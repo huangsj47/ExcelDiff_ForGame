@@ -33,6 +33,7 @@ from services.excel_diff_cache_service import (
     configure_excel_diff_cache_service,
 )
 from routes.cache_management_routes import cache_management_bp
+from routes.weekly_version_management_routes import weekly_version_bp
 from utils.url_helpers import generate_commit_diff_url, generate_excel_diff_data_url, generate_refresh_diff_url
 import threading
 import queue
@@ -713,6 +714,7 @@ log_print(
 
 db = SQLAlchemy(app)
 app.register_blueprint(cache_management_bp)
+app.register_blueprint(weekly_version_bp, name="")
 
 # 添加Excel列字母转换过滤器
 @app.template_filter('excel_column_letter')
@@ -2072,8 +2074,8 @@ def project_detail_original(project_id):
     repositories = Repository.query.filter_by(project_id=project_id).order_by(Repository.display_order).all()
     return render_template('project_detail.html', project=project, repositories=repositories)
 
-# 周版本配置相关路由
-@app.route('/projects/<int:project_id>/weekly-version-config')
+# 周版本相关路由已迁移至 routes/weekly_version_management_routes.py，
+# 此处保留处理函数供蓝图包装层复用，避免大范围业务回归。
 def weekly_version_config(project_id):
     """周版本配置页面"""
     project = Project.query.get_or_404(project_id)
@@ -2204,7 +2206,6 @@ def weekly_version_config(project_id):
                          ended_versions=ended_versions,
                          pagination=pagination)
 
-@app.route('/projects/<int:project_id>/weekly-version-config/api', methods=['GET', 'POST'])
 def weekly_version_config_api(project_id):
     """周版本配置API"""
     project = Project.query.get_or_404(project_id)
@@ -2334,7 +2335,6 @@ def weekly_version_config_api(project_id):
             log_print(f"创建周版本配置失败: {e}", 'ERROR', force=True)
             return jsonify({'success': False, 'message': f'创建失败: {str(e)}'}), 500
 
-@app.route('/projects/<int:project_id>/weekly-version-config/api/<int:config_id>', methods=['GET', 'PUT', 'DELETE'])
 def weekly_version_config_detail_api(project_id, config_id):
     """周版本配置详情API"""
     project = Project.query.get_or_404(project_id)
@@ -2459,7 +2459,6 @@ def weekly_version_config_detail_api(project_id, config_id):
             log_print(f"删除周版本配置失败: {e}", 'ERROR', force=True)
             return jsonify({'success': False, 'message': f'删除失败: {str(e)}'}), 500
 
-@app.route('/projects/<int:project_id>/weekly-version')
 def weekly_version_list(project_id):
     """周版本diff列表页面"""
     project = Project.query.get_or_404(project_id)
@@ -2578,7 +2577,6 @@ def merged_project_view(project_id):
                          inactive_versions_json=inactive_versions_json,
                          repositories=repositories)
 
-@app.route('/weekly-version-config/<int:config_id>/diff')
 def weekly_version_diff(config_id):
     """周版本diff详情页面 - 聚合显示同一时间段的不同仓库配置"""
     config = WeeklyVersionConfig.query.get_or_404(config_id)
@@ -2600,7 +2598,6 @@ def weekly_version_diff(config_id):
                          all_configs=all_configs,
                          current_config_id=config_id)
 
-@app.route('/weekly-version-config/<int:config_id>/info')
 def weekly_version_config_info_api(config_id):
     """获取周版本配置信息API"""
     try:
@@ -2624,7 +2621,6 @@ def weekly_version_config_info_api(config_id):
         log_print(f"获取周版本配置信息失败: {e}", 'ERROR', force=True)
         return jsonify({'success': False, 'message': str(e)}), 500
 
-@app.route('/weekly-version-config/<int:config_id>/files')
 def weekly_version_files_api(config_id):
     """获取周版本文件列表API"""
     try:
@@ -2685,7 +2681,6 @@ def weekly_version_files_api(config_id):
         log_print(f"获取周版本文件列表失败: {e}", 'ERROR', force=True)
         return jsonify({'success': False, 'message': str(e)}), 500
 
-@app.route('/weekly-version-config/<int:config_id>/file-diff')
 def weekly_version_file_diff_api(config_id):
     """获取单个文件的diff内容"""
     try:
@@ -2713,7 +2708,6 @@ def weekly_version_file_diff_api(config_id):
         log_print(f"获取文件diff失败: {e}", 'ERROR', force=True)
         return f"<div class='alert alert-danger'>加载diff失败: {str(e)}</div>"
 
-@app.route('/weekly-version-config/<int:config_id>/file-full-diff')
 def weekly_version_file_full_diff(config_id):
     """周版本文件完整diff页面 - 优化版本，先显示页面框架"""
     try:
@@ -2755,7 +2749,6 @@ def weekly_version_file_full_diff(config_id):
                              error_message=f"加载失败: {str(e)}",
                              back_url=url_for('weekly_version_diff', config_id=config_id))
 
-@app.route('/weekly-version-config/<int:config_id>/file-full-diff-data')
 def weekly_version_file_full_diff_data(config_id):
     """异步加载周版本文件完整diff数据"""
     try:
@@ -2834,7 +2827,6 @@ def weekly_version_file_full_diff_data(config_id):
         log_print(f"异步加载周版本diff数据失败: {e}", 'ERROR', force=True)
         return jsonify({'success': False, 'message': f'加载失败: {str(e)}'}), 500
 
-@app.route('/weekly-version-config/<int:config_id>/file-previous-version')
 def weekly_version_file_previous_version(config_id):
     """查看周版本文件的上一版本"""
     try:
@@ -2881,7 +2873,6 @@ def weekly_version_file_previous_version(config_id):
                              error_message=f"加载失败: {str(e)}",
                              back_url=url_for('weekly_version_diff', config_id=config_id))
 
-@app.route('/weekly-version-config/<int:config_id>/file-complete-diff')
 def weekly_version_file_complete_diff(config_id):
     """周版本文件完整对比页面（类似单文件diff的完整对比）"""
     try:
@@ -2961,7 +2952,6 @@ def weekly_version_file_complete_diff(config_id):
                              error_message=f"加载完整文件对比失败: {str(e)}",
                              back_url=url_for('weekly_version_diff', config_id=config_id))
 
-@app.route('/weekly-version-config/<int:config_id>/file-status', methods=['POST'])
 def weekly_version_file_status_api(config_id):
     """更新文件确认状态"""
     try:
@@ -3008,7 +2998,6 @@ def weekly_version_file_status_api(config_id):
         log_print(f"更新文件状态失败: {e}", 'ERROR', force=True)
         return jsonify({'success': False, 'message': str(e)}), 500
 
-@app.route('/weekly-version-config/<int:config_id>/file-status-info')
 def weekly_version_file_status_info_api(config_id):
     """获取文件确认状态信息"""
     try:
@@ -3126,7 +3115,6 @@ def get_sync_configs():
         log_print(f"获取同步配置失败: {e}", 'ERROR', force=True)
         return jsonify({'success': False, 'message': str(e)}), 500
 
-@app.route('/weekly-version-config/<int:config_id>/batch-confirm', methods=['POST'])
 def weekly_version_batch_confirm_api(config_id):
     """批量确认待确认的文件"""
     try:
@@ -4409,7 +4397,6 @@ def parse_and_render_diff(diff_content):
         log_print(f"解析diff内容失败: {e}", 'ERROR', force=True)
         return f"<div class='alert alert-danger'>解析diff失败: {str(e)}</div>"
 
-@app.route('/weekly-version-config/<int:config_id>/stats')
 def weekly_version_stats_api(config_id):
     """获取周版本配置统计信息"""
     try:

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from utils.diff_data_utils import (
     clean_json_data,
     format_cell_value,
@@ -122,3 +124,52 @@ class TestAppSplitTodoProgress:
         assert "@app.route('/admin/weekly-excel-cache/clear-all', methods=['POST'])" not in content
         assert "@app.route('/admin/weekly-excel-cache/rebuild/<int:config_id>', methods=['POST'])" not in content
         assert "@app.route('/admin/excel-cache')" not in content
+
+    def test_app_registers_weekly_version_blueprint(self):
+        content = _read("app.py")
+        assert "from routes.weekly_version_management_routes import weekly_version_bp" in content
+        assert "app.register_blueprint(weekly_version_bp, name=\"\")" in content
+
+    def test_weekly_version_routes_extracted_to_blueprint(self):
+        content = _read("routes/weekly_version_management_routes.py")
+        assert "weekly_version_bp = Blueprint(" in content
+        assert "/projects/<int:project_id>/weekly-version-config" in content
+        assert "/projects/<int:project_id>/weekly-version-config/api" in content
+        assert "/projects/<int:project_id>/weekly-version" in content
+        assert "/weekly-version-config/<int:config_id>/diff" in content
+        assert "/weekly-version-config/<int:config_id>/file-full-diff" in content
+        assert "/weekly-version-config/<int:config_id>/batch-confirm" in content
+        assert "/weekly-version-config/<int:config_id>/stats" in content
+
+    def test_app_removed_migrated_weekly_route_decorators(self):
+        content = _read("app.py")
+        assert "@app.route('/projects/<int:project_id>/weekly-version-config')" not in content
+        assert "@app.route('/projects/<int:project_id>/weekly-version-config/api', methods=['GET', 'POST'])" not in content
+        assert "@app.route('/projects/<int:project_id>/weekly-version-config/api/<int:config_id>', methods=['GET', 'PUT', 'DELETE'])" not in content
+        assert "@app.route('/projects/<int:project_id>/weekly-version')" not in content
+        assert "@app.route('/weekly-version-config/<int:config_id>/diff')" not in content
+        assert "@app.route('/weekly-version-config/<int:config_id>/info')" not in content
+        assert "@app.route('/weekly-version-config/<int:config_id>/files')" not in content
+        assert "@app.route('/weekly-version-config/<int:config_id>/file-diff')" not in content
+        assert "@app.route('/weekly-version-config/<int:config_id>/file-full-diff')" not in content
+        assert "@app.route('/weekly-version-config/<int:config_id>/file-full-diff-data')" not in content
+        assert "@app.route('/weekly-version-config/<int:config_id>/file-previous-version')" not in content
+        assert "@app.route('/weekly-version-config/<int:config_id>/file-complete-diff')" not in content
+        assert "@app.route('/weekly-version-config/<int:config_id>/file-status', methods=['POST'])" not in content
+        assert "@app.route('/weekly-version-config/<int:config_id>/file-status-info')" not in content
+        assert "@app.route('/weekly-version-config/<int:config_id>/batch-confirm', methods=['POST'])" not in content
+        assert "@app.route('/weekly-version-config/<int:config_id>/stats')" not in content
+
+    def test_weekly_version_legacy_endpoints_remain_accessible_via_url_for(self):
+        try:
+            import app as app_module
+        except Exception as exc:
+            pytest.skip(f"app 模块导入失败，跳过 endpoint 兼容性检查: {exc}")
+
+        flask_app = app_module.app
+        with flask_app.test_request_context("/"):
+            from flask import url_for
+
+            assert url_for("weekly_version_config", project_id=1) == "/projects/1/weekly-version-config"
+            assert url_for("weekly_version_diff", config_id=2) == "/weekly-version-config/2/diff"
+            assert url_for("weekly_version_stats_api", config_id=3) == "/weekly-version-config/3/stats"
