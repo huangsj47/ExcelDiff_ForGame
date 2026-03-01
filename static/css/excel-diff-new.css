@@ -1,0 +1,523 @@
+/* Excel diff styles - 新设计 */
+.excel-diff-wrapper {
+    border: 1px solid #dee2e6;
+    border-radius: 0.375rem;
+    background-color: #fff;
+}
+
+/* 水平标签页样式 */
+.excel-sheet-tabs-container {
+    background-color: #f8f9fa;
+    border-bottom: 1px solid #dee2e6;
+    padding: 10px 15px 0;
+}
+
+.excel-sheet-tabs {
+    display: flex;
+    gap: 2px;
+    overflow-x: auto;
+    white-space: nowrap;
+}
+/* 标签页样式 */
+.excel-sheet-tab {
+    padding: 10px 15px;
+    margin-right: 5px;
+    border: 1px solid #dee2e6;
+    border-bottom: none;
+    background-color: #f8f9fa;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-size: 14.7px;
+    font-weight: 500;
+    color: #495057;
+    border-radius: 5px 5px 0 0;
+    white-space: nowrap;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+/* 有变更的标签页 - 黄色 */
+.excel-tab-with-changes {
+    background-color: #fff3cd;
+    border-color: #ffeaa7;
+    color: #856404;
+}
+
+.excel-tab-with-changes:hover {
+    background-color: #ffecb5;
+}
+
+.excel-tab-with-changes.active {
+    background-color: #fff;
+    border-color: #ffeaa7;
+    color: #856404;
+    font-weight: 600;
+}
+
+/* 无变更的标签页样式 */
+.excel-tab-no-changes {
+    background-color: #f8f9fa;
+    color: #6c757d;
+    border-color: #dee2e6;
+}
+
+.excel-tab-no-changes.active {
+    background-color: #e9ecef;
+    border-bottom-color: #fff;
+}
+
+/* 禁用的标签页样式 */
+.excel-tab-disabled {
+    cursor: not-allowed !important;
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+.excel-tab-disabled:hover {
+    background-color: inherit !important;
+    transform: none !important;
+}
+
+/* 召唤物工作表特殊禁用样式 */
+.excel-tab-summon-disabled {
+    background-color: #f5f5f5 !important;
+    color: #999 !important;
+    border-color: #ddd !important;
+    text-decoration: line-through;
+    font-style: italic;
+}
+
+/* 内容区域 */
+.excel-content-area {
+    position: relative;
+}
+
+.excel-sheet-content {
+    display: none;
+    padding: 15px;
+}
+
+.excel-sheet-content.active {
+    display: block;
+}
+
+/* 表格容器 - 支持双向滚动 */
+.excel-table-wrapper {
+    overflow: auto;
+    max-height: 70vh;
+    border: 1px solid #dee2e6;
+    border-radius: 0.375rem;
+    /* 优化滚动性能，防止背景色异常 */
+    background-color: #fff !important;
+    will-change: scroll-position;
+    transform: translateZ(0);
+    -webkit-overflow-scrolling: touch;
+}
+
+/* Excel表格样式 */
+.excel-diff-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    table-layout: auto;
+    min-width: 800px;
+    /* 防止滚动时背景色异常 */
+    background-color: #fff !important;
+    will-change: scroll-position;
+    transform: translateZ(0);
+}
+
+.excel-diff-table td {
+    border: 1px solid #dee2e6;
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: middle;
+    white-space: nowrap;
+    min-width: 80px;
+    font-size: 12.6px;
+}
+
+.excel-diff-table th {
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+    padding: 8px 12px;
+    text-align: center;
+    font-size: 12.6px;
+    font-weight: bold;
+    min-width: 80px;
+    max-width: 150px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+/* Excel列ID样式 */
+.excel-column-id {
+    font-size: 10px;
+    color: #6c757d;
+    font-weight: 500;
+    text-align: center;
+    margin-bottom: 2px;
+    font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+    display: block;
+    line-height: 1.2;
+}
+
+.excel-bold-text {
+    font-weight: 700 !important;
+    color: #212529 !important;
+}
+
+.excel-field-row th {
+    background-color: #f8f9fa;
+    font-weight: 600;
+    position: sticky;
+    top: 32px;
+    z-index: 9;
+}
+
+.excel-row-header {
+    background-color: #f8f9fa;
+    text-align: center;
+    font-weight: bold;
+    min-width: 60px;
+    max-width: 60px;
+    position: sticky;
+    left: 0;
+    z-index: 8;
+}
+
+.excel-column-header {
+    min-width: 80px;
+    max-width: 120px;
+}
+
+.excel-field-header {
+    min-width: 100px;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    word-wrap: break-word;
+    padding: 8px 4px;
+}
+
+/* 行号样式 - 使用更高特异性确保垂直居中生效 */
+.excel-diff-table .excel-row-number {
+    background-color: #f8f9fa !important;
+    font-weight: bold;
+    text-align: center;
+    vertical-align: middle !important;
+    min-width: 60px;
+    max-width: 60px;
+    position: sticky;
+    left: 0;
+    z-index: 5;
+    border-right: 2px solid #dee2e6 !important;
+}
+
+/* 修改列的列标题高亮样式 */
+.excel-modified-column-header {
+    background-color: #fff3cd !important;
+    border-color: #ffeaa7 !important;
+    color: #856404 !important;
+}
+
+/* 单元格样式 - 使用更高特异性确保垂直居中生效 */
+.excel-diff-table .excel-cell {
+    background-color: #fff !important;
+    min-width: 100px;
+    max-width: 400px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    word-wrap: break-word;
+    font-weight: normal;
+    padding: 8px 4px;
+    vertical-align: middle !important;
+    /* 防止继承黄色背景 */
+    background-image: none !important;
+}
+
+/* 修改列的单元格 - 自动调整宽度以显示完整内容 */
+.excel-cell.modified-column {
+    min-width: 200px;
+    max-width: 1000px;
+    width: auto;
+    overflow: visible;
+    white-space: normal;
+    word-wrap: break-word;
+    padding: 8px 15px;
+}
+
+/* 新增行样式 - 绿色 - 修复合并diff页面显示问题 */
+.excel-row-added {
+    background-color: transparent !important; /* 移除行级背景色，让单元格背景色显示 */
+}
+
+.excel-row-added .excel-cell {
+    background-color: #d4edda !important;
+    border-color: #c3e6cb;
+    font-weight: bold;
+}
+
+.excel-row-added .excel-row-number {
+    background-color: #53d471 !important;
+    font-weight: bold;
+}
+
+/* 新增行单元格 - 背景色与行号一致，使用深绿色 */
+.excel-diff-table .excel-row-added .excel-cell {
+    background-color: #53d471 !important; /* 使用与行号一致的深绿色背景 */
+    border-color: #28a745 !important;
+    font-weight: bold !important;
+    color: #000 !important; /* 使用黑色文字确保可读性 */
+}
+
+/* 删除行样式 - 红色 - 修复合并diff页面显示问题 */
+.excel-row-removed {
+    background-color: transparent !important; /* 移除行级背景色，让单元格背景色显示 */
+}
+
+.excel-removed {
+    background-color: #f8d7da !important;
+}
+
+/* 删除行单元格 - 使用更高优先级确保红色背景生效 */
+.excel-diff-table .excel-row-removed .excel-cell {
+    background-color: #f76571 !important; /* 使用与行号一致的深红色背景 */
+    border-color: #f5c6cb !important;
+    font-weight: bold !important;
+    color: #000 !important; /* 使用黑色文字 */
+}
+
+/* 删除行行号 - 使用更高优先级确保红色背景生效 */
+.excel-diff-table .excel-row-number.excel-removed {
+    background-color: #f76571 !important;
+    border-color: #f5c6cb !important;
+    color: #721c24 !important;
+    font-weight: bold !important;
+}
+
+/* 修改行样式 - 限制作用范围，防止影响整个表格 */
+.excel-diff-table tr.excel-modified {
+    background-color: transparent !important;
+}
+
+.excel-diff-table tr.excel-modified .excel-cell.excel-cell-modified {
+    background-color: #fff3cd !important;
+}
+
+/* 确保非修改单元格保持白色背景 */
+.excel-diff-table tr.excel-modified .excel-cell:not(.excel-cell-modified) {
+    background-color: #fff !important;
+}
+
+/* 修改行的行号样式 - 临时改为白色测试滚动问题 */
+.excel-diff-table .excel-row-number.excel-modified {
+    background-color: #ffffff !important; /* 临时改为白色测试滚动问题 */
+    border-color: #dee2e6 !important; /* 改为灰色边框 */
+    color: #495057 !important; /* 改为深灰色文字 */
+    font-weight: bold !important;
+}
+
+/* 修改行 - 旧值（红色） */
+.excel-row-modified-old {
+    background-color: transparent;
+}
+
+.excel-row-modified-old .excel-cell {
+    background-color: #ffebee !important;
+    border-color: #f5c6cb;
+    font-weight: normal !important;
+    height: 40px;
+    min-height: 40px;
+    vertical-align: middle;
+}
+
+/* 修改行 - 新值（绿色） */
+.excel-row-modified-new {
+    background-color: transparent;
+}
+
+.excel-diff-table .excel-row-modified-new .excel-cell {
+    background-color: #e8f5e8 !important;
+    border-color: #c3e6cb;
+    font-weight: normal !important;
+    height: 40px;
+    min-height: 40px;
+    vertical-align: middle;
+    padding: 8px 16px !important;
+    text-align: left !important;
+}
+
+/* 修改的单元格样式 */
+.excel-cell.excel-cell-modified {
+    background-color: #fff !important;
+    border-left: 3px solid #ffc107 !important;
+    padding: 0 !important;
+}
+
+/* 修改单元格的样式 - 使用更高优先级 */
+.excel-diff-table .excel-cell.excel-modified-old {
+    background-color: #ffebee !important; /* 浅红色背景 */
+    color: #c62828 !important; /* 深红色文字 */
+    padding: 4px !important;
+    border-left: 4px solid #ffc107 !important; /* 黄色左边框 */
+}
+
+.excel-diff-table .excel-cell.excel-modified-new {
+    background-color: #e8f5e8 !important; /* 浅绿色背景 */
+    color: #2e7d32 !important; /* 深绿色文字 */
+    padding: 4px !important;
+    border-left: 4px solid #ffc107 !important; /* 黄色左边框 */
+}
+
+/* 单元格内部diff显示样式 */
+.excel-diff-old {
+    background-color: #ffebee !important; /* 浅红色背景 */
+    color: #c62828 !important; /* 深红色文字 */
+    padding: 2px 4px !important;
+    margin: 1px 0 !important;
+    border-radius: 2px !important;
+    font-size: 12px !important;
+    line-height: 1.2 !important;
+    display: block !important;
+    text-decoration: line-through !important; /* 删除线 */
+}
+
+.excel-diff-new {
+    background-color: #e8f5e8 !important; /* 浅绿色背景 */
+    color: #2e7d32 !important; /* 深绿色文字 */
+    padding: 2px 4px !important;
+    margin: 1px 0 !important;
+    border-radius: 2px !important;
+    font-size: 12px !important;
+    line-height: 1.2 !important;
+    display: block !important;
+    font-weight: bold !important;
+}
+
+.excel-diff-added {
+    background-color: #d4edda !important; /* 绿色背景 */
+    color: #155724 !important; /* 深绿色文字 */
+    padding: 2px 4px !important;
+    border-radius: 2px !important;
+    font-weight: bold !important;
+    display: block !important;
+}
+
+.excel-diff-removed {
+    background-color: #f8d7da !important; /* 红色背景 */
+    color: #721c24 !important; /* 深红色文字 */
+    padding: 2px 4px !important;
+    border-radius: 2px !important;
+    text-decoration: line-through !important; /* 删除线 */
+    display: block !important;
+}
+
+/* 修改单元格的文字背景色 */
+.excel-text-bg-old {
+    background-color: #ffcdd2 !important; /* 浅红色背景 */
+    color: #c62828 !important; /* 深红色文字 */
+    padding: 2px 4px;
+    border-radius: 3px;
+    display: inline-block;
+    text-align: left !important;
+    vertical-align: top !important;
+}
+
+.excel-text-bg-new {
+    background-color: #2e7d32 !important; /* 深绿色背景 */
+    color: white !important; /* 白色文字 */
+    padding: 2px 4px;
+    border-radius: 3px;
+    display: inline-block;
+    text-align: left !important;
+    vertical-align: top !important;
+    border: none !important;
+    text-decoration: none !important;
+}
+
+/* 未修改的合并单元格 - 使用更高特异性确保垂直居中生效 */
+.excel-diff-table .excel-unchanged {
+    background-color: #fff !important;
+    font-weight: normal !important;
+    vertical-align: middle !important;
+}
+
+/* 修改行中未变更的单元格 - 强制白色背景 */
+.excel-row-modified-old .excel-unchanged,
+.excel-row-modified-new .excel-unchanged {
+    background-color: #fff !important;
+}
+
+/* 未修改行样式 */
+.excel-row-unchanged {
+    background-color: #fff;
+}
+
+.excel-row-unchanged .excel-cell {
+    font-weight: normal;
+}
+
+/* 滚动条样式 */
+.excel-table-wrapper::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+}
+
+.excel-table-wrapper::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 6px;
+}
+
+.excel-table-wrapper::-webkit-scrollbar-thumb {
+    background: #c1c1c1;
+    border-radius: 6px;
+}
+
+.excel-table-wrapper::-webkit-scrollbar-thumb:hover {
+    background: #a8a8a8;
+}
+
+.excel-table-wrapper::-webkit-scrollbar-corner {
+    background: #f1f1f1;
+}
+
+/* 修改单元格的样式 - 与单文件diff保持一致 */
+.excel-cell-modified {
+    background-color: #fff !important;
+    border-left: 3px solid #ffc107 !important;
+    padding: 0 !important;
+}
+
+/* 修改单元格内的旧值显示 */
+.excel-cell-old {
+    background-color: #ffebee !important; /* 浅红色背景 */
+    color: #c62828 !important; /* 深红色文字 */
+    padding: 2px 4px !important;
+    margin: 1px 0 !important;
+    border-radius: 2px !important;
+    font-size: 12px !important;
+    line-height: 1.2 !important;
+    display: block !important;
+    text-decoration: line-through !important; /* 删除线 */
+}
+
+/* 修改单元格内的新值显示 */
+.excel-cell-new {
+    background-color: #e8f5e8 !important; /* 浅绿色背景 */
+    color: #2e7d32 !important; /* 深绿色文字 */
+    padding: 2px 4px !important;
+    margin: 1px 0 !important;
+    border-radius: 2px !important;
+    font-size: 12px !important;
+    line-height: 1.2 !important;
+    display: block !important;
+    font-weight: bold !important;
+}

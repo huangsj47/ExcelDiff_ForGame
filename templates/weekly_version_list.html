@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+
+{% block title %}周版本diff - {{ project.name }}{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h2>周版本diff</h2>
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{{ url_for('index') }}">项目列表</a></li>
+                    <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=project.id) }}">{{ project.name }}</a></li>
+                    <li class="breadcrumb-item active">周版本diff</li>
+                </ol>
+            </nav>
+        </div>
+        <div>
+            <a href="{{ url_for('weekly_version_config', project_id=project.id) }}" class="btn btn-primary">
+                <i class="fas fa-cog me-2"></i>配置管理
+            </a>
+        </div>
+    </div>
+
+    <!-- 配置列表 -->
+    <div class="row">
+        {% if configs %}
+            {% for config in configs %}
+            <div class="col-md-6 col-lg-4 mb-3">
+                <div class="card h-100">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h6 class="mb-0">{{ config.name }}</h6>
+                        <div>
+                            <span class="badge bg-{% if config.status == 'active' %}success{% elif config.status == 'completed' %}primary{% else %}secondary{% endif %}">
+                                {% if config.status == 'active' %}进行中
+                                {% elif config.status == 'completed' %}已完成
+                                {% else %}已归档{% endif %}
+                            </span>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <p class="card-text">
+                            <small class="text-muted">仓库:</small> 
+                            <span class="badge bg-{% if config.repository.type == 'git' %}success{% else %}primary{% endif %}">
+                                {{ config.repository.name }}
+                            </span>
+                        </p>
+                        <p class="card-text">
+                            <small class="text-muted">分支:</small> {{ config.branch }}
+                        </p>
+                        <p class="card-text">
+                            <small class="text-muted">时间范围:</small><br>
+                            <small>{{ config.start_time.strftime('%Y-%m-%d %H:%M') }} 至<br>
+                            {{ config.end_time.strftime('%Y-%m-%d %H:%M') }}</small>
+                        </p>
+                        
+                        <!-- 统计信息 -->
+                        <div class="mt-3">
+                            <div class="row text-center">
+                                <div class="col-4">
+                                    <div class="text-primary">
+                                        <i class="fas fa-file-alt"></i>
+                                        <div class="small">文件数</div>
+                                        <div class="fw-bold" id="fileCount-{{ config.id }}">-</div>
+                                    </div>
+                                </div>
+                                <div class="col-4">
+                                    <div class="text-warning">
+                                        <i class="fas fa-clock"></i>
+                                        <div class="small">待确认</div>
+                                        <div class="fw-bold" id="pendingCount-{{ config.id }}">-</div>
+                                    </div>
+                                </div>
+                                <div class="col-4">
+                                    <div class="text-success">
+                                        <i class="fas fa-check"></i>
+                                        <div class="small">已确认</div>
+                                        <div class="fw-bold" id="confirmedCount-{{ config.id }}">-</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-footer">
+                        <a href="{{ url_for('weekly_version_diff', config_id=config.id) }}" class="btn btn-success w-100">
+                            <i class="fas fa-eye me-2"></i>查看diff详情
+                        </a>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        {% else %}
+        <div class="col-12">
+            <div class="text-center py-5">
+                <i class="fas fa-calendar-week fa-3x text-muted mb-3"></i>
+                <h4 class="text-muted">暂无周版本配置</h4>
+                <p class="text-muted">请先创建周版本diff配置</p>
+                <a href="{{ url_for('weekly_version_config', project_id=project.id) }}" class="btn btn-primary">
+                    立即配置
+                </a>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+// 页面加载时获取统计信息
+document.addEventListener('DOMContentLoaded', function() {
+    {% for config in configs %}
+    loadConfigStats({{ config.id }});
+    {% endfor %}
+});
+
+function loadConfigStats(configId) {
+    fetch(`/weekly-version-config/${configId}/stats`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                document.getElementById(`fileCount-${configId}`).textContent = data.stats.total_files;
+                document.getElementById(`pendingCount-${configId}`).textContent = data.stats.pending_count;
+                document.getElementById(`confirmedCount-${configId}`).textContent = data.stats.confirmed_count;
+            }
+        })
+        .catch(error => {
+            console.error('Error loading stats:', error);
+        });
+}
+</script>
+{% endblock %}

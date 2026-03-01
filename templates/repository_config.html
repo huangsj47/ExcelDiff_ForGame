@@ -1,0 +1,703 @@
+{% extends "base.html" %}
+
+{% block title %}配置仓库 - {{ project.name }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <!-- 页面头部 -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <h3 class="mb-2">配置仓库</h3>
+                    <nav aria-label="breadcrumb">
+                        <ol class="breadcrumb mb-0">
+                            <li class="breadcrumb-item"><a href="{{ url_for('index') }}" class="text-decoration-none">项目列表</a></li>
+                            <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=project.id) }}" class="text-decoration-none">{{ project.name }}</a></li>
+                            <li class="breadcrumb-item active">配置仓库</li>
+                        </ol>
+                    </nav>
+                </div>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-warning" onclick="showBatchUpdateModal()">
+                        <i class="bi bi-key me-1"></i>统一修改密码/Token
+                    </button>
+                    <button class="btn btn-primary" onclick="location.href='{{ url_for('add_svn_repository', project_id=project.id) }}'">
+                        <i class="bi bi-plus-circle me-1"></i>新增SVN仓库
+                    </button>
+                    <button class="btn btn-success" onclick="location.href='{{ url_for('add_git_repository', project_id=project.id) }}'">
+                        <i class="bi bi-plus-circle me-1"></i>新增GitLab仓库
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Flash消息显示已移至base.html，避免重复显示 -->
+
+    <!-- 提示信息 -->
+    <div class="row mb-3">
+        <div class="col-12">
+            <div class="alert alert-info border-0 shadow-sm">
+                <i class="bi bi-info-circle me-2"></i>
+                成功配置项目日程仓库后，才能配置仓库
+            </div>
+        </div>
+    </div>
+
+    {% if repositories %}
+    <!-- 仓库列表 -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-light border-bottom">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0 text-primary">
+                            <i class="bi bi-database me-2"></i>
+                            {{ project.code }}仓库
+                        </h5>
+                        <div class="d-flex gap-2">
+                            <span class="badge bg-secondary">共 {{ repositories|length }} 个仓库</span>
+                            <button class="btn btn-outline-primary btn-sm" onclick="showRepositoryOrderModal()">
+                                <i class="bi bi-arrow-up-down me-1"></i>编辑仓库顺序
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0" style="font-size: 0.9em;">
+                            <thead class="table-light">
+                                <tr>
+                                    <th width="5%" class="border-0">
+                                        <i class="bi bi-grip-vertical me-1"></i>ID
+                                    </th>
+                                    <th width="12%" class="border-0">
+                                        <i class="bi bi-tag me-1"></i>仓库名称
+                                    </th>
+                                    <th width="23%" class="border-0">
+                                        <i class="bi bi-link-45deg me-1"></i>仓库地址
+                                    </th>
+                                    <th width="20%" class="border-0">
+                                        <i class="bi bi-folder me-1"></i>仓库根目录
+                                    </th>
+                                    <th width="8%" class="border-0">
+                                        <i class="bi bi-code-square me-1"></i>当前版本
+                                    </th>
+                                    <th width="8%" class="border-0">
+                                        <i class="bi bi-layers me-1"></i>资源类型
+                                    </th>
+                                    <th width="24%" class="border-0">
+                                        <i class="bi bi-gear me-1"></i>操作
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody id="repositoryTableBody">
+                                {% for repo in repositories %}
+                                <tr class="align-middle" data-repo-id="{{ repo.id }}">
+                                    <td class="fw-medium text-center">
+                                        <div class="fw-bold text-primary">{{ repo.id }}</div>
+                                    </td>
+                                    <td class="fw-medium">
+                                        <div class="d-flex align-items-center">
+                                            <span class="badge bg-{% if repo.type == 'svn' %}primary{% else %}success{% endif %} me-2">
+                                                {{ repo.type.upper() }}
+                                            </span>
+                                            {{ repo.name }}
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <code class="text-muted small">
+                                            {% if repo.type == 'svn' %}
+                                                {{ repo.url[:50] }}{% if repo.url|length > 50 %}...{% endif %}
+                                            {% else %}
+                                                {{ repo.server_url[:50] }}{% if repo.server_url|length > 50 %}...{% endif %}
+                                            {% endif %}
+                                        </code>
+                                    </td>
+                                    <td>
+                                        <code class="text-muted small">
+                                            {% if repo.type == 'svn' %}
+                                                {{ repo.root_directory[:30] }}{% if repo.root_directory|length > 30 %}...{% endif %}
+                                            {% else %}
+                                                {{ repo.url[:30] }}{% if repo.url|length > 30 %}...{% endif %}
+                                            {% endif %}
+                                        </code>
+                                    </td>
+                                    <td>
+                                        <span class="badge bg-info">
+                                            {% if repo.type == 'svn' %}
+                                                {{ repo.current_version or 'master' }}
+                                            {% else %}
+                                                {{ repo.branch or 'master' }}
+                                            {% endif %}
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <span class="badge bg-{% if repo.resource_type == 'table' %}warning{% elif repo.resource_type == 'code' %}success{% else %}secondary{% endif %}">
+                                            {% if repo.resource_type == 'code' %}代码
+                                            {% elif repo.resource_type == 'table' %}配置表
+                                            {% elif repo.resource_type == 'res' %}资源
+                                            {% else %}{{ repo.resource_type }}{% endif %}
+                                        </span>
+                                        {% if repo.clone_status %}
+                                        <br>
+                                        <small class="badge bg-{% if repo.clone_status == 'completed' %}success{% elif repo.clone_status == 'cloning' %}info{% elif repo.clone_status == 'failed' %}danger{% else %}secondary{% endif %} mt-1">
+                                            {% if repo.clone_status == 'pending' %}待克隆
+                                            {% elif repo.clone_status == 'cloning' %}克隆中
+                                            {% elif repo.clone_status == 'completed' %}已克隆
+                                            {% elif repo.clone_status == 'failed' %}克隆失败
+                                            {% endif %}
+                                        </small>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <div class="btn-group-vertical btn-group-sm d-grid gap-1" role="group">
+                                            <div class="d-flex gap-1">
+                                                <button class="btn btn-outline-primary btn-sm flex-fill" onclick="testRepository({{ repo.id }})" title="测试连接">
+                                                    <i class="bi bi-wifi"></i> 测试连接
+                                                </button>
+                                                <button class="btn btn-outline-success btn-sm flex-fill" onclick="syncRepository({{ repo.id }})" title="获取数据">
+                                                    <i class="bi bi-arrow-clockwise"></i> 获取数据
+                                                </button>
+                                                {% if repo.type == 'git' and repo.clone_status == 'failed' %}
+                                                <button class="btn btn-outline-warning btn-sm flex-fill" onclick="retryClone({{ repo.id }})" title="重试克隆">
+                                                    <i class="bi bi-arrow-repeat"></i> 重试克隆
+                                                </button>
+                                                {% endif %}
+                                            </div>
+                                            <div class="d-flex gap-1">
+                                                <button class="btn btn-outline-info btn-sm flex-fill" onclick="editRepository({{ repo.id }})" title="修改配置">
+                                                    <i class="bi bi-pencil"></i> 修改配置
+                                                </button>
+                                                <button class="btn btn-outline-danger btn-sm flex-fill" onclick="deleteRepository({{ repo.id }})" title="删除仓库">
+                                                    <i class="bi bi-x-circle"></i> 删除
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <!-- 空状态 -->
+    <div class="row">
+        <div class="col-12">
+            <div class="text-center py-5">
+                <div class="mb-4">
+                    <i class="bi bi-database text-muted" style="font-size: 4rem;"></i>
+                </div>
+                <h4 class="text-muted mb-3">暂无仓库配置</h4>
+                <p class="text-muted mb-4">点击上方按钮添加您的第一个仓库，开始管理代码版本</p>
+                <div class="d-flex justify-content-center gap-2">
+                    <a href="{{ url_for('add_svn_repository', project_id=project.id) }}" class="btn btn-primary">
+                        <i class="bi bi-plus-circle me-1"></i>添加SVN仓库
+                    </a>
+                    <a href="{{ url_for('add_git_repository', project_id=project.id) }}" class="btn btn-success">
+                        <i class="bi bi-plus-circle me-1"></i>添加GitLab仓库
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- 仓库顺序调整模态框 -->
+<div class="modal fade" id="repositoryOrderModal" tabindex="-1" aria-labelledby="repositoryOrderModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="repositoryOrderModalLabel">
+                    <i class="bi bi-arrow-up-down me-2"></i>调整仓库顺序
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info">
+                    <i class="bi bi-info-circle me-2"></i>
+                    请选择两个仓库进行顺序对调
+                </div>
+                
+                <div class="row">
+                    <div class="col-md-6">
+                        <label for="firstRepository" class="form-label fw-medium">第一个仓库</label>
+                        <select class="form-select" id="firstRepository">
+                            <option value="">请选择仓库</option>
+                            {% for repo in repositories %}
+                            <option value="{{ repo.id }}">ID: {{ repo.id }} - {{ repo.name }} ({{ repo.type.upper() }})</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="secondRepository" class="form-label fw-medium">第二个仓库</label>
+                        <select class="form-select" id="secondRepository">
+                            <option value="">请选择仓库</option>
+                            {% for repo in repositories %}
+                            <option value="{{ repo.id }}">ID: {{ repo.id }} - {{ repo.name }} ({{ repo.type.upper() }})</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="mt-4" id="swapPreview" style="display: none;">
+                    <div class="alert alert-warning">
+                        <h6 class="mb-2"><i class="bi bi-arrow-left-right me-2"></i>对调预览</h6>
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div class="text-center">
+                                <div class="badge bg-primary mb-2" id="firstRepoInfo"></div>
+                                <div class="small text-muted">当前顺序位置</div>
+                                <div class="fw-bold" id="firstRepoOrder"></div>
+                            </div>
+                            <div class="text-center">
+                                <i class="bi bi-arrow-left-right text-primary" style="font-size: 2rem;"></i>
+                            </div>
+                            <div class="text-center">
+                                <div class="badge bg-success mb-2" id="secondRepoInfo"></div>
+                                <div class="small text-muted">当前顺序位置</div>
+                                <div class="fw-bold" id="secondRepoOrder"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="confirmSwapBtn" onclick="confirmRepositorySwap()" disabled>
+                    <i class="bi bi-arrow-left-right me-1"></i>确认对调
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 批量更新密码/Token弹窗 -->
+<div class="modal fade" id="batchUpdateModal" tabindex="-1" aria-labelledby="batchUpdateModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="batchUpdateModalLabel">统一修改密码/Token</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <form id="batchUpdateForm">
+                    <div class="mb-3">
+                        <label for="repoType" class="form-label">仓库类型</label>
+                        <select class="form-select" id="repoType" name="repo_type" onchange="toggleCredentialFields()">
+                            <option value="">请选择仓库类型</option>
+                            <option value="git">Git仓库</option>
+                            <option value="svn">SVN仓库</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Git Token字段 -->
+                    <div id="gitFields" style="display: none;">
+                        <div class="mb-3">
+                            <label for="gitToken" class="form-label">Git Token</label>
+                            <input type="password" class="form-control" id="gitToken" name="git_token" placeholder="输入新的Git Token">
+                            <div class="form-text">将更新本项目下所有Git仓库的Token</div>
+                        </div>
+                    </div>
+                    
+                    <!-- SVN用户名密码字段 -->
+                    <div id="svnFields" style="display: none;">
+                        <div class="mb-3">
+                            <label for="svnUsername" class="form-label">SVN用户名</label>
+                            <input type="text" class="form-control" id="svnUsername" name="svn_username" placeholder="输入SVN用户名">
+                        </div>
+                        <div class="mb-3">
+                            <label for="svnPassword" class="form-label">SVN密码</label>
+                            <input type="password" class="form-control" id="svnPassword" name="svn_password" placeholder="输入SVN密码">
+                            <div class="form-text">将更新本项目下所有SVN仓库的用户名和密码</div>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-warning" onclick="executeBatchUpdate()">批量更新</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.table th {
+    background-color: #f8f9fa;
+    font-weight: 600;
+    color: #495057;
+    border-bottom: 2px solid #dee2e6;
+}
+
+.table td {
+    vertical-align: middle;
+    border-bottom: 1px solid #f1f3f4;
+}
+
+.table tbody tr:hover {
+    background-color: #f8f9fa;
+}
+
+.btn-group-vertical .btn {
+    font-size: 0.75rem;
+    padding: 0.25rem 0.5rem;
+}
+
+.card {
+    border-radius: 8px;
+}
+
+.alert {
+    border-radius: 8px;
+}
+
+code {
+    background-color: #f8f9fa;
+    padding: 0.125rem 0.25rem;
+    border-radius: 3px;
+}
+
+.draggable-row {
+    transition: background-color 0.2s ease;
+}
+
+.draggable-row:hover {
+    background-color: #f8f9fa;
+}
+
+.draggable-row.sortable-ghost {
+    opacity: 0.5;
+    background-color: #e3f2fd;
+}
+
+.sortable-chosen {
+    background-color: #fff3cd !important;
+}
+
+.sortable-drag {
+    opacity: 0.8;
+    transform: rotate(5deg);
+}
+
+.drag-handle {
+    cursor: move !important;
+    font-size: 1.2em;
+}
+
+.drag-handle:hover {
+    color: #007bff !important;
+    transform: scale(1.1);
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+<script>
+function deleteRepository(repoId) {
+    if (confirm('确定要删除这个仓库吗？此操作不可恢复。')) {
+        fetch(`/repositories/${repoId}/delete`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        }).then(response => {
+            if (response.ok) {
+                location.reload();
+            } else {
+                alert('删除失败');
+            }
+        });
+    }
+}
+
+function syncRepository(repoId) {
+    if (confirm('确定要同步这个仓库的提交记录吗？')) {
+        fetch(`/repositories/${repoId}/sync`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        }).then(response => {
+            if (response.ok) {
+                alert('同步成功');
+                location.reload();
+            } else {
+                alert('同步失败');
+            }
+        });
+    }
+}
+
+function editRepository(repoId) {
+    // 跳转到编辑仓库页面
+    window.location.href = `/repositories/${repoId}/edit`;
+}
+
+function showBatchUpdateModal() {
+    const modal = new bootstrap.Modal(document.getElementById('batchUpdateModal'));
+    modal.show();
+}
+
+function toggleCredentialFields() {
+    const repoType = document.getElementById('repoType').value;
+    const gitFields = document.getElementById('gitFields');
+    const svnFields = document.getElementById('svnFields');
+    
+    if (repoType === 'git') {
+        gitFields.style.display = 'block';
+        svnFields.style.display = 'none';
+    } else if (repoType === 'svn') {
+        gitFields.style.display = 'none';
+        svnFields.style.display = 'block';
+    } else {
+        gitFields.style.display = 'none';
+        svnFields.style.display = 'none';
+    }
+}
+
+function executeBatchUpdate() {
+    const form = document.getElementById('batchUpdateForm');
+    const formData = new FormData(form);
+    const repoType = formData.get('repo_type');
+    
+    if (!repoType) {
+        alert('请选择仓库类型');
+        return;
+    }
+    
+    let requestData = {
+        repo_type: repoType,
+        project_id: {{ project.id }}
+    };
+    
+    if (repoType === 'git') {
+        const gitToken = formData.get('git_token');
+        if (!gitToken) {
+            alert('请输入Git Token');
+            return;
+        }
+        requestData.git_token = gitToken;
+    } else if (repoType === 'svn') {
+        const svnUsername = formData.get('svn_username');
+        const svnPassword = formData.get('svn_password');
+        if (!svnUsername || !svnPassword) {
+            alert('请输入SVN用户名和密码');
+            return;
+        }
+        requestData.svn_username = svnUsername;
+        requestData.svn_password = svnPassword;
+    }
+    
+    fetch('/repositories/batch-update-credentials', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestData)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            alert(`批量更新成功！更新了 ${data.updated_count} 个仓库`);
+            const modal = bootstrap.Modal.getInstance(document.getElementById('batchUpdateModal'));
+            modal.hide();
+            location.reload();
+        } else {
+            alert('批量更新失败：' + (data.message || '未知错误'));
+        }
+    })
+    .catch(error => {
+        console.error('批量更新失败:', error);
+        alert('批量更新失败，请稍后重试');
+    });
+}
+
+// 显示仓库顺序调整模态框
+function showRepositoryOrderModal() {
+    const modal = new bootstrap.Modal(document.getElementById('repositoryOrderModal'));
+    modal.show();
+    
+    // 重置选择
+    document.getElementById('firstRepository').value = '';
+    document.getElementById('secondRepository').value = '';
+    document.getElementById('swapPreview').style.display = 'none';
+    document.getElementById('confirmSwapBtn').disabled = true;
+}
+
+// 初始化仓库顺序调整功能
+document.addEventListener('DOMContentLoaded', function() {
+    const firstSelect = document.getElementById('firstRepository');
+    const secondSelect = document.getElementById('secondRepository');
+    
+    if (firstSelect && secondSelect) {
+        // 监听选择变化
+        firstSelect.addEventListener('change', updateSwapPreview);
+        secondSelect.addEventListener('change', updateSwapPreview);
+        
+        // 防止选择相同的仓库
+        firstSelect.addEventListener('change', function() {
+            updateSecondSelectOptions();
+        });
+        secondSelect.addEventListener('change', function() {
+            updateFirstSelectOptions();
+        });
+    }
+});
+
+// 更新第二个选择框的选项
+function updateSecondSelectOptions() {
+    const firstValue = document.getElementById('firstRepository').value;
+    const secondSelect = document.getElementById('secondRepository');
+    const options = secondSelect.querySelectorAll('option');
+    
+    options.forEach(option => {
+        if (option.value === firstValue && option.value !== '') {
+            option.disabled = true;
+            option.style.display = 'none';
+        } else {
+            option.disabled = false;
+            option.style.display = 'block';
+        }
+    });
+    
+    // 如果当前选择的是被禁用的选项，则重置
+    if (secondSelect.value === firstValue) {
+        secondSelect.value = '';
+    }
+}
+
+// 更新第一个选择框的选项
+function updateFirstSelectOptions() {
+    const secondValue = document.getElementById('secondRepository').value;
+    const firstSelect = document.getElementById('firstRepository');
+    const options = firstSelect.querySelectorAll('option');
+    
+    options.forEach(option => {
+        if (option.value === secondValue && option.value !== '') {
+            option.disabled = true;
+            option.style.display = 'none';
+        } else {
+            option.disabled = false;
+            option.style.display = 'block';
+        }
+    });
+    
+    // 如果当前选择的是被禁用的选项，则重置
+    if (firstSelect.value === secondValue) {
+        firstSelect.value = '';
+    }
+}
+
+// 更新对调预览
+function updateSwapPreview() {
+    const firstValue = document.getElementById('firstRepository').value;
+    const secondValue = document.getElementById('secondRepository').value;
+    const swapPreview = document.getElementById('swapPreview');
+    const confirmBtn = document.getElementById('confirmSwapBtn');
+    
+    if (firstValue && secondValue && firstValue !== secondValue) {
+        // 获取仓库信息
+        const repositories = [
+            {% for repo in repositories %}
+            {
+                id: {{ repo.id }},
+                name: "{{ repo.name }}",
+                type: "{{ repo.type }}",
+                display_order: {{ repo.display_order or 0 }}
+            }{% if not loop.last %},{% endif %}
+            {% endfor %}
+        ];
+        const firstRepo = repositories.find(r => r.id == firstValue);
+        const secondRepo = repositories.find(r => r.id == secondValue);
+        
+        if (firstRepo && secondRepo) {
+            // 显示预览
+            document.getElementById('firstRepoInfo').textContent = `ID: ${firstRepo.id} - ${firstRepo.name}`;
+            document.getElementById('secondRepoInfo').textContent = `ID: ${secondRepo.id} - ${secondRepo.name}`;
+            document.getElementById('firstRepoOrder').textContent = firstRepo.display_order || '未设置';
+            document.getElementById('secondRepoOrder').textContent = secondRepo.display_order || '未设置';
+            
+            swapPreview.style.display = 'block';
+            confirmBtn.disabled = false;
+        }
+    } else {
+        swapPreview.style.display = 'none';
+        confirmBtn.disabled = true;
+    }
+}
+
+// 确认仓库对调
+function confirmRepositorySwap() {
+    const firstValue = document.getElementById('firstRepository').value;
+    const secondValue = document.getElementById('secondRepository').value;
+    
+    if (!firstValue || !secondValue || firstValue === secondValue) {
+        alert('请选择两个不同的仓库进行对调');
+        return;
+    }
+    
+    fetch('/repositories/swap-order', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            first_repo_id: firstValue,
+            second_repo_id: secondValue,
+            project_id: {{ project.id }}
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            alert('仓库顺序对调成功！');
+            const modal = bootstrap.Modal.getInstance(document.getElementById('repositoryOrderModal'));
+            modal.hide();
+            location.reload();
+        } else {
+            alert('对调失败：' + (data.message || '未知错误'));
+        }
+    })
+    .catch(error => {
+        console.error('对调失败:', error);
+        alert('对调失败，请稍后重试');
+    });
+}
+
+// 更新仓库排序
+function updateRepositoryOrder(repoId, newOrder) {
+    fetch('/repositories/update-order', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            repo_id: repoId,
+            new_order: newOrder,
+            project_id: {{ project.id }}
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            console.log('仓库排序更新成功');
+        } else {
+            alert('排序更新失败：' + (data.message || '未知错误'));
+            location.reload(); // 刷新页面恢复原始顺序
+        }
+    })
+    .catch(error => {
+        console.error('排序更新失败:', error);
+        alert('排序更新失败，请稍后重试');
+        location.reload(); // 刷新页面恢复原始顺序
+    });
+}
+</script>
+{% endblock %}

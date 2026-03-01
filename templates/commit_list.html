@@ -1,0 +1,2107 @@
+{% extends "base.html" %}
+
+{% block title %}提交记录 - {{ repository.name }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <!-- 项目标题和仓库标签页 -->
+    <div class="mb-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div class="d-flex align-items-center gap-3">
+                <h3 class="text-primary mb-0">
+                    <i class="bi bi-folder-fill me-2"></i>{{ project.name }}
+                </h3>
+                {% if repository.resource_type == 'table' %}
+                <div class="d-flex align-items-center gap-2">
+                    <button class="btn btn-outline-primary btn-sm" id="regenerateCacheButton" onclick="regenerateCache()" data-repository-id="{{ repository.id }}" style="font-size: 90%; padding: 0.25rem 0.5rem; border-radius: 0.375rem;">
+                        <i class="bi bi-arrow-clockwise me-1"></i>
+                        <span class="cache-text">重建缓存</span>
+                        <span class="cache-loading d-none">
+                            <span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+                            重建中...
+                        </span>
+                    </button>
+                    <div id="cacheStatusMessage" class="text-muted small d-none" style="min-width: 200px;"></div>
+                </div>
+                {% endif %}
+            </div>
+            <div class="d-flex gap-2">
+                <button class="btn btn-success btn-sm" id="syncButton" data-repository-id="{{ repository.id }}" style="font-size: 105%; padding: 0.315rem 0.63rem;">
+                    <i class="bi bi-arrow-clockwise me-1"></i>
+                    <span class="sync-text">手动获取数据</span>
+                    <span class="sync-loading d-none">
+                        <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                        同步分析中...
+                    </span>
+                </button>
+                <button class="btn btn-warning btn-sm" id="toggleViewButton" onclick="toggleView()" style="font-size: 105%; padding: 0.315rem 0.63rem; min-width: 150px;">
+                    <i class="bi bi-funnel me-1"></i>
+                    <span id="toggleViewText">查看所有未确认条目</span>
+                </button>
+                <button class="btn btn-info btn-sm" onclick="showRepositoryCompareModal()" style="font-size: 105%; padding: 0.315rem 0.63rem;">
+                    <i class="bi bi-git me-1"></i>仓库间提交对比
+                </button>
+            </div>
+        </div>
+        <ul class="nav nav-tabs border-0">
+            {% for group in grouped_repositories %}
+            <li class="nav-item">
+                {% if group.repositories|length > 1 %}
+                <!-- 多分支仓库：显示下拉菜单 -->
+                <div class="dropdown">
+                    <button class="nav-link dropdown-toggle {% if group.current_repo.id == repository.id %}active{% endif %}" 
+                            type="button" data-bs-toggle="dropdown" aria-expanded="false" 
+                            id="dropdownMenuButton{{ loop.index }}"
+                            style="background: none !important; border: none !important; cursor: pointer !important;">
+                        {% set current_branch = repository.branch if repository.branch else (repository.name.split('_')[-1] if '_' in repository.name else 'master') %}
+                        {{ group.name }} <span class="badge bg-primary ms-1">{{ current_branch }}</span>
+                    </button>
+                    <ul class="dropdown-menu" aria-labelledby="dropdownMenuButton{{ loop.index }}">
+                    {% for repo in group.repositories %}
+                    <li>
+                        <a class="dropdown-item {% if repo.id == repository.id %}active{% endif %}" 
+                           href="{{ url_for('commit_list', repository_id=repo.id) }}">
+                            {% set branch_name = repo.branch if repo.branch else (repo.name.split('_')[-1] if '_' in repo.name else 'master') %}
+                            <span class="badge bg-secondary me-2">{{ branch_name }}</span>
+                            <small class="text-muted">({{ repo.type }})</small>
+                        </a>
+                    </li>
+                    {% endfor %}
+                    </ul>
+                </div>
+                {% else %}
+                <!-- 单分支仓库：普通链接 -->
+                <a class="nav-link {% if group.current_repo.id == repository.id %}active{% endif %}" 
+                   href="{{ url_for('commit_list', repository_id=group.current_repo.id) }}">
+                    {% set branch_name = group.current_repo.branch if group.current_repo.branch else (group.current_repo.name.split('_')[-1] if '_' in group.current_repo.name else 'master') %}
+                    {{ group.name }} <span class="badge bg-primary ms-1">{{ branch_name }}</span>
+                </a>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+
+    <!-- 仓库状态提示 -->
+    {% if not repository_status.is_data_ready %}
+    <div class="alert alert-info border-0 shadow-sm mb-4" role="alert">
+        <div class="d-flex align-items-center">
+            {% if repository_status.clone_status == 'cloning' %}
+            <div class="spinner-border spinner-border-sm text-info me-3" role="status" aria-hidden="true"></div>
+            <i class="bi bi-info-circle-fill me-2 fs-5"></i>
+            {% elif repository_status.clone_status == 'failed' %}
+            <i class="bi bi-exclamation-triangle-fill me-2 fs-5 text-warning"></i>
+            {% else %}
+            <i class="bi bi-clock-fill me-2 fs-5"></i>
+            {% endif %}
+            <div>
+                <h6 class="alert-heading mb-1">仓库数据准备中</h6>
+                <p class="mb-0">{{ repository_status.status_message }}</p>
+                {% if repository_status.clone_status == 'completed' %}
+                <small class="text-muted">
+                    <i class="bi bi-lightbulb me-1"></i>
+                    提示：数据分析需要一定时间，请稍等片刻...
+                </small>
+                {% endif %}
+            </div>
+        </div>
+        {% if repository_status.clone_status == 'cloning' or (repository_status.clone_status == 'completed' and commits|length == 0) %}
+        <div class="mt-3">
+            <button class="btn btn-outline-info btn-sm" onclick="location.reload()">
+                <i class="bi bi-arrow-clockwise me-1"></i>刷新页面
+            </button>
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- 筛选条件 -->
+    <div class="card mb-4 border-0 shadow-sm filter-container">
+        <div class="card-header bg-gradient-primary text-white border-0 py-3">
+            <div class="d-flex align-items-center justify-content-between">
+                <h6 class="mb-0 fw-bold">
+                    <i class="bi bi-funnel-fill me-2"></i>筛选条件
+                </h6>
+                <small class="opacity-75">快速筛选提交记录</small>
+            </div>
+        </div>
+        <div class="card-body p-4">
+            <form method="GET" id="filterForm">
+                <!-- 第一行：基础筛选 -->
+                <div class="row g-4 mb-4">
+                    <div class="col-xl-3 col-lg-4 col-md-6">
+                        <div class="form-floating">
+                            <input type="text" class="form-control" name="author" id="authorInput"
+                                   value="{{ filters.author }}" placeholder="输入作者名">
+                            <label for="authorInput">
+                                <i class="bi bi-person text-primary me-2"></i>提交者
+                            </label>
+                        </div>
+                    </div>
+                    <div class="col-xl-4 col-lg-5 col-md-6">
+                        <div class="form-floating">
+                            <input type="text" class="form-control" name="path" id="pathInput"
+                                   value="{{ filters.path }}" placeholder="文件路径">
+                            <label for="pathInput">
+                                <i class="bi bi-folder text-primary me-2"></i>文件路径
+                            </label>
+                        </div>
+                    </div>
+                    <div class="col-xl-3 col-lg-3 col-md-6">
+                        <div class="form-floating">
+                            <input type="text" class="form-control" name="version" id="versionInput"
+                                   value="{{ filters.version }}" placeholder="版本号">
+                            <label for="versionInput">
+                                <i class="bi bi-tag text-primary me-2"></i>版本号
+                            </label>
+                        </div>
+                    </div>
+                    <div class="col-xl-2 col-lg-12 col-md-6">
+                        <div class="d-flex gap-2 h-100">
+                            <button type="submit" class="btn btn-primary btn-lg flex-fill d-flex align-items-center justify-content-center">
+                                <i class="bi bi-search me-2"></i>筛选
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 第二行：高级筛选 -->
+                <div class="row g-4 align-items-end">
+                    <div class="col-lg-2 col-md-4 col-sm-6">
+                        <label class="form-label fw-medium text-muted mb-2">
+                            <i class="bi bi-gear me-1"></i>操作类型
+                        </label>
+                        <select class="form-select" name="operation" style="font-size: 0.875rem;">
+                            <option value="">全部操作</option>
+                            <option value="A" {% if filters.operation == 'A' %}selected{% endif %}>
+                                <i class="bi bi-plus-circle"></i> 新增
+                            </option>
+                            <option value="M" {% if filters.operation == 'M' %}selected{% endif %}>
+                                <i class="bi bi-pencil-square"></i> 修改
+                            </option>
+                            <option value="D" {% if filters.operation == 'D' %}selected{% endif %}>
+                                <i class="bi bi-trash"></i> 删除
+                            </option>
+                        </select>
+                    </div>
+                    <div class="col-md-2 filter-item" style="overflow: visible !important;">
+                        <label>确认状态</label>
+                        <div class="dropdown position-static">
+                            <button class="btn btn-outline-primary dropdown-toggle w-100" type="button" 
+                                    id="statusDropdownButton" onclick="toggleStatusDropdown(event)" 
+                                    aria-expanded="false">
+                                <span id="statusDropdownText">选择状态</span>
+                            </button>
+                            <div class="dropdown-menu custom-dropdown" id="statusDropdownMenu" style="display: none; min-width: 280px; padding: 0.75rem; position: absolute; top: 100%; left: 0; z-index: 1050;">
+                                <h6 class="dropdown-header">选择确认状态</h6>
+                                <div class="dropdown-item-text mb-2" style="padding: 0.5rem 0; position: relative;">
+                                    <div class="d-flex align-items-center">
+                                        <input class="form-check-input status-checkbox me-2" type="checkbox" value="pending" id="statusPending" style="margin-top: 0; position: relative;">
+                                        <label class="form-check-label d-flex align-items-center" for="statusPending" style="margin-bottom: 0;">
+                                            <span class="badge bg-warning text-dark me-2">待确认</span>
+                                            <span>待确认条目</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="dropdown-item-text mb-2" style="padding: 0.5rem 0; position: relative;">
+                                    <div class="d-flex align-items-center">
+                                        <input class="form-check-input status-checkbox me-2" type="checkbox" value="confirmed" id="statusConfirmed" style="margin-top: 0; position: relative;">
+                                        <label class="form-check-label d-flex align-items-center" for="statusConfirmed" style="margin-bottom: 0;">
+                                            <span class="badge bg-success me-2">已确认</span>
+                                            <span>已确认提交</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="dropdown-item-text mb-2" style="padding: 0.5rem 0; position: relative;">
+                                    <div class="d-flex align-items-center">
+                                        <input class="form-check-input status-checkbox me-2" type="checkbox" value="rejected" id="statusRejected" style="margin-top: 0; position: relative;">
+                                        <label class="form-check-label d-flex align-items-center" for="statusRejected" style="margin-bottom: 0;">
+                                            <span class="badge bg-danger me-2">已拒绝</span>
+                                            <span>已拒绝条目</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="border-top pt-3">
+                                    <div class="d-flex gap-2">
+                                        <button type="button" class="btn btn-primary btn-sm flex-fill" id="applyStatusBtn">
+                                            <i class="bi bi-check me-1"></i>应用
+                                        </button>
+                                        <button type="button" class="btn btn-outline-secondary btn-sm flex-fill" id="clearStatusBtn">
+                                            <i class="bi bi-x me-1"></i>清空
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Hidden inputs for form submission -->
+                        <div id="statusHiddenInputs">
+                            {% for status in filters.status_list %}
+                            <input type="hidden" name="status" value="{{ status }}">
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div class="col-lg-8 col-md-4">
+                        <div class="d-flex justify-content-end gap-2">
+                            <a href="{{ url_for('commit_list', repository_id=repository.id) }}" 
+                               class="btn btn-outline-secondary btn-lg">
+                                <i class="bi bi-arrow-clockwise me-2"></i>重置筛选
+                            </a>
+                            <button type="button" class="btn btn-info btn-lg" onclick="toggleAdvancedFilters()">
+                                <i class="bi bi-sliders me-2"></i>高级筛选
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 高级筛选区域（默认隐藏） -->
+                <div id="advancedFilters" class="mt-4 pt-4 border-top" style="display: none;">
+                    <div class="row g-4">
+                        <div class="col-lg-3 col-md-6">
+                            <label class="form-label fw-medium text-muted">
+                                <i class="bi bi-calendar me-1"></i>提交时间范围
+                            </label>
+                            <div class="input-group">
+                                <input type="date" class="form-control" name="start_date" value="{{ filters.start_date }}">
+                                <span class="input-group-text">至</span>
+                                <input type="date" class="form-control" name="end_date" value="{{ filters.end_date }}">
+                            </div>
+                        </div>
+                        <div class="col-lg-2 col-md-6">
+                            <label class="form-label fw-medium text-muted">
+                                <i class="bi bi-sort-numeric-down me-1"></i>每页显示
+                            </label>
+                            <select class="form-select" name="per_page">
+                                <option value="20" {% if request.args.get('per_page') == '20' %}selected{% endif %}>20条</option>
+                                <option value="50" {% if request.args.get('per_page') == '50' or not request.args.get('per_page') %}selected{% endif %}>50条</option>
+                                <option value="100" {% if request.args.get('per_page') == '100' %}selected{% endif %}>100条</option>
+                            </select>
+                        </div>
+                        <div class="col-lg-2 col-md-6">
+                            <label class="form-label fw-medium text-muted">
+                                <i class="bi bi-sort-down me-1"></i>排序方式
+                            </label>
+                            <select class="form-select" name="sort_by">
+                                <option value="commit_time_desc" {% if request.args.get('sort_by') == 'commit_time_desc' or not request.args.get('sort_by') %}selected{% endif %}>时间降序</option>
+                                <option value="commit_time_asc" {% if request.args.get('sort_by') == 'commit_time_asc' %}selected{% endif %}>时间升序</option>
+                                <option value="author_asc" {% if request.args.get('sort_by') == 'author_asc' %}selected{% endif %}>作者A-Z</option>
+                                <option value="path_asc" {% if request.args.get('sort_by') == 'path_asc' %}selected{% endif %}>路径A-Z</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 提交记录表格 -->
+    <div class="commits-table-container">
+        {% if commits %}
+        <div class="card border-0 shadow-sm">
+            <div class="card-header bg-white border-0 pb-0">
+                <div class="d-flex justify-content-between align-items-center">
+                    <h6 class="mb-0 text-secondary">
+                        <i class="bi bi-list-ul me-2"></i>提交记录
+                        <span class="badge bg-primary ms-2">{{ pagination.total }} 条记录</span>
+                    </h6>
+                    <small class="text-muted">第 {{ pagination.page }} 页，共 {{ pagination.pages }} 页</small>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0 commit-table" style="font-size: 105%; line-height: 1.575;">
+                        <thead class="table-light" style="font-size: 105%;">
+                            <tr style="line-height: 1.575;">
+                                <th width="1.5%" class="border-0 compact-col">
+                                    <input type="checkbox" id="selectAll" onchange="toggleSelectAll()" class="form-check-input" style="transform: scale(1.05);">
+                                </th>
+                                <th width="2%" class="border-0 compact-col">
+                                    <i class="bi bi-hash"></i>
+                                </th>
+                                <th width="10%" class="border-0">
+                                    <i class="bi bi-person me-1"></i>作者
+                                </th>
+                                <th width="25%" class="border-0">
+                                    <i class="bi bi-file-text me-1"></i>文件名
+                                </th>
+                                <th width="32%" class="border-0">
+                                    <i class="bi bi-chat-text me-1"></i>提交日志
+                                </th>
+                                <th width="5%" class="border-0 compact-col">
+                                    <i class="bi bi-tag"></i>版本
+                                </th>
+                                <th width="3%" class="border-0 compact-col">
+                                    <i class="bi bi-gear"></i>
+                                </th>
+                                <th width="7%" class="border-0 compact-col">
+                                    <i class="bi bi-clock"></i>时间
+                                </th>
+                                <th width="5%" class="border-0 compact-col">
+                                    <i class="bi bi-check-circle"></i>
+                                </th>
+                                <th width="9.5%" class="border-0 compact-col">
+                                    <i class="bi bi-three-dots"></i>操作
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody style="font-size: 105%; line-height: 1.575;">
+                            {% for commit in commits %}
+                            <tr class="align-middle commit-row 
+                                {% if commit.operation == 'A' %}commit-row-added
+                                {% elif commit.operation == 'D' %}commit-row-deleted
+                                {% elif commit.operation == 'M' %}commit-row-modified
+                                {% endif %}" style="line-height: 1.575;">
+                                <td class="compact-cell">
+                                    <input type="checkbox" class="commit-checkbox form-check-input" value="{{ commit.id }}" onchange="updateBatchButtons()" style="transform: scale(1.05);">
+                                </td>
+                                <td class="fw-medium text-muted compact-cell">{{ (pagination.page - 1) * 50 + loop.index }}</td>
+                                <td class="author-cell">
+                                    <span class="fw-medium text-truncate d-inline-block" style="max-width: 120px;" title="{{ commit.author | e }}">{{ commit.author | e }}</span>
+                                </td>
+                                <td class="path-cell">
+                                    <a href="{{ generate_commit_diff_url(commit) }}"
+                                       class="text-decoration-none path-link priority-diff-link"
+                                       data-commit-id="{{ commit.id }}"
+                                       data-file-path="{{ commit.path | e }}">
+                                        <i class="bi bi-file-text me-1 text-muted"></i>
+                                        <span class="text-truncate d-inline-block" style="max-width: 430px;" title="{{ commit.path | e }}">{{ commit.path.split('/')[-1] | e }}</span>
+                                    </a>
+                                </td>
+                                <td class="message-cell">
+                                    <div class="commit-message-cell" title="{{ commit.message | e }}">
+                                        <span class="text-truncate d-inline-block" style="max-width: 530px;">{{ commit.message.strip() | e }}</span>
+                                    </div>
+                                </td>
+                                <td class="version-col">
+                                    <a href="{{ url_for('commit_list', repository_id=repository.id, author='', path='', version=commit.version, operation='', start_date='', end_date='', per_page=50, sort_by='commit_time_desc') }}" 
+                                       class="text-decoration-none version-link"
+                                       title="点击筛选此版本的所有提交">
+                                        <code class="bg-light px-2 py-1 rounded">{{ commit.version }}</code>
+                                    </a>
+                                </td>
+                                <td class="text-center">
+                                    <span class="operation-badge 
+                                        {% if commit.operation == 'A' %}operation-A
+                                        {% elif commit.operation == 'M' %}operation-M
+                                        {% elif commit.operation == 'D' %}operation-D
+                                        {% else %}operation-other{% endif %}">
+                                        {% if commit.operation == 'A' %}新增
+                                        {% elif commit.operation == 'M' %}修改
+                                        {% elif commit.operation == 'D' %}删除
+                                        {% else %}{{ commit.operation }}{% endif %}
+                                    </span>
+                                </td>
+                                <td class="text-center">
+                                    {% if commit.commit_time %}
+                                        {{ commit.commit_time.strftime('%Y-%m-%d %H:%M') }}
+                                    {% else %}
+                                        未知
+                                    {% endif %}
+                                </td>
+                                <td class="text-center">
+                                    <span class="status-badge 
+                                        {% if commit.status == 'pending' %}status-pending
+                                        {% elif commit.status == 'confirmed' %}status-confirmed
+                                        {% elif commit.status == 'rejected' %}status-rejected
+                                        {% else %}status-other{% endif %}">
+                                        {% if commit.status == 'pending' %}待确认
+                                        {% elif commit.status == 'confirmed' %}已确认
+                                        {% elif commit.status == 'rejected' %}已拒绝
+                                        {% else %}{{ commit.status }}{% endif %}
+                                    </span>
+                                </td>
+                                <td class="text-center">
+                                    <div class="action-buttons">
+                                        {% if commit.status == 'pending' %}
+                                            <button class="action-btn approve-btn" data-commit-id="{{ commit.id }}" data-status="confirmed" style="font-size: 105%; padding: 0.315rem 0.63rem;">
+                                                通过
+                                            </button>
+                                        {% elif commit.status == 'confirmed' %}
+                                            <a href="{{ generate_commit_diff_url(commit) }}"
+                                               class="action-btn detail-btn priority-diff-link"
+                                               data-commit-id="{{ commit.id }}"
+                                               data-file-path="{{ commit.path | e }}"
+                                               style="font-size: 105%; padding: 0.315rem 0.63rem;">
+                                                详情
+                                            </a>
+                                        {% elif commit.status == 'rejected' %}
+                                            <button class="action-btn rejected-btn" disabled style="font-size: 105%; padding: 0.315rem 0.63rem;">
+                                                已拒绝
+                                            </button>
+                                        {% endif %}
+                                        <div class="dropdown">
+                                            <button class="action-btn dropdown-btn" data-commit-id="{{ commit.id }}" style="font-size: 105%; padding: 0.315rem 0.63rem;">▼</button>
+                                            <!-- 原始下拉菜单隐藏 -->
+                                            <div class="dropdown-menu" id="dropdown-{{ commit.id }}" style="display: none;">
+                                                {% if commit.status != 'confirmed' %}
+                                    <a href="#" data-commit-id="{{ commit.id }}" data-status="confirmed" class="status-link">通过</a>
+                                    {% endif %}
+                                    {% if commit.status != 'rejected' %}
+                                    <a href="#" data-commit-id="{{ commit.id }}" data-status="rejected" class="status-link">拒绝</a>
+                                    {% endif %}
+                                    <a href="#" data-commit-id="{{ commit.id }}" class="approve-all-link">通过该次提交的所有文件</a>
+                                    <a href="{{ generate_commit_diff_url(commit) }}"
+                                       class="priority-diff-link"
+                                       data-commit-id="{{ commit.id }}"
+                                       data-file-path="{{ commit.path | e }}">查看详情</a>
+                                </div>
+                            </div>
+                        </div>
+                    </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 分页导航 -->
+        {% if pagination.pages > 1 %}
+        <nav aria-label="分页导航" class="mt-4">
+            <ul class="pagination justify-content-center">
+                <!-- 当前页附近的页码 -->
+                {% for page_num in pagination.iter_pages(left_edge=1, right_edge=1, left_current=2, right_current=2) %}
+                    {% if page_num %}
+                        {% if page_num != pagination.page %}
+                        <li class="page-item">
+                            <a class="page-link" href="{{ url_for('commit_list', repository_id=repository.id, page=page_num, author=filters.author, path=filters.path, version=filters.version, operation=filters.operation, status=filters.status_list|join(',') if filters.status_list else filters.status, per_page=request.args.get('per_page', 50)) }}">{{ page_num }}</a>
+                        </li>
+                        {% else %}
+                        <li class="page-item active">
+                            <span class="page-link">{{ page_num }}</span>
+                        </li>
+                        {% endif %}
+                    {% else %}
+                    <li class="page-item disabled">
+                        <span class="page-link">...</span>
+                    </li>
+                    {% endif %}
+                {% endfor %}
+                
+                <!-- 后一页 -->
+                {% if pagination.has_next %}
+                <li class="page-item">
+                    <a class="page-link" href="{{ url_for('commit_list', repository_id=repository.id, page=pagination.next_num, author=filters.author, path=filters.path, version=filters.version, operation=filters.operation, status=filters.status_list|join(',') if filters.status_list else filters.status, per_page=request.args.get('per_page', 50)) }}">后一页</a>
+                </li>
+                {% endif %}
+            </ul>
+        </nav>
+        {% endif %}
+        
+        <!-- 批量操作按钮 -->
+        <div class="batch-operations mt-4" id="batchOperations" style="display: none;">
+            <div class="d-flex justify-content-center gap-3">
+                <button type="button" class="btn btn-success" id="batchApproveBtn" onclick="batchApprove()">
+                    <i class="fas fa-check me-2"></i>通过选中项目
+                </button>
+                <button type="button" class="btn btn-warning" id="batchRejectBtn" onclick="batchReject()">
+                    <i class="fas fa-times me-2"></i>不通过选中项目
+                </button>
+                <button type="button" class="btn btn-info" id="mergeDiffBtn" onclick="mergeDiff()">
+                    <i class="fas fa-code-branch me-2"></i>合并选中条目diff
+                </button>
+            </div>
+        </div>
+        
+        {% else %}
+        <div class="alert alert-info">
+            <i class="fas fa-info-circle me-2"></i>
+            暂无提交记录
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- 增量同步确认模态框 -->
+<div class="modal fade" id="syncOptionsModal" tabindex="-1" aria-labelledby="syncOptionsModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="syncOptionsModalLabel">
+                    <i class="bi bi-plus-circle"></i> 增量同步确认
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <div class="alert alert-info">
+                        <i class="bi bi-info-circle"></i>
+                        <strong>增量同步</strong>
+                        <p class="mb-0 mt-2">将仅同步新的提交记录，保留现有缓存数据。这是推荐的同步方式，速度快且不会影响已有数据。</p>
+                    </div>
+
+                    <p class="text-muted mb-0">确定要开始增量同步吗？</p>
+                </div>
+
+                <div class="alert alert-info d-none" id="syncProgress">
+                    <div class="d-flex align-items-center">
+                        <div class="spinner-border spinner-border-sm me-2" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <span id="syncProgressText">正在执行增量同步，请稍候...</span>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="performSync('incremental')">
+                    <i class="bi bi-plus-circle"></i> 开始增量同步
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 仓库间diff对比设置弹窗 -->
+<div class="modal fade" id="repositoryCompareModal" tabindex="-1" aria-labelledby="repositoryCompareModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="repositoryCompareModalLabel">仓库间diff对比设置</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <form id="repositoryCompareForm">
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label for="sourceRepository" class="form-label">外放分支仓库:</label>
+                            <select class="form-select" id="sourceRepository" name="source_repository">
+                                <option value="">请选择仓库</option>
+                                {% for repo in repositories %}
+                                <option value="{{ repo.id }}">{{ repo.name }}_{{ repo.type }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="targetRepository" class="form-label">主分支仓库:</label>
+                            <select class="form-select" id="targetRepository" name="target_repository">
+                                <option value="">请选择仓库</option>
+                                {% for repo in repositories %}
+                                <option value="{{ repo.id }}">{{ repo.name }}_{{ repo.type }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label class="form-label">diff时间范围:</label>
+                        <div class="row">
+                            <div class="col-md-2">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="timeRange" id="oneWeek" value="week" checked>
+                                    <label class="form-check-label" for="oneWeek">一周内</label>
+                                </div>
+                            </div>
+                            <div class="col-md-2">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="timeRange" id="customTime" value="custom">
+                                    <label class="form-check-label" for="customTime">自定义时间</label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row mb-3" id="customTimeRange" style="display: none;">
+                        <div class="col-md-5">
+                            <input type="datetime-local" class="form-control" id="startTime" name="start_time">
+                        </div>
+                        <div class="col-md-1 text-center">
+                            <span>到</span>
+                        </div>
+                        <div class="col-md-5">
+                            <input type="datetime-local" class="form-control" id="endTime" name="end_time">
+                        </div>
+                    </div>
+                    
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label for="intervalMinutes" class="form-label">提交间隔不超过:</label>
+                            <div class="input-group">
+                                <input type="number" class="form-control" id="intervalMinutes" name="interval_minutes" value="5" min="1">
+                                <span class="input-group-text">分钟</span>
+                            </div>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" onclick="executeRepositoryCompare()">确定</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('=== 页面加载完成，开始初始化下拉菜单 ===');
+    
+    // 初始化状态下拉菜单
+    initStatusDropdown();
+    
+    // 绑定手动获取数据按钮事件
+    const syncButton = document.getElementById('syncButton');
+    if (syncButton) {
+        syncButton.addEventListener('click', function() {
+            const repoId = this.getAttribute('data-repository-id');
+            if (repoId) {
+                syncRepository(repoId);
+            }
+        });
+        console.log('✅ 手动获取数据按钮事件已绑定');
+    } else {
+        console.warn('⚠️ 未找到手动获取数据按钮');
+    }
+    
+    // 确保Bootstrap dropdown正常工作
+    const dropdownElements = document.querySelectorAll('[data-bs-toggle="dropdown"]');
+    console.log('找到下拉按钮数量:', dropdownElements.length);
+    
+    dropdownElements.forEach((element, index) => {
+        console.log(`下拉按钮 ${index + 1}:`, element);
+        console.log(`  - ID: ${element.id}`);
+        console.log(`  - 类名: ${element.className}`);
+        console.log(`  - data-bs-toggle: ${element.getAttribute('data-bs-toggle')}`);
+        
+        element.style.pointerEvents = 'auto';
+        
+        // 添加点击事件监听
+        element.addEventListener('click', function(e) {
+            console.log(`=== 下拉按钮 ${index + 1} 被点击 ===`);
+            console.log('点击事件:', e);
+            console.log('目标元素:', e.target);
+            console.log('当前元素:', this);
+            console.log('Bootstrap实例:', bootstrap.Dropdown.getInstance(this));
+        });
+        
+        // 添加Bootstrap下拉事件监听
+        element.addEventListener('show.bs.dropdown', function() {
+            console.log(`下拉菜单 ${index + 1} 即将显示`);
+        });
+        
+        element.addEventListener('shown.bs.dropdown', function() {
+            console.log(`下拉菜单 ${index + 1} 已显示`);
+        });
+        
+        element.addEventListener('hide.bs.dropdown', function() {
+            console.log(`下拉菜单 ${index + 1} 即将隐藏`);
+        });
+        
+        element.addEventListener('hidden.bs.dropdown', function() {
+            console.log(`下拉菜单 ${index + 1} 已隐藏`);
+        });
+    });
+    
+    // 检查Bootstrap是否正确加载
+    if (typeof bootstrap !== 'undefined') {
+        console.log('Bootstrap已加载，版本:', bootstrap);
+    } else {
+        console.error('Bootstrap未加载！');
+    }
+});
+
+// 初始化状态下拉菜单
+function initStatusDropdown() {
+    const statusCheckboxes = document.querySelectorAll('.status-checkbox');
+    const statusDropdownText = document.getElementById('statusDropdownText');
+    const statusHiddenInputs = document.getElementById('statusHiddenInputs');
+    
+    console.log('=== 初始化状态下拉菜单 ===');
+    console.log('找到复选框数量:', statusCheckboxes.length);
+    console.log('下拉文本元素:', statusDropdownText);
+    console.log('隐藏输入容器:', statusHiddenInputs);
+    
+    // 更新显示文本
+    function updateStatusText() {
+        const checkedBoxes = document.querySelectorAll('.status-checkbox:checked');
+        if (checkedBoxes.length === 0) {
+            statusDropdownText.textContent = '选择状态';
+        } else if (checkedBoxes.length === 1) {
+            const labels = {
+                'pending': '待确认',
+                'confirmed': '已确认',
+                'rejected': '已拒绝'
+            };
+            statusDropdownText.textContent = labels[checkedBoxes[0].value];
+        } else {
+            statusDropdownText.textContent = `已选择 ${checkedBoxes.length} 项`;
+        }
+        
+        // 更新隐藏输入字段
+        statusHiddenInputs.innerHTML = '';
+        checkedBoxes.forEach(checkbox => {
+            const hiddenInput = document.createElement('input');
+            hiddenInput.type = 'hidden';
+            hiddenInput.name = 'status';
+            hiddenInput.value = checkbox.value;
+            statusHiddenInputs.appendChild(hiddenInput);
+        });
+    }
+    
+    // 初始化显示
+    updateStatusText();
+    
+    // 监听复选框变化
+    statusCheckboxes.forEach(checkbox => {
+        checkbox.addEventListener('change', updateStatusText);
+    });
+    
+    // 防止点击下拉菜单内容时关闭菜单
+    const dropdownMenu = document.getElementById('statusDropdownMenu');
+    if (dropdownMenu) {
+        dropdownMenu.addEventListener('click', function(e) {
+            console.log('下拉菜单内部点击事件:', e.target);
+            e.stopPropagation();
+        });
+        
+        // 检查菜单的父容器层级
+        console.log('下拉菜单父容器链:');
+        let parent = dropdownMenu.parentElement;
+        let level = 0;
+        while (parent && level < 10) {
+            console.log(`  Level ${level}:`, parent.tagName, parent.className, window.getComputedStyle(parent).overflow);
+            parent = parent.parentElement;
+            level++;
+        }
+    }
+}
+
+// 全选功能
+function toggleSelectAll() {
+    const selectAllCheckbox = document.getElementById('selectAll');
+    const checkboxes = document.querySelectorAll('.commit-checkbox');
+    
+    checkboxes.forEach(checkbox => {
+        checkbox.checked = selectAllCheckbox.checked;
+    });
+    updateBatchButtons();
+}
+
+// 更新批量操作按钮显示
+function updateBatchButtons() {
+    const checkboxes = document.querySelectorAll('.commit-checkbox:checked');
+    const batchOperations = document.getElementById('batchOperations');
+
+    console.log('updateBatchButtons 被调用，选中数量:', checkboxes.length);
+
+    if (!batchOperations) {
+        console.error('❌ 找不到 batchOperations 元素！');
+        return;
+    }
+
+    if (checkboxes.length > 0) {
+        batchOperations.style.display = 'block';
+        console.log('✅ 显示批量操作按钮');
+    } else {
+        batchOperations.style.display = 'none';
+        console.log('隐藏批量操作按钮');
+    }
+}
+
+// 批量通过
+function batchApprove() {
+    const checkboxes = document.querySelectorAll('.commit-checkbox:checked');
+    const commitIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+    
+    if (commitIds.length === 0) {
+        alert('请选择要通过的提交');
+        return;
+    }
+    
+    if (!confirm(`确定要通过选中的 ${commitIds.length} 个提交吗？`)) {
+        return;
+    }
+    
+    fetch('/commits/batch-approve', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            commit_ids: commitIds
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            alert(data.message);
+            location.reload();
+        } else {
+            alert('操作失败: ' + data.message);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('操作失败: ' + error.message);
+    });
+}
+
+// 批量拒绝
+function batchReject() {
+    const checkboxes = document.querySelectorAll('.commit-checkbox:checked');
+    const commitIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+    
+    if (commitIds.length === 0) {
+        alert('请选择要拒绝的提交');
+        return;
+    }
+    
+    if (!confirm(`确定要拒绝选中的 ${commitIds.length} 个提交吗？`)) {
+        return;
+    }
+    
+    fetch('/commits/batch-reject', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            commit_ids: commitIds
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            alert(data.message);
+            location.reload();
+        } else {
+            alert('操作失败: ' + data.message);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('操作失败: ' + error.message);
+    });
+}
+
+// 合并diff
+function mergeDiff() {
+    const checkboxes = document.querySelectorAll('.commit-checkbox:checked');
+    const commitIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+    
+    if (commitIds.length === 0) {
+        alert('请选择要合并diff的提交');
+        return;
+    }
+    
+    // 构建URL参数
+    const params = commitIds.map(id => `ids=${id}`).join('&');
+    window.open(`/commits/merge-diff?${params}`, '_blank');
+}
+
+// 全局变量存储当前仓库ID
+let currentRepositoryId = null;
+
+// 修改原有的syncRepository函数 - 所有仓库都直接执行增量同步
+function syncRepository(repoId) {
+    currentRepositoryId = repoId;
+
+    // 所有仓库都直接执行增量同步，不再显示选择对话框
+    console.log('执行增量同步');
+    performSync('incremental');
+}
+
+// 执行同步操作
+function performSync(syncType) {
+    if (!currentRepositoryId) {
+        alert('错误：未选择仓库');
+        return;
+    }
+    
+    // 显示进度提示
+    const progressDiv = document.getElementById('syncProgress');
+    const progressText = document.getElementById('syncProgressText');
+    const syncButton = document.getElementById('syncButton');
+    const syncText = syncButton.querySelector('.sync-text');
+
+    if (progressDiv) {
+        progressDiv.classList.remove('d-none');
+        progressText.textContent = '正在执行增量同步，仅处理新提交...';
+    }
+
+    // 更新按钮状态
+    if (syncButton && syncText) {
+        syncButton.disabled = true;
+        syncText.textContent = '同步分析中...';
+    }
+    
+    // 设置超时控制
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+        controller.abort();
+    }, 300000); // 5分钟超时
+    
+    // 使用增量同步API端点
+    const endpoint = `/repositories/${currentRepositoryId}/sync`;
+    
+    // 发送请求
+    fetch(endpoint, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        signal: controller.signal
+    })
+    .then(response => {
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+            return response.json().then(data => {
+                throw new Error(data.message || `HTTP ${response.status}`);
+            });
+        }
+        return response.json();
+    })
+    .then(data => {
+        // 隐藏模态框
+        const syncModal = bootstrap.Modal.getInstance(document.getElementById('syncOptionsModal'));
+        if (syncModal) {
+            // 移除焦点避免aria-hidden警告
+            document.activeElement.blur();
+            syncModal.hide();
+        }
+        
+        // 显示成功消息
+        const alertType = data.success ? 'success' : 'danger';
+        const alertIcon = data.success ? 'check-circle' : 'exclamation-triangle';
+
+        showAlert(
+            `<i class="bi bi-${alertIcon}"></i> 增量同步${data.success ? '成功' : '失败'}`,
+            `${data.message}${data.total_time ? ` (耗时: ${data.total_time})` : ''}`,
+            alertType
+        );
+
+        if (data.success) {
+            // 手动获取数据完成后立即刷新页面显示最新数据
+            console.log('手动同步成功，1秒后刷新页面');
+            setTimeout(() => {
+                location.reload();
+            }, 1000); // 1秒后刷新，让用户看到成功消息
+        }
+    })
+    .catch(error => {
+        clearTimeout(timeoutId);
+        
+        // 隐藏模态框
+        const syncModal = bootstrap.Modal.getInstance(document.getElementById('syncOptionsModal'));
+        if (syncModal) {
+            // 移除焦点避免aria-hidden警告
+            document.activeElement.blur();
+            syncModal.hide();
+        }
+        
+        // 处理不同类型的错误
+        let errorMessage = '同步失败';
+        if (error.name === 'AbortError') {
+            errorMessage = '同步超时，请稍后重试';
+        } else if (error.message.includes('Failed to fetch')) {
+            errorMessage = '网络连接失败，请检查网络连接';
+        } else {
+            errorMessage = error.message || '未知错误';
+        }
+        
+        showAlert(
+            '<i class="bi bi-exclamation-triangle"></i> 同步失败',
+            errorMessage,
+            'danger'
+        );
+    })
+    .finally(() => {
+        // 恢复按钮状态
+        if (syncButton && syncText) {
+            syncButton.disabled = false;
+            syncText.textContent = '手动获取数据';
+        }
+        
+        // 隐藏进度提示
+        progressDiv.classList.add('d-none');
+        currentRepositoryId = null;
+    });
+}
+
+// 显示警告信息的辅助函数
+function showAlert(title, message, type = 'info') {
+    const alertContainer = document.getElementById('alert-container') || document.body;
+    
+    const alertDiv = document.createElement('div');
+    alertDiv.className = `alert alert-${type} alert-dismissible fade show`;
+    alertDiv.innerHTML = `
+        <strong>${title}</strong><br>
+        ${message}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    `;
+    
+    alertContainer.appendChild(alertDiv);
+    
+    // 5秒后自动移除
+    setTimeout(() => {
+        if (alertDiv.parentNode) {
+            alertDiv.remove();
+        }
+    }, 5000);
+}
+
+// Toast 提示函数
+function showToast(title, message, type = 'info') {
+    // 创建 toast 容器（如果不存在）
+    let toastContainer = document.getElementById('toastContainer');
+    if (!toastContainer) {
+        toastContainer = document.createElement('div');
+        toastContainer.id = 'toastContainer';
+        toastContainer.className = 'toast-container position-fixed top-0 end-0 p-3';
+        toastContainer.style.zIndex = '9999';
+        document.body.appendChild(toastContainer);
+    }
+    
+    // 创建 toast 元素
+    const toastId = 'toast-' + Date.now();
+    const bgClass = type === 'success' ? 'bg-success' : type === 'error' ? 'bg-danger' : 'bg-primary';
+    const iconClass = type === 'success' ? 'bi-check-circle' : type === 'error' ? 'bi-x-circle' : 'bi-info-circle';
+    
+    const toastHtml = `
+        <div id="${toastId}" class="toast align-items-center text-white ${bgClass} border-0" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="d-flex">
+                <div class="toast-body">
+                    <i class="bi ${iconClass} me-2"></i>
+                    <strong>${title}</strong><br>
+                    <small>${message}</small>
+                </div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+        </div>
+    `;
+    
+    toastContainer.insertAdjacentHTML('beforeend', toastHtml);
+    
+    // 显示 toast
+    const toastElement = document.getElementById(toastId);
+    const toast = new bootstrap.Toast(toastElement, {
+        autohide: true,
+        delay: 3000
+    });
+    
+    toast.show();
+    
+    // 自动清理
+    toastElement.addEventListener('hidden.bs.toast', function () {
+        toastElement.remove();
+    });
+}
+
+// 切换显示模式
+let isShowingAll = true;
+
+function toggleViewMode() {
+    const currentUrl = new URL(window.location.href);
+    const currentStatus = currentUrl.searchParams.getAll('status');
+    
+    // 检查是否已经在显示未确认条目（pending 和 rejected）
+    const isShowingUnconfirmed = currentStatus.includes('pending') && currentStatus.includes('rejected') && currentStatus.length === 2;
+    
+    if (isShowingUnconfirmed) {
+        // 当前显示未确认条目，切换到显示全部
+        currentUrl.searchParams.delete('status');
+        currentUrl.searchParams.delete('page'); // 重置到第一页
+    } else {
+        // 当前显示其他，切换到只显示未确认（pending + rejected）
+        currentUrl.searchParams.delete('status');
+        currentUrl.searchParams.append('status', 'pending');
+        currentUrl.searchParams.append('status', 'rejected');
+        currentUrl.searchParams.delete('page'); // 重置到第一页
+    }
+    
+    window.location.href = currentUrl.toString();
+}
+
+// 显示未确认条目（保持向后兼容）
+function showUnconfirmedItems() {
+    toggleViewMode();
+}
+
+function updateCommitStatus(commitId, status) {
+    fetch(`/commits/${commitId}/status`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ status: status })
+    }).then(response => {
+        if (response.ok) {
+            location.reload();
+        } else {
+            alert('状态更新失败');
+        }
+    }).catch(error => {
+        console.error('Error:', error);
+        alert('状态更新失败');
+    });
+}
+
+// 移除重复的toggleDropdown函数，使用专门的事件处理器
+
+// 全局点击事件处理
+document.addEventListener('click', function(event) {
+    // 检查点击是否在状态下拉菜单外部
+    const statusButton = document.getElementById('statusDropdownButton');
+    const bodyMenu = document.getElementById('statusDropdownMenuPortal');
+    
+    if (statusButton && bodyMenu) {
+        const isClickInsideDropdown = bodyMenu.contains(event.target);
+        const isClickOnButton = statusButton.contains(event.target);
+        
+        if (!isClickInsideDropdown && !isClickOnButton) {
+            bodyMenu.remove();
+            statusButton.setAttribute('aria-expanded', 'false');
+        }
+    }
+    
+    // 处理下拉菜单内部点击
+    if (event.target.closest('#statusDropdownMenuPortal')) {
+        // 如果点击的是应用或清空按钮，允许事件继续
+        if (event.target.onclick || 
+            event.target.classList.contains('btn') ||
+            event.target.id === 'applyStatusFilter' ||
+            event.target.id === 'clearStatusFilter') {
+            return;
+        }
+        
+        // 如果点击的是复选框或标签，允许事件继续
+        if (event.target.type === 'checkbox' || 
+            event.target.tagName === 'LABEL' ||
+            event.target.classList.contains('form-check-input') ||
+            event.target.classList.contains('form-check-label')) {
+            return;
+        }
+        
+        // 其他情况阻止事件冒泡，防止菜单关闭
+        event.stopPropagation();
+        return;
+    }
+    
+    // 处理下拉按钮点击 - 已移除，使用专门的事件处理器
+    
+    // 处理状态更新链接
+    if (event.target.classList.contains('status-link')) {
+        event.preventDefault();
+        const commitId = event.target.getAttribute('data-commit-id');
+        const status = event.target.getAttribute('data-status');
+        updateCommitStatus(commitId, status);
+        return;
+    }
+    
+    // 处理批量确认链接
+    if (event.target.classList.contains('approve-all-link')) {
+        event.preventDefault();
+        const commitId = event.target.getAttribute('data-commit-id');
+        approveAllFiles(commitId);
+        return;
+    }
+    
+    // 处理状态筛选按钮点击
+    if (event.target.id === 'applyStatusBtn') {
+        event.preventDefault();
+        applyStatusFilter();
+        return;
+    }
+    
+    if (event.target.id === 'clearStatusBtn') {
+        event.preventDefault();
+        clearStatusFilter();
+        return;
+    }
+    
+    // 操作按钮点击已在handleGlobalClick中处理
+    
+    // 点击Bootstrap下拉菜单内容时不关闭，但允许按钮点击
+    if (event.target.closest('.dropdown-menu') && 
+        event.target.id !== 'applyStatusBtn' && 
+        event.target.id !== 'clearStatusBtn') {
+        return;
+    }
+    
+    // 点击其他地方关闭自定义下拉菜单（不干扰Bootstrap）
+    document.querySelectorAll('.dropdown-menu.show').forEach(menu => {
+        // 只关闭非Bootstrap的下拉菜单
+        const parentDropdown = menu.closest('.dropdown');
+        const hasBootstrapToggle = parentDropdown && parentDropdown.querySelector('[data-bs-toggle="dropdown"]');
+        if (!hasBootstrapToggle) {
+            menu.classList.remove('show');
+        }
+    });
+    
+    // 点击其他地方关闭操作列下拉菜单（不干扰Bootstrap和状态筛选菜单）
+    document.querySelectorAll('td .dropdown-menu.show').forEach(menu => {
+        menu.classList.remove('show');
+    });
+    
+    // 关闭状态下拉菜单
+    const statusMenuElement = document.getElementById('statusDropdownMenu');
+    const statusButtonElement = document.getElementById('statusDropdownButton');
+    if (statusMenuElement && statusButtonElement && 
+        !statusButtonElement.contains(event.target) && !statusMenuElement.contains(event.target)) {
+        statusMenuElement.classList.remove('show');
+        statusButtonElement.setAttribute('aria-expanded', 'false');
+    }
+});
+
+function approveAllFiles(commitId) {
+    if (confirm('确定要通过该次提交的所有文件吗？')) {
+        fetch(`/commits/${commitId}/approve-all`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        }).then(response => {
+            if (response.ok) {
+                location.reload();
+            } else {
+                alert('批量确认失败');
+            }
+        }).catch(error => {
+            console.error('Error:', error);
+            alert('批量确认失败');
+        });
+    }
+}
+
+// 切换视图函数
+function toggleView() {
+    const currentUrl = new URL(window.location.href);
+    const currentStatus = currentUrl.searchParams.get('status');
+    
+    // 如果当前是查看未确认条目，则切换到查看所有条目
+    if (currentStatus === 'pending') {
+        currentUrl.searchParams.delete('status');
+    } else {
+        // 否则切换到查看未确认条目
+        currentUrl.searchParams.set('status', 'pending');
+    }
+    
+    window.location.href = currentUrl.toString();
+}
+
+// 页面加载时更新按钮文本
+document.addEventListener('DOMContentLoaded', function() {
+    updateToggleButtonText();
+});
+
+// 更新切换按钮文本
+function updateToggleButtonText() {
+    const currentUrl = new URL(window.location.href);
+    const currentStatus = currentUrl.searchParams.get('status');
+    const toggleViewText = document.getElementById('toggleViewText');
+    
+    if (currentStatus === 'pending') {
+        // 当前显示未确认条目，按钮显示"查看所有条目"
+        toggleViewText.textContent = '查看所有条目';
+    } else {
+        // 当前显示所有条目，按钮显示"查看所有未确认条目"
+        toggleViewText.textContent = '查看所有未确认条目';
+    }
+}
+
+// 查看所有未确认条目（保持向后兼容）
+function showUnconfirmedItems() {
+    const currentUrl = new URL(window.location.href);
+    currentUrl.searchParams.set('status', 'pending');
+    window.location.href = currentUrl.toString();
+}
+
+        function showCacheStatusMessage(message, type, duration) {
+            const statusElement = document.getElementById('cacheStatusMessage');
+            if (statusElement) {
+                statusElement.textContent = message;
+                statusElement.className = `cache-status-message ${type}`;
+                statusElement.style.display = 'inline-block';
+                
+                if (duration > 0) {
+                    setTimeout(() => {
+                        statusElement.style.display = 'none';
+                    }, duration);
+                }
+            }
+        }
+
+        // 处理优先级diff链接点击事件
+        function handlePriorityDiffClick(event) {
+            const link = event.target.closest('.priority-diff-link');
+            if (!link) return;
+            
+            const commitId = link.dataset.commitId;
+            const filePath = link.dataset.filePath;
+            
+            // 检查是否为Excel文件
+            if (!filePath || !filePath.match(/\.(xlsx?|xls)$/i)) {
+                // 非Excel文件直接跳转
+                return true;
+            }
+            
+            // Excel文件先发送优先处理请求
+            event.preventDefault();
+            
+            // 不显示处理中状态，避免闪烁
+            // const originalHtml = link.innerHTML;
+            // link.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>处理中...';
+            // link.style.pointerEvents = 'none';
+            
+            fetch(`/commits/${commitId}/priority-diff`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    if (data.cached) {
+                        // 已有缓存，直接跳转
+                        console.log('文件已有缓存，直接跳转');
+                        window.location.href = link.href;
+                    } else {
+                        // 已添加到优先队列，显示提示后跳转
+                        console.log(`已添加到优先队列: ${data.message}`);
+                        // 短暂延迟后跳转，让用户看到优先处理的反馈
+                        setTimeout(() => {
+                            window.location.href = link.href;
+                        }, 500);
+                    }
+                } else {
+                    console.error('优先处理请求失败:', data.message);
+                    // 失败时仍然跳转
+                    window.location.href = link.href;
+                }
+            })
+            .catch(error => {
+                console.error('优先处理请求错误:', error);
+                // 错误时仍然跳转
+                window.location.href = link.href;
+            })
+            // .finally(() => {
+            //     // 恢复链接状态
+            //     link.innerHTML = originalHtml;
+            //     link.style.pointerEvents = 'auto';
+            // });
+            
+            return false;
+        }
+
+        // 绑定优先级diff链接事件
+        document.addEventListener('DOMContentLoaded', function() {
+            document.addEventListener('click', handlePriorityDiffClick);
+        });
+
+        // 重新生成Diff缓存
+function regenerateCache() {
+    console.log('regenerateCache 函数被调用');
+    const button = document.getElementById('regenerateCacheButton');
+    
+    if (!button) {
+        console.error('找不到 regenerateCacheButton 按钮');
+        alert('找不到重建缓存按钮');
+        return;
+    }
+    
+    const repositoryId = button.getAttribute('data-repository-id');
+    console.log('Repository ID:', repositoryId);
+    
+    if (!repositoryId) {
+        console.error('无法获取仓库ID');
+        showCacheStatusMessage('无法获取仓库ID', 'error');
+        return;
+    }
+    
+    if (!confirm('确定要重新生成Diff缓存吗？这可能需要一些时间。')) {
+        return;
+    }
+    
+    // 显示加载状态
+    const cacheText = button.querySelector('.cache-text');
+    const cacheLoading = button.querySelector('.cache-loading');
+    
+    cacheText.classList.add('d-none');
+    cacheLoading.classList.remove('d-none');
+    button.disabled = true;
+    
+    showCacheStatusMessage('正在重新生成缓存，时间较长，请稍候...', 'info', 0);
+    
+    // 发送请求重新生成缓存
+    fetch(`/repositories/${repositoryId}/regenerate-cache`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        }
+    })
+    .then(response => {
+        console.log('Response status:', response.status);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        return response.json();
+    })
+    .then(data => {
+        console.log('Response data:', data);
+        if (data.success) {
+            showCacheStatusMessage('✅ ' + data.message, 'success', 8000);
+            // 延迟刷新页面以让用户看到成功消息
+            setTimeout(() => {
+                window.location.reload();
+            }, 2000);
+        } else {
+            showCacheStatusMessage('❌ 重新生成失败: ' + (data.message || '未知错误'), 'error', 10000);
+        }
+    })
+    .catch(error => {
+        console.error('Fetch error:', error);
+        showCacheStatusMessage('❌ 网络错误，请重试: ' + error.message, 'error', 10000);
+    })
+    .finally(() => {
+        // 恢复按钮状态
+        cacheText.classList.remove('d-none');
+        cacheLoading.classList.add('d-none');
+        button.disabled = false;
+    });
+}
+
+// 显示仓库对比弹窗
+function showRepositoryCompareModal() {
+    const modal = new bootstrap.Modal(document.getElementById('repositoryCompareModal'));
+    modal.show();
+}
+
+// 时间范围选择切换
+document.addEventListener('change', function(event) {
+    if (event.target.name === 'timeRange') {
+        const customTimeRange = document.getElementById('customTimeRange');
+        if (event.target.value === 'custom') {
+            customTimeRange.style.display = 'block';
+            // 设置默认时间
+            const now = new Date();
+            const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+            document.getElementById('startTime').value = oneWeekAgo.toISOString().slice(0, 16);
+            document.getElementById('endTime').value = now.toISOString().slice(0, 16);
+        } else {
+            customTimeRange.style.display = 'none';
+        }
+    }
+});
+
+// 执行仓库对比
+function executeRepositoryCompare() {
+    const form = document.getElementById('repositoryCompareForm');
+    const formData = new FormData(form);
+    
+    const sourceRepo = formData.get('source_repository');
+    const targetRepo = formData.get('target_repository');
+    
+    if (!sourceRepo || !targetRepo) {
+        alert('请选择要对比的仓库');
+        return;
+    }
+    
+    if (sourceRepo === targetRepo) {
+        alert('请选择不同的仓库进行对比');
+        return;
+    }
+    
+    const timeRange = formData.get('timeRange');
+    let startTime, endTime;
+    
+    if (timeRange === 'week') {
+        const now = new Date();
+        const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        startTime = oneWeekAgo.toISOString();
+        endTime = now.toISOString();
+    } else {
+        startTime = new Date(formData.get('start_time')).toISOString();
+        endTime = new Date(formData.get('end_time')).toISOString();
+    }
+    
+    const intervalMinutes = formData.get('interval_minutes');
+    
+    // 构建对比URL
+    const compareUrl = `/repositories/compare?source=${sourceRepo}&target=${targetRepo}&start_time=${encodeURIComponent(startTime)}&end_time=${encodeURIComponent(endTime)}&interval=${intervalMinutes}`;
+    
+    // 关闭弹窗并打开对比页面
+    const modal = bootstrap.Modal.getInstance(document.getElementById('repositoryCompareModal'));
+    modal.hide();
+    
+    window.open(compareUrl, '_blank');
+}
+
+// 状态下拉菜单功能
+function toggleStatusDropdown(event) {
+    if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+    
+    const button = document.getElementById('statusDropdownButton');
+    let menu = document.getElementById('statusDropdownMenu');
+    
+    if (!button) {
+        console.error('找不到下拉按钮元素！');
+        return;
+    }
+    
+    // 检查菜单是否已经存在于body中
+    let bodyMenu = document.getElementById('statusDropdownMenuPortal');
+    const isVisible = bodyMenu && bodyMenu.style.display === 'block';
+    
+    if (!isVisible) {
+        // 如果菜单存在于body中，先移除
+        if (bodyMenu) {
+            bodyMenu.remove();
+        }
+        
+        // 获取按钮位置
+        const buttonRect = button.getBoundingClientRect();
+        
+        // 克隆原始菜单到body
+        if (menu) {
+            bodyMenu = menu.cloneNode(true);
+            bodyMenu.id = 'statusDropdownMenuPortal';
+            
+            // 设置样式
+            Object.assign(bodyMenu.style, {
+                display: 'block',
+                position: 'fixed',
+                zIndex: '99999',
+                top: (buttonRect.bottom + 2) + 'px',
+                left: buttonRect.left + 'px',
+                minWidth: '280px',
+                width: 'auto',
+                height: 'auto',
+                maxHeight: 'none',
+                overflow: 'visible',
+                backgroundColor: 'white',
+                border: '1px solid #d0d7de',
+                borderRadius: '6px',
+                boxShadow: '0 8px 24px rgba(0, 0, 0, 0.12)',
+                padding: '8px 0'
+            });
+            
+            // 添加滚动事件监听器来更新弹窗位置
+            const updateStatusMenuPosition = () => {
+                const currentBtnRect = button.getBoundingClientRect();
+                const currentMenuTop = currentBtnRect.bottom + 2;
+                const currentMenuLeft = currentBtnRect.left;
+                
+                bodyMenu.style.top = currentMenuTop + 'px';
+                bodyMenu.style.left = currentMenuLeft + 'px';
+            };
+            
+            // 监听滚动事件
+            window.addEventListener('scroll', updateStatusMenuPosition, { passive: true });
+            
+            // 存储清理函数
+            bodyMenu._cleanup = () => {
+                window.removeEventListener('scroll', updateStatusMenuPosition);
+            };
+            
+            // 移除可能限制的CSS类
+            bodyMenu.classList.remove('dropdown-menu', 'custom-dropdown');
+            bodyMenu.classList.add('show');
+            
+            // 添加到body
+            document.body.appendChild(bodyMenu);
+            
+            // 重新绑定事件监听器
+            const checkboxes = bodyMenu.querySelectorAll('.status-checkbox');
+            checkboxes.forEach(checkbox => {
+                checkbox.addEventListener('change', function() {
+                    // 同步到原始菜单
+                    const originalCheckbox = document.querySelector(`#statusDropdownMenu input[value="${checkbox.value}"]`);
+                    if (originalCheckbox) {
+                        originalCheckbox.checked = checkbox.checked;
+                    }
+                    updateStatusText();
+                });
+            });
+            
+            // 绑定应用按钮事件
+            const applyBtn = bodyMenu.querySelector('#applyStatusBtn');
+            if (applyBtn) {
+                applyBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    
+                    // 先更新原始菜单的复选框状态
+                    const portalCheckboxes = bodyMenu.querySelectorAll('.status-checkbox');
+                    portalCheckboxes.forEach(checkbox => {
+                        const originalCheckbox = document.querySelector(`#statusDropdownMenu input[value="${checkbox.value}"]`);
+                        if (originalCheckbox) {
+                            originalCheckbox.checked = checkbox.checked;
+                        }
+                    });
+                    
+                    // 更新显示文本和隐藏字段
+                    updateStatusText();
+                    
+                    // 立即提交表单进行筛选
+                    const form = document.getElementById('filterForm');
+                    if (form) {
+                        console.log('应用筛选并提交表单');
+                        console.log('表单数据:', new FormData(form));
+                        
+                        // 检查隐藏字段是否正确设置
+                        const hiddenInputs = document.querySelectorAll('#statusHiddenInputs input');
+                        console.log('隐藏字段数量:', hiddenInputs.length);
+                        hiddenInputs.forEach(input => {
+                            console.log('隐藏字段值:', input.name, input.value);
+                        });
+                        
+                        form.submit();
+                    } else {
+                        console.error('找不到筛选表单 #filterForm');
+                        // 尝试查找其他可能的表单
+                        const allForms = document.querySelectorAll('form');
+                        console.log('页面中的所有表单:', allForms);
+                        if (allForms.length > 0) {
+                            console.log('使用第一个表单提交');
+                            allForms[0].submit();
+                        }
+                    }
+                    
+                    // 关闭下拉菜单
+                    bodyMenu.remove();
+                    const statusBtn = document.getElementById('statusDropdownButton');
+                    if (statusBtn) {
+                        statusBtn.setAttribute('aria-expanded', 'false');
+                    }
+                });
+            }
+            
+            // 绑定清空按钮事件
+            const clearBtn = bodyMenu.querySelector('#clearStatusBtn');
+            if (clearBtn) {
+                clearBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    
+                    // 清空Portal菜单中的复选框
+                    const portalCheckboxes = bodyMenu.querySelectorAll('.status-checkbox');
+                    portalCheckboxes.forEach(checkbox => {
+                        checkbox.checked = false;
+                    });
+                    
+                    // 同步到原始菜单
+                    const originalCheckboxes = document.querySelectorAll('#statusDropdownMenu .status-checkbox');
+                    originalCheckboxes.forEach(checkbox => {
+                        checkbox.checked = false;
+                    });
+                    
+                    // 更新显示文本和隐藏字段
+                    updateStatusText();
+                    
+                    console.log('清空状态选择，保持菜单打开');
+                    // 不关闭下拉菜单，让用户继续选择
+                });
+            }
+            
+            // 防止点击菜单内容时关闭
+            bodyMenu.addEventListener('click', function(e) {
+                e.stopPropagation();
+            });
+            
+            console.log('菜单已添加到body，位置:', bodyMenu.getBoundingClientRect());
+            
+            // 检查边界并调整位置
+            requestAnimationFrame(() => {
+                const menuRect = bodyMenu.getBoundingClientRect();
+                const viewportHeight = window.innerHeight;
+                const viewportWidth = window.innerWidth;
+                
+                console.log('菜单实际尺寸:', menuRect);
+                
+                // 如果菜单超出视口底部，向上显示
+                if (menuRect.bottom > viewportHeight - 20) {
+                    const newTop = buttonRect.top - menuRect.height - 2;
+                    bodyMenu.style.top = Math.max(10, newTop) + 'px';
+                    console.log('调整为向上显示');
+                }
+                
+                // 如果菜单超出视口右侧，向左调整
+                if (menuRect.right > viewportWidth - 20) {
+                    const newLeft = buttonRect.right - menuRect.width;
+                    bodyMenu.style.left = Math.max(10, newLeft) + 'px';
+                    console.log('调整为向左对齐');
+                }
+            });
+        }
+        
+        button.setAttribute('aria-expanded', 'true');
+        
+    } else {
+        // 隐藏并移除菜单
+        if (bodyMenu) {
+            // 清理滚动事件监听器
+            if (bodyMenu._cleanup) {
+                bodyMenu._cleanup();
+            }
+            bodyMenu.remove();
+        }
+        button.setAttribute('aria-expanded', 'false');
+    }
+}
+
+// 更新状态文本的函数
+function updateStatusText() {
+    const checkedBoxes = document.querySelectorAll('#statusDropdownMenu .status-checkbox:checked');
+    const statusDropdownText = document.getElementById('statusDropdownText');
+    const statusHiddenInputs = document.getElementById('statusHiddenInputs');
+    
+    if (checkedBoxes.length === 0) {
+        statusDropdownText.textContent = '选择状态';
+    } else if (checkedBoxes.length === 1) {
+        const labels = {
+            'pending': '待确认',
+            'confirmed': '已确认',
+            'rejected': '已拒绝'
+        };
+        statusDropdownText.textContent = labels[checkedBoxes[0].value];
+    } else {
+        statusDropdownText.textContent = `已选择 ${checkedBoxes.length} 项`;
+    }
+    
+    // 更新隐藏输入字段
+    statusHiddenInputs.innerHTML = '';
+    checkedBoxes.forEach(checkbox => {
+        const hiddenInput = document.createElement('input');
+        hiddenInput.type = 'hidden';
+        hiddenInput.name = 'status';
+        hiddenInput.value = checkbox.value;
+        statusHiddenInputs.appendChild(hiddenInput);
+    });
+}
+
+
+// 应用状态筛选
+function applyStatusFilter() {
+    // 获取原始菜单中的复选框状态（已经通过事件同步更新）
+    const checkboxes = document.querySelectorAll('#statusDropdownMenu .status-checkbox:checked');
+    const selectedStatuses = Array.from(checkboxes).map(cb => cb.value);
+    
+    console.log('应用状态筛选，选中的状态:', selectedStatuses);
+    
+    // 更新按钮文本
+    updateStatusText();
+    
+    // 提交表单进行筛选
+    const form = document.getElementById('filterForm');
+    if (form) {
+        console.log('提交筛选表单');
+        form.submit();
+    } else {
+        console.error('找不到筛选表单');
+    }
+}
+
+// 清空状态筛选
+function clearStatusFilter() {
+    // 清空原始菜单中的复选框
+    const checkboxes = document.querySelectorAll('#statusDropdownMenu .status-checkbox');
+    checkboxes.forEach(cb => cb.checked = false);
+    
+    console.log('清空状态筛选');
+    
+    // 更新按钮文本
+    updateStatusText();
+    
+    // 提交表单进行筛选
+    const form = document.getElementById('filterForm');
+    if (form) {
+        console.log('提交筛选表单');
+        form.submit();
+    } else {
+        console.error('找不到筛选表单');
+    }
+}
+
+// 切换高级筛选显示/隐藏
+function toggleAdvancedFilters() {
+    const advancedFilters = document.getElementById('advancedFilters');
+    const button = event.target.closest('button');
+    const icon = button.querySelector('i');
+    
+    if (advancedFilters.style.display === 'none' || advancedFilters.style.display === '') {
+        advancedFilters.style.display = 'block';
+        button.innerHTML = '<i class="bi bi-sliders me-2"></i>收起高级筛选';
+        icon.className = 'bi bi-chevron-up me-2';
+    } else {
+        advancedFilters.style.display = 'none';
+        button.innerHTML = '<i class="bi bi-sliders me-2"></i>高级筛选';
+        icon.className = 'bi bi-sliders me-2';
+    }
+}
+
+// 下拉菜单控制
+function initDropdownMenus() {
+    // 查找所有下拉按钮
+    const dropdownBtns = document.querySelectorAll('.dropdown-btn');
+
+    if (dropdownBtns.length === 0) {
+        console.warn('未找到下拉按钮');
+        return;
+    }
+    
+    // 为每个按钮添加事件
+    dropdownBtns.forEach(function(btn, index) {
+        // 移除可能存在的旧事件监听器
+        btn.removeEventListener('click', handleDropdownClick);
+
+        // 添加新的事件监听器
+        btn.addEventListener('click', handleDropdownClick);
+    });
+
+    console.log('✅ 已为', dropdownBtns.length, '个下拉按钮绑定事件监听器');
+
+    // 检查批量操作按钮是否存在
+    const batchOps = document.getElementById('batchOperations');
+    console.log('批量操作按钮容器:', batchOps ? '存在' : '不存在');
+
+    // 检查复选框事件绑定
+    const checkboxes = document.querySelectorAll('.commit-checkbox');
+    console.log('找到复选框数量:', checkboxes.length);
+
+    // 全局点击事件
+    document.removeEventListener('click', handleGlobalClick);
+    document.addEventListener('click', handleGlobalClick);
+    console.log('✅ 全局点击事件已绑定');
+}
+
+function handleDropdownClick(e) {
+    console.log('=== 下拉按钮点击事件触发 ===');
+    console.log('点击的元素:', this);
+    console.log('事件对象:', e);
+    
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const commitId = this.getAttribute('data-commit-id');
+    console.log('提交ID:', commitId);
+    
+    const dropdown = document.getElementById('dropdown-' + commitId);
+    console.log('查找下拉菜单 ID:', 'dropdown-' + commitId);
+    console.log('找到的下拉菜单:', dropdown);
+    
+    if (!dropdown) {
+        console.error('❌ 找不到下拉菜单元素!');
+        console.log('页面中所有dropdown-menu:', document.querySelectorAll('.dropdown-menu'));
+        return;
+    }
+    
+    // 关闭其他菜单
+    const allMenus = document.querySelectorAll('td .dropdown-menu');
+    console.log('关闭其他菜单，总数:', allMenus.length);
+    allMenus.forEach(function(menu) {
+        if (menu !== dropdown) {
+            menu.classList.remove('show');
+        }
+    });
+    
+    // 计算位置
+    const btnRect = this.getBoundingClientRect();
+    console.log('按钮位置:', btnRect);
+    
+    const viewportHeight = window.innerHeight;
+    const menuHeight = 150;
+    
+    let topPosition = btnRect.bottom + window.scrollY;
+    if (btnRect.bottom + menuHeight > viewportHeight) {
+        topPosition = btnRect.top + window.scrollY - menuHeight;
+    }
+    
+    dropdown.style.top = topPosition + 'px';
+    dropdown.style.left = (btnRect.right - 180 + window.scrollX) + 'px';
+    dropdown.style.zIndex = '99999';
+    
+    console.log('设置菜单位置:', {
+        top: dropdown.style.top,
+        left: dropdown.style.left,
+        zIndex: dropdown.style.zIndex
+    });
+    
+    // 强制隐藏原始菜单
+    dropdown.style.display = 'none';
+    dropdown.classList.remove('show');
+    
+    // 检查是否已有portal菜单显示
+    const existingPortal = document.getElementById(dropdown.id + '-portal');
+    const isVisible = !existingPortal;
+    console.log('菜单显示状态:', isVisible);
+    
+    if (isVisible) {
+        // 创建简化的菜单副本
+        const menuClone = document.createElement('div');
+        menuClone.id = dropdown.id + '-portal';
+        menuClone.className = 'dropdown-menu-portal';
+        
+        // 复制菜单内容
+        menuClone.innerHTML = dropdown.innerHTML;
+        
+        // 设置基本样式
+        menuClone.style.cssText = `
+            position: fixed;
+            z-index: 99999;
+            display: block;
+            visibility: visible;
+            opacity: 1;
+            pointer-events: auto;
+            width: 180px;
+            background-color: #fff;
+            border: 1px solid #dee2e6;
+            border-radius: 0.375rem;
+            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+            padding: 0.5rem 0;
+            font-size: 0.875rem;
+            line-height: 1.5;
+        `;
+        
+        // 为菜单项添加样式
+        const menuItems = menuClone.querySelectorAll('a');
+        menuItems.forEach(item => {
+            item.style.cssText = `
+                display: block;
+                padding: 0.25rem 1rem;
+                color: #212529;
+                text-decoration: none;
+                background-color: transparent;
+                border: 0;
+                white-space: nowrap;
+            `;
+            
+            // 添加悬停效果
+            item.addEventListener('mouseenter', function() {
+                this.style.backgroundColor = '#e9ecef';
+                this.style.color = '#16181b';
+            });
+            
+            item.addEventListener('mouseleave', function() {
+                this.style.backgroundColor = 'transparent';
+                this.style.color = '#212529';
+            });
+        });
+        
+        // 移除旧的portal菜单
+        const existingPortal = document.getElementById(menuClone.id);
+        if (existingPortal) {
+            document.body.removeChild(existingPortal);
+        }
+        
+        document.body.appendChild(menuClone);
+        
+        // 计算初始位置
+        const btnRect = this.getBoundingClientRect();
+        const menuTop = btnRect.bottom + 2;
+        const menuLeft = Math.max(10, btnRect.right - 180);
+        
+        menuClone.style.top = menuTop + 'px';
+        menuClone.style.left = menuLeft + 'px';
+        
+        // 添加滚动事件监听器来更新弹窗位置
+        const updateMenuPosition = () => {
+            const currentBtnRect = this.getBoundingClientRect();
+            const currentMenuTop = currentBtnRect.bottom + 2;
+            const currentMenuLeft = Math.max(10, currentBtnRect.right - 180);
+            
+            menuClone.style.top = currentMenuTop + 'px';
+            menuClone.style.left = currentMenuLeft + 'px';
+        };
+        
+        // 监听滚动事件
+        window.addEventListener('scroll', updateMenuPosition, { passive: true });
+        
+        // 存储清理函数
+        menuClone._cleanup = () => {
+            window.removeEventListener('scroll', updateMenuPosition);
+        };
+        
+        // 隐藏原菜单
+        dropdown.style.display = 'none';
+    } else {
+        // 移除portal菜单
+        const existingPortal = document.getElementById(dropdown.id + '-portal');
+        if (existingPortal) {
+            // 清理滚动事件监听器
+            if (existingPortal._cleanup) {
+                existingPortal._cleanup();
+            }
+            document.body.removeChild(existingPortal);
+        }
+    }
+}
+
+function handleGlobalClick(e) {
+    console.log('全局点击事件:', e.target);
+
+    // 检查是否点击了同步按钮或模态框内容，如果是则不处理
+    if (e.target.closest('#syncButton') ||
+        e.target.closest('#syncOptionsModal') ||
+        e.target.closest('.modal-content')) {
+        console.log('点击了同步按钮或模态框，跳过全局处理');
+        return;
+    }
+
+    // 处理操作按钮点击 - 移到这里确保优先处理
+    if (e.target.classList.contains('approve-btn') || e.target.classList.contains('reviewed-btn')) {
+        console.log('点击了操作按钮:', e.target);
+        const commitId = e.target.getAttribute('data-commit-id');
+        const status = e.target.getAttribute('data-status');
+        console.log('提交ID:', commitId, '状态:', status);
+        if (commitId && status) {
+            updateCommitStatus(commitId, status);
+        }
+        return;
+    }
+
+    // 处理下拉菜单中的状态链接点击
+    if (e.target.classList.contains('status-link')) {
+        console.log('点击了状态链接:', e.target);
+        e.preventDefault();
+        const commitId = e.target.getAttribute('data-commit-id');
+        const status = e.target.getAttribute('data-status');
+        console.log('提交ID:', commitId, '状态:', status);
+        if (commitId && status) {
+            updateCommitStatus(commitId, status);
+        }
+        return;
+    }
+
+    if (!e.target.closest('.dropdown')) {
+        // 关闭原始菜单
+        const menus = document.querySelectorAll('td .dropdown-menu.show');
+        console.log('关闭显示中的菜单数量:', menus.length);
+        menus.forEach(function(menu) {
+            menu.classList.remove('show');
+        });
+
+        // 关闭portal菜单
+        const portalMenus = document.querySelectorAll('[id$="-portal"]');
+        console.log('关闭portal菜单数量:', portalMenus.length);
+        portalMenus.forEach(function(menu) {
+            if (menu.parentNode === document.body) {
+                document.body.removeChild(menu);
+            }
+        });
+    }
+}
+
+// 多种方式确保初始化
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initDropdownMenus);
+} else {
+    initDropdownMenus();
+}
+
+// 备用初始化
+setTimeout(function() {
+    const btns = document.querySelectorAll('.dropdown-btn');
+    if (btns.length > 0) {
+        initDropdownMenus();
+    }
+}, 1000);
+
+</script>
+{% endblock %}

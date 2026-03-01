@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+
+{% block title %}仓库对比结果{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <!-- 对比信息 -->
+    <div class="mb-4">
+        <h4>仓库间提交对比结果</h4>
+        <div class="row">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-title">外放分支仓库</h6>
+                        <p class="card-text">{{ source_repo.name }}_{{ source_repo.type }}</p>
+                        <small class="text-muted">文件数: {{ comparison_result.source_files_count }}</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-title">主分支仓库</h6>
+                        <p class="card-text">{{ target_repo.name }}_{{ target_repo.type }}</p>
+                        <small class="text-muted">文件数: {{ comparison_result.target_files_count }}</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 对比参数 -->
+    <div class="card mb-4">
+        <div class="card-body">
+            <h6 class="card-title">对比参数</h6>
+            <div class="row">
+                <div class="col-md-3">
+                    <strong>开始时间:</strong> {{ start_time.strftime('%Y-%m-%d %H:%M') }}
+                </div>
+                <div class="col-md-3">
+                    <strong>结束时间:</strong> {{ end_time.strftime('%Y-%m-%d %H:%M') }}
+                </div>
+                <div class="col-md-3">
+                    <strong>时间间隔阈值:</strong> {{ interval_minutes }} 分钟
+                </div>
+                <div class="col-md-3">
+                    <strong>共同文件数:</strong> {{ comparison_result.common_files_count }}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 差异统计 -->
+    <div class="alert alert-info">
+        <h6><i class="fas fa-info-circle me-2"></i>对比结果统计</h6>
+        <p class="mb-0">发现 <strong>{{ comparison_result.total_differences }}</strong> 个差异项</p>
+    </div>
+
+    <!-- 差异详情 -->
+    {% if comparison_result.differences %}
+    <div class="card">
+        <div class="card-header">
+            <h6 class="mb-0">差异详情</h6>
+        </div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th width="5%">序号</th>
+                            <th width="15%">差异类型</th>
+                            <th width="30%">文件路径</th>
+                            <th width="20%">{{ source_repo.name }}信息</th>
+                            <th width="20%">{{ target_repo.name }}信息</th>
+                            <th width="10%">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for diff in comparison_result.differences %}
+                        <tr>
+                            <td>{{ loop.index }}</td>
+                            <td>
+                                {% if diff.type == 'source_only' %}
+                                    <span class="badge bg-warning">仅源仓库</span>
+                                {% elif diff.type == 'target_only' %}
+                                    <span class="badge bg-info">仅目标仓库</span>
+                                {% elif diff.type == 'source_newer' %}
+                                    <span class="badge bg-success">源仓库更新</span>
+                                {% elif diff.type == 'target_newer' %}
+                                    <span class="badge bg-primary">目标仓库更新</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <code>{{ diff.file_path }}</code>
+                            </td>
+                            <td>
+                                {% if diff.type == 'source_only' %}
+                                    {% set latest_commit = diff.source_commits[0] %}
+                                    <div>
+                                        <small class="text-muted">版本:</small> {{ latest_commit.version }}<br>
+                                        <small class="text-muted">时间:</small> {{ latest_commit.commit_time.strftime('%m-%d %H:%M') }}<br>
+                                        <small class="text-muted">作者:</small> {{ latest_commit.author }}
+                                    </div>
+                                {% elif diff.type in ['source_newer', 'target_newer'] %}
+                                    <div>
+                                        <small class="text-muted">版本:</small> {{ diff.source_commit.version }}<br>
+                                        <small class="text-muted">时间:</small> {{ diff.source_commit.commit_time.strftime('%m-%d %H:%M') }}<br>
+                                        <small class="text-muted">作者:</small> {{ diff.source_commit.author }}
+                                    </div>
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if diff.type == 'target_only' %}
+                                    {% set latest_commit = diff.target_commits[0] %}
+                                    <div>
+                                        <small class="text-muted">版本:</small> {{ latest_commit.version }}<br>
+                                        <small class="text-muted">时间:</small> {{ latest_commit.commit_time.strftime('%m-%d %H:%M') }}<br>
+                                        <small class="text-muted">作者:</small> {{ latest_commit.author }}
+                                    </div>
+                                {% elif diff.type in ['source_newer', 'target_newer'] %}
+                                    <div>
+                                        <small class="text-muted">版本:</small> {{ diff.target_commit.version }}<br>
+                                        <small class="text-muted">时间:</small> {{ diff.target_commit.commit_time.strftime('%m-%d %H:%M') }}<br>
+                                        <small class="text-muted">作者:</small> {{ diff.target_commit.author }}
+                                        {% if diff.time_diff_minutes %}
+                                        <br><small class="text-warning">相差 {{ diff.time_diff_minutes }} 分钟</small>
+                                        {% endif %}
+                                    </div>
+                                {% else %}
+                                    <span class="text-muted">-</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if diff.type == 'source_only' %}
+                                    <a href="{{ generate_commit_diff_url(diff.source_commits[0]) }}" class="btn btn-sm btn-outline-primary" target="_blank">查看详情</a>
+                                {% elif diff.type == 'target_only' %}
+                                    <a href="{{ generate_commit_diff_url(diff.target_commits[0]) }}" class="btn btn-sm btn-outline-primary" target="_blank">查看详情</a>
+                                {% elif diff.type in ['source_newer', 'target_newer'] %}
+                                    <div class="btn-group-vertical" role="group">
+                                        <a href="{{ generate_commit_diff_url(diff.source_commit) }}" class="btn btn-sm btn-outline-success" target="_blank">源仓库</a>
+                                        <a href="{{ generate_commit_diff_url(diff.target_commit) }}" class="btn btn-sm btn-outline-info" target="_blank">目标仓库</a>
+                                    </div>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="alert alert-success">
+        <h6><i class="fas fa-check-circle me-2"></i>对比完成</h6>
+        <p class="mb-0">在指定的时间范围和间隔阈值内，两个仓库没有发现差异。</p>
+    </div>
+    {% endif %}
+
+    <!-- 操作按钮 -->
+    <div class="mt-4 text-center">
+        <button class="btn btn-secondary" onclick="window.close()">关闭窗口</button>
+        <button class="btn btn-primary" onclick="window.print()">打印报告</button>
+    </div>
+</div>
+
+<style>
+.card {
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.table th {
+    background-color: #f8f9fa;
+    font-weight: 600;
+}
+
+.badge {
+    font-size: 0.75em;
+}
+
+code {
+    background-color: #f8f9fa;
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-size: 0.9em;
+}
+
+@media print {
+    .btn, .card-header {
+        display: none !important;
+    }
+    
+    .card {
+        border: 1px solid #000 !important;
+        box-shadow: none !important;
+    }
+}
+</style>
+{% endblock %}

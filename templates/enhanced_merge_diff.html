@@ -1,0 +1,731 @@
+{% extends "base.html" %}
+
+{% block title %}增强合并diff显示{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.0">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-diff-new.css') }}?v=2.0">
+<script src="{{ url_for('static', filename='js/diff-handlers.js') }}?v=2.2"></script>
+<style>
+/* 增强合并diff样式 */
+.merge-diff-container {
+    margin: 20px 0;
+}
+
+/* 情况1: 多文件diff样式 */
+.multiple-files-container .file-section {
+    margin-bottom: 3rem;
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.multiple-files-container .file-section:not(:last-child) {
+    border-bottom: 3px solid #007bff;
+}
+
+.file-header {
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid #dee2e6;
+}
+
+.file-header h4 {
+    margin: 0;
+    color: #495057;
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.file-header .commit-info {
+    font-size: 0.9rem;
+    color: #6c757d;
+    margin-top: 0.5rem;
+}
+
+/* 情况3: 分段diff样式 */
+.segmented-diff-container .segment {
+    margin-bottom: 2rem;
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.segment-header {
+    background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%);
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #ffc107;
+}
+
+.segment-header h5 {
+    margin: 0;
+    color: #856404;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.segment-info {
+    font-size: 0.85rem;
+    color: #6c757d;
+    margin-top: 0.25rem;
+}
+
+/* 通用diff内容样式 */
+.diff-content {
+    background: #fff;
+}
+
+/* Excel diff容器增强 */
+.excel-diff-container {
+    min-height: 200px;
+}
+
+/* 加载状态 */
+.loading-state {
+    text-align: center;
+    padding: 2rem;
+    color: #6c757d;
+}
+
+.loading-spinner {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 3px solid #f3f3f3;
+    border-top: 3px solid #007bff;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-right: 10px;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* 错误状态 */
+.error-state {
+    text-align: center;
+    padding: 2rem;
+    color: #dc3545;
+    background: #f8d7da;
+    border: 1px solid #f5c6cb;
+    border-radius: 4px;
+    margin: 1rem 0;
+}
+
+/* 提交信息样式保持不变 */
+.commit-info-table {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.commit-info-table th {
+    background-color: #f8f9fa;
+    border-bottom: 2px solid #dee2e6;
+    padding: 12px 8px;
+    vertical-align: middle;
+    color: #495057;
+}
+
+.commit-row {
+    transition: background-color 0.2s ease;
+}
+
+.commit-row:hover {
+    background-color: #f8f9fa;
+}
+
+.commit-row td {
+    padding: 12px 8px;
+    vertical-align: middle;
+    border-bottom: 1px solid #dee2e6;
+}
+
+.commit-id {
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    font-size: 0.875rem;
+    background-color: #f1f3f4;
+    padding: 2px 6px;
+    border-radius: 3px;
+    color: #495057;
+}
+
+.status-pending {
+    background-color: #ffc107 !important;
+    color: #000 !important;
+}
+
+.status-reviewed {
+    background-color: #17a2b8 !important;
+    color: #fff !important;
+}
+
+.status-confirmed {
+    background-color: #28a745 !important;
+    color: #fff !important;
+}
+
+.status-rejected {
+    background-color: #dc3545 !important;
+    color: #fff !important;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-12">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h2>合并diff显示</h2>
+                <div>
+                    <button id="refreshMergeDiffBtn" class="btn btn-warning me-2" onclick="refreshMergeDiff()">
+                        <i class="fas fa-sync-alt"></i> 重新计算
+                    </button>
+                    <a href="{{ url_for('commit_list', repository_id=repository.id) }}" class="btn btn-secondary">
+                        <i class="fas fa-arrow-left"></i> 返回提交列表
+                    </a>
+                </div>
+            </div>
+
+            <!-- 提交信息表格 -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-code-branch"></i> 
+                        合并的提交信息 ({{ commits|length }}个提交)
+                        <button type="button" class="btn btn-success btn-sm ms-3" onclick="batchApprove()">
+                            <i class="fas fa-check"></i> 批量通过
+                        </button>
+                    </h5>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0 commit-info-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 40px;">
+                                        <input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)">
+                                    </th>
+                                    <th style="width: 120px;">提交ID</th>
+                                    <th style="width: 200px;">文件名</th>
+                                    <th>提交信息</th>
+                                    <th style="width: 120px;">作者</th>
+                                    <th style="width: 150px;">时间</th>
+                                    <th style="width: 100px;">状态</th>
+                                    <th style="width: 150px;">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for commit in commits %}
+                                <tr class="commit-row" data-commit-id="{{ commit.commit_id }}">
+                                    <td>
+                                        <input type="checkbox" class="commit-checkbox" value="{{ commit.commit_id }}">
+                                    </td>
+                                    <td>
+                                        <span class="commit-id">{{ commit.commit_id[:8] }}</span>
+                                    </td>
+                                    <td>
+                                        <span class="filename-text">{{ commit.path.split('/')[-1] }}</span>
+                                    </td>
+                                    <td>
+                                        <div class="commit-message">{{ commit.message or '无提交信息' }}</div>
+                                    </td>
+                                    <td>
+                                        <span class="author-text">{{ commit.author or '未知' }}</span>
+                                    </td>
+                                    <td>
+                                        <span class="time-text">{{ commit.commit_time.strftime('%m-%d %H:%M') if commit.commit_time else '未知时间' }}</span>
+                                    </td>
+                                    <td>
+                                        <span class="badge status-{{ commit.status or 'pending' }} fs-6">
+                                            {% if commit.status == 'confirmed' %}已确认
+                                            {% elif commit.status == 'reviewed' %}已审核
+                                            {% elif commit.status == 'rejected' %}已拒绝
+                                            {% else %}待处理{% endif %}
+                                        </span>
+                                    </td>
+                                    <td>
+                                        {% if commit.status != 'confirmed' %}
+                                        <button class="btn btn-success btn-sm me-1" onclick="approveCommit('{{ commit.commit_id }}')">
+                                            <i class="fas fa-check"></i> 通过
+                                        </button>
+                                        {% endif %}
+                                        {% if commit.status != 'rejected' %}
+                                        <button class="btn btn-danger btn-sm" onclick="rejectCommit('{{ commit.commit_id }}')">
+                                            <i class="fas fa-times"></i> 拒绝
+                                        </button>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- diff内容显示区域 -->
+            <div class="merge-diff-container">
+                {% if merged_diff_data %}
+                    {% if merged_diff_data.type == 'multiple_files' %}
+                        <!-- 情况1&4: 多文件diff显示（包括混合情况） -->
+                        <div class="multiple-files-container">
+                            <div class="alert alert-info">
+                                <i class="fas fa-info-circle"></i> 
+                                检测到多文件的合并diff，共{{ merged_diff_data.total_files }}个文件，{{ merged_diff_data.total_sections }}个diff段。
+                                {% if merged_diff_data.total_sections > merged_diff_data.total_files %}
+                                包含连续提交合并和分段显示的混合情况。
+                                {% else %}
+                                分别显示每个文件的差异。
+                                {% endif %}
+                            </div>
+                            
+                            {% for section in merged_diff_data.sections %}
+                            <div class="file-section">
+                                <div class="file-header">
+                                    <h4><i class="fas fa-file"></i> {{ section.file_path }}</h4>
+                                    <div class="commit-info">
+                                        <span class="badge bg-secondary me-2">{{ section.diff_type }}</span>
+                                        {{ section.description }}
+                                        <br>
+                                        <small class="text-muted">
+                                            涉及提交: 
+                                            {% for commit in section.commits %}
+                                                <span class="commit-id">{{ commit.id[:8] }}</span>
+                                                {% if not loop.last %}, {% endif %}
+                                            {% endfor %}
+                                        </small>
+                                    </div>
+                                </div>
+                                <div class="diff-content">
+                                    {% if section.diff_data.type == 'excel' %}
+                                        <div class="excel-diff-container" id="excel-diff-container-file-{{ loop.index }}">
+                                            <div class="loading-state">
+                                                <div class="loading-spinner"></div>
+                                                正在加载Excel差异数据...
+                                            </div>
+                                        </div>
+                                        <script type="application/json" id="diff-data-file-{{ loop.index }}">{{ section.diff_data|tojson|safe }}</script>
+                                        <script>
+                                        document.addEventListener('DOMContentLoaded', function() {
+                                            console.log('Excel diff script executing for file section {{ loop.index }}');
+                                            const dataScript = document.getElementById('diff-data-file-{{ loop.index }}');
+                                            if (!dataScript) {
+                                                console.error('Data script not found: diff-data-file-{{ loop.index }}');
+                                                return;
+                                            }
+                                            try {
+                                                const diffData = JSON.parse(dataScript.textContent);
+                                                console.log('Parsed diff data for file {{ loop.index }}:', diffData);
+                                                showExcelSheetInContainer(diffData, 'excel-diff-container-file-{{ loop.index }}');
+                                            } catch (error) {
+                                                console.error('Error parsing diff data for file {{ loop.index }}:', error);
+                                            }
+                                        });
+                                        </script>
+                                    {% else %}
+                                        <!-- 文本文件diff显示 -->
+                                        <div class="diff-viewer">
+                                            {% if section.diff_data.hunks %}
+                                                {% for hunk in section.diff_data.hunks %}
+                                                <div class="diff-hunk">
+                                                    <div class="diff-hunk-header">{{ hunk.header }}</div>
+                                                    {% for line in hunk.lines %}
+                                                    <div class="diff-line diff-line-{{ line.type }}">
+                                                        <span class="line-number">{{ line.old_line_number or '' }}</span>
+                                                        <span class="line-number">{{ line.new_line_number or '' }}</span>
+                                                        <span class="line-content">{{ line.content }}</span>
+                                                    </div>
+                                                    {% endfor %}
+                                                </div>
+                                                {% endfor %}
+                                            {% else %}
+                                                <div class="alert alert-warning">无差异数据</div>
+                                            {% endif %}
+                                        </div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        
+                    {% elif merged_diff_data.type == 'segmented_diff' %}
+                        <!-- 情况3: 分段diff显示 -->
+                        <div class="segmented-diff-container">
+                            <div class="alert alert-warning">
+                                <i class="fas fa-exclamation-triangle"></i> 
+                                检测到相同文件的非连续提交，分{{ merged_diff_data.total_segments }}段显示差异。
+                            </div>
+                            
+                            {% for segment in merged_diff_data.segments %}
+                            <div class="segment">
+                                <div class="segment-header">
+                                    <h5>
+                                        <i class="fas fa-code-branch"></i> 
+                                        差异段 {{ segment.segment_info.segment_index }}/{{ segment.segment_info.total_segments }}
+                                    </h5>
+                                    <div class="segment-info">
+                                        {{ segment.segment_info.current }} ← {{ segment.segment_info.previous }}
+                                        ({{ merged_diff_data.file_path }})
+                                    </div>
+                                </div>
+                                <div class="diff-content">
+                                    {% if segment.type == 'excel' %}
+                                        <div class="excel-diff-container" id="excel-segment-{{ loop.index }}">
+                                            <div class="loading-state">
+                                                <div class="loading-spinner"></div>
+                                                正在加载Excel差异数据...
+                                            </div>
+                                        </div>
+                                        <script type="application/json" id="segment-data-{{ loop.index }}">{{ segment|tojson|safe }}</script>
+                                        <script>
+                                        document.addEventListener('DOMContentLoaded', function() {
+                                            console.log('Excel segment script executing for segment {{ loop.index }}');
+                                            const dataScript = document.getElementById('segment-data-{{ loop.index }}');
+                                            if (!dataScript) {
+                                                console.error('Segment data script not found: segment-data-{{ loop.index }}');
+                                                return;
+                                            }
+                                            try {
+                                                const segmentData = JSON.parse(dataScript.textContent);
+                                                console.log('Parsed segment data for {{ loop.index }}:', segmentData);
+                                                showExcelSheetInContainer(segmentData, 'excel-segment-{{ loop.index }}');
+                                            } catch (error) {
+                                                console.error('Error parsing segment data for {{ loop.index }}:', error);
+                                            }
+                                        });
+                                        </script>
+                                    {% else %}
+                                        <!-- 文本文件diff显示 -->
+                                        <div class="diff-viewer">
+                                            {% if segment.hunks %}
+                                                {% for hunk in segment.hunks %}
+                                                <div class="diff-hunk">
+                                                    <div class="diff-hunk-header">{{ hunk.header }}</div>
+                                                    {% for line in hunk.lines %}
+                                                    <div class="diff-line diff-line-{{ line.type }}">
+                                                        <span class="line-number">{{ line.old_line_number or '' }}</span>
+                                                        <span class="line-number">{{ line.new_line_number or '' }}</span>
+                                                        <span class="line-content">{{ line.content }}</span>
+                                                    </div>
+                                                    {% endfor %}
+                                                </div>
+                                                {% endfor %}
+                                            {% else %}
+                                                <div class="alert alert-warning">无差异数据</div>
+                                            {% endif %}
+                                        </div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        
+                    {% else %}
+                        <!-- 情况2: 单个合并diff显示 (连续提交) -->
+                        <div class="single-merge-container">
+                            <div class="alert alert-success">
+                                <i class="fas fa-check-circle"></i> 
+                                检测到相同文件的连续提交，合并显示为单个差异。
+                                {% if merged_diff_data.commit_range %}
+                                    ({{ merged_diff_data.commit_range }})
+                                {% endif %}
+                            </div>
+                            
+                            <div class="card">
+                                <div class="card-header">
+                                    <h5><i class="fas fa-file"></i> {{ merged_diff_data.file_path or '文件差异' }}</h5>
+                                </div>
+                                <div class="card-body p-0">
+                                    {% if merged_diff_data.type == 'excel' %}
+                                        <div class="excel-diff-container" id="excel-merged">
+                                            <div class="loading-state">
+                                                <div class="loading-spinner"></div>
+                                                正在加载Excel差异数据...
+                                            </div>
+                                        </div>
+                                        <script type="application/json" id="merged-data">{{ merged_diff_data|tojson|safe }}</script>
+                                        <script>
+                                        document.addEventListener('DOMContentLoaded', function() {
+                                            const dataScript = document.getElementById('merged-data');
+                                            const mergedData = JSON.parse(dataScript.textContent);
+                                            showExcelSheetInContainer(mergedData, 'excel-merged');
+                                        });
+                                        </script>
+                                    {% else %}
+                                        <!-- 文本文件diff显示 -->
+                                        <div class="diff-viewer">
+                                            {% if merged_diff_data.hunks %}
+                                                {% for hunk in merged_diff_data.hunks %}
+                                                <div class="diff-hunk">
+                                                    <div class="diff-hunk-header">{{ hunk.header }}</div>
+                                                    {% for line in hunk.lines %}
+                                                    <div class="diff-line diff-line-{{ line.type }}">
+                                                        <span class="line-number">{{ line.old_line_number or '' }}</span>
+                                                        <span class="line-number">{{ line.new_line_number or '' }}</span>
+                                                        <span class="line-content">{{ line.content }}</span>
+                                                    </div>
+                                                    {% endfor %}
+                                                </div>
+                                                {% endfor %}
+                                            {% else %}
+                                                <div class="alert alert-warning">无差异数据</div>
+                                            {% endif %}
+                                        </div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    {% endif %}
+                {% else %}
+                    <!-- 无diff数据 -->
+                    <div class="error-state">
+                        <i class="fas fa-exclamation-circle"></i>
+                        无法获取合并diff数据，请检查提交信息或稍后重试。
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// 全选/取消全选功能
+function toggleSelectAll(checkbox) {
+    const checkboxes = document.querySelectorAll('.commit-checkbox');
+    checkboxes.forEach(cb => cb.checked = checkbox.checked);
+}
+
+// 批量通过功能
+function batchApprove() {
+    const selectedCommits = Array.from(document.querySelectorAll('.commit-checkbox:checked'))
+        .map(cb => cb.value);
+    
+    if (selectedCommits.length === 0) {
+        alert('请先选择要通过的提交');
+        return;
+    }
+    
+    if (!confirm(`确定要批量通过 ${selectedCommits.length} 个提交吗？`)) {
+        return;
+    }
+    
+    fetch('/commits/batch-approve', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            commit_ids: selectedCommits
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            // 更新UI状态
+            selectedCommits.forEach(commitId => {
+                const row = document.querySelector(`[data-commit-id="${commitId}"]`);
+                if (row) {
+                    const badge = row.querySelector('.badge[class*="status-"]');
+                    if (badge) {
+                        badge.className = 'badge status-confirmed fs-6';
+                        badge.textContent = '已确认';
+                    }
+                    
+                    // 隐藏通过按钮
+                    const approveBtn = row.querySelector('.btn-success');
+                    if (approveBtn && approveBtn.textContent.includes('通过')) {
+                        approveBtn.style.display = 'none';
+                    }
+                }
+            });
+            
+            // 取消所有选择
+            document.querySelectorAll('.commit-checkbox').forEach(cb => cb.checked = false);
+            document.getElementById('selectAll').checked = false;
+            
+            alert('批量通过成功！');
+        } else {
+            alert('批量通过失败：' + (data.message || '未知错误'));
+        }
+    })
+    .catch(error => {
+        console.error('批量通过请求失败:', error);
+        alert('批量通过失败，请稍后重试');
+    });
+}
+
+// 单个提交通过功能
+function approveCommit(commitId) {
+    if (!confirm('确定要通过此提交吗？')) {
+        return;
+    }
+    
+    fetch('/commits/batch-approve', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            commit_ids: [commitId]
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            const row = document.querySelector(`[data-commit-id="${commitId}"]`);
+            if (row) {
+                const badge = row.querySelector('.badge[class*="status-"]');
+                if (badge) {
+                    badge.className = 'badge status-confirmed fs-6';
+                    badge.textContent = '已确认';
+                }
+                
+                const approveBtn = row.querySelector('.btn-success');
+                if (approveBtn && approveBtn.textContent.includes('通过')) {
+                    approveBtn.style.display = 'none';
+                }
+            }
+            
+            alert('提交已通过！');
+        } else {
+            alert('操作失败：' + (data.message || '未知错误'));
+        }
+    })
+    .catch(error => {
+        console.error('通过提交请求失败:', error);
+        alert('操作失败，请稍后重试');
+    });
+}
+
+// 单个提交拒绝功能
+function rejectCommit(commitId) {
+    if (!confirm('确定要拒绝此提交吗？')) {
+        return;
+    }
+    
+    fetch('/commits/reject', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            commit_id: commitId
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            const row = document.querySelector(`[data-commit-id="${commitId}"]`);
+            if (row) {
+                const badge = row.querySelector('.badge[class*="status-"]');
+                if (badge) {
+                    badge.className = 'badge status-rejected fs-6';
+                    badge.textContent = '已拒绝';
+                }
+                
+                const rejectBtn = row.querySelector('.btn-danger');
+                if (rejectBtn && rejectBtn.textContent.includes('拒绝')) {
+                    rejectBtn.style.display = 'none';
+                }
+            }
+            
+            alert('提交已拒绝！');
+        } else {
+            alert('操作失败：' + (data.message || '未知错误'));
+        }
+    })
+    .catch(error => {
+        console.error('拒绝提交请求失败:', error);
+        alert('操作失败，请稍后重试');
+    });
+}
+
+// 重新计算合并diff
+function refreshMergeDiff() {
+    const refreshBtn = document.getElementById('refreshMergeDiffBtn');
+    const originalText = refreshBtn.innerHTML;
+    
+    // 获取当前页面的提交ID
+    const urlParams = new URLSearchParams(window.location.search);
+    const commitIds = urlParams.getAll('ids');
+    
+    if (commitIds.length === 0) {
+        alert('未找到提交ID');
+        return;
+    }
+    
+    // 显示加载状态
+    refreshBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 重新计算中...';
+    refreshBtn.disabled = true;
+    
+    fetch('/commits/merge-diff/refresh', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            commit_ids: commitIds
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            alert(data.message);
+            // 刷新页面以显示重新计算的结果
+            window.location.reload();
+        } else {
+            alert('重新计算失败：' + (data.message || '未知错误'));
+        }
+    })
+    .catch(error => {
+        console.error('重新计算请求失败:', error);
+        alert('重新计算失败，请稍后重试');
+    })
+    .finally(() => {
+        // 恢复按钮状态
+        refreshBtn.innerHTML = originalText;
+        refreshBtn.disabled = false;
+    });
+}
+
+// Excel diff显示函数 (从diff-handlers.js引入)
+function showExcelSheetInContainer(diffData, containerId) {
+    if (typeof initExcelDiff === 'function') {
+        initExcelDiff(diffData);
+    }
+    
+    const container = document.getElementById(containerId);
+    if (!container) {
+        console.error('容器未找到:', containerId);
+        return;
+    }
+    
+    if (!diffData || diffData.type !== 'excel') {
+        container.innerHTML = '<div class="error-state">无效的Excel数据</div>';
+        return;
+    }
+    
+    try {
+        // 使用diff-handlers.js中的函数显示Excel diff
+        if (typeof initExcelDiff === 'function') {
+            // 为Excel diff创建必要的DOM结构
+            container.innerHTML = `
+                <div class="excel-diff-container">
+                    <div id="excel-sheet-tabs" class="excel-sheet-tabs"></div>
+                    <div id="excel-content" class="excel-content"></div>
+                </div>
+            `;
+            initExcelDiff(diffData);
+        } else {
+            // 备用显示方法
+            container.innerHTML = '<div class="alert alert-info">Excel差异数据加载完成，但显示函数未找到</div>';
+        }
+    } catch (error) {
+        console.error('显示Excel diff失败:', error);
+        container.innerHTML = '<div class="error-state">Excel差异显示失败: ' + error.message + '</div>';
+    }
+}
+</script>
+{% endblock %}

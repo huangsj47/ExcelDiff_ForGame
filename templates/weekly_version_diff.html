@@ -1,0 +1,1853 @@
+{% extends "base.html" %}
+
+{% block title %}{{ config.name }} - 周版本diff详情{% endblock %}
+
+{% block head %}
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h2>{{ config.name }}</h2>
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{{ url_for('index') }}">项目列表</a></li>
+                    <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=config.project_id) }}">{{ config.project.name }}</a></li>
+                    <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=config.project_id) }}">周版本diff</a></li>
+                    <li class="breadcrumb-item active">{{ config.name }}</li>
+                </ol>
+            </nav>
+        </div>
+        <div>
+            <div class="btn-group me-2" role="group">
+                <button type="button" class="btn btn-outline-primary" id="toggleFoldersBtn" onclick="toggleAllFolders()">
+                    <i class="fas fa-compress-arrows-alt me-1" id="toggleFoldersIcon"></i>
+                    <span id="toggleFoldersText">收起全部</span>
+                </button>
+            </div>
+            <button type="button" class="btn btn-success" onclick="confirmAllPending()">
+                <i class="fas fa-check-double me-2"></i>批量确认
+            </button>
+        </div>
+    </div>
+
+    <!-- 仓库标签页 -->
+    {% if all_configs|length > 1 %}
+    <div class="card mb-4">
+        <div class="card-header">
+            <div class="d-flex justify-content-between align-items-center">
+                <ul class="nav nav-tabs card-header-tabs mb-0" id="repositoryTabs" role="tablist">
+                    {% for cfg in all_configs %}
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link {% if cfg.id == current_config_id %}active{% endif %}"
+                                id="repo-{{ cfg.id }}-tab"
+                                data-bs-toggle="tab"
+                                data-bs-target="#repo-{{ cfg.id }}"
+                                data-config-id="{{ cfg.id }}"
+                                data-repository-name="{{ cfg.repository.name }}"
+                                data-repository-type="{{ cfg.repository.resource_type or 'code' }}"
+                                type="button"
+                                role="tab"
+                                aria-controls="repo-{{ cfg.id }}"
+                                aria-selected="{% if cfg.id == current_config_id %}true{% else %}false{% endif %}"
+                                onclick="switchRepository({{ cfg.id }})">
+                            <i class="fas fa-{% if cfg.repository.type == 'git' %}code-branch{% else %}folder{% endif %} me-2"></i>
+                            {{ cfg.repository.name }}
+                            <span class="badge bg-{% if cfg.repository.type == 'git' %}success{% else %}primary{% endif %} ms-1">
+                                {{ cfg.repository.type.upper() }}
+                            </span>
+                        </button>
+                    </li>
+                    {% endfor %}
+                </ul>
+
+                <!-- 重建缓存按钮 - 动态显示 -->
+                <button type="button" class="btn btn-outline-primary btn-sm" onclick="rebuildExcelCache()" id="rebuildCacheBtn" style="display: none;">
+                    <i class="fas fa-sync-alt me-1"></i>重建缓存
+                </button>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="tab-content" id="repositoryTabContent">
+                {% for cfg in all_configs %}
+                <div class="tab-pane fade {% if cfg.id == current_config_id %}show active{% endif %}"
+                     id="repo-{{ cfg.id }}"
+                     role="tabpanel"
+                     aria-labelledby="repo-{{ cfg.id }}-tab">
+                    <!-- 配置信息 -->
+                    <div class="row">
+                        <div class="col-md-3">
+                            <strong>仓库:</strong> {{ cfg.repository.name }}
+                            <span class="badge bg-{% if cfg.repository.type == 'git' %}success{% else %}primary{% endif %} ms-1">
+                                {{ cfg.repository.type.upper() }}
+                            </span>
+                        </div>
+                        <div class="col-md-3">
+                            <strong>分支:</strong> {{ cfg.branch }}
+                        </div>
+                        <div class="col-md-3">
+                            <strong>时间范围:</strong><br>
+                            <small>{{ cfg.start_time.strftime('%Y-%m-%d %H:%M') }} 至 {{ cfg.end_time.strftime('%Y-%m-%d %H:%M') }}</small>
+                        </div>
+                        <div class="col-md-3">
+                            <strong>状态:</strong>
+                            <span class="badge bg-{% if cfg.status == 'active' %}success{% elif cfg.status == 'completed' %}primary{% else %}secondary{% endif %}">
+                                {% if cfg.status == 'active' %}进行中
+                                {% elif cfg.status == 'completed' %}已完成
+                                {% else %}已归档{% endif %}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <!-- 单个仓库时的配置信息卡片 -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <div class="d-flex justify-content-between align-items-center">
+                <h6 class="mb-0">
+                    <i class="fas fa-{% if config.repository.type == 'git' %}code-branch{% else %}folder{% endif %} me-2"></i>
+                    {{ config.repository.name }}
+                    <span class="badge bg-{% if config.repository.type == 'git' %}success{% else %}primary{% endif %} ms-1">
+                        {{ config.repository.type.upper() }}
+                    </span>
+                </h6>
+
+                <!-- 重建缓存按钮已移至顶部统一管理 -->
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-3">
+                    <strong>分支:</strong> {{ config.branch }}
+                </div>
+                <div class="col-md-6">
+                    <strong>时间范围:</strong><br>
+                    <small>{{ config.start_time.strftime('%Y-%m-%d %H:%M') }} 至 {{ config.end_time.strftime('%Y-%m-%d %H:%M') }}</small>
+                </div>
+                <div class="col-md-3">
+                    <strong>状态:</strong>
+                    <span class="badge bg-{% if config.status == 'active' %}success{% elif config.status == 'completed' %}primary{% else %}secondary{% endif %}">
+                        {% if config.status == 'active' %}进行中
+                        {% elif config.status == 'completed' %}已完成
+                        {% else %}已归档{% endif %}
+                    </span>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- 筛选和搜索 -->
+    <div class="card mb-4">
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-3">
+                    <label for="authorFilter" class="form-label">按提交者筛选</label>
+                    <select class="form-select" id="authorFilter" onchange="filterByAuthor()">
+                        <option value="">全部提交者</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label for="statusFilter" class="form-label">按状态筛选</label>
+                    <select class="form-select" id="statusFilter" onchange="filterByStatus()">
+                        <option value="">全部状态</option>
+                        <option value="pending">待确认</option>
+                        <option value="confirmed">已确认</option>
+                        <option value="rejected">已拒绝</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label for="fileTypeFilter" class="form-label">按文件类型筛选</label>
+                    <select class="form-select" id="fileTypeFilter" onchange="filterByFileType()">
+                        <option value="">全部类型</option>
+                        <option value="code">代码文件</option>
+                        <option value="table">配置表</option>
+                        <option value="res">资源文件</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label for="searchInput" class="form-label">搜索文件</label>
+                    <input type="text" class="form-control" id="searchInput" placeholder="输入文件名或路径" onkeyup="searchFiles()">
+                </div>
+            </div>
+            <!-- 重建缓存按钮已移至仓库标签页区域 -->
+        </div>
+    </div>
+
+    <!-- 文件变更列表 -->
+    <div class="card modern-file-list">
+        <div class="card-header bg-white border-bottom">
+            <div class="d-flex justify-content-between align-items-center">
+                <div class="d-flex align-items-center">
+                    <i class="bi bi-folder-open me-2 text-primary"></i>
+                    <h6 class="mb-0 fw-bold">文件变更列表</h6>
+                    <span class="badge bg-light text-dark ms-2" id="totalFilesCount">加载中...</span>
+                </div>
+                <div class="d-flex align-items-center">
+                    <span class="text-muted me-3 small">页码 <span id="currentPageInfo">1</span> / <span id="totalPages">1</span></span>
+                    <div class="btn-group" role="group" id="paginationControls" style="display: none;">
+                        <button type="button" class="btn btn-outline-primary btn-sm" id="prevPage" onclick="changePage(-1)">
+                            上一页
+                        </button>
+                        <button type="button" class="btn btn-outline-primary btn-sm" id="nextPage" onclick="changePage(1)">
+                            下一页
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="card-body p-0">
+            <!-- 仓库名称 -->
+            <div class="repository-header">
+                <div class="d-flex align-items-center px-4 py-3 bg-light border-bottom">
+                    <i class="bi bi-git me-2 text-success"></i>
+                    <h5 class="mb-0 fw-bold text-dark" id="currentRepositoryName">{{ config.repository.name }}</h5>
+                </div>
+            </div>
+
+            <!-- 文件树形结构 -->
+            <div id="fileTreeContainer" class="file-tree-container">
+                <!-- 文件树将通过JavaScript动态生成 -->
+                <div class="text-center py-5">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">加载中...</span>
+                    </div>
+                    <div class="mt-2 text-muted">正在加载文件列表...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 文件diff查看模态框 -->
+<div class="modal fade" id="diffModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-fullscreen">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="diffModalTitle">文件diff</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-0">
+                <div id="diffContent">
+                    <!-- diff内容将动态加载 -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="btn-group me-auto" role="group">
+                    <button type="button" class="btn btn-success" onclick="confirmFile()">
+                        <i class="fas fa-check me-1"></i>确认通过
+                    </button>
+                    <button type="button" class="btn btn-danger" onclick="rejectFile()">
+                        <i class="fas fa-times me-1"></i>拒绝
+                    </button>
+                    <button type="button" class="btn btn-warning" onclick="resetFileStatus()">
+                        <i class="fas fa-undo me-1"></i>重置状态
+                    </button>
+                </div>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+/* 现代化文件列表样式 */
+.modern-file-list {
+    border: none;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.modern-file-list .card-header {
+    background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
+    border-bottom: 1px solid #e9ecef;
+    padding: 16px 24px;
+}
+
+/* 仓库头部样式 */
+.repository-header {
+    background: #f8f9fa;
+}
+
+/* 文件树容器样式 */
+.file-tree-container {
+    background: #ffffff;
+}
+
+/* 目录样式 - 紧凑版 */
+.directory-item {
+    background: #f8f9fa;
+    border-bottom: 1px solid #e9ecef;
+    padding: 8px 16px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    position: relative;
+}
+
+.directory-item:hover {
+    background: #e9ecef;
+}
+
+.directory-item.collapsed .directory-files {
+    display: none;
+}
+
+.directory-item.expanded .directory-files {
+    display: block;
+}
+
+.directory-header {
+    display: flex;
+    align-items: center;
+    font-weight: 600;
+    color: #495057;
+    font-size: 13px;
+}
+
+.directory-toggle {
+    margin-right: 6px;
+    font-size: 10px;
+    transition: transform 0.2s ease;
+}
+
+.directory-item.expanded .directory-toggle {
+    transform: rotate(90deg);
+}
+
+.directory-path {
+    font-size: 13px;
+    color: #495057;
+    margin-left: 2px;
+}
+
+/* 文件项样式 - 紧凑单行版 */
+.file-item {
+    display: flex;
+    align-items: center;
+    padding: 6px 16px 6px 40px; /* 减少内边距，左侧缩进 */
+    border-bottom: 1px solid #f1f3f4;
+    transition: all 0.2s ease;
+    background: #ffffff;
+    min-height: 36px; /* 固定最小高度 */
+}
+
+.file-item:hover {
+    background: #f8f9fa;
+}
+
+.file-item.pending {
+    border-left: 3px solid #ffc107;
+}
+
+.file-item.confirmed {
+    border-left: 3px solid #198754;
+}
+
+.file-item.rejected {
+    border-left: 3px solid #dc3545;
+}
+
+/* 文件项内容布局 - 紧凑单行版 */
+.file-content {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    gap: 12px;
+}
+
+.file-icon {
+    font-size: 14px;
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #e3f2fd;
+    border-radius: 4px;
+    flex-shrink: 0;
+}
+
+.file-name {
+    font-weight: 500;
+    color: #1976d2;
+    text-decoration: none;
+    font-size: 13px;
+    cursor: pointer;
+    flex-shrink: 0;
+    min-width: 324px;
+    max-width: 324px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.file-name:hover {
+    text-decoration: underline;
+    color: #1565c0;
+}
+
+.file-status {
+    flex-shrink: 0;
+    min-width: 60px;
+}
+
+.file-status .badge {
+    font-size: 11px;
+    padding: 2px 6px;
+}
+
+.file-author {
+    color: #6c757d;
+    flex-shrink: 0;
+    min-width: 100px;
+    max-width: 100px;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.file-commit-count {
+    flex-shrink: 0;
+    min-width: 30px;
+}
+
+.file-commit-message {
+    color: #6c757d;
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    line-height: 1.3;
+    word-break: keep-all;
+    overflow-wrap: normal;
+    white-space: pre-wrap;
+    text-align: left;
+    max-height: 2.6em;
+    overflow: hidden;
+}
+
+.file-actions {
+    flex-shrink: 0;
+    margin-left: auto;
+}
+
+/* 按钮样式改进 - 紧凑版 */
+.btn-action {
+    padding: 4px 8px;
+    font-size: 11px;
+    font-weight: 500;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+}
+
+.btn-action:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+/* 激活状态的按钮样式 */
+.btn-action.active {
+    opacity: 1;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+
+.btn-success.btn-action.active {
+    background-color: #198754;
+    border-color: #198754;
+    color: white;
+}
+
+.btn-danger.btn-action.active {
+    background-color: #dc3545;
+    border-color: #dc3545;
+    color: white;
+}
+
+.action-buttons .btn-group .btn-action {
+    border-radius: 6px 0 0 6px;
+}
+
+.action-buttons .btn-group .dropdown-toggle {
+    border-radius: 0 6px 6px 0;
+}
+
+/* 提交次数样式 - 紧凑版 */
+.commit-count-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 2px 6px;
+    background: #f1f3f4;
+    color: #5f6368;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.commit-message {
+    font-size: 13px;
+    color: #5f6368;
+    line-height: 1.4;
+    word-break: keep-all;
+    overflow-wrap: normal;
+    white-space: pre-wrap;
+    text-align: left;
+    max-height: 2.8em;
+    overflow: hidden;
+}
+
+.status-select {
+    font-size: 0.8em;
+    padding: 0.25rem 0.5rem;
+}
+
+.action-buttons .btn {
+    font-size: 0.75em;
+    padding: 0.25rem 0.5rem;
+}
+
+.pagination-info {
+    font-size: 0.9em;
+    color: #6c757d;
+}
+
+.table th {
+    border-top: none;
+    font-weight: 600;
+    font-size: 0.9em;
+}
+
+.table td {
+    vertical-align: middle;
+    font-size: 0.85em;
+}
+
+.cursor-pointer {
+    cursor: pointer;
+}
+
+.action-buttons .btn-group {
+    font-size: 0.75em;
+}
+
+.action-buttons .btn-group .btn {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75em;
+}
+
+.dropdown-menu {
+    font-size: 0.85em;
+    min-width: 120px;
+    z-index: 99999 !important; /* 设置超高层级 */
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15) !important;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    border-radius: 0.375rem;
+    position: absolute !important; /* 强制绝对定位 */
+}
+
+.dropdown-item {
+    padding: 0.25rem 0.75rem;
+}
+
+.dropdown-item i {
+    width: 16px;
+}
+
+/* 修复下拉菜单位置偏差 */
+.btn-group .dropdown-menu {
+    transform: translateX(0) !important;
+    left: 0 !important;
+    right: auto !important;
+    position: absolute !important;
+    z-index: 99999 !important;
+}
+
+/* 确保下拉菜单容器有正确的定位 */
+.btn-group {
+    position: relative;
+    z-index: 99999 !important;
+}
+
+/* 强制所有下拉菜单使用最高层级 */
+.dropdown-menu.show {
+    z-index: 99999 !important;
+    position: absolute !important;
+}
+
+/* 确保文件列表容器不会遮挡下拉菜单 */
+.modern-file-list {
+    position: relative;
+    z-index: 1;
+}
+
+.file-item {
+    position: relative;
+    z-index: 1;
+}
+
+/* 确保文件条目的层级低于下拉菜单 */
+.directory-item {
+    position: relative;
+    z-index: 1;
+}
+
+.file-content {
+    position: relative;
+    z-index: 1;
+}
+
+/* 确保按钮组在需要时能显示下拉菜单 */
+.action-buttons {
+    position: relative;
+    z-index: 2;
+}
+
+.action-buttons .btn-group {
+    position: relative;
+    z-index: 99999;
+}
+
+/* 强制下拉菜单在所有情况下都使用最高层级 */
+.dropdown-menu,
+.btn-group .dropdown-menu,
+.action-buttons .dropdown-menu {
+    z-index: 99999 !important;
+    position: absolute !important;
+}
+
+/* 复制的下拉菜单样式 - 最高层级 */
+.dropdown-menu-clone {
+    position: fixed !important;
+    z-index: 999999 !important;
+    background: white !important;
+    border: 1px solid rgba(0, 0, 0, 0.15) !important;
+    border-radius: 0.375rem !important;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.175) !important;
+    width: 180px !important;
+    font-size: 0.85em !important;
+    padding: 0.5rem 0 !important;
+    margin: 0 !important;
+    display: none !important;
+}
+
+.dropdown-menu-clone.show {
+    display: block !important;
+}
+
+.dropdown-menu-clone .dropdown-item {
+    display: block !important;
+    width: 100% !important;
+    padding: 0.25rem 0.75rem !important;
+    clear: both !important;
+    font-weight: 400 !important;
+    color: #212529 !important;
+    text-align: inherit !important;
+    text-decoration: none !important;
+    white-space: nowrap !important;
+    background-color: transparent !important;
+    border: 0 !important;
+    cursor: pointer !important;
+}
+
+.dropdown-menu-clone .dropdown-item:hover {
+    color: #1e2125 !important;
+    background-color: #e9ecef !important;
+}
+
+.dropdown-menu-clone .dropdown-item i {
+    width: 16px !important;
+}
+
+/* 重建缓存按钮样式 */
+#rebuildCacheBtn {
+    background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+    border: none;
+    color: white;
+    font-weight: 500;
+    padding: 8px 16px;
+    border-radius: 6px;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 8px rgba(40, 167, 69, 0.3);
+}
+
+#rebuildCacheBtn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
+    background: linear-gradient(135deg, #218838 0%, #1e7e34 100%);
+    color: white;
+}
+
+#rebuildCacheBtn:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 6px rgba(40, 167, 69, 0.3);
+}
+
+#rebuildCacheBtn:disabled {
+    background: linear-gradient(135deg, #a0a0a0 0%, #888888 100%);
+    box-shadow: none;
+    transform: none;
+    cursor: not-allowed;
+}
+
+#rebuildCacheBtn i {
+    font-size: 14px;
+}
+</style>
+
+<script>
+let configId = {{ config.id }};
+let currentConfigId = {{ current_config_id }};
+let allFiles = [];
+let filteredFiles = [];
+let currentFilePath = '';
+let allAuthors = new Set();
+
+// 分页相关变量
+let currentPage = 1;
+let itemsPerPage = 50;
+let totalPages = 1;
+
+// 页面加载时初始化
+document.addEventListener('DOMContentLoaded', function() {
+    loadFileList();
+
+    // 初始化重建缓存按钮显示状态
+    setTimeout(() => {
+        updateRebuildCacheButtonVisibility();
+    }, 100);
+
+    // 监听浏览器历史记录变化
+    window.addEventListener('popstate', function(event) {
+        if (event.state && event.state.configId) {
+            const newConfigId = event.state.configId;
+            if (newConfigId !== currentConfigId) {
+                // 更新标签页状态
+                updateTabState(newConfigId);
+                // 切换仓库（不更新历史记录，避免循环）
+                switchRepositoryInternal(newConfigId);
+            }
+        }
+    });
+});
+
+// 仓库切换函数
+function switchRepository(newConfigId) {
+    if (newConfigId === currentConfigId) {
+        return; // 如果是当前仓库，不需要切换
+    }
+
+    // 更新当前配置ID
+    configId = newConfigId;
+    currentConfigId = newConfigId;
+
+    // 清空当前数据
+    allFiles = [];
+    filteredFiles = [];
+    allAuthors = new Set();
+
+    // 重置筛选器
+    document.getElementById('authorFilter').value = '';
+    document.getElementById('statusFilter').value = '';
+    document.getElementById('fileTypeFilter').value = '';
+    document.getElementById('searchInput').value = '';
+
+    // 更新标签页状态
+    updateTabState(newConfigId);
+
+    // 重新加载文件列表
+    loadFileList();
+
+    // 更新URL（可选，用于书签和刷新）
+    const newUrl = `/weekly-version-config/${newConfigId}/diff`;
+    window.history.pushState({configId: newConfigId}, '', newUrl);
+}
+
+// 内部仓库切换函数（不更新历史记录）
+function switchRepositoryInternal(newConfigId) {
+    if (newConfigId === currentConfigId) {
+        return;
+    }
+
+    // 更新当前配置ID
+    configId = newConfigId;
+    currentConfigId = newConfigId;
+
+    // 清空当前数据
+    allFiles = [];
+    filteredFiles = [];
+    allAuthors = new Set();
+
+    // 重置筛选器
+    document.getElementById('authorFilter').value = '';
+    document.getElementById('statusFilter').value = '';
+    document.getElementById('fileTypeFilter').value = '';
+    document.getElementById('searchInput').value = '';
+
+    // 更新标签页状态
+    updateTabState(newConfigId);
+
+    // 重新加载文件列表
+    loadFileList();
+}
+
+// 更新标签页状态
+function updateTabState(activeConfigId) {
+    // 移除所有标签的active状态
+    document.querySelectorAll('#repositoryTabs .nav-link').forEach(tab => {
+        tab.classList.remove('active');
+        tab.setAttribute('aria-selected', 'false');
+    });
+
+    // 移除所有内容面板的active状态
+    document.querySelectorAll('#repositoryTabContent .tab-pane').forEach(pane => {
+        pane.classList.remove('show', 'active');
+    });
+
+    // 激活对应的标签和内容面板
+    const activeTab = document.getElementById(`repo-${activeConfigId}-tab`);
+    const activePane = document.getElementById(`repo-${activeConfigId}`);
+
+    if (activeTab && activePane) {
+        activeTab.classList.add('active');
+        activeTab.setAttribute('aria-selected', 'true');
+        activePane.classList.add('show', 'active');
+    }
+
+    // 更新重建缓存按钮显示状态
+    setTimeout(() => {
+        updateRebuildCacheButtonVisibility();
+    }, 100);
+}
+
+function loadFileList() {
+    fetch(`/weekly-version-config/${configId}/files`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                allFiles = data.files;
+                updateAuthorFilter(data.authors);
+
+                // 重新应用当前的筛选条件，而不是重置为显示所有文件
+                applyFilters();
+
+                document.getElementById('totalFilesCount').textContent = `${data.total_files} 个文件`;
+
+                // 更新仓库名称显示
+                updateRepositoryName(data.repository_name);
+
+                // 更新重建缓存按钮显示状态
+                updateRebuildCacheButtonVisibility();
+            } else {
+                document.getElementById('fileTableBody').innerHTML =
+                    '<tr><td colspan="6" class="text-center alert alert-danger">加载文件列表失败: ' + data.message + '</td></tr>';
+            }
+        })
+        .catch(error => {
+            console.error('Error loading file list:', error);
+            document.getElementById('fileTableBody').innerHTML =
+                '<tr><td colspan="6" class="text-center alert alert-danger">加载文件列表失败，请刷新页面重试</td></tr>';
+        });
+}
+
+function updateRepositoryName(repositoryName) {
+    const repoNameElement = document.getElementById('currentRepositoryName');
+    if (repoNameElement && repositoryName) {
+        repoNameElement.textContent = repositoryName;
+        console.log('更新仓库名称为:', repositoryName);
+    }
+}
+
+function updateRebuildCacheButtonVisibility() {
+    // 根据当前配置ID判断是否为配置表仓库
+    const rebuildBtn = document.getElementById('rebuildCacheBtn');
+
+    // 获取当前活跃的配置信息
+    const activeTab = document.querySelector('.nav-link.active[data-config-id]');
+    if (!activeTab) {
+        console.log('未找到活跃的配置标签');
+        if (rebuildBtn) rebuildBtn.style.display = 'none';
+        return;
+    }
+
+    const currentConfigId = activeTab.getAttribute('data-config-id');
+    console.log('当前配置ID:', currentConfigId);
+
+    // 通过API获取准确的仓库信息
+    fetch(`/weekly-version-config/${currentConfigId}/info`)
+        .then(response => response.json())
+        .then(data => {
+            console.log('获取到的配置信息:', data);
+
+            if (data.success && rebuildBtn) {
+                const config = data.config;
+                const repository = config.repository;
+
+                // 检查是否为配置表仓库
+                const isTableRepository = repository.resource_type === 'table' ||
+                                         repository.name.toLowerCase().includes('config') ||
+                                         repository.name.toLowerCase().includes('table');
+
+                console.log('仓库信息:', {
+                    name: repository.name,
+                    resource_type: repository.resource_type,
+                    isTableRepository: isTableRepository
+                });
+
+                if (isTableRepository) {
+                    console.log('当前是配置表仓库，显示重建缓存按钮');
+                    rebuildBtn.style.display = 'inline-block';
+                } else {
+                    console.log('当前不是配置表仓库，隐藏重建缓存按钮');
+                    rebuildBtn.style.display = 'none';
+                }
+            }
+        })
+        .catch(error => {
+            console.error('获取配置信息失败:', error);
+            if (rebuildBtn) rebuildBtn.style.display = 'none';
+        });
+}
+
+function updateFileTable() {
+    // 计算分页
+    totalPages = Math.ceil(filteredFiles.length / itemsPerPage);
+    if (currentPage > totalPages) currentPage = 1;
+
+    const startIndex = (currentPage - 1) * itemsPerPage;
+    const endIndex = Math.min(startIndex + itemsPerPage, filteredFiles.length);
+    const currentPageFiles = filteredFiles.slice(startIndex, endIndex);
+
+    // 构建文件树结构
+    const fileTree = buildFileTree(currentPageFiles);
+    const treeHtml = renderFileTree(fileTree);
+
+    document.getElementById('fileTreeContainer').innerHTML = treeHtml;
+
+    // 重置为展开状态
+    foldersExpanded = true;
+    updateToggleButton();
+
+    // 初始化Bootstrap tooltips
+    initializeTooltips();
+
+    // 更新分页信息
+    updatePaginationInfo();
+}
+
+function buildFileTree(files) {
+    const tree = {};
+
+    files.forEach(file => {
+        const pathParts = file.file_path.split('/');
+        const fileName = pathParts.pop();
+        const dirPath = pathParts.join('/') || '/';
+
+        if (!tree[dirPath]) {
+            tree[dirPath] = {
+                path: dirPath,
+                files: []
+            };
+        }
+
+        tree[dirPath].files.push({
+            ...file,
+            fileName: fileName
+        });
+    });
+
+    return tree;
+}
+
+function renderFileTree(tree) {
+    if (Object.keys(tree).length === 0) {
+        return '<div class="text-center py-5 text-muted">没有找到匹配的文件</div>';
+    }
+
+    let html = '';
+
+    // 按路径排序
+    const sortedPaths = Object.keys(tree).sort();
+
+    sortedPaths.forEach(dirPath => {
+        const directory = tree[dirPath];
+        const dirId = `dir-${dirPath.replace(/[^a-zA-Z0-9]/g, '-')}`;
+
+        html += `
+            <div class="directory-item expanded" data-dir-path="${dirPath}">
+                <div class="directory-header" onclick="toggleDirectory('${dirId}')">
+                    <i class="bi bi-chevron-right directory-toggle"></i>
+                    <i class="bi bi-folder me-2 text-warning"></i>
+                    <span class="directory-path">${dirPath}</span>
+                    <span class="badge bg-light text-dark ms-2">${directory.files.length} 个文件</span>
+                </div>
+                <div class="directory-files" id="${dirId}">
+                    ${renderDirectoryFiles(directory.files)}
+                </div>
+            </div>
+        `;
+    });
+
+    return html;
+}
+
+function renderDirectoryFiles(files) {
+    let html = '';
+
+    files.forEach(file => {
+        const statusClass = file.overall_status || 'pending';
+        const statusText = getStatusText(statusClass);
+        const statusBadgeClass = getStatusBadgeClass(statusClass);
+
+
+
+        // 解析提交信息
+        const commitAuthors = file.commit_authors ? JSON.parse(file.commit_authors) : [];
+        const commitMessages = file.commit_messages ? JSON.parse(file.commit_messages) : [];
+        const lastCommitMessage = commitMessages.length > 0 ? commitMessages[commitMessages.length - 1].trim() : '';
+
+        // 处理提交人显示
+        const uniqueAuthors = [...new Set(commitAuthors)];
+        const authorsDisplay = formatAuthorsForTree(uniqueAuthors);
+
+        // 根据文件操作类型确定颜色
+        const operationClass = getOperationClass(file.primary_operation || 'M');
+        const operationColor = getOperationColor(file.primary_operation || 'M');
+
+        html += `
+            <div class="file-item ${statusClass}" data-file-path="${file.file_path}">
+                <div class="file-content">
+                    <div class="file-icon">
+                        <i class="bi bi-file-earmark-text ${operationClass}"></i>
+                    </div>
+                    <div class="file-name ${operationClass}" onclick="openFullDiff('${file.file_path}')" title="${file.file_path}">
+                        ${file.fileName}
+                    </div>
+                    <div class="file-status">
+                        <span class="badge ${statusBadgeClass}">${statusText}</span>
+                    </div>
+                    <div class="file-author" title="${uniqueAuthors.join(', ')}">${authorsDisplay}</div>
+                    <div class="file-commit-count">
+                        <span class="commit-count-badge">${file.commit_count || 0}</span>
+                    </div>
+                    <div class="file-commit-message" title="${lastCommitMessage}">
+                        ${lastCommitMessage || '暂无提交日志'}
+                    </div>
+                    <div class="file-actions">
+                        <div class="action-buttons d-flex gap-3 align-items-center">
+                            <a href="/weekly-version-config/${configId}/file-full-diff?file_path=${encodeURIComponent(file.file_path)}"
+                               class="btn btn-outline-info btn-action" title="完整diff">
+                                <i class="bi bi-arrows-fullscreen"></i>
+                            </a>
+                            ${generateStatusButton(file.file_path, statusClass)}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+
+    return html;
+}
+
+function getFileName(filePath) {
+    return filePath.split('/').pop();
+}
+
+function getFilePath(filePath) {
+    const parts = filePath.split('/');
+    return parts.length > 1 ? parts.slice(0, -1).join('/') + '/' : '';
+}
+
+function formatAuthorsDisplay(authors) {
+    if (authors.length === 0) {
+        return '<small class="text-muted">未知</small>';
+    }
+
+    if (authors.length === 1) {
+        return `<small>${authors[0]}</small>`;
+    }
+
+    if (authors.length === 2) {
+        return `<small>${authors[0]}, ${authors[1]}</small>`;
+    }
+
+    // 超过2人时显示前两个，其余用...表示
+    const displayAuthors = authors.slice(0, 2).join(', ');
+    const remainingCount = authors.length - 2;
+    const remainingAuthors = authors.slice(2).join(', ');
+
+    return `
+        <small>
+            ${displayAuthors}
+            <span class="text-muted cursor-pointer"
+                  title="其他提交人: ${remainingAuthors}"
+                  data-bs-toggle="tooltip">
+                ... (+${remainingCount})
+            </span>
+        </small>
+    `;
+}
+
+function formatAuthorsForTree(authors) {
+    if (authors.length === 0) {
+        return '<span class="text-muted">未知</span>';
+    }
+
+    if (authors.length === 1) {
+        return `<span>${authors[0]}</span>`;
+    }
+
+    // 树形结构中简化显示
+    return `<span>${authors[0]}</span>`;
+}
+
+function generateStatusButton(filePath, statusClass) {
+    const buttonId = `btn-group-${filePath.replace(/[^a-zA-Z0-9]/g, '-')}`;
+
+    if (statusClass === 'confirmed') {
+        // 已确认状态：显示白底和-图标，点击可以重置状态
+        return `
+            <div class="btn-group" role="group" id="${buttonId}">
+                <button type="button" class="btn btn-outline-success btn-action"
+                        onclick="updateFileStatusQuick('${filePath}', 'pending')" title="已通过，点击重置"
+                        style="background-color: white; color: #198754; border-color: #198754;">
+                    <i class="bi bi-dash-lg"></i>
+                </button>
+                <button type="button" class="btn btn-outline-secondary btn-action dropdown-toggle dropdown-toggle-split"
+                        onclick="showDropdownClone('${buttonId}', '${filePath}')" title="更多操作">
+                    <span class="visually-hidden">更多操作</span>
+                </button>
+            </div>
+        `;
+    } else if (statusClass === 'rejected') {
+        // 已拒绝状态：显示红色的拒绝按钮，点击可以重置状态
+        return `
+            <div class="btn-group" role="group" id="${buttonId}">
+                <button type="button" class="btn btn-danger btn-action active"
+                        onclick="updateFileStatusQuick('${filePath}', 'pending')" title="已拒绝，点击重置">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+                <button type="button" class="btn btn-outline-secondary btn-action dropdown-toggle dropdown-toggle-split"
+                        onclick="showDropdownClone('${buttonId}', '${filePath}')" title="更多操作">
+                    <span class="visually-hidden">更多操作</span>
+                </button>
+            </div>
+        `;
+    } else {
+        // 待确认状态：显示通过和拒绝按钮
+        return `
+            <div class="btn-group" role="group" id="${buttonId}">
+                <button type="button" class="btn btn-success btn-action"
+                        onclick="updateFileStatusQuick('${filePath}', 'confirmed')" title="通过">
+                    <i class="bi bi-check-lg"></i>
+                </button>
+                <button type="button" class="btn btn-outline-secondary btn-action dropdown-toggle dropdown-toggle-split"
+                        onclick="showDropdownClone('${buttonId}', '${filePath}')" title="更多操作">
+                    <span class="visually-hidden">更多操作</span>
+                </button>
+            </div>
+        `;
+    }
+}
+
+function toggleDirectory(dirId) {
+    const dirElement = document.getElementById(dirId);
+    const dirItem = dirElement.closest('.directory-item');
+    const toggle = dirItem.querySelector('.directory-toggle');
+
+    if (dirItem.classList.contains('expanded')) {
+        dirItem.classList.remove('expanded');
+        dirItem.classList.add('collapsed');
+        dirElement.style.display = 'none';
+    } else {
+        dirItem.classList.remove('collapsed');
+        dirItem.classList.add('expanded');
+        dirElement.style.display = 'block';
+    }
+}
+
+function openFullDiff(filePath) {
+    window.open(`/weekly-version-config/${configId}/file-full-diff?file_path=${encodeURIComponent(filePath)}`, '_blank');
+}
+
+function initializeTooltips() {
+    // 初始化Bootstrap tooltips
+    const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    tooltipTriggerList.map(function (tooltipTriggerEl) {
+        return new bootstrap.Tooltip(tooltipTriggerEl);
+    });
+}
+
+function updatePaginationInfo() {
+    const startIndex = (currentPage - 1) * itemsPerPage + 1;
+    const endIndex = Math.min(currentPage * itemsPerPage, filteredFiles.length);
+
+    // 更新页码信息
+    const currentPageInfoEl = document.getElementById('currentPageInfo');
+    const totalPagesEl = document.getElementById('totalPages');
+
+    if (currentPageInfoEl) {
+        currentPageInfoEl.textContent = currentPage;
+    }
+
+    if (totalPagesEl) {
+        totalPagesEl.textContent = totalPages;
+    }
+
+    // 显示/隐藏分页控件
+    const paginationControls = document.getElementById('paginationControls');
+    if (paginationControls && totalPages > 1) {
+        paginationControls.style.display = 'block';
+        const prevBtn = document.getElementById('prevPage');
+        const nextBtn = document.getElementById('nextPage');
+
+        if (prevBtn) prevBtn.disabled = currentPage === 1;
+        if (nextBtn) nextBtn.disabled = currentPage === totalPages;
+    } else if (paginationControls) {
+        paginationControls.style.display = 'none';
+    }
+}
+
+function changePage(direction) {
+    const newPage = currentPage + direction;
+    if (newPage >= 1 && newPage <= totalPages) {
+        currentPage = newPage;
+        updateFileTable();
+    }
+}
+
+function updateFileStatusQuick(filePath, newStatus) {
+    fetch(`/weekly-version-config/${configId}/file-status`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            file_path: filePath,
+            status: newStatus
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // 更新本地数据
+            const fileIndex = allFiles.findIndex(f => f.file_path === filePath);
+            if (fileIndex !== -1) {
+                allFiles[fileIndex].overall_status = newStatus;
+            }
+
+            const filteredIndex = filteredFiles.findIndex(f => f.file_path === filePath);
+            if (filteredIndex !== -1) {
+                filteredFiles[filteredIndex].overall_status = newStatus;
+            }
+
+            // 重新渲染表格
+            updateFileTable();
+
+            // 状态更新成功，无需显示提示
+        } else {
+            // 恢复原状态
+            loadFileList();
+            showToast('状态更新失败: ' + data.message, 'error');
+        }
+    })
+    .catch(error => {
+        console.error('Error updating status:', error);
+        // 恢复原状态
+        loadFileList();
+        showToast('状态更新失败，请重试', 'error');
+    });
+}
+
+function getStatusText(status) {
+    switch (status) {
+        case 'confirmed': return '已确认';
+        case 'rejected': return '已拒绝';
+        default: return '待确认';
+    }
+}
+
+function getStatusBadgeClass(status) {
+    switch (status) {
+        case 'confirmed': return 'bg-success';
+        case 'rejected': return 'bg-danger';
+        default: return 'bg-warning';
+    }
+}
+
+function getOperationClass(operation) {
+    switch (operation) {
+        case 'D': return 'text-danger';  // 删除文件 - 深红色
+        case 'A': return 'text-success'; // 新增文件 - 深绿色
+        case 'M': return 'text-primary'; // 修改文件 - 蓝色（默认）
+        default: return 'text-primary';
+    }
+}
+
+function getOperationColor(operation) {
+    switch (operation) {
+        case 'D': return '#dc3545';  // Bootstrap danger color
+        case 'A': return '#198754';  // Bootstrap success color
+        case 'M': return '#0d6efd';  // Bootstrap primary color
+        default: return '#0d6efd';
+    }
+}
+
+function showToast(message, type = 'info') {
+    // 创建简单的提示消息
+    const toast = document.createElement('div');
+    toast.className = `alert alert-${type === 'success' ? 'success' : type === 'error' ? 'danger' : 'info'} position-fixed`;
+    toast.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
+    toast.innerHTML = `
+        <div class="d-flex align-items-center">
+            <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'} me-2"></i>
+            ${message}
+        </div>
+    `;
+
+    document.body.appendChild(toast);
+
+    // 3秒后自动移除
+    setTimeout(() => {
+        if (toast.parentNode) {
+            toast.parentNode.removeChild(toast);
+        }
+    }, 3000);
+}
+
+// 全局变量跟踪文件夹状态
+let foldersExpanded = true; // 默认展开状态
+
+function toggleAllFolders() {
+    if (foldersExpanded) {
+        collapseAllFolders();
+    } else {
+        expandAllFolders();
+    }
+}
+
+function expandAllFolders() {
+    const allDirectories = document.querySelectorAll('.directory-item');
+    allDirectories.forEach(dir => {
+        dir.classList.remove('collapsed');
+        dir.classList.add('expanded');
+        const filesContainer = dir.querySelector('.directory-files');
+        if (filesContainer) {
+            filesContainer.style.display = 'block';
+        }
+    });
+
+    // 更新按钮状态
+    foldersExpanded = true;
+    updateToggleButton();
+}
+
+function collapseAllFolders() {
+    const allDirectories = document.querySelectorAll('.directory-item');
+    allDirectories.forEach(dir => {
+        dir.classList.remove('expanded');
+        dir.classList.add('collapsed');
+        const filesContainer = dir.querySelector('.directory-files');
+        if (filesContainer) {
+            filesContainer.style.display = 'none';
+        }
+    });
+
+    // 更新按钮状态
+    foldersExpanded = false;
+    updateToggleButton();
+}
+
+function updateToggleButton() {
+    const btn = document.getElementById('toggleFoldersBtn');
+    const icon = document.getElementById('toggleFoldersIcon');
+    const text = document.getElementById('toggleFoldersText');
+
+    if (foldersExpanded) {
+        // 当前是展开状态，按钮显示"收起全部"
+        icon.className = 'fas fa-compress-arrows-alt me-1';
+        text.textContent = '收起全部';
+    } else {
+        // 当前是收起状态，按钮显示"展开全部"
+        icon.className = 'fas fa-expand-arrows-alt me-1';
+        text.textContent = '展开全部';
+    }
+}
+
+// 下拉菜单克隆处理
+let currentDropdownClone = null;
+let globalClickHandler = null;
+
+function showDropdownClone(buttonId, filePath) {
+    console.log('showDropdownClone called:', buttonId, filePath);
+
+    // 如果当前有显示的下拉菜单，先隐藏
+    if (currentDropdownClone) {
+        hideDropdownClone();
+        return; // 如果点击的是同一个按钮，则只关闭菜单
+    }
+
+    const buttonGroup = document.getElementById(buttonId);
+    if (!buttonGroup) {
+        console.error('Button group not found:', buttonId);
+        return;
+    }
+
+    const dropdownButton = buttonGroup.querySelector('.dropdown-toggle');
+    if (!dropdownButton) {
+        console.error('Dropdown button not found in group:', buttonId);
+        return;
+    }
+
+    // 获取按钮位置
+    const rect = dropdownButton.getBoundingClientRect();
+
+    // 创建下拉菜单内容
+    const menuContent = getDropdownMenuContent(filePath);
+
+    // 创建克隆的下拉菜单
+    const clone = document.createElement('div');
+    clone.className = 'dropdown-menu-clone show';
+    clone.innerHTML = menuContent;
+
+    // 计算右对齐位置 - 菜单右侧与按钮右侧对齐
+    const menuWidth = 180; // 下拉菜单宽度
+    const leftPosition = rect.right - menuWidth;
+
+    clone.style.left = leftPosition + 'px';
+    clone.style.top = (rect.bottom + 2) + 'px';
+
+    // 添加到body
+    document.body.appendChild(clone);
+    currentDropdownClone = clone;
+
+    // 设置全局点击事件监听器
+    globalClickHandler = function(event) {
+        // 检查点击是否在下拉菜单内部或触发按钮上
+        if (!clone.contains(event.target) && !dropdownButton.contains(event.target)) {
+            hideDropdownClone();
+        }
+    };
+
+    // 延迟添加事件监听器，避免立即触发
+    setTimeout(() => {
+        document.addEventListener('click', globalClickHandler);
+    }, 10);
+
+    console.log('Dropdown clone created and shown');
+}
+
+function hideDropdownClone() {
+    console.log('hideDropdownClone called');
+
+    if (currentDropdownClone) {
+        currentDropdownClone.remove();
+        currentDropdownClone = null;
+        console.log('Dropdown clone removed');
+    }
+
+    // 移除全局点击事件监听器
+    if (globalClickHandler) {
+        document.removeEventListener('click', globalClickHandler);
+        globalClickHandler = null;
+        console.log('Global click handler removed');
+    }
+}
+
+function getDropdownMenuContent(filePath) {
+    // 根据文件路径获取当前状态
+    const file = allFiles.find(f => f.file_path === filePath);
+    const status = file ? file.overall_status : 'pending';
+
+    if (status === 'confirmed') {
+        return `
+            <a class="dropdown-item" href="#" onclick="updateFileStatusQuick('${filePath}', 'pending'); hideDropdownClone();">
+                <i class="bi bi-arrow-clockwise text-warning me-2"></i>重置为待确认
+            </a>
+            <a class="dropdown-item" href="#" onclick="updateFileStatusQuick('${filePath}', 'rejected'); hideDropdownClone();">
+                <i class="bi bi-x-circle text-danger me-2"></i>拒绝
+            </a>
+        `;
+    } else if (status === 'rejected') {
+        return `
+            <a class="dropdown-item" href="#" onclick="updateFileStatusQuick('${filePath}', 'pending'); hideDropdownClone();">
+                <i class="bi bi-arrow-clockwise text-warning me-2"></i>重置为待确认
+            </a>
+            <a class="dropdown-item" href="#" onclick="updateFileStatusQuick('${filePath}', 'confirmed'); hideDropdownClone();">
+                <i class="bi bi-check-circle text-success me-2"></i>确认通过
+            </a>
+        `;
+    } else {
+        return `
+            <a class="dropdown-item" href="#" onclick="updateFileStatusQuick('${filePath}', 'confirmed'); hideDropdownClone();">
+                <i class="bi bi-check-circle text-success me-2"></i>确认通过
+            </a>
+            <a class="dropdown-item" href="#" onclick="updateFileStatusQuick('${filePath}', 'rejected'); hideDropdownClone();">
+                <i class="bi bi-x-circle text-danger me-2"></i>拒绝
+            </a>
+        `;
+    }
+}
+
+function viewFileDiff(filePath) {
+    currentFilePath = filePath;
+    document.getElementById('diffModalTitle').textContent = `文件diff - ${filePath}`;
+    
+    // 显示加载状态
+    document.getElementById('diffContent').innerHTML = `
+        <div class="text-center py-5">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">加载中...</span>
+            </div>
+            <div class="mt-2">正在加载diff内容...</div>
+        </div>
+    `;
+    
+    // 显示模态框
+    new bootstrap.Modal(document.getElementById('diffModal')).show();
+    
+    // 加载diff内容
+    fetch(`/weekly-version-config/${configId}/file-diff?file_path=${encodeURIComponent(filePath)}`)
+        .then(response => response.text())
+        .then(html => {
+            document.getElementById('diffContent').innerHTML = html;
+        })
+        .catch(error => {
+            console.error('Error loading diff:', error);
+            document.getElementById('diffContent').innerHTML = 
+                '<div class="alert alert-danger">加载diff内容失败，请重试</div>';
+        });
+}
+
+function updateAuthorFilter(authors) {
+    const select = document.getElementById('authorFilter');
+    select.innerHTML = '<option value="">全部提交者</option>';
+    
+    authors.forEach(author => {
+        const option = document.createElement('option');
+        option.value = author;
+        option.textContent = author;
+        select.appendChild(option);
+    });
+}
+
+// 筛选功能
+function filterByAuthor() {
+    const selectedAuthor = document.getElementById('authorFilter').value;
+    applyFilters();
+}
+
+function filterByStatus() {
+    const selectedStatus = document.getElementById('statusFilter').value;
+    applyFilters();
+}
+
+function filterByFileType() {
+    const selectedType = document.getElementById('fileTypeFilter').value;
+    applyFilters();
+}
+
+function searchFiles() {
+    const searchTerm = document.getElementById('searchInput').value;
+    applyFilters();
+}
+
+function applyFilters() {
+    const selectedAuthor = document.getElementById('authorFilter').value;
+    const selectedStatus = document.getElementById('statusFilter').value;
+    const selectedType = document.getElementById('fileTypeFilter').value;
+    const searchTerm = document.getElementById('searchInput').value.toLowerCase();
+
+    filteredFiles = allFiles.filter(file => {
+        // 按提交者筛选
+        if (selectedAuthor) {
+            const commitAuthors = file.commit_authors ? JSON.parse(file.commit_authors) : [];
+            if (!commitAuthors.includes(selectedAuthor)) {
+                return false;
+            }
+        }
+
+        // 按状态筛选
+        if (selectedStatus && file.overall_status !== selectedStatus) {
+            return false;
+        }
+
+        // 按文件类型筛选
+        if (selectedType) {
+            const fileExt = file.file_path.split('.').pop().toLowerCase();
+            switch (selectedType) {
+                case 'code':
+                    if (!['js', 'ts', 'py', 'java', 'cpp', 'c', 'h', 'cs', 'php', 'rb', 'go', 'rs', 'lua'].includes(fileExt)) {
+                        return false;
+                    }
+                    break;
+                case 'table':
+                    if (!['xlsx', 'xls', 'csv', 'json', 'xml', 'yaml', 'yml'].includes(fileExt)) {
+                        return false;
+                    }
+                    break;
+                case 'res':
+                    if (!['png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'mp3', 'wav', 'mp4', 'avi'].includes(fileExt)) {
+                        return false;
+                    }
+                    break;
+            }
+        }
+
+        // 按文件名搜索
+        if (searchTerm && !file.file_path.toLowerCase().includes(searchTerm)) {
+            return false;
+        }
+
+        return true;
+    });
+
+    // 重置到第一页
+    currentPage = 1;
+    updateFileTable();
+}
+
+// 确认操作
+function confirmFile() {
+    updateFileStatus(currentFilePath, 'confirmed');
+}
+
+function rejectFile() {
+    updateFileStatus(currentFilePath, 'rejected');
+}
+
+function resetFileStatus() {
+    updateFileStatus(currentFilePath, 'pending');
+}
+
+function updateFileStatus(filePath, status) {
+    fetch(`/weekly-version-config/${configId}/file-status`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            file_path: filePath,
+            status: status
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // 刷新文件列表
+            loadFileList();
+            // 关闭模态框
+            bootstrap.Modal.getInstance(document.getElementById('diffModal')).hide();
+            // 状态更新成功，无需显示提示
+        } else {
+            showToast('更新状态失败: ' + data.message, 'error');
+        }
+    })
+    .catch(error => {
+        console.error('Error updating status:', error);
+        showToast('更新状态失败，请重试', 'error');
+    });
+}
+
+function confirmAllPending() {
+    // 获取当前筛选后的待确认文件
+    const pendingFiles = filteredFiles.filter(f => f.overall_status === 'pending');
+    const pendingCount = pendingFiles.length;
+
+    if (pendingCount === 0) {
+        showToast('没有待确认的文件', 'info');
+        return;
+    }
+
+    // 获取当前仓库名称
+    const currentRepoName = document.getElementById('currentRepositoryName')?.textContent || '当前仓库';
+
+    // 获取筛选信息
+    const filterInfo = getFilterInfo();
+    let confirmMessage = `确定要批量确认 ${currentRepoName} 的 ${pendingCount} 个文件吗？`;
+
+    if (filterInfo) {
+        confirmMessage = `确定要批量确认 ${currentRepoName} 中${filterInfo}的 ${pendingCount} 个文件吗？`;
+    }
+
+    if (confirm(confirmMessage)) {
+        // 发送待确认文件的路径列表到后端
+        const filePaths = pendingFiles.map(f => f.file_path);
+
+        fetch(`/weekly-version-config/${configId}/batch-confirm`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                file_paths: filePaths
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                showToast(`成功确认了 ${data.updated_count} 个文件`, 'success');
+                loadFileList();
+            } else {
+                showToast('批量确认失败: ' + data.message, 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error batch confirming:', error);
+            showToast('批量确认失败，请重试', 'error');
+        });
+    }
+}
+
+// 获取选中的状态数组
+function getSelectedStatuses() {
+    const statusSelect = document.getElementById('statusFilter');
+    if (!statusSelect || !statusSelect.value) {
+        return [];
+    }
+    return [statusSelect.value];
+}
+
+// 获取当前筛选信息的描述
+function getFilterInfo() {
+    const authorFilter = document.getElementById('authorFilter')?.value;
+    const fileTypeFilter = document.getElementById('fileTypeFilter')?.value;
+    const statusFilter = getSelectedStatuses();
+
+    let filterParts = [];
+
+    if (authorFilter) {
+        filterParts.push(`提交者"${authorFilter}"`);
+    }
+
+    if (fileTypeFilter && fileTypeFilter !== 'all') {
+        const fileTypeNames = {
+            'code': '代码文件',
+            'excel': 'Excel文件',
+            'image': '图片文件',
+            'other': '其他文件'
+        };
+        filterParts.push(`${fileTypeNames[fileTypeFilter] || fileTypeFilter}类型`);
+    }
+
+    if (statusFilter.length > 0 && statusFilter.length < 3) {
+        const statusNames = {
+            'pending': '待确认',
+            'confirmed': '已确认',
+            'rejected': '已拒绝'
+        };
+        const statusTexts = statusFilter.map(s => statusNames[s] || s);
+        filterParts.push(`状态为${statusTexts.join('、')}`);
+    }
+
+    return filterParts.length > 0 ? filterParts.join('、') : null;
+}
+
+// 重建Excel缓存
+function rebuildExcelCache() {
+    const btn = document.getElementById('rebuildCacheBtn');
+
+    console.log('🔄 用户点击重建缓存按钮，配置ID:', configId);
+
+    if (!confirm('确定要重建当前周版本的Excel合并diff缓存吗？\n\n这将清理现有缓存并重新生成，可能需要一些时间。')) {
+        console.log('❌ 用户取消了重建缓存操作');
+        return;
+    }
+
+    console.log('✅ 用户确认重建缓存，开始发送请求...');
+
+    // 禁用按钮并显示加载状态
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>重建中...';
+
+    const startTime = Date.now();
+    console.log('⏰ 请求开始时间:', new Date(startTime).toLocaleString());
+
+    fetch(`/admin/weekly-excel-cache/rebuild/${configId}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        }
+    })
+    .then(response => {
+        const endTime = Date.now();
+        const duration = endTime - startTime;
+        console.log('📡 收到服务器响应，耗时:', duration + 'ms', '状态码:', response.status);
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        return response.json();
+    })
+    .then(data => {
+        console.log('📊 服务器响应数据:', data);
+
+        if (data.success) {
+            console.log('✅ 重建缓存请求成功');
+            console.log('📈 统计信息:', {
+                taskCount: data.task_count,
+                deletedCount: data.deleted_count,
+                excelFiles: data.excel_files
+            });
+
+            showToast(data.message, 'success');
+
+            if (data.task_count > 0) {
+                const taskMessage = `已创建 ${data.task_count} 个缓存重建任务，请稍后查看结果`;
+                showToast(taskMessage, 'info');
+                console.log('🚀 任务创建完成:', taskMessage);
+
+                // 如果有文件列表，显示详细信息
+                if (data.excel_files && data.excel_files.length > 0) {
+                    console.log('📋 需要重建缓存的Excel文件列表:');
+                    data.excel_files.forEach((file, index) => {
+                        console.log(`  ${index + 1}. ${file}`);
+                    });
+                }
+
+                // 提示用户可以查看缓存管理页面
+                setTimeout(() => {
+                    showToast('可以访问 /admin/excel-cache 页面查看缓存生成进度', 'info');
+                }, 2000);
+            } else {
+                console.log('ℹ️ 没有创建任何任务');
+            }
+        } else {
+            console.error('❌ 重建缓存失败:', data.message);
+            showToast('重建缓存失败: ' + data.message, 'error');
+        }
+    })
+    .catch(error => {
+        console.error('💥 重建缓存请求异常:', error);
+        console.error('错误详情:', {
+            name: error.name,
+            message: error.message,
+            stack: error.stack
+        });
+        showToast('重建缓存失败，请重试: ' + error.message, 'error');
+    })
+    .finally(() => {
+        const finalTime = Date.now();
+        const totalDuration = finalTime - startTime;
+        console.log('🏁 重建缓存操作完成，总耗时:', totalDuration + 'ms');
+
+        // 恢复按钮状态
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-sync-alt me-2"></i>重建缓存';
+        console.log('🔄 按钮状态已恢复');
+    });
+}
+
+
+</script>
+{% endblock %}

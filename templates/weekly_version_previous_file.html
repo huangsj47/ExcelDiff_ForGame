@@ -1,0 +1,375 @@
+{% extends "base.html" %}
+
+{% block title %}{{ file_path }} - 上一版本 - 周版本diff{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.0">
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <!-- 面包屑导航 -->
+    <nav aria-label="breadcrumb" class="mb-3">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('index') }}">变更确认平台</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('project_detail', project_id=config.project_id) }}">{{ config.project.name }}</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('weekly_version_diff', config_id=config.id) }}">{{ config.name }}</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('weekly_version_file_full_diff', config_id=config.id, file_path=file_path) }}">{{ file_path.split('/')[-1] }}</a></li>
+            <li class="breadcrumb-item active">上一版本</li>
+        </ol>
+    </nav>
+
+    <!-- 文件信息卡片 -->
+    <div class="card mb-4">
+        <div class="card-header bg-light d-flex justify-content-between align-items-center">
+            <div class="d-flex align-items-center">
+                <h6 class="mb-0 me-3">文件信息</h6>
+                <span class="diff-type-badge text">文本文件</span>
+                <span class="badge bg-info ms-2">上一版本</span>
+            </div>
+            <div>
+                <button class="btn btn-outline-primary btn-sm me-2" onclick="copyFileContent()">
+                    <i class="bi bi-clipboard"></i> 复制内容
+                </button>
+                <button class="btn btn-outline-secondary btn-sm me-2" onclick="downloadFile()">
+                    <i class="bi bi-download"></i> 下载文件
+                </button>
+                <a href="{{ url_for('weekly_version_file_full_diff', config_id=config.id, file_path=file_path) }}" class="btn btn-secondary btn-sm">
+                    <i class="bi bi-arrow-left"></i> 返回diff
+                </a>
+            </div>
+        </div>
+        <div class="card-body py-3">
+            <div class="mb-3">
+                <strong>文件路径:</strong> <code>{{ file_path }}</code>
+            </div>
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="version-info baseline-version">
+                        <h6 class="version-title mb-2">基准版本</h6>
+                        <div><strong>提交ID:</strong> <code>{{ commit_info.short_id or commit_id[:8] }}</code></div>
+                        {% if commit_info %}
+                        <div><strong>提交时间:</strong> {{ commit_info.commit_time or '未知时间' }}</div>
+                        <div><strong>提交者:</strong> {{ commit_info.author or '未知作者' }}</div>
+                        {% if commit_info.message %}
+                        <div><strong>提交信息:</strong> {{ commit_info.message.strip() }}</div>
+                        {% endif %}
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="version-info file-status">
+                        <h6 class="version-title mb-2">文件状态</h6>
+                        <div><strong>操作类型:</strong> <span class="text-danger fw-bold">文件已删除</span></div>
+                        <div><strong>文件大小:</strong> {{ file_content.split('\n')|length }} 行</div>
+                        <div><strong>字符数:</strong> {{ file_content|length }} 字符</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 差异内容 -->
+    <div class="card">
+        <div class="card-header bg-light">
+            <h6 class="mb-0">
+                <i class="bi bi-file-earmark-text"></i> 文件内容
+                <span class="text-muted ms-2">共 {{ file_content.split('\n')|length }} 行</span>
+            </h6>
+        </div>
+        <div class="card-body p-0">
+            <!-- 使用与单文件diff相同的样式 -->
+            <div class="diff-content-container">
+                <div class="panel-content" style="background: white; font-family: 'Consolas', 'Monaco', 'Courier New', monospace; font-size: 13px; line-height: 1.4;">
+                    {% if file_content and file_content.strip() %}
+                        <div class="code-container" style="display: block; min-height: 100%; min-width: max-content; padding: 0;">
+                            {% for line in file_content.split('\n') %}
+                                <div class="code-line context" style="display: flex; min-height: 18.2px; line-height: 18.2px; min-width: max-content;">
+                                    <div class="line-number" style="padding: 0 0.5rem; color: #6c757d; font-size: 13px; height: 18.2px; line-height: 18.2px; flex-shrink: 0; min-width: 60px; text-align: right; box-sizing: border-box; background: #f8f9fa; border-right: 1px solid #e9ecef; user-select: none;">{{ loop.index }}</div>
+                                    <div class="line-text" style="padding: 0 0.5rem; height: 18.2px; line-height: 18.2px; white-space: nowrap; flex: 1; box-sizing: border-box; min-width: 0; overflow: visible;">{{ line if line else ' ' }}</div>
+                                </div>
+                            {% endfor %}
+                            <!-- 底部空白行，不显示行号 -->
+                            {% for i in range(10) %}
+                                <div class="code-line bottom-spacer" style="display: flex; min-height: 18.2px; line-height: 18.2px; min-width: max-content;">
+                                    <div class="line-number" style="padding: 0 0.5rem; color: transparent; font-size: 13px; height: 18.2px; line-height: 18.2px; flex-shrink: 0; min-width: 60px; text-align: right; box-sizing: border-box; background: #f8f9fa; border-right: 1px solid #e9ecef; user-select: none;"></div>
+                                    <div class="line-text" style="padding: 0 0.5rem; height: 18.2px; line-height: 18.2px; white-space: nowrap; flex: 1; box-sizing: border-box; min-width: 0; overflow: visible;"> </div>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <div class="text-center py-5 text-muted">
+                            <i class="bi bi-file-earmark-x fa-3x mb-3"></i>
+                            <p>文件为空或无内容</p>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+/* 代码显示样式 - 与单文件diff一致 */
+.code-line:hover {
+    background-color: #f8f9fa;
+}
+
+.code-line.context {
+    background-color: transparent;
+}
+
+/* 版本信息样式 */
+.version-info {
+    padding: 16px;
+    border-radius: 8px;
+    border: 1px solid #e9ecef;
+    transition: all 0.2s ease;
+}
+
+.version-info:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+/* 基准版本 - 浅黄色背景 */
+.version-info.baseline-version {
+    background: linear-gradient(135deg, #fff9e6 0%, #fef7e0 100%);
+    border-color: #f0d000;
+    border-left: 4px solid #f0d000;
+}
+
+/* 文件状态 - 浅红色背景 */
+.version-info.file-status {
+    background: linear-gradient(135deg, #ffe6e6 0%, #ffeaea 100%);
+    border-color: #dc3545;
+    border-left: 4px solid #dc3545;
+}
+
+.version-title {
+    color: #495057;
+    font-weight: 600;
+    margin-bottom: 12px;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.baseline-version .version-title {
+    color: #b8860b;
+}
+
+.file-status .version-title {
+    color: #dc3545;
+}
+
+.version-info div {
+    margin-bottom: 6px;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.version-info div:last-child {
+    margin-bottom: 0;
+}
+
+.version-info strong {
+    color: #495057;
+    font-weight: 600;
+}
+
+.version-info code {
+    background: rgba(0,0,0,0.05);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+}
+
+/* 差异类型标签样式 */
+.diff-type-badge {
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.diff-type-badge.text {
+    background: #e3f2fd;
+    color: #1976d2;
+}
+
+.diff-type-badge.excel {
+    background: #e8f5e8;
+    color: #2e7d32;
+}
+
+.diff-type-badge.image {
+    background: #fff3e0;
+    color: #f57c00;
+}
+
+.diff-type-badge.binary {
+    background: #fce4ec;
+    color: #c2185b;
+}
+
+/* 文本diff容器样式调整 */
+.text-diff-container {
+    max-height: 70vh;
+    overflow-y: auto;
+    font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    background: #f8f9fa;
+    border: 1px solid #e1e4e8;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.text-diff-header {
+    background: #fafbfc;
+    border-bottom: 1px solid #e1e4e8;
+    padding: 8px 16px;
+    font-weight: 600;
+    color: #24292e;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.text-diff-title {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0;
+}
+
+.text-diff-stats {
+    display: flex;
+    gap: 12px;
+    font-size: 11px;
+    color: #586069;
+}
+
+.text-diff-stat {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.text-diff-content {
+    background: #ffffff;
+}
+
+.text-diff-line {
+    display: flex;
+    font-size: 12px;
+    line-height: 20px;
+    border-bottom: 1px solid #f1f3f4;
+}
+
+.text-diff-line:hover {
+    background-color: #f8f9fa;
+}
+
+.text-diff-line-number {
+    width: 60px;
+    padding: 0 8px;
+    text-align: right;
+    font-size: 11px;
+    color: #586069;
+    background: #fafbfc;
+    border-right: 1px solid #e1e4e8;
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.text-diff-line-content {
+    flex: 1;
+    padding: 0 8px;
+    white-space: pre;
+    overflow-x: auto;
+    background: #ffffff;
+}
+
+.text-diff-line.context .text-diff-line-content {
+    color: #24292e;
+}
+
+/* 面包屑样式 */
+.breadcrumb-item a {
+    text-decoration: none;
+    color: #007bff;
+}
+
+.breadcrumb-item a:hover {
+    text-decoration: underline;
+}
+</style>
+
+<script>
+function copyFileContent() {
+    const content = `{{ file_content | replace('\n', '\\n') | replace('"', '\\"') | replace('\\', '\\\\') }}`;
+    navigator.clipboard.writeText(content).then(function() {
+        showToast('文件内容已复制到剪贴板', 'success');
+    }, function(err) {
+        console.error('复制失败:', err);
+        showToast('复制失败，请手动选择内容复制', 'error');
+    });
+}
+
+function downloadFile() {
+    const content = `{{ file_content | replace('\n', '\\n') | replace('"', '\\"') | replace('\\', '\\\\') }}`;
+    const filename = '{{ file_path.split("/")[-1] }}';
+
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+
+    showToast('文件下载已开始', 'success');
+}
+
+function showToast(message, type) {
+    // 使用Bootstrap Toast组件
+    const toastContainer = document.getElementById('toast-container') || createToastContainer();
+
+    const toastId = 'toast-' + Date.now();
+    const toastHtml = `
+        <div id="${toastId}" class="toast align-items-center text-white bg-${type === 'success' ? 'success' : 'danger'} border-0" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="d-flex">
+                <div class="toast-body">
+                    <i class="bi bi-${type === 'success' ? 'check-circle' : 'exclamation-circle'} me-2"></i>
+                    ${message}
+                </div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+        </div>
+    `;
+
+    toastContainer.insertAdjacentHTML('beforeend', toastHtml);
+    const toastElement = document.getElementById(toastId);
+    const toast = new bootstrap.Toast(toastElement);
+    toast.show();
+
+    // 自动清理DOM
+    toastElement.addEventListener('hidden.bs.toast', function() {
+        toastElement.remove();
+    });
+}
+
+function createToastContainer() {
+    const container = document.createElement('div');
+    container.id = 'toast-container';
+    container.className = 'toast-container position-fixed top-0 end-0 p-3';
+    container.style.zIndex = '9999';
+    document.body.appendChild(container);
+    return container;
+}
+</script>
+{% endblock %}

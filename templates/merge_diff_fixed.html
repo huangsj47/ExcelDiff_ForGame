@@ -1,0 +1,281 @@
+{% extends "base.html" %}
+
+{% block title %}diff多版本合并显示{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.0">
+<style>
+/* 多Excel文件显示样式 */
+.commit-diff-section {
+    position: relative;
+}
+
+.commit-diff-section:not(:first-child) {
+    border-top: 2px solid #dee2e6;
+    padding-top: 2rem;
+    margin-top: 2rem;
+}
+
+.commit-diff-section .diff-file-header {
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    padding: 1rem;
+    border-radius: 8px 8px 0 0;
+    border: 1px solid #dee2e6;
+    margin-bottom: 0;
+}
+
+.commit-diff-section .excel-diff-container {
+    border: 1px solid #dee2e6;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+}
+
+.file-path-display {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #495057;
+    margin-bottom: 0.5rem;
+}
+
+.commit-meta-info {
+    font-size: 0.9rem;
+    color: #6c757d;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-12">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h2>合并差异显示</h2>
+                <div>
+                    <button id="refreshMergeDiffBtn" class="btn btn-warning me-2" onclick="refreshMergeDiff()">
+                        <i class="fas fa-sync-alt"></i> 重新计算
+                    </button>
+                    <a href="{{ url_for('project_detail', project_id=project.id) }}" class="btn btn-secondary">
+                        <i class="fas fa-arrow-left"></i> 返回项目
+                    </a>
+                </div>
+            </div>
+
+            {% if merged_diff_data %}
+                <!-- 合并diff显示 -->
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">合并差异 - {{ commits[0].path }}</h5>
+                    </div>
+                    <div class="card-body">
+                        {% if merged_diff_data.type == 'excel' %}
+                            <!-- Excel合并diff显示 -->
+                            <div class="excel-diff-container">
+                                {% include 'diff_partials/excel_diff.html' %}
+                            </div>
+                        {% elif merged_diff_data.hunks %}
+                            <!-- 文本合并diff显示 -->
+                            <div class="diff-content">
+                                {% for hunk in merged_diff_data.hunks %}
+                                <div class="hunk">
+                                    <div class="hunk-header">{{ hunk.header }}</div>
+                                    {% for line in hunk.lines %}
+                                    <div class="line {{ line.type }}">
+                                        <span class="line-number old">{{ line.old_line_number if line.old_line_number else '' }}</span>
+                                        <span class="line-number new">{{ line.new_line_number if line.new_line_number else '' }}</span>
+                                        <span class="line-content">{{ line.content }}</span>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                        {% else %}
+                            <div class="alert alert-info">
+                                无法解析diff内容或文件无变更
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            {% else %}
+                <!-- 传统的逐个提交diff显示 -->
+                {% for commit_info in commits_with_diff %}
+                {% set commit = commit_info.commit %}
+                <div class="commit-diff-section mb-4">
+                    <div class="diff-container">
+                        <div class="diff-file-header">
+                            <div class="file-path-display">
+                                📄 {{ commit.path }}
+                            </div>
+                            <div class="commit-meta-info">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <div>
+                                        <span class="badge bg-primary">{{ commit.commit_id[:8] }}</span>
+                                        <span class="ms-2">{{ commit.message or '无提交消息' }}</span>
+                                    </div>
+                                    <div class="text-end">
+                                        <small class="text-muted">
+                                            版本: {{ commit.version }} | 
+                                            提交者: {{ commit.author }} | 
+                                            {% if commit.commit_time %}
+                                                {{ commit.commit_time.strftime('%m月%d日 %H:%M') }}
+                                            {% else %}
+                                                未知时间
+                                            {% endif %}
+                                        </small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {% set diff_data = commit_info.diff_data %}
+                        {% if diff_data %}
+                            {% if diff_data.type == 'excel' %}
+                                <!-- Excel diff显示 -->
+                                <div id="excel-diff-{{ commit.id }}" class="excel-diff-container">
+                                    {% include 'diff_partials/excel_diff.html' %}
+                                </div>
+                            {% elif diff_data.lines %}
+                                <!-- 文本diff显示 -->
+                                <div class="diff-content">
+                                    {% for line in diff_data.lines %}
+                                    <div class="line {{ line.type }}">
+                                        <span class="line-number old">{{ line.old_line_number if line.old_line_number else '' }}</span>
+                                        <span class="line-number new">{{ line.new_line_number if line.new_line_number else '' }}</span>
+                                        <span class="line-content">{{ line.content }}</span>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            {% else %}
+                                <div class="alert alert-info">
+                                    无差异内容或文件无变更
+                                </div>
+                            {% endif %}
+                        {% else %}
+                            <div class="alert alert-warning">
+                                无法获取diff数据
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/diff-handlers.js') }}"></script>
+<script>
+// 重新计算合并diff
+function refreshMergeDiff() {
+    const btn = document.getElementById('refreshMergeDiffBtn');
+    const originalText = btn.innerHTML;
+    
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 计算中...';
+    
+    const commitIds = {{ commit_ids | tojson }};
+    
+    fetch('/commits/merge-diff/refresh', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            commit_ids: commitIds
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            alert(data.message);
+            // 刷新页面显示重新计算的结果
+            window.location.reload();
+        } else {
+            alert('重新计算失败: ' + data.message);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('重新计算失败: ' + error.message);
+    })
+    .finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+    });
+}
+
+// 初始化Excel diff处理器
+document.addEventListener('DOMContentLoaded', function() {
+    // 为每个Excel diff容器初始化独立的处理器
+    {% for commit_info in commits_with_diff %}
+    {% set commit = commit_info.commit %}
+    {% set diff_data = commit_info.diff_data %}
+    {% if diff_data and diff_data.type == 'excel' %}
+    initExcelDiffForContainer('excel-diff-{{ commit.id }}', {{ diff_data | tojson }});
+    {% endif %}
+    {% endfor %}
+    
+    // 如果有合并的Excel diff，也需要初始化
+    {% if merged_diff_data and merged_diff_data.type == 'excel' %}
+    initExcelDiff({{ merged_diff_data | tojson }});
+    {% endif %}
+});
+
+// 为特定容器初始化Excel diff处理器
+function initExcelDiffForContainer(containerId, diffData) {
+    const container = document.getElementById(containerId);
+    if (!container || !diffData || !diffData.sheets) return;
+    
+    // 为该容器内的工作表标签添加点击事件
+    const sheetTabs = container.querySelectorAll('.sheet-tab');
+    sheetTabs.forEach(tab => {
+        tab.addEventListener('click', function() {
+            const sheetName = this.dataset.sheet;
+            showExcelSheetInContainer(containerId, sheetName, diffData);
+            
+            // 更新标签状态
+            container.querySelectorAll('.sheet-tab').forEach(t => t.classList.remove('active'));
+            this.classList.add('active');
+        });
+    });
+    
+    // 默认显示第一个工作表
+    const firstSheetName = Object.keys(diffData.sheets)[0];
+    if (firstSheetName) {
+        showExcelSheetInContainer(containerId, firstSheetName, diffData);
+        const firstTab = container.querySelector(`[data-sheet="${firstSheetName}"]`);
+        if (firstTab) firstTab.classList.add('active');
+    }
+}
+
+// 在特定容器中显示Excel工作表
+function showExcelSheetInContainer(containerId, sheetName, diffData) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    
+    const tableContainer = container.querySelector('.excel-table-container');
+    if (!tableContainer) return;
+    
+    const sheetData = diffData.sheets[sheetName];
+    if (!sheetData || !sheetData.rows) {
+        tableContainer.innerHTML = '<div class="alert alert-info">该工作表无数据</div>';
+        return;
+    }
+    
+    // 生成表格HTML
+    let tableHtml = '<table class="table table-sm excel-diff-table">';
+    
+    sheetData.rows.forEach((row, rowIndex) => {
+        tableHtml += '<tr>';
+        row.forEach((cell, colIndex) => {
+            const cellClass = cell.status ? `cell-${cell.status}` : '';
+            const cellContent = cell.value || '';
+            tableHtml += `<td class="${cellClass}">${cellContent}</td>`;
+        });
+        tableHtml += '</tr>';
+    });
+    
+    tableHtml += '</table>';
+    tableContainer.innerHTML = tableHtml;
+}
+</script>
+{% endblock %}

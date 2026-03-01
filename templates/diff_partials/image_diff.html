@@ -1,0 +1,98 @@
+<!-- 图片文件差异显示 (并排对比) -->
+<div class="image-diff-container">
+    <div class="image-diff-header">
+        <div class="d-flex align-items-center">
+            <i class="bi bi-image me-2"></i>
+            <h5 class="mb-0">图片差异对比</h5>
+        </div>
+        <div class="image-diff-operation">
+            <span class="badge bg-{{ 'success' if diff_data.operation == 'added' else ('warning' if diff_data.operation == 'modified' else 'secondary') }}">
+                {% if diff_data.operation == 'added' %}新增图片
+                {% elif diff_data.operation == 'modified' %}图片已修改
+                {% else %}图片未变更
+                {% endif %}
+            </span>
+        </div>
+    </div>
+    
+    <div class="image-diff-content">
+        {% if diff_data.previous_image %}
+        <!-- 有对比图片的情况 -->
+        <div class="image-diff-comparison">
+            <div class="image-diff-side">
+                <div class="image-diff-side-header">
+                    <i class="bi bi-arrow-left me-2"></i>修改前
+                </div>
+                <div class="image-diff-side-content">
+                    <img src="data:image/{{ diff_data.previous_image.info.format.lower() if diff_data.previous_image.info.format else 'png' }};base64,{{ diff_data.previous_image.base64 }}" 
+                         class="image-diff-image" alt="修改前的图片">
+                    <div class="image-diff-info">
+                        {% if diff_data.previous_image.info %}
+                        <div>尺寸: {{ diff_data.previous_image.info.width }}×{{ diff_data.previous_image.info.height }}</div>
+                        <div>格式: {{ diff_data.previous_image.info.format or '未知' }}</div>
+                        <div>大小: {{ (diff_data.previous_image.info.size_bytes / 1024) | round(1) }} KB</div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            
+            <div class="image-diff-side">
+                <div class="image-diff-side-header">
+                    <i class="bi bi-arrow-right me-2"></i>修改后
+                </div>
+                <div class="image-diff-side-content">
+                    <img src="data:image/{{ diff_data.current_image.info.format.lower() if diff_data.current_image.info.format else 'png' }};base64,{{ diff_data.current_image.base64 }}" 
+                         class="image-diff-image" alt="修改后的图片">
+                    <div class="image-diff-info">
+                        {% if diff_data.current_image.info %}
+                        <div>尺寸: {{ diff_data.current_image.info.width }}×{{ diff_data.current_image.info.height }}</div>
+                        <div>格式: {{ diff_data.current_image.info.format or '未知' }}</div>
+                        <div>大小: {{ (diff_data.current_image.info.size_bytes / 1024) | round(1) }} KB</div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 变更统计 -->
+        <div class="image-diff-stats">
+            <h6>变更统计</h6>
+            <div class="image-diff-stat-row">
+                <span>图片状态:</span>
+                <span class="fw-bold text-{{ 'success' if diff_data.is_same else 'warning' }}">
+                    {{ '相同' if diff_data.is_same else '已修改' }}
+                </span>
+            </div>
+            {% if diff_data.current_image.info and diff_data.previous_image.info %}
+            <div class="image-diff-stat-row">
+                <span>尺寸变化:</span>
+                <span>{{ diff_data.previous_image.info.width }}×{{ diff_data.previous_image.info.height }} → {{ diff_data.current_image.info.width }}×{{ diff_data.current_image.info.height }}</span>
+            </div>
+            <div class="image-diff-stat-row">
+                <span>大小变化:</span>
+                <span>{{ (diff_data.previous_image.info.size_bytes / 1024) | round(1) }} KB → {{ (diff_data.current_image.info.size_bytes / 1024) | round(1) }} KB</span>
+            </div>
+            {% endif %}
+        </div>
+        
+        {% else %}
+        <!-- 新增图片的情况 -->
+        <div class="image-diff-no-previous">
+            <h6><i class="bi bi-plus-circle me-2"></i>新增图片</h6>
+            <p class="mb-3">这是一个新添加的图片文件</p>
+        </div>
+        
+        <div class="text-center">
+            <img src="data:image/{{ diff_data.current_image.info.format.lower() if diff_data.current_image.info.format else 'png' }};base64,{{ diff_data.current_image.base64 }}" 
+                 class="image-diff-image" alt="新增的图片" style="max-width: 80%;">
+            <div class="image-diff-info mt-3">
+                {% if diff_data.current_image.info %}
+                <div>尺寸: {{ diff_data.current_image.info.width }}×{{ diff_data.current_image.info.height }}</div>
+                <div>格式: {{ diff_data.current_image.info.format or '未知' }}</div>
+                <div>大小: {{ (diff_data.current_image.info.size_bytes / 1024) | round(1) }} KB</div>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>

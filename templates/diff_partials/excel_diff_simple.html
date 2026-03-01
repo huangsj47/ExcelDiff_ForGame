@@ -1,0 +1,70 @@
+<!-- 简化的Excel文件差异显示 -->
+<div class="excel-diff-container">
+    <div class="excel-diff-header">
+        <div class="d-flex align-items-center">
+            <i class="bi bi-file-earmark-spreadsheet me-2"></i>
+            <h5 class="excel-diff-title">Excel表格差异</h5>
+        </div>
+    </div>
+    
+    {% set excel_data = sheet_data if sheet_data else diff_data %}
+    {% if excel_data and excel_data.sheets %}
+    <div class="excel-content-area">
+        {% for sheet_name, sheet_data in excel_data.sheets.items() %}
+        <div class="excel-sheet-content">
+            <h6>工作表: {{ sheet_name }}</h6>
+            
+            {% if sheet_data.rows %}
+            <div class="excel-table-wrapper">
+                <table class="table table-bordered table-sm">
+                    <thead>
+                        <tr>
+                            <th>行号</th>
+                            {% for header in sheet_data.headers[:10] %}
+                            <th>{{ header }}</th>
+                            {% endfor %}
+                            {% if sheet_data.headers|length > 10 %}
+                            <th>...</th>
+                            {% endif %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in sheet_data.rows[:20] %}
+                        <tr class="{% if row.status == 'modified' %}table-warning{% elif row.status == 'added' %}table-success{% elif row.status == 'removed' %}table-danger{% endif %}">
+                            <td>{{ row.row_number }}</td>
+                            {% for cell in row.cells[:10] %}
+                            <td class="{% if cell.status == 'changed' %}text-primary fw-bold{% elif cell.status == 'added' %}text-success{% elif cell.status == 'removed' %}text-danger{% endif %}">
+                                {{ cell.value|truncate(50) }}
+                            </td>
+                            {% endfor %}
+                            {% if row.cells|length > 10 %}
+                            <td>...</td>
+                            {% endif %}
+                        </tr>
+                        {% endfor %}
+                        {% if sheet_data.rows|length > 20 %}
+                        <tr>
+                            <td colspan="12" class="text-center text-muted">
+                                ... 还有 {{ sheet_data.rows|length - 20 }} 行数据
+                            </td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="p-3 text-muted text-center">
+                <p>工作表 "{{ sheet_name }}" 没有数据或无变更</p>
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="p-4 text-center text-muted">
+        <i class="bi bi-file-earmark-spreadsheet fs-1 mb-3"></i>
+        <p>没有找到Excel工作表数据</p>
+        <small>调试信息: excel_data={{ excel_data is defined }}, sheets={{ excel_data.sheets is defined if excel_data else 'N/A' }}</small>
+    </div>
+    {% endif %}
+</div>

@@ -1,0 +1,90 @@
+<!-- 二进制文件差异显示 (信息提示) -->
+<div class="binary-diff-container">
+    <div class="binary-diff-header">
+        <div class="d-flex align-items-center">
+            <i class="bi bi-file-binary me-2"></i>
+            <h5 class="mb-0">二进制文件</h5>
+        </div>
+        <div class="binary-diff-operation">
+            <span class="badge bg-{{ 'success' if diff_data.operation == 'added' else ('warning' if diff_data.operation == 'modified' else 'secondary') }}">
+                {% if diff_data.operation == 'added' %}新增文件
+                {% elif diff_data.operation == 'modified' %}文件已修改
+                {% else %}文件未变更
+                {% endif %}
+            </span>
+        </div>
+    </div>
+    
+    <div class="binary-diff-content">
+        <div class="binary-diff-icon">
+            <i class="bi bi-file-earmark-binary"></i>
+        </div>
+        
+        <div class="binary-diff-message">
+            二进制文件无法显示差异内容
+        </div>
+        
+        <p class="text-muted">
+            此文件为二进制格式，无法以文本方式显示具体的变更内容。
+            您可以通过下载文件来查看具体变化。
+        </p>
+        
+        <div class="binary-diff-info">
+            <h6>文件信息</h6>
+            
+            <div class="binary-info-row">
+                <span class="binary-info-label">文件路径:</span>
+                <span class="binary-info-value"><code>{{ diff_data.file_path }}</code></span>
+            </div>
+            
+            <div class="binary-info-row">
+                <span class="binary-info-label">MIME类型:</span>
+                <span class="binary-info-value">{{ diff_data.mime_type or '未知' }}</span>
+            </div>
+            
+            <div class="binary-info-row">
+                <span class="binary-info-label">当前大小:</span>
+                <span class="binary-info-value">{{ (diff_data.current_size / 1024) | round(2) }} KB</span>
+            </div>
+            
+            {% if diff_data.previous_size > 0 %}
+            <div class="binary-info-row">
+                <span class="binary-info-label">之前大小:</span>
+                <span class="binary-info-value">{{ (diff_data.previous_size / 1024) | round(2) }} KB</span>
+            </div>
+            
+            <div class="binary-info-row">
+                <span class="binary-info-label">大小变化:</span>
+                <span class="binary-info-value">
+                    {% set size_change = diff_data.size_change %}
+                    {% if size_change > 0 %}
+                        <span class="binary-size-change positive">+{{ (size_change / 1024) | round(2) }} KB</span>
+                    {% elif size_change < 0 %}
+                        <span class="binary-size-change negative">{{ (size_change / 1024) | round(2) }} KB</span>
+                    {% else %}
+                        <span class="binary-size-change neutral">无变化</span>
+                    {% endif %}
+                </span>
+            </div>
+            {% endif %}
+            
+            <div class="binary-info-row">
+                <span class="binary-info-label">文件状态:</span>
+                <span class="binary-info-value">
+                    {% if diff_data.is_same %}
+                        <span class="text-success"><i class="bi bi-check-circle"></i> 文件内容相同</span>
+                    {% else %}
+                        <span class="text-warning"><i class="bi bi-exclamation-circle"></i> 文件内容已变更</span>
+                    {% endif %}
+                </span>
+            </div>
+        </div>
+        
+        <div class="mt-4 text-center">
+            <div class="alert alert-info">
+                <i class="bi bi-info-circle me-2"></i>
+                <strong>提示:</strong> 如需查看具体变更，请使用专门的二进制文件比较工具，或联系开发人员获取更多信息。
+            </div>
+        </div>
+    </div>
+</div>

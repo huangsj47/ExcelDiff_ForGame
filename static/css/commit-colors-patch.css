@@ -1,0 +1,39 @@
+/* 提交列表行状态背景色 - 更浅的颜色 */
+.commit-row-added {
+    background-color: #e8f5e8 !important; /* 更浅的绿色 - 新增 */
+}
+
+.commit-row-deleted {
+    background-color: #fdeced !important; /* 更浅的红色 - 删除 */
+}
+
+/* 鼠标悬停效果 */
+.commit-row-added:hover {
+    background-color: #d4f6d4 !important;
+}
+
+.commit-row-deleted:hover {
+    background-color: #f8d7da !important;
+}
+
+/* 操作标记样式 - 也调整为更浅的颜色 */
+.operation-A {
+    background: #e8f5e8;
+    color: #1a7f37;
+}
+
+.operation-D {
+    background: #fdeced;
+    color: #cf222e;
+}
+
+/* 状态标记样式 - 调整确认和拒绝状态的颜色 */
+.status-confirmed {
+    background: #e8f5e8;
+    color: #1a7f37;
+}
+
+.status-rejected {
+    background: #fdeced;
+    color: #cf222e;
+}

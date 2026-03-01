@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+
+{% block title %}{{ project.name }} - 项目详情{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h2>{{ project.name }}</h2>
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{{ url_for('index') }}">项目列表</a></li>
+                    <li class="breadcrumb-item active">{{ project.name }}</li>
+                </ol>
+            </nav>
+        </div>
+        <div>
+            <div class="btn-group me-2" role="group">
+                <a href="{{ url_for('merged_project_view', project_id=project.id) }}" class="btn btn-success">
+                    <i class="fas fa-th-large me-2"></i>项目概览
+                </a>
+                <a href="{{ url_for('weekly_version_list', project_id=project.id) }}" class="btn btn-outline-success">
+                    <i class="fas fa-calendar-week me-2"></i>周版本diff
+                </a>
+                <a href="{{ url_for('weekly_version_config', project_id=project.id) }}" class="btn btn-outline-success">
+                    <i class="fas fa-cog me-2"></i>配置周版本
+                </a>
+            </div>
+            <a href="{{ url_for('repository_config', project_id=project.id) }}" class="btn btn-primary">
+                <i class="fas fa-cog me-2"></i>配置仓库
+            </a>
+        </div>
+    </div>
+
+    {% if repositories %}
+    <div class="row">
+        {% for repo in repositories %}
+        <div class="col-md-6 col-lg-4 mb-3">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h6 class="mb-0">{{ repo.name }}</h6>
+                    <span class="badge bg-{% if repo.type == 'git' %}success{% else %}primary{% endif %}">
+                        {{ repo.type.upper() }}
+                    </span>
+                </div>
+                <div class="card-body">
+                    <p class="card-text">
+                        <small class="text-muted">资源类型:</small> 
+                        <span class="badge bg-secondary">
+                            {% if repo.resource_type == 'code' %}代码
+                            {% elif repo.resource_type == 'table' %}配置表
+                            {% elif repo.resource_type == 'res' %}资源
+                            {% else %}{{ repo.resource_type }}{% endif %}
+                        </span>
+                    </p>
+                    <p class="card-text">
+                        <small class="text-muted">分支/版本:</small> 
+                        {{ repo.branch or repo.current_version or '-' }}
+                    </p>
+                    <p class="card-text">
+                        <small class="text-muted">创建时间:</small> 
+                        {{ repo.created_at.strftime('%Y-%m-%d') }}
+                    </p>
+                </div>
+                <div class="card-footer">
+                    <div class="btn-group w-100" role="group">
+                        <a href="{{ url_for('commit_list', repository_id=repo.id) }}" class="btn btn-primary btn-sm">
+                            <i class="fas fa-list me-1"></i>提交记录
+                        </a>
+                        <a href="{{ url_for('weekly_version_list', project_id=project.id, repository_id=repo.id) }}" class="btn btn-success btn-sm">
+                            <i class="fas fa-calendar-week me-1"></i>周版本
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="text-center py-5">
+        <i class="fas fa-database fa-3x text-muted mb-3"></i>
+        <h4 class="text-muted">暂无仓库配置</h4>
+        <p class="text-muted">请先配置项目的代码仓库</p>
+        <a href="{{ url_for('repository_config', project_id=project.id) }}" class="btn btn-primary">
+            立即配置
+        </a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

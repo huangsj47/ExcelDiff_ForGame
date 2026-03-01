@@ -1,0 +1,1566 @@
+/* 自定义样式 */
+.navbar-brand {
+    font-weight: bold;
+}
+
+/* Excel 加载指示器样式 */
+#excel-loading-indicator {
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(5px);
+    border-radius: 10px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+}
+
+#excel-loading-indicator .spinner-border {
+    width: 3rem;
+    height: 3rem;
+}
+
+.progress-bar-striped.progress-bar-animated {
+    animation: progress-bar-stripes 1s linear infinite;
+}
+
+@keyframes progress-bar-stripes {
+    0% { background-position: 1rem 0; }
+    100% { background-position: 0 0; }
+}
+
+/* 旋转动画 */
+.spin {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* 标签页切换加载覆盖层 */
+.tab-switch-loading-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(3px);
+    z-index: 1000;
+    border-radius: 8px;
+    min-height: 200px;
+}
+
+.excel-content-area {
+    position: relative;
+}
+
+/* 防止内容闪烁的平滑过渡 */
+.card-body {
+    transition: opacity 0.2s ease-in-out;
+}
+
+.excel-diff-container {
+    transition: opacity 0.3s ease-in-out, transform 0.3s ease-in-out;
+}
+
+.excel-diff-container.loading {
+    opacity: 0.7;
+    transform: translateY(10px);
+}
+
+/* 页面切换时的平滑过渡 */
+body {
+    transition: opacity 0.15s ease-in-out;
+}
+
+/* 防止FOUC (Flash of Unstyled Content) */
+.excel-sheet-content {
+    opacity: 0;
+    transition: opacity 0.25s ease-in-out;
+}
+
+.excel-sheet-content.active {
+    opacity: 1;
+}
+
+/* 加载状态的平滑过渡 */
+#excel-loading-indicator {
+    transition: opacity 0.2s ease-in-out;
+}
+
+/* 表格内容的渐入效果 */
+.excel-diff-table {
+    animation: fadeInUp 0.4s ease-out;
+}
+
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* 提交列表行状态背景色 */
+.commit-row-added {
+    background-color: #d4f6d4 !important; /* 浅绿色 - 新增 */
+}
+
+.commit-row-deleted {
+    background-color: #f8d7da !important; /* 浅红色 - 删除 */
+}
+
+/* 鼠标悬停效果 */
+.commit-row-added:hover {
+    background-color: #c3f0c3 !important;
+}
+
+.commit-row-deleted:hover {
+    background-color: #f1c2c7 !important;
+}
+
+.commit-row-modified:hover {
+    background-color: #f8f9fa !important;
+}
+
+.table-hover tbody tr:hover {
+    background-color: #f8f9fa;
+}
+
+.status-pending {
+    color: #ffc107;
+}
+
+.status-confirmed {
+    color: #198754;
+}
+
+.status-rejected {
+    color: #dc3545;
+}
+
+.diff-added {
+    background-color: #d4edda;
+    border-left: 4px solid #28a745;
+    padding: 8px;
+    margin: 2px 0;
+}
+
+.diff-removed {
+    background-color: #f8d7da;
+    border-left: 4px solid #dc3545;
+    padding: 8px;
+    margin: 2px 0;
+}
+
+.diff-modified {
+    background-color: #fff3cd;
+    border-left: 3px solid #ffc107;
+    padding: 8px;
+    margin: 2px 0;
+}
+
+.excel-table {
+    font-size: 0.9rem;
+}
+
+.excel-table th, .excel-table td {
+    border: 1px solid #dee2e6;
+    padding: 0.375rem;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.footer {
+    margin-top: 50px;
+    padding: 20px 0;
+    background-color: #f8f9fa;
+    border-top: 1px solid #dee2e6;
+}
+
+/* 项目卡片样式 */
+.project-card {
+    transition: transform 0.2s;
+}
+
+.project-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+/* 仓库状态指示器 */
+.repo-status {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 5px;
+}
+
+.repo-status.active {
+    background-color: #28a745;
+}
+
+.repo-status.inactive {
+    background-color: #dc3545;
+}
+
+/* 提交记录表格样式 */
+.commit-table {
+    font-size: 11.55px;
+    table-layout: auto;
+    width: 100%;
+}
+
+/* Excel差异容器 */
+.excel-diff-container {
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #ffffff;
+}
+
+/* Sheet标签栏 */
+.excel-sheet-tabs {
+    display: flex;
+    background: #f8f9fa;
+    border-bottom: 1px solid #dee2e6;
+    padding: 0;
+    margin: 0;
+    overflow-x: auto;
+}
+
+.excel-sheet-tab {
+    padding: 8px 16px;
+    cursor: pointer;
+    border-right: 1px solid #dee2e6;
+    white-space: nowrap;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+    position: relative;
+}
+
+.excel-sheet-tab.active {
+    background: #ffffff;
+    border-bottom: 2px solid #007bff;
+}
+
+.excel-sheet-tab.modified {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.excel-sheet-tab.unchanged {
+    background: #e9ecef;
+    color: #6c757d;
+}
+
+.excel-sheet-tab:hover {
+    background: #e9ecef;
+}
+
+/* 主表格容器 */
+.excel-main-table-container {
+    position: relative;
+    overflow: auto;
+    max-height: 600px;
+    border: 1px solid #dee2e6;
+}
+
+/* Excel差异表格样式 */
+.excel-diff-table {
+    table-layout: fixed;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 12px;
+    margin: 0;
+    min-width: 100%;
+}
+
+/* 列标题（A, B, C, D...） */
+.excel-column-header {
+    background: #f1f3f4;
+    border: 1px solid #dee2e6;
+    text-align: center;
+    font-weight: 600;
+    font-size: 11px;
+    color: #5f6368;
+    padding: 4px 8px;
+    min-width: 80px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+/* 有变化的列标题 */
+.excel-column-header-modified {
+    background: #fff3cd !important;
+    border: 1px solid #ffc107 !important;
+    color: #856404 !important;
+    font-weight: 700 !important;
+}
+
+/* 行标题（1, 2, 3, 4...） */
+.excel-row-header {
+    background: #f1f3f4;
+    border: 1px solid #dee2e6;
+    text-align: center;
+    font-weight: 600;
+    font-size: 11px;
+    color: #5f6368;
+    padding: 4px 8px;
+    width: 50px;
+    min-width: 50px;
+    position: sticky;
+    left: 0;
+    z-index: 5;
+}
+
+/* 有变化的行标题 */
+.excel-row-header-added {
+    background: #d4edda !important;
+    border: 1px solid #28a745 !important;
+    color: #155724 !important;
+}
+
+.excel-row-header-removed {
+    background: #f8d7da !important;
+    border: 1px solid #dc3545 !important;
+    color: #721c24 !important;
+}
+
+.excel-row-header-modified {
+    background: #fff3cd !important;
+    border: 1px solid #ffc107 !important;
+    color: #856404 !important;
+}
+
+/* 左上角交叉单元格 */
+.excel-corner-cell {
+    background: #f1f3f4;
+    border: 1px solid #dee2e6;
+    width: 50px;
+    min-width: 50px;
+    position: sticky;
+    left: 0;
+    top: 0;
+    z-index: 15;
+    background-color: #e9ecef !important;
+    text-align: center;
+    font-weight: bold;
+    min-width: 50px !important;
+    max-width: 50px !important;
+}
+
+/* 表头行（多行表头支持） */
+.excel-header-row {
+    background: #f8f9fa;
+    border-bottom: 2px solid #dee2e6;
+}
+
+.excel-header-cell {
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    padding: 8px;
+    text-align: center;
+    font-weight: 600;
+    font-size: 12px;
+    white-space: nowrap;
+    position: sticky;
+    z-index: 8;
+    background-color: #f8f9fa;
+    font-weight: bold;
+    min-width: 100px;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 数据单元格 */
+.excel-data-cell {
+    border: 1px solid #e1e5e9;
+    padding: 4px 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 12px;
+    min-width: 80px;
+    background: #ffffff;
+    font-family: 'Courier New', monospace;
+    min-width: 100px;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 修改状态样式 */
+.excel-cell-added {
+    background-color: #d4edda !important;
+    border-left: 3px solid #28a745;
+}
+
+.excel-cell-removed {
+    background-color: #f8d7da !important;
+    border-left: 3px solid #dc3545;
+}
+
+.excel-cell-modified {
+    background-color: #fff3cd !important;
+    border-left: 3px solid #ffc107;
+    background-color: #fff3cd !important;
+    border-color: #ffeaa7 !important;
+}
+
+/* 修改行双行显示样式 */
+.excel-modified-cell-old {
+    background-color: #f8d7da !important;
+    color: #721c24;
+    border-left: 3px solid #dc3545;
+}
+
+.excel-modified-cell-new {
+    background-color: #d4edda !important;
+    color: #155724;
+    border-left: 3px solid #28a745;
+}
+
+.excel-unchanged-cell {
+    background-color: #ffffff !important;
+    color: #495057;
+}
+
+/* 修改详情显示 */
+.excel-modified-section {
+    margin-top: 20px;
+    border: 1px solid #dee2e6;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.excel-modified-header {
+    background: #f8f9fa;
+    padding: 12px 16px;
+    border-bottom: 1px solid #dee2e6;
+    font-weight: 600;
+    color: #495057;
+}
+
+.excel-modified-row {
+    display: flex;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.excel-modified-cell {
+    flex: 1;
+    min-width: 120px;
+    border-right: 1px solid #e9ecef;
+}
+
+.excel-modified-cell-header {
+    background: #f1f3f4;
+    padding: 8px 12px;
+    font-weight: 600;
+    font-size: 11px;
+    color: #5f6368;
+    border-bottom: 1px solid #dee2e6;
+}
+
+.excel-modified-cell-old {
+    background: #f8d7da;
+    padding: 8px 12px;
+    color: #721c24;
+    font-size: 12px;
+    border-bottom: 1px solid #f5c6cb;
+}
+
+.excel-modified-cell-new {
+    background: #d4edda;
+    padding: 8px 12px;
+    color: #155724;
+    font-size: 12px;
+}
+
+/* Excel变更区域样式 */
+.excel-changes-section {
+    border: 1px solid #e9ecef;
+    border-radius: 6px;
+    padding: 0;
+    background-color: #ffffff;
+}
+
+.excel-changes-section h6 {
+    background-color: #f8f9fa;
+    padding: 12px 16px;
+    margin: 0 0 16px 0;
+    border-bottom: 1px solid #e9ecef;
+    border-radius: 6px 6px 0 0;
+}
+
+/* 表格容器横向滚动 */
+.table-responsive {
+    overflow-x: auto;
+    overflow-y: auto;
+    position: relative;
+}
+
+/* 增强的滚动条样式 */
+.table-responsive::-webkit-scrollbar {
+    height: 12px;
+    width: 12px;
+}
+
+.table-responsive::-webkit-scrollbar-track {
+    background: #f8f9fa;
+    border-radius: 6px;
+    border: 1px solid #e9ecef;
+}
+
+.table-responsive::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, #007bff 0%, #0056b3 100%);
+    border-radius: 6px;
+    border: 2px solid #f8f9fa;
+    min-height: 30px;
+}
+
+.table-responsive::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, #0056b3 0%, #004085 100%);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+
+.table-responsive::-webkit-scrollbar-corner {
+    background: #f8f9fa;
+}
+
+/* 滚动进度指示器 */
+.scroll-progress-container {
+    position: absolute;
+    right: 15px;
+    top: 10px;
+    width: 120px;
+    height: 20px;
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid #dee2e6;
+    border-radius: 10px;
+    padding: 2px;
+    z-index: 15;
+    font-size: 10px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.scroll-progress-bar {
+    position: absolute;
+    left: 2px;
+    top: 2px;
+    height: 16px;
+    background: linear-gradient(90deg, #28a745 0%, #20c997 100%);
+    border-radius: 8px;
+    transition: width 0.1s ease;
+    min-width: 2px;
+}
+
+.scroll-progress-text {
+    position: relative;
+    z-index: 2;
+    color: #495057;
+    font-weight: 600;
+    text-shadow: 0 1px 2px rgba(255,255,255,0.8);
+}
+
+/* 固定表头 */
+.sticky-top {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background-color: #f8f9fa !important;
+}
+
+/* 优化无变化行的样式 */
+.excel-row-unchanged {
+    background-color: #ffffff !important;
+}
+
+.excel-row-unchanged td {
+    background-color: #ffffff;
+}
+
+.commit-table th {
+    background-color: #f8f9fa;
+    font-weight: 600;
+    border-bottom: 2px solid #dee2e6;
+    padding: 4px 3px;
+    vertical-align: middle;
+    text-align: center;
+    font-size: 11.55px;
+    white-space: nowrap;
+    line-height: 1.1;
+}
+
+.commit-table th.compact-col {
+    padding: 4px 2px;
+    font-size: 11.55px;
+    line-height: 1.1;
+}
+
+.commit-table td {
+    vertical-align: middle;
+    text-align: center;
+    padding: 2.6px 3px;
+    word-wrap: break-word;
+    overflow: visible;
+    font-size: 11.55px;
+    line-height: 1.1;
+}
+
+.commit-table td.compact-cell {
+    padding: 2.6px 2px;
+    text-align: center;
+    line-height: 1.1;
+}
+
+.commit-table td.author-cell {
+    text-align: left;
+    padding-left: 4px;
+    padding-top: 2.6px;
+    padding-bottom: 2.6px;
+    line-height: 1.1;
+}
+
+.commit-table td.path-cell {
+    text-align: left;
+    padding-left: 4px;
+    padding-right: 2px;
+    padding-top: 2.6px;
+    padding-bottom: 2.6px;
+    line-height: 1.1;
+}
+
+.commit-table td.message-cell {
+    text-align: left;
+    padding-left: 4px;
+    padding-right: 2px;
+    padding-top: 2.6px;
+    padding-bottom: 2.6px;
+    line-height: 1.1;
+}
+
+
+/* 提交日志列样式 */
+.commit-message-cell {
+    text-align: left;
+    width: 100%;
+}
+
+.commit-message-cell .text-truncate {
+    color: #495057;
+    font-size: 11.55px;
+    line-height: 1.1;
+    word-break: break-word;
+    display: block;
+    width: 100%;
+}
+
+/* 文件路径列样式 */
+.path-link .text-truncate {
+    font-size: 11.55px;
+    word-break: break-word;
+    display: block;
+    width: 100%;
+    line-height: 1.1;
+}
+
+/* Excel风格紧凑布局 */
+.table-responsive {
+    overflow-x: auto;
+    overflow-y: visible;
+}
+
+.commit-table {
+    margin-bottom: 0;
+    border-collapse: separate;
+    border-spacing: 0;
+    position: relative;
+}
+
+.commit-table th,
+.commit-table td {
+    border-right: 1px solid #dee2e6;
+    border-bottom: 1px solid #dee2e6;
+}
+
+.commit-table th:last-child,
+.commit-table td:last-child {
+    border-right: none;
+}
+
+/* 操作列下拉菜单修复 */
+.action-buttons .dropdown {
+    position: relative;
+}
+
+/* 操作列中的下拉菜单样式 */
+td .dropdown {
+    position: relative;
+}
+
+td .dropdown-menu {
+    position: absolute !important;
+    top: 100% !important;
+    left: 0 !important;
+    right: auto !important;
+    z-index: 99999 !important;
+    display: none !important;
+    visibility: hidden;
+    min-width: 150px;
+    background: white;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    white-space: nowrap;
+    pointer-events: auto;
+}
+
+td .dropdown-menu.show {
+    display: block !important;
+    visibility: visible !important;
+}
+
+td .dropdown-menu a {
+    display: block;
+    padding: 8px 15px;
+    clear: both;
+    font-weight: normal;
+    line-height: 1.4;
+    color: #333;
+    text-decoration: none;
+    white-space: nowrap;
+    font-size: 12px;
+}
+
+td .dropdown-menu a:hover {
+    background-color: #f5f5f5;
+    color: #262626;
+}
+
+.action-buttons {
+    position: relative;
+    z-index: 10;
+}
+
+.action-btn {
+    padding: 2px 6px;
+    font-size: 10px;
+    border: none;
+    border-radius: 3px;
+    margin-right: 2px;
+    cursor: pointer;
+}
+
+.dropdown-btn {
+    background-color: #6c757d;
+    color: white;
+}
+
+.dropdown-btn:hover {
+    background-color: #5a6268;
+}
+
+.approve-btn {
+    background-color: #28a745;
+    color: white;
+}
+
+.detail-btn {
+    background-color: #17a2b8;
+    color: white;
+    text-decoration: none;
+}
+
+.rejected-btn {
+    background-color: #6c757d;
+    color: white;
+    opacity: 0.6;
+}
+
+
+/* 差异显示样式 */
+.diff-container {
+    background-color: #f8f9fa;
+    border-radius: 5px;
+    padding: 15px;
+}
+
+.diff-line {
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 1.4;
+    margin: 1px 0;
+    padding: 2px 5px;
+}
+
+.diff-line.added {
+    background-color: #d4edda;
+    color: #155724;
+}
+
+.diff-line.removed {
+    background-color: #f8d7da;
+    color: #721c24;
+}
+
+.diff-line.modified {
+    background-color: #fff3cd;
+    color: #856404;
+}
+
+/* 表单样式改进 */
+.form-label {
+    font-weight: 500;
+    color: #495057;
+}
+
+.required-field::after {
+    content: " *";
+    color: #dc3545;
+}
+
+/* 按钮组样式 */
+.btn-group-custom .btn {
+    margin-right: 5px;
+    margin-bottom: 5px;
+}
+
+/* 加载动画 */
+.loading {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 3px solid #f3f3f3;
+    border-top: 3px solid #3498db;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+    .container-fluid {
+        padding-left: 10px;
+        padding-right: 10px;
+    }
+    
+    .table-responsive {
+        font-size: 12px;
+    }
+    
+    .btn-group-custom .btn {
+        font-size: 12px;
+        padding: 4px 8px;
+    }
+}
+
+/* 标签页样式 */
+.nav-tabs .nav-link {
+    color: #495057;
+    border: 1px solid transparent;
+}
+
+.nav-tabs .nav-link.active {
+    background-color: #fff;
+    border-color: #dee2e6 #dee2e6 #fff;
+}
+
+/* 徽章样式 */
+.badge-custom {
+    font-size: 0.75em;
+    padding: 0.25em 0.5em;
+}
+
+/* GitHub风格的代码diff样式 */
+.diff-container {
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    margin: 16px 0;
+    overflow: hidden;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.diff-file-header {
+    background: #f6f8fa;
+    border-bottom: 1px solid #d0d7de;
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #24292f;
+    display: flex;
+    align-items: center;
+}
+
+.diff-file-header::before {
+    content: "📄";
+    margin-right: 8px;
+}
+
+.diff-hunk {
+    border-bottom: 1px solid #d8dee4;
+}
+
+.diff-hunk:last-child {
+    border-bottom: none;
+}
+
+.diff-hunk-header {
+    background: #f6f8fa;
+    border-bottom: 1px solid #d0d7de;
+    padding: 5px 16px;
+    font-size: 12px;
+    color: #656d76;
+    font-weight: normal;
+    line-height: 1.45;
+}
+
+.diff-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    line-height: 20px;
+}
+
+.diff-line-number {
+    width: 1%;
+    min-width: 50px;
+    padding: 0 8px;
+    text-align: right;
+    vertical-align: top;
+    color: #656d76;
+    background: #f6f8fa;
+    border-right: 1px solid #d0d7de;
+    user-select: none;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.diff-line-content {
+    padding: 0 8px;
+    vertical-align: top;
+    white-space: pre;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+    line-height: 20px;
+}
+
+.diff-line-added {
+    background-color: #dafbe1 !important;
+}
+
+.diff-line-added .diff-line-number {
+    background-color: #ccf2d4 !important;
+    color: #24292f !important;
+}
+
+.diff-line-added .diff-line-content {
+    background-color: #dafbe1 !important;
+}
+
+.diff-line-removed {
+    background-color: #ffebe9 !important;
+}
+
+.diff-line-removed .diff-line-number {
+    background-color: #ffd7d5 !important;
+    color: #24292f !important;
+}
+
+.diff-line-removed .diff-line-content {
+    background-color: #ffebe9 !important;
+}
+
+.diff-line-context {
+    background-color: #fff !important;
+}
+
+.diff-line-context .diff-line-number {
+    background-color: #f6f8fa !important;
+    color: #656d76 !important;
+}
+
+.diff-line-context .diff-line-content {
+    background-color: #fff !important;
+}
+
+/* 添加前缀符号显示 */
+.diff-line-added .diff-line-content::before {
+    content: "+";
+    color: #2da44e;
+    font-weight: bold;
+    margin-right: 4px;
+}
+
+.diff-line-removed .diff-line-content::before {
+    content: "-";
+    color: #cf222e;
+    font-weight: bold;
+    margin-right: 4px;
+}
+
+.diff-line-context .diff-line-content::before {
+    content: " ";
+    margin-right: 4px;
+}
+
+.diff-context .line-content::before {
+    content: ' ';
+    margin-right: 4px;
+}
+
+/* 提交列表表格样式 */
+.commits-table-container {
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    overflow: visible;
+    position: relative;
+    z-index: 1;
+}
+
+.commits-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+}
+
+.commits-table thead {
+    background: #f6f8fa;
+    border-bottom: 1px solid #d0d7de;
+}
+
+.commits-table th {
+    padding: 8px 12px;
+    text-align: left;
+    font-weight: 600;
+    color: #24292f;
+    border-right: 1px solid #d0d7de;
+    white-space: nowrap;
+}
+
+.commits-table th:last-child {
+    border-right: none;
+}
+
+.commits-table tbody tr {
+    height: 52.5px; 
+    border-bottom: 1px solid #d0d7de;
+    position: relative;
+}
+
+.commits-table tbody tr:hover {
+    background: #f6f8fa;
+    z-index: 1;
+}
+
+.commits-table td {
+    padding: 6px 12px;
+    border-right: 1px solid #d0d7de;
+    vertical-align: middle;
+}
+
+.commits-table td:last-child {
+    border-right: none;
+}
+
+/* 列宽设置 */
+.checkbox-col { width: 30px; text-align: center; }
+.id-col { width: 60px; }
+.path-col { width: 200px; }
+.version-col { width: 80px; }
+.operation-col { width: 50px; text-align: center; }
+.author-col { width: 100px; }
+.time-col { width: 130px; }
+.message-col { width: 300px; }
+.status-col { width: 80px; text-align: center; }
+.action-col { width: 100px; text-align: center; }
+
+/* 链接样式 */
+.path-link, .version-link {
+    color: #0969da;
+    text-decoration: none;
+}
+
+.path-link:hover, .version-link:hover {
+    text-decoration: underline;
+}
+
+/* 操作标记样式 */
+.operation-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-weight: 600;
+    font-size: 11px;
+    text-align: center;
+    min-width: 20px;
+}
+
+.operation-A {
+    background: #dafbe1;
+    color: #1a7f37;
+}
+
+.operation-M {
+    background: #fff8c5;
+    color: #9a6700;
+}
+
+.operation-D {
+    background: #ffebe9;
+    color: #cf222e;
+}
+
+.operation-other {
+    background: #f6f8fa;
+    color: #656d76;
+}
+
+/* 状态标记样式 */
+.status-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-weight: 500;
+    font-size: 11px;
+    text-align: center;
+}
+
+.status-pending {
+    background: #fef3cd;
+    color: #664d03;
+    border: 1px solid #ffecb5;
+}
+
+.status-reviewed {
+    background: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeaa7;
+}
+
+.status-confirmed {
+    background: #dafbe1;
+    color: #1a7f37;
+}
+
+.status-rejected {
+    background: #ffebe9;
+    color: #cf222e;
+}
+
+.status-other {
+    background: #f6f8fa;
+    color: #656d76;
+}
+
+/* 作者名样式 */
+.author-name {
+    color: #0969da;
+    font-weight: 500;
+}
+
+/* 提交消息样式 */
+.commit-message {
+    display: block;
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #656d76;
+}
+
+/* 操作按钮样式 */
+.action-buttons {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    justify-content: center;
+    position: relative;
+}
+
+.action-btn {
+    padding: 4px 8px;
+    border: 1px solid #d0d7de;
+    border-radius: 3px;
+    background: #f6f8fa;
+    color: #24292f;
+    text-decoration: none;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.action-btn:hover {
+    background: #f3f4f6;
+    border-color: #8c959f;
+    text-decoration: none;
+}
+
+.view-btn {
+    background: #0969da;
+    color: #fff;
+    border-color: #0969da;
+}
+
+.view-btn:hover {
+    background: #0860ca;
+    border-color: #0860ca;
+    color: #fff;
+}
+
+.dropdown-btn {
+    padding: 4px 6px;
+    font-size: 10px;
+}
+
+.approve-btn {
+    background: #198754;
+    color: #fff;
+    border-color: #198754;
+    font-weight: 600;
+}
+
+.approve-btn:hover {
+    background: #157347;
+    border-color: #146c43;
+    color: #fff;
+}
+
+.reviewed-btn {
+    background: #fd7e14;
+}
+
+.reviewed-btn:hover {
+    color: #fff;
+    border-color: #fd7e14;
+    font-weight: 600;
+}
+
+.rejected-btn {
+    background: #f8d7da;
+    border-color: #f5c6cb;
+    color: #721c24;
+    cursor: not-allowed;
+    opacity: 0.8;
+}
+
+.rejected-btn:hover {
+    background: #f8d7da;
+    border-color: #f5c6cb;
+    color: #721c24;
+    cursor: not-allowed;
+    opacity: 0.8;
+}
+
+.detail-btn {
+    background: #f6f8fa;
+    color: #24292f;
+    border-color: #d0d7de;
+}
+
+.detail-btn:hover {
+    background: #f3f4f6;
+    border-color: #8c959f;
+    color: #24292f;
+    text-decoration: none;
+}
+
+/* 下拉菜单样式 */
+/* 自定义下拉菜单 */
+.dropdown-menu.custom-dropdown {
+    position: absolute;
+    right: 0;
+    top: 100%;
+    left: auto;
+    min-width: 250px;
+    max-width: 350px;
+    padding: 8px 0;
+    z-index: 1050;
+    margin-top: 1px;
+    display: none;
+    float: left;
+    font-size: 0.875rem;
+    color: #212529;
+    text-align: left;
+    list-style: none;
+    background-color: #fff;
+    background-clip: padding-box;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    border-radius: 0.25rem;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+}
+
+.dropdown-menu.custom-dropdown.show {
+    display: block !important;
+}
+
+.dropdown-menu.custom-dropdown .dropdown-item {
+    display: block;
+    width: 100%;
+    padding: 0.25rem 1rem;
+    clear: both;
+    font-weight: 400;
+    color: #212529;
+    text-align: inherit;
+    text-decoration: none;
+    white-space: nowrap;
+    background-color: transparent;
+    border: 0;
+}
+
+.dropdown-menu.custom-dropdown .dropdown-item:hover {
+    background-color: #f8f9fa;
+}
+
+.dropdown-menu.custom-dropdown .form-check {
+    margin-bottom: 0;
+    padding-left: 1.5em;
+}
+
+.dropdown-menu.custom-dropdown .form-check-input {
+    margin-left: -1.5em;
+}
+
+.dropdown-menu.custom-dropdown .dropdown-divider {
+    height: 0;
+    margin: 0.5rem 0;
+    overflow: hidden;
+    border-top: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+/* 筛选区域下拉菜单特殊处理 */
+.filter-container {
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 12px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    transform: scale(0.8);
+    transform-origin: top left;
+    margin-bottom: -20%;
+}
+
+.filter-container .card-header {
+    background: linear-gradient(135deg, #0969da 0%, #0550ae 100%);
+    border-bottom: none;
+    border-radius: 12px 12px 0 0;
+}
+
+.filter-container .form-floating > label {
+    color: #656d76;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.filter-container .form-control {
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    transition: all 0.2s ease;
+}
+
+.filter-container .form-control:focus {
+    border-color: #0969da;
+    box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.1);
+}
+
+.filter-container .form-select {
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23343a40' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m1 6 7 7 7-7'/%3e%3c/svg%3e");
+}
+
+.filter-container .dropdown {
+    position: relative;
+    z-index: 1000;
+}
+
+.filter-container .dropdown-menu.custom-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 1050;
+    min-width: 200px;
+    max-width: 300px;
+    padding: 8px 0;
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    overflow: visible !important;
+}
+
+.filter-container .dropdown-menu.custom-dropdown.show {
+    display: block !important;
+}
+
+.filter-container .dropdown-menu.show {
+    display: block !important;
+}
+
+/* 状态下拉菜单强制样式 */
+#statusDropdownMenu {
+    max-height: none !important;
+    height: auto !important;
+    overflow: visible !important;
+    position: fixed !important;
+    z-index: 99999 !important;
+}
+
+#statusDropdownMenu .form-check {
+    padding: 8px 16px !important;
+    margin: 0 !important;
+    white-space: nowrap !important;
+}
+
+#statusDropdownMenu .dropdown-header {
+    padding: 8px 16px !important;
+    margin: 0 !important;
+}
+
+/* 确保表格容器不会遮挡下拉菜单 */
+.card-body {
+    overflow: visible !important;
+    position: relative;
+    z-index: 1;
+}
+
+.table-responsive {
+    overflow: visible !important;
+    position: static;
+}
+
+.commit-table {
+    position: relative;
+    z-index: 1;
+}
+
+.commit-table tbody {
+    position: relative;
+    z-index: 2;
+}
+
+.commit-table td {
+    position: relative;
+    z-index: 3;
+}
+
+.dropdown-menu a {
+    display: block;
+    padding: 8px 12px;
+    color: #333;
+    text-decoration: none;
+    font-size: 12px;
+    white-space: nowrap;
+    border: none;
+    background: none;
+}
+
+.dropdown-menu a:hover {
+    background-color: #f5f5f5;
+    text-decoration: none;
+}
+
+/* 操作下拉菜单中的链接样式 */
+.dropdown .dropdown-menu a {
+    display: block;
+    padding: 8px 15px;
+    color: #333;
+    text-decoration: none;
+    white-space: nowrap;
+    cursor: pointer;
+    background: none;
+    font-size: 12px;
+}
+
+.dropdown .dropdown-menu a:hover {
+    background-color: #f5f5f5;
+    text-decoration: none;
+}
+
+/* 响应式diff样式 */
+@media (max-width: 768px) {
+    .diff-table {
+        font-size: 11px;
+    }
+    
+    .line-number {
+        min-width: 40px;
+        padding: 0 4px;
+    }
+    
+    .line-content {
+        padding: 0 4px;
+    }
+}
+
+.excel-table {
+    font-size: 0.9rem;
+}
+
+.excel-table th, .excel-table td {
+    border: 1px solid #dee2e6;
+    padding: 0.375rem;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.footer {
+    margin-top: 50px;
+    padding: 20px 0;
+    background-color: #f8f9fa;
+    border-top: 1px solid #dee2e6;
+}
+
+.status-pending {
+    color: #ffc107;
+}
+
+.status-confirmed {
+    color: #198754;
+}
+
+.status-rejected {
+    color: #dc3545;
+}
+
+.diff-added {
+    background-color: #d4edda;
+    border-left: 4px solid #28a745;
+    padding: 8px;
+    margin: 2px 0;
+}
+
+.diff-removed {
+    background-color: #f8d7da;
+    border-left: 4px solid #dc3545;
+    padding: 8px;
+    margin: 2px 0;
+}
+
+.diff-modified {
+    background-color: #fff3cd;
+    border-left: 3px solid #ffc107;
+    padding: 8px;
+    margin: 2px 0;
+}

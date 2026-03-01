@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>完整文件对比 - {{ file_path }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css">
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f8f9fa;
+        }
+        
+        .diff-container {
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .diff-header {
+            background: white;
+            border-bottom: 1px solid #dee2e6;
+            padding: 1rem;
+            flex-shrink: 0;
+        }
+        
+        .diff-content {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+            margin-left: 40px; /* 为更宽的滑动条留出空间 */
+        }
+        
+        .diff-panel {
+            width: 50%;
+            flex: 0 0 50%;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid #dee2e6;
+            box-sizing: border-box;
+        }
+        
+        .diff-panel:last-child {
+            border-right: none;
+        }
+        
+        .panel-header {
+            background: #f8f9fa;
+            border-bottom: 1px solid #dee2e6;
+            padding: 0.75rem 1rem;
+            font-weight: 600;
+            color: #495057;
+            flex-shrink: 0;
+        }
+        
+        .panel-header.previous {
+            background: #fff5f5;
+            color: #721c24;
+        }
+        
+        .panel-header.current {
+            background: #f0f9ff;
+            color: #1e40af;
+        }
+        
+        .panel-content {
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.4;
+            background: white;
+            position: relative;
+            /* 性能优化 */
+            will-change: scroll-position;
+            transform: translateZ(0); /* 启用硬件加速 */
+            -webkit-overflow-scrolling: touch; /* iOS 平滑滚动 */
+        }
+        
+        /* 左侧面板隐藏滚动条 */
+        #leftPanel {
+            scrollbar-width: none; /* Firefox */
+            -ms-overflow-style: none; /* IE and Edge */
+        }
+        
+        #leftPanel::-webkit-scrollbar {
+            display: none; /* Chrome, Safari, Opera */
+        }
+        
+        /* 右侧面板显示滚动条在右侧 */
+        #rightPanel {
+            scrollbar-width: thin;
+            scrollbar-color: #888 #f1f1f1;
+        }
+        
+        #rightPanel::-webkit-scrollbar {
+            width: 12px;
+            height: 12px;
+        }
+        
+        #rightPanel::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+        
+        #rightPanel::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 6px;
+        }
+        
+        #rightPanel::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+        
+        .code-container {
+            display: block;
+            min-height: 100%;
+            min-width: max-content;
+            padding: 0;
+            /* 性能优化 */
+            contain: layout style paint;
+            transform: translateZ(0);
+        }
+        
+        .code-line, .diff-line {
+            display: flex;
+            min-height: 18.2px;
+            line-height: 18.2px;
+            min-width: max-content;
+            position: relative;
+        }
+
+        .line-number {
+            padding: 0 0.5rem;
+            color: #6c757d;
+            font-size: 13px;
+            height: 18.2px;
+            line-height: 18.2px;
+            flex-shrink: 0;
+            min-width: 60px;
+            text-align: right;
+            box-sizing: border-box;
+            background: #f8f9fa;
+            border-right: 1px solid #e9ecef;
+            user-select: none;
+        }
+
+        .line-text, .line-content {
+            padding: 0 0.5rem;
+            height: 18.2px;
+            line-height: 18.2px;
+            white-space: nowrap;
+            flex: 1;
+            box-sizing: border-box;
+            min-width: 0;
+            overflow: visible;
+        }
+        
+        /* GitHub风格的diff样式 */
+        .code-line.added, .diff-line.added {
+            background-color: #e6ffed;
+            border-left: 3px solid #28a745;
+        }
+
+        .code-line.added .line-number, .diff-line.added .line-number {
+            background-color: #ccffd8;
+            color: #155724;
+        }
+
+        .diff-line.removed {
+            background-color: #ffeef0;
+            border-left: 3px solid #dc3545;
+        }
+
+        .diff-line.removed .line-number {
+            background-color: #ffdce0;
+            color: #721c24;
+        }
+
+        .diff-line.empty {
+            background-color: #f8f9fa;
+        }
+
+        .diff-line.empty .line-number {
+            background-color: #e9ecef;
+            color: transparent;
+        }
+
+        .diff-line.empty .line-content {
+            color: transparent;
+        }
+
+        .diff-line.context {
+            background-color: white;
+        }
+
+        .code-line.removed {
+            background-color: #ffeef0;
+            border-left: 3px solid #dc3545;
+        }
+
+        .code-line.removed .line-number {
+            background-color: #ffd6cc;
+            color: #721c24;
+        }
+
+        .code-line.modified {
+            background-color: #fff5b4;
+            border-left: 3px solid #ffc107;
+        }
+
+        .code-line.modified .line-number {
+            background-color: #ffecb5;
+            color: #856404;
+        }
+
+        .code-line.context {
+            background-color: transparent;
+        }
+
+        .code-line:hover {
+            background-color: #f8f9fa;
+        }
+
+        /* 当前diff行高亮样式 */
+        .code-line.current-diff-highlight {
+            opacity: 1;
+        }
+        
+        /* 底部空白行样式 */
+        .code-line.bottom-spacer .line-number {
+            color: transparent;
+        }
+        
+        /* 全局滚动条样式 */
+        .global-scrollbar {
+            position: fixed;
+            left: 0;
+            top: 0;
+            width: 40px;
+            height: 100vh;
+            background: #f8f9fa;
+            border-right: 3px solid #6c757d;
+            box-shadow: 2px 0 4px rgba(0,0,0,0.2);
+            z-index: 9999;
+            pointer-events: auto;
+        }
+
+        .scrollbar-track {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            background: #ffffff;
+            border: 1px solid #dee2e6;
+            border-radius: 2px;
+        }
+
+        .scrollbar-indicator {
+            position: absolute;
+            width: 100%;
+            height: 3px;
+            cursor: pointer;
+            border-radius: 1px;
+        }
+
+        .scrollbar-indicator.added {
+            background: #75e68f; /* 绿色 - 新增 */
+        }
+
+        .scrollbar-indicator.removed {
+            background: #e46975; /* 红色 - 删除 */
+        }
+
+        .scrollbar-indicator.modified {
+            background: #e2c366; /* 黄色 - 修改 */
+        }
+
+        .scrollbar-thumb {
+            position: absolute;
+            width: 100%;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(0, 0, 0, 0.6);
+            border-radius: 2px;
+            cursor: grab;
+            min-height: 20px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+            /* 性能优化 */
+            will-change: transform;
+            transform: translateZ(0);
+            transition: none; /* 移除过渡动画，提高性能 */
+        }
+
+        .scrollbar-thumb:active {
+            cursor: grabbing;
+            background: rgba(0,0,0,0.4);
+        }
+
+        /* 导航按钮样式 */
+        .btn-outline-primary {
+            border-color: #0d6efd;
+            color: #0d6efd;
+            background-color: transparent;
+            transition: all 0.2s ease;
+        }
+
+        .btn-outline-primary:hover:not(:disabled) {
+            background-color: #0d6efd;
+            border-color: #0d6efd;
+            color: #fff;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(13, 110, 253, 0.3);
+        }
+
+        .btn-outline-primary:disabled {
+            background-color: #f8f9fa !important;
+            border-color: #dee2e6 !important;
+            color: #adb5bd !important;
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+
+        
+        /* 响应式设计 */
+        @media (max-width: 768px) {
+            .diff-content {
+                flex-direction: column;
+                margin-left: 0;
+            }
+            
+            .diff-panel {
+                width: 100%;
+                flex: 0 0 50vh;
+                border-right: none;
+                border-bottom: 1px solid #dee2e6;
+            }
+            
+            .diff-panel:last-child {
+                border-bottom: none;
+            }
+        }
+        
+        /* 文件信息样式 */
+        .file-info {
+            background: #f8f9fa;
+            padding: 0.5rem 1rem;
+            border-bottom: 1px solid #dee2e6;
+            font-size: 0.875rem;
+            color: #6c757d;
+        }
+        
+        .commit-info {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        
+        .commit-id {
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            background: #e9ecef;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.8rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="diff-container">
+        <!-- 头部信息 -->
+        <div class="diff-header">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="mb-1">
+                        <i class="bi bi-file-earmark-code me-2"></i>{{ file_path }}
+                    </h5>
+                    <div class="text-muted small">
+                        <span class="me-3">
+                            <i class="bi bi-calendar me-1"></i>
+                            {{ config.start_time.strftime('%Y-%m-%d %H:%M') }} 至 {{ config.end_time.strftime('%Y-%m-%d %H:%M') }}
+                        </span>
+                        <span class="me-3">
+                            <i class="bi bi-git me-1"></i>
+                            {{ diff_cache.commit_count }} 次提交
+                        </span>
+                        <span>
+                            <i class="bi bi-person me-1"></i>
+                            {% set unique_authors = commit_authors | unique | list %}
+                            {% if unique_authors | length <= 2 %}
+                                {{ unique_authors | join(', ') }}
+                            {% else %}
+                                {{ unique_authors[:2] | join(', ') }} ... (+{{ unique_authors | length - 2 }})
+                            {% endif %}
+                        </span>
+                    </div>
+                </div>
+                <div class="d-flex align-items-center gap-3">
+                    <!-- Diff导航控件 -->
+                    <div class="d-flex align-items-center gap-2">
+                        <button type="button" class="btn btn-outline-primary btn-sm" id="prevDiffBtn">
+                            <i class="bi bi-chevron-up"></i>
+                        </button>
+                        <span class="small text-muted" id="diffCounter">0/0</span>
+                        <button type="button" class="btn btn-outline-primary btn-sm" id="nextDiffBtn">
+                            <i class="bi bi-chevron-down"></i>
+                        </button>
+                    </div>
+
+                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="window.close()">
+                        <i class="bi bi-x-lg me-1"></i>关闭
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 对比内容 -->
+        <div class="diff-content">
+            <!-- 左侧面板 - 基准版本 -->
+            <div class="diff-panel">
+                <div class="panel-header previous">
+                    <i class="bi bi-file-earmark-minus me-2"></i>
+                    {% if base_commit_info %}
+                        基准版本 ({{ base_commit_info.short_id }})
+                    {% else %}
+                        基准版本 (无)
+                    {% endif %}
+                </div>
+                {% if base_commit_info %}
+                <div class="file-info">
+                    <div class="commit-info">
+                        <span class="commit-id">{{ base_commit_info.short_id }}</span>
+                        <span>{{ base_commit_info.author }}</span>
+                        <span>{{ base_commit_info.commit_time }}</span>
+                        <span class="text-truncate" style="max-width: 200px;">{{ base_commit_info.message.strip() }}</span>
+                    </div>
+                </div>
+                {% endif %}
+                <div class="panel-content synced" id="leftPanel">
+                    <div class="code-container">
+                        {% if side_by_side_diff and side_by_side_diff.left_lines %}
+                            {% for line in side_by_side_diff.left_lines %}
+                            <div class="diff-line {{ line.type }}">
+                                <div class="line-number">
+                                    {% if line.line_num %}{{ line.line_num }}{% endif %}
+                                </div>
+                                <div class="line-content">{{ line.content if line.content else ' ' }}</div>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <div class="text-muted p-3">文件不存在或为空</div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <!-- 右侧面板 - 当前版本 -->
+            <div class="diff-panel">
+                <div class="panel-header current">
+                    <i class="bi bi-file-earmark-plus me-2"></i>
+                    当前版本 ({{ latest_commit_id[:8] }})
+                </div>
+                <div class="file-info">
+                    <div class="commit-info">
+                        <span class="commit-id">{{ latest_commit_id[:8] }}</span>
+                        {% if commit_authors and commit_authors|length > 0 %}
+                        <span>{{ commit_authors[-1] }}</span>
+                        {% endif %}
+                        {% if commit_times and commit_times|length > 0 %}
+                        <span>{{ commit_times[-1] }}</span>
+                        {% endif %}
+                        {% if commit_messages and commit_messages|length > 0 %}
+                        <span class="text-truncate" style="max-width: 200px;">{{ commit_messages[-1].strip() }}</span>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="panel-content synced" id="rightPanel">
+                    <div class="code-container">
+                        {% if side_by_side_diff and side_by_side_diff.right_lines %}
+                            {% for line in side_by_side_diff.right_lines %}
+                            <div class="diff-line {{ line.type }}">
+                                <div class="line-number">
+                                    {% if line.line_num %}{{ line.line_num }}{% endif %}
+                                </div>
+                                <div class="line-content">{{ line.content if line.content else ' ' }}</div>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <div class="text-muted p-3">文件不存在或为空</div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 全局滚动条 -->
+    <div class="global-scrollbar" id="globalScrollbar">
+        <div class="scrollbar-track" id="scrollbarTrack">
+            <div class="scrollbar-thumb" id="scrollbarThumb"></div>
+        </div>
+    </div>
+
+
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // 全局变量
+        let isScrolling = false;
+        let scrollTimeout;
+        let isDragging = false;
+        let dragStartY = 0;
+        let dragStartScrollTop = 0;
+
+        // 性能优化变量
+        let rafId = null;
+        let lastScrollTop = -1;
+        let scrollVelocity = 0;
+        let lastScrollTime = 0;
+
+        const leftPanel = document.getElementById('leftPanel');
+        const rightPanel = document.getElementById('rightPanel');
+        const globalScrollbar = document.getElementById('globalScrollbar');
+        const scrollbarTrack = document.getElementById('scrollbarTrack');
+        const scrollbarThumb = document.getElementById('scrollbarThumb');
+
+        // 全局变量存储diff变化
+        window.diffChanges = [];
+        window.currentDiffIndex = -1;
+
+        // 优化的同步滚动功能
+        function syncScroll(source, target) {
+            if (isScrolling) return;
+
+            isScrolling = true;
+
+            // 计算滚动比例，避免除零错误
+            const sourceMaxScroll = source.scrollHeight - source.clientHeight;
+            const targetMaxScroll = target.scrollHeight - target.clientHeight;
+
+            if (sourceMaxScroll <= 0 || targetMaxScroll <= 0) {
+                isScrolling = false;
+                return;
+            }
+
+            const scrollRatio = source.scrollTop / sourceMaxScroll;
+            const targetScrollTop = scrollRatio * targetMaxScroll;
+
+            // 使用 transform 而不是直接设置 scrollTop，性能更好
+            // 但这里仍需要使用 scrollTop 来保持滚动条功能
+            if (Math.abs(target.scrollTop - targetScrollTop) > 1) {
+                target.scrollTop = targetScrollTop;
+            }
+
+            // 批量更新DOM，减少重绘
+            requestAnimationFrame(() => {
+                updateGlobalScrollbar();
+
+                // 移除同步指示器，避免滚动时的视觉干扰
+                // 同步滚动功能仍然正常工作，只是不显示提示
+            });
+
+            // 清除之前的定时器
+            clearTimeout(scrollTimeout);
+
+            // 设置新的定时器来重置滚动标志
+            scrollTimeout = setTimeout(() => {
+                isScrolling = false;
+            }, 50); // 进一步减少延迟时间
+        }
+
+        // 高性能滚动事件绑定
+        let leftScrollTimer, rightScrollTimer;
+        let animationFrameId = null;
+
+        function handleScroll(source, target) {
+            const now = performance.now();
+
+            // 限制滚动频率，避免过于频繁的更新
+            if (now - lastScrollTime < 16) { // 约60fps
+                return;
+            }
+
+            lastScrollTime = now;
+
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+            }
+
+            animationFrameId = requestAnimationFrame(() => {
+                if (!isScrolling) {
+                    syncScroll(source, target);
+                }
+            });
+        }
+
+        leftPanel.addEventListener('scroll', function() {
+            handleScroll(leftPanel, rightPanel);
+        }, { passive: true });
+
+        rightPanel.addEventListener('scroll', function() {
+            handleScroll(rightPanel, leftPanel);
+        }, { passive: true });
+
+        // 页面加载完成后初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            collectDiffChanges();
+            initializeGlobalScrollbar();
+            updateNavigationButtons();
+
+            // 绑定导航按钮事件
+            document.getElementById('prevDiffBtn').addEventListener('click', () => navigateToDiff(-1));
+            document.getElementById('nextDiffBtn').addEventListener('click', () => navigateToDiff(1));
+        });
+
+        function collectDiffChanges() {
+            // 收集已经标记好的diff变化（由后端生成）
+            const leftLines = Array.from(leftPanel.querySelectorAll('.diff-line'));
+            const rightLines = Array.from(rightPanel.querySelectorAll('.diff-line'));
+
+            const changes = [];
+
+            // 收集所有有变化的行（包括空行）
+            leftLines.forEach((line, index) => {
+                const rightLine = rightLines[index];
+
+                // 检查是否有任何类型的变化（added, removed, empty）
+                const leftHasChange = line.classList.contains('added') || line.classList.contains('removed') || line.classList.contains('empty');
+                const rightHasChange = rightLine && (rightLine.classList.contains('added') || rightLine.classList.contains('removed') || rightLine.classList.contains('empty'));
+
+                if (leftHasChange || rightHasChange) {
+                    // 确定变化类型
+                    let changeType = 'context';
+                    if (line.classList.contains('removed') || (rightLine && rightLine.classList.contains('empty'))) {
+                        changeType = 'removed';
+                    } else if (rightLine && rightLine.classList.contains('added') || line.classList.contains('empty')) {
+                        changeType = 'added';
+                    } else if (line.classList.contains('added') && rightLine && rightLine.classList.contains('removed')) {
+                        changeType = 'modified';
+                    }
+
+                    changes.push({
+                        index: index,
+                        leftElement: line,
+                        rightElement: rightLine,
+                        type: changeType,
+                        leftLineNumber: index + 1,
+                        rightLineNumber: index + 1
+                    });
+                }
+            });
+
+            // 使用与单个提交相同的合并逻辑
+            window.diffChanges = mergeConsecutiveDiffs(changes);
+
+            // 创建滚动条指示器
+            createScrollbarIndicators();
+        }
+
+        // 导航到指定的diff变化
+        function navigateToDiff(direction) {
+            if (window.diffChanges.length === 0) return;
+
+            // 清除之前的高亮
+            document.querySelectorAll('.current-diff-highlight').forEach(el => {
+                el.classList.remove('current-diff-highlight');
+            });
+
+            // 更新索引
+            if (direction > 0) {
+                window.currentDiffIndex = Math.min(window.currentDiffIndex + 1, window.diffChanges.length - 1);
+            } else {
+                window.currentDiffIndex = Math.max(window.currentDiffIndex - 1, 0);
+            }
+
+            // 获取当前diff变化块
+            const currentBlock = window.diffChanges[window.currentDiffIndex];
+            if (!currentBlock) return;
+
+            // 高亮当前diff块的所有行
+            if (currentBlock.diffs) {
+                // 新的数据结构：包含多个diff的组
+                currentBlock.diffs.forEach(diff => {
+                    if (diff.leftElement) {
+                        diff.leftElement.classList.add('current-diff-highlight');
+                    }
+                    if (diff.rightElement) {
+                        diff.rightElement.classList.add('current-diff-highlight');
+                    }
+                });
+            } else {
+                // 单个diff
+                if (currentBlock.leftElement) {
+                    currentBlock.leftElement.classList.add('current-diff-highlight');
+                }
+                if (currentBlock.rightElement) {
+                    currentBlock.rightElement.classList.add('current-diff-highlight');
+                }
+            }
+
+            // 滚动到当前diff块的第一行
+            let targetIndex = 0;
+            if (currentBlock.diffs) {
+                targetIndex = currentBlock.diffs[0].index;
+            } else {
+                targetIndex = currentBlock.index;
+            }
+
+            // 获取左右面板对应索引的元素
+            const leftLines = Array.from(leftPanel.querySelectorAll('.diff-line'));
+            const rightLines = Array.from(rightPanel.querySelectorAll('.diff-line'));
+
+            const leftTargetElement = leftLines[targetIndex];
+            const rightTargetElement = rightLines[targetIndex];
+
+            if (rightTargetElement && leftTargetElement) {
+                // 暂时禁用滚动同步，避免导航时的冲突
+                isScrolling = true;
+
+                const elementTop = rightTargetElement.offsetTop;
+                const panelHeight = rightPanel.clientHeight;
+                const scrollTop = Math.max(0, elementTop - panelHeight / 2);
+
+                // 确保两个面板滚动到完全相同的位置
+                rightPanel.scrollTop = scrollTop;
+                leftPanel.scrollTop = scrollTop;
+
+                // 延迟重新启用滚动同步
+                setTimeout(() => {
+                    isScrolling = false;
+                }, 100);
+            }
+
+            // 更新导航按钮状态
+            updateNavigationButtons();
+        }
+
+        // 更新导航按钮状态
+        function updateNavigationButtons() {
+            const prevBtn = document.getElementById('prevDiffBtn');
+            const nextBtn = document.getElementById('nextDiffBtn');
+            const counter = document.getElementById('diffCounter');
+
+            if (!prevBtn || !nextBtn || !counter) return;
+
+            // 初始化currentDiffIndex
+            if (window.currentDiffIndex === undefined) {
+                window.currentDiffIndex = -1;
+            }
+
+            prevBtn.disabled = window.currentDiffIndex <= 0;
+            nextBtn.disabled = window.currentDiffIndex >= window.diffChanges.length - 1;
+
+            if (window.currentDiffIndex >= 0) {
+                counter.textContent = `${window.currentDiffIndex + 1}/${window.diffChanges.length}`;
+            } else {
+                counter.textContent = `0/${window.diffChanges.length}`;
+            }
+        }
+
+        // 计算最长公共子序列(LCS)
+        function computeLCS(left, right) {
+            const m = left.length;
+            const n = right.length;
+            const dp = Array(m + 1).fill().map(() => Array(n + 1).fill(0));
+
+            for (let i = 1; i <= m; i++) {
+                for (let j = 1; j <= n; j++) {
+                    if (left[i - 1] === right[j - 1]) {
+                        dp[i][j] = dp[i - 1][j - 1] + 1;
+                    } else {
+                        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+                    }
+                }
+            }
+
+            // 回溯构建LCS
+            const lcs = [];
+            let i = m, j = n;
+            while (i > 0 && j > 0) {
+                if (left[i - 1] === right[j - 1]) {
+                    lcs.unshift({ left: i - 1, right: j - 1 });
+                    i--;
+                    j--;
+                } else if (dp[i - 1][j] > dp[i][j - 1]) {
+                    i--;
+                } else {
+                    j--;
+                }
+            }
+
+            return lcs;
+        }
+
+        // 基于LCS生成diff结果
+        function generateDiffFromLCS(leftContent, rightContent, lcs) {
+            const result = [];
+            let leftIndex = 0, rightIndex = 0, lcsIndex = 0;
+
+            while (leftIndex < leftContent.length || rightIndex < rightContent.length) {
+                if (lcsIndex < lcs.length &&
+                    leftIndex === lcs[lcsIndex].left &&
+                    rightIndex === lcs[lcsIndex].right) {
+                    // 相同行
+                    result.push({
+                        type: 'context',
+                        leftElement: leftContent[leftIndex].element,
+                        rightElement: rightContent[rightIndex].element,
+                        leftLine: leftIndex,
+                        rightLine: rightIndex,
+                        content: leftContent[leftIndex].content
+                    });
+                    leftIndex++;
+                    rightIndex++;
+                    lcsIndex++;
+                } else if (lcsIndex < lcs.length && leftIndex === lcs[lcsIndex].left) {
+                    // 右侧新增
+                    result.push({
+                        type: 'added',
+                        rightElement: rightContent[rightIndex].element,
+                        rightLine: rightIndex,
+                        content: rightContent[rightIndex].content
+                    });
+                    rightIndex++;
+                } else if (lcsIndex < lcs.length && rightIndex === lcs[lcsIndex].right) {
+                    // 左侧删除
+                    result.push({
+                        type: 'removed',
+                        leftElement: leftContent[leftIndex].element,
+                        leftLine: leftIndex,
+                        content: leftContent[leftIndex].content
+                    });
+                    leftIndex++;
+                } else {
+                    // 修改行或者不在LCS中的行
+                    if (leftIndex < leftContent.length && rightIndex < rightContent.length) {
+                        // 检查内容是否真的不同，避免误判
+                        if (leftContent[leftIndex].content !== rightContent[rightIndex].content) {
+                            result.push({
+                                type: 'modified',
+                                leftElement: leftContent[leftIndex].element,
+                                rightElement: rightContent[rightIndex].element,
+                                leftLine: leftIndex,
+                                rightLine: rightIndex,
+                                content: `${leftContent[leftIndex].content} → ${rightContent[rightIndex].content}`
+                            });
+                        } else {
+                            result.push({
+                                type: 'context',
+                                leftElement: leftContent[leftIndex].element,
+                                rightElement: rightContent[rightIndex].element,
+                                leftLine: leftIndex,
+                                rightLine: rightIndex,
+                                content: leftContent[leftIndex].content
+                            });
+                        }
+                        leftIndex++;
+                        rightIndex++;
+                    } else if (leftIndex < leftContent.length) {
+                        result.push({
+                            type: 'removed',
+                            leftElement: leftContent[leftIndex].element,
+                            leftLine: leftIndex,
+                            content: leftContent[leftIndex].content
+                        });
+                        leftIndex++;
+                    } else if (rightIndex < rightContent.length) {
+                        result.push({
+                            type: 'added',
+                            rightElement: rightContent[rightIndex].element,
+                            rightLine: rightIndex,
+                            content: rightContent[rightIndex].content
+                        });
+                        rightIndex++;
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        // 合并连续的差异行为同一处修改（与单个提交保持一致）
+        function mergeConsecutiveDiffs(diffs) {
+            if (diffs.length === 0) return [];
+
+            // 按索引排序
+            const sortedDiffs = diffs.sort((a, b) => a.index - b.index);
+
+            const merged = [];
+            let currentGroup = [sortedDiffs[0]];
+
+            for (let i = 1; i < sortedDiffs.length; i++) {
+                const current = sortedDiffs[i];
+                const previous = sortedDiffs[i - 1];
+
+                // 如果当前行与前一行连续（行号相差3以内，允许少量上下文行），则合并到同一组
+                if (current.index - previous.index <= 3) {
+                    currentGroup.push(current);
+                } else {
+                    // 创建合并的修改项
+                    const mergedDiff = {
+                        index: currentGroup[0].index,
+                        startIndex: currentGroup[0].index,
+                        endIndex: currentGroup[currentGroup.length - 1].index,
+                        leftElement: currentGroup[0].leftElement,
+                        rightElement: currentGroup[0].rightElement,
+                        type: 'group',
+                        count: currentGroup.length,
+                        diffs: currentGroup
+                    };
+                    merged.push(mergedDiff);
+                    currentGroup = [current];
+                }
+            }
+
+            // 处理最后一组
+            if (currentGroup.length > 0) {
+                const mergedDiff = {
+                    index: currentGroup[0].index,
+                    startIndex: currentGroup[0].index,
+                    endIndex: currentGroup[currentGroup.length - 1].index,
+                    leftElement: currentGroup[0].leftElement,
+                    rightElement: currentGroup[0].rightElement,
+                    type: 'group',
+                    count: currentGroup.length,
+                    diffs: currentGroup
+                };
+                merged.push(mergedDiff);
+            }
+
+            return merged;
+        }
+
+
+
+        // 初始化全局滚动条
+        function initializeGlobalScrollbar() {
+            // 滚动条拖拽功能
+            scrollbarThumb.addEventListener('mousedown', function(e) {
+                isDragging = true;
+                dragStartY = e.clientY;
+                dragStartScrollTop = rightPanel.scrollTop;
+                document.addEventListener('mousemove', handleDrag);
+                document.addEventListener('mouseup', handleDragEnd);
+                e.preventDefault();
+            });
+
+            // 点击滚动条轨道跳转
+            scrollbarTrack.addEventListener('click', function(e) {
+                if (e.target === scrollbarThumb) return;
+
+                const trackRect = scrollbarTrack.getBoundingClientRect();
+                const clickY = e.clientY - trackRect.top;
+                const trackHeight = trackRect.height;
+                const scrollRatio = clickY / trackHeight;
+
+                const maxScrollTop = rightPanel.scrollHeight - rightPanel.clientHeight;
+                const targetScrollTop = scrollRatio * maxScrollTop;
+
+                rightPanel.scrollTop = targetScrollTop;
+                leftPanel.scrollTop = targetScrollTop;
+            });
+
+            updateGlobalScrollbar();
+        }
+
+        function handleDrag(e) {
+            if (!isDragging) return;
+
+            const deltaY = e.clientY - dragStartY;
+            const trackHeight = scrollbarTrack.clientHeight;
+            const maxScrollTop = rightPanel.scrollHeight - rightPanel.clientHeight;
+
+            const scrollDelta = (deltaY / trackHeight) * maxScrollTop;
+            const newScrollTop = Math.max(0, Math.min(maxScrollTop, dragStartScrollTop + scrollDelta));
+
+            rightPanel.scrollTop = newScrollTop;
+            leftPanel.scrollTop = newScrollTop;
+        }
+
+        function handleDragEnd() {
+            isDragging = false;
+            document.removeEventListener('mousemove', handleDrag);
+            document.removeEventListener('mouseup', handleDragEnd);
+        }
+
+        // 优化的全局滚动条更新
+        let lastScrollbarUpdate = 0;
+        let cachedScrollbarData = null;
+
+        function updateGlobalScrollbar() {
+            const now = performance.now();
+
+            // 限制滚动条更新频率
+            if (now - lastScrollbarUpdate < 16) {
+                return;
+            }
+
+            lastScrollbarUpdate = now;
+
+            const scrollTop = rightPanel.scrollTop;
+            const scrollHeight = rightPanel.scrollHeight;
+            const clientHeight = rightPanel.clientHeight;
+
+            // 缓存不变的数据
+            if (!cachedScrollbarData ||
+                cachedScrollbarData.scrollHeight !== scrollHeight ||
+                cachedScrollbarData.clientHeight !== clientHeight) {
+
+                cachedScrollbarData = {
+                    scrollHeight,
+                    clientHeight,
+                    trackHeight: scrollbarTrack.clientHeight,
+                    maxScroll: scrollHeight - clientHeight,
+                    thumbHeight: Math.max(20, (clientHeight / scrollHeight) * scrollbarTrack.clientHeight)
+                };
+            }
+
+            if (cachedScrollbarData.maxScroll <= 0) {
+                if (scrollbarThumb.style.display !== 'none') {
+                    scrollbarThumb.style.display = 'none';
+                }
+                return;
+            }
+
+            if (scrollbarThumb.style.display !== 'block') {
+                scrollbarThumb.style.display = 'block';
+            }
+
+            const thumbTop = (scrollTop / cachedScrollbarData.maxScroll) *
+                           (cachedScrollbarData.trackHeight - cachedScrollbarData.thumbHeight);
+
+            // 使用 transform 替代直接修改 top 和 height，性能更好
+            scrollbarThumb.style.transform = `translateY(${thumbTop}px)`;
+            scrollbarThumb.style.height = cachedScrollbarData.thumbHeight + 'px';
+        }
+
+        // 创建滚动条指示器
+        function createScrollbarIndicators() {
+            // 清除现有指示器
+            document.querySelectorAll('.scrollbar-indicator').forEach(el => el.remove());
+
+            if (!window.diffChanges || window.diffChanges.length === 0) return;
+
+            const trackHeight = scrollbarTrack.clientHeight;
+            const contentHeight = rightPanel.scrollHeight;
+
+            window.diffChanges.forEach(block => {
+                const indicator = document.createElement('div');
+                indicator.className = `scrollbar-indicator ${block.type}`;
+
+                // 计算指示器位置（使用块的第一行）
+                let elementTop = 0;
+                if (block.diffs) {
+                    // 新的数据结构：包含多个diff的组
+                    const firstDiff = block.diffs[0];
+                    if (firstDiff.rightElement) {
+                        elementTop = firstDiff.rightElement.offsetTop;
+                    } else if (firstDiff.leftElement) {
+                        elementTop = firstDiff.leftElement.offsetTop;
+                    }
+                } else {
+                    // 单个diff
+                    if (block.rightElement) {
+                        elementTop = block.rightElement.offsetTop;
+                    } else if (block.leftElement) {
+                        elementTop = block.leftElement.offsetTop;
+                    }
+                }
+
+                const indicatorTop = (elementTop / contentHeight) * trackHeight;
+                indicator.style.top = indicatorTop + 'px';
+
+                // 如果是多行变更块，增加指示器高度
+                const changeCount = block.diffs ? block.diffs.length : 1;
+                if (changeCount > 1) {
+                    const blockHeight = Math.max(2, Math.min(10, changeCount * 2));
+                    indicator.style.height = blockHeight + 'px';
+                }
+
+                // 点击指示器跳转到对应位置
+                indicator.addEventListener('click', function() {
+                    const targetScrollTop = elementTop - rightPanel.clientHeight / 2;
+                    rightPanel.scrollTop = Math.max(0, targetScrollTop);
+                    leftPanel.scrollTop = Math.max(0, targetScrollTop);
+                });
+
+                scrollbarTrack.appendChild(indicator);
+            });
+        }
+
+        // 窗口大小改变时更新滚动条
+        window.addEventListener('resize', function() {
+            updateGlobalScrollbar();
+            createScrollbarIndicators();
+        });
+    </script>
+</body>
+</html>

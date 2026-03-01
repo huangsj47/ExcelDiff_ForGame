@@ -1,0 +1,992 @@
+{% extends "base.html" %}
+
+{% block title %}周版本diff配置 - {{ project.name }}{% endblock %}
+
+{% block content %}
+<div class="container">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h2>周版本diff配置</h2>
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{{ url_for('index') }}">项目列表</a></li>
+                    <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=project.id) }}">{{ project.name }}</a></li>
+                    <li class="breadcrumb-item active">周版本配置</li>
+                </ol>
+            </nav>
+        </div>
+        <div>
+            <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addConfigModal">
+                <i class="fas fa-plus me-2"></i>新增配置
+            </button>
+        </div>
+    </div>
+
+    <!-- 配置列表 - 分类显示 -->
+    <div class="row">
+        {% if active_versions or future_versions or ended_versions %}
+
+            <!-- 活跃版本 -->
+            {% if active_versions %}
+            <div class="col-12 mb-4">
+                <div class="card">
+                    <div class="card-header bg-success text-white">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">
+                                <i class="fas fa-play-circle me-2"></i>活跃版本
+                                <span class="badge bg-light text-success ms-2">{{ active_versions|length }}</span>
+                            </h5>
+                            <button class="btn btn-sm btn-outline-light" type="button" data-bs-toggle="collapse" data-bs-target="#activeVersions" aria-expanded="true">
+                                <i class="fas fa-chevron-down"></i> 展开/收起
+                            </button>
+                        </div>
+                    </div>
+                    <div class="collapse show" id="activeVersions">
+                        <div class="card-body">
+                            {% for version_group in active_versions %}
+                            <div class="mb-4 border rounded p-3" style="background-color: #f8fff8;">
+                                <div class="d-flex justify-content-between align-items-center mb-3">
+                                    <div>
+                                        <h6 class="mb-1">
+                                            <i class="fas fa-calendar-week me-2"></i>{{ version_group.version_name }}
+                                        </h6>
+                                        <small class="text-muted">
+                                            <i class="fas fa-clock me-1"></i>
+                                            {{ version_group.start_time.strftime('%Y-%m-%d %H:%M') }} 至 {{ version_group.end_time.strftime('%Y-%m-%d %H:%M') }}
+                                        </small>
+                                    </div>
+                                    <span class="badge bg-success">进行中</span>
+                                </div>
+                                <div class="row">
+                                    {% for config in version_group.configs %}
+                                    <div class="col-md-6 col-lg-3 mb-3">
+                                        <div class="border rounded p-2 h-100" style="background-color: #ffffff;">
+                                            <div class="d-flex justify-content-between align-items-start mb-2">
+                                                <h6 class="mb-0 small">
+                                                    <span class="badge bg-{% if config.repository.type == 'git' %}success{% else %}primary{% endif %}">
+                                                        {{ config.repository.name }}
+                                                    </span>
+                                                </h6>
+                                                {% if config.is_active %}
+                                                    <span class="badge bg-info" title="自动同步">
+                                                        <i class="fas fa-sync-alt"></i>
+                                                    </span>
+                                                {% endif %}
+                                            </div>
+                                            <div class="small text-muted mb-2">
+                                                <div><i class="fas fa-code-branch me-1"></i>{{ config.branch }}</div>
+                                            </div>
+                                            <!-- 异步加载统计信息 -->
+                                            <div class="stats-container mb-2" data-config-id="{{ config.id }}">
+                                                <div class="d-flex justify-content-between small">
+                                                    <span class="text-muted">加载中...</span>
+                                                    <div class="spinner-border spinner-border-sm" role="status"></div>
+                                                </div>
+                                            </div>
+                                            <!-- 操作按钮 -->
+                                            <div class="d-flex gap-1">
+                                                <a href="{{ url_for('weekly_version_diff', config_id=config.id) }}" class="btn btn-success btn-sm flex-fill" title="查看diff">
+                                                    <i class="fas fa-eye"></i>
+                                                </a>
+                                                <button type="button" class="btn btn-outline-primary btn-sm flex-fill" onclick="editConfig({{ config.id }})" title="修改">
+                                                    <i class="fas fa-edit"></i>
+                                                </button>
+                                                <button type="button" class="btn btn-outline-danger btn-sm flex-fill" onclick="deleteConfig({{ config.id }})" title="删除">
+                                                    <i class="fas fa-trash"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- 未来版本 -->
+            {% if future_versions %}
+            <div class="col-12 mb-4">
+                <div class="card">
+                    <div class="card-header bg-info text-white">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">
+                                <i class="fas fa-clock me-2"></i>未来版本
+                                <span class="badge bg-light text-info ms-2">{{ future_versions|length }}</span>
+                            </h5>
+                            <button class="btn btn-sm btn-outline-light" type="button" data-bs-toggle="collapse" data-bs-target="#futureVersions" aria-expanded="true">
+                                <i class="fas fa-chevron-down"></i> 展开/收起
+                            </button>
+                        </div>
+                    </div>
+                    <div class="collapse show" id="futureVersions">
+                        <div class="card-body">
+                            {% for version_group in future_versions %}
+                            <div class="mb-4 border rounded p-3" style="background-color: #f8f9ff;">
+                                <div class="d-flex justify-content-between align-items-center mb-3">
+                                    <div>
+                                        <h6 class="mb-1">
+                                            <i class="fas fa-calendar-week me-2"></i>{{ version_group.version_name }}
+                                        </h6>
+                                        <small class="text-muted">
+                                            <i class="fas fa-clock me-1"></i>
+                                            {{ version_group.start_time.strftime('%Y-%m-%d %H:%M') }} 至 {{ version_group.end_time.strftime('%Y-%m-%d %H:%M') }}
+                                        </small>
+                                    </div>
+                                    <span class="badge bg-info">未开始</span>
+                                </div>
+                                <div class="row">
+                                    {% for config in version_group.configs %}
+                                    <div class="col-md-6 col-lg-3 mb-3">
+                                        <div class="border rounded p-2 h-100" style="background-color: #ffffff;">
+                                            <div class="d-flex justify-content-between align-items-start mb-2">
+                                                <h6 class="mb-0 small">
+                                                    <span class="badge bg-{% if config.repository.type == 'git' %}success{% else %}primary{% endif %}">
+                                                        {{ config.repository.name }}
+                                                    </span>
+                                                </h6>
+                                                {% if config.is_active %}
+                                                    <span class="badge bg-info" title="自动同步">
+                                                        <i class="fas fa-sync-alt"></i>
+                                                    </span>
+                                                {% endif %}
+                                            </div>
+                                            <div class="small text-muted mb-2">
+                                                <div><i class="fas fa-code-branch me-1"></i>{{ config.branch }}</div>
+                                            </div>
+                                            <!-- 异步加载统计信息 -->
+                                            <div class="stats-container mb-2" data-config-id="{{ config.id }}">
+                                                <div class="d-flex justify-content-between small">
+                                                    <span class="text-muted">加载中...</span>
+                                                    <div class="spinner-border spinner-border-sm" role="status"></div>
+                                                </div>
+                                            </div>
+                                            <!-- 操作按钮 -->
+                                            <div class="d-flex gap-1">
+                                                <a href="{{ url_for('weekly_version_diff', config_id=config.id) }}" class="btn btn-success btn-sm flex-fill" title="查看diff">
+                                                    <i class="fas fa-eye"></i>
+                                                </a>
+                                                <button type="button" class="btn btn-outline-primary btn-sm flex-fill" onclick="editConfig({{ config.id }})" title="修改">
+                                                    <i class="fas fa-edit"></i>
+                                                </button>
+                                                <button type="button" class="btn btn-outline-danger btn-sm flex-fill" onclick="deleteConfig({{ config.id }})" title="删除">
+                                                    <i class="fas fa-trash"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- 已结束版本 -->
+            {% if ended_versions %}
+            <div class="col-12 mb-4">
+                <div class="card">
+                    <div class="card-header bg-secondary text-white">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">
+                                <i class="fas fa-history me-2"></i>已结束版本
+                                <span class="badge bg-light text-secondary ms-2">{{ ended_versions|length }}</span>
+                            </h5>
+                            <button class="btn btn-sm btn-outline-light" type="button" data-bs-toggle="collapse" data-bs-target="#endedVersions" aria-expanded="false">
+                                <i class="fas fa-chevron-right"></i> 展开/收起
+                            </button>
+                        </div>
+                    </div>
+                    <div class="collapse" id="endedVersions">
+                        <div class="card-body">
+                            {% for version_group in ended_versions %}
+                            <div class="mb-4 border rounded p-3" style="background-color: #f8f8f8;">
+                                <div class="d-flex justify-content-between align-items-center mb-3">
+                                    <div>
+                                        <h6 class="mb-1">
+                                            <i class="fas fa-calendar-week me-2"></i>{{ version_group.version_name }}
+                                        </h6>
+                                        <small class="text-muted">
+                                            <i class="fas fa-clock me-1"></i>
+                                            {{ version_group.start_time.strftime('%Y-%m-%d %H:%M') }} 至 {{ version_group.end_time.strftime('%Y-%m-%d %H:%M') }}
+                                        </small>
+                                    </div>
+                                    <span class="badge bg-secondary">已结束</span>
+                                </div>
+                                <div class="row">
+                                    {% for config in version_group.configs %}
+                                    <div class="col-md-6 col-lg-3 mb-3">
+                                        <div class="border rounded p-2 h-100" style="background-color: #ffffff;">
+                                            <div class="d-flex justify-content-between align-items-start mb-2">
+                                                <h6 class="mb-0 small">
+                                                    <span class="badge bg-{% if config.repository.type == 'git' %}success{% else %}primary{% endif %}">
+                                                        {{ config.repository.name }}
+                                                    </span>
+                                                </h6>
+                                                {% if config.is_active %}
+                                                    <span class="badge bg-info" title="自动同步">
+                                                        <i class="fas fa-sync-alt"></i>
+                                                    </span>
+                                                {% endif %}
+                                            </div>
+                                            <div class="small text-muted mb-2">
+                                                <div><i class="fas fa-code-branch me-1"></i>{{ config.branch }}</div>
+                                            </div>
+                                            <!-- 异步加载统计信息 -->
+                                            <div class="stats-container mb-2" data-config-id="{{ config.id }}">
+                                                <div class="d-flex justify-content-between small">
+                                                    <span class="text-muted">加载中...</span>
+                                                    <div class="spinner-border spinner-border-sm" role="status"></div>
+                                                </div>
+                                            </div>
+                                            <!-- 操作按钮 -->
+                                            <div class="d-flex gap-1">
+                                                <a href="{{ url_for('weekly_version_diff', config_id=config.id) }}" class="btn btn-success btn-sm flex-fill" title="查看diff">
+                                                    <i class="fas fa-eye"></i>
+                                                </a>
+                                                <button type="button" class="btn btn-outline-primary btn-sm flex-fill" onclick="editConfig({{ config.id }})" title="修改">
+                                                    <i class="fas fa-edit"></i>
+                                                </button>
+                                                <button type="button" class="btn btn-outline-danger btn-sm flex-fill" onclick="deleteConfig({{ config.id }})" title="删除">
+                                                    <i class="fas fa-trash"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+        {% else %}
+        <div class="col-12">
+            <div class="text-center py-5">
+                <i class="fas fa-calendar-week fa-3x text-muted mb-3"></i>
+                <h4 class="text-muted">暂无周版本配置</h4>
+                <p class="text-muted">请先创建周版本diff配置</p>
+                <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addConfigModal">
+                    立即创建
+                </button>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- 分页组件 -->
+    {% if pagination and pagination.total_pages > 1 %}
+    <div class="row mt-4">
+        <div class="col-12">
+            <nav aria-label="周版本配置分页">
+                <ul class="pagination justify-content-center">
+                    <!-- 上一页 -->
+                    <li class="page-item {% if not pagination.has_prev %}disabled{% endif %}">
+                        <a class="page-link" href="{% if pagination.has_prev %}{{ url_for('weekly_version_config', project_id=project.id, page=pagination.prev_num) }}{% else %}#{% endif %}">
+                            <i class="fas fa-chevron-left"></i> 上一页
+                        </a>
+                    </li>
+
+                    <!-- 页码 -->
+                    {% set start_page = [1, pagination.page - 2]|max %}
+                    {% set end_page = [pagination.total_pages, pagination.page + 2]|min %}
+
+                    {% if start_page > 1 %}
+                        <li class="page-item">
+                            <a class="page-link" href="{{ url_for('weekly_version_config', project_id=project.id, page=1) }}">1</a>
+                        </li>
+                        {% if start_page > 2 %}
+                            <li class="page-item disabled">
+                                <span class="page-link">...</span>
+                            </li>
+                        {% endif %}
+                    {% endif %}
+
+                    {% for page_num in range(start_page, end_page + 1) %}
+                        <li class="page-item {% if page_num == pagination.page %}active{% endif %}">
+                            <a class="page-link" href="{{ url_for('weekly_version_config', project_id=project.id, page=page_num) }}">{{ page_num }}</a>
+                        </li>
+                    {% endfor %}
+
+                    {% if end_page < pagination.total_pages %}
+                        {% if end_page < pagination.total_pages - 1 %}
+                            <li class="page-item disabled">
+                                <span class="page-link">...</span>
+                            </li>
+                        {% endif %}
+                        <li class="page-item">
+                            <a class="page-link" href="{{ url_for('weekly_version_config', project_id=project.id, page=pagination.total_pages) }}">{{ pagination.total_pages }}</a>
+                        </li>
+                    {% endif %}
+
+                    <!-- 下一页 -->
+                    <li class="page-item {% if not pagination.has_next %}disabled{% endif %}">
+                        <a class="page-link" href="{% if pagination.has_next %}{{ url_for('weekly_version_config', project_id=project.id, page=pagination.next_num) }}{% else %}#{% endif %}">
+                            下一页 <i class="fas fa-chevron-right"></i>
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+
+            <!-- 分页信息 -->
+            <div class="text-center text-muted small mt-2">
+                显示第 {{ (pagination.page - 1) * pagination.per_page + 1 }} - {{ [pagination.page * pagination.per_page, pagination.total]|min }} 项，共 {{ pagination.total }} 个版本组
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- 新增配置模态框 -->
+<div class="modal fade" id="addConfigModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">新增周版本配置</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form id="addConfigForm" method="POST" action="{{ url_for('weekly_version_config_api', project_id=project.id) }}">
+                <div class="modal-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="configName" class="form-label">配置名称 <span class="text-danger">*</span></label>
+                                <input type="text" class="form-control" id="configName" name="name" required 
+                                       placeholder="例如：第42周版本">
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="repository" class="form-label">选择仓库 <span class="text-danger">*</span></label>
+                                <select class="form-select" id="repository" name="repository_id" required>
+                                    <option value="all" selected>全部仓库</option>
+                                    {% for repo in repositories %}
+                                    <option value="{{ repo.id }}">{{ repo.name }} ({{ repo.type.upper() }})</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="branch" class="form-label">分支名称 <span class="text-danger">*</span></label>
+                                <input type="text" class="form-control" id="branch" name="branch" required 
+                                       placeholder="例如：main, master, develop">
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="cycleType" class="form-label">周期类型</label>
+                                <select class="form-select" id="cycleType" name="cycle_type">
+                                    <option value="weekly">单周</option>
+                                    <option value="biweekly">双周</option>
+                                    <option value="custom" selected>自定义</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="startTime" class="form-label">开始时间 <span class="text-danger">*</span></label>
+                                <input type="datetime-local" class="form-control" id="startTime" name="start_time" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="endTime" class="form-label">结束时间 <span class="text-danger">*</span></label>
+                                <input type="datetime-local" class="form-control" id="endTime" name="end_time" required>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="description" class="form-label">描述</label>
+                        <textarea class="form-control" id="description" name="description" rows="3" 
+                                  placeholder="可选：添加配置描述信息"></textarea>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="autoSync" name="auto_sync" checked>
+                                <label class="form-check-label" for="autoSync">
+                                    启用自动同步（每2分钟检查一次）
+                                </label>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="isActive" name="is_active" checked>
+                                <label class="form-check-label" for="isActive">
+                                    立即启用此配置
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">创建配置</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- 编辑配置模态框 -->
+<div class="modal fade" id="editConfigModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">编辑周版本配置</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form id="editConfigForm" method="POST">
+                <div class="modal-body">
+                    <div class="alert alert-warning">
+                        <i class="fas fa-exclamation-triangle me-2"></i>
+                        <strong>注意：</strong>修改时间范围后，将会清空所有diff缓存和确认状态，需要重新生成diff数据。
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="editConfigName" class="form-label">配置名称 <span class="text-danger">*</span></label>
+                                <input type="text" class="form-control" id="editConfigName" name="name" required
+                                       placeholder="例如：第42周版本">
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="editCycleType" class="form-label">周期类型</label>
+                                <select class="form-select" id="editCycleType" name="cycle_type">
+                                    <option value="weekly">单周</option>
+                                    <option value="biweekly">双周</option>
+                                    <option value="custom">自定义</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="editStartTime" class="form-label">开始时间 <span class="text-danger">*</span></label>
+                                <input type="datetime-local" class="form-control" id="editStartTime" name="start_time" required>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="editEndTime" class="form-label">结束时间 <span class="text-danger">*</span></label>
+                                <input type="datetime-local" class="form-control" id="editEndTime" name="end_time" required>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="editDescription" class="form-label">描述</label>
+                        <textarea class="form-control" id="editDescription" name="description" rows="3"
+                                  placeholder="可选的配置描述"></textarea>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="editAutoSync" name="auto_sync" checked>
+                                <label class="form-check-label" for="editAutoSync">
+                                    自动同步
+                                </label>
+                                <small class="form-text text-muted">启用后会定期自动同步diff数据</small>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="editIsActive" name="is_active" checked>
+                                <label class="form-check-label" for="editIsActive">
+                                    启用配置
+                                </label>
+                                <small class="form-text text-muted">禁用后不会进行自动同步</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-save me-1"></i>保存修改
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+// 页面加载时设置默认时间
+document.addEventListener('DOMContentLoaded', function() {
+    // 设置默认开始时间为本周一0点
+    const now = new Date();
+    const monday = new Date(now);
+    monday.setDate(now.getDate() - now.getDay() + 1);
+    monday.setHours(0, 0, 0, 0);
+
+    // 设置默认结束时间为下周一24点（23:59）
+    const nextMonday = new Date(monday);
+    nextMonday.setDate(monday.getDate() + 7);
+    nextMonday.setHours(23, 59, 0, 0); // 设置为23:59，接近24点
+
+    document.getElementById('startTime').value = formatDateTimeLocal(monday);
+    document.getElementById('endTime').value = formatDateTimeLocal(nextMonday);
+
+    // 添加智能时间调整事件监听器
+    setupTimeAdjustmentListeners();
+
+    // 异步加载统计信息
+    loadAllStats();
+
+    // 设置展开收起按钮事件监听器
+    setupCollapseListeners();
+});
+
+// 设置展开收起按钮事件监听器
+function setupCollapseListeners() {
+    // 监听所有折叠面板的展开/收起事件
+    document.querySelectorAll('[data-bs-toggle="collapse"]').forEach(button => {
+        const targetId = button.getAttribute('data-bs-target');
+        const targetElement = document.querySelector(targetId);
+
+        if (targetElement) {
+            targetElement.addEventListener('show.bs.collapse', function() {
+                // 展开时，图标变为向下箭头
+                const icon = button.querySelector('i');
+                if (icon) {
+                    icon.className = 'fas fa-chevron-down';
+                }
+            });
+
+            targetElement.addEventListener('hide.bs.collapse', function() {
+                // 收起时，图标变为向右箭头
+                const icon = button.querySelector('i');
+                if (icon) {
+                    icon.className = 'fas fa-chevron-right';
+                }
+            });
+        }
+    });
+}
+
+function formatDateTimeLocal(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+// 智能时间调整功能
+function setupTimeAdjustmentListeners() {
+    const cycleTypeSelect = document.getElementById('cycleType');
+    const startTimeInput = document.getElementById('startTime');
+    const endTimeInput = document.getElementById('endTime');
+
+    // 周期类型变化时调整时间
+    cycleTypeSelect.addEventListener('change', function() {
+        adjustTimeBasedOnCycle();
+    });
+
+    // 开始时间变化时调整结束时间
+    startTimeInput.addEventListener('change', function() {
+        if (cycleTypeSelect.value !== 'custom') {
+            adjustEndTimeFromStart();
+        }
+    });
+
+    // 结束时间变化时调整开始时间
+    endTimeInput.addEventListener('change', function() {
+        if (cycleTypeSelect.value !== 'custom') {
+            adjustStartTimeFromEnd();
+        }
+    });
+}
+
+// 根据周期类型调整时间
+function adjustTimeBasedOnCycle() {
+    const cycleType = document.getElementById('cycleType').value;
+    const startTimeInput = document.getElementById('startTime');
+    const endTimeInput = document.getElementById('endTime');
+
+    if (cycleType === 'custom') {
+        return; // 自定义类型不自动调整
+    }
+
+    // 如果有开始时间，基于开始时间调整结束时间
+    if (startTimeInput.value) {
+        adjustEndTimeFromStart();
+    } else {
+        // 如果没有开始时间，设置默认时间
+        const now = new Date();
+        const monday = new Date(now);
+        monday.setDate(now.getDate() - now.getDay() + 1);
+        monday.setHours(0, 0, 0, 0);
+
+        startTimeInput.value = formatDateTimeLocal(monday);
+        adjustEndTimeFromStart();
+    }
+}
+
+// 基于开始时间调整结束时间
+function adjustEndTimeFromStart() {
+    const cycleType = document.getElementById('cycleType').value;
+    const startTimeInput = document.getElementById('startTime');
+    const endTimeInput = document.getElementById('endTime');
+
+    if (!startTimeInput.value || cycleType === 'custom') {
+        return;
+    }
+
+    const startDate = new Date(startTimeInput.value);
+    const endDate = new Date(startDate);
+
+    if (cycleType === 'weekly') {
+        // 单周：+7天，设置为23:59
+        endDate.setDate(startDate.getDate() + 7);
+        endDate.setHours(23, 59, 0, 0);
+    } else if (cycleType === 'biweekly') {
+        // 双周：+14天，设置为23:59
+        endDate.setDate(startDate.getDate() + 14);
+        endDate.setHours(23, 59, 0, 0);
+    }
+
+    endTimeInput.value = formatDateTimeLocal(endDate);
+}
+
+// 基于结束时间调整开始时间
+function adjustStartTimeFromEnd() {
+    const cycleType = document.getElementById('cycleType').value;
+    const startTimeInput = document.getElementById('startTime');
+    const endTimeInput = document.getElementById('endTime');
+
+    if (!endTimeInput.value || cycleType === 'custom') {
+        return;
+    }
+
+    const endDate = new Date(endTimeInput.value);
+    const startDate = new Date(endDate);
+
+    if (cycleType === 'weekly') {
+        // 单周：-7天，设置为00:00
+        startDate.setDate(endDate.getDate() - 7);
+        startDate.setHours(0, 0, 0, 0);
+    } else if (cycleType === 'biweekly') {
+        // 双周：-14天，设置为00:00
+        startDate.setDate(endDate.getDate() - 14);
+        startDate.setHours(0, 0, 0, 0);
+    }
+
+    startTimeInput.value = formatDateTimeLocal(startDate);
+}
+
+// 为编辑模态框设置智能时间调整功能
+function setupEditTimeAdjustmentListeners() {
+    const cycleTypeSelect = document.getElementById('editCycleType');
+    const startTimeInput = document.getElementById('editStartTime');
+    const endTimeInput = document.getElementById('editEndTime');
+
+    // 移除之前的监听器（如果存在）
+    cycleTypeSelect.removeEventListener('change', editAdjustTimeBasedOnCycle);
+    startTimeInput.removeEventListener('change', editAdjustEndTimeFromStart);
+    endTimeInput.removeEventListener('change', editAdjustStartTimeFromEnd);
+
+    // 添加新的监听器
+    cycleTypeSelect.addEventListener('change', editAdjustTimeBasedOnCycle);
+    startTimeInput.addEventListener('change', editAdjustEndTimeFromStart);
+    endTimeInput.addEventListener('change', editAdjustStartTimeFromEnd);
+}
+
+// 编辑模态框：根据周期类型调整时间
+function editAdjustTimeBasedOnCycle() {
+    const cycleType = document.getElementById('editCycleType').value;
+    const startTimeInput = document.getElementById('editStartTime');
+
+    if (cycleType === 'custom') {
+        return; // 自定义类型不自动调整
+    }
+
+    // 如果有开始时间，基于开始时间调整结束时间
+    if (startTimeInput.value) {
+        editAdjustEndTimeFromStart();
+    }
+}
+
+// 编辑模态框：基于开始时间调整结束时间
+function editAdjustEndTimeFromStart() {
+    const cycleType = document.getElementById('editCycleType').value;
+    const startTimeInput = document.getElementById('editStartTime');
+    const endTimeInput = document.getElementById('editEndTime');
+
+    if (!startTimeInput.value || cycleType === 'custom') {
+        return;
+    }
+
+    const startDate = new Date(startTimeInput.value);
+    const endDate = new Date(startDate);
+
+    if (cycleType === 'weekly') {
+        // 单周：+7天，设置为23:59
+        endDate.setDate(startDate.getDate() + 7);
+        endDate.setHours(23, 59, 0, 0);
+    } else if (cycleType === 'biweekly') {
+        // 双周：+14天，设置为23:59
+        endDate.setDate(startDate.getDate() + 14);
+        endDate.setHours(23, 59, 0, 0);
+    }
+
+    endTimeInput.value = formatDateTimeLocal(endDate);
+}
+
+// 编辑模态框：基于结束时间调整开始时间
+function editAdjustStartTimeFromEnd() {
+    const cycleType = document.getElementById('editCycleType').value;
+    const startTimeInput = document.getElementById('editStartTime');
+    const endTimeInput = document.getElementById('editEndTime');
+
+    if (!endTimeInput.value || cycleType === 'custom') {
+        return;
+    }
+
+    const endDate = new Date(endTimeInput.value);
+    const startDate = new Date(endDate);
+
+    if (cycleType === 'weekly') {
+        // 单周：-7天，设置为00:00
+        startDate.setDate(endDate.getDate() - 7);
+        startDate.setHours(0, 0, 0, 0);
+    } else if (cycleType === 'biweekly') {
+        // 双周：-14天，设置为00:00
+        startDate.setDate(endDate.getDate() - 14);
+        startDate.setHours(0, 0, 0, 0);
+    }
+
+    startTimeInput.value = formatDateTimeLocal(startDate);
+}
+
+// 编辑配置
+function editConfig(configId) {
+    // 获取配置详情
+    fetch(`{{ url_for('weekly_version_config_api', project_id=project.id) }}/${configId}`, {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json',
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const config = data.config;
+
+            // 填充表单数据
+            document.getElementById('editConfigName').value = config.name;
+            document.getElementById('editCycleType').value = config.cycle_type;
+
+            const startTimeFormatted = formatDateTimeLocal(new Date(config.start_time));
+            const endTimeFormatted = formatDateTimeLocal(new Date(config.end_time));
+
+            document.getElementById('editStartTime').value = startTimeFormatted;
+            document.getElementById('editEndTime').value = endTimeFormatted;
+            document.getElementById('editDescription').value = config.description || '';
+            document.getElementById('editAutoSync').checked = config.auto_sync;
+            document.getElementById('editIsActive').checked = config.is_active;
+
+            // 保存原始时间数据用于比较
+            const form = document.getElementById('editConfigForm');
+            form.dataset.originalStartTime = startTimeFormatted;
+            form.dataset.originalEndTime = endTimeFormatted;
+
+            // 设置表单提交URL
+            form.action = `{{ url_for('weekly_version_config_api', project_id=project.id) }}/${configId}`;
+
+            // 显示模态框
+            const modal = new bootstrap.Modal(document.getElementById('editConfigModal'));
+            modal.show();
+
+            // 为编辑模态框设置时间调整监听器
+            setupEditTimeAdjustmentListeners();
+        } else {
+            alert('获取配置信息失败：' + data.message);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('获取配置信息失败，请重试');
+    });
+}
+
+// 删除配置
+function deleteConfig(configId) {
+    if (confirm('确定要删除这个配置吗？删除后相关的diff缓存也会被清除。')) {
+        fetch(`{{ url_for('weekly_version_config_api', project_id=project.id) }}/${configId}`, {
+            method: 'DELETE',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                location.reload();
+            } else {
+                alert('删除失败：' + data.message);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('删除失败，请重试');
+        });
+    }
+}
+
+// 新增表单提交处理
+document.getElementById('addConfigForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+
+    const formData = new FormData(this);
+    const data = Object.fromEntries(formData.entries());
+
+    // 处理复选框
+    data.auto_sync = document.getElementById('autoSync').checked;
+    data.is_active = document.getElementById('isActive').checked;
+
+    fetch(this.action, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(data)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            location.reload();
+        } else {
+            alert('创建失败：' + data.message);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('创建失败，请重试');
+    });
+});
+
+// 编辑表单提交处理
+document.getElementById('editConfigForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+
+    // 确认是否要修改时间范围
+    const originalStartTime = this.dataset.originalStartTime;
+    const originalEndTime = this.dataset.originalEndTime;
+    const newStartTime = document.getElementById('editStartTime').value;
+    const newEndTime = document.getElementById('editEndTime').value;
+
+    const timeChanged = originalStartTime !== newStartTime || originalEndTime !== newEndTime;
+
+    if (timeChanged) {
+        const confirmMessage = '修改时间范围将会清空所有diff缓存和确认状态，需要重新生成diff数据。\n\n确定要继续吗？';
+        if (!confirm(confirmMessage)) {
+            return;
+        }
+    }
+
+    const formData = new FormData(this);
+    const data = Object.fromEntries(formData.entries());
+
+    // 处理复选框
+    data.auto_sync = document.getElementById('editAutoSync').checked;
+    data.is_active = document.getElementById('editIsActive').checked;
+
+    // 添加时间变更标记
+    data.time_changed = timeChanged;
+
+    fetch(this.action, {
+        method: 'PUT',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(data)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // 关闭模态框
+            const modal = bootstrap.Modal.getInstance(document.getElementById('editConfigModal'));
+            modal.hide();
+
+            // 显示成功消息
+            if (timeChanged) {
+                alert('配置更新成功！diff缓存已清空，将重新生成diff数据。');
+            } else {
+                alert('配置更新成功！');
+            }
+
+            // 刷新页面
+            location.reload();
+        } else {
+            alert('更新失败：' + data.message);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('更新失败，请重试');
+    });
+});
+
+// 异步加载所有配置的统计信息
+function loadAllStats() {
+    const statsContainers = document.querySelectorAll('.stats-container');
+
+    statsContainers.forEach(container => {
+        const configId = container.dataset.configId;
+        loadConfigStats(configId, container);
+    });
+}
+
+// 加载单个配置的统计信息
+function loadConfigStats(configId, container) {
+    fetch(`{{ url_for('weekly_version_stats_api', config_id=0) }}`.replace('0', configId))
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                const stats = data.stats;
+                container.innerHTML = `
+                    <div class="d-flex justify-content-between small">
+                        <span class="badge bg-secondary">全部：${stats.total_files}</span>
+                        <span class="badge bg-warning">待确认：${stats.pending_count}</span>
+                        <span class="badge bg-success">已确认：${stats.confirmed_count}</span>
+                    </div>
+                `;
+            } else {
+                container.innerHTML = '<small class="text-muted">统计加载失败</small>';
+            }
+        })
+        .catch(error => {
+            console.error('加载统计失败:', error);
+            container.innerHTML = '<small class="text-muted">统计加载失败</small>';
+        });
+}
+
+
+</script>
+{% endblock %}

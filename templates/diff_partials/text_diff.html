@@ -1,0 +1,63 @@
+<!-- 文本文件差异显示 (GitHub风格) -->
+<div class="text-diff-container">
+    <div class="text-diff-header">
+        <div class="d-flex align-items-center">
+            <i class="bi bi-file-text me-2"></i>
+            <span>文本差异</span>
+        </div>
+        <div class="text-diff-stats">
+            <div class="text-diff-stat added">
+                <i class="bi bi-plus-circle"></i>
+                <span>+{{ diff_data.stats.added if diff_data.stats else 0 }}</span>
+            </div>
+            <div class="text-diff-stat removed">
+                <i class="bi bi-dash-circle"></i>
+                <span>-{{ diff_data.stats.removed if diff_data.stats else 0 }}</span>
+            </div>
+            {% if diff_data.stats and diff_data.stats.modified > 0 %}
+            <div class="text-diff-stat modified">
+                <i class="bi bi-pencil-circle"></i>
+                <span>~{{ diff_data.stats.modified }}</span>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    
+    <div class="text-diff-content" id="text-diff-content">
+        {% if diff_data.hunks %}
+            {% for hunk in diff_data.hunks %}
+            <div class="text-diff-hunk">
+                <div class="text-diff-hunk-header">
+                    {{ hunk.header }}
+                </div>
+                <div class="text-diff-lines">
+                    {% set ns = namespace(old_line=hunk.old_start, new_line=hunk.new_start) %}
+                    {% for line in hunk.lines %}
+                        <div class="text-diff-line {{ line.type }}">
+                            <div class="text-diff-line-number">
+                                {% if line.type == 'removed' %}
+                                    {{ ns.old_line }}
+                                    {% set ns.old_line = ns.old_line + 1 %}
+                                {% elif line.type == 'added' %}
+                                    {{ ns.new_line }}
+                                    {% set ns.new_line = ns.new_line + 1 %}
+                                {% else %}
+                                    {{ ns.old_line }}
+                                    {% set ns.old_line = ns.old_line + 1 %}
+                                    {% set ns.new_line = ns.new_line + 1 %}
+                                {% endif %}
+                            </div>
+                            <div class="text-diff-line-content">{{ line.content }}</div>
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endfor %}
+        {% else %}
+            <div class="p-4 text-center text-muted">
+                <i class="bi bi-file-earmark-text fs-1 mb-3"></i>
+                <p>没有找到文本差异数据</p>
+            </div>
+        {% endif %}
+    </div>
+</div>

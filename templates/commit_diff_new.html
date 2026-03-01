@@ -1,0 +1,327 @@
+{% extends "base.html" %}
+
+{% block title %}差异确认 - {{ commit.path }}{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.0">
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <!-- 面包屑导航 -->
+    <nav aria-label="breadcrumb" class="mb-3">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('index') }}">变更确认平台</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('project_detail', project_id=project.id) }}">{{ project.code }}</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('commit_list', repository_id=repository.id) }}">{{ repository.name.replace('_git', '') }}</a></li>
+            <li class="breadcrumb-item active">{{ commit.path }}</li>
+        </ol>
+    </nav>
+
+    <!-- 文件信息卡片 -->
+    <div class="card mb-4">
+        <div class="card-header bg-light d-flex justify-content-between align-items-center">
+            <div class="d-flex align-items-center">
+                <h6 class="mb-0 me-3">文件信息</h6>
+                <span class="diff-type-badge {{ diff_data.type if diff_data else 'unknown' }}">
+                    {% if diff_data %}
+                        {% if diff_data.type == 'text' %}文本文件
+                        {% elif diff_data.type == 'excel' %}表格文件
+                        {% elif diff_data.type == 'image' %}图片文件
+                        {% elif diff_data.type == 'binary' %}二进制文件
+                        {% else %}{{ diff_data.type.upper() }}
+                        {% endif %}
+                    {% else %}
+                        未知类型
+                    {% endif %}
+                </span>
+                <span class="badge status-{{ commit.status }} ms-2">
+                    {% if commit.status == 'pending' %}待确认
+                    {% elif commit.status == 'reviewed' %}已查看
+                    {% elif commit.status == 'confirmed' %}已确认
+                    {% elif commit.status == 'rejected' %}已拒绝
+                    {% else %}{{ commit.status }}
+                    {% endif %}
+                </span>
+            </div>
+            <div>
+                {% if commit.status in ['pending', 'reviewed'] %}
+                <button class="btn btn-success btn-sm me-2" onclick="updateCommitStatus('{{ commit.id }}', 'confirmed')">
+                    <i class="bi bi-check-circle"></i> 确认
+                </button>
+                <button class="btn btn-danger btn-sm me-2" onclick="updateCommitStatus('{{ commit.id }}', 'rejected')">
+                    <i class="bi bi-x-circle"></i> 拒绝
+                </button>
+                {% endif %}
+                <button class="btn btn-warning btn-sm me-2" onclick="refreshDiff('{{ commit.id }}', event)" title="重新计算差异（绕过缓存）">
+                    <i class="bi bi-arrow-clockwise"></i> 重新计算
+                </button>
+                <a href="{{ url_for('commit_list', repository_id=repository.id) }}" class="btn btn-secondary btn-sm">
+                    <i class="bi bi-arrow-left"></i> 返回项目
+                </a>
+            </div>
+        </div>
+        <div class="card-body py-3">
+            <div class="mb-3">
+                <strong>文件路径:</strong> <code>{{ commit.path }}</code>
+            </div>
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="version-info">
+                        <h6 class="text-muted mb-2">当前版本</h6>
+                        <div><strong>提交ID:</strong> <code>{{ commit.commit_id[:8] }}</code></div>
+                        <div><strong>提交时间:</strong> {{ commit.commit_time.strftime('%Y-%m-%d %H:%M:%S') if commit.commit_time else '无' }}</div>
+                        <div><strong>提交者:</strong> {{ commit.author | e or '无' }}</div>
+                        {% if commit.message %}
+                        <div><strong>提交信息:</strong> {{ commit.message | e }}</div>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="version-info">
+                        <h6 class="text-muted mb-2">对比版本</h6>
+                        <div><strong>提交ID:</strong> 
+                            {% if previous_commit %}
+                                <code>{{ previous_commit.commit_id[:8] }}</code>
+                            {% else %}
+                                <code>初始版本</code>
+                            {% endif %}
+                        </div>
+                        <div><strong>操作类型:</strong> 
+                            {% if commit.operation == 'A' %}
+                                新增文件
+                            {% elif commit.operation == 'M' %}
+                                修改文件
+                            {% elif commit.operation == 'D' %}
+                                删除文件
+                            {% else %}
+                                与父提交对比
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 差异内容区域 -->
+    <div class="diff-container">
+        {% if diff_data %}
+            {% if diff_data.type == 'text' %}
+                {% include 'diff_partials/text_diff.html' %}
+            {% elif diff_data.type == 'excel' %}
+                {% include 'diff_partials/excel_diff.html' %}
+            {% elif diff_data.type == 'image' %}
+                {% include 'diff_partials/image_diff.html' %}
+            {% elif diff_data.type == 'binary' %}
+                {% include 'diff_partials/binary_diff.html' %}
+            {% else %}
+                <div class="diff-error">
+                    <div class="diff-error-icon"><i class="bi bi-exclamation-triangle"></i></div>
+                    <h5>未知文件类型: {{ diff_data.type }}</h5>
+                    <p>无法处理此文件类型的差异显示</p>
+                </div>
+            {% endif %}
+        {% else %}
+            <div class="diff-error">
+                <div class="diff-error-icon"><i class="bi bi-file-earmark-x"></i></div>
+                <h5>无法获取文件差异</h5>
+                <p>文件差异数据不可用或处理失败</p>
+            </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/diff-handlers.js') }}?v=2.0"></script>
+<script>
+// 状态更新函数
+function updateCommitStatus(commitId, status) {
+    const statusText = status === 'confirmed' ? '确认' : '拒绝';
+    
+    if (!confirm(`确定要${statusText}此提交吗？`)) {
+        return;
+    }
+    
+    fetch('/commits/' + commitId + '/status', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            status: status
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // 更新页面状态显示
+            const statusBadge = document.querySelector('.badge[class*="status-"]');
+            if (statusBadge) {
+                statusBadge.className = `badge status-${status} ms-2`;
+                statusBadge.textContent = status === 'confirmed' ? '已确认' : '已拒绝';
+            }
+            
+            // 隐藏操作按钮
+            const buttons = document.querySelectorAll('.btn-success, .btn-danger');
+            buttons.forEach(btn => {
+                if (btn.textContent.includes('确认') || btn.textContent.includes('拒绝')) {
+                    btn.style.display = 'none';
+                }
+            });
+            
+            alert(`提交已${statusText}！`);
+        } else {
+            alert('状态更新失败: ' + (data.message || '未知错误'));
+        }
+    })
+    .catch(error => {
+        console.error('更新状态失败:', error);
+        alert('状态更新失败，请稍后重试');
+    });
+}
+
+// 重新计算差异函数 - 优化版本，避免完整页面重新加载
+function refreshDiff(commitId, event) {
+    const button = event.target.closest('button');
+    const originalText = button.innerHTML;
+
+    // 显示加载状态
+    button.innerHTML = '<i class="bi bi-arrow-clockwise spin"></i> 计算中...';
+    button.disabled = true;
+
+    // 显示全局加载提示
+    showLoadingMessage('正在重新计算差异数据，请稍候...');
+
+    fetch('/commits/' + commitId + '/refresh-diff', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // 显示成功消息
+            showSuccessMessage(`差异重新计算完成，耗时 ${data.processing_time?.toFixed(2) || '未知'} 秒`);
+
+            // 延迟刷新以让用户看到成功消息
+            setTimeout(() => {
+                // 只刷新差异内容区域，而不是整个页面
+                refreshDiffContent(commitId);
+            }, 1500);
+        } else {
+            hideLoadingMessage();
+            alert('重新计算失败: ' + (data.message || '未知错误'));
+            button.innerHTML = originalText;
+            button.disabled = false;
+        }
+    })
+    .catch(error => {
+        hideLoadingMessage();
+        console.error('重新计算失败:', error);
+        alert('重新计算失败，请稍后重试');
+        button.innerHTML = originalText;
+        button.disabled = false;
+    });
+}
+
+// 只刷新差异内容区域
+function refreshDiffContent(commitId) {
+    fetch('/commits/' + commitId + '/excel-diff-data')
+    .then(response => response.json())
+    .then(data => {
+        if (data.success && data.diff_data) {
+            // 更新差异内容
+            updateDiffDisplay(data.diff_data);
+            hideLoadingMessage();
+
+            // 恢复按钮状态
+            const button = document.querySelector('button[onclick*="refreshDiff"]');
+            if (button) {
+                button.innerHTML = '<i class="bi bi-arrow-clockwise"></i> 重新计算';
+                button.disabled = false;
+            }
+        } else {
+            // 如果局部刷新失败，回退到完整页面刷新
+            location.reload();
+        }
+    })
+    .catch(error => {
+        console.error('刷新差异内容失败:', error);
+        // 如果局部刷新失败，回退到完整页面刷新
+        location.reload();
+    });
+}
+
+// 更新差异显示内容
+function updateDiffDisplay(diffData) {
+    if (diffData.type === 'excel' && diffData.sheets) {
+        // 更新Excel差异表格
+        const diffContainer = document.querySelector('.excel-diff-container');
+        if (diffContainer) {
+            // 重新渲染Excel差异表格
+            renderExcelDiff(diffData);
+        }
+    }
+}
+
+// 显示加载消息
+function showLoadingMessage(message) {
+    // 创建或更新加载提示
+    let loadingDiv = document.getElementById('refresh-loading');
+    if (!loadingDiv) {
+        loadingDiv = document.createElement('div');
+        loadingDiv.id = 'refresh-loading';
+        loadingDiv.className = 'alert alert-info position-fixed';
+        loadingDiv.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
+        document.body.appendChild(loadingDiv);
+    }
+    loadingDiv.innerHTML = `
+        <div class="d-flex align-items-center">
+            <div class="spinner-border spinner-border-sm me-2" role="status"></div>
+            <span>${message}</span>
+        </div>
+    `;
+    loadingDiv.style.display = 'block';
+}
+
+// 显示成功消息
+function showSuccessMessage(message) {
+    const loadingDiv = document.getElementById('refresh-loading');
+    if (loadingDiv) {
+        loadingDiv.className = 'alert alert-success position-fixed';
+        loadingDiv.innerHTML = `
+            <div class="d-flex align-items-center">
+                <i class="bi bi-check-circle me-2"></i>
+                <span>${message}</span>
+            </div>
+        `;
+    }
+}
+
+// 隐藏加载消息
+function hideLoadingMessage() {
+    const loadingDiv = document.getElementById('refresh-loading');
+    if (loadingDiv) {
+        loadingDiv.style.display = 'none';
+    }
+}
+
+// 初始化diff处理器
+document.addEventListener('DOMContentLoaded', function() {
+    {% if diff_data %}
+        {% if diff_data.type == 'text' %}
+            initTextDiff({{ diff_data | tojson }});
+        {% elif diff_data.type == 'excel' %}
+            initExcelDiff({{ diff_data | tojson }});
+        {% elif diff_data.type == 'image' %}
+            initImageDiff({{ diff_data | tojson }});
+        {% elif diff_data.type == 'binary' %}
+            initBinaryDiff({{ diff_data | tojson }});
+        {% endif %}
+    {% endif %}
+});
+</script>
+{% endblock %}

@@ -1,0 +1,1976 @@
+{% extends "base.html" %}
+
+{% block title %}diff多版本合并显示{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.0">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-diff-new.css') }}?v=2.0">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-scroll-fix.css') }}?v=2.0">
+<style>
+/* 加载状态样式 */
+.loading-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    margin: 1rem 0;
+}
+
+.loading-spinner {
+    width: 2rem;
+    height: 2rem;
+    border: 3px solid #f3f4f6;
+    border-top: 3px solid #3b82f6;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-right: 1rem;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.loading-text {
+    color: #6b7280;
+    font-size: 0.9rem;
+}
+
+/* 强制修改行背景色 - 最高优先级 */
+.excel-diff-table tr.excel-row-modified-old {
+    background-color: #ffebee !important;
+    background-image: none !important;
+}
+
+.excel-diff-table tr.excel-row-modified-new {
+    background-color: #e8f5e8 !important;
+    background-image: none !important;
+}
+
+.excel-diff-table tr.excel-row-modified-old .excel-cell {
+    background-color: #ffebee !important;
+    background-image: none !important;
+}
+
+.excel-diff-table tr.excel-row-modified-new .excel-cell {
+    background-color: #e8f5e8 !important;
+    background-image: none !important;
+}
+
+.excel-diff-table tr.excel-row-modified-old .excel-cell.excel-unchanged {
+    background-color: #fff !important;
+    background-image: none !important;
+}
+
+.excel-diff-table tr.excel-row-modified-new .excel-cell.excel-unchanged {
+    background-color: #fff !important;
+    background-image: none !important;
+}
+
+/* 确保文本背景样式不被覆盖 - 最高优先级 */
+.excel-diff-table .excel-text-bg-old {
+    background-color: #ee3f51 !important; /* 红色背景 */
+    color: #f8f8f8 !important; /* 白色文字 */
+    padding: 2px 4px !important;
+    border-radius: 3px !important;
+    display: inline-block !important;
+    text-align: left !important;
+    vertical-align: top !important;
+}
+
+.excel-diff-table .excel-text-bg-new {
+    background-color: #2e7d32 !important; /* 深绿色背景 */
+    color: white !important; /* 白色文字 */
+    padding: 2px 4px !important;
+    border-radius: 3px !important;
+    display: inline-block !important;
+    text-align: left !important;
+    vertical-align: top !important;
+    border: none !important;
+    text-decoration: none !important;
+}
+
+/* 统一单文件diff样式 */
+.commit-diff-section .card-header {
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-bottom: 1px solid #dee2e6;
+}
+
+.commit-diff-section .card-body {
+    padding: 0;
+}
+
+/* 版本信息样式 - 与单文件diff一致 */
+.version-info {
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 1rem;
+}
+
+.version-info.current {
+    background-color: #d4edda;
+    border: 1px solid #c3e6cb;
+}
+
+.version-info.current h6 {
+    color: #155724;
+}
+
+.version-info.previous {
+    background-color: #f8d7da;
+    border: 1px solid #f5c6cb;
+}
+
+.version-info.previous h6 {
+    color: #721c24;
+}
+
+/* 文件路径样式 */
+.file-path-code {
+    background-color: #f8f9fa;
+    padding: 0.5rem;
+    border-radius: 4px;
+    font-family: 'Courier New', monospace;
+    font-size: 0.9rem;
+}
+
+/* 状态徽章样式 */
+.status-badge {
+    font-size: 0.8rem;
+    padding: 0.25rem 0.5rem;
+}
+
+.status-pending { background-color: #ffc107; color: #212529; }
+.status-reviewed { background-color: #17a2b8; color: white; }
+.status-confirmed { background-color: #28a745; color: white; }
+.status-rejected { background-color: #dc3545; color: white; }
+/* 多Excel文件显示样式 */
+.commit-diff-section {
+    position: relative;
+}
+
+.commit-diff-section:not(:first-child) {
+    border-top: 2px solid #dee2e6;
+    padding-top: 2rem;
+    margin-top: 2rem;
+}
+
+.commit-diff-section .diff-file-header {
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    padding: 1rem;
+    border-radius: 8px 8px 0 0;
+    border: 1px solid #dee2e6;
+    margin-bottom: 0;
+}
+
+.commit-diff-section .excel-diff-container {
+    border: 1px solid #dee2e6;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+}
+
+.file-path-display {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #495057;
+    margin-bottom: 0.5rem;
+}
+
+.commit-meta-info {
+    font-size: 0.9rem;
+    color: #6c757d;
+}
+
+/* Excel diff 增强样式 */
+.excel-row-header-modified {
+    background: #fff3cd !important;
+    border-left: 3px solid #ffc107 !important;
+}
+
+.excel-cell-in-modified-row {
+    background: #fffbf0;
+}
+
+/* 确保未修改行为白色背景 */
+.excel-row-normal {
+    background: #fff !important;
+}
+
+.excel-row-normal .excel-row-header {
+    background: #f8f9fa !important;
+}
+
+.excel-row-normal .excel-cell {
+    background: #fff !important;
+}
+
+/* 修改行的黄色背景 */
+.excel-row-modified-old {
+    background: #fff3cd;
+}
+
+/* 覆盖所有可能的样式冲突，确保普通单元格为白色背景，但不影响新增/删除行 */
+.excel-cell:not(.excel-added):not(.excel-removed) {
+    background: #fff !important;
+    background-color: #fff !important;
+    vertical-align: top !important;
+}
+
+.excel-row-modified-old .excel-cell:not(.excel-added):not(.excel-removed) {
+    background: #fff !important;
+    background-color: #fff !important;
+}
+
+.excel-row-modified-new .excel-cell:not(.excel-added):not(.excel-removed) {
+    background: #fff !important;
+    background-color: #fff !important;
+}
+
+/* 强制覆盖任何可能的行级样式，但不影响新增/删除行 */
+tr.excel-row-modified-old td.excel-cell:not(.excel-added):not(.excel-removed) {
+    background: #fff !important;
+    background-color: #fff !important;
+}
+
+/* 覆盖表格级别的样式，但不影响新增/删除行 */
+.excel-diff-table .excel-cell:not(.excel-added):not(.excel-removed) {
+    background: #fff !important;
+    background-color: #fff !important;
+}
+
+.excel-diff-table tr.excel-row-modified-old td.excel-cell:not(.excel-added):not(.excel-removed) {
+    background: #fff !important;
+    background-color: #fff !important;
+}
+
+/* 确保新增行和删除行的单元格背景色与行号一致 */
+.excel-diff-table .excel-row-added .excel-cell.excel-added {
+    background-color: #53d471 !important; /* 与行号一致的深绿色背景 */
+    border-color: #28a745 !important;
+    font-weight: bold !important;
+    color: #000 !important; /* 黑色文字确保可读性 */
+}
+
+/* 修改行中旧值单元格的样式 - 浅红色背景，使用最高优先级选择器 */
+.excel-diff-table tr.excel-row-modified-old td.excel-cell.excel-modified-old,
+.excel-diff-table td.excel-cell.excel-modified-old.modified-column,
+.excel-diff-table .excel-cell.excel-modified-old {
+    background-color: #f8d7da !important; /* 浅红色背景 */
+    background: #f8d7da !important;
+    border-color: #f5c6cb !important;
+    color: #721c24 !important;
+    font-weight: bold !important;
+    background-image: none !important;
+}
+
+/* 修改行中新值单元格的样式 - 浅绿色背景，使用最高优先级选择器 */
+.excel-diff-table tr.excel-row-modified-new td.excel-cell.excel-modified-new,
+.excel-diff-table td.excel-cell.excel-modified-new.modified-column,
+.excel-diff-table .excel-cell.excel-modified-new {
+    background-color: #d4edda !important; /* 浅绿色背景 */
+    background: #d4edda !important;
+    border-color: #c3e6cb !important;
+    color: #155724 !important;
+    font-weight: bold !important;
+    background-image: none !important;
+}
+
+.excel-diff-table .excel-row-removed .excel-cell.excel-removed {
+    background-color: #f76571 !important; /* 使用与行号一致的深红色背景 */
+    border-color: #f5c6cb !important;
+    font-weight: bold !important;
+    color: #000 !important; /* 使用黑色文字 */
+}
+
+/* 确保新增行和删除行的样式具有最高优先级 */
+.excel-diff-table tr.excel-row-added td.excel-cell.excel-added {
+    background-color: #53d471 !important; /* 与行号一致的深绿色背景 */
+    border-color: #28a745 !important;
+    color: #000 !important; /* 黑色文字确保可读性 */
+    font-weight: bold !important;
+}
+
+.excel-diff-table tr.excel-row-removed td.excel-cell.excel-removed {
+    background-color: #f76571 !important; /* 使用与行号一致的深红色背景 */
+    border-color: #f5c6cb !important;
+    color: #000 !important; /* 使用黑色文字 */
+    font-weight: bold !important;
+}
+
+/* 确保有变更的单元格容器样式正确 - 使用与单文件diff一致的样式 */
+.excel-cell.excel-cell-modified {
+    background-color: #fff !important;
+    border-left: 3px solid #ffc107 !important;
+    padding: 0 !important;
+    vertical-align: top !important;
+}
+
+/* 修改行的行号样式 */
+td.excel-row-number.excel-modified,
+.excel-diff-table td.excel-row-number.excel-modified,
+.excel-diff-table tr.excel-row-modified-old td.excel-row-number.excel-modified,
+.excel-diff-table tr.excel-row-modified-new td.excel-row-number.excel-modified,
+.excel-row-number.excel-modified {
+    background-color: #fff3cd !important;
+    background: #fff3cd !important;
+    border-color: #ffeaa7 !important;
+    color: #856404 !important;
+    font-weight: bold !important;
+    background-image: none !important;
+    /* 强制覆盖任何可能的背景样式 */
+    background-attachment: initial !important;
+    background-clip: initial !important;
+    background-origin: initial !important;
+    background-position: initial !important;
+    background-repeat: initial !important;
+    background-size: initial !important;
+}
+
+/* 上下对比显示样式 */
+.excel-diff-old {
+    background: #ffebee;
+    color: #d32f2f;
+    padding: 4px 8px;
+    border-bottom: 1px solid #ffcdd2;
+    text-decoration: line-through;
+    font-size: 12px;
+}
+
+.excel-diff-new {
+    background: #e8f5e8;
+    color: #2e7d32;
+    padding: 4px 8px;
+    font-weight: bold;
+    font-size: 12px;
+}
+
+/* 删除单元格样式 */
+.excel-diff-removed {
+    background: #ffebee;
+    color: #d32f2f;
+    padding: 4px 8px;
+    text-decoration: line-through;
+    font-size: 12px;
+    text-align: center;
+}
+
+/* 新增单元格样式 */
+.excel-diff-added {
+    background: #e8f5e8;
+    color: #2e7d32;
+    padding: 4px 8px;
+    font-weight: bold;
+    font-size: 12px;
+    text-align: center;
+}
+
+/* 工作表标签状态样式 */
+.excel-sheet-tab.excel-tab-with-changes {
+    background: #fff3cd;
+    color: #856404;
+    font-weight: 600;
+    border-bottom-color: #ffc107;
+}
+
+.excel-sheet-tab.excel-tab-with-changes::after {
+    content: '●';
+    color: #ffc107;
+    margin-left: 6px;
+    font-size: 8px;
+}
+
+.excel-sheet-tab.excel-tab-no-changes {
+    background: #f8f9fa;
+    color: #6c757d;
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.excel-sheet-tab.excel-tab-disabled {
+    pointer-events: none;
+}
+
+/* 表头样式 */
+.excel-version-header {
+    font-size: 11px;
+    font-weight: 500;
+    text-align: center;
+    padding: 4px 8px;
+}
+
+.excel-version-header.old {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.excel-version-header.new {
+    background: #d1ecf1;
+    color: #0c5460;
+}
+
+/* 提交状态徽章样式 */
+.status-pending {
+    background-color: #ffc107 !important;
+    color: #000 !important;
+}
+
+.status-reviewed {
+    background-color: #17a2b8 !important;
+    color: #fff !important;
+}
+
+.status-confirmed {
+    background-color: #28a745 !important;
+    color: #fff !important;
+}
+
+        .status-rejected {
+            background-color: #dc3545 !important;
+        }
+
+        /* 提交信息表格优化 */
+        .commit-info-table {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        .commit-info-table th {
+            background-color: #f8f9fa;
+            border-bottom: 2px solid #dee2e6;
+            padding: 12px 8px;
+            vertical-align: middle;
+            color: #495057;
+        }
+
+        .commit-row {
+            transition: background-color 0.2s ease;
+        }
+
+        .commit-row:hover {
+            background-color: #f8f9fa;
+        }
+
+        .commit-row td {
+            padding: 12px 8px;
+            vertical-align: middle;
+            border-bottom: 1px solid #dee2e6;
+        }
+
+        .commit-id {
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.875rem;
+            background-color: #f1f3f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #495057;
+        }
+
+        .filename-text {
+            font-size: 0.875rem;
+            color: #6c757d;
+            font-weight: 500;
+        }
+
+        .commit-message {
+            font-size: 0.875rem;
+            line-height: 1.4;
+            color: #212529;
+            white-space: normal;
+            word-wrap: break-word;
+            max-width: 400px;
+        }
+
+        .author-text {
+            font-size: 0.875rem;
+            color: #495057;
+            font-weight: 500;
+        }
+
+        .time-text {
+            font-size: 0.875rem;
+            color: #6c757d;
+        }
+
+        .badge.fs-6 {
+            font-size: 0.875rem !important;
+            padding: 0.375rem 0.75rem;
+        }
+
+        .commit-info-table .btn-sm {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.875rem;
+        }
+
+        /* 新的卡片式提交信息列表样式 */
+        .commit-list-card {
+            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+            border: 1px solid rgba(0, 0, 0, 0.125);
+            font-size: 105%; /* 整体放大到105% */
+        }
+        
+        .commit-item {
+            transition: all 0.2s ease;
+            position: relative;
+        }
+        
+        .commit-item:hover {
+            background-color: #f8f9fa;
+        }
+        
+        .commit-item:last-child {
+            border-bottom: none !important;
+        }
+        
+        .commit-id-compact {
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.875rem;
+            background-color: #e9ecef;
+            padding: 0.125rem 0.375rem;
+            border-radius: 0.25rem;
+            color: #495057;
+            font-weight: 600;
+        }
+        
+        .commit-message-compact {
+            font-size: 0.875rem;
+            color: #212529;
+            font-weight: 500;
+            white-space: normal;
+            word-wrap: break-word;
+            line-height: 1.4;
+            margin-right: 1rem; /* 增加与文件名的间距 */
+            flex: 1; /* 允许占用可用空间 */
+        }
+        
+        .filename-compact {
+            font-size: 110%; /* 文件名放大到110% */
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            white-space: normal;
+            word-wrap: break-word;
+            font-weight: 600;
+            color: #495057;
+        }
+        
+        .badge.status-pending {
+            background-color: #ffc107;
+            color: #000;
+            font-size: 0.75rem;
+            padding: 0.25rem 0.5rem;
+        }
+        
+        .badge.status-reviewed {
+            background-color: #17a2b8;
+            color: #fff;
+            font-size: 0.75rem;
+            padding: 0.25rem 0.5rem;
+        }
+        
+        .badge.status-confirmed {
+            background-color: #28a745;
+            color: #fff;
+            font-size: 0.75rem;
+            padding: 0.25rem 0.5rem;
+        }
+        
+        .badge.status-rejected {
+            background-color: #dc3545;
+            color: #fff;
+            font-size: 0.75rem;
+            padding: 0.25rem 0.5rem;
+        }
+        
+        .btn-xs {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.75rem;
+            line-height: 1;
+        }
+        
+        .btn-group-sm .btn {
+            border-radius: 0.25rem;
+        }
+        
+        .btn-group-sm .btn:not(:last-child) {
+            margin-right: 0.25rem;
+        }
+
+        .table th {
+            border-top: none;
+            font-weight: 600;
+            font-size: 0.875rem;
+        }
+
+        .table td {
+            vertical-align: middle;
+            font-size: 0.875rem;
+        }
+
+        .table-hover tbody tr:hover {
+            background-color: rgba(0, 123, 255, 0.05);
+        }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-12">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h2>合并差异显示</h2>
+                <div>
+                    <button id="refreshMergeDiffBtn" class="btn btn-warning me-2" onclick="refreshMergeDiff()">
+                        <i class="fas fa-sync-alt"></i> 重新计算
+                    </button>
+                    <a href="{{ url_for('commit_list', repository_id=commits[0].repository.id) }}" class="btn btn-secondary">
+                        <i class="fas fa-arrow-left"></i> 返回项目
+                    </a>
+                </div>
+            </div>
+
+            <!-- 提交信息列表 -->
+            <div class="card mb-4 commit-list-card">
+                <div class="card-header bg-white border-bottom">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div class="d-flex align-items-center">
+                            <i class="fas fa-code-branch text-primary me-2"></i>
+                            <h5 class="mb-0 fw-semibold">提交信息列表</h5>
+                            <span class="badge bg-light text-dark ms-2">{{ commits|length }} 个提交</span>
+                        </div>
+                        <button class="btn btn-success" onclick="approveAllCommits()" title="将所有待确认的提交设置为已确认">
+                            <i class="fas fa-check-double me-2"></i>一键通过
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    {% for commit in commits %}
+                    <div class="commit-item border-bottom py-2" data-commit-id="{{ commit.id }}">
+                        <div class="row g-0 align-items-center px-3">
+                            <!-- 版本和状态 -->
+                            <div class="col-auto me-3">
+                                <span class="badge bg-dark me-2">{{ commit.version }}</span>
+                                <span class="badge status-{{ commit.status }}">
+                                    {% if commit.status == 'pending' %}待确认
+                                    {% elif commit.status == 'reviewed' %}已查看
+                                    {% elif commit.status == 'confirmed' %}已确认
+                                    {% elif commit.status == 'rejected' %}已拒绝
+                                    {% else %}{{ commit.status }}
+                                    {% endif %}
+                                </span>
+                            </div>
+                            
+                            <!-- 主要信息 -->
+                            <div class="col">
+                                <!-- 第一行：提交ID、作者、时间 -->
+                                <div class="d-flex align-items-center mb-1">
+                                    <code class="commit-id-compact me-3">{{ commit.commit_id[:8] }}</code>
+                                    <span class="text-muted small me-3">
+                                        <i class="fas fa-user me-1"></i>{{ commit.author | e or '未知' }}
+                                    </span>
+                                    <span class="text-muted small">
+                                        <i class="fas fa-clock me-1"></i>
+                                        {% if commit.commit_time %}
+                                            {{ commit.commit_time.strftime('%m-%d %H:%M') }}
+                                        {% else %}
+                                            未知时间
+                                        {% endif %}
+                                    </span>
+                                </div>
+                                <!-- 第二行：提交信息 -->
+                                <div class="mb-1">
+                                    <span class="commit-message-compact">{{ commit.message | e or '无提交消息' }}</span>
+                                </div>
+                                <!-- 第三行：文件名 -->
+                                <div>
+                                    <span class="filename-compact text-muted">{{ commit.path }}</span>
+                                </div>
+                            </div>
+                            
+                            <!-- 操作按钮 -->
+                            <div class="col-auto">
+                                <div class="d-flex align-items-center">
+                                    <a href="{{ url_for('commit_diff_with_path', project_code=commit.repository.project.code, repository_name=commit.repository.name, commit_id=commit.id) }}" 
+                                       class="btn btn-outline-primary btn-xs me-2" 
+                                       title="查看详细差异">
+                                        <i class="fas fa-eye"></i>
+                                    </a>
+                                    {% if commit.status != 'confirmed' %}
+                                    <button class="btn btn-success btn-xs me-2" 
+                                            onclick="approveCommit({{ commit.id }})"
+                                            title="通过此提交">
+                                        <i class="fas fa-check me-1"></i>通过
+                                    </button>
+                                    {% endif %}
+                                    {% if commit.status != 'rejected' %}
+                                    <button class="btn btn-danger btn-xs" 
+                                            onclick="rejectCommit({{ commit.id }})"
+                                            title="拒绝此提交">
+                                        <i class="fas fa-times me-1"></i>拒绝
+                                    </button>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            {% if merged_diff_data %}
+                <!-- 合并diff显示 -->
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">合并差异 - {{ commits[0].path }}</h5>
+                    </div>
+                    <div class="card-body">
+                        {% if merged_diff_data.type == 'excel' %}
+                            <!-- Excel合并diff显示 - 使用与单文件diff相同的结构 -->
+                            <div class="excel-diff-wrapper">
+                                <!-- Excel工作表标签容器 -->
+                                <div class="excel-sheet-tabs-container">
+                                    <div id="excel-sheet-tabs" class="excel-sheet-tabs"></div>
+                                </div>
+
+                                <!-- Excel表格内容容器 -->
+                                <div id="excel-content" class="excel-content-area">
+                                    <div class="excel-sheet-content active">
+                                        <div class="excel-table-wrapper">
+                                            <!-- 表格内容将通过JavaScript动态生成 -->
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        {% elif merged_diff_data.hunks %}
+                            <!-- 文本合并diff显示 -->
+                            <div class="diff-content">
+                                {% for hunk in merged_diff_data.hunks %}
+                                <div class="hunk">
+                                    <div class="hunk-header">{{ hunk.header }}</div>
+                                    {% for line in hunk.lines %}
+                                    <div class="line {{ line.type }}">
+                                        <span class="line-number old">{{ line.old_line_number if line.old_line_number else '' }}</span>
+                                        <span class="line-number new">{{ line.new_line_number if line.new_line_number else '' }}</span>
+                                        <span class="line-content">{{ line.content }}</span>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                        {% else %}
+                            <div class="alert alert-info">
+                                无法解析diff内容或文件无变更
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            {% else %}
+                <!-- 传统的逐个提交diff显示 -->
+                {% for commit_info in commits_with_diff %}
+                {% set commit = commit_info.commit %}
+                <div class="commit-diff-section mb-4">
+                    <div class="diff-container">
+                        <div class="diff-file-header">
+                            <div class="file-path-display">
+                                {% if commit_info.get('display_title') %}
+                                    {{ commit_info.display_title }}
+                                {% else %}
+                                    📄 {{ commit.path }}
+                                {% endif %}
+                            </div>
+                            <div class="commit-meta-info">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <div>
+                                        {% if commit_info.get('type') == 'consecutive_merge' %}
+                                            <span class="badge bg-success">合并</span>
+                                            <span class="ms-2">{{ commit_info.display_subtitle }}</span>
+                                        {% else %}
+                                            <span class="badge bg-primary">{{ commit.commit_id[:8] }}</span>
+                                            <span class="ms-2">{{ commit.message | e or '无提交消息' }}</span>
+                                        {% endif %}
+                                    </div>
+                                    <div class="text-end">
+                                        <small class="text-muted">
+                                            {% if commit_info.get('type') == 'consecutive_merge' %}
+                                                版本: {{ commit.version }} |
+                                                提交者: {{ commit.author | e }} |
+                                                最新时间: {{ commit.commit_time.strftime('%m月%d日 %H:%M') if commit.commit_time else '未知时间' }}
+                                            {% else %}
+                                                版本: {{ commit.version }} |
+                                                提交者: {{ commit.author | e }} |
+                                                {% if commit.commit_time %}
+                                                    {{ commit.commit_time.strftime('%m月%d日 %H:%M') }}
+                                                {% else %}
+                                                    未知时间
+                                                {% endif %}
+                                            {% endif %}
+                                        </small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 异步加载diff内容 -->
+                        <div class="card">
+                            <div class="card-header bg-light d-flex justify-content-between align-items-center">
+                                <div class="d-flex align-items-center">
+                                    <h6 class="mb-0 me-3">文件信息</h6>
+                                    <span class="badge status-{{ commit.status }}">
+                                        {% if commit.status == 'pending' %}待确认
+                                        {% elif commit.status == 'reviewed' %}已查看
+                                        {% elif commit.status == 'confirmed' %}已确认
+                                        {% elif commit.status == 'rejected' %}已拒绝
+                                        {% else %}{{ commit.status }}
+                                        {% endif %}
+                                    </span>
+                                </div>
+                                <div>
+                                    {% if commit.status in ['pending', 'reviewed'] %}
+                                    <button class="btn btn-success btn-sm me-2" onclick="updateCommitStatus('{{ commit.id }}', 'confirmed')">
+                                        <i class="bi bi-check-circle"></i> 确认
+                                    </button>
+                                    <button class="btn btn-danger btn-sm me-2" onclick="updateCommitStatus('{{ commit.id }}', 'rejected')">
+                                        <i class="bi bi-x-circle"></i> 拒绝
+                                    </button>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <div class="card-body py-3">
+                                <!-- 文件路径 -->
+                                <div class="mb-3">
+                                    <strong>文件路径:</strong> <code class="file-path-code">{{ commit.path }}</code>
+                                </div>
+
+                                <!-- 版本信息对比 - 在合并diff页面中隐藏 -->
+                                <div class="row" style="display: none;">
+                                    <div class="col-md-6">
+                                        <div class="version-info current">
+                                            <h6 class="mb-2 fw-bold">当前版本</h6>
+                                            <div><strong>Commit ID:</strong> <code>{{ commit.commit_id[:8] }}</code></div>
+                                            <div><strong>提交时间:</strong> {{ commit.commit_time.strftime('%Y-%m-%d %H:%M:%S') if commit.commit_time else 'N/A' }}</div>
+                                            <div><strong>提交者:</strong> {{ commit.author | e or 'N/A' }}</div>
+                                            {% if commit.message %}
+                                            <div><strong>提交信息:</strong> {{ commit.message | e }}</div>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="version-info previous">
+                                            <h6 class="mb-2 fw-bold">对比版本</h6>
+                                            <div id="previous-version-{{ commit.id }}">
+                                                <div class="text-muted">加载中...</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- diff内容容器 -->
+                        <div class="diff-content-container" id="diff-container-{{ commit.id }}">
+                            <div class="loading-container">
+                                <div class="loading-spinner"></div>
+                                <div class="loading-text">正在加载差异内容...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/diff-handlers.js') }}"></script>
+
+<!-- 将数据传递给JavaScript -->
+<script type="application/json" id="page-data">
+{
+    "commit_ids": {{ commit_ids | tojson | safe }},
+    "commits_with_diff": [
+        {% for commit_info in commits_with_diff %}
+        {
+            "commit_id": {{ commit_info.commit.id }},
+            "diff_data": {% if commit_info.diff_data %}{{ commit_info.diff_data | tojson | replace('NaN', 'null') | replace('Infinity', 'null') | replace('-Infinity', 'null') | safe }}{% else %}null{% endif %}
+        }{% if not loop.last %},{% endif %}
+        {% endfor %}
+    ],
+    "merged_diff_data": {% if merged_diff_data %}{{ merged_diff_data | tojson | replace('NaN', 'null') | replace('Infinity', 'null') | replace('-Infinity', 'null') | safe }}{% else %}null{% endif %}
+}
+</script>
+
+<script>
+// HTML转义函数
+function escapeHtml(text) {
+    if (text == null) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// 重新计算合并diff
+function refreshMergeDiff() {
+    const btn = document.getElementById('refreshMergeDiffBtn');
+    const originalText = btn.innerHTML;
+    
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 计算中...';
+    
+    const pageData = JSON.parse(document.getElementById('page-data').textContent);
+    
+    fetch('/commits/merge-diff/refresh', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            commit_ids: pageData.commit_ids
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            alert(data.message);
+            window.location.reload();
+        } else {
+            alert('重新计算失败: ' + data.message);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('重新计算失败: ' + error.message);
+    })
+    .finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+    });
+}
+
+// 格式化单元格值函数
+function formatCellValue(value) {
+    // 处理空值、null值、undefined值和NaN值
+    if (value === null || value === undefined) {
+        return '';
+    }
+
+    // 处理NaN值
+    if (typeof value === 'number' && isNaN(value)) {
+        return '';
+    }
+
+    // 转换为字符串并去除多余空格
+    var strValue = String(value).trim();
+
+    // 检查是否为字符串形式的NaN、null等
+    if (strValue.toLowerCase() === 'nan' ||
+        strValue.toLowerCase() === 'null' ||
+        strValue.toLowerCase() === 'undefined' ||
+        strValue.toLowerCase() === 'none' ||
+        strValue === '') {
+        return '';
+    }
+
+    return strValue;
+}
+
+// 异步加载单个提交的diff数据
+function loadCommitDiffData(commitId) {
+    const container = document.getElementById(`diff-container-${commitId}`);
+    if (!container) {
+        console.error(`找不到提交 ${commitId} 的容器`);
+        return;
+    }
+
+    fetch(`/commits/${commitId}/diff-data`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success && data.diff_data) {
+                // 更新前一版本信息
+                updatePreviousVersionInfo(commitId, data.previous_commit);
+                // 渲染diff内容
+                renderCommitDiff(commitId, data.diff_data);
+            } else {
+                showDiffError(commitId, data.message || '无法获取diff数据');
+            }
+        })
+        .catch(error => {
+            console.error(`加载提交 ${commitId} 的diff数据失败:`, error);
+            showDiffError(commitId, '网络错误，请稍后重试');
+        });
+}
+
+// 更新前一版本信息
+function updatePreviousVersionInfo(commitId, previousCommit) {
+    const container = document.getElementById(`previous-version-${commitId}`);
+    if (!container) return;
+
+    if (previousCommit) {
+        container.innerHTML = `
+            <div><strong>Commit ID:</strong> <code>${escapeHtml(previousCommit.commit_id)}</code></div>
+            <div><strong>提交时间:</strong> ${escapeHtml(previousCommit.commit_time)}</div>
+            <div><strong>提交者:</strong> ${escapeHtml(previousCommit.author)}</div>
+            ${previousCommit.message !== 'N/A' ? `<div><strong>提交信息:</strong> ${escapeHtml(previousCommit.message)}</div>` : ''}
+        `;
+    } else {
+        container.innerHTML = `
+            <div class="text-muted">无前一版本</div>
+        `;
+    }
+}
+
+// 渲染提交的diff内容
+function renderCommitDiff(commitId, diffData) {
+    const container = document.getElementById(`diff-container-${commitId}`);
+    if (!container) return;
+
+    if (diffData.type === 'excel') {
+        // 渲染Excel diff - 使用正确的容器结构
+        const containerId = `excel-diff-${commitId}`;
+        container.innerHTML = `
+            <div id="${containerId}" class="excel-diff-container">
+                <div class="excel-diff-wrapper">
+                    <div class="excel-sheet-tabs-container">
+                        <div class="excel-sheet-tabs"></div>
+                    </div>
+                    <div class="excel-content-area">
+                        <div class="excel-sheet-content active">
+                            <div class="excel-table-container">
+                                <!-- 表格内容将通过JavaScript动态生成 -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // 存储diff数据供后续使用
+        window.loadedDiffData[commitId] = diffData;
+
+        // 初始化Excel diff
+        try {
+            initExcelDiffForContainer(containerId, diffData);
+        } catch(e) {
+            console.error(`初始化Excel diff失败 (commit ${commitId}):`, e);
+            showDiffError(commitId, '渲染Excel差异失败');
+        }
+    } else if (diffData.hunks) {
+        // 渲染文本diff
+        let htmlContent = '<div class="diff-content">';
+        diffData.hunks.forEach(hunk => {
+            htmlContent += `<div class="hunk">`;
+            htmlContent += `<div class="hunk-header">${hunk.header}</div>`;
+            hunk.lines.forEach(line => {
+                htmlContent += `
+                    <div class="line ${line.type}">
+                        <span class="line-number old">${line.old_line_number || ''}</span>
+                        <span class="line-number new">${line.new_line_number || ''}</span>
+                        <span class="line-content">${line.content}</span>
+                    </div>
+                `;
+            });
+            htmlContent += `</div>`;
+        });
+        htmlContent += '</div>';
+        container.innerHTML = htmlContent;
+    } else {
+        container.innerHTML = `
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i>
+                无差异内容或文件无变更
+            </div>
+        `;
+    }
+}
+
+// 显示diff加载错误
+function showDiffError(commitId, message) {
+    const container = document.getElementById(`diff-container-${commitId}`);
+    if (!container) return;
+
+    container.innerHTML = `
+        <div class="alert alert-warning">
+            <i class="fas fa-exclamation-triangle"></i>
+            ${message}
+            <button class="btn btn-sm btn-outline-primary ms-2" onclick="loadCommitDiffData(${commitId})">
+                <i class="fas fa-redo"></i> 重试
+            </button>
+        </div>
+    `;
+}
+
+// 全局存储已加载的diff数据
+window.loadedDiffData = {};
+
+// 初始化Excel diff处理器
+document.addEventListener('DOMContentLoaded', function() {
+    // 智能检测DOM加载完成并应用样式
+    function applyModifiedRowNumberStyles() {
+        // 强制设置修改行号的背景色
+        const modifiedRowNumbers = document.querySelectorAll('.excel-row-number.excel-modified');
+
+        modifiedRowNumbers.forEach((element, index) => {
+            // 恢复浅黄色背景
+            element.style.setProperty('background-color', '#fff3cd', 'important');
+            element.style.setProperty('background', '#fff3cd', 'important');
+            element.style.setProperty('border-color', '#ffeaa7', 'important');
+            element.style.setProperty('color', '#856404', 'important');
+        });
+
+        // 强制设置修改行中旧值单元格的背景色
+        const modifiedOldCells = document.querySelectorAll('.excel-cell.excel-modified-old');
+
+        modifiedOldCells.forEach((element, index) => {
+            // 强制设置浅红色背景
+            element.style.setProperty('background-color', '#f8d7da', 'important');
+            element.style.setProperty('background', '#f8d7da', 'important');
+            element.style.setProperty('border-color', '#f5c6cb', 'important');
+            element.style.setProperty('color', '#721c24', 'important');
+        });
+
+        // 强制设置修改行中新值单元格的背景色
+        const modifiedNewCells = document.querySelectorAll('.excel-cell.excel-modified-new');
+
+        modifiedNewCells.forEach((element, index) => {
+            // 强制设置浅绿色背景
+            element.style.setProperty('background-color', '#d4edda', 'important');
+            element.style.setProperty('background', '#d4edda', 'important');
+            element.style.setProperty('border-color', '#c3e6cb', 'important');
+            element.style.setProperty('color', '#155724', 'important');
+        });
+    }
+
+    // 使用MutationObserver监听DOM变化，一旦表格插入就立即应用样式
+    const observer = new MutationObserver((mutations) => {
+        let hasTableChanges = false;
+        mutations.forEach((mutation) => {
+            if (mutation.type === 'childList') {
+                mutation.addedNodes.forEach((node) => {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        // 检查是否有表格相关的元素被添加
+                        if (node.classList && (node.classList.contains('excel-diff-table') ||
+                            node.querySelector && node.querySelector('.excel-diff-table'))) {
+                            hasTableChanges = true;
+                        }
+                    }
+                });
+            }
+        });
+
+        if (hasTableChanges) {
+            // 短暂延迟确保DOM完全渲染
+            setTimeout(applyModifiedRowNumberStyles, 100);
+        }
+    });
+
+    // 开始观察DOM变化
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+
+    // 备用方案：如果500毫秒后还没有应用样式，强制执行一次
+    setTimeout(() => {
+        const modifiedRowNumbers = document.querySelectorAll('.excel-row-number.excel-modified');
+        if (modifiedRowNumbers.length > 0) {
+            // 检查是否已经应用了样式
+            const firstElement = modifiedRowNumbers[0];
+            const currentBg = window.getComputedStyle(firstElement).backgroundColor;
+            if (currentBg !== 'rgb(255, 243, 205)') { // #fff3cd的RGB值
+                applyModifiedRowNumberStyles();
+            }
+        }
+    }, 500);
+
+    // 检查是否有page-data元素（合并diff模式）
+    const pageDataElement = document.getElementById('page-data');
+    if (pageDataElement) {
+        const pageData = JSON.parse(pageDataElement.textContent);
+        
+        // 根据页面显示模式决定初始化逻辑
+        if (!pageData.merged_diff_data) {
+            // 异步加载每个提交的diff数据
+            pageData.commits_with_diff.forEach(function(commitInfo, index) {
+                const commitId = commitInfo.commit_id;
+                // 异步加载diff数据
+                loadCommitDiffData(commitId);
+            });
+        }
+        
+        // 如果有合并的Excel diff，也需要初始化
+        if (pageData.merged_diff_data && pageData.merged_diff_data.type === 'excel') {
+            try {
+                initMergedExcelDiff(pageData.merged_diff_data);
+            } catch(e) {
+                console.error('初始化合并Excel diff失败:', e);
+            }
+        }
+    } else {
+        // 查找所有diff数据脚本
+        const diffDataScripts = document.querySelectorAll('script[id^="diff-data-file-"]');
+        
+        diffDataScripts.forEach((script, index) => {
+            try {
+                const diffData = JSON.parse(script.textContent);
+                const fileNumber = index + 1;
+
+                
+                if (diffData.type === 'excel' || diffData.sheets) {
+                    const containerId = `excel-diff-container-file-${fileNumber}`;
+
+                    
+                    // 确保数据格式正确
+                    if (!diffData.type) diffData.type = 'excel';
+                    
+                    initExcelDiffForContainer(containerId, diffData);
+                }
+            } catch(e) {
+                console.error(`解析diff数据失败 (script ${index}):`, e);
+            }
+        });
+    }
+});
+
+// 初始化合并Excel diff处理器
+function initMergedExcelDiff(diffData) {
+    if (!diffData || !diffData.sheets || Object.keys(diffData.sheets).length === 0) {
+        return;
+    }
+
+    // 查找合并diff的容器
+    const tabsContainer = document.querySelector('#excel-sheet-tabs');
+    const contentContainer = document.querySelector('#excel-content .excel-table-container');
+
+    if (!tabsContainer || !contentContainer) {
+        console.error('未找到合并diff的Excel容器');
+        return;
+    }
+
+    // 生成工作表标签
+    generateMergedExcelTabs(tabsContainer, diffData.sheets);
+
+    // 显示第一个有变更的工作表
+    const firstChangedSheet = Object.keys(diffData.sheets).find(sheetName => {
+        const sheet = diffData.sheets[sheetName];
+        return sheet.rows && sheet.rows.some(row =>
+            row.status === 'added' || row.status === 'removed' || row.status === 'modified'
+        );
+    });
+
+    if (firstChangedSheet) {
+        showMergedExcelSheet(contentContainer, firstChangedSheet, diffData.sheets[firstChangedSheet]);
+    }
+}
+
+// 生成合并Excel工作表标签
+function generateMergedExcelTabs(tabsContainer, sheets) {
+    const sheetNames = Object.keys(sheets);
+    let tabsHtml = '';
+    
+    // 分析工作表变更状态
+    const sheetAnalysis = sheetNames.map(name => {
+        const sheet = sheets[name];
+        const hasChanges = sheet.rows && sheet.rows.some(row => 
+            row.status === 'added' || row.status === 'removed' || row.status === 'modified'
+        );
+        return { name, hasChanges };
+    });
+    
+    // 排序：有变更的在前
+    const sortedSheets = sheetAnalysis.sort((a, b) => {
+        if (a.hasChanges && !b.hasChanges) return -1;
+        if (!a.hasChanges && b.hasChanges) return 1;
+        return a.name.localeCompare(b.name);
+    });
+    
+    sortedSheets.forEach((sheet, index) => {
+        const isActive = index === 0 && sheet.hasChanges ? 'active' : '';
+        const hasChangesClass = sheet.hasChanges ? 'excel-tab-with-changes' : 'excel-tab-no-changes';
+        const clickable = sheet.hasChanges ? `onclick="switchMergedExcelSheet('${sheet.name}')"` : '';
+        const disabled = sheet.hasChanges ? '' : 'excel-tab-disabled';
+        
+        tabsHtml += `
+            <div class="excel-sheet-tab ${hasChangesClass} ${isActive} ${disabled}" 
+                 ${clickable} data-sheet="${sheet.name}">
+                ${sheet.name}
+            </div>
+        `;
+    });
+    
+    tabsContainer.innerHTML = tabsHtml;
+}
+
+// 显示合并Excel工作表内容
+function showMergedExcelSheet(contentContainer, sheetName, sheetData) {
+    if (!sheetData || !sheetData.rows) {
+        contentContainer.innerHTML = '<div class="alert alert-info">该工作表无数据</div>';
+        return;
+    }
+    
+    // 生成表格HTML
+    let tableHtml = '<table class="excel-diff-table">';
+    
+    // 添加表头
+    if (sheetData.headers && sheetData.headers.length > 0) {
+        tableHtml += '<thead><tr>';
+        tableHtml += '<th class="excel-row-header">行号</th>';
+        sheetData.headers.forEach(header => {
+            tableHtml += `<th class="excel-column-header">${header}</th>`;
+        });
+        tableHtml += '</tr></thead>';
+    }
+    
+    tableHtml += '<tbody>';
+    
+    sheetData.rows.forEach((row, rowIndex) => {
+        const hasRowChanges = row.status === 'added' || row.status === 'removed' || row.status === 'modified';
+        let rowClass = '';
+        
+        if (row.status === 'removed') {
+            rowClass = 'excel-row-removed';
+        } else if (row.status === 'added') {
+            rowClass = 'excel-row-added';
+        }
+        
+        tableHtml += `<tr class="${rowClass}">`;
+        
+        // 行号
+        const rowHeaderClass = hasRowChanges ? 'excel-row-header excel-row-header-modified' : 'excel-row-header';
+        tableHtml += `<td class="${rowHeaderClass}">${row.row_number || rowIndex + 1}</td>`;
+        
+        // 处理单元格数据
+        if (row.data && typeof row.data === 'object') {
+            const headers = sheetData.headers || Object.keys(row.data);
+            headers.forEach(header => {
+                const cellValue = row.data[header];
+                let cellClass = 'excel-cell';
+                let cellContent = formatCellValue(cellValue);
+                
+                // 检查单元格变更
+                let change = null;
+                if (row.cell_changes) {
+                    if (Array.isArray(row.cell_changes)) {
+                        change = row.cell_changes.find(c => c.column === header);
+                    } else if (typeof row.cell_changes === 'object') {
+                        change = row.cell_changes[header];
+                    }
+                }
+                
+                if (change) {
+                    if (change.status === 'removed') {
+                        cellClass += ' excel-removed';
+                        cellContent = `<div class="excel-diff-removed">${formatCellValue(change.old_value)}</div>`;
+                    } else if (change.status === 'added') {
+                        cellClass += ' excel-added';
+                        cellContent = `<div class="excel-diff-added">${formatCellValue(change.new_value || cellValue)}</div>`;
+                    } else if (change.status === 'modified') {
+                        cellClass += ' excel-modified-new';
+                        cellContent = `<div class="excel-diff-old">${formatCellValue(change.old_value)}</div>` +
+                                    `<div class="excel-diff-new">${formatCellValue(change.new_value || cellValue)}</div>`;
+                    }
+                }
+                
+                tableHtml += `<td class="${cellClass}">${cellContent}</td>`;
+            });
+        } else {
+            // 处理其他格式的行数据
+            tableHtml += '<td colspan="100%">未知格式的行数据</td>';
+        }
+        
+        tableHtml += '</tr>';
+    });
+    
+    tableHtml += '</tbody></table>';
+    
+    contentContainer.innerHTML = tableHtml;
+}
+
+// 更新提交状态
+function updateCommitStatus(commitId, status) {
+    fetch(`/commits/${commitId}/status`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ status: status })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // 更新页面上的状态显示
+            const statusBadge = document.querySelector(`[data-commit-id="${commitId}"] .badge.status-${data.old_status}`);
+            if (statusBadge) {
+                statusBadge.className = statusBadge.className.replace(`status-${data.old_status}`, `status-${status}`);
+                statusBadge.textContent = getStatusText(status);
+            }
+
+            // 显示成功消息
+            showToast(`提交状态已更新为: ${getStatusText(status)}`, 'success');
+        } else {
+            showToast('更新状态失败: ' + data.message, 'error');
+        }
+    })
+    .catch(error => {
+        console.error('更新状态失败:', error);
+        showToast('更新状态失败: 网络错误', 'error');
+    });
+}
+
+// 获取状态文本
+function getStatusText(status) {
+    const statusMap = {
+        'pending': '待确认',
+        'reviewed': '已查看',
+        'confirmed': '已确认',
+        'rejected': '已拒绝'
+    };
+    return statusMap[status] || status;
+}
+
+// 显示提示消息
+function showToast(message, type = 'info') {
+    // 简单的提示实现
+    const alertClass = type === 'success' ? 'alert-success' :
+                      type === 'error' ? 'alert-danger' : 'alert-info';
+
+    const toast = document.createElement('div');
+    toast.className = `alert ${alertClass} position-fixed`;
+    toast.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
+    toast.innerHTML = `
+        ${message}
+        <button type="button" class="btn-close" onclick="this.parentElement.remove()"></button>
+    `;
+
+    document.body.appendChild(toast);
+
+    // 3秒后自动消失
+    setTimeout(() => {
+        if (toast.parentElement) {
+            toast.remove();
+        }
+    }, 3000);
+}
+
+// 切换合并Excel工作表
+function switchMergedExcelSheet(sheetName) {
+    // 更新标签状态
+    document.querySelectorAll('.excel-sheet-tab').forEach(tab => {
+        tab.classList.remove('active');
+        if (tab.dataset.sheet === sheetName) {
+            tab.classList.add('active');
+        }
+    });
+    
+    // 获取页面数据并显示对应工作表
+    const pageData = JSON.parse(document.getElementById('page-data').textContent);
+    if (pageData.merged_diff_data && pageData.merged_diff_data.sheets) {
+        const contentContainer = document.querySelector('#excel-content .excel-table-container');
+        if (contentContainer) {
+            showMergedExcelSheet(contentContainer, sheetName, pageData.merged_diff_data.sheets[sheetName]);
+        }
+    }
+}
+
+// 为特定容器初始化Excel diff处理器
+function initExcelDiffForContainer(containerId, diffData) {
+    
+    const container = document.getElementById(containerId);
+    if (!container) {
+        console.error(`❌ 容器不存在: ${containerId}`);
+        return;
+    }
+    
+    if (!diffData || !diffData.sheets) {
+        console.error(`❌ 无效的diff数据:`, diffData);
+        return;
+    }
+    
+    // 重新生成工作表标签，使用与单个文件diff相同的逻辑
+    generateExcelTabsForContainer(container, diffData.sheets);
+    
+    // 显示第一个有变更的工作表
+    const firstChangedTab = container.querySelector('.excel-sheet-tab.excel-tab-with-changes');
+    if (firstChangedTab) {
+        const sheetName = firstChangedTab.dataset.sheet;
+        showExcelSheetInContainer(containerId, sheetName, diffData);
+    }
+}
+
+// 为特定容器生成Excel工作表标签（使用单个文件diff的排序和颜色逻辑）
+function generateExcelTabsForContainer(container, sheets) {
+    const tabsContainer = container.querySelector('.excel-sheet-tabs');
+    if (!tabsContainer) {
+        console.error('❌ 未找到工作表标签容器');
+        return;
+    }
+    
+    const originalSheetNames = Object.keys(sheets);
+
+    // 分析每个sheet的变更状态
+    const sheetAnalysis = [];
+    for (let i = 0; i < originalSheetNames.length; i++) {
+        const sheetName = originalSheetNames[i];
+        const sheetData = sheets[sheetName];
+        
+        // 检查是否有变更内容
+        let hasChanges = false;
+        if (sheetData && sheetData.rows) {
+            hasChanges = sheetData.rows.some(function(row) {
+                return row.status === 'added' || row.status === 'removed' || row.status === 'modified';
+            });
+        }
+
+        sheetAnalysis.push({
+            name: sheetName,
+            originalIndex: i,
+            hasChanges: hasChanges
+        });
+    }
+    
+    // 重新排序：有变更的sheet在前，无变更的在后，各自保持原顺序
+    const changedSheets = sheetAnalysis.filter(function(sheet) { return sheet.hasChanges; });
+    const unchangedSheets = sheetAnalysis.filter(function(sheet) { return !sheet.hasChanges; });
+    
+    // 对有变更的sheet按名称排序，确保Sheet1在前
+    changedSheets.sort(function(a, b) {
+        // Sheet1 优先级最高
+        if (a.name === 'Sheet1') return -1;
+        if (b.name === 'Sheet1') return 1;
+        // 其他按字母顺序排序
+        return a.name.localeCompare(b.name);
+    });
+    
+    const reorderedSheets = changedSheets.concat(unchangedSheets);
+
+    // 生成标签HTML
+    let tabsHtml = '';
+    let defaultActiveSheetName = null;
+    
+    // 选择默认激活的工作表
+    if (changedSheets.length > 0) {
+        // 选择第一个有变更且不是测试配置的sheet
+        const selectableChangedSheets = changedSheets.filter(function(sheet) {
+            return !sheet.name.includes('测试配置');
+        });
+        
+        if (selectableChangedSheets.length > 0) {
+            defaultActiveSheetName = selectableChangedSheets[0].name;
+        } else {
+            defaultActiveSheetName = changedSheets[0].name;
+        }
+    } else {
+        // 最后选择第一个sheet
+        defaultActiveSheetName = reorderedSheets[0].name;
+    }
+    
+    for (let i = 0; i < reorderedSheets.length; i++) {
+        const sheet = reorderedSheets[i];
+        const sheetName = sheet.name;
+        const hasChanges = sheet.hasChanges;
+        const isActive = sheetName === defaultActiveSheetName ? 'active' : '';
+        
+        const tabClass = hasChanges ? 'excel-tab-with-changes' : 'excel-tab-no-changes';
+        const activeClass = isActive ? ' active' : '';
+        
+        // 无变更的sheet和"召唤物"sheet不可点击
+        const isSummonSheet = sheetName.includes('召唤物');
+        const isClickable = hasChanges && !isSummonSheet;
+        const clickHandler = isClickable ? `onclick="switchExcelSheetInContainer(this, '${sheetName}')"` : '';
+        const disabledClass = isClickable ? '' : ' excel-tab-disabled';
+        
+        // 如果是召唤物sheet，添加特殊标识
+        if (isSummonSheet) {
+            disabledClass += ' excel-tab-summon-disabled';
+        }
+        
+        tabsHtml += `<div class="excel-sheet-tab ${tabClass}${activeClass}${disabledClass}" ` +
+                   `${clickHandler} ` +
+                   `data-sheet="${sheetName}" data-has-changes="${hasChanges}">${sheetName}</div>`;
+    }
+    
+    tabsContainer.innerHTML = tabsHtml;
+}
+
+// 创建修改行的双行结构 - 与单文件diff一致
+function createModifiedRowForContainer(row, headers, rowIndex) {
+    let html = '';
+
+    // 将cell_changes数组转换为映射，便于查找
+    const modifiedCellsMap = {};
+    if (row.cell_changes && Array.isArray(row.cell_changes)) {
+        row.cell_changes.forEach(function(change) {
+            modifiedCellsMap[change.column] = {
+                old_value: change.old_value,
+                new_value: change.new_value
+            };
+        });
+    }
+
+    // 第一行显示旧值（红色背景）
+    html += '<tr class="excel-row-modified-old">';
+    html += '<td class="excel-row-number excel-modified" rowspan="2">' + (row.row_number || rowIndex + 1) + '</td>';
+
+    headers.forEach(function(header) {
+        const cellChange = modifiedCellsMap[header];
+
+        if (cellChange) {
+            // 有变更的单元格 - 显示旧值
+            const oldValue = formatCellValue(cellChange.old_value);
+            html += '<td class="excel-cell excel-modified-old modified-column">';
+            // 对于null/nan/空值，不显示文本块
+            if (oldValue && oldValue.trim() !== '' && oldValue.toLowerCase() !== 'null' && oldValue.toLowerCase() !== 'nan') {
+                html += '<span class="excel-text-bg-old">' + oldValue + '</span>';
+            } else {
+                html += ''; // 空值不显示任何内容
+            }
+            html += '</td>';
+        } else {
+            // 未变更的单元格 - 使用rowspan=2合并
+            const cellValue = formatCellValue(row.data && row.data[header]);
+            html += '<td class="excel-cell excel-unchanged" rowspan="2">' + cellValue + '</td>';
+        }
+    });
+
+    html += '</tr>';
+
+    // 第二行显示新值（绿色背景）
+    html += '<tr class="excel-row-modified-new">';
+
+    headers.forEach(function(header) {
+        const cellChange = modifiedCellsMap[header];
+
+        if (cellChange) {
+            // 有变更的单元格 - 显示新值
+            const newValue = formatCellValue(cellChange.new_value);
+            html += '<td class="excel-cell excel-modified-new modified-column">';
+            // 对于null/nan/空值，不显示文本块
+            if (newValue && newValue.trim() !== '' && newValue.toLowerCase() !== 'null' && newValue.toLowerCase() !== 'nan') {
+                html += '<span class="excel-text-bg-new">' + newValue + '</span>';
+            } else {
+                html += ''; // 空值不显示任何内容
+            }
+            html += '</td>';
+        }
+        // 未变更的单元格已经在上一行用rowspan=2处理了
+    });
+
+    html += '</tr>';
+
+    return html;
+}
+
+// 在特定容器中显示Excel工作表
+function showExcelSheetInContainer(containerId, sheetName, diffData) {
+    const container = document.getElementById(containerId);
+    if (!container) {
+        console.error(`容器不存在: ${containerId}`);
+        return;
+    }
+
+    const tableContainer = container.querySelector('.excel-table-container');
+    if (!tableContainer) {
+        console.error(`表格容器不存在: .excel-table-container`);
+        return;
+    }
+
+    const sheetData = diffData.sheets[sheetName];
+    
+    if (!sheetData || !sheetData.rows) {
+        tableContainer.innerHTML = '<div class="alert alert-info">该工作表无数据</div>';
+        console.warn(`⚠️ 工作表 ${sheetName} 无数据`);
+        return;
+    }
+    
+    // 生成表格HTML
+    let tableHtml = '<div class="excel-table-wrapper"><table class="excel-diff-table">';
+
+    // 收集所有修改的列，用于标题高亮
+    const modifiedColumns = new Set();
+    sheetData.rows.forEach(function(row) {
+        if (row.cell_changes && Array.isArray(row.cell_changes)) {
+            row.cell_changes.forEach(function(change) {
+                modifiedColumns.add(change.column);
+            });
+        }
+    });
+
+    // 添加表头 - 高亮修改的列
+    if (sheetData.headers && sheetData.headers.length > 0) {
+        tableHtml += '<thead><tr>';
+        tableHtml += '<th class="excel-row-header">行号</th>';
+        sheetData.headers.forEach(function(header) {
+            const isModified = modifiedColumns.has(header);
+            const headerClass = isModified ? 'excel-column-header excel-modified-column-header' : 'excel-column-header';
+            tableHtml += '<th class="' + headerClass + '">' + header + '</th>';
+        });
+        tableHtml += '</tr></thead>';
+    } else if (sheetData.rows.length > 0 && sheetData.rows[0].data) {
+        // 如果没有明确的headers，从第一行数据中提取
+        const firstRowData = sheetData.rows[0].data;
+        const headers = Object.keys(firstRowData);
+        tableHtml += '<thead><tr>';
+        tableHtml += '<th class="excel-row-header">行号</th>';
+        headers.forEach(function(header) {
+            const isModified = modifiedColumns.has(header);
+            const headerClass = isModified ? 'excel-column-header excel-modified-column-header' : 'excel-column-header';
+            tableHtml += '<th class="' + headerClass + '">' + header + '</th>';
+        });
+        tableHtml += '</tr></thead>';
+    }
+    
+    tableHtml += '<tbody>';
+
+    sheetData.rows.forEach(function(row, rowIndex) {
+        // 检查行是否有变更
+        const isRowDeleted = row.status === 'removed';
+        const isRowAdded = row.status === 'added';
+        const isRowModified = row.status === 'modified' || (row.cell_changes && row.cell_changes.length > 0);
+
+        if (isRowDeleted) {
+            // 删除行 - 单行红色背景
+            tableHtml += '<tr class="excel-row-removed">';
+            tableHtml += '<td class="excel-row-number excel-removed">' + (row.row_number || rowIndex + 1) + '</td>';
+        } else if (isRowAdded) {
+            // 新增行 - 单行绿色背景
+            tableHtml += '<tr class="excel-row-added">';
+            tableHtml += '<td class="excel-row-number excel-added">' + (row.row_number || rowIndex + 1) + '</td>';
+        } else if (isRowModified) {
+            // 修改行 - 使用双行结构
+            const modifiedRowHtml = createModifiedRowForContainer(row, sheetData.headers || Object.keys(row.data || {}), rowIndex);
+            tableHtml += modifiedRowHtml;
+            return; // 跳过后续的单行处理逻辑
+        } else {
+            // 普通行 - 无变更
+            tableHtml += '<tr class="excel-row-unchanged">';
+            tableHtml += '<td class="excel-row-number">' + (row.row_number || rowIndex + 1) + '</td>';
+        }
+        
+
+        
+        if (Array.isArray(row)) {
+            // 如果row是数组格式 - 根据行状态添加相应的CSS类
+            row.forEach(function(cell, colIndex) {
+                const cellValue = formatCellValue(cell && cell.value ? cell.value : (cell || ''));
+                let cellClass = 'excel-cell';
+
+                // 根据行状态添加相应的CSS类
+                if (isRowAdded) {
+                    cellClass += ' excel-added';
+                } else if (isRowDeleted) {
+                    cellClass += ' excel-removed';
+                }
+
+                tableHtml += '<td class="' + cellClass + '">' + cellValue + '</td>';
+            });
+        } else if (row.cells && Array.isArray(row.cells)) {
+            // 如果row有cells属性 - 根据行状态添加相应的CSS类
+            row.cells.forEach(function(cell, colIndex) {
+                const cellValue = formatCellValue(cell && cell.value !== undefined ? cell.value : (cell || ''));
+                let cellClass = 'excel-cell';
+
+                // 根据行状态添加相应的CSS类
+                if (isRowAdded) {
+                    cellClass += ' excel-added';
+                } else if (isRowDeleted) {
+                    cellClass += ' excel-removed';
+                }
+
+                tableHtml += '<td class="' + cellClass + '">' + cellValue + '</td>';
+            });
+        } else if (row.data && typeof row.data === 'object') {
+            // 如果row有data属性 - 根据行状态添加相应的CSS类
+            const headers = sheetData.headers || Object.keys(row.data);
+            headers.forEach(function(header, colIndex) {
+                const cellValue = formatCellValue(row.data[header]);
+                let cellClass = 'excel-cell';
+
+                // 根据行状态添加相应的CSS类
+                if (isRowAdded) {
+                    cellClass += ' excel-added';
+                } else if (isRowDeleted) {
+                    cellClass += ' excel-removed';
+                }
+
+                tableHtml += '<td class="' + cellClass + '">' + cellValue + '</td>';
+            });
+        } else {
+            console.warn(`⚠️ 未知的行格式:`, row);
+            tableHtml += '<td colspan="100%">未知格式的行数据</td>';
+        }
+        tableHtml += '</tr>';
+    });
+    
+    tableHtml += '</tbody></table></div>';
+
+    tableContainer.innerHTML = tableHtml;
+}
+
+// 切换容器中的Excel工作表
+function switchExcelSheetInContainer(tabElement, sheetName) {
+    // 找到包含此标签的容器 - 先找最近的有ID的容器
+    let container = tabElement.closest('.excel-diff-container');
+    while (container && !container.id) {
+        container = container.parentElement.closest('.excel-diff-container');
+    }
+
+    if (!container || !container.id) {
+        console.error('未找到有ID的Excel容器');
+        return;
+    }
+
+    const containerId = container.id;
+    
+    // 移除同一容器内所有标签的active状态
+    const allTabs = container.querySelectorAll('.excel-sheet-tab');
+    allTabs.forEach(tab => tab.classList.remove('active'));
+    
+    // 激活当前标签
+    tabElement.classList.add('active');
+    
+    // 从全局存储中获取diff数据
+    const commitId = containerId.replace('excel-diff-', '');
+    const diffData = window.loadedDiffData[commitId];
+
+    if (diffData) {
+        showExcelSheetInContainer(containerId, sheetName, diffData);
+    } else {
+        console.error('未找到对应的diff数据');
+    }
+}
+
+// 一键通过功能
+function approveAllCommits() {
+    if (!confirm('确定要将所有待确认的提交设置为已确认吗？')) {
+        return;
+    }
+    
+    const commitIds = {{ commit_ids | tojson | safe }};
+    
+    // 发送批量确认请求
+    fetch('/commits/batch-approve', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            commit_ids: commitIds
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            // 更新页面上的状态显示
+            document.querySelectorAll('.badge[class*="status-"]').forEach(badge => {
+                if (badge.textContent.trim() === '待确认') {
+                    badge.className = 'badge status-confirmed px-3 py-2';
+                    badge.textContent = '已确认';
+                }
+            });
+            
+            // 隐藏已确认提交的通过按钮
+            document.querySelectorAll('.btn-success').forEach(btn => {
+                if (btn.textContent.includes('通过')) {
+                    btn.style.display = 'none';
+                }
+            });
+            
+            alert('批量确认成功！');
+        } else {
+            alert('批量确认失败：' + (data.message || '未知错误'));
+        }
+    })
+    .catch(error => {
+        console.error('批量确认请求失败:', error);
+        alert('批量确认失败，请稍后重试');
+    });
+}
+
+// 单个提交通过功能
+function approveCommit(commitId) {
+    if (!confirm('确定要通过此提交吗？')) {
+        return;
+    }
+    
+    fetch('/commits/batch-approve', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            commit_ids: [commitId]
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            // 找到对应的提交项并更新状态
+            const commitItem = document.querySelector(`[data-commit-id="${commitId}"]`);
+            if (commitItem) {
+                const statusBadge = commitItem.querySelector('.badge[class*="status-"]');
+                if (statusBadge) {
+                    statusBadge.className = 'badge status-confirmed px-3 py-2';
+                    statusBadge.textContent = '已确认';
+                }
+                
+                // 隐藏通过按钮
+                const approveBtn = commitItem.querySelector('.btn-success');
+                if (approveBtn && approveBtn.textContent.includes('通过')) {
+                    approveBtn.style.display = 'none';
+                }
+            }
+            
+            alert('提交已通过！');
+        } else {
+            alert('操作失败：' + (data.message || '未知错误'));
+        }
+    })
+    .catch(error => {
+        console.error('通过提交请求失败:', error);
+        alert('操作失败，请稍后重试');
+    });
+}
+
+// 单个提交拒绝功能
+function rejectCommit(commitId) {
+    if (!confirm('确定要拒绝此提交吗？')) {
+        return;
+    }
+    
+    fetch('/commits/reject', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            commit_id: commitId
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            // 找到对应的提交项并更新状态
+            const commitItem = document.querySelector(`[data-commit-id="${commitId}"]`);
+            if (commitItem) {
+                const statusBadge = commitItem.querySelector('.badge[class*="status-"]');
+                if (statusBadge) {
+                    statusBadge.className = 'badge status-rejected px-3 py-2';
+                    statusBadge.textContent = '已拒绝';
+                }
+                
+                // 隐藏拒绝按钮
+                const rejectBtn = commitItem.querySelector('.btn-danger');
+                if (rejectBtn && rejectBtn.textContent.includes('拒绝')) {
+                    rejectBtn.style.display = 'none';
+                }
+            }
+            
+            alert('提交已拒绝！');
+        } else {
+            alert('操作失败：' + (data.message || '未知错误'));
+        }
+    })
+    .catch(error => {
+        console.error('拒绝提交请求失败:', error);
+        alert('操作失败，请稍后重试');
+    });
+}
+</script>
+{% endblock %}

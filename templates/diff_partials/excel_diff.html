@@ -1,0 +1,139 @@
+<!-- Excel文件差异显示 (表格风格) - 使用与单文件diff相同的结构 -->
+<div class="excel-diff-wrapper">
+    {% set excel_data = sheet_data if sheet_data else diff_data %}
+    {% if excel_data.sheets %}
+    <!-- Excel工作表标签容器 -->
+    <div class="excel-sheet-tabs-container">
+        <div class="excel-sheet-tabs" id="excel-sheet-tabs">
+            {% for sheet_name in excel_data.sheets.keys() %}
+            <button class="excel-sheet-tab {% if loop.first %}active{% endif %}"
+                    data-sheet="{{ sheet_name }}"
+                    onclick="showExcelSheet('{{ sheet_name }}')">
+                {{ sheet_name }}
+                {% set sheet = excel_data.sheets[sheet_name] %}
+                {% if sheet.has_changes %}
+                <span class="badge bg-warning ms-1">变更</span>
+                {% endif %}
+            </button>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="excel-content-area" id="excel-content-area">
+        {% for sheet_name, sheet_data in excel_data.sheets.items() %}
+        <div class="excel-sheet-content {% if loop.first %}active{% endif %}" id="sheet-{{ sheet_name }}">
+            {% if sheet_data.status == 'deleted' %}
+            <div class="alert alert-danger">
+                <i class="bi bi-trash me-2"></i>工作表 "{{ sheet_name }}" 已被删除
+            </div>
+            {% elif sheet_data.status == 'added' %}
+            <div class="alert alert-success">
+                <i class="bi bi-plus-circle me-2"></i>工作表 "{{ sheet_name }}" 是新增的
+            </div>
+            {% endif %}
+            
+            <div class="excel-table-container">
+            {% if sheet_data.rows %}
+                <div class="excel-table-wrapper">
+                    <table class="excel-diff-table">
+                    {% if sheet_data.headers %}
+                    <thead>
+                        <tr>
+                            <th class="excel-row-header excel-bold-text">行号</th>
+                            {% for header in sheet_data.headers %}
+                            <th class="excel-column-header">
+                                <div class="excel-column-id">{{ loop.index0 | excel_column_letter }}</div>
+                                <div class="excel-bold-text">{{ header }}</div>
+                            </th>
+                            {% endfor %}
+                        </tr>
+                    </thead>
+                    {% endif %}
+                    <tbody>
+                        {% for row in sheet_data.rows %}
+                        {% if row.status == 'added' %}
+                        <!-- 新增行 - 绿色背景 -->
+                        <tr class="excel-row-added">
+                            <td class="excel-row-number excel-bold-text">{{ row.row_number }}</td>
+                            {% for cell in row.cells %}
+                            <td class="excel-cell">{{ cell.value | format_cell_value }}</td>
+                            {% endfor %}
+                        </tr>
+                        {% elif row.status == 'removed' %}
+                        <!-- 删除行 - 红色背景 -->
+                        <tr class="excel-row-removed">
+                            <td class="excel-row-number excel-bold-text">{{ row.row_number }}</td>
+                            {% for cell in row.cells %}
+                            <td class="excel-cell">{{ cell.value | format_cell_value }}</td>
+                            {% endfor %}
+                        </tr>
+                        {% else %}
+                        <!-- 普通行或修改行 - 按单元格显示差异 -->
+                        <tr class="excel-row-normal">
+                            <td class="excel-row-number excel-bold-text">{{ row.row_number }}</td>
+                            {% for cell in row.cells %}
+                            {% if cell.status == 'changed' %}
+                            <td class="excel-cell excel-cell-modified">
+                                {% if cell.old_value %}
+                                <div class="excel-cell-old">{{ cell.old_value | format_cell_value }}</div>
+                                {% endif %}
+                                <div class="excel-cell-new">{{ cell.value | format_cell_value }}</div>
+                            </td>
+                            {% elif cell.status == 'added' %}
+                            <td class="excel-cell excel-cell-added">
+                                <span class="excel-text-bg-new">{{ cell.value | format_cell_value }}</span>
+                            </td>
+                            {% elif cell.status == 'removed' %}
+                            <td class="excel-cell excel-cell-removed">
+                                <span class="excel-text-bg-old">{{ cell.value | format_cell_value }}</span>
+                            </td>
+                            {% else %}
+                            <td class="excel-cell">{{ cell.value | format_cell_value }}</td>
+                            {% endif %}
+                            {% endfor %}
+                        </tr>
+                        {% endif %}
+                        {% endfor %}
+                    </tbody>
+                    </table>
+                </div>
+            {% else %}
+                <div class="p-3 text-muted text-center">
+                    <i class="bi bi-file-earmark-spreadsheet fs-3 mb-2"></i>
+                    <p>工作表 "{{ sheet_name }}" 没有数据或无变更</p>
+                </div>
+            {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    
+    <script>
+    function showExcelSheet(sheetName) {
+        // 隐藏所有工作表内容
+        document.querySelectorAll('.excel-sheet-content').forEach(content => {
+            content.classList.remove('active');
+        });
+        
+        // 移除所有标签的active状态
+        document.querySelectorAll('.excel-sheet-tab').forEach(tab => {
+            tab.classList.remove('active');
+        });
+        
+        // 显示选中的工作表
+        const targetSheet = document.getElementById('sheet-' + sheetName);
+        if (targetSheet) {
+            targetSheet.classList.add('active');
+        }
+        
+        // 激活对应的标签
+        event.target.classList.add('active');
+    }
+    </script>
+    {% else %}
+    <div class="p-4 text-center text-muted">
+        <i class="bi bi-file-earmark-spreadsheet fs-1 mb-3"></i>
+        <p>没有找到Excel工作表数据</p>
+    </div>
+    {% endif %}
+</div>

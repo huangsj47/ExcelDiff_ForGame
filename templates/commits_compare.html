@@ -1,0 +1,324 @@
+{% extends "base.html" %}
+
+{% block title %}提交对比 - {{ compare_diff.file_path }}{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <!-- 面包屑导航 -->
+    <nav aria-label="breadcrumb" class="mb-3">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('index') }}">变更确认平台</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('project_detail', project_id=project.id) }}">{{ project.code }}</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('commit_list', repository_id=repository.id) }}">{{ repository.name }}_{{ repository.type }}</a></li>
+            <li class="breadcrumb-item active">提交对比</li>
+        </ol>
+    </nav>
+
+    <!-- 对比信息 -->
+    <div class="card mb-4">
+        <div class="card-header bg-light">
+            <h6 class="mb-0">对比信息</h6>
+        </div>
+        <div class="card-body">
+            <div class="row">
+                <div class="col-md-12">
+                    <table class="table table-sm table-borderless">
+                        <tr>
+                            <td width="120"><strong>文件路径:</strong></td>
+                            <td><code>{{ compare_diff.file_path }}</code></td>
+                        </tr>
+                        <tr>
+                            <td><strong>对比版本:</strong></td>
+                            <td>
+                                <span class="badge bg-info">{{ compare_diff.from_commit }}</span>
+                                <i class="fas fa-arrow-right mx-2"></i>
+                                <span class="badge bg-success">{{ compare_diff.to_commit }}</span>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 提交详情对比 -->
+    <div class="card mb-4">
+        <div class="card-header bg-light">
+            <h6 class="mb-0">提交详情对比</h6>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-striped mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th width="15%">项目</th>
+                            <th width="40%">源版本 ({{ compare_diff.from_commit }})</th>
+                            <th width="40%">目标版本 ({{ compare_diff.to_commit }})</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>版本号</strong></td>
+                            <td>{{ from_commit.version }}</td>
+                            <td>{{ to_commit.version }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>提交者</strong></td>
+                            <td>{{ from_commit.author }}</td>
+                            <td>{{ to_commit.author }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>提交时间</strong></td>
+                            <td>{{ from_commit.commit_time.strftime('%Y-%m-%d %H:%M:%S') if from_commit.commit_time else '-' }}</td>
+                            <td>{{ to_commit.commit_time.strftime('%Y-%m-%d %H:%M:%S') if to_commit.commit_time else '-' }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>操作类型</strong></td>
+                            <td>
+                                <span class="badge bg-{% if from_commit.operation == 'A' %}success{% elif from_commit.operation == 'M' %}warning{% else %}danger{% endif %}">
+                                    {% if from_commit.operation == 'A' %}新增
+                                    {% elif from_commit.operation == 'M' %}修改
+                                    {% elif from_commit.operation == 'D' %}删除
+                                    {% else %}{{ from_commit.operation }}{% endif %}
+                                </span>
+                            </td>
+                            <td>
+                                <span class="badge bg-{% if to_commit.operation == 'A' %}success{% elif to_commit.operation == 'M' %}warning{% else %}danger{% endif %}">
+                                    {% if to_commit.operation == 'A' %}新增
+                                    {% elif to_commit.operation == 'M' %}修改
+                                    {% elif to_commit.operation == 'D' %}删除
+                                    {% else %}{{ to_commit.operation }}{% endif %}
+                                </span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><strong>确认状态</strong></td>
+                            <td>
+                                <span class="badge bg-{% if from_commit.status == 'pending' %}warning{% elif from_commit.status == 'confirmed' %}success{% elif from_commit.status == 'reviewed' %}info{% else %}danger{% endif %}">
+                                    {% if from_commit.status == 'pending' %}待确认
+                                    {% elif from_commit.status == 'confirmed' %}已确认
+                                    {% elif from_commit.status == 'reviewed' %}已查看
+                                    {% else %}已拒绝{% endif %}
+                                </span>
+                            </td>
+                            <td>
+                                <span class="badge bg-{% if to_commit.status == 'pending' %}warning{% elif to_commit.status == 'confirmed' %}success{% elif to_commit.status == 'reviewed' %}info{% else %}danger{% endif %}">
+                                    {% if to_commit.status == 'pending' %}待确认
+                                    {% elif to_commit.status == 'confirmed' %}已确认
+                                    {% elif to_commit.status == 'reviewed' %}已查看
+                                    {% else %}已拒绝{% endif %}
+                                </span>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- diff内容显示 -->
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">diff对比内容</h5>
+            <div>
+                <button class="btn btn-secondary btn-sm" onclick="window.close()">关闭</button>
+                <a href="{{ generate_commit_diff_url(from_commit) }}" class="btn btn-outline-primary btn-sm" target="_blank">查看源版本</a>
+                <a href="{{ generate_commit_diff_url(to_commit) }}" class="btn btn-outline-success btn-sm" target="_blank">查看目标版本</a>
+            </div>
+        </div>
+        <div class="card-body">
+            {% if compare_diff.type == 'table' %}
+                <!-- Excel表格差异显示 -->
+                <div class="alert alert-info">
+                    <i class="fas fa-info-circle me-2"></i>
+                    Excel文件对比功能正在开发中
+                </div>
+            {% else %}
+                <!-- 代码差异显示 - GitHub风格 -->
+                <div class="diff-container">
+                    <div class="diff-file-header">
+                        <i class="fas fa-file-code me-2"></i>{{ compare_diff.file_path }}
+                    </div>
+                    
+                    {% if compare_diff.hunks and compare_diff.hunks|length > 0 %}
+                        {% for hunk in compare_diff.hunks %}
+                        <div class="diff-hunk">
+                            <!-- Hunk 头部 -->
+                            <div class="diff-hunk-header">
+                                {{ hunk.header }}
+                                {% if hunk.context %}
+                                {{ hunk.context }}
+                                {% endif %}
+                            </div>
+                            
+                            <!-- Diff 行 -->
+                            <table class="diff-table">
+                                <tbody>
+                                    {% set old_line = hunk.old_start %}
+                                    {% set new_line = hunk.new_start %}
+                                    {% for line in hunk.lines %}
+                                    <tr class="diff-line-{{ line.type }}">
+                                        <td class="diff-line-number">
+                                            {% if line.type != 'added' %}
+                                                {{ old_line }}
+                                                {% set old_line = old_line + 1 %}
+                                            {% endif %}
+                                        </td>
+                                        <td class="diff-line-number">
+                                            {% if line.type != 'removed' %}
+                                                {{ new_line }}
+                                                {% set new_line = new_line + 1 %}
+                                            {% endif %}
+                                        </td>
+                                        <td class="diff-line-content">{{ line.content }}</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        {% endfor %}
+                    {% elif compare_diff.lines %}
+                        <!-- 显示简化格式 -->
+                        <table class="diff-table">
+                            <tbody>
+                                {% for line in compare_diff.lines %}
+                                <tr class="diff-line-{{ line.type }}">
+                                    <td class="diff-line-number">{{ line.old_line_number or '' }}</td>
+                                    <td class="diff-line-number">{{ line.new_line_number or '' }}</td>
+                                    <td class="diff-line-content">{{ line.content }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    {% else %}
+                        <div class="p-3 text-muted">
+                            <i class="fas fa-info-circle"></i>
+                            两个版本之间没有差异或无法解析diff内容
+                        </div>
+                    {% endif %}
+                </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<style>
+.diff-container {
+    border: 1px solid #d1d9e0;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.diff-file-header {
+    background-color: #f6f8fa;
+    padding: 8px 16px;
+    border-bottom: 1px solid #d1d9e0;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.diff-hunk {
+    border-bottom: 1px solid #d1d9e0;
+}
+
+.diff-hunk:last-child {
+    border-bottom: none;
+}
+
+.diff-hunk-header {
+    background-color: #f1f8ff;
+    padding: 4px 16px;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 12px;
+    color: #656d76;
+    border-bottom: 1px solid #d1d9e0;
+}
+
+.diff-table {
+    width: 100%;
+    margin: 0;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 12px;
+    border-collapse: collapse;
+}
+
+.diff-table td {
+    padding: 0 8px;
+    line-height: 20px;
+    vertical-align: top;
+    border: none;
+}
+
+.diff-line-number {
+    width: 1%;
+    min-width: 50px;
+    color: #656d76;
+    text-align: right;
+    background-color: #f6f8fa;
+    border-right: 1px solid #d1d9e0;
+    user-select: none;
+}
+
+.diff-line-content {
+    padding-left: 16px;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.diff-line-context {
+    background-color: #ffffff;
+}
+
+.diff-line-added {
+    background-color: #e6ffed;
+}
+
+.diff-line-added .diff-line-number {
+    background-color: #ccffd8;
+}
+
+.diff-line-added .diff-line-content {
+    background-color: #e6ffed;
+}
+
+.diff-line-removed {
+    background-color: #ffecec;
+}
+
+.diff-line-removed .diff-line-number {
+    background-color: #ffd7d5;
+}
+
+.diff-line-removed .diff-line-content {
+    background-color: #ffecec;
+}
+
+.diff-line-header {
+    background-color: #f1f8ff;
+}
+
+.diff-line-header .diff-line-content {
+    background-color: #f1f8ff;
+    color: #656d76;
+    font-weight: 600;
+}
+
+.badge {
+    font-size: 0.75em;
+}
+
+code {
+    background-color: #f6f8fa;
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-size: 0.9em;
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// 可以添加一些交互功能
+</script>
+{% endblock %}

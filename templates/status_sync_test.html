@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>状态同步测试页面</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container mt-4">
+        <h1 class="mb-4">
+            <i class="fas fa-bug text-primary"></i>
+            状态同步测试页面
+        </h1>
+
+        <!-- 测试结果显示区 -->
+        <div id="result" class="alert alert-info">
+            准备进行API测试...
+        </div>
+
+        <!-- 统计信息卡片 -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card bg-primary text-white">
+                    <div class="card-body text-center">
+                        <i class="fas fa-code-branch fa-2x mb-2"></i>
+                        <h4 id="totalMappings">-</h4>
+                        <small>映射关系总数</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-success text-white">
+                    <div class="card-body text-center">
+                        <i class="fas fa-check-circle fa-2x mb-2"></i>
+                        <h4 id="confirmedCount">-</h4>
+                        <small>已确认文件</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-warning text-white">
+                    <div class="card-body text-center">
+                        <i class="fas fa-clock fa-2x mb-2"></i>
+                        <h4 id="pendingCount">-</h4>
+                        <small>待确认文件</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-info text-white">
+                    <div class="card-body text-center">
+                        <i class="fas fa-layer-group fa-2x mb-2"></i>
+                        <h4 id="mergedDiffCount">-</h4>
+                        <small>合并diff文件</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 测试按钮 -->
+        <div class="mb-4">
+            <button type="button" class="btn btn-primary" onclick="testMappingInfo()">
+                <i class="fas fa-play me-2"></i>测试映射信息API
+            </button>
+            <button type="button" class="btn btn-success ms-2" onclick="testStatistics()">
+                <i class="fas fa-chart-bar me-2"></i>测试统计功能
+            </button>
+            <button type="button" class="btn btn-info ms-2" onclick="clearConsole()">
+                <i class="fas fa-eraser me-2"></i>清空控制台
+            </button>
+        </div>
+
+        <!-- 数据显示区 -->
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-database me-2"></i>API数据预览</h5>
+            </div>
+            <div class="card-body">
+                <pre id="dataPreview" class="bg-light p-3" style="max-height: 400px; overflow-y: auto;">
+等待数据加载...
+                </pre>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentData = null;
+
+        function showResult(message, type = 'info') {
+            const resultDiv = document.getElementById('result');
+            resultDiv.className = `alert alert-${type}`;
+            resultDiv.innerHTML = `<i class="fas fa-${type === 'success' ? 'check' : type === 'danger' ? 'times' : 'info'}-circle me-2"></i>${message}`;
+        }
+
+        function updateStatistics(mappingInfo) {
+            console.log('=== updateStatistics called ===');
+            console.log('Input mappingInfo:', mappingInfo);
+            console.log('Is array:', Array.isArray(mappingInfo));
+            
+            if (!mappingInfo || !Array.isArray(mappingInfo)) {
+                console.error('Invalid mapping info for statistics:', mappingInfo);
+                showResult('统计信息更新失败：数据格式错误', 'danger');
+                return;
+            }
+            
+            console.log('Processing statistics for', mappingInfo.length, 'items');
+            
+            const totalMappings = mappingInfo.length;
+            const confirmedCount = mappingInfo.filter(info => info.weekly_status === 'confirmed').length;
+            const pendingCount = mappingInfo.filter(info => info.weekly_status === 'pending').length;
+            const rejectedCount = mappingInfo.filter(info => info.weekly_status === 'rejected').length;
+            const mergedDiffCount = mappingInfo.filter(info => info.is_merged_diff === true).length;
+            
+            console.log('Calculated stats:', {
+                total: totalMappings,
+                confirmed: confirmedCount,
+                pending: pendingCount,
+                rejected: rejectedCount,
+                merged: mergedDiffCount
+            });
+            
+            // 更新统计卡片
+            const totalElement = document.getElementById('totalMappings');
+            const confirmedElement = document.getElementById('confirmedCount');
+            const pendingElement = document.getElementById('pendingCount');
+            const mergedElement = document.getElementById('mergedDiffCount');
+            
+            console.log('DOM elements found:', {
+                totalElement: !!totalElement,
+                confirmedElement: !!confirmedElement,
+                pendingElement: !!pendingElement,
+                mergedElement: !!mergedElement
+            });
+            
+            if (totalElement) {
+                totalElement.textContent = totalMappings;
+                console.log('Updated totalMappings to:', totalMappings);
+            } else {
+                console.error('totalMappings element not found');
+            }
+            
+            if (confirmedElement) {
+                confirmedElement.textContent = confirmedCount;
+                console.log('Updated confirmedCount to:', confirmedCount);
+            } else {
+                console.error('confirmedCount element not found');
+            }
+            
+            if (pendingElement) {
+                pendingElement.textContent = pendingCount;
+                console.log('Updated pendingCount to:', pendingCount);
+            } else {
+                console.error('pendingCount element not found');
+            }
+            
+            if (mergedElement) {
+                mergedElement.textContent = mergedDiffCount;
+                console.log('Updated mergedDiffCount to:', mergedDiffCount);
+            } else {
+                console.error('mergedDiffCount element not found');
+            }
+            
+            showResult(`统计信息更新成功：总数 ${totalMappings}，已确认 ${confirmedCount}，待确认 ${pendingCount}，合并diff ${mergedDiffCount}`, 'success');
+            console.log('=== updateStatistics completed ===');
+        }
+
+        function testMappingInfo() {
+            showResult('正在测试映射信息API...', 'info');
+            console.log('=== Testing Mapping Info API ===');
+            
+            fetch('/status-sync/mapping-info')
+            .then(response => {
+                console.log('Response status:', response.status);
+                console.log('Response headers:', response.headers);
+                return response.json();
+            })
+            .then(data => {
+                console.log('API Response:', data);
+                currentData = data;
+                
+                if (data.success) {
+                    console.log('Mapping info array:', data.mapping_info);
+                    console.log('Array length:', data.mapping_info.length);
+                    
+                    // 显示数据预览
+                    const preview = document.getElementById('dataPreview');
+                    preview.textContent = JSON.stringify(data, null, 2);
+                    
+                    showResult(`API测试成功：获取到 ${data.mapping_info.length} 条映射信息`, 'success');
+                } else {
+                    showResult('API测试失败: ' + data.message, 'danger');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showResult('API测试失败: ' + error.message, 'danger');
+            });
+        }
+
+        function testStatistics() {
+            if (!currentData || !currentData.success) {
+                showResult('请先测试映射信息API获取数据', 'warning');
+                return;
+            }
+            
+            console.log('=== Testing Statistics Function ===');
+            updateStatistics(currentData.mapping_info);
+        }
+
+        function clearConsole() {
+            console.clear();
+            showResult('控制台已清空', 'info');
+        }
+
+        // 页面加载时自动测试
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('Page loaded, starting automatic test...');
+            setTimeout(testMappingInfo, 1000);
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,982 @@
+{% extends "base.html" %}
+
+{% block title %}状态同步映射管理{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h2><i class="fas fa-exchange-alt me-2 text-primary"></i>状态同步映射管理{% if project %} - {{ project.name }}{% endif %}</h2>
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{{ url_for('index') }}">项目列表</a></li>
+                    {% if project %}
+                    <li class="breadcrumb-item"><a href="{{ url_for('project_detail', project_id=project.id) }}">{{ project.name }}</a></li>
+                    <li class="breadcrumb-item active">状态同步映射</li>
+                    {% else %}
+                    <li class="breadcrumb-item active">状态同步映射</li>
+                    {% endif %}
+                </ol>
+            </nav>
+        </div>
+        <div>
+            <button type="button" class="btn btn-outline-primary" onclick="loadMappingInfo()">
+                <i class="fas fa-sync-alt me-2"></i>刷新数据
+            </button>
+        </div>
+    </div>
+
+    {% if project %}
+    <!-- 项目信息 -->
+    <div class="alert alert-info mb-4">
+        <div class="row align-items-center">
+            <div class="col-md-8">
+                <h5 class="mb-1"><i class="fas fa-project-diagram me-2"></i>{{ project.name }} ({{ project.code }})</h5>
+                <p class="mb-0 text-muted">{{ project.department or '未指定部门' }}</p>
+            </div>
+            <div class="col-md-4 text-end">
+                <small class="text-muted">仅显示此项目下的映射信息</small>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- 统计信息卡片 -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card bg-primary text-white">
+                <div class="card-body text-center">
+                    <i class="fas fa-code-branch fa-2x mb-2"></i>
+                    <h4 id="totalMappings">-</h4>
+                    <small>映射关系总数</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-success text-white">
+                <div class="card-body text-center">
+                    <i class="fas fa-check-circle fa-2x mb-2"></i>
+                    <h4 id="confirmedCount">-</h4>
+                    <small>已确认文件</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-warning text-white">
+                <div class="card-body text-center">
+                    <i class="fas fa-clock fa-2x mb-2"></i>
+                    <h4 id="pendingCount">-</h4>
+                    <small>待确认文件</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-info text-white">
+                <div class="card-body text-center">
+                    <i class="fas fa-layer-group fa-2x mb-2"></i>
+                    <h4 id="mergedDiffCount">-</h4>
+                    <small>合并diff文件</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 功能操作区 -->
+    <div class="row mb-4">
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-filter me-2"></i>筛选和查看
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <label for="configSelect" class="form-label">选择周版本配置</label>
+                            <select class="form-select" id="configSelect">
+                                <option value="">全部配置</option>
+                                <!-- 配置选项将通过JavaScript动态加载 -->
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="statusFilter" class="form-label">状态筛选</label>
+                            <select class="form-select" id="statusFilter">
+                                <option value="">全部状态</option>
+                                <option value="pending">待确认</option>
+                                <option value="confirmed">已确认</option>
+                                <option value="rejected">已拒绝</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mt-3">
+                        <button type="button" class="btn btn-primary" onclick="loadMappingInfo()">
+                            <i class="fas fa-search me-2"></i>查看映射信息
+                        </button>
+                        <button type="button" class="btn btn-outline-secondary ms-2" onclick="exportMappingInfo()">
+                            <i class="fas fa-download me-2"></i>导出数据
+                        </button>
+                        <button type="button" class="btn btn-outline-info ms-2" onclick="debugStatistics()">
+                            <i class="fas fa-bug me-2"></i>调试统计
+                        </button>
+                        <button type="button" class="btn btn-outline-warning ms-2" onclick="forceRefresh()">
+                            <i class="fas fa-sync me-2"></i>强制刷新
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card border-warning">
+                <div class="card-header bg-warning text-dark">
+                    <h5 class="mb-0">
+                        <i class="fas fa-tools me-2"></i>管理操作
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <p class="card-text small">
+                        清空所有文件的确认状态，重置为"待确认"状态。
+                        <strong class="text-danger">此操作不可逆！</strong>
+                    </p>
+                    <button type="button" class="btn btn-warning btn-sm" onclick="clearAllStatus()">
+                        <i class="fas fa-trash-alt me-2"></i>清空所有状态
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 映射信息显示区域 -->
+    <div class="card" id="mappingInfoCard" style="display: none;">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">
+                <i class="fas fa-table me-2"></i>状态同步映射信息
+                <span class="badge bg-secondary ms-2" id="mappingCount">0</span>
+            </h5>
+            <div>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="toggleTableView()">
+                    <i class="fas fa-th-list me-1"></i>切换视图
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="hideMappingInfo()">
+                    <i class="fas fa-times me-1"></i>隐藏
+                </button>
+            </div>
+        </div>
+        <div class="card-body p-0">
+            <!-- 搜索栏 -->
+            <div class="p-3 border-bottom">
+                <div class="row">
+                    <div class="col-md-6">
+                        <input type="text" class="form-control" id="searchInput" placeholder="搜索文件路径..."">
+                    </div>
+                    <div class="col-md-3">
+                        <select class="form-select" id="diffTypeFilter">
+                            <option value="">全部类型</option>
+                            <option value="merged">合并diff</option>
+                            <option value="single">单个提交</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <select class="form-select" id="statusFilterTable">
+                            <option value="">全部状态</option>
+                            <option value="pending">待确认</option>
+                            <option value="confirmed">已确认</option>
+                            <option value="rejected">已拒绝</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <div class="table-responsive">
+                <table class="table table-hover mb-0" id="mappingTable">
+                    <thead class="table-light sticky-top">
+                        <tr>
+                            <th style="width: 35%;">
+                                <i class="fas fa-file-code me-1"></i>文件路径
+                                <button class="btn btn-sm btn-link p-0 ms-1" type="button" data-sort="0">
+                                    <i class="fas fa-sort"></i>
+                                </button>
+                            </th>
+                            <th style="width: 12%;">
+                                <i class="fas fa-flag me-1"></i>周版本状态
+                                <button class="btn btn-sm btn-link p-0 ms-1" type="button" data-sort="1">
+                                    <i class="fas fa-sort"></i>
+                                </button>
+                            </th>
+                            <th style="width: 10%;">
+                                <i class="fas fa-hashtag me-1"></i>提交数
+                                <button class="btn btn-sm btn-link p-0 ms-1" type="button" data-sort="2">
+                                    <i class="fas fa-sort"></i>
+                                </button>
+                            </th>
+                            <th style="width: 15%;">
+                                <i class="fas fa-tasks me-1"></i>提交状态
+                            </th>
+                            <th style="width: 10%;">
+                                <i class="fas fa-layer-group me-1"></i>类型
+                            </th>
+                            <th style="width: 18%;">
+                                <i class="fas fa-code-branch me-1"></i>提交ID范围
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody id="mappingTableBody">
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- 分页 -->
+            <div class="p-3 border-top">
+                <nav>
+                    <ul class="pagination pagination-sm mb-0 justify-content-center" id="pagination">
+                    </ul>
+                </nav>
+            </div>
+        </div>
+    </div>
+
+    <!-- 操作结果显示区域 -->
+    <div id="resultAlert" class="alert" style="display: none; margin-top: 20px;"></div>
+</div>
+
+<style>
+/* 文件路径内容样式 */
+.file-path-content {
+    font-size: 0.85em !important; /* 字体缩小到85% */
+    word-wrap: break-word !important; /* 自动换行 */
+    word-break: break-all !important; /* 允许在任意字符处换行 */
+    white-space: normal !important; /* 允许换行 */
+    line-height: 1.3 !important; /* 调整行高 */
+    max-width: 100% !important; /* 确保不超出容器宽度 */
+}
+
+/* 确保表格单元格支持换行 */
+#mappingTable td {
+    white-space: normal !important;
+    vertical-align: top !important;
+}
+
+/* 文件路径列的特殊处理 */
+#mappingTable td:first-child {
+    max-width: 0; /* 配合table-layout: fixed使用 */
+    overflow: visible;
+}
+
+/* 表格布局优化 */
+#mappingTable {
+    table-layout: fixed;
+    width: 100%;
+}
+</style>
+
+<script>
+let currentMappingData = [];
+let currentPage = 1;
+const itemsPerPage = 20;
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('=== DOM Content Loaded ===');
+    console.log('Page URL:', window.location.href);
+    console.log('Document ready state:', document.readyState);
+
+    // 检查关键DOM元素是否存在
+    const totalElement = document.getElementById('totalMappings');
+    const confirmedElement = document.getElementById('confirmedCount');
+    const pendingElement = document.getElementById('pendingCount');
+    const mergedElement = document.getElementById('mergedDiffCount');
+
+    console.log('Key DOM elements check:', {
+        totalMappings: !!totalElement,
+        confirmedCount: !!confirmedElement,
+        pendingCount: !!pendingElement,
+        mergedDiffCount: !!mergedElement
+    });
+
+    // 页面加载时自动加载映射信息
+    console.log('Setting up auto-load timer...');
+    setTimeout(function() {
+        console.log('Auto-load timer triggered');
+        loadMappingInfo();
+        loadConfigs();
+    }, 100);
+
+    // 绑定筛选器事件
+    const statusFilter = document.getElementById('statusFilter');
+    const configSelect = document.getElementById('configSelect');
+
+    console.log('Filter elements check:', {
+        statusFilter: !!statusFilter,
+        configSelect: !!configSelect
+    });
+
+    if (statusFilter) {
+        statusFilter.addEventListener('change', function() {
+            console.log('Status filter changed:', this.value);
+            loadMappingInfo();
+        });
+    }
+
+    if (configSelect) {
+        configSelect.addEventListener('change', function() {
+            console.log('Config select changed:', this.value);
+            loadMappingInfo();
+        });
+    }
+
+    console.log('=== DOM initialization completed ===');
+
+    // 初始绑定表格事件（如果表格已存在）
+    setTimeout(bindTableEvents, 200);
+});
+
+function loadConfigs() {
+    console.log('Loading configs...');
+
+    let url = '/status-sync/configs';
+    const params = new URLSearchParams();
+
+    // 如果有项目信息，添加project_id参数
+    {% if project %}
+    params.append('project_id', {{ project.id }});
+    {% endif %}
+
+    if (params.toString()) {
+        url += '?' + params.toString();
+    }
+
+    fetch(url)
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const configSelect = document.getElementById('configSelect');
+            if (configSelect) {
+                // 清空现有选项
+                configSelect.innerHTML = '<option value="">全部配置</option>';
+
+                // 添加配置选项
+                data.configs.forEach(config => {
+                    const option = document.createElement('option');
+                    option.value = config.id;
+                    option.textContent = `${config.name} (${config.repository_name})`;
+                    configSelect.appendChild(option);
+                });
+            }
+        } else {
+            console.error('加载配置失败:', data.message);
+        }
+    })
+    .catch(error => {
+        console.error('Error loading configs:', error);
+    });
+}
+
+function clearAllStatus() {
+    if (!confirm('确定要清空所有文件的确认状态吗？此操作不可逆！')) {
+        return;
+    }
+    
+    if (!confirm('再次确认：这将重置所有提交记录和周版本diff记录的状态为"待确认"，确定继续吗？')) {
+        return;
+    }
+    
+    showLoading('正在清空确认状态...');
+    
+    fetch('/status-sync/clear-all', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        hideLoading();
+        if (data.success) {
+            showAlert('success', `清空成功！重置了 ${data.commit_count} 个提交记录和 ${data.weekly_count} 个周版本记录`);
+        } else {
+            showAlert('danger', '清空失败: ' + data.message);
+        }
+    })
+    .catch(error => {
+        hideLoading();
+        console.error('Error:', error);
+        showAlert('danger', '清空失败: ' + error.message);
+    });
+}
+
+function loadMappingInfo() {
+    console.log('Loading mapping info...');
+
+    const configSelect = document.getElementById('configSelect');
+    const statusFilter = document.getElementById('statusFilter');
+
+    const configId = configSelect ? configSelect.value : '';
+    const statusFilterValue = statusFilter ? statusFilter.value : '';
+
+    console.log('Config ID:', configId, 'Status Filter:', statusFilterValue);
+
+    showLoading('正在加载映射信息...');
+
+    let url = '/status-sync/mapping-info';
+    const params = new URLSearchParams();
+    if (configId) {
+        params.append('config_id', configId);
+    }
+    if (statusFilterValue) {
+        params.append('status_filter', statusFilterValue);
+    }
+
+    // 检查是否有项目信息，如果有则添加project_id参数
+    {% if project %}
+    params.append('project_id', {{ project.id }});
+    {% endif %}
+
+    if (params.toString()) {
+        url += '?' + params.toString();
+    }
+
+    console.log('Fetching URL:', url);
+
+    fetch(url)
+    .then(response => {
+        console.log('Response received:', response.status);
+        return response.json();
+    })
+    .then(data => {
+        hideLoading();
+        if (data.success) {
+            displayMappingInfo(data.mapping_info);
+        } else {
+            showAlert('danger', '加载失败: ' + data.message);
+        }
+    })
+    .catch(error => {
+        hideLoading();
+        console.error('Error:', error);
+        showAlert('danger', '加载失败: ' + error.message);
+    });
+}
+
+function displayMappingInfo(mappingInfo) {
+    console.log('🔍 displayMappingInfo called');
+    console.log('📊 Data type:', typeof mappingInfo);
+    console.log('📊 Is array:', Array.isArray(mappingInfo));
+    console.log('📊 Data length:', mappingInfo ? mappingInfo.length : 'null');
+    console.log('📊 Sample item:', mappingInfo && mappingInfo[0] ? mappingInfo[0] : 'no items');
+
+    if (!mappingInfo || !Array.isArray(mappingInfo)) {
+        console.error('❌ Invalid mapping info provided');
+        setStatisticValues(0, 0, 0, 0);
+        return;
+    }
+
+    currentMappingData = mappingInfo;
+    console.log('✅ Data stored in currentMappingData');
+
+    // 直接计算统计信息（避免函数调用问题）
+    console.log('🔄 Calculating statistics directly...');
+    const totalMappings = mappingInfo.length;
+    const confirmedCount = mappingInfo.filter(info => info.weekly_status === 'confirmed').length;
+    const pendingCount = mappingInfo.filter(info => info.weekly_status === 'pending').length;
+    const mergedDiffCount = mappingInfo.filter(info => info.is_merged_diff === true).length;
+
+    console.log('📊 Calculated statistics:', {
+        total: totalMappings,
+        confirmed: confirmedCount,
+        pending: pendingCount,
+        merged: mergedDiffCount
+    });
+
+    // 直接设置统计值
+    setStatisticValues(totalMappings, confirmedCount, pendingCount, mergedDiffCount);
+
+    // 显示表格
+    console.log('🔄 Calling renderTable...');
+    renderTable();
+
+    // 显示卡片
+    const card = document.getElementById('mappingInfoCard');
+    if (card) {
+        card.style.display = 'block';
+        console.log('✅ Card displayed');
+    }
+
+    // 重新绑定事件
+    bindTableEvents();
+    console.log('✅ displayMappingInfo completed');
+}
+
+function updateStatistics(mappingInfo) {
+    console.log('📈 updateStatistics called');
+    console.log('📈 Input data:', mappingInfo ? mappingInfo.length : 'null', 'items');
+
+    if (!mappingInfo || !Array.isArray(mappingInfo)) {
+        console.log('❌ Invalid data, setting zeros');
+        setStatisticValues(0, 0, 0, 0);
+        return;
+    }
+
+    // 检查数据结构
+    if (mappingInfo.length > 0) {
+        console.log('📈 Sample data keys:', Object.keys(mappingInfo[0]));
+        console.log('📈 Sample weekly_status:', mappingInfo[0].weekly_status);
+        console.log('📈 Sample is_merged_diff:', mappingInfo[0].is_merged_diff);
+    }
+
+    const totalMappings = mappingInfo.length;
+    const confirmedCount = mappingInfo.filter(info => info.weekly_status === 'confirmed').length;
+    const pendingCount = mappingInfo.filter(info => info.weekly_status === 'pending').length;
+    const mergedDiffCount = mappingInfo.filter(info => info.is_merged_diff === true).length;
+
+    console.log('📈 Calculated stats:', {
+        total: totalMappings,
+        confirmed: confirmedCount,
+        pending: pendingCount,
+        merged: mergedDiffCount
+    });
+
+    setStatisticValues(totalMappings, confirmedCount, pendingCount, mergedDiffCount);
+}
+
+function setStatisticValues(total, confirmed, pending, merged) {
+    console.log('🎯 setStatisticValues called with:', {total, confirmed, pending, merged});
+
+    try {
+        const elements = {
+            totalMappings: document.getElementById('totalMappings'),
+            confirmedCount: document.getElementById('confirmedCount'),
+            pendingCount: document.getElementById('pendingCount'),
+            mergedDiffCount: document.getElementById('mergedDiffCount')
+        };
+
+        console.log('🎯 DOM elements found:', {
+            totalMappings: !!elements.totalMappings,
+            confirmedCount: !!elements.confirmedCount,
+            pendingCount: !!elements.pendingCount,
+            mergedDiffCount: !!elements.mergedDiffCount
+        });
+
+        if (elements.totalMappings) {
+            elements.totalMappings.textContent = total;
+            console.log('✅ Set totalMappings to:', total);
+        }
+        if (elements.confirmedCount) {
+            elements.confirmedCount.textContent = confirmed;
+            console.log('✅ Set confirmedCount to:', confirmed);
+        }
+        if (elements.pendingCount) {
+            elements.pendingCount.textContent = pending;
+            console.log('✅ Set pendingCount to:', pending);
+        }
+        if (elements.mergedDiffCount) {
+            elements.mergedDiffCount.textContent = merged;
+            console.log('✅ Set mergedDiffCount to:', merged);
+        }
+
+        // 验证设置是否成功
+        setTimeout(() => {
+            console.log('🔍 Verification - Current DOM values:');
+            console.log('Total:', elements.totalMappings ? elements.totalMappings.textContent : 'not found');
+            console.log('Confirmed:', elements.confirmedCount ? elements.confirmedCount.textContent : 'not found');
+            console.log('Pending:', elements.pendingCount ? elements.pendingCount.textContent : 'not found');
+            console.log('Merged:', elements.mergedDiffCount ? elements.mergedDiffCount.textContent : 'not found');
+        }, 100);
+
+    } catch (error) {
+        console.error('❌ Error updating statistics:', error);
+    }
+}
+
+function renderTable() {
+    const filteredData = getFilteredData();
+    const paginatedData = getPaginatedData(filteredData);
+
+    const tableBody = document.getElementById('mappingTableBody');
+    const mappingCount = document.getElementById('mappingCount');
+
+    tableBody.innerHTML = '';
+    mappingCount.textContent = filteredData.length;
+
+    if (paginatedData.length === 0) {
+        tableBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">暂无匹配的映射信息</td></tr>';
+    } else {
+        paginatedData.forEach(info => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>
+                    <div class="d-flex align-items-center">
+                        <i class="fas fa-file-code text-muted me-2"></i>
+                        <div>
+                            <div class="fw-medium file-path-content" title="${info.file_path}">${info.file_path}</div>
+                            <small class="text-muted">${getFileExtension(info.file_path)}</small>
+                        </div>
+                    </div>
+                </td>
+                <td>
+                    <span class="badge ${getStatusBadgeClass(info.weekly_status)}">${getStatusText(info.weekly_status)}</span>
+                </td>
+                <td>
+                    <span class="badge bg-light text-dark">${info.commit_count}</span>
+                </td>
+                <td>
+                    <div class="d-flex flex-wrap gap-1">
+                        ${info.commit_statuses.map(s => `<span class="badge ${getStatusBadgeClass(s)} badge-sm">${getStatusText(s)}</span>`).join('')}
+                    </div>
+                </td>
+                <td>
+                    ${info.is_merged_diff ?
+                        '<span class="badge bg-warning"><i class="fas fa-layer-group me-1"></i>合并</span>' :
+                        '<span class="badge bg-secondary"><i class="fas fa-file me-1"></i>单个</span>'
+                    }
+                </td>
+                <td>
+                    <div class="small">
+                        ${info.base_commit_id ?
+                            `<div><strong>起:</strong> <code class="small">${truncateText(info.base_commit_id, 8)}</code></div>` :
+                            ''
+                        }
+                        <div><strong>末:</strong> <code class="small">${truncateText(info.latest_commit_id, 8)}</code></div>
+                    </div>
+                </td>
+            `;
+            tableBody.appendChild(row);
+        });
+    }
+
+    renderPagination(filteredData.length);
+}
+
+function getStatusText(status) {
+    const statusMap = {
+        'pending': '待确认',
+        'confirmed': '已确认',
+        'rejected': '已拒绝'
+    };
+    return statusMap[status] || status;
+}
+
+function getStatusBadgeClass(status) {
+    const classMap = {
+        'pending': 'bg-warning',
+        'confirmed': 'bg-success',
+        'rejected': 'bg-danger'
+    };
+    return classMap[status] || 'bg-secondary';
+}
+
+function getFilteredData() {
+    if (!currentMappingData || !Array.isArray(currentMappingData)) {
+        return [];
+    }
+
+    let filtered = currentMappingData;
+
+    // 状态筛选
+    const statusFilter = document.getElementById('statusFilter').value;
+    if (statusFilter) {
+        filtered = filtered.filter(info => info.weekly_status === statusFilter);
+    }
+
+    // 搜索筛选
+    const searchTerm = document.getElementById('searchInput')?.value.toLowerCase() || '';
+    if (searchTerm) {
+        filtered = filtered.filter(info =>
+            info.file_path.toLowerCase().includes(searchTerm)
+        );
+    }
+
+    // 类型筛选
+    const diffTypeFilter = document.getElementById('diffTypeFilter')?.value || '';
+    if (diffTypeFilter === 'merged') {
+        filtered = filtered.filter(info => info.is_merged_diff);
+    } else if (diffTypeFilter === 'single') {
+        filtered = filtered.filter(info => !info.is_merged_diff);
+    }
+
+    // 表格状态筛选
+    const statusFilterTable = document.getElementById('statusFilterTable')?.value || '';
+    if (statusFilterTable) {
+        filtered = filtered.filter(info => info.weekly_status === statusFilterTable);
+    }
+
+    return filtered;
+}
+
+function getPaginatedData(data) {
+    const startIndex = (currentPage - 1) * itemsPerPage;
+    const endIndex = startIndex + itemsPerPage;
+    return data.slice(startIndex, endIndex);
+}
+
+function renderPagination(totalItems) {
+    const totalPages = Math.ceil(totalItems / itemsPerPage);
+    const pagination = document.getElementById('pagination');
+
+    pagination.innerHTML = '';
+
+    if (totalPages <= 1) return;
+
+    // 上一页
+    const prevLi = document.createElement('li');
+    prevLi.className = `page-item ${currentPage === 1 ? 'disabled' : ''}`;
+    prevLi.innerHTML = `<a class="page-link" href="#" onclick="changePage(${currentPage - 1})">上一页</a>`;
+    pagination.appendChild(prevLi);
+
+    // 页码
+    const startPage = Math.max(1, currentPage - 2);
+    const endPage = Math.min(totalPages, currentPage + 2);
+
+    for (let i = startPage; i <= endPage; i++) {
+        const li = document.createElement('li');
+        li.className = `page-item ${i === currentPage ? 'active' : ''}`;
+        li.innerHTML = `<a class="page-link" href="#" onclick="changePage(${i})">${i}</a>`;
+        pagination.appendChild(li);
+    }
+
+    // 下一页
+    const nextLi = document.createElement('li');
+    nextLi.className = `page-item ${currentPage === totalPages ? 'disabled' : ''}`;
+    nextLi.innerHTML = `<a class="page-link" href="#" onclick="changePage(${currentPage + 1})">下一页</a>`;
+    pagination.appendChild(nextLi);
+}
+
+function changePage(page) {
+    const totalPages = Math.ceil(getFilteredData().length / itemsPerPage);
+    if (page < 1 || page > totalPages) return;
+
+    currentPage = page;
+    renderTable();
+}
+
+function filterTable() {
+    currentPage = 1;
+    renderTable();
+}
+
+function bindTableEvents() {
+    // 绑定表格内的筛选器事件
+    const searchInput = document.getElementById('searchInput');
+    const diffTypeFilter = document.getElementById('diffTypeFilter');
+    const statusFilterTable = document.getElementById('statusFilterTable');
+
+    if (searchInput) {
+        searchInput.removeEventListener('keyup', filterTable); // 移除旧的事件监听器
+        searchInput.addEventListener('keyup', filterTable);
+    }
+    if (diffTypeFilter) {
+        diffTypeFilter.removeEventListener('change', filterTable);
+        diffTypeFilter.addEventListener('change', filterTable);
+    }
+    if (statusFilterTable) {
+        statusFilterTable.removeEventListener('change', filterTable);
+        statusFilterTable.addEventListener('change', filterTable);
+    }
+
+    // 绑定排序按钮事件
+    const sortButtons = document.querySelectorAll('[data-sort]');
+    sortButtons.forEach(button => {
+        button.removeEventListener('click', handleSortClick); // 移除旧的事件监听器
+        button.addEventListener('click', handleSortClick);
+    });
+}
+
+function handleSortClick(e) {
+    e.preventDefault();
+    const columnIndex = parseInt(this.getAttribute('data-sort'));
+    console.log('Sort button clicked, column:', columnIndex);
+    sortMappingTable(columnIndex);
+}
+
+function debugStatistics() {
+    console.log('=== Debug Statistics ===');
+    console.log('currentMappingData:', currentMappingData);
+
+    if (currentMappingData && currentMappingData.length > 0) {
+        console.log('Sample data:', currentMappingData[0]);
+        updateStatistics(currentMappingData);
+    } else {
+        console.log('No current mapping data, fetching fresh data...');
+        fetch('/status-sync/mapping-info')
+        .then(response => response.json())
+        .then(data => {
+            console.log('Fresh API data:', data);
+            if (data.success) {
+                updateStatistics(data.mapping_info);
+            }
+        });
+    }
+}
+
+function forceRefresh() {
+    // 清空当前数据
+    currentMappingData = [];
+    currentPage = 1;
+
+    // 重置统计信息
+    setStatisticValues('-', '-', '-', '-');
+
+    // 重新加载数据
+    loadMappingInfo();
+
+    showAlert('info', '正在刷新数据...');
+}
+
+
+
+// 确保事件处理函数在全局作用域
+window.sortMappingTable = sortMappingTable;
+window.filterTable = filterTable;
+window.changePage = changePage;
+window.toggleTableView = toggleTableView;
+window.hideMappingInfo = hideMappingInfo;
+window.exportMappingInfo = exportMappingInfo;
+window.loadMappingInfo = loadMappingInfo;
+window.clearAllStatus = clearAllStatus;
+window.bindTableEvents = bindTableEvents;
+window.handleSortClick = handleSortClick;
+window.forceRefresh = forceRefresh;
+
+function sortMappingTable(columnIndex) {
+    if (!currentMappingData || currentMappingData.length === 0) {
+        console.log('No data to sort');
+        return;
+    }
+
+    console.log('Sorting column:', columnIndex, 'Data length:', currentMappingData.length);
+
+    // 简单的排序实现
+    const isAscending = !currentMappingData._sortAscending;
+    currentMappingData._sortAscending = isAscending;
+
+    currentMappingData.sort((a, b) => {
+        let aVal, bVal;
+        switch(columnIndex) {
+            case 0: // 文件路径
+                aVal = a.file_path || '';
+                bVal = b.file_path || '';
+                break;
+            case 1: // 状态
+                aVal = a.weekly_status || '';
+                bVal = b.weekly_status || '';
+                break;
+            case 2: // 提交数
+                aVal = a.commit_count || 0;
+                bVal = b.commit_count || 0;
+                break;
+            default:
+                return 0;
+        }
+
+        if (typeof aVal === 'string') {
+            return isAscending ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+        } else {
+            return isAscending ? aVal - bVal : bVal - aVal;
+        }
+    });
+
+    currentPage = 1; // 重置到第一页
+    renderTable();
+    console.log('Sort completed, ascending:', isAscending);
+}
+
+function toggleTableView() {
+    // 可以实现表格视图切换功能
+    alert('表格视图切换功能待实现');
+}
+
+function hideMappingInfo() {
+    document.getElementById('mappingInfoCard').style.display = 'none';
+}
+
+function exportMappingInfo() {
+    const data = getFilteredData();
+    const csv = convertToCSV(data);
+    downloadCSV(csv, 'status_sync_mapping.csv');
+}
+
+function convertToCSV(data) {
+    const headers = ['文件路径', '周版本状态', '提交数量', '提交状态', '是否合并diff', '基础提交ID', '最新提交ID'];
+    const rows = data.map(info => [
+        info.file_path,
+        info.weekly_status,
+        info.commit_count,
+        info.commit_statuses.join(';'),
+        info.is_merged_diff ? '是' : '否',
+        info.base_commit_id || '',
+        info.latest_commit_id || ''
+    ]);
+
+    return [headers, ...rows].map(row =>
+        row.map(field => `"${field}"`).join(',')
+    ).join('\n');
+}
+
+function downloadCSV(csv, filename) {
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', filename);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+function getFileExtension(filePath) {
+    const ext = filePath.split('.').pop().toLowerCase();
+    const extMap = {
+        'lua': 'Lua脚本',
+        'xlsx': 'Excel文件',
+        'js': 'JavaScript',
+        'py': 'Python',
+        'java': 'Java',
+        'cpp': 'C++',
+        'h': '头文件'
+    };
+    return extMap[ext] || ext.toUpperCase();
+}
+
+function truncateText(text, maxLength) {
+    if (!text || text.length <= maxLength) {
+        return text || '';
+    }
+    return text.substring(0, maxLength) + '...';
+}
+
+function showAlert(type, message) {
+    const alert = document.getElementById('resultAlert');
+    alert.className = `alert alert-${type}`;
+    alert.innerHTML = `
+        <div class="d-flex align-items-center">
+            <i class="fas fa-${type === 'success' ? 'check-circle' : 'exclamation-circle'} me-2"></i>
+            ${message}
+        </div>
+    `;
+    alert.style.display = 'block';
+    
+    // 5秒后自动隐藏
+    setTimeout(() => {
+        alert.style.display = 'none';
+    }, 5000);
+}
+
+function showLoading(message) {
+    const alert = document.getElementById('resultAlert');
+    alert.className = 'alert alert-info';
+    alert.innerHTML = `
+        <div class="d-flex align-items-center">
+            <div class="spinner-border spinner-border-sm me-2" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            ${message}
+        </div>
+    `;
+    alert.style.display = 'block';
+}
+
+function hideLoading() {
+    const alert = document.getElementById('resultAlert');
+    alert.style.display = 'none';
+}
+</script>
+{% endblock %}

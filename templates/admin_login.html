@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}管理员登录 - Diff确认平台{% endblock %}
+
+{% block content %}
+<div class="container" style="max-width: 520px;">
+    <div class="card shadow-sm">
+        <div class="card-body p-4">
+            <h4 class="mb-3">管理员登录</h4>
+            <form method="POST" action="{{ url_for('admin_login') }}">
+                <input type="hidden" name="next" value="{{ next_url or request.args.get('next', '') }}">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+
+                <div class="mb-3">
+                    <label for="username" class="form-label">用户名</label>
+                    <input type="text" class="form-control" id="username" name="username" required autocomplete="username">
+                </div>
+
+                <div class="mb-3">
+                    <label for="password" class="form-label">密码</label>
+                    <input type="password" class="form-control" id="password" name="password" required autocomplete="current-password">
+                </div>
+
+                <div class="d-flex justify-content-end gap-2">
+                    <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">取消</a>
+                    <button type="submit" class="btn btn-primary">登录</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
