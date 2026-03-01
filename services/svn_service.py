@@ -6,14 +6,15 @@ import xml.etree.ElementTree as ET
 import tempfile
 import shutil
 from utils.path_security import build_repository_local_path
+from services.model_loader import get_runtime_models
 
 # 延迟导入数据库模块，避免循环导入
 def get_db_models():
     """获取数据库模块，避免循环导入"""
     try:
-        from app import db, Commit
+        db, Commit = get_runtime_models("db", "Commit")
         return db, Commit
-    except ImportError:
+    except Exception:
         return None, None
 
 class SVNService:

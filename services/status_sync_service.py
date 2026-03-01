@@ -4,8 +4,9 @@
 """
 import json
 from datetime import datetime, timezone
-from typing import List, Dict, Optional, Set
-from sqlalchemy import and_, or_
+from typing import Dict, List
+from sqlalchemy import and_
+from services.model_loader import get_runtime_models
 from utils.safe_print import log_print
 
 
@@ -27,7 +28,7 @@ class StatusSyncService:
             Dict: 同步结果
         """
         try:
-            from app import Commit, WeeklyVersionDiffCache, WeeklyVersionConfig
+            Commit, = get_runtime_models("Commit")
             
             # 获取提交记录
             commit = self.db.session.get(Commit, commit_id)
@@ -80,7 +81,7 @@ class StatusSyncService:
             Dict: 同步结果
         """
         try:
-            from app import Commit, WeeklyVersionDiffCache, WeeklyVersionConfig
+            WeeklyVersionDiffCache, = get_runtime_models("WeeklyVersionDiffCache")
             
             # 获取周版本diff缓存
             cache = self.db.session.query(WeeklyVersionDiffCache).filter_by(
@@ -119,7 +120,10 @@ class StatusSyncService:
     
     def _find_related_weekly_caches(self, commit) -> List:
         """查找与提交记录相关的周版本diff缓存"""
-        from app import WeeklyVersionDiffCache, WeeklyVersionConfig
+        WeeklyVersionDiffCache, WeeklyVersionConfig = get_runtime_models(
+            "WeeklyVersionDiffCache",
+            "WeeklyVersionConfig",
+        )
         
         # 通过文件路径和时间范围查找相关的周版本配置
         weekly_caches = self.db.session.query(WeeklyVersionDiffCache).join(
@@ -137,7 +141,7 @@ class StatusSyncService:
     
     def _find_related_commits(self, cache) -> List:
         """查找与周版本diff缓存相关的提交记录"""
-        from app import Commit
+        Commit, WeeklyVersionConfig = get_runtime_models("Commit", "WeeklyVersionConfig")
         
         # 获取所有相关的commit_id
         commit_ids = set()
@@ -151,7 +155,6 @@ class StatusSyncService:
         # 如果是合并diff，还需要获取中间的提交
         if self._is_merged_diff(cache):
             # 获取时间范围内的所有相关提交
-            from app import WeeklyVersionConfig
             config = self.db.session.get(WeeklyVersionConfig, cache.config_id)
             if config:
                 # 查找该文件在时间范围内的所有提交
@@ -232,7 +235,7 @@ class StatusSyncService:
     def clear_all_confirmation_status(self) -> Dict:
         """清空所有文件的确认状态"""
         try:
-            from app import Commit, WeeklyVersionDiffCache
+            Commit, WeeklyVersionDiffCache = get_runtime_models("Commit", "WeeklyVersionDiffCache")
 
             log_print("开始清空所有确认状态", 'SYNC')
 
@@ -271,7 +274,17 @@ class StatusSyncService:
     def get_sync_mapping_info(self, config_id: int = None, repository_id: int = None, project_id: int = None) -> Dict:
         """获取同步映射信息，用于调试和监控"""
         try:
-            from app import Commit, WeeklyVersionDiffCache, WeeklyVersionConfig, Repository
+            (
+                Commit,
+                WeeklyVersionDiffCache,
+                WeeklyVersionConfig,
+                Repository,
+            ) = get_runtime_models(
+                "Commit",
+                "WeeklyVersionDiffCache",
+                "WeeklyVersionConfig",
+                "Repository",
+            )
 
             query = self.db.session.query(WeeklyVersionDiffCache)
 
