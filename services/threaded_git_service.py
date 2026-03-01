@@ -11,8 +11,15 @@ class ThreadedGitService(GitService):
     """多线程优化的Git服务，专门优化前一次提交查找性能"""
     
     def __init__(self, repo_url=None, root_directory=None, username=None, token=None, repository=None, active_processes=None, max_workers=6):
-        super().__init__(repo_url, root_directory, username, token, repository, active_processes)
-        self.max_workers = max_workers
+        super().__init__(
+            repo_url,
+            root_directory,
+            username,
+            token,
+            repository,
+            active_processes,
+            max_workers=max_workers
+        )
         
     def _collect_previous_commits_threaded(self, repo, commits):
         """多线程版本的前一次提交收集，显著提升性能"""

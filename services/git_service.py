@@ -73,7 +73,7 @@ def patched_execute(self, command, *args, **kwargs):
 git.cmd.Git.execute = patched_execute
 
 class GitService:
-    def __init__(self, repo_url, root_directory=None, username=None, token=None, repository=None, active_processes=None):
+    def __init__(self, repo_url, root_directory=None, username=None, token=None, repository=None, active_processes=None, max_workers=None):
         self.repo_url = repo_url
         self.root_directory = root_directory
         self.username = username
@@ -84,8 +84,12 @@ class GitService:
         # 解析仓库URL获取本地路径
         self.local_path = self._get_local_path()
         
-        # 线程池配置
-        self.max_workers = min(32, (os.cpu_count() or 1) + 4)  # 基于CPU核心数设置线程数
+        # 线程池配置（支持子类注入，避免父子类配置不一致）
+        default_workers = min(32, (os.cpu_count() or 1) + 4)  # 基于CPU核心数设置线程数
+        if max_workers is None:
+            self.max_workers = default_workers
+        else:
+            self.max_workers = max(1, int(max_workers))
         self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)
         
         # 性能监控

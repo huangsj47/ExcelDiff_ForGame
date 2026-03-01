@@ -112,13 +112,17 @@ function showAlert(type, message) {
 
 // 批量更新提交状态
 function batchUpdateCommits(ids, action) {
+    const actionNormalized = String(action || '').toLowerCase();
+    const isApprove = ['approve', 'confirm', 'confirmed'].includes(actionNormalized);
+    const endpoint = isApprove ? '/commits/batch-approve' : '/commits/batch-reject';
+
     $.ajax({
-        url: '/commits/batch-update',
+        url: endpoint,
         method: 'POST',
-        data: {
-            ids: ids,
-            action: action
-        },
+        contentType: 'application/json',
+        data: JSON.stringify({
+            commit_ids: ids
+        }),
         success: function(response) {
             alert('操作成功');
             location.reload();
@@ -206,18 +210,22 @@ function showDiffDetail(commitId) {
 
 // 快速确认/拒绝
 function quickUpdateStatus(commitId, status) {
+    const actionNormalized = String(status || '').toLowerCase();
+    const targetStatus = ['confirm', 'confirmed', 'approve'].includes(actionNormalized) ? 'confirmed' : 'rejected';
+
     $.ajax({
         url: `/commits/${commitId}/status`,
         method: 'POST',
-        data: {
-            action: status
-        },
+        contentType: 'application/json',
+        data: JSON.stringify({
+            status: targetStatus
+        }),
         success: function(response) {
             // 更新页面状态显示
             const row = $(`tr[data-commit-id="${commitId}"]`);
             const statusCell = row.find('.status-cell');
-            const statusClass = status === 'confirm' ? 'success' : 'danger';
-            const statusText = status === 'confirm' ? '已确认' : '已拒绝';
+            const statusClass = targetStatus === 'confirmed' ? 'success' : 'danger';
+            const statusText = targetStatus === 'confirmed' ? '已确认' : '已拒绝';
             statusCell.html(`<span class="badge bg-${statusClass}">${statusText}</span>`);
             
             // 禁用操作按钮

@@ -102,7 +102,7 @@
 - `models/`: 数据模型（项目、仓库、提交、缓存、周版本、任务、操作日志）
 - `services/`: Git/SVN 同步、Diff 计算、缓存、状态同步等服务
 - `tasks/`: 后台任务与清理任务
-- `routes/`: Blueprint/Express 路由（部分为兼容保留）
+- `routes/`: Flask Blueprint 路由
 - `templates/`: 页面模板
 - `static/`: 前端 JS/CSS
 - `utils/`: 数据库、重试、时区、URL 辅助工具
@@ -226,14 +226,6 @@ pytest
 ```
 
 当前测试侧重结构与逻辑验证，业务全链路集成覆盖较少，建议在关键流程增加接口级与端到端用例。
-
-## Node 兼容模块说明
-
-仓库中保留了 `server.js` + `routes/*.js` 的 Express 版本实现，用于历史兼容/过渡。
-
-- 主链路已迁移到 Python Flask（`app.py`）
-- `package.json` 当前标注为废弃状态
-- 新功能开发建议统一在 Python 主服务侧进行
 
 ## 已知现状
 

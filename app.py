@@ -2797,8 +2797,9 @@ def weekly_version_config(project_id):
     repositories = Repository.query.filter_by(project_id=project_id).all()
 
     # 获取分页参数
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 20, type=int)  # 每页显示20个版本组
+    page = max(1, request.args.get('page', 1, type=int) or 1)
+    requested_per_page = request.args.get('per_page', 20, type=int) or 20
+    per_page = min(max(requested_per_page, 1), 200)  # 每页最大200，防止大分页拖垮查询
 
     # 获取所有配置用于分组
     all_configs = WeeklyVersionConfig.query.filter_by(project_id=project_id).order_by(WeeklyVersionConfig.created_at.desc()).all()
@@ -6124,8 +6125,9 @@ def commit_list(repository_id):
     }
     
     # 获取分页参数
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 50, type=int)  # 支持自定义每页记录数
+    page = max(1, request.args.get('page', 1, type=int) or 1)
+    requested_per_page = request.args.get('per_page', 50, type=int) or 50
+    per_page = min(max(requested_per_page, 1), 200)  # 限制每页大小，避免大页拖垮查询
     
     # 构建查询
     query = Commit.query.filter_by(repository_id=repository_id)
@@ -6159,16 +6161,12 @@ def commit_list(repository_id):
     
     if filters['author']:
         query = query.filter(Commit.author.contains(filters['author']))
-        log_print(f"添加作者筛选后: {query.count()}", 'APP')
     if filters['path']:
         query = query.filter(Commit.path.contains(filters['path']))
-        log_print(f"添加路径筛选后: {query.count()}", 'APP')
     if filters['version']:
         query = query.filter(Commit.version.contains(filters['version']))
-        log_print(f"添加版本筛选后: {query.count()}", 'APP')
     if filters['operation']:
         query = query.filter_by(operation=filters['operation'])
-        log_print(f"添加操作筛选后: {query.count()}", 'APP')
     # 处理状态筛选 - 支持逗号分隔的多状态
     status_param = request.args.get('status', '')
     if status_param and ',' in status_param:
@@ -6176,13 +6174,10 @@ def commit_list(repository_id):
         status_list = [s.strip() for s in status_param.split(',') if s.strip()]
         if status_list:
             query = query.filter(Commit.status.in_(status_list))
-            log_print(f"添加多状态筛选后: {query.count()}", 'APP')
     elif filters['status_list']:
         query = query.filter(Commit.status.in_(filters['status_list']))
-        log_print(f"添加状态列表筛选后: {query.count()}", 'APP')
     elif filters['status']:
         query = query.filter_by(status=filters['status'])
-        log_print(f"添加单状态筛选后: {query.count()}", 'APP')
     
     # 分页查询
     pagination = query.order_by(Commit.commit_time.desc()).paginate(
@@ -6194,7 +6189,6 @@ def commit_list(repository_id):
     log_print(f"=== 分页调试信息 ===", 'APP')
     log_print(f"Repository ID: {repository_id}", 'APP')
     log_print(f"Page: {page}, Per page: {per_page}", 'APP')
-    log_print(f"Total commits in query: {query.count()}", 'APP')
     log_print(f"Pagination total: {pagination.total}", 'APP')
     log_print(f"Pagination pages: {pagination.pages}", 'APP')
     log_print(f"Current page items: {len(commits)}", 'APP')
@@ -7294,8 +7288,22 @@ def check_local_repository_exists(project_code, repository_name, repository_id):
 def update_commit_status(commit_id):
     """更新提交状态"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         status = data.get('status')
+
+        # 兼容历史前端：action=confirm/reject
+        if not status:
+            action = (data.get('action') or request.form.get('action') or request.form.get('status') or '').strip()
+            action_to_status = {
+                'confirm': 'confirmed',
+                'confirmed': 'confirmed',
+                'approve': 'confirmed',
+                'reject': 'rejected',
+                'rejected': 'rejected',
+                'pending': 'pending',
+                'reviewed': 'reviewed',
+            }
+            status = action_to_status.get(action, action)
 
         if status not in ['pending', 'reviewed', 'confirmed', 'rejected']:
             return jsonify({'status': 'error', 'message': '无效的状态值'}), 400
@@ -7316,6 +7324,59 @@ def update_commit_status(commit_id):
 
     except Exception as e:
         app.logger.error(f"更新提交状态失败: {str(e)}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/commits/batch-update', methods=['POST'])
+def batch_update_commits_compat():
+    """兼容历史前端的批量更新接口（batch-approve/batch-reject 的统一入口）"""
+    try:
+        data = request.get_json(silent=True) or {}
+        commit_ids = data.get('commit_ids') or data.get('ids') or request.form.getlist('ids')
+        action = (data.get('action') or request.form.get('action') or '').strip().lower()
+
+        if not commit_ids:
+            return jsonify({'status': 'error', 'message': '未选择任何提交'}), 400
+
+        # 标准化commit_ids为int列表
+        normalized_ids = []
+        for raw_id in commit_ids:
+            try:
+                normalized_ids.append(int(raw_id))
+            except (TypeError, ValueError):
+                continue
+        if not normalized_ids:
+            return jsonify({'status': 'error', 'message': '提交ID无效'}), 400
+
+        if action in {'confirm', 'confirmed', 'approve'}:
+            target_status = 'confirmed'
+        elif action in {'reject', 'rejected'}:
+            target_status = 'rejected'
+        else:
+            return jsonify({'status': 'error', 'message': '不支持的批量操作'}), 400
+
+        from services.status_sync_service import StatusSyncService
+        sync_service = StatusSyncService(db)
+        updated_count = 0
+        sync_results = []
+
+        for commit_id in normalized_ids:
+            commit = db.session.get(Commit, commit_id)
+            if commit and commit.status != target_status:
+                commit.status = target_status
+                updated_count += 1
+                sync_results.append(sync_service.sync_commit_to_weekly(commit_id, target_status))
+
+        db.session.commit()
+        total_weekly_updated = sum(r.get('updated_count', 0) for r in sync_results if r.get('success'))
+        return jsonify({
+            'status': 'success',
+            'message': f'已更新 {updated_count} 个提交，同步更新 {total_weekly_updated} 个周版本记录',
+            'updated_count': updated_count
+        })
+    except Exception as e:
+        db.session.rollback()
+        log_print(f"批量更新提交失败: {str(e)}", 'APP', force=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/commits/<int:commit_id>/approve-all', methods=['POST'])
