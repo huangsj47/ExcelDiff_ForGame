@@ -47,6 +47,12 @@ class TestServiceAppCoupling:
         assert "from app import" not in content
         assert "get_runtime_models(" in content
 
+    def test_init_scripts_use_model_loader(self):
+        for path in ["init_database.py", "init_html_cache.py", "recreate_db.py"]:
+            content = _read(path)
+            assert "from app import" not in content
+            assert "get_runtime_models(" in content
+
 
 class TestModelLoader:
     def test_prefers_models_when_models_exports_app_models(self, monkeypatch):

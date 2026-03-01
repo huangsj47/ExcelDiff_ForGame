@@ -4,6 +4,7 @@
 """
 import os
 import sys
+from services.model_loader import get_runtime_models
 
 # 确保可以导入app模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -11,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 def init_html_cache_table():
     """初始化HTML缓存表"""
     try:
-        from app import app, db, ExcelHtmlCache
+        app, db, ExcelHtmlCache = get_runtime_models("app", "db", "ExcelHtmlCache")
         import os
 
         with app.app_context():

@@ -6,10 +6,11 @@
 
 import sqlite3
 import os
-from app import app, db
+from services.model_loader import get_runtime_models
 
 def check_and_create_all_tables():
     """检查并创建所有必需的数据库表"""
+    app, db = get_runtime_models("app", "db")
 
     # 确保instance目录存在
     instance_dir = 'instance'
