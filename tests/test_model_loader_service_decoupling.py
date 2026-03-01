@@ -37,6 +37,11 @@ class TestServiceAppCoupling:
         assert "import_module('app')" not in content
         assert "get_runtime_models(" in content
 
+    def test_incremental_cache_system_no_direct_app_imports(self):
+        content = _read("incremental_cache_system.py")
+        assert "from app import" not in content
+        assert "get_runtime_models(" in content
+
 
 class TestModelLoader:
     def test_prefers_models_when_models_exports_app_models(self, monkeypatch):

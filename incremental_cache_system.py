@@ -7,6 +7,7 @@
 
 from datetime import datetime, timezone
 from sqlalchemy import text
+from services.model_loader import get_runtime_models
 
 class IncrementalCacheManager:
     """增量缓存管理器"""
@@ -16,9 +17,9 @@ class IncrementalCacheManager:
     
     def add_repository_sync_fields(self):
         """为Repository表添加同步跟踪字段"""
+        db = None
         try:
-            # 延迟导入避免循环依赖
-            from app import app, db
+            app, db = get_runtime_models("app", "db")
             
             with app.app_context():
                 # 检查字段是否已存在
@@ -47,13 +48,12 @@ class IncrementalCacheManager:
                     
         except Exception as e:
             print(f"❌ 添加Repository同步跟踪字段失败: {e}")
-            db.session.rollback()
+            if db is not None:
+                db.session.rollback()
     
     def get_new_commits_since_last_sync(self, repository, service):
         """获取自上次同步以来的新提交"""
         try:
-            # 延迟导入避免循环依赖
-            from app import Repository
             # 获取仓库的最新提交ID
             all_commits = service.get_commits(limit=1000)
             if not all_commits:
@@ -97,8 +97,7 @@ class IncrementalCacheManager:
     def get_existing_cached_files(self, repository_id):
         """获取已有缓存的文件列表"""
         try:
-            # 延迟导入避免循环依赖
-            from app import DiffCache
+            DiffCache, = get_runtime_models("DiffCache")
             
             cached_files = set()
             
@@ -121,19 +120,33 @@ class IncrementalCacheManager:
     
     def incremental_sync_repository(self, repository_id):
         """增量同步仓库"""
+        db = None
         try:
-            # 延迟导入避免循环依赖
-            from app import Repository, Commit, db, excel_cache_service
+            (
+                Repository,
+                Commit,
+                db,
+                excel_cache_service,
+                get_git_service,
+                get_svn_service,
+                add_excel_diff_task,
+            ) = get_runtime_models(
+                "Repository",
+                "Commit",
+                "db",
+                "excel_cache_service",
+                "get_git_service",
+                "get_svn_service",
+                "add_excel_diff_task",
+            )
             
             repository = Repository.query.get_or_404(repository_id)
             print(f"🔄 开始增量同步仓库: {repository.name}")
             
             # 创建服务实例（使用缓存）
             if repository.type == 'git':
-                from app import get_git_service
                 service = get_git_service(repository)
             elif repository.type == 'svn':
-                from app import get_svn_service
                 service = get_svn_service(repository)
             else:
                 raise ValueError(f"不支持的仓库类型: {repository.type}")
@@ -188,7 +201,6 @@ class IncrementalCacheManager:
                     
                     if cache_key not in existing_cached_files:
                         # 添加Excel缓存任务
-                        from app import add_excel_diff_task
                         add_excel_diff_task(
                             repository_id, 
                             commit_data['commit_id'], 
@@ -212,14 +224,20 @@ class IncrementalCacheManager:
             
         except Exception as e:
             print(f"❌ 增量同步失败: {e}")
-            db.session.rollback()
+            if db is not None:
+                db.session.rollback()
             return False, f"增量同步失败: {str(e)}"
     
     def force_full_sync(self, repository_id):
         """强制全量同步（清空重建）"""
+        db = None
         try:
-            # 延迟导入避免循环依赖
-            from app import Repository, Commit, DiffCache, db
+            Repository, Commit, DiffCache, db = get_runtime_models(
+                "Repository",
+                "Commit",
+                "DiffCache",
+                "db",
+            )
             
             repository = Repository.query.get_or_404(repository_id)
             print(f"🔄 开始全量同步仓库: {repository.name}")
@@ -241,7 +259,8 @@ class IncrementalCacheManager:
             
         except Exception as e:
             print(f"❌ 全量同步失败: {e}")
-            db.session.rollback()
+            if db is not None:
+                db.session.rollback()
             return False, f"全量同步失败: {str(e)}"
 
 # 全局实例
