@@ -2,6 +2,7 @@
 import time
 import functools
 from sqlalchemy.exc import OperationalError, PendingRollbackError
+from services.model_loader import get_runtime_models
 
 def db_retry(max_retries=3, delay=0.1):
     """数据库操作重试装饰器"""
@@ -17,7 +18,7 @@ def db_retry(max_retries=3, delay=0.1):
                             print(f"数据库操作失败，重试 {attempt + 1}/{max_retries}: {str(e)}")
                             # 回滚会话
                             try:
-                                from app import db
+                                db, = get_runtime_models("db")
                                 db.session.rollback()
                             except:
                                 pass

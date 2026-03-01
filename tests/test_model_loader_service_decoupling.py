@@ -42,6 +42,11 @@ class TestServiceAppCoupling:
         assert "from app import" not in content
         assert "get_runtime_models(" in content
 
+    def test_db_retry_no_direct_app_import(self):
+        content = _read("utils/db_retry.py")
+        assert "from app import" not in content
+        assert "get_runtime_models(" in content
+
 
 class TestModelLoader:
     def test_prefers_models_when_models_exports_app_models(self, monkeypatch):
