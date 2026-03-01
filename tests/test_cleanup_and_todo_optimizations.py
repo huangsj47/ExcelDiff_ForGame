@@ -44,9 +44,11 @@ class TestApiContractAndPaginationOptimization:
         assert "action: status" not in content
 
     def test_app_has_batch_update_compat_route(self):
-        content = _read("app.py")
-        assert "@app.route('/commits/batch-update', methods=['POST'])" in content
-        assert "def batch_update_commits_compat():" in content
+        content = _read("routes/commit_diff_routes.py")
+        assert "/commits/batch-update" in content
+        assert "endpoint=\"batch_update_commits_compat\"" in content
+        app_content = _read("app.py")
+        assert "def batch_update_commits_compat():" in app_content
 
     def test_commit_list_per_page_is_limited(self):
         content = _read("app.py")

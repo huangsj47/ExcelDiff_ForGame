@@ -33,6 +33,7 @@ from services.excel_diff_cache_service import (
     configure_excel_diff_cache_service,
 )
 from routes.cache_management_routes import cache_management_bp
+from routes.commit_diff_routes import commit_diff_bp
 from routes.weekly_version_management_routes import weekly_version_bp
 from utils.url_helpers import generate_commit_diff_url, generate_excel_diff_data_url, generate_refresh_diff_url
 import threading
@@ -714,6 +715,7 @@ log_print(
 
 db = SQLAlchemy(app)
 app.register_blueprint(cache_management_bp)
+app.register_blueprint(commit_diff_bp, name="")
 app.register_blueprint(weekly_version_bp, name="")
 
 # 添加Excel列字母转换过滤器
@@ -5479,7 +5481,6 @@ def create_svn_repository():
     return redirect(url_for('repository_config', project_id=project_id))
 
 # 提交记录列表页面
-@app.route('/repositories/<int:repository_id>/commits')
 def commit_list(repository_id):
     log_print(f"=== 访问提交列表页面 ===", 'APP')
     log_print(f"Repository ID: {repository_id}", 'APP')
@@ -5627,12 +5628,10 @@ def commit_list(repository_id):
 # diff确认页面
 
 # 新的带项目代号和仓库名的Excel diff数据路由
-@app.route('/<project_code>/<repository_name>/commits/<int:commit_id>/excel-diff-data')
 def get_excel_diff_data_with_path(project_code, repository_name, commit_id):
     return get_excel_diff_data(commit_id)
 
 # 保持向后兼容的原路由
-@app.route('/commits/<int:commit_id>/excel-diff-data')
 def get_excel_diff_data(commit_id):
     """异步获取Excel diff数据的API端点（支持HTML缓存优先）"""
     commit = Commit.query.get_or_404(commit_id)
@@ -5768,12 +5767,10 @@ def get_excel_diff_data(commit_id):
 
 # 新的统一差异显示路由
 # 新的带项目代号和仓库名的新diff路由
-@app.route('/<project_code>/<repository_name>/commits/<int:commit_id>/diff/new')
 def commit_diff_new_with_path(project_code, repository_name, commit_id):
     return commit_diff_new(commit_id)
 
 # 保持向后兼容的原路由
-@app.route('/commits/<int:commit_id>/diff/new')
 def commit_diff_new(commit_id):
     """使用新的差异服务显示文件差异"""
     commit = Commit.query.get_or_404(commit_id)
@@ -5817,7 +5814,6 @@ def commit_diff_new(commit_id):
                          previous_commit=previous_commit)
 
 # 完整文件diff路由
-@app.route('/commits/<int:commit_id>/full-diff')
 def commit_full_diff(commit_id):
     """显示完整文件的diff，类似Git工具的并排显示"""
     commit = Commit.query.get_or_404(commit_id)
@@ -6049,12 +6045,10 @@ def generate_side_by_side_diff(current_content, previous_content):
 
 # 重新计算差异API
 # 新的带项目代号和仓库名的刷新diff路由
-@app.route('/<project_code>/<repository_name>/commits/<int:commit_id>/refresh-diff', methods=['POST'])
 def refresh_commit_diff_with_path(project_code, repository_name, commit_id):
     return refresh_commit_diff(commit_id)
 
 # 保持向后兼容的原路由
-@app.route('/commits/<int:commit_id>/refresh-diff', methods=['POST'])
 def refresh_commit_diff(commit_id):
     """重新计算提交的差异数据，绕过缓存 - 优化版本"""
     try:
@@ -6168,12 +6162,10 @@ def refresh_commit_diff(commit_id):
         }), 500
 
 # 新的带项目代号和仓库名的路由
-@app.route('/<project_code>/<repository_name>/commits/<int:commit_id>/diff')
 def commit_diff_with_path(project_code, repository_name, commit_id):
     return commit_diff(commit_id)
 
 # 保持向后兼容的原路由
-@app.route('/commits/<int:commit_id>/diff')
 def commit_diff(commit_id):
     commit = Commit.query.get_or_404(commit_id)
     repository = commit.repository
@@ -6692,7 +6684,6 @@ def check_local_repository_exists(project_code, repository_name, repository_id):
         return False
     return os.path.exists(local_path)
 
-@app.route('/commits/<int:commit_id>/status', methods=['POST'])
 def update_commit_status(commit_id):
     """更新提交状态"""
     try:
@@ -6735,7 +6726,6 @@ def update_commit_status(commit_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/commits/batch-update', methods=['POST'])
 def batch_update_commits_compat():
     """兼容历史前端的批量更新接口（batch-approve/batch-reject 的统一入口）"""
     try:
@@ -6787,7 +6777,6 @@ def batch_update_commits_compat():
         log_print(f"批量更新提交失败: {str(e)}", 'APP', force=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/commits/<int:commit_id>/approve-all', methods=['POST'])
 def approve_all_files(commit_id):
     """批量确认提交的所有文件"""
     try:
@@ -6826,7 +6815,6 @@ def approve_all_files(commit_id):
         traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/commits/batch-approve', methods=['POST'])
 def batch_approve_commits():
     """批量通过选中的提交"""
     try:
@@ -6867,7 +6855,6 @@ def batch_approve_commits():
         log_print(f"批量通过失败: {str(e)}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/commits/batch-reject', methods=['POST'])
 def batch_reject_commits():
     """批量拒绝选中的提交"""
     try:
@@ -6908,7 +6895,6 @@ def batch_reject_commits():
         log_print(f"批量拒绝失败: {str(e)}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/commits/reject', methods=['POST'])
 def reject_commit():
     """拒绝单个提交"""
     try:
@@ -6940,7 +6926,6 @@ def reject_commit():
         log_print(f"拒绝提交失败: {str(e)}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/commits/<int:commit_id>/priority-diff', methods=['POST'])
 def request_priority_diff(commit_id):
     """请求优先处理指定提交的diff"""
     try:
@@ -6983,13 +6968,11 @@ def request_priority_diff(commit_id):
             'message': f'请求失败: {str(e)}'
         })
 
-@app.route('/<project_code>/<repository_name>/commits/<int:commit_id>/priority-diff', methods=['POST'])
 def request_priority_diff_with_path(project_code, repository_name, commit_id):
     """请求优先处理指定提交的diff (带路径版本)"""
     return request_priority_diff(commit_id)
 
 # 合并diff重新计算路由
-@app.route('/commits/<int:commit_id>/diff-data', methods=['GET'])
 def get_commit_diff_data(commit_id):
     """异步获取单个提交的diff数据（优化版本，优先使用缓存）"""
     try:
@@ -7085,7 +7068,6 @@ def get_commit_diff_data(commit_id):
             'message': f'获取diff数据失败: {str(e)}'
         })
 
-@app.route('/commits/merge-diff/refresh', methods=['POST'])
 def refresh_merge_diff():
     """重新计算合并diff数据，绕过缓存"""
     try:
@@ -7174,7 +7156,6 @@ def refresh_merge_diff():
         log_print(f"重新计算合并diff失败: {e}", 'INFO')
         return jsonify({'success': False, 'message': f'重新计算失败: {str(e)}'})
 
-@app.route('/commits/merge-diff')
 def merge_diff():
     """合并选中条目的diff显示页面"""
     log_print("🚨🚨🚨 ROUTE CALLED! /commits/merge-diff 🚨🚨🚨", 'APP')
@@ -7285,7 +7266,6 @@ def merge_diff():
 
 # 编辑仓库页面
 
-@app.route('/update_commit_fields')
 def update_commit_fields_route():
     """更新现有提交记录中缺失的version和operation字段"""
     try:
@@ -9075,7 +9055,6 @@ def analyze_repository_differences(source_commits, target_commits, source_repo, 
         'common_files_count': len(set(source_files.keys()) & set(target_files.keys()))
     }
 
-@app.route('/repositories/<int:repository_id>/commits/by-file')
 def get_commits_by_file(repository_id):
     """获取指定文件的所有提交记录"""
     file_path = request.args.get('path')
@@ -9100,7 +9079,6 @@ def get_commits_by_file(repository_id):
     
     return jsonify({'commits': commits_data})
 
-@app.route('/commits/compare')
 def commits_compare():
     """提交对比页面"""
     from_commit_id = request.args.get('from')

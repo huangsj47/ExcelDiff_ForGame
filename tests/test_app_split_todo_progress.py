@@ -173,3 +173,70 @@ class TestAppSplitTodoProgress:
             assert url_for("weekly_version_config", project_id=1) == "/projects/1/weekly-version-config"
             assert url_for("weekly_version_diff", config_id=2) == "/weekly-version-config/2/diff"
             assert url_for("weekly_version_stats_api", config_id=3) == "/weekly-version-config/3/stats"
+
+    def test_app_registers_commit_diff_blueprint(self):
+        content = _read("app.py")
+        assert "from routes.commit_diff_routes import commit_diff_bp" in content
+        assert "app.register_blueprint(commit_diff_bp, name=\"\")" in content
+
+    def test_commit_diff_routes_extracted_to_blueprint(self):
+        content = _read("routes/commit_diff_routes.py")
+        assert "commit_diff_bp = Blueprint(" in content
+        assert "/repositories/<int:repository_id>/commits" in content
+        assert "/commits/<int:commit_id>/excel-diff-data" in content
+        assert "/commits/<int:commit_id>/diff/new" in content
+        assert "/commits/<int:commit_id>/full-diff" in content
+        assert "/commits/<int:commit_id>/refresh-diff" in content
+        assert "/commits/<int:commit_id>/diff" in content
+        assert "/commits/<int:commit_id>/status" in content
+        assert "/commits/batch-update" in content
+        assert "/commits/batch-approve" in content
+        assert "/commits/batch-reject" in content
+        assert "/commits/<int:commit_id>/priority-diff" in content
+        assert "/commits/<int:commit_id>/diff-data" in content
+        assert "/commits/merge-diff/refresh" in content
+        assert "/commits/merge-diff" in content
+        assert "/update_commit_fields" in content
+        assert "/repositories/<int:repository_id>/commits/by-file" in content
+        assert "/commits/compare" in content
+
+    def test_app_removed_migrated_commit_diff_route_decorators(self):
+        content = _read("app.py")
+        assert "@app.route('/repositories/<int:repository_id>/commits')" not in content
+        assert "@app.route('/<project_code>/<repository_name>/commits/<int:commit_id>/excel-diff-data')" not in content
+        assert "@app.route('/commits/<int:commit_id>/excel-diff-data')" not in content
+        assert "@app.route('/<project_code>/<repository_name>/commits/<int:commit_id>/diff/new')" not in content
+        assert "@app.route('/commits/<int:commit_id>/diff/new')" not in content
+        assert "@app.route('/commits/<int:commit_id>/full-diff')" not in content
+        assert "@app.route('/<project_code>/<repository_name>/commits/<int:commit_id>/refresh-diff', methods=['POST'])" not in content
+        assert "@app.route('/commits/<int:commit_id>/refresh-diff', methods=['POST'])" not in content
+        assert "@app.route('/<project_code>/<repository_name>/commits/<int:commit_id>/diff')" not in content
+        assert "@app.route('/commits/<int:commit_id>/diff')" not in content
+        assert "@app.route('/commits/<int:commit_id>/status', methods=['POST'])" not in content
+        assert "@app.route('/commits/batch-update', methods=['POST'])" not in content
+        assert "@app.route('/commits/<int:commit_id>/approve-all', methods=['POST'])" not in content
+        assert "@app.route('/commits/batch-approve', methods=['POST'])" not in content
+        assert "@app.route('/commits/batch-reject', methods=['POST'])" not in content
+        assert "@app.route('/commits/reject', methods=['POST'])" not in content
+        assert "@app.route('/commits/<int:commit_id>/priority-diff', methods=['POST'])" not in content
+        assert "@app.route('/<project_code>/<repository_name>/commits/<int:commit_id>/priority-diff', methods=['POST'])" not in content
+        assert "@app.route('/commits/<int:commit_id>/diff-data', methods=['GET'])" not in content
+        assert "@app.route('/commits/merge-diff/refresh', methods=['POST'])" not in content
+        assert "@app.route('/commits/merge-diff')" not in content
+        assert "@app.route('/update_commit_fields')" not in content
+        assert "@app.route('/repositories/<int:repository_id>/commits/by-file')" not in content
+        assert "@app.route('/commits/compare')" not in content
+
+    def test_commit_diff_legacy_endpoints_remain_accessible_via_url_for(self):
+        try:
+            import app as app_module
+        except Exception as exc:
+            pytest.skip(f"app 模块导入失败，跳过 commit/diff endpoint 兼容性检查: {exc}")
+
+        flask_app = app_module.app
+        with flask_app.test_request_context("/"):
+            from flask import url_for
+
+            assert url_for("commit_list", repository_id=1) == "/repositories/1/commits"
+            assert url_for("commit_diff", commit_id=2) == "/commits/2/diff"
+            assert url_for("batch_update_commits_compat") == "/commits/batch-update"
