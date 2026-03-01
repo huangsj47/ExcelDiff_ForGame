@@ -60,6 +60,19 @@ class TestRemainingHighPriorityStaticChecks:
         assert "TODO: 实现Excel文件的前一提交比较逻辑" not in content
         assert "diff_data = get_unified_diff_data(commit, previous_commit)" in content
 
+    def test_async_repository_update_uses_app_context_and_id_reload(self):
+        content = _read("app.py")
+        assert "def run_repository_update_and_cache(repository_id):" in content
+        assert "with app.app_context():" in content
+        assert "repository = db.session.get(Repository, repository_id)" in content
+        assert "threading.Thread(target=run_repository_update_and_cache, args=(repository_id,), daemon=True)" in content
+
+    def test_async_refilter_reloads_repository_in_context(self):
+        content = _read("app.py")
+        assert "def async_refilter():" in content
+        assert "with app.app_context():" in content
+        assert "repo = Repository.query.get(repository_id)" in content
+
 
 class TestRemainingHighPriorityRuntimeChecks:
     def test_generate_merged_diff_data_segmented_strategy(self, monkeypatch):
