@@ -90,9 +90,9 @@ class TestApiContractAndPaginationOptimization:
         assert "with ThreadPoolExecutor(max_workers=min(len(batches), self.max_workers)) as executor:" not in git_service
 
     def test_legacy_excel_diff_status_endpoint_deprecated(self):
-        content = _read("app.py")
-        assert "@app.route('/api/excel-diff-status/<cache_key>')" in content
-        assert "'status': 'deprecated'" in content
+        content = _read("routes/cache_management_routes.py")
+        assert "@cache_management_bp.route(\"/api/excel-diff-status/<cache_key>\")" in content
+        assert "\"status\": \"deprecated\"" in content
         assert "410" in content
 
     def test_async_repository_update_uses_id_based_worker(self):
@@ -108,21 +108,21 @@ class TestApiContractAndPaginationOptimization:
         assert "'update_repository_and_cache'" in content
 
     def test_project_cache_stats_endpoint_uses_aggregated_queries(self):
-        content = _read("app.py")
-        assert "func.sum(case((DiffCache.cache_status == 'completed', 1), else_=0))" in content
-        assert "func.sum(case((ExcelHtmlCache.cache_status == 'completed', 1), else_=0))" in content
-        assert "func.sum(case((WeeklyVersionExcelCache.cache_status == 'completed', 1), else_=0))" in content
+        content = _read("routes/cache_management_routes.py")
+        assert "func.sum(case((DiffCache.cache_status == \"completed\", 1), else_=0))" in content
+        assert "func.sum(case((ExcelHtmlCache.cache_status == \"completed\", 1), else_=0))" in content
+        assert "func.sum(case((WeeklyVersionExcelCache.cache_status == \"completed\", 1), else_=0))" in content
 
     def test_clear_all_diff_cache_uses_bulk_delete(self):
-        content = _read("app.py")
+        content = _read("routes/cache_management_routes.py")
         assert "DiffCache.query.delete(synchronize_session=False)" in content
-        assert "BackgroundTask.query.filter_by(task_type='excel_diff').delete(synchronize_session=False)" in content
+        assert "BackgroundTask.query.filter_by(task_type=\"excel_diff\").delete(synchronize_session=False)" in content
         assert "DELETE FROM diff_cache WHERE id IN" not in content
         assert "time.sleep(0.01)" not in content
 
     def test_excel_cache_logs_uses_db_pagination_not_all(self):
-        content = _read("app.py")
-        assert "logs_query = OperationLog.query.filter_by(source='excel_cache')" in content
+        content = _read("routes/cache_management_routes.py")
+        assert "logs_query = OperationLog.query.filter_by(source=\"excel_cache\")" in content
         assert "total_logs_raw = logs_query.count()" in content
         assert ".offset(offset)" in content
         assert ".limit(fetch_size)" in content

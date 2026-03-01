@@ -37,8 +37,8 @@ class _FakeQuery:
 
 class TestExcelAndCacheStaticChecks:
     def test_excel_cache_logs_filters_source(self):
-        content = _read("app.py")
-        assert "logs_query = OperationLog.query.filter_by(source='excel_cache')" in content
+        content = _read("routes/cache_management_routes.py")
+        assert "logs_query = OperationLog.query.filter_by(source=\"excel_cache\")" in content
         assert "total_logs_raw = logs_query.count()" in content
         assert "logs_query\n                .order_by(OperationLog.created_at.desc())" in content
 
