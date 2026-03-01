@@ -240,3 +240,38 @@ class TestAppSplitTodoProgress:
             assert url_for("commit_list", repository_id=1) == "/repositories/1/commits"
             assert url_for("commit_diff", commit_id=2) == "/commits/2/diff"
             assert url_for("batch_update_commits_compat") == "/commits/batch-update"
+
+    def test_app_registers_core_management_blueprint(self):
+        content = _read("app.py")
+        assert "from routes.core_management_routes import core_management_bp" in content
+        assert "app.register_blueprint(core_management_bp, name=\"\")" in content
+
+    def test_core_management_routes_extracted_to_blueprint(self):
+        content = _read("routes/core_management_routes.py")
+        assert "core_management_bp = Blueprint(" in content
+        assert "/auth/login" in content
+        assert "/projects" in content
+        assert "/projects/<int:project_id>/repositories" in content
+        assert "/repositories/git" in content
+        assert "/repositories/svn" in content
+        assert "/status-sync/management" in content
+        assert "/repositories/compare" in content
+
+    def test_app_has_no_direct_route_decorators_after_a8(self):
+        content = _read("app.py")
+        assert "@app.route(" not in content
+
+    def test_core_legacy_endpoints_remain_accessible_via_url_for(self):
+        try:
+            import app as app_module
+        except Exception as exc:
+            pytest.skip(f"app 模块导入失败，跳过 core endpoint 兼容性检查: {exc}")
+
+        flask_app = app_module.app
+        with flask_app.test_request_context("/"):
+            from flask import url_for
+
+            assert url_for("index") == "/"
+            assert url_for("projects") == "/projects"
+            assert url_for("repository_config", project_id=1) == "/projects/1/repositories"
+            assert url_for("repository_compare") == "/repositories/compare"

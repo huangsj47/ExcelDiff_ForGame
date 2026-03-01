@@ -34,6 +34,7 @@ from services.excel_diff_cache_service import (
 )
 from routes.cache_management_routes import cache_management_bp
 from routes.commit_diff_routes import commit_diff_bp
+from routes.core_management_routes import core_management_bp
 from routes.weekly_version_management_routes import weekly_version_bp
 from utils.url_helpers import generate_commit_diff_url, generate_excel_diff_data_url, generate_refresh_diff_url
 import threading
@@ -716,6 +717,7 @@ log_print(
 db = SQLAlchemy(app)
 app.register_blueprint(cache_management_bp)
 app.register_blueprint(commit_diff_bp, name="")
+app.register_blueprint(core_management_bp, name="")
 app.register_blueprint(weekly_version_bp, name="")
 
 # 添加Excel列字母转换过滤器
@@ -1983,7 +1985,6 @@ def queue_missing_git_branch_refresh(project_id, repository_ids):
     return True
 
 # 测试路由
-@app.route('/auth/login', methods=['GET', 'POST'])
 def admin_login():
     next_url = request.args.get('next') or request.form.get('next') or url_for('index')
     if request.method == 'POST':
@@ -2009,7 +2010,6 @@ def admin_login():
     return render_template('admin_login.html', next_url=next_url)
 
 
-@app.route('/auth/logout', methods=['POST'])
 def admin_logout():
     session.pop('is_admin', None)
     session.pop('admin_user', None)
@@ -2018,12 +2018,10 @@ def admin_logout():
     return redirect(url_for('index'))
 
 
-@app.route('/test')
 def test():
     return "服务器正常工作！"
 
 # 主页路由
-@app.route('/')
 def index():
     try:
         log_print("访问主页路由", 'APP')
@@ -2037,7 +2035,6 @@ def index():
         return f"主页加载错误: {str(e)}", 500
 
 # 项目管理路由
-@app.route('/projects', methods=['GET', 'POST'])
 def projects():
     if request.method == 'POST':
         code = request.form.get('code')
@@ -2064,13 +2061,11 @@ def projects():
     return render_template('projects.html', projects=projects)
 
 # 项目详情页面 - 重定向到项目概览
-@app.route('/projects/<int:project_id>')
 def project_detail(project_id):
     # 直接重定向到项目概览页面
     return redirect(url_for('merged_project_view', project_id=project_id))
 
 # 保留原项目详情页面作为备用
-@app.route('/projects/<int:project_id>/detail')
 def project_detail_original(project_id):
     project = Project.query.get_or_404(project_id)
     repositories = Repository.query.filter_by(project_id=project_id).order_by(Repository.display_order).all()
@@ -2478,7 +2473,6 @@ def weekly_version_list(project_id):
                          configs=configs,
                          selected_repository_id=repository_id)
 
-@app.route('/projects/<int:project_id>/merged-view')
 def merged_project_view(project_id):
     """合并的项目视图：左侧周版本列表，右侧仓库列表"""
     project = Project.query.get_or_404(project_id)
@@ -3028,7 +3022,6 @@ def weekly_version_file_status_info_api(config_id):
         log_print(f"获取周版本文件状态失败: {e}", 'ERROR', force=True)
         return jsonify({'success': False, 'message': f'获取失败: {str(e)}'}), 500
 
-@app.route('/status-sync/clear-all', methods=['POST'])
 @require_admin
 def clear_all_confirmation_status():
     """清空所有文件的确认状态"""
@@ -3047,7 +3040,6 @@ def clear_all_confirmation_status():
         log_print(f"清空确认状态失败: {e}", 'ERROR', force=True)
         return jsonify({'success': False, 'message': str(e)}), 500
 
-@app.route('/status-sync/mapping-info')
 def get_sync_mapping_info():
     """获取状态同步映射信息"""
     try:
@@ -3069,12 +3061,10 @@ def get_sync_mapping_info():
         log_print(f"获取同步映射信息失败: {e}", 'ERROR', force=True)
         return jsonify({'success': False, 'message': str(e)}), 500
 
-@app.route('/status-sync/management')
 def status_sync_management():
     """状态同步管理页面（全局）"""
     return render_template('status_sync_management.html')
 
-@app.route('/<project_code>/status-sync/management')
 def project_status_sync_management(project_code):
     """项目特定的状态同步管理页面"""
     # 根据项目代码查找项目
@@ -3085,12 +3075,10 @@ def project_status_sync_management(project_code):
 
     return render_template('status_sync_management.html', project=project)
 
-@app.route('/status-sync/test')
 def status_sync_test():
     """状态同步测试页面"""
     return render_template('status_sync_test.html')
 
-@app.route('/status-sync/configs')
 def get_sync_configs():
     """获取状态同步配置列表，支持按项目过滤"""
     try:
@@ -5050,26 +5038,22 @@ def generate_merged_diff_data(repository, file_path, base_commit, latest_commit,
         log_print(f"鐢熸垚鍚堝苟diff鏁版嵁澶辫触: {e}", 'WEEKLY', force=True)
         return {}
 
-@app.route('/projects/<int:project_id>/repositories')
 def repository_config(project_id):
     project = Project.query.get_or_404(project_id)
     repositories = Repository.query.filter_by(project_id=project_id).order_by(Repository.display_order).all()
     return render_template('repository_config.html', project=project, repositories=repositories)
 
 # 新增Git仓库页面
-@app.route('/projects/<int:project_id>/repositories/add-git')
 def add_git_repository(project_id):
     project = Project.query.get_or_404(project_id)
     return render_template('add_git_repository.html', project=project)
 
 # 新增SVN仓库页面
-@app.route('/projects/<int:project_id>/repositories/add-svn')
 def add_svn_repository(project_id):
     project = Project.query.get_or_404(project_id)
     return render_template('add_svn_repository.html', project=project)
 
 # 创建Git仓库
-@app.route('/repositories/git', methods=['POST'])
 @require_admin
 def create_git_repository():
     project_id = request.form.get('project_id')
@@ -5379,7 +5363,6 @@ def clone_svn_repository_to_local(repository):
         raise Exception(error_msg)
 
 # 创建SVN仓库
-@app.route('/repositories/svn', methods=['POST'])
 @require_admin
 def create_svn_repository():
     project_id = request.form.get('project_id')
@@ -6386,7 +6369,6 @@ def commit_diff(commit_id):
 # 确认/拒绝提交（旧版本，已被新的API替代）
 
 # 重新生成Diff缓存
-@app.route('/repositories/<int:repository_id>/regenerate-cache', methods=['POST'])
 def regenerate_cache(repository_id):
     """重新生成指定仓库的Excel文件差异缓存"""
     try:
@@ -6431,7 +6413,6 @@ def regenerate_cache(repository_id):
         }), 500
 
 # 获取缓存状态
-@app.route('/repositories/<int:repository_id>/cache-status')
 def get_cache_status(repository_id):
     """获取仓库的缓存状态"""
     try:
@@ -6475,7 +6456,6 @@ def get_cache_status(repository_id):
         }), 500
 
 # 重试克隆仓库
-@app.route('/repositories/<int:repository_id>/retry-clone', methods=['POST'])
 def retry_clone_repository(repository_id):
     repository = Repository.query.get_or_404(repository_id)
     
@@ -6493,7 +6473,6 @@ def retry_clone_repository(repository_id):
     return redirect(url_for('repository_config', project_id=project_id))
 
 # 同步仓库提交记录
-@app.route('/repositories/<int:repository_id>/sync', methods=['POST'])
 def sync_repository(repository_id):
     """手动获取数据 - 立即执行git pull和分析"""
     try:
@@ -6649,7 +6628,6 @@ def run_repository_update_and_cache(repository_id):
         traceback.print_exc()
 
 
-@app.route('/api/repositories/<int:repository_id>/reuse-and-update', methods=['POST'])
 def reuse_repository_and_update(repository_id):
     """复用仓库并触发更新和缓存操作的API接口"""
     try:
@@ -7302,7 +7280,6 @@ def update_commit_fields_route():
             'message': f'更新失败: {str(e)}'
         }), 500
 
-@app.route('/repositories/<int:repository_id>/edit')
 def edit_repository(repository_id):
     repository = Repository.query.get_or_404(repository_id)
     project = repository.project
@@ -7319,7 +7296,6 @@ def edit_repository(repository_id):
                              is_edit=True)
 
 # 更新仓库配置 - 表单提交处理
-@app.route('/repositories/<int:repository_id>/update', methods=['POST'])
 @require_admin
 def update_repository(repository_id):
     """处理仓库编辑表单提交"""
@@ -7492,7 +7468,6 @@ def update_repository(repository_id):
         return redirect(url_for('edit_repository', repository_id=repository_id))
 
 # 更新仓库配置 - API接口
-@app.route('/repositories/<int:repository_id>/update-api', methods=['POST'])
 def update_repository_and_cache(repository_id):
     """更新仓库并触发缓存操作的API接口"""
     try:
@@ -7521,7 +7496,6 @@ def update_repository_and_cache(repository_id):
         }), 500
 
 # 批量更新仓库凭据
-@app.route('/repositories/batch-update-credentials', methods=['POST'])
 @require_admin
 def batch_update_credentials():
     """批量更新项目下的仓库凭据"""
@@ -7581,7 +7555,6 @@ def batch_update_credentials():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # 更新仓库排序
-@app.route('/repositories/update-order', methods=['POST'])
 def update_repository_order():
     try:
         data = request.get_json()
@@ -7620,7 +7593,6 @@ def update_repository_order():
         db.session.rollback()
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/repositories/swap-order', methods=['POST'])
 def swap_repository_order():
     try:
         data = request.get_json()
@@ -7661,7 +7633,6 @@ def swap_repository_order():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # 删除仓库
-@app.route('/repositories/<int:repository_id>/delete', methods=['POST'])
 @require_admin
 def delete_repository(repository_id):
     repository = Repository.query.get_or_404(repository_id)
@@ -7954,7 +7925,6 @@ def cleanup_pending_deletions():
     cleanup_thread.start()
 
 # 测试仓库连接
-@app.route('/repositories/<int:repository_id>/test', methods=['POST'])
 def test_repository(repository_id):
     repository = Repository.query.get_or_404(repository_id)
     
@@ -7996,7 +7966,6 @@ def test_repository(repository_id):
     return redirect(url_for('repository_config', project_id=repository.project_id))
 
 # 删除项目
-@app.route('/projects/<int:project_id>/delete', methods=['POST'])
 @require_admin
 def delete_project(project_id):
     project = Project.query.get_or_404(project_id)
@@ -8926,7 +8895,6 @@ def get_mock_diff_data(commit):
             ]
         }
 
-@app.route('/repositories/compare')
 def repository_compare():
     """仓库间提交对比页面"""
     source_repo_id = request.args.get('source')
