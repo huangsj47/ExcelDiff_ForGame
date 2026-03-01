@@ -78,3 +78,41 @@ class TestApiContractAndPaginationOptimization:
         threaded_service = _read("services/threaded_git_service.py")
         assert "max_workers=None" in git_service
         assert "max_workers=max_workers" in threaded_service
+
+    def test_legacy_excel_diff_status_endpoint_deprecated(self):
+        content = _read("app.py")
+        assert "@app.route('/api/excel-diff-status/<cache_key>')" in content
+        assert "'status': 'deprecated'" in content
+        assert "410" in content
+
+    def test_async_repository_update_uses_id_based_worker(self):
+        content = _read("app.py")
+        assert "def run_repository_update_and_cache(repository_id):" in content
+        assert "with app.app_context():" in content
+        assert "db.session.get(Repository, repository_id)" in content
+        assert "target=run_repository_update_and_cache" in content
+
+    def test_sensitive_endpoints_cover_async_update_routes(self):
+        content = _read("app.py")
+        assert "'reuse_repository_and_update'" in content
+        assert "'update_repository_and_cache'" in content
+
+    def test_project_cache_stats_endpoint_uses_aggregated_queries(self):
+        content = _read("app.py")
+        assert "func.sum(case((DiffCache.cache_status == 'completed', 1), else_=0))" in content
+        assert "func.sum(case((ExcelHtmlCache.cache_status == 'completed', 1), else_=0))" in content
+        assert "func.sum(case((WeeklyVersionExcelCache.cache_status == 'completed', 1), else_=0))" in content
+
+    def test_clear_all_diff_cache_uses_bulk_delete(self):
+        content = _read("app.py")
+        assert "DiffCache.query.delete(synchronize_session=False)" in content
+        assert "BackgroundTask.query.filter_by(task_type='excel_diff').delete(synchronize_session=False)" in content
+        assert "DELETE FROM diff_cache WHERE id IN" not in content
+        assert "time.sleep(0.01)" not in content
+
+    def test_excel_cache_logs_uses_db_pagination_not_all(self):
+        content = _read("app.py")
+        assert "total_logs_raw = OperationLog.query.count()" in content
+        assert ".offset(offset)" in content
+        assert ".limit(fetch_size)" in content
+        assert "OperationLog.query.order_by(OperationLog.created_at.desc()).all()" not in content

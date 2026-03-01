@@ -16,7 +16,7 @@ from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
-from sqlalchemy import Index
+from sqlalchemy import Index, func, case
 from services.git_service import GitService
 from services.enhanced_git_service import EnhancedGitService
 from services.threaded_git_service import ThreadedGitService
@@ -748,6 +748,8 @@ SENSITIVE_ENDPOINTS = {
     'update_repository',
     'retry_clone_repository',
     'sync_repository',
+    'reuse_repository_and_update',
+    'update_repository_and_cache',
 }
 
 
@@ -909,8 +911,7 @@ def format_cell_value_filter(value):
 # 全局变量存储Git进程
 active_git_processes = set()
 
-# 全局变量存储Excel diff处理状态
-excel_diff_cache = {}
+# Excel diff 状态统一走数据库缓存与任务队列，不再使用进程内字典状态。
 
 # 后台任务队列和状态 - 使用优先级队列
 background_task_queue = queue.PriorityQueue()
@@ -5856,31 +5857,44 @@ def enhanced_async_clone_with_status_update(repository_id, repository_name):
     
     log_print(f"🏁 异步克隆任务结束: {repository_name} (ID: {repository_id}, 'INFO')")
 
-def enhanced_retry_clone_repository(repository):
-    """增强的重试克隆函数"""
+def enhanced_retry_clone_repository(repository_id):
+    """增强的重试克隆函数（线程安全：仅传repository_id）"""
+    repository_name = f"repo-{repository_id}"
     try:
-        log_print(f"🔄 开始增强重试克隆: {repository.name}", 'INFO')
-        
-        # 重置克隆状态
         with app.app_context():
+            repository = db.session.get(Repository, repository_id)
+            if not repository:
+                log_print(f"❌ 重试克隆失败：仓库不存在 {repository_id}", 'GIT', force=True)
+                return
+
+            repository_name = repository.name
+            log_print(f"🔄 开始增强重试克隆: {repository_name}", 'INFO')
+
+            # 重置克隆状态
             repository.clone_status = 'cloning'
             repository.clone_error = None
             db.session.commit()
-        
-        # 执行增强克隆（包含内置重试机制）
-        clone_repository_to_local(repository)
-        
-        log_print(f"✅ 增强重试克隆完成: {repository.name}", 'INFO')
-        
+
+            # 执行增强克隆（包含内置重试机制）
+            clone_repository_to_local(repository)
+
+            repository.clone_status = 'completed'
+            repository.clone_error = None
+            db.session.commit()
+            log_print(f"✅ 增强重试克隆完成: {repository_name}", 'INFO')
+
     except Exception as e:
         error_msg = f"增强重试克隆失败: {str(e)}"
         log_print(f"❌ {error_msg}", 'GIT', force=True)
-        
-        # 更新克隆状态为失败
-        with app.app_context():
-            repository.clone_status = 'failed'
-            repository.clone_error = error_msg
-            db.session.commit()
+        try:
+            with app.app_context():
+                repository = db.session.get(Repository, repository_id)
+                if repository:
+                    repository.clone_status = 'failed'
+                    repository.clone_error = error_msg
+                    db.session.commit()
+        except Exception as db_error:
+            log_print(f"❌ 更新重试克隆状态失败: {db_error}", 'GIT', force=True)
 
 def enhanced_async_svn_clone_with_status_update(repository_id, repository_name):
     """增强的异步SVN克隆函数，包含状态更新"""
@@ -7071,18 +7085,15 @@ def retry_clone_repository(repository_id):
     if repository.type != 'git':
         flash('只支持Git仓库的克隆重试', 'error')
         return redirect(url_for('repository_config', project_id=repository.project_id))
-    
-    def async_retry_clone():
-        # 使用增强的重试克隆函数
-        enhanced_retry_clone_repository(repository)
+
+    project_id = repository.project_id
     
     # 启动后台线程进行重试克隆
-    retry_thread = threading.Thread(target=async_retry_clone)
-    retry_thread.daemon = True
+    retry_thread = threading.Thread(target=enhanced_retry_clone_repository, args=(repository_id,), daemon=True)
     retry_thread.start()
     
     flash('已启动仓库克隆重试，请稍后查看状态', 'success')
-    return redirect(url_for('repository_config', project_id=repository.project_id))
+    return redirect(url_for('repository_config', project_id=project_id))
 
 # 同步仓库提交记录
 @app.route('/repositories/<int:repository_id>/sync', methods=['POST'])
@@ -7207,68 +7218,60 @@ def sync_repository(repository_id):
         log_print(f"错误详情: {error_details}", 'INFO')
         return jsonify({'status': 'error', 'message': f'同步失败: {str(e)}'}), 500
 
+def run_repository_update_and_cache(repository_id):
+    """异步执行仓库更新和缓存（线程安全：按ID重新查询对象）"""
+    try:
+        with app.app_context():
+            repository = db.session.get(Repository, repository_id)
+            if not repository:
+                log_print(f"❌ 异步更新失败：仓库不存在 {repository_id}", 'API', force=True)
+                return
+
+            if repository.type == 'git':
+                service = get_git_service(repository)
+                success, message = service.clone_or_update_repository()
+                log_print(f"Git更新结果: {success}, {message}", 'GIT')
+            elif repository.type == 'svn':
+                service = get_svn_service(repository)
+                success, message = service.checkout_or_update_repository()
+                log_print(f"SVN更新结果: {success}, {message}", 'SVN')
+            else:
+                log_print(f"不支持的仓库类型: {repository.type}", 'API', force=True)
+                return
+
+            if success:
+                log_print("仓库更新成功，开始触发缓存操作...", 'CACHE')
+                commits_added = service.sync_repository_commits(db, Commit)
+                log_print(f"{repository.type.upper()} 同步完成，添加了 {commits_added} 个新提交", 'SYNC')
+                log_print(f"✅ 仓库 {repository.name} 更新和缓存完成", 'CACHE')
+            else:
+                log_print(f"❌ 仓库 {repository.name} 更新失败: {message}", 'API', force=True)
+    except Exception as e:
+        log_print(f"❌ 异步更新和缓存操作异常: {e}", 'API', force=True)
+        import traceback
+        traceback.print_exc()
+
+
 @app.route('/api/repositories/<int:repository_id>/reuse-and-update', methods=['POST'])
 def reuse_repository_and_update(repository_id):
     """复用仓库并触发更新和缓存操作的API接口"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         action = data.get('action', 'pull_and_cache')
-        
+
         repository = Repository.query.get_or_404(repository_id)
         log_print(f"🔄 收到仓库复用更新请求: {repository.name} (ID: {repository_id})", 'API')
-        
-        def async_update_and_cache():
-            """异步执行更新和缓存操作"""
-            try:
-                if repository.type == 'git':
-                    # Git仓库更新
-                    service = get_git_service(repository)
-                    success, message = service.clone_or_update_repository()
-                    log_print(f"Git更新结果: {success}, {message}", 'GIT')
-                    
-                elif repository.type == 'svn':
-                    # SVN仓库更新
-                    service = get_svn_service(repository)
-                    success, message = service.checkout_or_update_repository()
-                    log_print(f"SVN更新结果: {success}, {message}", 'SVN')
-                else:
-                    log_print(f"不支持的仓库类型: {repository.type}", 'API', force=True)
-                    return
-                
-                if success:
-                    # 更新成功后触发缓存操作
-                    log_print(f"仓库更新成功，开始触发缓存操作...", 'CACHE')
-                    
-                    # 手动同步提交记录
-                    if repository.type == 'git':
-                        commits_added = service.sync_repository_commits(db, Commit)
-                        log_print(f"Git同步完成，添加了 {commits_added} 个新提交", 'SYNC')
-                    elif repository.type == 'svn':
-                        commits_added = service.sync_repository_commits(db, Commit)
-                        log_print(f"SVN同步完成，添加了 {commits_added} 个新提交", 'SYNC')
-                    
-                    log_print(f"✅ 仓库 {repository.name} 更新和缓存完成", 'CACHE')
-                else:
-                    log_print(f"❌ 仓库 {repository.name} 更新失败: {message}", 'API', force=True)
-                    
-            except Exception as e:
-                log_print(f"❌ 异步更新和缓存操作异常: {e}", 'API', force=True)
-                import traceback
-                traceback.print_exc()
-        
-        # 启动后台线程执行更新和缓存
-        import threading
-        update_thread = threading.Thread(target=async_update_and_cache)
-        update_thread.daemon = True
+
+        update_thread = threading.Thread(target=run_repository_update_and_cache, args=(repository_id,), daemon=True)
         update_thread.start()
-        
+
         return jsonify({
             'success': True,
             'message': f'仓库 {repository.name} 更新和缓存任务已启动',
             'repository_id': repository_id,
             'action': action
         })
-        
+
     except Exception as e:
         log_print(f"❌ 仓库更新API异常: {e}", 'API', force=True)
         return jsonify({
@@ -7537,44 +7540,46 @@ def get_excel_cache_logs():
     """获取Excel缓存操作日志"""
     try:
         # 获取分页参数
-        page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('per_page', 10, type=int)
+        page = max(1, request.args.get('page', 1, type=int) or 1)
+        per_page = request.args.get('per_page', 10, type=int) or 10
 
         # 限制每页最大数量和总页数，确保最多返回200条
-        per_page = min(per_page, 50)  # 每页最多50条
+        per_page = min(max(per_page, 1), 50)  # 每页1~50条
         max_total = 200
 
-        # 从数据库读取操作日志
-        db_logs = OperationLog.query.order_by(OperationLog.created_at.desc()).all()
+        # 只允许访问最近max_total条日志，避免全量all()造成内存和查询压力
+        total_logs_raw = OperationLog.query.count()
+        total_logs = min(total_logs_raw, max_total)
+        offset = (page - 1) * per_page
+
+        if offset >= total_logs:
+            paginated_logs_db = []
+        else:
+            fetch_size = min(per_page, total_logs - offset)
+            paginated_logs_db = (
+                OperationLog.query
+                .order_by(OperationLog.created_at.desc())
+                .offset(offset)
+                .limit(fetch_size)
+                .all()
+            )
 
         # 转换为前端需要的格式，使用北京时间
         from utils.timezone_utils import format_beijing_time
         logs = []
-        for log in db_logs:
+        for log in paginated_logs_db:
             logs.append({
                 'time': format_beijing_time(log.created_at, '%Y/%m/%d %H:%M:%S'),
                 'message': log.message,
                 'type': log.log_type
             })
-
-        total_logs = len(logs)
-        
-        # 限制总数为200条
-        if total_logs > max_total:
-            logs = logs[:max_total]
-            total_logs = max_total
-        
-        # 计算分页
-        start_idx = (page - 1) * per_page
-        end_idx = start_idx + per_page
-        paginated_logs = logs[start_idx:end_idx]
-        
+       
         # 计算总页数
         total_pages = (total_logs + per_page - 1) // per_page
         
         return jsonify({
             'success': True,
-            'logs': paginated_logs,
+            'logs': logs,
             'pagination': {
                 'page': page,
                 'per_page': per_page,
@@ -7715,30 +7720,14 @@ def request_priority_diff_with_path(project_code, repository_name, commit_id):
 
 @app.route('/api/excel-diff-status/<cache_key>')
 def excel_diff_status(cache_key):
-    """检查Excel diff处理状态"""
+    """旧版状态接口（已废弃）"""
     try:
-        if cache_key in excel_diff_cache:
-            cached_result = excel_diff_cache[cache_key]
-            
-            if cached_result['status'] == 'completed':
-                return jsonify({
-                    'status': 'completed',
-                    'diff_data': cached_result['data']
-                })
-            elif cached_result['status'] == 'error':
-                return jsonify({
-                    'status': 'error',
-                    'error': cached_result.get('error', 'Unknown error')
-                })
-            else:
-                return jsonify({
-                    'status': 'processing'
-                })
-        else:
-            return jsonify({
-                'status': 'not_found'
-            }), 404
-            
+        return jsonify({
+            'status': 'deprecated',
+            'message': '该接口已废弃，请改用 /commits/<commit_id>/diff-data 与缓存管理接口查询状态。',
+            'cache_key': cache_key
+        }), 410
+
     except Exception as e:
         log_print(f"检查Excel diff状态失败: {str(e)}")
         return jsonify({
@@ -8274,55 +8263,14 @@ def update_repository(repository_id):
 def update_repository_and_cache(repository_id):
     """更新仓库并触发缓存操作的API接口"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         action = data.get('action', 'pull_and_cache')
         
         repository = Repository.query.get_or_404(repository_id)
         log_print(f"🔄 收到仓库更新请求: {repository.name} (ID: {repository_id})", 'API')
-        
-        def async_update_and_cache():
-            """异步执行更新和缓存操作"""
-            try:
-                if repository.type == 'git':
-                    # Git仓库更新
-                    service = get_git_service(repository)
-                    success, message = service.clone_or_update_repository()
-                    log_print(f"Git更新结果: {success}, {message}", 'GIT')
-                    
-                elif repository.type == 'svn':
-                    # SVN仓库更新
-                    service = get_svn_service(repository)
-                    success, message = service.checkout_or_update_repository()
-                    log_print(f"SVN更新结果: {success}, {message}", 'SVN')
-                else:
-                    log_print(f"不支持的仓库类型: {repository.type}", 'API', force=True)
-                    return
-                
-                if success:
-                    # 更新成功后触发缓存操作
-                    log_print(f"仓库更新成功，开始触发缓存操作...", 'CACHE')
-                    
-                    # 手动同步提交记录
-                    if repository.type == 'git':
-                        commits_added = service.sync_repository_commits(db, Commit)
-                        log_print(f"Git同步完成，添加了 {commits_added} 个新提交", 'SYNC')
-                    elif repository.type == 'svn':
-                        commits_added = service.sync_repository_commits(db, Commit)
-                        log_print(f"SVN同步完成，添加了 {commits_added} 个新提交", 'SYNC')
-                    
-                    log_print(f"✅ 仓库 {repository.name} 更新和缓存完成", 'CACHE')
-                else:
-                    log_print(f"❌ 仓库 {repository.name} 更新失败: {message}", 'API', force=True)
-                    
-            except Exception as e:
-                log_print(f"❌ 异步更新和缓存操作异常: {e}", 'API', force=True)
-                import traceback
-                traceback.print_exc()
-        
+
         # 启动后台线程执行更新和缓存
-        import threading
-        update_thread = threading.Thread(target=async_update_and_cache)
-        update_thread.daemon = True
+        update_thread = threading.Thread(target=run_repository_update_and_cache, args=(repository_id,), daemon=True)
         update_thread.start()
         
         return jsonify({
@@ -10206,33 +10154,9 @@ def clear_all_diff_cache():
     """清理所有Excel差异数据缓存"""
     try:
         log_print("🧹 开始清理Excel差异数据缓存...", 'INFO')
-
-        # 分批清理DiffCache记录，避免长时间阻塞
-        total_diff_cache_count = 0
-        batch_size = 100
-
-        while True:
-            # 每次删除100条记录
-            from sqlalchemy import text
-            result = db.session.execute(text(f'DELETE FROM diff_cache WHERE id IN (SELECT id FROM diff_cache LIMIT {batch_size})'))
-            batch_count = result.rowcount
-
-            if batch_count == 0:
-                break
-
-            total_diff_cache_count += batch_count
-            db.session.commit()
-
-            log_print(f"🧹 已清理 {total_diff_cache_count} 个Excel差异数据缓存...", 'INFO')
-
-            # 避免长时间占用数据库连接
-            import time
-            time.sleep(0.01)  # 10毫秒间隔
-
-        # 清理所有后台任务队列中的Excel diff任务
-        task_result = db.session.execute(text("DELETE FROM background_tasks WHERE task_type = 'excel_diff'"))
-        task_count = task_result.rowcount
-
+        # 使用数据库原生批量删除，避免循环小批删除 + sleep 的低吞吐
+        total_diff_cache_count = DiffCache.query.delete(synchronize_session=False)
+        task_count = BackgroundTask.query.filter_by(task_type='excel_diff').delete(synchronize_session=False)
         db.session.commit()
 
         log_print(f"🧹 清理完成：{total_diff_cache_count} 个Excel差异数据缓存，{task_count} 个相关后台任务", 'INFO')
@@ -10311,71 +10235,146 @@ def get_excel_cache_stats_by_project():
     """获取按项目分组的Excel缓存统计信息"""
     try:
         with app.app_context():
-            # 获取所有项目
-            projects = Project.query.all()
+            projects = Project.query.order_by(Project.id.asc()).all()
             project_stats = []
-            
+
+            # 1) 仓库数量（按项目聚合）
+            repo_counts = db.session.query(
+                Repository.project_id,
+                func.count(Repository.id).label('repository_count')
+            ).group_by(Repository.project_id).all()
+            repo_count_map = {pid: int(cnt or 0) for pid, cnt in repo_counts}
+
+            # 2) DiffCache统计（按项目聚合）
+            diff_rows = db.session.query(
+                Repository.project_id.label('project_id'),
+                func.count(DiffCache.id).label('total_count'),
+                func.sum(case((DiffCache.cache_status == 'completed', 1), else_=0)).label('completed_count'),
+                func.sum(case((DiffCache.cache_status == 'processing', 1), else_=0)).label('processing_count'),
+                func.sum(case((DiffCache.cache_status == 'failed', 1), else_=0)).label('failed_count'),
+                func.sum(case((DiffCache.cache_status == 'outdated', 1), else_=0)).label('outdated_count'),
+                func.sum(case(((DiffCache.cache_status == 'completed') & (DiffCache.diff_version == DIFF_LOGIC_VERSION), 1), else_=0)).label('current_version_count'),
+                func.sum(case(((DiffCache.cache_status == 'completed') & (DiffCache.is_long_processing.is_(True)), 1), else_=0)).label('long_processing_count'),
+            ).join(
+                Repository, Repository.id == DiffCache.repository_id
+            ).group_by(
+                Repository.project_id
+            ).all()
+            diff_map = {}
+            for row in diff_rows:
+                total_count = int(row.total_count or 0)
+                completed_count = int(row.completed_count or 0)
+                long_processing_count = int(row.long_processing_count or 0)
+                diff_map[row.project_id] = {
+                    'total_count': total_count,
+                    'completed_count': completed_count,
+                    'processing_count': int(row.processing_count or 0),
+                    'failed_count': int(row.failed_count or 0),
+                    'outdated_count': int(row.outdated_count or 0),
+                    'current_version_count': int(row.current_version_count or 0),
+                    'long_processing_count': long_processing_count,
+                    'normal_processing_count': max(completed_count - long_processing_count, 0),
+                    'version': DIFF_LOGIC_VERSION
+                }
+
+            # 3) ExcelHtmlCache统计（按项目聚合）
+            html_rows = db.session.query(
+                Repository.project_id.label('project_id'),
+                func.count(ExcelHtmlCache.id).label('total_count'),
+                func.sum(case((ExcelHtmlCache.cache_status == 'completed', 1), else_=0)).label('completed_count'),
+                func.sum(case((ExcelHtmlCache.diff_version == excel_html_cache_service.current_version, 1), else_=0)).label('current_version_count'),
+                func.sum(
+                    func.length(func.coalesce(ExcelHtmlCache.html_content, '')) +
+                    func.length(func.coalesce(ExcelHtmlCache.css_content, '')) +
+                    func.length(func.coalesce(ExcelHtmlCache.js_content, ''))
+                ).label('total_size_bytes')
+            ).join(
+                Repository, Repository.id == ExcelHtmlCache.repository_id
+            ).group_by(
+                Repository.project_id
+            ).all()
+            html_map = {}
+            for row in html_rows:
+                total_count = int(row.total_count or 0)
+                current_version_count = int(row.current_version_count or 0)
+                total_size_bytes = int(row.total_size_bytes or 0)
+                html_map[row.project_id] = {
+                    'total_count': total_count,
+                    'completed_count': int(row.completed_count or 0),
+                    'current_version_count': current_version_count,
+                    'old_version_count': max(total_count - current_version_count, 0),
+                    'total_size_mb': round(total_size_bytes / (1024 * 1024), 2),
+                    'current_version': excel_html_cache_service.current_version
+                }
+
+            # 4) WeeklyVersionExcelCache统计（按项目聚合）
+            weekly_rows = db.session.query(
+                Repository.project_id.label('project_id'),
+                func.count(WeeklyVersionExcelCache.id).label('total_count'),
+                func.sum(case((WeeklyVersionExcelCache.cache_status == 'completed', 1), else_=0)).label('completed_count'),
+                func.sum(case((WeeklyVersionExcelCache.cache_status == 'processing', 1), else_=0)).label('processing_count'),
+                func.sum(case((WeeklyVersionExcelCache.cache_status == 'failed', 1), else_=0)).label('failed_count'),
+                func.sum(func.length(func.coalesce(WeeklyVersionExcelCache.html_content, ''))).label('total_size')
+            ).join(
+                Repository, Repository.id == WeeklyVersionExcelCache.repository_id
+            ).group_by(
+                Repository.project_id
+            ).all()
+            weekly_map = {}
+            for row in weekly_rows:
+                weekly_map[row.project_id] = {
+                    'total_count': int(row.total_count or 0),
+                    'completed_count': int(row.completed_count or 0),
+                    'processing_count': int(row.processing_count or 0),
+                    'failed_count': int(row.failed_count or 0),
+                    'total_size': int(row.total_size or 0),
+                    'max_cache_count': weekly_excel_cache_service.max_cache_count,
+                    'expire_days': weekly_excel_cache_service.expire_days
+                }
+
             for project in projects:
-                # 获取项目下所有仓库的ID
-                repository_ids = [repo.id for repo in project.repositories]
-                log_print(f"🔍 项目 {project.code} 包含仓库ID: {repository_ids}", 'CACHE')
-                
-                if repository_ids:
-                    # 数据缓存统计
-                    data_cache_stats = excel_cache_service.get_cache_statistics_by_repositories(repository_ids)
+                pid = project.id
+                data_cache_stats = diff_map.get(pid, {
+                    'total_count': 0,
+                    'completed_count': 0,
+                    'processing_count': 0,
+                    'failed_count': 0,
+                    'outdated_count': 0,
+                    'current_version_count': 0,
+                    'long_processing_count': 0,
+                    'normal_processing_count': 0,
+                    'version': DIFF_LOGIC_VERSION
+                })
+                html_cache_stats = html_map.get(pid, {
+                    'total_count': 0,
+                    'completed_count': 0,
+                    'current_version_count': 0,
+                    'old_version_count': 0,
+                    'total_size_mb': 0.0,
+                    'current_version': excel_html_cache_service.current_version
+                })
+                weekly_excel_cache_stats = weekly_map.get(pid, {
+                    'total_count': 0,
+                    'completed_count': 0,
+                    'processing_count': 0,
+                    'failed_count': 0,
+                    'total_size': 0,
+                    'max_cache_count': weekly_excel_cache_service.max_cache_count,
+                    'expire_days': weekly_excel_cache_service.expire_days
+                })
 
-                    # HTML缓存统计
-                    html_cache_stats = excel_html_cache_service.get_cache_statistics_by_repositories(repository_ids)
+                project_stats.append({
+                    'project': {
+                        'id': pid,
+                        'code': project.code,
+                        'name': project.name,
+                        'repository_count': repo_count_map.get(pid, 0)
+                    },
+                    'data_cache': data_cache_stats,
+                    'html_cache': html_cache_stats,
+                    'weekly_excel_cache': weekly_excel_cache_stats
+                })
 
-                    # 周版本Excel缓存统计
-                    weekly_excel_cache_stats = weekly_excel_cache_service.get_cache_stats_by_project(project.id)
-
-                    project_stats.append({
-                        'project': {
-                            'id': project.id,
-                            'code': project.code,
-                            'name': project.name,
-                            'repository_count': len(project.repositories)
-                        },
-                        'data_cache': data_cache_stats,
-                        'html_cache': html_cache_stats,
-                        'weekly_excel_cache': weekly_excel_cache_stats
-                    })
-                else:
-                    # 没有仓库的项目
-                    project_stats.append({
-                        'project': {
-                            'id': project.id,
-                            'code': project.code,
-                            'name': project.name,
-                            'repository_count': 0
-                        },
-                        'data_cache': {
-                            'total': 0,
-                            'completed': 0,
-                            'processing': 0,
-                            'failed': 0,
-                            'outdated': 0,
-                            'current_version': 0,
-                            'long_processing': 0,
-                            'version': DIFF_LOGIC_VERSION
-                        },
-                        'html_cache': {
-                            'total_count': 0,
-                            'completed_count': 0,
-                            'current_version_count': 0,
-                            'old_version_count': 0,
-                            'total_size_mb': 0.0
-                        },
-                        'weekly_excel_cache': {
-                            'total_count': 0,
-                            'completed_count': 0,
-                            'processing_count': 0,
-                            'failed_count': 0,
-                            'total_size': 0
-                        }
-                    })
-            
             return jsonify({
                 'success': True,
                 'projects': project_stats,
