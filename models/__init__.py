@@ -6,26 +6,26 @@
 若 app.py 因环境依赖无法导入，再回退到本地 models/* 定义。
 """
 
+import importlib
 from flask_sqlalchemy import SQLAlchemy
 
 USING_APP_MODELS = False
 
 try:
-    from app import (  # type: ignore
-        db,
-        Project,
-        Repository,
-        GlobalRepositoryCounter,
-        Commit,
-        DiffCache,
-        ExcelHtmlCache,
-        MergedDiffCache,
-        BackgroundTask,
-        WeeklyVersionConfig,
-        WeeklyVersionDiffCache,
-        WeeklyVersionExcelCache,
-        OperationLog,
-    )
+    app_module = importlib.import_module("app")
+    db = app_module.db
+    Project = app_module.Project
+    Repository = app_module.Repository
+    GlobalRepositoryCounter = app_module.GlobalRepositoryCounter
+    Commit = app_module.Commit
+    DiffCache = app_module.DiffCache
+    ExcelHtmlCache = app_module.ExcelHtmlCache
+    MergedDiffCache = app_module.MergedDiffCache
+    BackgroundTask = app_module.BackgroundTask
+    WeeklyVersionConfig = app_module.WeeklyVersionConfig
+    WeeklyVersionDiffCache = app_module.WeeklyVersionDiffCache
+    WeeklyVersionExcelCache = app_module.WeeklyVersionExcelCache
+    OperationLog = app_module.OperationLog
     USING_APP_MODELS = True
 except Exception:
     db = SQLAlchemy()

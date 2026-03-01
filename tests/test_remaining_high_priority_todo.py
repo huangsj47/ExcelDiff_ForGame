@@ -41,7 +41,7 @@ class TestRemainingHighPriorityStaticChecks:
     def test_models_package_has_app_first_export_strategy(self):
         content = _read("models/__init__.py")
         assert "USING_APP_MODELS" in content
-        assert "from app import" in content
+        assert "import_module(\"app\")" in content
         assert "except Exception" in content
 
     def test_repository_to_dict_no_invalid_clone_progress_field(self):
