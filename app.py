@@ -16,7 +16,7 @@ from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
-from sqlalchemy import Index, func, case
+from sqlalchemy import Index, func, case, inspect
 from services.git_service import GitService
 from services.enhanced_git_service import EnhancedGitService
 from services.threaded_git_service import ThreadedGitService
@@ -35,6 +35,12 @@ import queue
 import logging
 from utils.db_retry import db_retry
 from utils.sqlite_config import set_sqlite_pragma  # 导入SQLite优化配置
+from utils.db_config import (
+    apply_database_settings,
+    get_database_backend_from_config,
+    get_sqlite_path_from_uri,
+    sanitize_database_uri,
+)
 
     
 from urllib.parse import urlparse
@@ -884,9 +890,13 @@ def enforce_csrf():
 app.jinja_env.globals['get_excel_column_letter'] = get_excel_column_letter
 app.jinja_env.globals['csrf_token'] = csrf_token
 app.config['SECRET_KEY'] = secret_key
-app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{os.path.abspath("instance/diff_platform.db")}'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db_runtime_settings = apply_database_settings(app.config)
 app.secret_key = secret_key
+log_print(
+    f"ℹ️ 数据库后端: {db_runtime_settings['backend']} | URI: {db_runtime_settings['display_uri']}",
+    'DB',
+    force=True
+)
 
 db = SQLAlchemy(app)
 
@@ -10127,36 +10137,36 @@ def generate_compare_diff(from_commit, to_commit, from_diff_data, to_diff_data):
 # 应用启动时的初始化
 def create_tables():
     """创建数据库表"""
-    import sqlite3
-    import os
-
     with app.app_context():
-        # 确保instance目录存在
-        instance_dir = 'instance'
-        if not os.path.exists(instance_dir):
-            try:
-                os.makedirs(instance_dir)
-                log_print(f"✅ 创建instance目录: {os.path.abspath(instance_dir)}", 'DB')
-            except Exception as e:
-                log_print(f"❌ 创建instance目录失败: {e}", 'DB', force=True)
-                return
-        else:
-            log_print(f"ℹ️ instance目录已存在: {os.path.abspath(instance_dir)}", 'DB')
+        backend = get_database_backend_from_config(app.config)
+        database_uri = str(app.config.get("SQLALCHEMY_DATABASE_URI", "") or "")
+        sqlite_db_path = app.config.get("SQLITE_DB_PATH") or get_sqlite_path_from_uri(database_uri)
 
-        # 检查创建前的表状态
-        db_path = 'instance/diff_platform.db'
-        existing_tables = []
-        if os.path.exists(db_path):
-            try:
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                existing_tables = [table[0] for table in cursor.fetchall()]
-                conn.close()
-            except Exception as e:
-                log_print(f"检查现有表失败: {e}", 'DB', force=True)
+        if backend == "sqlite" and sqlite_db_path:
+            instance_dir = os.path.dirname(sqlite_db_path)
+            if instance_dir and not os.path.exists(instance_dir):
+                try:
+                    os.makedirs(instance_dir, exist_ok=True)
+                    log_print(f"✅ 创建instance目录: {os.path.abspath(instance_dir)}", 'DB')
+                except Exception as e:
+                    log_print(f"❌ 创建instance目录失败: {e}", 'DB', force=True)
+                    return
+            elif instance_dir:
+                log_print(f"ℹ️ instance目录已存在: {os.path.abspath(instance_dir)}", 'DB')
+
+            if not os.path.exists(sqlite_db_path):
+                log_print(f"ℹ️ 数据库文件不存在，将创建新数据库: {os.path.abspath(sqlite_db_path)}", 'DB')
         else:
-            log_print(f"ℹ️ 数据库文件不存在，将创建新数据库: {os.path.abspath(db_path)}", 'DB')
+            log_print(
+                f"ℹ️ 使用 {backend.upper()} 数据库: {sanitize_database_uri(database_uri)}",
+                'DB'
+            )
+
+        existing_tables = []
+        try:
+            existing_tables = inspect(db.engine).get_table_names()
+        except Exception as e:
+            log_print(f"检查现有表失败: {e}", 'DB', force=True)
 
         log_print(f"创建前的数据库表: {existing_tables}", 'DB')
         
@@ -10170,12 +10180,7 @@ def create_tables():
         
         # 检查创建后的表状态
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            final_tables = [table[0] for table in cursor.fetchall()]
-            conn.close()
-            
+            final_tables = inspect(db.engine).get_table_names()
             log_print(f"创建后的数据库表: {final_tables}", 'DB')
             
             # 验证必需的表
