@@ -31,7 +31,7 @@ class WeeklyExcelCacheService:
     
     def is_excel_file(self, file_path: str) -> bool:
         """鍒ゆ柇鏄惁涓篍xcel鏂囦欢"""
-        excel_extensions = ['.xlsx', '.xls', '.csv']
+        excel_extensions = ['.xlsx', '.xls', '.xlsm', '.xlsb', '.csv']
         return any(file_path.lower().endswith(ext) for ext in excel_extensions)
 
     def log_cache_operation(self, message, log_type='info', repository_id=None, config_id=None, file_path=None):
@@ -115,23 +115,36 @@ class WeeklyExcelCacheService:
     def needs_merged_diff_cache(self, config_id: int, file_path: str) -> bool:
         """鍒ゆ柇鏄惁闇€瑕佸悎骞禿iff缂撳瓨锛堝彧鏈夊娆¤繛缁彁浜ょ殑Excel鏂囦欢鎵嶉渶瑕侊級"""
         try:
-            # 妫€鏌ユ槸鍚︿负Excel鏂囦欢
             if not self.is_excel_file(file_path):
-                print(f"Debug: {file_path} is not an Excel file")
                 return False
 
-            print(f"Debug: {file_path} is an Excel file, checking diff cache...")
+            WeeklyVersionDiffCache, WeeklyVersionExcelCache = get_runtime_models(
+                "WeeklyVersionDiffCache",
+                "WeeklyVersionExcelCache"
+            )
 
-            # 鏆傛椂绠€鍖栭€昏緫锛岀洿鎺ヨ繑鍥濼rue璁╂墍鏈塃xcel鏂囦欢閮介噸寤虹紦瀛?
-            # 杩欐牱鍙互閬垮厤澶嶆潅鐨勬暟鎹簱鏌ヨ瀵艰嚧鐨勫崱姝婚棶棰?
-            print(f"Debug: Returning True for {file_path} (simplified logic)")
-            return True
+            latest_diff_cache = (
+                WeeklyVersionDiffCache.query
+                .filter_by(config_id=config_id, file_path=file_path, cache_status='completed')
+                .order_by(WeeklyVersionDiffCache.updated_at.desc())
+                .first()
+            )
+            if not latest_diff_cache or not latest_diff_cache.latest_commit_id:
+                return False
+
+            base_commit_id = latest_diff_cache.base_commit_id or ''
+            existing_cache = WeeklyVersionExcelCache.query.filter_by(
+                config_id=config_id,
+                file_path=file_path,
+                base_commit_id=base_commit_id,
+                latest_commit_id=latest_diff_cache.latest_commit_id,
+                diff_version=self.diff_logic_version,
+                cache_status='completed'
+            ).first()
+            return existing_cache is None
 
         except Exception as e:
-            # 娣诲姞閿欒鏃ュ織
             print(f"Error in needs_merged_diff_cache: {e}")
-            import traceback
-            traceback.print_exc()
             return False
     
     def get_cached_html(self, config_id: int, file_path: str, base_commit_id: str, latest_commit_id: str) -> Optional[Dict[str, Any]]:

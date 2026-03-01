@@ -5407,6 +5407,7 @@ def generate_weekly_merged_diff(config, file_path, commits):
 
         if existing_cache:
             # 更新现有缓存
+            previous_latest_commit_id = existing_cache.latest_commit_id
             existing_cache.merged_diff_data = json.dumps(merged_diff_data)
             existing_cache.base_commit_id = base_commit.commit_id if base_commit else None
             existing_cache.latest_commit_id = latest_commit.commit_id
@@ -5419,7 +5420,7 @@ def generate_weekly_merged_diff(config, file_path, commits):
             existing_cache.updated_at = datetime.now(timezone.utc)
 
             # 如果有新的提交，重置确认状态
-            if existing_cache.latest_commit_id != latest_commit.commit_id:
+            if previous_latest_commit_id != latest_commit.commit_id:
                 existing_cache.confirmation_status = json.dumps({"dev": "pending"})
                 existing_cache.overall_status = 'pending'
 
@@ -7760,7 +7761,8 @@ def get_excel_cache_logs():
         max_total = 200
 
         # 只允许访问最近max_total条日志，避免全量all()造成内存和查询压力
-        total_logs_raw = OperationLog.query.count()
+        logs_query = OperationLog.query.filter_by(source='excel_cache')
+        total_logs_raw = logs_query.count()
         total_logs = min(total_logs_raw, max_total)
         offset = (page - 1) * per_page
 
@@ -7769,7 +7771,7 @@ def get_excel_cache_logs():
         else:
             fetch_size = min(per_page, total_logs - offset)
             paginated_logs_db = (
-                OperationLog.query
+                logs_query
                 .order_by(OperationLog.created_at.desc())
                 .offset(offset)
                 .limit(fetch_size)

@@ -227,8 +227,40 @@ pytest
 
 当前测试侧重结构与逻辑验证，业务全链路集成覆盖较少，建议在关键流程增加接口级与端到端用例。
 
+## 缓存机制与相关逻辑说明
+
+### 1) Excel Diff 数据缓存（`DiffCache`）
+
+- 缓存维度：`repository_id + commit_id + file_path`，并结合 `diff_version` 与 `cache_status` 控制命中。
+- 命中条件：`cache_status='completed'` 且 `diff_version == DIFF_LOGIC_VERSION`。
+- 生成流程：优先查缓存，未命中时实时计算 diff，并写入 `DiffCache`。
+- 版本治理：旧版本缓存会被标记或清理，避免新旧 diff 逻辑混用。
+- 保留策略：
+  - 普通缓存按数量窗口保留（默认最大 1000 条，超出清理旧记录）。
+  - 长耗时缓存（`is_long_processing=True`）可延长保留（默认约 90 天）。
+
+### 2) Excel HTML 渲染缓存（`ExcelHtmlCache`）
+
+- 目标：减少重复渲染开销，缓存渲染后的 `html/css/js`。
+- 缓存键：`repository_id + commit_id + file_path + diff_logic_version`。
+- 命中后直接返回渲染结果；未命中则按 diff 数据生成并入库。
+- 清理策略：支持按版本清理、按过期时间清理和手动重建。
+
+### 3) 周版本缓存（`WeeklyVersionDiffCache` / `WeeklyVersionExcelCache`）
+
+- `WeeklyVersionDiffCache`：保存时间窗口内文件级合并 diff 元数据（基准/最新提交、提交列表、确认状态等）。
+- `WeeklyVersionExcelCache`：保存周版本 Excel 合并 diff 的 HTML 结果。
+- 生成判定：仅当对应最新提交对尚无可用 `WeeklyVersionExcelCache` 时才创建缓存任务，避免重复任务堆积。
+- 状态联动：当检测到 `latest_commit_id` 变化时，会重置确认状态为 `pending`，确保新变更不被旧确认状态覆盖。
+
+### 4) 维护与观测
+
+- 提供缓存统计、按项目聚合统计、过期清理、全量清理、重建等管理接口。
+- Excel 缓存日志接口已按 `source='excel_cache'` 过滤，避免混入非目标日志。
+- 定时任务默认包含每日缓存清理及周版本同步检查。
+
 ## 已知现状
 
 - `app.py` 体量较大（单体路由集中），后续可继续拆分到 Blueprint
 - 默认无登录鉴权模块，部署到内网/公网前需补充访问控制
-- SQLite 在高并发写入下存在瓶颈，建议中长期迁移数据库
+- SQLite 高并发写入瓶颈已做阶段性优化（WAL/超时参数、后台任务队列、批量清理与缓存链路优化）；中长期仍建议迁移到 MySQL/PostgreSQL 以获得更高写入并发与扩展性

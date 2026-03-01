@@ -122,7 +122,8 @@ class TestApiContractAndPaginationOptimization:
 
     def test_excel_cache_logs_uses_db_pagination_not_all(self):
         content = _read("app.py")
-        assert "total_logs_raw = OperationLog.query.count()" in content
+        assert "logs_query = OperationLog.query.filter_by(source='excel_cache')" in content
+        assert "total_logs_raw = logs_query.count()" in content
         assert ".offset(offset)" in content
         assert ".limit(fetch_size)" in content
         assert "OperationLog.query.order_by(OperationLog.created_at.desc()).all()" not in content
