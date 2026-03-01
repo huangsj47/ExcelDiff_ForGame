@@ -53,6 +53,19 @@ class TestExcelAndCacheStaticChecks:
         assert "WeeklyVersionDiffCache" in content
         assert "existing_cache is None" in content
 
+    def test_excel_diff_cache_avoids_global_session_expire_all(self):
+        content = _read("services/excel_diff_cache_service.py")
+        assert "db.session.expire_all()" not in content
+        assert ".populate_existing()" in content
+
+    def test_excel_html_cache_stats_use_sql_aggregation(self):
+        content = _read("services/excel_html_cache_service.py")
+        assert "func.sum(" in content
+        assert "func.length(func.coalesce(ExcelHtmlCache.html_content, ''))" in content
+        assert "func.length(func.coalesce(ExcelHtmlCache.css_content, ''))" in content
+        assert "func.length(func.coalesce(ExcelHtmlCache.js_content, ''))" in content
+        assert "for cache in query.filter(ExcelHtmlCache.cache_status == 'completed').all():" not in content
+
 
 class TestWeeklyExcelCacheServiceNeedsCache:
     def _patch_runtime_models(self, monkeypatch, diff_query, html_query):

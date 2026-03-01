@@ -112,17 +112,21 @@ class ExcelDiffCacheService:
         """获取缓存的差异数据，检查版本号匹配"""
         try:
             log_print(f"🔍 查询缓存: repo={repository_id}, commit={commit_id[:8]}, file={file_path}", 'CACHE')
-            
-            # 强制刷新数据库会话，避免读取过期缓存
-            db.session.expire_all()
-            
-            cache = DiffCache.query.filter_by(
+
+            # 只刷新本次查询命中的对象，避免会话全量失效带来的额外开销
+            cache = (
+                DiffCache.query
+                .populate_existing()
+                .filter_by(
                 repository_id=repository_id,
                 commit_id=commit_id,
                 file_path=file_path,
                 cache_status='completed',
                 diff_version=DIFF_LOGIC_VERSION  # 只返回当前版本的缓存
-            ).order_by(DiffCache.updated_at.desc()).first()
+                )
+                .order_by(DiffCache.updated_at.desc())
+                .first()
+            )
             
             if cache:
                 log_print(f"✅ 缓存命中: {file_path} | 版本: {cache.diff_version} | 创建时间: {cache.created_at}", 'CACHE')
@@ -130,12 +134,17 @@ class ExcelDiffCacheService:
                 return cache
             else:
                 # 检查是否存在旧版本的缓存
-                old_cache = DiffCache.query.filter_by(
-                    repository_id=repository_id,
-                    commit_id=commit_id,
-                    file_path=file_path,
-                    cache_status='completed'
-                ).first()
+                old_cache = (
+                    DiffCache.query
+                    .populate_existing()
+                    .filter_by(
+                        repository_id=repository_id,
+                        commit_id=commit_id,
+                        file_path=file_path,
+                        cache_status='completed'
+                    )
+                    .first()
+                )
                 
                 if old_cache and old_cache.diff_version != DIFF_LOGIC_VERSION:
                     log_print(f"⚠️ 发现旧版本缓存: {file_path} | 旧版本: {old_cache.diff_version} → 当前版本: {DIFF_LOGIC_VERSION}", 'CACHE')

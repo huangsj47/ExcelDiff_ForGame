@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
 from flask import render_template
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import func
 from services.model_loader import get_runtime_models
 
 
@@ -456,7 +457,6 @@ class ExcelHtmlCacheService:
         """鑾峰彇HTML缂撳瓨缁熻淇℃伅"""
         try:
             ExcelHtmlCache, flask_app = get_runtime_models("ExcelHtmlCache", "app")
-            from typing import Dict, Any
             
             with flask_app.app_context():
                 query = ExcelHtmlCache.query
@@ -466,16 +466,21 @@ class ExcelHtmlCacheService:
                 total_count = query.count()
                 completed_count = query.filter(ExcelHtmlCache.cache_status == 'completed').count()
                 current_version_count = query.filter(ExcelHtmlCache.diff_version == self.current_version).count()
-                
-                # 璁＄畻鎬荤紦瀛樺ぇ灏忥紙浼扮畻锛?
-                total_size = 0
-                for cache in query.filter(ExcelHtmlCache.cache_status == 'completed').all():
-                    if cache.html_content:
-                        total_size += len(cache.html_content.encode('utf-8'))
-                    if cache.css_content:
-                        total_size += len(cache.css_content.encode('utf-8'))
-                    if cache.js_content:
-                        total_size += len(cache.js_content.encode('utf-8'))
+
+                completed_query = query.filter(ExcelHtmlCache.cache_status == 'completed')
+                total_size = (
+                    completed_query.with_entities(
+                        func.coalesce(
+                            func.sum(
+                                func.length(func.coalesce(ExcelHtmlCache.html_content, ''))
+                                + func.length(func.coalesce(ExcelHtmlCache.css_content, ''))
+                                + func.length(func.coalesce(ExcelHtmlCache.js_content, ''))
+                            ),
+                            0,
+                        )
+                    ).scalar()
+                    or 0
+                )
             
             return {
                 'total_count': total_count,
@@ -519,16 +524,21 @@ class ExcelHtmlCacheService:
                 total_count = query.count()
                 completed_count = query.filter(ExcelHtmlCache.cache_status == 'completed').count()
                 current_version_count = query.filter(ExcelHtmlCache.diff_version == self.current_version).count()
-                
-                # 璁＄畻鎬荤紦瀛樺ぇ灏忥紙浼扮畻锛?
-                total_size = 0
-                for cache in query.filter(ExcelHtmlCache.cache_status == 'completed').all():
-                    if cache.html_content:
-                        total_size += len(cache.html_content.encode('utf-8'))
-                    if cache.css_content:
-                        total_size += len(cache.css_content.encode('utf-8'))
-                    if cache.js_content:
-                        total_size += len(cache.js_content.encode('utf-8'))
+
+                completed_query = query.filter(ExcelHtmlCache.cache_status == 'completed')
+                total_size = (
+                    completed_query.with_entities(
+                        func.coalesce(
+                            func.sum(
+                                func.length(func.coalesce(ExcelHtmlCache.html_content, ''))
+                                + func.length(func.coalesce(ExcelHtmlCache.css_content, ''))
+                                + func.length(func.coalesce(ExcelHtmlCache.js_content, ''))
+                            ),
+                            0,
+                        )
+                    ).scalar()
+                    or 0
+                )
             
             return {
                 'total_count': total_count,
