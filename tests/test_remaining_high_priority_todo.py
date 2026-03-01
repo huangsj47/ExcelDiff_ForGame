@@ -48,6 +48,18 @@ class TestRemainingHighPriorityStaticChecks:
         content = _read("models/repository.py")
         assert "clone_progress" not in content
 
+    def test_commit_list_branch_probe_is_async(self):
+        content = _read("app.py")
+        assert "def queue_missing_git_branch_refresh(" in content
+        assert "missing_git_branch_repo_ids.append(repo.id)" in content
+        assert "queue_missing_git_branch_refresh(project.id, missing_git_branch_repo_ids)" in content
+        assert "git_service = ThreadedGitService(repo.url, repo.root_directory, repo.username, repo.token, repo)" not in content
+
+    def test_excel_diff_previous_commit_todo_removed(self):
+        content = _read("app.py")
+        assert "TODO: 实现Excel文件的前一提交比较逻辑" not in content
+        assert "diff_data = get_unified_diff_data(commit, previous_commit)" in content
+
 
 class TestRemainingHighPriorityRuntimeChecks:
     def test_generate_merged_diff_data_segmented_strategy(self, monkeypatch):

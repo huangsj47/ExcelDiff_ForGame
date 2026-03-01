@@ -910,6 +910,9 @@ def format_cell_value_filter(value):
 
 # 全局变量存储Git进程
 active_git_processes = set()
+branch_refresh_lock = threading.Lock()
+branch_refresh_cooldown_until = {}
+BRANCH_REFRESH_COOLDOWN_SECONDS = max(10, int(os.environ.get("BRANCH_REFRESH_COOLDOWN_SECONDS", "120") or 120))
 
 # Excel diff 状态统一走数据库缓存与任务队列，不再使用进程内字典状态。
 
@@ -2695,6 +2698,65 @@ def start_scheduler():
     scheduler_thread = threading.Thread(target=run_scheduled_tasks, daemon=True)
     scheduler_thread.start()
     log_print("定时任务调度器已启动", 'APP')
+
+
+def queue_missing_git_branch_refresh(project_id, repository_ids):
+    """Asynchronously refresh missing git branches to avoid blocking page rendering."""
+    unique_repo_ids = sorted({int(repo_id) for repo_id in (repository_ids or []) if repo_id})
+    if not unique_repo_ids:
+        return False
+
+    now_ts = time.time()
+    with branch_refresh_lock:
+        cooldown_until = branch_refresh_cooldown_until.get(project_id, 0.0)
+        if cooldown_until > now_ts:
+            return False
+        branch_refresh_cooldown_until[project_id] = now_ts + BRANCH_REFRESH_COOLDOWN_SECONDS
+
+    def refresh_worker(target_project_id, target_repo_ids):
+        updated_count = 0
+        try:
+            with app.app_context():
+                repositories = Repository.query.filter(
+                    Repository.project_id == target_project_id,
+                    Repository.type == 'git',
+                    Repository.id.in_(target_repo_ids),
+                    (Repository.branch.is_(None)) | (Repository.branch == '')
+                ).all()
+
+                if not repositories:
+                    return
+
+                for repo in repositories:
+                    try:
+                        git_service = get_git_service(repo)
+                        branches = git_service.get_branches()
+                        if branches:
+                            repo.branch = branches[0]
+                            updated_count += 1
+                    except Exception as branch_error:
+                        log_print(f"异步刷新仓库分支失败: repo_id={repo.id}, error={branch_error}", 'APP')
+
+                if updated_count > 0:
+                    db.session.commit()
+                    log_print(f"异步刷新仓库分支完成: project_id={target_project_id}, updated={updated_count}", 'APP')
+                else:
+                    db.session.rollback()
+        except Exception as worker_error:
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            log_print(f"异步刷新仓库分支异常: project_id={target_project_id}, error={worker_error}", 'APP', force=True)
+
+    refresh_thread = threading.Thread(
+        target=refresh_worker,
+        args=(project_id, unique_repo_ids),
+        daemon=True,
+        name=f"branch-refresh-{project_id}",
+    )
+    refresh_thread.start()
+    return True
 
 # 测试路由
 @app.route('/auth/login', methods=['GET', 'POST'])
@@ -6220,24 +6282,11 @@ def commit_list(repository_id):
     all_repositories = project.repositories
     repository_groups = {}
     
-    # 为每个仓库获取实际分支信息
+    # 页面渲染阶段只使用本地缓存分支；缺失分支异步刷新，避免阻塞请求
+    missing_git_branch_repo_ids = []
     for repo in all_repositories:
-        # 如果没有分支信息，尝试从git服务获取
         if not repo.branch and repo.type == 'git':
-            try:
-                from services.threaded_git_service import ThreadedGitService
-                git_service = ThreadedGitService(repo.url, repo.root_directory, repo.username, repo.token, repo)
-                branches = git_service.get_branches()
-                if branches:
-                    # 使用第一个分支作为默认分支，通常是master或main
-                    repo.branch = branches[0]
-                    db.session.commit()
-            except:
-                # 如果获取失败，使用默认值
-                repo.branch = 'master'
-        elif not repo.branch:
-            # SVN或其他类型仓库的默认分支
-            repo.branch = 'master'
+            missing_git_branch_repo_ids.append(repo.id)
         
         # 移除 _git 和 _svn 后缀来分组
         base_name = repo.name
@@ -6256,6 +6305,14 @@ def commit_list(repository_id):
         # 找到最早创建的仓库作为代表
         if repo.id < repository_groups[base_name]['earliest_repo'].id:
             repository_groups[base_name]['earliest_repo'] = repo
+
+    if missing_git_branch_repo_ids:
+        queued = queue_missing_git_branch_refresh(project.id, missing_git_branch_repo_ids)
+        if queued:
+            log_print(
+                f"检测到 {len(missing_git_branch_repo_ids)} 个缺失分支的Git仓库，已异步刷新",
+                'APP',
+            )
     
     # 转换为列表格式，用于模板显示
     grouped_repositories = []
@@ -8957,9 +9014,14 @@ def get_diff_data(commit):
             if commit.path and (commit.path.endswith('.xlsx') or commit.path.endswith('.xls')):
                 try:
                     log_print(f"开始处理commit {commit.commit_id}的Excel diff数据...", 'EXCEL')
-                    # 对于Excel文件，暂时保持原有逻辑，后续可以优化
-                    # TODO: 实现Excel文件的前一提交比较逻辑
-                    diff_data = service.parse_excel_diff(commit.commit_id, commit.path)
+                    # 优先使用统一差异服务，按前一提交进行真实对比
+                    diff_data = get_unified_diff_data(commit, previous_commit)
+                    if not diff_data:
+                        # 兜底到原有解析逻辑，避免功能中断
+                        diff_data = service.parse_excel_diff(commit.commit_id, commit.path)
+
+                    if diff_data:
+                        diff_data = clean_json_data(diff_data)
 
                     # 打印性能统计
                     if hasattr(service, 'performance_stats'):
