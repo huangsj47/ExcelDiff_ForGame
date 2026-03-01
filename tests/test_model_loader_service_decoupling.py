@@ -25,6 +25,18 @@ class TestServiceAppCoupling:
         assert "from app import" not in content
         assert "get_runtime_models(" in content
 
+    def test_excel_html_cache_service_no_direct_app_imports(self):
+        content = _read("services/excel_html_cache_service.py")
+        assert "from app import" not in content
+        assert "import_module('app')" not in content
+        assert "get_runtime_models(" in content
+
+    def test_weekly_excel_cache_service_no_direct_app_imports(self):
+        content = _read("services/weekly_excel_cache_service.py")
+        assert "from app import" not in content
+        assert "import_module('app')" not in content
+        assert "get_runtime_models(" in content
+
 
 class TestModelLoader:
     def test_prefers_models_when_models_exports_app_models(self, monkeypatch):
@@ -109,4 +121,3 @@ class TestSvnModelAdapter:
         db_obj, commit_obj = svn_service.get_db_models()
         assert db_obj is None
         assert commit_obj is None
-

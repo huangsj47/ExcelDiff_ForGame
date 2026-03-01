@@ -1,6 +1,6 @@
-"""
-周版本Excel合并diff缓存服务
-提供周版本Excel文件合并diff的HTML缓存功能
+﻿"""
+鍛ㄧ増鏈珽xcel鍚堝苟diff缂撳瓨鏈嶅姟
+鎻愪緵鍛ㄧ増鏈珽xcel鏂囦欢鍚堝苟diff鐨凥TML缂撳瓨鍔熻兘
 """
 import os
 import json
@@ -10,41 +10,40 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List
 from flask import render_template
 from flask_sqlalchemy import SQLAlchemy
+from services.model_loader import get_runtime_models
 
 
 class WeeklyExcelCacheService:
-    """周版本Excel缓存服务类"""
+    """鍛ㄧ増鏈珽xcel缂撳瓨鏈嶅姟绫?"""
 
     def __init__(self, db, diff_logic_version):
         self.db = db
         self.diff_logic_version = diff_logic_version
-        self.max_cache_count = 1000  # 最多保留1000条缓存
-        self.expire_days = 90  # 缓存保留90天
-        self.processing_cache = set()  # 正在处理的缓存键集合
-        self.operation_logs = []  # 操作日志列表
+        self.max_cache_count = 1000  # 鏈€澶氫繚鐣?000鏉＄紦瀛?
+        self.expire_days = 90  # 缂撳瓨淇濈暀90澶?
+        self.processing_cache = set()  # 姝ｅ湪澶勭悊鐨勭紦瀛橀敭闆嗗悎
+        self.operation_logs = []  # 鎿嶄綔鏃ュ織鍒楄〃
     
     def generate_cache_key(self, config_id: int, file_path: str, base_commit_id: str, latest_commit_id: str) -> str:
-        """生成缓存键"""
+        """鐢熸垚缂撳瓨閿?"""
         key_data = f"{config_id}:{file_path}:{base_commit_id}:{latest_commit_id}:{self.diff_logic_version}"
         return hashlib.md5(key_data.encode('utf-8')).hexdigest()
     
     def is_excel_file(self, file_path: str) -> bool:
-        """判断是否为Excel文件"""
+        """鍒ゆ柇鏄惁涓篍xcel鏂囦欢"""
         excel_extensions = ['.xlsx', '.xls', '.csv']
         return any(file_path.lower().endswith(ext) for ext in excel_extensions)
 
     def log_cache_operation(self, message, log_type='info', repository_id=None, config_id=None, file_path=None):
-        """记录缓存操作日志到数据库"""
+        """璁板綍缂撳瓨鎿嶄綔鏃ュ織鍒版暟鎹簱"""
         try:
-            # 避免循环导入，直接使用已有的数据库连接
-            # 不再重复创建应用上下文，使用当前上下文
+            # 閬垮厤寰幆瀵煎叆锛岀洿鎺ヤ娇鐢ㄥ凡鏈夌殑鏁版嵁搴撹繛鎺?
+            # 涓嶅啀閲嶅鍒涘缓搴旂敤涓婁笅鏂囷紝浣跨敤褰撳墠涓婁笅鏂?
 
-            # 动态导入，避免循环导入问题
-            import importlib
-            app_module = importlib.import_module('app')
-            OperationLog = app_module.OperationLog
+            # 鍔ㄦ€佸鍏ワ紝閬垮厤寰幆瀵煎叆闂
+            OperationLog, = get_runtime_models("OperationLog")
 
-            # 保存到数据库（不创建新的应用上下文）
+            # 淇濆瓨鍒版暟鎹簱锛堜笉鍒涘缓鏂扮殑搴旂敤涓婁笅鏂囷級
             log_entry = OperationLog(
                 log_type=log_type,
                 message=message,
@@ -55,12 +54,12 @@ class WeeklyExcelCacheService:
             )
             self.db.session.add(log_entry)
 
-            # 清理超过200条的旧日志
+            # 娓呯悊瓒呰繃200鏉＄殑鏃ф棩蹇?
             self._cleanup_old_logs()
 
             self.db.session.commit()
 
-            # 同时保持内存中的日志（用于向后兼容），使用北京时间
+            # 鍚屾椂淇濇寔鍐呭瓨涓殑鏃ュ織锛堢敤浜庡悜鍚庡吋瀹癸級锛屼娇鐢ㄥ寳浜椂闂?
             from utils.timezone_utils import now_beijing
             timestamp = now_beijing().strftime('%Y/%m/%d %H:%M:%S')
             memory_log = {
@@ -69,12 +68,12 @@ class WeeklyExcelCacheService:
                 'type': log_type
             }
             self.operation_logs.append(memory_log)
-            # 保持最多100条内存日志
+            # 淇濇寔鏈€澶?00鏉″唴瀛樻棩蹇?
             if len(self.operation_logs) > 100:
                 self.operation_logs = self.operation_logs[-100:]
 
         except Exception as e:
-            # 如果数据库操作失败，至少保持内存日志，使用北京时间
+            # 濡傛灉鏁版嵁搴撴搷浣滃け璐ワ紝鑷冲皯淇濇寔鍐呭瓨鏃ュ織锛屼娇鐢ㄥ寳浜椂闂?
             try:
                 from utils.timezone_utils import now_beijing
                 timestamp = now_beijing().strftime('%Y/%m/%d %H:%M:%S')
@@ -87,24 +86,22 @@ class WeeklyExcelCacheService:
                 if len(self.operation_logs) > 100:
                     self.operation_logs = self.operation_logs[-100:]
             except:
-                pass  # 如果连内存日志都失败，就忽略
+                pass  # 濡傛灉杩炲唴瀛樻棩蹇楅兘澶辫触锛屽氨蹇界暐
 
-            # 使用print而不是log_print，避免循环导入
-            print(f"[ERROR] 记录缓存操作日志失败: {e}")
+            # 浣跨敤print鑰屼笉鏄痩og_print锛岄伩鍏嶅惊鐜鍏?
+            print(f"[ERROR] 璁板綍缂撳瓨鎿嶄綔鏃ュ織澶辫触: {e}")
 
     def _cleanup_old_logs(self):
-        """清理超过200条的旧日志"""
+        """娓呯悊瓒呰繃200鏉＄殑鏃ф棩蹇?"""
         try:
-            # 动态导入，避免循环导入问题
-            import importlib
-            app_module = importlib.import_module('app')
-            OperationLog = app_module.OperationLog
+            # 鍔ㄦ€佸鍏ワ紝閬垮厤寰幆瀵煎叆闂
+            OperationLog, = get_runtime_models("OperationLog")
 
-            # 获取当前日志总数
+            # 鑾峰彇褰撳墠鏃ュ織鎬绘暟
             total_count = OperationLog.query.filter_by(source='weekly_excel_cache').count()
 
             if total_count > 200:
-                # 删除最旧的日志，保留最新的200条
+                # 鍒犻櫎鏈€鏃х殑鏃ュ織锛屼繚鐣欐渶鏂扮殑200鏉?
                 excess_count = total_count - 200
                 old_logs = OperationLog.query.filter_by(source='weekly_excel_cache').order_by(OperationLog.created_at.asc()).limit(excess_count).all()
 
@@ -112,40 +109,38 @@ class WeeklyExcelCacheService:
                     self.db.session.delete(log)
 
         except Exception as e:
-            # 使用print而不是log_print，避免循环导入
-            print(f"[ERROR] 清理旧周版本操作日志失败: {e}")
+            # 浣跨敤print鑰屼笉鏄痩og_print锛岄伩鍏嶅惊鐜鍏?
+            print(f"[ERROR] 娓呯悊鏃у懆鐗堟湰鎿嶄綔鏃ュ織澶辫触: {e}")
     
     def needs_merged_diff_cache(self, config_id: int, file_path: str) -> bool:
-        """判断是否需要合并diff缓存（只有多次连续提交的Excel文件才需要）"""
+        """鍒ゆ柇鏄惁闇€瑕佸悎骞禿iff缂撳瓨锛堝彧鏈夊娆¤繛缁彁浜ょ殑Excel鏂囦欢鎵嶉渶瑕侊級"""
         try:
-            # 检查是否为Excel文件
+            # 妫€鏌ユ槸鍚︿负Excel鏂囦欢
             if not self.is_excel_file(file_path):
                 print(f"Debug: {file_path} is not an Excel file")
                 return False
 
             print(f"Debug: {file_path} is an Excel file, checking diff cache...")
 
-            # 暂时简化逻辑，直接返回True让所有Excel文件都重建缓存
-            # 这样可以避免复杂的数据库查询导致的卡死问题
+            # 鏆傛椂绠€鍖栭€昏緫锛岀洿鎺ヨ繑鍥濼rue璁╂墍鏈塃xcel鏂囦欢閮介噸寤虹紦瀛?
+            # 杩欐牱鍙互閬垮厤澶嶆潅鐨勬暟鎹簱鏌ヨ瀵艰嚧鐨勫崱姝婚棶棰?
             print(f"Debug: Returning True for {file_path} (simplified logic)")
             return True
 
         except Exception as e:
-            # 添加错误日志
+            # 娣诲姞閿欒鏃ュ織
             print(f"Error in needs_merged_diff_cache: {e}")
             import traceback
             traceback.print_exc()
             return False
     
     def get_cached_html(self, config_id: int, file_path: str, base_commit_id: str, latest_commit_id: str) -> Optional[Dict[str, Any]]:
-        """获取缓存的HTML内容"""
+        """鑾峰彇缂撳瓨鐨凥TML鍐呭"""
         try:
-            # 动态导入，避免循环导入问题
-            import importlib
-            app_module = importlib.import_module('app')
-            WeeklyVersionExcelCache = app_module.WeeklyVersionExcelCache
+            # 鍔ㄦ€佸鍏ワ紝閬垮厤寰幆瀵煎叆闂
+            WeeklyVersionExcelCache, = get_runtime_models("WeeklyVersionExcelCache")
 
-            # 不创建新的应用上下文，使用当前上下文
+            # 涓嶅垱寤烘柊鐨勫簲鐢ㄤ笂涓嬫枃锛屼娇鐢ㄥ綋鍓嶄笂涓嬫枃
             cache_key = self.generate_cache_key(config_id, file_path, base_commit_id, latest_commit_id)
 
             cache_record = WeeklyVersionExcelCache.query.filter_by(
@@ -170,24 +165,22 @@ class WeeklyExcelCacheService:
                 return None
 
         except Exception as e:
-            # 静默处理错误，避免日志污染
+            # 闈欓粯澶勭悊閿欒锛岄伩鍏嶆棩蹇楁薄鏌?
             return None
     
     def save_html_cache(self, config_id: int, repository_id: int, file_path: str,
                        base_commit_id: str, latest_commit_id: str, commit_count: int,
                        html_content: str, css_content: str = "", js_content: str = "",
                        metadata: Dict[str, Any] = None, processing_time: float = 0) -> bool:
-        """保存HTML缓存"""
+        """淇濆瓨HTML缂撳瓨"""
         try:
-            # 动态导入，避免循环导入问题
-            import importlib
-            app_module = importlib.import_module('app')
-            WeeklyVersionExcelCache = app_module.WeeklyVersionExcelCache
+            # 鍔ㄦ€佸鍏ワ紝閬垮厤寰幆瀵煎叆闂
+            WeeklyVersionExcelCache, = get_runtime_models("WeeklyVersionExcelCache")
 
-            # 不创建新的应用上下文，使用当前上下文
+            # 涓嶅垱寤烘柊鐨勫簲鐢ㄤ笂涓嬫枃锛屼娇鐢ㄥ綋鍓嶄笂涓嬫枃
             cache_key = self.generate_cache_key(config_id, file_path, base_commit_id, latest_commit_id)
 
-            # 检查是否已存在
+            # 妫€鏌ユ槸鍚﹀凡瀛樺湪
             existing_cache = WeeklyVersionExcelCache.query.filter_by(
                 config_id=config_id,
                 file_path=file_path,
@@ -197,7 +190,7 @@ class WeeklyExcelCacheService:
             ).first()
 
             if existing_cache:
-                # 更新现有缓存
+                # 鏇存柊鐜版湁缂撳瓨
                 existing_cache.html_content = html_content
                 existing_cache.css_content = css_content
                 existing_cache.js_content = js_content
@@ -206,7 +199,7 @@ class WeeklyExcelCacheService:
                 existing_cache.processing_time = processing_time
                 existing_cache.updated_at = datetime.now(timezone.utc)
             else:
-                # 创建新缓存
+                # 鍒涘缓鏂扮紦瀛?
                 new_cache = WeeklyVersionExcelCache(
                     config_id=config_id,
                     repository_id=repository_id,
@@ -233,11 +226,11 @@ class WeeklyExcelCacheService:
             return False
     
     def cleanup_expired_cache(self) -> int:
-        """清理过期缓存（超过90天）"""
+        """娓呯悊杩囨湡缂撳瓨锛堣秴杩?0澶╋級"""
         try:
-            from app import WeeklyVersionExcelCache, app
+            WeeklyVersionExcelCache, flask_app = get_runtime_models("WeeklyVersionExcelCache", "app")
             
-            with app.app_context():
+            with flask_app.app_context():
                 expire_date = datetime.now(timezone.utc) - timedelta(days=self.expire_days)
                 
                 expired_caches = WeeklyVersionExcelCache.query.filter(
@@ -256,17 +249,17 @@ class WeeklyExcelCacheService:
             return 0
     
     def cleanup_old_cache(self) -> int:
-        """清理超过1000条的旧缓存"""
+        """娓呯悊瓒呰繃1000鏉＄殑鏃х紦瀛?"""
         try:
-            from app import WeeklyVersionExcelCache, app
+            WeeklyVersionExcelCache, flask_app = get_runtime_models("WeeklyVersionExcelCache", "app")
             
-            with app.app_context():
+            with flask_app.app_context():
                 total_count = WeeklyVersionExcelCache.query.count()
                 
                 if total_count <= self.max_cache_count:
                     return 0
                 
-                # 删除最旧的缓存，保留最新的1000条
+                # 鍒犻櫎鏈€鏃х殑缂撳瓨锛屼繚鐣欐渶鏂扮殑1000鏉?
                 old_caches = WeeklyVersionExcelCache.query.order_by(
                     WeeklyVersionExcelCache.created_at.asc()
                 ).limit(total_count - self.max_cache_count).all()
@@ -283,29 +276,27 @@ class WeeklyExcelCacheService:
             return 0
     
     def get_cache_stats(self) -> Dict[str, Any]:
-        """获取缓存统计信息"""
+        """鑾峰彇缂撳瓨缁熻淇℃伅"""
         try:
-            # 动态导入，避免循环导入问题
-            import importlib
-            app_module = importlib.import_module('app')
-            WeeklyVersionExcelCache = app_module.WeeklyVersionExcelCache
+            # 鍔ㄦ€佸鍏ワ紝閬垮厤寰幆瀵煎叆闂
+            WeeklyVersionExcelCache, = get_runtime_models("WeeklyVersionExcelCache")
 
-            # 不需要 app_context，因为在Flask请求中已经有了
+            # 涓嶉渶瑕?app_context锛屽洜涓哄湪Flask璇锋眰涓凡缁忔湁浜?
             total_count = WeeklyVersionExcelCache.query.count()
             completed_count = WeeklyVersionExcelCache.query.filter_by(cache_status='completed').count()
             processing_count = WeeklyVersionExcelCache.query.filter_by(cache_status='processing').count()
             failed_count = WeeklyVersionExcelCache.query.filter_by(cache_status='failed').count()
 
-            # 计算缓存大小（估算）- 使用更快的方法
+            # 璁＄畻缂撳瓨澶у皬锛堜及绠楋級- 浣跨敤鏇村揩鐨勬柟娉?
             total_size = 0
             try:
-                # 只计算已完成的缓存的大小，避免长时间查询
+                # 鍙绠楀凡瀹屾垚鐨勭紦瀛樼殑澶у皬锛岄伩鍏嶉暱鏃堕棿鏌ヨ
                 completed_caches = WeeklyVersionExcelCache.query.filter_by(cache_status='completed').limit(100).all()
                 for cache in completed_caches:
                     if cache.html_content:
                         total_size += len(cache.html_content.encode('utf-8'))
 
-                # 如果有更多缓存，按比例估算
+                # 濡傛灉鏈夋洿澶氱紦瀛橈紝鎸夋瘮渚嬩及绠?
                 if completed_count > 100:
                     total_size = int(total_size * (completed_count / 100))
 
@@ -334,11 +325,11 @@ class WeeklyExcelCacheService:
             }
     
     def get_cache_stats_by_project(self, project_id: int) -> Dict[str, Any]:
-        """获取指定项目的周版本Excel缓存统计信息"""
+        """鑾峰彇鎸囧畾椤圭洰鐨勫懆鐗堟湰Excel缂撳瓨缁熻淇℃伅"""
         try:
-            from app import WeeklyVersionExcelCache, WeeklyVersionConfig
+            WeeklyVersionExcelCache, WeeklyVersionConfig = get_runtime_models("WeeklyVersionExcelCache", "WeeklyVersionConfig")
 
-            # 获取该项目下所有周版本配置的ID
+            # 鑾峰彇璇ラ」鐩笅鎵€鏈夊懆鐗堟湰閰嶇疆鐨処D
             config_ids = [config.id for config in WeeklyVersionConfig.query.join(
                 WeeklyVersionConfig.repository
             ).filter_by(project_id=project_id).all()]
@@ -354,7 +345,7 @@ class WeeklyExcelCacheService:
                     'expire_days': self.expire_days
                 }
 
-            # 统计该项目下的周版本Excel缓存
+            # 缁熻璇ラ」鐩笅鐨勫懆鐗堟湰Excel缂撳瓨
             total_count = WeeklyVersionExcelCache.query.filter(
                 WeeklyVersionExcelCache.config_id.in_(config_ids)
             ).count()
@@ -374,10 +365,10 @@ class WeeklyExcelCacheService:
                 WeeklyVersionExcelCache.cache_status == 'failed'
             ).count()
 
-            # 计算缓存大小（估算）- 使用更快的方法
+            # 璁＄畻缂撳瓨澶у皬锛堜及绠楋級- 浣跨敤鏇村揩鐨勬柟娉?
             total_size = 0
             try:
-                # 只计算已完成的缓存的大小，避免长时间查询
+                # 鍙绠楀凡瀹屾垚鐨勭紦瀛樼殑澶у皬锛岄伩鍏嶉暱鏃堕棿鏌ヨ
                 completed_caches = WeeklyVersionExcelCache.query.filter(
                     WeeklyVersionExcelCache.config_id.in_(config_ids),
                     WeeklyVersionExcelCache.cache_status == 'completed'
@@ -387,7 +378,7 @@ class WeeklyExcelCacheService:
                     if cache.html_content:
                         total_size += len(cache.html_content.encode('utf-8'))
 
-                # 如果有更多缓存，按比例估算
+                # 濡傛灉鏈夋洿澶氱紦瀛橈紝鎸夋瘮渚嬩及绠?
                 if completed_count > 100:
                     total_size = int(total_size * (completed_count / 100))
 
@@ -416,23 +407,27 @@ class WeeklyExcelCacheService:
             }
 
     def clear_all_cache(self) -> int:
-        """清理所有缓存"""
+        """娓呯悊鎵€鏈夌紦瀛?"""
         try:
-            # 动态导入，避免循环导入问题
-            import importlib
-            app_module = importlib.import_module('app')
-            WeeklyVersionExcelCache = app_module.WeeklyVersionExcelCache
+            # 鍔ㄦ€佸鍏ワ紝閬垮厤寰幆瀵煎叆闂
+            WeeklyVersionExcelCache, = get_runtime_models("WeeklyVersionExcelCache")
 
-            # 不需要额外的app_context，因为这个方法已经在Flask请求上下文中运行
+            # 涓嶉渶瑕侀澶栫殑app_context锛屽洜涓鸿繖涓柟娉曞凡缁忓湪Flask璇锋眰涓婁笅鏂囦腑杩愯
             count = WeeklyVersionExcelCache.query.count()
             WeeklyVersionExcelCache.query.delete()
             self.db.session.commit()
-            print(f"✅ 已清理 {count} 条周版本Excel缓存")
+            print(f"鉁?宸叉竻鐞?{count} 鏉″懆鐗堟湰Excel缂撳瓨")
             return count
 
         except Exception as e:
-            print(f"❌ 清理周版本Excel缓存失败: {e}")
+            print(f"鉂?娓呯悊鍛ㄧ増鏈珽xcel缂撳瓨澶辫触: {e}")
             import traceback
             traceback.print_exc()
             self.db.session.rollback()
             return 0
+
+
+
+
+
+

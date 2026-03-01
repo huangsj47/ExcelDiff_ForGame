@@ -1,6 +1,6 @@
-"""
-Excel HTML缓存服务
-提供Excel差异结果的HTML缓存功能，包括HTML内容和CSS样式
+﻿"""
+Excel HTML缂撳瓨鏈嶅姟
+鎻愪緵Excel宸紓缁撴灉鐨凥TML缂撳瓨鍔熻兘锛屽寘鎷琀TML鍐呭鍜孋SS鏍峰紡
 """
 import os
 import json
@@ -10,30 +10,31 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
 from flask import render_template
 from flask_sqlalchemy import SQLAlchemy
+from services.model_loader import get_runtime_models
 
 
 class ExcelHtmlCacheService:
-    """Excel HTML缓存服务类"""
+    """Excel HTML缂撳瓨鏈嶅姟绫?"""
     
     def __init__(self, db, diff_logic_version):
         self.db = db
         self.diff_logic_version = diff_logic_version
-        self.current_version = diff_logic_version  # 添加current_version属性
-        self.processing_cache = set()  # 正在处理的缓存键集合
+        self.current_version = diff_logic_version  # 娣诲姞current_version灞炴€?        self.processing_cache = set()  # 姝ｅ湪澶勭悊鐨勭紦瀛橀敭闆嗗悎
     
     def generate_cache_key(self, repository_id: int, commit_id: str, file_path: str) -> str:
-        """生成缓存键"""
+        """鐢熸垚缂撳瓨閿?"""
         key_data = f"{repository_id}:{commit_id}:{file_path}:{self.diff_logic_version}"
         return hashlib.md5(key_data.encode('utf-8')).hexdigest()
     
     def get_cached_html(self, repository_id: int, commit_id: str, file_path: str) -> Optional[Dict[str, Any]]:
-        """获取缓存的HTML内容"""
+        """鑾峰彇缂撳瓨鐨凥TML鍐呭"""
         try:
-            from app import ExcelHtmlCache, app
+            ExcelHtmlCache, flask_app = get_runtime_models("ExcelHtmlCache", "app")
             
-            with app.app_context():
+            with flask_app.app_context():
                 cache_key = self.generate_cache_key(repository_id, commit_id, file_path)
-                # 静默查询，不输出日志
+                # 闈欓粯鏌ヨ锛屼笉杈撳嚭鏃ュ織
+
                 
                 cache_record = ExcelHtmlCache.query.filter_by(
                     repository_id=repository_id,
@@ -44,7 +45,7 @@ class ExcelHtmlCacheService:
                 ).first()
             
             if cache_record:
-                # 缓存命中，静默处理
+                # 缂撳瓨鍛戒腑锛岄潤榛樺鐞?
                 return {
                     'html_content': cache_record.html_content,
                     'css_content': cache_record.css_content,
@@ -54,24 +55,26 @@ class ExcelHtmlCacheService:
                     'from_cache': True
                 }
             else:
-                # 缓存未命中，静默处理
+                # 缂撳瓨鏈懡涓紝闈欓粯澶勭悊
+
                 return None
                 
         except Exception as e:
-            # 获取缓存失败，静默处理错误
+            # 鑾峰彇缂撳瓨澶辫触锛岄潤榛樺鐞嗛敊璇?
             return None
     
     def save_html_cache(self, repository_id: int, commit_id: str, file_path: str, 
                        html_content: str, css_content: str = "", js_content: str = "",
                        metadata: Dict[str, Any] = None) -> bool:
-        """保存HTML缓存"""
+        """淇濆瓨HTML缂撳瓨"""
         try:
-            from app import ExcelHtmlCache, app
+            ExcelHtmlCache, flask_app = get_runtime_models("ExcelHtmlCache", "app")
             
-            with app.app_context():
+            with flask_app.app_context():
                 cache_key = self.generate_cache_key(repository_id, commit_id, file_path)
                 
-                # 检查是否已存在
+                # 妫€鏌ユ槸鍚﹀凡瀛樺湪
+
                 existing_cache = ExcelHtmlCache.query.filter_by(
                     repository_id=repository_id,
                     commit_id=commit_id,
@@ -80,16 +83,17 @@ class ExcelHtmlCacheService:
                 ).first()
             
             if existing_cache:
-                # 更新现有缓存
+                # 鏇存柊鐜版湁缂撳瓨
+
                 existing_cache.html_content = html_content
                 existing_cache.css_content = css_content
                 existing_cache.js_content = js_content
                 existing_cache.cache_metadata = json.dumps(metadata) if metadata else None
                 existing_cache.cache_status = 'completed'
                 existing_cache.updated_at = datetime.utcnow()
-                # 更新缓存，静默处理
+                # 鏇存柊缂撳瓨锛岄潤榛樺鐞?
             else:
-                # 创建新缓存
+                # 鍒涘缓鏂扮紦瀛?
                 new_cache = ExcelHtmlCache(
                     repository_id=repository_id,
                     commit_id=commit_id,
@@ -103,41 +107,45 @@ class ExcelHtmlCacheService:
                     diff_version=self.diff_logic_version
                 )
                 self.db.session.add(new_cache)
-                # 创建缓存，静默处理
+                # 鍒涘缓缂撳瓨锛岄潤榛樺鐞?
                 
             self.db.session.commit()
             return True
             
         except Exception as e:
-            # 保存缓存失败，静默处理错误
+            # 淇濆瓨缂撳瓨澶辫触锛岄潤榛樺鐞嗛敊璇?
             self.db.session.rollback()
             return False
     
     def generate_excel_html(self, diff_data: Dict[str, Any]) -> Tuple[str, str, str]:
-        """根据Excel差异数据生成HTML内容"""
+        """鏍规嵁Excel宸紓鏁版嵁鐢熸垚HTML鍐呭"""
         try:
             if not diff_data or diff_data.get('type') != 'excel':
-                raise ValueError("无效的Excel差异数据")
+                raise ValueError("鏃犳晥鐨凟xcel宸紓鏁版嵁")
             
-            # 生成HTML内容
+            # 鐢熸垚HTML鍐呭
+
             html_content = self._render_excel_diff_html(diff_data)
             
-            # 生成CSS样式
+            # 鐢熸垚CSS鏍峰紡
+
             css_content = self._generate_excel_diff_css()
             
-            # 生成JavaScript代码
+            # 鐢熸垚JavaScript浠ｇ爜
+
             js_content = self._generate_excel_diff_js()
             
             return html_content, css_content, js_content
             
         except Exception as e:
-            # 生成HTML失败，静默处理错误
+            # 鐢熸垚HTML澶辫触锛岄潤榛樺鐞嗛敊璇?
             raise
     
     def _render_excel_diff_html(self, diff_data: Dict[str, Any]) -> str:
-        """渲染Excel差异HTML模板"""
+        """娓叉煋Excel宸紓HTML妯℃澘"""
         try:
-            # 使用Flask的render_template渲染Excel差异模板
+            # 浣跨敤Flask鐨剅ender_template娓叉煋Excel宸紓妯℃澘
+
             from flask import current_app
             
             with current_app.app_context():
@@ -151,48 +159,51 @@ class ExcelHtmlCacheService:
                 return html_content
                 
         except Exception as e:
-            # 渲染模板失败，静默处理错误
-            # 如果模板渲染失败，生成简单的HTML结构
+            # 娓叉煋妯℃澘澶辫触锛岄潤榛樺鐞嗛敊璇?            # 濡傛灉妯℃澘娓叉煋澶辫触锛岀敓鎴愮畝鍗曠殑HTML缁撴瀯
+
             return self._generate_simple_excel_html(diff_data)
     
     def _generate_simple_excel_html(self, diff_data: Dict[str, Any]) -> str:
-        """生成简单的Excel差异HTML结构"""
+        """鐢熸垚绠€鍗曠殑Excel宸紓HTML缁撴瀯"""
         html_parts = ['<div class="excel-diff-container">']
         
-        # 文件信息
+        # 鏂囦欢淇℃伅
+
         file_path = diff_data.get('file_path', '')
-        html_parts.append(f'<div class="file-header"><h3>Excel文件差异: {file_path}</h3></div>')
+        html_parts.append(f'<div class="file-header"><h3>Excel鏂囦欢宸紓: {file_path}</h3></div>')
         
-        # 汇总信息
+        # 姹囨€讳俊鎭?
         summary = diff_data.get('summary', {})
         if summary:
             html_parts.append('<div class="diff-summary">')
-            html_parts.append(f'<span class="added">新增: {summary.get("added", 0)}</span>')
-            html_parts.append(f'<span class="removed">删除: {summary.get("removed", 0)}</span>')
-            html_parts.append(f'<span class="modified">修改: {summary.get("modified", 0)}</span>')
+            html_parts.append(f'<span class="added">鏂板: {summary.get("added", 0)}</span>')
+            html_parts.append(f'<span class="removed">鍒犻櫎: {summary.get("removed", 0)}</span>')
+            html_parts.append(f'<span class="modified">淇敼: {summary.get("modified", 0)}</span>')
             html_parts.append('</div>')
         
-        # 工作表差异
+        # 宸ヤ綔琛ㄥ樊寮?
         sheets = diff_data.get('sheets', {})
         for sheet_name, sheet_data in sheets.items():
             html_parts.append(f'<div class="sheet-container" data-sheet="{sheet_name}">')
-            html_parts.append(f'<h4 class="sheet-title">工作表: {sheet_name}</h4>')
+            html_parts.append(f'<h4 class="sheet-title">宸ヤ綔琛? {sheet_name}</h4>')
             
-            # 表格内容
+            # 琛ㄦ牸鍐呭
+
             if 'rows' in sheet_data and sheet_data['rows']:
                 html_parts.append('<div class="table-container">')
                 html_parts.append('<table class="excel-diff-table">')
                 
-                # 表头
+                # 琛ㄥご
+
                 headers = sheet_data.get('headers', [])
                 if headers:
                     html_parts.append('<thead><tr>')
-                    html_parts.append('<th>行号</th><th>状态</th>')
+                    html_parts.append('<th>琛屽彿</th><th>鐘舵€?/th>')
                     for header in headers:
                         html_parts.append(f'<th>{header}</th>')
                     html_parts.append('</tr></thead>')
                 
-                # 表格行
+                # 琛ㄦ牸琛?
                 html_parts.append('<tbody>')
                 for row in sheet_data['rows']:
                     status = row.get('status', 'unchanged')
@@ -218,7 +229,7 @@ class ExcelHtmlCacheService:
         return ''.join(html_parts)
     
     def _generate_excel_diff_css(self) -> str:
-        """生成Excel差异的CSS样式"""
+        """鐢熸垚Excel宸紓鐨凜SS鏍峰紡"""
         return """
         .excel-diff-container {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -338,33 +349,28 @@ class ExcelHtmlCacheService:
         """
     
     def _generate_excel_diff_js(self) -> str:
-        """生成Excel差异的JavaScript代码"""
+        """鐢熸垚Excel宸紓鐨凧avaScript浠ｇ爜"""
         return """
-        // Excel差异表格交互功能
+        // Excel宸紓琛ㄦ牸浜や簰鍔熻兘
         document.addEventListener('DOMContentLoaded', function() {
-            // 表格行点击高亮
-            const rows = document.querySelectorAll('.excel-diff-table tbody tr');
+            // 琛ㄦ牸琛岀偣鍑婚珮浜?            const rows = document.querySelectorAll('.excel-diff-table tbody tr');
             rows.forEach(row => {
                 row.addEventListener('click', function() {
-                    // 移除其他行的高亮
+                    // 绉婚櫎鍏朵粬琛岀殑楂樹寒
                     rows.forEach(r => r.classList.remove('selected'));
-                    // 添加当前行高亮
-                    this.classList.add('selected');
+                    // 娣诲姞褰撳墠琛岄珮浜?                    this.classList.add('selected');
                 });
             });
             
-            // 工作表切换功能
-            const sheetContainers = document.querySelectorAll('.sheet-container');
+            // 宸ヤ綔琛ㄥ垏鎹㈠姛鑳?            const sheetContainers = document.querySelectorAll('.sheet-container');
             if (sheetContainers.length > 1) {
-                // 如果有多个工作表，添加切换功能
-                sheetContainers.forEach((container, index) => {
+                // 濡傛灉鏈夊涓伐浣滆〃锛屾坊鍔犲垏鎹㈠姛鑳?                sheetContainers.forEach((container, index) => {
                     if (index > 0) {
                         container.style.display = 'none';
                     }
                 });
                 
-                // 添加工作表切换按钮
-                const tabContainer = document.createElement('div');
+                // 娣诲姞宸ヤ綔琛ㄥ垏鎹㈡寜閽?                const tabContainer = document.createElement('div');
                 tabContainer.className = 'sheet-tabs';
                 tabContainer.innerHTML = '<style>.sheet-tabs{margin:10px 0;}.sheet-tab{display:inline-block;padding:8px 16px;margin-right:5px;background:#f8f9fa;border:1px solid #dee2e6;cursor:pointer;border-radius:3px;}.sheet-tab.active{background:#007bff;color:white;}</style>';
                 
@@ -374,32 +380,31 @@ class ExcelHtmlCacheService:
                     tab.className = 'sheet-tab' + (index === 0 ? ' active' : '');
                     tab.textContent = sheetName;
                     tab.addEventListener('click', function() {
-                        // 隐藏所有工作表
+                        // 闅愯棌鎵€鏈夊伐浣滆〃
                         sheetContainers.forEach(c => c.style.display = 'none');
-                        // 显示选中的工作表
+                        // 鏄剧ず閫変腑鐨勫伐浣滆〃
                         container.style.display = 'block';
-                        // 更新标签状态
-                        document.querySelectorAll('.sheet-tab').forEach(t => t.classList.remove('active'));
+                        // 鏇存柊鏍囩鐘舵€?                        document.querySelectorAll('.sheet-tab').forEach(t => t.classList.remove('active'));
                         this.classList.add('active');
                     });
                     tabContainer.appendChild(tab);
                 });
                 
-                // 插入到第一个工作表前面
+                // 鎻掑叆鍒扮涓€涓伐浣滆〃鍓嶉潰
                 sheetContainers[0].parentNode.insertBefore(tabContainer, sheetContainers[0]);
             }
         });
         
-        // 添加选中行的CSS样式
+        // 娣诲姞閫変腑琛岀殑CSS鏍峰紡
         const style = document.createElement('style');
         style.textContent = '.excel-diff-table tbody tr.selected { background-color: rgba(0, 123, 255, 0.2) !important; }';
         document.head.appendChild(style);
         """
     
     def cleanup_old_version_cache(self):
-        """清理旧版本的HTML缓存"""
+        """娓呯悊鏃х増鏈殑HTML缂撳瓨"""
         try:
-            from app import ExcelHtmlCache
+            ExcelHtmlCache, = get_runtime_models("ExcelHtmlCache")
             old_caches = ExcelHtmlCache.query.filter(
                 ExcelHtmlCache.diff_version != self.current_version
             ).all()
@@ -409,21 +414,21 @@ class ExcelHtmlCacheService:
                 self.db.session.delete(cache)
             
             self.db.session.commit()
-            # 清理旧版本缓存完成
+            # 娓呯悊鏃х増鏈紦瀛樺畬鎴?
             return count
             
         except Exception as e:
-            # 清理旧版本缓存失败
+            # 娓呯悊鏃х増鏈紦瀛樺け璐?
             self.db.session.rollback()
             return 0
     
     def cleanup_expired_cache(self):
-        """清理过期的HTML缓存（基于创建时间，超过7天的缓存）"""
+        """娓呯悊杩囨湡鐨凥TML缂撳瓨锛堝熀浜庡垱寤烘椂闂达紝瓒呰繃7澶╃殑缂撳瓨锛?"""
         try:
-            from app import ExcelHtmlCache
+            ExcelHtmlCache, = get_runtime_models("ExcelHtmlCache")
             from datetime import datetime, timedelta
             
-            # HTML缓存保留7天
+            # HTML缂撳瓨淇濈暀7澶?
             expire_time = datetime.utcnow() - timedelta(days=7)
             
             expired_caches = ExcelHtmlCache.query.filter(
@@ -436,22 +441,24 @@ class ExcelHtmlCacheService:
             
             if count > 0:
                 self.db.session.commit()
-                # 清理过期缓存完成
+                # 娓呯悊杩囨湡缂撳瓨瀹屾垚
+
             
             return count
             
         except Exception as e:
-            # 清理过期缓存失败
+            # 娓呯悊杩囨湡缂撳瓨澶辫触
+
             self.db.session.rollback()
             return 0
     
     def get_cache_statistics(self, repository_id=None):
-        """获取HTML缓存统计信息"""
+        """鑾峰彇HTML缂撳瓨缁熻淇℃伅"""
         try:
-            from app import ExcelHtmlCache, app
+            ExcelHtmlCache, flask_app = get_runtime_models("ExcelHtmlCache", "app")
             from typing import Dict, Any
             
-            with app.app_context():
+            with flask_app.app_context():
                 query = ExcelHtmlCache.query
                 if repository_id:
                     query = query.filter(ExcelHtmlCache.repository_id == repository_id)
@@ -460,7 +467,7 @@ class ExcelHtmlCacheService:
                 completed_count = query.filter(ExcelHtmlCache.cache_status == 'completed').count()
                 current_version_count = query.filter(ExcelHtmlCache.diff_version == self.current_version).count()
                 
-                # 计算总缓存大小（估算）
+                # 璁＄畻鎬荤紦瀛樺ぇ灏忥紙浼扮畻锛?
                 total_size = 0
                 for cache in query.filter(ExcelHtmlCache.cache_status == 'completed').all():
                     if cache.html_content:
@@ -480,7 +487,8 @@ class ExcelHtmlCacheService:
             }
             
         except Exception as e:
-            # 获取缓存统计失败
+            # 鑾峰彇缂撳瓨缁熻澶辫触
+
             return {
                 'total_count': 0,
                 'completed_count': 0,
@@ -491,9 +499,9 @@ class ExcelHtmlCacheService:
             }
     
     def get_cache_statistics_by_repositories(self, repository_ids):
-        """获取指定仓库列表的HTML缓存统计信息"""
+        """鑾峰彇鎸囧畾浠撳簱鍒楄〃鐨凥TML缂撳瓨缁熻淇℃伅"""
         try:
-            from app import ExcelHtmlCache, app
+            ExcelHtmlCache, flask_app = get_runtime_models("ExcelHtmlCache", "app")
             
             if not repository_ids:
                 return {
@@ -505,14 +513,14 @@ class ExcelHtmlCacheService:
                     'current_version': self.current_version
                 }
             
-            with app.app_context():
+            with flask_app.app_context():
                 query = ExcelHtmlCache.query.filter(ExcelHtmlCache.repository_id.in_(repository_ids))
                 
                 total_count = query.count()
                 completed_count = query.filter(ExcelHtmlCache.cache_status == 'completed').count()
                 current_version_count = query.filter(ExcelHtmlCache.diff_version == self.current_version).count()
                 
-                # 计算总缓存大小（估算）
+                # 璁＄畻鎬荤紦瀛樺ぇ灏忥紙浼扮畻锛?
                 total_size = 0
                 for cache in query.filter(ExcelHtmlCache.cache_status == 'completed').all():
                     if cache.html_content:
@@ -542,11 +550,11 @@ class ExcelHtmlCacheService:
             }
     
     def delete_html_cache(self, repository_id: int, commit_id: str, file_path: str) -> int:
-        """删除指定的HTML缓存"""
+        """鍒犻櫎鎸囧畾鐨凥TML缂撳瓨"""
         try:
-            from app import ExcelHtmlCache, app
+            ExcelHtmlCache, flask_app = get_runtime_models("ExcelHtmlCache", "app")
             
-            with app.app_context():
+            with flask_app.app_context():
                 deleted_count = ExcelHtmlCache.query.filter_by(
                     repository_id=repository_id,
                     commit_id=commit_id,
@@ -561,3 +569,8 @@ class ExcelHtmlCacheService:
         except Exception as e:
             self.db.session.rollback()
             return 0
+
+
+
+
+
