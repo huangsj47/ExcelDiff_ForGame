@@ -4,13 +4,18 @@ from datetime import datetime
 import time
 import git
 import re
+import os
 from services.git_service import GitService
 from utils.path_security import build_repository_local_path
 
 class ThreadedGitService(GitService):
     """多线程优化的Git服务，专门优化前一次提交查找性能"""
     
-    def __init__(self, repo_url=None, root_directory=None, username=None, token=None, repository=None, active_processes=None, max_workers=6):
+    def __init__(self, repo_url=None, root_directory=None, username=None, token=None, repository=None, active_processes=None, max_workers=None):
+        if max_workers is None:
+            # 线程化场景默认保持保守上限，避免高并发环境过度争抢CPU
+            cpu_based_workers = min(32, (os.cpu_count() or 1) + 4)
+            max_workers = min(6, cpu_based_workers)
         super().__init__(
             repo_url,
             root_directory,
@@ -611,7 +616,7 @@ def performance_test_previous_commits(repository, commits_sample):
         username=getattr(repository, 'username', None),
         token=getattr(repository, 'token', None),
         repository=repository,
-        max_workers=6
+        max_workers=None
     )
     start_time = time.time()
     threaded_result = threaded_service._collect_previous_commits_threaded(repository._repo_obj, commits_sample)

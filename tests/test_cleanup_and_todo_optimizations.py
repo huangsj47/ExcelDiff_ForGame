@@ -77,7 +77,9 @@ class TestApiContractAndPaginationOptimization:
         git_service = _read("services/git_service.py")
         threaded_service = _read("services/threaded_git_service.py")
         assert "max_workers=None" in git_service
+        assert "max_workers=None" in threaded_service
         assert "max_workers=max_workers" in threaded_service
+        assert "max_workers=6" not in threaded_service
 
     def test_git_service_thread_pool_is_lazy_initialized(self):
         git_service = _read("services/git_service.py")
