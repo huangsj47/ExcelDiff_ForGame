@@ -13,34 +13,28 @@ class OperationLog(db.Model):
     __tablename__ = 'operation_log'
     
     id = db.Column(db.Integer, primary_key=True)
-    operation_type = db.Column(db.String(50), nullable=False)  # 操作类型
-    target_type = db.Column(db.String(50))  # 目标类型 (repository, commit, etc.)
-    target_id = db.Column(db.Integer)  # 目标ID
-    description = db.Column(db.Text)  # 操作描述
-    details = db.Column(db.Text)  # 详细信息 (JSON格式)
-    user_info = db.Column(db.Text)  # 用户信息 (JSON格式)
-    ip_address = db.Column(db.String(45))  # IP地址
-    user_agent = db.Column(db.Text)  # 用户代理
-    status = db.Column(db.String(20), default='success')  # 操作状态
-    error_message = db.Column(db.Text)  # 错误信息
+    log_type = db.Column(db.String(20), nullable=False)  # 'info', 'success', 'error', 'warning'
+    message = db.Column(db.Text, nullable=False)  # 日志消息
+    source = db.Column(db.String(50), nullable=False)  # 'excel_cache', 'weekly_excel_cache'
+    repository_id = db.Column(db.Integer, db.ForeignKey('repository.id'), nullable=True)
+    config_id = db.Column(db.Integer, nullable=True)
+    file_path = db.Column(db.String(500), nullable=True)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+
+    repository = db.relationship('Repository', backref='operation_logs', lazy=True)
     
     def __repr__(self):
-        return f'<OperationLog {self.operation_type} - {self.status}>'
+        return f'<OperationLog {self.log_type} - {self.source}>'
     
     def to_dict(self):
         """转换为字典"""
         return {
             'id': self.id,
-            'operation_type': self.operation_type,
-            'target_type': self.target_type,
-            'target_id': self.target_id,
-            'description': self.description,
-            'details': self.details,
-            'user_info': self.user_info,
-            'ip_address': self.ip_address,
-            'user_agent': self.user_agent,
-            'status': self.status,
-            'error_message': self.error_message,
+            'log_type': self.log_type,
+            'message': self.message,
+            'source': self.source,
+            'repository_id': self.repository_id,
+            'config_id': self.config_id,
+            'file_path': self.file_path,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }

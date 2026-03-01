@@ -37,8 +37,8 @@ class WeeklyVersionConfig(db.Model):
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     # 关系
-    project = db.relationship('Project', backref='weekly_configs')
-    repository = db.relationship('Repository', backref='weekly_configs')
+    project = db.relationship('Project', backref='weekly_version_configs')
+    repository = db.relationship('Repository', backref='weekly_version_configs')
 
     def __repr__(self):
         return f'<WeeklyVersionConfig {self.name}>'
@@ -51,11 +51,13 @@ class WeeklyVersionDiffCache(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     config_id = db.Column(db.Integer, db.ForeignKey('weekly_version_config.id'), nullable=False)
     repository_id = db.Column(db.Integer, db.ForeignKey('repository.id'), nullable=False)
-    file_path = db.Column(db.Text, nullable=False)
+    file_path = db.Column(db.String(500), nullable=False)
+    file_type = db.Column(db.String(50))  # 文件类型：'code', 'table', 'res', etc.
 
     # 差异数据
-    diff_data = db.Column(db.Text)  # JSON格式的差异数据
-    file_stats = db.Column(db.Text)  # JSON格式的文件统计信息
+    merged_diff_data = db.Column(db.Text)  # JSON格式的合并diff数据
+    base_commit_id = db.Column(db.String(100))  # 基准版本的commit_id
+    latest_commit_id = db.Column(db.String(100))  # 最新版本的commit_id
 
     # 提交信息
     commit_authors = db.Column(db.Text)  # JSON格式的提交者列表
@@ -98,7 +100,13 @@ class WeeklyVersionExcelCache(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     config_id = db.Column(db.Integer, db.ForeignKey('weekly_version_config.id'), nullable=False)
     repository_id = db.Column(db.Integer, db.ForeignKey('repository.id'), nullable=False)
-    file_path = db.Column(db.Text, nullable=False)
+    file_path = db.Column(db.String(500), nullable=False)
+    cache_key = db.Column(db.String(255), nullable=False, unique=True)
+
+    # 提交信息
+    base_commit_id = db.Column(db.String(100))  # 基准版本的commit_id
+    latest_commit_id = db.Column(db.String(100))  # 最新版本的commit_id
+    commit_count = db.Column(db.Integer, default=0)  # 提交数量
 
     # HTML内容和样式
     html_content = db.Column(db.Text)  # 渲染好的HTML内容

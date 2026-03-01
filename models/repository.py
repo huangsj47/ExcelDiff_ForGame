@@ -42,19 +42,19 @@ class Repository(db.Model):
     unconfirmed_history = db.Column(db.Boolean, default=False)
     delete_table_alert = db.Column(db.Boolean, default=False)
     weekly_version_setting = db.Column(db.String(100))
-    clone_status = db.Column(db.String(20))
+    clone_status = db.Column(db.String(20), default='pending')
     clone_error = db.Column(db.Text)
-    display_order = db.Column(db.Integer)
+    display_order = db.Column(db.Integer, default=0)
     last_sync_commit_id = db.Column(db.String(100))
     last_sync_time = db.Column(db.DateTime)
     cache_version = db.Column(db.String(20))
-    sync_mode = db.Column(db.String(20))
+    sync_mode = db.Column(db.String(20), default='full')
     
     # Table配置字段
     header_rows = db.Column(db.Integer)
     key_columns = db.Column(db.String(200))
-    enable_id_confirmation = db.Column(db.Boolean)
-    show_duplicate_id_warning = db.Column(db.Boolean)
+    enable_id_confirmation = db.Column(db.Boolean, default=False)
+    show_duplicate_id_warning = db.Column(db.Boolean, default=False)
 
     # Git特定字段
     tag_selection = db.Column(db.String(500))
@@ -97,7 +97,6 @@ class Repository(db.Model):
             'resource_type': self.resource_type,
             'current_version': self.current_version,
             'clone_status': self.clone_status,
-            'clone_progress': self.clone_progress,
             'display_order': self.display_order,
             'created_at': self.created_at.isoformat() if self.created_at else None
         }

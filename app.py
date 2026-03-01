@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import json
 import math
@@ -5610,34 +5610,174 @@ def get_real_base_commit_from_vcs(config, file_path):
         traceback.print_exc()
         return None
 
+def _normalize_commit_operation(operation):
+    """Normalize commit operation to A/M/D/R style."""
+    if operation is None:
+        return 'M'
+
+    normalized = str(operation).strip().upper()
+    if not normalized:
+        return 'M'
+
+    mapping = {
+        'ADD': 'A',
+        'ADDED': 'A',
+        'CREATE': 'A',
+        'CREATED': 'A',
+        'MOD': 'M',
+        'MODIFIED': 'M',
+        'UPDATE': 'M',
+        'UPDATED': 'M',
+        'DEL': 'D',
+        'DELETE': 'D',
+        'DELETED': 'D',
+        'REMOVE': 'D',
+        'REMOVED': 'D',
+        'RENAME': 'R',
+        'RENAMED': 'R',
+    }
+    return mapping.get(normalized, normalized[:1])
+
+
+def _commit_sort_key_for_merge(commit):
+    """Stable sort key for commit merge ordering."""
+    commit_time = getattr(commit, 'commit_time', None)
+    commit_ts = float('-inf')
+    if isinstance(commit_time, datetime):
+        try:
+            if commit_time.tzinfo is None:
+                commit_time = commit_time.replace(tzinfo=timezone.utc)
+            commit_ts = commit_time.timestamp()
+        except Exception:
+            commit_ts = float('-inf')
+
+    commit_db_id = getattr(commit, 'id', 0) or 0
+    return commit_ts, commit_db_id
+
+
+def _commit_time_to_iso(commit_time):
+    if isinstance(commit_time, datetime):
+        return commit_time.isoformat()
+    return None
+
+
 def generate_merged_diff_data(repository, file_path, base_commit, latest_commit, commits):
-    """生成合并diff数据"""
+    """Generate merged diff data with real merge strategy and compatible metadata."""
     try:
-        # 这里应该实现实际的diff合并逻辑
-        # 暂时返回基本的diff信息
-        diff_data = {
-            'file_path': file_path,
-            'base_commit': base_commit.commit_id if base_commit else None,
-            'latest_commit': latest_commit.commit_id,
-            'commits_count': len(commits),
-            'authors': list(set(commit.author for commit in commits)),
-            'operations': [commit.operation for commit in commits],
-            'time_range': {
-                'start': commits[0].commit_time.isoformat(),
-                'end': commits[-1].commit_time.isoformat()
+        ordered_commits = sorted((commits or []), key=_commit_sort_key_for_merge)
+        if not ordered_commits:
+            return {
+                'file_path': file_path,
+                'file_type': DiffService().get_file_type(file_path),
+                'base_commit': base_commit.commit_id if base_commit else None,
+                'latest_commit': latest_commit.commit_id if latest_commit else None,
+                'commits_count': 0,
+                'commit_ids': [],
+                'authors': [],
+                'operations': [],
+                'time_range': {'start': None, 'end': None},
+                'merge_strategy': 'empty',
+                'has_conflict_risk': False,
+                'is_rename_suspected': False,
+                'contains_added': False,
+                'contains_deleted': False,
+                'contains_modified': False,
+                'diff_data': None,
+                'merged_diff': None,
             }
+
+        operations = [_normalize_commit_operation(getattr(commit, 'operation', None)) for commit in ordered_commits]
+        operation_set = set(operations)
+        commit_ids = [getattr(commit, 'commit_id', None) for commit in ordered_commits if getattr(commit, 'commit_id', None)]
+        authors = sorted({(getattr(commit, 'author', None) or 'Unknown') for commit in ordered_commits})
+
+        merge_strategy = 'single'
+        merged_diff = None
+
+        if len(ordered_commits) == 1:
+            current_commit = ordered_commits[0]
+            previous_commit = base_commit if (base_commit and base_commit.commit_id != current_commit.commit_id) else None
+            if previous_commit:
+                merged_diff = get_commit_pair_diff_internal(current_commit, previous_commit)
+            else:
+                merged_diff = get_unified_diff_data(current_commit, None)
+        else:
+            if are_commits_consecutive_internal(ordered_commits):
+                merge_strategy = 'consecutive'
+                merged_diff = handle_consecutive_commits_merge_internal(ordered_commits)
+            else:
+                merge_strategy = 'segmented'
+                merged_diff = handle_non_consecutive_commits_merge_internal(ordered_commits)
+
+        # Fallback path: use latest commit against nearest baseline to avoid empty payload.
+        if not merged_diff:
+            latest_for_fallback = ordered_commits[-1]
+            previous_for_fallback = None
+            if base_commit and base_commit.commit_id != latest_for_fallback.commit_id:
+                previous_for_fallback = base_commit
+            elif len(ordered_commits) > 1:
+                previous_for_fallback = ordered_commits[-2]
+
+            if previous_for_fallback:
+                merged_diff = get_commit_pair_diff_internal(latest_for_fallback, previous_for_fallback)
+            else:
+                merged_diff = get_unified_diff_data(latest_for_fallback, None)
+
+        merged_diff = clean_json_data(merged_diff) if merged_diff else {
+            'type': 'summary',
+            'file_path': file_path,
+            'message': 'No diff payload generated'
         }
 
-        # TODO: 实现实际的文件内容diff合并逻辑
-        # 这里需要根据文件类型调用相应的diff服务
+        segment_summaries = []
+        if isinstance(merged_diff, dict) and merged_diff.get('type') == 'segmented_diff':
+            for index, segment in enumerate(merged_diff.get('segments', []), start=1):
+                segment_info = {}
+                if isinstance(segment, dict):
+                    segment_info = segment.get('segment_info') or {}
+                segment_summaries.append({
+                    'segment_index': segment_info.get('segment_index', index),
+                    'current': segment_info.get('current'),
+                    'previous': segment_info.get('previous'),
+                })
 
-        return diff_data
+        known_authors = [author for author in authors if author != 'Unknown']
+        has_conflict_risk = (merge_strategy == 'segmented') or (len(known_authors) > 1 and len(ordered_commits) > 1)
+        is_rename_suspected = ('R' in operation_set) or ('A' in operation_set and 'D' in operation_set)
+
+        final_data = {
+            'file_path': file_path,
+            'file_type': DiffService().get_file_type(file_path),
+            'base_commit': base_commit.commit_id if base_commit else None,
+            'latest_commit': (latest_commit.commit_id if latest_commit else ordered_commits[-1].commit_id),
+            'commits_count': len(ordered_commits),
+            'commit_ids': commit_ids,
+            'authors': authors,
+            'operations': operations,
+            'time_range': {
+                'start': _commit_time_to_iso(getattr(ordered_commits[0], 'commit_time', None)),
+                'end': _commit_time_to_iso(getattr(ordered_commits[-1], 'commit_time', None)),
+            },
+            'merge_strategy': merge_strategy,
+            'has_conflict_risk': has_conflict_risk,
+            'is_rename_suspected': is_rename_suspected,
+            'contains_added': 'A' in operation_set,
+            'contains_deleted': 'D' in operation_set,
+            'contains_modified': 'M' in operation_set,
+            'diff_data': merged_diff,
+            'merged_diff': merged_diff,  # backward-friendly alias
+        }
+
+        if segment_summaries:
+            final_data['segments'] = segment_summaries
+            final_data['total_segments'] = len(segment_summaries)
+
+        return clean_json_data(final_data)
 
     except Exception as e:
-        log_print(f"生成合并diff数据失败: {e}", 'WEEKLY', force=True)
+        log_print(f"鐢熸垚鍚堝苟diff鏁版嵁澶辫触: {e}", 'WEEKLY', force=True)
         return {}
 
-# 仓库配置页面
 @app.route('/projects/<int:project_id>/repositories')
 def repository_config(project_id):
     project = Project.query.get_or_404(project_id)
@@ -10630,3 +10770,4 @@ if __name__ == '__main__':
         # 确保清理工作完成
         if not shutdown_flag.is_set():
             cleanup_app()
+

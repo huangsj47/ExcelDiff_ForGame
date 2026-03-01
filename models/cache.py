@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 缓存模型
@@ -8,34 +8,39 @@ from datetime import datetime, timezone
 from sqlalchemy import Index
 from . import db
 
+DIFF_LOGIC_VERSION = "1.8.0"
+
 
 class DiffCache(db.Model):
     """Excel文件差异缓存表"""
     __tablename__ = 'diff_cache'
-    
+
     id = db.Column(db.Integer, primary_key=True)
     repository_id = db.Column(db.Integer, db.ForeignKey('repository.id'), nullable=False)
-    commit_id = db.Column(db.String(100), nullable=False)
-    file_path = db.Column(db.Text, nullable=False)
-    
-    # 差异数据
-    diff_data = db.Column(db.Text)  # JSON格式的差异数据
-    
-    # 缓存元数据
-    file_size = db.Column(db.Integer)
-    processing_time = db.Column(db.Float)
-    diff_version = db.Column(db.String(20))
+    commit_id = db.Column(db.String(255), nullable=False)
+    file_path = db.Column(db.String(500), nullable=False)
+    previous_commit_id = db.Column(db.String(255))
+
+    diff_data = db.Column(db.Text)
+    file_size = db.Column(db.Integer, default=0)
+    processing_time = db.Column(db.Float, default=0.0)
+    cache_status = db.Column(db.String(50), default='pending')  # pending, completed, failed
+    error_message = db.Column(db.Text)
+    diff_version = db.Column(db.String(20), default=DIFF_LOGIC_VERSION)
+    commit_time = db.Column(db.DateTime)
+    is_long_processing = db.Column(db.Boolean, default=False)
     expire_at = db.Column(db.DateTime)
-    
-    # 时间戳
+
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-    
-    # 索引
+
     __table_args__ = (
-        Index('idx_diff_cache_repo_commit', 'repository_id', 'commit_id'),
-        Index('idx_diff_cache_file', 'file_path'),
-        Index('idx_diff_cache_expire', 'expire_at'),
+        Index('idx_repo_commit_file', 'repository_id', 'commit_id', 'file_path'),
+        Index('idx_created_at', 'created_at'),
+        Index('idx_cache_status', 'cache_status'),
+        Index('idx_diff_version', 'diff_version'),
+        Index('idx_expire_at', 'expire_at'),
+        Index('idx_is_long_processing', 'is_long_processing'),
     )
 
 
@@ -49,21 +54,17 @@ class ExcelHtmlCache(db.Model):
     file_path = db.Column(db.String(500), nullable=False)
     cache_key = db.Column(db.String(255), nullable=False, unique=True)
 
-    # HTML内容和样式
-    html_content = db.Column(db.Text)  # 渲染好的HTML内容
-    css_content = db.Column(db.Text)   # CSS样式
-    js_content = db.Column(db.Text)    # JavaScript代码
-    cache_metadata = db.Column(db.Text)  # JSON格式的元数据（文件信息、统计等）
+    html_content = db.Column(db.Text)
+    css_content = db.Column(db.Text)
+    js_content = db.Column(db.Text)
+    cache_metadata = db.Column(db.Text)
 
-    # 缓存状态
-    cache_status = db.Column(db.String(50))  # 'pending', 'processing', 'completed', 'failed'
-    diff_version = db.Column(db.String(20))  # diff逻辑版本号
+    cache_status = db.Column(db.String(50), default='pending')
+    diff_version = db.Column(db.String(20), default=DIFF_LOGIC_VERSION)
 
-    # 时间戳
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
-    # 索引（使用现有的索引名称）
     __table_args__ = (
         Index('idx_html_repo_commit_file', 'repository_id', 'commit_id', 'file_path'),
         Index('idx_html_cache_status', 'cache_status'),
@@ -75,25 +76,39 @@ class ExcelHtmlCache(db.Model):
 class MergedDiffCache(db.Model):
     """合并差异缓存表"""
     __tablename__ = 'merged_diff_cache'
-    
+
     id = db.Column(db.Integer, primary_key=True)
     repository_id = db.Column(db.Integer, db.ForeignKey('repository.id'), nullable=False)
-    commit_id = db.Column(db.String(100), nullable=False)
-    file_path = db.Column(db.Text, nullable=False)
-    
-    # 合并差异数据
-    merged_diff_data = db.Column(db.Text)  # JSON格式的合并差异数据
-    
-    # 缓存元数据
+
+    cache_key = db.Column(db.String(255), nullable=False, unique=True)
+    file_path = db.Column(db.String(500), nullable=False)
+
+    base_commit_id = db.Column(db.String(100))
+    target_commit_id = db.Column(db.String(100))
+    commit_id_list = db.Column(db.Text)
+
+    merged_diff_data = db.Column(db.Text)
+    diff_summary = db.Column(db.Text)
+
+    total_commits = db.Column(db.Integer, default=0)
+    added_lines = db.Column(db.Integer, default=0)
+    deleted_lines = db.Column(db.Integer, default=0)
+    modified_lines = db.Column(db.Integer, default=0)
+
+    cache_status = db.Column(db.String(50), default='pending')
     processing_time = db.Column(db.Float)
-    diff_version = db.Column(db.String(20))
-    
-    # 时间戳
+    file_size = db.Column(db.Integer)
+    diff_version = db.Column(db.String(20), default=DIFF_LOGIC_VERSION)
+
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-    
-    # 索引
+    expire_at = db.Column(db.DateTime)
+
     __table_args__ = (
-        Index('idx_merged_diff_cache_repo_commit', 'repository_id', 'commit_id'),
-        Index('idx_merged_diff_cache_file', 'file_path'),
+        Index('idx_merged_diff_cache_key', 'cache_key'),
+        Index('idx_merged_diff_repo_file', 'repository_id', 'file_path'),
+        Index('idx_merged_diff_commits', 'base_commit_id', 'target_commit_id'),
+        Index('idx_merged_diff_status', 'cache_status'),
+        Index('idx_merged_diff_version', 'diff_version'),
+        Index('idx_merged_diff_expire', 'expire_at'),
     )
