@@ -90,7 +90,8 @@ class GitService:
             self.max_workers = default_workers
         else:
             self.max_workers = max(1, int(max_workers))
-        self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)
+        # 延迟创建线程池，避免大量实例初始化时抢占线程资源
+        self.thread_pool = None
         
         # 性能监控
         self.performance_stats = {
@@ -1995,6 +1996,7 @@ class GitService:
             if hasattr(self, 'thread_pool') and self.thread_pool:
                 self.thread_pool.shutdown(wait=True)
                 print("🔧 [GIT_SERVICE] 线程池已清理")
+                self.thread_pool = None
         except Exception as e:
             print(f"🔧 [GIT_SERVICE] 清理线程池时出错: {str(e)}")
     

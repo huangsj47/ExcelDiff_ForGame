@@ -79,6 +79,11 @@ class TestApiContractAndPaginationOptimization:
         assert "max_workers=None" in git_service
         assert "max_workers=max_workers" in threaded_service
 
+    def test_git_service_thread_pool_is_lazy_initialized(self):
+        git_service = _read("services/git_service.py")
+        assert "self.thread_pool = None" in git_service
+        assert "self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)" not in git_service
+
     def test_legacy_excel_diff_status_endpoint_deprecated(self):
         content = _read("app.py")
         assert "@app.route('/api/excel-diff-status/<cache_key>')" in content
