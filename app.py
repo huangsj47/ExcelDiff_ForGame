@@ -8383,7 +8383,7 @@ def update_repository(repository_id):
                     log_print("开始异步重新筛选仓库内容...", 'APP')
                     with app.app_context():
                         # 重新获取repository对象（在新的应用上下文中）
-                        repo = Repository.query.get(repository_id)
+                        repo = db.session.get(Repository, repository_id)
                         if not repo:
                             log_print(f"❌ 未找到仓库ID: {repository_id}", 'APP', force=True)
                             return

@@ -71,7 +71,7 @@ class TestRemainingHighPriorityStaticChecks:
         content = _read("app.py")
         assert "def async_refilter():" in content
         assert "with app.app_context():" in content
-        assert "repo = Repository.query.get(repository_id)" in content
+        assert "repo = db.session.get(Repository, repository_id)" in content
 
     def test_scheduler_runs_pending_with_app_context(self):
         content = _read("app.py")
