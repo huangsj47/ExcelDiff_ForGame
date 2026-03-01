@@ -82,7 +82,10 @@ class TestApiContractAndPaginationOptimization:
     def test_git_service_thread_pool_is_lazy_initialized(self):
         git_service = _read("services/git_service.py")
         assert "self.thread_pool = None" in git_service
-        assert "self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)" not in git_service
+        assert "def _get_thread_pool(self):" in git_service
+        assert "self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)" in git_service
+        assert "with ThreadPoolExecutor(max_workers=min(len(sheet_tasks), self.max_workers)) as executor:" not in git_service
+        assert "with ThreadPoolExecutor(max_workers=min(len(batches), self.max_workers)) as executor:" not in git_service
 
     def test_legacy_excel_diff_status_endpoint_deprecated(self):
         content = _read("app.py")

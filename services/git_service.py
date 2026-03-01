@@ -100,6 +100,12 @@ class GitService:
             'git_operations_time': 0,
             'parallel_tasks_count': 0
         }
+
+    def _get_thread_pool(self):
+        """按需获取共享线程池，避免重复创建销毁开销。"""
+        if self.thread_pool is None:
+            self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)
+        return self.thread_pool
     
     def _get_local_path(self):
         if self.repository:
@@ -1356,25 +1362,25 @@ class GitService:
         print(f"开始并行处理 {len(sheet_tasks)} 个工作表...")
         self.performance_stats['parallel_tasks_count'] += len(sheet_tasks)
         
-        with ThreadPoolExecutor(max_workers=min(len(sheet_tasks), self.max_workers)) as executor:
-            # 提交任务
-            future_to_sheet = {
-                executor.submit(self._compare_sheet_data_safe, current_sheet, previous_sheet): sheet_name
-                for sheet_name, current_sheet, previous_sheet in sheet_tasks
-            }
-            
-            # 收集结果
-            for future in as_completed(future_to_sheet):
-                sheet_name = future_to_sheet[future]
-                try:
-                    result = future.result(timeout=5)  # 减少超时时间到5秒
-                    diff_sheets[sheet_name] = result
-                except Exception as e:
-                    print(f"工作表 '{sheet_name}' 处理失败: {str(e)}")
-                    # 失败时使用串行处理作为备选
-                    current_sheet = next(cs for sn, cs, _ in sheet_tasks if sn == sheet_name)
-                    previous_sheet = next(ps for sn, _, ps in sheet_tasks if sn == sheet_name)
-                    diff_sheets[sheet_name] = self._compare_sheet_data(current_sheet, previous_sheet)
+        executor = self._get_thread_pool()
+        # 提交任务
+        future_to_sheet = {
+            executor.submit(self._compare_sheet_data_safe, current_sheet, previous_sheet): sheet_name
+            for sheet_name, current_sheet, previous_sheet in sheet_tasks
+        }
+        
+        # 收集结果
+        for future in as_completed(future_to_sheet):
+            sheet_name = future_to_sheet[future]
+            try:
+                result = future.result(timeout=5)  # 减少超时时间到5秒
+                diff_sheets[sheet_name] = result
+            except Exception as e:
+                print(f"工作表 '{sheet_name}' 处理失败: {str(e)}")
+                # 失败时使用串行处理作为备选
+                current_sheet = next(cs for sn, cs, _ in sheet_tasks if sn == sheet_name)
+                previous_sheet = next(ps for sn, _, ps in sheet_tasks if sn == sheet_name)
+                diff_sheets[sheet_name] = self._compare_sheet_data(current_sheet, previous_sheet)
         
         return diff_sheets
     
@@ -1810,36 +1816,36 @@ class GitService:
         diff_rows = []
         has_changes = False
         
-        with ThreadPoolExecutor(max_workers=min(len(batches), self.max_workers)) as executor:
-            # 提交批处理任务
-            future_to_batch = {
-                executor.submit(self._compare_row_batch, current_sheet, previous_sheet, headers, start_idx, end_idx): (start_idx, end_idx)
-                for start_idx, end_idx in batches
-            }
-            
-            # 收集结果并按顺序合并
-            batch_results = {}
-            for future in as_completed(future_to_batch):
-                start_idx, end_idx = future_to_batch[future]
-                try:
-                    batch_diff_rows, batch_has_changes = future.result(timeout=60)
-                    batch_results[start_idx] = (batch_diff_rows, batch_has_changes)
-                    if batch_has_changes:
-                        has_changes = True
-                except Exception as e:
-                    print(f"批处理 {start_idx}-{end_idx} 失败: {str(e)}")
-                    # 失败时使用串行处理
-                    batch_diff_rows, batch_has_changes = self._compare_row_batch(
-                        current_sheet, previous_sheet, headers, start_idx, end_idx
-                    )
-                    batch_results[start_idx] = (batch_diff_rows, batch_has_changes)
-                    if batch_has_changes:
-                        has_changes = True
-            
-            # 按顺序合并结果
-            for start_idx in sorted(batch_results.keys()):
-                batch_diff_rows, _ = batch_results[start_idx]
-                diff_rows.extend(batch_diff_rows)
+        executor = self._get_thread_pool()
+        # 提交批处理任务
+        future_to_batch = {
+            executor.submit(self._compare_row_batch, current_sheet, previous_sheet, headers, start_idx, end_idx): (start_idx, end_idx)
+            for start_idx, end_idx in batches
+        }
+        
+        # 收集结果并按顺序合并
+        batch_results = {}
+        for future in as_completed(future_to_batch):
+            start_idx, end_idx = future_to_batch[future]
+            try:
+                batch_diff_rows, batch_has_changes = future.result(timeout=60)
+                batch_results[start_idx] = (batch_diff_rows, batch_has_changes)
+                if batch_has_changes:
+                    has_changes = True
+            except Exception as e:
+                print(f"批处理 {start_idx}-{end_idx} 失败: {str(e)}")
+                # 失败时使用串行处理
+                batch_diff_rows, batch_has_changes = self._compare_row_batch(
+                    current_sheet, previous_sheet, headers, start_idx, end_idx
+                )
+                batch_results[start_idx] = (batch_diff_rows, batch_has_changes)
+                if batch_has_changes:
+                    has_changes = True
+        
+        # 按顺序合并结果
+        for start_idx in sorted(batch_results.keys()):
+            batch_diff_rows, _ = batch_results[start_idx]
+            diff_rows.extend(batch_diff_rows)
         
         return {
             'status': 'modified' if has_changes else 'unchanged',
