@@ -2,44 +2,26 @@
 # -*- coding: utf-8 -*-
 """数据库模型包。
 
-优先复用 app.py 中的模型定义，尽量避免双轨模型漂移。
-若 app.py 因环境依赖无法导入，再回退到本地 models/* 定义。
+所有模型定义统一维护在 models/ 子模块中，app.py 通过
+``from models import db, Project, ...`` 导入。
+db 实例在此处创建（未绑定），app.py 负责调用 db.init_app(app) 完成绑定。
 """
 
-import importlib
 from flask_sqlalchemy import SQLAlchemy
 
-USING_APP_MODELS = False
+# 全局 db 实例，由 app.py 调用 db.init_app(app) 完成绑定
+db = SQLAlchemy()
 
-try:
-    app_module = importlib.import_module("app")
-    db = app_module.db
-    Project = app_module.Project
-    Repository = app_module.Repository
-    GlobalRepositoryCounter = app_module.GlobalRepositoryCounter
-    Commit = app_module.Commit
-    DiffCache = app_module.DiffCache
-    ExcelHtmlCache = app_module.ExcelHtmlCache
-    MergedDiffCache = app_module.MergedDiffCache
-    BackgroundTask = app_module.BackgroundTask
-    WeeklyVersionConfig = app_module.WeeklyVersionConfig
-    WeeklyVersionDiffCache = app_module.WeeklyVersionDiffCache
-    WeeklyVersionExcelCache = app_module.WeeklyVersionExcelCache
-    OperationLog = app_module.OperationLog
-    USING_APP_MODELS = True
-except Exception:
-    db = SQLAlchemy()
-    from .project import Project
-    from .repository import Repository, GlobalRepositoryCounter
-    from .commit import Commit
-    from .cache import DiffCache, ExcelHtmlCache, MergedDiffCache
-    from .task import BackgroundTask
-    from .weekly_version import WeeklyVersionConfig, WeeklyVersionDiffCache, WeeklyVersionExcelCache
-    from .operation_log import OperationLog
+from .project import Project
+from .repository import Repository, GlobalRepositoryCounter
+from .commit import Commit
+from .cache import DiffCache, ExcelHtmlCache, MergedDiffCache
+from .task import BackgroundTask
+from .weekly_version import WeeklyVersionConfig, WeeklyVersionDiffCache, WeeklyVersionExcelCache
+from .operation_log import OperationLog
 
 __all__ = [
     'db',
-    'USING_APP_MODELS',
     'Project',
     'Repository',
     'GlobalRepositoryCounter',

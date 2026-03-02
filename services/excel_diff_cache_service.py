@@ -4,7 +4,9 @@
 
 import json
 import time
+import threading
 from datetime import datetime, timedelta, timezone
+from sqlalchemy import func
 
 
 app = None
@@ -14,8 +16,14 @@ DiffCache = None
 OperationLog = None
 Commit = None
 Repository = None
-log_print = None
 get_unified_diff_data = None
+
+
+def _noop_log(*args, **kwargs):
+    """Fallback no-op logger when log_print is not configured."""
+    pass
+
+log_print = _noop_log
 
 
 def configure_excel_diff_cache_service(*, app_instance, db_instance, diff_logic_version, diff_cache_model, operation_log_model, commit_model, repository_model, log_print_func, unified_diff_func):
@@ -35,7 +43,9 @@ class ExcelDiffCacheService:
     """Excel文件差异缓存服务"""
     
     def __init__(self):
-        self.processing_commits = set()  # 正在处理的提交ID集合
+        self._processing_commits = set()  # 正在处理的提交ID集合
+        self._processing_lock = threading.Lock()  # 线程安全锁
+        self._log_write_count = 0  # 日志写入计数器（用于控制清理频率）
         self.operation_logs = []  # 操作日志列表ID集合
         self.max_cache_count = 1000  # 最大缓存数量
         self.long_processing_threshold = 10.0  # 长处理时间阈值（秒）
@@ -59,8 +69,10 @@ class ExcelDiffCacheService:
             )
             db.session.add(log_entry)
 
-            # 清理超过200条的旧日志
-            self._cleanup_old_logs()
+            # 每50次写入清理一次旧日志 (#34)
+            self._log_write_count += 1
+            if self._log_write_count % 50 == 0:
+                self._cleanup_old_logs()
 
             db.session.commit()
 
@@ -92,18 +104,24 @@ class ExcelDiffCacheService:
             log_print(f"记录操作日志到数据库失败: {e}", 'ERROR')
 
     def _cleanup_old_logs(self):
-        """清理超过200条的旧日志"""
+        """清理超过200条的旧日志（批量DELETE，避免逐行删除）"""
         try:
             # 获取当前日志总数
             total_count = OperationLog.query.filter_by(source='excel_cache').count()
 
             if total_count > 200:
-                # 删除最旧的日志，保留最新的200条
+                # 使用子查询批量删除，避免将对象加载到Python内存
                 excess_count = total_count - 200
-                old_logs = OperationLog.query.filter_by(source='excel_cache').order_by(OperationLog.created_at.asc()).limit(excess_count).all()
-
-                for log in old_logs:
-                    db.session.delete(log)
+                subquery = (
+                    db.session.query(OperationLog.id)
+                    .filter_by(source='excel_cache')
+                    .order_by(OperationLog.created_at.asc())
+                    .limit(excess_count)
+                    .subquery()
+                )
+                OperationLog.query.filter(
+                    OperationLog.id.in_(db.session.query(subquery))
+                ).delete(synchronize_session=False)
 
         except Exception as e:
             log_print(f"清理旧操作日志失败: {e}", 'ERROR')
@@ -197,11 +215,41 @@ class ExcelDiffCacheService:
             log_print(f"❌ diff数据优化失败: {e}", 'CACHE', force=True)
             return diff_data
     
+    # diff_data 序列化后最大允许 20MB (#40)
+    MAX_DIFF_DATA_BYTES = 20 * 1024 * 1024
+
     def save_cached_diff(self, repository_id, commit_id, file_path, diff_data, processing_time=0.0, file_size=0, previous_commit_id=None, commit_time=None):
         """保存差异数据到缓存，支持智能缓存策略"""
         try:
             log_print(f"💾 保存缓存: repo={repository_id}, commit={commit_id[:8]}, file={file_path}", 'CACHE')
-            
+
+            # --- #40: 序列化并检查大小限制 ---
+            diff_json = json.dumps(diff_data)
+            diff_bytes = len(diff_json.encode('utf-8'))
+            if diff_bytes > self.MAX_DIFF_DATA_BYTES:
+                size_mb = diff_bytes / (1024 * 1024)
+                log_print(
+                    f"⚠️ diff_data 超出大小限制: {file_path} | "
+                    f"{size_mb:.2f}MB > {self.MAX_DIFF_DATA_BYTES / (1024*1024):.0f}MB，"
+                    f"仅保存摘要信息", 'CACHE', force=True)
+                # 用精简占位数据替代，保留统计但丢弃行详情
+                summary_data = {
+                    'type': diff_data.get('type', 'excel'),
+                    'truncated': True,
+                    'original_size_mb': round(size_mb, 2),
+                    'error': f'数据过大({size_mb:.1f}MB)，已截断。请在线查看差异。',
+                }
+                if 'sheets' in diff_data:
+                    summary_data['sheets'] = {}
+                    for sheet_name, sheet_info in diff_data['sheets'].items():
+                        summary_data['sheets'][sheet_name] = {
+                            'stats': sheet_info.get('stats', {}),
+                            'rows': [],            # 清空行数据
+                            'headers': sheet_info.get('headers', []),
+                        }
+                diff_json = json.dumps(summary_data)
+                log_print(f"📦 已替换为摘要数据: {len(diff_json)} 字符", 'CACHE')
+
             # 判断是否为长处理时间文件
             is_long_processing = processing_time > self.long_processing_threshold
             
@@ -223,8 +271,8 @@ class ExcelDiffCacheService:
             ).first()
             
             if existing_cache:
-                # 更新现有缓存
-                existing_cache.diff_data = json.dumps(diff_data)
+                # 更新现有缓存（使用已序列化的 diff_json）
+                existing_cache.diff_data = diff_json
                 existing_cache.processing_time = processing_time
                 existing_cache.file_size = file_size
                 existing_cache.cache_status = 'completed'
@@ -236,13 +284,13 @@ class ExcelDiffCacheService:
                     existing_cache.commit_time = commit_time
                 log_print(f"🔄 更新现有缓存: {file_path}", 'CACHE')
             else:
-                # 创建新缓存
+                # 创建新缓存（使用已序列化的 diff_json）
                 new_cache = DiffCache(
                     repository_id=repository_id,
                     commit_id=commit_id,
                     file_path=file_path,
                     previous_commit_id=previous_commit_id,
-                    diff_data=json.dumps(diff_data),
+                    diff_data=diff_json,
                     processing_time=processing_time,
                     file_size=file_size,
                     cache_status='completed',
@@ -256,19 +304,7 @@ class ExcelDiffCacheService:
             
             db.session.commit()
             
-            # 验证缓存是否真的保存成功
-            saved_cache = DiffCache.query.filter_by(
-                repository_id=repository_id,
-                commit_id=commit_id,
-                file_path=file_path
-            ).first()
-            
-            if saved_cache:
-                log_print(f"✅ 缓存保存验证成功: ID={saved_cache.id}, 状态={saved_cache.cache_status}, 版本={saved_cache.diff_version}", 'CACHE')
-            else:
-                log_print(f"❌ 缓存保存验证失败: 数据库中未找到缓存记录", 'CACHE', force=True)
-            
-            # 保存后检查是否需要清理旧缓存
+            # 保存后检查是否需要清理旧缓存 (#33: 移除冗余验证查询)
             if not is_long_processing:
                 self._cleanup_old_cache(repository_id)
             
@@ -355,13 +391,13 @@ class ExcelDiffCacheService:
         try:
             log_print(f"开始后台处理Excel差异: repo={repository_id}, commit={commit_id}, file={file_path}", 'EXCEL')
             
-            # 检查是否已在处理中
+            # 检查是否已在处理中（线程安全）
             task_key = f"{repository_id}_{commit_id}_{file_path}"
-            if task_key in self.processing_commits:
-                log_print(f"任务已在处理中，跳过: {task_key}", 'EXCEL')
-                return
-            
-            self.processing_commits.add(task_key)
+            with self._processing_lock:
+                if task_key in self._processing_commits:
+                    log_print(f"任务已在处理中，跳过: {task_key}", 'EXCEL')
+                    return
+                self._processing_commits.add(task_key)
             
             # 确保在Flask应用上下文中执行
             with app.app_context():
@@ -426,7 +462,8 @@ class ExcelDiffCacheService:
                     import traceback
                     traceback.print_exc()
                 finally:
-                    self.processing_commits.discard(task_key)
+                    with self._processing_lock:
+                        self._processing_commits.discard(task_key)
                 
         except Exception as e:
             log_print(f"后台处理Excel差异异常: {e}", 'EXCEL', force=True)
@@ -434,51 +471,39 @@ class ExcelDiffCacheService:
             traceback.print_exc()
     
     def cleanup_old_cache(self, days=30):
-        """清理超过指定天数的缓存数据和旧版本缓存"""
+        """清理超过指定天数的缓存数据和旧版本缓存（合并OR查询，#39）"""
         try:
+            from sqlalchemy import or_
             cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
             
-            # 清理超过指定天数的缓存
-            old_caches = DiffCache.query.filter(DiffCache.created_at < cutoff_date).all()
-            
-            # 清理标记为过期的旧版本缓存
-            outdated_caches = DiffCache.query.filter_by(cache_status='outdated').all()
-            
-            # 清理版本号不匹配的缓存（兼容性清理）
-            version_mismatch_caches = DiffCache.query.filter(
-                DiffCache.diff_version != DIFF_LOGIC_VERSION,
-                DiffCache.cache_status == 'completed'
-            ).all()
-            
-            all_caches_to_delete = old_caches + outdated_caches + version_mismatch_caches
-            
-            # 去重
-            unique_caches = {cache.id: cache for cache in all_caches_to_delete}
-            
-            count = len(unique_caches)
-            for cache in unique_caches.values():
-                db.session.delete(cache)
+            # 合并为一条 OR 查询，减少3次独立全表扫描为1次 (#39)
+            total_count = DiffCache.query.filter(
+                or_(
+                    DiffCache.created_at < cutoff_date,                                       # 超期缓存
+                    DiffCache.cache_status == 'outdated',                                     # 标记过期
+                    db.and_(DiffCache.diff_version != DIFF_LOGIC_VERSION,
+                            DiffCache.cache_status == 'completed'),                           # 版本不匹配
+                )
+            ).delete(synchronize_session=False)
             
             db.session.commit()
-            log_print(f"清理了 {count} 条过期缓存数据（包括 {len(old_caches)} 条超期缓存，{len(outdated_caches)} 条标记过期缓存，{len(version_mismatch_caches)} 条版本不匹配缓存）")
-            return count
+            log_print(f"🗑️ 合并清理了 {total_count} 条过期/过旧/版本不匹配缓存")
+            return total_count
         except Exception as e:
             log_print(f"清理缓存失败: {e}", 'CACHE', force=True)
-            db.session.rollback()
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
             return 0
     
     def cleanup_version_mismatch_cache(self):
-        """专门清理版本号不匹配的缓存"""
+        """专门清理版本号不匹配的缓存（批量DELETE）"""
         try:
-            # 查找所有版本号不匹配的缓存
-            mismatch_caches = DiffCache.query.filter(
+            # 批量删除所有版本号不匹配的缓存
+            count = DiffCache.query.filter(
                 DiffCache.diff_version != DIFF_LOGIC_VERSION
-            ).all()
-            
-            count = len(mismatch_caches)
-            for cache in mismatch_caches:
-                log_print(f"清理版本不匹配的缓存: {cache.file_path} (版本: {cache.diff_version} → {DIFF_LOGIC_VERSION})", 'CACHE')
-                db.session.delete(cache)
+            ).delete(synchronize_session=False)
             
             db.session.commit()
             log_print(f"清理了 {count} 条版本不匹配的缓存", 'CACHE')
@@ -489,31 +514,37 @@ class ExcelDiffCacheService:
             return 0
     
     def _cleanup_old_cache(self, repository_id=None):
-        """清理超过1000条的旧缓存（不包括长处理文件）"""
+        """清理超过1000条的旧缓存（不包括长处理文件）- 使用子查询批量DELETE"""
         try:
-            query = DiffCache.query.filter(
+            base_filter = [
                 DiffCache.cache_status == 'completed',
                 DiffCache.is_long_processing == False  # 不清理长处理文件
-            )
+            ]
             
             if repository_id:
-                query = query.filter(DiffCache.repository_id == repository_id)
+                base_filter.append(DiffCache.repository_id == repository_id)
             
-            # 按创建时间倒序，保留最新的1000条
-            total_count = query.count()
+            total_count = DiffCache.query.filter(*base_filter).count()
             if total_count > self.max_cache_count:
-                # 获取需要删除的记录
-                old_caches = query.order_by(DiffCache.created_at.desc()).offset(self.max_cache_count).all()
+                # 用子查询选出要保留的最新N条ID之外的记录
+                excess_count = total_count - self.max_cache_count
+                subquery = (
+                    db.session.query(DiffCache.id)
+                    .filter(*base_filter)
+                    .order_by(DiffCache.created_at.asc())
+                    .limit(excess_count)
+                    .subquery()
+                )
                 
-                deleted_count = len(old_caches)
-                for cache in old_caches:
-                    db.session.delete(cache)
+                deleted_count = DiffCache.query.filter(
+                    DiffCache.id.in_(db.session.query(subquery))
+                ).delete(synchronize_session=False)
                 
                 db.session.commit()
+                log_print(f"🗑️ 清理了 {deleted_count} 条超限缓存", 'CACHE')
                 return deleted_count
             else:
-                current_count = query.count()
-                log_print(f"📊 当前缓存数量 {current_count}，无需清理", 'CACHE')
+                log_print(f"📊 当前缓存数量 {total_count}，无需清理", 'CACHE')
                 return 0
                 
         except Exception as e:

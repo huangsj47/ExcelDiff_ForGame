@@ -62,6 +62,9 @@ class Repository(db.Model):
     
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
+    # 关系
+    commits = db.relationship('Commit', backref='repository', lazy=True, cascade='all, delete-orphan')
+
     @property
     def password(self):
         return decrypt_credential(self._password)

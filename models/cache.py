@@ -43,6 +43,8 @@ class DiffCache(db.Model):
         Index('idx_is_long_processing', 'is_long_processing'),
     )
 
+    repository = db.relationship('Repository', backref='diff_caches')
+
 
 class ExcelHtmlCache(db.Model):
     """Excel HTML缓存表"""
@@ -71,6 +73,8 @@ class ExcelHtmlCache(db.Model):
         Index('idx_html_cache_key', 'cache_key'),
         Index('idx_html_diff_version', 'diff_version'),
     )
+
+    repository = db.relationship('Repository', backref='excel_html_caches')
 
 
 class MergedDiffCache(db.Model):
@@ -112,3 +116,5 @@ class MergedDiffCache(db.Model):
         Index('idx_merged_diff_version', 'diff_version'),
         Index('idx_merged_diff_expire', 'expire_at'),
     )
+
+    repository = db.relationship('Repository', backref='merged_diff_caches')

@@ -24,9 +24,6 @@ class Commit(db.Model):
     status = db.Column(db.String(20), default='pending')  # 'pending', 'confirmed', 'rejected'
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     
-    # 关系
-    repository = db.relationship('Repository', backref='commits')
-    
     def __repr__(self):
         return f'<Commit {self.commit_id[:8]} - {self.path}>'
     

@@ -5,6 +5,7 @@
 """
 
 from datetime import datetime, timezone
+from sqlalchemy import Index
 from . import db
 
 
@@ -22,6 +23,14 @@ class OperationLog(db.Model):
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     repository = db.relationship('Repository', backref='operation_logs', lazy=True)
+
+    __table_args__ = (
+        Index('idx_operation_log_source', 'source'),
+        Index('idx_operation_log_type', 'log_type'),
+        Index('idx_operation_log_repo', 'repository_id'),
+        Index('idx_operation_log_config', 'config_id'),
+        Index('idx_operation_log_created', 'created_at'),
+    )
     
     def __repr__(self):
         return f'<OperationLog {self.log_type} - {self.source}>'
