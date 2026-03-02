@@ -124,8 +124,8 @@ class GitService:
         """安全执行Git命令，处理编码问题"""
         try:
             from utils.safe_print import log_print
-            log_print(f"🔧 执行Git命令: {sanitize_text(' '.join(cmd))}", 'GIT', force=True)
-            log_print(f"🔧 工作目录: {cwd or self.local_path}", 'GIT', force=True)
+            log_print(f"🔧 执行Git命令: {sanitize_text(' '.join(cmd))}", 'GIT')
+            log_print(f"🔧 工作目录: {cwd or self.local_path}", 'GIT')
             
             # 设置环境变量以处理中文编码
             env = os.environ.copy()
@@ -144,11 +144,15 @@ class GitService:
                 timeout=timeout
             )
             
-            log_print(f"✅ Git命令完成，返回码: {result.returncode}", 'GIT', force=True)
+            log_print(f"✅ Git命令完成，返回码: {result.returncode}", 'GIT')
             if result.stdout:
-                log_print(f"📤 stdout: {sanitize_text(result.stdout[:200])}...", 'GIT', force=True)
+                log_print(f"📤 stdout: {sanitize_text(result.stdout[:200])}...", 'GIT')
             if result.stderr:
-                log_print(f"📤 stderr: {sanitize_text(result.stderr[:200])}...", 'GIT', force=True)
+                # SSH 后量子加密警告等非错误信息不使用 force
+                _stderr_is_warning = (result.returncode == 0 and
+                    ('WARNING' in result.stderr or 'post-quantum' in result.stderr))
+                log_print(f"📤 stderr: {sanitize_text(result.stderr[:200])}...",
+                          'GIT', force=not _stderr_is_warning)
             
             return result
         except subprocess.TimeoutExpired:
@@ -326,7 +330,13 @@ class GitService:
                     if result.stdout:
                         log_print(f"输出: {sanitize_text(result.stdout[:200])}...", 'GIT')  # 只显示前200字符
                     if result.stderr:
-                        log_print(f"错误: {sanitize_text(result.stderr)}", 'GIT', force=True)
+                        # SSH 后量子加密警告在返回码=0时不当作错误
+                        _is_ssh_warning = (result.returncode == 0 and
+                            ('WARNING' in result.stderr or 'post-quantum' in result.stderr))
+                        if _is_ssh_warning:
+                            log_print(f"SSH连接警告(可忽略): {sanitize_text(result.stderr[:100])}...", 'GIT')
+                        else:
+                            log_print(f"错误: {sanitize_text(result.stderr)}", 'GIT', force=True)
                     
                     return result.returncode == 0
                 except subprocess.TimeoutExpired:

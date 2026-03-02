@@ -113,15 +113,63 @@ if sys.platform == 'win32':
     os.system('chcp 65001 >nul 2>&1')
 # Diff逻辑版本号 - 当diff算法或逻辑发生变化时需要更新此版本号
 DIFF_LOGIC_VERSION = "1.8.0"
-LOG_LEVEL = {
-    'APP_VERBOSE': True,      # 应用主要日志
-    'GIT_VERBOSE': True,     # Git操作详细日志
-    'CACHE_VERBOSE': True,   # 缓存操作详细日志
-    'DIFF_VERBOSE': True,    # Diff计算详细日志
-    'SVN_VERBOSE': True,     # SVN操作详细日志
-    'EXCEL_VERBOSE': True,   # Excel处理详细日志
-    'LOGGING_VERBOSE': True   # 通用日志输出（重载print函数使用）
-}
+
+# ---------------------------------------------------------------------------
+#  日志级别控制 — 从 .env 读取，默认全部开启
+#  在 .env 中设置 LOG_<类型>=false 即可关闭对应类型的日志
+#  例如: LOG_GIT=false  LOG_REQUEST=false  LOG_CACHE=false
+# ---------------------------------------------------------------------------
+_LOG_CATEGORIES = [
+    # ---- 核心 ----
+    'APP',       # 应用主要日志（启动/关闭/路由访问）
+    'ERROR',     # 错误级别日志（始终建议开启）
+    'INFO',      # 通用信息日志
+    'DEBUG',     # 调试日志
+    'LOGGING',   # 重载 print 产生的日志
+    # ---- 版本控制 ----
+    'GIT',       # Git 操作详细日志
+    'SVN',       # SVN 操作详细日志
+    # ---- 业务 ----
+    'DIFF',      # Diff 计算详细日志
+    'EXCEL',     # Excel 处理详细日志
+    'CACHE',     # 缓存操作详细日志
+    'TASK',      # 后台任务日志
+    'WEEKLY',    # 周版本同步日志
+    'SYNC',      # 状态同步日志
+    'SCHEDULER', # 定时调度器日志
+    # ---- HTTP / 安全 ----
+    'REQUEST',   # HTTP 请求日志
+    'API',       # API 调用日志
+    'REPO',      # 仓库管理日志
+    # ---- 基础设施 ----
+    'DB',        # 数据库操作日志
+    'CLEANUP',   # 清理任务日志
+    'PERF',      # 性能计数日志
+    'DELETE',    # 删除操作日志
+    'TEST',      # 测试相关日志
+]
+
+def _build_log_level() -> dict:
+    """根据 .env 中的 LOG_<TYPE> 环境变量构建日志开关字典
+    - 默认所有日志类型开启 (True)
+    - 在 .env 中设置 LOG_GIT=false 即可关闭 GIT 类型日志
+    - LOG_ALL=false 可一次性关闭全部普通日志（ERROR 除外）
+    """
+    result = {}
+    # 全局开关
+    log_all = os.environ.get('LOG_ALL', 'true').lower() != 'false'
+    for cat in _LOG_CATEGORIES:
+        env_val = os.environ.get(f'LOG_{cat}', '').strip().lower()
+        if env_val == 'false':
+            result[f'{cat}_VERBOSE'] = False
+        elif env_val == 'true':
+            result[f'{cat}_VERBOSE'] = True
+        else:
+            # 未显式配置时取决于全局开关；ERROR 始终开启
+            result[f'{cat}_VERBOSE'] = True if cat == 'ERROR' else log_all
+    return result
+
+LOG_LEVEL = _build_log_level()
 
 
 def log_print(message, log_type='INFO', force=False):
@@ -269,8 +317,17 @@ def log_print(message, log_type='INFO', force=False):
             # 完全静默处理
             pass
 
-# 保存原始print函数
-_original_print = print
+# 保存原始print函数 — 必须使用 sys.stdout.write 来确保不递归
+# 在模块被 Flask 二次 import 时, builtins.print 可能已被重载,
+# 这里直接用底层 IO 避免重复打印
+import sys as _sys_for_log
+
+def _original_print(msg, **kwargs):
+    """安全的底层输出, 直接写 sys.stdout, 不经过 builtins.print"""
+    try:
+        _sys_for_log.stdout.write(str(msg) + '\n')
+    except Exception:
+        pass
 
 
 def clear_log_file():
