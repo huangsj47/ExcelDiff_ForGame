@@ -57,7 +57,7 @@ class ExcelDiffCacheService:
         
     def is_excel_file(self, file_path):
         """检查文件是否为Excel文件"""
-        excel_extensions = ['.xlsx', '.xls', '.xlsm']
+        excel_extensions = ['.xlsx', '.xls', '.xlsm', '.xlsb', '.csv']
         return any(file_path.lower().endswith(ext) for ext in excel_extensions)
     
     def _get_project_code(self, repository_id):

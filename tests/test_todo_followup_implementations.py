@@ -1,0 +1,53 @@
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _read(path: str) -> str:
+    return (PROJECT_ROOT / path).read_text(encoding="utf-8")
+
+
+class TestWeeklyTodoFollowups:
+    def test_weekly_excel_task_dedup_is_enabled(self):
+        content = _read("app.py")
+        assert "def create_weekly_excel_cache_task(config_id, file_path):" in content
+        assert "BackgroundTask.task_type == 'weekly_excel_cache'" in content
+        assert "BackgroundTask.status.in_(['pending', 'processing'])" in content
+        assert "跳过重复周版本Excel缓存任务" in content
+
+    def test_weekly_excel_html_prefers_merged_cache_payload(self):
+        content = _read("app.py")
+        assert "def _load_weekly_excel_diff_from_cache(repository, diff_cache, file_path):" in content
+        assert "_extract_excel_diff_from_payload(merged_payload)" in content
+        assert "复用周版本缓存中的合并Excel diff" in content
+        assert "暂时使用第一个和最后一个提交进行对比" not in content
+
+    def test_weekly_excel_lookup_composite_index_exists(self):
+        content = _read("models/weekly_version.py")
+        assert "idx_weekly_excel_lookup" in content
+        assert "'base_commit_id'" in content
+        assert "'latest_commit_id'" in content
+        assert "'diff_version'" in content
+        assert "'cache_status'" in content
+
+    def test_excel_diff_service_recognizes_xlsb_and_csv(self):
+        content = _read("services/excel_diff_cache_service.py")
+        func_start = content.find("def is_excel_file(self, file_path):")
+        assert func_start >= 0
+        func_end = content.find("\n    def ", func_start + 1)
+        func_body = content[func_start:func_end] if func_end > 0 else content[func_start:]
+        assert ".xlsb" in func_body
+        assert ".csv" in func_body
+
+    def test_startup_version_mismatch_cleanup_uses_bulk_service_calls(self):
+        content = _read("app.py")
+        func_start = content.find("def clear_version_mismatch_cache():")
+        assert func_start >= 0
+        func_end = content.find("\ndef initialize_app():", func_start)
+        func_body = content[func_start:func_end] if func_end > 0 else content[func_start:]
+
+        assert "excel_cache_service.cleanup_version_mismatch_cache()" in func_body
+        assert "excel_html_cache_service.cleanup_old_version_cache()" in func_body
+        assert ".limit(batch_size).all()" not in func_body
+        assert "time.sleep(0.1)" not in func_body

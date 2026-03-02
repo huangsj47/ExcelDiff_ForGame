@@ -55,9 +55,29 @@ class TestServiceAppCoupling:
 
 
 class TestModelLoader:
-    def test_prefers_models_when_models_exports_app_models(self, monkeypatch):
+    def test_model_lookup_does_not_touch_app_when_models_hit(self, monkeypatch):
         model_loader.clear_model_loader_cache()
-        models_module = SimpleNamespace(USING_APP_MODELS=True, Commit="models_commit")
+        models_module = SimpleNamespace(Commit="models_commit")
+        import_calls = {"models": 0, "app": 0}
+
+        def fake_import_module(name):
+            if name == "models":
+                import_calls["models"] += 1
+                return models_module
+            if name == "app":
+                import_calls["app"] += 1
+                raise AssertionError("model lookup should not import app when models hit")
+            raise ImportError(name)
+
+        monkeypatch.setattr(model_loader.importlib, "import_module", fake_import_module)
+        assert model_loader.get_runtime_model("Commit") == "models_commit"
+        assert import_calls["models"] == 1
+        assert import_calls["app"] == 0
+        model_loader.clear_model_loader_cache()
+
+    def test_prefers_models_for_model_objects(self, monkeypatch):
+        model_loader.clear_model_loader_cache()
+        models_module = SimpleNamespace(Commit="models_commit")
         app_module = SimpleNamespace(Commit="app_commit")
 
         def fake_import_module(name):
@@ -71,9 +91,9 @@ class TestModelLoader:
         assert model_loader.get_runtime_model("Commit") == "models_commit"
         model_loader.clear_model_loader_cache()
 
-    def test_falls_back_to_app_when_models_not_app_bound(self, monkeypatch):
+    def test_model_objects_do_not_fall_back_to_app_when_models_has_symbol(self, monkeypatch):
         model_loader.clear_model_loader_cache()
-        models_module = SimpleNamespace(USING_APP_MODELS=False, Commit="local_commit")
+        models_module = SimpleNamespace(Commit="local_commit")
         app_module = SimpleNamespace(Commit="app_commit")
 
         def fake_import_module(name):
@@ -84,12 +104,28 @@ class TestModelLoader:
             raise ImportError(name)
 
         monkeypatch.setattr(model_loader.importlib, "import_module", fake_import_module)
-        assert model_loader.get_runtime_model("Commit") == "app_commit"
+        assert model_loader.get_runtime_model("Commit") == "local_commit"
+        model_loader.clear_model_loader_cache()
+
+    def test_non_model_object_falls_back_to_app(self, monkeypatch):
+        model_loader.clear_model_loader_cache()
+        models_module = SimpleNamespace()
+        app_module = SimpleNamespace(log_print="log_fn")
+
+        def fake_import_module(name):
+            if name == "models":
+                return models_module
+            if name == "app":
+                return app_module
+            raise ImportError(name)
+
+        monkeypatch.setattr(model_loader.importlib, "import_module", fake_import_module)
+        assert model_loader.get_runtime_model("log_print") == "log_fn"
         model_loader.clear_model_loader_cache()
 
     def test_falls_back_to_local_models_when_app_unavailable(self, monkeypatch):
         model_loader.clear_model_loader_cache()
-        models_module = SimpleNamespace(USING_APP_MODELS=False, Commit="local_commit")
+        models_module = SimpleNamespace(Commit="local_commit")
 
         def fake_import_module(name):
             if name == "models":
@@ -102,7 +138,7 @@ class TestModelLoader:
 
     def test_raises_when_model_missing(self, monkeypatch):
         model_loader.clear_model_loader_cache()
-        models_module = SimpleNamespace(USING_APP_MODELS=False)
+        models_module = SimpleNamespace()
         app_module = SimpleNamespace()
 
         def fake_import_module(name):

@@ -410,6 +410,10 @@ def request_join_project(
     user_id: int, project_id: int, message: Optional[str] = None
 ) -> tuple[bool, Optional[str]]:
     """提交项目加入申请。"""
+    user = db.session.get(AuthUser, user_id)
+    if not user:
+        return False, "用户不存在"
+
     project = db.session.get(Project, project_id)
     if not project:
         return False, "项目不存在"
@@ -499,6 +503,10 @@ def request_create_project(
     reason: Optional[str] = None,
 ) -> tuple[bool, Optional[str]]:
     """提交项目创建申请。"""
+    user = db.session.get(AuthUser, user_id)
+    if not user:
+        return False, "用户不存在"
+
     project_code = project_code.strip()
     project_name = project_name.strip()
 
@@ -550,6 +558,10 @@ def handle_create_project_request(
         return False, f"申请已处理 (状态: {req.status})"
 
     if action == "approve":
+        applicant = db.session.get(AuthUser, req.user_id)
+        if not applicant:
+            return False, "申请用户不存在，无法创建项目"
+
         # 再次检查编码唯一性
         existing = Project.query.filter_by(code=req.project_code).first()
         if existing:

@@ -132,4 +132,13 @@ class WeeklyVersionExcelCache(db.Model):
         Index('idx_weekly_excel_config_file', 'config_id', 'file_path'),
         Index('idx_weekly_excel_repo', 'repository_id'),
         Index('idx_weekly_excel_status', 'cache_status'),
+        Index(
+            'idx_weekly_excel_lookup',
+            'config_id',
+            'file_path',
+            'base_commit_id',
+            'latest_commit_id',
+            'diff_version',
+            'cache_status',
+        ),
     )

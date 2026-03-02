@@ -717,9 +717,12 @@ def rebuild_weekly_excel_cache(config_id):
         for file_path in excel_files:
             try:
                 log_print(f"📝 创建任务: {file_path}", "WEEKLY", force=True)
-                create_weekly_excel_cache_task(config_id, file_path)
-                task_count += 1
-                log_print(f"✅ 任务创建成功: {file_path}", "WEEKLY", force=True)
+                created_task_id = create_weekly_excel_cache_task(config_id, file_path)
+                if created_task_id is not None:
+                    task_count += 1
+                    log_print(f"✅ 任务创建成功: {file_path} (task_id={created_task_id})", "WEEKLY", force=True)
+                else:
+                    log_print(f"⏭️ 跳过重复任务: {file_path}", "WEEKLY", force=True)
             except Exception as task_exc:
                 log_print(f"❌ 创建Excel缓存任务失败: {file_path}, 错误: {task_exc}", "WEEKLY", force=True)
 

@@ -1,6 +1,6 @@
 """
 安全的日志输出工具，避免I/O operation on closed file错误
-统一委托给 app.log_print，确保所有日志经过统一的日志系统处理
+优先委托给已加载的 app.log_print，未加载时使用本地回退输出。
 """
 import sys
 import os
@@ -9,12 +9,19 @@ from datetime import datetime
 
 
 def _get_app_log_print():
-    """延迟获取 app.log_print，避免循环导入"""
-    try:
-        from app import log_print as _app_log_print, LOG_LEVEL
-        return _app_log_print, LOG_LEVEL
-    except ImportError:
+    """从已加载模块中获取 app.log_print，避免触发导入副作用。"""
+    app_module = sys.modules.get("app")
+    if not app_module:
         return None, {}
+
+    app_log_print = getattr(app_module, "log_print", None)
+    log_level = getattr(app_module, "LOG_LEVEL", {})
+    if not isinstance(log_level, dict):
+        log_level = {}
+
+    if callable(app_log_print):
+        return app_log_print, log_level
+    return None, log_level
 
 
 def safe_print(message, log_type='INFO', force=False):

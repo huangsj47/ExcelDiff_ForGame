@@ -1,4 +1,8 @@
-"""Shared runtime model loader to reduce hard coupling with app.py."""
+"""Shared runtime object loader.
+
+Model objects (`db` and ORM models) are resolved from `models` as the
+single source of truth. Non-model runtime objects fall back to `app`.
+"""
 
 from __future__ import annotations
 
@@ -23,19 +27,44 @@ def _load_app_module():
         return None
 
 
+_MODEL_OBJECT_NAMES = frozenset(
+    {
+        "db",
+        "Project",
+        "Repository",
+        "GlobalRepositoryCounter",
+        "Commit",
+        "DiffCache",
+        "ExcelHtmlCache",
+        "MergedDiffCache",
+        "BackgroundTask",
+        "WeeklyVersionConfig",
+        "WeeklyVersionDiffCache",
+        "WeeklyVersionExcelCache",
+        "OperationLog",
+        "AuthUser",
+        "AuthFunction",
+        "AuthUserFunction",
+        "AuthUserProject",
+        "AuthProjectJoinRequest",
+        "AuthProjectCreateRequest",
+    }
+)
+
+
 def _resolve_runtime_object(name: str) -> Any:
-    """Resolve object from models first, then app fallback, then local models."""
+    """Resolve runtime object with models as single source for model objects."""
     models_module = _load_models_module()
-    app_module = _load_app_module()
 
-    if models_module and getattr(models_module, "USING_APP_MODELS", False) and hasattr(models_module, name):
+    if name in _MODEL_OBJECT_NAMES and models_module and hasattr(models_module, name):
         return getattr(models_module, name)
-
-    if app_module and hasattr(app_module, name):
-        return getattr(app_module, name)
 
     if models_module and hasattr(models_module, name):
         return getattr(models_module, name)
+
+    app_module = _load_app_module()
+    if app_module and hasattr(app_module, name):
+        return getattr(app_module, name)
 
     raise RuntimeError(f"无法解析运行时对象: {name}")
 
@@ -51,4 +80,3 @@ def get_runtime_models(*names: str) -> Tuple[Any, ...]:
 def clear_model_loader_cache() -> None:
     _load_models_module.cache_clear()
     _load_app_module.cache_clear()
-

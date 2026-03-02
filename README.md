@@ -378,12 +378,6 @@ python tests/test_auth_e2e.py
 - Excel 缓存日志接口已按 `source='excel_cache'` 过滤，避免混入非目标日志。
 - 定时任务默认包含每日缓存清理及周版本同步检查。
 
-## 已知现状
-
-- `app.py` 体量较大（单体路由集中），后续可继续拆分到 Blueprint
-- ~~默认无登录鉴权模块~~ → ✅ 已内置完整的 RBAC 账号系统（`auth/` 模块），支持注册/登录/项目隔离/审批工作流，可直接用于内网/公网部署
-- SQLite 高并发写入瓶颈已做阶段性优化（WAL/超时参数、后台任务队列、批量清理与缓存链路优化）；中长期仍建议迁移到 MySQL/PostgreSQL 以获得更高写入并发与扩展性
-- 当前认证暂未接入 LDAP/SSO，如需企业统一认证可通过 `auth/providers.py` 的 Provider 抽象扩展
 
 ## 数据库表概览（`auth_` 前缀）
 
