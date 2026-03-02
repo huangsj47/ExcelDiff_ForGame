@@ -4,31 +4,43 @@
 
 {% block head %}
 <style>
-    /* ===== 页面头部 - Enterprise Blue ===== */
+    /* ===== 页面头部 - 白底简洁风格 ===== */
     .commit-page-header {
-        background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
-        border-radius: 0.75rem;
-        padding: 1.25rem 1.5rem;
+        background: #ffffff;
+        border-radius: 0;
+        padding: 1.5rem 0 1rem 0;
         margin-bottom: 1.25rem;
-        box-shadow: 0 4px 16px rgba(13,110,253,0.2);
-        color: #fff;
+        box-shadow: none;
+        color: #1e293b;
+        border-bottom: 1px solid #e2e8f0;
     }
-    .commit-page-header h4 { color: #fff !important; font-weight: 700; font-size: 1.25rem; margin-bottom: 0.25rem; }
+    .commit-page-header h4 { color: #1e293b !important; font-weight: 700; font-size: 1.5rem; margin-bottom: 0.35rem; }
     .commit-page-header .breadcrumb { margin: 0; padding: 0; background: none; }
-    .commit-page-header .breadcrumb-item a { color: rgba(255,255,255,0.8); text-decoration: none; font-weight: 500; font-size: 0.82rem; }
-    .commit-page-header .breadcrumb-item a:hover { color: #fff; }
-    .commit-page-header .breadcrumb-item.active { color: rgba(255,255,255,0.55); font-size: 0.82rem; }
-    .commit-page-header .breadcrumb-item + .breadcrumb-item::before { color: rgba(255,255,255,0.35); }
-    .commit-page-header .header-action-btn { font-size: 0.78rem; padding: 0.3rem 0.7rem; border-radius: 6px; font-weight: 500; transition: all 0.2s; border: 1px solid rgba(255,255,255,0.3); color: #fff; background: rgba(255,255,255,0.1); }
-    .commit-page-header .header-action-btn:hover { background: rgba(255,255,255,0.2); border-color: rgba(255,255,255,0.5); color: #fff; }
-    .commit-page-header .header-action-btn.btn-accent { background: rgba(255,255,255,0.9); color: #1e3a5f; border: none; font-weight: 600; }
-    .commit-page-header .header-action-btn.btn-accent:hover { background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+    .commit-page-header .breadcrumb-item a { color: #0d6efd; text-decoration: underline; font-weight: 500; font-size: 0.82rem; }
+    .commit-page-header .breadcrumb-item a:hover { color: #0a58ca; }
+    .commit-page-header .breadcrumb-item.active { color: #6c757d; font-size: 0.82rem; }
+    .commit-page-header .breadcrumb-item + .breadcrumb-item::before { color: #94a3b8; content: "/"; }
+    .commit-page-header .header-action-btn { font-size: 0.78rem; padding: 0.35rem 0.85rem; border-radius: 6px; font-weight: 600; transition: all 0.2s; border: 1.5px solid #e2e8f0; color: #374151; background: #ffffff; }
+    .commit-page-header .header-action-btn:hover { background: #f1f5f9; border-color: #cbd5e1; color: #1e293b; }
+    .commit-page-header .header-action-btn.btn-accent { background: #198754; color: #fff; border: 1.5px solid #198754; font-weight: 600; }
+    .commit-page-header .header-action-btn.btn-accent:hover { background: #157347; border-color: #157347; box-shadow: 0 2px 8px rgba(25,135,84,0.25); }
 
     /* ===== 仓库标签页 ===== */
     .repo-tabs { border-bottom: 2px solid #e2e8f0; margin-bottom: 1.25rem; }
     .repo-tabs .nav-link { font-size: 0.82rem; font-weight: 500; color: #64748b; padding: 0.5rem 1rem; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; }
     .repo-tabs .nav-link:hover { color: #0d6efd; border-bottom-color: #bfdbfe; }
     .repo-tabs .nav-link.active { color: #0d6efd; border-bottom-color: #0d6efd; font-weight: 600; background: none; }
+
+    /* ===== 分支标签底色 ===== */
+    .branch-tag { display: inline-flex; align-items: center; gap: 3px; font-size: 0.7rem; font-weight: 600; padding: 0.18rem 0.5rem; border-radius: 10px; vertical-align: middle; margin-left: 4px; }
+    .branch-tag i { font-size: 0.6rem; }
+    .branch-tag-master { background: #dcfce7; color: #166534; }
+    .branch-tag-dev { background: #fef3c7; color: #92400e; }
+    .branch-tag-release { background: #dbeafe; color: #1e40af; }
+    .branch-tag-feature { background: #f3e8ff; color: #6b21a8; }
+    .branch-tag-hotfix { background: #fee2e2; color: #991b1b; }
+    .branch-tag-default { background: #e0e7ff; color: #3730a3; }
+    .branch-tag-dropdown { font-size: 0.68rem; padding: 0.15rem 0.45rem; border-radius: 8px; }
 
     /* ===== 筛选卡片 ===== */
     .filter-card { border: 1px solid #e2e8f0; border-radius: 0.625rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); overflow: hidden; }
@@ -83,14 +95,14 @@
 
 {% block content %}
 <div class="container-fluid px-4">
-    <!-- 页面头部 - 蓝色渐变 -->
+    <!-- 页面头部 - 白底简洁 -->
     <div class="commit-page-header">
         <div class="d-flex justify-content-between align-items-center">
             <div>
-                <h4><i class="fas fa-list-alt me-2"></i>{{ repository.name }}</h4>
+                <h4>{{ repository.name }}</h4>
                 <nav aria-label="breadcrumb">
                     <ol class="breadcrumb">
-                        <li class="breadcrumb-item"><a href="{{ url_for('index') }}"><i class="fas fa-home me-1"></i>项目列表</a></li>
+                        <li class="breadcrumb-item"><a href="{{ url_for('index') }}">项目列表</a></li>
                         <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=project.id) }}">{{ project.name }}</a></li>
                         <li class="breadcrumb-item active">提交记录</li>
                     </ol>
@@ -138,7 +150,7 @@
                             type="button" data-bs-toggle="dropdown" aria-expanded="false" 
                             id="dropdownMenuButton{{ loop.index }}">
                         {% set current_branch = repository.branch if repository.branch else (repository.name.split('_')[-1] if '_' in repository.name else 'master') %}
-                        {{ group.name }} <span class="badge" style="background:#eff6ff;color:#1d4ed8;font-size:0.7rem;padding:0.15rem 0.4rem;border-radius:4px;">{{ current_branch }}</span>
+                        {{ group.name }} <span class="branch-tag {% if 'master' in current_branch or 'main' in current_branch %}branch-tag-master{% elif 'dev' in current_branch or 'develop' in current_branch %}branch-tag-dev{% elif 'release' in current_branch %}branch-tag-release{% elif 'feature' in current_branch %}branch-tag-feature{% elif 'hotfix' in current_branch or 'fix' in current_branch %}branch-tag-hotfix{% else %}branch-tag-default{% endif %}"><i class="fas fa-code-branch"></i>{{ current_branch }}</span>
                     </button>
                     <ul class="dropdown-menu" aria-labelledby="dropdownMenuButton{{ loop.index }}">
                     {% for repo in group.repositories %}
@@ -146,7 +158,7 @@
                         <a class="dropdown-item {% if repo.id == repository.id %}active{% endif %}" 
                            href="{{ url_for('commit_list', repository_id=repo.id) }}" style="font-size:0.82rem;">
                             {% set branch_name = repo.branch if repo.branch else (repo.name.split('_')[-1] if '_' in repo.name else 'master') %}
-                            <span class="badge" style="background:#f1f5f9;color:#475569;font-size:0.7rem;">{{ branch_name }}</span>
+                            <span class="branch-tag branch-tag-dropdown {% if 'master' in branch_name or 'main' in branch_name %}branch-tag-master{% elif 'dev' in branch_name or 'develop' in branch_name %}branch-tag-dev{% elif 'release' in branch_name %}branch-tag-release{% elif 'feature' in branch_name %}branch-tag-feature{% elif 'hotfix' in branch_name or 'fix' in branch_name %}branch-tag-hotfix{% else %}branch-tag-default{% endif %}"><i class="fas fa-code-branch"></i>{{ branch_name }}</span>
                             <small class="text-muted ms-1">({{ repo.type }})</small>
                         </a>
                     </li>
@@ -157,7 +169,7 @@
                 <a class="nav-link {% if group.current_repo.id == repository.id %}active{% endif %}" 
                    href="{{ url_for('commit_list', repository_id=group.current_repo.id) }}">
                     {% set branch_name = group.current_repo.branch if group.current_repo.branch else (group.current_repo.name.split('_')[-1] if '_' in group.current_repo.name else 'master') %}
-                    {{ group.name }} <span class="badge" style="background:#eff6ff;color:#1d4ed8;font-size:0.7rem;padding:0.15rem 0.4rem;border-radius:4px;">{{ branch_name }}</span>
+                    {{ group.name }} <span class="branch-tag {% if 'master' in branch_name or 'main' in branch_name %}branch-tag-master{% elif 'dev' in branch_name or 'develop' in branch_name %}branch-tag-dev{% elif 'release' in branch_name %}branch-tag-release{% elif 'feature' in branch_name %}branch-tag-feature{% elif 'hotfix' in branch_name or 'fix' in branch_name %}branch-tag-hotfix{% else %}branch-tag-default{% endif %}"><i class="fas fa-code-branch"></i>{{ branch_name }}</span>
                 </a>
                 {% endif %}
             </li>

@@ -4,23 +4,24 @@
 
 {% block head %}
 <style>
-    /* ===== 页面头部 ===== */
+    /* ===== 页面头部 - 白底简洁风格 ===== */
     .form-page-header {
-        background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
-        border-radius: 0.75rem;
-        padding: 1.25rem 1.5rem;
+        background: #ffffff;
+        border-radius: 0;
+        padding: 1.5rem 0 1rem 0;
         margin-bottom: 1.5rem;
-        box-shadow: 0 4px 16px rgba(13,110,253,0.2);
-        color: #fff;
+        box-shadow: none;
+        color: #1e293b;
+        border-bottom: 1px solid #e2e8f0;
     }
-    .form-page-header h2 { color: #fff !important; font-size: 1.3rem; margin-bottom: 0.25rem; }
+    .form-page-header h2 { color: #1e293b !important; font-size: 1.5rem; font-weight: 700; margin-bottom: 0.35rem; }
     .form-page-header .breadcrumb { margin: 0; padding: 0; background: none; }
-    .form-page-header .breadcrumb-item a { color: rgba(255,255,255,0.75); text-decoration: none; font-size: 0.85rem; }
-    .form-page-header .breadcrumb-item a:hover { color: #fff; }
-    .form-page-header .breadcrumb-item.active { color: rgba(255,255,255,0.55); font-size: 0.85rem; }
-    .form-page-header .breadcrumb-item + .breadcrumb-item::before { color: rgba(255,255,255,0.35); }
-    .form-page-header .btn-outline-light { border: 1.5px solid rgba(255,255,255,0.4); color: #fff; font-size: 0.8rem; border-radius: 6px; }
-    .form-page-header .btn-outline-light:hover { background: rgba(255,255,255,0.12); }
+    .form-page-header .breadcrumb-item a { color: #0d6efd; text-decoration: underline; font-size: 0.82rem; font-weight: 500; }
+    .form-page-header .breadcrumb-item a:hover { color: #0a58ca; }
+    .form-page-header .breadcrumb-item.active { color: #6c757d; font-size: 0.82rem; }
+    .form-page-header .breadcrumb-item + .breadcrumb-item::before { color: #94a3b8; content: "/"; }
+    .form-page-header .btn-back { border: 1.5px solid #e2e8f0; color: #374151; font-size: 0.8rem; border-radius: 6px; background: #fff; }
+    .form-page-header .btn-back:hover { background: #f1f5f9; border-color: #cbd5e1; }
 
     /* ===== 表单卡片 ===== */
     .form-card { border: 1px solid #e2e8f0; border-radius: 0.75rem; box-shadow: 0 2px 8px rgba(0,0,0,0.06); background: #fff; }

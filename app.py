@@ -1623,9 +1623,48 @@ def schedule_weekly_sync_tasks():
             log_print(f"检查了 {len(active_configs)} 个周版本配置", 'WEEKLY')
     except Exception as e:
         log_print(f"调度周版本同步任务失败: {e}", 'WEEKLY', force=True)
+# 定时自动同步仓库新提交
+
+
+def schedule_repository_sync_tasks():
+    """定时同步所有已克隆仓库的新提交记录"""
+    try:
+        with app.app_context():
+            # 获取所有克隆完成的仓库
+            repositories = Repository.query.filter_by(clone_status='completed').all()
+            if not repositories:
+                return
+
+            synced_count = 0
+            for repository in repositories:
+                try:
+                    # 检查是否已存在该仓库的 pending 同步任务，避免重复
+                    existing_task = BackgroundTask.query.filter_by(
+                        repository_id=repository.id,
+                        task_type='auto_sync',
+                        status='pending'
+                    ).first()
+                    if existing_task:
+                        continue
+
+                    # 创建自动同步任务
+                    task_id = create_auto_sync_task(repository.id)
+                    if task_id:
+                        synced_count += 1
+                except Exception as repo_err:
+                    log_print(f"⚠️ 仓库 {repository.name} 自动同步调度失败: {repo_err}", 'SCHEDULER', force=True)
+                    continue
+
+            if synced_count > 0:
+                log_print(f"📋 已调度 {synced_count} 个仓库自动同步任务", 'SCHEDULER')
+    except Exception as e:
+        log_print(f"❌ 定时仓库同步调度失败: {e}", 'SCHEDULER', force=True)
+
+
 # 设置定时任务
 schedule.every().day.at("04:00").do(schedule_cleanup_task)
 schedule.every(2).minutes.do(schedule_weekly_sync_tasks)  # 每2分钟检查一次周版本同步
+schedule.every(10).minutes.do(schedule_repository_sync_tasks)  # 每10分钟自动同步仓库新提交
 # 定时任务检查器
 
 

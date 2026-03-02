@@ -32,9 +32,9 @@
                         <i class="fas fa-broom"></i>
                         <span>清理旧版本</span>
                     </button>
-                    <button class="action-btn danger" onclick="clearAllCache()">
+                    <button class="action-btn danger" id="clearCacheBtn" onclick="clearAllCache()">
                         <i class="fas fa-trash-alt"></i>
-                        <span>清理全部</span>
+                        <span id="clearCacheBtnText">清理全部</span>
                     </button>
                 </div>
             </div>
@@ -1134,13 +1134,28 @@ let projectStatsData = {};
 function showAllProjects() {
     currentProjectId = 'all';
     updateActiveTab('all');
+    updateClearCacheButton();
     refreshStats();
 }
 
 function showProject(projectId) {
     currentProjectId = projectId;
     updateActiveTab(projectId);
+    updateClearCacheButton();
     refreshProjectStats();
+}
+
+function updateClearCacheButton() {
+    const btnText = document.getElementById('clearCacheBtnText');
+    if (!btnText) return;
+    if (currentProjectId === 'all') {
+        btnText.textContent = '清理全部';
+    } else {
+        // 获取项目名称
+        const activeTab = document.querySelector(`[data-project="${currentProjectId}"] span`);
+        const projectName = activeTab ? activeTab.textContent : '';
+        btnText.textContent = '清理选中项目';
+    }
 }
 
 function updateActiveTab(projectId) {
@@ -1346,6 +1361,36 @@ function clearOldCache() {
 }
 
 function clearAllCache() {
+    // 根据当前选中的项目决定行为
+    if (currentProjectId !== 'all') {
+        // 清理选中项目的缓存
+        const activeTab = document.querySelector(`[data-project="${currentProjectId}"] span`);
+        const projectName = activeTab ? activeTab.textContent : '选中项目';
+        if (!confirm(`⚠️ 确定要清理项目「${projectName}」的所有缓存吗？\n\n这将删除该项目下的：\n• 所有Diff数据缓存\n• 所有HTML缓存\n• 所有周版本Excel缓存\n• 相关后台任务\n\n不会影响其他项目的缓存。\n此操作不可撤销！`)) {
+            return;
+        }
+        addLogEntry(`开始清理项目「${projectName}」的缓存...`, 'warning');
+        fetch('/admin/excel-cache/clear-project-cache', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project_id: parseInt(currentProjectId) })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                addLogEntry(`🎉 项目「${projectName}」缓存清理完成: ${data.message}`, 'success');
+                refreshStats();
+            } else {
+                addLogEntry(`清理失败: ${data.message}`, 'error');
+            }
+        })
+        .catch(error => {
+            addLogEntry(`清理失败: ${error.message}`, 'error');
+        });
+        return;
+    }
+
+    // 清理全部缓存（原始逻辑）
     if (!confirm('⚠️ 警告：确定要清理所有缓存吗？\n\n这将删除：\n• 所有HTML缓存\n• 所有Excel差异数据缓存\n• 所有周版本Excel缓存\n\n下次访问时需要重新生成。\n\n这个操作不可撤销！')) {
         return;
     }

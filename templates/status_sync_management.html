@@ -19,12 +19,12 @@
                 </div>
                 <nav aria-label="breadcrumb" class="breadcrumb-sync">
                     <ol class="breadcrumb mb-0">
-                        <li class="breadcrumb-item"><a href="{{ url_for('index') }}" style="color:rgba(255,255,255,0.8)">项目列表</a></li>
+                        <li class="breadcrumb-item"><a href="{{ url_for('index') }}" style="color:#0d6efd; text-decoration:underline; font-size:0.82rem; font-weight:500;">项目列表</a></li>
                         {% if project %}
-                        <li class="breadcrumb-item"><a href="{{ url_for('project_detail', project_id=project.id) }}" style="color:rgba(255,255,255,0.8)">{{ project.name }}</a></li>
-                        <li class="breadcrumb-item active" style="color:rgba(255,255,255,0.6)">状态同步映射</li>
+                        <li class="breadcrumb-item"><a href="{{ url_for('project_detail', project_id=project.id) }}" style="color:#0d6efd; text-decoration:underline; font-size:0.82rem; font-weight:500;">{{ project.name }}</a></li>
+                        <li class="breadcrumb-item active" style="color:#6c757d; font-size:0.82rem;">状态同步映射</li>
                         {% else %}
-                        <li class="breadcrumb-item active" style="color:rgba(255,255,255,0.6)">状态同步映射</li>
+                        <li class="breadcrumb-item active" style="color:#6c757d; font-size:0.82rem;">状态同步映射</li>
                         {% endif %}
                     </ol>
                 </nav>
@@ -154,10 +154,12 @@
                     <i class="fas fa-exclamation-triangle"></i>
                     <span>清空所有文件的确认状态，重置为"待确认"。<strong>此操作不可逆！</strong></span>
                 </div>
-                <button type="button" class="action-btn-sync danger" onclick="clearAllStatus()">
-                    <i class="fas fa-trash-alt"></i>
-                    <span>清空所有状态</span>
-                </button>
+                <div style="display: flex; justify-content: flex-end;">
+                    <button type="button" class="action-btn-sync danger" onclick="clearAllStatus()">
+                        <i class="fas fa-trash-alt"></i>
+                        <span>清空所有状态</span>
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -271,23 +273,19 @@
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
-/* ====== 页面头部 - 深蓝风格 ====== */
+/* ====== 页面头部 - 白底简洁风格 ====== */
 .page-header-sync {
-    background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
-    border-radius: 0.75rem;
-    padding: 28px 32px;
+    background: #ffffff;
+    border-radius: 0;
+    padding: 1.5rem 0 1rem 0;
     margin-bottom: 24px;
-    box-shadow: 0 4px 16px rgba(30, 58, 95, 0.18);
+    box-shadow: none;
     position: relative;
     overflow: hidden;
+    border-bottom: 1px solid #e2e8f0;
 }
 .page-header-sync::before {
-    content: '';
-    position: absolute;
-    top: -60px; right: -60px;
-    width: 180px; height: 180px;
-    background: rgba(255,255,255,0.06);
-    border-radius: 50%;
+    display: none;
 }
 .header-content-sync {
     display: flex;
@@ -309,23 +307,23 @@
     gap: 16px;
 }
 .title-icon-sync {
-    width: 52px; height: 52px;
-    background: rgba(255,255,255,0.15);
-    border-radius: 12px;
+    width: 44px; height: 44px;
+    background: #eff6ff;
+    border-radius: 10px;
     display: flex;
     align-items: center;
     justify-content: center;
 }
-.title-icon-sync i { font-size: 24px; color: white; }
+.title-icon-sync i { font-size: 20px; color: #0d6efd; }
 .title-text-sync h1 {
-    color: white;
-    font-size: 1.6rem;
+    color: #1e293b;
+    font-size: 1.5rem;
     font-weight: 700;
     margin: 0;
 }
 .subtitle-sync {
-    color: rgba(255,255,255,0.75);
-    font-size: 0.875rem;
+    color: #64748b;
+    font-size: 0.82rem;
     margin: 2px 0 0 0;
     font-weight: 400;
 }
@@ -337,7 +335,8 @@
     padding: 0;
 }
 .breadcrumb-sync .breadcrumb-item + .breadcrumb-item::before {
-    color: rgba(255,255,255,0.4);
+    color: #94a3b8;
+    content: "/";
 }
 .header-actions-sync {
     display: flex;
@@ -361,12 +360,13 @@
     white-space: nowrap;
 }
 .action-btn-sync.primary {
-    background: rgba(255,255,255,0.15);
-    color: white;
-    border: 1px solid rgba(255,255,255,0.25);
+    background: #ffffff;
+    color: #374151;
+    border: 1.5px solid #e2e8f0;
 }
 .action-btn-sync.primary:hover {
-    background: rgba(255,255,255,0.25);
+    background: #f1f5f9;
+    border-color: #cbd5e1;
 }
 .action-btn-sync.secondary {
     background: #0969da;
@@ -575,6 +575,7 @@
     gap: 8px;
     margin-top: 14px;
     flex-wrap: wrap;
+    justify-content: flex-end;
 }
 
 /* ====== 管理操作卡片 ====== */

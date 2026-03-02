@@ -79,6 +79,67 @@ def clear_all_diff_cache():
         return jsonify({"success": False, "message": f"清理失败: {str(exc)}"}), 500
 
 
+@cache_management_bp.route("/admin/excel-cache/clear-project-cache", methods=["POST"])
+@require_admin
+def clear_project_cache():
+    """清理指定项目的所有缓存数据"""
+    db, DiffCache, ExcelHtmlCache, Repository, BackgroundTask, log_print = get_runtime_models(
+        "db", "DiffCache", "ExcelHtmlCache", "Repository", "BackgroundTask", "log_print",
+    )
+    try:
+        data = request.get_json() or {}
+        project_id = data.get("project_id")
+        if not project_id:
+            return jsonify({"success": False, "message": "缺少 project_id 参数"}), 400
+
+        # 获取该项目下所有仓库 ID
+        repo_ids = [r.id for r in Repository.query.filter_by(project_id=project_id).all()]
+        if not repo_ids:
+            return jsonify({"success": True, "message": "该项目下没有仓库，无需清理", "diff_count": 0, "html_count": 0, "task_count": 0})
+
+        # 批量删除 DiffCache
+        diff_count = DiffCache.query.filter(DiffCache.repository_id.in_(repo_ids)).delete(synchronize_session=False)
+        # 批量删除 ExcelHtmlCache
+        html_count = ExcelHtmlCache.query.filter(ExcelHtmlCache.repository_id.in_(repo_ids)).delete(synchronize_session=False)
+        # 批量删除相关后台任务
+        task_count = BackgroundTask.query.filter(
+            BackgroundTask.repository_id.in_(repo_ids),
+            BackgroundTask.task_type.in_(["excel_diff", "auto_sync"])
+        ).delete(synchronize_session=False)
+
+        # 尝试清理周版本Excel缓存
+        weekly_count = 0
+        try:
+            WeeklyVersionExcelCache = get_runtime_models("WeeklyVersionExcelCache")[0]
+            from models.weekly_version import WeeklyVersionConfig
+            config_ids = [c.id for c in WeeklyVersionConfig.query.filter_by(project_id=project_id).all()]
+            if config_ids:
+                weekly_count = WeeklyVersionExcelCache.query.filter(
+                    WeeklyVersionExcelCache.config_id.in_(config_ids)
+                ).delete(synchronize_session=False)
+        except Exception:
+            pass
+
+        db.session.commit()
+
+        log_print(
+            f"🧹 项目 {project_id} 缓存清理完成: {diff_count} 条Diff缓存, {html_count} 条HTML缓存, {weekly_count} 条周版本缓存, {task_count} 条任务",
+            "INFO",
+        )
+        return jsonify({
+            "success": True,
+            "message": f"已清理项目缓存: {diff_count} 条Diff + {html_count} 条HTML + {weekly_count} 条周版本 + {task_count} 条任务",
+            "diff_count": diff_count,
+            "html_count": html_count,
+            "weekly_count": weekly_count,
+            "task_count": task_count,
+        })
+    except Exception as exc:
+        db.session.rollback()
+        log_print(f"清理项目缓存失败: {exc}", "INFO", force=True)
+        return jsonify({"success": False, "message": f"清理失败: {str(exc)}"}), 500
+
+
 @cache_management_bp.route("/admin/excel-cache/strategy-info", methods=["GET"])
 def get_cache_strategy_info():
     """Get cache strategy summary."""

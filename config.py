@@ -74,4 +74,5 @@ CACHE_CONFIG = {
 SCHEDULE_CONFIG = {
     'cleanup_time': "04:00",  # 每天4点清理
     'weekly_sync_interval': 2,  # 每2分钟检查周版本同步
+    'repo_sync_interval': 10,  # 每10分钟自动同步仓库新提交
 }
