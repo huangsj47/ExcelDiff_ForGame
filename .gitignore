@@ -29,13 +29,11 @@ htmlcov/
 
 .env
 .env.*
+!.env.simple
 
 .vscode/
 .idea/
 node_modules/
 
-task_plan.md
-TODO_FIX_LIST.md
-findings.md
-progress.md
+
 
