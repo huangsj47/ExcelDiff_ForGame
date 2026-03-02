@@ -410,6 +410,10 @@ def request_join_project(
     user_id: int, project_id: int, message: Optional[str] = None
 ) -> tuple[bool, Optional[str]]:
     """提交项目加入申请。"""
+    project = db.session.get(Project, project_id)
+    if not project:
+        return False, "项目不存在"
+
     # 检查是否已经是成员
     existing_member = AuthUserProject.query.filter_by(
         user_id=user_id, project_id=project_id

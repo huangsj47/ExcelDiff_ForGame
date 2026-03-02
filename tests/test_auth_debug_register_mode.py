@@ -9,8 +9,8 @@ from contextlib import contextmanager
 
 from app import app, db
 from auth import routes as auth_routes
-from auth.models import AuthUser, AuthUserProject, PlatformRole
-from auth.services import add_user_to_project, register_user
+from auth.models import AuthProjectJoinRequest, AuthUser, AuthUserProject, PlatformRole
+from auth.services import add_user_to_project, register_user, request_join_project
 from models.project import Project
 
 
@@ -64,6 +64,18 @@ def _login_admin(client):
             "_csrf_token": "test-csrf-token-debug-register",
             "username": "admin",
             "password": "admin123",
+        },
+        follow_redirects=True,
+    )
+
+
+def _login_user(client, username: str, password: str):
+    return client.post(
+        "/auth/login",
+        data={
+            "_csrf_token": "test-csrf-token-debug-register",
+            "username": username,
+            "password": password,
         },
         follow_redirects=True,
     )
@@ -210,6 +222,38 @@ def test_api_add_project_member_rejects_nonexistent_user():
         assert data.get("success") is False
         assert data.get("message") == "用户不存在"
         assert AuthUserProject.query.filter_by(project_id=project.id).count() == 0
+
+
+def test_request_join_project_rejects_nonexistent_project():
+    with _client():
+        user, err = register_user("join_missing_project_user", "pass1234")
+        assert err is None
+        assert user is not None
+
+        success, error = request_join_project(user.id, 999999, "join test")
+        assert success is False
+        assert error == "项目不存在"
+        assert AuthProjectJoinRequest.query.count() == 0
+
+
+def test_api_request_join_project_rejects_nonexistent_project():
+    with _client() as client:
+        reg_resp = _post_register(client, "join_api_missing_project_user", PlatformRole.NORMAL.value)
+        assert reg_resp.status_code == 200
+
+        login_resp = _login_user(client, "join_api_missing_project_user", "pass1234")
+        assert login_resp.status_code == 200
+
+        response = client.post(
+            "/auth/api/request-join-project",
+            json={"project_id": 999999, "message": "join please"},
+            headers={"X-CSRFToken": "test-csrf-token-debug-register"},
+        )
+        data = response.get_json(silent=True) or {}
+        assert response.status_code == 400
+        assert data.get("success") is False
+        assert data.get("message") == "项目不存在"
+        assert AuthProjectJoinRequest.query.count() == 0
 
 
 def test_login_does_not_500_when_auth_tables_missing():
