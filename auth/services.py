@@ -455,17 +455,16 @@ def handle_join_request(
         return False, f"申请已处理 (状态: {req.status})"
 
     if action == "approve":
-        req.status = RequestStatus.APPROVED.value
-        req.handled_by = handled_by
-        req.handled_at = datetime.now(timezone.utc)
-
         # 自动将用户添加到项目
         success, err = add_user_to_project(
             req.user_id, req.project_id, approved_by=handled_by
         )
-        if not success:
-            # 如果已经是成员，也标记为已通过
-            pass
+        if not success and err != "用户已是该项目成员":
+            return False, f"处理加入申请失败: {err}"
+
+        req.status = RequestStatus.APPROVED.value
+        req.handled_by = handled_by
+        req.handled_at = datetime.now(timezone.utc)
 
     elif action == "deny":
         req.status = RequestStatus.DENIED.value

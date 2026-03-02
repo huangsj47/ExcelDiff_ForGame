@@ -9,9 +9,16 @@ from contextlib import contextmanager
 
 from app import app, db
 from auth import routes as auth_routes
-from auth.models import AuthProjectJoinRequest, AuthUser, AuthUserProject, PlatformRole
+from auth.models import (
+    AuthProjectJoinRequest,
+    AuthUser,
+    AuthUserProject,
+    PlatformRole,
+    RequestStatus,
+)
 from auth.services import (
     add_user_to_project,
+    handle_join_request,
     register_user,
     request_join_project,
     toggle_user_active,
@@ -259,6 +266,41 @@ def test_api_request_join_project_rejects_nonexistent_project():
         assert data.get("success") is False
         assert data.get("message") == "项目不存在"
         assert AuthProjectJoinRequest.query.count() == 0
+
+
+def test_handle_join_request_keeps_pending_when_add_member_fails(monkeypatch):
+    with _client():
+        user, err = register_user("join_handle_fail_user", "pass1234")
+        assert err is None
+        assert user is not None
+
+        project = Project(code="JOIN_HANDLE_FAIL", name="Join Handle Fail")
+        db.session.add(project)
+        db.session.commit()
+
+        success_req, error_req = request_join_project(user.id, project.id, "please allow")
+        assert success_req is True
+        assert error_req is None
+
+        req = AuthProjectJoinRequest.query.filter_by(
+            user_id=user.id,
+            project_id=project.id,
+            status=RequestStatus.PENDING.value,
+        ).first()
+        assert req is not None
+
+        def _fake_add_user_to_project(*_args, **_kwargs):
+            return False, "项目不存在"
+
+        monkeypatch.setattr("auth.services.add_user_to_project", _fake_add_user_to_project)
+        ok, err = handle_join_request(req.id, "approve", handled_by=0)
+        assert ok is False
+        assert err is not None
+        assert "项目不存在" in err
+
+        refreshed = db.session.get(AuthProjectJoinRequest, req.id)
+        assert refreshed is not None
+        assert refreshed.status == RequestStatus.PENDING.value
 
 
 def test_deactivated_user_session_is_not_treated_as_logged_in():
