@@ -54,6 +54,13 @@
     .repo-sub-card .btn-view { background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%); color: #fff; border: none; }
     .repo-sub-card .btn-view:hover { box-shadow: 0 2px 6px rgba(13,110,253,0.3); color: #fff; }
 
+    /* ===== 刷新按钮 ===== */
+    .btn-refresh-stats { cursor: pointer; border: none; background: none; padding: 0.15rem 0.35rem; border-radius: 4px; transition: all 0.2s; }
+    .btn-refresh-stats:hover { background: rgba(13,202,240,0.15); }
+    .btn-refresh-stats .fa-sync-alt { transition: transform 0.5s; }
+    .btn-refresh-stats.refreshing .fa-sync-alt { animation: spin 0.8s linear infinite; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
     /* ===== 空状态 ===== */
     .empty-state { padding: 3rem 1rem; text-align: center; }
     .empty-state i { color: #94a3b8; }
@@ -63,7 +70,7 @@
 {% endblock %}
 
 {% block content %}
-<div class="container">
+<div class="container-fluid" style="max-width: 1700px;">
     <!-- Deep Blue 页面头部 -->
     <div class="weekly-page-header">
         <div class="d-flex justify-content-between align-items-center">
@@ -130,11 +137,9 @@
                                                         {{ config.repository.name }}
                                                     </span>
                                                 </h6>
-                                                {% if config.is_active %}
-                                                    <span class="badge bg-info" title="自动同步" style="font-size:0.65rem;">
-                                                        <i class="fas fa-sync-alt"></i>
-                                                    </span>
-                                                {% endif %}
+                                                <button type="button" class="btn-refresh-stats badge bg-info" title="点击刷新统计" style="font-size:0.65rem;" onclick="refreshConfigStats({{ config.id }}, this)">
+                                                    <i class="fas fa-sync-alt"></i>
+                                                </button>
                                             </div>
                                             <div class="small text-muted mb-2">
                                                 <div><i class="fas fa-code-branch me-1"></i>{{ config.branch }}</div>
@@ -1015,6 +1020,30 @@ document.getElementById('editConfigForm').addEventListener('submit', function(e)
         alert('更新失败，请重试');
     });
 });
+
+// 手动刷新单个配置的统计信息（点击刷新按钮触发）
+function refreshConfigStats(configId, btnElement) {
+    // 防止重复点击
+    if (btnElement.classList.contains('refreshing')) return;
+    btnElement.classList.add('refreshing');
+
+    // 找到对应的 stats-container
+    const container = document.querySelector(`.stats-container[data-config-id="${configId}"]`);
+    if (container) {
+        container.innerHTML = `
+            <div class="d-flex justify-content-between small">
+                <span class="text-muted">刷新中...</span>
+                <div class="spinner-border spinner-border-sm" role="status"></div>
+            </div>
+        `;
+        loadConfigStats(configId, container);
+    }
+
+    // 动画结束后移除 class
+    setTimeout(() => {
+        btnElement.classList.remove('refreshing');
+    }, 800);
+}
 
 // 异步加载所有配置的统计信息
 function loadAllStats() {
