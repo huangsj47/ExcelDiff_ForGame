@@ -2,106 +2,280 @@
 
 {% block title %}项目列表 - Diff确认平台{% endblock %}
 
+{% block head %}
+<style>
+    .index-header {
+        background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
+        border-radius: 0.75rem;
+        padding: 1.75rem 2rem;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        border: 1px solid #e9ecef;
+    }
+    .index-header h2 {
+        font-weight: 700;
+        color: #1e293b;
+        font-size: 1.5rem;
+        margin: 0;
+    }
+    .index-header p {
+        color: #64748b;
+        font-size: 0.9rem;
+        margin: 0.25rem 0 0;
+    }
+    .index-table-card {
+        border: 1px solid #d0d7de;
+        border-radius: 0.75rem;
+        overflow: hidden;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+    .index-table-card .table {
+        margin-bottom: 0;
+        font-size: 0.9rem;
+    }
+    .index-table-card .table thead th {
+        background: linear-gradient(180deg, #f6f8fa 0%, #eef1f5 100%);
+        border-bottom: 2px solid #d0d7de;
+        font-weight: 600;
+        color: #24292f;
+        padding: 12px 16px;
+        white-space: nowrap;
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+    }
+    .index-table-card .table tbody tr {
+        transition: background 0.15s ease;
+    }
+    .index-table-card .table tbody tr:hover {
+        background: #f6f8fa;
+    }
+    .index-table-card .table tbody td {
+        padding: 14px 16px;
+        vertical-align: middle;
+        border-bottom: 1px solid #eaecef;
+        color: #24292f;
+    }
+    .project-code-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-weight: 600;
+        color: #0969da;
+    }
+    .project-code-badge .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #2da44e;
+        flex-shrink: 0;
+    }
+    .action-btn-group {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+    }
+    .action-btn-group .btn {
+        font-size: 0.78rem;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-weight: 500;
+        transition: all 0.15s ease;
+        white-space: nowrap;
+    }
+    .action-btn-group .btn:hover {
+        transform: translateY(-1px);
+    }
+    .empty-state {
+        padding: 4rem 2rem;
+        text-align: center;
+    }
+    .empty-state-icon {
+        width: 72px;
+        height: 72px;
+        background: linear-gradient(135deg, #e8f0fe, #dbeafe);
+        border-radius: 50%;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 1.5rem;
+    }
+    .empty-state-icon i {
+        font-size: 1.75rem;
+        color: #0969da;
+    }
+    /* 模态框增强 */
+    .modal-content {
+        border: none;
+        border-radius: 0.75rem;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.12);
+    }
+    .modal-header {
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        border-bottom: 1px solid #dee2e6;
+        border-radius: 0.75rem 0.75rem 0 0;
+        padding: 1.25rem 1.5rem;
+    }
+    .modal-header .modal-title {
+        font-weight: 700;
+        color: #1e293b;
+    }
+    .modal-body {
+        padding: 1.5rem;
+    }
+    .modal-body .form-label {
+        font-weight: 600;
+        color: #374151;
+        font-size: 0.875rem;
+    }
+    .modal-body .form-control {
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+        padding: 0.625rem 0.875rem;
+        transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .modal-body .form-control:focus {
+        border-color: #0969da;
+        box-shadow: 0 0 0 3px rgba(9,105,218,0.12);
+    }
+    .modal-footer {
+        border-top: 1px solid #eaecef;
+        padding: 1rem 1.5rem;
+    }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="container">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <h2>我的项目</h2>
-        <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#newProjectModal">
-            <i class="fas fa-plus me-2"></i>新建项目
-        </button>
+    <!-- 页面标题区域 -->
+    <div class="index-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h2><i class="fas fa-folder me-2" style="color: #0969da;"></i>我的项目</h2>
+                <p>选择一个项目查看仓库提交和差异对比</p>
+            </div>
+            {% if is_admin() %}
+            <button type="button" class="btn btn-primary px-4" data-bs-toggle="modal" data-bs-target="#newProjectModal" style="border-radius: 8px; font-weight: 600; box-shadow: 0 2px 8px rgba(13,110,253,0.3);">
+                <i class="fas fa-plus me-2"></i>新建项目
+            </button>
+            {% else %}
+            <a href="{{ url_for('admin_login', next=request.url) }}" class="btn btn-outline-secondary btn-sm" style="border-radius: 8px;">
+                <i class="fas fa-lock me-1"></i>管理员登录
+            </a>
+            {% endif %}
+        </div>
     </div>
 
     {% if projects %}
-    <div class="card">
-        <div class="card-body p-0">
-            <table class="table table-hover mb-0">
-                <thead class="table-light">
-                    <tr>
-                        <th>项目代号</th>
-                        <th>易协作代号</th>
-                        <th>所属部门</th>
-                        <th>操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for project in projects %}
-                    <tr>
-                        <td>
-                            <i class="fas fa-check-circle text-success me-2"></i>
+    <div class="index-table-card">
+        <table class="table table-hover">
+            <thead>
+                <tr>
+                    <th>项目代号</th>
+                    <th>易协作代号</th>
+                    <th>所属部门</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for project in projects %}
+                <tr>
+                    <td>
+                        <span class="project-code-badge">
+                            <span class="dot"></span>
                             {{ project.code }}
-                        </td>
-                        <td>{{ project.name }}</td>
-                        <td>{{ project.department or '-' }}</td>
-                        <td>
+                        </span>
+                    </td>
+                    <td style="font-weight: 500;">{{ project.name }}</td>
+                    <td style="color: #656d76;">{{ project.department or '-' }}</td>
+                    <td>
+                        <div class="action-btn-group">
                             <a href="{{ url_for('project_detail', project_id=project.id) }}" class="btn btn-success btn-sm">
-                                进入项目
+                                <i class="fas fa-arrow-right me-1"></i>进入项目
                             </a>
-                            <a href="{{ url_for('repository_config', project_id=project.id) }}" class="btn btn-info btn-sm">
-                                仓库配置
+                            {% if is_admin() %}
+                            <a href="{{ url_for('repository_config', project_id=project.id) }}" class="btn btn-info btn-sm" style="color: #fff;">
+                                <i class="fas fa-database me-1"></i>仓库配置
                             </a>
                             <a href="/{{ project.code }}/status-sync/management" class="btn btn-warning btn-sm">
                                 <i class="fas fa-exchange-alt me-1"></i>查看映射
                             </a>
                             <button class="btn btn-danger btn-sm" onclick="deleteProject({{ project.id }})">
-                                删除项目
+                                <i class="fas fa-trash me-1"></i>删除
                             </button>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
     </div>
     {% else %}
-    <div class="text-center py-5">
-        <i class="fas fa-folder-open fa-3x text-muted mb-3"></i>
-        <h4 class="text-muted">暂无项目</h4>
-        <p class="text-muted">点击上方按钮创建您的第一个项目</p>
+    <div class="index-table-card">
+        <div class="empty-state">
+            <div class="empty-state-icon">
+                <i class="fas fa-folder-open"></i>
+            </div>
+            <h4 style="font-weight: 700; color: #1e293b; margin-bottom: 0.5rem;">暂无项目</h4>
+            {% if is_admin() %}
+            <p style="color: #64748b; max-width: 320px; margin: 0 auto;">点击上方「新建项目」按钮创建您的第一个项目</p>
+            {% else %}
+            <p style="color: #64748b; max-width: 320px; margin: 0 auto;">请联系管理员创建项目</p>
+            {% endif %}
+        </div>
     </div>
     {% endif %}
 </div>
 
+{% if is_admin() %}
 <!-- 新建项目模态框 -->
 <div class="modal fade" id="newProjectModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">新建项目</h5>
+                <h5 class="modal-title"><i class="fas fa-plus-circle me-2" style="color: #0969da;"></i>新建项目</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form method="POST" action="{{ url_for('projects') }}">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                 <div class="modal-body">
                     <div class="mb-3">
-                        <label for="code" class="form-label">项目代号 *</label>
-                        <input type="text" class="form-control" id="code" name="code" required>
+                        <label for="code" class="form-label">项目代号 <span style="color: #cf222e;">*</span></label>
+                        <input type="text" class="form-control" id="code" name="code" required placeholder="例如: PROJECT-001">
                     </div>
                     <div class="mb-3">
-                        <label for="name" class="form-label">项目名称 *</label>
-                        <input type="text" class="form-control" id="name" name="name" required>
+                        <label for="name" class="form-label">项目名称 <span style="color: #cf222e;">*</span></label>
+                        <input type="text" class="form-control" id="name" name="name" required placeholder="例如: 配表Diff确认平台">
                     </div>
                     <div class="mb-3">
                         <label for="department" class="form-label">所属部门</label>
-                        <input type="text" class="form-control" id="department" name="department">
+                        <input type="text" class="form-control" id="department" name="department" placeholder="例如: 研发部">
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                    <button type="submit" class="btn btn-primary">创建</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" style="border-radius: 8px;">取消</button>
+                    <button type="submit" class="btn btn-primary" style="border-radius: 8px; font-weight: 600;">
+                        <i class="fas fa-check me-1"></i>创建项目
+                    </button>
                 </div>
             </form>
         </div>
     </div>
 </div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
 <script>
+{% if is_admin() %}
 function deleteProject(projectId) {
     if (confirm('确定要删除这个项目吗？此操作不可恢复。')) {
         fetch(`/projects/${projectId}/delete`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
+                'X-CSRF-Token': '{{ csrf_token() }}'
             }
         }).then(response => {
             if (response.ok) {
@@ -112,5 +286,6 @@ function deleteProject(projectId) {
         });
     }
 }
+{% endif %}
 </script>
 {% endblock %}
