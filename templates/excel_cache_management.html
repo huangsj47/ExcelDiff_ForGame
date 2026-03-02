@@ -249,20 +249,12 @@
             </div>
             <div class="log-pagination" id="logPagination" style="display: none;">
                 <div class="pagination-info">
-                    <span id="logInfo">显示 1-10 条，共 0 条记录</span>
+                    <span id="logInfo">已加载 0 条，共 0 条记录（最多显示1000条）</span>
                 </div>
                 <div class="pagination-controls">
-                    <button class="pagination-btn" id="prevPageBtn" onclick="loadPreviousPage()" disabled>
-                        <i class="fas fa-chevron-left"></i>
-                        上一页
-                    </button>
                     <button class="pagination-btn primary" id="loadMoreBtn" onclick="loadMoreLogs()">
                         <i class="fas fa-plus"></i>
-                        查看更多
-                    </button>
-                    <button class="pagination-btn" id="nextPageBtn" onclick="loadNextPage()" disabled>
-                        下一页
-                        <i class="fas fa-chevron-right"></i>
+                        加载更多
                     </button>
                 </div>
             </div>
@@ -384,12 +376,12 @@
 }
 
 .action-btn.secondary {
-    background: #0969da;
+    background: #e8590c;
     color: white;
 }
 
 .action-btn.secondary:hover {
-    background: #0550ae;
+    background: #d9480f;
 }
 
 .action-btn.warning {
@@ -1063,7 +1055,8 @@ let operationLogEntries = [];
 let currentLogPage = 1;
 let totalLogPages = 1;
 let totalLogCount = 0;
-let logsPerPage = 10;
+let logsPerPage = 50;
+const MAX_LOG_DISPLAY = 1000;
 
 function addLogEntry(message, type = 'info', existingTime = null) {
     // 如果有现有时间戳（从后端传来），使用它；否则生成新的时间戳
@@ -1490,55 +1483,39 @@ function loadOperationLogs(page = 1) {
 
 // 加载更多日志
 function loadMoreLogs() {
+    // 已加载条数达到上限则不再加载
+    if (operationLogEntries.length >= MAX_LOG_DISPLAY) {
+        return;
+    }
     if (currentLogPage < totalLogPages) {
         loadOperationLogs(currentLogPage + 1);
     }
-}
-
-// 加载上一页
-function loadPreviousPage() {
-    if (currentLogPage > 1) {
-        // 重新加载前面的页面
-        operationLogEntries = [];
-        for (let i = 1; i < currentLogPage; i++) {
-            loadOperationLogs(i);
-        }
-    }
-}
-
-// 加载下一页
-function loadNextPage() {
-    loadMoreLogs();
 }
 
 // 更新分页控件
 function updatePaginationControls() {
     const paginationDiv = document.getElementById('logPagination');
     const logInfo = document.getElementById('logInfo');
-    const prevBtn = document.getElementById('prevPageBtn');
-    const nextBtn = document.getElementById('nextPageBtn');
     const loadMoreBtn = document.getElementById('loadMoreBtn');
     
     if (totalLogCount > 0) {
         paginationDiv.style.display = 'flex';
         
-        // 更新信息显示
-        const startIndex = Math.max(1, (currentLogPage - 1) * logsPerPage + 1);
-        const endIndex = Math.min(currentLogPage * logsPerPage, totalLogCount);
-        logInfo.textContent = `显示 ${startIndex}-${endIndex} 条，共 ${totalLogCount} 条记录`;
+        // 已加载条数
+        const loadedCount = operationLogEntries.length;
+        const displayTotal = Math.min(totalLogCount, MAX_LOG_DISPLAY);
+        logInfo.textContent = `已加载 ${loadedCount} 条，共 ${totalLogCount} 条记录（最多显示${MAX_LOG_DISPLAY}条）`;
         
-        // 更新按钮状态
-        prevBtn.disabled = currentLogPage <= 1;
-        nextBtn.disabled = currentLogPage >= totalLogPages;
-        
-        // 查看更多按钮
-        if (currentLogPage >= totalLogPages) {
+        // 判断是否还能加载更多
+        const hasMore = currentLogPage < totalLogPages && loadedCount < MAX_LOG_DISPLAY;
+        if (!hasMore) {
             loadMoreBtn.style.display = 'none';
         } else {
+            const remaining = Math.min(totalLogCount - loadedCount, MAX_LOG_DISPLAY - loadedCount);
             loadMoreBtn.style.display = 'flex';
             loadMoreBtn.innerHTML = `
                 <i class="fas fa-plus"></i>
-                查看更多 (还有 ${totalLogCount - currentLogPage * logsPerPage} 条)
+                加载更多 (还有 ${remaining} 条可加载)
             `;
         }
     } else {

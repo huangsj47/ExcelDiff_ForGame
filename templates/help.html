@@ -1,0 +1,673 @@
+{% extends "base.html" %}
+
+{% block title %}使用帮助 - Diff确认平台{% endblock %}
+
+{% block content %}
+<div class="help-container">
+    <!-- 页面头部 -->
+    <div class="help-hero">
+        <div class="hero-content">
+            <div class="hero-icon">
+                <i class="fas fa-book-open"></i>
+            </div>
+            <h1>使用帮助</h1>
+            <p class="hero-subtitle">快速了解 Diff确认平台 的核心功能与操作指南</p>
+        </div>
+    </div>
+
+    <!-- 快速导航 -->
+    <div class="help-nav-card">
+        <div class="help-nav-grid">
+            <a href="#section-project" class="help-nav-item">
+                <i class="fas fa-project-diagram"></i>
+                <span>新建项目</span>
+            </a>
+            <a href="#section-repo" class="help-nav-item">
+                <i class="fas fa-code-branch"></i>
+                <span>配置仓库</span>
+            </a>
+            <a href="#section-weekly" class="help-nav-item">
+                <i class="fas fa-calendar-week"></i>
+                <span>周版本管理</span>
+            </a>
+            <a href="#section-diff" class="help-nav-item">
+                <i class="fas fa-file-excel"></i>
+                <span>查看Diff</span>
+            </a>
+            <a href="#section-colors" class="help-nav-item">
+                <i class="fas fa-palette"></i>
+                <span>颜色说明</span>
+            </a>
+            <a href="#section-cache" class="help-nav-item">
+                <i class="fas fa-database"></i>
+                <span>缓存管理</span>
+            </a>
+        </div>
+    </div>
+
+    <!-- 正文内容区域 -->
+    <div class="help-content-area">
+
+        <!-- 第1节：新建项目 -->
+        <section class="help-section" id="section-project">
+            <div class="section-header">
+                <div class="section-number">1</div>
+                <div>
+                    <h2>新建项目</h2>
+                    <p>创建一个新项目来管理你的配表仓库</p>
+                </div>
+            </div>
+            <div class="section-body">
+                <div class="step-list">
+                    <div class="step-item">
+                        <div class="step-badge">1</div>
+                        <div class="step-content">
+                            <h4>进入项目管理页面</h4>
+                            <p>点击顶部导航栏的 <strong>「项目列表」</strong> 进入主页，点击 <strong>「新建项目」</strong> 按钮。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">2</div>
+                        <div class="step-content">
+                            <h4>填写项目信息</h4>
+                            <p>在弹出的表单中填写以下信息：</p>
+                            <ul class="info-list">
+                                <li><strong>项目代号</strong>：项目的唯一标识符，如 <code>G119</code>，用于URL路径</li>
+                                <li><strong>项目名称</strong>：项目的可读名称，如「某某项目」</li>
+                                <li><strong>项目描述</strong>：（可选）简要描述项目用途</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">3</div>
+                        <div class="step-content">
+                            <h4>提交创建</h4>
+                            <p>确认信息无误后点击「创建」按钮，项目即创建成功。创建后可在项目卡片中进一步配置仓库。</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="tip-box">
+                    <i class="fas fa-lightbulb"></i>
+                    <span>项目代号创建后不可修改，请谨慎填写。建议使用简短的英文+数字组合。</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 第2节：配置仓库 -->
+        <section class="help-section" id="section-repo">
+            <div class="section-header">
+                <div class="section-number">2</div>
+                <div>
+                    <h2>配置 SVN / Git 仓库</h2>
+                    <p>为项目添加代码仓库以追踪配表变更</p>
+                </div>
+            </div>
+            <div class="section-body">
+                <div class="step-list">
+                    <div class="step-item">
+                        <div class="step-badge">1</div>
+                        <div class="step-content">
+                            <h4>进入项目详情</h4>
+                            <p>在项目列表中点击对应项目的 <strong>「管理」</strong> 按钮，进入项目管理页面。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">2</div>
+                        <div class="step-content">
+                            <h4>添加仓库</h4>
+                            <p>点击 <strong>「添加仓库」</strong> 按钮，选择仓库类型并填写信息：</p>
+                            <div class="dual-panel">
+                                <div class="panel-card">
+                                    <h5><i class="fab fa-git-alt" style="color: #f05032;"></i> Git 仓库</h5>
+                                    <ul class="info-list">
+                                        <li><strong>仓库名称</strong>：仓库显示名</li>
+                                        <li><strong>仓库URL</strong>：Git 远程地址（HTTPS 或 SSH）</li>
+                                        <li><strong>默认分支</strong>：如 <code>main</code> 或 <code>master</code></li>
+                                        <li><strong>认证方式</strong>：用户名密码或SSH密钥</li>
+                                    </ul>
+                                </div>
+                                <div class="panel-card">
+                                    <h5><i class="fas fa-server" style="color: #809cc1;"></i> SVN 仓库</h5>
+                                    <ul class="info-list">
+                                        <li><strong>仓库名称</strong>：仓库显示名</li>
+                                        <li><strong>仓库URL</strong>：SVN 仓库地址</li>
+                                        <li><strong>用户名</strong>：SVN 登录用户名</li>
+                                        <li><strong>密码</strong>：SVN 登录密码</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">3</div>
+                        <div class="step-content">
+                            <h4>同步提交记录</h4>
+                            <p>仓库添加成功后，系统会自动开始同步提交记录。你也可以手动点击 <strong>「同步」</strong> 按钮来获取最新提交。</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="tip-box warning">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <span>请确保仓库地址可访问，认证信息正确。如果使用SSH方式，请确认服务器已配置对应的SSH密钥。</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 第3节：周版本管理 -->
+        <section class="help-section" id="section-weekly">
+            <div class="section-header">
+                <div class="section-number">3</div>
+                <div>
+                    <h2>周版本管理</h2>
+                    <p>按周管理配表版本，支持合并多次提交的 Diff</p>
+                </div>
+            </div>
+            <div class="section-body">
+                <div class="step-list">
+                    <div class="step-item">
+                        <div class="step-badge">1</div>
+                        <div class="step-content">
+                            <h4>创建周版本配置</h4>
+                            <p>在项目管理页面，点击 <strong>「周版本管理」</strong> 标签页，然后点击 <strong>「新增周版本」</strong>。</p>
+                            <ul class="info-list">
+                                <li><strong>版本名称</strong>：如「2025年第12周」</li>
+                                <li><strong>起止日期</strong>：设定该周版本覆盖的时间范围</li>
+                                <li><strong>关联仓库</strong>：选择要追踪的仓库</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">2</div>
+                        <div class="step-content">
+                            <h4>查看周版本 Diff</h4>
+                            <p>周版本创建后，系统会自动合并该时间范围内所有提交的 Diff。点击 <strong>「查看Diff」</strong> 可以看到整个周期的合并变更。</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="tip-box">
+                    <i class="fas fa-lightbulb"></i>
+                    <span>周版本 Diff 会合并所有单次提交的变更，只展示最终的新旧值差异，便于整体审阅。</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 第4节：查看 Excel Diff -->
+        <section class="help-section" id="section-diff">
+            <div class="section-header">
+                <div class="section-number">4</div>
+                <div>
+                    <h2>查看 Excel Diff</h2>
+                    <p>对比 Excel 配表文件的变更内容</p>
+                </div>
+            </div>
+            <div class="section-body">
+                <div class="step-list">
+                    <div class="step-item">
+                        <div class="step-badge">1</div>
+                        <div class="step-content">
+                            <h4>进入仓库提交列表</h4>
+                            <p>在项目管理页面，点击对应仓库的 <strong>「提交记录」</strong>，查看所有提交历史。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">2</div>
+                        <div class="step-content">
+                            <h4>查看单次提交 Diff</h4>
+                            <p>点击某次提交记录的 <strong>「查看Diff」</strong> 按钮，进入 Diff 详情页面。</p>
+                            <ul class="info-list">
+                                <li>页面顶部显示提交的基本信息（提交者、时间、消息）</li>
+                                <li>如果提交包含 Excel 文件变更，将以表格形式显示差异</li>
+                                <li>多个 Sheet 页通过标签页切换查看</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">3</div>
+                        <div class="step-content">
+                            <h4>确认状态管理</h4>
+                            <p>每条提交记录都有确认状态，可标记为「待确认」「已确认」「已拒绝」，方便团队协作追踪。</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 第5节：Diff 颜色说明 -->
+        <section class="help-section" id="section-colors">
+            <div class="section-header">
+                <div class="section-number">5</div>
+                <div>
+                    <h2>Diff 颜色与标识说明</h2>
+                    <p>了解 Excel Diff 中各种颜色和标记的含义</p>
+                </div>
+            </div>
+            <div class="section-body">
+                <h4 class="sub-title">行级别变更</h4>
+                <div class="color-legend">
+                    <div class="legend-item legend-added-row">
+                        <div class="legend-sample">
+                            <div class="sample-row added-row">
+                                <span class="sample-cell num">1001</span>
+                                <span class="sample-cell">new_key</span>
+                                <span class="sample-cell">新增的值</span>
+                                <span class="sample-cell">true</span>
+                            </div>
+                        </div>
+                        <div class="legend-desc">
+                            <strong>新增行（整行绿色底色）</strong>
+                            <p>表示该行是新版本中新增的数据行，之前不存在。</p>
+                        </div>
+                    </div>
+                    <div class="legend-item legend-removed-row">
+                        <div class="legend-sample">
+                            <div class="sample-row removed-row">
+                                <span class="sample-cell num">502</span>
+                                <span class="sample-cell">old_key</span>
+                                <span class="sample-cell">已删除的值</span>
+                                <span class="sample-cell">false</span>
+                            </div>
+                        </div>
+                        <div class="legend-desc">
+                            <strong>删除行（整行红色底色）</strong>
+                            <p>表示该行在新版本中已被删除，只存在于旧版本中。</p>
+                        </div>
+                    </div>
+                </div>
+
+                <h4 class="sub-title" style="margin-top: 28px;">单元格级别变更</h4>
+                <div class="color-legend">
+                    <div class="legend-item legend-cell-change">
+                        <div class="legend-sample">
+                            <div class="sample-row normal-row">
+                                <span class="sample-cell num mod">677</span>
+                                <span class="sample-cell">some_key</span>
+                                <span class="sample-cell cell-modified">
+                                    <span class="old-val">旧的值</span>
+                                    <span class="new-val">新的值</span>
+                                </span>
+                                <span class="sample-cell">true</span>
+                            </div>
+                        </div>
+                        <div class="legend-desc">
+                            <strong>修改的单元格</strong>
+                            <p>当某一行只有部分单元格发生变化时：</p>
+                            <ul>
+                                <li><span class="inline-badge old">红色背景</span> 表示 <strong>旧值</strong>（修改前的值）</li>
+                                <li><span class="inline-badge new">绿色背景</span> 表示 <strong>新值</strong>（修改后的值）</li>
+                                <li>未变化的单元格保持白色背景</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <h4 class="sub-title" style="margin-top: 28px;">行号标识</h4>
+                <div class="color-legend">
+                    <div class="legend-item">
+                        <div class="legend-sample">
+                            <div class="row-number-samples">
+                                <span class="rn-sample rn-added">1001</span>
+                                <span class="rn-label">新增行</span>
+                                <span class="rn-sample rn-removed">502</span>
+                                <span class="rn-label">删除行</span>
+                                <span class="rn-sample rn-modified">677</span>
+                                <span class="rn-label">修改行</span>
+                            </div>
+                        </div>
+                        <div class="legend-desc">
+                            <strong>行号颜色</strong>
+                            <p>行号列也会用不同颜色标识该行的变更类型，方便快速定位。</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tip-box">
+                    <i class="fas fa-lightbulb"></i>
+                    <span>在 Diff 页面中，你可以通过 Sheet 标签页切换不同工作表。标签上带有 <span class="badge bg-warning">变更</span> 标记的表示该 Sheet 有内容变化。</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 第6节：缓存管理 -->
+        <section class="help-section" id="section-cache">
+            <div class="section-header">
+                <div class="section-number">6</div>
+                <div>
+                    <h2>缓存管理</h2>
+                    <p>管理系统的 Diff 缓存数据，优化性能</p>
+                </div>
+            </div>
+            <div class="section-body">
+                <div class="step-list">
+                    <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-tachometer-alt"></i></div>
+                        <div class="step-content">
+                            <h4>缓存加速原理</h4>
+                            <p>系统会缓存已生成的 Diff 数据和 HTML 渲染结果，避免重复计算。首次查看 Diff 时可能较慢，后续访问将直接使用缓存，速度极快。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-broom"></i></div>
+                        <div class="step-content">
+                            <h4>缓存清理</h4>
+                            <p>在 <strong>「缓存管理」</strong> 页面，你可以：</p>
+                            <ul class="info-list">
+                                <li><strong>清理过期</strong>：清理超时的普通缓存和已过期的长处理文件缓存</li>
+                                <li><strong>清理旧版本</strong>：当 Diff 逻辑版本升级后，清理旧版本的缓存</li>
+                                <li><strong>清理全部</strong>：删除所有缓存（下次访问需重新生成）</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                <div class="tip-box warning">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <span>清理全部缓存后，所有 Diff 页面在首次访问时需要重新计算和渲染，可能需要较长时间，请谨慎操作。</span>
+                </div>
+            </div>
+        </section>
+
+    </div><!-- end help-content-area -->
+</div><!-- end help-container -->
+
+<style>
+/* ==================== 帮助页面样式 ==================== */
+.help-container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0 20px 60px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* 页面头部 */
+.help-hero {
+    background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
+    border-radius: 0.75rem;
+    padding: 48px 32px;
+    margin-bottom: 24px;
+    text-align: center;
+    color: white;
+    position: relative;
+    overflow: hidden;
+}
+.help-hero::before {
+    content: '';
+    position: absolute;
+    top: -80px; right: -80px;
+    width: 220px; height: 220px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 50%;
+}
+.help-hero::after {
+    content: '';
+    position: absolute;
+    bottom: -60px; left: -40px;
+    width: 160px; height: 160px;
+    background: rgba(255,255,255,0.04);
+    border-radius: 50%;
+}
+.hero-content { position: relative; z-index: 2; }
+.hero-icon {
+    width: 64px; height: 64px;
+    background: rgba(255,255,255,0.15);
+    border-radius: 16px;
+    display: inline-flex;
+    align-items: center; justify-content: center;
+    margin-bottom: 16px;
+}
+.hero-icon i { font-size: 28px; color: white; }
+.help-hero h1 {
+    font-size: 2rem; font-weight: 700;
+    margin: 0 0 8px;
+}
+.hero-subtitle {
+    font-size: 1rem;
+    opacity: 0.8;
+    margin: 0;
+}
+
+/* 快速导航 */
+.help-nav-card {
+    background: white;
+    border-radius: 0.75rem;
+    padding: 20px;
+    margin-bottom: 28px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border: 1px solid #d0d7de;
+}
+.help-nav-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 10px;
+}
+.help-nav-item {
+    display: flex; flex-direction: column;
+    align-items: center; gap: 6px;
+    padding: 14px 8px;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    text-decoration: none;
+    color: #24292f;
+    transition: all 0.2s;
+    font-size: 13px; font-weight: 600;
+}
+.help-nav-item i {
+    font-size: 20px; color: #0969da;
+}
+.help-nav-item:hover {
+    border-color: #0969da;
+    background: #f0f6ff;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(9,105,218,0.12);
+    color: #0969da;
+    text-decoration: none;
+}
+@media (max-width: 768px) {
+    .help-nav-grid { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* 内容区 */
+.help-content-area { display: flex; flex-direction: column; gap: 24px; }
+
+/* 章节卡片 */
+.help-section {
+    background: white;
+    border-radius: 0.75rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border: 1px solid #d0d7de;
+    overflow: hidden;
+    scroll-margin-top: 80px;
+}
+.section-header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 20px 24px;
+    background: #f6f8fa;
+    border-bottom: 1px solid #d0d7de;
+}
+.section-number {
+    width: 40px; height: 40px;
+    background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
+    color: white;
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.1rem; font-weight: 700;
+    flex-shrink: 0;
+}
+.section-header h2 {
+    margin: 0; font-size: 1.15rem; font-weight: 700; color: #24292f;
+}
+.section-header p {
+    margin: 2px 0 0; font-size: 0.82rem; color: #656d76;
+}
+.section-body { padding: 24px; }
+
+/* 步骤列表 */
+.step-list { display: flex; flex-direction: column; gap: 20px; }
+.step-item {
+    display: flex; gap: 14px; align-items: flex-start;
+}
+.step-badge {
+    width: 32px; height: 32px;
+    background: #0969da; color: white;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700;
+    flex-shrink: 0; margin-top: 2px;
+}
+.step-content { flex: 1; }
+.step-content h4 {
+    margin: 0 0 6px; font-size: 1rem; font-weight: 600; color: #24292f;
+}
+.step-content p { margin: 0 0 8px; font-size: 0.9rem; color: #3d4451; line-height: 1.65; }
+.info-list {
+    margin: 6px 0 0; padding-left: 20px;
+    font-size: 0.88rem; color: #3d4451; line-height: 1.7;
+}
+.info-list li { margin-bottom: 4px; }
+.info-list code {
+    background: #f0f3f6; padding: 2px 6px; border-radius: 4px;
+    font-size: 0.85em; color: #0969da;
+}
+
+/* 提示框 */
+.tip-box {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 14px 16px;
+    background: #ddf4ff; border: 1px solid #54aeff;
+    border-radius: 6px;
+    font-size: 0.88rem; color: #24292f;
+    margin-top: 20px;
+}
+.tip-box i { color: #0969da; margin-top: 2px; flex-shrink: 0; }
+.tip-box.warning {
+    background: #fff8c5; border-color: #d4a72c;
+}
+.tip-box.warning i { color: #9a6700; }
+
+/* 双面板 */
+.dual-panel {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+    margin-top: 12px;
+}
+.panel-card {
+    padding: 16px;
+    background: #f6f8fa;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+}
+.panel-card h5 {
+    margin: 0 0 10px; font-size: 0.95rem; font-weight: 600;
+    display: flex; align-items: center; gap: 8px;
+}
+@media (max-width: 640px) {
+    .dual-panel { grid-template-columns: 1fr; }
+}
+
+/* 小标题 */
+.sub-title {
+    font-size: 1rem; font-weight: 600; color: #24292f;
+    margin: 0 0 14px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid #0969da;
+    display: inline-block;
+}
+
+/* ===== 颜色说明演示 ===== */
+.color-legend { display: flex; flex-direction: column; gap: 18px; }
+.legend-item {
+    display: flex; gap: 20px; align-items: flex-start;
+    padding: 16px;
+    border: 1px solid #d0d7de;
+    border-radius: 8px;
+    background: #fafbfc;
+}
+.legend-sample { flex-shrink: 0; }
+.legend-desc { flex: 1; }
+.legend-desc strong { font-size: 0.92rem; color: #24292f; }
+.legend-desc p { margin: 4px 0 0; font-size: 0.85rem; color: #656d76; line-height: 1.6; }
+.legend-desc ul { margin: 6px 0 0; padding-left: 18px; font-size: 0.85rem; color: #656d76; }
+.legend-desc ul li { margin-bottom: 3px; }
+
+/* 示例行 */
+.sample-row {
+    display: flex;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    overflow: hidden;
+    font-size: 12px;
+    min-width: 280px;
+}
+.sample-cell {
+    padding: 6px 10px;
+    border-right: 1px solid #dee2e6;
+    white-space: nowrap;
+}
+.sample-cell:last-child { border-right: none; }
+.sample-cell.num { font-weight: 700; min-width: 44px; text-align: center; }
+
+/* 新增行示例 */
+.added-row .sample-cell {
+    background: #53d471; color: #000; font-weight: 600;
+}
+.added-row .sample-cell.num {
+    background: #2da44e; color: #fff;
+}
+
+/* 删除行示例 */
+.removed-row .sample-cell {
+    background: #f76571; color: #000; font-weight: 600;
+}
+.removed-row .sample-cell.num {
+    background: #cf222e; color: #fff;
+}
+
+/* 普通修改行示例 */
+.normal-row .sample-cell {
+    background: #fff;
+}
+.normal-row .sample-cell.num.mod {
+    background: #fff3cd; color: #856404; font-weight: 700;
+}
+.cell-modified {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 4px 8px !important;
+    background: #fff !important;
+}
+.old-val {
+    background: #ee3f51; color: #fff;
+    padding: 1px 6px; border-radius: 3px;
+    font-size: 11px;
+}
+.new-val {
+    background: #2e7d32; color: #fff;
+    padding: 1px 6px; border-radius: 3px;
+    font-size: 11px;
+}
+
+/* 行号示例 */
+.row-number-samples {
+    display: flex; align-items: center; gap: 8px;
+    flex-wrap: wrap;
+}
+.rn-sample {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 44px; padding: 4px 10px;
+    border-radius: 4px; font-size: 12px; font-weight: 700;
+}
+.rn-added { background: #c8e6c9; color: #155724; }
+.rn-removed { background: #ffcdd2; color: #721c24; }
+.rn-modified { background: #fff3cd; color: #856404; }
+.rn-label { font-size: 12px; color: #656d76; margin-right: 10px; }
+
+/* 内联标记 */
+.inline-badge {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 3px;
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+.inline-badge.old { background: #ee3f51; color: #fff; }
+.inline-badge.new { background: #2e7d32; color: #fff; }
+
+/* 滚动平滑 */
+html { scroll-behavior: smooth; }
+</style>

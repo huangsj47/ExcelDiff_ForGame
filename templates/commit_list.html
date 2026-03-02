@@ -1756,6 +1756,25 @@ function toggleStatusDropdown(event) {
             bodyMenu.classList.remove('dropdown-menu', 'custom-dropdown');
             bodyMenu.classList.add('show');
             
+            // 修复克隆后的ID冲突：给Portal中的checkbox加后缀，同步更新label的for属性
+            bodyMenu.querySelectorAll('.status-checkbox').forEach(cb => {
+                const oldId = cb.id;
+                if (oldId) {
+                    const newId = oldId + '_portal';
+                    cb.id = newId;
+                    // 更新对应label的for属性
+                    const label = bodyMenu.querySelector(`label[for="${oldId}"]`);
+                    if (label) {
+                        label.setAttribute('for', newId);
+                    }
+                }
+            });
+            // 同样修复按钮的ID，避免getElementById冲突
+            const portalApplyBtn = bodyMenu.querySelector('#applyStatusBtn');
+            if (portalApplyBtn) portalApplyBtn.id = 'applyStatusBtn_portal';
+            const portalClearBtn = bodyMenu.querySelector('#clearStatusBtn');
+            if (portalClearBtn) portalClearBtn.id = 'clearStatusBtn_portal';
+            
             // 添加到body
             document.body.appendChild(bodyMenu);
             
@@ -1773,7 +1792,7 @@ function toggleStatusDropdown(event) {
             });
             
             // 绑定应用按钮事件
-            const applyBtn = bodyMenu.querySelector('#applyStatusBtn');
+            const applyBtn = bodyMenu.querySelector('#applyStatusBtn_portal');
             if (applyBtn) {
                 applyBtn.addEventListener('click', function(e) {
                     e.preventDefault();
@@ -1826,7 +1845,7 @@ function toggleStatusDropdown(event) {
             }
             
             // 绑定清空按钮事件
-            const clearBtn = bodyMenu.querySelector('#clearStatusBtn');
+            const clearBtn = bodyMenu.querySelector('#clearStatusBtn_portal');
             if (clearBtn) {
                 clearBtn.addEventListener('click', function(e) {
                     e.preventDefault();

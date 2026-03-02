@@ -1593,6 +1593,28 @@ class GitService:
         # 使用快速比较，确保能检测到变化
         return self._fast_compare_rows(current_sheet, previous_sheet)
     
+    @staticmethod
+    def _normalize_cell_value(val):
+        """标准化单元格值，统一处理NaN/None/空字符串，避免假diff"""
+        import math
+        if val is None:
+            return None
+        # 处理 float NaN
+        if isinstance(val, float):
+            if math.isnan(val):
+                return None
+        # 尝试 pandas isna
+        try:
+            import pandas as pd
+            if pd.isna(val):
+                return None
+        except (TypeError, ValueError, ImportError):
+            pass
+        val_str = str(val).strip()
+        if val_str.lower() in ('', 'nan', 'none', 'null', '<na>', 'undefined'):
+            return None
+        return val_str
+
     def _fast_compare_rows(self, current_sheet, previous_sheet):
         """快速行比较 - 生成前端兼容的数据格式"""
         # 检测数据格式并获取合并后的表头（处理列删除/新增）
@@ -1626,6 +1648,9 @@ class GitService:
         diff_rows = []
         has_changes = False
         
+        # 值规范化函数，避免NaN/None/空字符串产生假diff
+        normalize = self._normalize_cell_value
+        
         # 优化的逐行比较，生成单元格级别的变化数据
         for i in range(max_rows):
             if i < len(current_sheet) and i < len(previous_sheet):
@@ -1641,27 +1666,35 @@ class GitService:
                         current_value = current_row.get(header, '')
                         previous_value = previous_row.get(header, '')
                         
+                        # 规范化值后再比较，避免NaN vs ''等假diff
+                        norm_current = normalize(current_value)
+                        norm_previous = normalize(previous_value)
+                        
                         # 如果列在当前版本中不存在，标记为删除
                         if header not in current_headers and header in previous_headers:
-                            cell_changes[header] = {
-                                'old': str(previous_value),
-                                'new': '',
-                                'status': 'removed'
-                            }
-                            row_has_changes = True
+                            # 仅当旧值非空时才标记为删除
+                            if norm_previous is not None:
+                                cell_changes[header] = {
+                                    'old': str(previous_value),
+                                    'new': '',
+                                    'status': 'removed'
+                                }
+                                row_has_changes = True
                         # 如果列在前一版本中不存在，标记为新增
                         elif header in current_headers and header not in previous_headers:
+                            # 仅当新值非空时才标记为新增
+                            if norm_current is not None:
+                                cell_changes[header] = {
+                                    'old': '',
+                                    'new': str(current_value),
+                                    'status': 'added'
+                                }
+                                row_has_changes = True
+                        # 如果规范化后的值不同，才标记为修改
+                        elif norm_current != norm_previous:
                             cell_changes[header] = {
-                                'old': '',
-                                'new': str(current_value),
-                                'status': 'added'
-                            }
-                            row_has_changes = True
-                        # 如果值发生变化，标记为修改
-                        elif current_value != previous_value:
-                            cell_changes[header] = {
-                                'old': str(previous_value),
-                                'new': str(current_value),
+                                'old': str(previous_value) if norm_previous is not None else '',
+                                'new': str(current_value) if norm_current is not None else '',
                                 'status': 'modified'
                             }
                             row_has_changes = True

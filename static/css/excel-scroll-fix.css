@@ -281,10 +281,10 @@ div.excel-table-wrapper,
     overflow-y: scroll !important;
 }
 
-/* 确保表格足够大以触发滚动条 */
+/* 确保表格足够宽以触发水平滚动条 */
 .excel-table-wrapper .excel-diff-table {
     min-width: 1200px !important;
-    min-height: 400px !important;
+    /* 不设置 min-height，避免行数少时行高被拉伸 */
 }
 
 /* 强制显示滚动条 - 最高优先级 */

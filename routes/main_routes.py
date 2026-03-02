@@ -31,6 +31,12 @@ def index():
         return f"主页加载错误: {str(e)}", 500
 
 
+@main_bp.route('/help')
+def help_page():
+    """帮助页面路由"""
+    return render_template('help.html')
+
+
 @main_bp.route('/api/system/info')
 def system_info():
     """系统信息API"""
