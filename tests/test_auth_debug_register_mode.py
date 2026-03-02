@@ -10,16 +10,20 @@ from contextlib import contextmanager
 from app import app, db
 from auth import routes as auth_routes
 from auth.models import (
+    AuthProjectCreateRequest,
     AuthProjectJoinRequest,
     AuthUser,
     AuthUserProject,
     PlatformRole,
     RequestStatus,
 )
+import auth.services as auth_services
 from auth.services import (
     add_user_to_project,
+    handle_create_project_request,
     handle_join_request,
     register_user,
+    request_create_project,
     request_join_project,
     toggle_user_active,
 )
@@ -246,6 +250,73 @@ def test_request_join_project_rejects_nonexistent_project():
         assert success is False
         assert error == "项目不存在"
         assert AuthProjectJoinRequest.query.count() == 0
+
+
+def test_request_join_project_rejects_nonexistent_user():
+    with _client():
+        project = Project(code="JOIN_USER_MISSING", name="Join User Missing")
+        db.session.add(project)
+        db.session.commit()
+
+        success, error = request_join_project(999999, project.id, "join test")
+        assert success is False
+        assert error == "用户不存在"
+        assert AuthProjectJoinRequest.query.count() == 0
+
+
+def test_request_create_project_rejects_nonexistent_user():
+    with _client():
+        success, error = request_create_project(
+            999999,
+            "CREATE_USER_MISSING",
+            "Create User Missing",
+            "QA",
+            "need project",
+        )
+        assert success is False
+        assert error == "用户不存在"
+        assert AuthProjectCreateRequest.query.count() == 0
+
+
+def test_handle_create_project_request_keeps_pending_when_applicant_missing(monkeypatch):
+    with _client():
+        user, err = register_user("create_handle_user", "pass1234")
+        assert err is None
+        assert user is not None
+
+        ok_req, req_err = request_create_project(
+            user.id,
+            "CREATE_HANDLE_MISSING",
+            "Create Handle Missing",
+            "QA",
+            "need project",
+        )
+        assert ok_req is True
+        assert req_err is None
+
+        req = AuthProjectCreateRequest.query.filter_by(
+            user_id=user.id,
+            project_code="CREATE_HANDLE_MISSING",
+            status=RequestStatus.PENDING.value,
+        ).first()
+        assert req is not None
+
+        original_get = auth_services.db.session.get
+
+        def _fake_get(model, identity, *args, **kwargs):
+            if model is AuthUser and identity == user.id:
+                return None
+            return original_get(model, identity, *args, **kwargs)
+
+        monkeypatch.setattr(auth_services.db.session, "get", _fake_get)
+
+        ok, handle_err = handle_create_project_request(req.id, "approve", handled_by=0)
+        assert ok is False
+        assert handle_err == "申请用户不存在，无法创建项目"
+
+        refreshed = db.session.get(AuthProjectCreateRequest, req.id)
+        assert refreshed is not None
+        assert refreshed.status == RequestStatus.PENDING.value
 
 
 def test_api_request_join_project_rejects_nonexistent_project():
