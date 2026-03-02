@@ -93,6 +93,14 @@ from services.status_sync_handlers import (
     status_sync_test,
     weekly_version_batch_confirm_api,
 )
+from services.weekly_version_file_handlers import (
+    get_file_content_at_commit,
+    weekly_version_file_complete_diff,
+    weekly_version_file_previous_version,
+    weekly_version_file_status_api,
+    weekly_version_file_status_info_api,
+    weekly_version_stats_api,
+)
 from routes.cache_management_routes import cache_management_bp
 from routes.commit_diff_routes import commit_diff_bp
 from routes.core_management_routes import core_management_bp
@@ -2638,176 +2646,7 @@ def weekly_version_file_full_diff_data(config_id):
         log_print(f"异步加载周版本diff数据失败: {e}", 'ERROR', force=True)
         return jsonify({'success': False, 'message': f'加载失败: {str(e)}'}), 500
 
-def weekly_version_file_previous_version(config_id):
-    """查看周版本文件的上一版本"""
-    try:
-        config = WeeklyVersionConfig.query.get_or_404(config_id)
-        file_path = request.args.get('file_path')
-        commit_id = request.args.get('commit_id')
-        if not file_path or not commit_id:
-            return "缺少文件路径或提交ID参数", 400
 
-        # 使用Git服务获取指定提交的文件内容
-        from services.threaded_git_service import ThreadedGitService
-        git_service = ThreadedGitService(
-            config.repository.url,
-            config.repository.root_directory,
-            config.repository.username,
-            config.repository.token,
-            config.repository
-        )
-        # 获取文件内容
-        file_content = git_service.get_file_content(commit_id, file_path)
-        if file_content is None:
-            return render_template('error.html',
-                                 error_message="无法获取文件内容，文件可能不存在",
-                                 back_url=url_for('weekly_version_file_full_diff',
-                                                config_id=config_id,
-                                                file_path=file_path))
-        # 获取提交信息
-        commit_info = git_service.get_commit_info(commit_id)
-        return render_template('weekly_version_previous_file.html',
-                             config=config,
-                             file_path=file_path,
-                             commit_id=commit_id,
-                             commit_info=commit_info,
-                             file_content=file_content)
-    except Exception as e:
-        log_print(f"查看上一版本文件失败: {e}", 'ERROR', force=True)
-        return render_template('error.html',
-                             error_message=f"加载失败: {str(e)}",
-                             back_url=url_for('weekly_version_diff', config_id=config_id))
-def weekly_version_file_complete_diff(config_id):
-    """周版本文件完整对比页面（类似单文件diff的完整对比）"""
-    try:
-        config = WeeklyVersionConfig.query.get_or_404(config_id)
-        file_path = request.args.get('file_path')
-        if not file_path:
-            return "缺少文件路径参数", 400
-
-        # 获取该文件的diff缓存
-        diff_cache = WeeklyVersionDiffCache.query.filter_by(
-            config_id=config_id,
-            file_path=file_path
-        ).first()
-        if not diff_cache:
-            return render_template('error.html',
-                                 error_message="未找到该文件的diff数据",
-                                 back_url=url_for('weekly_version_diff', config_id=config_id))
-        # 解析提交信息
-        commit_authors = json.loads(diff_cache.commit_authors) if diff_cache.commit_authors else []
-        commit_messages = json.loads(diff_cache.commit_messages) if diff_cache.commit_messages else []
-        commit_times = json.loads(diff_cache.commit_times) if diff_cache.commit_times else []
-        # 获取基准版本和当前版本的文件内容
-        repository = config.repository
-        # 获取基准版本内容
-        previous_file_content = ""
-        if diff_cache.base_commit_id:
-            try:
-                previous_file_content = get_file_content_at_commit(repository, diff_cache.base_commit_id, file_path)
-            except Exception as e:
-                log_print(f"获取基准版本文件内容失败: {e}", 'ERROR')
-                previous_file_content = ""
-        # 获取当前版本内容
-        current_file_content = ""
-        if diff_cache.latest_commit_id:
-            try:
-                current_file_content = get_file_content_at_commit(repository, diff_cache.latest_commit_id, file_path)
-            except Exception as e:
-                log_print(f"获取当前版本文件内容失败: {e}", 'ERROR')
-                current_file_content = ""
-        # 构建基准版本提交信息
-        base_commit_info = None
-        if diff_cache.base_commit_id:
-            base_commit_info = {
-                'short_id': diff_cache.base_commit_id[:8],
-                'author': '基准版本',
-                'commit_time': config.start_time.strftime('%Y-%m-%d %H:%M'),
-                'message': '周版本基准'
-            }
-        # 生成Git风格的并排diff数据（与单个提交保持一致）
-        side_by_side_diff = generate_side_by_side_diff(current_file_content, previous_file_content)
-        return render_template('weekly_version_complete_diff.html',
-                             config=config,
-                             diff_cache=diff_cache,
-                             file_path=file_path,
-                             commit_authors=commit_authors,
-                             commit_messages=commit_messages,
-                             commit_times=commit_times,
-                             base_commit_info=base_commit_info,
-                             base_commit_id=diff_cache.base_commit_id,
-                             latest_commit_id=diff_cache.latest_commit_id,
-                             previous_file_content=previous_file_content,
-                             current_file_content=current_file_content,
-                             side_by_side_diff=side_by_side_diff)
-    except Exception as e:
-        log_print(f"获取周版本完整文件对比失败: {e}", 'ERROR', force=True)
-        return render_template('error.html',
-                             error_message=f"加载完整文件对比失败: {str(e)}",
-                             back_url=url_for('weekly_version_diff', config_id=config_id))
-def weekly_version_file_status_api(config_id):
-    """更新文件确认状态"""
-    try:
-        config = WeeklyVersionConfig.query.get_or_404(config_id)
-        data = request.get_json()
-        file_path = data.get('file_path')
-        status = data.get('status')
-        if not file_path or not status:
-            return jsonify({'success': False, 'message': '缺少必需参数'}), 400
-
-        # 获取文件的diff缓存
-        diff_cache = WeeklyVersionDiffCache.query.filter_by(
-            config_id=config_id,
-            file_path=file_path
-        ).first()
-        if not diff_cache:
-            return jsonify({'success': False, 'message': '未找到文件记录'}), 404
-
-        # 更新确认状态
-        old_status = diff_cache.overall_status
-        confirmation_status = json.loads(diff_cache.confirmation_status) if diff_cache.confirmation_status else {}
-        confirmation_status['dev'] = status
-        diff_cache.confirmation_status = json.dumps(confirmation_status)
-        diff_cache.overall_status = status
-        diff_cache.updated_at = datetime.now(timezone.utc)
-        db.session.commit()
-        # 同步状态到提交记录
-        if old_status != status:
-            from services.status_sync_service import StatusSyncService
-            sync_service = StatusSyncService(db)
-            sync_result = sync_service.sync_weekly_to_commit(config_id, file_path, status)
-            log_print(f"周版本状态同步结果: {sync_result}", 'SYNC')
-        return jsonify({'success': True, 'message': '状态更新成功'})
-
-    except Exception as e:
-        db.session.rollback()
-        log_print(f"更新文件状态失败: {e}", 'ERROR', force=True)
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-def weekly_version_file_status_info_api(config_id):
-    """获取文件确认状态信息"""
-    try:
-        config = WeeklyVersionConfig.query.get_or_404(config_id)
-        file_path = request.args.get('file_path')
-        if not file_path:
-            return jsonify({'success': False, 'message': '缺少文件路径参数'}), 400
-
-        # 获取文件状态
-        diff_cache = WeeklyVersionDiffCache.query.filter_by(
-            config_id=config_id,
-            file_path=file_path
-        ).first()
-        if not diff_cache:
-            return jsonify({'success': False, 'message': '未找到文件记录'}), 404
-
-        return jsonify({
-            'success': True,
-            'status': diff_cache.overall_status or 'pending',
-            'file_path': file_path
-        })
-    except Exception as e:
-        log_print(f"获取周版本文件状态失败: {e}", 'ERROR', force=True)
-        return jsonify({'success': False, 'message': f'获取失败: {str(e)}'}), 500
 
 
 
@@ -3142,43 +2981,7 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
 
 
 
-def weekly_version_stats_api(config_id):
-    """获取周版本配置统计信息"""
-    try:
-        config = WeeklyVersionConfig.query.get_or_404(config_id)
-        # 统计各状态的文件数量
-        total_files = WeeklyVersionDiffCache.query.filter_by(config_id=config_id).count()
-        pending_count = WeeklyVersionDiffCache.query.filter_by(config_id=config_id, overall_status='pending').count()
-        confirmed_count = WeeklyVersionDiffCache.query.filter_by(config_id=config_id, overall_status='confirmed').count()
-        rejected_count = WeeklyVersionDiffCache.query.filter_by(config_id=config_id, overall_status='rejected').count()
-        return jsonify({
-            'success': True,
-            'stats': {
-                'total_files': total_files,
-                'pending_count': pending_count,
-                'confirmed_count': confirmed_count,
-                'rejected_count': rejected_count
-            }
-        })
-    except Exception as e:
-        log_print(f"获取周版本统计信息失败: {e}", 'ERROR', force=True)
-        return jsonify({'success': False, 'message': str(e)}), 500
 
-def get_file_content_at_commit(repository, commit_id, file_path):
-    """获取指定commit的文件内容"""
-    try:
-        git_service = GitService(
-            repo_url=repository.url,
-            root_directory=repository.root_directory,
-            username=repository.username,
-            token=repository.token,
-            repository=repository
-        )
-        return git_service.get_file_content(commit_id, file_path)
-
-    except Exception as e:
-        log_print(f"获取文件内容失败: {e}", 'ERROR')
-        return ""
 
 def get_status_text(status):
     """获取状态文本"""
