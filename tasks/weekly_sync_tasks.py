@@ -75,8 +75,8 @@ def process_weekly_sync_task(task_data):
             log_print("周版本同步任务缺少config_id", 'WEEKLY', force=True)
             return False
         
-        from models import WeeklyVersionConfig
-        config = WeeklyVersionConfig.query.get(config_id)
+        from models import WeeklyVersionConfig, db
+        config = db.session.get(WeeklyVersionConfig, config_id)
         if not config:
             log_print(f"未找到周版本配置: {config_id}", 'WEEKLY', force=True)
             return False

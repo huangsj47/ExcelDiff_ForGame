@@ -783,6 +783,8 @@ def enforce_admin_access():
         return None
     if any(request.path.startswith(p) for p in AUTH_EXEMPT_PATHS):
         return None
+    if _is_valid_admin_token():
+        return None
 
     # ── 全局登录检查 ──
     # 所有非白名单页面必须登录
@@ -2551,7 +2553,7 @@ def weekly_version_file_full_diff_data(config_id):
         if diff_cache.base_commit_id:
             try:
                 # 重新获取Repository对象，避免SQLAlchemy会话问题
-                repository = Repository.query.get(config.repository_id)
+                repository = db.session.get(Repository, config.repository_id)
                 if not repository:
                     log_print(f"异步获取基准版本信息失败: 仓库不存在 {config.repository_id}", 'ERROR', force=True)
                 else:
@@ -2965,6 +2967,175 @@ def generate_weekly_git_diff_html(config, diff_cache, file_path, force_recalcula
         log_print(f"生成周版本Git diff HTML失败: {e}", 'ERROR', force=True)
         return f"<div class='alert alert-danger'>生成diff内容失败: {str(e)}</div>"
 
+def _merge_segmented_excel_diff_payload(segment_payloads):
+    """将 segmented_diff 中的多个 Excel diff 段合并为可渲染结构。"""
+    if not isinstance(segment_payloads, list) or not segment_payloads:
+        return None
+
+    total_segments = len(segment_payloads)
+    merged_result = {
+        'type': 'excel',
+        'sheets': {},
+        'has_changes': False,
+        'is_merged': True,
+        'merge_strategy': 'segmented',
+        'total_segments': total_segments,
+    }
+
+    for segment_index, segment_payload in enumerate(segment_payloads, start=1):
+        excel_payload = _extract_excel_diff_from_payload(segment_payload)
+        if not excel_payload:
+            continue
+
+        sheets = excel_payload.get('sheets') if isinstance(excel_payload, dict) else None
+        if not isinstance(sheets, dict):
+            continue
+
+        if excel_payload.get('has_changes'):
+            merged_result['has_changes'] = True
+
+        for sheet_name, sheet_data in sheets.items():
+            if not isinstance(sheet_data, dict):
+                continue
+
+            merged_sheet = merged_result['sheets'].setdefault(
+                sheet_name,
+                {
+                    'status': sheet_data.get('status', 'modified'),
+                    'has_changes': False,
+                    'rows': [],
+                    'stats': {'added': 0, 'removed': 0, 'modified': 0},
+                },
+            )
+
+            rows = sheet_data.get('rows') or []
+            if isinstance(rows, list):
+                for row in rows:
+                    if isinstance(row, dict):
+                        row_copy = dict(row)
+                        row_copy.setdefault(
+                            'segment_info',
+                            {'segment_index': segment_index, 'total_segments': total_segments},
+                        )
+                        merged_sheet['rows'].append(row_copy)
+                    else:
+                        merged_sheet['rows'].append(row)
+
+            merged_sheet['has_changes'] = (
+                merged_sheet.get('has_changes', False)
+                or bool(sheet_data.get('has_changes'))
+                or bool(rows)
+            )
+
+            source_stats = sheet_data.get('stats')
+            if isinstance(source_stats, dict):
+                for stat_key in ('added', 'removed', 'modified'):
+                    try:
+                        merged_sheet['stats'][stat_key] += int(source_stats.get(stat_key, 0) or 0)
+                    except (TypeError, ValueError):
+                        continue
+            elif isinstance(rows, list):
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    row_status = row.get('status')
+                    if row_status in merged_sheet['stats']:
+                        merged_sheet['stats'][row_status] += 1
+
+            if merged_sheet['rows']:
+                merged_sheet['status'] = 'modified'
+
+    if not merged_result['sheets']:
+        return None
+    return merged_result
+
+def _extract_excel_diff_from_payload(payload):
+    """从 merged_diff/diff_data/segmented_diff 结构中提取 Excel diff 数据。"""
+    if payload is None:
+        return None
+
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    payload_type = payload.get('type')
+    sheets = payload.get('sheets')
+    if payload_type == 'excel' and isinstance(sheets, dict):
+        return payload
+
+    for nested_key in ('diff_data', 'merged_diff'):
+        nested_payload = payload.get(nested_key)
+        nested_excel = _extract_excel_diff_from_payload(nested_payload)
+        if nested_excel:
+            return nested_excel
+
+    segments = payload.get('segments')
+    if payload_type == 'segmented_diff' and isinstance(segments, list):
+        return _merge_segmented_excel_diff_payload(segments)
+
+    return None
+
+def _load_weekly_excel_diff_from_cache(repository, diff_cache, file_path):
+    """优先复用周版本缓存中的真实合并 diff 数据（含 segmented_diff）。"""
+    merged_payload = None
+    if diff_cache.merged_diff_data:
+        try:
+            merged_payload = json.loads(diff_cache.merged_diff_data)
+        except Exception as parse_err:
+            log_print(
+                f"周版本 merged_diff_data 解析失败，回退实时计算: {file_path}, 错误: {parse_err}",
+                'WEEKLY',
+                force=True,
+            )
+
+    cached_excel_diff = _extract_excel_diff_from_payload(merged_payload)
+    if cached_excel_diff:
+        return cached_excel_diff
+
+    commit_ids = []
+    if isinstance(merged_payload, dict):
+        raw_commit_ids = merged_payload.get('commit_ids')
+        if isinstance(raw_commit_ids, list):
+            commit_ids = [cid for cid in raw_commit_ids if isinstance(cid, str) and cid]
+
+    if not commit_ids:
+        return None
+
+    commit_rows = Commit.query.filter(
+        Commit.repository_id == repository.id,
+        Commit.path == file_path,
+        Commit.commit_id.in_(commit_ids),
+    ).all()
+    if not commit_rows:
+        return None
+
+    commit_map = {item.commit_id: item for item in commit_rows}
+    ordered_commits = [commit_map[cid] for cid in commit_ids if cid in commit_map]
+    if not ordered_commits:
+        ordered_commits = sorted(commit_rows, key=_commit_sort_key_for_merge)
+
+    base_commit = None
+    if diff_cache.base_commit_id:
+        base_commit = Commit.query.filter(
+            Commit.repository_id == repository.id,
+            Commit.path == file_path,
+            Commit.commit_id == diff_cache.base_commit_id,
+        ).first()
+
+    recomputed = generate_merged_diff_data(
+        repository=repository,
+        file_path=file_path,
+        base_commit=base_commit,
+        latest_commit=ordered_commits[-1],
+        commits=ordered_commits,
+    )
+    return _extract_excel_diff_from_payload(recomputed)
+
 def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_recalculate=False):
     """生成周版本Excel文件的合并diff HTML内容"""
     try:
@@ -2983,46 +3154,31 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
                     log_print(f"已清理 {deleted_count} 条周版本Excel缓存: {file_path}", 'WEEKLY')
             except Exception as cache_e:
                 log_print(f"清理周版本Excel缓存失败: {cache_e}", 'WEEKLY', force=True)
-        # 解析提交信息
-        commit_authors = json.loads(diff_cache.commit_authors) if diff_cache.commit_authors else []
-        commit_messages = json.loads(diff_cache.commit_messages) if diff_cache.commit_messages else []
-        commit_times = json.loads(diff_cache.commit_times) if diff_cache.commit_times else []
-        # 获取所有相关的提交ID
-        all_commit_ids = []
-        if diff_cache.base_commit_id:
-            all_commit_ids.append(diff_cache.base_commit_id)
-        if diff_cache.latest_commit_id:
-            all_commit_ids.append(diff_cache.latest_commit_id)
-        # 从commit_messages中提取更多的提交ID（如果有的话）
-        # 这里需要根据实际的数据结构来获取所有相关的提交
-        log_print(f"生成Excel合并diff: {file_path}, 提交数量: {len(all_commit_ids)}", 'WEEKLY')
-        # 查找该文件的所有相关提交记录
-        from sqlalchemy import and_, or_
-        commits = Commit.query.filter(
-            and_(
-                Commit.repository_id == repository.id,
-                Commit.path == file_path,
-                or_(
-                    Commit.commit_id == diff_cache.base_commit_id,
-                    Commit.commit_id == diff_cache.latest_commit_id
-                )
-            )
-        ).order_by(Commit.commit_time.asc()).all()
-        if not commits:
-            return "<div class='alert alert-warning'>未找到相关的Excel提交记录</div>"
+        merged_diff_data = _load_weekly_excel_diff_from_cache(repository, diff_cache, file_path)
 
-        log_print(f"找到 {len(commits)} 个相关提交", 'WEEKLY')
-        # 使用现有的Excel diff处理逻辑
-        if len(commits) == 1:
-            # 单个提交，直接获取其Excel diff数据
-            commit = commits[0]
-            merged_diff_data = get_real_diff_data_for_merge(commit)
+        if merged_diff_data:
+            log_print(f"复用周版本缓存中的合并Excel diff: {file_path}", 'WEEKLY')
         else:
-            # 多个提交，需要合并处理
-            # 暂时使用第一个和最后一个提交进行对比
-            first_commit = commits[0]
-            last_commit = commits[-1]
-            merged_diff_data = get_commit_pair_diff_internal(last_commit, first_commit)
+            log_print(f"周版本缓存缺少可用Excel合并数据，回退实时计算: {file_path}", 'WEEKLY')
+            from sqlalchemy import and_, or_
+            commits = Commit.query.filter(
+                and_(
+                    Commit.repository_id == repository.id,
+                    Commit.path == file_path,
+                    or_(
+                        Commit.commit_id == diff_cache.base_commit_id,
+                        Commit.commit_id == diff_cache.latest_commit_id
+                    )
+                )
+            ).order_by(Commit.commit_time.asc()).all()
+            if not commits:
+                return "<div class='alert alert-warning'>未找到相关的Excel提交记录</div>"
+
+            log_print(f"回退模式找到 {len(commits)} 个相关提交", 'WEEKLY')
+            if len(commits) == 1:
+                merged_diff_data = get_real_diff_data_for_merge(commits[0])
+            else:
+                merged_diff_data = get_commit_pair_diff_internal(commits[-1], commits[0])
         if not merged_diff_data or merged_diff_data.get('type') != 'excel':
             log_print(f"❌ Excel合并diff数据检查失败:", 'WEEKLY', force=True)
             log_print(f"  - merged_diff_data存在: {merged_diff_data is not None}", 'WEEKLY', force=True)
@@ -4074,7 +4230,7 @@ def create_weekly_sync_task(config_id):
 def process_weekly_version_sync(config_id):
     """处理周版本同步任务"""
     try:
-        config = WeeklyVersionConfig.query.get(config_id)
+        config = db.session.get(WeeklyVersionConfig, config_id)
         if not config:
             log_print(f"周版本配置不存在: {config_id}", 'WEEKLY', force=True)
             return
@@ -4222,7 +4378,7 @@ def process_weekly_excel_cache(config_id, file_path):
         start_time = time.time()
         log_print(f"开始生成周版本Excel缓存: 配置 {config_id}, 文件 {file_path}", 'WEEKLY')
         # 获取配置和diff缓存
-        config = WeeklyVersionConfig.query.get(config_id)
+        config = db.session.get(WeeklyVersionConfig, config_id)
         if not config:
             raise Exception(f"周版本配置不存在: {config_id}")
         diff_cache = WeeklyVersionDiffCache.query.filter_by(
@@ -4279,6 +4435,20 @@ def create_weekly_excel_cache_task(config_id, file_path):
     """创建周版本Excel缓存任务"""
     log_print(f"📝 开始创建周版本Excel缓存任务: config_id={config_id}, file_path={file_path}", 'WEEKLY', force=True)
     try:
+        existing_task = BackgroundTask.query.filter(
+            BackgroundTask.task_type == 'weekly_excel_cache',
+            BackgroundTask.repository_id == config_id,
+            BackgroundTask.file_path == file_path,
+            BackgroundTask.status.in_(['pending', 'processing']),
+        ).order_by(BackgroundTask.id.desc()).first()
+        if existing_task:
+            log_print(
+                f"⏭️ 跳过重复周版本Excel缓存任务: config_id={config_id}, "
+                f"file_path={file_path}, existing_task_id={existing_task.id}, status={existing_task.status}",
+                'WEEKLY'
+            )
+            return None
+
         # 创建后台任务来生成Excel HTML缓存
         # 使用repository_id字段存储config_id
         log_print(f"🗃️ 创建数据库任务记录...", 'WEEKLY', force=True)
@@ -4311,6 +4481,7 @@ def create_weekly_excel_cache_task(config_id, file_path):
         background_task_queue.put(task_wrapper)
         log_print(f"✅ 任务已添加到队列，当前队列大小: {background_task_queue.qsize()}", 'WEEKLY', force=True)
         log_print(f"🎉 周版本Excel缓存任务创建完成: {file_path}", 'WEEKLY', force=True)
+        return new_task.id
     except Exception as e:
         log_print(f"❌ 创建周版本Excel缓存任务失败: {e}", 'WEEKLY', force=True)
         log_print(f"错误详情: {type(e).__name__}: {str(e)}", 'WEEKLY', force=True)
@@ -5821,7 +5992,7 @@ def get_cache_status(repository_id):
 
 def get_clone_status(repository_id):
     """轻量级 API：返回仓库的 clone_status，供前端轮询。"""
-    repo = Repository.query.get(repository_id)
+    repo = db.session.get(Repository, repository_id)
     if not repo:
         return jsonify({"success": False, "message": "仓库不存在"}), 404
     # 查询该仓库的提交记录数量，用于判断数据是否真正就绪
@@ -5887,7 +6058,7 @@ def sync_repository(repository_id):
             else:
                 log_print(f"🔍 [MANUAL_SYNC] 首次同步，获取最近800个提交", 'INFO')
             # 检查仓库配置的起始日期限制
-            repository = Repository.query.get(repository_id)
+            repository = db.session.get(Repository, repository_id)
             if repository and repository.start_date:
                 if since_date is None or since_date < repository.start_date:
                     since_date = repository.start_date
@@ -8272,56 +8443,11 @@ def create_tables():
             log_print(f"检查最终表状态失败: {e}", 'DB', force=True)
 def clear_version_mismatch_cache():
     """清理版本不匹配的缓存（自动模式）"""
-    import time
     try:
         log_print(f"检查并清理版本不匹配的缓存 (当前版本: {DIFF_LOGIC_VERSION})", 'CACHE')
-        # 分批清理，避免长时间锁定数据库
-        batch_size = 100
-        total_diff_cleaned = 0
-        total_html_cleaned = 0
-        # 清理DiffCache表中版本不匹配的记录（分批处理）
-        while True:
-            try:
-                diff_cache_batch = DiffCache.query.filter(
-                    DiffCache.diff_version != DIFF_LOGIC_VERSION
-                ).limit(batch_size).all()
-                if not diff_cache_batch:
-                    break
-
-                for cache in diff_cache_batch:
-                    log_print(f"清理版本不匹配的缓存: {cache.file_path} (版本: {cache.diff_version} → {DIFF_LOGIC_VERSION})", 'CACHE')
-                    db.session.delete(cache)
-                db.session.commit()
-                total_diff_cleaned += len(diff_cache_batch)
-                # 短暂休息，释放数据库锁
-                time.sleep(0.1)
-            except Exception as e:
-                log_print(f"清理DiffCache批次失败: {e}", 'CACHE', force=True)
-                db.session.rollback()
-                time.sleep(1)  # 等待后重试
-                continue
-
-        # 清理ExcelHtmlCache表中版本不匹配的记录（分批处理）
-        while True:
-            try:
-                html_cache_batch = ExcelHtmlCache.query.filter(
-                    ExcelHtmlCache.diff_version != DIFF_LOGIC_VERSION
-                ).limit(batch_size).all()
-                if not html_cache_batch:
-                    break
-
-                for cache in html_cache_batch:
-                    log_print(f"清理版本不匹配的HTML缓存: {cache.file_path} (版本: {cache.diff_version} → {DIFF_LOGIC_VERSION})", 'CACHE')
-                    db.session.delete(cache)
-                db.session.commit()
-                total_html_cleaned += len(html_cache_batch)
-                # 短暂休息，释放数据库锁
-                time.sleep(0.1)
-            except Exception as e:
-                log_print(f"清理ExcelHtmlCache批次失败: {e}", 'CACHE', force=True)
-                db.session.rollback()
-                time.sleep(1)  # 等待后重试
-                continue
+        # 使用服务层批量清理，避免 all()+逐条 delete+sleep 带来的启动期开销
+        total_diff_cleaned = excel_cache_service.cleanup_version_mismatch_cache()
+        total_html_cleaned = excel_html_cache_service.cleanup_old_version_cache()
 
         if total_diff_cleaned > 0 or total_html_cleaned > 0:
             log_print(f"清理完成：{total_diff_cleaned} 条数据缓存，{total_html_cleaned} 条HTML缓存", 'CACHE')
