@@ -96,10 +96,17 @@ from utils.request_security import (
     _is_same_origin_request,
     _is_valid_admin_token,
     _has_admin_access,
+    _has_project_admin_access,
+    _has_project_access,
+    _is_logged_in,
+    _get_current_user,
+    _get_accessible_project_ids,
     _unauthorized_admin_response,
+    _unauthorized_login_response,
     csrf_token,
     configure_request_security,
     require_admin,
+    require_login,
 )
 _IS_TESTING = os.environ.get("TESTING", "").lower() in ("1", "true", "yes")
 if not _IS_TESTING:
@@ -744,14 +751,42 @@ def log_request_info():
     """Record incoming request info for admin routes."""
     if request.path.startswith('/admin/'):
         log_print(f"[REQUEST] {request.method} {request.path}", 'REQUEST', force=True)
+# 不需要登录即可访问的端点（白名单）
+AUTH_EXEMPT_ENDPOINTS = frozenset({
+    'static',
+    'admin_login',
+    'admin_logout',
+    'auth_bp.login',
+    'auth_bp.register',
+    'auth_bp.logout',
+    'test',
+})
+
+# 不需要登录即可访问的路径前缀
+AUTH_EXEMPT_PATHS = (
+    '/static/',
+    '/auth/login',
+    '/auth/register',
+    '/auth/logout',
+)
+
 @app.before_request
 def enforce_admin_access():
     if not ENABLE_ADMIN_SECURITY:
         return None
 
-    if request.endpoint in {'static', 'admin_login', 'admin_logout'}:
+    # 白名单端点和路径无需认证
+    if request.endpoint in AUTH_EXEMPT_ENDPOINTS:
+        return None
+    if any(request.path.startswith(p) for p in AUTH_EXEMPT_PATHS):
         return None
 
+    # ── 全局登录检查 ──
+    # 所有非白名单页面必须登录
+    if not _is_logged_in():
+        return _unauthorized_login_response()
+
+    # ── 管理员权限端点检查 ──
     # 始终需要管理员权限的端点
     if request.path.startswith('/admin/') or request.endpoint in SENSITIVE_ENDPOINTS:
         if not _has_admin_access():
@@ -790,6 +825,10 @@ def enforce_csrf():
 app.jinja_env.globals['get_excel_column_letter'] = get_excel_column_letter
 app.jinja_env.globals['csrf_token'] = csrf_token
 app.jinja_env.globals['is_admin'] = _has_admin_access
+app.jinja_env.globals['is_logged_in'] = _is_logged_in
+app.jinja_env.globals['get_current_user'] = _get_current_user
+app.jinja_env.globals['has_project_access'] = _has_project_access
+app.jinja_env.globals['has_project_admin_access'] = _has_project_admin_access
 app.config['SECRET_KEY'] = secret_key
 db_runtime_settings = apply_database_settings(app.config)
 app.secret_key = secret_key
@@ -800,6 +839,36 @@ log_print(
 )
 db.init_app(app)
 _original_print("[TRACE] db.init_app(app) done")
+
+# ── 初始化 Auth 账号系统 ──
+try:
+    from auth import init_auth
+    init_auth(app, db)
+    _original_print("[TRACE] auth module initialized")
+
+    # 注册 Auth Blueprint
+    from auth.routes import auth_bp
+    app.register_blueprint(auth_bp)
+    _original_print("[TRACE] auth_bp registered")
+
+    # 在数据库表创建完成后初始化默认数据
+    with app.app_context():
+        try:
+            from auth.services import init_default_functions, migrate_env_admin_to_db
+            func_count = init_default_functions()
+            if func_count > 0:
+                _original_print(f"[TRACE] auth: initialized {func_count} default functions")
+            admin_user = migrate_env_admin_to_db()
+            if admin_user:
+                _original_print(f"[TRACE] auth: migrated env admin to db: {admin_user.username}")
+        except Exception as e:
+            _original_print(f"[TRACE] auth: default data init skipped: {e}")
+except ImportError as e:
+    _original_print(f"[TRACE] auth module not available: {e}")
+except Exception as e:
+    _original_print(f"[TRACE] auth module init failed: {e}")
+    import traceback; traceback.print_exc()
+
 app.register_blueprint(cache_management_bp)
 _original_print("[TRACE] cache_management_bp registered")
 try:
@@ -1797,9 +1866,38 @@ def help_page():
 def index():
     try:
         log_print("访问主页路由", 'APP')
-        projects = Project.query.order_by(Project.created_at.desc()).all()
-        log_print(f"找到 {len(projects)} 个项目", 'APP')
-        return render_template('index.html', projects=projects)
+
+        # ── 项目隔离：根据用户角色过滤可见项目 ──
+        from utils.request_security import _get_accessible_project_ids, _has_admin_access
+        accessible_ids = _get_accessible_project_ids()
+
+        if accessible_ids is None:
+            # 平台管理员 / 环境变量管理员 → 可见所有项目
+            projects = Project.query.order_by(Project.created_at.desc()).all()
+        elif accessible_ids:
+            projects = (
+                Project.query
+                .filter(Project.id.in_(accessible_ids))
+                .order_by(Project.created_at.desc())
+                .all()
+            )
+        else:
+            projects = []
+
+        # 获取所有项目列表（用于"申请加入"弹窗，排除已归属项目）
+        all_projects = Project.query.order_by(Project.code).all() if accessible_ids is not None else []
+        joinable_projects = [
+            p for p in all_projects
+            if p.id not in (accessible_ids or [])
+        ]
+
+        log_print(f"找到 {len(projects)} 个可见项目（总 {len(all_projects) + len(projects) if accessible_ids is not None else len(projects)} 个）", 'APP')
+        return render_template(
+            'index.html',
+            projects=projects,
+            joinable_projects=joinable_projects,
+            is_platform_admin=_has_admin_access(),
+        )
 
     except Exception as e:
         log_print(f"主页路由错误: {str(e)}", 'APP', force=True)

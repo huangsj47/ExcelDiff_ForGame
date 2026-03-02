@@ -1,0 +1,365 @@
+{% extends "base.html" %}
+
+{% block title %}用户管理 - Diff确认平台{% endblock %}
+
+{% block head %}
+<style>
+    .mgmt-header {
+        background: linear-gradient(135deg, #0d6efd 0%, #084298 100%);
+        border-radius: 16px;
+        padding: 2rem;
+        color: #fff;
+        margin-bottom: 1.5rem;
+    }
+    .mgmt-header h3 { font-weight: 600; margin-bottom: 0.25rem; }
+    .mgmt-header p { opacity: 0.85; margin-bottom: 0; }
+
+    .stat-card {
+        border: none;
+        border-radius: 12px;
+        padding: 1.25rem;
+        text-align: center;
+        background: rgba(255,255,255,0.15);
+        backdrop-filter: blur(4px);
+    }
+    .stat-card .stat-num { font-size: 1.8rem; font-weight: 700; }
+    .stat-card .stat-label { font-size: 0.8rem; opacity: 0.85; }
+
+    .section-card {
+        border: none;
+        border-radius: 14px;
+        box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+        margin-bottom: 1.5rem;
+        overflow: hidden;
+    }
+    .section-card .card-header {
+        background: #f8f9fa;
+        border-bottom: 1px solid #e9ecef;
+        padding: 1rem 1.25rem;
+        font-weight: 600;
+        font-size: 1rem;
+    }
+    .section-card .card-body { padding: 1.25rem; }
+
+    .user-table { margin-bottom: 0; }
+    .user-table th {
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #6c757d;
+        border-bottom-width: 1px;
+        white-space: nowrap;
+    }
+    .user-table td { vertical-align: middle; font-size: 0.9rem; }
+
+    .badge-role {
+        font-size: 0.75rem;
+        padding: 0.3em 0.7em;
+        border-radius: 6px;
+        font-weight: 500;
+    }
+    .badge-admin { background: #0d6efd; color: #fff; }
+    .badge-project-admin { background: #6f42c1; color: #fff; }
+    .badge-normal { background: #e9ecef; color: #495057; }
+    .badge-active { background: #d1e7dd; color: #0f5132; }
+    .badge-inactive { background: #f8d7da; color: #842029; }
+
+    .action-btn {
+        padding: 0.25rem 0.5rem;
+        font-size: 0.8rem;
+        border-radius: 6px;
+        border: none;
+    }
+
+    .pending-item {
+        background: #fff;
+        border: 1px solid #e9ecef;
+        border-radius: 10px;
+        padding: 1rem;
+        margin-bottom: 0.75rem;
+        transition: box-shadow 0.2s;
+    }
+    .pending-item:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    .pending-meta { font-size: 0.8rem; color: #6c757d; }
+
+    .empty-state {
+        text-align: center;
+        padding: 2rem;
+        color: #adb5bd;
+    }
+    .empty-state svg { margin-bottom: 0.5rem; }
+
+    .search-box {
+        border-radius: 10px;
+        border: 1.5px solid #dee2e6;
+        padding: 0.5rem 1rem;
+        font-size: 0.9rem;
+        transition: border-color 0.2s;
+    }
+    .search-box:focus {
+        border-color: #0d6efd;
+        box-shadow: 0 0 0 3px rgba(13,110,253,0.1);
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Header -->
+<div class="mgmt-header">
+    <div class="row align-items-center">
+        <div class="col-md-6">
+            <h3>
+                <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16" class="me-2" style="vertical-align: -4px;">
+                    <path d="M15 14s1 0 1-1-1-4-5-4-5 3-5 4 1 1 1 1h8Zm-7.978-1A.261.261 0 0 1 7 12.996c.001-.264.167-1.03.76-1.72C8.312 10.629 9.282 10 11 10c1.717 0 2.687.63 3.24 1.276.593.69.758 1.457.76 1.72l-.008.002a.274.274 0 0 1-.014.002H7.022ZM11 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm3-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM6.936 9.28a5.88 5.88 0 0 0-1.23-.247A7.35 7.35 0 0 0 5 9c-4 0-5 3-5 4 0 .667.333 1 1 1h4.216A2.238 2.238 0 0 1 5 13c0-.26.058-.573.152-.922.18-.672.53-1.285 1.06-1.744.608-.525 1.39-.858 2.35-1.052ZM8 5.5a2.5 2.5 0 1 0-5 0 2.5 2.5 0 0 0 5 0ZM.5 5.5a3.5 3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0Z"/>
+                </svg>
+                用户管理
+            </h3>
+            <p>管理平台用户、角色、审批申请</p>
+        </div>
+        <div class="col-md-6">
+            <div class="row g-3">
+                <div class="col-4">
+                    <div class="stat-card">
+                        <div class="stat-num" id="statTotal">{{ users|length }}</div>
+                        <div class="stat-label">总用户数</div>
+                    </div>
+                </div>
+                <div class="col-4">
+                    <div class="stat-card">
+                        <div class="stat-num" id="statPendingJoin">{{ pending_join_requests|length }}</div>
+                        <div class="stat-label">待审加入</div>
+                    </div>
+                </div>
+                <div class="col-4">
+                    <div class="stat-card">
+                        <div class="stat-num" id="statPendingCreate">{{ pending_create_requests|length }}</div>
+                        <div class="stat-label">待审创建</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Pending Requests -->
+{% if pending_join_requests or pending_create_requests %}
+<div class="section-card card">
+    <div class="card-header d-flex align-items-center">
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16" class="me-2 text-warning">
+            <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16Zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.399l-.254.146.063-.336 1.564-.694h.523ZM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/>
+        </svg>
+        待审批申请
+        <span class="badge bg-warning text-dark ms-2">{{ (pending_join_requests|length) + (pending_create_requests|length) }}</span>
+    </div>
+    <div class="card-body">
+        {% for req in pending_join_requests %}
+        <div class="pending-item" id="join-req-{{ req.id }}">
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <strong>{{ req.user.display_name or req.user.username }}</strong>
+                    <span class="badge bg-info bg-opacity-10 text-info ms-2">加入项目</span>
+                    <div class="pending-meta mt-1">
+                        申请加入项目: <strong>{{ req.project.name if req.project else '未知' }}</strong>
+                        {% if req.message %} · 留言: {{ req.message }}{% endif %}
+                        · {{ req.created_at.strftime('%Y-%m-%d %H:%M') if req.created_at else '' }}
+                    </div>
+                </div>
+                <div class="btn-group">
+                    <button class="btn btn-sm btn-outline-success action-btn" onclick="handleJoinRequest({{ req.id }}, 'approve')">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z"/></svg>
+                        通过
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger action-btn" onclick="handleJoinRequest({{ req.id }}, 'deny')">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/></svg>
+                        拒绝
+                    </button>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+
+        {% for req in pending_create_requests %}
+        <div class="pending-item" id="create-req-{{ req.id }}">
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <strong>{{ req.user.display_name or req.user.username }}</strong>
+                    <span class="badge bg-purple bg-opacity-10 text-purple ms-2" style="background-color: rgba(111,66,193,0.1) !important; color: #6f42c1 !important;">创建项目</span>
+                    <div class="pending-meta mt-1">
+                        项目代号: <strong>{{ req.project_code }}</strong> · 名称: <strong>{{ req.project_name }}</strong>
+                        {% if req.department %} · 部门: {{ req.department }}{% endif %}
+                        {% if req.reason %} · 原因: {{ req.reason }}{% endif %}
+                        · {{ req.created_at.strftime('%Y-%m-%d %H:%M') if req.created_at else '' }}
+                    </div>
+                </div>
+                <div class="btn-group">
+                    <button class="btn btn-sm btn-outline-success action-btn" onclick="handleCreateRequest({{ req.id }}, 'approve')">通过</button>
+                    <button class="btn btn-sm btn-outline-danger action-btn" onclick="handleCreateRequest({{ req.id }}, 'deny')">拒绝</button>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<!-- User List -->
+<div class="section-card card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span>
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16" class="me-2">
+                <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0Zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4Z"/>
+            </svg>
+            用户列表
+        </span>
+        <input type="text" class="search-box" id="userSearch" placeholder="搜索用户名 / 显示名..." style="max-width: 250px;" oninput="filterUsers()">
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table user-table align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>用户名</th>
+                        <th>显示名</th>
+                        <th>角色</th>
+                        <th>状态</th>
+                        <th>创建时间</th>
+                        <th class="text-end">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="userTableBody">
+                    {% for user in users %}
+                    <tr class="user-row" data-username="{{ user.username }}" data-display="{{ user.display_name or '' }}">
+                        <td><code>{{ user.id }}</code></td>
+                        <td><strong>{{ user.username }}</strong></td>
+                        <td>{{ user.display_name or '-' }}</td>
+                        <td>
+                            {% if user.role == 'platform_admin' %}
+                                <span class="badge badge-role badge-admin">平台管理员</span>
+                            {% elif user.role == 'project_admin' %}
+                                <span class="badge badge-role badge-project-admin">项目管理员</span>
+                            {% else %}
+                                <span class="badge badge-role badge-normal">普通用户</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if user.is_active %}
+                                <span class="badge badge-role badge-active">活跃</span>
+                            {% else %}
+                                <span class="badge badge-role badge-inactive">已禁用</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-muted" style="font-size: 0.82rem;">{{ user.created_at.strftime('%Y-%m-%d') if user.created_at else '-' }}</td>
+                        <td class="text-end">
+                            <div class="btn-group">
+                                <button class="btn btn-sm btn-outline-primary action-btn dropdown-toggle" data-bs-toggle="dropdown">
+                                    角色
+                                </button>
+                                <ul class="dropdown-menu dropdown-menu-end">
+                                    <li><a class="dropdown-item {% if user.role == 'platform_admin' %}active{% endif %}" href="#" onclick="updateRole({{ user.id }}, 'platform_admin'); return false;">平台管理员</a></li>
+                                    <li><a class="dropdown-item {% if user.role == 'project_admin' %}active{% endif %}" href="#" onclick="updateRole({{ user.id }}, 'project_admin'); return false;">项目管理员</a></li>
+                                    <li><a class="dropdown-item {% if user.role == 'normal' %}active{% endif %}" href="#" onclick="updateRole({{ user.id }}, 'normal'); return false;">普通用户</a></li>
+                                </ul>
+                                <button class="btn btn-sm btn-outline-warning action-btn" onclick="toggleActive({{ user.id }})" title="{{ '禁用' if user.is_active else '启用' }}">
+                                    {{ '禁用' if user.is_active else '启用' }}
+                                </button>
+                                <button class="btn btn-sm btn-outline-secondary action-btn" onclick="resetPassword({{ user.id }}, '{{ user.username }}')" title="重置密码">
+                                    重置密码
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if not users %}
+        <div class="empty-state">
+            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/>
+            </svg>
+            <p>暂无用户</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const csrfToken = "{{ csrf_token() }}";
+
+function apiCall(url, method, body) {
+    return fetch(url, {
+        method: method,
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': csrfToken,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+    }).then(r => r.json());
+}
+
+function updateRole(userId, role) {
+    apiCall(`/auth/api/users/${userId}/role`, 'POST', { role })
+        .then(data => {
+            if (data.success) { location.reload(); }
+            else { alert(data.message || '操作失败'); }
+        });
+}
+
+function toggleActive(userId) {
+    if (!confirm('确认切换该用户的启用状态？')) return;
+    apiCall(`/auth/api/users/${userId}/toggle-active`, 'POST', {})
+        .then(data => {
+            if (data.success) { location.reload(); }
+            else { alert(data.message || '操作失败'); }
+        });
+}
+
+function resetPassword(userId, username) {
+    const newPwd = prompt(`请输入用户 "${username}" 的新密码（至少6位）：`);
+    if (!newPwd) return;
+    if (newPwd.length < 6) { alert('密码至少6位'); return; }
+    apiCall(`/auth/api/users/${userId}/reset-password`, 'POST', { password: newPwd })
+        .then(data => {
+            if (data.success) { alert('密码已重置'); }
+            else { alert(data.message || '操作失败'); }
+        });
+}
+
+function handleJoinRequest(reqId, action) {
+    const label = action === 'approve' ? '通过' : '拒绝';
+    if (!confirm(`确认${label}该加入申请？`)) return;
+    apiCall(`/auth/api/join-requests/${reqId}/handle`, 'POST', { action })
+        .then(data => {
+            if (data.success) {
+                document.getElementById('join-req-' + reqId).remove();
+                alert(data.message);
+            } else { alert(data.message || '操作失败'); }
+        });
+}
+
+function handleCreateRequest(reqId, action) {
+    const label = action === 'approve' ? '通过' : '拒绝';
+    if (!confirm(`确认${label}该创建申请？`)) return;
+    apiCall(`/auth/api/create-requests/${reqId}/handle`, 'POST', { action })
+        .then(data => {
+            if (data.success) {
+                document.getElementById('create-req-' + reqId).remove();
+                alert(data.message);
+            } else { alert(data.message || '操作失败'); }
+        });
+}
+
+function filterUsers() {
+    const q = document.getElementById('userSearch').value.toLowerCase();
+    document.querySelectorAll('.user-row').forEach(row => {
+        const u = row.dataset.username.toLowerCase();
+        const d = row.dataset.display.toLowerCase();
+        row.style.display = (u.includes(q) || d.includes(q)) ? '' : 'none';
+    });
+}
+</script>
+{% endblock %}

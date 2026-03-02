@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Request security helpers for admin auth and CSRF checks."""
+"""Request security helpers for admin auth and CSRF checks.
+
+已扩展支持多级角色权限系统（平台管理员 / 项目管理员 / 普通用户）。
+通过 AuthProvider 接口实现解耦，同时保持向后兼容。
+"""
 
 import hmac
 import os
@@ -69,7 +73,98 @@ def _is_valid_admin_token():
 
 
 def _has_admin_access():
-    return bool(session.get("is_admin")) or _is_valid_admin_token()
+    """判断当前请求是否拥有平台管理员权限。
+
+    优先使用 AuthProvider（数据库用户），回退到 Session / API Token 兼容逻辑。
+    """
+    # 1. API Token 兼容（无需 Provider）
+    if _is_valid_admin_token():
+        return True
+
+    # 2. 尝试通过 AuthProvider 判断
+    try:
+        from auth import get_auth_provider
+        provider = get_auth_provider()
+        if provider.has_platform_admin_access():
+            return True
+    except (RuntimeError, ImportError):
+        pass
+
+    # 3. 回退到原始 Session 兼容
+    return bool(session.get("is_admin"))
+
+
+def _is_logged_in():
+    """判断当前请求是否已登录（任意角色）。"""
+    try:
+        from auth import get_auth_provider
+        provider = get_auth_provider()
+        return provider.is_logged_in()
+    except (RuntimeError, ImportError):
+        return bool(session.get("is_admin"))
+
+
+def _get_current_user():
+    """获取当前已登录的用户对象，未登录返回 None。"""
+    try:
+        from auth import get_auth_provider
+        provider = get_auth_provider()
+        return provider.get_current_user()
+    except (RuntimeError, ImportError):
+        return None
+
+
+def _has_project_admin_access(project_id):
+    """判断当前用户是否为指定项目的管理员。
+
+    平台管理员自动拥有所有项目的管理员权限。
+    """
+    if _has_admin_access():
+        return True
+
+    try:
+        from auth import get_auth_provider
+        provider = get_auth_provider()
+        return provider.has_project_admin_access(project_id)
+    except (RuntimeError, ImportError):
+        return False
+
+
+def _has_project_access(project_id):
+    """判断当前用户是否拥有指定项目的访问权限（成员或管理员）。
+
+    平台管理员自动拥有所有项目的访问权限。
+    """
+    if _has_admin_access():
+        return True
+
+    try:
+        from auth import get_auth_provider
+        provider = get_auth_provider()
+        return provider.has_project_access(project_id)
+    except (RuntimeError, ImportError):
+        return False
+
+
+def _get_accessible_project_ids():
+    """获取当前用户可访问的所有项目 ID 列表。
+
+    平台管理员返回 None（表示可访问所有项目）。
+    未登录返回空列表。
+    """
+    if _has_admin_access():
+        return None  # None = 全部可访问
+
+    try:
+        from auth import get_auth_provider
+        provider = get_auth_provider()
+        ids = provider.get_accessible_project_ids()
+        # Provider 返回空列表时可能表示平台管理员或未登录
+        if not ids and provider.has_platform_admin_access():
+            return None
+        return ids
+    except (RuntimeError, ImportError):
+        return []
 
 
 def _unauthorized_admin_response():
@@ -81,7 +176,28 @@ def _unauthorized_admin_response():
     else:
         next_url = request.referrer or url_for("index")
     flash("请先使用管理员账号登录。", "error")
-    return redirect(url_for("admin_login", next=next_url))
+    # 优先跳转到新的登录页，回退到旧的 admin_login
+    try:
+        login_url = url_for("auth_bp.login", next=next_url)
+    except Exception:
+        login_url = url_for("admin_login", next=next_url)
+    return redirect(login_url)
+
+
+def _unauthorized_login_response():
+    """未登录时的通用响应（跳转到登录页面）。"""
+    if _is_api_request():
+        return jsonify({"success": False, "message": "Authentication required"}), 401
+    if request.method == "GET":
+        next_url = request.url
+    else:
+        next_url = request.referrer or url_for("index")
+    flash("请先登录。", "error")
+    try:
+        login_url = url_for("auth_bp.login", next=next_url)
+    except Exception:
+        login_url = url_for("admin_login", next=next_url)
+    return redirect(login_url)
 
 
 def _csrf_error_response(message):
@@ -129,12 +245,26 @@ def _is_safe_redirect(target):
 
 
 def require_admin(func):
+    """要求平台管理员权限（向后兼容装饰器）。"""
     @wraps(func)
     def wrapper(*args, **kwargs):
         if not ENABLE_ADMIN_SECURITY:
             return func(*args, **kwargs)
         if not _has_admin_access():
             return _unauthorized_admin_response()
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+def require_login(func):
+    """要求用户已登录（任意角色即可）。"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not ENABLE_ADMIN_SECURITY:
+            return func(*args, **kwargs)
+        if not _is_logged_in():
+            return _unauthorized_login_response()
         return func(*args, **kwargs)
 
     return wrapper

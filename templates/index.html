@@ -129,13 +129,13 @@
         color: #374151;
         font-size: 0.875rem;
     }
-    .modal-body .form-control {
+    .modal-body .form-control, .modal-body .form-select {
         border: 1px solid #d0d7de;
         border-radius: 8px;
         padding: 0.625rem 0.875rem;
         transition: border-color 0.2s, box-shadow 0.2s;
     }
-    .modal-body .form-control:focus {
+    .modal-body .form-control:focus, .modal-body .form-select:focus {
         border-color: #0969da;
         box-shadow: 0 0 0 3px rgba(9,105,218,0.12);
     }
@@ -143,11 +143,62 @@
         border-top: 1px solid #eaecef;
         padding: 1rem 1.5rem;
     }
+    /* 头部按钮组 */
+    .header-btn-group {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+    }
+    .header-btn-group .btn {
+        border-radius: 8px;
+        font-weight: 600;
+    }
+    /* 用户信息区 */
+    .user-info-bar {
+        background: #f0f6ff;
+        border: 1px solid #d0e0f5;
+        border-radius: 8px;
+        padding: 0.6rem 1rem;
+        margin-bottom: 1rem;
+        font-size: 0.85rem;
+        color: #1a56db;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .user-info-bar .badge {
+        font-size: 0.72rem;
+    }
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="container-fluid" style="max-width: 1700px;">
+
+    <!-- 用户信息栏 -->
+    {% if session.get('auth_username') %}
+    <div class="user-info-bar">
+        <i class="fas fa-user-circle"></i>
+        <span>当前用户: <strong>{{ session.get('auth_username') }}</strong></span>
+        {% if session.get('auth_role') == 'platform_admin' %}
+        <span class="badge bg-danger">平台管理员</span>
+        {% endif %}
+        <span class="ms-auto">
+            <a href="{{ url_for('auth_bp.change_password_view') }}" class="text-decoration-none me-3" style="font-size: 0.82rem;">
+                <i class="fas fa-key me-1"></i>修改密码
+            </a>
+            {% if is_admin() %}
+            <a href="{{ url_for('auth_bp.user_list') }}" class="text-decoration-none me-3" style="font-size: 0.82rem;">
+                <i class="fas fa-users-cog me-1"></i>用户管理
+            </a>
+            {% endif %}
+            <a href="{{ url_for('auth_bp.logout') }}" class="text-decoration-none text-danger" style="font-size: 0.82rem;">
+                <i class="fas fa-sign-out-alt me-1"></i>退出登录
+            </a>
+        </span>
+    </div>
+    {% endif %}
+
     <!-- 页面标题区域 -->
     <div class="index-header">
         <div class="d-flex justify-content-between align-items-center">
@@ -155,15 +206,28 @@
                 <h2><i class="fas fa-folder me-2" style="color: #0969da;"></i>我的项目</h2>
                 <p>选择一个项目查看仓库提交和差异对比</p>
             </div>
-            {% if is_admin() %}
-            <button type="button" class="btn btn-primary px-4" data-bs-toggle="modal" data-bs-target="#newProjectModal" style="border-radius: 8px; font-weight: 600; box-shadow: 0 2px 8px rgba(13,110,253,0.3);">
-                <i class="fas fa-plus me-2"></i>新建项目
-            </button>
-            {% else %}
-            <a href="{{ url_for('admin_login', next=request.url) }}" class="btn btn-outline-secondary btn-sm" style="border-radius: 8px;">
-                <i class="fas fa-lock me-1"></i>管理员登录
-            </a>
-            {% endif %}
+            <div class="header-btn-group">
+                <!-- 申请加入已有项目 -->
+                {% if joinable_projects %}
+                <button type="button" class="btn btn-outline-primary px-3" data-bs-toggle="modal" data-bs-target="#joinProjectModal"
+                        style="box-shadow: none;">
+                    <i class="fas fa-sign-in-alt me-1"></i>申请加入项目
+                </button>
+                {% endif %}
+
+                <!-- 申请创建新项目（普通用户） / 直接创建（管理员） -->
+                {% if is_admin() %}
+                <button type="button" class="btn btn-primary px-4" data-bs-toggle="modal" data-bs-target="#newProjectModal"
+                        style="box-shadow: 0 2px 8px rgba(13,110,253,0.3);">
+                    <i class="fas fa-plus me-2"></i>新建项目
+                </button>
+                {% elif session.get('auth_user_id') %}
+                <button type="button" class="btn btn-outline-success px-3" data-bs-toggle="modal" data-bs-target="#requestCreateProjectModal"
+                        style="box-shadow: none;">
+                    <i class="fas fa-paper-plane me-1"></i>申请创建项目
+                </button>
+                {% endif %}
+            </div>
         </div>
     </div>
 
@@ -201,6 +265,9 @@
                             <a href="/{{ project.code }}/status-sync/management" class="btn btn-warning btn-sm">
                                 <i class="fas fa-exchange-alt me-1"></i>查看映射
                             </a>
+                            <a href="{{ url_for('auth_bp.project_members', project_id=project.id) }}" class="btn btn-secondary btn-sm">
+                                <i class="fas fa-users me-1"></i>成员管理
+                            </a>
                             <button class="btn btn-danger btn-sm" onclick="deleteProject({{ project.id }})">
                                 <i class="fas fa-trash me-1"></i>删除
                             </button>
@@ -218,11 +285,15 @@
             <div class="empty-state-icon">
                 <i class="fas fa-folder-open"></i>
             </div>
-            <h4 style="font-weight: 700; color: #1e293b; margin-bottom: 0.5rem;">暂无项目</h4>
+            <h4 style="font-weight: 700; color: #1e293b; margin-bottom: 0.5rem;">暂无可见项目</h4>
             {% if is_admin() %}
             <p style="color: #64748b; max-width: 320px; margin: 0 auto;">点击上方「新建项目」按钮创建您的第一个项目</p>
+            {% elif session.get('auth_user_id') %}
+            <p style="color: #64748b; max-width: 360px; margin: 0 auto;">
+                您尚未加入任何项目。可以点击上方「申请加入项目」加入已有项目，或者「申请创建项目」创建新项目。
+            </p>
             {% else %}
-            <p style="color: #64748b; max-width: 320px; margin: 0 auto;">请联系管理员创建项目</p>
+            <p style="color: #64748b; max-width: 320px; margin: 0 auto;">请联系管理员将您添加到项目中</p>
             {% endif %}
         </div>
     </div>
@@ -230,7 +301,7 @@
 </div>
 
 {% if is_admin() %}
-<!-- 新建项目模态框 -->
+<!-- 新建项目模态框（管理员直接创建） -->
 <div class="modal fade" id="newProjectModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
@@ -265,6 +336,83 @@
     </div>
 </div>
 {% endif %}
+
+<!-- 申请加入项目模态框 -->
+{% if joinable_projects %}
+<div class="modal fade" id="joinProjectModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-sign-in-alt me-2" style="color: #0969da;"></i>申请加入项目</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label for="joinProjectSelect" class="form-label">选择项目 <span style="color: #cf222e;">*</span></label>
+                    <select class="form-select" id="joinProjectSelect" required>
+                        <option value="">-- 请选择 --</option>
+                        {% for p in joinable_projects %}
+                        <option value="{{ p.id }}">{{ p.code }} — {{ p.name }}{% if p.department %} ({{ p.department }}){% endif %}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label for="joinMessage" class="form-label">申请理由</label>
+                    <textarea class="form-control" id="joinMessage" rows="3" placeholder="可选：说明您申请加入的原因"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" style="border-radius: 8px;">取消</button>
+                <button type="button" class="btn btn-primary" onclick="submitJoinRequest()" style="border-radius: 8px; font-weight: 600;" id="joinSubmitBtn">
+                    <i class="fas fa-paper-plane me-1"></i>提交申请
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- 申请创建项目模态框（普通用户） -->
+{% if session.get('auth_user_id') and not is_admin() %}
+<div class="modal fade" id="requestCreateProjectModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-paper-plane me-2" style="color: #198754;"></i>申请创建项目</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info" style="font-size: 0.85rem; border-radius: 8px;">
+                    <i class="fas fa-info-circle me-1"></i>
+                    您的申请将提交给平台管理员审批。审批通过后，项目将自动创建，您将成为该项目的管理员。
+                </div>
+                <div class="mb-3">
+                    <label for="createProjectCode" class="form-label">项目代号 <span style="color: #cf222e;">*</span></label>
+                    <input type="text" class="form-control" id="createProjectCode" required placeholder="例如: PROJECT-001">
+                </div>
+                <div class="mb-3">
+                    <label for="createProjectName" class="form-label">项目名称 <span style="color: #cf222e;">*</span></label>
+                    <input type="text" class="form-control" id="createProjectName" required placeholder="例如: 新项目名称">
+                </div>
+                <div class="mb-3">
+                    <label for="createProjectDept" class="form-label">所属部门</label>
+                    <input type="text" class="form-control" id="createProjectDept" placeholder="例如: 研发部">
+                </div>
+                <div class="mb-3">
+                    <label for="createProjectReason" class="form-label">申请理由</label>
+                    <textarea class="form-control" id="createProjectReason" rows="3" placeholder="可选：说明创建项目的原因"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" style="border-radius: 8px;">取消</button>
+                <button type="button" class="btn btn-success" onclick="submitCreateRequest()" style="border-radius: 8px; font-weight: 600;" id="createSubmitBtn">
+                    <i class="fas fa-paper-plane me-1"></i>提交申请
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -288,5 +436,88 @@ function deleteProject(projectId) {
     }
 }
 {% endif %}
+
+/* 申请加入项目 */
+function submitJoinRequest() {
+    var projectId = document.getElementById('joinProjectSelect').value;
+    var message = document.getElementById('joinMessage').value.trim();
+    if (!projectId) {
+        alert('请选择一个项目');
+        return;
+    }
+    var btn = document.getElementById('joinSubmitBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>提交中...';
+
+    fetch('{{ url_for("auth_bp.api_request_join_project") }}', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': '{{ csrf_token() }}'
+        },
+        body: JSON.stringify({ project_id: parseInt(projectId), message: message })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            alert('申请已提交，请等待管理员审批。');
+            location.reload();
+        } else {
+            alert('提交失败: ' + (data.message || '未知错误'));
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-paper-plane me-1"></i>提交申请';
+        }
+    })
+    .catch(err => {
+        alert('网络错误: ' + err);
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-paper-plane me-1"></i>提交申请';
+    });
+}
+
+/* 申请创建项目 */
+function submitCreateRequest() {
+    var code = document.getElementById('createProjectCode').value.trim();
+    var name = document.getElementById('createProjectName').value.trim();
+    var dept = document.getElementById('createProjectDept').value.trim();
+    var reason = document.getElementById('createProjectReason').value.trim();
+    if (!code || !name) {
+        alert('项目代号和名称不能为空');
+        return;
+    }
+    var btn = document.getElementById('createSubmitBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>提交中...';
+
+    fetch('{{ url_for("auth_bp.api_request_create_project") }}', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': '{{ csrf_token() }}'
+        },
+        body: JSON.stringify({
+            project_code: code,
+            project_name: name,
+            department: dept,
+            reason: reason
+        })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            alert('项目创建申请已提交，请等待管理员审批。');
+            bootstrap.Modal.getInstance(document.getElementById('requestCreateProjectModal')).hide();
+        } else {
+            alert('提交失败: ' + (data.message || '未知错误'));
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-paper-plane me-1"></i>提交申请';
+        }
+    })
+    .catch(err => {
+        alert('网络错误: ' + err);
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-paper-plane me-1"></i>提交申请';
+    });
+}
 </script>
 {% endblock %}

@@ -20,6 +20,20 @@ from .task import BackgroundTask
 from .weekly_version import WeeklyVersionConfig, WeeklyVersionDiffCache, WeeklyVersionExcelCache
 from .operation_log import OperationLog
 
+# 导入 auth 模块的模型，确保 db.create_all() 能创建对应的表
+try:
+    from auth.models import (
+        AuthUser,
+        AuthFunction,
+        AuthUserFunction,
+        AuthUserProject,
+        AuthProjectJoinRequest,
+        AuthProjectCreateRequest,
+    )
+    _AUTH_MODELS_LOADED = True
+except ImportError:
+    _AUTH_MODELS_LOADED = False
+
 __all__ = [
     'db',
     'Project',
@@ -35,3 +49,13 @@ __all__ = [
     'WeeklyVersionExcelCache',
     'OperationLog',
 ]
+
+if _AUTH_MODELS_LOADED:
+    __all__.extend([
+        'AuthUser',
+        'AuthFunction',
+        'AuthUserFunction',
+        'AuthUserProject',
+        'AuthProjectJoinRequest',
+        'AuthProjectCreateRequest',
+    ])

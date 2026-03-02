@@ -1,0 +1,363 @@
+{% extends "base.html" %}
+
+{% block title %}项目成员管理 - {{ project.name }} - Diff确认平台{% endblock %}
+
+{% block head %}
+<style>
+    .mgmt-header {
+        background: linear-gradient(135deg, #6f42c1 0%, #4a2785 100%);
+        border-radius: 16px;
+        padding: 2rem;
+        color: #fff;
+        margin-bottom: 1.5rem;
+    }
+    .mgmt-header h3 { font-weight: 600; margin-bottom: 0.25rem; }
+    .mgmt-header p { opacity: 0.85; margin-bottom: 0; }
+    .mgmt-header .project-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        background: rgba(255,255,255,0.15);
+        padding: 0.3rem 0.8rem;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        margin-top: 0.5rem;
+        border: 1px solid rgba(255,255,255,0.2);
+    }
+
+    .section-card {
+        border: none;
+        border-radius: 14px;
+        box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+        margin-bottom: 1.5rem;
+        overflow: hidden;
+    }
+    .section-card .card-header {
+        background: #f8f9fa;
+        border-bottom: 1px solid #e9ecef;
+        padding: 1rem 1.25rem;
+        font-weight: 600;
+        font-size: 1rem;
+    }
+    .section-card .card-body { padding: 1.25rem; }
+
+    .member-table { margin-bottom: 0; }
+    .member-table th {
+        font-size: 0.8rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #6c757d;
+        border-bottom-width: 1px;
+        white-space: nowrap;
+    }
+    .member-table td { vertical-align: middle; font-size: 0.9rem; }
+
+    .badge-role {
+        font-size: 0.75rem;
+        padding: 0.3em 0.7em;
+        border-radius: 6px;
+        font-weight: 500;
+    }
+    .badge-admin { background: #6f42c1; color: #fff; }
+    .badge-member { background: #e9ecef; color: #495057; }
+
+    .action-btn {
+        padding: 0.25rem 0.5rem;
+        font-size: 0.8rem;
+        border-radius: 6px;
+    }
+
+    .func-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        background: #e8f4fd;
+        color: #0d6efd;
+        padding: 0.2rem 0.6rem;
+        border-radius: 15px;
+        font-size: 0.75rem;
+        margin: 0.1rem;
+    }
+    .func-badge .remove-func {
+        cursor: pointer;
+        opacity: 0.6;
+        transition: opacity 0.2s;
+    }
+    .func-badge .remove-func:hover { opacity: 1; }
+
+    .func-lead {
+        background: #fff3cd;
+        color: #856404;
+    }
+
+    .add-member-form {
+        background: #f8f9fa;
+        border-radius: 10px;
+        padding: 1rem;
+    }
+
+    .empty-state {
+        text-align: center;
+        padding: 2rem;
+        color: #adb5bd;
+    }
+
+    .back-link {
+        color: rgba(255,255,255,0.8);
+        text-decoration: none;
+        font-size: 0.85rem;
+        transition: color 0.2s;
+    }
+    .back-link:hover { color: #fff; }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Header -->
+<div class="mgmt-header">
+    <a href="{{ url_for('index') }}" class="back-link">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16" class="me-1" style="vertical-align: -1px;">
+            <path fill-rule="evenodd" d="M15 8a.5.5 0 0 0-.5-.5H2.707l3.147-3.146a.5.5 0 1 0-.708-.708l-4 4a.5.5 0 0 0 0 .708l4 4a.5.5 0 0 0 .708-.708L2.707 8.5H14.5A.5.5 0 0 0 15 8z"/>
+        </svg>
+        返回项目列表
+    </a>
+    <h3 class="mt-2">
+        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="currentColor" viewBox="0 0 16 16" class="me-2" style="vertical-align: -4px;">
+            <path d="M15 14s1 0 1-1-1-4-5-4-5 3-5 4 1 1 1 1h8Zm-7.978-1A.261.261 0 0 1 7 12.996c.001-.264.167-1.03.76-1.72C8.312 10.629 9.282 10 11 10c1.717 0 2.687.63 3.24 1.276.593.69.758 1.457.76 1.72l-.008.002a.274.274 0 0 1-.014.002H7.022ZM11 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm3-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM6.936 9.28a5.88 5.88 0 0 0-1.23-.247A7.35 7.35 0 0 0 5 9c-4 0-5 3-5 4 0 .667.333 1 1 1h4.216A2.238 2.238 0 0 1 5 13c0-.26.058-.573.152-.922.18-.672.53-1.285 1.06-1.744.608-.525 1.39-.858 2.35-1.052ZM8 5.5a2.5 2.5 0 1 0-5 0 2.5 2.5 0 0 0 5 0ZM.5 5.5a3.5 3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0Z"/>
+        </svg>
+        项目成员管理
+    </h3>
+    <div class="project-badge">
+        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M1 2.828c.885-.37 2.154-.769 3.388-.893 1.33-.134 2.458.063 3.112.752v9.746c-.935-.53-2.12-.603-3.213-.493-1.18.12-2.37.461-3.287.811V2.828zm7.5-.141c.654-.689 1.782-.886 3.112-.752 1.234.124 2.503.523 3.388.893v9.923c-.918-.35-2.107-.692-3.287-.81-1.094-.111-2.278-.039-3.213.492V2.687zM8 1.783C7.015.936 5.587.81 4.287.94c-1.514.153-3.042.672-3.994 1.105A.5.5 0 0 0 0 2.5v11a.5.5 0 0 0 .707.455c.882-.4 2.303-.881 3.68-1.02 1.409-.142 2.59.087 3.223.877a.5.5 0 0 0 .78 0c.633-.79 1.814-1.019 3.222-.877 1.378.139 2.8.62 3.681 1.02A.5.5 0 0 0 16 13.5v-11a.5.5 0 0 0-.293-.455c-.952-.433-2.48-.952-3.994-1.105C10.413.809 8.985.936 8 1.783z"/>
+        </svg>
+        {{ project.name }} ({{ project.project_code if project.project_code else 'ID:' ~ project.id }})
+    </div>
+</div>
+
+<!-- Add Member -->
+<div class="section-card card">
+    <div class="card-header">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" class="me-2">
+            <path d="M1 14s-1 0-1-1 1-4 6-4 6 3 6 4-1 1-1 1H1zm5-6a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
+            <path fill-rule="evenodd" d="M13.5 5a.5.5 0 0 1 .5.5V7h1.5a.5.5 0 0 1 0 1H14v1.5a.5.5 0 0 1-1 0V8h-1.5a.5.5 0 0 1 0-1H13V5.5a.5.5 0 0 1 .5-.5z"/>
+        </svg>
+        添加成员
+    </div>
+    <div class="card-body">
+        <div class="add-member-form">
+            <div class="row g-3 align-items-end">
+                <div class="col-md-5">
+                    <label class="form-label" style="font-size: 0.85rem; font-weight: 500;">选择用户</label>
+                    <select class="form-select" id="addUserSelect" style="border-radius: 8px;">
+                        <option value="">-- 选择要添加的用户 --</option>
+                        {% for u in all_users %}
+                            {% if u.is_active %}
+                            <option value="{{ u.id }}">{{ u.username }}{% if u.display_name %} ({{ u.display_name }}){% endif %}</option>
+                            {% endif %}
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label" style="font-size: 0.85rem; font-weight: 500;">项目角色</label>
+                    <select class="form-select" id="addUserRole" style="border-radius: 8px;">
+                        <option value="member">成员</option>
+                        <option value="project_admin">项目管理员</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <button class="btn btn-primary w-100" style="border-radius: 8px;" onclick="addMember()">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" class="me-1">
+                            <path fill-rule="evenodd" d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/>
+                        </svg>
+                        添加
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Members List -->
+<div class="section-card card">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <span>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" class="me-2">
+                <path d="M7 14s-1 0-1-1 1-4 5-4 5 3 5 4-1 1-1 1H7Zm4-6a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/>
+            </svg>
+            当前成员
+            <span class="badge bg-secondary ms-1">{{ members|length }}</span>
+        </span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table member-table align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>用户</th>
+                        <th>项目角色</th>
+                        <th>职能</th>
+                        <th>加入时间</th>
+                        <th class="text-end">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for m in members %}
+                    <tr id="member-{{ m.user_id }}">
+                        <td>
+                            <strong>{{ m.user.username }}</strong>
+                            {% if m.user.display_name %}
+                            <br><small class="text-muted">{{ m.user.display_name }}</small>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if m.role == 'project_admin' %}
+                                <span class="badge badge-role badge-admin">项目管理员</span>
+                            {% else %}
+                                <span class="badge badge-role badge-member">成员</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if m.user.function_assignments %}
+                                {% for fa in m.user.function_assignments %}
+                                    {% if fa.project_id == project.id or fa.project_id is none %}
+                                    <span class="func-badge {% if fa.function.is_lead_qa %}func-lead{% endif %}">
+                                        {{ fa.function.name }}
+                                        <span class="remove-func" onclick="removeFunction({{ m.user_id }}, {{ fa.function_id }})" title="移除">×</span>
+                                    </span>
+                                    {% endif %}
+                                {% endfor %}
+                            {% else %}
+                                <span class="text-muted" style="font-size: 0.8rem;">无</span>
+                            {% endif %}
+                            <button class="btn btn-sm btn-link p-0 ms-1" style="font-size: 0.75rem;" onclick="showAssignFunc({{ m.user_id }}, '{{ m.user.username }}')">
+                                + 分配
+                            </button>
+                        </td>
+                        <td class="text-muted" style="font-size: 0.82rem;">
+                            {{ m.joined_at.strftime('%Y-%m-%d') if m.joined_at else '-' }}
+                        </td>
+                        <td class="text-end">
+                            <div class="btn-group">
+                                <button class="btn btn-sm btn-outline-primary action-btn dropdown-toggle" data-bs-toggle="dropdown">
+                                    角色
+                                </button>
+                                <ul class="dropdown-menu dropdown-menu-end">
+                                    <li><a class="dropdown-item {% if m.role == 'project_admin' %}active{% endif %}" href="#" onclick="updateMemberRole({{ m.user_id }}, 'project_admin'); return false;">项目管理员</a></li>
+                                    <li><a class="dropdown-item {% if m.role == 'member' %}active{% endif %}" href="#" onclick="updateMemberRole({{ m.user_id }}, 'member'); return false;">成员</a></li>
+                                </ul>
+                                <button class="btn btn-sm btn-outline-danger action-btn" onclick="removeMember({{ m.user_id }}, '{{ m.user.username }}')">
+                                    移除
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if not members %}
+        <div class="empty-state">
+            <p>暂无成员</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Assign Function Modal -->
+<div class="modal fade" id="assignFuncModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="border-radius: 14px; border: none;">
+            <div class="modal-header" style="border-bottom: 1px solid #e9ecef;">
+                <h6 class="modal-title">分配职能给 <strong id="assignFuncUser"></strong></h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="assignFuncUserId">
+                <select class="form-select mb-3" id="assignFuncSelect" style="border-radius: 8px;">
+                    <option value="">-- 选择职能 --</option>
+                    {% for f in functions %}
+                    <option value="{{ f.id }}">{{ f.name }}{% if f.is_lead_qa %} ★ (主QA){% endif %}</option>
+                    {% endfor %}
+                </select>
+                <button class="btn btn-primary w-100" style="border-radius: 8px;" onclick="assignFunction()">确认分配</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const csrfToken = "{{ csrf_token() }}";
+const projectId = {{ project.id }};
+
+function apiCall(url, method, body) {
+    const opts = {
+        method: method,
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': csrfToken,
+        },
+    };
+    if (body) opts.body = JSON.stringify(body);
+    return fetch(url, opts).then(r => r.json());
+}
+
+function addMember() {
+    const userId = document.getElementById('addUserSelect').value;
+    const role = document.getElementById('addUserRole').value;
+    if (!userId) { alert('请选择用户'); return; }
+    apiCall(`/auth/api/project/${projectId}/members`, 'POST', { user_id: parseInt(userId), role })
+        .then(data => {
+            if (data.success) { location.reload(); }
+            else { alert(data.message || '添加失败'); }
+        });
+}
+
+function updateMemberRole(userId, role) {
+    apiCall(`/auth/api/project/${projectId}/members/${userId}/role`, 'POST', { role })
+        .then(data => {
+            if (data.success) { location.reload(); }
+            else { alert(data.message || '更新失败'); }
+        });
+}
+
+function removeMember(userId, username) {
+    if (!confirm(`确认将 "${username}" 从项目中移除？`)) return;
+    apiCall(`/auth/api/project/${projectId}/members/${userId}`, 'DELETE')
+        .then(data => {
+            if (data.success) {
+                document.getElementById('member-' + userId).remove();
+            } else { alert(data.message || '移除失败'); }
+        });
+}
+
+function showAssignFunc(userId, username) {
+    document.getElementById('assignFuncUserId').value = userId;
+    document.getElementById('assignFuncUser').textContent = username;
+    new bootstrap.Modal(document.getElementById('assignFuncModal')).show();
+}
+
+function assignFunction() {
+    const userId = document.getElementById('assignFuncUserId').value;
+    const funcId = document.getElementById('assignFuncSelect').value;
+    if (!funcId) { alert('请选择职能'); return; }
+    apiCall(`/auth/api/users/${userId}/functions`, 'POST', { function_id: parseInt(funcId), project_id: projectId })
+        .then(data => {
+            if (data.success) { location.reload(); }
+            else { alert(data.message || '分配失败'); }
+        });
+}
+
+function removeFunction(userId, funcId) {
+    if (!confirm('确认移除该职能？')) return;
+    apiCall(`/auth/api/users/${userId}/functions/${funcId}?project_id=${projectId}`, 'DELETE')
+        .then(data => {
+            if (data.success) { location.reload(); }
+            else { alert(data.message || '移除失败'); }
+        });
+}
+</script>
+{% endblock %}

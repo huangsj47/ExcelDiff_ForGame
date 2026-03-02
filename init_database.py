@@ -27,6 +27,13 @@ EXPECTED_TABLES = [
     "weekly_version_excel_cache",
     "merged_diff_cache",
     "operation_log",
+    # 账号系统表 (auth_ 前缀)
+    "auth_users",
+    "auth_functions",
+    "auth_user_functions",
+    "auth_user_projects",
+    "auth_project_join_requests",
+    "auth_project_create_requests",
 ]
 
 
