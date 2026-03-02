@@ -3,181 +3,204 @@
 {% block title %}状态同步映射管理{% endblock %}
 
 {% block content %}
-<div class="container-fluid">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <div>
-            <h2><i class="fas fa-exchange-alt me-2 text-primary"></i>状态同步映射管理{% if project %} - {{ project.name }}{% endif %}</h2>
-            <nav aria-label="breadcrumb">
-                <ol class="breadcrumb">
-                    <li class="breadcrumb-item"><a href="{{ url_for('index') }}">项目列表</a></li>
-                    {% if project %}
-                    <li class="breadcrumb-item"><a href="{{ url_for('project_detail', project_id=project.id) }}">{{ project.name }}</a></li>
-                    <li class="breadcrumb-item active">状态同步映射</li>
-                    {% else %}
-                    <li class="breadcrumb-item active">状态同步映射</li>
-                    {% endif %}
-                </ol>
-            </nav>
-        </div>
-        <div>
-            <button type="button" class="btn btn-outline-primary" onclick="loadMappingInfo()">
-                <i class="fas fa-sync-alt me-2"></i>刷新数据
-            </button>
+<div class="sync-management-container">
+    <!-- 页面头部 -->
+    <div class="page-header-sync">
+        <div class="header-content-sync">
+            <div class="header-left-sync">
+                <div class="page-title-sync">
+                    <div class="title-icon-sync">
+                        <i class="fas fa-exchange-alt"></i>
+                    </div>
+                    <div class="title-text-sync">
+                        <h1>状态同步映射管理{% if project %} - {{ project.name }}{% endif %}</h1>
+                        <p class="subtitle-sync">状态追踪 · 映射管理 · 数据同步</p>
+                    </div>
+                </div>
+                <nav aria-label="breadcrumb" class="breadcrumb-sync">
+                    <ol class="breadcrumb mb-0">
+                        <li class="breadcrumb-item"><a href="{{ url_for('index') }}" style="color:rgba(255,255,255,0.8)">项目列表</a></li>
+                        {% if project %}
+                        <li class="breadcrumb-item"><a href="{{ url_for('project_detail', project_id=project.id) }}" style="color:rgba(255,255,255,0.8)">{{ project.name }}</a></li>
+                        <li class="breadcrumb-item active" style="color:rgba(255,255,255,0.6)">状态同步映射</li>
+                        {% else %}
+                        <li class="breadcrumb-item active" style="color:rgba(255,255,255,0.6)">状态同步映射</li>
+                        {% endif %}
+                    </ol>
+                </nav>
+            </div>
+            <div class="header-actions-sync">
+                <button type="button" class="action-btn-sync primary" onclick="loadMappingInfo()">
+                    <i class="fas fa-sync-alt"></i>
+                    <span>刷新数据</span>
+                </button>
+                <button type="button" class="action-btn-sync secondary" onclick="forceRefresh()">
+                    <i class="fas fa-redo"></i>
+                    <span>强制刷新</span>
+                </button>
+            </div>
         </div>
     </div>
 
     {% if project %}
-    <!-- 项目信息 -->
-    <div class="alert alert-info mb-4">
-        <div class="row align-items-center">
-            <div class="col-md-8">
-                <h5 class="mb-1"><i class="fas fa-project-diagram me-2"></i>{{ project.name }} ({{ project.code }})</h5>
-                <p class="mb-0 text-muted">{{ project.department or '未指定部门' }}</p>
+    <!-- 项目信息卡片 -->
+    <div class="project-info-card-sync">
+        <div class="project-info-header-sync">
+            <div class="project-info-icon-sync">
+                <i class="fas fa-project-diagram"></i>
             </div>
-            <div class="col-md-4 text-end">
-                <small class="text-muted">仅显示此项目下的映射信息</small>
+            <div class="project-info-details-sync">
+                <h3>{{ project.name }} ({{ project.code }})</h3>
+                <p>{{ project.department or '未指定部门' }} · 仅显示此项目下的映射信息</p>
             </div>
         </div>
     </div>
     {% endif %}
 
-    <!-- 统计信息卡片 -->
-    <div class="row mb-4">
-        <div class="col-md-3">
-            <div class="card bg-primary text-white">
-                <div class="card-body text-center">
-                    <i class="fas fa-code-branch fa-2x mb-2"></i>
-                    <h4 id="totalMappings">-</h4>
-                    <small>映射关系总数</small>
-                </div>
+    <!-- 统计仪表板 -->
+    <div class="stats-grid-sync">
+        <div class="stat-card-sync stat-primary">
+            <div class="stat-card-icon-sync">
+                <i class="fas fa-code-branch"></i>
+            </div>
+            <div class="stat-card-content-sync">
+                <div class="stat-value-sync" id="totalMappings">-</div>
+                <div class="stat-label-sync">映射关系总数</div>
             </div>
         </div>
-        <div class="col-md-3">
-            <div class="card bg-success text-white">
-                <div class="card-body text-center">
-                    <i class="fas fa-check-circle fa-2x mb-2"></i>
-                    <h4 id="confirmedCount">-</h4>
-                    <small>已确认文件</small>
-                </div>
+        <div class="stat-card-sync stat-success">
+            <div class="stat-card-icon-sync">
+                <i class="fas fa-check-circle"></i>
+            </div>
+            <div class="stat-card-content-sync">
+                <div class="stat-value-sync" id="confirmedCount">-</div>
+                <div class="stat-label-sync">已确认文件</div>
             </div>
         </div>
-        <div class="col-md-3">
-            <div class="card bg-warning text-white">
-                <div class="card-body text-center">
-                    <i class="fas fa-clock fa-2x mb-2"></i>
-                    <h4 id="pendingCount">-</h4>
-                    <small>待确认文件</small>
-                </div>
+        <div class="stat-card-sync stat-warning">
+            <div class="stat-card-icon-sync">
+                <i class="fas fa-clock"></i>
+            </div>
+            <div class="stat-card-content-sync">
+                <div class="stat-value-sync" id="pendingCount">-</div>
+                <div class="stat-label-sync">待确认文件</div>
             </div>
         </div>
-        <div class="col-md-3">
-            <div class="card bg-info text-white">
-                <div class="card-body text-center">
-                    <i class="fas fa-layer-group fa-2x mb-2"></i>
-                    <h4 id="mergedDiffCount">-</h4>
-                    <small>合并diff文件</small>
-                </div>
+        <div class="stat-card-sync stat-info">
+            <div class="stat-card-icon-sync">
+                <i class="fas fa-layer-group"></i>
+            </div>
+            <div class="stat-card-content-sync">
+                <div class="stat-value-sync" id="mergedDiffCount">-</div>
+                <div class="stat-label-sync">合并diff文件</div>
             </div>
         </div>
     </div>
 
     <!-- 功能操作区 -->
-    <div class="row mb-4">
-        <div class="col-md-8">
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="mb-0">
-                        <i class="fas fa-filter me-2"></i>筛选和查看
-                    </h5>
+    <div class="operations-grid-sync">
+        <div class="dashboard-card-sync filter-card-sync">
+            <div class="card-header-sync">
+                <div class="card-icon-sync filter-icon">
+                    <i class="fas fa-filter"></i>
                 </div>
-                <div class="card-body">
-                    <div class="row">
-                        <div class="col-md-6">
-                            <label for="configSelect" class="form-label">选择周版本配置</label>
-                            <select class="form-select" id="configSelect">
-                                <option value="">全部配置</option>
-                                <!-- 配置选项将通过JavaScript动态加载 -->
-                            </select>
-                        </div>
-                        <div class="col-md-6">
-                            <label for="statusFilter" class="form-label">状态筛选</label>
-                            <select class="form-select" id="statusFilter">
-                                <option value="">全部状态</option>
-                                <option value="pending">待确认</option>
-                                <option value="confirmed">已确认</option>
-                                <option value="rejected">已拒绝</option>
-                            </select>
-                        </div>
+                <div class="card-title-sync">
+                    <h3>筛选和查看</h3>
+                    <p>选择配置与状态筛选数据</p>
+                </div>
+            </div>
+            <div class="card-content-sync">
+                <div class="filter-row-sync">
+                    <div class="filter-item-sync">
+                        <label for="configSelect" class="filter-label-sync">选择周版本配置</label>
+                        <select class="form-select-sync" id="configSelect">
+                            <option value="">全部配置</option>
+                        </select>
                     </div>
-                    <div class="mt-3">
-                        <button type="button" class="btn btn-primary" onclick="loadMappingInfo()">
-                            <i class="fas fa-search me-2"></i>查看映射信息
-                        </button>
-                        <button type="button" class="btn btn-outline-secondary ms-2" onclick="exportMappingInfo()">
-                            <i class="fas fa-download me-2"></i>导出数据
-                        </button>
-                        <button type="button" class="btn btn-outline-info ms-2" onclick="debugStatistics()">
-                            <i class="fas fa-bug me-2"></i>调试统计
-                        </button>
-                        <button type="button" class="btn btn-outline-warning ms-2" onclick="forceRefresh()">
-                            <i class="fas fa-sync me-2"></i>强制刷新
-                        </button>
+                    <div class="filter-item-sync">
+                        <label for="statusFilter" class="filter-label-sync">状态筛选</label>
+                        <select class="form-select-sync" id="statusFilter">
+                            <option value="">全部状态</option>
+                            <option value="pending">待确认</option>
+                            <option value="confirmed">已确认</option>
+                            <option value="rejected">已拒绝</option>
+                        </select>
                     </div>
+                </div>
+                <div class="filter-actions-sync">
+                    <button type="button" class="action-btn-sync primary" onclick="loadMappingInfo()">
+                        <i class="fas fa-search"></i>
+                        <span>查看映射信息</span>
+                    </button>
+                    <button type="button" class="action-btn-sync outline" onclick="exportMappingInfo()">
+                        <i class="fas fa-download"></i>
+                        <span>导出数据</span>
+                    </button>
                 </div>
             </div>
         </div>
-        <div class="col-md-4">
-            <div class="card border-warning">
-                <div class="card-header bg-warning text-dark">
-                    <h5 class="mb-0">
-                        <i class="fas fa-tools me-2"></i>管理操作
-                    </h5>
+        <div class="dashboard-card-sync management-card-sync">
+            <div class="card-header-sync">
+                <div class="card-icon-sync warning-icon">
+                    <i class="fas fa-tools"></i>
                 </div>
-                <div class="card-body">
-                    <p class="card-text small">
-                        清空所有文件的确认状态，重置为"待确认"状态。
-                        <strong class="text-danger">此操作不可逆！</strong>
-                    </p>
-                    <button type="button" class="btn btn-warning btn-sm" onclick="clearAllStatus()">
-                        <i class="fas fa-trash-alt me-2"></i>清空所有状态
-                    </button>
+                <div class="card-title-sync">
+                    <h3>管理操作</h3>
+                    <p>重置确认状态</p>
                 </div>
+            </div>
+            <div class="card-content-sync">
+                <div class="warning-text-sync">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <span>清空所有文件的确认状态，重置为"待确认"。<strong>此操作不可逆！</strong></span>
+                </div>
+                <button type="button" class="action-btn-sync danger" onclick="clearAllStatus()">
+                    <i class="fas fa-trash-alt"></i>
+                    <span>清空所有状态</span>
+                </button>
             </div>
         </div>
     </div>
 
     <!-- 映射信息显示区域 -->
-    <div class="card" id="mappingInfoCard" style="display: none;">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <h5 class="mb-0">
-                <i class="fas fa-table me-2"></i>状态同步映射信息
-                <span class="badge bg-secondary ms-2" id="mappingCount">0</span>
-            </h5>
-            <div>
-                <button type="button" class="btn btn-sm btn-outline-primary" onclick="toggleTableView()">
-                    <i class="fas fa-th-list me-1"></i>切换视图
+    <div class="dashboard-card-sync table-card-sync" id="mappingInfoCard" style="display: none;">
+        <div class="card-header-sync table-header-sync">
+            <div class="card-header-left-sync">
+                <div class="card-icon-sync table-icon">
+                    <i class="fas fa-table"></i>
+                </div>
+                <div class="card-title-sync">
+                    <h3>状态同步映射信息 <span class="badge-count-sync" id="mappingCount">0</span></h3>
+                    <p>文件映射详情与状态追踪</p>
+                </div>
+            </div>
+            <div class="table-actions-sync">
+                <button type="button" class="action-btn-sync outline small" onclick="toggleTableView()">
+                    <i class="fas fa-th-list"></i>
+                    <span>切换视图</span>
                 </button>
-                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="hideMappingInfo()">
-                    <i class="fas fa-times me-1"></i>隐藏
+                <button type="button" class="action-btn-sync outline small" onclick="hideMappingInfo()">
+                    <i class="fas fa-times"></i>
+                    <span>隐藏</span>
                 </button>
             </div>
         </div>
-        <div class="card-body p-0">
+        <div class="card-content-sync p-0">
             <!-- 搜索栏 -->
-            <div class="p-3 border-bottom">
-                <div class="row">
-                    <div class="col-md-6">
-                        <input type="text" class="form-control" id="searchInput" placeholder="搜索文件路径..."">
+            <div class="table-filter-bar-sync">
+                <div class="filter-row-sync">
+                    <div class="filter-item-sync flex-2">
+                        <input type="text" class="form-input-sync" id="searchInput" placeholder="🔍 搜索文件路径...">
                     </div>
-                    <div class="col-md-3">
-                        <select class="form-select" id="diffTypeFilter">
+                    <div class="filter-item-sync">
+                        <select class="form-select-sync" id="diffTypeFilter">
                             <option value="">全部类型</option>
                             <option value="merged">合并diff</option>
                             <option value="single">单个提交</option>
                         </select>
                     </div>
-                    <div class="col-md-3">
-                        <select class="form-select" id="statusFilterTable">
+                    <div class="filter-item-sync">
+                        <select class="form-select-sync" id="statusFilterTable">
                             <option value="">全部状态</option>
                             <option value="pending">待确认</option>
                             <option value="confirmed">已确认</option>
@@ -240,32 +263,425 @@
 </div>
 
 <style>
-/* 文件路径内容样式 */
-.file-path-content {
-    font-size: 0.85em !important; /* 字体缩小到85% */
-    word-wrap: break-word !important; /* 自动换行 */
-    word-break: break-all !important; /* 允许在任意字符处换行 */
-    white-space: normal !important; /* 允许换行 */
-    line-height: 1.3 !important; /* 调整行高 */
-    max-width: 100% !important; /* 确保不超出容器宽度 */
+/* ====== 全局容器 ====== */
+.sync-management-container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 20px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
-/* 确保表格单元格支持换行 */
-#mappingTable td {
-    white-space: normal !important;
-    vertical-align: top !important;
+/* ====== 页面头部 - 深蓝风格 ====== */
+.page-header-sync {
+    background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
+    border-radius: 0.75rem;
+    padding: 28px 32px;
+    margin-bottom: 24px;
+    box-shadow: 0 4px 16px rgba(30, 58, 95, 0.18);
+    position: relative;
+    overflow: hidden;
+}
+.page-header-sync::before {
+    content: '';
+    position: absolute;
+    top: -60px; right: -60px;
+    width: 180px; height: 180px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 50%;
+}
+.header-content-sync {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    position: relative;
+    z-index: 2;
+    flex-wrap: wrap;
+    gap: 16px;
+}
+.header-left-sync {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.page-title-sync {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+.title-icon-sync {
+    width: 52px; height: 52px;
+    background: rgba(255,255,255,0.15);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.title-icon-sync i { font-size: 24px; color: white; }
+.title-text-sync h1 {
+    color: white;
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin: 0;
+}
+.subtitle-sync {
+    color: rgba(255,255,255,0.75);
+    font-size: 0.875rem;
+    margin: 2px 0 0 0;
+    font-weight: 400;
+}
+.breadcrumb-sync {
+    margin-top: 4px;
+}
+.breadcrumb-sync .breadcrumb {
+    background: transparent;
+    padding: 0;
+}
+.breadcrumb-sync .breadcrumb-item + .breadcrumb-item::before {
+    color: rgba(255,255,255,0.4);
+}
+.header-actions-sync {
+    display: flex;
+    gap: 8px;
+    align-items: center;
 }
 
-/* 文件路径列的特殊处理 */
-#mappingTable td:first-child {
-    max-width: 0; /* 配合table-layout: fixed使用 */
-    overflow: visible;
+/* ====== 通用按钮 - GitHub/Bootstrap风格 ====== */
+.action-btn-sync {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-decoration: none;
+    white-space: nowrap;
+}
+.action-btn-sync.primary {
+    background: rgba(255,255,255,0.15);
+    color: white;
+    border: 1px solid rgba(255,255,255,0.25);
+}
+.action-btn-sync.primary:hover {
+    background: rgba(255,255,255,0.25);
+}
+.action-btn-sync.secondary {
+    background: #0969da;
+    color: white;
+}
+.action-btn-sync.secondary:hover {
+    background: #0550ae;
+}
+.action-btn-sync.outline {
+    background: white;
+    color: #0969da;
+    border: 1px solid #d0d7de;
+}
+.action-btn-sync.outline:hover {
+    background: #f6f8fa;
+    border-color: #0969da;
+}
+.action-btn-sync.danger {
+    background: #cf222e;
+    color: white;
+}
+.action-btn-sync.danger:hover {
+    background: #a40e26;
+    box-shadow: 0 4px 12px rgba(207, 34, 46, 0.2);
+}
+.action-btn-sync.small {
+    padding: 5px 12px;
+    font-size: 12px;
+    border-radius: 6px;
 }
 
-/* 表格布局优化 */
+/* ====== 项目信息卡片 ====== */
+.project-info-card-sync {
+    background: white;
+    border-radius: 0.75rem;
+    padding: 16px 20px;
+    margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border: 1px solid #d0d7de;
+    border-left: 4px solid #0969da;
+}
+.project-info-header-sync {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.project-info-icon-sync {
+    width: 40px; height: 40px;
+    background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.project-info-icon-sync i { color: white; font-size: 16px; }
+.project-info-details-sync h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: #24292f;
+}
+.project-info-details-sync p {
+    margin: 2px 0 0;
+    color: #656d76;
+    font-size: 0.82rem;
+}
+
+/* ====== 统计仪表板 ====== */
+.stats-grid-sync {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 20px;
+}
+.stat-card-sync {
+    background: white;
+    border-radius: 0.75rem;
+    padding: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border: 1px solid #d0d7de;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    transition: all 0.2s ease;
+}
+.stat-card-sync:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    border-color: #0969da;
+}
+.stat-card-icon-sync {
+    width: 48px; height: 48px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.stat-card-icon-sync i { font-size: 20px; color: white; }
+.stat-primary .stat-card-icon-sync { background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%); }
+.stat-success .stat-card-icon-sync { background: #1a7f37; }
+.stat-warning .stat-card-icon-sync { background: #bf8700; }
+.stat-info .stat-card-icon-sync { background: #0969da; }
+.stat-value-sync {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: #24292f;
+    line-height: 1;
+}
+.stat-label-sync {
+    font-size: 0.8rem;
+    color: #656d76;
+    margin-top: 2px;
+}
+
+/* ====== 功能操作区 ====== */
+.operations-grid-sync {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 16px;
+    margin-bottom: 20px;
+}
+.dashboard-card-sync {
+    background: white;
+    border-radius: 0.75rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    border: 1px solid #d0d7de;
+    overflow: hidden;
+}
+.card-header-sync {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 20px 0;
+}
+.card-icon-sync {
+    width: 38px; height: 38px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.card-icon-sync i { font-size: 16px; color: white; }
+.filter-icon { background: linear-gradient(135deg, #0969da 0%, #0550ae 100%); }
+.warning-icon { background: #bf8700; }
+.table-icon { background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%); }
+.card-title-sync h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: #24292f;
+}
+.card-title-sync p {
+    margin: 2px 0 0;
+    font-size: 0.8rem;
+    color: #656d76;
+}
+.card-content-sync {
+    padding: 16px 20px 20px;
+}
+.card-content-sync.p-0 {
+    padding: 0;
+}
+
+/* ====== 筛选区域 ====== */
+.filter-row-sync {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+}
+.filter-item-sync {
+    flex: 1;
+    min-width: 180px;
+}
+.filter-item-sync.flex-2 {
+    flex: 2;
+}
+.filter-label-sync {
+    display: block;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #24292f;
+    margin-bottom: 6px;
+}
+.form-select-sync,
+.form-input-sync {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    font-size: 13px;
+    color: #24292f;
+    background: #f6f8fa;
+    transition: all 0.15s ease;
+    outline: none;
+}
+.form-select-sync:focus,
+.form-input-sync:focus {
+    border-color: #0969da;
+    box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.15);
+    background: white;
+}
+.filter-actions-sync {
+    display: flex;
+    gap: 8px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+}
+
+/* ====== 管理操作卡片 ====== */
+.warning-text-sync {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 14px;
+    background: #fff8c5;
+    border: 1px solid #d4a72c;
+    border-radius: 6px;
+    font-size: 0.82rem;
+    color: #6a5108;
+    margin-bottom: 14px;
+    line-height: 1.5;
+}
+.warning-text-sync i {
+    color: #bf8700;
+    margin-top: 2px;
+    flex-shrink: 0;
+}
+
+/* ====== 表格卡片 ====== */
+.table-card-sync {
+    margin-bottom: 20px;
+}
+.table-header-sync {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px 0;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.card-header-left-sync {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.table-actions-sync {
+    display: flex;
+    gap: 6px;
+}
+.badge-count-sync {
+    background: #0969da;
+    color: white;
+    padding: 2px 10px;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+.table-filter-bar-sync {
+    padding: 12px 20px;
+    border-bottom: 1px solid #d8dee4;
+    background: #f6f8fa;
+}
+
+/* ====== 表格样式增强 ====== */
 #mappingTable {
     table-layout: fixed;
     width: 100%;
+}
+#mappingTable thead th {
+    background: #f6f8fa;
+    color: #24292f;
+    font-weight: 600;
+    font-size: 0.82rem;
+    letter-spacing: 0.02em;
+    border-bottom: 1px solid #d8dee4;
+    padding: 10px 14px;
+}
+#mappingTable td {
+    white-space: normal !important;
+    vertical-align: top !important;
+    padding: 10px 14px;
+    border-bottom: 1px solid #d8dee4;
+    color: #24292f;
+}
+#mappingTable td:first-child {
+    max-width: 0;
+    overflow: visible;
+}
+#mappingTable tbody tr:hover {
+    background: #f6f8fa;
+}
+.file-path-content {
+    font-size: 0.85em !important;
+    word-wrap: break-word !important;
+    word-break: break-all !important;
+    white-space: normal !important;
+    line-height: 1.3 !important;
+    max-width: 100% !important;
+}
+
+/* ====== 响应式 ====== */
+@media (max-width: 992px) {
+    .stats-grid-sync { grid-template-columns: repeat(2, 1fr); }
+    .operations-grid-sync { grid-template-columns: 1fr; }
+    .header-content-sync { flex-direction: column; align-items: flex-start; }
+    .title-text-sync h1 { font-size: 1.4rem; }
+}
+@media (max-width: 576px) {
+    .stats-grid-sync { grid-template-columns: 1fr; }
+    .page-header-sync { padding: 20px 16px; }
+    .filter-row-sync { flex-direction: column; }
 }
 </style>
 
@@ -444,6 +860,8 @@ function loadMappingInfo() {
     .then(data => {
         hideLoading();
         if (data.success) {
+            // 保存后端返回的空数据原因，供 renderTable 使用
+            window._mappingEmptyReason = data.empty_reason || null;
             displayMappingInfo(data.mapping_info);
         } else {
             showAlert('danger', '加载失败: ' + data.message);
@@ -597,7 +1015,37 @@ function renderTable() {
     mappingCount.textContent = filteredData.length;
 
     if (paginatedData.length === 0) {
-        tableBody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">暂无匹配的映射信息</td></tr>';
+        // 根据不同原因显示不同的空状态提示
+        let emptyMessage = '暂无匹配的映射信息';
+        let emptyIcon = 'fas fa-inbox';
+        let emptyHint = '';
+        if (window._mappingEmptyReason) {
+            const reason = window._mappingEmptyReason;
+            if (reason === 'no_repository') {
+                emptyMessage = '当前项目尚未配置 Git/SVN 仓库';
+                emptyIcon = 'fas fa-code-branch';
+                emptyHint = '请先在项目设置中添加代码仓库配置';
+            } else if (reason === 'no_weekly_config') {
+                emptyMessage = '当前项目尚未配置周版本';
+                emptyIcon = 'fas fa-calendar-week';
+                emptyHint = '请先在仓库管理中添加周版本配置';
+            } else if (reason === 'no_cache_data') {
+                emptyMessage = '周版本已配置，但尚未生成缓存数据';
+                emptyIcon = 'fas fa-database';
+                emptyHint = '请点击"强制刷新"或等待后台自动同步';
+            }
+        } else if (currentMappingData && currentMappingData.length > 0 && filteredData.length === 0) {
+            emptyMessage = '当前筛选条件下没有匹配的记录';
+            emptyIcon = 'fas fa-filter';
+            emptyHint = '请尝试调整筛选条件';
+        }
+        tableBody.innerHTML = `<tr><td colspan="6" class="text-center text-muted py-4">
+            <div style="padding: 20px 0;">
+                <i class="${emptyIcon}" style="font-size: 2rem; margin-bottom: 10px; display: block; opacity: 0.5;"></i>
+                <div style="font-size: 1rem; font-weight: 500;">${emptyMessage}</div>
+                ${emptyHint ? `<div style="font-size: 0.85rem; margin-top: 6px; opacity: 0.7;">${emptyHint}</div>` : ''}
+            </div>
+        </td></tr>`;
     } else {
         paginatedData.forEach(info => {
             const row = document.createElement('tr');

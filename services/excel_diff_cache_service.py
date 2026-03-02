@@ -50,19 +50,122 @@ class ExcelDiffCacheService:
         self.max_cache_count = 1000  # 最大缓存数量
         self.long_processing_threshold = 10.0  # 长处理时间阈值（秒）
         self.long_processing_expire_days = 90  # 长处理文件缓存保留天数（3个月）
+        # ===== 日志聚合缓冲区（1分钟窗口）=====
+        self._log_buffer = {}       # { project_code: { 'success': count, 'error': count, 'files': set(), 'last_flush': datetime } }
+        self._log_buffer_lock = threading.Lock()
+        self._LOG_FLUSH_INTERVAL = 60  # 聚合窗口：60秒
         
     def is_excel_file(self, file_path):
         """检查文件是否为Excel文件"""
         excel_extensions = ['.xlsx', '.xls', '.xlsm']
         return any(file_path.lower().endswith(ext) for ext in excel_extensions)
     
-    def log_cache_operation(self, message, log_type='info', repository_id=None, file_path=None):
-        """记录缓存操作日志到数据库"""
+    def _get_project_code(self, repository_id):
+        """根据 repository_id 获取项目编号（如 G119），带简易缓存"""
+        if repository_id is None:
+            return None
+        # 简易进程内缓存，避免重复查询
+        cache_attr = '_project_code_cache'
+        if not hasattr(self, cache_attr):
+            setattr(self, cache_attr, {})
+        cache = getattr(self, cache_attr)
+        if repository_id in cache:
+            return cache[repository_id]
         try:
-            # 保存到数据库
+            repo = db.session.get(Repository, repository_id)
+            if repo and repo.project:
+                code = repo.project.code
+                cache[repository_id] = code
+                return code
+        except Exception:
+            pass
+        cache[repository_id] = None
+        return None
+
+    def _flush_log_buffer(self, project_code, force=False):
+        """刷新指定项目的日志缓冲区，将聚合摘要写入数据库"""
+        with self._log_buffer_lock:
+            buf = self._log_buffer.get(project_code)
+            if not buf:
+                return
+            now = time.time()
+            elapsed = now - buf.get('last_flush', 0)
+            if not force and elapsed < self._LOG_FLUSH_INTERVAL:
+                return  # 窗口未到，不刷新
+            # 构建聚合摘要
+            success_cnt = buf.get('success', 0)
+            error_cnt = buf.get('error', 0)
+            total = success_cnt + error_cnt
+            files = buf.get('files', set())
+            prefix = f"【{project_code}】" if project_code else ""
+            summary_parts = []
+            if success_cnt > 0:
+                summary_parts.append(f"成功 {success_cnt} 个")
+            if error_cnt > 0:
+                summary_parts.append(f"失败 {error_cnt} 个")
+            summary_msg = f"{prefix}缓存批量统计: {'，'.join(summary_parts)}（共 {total} 个文件）"
+            log_type = 'success' if error_cnt == 0 else ('error' if success_cnt == 0 else 'warning')
+            # 重置缓冲区
+            self._log_buffer[project_code] = {
+                'success': 0, 'error': 0, 'files': set(),
+                'last_flush': now, 'repository_id': buf.get('repository_id')
+            }
+        # 在锁外写入数据库
+        try:
             log_entry = OperationLog(
                 log_type=log_type,
-                message=message,
+                message=summary_msg,
+                source='excel_cache',
+                repository_id=buf.get('repository_id'),
+                file_path=None
+            )
+            db.session.add(log_entry)
+            self._log_write_count += 1
+            if self._log_write_count % 50 == 0:
+                self._cleanup_old_logs()
+            db.session.commit()
+            # 内存日志
+            from utils.timezone_utils import now_beijing
+            timestamp = now_beijing().strftime('%Y/%m/%d %H:%M:%S')
+            self.operation_logs.append({'time': timestamp, 'message': summary_msg, 'type': log_type})
+            if len(self.operation_logs) > 100:
+                self.operation_logs = self.operation_logs[-100:]
+        except Exception as e:
+            log_print(f"刷新聚合日志失败: {e}", 'ERROR')
+
+    def log_cache_operation(self, message, log_type='info', repository_id=None, file_path=None):
+        """记录缓存操作日志到数据库。
+        对于高频的 success/error 类型日志，使用 1 分钟聚合窗口批量写入。
+        其他类型（info/warning）立即写入并附带项目编号前缀。
+        """
+        try:
+            # 获取项目编号前缀
+            project_code = self._get_project_code(repository_id)
+            prefix = f"【{project_code}】" if project_code else ""
+
+            # 高频日志聚合：success 和 error 类型进入缓冲区
+            if log_type in ('success', 'error') and repository_id is not None:
+                buf_key = project_code or f"repo_{repository_id}"
+                with self._log_buffer_lock:
+                    if buf_key not in self._log_buffer:
+                        self._log_buffer[buf_key] = {
+                            'success': 0, 'error': 0, 'files': set(),
+                            'last_flush': time.time(), 'repository_id': repository_id
+                        }
+                    buf = self._log_buffer[buf_key]
+                    buf[log_type] = buf.get(log_type, 0) + 1
+                    if file_path:
+                        buf['files'].add(file_path)
+                # 检查是否需要刷新
+                self._flush_log_buffer(buf_key)
+                return
+
+            # 非聚合日志：立即写入，添加项目编号前缀
+            prefixed_message = f"{prefix}{message}" if prefix else message
+
+            log_entry = OperationLog(
+                log_type=log_type,
+                message=prefixed_message,
                 source='excel_cache',
                 repository_id=repository_id,
                 file_path=file_path
@@ -81,7 +184,7 @@ class ExcelDiffCacheService:
             timestamp = now_beijing().strftime('%Y/%m/%d %H:%M:%S')
             memory_log = {
                 'time': timestamp,
-                'message': message,
+                'message': prefixed_message,
                 'type': log_type
             }
             self.operation_logs.append(memory_log)
@@ -470,6 +573,31 @@ class ExcelDiffCacheService:
             import traceback
             traceback.print_exc()
     
+    def cleanup_expired_cache(self):
+        """清理已过期的缓存记录（expire_at 已过期 + 状态为 outdated/failed 的记录）"""
+        try:
+            from sqlalchemy import or_
+            now = datetime.now(timezone.utc)
+
+            expired_count = DiffCache.query.filter(
+                or_(
+                    db.and_(DiffCache.expire_at.isnot(None), DiffCache.expire_at < now),   # 过期时间已到
+                    DiffCache.cache_status == 'outdated',                                   # 标记为过期
+                    DiffCache.cache_status == 'failed',                                     # 失败的记录
+                )
+            ).delete(synchronize_session=False)
+
+            db.session.commit()
+            log_print(f"🗑️ 清理了 {expired_count} 条过期/失败缓存", 'CACHE')
+            return expired_count
+        except Exception as e:
+            log_print(f"❌ 清理过期缓存失败: {e}", 'CACHE', force=True)
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            return 0
+
     def cleanup_old_cache(self, days=30):
         """清理超过指定天数的缓存数据和旧版本缓存（合并OR查询，#39）"""
         try:

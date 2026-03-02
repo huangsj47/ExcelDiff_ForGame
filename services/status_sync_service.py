@@ -288,6 +288,9 @@ class StatusSyncService:
 
             query = self.db.session.query(WeeklyVersionDiffCache)
 
+            # empty_reason 用于前端显示精准的空状态提示
+            empty_reason = None
+
             if config_id:
                 query = query.filter_by(config_id=config_id)
             elif repository_id:
@@ -297,7 +300,7 @@ class StatusSyncService:
                 if config_ids:
                     query = query.filter(WeeklyVersionDiffCache.config_id.in_(config_ids))
                 else:
-                    return {'success': True, 'mapping_info': []}
+                    return {'success': True, 'mapping_info': [], 'empty_reason': 'no_weekly_config'}
             elif project_id:
                 # 通过project_id查找相关的repository_id，再查找config_id
                 repositories = self.db.session.query(Repository).filter_by(project_id=project_id).all()
@@ -308,9 +311,10 @@ class StatusSyncService:
                     if config_ids:
                         query = query.filter(WeeklyVersionDiffCache.config_id.in_(config_ids))
                     else:
-                        return {'success': True, 'mapping_info': []}
+                        empty_reason = 'no_weekly_config'
+                        return {'success': True, 'mapping_info': [], 'empty_reason': empty_reason}
                 else:
-                    return {'success': True, 'mapping_info': []}
+                    return {'success': True, 'mapping_info': [], 'empty_reason': 'no_repository'}
 
             weekly_caches = query.all()
 

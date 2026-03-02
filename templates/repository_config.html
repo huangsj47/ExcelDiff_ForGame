@@ -4,31 +4,31 @@
 
 {% block content %}
 <div class="container-fluid">
-    <!-- 页面头部 -->
-    <div class="row mb-4">
-        <div class="col-12">
-            <div class="d-flex justify-content-between align-items-center">
-                <div>
-                    <h3 class="mb-2">配置仓库</h3>
-                    <nav aria-label="breadcrumb">
-                        <ol class="breadcrumb mb-0">
-                            <li class="breadcrumb-item"><a href="{{ url_for('index') }}" class="text-decoration-none">项目列表</a></li>
-                            <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=project.id) }}" class="text-decoration-none">{{ project.name }}</a></li>
-                            <li class="breadcrumb-item active">配置仓库</li>
-                        </ol>
-                    </nav>
-                </div>
-                <div class="d-flex gap-2">
-                    <button class="btn btn-warning" onclick="showBatchUpdateModal()">
-                        <i class="bi bi-key me-1"></i>统一修改密码/Token
-                    </button>
-                    <button class="btn btn-primary" onclick="location.href='{{ url_for('add_svn_repository', project_id=project.id) }}'">
-                        <i class="bi bi-plus-circle me-1"></i>新增SVN仓库
-                    </button>
-                    <button class="btn btn-success" onclick="location.href='{{ url_for('add_git_repository', project_id=project.id) }}'">
-                        <i class="bi bi-plus-circle me-1"></i>新增GitLab仓库
-                    </button>
-                </div>
+    <!-- 页面头部 - 蓝色渐变 -->
+    <div class="page-header" style="background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%); border-radius: 0.75rem; padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; box-shadow: 0 4px 16px rgba(13,110,253,0.2); color: #fff;">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h4 class="mb-1" style="color: #fff; font-weight: 700; font-size: 1.25rem;">
+                    <i class="fas fa-database me-2"></i>配置仓库
+                </h4>
+                <nav aria-label="breadcrumb">
+                    <ol class="breadcrumb mb-0" style="background: none; padding: 0;">
+                        <li class="breadcrumb-item"><a href="{{ url_for('index') }}" style="color: rgba(255,255,255,0.8); text-decoration: none; font-weight: 500;"><i class="fas fa-home me-1"></i>项目列表</a></li>
+                        <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=project.id) }}" style="color: rgba(255,255,255,0.8); text-decoration: none; font-weight: 500;">{{ project.name }}</a></li>
+                        <li class="breadcrumb-item" style="color: rgba(255,255,255,0.6);">配置仓库</li>
+                    </ol>
+                </nav>
+            </div>
+            <div class="d-flex gap-2">
+                <button class="btn btn-sm px-3" onclick="showBatchUpdateModal()" style="background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.25); border-radius: 6px; font-weight: 500; font-size: 0.82rem;">
+                    <i class="fas fa-key me-1"></i>统一修改密码
+                </button>
+                <button class="btn btn-sm px-3" onclick="location.href='{{ url_for('add_svn_repository', project_id=project.id) }}'" style="background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.25); border-radius: 6px; font-weight: 500; font-size: 0.82rem;">
+                    <i class="fas fa-plus-circle me-1"></i>新增SVN仓库
+                </button>
+                <button class="btn btn-sm px-3" onclick="location.href='{{ url_for('add_git_repository', project_id=project.id) }}'" style="background: rgba(255,255,255,0.9); color: #1e3a5f; border: none; border-radius: 6px; font-weight: 600; font-size: 0.82rem;">
+                    <i class="fas fa-plus-circle me-1"></i>新增GitLab仓库
+                </button>
             </div>
         </div>
     </div>
@@ -36,173 +36,127 @@
     <!-- Flash消息显示已移至base.html，避免重复显示 -->
 
     <!-- 提示信息 -->
-    <div class="row mb-3">
-        <div class="col-12">
-            <div class="alert alert-info border-0 shadow-sm">
-                <i class="bi bi-info-circle me-2"></i>
-                成功配置项目日程仓库后，才能配置仓库
-            </div>
+    <div class="mb-3">
+        <div class="d-flex align-items-center px-3 py-2" style="background: #eff6ff; border-radius: 8px; border: 1px solid #dbeafe; font-size: 0.82rem; color: #1e40af;">
+            <i class="fas fa-info-circle me-2" style="color: #3b82f6;"></i>
+            成功配置项目日程仓库后，才能配置仓库
         </div>
     </div>
 
     {% if repositories %}
     <!-- 仓库列表 -->
-    <div class="row">
-        <div class="col-12">
-            <div class="card border-0 shadow-sm">
-                <div class="card-header bg-light border-bottom">
-                    <div class="d-flex justify-content-between align-items-center">
-                        <h5 class="mb-0 text-primary">
-                            <i class="bi bi-database me-2"></i>
-                            {{ project.code }}仓库
-                        </h5>
-                        <div class="d-flex gap-2">
-                            <span class="badge bg-secondary">共 {{ repositories|length }} 个仓库</span>
-                            <button class="btn btn-outline-primary btn-sm" onclick="showRepositoryOrderModal()">
-                                <i class="bi bi-arrow-up-down me-1"></i>编辑仓库顺序
-                            </button>
-                        </div>
-                    </div>
+    <div class="card border-0" style="border-radius: 0.625rem; box-shadow: 0 2px 12px rgba(0,0,0,0.06); border: 1px solid #e5e7eb;">
+        <div class="card-header px-3 py-2" style="background: #f8fafc; border-bottom: 1px solid #e5e7eb; border-radius: 0.625rem 0.625rem 0 0;">
+            <div class="d-flex justify-content-between align-items-center">
+                <h6 class="mb-0" style="font-weight: 600; color: #1e293b; font-size: 0.9rem;">
+                    <i class="fas fa-server me-2" style="color: #0d6efd;"></i>{{ project.code }} 仓库
+                </h6>
+                <div class="d-flex gap-2 align-items-center">
+                    <span class="px-2 py-1" style="background: #e0e7ff; color: #3730a3; border-radius: 6px; font-size: 0.75rem; font-weight: 600;">共 {{ repositories|length }} 个</span>
+                    <button class="btn btn-sm" onclick="showRepositoryOrderModal()" style="font-size: 0.78rem; color: #475569; border: 1px solid #d1d5db; border-radius: 6px; padding: 0.2rem 0.6rem;">
+                        <i class="fas fa-sort me-1"></i>调整顺序
+                    </button>
                 </div>
-                <div class="card-body p-0">
-                    <div class="table-responsive">
-                        <table class="table table-hover mb-0" style="font-size: 0.9em;">
-                            <thead class="table-light">
-                                <tr>
-                                    <th width="5%" class="border-0">
-                                        <i class="bi bi-grip-vertical me-1"></i>ID
-                                    </th>
-                                    <th width="12%" class="border-0">
-                                        <i class="bi bi-tag me-1"></i>仓库名称
-                                    </th>
-                                    <th width="23%" class="border-0">
-                                        <i class="bi bi-link-45deg me-1"></i>仓库地址
-                                    </th>
-                                    <th width="20%" class="border-0">
-                                        <i class="bi bi-folder me-1"></i>仓库根目录
-                                    </th>
-                                    <th width="8%" class="border-0">
-                                        <i class="bi bi-code-square me-1"></i>当前版本
-                                    </th>
-                                    <th width="8%" class="border-0">
-                                        <i class="bi bi-layers me-1"></i>资源类型
-                                    </th>
-                                    <th width="24%" class="border-0">
-                                        <i class="bi bi-gear me-1"></i>操作
-                                    </th>
-                                </tr>
-                            </thead>
-                            <tbody id="repositoryTableBody">
-                                {% for repo in repositories %}
-                                <tr class="align-middle" data-repo-id="{{ repo.id }}">
-                                    <td class="fw-medium text-center">
-                                        <div class="fw-bold text-primary">{{ repo.id }}</div>
-                                    </td>
-                                    <td class="fw-medium">
-                                        <div class="d-flex align-items-center">
-                                            <span class="badge bg-{% if repo.type == 'svn' %}primary{% else %}success{% endif %} me-2">
-                                                {{ repo.type.upper() }}
-                                            </span>
-                                            {{ repo.name }}
-                                        </div>
-                                    </td>
-                                    <td>
-                                        <code class="text-muted small">
-                                            {% if repo.type == 'svn' %}
-                                                {{ repo.url[:50] }}{% if repo.url|length > 50 %}...{% endif %}
-                                            {% else %}
-                                                {{ repo.server_url[:50] }}{% if repo.server_url|length > 50 %}...{% endif %}
-                                            {% endif %}
-                                        </code>
-                                    </td>
-                                    <td>
-                                        <code class="text-muted small">
-                                            {% if repo.type == 'svn' %}
-                                                {{ repo.root_directory[:30] }}{% if repo.root_directory|length > 30 %}...{% endif %}
-                                            {% else %}
-                                                {{ repo.url[:30] }}{% if repo.url|length > 30 %}...{% endif %}
-                                            {% endif %}
-                                        </code>
-                                    </td>
-                                    <td>
-                                        <span class="badge bg-info">
-                                            {% if repo.type == 'svn' %}
-                                                {{ repo.current_version or 'master' }}
-                                            {% else %}
-                                                {{ repo.branch or 'master' }}
-                                            {% endif %}
-                                        </span>
-                                    </td>
-                                    <td>
-                                        <span class="badge bg-{% if repo.resource_type == 'table' %}warning{% elif repo.resource_type == 'code' %}success{% else %}secondary{% endif %}">
-                                            {% if repo.resource_type == 'code' %}代码
-                                            {% elif repo.resource_type == 'table' %}配置表
-                                            {% elif repo.resource_type == 'res' %}资源
-                                            {% else %}{{ repo.resource_type }}{% endif %}
-                                        </span>
-                                        {% if repo.clone_status %}
-                                        <br>
-                                        <small class="badge bg-{% if repo.clone_status == 'completed' %}success{% elif repo.clone_status == 'cloning' %}info{% elif repo.clone_status == 'failed' %}danger{% else %}secondary{% endif %} mt-1">
-                                            {% if repo.clone_status == 'pending' %}待克隆
-                                            {% elif repo.clone_status == 'cloning' %}克隆中
-                                            {% elif repo.clone_status == 'completed' %}已克隆
-                                            {% elif repo.clone_status == 'failed' %}克隆失败
-                                            {% endif %}
-                                        </small>
-                                        {% endif %}
-                                    </td>
-                                    <td>
-                                        <div class="btn-group-vertical btn-group-sm d-grid gap-1" role="group">
-                                            <div class="d-flex gap-1">
-                                                <button class="btn btn-outline-primary btn-sm flex-fill" onclick="testRepository({{ repo.id }})" title="测试连接">
-                                                    <i class="bi bi-wifi"></i> 测试连接
-                                                </button>
-                                                <button class="btn btn-outline-success btn-sm flex-fill" onclick="syncRepository({{ repo.id }})" title="获取数据">
-                                                    <i class="bi bi-arrow-clockwise"></i> 获取数据
-                                                </button>
-                                                {% if repo.type == 'git' and repo.clone_status == 'failed' %}
-                                                <button class="btn btn-outline-warning btn-sm flex-fill" onclick="retryClone({{ repo.id }})" title="重试克隆">
-                                                    <i class="bi bi-arrow-repeat"></i> 重试克隆
-                                                </button>
-                                                {% endif %}
-                                            </div>
-                                            <div class="d-flex gap-1">
-                                                <button class="btn btn-outline-info btn-sm flex-fill" onclick="editRepository({{ repo.id }})" title="修改配置">
-                                                    <i class="bi bi-pencil"></i> 修改配置
-                                                </button>
-                                                <button class="btn btn-outline-danger btn-sm flex-fill" onclick="deleteRepository({{ repo.id }})" title="删除仓库">
-                                                    <i class="bi bi-x-circle"></i> 删除
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
+            </div>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover mb-0" style="font-size: 0.82rem;">
+                    <thead>
+                        <tr style="background: #f1f5f9; border-bottom: 2px solid #e2e8f0;">
+                            <th width="4%" class="border-0 text-center" style="padding: 0.6rem 0.5rem; color: #64748b; font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em;">ID</th>
+                            <th width="13%" class="border-0" style="padding: 0.6rem 0.5rem; color: #64748b; font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em;">仓库名称</th>
+                            <th width="24%" class="border-0" style="padding: 0.6rem 0.5rem; color: #64748b; font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em;">仓库地址</th>
+                            <th width="18%" class="border-0" style="padding: 0.6rem 0.5rem; color: #64748b; font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em;">根目录</th>
+                            <th width="7%" class="border-0 text-center" style="padding: 0.6rem 0.5rem; color: #64748b; font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em;">版本/分支</th>
+                            <th width="10%" class="border-0 text-center" style="padding: 0.6rem 0.5rem; color: #64748b; font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em;">类型 / 状态</th>
+                            <th width="24%" class="border-0 text-center" style="padding: 0.6rem 0.5rem; color: #64748b; font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em;">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="repositoryTableBody">
+                        {% for repo in repositories %}
+                        <tr class="align-middle repo-row" data-repo-id="{{ repo.id }}">
+                            <td class="text-center" style="padding: 0.55rem 0.5rem;">
+                                <span style="font-weight: 700; color: #0d6efd; font-size: 0.85rem;">#{{ repo.id }}</span>
+                            </td>
+                            <td style="padding: 0.55rem 0.5rem;">
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="d-inline-flex align-items-center justify-content-center" style="width: 28px; height: 28px; border-radius: 6px; font-size: 0.65rem; font-weight: 700; color: #fff; background: {% if repo.type == 'svn' %}linear-gradient(135deg, #3b82f6, #1d4ed8){% else %}linear-gradient(135deg, #22c55e, #15803d){% endif %}; flex-shrink: 0;">
+                                        {{ repo.type.upper() }}
+                                    </span>
+                                    <span style="font-weight: 600; color: #1e293b;">{{ repo.name }}</span>
+                                </div>
+                            </td>
+                            <td style="padding: 0.55rem 0.5rem;">
+                                <code style="font-size: 0.78rem; color: #64748b; background: #f1f5f9; padding: 0.15rem 0.4rem; border-radius: 4px; word-break: break-all;">
+                                    {% if repo.type == 'svn' %}{{ repo.url[:55] }}{% if repo.url|length > 55 %}...{% endif %}{% else %}{{ repo.server_url[:55] }}{% if repo.server_url|length > 55 %}...{% endif %}{% endif %}
+                                </code>
+                            </td>
+                            <td style="padding: 0.55rem 0.5rem;">
+                                <code style="font-size: 0.78rem; color: #64748b; background: #f1f5f9; padding: 0.15rem 0.4rem; border-radius: 4px; word-break: break-all;">
+                                    {% if repo.type == 'svn' %}{{ repo.root_directory[:35] }}{% if repo.root_directory|length > 35 %}...{% endif %}{% else %}{{ repo.url[:35] }}{% if repo.url|length > 35 %}...{% endif %}{% endif %}
+                                </code>
+                            </td>
+                            <td class="text-center" style="padding: 0.55rem 0.5rem;">
+                                <span style="background: #eff6ff; color: #1d4ed8; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 500;">
+                                    {% if repo.type == 'svn' %}{{ repo.current_version or 'master' }}{% else %}{{ repo.branch or 'master' }}{% endif %}
+                                </span>
+                            </td>
+                            <td class="text-center" style="padding: 0.55rem 0.5rem;">
+                                <span style="display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.72rem; font-weight: 600; {% if repo.resource_type == 'table' %}background: #fef3c7; color: #92400e;{% elif repo.resource_type == 'code' %}background: #dcfce7; color: #166534;{% else %}background: #f1f5f9; color: #475569;{% endif %}">
+                                    {% if repo.resource_type == 'code' %}<i class="fas fa-code me-1"></i>代码{% elif repo.resource_type == 'table' %}<i class="fas fa-table me-1"></i>配置表{% elif repo.resource_type == 'res' %}<i class="fas fa-folder me-1"></i>资源{% else %}{{ repo.resource_type }}{% endif %}
+                                </span>
+                                {% if repo.clone_status %}
+                                <br>
+                                <span style="display: inline-block; margin-top: 3px; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.68rem; font-weight: 500; {% if repo.clone_status == 'completed' %}background: #dcfce7; color: #166534;{% elif repo.clone_status == 'cloning' %}background: #dbeafe; color: #1e40af;{% elif repo.clone_status == 'failed' %}background: #fee2e2; color: #991b1b;{% else %}background: #f1f5f9; color: #475569;{% endif %}">
+                                    {% if repo.clone_status == 'pending' %}⏳ 待克隆{% elif repo.clone_status == 'cloning' %}🔄 克隆中{% elif repo.clone_status == 'completed' %}✓ 已克隆{% elif repo.clone_status == 'failed' %}✗ 失败{% endif %}
+                                </span>
+                                {% endif %}
+                            </td>
+                            <td class="text-center" style="padding: 0.55rem 0.5rem;">
+                                <div class="d-flex flex-wrap gap-1 justify-content-center">
+                                    <button class="btn btn-sm action-btn" onclick="testRepository({{ repo.id }})" title="测试连接" style="font-size: 0.72rem; padding: 0.2rem 0.5rem; color: #0d6efd; border: 1px solid #bfdbfe; border-radius: 5px; background: #eff6ff;">
+                                        <i class="fas fa-plug me-1"></i>测试
+                                    </button>
+                                    <button class="btn btn-sm action-btn" onclick="syncRepository({{ repo.id }})" title="同步数据" style="font-size: 0.72rem; padding: 0.2rem 0.5rem; color: #059669; border: 1px solid #a7f3d0; border-radius: 5px; background: #ecfdf5;">
+                                        <i class="fas fa-sync-alt me-1"></i>同步
+                                    </button>
+                                    <button class="btn btn-sm action-btn" onclick="editRepository({{ repo.id }})" title="修改配置" style="font-size: 0.72rem; padding: 0.2rem 0.5rem; color: #7c3aed; border: 1px solid #ddd6fe; border-radius: 5px; background: #f5f3ff;">
+                                        <i class="fas fa-edit me-1"></i>修改
+                                    </button>
+                                    <button class="btn btn-sm action-btn" onclick="deleteRepository({{ repo.id }})" title="删除仓库" style="font-size: 0.72rem; padding: 0.2rem 0.5rem; color: #dc2626; border: 1px solid #fecaca; border-radius: 5px; background: #fef2f2;">
+                                        <i class="fas fa-trash-alt me-1"></i>删除
+                                    </button>
+                                    {% if repo.type == 'git' and repo.clone_status == 'failed' %}
+                                    <button class="btn btn-sm action-btn" onclick="retryClone({{ repo.id }})" title="重试克隆" style="font-size: 0.72rem; padding: 0.2rem 0.5rem; color: #d97706; border: 1px solid #fde68a; border-radius: 5px; background: #fffbeb;">
+                                        <i class="fas fa-redo me-1"></i>重试
+                                    </button>
+                                    {% endif %}
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
             </div>
         </div>
     </div>
     {% else %}
     <!-- 空状态 -->
-    <div class="row">
-        <div class="col-12">
-            <div class="text-center py-5">
-                <div class="mb-4">
-                    <i class="bi bi-database text-muted" style="font-size: 4rem;"></i>
-                </div>
-                <h4 class="text-muted mb-3">暂无仓库配置</h4>
-                <p class="text-muted mb-4">点击上方按钮添加您的第一个仓库，开始管理代码版本</p>
-                <div class="d-flex justify-content-center gap-2">
-                    <a href="{{ url_for('add_svn_repository', project_id=project.id) }}" class="btn btn-primary">
-                        <i class="bi bi-plus-circle me-1"></i>添加SVN仓库
-                    </a>
-                    <a href="{{ url_for('add_git_repository', project_id=project.id) }}" class="btn btn-success">
-                        <i class="bi bi-plus-circle me-1"></i>添加GitLab仓库
-                    </a>
-                </div>
+    <div class="card border-0" style="border-radius: 0.75rem; box-shadow: 0 2px 12px rgba(0,0,0,0.06); border: 1px solid #e5e7eb;">
+        <div class="card-body text-center py-5">
+            <div style="width: 56px; height: 56px; background: #eff6ff; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 1rem;">
+                <i class="fas fa-database" style="font-size: 1.5rem; color: #3b82f6;"></i>
+            </div>
+            <h5 style="color: #1e293b; font-weight: 600; margin-bottom: 0.5rem;">暂无仓库配置</h5>
+            <p style="color: #64748b; font-size: 0.85rem; margin-bottom: 1.25rem;">点击下方按钮添加您的第一个仓库，开始管理代码版本</p>
+            <div class="d-flex justify-content-center gap-2">
+                <a href="{{ url_for('add_svn_repository', project_id=project.id) }}" class="btn btn-sm px-3" style="background: #eff6ff; color: #0d6efd; border: 1px solid #bfdbfe; border-radius: 8px; font-weight: 600; font-size: 0.85rem;">
+                    <i class="fas fa-plus-circle me-1"></i>添加SVN仓库
+                </a>
+                <a href="{{ url_for('add_git_repository', project_id=project.id) }}" class="btn btn-sm px-3" style="background: linear-gradient(135deg, #0d6efd, #0b5ed7); color: #fff; border: none; border-radius: 8px; font-weight: 600; font-size: 0.85rem;">
+                    <i class="fas fa-plus-circle me-1"></i>添加GitLab仓库
+                </a>
             </div>
         </div>
     </div>
@@ -328,71 +282,46 @@
 </div>
 
 <style>
-.table th {
-    background-color: #f8f9fa;
-    font-weight: 600;
-    color: #495057;
-    border-bottom: 2px solid #dee2e6;
+/* ===== 表格行样式 ===== */
+.repo-row {
+    transition: background-color 0.15s ease;
+    border-bottom: 1px solid #f1f5f9;
+}
+.repo-row:hover {
+    background-color: #f8fafc !important;
+}
+.repo-row:last-child {
+    border-bottom: none;
 }
 
-.table td {
-    vertical-align: middle;
-    border-bottom: 1px solid #f1f3f4;
+/* ===== 操作按钮交互 ===== */
+.action-btn {
+    transition: all 0.2s ease;
+    cursor: pointer;
+}
+.action-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.1);
 }
 
-.table tbody tr:hover {
-    background-color: #f8f9fa;
+/* ===== 面包屑分隔符颜色 ===== */
+.page-header .breadcrumb-item + .breadcrumb-item::before {
+    color: rgba(255,255,255,0.4);
 }
 
-.btn-group-vertical .btn {
-    font-size: 0.75rem;
-    padding: 0.25rem 0.5rem;
-}
+/* ===== 拖拽排序样式 ===== */
+.draggable-row { transition: background-color 0.2s ease; }
+.draggable-row:hover { background-color: #f8f9fa; }
+.draggable-row.sortable-ghost { opacity: 0.5; background-color: #e3f2fd; }
+.sortable-chosen { background-color: #fff3cd !important; }
+.sortable-drag { opacity: 0.8; transform: rotate(5deg); }
+.drag-handle { cursor: move !important; font-size: 1.2em; }
+.drag-handle:hover { color: #007bff !important; transform: scale(1.1); }
 
-.card {
-    border-radius: 8px;
-}
-
-.alert {
-    border-radius: 8px;
-}
-
-code {
-    background-color: #f8f9fa;
-    padding: 0.125rem 0.25rem;
-    border-radius: 3px;
-}
-
-.draggable-row {
-    transition: background-color 0.2s ease;
-}
-
-.draggable-row:hover {
-    background-color: #f8f9fa;
-}
-
-.draggable-row.sortable-ghost {
-    opacity: 0.5;
-    background-color: #e3f2fd;
-}
-
-.sortable-chosen {
-    background-color: #fff3cd !important;
-}
-
-.sortable-drag {
-    opacity: 0.8;
-    transform: rotate(5deg);
-}
-
-.drag-handle {
-    cursor: move !important;
-    font-size: 1.2em;
-}
-
-.drag-handle:hover {
-    color: #007bff !important;
-    transform: scale(1.1);
+/* ===== 响应式适配 ===== */
+@media (max-width: 768px) {
+    .page-header .d-flex { flex-direction: column; gap: 0.75rem; }
+    .action-btn { font-size: 0.68rem !important; padding: 0.15rem 0.35rem !important; }
 }
 </style>
 {% endblock %}
@@ -400,6 +329,118 @@ code {
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 <script>
+// ===== 克隆状态轮询 & 按钮禁用逻辑 =====
+(function() {
+    // 后端渲染的初始状态
+    const repoStatuses = {
+        {% for repo in repositories %}
+        {{ repo.id }}: "{{ repo.clone_status or 'completed' }}"{% if not loop.last %},{% endif %}
+        {% endfor %}
+    };
+    const POLL_INTERVAL = 5000; // 5 秒
+    let pollingTimers = {};
+
+    /** 禁用/启用某行的操作按钮 */
+    function setRowButtonsDisabled(repoId, disabled) {
+        const row = document.querySelector(`tr.repo-row[data-repo-id="${repoId}"]`);
+        if (!row) return;
+        row.querySelectorAll('.action-btn').forEach(btn => {
+            if (disabled) {
+                btn.disabled = true;
+                btn.style.opacity = '0.45';
+                btn.style.pointerEvents = 'none';
+                btn.style.cursor = 'not-allowed';
+            } else {
+                btn.disabled = false;
+                btn.style.opacity = '';
+                btn.style.pointerEvents = '';
+                btn.style.cursor = 'pointer';
+            }
+        });
+    }
+
+    /** 更新状态徽标文本 */
+    function updateStatusBadge(repoId, status, errorMsg) {
+        const row = document.querySelector(`tr.repo-row[data-repo-id="${repoId}"]`);
+        if (!row) return;
+        // 找到状态栏（第6列）里的克隆状态 span
+        const cells = row.querySelectorAll('td');
+        const statusCell = cells[5]; // 0-indexed, 第6列
+        if (!statusCell) return;
+        let badge = statusCell.querySelector('.clone-status-badge');
+        if (!badge) {
+            // 如果还没有 badge，创建一个
+            const br = document.createElement('br');
+            badge = document.createElement('span');
+            badge.className = 'clone-status-badge';
+            badge.style.cssText = 'display:inline-block;margin-top:3px;padding:0.1rem 0.4rem;border-radius:4px;font-size:0.68rem;font-weight:500;';
+            statusCell.appendChild(br);
+            statusCell.appendChild(badge);
+        }
+        const map = {
+            pending:   { text: '⏳ 待克隆',  bg: '#f1f5f9', color: '#475569' },
+            cloning:   { text: '🔄 克隆中',  bg: '#dbeafe', color: '#1e40af' },
+            completed: { text: '✓ 已克隆',   bg: '#dcfce7', color: '#166534' },
+            failed:    { text: '✗ 失败',     bg: '#fee2e2', color: '#991b1b' },
+        };
+        const info = map[status] || map.pending;
+        badge.textContent = info.text;
+        badge.style.background = info.bg;
+        badge.style.color = info.color;
+        if (status === 'failed' && errorMsg) {
+            badge.title = errorMsg;
+        }
+        // 如果克隆失败，动态添加"重试"按钮
+        if (status === 'failed') {
+            const actionsCell = cells[6];
+            if (actionsCell && !actionsCell.querySelector('.retry-clone-btn')) {
+                const retryBtn = document.createElement('button');
+                retryBtn.className = 'btn btn-sm action-btn retry-clone-btn';
+                retryBtn.title = '重试克隆';
+                retryBtn.style.cssText = 'font-size:0.72rem;padding:0.2rem 0.5rem;color:#d97706;border:1px solid #fde68a;border-radius:5px;background:#fffbeb;';
+                retryBtn.innerHTML = '<i class="fas fa-redo me-1"></i>重试';
+                retryBtn.onclick = function() { retryClone(repoId); };
+                actionsCell.querySelector('.d-flex').appendChild(retryBtn);
+            }
+        }
+    }
+
+    /** 轮询单个仓库状态 */
+    function pollCloneStatus(repoId) {
+        fetch(`/repositories/${repoId}/clone-status`)
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) return;
+                const status = data.clone_status;
+                updateStatusBadge(repoId, status, data.clone_error);
+                if (status === 'cloning' || status === 'pending') {
+                    // 继续轮询，保持禁用
+                    setRowButtonsDisabled(repoId, true);
+                    pollingTimers[repoId] = setTimeout(() => pollCloneStatus(repoId), POLL_INTERVAL);
+                } else {
+                    // 完成或失败，恢复按钮
+                    setRowButtonsDisabled(repoId, false);
+                    delete pollingTimers[repoId];
+                }
+            })
+            .catch(() => {
+                // 网络错误也继续轮询
+                pollingTimers[repoId] = setTimeout(() => pollCloneStatus(repoId), POLL_INTERVAL);
+            });
+    }
+
+    /** 页面加载时初始化 */
+    document.addEventListener('DOMContentLoaded', function() {
+        Object.keys(repoStatuses).forEach(id => {
+            const status = repoStatuses[id];
+            if (status === 'cloning' || status === 'pending') {
+                setRowButtonsDisabled(id, true);
+                pollCloneStatus(id);
+            }
+        });
+    });
+})();
+
 function deleteRepository(repoId) {
     if (confirm('确定要删除这个仓库吗？此操作不可恢复。')) {
         fetch(`/repositories/${repoId}/delete`, {
@@ -435,9 +476,37 @@ function syncRepository(repoId) {
     }
 }
 
+function testRepository(repoId) {
+    fetch(`/repositories/${repoId}/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+    }).then(response => {
+        if (response.ok) {
+            location.reload();
+        } else {
+            alert('测试连接失败');
+        }
+    });
+}
+
 function editRepository(repoId) {
     // 跳转到编辑仓库页面
     window.location.href = `/repositories/${repoId}/edit`;
+}
+
+function retryClone(repoId) {
+    if (confirm('确定要重试克隆该仓库吗？')) {
+        fetch(`/repositories/${repoId}/retry-clone`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        }).then(response => {
+            if (response.ok) {
+                location.reload();
+            } else {
+                alert('重试克隆失败');
+            }
+        });
+    }
 }
 
 function showBatchUpdateModal() {

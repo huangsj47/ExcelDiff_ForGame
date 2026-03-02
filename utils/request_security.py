@@ -75,7 +75,11 @@ def _has_admin_access():
 def _unauthorized_admin_response():
     if _is_api_request():
         return jsonify({"success": False, "message": "Admin authentication required"}), 401
-    next_url = request.url if request.url else url_for("index")
+    # POST/PUT/DELETE 等非 GET 请求的 URL 不能作为登录后跳转目标（会导致 405）
+    if request.method == "GET":
+        next_url = request.url
+    else:
+        next_url = request.referrer or url_for("index")
     flash("请先使用管理员账号登录。", "error")
     return redirect(url_for("admin_login", next=next_url))
 

@@ -128,6 +128,11 @@ def get_cache_status_route(repository_id):
     return _dispatch("get_cache_status", repository_id)
 
 
+@core_management_bp.route("/repositories/<int:repository_id>/clone-status", endpoint="get_clone_status")
+def get_clone_status_route(repository_id):
+    return _dispatch("get_clone_status", repository_id)
+
+
 @core_management_bp.route(
     "/repositories/<int:repository_id>/retry-clone",
     methods=["POST"],

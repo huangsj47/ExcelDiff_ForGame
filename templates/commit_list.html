@@ -2,79 +2,162 @@
 
 {% block title %}提交记录 - {{ repository.name }}{% endblock %}
 
+{% block head %}
+<style>
+    /* ===== 页面头部 - Enterprise Blue ===== */
+    .commit-page-header {
+        background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
+        border-radius: 0.75rem;
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 1.25rem;
+        box-shadow: 0 4px 16px rgba(13,110,253,0.2);
+        color: #fff;
+    }
+    .commit-page-header h4 { color: #fff !important; font-weight: 700; font-size: 1.25rem; margin-bottom: 0.25rem; }
+    .commit-page-header .breadcrumb { margin: 0; padding: 0; background: none; }
+    .commit-page-header .breadcrumb-item a { color: rgba(255,255,255,0.8); text-decoration: none; font-weight: 500; font-size: 0.82rem; }
+    .commit-page-header .breadcrumb-item a:hover { color: #fff; }
+    .commit-page-header .breadcrumb-item.active { color: rgba(255,255,255,0.55); font-size: 0.82rem; }
+    .commit-page-header .breadcrumb-item + .breadcrumb-item::before { color: rgba(255,255,255,0.35); }
+    .commit-page-header .header-action-btn { font-size: 0.78rem; padding: 0.3rem 0.7rem; border-radius: 6px; font-weight: 500; transition: all 0.2s; border: 1px solid rgba(255,255,255,0.3); color: #fff; background: rgba(255,255,255,0.1); }
+    .commit-page-header .header-action-btn:hover { background: rgba(255,255,255,0.2); border-color: rgba(255,255,255,0.5); color: #fff; }
+    .commit-page-header .header-action-btn.btn-accent { background: rgba(255,255,255,0.9); color: #1e3a5f; border: none; font-weight: 600; }
+    .commit-page-header .header-action-btn.btn-accent:hover { background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+
+    /* ===== 仓库标签页 ===== */
+    .repo-tabs { border-bottom: 2px solid #e2e8f0; margin-bottom: 1.25rem; }
+    .repo-tabs .nav-link { font-size: 0.82rem; font-weight: 500; color: #64748b; padding: 0.5rem 1rem; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; }
+    .repo-tabs .nav-link:hover { color: #0d6efd; border-bottom-color: #bfdbfe; }
+    .repo-tabs .nav-link.active { color: #0d6efd; border-bottom-color: #0d6efd; font-weight: 600; background: none; }
+
+    /* ===== 筛选卡片 ===== */
+    .filter-card { border: 1px solid #e2e8f0; border-radius: 0.625rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); overflow: hidden; }
+    .filter-card .filter-header { background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%); padding: 0.65rem 1.25rem; }
+    .filter-card .filter-header h6 { color: #fff; font-size: 0.82rem; font-weight: 600; margin: 0; }
+    .filter-card .filter-header small { color: rgba(255,255,255,0.7); font-size: 0.75rem; }
+    .filter-card .filter-body { padding: 1rem 1.25rem; background: #fff; }
+    .filter-card .form-floating label { font-size: 0.82rem; }
+    .filter-card .form-control, .filter-card .form-select { border-radius: 6px; border: 1.5px solid #e2e8f0; font-size: 0.82rem; }
+    .filter-card .form-control:focus, .filter-card .form-select:focus { border-color: #0d6efd; box-shadow: 0 0 0 3px rgba(13,110,253,0.1); }
+
+    /* ===== 数据表格 ===== */
+    .commits-table-container .card { border: 1px solid #e2e8f0; border-radius: 0.625rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+    .commit-table thead th { background: #f1f5f9; color: #64748b; font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 2px solid #e2e8f0; padding: 0.55rem 0.5rem; }
+    .commit-table tbody td { font-size: 0.8rem; padding: 0.45rem 0.5rem; }
+
+    /* ===== 状态提示 ===== */
+    .clone-status-alert { border: 1px solid #dbeafe; border-radius: 0.625rem; background: #eff6ff; padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+    .clone-status-alert .alert-heading { font-size: 0.9rem; font-weight: 600; color: #1e40af; }
+    .clone-status-alert p { font-size: 0.82rem; color: #475569; margin-bottom: 0; }
+
+    /* ===== 操作按钮 ===== */
+    .operation-badge { font-size: 0.7rem; padding: 0.2rem 0.45rem; border-radius: 4px; font-weight: 600; }
+    .operation-A { background: #dcfce7; color: #166534; }
+    .operation-M { background: #fef3c7; color: #92400e; }
+    .operation-D { background: #fee2e2; color: #991b1b; }
+    .status-badge { font-size: 0.7rem; padding: 0.2rem 0.45rem; border-radius: 4px; font-weight: 600; }
+    .status-pending { background: #fef3c7; color: #92400e; }
+    .status-confirmed { background: #dcfce7; color: #166534; }
+    .status-rejected { background: #fee2e2; color: #991b1b; }
+
+    .action-btn { font-size: 0.72rem !important; padding: 0.2rem 0.5rem !important; border-radius: 5px; font-weight: 500; border: 1px solid; transition: all 0.2s; cursor: pointer; }
+    .approve-btn { color: #059669; border-color: #a7f3d0; background: #ecfdf5; }
+    .approve-btn:hover { background: #d1fae5; }
+    .detail-btn { color: #0d6efd; border-color: #bfdbfe; background: #eff6ff; text-decoration: none; }
+    .detail-btn:hover { background: #dbeafe; }
+    .rejected-btn { color: #dc2626; border-color: #fecaca; background: #fef2f2; }
+    .dropdown-btn { color: #64748b; border-color: #e2e8f0; background: #f8fafc; }
+    .dropdown-btn:hover { background: #f1f5f9; }
+
+    /* ===== 分页 ===== */
+    .pagination .page-link { border-radius: 6px; margin: 0 2px; font-weight: 500; font-size: 0.82rem; }
+    .pagination .page-item.active .page-link { background: #0d6efd; border-color: #0d6efd; }
+
+    /* ===== 响应式 ===== */
+    @media (max-width: 768px) {
+        .commit-page-header { padding: 1rem; }
+        .commit-page-header h4 { font-size: 1.1rem; }
+    }
+</style>
+{% endblock %}
+
 {% block content %}
-<div class="container-fluid">
-    <!-- 项目标题和仓库标签页 -->
-    <div class="mb-4">
-        <div class="d-flex justify-content-between align-items-center mb-3">
-            <div class="d-flex align-items-center gap-3">
-                <h3 class="text-primary mb-0">
-                    <i class="bi bi-folder-fill me-2"></i>{{ project.name }}
-                </h3>
-                {% if repository.resource_type == 'table' %}
-                <div class="d-flex align-items-center gap-2">
-                    <button class="btn btn-outline-primary btn-sm" id="regenerateCacheButton" onclick="regenerateCache()" data-repository-id="{{ repository.id }}" style="font-size: 90%; padding: 0.25rem 0.5rem; border-radius: 0.375rem;">
-                        <i class="bi bi-arrow-clockwise me-1"></i>
-                        <span class="cache-text">重建缓存</span>
-                        <span class="cache-loading d-none">
-                            <span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
-                            重建中...
-                        </span>
-                    </button>
-                    <div id="cacheStatusMessage" class="text-muted small d-none" style="min-width: 200px;"></div>
-                </div>
-                {% endif %}
+<div class="container-fluid px-4">
+    <!-- 页面头部 - 蓝色渐变 -->
+    <div class="commit-page-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h4><i class="fas fa-list-alt me-2"></i>{{ repository.name }}</h4>
+                <nav aria-label="breadcrumb">
+                    <ol class="breadcrumb">
+                        <li class="breadcrumb-item"><a href="{{ url_for('index') }}"><i class="fas fa-home me-1"></i>项目列表</a></li>
+                        <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=project.id) }}">{{ project.name }}</a></li>
+                        <li class="breadcrumb-item active">提交记录</li>
+                    </ol>
+                </nav>
             </div>
-            <div class="d-flex gap-2">
-                <button class="btn btn-success btn-sm" id="syncButton" data-repository-id="{{ repository.id }}" style="font-size: 105%; padding: 0.315rem 0.63rem;">
-                    <i class="bi bi-arrow-clockwise me-1"></i>
-                    <span class="sync-text">手动获取数据</span>
-                    <span class="sync-loading d-none">
-                        <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
-                        同步分析中...
+            <div class="d-flex gap-2 align-items-center">
+                {% if repository.resource_type == 'table' %}
+                <button class="btn header-action-btn repo-action-btn" id="regenerateCacheButton" onclick="regenerateCache()" data-repository-id="{{ repository.id }}">
+                    <i class="fas fa-sync-alt me-1"></i>
+                    <span class="cache-text">重建缓存</span>
+                    <span class="cache-loading d-none">
+                        <span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+                        重建中...
                     </span>
                 </button>
-                <button class="btn btn-warning btn-sm" id="toggleViewButton" onclick="toggleView()" style="font-size: 105%; padding: 0.315rem 0.63rem; min-width: 150px;">
-                    <i class="bi bi-funnel me-1"></i>
-                    <span id="toggleViewText">查看所有未确认条目</span>
+                <div id="cacheStatusMessage" class="text-muted small d-none" style="min-width: 200px;"></div>
+                {% endif %}
+                <button class="btn header-action-btn repo-action-btn" id="syncButton" data-repository-id="{{ repository.id }}">
+                    <i class="fas fa-download me-1"></i>
+                    <span class="sync-text">手动获取数据</span>
+                    <span class="sync-loading d-none">
+                        <span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+                        同步中...
+                    </span>
                 </button>
-                <button class="btn btn-info btn-sm" onclick="showRepositoryCompareModal()" style="font-size: 105%; padding: 0.315rem 0.63rem;">
-                    <i class="bi bi-git me-1"></i>仓库间提交对比
+                <button class="btn header-action-btn repo-action-btn" id="toggleViewButton" onclick="toggleView()">
+                    <i class="fas fa-filter me-1"></i>
+                    <span id="toggleViewText">未确认条目</span>
+                </button>
+                <button class="btn header-action-btn btn-accent repo-action-btn" onclick="showRepositoryCompareModal()">
+                    <i class="fas fa-code-branch me-1"></i>仓库对比
                 </button>
             </div>
         </div>
-        <ul class="nav nav-tabs border-0">
+    </div>
+
+    <!-- 仓库标签页 -->
+    <div class="mb-3">
+        <ul class="nav repo-tabs border-0">
             {% for group in grouped_repositories %}
             <li class="nav-item">
                 {% if group.repositories|length > 1 %}
-                <!-- 多分支仓库：显示下拉菜单 -->
                 <div class="dropdown">
                     <button class="nav-link dropdown-toggle {% if group.current_repo.id == repository.id %}active{% endif %}" 
                             type="button" data-bs-toggle="dropdown" aria-expanded="false" 
-                            id="dropdownMenuButton{{ loop.index }}"
-                            style="background: none !important; border: none !important; cursor: pointer !important;">
+                            id="dropdownMenuButton{{ loop.index }}">
                         {% set current_branch = repository.branch if repository.branch else (repository.name.split('_')[-1] if '_' in repository.name else 'master') %}
-                        {{ group.name }} <span class="badge bg-primary ms-1">{{ current_branch }}</span>
+                        {{ group.name }} <span class="badge" style="background:#eff6ff;color:#1d4ed8;font-size:0.7rem;padding:0.15rem 0.4rem;border-radius:4px;">{{ current_branch }}</span>
                     </button>
                     <ul class="dropdown-menu" aria-labelledby="dropdownMenuButton{{ loop.index }}">
                     {% for repo in group.repositories %}
                     <li>
                         <a class="dropdown-item {% if repo.id == repository.id %}active{% endif %}" 
-                           href="{{ url_for('commit_list', repository_id=repo.id) }}">
+                           href="{{ url_for('commit_list', repository_id=repo.id) }}" style="font-size:0.82rem;">
                             {% set branch_name = repo.branch if repo.branch else (repo.name.split('_')[-1] if '_' in repo.name else 'master') %}
-                            <span class="badge bg-secondary me-2">{{ branch_name }}</span>
-                            <small class="text-muted">({{ repo.type }})</small>
+                            <span class="badge" style="background:#f1f5f9;color:#475569;font-size:0.7rem;">{{ branch_name }}</span>
+                            <small class="text-muted ms-1">({{ repo.type }})</small>
                         </a>
                     </li>
                     {% endfor %}
                     </ul>
                 </div>
                 {% else %}
-                <!-- 单分支仓库：普通链接 -->
                 <a class="nav-link {% if group.current_repo.id == repository.id %}active{% endif %}" 
                    href="{{ url_for('commit_list', repository_id=group.current_repo.id) }}">
                     {% set branch_name = group.current_repo.branch if group.current_repo.branch else (group.current_repo.name.split('_')[-1] if '_' in group.current_repo.name else 'master') %}
-                    {{ group.name }} <span class="badge bg-primary ms-1">{{ branch_name }}</span>
+                    {{ group.name }} <span class="badge" style="background:#eff6ff;color:#1d4ed8;font-size:0.7rem;padding:0.15rem 0.4rem;border-radius:4px;">{{ branch_name }}</span>
                 </a>
                 {% endif %}
             </li>
@@ -84,22 +167,21 @@
 
     <!-- 仓库状态提示 -->
     {% if not repository_status.is_data_ready %}
-    <div class="alert alert-info border-0 shadow-sm mb-4" role="alert">
+    <div class="clone-status-alert" role="alert">
         <div class="d-flex align-items-center">
             {% if repository_status.clone_status == 'cloning' %}
-            <div class="spinner-border spinner-border-sm text-info me-3" role="status" aria-hidden="true"></div>
-            <i class="bi bi-info-circle-fill me-2 fs-5"></i>
+            <div class="spinner-border spinner-border-sm me-3" style="color:#3b82f6;" role="status" aria-hidden="true"></div>
             {% elif repository_status.clone_status == 'failed' %}
-            <i class="bi bi-exclamation-triangle-fill me-2 fs-5 text-warning"></i>
+            <i class="fas fa-exclamation-triangle me-3" style="font-size:1.1rem;color:#d97706;"></i>
             {% else %}
-            <i class="bi bi-clock-fill me-2 fs-5"></i>
+            <i class="fas fa-clock me-3" style="font-size:1.1rem;color:#3b82f6;"></i>
             {% endif %}
             <div>
                 <h6 class="alert-heading mb-1">仓库数据准备中</h6>
-                <p class="mb-0">{{ repository_status.status_message }}</p>
+                <p>{{ repository_status.status_message }}</p>
                 {% if repository_status.clone_status == 'completed' %}
-                <small class="text-muted">
-                    <i class="bi bi-lightbulb me-1"></i>
+                <small style="color:#64748b;">
+                    <i class="fas fa-lightbulb me-1"></i>
                     提示：数据分析需要一定时间，请稍等片刻...
                 </small>
                 {% endif %}
@@ -107,8 +189,8 @@
         </div>
         {% if repository_status.clone_status == 'cloning' or (repository_status.clone_status == 'completed' and commits|length == 0) %}
         <div class="mt-3">
-            <button class="btn btn-outline-info btn-sm" onclick="location.reload()">
-                <i class="bi bi-arrow-clockwise me-1"></i>刷新页面
+            <button class="btn btn-sm" onclick="location.reload()" style="font-size:0.78rem;padding:0.25rem 0.65rem;border-radius:6px;border:1px solid #bfdbfe;color:#1e40af;background:#dbeafe;">
+                <i class="fas fa-sync-alt me-1"></i>刷新页面
             </button>
         </div>
         {% endif %}
@@ -116,25 +198,25 @@
     {% endif %}
 
     <!-- 筛选条件 -->
-    <div class="card mb-4 border-0 shadow-sm filter-container">
-        <div class="card-header bg-gradient-primary text-white border-0 py-3">
+    <div class="filter-card mb-4">
+        <div class="filter-header">
             <div class="d-flex align-items-center justify-content-between">
-                <h6 class="mb-0 fw-bold">
-                    <i class="bi bi-funnel-fill me-2"></i>筛选条件
+                <h6>
+                    <i class="fas fa-filter me-2"></i>筛选条件
                 </h6>
-                <small class="opacity-75">快速筛选提交记录</small>
+                <small>快速筛选提交记录</small>
             </div>
         </div>
-        <div class="card-body p-4">
+        <div class="filter-body">
             <form method="GET" id="filterForm">
                 <!-- 第一行：基础筛选 -->
-                <div class="row g-4 mb-4">
+                <div class="row g-3 mb-3">
                     <div class="col-xl-3 col-lg-4 col-md-6">
                         <div class="form-floating">
                             <input type="text" class="form-control" name="author" id="authorInput"
                                    value="{{ filters.author }}" placeholder="输入作者名">
                             <label for="authorInput">
-                                <i class="bi bi-person text-primary me-2"></i>提交者
+                                <i class="fas fa-user me-2" style="color:#0d6efd;"></i>提交者
                             </label>
                         </div>
                     </div>
@@ -143,7 +225,7 @@
                             <input type="text" class="form-control" name="path" id="pathInput"
                                    value="{{ filters.path }}" placeholder="文件路径">
                             <label for="pathInput">
-                                <i class="bi bi-folder text-primary me-2"></i>文件路径
+                                <i class="fas fa-folder me-2" style="color:#0d6efd;"></i>文件路径
                             </label>
                         </div>
                     </div>
@@ -152,40 +234,40 @@
                             <input type="text" class="form-control" name="version" id="versionInput"
                                    value="{{ filters.version }}" placeholder="版本号">
                             <label for="versionInput">
-                                <i class="bi bi-tag text-primary me-2"></i>版本号
+                                <i class="fas fa-tag me-2" style="color:#0d6efd;"></i>版本号
                             </label>
                         </div>
                     </div>
                     <div class="col-xl-2 col-lg-12 col-md-6">
                         <div class="d-flex gap-2 h-100">
-                            <button type="submit" class="btn btn-primary btn-lg flex-fill d-flex align-items-center justify-content-center">
-                                <i class="bi bi-search me-2"></i>筛选
+                            <button type="submit" class="btn flex-fill d-flex align-items-center justify-content-center" style="border-radius:6px;font-size:0.82rem;font-weight:600;background:linear-gradient(135deg,#1e3a5f 0%,#0d6efd 100%);color:#fff;height:calc(3.5rem + 2px);">
+                                <i class="fas fa-search me-1"></i>筛选
                             </button>
                         </div>
                     </div>
                 </div>
 
                 <!-- 第二行：高级筛选 -->
-                <div class="row g-4 align-items-end">
+                <div class="row g-3 align-items-end">
                     <div class="col-lg-2 col-md-4 col-sm-6">
-                        <label class="form-label fw-medium text-muted mb-2">
-                            <i class="bi bi-gear me-1"></i>操作类型
+                        <label class="form-label fw-medium mb-2" style="font-size:0.8rem;color:#64748b;">
+                            <i class="fas fa-cog me-1"></i>操作类型
                         </label>
-                        <select class="form-select" name="operation" style="font-size: 0.875rem;">
+                        <select class="form-select" name="operation" style="font-size:0.82rem;border-radius:6px;border:1.5px solid #e2e8f0;">
                             <option value="">全部操作</option>
                             <option value="A" {% if filters.operation == 'A' %}selected{% endif %}>
-                                <i class="bi bi-plus-circle"></i> 新增
+                                <i class="fas fa-plus-circle"></i> 新增
                             </option>
                             <option value="M" {% if filters.operation == 'M' %}selected{% endif %}>
-                                <i class="bi bi-pencil-square"></i> 修改
+                                <i class="fas fa-pen-square"></i> 修改
                             </option>
                             <option value="D" {% if filters.operation == 'D' %}selected{% endif %}>
-                                <i class="bi bi-trash"></i> 删除
+                                <i class="fas fa-trash-alt"></i> 删除
                             </option>
                         </select>
                     </div>
                     <div class="col-md-2 filter-item" style="overflow: visible !important;">
-                        <label>确认状态</label>
+                        <label class="form-label fw-medium mb-2" style="font-size:0.8rem;color:#64748b;">确认状态</label>
                         <div class="dropdown position-static">
                             <button class="btn btn-outline-primary dropdown-toggle w-100" type="button" 
                                     id="statusDropdownButton" onclick="toggleStatusDropdown(event)" 
@@ -224,10 +306,10 @@
                                 <div class="border-top pt-3">
                                     <div class="d-flex gap-2">
                                         <button type="button" class="btn btn-primary btn-sm flex-fill" id="applyStatusBtn">
-                                            <i class="bi bi-check me-1"></i>应用
+                                            <i class="fas fa-check me-1"></i>应用
                                         </button>
                                         <button type="button" class="btn btn-outline-secondary btn-sm flex-fill" id="clearStatusBtn">
-                                            <i class="bi bi-x me-1"></i>清空
+                                            <i class="fas fa-times me-1"></i>清空
                                         </button>
                                     </div>
                                 </div>
@@ -243,22 +325,22 @@
                     <div class="col-lg-8 col-md-4">
                         <div class="d-flex justify-content-end gap-2">
                             <a href="{{ url_for('commit_list', repository_id=repository.id) }}" 
-                               class="btn btn-outline-secondary btn-lg">
-                                <i class="bi bi-arrow-clockwise me-2"></i>重置筛选
+                               class="btn btn-outline-secondary" style="border-radius:6px;font-size:0.82rem;">
+                                <i class="fas fa-undo me-1"></i>重置筛选
                             </a>
-                            <button type="button" class="btn btn-info btn-lg" onclick="toggleAdvancedFilters()">
-                                <i class="bi bi-sliders me-2"></i>高级筛选
+                            <button type="button" class="btn" onclick="toggleAdvancedFilters()" style="border-radius:6px;font-size:0.82rem;background:#1e3a5f;color:#fff;font-weight:500;">
+                                <i class="fas fa-sliders-h me-1"></i>高级筛选
                             </button>
                         </div>
                     </div>
                 </div>
 
                 <!-- 高级筛选区域（默认隐藏） -->
-                <div id="advancedFilters" class="mt-4 pt-4 border-top" style="display: none;">
-                    <div class="row g-4">
+                <div id="advancedFilters" class="mt-3 pt-3 border-top" style="display: none;">
+                    <div class="row g-3">
                         <div class="col-lg-3 col-md-6">
-                            <label class="form-label fw-medium text-muted">
-                                <i class="bi bi-calendar me-1"></i>提交时间范围
+                            <label class="form-label fw-medium" style="font-size:0.8rem;color:#64748b;">
+                                <i class="fas fa-calendar-alt me-1"></i>提交时间范围
                             </label>
                             <div class="input-group">
                                 <input type="date" class="form-control" name="start_date" value="{{ filters.start_date }}">
@@ -267,8 +349,8 @@
                             </div>
                         </div>
                         <div class="col-lg-2 col-md-6">
-                            <label class="form-label fw-medium text-muted">
-                                <i class="bi bi-sort-numeric-down me-1"></i>每页显示
+                            <label class="form-label fw-medium" style="font-size:0.8rem;color:#64748b;">
+                                <i class="fas fa-list-ol me-1"></i>每页显示
                             </label>
                             <select class="form-select" name="per_page">
                                 <option value="20" {% if request.args.get('per_page') == '20' %}selected{% endif %}>20条</option>
@@ -277,8 +359,8 @@
                             </select>
                         </div>
                         <div class="col-lg-2 col-md-6">
-                            <label class="form-label fw-medium text-muted">
-                                <i class="bi bi-sort-down me-1"></i>排序方式
+                            <label class="form-label fw-medium" style="font-size:0.8rem;color:#64748b;">
+                                <i class="fas fa-sort-amount-down me-1"></i>排序方式
                             </label>
                             <select class="form-select" name="sort_by">
                                 <option value="commit_time_desc" {% if request.args.get('sort_by') == 'commit_time_desc' or not request.args.get('sort_by') %}selected{% endif %}>时间降序</option>
@@ -299,59 +381,59 @@
         <div class="card border-0 shadow-sm">
             <div class="card-header bg-white border-0 pb-0">
                 <div class="d-flex justify-content-between align-items-center">
-                    <h6 class="mb-0 text-secondary">
-                        <i class="bi bi-list-ul me-2"></i>提交记录
-                        <span class="badge bg-primary ms-2">{{ pagination.total }} 条记录</span>
+                    <h6 class="mb-0" style="color:#1e3a5f;font-size:0.85rem;font-weight:600;">
+                        <i class="fas fa-list-ul me-1"></i>提交记录
+                        <span class="badge ms-2" style="background:#0d6efd;font-size:0.7rem;font-weight:500;padding:3px 8px;border-radius:10px;">{{ pagination.total }} 条</span>
                     </h6>
-                    <small class="text-muted">第 {{ pagination.page }} 页，共 {{ pagination.pages }} 页</small>
+                    <small style="color:#94a3b8;font-size:0.75rem;">第 {{ pagination.page }} 页 / 共 {{ pagination.pages }} 页</small>
                 </div>
             </div>
             <div class="card-body p-0">
                 <div class="table-responsive">
-                    <table class="table table-hover mb-0 commit-table" style="font-size: 105%; line-height: 1.575;">
-                        <thead class="table-light" style="font-size: 105%;">
-                            <tr style="line-height: 1.575;">
-                                <th width="1.5%" class="border-0 compact-col">
-                                    <input type="checkbox" id="selectAll" onchange="toggleSelectAll()" class="form-check-input" style="transform: scale(1.05);">
+                    <table class="table table-hover mb-0 commit-table" style="font-size:0.8rem;line-height:1.5;">
+                        <thead style="background:linear-gradient(135deg,#f1f5f9,#e8edf3);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.03em;">
+                            <tr style="line-height:1.5;">
+                                <th width="1.5%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
+                                    <input type="checkbox" id="selectAll" onchange="toggleSelectAll()" class="form-check-input" style="transform:scale(0.9);">
                                 </th>
-                                <th width="2%" class="border-0 compact-col">
-                                    <i class="bi bi-hash"></i>
+                                <th width="2%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
+                                    <i class="fas fa-hashtag"></i>
                                 </th>
-                                <th width="10%" class="border-0">
-                                    <i class="bi bi-person me-1"></i>作者
+                                <th width="10%" class="border-0" style="color:#475569;font-weight:600;">
+                                    <i class="fas fa-user me-1"></i>作者
                                 </th>
-                                <th width="25%" class="border-0">
-                                    <i class="bi bi-file-text me-1"></i>文件名
+                                <th width="25%" class="border-0" style="color:#475569;font-weight:600;">
+                                    <i class="fas fa-file-alt me-1"></i>文件名
                                 </th>
-                                <th width="32%" class="border-0">
-                                    <i class="bi bi-chat-text me-1"></i>提交日志
+                                <th width="32%" class="border-0" style="color:#475569;font-weight:600;">
+                                    <i class="fas fa-comment-alt me-1"></i>提交日志
                                 </th>
-                                <th width="5%" class="border-0 compact-col">
-                                    <i class="bi bi-tag"></i>版本
+                                <th width="5%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
+                                    <i class="fas fa-tag"></i> 版本
                                 </th>
-                                <th width="3%" class="border-0 compact-col">
-                                    <i class="bi bi-gear"></i>
+                                <th width="3%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
+                                    <i class="fas fa-cog"></i>
                                 </th>
-                                <th width="7%" class="border-0 compact-col">
-                                    <i class="bi bi-clock"></i>时间
+                                <th width="7%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
+                                    <i class="fas fa-clock"></i> 时间
                                 </th>
-                                <th width="5%" class="border-0 compact-col">
-                                    <i class="bi bi-check-circle"></i>
+                                <th width="5%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
+                                    <i class="fas fa-check-circle"></i>
                                 </th>
-                                <th width="9.5%" class="border-0 compact-col">
-                                    <i class="bi bi-three-dots"></i>操作
+                                <th width="9.5%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
+                                    <i class="fas fa-ellipsis-h"></i> 操作
                                 </th>
                             </tr>
                         </thead>
-                        <tbody style="font-size: 105%; line-height: 1.575;">
+                        <tbody style="font-size:0.8rem;line-height:1.5;">
                             {% for commit in commits %}
                             <tr class="align-middle commit-row 
                                 {% if commit.operation == 'A' %}commit-row-added
                                 {% elif commit.operation == 'D' %}commit-row-deleted
                                 {% elif commit.operation == 'M' %}commit-row-modified
-                                {% endif %}" style="line-height: 1.575;">
+                                 {% endif %}" style="line-height:1.5;">
                                 <td class="compact-cell">
-                                    <input type="checkbox" class="commit-checkbox form-check-input" value="{{ commit.id }}" onchange="updateBatchButtons()" style="transform: scale(1.05);">
+                                    <input type="checkbox" class="commit-checkbox form-check-input" value="{{ commit.id }}" onchange="updateBatchButtons()" style="transform:scale(0.9);">
                                 </td>
                                 <td class="fw-medium text-muted compact-cell">{{ (pagination.page - 1) * 50 + loop.index }}</td>
                                 <td class="author-cell">
@@ -362,7 +444,7 @@
                                        class="text-decoration-none path-link priority-diff-link"
                                        data-commit-id="{{ commit.id }}"
                                        data-file-path="{{ commit.path | e }}">
-                                        <i class="bi bi-file-text me-1 text-muted"></i>
+                                        <i class="fas fa-file-code me-1" style="color:#94a3b8;font-size:0.72rem;"></i>
                                         <span class="text-truncate d-inline-block" style="max-width: 430px;" title="{{ commit.path | e }}">{{ commit.path.split('/')[-1] | e }}</span>
                                     </a>
                                 </td>
@@ -412,7 +494,7 @@
                                 <td class="text-center">
                                     <div class="action-buttons">
                                         {% if commit.status == 'pending' %}
-                                            <button class="action-btn approve-btn" data-commit-id="{{ commit.id }}" data-status="confirmed" style="font-size: 105%; padding: 0.315rem 0.63rem;">
+                                            <button class="action-btn approve-btn" data-commit-id="{{ commit.id }}" data-status="confirmed" style="font-size:0.75rem;padding:3px 8px;border-radius:4px;">
                                                 通过
                                             </button>
                                         {% elif commit.status == 'confirmed' %}
@@ -420,16 +502,16 @@
                                                class="action-btn detail-btn priority-diff-link"
                                                data-commit-id="{{ commit.id }}"
                                                data-file-path="{{ commit.path | e }}"
-                                               style="font-size: 105%; padding: 0.315rem 0.63rem;">
+                                               style="font-size:0.75rem;padding:3px 8px;border-radius:4px;">
                                                 详情
                                             </a>
                                         {% elif commit.status == 'rejected' %}
-                                            <button class="action-btn rejected-btn" disabled style="font-size: 105%; padding: 0.315rem 0.63rem;">
+                                            <button class="action-btn rejected-btn" disabled style="font-size:0.75rem;padding:3px 8px;border-radius:4px;">
                                                 已拒绝
                                             </button>
                                         {% endif %}
                                         <div class="dropdown">
-                                            <button class="action-btn dropdown-btn" data-commit-id="{{ commit.id }}" style="font-size: 105%; padding: 0.315rem 0.63rem;">▼</button>
+                                            <button class="action-btn dropdown-btn" data-commit-id="{{ commit.id }}" style="font-size:0.75rem;padding:3px 8px;border-radius:4px;">▼</button>
                                             <!-- 原始下拉菜单隐藏 -->
                                             <div class="dropdown-menu" id="dropdown-{{ commit.id }}" style="display: none;">
                                                 {% if commit.status != 'confirmed' %}
@@ -504,10 +586,23 @@
         </div>
         
         {% else %}
-        <div class="alert alert-info">
-            <i class="fas fa-info-circle me-2"></i>
-            暂无提交记录
-        </div>
+            {% if not repository_status.is_data_ready %}
+            <div class="alert" style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:0.625rem;color:#1e40af;">
+                <div class="d-flex align-items-center">
+                    <div class="spinner-border spinner-border-sm me-2" style="color:#3b82f6;" role="status" aria-hidden="true"></div>
+                    <div>
+                        <i class="fas fa-database me-1"></i>
+                        <strong>数据准备中，请稍等...</strong>
+                        <div class="mt-1" style="font-size:0.8rem;color:#475569;">仓库正在初始化或分析提交数据，完成后将自动刷新页面显示提交记录</div>
+                    </div>
+                </div>
+            </div>
+            {% else %}
+            <div class="alert alert-info" style="border-radius:0.625rem;">
+                <i class="fas fa-info-circle me-2"></i>
+                暂无提交记录
+            </div>
+            {% endif %}
         {% endif %}
     </div>
 </div>
@@ -518,14 +613,14 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title" id="syncOptionsModalLabel">
-                    <i class="bi bi-plus-circle"></i> 增量同步确认
+                    <i class="fas fa-plus-circle"></i> 增量同步确认
                 </h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
                 <div class="mb-3">
                     <div class="alert alert-info">
-                        <i class="bi bi-info-circle"></i>
+                        <i class="fas fa-info-circle"></i>
                         <strong>增量同步</strong>
                         <p class="mb-0 mt-2">将仅同步新的提交记录，保留现有缓存数据。这是推荐的同步方式，速度快且不会影响已有数据。</p>
                     </div>
@@ -545,7 +640,7 @@
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
                 <button type="button" class="btn btn-primary" onclick="performSync('incremental')">
-                    <i class="bi bi-plus-circle"></i> 开始增量同步
+                    <i class="fas fa-plus-circle"></i> 开始增量同步
                 </button>
             </div>
         </div>
@@ -645,6 +740,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const syncButton = document.getElementById('syncButton');
     if (syncButton) {
         syncButton.addEventListener('click', function() {
+            if (this.disabled) return;
             const repoId = this.getAttribute('data-repository-id');
             if (repoId) {
                 syncRepository(repoId);
@@ -653,6 +749,50 @@ document.addEventListener('DOMContentLoaded', function() {
         console.log('✅ 手动获取数据按钮事件已绑定');
     } else {
         console.warn('⚠️ 未找到手动获取数据按钮');
+    }
+
+    // === 仓库数据就绪状态联锁 ===
+    const isDataReady = {{ 'true' if repository_status.is_data_ready else 'false' }};
+    const cloneStatus = '{{ repository_status.clone_status }}';
+    
+    if (!isDataReady) {
+        // 禁用所有操作按钮
+        const actionBtns = document.querySelectorAll('.repo-action-btn');
+        actionBtns.forEach(function(btn) {
+            btn.disabled = true;
+            btn.style.opacity = '0.5';
+            btn.style.cursor = 'not-allowed';
+            btn.style.pointerEvents = 'none';
+        });
+        console.log('⚠️ 仓库数据未就绪，已禁用', actionBtns.length, '个操作按钮');
+
+        // 轮询仓库状态，就绪后自动刷新页面
+        const repoId = {{ repository.id }};
+        let pollInterval = setInterval(function() {
+            fetch('/repositories/' + repoId + '/clone-status')
+                .then(r => r.json())
+                .then(data => {
+                    console.log('📡 仓库状态轮询:', data.clone_status, '数据就绪:', data.is_data_ready, '提交数:', data.commit_count);
+                    if (data.is_data_ready) {
+                        // 数据已就绪（克隆完成+有提交数据），刷新页面
+                        clearInterval(pollInterval);
+                        console.log('✅ 仓库数据就绪，2秒后自动刷新页面');
+                        setTimeout(function() { location.reload(); }, 2000);
+                    } else if (data.clone_status === 'failed') {
+                        // 克隆失败，恢复按钮
+                        clearInterval(pollInterval);
+                        console.log('❌ 仓库克隆失败，恢复按钮');
+                        actionBtns.forEach(function(btn) {
+                            btn.disabled = false;
+                            btn.style.opacity = '';
+                            btn.style.cursor = '';
+                            btn.style.pointerEvents = '';
+                        });
+                    }
+                    // 其他状态（cloning/pending/completed但无数据）继续轮询
+                })
+                .catch(err => console.warn('轮询失败:', err));
+        }, 5000);
     }
     
     // 确保Bootstrap dropdown正常工作
@@ -968,7 +1108,7 @@ function performSync(syncType) {
         const alertIcon = data.success ? 'check-circle' : 'exclamation-triangle';
 
         showAlert(
-            `<i class="bi bi-${alertIcon}"></i> 增量同步${data.success ? '成功' : '失败'}`,
+            `<i class="fas fa-${data.success ? 'check-circle' : 'exclamation-triangle'}"></i> 增量同步${data.success ? '成功' : '失败'}`,
             `${data.message}${data.total_time ? ` (耗时: ${data.total_time})` : ''}`,
             alertType
         );
@@ -1003,7 +1143,7 @@ function performSync(syncType) {
         }
         
         showAlert(
-            '<i class="bi bi-exclamation-triangle"></i> 同步失败',
+            '<i class="fas fa-exclamation-triangle"></i> 同步失败',
             errorMessage,
             'danger'
         );
@@ -1058,13 +1198,13 @@ function showToast(title, message, type = 'info') {
     // 创建 toast 元素
     const toastId = 'toast-' + Date.now();
     const bgClass = type === 'success' ? 'bg-success' : type === 'error' ? 'bg-danger' : 'bg-primary';
-    const iconClass = type === 'success' ? 'bi-check-circle' : type === 'error' ? 'bi-x-circle' : 'bi-info-circle';
+    const iconClass = type === 'success' ? 'fa-check-circle' : type === 'error' ? 'fa-times-circle' : 'fa-info-circle';
     
     const toastHtml = `
         <div id="${toastId}" class="toast align-items-center text-white ${bgClass} border-0" role="alert" aria-live="assertive" aria-atomic="true">
             <div class="d-flex">
                 <div class="toast-body">
-                    <i class="bi ${iconClass} me-2"></i>
+                    <i class="fas ${iconClass} me-2"></i>
                     <strong>${title}</strong><br>
                     <small>${message}</small>
                 </div>
@@ -1827,12 +1967,12 @@ function toggleAdvancedFilters() {
     
     if (advancedFilters.style.display === 'none' || advancedFilters.style.display === '') {
         advancedFilters.style.display = 'block';
-        button.innerHTML = '<i class="bi bi-sliders me-2"></i>收起高级筛选';
-        icon.className = 'bi bi-chevron-up me-2';
+        button.innerHTML = '<i class="fas fa-sliders-h me-1"></i>收起高级筛选';
+        icon.className = 'fas fa-chevron-up me-1';
     } else {
         advancedFilters.style.display = 'none';
-        button.innerHTML = '<i class="bi bi-sliders me-2"></i>高级筛选';
-        icon.className = 'bi bi-sliders me-2';
+        button.innerHTML = '<i class="fas fa-sliders-h me-1"></i>高级筛选';
+        icon.className = 'fas fa-sliders-h me-1';
     }
 }
 

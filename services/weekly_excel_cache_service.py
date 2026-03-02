@@ -30,6 +30,11 @@ class WeeklyExcelCacheService:
         self._log_write_count = 0  # 日志写入计数器，用于控制清理频率 (#34)
         # 缓存动态导入的模型引用 (#38)
         self._models_cache: Dict[str, Any] = {}
+        # ===== 日志聚合缓冲区（1分钟窗口）=====
+        self._log_buffer = {}       # { project_code: { 'success': count, 'error': count, ... } }
+        self._log_buffer_lock = threading.Lock()
+        self._LOG_FLUSH_INTERVAL = 60  # 聚合窗口：60秒
+        self._project_code_cache = {}  # 项目编号缓存
 
     def _get_model(self, *names):
         """获取并缓存动态模型引用，避免每个方法都重复调用 get_runtime_models (#38)"""
@@ -54,15 +59,113 @@ class WeeklyExcelCacheService:
         excel_extensions = ['.xlsx', '.xls', '.xlsm', '.xlsb', '.csv']
         return any(file_path.lower().endswith(ext) for ext in excel_extensions)
 
+    def _get_project_code(self, repository_id):
+        """根据 repository_id 获取项目编号（如 G119），带简易缓存"""
+        if repository_id is None:
+            return None
+        if repository_id in self._project_code_cache:
+            return self._project_code_cache[repository_id]
+        try:
+            Repository = self._get_model("Repository")
+            repo = self.db.session.get(Repository, repository_id)
+            if repo and repo.project:
+                code = repo.project.code
+                self._project_code_cache[repository_id] = code
+                return code
+        except Exception:
+            pass
+        self._project_code_cache[repository_id] = None
+        return None
+
+    def _flush_log_buffer(self, project_code, force=False):
+        """刷新指定项目的日志缓冲区，将聚合摘要写入数据库"""
+        with self._log_buffer_lock:
+            buf = self._log_buffer.get(project_code)
+            if not buf:
+                return
+            now = time.time()
+            elapsed = now - buf.get('last_flush', 0)
+            if not force and elapsed < self._LOG_FLUSH_INTERVAL:
+                return  # 窗口未到，不刷新
+            # 构建聚合摘要
+            success_cnt = buf.get('success', 0)
+            error_cnt = buf.get('error', 0)
+            total = success_cnt + error_cnt
+            if total == 0:
+                return
+            prefix = f"【{project_code}】" if project_code else ""
+            summary_parts = []
+            if success_cnt > 0:
+                summary_parts.append(f"成功 {success_cnt} 个")
+            if error_cnt > 0:
+                summary_parts.append(f"失败 {error_cnt} 个")
+            summary_msg = f"{prefix}周版本缓存批量统计: {'，'.join(summary_parts)}（共 {total} 个文件）"
+            log_type = 'success' if error_cnt == 0 else ('error' if success_cnt == 0 else 'warning')
+            saved_repo_id = buf.get('repository_id')
+            # 重置缓冲区
+            self._log_buffer[project_code] = {
+                'success': 0, 'error': 0, 'files': set(),
+                'last_flush': now, 'repository_id': saved_repo_id
+            }
+        # 在锁外写入数据库
+        try:
+            OperationLog = self._get_model("OperationLog")
+            log_entry = OperationLog(
+                log_type=log_type,
+                message=summary_msg,
+                source='weekly_excel_cache',
+                repository_id=saved_repo_id,
+                file_path=None
+            )
+            self.db.session.add(log_entry)
+            self._log_write_count += 1
+            if self._log_write_count % 50 == 0:
+                self._cleanup_old_logs()
+            self.db.session.commit()
+            # 内存日志
+            from utils.timezone_utils import now_beijing
+            timestamp = now_beijing().strftime('%Y/%m/%d %H:%M:%S')
+            self.operation_logs.append({'time': timestamp, 'message': summary_msg, 'type': log_type})
+            if len(self.operation_logs) > 100:
+                self.operation_logs = self.operation_logs[-100:]
+        except Exception as e:
+            print(f"[ERROR] 刷新周版本聚合日志失败: {e}")
+
     def log_cache_operation(self, message, log_type='info', repository_id=None, config_id=None, file_path=None):
-        """记录缓存操作日志到数据库"""
+        """记录缓存操作日志到数据库。
+        对于高频的 success/error 类型日志，使用 1 分钟聚合窗口批量写入。
+        其他类型（info/warning）立即写入并附带项目编号前缀。
+        """
         try:
             OperationLog = self._get_model("OperationLog")
 
-            # 保存到数据库（不创建新的应用上下文）
+            # 获取项目编号前缀
+            project_code = self._get_project_code(repository_id)
+            prefix = f"【{project_code}】" if project_code else ""
+
+            # 高频日志聚合：success 和 error 类型进入缓冲区
+            if log_type in ('success', 'error') and repository_id is not None:
+                buf_key = project_code or f"repo_{repository_id}"
+                with self._log_buffer_lock:
+                    if buf_key not in self._log_buffer:
+                        self._log_buffer[buf_key] = {
+                            'success': 0, 'error': 0, 'files': set(),
+                            'last_flush': time.time(), 'repository_id': repository_id
+                        }
+                    buf = self._log_buffer[buf_key]
+                    buf[log_type] = buf.get(log_type, 0) + 1
+                    if file_path:
+                        buf['files'].add(file_path)
+                # 检查是否需要刷新
+                self._flush_log_buffer(buf_key)
+                return
+
+            # 非聚合日志：立即写入，添加项目编号前缀
+            prefixed_message = f"{prefix}{message}" if prefix else message
+
             log_entry = OperationLog(
                 log_type=log_type,
-                message=message,
+                message=prefixed_message,
                 source='weekly_excel_cache',
                 repository_id=repository_id,
                 config_id=config_id,
@@ -82,7 +185,7 @@ class WeeklyExcelCacheService:
             timestamp = now_beijing().strftime('%Y/%m/%d %H:%M:%S')
             memory_log = {
                 'time': timestamp,
-                'message': message,
+                'message': prefixed_message,
                 'type': log_type
             }
             self.operation_logs.append(memory_log)
