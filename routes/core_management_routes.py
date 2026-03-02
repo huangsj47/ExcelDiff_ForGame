@@ -34,6 +34,11 @@ def test_route():
     return _dispatch("test")
 
 
+@core_management_bp.route("/help", endpoint="help_page")
+def help_page_route():
+    return _dispatch("help_page")
+
+
 @core_management_bp.route("/", endpoint="index")
 def index_route():
     return _dispatch("index")

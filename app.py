@@ -1779,6 +1779,11 @@ def admin_logout():
 def test():
     return "服务器正常工作！"
 
+
+def help_page():
+    """帮助页面"""
+    return render_template('help.html')
+
 # 主页路由
 
 
