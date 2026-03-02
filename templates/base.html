@@ -302,25 +302,40 @@
     </style>
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+    <nav class="navbar navbar-expand-lg" style="background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%); box-shadow: 0 2px 12px rgba(0,0,0,0.15); padding: 0.6rem 0;">
         <div class="container-fluid">
-            <a class="navbar-brand" href="{{ url_for('index') }}" style="margin-left: 0;">
-                <i class="fas fa-code-branch me-2"></i>
+            <a class="navbar-brand d-flex align-items-center" href="{{ url_for('index') }}" style="margin-left: 0; color: #fff; font-weight: 700; font-size: 1.15rem; letter-spacing: 0.02em;">
+                <span style="display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; background: rgba(255,255,255,0.15); border-radius: 8px; margin-right: 10px;">
+                    <i class="fas fa-code-branch" style="font-size: 0.95rem;"></i>
+                </span>
                 Diff确认平台
             </a>
-            <div class="navbar-nav ms-auto">
-                <a class="nav-link" href="{{ url_for('index') }}">项目列表</a>
-                <a class="nav-link" href="{{ url_for('excel_cache_management') }}">
-                    <i class="fas fa-database me-1"></i>缓存管理
-                </a>
-                {% if session.get('is_admin') %}
-                <form method="POST" action="{{ url_for('admin_logout') }}" class="d-flex align-items-center ms-2">
-                    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
-                    <button type="submit" class="btn btn-sm btn-outline-light">退出管理</button>
-                </form>
-                {% else %}
-                <a class="nav-link" href="{{ url_for('admin_login') }}">管理员登录</a>
-                {% endif %}
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarMain" aria-controls="navbarMain" aria-expanded="false" aria-label="Toggle navigation" style="border-color: rgba(255,255,255,0.3);">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarMain">
+                <div class="navbar-nav ms-auto align-items-center gap-1">
+                    <a class="nav-link px-3" href="{{ url_for('index') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
+                        <i class="fas fa-th-large me-1" style="font-size: 0.85rem;"></i>项目列表
+                    </a>
+                    <a class="nav-link px-3" href="{{ url_for('excel_cache_management') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
+                        <i class="fas fa-database me-1" style="font-size: 0.85rem;"></i>缓存管理
+                    </a>
+                    {% if session.get('is_admin') %}
+                    <div class="vr mx-2" style="border-color: rgba(255,255,255,0.2); height: 24px; align-self: center;"></div>
+                    <form method="POST" action="{{ url_for('admin_logout') }}" class="d-flex align-items-center">
+                        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="btn btn-sm px-3" style="background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.25); border-radius: 6px; font-weight: 500; font-size: 0.85rem; transition: all 0.2s;">
+                            <i class="fas fa-sign-out-alt me-1"></i>退出管理
+                        </button>
+                    </form>
+                    {% else %}
+                    <div class="vr mx-2" style="border-color: rgba(255,255,255,0.2); height: 24px; align-self: center;"></div>
+                    <a class="nav-link px-3" href="{{ url_for('admin_login') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
+                        <i class="fas fa-user-shield me-1" style="font-size: 0.85rem;"></i>管理员登录
+                    </a>
+                    {% endif %}
+                </div>
             </div>
         </div>
     </nav>
@@ -329,7 +344,7 @@
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% for category, message in messages %}
-                    <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
+                    <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert" style="border-radius: 8px; border: none; box-shadow: 0 2px 8px rgba(0,0,0,0.08); font-weight: 500;">
                         {{ message }}
                         <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
                     </div>
@@ -340,14 +355,14 @@
         {% block content %}{% endblock %}
     </main>
 
-    <footer class="footer">
+    <footer style="margin-top: auto; padding: 1.25rem 0; background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%); border-top: 1px solid #dee2e6;">
         <div class="container text-center">
-            <p class="text-muted mb-0">奇哥，牛逼！</p>
-            <div class="mt-2">
-                <a href="#" class="text-muted me-3">友情链接</a>
-                <a href="#" class="text-muted me-3">联系方式</a>
-                <a href="#" class="text-muted me-3">北落师门</a>
-                <a href="#" class="text-muted">G119</a>
+            <p style="color: #6c757d; margin-bottom: 0.5rem; font-size: 0.85rem; font-weight: 500;">奇哥，牛逼！</p>
+            <div style="display: flex; justify-content: center; gap: 1.5rem; font-size: 0.8rem;">
+                <a href="#" style="color: #8c959f; text-decoration: none; transition: color 0.2s;">友情链接</a>
+                <a href="#" style="color: #8c959f; text-decoration: none; transition: color 0.2s;">联系方式</a>
+                <a href="#" style="color: #8c959f; text-decoration: none; transition: color 0.2s;">北落师门</a>
+                <a href="#" style="color: #8c959f; text-decoration: none; transition: color 0.2s;">G119</a>
             </div>
         </div>
     </footer>

@@ -3,6 +3,28 @@
     font-weight: bold;
 }
 
+/* 导航栏链接悬停效果 */
+.navbar .nav-link:hover {
+    background: rgba(255,255,255,0.12) !important;
+    color: #fff !important;
+}
+
+/* 全局按钮圆角和光标 */
+.btn {
+    cursor: pointer;
+    border-radius: 6px;
+}
+
+/* 全局卡片圆角 */
+.card {
+    border-radius: 0.75rem;
+}
+
+/* body 背景色微调 */
+body {
+    background-color: #f5f6f8;
+}
+
 /* Excel 加载指示器样式 */
 #excel-loading-indicator {
     background: rgba(255, 255, 255, 0.95);
