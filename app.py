@@ -822,6 +822,7 @@ _bp_prefixes = [
     "commit_diff_routes.",
     "weekly_version_routes.",
     "cache_management.",
+    "main.",
 ]
 
 def _register_endpoint_aliases(app):
