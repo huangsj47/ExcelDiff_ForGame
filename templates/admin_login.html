@@ -2,31 +2,380 @@
 
 {% block title %}管理员登录 - Diff确认平台{% endblock %}
 
+{% block head %}
+<style>
+    .login-wrapper {
+        min-height: calc(100vh - 200px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem 1rem;
+    }
+
+    .login-card {
+        width: 100%;
+        max-width: 440px;
+        border: none;
+        border-radius: 16px;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08), 0 1px 4px rgba(0, 0, 0, 0.04);
+        overflow: hidden;
+        transition: box-shadow 0.3s ease;
+    }
+
+    .login-card:hover {
+        box-shadow: 0 8px 40px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06);
+    }
+
+    .login-header {
+        background: linear-gradient(135deg, #0d6efd 0%, #0a58ca 50%, #084298 100%);
+        padding: 2.5rem 2rem 2rem;
+        text-align: center;
+        color: #fff;
+        position: relative;
+        overflow: hidden;
+    }
+
+    .login-header::before {
+        content: '';
+        position: absolute;
+        top: -50%;
+        right: -50%;
+        width: 100%;
+        height: 200%;
+        background: radial-gradient(circle, rgba(255,255,255,0.08) 0%, transparent 70%);
+        pointer-events: none;
+    }
+
+    .login-icon-circle {
+        width: 72px;
+        height: 72px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.15);
+        backdrop-filter: blur(4px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0 auto 1rem;
+        border: 2px solid rgba(255, 255, 255, 0.2);
+    }
+
+    .login-icon-circle svg {
+        width: 32px;
+        height: 32px;
+        color: #fff;
+    }
+
+    .login-header h4 {
+        font-weight: 600;
+        margin-bottom: 0.25rem;
+        font-size: 1.35rem;
+        letter-spacing: 0.02em;
+    }
+
+    .login-header p {
+        opacity: 0.85;
+        margin-bottom: 0;
+        font-size: 0.9rem;
+    }
+
+    .login-body {
+        padding: 2rem 2rem 1.5rem;
+    }
+
+    .login-body .form-label {
+        font-weight: 500;
+        font-size: 0.875rem;
+        color: #495057;
+        margin-bottom: 0.4rem;
+    }
+
+    .login-body .form-control {
+        border-radius: 10px;
+        padding: 0.7rem 1rem;
+        border: 1.5px solid #dee2e6;
+        font-size: 0.95rem;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        background-color: #f8f9fa;
+    }
+
+    .login-body .form-control:focus {
+        border-color: #0d6efd;
+        box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.12);
+        background-color: #fff;
+    }
+
+    .login-body .input-group {
+        position: relative;
+    }
+
+    .login-body .input-icon {
+        position: absolute;
+        left: 14px;
+        top: 50%;
+        transform: translateY(-50%);
+        z-index: 4;
+        color: #6c757d;
+        pointer-events: none;
+        transition: color 0.2s ease;
+    }
+
+    .login-body .form-control.has-icon {
+        padding-left: 2.6rem;
+    }
+
+    .login-body .form-control.has-icon:focus ~ .input-icon,
+    .login-body .form-control.has-icon:focus + .input-icon {
+        color: #0d6efd;
+    }
+
+    .btn-login {
+        border-radius: 10px;
+        padding: 0.7rem 1.5rem;
+        font-weight: 600;
+        font-size: 1rem;
+        letter-spacing: 0.02em;
+        transition: all 0.2s ease;
+        border: none;
+        background: linear-gradient(135deg, #0d6efd 0%, #0a58ca 100%);
+        color: #fff;
+        width: 100%;
+    }
+
+    .btn-login:hover {
+        background: linear-gradient(135deg, #0b5ed7 0%, #084298 100%);
+        box-shadow: 0 4px 16px rgba(13, 110, 253, 0.3);
+        transform: translateY(-1px);
+    }
+
+    .btn-login:active {
+        transform: translateY(0);
+        box-shadow: 0 2px 8px rgba(13, 110, 253, 0.2);
+    }
+
+    .login-footer {
+        padding: 0 2rem 2rem;
+        text-align: center;
+    }
+
+    .login-footer a {
+        color: #6c757d;
+        text-decoration: none;
+        font-size: 0.875rem;
+        transition: color 0.2s ease;
+    }
+
+    .login-footer a:hover {
+        color: #0d6efd;
+    }
+
+    .login-divider {
+        position: relative;
+        text-align: center;
+        margin: 1.5rem 0;
+    }
+
+    .login-divider::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        top: 50%;
+        width: 100%;
+        height: 1px;
+        background: #e9ecef;
+    }
+
+    .login-divider span {
+        background: #fff;
+        padding: 0 1rem;
+        position: relative;
+        color: #adb5bd;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    .toggle-password {
+        position: absolute;
+        right: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        z-index: 4;
+        background: none;
+        border: none;
+        color: #6c757d;
+        cursor: pointer;
+        padding: 4px;
+        transition: color 0.2s ease;
+    }
+
+    .toggle-password:hover {
+        color: #0d6efd;
+    }
+
+    /* Flash messages inside card */
+    .login-alerts {
+        padding: 0 2rem;
+    }
+
+    .login-alerts .alert {
+        border-radius: 10px;
+        font-size: 0.875rem;
+        margin-bottom: 0;
+        margin-top: 1rem;
+    }
+
+    @media (max-width: 480px) {
+        .login-card {
+            border-radius: 12px;
+        }
+        .login-header {
+            padding: 2rem 1.5rem 1.5rem;
+        }
+        .login-body {
+            padding: 1.5rem;
+        }
+        .login-footer {
+            padding: 0 1.5rem 1.5rem;
+        }
+    }
+</style>
+{% endblock %}
+
 {% block content %}
-<div class="container" style="max-width: 520px;">
-    <div class="card shadow-sm">
-        <div class="card-body p-4">
-            <h4 class="mb-3">管理员登录</h4>
-            <form method="POST" action="{{ url_for('admin_login') }}">
+<div class="login-wrapper">
+    <div class="login-card card">
+        <!-- Header -->
+        <div class="login-header">
+            <div class="login-icon-circle">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
+                </svg>
+            </div>
+            <h4>管理员登录</h4>
+            <p>请输入管理员凭证以继续操作</p>
+        </div>
+
+        <!-- Login Form -->
+        <div class="login-body">
+            <form method="POST" action="{{ url_for('admin_login') }}" id="loginForm">
                 <input type="hidden" name="next" value="{{ next_url or request.args.get('next', '') }}">
                 <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
 
                 <div class="mb-3">
-                    <label for="username" class="form-label">用户名</label>
-                    <input type="text" class="form-control" id="username" name="username" required autocomplete="username">
+                    <label for="username" class="form-label">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16" class="me-1" style="vertical-align: -1px;">
+                            <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0Zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4Zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10Z"/>
+                        </svg>
+                        用户名
+                    </label>
+                    <div class="input-group" style="position: relative;">
+                        <input type="text" class="form-control has-icon" id="username" name="username"
+                               placeholder="请输入管理员用户名"
+                               required autocomplete="username" autofocus>
+                        <span class="input-icon">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                                <path d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0Zm4 8c0 1-1 1-1 1H3s-1 0-1-1 1-4 6-4 6 3 6 4Zm-1-.004c-.001-.246-.154-.986-.832-1.664C11.516 10.68 10.289 10 8 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10Z"/>
+                            </svg>
+                        </span>
+                    </div>
                 </div>
 
-                <div class="mb-3">
-                    <label for="password" class="form-label">密码</label>
-                    <input type="password" class="form-control" id="password" name="password" required autocomplete="current-password">
+                <div class="mb-4">
+                    <label for="password" class="form-label">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16" class="me-1" style="vertical-align: -1px;">
+                            <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+                        </svg>
+                        密码
+                    </label>
+                    <div class="input-group" style="position: relative;">
+                        <input type="password" class="form-control has-icon" id="password" name="password"
+                               placeholder="请输入管理员密码"
+                               required autocomplete="current-password">
+                        <span class="input-icon">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                                <path d="M8 1a2 2 0 0 1 2 2v4H6V3a2 2 0 0 1 2-2zm3 6V3a3 3 0 0 0-6 0v4a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+                            </svg>
+                        </span>
+                        <button type="button" class="toggle-password" onclick="togglePasswordVisibility()" aria-label="切换密码可见性">
+                            <svg id="eyeIcon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16">
+                                <path d="M16 8s-3-5.5-8-5.5S0 8 0 8s3 5.5 8 5.5S16 8 16 8zM1.173 8a13.133 13.133 0 0 1 1.66-2.043C4.12 4.668 5.88 3.5 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.133 13.133 0 0 1 14.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755C11.879 11.332 10.119 12.5 8 12.5c-2.12 0-3.879-1.168-5.168-2.457A13.134 13.134 0 0 1 1.172 8z"/>
+                                <path d="M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM4.5 8a3.5 3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0z"/>
+                            </svg>
+                            <svg id="eyeSlashIcon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16" style="display:none;">
+                                <path d="M13.359 11.238C15.06 9.72 16 8 16 8s-3-5.5-8-5.5a7.028 7.028 0 0 0-2.79.588l.77.771A5.944 5.944 0 0 1 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.134 13.134 0 0 1 14.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755-.165.165-.337.328-.517.486l.708.709z"/>
+                                <path d="M11.297 9.176a3.5 3.5 0 0 0-4.474-4.474l.823.823a2.5 2.5 0 0 1 2.829 2.829l.822.822zm-2.943 1.299.822.822a3.5 3.5 0 0 1-4.474-4.474l.823.823a2.5 2.5 0 0 0 2.829 2.829z"/>
+                                <path d="M3.35 5.47c-.18.16-.353.322-.518.487A13.134 13.134 0 0 0 1.172 8l.195.288c.335.48.83 1.12 1.465 1.755C4.121 11.332 5.881 12.5 8 12.5c.716 0 1.39-.133 2.02-.36l.77.772A7.029 7.029 0 0 1 8 13.5C3 13.5 0 8 0 8s.939-1.721 2.641-3.238l.708.709zm10.296 8.884-12-12 .708-.708 12 12-.708.708z"/>
+                            </svg>
+                        </button>
+                    </div>
                 </div>
 
-                <div class="d-flex justify-content-end gap-2">
-                    <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">取消</a>
-                    <button type="submit" class="btn btn-primary">登录</button>
-                </div>
+                <button type="submit" class="btn btn-login" id="loginBtn">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16" class="me-2" style="vertical-align: -3px;">
+                        <path fill-rule="evenodd" d="M6 3.5a.5.5 0 0 1 .5-.5h8a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-2a.5.5 0 0 0-1 0v2A1.5 1.5 0 0 0 6.5 14h8a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 14.5 2h-8A1.5 1.5 0 0 0 5 3.5v2a.5.5 0 0 0 1 0v-2z"/>
+                        <path fill-rule="evenodd" d="M11.854 8.354a.5.5 0 0 0 0-.708l-3-3a.5.5 0 1 0-.708.708L10.293 7.5H1.5a.5.5 0 0 0 0 1h8.793l-2.147 2.146a.5.5 0 0 0 .708.708l3-3z"/>
+                    </svg>
+                    登录
+                </button>
             </form>
+        </div>
+
+        <!-- Footer -->
+        <div class="login-divider"><span>或</span></div>
+        <div class="login-footer">
+            <a href="{{ url_for('index') }}">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16" class="me-1" style="vertical-align: -2px;">
+                    <path fill-rule="evenodd" d="M15 8a.5.5 0 0 0-.5-.5H2.707l3.147-3.146a.5.5 0 1 0-.708-.708l-4 4a.5.5 0 0 0 0 .708l4 4a.5.5 0 0 0 .708-.708L2.707 8.5H14.5A.5.5 0 0 0 15 8z"/>
+                </svg>
+                返回项目列表
+            </a>
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function togglePasswordVisibility() {
+    const pwd = document.getElementById('password');
+    const eyeIcon = document.getElementById('eyeIcon');
+    const eyeSlashIcon = document.getElementById('eyeSlashIcon');
+    if (pwd.type === 'password') {
+        pwd.type = 'text';
+        eyeIcon.style.display = 'none';
+        eyeSlashIcon.style.display = 'block';
+    } else {
+        pwd.type = 'password';
+        eyeIcon.style.display = 'block';
+        eyeSlashIcon.style.display = 'none';
+    }
+}
+
+// Move global flash alerts into the login card for a cleaner look
+document.addEventListener('DOMContentLoaded', function() {
+    var globalAlerts = document.querySelectorAll('main.container-fluid > .alert');
+    var loginBody = document.querySelector('.login-body');
+    if (globalAlerts.length && loginBody) {
+        var wrapper = document.createElement('div');
+        wrapper.className = 'login-alerts';
+        wrapper.style.padding = '0 2rem';
+        wrapper.style.paddingTop = '1.5rem';
+        globalAlerts.forEach(function(alert) {
+            // Restyle the alert for card context
+            alert.style.borderRadius = '10px';
+            alert.style.fontSize = '0.875rem';
+            alert.style.marginBottom = '0';
+            wrapper.appendChild(alert);
+        });
+        loginBody.parentNode.insertBefore(wrapper, loginBody);
+    }
+});
+
+// Loading state on submit
+document.getElementById('loginForm').addEventListener('submit', function() {
+    var btn = document.getElementById('loginBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>登录中...';
+});
+</script>
 {% endblock %}
