@@ -378,9 +378,11 @@
             </div>
             <div>
                 <div class="btn-group" role="group">
+                    {% if repositories %}
                     <a href="{{ url_for('weekly_version_config', project_id=project.id) }}" class="btn btn-primary">
                         <i class="fas fa-cog me-2"></i>配置管理
                     </a>
+                    {% endif %}
                     <a href="{{ url_for('repository_config', project_id=project.id) }}" class="btn btn-outline-primary">
                         <i class="fas fa-database me-2"></i>配置仓库
                     </a>
@@ -389,6 +391,64 @@
         </div>
     </div>
 
+    {% if not repositories %}
+    <!-- ===== 无仓库空状态：引导用户先创建仓库 ===== -->
+    <div class="row justify-content-center">
+        <div class="col-lg-8 col-md-10">
+            <div class="card border-0" style="box-shadow: 0 8px 32px rgba(0,0,0,0.08); border-radius: 1rem; overflow: hidden;">
+                <div class="card-body p-0">
+                    <!-- 顶部渐变横幅 -->
+                    <div style="background: linear-gradient(135deg, #0d6efd 0%, #6610f2 50%, #6f42c1 100%); padding: 3rem 2.5rem 2.5rem; text-align: center; color: white;">
+                        <div style="width: 80px; height: 80px; background: rgba(255,255,255,0.15); border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 1.5rem; backdrop-filter: blur(10px);">
+                            <i class="fas fa-code-branch" style="font-size: 2rem;"></i>
+                        </div>
+                        <h3 style="font-weight: 700; margin-bottom: 0.75rem;">开始配置项目仓库</h3>
+                        <p style="opacity: 0.85; font-size: 1.05rem; max-width: 480px; margin: 0 auto;">
+                            项目尚未关联任何代码仓库。请先添加 Git 或 SVN 仓库，然后即可创建周版本进行 Diff 对比。
+                        </p>
+                    </div>
+
+                    <!-- 步骤指引 -->
+                    <div style="padding: 2.5rem;">
+                        <div class="row g-4 mb-4">
+                            <div class="col-md-4">
+                                <div class="text-center p-3" style="background: #f0f6ff; border-radius: 0.75rem; height: 100%;">
+                                    <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #0d6efd, #0b5ed7); border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 1.25rem; margin-bottom: 1rem;">1</div>
+                                    <h6 style="font-weight: 600; color: #1e293b;">添加仓库</h6>
+                                    <p class="mb-0" style="font-size: 0.875rem; color: #64748b;">配置 Git/SVN 仓库地址和认证信息</p>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="text-center p-3" style="background: #f0fdf4; border-radius: 0.75rem; height: 100%;">
+                                    <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #22c55e, #16a34a); border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 1.25rem; margin-bottom: 1rem;">2</div>
+                                    <h6 style="font-weight: 600; color: #1e293b;">创建周版本</h6>
+                                    <p class="mb-0" style="font-size: 0.875rem; color: #64748b;">设定时间范围与分支，生成版本快照</p>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="text-center p-3" style="background: #fdf4ff; border-radius: 0.75rem; height: 100%;">
+                                    <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #a855f7, #9333ea); border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 1.25rem; margin-bottom: 1rem;">3</div>
+                                    <h6 style="font-weight: 600; color: #1e293b;">查看 Diff</h6>
+                                    <p class="mb-0" style="font-size: 0.875rem; color: #64748b;">对比文件变更并逐项确认提交内容</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="text-center">
+                            <a href="{{ url_for('repository_config', project_id=project.id) }}" class="btn btn-lg px-5 py-3" style="background: linear-gradient(135deg, #0d6efd 0%, #6610f2 100%); color: white; border: none; border-radius: 0.75rem; font-weight: 600; font-size: 1.1rem; box-shadow: 0 4px 16px rgba(13,110,253,0.35); transition: all 0.2s ease;">
+                                <i class="fas fa-plus-circle me-2"></i>立即配置仓库
+                            </a>
+                            <p class="mt-3 mb-0" style="font-size: 0.85rem; color: #94a3b8;">
+                                <i class="fas fa-info-circle me-1"></i>支持 Git (HTTP/SSH) 和 SVN 仓库
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <!-- ===== 有仓库：正常显示周版本和仓库列表 ===== -->
     <div class="row">
         <!-- 左侧：周版本列表 (占4/5宽度) -->
         <div class="col-lg-9 col-md-8">
@@ -607,6 +667,7 @@
             </div>
         </div>
     </div>
+    {% endif %}
 </div>
 
 <script>
