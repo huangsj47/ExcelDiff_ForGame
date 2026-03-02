@@ -15,30 +15,30 @@
         </div>
     </div>
 
-    <!-- 快速导航 -->
-    <div class="help-nav-card">
-        <div class="help-nav-grid">
-            <a href="#section-project" class="help-nav-item">
+    <!-- 标签导航 -->
+    <div class="help-tabs-wrapper">
+        <div class="help-tabs">
+            <a href="#section-project" class="help-tab active" data-section="section-project">
                 <i class="fas fa-project-diagram"></i>
                 <span>新建项目</span>
             </a>
-            <a href="#section-repo" class="help-nav-item">
+            <a href="#section-repo" class="help-tab" data-section="section-repo">
                 <i class="fas fa-code-branch"></i>
                 <span>配置仓库</span>
             </a>
-            <a href="#section-weekly" class="help-nav-item">
+            <a href="#section-weekly" class="help-tab" data-section="section-weekly">
                 <i class="fas fa-calendar-week"></i>
                 <span>周版本管理</span>
             </a>
-            <a href="#section-diff" class="help-nav-item">
+            <a href="#section-diff" class="help-tab" data-section="section-diff">
                 <i class="fas fa-file-excel"></i>
                 <span>查看Diff</span>
             </a>
-            <a href="#section-colors" class="help-nav-item">
+            <a href="#section-colors" class="help-tab" data-section="section-colors">
                 <i class="fas fa-palette"></i>
                 <span>颜色说明</span>
             </a>
-            <a href="#section-cache" class="help-nav-item">
+            <a href="#section-cache" class="help-tab" data-section="section-cache">
                 <i class="fas fa-database"></i>
                 <span>缓存管理</span>
             </a>
@@ -94,7 +94,7 @@
         </section>
 
         <!-- 第2节：配置仓库 -->
-        <section class="help-section" id="section-repo">
+        <section class="help-section" id="section-repo" style="display:none;">
             <div class="section-header">
                 <div class="section-number">2</div>
                 <div>
@@ -154,7 +154,7 @@
         </section>
 
         <!-- 第3节：周版本管理 -->
-        <section class="help-section" id="section-weekly">
+        <section class="help-section" id="section-weekly" style="display:none;">
             <div class="section-header">
                 <div class="section-number">3</div>
                 <div>
@@ -192,7 +192,7 @@
         </section>
 
         <!-- 第4节：查看 Excel Diff -->
-        <section class="help-section" id="section-diff">
+        <section class="help-section" id="section-diff" style="display:none;">
             <div class="section-header">
                 <div class="section-number">4</div>
                 <div>
@@ -233,7 +233,7 @@
         </section>
 
         <!-- 第5节：Diff 颜色说明 -->
-        <section class="help-section" id="section-colors">
+        <section class="help-section" id="section-colors" style="display:none;">
             <div class="section-header">
                 <div class="section-number">5</div>
                 <div>
@@ -328,7 +328,7 @@
         </section>
 
         <!-- 第6节：缓存管理 -->
-        <section class="help-section" id="section-cache">
+        <section class="help-section" id="section-cache" style="display:none;">
             <div class="section-header">
                 <div class="section-number">6</div>
                 <div>
@@ -371,7 +371,7 @@
 <style>
 /* ==================== 帮助页面样式 ==================== */
 .help-container {
-    max-width: 960px;
+    max-width: 1200px;
     margin: 0 auto;
     padding: 0 20px 60px;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -381,12 +381,14 @@
 .help-hero {
     background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
     border-radius: 0.75rem;
-    padding: 48px 32px;
-    margin-bottom: 24px;
+    padding: 36px 32px;
+    margin-bottom: 0;
     text-align: center;
     color: white;
     position: relative;
     overflow: hidden;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
 }
 .help-hero::before {
     content: '';
@@ -406,66 +408,69 @@
 }
 .hero-content { position: relative; z-index: 2; }
 .hero-icon {
-    width: 64px; height: 64px;
+    width: 52px; height: 52px;
     background: rgba(255,255,255,0.15);
-    border-radius: 16px;
+    border-radius: 12px;
     display: inline-flex;
     align-items: center; justify-content: center;
-    margin-bottom: 16px;
+    margin-bottom: 10px;
 }
-.hero-icon i { font-size: 28px; color: white; }
+.hero-icon i { font-size: 22px; color: white; }
 .help-hero h1 {
-    font-size: 2rem; font-weight: 700;
-    margin: 0 0 8px;
+    font-size: 1.6rem; font-weight: 700;
+    margin: 0 0 4px;
 }
 .hero-subtitle {
-    font-size: 1rem;
+    font-size: 0.9rem;
     opacity: 0.8;
     margin: 0;
 }
 
-/* 快速导航 */
-.help-nav-card {
+/* 标签导航 */
+.help-tabs-wrapper {
     background: white;
-    border-radius: 0.75rem;
-    padding: 20px;
-    margin-bottom: 28px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-    border: 1px solid #d0d7de;
+    border-left: 1px solid #d0d7de;
+    border-right: 1px solid #d0d7de;
+    border-bottom: 1px solid #d0d7de;
+    padding: 0;
+    margin-bottom: 20px;
+    border-bottom-left-radius: 0.75rem;
+    border-bottom-right-radius: 0.75rem;
+    overflow: hidden;
 }
-.help-nav-grid {
-    display: grid;
-    grid-template-columns: repeat(6, 1fr);
-    gap: 10px;
+.help-tabs {
+    display: flex;
+    overflow-x: auto;
+    scrollbar-width: none;
 }
-.help-nav-item {
-    display: flex; flex-direction: column;
-    align-items: center; gap: 6px;
-    padding: 14px 8px;
-    border: 1px solid #d0d7de;
-    border-radius: 8px;
+.help-tabs::-webkit-scrollbar { display: none; }
+.help-tab {
+    display: flex; align-items: center; gap: 8px;
+    padding: 14px 24px;
     text-decoration: none;
-    color: #24292f;
+    color: #57606a;
+    font-size: 14px; font-weight: 600;
+    white-space: nowrap;
+    border-bottom: 3px solid transparent;
     transition: all 0.2s;
-    font-size: 13px; font-weight: 600;
+    flex: 1;
+    justify-content: center;
+    cursor: pointer;
 }
-.help-nav-item i {
-    font-size: 20px; color: #0969da;
-}
-.help-nav-item:hover {
-    border-color: #0969da;
-    background: #f0f6ff;
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(9,105,218,0.12);
+.help-tab i { font-size: 16px; }
+.help-tab:hover {
     color: #0969da;
+    background: #f0f6ff;
     text-decoration: none;
 }
-@media (max-width: 768px) {
-    .help-nav-grid { grid-template-columns: repeat(3, 1fr); }
+.help-tab.active {
+    color: #0969da;
+    border-bottom-color: #0969da;
+    background: #f0f6ff;
 }
 
 /* 内容区 */
-.help-content-area { display: flex; flex-direction: column; gap: 24px; }
+.help-content-area { display: flex; flex-direction: column; gap: 0; }
 
 /* 章节卡片 */
 .help-section {
@@ -474,11 +479,15 @@
     box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     border: 1px solid #d0d7de;
     overflow: hidden;
-    scroll-margin-top: 80px;
+    animation: helpFadeIn 0.25s ease;
+}
+@keyframes helpFadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 .section-header {
     display: flex; align-items: center; gap: 14px;
-    padding: 20px 24px;
+    padding: 20px 28px;
     background: #f6f8fa;
     border-bottom: 1px solid #d0d7de;
 }
@@ -492,20 +501,18 @@
     flex-shrink: 0;
 }
 .section-header h2 {
-    margin: 0; font-size: 1.15rem; font-weight: 700; color: #24292f;
+    margin: 0; font-size: 1.2rem; font-weight: 700; color: #24292f;
 }
 .section-header p {
-    margin: 2px 0 0; font-size: 0.82rem; color: #656d76;
+    margin: 2px 0 0; font-size: 0.85rem; color: #656d76;
 }
-.section-body { padding: 24px; }
+.section-body { padding: 28px; }
 
 /* 步骤列表 */
-.step-list { display: flex; flex-direction: column; gap: 20px; }
-.step-item {
-    display: flex; gap: 14px; align-items: flex-start;
-}
+.step-list { display: flex; flex-direction: column; gap: 22px; }
+.step-item { display: flex; gap: 16px; align-items: flex-start; }
 .step-badge {
-    width: 32px; height: 32px;
+    width: 34px; height: 34px;
     background: #0969da; color: white;
     border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
@@ -514,14 +521,14 @@
 }
 .step-content { flex: 1; }
 .step-content h4 {
-    margin: 0 0 6px; font-size: 1rem; font-weight: 600; color: #24292f;
+    margin: 0 0 8px; font-size: 1.05rem; font-weight: 600; color: #24292f;
 }
-.step-content p { margin: 0 0 8px; font-size: 0.9rem; color: #3d4451; line-height: 1.65; }
+.step-content p { margin: 0 0 8px; font-size: 0.92rem; color: #3d4451; line-height: 1.7; }
 .info-list {
     margin: 6px 0 0; padding-left: 20px;
-    font-size: 0.88rem; color: #3d4451; line-height: 1.7;
+    font-size: 0.9rem; color: #3d4451; line-height: 1.75;
 }
-.info-list li { margin-bottom: 4px; }
+.info-list li { margin-bottom: 5px; }
 .info-list code {
     background: #f0f3f6; padding: 2px 6px; border-radius: 4px;
     font-size: 0.85em; color: #0969da;
@@ -530,28 +537,26 @@
 /* 提示框 */
 .tip-box {
     display: flex; align-items: flex-start; gap: 10px;
-    padding: 14px 16px;
+    padding: 14px 18px;
     background: #ddf4ff; border: 1px solid #54aeff;
-    border-radius: 6px;
-    font-size: 0.88rem; color: #24292f;
-    margin-top: 20px;
+    border-radius: 8px;
+    font-size: 0.9rem; color: #24292f;
+    margin-top: 22px;
 }
 .tip-box i { color: #0969da; margin-top: 2px; flex-shrink: 0; }
-.tip-box.warning {
-    background: #fff8c5; border-color: #d4a72c;
-}
+.tip-box.warning { background: #fff8c5; border-color: #d4a72c; }
 .tip-box.warning i { color: #9a6700; }
 
 /* 双面板 */
 .dual-panel {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 14px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
     margin-top: 12px;
 }
 .panel-card {
-    padding: 16px;
+    padding: 18px;
     background: #f6f8fa;
     border: 1px solid #d0d7de;
-    border-radius: 8px;
+    border-radius: 10px;
 }
 .panel-card h5 {
     margin: 0 0 10px; font-size: 0.95rem; font-weight: 600;
@@ -574,16 +579,16 @@
 .color-legend { display: flex; flex-direction: column; gap: 18px; }
 .legend-item {
     display: flex; gap: 20px; align-items: flex-start;
-    padding: 16px;
+    padding: 18px;
     border: 1px solid #d0d7de;
-    border-radius: 8px;
+    border-radius: 10px;
     background: #fafbfc;
 }
 .legend-sample { flex-shrink: 0; }
 .legend-desc { flex: 1; }
-.legend-desc strong { font-size: 0.92rem; color: #24292f; }
-.legend-desc p { margin: 4px 0 0; font-size: 0.85rem; color: #656d76; line-height: 1.6; }
-.legend-desc ul { margin: 6px 0 0; padding-left: 18px; font-size: 0.85rem; color: #656d76; }
+.legend-desc strong { font-size: 0.95rem; color: #24292f; }
+.legend-desc p { margin: 4px 0 0; font-size: 0.88rem; color: #656d76; line-height: 1.65; }
+.legend-desc ul { margin: 6px 0 0; padding-left: 18px; font-size: 0.88rem; color: #656d76; }
 .legend-desc ul li { margin-bottom: 3px; }
 
 /* 示例行 */
@@ -593,39 +598,22 @@
     border-radius: 4px;
     overflow: hidden;
     font-size: 12px;
-    min-width: 280px;
+    min-width: 320px;
 }
 .sample-cell {
-    padding: 6px 10px;
+    padding: 6px 12px;
     border-right: 1px solid #dee2e6;
     white-space: nowrap;
 }
 .sample-cell:last-child { border-right: none; }
-.sample-cell.num { font-weight: 700; min-width: 44px; text-align: center; }
+.sample-cell.num { font-weight: 700; min-width: 48px; text-align: center; }
 
-/* 新增行示例 */
-.added-row .sample-cell {
-    background: #53d471; color: #000; font-weight: 600;
-}
-.added-row .sample-cell.num {
-    background: #2da44e; color: #fff;
-}
-
-/* 删除行示例 */
-.removed-row .sample-cell {
-    background: #f76571; color: #000; font-weight: 600;
-}
-.removed-row .sample-cell.num {
-    background: #cf222e; color: #fff;
-}
-
-/* 普通修改行示例 */
-.normal-row .sample-cell {
-    background: #fff;
-}
-.normal-row .sample-cell.num.mod {
-    background: #fff3cd; color: #856404; font-weight: 700;
-}
+.added-row .sample-cell { background: #53d471; color: #000; font-weight: 600; }
+.added-row .sample-cell.num { background: #2da44e; color: #fff; }
+.removed-row .sample-cell { background: #f76571; color: #000; font-weight: 600; }
+.removed-row .sample-cell.num { background: #cf222e; color: #fff; }
+.normal-row .sample-cell { background: #fff; }
+.normal-row .sample-cell.num.mod { background: #fff3cd; color: #856404; font-weight: 700; }
 .cell-modified {
     display: flex; flex-direction: column; gap: 2px;
     padding: 4px 8px !important;
@@ -633,23 +621,18 @@
 }
 .old-val {
     background: #ee3f51; color: #fff;
-    padding: 1px 6px; border-radius: 3px;
-    font-size: 11px;
+    padding: 1px 6px; border-radius: 3px; font-size: 11px;
 }
 .new-val {
     background: #2e7d32; color: #fff;
-    padding: 1px 6px; border-radius: 3px;
-    font-size: 11px;
+    padding: 1px 6px; border-radius: 3px; font-size: 11px;
 }
 
 /* 行号示例 */
-.row-number-samples {
-    display: flex; align-items: center; gap: 8px;
-    flex-wrap: wrap;
-}
+.row-number-samples { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .rn-sample {
     display: inline-flex; align-items: center; justify-content: center;
-    min-width: 44px; padding: 4px 10px;
+    min-width: 48px; padding: 4px 12px;
     border-radius: 4px; font-size: 12px; font-weight: 700;
 }
 .rn-added { background: #c8e6c9; color: #155724; }
@@ -659,17 +642,53 @@
 
 /* 内联标记 */
 .inline-badge {
-    display: inline-block;
-    padding: 1px 8px;
-    border-radius: 3px;
-    font-size: 0.82rem;
-    font-weight: 600;
+    display: inline-block; padding: 1px 8px;
+    border-radius: 3px; font-size: 0.84rem; font-weight: 600;
 }
 .inline-badge.old { background: #ee3f51; color: #fff; }
 .inline-badge.new { background: #2e7d32; color: #fff; }
 
-/* 滚动平滑 */
 html { scroll-behavior: smooth; }
+
+@media (max-width: 768px) {
+    .help-tabs { justify-content: flex-start; }
+    .help-tab { padding: 12px 16px; flex: none; }
+}
 </style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    var tabs = document.querySelectorAll('.help-tab');
+    var sections = document.querySelectorAll('.help-section');
+
+    function showSection(sectionId) {
+        sections.forEach(function(s) { s.style.display = 'none'; });
+        tabs.forEach(function(t) { t.classList.remove('active'); });
+        var target = document.getElementById(sectionId);
+        if (target) { target.style.display = 'block'; }
+        tabs.forEach(function(t) {
+            if (t.getAttribute('data-section') === sectionId) {
+                t.classList.add('active');
+            }
+        });
+    }
+
+    tabs.forEach(function(tab) {
+        tab.addEventListener('click', function(e) {
+            e.preventDefault();
+            var sectionId = this.getAttribute('data-section');
+            showSection(sectionId);
+            history.replaceState(null, null, '#' + sectionId);
+        });
+    });
+
+    var hash = window.location.hash.replace('#', '');
+    if (hash && document.getElementById(hash)) {
+        showSection(hash);
+    } else {
+        showSection('section-project');
+    }
+});
+</script>
 
 {% endblock %}

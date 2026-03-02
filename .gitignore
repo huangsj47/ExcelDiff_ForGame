@@ -4,6 +4,8 @@ venv/
 .venv/
 env/
 
+openspec/
+
 /instance/
 *.db
 *.sqlite
