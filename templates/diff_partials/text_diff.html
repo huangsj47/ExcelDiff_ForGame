@@ -1,23 +1,21 @@
-<!-- 文本文件差异显示 (GitHub风格) -->
-<div class="text-diff-container">
-    <div class="text-diff-header">
-        <div class="d-flex align-items-center">
-            <i class="bi bi-file-text me-2"></i>
-            <span>文本差异</span>
+<!-- 文本文件差异显示 (GitHub风格 - 增强版) -->
+<div class="text-diff-container" style="border: 1px solid #d0d7de; border-radius: 8px; overflow: hidden; background: #fff; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace; box-shadow: 0 1px 4px rgba(0,0,0,0.06);">
+    <!-- 头部信息栏 -->
+    <div class="text-diff-header" style="display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; background: linear-gradient(180deg, #f6f8fa 0%, #eef1f5 100%); border-bottom: 1px solid #d0d7de;">
+        <div class="d-flex align-items-center" style="gap: 8px;">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="#656d76"><path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0113.25 16h-9.5A1.75 1.75 0 012 14.25V1.75z"/></svg>
+            <span style="font-weight: 600; font-size: 13px; color: #24292f;">文本差异</span>
         </div>
-        <div class="text-diff-stats">
-            <div class="text-diff-stat added">
-                <i class="bi bi-plus-circle"></i>
-                <span>+{{ diff_data.stats.added if diff_data.stats else 0 }}</span>
+        <div class="text-diff-stats" style="display: flex; gap: 12px; align-items: center;">
+            <div class="text-diff-stat" style="display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600;">
+                <span style="color: #1a7f37; background: #dafbe1; padding: 2px 8px; border-radius: 10px;">+{{ diff_data.stats.added if diff_data.stats else 0 }}</span>
             </div>
-            <div class="text-diff-stat removed">
-                <i class="bi bi-dash-circle"></i>
-                <span>-{{ diff_data.stats.removed if diff_data.stats else 0 }}</span>
+            <div class="text-diff-stat" style="display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600;">
+                <span style="color: #cf222e; background: #ffebe9; padding: 2px 8px; border-radius: 10px;">-{{ diff_data.stats.removed if diff_data.stats else 0 }}</span>
             </div>
             {% if diff_data.stats and diff_data.stats.modified > 0 %}
-            <div class="text-diff-stat modified">
-                <i class="bi bi-pencil-circle"></i>
-                <span>~{{ diff_data.stats.modified }}</span>
+            <div class="text-diff-stat" style="display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600;">
+                <span style="color: #9a6700; background: #fff8c5; padding: 2px 8px; border-radius: 10px;">~{{ diff_data.stats.modified }}</span>
             </div>
             {% endif %}
         </div>
@@ -27,14 +25,14 @@
         {% if diff_data.hunks %}
             {% for hunk in diff_data.hunks %}
             <div class="text-diff-hunk">
-                <div class="text-diff-hunk-header">
+                <div class="text-diff-hunk-header" style="background: #ddf4ff; border-bottom: 1px solid #bde0fe; padding: 6px 16px; font-size: 12px; color: #0969da; font-weight: 500; line-height: 1.5;">
                     {{ hunk.header }}
                 </div>
                 <div class="text-diff-lines">
                     {% set ns = namespace(old_line=hunk.old_start, new_line=hunk.new_start) %}
                     {% for line in hunk.lines %}
-                        <div class="text-diff-line {{ line.type }}">
-                            <div class="text-diff-line-number">
+                        <div class="text-diff-line {{ line.type }}" style="display: flex; border-bottom: 1px solid {% if line.type == 'added' %}#ccffd8{% elif line.type == 'removed' %}#ffd7d5{% else %}#f0f0f0{% endif %}; {% if line.type == 'added' %}background: #dafbe1;{% elif line.type == 'removed' %}background: #ffebe9;{% else %}background: #fff;{% endif %}">
+                            <div class="text-diff-line-number" style="min-width: 50px; padding: 2px 8px; text-align: right; color: #656d76; font-size: 12px; user-select: none; {% if line.type == 'added' %}background: #ccffd8;{% elif line.type == 'removed' %}background: #ffd7d5;{% else %}background: #f6f8fa;{% endif %} border-right: 1px solid #d0d7de;">
                                 {% if line.type == 'removed' %}
                                     {{ ns.old_line }}
                                     {% set ns.old_line = ns.old_line + 1 %}
@@ -47,16 +45,17 @@
                                     {% set ns.new_line = ns.new_line + 1 %}
                                 {% endif %}
                             </div>
-                            <div class="text-diff-line-content">{{ line.content }}</div>
+                            <div class="text-diff-line-prefix" style="width: 20px; text-align: center; font-weight: 700; font-size: 12px; padding: 2px 0; {% if line.type == 'added' %}color: #1a7f37;{% elif line.type == 'removed' %}color: #cf222e;{% else %}color: transparent;{% endif %}">{% if line.type == 'added' %}+{% elif line.type == 'removed' %}-{% else %}&nbsp;{% endif %}</div>
+                            <div class="text-diff-line-content" style="flex: 1; padding: 2px 8px; white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 20px; tab-size: 4;">{{ line.content }}</div>
                         </div>
                     {% endfor %}
                 </div>
             </div>
             {% endfor %}
         {% else %}
-            <div class="p-4 text-center text-muted">
-                <i class="bi bi-file-earmark-text fs-1 mb-3"></i>
-                <p>没有找到文本差异数据</p>
+            <div style="padding: 3rem; text-align: center; color: #656d76;">
+                <svg width="48" height="48" viewBox="0 0 16 16" fill="#c9d1d9" style="margin-bottom: 1rem;"><path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0113.25 16h-9.5A1.75 1.75 0 012 14.25V1.75z"/></svg>
+                <p style="font-size: 14px; font-weight: 500;">没有找到文本差异数据</p>
             </div>
         {% endif %}
     </div>
