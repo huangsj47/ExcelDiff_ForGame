@@ -1064,51 +1064,69 @@ def background_task_worker():
                                 log_print(f"🔍 [BACKGROUND_SYNC] Git服务获取到 {len(commits)} 个提交记录", 'SYNC')
                                 commits_added = 0
                                 excel_tasks_added = 0
-                                for i, commit_data in enumerate(commits):
-                                    # 检查提交是否已存在
-                                    existing_commit = Commit.query.filter_by(
+
+                                # ===== 性能优化：批量查询已存在的commit，避免逐条SELECT =====
+                                # 按批次（500条）查询已存在的 commit_id，构建集合用于 O(1) 查找
+                                existing_commit_ids = set()
+                                all_incoming_ids = list(set(cd['commit_id'] for cd in commits))
+                                BATCH_SIZE = 500
+                                for batch_start in range(0, len(all_incoming_ids), BATCH_SIZE):
+                                    batch_ids = all_incoming_ids[batch_start:batch_start + BATCH_SIZE]
+                                    existing_rows = db.session.query(Commit.commit_id).filter(
+                                        Commit.repository_id == repository.id,
+                                        Commit.commit_id.in_(batch_ids)
+                                    ).all()
+                                    existing_commit_ids.update(row[0] for row in existing_rows)
+                                log_print(f"🔍 [BACKGROUND_SYNC] 批量查询完成: {len(existing_commit_ids)}/{len(all_incoming_ids)} 已存在", 'SYNC')
+
+                                # 批量构建新提交对象和Excel任务
+                                new_commit_objects = []
+                                excel_task_list = []
+                                for commit_data in commits:
+                                    if commit_data['commit_id'] in existing_commit_ids:
+                                        continue  # 已存在，跳过
+                                    # 去重：同一 commit_id 可能出现多次（不同文件路径），只插入一次
+                                    existing_commit_ids.add(commit_data['commit_id'])
+                                    new_commit = Commit(
                                         repository_id=repository.id,
-                                        commit_id=commit_data['commit_id']
-                                    ).first()
-                                    if not existing_commit:
-                                        # 创建新的提交记录
-                                        new_commit = Commit(
-                                            repository_id=repository.id,
-                                            commit_id=commit_data['commit_id'],
-                                            author=commit_data.get('author', ''),
-                                            message=commit_data.get('message', ''),
-                                            commit_time=commit_data.get('commit_time'),
-                                            path=commit_data.get('path', ''),
-                                            version=commit_data.get('version', commit_data['commit_id'][:8]),
-                                            operation=commit_data.get('operation', 'M'),
-                                            status='pending'
-                                        )
-                                        db.session.add(new_commit)
-                                        commits_added += 1
-                                        log_print(f"➕ [BACKGROUND_SYNC] 添加新提交 {i+1}/{len(commits)}: {commit_data['commit_id'][:8]}", 'SYNC')
-                                        # 检查是否为Excel文件，如果是则添加到diff缓存任务队列
-                                        file_path = commit_data.get('path', '')
-                                        if file_path.lower().endswith(('.xlsx', '.xls')):
-                                            log_print(f"📊 [BACKGROUND_SYNC] 检测到Excel文件: {file_path}", 'SYNC')
-                                            try:
-                                                # 创建任务数据
-                                                task_data = {
-                                                    'type': 'excel_diff',
-                                                    'repository_id': repository.id,
-                                                    'commit_id': commit_data['commit_id'],
-                                                    'file_path': file_path
-                                                }
-                                                # 使用计数器确保任务的唯一性
-                                                import time
-                                                task_counter = int(time.time() * 1000000)  # 微秒级时间戳作为计数器
-                                                task_wrapper = TaskWrapper(8, task_counter, task_data)  # 低优先级，后台缓存
-                                                background_task_queue.put(task_wrapper)
-                                                excel_tasks_added += 1
-                                                log_print(f"✅ [BACKGROUND_SYNC] Excel缓存任务已添加: {file_path}", 'SYNC')
-                                            except Exception as e:
-                                                log_print(f"❌ [BACKGROUND_SYNC] 添加Excel缓存任务失败: {e}", 'SYNC', force=True)
-                                    else:
-                                        log_print(f"⏭️ [BACKGROUND_SYNC] 跳过已存在提交 {i+1}/{len(commits)}: {commit_data['commit_id'][:8]}", 'SYNC')
+                                        commit_id=commit_data['commit_id'],
+                                        author=commit_data.get('author', ''),
+                                        message=commit_data.get('message', ''),
+                                        commit_time=commit_data.get('commit_time'),
+                                        path=commit_data.get('path', ''),
+                                        version=commit_data.get('version', commit_data['commit_id'][:8]),
+                                        operation=commit_data.get('operation', 'M'),
+                                        status='pending'
+                                    )
+                                    new_commit_objects.append(new_commit)
+                                    # 收集Excel文件任务
+                                    file_path = commit_data.get('path', '')
+                                    if file_path.lower().endswith(('.xlsx', '.xls')):
+                                        excel_task_list.append({
+                                            'type': 'excel_diff',
+                                            'repository_id': repository.id,
+                                            'commit_id': commit_data['commit_id'],
+                                            'file_path': file_path
+                                        })
+
+                                # 批量插入新提交（使用 bulk_save_objects 减少数据库往返）
+                                if new_commit_objects:
+                                    db.session.bulk_save_objects(new_commit_objects)
+                                    commits_added = len(new_commit_objects)
+                                    log_print(f"➕ [BACKGROUND_SYNC] 批量插入 {commits_added} 个新提交", 'SYNC')
+
+                                # 批量添加Excel缓存任务到队列
+                                for task_data in excel_task_list:
+                                    try:
+                                        task_counter = int(time.time() * 1000000)
+                                        task_wrapper = TaskWrapper(8, task_counter, task_data)
+                                        background_task_queue.put(task_wrapper)
+                                        excel_tasks_added += 1
+                                    except Exception as e:
+                                        log_print(f"❌ [BACKGROUND_SYNC] 添加Excel缓存任务失败: {e}", 'SYNC', force=True)
+                                if excel_tasks_added > 0:
+                                    log_print(f"📊 [BACKGROUND_SYNC] 批量添加 {excel_tasks_added} 个Excel缓存任务", 'SYNC')
+
                                 # 提交数据库更改
                                 db.session.commit()
                                 log_print(f"✅ [BACKGROUND_SYNC] 后台同步完成，添加了 {commits_added} 个新提交，{excel_tasks_added} 个Excel缓存任务", 'SYNC')
@@ -1517,10 +1535,12 @@ def schedule_weekly_sync_tasks():
                 auto_sync=True
             ).all()
             for config in active_configs:
-                # 检查是否在时间范围内或已结束
-                now = datetime.now(timezone.utc)
+                # 使用本地时间进行比较（config.start_time/end_time 为 naive 本地时间）
+                now_local = datetime.now()
+                # 确保 config.end_time 是 naive datetime
+                config_end = config.end_time.replace(tzinfo=None) if config.end_time.tzinfo else config.end_time
                 # 如果配置已结束且状态还是active，更新为completed
-                if now > config.end_time and config.status == 'active':
+                if now_local > config_end and config.status == 'active':
                     config.status = 'completed'
                     db.session.commit()
                     log_print(f"周版本配置已完成: {config.name}", 'WEEKLY')
@@ -1528,6 +1548,20 @@ def schedule_weekly_sync_tasks():
 
                 # 如果配置还在进行中，创建同步任务
                 if config.status == 'active':
+                    # 先清理同一config_id的卡死pending任务（服务器重启后恢复）
+                    stale_tasks = BackgroundTask.query.filter_by(
+                        task_type='weekly_sync',
+                        commit_id=str(config.id),
+                        status='pending'
+                    ).all()
+                    for stale in stale_tasks:
+                        # 超过5分钟的pending任务视为卡死，重置（统一使用naive本地时间比较）
+                        stale_created = stale.created_at.replace(tzinfo=None) if stale.created_at and stale.created_at.tzinfo else stale.created_at
+                        if stale_created and (datetime.now() - stale_created).total_seconds() > 300:
+                            stale.status = 'failed'
+                            stale.error_message = '任务超时，已被调度器重置'
+                            db.session.commit()
+                            log_print(f"重置卡死的周版本同步任务: task_id={stale.id}, config_id={config.id}", 'WEEKLY', force=True)
                     create_weekly_sync_task(config.id)
             log_print(f"检查了 {len(active_configs)} 个周版本配置", 'WEEKLY')
     except Exception as e:
@@ -2063,8 +2097,8 @@ def merged_project_view(project_id):
     # 获取所有仓库
     repositories = Repository.query.filter_by(project_id=project_id).order_by(Repository.display_order).all()
     # 按时间范围和名称分组周版本配置
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
+    from datetime import datetime
+    now = datetime.now()
     # 分组逻辑：相同版本基础名称+相同时间范围的配置归为一组
     version_groups = {}
     for config in configs:
@@ -2087,16 +2121,10 @@ def merged_project_view(project_id):
         # 判断是否为活跃版本（当前时间在版本时间范围内）
         # 处理时区问题：统一转换为无时区的本地时间进行比较
         try:
-            # 将now转换为本地时间（无时区）
-            now_local = now.replace(tzinfo=None)
-            # 确保数据库时间也是无时区的
-            start_time = config.start_time
-            end_time = config.end_time
-            if start_time.tzinfo is not None:
-                start_time = start_time.replace(tzinfo=None)
-            if end_time.tzinfo is not None:
-                end_time = end_time.replace(tzinfo=None)
-            if start_time <= now_local <= end_time:
+            # now已经是naive本地时间，确保数据库时间也是无时区的
+            start_time = config.start_time.replace(tzinfo=None) if config.start_time and config.start_time.tzinfo else config.start_time
+            end_time = config.end_time.replace(tzinfo=None) if config.end_time and config.end_time.tzinfo else config.end_time
+            if start_time and end_time and start_time <= now <= end_time:
                 version_groups[group_key]['is_active'] = True
         except Exception as e:
             log_print(f"时间比较出错: {str(e)}", 'APP', force=True)
@@ -5578,6 +5606,26 @@ def get_cache_status(repository_id):
             'success': False, 
             'message': f'获取缓存状态失败: {str(e)}'
         }), 500
+# 查询仓库克隆状态 API
+
+
+def get_clone_status(repository_id):
+    """轻量级 API：返回仓库的 clone_status，供前端轮询。"""
+    repo = Repository.query.get(repository_id)
+    if not repo:
+        return jsonify({"success": False, "message": "仓库不存在"}), 404
+    # 查询该仓库的提交记录数量，用于判断数据是否真正就绪
+    commit_count = Commit.query.filter_by(repository_id=repository_id).count()
+    is_data_ready = (repo.clone_status == 'completed' and commit_count > 0)
+    return jsonify({
+        "success": True,
+        "clone_status": repo.clone_status or "pending",
+        "clone_error": getattr(repo, "clone_error", None) or "",
+        "commit_count": commit_count,
+        "is_data_ready": is_data_ready,
+    })
+
+
 # 重试克隆仓库
 
 

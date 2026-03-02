@@ -2,23 +2,85 @@
 
 {% block title %}周版本diff配置 - {{ project.name }}{% endblock %}
 
+{% block head %}
+<style>
+    /* ===== 页面头部 - Deep Blue ===== */
+    .weekly-page-header {
+        background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
+        border-radius: 0.75rem;
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 1.25rem;
+        box-shadow: 0 4px 16px rgba(13,110,253,0.2);
+        color: #fff;
+    }
+    .weekly-page-header h4 { color: #fff !important; font-weight: 700; font-size: 1.25rem; margin-bottom: 0.25rem; }
+    .weekly-page-header .breadcrumb { margin: 0; padding: 0; background: none; }
+    .weekly-page-header .breadcrumb-item a { color: rgba(255,255,255,0.8); text-decoration: none; font-weight: 500; font-size: 0.82rem; }
+    .weekly-page-header .breadcrumb-item a:hover { color: #fff; }
+    .weekly-page-header .breadcrumb-item.active { color: rgba(255,255,255,0.55); font-size: 0.82rem; }
+    .weekly-page-header .breadcrumb-item + .breadcrumb-item::before { color: rgba(255,255,255,0.35); }
+    .weekly-page-header .header-action-btn { font-size: 0.82rem; padding: 0.4rem 1rem; border-radius: 6px; font-weight: 600; transition: all 0.2s; background: rgba(255,255,255,0.9); color: #1e3a5f; border: none; }
+    .weekly-page-header .header-action-btn:hover { background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.15); color: #1e3a5f; }
+
+    /* ===== 版本分组卡片 ===== */
+    .version-section-card { border: 1px solid #e2e8f0; border-radius: 0.75rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); overflow: hidden; }
+    .version-section-header {
+        background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
+        padding: 0.75rem 1.25rem;
+        color: #fff;
+    }
+    .version-section-header.future-header {
+        background: linear-gradient(135deg, #1e3a5f 0%, #0ea5e9 100%);
+    }
+    .version-section-header.ended-header {
+        background: linear-gradient(135deg, #334155 0%, #64748b 100%);
+    }
+    .version-section-header h5 { margin: 0; font-size: 0.95rem; font-weight: 600; color: #fff; }
+    .version-section-header .badge { font-size: 0.72rem; }
+    .version-section-header .btn-outline-light { font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 5px; }
+
+    /* ===== 版本组内项目 ===== */
+    .version-group-block { border: 1px solid #e2e8f0; border-radius: 0.625rem; padding: 1rem; background: #f8fafc; }
+    .version-group-block .badge-status { font-size: 0.72rem; font-weight: 600; padding: 0.25rem 0.6rem; border-radius: 4px; }
+    .version-group-block .badge-status.active { background: linear-gradient(135deg, #059669 0%, #10b981 100%); color: #fff; }
+    .version-group-block .badge-status.future { background: linear-gradient(135deg, #0284c7 0%, #0ea5e9 100%); color: #fff; }
+    .version-group-block .badge-status.ended { background: #94a3b8; color: #fff; }
+
+    /* ===== 仓库子卡片 ===== */
+    .repo-sub-card { border: 1px solid #e2e8f0; border-radius: 0.5rem; padding: 0.75rem; background: #fff; transition: all 0.2s; }
+    .repo-sub-card:hover { box-shadow: 0 2px 8px rgba(13,110,253,0.12); border-color: #bfdbfe; }
+    .repo-sub-card .btn-sm { font-size: 0.72rem; padding: 0.25rem 0.5rem; border-radius: 5px; }
+    .repo-sub-card .btn-view { background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%); color: #fff; border: none; }
+    .repo-sub-card .btn-view:hover { box-shadow: 0 2px 6px rgba(13,110,253,0.3); color: #fff; }
+
+    /* ===== 空状态 ===== */
+    .empty-state { padding: 3rem 1rem; text-align: center; }
+    .empty-state i { color: #94a3b8; }
+    .empty-state h4 { color: #64748b; font-size: 1.1rem; font-weight: 600; }
+    .empty-state p { color: #94a3b8; font-size: 0.88rem; }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="container">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <div>
-            <h2>周版本diff配置</h2>
-            <nav aria-label="breadcrumb">
-                <ol class="breadcrumb">
-                    <li class="breadcrumb-item"><a href="{{ url_for('index') }}">项目列表</a></li>
-                    <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=project.id) }}">{{ project.name }}</a></li>
-                    <li class="breadcrumb-item active">周版本配置</li>
-                </ol>
-            </nav>
-        </div>
-        <div>
-            <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addConfigModal">
-                <i class="fas fa-plus me-2"></i>新增配置
-            </button>
+    <!-- Deep Blue 页面头部 -->
+    <div class="weekly-page-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h4><i class="fas fa-calendar-week me-2"></i>周版本diff配置</h4>
+                <nav aria-label="breadcrumb">
+                    <ol class="breadcrumb">
+                        <li class="breadcrumb-item"><a href="{{ url_for('index') }}">项目列表</a></li>
+                        <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=project.id) }}">{{ project.name }}</a></li>
+                        <li class="breadcrumb-item active">周版本配置</li>
+                    </ol>
+                </nav>
+            </div>
+            <div>
+                <button type="button" class="header-action-btn" data-bs-toggle="modal" data-bs-target="#addConfigModal">
+                    <i class="fas fa-plus me-1"></i>新增配置
+                </button>
+            </div>
         </div>
     </div>
 
@@ -29,12 +91,12 @@
             <!-- 活跃版本 -->
             {% if active_versions %}
             <div class="col-12 mb-4">
-                <div class="card">
-                    <div class="card-header bg-success text-white">
+                <div class="version-section-card">
+                    <div class="version-section-header">
                         <div class="d-flex justify-content-between align-items-center">
-                            <h5 class="mb-0">
+                            <h5>
                                 <i class="fas fa-play-circle me-2"></i>活跃版本
-                                <span class="badge bg-light text-success ms-2">{{ active_versions|length }}</span>
+                                <span class="badge bg-light text-primary ms-2">{{ active_versions|length }}</span>
                             </h5>
                             <button class="btn btn-sm btn-outline-light" type="button" data-bs-toggle="collapse" data-bs-target="#activeVersions" aria-expanded="true">
                                 <i class="fas fa-chevron-down"></i> 展开/收起
@@ -44,23 +106,23 @@
                     <div class="collapse show" id="activeVersions">
                         <div class="card-body">
                             {% for version_group in active_versions %}
-                            <div class="mb-4 border rounded p-3" style="background-color: #f8fff8;">
+                            <div class="version-group-block mb-3">
                                 <div class="d-flex justify-content-between align-items-center mb-3">
                                     <div>
                                         <h6 class="mb-1">
-                                            <i class="fas fa-calendar-week me-2"></i>{{ version_group.version_name }}
+                                            <i class="fas fa-calendar-week me-2 text-primary"></i>{{ version_group.version_name }}
                                         </h6>
                                         <small class="text-muted">
                                             <i class="fas fa-clock me-1"></i>
                                             {{ version_group.start_time.strftime('%Y-%m-%d %H:%M') }} 至 {{ version_group.end_time.strftime('%Y-%m-%d %H:%M') }}
                                         </small>
                                     </div>
-                                    <span class="badge bg-success">进行中</span>
+                                    <span class="badge-status active">进行中</span>
                                 </div>
                                 <div class="row">
                                     {% for config in version_group.configs %}
                                     <div class="col-md-6 col-lg-3 mb-3">
-                                        <div class="border rounded p-2 h-100" style="background-color: #ffffff;">
+                                        <div class="repo-sub-card h-100">
                                             <div class="d-flex justify-content-between align-items-start mb-2">
                                                 <h6 class="mb-0 small">
                                                     <span class="badge bg-{% if config.repository.type == 'git' %}success{% else %}primary{% endif %}">
@@ -68,7 +130,7 @@
                                                     </span>
                                                 </h6>
                                                 {% if config.is_active %}
-                                                    <span class="badge bg-info" title="自动同步">
+                                                    <span class="badge bg-info" title="自动同步" style="font-size:0.65rem;">
                                                         <i class="fas fa-sync-alt"></i>
                                                     </span>
                                                 {% endif %}
@@ -85,7 +147,7 @@
                                             </div>
                                             <!-- 操作按钮 -->
                                             <div class="d-flex gap-1">
-                                                <a href="{{ url_for('weekly_version_diff', config_id=config.id) }}" class="btn btn-success btn-sm flex-fill" title="查看diff">
+                                                <a href="{{ url_for('weekly_version_diff', config_id=config.id) }}" class="btn btn-view btn-sm flex-fill" title="查看diff">
                                                     <i class="fas fa-eye"></i>
                                                 </a>
                                                 <button type="button" class="btn btn-outline-primary btn-sm flex-fill" onclick="editConfig({{ config.id }})" title="修改">
@@ -110,10 +172,10 @@
             <!-- 未来版本 -->
             {% if future_versions %}
             <div class="col-12 mb-4">
-                <div class="card">
-                    <div class="card-header bg-info text-white">
+                <div class="version-section-card">
+                    <div class="version-section-header future-header">
                         <div class="d-flex justify-content-between align-items-center">
-                            <h5 class="mb-0">
+                            <h5>
                                 <i class="fas fa-clock me-2"></i>未来版本
                                 <span class="badge bg-light text-info ms-2">{{ future_versions|length }}</span>
                             </h5>
@@ -125,23 +187,23 @@
                     <div class="collapse show" id="futureVersions">
                         <div class="card-body">
                             {% for version_group in future_versions %}
-                            <div class="mb-4 border rounded p-3" style="background-color: #f8f9ff;">
+                            <div class="version-group-block mb-3">
                                 <div class="d-flex justify-content-between align-items-center mb-3">
                                     <div>
                                         <h6 class="mb-1">
-                                            <i class="fas fa-calendar-week me-2"></i>{{ version_group.version_name }}
+                                            <i class="fas fa-calendar-week me-2 text-info"></i>{{ version_group.version_name }}
                                         </h6>
                                         <small class="text-muted">
                                             <i class="fas fa-clock me-1"></i>
                                             {{ version_group.start_time.strftime('%Y-%m-%d %H:%M') }} 至 {{ version_group.end_time.strftime('%Y-%m-%d %H:%M') }}
                                         </small>
                                     </div>
-                                    <span class="badge bg-info">未开始</span>
+                                    <span class="badge-status future">未开始</span>
                                 </div>
                                 <div class="row">
                                     {% for config in version_group.configs %}
                                     <div class="col-md-6 col-lg-3 mb-3">
-                                        <div class="border rounded p-2 h-100" style="background-color: #ffffff;">
+                                        <div class="repo-sub-card h-100">
                                             <div class="d-flex justify-content-between align-items-start mb-2">
                                                 <h6 class="mb-0 small">
                                                     <span class="badge bg-{% if config.repository.type == 'git' %}success{% else %}primary{% endif %}">
@@ -149,7 +211,7 @@
                                                     </span>
                                                 </h6>
                                                 {% if config.is_active %}
-                                                    <span class="badge bg-info" title="自动同步">
+                                                    <span class="badge bg-info" title="自动同步" style="font-size:0.65rem;">
                                                         <i class="fas fa-sync-alt"></i>
                                                     </span>
                                                 {% endif %}
@@ -166,7 +228,7 @@
                                             </div>
                                             <!-- 操作按钮 -->
                                             <div class="d-flex gap-1">
-                                                <a href="{{ url_for('weekly_version_diff', config_id=config.id) }}" class="btn btn-success btn-sm flex-fill" title="查看diff">
+                                                <a href="{{ url_for('weekly_version_diff', config_id=config.id) }}" class="btn btn-view btn-sm flex-fill" title="查看diff">
                                                     <i class="fas fa-eye"></i>
                                                 </a>
                                                 <button type="button" class="btn btn-outline-primary btn-sm flex-fill" onclick="editConfig({{ config.id }})" title="修改">
@@ -191,10 +253,10 @@
             <!-- 已结束版本 -->
             {% if ended_versions %}
             <div class="col-12 mb-4">
-                <div class="card">
-                    <div class="card-header bg-secondary text-white">
+                <div class="version-section-card">
+                    <div class="version-section-header ended-header">
                         <div class="d-flex justify-content-between align-items-center">
-                            <h5 class="mb-0">
+                            <h5>
                                 <i class="fas fa-history me-2"></i>已结束版本
                                 <span class="badge bg-light text-secondary ms-2">{{ ended_versions|length }}</span>
                             </h5>
@@ -206,23 +268,23 @@
                     <div class="collapse" id="endedVersions">
                         <div class="card-body">
                             {% for version_group in ended_versions %}
-                            <div class="mb-4 border rounded p-3" style="background-color: #f8f8f8;">
+                            <div class="version-group-block mb-3">
                                 <div class="d-flex justify-content-between align-items-center mb-3">
                                     <div>
                                         <h6 class="mb-1">
-                                            <i class="fas fa-calendar-week me-2"></i>{{ version_group.version_name }}
+                                            <i class="fas fa-calendar-week me-2 text-secondary"></i>{{ version_group.version_name }}
                                         </h6>
                                         <small class="text-muted">
                                             <i class="fas fa-clock me-1"></i>
                                             {{ version_group.start_time.strftime('%Y-%m-%d %H:%M') }} 至 {{ version_group.end_time.strftime('%Y-%m-%d %H:%M') }}
                                         </small>
                                     </div>
-                                    <span class="badge bg-secondary">已结束</span>
+                                    <span class="badge-status ended">已结束</span>
                                 </div>
                                 <div class="row">
                                     {% for config in version_group.configs %}
                                     <div class="col-md-6 col-lg-3 mb-3">
-                                        <div class="border rounded p-2 h-100" style="background-color: #ffffff;">
+                                        <div class="repo-sub-card h-100">
                                             <div class="d-flex justify-content-between align-items-start mb-2">
                                                 <h6 class="mb-0 small">
                                                     <span class="badge bg-{% if config.repository.type == 'git' %}success{% else %}primary{% endif %}">
@@ -230,7 +292,7 @@
                                                     </span>
                                                 </h6>
                                                 {% if config.is_active %}
-                                                    <span class="badge bg-info" title="自动同步">
+                                                    <span class="badge bg-info" title="自动同步" style="font-size:0.65rem;">
                                                         <i class="fas fa-sync-alt"></i>
                                                     </span>
                                                 {% endif %}
@@ -247,7 +309,7 @@
                                             </div>
                                             <!-- 操作按钮 -->
                                             <div class="d-flex gap-1">
-                                                <a href="{{ url_for('weekly_version_diff', config_id=config.id) }}" class="btn btn-success btn-sm flex-fill" title="查看diff">
+                                                <a href="{{ url_for('weekly_version_diff', config_id=config.id) }}" class="btn btn-view btn-sm flex-fill" title="查看diff">
                                                     <i class="fas fa-eye"></i>
                                                 </a>
                                                 <button type="button" class="btn btn-outline-primary btn-sm flex-fill" onclick="editConfig({{ config.id }})" title="修改">

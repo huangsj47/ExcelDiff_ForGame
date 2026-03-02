@@ -4,38 +4,81 @@
 
 {% block head %}
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
+<style>
+    /* ===== 页面头部 - Deep Blue ===== */
+    .weekly-diff-header {
+        background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
+        border-radius: 0.75rem;
+        padding: 1.25rem 1.5rem;
+        margin-bottom: 1.25rem;
+        box-shadow: 0 4px 16px rgba(13,110,253,0.2);
+        color: #fff;
+    }
+    .weekly-diff-header h4 { color: #fff !important; font-weight: 700; font-size: 1.25rem; margin-bottom: 0.25rem; }
+    .weekly-diff-header .breadcrumb { margin: 0; padding: 0; background: none; }
+    .weekly-diff-header .breadcrumb-item a { color: rgba(255,255,255,0.8); text-decoration: none; font-weight: 500; font-size: 0.82rem; }
+    .weekly-diff-header .breadcrumb-item a:hover { color: #fff; }
+    .weekly-diff-header .breadcrumb-item.active { color: rgba(255,255,255,0.55); font-size: 0.82rem; }
+    .weekly-diff-header .breadcrumb-item + .breadcrumb-item::before { color: rgba(255,255,255,0.35); }
+    .weekly-diff-header .header-action-btn { font-size: 0.78rem; padding: 0.3rem 0.7rem; border-radius: 6px; font-weight: 500; transition: all 0.2s; border: 1px solid rgba(255,255,255,0.3); color: #fff; background: rgba(255,255,255,0.1); }
+    .weekly-diff-header .header-action-btn:hover { background: rgba(255,255,255,0.2); border-color: rgba(255,255,255,0.5); color: #fff; }
+    .weekly-diff-header .header-action-btn.btn-accent { background: rgba(255,255,255,0.9); color: #1e3a5f; border: none; font-weight: 600; }
+    .weekly-diff-header .header-action-btn.btn-accent:hover { background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+
+    /* ===== 仓库标签页卡片 ===== */
+    .repo-tabs-card { border: 1px solid #e2e8f0; border-radius: 0.75rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); overflow: hidden; }
+    .repo-tabs-card .card-header { background: linear-gradient(135deg, #f8fafc 0%, #fff 100%); border-bottom: 2px solid #e2e8f0; padding: 0.5rem 1rem; }
+    .repo-tabs-card .nav-link { font-size: 0.82rem; font-weight: 500; color: #64748b; padding: 0.5rem 1rem; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; }
+    .repo-tabs-card .nav-link:hover { color: #0d6efd; border-bottom-color: #bfdbfe; }
+    .repo-tabs-card .nav-link.active { color: #0d6efd; border-bottom-color: #0d6efd; font-weight: 600; background: none; }
+
+    /* ===== 筛选卡片 ===== */
+    .filter-card { border: 1px solid #e2e8f0; border-radius: 0.625rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); overflow: hidden; }
+    .filter-card .filter-header { background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%); padding: 0.5rem 1.25rem; }
+    .filter-card .filter-header h6 { color: #fff; font-size: 0.82rem; font-weight: 600; margin: 0; }
+    .filter-card .filter-body { padding: 1rem 1.25rem; background: #fff; }
+    .filter-card .form-label { font-size: 0.8rem; font-weight: 500; color: #475569; }
+    .filter-card .form-control, .filter-card .form-select { border-radius: 6px; border: 1.5px solid #e2e8f0; font-size: 0.82rem; }
+    .filter-card .form-control:focus, .filter-card .form-select:focus { border-color: #0d6efd; box-shadow: 0 0 0 3px rgba(13,110,253,0.1); }
+
+    /* ===== 配置信息卡片 ===== */
+    .config-info-card { border: 1px solid #e2e8f0; border-radius: 0.75rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); overflow: hidden; }
+    .config-info-header { background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%); padding: 0.65rem 1.25rem; color: #fff; }
+    .config-info-header h6 { color: #fff; margin: 0; font-size: 0.88rem; font-weight: 600; }
+</style>
 {% endblock %}
 
 {% block content %}
 <div class="container-fluid">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <div>
-            <h2>{{ config.name }}</h2>
-            <nav aria-label="breadcrumb">
-                <ol class="breadcrumb">
-                    <li class="breadcrumb-item"><a href="{{ url_for('index') }}">项目列表</a></li>
-                    <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=config.project_id) }}">{{ config.project.name }}</a></li>
-                    <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=config.project_id) }}">周版本diff</a></li>
-                    <li class="breadcrumb-item active">{{ config.name }}</li>
-                </ol>
-            </nav>
-        </div>
-        <div>
-            <div class="btn-group me-2" role="group">
-                <button type="button" class="btn btn-outline-primary" id="toggleFoldersBtn" onclick="toggleAllFolders()">
+    <!-- Deep Blue 页面头部 -->
+    <div class="weekly-diff-header">
+        <div class="d-flex justify-content-between align-items-center">
+            <div>
+                <h4><i class="fas fa-code-branch me-2"></i>{{ config.name }}</h4>
+                <nav aria-label="breadcrumb">
+                    <ol class="breadcrumb">
+                        <li class="breadcrumb-item"><a href="{{ url_for('index') }}">项目列表</a></li>
+                        <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=config.project_id) }}">{{ config.project.name }}</a></li>
+                        <li class="breadcrumb-item"><a href="{{ url_for('merged_project_view', project_id=config.project_id) }}">周版本diff</a></li>
+                        <li class="breadcrumb-item active">{{ config.name }}</li>
+                    </ol>
+                </nav>
+            </div>
+            <div class="d-flex gap-2">
+                <button type="button" class="header-action-btn" id="toggleFoldersBtn" onclick="toggleAllFolders()">
                     <i class="fas fa-compress-arrows-alt me-1" id="toggleFoldersIcon"></i>
                     <span id="toggleFoldersText">收起全部</span>
                 </button>
+                <button type="button" class="header-action-btn btn-accent" onclick="confirmAllPending()">
+                    <i class="fas fa-check-double me-1"></i>批量确认
+                </button>
             </div>
-            <button type="button" class="btn btn-success" onclick="confirmAllPending()">
-                <i class="fas fa-check-double me-2"></i>批量确认
-            </button>
         </div>
     </div>
 
     <!-- 仓库标签页 -->
     {% if all_configs|length > 1 %}
-    <div class="card mb-4">
+    <div class="repo-tabs-card mb-4">
         <div class="card-header">
             <div class="d-flex justify-content-between align-items-center">
                 <ul class="nav nav-tabs card-header-tabs mb-0" id="repositoryTabs" role="tablist">
@@ -107,18 +150,16 @@
     </div>
     {% else %}
     <!-- 单个仓库时的配置信息卡片 -->
-    <div class="card mb-4">
-        <div class="card-header">
+    <div class="config-info-card mb-4">
+        <div class="config-info-header">
             <div class="d-flex justify-content-between align-items-center">
-                <h6 class="mb-0">
+                <h6>
                     <i class="fas fa-{% if config.repository.type == 'git' %}code-branch{% else %}folder{% endif %} me-2"></i>
                     {{ config.repository.name }}
-                    <span class="badge bg-{% if config.repository.type == 'git' %}success{% else %}primary{% endif %} ms-1">
+                    <span class="badge bg-light text-primary ms-1" style="font-size:0.7rem;">
                         {{ config.repository.type.upper() }}
                     </span>
                 </h6>
-
-                <!-- 重建缓存按钮已移至顶部统一管理 -->
             </div>
         </div>
         <div class="card-body">
@@ -144,8 +185,11 @@
     {% endif %}
 
     <!-- 筛选和搜索 -->
-    <div class="card mb-4">
-        <div class="card-body">
+    <div class="filter-card mb-4">
+        <div class="filter-header">
+            <h6><i class="fas fa-filter me-1"></i>筛选与搜索</h6>
+        </div>
+        <div class="filter-body">
             <div class="row">
                 <div class="col-md-3">
                     <label for="authorFilter" class="form-label">按提交者筛选</label>
@@ -176,7 +220,6 @@
                     <input type="text" class="form-control" id="searchInput" placeholder="输入文件名或路径" onkeyup="searchFiles()">
                 </div>
             </div>
-            <!-- 重建缓存按钮已移至仓库标签页区域 -->
         </div>
     </div>
 
