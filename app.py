@@ -110,6 +110,19 @@ from services.repository_creation_handlers import (
     enhanced_async_svn_clone_with_status_update,
     enhanced_retry_clone_repository,
 )
+from services.core_navigation_handlers import (
+    add_git_repository,
+    add_svn_repository,
+    admin_login,
+    admin_logout,
+    help_page,
+    index,
+    project_detail,
+    project_detail_original,
+    projects,
+    repository_config,
+    test,
+)
 from routes.cache_management_routes import cache_management_bp
 from routes.commit_diff_routes import commit_diff_bp
 from routes.core_management_routes import core_management_bp
@@ -1881,130 +1894,26 @@ def queue_missing_git_branch_refresh(project_id, repository_ids):
 # 测试路由
 
 
-def admin_login():
-    next_url = request.args.get('next') or request.form.get('next') or url_for('index')
-    if request.method == 'POST':
-        configured_user = os.environ.get('ADMIN_USERNAME', 'admin').strip()
-        configured_password = os.environ.get('ADMIN_PASSWORD', '').strip()
-        username = (request.form.get('username') or '').strip()
-        password = (request.form.get('password') or '').strip()
-        if not configured_password:
-            flash('ADMIN_PASSWORD 未配置，无法登录管理员账号。', 'error')
-            return render_template('admin_login.html', next_url=next_url), 500
-
-        if hmac.compare_digest(username, configured_user) and hmac.compare_digest(password, configured_password):
-            session['is_admin'] = True
-            session['admin_user'] = username
-            session.permanent = True
-            flash('管理员登录成功。', 'success')
-            if not _is_safe_redirect(next_url):
-                next_url = url_for('index')
-            return redirect(next_url)
-
-        flash('管理员账号或密码错误。', 'error')
-    return render_template('admin_login.html', next_url=next_url)
-
-def admin_logout():
-    session.pop('is_admin', None)
-    session.pop('admin_user', None)
-    session.pop(CSRF_SESSION_KEY, None)
-    flash('已退出管理员登录。', 'success')
-    return redirect(url_for('index'))
-
-def test():
-    return "服务器正常工作！"
 
 
-def help_page():
-    """帮助页面"""
-    return render_template('help.html')
+
+
 
 # 主页路由
 
 
-def index():
-    try:
-        log_print("访问主页路由", 'APP')
-
-        # ── 项目隔离：根据用户角色过滤可见项目 ──
-        from utils.request_security import _get_accessible_project_ids, _has_admin_access
-        accessible_ids = _get_accessible_project_ids()
-
-        if accessible_ids is None:
-            # 平台管理员 / 环境变量管理员 → 可见所有项目
-            projects = Project.query.order_by(Project.created_at.desc()).all()
-        elif accessible_ids:
-            projects = (
-                Project.query
-                .filter(Project.id.in_(accessible_ids))
-                .order_by(Project.created_at.desc())
-                .all()
-            )
-        else:
-            projects = []
-
-        # 获取所有项目列表（用于"申请加入"弹窗，排除已归属项目）
-        all_projects = Project.query.order_by(Project.code).all() if accessible_ids is not None else []
-        joinable_projects = [
-            p for p in all_projects
-            if p.id not in (accessible_ids or [])
-        ]
-
-        log_print(f"找到 {len(projects)} 个可见项目（总 {len(all_projects) + len(projects) if accessible_ids is not None else len(projects)} 个）", 'APP')
-        return render_template(
-            'index.html',
-            projects=projects,
-            joinable_projects=joinable_projects,
-            is_platform_admin=_has_admin_access(),
-        )
-
-    except Exception as e:
-        log_print(f"主页路由错误: {str(e)}", 'APP', force=True)
-        import traceback
-        traceback.print_exc()
-        return f"主页加载错误: {str(e)}", 500
 
 # 项目管理路由
 
 
-def projects():
-    if request.method == 'POST':
-        code = request.form.get('code')
-        name = request.form.get('name')
-        department = request.form.get('department')
-        if not code or not name:
-            flash('项目代号和名称不能为空', 'error')
-            return redirect(url_for('projects'))
-
-        # 检查项目代号是否已存在
-        existing_project = Project.query.filter_by(code=code).first()
-        if existing_project:
-            flash('项目代号已存在', 'error')
-            return redirect(url_for('projects'))
-
-        project = Project(code=code, name=name, department=department)
-        db.session.add(project)
-        db.session.commit()
-        flash('项目创建成功', 'success')
-        return redirect(url_for('projects'))
-
-    projects = Project.query.order_by(Project.created_at.desc()).all()
-    return render_template('projects.html', projects=projects)
 
 # 项目详情页面 - 重定向到项目概览
 
 
-def project_detail(project_id):
-    # 直接重定向到项目概览页面
-    return redirect(url_for('merged_project_view', project_id=project_id))
 
 # 保留原项目详情页面作为备用
 
 
-def project_detail_original(project_id):
-    project = Project.query.get_or_404(project_id)
-    repositories = Repository.query.filter_by(project_id=project_id).order_by(Repository.display_order).all()
-    return render_template('project_detail.html', project=project, repositories=repositories)
 
 # 周版本相关路由已迁移至 routes/weekly_version_management_routes.py，
 # 此处保留处理函数供蓝图包装层复用，避免大范围业务回归。
@@ -3551,24 +3460,14 @@ def generate_merged_diff_data(repository, file_path, base_commit, latest_commit,
         log_print(f"生成合并diff数据失败: {e}", 'WEEKLY', force=True)
         return {}
 
-def repository_config(project_id):
-    project = Project.query.get_or_404(project_id)
-    repositories = Repository.query.filter_by(project_id=project_id).order_by(Repository.display_order).all()
-    return render_template('repository_config.html', project=project, repositories=repositories)
 
 # 新增Git仓库页面
 
 
-def add_git_repository(project_id):
-    project = Project.query.get_or_404(project_id)
-    return render_template('add_git_repository.html', project=project)
 
 # 新增SVN仓库页面
 
 
-def add_svn_repository(project_id):
-    project = Project.query.get_or_404(project_id)
-    return render_template('add_svn_repository.html', project=project)
 
 # 创建Git仓库
 
