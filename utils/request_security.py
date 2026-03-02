@@ -30,7 +30,28 @@ def csrf_token():
     return token
 
 
+# Admin page routes that render HTML templates (not JSON APIs)
+_ADMIN_PAGE_ROUTES = frozenset({
+    "/admin/excel-cache",
+})
+
+
+def _is_admin_page_route():
+    """Check if the current request is for an admin HTML page (not an API endpoint)."""
+    return request.path in _ADMIN_PAGE_ROUTES
+
+
 def _is_api_request():
+    # If the browser is requesting an admin HTML page, treat it as a page request
+    if _is_admin_page_route():
+        accept = request.headers.get("Accept", "")
+        # Only treat as API if explicitly requesting JSON
+        if request.is_json or "application/json" in accept:
+            return True
+        if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+            return True
+        return False
+
     accept = request.headers.get("Accept", "")
     return (
         request.path.startswith("/api/")
