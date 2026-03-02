@@ -42,7 +42,17 @@ class TestRemainingHighPriorityStaticChecks:
         content = _read("models/__init__.py")
         assert "db = SQLAlchemy()" in content
         assert "from flask_sqlalchemy import SQLAlchemy" in content
-        assert "db.init_app" not in content  # init_app is called in app.py, not here
+        # init_app should only appear in comments/docstrings, not as actual code
+        import re
+        # Remove triple-quoted docstrings first
+        code_only = re.sub(r'"""[\s\S]*?"""', '', content)
+        code_only = re.sub(r"'''[\s\S]*?'''", '', code_only)
+        for line in code_only.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue  # skip blank lines and comments
+            assert "db.init_app" not in stripped, \
+                f"db.init_app should not be called in models/__init__.py (found in: {stripped})"
 
     def test_repository_to_dict_no_invalid_clone_progress_field(self):
         content = _read("models/repository.py")

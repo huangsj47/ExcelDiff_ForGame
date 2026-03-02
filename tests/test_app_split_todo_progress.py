@@ -128,7 +128,7 @@ class TestAppSplitTodoProgress:
     def test_app_registers_weekly_version_blueprint(self):
         content = _read("app.py")
         assert "from routes.weekly_version_management_routes import weekly_version_bp" in content
-        assert "app.register_blueprint(weekly_version_bp, name=\"\")" in content
+        assert "app.register_blueprint(weekly_version_bp)" in content
 
     def test_weekly_version_routes_extracted_to_blueprint(self):
         content = _read("routes/weekly_version_management_routes.py")
@@ -177,7 +177,7 @@ class TestAppSplitTodoProgress:
     def test_app_registers_commit_diff_blueprint(self):
         content = _read("app.py")
         assert "from routes.commit_diff_routes import commit_diff_bp" in content
-        assert "app.register_blueprint(commit_diff_bp, name=\"\")" in content
+        assert "app.register_blueprint(commit_diff_bp)" in content
 
     def test_commit_diff_routes_extracted_to_blueprint(self):
         content = _read("routes/commit_diff_routes.py")
@@ -244,7 +244,7 @@ class TestAppSplitTodoProgress:
     def test_app_registers_core_management_blueprint(self):
         content = _read("app.py")
         assert "from routes.core_management_routes import core_management_bp" in content
-        assert "app.register_blueprint(core_management_bp, name=\"\")" in content
+        assert "app.register_blueprint(core_management_bp)" in content
 
     def test_core_management_routes_extracted_to_blueprint(self):
         content = _read("routes/core_management_routes.py")

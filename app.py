@@ -101,14 +101,20 @@ from utils.request_security import (
     configure_request_security,
     require_admin,
 )
-system("title SEOTool - diff-confirmation-platform")
+_IS_TESTING = os.environ.get("TESTING", "").lower() in ("1", "true", "yes")
+if not _IS_TESTING:
+    system("title SEOTool - diff-confirmation-platform")
 # 设置控制台输出编码为UTF-8
-if sys.platform == 'win32':
+# 在测试环境中跳过 stdout/stderr 重包装，避免 pytest 的 I/O 冲突
+if sys.platform == 'win32' and not _IS_TESTING:
     import codecs
     import io
     # 设置UTF-8编码并启用错误处理
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    except (AttributeError, ValueError):
+        pass  # stdout.buffer 不可用（如被 pytest 捕获时）
     # 设置控制台代码页为UTF-8
     os.system('chcp 65001 >nul 2>&1')
 # Diff逻辑版本号 - 当diff算法或逻辑发生变化时需要更新此版本号
@@ -358,10 +364,11 @@ def safe_log_print(*args, **kwargs):
             # 如果原始print也失败，静默处理
             pass
 
-# 重载内置print函数
+# 重载内置print函数（测试环境中跳过，避免干扰 pytest 输出）
 import builtins
 
-builtins.print = safe_log_print
+if not _IS_TESTING:
+    builtins.print = safe_log_print
 # 设置全局异常处理器，防止未捕获的异常中断日志输出
 
 
