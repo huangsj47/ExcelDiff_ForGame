@@ -10,7 +10,12 @@ from contextlib import contextmanager
 from app import app, db
 from auth import routes as auth_routes
 from auth.models import AuthProjectJoinRequest, AuthUser, AuthUserProject, PlatformRole
-from auth.services import add_user_to_project, register_user, request_join_project
+from auth.services import (
+    add_user_to_project,
+    register_user,
+    request_join_project,
+    toggle_user_active,
+)
 from models.project import Project
 
 
@@ -254,6 +259,31 @@ def test_api_request_join_project_rejects_nonexistent_project():
         assert data.get("success") is False
         assert data.get("message") == "项目不存在"
         assert AuthProjectJoinRequest.query.count() == 0
+
+
+def test_deactivated_user_session_is_not_treated_as_logged_in():
+    with _client() as client:
+        reg_resp = _post_register(client, "deactivated_user_case", PlatformRole.NORMAL.value)
+        assert reg_resp.status_code == 200
+
+        login_resp = _login_user(client, "deactivated_user_case", "pass1234")
+        assert login_resp.status_code == 200
+
+        user = AuthUser.query.filter_by(username="deactivated_user_case").first()
+        assert user is not None
+        success, error = toggle_user_active(user.id)
+        assert success is True
+        assert error is None
+
+        me_resp = client.get("/auth/api/me", headers={"Accept": "application/json"})
+        me_data = me_resp.get_json(silent=True) or {}
+        assert me_resp.status_code in (200, 401)
+        if me_resp.status_code == 200:
+            assert me_data.get("logged_in") is False
+
+        protected_resp = client.get("/auth/change-password", follow_redirects=False)
+        assert protected_resp.status_code in (301, 302)
+        assert "/auth/login" in protected_resp.headers.get("Location", "")
 
 
 def test_login_does_not_500_when_auth_tables_missing():

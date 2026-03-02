@@ -135,6 +135,28 @@ class DatabaseAuthProvider(AuthProvider):
         from .models import AuthUser
         return AuthUser
 
+    def _clear_auth_session(self) -> None:
+        for key in ("auth_user_id", "auth_username", "auth_role", "is_admin", "admin_user"):
+            session.pop(key, None)
+
+    def _get_active_user_from_session(self) -> Optional["AuthUser"]:
+        user_id = session.get("auth_user_id")
+        if not user_id:
+            return None
+
+        AuthUser = self._get_user_model()
+        try:
+            user = AuthUser.query.filter_by(id=user_id, is_active=True).first()
+        except SQLAlchemyError:
+            return None
+
+        if user is None:
+            # Session user may be deactivated/deleted; clear stale auth markers.
+            self._clear_auth_session()
+            return None
+
+        return user
+
     def _get_user_project_model(self):
         from .models import AuthUserProject
         return AuthUserProject
@@ -163,34 +185,30 @@ class DatabaseAuthProvider(AuthProvider):
         return user
 
     def get_current_user(self) -> Optional["AuthUser"]:
-        user_id = session.get("auth_user_id")
-        if not user_id:
-            return None
-        AuthUser = self._get_user_model()
-        try:
-            return AuthUser.query.filter_by(id=user_id, is_active=True).first()
-        except SQLAlchemyError:
-            return None
+        return self._get_active_user_from_session()
 
     def is_logged_in(self) -> bool:
-        return session.get("auth_user_id") is not None
+        return self._get_active_user_from_session() is not None
 
     def has_platform_admin_access(self) -> bool:
-        return session.get("auth_role") == "platform_admin"
+        user = self._get_active_user_from_session()
+        if user is None:
+            return False
+        return bool(user.is_platform_admin)
 
     def has_project_admin_access(self, project_id: int) -> bool:
         # 平台管理员拥有一切权限
         if self.has_platform_admin_access():
             return True
 
-        user_id = session.get("auth_user_id")
-        if not user_id:
+        user = self._get_active_user_from_session()
+        if user is None:
             return False
 
         AuthUserProject = self._get_user_project_model()
         try:
             membership = AuthUserProject.query.filter_by(
-                user_id=user_id, project_id=project_id
+                user_id=user.id, project_id=project_id
             ).first()
         except SQLAlchemyError:
             return False
@@ -203,14 +221,14 @@ class DatabaseAuthProvider(AuthProvider):
         if self.has_platform_admin_access():
             return True
 
-        user_id = session.get("auth_user_id")
-        if not user_id:
+        user = self._get_active_user_from_session()
+        if user is None:
             return False
 
         AuthUserProject = self._get_user_project_model()
         try:
             return AuthUserProject.query.filter_by(
-                user_id=user_id, project_id=project_id
+                user_id=user.id, project_id=project_id
             ).first() is not None
         except SQLAlchemyError:
             return False
@@ -219,13 +237,13 @@ class DatabaseAuthProvider(AuthProvider):
         if self.has_platform_admin_access():
             return []  # 空列表 = 全部可访问
 
-        user_id = session.get("auth_user_id")
-        if not user_id:
+        user = self._get_active_user_from_session()
+        if user is None:
             return []
 
         AuthUserProject = self._get_user_project_model()
         try:
-            memberships = AuthUserProject.query.filter_by(user_id=user_id).all()
+            memberships = AuthUserProject.query.filter_by(user_id=user.id).all()
         except SQLAlchemyError:
             return []
         return [m.project_id for m in memberships]
