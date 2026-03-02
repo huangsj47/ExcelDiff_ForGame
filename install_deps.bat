@@ -1,11 +1,39 @@
 @echo off
-echo 正在安装项目依赖...
-pip install GitPython==3.1.37
-pip install pandas==2.1.1
-pip install openpyxl==3.1.2
-pip install xlrd==2.0.1
-pip install xlwt==1.3.0
-pip install python-dateutil==2.8.2
-pip install requests==2.31.0
-echo 依赖安装完成！
+setlocal EnableExtensions
+
+echo ========================================
+echo   Installing project dependencies
+echo ========================================
+echo.
+
+where python >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Python was not found in PATH.
+    pause
+    exit /b 1
+)
+
+if not exist "requirements.txt" (
+    echo [ERROR] requirements.txt was not found.
+    pause
+    exit /b 1
+)
+
+echo [INFO] Upgrading pip...
+python -m pip install --upgrade pip
+if errorlevel 1 (
+    echo [WARN] pip upgrade failed. Continue with current version.
+)
+
+echo [INFO] Installing dependencies from requirements.txt ...
+python -m pip install --prefer-binary -r requirements.txt
+if errorlevel 1 (
+    echo [ERROR] Dependency installation failed.
+    pause
+    exit /b 1
+)
+
+echo [INFO] Dependency installation completed.
 pause
+exit /b 0
+

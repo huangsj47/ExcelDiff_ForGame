@@ -170,6 +170,10 @@ def test_register_login_logout():
     _banner("1. 注册 / 登录 / 登出")
 
     with _client() as c:
+        # --- 1.0 帮助页无需登录 ---
+        resp = c.get("/help", follow_redirects=False)
+        _assert(resp.status_code == 200, "1.0 /help 无需登录可访问")
+
         # --- 1.1 注册 ---
         resp = _form_post(c, "/auth/register", {
             "username": "testuser1",
@@ -648,14 +652,32 @@ def test_security():
         text = resp.data.decode("utf-8")
         _assert("至少" in text, "9.5 短密码被拒")
 
-        # 9.6 用户名太短
+        # 9.6 用户名非法字符
         resp = _form_post(c, "/auth/register", {
-            "username": "x",
+            "username": "bad user",
             "password": "pass1234",
             "password_confirm": "pass1234",
         }, follow_redirects=True)
         text = resp.data.decode("utf-8")
-        _assert("至少" in text, "9.6 短用户名被拒")
+        _assert("仅支持" in text or "长度" in text, "9.6 非法用户名被拒")
+
+        # 9.7 用户名过短
+        resp = _form_post(c, "/auth/register", {
+            "username": "ab",
+            "password": "pass1234",
+            "password_confirm": "pass1234",
+        }, follow_redirects=True)
+        text = resp.data.decode("utf-8")
+        _assert("至少 3" in text or "长度" in text, "9.7 短用户名被拒")
+
+        # 9.8 用户名不能为纯数字
+        resp = _form_post(c, "/auth/register", {
+            "username": "111111",
+            "password": "pass1234",
+            "password_confirm": "pass1234",
+        }, follow_redirects=True)
+        text = resp.data.decode("utf-8")
+        _assert("纯数字" in text or "不能" in text, "9.8 纯数字用户名被拒")
 
 
 # ═══════════════════════════════════════════════════════════════════

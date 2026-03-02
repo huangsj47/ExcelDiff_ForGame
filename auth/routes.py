@@ -63,6 +63,10 @@ auth_bp = Blueprint(
 
 # Debug 模式：允许注册时选择角色
 AUTH_DEBUG_MODE = os.environ.get("AUTH_DEBUG_MODE", "false").lower() in ("1", "true", "yes")
+DEBUG_REGISTER_ALLOWED_ROLES = {
+    PlatformRole.NORMAL.value,
+    PlatformRole.PLATFORM_ADMIN.value,
+}
 
 
 # ──────────────────────────── 登录 / 注册 / 登出 ────────────────────────────
@@ -85,7 +89,11 @@ def login():
 
         if not username or not password:
             flash("请输入用户名和密码。", "error")
-            return render_template("auth_login.html", next_url=next_url)
+            return render_template(
+                "auth_login.html",
+                next_url=next_url,
+                form_username=username,
+            )
 
         provider = get_auth_provider()
         user = provider.authenticate(username, password)
@@ -98,8 +106,13 @@ def login():
             return redirect(next_url)
 
         flash("用户名或密码错误。", "error")
+        return render_template(
+            "auth_login.html",
+            next_url=next_url,
+            form_username=username,
+        )
 
-    return render_template("auth_login.html", next_url=next_url)
+    return render_template("auth_login.html", next_url=next_url, form_username="")
 
 
 @auth_bp.route("/register", methods=["GET", "POST"])
@@ -112,15 +125,25 @@ def register():
         display_name = (request.form.get("display_name") or "").strip()
         email = (request.form.get("email") or "").strip()
 
-        # Debug 模式允许选择角色
+        # Debug 模式允许选择角色（仅 normal/platform_admin）
+        role = PlatformRole.NORMAL.value
         if AUTH_DEBUG_MODE:
-            role = request.form.get("role", PlatformRole.NORMAL.value)
-        else:
-            role = PlatformRole.NORMAL.value
+            requested_role = (request.form.get("role") or PlatformRole.NORMAL.value).strip()
+            if requested_role in DEBUG_REGISTER_ALLOWED_ROLES:
+                role = requested_role
 
         if password != confirm_password:
             flash("两次输入的密码不一致。", "error")
-            return render_template("auth_register.html", debug_mode=AUTH_DEBUG_MODE)
+            return render_template(
+                "auth_register.html",
+                debug_mode=AUTH_DEBUG_MODE,
+                form_data={
+                    "username": username,
+                    "display_name": display_name,
+                    "email": email,
+                    "role": role,
+                },
+            )
 
         user, error = register_user(
             username=username,
@@ -132,12 +155,25 @@ def register():
 
         if error:
             flash(error, "error")
-            return render_template("auth_register.html", debug_mode=AUTH_DEBUG_MODE)
+            return render_template(
+                "auth_register.html",
+                debug_mode=AUTH_DEBUG_MODE,
+                form_data={
+                    "username": username,
+                    "display_name": display_name,
+                    "email": email,
+                    "role": role,
+                },
+            )
 
         flash(f"注册成功！用户 '{username}' 已创建，请登录。", "success")
         return redirect(url_for("auth_bp.login"))
 
-    return render_template("auth_register.html", debug_mode=AUTH_DEBUG_MODE)
+    return render_template(
+        "auth_register.html",
+        debug_mode=AUTH_DEBUG_MODE,
+        form_data={"role": PlatformRole.NORMAL.value},
+    )
 
 
 @auth_bp.route("/logout")

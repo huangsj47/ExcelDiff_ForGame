@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Optional
 
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -50,15 +51,21 @@ def register_user(
     """
     username = username.strip()
     if not username:
-        return None, "用户名不能为空"
-    if len(username) < 2:
-        return None, "用户名至少2个字符"
-    if len(password) < 4:
-        return None, "密码至少4个字符"
+        return None, "用户名不能为空。"
+    if len(username) > 50:
+        return None, "用户名不能超过 50 个字符。"
+    if len(username) < 3:
+        return None, "用户名至少 3 个字符。"
+    if username.isdigit():
+        return None, "用户名不能为纯数字，请至少包含一个字母或符号。"
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,50}", username):
+        return None, "用户名仅支持字母、数字、点(.)、下划线(_)和短横线(-)，长度 3-50。"
+    if len(password) < 6:
+        return None, "密码至少 6 个字符。"
 
     existing = AuthUser.query.filter_by(username=username).first()
     if existing:
-        return None, f"用户名 '{username}' 已存在"
+        return None, f"用户名 '{username}' 已存在。"
 
     # 验证角色值
     try:
@@ -97,8 +104,8 @@ def change_password(
     if not check_password_hash(user.password_hash, old_password):
         return False, "旧密码不正确"
 
-    if len(new_password) < 4:
-        return False, "新密码至少4个字符"
+    if len(new_password) < 6:
+        return False, "新密码至少 6 个字符。"
 
     user.password_hash = generate_password_hash(new_password, method="pbkdf2:sha256")
     db.session.commit()
@@ -110,8 +117,8 @@ def admin_reset_password(user_id: int, new_password: str) -> tuple[bool, Optiona
     user = AuthUser.query.get(user_id)
     if not user:
         return False, "用户不存在"
-    if len(new_password) < 4:
-        return False, "新密码至少4个字符"
+    if len(new_password) < 6:
+        return False, "新密码至少 6 个字符。"
 
     user.password_hash = generate_password_hash(new_password, method="pbkdf2:sha256")
     db.session.commit()

@@ -19,6 +19,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Optional
 
 from flask import session
+from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.security import check_password_hash
 
 if TYPE_CHECKING:
@@ -140,7 +141,11 @@ class DatabaseAuthProvider(AuthProvider):
 
     def authenticate(self, username: str, password: str) -> Optional["AuthUser"]:
         AuthUser = self._get_user_model()
-        user = AuthUser.query.filter_by(username=username, is_active=True).first()
+        try:
+            user = AuthUser.query.filter_by(username=username, is_active=True).first()
+        except SQLAlchemyError:
+            # Keep login endpoint stable even if auth tables are temporarily unavailable.
+            return None
         if user is None:
             return None
         if not check_password_hash(user.password_hash, password):
@@ -162,7 +167,10 @@ class DatabaseAuthProvider(AuthProvider):
         if not user_id:
             return None
         AuthUser = self._get_user_model()
-        return AuthUser.query.filter_by(id=user_id, is_active=True).first()
+        try:
+            return AuthUser.query.filter_by(id=user_id, is_active=True).first()
+        except SQLAlchemyError:
+            return None
 
     def is_logged_in(self) -> bool:
         return session.get("auth_user_id") is not None
@@ -180,9 +188,12 @@ class DatabaseAuthProvider(AuthProvider):
             return False
 
         AuthUserProject = self._get_user_project_model()
-        membership = AuthUserProject.query.filter_by(
-            user_id=user_id, project_id=project_id
-        ).first()
+        try:
+            membership = AuthUserProject.query.filter_by(
+                user_id=user_id, project_id=project_id
+            ).first()
+        except SQLAlchemyError:
+            return False
         if membership is None:
             return False
         return membership.is_project_admin
@@ -197,9 +208,12 @@ class DatabaseAuthProvider(AuthProvider):
             return False
 
         AuthUserProject = self._get_user_project_model()
-        return AuthUserProject.query.filter_by(
-            user_id=user_id, project_id=project_id
-        ).first() is not None
+        try:
+            return AuthUserProject.query.filter_by(
+                user_id=user_id, project_id=project_id
+            ).first() is not None
+        except SQLAlchemyError:
+            return False
 
     def get_accessible_project_ids(self) -> list[int]:
         if self.has_platform_admin_access():
@@ -210,7 +224,10 @@ class DatabaseAuthProvider(AuthProvider):
             return []
 
         AuthUserProject = self._get_user_project_model()
-        memberships = AuthUserProject.query.filter_by(user_id=user_id).all()
+        try:
+            memberships = AuthUserProject.query.filter_by(user_id=user_id).all()
+        except SQLAlchemyError:
+            return []
         return [m.project_id for m in memberships]
 
 

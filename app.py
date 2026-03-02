@@ -759,6 +759,8 @@ AUTH_EXEMPT_ENDPOINTS = frozenset({
     'auth_bp.login',
     'auth_bp.register',
     'auth_bp.logout',
+    'help_page',
+    'core_management_routes.help_page',
     'test',
 })
 
@@ -768,6 +770,7 @@ AUTH_EXEMPT_PATHS = (
     '/auth/login',
     '/auth/register',
     '/auth/logout',
+    '/help',
 )
 
 @app.before_request

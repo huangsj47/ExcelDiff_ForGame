@@ -131,6 +131,8 @@ ADMIN_API_TOKEN={at}
 # 是否启用管理员安全校验 (true/false)
 ENABLE_ADMIN_SECURITY=true
 
+AUTH_DEBUG_MODE=false
+
 # 数据库配置
 DB_BACKEND=sqlite
 
