@@ -89,6 +89,21 @@ def check_and_create_all_tables():
         print(f"\n❌ 仍然缺失的表: {still_missing}")
         return False
 
+    # 如果 auth 表是新创建的，尝试初始化默认数据
+    auth_tables_were_missing = any(t.startswith("auth_") for t in missing_tables)
+    if auth_tables_were_missing:
+        try:
+            with app.app_context():
+                from auth.services import init_default_functions, migrate_env_admin_to_db
+                func_count = init_default_functions()
+                if func_count > 0:
+                    print(f"✅ 初始化了 {func_count} 个默认职能")
+                admin_user = migrate_env_admin_to_db()
+                if admin_user:
+                    print(f"✅ 已将 .env 管理员迁移到数据库: {admin_user.username}")
+        except Exception as exc:
+            print(f"⚠️ Auth 默认数据初始化跳过: {exc}")
+
     print("\n✅ 所有必需表均已创建")
     return True
 

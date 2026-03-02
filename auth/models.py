@@ -87,10 +87,12 @@ class AuthUser(db.Model):
 
     # 关系
     functions = db.relationship(
-        "AuthUserFunction", back_populates="user", cascade="all, delete-orphan", lazy="dynamic"
+        "AuthUserFunction", back_populates="user", cascade="all, delete-orphan", lazy="dynamic",
+        foreign_keys="AuthUserFunction.user_id",
     )
     projects = db.relationship(
-        "AuthUserProject", back_populates="user", cascade="all, delete-orphan", lazy="dynamic"
+        "AuthUserProject", back_populates="user", cascade="all, delete-orphan", lazy="dynamic",
+        foreign_keys="AuthUserProject.user_id",
     )
 
     def __repr__(self) -> str:

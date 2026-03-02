@@ -4,17 +4,79 @@
 
 ## 项目定位
 
-该平台用于管理“项目 -> 仓库 -> 提交 -> 差异确认”全链路，重点解决：
+该平台用于管理"项目 -> 仓库 -> 提交 -> 差异确认"全链路，重点解决：
 
 - 多仓库（Git/SVN）提交记录统一管理
 - Excel/代码/图片/二进制文件的差异展示
 - 变更状态审核（待确认/已确认/已拒绝）与批量操作
 - 周版本（时间窗口）聚合对比与状态联动
 - 缓存与后台任务体系（加速 Diff 计算，降低重复开销）
+- **多租户账号与权限体系（RBAC）**：三级角色 + 项目隔离 + 审批工作流
 
 主服务入口为 `app.py`，默认监听 `0.0.0.0:8002`。
 
 ## 功能全景
+
+## 0. 账号与权限系统 (RBAC) 🆕
+
+平台内置了一套完整的多租户权限体系，支持自助注册、项目级隔离和审批工作流。
+
+### 0.1 三级角色模型
+
+| 角色 | 标识 | 权限范围 |
+|------|------|----------|
+| **平台管理员** | `platform_admin` | 全局管理：用户管理、角色分配、审批所有申请、查看所有项目 |
+| **项目管理员** | `project_admin` | 项目维度：管理所属项目成员、分配职能、查看项目数据 |
+| **普通用户** | `normal` | 仅可访问已加入的项目，提交加入/创建项目申请 |
+
+### 0.2 项目隔离
+
+- 每位用户只能看到和访问 **自己所属的项目**
+- 平台管理员可跨项目查看所有数据
+- 项目成员通过 `auth_user_projects` 关联表管理
+
+### 0.3 职能系统
+
+预设 11 种职能，可按项目维度分配给用户：
+
+| 职能 | 说明 | 特殊标记 |
+|------|------|----------|
+| **主QA✦** | 主测试 | ⚡ `is_lead_qa=True` — 自动提权为项目管理员 |
+| QA | 测试 | — |
+| 主策划 | 主策划 | — |
+| 策划 | 策划 | — |
+| 主程序 | 主程序 | — |
+| 程序 | 程序 | — |
+| 主美 | 主美术 | — |
+| 美术 | 美术 | — |
+| PM | 项目经理 | — |
+| 其他 | 其他职能 | — |
+| 管理员 | 管理员 | — |
+
+**关键业务规则：** 当某用户被分配「主QA✦」职能到某项目时，系统自动将其在该项目中的角色提升为**项目管理员**；移除所有「主QA✦」后自动降级为普通成员。
+
+### 0.4 审批工作流
+
+1. **加入项目申请**：普通用户可在首页申请加入已有项目 → 平台管理员在用户管理页审批
+2. **创建项目申请**：普通用户可申请创建全新项目 → 审批通过后自动创建项目，申请人成为项目管理员
+
+### 0.5 认证页面
+
+| 页面 | 路由 | 说明 |
+|------|------|------|
+| 登录 | `/auth/login` | 用户名 + 密码登录 |
+| 注册 | `/auth/register` | 自助注册，默认角色为普通用户 |
+| 修改密码 | `/auth/change-password` | 已登录用户自行修改密码 |
+| 用户管理 | `/auth/users` | 平台管理员专属：用户列表、角色变更、审批中心 |
+| 项目成员管理 | `/auth/project/<id>/members` | 项目管理员专属：成员增删、职能分配 |
+
+### 0.6 安全机制
+
+- **密码存储**：Werkzeug `pbkdf2:sha256` 哈希
+- **CSRF 保护**：HMAC-SHA256 令牌校验，所有 POST/PUT/DELETE 请求自动拦截
+- **会话管理**：Flask server-side session
+- **输入校验**：用户名 ≥ 3 字符，密码 ≥ 6 字符
+- **账户禁用**：管理员可禁用用户，禁用后无法登录
 
 ## 1. 项目管理
 
@@ -99,21 +161,36 @@
 ## 分层结构
 
 - `app.py`: 主应用与核心路由（当前主链路）
+- `auth/`: 🆕 账号与权限模块（独立 Blueprint）
+  - `models.py`: RBAC 数据模型（用户、职能、项目关联、审批申请）
+  - `routes.py`: 认证/管理路由（`/auth/*`）
+  - `services.py`: 业务逻辑（注册、审批、自动提权等）
+  - `providers.py`: 认证提供者抽象（支持数据库用户 + `.env` 环境变量管理员）
+  - `decorators.py`: 权限装饰器
+  - `templates/`: 认证相关页面模板
 - `models/`: 数据模型（项目、仓库、提交、缓存、周版本、任务、操作日志）
 - `services/`: Git/SVN 同步、Diff 计算、缓存、状态同步等服务
 - `tasks/`: 后台任务与清理任务
 - `routes/`: Flask Blueprint 路由
 - `templates/`: 页面模板
 - `static/`: 前端 JS/CSS
-- `utils/`: 数据库、重试、时区、URL 辅助工具
+- `utils/`: 数据库、重试、时区、URL、请求安全辅助工具
 
 ## 目录说明
 
 ```text
 .
-├── app.py
-├── config.py
+├── app.py                    # 主应用入口
+├── config.py                 # 配置文件
 ├── requirements.txt
+├── auth/                     # 🆕 账号与权限模块
+│   ├── __init__.py           # Provider 初始化
+│   ├── models.py             # RBAC 数据模型
+│   ├── routes.py             # 认证路由 Blueprint
+│   ├── services.py           # 业务逻辑层
+│   ├── providers.py          # 认证提供者（DB / ENV）
+│   ├── decorators.py         # 权限装饰器
+│   └── templates/            # 登录/注册/管理页面
 ├── models/
 ├── services/
 ├── tasks/
@@ -122,6 +199,7 @@
 ├── static/
 ├── utils/
 ├── tests/
+│   └── test_auth_e2e.py      # 🆕 账号系统端到端测试（62 用例）
 ├── instance/                 # SQLite 数据库目录（运行后生成）
 ├── repos/                    # 本地仓库工作目录
 └── logs/runlog.log
@@ -216,16 +294,57 @@ python app.py
   - `GET /api/excel-cache/stats-by-project`
   - `POST /admin/excel-cache/cleanup-expired`
   - `POST /admin/excel-cache/clear-all-diff-cache`
+- 🆕 认证与用户管理
+  - `GET/POST /auth/login` — 登录
+  - `GET/POST /auth/register` — 注册
+  - `GET /auth/logout` — 登出
+  - `GET/POST /auth/change-password` — 修改密码
+  - `GET /auth/users` — 用户管理页（管理员）
+  - `GET /auth/api/me` — 当前用户信息
+  - `POST /auth/api/users/<id>/role` — 修改用户角色
+  - `POST /auth/api/users/<id>/toggle-active` — 启用/禁用用户
+  - `POST /auth/api/users/<id>/reset-password` — 重置密码
+  - `POST /auth/api/users/<id>/functions` — 分配职能
+  - `DELETE /auth/api/users/<id>/functions/<fid>` — 移除职能
+- 🆕 项目成员与审批
+  - `GET /auth/project/<id>/members` — 项目成员管理页
+  - `POST /auth/api/project/<id>/members` — 添加成员
+  - `DELETE /auth/api/project/<id>/members/<uid>` — 移除成员
+  - `POST /auth/api/project/<id>/members/<uid>/role` — 修改成员角色
+  - `POST /auth/api/request-join-project` — 申请加入项目
+  - `POST /auth/api/join-requests/<id>/handle` — 审批加入申请
+  - `POST /auth/api/request-create-project` — 申请创建项目
+  - `POST /auth/api/create-requests/<id>/handle` — 审批创建申请
 
 ## 测试
 
-运行测试：
+运行全部测试：
 
 ```bash
 pytest
 ```
 
-当前测试侧重结构与逻辑验证，业务全链路集成覆盖较少，建议在关键流程增加接口级与端到端用例。
+### 账号系统端到端测试 🆕
+
+```bash
+python tests/test_auth_e2e.py
+```
+
+独立运行的 E2E 测试套件，使用临时 SQLite 数据库，覆盖 **62 个用例 / 11 个测试组**：
+
+| # | 测试组 | 用例数 | 覆盖范围 |
+|---|--------|--------|----------|
+| 1 | 注册 / 登录 / 登出 | 8 | 正常流程 + 重复注册 + 密码不一致 + 错误密码 |
+| 2 | 管理员登录与权限 | 4 | 管理员认证 + 用户管理页访问 + API 身份验证 |
+| 3 | 密码修改 | 3 | 修改密码 + 新密码登录 + 旧密码失效 |
+| 4 | 项目隔离 | 5 | 用户只能访问所属项目 + 管理员跨项目 |
+| 5 | 项目加入申请 → 审批 | 5 | 提交申请 + 重复拒绝 + 审批通过 + 可见性验证 |
+| 6 | 项目创建申请 → 审批 | 8 | 提交创建申请 + 审批 + 项目自动创建 + 申请人自动升为项目管理员 |
+| 7 | 主QA 自动提权 | 6 | 分配主QA → 自动升级项目管理员 → 移除主QA → 自动降级 |
+| 8 | 角色权限控制 | 6 | 普通用户越权拒绝 + 管理员操作验证 |
+| 9 | 安全测试 | 6 | CSRF + SQL 注入 + XSS + 输入校验 |
+| 10 | 边界条件 | 5 | 禁用用户 + 空输入 + 不存在资源 + 重复操作 |
+| 11 | 项目成员管理 | 4 | 添加/重复/角色修改/移除成员 |
 
 ## 缓存机制与相关逻辑说明
 
@@ -262,5 +381,19 @@ pytest
 ## 已知现状
 
 - `app.py` 体量较大（单体路由集中），后续可继续拆分到 Blueprint
-- 默认无登录鉴权模块，部署到内网/公网前需补充访问控制
+- ~~默认无登录鉴权模块~~ → ✅ 已内置完整的 RBAC 账号系统（`auth/` 模块），支持注册/登录/项目隔离/审批工作流，可直接用于内网/公网部署
 - SQLite 高并发写入瓶颈已做阶段性优化（WAL/超时参数、后台任务队列、批量清理与缓存链路优化）；中长期仍建议迁移到 MySQL/PostgreSQL 以获得更高写入并发与扩展性
+- 当前认证暂未接入 LDAP/SSO，如需企业统一认证可通过 `auth/providers.py` 的 Provider 抽象扩展
+
+## 数据库表概览（`auth_` 前缀）
+
+| 表名 | 说明 |
+|------|------|
+| `auth_users` | 用户信息（用户名、密码哈希、角色、启用状态） |
+| `auth_functions` | 职能定义（主QA✦、QA、策划、程序、美术 等 11 种预设） |
+| `auth_user_functions` | 用户-职能关联（支持按项目维度分配） |
+| `auth_user_projects` | 用户-项目归属（含项目级角色 admin/member） |
+| `auth_project_join_requests` | 项目加入申请 |
+| `auth_project_create_requests` | 项目创建申请 |
+
+所有 `auth_` 表与业务表（`project`、`repository`、`commit` 等）通过外键关联但命名隔离，不影响原有业务逻辑。
