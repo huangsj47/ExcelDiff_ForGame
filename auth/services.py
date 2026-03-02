@@ -97,7 +97,7 @@ def change_password(
         (True, None) 成功时
         (False, error_message) 失败时
     """
-    user = AuthUser.query.get(user_id)
+    user = db.session.get(AuthUser, user_id)
     if not user:
         return False, "用户不存在"
 
@@ -114,7 +114,7 @@ def change_password(
 
 def admin_reset_password(user_id: int, new_password: str) -> tuple[bool, Optional[str]]:
     """管理员重置用户密码（无需旧密码）。"""
-    user = AuthUser.query.get(user_id)
+    user = db.session.get(AuthUser, user_id)
     if not user:
         return False, "用户不存在"
     if len(new_password) < 6:
@@ -127,7 +127,7 @@ def admin_reset_password(user_id: int, new_password: str) -> tuple[bool, Optiona
 
 def update_user_role(user_id: int, new_role: str) -> tuple[bool, Optional[str]]:
     """修改用户平台角色。"""
-    user = AuthUser.query.get(user_id)
+    user = db.session.get(AuthUser, user_id)
     if not user:
         return False, "用户不存在"
 
@@ -143,7 +143,7 @@ def update_user_role(user_id: int, new_role: str) -> tuple[bool, Optional[str]]:
 
 def toggle_user_active(user_id: int) -> tuple[bool, Optional[str]]:
     """切换用户启用/禁用状态。"""
-    user = AuthUser.query.get(user_id)
+    user = db.session.get(AuthUser, user_id)
     if not user:
         return False, "用户不存在"
 
@@ -153,7 +153,7 @@ def toggle_user_active(user_id: int) -> tuple[bool, Optional[str]]:
 
 
 def get_user_by_id(user_id: int) -> Optional[AuthUser]:
-    return AuthUser.query.get(user_id)
+    return db.session.get(AuthUser, user_id)
 
 
 def get_user_by_username(username: str) -> Optional[AuthUser]:
@@ -180,11 +180,11 @@ def assign_function(
 
     如果分配的是 Lead QA 职能，自动将用户在该项目中升级为项目管理员。
     """
-    user = AuthUser.query.get(user_id)
+    user = db.session.get(AuthUser, user_id)
     if not user:
         return False, "用户不存在"
 
-    func = AuthFunction.query.get(function_id)
+    func = db.session.get(AuthFunction, function_id)
     if not func:
         return False, "职能不存在"
 
@@ -316,6 +316,20 @@ def add_user_to_project(
     approved_by: Optional[int] = None,
 ) -> tuple[bool, Optional[str]]:
     """将用户添加到项目。"""
+    normalized_role = (role or ProjectRole.MEMBER.value).strip()
+    try:
+        normalized_role = ProjectRole(normalized_role).value
+    except ValueError:
+        return False, f"无效的项目角色: {role}"
+
+    user = db.session.get(AuthUser, user_id)
+    if not user:
+        return False, "用户不存在"
+
+    project = db.session.get(Project, project_id)
+    if not project:
+        return False, "项目不存在"
+
     existing = AuthUserProject.query.filter_by(
         user_id=user_id, project_id=project_id
     ).first()
@@ -325,13 +339,12 @@ def add_user_to_project(
     membership = AuthUserProject(
         user_id=user_id,
         project_id=project_id,
-        role=role,
+        role=normalized_role,
         approved_by=approved_by,
     )
     db.session.add(membership)
     db.session.commit()
     return True, None
-
 
 def remove_user_from_project(user_id: int, project_id: int) -> tuple[bool, Optional[str]]:
     """从项目中移除用户。"""
@@ -430,7 +443,7 @@ def handle_join_request(
     handled_by: int,
 ) -> tuple[bool, Optional[str]]:
     """处理项目加入申请 (approve / deny)。"""
-    req = AuthProjectJoinRequest.query.get(request_id)
+    req = db.session.get(AuthProjectJoinRequest, request_id)
     if not req:
         return False, "申请不存在"
 
@@ -526,7 +539,7 @@ def handle_create_project_request(
       1. 创建项目
       2. 将申请人添加为项目管理员
     """
-    req = AuthProjectCreateRequest.query.get(request_id)
+    req = db.session.get(AuthProjectCreateRequest, request_id)
     if not req:
         return False, "申请不存在"
 
@@ -637,3 +650,4 @@ def migrate_env_admin_to_db() -> Optional[AuthUser]:
         role=PlatformRole.PLATFORM_ADMIN.value,
     )
     return user
+

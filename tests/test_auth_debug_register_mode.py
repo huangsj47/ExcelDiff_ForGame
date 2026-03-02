@@ -9,7 +9,9 @@ from contextlib import contextmanager
 
 from app import app, db
 from auth import routes as auth_routes
-from auth.models import AuthUser, PlatformRole
+from auth.models import AuthUser, AuthUserProject, PlatformRole
+from auth.services import add_user_to_project, register_user
+from models.project import Project
 
 
 @contextmanager
@@ -50,6 +52,18 @@ def _post_register(client, username: str, role: str):
             "password": "pass1234",
             "password_confirm": "pass1234",
             "role": role,
+        },
+        follow_redirects=True,
+    )
+
+
+def _login_admin(client):
+    return client.post(
+        "/auth/login",
+        data={
+            "_csrf_token": "test-csrf-token-debug-register",
+            "username": "admin",
+            "password": "admin123",
         },
         follow_redirects=True,
     )
@@ -99,6 +113,103 @@ def test_register_page_shows_role_selector_only_in_debug_mode():
             assert "platform_admin" in debug_html
     finally:
         auth_routes.AUTH_DEBUG_MODE = old_mode
+
+
+def test_register_page_hides_one_char_username_hint_copy():
+    with _client() as client:
+        page = client.get("/auth/register")
+        html = page.data.decode("utf-8")
+        assert "可使用 1 位用户名（例如：2）。" not in html
+
+
+def test_add_user_to_project_rejects_invalid_role():
+    with _client():
+        user, err = register_user("invalid_role_member", "pass1234")
+        assert err is None
+        assert user is not None
+
+        project = Project(code="ROLE_INVALID_1", name="Role Invalid Project 1")
+        db.session.add(project)
+        db.session.commit()
+
+        success, error = add_user_to_project(user.id, project.id, role="owner")
+        assert success is False
+        assert error is not None
+        assert "无效的项目角色" in error
+        assert AuthUserProject.query.filter_by(
+            user_id=user.id,
+            project_id=project.id,
+        ).first() is None
+
+
+def test_api_add_project_member_rejects_invalid_role():
+    with _client() as client:
+        login_resp = _login_admin(client)
+        assert login_resp.status_code == 200
+
+        user, err = register_user("invalid_role_member_api", "pass1234")
+        assert err is None
+        assert user is not None
+
+        project = Project(code="ROLE_INVALID_2", name="Role Invalid Project 2")
+        db.session.add(project)
+        db.session.commit()
+
+        response = client.post(
+            f"/auth/api/project/{project.id}/members",
+            json={"user_id": user.id, "role": "owner"},
+            headers={"X-CSRFToken": "test-csrf-token-debug-register"},
+        )
+        data = response.get_json(silent=True) or {}
+        assert response.status_code == 400
+        assert data.get("success") is False
+        assert "无效的项目角色" in data.get("message", "")
+        assert AuthUserProject.query.filter_by(
+            user_id=user.id,
+            project_id=project.id,
+        ).first() is None
+
+
+def test_add_user_to_project_rejects_nonexistent_user_or_project():
+    with _client():
+        user, err = register_user("exist_member_1", "pass1234")
+        assert err is None
+        assert user is not None
+
+        project = Project(code="ROLE_EXIST_1", name="Role Exist Project 1")
+        db.session.add(project)
+        db.session.commit()
+
+        success_1, error_1 = add_user_to_project(999999, project.id, role="member")
+        assert success_1 is False
+        assert error_1 == "用户不存在"
+
+        success_2, error_2 = add_user_to_project(user.id, 999999, role="member")
+        assert success_2 is False
+        assert error_2 == "项目不存在"
+
+        assert AuthUserProject.query.filter_by(project_id=project.id).count() == 0
+
+
+def test_api_add_project_member_rejects_nonexistent_user():
+    with _client() as client:
+        login_resp = _login_admin(client)
+        assert login_resp.status_code == 200
+
+        project = Project(code="ROLE_EXIST_2", name="Role Exist Project 2")
+        db.session.add(project)
+        db.session.commit()
+
+        response = client.post(
+            f"/auth/api/project/{project.id}/members",
+            json={"user_id": 999999, "role": "member"},
+            headers={"X-CSRFToken": "test-csrf-token-debug-register"},
+        )
+        data = response.get_json(silent=True) or {}
+        assert response.status_code == 400
+        assert data.get("success") is False
+        assert data.get("message") == "用户不存在"
+        assert AuthUserProject.query.filter_by(project_id=project.id).count() == 0
 
 
 def test_login_does_not_500_when_auth_tables_missing():
