@@ -34,9 +34,9 @@
                 <i class="fas fa-file-excel"></i>
                 <span>查看Diff</span>
             </a>
-            <a href="#section-colors" class="help-tab" data-section="section-colors">
-                <i class="fas fa-palette"></i>
-                <span>颜色说明</span>
+            <a href="#section-confirm" class="help-tab" data-section="section-confirm">
+                <i class="fas fa-check-circle"></i>
+                <span>确认与拒绝</span>
             </a>
             <a href="#section-cache" class="help-tab" data-section="section-cache">
                 <i class="fas fa-database"></i>
@@ -229,19 +229,11 @@
                         </div>
                     </div>
                 </div>
-            </div>
-        </section>
 
-        <!-- 第5节：Diff 颜色说明 -->
-        <section class="help-section" id="section-colors" style="display:none;">
-            <div class="section-header">
-                <div class="section-number">5</div>
-                <div>
-                    <h2>Diff 颜色与标识说明</h2>
-                    <p>了解 Excel Diff 中各种颜色和标记的含义</p>
-                </div>
-            </div>
-            <div class="section-body">
+                <!-- 颜色说明（合并自原"颜色说明"标签） -->
+                <hr style="margin: 32px 0; border-color: #d0d7de;">
+                <h3 style="margin: 0 0 20px; font-size: 1.1rem; font-weight: 700; color: #24292f;"><i class="fas fa-palette" style="color: #0969da; margin-right: 8px;"></i>Diff 颜色与标识说明</h3>
+
                 <h4 class="sub-title">行级别变更</h4>
                 <div class="color-legend">
                     <div class="legend-item legend-added-row">
@@ -323,6 +315,111 @@
                 <div class="tip-box">
                     <i class="fas fa-lightbulb"></i>
                     <span>在 Diff 页面中，你可以通过 Sheet 标签页切换不同工作表。标签上带有 <span class="badge bg-warning">变更</span> 标记的表示该 Sheet 有内容变化。</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 第5节：确认与拒绝 -->
+        <section class="help-section" id="section-confirm" style="display:none;">
+            <div class="section-header">
+                <div class="section-number">5</div>
+                <div>
+                    <h2>确认与拒绝</h2>
+                    <p>管理提交记录和周版本文件的审阅状态</p>
+                </div>
+            </div>
+            <div class="section-body">
+                <h3 style="margin: 0 0 20px; font-size: 1.1rem; font-weight: 700; color: #24292f;"><i class="fas fa-code-branch" style="color: #0969da; margin-right: 8px;"></i>仓库提交确认</h3>
+                <div class="step-list">
+                    <div class="step-item">
+                        <div class="step-badge">1</div>
+                        <div class="step-content">
+                            <h4>三种确认状态</h4>
+                            <p>每条仓库提交记录都有一个确认状态：</p>
+                            <ul class="info-list">
+                                <li><span class="badge bg-warning text-dark">待确认</span> — 提交尚未被审阅，为默认状态</li>
+                                <li><span class="badge bg-success">已确认</span> — 提交内容已被审阅并通过</li>
+                                <li><span class="badge bg-danger">已拒绝</span> — 提交内容被审阅后拒绝</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">2</div>
+                        <div class="step-content">
+                            <h4>单个提交确认/拒绝</h4>
+                            <p>在提交记录列表中，每条提交右侧有操作按钮：</p>
+                            <ul class="info-list">
+                                <li>点击 <strong>「✓ 通过」</strong> 按钮，将该提交标记为 <span class="badge bg-success">已确认</span></li>
+                                <li>点击 <strong>「✗ 拒绝」</strong> 按钮，将该提交标记为 <span class="badge bg-danger">已拒绝</span></li>
+                                <li>已确认或已拒绝的提交，可以通过下拉菜单切换状态或重置为待确认</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">3</div>
+                        <div class="step-content">
+                            <h4>批量确认</h4>
+                            <p>在提交记录列表页面，可以勾选多条提交，然后点击 <strong>「批量确认」</strong> 按钮，一次性将所有选中的提交标记为已确认。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">4</div>
+                        <div class="step-content">
+                            <h4>快速筛选</h4>
+                            <p>提交列表支持按确认状态筛选：</p>
+                            <ul class="info-list">
+                                <li>点击 <strong>「未确认条目」</strong> 按钮可快速切换只显示待确认和已拒绝的记录</li>
+                                <li>也可以在筛选面板中选择特定状态进行精确过滤</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <hr style="margin: 32px 0; border-color: #d0d7de;">
+
+                <h3 style="margin: 0 0 20px; font-size: 1.1rem; font-weight: 700; color: #24292f;"><i class="fas fa-calendar-week" style="color: #0969da; margin-right: 8px;"></i>周版本文件确认</h3>
+                <div class="step-list">
+                    <div class="step-item">
+                        <div class="step-badge">1</div>
+                        <div class="step-content">
+                            <h4>文件级别确认</h4>
+                            <p>在周版本 Diff 页面中，每个 Excel 文件都有独立的确认状态。进入文件的 Diff 详情后，可以使用顶部的操作按钮：</p>
+                            <ul class="info-list">
+                                <li>点击 <strong>「确认通过」</strong> 按钮，表示该文件的变更审阅通过</li>
+                                <li>点击 <strong>「拒绝」</strong> 按钮，表示该文件的变更需要修改</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">2</div>
+                        <div class="step-content">
+                            <h4>快捷操作</h4>
+                            <p>在文件列表中，每个文件右侧提供了快捷状态按钮，无需进入 Diff 详情即可直接确认或拒绝，提高审阅效率。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">3</div>
+                        <div class="step-content">
+                            <h4>批量确认</h4>
+                            <p>点击周版本 Diff 页面顶部的 <strong>「批量确认」</strong> 按钮，可以一次性将所有待确认的文件标记为已确认，适用于整体审阅无异议的情况。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">4</div>
+                        <div class="step-content">
+                            <h4>进度统计</h4>
+                            <p>周版本列表页面会显示每个配置的确认进度统计：</p>
+                            <ul class="info-list">
+                                <li><strong>待确认数</strong>：尚未审阅的文件数量</li>
+                                <li><strong>已确认数</strong>：已通过审阅的文件数量</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tip-box">
+                    <i class="fas fa-lightbulb"></i>
+                    <span>确认/拒绝操作仅用于标记审阅状态，不会影响实际的配表数据或仓库内容。修改周版本的时间范围会清空所有确认状态。</span>
                 </div>
             </div>
         </section>
