@@ -103,21 +103,21 @@ def projects():
         department = request.form.get("department")
         if not code or not name:
             flash("项目代号和名称不能为空", "error")
-            return redirect(url_for("projects"))
+            return redirect(url_for("index"))
 
         existing_project = Project.query.filter_by(code=code).first()
         if existing_project:
             flash("项目代号已存在", "error")
-            return redirect(url_for("projects"))
+            return redirect(url_for("index"))
 
         project = Project(code=code, name=name, department=department)
         db.session.add(project)
         db.session.commit()
         flash("项目创建成功", "success")
-        return redirect(url_for("projects"))
+        return redirect(url_for("index"))
 
-    projects_list = Project.query.order_by(Project.created_at.desc()).all()
-    return render_template("projects.html", projects=projects_list)
+    # GET 请求也重定向到首页（统一使用 index.html 模板）
+    return redirect(url_for("index"))
 
 
 def project_detail(project_id):

@@ -36,6 +36,7 @@ from .services import (
     assign_function,
     change_password,
     get_project_members,
+    get_project_pre_assignments,
     get_user_by_id,
     handle_create_project_request,
     handle_join_request,
@@ -43,11 +44,14 @@ from .services import (
     list_pending_create_requests,
     list_pending_join_requests,
     list_users,
+    pre_assign_user_to_project,
     register_user,
     remove_function,
+    remove_pre_assignment,
     remove_user_from_project,
     request_create_project,
     request_join_project,
+    search_users,
     toggle_user_active,
     update_project_member_role,
     update_user_role,
@@ -269,6 +273,11 @@ def api_toggle_user_active(user_id):
     if not _has_admin_access():
         return jsonify({"success": False, "message": "权限不足"}), 403
 
+    # 禁止管理员禁用自身账号
+    current_user_id = session.get("auth_user_id")
+    if current_user_id and current_user_id == user_id:
+        return jsonify({"success": False, "message": "不能禁用自己的账号"}), 400
+
     success, error = toggle_user_active(user_id)
     if not success:
         return jsonify({"success": False, "message": error}), 400
@@ -339,16 +348,15 @@ def project_members(project_id):
         return redirect(url_for("index"))
 
     from models.project import Project
+    from .models import AuthUserProject
     project = Project.query.get_or_404(project_id)
-    members = get_project_members(project_id)
+    members = AuthUserProject.query.filter_by(project_id=project_id).all()
     functions = list_functions()
-    all_users = list_users()
     return render_template(
         "project_members.html",
         project=project,
         members=members,
         functions=functions,
-        all_users=all_users,
     )
 
 
@@ -511,3 +519,124 @@ def api_current_user():
             "functions": [],
         },
     })
+
+
+# ──────────────────────────── 用户搜索 (API) ────────────────────────────
+
+
+@auth_bp.route("/api/users/search")
+def api_search_users():
+    """搜索用户（支持关键词、排除已有成员、分页）
+
+    Query params:
+      - q: 关键词（模糊匹配用户名/显示名/邮箱）
+      - exclude_project_id: 排除已在该项目中的用户
+      - page: 页码（默认1）
+      - per_page: 每页数量（默认20，最大50）
+    """
+    if not _is_logged_in():
+        return jsonify({"success": False, "message": "请先登录"}), 401
+
+    keyword = (request.args.get("q") or "").strip()
+    exclude_project_id = request.args.get("exclude_project_id", type=int)
+    page = max(1, request.args.get("page", 1, type=int))
+    per_page = min(50, max(1, request.args.get("per_page", 20, type=int)))
+
+    # 获取需要排除的用户 ID 列表（已是项目成员）
+    exclude_ids = None
+    if exclude_project_id:
+        from .models import AuthUserProject
+        existing_memberships = AuthUserProject.query.filter_by(
+            project_id=exclude_project_id
+        ).all()
+        exclude_ids = [m.user_id for m in existing_memberships]
+
+    users, total = search_users(
+        keyword,
+        exclude_user_ids=exclude_ids,
+        only_active=True,
+        page=page,
+        per_page=per_page,
+    )
+
+    return jsonify({
+        "success": True,
+        "users": [
+            {
+                "id": u.id,
+                "username": u.username,
+                "display_name": u.display_name or u.username,
+                "email": u.email or "",
+                "role": u.role,
+            }
+            for u in users
+        ],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "has_more": (page * per_page) < total,
+    })
+
+
+# ──────────────────────────── 项目成员预分配 (API) ────────────────────────────
+
+
+@auth_bp.route("/api/project/<int:project_id>/pre-assign", methods=["POST"])
+def api_pre_assign_member(project_id):
+    """通过用户名预分配项目成员（支持未注册用户）"""
+    from utils.request_security import _has_project_admin_access
+    if not _has_project_admin_access(project_id):
+        return jsonify({"success": False, "message": "权限不足"}), 403
+
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    role = data.get("role", "member")
+    if not username:
+        return jsonify({"success": False, "message": "请输入用户名"}), 400
+
+    admin_user_id = session.get("auth_user_id")
+    success, error = pre_assign_user_to_project(username, project_id, role, assigned_by=admin_user_id)
+    if not success:
+        return jsonify({"success": False, "message": error}), 400
+
+    # 判断是直接添加还是预分配
+    from .models import AuthUser
+    user_exists = AuthUser.query.filter_by(username=username).first() is not None
+    if user_exists:
+        return jsonify({"success": True, "message": f"用户 '{username}' 已直接添加到项目"})
+    else:
+        return jsonify({"success": True, "message": f"用户 '{username}' 尚未注册，已创建预分配记录，该用户注册后将自动加入项目"})
+
+
+@auth_bp.route("/api/project/<int:project_id>/pre-assignments")
+def api_list_pre_assignments(project_id):
+    """获取项目的预分配记录列表"""
+    from utils.request_security import _has_project_admin_access
+    if not _has_project_admin_access(project_id):
+        return jsonify({"success": False, "message": "权限不足"}), 403
+
+    include_applied = request.args.get("include_applied", "false").lower() in ("1", "true", "yes")
+    records = get_project_pre_assignments(project_id, include_applied=include_applied)
+    return jsonify({"success": True, "pre_assignments": records})
+
+
+@auth_bp.route("/api/pre-assignments/<int:pre_id>", methods=["DELETE"])
+def api_remove_pre_assignment(pre_id):
+    """删除预分配记录"""
+    if not _is_logged_in():
+        return jsonify({"success": False, "message": "请先登录"}), 401
+
+    # 需要检查该预分配记录所属项目的管理员权限
+    from .models import AuthProjectPreAssignment
+    record = AuthProjectPreAssignment.query.get(pre_id)
+    if not record:
+        return jsonify({"success": False, "message": "预分配记录不存在"}), 404
+
+    from utils.request_security import _has_project_admin_access
+    if not _has_project_admin_access(record.project_id):
+        return jsonify({"success": False, "message": "权限不足"}), 403
+
+    success, error = remove_pre_assignment(pre_id)
+    if not success:
+        return jsonify({"success": False, "message": error}), 400
+    return jsonify({"success": True, "message": "预分配记录已删除"})

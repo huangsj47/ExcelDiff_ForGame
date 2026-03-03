@@ -23,6 +23,7 @@ from .models import (
     AuthFunction,
     AuthProjectCreateRequest,
     AuthProjectJoinRequest,
+    AuthProjectPreAssignment,
     AuthUser,
     AuthUserFunction,
     AuthUserProject,
@@ -83,6 +84,16 @@ def register_user(
     )
     db.session.add(user)
     db.session.commit()
+
+    # 注册成功后自动应用预分配的项目成员关系
+    try:
+        applied = apply_pre_assignments(user)
+        if applied > 0:
+            from utils.logger import log_print
+            log_print(f"用户 {user.username} 注册时自动应用了 {applied} 条项目预分配", 'AUTH')
+    except Exception:
+        pass  # 预分配失败不影响注册
+
     return user, None
 
 
@@ -165,6 +176,46 @@ def list_users(*, include_inactive: bool = False) -> list[AuthUser]:
     if not include_inactive:
         query = query.filter_by(is_active=True)
     return query.order_by(AuthUser.created_at.desc()).all()
+
+
+def search_users(
+    keyword: str = "",
+    *,
+    exclude_user_ids: list[int] | None = None,
+    only_active: bool = True,
+    page: int = 1,
+    per_page: int = 20,
+) -> tuple[list[AuthUser], int]:
+    """搜索用户，支持关键词（用户名/显示名/邮箱模糊搜索）、排除已有成员、分页。
+
+    Returns:
+        (users_list, total_count)
+    """
+    query = AuthUser.query
+    if only_active:
+        query = query.filter_by(is_active=True)
+
+    if keyword:
+        like_kw = f"%{keyword}%"
+        query = query.filter(
+            db.or_(
+                AuthUser.username.ilike(like_kw),
+                AuthUser.display_name.ilike(like_kw),
+                AuthUser.email.ilike(like_kw),
+            )
+        )
+
+    if exclude_user_ids:
+        query = query.filter(AuthUser.id.notin_(exclude_user_ids))
+
+    total = query.count()
+    users = (
+        query.order_by(AuthUser.username)
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
+    return users, total
 
 
 # ──────────────────────────── 职能管理 ────────────────────────────
@@ -665,4 +716,134 @@ def migrate_env_admin_to_db() -> Optional[AuthUser]:
         role=PlatformRole.PLATFORM_ADMIN.value,
     )
     return user
+
+
+# ──────────────────────── 项目成员预分配 ────────────────────────
+
+
+def pre_assign_user_to_project(
+    username: str,
+    project_id: int,
+    role: str = ProjectRole.MEMBER.value,
+    assigned_by: Optional[int] = None,
+) -> tuple[bool, Optional[str]]:
+    """预分配用户到项目（支持用户尚未注册）。
+
+    如果用户已存在，直接添加到项目（走正常流程）；
+    如果用户不存在，创建预分配记录，待用户注册/登录时自动生效。
+
+    Returns:
+        (True, None) 成功时
+        (False, error_message) 失败时
+    """
+    username = username.strip()
+    if not username:
+        return False, "用户名不能为空"
+
+    # 校验角色
+    normalized_role = (role or ProjectRole.MEMBER.value).strip()
+    # 支持 "project_admin" 映射到 ProjectRole.ADMIN
+    if normalized_role == "project_admin":
+        normalized_role = ProjectRole.ADMIN.value
+    try:
+        normalized_role = ProjectRole(normalized_role).value
+    except ValueError:
+        return False, f"无效的项目角色: {role}"
+
+    project = db.session.get(Project, project_id)
+    if not project:
+        return False, "项目不存在"
+
+    # 检查用户是否已存在
+    existing_user = AuthUser.query.filter_by(username=username).first()
+    if existing_user:
+        # 用户已存在，直接添加到项目
+        return add_user_to_project(existing_user.id, project_id, normalized_role, approved_by=assigned_by)
+
+    # 用户不存在，检查是否已有预分配记录
+    existing_pre = AuthProjectPreAssignment.query.filter_by(
+        username=username, project_id=project_id
+    ).first()
+    if existing_pre:
+        if existing_pre.applied:
+            return False, f"用户 '{username}' 已通过预分配加入该项目"
+        # 更新角色
+        existing_pre.role = normalized_role
+        existing_pre.assigned_by = assigned_by
+        db.session.commit()
+        return True, None
+
+    # 创建预分配记录
+    pre_assign = AuthProjectPreAssignment(
+        username=username,
+        project_id=project_id,
+        role=normalized_role,
+        assigned_by=assigned_by,
+    )
+    db.session.add(pre_assign)
+    db.session.commit()
+    return True, None
+
+
+def apply_pre_assignments(user: AuthUser) -> int:
+    """将用户的所有未生效的预分配记录应用到项目归属表。
+
+    在用户注册或登录时调用。
+    Returns:
+        应用的预分配记录数量
+    """
+    pending_assignments = AuthProjectPreAssignment.query.filter_by(
+        username=user.username, applied=False
+    ).all()
+
+    applied_count = 0
+    for pa in pending_assignments:
+        # 检查是否已经是项目成员
+        existing = AuthUserProject.query.filter_by(
+            user_id=user.id, project_id=pa.project_id
+        ).first()
+        if existing:
+            # 已是成员，标记预分配为已应用
+            pa.applied = True
+            pa.applied_at = datetime.now(timezone.utc)
+            continue
+
+        # 添加到项目
+        membership = AuthUserProject(
+            user_id=user.id,
+            project_id=pa.project_id,
+            role=pa.role,
+            approved_by=pa.assigned_by,
+        )
+        db.session.add(membership)
+
+        pa.applied = True
+        pa.applied_at = datetime.now(timezone.utc)
+        applied_count += 1
+
+    if pending_assignments:
+        db.session.commit()
+
+    return applied_count
+
+
+def get_project_pre_assignments(project_id: int, include_applied: bool = False) -> list[dict]:
+    """获取项目的预分配记录列表。"""
+    query = AuthProjectPreAssignment.query.filter_by(project_id=project_id)
+    if not include_applied:
+        query = query.filter_by(applied=False)
+    records = query.order_by(AuthProjectPreAssignment.created_at.desc()).all()
+    return [r.to_dict() for r in records]
+
+
+def remove_pre_assignment(pre_assignment_id: int) -> tuple[bool, Optional[str]]:
+    """删除一条预分配记录。"""
+    record = db.session.get(AuthProjectPreAssignment, pre_assignment_id)
+    if not record:
+        return False, "预分配记录不存在"
+    if record.applied:
+        return False, "该预分配已生效，无法删除"
+    db.session.delete(record)
+    db.session.commit()
+    return True, None
 

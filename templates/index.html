@@ -175,30 +175,6 @@
 {% block content %}
 <div class="container-fluid" style="max-width: 1700px;">
 
-    <!-- 用户信息栏 -->
-    {% if session.get('auth_username') %}
-    <div class="user-info-bar">
-        <i class="fas fa-user-circle"></i>
-        <span>当前用户: <strong>{{ session.get('auth_username') }}</strong></span>
-        {% if session.get('auth_role') == 'platform_admin' %}
-        <span class="badge bg-danger">平台管理员</span>
-        {% endif %}
-        <span class="ms-auto">
-            <a href="{{ url_for('auth_bp.change_password_view') }}" class="text-decoration-none me-3" style="font-size: 0.82rem;">
-                <i class="fas fa-key me-1"></i>修改密码
-            </a>
-            {% if is_admin() %}
-            <a href="{{ url_for('auth_bp.user_list') }}" class="text-decoration-none me-3" style="font-size: 0.82rem;">
-                <i class="fas fa-users-cog me-1"></i>用户管理
-            </a>
-            {% endif %}
-            <a href="{{ url_for('auth_bp.logout') }}" class="text-decoration-none text-danger" style="font-size: 0.82rem;">
-                <i class="fas fa-sign-out-alt me-1"></i>退出登录
-            </a>
-        </span>
-    </div>
-    {% endif %}
-
     <!-- 页面标题区域 -->
     <div class="index-header">
         <div class="d-flex justify-content-between align-items-center">

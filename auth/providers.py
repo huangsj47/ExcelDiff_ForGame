@@ -182,6 +182,16 @@ class DatabaseAuthProvider(AuthProvider):
         session["admin_user"] = user.username if user.is_platform_admin else None
         session.permanent = True
 
+        # 应用预分配的项目成员关系
+        try:
+            from .services import apply_pre_assignments
+            applied = apply_pre_assignments(user)
+            if applied > 0:
+                from utils.logger import log_print
+                log_print(f"用户 {user.username} 登录时自动应用了 {applied} 条项目预分配", 'AUTH')
+        except Exception:
+            pass  # 预分配失败不影响登录
+
         return user
 
     def get_current_user(self) -> Optional["AuthUser"]:

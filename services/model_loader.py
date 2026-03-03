@@ -48,6 +48,7 @@ _MODEL_OBJECT_NAMES = frozenset(
         "AuthUserProject",
         "AuthProjectJoinRequest",
         "AuthProjectCreateRequest",
+        "AuthProjectPreAssignment",
     }
 )
 

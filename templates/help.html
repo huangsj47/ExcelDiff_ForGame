@@ -146,6 +146,90 @@
                         </div>
                     </div>
                 </div>
+                <!-- Excel 配置表相关配置说明 -->
+                <hr style="margin: 32px 0; border-color: #d0d7de;">
+                <h3 style="margin: 0 0 20px; font-size: 1.1rem; font-weight: 700; color: #24292f;">
+                    <i class="fas fa-table" style="color: #0969da; margin-right: 8px;"></i>Excel 配置表参数说明
+                </h3>
+
+                <div class="step-list">
+                    <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-heading" style="font-size: 12px;"></i></div>
+                        <div class="step-content">
+                            <h4>表头行数 <span class="badge bg-danger" style="font-size: 0.7rem; vertical-align: middle;">必填</span></h4>
+                            <p>指定 Excel 文件中表头占据的行数。系统根据此值区分表头和数据行，正确解析 Diff。例如表头占 <code>3</code> 行，则第 4 行开始为数据。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-key" style="font-size: 12px;"></i></div>
+                        <div class="step-content">
+                            <h4>关键列</h4>
+                            <p>能够唯一标识一行数据的列号（从 1 开始），多个列号用英文逗号分隔，如 <code>1,2,3</code>。系统根据关键列匹配新旧版本中的同一行，精确计算行级和单元格级变更。若不填写，默认按行号顺序对齐。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-fingerprint" style="font-size: 12px;"></i></div>
+                        <div class="step-content">
+                            <h4>开启按 ID 确认</h4>
+                            <p>勾选后，Diff 页面支持按行（根据关键列 ID）逐条确认变更状态，适用于需要逐行审阅的精细化确认场景。需先正确配置「关键列」。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-clone" style="font-size: 12px;"></i></div>
+                        <div class="step-content">
+                            <h4>显示重复 ID 提示</h4>
+                            <p>勾选后，当 Excel 数据中存在关键列值重复的行时，Diff 页面会高亮提示重复 ID，帮助发现配表中的数据异常。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-tags" style="font-size: 12px;"></i></div>
+                        <div class="step-content">
+                            <h4>标签选择</h4>
+                            <p>为仓库设置自定义标签，多个标签用英文逗号分隔。标签用于对仓库进行分类和筛选，便于在项目中快速定位目标仓库。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-filter" style="font-size: 12px;"></i></div>
+                        <div class="step-content">
+                            <h4>路径 / 文件类型正则</h4>
+                            <p>使用正则表达式过滤要追踪的文件路径和类型。只有匹配该正则的文件才会生成 Diff。例如 <code>^(client_data|server_data)/.*\.(xlsx|xls)+</code> 表示只追踪 <code>client_data</code> 或 <code>server_data</code> 目录下的 Excel 文件。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-search" style="font-size: 12px;"></i></div>
+                        <div class="step-content">
+                            <h4>Log 正则</h4>
+                            <p>用正则表达式从提交日志（commit message）中提取关键信息。例如 <code>序(\d+)</code> 可从提交消息中提取序号，提取的内容会展示在提交列表中便于快速查看。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-ban" style="font-size: 12px;"></i></div>
+                        <div class="step-content">
+                            <h4>Log 过滤正则</h4>
+                            <p>使用正则表达式过滤不需要的提交记录。匹配该正则的提交将被自动隐藏，例如 <code>^(Merge branch).*</code> 可过滤掉所有合并提交。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-user-slash" style="font-size: 12px;"></i></div>
+                        <div class="step-content">
+                            <h4>提交人过滤</h4>
+                            <p>指定需要过滤的提交人邮箱，多个邮箱用英文逗号分隔。匹配的提交人所提交的记录将被隐藏，适用于过滤自动化工具提交等场景。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-star" style="font-size: 12px;"></i></div>
+                        <div class="step-content">
+                            <h4>重点表名</h4>
+                            <p>指定需要重点关注的 Excel 表名（Sheet 名或文件名），多个名称用英文逗号分隔。被标记为重点的表在 Diff 展示中会优先排列并高亮标识，便于快速关注关键配表变更。</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tip-box">
+                    <i class="fas fa-lightbulb"></i>
+                    <span>以上「高级设置」中的字段（路径正则、Log 正则、Log 过滤正则、提交人过滤、重点表名）在添加仓库时默认折叠，点击「更多设置（可选）」展开即可配置。</span>
+                </div>
+
                 <div class="tip-box warning">
                     <i class="fas fa-exclamation-triangle"></i>
                     <span>请确保仓库地址可访问，认证信息正确。如果使用SSH方式，请确认服务器已配置对应的SSH密钥。</span>

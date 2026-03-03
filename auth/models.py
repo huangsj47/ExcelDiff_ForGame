@@ -347,6 +347,56 @@ class AuthProjectCreateRequest(db.Model):
         }
 
 
+# ────────────────────────── 项目成员预分配表 ──────────────────────────
+
+
+class AuthProjectPreAssignment(db.Model):
+    """项目成员预分配表
+
+    管理员可以通过用户名预先指定项目成员，即使该用户尚未注册。
+    当用户注册并首次登录后，系统自动将其加入预分配的项目。
+    """
+    __tablename__ = "auth_project_pre_assignments"
+
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), nullable=False, index=True)
+    project_id = db.Column(db.Integer, db.ForeignKey("project.id", ondelete="CASCADE"), nullable=False)
+    role = db.Column(
+        db.String(20),
+        nullable=False,
+        default=ProjectRole.MEMBER.value,
+    )
+    assigned_by = db.Column(db.Integer, db.ForeignKey("auth_users.id"), nullable=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    applied = db.Column(db.Boolean, default=False, nullable=False)
+    applied_at = db.Column(db.DateTime, nullable=True)
+
+    __table_args__ = (
+        db.UniqueConstraint("username", "project_id", name="uq_pre_assign_user_project"),
+    )
+
+    # 关系
+    project = db.relationship("Project")
+    assigner = db.relationship("AuthUser", foreign_keys=[assigned_by])
+
+    def __repr__(self) -> str:
+        return f"<AuthProjectPreAssignment username={self.username} project={self.project_id} role={self.role} applied={self.applied}>"
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "username": self.username,
+            "project_id": self.project_id,
+            "project_name": self.project.name if self.project else None,
+            "role": self.role,
+            "assigned_by": self.assigned_by,
+            "assigner_name": self.assigner.username if self.assigner else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "applied": self.applied,
+            "applied_at": self.applied_at.isoformat() if self.applied_at else None,
+        }
+
+
 # ──────────────────────────── 默认职能数据 ────────────────────────────
 
 DEFAULT_FUNCTIONS: list[dict] = [

@@ -29,6 +29,7 @@ try:
         AuthUserProject,
         AuthProjectJoinRequest,
         AuthProjectCreateRequest,
+        AuthProjectPreAssignment,
     )
     _AUTH_MODELS_LOADED = True
 except ImportError:
@@ -58,4 +59,5 @@ if _AUTH_MODELS_LOADED:
         'AuthUserProject',
         'AuthProjectJoinRequest',
         'AuthProjectCreateRequest',
+        'AuthProjectPreAssignment',
     ])

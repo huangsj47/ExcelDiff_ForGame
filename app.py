@@ -586,6 +586,7 @@ configure_commit_diff_logic(
 )
 
 
+
 # 测试路由
 
 
@@ -2067,6 +2068,28 @@ configure_weekly_version_logic(
 )
 _original_print("[TRACE] weekly_version_logic configured")
 
+# ---------------------------------------------------------------------------
+# 后台任务工作服务 — 注入运行时依赖
+# ---------------------------------------------------------------------------
+configure_task_worker(
+    app=app,
+    db=db,
+    excel_cache_service=excel_cache_service,
+    BackgroundTask=BackgroundTask,
+    Commit=Commit,
+    Repository=Repository,
+    DiffCache=DiffCache,
+    WeeklyVersionConfig=WeeklyVersionConfig,
+    active_git_processes=active_git_processes,
+    get_git_service=get_git_service,
+    get_svn_service=get_svn_service,
+    get_unified_diff_data=get_unified_diff_data,
+    process_weekly_version_sync=process_weekly_version_sync,
+    process_weekly_excel_cache=process_weekly_excel_cache,
+    db_retry=db_retry,
+)
+_original_print("[TRACE] task_worker configured")
+
 
 def initialize_app():
     """初始化应用，包括数据库和后台任务"""
@@ -2079,6 +2102,18 @@ def initialize_app():
         # 创建数据库表
         create_tables()
         log_print("数据库表创建完成", 'APP')
+        # 数据库表创建完成后，初始化 Auth 默认数据（首次启动时表不存在会跳过，需要在此补充）
+        try:
+            from auth.services import init_default_functions, migrate_env_admin_to_db
+            with app.app_context():
+                func_count = init_default_functions()
+                if func_count > 0:
+                    log_print(f"Auth: 初始化了 {func_count} 个默认职能", 'AUTH')
+                admin_user = migrate_env_admin_to_db()
+                if admin_user:
+                    log_print(f"Auth: 迁移环境变量管理员到数据库: {admin_user.username}", 'AUTH')
+        except Exception as e:
+            log_print(f"Auth 默认数据初始化跳过: {e}", 'AUTH')
         # 在应用上下文中启动后台任务工作线程
         with app.app_context():
             start_background_task_worker()
