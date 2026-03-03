@@ -1233,16 +1233,42 @@ def _render_weekly_deleted_excel_notice(config, file_path, previous_commit_id):
     safe_file_name = escape((file_path or "").split("/")[-1] or file_path or "该文件")
     previous_html = ""
     if previous_commit_id:
-        encoded_file_path = quote(file_path or "", safe="")
-        previous_url = (
-            f"/weekly-version-config/{config.id}/file-previous-version"
-            f"?file_path={encoded_file_path}&commit_id={quote(str(previous_commit_id), safe='')}"
+        previous_commit_str = str(previous_commit_id).strip()
+        previous_url = None
+
+        # 优先跳转到提交详情页（可正确展示Excel历史内容），避免走文本预览接口导致xlsx报错
+        commit_query = Commit.query.filter(
+            Commit.repository_id == config.repository_id,
+            Commit.path == file_path,
         )
+        if len(previous_commit_str) >= 40:
+            previous_commit = commit_query.filter(Commit.commit_id == previous_commit_str).first()
+        else:
+            previous_commit = commit_query.filter(Commit.commit_id.like(f"{previous_commit_str}%")).first()
+
+        if previous_commit:
+            try:
+                previous_url = url_for(
+                    "commit_diff_with_path",
+                    project_code=config.project.code,
+                    repository_name=config.repository.name,
+                    commit_id=previous_commit.id,
+                )
+            except Exception:
+                previous_url = url_for("commit_diff", commit_id=previous_commit.id)
+
+        if not previous_url:
+            encoded_file_path = quote(file_path or "", safe="")
+            previous_url = (
+                f"/weekly-version-config/{config.id}/file-previous-version"
+                f"?file_path={encoded_file_path}&commit_id={quote(previous_commit_str, safe='')}"
+            )
+
         previous_html = (
             "<hr>"
             "<p class='mb-0'>"
             "<small class='text-muted'>"
-            f"可以查看 <a href='{previous_url}' class='alert-link' target='_blank'>上一个版本 ({escape(str(previous_commit_id)[:8])})</a> "
+            f"可以查看 <a href='{previous_url}' class='alert-link' target='_blank'>上一个版本 ({escape(previous_commit_str[:8])})</a> "
             "来查看删除前的Excel内容。"
             "</small>"
             "</p>"

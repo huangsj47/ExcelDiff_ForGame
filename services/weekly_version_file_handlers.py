@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from flask import jsonify, render_template, request, url_for
+from flask import jsonify, redirect, render_template, request, url_for
 
 from services.model_loader import get_runtime_models
 
 
 def weekly_version_file_previous_version(config_id):
     """View previous version file content for weekly config."""
-    WeeklyVersionConfig, log_print = get_runtime_models("WeeklyVersionConfig", "log_print")
+    WeeklyVersionConfig, Commit, log_print = get_runtime_models("WeeklyVersionConfig", "Commit", "log_print")
     try:
         config = WeeklyVersionConfig.query.get_or_404(config_id)
         file_path = request.args.get("file_path")
@@ -31,6 +31,40 @@ def weekly_version_file_previous_version(config_id):
         )
         file_content = git_service.get_file_content(commit_id, file_path)
         if file_content is None:
+            # 仓库本地状态可能滞后，先尝试更新后再取一次
+            try:
+                sync_ok, _ = git_service.clone_or_update_repository()
+                if sync_ok:
+                    file_content = git_service.get_file_content(commit_id, file_path)
+            except Exception:
+                pass
+
+        if file_content is None:
+            lower_path = file_path.lower()
+            is_excel_file = lower_path.endswith((".xlsx", ".xls", ".xlsm", ".xlsb"))
+            if is_excel_file:
+                # Excel 删除场景优先跳转到提交Diff页面，避免文本预览接口无法解码二进制内容
+                commit_query = Commit.query.filter(
+                    Commit.repository_id == config.repository_id,
+                    Commit.path == file_path,
+                )
+                if len(commit_id) >= 40:
+                    previous_commit = commit_query.filter(Commit.commit_id == commit_id).first()
+                else:
+                    previous_commit = commit_query.filter(Commit.commit_id.like(f"{commit_id}%")).first()
+
+                if previous_commit:
+                    try:
+                        diff_url = url_for(
+                            "commit_diff_with_path",
+                            project_code=config.project.code,
+                            repository_name=config.repository.name,
+                            commit_id=previous_commit.id,
+                        )
+                    except Exception:
+                        diff_url = url_for("commit_diff", commit_id=previous_commit.id)
+                    return redirect(diff_url)
+
             return render_template(
                 "error.html",
                 error_message="无法获取文件内容，文件可能不存在",

@@ -147,6 +147,20 @@
         #navbarMain .navbar-nav .nav-link i {
             font-size: 0.76rem !important;
         }
+
+        /* 统一面包屑文本基线，修复项目名与“项目列表”底部不齐 */
+        .breadcrumb {
+            align-items: flex-end;
+        }
+        .breadcrumb-item,
+        .breadcrumb-item > a {
+            display: inline-flex;
+            align-items: flex-end;
+            line-height: 1.25;
+        }
+        .breadcrumb-item i {
+            line-height: 1;
+        }
         
         /* 新筛选条件样式 - 缩小至85% */
         .filter-container {
