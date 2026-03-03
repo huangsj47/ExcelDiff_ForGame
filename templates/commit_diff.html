@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}Diff确认 - {{ commit.path }}{% endblock %}
 
@@ -88,7 +88,7 @@
                     <div class="version-info p-3 rounded" style="background-color: #d4edda; border: 1px solid #c3e6cb;">
                         <h6 class="mb-2 fw-bold" style="color: #155724;">当前版本</h6>
                         <div><strong>Commit ID:</strong> <code>{{ commit.commit_id[:8] }}</code></div>
-                        <div><strong>提交时间:</strong> {{ commit.commit_time.strftime('%Y-%m-%d %H:%M:%S') if commit.commit_time else 'N/A' }}</div>
+                        <div><strong>提交时间:</strong> {{ format_beijing_time(commit.commit_time, '%Y-%m-%d %H:%M:%S') if commit.commit_time else 'N/A' }}</div>
                         <div><strong>提交者:</strong> {{ commit.author | e or 'N/A' }}</div>
                         {% if commit.message %}
                         <div><strong>提交信息:</strong> {{ commit.message | e }}</div>
@@ -106,7 +106,7 @@
                             {% endif %}
                         </div>
                         {% if previous_commit %}
-                        <div><strong>提交时间:</strong> {{ previous_commit.commit_time.strftime('%Y-%m-%d %H:%M:%S') if previous_commit.commit_time else 'N/A' }}</div>
+                        <div><strong>提交时间:</strong> {{ format_beijing_time(previous_commit.commit_time, '%Y-%m-%d %H:%M:%S') if previous_commit.commit_time else 'N/A' }}</div>
                         <div><strong>提交者:</strong> {{ previous_commit.author | e or 'N/A' }}</div>
                         {% if previous_commit.message %}
                         <div><strong>提交信息:</strong> {{ previous_commit.message | e }}</div>
@@ -299,7 +299,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/diff-handlers.js') }}?v=2.1"></script>
+<script src="{{ url_for('static', filename='js/diff-handlers.js') }}?v=2.2"></script>
 <script>
     
     // 自动解析代码diff内容
@@ -1623,3 +1623,4 @@ function executeDiffCompare() {
 })();
 </script>
 {% endif %}
+

@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}性能观测面板 - Diff确认平台{% endblock %}
 
@@ -107,7 +107,7 @@
             <table class="perf-table recent-table">
                 <thead>
                     <tr>
-                        <th>时间(UTC)</th>
+                        <th>时间(UTC+8)</th>
                         <th>处理管线</th>
                         <th>结果</th>
                         <th>指标</th>
@@ -566,13 +566,24 @@ function buildKVBages(obj, type) {
 
 function renderKpis(data) {
     document.getElementById('kpiTotal').textContent = fmtNum(data.total_events);
-    document.getElementById('kpiStored').textContent = `已存储 ${fmtNum(data.stored_event_count)} 条 / 容量 ${fmtNum(data.capacity)}`;
+    const storedText = `已存储 ${fmtNum(data.stored_event_count)} 条 / 容量 ${fmtNum(data.capacity)}`;
+    if (data.scope_balance_enabled) {
+        const scopeText = ` · 活跃分片 ${fmtNum(data.active_scope_count || 0)} · 分片软上限 ${fmtNum(data.soft_scope_capacity || 0)}`;
+        const evicted = Number(data.evicted_event_count || 0);
+        const rebalanceEvicted = Number(data.scope_rebalance_evictions || 0);
+        const evictText = evicted > 0
+            ? ` · 累计淘汰 ${fmtNum(evicted)}（均衡淘汰 ${fmtNum(rebalanceEvicted)}）`
+            : '';
+        document.getElementById('kpiStored').textContent = `${storedText}${scopeText}${evictText}`;
+    } else {
+        document.getElementById('kpiStored').textContent = storedText;
+    }
     document.getElementById('kpiSuccessRate').textContent = formatPercent(data.success_rate);
     document.getElementById('kpiSuccess').textContent = `成功 ${fmtNum(data.success_count)} / 失败 ${fmtNum(data.failed_count)}`;
     document.getElementById('kpiAvgMs').textContent = formatDuration(data.avg_total_ms);
     document.getElementById('kpiP95Ms').textContent = formatDuration(data.p95_total_ms);
     document.getElementById('kpiMaxMs').textContent = `峰值耗时 ${formatDuration(data.max_total_ms)}`;
-    document.getElementById('generatedAt').textContent = `更新时间 ${data.generated_at || '-'}`;
+    document.getElementById('generatedAt').textContent = `更新时间(${data.timezone || 'UTC+8'}) ${data.generated_at || '-'}`;
 }
 
 function renderPipelineTable(list) {
@@ -736,3 +747,6 @@ loadStats().catch(err => alert(err.message));
 setupAutoRefresh();
 </script>
 {% endblock %}
+
+
+

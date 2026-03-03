@@ -353,6 +353,23 @@ function highlightParameterList(oldValue, newValue, type) {
     // 使用找到的分隔符分割参数
     const oldParams = oldValue.split(usedSeparator).map(p => p.trim());
     const newParams = newValue.split(usedSeparator).map(p => p.trim());
+
+    // 分隔后超过1段发生变化时，按整格变更展示，避免出现碎片化高亮
+    const maxLength = Math.max(oldParams.length, newParams.length);
+    let changedSegmentCount = 0;
+    for (let i = 0; i < maxLength; i++) {
+        if (oldParams[i] !== newParams[i]) {
+            changedSegmentCount++;
+        }
+    }
+
+    if (changedSegmentCount > 1) {
+        if (type === 'old') {
+            return `<span class="excel-text-bg-old">${escapeHtml(oldValue)}</span>`;
+        }
+        return `<span class="excel-text-bg-new">${escapeHtml(newValue)}</span>`;
+    }
+
     const targetParams = type === 'old' ? oldParams : newParams;
     const compareParams = type === 'old' ? newParams : oldParams;
     

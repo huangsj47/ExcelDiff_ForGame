@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}增强合并diff显示{% endblock %}
 
@@ -235,7 +235,7 @@
                                         <span class="author-text">{{ commit.author or '未知' }}</span>
                                     </td>
                                     <td>
-                                        <span class="time-text">{{ commit.commit_time.strftime('%m-%d %H:%M') if commit.commit_time else '未知时间' }}</span>
+                                        <span class="time-text">{{ format_beijing_time(commit.commit_time, '%m-%d %H:%M') if commit.commit_time else '未知时间' }}</span>
                                     </td>
                                     <td>
                                         <span class="badge status-{{ commit.status or 'pending' }} fs-6">
@@ -729,3 +729,4 @@ function showExcelSheetInContainer(diffData, containerId) {
 }
 </script>
 {% endblock %}
+

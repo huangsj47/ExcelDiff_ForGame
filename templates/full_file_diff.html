@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -364,7 +364,7 @@
                             <i class="bi bi-arrow-left text-danger"></i>
                             {% if previous_commit %}
                                 {{ previous_commit.commit_id[:8] }}
-                                <small class="text-muted">({{ previous_commit.commit_time.strftime('%Y-%m-%d %H:%M') if previous_commit.commit_time else 'N/A' }})</small>
+                                <small class="text-muted">({{ format_beijing_time(previous_commit.commit_time, '%Y-%m-%d %H:%M') if previous_commit.commit_time else 'N/A' }})</small>
                             {% else %}
                                 初始版本
                             {% endif %}
@@ -372,7 +372,7 @@
                         <span>
                             <i class="bi bi-arrow-right text-success"></i>
                             {{ commit.commit_id[:8] }}
-                            <small class="text-muted">({{ commit.commit_time.strftime('%Y-%m-%d %H:%M') if commit.commit_time else 'N/A' }})</small>
+                            <small class="text-muted">({{ format_beijing_time(commit.commit_time, '%Y-%m-%d %H:%M') if commit.commit_time else 'N/A' }})</small>
                         </span>
                     </div>
                 </div>
@@ -1006,6 +1006,7 @@
     </script>
 </body>
 </html>
+
 
 
 

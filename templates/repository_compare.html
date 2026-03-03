@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}仓库对比结果{% endblock %}
 
@@ -35,10 +35,10 @@
             <h6 class="card-title">对比参数</h6>
             <div class="row">
                 <div class="col-md-3">
-                    <strong>开始时间:</strong> {{ start_time.strftime('%Y-%m-%d %H:%M') }}
+                    <strong>开始时间:</strong> {{ format_beijing_time(start_time, '%Y-%m-%d %H:%M') }}
                 </div>
                 <div class="col-md-3">
-                    <strong>结束时间:</strong> {{ end_time.strftime('%Y-%m-%d %H:%M') }}
+                    <strong>结束时间:</strong> {{ format_beijing_time(end_time, '%Y-%m-%d %H:%M') }}
                 </div>
                 <div class="col-md-3">
                     <strong>时间间隔阈值:</strong> {{ interval_minutes }} 分钟
@@ -98,13 +98,13 @@
                                     {% set latest_commit = diff.source_commits[0] %}
                                     <div>
                                         <small class="text-muted">版本:</small> {{ latest_commit.version }}<br>
-                                        <small class="text-muted">时间:</small> {{ latest_commit.commit_time.strftime('%m-%d %H:%M') }}<br>
+                                        <small class="text-muted">时间:</small> {{ format_beijing_time(latest_commit.commit_time, '%m-%d %H:%M') }}<br>
                                         <small class="text-muted">作者:</small> {{ latest_commit.author }}
                                     </div>
                                 {% elif diff.type in ['source_newer', 'target_newer'] %}
                                     <div>
                                         <small class="text-muted">版本:</small> {{ diff.source_commit.version }}<br>
-                                        <small class="text-muted">时间:</small> {{ diff.source_commit.commit_time.strftime('%m-%d %H:%M') }}<br>
+                                        <small class="text-muted">时间:</small> {{ format_beijing_time(diff.source_commit.commit_time, '%m-%d %H:%M') }}<br>
                                         <small class="text-muted">作者:</small> {{ diff.source_commit.author }}
                                     </div>
                                 {% else %}
@@ -116,13 +116,13 @@
                                     {% set latest_commit = diff.target_commits[0] %}
                                     <div>
                                         <small class="text-muted">版本:</small> {{ latest_commit.version }}<br>
-                                        <small class="text-muted">时间:</small> {{ latest_commit.commit_time.strftime('%m-%d %H:%M') }}<br>
+                                        <small class="text-muted">时间:</small> {{ format_beijing_time(latest_commit.commit_time, '%m-%d %H:%M') }}<br>
                                         <small class="text-muted">作者:</small> {{ latest_commit.author }}
                                     </div>
                                 {% elif diff.type in ['source_newer', 'target_newer'] %}
                                     <div>
                                         <small class="text-muted">版本:</small> {{ diff.target_commit.version }}<br>
-                                        <small class="text-muted">时间:</small> {{ diff.target_commit.commit_time.strftime('%m-%d %H:%M') }}<br>
+                                        <small class="text-muted">时间:</small> {{ format_beijing_time(diff.target_commit.commit_time, '%m-%d %H:%M') }}<br>
                                         <small class="text-muted">作者:</small> {{ diff.target_commit.author }}
                                         {% if diff.time_diff_minutes %}
                                         <br><small class="text-warning">相差 {{ diff.time_diff_minutes }} 分钟</small>
@@ -198,3 +198,4 @@ code {
 }
 </style>
 {% endblock %}
+

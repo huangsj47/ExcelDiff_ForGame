@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}项目管理 - Diff确认平台{% endblock %}
 
@@ -189,7 +189,7 @@
                     </td>
                     <td style="font-weight: 500;">{{ project.name }}</td>
                     <td style="color: #656d76;">{{ project.department or '-' }}</td>
-                    <td style="color: #656d76; font-size: 0.85rem;">{{ project.created_at.strftime('%Y-%m-%d') }}</td>
+                    <td style="color: #656d76; font-size: 0.85rem;">{{ format_beijing_time(project.created_at, '%Y-%m-%d') }}</td>
                     <td>
                         <div class="action-btn-group">
                             <a href="{{ url_for('merged_project_view', project_id=project.id) }}" class="btn btn-success btn-sm">

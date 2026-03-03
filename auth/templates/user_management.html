@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}用户管理 - Diff确认平台{% endblock %}
 
@@ -162,7 +162,7 @@
                     <div class="pending-meta mt-1">
                         申请加入项目: <strong>{{ req.project.name if req.project else '未知' }}</strong>
                         {% if req.message %} · 留言: {{ req.message }}{% endif %}
-                        · {{ req.created_at.strftime('%Y-%m-%d %H:%M') if req.created_at else '' }}
+                        · {{ format_beijing_time(req.created_at, '%Y-%m-%d %H:%M') if req.created_at else '' }}
                     </div>
                 </div>
                 <div class="btn-group">
@@ -189,7 +189,7 @@
                         项目代号: <strong>{{ req.project_code }}</strong> · 名称: <strong>{{ req.project_name }}</strong>
                         {% if req.department %} · 部门: {{ req.department }}{% endif %}
                         {% if req.reason %} · 原因: {{ req.reason }}{% endif %}
-                        · {{ req.created_at.strftime('%Y-%m-%d %H:%M') if req.created_at else '' }}
+                        · {{ format_beijing_time(req.created_at, '%Y-%m-%d %H:%M') if req.created_at else '' }}
                     </div>
                 </div>
                 <div class="btn-group">
@@ -250,7 +250,7 @@
                                 <span class="badge badge-role badge-inactive">已禁用</span>
                             {% endif %}
                         </td>
-                        <td class="text-muted" style="font-size: 0.82rem;">{{ user.created_at.strftime('%Y-%m-%d') if user.created_at else '-' }}</td>
+                        <td class="text-muted" style="font-size: 0.82rem;">{{ format_beijing_time(user.created_at, '%Y-%m-%d') if user.created_at else '-' }}</td>
                         <td class="text-end">
                             <div class="btn-group">
                                 <button class="btn btn-sm btn-outline-primary action-btn dropdown-toggle" data-bs-toggle="dropdown">
@@ -363,3 +363,4 @@ function filterUsers() {
 }
 </script>
 {% endblock %}
+

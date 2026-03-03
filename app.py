@@ -783,12 +783,6 @@ def commit_list(repository_id):
                 unique_usernames.append(username)
         return unique_usernames
 
-    def _abbreviate_username(username: str) -> str:
-        clean_name = (username or '').strip()
-        if not clean_name:
-            return ''
-        return f"{clean_name[:2]}.."
-
     # 批量查询确认用户姓名（display_name），避免模板中逐条查询
     all_confirm_usernames = set()
     for commit in commits:
@@ -814,12 +808,8 @@ def commit_list(repository_id):
         confirm_users_display = ''
         confirm_users_title = ''
         if commit.status in ('confirmed', 'rejected') and commit_confirm_users:
-            if repository.enable_id_confirmation:
-                confirm_users_display = ', '.join(_abbreviate_username(username) for username in commit_confirm_users)
-                confirm_users_title = ', '.join(commit_confirm_display_names)
-            else:
-                confirm_users_display = ', '.join(commit_confirm_users)
-                confirm_users_title = ', '.join(commit_confirm_display_names)
+            confirm_users_display = ', '.join(commit_confirm_users)
+            confirm_users_title = ', '.join(commit_confirm_display_names)
 
         commit.confirm_users_display = confirm_users_display
         commit.confirm_users_title = confirm_users_title

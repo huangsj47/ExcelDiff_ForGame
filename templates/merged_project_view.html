@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}{{ project.name }} - 项目概览{% endblock %}
 
@@ -393,7 +393,7 @@
                                     <div class="d-flex align-items-center">
                                         <i class="fas fa-calendar me-2 text-muted"></i>
                                         <small class="text-muted me-2">创建:</small>
-                                        <small>{{ repo.created_at.strftime('%Y-%m-%d') }}</small>
+                                        <small>{{ format_beijing_time(repo.created_at, '%Y-%m-%d') }}</small>
                                     </div>
                                 </div>
 
@@ -490,8 +490,8 @@ function getBranchTagClass(branch) {
 }
 
 function createInactiveVersionHtml(version) {
-    const startTime = new Date(version.start_time).toLocaleString('zh-CN');
-    const endTime = new Date(version.end_time).toLocaleString('zh-CN');
+    const startTime = new Date(version.start_time).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
+    const endTime = new Date(version.end_time).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
     
     let configsHtml = '';
     let statsHtml = '';
@@ -746,3 +746,4 @@ function deleteVersionGroup(versionName, configIds) {
 
 
 {% endblock %}
+

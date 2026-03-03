@@ -255,6 +255,9 @@ python app.py
 - `SQLALCHEMY_DATABASE_URI`（默认 SQLite）
 - `DIFF_LOGIC_VERSION`（用于缓存版本控制）
 - 定时任务频率（每日清理 + 每 2 分钟周版本检查）
+- `PERF_METRICS_MAX_EVENTS`（`/admin/performance` 事件窗口总容量，默认 `8000`）
+- `PERF_METRICS_MAX_SCOPE_SHARE`（单分片最大占比，默认 `0.35`）
+- `PERF_METRICS_MIN_SCOPE_EVENTS`（单分片软上限最小值，默认 `300`）
 
 建议在生产环境替换 `SECRET_KEY`，并根据数据规模考虑迁移到 MySQL/PostgreSQL。
 

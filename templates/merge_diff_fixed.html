@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}diff多版本合并显示{% endblock %}
 
@@ -116,7 +116,7 @@
                                             版本: {{ commit.version }} | 
                                             提交者: {{ commit.author }} | 
                                             {% if commit.commit_time %}
-                                                {{ commit.commit_time.strftime('%m月%d日 %H:%M') }}
+                                                {{ format_beijing_time(commit.commit_time, '%m月%d日 %H:%M') }}
                                             {% else %}
                                                 未知时间
                                             {% endif %}
@@ -279,3 +279,4 @@ function showExcelSheetInContainer(containerId, sheetName, diffData) {
 }
 </script>
 {% endblock %}
+

@@ -1,4 +1,4 @@
-"""Repository compare handlers extracted from app.py."""
+﻿"""Repository compare handlers extracted from app.py."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from datetime import datetime
 from flask import flash, jsonify, redirect, render_template, request, url_for
 
 from services.model_loader import get_runtime_model, get_runtime_models
+from utils.timezone_utils import format_beijing_time
 
 
 def repository_compare():
@@ -174,7 +175,7 @@ def get_commits_by_file(repository_id):
                 "id": commit.id,
                 "version": commit.version,
                 "author": commit.author,
-                "commit_time": commit.commit_time.strftime("%Y-%m-%d %H:%M:%S") if commit.commit_time else "",
+                "commit_time": format_beijing_time(commit.commit_time, "%Y-%m-%d %H:%M:%S") if commit.commit_time else "",
                 "status": commit.status,
                 "operation": commit.operation,
             }
@@ -287,3 +288,4 @@ def generate_compare_diff(from_commit, to_commit, from_diff_data, to_diff_data):
                 },
             ],
         }
+

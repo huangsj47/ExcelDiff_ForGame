@@ -74,6 +74,25 @@ class _WeeklyCommitQuery:
         return self._base_commit
 
 
+class _DeletedExcelQuery:
+    def __init__(self, latest_commit, previous_commit):
+        self._latest_commit = latest_commit
+        self._previous_commit = previous_commit
+        self.first_calls = 0
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def order_by(self, *args, **kwargs):
+        return self
+
+    def first(self):
+        self.first_calls += 1
+        if self.first_calls == 1:
+            return self._latest_commit
+        return self._previous_commit
+
+
 def test_weekly_excel_fallback_uses_full_window_commits(monkeypatch):
     repo = SimpleNamespace(id=1, type="git")
     t1 = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
@@ -158,6 +177,71 @@ def test_weekly_excel_html_uses_cached_html_first(monkeypatch):
 
     html = weekly_logic.generate_weekly_excel_merged_diff_html(config, diff_cache, "a.xlsx")
     assert html == "<cached-weekly-html>"
+
+
+def test_weekly_excel_deleted_file_returns_deleted_notice(monkeypatch):
+    repo = SimpleNamespace(id=1, type="git")
+    latest_commit = SimpleNamespace(
+        id=30,
+        commit_id="latest_del",
+        commit_time=datetime(2026, 1, 3, 10, 0, tzinfo=timezone.utc),
+        operation="D",
+    )
+    previous_commit = SimpleNamespace(
+        id=29,
+        commit_id="prev_keep",
+        commit_time=datetime(2026, 1, 2, 10, 0, tzinfo=timezone.utc),
+        operation="M",
+    )
+    query = _DeletedExcelQuery(latest_commit, previous_commit)
+    fake_commit_model = type(
+        "FakeCommitDeleted",
+        (),
+        {
+            "query": query,
+            "repository_id": _DummyCol(),
+            "path": _DummyCol(),
+            "commit_id": _DummyCol(),
+            "commit_time": _DummyCol(),
+            "id": _DummyCol(),
+        },
+    )
+    monkeypatch.setattr(weekly_logic, "Commit", fake_commit_model)
+    monkeypatch.setattr(
+        weekly_logic,
+        "_weekly_excel_cache_service",
+        SimpleNamespace(
+            get_cached_html=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("deleted file should bypass html cache lookup")
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        weekly_logic,
+        "_load_weekly_excel_diff_from_cache",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("deleted file should not load excel merged cache")
+        ),
+    )
+
+    config = SimpleNamespace(
+        id=11,
+        repository=repo,
+        repository_id=repo.id,
+        start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        end_time=datetime(2026, 1, 7, tzinfo=timezone.utc),
+    )
+    diff_cache = SimpleNamespace(
+        base_commit_id="base0",
+        latest_commit_id="latest_del",
+        merged_diff_data=None,
+    )
+
+    html = weekly_logic.generate_weekly_excel_merged_diff_html(config, diff_cache, "a.xlsx")
+
+    assert "Excel文件已删除" in html
+    assert "file-previous-version" in html
+    assert "commit_id=prev_keep" in html
 
 
 def test_excel_html_cache_get_cached_html_preserves_datetime(monkeypatch):

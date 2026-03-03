@@ -1,4 +1,4 @@
-"""Commit operation handlers extracted from app.py."""
+﻿"""Commit operation handlers extracted from app.py."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from flask import flash, jsonify, redirect, render_template, request, url_for
 from models import Commit, DiffCache, ExcelHtmlCache, db
 from services.model_loader import get_runtime_model
 from utils.request_security import require_admin
+from utils.timezone_utils import format_beijing_time
 
 
 class _RuntimeProxy:
@@ -269,7 +270,7 @@ def get_commit_diff_data(commit_id):
                 'diff_data': diff_data,
                 'previous_commit': {
                     'commit_id': previous_commit.commit_id[:8] if previous_commit else 'N/A',
-                    'commit_time': previous_commit.commit_time.strftime('%Y-%m-%d %H:%M:%S') if previous_commit and previous_commit.commit_time else 'N/A',
+                    'commit_time': format_beijing_time(previous_commit.commit_time, '%Y-%m-%d %H:%M:%S') if previous_commit and previous_commit.commit_time else 'N/A',
                     'author': previous_commit.author if previous_commit else 'N/A',
                     'message': previous_commit.message if previous_commit else 'N/A'
                 } if previous_commit else None
@@ -428,7 +429,7 @@ def merge_diff():
     for c in commits:
         try:
             if c.commit_time:
-                commit_times.append(c.commit_time.strftime('%Y-%m-%d %H:%M:%S'))
+                commit_times.append(format_beijing_time(c.commit_time, '%Y-%m-%d %H:%M:%S'))
             else:
                 commit_times.append('None')
         except Exception as e:
@@ -499,3 +500,4 @@ def update_commit_fields_route():
             'success': False,
             'message': f'更新失败: {str(e)}'
         }), 500
+

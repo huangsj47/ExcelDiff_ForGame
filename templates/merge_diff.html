@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}diff多版本合并显示{% endblock %}
 
@@ -670,7 +670,7 @@ td.excel-row-number.excel-modified,
                                     <span class="text-muted small">
                                         <i class="fas fa-clock me-1"></i>
                                         {% if commit.commit_time %}
-                                            {{ commit.commit_time.strftime('%m-%d %H:%M') }}
+                                            {{ format_beijing_time(commit.commit_time, '%m-%d %H:%M') }}
                                         {% else %}
                                             未知时间
                                         {% endif %}
@@ -793,12 +793,12 @@ td.excel-row-number.excel-modified,
                                             {% if commit_info.get('type') == 'consecutive_merge' %}
                                                 版本: {{ commit.version }} |
                                                 提交者: {{ commit.author | e }} |
-                                                最新时间: {{ commit.commit_time.strftime('%m月%d日 %H:%M') if commit.commit_time else '未知时间' }}
+                                                最新时间: {{ format_beijing_time(commit.commit_time, '%m月%d日 %H:%M') if commit.commit_time else '未知时间' }}
                                             {% else %}
                                                 版本: {{ commit.version }} |
                                                 提交者: {{ commit.author | e }} |
                                                 {% if commit.commit_time %}
-                                                    {{ commit.commit_time.strftime('%m月%d日 %H:%M') }}
+                                                    {{ format_beijing_time(commit.commit_time, '%m月%d日 %H:%M') }}
                                                 {% else %}
                                                     未知时间
                                                 {% endif %}
@@ -846,7 +846,7 @@ td.excel-row-number.excel-modified,
                                         <div class="version-info current">
                                             <h6 class="mb-2 fw-bold">当前版本</h6>
                                             <div><strong>Commit ID:</strong> <code>{{ commit.commit_id[:8] }}</code></div>
-                                            <div><strong>提交时间:</strong> {{ commit.commit_time.strftime('%Y-%m-%d %H:%M:%S') if commit.commit_time else 'N/A' }}</div>
+                                            <div><strong>提交时间:</strong> {{ format_beijing_time(commit.commit_time, '%Y-%m-%d %H:%M:%S') if commit.commit_time else 'N/A' }}</div>
                                             <div><strong>提交者:</strong> {{ commit.author | e or 'N/A' }}</div>
                                             {% if commit.message %}
                                             <div><strong>提交信息:</strong> {{ commit.message | e }}</div>
@@ -1974,3 +1974,4 @@ function rejectCommit(commitId) {
 }
 </script>
 {% endblock %}
+

@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}提交对比 - {{ compare_diff.file_path }}{% endblock %}
 
@@ -69,8 +69,8 @@
                         </tr>
                         <tr>
                             <td><strong>提交时间</strong></td>
-                            <td>{{ from_commit.commit_time.strftime('%Y-%m-%d %H:%M:%S') if from_commit.commit_time else '-' }}</td>
-                            <td>{{ to_commit.commit_time.strftime('%Y-%m-%d %H:%M:%S') if to_commit.commit_time else '-' }}</td>
+                            <td>{{ format_beijing_time(from_commit.commit_time, '%Y-%m-%d %H:%M:%S') if from_commit.commit_time else '-' }}</td>
+                            <td>{{ format_beijing_time(to_commit.commit_time, '%Y-%m-%d %H:%M:%S') if to_commit.commit_time else '-' }}</td>
                         </tr>
                         <tr>
                             <td><strong>操作类型</strong></td>
@@ -322,3 +322,4 @@ code {
 // 可以添加一些交互功能
 </script>
 {% endblock %}
+

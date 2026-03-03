@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}Excel缓存管理 - Diff确认平台{% endblock %}
 
@@ -1060,7 +1060,7 @@ const MAX_LOG_DISPLAY = 1000;
 
 function addLogEntry(message, type = 'info', existingTime = null) {
     // 如果有现有时间戳（从后端传来），使用它；否则生成新的时间戳
-    const timestamp = existingTime || new Date().toLocaleString('zh-CN');
+    const timestamp = existingTime || new Date().toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
     const entry = {
         time: timestamp,
         message: message,
@@ -1554,3 +1554,4 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 {% endblock %}
+

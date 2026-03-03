@@ -38,6 +38,8 @@ import re
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
+from html import escape
+from urllib.parse import quote
 
 from flask import render_template, request, jsonify, url_for
 
@@ -1149,10 +1151,122 @@ def _load_weekly_excel_diff_from_cache(repository, diff_cache, file_path):
     )
     return _extract_excel_diff_from_payload(recomputed)
 
+
+def _is_deleted_operation(operation):
+    op = str(operation or "").strip().upper()
+    return op in {"D", "DEL", "DELETE", "DELETED", "REMOVE", "REMOVED"}
+
+
+def _resolve_weekly_deleted_excel_state(config, diff_cache, file_path):
+    """判断周版本Excel是否为最终删除状态，并返回可用的上一版本commit_id。"""
+    latest_commit = None
+    repository_id = getattr(config, "repository_id", None)
+    if not repository_id:
+        repository_id = getattr(getattr(config, "repository", None), "id", None)
+
+    if repository_id and getattr(diff_cache, "latest_commit_id", None):
+        try:
+            latest_commit = (
+                Commit.query.filter(
+                    Commit.repository_id == repository_id,
+                    Commit.path == file_path,
+                    Commit.commit_id == diff_cache.latest_commit_id,
+                )
+                .order_by(Commit.commit_time.desc(), Commit.id.desc())
+                .first()
+            )
+        except Exception:
+            latest_commit = None
+
+    if latest_commit and _is_deleted_operation(getattr(latest_commit, "operation", None)):
+        previous_commit = None
+        try:
+            previous_commit = (
+                Commit.query.filter(
+                    Commit.repository_id == repository_id,
+                    Commit.path == file_path,
+                    Commit.commit_time < latest_commit.commit_time,
+                )
+                .order_by(Commit.commit_time.desc(), Commit.id.desc())
+                .first()
+            )
+            if previous_commit is None:
+                previous_commit = (
+                    Commit.query.filter(
+                        Commit.repository_id == repository_id,
+                        Commit.path == file_path,
+                        Commit.commit_time == latest_commit.commit_time,
+                        Commit.id < latest_commit.id,
+                    )
+                    .order_by(Commit.id.desc())
+                    .first()
+                )
+        except Exception:
+            previous_commit = None
+        previous_commit_id = (
+            previous_commit.commit_id if previous_commit and previous_commit.commit_id else diff_cache.base_commit_id
+        )
+        return True, previous_commit_id
+
+    # 兜底：数据库缺少最新提交记录时，尝试使用缓存中的操作序列判断
+    if getattr(diff_cache, "merged_diff_data", None):
+        try:
+            merged_payload = json.loads(diff_cache.merged_diff_data)
+            if isinstance(merged_payload, dict):
+                operations = merged_payload.get("operations")
+                commit_ids = merged_payload.get("commit_ids")
+                if isinstance(operations, list) and operations and _is_deleted_operation(operations[-1]):
+                    previous_commit_id = None
+                    if isinstance(commit_ids, list) and len(commit_ids) >= 2:
+                        previous_commit_id = commit_ids[-2]
+                    if not previous_commit_id:
+                        previous_commit_id = diff_cache.base_commit_id
+                    return True, previous_commit_id
+        except Exception:
+            pass
+
+    return False, None
+
+
+def _render_weekly_deleted_excel_notice(config, file_path, previous_commit_id):
+    """复用提交页删除提示语义，展示周版本Excel文件已删除提示。"""
+    safe_file_name = escape((file_path or "").split("/")[-1] or file_path or "该文件")
+    previous_html = ""
+    if previous_commit_id:
+        encoded_file_path = quote(file_path or "", safe="")
+        previous_url = (
+            f"/weekly-version-config/{config.id}/file-previous-version"
+            f"?file_path={encoded_file_path}&commit_id={quote(str(previous_commit_id), safe='')}"
+        )
+        previous_html = (
+            "<hr>"
+            "<p class='mb-0'>"
+            "<small class='text-muted'>"
+            f"可以查看 <a href='{previous_url}' class='alert-link' target='_blank'>上一个版本 ({escape(str(previous_commit_id)[:8])})</a> "
+            "来查看删除前的Excel内容。"
+            "</small>"
+            "</p>"
+        )
+
+    return (
+        "<div class='p-4 text-center'>"
+        "<div class='alert alert-warning mb-4'>"
+        "<i class='bi bi-trash fs-1 mb-3 d-block text-warning'></i>"
+        "<h5 class='alert-heading'>Excel文件已删除</h5>"
+        f"<p class='mb-0'>{safe_file_name} 在该周版本中已被删除。</p>"
+        f"{previous_html}"
+        "</div>"
+        "</div>"
+    )
+
 def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_recalculate=False):
     """生成周版本Excel文件的合并diff HTML内容"""
     try:
         repository = config.repository
+        is_deleted, previous_commit_id = _resolve_weekly_deleted_excel_state(config, diff_cache, file_path)
+        if is_deleted:
+            log_print(f"周版本Excel文件已删除，返回删除提示: {file_path}", 'WEEKLY')
+            return _render_weekly_deleted_excel_notice(config, file_path, previous_commit_id)
         if not force_recalculate:
             try:
                 cached_html = _weekly_excel_cache_service.get_cached_html(

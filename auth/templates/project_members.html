@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}项目成员管理 - {{ project.name }} - Diff确认平台{% endblock %}
 
@@ -426,7 +426,7 @@
                             </button>
                         </td>
                         <td class="text-muted" style="font-size: 0.82rem;">
-                            {{ m.joined_at.strftime('%Y-%m-%d') if m.joined_at else '-' }}
+                            {{ format_beijing_time(m.joined_at, '%Y-%m-%d') if m.joined_at else '-' }}
                         </td>
                         <td class="text-end">
                             <div class="btn-group">
@@ -810,3 +810,4 @@ function escapeHtml(str) {
 document.addEventListener('DOMContentLoaded', loadPreAssignments);
 </script>
 {% endblock %}
+

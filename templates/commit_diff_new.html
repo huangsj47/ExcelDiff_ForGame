@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}差异确认 - {{ commit.path }}{% endblock %}
 
@@ -70,7 +70,7 @@
                     <div class="version-info">
                         <h6 class="text-muted mb-2">当前版本</h6>
                         <div><strong>提交ID:</strong> <code>{{ commit.commit_id[:8] }}</code></div>
-                        <div><strong>提交时间:</strong> {{ commit.commit_time.strftime('%Y-%m-%d %H:%M:%S') if commit.commit_time else '无' }}</div>
+                        <div><strong>提交时间:</strong> {{ format_beijing_time(commit.commit_time, '%Y-%m-%d %H:%M:%S') if commit.commit_time else '无' }}</div>
                         <div><strong>提交者:</strong> {{ commit.author | e or '无' }}</div>
                         {% if commit.message %}
                         <div><strong>提交信息:</strong> {{ commit.message | e }}</div>
@@ -134,7 +134,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/diff-handlers.js') }}?v=2.0"></script>
+<script src="{{ url_for('static', filename='js/diff-handlers.js') }}?v=2.2"></script>
 <script>
 // 状态更新函数
 function updateCommitStatus(commitId, status) {
@@ -325,3 +325,4 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 {% endblock %}
+
