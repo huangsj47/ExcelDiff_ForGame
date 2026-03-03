@@ -43,7 +43,7 @@ class TestExcelAndCacheStaticChecks:
         assert "logs_query\n                .order_by(OperationLog.created_at.desc())" in content
 
     def test_weekly_cache_status_reset_uses_previous_latest_commit(self):
-        content = _read("app.py")
+        content = _read("services/weekly_version_logic.py")
         assert "previous_latest_commit_id = existing_cache.latest_commit_id" in content
         assert "if previous_latest_commit_id != latest_commit.commit_id:" in content
 

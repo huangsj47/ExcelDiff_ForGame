@@ -49,11 +49,11 @@ class TestWeeklySyncScheduler:
 
     def test_scheduler_uses_naive_datetime_for_comparison(self):
         """调度器应使用 naive datetime 而非 UTC-aware datetime 做比较"""
-        content = _read_source("app.py")
+        content = _read_source("services/task_worker_service.py")
         # schedule_weekly_sync_tasks 函数中不应出现
         # datetime.now(timezone.utc) 用于与 config 时间比较
         func_start = content.find("def schedule_weekly_sync_tasks")
-        func_end = content.find("\n# 设置定时任务", func_start)
+        func_end = content.find("\ndef ", func_start + 10)
         func_body = content[func_start:func_end]
         # 关键修复：应使用 datetime.now() 而非 datetime.now(timezone.utc)
         assert "now_local = datetime.now()" in func_body, \
@@ -63,9 +63,9 @@ class TestWeeklySyncScheduler:
 
     def test_stale_task_detection_uses_naive_time(self):
         """卡死任务检测应使用 naive 本地时间比较"""
-        content = _read_source("app.py")
+        content = _read_source("services/task_worker_service.py")
         func_start = content.find("def schedule_weekly_sync_tasks")
-        func_end = content.find("\n# 设置定时任务", func_start)
+        func_end = content.find("\ndef ", func_start + 10)
         func_body = content[func_start:func_end]
         assert "datetime.now() -" in func_body or \
                "(datetime.now() - stale_created)" in func_body, \
@@ -73,12 +73,13 @@ class TestWeeklySyncScheduler:
 
     def test_scheduler_registered_every_2_minutes(self):
         """定时器应注册为每 2 分钟执行"""
-        content = _read_source("app.py")
-        assert "schedule.every(2).minutes.do(schedule_weekly_sync_tasks)" in content
+        # setup_schedule 已拆分到 services/task_worker_service.py
+        content = _read_source("services/task_worker_service.py")
+        assert "every(2).minutes.do(schedule_weekly_sync_tasks)" in content
 
     def test_merged_project_view_uses_naive_now(self):
         """合并项目视图的活跃状态判断应使用 naive 本地时间"""
-        content = _read_source("app.py")
+        content = _read_source("services/weekly_version_logic.py")
         func_start = content.find("def merged_project_view(")
         func_end = content.find("\ndef ", func_start + 10)
         func_body = content[func_start:func_end]
@@ -88,12 +89,12 @@ class TestWeeklySyncScheduler:
 
     def test_create_weekly_sync_task_function_exists(self):
         """create_weekly_sync_task 函数应存在并接受 config_id 参数"""
-        content = _read_source("app.py")
+        content = _read_source("services/task_worker_service.py")
         assert "def create_weekly_sync_task(config_id):" in content
 
     def test_process_weekly_version_sync_function_exists(self):
         """process_weekly_version_sync 函数应存在"""
-        content = _read_source("app.py")
+        content = _read_source("services/weekly_version_logic.py")
         assert "def process_weekly_version_sync(config_id):" in content
 
 
@@ -129,7 +130,7 @@ class TestBackgroundTaskLifecycle:
 
     def test_weekly_sync_task_creation_logic(self):
         """周版本同步任务创建应检查重复"""
-        content = _read_source("app.py")
+        content = _read_source("services/task_worker_service.py")
         func_start = content.find("def create_weekly_sync_task(")
         func_end = content.find("\ndef ", func_start + 10)
         func_body = content[func_start:func_end]
@@ -138,7 +139,7 @@ class TestBackgroundTaskLifecycle:
 
     def test_weekly_sync_task_uses_priority_3(self):
         """周版本同步任务应使用高优先级 3"""
-        content = _read_source("app.py")
+        content = _read_source("services/task_worker_service.py")
         func_start = content.find("def create_weekly_sync_task(")
         func_end = content.find("\ndef ", func_start + 10)
         func_body = content[func_start:func_end]
@@ -146,12 +147,12 @@ class TestBackgroundTaskLifecycle:
 
     def test_worker_handles_weekly_sync_type(self):
         """后台 worker 应能处理 weekly_sync 类型任务"""
-        content = _read_source("app.py")
+        content = _read_source("services/task_worker_service.py")
         assert "elif task['type'] == 'weekly_sync':" in content
 
     def test_worker_updates_task_status_on_complete(self):
         """worker 完成后应更新任务状态"""
-        content = _read_source("app.py")
+        content = _read_source("services/task_worker_service.py")
         assert "update_task_status_with_retry" in content
 
 

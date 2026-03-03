@@ -10,14 +10,14 @@ def _read(path: str) -> str:
 
 class TestWeeklyTodoFollowups:
     def test_weekly_excel_task_dedup_is_enabled(self):
-        content = _read("app.py")
+        content = _read("services/weekly_version_logic.py")
         assert "def create_weekly_excel_cache_task(config_id, file_path):" in content
         assert "BackgroundTask.task_type == 'weekly_excel_cache'" in content
         assert "BackgroundTask.status.in_(['pending', 'processing'])" in content
         assert "跳过重复周版本Excel缓存任务" in content
 
     def test_weekly_excel_html_prefers_merged_cache_payload(self):
-        content = _read("app.py")
+        content = _read("services/weekly_version_logic.py")
         assert "def _load_weekly_excel_diff_from_cache(repository, diff_cache, file_path):" in content
         assert "_extract_excel_diff_from_payload(merged_payload)" in content
         assert "复用周版本缓存中的合并Excel diff" in content

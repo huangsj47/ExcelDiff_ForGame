@@ -30,7 +30,7 @@ def _safe_import_app_or_skip():
 
 class TestRemainingHighPriorityStaticChecks:
     def test_generate_merged_diff_data_no_placeholder_todo(self):
-        content = _read("app.py")
+        content = _read("services/commit_diff_logic.py")
         assert "def generate_merged_diff_data(" in content
         assert "handle_consecutive_commits_merge_internal" in content
         assert "handle_non_consecutive_commits_merge_internal" in content
@@ -59,8 +59,10 @@ class TestRemainingHighPriorityStaticChecks:
         assert "clone_progress" not in content
 
     def test_commit_list_branch_probe_is_async(self):
+        # queue_missing_git_branch_refresh 已拆分到 services/task_worker_service.py
+        tws_content = _read("services/task_worker_service.py")
+        assert "def queue_missing_git_branch_refresh(" in tws_content
         content = _read("app.py")
-        assert "def queue_missing_git_branch_refresh(" in content
         assert "missing_git_branch_repo_ids.append(repo.id)" in content
         assert "queue_missing_git_branch_refresh(project.id, missing_git_branch_repo_ids)" in content
         assert "git_service = ThreadedGitService(repo.url, repo.root_directory, repo.username, repo.token, repo)" not in content
@@ -84,15 +86,17 @@ class TestRemainingHighPriorityStaticChecks:
         assert "repo = db.session.get(Repository, repository_id)" in content
 
     def test_scheduler_runs_pending_with_app_context(self):
-        content = _read("app.py")
+        # run_scheduled_tasks 已拆分到 services/task_worker_service.py
+        content = _read("services/task_worker_service.py")
         assert "def run_scheduled_tasks():" in content
-        assert "with app.app_context():" in content
-        assert "schedule.run_pending()" in content
+        assert "app_context()" in content
+        assert "run_pending()" in content
 
 
 class TestRemainingHighPriorityRuntimeChecks:
     def test_generate_merged_diff_data_segmented_strategy(self, monkeypatch):
-        app_module = _safe_import_app_or_skip()
+        _safe_import_app_or_skip()
+        import services.commit_diff_logic as cdl
 
         repo = SimpleNamespace(id=1, type="git")
         commit_1 = SimpleNamespace(
@@ -114,9 +118,9 @@ class TestRemainingHighPriorityRuntimeChecks:
             repository=repo,
         )
 
-        monkeypatch.setattr(app_module, "are_commits_consecutive_internal", lambda _commits: False)
+        monkeypatch.setattr(cdl, "are_commits_consecutive_internal", lambda _commits: False)
         monkeypatch.setattr(
-            app_module,
+            cdl,
             "handle_non_consecutive_commits_merge_internal",
             lambda _commits: {
                 "type": "segmented_diff",
@@ -125,11 +129,11 @@ class TestRemainingHighPriorityRuntimeChecks:
                 ],
             },
         )
-        monkeypatch.setattr(app_module, "handle_consecutive_commits_merge_internal", lambda _commits: None)
-        monkeypatch.setattr(app_module, "get_commit_pair_diff_internal", lambda *_: {"type": "text", "hunks": []})
-        monkeypatch.setattr(app_module, "get_unified_diff_data", lambda *_: {"type": "text", "hunks": []})
+        monkeypatch.setattr(cdl, "handle_consecutive_commits_merge_internal", lambda _commits: None)
+        monkeypatch.setattr(cdl, "get_commit_pair_diff_internal", lambda *_: {"type": "text", "hunks": []})
+        monkeypatch.setattr(cdl, "_get_unified_diff_data", lambda *_: {"type": "text", "hunks": []})
 
-        result = app_module.generate_merged_diff_data(
+        result = cdl.generate_merged_diff_data(
             repository=repo,
             file_path="foo/bar.txt",
             base_commit=SimpleNamespace(commit_id="base0001"),
@@ -143,7 +147,8 @@ class TestRemainingHighPriorityRuntimeChecks:
         assert result["operations"] == ["M", "M"]
 
     def test_generate_merged_diff_data_operation_signals(self, monkeypatch):
-        app_module = _safe_import_app_or_skip()
+        _safe_import_app_or_skip()
+        import services.commit_diff_logic as cdl
 
         repo = SimpleNamespace(id=2, type="git")
         commit_1 = SimpleNamespace(
@@ -165,12 +170,12 @@ class TestRemainingHighPriorityRuntimeChecks:
             repository=repo,
         )
 
-        monkeypatch.setattr(app_module, "are_commits_consecutive_internal", lambda _commits: True)
-        monkeypatch.setattr(app_module, "handle_consecutive_commits_merge_internal", lambda _commits: {"type": "text", "hunks": []})
-        monkeypatch.setattr(app_module, "get_commit_pair_diff_internal", lambda *_: {"type": "text", "hunks": []})
-        monkeypatch.setattr(app_module, "get_unified_diff_data", lambda *_: {"type": "text", "hunks": []})
+        monkeypatch.setattr(cdl, "are_commits_consecutive_internal", lambda _commits: True)
+        monkeypatch.setattr(cdl, "handle_consecutive_commits_merge_internal", lambda _commits: {"type": "text", "hunks": []})
+        monkeypatch.setattr(cdl, "get_commit_pair_diff_internal", lambda *_: {"type": "text", "hunks": []})
+        monkeypatch.setattr(cdl, "_get_unified_diff_data", lambda *_: {"type": "text", "hunks": []})
 
-        result = app_module.generate_merged_diff_data(
+        result = cdl.generate_merged_diff_data(
             repository=repo,
             file_path="foo/baz.txt",
             base_commit=SimpleNamespace(commit_id="base0002"),

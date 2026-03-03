@@ -56,7 +56,7 @@ class TestApiContractAndPaginationOptimization:
         assert "per_page = min(max(requested_per_page, 1), 200)" in content
 
     def test_weekly_version_per_page_is_limited(self):
-        content = _read("app.py")
+        content = _read("services/weekly_version_logic.py")
         assert "requested_per_page = request.args.get('per_page', 20, type=int) or 20" in content
         assert "per_page = min(max(requested_per_page, 1), 200)" in content
 

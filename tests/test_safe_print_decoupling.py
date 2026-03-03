@@ -20,7 +20,8 @@ def test_safe_print_module_has_no_direct_app_import():
 
 def test_get_app_log_print_returns_none_when_app_not_loaded(monkeypatch):
     monkeypatch.delitem(sys.modules, "app", raising=False)
-    app_log_print, log_level = safe_print_module._get_app_log_print()
+    monkeypatch.delitem(sys.modules, "utils.logger", raising=False)
+    app_log_print, log_level = safe_print_module._get_logger_log_print()
     assert app_log_print is None
     assert log_level == {}
 
