@@ -8,6 +8,7 @@ import json
 import time
 import hashlib
 import threading
+import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List
 from flask import render_template
@@ -36,18 +37,53 @@ class WeeklyExcelCacheService:
         self._LOG_FLUSH_INTERVAL = 60  # 聚合窗口：60秒
         self._project_code_cache = {}  # 项目编号缓存
 
+    def _log_exception(self, context: str, exc: Exception, category: str = "WEEKLY"):
+        """统一异常日志：输出异常类型、消息和完整堆栈。"""
+        detail = f"{context}: {type(exc).__name__}: {exc}"
+        stack = traceback.format_exc()
+        try:
+            from utils.logger import log_print
+            log_print(f"{detail}\n{stack}", category, force=True)
+        except Exception:
+            print(f"[ERROR] {detail}\n{stack}")
+
+    @staticmethod
+    def _normalize_model_results(names, resolved):
+        """规范化 get_runtime_models 返回值，兼容单模型 tuple/plain object。"""
+        if len(names) == 1:
+            if isinstance(resolved, (tuple, list)):
+                if len(resolved) != 1:
+                    raise RuntimeError(
+                        f"get_runtime_models 单对象返回数量异常: expected=1 actual={len(resolved)} names={names}"
+                    )
+                return (resolved[0],)
+            return (resolved,)
+
+        if not isinstance(resolved, (tuple, list)):
+            raise RuntimeError(
+                f"get_runtime_models 多对象返回类型异常: expected tuple/list actual={type(resolved).__name__} names={names}"
+            )
+        if len(resolved) != len(names):
+            raise RuntimeError(
+                f"get_runtime_models 多对象返回数量异常: expected={len(names)} actual={len(resolved)} names={names}"
+            )
+        return tuple(resolved)
+
     def _get_model(self, *names):
         """获取并缓存动态模型引用，避免每个方法都重复调用 get_runtime_models (#38)"""
-        missing = [n for n in names if n not in self._models_cache]
-        if missing:
-            results = get_runtime_models(*missing)
-            if len(missing) == 1:
-                results = (results,)
-            for name, model in zip(missing, results):
-                self._models_cache[name] = model
-        if len(names) == 1:
-            return self._models_cache[names[0]]
-        return tuple(self._models_cache[n] for n in names)
+        try:
+            missing = [n for n in names if n not in self._models_cache]
+            if missing:
+                results = get_runtime_models(*missing)
+                normalized_results = self._normalize_model_results(missing, results)
+                for name, model in zip(missing, normalized_results):
+                    self._models_cache[name] = model
+            if len(names) == 1:
+                return self._models_cache[names[0]]
+            return tuple(self._models_cache[n] for n in names)
+        except Exception as e:
+            self._log_exception(f"加载运行时模型失败 names={names}", e)
+            raise
 
     def generate_cache_key(self, config_id: int, file_path: str, base_commit_id: str, latest_commit_id: str) -> str:
         """生成缓存键（使用 SHA-256 替代 MD5，#36）"""
@@ -72,8 +108,8 @@ class WeeklyExcelCacheService:
                 code = repo.project.code
                 self._project_code_cache[repository_id] = code
                 return code
-        except Exception:
-            pass
+        except Exception as e:
+            self._log_exception(f"获取项目编号失败 repository_id={repository_id}", e)
         self._project_code_cache[repository_id] = None
         return None
 
@@ -129,7 +165,7 @@ class WeeklyExcelCacheService:
             if len(self.operation_logs) > 100:
                 self.operation_logs = self.operation_logs[-100:]
         except Exception as e:
-            print(f"[ERROR] 刷新周版本聚合日志失败: {e}")
+            self._log_exception(f"刷新周版本聚合日志失败 project_code={project_code}", e)
 
     def log_cache_operation(self, message, log_type='info', repository_id=None, config_id=None, file_path=None):
         """记录缓存操作日志到数据库。
@@ -206,11 +242,10 @@ class WeeklyExcelCacheService:
                 self.operation_logs.append(memory_log)
                 if len(self.operation_logs) > 100:
                     self.operation_logs = self.operation_logs[-100:]
-            except:
+            except Exception:
                 pass  # 如果连内存日志都失败，就忽略
 
-            # 使用print而不是log_print，避免循环导入
-            print(f"[ERROR] 记录缓存操作日志失败: {e}")
+            self._log_exception("记录缓存操作日志失败", e)
 
     def _cleanup_old_logs(self):
         """清理超过200条的旧日志（批量DELETE，避免逐行删除）"""
@@ -235,8 +270,7 @@ class WeeklyExcelCacheService:
                 ).delete(synchronize_session=False)
 
         except Exception as e:
-            # 使用print而不是log_print，避免循环导入
-            print(f"[ERROR] 清理旧周版本操作日志失败: {e}")
+            self._log_exception("清理旧周版本操作日志失败", e)
 
     def needs_merged_diff_cache(self, config_id: int, file_path: str) -> bool:
         """判断是否需要合并Diff缓存（只有多次连续提交的Excel文件才需要）"""
@@ -270,7 +304,10 @@ class WeeklyExcelCacheService:
             return existing_cache is None
 
         except Exception as e:
-            print(f"Error in needs_merged_diff_cache: {e}")
+            self._log_exception(
+                f"needs_merged_diff_cache 执行失败 config_id={config_id}, file_path={file_path}",
+                e
+            )
             return False
 
     def get_cached_html(self, config_id: int, file_path: str, base_commit_id: str, latest_commit_id: str) -> Optional[Dict[str, Any]]:
@@ -302,7 +339,10 @@ class WeeklyExcelCacheService:
                 return None
 
         except Exception as e:
-            # 静默处理错误，避免日志污染
+            self._log_exception(
+                f"获取周版本Excel缓存失败 config_id={config_id}, file_path={file_path}",
+                e
+            )
             return None
 
     def save_html_cache(self, config_id: int, repository_id: int, file_path: str,
@@ -358,6 +398,10 @@ class WeeklyExcelCacheService:
 
         except Exception as e:
             self.db.session.rollback()
+            self._log_exception(
+                f"保存周版本Excel缓存失败 config_id={config_id}, repository_id={repository_id}, file_path={file_path}",
+                e
+            )
             return False
 
     def cleanup_expired_cache(self) -> int:
@@ -378,6 +422,7 @@ class WeeklyExcelCacheService:
 
         except Exception as e:
             self.db.session.rollback()
+            self._log_exception("清理过期周版本Excel缓存失败", e)
             return 0
 
     def cleanup_old_cache(self) -> int:
@@ -409,6 +454,7 @@ class WeeklyExcelCacheService:
 
         except Exception as e:
             self.db.session.rollback()
+            self._log_exception("清理超限周版本Excel缓存失败", e)
             return 0
 
     def get_cache_stats(self) -> Dict[str, Any]:
@@ -428,7 +474,8 @@ class WeeklyExcelCacheService:
                     func.sum(func.length(WeeklyVersionExcelCache.html_content))
                 ).filter_by(cache_status='completed').scalar()
                 total_size = size_result or 0
-            except Exception:
+            except Exception as e:
+                self._log_exception("计算周版本Excel缓存总大小失败", e)
                 total_size = 0
 
             return {
@@ -442,6 +489,7 @@ class WeeklyExcelCacheService:
             }
 
         except Exception as e:
+            self._log_exception("获取周版本Excel缓存统计失败", e)
             return {
                 'total_count': 0,
                 'completed_count': 0,
@@ -503,7 +551,8 @@ class WeeklyExcelCacheService:
                     WeeklyVersionExcelCache.cache_status == 'completed'
                 ).scalar()
                 total_size = size_result or 0
-            except Exception:
+            except Exception as e:
+                self._log_exception(f"计算项目周版本Excel缓存总大小失败 project_id={project_id}", e)
                 total_size = 0
 
             return {
@@ -517,6 +566,7 @@ class WeeklyExcelCacheService:
             }
 
         except Exception as e:
+            self._log_exception(f"获取项目周版本Excel缓存统计失败 project_id={project_id}", e)
             return {
                 'total_count': 0,
                 'completed_count': 0,
@@ -539,8 +589,6 @@ class WeeklyExcelCacheService:
             return count
 
         except Exception as e:
-            print(f"❌ 清理周版本Excel缓存失败: {e}")
-            import traceback
-            traceback.print_exc()
+            self._log_exception("清理全部周版本Excel缓存失败", e)
             self.db.session.rollback()
             return 0

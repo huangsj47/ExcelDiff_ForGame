@@ -41,9 +41,17 @@
     .repository-stat-item { background: #fff; border-radius: 6px; padding: 0.6rem 0.875rem; margin-bottom: 0.5rem; border: 1px solid #edf0f4; transition: all 0.2s; }
     .repository-stat-item:hover { box-shadow: 0 2px 6px rgba(0,0,0,0.06); }
     .repository-stat-item:last-child { margin-bottom: 0; }
-    .repository-name { font-size: 0.9rem; color: #334155; font-weight: 600; flex-shrink: 1 !important; min-width: 0 !important; margin-right: 0.75rem !important; }
+    .repository-name { display: flex; align-items: center; gap: 0.35rem; font-size: 0.9rem; color: #334155; font-weight: 600; flex-shrink: 1 !important; min-width: 0 !important; margin-right: 0.75rem !important; }
     .stats-info { font-size: 0.8rem; flex-wrap: nowrap !important; }
     .stat-item { white-space: nowrap; display: flex; align-items: center; gap: 0.2rem; }
+    .branch-tag { display: inline-flex; align-items: center; gap: 3px; font-size: 0.68rem; font-weight: 600; padding: 0.16rem 0.48rem; border-radius: 10px; line-height: 1.1; }
+    .branch-tag i { font-size: 0.58rem; }
+    .branch-tag-master { background: #dcfce7; color: #166534; }
+    .branch-tag-dev { background: #fef3c7; color: #92400e; }
+    .branch-tag-release { background: #dbeafe; color: #1e40af; }
+    .branch-tag-feature { background: #f3e8ff; color: #6b21a8; }
+    .branch-tag-hotfix { background: #fee2e2; color: #991b1b; }
+    .branch-tag-default { background: #e0e7ff; color: #3730a3; }
 
     /* ===== 操作按钮 ===== */
     .stats-action-buttons { position: absolute !important; top: 2.25rem !important; right: 0.875rem !important; bottom: 0 !important; display: flex !important; flex-direction: column !important; gap: 0.4rem !important; align-items: flex-end !important; justify-content: flex-end !important; z-index: 10 !important; width: 150px !important; padding-bottom: 0.6rem !important; pointer-events: none !important; }
@@ -251,6 +259,11 @@
                                             <div class="repository-name">
                                                 <i class="fas fa-{% if config.repository.type == 'git' %}git-alt{% else %}database{% endif %} me-2 text-muted"></i>
                                                 <strong>{{ config.repository.name }}</strong>
+                                                {% set _branch_text = config.branch or '-' %}
+                                                {% set _branch_lower = _branch_text|lower %}
+                                                <span class="branch-tag {% if _branch_lower.startswith('master') %}branch-tag-master{% elif _branch_lower.startswith('dev') or _branch_lower.startswith('develop') %}branch-tag-dev{% elif _branch_lower.startswith('release') %}branch-tag-release{% elif _branch_lower.startswith('feature') %}branch-tag-feature{% elif _branch_lower.startswith('hotfix') %}branch-tag-hotfix{% else %}branch-tag-default{% endif %}">
+                                                    <i class="fas fa-code-branch"></i>{{ _branch_text }}
+                                                </span>
                                             </div>
                                             <div class="stats-info d-flex gap-3">
                                                 <span class="stat-item">
@@ -466,6 +479,16 @@ function renderInactiveVersions() {
     });
 }
 
+function getBranchTagClass(branch) {
+    const lowerBranch = (branch || '').toLowerCase();
+    if (lowerBranch.startsWith('master')) return 'branch-tag-master';
+    if (lowerBranch.startsWith('dev') || lowerBranch.startsWith('develop')) return 'branch-tag-dev';
+    if (lowerBranch.startsWith('release')) return 'branch-tag-release';
+    if (lowerBranch.startsWith('feature')) return 'branch-tag-feature';
+    if (lowerBranch.startsWith('hotfix')) return 'branch-tag-hotfix';
+    return 'branch-tag-default';
+}
+
 function createInactiveVersionHtml(version) {
     const startTime = new Date(version.start_time).toLocaleString('zh-CN');
     const endTime = new Date(version.end_time).toLocaleString('zh-CN');
@@ -487,6 +510,9 @@ function createInactiveVersionHtml(version) {
                 <div class="repository-name">
                     <i class="fas fa-${config.repository.type === 'git' ? 'git-alt' : 'database'} me-2 text-muted"></i>
                     <strong>${config.repository.name}</strong>
+                    <span class="branch-tag ${getBranchTagClass(config.branch)}">
+                        <i class="fas fa-code-branch"></i>${config.branch || '-'}
+                    </span>
                 </div>
                 <div class="stats-info d-flex gap-3">
                     <span class="stat-item">

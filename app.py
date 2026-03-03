@@ -692,14 +692,32 @@ def commit_list(repository_id):
             'current_repo': repository if repository in group_data['repositories'] else group_data['earliest_repo']
         })
     repositories = all_repositories  # 保持向后兼容
+    raw_status_params = [s for s in request.args.getlist('status') if s]
+    normalized_status_list = []
+    for raw_status in raw_status_params:
+        for status_item in re.split(r"[,，]", str(raw_status)):
+            normalized = status_item.strip()
+            if normalized and normalized not in normalized_status_list:
+                normalized_status_list.append(normalized)
+
+    if not normalized_status_list:
+        fallback_status_param = request.args.get('status', '')
+        if fallback_status_param:
+            for status_item in re.split(r"[,，]", str(fallback_status_param)):
+                normalized = status_item.strip()
+                if normalized and normalized not in normalized_status_list:
+                    normalized_status_list.append(normalized)
+
     # 获取筛选参数
     filters = {
         'author': request.args.get('author', ''),
         'path': request.args.get('path', ''),
         'version': request.args.get('version', ''),
         'operation': request.args.get('operation', ''),
-        'status': request.args.get('status', ''),
-        'status_list': [s for s in request.args.getlist('status') if s]  # 过滤空字符串
+        'status': ','.join(normalized_status_list) if normalized_status_list else request.args.get('status', ''),
+        'status_list': normalized_status_list,
+        'start_date': request.args.get('start_date', ''),
+        'end_date': request.args.get('end_date', ''),
     }
     # 获取分页参数
     page = max(1, request.args.get('page', 1, type=int) or 1)
@@ -738,14 +756,8 @@ def commit_list(repository_id):
         query = query.filter(Commit.version.contains(filters['version']))
     if filters['operation']:
         query = query.filter_by(operation=filters['operation'])
-    # 处理状态筛选 - 支持逗号分隔的多状态
-    status_param = request.args.get('status', '')
-    if status_param and ',' in status_param:
-        # 如果status参数包含逗号，说明是多选状态
-        status_list = [s.strip() for s in status_param.split(',') if s.strip()]
-        if status_list:
-            query = query.filter(Commit.status.in_(status_list))
-    elif filters['status_list']:
+    # 处理状态筛选
+    if filters['status_list']:
         query = query.filter(Commit.status.in_(filters['status_list']))
     elif filters['status']:
         query = query.filter_by(status=filters['status'])
@@ -854,6 +866,13 @@ def get_excel_diff_data(commit_id):
         )
         if cached_html:
             log_print(f"✅ 从HTML缓存获取Excel差异: {commit.path}", 'EXCEL')
+            created_at_value = cached_html.get('created_at')
+            if created_at_value and hasattr(created_at_value, 'isoformat'):
+                created_at_iso = created_at_value.isoformat()
+            elif created_at_value:
+                created_at_iso = str(created_at_value)
+            else:
+                created_at_iso = None
             return jsonify({
                 'success': True, 
                 'html_content': cached_html['html_content'],
@@ -861,7 +880,7 @@ def get_excel_diff_data(commit_id):
                 'js_content': cached_html['js_content'],
                 'metadata': cached_html['metadata'],
                 'from_html_cache': True,
-                'created_at': cached_html['created_at'].isoformat() if cached_html['created_at'] else None
+                'created_at': created_at_iso
             })
         # HTML缓存未命中，检查原始数据缓存
         cached_diff = excel_cache_service.get_cached_diff(
@@ -903,11 +922,21 @@ def get_excel_diff_data(commit_id):
         log_print(f"🔄 缓存未命中，开始实时处理Excel文件: {commit.path}", 'INFO')
         # 获取前一个提交
         previous_commit = None
+        from sqlalchemy import and_, or_
         file_commits = Commit.query.filter(
             Commit.repository_id == repository.id,
             Commit.path == commit.path,
-            Commit.commit_time < commit.commit_time
-        ).order_by(Commit.commit_time.desc()).first()
+            or_(
+                Commit.commit_time < commit.commit_time,
+                and_(Commit.commit_time == commit.commit_time, Commit.id < commit.id),
+            )
+        ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
+        if not file_commits:
+            file_commits = Commit.query.filter(
+                Commit.repository_id == repository.id,
+                Commit.path == commit.path,
+                Commit.id < commit.id
+            ).order_by(Commit.id.desc()).first()
         # 使用统一差异服务处理
         diff_data = get_unified_diff_data(commit, file_commits)
         if diff_data and diff_data.get('type') == 'excel':

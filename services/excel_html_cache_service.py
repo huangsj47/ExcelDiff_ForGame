@@ -7,6 +7,7 @@ import json
 import time
 import hashlib
 import threading
+import traceback
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Tuple
 from flask import render_template
@@ -27,18 +28,53 @@ class ExcelHtmlCacheService:
         # 缓存动态导入的模型引用，避免每个方法都重复调用 get_runtime_models (#38)
         self._models_cache: Dict[str, Any] = {}
 
+    def _log_exception(self, context: str, exc: Exception, category: str = "CACHE"):
+        """统一异常日志：输出异常类型、消息和完整堆栈。"""
+        detail = f"{context}: {type(exc).__name__}: {exc}"
+        stack = traceback.format_exc()
+        try:
+            from utils.logger import log_print
+            log_print(f"{detail}\n{stack}", category, force=True)
+        except Exception:
+            print(f"[ERROR] {detail}\n{stack}")
+
+    @staticmethod
+    def _normalize_model_results(names, resolved):
+        """规范化 get_runtime_models 返回值，兼容单模型 tuple/plain object。"""
+        if len(names) == 1:
+            if isinstance(resolved, (tuple, list)):
+                if len(resolved) != 1:
+                    raise RuntimeError(
+                        f"get_runtime_models 单对象返回数量异常: expected=1 actual={len(resolved)} names={names}"
+                    )
+                return (resolved[0],)
+            return (resolved,)
+
+        if not isinstance(resolved, (tuple, list)):
+            raise RuntimeError(
+                f"get_runtime_models 多对象返回类型异常: expected tuple/list actual={type(resolved).__name__} names={names}"
+            )
+        if len(resolved) != len(names):
+            raise RuntimeError(
+                f"get_runtime_models 多对象返回数量异常: expected={len(names)} actual={len(resolved)} names={names}"
+            )
+        return tuple(resolved)
+
     def _get_model(self, *names):
         """获取并缓存动态模型引用 (#38)"""
-        missing = [n for n in names if n not in self._models_cache]
-        if missing:
-            models = get_runtime_models(*missing)
-            if len(missing) == 1:
-                models = (models,)
-            for name, model in zip(missing, models):
-                self._models_cache[name] = model
-        if len(names) == 1:
-            return self._models_cache[names[0]]
-        return tuple(self._models_cache[n] for n in names)
+        try:
+            missing = [n for n in names if n not in self._models_cache]
+            if missing:
+                models = get_runtime_models(*missing)
+                normalized_models = self._normalize_model_results(missing, models)
+                for name, model in zip(missing, normalized_models):
+                    self._models_cache[name] = model
+            if len(names) == 1:
+                return self._models_cache[names[0]]
+            return tuple(self._models_cache[n] for n in names)
+        except Exception as e:
+            self._log_exception(f"加载运行时模型失败 names={names}", e)
+            raise
 
     def generate_cache_key(self, repository_id: int, commit_id: str, file_path: str) -> str:
         """生成缓存键（SHA-256）"""
@@ -68,7 +104,7 @@ class ExcelHtmlCacheService:
                         'css_content': cache_record.css_content,
                         'js_content': cache_record.js_content,
                         'metadata': json.loads(cache_record.cache_metadata) if cache_record.cache_metadata else {},
-                        'created_at': str(cache_record.created_at) if cache_record.created_at else None,
+                        'created_at': cache_record.created_at,
                         'from_cache': True
                     }
                     return result
@@ -76,6 +112,10 @@ class ExcelHtmlCacheService:
                     return None
                 
         except Exception as e:
+            self._log_exception(
+                f"获取HTML缓存失败 repository_id={repository_id}, commit_id={commit_id}, file_path={file_path}",
+                e
+            )
             return None
     
     def save_html_cache(self, repository_id: int, commit_id: str, file_path: str, 
@@ -125,6 +165,10 @@ class ExcelHtmlCacheService:
                 self.db.session.rollback()
             except Exception:
                 pass
+            self._log_exception(
+                f"保存HTML缓存失败 repository_id={repository_id}, commit_id={commit_id}, file_path={file_path}",
+                e
+            )
             return False
     
     def generate_excel_html(self, diff_data: Dict[str, Any]) -> Tuple[str, str, str]:
@@ -140,6 +184,7 @@ class ExcelHtmlCacheService:
             return html_content, css_content, js_content
             
         except Exception as e:
+            self._log_exception("生成Excel HTML失败", e)
             raise
     
     def _render_excel_diff_html(self, diff_data: Dict[str, Any]) -> str:
@@ -158,6 +203,7 @@ class ExcelHtmlCacheService:
                 return html_content
                 
         except Exception as e:
+            self._log_exception("渲染Excel差异模板失败，回退简单HTML", e)
             # 如果模板渲染失败，生成简单的HTML结构
             return self._generate_simple_excel_html(diff_data)
     
@@ -359,6 +405,7 @@ class ExcelHtmlCacheService:
                 self.db.session.rollback()
             except Exception:
                 pass
+            self._log_exception("清理旧版本HTML缓存失败", e)
             return 0
     
     def cleanup_expired_cache(self):
@@ -383,6 +430,7 @@ class ExcelHtmlCacheService:
                 self.db.session.rollback()
             except Exception:
                 pass
+            self._log_exception("清理过期HTML缓存失败", e)
             return 0
     
     def get_cache_statistics(self, repository_id=None):
@@ -424,6 +472,7 @@ class ExcelHtmlCacheService:
                 }
             
         except Exception as e:
+            self._log_exception(f"获取HTML缓存统计失败 repository_id={repository_id}", e)
             return {
                 'total_count': 0,
                 'completed_count': 0,
@@ -480,6 +529,7 @@ class ExcelHtmlCacheService:
                 }
             
         except Exception as e:
+            self._log_exception(f"获取仓库列表HTML缓存统计失败 repository_ids={repository_ids}", e)
             return {
                 'total_count': 0,
                 'completed_count': 0,
@@ -511,4 +561,8 @@ class ExcelHtmlCacheService:
                 self.db.session.rollback()
             except Exception:
                 pass
+            self._log_exception(
+                f"删除HTML缓存失败 repository_id={repository_id}, commit_id={commit_id}, file_path={file_path}",
+                e
+            )
             return 0

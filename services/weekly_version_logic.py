@@ -34,6 +34,7 @@
 import json
 import math
 import os
+import re
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -564,6 +565,7 @@ def merged_project_view(project_id):
         for config in version['configs']:
             config_data = {
                 'id': config.id,
+                'branch': config.branch,
                 'repository': {
                     'name': config.repository.name,
                     'type': config.repository.type
@@ -621,12 +623,61 @@ def weekly_version_files_api(config_id):
         config = WeeklyVersionConfig.query.get_or_404(config_id)
         # 获取该配置的所有diff缓存
         diff_caches = WeeklyVersionDiffCache.query.filter_by(config_id=config_id).all()
+
+        def _parse_confirm_usernames(raw_value):
+            if not raw_value:
+                return []
+
+            usernames = [
+                item.strip() for item in re.split(r"[,，;；|\n\r]+", str(raw_value)) if item and item.strip()
+            ]
+            unique_usernames = []
+            for username in usernames:
+                if username not in unique_usernames:
+                    unique_usernames.append(username)
+            return unique_usernames
+
+        def _abbreviate_username(username):
+            clean_name = (username or '').strip()
+            if not clean_name:
+                return ''
+            return f"{clean_name[:2]}.."
+
+        all_confirm_usernames = set()
+        for cache in diff_caches:
+            all_confirm_usernames.update(_parse_confirm_usernames(cache.status_changed_by))
+
+        username_to_display_name = {}
+        if all_confirm_usernames:
+            try:
+                from auth.models import AuthUser
+                users = AuthUser.query.filter(AuthUser.username.in_(list(all_confirm_usernames))).all()
+                username_to_display_name = {
+                    user.username: (user.display_name or user.username) for user in users
+                }
+            except Exception as e:
+                log_print(f"加载周版本确认用户姓名映射失败，回退为用户名显示: {e}", 'WEEKLY')
+
         files = []
         authors = set()
         for cache in diff_caches:
             # 解析提交者信息
             commit_authors = json.loads(cache.commit_authors) if cache.commit_authors else []
             authors.update(commit_authors)
+
+            confirm_usernames = _parse_confirm_usernames(cache.status_changed_by)
+            confirm_display_names = [
+                username_to_display_name.get(username, username) for username in confirm_usernames
+            ]
+            confirm_user_display = ''
+            confirm_user_title = ''
+            if cache.overall_status in ('confirmed', 'rejected') and confirm_usernames:
+                if config.repository.enable_id_confirmation:
+                    confirm_user_display = ', '.join(_abbreviate_username(username) for username in confirm_usernames)
+                else:
+                    confirm_user_display = ', '.join(confirm_usernames)
+                confirm_user_title = ', '.join(confirm_display_names)
+
             # 解析合并diff数据以获取文件操作信息
             file_operations = []
             if cache.merged_diff_data:
@@ -653,6 +704,8 @@ def weekly_version_files_api(config_id):
                 'commit_times': cache.commit_times,        # 添加提交时间
                 'overall_status': cache.overall_status,
                 'status_changed_by': cache.status_changed_by,  # 操作者用户名
+                'confirm_user_display': confirm_user_display,
+                'confirm_user_title': confirm_user_title,
                 'confirmation_status': cache.confirmation_status,
                 'last_sync_time': cache.last_sync_time.isoformat() if cache.last_sync_time else None,
                 'operations': file_operations,  # 所有操作
@@ -663,7 +716,8 @@ def weekly_version_files_api(config_id):
             'files': files,
             'authors': list(authors),
             'total_files': len(files),
-            'repository_name': config.repository.name
+            'repository_name': config.repository.name,
+            'enable_id_confirmation': bool(config.repository.enable_id_confirmation)
         })
     except Exception as e:
         log_print(f"获取周版本文件列表失败: {e}", 'ERROR', force=True)
@@ -1047,6 +1101,23 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
     """生成周版本Excel文件的合并diff HTML内容"""
     try:
         repository = config.repository
+        if not force_recalculate:
+            try:
+                cached_html = _weekly_excel_cache_service.get_cached_html(
+                    config.id,
+                    file_path,
+                    diff_cache.base_commit_id or '',
+                    diff_cache.latest_commit_id,
+                )
+                if cached_html and cached_html.get('html_content'):
+                    log_print(f"命中周版本Excel HTML缓存: {file_path}", 'WEEKLY')
+                    return cached_html['html_content']
+            except Exception as cache_lookup_error:
+                log_print(
+                    f"查询周版本Excel HTML缓存失败，继续回退计算: {file_path}, 错误: {cache_lookup_error}",
+                    'WEEKLY',
+                    force=True,
+                )
         # 如果强制重新计算，先检查并清理缓存
         if force_recalculate:
             log_print(f"🔄 强制重新计算周版本Excel diff: {file_path}", 'WEEKLY')
@@ -1068,24 +1139,59 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
         else:
             log_print(f"周版本缓存缺少可用Excel合并数据，回退实时计算: {file_path}", 'WEEKLY')
             from sqlalchemy import and_, or_
+            # 优先使用周版本时间窗口内的完整提交集合，避免仅对比首尾提交导致漏掉中间变更
             commits = Commit.query.filter(
-                and_(
-                    Commit.repository_id == repository.id,
-                    Commit.path == file_path,
-                    or_(
-                        Commit.commit_id == diff_cache.base_commit_id,
-                        Commit.commit_id == diff_cache.latest_commit_id
+                Commit.repository_id == repository.id,
+                Commit.path == file_path,
+                Commit.commit_time >= config.start_time,
+                Commit.commit_time <= config.end_time,
+            ).order_by(Commit.commit_time.asc(), Commit.id.asc()).all()
+
+            # 向后兼容：历史缓存缺失时间窗口提交时，回退到首尾提交兜底
+            if not commits:
+                commits = Commit.query.filter(
+                    and_(
+                        Commit.repository_id == repository.id,
+                        Commit.path == file_path,
+                        or_(
+                            Commit.commit_id == diff_cache.base_commit_id,
+                            Commit.commit_id == diff_cache.latest_commit_id
+                        )
                     )
-                )
-            ).order_by(Commit.commit_time.asc()).all()
+                ).order_by(Commit.commit_time.asc(), Commit.id.asc()).all()
             if not commits:
                 return "<div class='alert alert-warning'>未找到相关的Excel提交记录</div>"
 
             log_print(f"回退模式找到 {len(commits)} 个相关提交", 'WEEKLY')
-            if len(commits) == 1:
-                merged_diff_data = get_real_diff_data_for_merge(commits[0])
-            else:
-                merged_diff_data = get_commit_pair_diff_internal(commits[-1], commits[0])
+            base_commit = None
+            if diff_cache.base_commit_id:
+                base_commit = Commit.query.filter(
+                    Commit.repository_id == repository.id,
+                    Commit.path == file_path,
+                    Commit.commit_id == diff_cache.base_commit_id,
+                ).first()
+            if base_commit is None:
+                base_commit = Commit.query.filter(
+                    Commit.repository_id == repository.id,
+                    Commit.path == file_path,
+                    Commit.commit_time < config.start_time,
+                ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
+
+            recomputed_payload = _generate_merged_diff_data(
+                repository=repository,
+                file_path=file_path,
+                base_commit=base_commit,
+                latest_commit=commits[-1],
+                commits=commits,
+            )
+            merged_diff_data = _extract_excel_diff_from_payload(recomputed_payload)
+
+            # 最后兜底：保持旧逻辑兼容
+            if not merged_diff_data:
+                if len(commits) == 1:
+                    merged_diff_data = get_real_diff_data_for_merge(commits[0])
+                else:
+                    merged_diff_data = get_commit_pair_diff_internal(commits[-1], commits[0])
         if not merged_diff_data or merged_diff_data.get('type') != 'excel':
             log_print(f"❌ Excel合并diff数据检查失败:", 'WEEKLY', force=True)
             log_print(f"  - merged_diff_data存在: {merged_diff_data is not None}", 'WEEKLY', force=True)
