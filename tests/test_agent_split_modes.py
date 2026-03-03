@@ -2,6 +2,8 @@ import json
 import uuid
 from types import SimpleNamespace
 
+from auth.models import AuthProjectPreAssignment, AuthUser, AuthUserProject
+from auth.services import register_user
 import services.task_worker_service as task_worker_service
 from agent.config import load_settings
 from agent import executor as agent_executor
@@ -14,7 +16,13 @@ def _uid(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 
-def _register_agent(client, shared_secret: str, agent_code: str, project_code: str | None) -> str:
+def _register_agent(
+    client,
+    shared_secret: str,
+    agent_code: str,
+    project_code: str | None,
+    default_admin_username: str = "admin",
+) -> str:
     project_codes = [project_code] if project_code else []
     response = client.post(
         "/api/agents/register",
@@ -22,7 +30,7 @@ def _register_agent(client, shared_secret: str, agent_code: str, project_code: s
             "agent_code": agent_code,
             "agent_name": f"{agent_code}-name",
             "project_codes": project_codes,
-            "default_admin_username": "admin",
+            "default_admin_username": default_admin_username,
         },
         headers={"X-Agent-Secret": shared_secret},
     )
@@ -445,3 +453,66 @@ def test_collect_agent_metrics_has_expected_fields():
     }
     assert required_keys.issubset(metrics.keys())
     assert int(metrics["cpu_cores"]) >= 1
+
+
+def test_default_admin_username_existing_user_becomes_project_admin(monkeypatch):
+    shared_secret = _uid("secret")
+    agent_code = _uid("agent")
+    project_code = _uid("PADMIN")
+    default_admin_username = _uid("owner")
+    monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
+
+    with app.app_context():
+        create_tables()
+        user, err = register_user(default_admin_username, "pass1234")
+        assert err is None
+        assert user is not None
+
+        with app.test_client() as client:
+            _register_agent(
+                client,
+                shared_secret,
+                agent_code,
+                project_code,
+                default_admin_username=default_admin_username,
+            )
+
+            project = Project.query.filter_by(code=project_code).first()
+            assert project is not None
+            db.session.expire_all()
+            membership = AuthUserProject.query.filter_by(
+                user_id=user.id,
+                project_id=project.id,
+            ).first()
+            assert membership is not None
+            assert membership.role == "admin"
+
+
+def test_default_admin_username_missing_user_creates_pre_assignment(monkeypatch):
+    shared_secret = _uid("secret")
+    agent_code = _uid("agent")
+    project_code = _uid("PPRE")
+    default_admin_username = _uid("future")
+    monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
+
+    with app.app_context():
+        create_tables()
+        with app.test_client() as client:
+            _register_agent(
+                client,
+                shared_secret,
+                agent_code,
+                project_code,
+                default_admin_username=default_admin_username,
+            )
+
+            project = Project.query.filter_by(code=project_code).first()
+            assert project is not None
+            pre = AuthProjectPreAssignment.query.filter_by(
+                username=default_admin_username,
+                project_id=project.id,
+            ).first()
+            assert pre is not None
+            assert pre.role == "admin"
+            assert pre.applied is False
+            assert AuthUser.query.filter_by(username=default_admin_username).first() is None

@@ -220,6 +220,104 @@ def build_agent_node_items():
     return _format_agent_rows(agents, bindings_by_agent_id)
 
 
+def _ensure_default_admin_for_projects(db, default_admin_username: str | None, project_ids: list[int] | None):
+    """确保默认管理员用户拥有目标项目管理员权限（不存在则预分配）。"""
+    username = (default_admin_username or "").strip()
+    normalized_project_ids = sorted({int(pid) for pid in (project_ids or []) if pid})
+    if not username or not normalized_project_ids:
+        return {
+            "mode": "skipped",
+            "username": username,
+            "project_count": len(normalized_project_ids),
+            "added_memberships": 0,
+            "updated_memberships": 0,
+            "created_preassignments": 0,
+            "updated_preassignments": 0,
+        }
+
+    try:
+        from auth.models import AuthProjectPreAssignment, AuthUser, AuthUserProject
+    except Exception as exc:
+        return {
+            "mode": "auth_unavailable",
+            "username": username,
+            "project_count": len(normalized_project_ids),
+            "added_memberships": 0,
+            "updated_memberships": 0,
+            "created_preassignments": 0,
+            "updated_preassignments": 0,
+            "error": str(exc),
+        }
+
+    target_role = "admin"
+    added_memberships = 0
+    updated_memberships = 0
+    created_preassignments = 0
+    updated_preassignments = 0
+
+    existing_user = AuthUser.query.filter_by(username=username).first()
+    if existing_user:
+        for project_id in normalized_project_ids:
+            membership = AuthUserProject.query.filter_by(
+                user_id=existing_user.id,
+                project_id=project_id,
+            ).first()
+            if membership:
+                if membership.role != target_role:
+                    membership.role = target_role
+                    updated_memberships += 1
+                continue
+
+            db.session.add(
+                AuthUserProject(
+                    user_id=existing_user.id,
+                    project_id=project_id,
+                    role=target_role,
+                )
+            )
+            added_memberships += 1
+
+        return {
+            "mode": "existing_user",
+            "username": username,
+            "project_count": len(normalized_project_ids),
+            "added_memberships": added_memberships,
+            "updated_memberships": updated_memberships,
+            "created_preassignments": 0,
+            "updated_preassignments": 0,
+        }
+
+    for project_id in normalized_project_ids:
+        pre = AuthProjectPreAssignment.query.filter_by(
+            username=username,
+            project_id=project_id,
+        ).first()
+        if pre:
+            if pre.role != target_role:
+                pre.role = target_role
+                updated_preassignments += 1
+            continue
+        db.session.add(
+            AuthProjectPreAssignment(
+                username=username,
+                project_id=project_id,
+                role=target_role,
+                applied=False,
+            )
+        )
+        created_preassignments += 1
+
+    return {
+        "mode": "pre_assignment",
+        "username": username,
+        "project_count": len(normalized_project_ids),
+        "added_memberships": 0,
+        "updated_memberships": 0,
+        "created_preassignments": created_preassignments,
+        "updated_preassignments": updated_preassignments,
+    }
+
+
 def _get_agent_by_identity(agent_code: str, agent_token: str):
     AgentNode = get_runtime_models("AgentNode")[0]
     return AgentNode.query.filter_by(agent_code=agent_code, agent_token=agent_token).first()
@@ -411,6 +509,7 @@ def register_agent_node():
         created_projects = []
         idempotent_projects = []
         conflict_projects = []
+        bound_project_ids = []
 
         for spec in project_specs:
             project_code = spec["code"]
@@ -431,11 +530,13 @@ def register_agent_node():
                 )
                 db.session.add(binding)
                 created_projects.append(project_code)
+                bound_project_ids.append(project.id)
                 continue
 
             binding = AgentProjectBinding.query.filter_by(project_id=project.id).first()
             if binding and binding.agent_id == agent.id:
                 idempotent_projects.append(project_code)
+                bound_project_ids.append(project.id)
                 continue
 
             # 严格遵循需求：项目代号已存在且非该 Agent 已绑定场景，禁止覆盖
@@ -454,6 +555,12 @@ def register_agent_node():
                 409,
             )
 
+        default_admin_assignment = _ensure_default_admin_for_projects(
+            db,
+            default_admin_username,
+            bound_project_ids,
+        )
+
         db.session.commit()
         log_print(
             f"Agent 注册成功: {agent_code}, 创建项目={len(created_projects)}, 幂等项目={len(idempotent_projects)}",
@@ -467,6 +574,7 @@ def register_agent_node():
                 "project_binding_count": len(project_specs),
                 "created_project_codes": created_projects,
                 "idempotent_project_codes": idempotent_projects,
+                "default_admin_assignment": default_admin_assignment,
             }
         )
     except Exception as exc:

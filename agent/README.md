@@ -20,6 +20,9 @@ python start_agent.py
 说明：
 - `AGENT_CODE` 可不配置，Agent 启动时会根据 `AGENT_NAME + AGENT_HOST` 自动生成唯一标识。
 - `AGENT_PROJECT_CODES` 允许为空，空时不会自动创建任何项目代号。
+- 若配置 `AGENT_DEFAULT_ADMIN_USERNAME` 且 `AGENT_PROJECT_CODES` 非空：
+  - 该用户会自动成为这些项目的项目管理员；
+  - 若用户尚未注册，会先写入预分配，待其注册/登录后自动生效。
 - Agent 会按配置周期上报 CPU/内存/磁盘/系统信息到平台。
 - `auto_sync` 默认在 Agent 本地执行（拉取仓库日志），结果回传平台入库。
 - 未列入 `AGENT_LOCAL_TASK_TYPES` 的任务会走平台 `execute-proxy` 过渡执行。
