@@ -164,7 +164,7 @@
                         <div class="step-badge"><i class="fas fa-key" style="font-size: 12px;"></i></div>
                         <div class="step-content">
                             <h4>关键列</h4>
-                            <p>能够唯一标识一行数据的列号（从 1 开始），多个列号用英文逗号分隔，如 <code>1,2,3</code>。系统根据关键列匹配新旧版本中的同一行，精确计算行级和单元格级变更。若不填写，默认按行号顺序对齐。</p>
+                            <p>能够唯一标识一行数据的列号（从 <code>1</code> 开始），多个列号用英文逗号分隔，如 <code>1,2,3</code>。系统根据关键列匹配新旧版本中的同一行，精确计算行级和单元格级变更。若不填写，默认按行号顺序对齐。一般以ID作为关键列，如果默认第二列（即B列）为ID，可以设置关键列为 <code>2</code> 。</p>
                         </div>
                     </div>
                     <div class="step-item">
@@ -179,13 +179,6 @@
                         <div class="step-content">
                             <h4>显示重复 ID 提示</h4>
                             <p>勾选后，当 Excel 数据中存在关键列值重复的行时，Diff 页面会高亮提示重复 ID，帮助发现配表中的数据异常。</p>
-                        </div>
-                    </div>
-                    <div class="step-item">
-                        <div class="step-badge"><i class="fas fa-tags" style="font-size: 12px;"></i></div>
-                        <div class="step-content">
-                            <h4>标签选择</h4>
-                            <p>为仓库设置自定义标签，多个标签用英文逗号分隔。标签用于对仓库进行分类和筛选，便于在项目中快速定位目标仓库。</p>
                         </div>
                     </div>
                     <div class="step-item">
