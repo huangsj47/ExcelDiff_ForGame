@@ -108,7 +108,7 @@
                                 </span>
                                 {% if repo.clone_status %}
                                 <br>
-                                <span style="display: inline-block; margin-top: 3px; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.68rem; font-weight: 500; {% if repo.clone_status == 'completed' %}background: #dcfce7; color: #166534;{% elif repo.clone_status == 'cloning' %}background: #dbeafe; color: #1e40af;{% elif repo.clone_status == 'failed' %}background: #fee2e2; color: #991b1b;{% else %}background: #f1f5f9; color: #475569;{% endif %}">
+                                <span class="clone-status-badge" style="display: inline-block; margin-top: 3px; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.68rem; font-weight: 500; {% if repo.clone_status == 'completed' %}background: #dcfce7; color: #166534;{% elif repo.clone_status == 'cloning' %}background: #dbeafe; color: #1e40af;{% elif repo.clone_status == 'failed' %}background: #fee2e2; color: #991b1b;{% else %}background: #f1f5f9; color: #475569;{% endif %}">
                                     {% if repo.clone_status == 'pending' %}⏳ 待克隆{% elif repo.clone_status == 'cloning' %}🔄 克隆中{% elif repo.clone_status == 'completed' %}✓ 已克隆{% elif repo.clone_status == 'failed' %}✗ 失败{% endif %}
                                 </span>
                                 {% endif %}
