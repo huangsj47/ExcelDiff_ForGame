@@ -57,11 +57,11 @@ if exist "requirements.txt" (
     echo [WARN] requirements.txt not found. Skipping dependency installation.
 )
 
-if not exist ".env" (
-    echo [INFO] .env not found. Generating secure defaults...
-    "%PYTHON_EXE%" -c "import pathlib,secrets; fk=secrets.token_urlsafe(48); ap=secrets.token_urlsafe(16); at=secrets.token_urlsafe(32); lines=['# Auto-generated .env for Diff Platform','HOST=0.0.0.0','PORT=8002',f'FLASK_SECRET_KEY={fk}','ADMIN_USERNAME=admin',f'ADMIN_PASSWORD={ap}',f'ADMIN_API_TOKEN={at}','ENABLE_ADMIN_SECURITY=true','AUTH_DEBUG_MODE=false','DB_BACKEND=sqlite','DEBUG_LOG=false','BRANCH_REFRESH_COOLDOWN_SECONDS=120']; pathlib.Path('.env').write_text('\\n'.join(lines)+'\\n', encoding='utf-8'); print(f'  ADMIN_USERNAME=admin'); print(f'  ADMIN_PASSWORD={ap}'); print(f'  ADMIN_API_TOKEN={at}')"
-    if errorlevel 1 (
-        echo [WARN] Auto-generation of .env failed.
+echo [INFO] Ensuring .env exists and format is valid...
+"%PYTHON_EXE%" -m utils.env_bootstrap --env-path ".env"
+if errorlevel 1 (
+    echo [WARN] .env bootstrap failed.
+    if not exist ".env" (
         if exist ".env.simple" (
             copy /Y ".env.simple" ".env" >nul
             if errorlevel 1 (
@@ -74,10 +74,11 @@ if not exist ".env" (
             goto :fail
         )
     ) else (
-        echo [INFO] .env generated successfully.
+        echo [ERROR] .env exists but bootstrap failed. Please check Python traceback.
+        goto :fail
     )
-    echo.
 )
+echo.
 
 echo ========================================
 echo   Starting application...
