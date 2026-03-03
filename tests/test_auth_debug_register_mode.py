@@ -28,6 +28,7 @@ from auth.services import (
     toggle_user_active,
 )
 from models.project import Project
+from utils.db_safety import assert_destructive_db_allowed, reset_sqlalchemy_engine_cache
 
 
 @contextmanager
@@ -38,12 +39,18 @@ def _client():
     app.config["WTF_CSRF_ENABLED"] = False
     app.config["SERVER_NAME"] = "localhost"
     app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{temp_db.name}"
+    reset_sqlalchemy_engine_cache(app)
     os.environ["ADMIN_USERNAME"] = "admin"
     os.environ["ADMIN_PASSWORD"] = "admin123"
     os.environ.setdefault("SECRET_KEY", "test-secret-key-for-debug-register")
 
     with app.app_context():
-        db.engine.dispose()
+        runtime_uri = str(db.engine.url)
+        assert_destructive_db_allowed(
+            database_uri=runtime_uri,
+            action_name="tests/test_auth_debug_register_mode.py::_client setup drop_all",
+            testing=True,
+        )
         db.drop_all()
         db.create_all()
         with app.test_client() as client:
@@ -51,6 +58,12 @@ def _client():
                 sess["_csrf_token"] = "test-csrf-token-debug-register"
             yield client
         db.session.remove()
+        runtime_uri = str(db.engine.url)
+        assert_destructive_db_allowed(
+            database_uri=runtime_uri,
+            action_name="tests/test_auth_debug_register_mode.py::_client teardown drop_all",
+            testing=True,
+        )
         db.drop_all()
         db.engine.dispose()
     try:
@@ -402,9 +415,18 @@ def test_deactivated_user_session_is_not_treated_as_logged_in():
 def test_login_does_not_500_when_auth_tables_missing():
     app.config["TESTING"] = True
     app.config["WTF_CSRF_ENABLED"] = False
+    tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp_db.close()
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{tmp_db.name}"
+    reset_sqlalchemy_engine_cache(app)
 
     with app.app_context():
-        db.engine.dispose()
+        runtime_uri = str(db.engine.url)
+        assert_destructive_db_allowed(
+            database_uri=runtime_uri,
+            action_name="tests/test_auth_debug_register_mode.py::test_login_does_not_500_when_auth_tables_missing",
+            testing=True,
+        )
         db.drop_all()
 
     try:
@@ -426,3 +448,7 @@ def test_login_does_not_500_when_auth_tables_missing():
     finally:
         with app.app_context():
             db.create_all()
+        try:
+            os.unlink(tmp_db.name)
+        except OSError:
+            pass

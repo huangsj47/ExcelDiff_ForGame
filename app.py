@@ -170,6 +170,7 @@ from utils.db_config import (
     get_sqlite_path_from_uri,
     sanitize_database_uri,
 )
+from utils.db_safety import collect_sqlite_runtime_diagnostics
 from urllib.parse import urlparse
 from os import system
 
@@ -2326,6 +2327,40 @@ def create_tables():
                 log_print("✅ 所有必需的表都已创建", 'DB')
         except Exception as e:
             log_print(f"检查最终表状态失败: {e}", 'DB', force=True)
+
+        # 启动诊断：记录 SQLite 文件与空闲页占比，帮助快速识别“文件很大但数据为空”场景
+        try:
+            diag = collect_sqlite_runtime_diagnostics(database_uri)
+            if diag.get("backend") == "sqlite":
+                def _fmt_mb(num_bytes):
+                    try:
+                        return f"{(float(num_bytes) / (1024 * 1024)):.2f}MB"
+                    except Exception:
+                        return "0.00MB"
+
+                log_print(
+                    "SQLite诊断: "
+                    f"path={diag.get('sqlite_path')}, "
+                    f"size={_fmt_mb(diag.get('db_size_bytes', 0))}, "
+                    f"wal={_fmt_mb(diag.get('wal_size_bytes', 0))}, "
+                    f"journal={diag.get('journal_mode')}, "
+                    f"pages={diag.get('page_count')}, "
+                    f"free_pages={diag.get('freelist_count')}, "
+                    f"free_ratio={float(diag.get('free_ratio', 0.0)):.2%}",
+                    'DB',
+                    force=True,
+                )
+                if float(diag.get("free_ratio", 0.0)) >= 0.80:
+                    log_print(
+                        "⚠️ SQLite空闲页占比超过80%，可能发生过大规模删除且未VACUUM；"
+                        "若出现数据缺失请优先核查是否误执行 drop_all/清库脚本。",
+                        'DB',
+                        force=True,
+                    )
+            if diag.get("error"):
+                log_print(f"SQLite诊断失败: {diag.get('error')}", 'DB', force=True)
+        except Exception as e:
+            log_print(f"SQLite启动诊断异常: {e}", 'DB', force=True)
 def clear_version_mismatch_cache():
     """清理版本不匹配的缓存（自动模式）"""
     try:

@@ -10,6 +10,7 @@ import sys
 import threading
 import builtins
 from datetime import datetime
+from glob import glob
 
 # ---------------------------------------------------------------------------
 #  日志级别控制 — 从 .env 读取，默认全部开启
@@ -69,6 +70,17 @@ def _build_log_level() -> dict:
 
 
 LOG_LEVEL = _build_log_level()
+
+
+def _get_log_dir() -> str:
+    """Resolve log directory path.
+
+    LOG_DIR env var can be used by tests to isolate side effects.
+    """
+    override = os.environ.get("LOG_DIR", "").strip()
+    if override:
+        return os.path.abspath(override)
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
 
 
 # 保存原始print函数 — 必须使用 sys.stdout.write 来确保不递归
@@ -171,7 +183,7 @@ def log_print(message, log_type='INFO', force=False):
         """安全地输出到文件，避免阻塞操作"""
         try:
             # 确保日志目录存在
-            log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+            log_dir = _get_log_dir()
             if not os.path.exists(log_dir):
                 os.makedirs(log_dir, exist_ok=True)
             log_file = os.path.join(log_dir, 'runlog.log')
@@ -225,19 +237,44 @@ def log_print(message, log_type='INFO', force=False):
             pass
 
 
+def _rotate_log_backups(log_file: str, max_backups: int = 10) -> None:
+    """Rotate current log file to timestamped backup and trim old backups."""
+    if not os.path.exists(log_file):
+        return
+
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    backup_base = f"{log_file}.bak.{timestamp}"
+    backup_path = backup_base
+    serial = 1
+    while os.path.exists(backup_path):
+        backup_path = f"{backup_base}_{serial}"
+        serial += 1
+
+    os.replace(log_file, backup_path)
+
+    backup_pattern = f"{log_file}.bak.*"
+    backup_files = sorted(glob(backup_pattern))
+    if len(backup_files) > max_backups:
+        for old_file in backup_files[: len(backup_files) - max_backups]:
+            try:
+                os.remove(old_file)
+            except OSError:
+                pass
+
+
 def clear_log_file():
-    """清空运行日志文件"""
+    """启动时轮转运行日志，并保留最多10个历史备份。"""
     try:
-        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+        log_dir = _get_log_dir()
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
         log_file = os.path.join(log_dir, 'runlog.log')
-        # 清空文件内容
-        with open(log_file, 'w', encoding='utf-8') as f:
-            f.write('')
-        _original_print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]日志文件已清空: {log_file}")
+        _rotate_log_backups(log_file, max_backups=10)
+        with open(log_file, 'w', encoding='utf-8'):
+            pass
+        _original_print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]日志文件已轮转并初始化: {log_file}")
     except Exception as e:
-        _original_print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]清空日志文件失败: {e}")
+        _original_print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]轮转日志文件失败: {e}")
 
 
 def safe_log_print(*args, **kwargs):

@@ -8,11 +8,44 @@ import builtins
 import sys
 import os
 import io
+import tempfile
+import atexit
 
 # ── 在任何测试 import app 之前，保存原始 I/O 对象 ──
 _real_stdout = sys.stdout
 _real_stderr = sys.stderr
 _real_print = builtins.print
+_created_test_db_path = None
+
+
+def _ensure_test_sqlite_db_env():
+    """Force tests to use an isolated sqlite file, not instance/diff_platform.db."""
+    global _created_test_db_path
+
+    # Respect explicit user override
+    if os.environ.get("SQLITE_DB_PATH"):
+        return
+
+    tmp_file = tempfile.NamedTemporaryFile(prefix="diff_platform_test_", suffix=".db", delete=False)
+    tmp_file.close()
+    _created_test_db_path = tmp_file.name
+    os.environ["DB_BACKEND"] = "sqlite"
+    os.environ["SQLITE_DB_PATH"] = _created_test_db_path
+
+
+def _cleanup_test_sqlite_db():
+    """Best-effort cleanup of temp sqlite files created for tests."""
+    if not _created_test_db_path:
+        return
+    for path in (_created_test_db_path, f"{_created_test_db_path}-wal", f"{_created_test_db_path}-shm"):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
+atexit.register(_cleanup_test_sqlite_db)
 
 
 def _guard_io():
@@ -47,6 +80,7 @@ def pytest_configure(config):
     """pytest 初始化最早阶段，设置环境变量阻止 app.py 的 IO 副作用"""
     # 告诉 app.py 不要修改 stdout（如果 app.py 支持的话）
     os.environ.setdefault("TESTING", "1")
+    _ensure_test_sqlite_db_env()
     _guard_io()
 
 

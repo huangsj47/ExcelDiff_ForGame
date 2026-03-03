@@ -40,6 +40,7 @@ os.environ["AUTH_DEBUG_MODE"] = "false"
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-e2e")
 
 from app import app, db  # noqa: E402
+from utils.db_safety import assert_destructive_db_allowed, reset_sqlalchemy_engine_cache  # noqa: E402
 
 # ── 统计 ──
 _passed = 0
@@ -95,12 +96,16 @@ def _client():
     # 使 enforce_csrf 不拦截测试请求：通过在 session 中预设 token
     # 更直接的方式：用 SQLALCHEMY_DATABASE_URI 切换到临时数据库
     app.config["SQLALCHEMY_DATABASE_URI"] = _TMP_DB_URI
+    reset_sqlalchemy_engine_cache(app)
 
     # 重新绑定引擎到临时数据库
     with app.app_context():
-        # 使 SQLAlchemy 使用新的 URI
-        db.engine.dispose()
-        # 对于 flask-sqlalchemy>=3，engine 会根据 config 自动重建
+        runtime_uri = str(db.engine.url)
+        assert_destructive_db_allowed(
+            database_uri=runtime_uri,
+            action_name="tests/test_auth_e2e.py::_client setup drop_all",
+            testing=True,
+        )
 
         db.create_all()
         # 初始化默认职能 + 迁移管理员
@@ -115,6 +120,12 @@ def _client():
             yield c
         # 清理
         db.session.remove()
+        runtime_uri = str(db.engine.url)
+        assert_destructive_db_allowed(
+            database_uri=runtime_uri,
+            action_name="tests/test_auth_e2e.py::_client teardown drop_all",
+            testing=True,
+        )
         db.drop_all()
 
 
