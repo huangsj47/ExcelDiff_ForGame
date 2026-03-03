@@ -125,8 +125,11 @@ def weekly_version_batch_confirm_api(config_id):
             ).all()
 
         from services.status_sync_service import StatusSyncService
+        from utils.request_security import _get_current_user
 
         sync_service = StatusSyncService(db)
+        current_user = _get_current_user()
+        operator_username = current_user.username if current_user else None
         updated_count = 0
         sync_results = []
 
@@ -136,6 +139,7 @@ def weekly_version_batch_confirm_api(config_id):
             confirmation_status["dev"] = "confirmed"
             cache.confirmation_status = json.dumps(confirmation_status)
             cache.overall_status = "confirmed"
+            cache.status_changed_by = operator_username
             cache.updated_at = datetime.now(timezone.utc)
             updated_count += 1
             log_print(f"确认文件: {cache.file_path}", "WEEKLY")

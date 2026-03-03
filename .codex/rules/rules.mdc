@@ -1,0 +1,640 @@
+
+---
+description: AI coding guidance and rules for this repository.
+alwaysApply: true
+---
+<rule>
+
+# 配表代码版本 Diff 平台 — AI 编码规则
+
+## 1. 高层架构概览
+
+### 1.1 系统定位
+这是一个 **游戏配表与代码版本 Diff 对比确认平台**，运行于 Flask Web 框架之上。
+核心业务：从 Git/SVN 仓库拉取游戏配表 (Excel) 和代码变更，生成 Diff，
+由 QA/策划/程序多角色进行逐文件确认（Approve / Reject）。
+
+### 1.2 技术栈
+| 层面 | 技术 |
+|------|------|
+| 后端框架 | Flask 2.3.3 + Flask-SQLAlchemy 3.0.5 |
+| 数据库 | SQLite（默认，WAL 模式）/ MySQL（可选） |
+| VCS 集成 | GitPython 3.1.37 / subprocess (SVN) |
+| Excel 解析 | openpyxl 3.1.2 / pandas / xlrd |
+| 认证系统 | 自研 auth 模块（Provider Pattern） |
+| 前端 | Jinja2 模板 + Bootstrap + 原生 JS |
+| 任务调度 | schedule 库 + 自建优先级队列 + threading |
+
+### 1.3 入口点
+- **应用入口**: `app.py` → `if __name__ == '__main__':` 块
+- **启动流程**:
+  1. `clear_log_file()` — 清空日志
+  2. `initialize_app()` — 创建表、启动后台 worker、注册定时任务
+  3. `app.run(debug=False, host=_host, port=_port, use_reloader=False, threaded=True)`
+- **关闭流程**: `cleanup_app()` → `stop_background_task_worker()` + `cleanup_git_processes()`
+- **生产启动命令**: `start.bat` (Windows) / `start.sh` (Linux)
+
+### 1.4 目录结构
+```
+app.py                 # Flask 应用主文件（< 2200 行，勿再增长）
+config.py              # 静态配置常量
+models/                # SQLAlchemy ORM 模型
+  __init__.py           # db = SQLAlchemy() 实例 + 所有模型的统一导出
+  project.py            # Project
+  repository.py         # Repository, GlobalRepositoryCounter
+  commit.py             # Commit
+  cache.py              # DiffCache, ExcelHtmlCache, MergedDiffCache
+  task.py               # BackgroundTask
+  weekly_version.py     # WeeklyVersionConfig, WeeklyVersionDiffCache, WeeklyVersionExcelCache
+  operation_log.py      # OperationLog
+auth/                  # 独立认证模块
+  __init__.py           # init_auth(), get_auth_provider()
+  models.py             # AuthUser, AuthFunction, AuthUserFunction, AuthUserProject, ...
+  providers.py          # AuthProvider(ABC), DatabaseAuthProvider, EnvAuthProvider, CompositeAuthProvider
+  decorators.py         # @require_login, @require_role, @require_project_access, ...
+  routes.py             # /auth/* 蓝图路由
+  services.py           # 业务逻辑: register_user, add_user_to_project, search_users, ...
+services/              # 业务逻辑层（从 app.py 拆分）
+  model_loader.py       # get_runtime_models() — 运行时懒加载模型，防止循环导入
+  git_service.py        # GitService 类
+  svn_service.py        # SVNService 类
+  diff_service.py       # DiffService 类
+  task_worker_service.py # 后台任务 worker 及定时调度
+  weekly_version_logic.py # 周版本 Diff 合并与缓存
+  core_navigation_handlers.py # 主要页面路由处理函数
+  commit_diff_logic.py  # 提交 Diff 合并算法
+  *_helpers.py           # 辅助处理器
+routes/                # Flask Blueprint 路由注册
+utils/                 # 通用工具函数
+  logger.py             # log_print(), _original_print()
+  db_retry.py           # @db_retry 装饰器
+  timezone_utils.py     # utc_to_beijing(), now_utc(), ...
+  request_security.py   # CSRF / 登录检查 / 权限判断
+  security_utils.py     # Fernet 加密/解密凭证
+  path_security.py      # 路径安全校验
+  diff_data_utils.py    # Excel diff 数据清理工具
+templates/             # Jinja2 HTML 模板
+static/                # CSS/JS 静态资源
+tests/                 # pytest 测试
+```
+
+---
+
+## 2. 代码风格与一致性
+
+### 2.1 文件头标准
+所有 Python 文件必须以如下文件头开始：
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+模块简述（中文）
+"""
+```
+
+### 2.2 命名约定
+
+| 类型 | 约定 | 示例 |
+|------|------|------|
+| 文件名 | `snake_case.py` | `weekly_version_logic.py` |
+| 类名 | `PascalCase` | `GitService`, `AuthUser`, `DiffCache` |
+| 函数/方法 | `snake_case` | `get_commit_diff_data()`, `init_default_functions()` |
+| 常量 | `UPPER_SNAKE_CASE` | `DIFF_LOGIC_VERSION`, `SENSITIVE_ENDPOINTS` |
+| 私有/内部函数 | `_leading_underscore` | `_original_print()`, `_has_admin_access()` |
+| 数据库表名 | `snake_case`，auth 模块使用 `auth_` 前缀 | `commits_log`, `auth_users`, `auth_user_projects` |
+| 枚举类 | `PascalCase(str, enum.Enum)` | `PlatformRole`, `ProjectRole`, `RequestStatus` |
+| 蓝图变量 | `xxx_bp` | `auth_bp`, `cache_management_bp` |
+| 配置环境变量 | `UPPER_SNAKE_CASE` | `FLASK_SECRET_KEY`, `DB_BACKEND`, `AUTH_DEBUG_MODE` |
+
+### 2.3 Import 顺序
+严格按以下分组排序，组间空行分隔：
+1. 标准库 (`os`, `sys`, `json`, `threading`, `datetime`, ...)
+2. 第三方库 (`flask`, `sqlalchemy`, `werkzeug`, ...)
+3. 本项目模块 (`models`, `services.*`, `utils.*`, `auth.*`)
+
+### 2.4 类型提示
+- auth 模块中**广泛使用** type hints（`-> Optional[AuthUser]`, `-> tuple[bool, Optional[str]]`）
+- 工具函数 (`utils/`) **必须**使用 type hints
+- 旧代码 (`services/`, `app.py`) 中 type hints 不强制但鼓励
+
+### 2.5 注释风格
+- 模块级用 `"""三引号中文 docstring"""`
+- 行内注释用 `# 中文注释`
+- 类 / 函数的 docstring 保持简洁，使用中文
+
+### 2.6 文件长度限制
+| 级别 | 阈值 | 动作 |
+|------|------|------|
+| ⚠️ WARNING | ≥ 1500 行 | 考虑拆分 |
+| ❌ ERROR | ≥ 2000 行 | **禁止**在该文件新增功能，必须拆分到新文件 |
+
+- 检查命令：`python scripts/check_file_length.py --strict`
+- 拆分策略：业务逻辑 → `services/`；路由 → `routes/`；工具 → `utils/`
+
+---
+
+## 3. 快速参考 — 核心工具函数
+
+### 3.1 日志
+```python
+from utils.logger import log_print, _original_print
+
+log_print(message: str, log_type: str = 'INFO', force: bool = False) -> None
+# log_type 可选值: 'APP', 'ERROR', 'GIT', 'SVN', 'DIFF', 'EXCEL', 'CACHE',
+#                  'TASK', 'WEEKLY', 'SYNC', 'REQUEST', 'API', 'DB', 'CLEANUP', 'PERF', ...
+# force=True 时忽略 LOG_LEVEL 设置，始终输出
+
+_original_print(msg: str) -> None
+# 直接写 sys.stdout，不经过 log_print 和 builtins.print 重载
+# 仅用于启动阶段 TRACE 日志
+```
+
+### 3.2 数据库重试
+```python
+from utils.db_retry import db_retry
+
+@db_retry(max_retries=3, delay=0.1)
+def some_db_operation():
+    ...
+# 捕获 OperationalError("database is locked") 和 PendingRollbackError
+# 指数退避重试
+```
+
+### 3.3 运行时模型加载（防循环导入）
+```python
+from services.model_loader import get_runtime_models, get_runtime_model
+
+db, Project, Repository = get_runtime_models("db", "Project", "Repository")
+Commit = get_runtime_model("Commit")
+# 可解析的名称: db, Project, Repository, GlobalRepositoryCounter, Commit,
+#   DiffCache, ExcelHtmlCache, MergedDiffCache, BackgroundTask,
+#   WeeklyVersionConfig, WeeklyVersionDiffCache, WeeklyVersionExcelCache,
+#   OperationLog, AuthUser, AuthFunction, AuthUserFunction, AuthUserProject,
+#   AuthProjectJoinRequest, AuthProjectCreateRequest
+# 以及 app 模块中的全局对象
+```
+
+### 3.4 时区工具
+```python
+from utils.timezone_utils import utc_to_beijing, now_utc, now_beijing, format_beijing_time
+
+utc_to_beijing(utc_time: Optional[datetime]) -> Optional[datetime]
+now_utc() -> datetime    # datetime.now(timezone.utc)
+now_beijing() -> datetime  # UTC+8
+format_beijing_time(utc_time: Optional[datetime], format_str: str = '%Y/%m/%d %H:%M:%S') -> str
+```
+- **重要**: 数据库中所有时间字段存储 **UTC**，显示时转换为北京时间 (UTC+8)
+- Model 的 `default=lambda: datetime.now(timezone.utc)`
+
+### 3.5 安全工具
+```python
+from utils.security_utils import encrypt_credential, decrypt_credential, sanitize_text, validate_repository_name
+
+encrypt_credential(value: Optional[str]) -> Optional[str]  # Fernet 加密
+decrypt_credential(value: Optional[str]) -> Optional[str]  # Fernet 解密
+
+from utils.path_security import build_repository_local_path
+build_repository_local_path(project_code: str, repository_name: str, repository_id: int, base_dir: str = "repos", strict: bool = False) -> str
+
+from utils.request_security import csrf_token, _has_admin_access, _is_logged_in, _get_current_user, _has_project_access, _has_project_admin_access, _get_accessible_project_ids
+```
+
+### 3.6 CSRF Token（模板中使用）
+```html
+<form method="POST">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+    ...
+</form>
+```
+AJAX 请求中通过 Header 传递：
+```javascript
+fetch(url, {
+    method: 'POST',
+    headers: {
+        'X-CSRF-Token': '{{ csrf_token() }}',
+        'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(data)
+});
+```
+
+### 3.7 Jinja2 全局函数
+以下函数在所有模板中可直接使用（无需 import）：
+```python
+{{ csrf_token() }}                      # CSRF Token
+{{ is_admin() }}                        # 当前用户是否为平台管理员
+{{ is_logged_in() }}                    # 当前用户是否已登录
+{{ get_current_user() }}                # 当前用户 AuthUser 对象或 None
+{{ has_project_access(project_id) }}    # 当前用户是否有该项目的访问权
+{{ has_project_admin_access(project_id) }}  # 当前用户是否为该项目管理员
+{{ get_excel_column_letter(index) }}    # 数字转 Excel 列号 (0→A, 1→B, ...)
+```
+
+---
+
+## 4. 关键常量与枚举
+
+### 4.1 Diff 逻辑版本
+```python
+DIFF_LOGIC_VERSION = "1.8.0"  # 在 app.py 和 config.py 中定义
+# 当 Diff 算法发生变化时必须更新此版本号，触发缓存失效
+```
+
+### 4.2 平台角色
+```python
+class PlatformRole(str, enum.Enum):
+    PLATFORM_ADMIN = "platform_admin"   # 超级管理员
+    PROJECT_ADMIN  = "project_admin"    # 项目管理员
+    NORMAL         = "normal"           # 普通用户
+```
+
+### 4.3 项目角色
+```python
+class ProjectRole(str, enum.Enum):
+    ADMIN  = "admin"    # 项目管理员
+    MEMBER = "member"   # 普通成员
+```
+
+### 4.4 审批状态
+```python
+class RequestStatus(str, enum.Enum):
+    PENDING  = "pending"
+    APPROVED = "approved"
+    DENIED   = "denied"
+```
+
+### 4.5 Commit 状态
+```python
+status: 'pending' | 'confirmed' | 'rejected'
+```
+
+### 4.6 仓库克隆状态
+```python
+clone_status: 'pending' | 'cloning' | 'cloned' | 'failed'
+```
+
+### 4.7 仓库类型
+```python
+type: 'git' | 'svn'
+resource_type: 'table' | 'res' | 'code'
+```
+
+### 4.8 操作类型 (Commit.operation)
+```python
+operation: 'A' (Add) | 'M' (Modify) | 'D' (Delete)
+```
+
+### 4.9 默认职能列表 (auth_functions)
+```
+主QA✦, QA, 主策划, 策划, 主程序, 程序, 主美, 美术, PM, 其他, 管理员
+```
+其中 `主QA✦` 的 `is_lead_qa=True`，拥有此职能的用户自动获得项目管理员身份。
+
+### 4.10 关键环境变量
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `FLASK_SECRET_KEY` | 随机生成 | Flask Session 密钥 |
+| `ADMIN_USERNAME` | admin | 环境变量管理员用户名 |
+| `ADMIN_PASSWORD` | — | 环境变量管理员密码 |
+| `ADMIN_API_TOKEN` | — | API Token 鉴权 |
+| `ENABLE_ADMIN_SECURITY` | true | 是否启用安全校验 |
+| `AUTH_DEBUG_MODE` | false | 注册页面是否显示角色选择 |
+| `DB_BACKEND` | sqlite | 数据库后端 (sqlite/mysql) |
+| `HOST` | 0.0.0.0 | 监听地址 |
+| `PORT` | 8002 | 监听端口 |
+| `BRANCH_REFRESH_COOLDOWN_SECONDS` | 120 | 分支刷新冷却 |
+| `LOG_ALL` | true | 全局日志开关 |
+
+---
+
+## 5. 核心模型快速访问
+
+### 5.1 获取 db 实例
+```python
+from models import db
+# 或在 services 中避免循环导入:
+from services.model_loader import get_runtime_models
+db, = get_runtime_models("db")
+```
+
+### 5.2 获取当前用户
+```python
+# 在路由/视图中:
+from utils.request_security import _get_current_user
+user = _get_current_user()  # -> AuthUser | None
+
+# 在模板中:
+{{ get_current_user() }}
+```
+
+### 5.3 获取用户可访问的项目
+```python
+from utils.request_security import _get_accessible_project_ids
+project_ids = _get_accessible_project_ids()
+# 返回 None 表示平台管理员（可访问所有项目）
+# 返回 [] 表示未登录或无项目
+# 返回 [1, 2, 3] 表示仅可访问这些项目
+```
+
+### 5.4 查询 Repository
+```python
+from models import Repository
+repo = Repository.query.get(repository_id)
+# 敏感字段通过 property 自动解密:
+repo.password  # 自动调用 decrypt_credential()
+repo.token     # 自动调用 decrypt_credential()
+```
+
+---
+
+## 6. 架构模式与约定
+
+### 6.1 依赖注入 (DI) — `configure_*()` 模式
+为避免循环导入，services 模块使用 `configure_xxx()` 函数接收运行时依赖：
+```python
+# services/commit_diff_logic.py
+def configure_commit_diff_logic(*, app_instance, db_instance, ...):
+    global _app, _db, ...
+    _app = app_instance
+    _db = db_instance
+    ...
+
+# app.py 中调用:
+configure_commit_diff_logic(app_instance=app, db_instance=db, ...)
+```
+**规则**: 新增 service 模块时，若需访问 `app` / `db` / 其他 service 实例，
+必须通过 `configure_*()` 注入，不得在模块顶层 `from app import app`。
+
+### 6.2 运行时懒加载 — `model_loader.py`
+```python
+from services.model_loader import get_runtime_models
+db, Commit, Repository = get_runtime_models("db", "Commit", "Repository")
+```
+**规则**: 在 `services/` 内部需要访问 ORM 模型时，
+优先使用 `get_runtime_models()` 而非直接 `from models import ...`（防止启动阶段循环导入）。
+
+### 6.3 Blueprint 端点别名
+蓝图注册的端点通过 `_register_endpoint_aliases()` 自动创建短名称别名：
+```python
+url_for("index")                    # 实际是 core_management_routes.index
+url_for("commit_list", ...)         # 实际是 commit_diff_routes.commit_list_route
+```
+**规则**: 模板和重定向中使用短名称 `url_for("xxx")`，不使用带蓝图前缀的全名。
+
+### 6.4 认证 Provider Pattern
+```
+AuthProvider (ABC)
+  ├── EnvAuthProvider          # 从环境变量读取管理员凭证
+  ├── DatabaseAuthProvider     # 从数据库读取用户信息
+  └── CompositeAuthProvider    # 组合：优先 DB，回退 Env
+```
+**规则**: 不要直接操作 `session["auth_*"]`，通过 Provider 接口访问。
+
+### 6.5 auth 表名前缀
+所有认证模块的数据表使用 `auth_` 前缀：
+```
+auth_users, auth_functions, auth_user_functions,
+auth_user_projects, auth_project_join_requests, auth_project_create_requests
+```
+
+---
+
+## 7. 异步与并发
+
+### 7.1 后台任务 Worker
+- 单线程 worker 从 `PriorityQueue` 消费任务（`task_worker_service.py`）
+- 任务类型：`excel_diff`, `auto_sync`, `weekly_sync`, `weekly_excel_cache`
+- 添加任务：`add_excel_diff_task(repository_id, commit_id, file_path, priority=10)`
+- 停止 worker：`stop_background_task_worker()` → 发送 None sentinel
+
+### 7.2 定时调度
+- 使用 `schedule` 库在独立守护线程运行
+- `setup_schedule()` 注册：
+  - 每天 04:00 清理过期缓存
+  - 每 2 分钟检查周版本同步
+  - 每 10 分钟自动同步仓库新提交
+- 线程入口：`start_scheduler()` → `run_scheduled_tasks()`
+
+### 7.3 线程安全注意事项
+- SQLite 使用 WAL 模式 + `@db_retry` 装饰器处理 `database is locked`
+- `threading.Lock()` 用于 `_task_paused` 标志（`background_task_service.py`）
+- Git 进程通过 `active_git_processes` 集合跟踪，关闭时 `cleanup_git_processes()`
+
+### 7.4 线程池
+- `ThreadedGitService` 使用 `ThreadPoolExecutor(max_workers=CPU_COUNT+4)` 并行处理 commit 历史
+- 确保在 `__del__` 或 `cleanup_thread_pool()` 中释放
+
+---
+
+## 8. 生命周期管理
+
+### 8.1 应用生命周期
+```
+app.py __main__
+  → clear_log_file()
+  → initialize_app()
+    → db.create_all()                # 创建/迁移数据库表
+    → init_default_functions()       # 初始化默认职能
+    → migrate_env_admin_to_db()      # 迁移环境变量管理员到数据库
+    → configure_*() 系列              # DI 注入
+    → start_background_task_worker() # 启动后台 worker
+    → setup_schedule()               # 注册定时任务
+    → start_scheduler()              # 启动调度线程
+    → cleanup_pending_deletions()    # 清理待删除的仓库目录
+  → app.run(...)
+  → cleanup_app()                    # atexit / signal handler
+    → stop_background_task_worker()
+    → cleanup_git_processes()
+```
+
+### 8.2 关键规则
+- **init 顺序**: `db.create_all()` 必须在 `init_default_functions()` **之前**，
+  否则会触发 `sqlite3.OperationalError: no such table: auth_functions`
+- **清理**: 所有后台线程必须设为 `daemon=True`，确保主进程退出时自动终止
+- **信号处理**: `SIGINT` / `SIGTERM` → `cleanup_app()` → `os._exit(0)`
+
+---
+
+## 9. 性能约定
+
+### 9.1 数据库查询
+- **禁止**在循环中执行 N+1 查询；使用 `joinedload()` 或批量查询
+- 大量用户场景（万级）使用分页 API + 异步搜索（参考 `search_users()`）
+- SQLite 配置：`set_sqlite_pragma()` → `journal_mode=WAL`, `synchronous=NORMAL`
+
+### 9.2 缓存策略
+- Excel Diff 缓存在数据库表 (`DiffCache`, `ExcelHtmlCache`, `WeeklyVersionExcelCache`)
+- 缓存通过 `DIFF_LOGIC_VERSION` 失效：版本不匹配时自动清理
+- 缓存清理定时任务每天 04:00 运行
+
+### 9.3 前端性能
+- 大数据集用户选择组件：使用 **异步搜索 + 300ms 防抖 + 分页加载** 模式
+  （不可加载全量用户到 `<select>` 中）
+- Excel Diff HTML 预渲染缓存到数据库，避免每次重新生成
+
+---
+
+## 10. 错误处理
+
+### 10.1 API 响应格式
+```python
+# 成功
+return jsonify({"success": True, "message": "操作成功", "data": {...}}), 200
+
+# 失败
+return jsonify({"success": False, "message": "错误描述"}), 400  # / 401 / 403 / 404 / 500
+```
+
+### 10.2 数据库操作
+```python
+try:
+    db.session.add(obj)
+    db.session.commit()
+except Exception as e:
+    db.session.rollback()
+    log_print(f"数据库操作失败: {e}", 'ERROR', force=True)
+    raise
+```
+
+### 10.3 VCS 操作
+Git/SVN 操作必须处理以下情况：
+- 网络超时 (timeout 参数，默认 300 秒)
+- 认证失败
+- 仓库不存在或已损坏
+- 回退策略：`_fallback_to_fresh_clone()`
+
+---
+
+## 11. 安全约定
+
+### 11.1 CSRF 保护
+- 所有 POST/PUT/DELETE 请求必须携带 CSRF Token
+- 表单中使用 `<input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">`
+- AJAX 使用 `X-CSRF-Token` Header
+
+### 11.2 认证白名单
+以下端点无需登录：
+```python
+AUTH_EXEMPT_ENDPOINTS = {'static', 'admin_login', 'admin_logout',
+    'auth_bp.login', 'auth_bp.register', 'auth_bp.logout', 'help_page', 'test'}
+AUTH_EXEMPT_PATHS = ('/static/', '/auth/login', '/auth/register', '/auth/logout', '/help')
+```
+
+### 11.3 凭证存储
+- 仓库密码和 Token 使用 Fernet 对称加密存储 (`_password`, `_token` 列)
+- 通过 `@property` 自动解密，`@setter` 自动加密
+- 密钥来源：`CREDENTIAL_ENCRYPTION_KEY` 环境变量 → 回退 `FLASK_SECRET_KEY`
+
+### 11.4 管理员自保护
+- 平台管理员**不能禁用自己的账号**（在 `toggle_user_active()` 中检查）
+
+---
+
+## 12. 测试
+
+### 12.1 运行测试
+```bash
+# 运行全部测试
+python -m pytest tests/ -q
+
+# 运行单个测试文件
+python -m pytest tests/test_auth_e2e.py -v
+
+# 运行单个测试函数
+python -m pytest tests/test_auth_e2e.py::test_login_success -v
+```
+
+### 12.2 测试环境配置
+- 环境变量 `TESTING=1` 自动由 `conftest.py` 设置
+- 该标志会**跳过** `builtins.print` 重载和 `sys.stdout` 重包装
+- pytest.ini: `addopts = -s --tb=short`
+
+### 12.3 测试文件模板
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+测试模块简述
+"""
+
+import os
+import pytest
+
+# 确保测试环境标志已设置
+os.environ.setdefault("TESTING", "1")
+
+
+class TestXxxFeature:
+    """Xxx 功能测试"""
+
+    def setup_method(self):
+        """每个测试前的准备"""
+        # 如需 Flask app context:
+        from app import app, db
+        self.app = app
+        self.client = app.test_client()
+        with app.app_context():
+            db.create_all()
+
+    def teardown_method(self):
+        """每个测试后的清理"""
+        pass
+
+    def test_xxx_success(self):
+        """测试 xxx 正常情况"""
+        assert True
+
+    def test_xxx_edge_case(self):
+        """测试 xxx 边界情况"""
+        assert True
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
+```
+
+---
+
+## 13. 新增模块检查清单
+
+### 新增 Service
+- [ ] 文件放在 `services/` 目录
+- [ ] 如需 `app` / `db` 等运行时对象 → 实现 `configure_xxx()` 函数
+- [ ] 在 `app.py` 的 `initialize_app()` 中调用 `configure_xxx()`
+- [ ] 使用 `get_runtime_models()` 获取 ORM 模型
+- [ ] 添加对应测试文件 `tests/test_xxx.py`
+
+### 新增 Route
+- [ ] 创建 Blueprint 文件 `routes/xxx_routes.py`
+- [ ] 在 `app.py` 中注册 Blueprint
+- [ ] 将蓝图前缀加入 `_bp_prefixes` 列表（如需端点别名）
+- [ ] POST 路由必须校验 CSRF Token
+- [ ] 管理员路由加入 `SENSITIVE_ENDPOINTS` 集合
+
+### 新增 Model
+- [ ] 文件放在 `models/` 目录
+- [ ] 在 `models/__init__.py` 中导出
+- [ ] auth 相关表使用 `auth_` 前缀
+- [ ] 时间字段使用 `default=lambda: datetime.now(timezone.utc)`
+- [ ] 在 `model_loader.py` 的 `_MODEL_OBJECT_NAMES` 中注册
+
+### 新增前端页面
+- [ ] 模板放在 `templates/` 或 `auth/templates/`
+- [ ] 继承 `base.html`：`{% extends "base.html" %}`
+- [ ] 表单包含 CSRF Token hidden input
+- [ ] AJAX 请求包含 `X-CSRF-Token` Header
+
+---
+
+## 14. 禁止事项
+
+1. **禁止**在 `app.py` 中新增功能代码（已超 2000 行），必须拆分到 `services/` 或 `routes/`
+2. **禁止**在 `services/` 模块顶层 `from app import app`（使用 DI 或 model_loader）
+3. **禁止**在模板中硬编码管理员密码或 API Token
+4. **禁止**返回未经清理的用户输入（XSS 防护：使用 `sanitize_text()`）
+5. **禁止**在循环中单条查询数据库（N+1 问题）
+6. **禁止**在数据库中存储明文密码（使用 `werkzeug.security.generate_password_hash`）
+7. **禁止**在生产代码中使用 `print()` 替代 `log_print()`（`print` 已被重载为 `safe_log_print`）
+8. **禁止**在不同文件中重复定义 `DIFF_LOGIC_VERSION`（使用 `app.py` 中的统一定义）
+
+</rule>

@@ -47,13 +47,14 @@ class StatusSyncService:
             
             updated_count = 0
             for cache in weekly_caches:
+                operator_username = commit.status_changed_by if new_status in ('confirmed', 'rejected') else None
                 # 检查是否为合并diff
                 if self._is_merged_diff(cache):
                     # 合并diff需要特殊处理
-                    updated = self._sync_merged_diff_status(cache, commit, new_status)
+                    updated = self._sync_merged_diff_status(cache, commit, new_status, operator_username)
                 else:
                     # 单个提交的diff直接同步
-                    updated = self._sync_single_diff_status(cache, new_status)
+                    updated = self._sync_single_diff_status(cache, new_status, operator_username)
                 
                 if updated:
                     updated_count += 1
@@ -101,12 +102,29 @@ class StatusSyncService:
                 log_print(f"未找到相关的提交记录: {file_path}", 'SYNC')
                 return {'success': True, 'message': '无相关提交记录', 'updated_count': 0}
             
+            # 周版本操作人（由 weekly_version_file_status_api 写入 cache.status_changed_by）
+            operator_username = cache.status_changed_by if new_status in ('confirmed', 'rejected') else None
+
             updated_count = 0
             for commit in related_commits:
+                status_updated = False
+
                 if commit.status != new_status:
                     commit.status = new_status
+                    status_updated = True
+
+                # 同步确认用户（pending 状态清空）
+                if commit.status_changed_by != operator_username:
+                    commit.status_changed_by = operator_username
+                    status_updated = True
+
+                if status_updated:
                     updated_count += 1
-                    log_print(f"更新提交状态: commit_id={commit.id}, path={commit.path}, status={new_status}", 'SYNC')
+                    log_print(
+                        f"更新提交状态: commit_id={commit.id}, path={commit.path}, "
+                        f"status={new_status}, changed_by={operator_username}",
+                        'SYNC'
+                    )
             
             self.db.session.commit()
             
@@ -190,22 +208,23 @@ class StatusSyncService:
         # 如果commit_count > 1，说明是合并diff
         return cache.commit_count > 1
 
-    def _sync_single_diff_status(self, cache, new_status: str) -> bool:
+    def _sync_single_diff_status(self, cache, new_status: str, operator_username: str = None) -> bool:
         """同步单个diff的状态"""
-        if cache.overall_status != new_status:
+        if cache.overall_status != new_status or cache.status_changed_by != operator_username:
             # 更新确认状态
             confirmation_status = json.loads(cache.confirmation_status) if cache.confirmation_status else {}
             confirmation_status['dev'] = new_status
 
             cache.confirmation_status = json.dumps(confirmation_status)
             cache.overall_status = new_status
+            cache.status_changed_by = operator_username
             cache.updated_at = datetime.now(timezone.utc)
 
             log_print(f"更新周版本diff状态: {cache.file_path}, status={new_status}", 'SYNC')
             return True
         return False
 
-    def _sync_merged_diff_status(self, cache, commit, new_status: str) -> bool:
+    def _sync_merged_diff_status(self, cache, commit, new_status: str, operator_username: str = None) -> bool:
         """同步合并diff的状态（复杂逻辑）"""
         # 获取所有相关的提交记录
         related_commits = self._find_related_commits(cache)
@@ -217,17 +236,17 @@ class StatusSyncService:
             all_confirmed = all(c.status == 'confirmed' or c.id == commit.id for c in related_commits)
             log_print(f"所有提交都已确认: {all_confirmed}", 'SYNC')
             if all_confirmed:
-                return self._sync_single_diff_status(cache, 'confirmed')
+                return self._sync_single_diff_status(cache, 'confirmed', operator_username)
         elif new_status == 'rejected':
             # 如果是拒绝状态，直接设置为拒绝
             log_print(f"设置合并diff为拒绝状态", 'SYNC')
-            return self._sync_single_diff_status(cache, 'rejected')
+            return self._sync_single_diff_status(cache, 'rejected', operator_username)
         elif new_status == 'pending':
             # 如果是待确认状态，检查是否有其他提交还是确认状态
             has_confirmed = any(c.status == 'confirmed' and c.id != commit.id for c in related_commits)
             log_print(f"其他提交仍有确认状态: {has_confirmed}", 'SYNC')
             if not has_confirmed:
-                return self._sync_single_diff_status(cache, 'pending')
+                return self._sync_single_diff_status(cache, 'pending', None)
 
         log_print(f"合并diff状态不需要更新", 'SYNC')
         return False
@@ -241,7 +260,7 @@ class StatusSyncService:
 
             # 重置所有提交记录状态
             commit_count = self.db.session.query(Commit).filter(Commit.status != 'pending').update(
-                {'status': 'pending'}, synchronize_session=False
+                {'status': 'pending', 'status_changed_by': None}, synchronize_session=False
             )
 
             # 重置所有周版本diff状态
@@ -337,3 +356,5 @@ class StatusSyncService:
         except Exception as e:
             log_print(f"获取同步映射信息失败: {e}", 'ERROR', force=True)
             return {'success': False, 'message': str(e)}
+
+

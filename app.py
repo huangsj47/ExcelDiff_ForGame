@@ -10,6 +10,7 @@ if os.path.exists(_env_path):
 
 import json
 import math
+import re
 import threading
 import queue
 import time
@@ -753,6 +754,61 @@ def commit_list(repository_id):
         page=page, per_page=per_page, error_out=False
     )
     commits = pagination.items
+
+    def _parse_confirm_usernames(raw_value):
+        if not raw_value:
+            return []
+
+        usernames = [
+            item.strip() for item in re.split(r"[,，;；|\n\r]+", str(raw_value)) if item and item.strip()
+        ]
+        unique_usernames = []
+        for username in usernames:
+            if username not in unique_usernames:
+                unique_usernames.append(username)
+        return unique_usernames
+
+    def _abbreviate_username(username: str) -> str:
+        clean_name = (username or '').strip()
+        if not clean_name:
+            return ''
+        return f"{clean_name[:2]}.."
+
+    # 批量查询确认用户姓名（display_name），避免模板中逐条查询
+    all_confirm_usernames = set()
+    for commit in commits:
+        all_confirm_usernames.update(_parse_confirm_usernames(commit.status_changed_by))
+
+    username_to_display_name = {}
+    if all_confirm_usernames:
+        try:
+            from auth.models import AuthUser
+            users = AuthUser.query.filter(AuthUser.username.in_(list(all_confirm_usernames))).all()
+            username_to_display_name = {
+                user.username: (user.display_name or user.username) for user in users
+            }
+        except Exception as e:
+            log_print(f"加载确认用户姓名映射失败，回退为用户名显示: {e}", 'APP')
+
+    for commit in commits:
+        commit_confirm_users = _parse_confirm_usernames(commit.status_changed_by)
+        commit_confirm_display_names = [
+            username_to_display_name.get(username, username) for username in commit_confirm_users
+        ]
+
+        confirm_users_display = ''
+        confirm_users_title = ''
+        if commit.status in ('confirmed', 'rejected') and commit_confirm_users:
+            if repository.enable_id_confirmation:
+                confirm_users_display = ', '.join(_abbreviate_username(username) for username in commit_confirm_users)
+                confirm_users_title = ', '.join(commit_confirm_display_names)
+            else:
+                confirm_users_display = ', '.join(commit_confirm_users)
+                confirm_users_title = ', '.join(commit_confirm_display_names)
+
+        commit.confirm_users_display = confirm_users_display
+        commit.confirm_users_title = confirm_users_title
+
     # 调试信息
     log_print(f"=== 分页调试信息 ===", 'APP')
     log_print(f"Repository ID: {repository_id}", 'APP')
@@ -1990,35 +2046,61 @@ def inject_template_functions():
         generate_excel_diff_data_url=generate_excel_diff_data_url,
         generate_refresh_diff_url=generate_refresh_diff_url
     )
-def _migrate_repository_columns():
-    """自动为 repository 表补充模型中新增但数据库尚缺的列（SQLite ALTER TABLE）"""
+def _migrate_table_columns(table_name, desired_cols):
+    """自动为指定表补充模型中新增但数据库尚缺的列（SQLite ALTER TABLE）"""
     try:
         insp = inspect(db.engine)
-        if 'repository' not in insp.get_table_names():
+        if table_name not in insp.get_table_names():
             return  # 表还不存在，create_all() 会负责创建
-        existing_cols = {col['name'] for col in insp.get_columns('repository')}
-        # 需要检查的新列及其 DDL 定义
-        desired_cols = {
-            'last_sync_error': 'last_sync_error TEXT',
-            'last_sync_error_time': 'last_sync_error_time DATETIME',
-        }
+        existing_cols = {col['name'] for col in insp.get_columns(table_name)}
         added = []
         for col_name, col_ddl in desired_cols.items():
             if col_name not in existing_cols:
                 from sqlalchemy import text as sa_text
-                db.session.execute(sa_text(f'ALTER TABLE repository ADD COLUMN {col_ddl}'))
+                db.session.execute(sa_text(f'ALTER TABLE {table_name} ADD COLUMN {col_ddl}'))
                 added.append(col_name)
         if added:
             db.session.commit()
-            log_print(f"✅ 自动迁移 repository 表，新增列: {', '.join(added)}", 'DB')
+            log_print(f"✅ 自动迁移 {table_name} 表，新增列: {', '.join(added)}", 'DB')
         else:
-            log_print("ℹ️ repository 表列已完整，无需迁移", 'DB')
+            log_print(f"ℹ️ {table_name} 表列已完整，无需迁移", 'DB')
     except Exception as e:
-        log_print(f"⚠️ repository 表自动迁移失败: {e}", 'DB', force=True)
+        log_print(f"⚠️ {table_name} 表自动迁移失败: {e}", 'DB', force=True)
         try:
             db.session.rollback()
         except Exception:
             pass
+
+
+def _migrate_repository_columns():
+    """自动为 repository 表补充模型中新增但数据库尚缺的列"""
+    _migrate_table_columns(
+        'repository',
+        {
+            'last_sync_error': 'last_sync_error TEXT',
+            'last_sync_error_time': 'last_sync_error_time DATETIME',
+        }
+    )
+
+
+def _migrate_commits_log_columns():
+    """自动为 commits_log 表补充模型中新增但数据库尚缺的列"""
+    _migrate_table_columns(
+        'commits_log',
+        {
+            'status_changed_by': 'status_changed_by VARCHAR(100)',
+        }
+    )
+
+
+def _migrate_weekly_version_diff_cache_columns():
+    """自动为 weekly_version_diff_cache 表补充模型中新增但数据库尚缺的列"""
+    _migrate_table_columns(
+        'weekly_version_diff_cache',
+        {
+            'status_changed_by': 'status_changed_by VARCHAR(100)',
+        }
+    )
 
 
 def create_tables():
@@ -2062,6 +2144,8 @@ def create_tables():
 
         # ---- 自动迁移：为已有表补充缺失列 ----
         _migrate_repository_columns()
+        _migrate_commits_log_columns()
+        _migrate_weekly_version_diff_cache_columns()
 
         # 检查创建后的表状态
         try:

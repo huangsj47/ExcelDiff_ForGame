@@ -451,6 +451,17 @@
     padding: 2px 6px;
 }
 
+.file-confirm-user {
+    color: #64748b;
+    flex-shrink: 0;
+    min-width: 100px;
+    max-width: 100px;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .file-author {
     color: #6c757d;
     flex-shrink: 0;
@@ -1063,6 +1074,7 @@ function renderDirectoryFiles(files) {
         const statusClass = file.overall_status || 'pending';
         const statusText = getStatusText(statusClass);
         const statusBadgeClass = getStatusBadgeClass(statusClass);
+        const confirmUserDisplay = getConfirmUserDisplay(file.status_changed_by);
 
 
 
@@ -1090,8 +1102,8 @@ function renderDirectoryFiles(files) {
                     </div>
                     <div class="file-status">
                         <span class="badge ${statusBadgeClass}">${statusText}</span>
-                        ${file.status_changed_by && statusClass !== 'pending' ? `<br><b style="color:${statusClass === 'confirmed' ? '#059669' : '#FF359A'};font-size:0.68rem;">${file.status_changed_by}</b>` : ''}
                     </div>
+                    <div class="file-confirm-user" title="${confirmUserDisplay}">${confirmUserDisplay}</div>
                     <div class="file-author" title="${uniqueAuthors.join(', ')}">${authorsDisplay}</div>
                     <div class="file-commit-count">
                         <span class="commit-count-badge">${file.commit_count || 0}</span>
@@ -1168,17 +1180,30 @@ function formatAuthorsForTree(authors) {
     return `<span>${authors[0]}</span>`;
 }
 
+function getConfirmUserDisplay(statusChangedBy) {
+    if (!statusChangedBy) {
+        return '';
+    }
+
+    const users = String(statusChangedBy)
+        .split(/[,\uFF0C;\uFF1B|\n\r]+/)
+        .map(user => user.trim())
+        .filter(Boolean);
+
+    return users.join(', ');
+}
+
 function generateStatusButton(filePath, statusClass) {
     const buttonId = `btn-group-${filePath.replace(/[^a-zA-Z0-9]/g, '-')}`;
 
     if (statusClass === 'confirmed') {
-        // 已确认状态：显示白底和-图标，点击可以重置状态
+        // 已确认状态：显示文本按钮，点击可重置
         return `
             <div class="btn-group" role="group" id="${buttonId}">
                 <button type="button" class="btn btn-outline-success btn-action"
                         onclick="updateFileStatusQuick('${filePath}', 'pending')" title="已通过，点击重置"
-                        style="background-color: white; color: #198754; border-color: #198754;">
-                    <i class="bi bi-dash-lg"></i>
+                        style="background-color: white; color: #198754; border-color: #198754; min-width: 64px;">
+                    已通过
                 </button>
                 <button type="button" class="btn btn-outline-secondary btn-action dropdown-toggle dropdown-toggle-split"
                         onclick="showDropdownClone('${buttonId}', '${filePath}')" title="更多操作">
@@ -1187,12 +1212,13 @@ function generateStatusButton(filePath, statusClass) {
             </div>
         `;
     } else if (statusClass === 'rejected') {
-        // 已拒绝状态：显示红色的拒绝按钮，点击可以重置状态
+        // 已拒绝状态：显示文本按钮，点击可重置
         return `
             <div class="btn-group" role="group" id="${buttonId}">
                 <button type="button" class="btn btn-danger btn-action active"
-                        onclick="updateFileStatusQuick('${filePath}', 'pending')" title="已拒绝，点击重置">
-                    <i class="bi bi-x-lg"></i>
+                        onclick="updateFileStatusQuick('${filePath}', 'pending')" title="已拒绝，点击重置"
+                        style="min-width: 64px;">
+                    已拒绝
                 </button>
                 <button type="button" class="btn btn-outline-secondary btn-action dropdown-toggle dropdown-toggle-split"
                         onclick="showDropdownClone('${buttonId}', '${filePath}')" title="更多操作">
@@ -1201,12 +1227,18 @@ function generateStatusButton(filePath, statusClass) {
             </div>
         `;
     } else {
-        // 待确认状态：显示通过和拒绝按钮
+        // 待确认状态：显示文本化通过/拒绝按钮
         return `
             <div class="btn-group" role="group" id="${buttonId}">
                 <button type="button" class="btn btn-success btn-action"
-                        onclick="updateFileStatusQuick('${filePath}', 'confirmed')" title="通过">
-                    <i class="bi bi-check-lg"></i>
+                        onclick="updateFileStatusQuick('${filePath}', 'confirmed')" title="通过"
+                        style="min-width: 52px;">
+                    通过
+                </button>
+                <button type="button" class="btn btn-outline-danger btn-action"
+                        onclick="updateFileStatusQuick('${filePath}', 'rejected')" title="拒绝"
+                        style="min-width: 52px;">
+                    拒绝
                 </button>
                 <button type="button" class="btn btn-outline-secondary btn-action dropdown-toggle dropdown-toggle-split"
                         onclick="showDropdownClone('${buttonId}', '${filePath}')" title="更多操作">
