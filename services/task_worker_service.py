@@ -6,6 +6,7 @@
 """
 
 import atexit
+import os
 import queue
 import signal
 import sys
@@ -59,6 +60,81 @@ EXCEL_TASK_ENQUEUE_COOLDOWN_SECONDS = max(
     5, int(os.environ.get("EXCEL_TASK_ENQUEUE_COOLDOWN_SECONDS", "45") or 45)
 )
 EXCEL_TASK_ENQUEUE_COOLDOWN_MAX_KEYS = 5000
+
+
+def _deployment_mode():
+    return (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
+
+
+def _use_agent_dispatch():
+    return _deployment_mode() in {"platform", "agent"}
+
+
+def _enqueue_agent_task_from_background_task(db_task, extra_payload=None):
+    """将 BackgroundTask 映射为 AgentTask（平台模式）。"""
+    if not _use_agent_dispatch() or db_task is None:
+        return None
+
+    from services.agent_management_handlers import enqueue_agent_task
+
+    task_type = db_task.task_type
+    repository_id = None
+    project_id = None
+    payload = dict(extra_payload or {})
+
+    if task_type in {"excel_diff", "auto_sync"}:
+        repository_id = db_task.repository_id
+        repo = _db.session.get(_Repository, repository_id) if repository_id else None
+        project_id = repo.project_id if repo else None
+        if repo and task_type == "auto_sync":
+            payload["repository"] = {
+                "repository_id": repo.id,
+                "type": repo.type,
+                "url": repo.url,
+                "username": repo.username,
+                "token": repo.token,
+                "branch": repo.branch,
+                "path_regex": repo.path_regex,
+                "log_filter_regex": repo.log_filter_regex,
+                "commit_filter": repo.commit_filter,
+            }
+            payload.setdefault("limit", 1000)
+    elif task_type == "weekly_sync":
+        try:
+            config_id = int(db_task.commit_id)
+        except Exception:
+            config_id = None
+        config = _db.session.get(_WeeklyVersionConfig, config_id) if config_id else None
+        if config:
+            repository_id = config.repository_id
+            project_id = config.project_id
+            payload.setdefault("config_id", config_id)
+    elif task_type == "weekly_excel_cache":
+        config_id = db_task.repository_id
+        config = _db.session.get(_WeeklyVersionConfig, config_id) if config_id else None
+        if config:
+            repository_id = config.repository_id
+            project_id = config.project_id
+            payload.setdefault("config_id", config_id)
+            payload.setdefault("file_path", db_task.file_path)
+
+    if not project_id:
+        return None
+
+    payload.setdefault("background_task_id", db_task.id)
+    payload.setdefault("repository_id", repository_id)
+    payload.setdefault("commit_id", db_task.commit_id)
+    payload.setdefault("file_path", db_task.file_path)
+
+    enqueue_agent_task(
+        task_type=task_type,
+        project_id=project_id,
+        repository_id=repository_id,
+        source_task_id=db_task.id,
+        priority=db_task.priority if db_task.priority is not None else 10,
+        payload=payload,
+    )
+    return True
 
 
 def _make_excel_task_key(repository_id, commit_id, file_path):
@@ -585,6 +661,45 @@ def _handle_weekly_excel_cache_task(task):
                     log_print(f"更新任务状态失败: {update_error}", 'TASK', force=True)
 
 
+def execute_task_inline_for_agent(task_type, payload):
+    """供 Agent 代理调用：在当前进程内直接执行任务逻辑并返回摘要。"""
+    normalized_type = str(task_type or "").strip()
+    payload = payload or {}
+
+    if normalized_type == 'excel_diff':
+        repository_id = payload.get('repository_id')
+        commit_id = payload.get('commit_id')
+        file_path = payload.get('file_path')
+        if not repository_id or not commit_id or not file_path:
+            raise ValueError("excel_diff 任务缺少 repository_id/commit_id/file_path")
+        _excel_cache_service.process_excel_diff_background(repository_id, commit_id, file_path)
+        return {"message": "excel_diff completed"}
+
+    if normalized_type == 'auto_sync':
+        repository_id = payload.get('repository_id')
+        if not repository_id:
+            raise ValueError("auto_sync 任务缺少 repository_id")
+        _handle_auto_sync_task({"repository_id": repository_id})
+        return {"message": "auto_sync completed"}
+
+    if normalized_type == 'weekly_sync':
+        config_id = payload.get('config_id')
+        if not config_id:
+            raise ValueError("weekly_sync 任务缺少 config_id")
+        _process_weekly_version_sync(int(config_id))
+        return {"message": "weekly_sync completed"}
+
+    if normalized_type == 'weekly_excel_cache':
+        config_id = payload.get('config_id')
+        file_path = payload.get('file_path')
+        if not config_id or not file_path:
+            raise ValueError("weekly_excel_cache 任务缺少 config_id/file_path")
+        _process_weekly_excel_cache(int(config_id), file_path)
+        return {"message": "weekly_excel_cache completed"}
+
+    raise ValueError(f"不支持的任务类型: {normalized_type}")
+
+
 # ---------------------------------------------------------------------------
 #  任务创建 / 队列管理
 # ---------------------------------------------------------------------------
@@ -607,15 +722,21 @@ def create_auto_sync_task(repository_id):
             status='pending'
         )
         _db.session.add(new_task)
+        _db.session.flush()
+        _enqueue_agent_task_from_background_task(
+            new_task,
+            extra_payload={"repository_id": repository_id},
+        )
         _db.session.commit()
-        task_data = {
-            'type': 'auto_sync',
-            'repository_id': repository_id,
-            'task_id': new_task.id
-        }
-        task_counter = int(time.time() * 1000000)
-        tw = TaskWrapper(5, task_counter, task_data)
-        background_task_queue.put(tw)
+        if not _use_agent_dispatch():
+            task_data = {
+                'type': 'auto_sync',
+                'repository_id': repository_id,
+                'task_id': new_task.id
+            }
+            task_counter = int(time.time() * 1000000)
+            tw = TaskWrapper(5, task_counter, task_data)
+            background_task_queue.put(tw)
         log_print(f"✅ 为仓库 {repository_id} 创建自动数据分析任务 (ID: {new_task.id})", 'SYNC')
         return new_task.id
     except Exception as e:
@@ -751,21 +872,29 @@ def add_excel_diff_task(repository_id, commit_id, file_path, priority=10, auto_c
         priority=priority
     )
     _db.session.add(task)
+    _db.session.flush()
+    _enqueue_agent_task_from_background_task(
+        task,
+        extra_payload={
+            "repository_id": repository_id,
+            "commit_id": commit_id,
+            "file_path": file_path,
+        },
+    )
     if auto_commit:
         _db.session.commit()
-    else:
-        # 分配 task.id，确保队列任务关联到可追踪的数据库记录
-        _db.session.flush()
-    task_data = {
-        'type': 'excel_diff',
-        'repository_id': repository_id,
-        'commit_id': commit_id,
-        'file_path': file_path,
-        'task_id': task.id
-    }
-    task_counter = int(time.time() * 1000000)
-    tw = TaskWrapper(priority, task_counter, task_data)
-    background_task_queue.put(tw)
+
+    if not _use_agent_dispatch():
+        task_data = {
+            'type': 'excel_diff',
+            'repository_id': repository_id,
+            'commit_id': commit_id,
+            'file_path': file_path,
+            'task_id': task.id
+        }
+        task_counter = int(time.time() * 1000000)
+        tw = TaskWrapper(priority, task_counter, task_data)
+        background_task_queue.put(tw)
     _mark_excel_task_cooldown(task_key)
     priority_text = "高优先级" if priority < 5 else "普通优先级"
     log_print(f"添加Excel差异任务到队列 ({priority_text}): {file_path}", 'EXCEL')
@@ -823,21 +952,34 @@ def add_excel_diff_tasks_batch(repository_id, excel_commits, priority=10):
         inserted_task_map = {
             (task.commit_id, task.file_path): task for task in inserted_tasks
         }
+        requires_agent_dispatch = _use_agent_dispatch()
         for i, (commit_id, file_path) in enumerate(new_task_keys):
             task = inserted_task_map.get((commit_id, file_path))
             if not task:
                 continue
-            task_data = {
-                'type': 'excel_diff',
-                'repository_id': repository_id,
-                'commit_id': task.commit_id,
-                'file_path': task.file_path,
-                'task_id': task.id
-            }
-            task_counter = base_counter + i
-            tw = TaskWrapper(priority, task_counter, task_data)
-            background_task_queue.put(tw)
+            if requires_agent_dispatch:
+                _enqueue_agent_task_from_background_task(
+                    task,
+                    extra_payload={
+                        "repository_id": repository_id,
+                        "commit_id": task.commit_id,
+                        "file_path": task.file_path,
+                    },
+                )
+            else:
+                task_data = {
+                    'type': 'excel_diff',
+                    'repository_id': repository_id,
+                    'commit_id': task.commit_id,
+                    'file_path': task.file_path,
+                    'task_id': task.id
+                }
+                task_counter = base_counter + i
+                tw = TaskWrapper(priority, task_counter, task_data)
+                background_task_queue.put(tw)
             _mark_excel_task_cooldown(_make_excel_task_key(repository_id, task.commit_id, task.file_path))
+        if requires_agent_dispatch:
+            _db.session.commit()
         log_print(f"批量添加了 {len(new_tasks)} 个Excel缓存任务到队列", 'TASK')
 
 
@@ -906,15 +1048,21 @@ def create_weekly_sync_task(config_id):
             status='pending'
         )
         _db.session.add(new_task)
+        _db.session.flush()
+        _enqueue_agent_task_from_background_task(
+            new_task,
+            extra_payload={"config_id": config_id},
+        )
         _db.session.commit()
-        task_data = {
-            'type': 'weekly_sync',
-            'config_id': config_id,
-            'task_id': new_task.id
-        }
-        task_counter = int(time.time() * 1000000)
-        tw = TaskWrapper(3, task_counter, task_data)
-        background_task_queue.put(tw)
+        if not _use_agent_dispatch():
+            task_data = {
+                'type': 'weekly_sync',
+                'config_id': config_id,
+                'task_id': new_task.id
+            }
+            task_counter = int(time.time() * 1000000)
+            tw = TaskWrapper(3, task_counter, task_data)
+            background_task_queue.put(tw)
         log_print(f"创建周版本同步任务: config_id={config_id}, task_id={new_task.id}", 'SYNC')
         return new_task.id
     except Exception as e:

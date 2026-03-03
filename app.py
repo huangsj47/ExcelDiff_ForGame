@@ -40,6 +40,9 @@ from models import (
     WeeklyVersionDiffCache,
     WeeklyVersionExcelCache,
     OperationLog,
+    AgentNode,
+    AgentProjectBinding,
+    AgentTask,
 )
 
 from services.git_service import GitService
@@ -154,6 +157,16 @@ from services.core_navigation_handlers import (
     repository_config,
     test,
 )
+from services.agent_management_handlers import (
+    register_agent_node,
+    agent_heartbeat,
+    list_agent_nodes,
+    list_agent_tasks,
+    agent_claim_task,
+    agent_report_task_result,
+    agent_execute_task_proxy,
+)
+from routes.agent_management_routes import agent_management_bp
 from routes.cache_management_routes import cache_management_bp
 from routes.commit_diff_routes import commit_diff_bp
 from routes.core_management_routes import core_management_bp
@@ -275,6 +288,16 @@ else:
     log_print("ℹ️ 未配置 CORS_ALLOWED_ORIGINS，默认禁用跨域访问。", "APP", force=True)
 CSRF_SESSION_KEY = "_csrf_token"
 ENABLE_ADMIN_SECURITY = os.environ.get("ENABLE_ADMIN_SECURITY", "true").lower() != "false"
+DEPLOYMENT_MODE = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
+if DEPLOYMENT_MODE not in {"single", "platform", "agent"}:
+    log_print(f"⚠️ 非法 DEPLOYMENT_MODE={DEPLOYMENT_MODE}，回退为 single", "APP", force=True)
+    DEPLOYMENT_MODE = "single"
+ENABLE_LOCAL_WORKER = DEPLOYMENT_MODE == "single"
+log_print(
+    f"服务启动模式: {DEPLOYMENT_MODE} | 本地后台任务: {'启用' if ENABLE_LOCAL_WORKER else '禁用'}",
+    "APP",
+    force=True,
+)
 # 始终需要管理员权限的端点（不论请求方法）
 SENSITIVE_ENDPOINTS = {
     'delete_repository',
@@ -335,6 +358,7 @@ AUTH_EXEMPT_PATHS = (
     '/auth/register',
     '/auth/logout',
     '/help',
+    '/api/agents/',
 )
 
 @app.before_request
@@ -375,6 +399,8 @@ def enforce_csrf():
         return None
 
     if request.endpoint in {'static'}:
+        return None
+    if request.path.startswith('/api/agents/'):
         return None
 
     if _is_valid_admin_token():
@@ -461,6 +487,12 @@ try:
 except Exception as e:
     _original_print(f"[TRACE] weekly_version_bp FAILED: {e}")
     import traceback; traceback.print_exc()
+try:
+    app.register_blueprint(agent_management_bp)
+    _original_print("[TRACE] agent_management_bp registered")
+except Exception as e:
+    _original_print(f"[TRACE] agent_management_bp FAILED: {e}")
+    import traceback; traceback.print_exc()
 
 # ---------------------------------------------------------------------------
 # 为所有 Blueprint 端点注册短名称别名，使 url_for('index') 等继续工作
@@ -470,6 +502,7 @@ _bp_prefixes = [
     "commit_diff_routes.",
     "weekly_version_routes.",
     "cache_management.",
+    "agent_management_routes.",
     "main.",
 ]
 
@@ -2308,7 +2341,8 @@ def create_tables():
                 'background_tasks', 'global_repository_counter',
                 'diff_cache', 'excel_html_cache', 'weekly_version_config',
                 'weekly_version_diff_cache', 'weekly_version_excel_cache',
-                'merged_diff_cache', 'operation_log'
+                'merged_diff_cache', 'operation_log',
+                'agent_nodes', 'agent_project_bindings', 'agent_tasks',
             ]
             missing_tables = [t for t in expected_tables if t not in final_tables]
             if missing_tables:
@@ -2434,22 +2468,27 @@ def initialize_app():
                     log_print(f"Auth: 迁移环境变量管理员到数据库: {admin_user.username}", 'AUTH')
         except Exception as e:
             log_print(f"Auth 默认数据初始化跳过: {e}", 'AUTH')
-        # 在应用上下文中启动后台任务工作线程
-        with app.app_context():
-            start_background_task_worker()
-        # 异步清理版本不匹配的缓存（避免阻塞启动）
-        import threading
-        def async_cache_cleanup():
-            try:
-                with app.app_context():
-                    clear_version_mismatch_cache()
-            except Exception as e:
-                log_print(f"异步缓存清理失败: {e}", 'APP', force=True)
-        cleanup_thread = threading.Thread(target=async_cache_cleanup, daemon=True)
-        cleanup_thread.start()
-        log_print("异步缓存清理已启动", 'APP')
-        # 清理待删除的仓库目录
-        cleanup_pending_deletions()
+        if ENABLE_LOCAL_WORKER:
+            # 在应用上下文中启动后台任务工作线程
+            with app.app_context():
+                start_background_task_worker()
+            # 异步清理版本不匹配的缓存（避免阻塞启动）
+            import threading
+
+            def async_cache_cleanup():
+                try:
+                    with app.app_context():
+                        clear_version_mismatch_cache()
+                except Exception as e:
+                    log_print(f"异步缓存清理失败: {e}", 'APP', force=True)
+
+            cleanup_thread = threading.Thread(target=async_cache_cleanup, daemon=True)
+            cleanup_thread.start()
+            log_print("异步缓存清理已启动", 'APP')
+            # 清理待删除的仓库目录
+            cleanup_pending_deletions()
+        else:
+            log_print("当前为 platform/agent 模式，跳过本地后台任务与缓存清理线程", "APP", force=True)
         log_print("应用初始化完成", 'APP')
         _app_initialized = True
     except Exception as e:
@@ -2459,7 +2498,8 @@ def cleanup_app():
     """应用关闭时的清理工作"""
     try:
         # log_print("开始清理应用资源...", 'APP')
-        stop_background_task_worker()
+        if ENABLE_LOCAL_WORKER:
+            stop_background_task_worker()
         cleanup_git_processes()
         # log_print("应用清理完成", 'APP')
     except Exception as e:
@@ -2516,6 +2556,12 @@ if __name__ == '__main__':
     if hasattr(signal, 'SIGTERM'):
         signal.signal(signal.SIGTERM, signal_handler)
     try:
+        if DEPLOYMENT_MODE == "agent":
+            log_print("以 Agent 模式启动（不启动 Flask Web 服务）", "APP", force=True)
+            from agent.runner import run_agent
+
+            run_agent()
+            sys.exit(0)
         # 清空日志文件
         clear_log_file()
         # 初始化应用

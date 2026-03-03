@@ -35,6 +35,7 @@ _LOG_CATEGORIES = [
     'WEEKLY',    # 周版本同步日志
     'SYNC',      # 状态同步日志
     'SCHEDULER', # 定时调度器日志
+    'AGENT',     # Agent 通信/任务日志
     # ---- HTTP / 安全 ----
     'REQUEST',   # HTTP 请求日志
     'API',       # API 调用日志

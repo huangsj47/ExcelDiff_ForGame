@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Agent 管理相关路由。"""
+
+from flask import Blueprint
+
+from services.model_loader import get_runtime_model
+
+
+agent_management_bp = Blueprint("agent_management_routes", __name__)
+
+
+def _dispatch(handler_name, *args, **kwargs):
+    handler = get_runtime_model(handler_name)
+    return handler(*args, **kwargs)
+
+
+@agent_management_bp.route("/api/agents/register", methods=["POST"], endpoint="register_agent_node")
+def register_agent_node_route():
+    return _dispatch("register_agent_node")
+
+
+@agent_management_bp.route("/api/agents/heartbeat", methods=["POST"], endpoint="agent_heartbeat")
+def agent_heartbeat_route():
+    return _dispatch("agent_heartbeat")
+
+
+@agent_management_bp.route("/api/agents", methods=["GET"], endpoint="list_agent_nodes")
+def list_agent_nodes_route():
+    return _dispatch("list_agent_nodes")
+
+
+@agent_management_bp.route("/api/agents/tasks", methods=["GET"], endpoint="list_agent_tasks")
+def list_agent_tasks_route():
+    return _dispatch("list_agent_tasks")
+
+
+@agent_management_bp.route("/api/agents/tasks/claim", methods=["POST"], endpoint="agent_claim_task")
+def agent_claim_task_route():
+    return _dispatch("agent_claim_task")
+
+
+@agent_management_bp.route(
+    "/api/agents/tasks/<int:task_id>/result",
+    methods=["POST"],
+    endpoint="agent_report_task_result",
+)
+def agent_report_task_result_route(task_id):
+    return _dispatch("agent_report_task_result", task_id)
+
+
+@agent_management_bp.route(
+    "/api/agents/tasks/<int:task_id>/execute-proxy",
+    methods=["POST"],
+    endpoint="agent_execute_task_proxy",
+)
+def agent_execute_task_proxy_route(task_id):
+    return _dispatch("agent_execute_task_proxy", task_id)

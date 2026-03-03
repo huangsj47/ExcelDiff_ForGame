@@ -254,10 +254,36 @@ python app.py
 - `SECRET_KEY`
 - `SQLALCHEMY_DATABASE_URI`（默认 SQLite）
 - `DIFF_LOGIC_VERSION`（用于缓存版本控制）
+- `DEPLOYMENT_MODE`（`single`/`platform`/`agent`）
+- `AGENT_SHARED_SECRET`（平台与 agent 通信密钥）
 - 定时任务频率（每日清理 + 每 2 分钟周版本检查）
 - `PERF_METRICS_MAX_EVENTS`（`/admin/performance` 事件窗口总容量，默认 `8000`）
 - `PERF_METRICS_MAX_SCOPE_SHARE`（单分片最大占比，默认 `0.35`）
 - `PERF_METRICS_MIN_SCOPE_EVENTS`（单分片软上限最小值，默认 `300`）
+
+## 平台 + Agent 模式（实验版）
+
+- 平台新增接口：
+  - `POST /api/agents/register`：Agent 注册、自动创建项目代号（若不存在）
+  - `POST /api/agents/heartbeat`：Agent 心跳上报
+  - `GET /api/agents`：查看 Agent 状态（管理员）
+  - `POST /api/agents/tasks/claim`：Agent 领取任务
+  - `POST /api/agents/tasks/<task_id>/execute-proxy`：平台代理执行任务（过渡模式）
+  - `POST /api/agents/tasks/<task_id>/result`：Agent 回传任务结果
+  - `GET /api/agents/tasks`：查看 Agent 任务状态（管理员）
+- 项目代号规则：
+  - 不存在：平台自动创建项目
+  - 已存在且已绑定当前 Agent：幂等通过
+  - 已存在且被其他主体占用：返回冲突，不覆盖
+- 独立 Agent 运行包位于 `agent/`，可单独打包分发：
+  - `python agent/build_zip.py`
+- `DEPLOYMENT_MODE=platform` 时，新增 `excel_diff/auto_sync/weekly_sync` 任务会下发到 `agent_tasks`。
+- 当前执行策略：
+  - `auto_sync`：默认由 Agent 本地执行（拉取 Git 仓库并回传提交清单，平台入库并继续派发 excel_diff）
+  - 其他任务：仍通过 `execute-proxy` 由平台执行（过渡方案）
+- 相关 Agent 配置：
+  - `AGENT_LOCAL_TASK_TYPES=auto_sync`
+  - `AGENT_REPOS_BASE_DIR=agent_repos`
 
 建议在生产环境替换 `SECRET_KEY`，并根据数据规模考虑迁移到 MySQL/PostgreSQL。
 

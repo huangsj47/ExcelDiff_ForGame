@@ -1752,8 +1752,31 @@ def create_weekly_excel_cache_task(config_id, file_path):
             priority=5  # 中等优先级
         )
         db.session.add(new_task)
+        db.session.flush()
+
+        deployment_mode = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
+        if deployment_mode in {"platform", "agent"}:
+            config = WeeklyVersionConfig.query.get(config_id)
+            if config:
+                from services.agent_management_handlers import enqueue_agent_task
+
+                enqueue_agent_task(
+                    task_type='weekly_excel_cache',
+                    project_id=config.project_id,
+                    repository_id=config.repository_id,
+                    source_task_id=new_task.id,
+                    priority=5,
+                    payload={
+                        "config_id": config_id,
+                        "file_path": file_path,
+                        "background_task_id": new_task.id,
+                    },
+                )
         db.session.commit()
         log_print(f"✅ 数据库任务记录创建成功，任务ID: {new_task.id}", 'WEEKLY', force=True)
+        if deployment_mode in {"platform", "agent"}:
+            log_print("📡 platform/agent 模式：任务已下发到 agent_tasks", 'WEEKLY', force=True)
+            return new_task.id
         # 添加到任务队列
         import time
         task_counter = int(time.time() * 1000000)  # 微秒级时间戳作为计数器
