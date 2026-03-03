@@ -40,6 +40,9 @@ background_task_queue = queue.PriorityQueue()
 background_task_running = False
 background_task_thread = None
 
+# 同步并发控制：同时最多5个仓库更新
+_sync_semaphore = threading.Semaphore(5)
+
 # Git 进程集合（由 configure_task_worker 注入）
 _active_git_processes = None
 
@@ -247,9 +250,76 @@ def _handle_excel_diff_task(task, priority):
                     log_print(f"更新任务状态失败: {update_error}", 'TASK', force=True)
 
 
+def _reset_repository_to_head(git_service, repository):
+    """超时或失败后重置仓库到 HEAD 状态"""
+    try:
+        log_print(f"🔄 [RESET] 正在重置仓库 {repository.name} 到 HEAD 状态...", 'SYNC', force=True)
+        reset_result = git_service._run_git_command(['git', 'reset', '--hard', 'HEAD'], timeout=60)
+        if reset_result and reset_result.returncode == 0:
+            log_print(f"✅ [RESET] git reset --hard HEAD 成功", 'SYNC')
+        else:
+            log_print(f"⚠️ [RESET] git reset --hard HEAD 失败", 'SYNC', force=True)
+        clean_result = git_service._run_git_command(['git', 'clean', '-fd'], timeout=60)
+        if clean_result and clean_result.returncode == 0:
+            log_print(f"✅ [RESET] git clean -fd 成功", 'SYNC')
+        else:
+            log_print(f"⚠️ [RESET] git clean -fd 失败", 'SYNC', force=True)
+    except Exception as reset_err:
+        log_print(f"❌ [RESET] 重置仓库异常: {reset_err}", 'SYNC', force=True)
+
+
+def _record_sync_error(repository, error_message):
+    """将同步错误信息记录到仓库模型"""
+    try:
+        repository.last_sync_error = str(error_message)[:2000]  # 限制长度
+        repository.last_sync_error_time = datetime.now(timezone.utc)
+        _db.session.commit()
+        log_print(f"📝 已记录仓库 {repository.name} 的同步错误", 'SYNC')
+    except Exception as db_err:
+        log_print(f"❌ 记录同步错误到数据库失败: {db_err}", 'SYNC', force=True)
+        try:
+            _db.session.rollback()
+        except Exception:
+            pass
+
+
+def _clear_sync_error(repository):
+    """同步成功后清除仓库的错误信息"""
+    if repository.last_sync_error:
+        try:
+            repository.last_sync_error = None
+            repository.last_sync_error_time = None
+            _db.session.commit()
+            log_print(f"✅ 已清除仓库 {repository.name} 的同步错误状态", 'SYNC')
+        except Exception as db_err:
+            log_print(f"⚠️ 清除同步错误状态失败: {db_err}", 'SYNC', force=True)
+            try:
+                _db.session.rollback()
+            except Exception:
+                pass
+
+
 def _handle_auto_sync_task(task):
-    """处理自动同步任务"""
-    log_print(f"🔄 自动数据分析: 仓库 {task['repository_id']}", 'SYNC')
+    """处理自动同步任务（含并发控制和超时处理）"""
+    repo_id = task['repository_id']
+    log_print(f"🔄 自动数据分析: 仓库 {repo_id}，等待并发许可...", 'SYNC')
+
+    # 并发控制：最多同时5个仓库更新
+    acquired = _sync_semaphore.acquire(timeout=120)
+    if not acquired:
+        log_print(f"⏰ 仓库 {repo_id} 等待并发许可超时(120s)，跳过本次同步", 'SYNC', force=True)
+        return
+
+    try:
+        log_print(f"🔓 仓库 {repo_id} 获得并发许可，开始同步", 'SYNC')
+        _handle_auto_sync_task_inner(task)
+    finally:
+        _sync_semaphore.release()
+        log_print(f"🔒 仓库 {repo_id} 释放并发许可", 'SYNC')
+
+
+def _handle_auto_sync_task_inner(task):
+    """自动同步任务的实际逻辑"""
     with _app.app_context():
         if 'task_id' in task:
             try:
@@ -267,20 +337,65 @@ def _handle_auto_sync_task(task):
                         repository.username, repository.token, repository
                     )
                     log_print(f"🚀 [BACKGROUND_SYNC] 开始后台同步仓库 ID: {repository.id}", 'SYNC')
-                    log_print(f"🔧 [BACKGROUND_SYNC] 准备调用 clone_or_update_repository", 'SYNC')
-                    log_print(f"🔧 [BACKGROUND_SYNC] Git服务对象: {git_service}", 'SYNC')
-                    log_print(f"🔧 [BACKGROUND_SYNC] 仓库URL: {repository.url}", 'SYNC')
                     log_print(f"🔧 [BACKGROUND_SYNC] 本地路径: {git_service.local_path}", 'SYNC')
-                    log_print(f"🔧 [BACKGROUND_SYNC] 即将调用 clone_or_update_repository 方法", 'SYNC')
-                    try:
-                        success, message = git_service.clone_or_update_repository()
-                        log_print(f"🔧 [BACKGROUND_SYNC] clone_or_update_repository 返回: success={success}, message={message}", 'SYNC')
-                    except Exception as e:
-                        log_print(f"❌ [BACKGROUND_SYNC] clone_or_update_repository 异常: {e}", 'SYNC', force=True)
-                        success, message = False, f"调用异常: {e}"
+
+                    # 使用5分钟超时的线程执行 clone_or_update
+                    sync_result = [False, "未执行"]
+                    sync_exception = [None]
+
+                    def _do_clone_or_update():
+                        try:
+                            s, m = git_service.clone_or_update_repository()
+                            sync_result[0] = s
+                            sync_result[1] = m
+                        except Exception as ex:
+                            sync_exception[0] = ex
+
+                    sync_thread = threading.Thread(target=_do_clone_or_update, daemon=True)
+                    sync_thread.start()
+                    sync_thread.join(timeout=300)  # 5分钟超时
+
+                    if sync_thread.is_alive():
+                        # 超时：记录错误并重置仓库
+                        error_msg = f"Git pull 超时（超过5分钟），已中断并重置仓库"
+                        log_print(f"⏰ [BACKGROUND_SYNC] {error_msg}: {repository.name}", 'SYNC', force=True)
+                        _reset_repository_to_head(git_service, repository)
+                        _record_sync_error(repository, error_msg)
+                        if 'task_id' in task:
+                            try:
+                                update_task_status_with_retry(task['task_id'], 'failed', error_msg)
+                            except Exception:
+                                pass
+                        return
+
+                    if sync_exception[0]:
+                        error_msg = f"clone_or_update 异常: {sync_exception[0]}"
+                        log_print(f"❌ [BACKGROUND_SYNC] {error_msg}", 'SYNC', force=True)
+                        _reset_repository_to_head(git_service, repository)
+                        _record_sync_error(repository, error_msg)
+                        if 'task_id' in task:
+                            try:
+                                update_task_status_with_retry(task['task_id'], 'failed', error_msg)
+                            except Exception:
+                                pass
+                        return
+
+                    success, message = sync_result
+                    log_print(f"🔧 [BACKGROUND_SYNC] clone_or_update_repository 返回: success={success}, message={message}", 'SYNC')
+
                     if not success:
                         log_print(f"仓库克隆/更新失败: {message}", 'SYNC', force=True)
-                        return  # 原代码用continue, 拆分后用return
+                        _reset_repository_to_head(git_service, repository)
+                        _record_sync_error(repository, f"同步失败: {message}")
+                        if 'task_id' in task:
+                            try:
+                                update_task_status_with_retry(task['task_id'], 'failed', message)
+                            except Exception:
+                                pass
+                        return
+
+                    # 同步成功 → 清除之前的错误状态
+                    _clear_sync_error(repository)
 
                     # 确定同步起始日期
                     since_date = None
@@ -805,7 +920,7 @@ def setup_schedule():
     import schedule as sched_module
     sched_module.every().day.at("04:00").do(schedule_cleanup_task)
     sched_module.every(2).minutes.do(schedule_weekly_sync_tasks)
-    sched_module.every(10).minutes.do(schedule_repository_sync_tasks)
+    sched_module.every(2).minutes.do(schedule_repository_sync_tasks)
 
 
 def run_scheduled_tasks():

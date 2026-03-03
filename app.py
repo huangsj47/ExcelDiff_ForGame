@@ -395,6 +395,9 @@ app.jinja_env.globals['is_logged_in'] = _is_logged_in
 app.jinja_env.globals['get_current_user'] = _get_current_user
 app.jinja_env.globals['has_project_access'] = _has_project_access
 app.jinja_env.globals['has_project_admin_access'] = _has_project_admin_access
+
+from utils.timezone_utils import format_beijing_time
+app.jinja_env.globals['format_beijing_time'] = format_beijing_time
 app.config['SECRET_KEY'] = secret_key
 db_runtime_settings = apply_database_settings(app.config)
 app.secret_key = secret_key
@@ -1658,6 +1661,13 @@ def update_commit_status(commit_id):
         commit = Commit.query.get_or_404(commit_id)
         old_status = commit.status
         commit.status = status
+        # 记录操作者用户名
+        from utils.request_security import _get_current_user
+        current_user = _get_current_user()
+        if status in ('confirmed', 'rejected'):
+            commit.status_changed_by = current_user.username if current_user else None
+        elif status == 'pending':
+            commit.status_changed_by = None
         db.session.commit()
         # 同步状态到周版本diff
         if old_status != status:
@@ -1665,7 +1675,11 @@ def update_commit_status(commit_id):
             sync_service = StatusSyncService(db)
             sync_result = sync_service.sync_commit_to_weekly(commit_id, status)
             log_print(f"提交状态同步结果: {sync_result}", 'SYNC')
-        return jsonify({'success': True, 'message': '状态更新成功'})
+        return jsonify({
+            'success': True,
+            'message': '状态更新成功',
+            'status_changed_by': commit.status_changed_by
+        })
 
     except Exception as e:
         app.logger.error(f"更新提交状态失败: {str(e)}")
@@ -1700,13 +1714,16 @@ def batch_update_commits_compat():
             return jsonify({'status': 'error', 'message': '不支持的批量操作'}), 400
 
         from services.status_sync_service import StatusSyncService
+        from utils.request_security import _get_current_user
         sync_service = StatusSyncService(db)
+        current_user = _get_current_user()
         updated_count = 0
         sync_results = []
         for commit_id in normalized_ids:
             commit = db.session.get(Commit, commit_id)
             if commit and commit.status != target_status:
                 commit.status = target_status
+                commit.status_changed_by = current_user.username if current_user else None
                 updated_count += 1
                 sync_results.append(sync_service.sync_commit_to_weekly(commit_id, target_status))
         db.session.commit()
@@ -1973,6 +1990,37 @@ def inject_template_functions():
         generate_excel_diff_data_url=generate_excel_diff_data_url,
         generate_refresh_diff_url=generate_refresh_diff_url
     )
+def _migrate_repository_columns():
+    """自动为 repository 表补充模型中新增但数据库尚缺的列（SQLite ALTER TABLE）"""
+    try:
+        insp = inspect(db.engine)
+        if 'repository' not in insp.get_table_names():
+            return  # 表还不存在，create_all() 会负责创建
+        existing_cols = {col['name'] for col in insp.get_columns('repository')}
+        # 需要检查的新列及其 DDL 定义
+        desired_cols = {
+            'last_sync_error': 'last_sync_error TEXT',
+            'last_sync_error_time': 'last_sync_error_time DATETIME',
+        }
+        added = []
+        for col_name, col_ddl in desired_cols.items():
+            if col_name not in existing_cols:
+                from sqlalchemy import text as sa_text
+                db.session.execute(sa_text(f'ALTER TABLE repository ADD COLUMN {col_ddl}'))
+                added.append(col_name)
+        if added:
+            db.session.commit()
+            log_print(f"✅ 自动迁移 repository 表，新增列: {', '.join(added)}", 'DB')
+        else:
+            log_print("ℹ️ repository 表列已完整，无需迁移", 'DB')
+    except Exception as e:
+        log_print(f"⚠️ repository 表自动迁移失败: {e}", 'DB', force=True)
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+
+
 def create_tables():
     """创建数据库表"""
     with app.app_context():
@@ -2011,6 +2059,9 @@ def create_tables():
         except Exception as e:
             log_print(f"❌ 创建表失败: {e}", 'DB', force=True)
             return
+
+        # ---- 自动迁移：为已有表补充缺失列 ----
+        _migrate_repository_columns()
 
         # 检查创建后的表状态
         try:

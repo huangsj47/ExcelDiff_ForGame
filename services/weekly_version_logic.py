@@ -288,11 +288,14 @@ def weekly_version_config_api(project_id):
         # 创建新配置
         try:
             data = request.get_json()
-            # 验证必需字段
-            required_fields = ['name', 'repository_id', 'branch', 'start_time', 'end_time']
+            # 验证必需字段（repository_id 或 repository_ids 至少提供一个）
+            required_fields = ['name', 'branch', 'start_time', 'end_time']
             for field in required_fields:
                 if not data.get(field):
                     return jsonify({'success': False, 'message': f'缺少必需字段: {field}'}), 400
+            # 验证仓库选择
+            if not data.get('repository_id') and not data.get('repository_ids'):
+                return jsonify({'success': False, 'message': '缺少必需字段: repository_id 或 repository_ids'}), 400
 
             # 解析时间并设置默认秒钟
             start_time = datetime.fromisoformat(data['start_time'].replace('T', ' '))
@@ -305,51 +308,42 @@ def weekly_version_config_api(project_id):
                 return jsonify({'success': False, 'message': '开始时间必须早于结束时间'}), 400
 
             created_configs = []
-            # 处理"全部仓库"选项
-            if data['repository_id'] == 'all':
-                # 获取项目下的所有仓库
-                repositories = Repository.query.filter_by(project_id=project_id).all()
-                if not repositories:
+            # 确定需要创建配置的仓库列表
+            target_repositories = []
+            if data.get('repository_id') == 'all':
+                # 全部仓库
+                target_repositories = Repository.query.filter_by(project_id=project_id).all()
+                if not target_repositories:
                     return jsonify({'success': False, 'message': '该项目下没有仓库'}), 400
-
-                # 为每个仓库创建配置
-                for repository in repositories:
-                    config = WeeklyVersionConfig(
-                        project_id=project_id,
-                        repository_id=repository.id,
-                        name=f"{data['name']} - {repository.name}",  # 添加仓库名称后缀
-                        description=data.get('description', ''),
-                        branch=data['branch'],
-                        start_time=start_time,
-                        end_time=end_time,
-                        cycle_type=data.get('cycle_type', 'custom'),
-                        is_active=data.get('is_active', True),
-                        auto_sync=data.get('auto_sync', True),
-                        status='active'
-                    )
-                    db.session.add(config)
-                    created_configs.append(config)
-                db.session.commit()
-                # 如果启用自动同步，为每个配置创建后台同步任务
-                for config in created_configs:
-                    if config.auto_sync and config.is_active:
-                        _create_weekly_sync_task(config.id)
-                return jsonify({
-                    'success': True,
-                    'message': f'成功为 {len(created_configs)} 个仓库创建配置',
-                    'config_count': len(created_configs)
-                })
+            elif data.get('repository_ids'):
+                # 多选仓库（ID列表）
+                repo_ids = data['repository_ids']
+                if isinstance(repo_ids, list):
+                    target_repositories = Repository.query.filter(
+                        Repository.id.in_(repo_ids),
+                        Repository.project_id == project_id
+                    ).all()
+                    if not target_repositories:
+                        return jsonify({'success': False, 'message': '所选仓库不存在或不属于该项目'}), 400
+                    if len(target_repositories) != len(repo_ids):
+                        return jsonify({'success': False, 'message': '部分仓库不存在或不属于该项目'}), 400
+                else:
+                    return jsonify({'success': False, 'message': 'repository_ids 必须为数组'}), 400
             else:
-                # 单个仓库配置
+                # 单个仓库
                 repository = Repository.query.filter_by(id=data['repository_id'], project_id=project_id).first()
                 if not repository:
                     return jsonify({'success': False, 'message': '仓库不存在或不属于该项目'}), 400
+                target_repositories = [repository]
 
-                # 创建配置
+            # 为每个目标仓库创建配置
+            is_multi = len(target_repositories) > 1
+            for repository in target_repositories:
+                config_name = f"{data['name']} - {repository.name}" if is_multi else data['name']
                 config = WeeklyVersionConfig(
                     project_id=project_id,
-                    repository_id=data['repository_id'],
-                    name=data['name'],
+                    repository_id=repository.id,
+                    name=config_name,
                     description=data.get('description', ''),
                     branch=data['branch'],
                     start_time=start_time,
@@ -360,14 +354,23 @@ def weekly_version_config_api(project_id):
                     status='active'
                 )
                 db.session.add(config)
-                db.session.commit()
-                # 如果启用自动同步，创建后台同步任务
+                created_configs.append(config)
+            db.session.commit()
+            # 如果启用自动同步，为每个配置创建后台同步任务
+            for config in created_configs:
                 if config.auto_sync and config.is_active:
                     _create_weekly_sync_task(config.id)
+            if is_multi:
+                return jsonify({
+                    'success': True,
+                    'message': f'成功为 {len(created_configs)} 个仓库创建配置',
+                    'config_count': len(created_configs)
+                })
+            else:
                 return jsonify({
                     'success': True,
                     'message': '配置创建成功',
-                    'config_id': config.id
+                    'config_id': created_configs[0].id
                 })
         except Exception as e:
             db.session.rollback()
@@ -649,6 +652,7 @@ def weekly_version_files_api(config_id):
                 'commit_messages': cache.commit_messages,  # 添加提交日志
                 'commit_times': cache.commit_times,        # 添加提交时间
                 'overall_status': cache.overall_status,
+                'status_changed_by': cache.status_changed_by,  # 操作者用户名
                 'confirmation_status': cache.confirmation_status,
                 'last_sync_time': cache.last_sync_time.isoformat() if cache.last_sync_time else None,
                 'operations': file_operations,  # 所有操作

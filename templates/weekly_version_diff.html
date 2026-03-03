@@ -23,8 +23,9 @@
     .weekly-diff-header .breadcrumb-item + .breadcrumb-item::before { color: #94a3b8; content: "/"; }
     .weekly-diff-header .header-action-btn { font-size: 0.78rem; padding: 0.35rem 0.85rem; border-radius: 6px; font-weight: 600; transition: all 0.2s; border: 1.5px solid #0d6efd; color: #fff; background: #0d6efd; }
     .weekly-diff-header .header-action-btn:hover { background: #0a58ca; border-color: #0a58ca; color: #fff; }
-    .weekly-diff-header .header-action-btn.btn-accent { background: #0d6efd; color: #fff; border: 1.5px solid #0d6efd; font-weight: 600; }
-    .weekly-diff-header .header-action-btn.btn-accent:hover { background: #0a58ca; border-color: #0a58ca; box-shadow: 0 2px 8px rgba(13,110,253,0.25); }
+    .weekly-diff-header .header-action-btn.btn-accent { background: #198754; color: #fff; border: 1.5px solid #198754; font-weight: 600; }
+    .weekly-diff-header .header-action-btn.btn-accent:hover { background: #157347; border-color: #146c43; box-shadow: 0 2px 8px rgba(25,135,84,0.25); }
+    .weekly-diff-header .header-action-btn.btn-accent:disabled { background: #a3cfbb; border-color: #a3cfbb; color: #fff; cursor: not-allowed; opacity: 0.65; box-shadow: none; }
 
     /* ===== 仓库标签页卡片 ===== */
     .repo-tabs-card { border: 1px solid #e2e8f0; border-radius: 0.75rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); overflow: hidden; }
@@ -70,7 +71,10 @@
                     <i class="fas fa-compress-arrows-alt me-1" id="toggleFoldersIcon"></i>
                     <span id="toggleFoldersText">收起全部</span>
                 </button>
-                <button type="button" class="header-action-btn btn-accent" onclick="confirmAllPending()">
+                {% set _can_batch_confirm = is_admin() or has_project_admin_access(config.project_id) %}
+                <button type="button" class="header-action-btn btn-accent"
+                        onclick="confirmAllPending()"
+                        {% if not _can_batch_confirm %}disabled title="仅平台管理员或项目管理员可操作"{% endif %}>
                     <i class="fas fa-check-double me-1"></i>批量确认
                 </button>
             </div>
@@ -100,7 +104,7 @@
                             <i class="fas fa-{% if cfg.repository.type == 'git' %}code-branch{% else %}folder{% endif %} me-2"></i>
                             {{ cfg.repository.name }}
                             <span class="badge bg-{% if cfg.repository.type == 'git' %}success{% else %}primary{% endif %} ms-1">
-                                {{ cfg.repository.type.upper() }}
+                                {{ cfg.branch }}
                             </span>
                         </button>
                     </li>
@@ -125,7 +129,7 @@
                         <div class="col-md-3">
                             <strong>仓库:</strong> {{ cfg.repository.name }}
                             <span class="badge bg-{% if cfg.repository.type == 'git' %}success{% else %}primary{% endif %} ms-1">
-                                {{ cfg.repository.type.upper() }}
+                                {{ cfg.branch }}
                             </span>
                         </div>
                         <div class="col-md-3">
@@ -158,7 +162,7 @@
                     <i class="fas fa-{% if config.repository.type == 'git' %}code-branch{% else %}folder{% endif %} me-2"></i>
                     {{ config.repository.name }}
                     <span class="badge bg-light text-primary ms-1" style="font-size:0.7rem;">
-                        {{ config.repository.type.upper() }}
+                        {{ config.branch }}
                     </span>
                 </h6>
             </div>
@@ -1025,13 +1029,22 @@ function renderFileTree(tree) {
         const directory = tree[dirPath];
         const dirId = `dir-${dirPath.replace(/[^a-zA-Z0-9]/g, '-')}`;
 
+        // 计算目录下已确认/总文件数
+        const totalFiles = directory.files.length;
+        const confirmedFiles = directory.files.filter(f => f.overall_status === 'confirmed').length;
+        const allConfirmed = confirmedFiles === totalFiles && totalFiles > 0;
+        const confirmRatioClass = allConfirmed ? 'text-success' : (confirmedFiles > 0 ? 'text-primary' : 'text-secondary');
+
         html += `
             <div class="directory-item expanded" data-dir-path="${dirPath}">
                 <div class="directory-header" onclick="toggleDirectory('${dirId}')">
                     <i class="bi bi-chevron-right directory-toggle"></i>
                     <i class="bi bi-folder me-2 text-warning"></i>
                     <span class="directory-path">${dirPath}</span>
-                    <span class="badge bg-light text-dark ms-2">${directory.files.length} 个文件</span>
+                    <span class="badge bg-light text-dark ms-2">${totalFiles} 个文件</span>
+                    <span class="badge bg-light ${confirmRatioClass} ms-1" style="font-size:0.72rem;font-weight:600;" title="已确认/总文件数">
+                        <i class="bi bi-check-circle me-1" style="font-size:0.68rem;"></i>${confirmedFiles}/${totalFiles}
+                    </span>
                 </div>
                 <div class="directory-files" id="${dirId}">
                     ${renderDirectoryFiles(directory.files)}
@@ -1077,6 +1090,7 @@ function renderDirectoryFiles(files) {
                     </div>
                     <div class="file-status">
                         <span class="badge ${statusBadgeClass}">${statusText}</span>
+                        ${file.status_changed_by && statusClass !== 'pending' ? `<br><b style="color:${statusClass === 'confirmed' ? '#059669' : '#FF359A'};font-size:0.68rem;">${file.status_changed_by}</b>` : ''}
                     </div>
                     <div class="file-author" title="${uniqueAuthors.join(', ')}">${authorsDisplay}</div>
                     <div class="file-commit-count">
@@ -1284,14 +1298,17 @@ function updateFileStatusQuick(filePath, newStatus) {
     .then(data => {
         if (data.success) {
             // 更新本地数据
+            const changedBy = data.status_changed_by || '';
             const fileIndex = allFiles.findIndex(f => f.file_path === filePath);
             if (fileIndex !== -1) {
                 allFiles[fileIndex].overall_status = newStatus;
+                allFiles[fileIndex].status_changed_by = changedBy;
             }
 
             const filteredIndex = filteredFiles.findIndex(f => f.file_path === filePath);
             if (filteredIndex !== -1) {
                 filteredFiles[filteredIndex].overall_status = newStatus;
+                filteredFiles[filteredIndex].status_changed_by = changedBy;
             }
 
             // 重新渲染表格

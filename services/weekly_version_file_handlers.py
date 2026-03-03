@@ -177,6 +177,13 @@ def weekly_version_file_status_api(config_id):
         diff_cache.confirmation_status = json.dumps(confirmation_status)
         diff_cache.overall_status = status
         diff_cache.updated_at = datetime.now(timezone.utc)
+        # 记录操作者用户名
+        from utils.request_security import _get_current_user
+        current_user = _get_current_user()
+        if status in ('confirmed', 'rejected'):
+            diff_cache.status_changed_by = current_user.username if current_user else None
+        elif status == 'pending':
+            diff_cache.status_changed_by = None
         db.session.commit()
 
         if old_status != status:
@@ -186,7 +193,11 @@ def weekly_version_file_status_api(config_id):
             sync_result = sync_service.sync_weekly_to_commit(config_id, file_path, status)
             log_print(f"周版本状态同步结果: {sync_result}", "SYNC")
 
-        return jsonify({"success": True, "message": "状态更新成功"})
+        return jsonify({
+            "success": True,
+            "message": "状态更新成功",
+            "status_changed_by": diff_cache.status_changed_by
+        })
     except Exception as exc:
         db.session.rollback()
         log_print(f"更新文件状态失败: {exc}", "ERROR", force=True)

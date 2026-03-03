@@ -66,6 +66,306 @@
     .empty-state i { color: #94a3b8; }
     .empty-state h4 { color: #64748b; font-size: 1.1rem; font-weight: 600; }
     .empty-state p { color: #94a3b8; font-size: 0.88rem; }
+
+    /* ===== 新增配置模态框优化样式 ===== */
+    .add-config-modal-content {
+        border: none;
+        border-radius: 1rem;
+        overflow: hidden;
+        box-shadow: 0 25px 60px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 0, 0, 0.05);
+    }
+    .add-config-modal-header {
+        background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 50%, #0d6efd 100%);
+        padding: 1.25rem 1.5rem;
+        border-bottom: none;
+        color: #fff;
+    }
+    .modal-header-icon {
+        width: 40px; height: 40px;
+        background: rgba(255,255,255,0.15);
+        border-radius: 10px;
+        display: flex; align-items: center; justify-content: center;
+        margin-right: 0.85rem;
+        font-size: 1rem;
+        backdrop-filter: blur(8px);
+    }
+    .modal-subtitle {
+        color: rgba(255,255,255,0.7);
+        font-size: 0.78rem;
+        display: block;
+        margin-top: 2px;
+    }
+    .add-config-modal-body {
+        padding: 1.25rem 1.5rem;
+        max-height: 65vh;
+        overflow-y: auto;
+        background: #f8fafc;
+    }
+    .add-config-modal-body::-webkit-scrollbar { width: 5px; }
+    .add-config-modal-body::-webkit-scrollbar-track { background: transparent; }
+    .add-config-modal-body::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    .add-config-modal-body::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+    /* 表单区块分组 */
+    .form-section {
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 0.75rem;
+        padding: 1rem 1.25rem;
+        margin-bottom: 1rem;
+        transition: box-shadow 0.2s;
+    }
+    .form-section:hover {
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+    .form-section-title {
+        font-size: 0.82rem;
+        font-weight: 700;
+        color: #334155;
+        margin-bottom: 0.85rem;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        letter-spacing: 0.02em;
+    }
+    .form-section-title i {
+        color: #0d6efd;
+        font-size: 0.85rem;
+    }
+
+    /* 现代化输入框 */
+    .form-control-modern {
+        border: 1.5px solid #e2e8f0;
+        border-radius: 0.5rem;
+        padding: 0.5rem 0.75rem;
+        font-size: 0.88rem;
+        transition: all 0.2s;
+        background: #fff;
+    }
+    .form-control-modern:focus {
+        border-color: #0d6efd;
+        box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.1);
+    }
+    .form-control-modern::placeholder {
+        color: #94a3b8;
+    }
+
+    /* ===== 仓库多选 checkbox grid ===== */
+    .repo-select-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+        flex-wrap: wrap;
+    }
+    .repo-toolbar-btn {
+        border: 1.5px solid #e2e8f0;
+        background: #fff;
+        color: #475569;
+        font-size: 0.76rem;
+        font-weight: 600;
+        padding: 0.3rem 0.65rem;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.2s;
+        display: inline-flex;
+        align-items: center;
+    }
+    .repo-toolbar-btn:hover {
+        border-color: #0d6efd;
+        color: #0d6efd;
+        background: #eff6ff;
+    }
+    .repo-toolbar-btn.active {
+        border-color: #0d6efd;
+        color: #0d6efd;
+        background: #eff6ff;
+    }
+    .repo-select-count {
+        font-size: 0.78rem;
+        color: #64748b;
+        margin-left: auto;
+    }
+    .repo-select-count strong {
+        color: #0d6efd;
+    }
+
+    .repo-checkbox-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 0.5rem;
+    }
+    .repo-checkbox-item {
+        margin: 0;
+        cursor: pointer;
+    }
+    .repo-checkbox-item input[type="checkbox"] {
+        display: none;
+    }
+    .repo-checkbox-card {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.55rem 0.75rem;
+        border: 1.5px solid #e2e8f0;
+        border-radius: 0.5rem;
+        background: #fff;
+        transition: all 0.2s;
+        cursor: pointer;
+    }
+    .repo-checkbox-item:hover .repo-checkbox-card {
+        border-color: #93c5fd;
+        background: #f0f7ff;
+    }
+    .repo-checkbox-item input[type="checkbox"]:checked ~ .repo-checkbox-card {
+        border-color: #0d6efd;
+        background: #eff6ff;
+        box-shadow: 0 0 0 1px rgba(13, 110, 253, 0.15);
+    }
+
+    .repo-checkbox-indicator {
+        width: 22px; height: 22px;
+        border: 2px solid #cbd5e1;
+        border-radius: 5px;
+        display: flex; align-items: center; justify-content: center;
+        flex-shrink: 0;
+        transition: all 0.2s;
+        color: transparent;
+        font-size: 0.7rem;
+    }
+    .repo-checkbox-item input[type="checkbox"]:checked ~ .repo-checkbox-card .repo-checkbox-indicator {
+        background: #0d6efd;
+        border-color: #0d6efd;
+        color: #fff;
+    }
+
+    .repo-info {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        min-width: 0;
+    }
+    .repo-name {
+        font-size: 0.82rem;
+        font-weight: 600;
+        color: #1e293b;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .repo-type-badge {
+        font-size: 0.62rem;
+        font-weight: 700;
+        padding: 0.1rem 0.4rem;
+        border-radius: 3px;
+        flex-shrink: 0;
+        letter-spacing: 0.05em;
+    }
+    .repo-type-git {
+        background: #dcfce7;
+        color: #15803d;
+    }
+    .repo-type-svn {
+        background: #dbeafe;
+        color: #1d4ed8;
+    }
+
+    /* ===== Toggle Switch 开关 ===== */
+    .toggle-switch-label {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.65rem 0;
+        cursor: pointer;
+        user-select: none;
+        margin-bottom: 0;
+    }
+    .toggle-switch-wrapper {
+        position: relative;
+        width: 42px;
+        height: 24px;
+        flex-shrink: 0;
+    }
+    .toggle-switch-input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+        position: absolute;
+    }
+    .toggle-switch-slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: #cbd5e1;
+        border-radius: 24px;
+        transition: all 0.3s;
+    }
+    .toggle-switch-slider::before {
+        content: "";
+        position: absolute;
+        height: 18px; width: 18px;
+        left: 3px; bottom: 3px;
+        background: #fff;
+        border-radius: 50%;
+        transition: all 0.3s;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+    }
+    .toggle-switch-input:checked + .toggle-switch-slider {
+        background: #0d6efd;
+    }
+    .toggle-switch-input:checked + .toggle-switch-slider::before {
+        transform: translateX(18px);
+    }
+    .toggle-switch-input:focus + .toggle-switch-slider {
+        box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.15);
+    }
+    .toggle-switch-text {
+        display: flex;
+        flex-direction: column;
+    }
+    .toggle-switch-title {
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: #1e293b;
+        line-height: 1.2;
+    }
+    .toggle-switch-desc {
+        font-size: 0.72rem;
+        color: #94a3b8;
+        line-height: 1.3;
+    }
+
+    /* ===== 模态框底部按钮 ===== */
+    .add-config-modal-footer {
+        background: #fff;
+        border-top: 1px solid #e2e8f0;
+        padding: 1rem 1.5rem;
+    }
+    .btn-modal-cancel {
+        border-radius: 0.5rem;
+        font-size: 0.85rem;
+        font-weight: 500;
+        padding: 0.45rem 1.25rem;
+        transition: all 0.2s;
+    }
+    .btn-modal-submit {
+        border-radius: 0.5rem;
+        font-size: 0.85rem;
+        font-weight: 600;
+        padding: 0.45rem 1.5rem;
+        background: linear-gradient(135deg, #0d6efd 0%, #0b5ed7 100%);
+        border: none;
+        transition: all 0.2s;
+        box-shadow: 0 2px 8px rgba(13, 110, 253, 0.25);
+    }
+    .btn-modal-submit:hover {
+        background: linear-gradient(135deg, #0b5ed7 0%, #084298 100%);
+        box-shadow: 0 4px 12px rgba(13, 110, 253, 0.35);
+        transform: translateY(-1px);
+    }
+    .btn-modal-submit:active {
+        transform: translateY(0);
+    }
 </style>
 {% endblock %}
 
@@ -416,98 +716,142 @@
 
 <!-- 新增配置模态框 -->
 <div class="modal fade" id="addConfigModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">新增周版本配置</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content add-config-modal-content">
+            <div class="modal-header add-config-modal-header">
+                <div class="d-flex align-items-center">
+                    <div class="modal-header-icon">
+                        <i class="fas fa-plus"></i>
+                    </div>
+                    <div>
+                        <h5 class="modal-title mb-0">新增周版本配置</h5>
+                        <small class="modal-subtitle">为项目创建新的周版本 Diff 配置</small>
+                    </div>
+                </div>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
             </div>
             <form id="addConfigForm" method="POST" action="{{ url_for('weekly_version_config_api', project_id=project.id) }}">
-                <div class="modal-body">
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="configName" class="form-label">配置名称 <span class="text-danger">*</span></label>
-                                <input type="text" class="form-control" id="configName" name="name" required 
-                                       placeholder="例如：第42周版本">
-                            </div>
+                <div class="modal-body add-config-modal-body">
+                    <!-- 基本信息区块 -->
+                    <div class="form-section">
+                        <div class="form-section-title">
+                            <i class="fas fa-info-circle"></i> 基本信息
                         </div>
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="repository" class="form-label">选择仓库 <span class="text-danger">*</span></label>
-                                <select class="form-select" id="repository" name="repository_id" required>
-                                    <option value="all" selected>全部仓库</option>
-                                    {% for repo in repositories %}
-                                    <option value="{{ repo.id }}">{{ repo.name }} ({{ repo.type.upper() }})</option>
-                                    {% endfor %}
-                                </select>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label for="configName" class="form-label">配置名称 <span class="text-danger">*</span></label>
+                                    <input type="text" class="form-control form-control-modern" id="configName" name="name" required 
+                                           placeholder="例如：第42周版本">
+                                </div>
                             </div>
-                        </div>
-                    </div>
-                    
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="branch" class="form-label">分支名称 <span class="text-danger">*</span></label>
-                                <input type="text" class="form-control" id="branch" name="branch" required 
-                                       placeholder="例如：main, master, develop">
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="cycleType" class="form-label">周期类型</label>
-                                <select class="form-select" id="cycleType" name="cycle_type">
-                                    <option value="weekly">单周</option>
-                                    <option value="biweekly">双周</option>
-                                    <option value="custom" selected>自定义</option>
-                                </select>
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label for="branch" class="form-label">分支名称 <span class="text-danger">*</span></label>
+                                    <input type="text" class="form-control form-control-modern" id="branch" name="branch" required 
+                                           placeholder="例如：main, master, develop">
+                                </div>
                             </div>
                         </div>
                     </div>
-                    
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="startTime" class="form-label">开始时间 <span class="text-danger">*</span></label>
-                                <input type="datetime-local" class="form-control" id="startTime" name="start_time" required>
-                            </div>
+
+                    <!-- 仓库选择区块 -->
+                    <div class="form-section">
+                        <div class="form-section-title">
+                            <i class="fas fa-database"></i> 选择仓库 <span class="text-danger">*</span>
                         </div>
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="endTime" class="form-label">结束时间 <span class="text-danger">*</span></label>
-                                <input type="datetime-local" class="form-control" id="endTime" name="end_time" required>
+                        <div class="repo-select-toolbar">
+                            <button type="button" class="repo-toolbar-btn active" id="repoSelectAll" onclick="toggleAllRepos(true)" title="全选">
+                                <i class="fas fa-check-double me-1"></i>全选
+                            </button>
+                            <button type="button" class="repo-toolbar-btn" id="repoDeselectAll" onclick="toggleAllRepos(false)" title="取消全选">
+                                <i class="fas fa-times me-1"></i>取消全选
+                            </button>
+                            <span class="repo-select-count" id="repoSelectCount">
+                                已选 <strong>{{ repositories|length }}</strong> / {{ repositories|length }} 个仓库
+                            </span>
+                        </div>
+                        <div class="repo-checkbox-grid" id="repoCheckboxGrid">
+                            {% for repo in repositories %}
+                            <label class="repo-checkbox-item" for="repo_{{ repo.id }}">
+                                <input type="checkbox" id="repo_{{ repo.id }}" name="repository_ids" value="{{ repo.id }}" checked
+                                       onchange="updateRepoSelectCount()">
+                                <span class="repo-checkbox-card">
+                                    <span class="repo-checkbox-indicator">
+                                        <i class="fas fa-check"></i>
+                                    </span>
+                                    <span class="repo-info">
+                                        <span class="repo-name">{{ repo.name }}</span>
+                                        <span class="repo-type-badge repo-type-{{ repo.type }}">{{ repo.branch or 'master' }}</span>
+                                    </span>
+                                </span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                        {% if not repositories %}
+                        <div class="text-center text-muted py-3">
+                            <i class="fas fa-inbox me-1"></i>该项目下暂无仓库
+                        </div>
+                        {% endif %}
+                    </div>
+
+                    <!-- 时间配置区块 -->
+                    <div class="form-section">
+                        <div class="form-section-title">
+                            <i class="fas fa-clock"></i> 时间配置
+                        </div>
+                        <div class="row">
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label for="cycleType" class="form-label">周期类型</label>
+                                    <select class="form-select form-control-modern" id="cycleType" name="cycle_type">
+                                        <option value="weekly">单周</option>
+                                        <option value="biweekly">双周</option>
+                                        <option value="custom" selected>自定义</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label for="startTime" class="form-label">开始时间 <span class="text-danger">*</span></label>
+                                    <input type="datetime-local" class="form-control form-control-modern" id="startTime" name="start_time" required>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label for="endTime" class="form-label">结束时间 <span class="text-danger">*</span></label>
+                                    <input type="datetime-local" class="form-control form-control-modern" id="endTime" name="end_time" required>
+                                </div>
                             </div>
                         </div>
                     </div>
-                    
-                    <div class="mb-3">
-                        <label for="description" class="form-label">描述</label>
-                        <textarea class="form-control" id="description" name="description" rows="3" 
-                                  placeholder="可选：添加配置描述信息"></textarea>
-                    </div>
-                    
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="form-check">
-                                <input class="form-check-input" type="checkbox" id="autoSync" name="auto_sync" checked>
-                                <label class="form-check-label" for="autoSync">
-                                    启用自动同步（每2分钟检查一次）
-                                </label>
-                            </div>
+
+                    <!-- 附加信息区块 -->
+                    <div class="form-section">
+                        <div class="form-section-title">
+                            <i class="fas fa-cog"></i> 附加设置
                         </div>
-                        <div class="col-md-6">
-                            <div class="form-check">
-                                <input class="form-check-input" type="checkbox" id="isActive" name="is_active" checked>
-                                <label class="form-check-label" for="isActive">
-                                    立即启用此配置
-                                </label>
-                            </div>
+                        <div class="mb-3">
+                            <label for="description" class="form-label">描述</label>
+                            <textarea class="form-control form-control-modern" id="description" name="description" rows="2" 
+                                      placeholder="可选：添加配置描述信息"></textarea>
+                        </div>
+                        <!-- 自动同步与启用默认强制开启，无需用户选择 -->
+                        <input type="hidden" id="autoSync" name="auto_sync" value="on">
+                        <input type="hidden" id="isActive" name="is_active" value="on">
+                        <div class="d-flex align-items-center px-3 py-2 mt-2" style="background: #f0fdf4; border-radius: 8px; border: 1px solid #bbf7d0; font-size: 0.8rem; color: #166534;">
+                            <i class="fas fa-check-circle me-2" style="color: #22c55e;"></i>
+                            自动同步与启用状态已默认开启（每2分钟自动检查更新）
                         </div>
                     </div>
                 </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                    <button type="submit" class="btn btn-primary">创建配置</button>
+                <div class="modal-footer add-config-modal-footer">
+                    <button type="button" class="btn btn-outline-secondary btn-modal-cancel" data-bs-dismiss="modal">
+                        <i class="fas fa-times me-1"></i>取消
+                    </button>
+                    <button type="submit" class="btn btn-primary btn-modal-submit" id="addConfigSubmitBtn">
+                        <i class="fas fa-rocket me-1"></i>创建配置
+                    </button>
                 </div>
             </form>
         </div>
@@ -570,25 +914,12 @@
                                   placeholder="可选的配置描述"></textarea>
                     </div>
 
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="form-check">
-                                <input class="form-check-input" type="checkbox" id="editAutoSync" name="auto_sync" checked>
-                                <label class="form-check-label" for="editAutoSync">
-                                    自动同步
-                                </label>
-                                <small class="form-text text-muted">启用后会定期自动同步diff数据</small>
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <div class="form-check">
-                                <input class="form-check-input" type="checkbox" id="editIsActive" name="is_active" checked>
-                                <label class="form-check-label" for="editIsActive">
-                                    启用配置
-                                </label>
-                                <small class="form-text text-muted">禁用后不会进行自动同步</small>
-                            </div>
-                        </div>
+                    <!-- 自动同步与启用默认强制开启，无需用户选择 -->
+                    <input type="hidden" id="editAutoSync" name="auto_sync" value="on">
+                    <input type="hidden" id="editIsActive" name="is_active" value="on">
+                    <div class="d-flex align-items-center px-3 py-2" style="background: #f0fdf4; border-radius: 8px; border: 1px solid #bbf7d0; font-size: 0.8rem; color: #166534;">
+                        <i class="fas fa-check-circle me-2" style="color: #22c55e;"></i>
+                        自动同步与启用状态已默认开启（每2分钟自动检查更新）
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -876,8 +1207,7 @@ function editConfig(configId) {
             document.getElementById('editStartTime').value = startTimeFormatted;
             document.getElementById('editEndTime').value = endTimeFormatted;
             document.getElementById('editDescription').value = config.description || '';
-            document.getElementById('editAutoSync').checked = config.auto_sync;
-            document.getElementById('editIsActive').checked = config.is_active;
+            // auto_sync 和 is_active 已强制开启，无需从后端回填
 
             // 保存原始时间数据用于比较
             const form = document.getElementById('editConfigForm');
@@ -927,16 +1257,70 @@ function deleteConfig(configId) {
     }
 }
 
+// ===== 仓库多选操作函数 =====
+// 全选/取消全选仓库
+function toggleAllRepos(selectAll) {
+    const checkboxes = document.querySelectorAll('#repoCheckboxGrid input[type="checkbox"]');
+    checkboxes.forEach(cb => { cb.checked = selectAll; });
+    updateRepoSelectCount();
+}
+
+// 更新已选仓库计数
+function updateRepoSelectCount() {
+    const total = document.querySelectorAll('#repoCheckboxGrid input[type="checkbox"]').length;
+    const checked = document.querySelectorAll('#repoCheckboxGrid input[type="checkbox"]:checked').length;
+    const countEl = document.getElementById('repoSelectCount');
+    if (countEl) {
+        countEl.innerHTML = `已选 <strong>${checked}</strong> / ${total} 个仓库`;
+    }
+    // 更新全选/取消全选按钮状态
+    const selectAllBtn = document.getElementById('repoSelectAll');
+    const deselectAllBtn = document.getElementById('repoDeselectAll');
+    if (selectAllBtn && deselectAllBtn) {
+        selectAllBtn.classList.toggle('active', checked === total);
+        deselectAllBtn.classList.toggle('active', checked === 0);
+    }
+}
+
+// 获取选中的仓库ID列表
+function getSelectedRepoIds() {
+    const checkboxes = document.querySelectorAll('#repoCheckboxGrid input[type="checkbox"]:checked');
+    return Array.from(checkboxes).map(cb => cb.value);
+}
+
 // 新增表单提交处理
 document.getElementById('addConfigForm').addEventListener('submit', function(e) {
     e.preventDefault();
 
-    const formData = new FormData(this);
-    const data = Object.fromEntries(formData.entries());
+    // 获取选中的仓库ID列表
+    const selectedRepoIds = getSelectedRepoIds();
+    if (selectedRepoIds.length === 0) {
+        alert('请至少选择一个仓库');
+        return;
+    }
 
-    // 处理复选框
-    data.auto_sync = document.getElementById('autoSync').checked;
-    data.is_active = document.getElementById('isActive').checked;
+    const formData = new FormData(this);
+    const data = {};
+    // 手动提取非仓库字段（排除 repository_ids 因为它是多值）
+    for (const [key, value] of formData.entries()) {
+        if (key !== 'repository_ids') {
+            data[key] = value;
+        }
+    }
+
+    // 设置仓库ID列表
+    const totalRepos = document.querySelectorAll('#repoCheckboxGrid input[type="checkbox"]').length;
+    if (selectedRepoIds.length === totalRepos) {
+        // 全选时，发送 'all'，与后端现有逻辑兼容
+        data.repository_id = 'all';
+    } else {
+        // 多选时，发送仓库ID数组
+        data.repository_ids = selectedRepoIds;
+    }
+
+    // 自动同步与启用强制开启
+    data.auto_sync = true;
+    data.is_active = true;
 
     fetch(this.action, {
         method: 'POST',
@@ -981,9 +1365,9 @@ document.getElementById('editConfigForm').addEventListener('submit', function(e)
     const formData = new FormData(this);
     const data = Object.fromEntries(formData.entries());
 
-    // 处理复选框
-    data.auto_sync = document.getElementById('editAutoSync').checked;
-    data.is_active = document.getElementById('editIsActive').checked;
+    // 自动同步与启用强制开启
+    data.auto_sync = true;
+    data.is_active = true;
 
     // 添加时间变更标记
     data.time_changed = timeChanged;
@@ -1021,10 +1405,27 @@ document.getElementById('editConfigForm').addEventListener('submit', function(e)
     });
 });
 
+// 每个配置的刷新冷却时间记录 { configId: lastClickTimestamp }
+const _refreshCooldowns = {};
+const REFRESH_COOLDOWN_MS = 3000; // 3秒限流
+
 // 手动刷新单个配置的统计信息（点击刷新按钮触发）
 function refreshConfigStats(configId, btnElement) {
-    // 防止重复点击
+    // 防止重复点击（动画进行中）
     if (btnElement.classList.contains('refreshing')) return;
+
+    // 3秒限流检查
+    const now = Date.now();
+    const lastClick = _refreshCooldowns[configId] || 0;
+    const elapsed = now - lastClick;
+    if (elapsed < REFRESH_COOLDOWN_MS) {
+        const remaining = Math.ceil((REFRESH_COOLDOWN_MS - elapsed) / 1000);
+        btnElement.title = `请等待 ${remaining} 秒后再刷新`;
+        return;
+    }
+    _refreshCooldowns[configId] = now;
+    btnElement.title = '点击刷新统计';
+
     btnElement.classList.add('refreshing');
 
     // 找到对应的 stats-container

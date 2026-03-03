@@ -286,41 +286,33 @@
                                     aria-expanded="false">
                                 <span id="statusDropdownText">选择状态</span>
                             </button>
-                            <div class="dropdown-menu custom-dropdown" id="statusDropdownMenu" style="display: none; min-width: 280px; padding: 0.75rem; position: absolute; top: 100%; left: 0; z-index: 1050;">
-                                <h6 class="dropdown-header">选择确认状态</h6>
-                                <div class="dropdown-item-text mb-2" style="padding: 0.5rem 0; position: relative;">
-                                    <div class="d-flex align-items-center">
-                                        <input class="form-check-input status-checkbox me-2" type="checkbox" value="pending" id="statusPending" style="margin-top: 0; position: relative;">
-                                        <label class="form-check-label d-flex align-items-center" for="statusPending" style="margin-bottom: 0;">
-                                            <span class="badge bg-warning text-dark me-2">待确认</span>
-                                            <span>待确认条目</span>
-                                        </label>
-                                    </div>
+                            <div class="dropdown-menu custom-dropdown" id="statusDropdownMenu" style="display: none; min-width: 280px; padding: 0; position: absolute; top: 100%; left: 0; z-index: 1050; border: none; border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,0.12); overflow: hidden;">
+                                <div style="padding: 0.65rem 0.875rem 0.4rem; background: #f8fafc; border-bottom: 1px solid #e5e7eb;">
+                                    <h6 style="margin: 0; font-size: 0.78rem; font-weight: 700; color: #1e293b; letter-spacing: 0.02em;">选择确认状态</h6>
                                 </div>
-                                <div class="dropdown-item-text mb-2" style="padding: 0.5rem 0; position: relative;">
-                                    <div class="d-flex align-items-center">
-                                        <input class="form-check-input status-checkbox me-2" type="checkbox" value="confirmed" id="statusConfirmed" style="margin-top: 0; position: relative;">
-                                        <label class="form-check-label d-flex align-items-center" for="statusConfirmed" style="margin-bottom: 0;">
-                                            <span class="badge bg-success me-2">已确认</span>
-                                            <span>已确认提交</span>
-                                        </label>
-                                    </div>
+                                <div style="padding: 0.5rem 0.75rem;">
+                                    <label class="d-flex align-items-center gap-2 px-2 py-2 mb-1" for="statusPending" style="cursor: pointer; border-radius: 6px; transition: background 0.15s;" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='transparent'">
+                                        <input class="form-check-input status-checkbox" type="checkbox" value="pending" id="statusPending" style="margin: 0; width: 16px; height: 16px; border-radius: 4px; border: 1.5px solid #cbd5e1;">
+                                        <span style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.72rem; font-weight: 600; background: #fef3c7; color: #92400e;">待确认</span>
+                                        <span style="font-size: 0.78rem; color: #64748b;">待确认条目</span>
+                                    </label>
+                                    <label class="d-flex align-items-center gap-2 px-2 py-2 mb-1" for="statusConfirmed" style="cursor: pointer; border-radius: 6px; transition: background 0.15s;" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='transparent'">
+                                        <input class="form-check-input status-checkbox" type="checkbox" value="confirmed" id="statusConfirmed" style="margin: 0; width: 16px; height: 16px; border-radius: 4px; border: 1.5px solid #cbd5e1;">
+                                        <span style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.72rem; font-weight: 600; background: #dcfce7; color: #166534;">已确认</span>
+                                        <span style="font-size: 0.78rem; color: #64748b;">已确认提交</span>
+                                    </label>
+                                    <label class="d-flex align-items-center gap-2 px-2 py-2 mb-1" for="statusRejected" style="cursor: pointer; border-radius: 6px; transition: background 0.15s;" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='transparent'">
+                                        <input class="form-check-input status-checkbox" type="checkbox" value="rejected" id="statusRejected" style="margin: 0; width: 16px; height: 16px; border-radius: 4px; border: 1.5px solid #cbd5e1;">
+                                        <span style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.72rem; font-weight: 600; background: #fee2e2; color: #991b1b;">已拒绝</span>
+                                        <span style="font-size: 0.78rem; color: #64748b;">已拒绝条目</span>
+                                    </label>
                                 </div>
-                                <div class="dropdown-item-text mb-2" style="padding: 0.5rem 0; position: relative;">
-                                    <div class="d-flex align-items-center">
-                                        <input class="form-check-input status-checkbox me-2" type="checkbox" value="rejected" id="statusRejected" style="margin-top: 0; position: relative;">
-                                        <label class="form-check-label d-flex align-items-center" for="statusRejected" style="margin-bottom: 0;">
-                                            <span class="badge bg-danger me-2">已拒绝</span>
-                                            <span>已拒绝条目</span>
-                                        </label>
-                                    </div>
-                                </div>
-                                <div class="border-top pt-3">
+                                <div style="padding: 0.5rem 0.75rem 0.65rem; background: #f8fafc; border-top: 1px solid #e5e7eb;">
                                     <div class="d-flex gap-2">
-                                        <button type="button" class="btn btn-primary btn-sm flex-fill" id="applyStatusBtn">
+                                        <button type="button" class="btn btn-sm flex-fill" id="applyStatusBtn" style="background: #0d6efd; color: #fff; border: none; border-radius: 6px; font-weight: 600; font-size: 0.78rem;">
                                             <i class="fas fa-check me-1"></i>应用
                                         </button>
-                                        <button type="button" class="btn btn-outline-secondary btn-sm flex-fill" id="clearStatusBtn">
+                                        <button type="button" class="btn btn-sm flex-fill" id="clearStatusBtn" style="background: #fff; color: #374151; border: 1.5px solid #e2e8f0; border-radius: 6px; font-weight: 500; font-size: 0.78rem;">
                                             <i class="fas fa-times me-1"></i>清空
                                         </button>
                                     </div>
@@ -502,6 +494,9 @@
                                         {% elif commit.status == 'rejected' %}已拒绝
                                         {% else %}{{ commit.status }}{% endif %}
                                     </span>
+                                    {% if commit.status_changed_by %}
+                                    <br><b style="color:{% if commit.status == 'confirmed' %}#059669{% elif commit.status == 'rejected' %}#FF359A{% else %}#6b7280{% endif %};font-size:0.72rem;">{{ commit.status_changed_by }}</b>
+                                    {% endif %}
                                 </td>
                                 <td class="text-center">
                                     <div class="action-buttons">
@@ -661,18 +656,26 @@
 
 <!-- 仓库间diff对比设置弹窗 -->
 <div class="modal fade" id="repositoryCompareModal" tabindex="-1" aria-labelledby="repositoryCompareModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="repositoryCompareModalLabel">仓库间diff对比设置</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content" style="border: none; border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.12);">
+            <div class="modal-header" style="background: #f8fafc; border-bottom: 1px solid #e5e7eb; border-radius: 12px 12px 0 0; padding: 1rem 1.25rem;">
+                <h6 class="modal-title d-flex align-items-center" id="repositoryCompareModalLabel" style="font-weight: 700; color: #1e293b; font-size: 0.95rem;">
+                    <span class="d-inline-flex align-items-center justify-content-center me-2" style="width: 28px; height: 28px; background: #eff6ff; border-radius: 6px;">
+                        <i class="fas fa-code-branch" style="color: #0d6efd; font-size: 0.75rem;"></i>
+                    </span>
+                    仓库间 Diff 对比设置
+                </h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close" style="font-size: 0.7rem;"></button>
             </div>
-            <div class="modal-body">
+            <div class="modal-body" style="padding: 1.25rem;">
                 <form id="repositoryCompareForm">
-                    <div class="row mb-3">
+                    <!-- 仓库选择 -->
+                    <div class="row mb-3 g-3">
                         <div class="col-md-6">
-                            <label for="sourceRepository" class="form-label">外放分支仓库:</label>
-                            <select class="form-select" id="sourceRepository" name="source_repository">
+                            <label for="sourceRepository" class="form-label" style="font-weight: 600; font-size: 0.82rem; color: #374151;">
+                                <i class="fas fa-arrow-right me-1" style="color: #f59e0b;"></i>外放分支仓库
+                            </label>
+                            <select class="form-select" id="sourceRepository" name="source_repository" style="border-radius: 8px; border: 1.5px solid #e2e8f0; font-size: 0.85rem; padding: 0.5rem 0.75rem;">
                                 <option value="">请选择仓库</option>
                                 {% for repo in repositories %}
                                 <option value="{{ repo.id }}">{{ repo.name }}_{{ repo.type }}</option>
@@ -680,8 +683,10 @@
                             </select>
                         </div>
                         <div class="col-md-6">
-                            <label for="targetRepository" class="form-label">主分支仓库:</label>
-                            <select class="form-select" id="targetRepository" name="target_repository">
+                            <label for="targetRepository" class="form-label" style="font-weight: 600; font-size: 0.82rem; color: #374151;">
+                                <i class="fas fa-arrow-left me-1" style="color: #0d6efd;"></i>主分支仓库
+                            </label>
+                            <select class="form-select" id="targetRepository" name="target_repository" style="border-radius: 8px; border: 1.5px solid #e2e8f0; font-size: 0.85rem; padding: 0.5rem 0.75rem;">
                                 <option value="">请选择仓库</option>
                                 {% for repo in repositories %}
                                 <option value="{{ repo.id }}">{{ repo.name }}_{{ repo.type }}</option>
@@ -690,50 +695,55 @@
                         </div>
                     </div>
                     
+                    <!-- 时间范围 -->
                     <div class="mb-3">
-                        <label class="form-label">diff时间范围:</label>
-                        <div class="row">
-                            <div class="col-md-2">
-                                <div class="form-check">
-                                    <input class="form-check-input" type="radio" name="timeRange" id="oneWeek" value="week" checked>
-                                    <label class="form-check-label" for="oneWeek">一周内</label>
-                                </div>
-                            </div>
-                            <div class="col-md-2">
-                                <div class="form-check">
-                                    <input class="form-check-input" type="radio" name="timeRange" id="customTime" value="custom">
-                                    <label class="form-check-label" for="customTime">自定义时间</label>
-                                </div>
-                            </div>
+                        <label class="form-label" style="font-weight: 600; font-size: 0.82rem; color: #374151;">
+                            <i class="fas fa-clock me-1" style="color: #6366f1;"></i>Diff 时间范围
+                        </label>
+                        <div class="d-flex gap-3">
+                            <label class="d-flex align-items-center gap-2 px-3 py-2" for="oneWeek" style="cursor: pointer; border-radius: 8px; border: 1.5px solid #e2e8f0; font-size: 0.82rem; color: #374151; transition: all 0.15s;">
+                                <input class="form-check-input" type="radio" name="timeRange" id="oneWeek" value="week" checked style="margin: 0; width: 16px; height: 16px;">
+                                一周内
+                            </label>
+                            <label class="d-flex align-items-center gap-2 px-3 py-2" for="customTime" style="cursor: pointer; border-radius: 8px; border: 1.5px solid #e2e8f0; font-size: 0.82rem; color: #374151; transition: all 0.15s;">
+                                <input class="form-check-input" type="radio" name="timeRange" id="customTime" value="custom" style="margin: 0; width: 16px; height: 16px;">
+                                自定义时间
+                            </label>
                         </div>
                     </div>
                     
-                    <div class="row mb-3" id="customTimeRange" style="display: none;">
+                    <!-- 自定义时间范围 -->
+                    <div class="row mb-3 g-2 align-items-center" id="customTimeRange" style="display: none;">
                         <div class="col-md-5">
-                            <input type="datetime-local" class="form-control" id="startTime" name="start_time">
+                            <input type="datetime-local" class="form-control" id="startTime" name="start_time" style="border-radius: 8px; border: 1.5px solid #e2e8f0; font-size: 0.85rem; padding: 0.5rem 0.75rem;">
                         </div>
                         <div class="col-md-1 text-center">
-                            <span>到</span>
+                            <span style="color: #94a3b8; font-size: 0.85rem;">至</span>
                         </div>
                         <div class="col-md-5">
-                            <input type="datetime-local" class="form-control" id="endTime" name="end_time">
+                            <input type="datetime-local" class="form-control" id="endTime" name="end_time" style="border-radius: 8px; border: 1.5px solid #e2e8f0; font-size: 0.85rem; padding: 0.5rem 0.75rem;">
                         </div>
                     </div>
                     
-                    <div class="row mb-3">
+                    <!-- 提交间隔 -->
+                    <div class="row mb-0">
                         <div class="col-md-6">
-                            <label for="intervalMinutes" class="form-label">提交间隔不超过:</label>
-                            <div class="input-group">
-                                <input type="number" class="form-control" id="intervalMinutes" name="interval_minutes" value="5" min="1">
-                                <span class="input-group-text">分钟</span>
+                            <label for="intervalMinutes" class="form-label" style="font-weight: 600; font-size: 0.82rem; color: #374151;">
+                                <i class="fas fa-stopwatch me-1" style="color: #10b981;"></i>提交间隔不超过
+                            </label>
+                            <div class="input-group" style="border-radius: 8px; overflow: hidden;">
+                                <input type="number" class="form-control" id="intervalMinutes" name="interval_minutes" value="5" min="1" style="border: 1.5px solid #e2e8f0; font-size: 0.85rem; padding: 0.5rem 0.75rem; border-right: none;">
+                                <span class="input-group-text" style="background: #f8fafc; border: 1.5px solid #e2e8f0; border-left: none; font-size: 0.82rem; color: #64748b;">分钟</span>
                             </div>
                         </div>
                     </div>
                 </form>
             </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-primary" onclick="executeRepositoryCompare()">确定</button>
+            <div class="modal-footer" style="background: #f8fafc; border-top: 1px solid #e5e7eb; border-radius: 0 0 12px 12px; padding: 0.75rem 1.25rem;">
+                <button type="button" class="btn btn-sm px-3" data-bs-dismiss="modal" style="background: #ffffff; color: #374151; border: 1.5px solid #e2e8f0; border-radius: 6px; font-weight: 500; font-size: 0.82rem;">取消</button>
+                <button type="button" class="btn btn-sm px-3" onclick="executeRepositoryCompare()" style="background: #0d6efd; color: #fff; border: 1.5px solid #0d6efd; border-radius: 6px; font-weight: 600; font-size: 0.82rem;">
+                    <i class="fas fa-play me-1"></i>开始对比
+                </button>
             </div>
         </div>
     </div>

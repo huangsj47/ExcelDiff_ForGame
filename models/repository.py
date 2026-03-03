@@ -59,6 +59,10 @@ class Repository(db.Model):
     # Git特定字段
     tag_selection = db.Column(db.String(500))
     start_date = db.Column(db.DateTime)
+
+    # 同步状态字段
+    last_sync_error = db.Column(db.Text)        # 最近一次同步失败的错误信息（成功后清空）
+    last_sync_error_time = db.Column(db.DateTime)  # 最近一次同步失败的时间
     
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 

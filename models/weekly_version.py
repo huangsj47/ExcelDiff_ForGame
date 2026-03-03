@@ -68,6 +68,7 @@ class WeeklyVersionDiffCache(db.Model):
     # 确认状态 - 支持多角色确认
     confirmation_status = db.Column(db.Text)  # JSON格式：{"dev": "pending", "qa": "confirmed", "pm": "pending"}
     overall_status = db.Column(db.String(20), default='pending')  # 'pending', 'confirmed', 'rejected'
+    status_changed_by = db.Column(db.String(100))  # 确认/拒绝操作者用户名
 
     # 缓存状态
     cache_status = db.Column(db.String(50), default='pending')  # pending, completed, failed

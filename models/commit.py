@@ -22,6 +22,7 @@ class Commit(db.Model):
     commit_time = db.Column(db.DateTime)
     message = db.Column(db.Text)
     status = db.Column(db.String(20), default='pending')  # 'pending', 'confirmed', 'rejected'
+    status_changed_by = db.Column(db.String(100))  # 确认/拒绝操作者用户名
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     
     def __repr__(self):
