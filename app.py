@@ -851,6 +851,7 @@ def get_excel_diff_data_with_path(project_code, repository_name, commit_id):
 
 def get_excel_diff_data(commit_id):
     """异步获取Excel diff数据的API端点（支持HTML缓存优先）"""
+    request_start = time.time()
     commit = Commit.query.get_or_404(commit_id)
     repository = commit.repository
     project = repository.project
@@ -861,11 +862,19 @@ def get_excel_diff_data(commit_id):
 
     try:
         # 首先检查HTML缓存（优先级最高）
+        html_lookup_start = time.time()
         cached_html = excel_html_cache_service.get_cached_html(
             repository.id, commit.commit_id, commit.path
         )
         if cached_html:
+            html_lookup_time = time.time() - html_lookup_start
+            total_time = time.time() - request_start
             log_print(f"✅ 从HTML缓存获取Excel差异: {commit.path}", 'EXCEL')
+            log_print(
+                f"📊 Excel接口耗时: html_lookup={html_lookup_time:.2f}s, total={total_time:.2f}s | "
+                f"html_bytes={len(cached_html.get('html_content') or '')}",
+                'EXCEL'
+            )
             created_at_value = cached_html.get('created_at')
             if created_at_value and hasattr(created_at_value, 'isoformat'):
                 created_at_iso = created_at_value.isoformat()
@@ -883,17 +892,21 @@ def get_excel_diff_data(commit_id):
                 'created_at': created_at_iso
             })
         # HTML缓存未命中，检查原始数据缓存
+        data_lookup_start = time.time()
         cached_diff = excel_cache_service.get_cached_diff(
             repository.id, commit.commit_id, commit.path
         )
+        data_lookup_time = time.time() - data_lookup_start
         if cached_diff:
             log_print(f"📊 从数据缓存获取Excel差异，生成HTML: {commit.path}", 'EXCEL')
             try:
                 # 解析缓存的diff数据
                 import json
+                render_start = time.time()
                 diff_data = json.loads(cached_diff.diff_data)
                 # 生成HTML缓存
                 html_content, css_content, js_content = excel_html_cache_service.generate_excel_html(diff_data)
+                render_time = time.time() - render_start
                 # 保存HTML缓存
                 metadata = {
                     'file_path': commit.path,
@@ -904,6 +917,12 @@ def get_excel_diff_data(commit_id):
                 excel_html_cache_service.save_html_cache(
                     repository.id, commit.commit_id, commit.path,
                     html_content, css_content, js_content, metadata
+                )
+                total_time = time.time() - request_start
+                log_print(
+                    f"📊 Excel接口耗时: data_lookup={data_lookup_time:.2f}s, render={render_time:.2f}s, total={total_time:.2f}s | "
+                    f"diff_bytes={len(cached_diff.diff_data.encode('utf-8')) / 1024:.1f}KB",
+                    'EXCEL'
                 )
                 return jsonify({
                     'success': True, 
@@ -921,6 +940,7 @@ def get_excel_diff_data(commit_id):
         # 所有缓存都未命中，实时处理
         log_print(f"🔄 缓存未命中，开始实时处理Excel文件: {commit.path}", 'INFO')
         # 获取前一个提交
+        previous_lookup_start = time.time()
         previous_commit = None
         from sqlalchemy import and_, or_
         file_commits = Commit.query.filter(
@@ -937,12 +957,17 @@ def get_excel_diff_data(commit_id):
                 Commit.path == commit.path,
                 Commit.id < commit.id
             ).order_by(Commit.id.desc()).first()
+        previous_lookup_time = time.time() - previous_lookup_start
         # 使用统一差异服务处理
+        diff_start = time.time()
         diff_data = get_unified_diff_data(commit, file_commits)
+        diff_time = time.time() - diff_start
         if diff_data and diff_data.get('type') == 'excel':
             try:
                 # 生成HTML内容
+                render_start = time.time()
                 html_content, css_content, js_content = excel_html_cache_service.generate_excel_html(diff_data)
+                render_time = time.time() - render_start
                 # 保存HTML缓存
                 metadata = {
                     'file_path': commit.path,
@@ -956,7 +981,13 @@ def get_excel_diff_data(commit_id):
                 )
                 # 异步缓存原始数据，用户主动请求使用高优先级
                 add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=1)
+                total_time = time.time() - request_start
                 log_print(f"✅ Excel差异实时处理完成，HTML缓存已保存: {commit.path}", 'EXCEL')
+                log_print(
+                    f"📊 Excel接口耗时: data_lookup={data_lookup_time:.2f}s, prev_lookup={previous_lookup_time:.2f}s, "
+                    f"diff={diff_time:.2f}s, render={render_time:.2f}s, total={total_time:.2f}s",
+                    'EXCEL'
+                )
                 return jsonify({
                     'success': True, 
                     'html_content': html_content,
@@ -1366,13 +1397,11 @@ def commit_diff(commit_id):
                 # 如果处理成功且验证通过，优化并立即缓存结果
                 if diff_data and cache_is_valid:
                     log_print(f"💾 立即缓存Excel差异结果: {commit.path}", 'EXCEL')
-                    # 优化diff数据：只保留有变更的行
-                    optimized_diff_data = excel_cache_service.optimize_diff_data(diff_data)
                     cache_success = excel_cache_service.save_cached_diff(
                         repository_id=repository.id,
                         commit_id=commit.commit_id,
                         file_path=commit.path,
-                        diff_data=optimized_diff_data,
+                        diff_data=diff_data,
                         previous_commit_id=previous_commit.commit_id if previous_commit else None,
                         processing_time=0,  # 这里可以记录实际处理时间
                         file_size=0,  # 这里可以记录文件大小

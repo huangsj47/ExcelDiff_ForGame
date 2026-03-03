@@ -1413,6 +1413,7 @@ def process_weekly_excel_cache(config_id, file_path):
         start_time = time.time()
         log_print(f"开始生成周版本Excel缓存: 配置 {config_id}, 文件 {file_path}", 'WEEKLY')
         # 获取配置和diff缓存
+        lookup_start = time.time()
         config = db.session.get(WeeklyVersionConfig, config_id)
         if not config:
             raise Exception(f"周版本配置不存在: {config_id}")
@@ -1422,21 +1423,32 @@ def process_weekly_excel_cache(config_id, file_path):
         ).first()
         if not diff_cache:
             raise Exception(f"周版本diff缓存不存在: {file_path}")
+        lookup_time = time.time() - lookup_start
         # 检查是否已存在缓存
+        cache_lookup_start = time.time()
         existing_cache = _weekly_excel_cache_service.get_cached_html(
             config_id, file_path,
             diff_cache.base_commit_id or '',
             diff_cache.latest_commit_id
         )
+        cache_lookup_time = time.time() - cache_lookup_start
         if existing_cache:
-            log_print(f"周版本Excel缓存已存在，跳过生成: {file_path}", 'WEEKLY')
+            total_time = time.time() - start_time
+            log_print(
+                f"周版本Excel缓存已存在，跳过生成: {file_path} | "
+                f"lookup={lookup_time:.2f}s, cache_lookup={cache_lookup_time:.2f}s, total={total_time:.2f}s",
+                'WEEKLY'
+            )
             return
 
         # 生成Excel合并diff HTML
+        render_start = time.time()
         html_content = generate_weekly_excel_merged_diff_html(config, diff_cache, file_path)
+        render_time = time.time() - render_start
         if not html_content:
             raise Exception("生成Excel合并diff HTML失败")
         # 保存到缓存
+        save_start = time.time()
         processing_time = time.time() - start_time
         success = _weekly_excel_cache_service.save_html_cache(
             config_id=config_id,
@@ -1455,8 +1467,15 @@ def process_weekly_excel_cache(config_id, file_path):
             },
             processing_time=processing_time
         )
+        save_time = time.time() - save_start
         if success:
             log_print(f"✅ 周版本Excel缓存生成完成: {file_path}, 耗时: {processing_time:.2f}秒", 'WEEKLY')
+            log_print(
+                f"📊 周版本Excel缓存指标: html_bytes={len(html_content.encode('utf-8')) / 1024:.1f}KB, "
+                f"commit_count={diff_cache.commit_count}, lookup={lookup_time:.2f}s, "
+                f"cache_lookup={cache_lookup_time:.2f}s, render={render_time:.2f}s, save={save_time:.2f}s",
+                'WEEKLY'
+            )
             # 记录到操作日志
             _weekly_excel_cache_service.log_cache_operation(f"✅ 周版本Excel缓存生成成功: {file_path} (耗时: {processing_time:.2f}秒)", 'success', repository_id=config.repository_id, config_id=config_id, file_path=file_path)
         else:

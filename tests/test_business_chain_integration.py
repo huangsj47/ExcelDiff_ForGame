@@ -208,6 +208,27 @@ class TestDiffServiceChain:
         assert self.service._values_equal("hello", "hello") is True
         assert self.service._values_equal("hello", "world") is False
 
+    def test_smart_row_diff_fastpath_handles_nan_equivalent_rows(self):
+        """_smart_row_diff 对按顺序等价(含NaN)的行应直接返回无变更"""
+        import numpy as np
+        import pandas as pd
+
+        current_df = pd.DataFrame([
+            {"A": 1, "B": np.nan},
+            {"A": 2, "B": "x"},
+        ])
+        previous_df = pd.DataFrame([
+            {"A": 1, "B": np.nan},
+            {"A": 2, "B": "x"},
+        ])
+
+        result = self.service._smart_row_diff(current_df, previous_df, ["A", "B"])
+
+        assert result["rows"] == []
+        assert result["stats"]["added"] == 0
+        assert result["stats"]["removed"] == 0
+        assert result["stats"]["modified"] == 0
+
     # -- 行哈希（改进后全列哈希）--
 
     def test_calculate_row_hash_full_columns(self):
@@ -332,6 +353,26 @@ class TestExcelDiffCacheChain:
         
         text_diff = {"type": "text", "hunks": []}
         assert service.optimize_diff_data(text_diff) is text_diff
+
+    def test_optimize_diff_data_does_not_mutate_input(self):
+        """optimize_diff_data 不应就地修改调用方传入对象"""
+        from services.excel_diff_cache_service import ExcelDiffCacheService
+        service = ExcelDiffCacheService()
+
+        diff_data = _build_excel_diff_data({
+            "Sheet1": [
+                {"status": "unchanged", "cells": {"A": "1"}},
+                {"status": "added", "cells": {"A": "2"}},
+                {"status": "modified", "cells": {"A": "3"}},
+            ]
+        })
+        original_rows = list(diff_data["sheets"]["Sheet1"]["rows"])
+
+        optimized = service.optimize_diff_data(diff_data)
+
+        assert len(optimized["sheets"]["Sheet1"]["rows"]) == 2
+        assert len(diff_data["sheets"]["Sheet1"]["rows"]) == len(original_rows)
+        assert diff_data["sheets"]["Sheet1"]["rows"] == original_rows
 
     def test_is_excel_file_detection(self):
         """Excel 文件检测"""

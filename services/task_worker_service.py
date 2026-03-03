@@ -52,6 +52,40 @@ branch_refresh_cooldown_until = {}
 import os
 BRANCH_REFRESH_COOLDOWN_SECONDS = max(10, int(os.environ.get("BRANCH_REFRESH_COOLDOWN_SECONDS", "120") or 120))
 
+# Excel diff 任务入队冷却（用于抑制短时间重复入队）
+excel_task_enqueue_lock = threading.Lock()
+excel_task_enqueue_cooldown_until = {}
+EXCEL_TASK_ENQUEUE_COOLDOWN_SECONDS = max(
+    5, int(os.environ.get("EXCEL_TASK_ENQUEUE_COOLDOWN_SECONDS", "45") or 45)
+)
+EXCEL_TASK_ENQUEUE_COOLDOWN_MAX_KEYS = 5000
+
+
+def _make_excel_task_key(repository_id, commit_id, file_path):
+    return f"{repository_id}:{commit_id}:{file_path}"
+
+
+def _is_excel_task_cooling_down(task_key):
+    now_ts = time.time()
+    with excel_task_enqueue_lock:
+        cooldown_until = excel_task_enqueue_cooldown_until.get(task_key, 0.0)
+    if cooldown_until > now_ts:
+        return True, cooldown_until - now_ts
+    return False, 0.0
+
+
+def _mark_excel_task_cooldown(task_key):
+    now_ts = time.time()
+    with excel_task_enqueue_lock:
+        excel_task_enqueue_cooldown_until[task_key] = now_ts + EXCEL_TASK_ENQUEUE_COOLDOWN_SECONDS
+        if len(excel_task_enqueue_cooldown_until) > EXCEL_TASK_ENQUEUE_COOLDOWN_MAX_KEYS:
+            expired_keys = [
+                key for key, until in excel_task_enqueue_cooldown_until.items()
+                if until <= now_ts
+            ]
+            for key in expired_keys:
+                excel_task_enqueue_cooldown_until.pop(key, None)
+
 
 def configure_task_worker(*, app, db, excel_cache_service,
                           BackgroundTask, Commit, Repository, DiffCache,
@@ -682,20 +716,32 @@ def stop_background_task_worker():
 
 def add_excel_diff_task(repository_id, commit_id, file_path, priority=10, auto_commit=True):
     """添加Excel差异处理任务到优先级队列"""
-    existing_task = _BackgroundTask.query.filter_by(
-        task_type='excel_diff',
-        repository_id=repository_id,
-        commit_id=commit_id,
-        file_path=file_path,
-        status='pending'
-    ).first()
+    task_key = _make_excel_task_key(repository_id, commit_id, file_path)
+    bypass_cooldown = priority <= 3
+
+    existing_task = _BackgroundTask.query.filter(
+        _BackgroundTask.task_type == 'excel_diff',
+        _BackgroundTask.repository_id == repository_id,
+        _BackgroundTask.commit_id == commit_id,
+        _BackgroundTask.file_path == file_path,
+        _BackgroundTask.status.in_(['pending', 'processing'])
+    ).order_by(_BackgroundTask.id.desc()).first()
     if existing_task:
         if priority < existing_task.priority:
             existing_task.priority = priority
             if auto_commit:
                 _db.session.commit()
             log_print(f"更新任务优先级: {file_path} (优先级: {priority})", 'TASK')
-        return existing_task.id if existing_task else None
+        _mark_excel_task_cooldown(task_key)
+        return existing_task.id
+
+    cooling_down, remain_seconds = _is_excel_task_cooling_down(task_key)
+    if cooling_down and not bypass_cooldown:
+        log_print(
+            f"跳过冷却期内重复Excel任务: {file_path} (剩余 {remain_seconds:.1f}s)",
+            'TASK'
+        )
+        return None
 
     task = _BackgroundTask(
         task_type='excel_diff',
@@ -707,6 +753,9 @@ def add_excel_diff_task(repository_id, commit_id, file_path, priority=10, auto_c
     _db.session.add(task)
     if auto_commit:
         _db.session.commit()
+    else:
+        # 分配 task.id，确保队列任务关联到可追踪的数据库记录
+        _db.session.flush()
     task_data = {
         'type': 'excel_diff',
         'repository_id': repository_id,
@@ -717,8 +766,10 @@ def add_excel_diff_task(repository_id, commit_id, file_path, priority=10, auto_c
     task_counter = int(time.time() * 1000000)
     tw = TaskWrapper(priority, task_counter, task_data)
     background_task_queue.put(tw)
+    _mark_excel_task_cooldown(task_key)
     priority_text = "高优先级" if priority < 5 else "普通优先级"
     log_print(f"添加Excel差异任务到队列 ({priority_text}): {file_path}", 'EXCEL')
+    return task.id
 
 
 def add_excel_diff_tasks_batch(repository_id, excel_commits, priority=10):
@@ -727,19 +778,27 @@ def add_excel_diff_tasks_batch(repository_id, excel_commits, priority=10):
         return
 
     existing_tasks = set()
-    existing_query = _BackgroundTask.query.filter_by(
-        task_type='excel_diff',
-        repository_id=repository_id,
-        status='pending'
+    existing_query = _BackgroundTask.query.filter(
+        _BackgroundTask.task_type == 'excel_diff',
+        _BackgroundTask.repository_id == repository_id,
+        _BackgroundTask.status.in_(['pending', 'processing'])
     ).all()
     for task in existing_query:
         existing_tasks.add((task.commit_id, task.file_path))
+    incoming_seen_tasks = set()
     new_tasks = []
+    new_task_keys = []
     base_counter = int(time.time() * 1000000)
-    for i, commit_data in enumerate(excel_commits):
+    for commit_data in excel_commits:
         commit_id = commit_data['commit_id']
         file_path = commit_data['path']
-        if (commit_id, file_path) in existing_tasks:
+        task_pair = (commit_id, file_path)
+        task_key = _make_excel_task_key(repository_id, commit_id, file_path)
+        if task_pair in existing_tasks or task_pair in incoming_seen_tasks:
+            continue
+        incoming_seen_tasks.add(task_pair)
+        cooling_down, _ = _is_excel_task_cooling_down(task_key)
+        if cooling_down:
             continue
         new_tasks.append({
             'task_type': 'excel_diff',
@@ -748,15 +807,26 @@ def add_excel_diff_tasks_batch(repository_id, excel_commits, priority=10):
             'file_path': file_path,
             'priority': priority
         })
+        new_task_keys.append(task_pair)
     if new_tasks:
         _db.session.bulk_insert_mappings(_BackgroundTask, new_tasks)
         _db.session.commit()
-        inserted_tasks = _BackgroundTask.query.filter_by(
-            task_type='excel_diff',
-            repository_id=repository_id,
-            status='pending'
-        ).filter(_BackgroundTask.id > (_db.session.query(_db.func.max(_BackgroundTask.id)).scalar() or 0) - len(new_tasks)).all()
-        for i, task in enumerate(inserted_tasks):
+        commit_ids = list({commit_id for commit_id, _ in new_task_keys})
+        file_paths = list({file_path for _, file_path in new_task_keys})
+        inserted_tasks = _BackgroundTask.query.filter(
+            _BackgroundTask.task_type == 'excel_diff',
+            _BackgroundTask.repository_id == repository_id,
+            _BackgroundTask.status == 'pending',
+            _BackgroundTask.commit_id.in_(commit_ids),
+            _BackgroundTask.file_path.in_(file_paths)
+        ).all()
+        inserted_task_map = {
+            (task.commit_id, task.file_path): task for task in inserted_tasks
+        }
+        for i, (commit_id, file_path) in enumerate(new_task_keys):
+            task = inserted_task_map.get((commit_id, file_path))
+            if not task:
+                continue
             task_data = {
                 'type': 'excel_diff',
                 'repository_id': repository_id,
@@ -767,6 +837,7 @@ def add_excel_diff_tasks_batch(repository_id, excel_commits, priority=10):
             task_counter = base_counter + i
             tw = TaskWrapper(priority, task_counter, task_data)
             background_task_queue.put(tw)
+            _mark_excel_task_cooldown(_make_excel_task_key(repository_id, task.commit_id, task.file_path))
         log_print(f"批量添加了 {len(new_tasks)} 个Excel缓存任务到队列", 'TASK')
 
 

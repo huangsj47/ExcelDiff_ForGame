@@ -219,6 +219,23 @@ def get_file_content_from_git(repository, commit_id, file_path):
 #  统一差异计算
 # ---------------------------------------------------------------------------
 
+def _collect_excel_metrics(diff_data):
+    metrics = {'sheet_count': 0, 'changed_rows': 0, 'summary': {}}
+    if not isinstance(diff_data, dict) or diff_data.get('type') != 'excel':
+        return metrics
+    try:
+        sheets = diff_data.get('sheets') or {}
+        metrics['sheet_count'] = len(sheets)
+        metrics['changed_rows'] = sum(
+            len((sheet or {}).get('rows') or [])
+            for sheet in sheets.values()
+        )
+        metrics['summary'] = diff_data.get('summary') or {}
+    except Exception:
+        pass
+    return metrics
+
+
 def get_unified_diff_data(commit, previous_commit=None):
     """使用新的统一差异服务获取差异数据（优化版本，优先使用缓存）"""
     from services.diff_service import DiffService
@@ -232,6 +249,7 @@ def get_unified_diff_data(commit, previous_commit=None):
         log_print(f"📂 当前提交: {commit.commit_id[:8]} | 前一提交: {previous_commit.commit_id[:8] if previous_commit else 'None'}", 'DIFF', force=True)
         # 如果是Excel文件，优先检查缓存
         is_excel = excel_cache_service.is_excel_file(commit.path)
+        cache_lookup_start = time.time()
         if is_excel:
             log_print(f"🔍 Excel文件，检查缓存: {commit.path}", 'CACHE')
             # 检查Excel diff缓存
@@ -245,10 +263,12 @@ def get_unified_diff_data(commit, previous_commit=None):
 
             else:
                 log_print(f"❌ 缓存未命中，开始实时计算: {commit.path}", 'CACHE')
+                log_print(f"⏱️ 缓存查询耗时: {time.time() - cache_lookup_start:.2f}秒", 'DIFF')
         # 如果没有前一提交，这可能是问题所在
         if previous_commit is None:
             log_print(f"⚠️ 警告: 没有前一提交，将与空版本比较 - 这可能导致显示为初始版本", 'DIFF', force=True)
         # 根据仓库类型获取文件内容
+        read_start = time.time()
         if repository.type == 'git':
             # 获取当前版本文件内容
             current_content = get_file_content_from_git(repository, commit.commit_id, commit.path)
@@ -271,6 +291,7 @@ def get_unified_diff_data(commit, previous_commit=None):
                 'error': f'不支持的仓库类型: {repository.type}',
                 'message': f'不支持的仓库类型: {repository.type}'
             }
+        read_time = time.time() - read_start
         # 处理差异
         diff_service = DiffService()
         calc_start_time = time.time()
@@ -279,9 +300,15 @@ def get_unified_diff_data(commit, previous_commit=None):
         if diff_data:
             total_time = time.time() - start_time
             log_print(f"✅ 实时diff计算完成: {commit.path} | 类型: {diff_data.get('type', 'unknown')} | 计算耗时: {processing_time:.2f}秒 | 总耗时: {total_time:.2f}秒", 'DIFF')
+            log_print(
+                f"📊 diff分段耗时: read={read_time:.2f}s, calc={processing_time:.2f}s | "
+                f"content_bytes(current={len(current_content or b'')}, previous={len(previous_content or b'')})",
+                'DIFF'
+            )
             # 如果是Excel文件且没有缓存，保存到缓存
             if is_excel and diff_data.get('type') == 'excel':
                 try:
+                    cache_save_start = time.time()
                     excel_cache_service.save_cached_diff(
                         repository_id=repository.id,
                         commit_id=commit.commit_id,
@@ -292,7 +319,14 @@ def get_unified_diff_data(commit, previous_commit=None):
                         previous_commit_id=previous_commit.commit_id if previous_commit else None,
                         commit_time=commit.commit_time
                     )
+                    cache_save_time = time.time() - cache_save_start
+                    metrics = _collect_excel_metrics(diff_data)
                     log_print(f"💾 Excel diff结果已保存到缓存: {commit.path}", 'CACHE')
+                    log_print(
+                        f"📈 Excel diff指标: sheets={metrics['sheet_count']}, rows={metrics['changed_rows']}, "
+                        f"summary={metrics['summary']} | save_cache={cache_save_time:.2f}s",
+                        'DIFF'
+                    )
                 except Exception as cache_error:
                     log_print(f"⚠️ 保存缓存失败: {cache_error}", 'CACHE')
         else:

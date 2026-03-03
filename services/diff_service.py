@@ -393,13 +393,14 @@ class DiffService:
         if previous_df is None:
             # 新增工作表
             headers = list(current_df.columns)
-            rows = []
-            for idx, row in current_df.iterrows():
-                rows.append({
-                    'row_number': idx + 1,
+            rows = [
+                {
+                    'row_number': row_number,
                     'status': 'added',
-                    'data': row.to_dict()
-                })
+                    'data': row_data
+                }
+                for row_number, row_data in self._dataframe_rows_with_index(current_df)
+            ]
             
             return {
                 'operation': 'added',
@@ -438,14 +439,17 @@ class DiffService:
         
         # 使用智能diff算法处理行插入/删除
         return self._smart_row_diff(current_df, previous_df, ordered_columns)
+
+    def _dataframe_rows_with_index(self, df):
+        """高效转换 DataFrame 为带原始行号的记录列表。"""
+        records = df.to_dict(orient='records')
+        return [(idx + 1, row_data) for idx, row_data in enumerate(records)]
     
     def _smart_row_diff(self, current_df, previous_df, all_columns) -> Dict[str, Any]:
         """智能行差异算法，正确处理行插入、删除和修改"""
-        import pandas as pd
-        
         # 转换为列表便于处理，保留原始行号
-        current_rows_with_index = [(idx + 1, row.to_dict()) for idx, (_, row) in enumerate(current_df.iterrows())]
-        previous_rows_with_index = [(idx + 1, row.to_dict()) for idx, (_, row) in enumerate(previous_df.iterrows())]
+        current_rows_with_index = self._dataframe_rows_with_index(current_df)
+        previous_rows_with_index = self._dataframe_rows_with_index(previous_df)
         
         # 过滤掉全NaN行，但保留原始行号
         current_filtered = []
@@ -461,6 +465,28 @@ class DiffService:
         # 提取纯数据用于匹配
         current_rows = [row_data for _, row_data in current_filtered]
         previous_rows = [row_data for _, row_data in previous_filtered]
+
+        # 大表常见场景：过滤后按顺序逐行等价，直接返回空差异
+        rows_equal = False
+        if len(current_rows) == len(previous_rows):
+            rows_equal = True
+            for idx, row_data in enumerate(current_rows):
+                if not self._rows_equal(row_data, previous_rows[idx], all_columns):
+                    rows_equal = False
+                    break
+        if rows_equal:
+            return {
+                'rows': [],
+                'stats': {
+                    'total_rows_current': len(current_filtered),
+                    'total_rows_previous': len(previous_filtered),
+                    'added': 0,
+                    'removed': 0,
+                    'modified': 0
+                },
+                'headers': all_columns,
+                'columns': all_columns
+            }
         
         # 使用改进的匹配算法
         matches = self._find_row_matches(current_rows, previous_rows, all_columns)
@@ -697,17 +723,6 @@ class DiffService:
         # 自适应搜索范围：至少10行，最多为数据集大小的10%
         data_size = max(len(current_rows), len(previous_rows))
         search_range = max(10, int(data_size * 0.1))
-        
-        # 收集已匹配行的位置偏移，用于估算整体偏移趋势
-        offset_sum = 0
-        offset_count = 0
-        for ci in used_current:
-            for m_item in []:
-                pass
-        # 从已有匹配中计算平均偏移
-        existing_offsets = []
-        all_matches_map = {}
-        # 此处不能直接访问外层 matches，通过 used_current/used_previous 间接推断
         
         # 对于未匹配的当前行，尝试与相近位置的前一版本行匹配
         for i, current_row in enumerate(current_rows):

@@ -287,29 +287,32 @@ class ExcelDiffCacheService:
             return diff_data
         
         try:
-            optimized_data = diff_data.copy()
+            optimized_data = dict(diff_data)
             original_size = 0
             optimized_size = 0
-            
-            if 'sheets' in optimized_data:
-                for sheet_name, sheet_data in optimized_data['sheets'].items():
-                    if 'rows' in sheet_data:
-                        original_rows = sheet_data['rows']
-                        original_size += len(original_rows)
-                        
-                        # 只保留有变更的行（added, removed, modified）
-                        changed_rows = [
-                            row for row in original_rows 
-                            if row.get('status') in ['added', 'removed', 'modified']
-                        ]
-                        
-                        sheet_data['rows'] = changed_rows
-                        optimized_size += len(changed_rows)
-                        
-                        # 更新统计信息，只统计有变更的行
-                        if 'stats' in sheet_data:
-                            stats = sheet_data['stats']
-                            # 保持原有的统计数据，因为这些是正确的变更统计
+
+            sheets = diff_data.get('sheets') or {}
+            optimized_sheets = {}
+            for sheet_name, sheet_data in sheets.items():
+                if not isinstance(sheet_data, dict):
+                    optimized_sheets[sheet_name] = sheet_data
+                    continue
+                new_sheet_data = dict(sheet_data)
+                if 'rows' in sheet_data:
+                    original_rows = sheet_data.get('rows') or []
+                    original_size += len(original_rows)
+
+                    # 只保留有变更的行（added, removed, modified）
+                    changed_rows = [
+                        row for row in original_rows
+                        if row.get('status') in ['added', 'removed', 'modified']
+                    ]
+
+                    new_sheet_data['rows'] = changed_rows
+                    optimized_size += len(changed_rows)
+                optimized_sheets[sheet_name] = new_sheet_data
+
+            optimized_data['sheets'] = optimized_sheets
             
             log_print(f"🗜️ diff数据优化: {original_size} 行 → {optimized_size} 行 (减少 {original_size - optimized_size} 行)", 'CACHE')
             return optimized_data
@@ -317,6 +320,28 @@ class ExcelDiffCacheService:
         except Exception as e:
             log_print(f"❌ diff数据优化失败: {e}", 'CACHE', force=True)
             return diff_data
+
+    def _collect_excel_diff_metrics(self, diff_data):
+        """收集Excel diff简要指标，用于性能观测日志。"""
+        metrics = {
+            'sheet_count': 0,
+            'changed_rows': 0,
+            'summary': {},
+        }
+        if not isinstance(diff_data, dict) or diff_data.get('type') != 'excel':
+            return metrics
+        try:
+            sheets = diff_data.get('sheets') or {}
+            metrics['sheet_count'] = len(sheets)
+            changed_rows = 0
+            for sheet_data in sheets.values():
+                rows = sheet_data.get('rows') or []
+                changed_rows += len(rows)
+            metrics['changed_rows'] = changed_rows
+            metrics['summary'] = diff_data.get('summary') or {}
+        except Exception:
+            pass
+        return metrics
     
     # diff_data 序列化后最大允许 20MB (#40)
     MAX_DIFF_DATA_BYTES = 20 * 1024 * 1024
@@ -326,25 +351,30 @@ class ExcelDiffCacheService:
         try:
             log_print(f"💾 保存缓存: repo={repository_id}, commit={commit_id[:8]}, file={file_path}", 'CACHE')
 
+            # 统一在保存入口执行轻量化，确保所有调用方行为一致
+            normalized_diff_data = diff_data
+            if isinstance(diff_data, dict) and diff_data.get('type') == 'excel':
+                normalized_diff_data = self.optimize_diff_data(diff_data)
+
             # --- #40: 序列化并检查大小限制 ---
-            diff_json = json.dumps(diff_data)
+            diff_json = json.dumps(normalized_diff_data)
             diff_bytes = len(diff_json.encode('utf-8'))
+            payload_mb = diff_bytes / (1024 * 1024)
             if diff_bytes > self.MAX_DIFF_DATA_BYTES:
-                size_mb = diff_bytes / (1024 * 1024)
                 log_print(
                     f"⚠️ diff_data 超出大小限制: {file_path} | "
-                    f"{size_mb:.2f}MB > {self.MAX_DIFF_DATA_BYTES / (1024*1024):.0f}MB，"
+                    f"{payload_mb:.2f}MB > {self.MAX_DIFF_DATA_BYTES / (1024*1024):.0f}MB，"
                     f"仅保存摘要信息", 'CACHE', force=True)
                 # 用精简占位数据替代，保留统计但丢弃行详情
                 summary_data = {
-                    'type': diff_data.get('type', 'excel'),
+                    'type': normalized_diff_data.get('type', 'excel'),
                     'truncated': True,
-                    'original_size_mb': round(size_mb, 2),
-                    'error': f'数据过大({size_mb:.1f}MB)，已截断。请在线查看差异。',
+                    'original_size_mb': round(payload_mb, 2),
+                    'error': f'数据过大({payload_mb:.1f}MB)，已截断。请在线查看差异。',
                 }
-                if 'sheets' in diff_data:
+                if 'sheets' in normalized_diff_data:
                     summary_data['sheets'] = {}
-                    for sheet_name, sheet_info in diff_data['sheets'].items():
+                    for sheet_name, sheet_info in normalized_diff_data['sheets'].items():
                         summary_data['sheets'][sheet_name] = {
                             'stats': sheet_info.get('stats', {}),
                             'rows': [],            # 清空行数据
@@ -411,7 +441,12 @@ class ExcelDiffCacheService:
             if not is_long_processing:
                 self._cleanup_old_cache(repository_id)
             
-            log_print(f"✅ 缓存保存成功: {file_path} | 处理时间: {processing_time:.2f}秒", 'CACHE')
+            final_bytes = len(diff_json.encode('utf-8'))
+            log_print(
+                f"✅ 缓存保存成功: {file_path} | 处理时间: {processing_time:.2f}秒 | "
+                f"payload={final_bytes / 1024:.1f}KB",
+                'CACHE'
+            )
             return True
             
         except Exception as e:
@@ -505,6 +540,7 @@ class ExcelDiffCacheService:
             # 确保在Flask应用上下文中执行
             with app.app_context():
                 try:
+                    query_start = time.time()
                     repository = db.session.get(Repository, repository_id)
                     if not repository:
                         log_print(f"仓库不存在: {repository_id}", 'EXCEL', force=True)
@@ -523,20 +559,33 @@ class ExcelDiffCacheService:
                     
                     # 获取前一个提交
                     previous_commit = None
+                    from sqlalchemy import and_, or_
                     file_commits = Commit.query.filter(
                         Commit.repository_id == repository_id,
                         Commit.path == file_path,
-                        Commit.commit_time < commit.commit_time
-                    ).order_by(Commit.commit_time.desc()).first()
+                        or_(
+                            Commit.commit_time < commit.commit_time,
+                            and_(Commit.commit_time == commit.commit_time, Commit.id < commit.id),
+                        ),
+                    ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
+                    if not file_commits:
+                        file_commits = Commit.query.filter(
+                            Commit.repository_id == repository_id,
+                            Commit.path == file_path,
+                            Commit.id < commit.id
+                        ).order_by(Commit.id.desc()).first()
+                    query_time = time.time() - query_start
                     
-                    start_time = time.time()
+                    diff_start = time.time()
                     
                     # 使用统一差异服务处理
                     diff_data = get_unified_diff_data(commit, file_commits)
                     
-                    processing_time = time.time() - start_time
+                    processing_time = time.time() - diff_start
                     
                     if diff_data and diff_data.get('type') == 'excel':
+                        metrics = self._collect_excel_diff_metrics(diff_data)
+                        cache_start = time.time()
                         # 缓存成功的差异数据
                         self.save_cached_diff(
                             repository_id=repository_id,
@@ -546,8 +595,15 @@ class ExcelDiffCacheService:
                             previous_commit_id=file_commits.commit_id if file_commits else None,
                             processing_time=processing_time
                         )
+                        cache_time = time.time() - cache_start
+                        total_time = time.time() - query_start
                         log_print(f"💾 Excel差异缓存成功: {file_path} | 版本: {DIFF_LOGIC_VERSION} | 耗时: {processing_time:.2f}秒", 'EXCEL')
-                        log_print(f"📈 差异数据大小: {len(str(diff_data))} 字符", 'EXCEL')
+                        log_print(
+                            f"📈 后台Excel diff指标: sheets={metrics['sheet_count']}, "
+                            f"rows={metrics['changed_rows']}, summary={metrics['summary']} | "
+                            f"query={query_time:.2f}s, diff={processing_time:.2f}s, cache={cache_time:.2f}s, total={total_time:.2f}s",
+                            'EXCEL'
+                        )
                         
                         # 记录到操作日志
                         self.log_cache_operation(f"✅ 缓存生成成功: {file_path}", 'success', repository_id=repository_id, file_path=file_path)
