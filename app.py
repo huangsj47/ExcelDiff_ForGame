@@ -162,6 +162,7 @@ from services.agent_management_handlers import (
     agent_heartbeat,
     list_agent_nodes,
     list_agent_tasks,
+    agent_overview_page,
     agent_claim_task,
     agent_report_task_result,
     agent_execute_task_proxy,
@@ -424,6 +425,7 @@ app.jinja_env.globals['is_logged_in'] = _is_logged_in
 app.jinja_env.globals['get_current_user'] = _get_current_user
 app.jinja_env.globals['has_project_access'] = _has_project_access
 app.jinja_env.globals['has_project_admin_access'] = _has_project_admin_access
+app.jinja_env.globals['deployment_mode'] = DEPLOYMENT_MODE
 
 from utils.timezone_utils import format_beijing_time
 app.jinja_env.globals['format_beijing_time'] = format_beijing_time
@@ -2287,6 +2289,24 @@ def _migrate_weekly_version_diff_cache_columns():
     )
 
 
+def _migrate_agent_nodes_columns():
+    """自动为 agent_nodes 表补充模型中新增但数据库尚缺的列"""
+    _migrate_table_columns(
+        'agent_nodes',
+        {
+            'cpu_cores': 'cpu_cores INTEGER',
+            'cpu_usage_percent': 'cpu_usage_percent FLOAT',
+            'memory_total_bytes': 'memory_total_bytes BIGINT',
+            'memory_available_bytes': 'memory_available_bytes BIGINT',
+            'disk_free_bytes': 'disk_free_bytes BIGINT',
+            'os_name': 'os_name VARCHAR(100)',
+            'os_version': 'os_version VARCHAR(200)',
+            'os_platform': 'os_platform VARCHAR(300)',
+            'metrics_updated_at': 'metrics_updated_at DATETIME',
+        }
+    )
+
+
 def create_tables():
     """创建数据库表"""
     with app.app_context():
@@ -2330,6 +2350,7 @@ def create_tables():
         _migrate_repository_columns()
         _migrate_commits_log_columns()
         _migrate_weekly_version_diff_cache_columns()
+        _migrate_agent_nodes_columns()
 
         # 检查创建后的表状态
         try:

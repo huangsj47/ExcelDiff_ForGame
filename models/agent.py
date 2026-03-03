@@ -28,6 +28,15 @@ class AgentNode(db.Model):
     status = db.Column(db.String(20), default="offline")  # online/offline
     last_heartbeat = db.Column(db.DateTime)
     last_error = db.Column(db.Text)
+    cpu_cores = db.Column(db.Integer)
+    cpu_usage_percent = db.Column(db.Float)
+    memory_total_bytes = db.Column(db.BigInteger)
+    memory_available_bytes = db.Column(db.BigInteger)
+    disk_free_bytes = db.Column(db.BigInteger)
+    os_name = db.Column(db.String(100))
+    os_version = db.Column(db.String(200))
+    os_platform = db.Column(db.String(300))
+    metrics_updated_at = db.Column(db.DateTime)
 
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(

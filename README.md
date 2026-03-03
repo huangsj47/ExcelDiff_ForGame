@@ -264,24 +264,31 @@ python app.py
 ## 平台 + Agent 模式（实验版）
 
 - 平台新增接口：
-  - `POST /api/agents/register`：Agent 注册、自动创建项目代号（若不存在）
+  - `POST /api/agents/register`：Agent 注册；可选自动创建项目代号（若传入）
   - `POST /api/agents/heartbeat`：Agent 心跳上报
   - `GET /api/agents`：查看 Agent 状态（管理员）
+  - `GET /admin/agents`：Agent 节点监控页（管理员）
   - `POST /api/agents/tasks/claim`：Agent 领取任务
   - `POST /api/agents/tasks/<task_id>/execute-proxy`：平台代理执行任务（过渡模式）
   - `POST /api/agents/tasks/<task_id>/result`：Agent 回传任务结果
   - `GET /api/agents/tasks`：查看 Agent 任务状态（管理员）
 - 项目代号规则：
+  - 不传/空：不创建项目代号
   - 不存在：平台自动创建项目
   - 已存在且已绑定当前 Agent：幂等通过
   - 已存在且被其他主体占用：返回冲突，不覆盖
 - 独立 Agent 运行包位于 `agent/`，可单独打包分发：
   - `python agent/build_zip.py`
 - `DEPLOYMENT_MODE=platform` 时，新增 `excel_diff/auto_sync/weekly_sync` 任务会下发到 `agent_tasks`。
+- 平台管理员在 `platform/agent` 模式下创建项目时，可在首页选择绑定目标 Agent。
 - 当前执行策略：
   - `auto_sync`：默认由 Agent 本地执行（拉取 Git 仓库并回传提交清单，平台入库并继续派发 excel_diff）
   - 其他任务：仍通过 `execute-proxy` 由平台执行（过渡方案）
 - 相关 Agent 配置：
+  - `AGENT_NAME`（建议必填）
+  - `AGENT_CODE`（可留空，自动根据 `AGENT_NAME + AGENT_HOST` 生成）
+  - `AGENT_PROJECT_CODES`（可留空）
+  - `AGENT_METRICS_INTERVAL_SECONDS=300`（CPU/内存/磁盘上报周期）
   - `AGENT_LOCAL_TASK_TYPES=auto_sync`
   - `AGENT_REPOS_BASE_DIR=agent_repos`
 

@@ -30,6 +30,11 @@ def list_agent_nodes_route():
     return _dispatch("list_agent_nodes")
 
 
+@agent_management_bp.route("/admin/agents", methods=["GET"], endpoint="agent_overview_page")
+def agent_overview_page_route():
+    return _dispatch("agent_overview_page")
+
+
 @agent_management_bp.route("/api/agents/tasks", methods=["GET"], endpoint="list_agent_tasks")
 def list_agent_tasks_route():
     return _dispatch("list_agent_tasks")

@@ -7,7 +7,7 @@ import os
 
 from flask import flash, redirect, render_template, request, session, url_for
 
-from models import Project, Repository, db
+from models import AgentNode, AgentProjectBinding, Project, Repository, db
 from services.model_loader import get_runtime_model
 from utils.request_security import _has_admin_access, _is_safe_redirect
 
@@ -81,12 +81,23 @@ def index():
         ]
 
         total_projects = (len(all_projects) + len(projects)) if accessible_ids is not None else len(projects)
+        deployment_mode = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
+        agent_nodes = []
+        if _has_admin_access() and deployment_mode in {"platform", "agent"}:
+            try:
+                from services.agent_management_handlers import build_agent_node_items
+
+                agent_nodes = build_agent_node_items()
+            except Exception as exc:
+                log_print(f"加载Agent列表失败: {exc}", "AGENT", force=True)
         log_print(f"找到 {len(projects)} 个可见项目（总 {total_projects} 个）", "APP")
         return render_template(
             "index.html",
             projects=projects,
             joinable_projects=joinable_projects,
             is_platform_admin=_has_admin_access(),
+            agent_nodes=agent_nodes,
+            deployment_mode=deployment_mode,
         )
     except Exception as exc:
         log_print(f"首页路由错误: {str(exc)}", "APP", force=True)
@@ -101,6 +112,8 @@ def projects():
         code = request.form.get("code")
         name = request.form.get("name")
         department = request.form.get("department")
+        selected_agent_code = (request.form.get("agent_code") or "").strip()
+        deployment_mode = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
         if not code or not name:
             flash("项目代号和名称不能为空", "error")
             return redirect(url_for("index"))
@@ -112,6 +125,26 @@ def projects():
 
         project = Project(code=code, name=name, department=department)
         db.session.add(project)
+        db.session.flush()
+
+        if selected_agent_code and deployment_mode in {"platform", "agent"}:
+            selected_agent = AgentNode.query.filter_by(agent_code=selected_agent_code).first()
+            if not selected_agent:
+                db.session.rollback()
+                flash("所选 Agent 节点不存在，请刷新后重试", "error")
+                return redirect(url_for("index"))
+
+            db.session.add(
+                AgentProjectBinding(
+                    agent_id=selected_agent.id,
+                    project_id=project.id,
+                    project_code=project.code,
+                )
+            )
+            db.session.commit()
+            flash(f"项目创建成功，已绑定到 Agent: {selected_agent.agent_name or selected_agent.agent_code}", "success")
+            return redirect(url_for("index"))
+
         db.session.commit()
         flash("项目创建成功", "success")
         return redirect(url_for("index"))

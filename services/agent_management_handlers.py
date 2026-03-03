@@ -4,19 +4,21 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import json
 import os
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from flask import jsonify, request
+from flask import jsonify, render_template, request
 
 from services.model_loader import get_runtime_models
 from utils.request_security import require_admin
 
 
 _PROJECT_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{2,50}$")
+_AGENT_CODE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
 
 def _agent_shared_secret() -> str:
@@ -68,6 +70,154 @@ def _normalize_project_specs(raw_projects):
         )
         seen.add(code)
     return specs
+
+
+def _normalize_agent_code(agent_code: str, agent_name: str, host: str) -> str:
+    raw = str(agent_code or "").strip()
+    if not raw:
+        base = str(agent_name or "agent").strip()
+        host_part = str(host or "").strip().replace(".", "-")
+        raw = f"{base}-{host_part}" if host_part else base
+
+    normalized = _AGENT_CODE_RE.sub("-", raw).strip("-").lower()
+    if not normalized:
+        normalized = f"agent-{secrets.token_hex(4)}"
+    return normalized[:100]
+
+
+def _to_int_or_none(value, min_value=None, max_value=None):
+    try:
+        iv = int(value)
+    except Exception:
+        return None
+    if min_value is not None and iv < min_value:
+        return None
+    if max_value is not None and iv > max_value:
+        return None
+    return iv
+
+
+def _to_float_or_none(value, min_value=None, max_value=None):
+    try:
+        fv = float(value)
+    except Exception:
+        return None
+    if min_value is not None and fv < min_value:
+        return None
+    if max_value is not None and fv > max_value:
+        return None
+    return fv
+
+
+def _extract_agent_metrics(payload: dict):
+    metrics = {
+        "cpu_cores": _to_int_or_none(payload.get("cpu_cores"), min_value=1, max_value=4096),
+        "cpu_usage_percent": _to_float_or_none(payload.get("cpu_usage_percent"), min_value=0, max_value=100),
+        "memory_total_bytes": _to_int_or_none(payload.get("memory_total_bytes"), min_value=0),
+        "memory_available_bytes": _to_int_or_none(payload.get("memory_available_bytes"), min_value=0),
+        "disk_free_bytes": _to_int_or_none(payload.get("disk_free_bytes"), min_value=0),
+        "os_name": str(payload.get("os_name") or "").strip()[:100] or None,
+        "os_version": str(payload.get("os_version") or "").strip()[:200] or None,
+        "os_platform": str(payload.get("os_platform") or "").strip()[:300] or None,
+    }
+    return metrics
+
+
+def _apply_agent_runtime_fields(agent, payload: dict):
+    now_utc = datetime.now(timezone.utc)
+    if "status" in payload:
+        status = str(payload.get("status") or "").strip()
+        agent.status = status or agent.status or "online"
+
+    host = str(payload.get("ip") or payload.get("host") or "").strip()
+    if host:
+        agent.host = host
+
+    if "port" in payload:
+        port = _to_int_or_none(payload.get("port"), min_value=1, max_value=65535)
+        if port is not None:
+            agent.port = port
+
+    if "agent_name" in payload:
+        incoming_name = str(payload.get("agent_name") or "").strip()
+        if incoming_name:
+            agent.agent_name = incoming_name
+
+    if "last_error" in payload:
+        last_error = str(payload.get("last_error") or "").strip()
+        agent.last_error = last_error or None
+
+    metrics = _extract_agent_metrics(payload)
+    metrics_updated = False
+    for key, value in metrics.items():
+        if value is None:
+            continue
+        setattr(agent, key, value)
+        metrics_updated = True
+
+    if metrics_updated:
+        agent.metrics_updated_at = now_utc
+
+    agent.last_heartbeat = now_utc
+
+
+def _format_agent_rows(agents, bindings_by_agent_id):
+    name_counter = Counter(
+        (str(item.agent_name or "").strip().lower() or "agent")
+        for item in agents
+    )
+    rows = []
+    for agent in agents:
+        raw_name = str(agent.agent_name or "").strip() or str(agent.agent_code or "").strip() or "agent"
+        name_key = raw_name.lower()
+        if name_counter.get(name_key, 0) > 1 and agent.host:
+            display_name = f"{raw_name}_{agent.host}"
+        else:
+            display_name = raw_name
+
+        binding_rows = bindings_by_agent_id.get(agent.id, [])
+        rows.append(
+            {
+                "agent_code": agent.agent_code,
+                "agent_name": raw_name,
+                "display_name": display_name,
+                "host": agent.host,
+                "port": agent.port,
+                "status": agent.status,
+                "last_heartbeat": agent.last_heartbeat.isoformat() if agent.last_heartbeat else None,
+                "default_admin_username": agent.default_admin_username,
+                "project_codes": [binding.project_code for binding in binding_rows],
+                "project_count": len(binding_rows),
+                "cpu_cores": agent.cpu_cores,
+                "cpu_usage_percent": agent.cpu_usage_percent,
+                "memory_total_bytes": agent.memory_total_bytes,
+                "memory_available_bytes": agent.memory_available_bytes,
+                "disk_free_bytes": agent.disk_free_bytes,
+                "os_name": agent.os_name,
+                "os_version": agent.os_version,
+                "os_platform": agent.os_platform,
+                "metrics_updated_at": agent.metrics_updated_at.isoformat() if agent.metrics_updated_at else None,
+            }
+        )
+    return rows
+
+
+def build_agent_node_items():
+    AgentNode, AgentProjectBinding = get_runtime_models("AgentNode", "AgentProjectBinding")
+    agents = AgentNode.query.order_by(AgentNode.updated_at.desc()).all()
+    if not agents:
+        return []
+
+    agent_ids = [item.id for item in agents]
+    bindings = (
+        AgentProjectBinding.query.filter(AgentProjectBinding.agent_id.in_(agent_ids))
+        .order_by(AgentProjectBinding.project_code.asc())
+        .all()
+    )
+    bindings_by_agent_id = {}
+    for row in bindings:
+        bindings_by_agent_id.setdefault(row.agent_id, []).append(row)
+    return _format_agent_rows(agents, bindings_by_agent_id)
 
 
 def _get_agent_by_identity(agent_code: str, agent_token: str):
@@ -217,10 +367,13 @@ def register_agent_node():
             return resp, code
 
         payload = request.get_json(silent=True) or {}
-        agent_code = str(payload.get("agent_code", "")).strip()
-        agent_name = str(payload.get("agent_name") or agent_code).strip()
-        host = str(payload.get("host", "")).strip() or None
-        port = payload.get("port")
+        host = str(payload.get("ip") or payload.get("host") or "").strip() or None
+        agent_name = str(payload.get("agent_name") or "").strip()
+        agent_code = _normalize_agent_code(
+            str(payload.get("agent_code") or "").strip(),
+            agent_name,
+            host or "",
+        )
         default_admin_username = str(payload.get("default_admin_username", "")).strip() or None
         capabilities = payload.get("capabilities")
 
@@ -229,11 +382,6 @@ def register_agent_node():
             or payload.get("project_codes")
             or payload.get("project_code_list")
         )
-
-        if not agent_code:
-            return jsonify({"success": False, "message": "缺少 agent_code"}), 400
-        if not project_specs:
-            return jsonify({"success": False, "message": "至少需要一个 project code"}), 400
 
         agent = AgentNode.query.filter_by(agent_code=agent_code).first()
         if not agent:
@@ -245,14 +393,19 @@ def register_agent_node():
             db.session.add(agent)
             db.session.flush()
         else:
-            agent.agent_name = agent_name or agent.agent_name
+            agent.agent_name = agent_name or agent.agent_name or agent_code
 
-        agent.host = host
-        agent.port = int(port) if isinstance(port, int) or (isinstance(port, str) and str(port).isdigit()) else None
+        _apply_agent_runtime_fields(
+            agent,
+            {
+                **payload,
+                "agent_name": agent_name or agent.agent_name or agent_code,
+                "host": host or payload.get("host"),
+                "status": "online",
+            },
+        )
         agent.default_admin_username = default_admin_username
         agent.capabilities = None if capabilities is None else str(capabilities)
-        agent.status = "online"
-        agent.last_heartbeat = datetime.now(timezone.utc)
         agent.last_error = None
 
         created_projects = []
@@ -311,6 +464,7 @@ def register_agent_node():
                 "success": True,
                 "agent_code": agent.agent_code,
                 "agent_token": agent.agent_token,
+                "project_binding_count": len(project_specs),
                 "created_project_codes": created_projects,
                 "idempotent_project_codes": idempotent_projects,
             }
@@ -340,19 +494,13 @@ def agent_heartbeat():
         if not agent:
             return jsonify({"success": False, "message": "Agent 身份无效"}), 401
 
-        status = str(payload.get("status") or "online").strip() or "online"
-        agent.status = status
-        agent.last_heartbeat = datetime.now(timezone.utc)
-        if "host" in payload:
-            host = str(payload.get("host") or "").strip()
-            agent.host = host or agent.host
-        if "port" in payload:
-            port = payload.get("port")
-            if isinstance(port, int) or (isinstance(port, str) and str(port).isdigit()):
-                agent.port = int(port)
-        if "last_error" in payload:
-            last_error = str(payload.get("last_error") or "").strip()
-            agent.last_error = last_error or None
+        _apply_agent_runtime_fields(
+            agent,
+            {
+                **payload,
+                "status": str(payload.get("status") or "online").strip() or "online",
+            },
+        )
 
         db.session.commit()
         return jsonify({"success": True, "server_time": datetime.now(timezone.utc).isoformat()})
@@ -572,33 +720,14 @@ def agent_execute_task_proxy(task_id):
 @require_admin
 def list_agent_nodes():
     """查看 Agent 节点状态（管理员）。"""
-    AgentNode, AgentProjectBinding, Project = get_runtime_models(
-        "AgentNode",
-        "AgentProjectBinding",
-        "Project",
-    )
-    agents = AgentNode.query.order_by(AgentNode.updated_at.desc()).all()
-    rows = []
-    for agent in agents:
-        bindings = (
-            AgentProjectBinding.query.filter_by(agent_id=agent.id)
-            .order_by(AgentProjectBinding.project_code.asc())
-            .all()
-        )
-        rows.append(
-            {
-                "agent_code": agent.agent_code,
-                "agent_name": agent.agent_name,
-                "host": agent.host,
-                "port": agent.port,
-                "status": agent.status,
-                "last_heartbeat": agent.last_heartbeat.isoformat() if agent.last_heartbeat else None,
-                "default_admin_username": agent.default_admin_username,
-                "project_codes": [binding.project_code for binding in bindings],
-            }
-        )
-
+    rows = build_agent_node_items()
     return jsonify({"success": True, "items": rows, "count": len(rows)})
+
+
+@require_admin
+def agent_overview_page():
+    """Agent 节点信息总览页面。"""
+    return render_template("admin_agents.html")
 
 
 @require_admin

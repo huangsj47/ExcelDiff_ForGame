@@ -300,6 +300,28 @@
                         <label for="department" class="form-label">所属部门</label>
                         <input type="text" class="form-control" id="department" name="department" placeholder="例如: 研发部">
                     </div>
+                    {% if deployment_mode in ['platform', 'agent'] %}
+                    <div class="mb-3">
+                        <label for="agent_code" class="form-label">绑定Agent节点</label>
+                        <select class="form-select" id="agent_code" name="agent_code" onchange="onProjectAgentChanged()">
+                            <option value="">不绑定（后续可手动绑定）</option>
+                            {% for node in agent_nodes %}
+                            <option value="{{ node.agent_code }}">
+                                {{ node.display_name }} | 状态: {{ node.status or 'unknown' }} | CPU: {{ '%.1f'|format(node.cpu_usage_percent or 0) }}%
+                            </option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">
+                            平台+Agent模式下可为新项目指定执行节点。可在
+                            <a href="{{ url_for('agent_overview_page') }}" target="_blank" rel="noopener">Agent节点页</a>
+                            查看全部节点详情。
+                        </div>
+                    </div>
+                    <div class="alert alert-light border" id="agentLiveInfoCard" style="font-size: 0.82rem;">
+                        <div class="fw-bold mb-1">节点信息</div>
+                        <div id="agentLiveInfoText">未选择Agent节点</div>
+                    </div>
+                    {% endif %}
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" style="border-radius: 8px;">取消</button>
@@ -394,6 +416,75 @@
 {% block scripts %}
 <script>
 {% if is_admin() %}
+let projectAgentNodes = {{ (agent_nodes or [])|tojson }};
+
+function formatBytes(bytes) {
+    const value = Number(bytes || 0);
+    if (!value) return '-';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let idx = 0;
+    let size = value;
+    while (size >= 1024 && idx < units.length - 1) {
+        size /= 1024;
+        idx += 1;
+    }
+    return `${size.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
+}
+
+function formatAgentText(node) {
+    if (!node) return '未选择Agent节点';
+    const cpu = node.cpu_usage_percent == null ? '-' : `${Number(node.cpu_usage_percent).toFixed(1)}%`;
+    return [
+        `名称: ${node.display_name || node.agent_name || node.agent_code}`,
+        `状态: ${node.status || '-'}`,
+        `CPU: ${cpu} / ${node.cpu_cores || '-'} 核`,
+        `内存可用: ${formatBytes(node.memory_available_bytes)} / ${formatBytes(node.memory_total_bytes)}`,
+        `磁盘剩余: ${formatBytes(node.disk_free_bytes)}`,
+        `系统: ${node.os_name || '-'} ${node.os_version || ''}`.trim(),
+        `IP: ${node.host || '-'}`
+    ].join(' | ');
+}
+
+function renderProjectAgentOptions() {
+    const select = document.getElementById('agent_code');
+    if (!select) return;
+    const selectedValue = select.value;
+    const dynamicOptions = projectAgentNodes.map(node => {
+        const cpu = node.cpu_usage_percent == null ? '-' : `${Number(node.cpu_usage_percent).toFixed(1)}%`;
+        return `<option value="${node.agent_code}">${node.display_name || node.agent_name || node.agent_code} | 状态: ${node.status || '-'} | CPU: ${cpu}</option>`;
+    }).join('');
+    select.innerHTML = `<option value="">不绑定（后续可手动绑定）</option>${dynamicOptions}`;
+    if (selectedValue && projectAgentNodes.some(node => node.agent_code === selectedValue)) {
+        select.value = selectedValue;
+    }
+    onProjectAgentChanged();
+}
+
+function onProjectAgentChanged() {
+    const select = document.getElementById('agent_code');
+    const infoEl = document.getElementById('agentLiveInfoText');
+    if (!select || !infoEl) return;
+    const selectedCode = select.value;
+    const node = projectAgentNodes.find(item => item.agent_code === selectedCode);
+    infoEl.textContent = formatAgentText(node);
+}
+
+async function refreshProjectAgentNodes() {
+    try {
+        const resp = await fetch('{{ url_for("list_agent_nodes") }}', {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+        const data = await resp.json();
+        if (data && data.success && Array.isArray(data.items)) {
+            projectAgentNodes = data.items;
+            renderProjectAgentOptions();
+        }
+    } catch (err) {
+        console.warn('刷新Agent节点失败:', err);
+    }
+}
+
 function deleteProject(projectId) {
     if (confirm('确定要删除这个项目吗？此操作不可恢复。')) {
         fetch(`/projects/${projectId}/delete`, {
@@ -495,5 +586,13 @@ function submitCreateRequest() {
         btn.innerHTML = '<i class="fas fa-paper-plane me-1"></i>提交申请';
     });
 }
+
+{% if is_admin() and deployment_mode in ['platform', 'agent'] %}
+document.addEventListener('DOMContentLoaded', function() {
+    renderProjectAgentOptions();
+    refreshProjectAgentNodes();
+    setInterval(refreshProjectAgentNodes, 30000);
+});
+{% endif %}
 </script>
 {% endblock %}

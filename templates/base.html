@@ -355,6 +355,11 @@
                     <a class="nav-link px-3" href="{{ url_for('admin_performance_dashboard') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
                         <i class="fas fa-tachometer-alt me-1" style="font-size: 0.85rem;"></i>性能面板
                     </a>
+                    {% if deployment_mode in ['platform', 'agent'] %}
+                    <a class="nav-link px-3" href="{{ url_for('agent_overview_page') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
+                        <i class="fas fa-server me-1" style="font-size: 0.85rem;"></i>Agent节点
+                    </a>
+                    {% endif %}
                     {% endif %}
                     <a class="nav-link px-3" href="{{ url_for('help_page') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
                         <i class="fas fa-question-circle me-1" style="font-size: 0.85rem;"></i>帮助

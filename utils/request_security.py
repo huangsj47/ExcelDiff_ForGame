@@ -37,6 +37,8 @@ def csrf_token():
 # Admin page routes that render HTML templates (not JSON APIs)
 _ADMIN_PAGE_ROUTES = frozenset({
     "/admin/excel-cache",
+    "/admin/agents",
+    "/admin/performance",
 })
 
 

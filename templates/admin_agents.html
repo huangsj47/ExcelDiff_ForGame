@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+
+{% block title %}Agent 节点监控 - Diff确认平台{% endblock %}
+
+{% block head %}
+<style>
+    .agent-summary-card {
+        border: 1px solid #d0d7de;
+        border-radius: 10px;
+        background: #fff;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+        padding: 14px 16px;
+    }
+    .agent-summary-card .label {
+        color: #656d76;
+        font-size: 0.78rem;
+    }
+    .agent-summary-card .value {
+        color: #24292f;
+        font-weight: 700;
+        font-size: 1.1rem;
+    }
+    .agent-table-card {
+        border: 1px solid #d0d7de;
+        border-radius: 10px;
+        overflow: hidden;
+    }
+    .agent-table-card thead th {
+        background: #f6f8fa;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        color: #57606a;
+        white-space: nowrap;
+    }
+    .agent-table-card td {
+        vertical-align: middle;
+        font-size: 0.86rem;
+    }
+    .mono {
+        font-family: Consolas, Monaco, monospace;
+        font-size: 0.82rem;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid" style="max-width: 1800px;">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h4 class="mb-1"><i class="fas fa-server me-2 text-primary"></i>Agent 节点监控</h4>
+            <div class="text-muted" style="font-size: 0.86rem;">每30秒自动刷新，可用于项目创建时选择合适节点。</div>
+        </div>
+        <button class="btn btn-outline-primary btn-sm" onclick="loadAgentNodes()">
+            <i class="fas fa-sync-alt me-1"></i>立即刷新
+        </button>
+    </div>
+
+    <div class="row g-2 mb-3">
+        <div class="col-6 col-md-3">
+            <div class="agent-summary-card">
+                <div class="label">节点总数</div>
+                <div class="value" id="totalNodes">0</div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="agent-summary-card">
+                <div class="label">在线节点</div>
+                <div class="value text-success" id="onlineNodes">0</div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="agent-summary-card">
+                <div class="label">已绑定项目总数</div>
+                <div class="value" id="boundProjects">0</div>
+            </div>
+        </div>
+        <div class="col-6 col-md-3">
+            <div class="agent-summary-card">
+                <div class="label">最近刷新</div>
+                <div class="value" style="font-size: 0.86rem;" id="lastRefresh">-</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="agent-table-card">
+        <div class="table-responsive">
+            <table class="table table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th>Agent</th>
+                        <th>状态</th>
+                        <th>IP/端口</th>
+                        <th>CPU</th>
+                        <th>内存</th>
+                        <th>磁盘剩余</th>
+                        <th>系统</th>
+                        <th>绑定项目</th>
+                        <th>心跳</th>
+                    </tr>
+                </thead>
+                <tbody id="agentRowsBody">
+                    <tr><td colspan="9" class="text-center text-muted py-4">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function formatBytes(bytes) {
+    const value = Number(bytes || 0);
+    if (!value) return '-';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let idx = 0;
+    let size = value;
+    while (size >= 1024 && idx < units.length - 1) {
+        size /= 1024;
+        idx += 1;
+    }
+    return `${size.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
+}
+
+function statusBadge(status) {
+    const val = String(status || '').toLowerCase();
+    if (val === 'online') return '<span class="badge bg-success">online</span>';
+    if (val === 'offline') return '<span class="badge bg-secondary">offline</span>';
+    return `<span class="badge bg-warning text-dark">${status || '-'}</span>`;
+}
+
+function formatTimeText(isoText) {
+    if (!isoText) return '-';
+    try {
+        return new Date(isoText).toLocaleString();
+    } catch (err) {
+        return isoText;
+    }
+}
+
+async function loadAgentNodes() {
+    const tbody = document.getElementById('agentRowsBody');
+    try {
+        const resp = await fetch('{{ url_for("list_agent_nodes") }}', {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+        const data = await resp.json();
+        if (!data.success) {
+            tbody.innerHTML = '<tr><td colspan="9" class="text-center text-danger py-4">加载失败</td></tr>';
+            return;
+        }
+
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (!items.length) {
+            tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">暂无Agent节点</td></tr>';
+        } else {
+            tbody.innerHTML = items.map(item => {
+                const cpuUsage = item.cpu_usage_percent == null ? '-' : `${Number(item.cpu_usage_percent).toFixed(1)}%`;
+                const memText = `${formatBytes(item.memory_available_bytes)} / ${formatBytes(item.memory_total_bytes)}`;
+                const projects = (item.project_codes || []).join(', ') || '-';
+                const osText = [item.os_name || '-', item.os_version || ''].join(' ').trim();
+                return `
+                <tr>
+                    <td>
+                        <div class="fw-bold">${item.display_name || item.agent_name || item.agent_code}</div>
+                        <div class="mono text-muted">${item.agent_code || '-'}</div>
+                    </td>
+                    <td>${statusBadge(item.status)}</td>
+                    <td class="mono">${item.host || '-'}${item.port ? ':' + item.port : ''}</td>
+                    <td>${cpuUsage} / ${item.cpu_cores || '-'} 核</td>
+                    <td>${memText}</td>
+                    <td>${formatBytes(item.disk_free_bytes)}</td>
+                    <td>${osText}</td>
+                    <td title="${projects}">${projects}</td>
+                    <td>${formatTimeText(item.last_heartbeat)}</td>
+                </tr>
+                `;
+            }).join('');
+        }
+
+        const onlineCount = items.filter(item => String(item.status || '').toLowerCase() === 'online').length;
+        const boundProjectCount = items.reduce((sum, item) => sum + Number(item.project_count || 0), 0);
+        document.getElementById('totalNodes').textContent = String(items.length);
+        document.getElementById('onlineNodes').textContent = String(onlineCount);
+        document.getElementById('boundProjects').textContent = String(boundProjectCount);
+        document.getElementById('lastRefresh').textContent = new Date().toLocaleString();
+    } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="9" class="text-center text-danger py-4">网络错误: ${err}</td></tr>`;
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    loadAgentNodes();
+    setInterval(loadAgentNodes, 30000);
+});
+</script>
+{% endblock %}

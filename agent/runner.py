@@ -13,10 +13,12 @@ try:
     from .config import load_settings
     from .executor import execute_task
     from .http_client import post_json
+    from .system_metrics import collect_agent_metrics
 except ImportError:
     from config import load_settings
     from executor import execute_task
     from http_client import post_json
+    from system_metrics import collect_agent_metrics
 
 
 _SHUTDOWN = False
@@ -40,10 +42,6 @@ def run_agent():
 
     if not settings.agent_shared_secret:
         raise RuntimeError("缺少 AGENT_SHARED_SECRET")
-    if not settings.agent_code:
-        raise RuntimeError("缺少 AGENT_CODE")
-    if not settings.project_codes:
-        raise RuntimeError("缺少 AGENT_PROJECT_CODES，至少配置一个项目代号")
 
     signal.signal(signal.SIGINT, _handle_signal)
     if hasattr(signal, "SIGTERM"):
@@ -55,6 +53,8 @@ def run_agent():
     common_headers = {"X-Agent-Secret": settings.agent_shared_secret}
     agent_token = ""
     last_heartbeat_at = 0.0
+    last_metrics_at = 0.0
+    cached_metrics = {}
 
     _log(
         f"启动 Agent: code={settings.agent_code}, projects={','.join(settings.project_codes)}, "
@@ -64,9 +64,12 @@ def run_agent():
 
     while not _SHUTDOWN:
         if not agent_token:
+            if not cached_metrics:
+                cached_metrics = collect_agent_metrics(settings.repos_base_dir)
+                last_metrics_at = time.time()
             register_payload = {
                 "agent_code": settings.agent_code,
-                "agent_name": settings.agent_name or settings.agent_code,
+                "agent_name": settings.agent_name,
                 "host": settings.agent_host,
                 "port": settings.agent_port,
                 "default_admin_username": settings.default_admin_username,
@@ -76,6 +79,7 @@ def run_agent():
                     "supports_weekly_diff": True,
                     "runtime": "python",
                 },
+                **cached_metrics,
             }
             status, data = post_json(register_url, register_payload, headers=common_headers, timeout=15)
             if status == 200 and data.get("success"):
@@ -94,6 +98,10 @@ def run_agent():
             continue
 
         now_ts = time.time()
+        should_push_metrics = (not cached_metrics) or (now_ts - last_metrics_at >= settings.metrics_interval_seconds)
+        if should_push_metrics:
+            cached_metrics = collect_agent_metrics(settings.repos_base_dir)
+            last_metrics_at = now_ts
         if now_ts - last_heartbeat_at >= settings.heartbeat_interval_seconds:
             heartbeat_payload = {
                 "agent_code": settings.agent_code,
@@ -102,6 +110,8 @@ def run_agent():
                 "host": settings.agent_host,
                 "port": settings.agent_port,
             }
+            if should_push_metrics:
+                heartbeat_payload.update(cached_metrics)
             status, data = post_json(heartbeat_url, heartbeat_payload, headers=common_headers, timeout=10)
             if status == 200 and data.get("success"):
                 _log("心跳成功", settings.log_verbose)
