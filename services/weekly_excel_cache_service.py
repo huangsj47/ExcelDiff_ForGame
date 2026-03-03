@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List
 from flask import render_template
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import func
+from sqlalchemy import func, text
 from services.model_loader import get_runtime_models
 
 
@@ -102,16 +102,43 @@ class WeeklyExcelCacheService:
         if repository_id in self._project_code_cache:
             return self._project_code_cache[repository_id]
         try:
-            Repository = self._get_model("Repository")
-            repo = self.db.session.get(Repository, repository_id)
-            if repo and repo.project:
-                code = repo.project.code
-                self._project_code_cache[repository_id] = code
-                return code
+            sql = text(
+                "SELECT p.code FROM repository r "
+                "JOIN project p ON p.id = r.project_id "
+                "WHERE r.id = :repository_id LIMIT 1"
+            )
+            code = self.db.session.execute(sql, {"repository_id": repository_id}).scalar()
+            if code:
+                code_str = str(code)
+                self._project_code_cache[repository_id] = code_str
+                return code_str
         except Exception as e:
             self._log_exception(f"获取项目编号失败 repository_id={repository_id}", e)
         self._project_code_cache[repository_id] = None
         return None
+
+    def _resolve_repository_id(self, repository_id=None, config_id=None):
+        """优先使用 repository_id，缺失时尝试通过 config_id 反查。"""
+        if repository_id:
+            return repository_id
+        if not config_id:
+            return None
+        try:
+            WeeklyVersionConfig = self._get_model("WeeklyVersionConfig")
+            cfg = self.db.session.get(WeeklyVersionConfig, config_id)
+            if cfg:
+                return cfg.repository_id
+        except Exception as e:
+            self._log_exception(f"根据 config_id 反查 repository_id 失败 config_id={config_id}", e)
+        return None
+
+    @staticmethod
+    def _ensure_project_prefix(message, project_code):
+        msg = str(message or "")
+        if msg.startswith("【"):
+            return msg
+        code = project_code or "UNKNOWN"
+        return f"【{code}】{msg}"
 
     def _flush_log_buffer(self, project_code, force=False):
         """刷新指定项目的日志缓冲区，将聚合摘要写入数据库"""
@@ -129,19 +156,23 @@ class WeeklyExcelCacheService:
             total = success_cnt + error_cnt
             if total == 0:
                 return
-            prefix = f"【{project_code}】" if project_code else ""
             summary_parts = []
             if success_cnt > 0:
                 summary_parts.append(f"成功 {success_cnt} 个")
             if error_cnt > 0:
                 summary_parts.append(f"失败 {error_cnt} 个")
-            summary_msg = f"{prefix}周版本缓存批量统计: {'，'.join(summary_parts)}（共 {total} 个文件）"
+            resolved_project_code = buf.get('project_code') or project_code
+            summary_msg = self._ensure_project_prefix(
+                f"周版本缓存批量统计: {'，'.join(summary_parts)}（共 {total} 个文件）",
+                resolved_project_code,
+            )
             log_type = 'success' if error_cnt == 0 else ('error' if success_cnt == 0 else 'warning')
             saved_repo_id = buf.get('repository_id')
             # 重置缓冲区
             self._log_buffer[project_code] = {
                 'success': 0, 'error': 0, 'files': set(),
-                'last_flush': now, 'repository_id': saved_repo_id
+                'last_flush': now, 'repository_id': saved_repo_id,
+                'project_code': resolved_project_code,
             }
         # 在锁外写入数据库
         try:
@@ -174,22 +205,25 @@ class WeeklyExcelCacheService:
         """
         try:
             OperationLog = self._get_model("OperationLog")
+            resolved_repository_id = self._resolve_repository_id(repository_id=repository_id, config_id=config_id)
 
             # 获取项目编号前缀
-            project_code = self._get_project_code(repository_id)
-            prefix = f"【{project_code}】" if project_code else ""
+            project_code = self._get_project_code(resolved_repository_id)
 
             # 高频日志聚合：success 和 error 类型进入缓冲区
-            if log_type in ('success', 'error') and repository_id is not None:
-                buf_key = project_code or f"repo_{repository_id}"
+            if log_type in ('success', 'error') and resolved_repository_id is not None:
+                buf_key = project_code or f"repo_{resolved_repository_id}"
                 with self._log_buffer_lock:
                     if buf_key not in self._log_buffer:
                         self._log_buffer[buf_key] = {
                             'success': 0, 'error': 0, 'files': set(),
-                            'last_flush': time.time(), 'repository_id': repository_id
+                            'last_flush': time.time(), 'repository_id': resolved_repository_id,
+                            'project_code': project_code,
                         }
                     buf = self._log_buffer[buf_key]
                     buf[log_type] = buf.get(log_type, 0) + 1
+                    if not buf.get('project_code') and project_code:
+                        buf['project_code'] = project_code
                     if file_path:
                         buf['files'].add(file_path)
                 # 检查是否需要刷新
@@ -197,13 +231,13 @@ class WeeklyExcelCacheService:
                 return
 
             # 非聚合日志：立即写入，添加项目编号前缀
-            prefixed_message = f"{prefix}{message}" if prefix else message
+            prefixed_message = self._ensure_project_prefix(message, project_code)
 
             log_entry = OperationLog(
                 log_type=log_type,
                 message=prefixed_message,
                 source='weekly_excel_cache',
-                repository_id=repository_id,
+                repository_id=resolved_repository_id,
                 config_id=config_id,
                 file_path=file_path
             )

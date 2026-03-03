@@ -57,6 +57,7 @@ from services.excel_diff_cache_service import (
     ExcelDiffCacheService,
     configure_excel_diff_cache_service,
 )
+from services.performance_metrics_service import get_perf_metrics_service
 from services.repository_cleanup_helpers import (
     cleanup_pending_deletions,
     delete_local_repository_directory,
@@ -556,6 +557,7 @@ configure_excel_diff_cache_service(
 )
 excel_cache_service = ExcelDiffCacheService()
 excel_html_cache_service = ExcelHtmlCacheService(db, DIFF_LOGIC_VERSION)
+performance_metrics_service = get_perf_metrics_service()
 # 初始化周版本Excel缓存服务
 from services.weekly_excel_cache_service import WeeklyExcelCacheService
 
@@ -875,6 +877,20 @@ def get_excel_diff_data(commit_id):
                 f"html_bytes={len(cached_html.get('html_content') or '')}",
                 'EXCEL'
             )
+            performance_metrics_service.record(
+                "api_excel_diff",
+                success=True,
+                metrics={
+                    "total_ms": total_time * 1000,
+                    "html_lookup_ms": html_lookup_time * 1000,
+                    "html_bytes": len(cached_html.get("html_content") or ""),
+                },
+                tags={
+                    "source": "html_cache",
+                    "repository_id": repository.id,
+                    "file_path": commit.path,
+                },
+            )
             created_at_value = cached_html.get('created_at')
             if created_at_value and hasattr(created_at_value, 'isoformat'):
                 created_at_iso = created_at_value.isoformat()
@@ -924,6 +940,21 @@ def get_excel_diff_data(commit_id):
                     f"diff_bytes={len(cached_diff.diff_data.encode('utf-8')) / 1024:.1f}KB",
                     'EXCEL'
                 )
+                performance_metrics_service.record(
+                    "api_excel_diff",
+                    success=True,
+                    metrics={
+                        "total_ms": total_time * 1000,
+                        "data_lookup_ms": data_lookup_time * 1000,
+                        "render_ms": render_time * 1000,
+                        "diff_bytes": len(cached_diff.diff_data.encode("utf-8")),
+                    },
+                    tags={
+                        "source": "data_cache",
+                        "repository_id": repository.id,
+                        "file_path": commit.path,
+                    },
+                )
                 return jsonify({
                     'success': True, 
                     'html_content': html_content,
@@ -935,6 +966,19 @@ def get_excel_diff_data(commit_id):
                 })
             except Exception as e:
                 log_print(f"⚠️ HTML生成失败，返回原始数据: {e}", 'INFO')
+                performance_metrics_service.record(
+                    "api_excel_diff",
+                    success=False,
+                    metrics={
+                        "total_ms": (time.time() - request_start) * 1000,
+                        "data_lookup_ms": data_lookup_time * 1000,
+                    },
+                    tags={
+                        "source": "data_cache_html_render_failed",
+                        "repository_id": repository.id,
+                        "file_path": commit.path,
+                    },
+                )
                 return jsonify({'success': True, 'diff_data': json.loads(cached_diff.diff_data), 'from_cache': True})
 
         # 所有缓存都未命中，实时处理
@@ -988,6 +1032,22 @@ def get_excel_diff_data(commit_id):
                     f"diff={diff_time:.2f}s, render={render_time:.2f}s, total={total_time:.2f}s",
                     'EXCEL'
                 )
+                performance_metrics_service.record(
+                    "api_excel_diff",
+                    success=True,
+                    metrics={
+                        "total_ms": total_time * 1000,
+                        "data_lookup_ms": data_lookup_time * 1000,
+                        "prev_lookup_ms": previous_lookup_time * 1000,
+                        "diff_ms": diff_time * 1000,
+                        "render_ms": render_time * 1000,
+                    },
+                    tags={
+                        "source": "realtime",
+                        "repository_id": repository.id,
+                        "file_path": commit.path,
+                    },
+                )
                 return jsonify({
                     'success': True, 
                     'html_content': html_content,
@@ -1001,16 +1061,58 @@ def get_excel_diff_data(commit_id):
                 log_print(f"⚠️ HTML生成失败，返回原始数据: {e}", 'INFO')
                 # 如果HTML生成失败，仍然返回原始数据，用户主动请求使用高优先级
                 add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=1)
+                performance_metrics_service.record(
+                    "api_excel_diff",
+                    success=False,
+                    metrics={
+                        "total_ms": (time.time() - request_start) * 1000,
+                        "data_lookup_ms": data_lookup_time * 1000,
+                        "prev_lookup_ms": previous_lookup_time * 1000,
+                        "diff_ms": diff_time * 1000,
+                    },
+                    tags={
+                        "source": "realtime_html_render_failed",
+                        "repository_id": repository.id,
+                        "file_path": commit.path,
+                    },
+                )
                 return jsonify({'success': True, 'diff_data': diff_data, 'from_cache': False})
 
         else:
             error_msg = diff_data.get('error', '处理失败') if diff_data else 'Excel文件处理返回空结果'
+            performance_metrics_service.record(
+                "api_excel_diff",
+                success=False,
+                metrics={
+                    "total_ms": (time.time() - request_start) * 1000,
+                    "data_lookup_ms": data_lookup_time * 1000,
+                    "prev_lookup_ms": previous_lookup_time * 1000,
+                    "diff_ms": diff_time * 1000,
+                },
+                tags={
+                    "source": "realtime_diff_failed",
+                    "repository_id": repository.id,
+                    "file_path": commit.path,
+                },
+            )
             return jsonify({'error': True, 'message': error_msg})
 
     except Exception as e:
         log_print(f"❌ Excel diff处理失败: {str(e)}")
         import traceback
         traceback.print_exc()
+        performance_metrics_service.record(
+            "api_excel_diff",
+            success=False,
+            metrics={
+                "total_ms": (time.time() - request_start) * 1000,
+            },
+            tags={
+                "source": "exception",
+                "repository_id": repository.id if repository else "",
+                "file_path": commit.path if commit else "",
+            },
+        )
         return jsonify({'error': True, 'message': f'Excel文件处理失败: {str(e)}'})
 
 # 新的统一差异显示路由

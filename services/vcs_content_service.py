@@ -11,6 +11,7 @@ import threading
 import time
 
 from utils.logger import log_print
+from services.performance_metrics_service import get_perf_metrics_service
 
 # ---------------------------------------------------------------------------
 #  Git / SVN 服务实例缓存
@@ -242,6 +243,7 @@ def get_unified_diff_data(commit, previous_commit=None):
     from services.excel_diff_cache_service import ExcelDiffCacheService
 
     excel_cache_service = ExcelDiffCacheService()
+    perf_metrics_service = get_perf_metrics_service()
     repository = commit.repository
     start_time = time.time()
     try:
@@ -259,6 +261,16 @@ def get_unified_diff_data(commit, previous_commit=None):
             if cached_diff:
                 cache_time = time.time() - start_time
                 log_print(f"✅ 缓存命中，跳过实时计算: {commit.path} | 耗时: {cache_time:.2f}秒", 'CACHE')
+                perf_metrics_service.record(
+                    "unified_excel_diff",
+                    success=True,
+                    metrics={"total_ms": cache_time * 1000},
+                    tags={
+                        "source": "cache_hit",
+                        "repository_id": repository.id,
+                        "file_path": commit.path,
+                    },
+                )
                 return json.loads(cached_diff.diff_data)
 
             else:
@@ -327,14 +339,80 @@ def get_unified_diff_data(commit, previous_commit=None):
                         f"summary={metrics['summary']} | save_cache={cache_save_time:.2f}s",
                         'DIFF'
                     )
+                    perf_metrics_service.record(
+                        "unified_excel_diff",
+                        success=True,
+                        metrics={
+                            "total_ms": total_time * 1000,
+                            "read_ms": read_time * 1000,
+                            "diff_ms": processing_time * 1000,
+                            "save_cache_ms": cache_save_time * 1000,
+                            "changed_rows": metrics["changed_rows"],
+                            "sheet_count": metrics["sheet_count"],
+                        },
+                        tags={
+                            "source": "realtime_excel",
+                            "repository_id": repository.id,
+                            "file_path": commit.path,
+                        },
+                    )
                 except Exception as cache_error:
                     log_print(f"⚠️ 保存缓存失败: {cache_error}", 'CACHE')
+                    perf_metrics_service.record(
+                        "unified_excel_diff",
+                        success=False,
+                        metrics={
+                            "total_ms": total_time * 1000,
+                            "read_ms": read_time * 1000,
+                            "diff_ms": processing_time * 1000,
+                        },
+                        tags={
+                            "source": "realtime_excel_save_cache_failed",
+                            "repository_id": repository.id,
+                            "file_path": commit.path,
+                        },
+                    )
+            else:
+                perf_metrics_service.record(
+                    "unified_excel_diff",
+                    success=True,
+                    metrics={
+                        "total_ms": total_time * 1000,
+                        "read_ms": read_time * 1000,
+                        "diff_ms": processing_time * 1000,
+                    },
+                    tags={
+                        "source": "realtime_non_excel",
+                        "repository_id": repository.id,
+                        "file_path": commit.path,
+                    },
+                )
         else:
             total_time = time.time() - start_time
             log_print(f"❌ 实时diff计算失败: {commit.path} | 耗时: {total_time:.2f}秒", 'DIFF', force=True)
+            perf_metrics_service.record(
+                "unified_excel_diff",
+                success=False,
+                metrics={"total_ms": total_time * 1000},
+                tags={
+                    "source": "diff_data_empty",
+                    "repository_id": repository.id,
+                    "file_path": commit.path,
+                },
+            )
         return diff_data
 
     except Exception as e:
         total_time = time.time() - start_time if 'start_time' in locals() else 0
         log_print(f"❌ 统一差异服务错误: {e} | 耗时: {total_time:.2f}秒", 'DIFF', force=True)
+        perf_metrics_service.record(
+            "unified_excel_diff",
+            success=False,
+            metrics={"total_ms": total_time * 1000},
+            tags={
+                "source": "exception",
+                "repository_id": repository.id if repository else "",
+                "file_path": commit.path if commit else "",
+            },
+        )
         return None

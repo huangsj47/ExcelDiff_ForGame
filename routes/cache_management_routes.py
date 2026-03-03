@@ -168,7 +168,12 @@ def get_cache_strategy_info():
 def get_excel_cache_logs():
     """获取Excel缓存操作日志"""
     try:
-        (OperationLog,) = get_runtime_models("OperationLog")
+        OperationLog, Repository, Project, db = get_runtime_models(
+            "OperationLog",
+            "Repository",
+            "Project",
+            "db",
+        )
 
         page = max(1, request.args.get("page", 1, type=int) or 1)
         per_page = request.args.get("per_page", 10, type=int) or 10
@@ -195,12 +200,27 @@ def get_excel_cache_logs():
 
         from utils.timezone_utils import format_beijing_time
 
+        repository_ids = {log.repository_id for log in paginated_logs_db if getattr(log, "repository_id", None)}
+        repository_project_code_map = {}
+        if repository_ids:
+            rows = (
+                db.session.query(Repository.id, Project.code)
+                .join(Project, Project.id == Repository.project_id)
+                .filter(Repository.id.in_(list(repository_ids)))
+                .all()
+            )
+            repository_project_code_map = {repo_id: code for repo_id, code in rows}
+
         logs = []
         for log in paginated_logs_db:
+            message = log.message or ""
+            if not str(message).startswith("【"):
+                project_code = repository_project_code_map.get(getattr(log, "repository_id", None)) or "UNKNOWN"
+                message = f"【{project_code}】{message}"
             logs.append(
                 {
                     "time": format_beijing_time(log.created_at, "%Y/%m/%d %H:%M:%S"),
-                    "message": log.message,
+                    "message": message,
                     "type": log.log_type,
                 }
             )
@@ -763,3 +783,39 @@ def excel_cache_management():
         current_version=DIFF_LOGIC_VERSION,
         projects=projects,
     )
+
+
+@cache_management_bp.route("/admin/performance")
+@require_admin
+def admin_performance_dashboard():
+    """性能观测面板页面。"""
+    return render_template("admin_performance_dashboard.html")
+
+
+@cache_management_bp.route("/admin/performance/stats", methods=["GET"])
+@require_admin
+def admin_performance_stats():
+    """获取性能观测聚合数据。"""
+    try:
+        (performance_metrics_service,) = get_runtime_models("performance_metrics_service")
+        window_minutes = request.args.get("window_minutes", default=60, type=int) or 60
+        recent_limit = request.args.get("recent_limit", default=500, type=int) or 500
+        data = performance_metrics_service.snapshot(
+            window_minutes=window_minutes,
+            recent_limit=recent_limit,
+        )
+        return jsonify({"success": True, "data": data})
+    except Exception as exc:
+        return jsonify({"success": False, "message": f"获取性能统计失败: {str(exc)}"}), 500
+
+
+@cache_management_bp.route("/admin/performance/reset", methods=["POST"])
+@require_admin
+def admin_performance_reset():
+    """清空性能观测缓存事件。"""
+    try:
+        (performance_metrics_service,) = get_runtime_models("performance_metrics_service")
+        cleared = performance_metrics_service.clear()
+        return jsonify({"success": True, "cleared": cleared, "message": f"已清空 {cleared} 条性能事件"})
+    except Exception as exc:
+        return jsonify({"success": False, "message": f"清空性能统计失败: {str(exc)}"}), 500

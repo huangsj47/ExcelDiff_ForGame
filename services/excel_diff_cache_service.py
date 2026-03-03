@@ -5,9 +5,11 @@
 import json
 import time
 import threading
+import traceback
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import func
+from sqlalchemy import func, text
 
+from services.performance_metrics_service import get_perf_metrics_service
 
 app = None
 db = None
@@ -72,15 +74,28 @@ class ExcelDiffCacheService:
         if repository_id in cache:
             return cache[repository_id]
         try:
-            repo = db.session.get(Repository, repository_id)
-            if repo and repo.project:
-                code = repo.project.code
-                cache[repository_id] = code
-                return code
-        except Exception:
-            pass
+            # 直接SQL查询，避免关系延迟加载导致拿不到项目编号
+            sql = text(
+                "SELECT p.code FROM repository r "
+                "JOIN project p ON p.id = r.project_id "
+                "WHERE r.id = :repository_id LIMIT 1"
+            )
+            code = db.session.execute(sql, {"repository_id": repository_id}).scalar()
+            if code:
+                cache[repository_id] = str(code)
+                return str(code)
+        except Exception as e:
+            log_print(f"获取项目编号失败 repository_id={repository_id}: {e}", 'ERROR')
         cache[repository_id] = None
         return None
+
+    @staticmethod
+    def _ensure_project_prefix(message, project_code):
+        msg = str(message or "")
+        if msg.startswith("【"):
+            return msg
+        code = project_code or "UNKNOWN"
+        return f"【{code}】{msg}"
 
     def _flush_log_buffer(self, project_code, force=False):
         """刷新指定项目的日志缓冲区，将聚合摘要写入数据库"""
@@ -97,18 +112,22 @@ class ExcelDiffCacheService:
             error_cnt = buf.get('error', 0)
             total = success_cnt + error_cnt
             files = buf.get('files', set())
-            prefix = f"【{project_code}】" if project_code else ""
+            resolved_project_code = buf.get('project_code') or project_code
             summary_parts = []
             if success_cnt > 0:
                 summary_parts.append(f"成功 {success_cnt} 个")
             if error_cnt > 0:
                 summary_parts.append(f"失败 {error_cnt} 个")
-            summary_msg = f"{prefix}缓存批量统计: {'，'.join(summary_parts)}（共 {total} 个文件）"
+            summary_msg = self._ensure_project_prefix(
+                f"缓存批量统计: {'，'.join(summary_parts)}（共 {total} 个文件）",
+                resolved_project_code,
+            )
             log_type = 'success' if error_cnt == 0 else ('error' if success_cnt == 0 else 'warning')
             # 重置缓冲区
             self._log_buffer[project_code] = {
                 'success': 0, 'error': 0, 'files': set(),
-                'last_flush': now, 'repository_id': buf.get('repository_id')
+                'last_flush': now, 'repository_id': buf.get('repository_id'),
+                'project_code': resolved_project_code,
             }
         # 在锁外写入数据库
         try:
@@ -141,7 +160,6 @@ class ExcelDiffCacheService:
         try:
             # 获取项目编号前缀
             project_code = self._get_project_code(repository_id)
-            prefix = f"【{project_code}】" if project_code else ""
 
             # 高频日志聚合：success 和 error 类型进入缓冲区
             if log_type in ('success', 'error') and repository_id is not None:
@@ -150,10 +168,13 @@ class ExcelDiffCacheService:
                     if buf_key not in self._log_buffer:
                         self._log_buffer[buf_key] = {
                             'success': 0, 'error': 0, 'files': set(),
-                            'last_flush': time.time(), 'repository_id': repository_id
+                            'last_flush': time.time(), 'repository_id': repository_id,
+                            'project_code': project_code,
                         }
                     buf = self._log_buffer[buf_key]
                     buf[log_type] = buf.get(log_type, 0) + 1
+                    if not buf.get('project_code') and project_code:
+                        buf['project_code'] = project_code
                     if file_path:
                         buf['files'].add(file_path)
                 # 检查是否需要刷新
@@ -161,7 +182,7 @@ class ExcelDiffCacheService:
                 return
 
             # 非聚合日志：立即写入，添加项目编号前缀
-            prefixed_message = f"{prefix}{message}" if prefix else message
+            prefixed_message = self._ensure_project_prefix(message, project_code)
 
             log_entry = OperationLog(
                 log_type=log_type,
@@ -526,6 +547,7 @@ class ExcelDiffCacheService:
     
     def process_excel_diff_background(self, repository_id, commit_id, file_path):
         """后台处理Excel文件差异"""
+        perf_metrics_service = get_perf_metrics_service()
         try:
             log_print(f"开始后台处理Excel差异: repo={repository_id}, commit={commit_id}, file={file_path}", 'EXCEL')
             
@@ -559,15 +581,24 @@ class ExcelDiffCacheService:
                     
                     # 获取前一个提交
                     previous_commit = None
-                    from sqlalchemy import and_, or_
-                    file_commits = Commit.query.filter(
-                        Commit.repository_id == repository_id,
-                        Commit.path == file_path,
-                        or_(
-                            Commit.commit_time < commit.commit_time,
-                            and_(Commit.commit_time == commit.commit_time, Commit.id < commit.id),
-                        ),
-                    ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
+                    file_commits = None
+                    if commit.commit_time is not None:
+                        from sqlalchemy import and_, or_
+
+                        file_commits = Commit.query.filter(
+                            Commit.repository_id == repository_id,
+                            Commit.path == file_path,
+                            or_(
+                                Commit.commit_time < commit.commit_time,
+                                and_(Commit.commit_time == commit.commit_time, Commit.id < commit.id),
+                            ),
+                        ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
+                    else:
+                        log_print(
+                            f"提交时间为空，前序提交查询降级为ID排序: repo={repository_id}, commit={commit_id}, file={file_path}",
+                            'EXCEL',
+                        )
+
                     if not file_commits:
                         file_commits = Commit.query.filter(
                             Commit.repository_id == repository_id,
@@ -604,6 +635,23 @@ class ExcelDiffCacheService:
                             f"query={query_time:.2f}s, diff={processing_time:.2f}s, cache={cache_time:.2f}s, total={total_time:.2f}s",
                             'EXCEL'
                         )
+                        perf_metrics_service.record(
+                            "background_excel_cache",
+                            success=True,
+                            metrics={
+                                "total_ms": total_time * 1000,
+                                "query_ms": query_time * 1000,
+                                "diff_ms": processing_time * 1000,
+                                "cache_ms": cache_time * 1000,
+                                "sheet_count": metrics["sheet_count"],
+                                "changed_rows": metrics["changed_rows"],
+                            },
+                            tags={
+                                "source": "background_excel",
+                                "repository_id": repository_id,
+                                "file_path": file_path,
+                            },
+                        )
                         
                         # 记录到操作日志
                         self.log_cache_operation(f"✅ 缓存生成成功: {file_path}", 'success', repository_id=repository_id, file_path=file_path)
@@ -612,22 +660,78 @@ class ExcelDiffCacheService:
                         error_msg = diff_data.get('error', '处理失败') if diff_data else '处理返回空结果'
                         self.cache_diff_error(repository_id, commit_id, file_path, error_msg)
                         log_print(f"❌ Excel差异处理失败: {file_path} | 错误: {error_msg}", 'EXCEL', force=True)
+                        perf_metrics_service.record(
+                            "background_excel_cache",
+                            success=False,
+                            metrics={
+                                "total_ms": (time.time() - query_start) * 1000,
+                                "query_ms": query_time * 1000,
+                                "diff_ms": processing_time * 1000,
+                            },
+                            tags={
+                                "source": "background_diff_failed",
+                                "repository_id": repository_id,
+                                "file_path": file_path,
+                            },
+                        )
                         
                         # 记录到操作日志
                         self.log_cache_operation(f"❌ 缓存生成失败: {file_path} - {error_msg}", 'error', repository_id=repository_id, file_path=file_path)
                         
                 except Exception as inner_e:
-                    log_print(f"处理Excel差异时出错: {inner_e}", 'EXCEL', force=True)
-                    import traceback
-                    traceback.print_exc()
+                    error_type = type(inner_e).__name__
+                    error_message = str(inner_e).replace('\n', ' ').strip()
+                    if len(error_message) > 240:
+                        error_message = f"{error_message[:237]}..."
+                    stack_text = traceback.format_exc()
+                    log_print(
+                        f"处理Excel差异时出错[{error_type}]: {error_message} | "
+                        f"repo={repository_id}, commit={commit_id}, file={file_path}\n{stack_text}",
+                        'EXCEL',
+                        force=True
+                    )
+                    perf_metrics_service.record(
+                        "background_excel_cache",
+                        success=False,
+                        metrics={
+                            "total_ms": (time.time() - query_start) * 1000,
+                            "query_ms": (query_time * 1000) if "query_time" in locals() else 0.0,
+                        },
+                        tags={
+                            "source": "background_inner_exception",
+                            "repository_id": repository_id,
+                            "file_path": file_path,
+                            "error_type": error_type,
+                            "error_message": error_message or "unknown_error",
+                        },
+                    )
                 finally:
                     with self._processing_lock:
                         self._processing_commits.discard(task_key)
                 
         except Exception as e:
-            log_print(f"后台处理Excel差异异常: {e}", 'EXCEL', force=True)
-            import traceback
-            traceback.print_exc()
+            error_type = type(e).__name__
+            error_message = str(e).replace('\n', ' ').strip()
+            if len(error_message) > 240:
+                error_message = f"{error_message[:237]}..."
+            log_print(
+                f"后台处理Excel差异异常[{error_type}]: {error_message} | "
+                f"repo={repository_id}, commit={commit_id}, file={file_path}\n{traceback.format_exc()}",
+                'EXCEL',
+                force=True
+            )
+            perf_metrics_service.record(
+                "background_excel_cache",
+                success=False,
+                metrics={},
+                tags={
+                    "source": "background_outer_exception",
+                    "repository_id": repository_id,
+                    "file_path": file_path,
+                    "error_type": error_type,
+                    "error_message": error_message or "unknown_error",
+                },
+            )
     
     def cleanup_expired_cache(self):
         """清理已过期的缓存记录（expire_at 已过期 + 状态为 outdated/failed 的记录）"""

@@ -1,0 +1,738 @@
+{% extends "base.html" %}
+
+{% block title %}性能观测面板 - Diff确认平台{% endblock %}
+
+{% block content %}
+<div class="perf-page">
+    <div class="perf-hero">
+        <div>
+            <h1>性能观测面板</h1>
+            <p>统一查看 API / Diff / 缓存任务链路耗时与成功率</p>
+        </div>
+        <div class="perf-actions">
+            <select id="windowSelect" class="perf-select">
+                <option value="30">最近 30 分钟</option>
+                <option value="60" selected>最近 60 分钟</option>
+                <option value="180">最近 3 小时</option>
+                <option value="720">最近 12 小时</option>
+                <option value="1440">最近 24 小时</option>
+            </select>
+            <button class="perf-btn secondary" id="autoRefreshBtn">自动刷新: 开</button>
+            <button class="perf-btn primary" id="refreshBtn">刷新</button>
+            <button class="perf-btn danger" id="resetBtn">清空事件</button>
+        </div>
+    </div>
+
+    <div class="kpi-grid">
+        <div class="kpi-card">
+            <span class="kpi-label">窗口事件数</span>
+            <span class="kpi-value" id="kpiTotal">-</span>
+            <span class="kpi-sub" id="kpiStored">已存储 - 条</span>
+        </div>
+        <div class="kpi-card">
+            <span class="kpi-label">成功率</span>
+            <span class="kpi-value" id="kpiSuccessRate">-</span>
+            <span class="kpi-sub" id="kpiSuccess">成功 - / 失败 -</span>
+        </div>
+        <div class="kpi-card">
+            <span class="kpi-label">平均耗时</span>
+            <span class="kpi-value" id="kpiAvgMs">-</span>
+            <span class="kpi-sub">全链路平均完成耗时</span>
+        </div>
+        <div class="kpi-card">
+            <span class="kpi-label">稳定耗时（95分位）</span>
+            <span class="kpi-value" id="kpiP95Ms">-</span>
+            <span class="kpi-sub" id="kpiMaxMs">95% 的任务会在该时间内完成</span>
+        </div>
+    </div>
+
+    <div class="panel-grid">
+        <section class="panel-card">
+            <div class="panel-title-row">
+                <h3>管线统计</h3>
+                <span id="generatedAt" class="panel-meta">更新时间 -</span>
+            </div>
+            <div class="table-wrap">
+                <table class="perf-table">
+                    <thead>
+                        <tr>
+                            <th>处理管线</th>
+                            <th>事件数</th>
+                            <th>成功率</th>
+                            <th>平均耗时</th>
+                            <th>稳定耗时（95分位）</th>
+                            <th>峰值耗时</th>
+                            <th>每分钟</th>
+                        </tr>
+                    </thead>
+                    <tbody id="pipelineTableBody">
+                        <tr><td colspan="7" class="empty-row">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="panel-card">
+            <div class="panel-title-row">
+                <h3>分钟级趋势</h3>
+                <span class="panel-meta">事件量与平均耗时</span>
+            </div>
+            <div id="timelineContainer" class="timeline-list">
+                <div class="timeline-empty">暂无数据</div>
+            </div>
+        </section>
+    </div>
+
+    <section class="panel-card recent-card">
+        <div class="panel-title-row">
+            <h3>最近事件</h3>
+            <span class="panel-meta" id="recentLimitMeta">最多记录 500 条</span>
+        </div>
+        <div class="recent-toolbar">
+            <div class="recent-toolbar-left" id="recentSummary">共 0 条</div>
+            <div class="recent-toolbar-right">
+                <label for="recentPageSizeSelect">每页</label>
+                <select id="recentPageSizeSelect" class="perf-select perf-select-sm">
+                    <option value="20">20</option>
+                    <option value="30" selected>30</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                </select>
+                <button id="recentPrevBtn" class="perf-btn secondary perf-btn-sm">上一页</button>
+                <span id="recentPageInfo" class="panel-meta">1 / 1</span>
+                <button id="recentNextBtn" class="perf-btn secondary perf-btn-sm">下一页</button>
+            </div>
+        </div>
+        <div class="table-wrap">
+            <table class="perf-table recent-table">
+                <thead>
+                    <tr>
+                        <th>时间(UTC)</th>
+                        <th>处理管线</th>
+                        <th>结果</th>
+                        <th>指标</th>
+                        <th>标签</th>
+                    </tr>
+                </thead>
+                <tbody id="recentEventsBody">
+                    <tr><td colspan="5" class="empty-row">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
+
+:root {
+    --perf-bg: #f4f7fb;
+    --perf-card: #ffffff;
+    --perf-text: #12304a;
+    --perf-muted: #5f7388;
+    --perf-primary: #0b7fab;
+    --perf-primary-soft: #e7f5fb;
+    --perf-success: #1f9d6a;
+    --perf-danger: #c44545;
+    --perf-border: #dbe5ef;
+}
+
+.perf-page {
+    padding: 0 0 24px 0;
+    color: var(--perf-text);
+    font-family: "Fira Sans", "Segoe UI", sans-serif;
+}
+.perf-hero {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: flex-start;
+    background: linear-gradient(135deg, #f1f8ff 0%, #ebf4fb 55%, #fef7ee 100%);
+    border: 1px solid var(--perf-border);
+    border-radius: 14px;
+    padding: 18px 20px;
+    margin-bottom: 16px;
+}
+.perf-hero h1 {
+    margin: 0;
+    font-size: 1.3rem;
+    font-weight: 700;
+}
+.perf-hero p {
+    margin: 6px 0 0 0;
+    color: var(--perf-muted);
+    font-size: 0.92rem;
+}
+.perf-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.perf-select, .perf-btn {
+    border-radius: 10px;
+    border: 1px solid var(--perf-border);
+    font-size: 0.88rem;
+    padding: 8px 12px;
+    line-height: 1.2;
+}
+.perf-select {
+    background: #fff;
+    min-width: 132px;
+}
+.perf-select-sm {
+    min-width: 72px;
+    padding: 6px 10px;
+}
+.perf-btn {
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+.perf-btn-sm {
+    padding: 6px 10px;
+    font-size: 0.8rem;
+}
+.perf-btn.primary {
+    background: var(--perf-primary);
+    color: #fff;
+    border-color: var(--perf-primary);
+}
+.perf-btn.secondary {
+    background: #fff;
+    color: var(--perf-text);
+}
+.perf-btn.secondary:disabled {
+    color: #9eb1c1;
+    cursor: not-allowed;
+}
+.perf-btn.danger {
+    background: #fff4f4;
+    color: var(--perf-danger);
+    border-color: #f0c8c8;
+}
+.perf-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(12, 41, 62, 0.08);
+}
+
+.kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.kpi-card {
+    background: var(--perf-card);
+    border: 1px solid var(--perf-border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.kpi-label {
+    color: var(--perf-muted);
+    font-size: 0.82rem;
+}
+.kpi-value {
+    font-size: 1.45rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    font-family: "Fira Code", "Consolas", monospace;
+}
+.kpi-sub {
+    color: var(--perf-muted);
+    font-size: 0.79rem;
+}
+
+.panel-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.panel-card {
+    background: var(--perf-card);
+    border: 1px solid var(--perf-border);
+    border-radius: 12px;
+    padding: 12px;
+}
+.panel-title-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+.panel-title-row h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 700;
+}
+.panel-meta {
+    font-size: 0.78rem;
+    color: var(--perf-muted);
+}
+.table-wrap {
+    overflow-x: auto;
+}
+
+.perf-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.83rem;
+}
+.perf-table th {
+    background: var(--perf-primary-soft);
+    color: #1d4e66;
+    font-weight: 700;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--perf-border);
+    white-space: nowrap;
+}
+.perf-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid #edf2f7;
+    vertical-align: top;
+}
+.empty-row, .timeline-empty {
+    color: var(--perf-muted);
+    text-align: center;
+    padding: 10px 0;
+}
+
+.pipeline-name {
+    font-weight: 600;
+    color: #16415a;
+}
+
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 0.74rem;
+    font-weight: 700;
+}
+.status-success {
+    background: #eaf8f2;
+    color: var(--perf-success);
+}
+.status-failed {
+    background: #fcefee;
+    color: var(--perf-danger);
+}
+
+.timeline-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 360px;
+    overflow-y: auto;
+}
+.timeline-item {
+    display: grid;
+    grid-template-columns: 48px 1fr auto;
+    gap: 8px;
+    align-items: center;
+}
+.timeline-time {
+    color: var(--perf-muted);
+    font-size: 0.78rem;
+}
+.timeline-bar {
+    height: 8px;
+    background: #eef3f8;
+    border-radius: 999px;
+    overflow: hidden;
+}
+.timeline-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #75bfd7 0%, #0b7fab 100%);
+}
+.timeline-meta {
+    font-size: 0.76rem;
+    color: var(--perf-muted);
+    white-space: nowrap;
+}
+
+.recent-card .perf-table td {
+    font-size: 0.78rem;
+}
+.recent-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+.recent-toolbar-left {
+    color: var(--perf-muted);
+    font-size: 0.78rem;
+}
+.recent-toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.recent-toolbar-right label {
+    font-size: 0.78rem;
+    color: var(--perf-muted);
+}
+
+.kv-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+.kv-badge {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 6px;
+    background: #f4f7fb;
+    border: 1px solid #e1e8f0;
+    color: #30485f;
+    padding: 2px 6px;
+    font-size: 0.72rem;
+    max-width: 480px;
+}
+.kv-label {
+    font-weight: 600;
+    margin-right: 4px;
+}
+.kv-value {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+@media (max-width: 1200px) {
+    .kpi-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .panel-grid {
+        grid-template-columns: 1fr;
+    }
+}
+@media (max-width: 768px) {
+    .perf-hero {
+        flex-direction: column;
+    }
+    .kpi-grid {
+        grid-template-columns: 1fr;
+    }
+    .recent-toolbar {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+}
+</style>
+
+<script>
+const PIPELINE_LABELS = {
+    api_excel_diff: 'Excel差异接口处理',
+    background_excel_cache: '后台Excel缓存构建',
+    unified_excel_diff: '统一Diff计算链路',
+    weekly_excel_cache: '周版本Excel缓存构建',
+};
+
+const SOURCE_LABELS = {
+    html_cache: '命中HTML缓存',
+    data_cache: '命中Diff数据缓存',
+    realtime: '实时计算',
+    background_excel: '后台缓存任务',
+    generated: '周版本新生成',
+    cache_hit: '命中已有缓存',
+    exception: '异常',
+    background_diff_failed: '后台Diff失败',
+    background_inner_exception: '后台内部异常',
+    background_outer_exception: '后台外层异常',
+    realtime_diff_failed: '实时Diff失败',
+    realtime_excel: '实时Excel计算',
+    realtime_non_excel: '实时非Excel计算',
+    realtime_html_render_failed: '实时HTML渲染失败',
+    realtime_excel_save_cache_failed: '实时缓存保存失败',
+    data_cache_html_render_failed: '数据缓存转HTML失败',
+    diff_data_empty: 'Diff结果为空',
+};
+
+const METRIC_LABELS = {
+    total_ms: '总耗时',
+    query_ms: '查询耗时',
+    diff_ms: 'Diff耗时',
+    cache_ms: '缓存写入耗时',
+    read_ms: '读取耗时',
+    render_ms: '渲染耗时',
+    lookup_ms: '查询耗时',
+    cache_lookup_ms: '缓存查询耗时',
+    save_ms: '保存耗时',
+    save_cache_ms: '缓存保存耗时',
+    changed_rows: '变更行数',
+    sheet_count: '工作表数',
+    html_bytes: 'HTML大小(B)',
+    diff_bytes: 'Diff数据大小(B)',
+    commit_count: '提交次数',
+};
+
+const TAG_LABELS = {
+    source: '来源',
+    repository_id: '仓库ID',
+    config_id: '配置ID',
+    file_path: '文件路径',
+    error_type: '异常类型',
+    error_message: '异常信息',
+};
+
+const state = {
+    autoRefresh: true,
+    timer: null,
+    recentEvents: [],
+    recentPage: 1,
+    recentPageSize: 30,
+    recentLimit: 500,
+};
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+
+function formatDuration(value) {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n) || n <= 0) return '0 ms';
+    if (n < 1000) return `${n.toFixed(1)} ms`;
+    if (n < 60000) return `${(n / 1000).toFixed(2)} 秒`;
+    return `${(n / 60000).toFixed(2)} 分钟`;
+}
+
+function formatPercent(v) {
+    const n = Number(v || 0);
+    return `${n.toFixed(1)}%`;
+}
+
+function fmtNum(v) {
+    return Number(v || 0).toLocaleString();
+}
+
+function getPipelineLabel(pipelineKey) {
+    if (!pipelineKey) return '未命名管线';
+    return PIPELINE_LABELS[pipelineKey] || '其他后台管线';
+}
+
+function getSourceLabel(sourceKey) {
+    if (!sourceKey) return '-';
+    return SOURCE_LABELS[sourceKey] || sourceKey;
+}
+
+function getMetricLabel(key) {
+    return METRIC_LABELS[key] || key;
+}
+
+function getTagLabel(key) {
+    return TAG_LABELS[key] || key;
+}
+
+function compactValue(value) {
+    const text = String(value ?? '');
+    if (text.length <= 80) {
+        return { short: text, full: text };
+    }
+    return { short: `${text.slice(0, 77)}...`, full: text };
+}
+
+function buildKVBages(obj, type) {
+    const entries = Object.entries(obj || {});
+    if (!entries.length) return '<span class="kv-badge">-</span>';
+    return entries.map(([k, v]) => {
+        const label = type === 'metric' ? getMetricLabel(k) : getTagLabel(k);
+        let value = v;
+        if (type === 'tag' && k === 'source') {
+            value = getSourceLabel(v);
+        } else if (typeof value === 'number') {
+            value = Number.isInteger(value) ? String(value) : value.toFixed(2);
+        }
+        const compact = compactValue(value);
+        return `
+            <span class="kv-badge" title="${escapeHtml(compact.full)}">
+                <span class="kv-label">${escapeHtml(label)}:</span>
+                <span class="kv-value">${escapeHtml(compact.short)}</span>
+            </span>
+        `;
+    }).join('');
+}
+
+function renderKpis(data) {
+    document.getElementById('kpiTotal').textContent = fmtNum(data.total_events);
+    document.getElementById('kpiStored').textContent = `已存储 ${fmtNum(data.stored_event_count)} 条 / 容量 ${fmtNum(data.capacity)}`;
+    document.getElementById('kpiSuccessRate').textContent = formatPercent(data.success_rate);
+    document.getElementById('kpiSuccess').textContent = `成功 ${fmtNum(data.success_count)} / 失败 ${fmtNum(data.failed_count)}`;
+    document.getElementById('kpiAvgMs').textContent = formatDuration(data.avg_total_ms);
+    document.getElementById('kpiP95Ms').textContent = formatDuration(data.p95_total_ms);
+    document.getElementById('kpiMaxMs').textContent = `峰值耗时 ${formatDuration(data.max_total_ms)}`;
+    document.getElementById('generatedAt').textContent = `更新时间 ${data.generated_at || '-'}`;
+}
+
+function renderPipelineTable(list) {
+    const body = document.getElementById('pipelineTableBody');
+    if (!list || !list.length) {
+        body.innerHTML = '<tr><td colspan="7" class="empty-row">当前窗口暂无事件</td></tr>';
+        return;
+    }
+    body.innerHTML = list.map(item => {
+        const pipelineKey = item.pipeline || '';
+        const pipelineLabel = getPipelineLabel(pipelineKey);
+        return `
+            <tr>
+                <td title="${escapeHtml(pipelineKey)}"><span class="pipeline-name">${escapeHtml(pipelineLabel)}</span></td>
+                <td>${fmtNum(item.count)}</td>
+                <td>${formatPercent(item.success_rate)}</td>
+                <td>${formatDuration(item.avg_total_ms)}</td>
+                <td>${formatDuration(item.p95_total_ms)}</td>
+                <td>${formatDuration(item.max_total_ms)}</td>
+                <td>${Number(item.events_per_min || 0).toFixed(2)}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function renderTimeline(list) {
+    const box = document.getElementById('timelineContainer');
+    if (!list || !list.length) {
+        box.innerHTML = '<div class="timeline-empty">暂无分钟级数据</div>';
+        return;
+    }
+    const maxCount = Math.max(...list.map(x => Number(x.count || 0)), 1);
+    box.innerHTML = list.slice(-30).map(item => {
+        const width = Math.max(4, Math.round((Number(item.count || 0) / maxCount) * 100));
+        return `
+            <div class="timeline-item">
+                <div class="timeline-time">${escapeHtml(item.minute)}</div>
+                <div class="timeline-bar"><div class="timeline-fill" style="width:${width}%"></div></div>
+                <div class="timeline-meta">事件 ${item.count} · 均耗 ${formatDuration(item.avg_total_ms)}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function getTotalRecentPages() {
+    const total = state.recentEvents.length;
+    return Math.max(1, Math.ceil(total / state.recentPageSize));
+}
+
+function updateRecentPager() {
+    const total = state.recentEvents.length;
+    const totalPages = getTotalRecentPages();
+    if (state.recentPage > totalPages) {
+        state.recentPage = totalPages;
+    }
+    document.getElementById('recentPageInfo').textContent = `${state.recentPage} / ${totalPages}`;
+    document.getElementById('recentSummary').textContent = `共 ${fmtNum(total)} 条，当前第 ${state.recentPage} 页`;
+    document.getElementById('recentPrevBtn').disabled = state.recentPage <= 1;
+    document.getElementById('recentNextBtn').disabled = state.recentPage >= totalPages;
+}
+
+function renderRecentEventsPage() {
+    const body = document.getElementById('recentEventsBody');
+    const list = state.recentEvents || [];
+    if (!list.length) {
+        body.innerHTML = '<tr><td colspan="5" class="empty-row">当前窗口暂无事件</td></tr>';
+        updateRecentPager();
+        return;
+    }
+
+    const startIndex = (state.recentPage - 1) * state.recentPageSize;
+    const pageData = list.slice(startIndex, startIndex + state.recentPageSize);
+    body.innerHTML = pageData.map(item => {
+        const pipelineKey = item.pipeline || '';
+        return `
+            <tr>
+                <td>${escapeHtml(item.time || '-')}</td>
+                <td title="${escapeHtml(pipelineKey)}"><span class="pipeline-name">${escapeHtml(getPipelineLabel(pipelineKey))}</span></td>
+                <td><span class="status-pill ${item.success ? 'status-success' : 'status-failed'}">${item.success ? '成功' : '失败'}</span></td>
+                <td><div class="kv-badges">${buildKVBages(item.metrics, 'metric')}</div></td>
+                <td><div class="kv-badges">${buildKVBages(item.tags, 'tag')}</div></td>
+            </tr>
+        `;
+    }).join('');
+    updateRecentPager();
+}
+
+function setRecentEvents(list) {
+    state.recentEvents = list || [];
+    state.recentPage = 1;
+    renderRecentEventsPage();
+}
+
+async function loadStats() {
+    const windowMinutes = Number(document.getElementById('windowSelect').value || 60);
+    const resp = await fetch(`/admin/performance/stats?window_minutes=${windowMinutes}&recent_limit=${state.recentLimit}`);
+    const payload = await resp.json();
+    if (!payload.success) {
+        throw new Error(payload.message || '加载失败');
+    }
+    const data = payload.data || {};
+    renderKpis(data);
+    renderPipelineTable(data.pipeline_stats || []);
+    renderTimeline(data.timeline || []);
+    setRecentEvents(data.recent_events || []);
+}
+
+async function resetMetrics() {
+    if (!confirm('确认清空当前进程的性能观测事件吗？')) return;
+    const resp = await fetch('/admin/performance/reset', { method: 'POST' });
+    const payload = await resp.json();
+    if (!payload.success) {
+        alert(payload.message || '清空失败');
+        return;
+    }
+    await loadStats();
+}
+
+function setupAutoRefresh() {
+    if (state.timer) clearInterval(state.timer);
+    if (!state.autoRefresh) return;
+    state.timer = setInterval(() => {
+        loadStats().catch(() => {});
+    }, 15000);
+}
+
+document.getElementById('refreshBtn').addEventListener('click', () => {
+    loadStats().catch(err => alert(err.message));
+});
+document.getElementById('windowSelect').addEventListener('change', () => {
+    loadStats().catch(err => alert(err.message));
+});
+document.getElementById('resetBtn').addEventListener('click', () => {
+    resetMetrics().catch(err => alert(err.message));
+});
+document.getElementById('autoRefreshBtn').addEventListener('click', (e) => {
+    state.autoRefresh = !state.autoRefresh;
+    e.target.textContent = `自动刷新: ${state.autoRefresh ? '开' : '关'}`;
+    setupAutoRefresh();
+});
+document.getElementById('recentPageSizeSelect').addEventListener('change', (e) => {
+    state.recentPageSize = Number(e.target.value || 30);
+    state.recentPage = 1;
+    renderRecentEventsPage();
+});
+document.getElementById('recentPrevBtn').addEventListener('click', () => {
+    if (state.recentPage <= 1) return;
+    state.recentPage -= 1;
+    renderRecentEventsPage();
+});
+document.getElementById('recentNextBtn').addEventListener('click', () => {
+    const totalPages = getTotalRecentPages();
+    if (state.recentPage >= totalPages) return;
+    state.recentPage += 1;
+    renderRecentEventsPage();
+});
+
+document.getElementById('recentLimitMeta').textContent = `最多记录 ${state.recentLimit} 条`;
+
+loadStats().catch(err => alert(err.message));
+setupAutoRefresh();
+</script>
+{% endblock %}

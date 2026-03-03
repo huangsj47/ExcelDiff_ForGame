@@ -136,6 +136,17 @@
             border-bottom: 0 !important;
             border-left: 0.3em solid transparent !important;
         }
+
+        /* 顶部右侧导航入口缩小一档（项目列表/缓存管理/性能面板/帮助/用户管理/用户名） */
+        #navbarMain .navbar-nav .nav-link {
+            font-size: 0.88rem !important;
+            padding: 0.34rem 0.68rem !important;
+            line-height: 1.15 !important;
+        }
+
+        #navbarMain .navbar-nav .nav-link i {
+            font-size: 0.76rem !important;
+        }
         
         /* 新筛选条件样式 - 缩小至85% */
         .filter-container {
@@ -326,6 +337,11 @@
                     <a class="nav-link px-3" href="{{ url_for('excel_cache_management') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
                         <i class="fas fa-database me-1" style="font-size: 0.85rem;"></i>缓存管理
                     </a>
+                    {% if is_admin() %}
+                    <a class="nav-link px-3" href="{{ url_for('admin_performance_dashboard') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
+                        <i class="fas fa-tachometer-alt me-1" style="font-size: 0.85rem;"></i>性能面板
+                    </a>
+                    {% endif %}
                     <a class="nav-link px-3" href="{{ url_for('help_page') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
                         <i class="fas fa-question-circle me-1" style="font-size: 0.85rem;"></i>帮助
                     </a>

@@ -59,6 +59,7 @@ from services.diff_render_helpers import (
     render_new_file_content,
     render_excel_diff_html,
 )
+from services.performance_metrics_service import get_perf_metrics_service
 from services.task_worker_service import TaskWrapper, background_task_queue
 from utils.logger import log_print
 from utils.timezone_utils import now_beijing
@@ -600,16 +601,19 @@ def weekly_version_config_info_api(config_id):
     """获取周版本配置信息API"""
     try:
         config = WeeklyVersionConfig.query.get_or_404(config_id)
+        repository = config.repository
+        if not repository:
+            return jsonify({'success': False, 'message': '周版本关联仓库不存在'}), 404
         return jsonify({
             'success': True,
             'config': {
                 'id': config.id,
                 'name': config.name,
                 'repository': {
-                    'id': config.repository.id,
-                    'name': config.repository.name,
-                    'type': config.repository.type,
-                    'resource_type': config.repository.resource_type
+                    'id': repository.id,
+                    'name': repository.name,
+                    'type': repository.type,
+                    'resource_type': getattr(repository, 'resource_type', None),
                 }
             }
         })
@@ -621,8 +625,54 @@ def weekly_version_files_api(config_id):
     """获取周版本文件列表API"""
     try:
         config = WeeklyVersionConfig.query.get_or_404(config_id)
+        repository = config.repository
+        if not repository:
+            return jsonify({'success': False, 'message': '周版本关联仓库不存在'}), 404
         # 获取该配置的所有diff缓存
         diff_caches = WeeklyVersionDiffCache.query.filter_by(config_id=config_id).all()
+
+        def _parse_json_list(raw_value):
+            if raw_value is None:
+                return []
+            if isinstance(raw_value, list):
+                return raw_value
+            if isinstance(raw_value, tuple):
+                return list(raw_value)
+            if isinstance(raw_value, str):
+                text_value = raw_value.strip()
+                if not text_value:
+                    return []
+                try:
+                    parsed = json.loads(text_value)
+                    if isinstance(parsed, list):
+                        return parsed
+                    if isinstance(parsed, tuple):
+                        return list(parsed)
+                except Exception:
+                    # 历史脏数据兜底：按分隔符拆分字符串
+                    return [
+                        item.strip()
+                        for item in re.split(r"[,，;；|\n\r]+", text_value)
+                        if item and item.strip()
+                    ]
+            return []
+
+        def _parse_json_obj(raw_value):
+            if raw_value is None:
+                return {}
+            if isinstance(raw_value, dict):
+                return raw_value
+            if isinstance(raw_value, str):
+                text_value = raw_value.strip()
+                if not text_value:
+                    return {}
+                try:
+                    parsed = json.loads(text_value)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    return {}
+            return {}
 
         def _parse_confirm_usernames(raw_value):
             if not raw_value:
@@ -662,7 +712,9 @@ def weekly_version_files_api(config_id):
         authors = set()
         for cache in diff_caches:
             # 解析提交者信息
-            commit_authors = json.loads(cache.commit_authors) if cache.commit_authors else []
+            commit_authors = _parse_json_list(cache.commit_authors)
+            commit_messages = _parse_json_list(cache.commit_messages)
+            commit_times = _parse_json_list(cache.commit_times)
             authors.update(commit_authors)
 
             confirm_usernames = _parse_confirm_usernames(cache.status_changed_by)
@@ -672,7 +724,7 @@ def weekly_version_files_api(config_id):
             confirm_user_display = ''
             confirm_user_title = ''
             if cache.overall_status in ('confirmed', 'rejected') and confirm_usernames:
-                if config.repository.enable_id_confirmation:
+                if repository.enable_id_confirmation:
                     confirm_user_display = ', '.join(_abbreviate_username(username) for username in confirm_usernames)
                 else:
                     confirm_user_display = ', '.join(confirm_usernames)
@@ -682,7 +734,7 @@ def weekly_version_files_api(config_id):
             file_operations = []
             if cache.merged_diff_data:
                 try:
-                    merged_data = json.loads(cache.merged_diff_data)
+                    merged_data = _parse_json_obj(cache.merged_diff_data)
                     file_operations = merged_data.get('operations', [])
                 except:
                     pass
@@ -699,9 +751,9 @@ def weekly_version_files_api(config_id):
             files.append({
                 'file_path': cache.file_path,
                 'commit_count': cache.commit_count,
-                'commit_authors': cache.commit_authors,
-                'commit_messages': cache.commit_messages,  # 添加提交日志
-                'commit_times': cache.commit_times,        # 添加提交时间
+                'commit_authors': json.dumps(commit_authors, ensure_ascii=False),
+                'commit_messages': json.dumps(commit_messages, ensure_ascii=False),  # 添加提交日志
+                'commit_times': json.dumps(commit_times, ensure_ascii=False),        # 添加提交时间
                 'overall_status': cache.overall_status,
                 'status_changed_by': cache.status_changed_by,  # 操作者用户名
                 'confirm_user_display': confirm_user_display,
@@ -716,8 +768,8 @@ def weekly_version_files_api(config_id):
             'files': files,
             'authors': list(authors),
             'total_files': len(files),
-            'repository_name': config.repository.name,
-            'enable_id_confirmation': bool(config.repository.enable_id_confirmation)
+            'repository_name': repository.name,
+            'enable_id_confirmation': bool(repository.enable_id_confirmation)
         })
     except Exception as e:
         log_print(f"获取周版本文件列表失败: {e}", 'ERROR', force=True)
@@ -1409,6 +1461,7 @@ def generate_weekly_merged_diff(config, file_path, commits):
         raise e
 def process_weekly_excel_cache(config_id, file_path):
     """处理周版本Excel缓存生成"""
+    perf_metrics_service = get_perf_metrics_service()
     try:
         start_time = time.time()
         log_print(f"开始生成周版本Excel缓存: 配置 {config_id}, 文件 {file_path}", 'WEEKLY')
@@ -1438,6 +1491,20 @@ def process_weekly_excel_cache(config_id, file_path):
                 f"周版本Excel缓存已存在，跳过生成: {file_path} | "
                 f"lookup={lookup_time:.2f}s, cache_lookup={cache_lookup_time:.2f}s, total={total_time:.2f}s",
                 'WEEKLY'
+            )
+            perf_metrics_service.record(
+                "weekly_excel_cache",
+                success=True,
+                metrics={
+                    "total_ms": total_time * 1000,
+                    "lookup_ms": lookup_time * 1000,
+                    "cache_lookup_ms": cache_lookup_time * 1000,
+                },
+                tags={
+                    "source": "cache_hit",
+                    "config_id": config_id,
+                    "file_path": file_path,
+                },
             )
             return
 
@@ -1476,12 +1543,43 @@ def process_weekly_excel_cache(config_id, file_path):
                 f"cache_lookup={cache_lookup_time:.2f}s, render={render_time:.2f}s, save={save_time:.2f}s",
                 'WEEKLY'
             )
+            perf_metrics_service.record(
+                "weekly_excel_cache",
+                success=True,
+                metrics={
+                    "total_ms": processing_time * 1000,
+                    "lookup_ms": lookup_time * 1000,
+                    "cache_lookup_ms": cache_lookup_time * 1000,
+                    "render_ms": render_time * 1000,
+                    "save_ms": save_time * 1000,
+                    "html_bytes": len(html_content.encode("utf-8")),
+                    "commit_count": diff_cache.commit_count or 0,
+                },
+                tags={
+                    "source": "generated",
+                    "config_id": config_id,
+                    "repository_id": config.repository_id,
+                    "file_path": file_path,
+                },
+            )
             # 记录到操作日志
             _weekly_excel_cache_service.log_cache_operation(f"✅ 周版本Excel缓存生成成功: {file_path} (耗时: {processing_time:.2f}秒)", 'success', repository_id=config.repository_id, config_id=config_id, file_path=file_path)
         else:
             raise Exception("保存缓存失败")
     except Exception as e:
         log_print(f"❌ 周版本Excel缓存生成失败: {file_path}, 错误: {e}", 'WEEKLY', force=True)
+        perf_metrics_service.record(
+            "weekly_excel_cache",
+            success=False,
+            metrics={
+                "total_ms": (time.time() - start_time) * 1000,
+            },
+            tags={
+                "source": "exception",
+                "config_id": config_id,
+                "file_path": file_path,
+            },
+        )
         # 记录到操作日志
         _weekly_excel_cache_service.log_cache_operation(f"❌ 周版本Excel缓存生成失败: {file_path} - {str(e)}", 'error', config_id=config_id, file_path=file_path)
         raise e
