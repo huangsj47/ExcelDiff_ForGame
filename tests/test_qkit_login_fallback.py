@@ -159,6 +159,25 @@ def test_admin_login_qkit_url_for_build_error_returns_503(monkeypatch):
     assert "admin_login.html" in resp[0]
 
 
+def test_admin_login_qkit_template_render_error_still_returns_503(monkeypatch):
+    app = _build_min_app()
+    monkeypatch.setenv("AUTH_BACKEND", "qkit")
+    app.config["AUTH_INIT_ERROR"] = "ImportError: auth init failed"
+
+    monkeypatch.setattr(
+        cnh,
+        "render_template",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("template render failed")),
+    )
+
+    with app.test_request_context("/auth/login?next=/projects"):
+        resp = cnh.admin_login()
+
+    assert isinstance(resp, tuple)
+    assert resp[1] == 503
+    assert "Qkit 登录模块不可用" in resp[0]
+
+
 def test_qkit_auth_login_redirect_url_for_build_error_returns_503(monkeypatch):
     app = _build_min_app()
     app.config["AUTH_INIT_ERROR"] = "BuildError: missing qkit route"
@@ -185,3 +204,21 @@ def test_qkit_auth_login_redirect_url_for_build_error_returns_503(monkeypatch):
     assert isinstance(resp, tuple)
     assert resp[1] == 503
     assert "admin_login.html" in resp[0]
+
+
+def test_qkit_auth_login_redirect_template_render_error_still_returns_503(monkeypatch):
+    app = _build_min_app()
+    app.config["AUTH_INIT_ERROR"] = "ImportError: qkit auth init failed"
+
+    monkeypatch.setattr(
+        qroutes,
+        "render_template",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("template render failed")),
+    )
+
+    with app.test_request_context("/auth/login?next=/projects"):
+        resp = qroutes._qkit_login_redirect("/projects")
+
+    assert isinstance(resp, tuple)
+    assert resp[1] == 503
+    assert "Qkit 登录模块不可用" in resp[0]

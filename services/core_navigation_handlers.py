@@ -39,7 +39,15 @@ def _qkit_login_unavailable_response(next_url: str):
         flash(f"Qkit 登录模块初始化失败：{init_error}", "error")
     else:
         flash("Qkit 登录模块未初始化，请检查 AUTH_BACKEND 配置与依赖安装。", "error")
-    return render_template("admin_login.html", next_url=next_url), 503
+    try:
+        return render_template("admin_login.html", next_url=next_url), 503
+    except Exception:
+        # Last-resort guard: avoid 500 when base template itself references missing endpoints.
+        fallback_html = (
+            "<h3>Qkit 登录模块不可用</h3>"
+            "<p>请检查 AUTH_BACKEND 与认证蓝图初始化日志。</p>"
+        )
+        return fallback_html, 503
 
 
 def admin_login():

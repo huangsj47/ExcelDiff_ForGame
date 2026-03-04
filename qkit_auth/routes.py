@@ -111,7 +111,14 @@ def _qkit_login_redirect(next_url: str):
             flash(f"Qkit 登录模块初始化失败：{init_error}", "error")
         else:
             flash("Qkit 登录模块未完整注册，请检查启动日志。", "error")
-        return render_template("admin_login.html", next_url=next_url), 503
+        try:
+            return render_template("admin_login.html", next_url=next_url), 503
+        except Exception:
+            fallback_html = (
+                "<h3>Qkit 登录模块不可用</h3>"
+                "<p>请检查 AUTH_BACKEND 与认证蓝图初始化日志。</p>"
+            )
+            return fallback_html, 503
     try:
         return redirect(url_for("qkit_auth_bp.login", next=next_url))
     except BuildError:
@@ -120,7 +127,14 @@ def _qkit_login_redirect(next_url: str):
             flash(f"Qkit 登录模块初始化失败：{init_error}", "error")
         else:
             flash("Qkit 登录模块路由不可用，请检查启动日志。", "error")
-        return render_template("admin_login.html", next_url=next_url), 503
+        try:
+            return render_template("admin_login.html", next_url=next_url), 503
+        except Exception:
+            fallback_html = (
+                "<h3>Qkit 登录模块路由不可用</h3>"
+                "<p>请检查 qkit_auth 蓝图注册状态。</p>"
+            )
+            return fallback_html, 503
 
 
 @auth_bp.route("/login", methods=["GET", "POST"])
