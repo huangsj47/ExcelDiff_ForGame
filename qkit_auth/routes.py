@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 
 from flask import (
     Blueprint,
@@ -50,6 +51,7 @@ from qkit_auth.services import (
     update_project_member_role,
     update_user_role,
     upsert_project_import_config,
+    get_jwt_import_error,
 )
 from utils.request_security import (
     _has_admin_access,
@@ -72,11 +74,36 @@ qkit_auth_bp = Blueprint(
     template_folder="templates",
 )
 
+
 def _has_routable_endpoint(endpoint: str) -> bool:
     try:
         return any(rule.endpoint == endpoint for rule in current_app.url_map.iter_rules())
     except Exception:
         return False
+
+
+def _has_local_path(path: str) -> bool:
+    target = str(path or "").strip()
+    if not target:
+        return False
+    try:
+        return any(rule.rule == target for rule in current_app.url_map.iter_rules())
+    except Exception:
+        return False
+
+
+def _render_qkit_unavailable(next_url: str, default_message: str):
+    init_error = str(current_app.config.get("AUTH_INIT_ERROR") or "").strip()
+    flash(f"Qkit 登录模块初始化失败：{init_error}" if init_error else default_message, "error")
+    try:
+        return render_template("admin_login.html", next_url=next_url), 503
+    except Exception:
+        fallback_html = (
+            "<h3>Qkit 登录模块不可用</h3>"
+            f"<p>{init_error or default_message}</p>"
+        )
+        return fallback_html, 503
+
 
 def _set_user_session(user: QkitAuthUser) -> None:
     session["auth_user_id"] = user.id
@@ -106,35 +133,11 @@ def _qkit_login_redirect(next_url: str):
     if next_url and _is_safe_redirect(next_url):
         session["qkit_backhost"] = next_url
     if not _has_routable_endpoint("qkit_auth_bp.login"):
-        init_error = str(current_app.config.get("AUTH_INIT_ERROR") or "").strip()
-        if init_error:
-            flash(f"Qkit 登录模块初始化失败：{init_error}", "error")
-        else:
-            flash("Qkit 登录模块未完整注册，请检查启动日志。", "error")
-        try:
-            return render_template("admin_login.html", next_url=next_url), 503
-        except Exception:
-            fallback_html = (
-                "<h3>Qkit 登录模块不可用</h3>"
-                "<p>请检查 AUTH_BACKEND 与认证蓝图初始化日志。</p>"
-            )
-            return fallback_html, 503
+        return _render_qkit_unavailable(next_url, "Qkit 登录模块未完整注册，请检查启动日志。")
     try:
         return redirect(url_for("qkit_auth_bp.login", next=next_url))
     except BuildError:
-        init_error = str(current_app.config.get("AUTH_INIT_ERROR") or "").strip()
-        if init_error:
-            flash(f"Qkit 登录模块初始化失败：{init_error}", "error")
-        else:
-            flash("Qkit 登录模块路由不可用，请检查启动日志。", "error")
-        try:
-            return render_template("admin_login.html", next_url=next_url), 503
-        except Exception:
-            fallback_html = (
-                "<h3>Qkit 登录模块路由不可用</h3>"
-                "<p>请检查 qkit_auth 蓝图注册状态。</p>"
-            )
-            return fallback_html, 503
+        return _render_qkit_unavailable(next_url, "Qkit 登录模块路由不可用，请检查启动日志。")
 
 
 @auth_bp.route("/login", methods=["GET", "POST"])
@@ -166,6 +169,20 @@ def qkit_login():
     if next_url and _is_safe_redirect(next_url):
         session["qkit_backhost"] = next_url
     settings = load_qkit_settings()
+
+    parsed = urlparse(settings.login_service)
+    # 防止配置误指向当前服务但未提供 /openid/login 时的 302 死循环。
+    if (not parsed.netloc or parsed.netloc == request.host) and parsed.path.startswith("/openid/login"):
+        if not _has_local_path(parsed.path):
+            return _render_qkit_unavailable(
+                next_url,
+                (
+                    "QKIT_LOGIN_SERVICE 指向当前服务的 /openid/login，"
+                    "但当前服务未提供该路由。请将 QKIT_LOGIN_HOST/QKIT_LOGIN_SERVICE "
+                    "配置为统一认证中心地址。"
+                ),
+            )
+
     response = make_response(redirect(settings.login_service))
     if settings.local_jwt_cache:
         response.set_cookie("qkitjwt", "", expires=0)
@@ -186,6 +203,12 @@ def after_login():
 
     payload = decode_qkit_jwt_unsafe(token)
     if not payload:
+        jwt_dep_error = str(get_jwt_import_error() or "").strip()
+        if jwt_dep_error:
+            return _render_qkit_unavailable(
+                request.args.get("next") or request.referrer or url_for("index"),
+                f"Qkit 登录依赖缺失（PyJWT）：{jwt_dep_error}",
+            )
         flash("Qkit 登录失败：无法解析用户身份。", "error")
         return redirect(url_for("qkit_auth_bp.login"))
 

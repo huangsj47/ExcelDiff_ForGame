@@ -17,4 +17,4 @@ schedule==1.2.0
 python-dotenv==1.0.1
 flask-cors==4.0.0
 cryptography==41.0.7
-pyJWT
+PyJWT>=2.8,<3

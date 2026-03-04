@@ -11,6 +11,7 @@ import threading
 import builtins
 from datetime import datetime
 from glob import glob
+import time
 
 # ---------------------------------------------------------------------------
 #  日志级别控制 — 从 .env 读取，默认全部开启
@@ -71,6 +72,8 @@ def _build_log_level() -> dict:
 
 
 LOG_LEVEL = _build_log_level()
+_LAST_CONSOLE_FAILURE_TS = 0.0
+_CONSOLE_FAILURE_INTERVAL_SECONDS = 5.0
 
 
 def _get_log_dir() -> str:
@@ -90,12 +93,36 @@ def _get_log_dir() -> str:
 _sys_for_log = sys
 
 
+def _writable_stream_candidates():
+    return (
+        getattr(_sys_for_log, "stdout", None),
+        getattr(_sys_for_log, "__stdout__", None),
+        getattr(_sys_for_log, "stderr", None),
+        getattr(_sys_for_log, "__stderr__", None),
+    )
+
+
+def _write_to_any_console(text: str) -> bool:
+    for stream in _writable_stream_candidates():
+        if stream is None:
+            continue
+        try:
+            if getattr(stream, "closed", False):
+                continue
+            stream.write(text)
+            try:
+                stream.flush()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def _original_print(msg, **kwargs):
-    """安全的底层输出, 直接写 sys.stdout, 不经过 builtins.print"""
-    try:
-        _sys_for_log.stdout.write(str(msg) + '\n')
-    except Exception:
-        pass
+    """安全的底层输出，优先 stdout，失败时自动回退。"""
+    _write_to_any_console(str(msg) + '\n')
 
 
 def log_print(message, log_type='INFO', force=False):
@@ -147,29 +174,19 @@ def log_print(message, log_type='INFO', force=False):
     def safe_console_print(msg):
         """安全地输出到控制台，完全避免flush操作"""
         try:
-            # 检查标准输出是否可用
-            if hasattr(sys.stdout, 'closed') and sys.stdout.closed:
-                return False
-
-            # 直接输出，完全不使用flush，让系统自动处理缓冲
-            _original_print(msg)
-            # 不执行任何flush操作，这是导致阻塞的根本原因
-            # 让操作系统和Python解释器自动管理输出缓冲
-            return True
+            return _write_to_any_console(str(msg) + '\n')
 
         except (UnicodeEncodeError, UnicodeDecodeError):
             # 编码错误，尝试安全编码
             try:
                 safe_msg = msg.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
-                _original_print(safe_msg)
-                return True
+                return _write_to_any_console(str(safe_msg) + '\n')
 
             except Exception:
                 try:
                     # 最后的尝试：ASCII安全模式
                     ascii_msg = msg.encode('ascii', errors='replace').decode('ascii')
-                    _original_print(ascii_msg)
-                    return True
+                    return _write_to_any_console(str(ascii_msg) + '\n')
 
                 except Exception:
                     return False
@@ -210,20 +227,21 @@ def log_print(message, log_type='INFO', force=False):
         console_success = safe_console_print(full_message)
         # 尝试输出到文件
         file_success = safe_file_print(full_message)
-        # 调试信息：如果控制台输出失败，记录到文件
+        # 控制台失败时限频记录，避免大量 [DEBUG] 噪音
         if not console_success:
-            try:
-                debug_msg = f"[DEBUG] 控制台输出失败: {safe_message[:50]}..."
-                safe_file_print(debug_msg)
-            except Exception:
-                pass
+            global _LAST_CONSOLE_FAILURE_TS
+            now_ts = time.time()
+            if now_ts - _LAST_CONSOLE_FAILURE_TS >= _CONSOLE_FAILURE_INTERVAL_SECONDS:
+                _LAST_CONSOLE_FAILURE_TS = now_ts
+                try:
+                    safe_file_print("[DEBUG] 控制台输出失败: stdout/stderr 不可写，日志仅写入文件")
+                except Exception:
+                    pass
 
         # 如果两者都失败，尝试最基本的输出
         if not console_success and not file_success:
             try:
-                # 最后的尝试：使用最基本的print，不经过safe_console_print
-                sys.stderr.write(f"[LOG_ERROR]{safe_message}\n")
-                sys.stderr.flush()
+                _write_to_any_console(f"[LOG_ERROR]{safe_message}\n")
             except Exception:
                 # 完全静默处理
                 pass
@@ -231,8 +249,7 @@ def log_print(message, log_type='INFO', force=False):
     except Exception as e:
         # 如果主要逻辑都失败了，尝试最基本的错误输出
         try:
-            sys.stderr.write(f"[LOG_CRITICAL_ERROR] 日志系统异常: {str(e)}\n")
-            sys.stderr.flush()
+            _write_to_any_console(f"[LOG_CRITICAL_ERROR] 日志系统异常: {str(e)}\n")
         except Exception:
             # 完全静默处理
             pass

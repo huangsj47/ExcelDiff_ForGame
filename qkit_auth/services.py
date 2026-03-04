@@ -10,7 +10,13 @@ import os
 import re
 from typing import Optional
 
-import jwt
+try:
+    import jwt
+    _JWT_IMPORT_ERROR = ""
+except Exception as exc:  # pragma: no cover - defensive guard for env/runtime differences
+    jwt = None
+    _JWT_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+
 import requests
 
 from models import AgentNode, AgentProjectBinding, Project, db
@@ -100,6 +106,8 @@ def _extract_function_name(item: dict) -> Optional[str]:
 
 
 def decode_qkit_jwt_unsafe(token: str) -> Optional[dict]:
+    if jwt is None:
+        return None
     raw = (token or "").strip()
     if not raw:
         return None
@@ -118,6 +126,10 @@ def decode_qkit_jwt_unsafe(token: str) -> Optional[dict]:
         except Exception:
             continue
     return None
+
+
+def get_jwt_import_error() -> str:
+    return _JWT_IMPORT_ERROR
 
 
 def extract_identity_from_payload(payload: dict) -> dict:
