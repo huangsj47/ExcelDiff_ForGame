@@ -157,6 +157,10 @@ from services.core_navigation_handlers import (
     repository_config,
     test,
 )
+from services.repository_sync_status import (
+    clear_sync_error as clear_repository_sync_error,
+    record_sync_error as record_repository_sync_error,
+)
 from services.agent_management_handlers import (
     register_agent_node,
     agent_heartbeat,
@@ -1837,6 +1841,7 @@ def retry_clone_repository(repository_id):
 @require_admin
 def sync_repository(repository_id):
     """手动获取数据 - 立即执行git pull和分析"""
+    repository = None
     try:
         log_print(f"🚀 [MANUAL_SYNC] 手动同步开始 - 仓库ID: {repository_id}", 'INFO')
         # 获取仓库信息
@@ -1852,6 +1857,14 @@ def sync_repository(repository_id):
             success, message = git_service.clone_or_update_repository()
             if not success:
                 log_print(f"❌ [MANUAL_SYNC] Git操作失败: {message}", 'INFO')
+                record_repository_sync_error(
+                    db.session,
+                    repository,
+                    f"手动同步失败（Git）: {message}",
+                    log_func=log_print,
+                    log_type="SYNC",
+                    commit=True,
+                )
                 return jsonify({'status': 'error', 'message': f'Git操作失败: {message}'}), 500
 
             log_print(f"✅ [MANUAL_SYNC] Git操作成功: {message}", 'INFO')
@@ -1917,6 +1930,13 @@ def sync_repository(repository_id):
                     log_print(f"⏭️ [MANUAL_SYNC] 跳过已存在提交 {i+1}/{len(commits)}: {commit_data['commit_id'][:8]}")
             # 提交数据库更改
             db.session.commit()
+            clear_repository_sync_error(
+                db.session,
+                repository,
+                log_func=log_print,
+                log_type="SYNC",
+                commit=True,
+            )
             log_print(f"✅ [MANUAL_SYNC] 手动同步完成，添加了 {commits_added} 个新提交，{excel_tasks_added} 个Excel缓存任务", 'INFO')
             return jsonify({
                 'status': 'success', 
@@ -1925,8 +1945,26 @@ def sync_repository(repository_id):
             }), 200
         elif repository.type == 'svn':
             svn_service = get_svn_service(repository)
+            success, message = svn_service.checkout_or_update_repository()
+            if not success:
+                record_repository_sync_error(
+                    db.session,
+                    repository,
+                    f"手动同步失败（SVN）: {message}",
+                    log_func=log_print,
+                    log_type="SYNC",
+                    commit=True,
+                )
+                return jsonify({'status': 'error', 'message': f'SVN操作失败: {message}'}), 500
             # 传入数据库模块避免循环导入
             commits_added = svn_service.sync_repository_commits(db, Commit)
+            clear_repository_sync_error(
+                db.session,
+                repository,
+                log_func=log_print,
+                log_type="SYNC",
+                commit=True,
+            )
             return jsonify({
                 'status': 'success',
                 'message': f'同步成功，添加了 {commits_added} 个新提交',
@@ -1940,10 +1978,20 @@ def sync_repository(repository_id):
         error_details = traceback.format_exc()
         log_print(f"❌ [MANUAL_SYNC] 手动同步失败: {str(e)}")
         log_print(f"错误详情: {error_details}", 'INFO')
+        if repository is not None:
+            record_repository_sync_error(
+                db.session,
+                repository,
+                f"手动同步异常: {e}",
+                log_func=log_print,
+                log_type="SYNC",
+                commit=True,
+            )
         return jsonify({'status': 'error', 'message': f'同步失败: {str(e)}'}), 500
 
 def run_repository_update_and_cache(repository_id):
     """异步执行仓库更新和缓存（线程安全：按ID重新查询对象）"""
+    repository = None
     try:
         with app.app_context():
             repository = db.session.get(Repository, repository_id)
@@ -1966,12 +2014,36 @@ def run_repository_update_and_cache(repository_id):
             if success:
                 log_print("仓库更新成功，开始触发缓存操作...", 'CACHE')
                 commits_added = service.sync_repository_commits(db, Commit)
+                clear_repository_sync_error(
+                    db.session,
+                    repository,
+                    log_func=log_print,
+                    log_type="SYNC",
+                    commit=True,
+                )
                 log_print(f"{repository.type.upper()} 同步完成，添加了 {commits_added} 个新提交", 'SYNC')
                 log_print(f"✅ 仓库 {repository.name} 更新和缓存完成", 'CACHE')
             else:
                 log_print(f"❌ 仓库 {repository.name} 更新失败: {message}", 'API', force=True)
+                record_repository_sync_error(
+                    db.session,
+                    repository,
+                    f"异步更新失败: {message}",
+                    log_func=log_print,
+                    log_type="SYNC",
+                    commit=True,
+                )
     except Exception as e:
         log_print(f"❌ 异步更新和缓存操作异常: {e}", 'API', force=True)
+        if repository is not None:
+            record_repository_sync_error(
+                db.session,
+                repository,
+                f"异步更新异常: {e}",
+                log_func=log_print,
+                log_type="SYNC",
+                commit=True,
+            )
         import traceback
         traceback.print_exc()
 @require_admin

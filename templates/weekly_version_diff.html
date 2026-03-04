@@ -407,10 +407,37 @@
     transition: all 0.2s ease;
     background: #ffffff;
     min-height: 46px;
+    cursor: pointer;
 }
 
 .file-item:hover {
     background: #f8f9fa;
+}
+
+.file-item.is-selected {
+    background: linear-gradient(90deg, #dbeafe 0%, #eff6ff 100%);
+    box-shadow: inset 0 0 0 2px #60a5fa, 0 2px 8px rgba(37, 99, 235, 0.12);
+}
+
+.file-item.is-selected::after {
+    content: '';
+    position: absolute;
+    top: 4px;
+    bottom: 4px;
+    right: 0;
+    width: 4px;
+    border-radius: 2px 0 0 2px;
+    background: #1d4ed8;
+}
+
+.file-item.is-selected .file-name {
+    color: #1e3a8a;
+    font-weight: 700;
+}
+
+.file-item.is-selected .commit-count-badge {
+    background: #bfdbfe;
+    color: #1e3a8a;
 }
 
 .file-item.pending {
@@ -934,6 +961,7 @@ let currentConfigId = {{ current_config_id }};
 let allFiles = [];
 let filteredFiles = [];
 let currentFilePath = '';
+let selectedFilePath = '';
 let allAuthors = new Set();
 
 // 分页相关变量
@@ -943,6 +971,7 @@ let totalPages = 1;
 
 // 页面加载时初始化
 document.addEventListener('DOMContentLoaded', function() {
+    initFileItemSelection();
     loadFileList();
 
     // 初始化重建缓存按钮显示状态
@@ -977,6 +1006,7 @@ function switchRepository(newConfigId) {
     // 清空当前数据
     allFiles = [];
     filteredFiles = [];
+    selectedFilePath = '';
     allAuthors = new Set();
 
     // 重置筛选器
@@ -1009,6 +1039,7 @@ function switchRepositoryInternal(newConfigId) {
     // 清空当前数据
     allFiles = [];
     filteredFiles = [];
+    selectedFilePath = '';
     allAuthors = new Set();
 
     // 重置筛选器
@@ -1081,6 +1112,9 @@ function loadFileList() {
         })
         .then(data => {
             allFiles = data.files || [];
+            if (selectedFilePath && !allFiles.some(file => file.file_path === selectedFilePath)) {
+                selectedFilePath = '';
+            }
             updateAuthorFilter(data.authors || []);
 
             // 重新应用当前的筛选条件，而不是重置为显示所有文件
@@ -1164,6 +1198,37 @@ function updateRebuildCacheButtonVisibility() {
         });
 }
 
+function setSelectedFileItem(filePath) {
+    selectedFilePath = filePath || '';
+    applySelectedFileHighlight();
+}
+
+function applySelectedFileHighlight() {
+    const fileItems = document.querySelectorAll('.file-item');
+    fileItems.forEach(item => {
+        const path = item.getAttribute('data-file-path') || '';
+        const isSelected = Boolean(selectedFilePath) && path === selectedFilePath;
+        item.classList.toggle('is-selected', isSelected);
+        item.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+    });
+}
+
+function initFileItemSelection() {
+    const treeContainer = document.getElementById('fileTreeContainer');
+    if (!treeContainer || treeContainer.dataset.selectionBound === '1') {
+        return;
+    }
+
+    treeContainer.dataset.selectionBound = '1';
+    treeContainer.addEventListener('click', function(event) {
+        const fileItem = event.target.closest('.file-item');
+        if (!fileItem || !treeContainer.contains(fileItem)) {
+            return;
+        }
+        setSelectedFileItem(fileItem.getAttribute('data-file-path') || '');
+    });
+}
+
 function updateFileTable() {
     // 计算分页
     totalPages = Math.ceil(filteredFiles.length / itemsPerPage);
@@ -1178,6 +1243,7 @@ function updateFileTable() {
     const treeHtml = renderFileTree(fileTree);
 
     document.getElementById('fileTreeContainer').innerHTML = treeHtml;
+    applySelectedFileHighlight();
 
     // 重置为展开状态
     foldersExpanded = true;
@@ -1295,9 +1361,10 @@ function renderDirectoryFiles(files) {
         // 根据文件操作类型确定颜色
         const operationClass = getOperationClass(file.primary_operation || 'M');
         const operationColor = getOperationColor(file.primary_operation || 'M');
+        const selectedClass = selectedFilePath === file.file_path ? 'is-selected' : '';
 
         html += `
-            <div class="file-item ${statusClass}" data-file-path="${file.file_path}">
+            <div class="file-item ${statusClass} ${selectedClass}" data-file-path="${file.file_path}">
                 <div class="file-content">
                     <div class="file-icon">
                         <i class="bi bi-file-earmark-text ${operationClass}"></i>

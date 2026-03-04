@@ -94,6 +94,23 @@
     .commits-table-container .card { border: 1px solid #e2e8f0; border-radius: 0.625rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
     .commit-table thead th { background: #f1f5f9; color: #64748b; font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 2px solid #e2e8f0; padding: 0.55rem 0.5rem; }
     .commit-table tbody td { font-size: 0.8rem; padding: 0.45rem 0.5rem; }
+    .commit-table tbody tr.commit-row {
+        cursor: pointer;
+        transition: background-color 0.16s ease, box-shadow 0.16s ease;
+    }
+    .commit-table tbody tr.commit-row.is-selected > td {
+        background: #dbeafe !important;
+        box-shadow: inset 0 1px 0 #93c5fd, inset 0 -1px 0 #93c5fd;
+    }
+    .commit-table tbody tr.commit-row.is-selected td:first-child {
+        border-left: 4px solid #2563eb;
+    }
+    .commit-table tbody tr.commit-row.is-selected .path-link,
+    .commit-table tbody tr.commit-row.is-selected .commit-message-cell,
+    .commit-table tbody tr.commit-row.is-selected .fw-medium {
+        color: #1e3a8a !important;
+        font-weight: 700;
+    }
     .commit-table .file-col { width: 22%; }
     .commit-table .author-col,
     .commit-table .author-cell {
@@ -864,6 +881,8 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // 初始化状态下拉菜单
     initStatusDropdown();
+    initCommitRowSelection();
+    updateBatchButtons();
     
     // 绑定手动获取数据按钮事件
     const syncButton = document.getElementById('syncButton');
@@ -1048,8 +1067,47 @@ function toggleSelectAll() {
     updateBatchButtons();
 }
 
+function syncCommitRowSelectionStates() {
+    document.querySelectorAll('.commit-table tbody tr.commit-row').forEach(row => {
+        const checkbox = row.querySelector('.commit-checkbox');
+        const checked = Boolean(checkbox && checkbox.checked);
+        row.classList.toggle('is-selected', checked);
+        row.setAttribute('aria-selected', checked ? 'true' : 'false');
+    });
+}
+
+function initCommitRowSelection() {
+    const tbody = document.querySelector('.commit-table tbody');
+    if (!tbody || tbody.dataset.selectionBound === '1') {
+        return;
+    }
+
+    tbody.dataset.selectionBound = '1';
+    tbody.addEventListener('click', function(event) {
+        const row = event.target.closest('tr.commit-row');
+        if (!row || !tbody.contains(row)) {
+            return;
+        }
+
+        if (event.target.closest('a, button, input, label, .dropdown, .dropdown-menu')) {
+            return;
+        }
+
+        const checkbox = row.querySelector('.commit-checkbox');
+        if (!checkbox) {
+            return;
+        }
+
+        checkbox.checked = !checkbox.checked;
+        updateBatchButtons();
+    });
+
+    syncCommitRowSelectionStates();
+}
+
 // 更新批量操作按钮显示
 function updateBatchButtons() {
+    syncCommitRowSelectionStates();
     const checkboxes = document.querySelectorAll('.commit-checkbox:checked');
     const batchOperations = document.getElementById('batchOperations');
 

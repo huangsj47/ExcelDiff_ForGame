@@ -620,9 +620,6 @@ td.excel-row-number.excel-modified,
             <div class="d-flex justify-content-between align-items-center mb-3">
                 <h2>合并差异显示</h2>
                 <div>
-                    <button id="refreshMergeDiffBtn" class="btn btn-warning me-2" onclick="refreshMergeDiff()">
-                        <i class="fas fa-sync-alt"></i> 重新计算
-                    </button>
                     <a href="{{ url_for('commit_list', repository_id=commits[0].repository.id) }}" class="btn btn-secondary">
                         <i class="fas fa-arrow-left"></i> 返回项目
                     </a>
@@ -906,44 +903,6 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
-}
-
-// 重新计算合并diff
-function refreshMergeDiff() {
-    const btn = document.getElementById('refreshMergeDiffBtn');
-    const originalText = btn.innerHTML;
-    
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 计算中...';
-    
-    const pageData = JSON.parse(document.getElementById('page-data').textContent);
-    
-    fetch('/commits/merge-diff/refresh', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            commit_ids: pageData.commit_ids
-        })
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            alert(data.message);
-            window.location.reload();
-        } else {
-            alert('重新计算失败: ' + data.message);
-        }
-    })
-    .catch(error => {
-        console.error('Error:', error);
-        alert('重新计算失败: ' + error.message);
-    })
-    .finally(() => {
-        btn.disabled = false;
-        btn.innerHTML = originalText;
-    });
 }
 
 // 格式化单元格值函数

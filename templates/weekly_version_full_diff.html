@@ -65,11 +65,6 @@
                 </div>
                 <div class="col-md-4 text-end">
                     <div class="d-flex justify-content-end align-items-center">
-                        <!-- 重新计算按钮 -->
-                        <button type="button" class="btn btn-outline-warning me-3" onclick="recalculateDiff()" id="recalculateBtn" style="background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%); color: #856404; border: 1px solid #ffeaa7;">
-                            <i class="fas fa-sync-alt me-1"></i>重新计算
-                        </button>
-
                         <!-- 状态操作按钮组 -->
                         <div class="d-flex" id="statusButtonGroup" style="gap: 10px;">
                             <button type="button" class="btn btn-success" onclick="confirmFile()" id="confirmBtn">
@@ -396,35 +391,6 @@
     font-weight: bold;
 }
 
-/* 重新计算按钮样式 */
-#recalculateBtn {
-    background: linear-gradient(135deg, #17a2b8 0%, #138496 100%);
-    border: none;
-    color: white;
-    font-weight: 500;
-    transition: all 0.3s ease;
-    box-shadow: 0 2px 6px rgba(23, 162, 184, 0.3);
-}
-
-#recalculateBtn:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 10px rgba(23, 162, 184, 0.4);
-    background: linear-gradient(135deg, #138496 0%, #117a8b 100%);
-    color: white;
-}
-
-#recalculateBtn:active {
-    transform: translateY(0);
-    box-shadow: 0 2px 4px rgba(23, 162, 184, 0.3);
-}
-
-#recalculateBtn:disabled {
-    background: linear-gradient(135deg, #a0a0a0 0%, #888888 100%);
-    box-shadow: none;
-    transform: none;
-    cursor: not-allowed;
-}
-
 /* 状态显示样式 */
 #statusDisplay .badge {
     padding: 8px 12px;
@@ -595,14 +561,7 @@ window.initWeeklyExcelDiff = function(diffData) {
 };
 
 function loadDiffContent() {
-    // 检查URL参数中是否有nocache标志
-    const urlParams = new URLSearchParams(window.location.search);
-    const nocache = urlParams.get('nocache') === 'true';
-
-    let url = `/weekly-version-config/${configId}/file-full-diff-data?file_path=${encodeURIComponent(filePath)}`;
-    if (nocache) {
-        url += '&nocache=true';
-    }
+    const url = `/weekly-version-config/${configId}/file-full-diff-data?file_path=${encodeURIComponent(filePath)}`;
 
     // 显示加载状态
     document.getElementById('diffContent').innerHTML = `
@@ -623,17 +582,6 @@ function loadDiffContent() {
             if (data.success) {
                 const diffContainer = document.getElementById('diffContent');
                 diffContainer.innerHTML = data.diff_html;
-
-                // 如果是重新计算的结果，显示提示
-                if (data.recalculated) {
-                    showToast('✅ diff已重新计算完成', 'success');
-
-                    // 清理URL中的nocache参数
-                    const currentUrl = new URL(window.location.href);
-                    currentUrl.searchParams.delete('nocache');
-                    currentUrl.searchParams.delete('recalculate');
-                    window.history.replaceState({}, '', currentUrl.toString());
-                }
 
                 // 检查是否有Excel相关的脚本执行
 
@@ -773,27 +721,6 @@ function rejectFile() {
 
 function resetFileStatus() {
     updateFileStatus('pending');
-}
-
-// 重新计算diff
-function recalculateDiff() {
-    const btn = document.getElementById('recalculateBtn');
-
-    if (!confirm('确定要重新计算diff吗？\n\n这将忽略缓存，重新实时计算文件差异，可能需要一些时间。')) {
-        return;
-    }
-
-    // 禁用按钮并显示加载状态
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>计算中...';
-
-    // 构建重新计算的URL，添加nocache参数
-    const currentUrl = new URL(window.location.href);
-    currentUrl.searchParams.set('nocache', 'true');
-    currentUrl.searchParams.set('recalculate', Date.now()); // 添加时间戳防止浏览器缓存
-
-    // 重新加载页面
-    window.location.href = currentUrl.toString();
 }
 
 // 全局函数：显示/隐藏删除内容详情

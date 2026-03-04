@@ -349,6 +349,80 @@ class GitService:
             log_print(f"SSH连接测试失败: {str(e)}", 'GIT', force=True)
             return False
 
+    @staticmethod
+    def _git_cmd_success(result):
+        return bool(result and getattr(result, "returncode", -1) == 0)
+
+    def _cleanup_git_lock_files(self):
+        """清理常见的Git锁文件，防止pull/fetch被锁阻塞。"""
+        removed_locks = []
+        lock_files = [
+            os.path.join(".git", "index.lock"),
+            os.path.join(".git", "config.lock"),
+            os.path.join(".git", "HEAD.lock"),
+            os.path.join(".git", "packed-refs.lock"),
+            os.path.join(".git", "shallow.lock"),
+        ]
+        for relative_path in lock_files:
+            lock_path = os.path.join(self.local_path, relative_path)
+            if not os.path.exists(lock_path):
+                continue
+            try:
+                os.remove(lock_path)
+                removed_locks.append(relative_path.replace("\\", "/"))
+            except Exception:
+                continue
+        return removed_locks
+
+    def _checkout_configured_branch(self):
+        """显式切换到仓库配置的分支，避免在错误分支上pull。"""
+        branch = (getattr(self.repository, "branch", "") or "").strip() if self.repository else ""
+        if not branch:
+            return True, "未配置分支，保持当前HEAD"
+
+        self._run_git_command(['git', 'fetch', '--all', '--prune'], timeout=120)
+        checkout_result = self._run_git_command(['git', 'checkout', branch], timeout=90)
+        if self._git_cmd_success(checkout_result):
+            return True, f"已切换分支: {branch}"
+
+        recreate_result = self._run_git_command(['git', 'checkout', '-B', branch, f'origin/{branch}'], timeout=90)
+        if self._git_cmd_success(recreate_result):
+            return True, f"已重建并切换分支: {branch}"
+
+        error_text = ""
+        if recreate_result and getattr(recreate_result, "stderr", ""):
+            error_text = recreate_result.stderr.strip()
+        elif checkout_result and getattr(checkout_result, "stderr", ""):
+            error_text = checkout_result.stderr.strip()
+        return False, f"分支切换失败({branch}){': ' + sanitize_text(error_text) if error_text else ''}"
+
+    def _pull_repository(self, timeout=120):
+        branch = (getattr(self.repository, "branch", "") or "").strip() if self.repository else ""
+        cmd = ['git', 'pull', '--no-rebase', 'origin']
+        if branch:
+            cmd.append(branch)
+        return self._run_git_command(cmd, timeout=timeout)
+
+    def _self_heal_repository_state(self):
+        """失败后执行保守自愈，尽量恢复到可pull状态。"""
+        from utils.safe_print import log_print
+
+        removed_locks = self._cleanup_git_lock_files()
+        if removed_locks:
+            log_print(f"🧹 清理Git锁文件: {', '.join(removed_locks)}", 'GIT')
+
+        reset_result = self._run_git_command(['git', 'reset', '--hard', 'HEAD'], timeout=90)
+        clean_result = self._run_git_command(['git', 'clean', '-fd'], timeout=90)
+        self._run_git_command(['git', 'gc', '--prune=now'], timeout=180)
+
+        if not self._git_cmd_success(reset_result) or not self._git_cmd_success(clean_result):
+            return False, "Git自愈失败(reset/clean未成功)"
+
+        branch_ok, branch_message = self._checkout_configured_branch()
+        if not branch_ok:
+            return False, branch_message
+        return True, "Git自愈完成"
+
     def clone_or_update_repository(self):
         """克隆或更新本地仓库"""
         try:
@@ -369,23 +443,30 @@ class GitService:
             if os.path.exists(self.local_path):
                 # 如果本地仓库已存在，则更新
                 log_print("本地仓库已存在，开始更新...", 'GIT')
-                
-                # 完全使用subprocess避免GitPython的编码问题
-                # 使用merge策略避免rebase冲突，设置较短超时避免卡住
-                result = self._run_git_command(['git', 'pull', '--no-rebase', 'origin'], timeout=60)
-                
-                if result and result.returncode == 0:
+
+                removed_locks = self._cleanup_git_lock_files()
+                if removed_locks:
+                    log_print(f"🧹 检测并清理Git锁文件: {', '.join(removed_locks)}", 'GIT')
+
+                branch_ok, branch_message = self._checkout_configured_branch()
+                if not branch_ok:
+                    log_print(branch_message, 'GIT', force=True)
+                    return False, branch_message
+
+                # 使用显式分支pull，避免拉错分支
+                result = self._pull_repository(timeout=120)
+
+                if self._git_cmd_success(result):
                     log_print(f"仓库已更新: {self.local_path}", 'GIT')
                     return True, "仓库更新成功"
                 elif result:
                     log_print(f"Git pull输出: {result.stdout}", 'GIT')
                     log_print(f"Git pull错误: {result.stderr}", 'GIT')
-                    
-                    # 如果是超时，直接返回成功（假设仓库已存在且可用）
+
+                    # 超时视为失败，进入自愈流程
                     if result.returncode == -1 and "超时" in result.stderr:
-                        log_print("Git命令超时，但仓库已存在，继续使用", 'GIT')
-                        return True, "仓库已存在（Git命令超时）"
-                    
+                        log_print("Git命令超时，尝试执行仓库自愈", 'GIT', force=True)
+
                     # 检查是否实际更新成功（有时stderr有内容但实际成功了）
                     if "Already up to date" in result.stdout or "Already up-to-date" in result.stdout:
                         log_print("仓库已是最新状态", 'GIT')
@@ -394,24 +475,28 @@ class GitService:
                         log_print("仓库更新成功", 'GIT')
                         return True, "仓库更新成功"
                     else:
-                        # 如果pull失败，尝试重置并强制更新
-                        log_print("尝试重置仓库状态并强制更新...", 'GIT')
+                        # pull失败后，执行一次自愈并重试
+                        log_print("尝试自愈仓库状态并重试更新...", 'GIT')
                         try:
-                            # 重置到远程分支
-                            reset_result = self._run_git_command(['git', 'reset', '--hard', 'HEAD'])
-                            if reset_result and reset_result.returncode == 0:
-                                # 再次尝试pull，设置超时
-                                pull_result = self._run_git_command(['git', 'pull', '--no-rebase', 'origin'], timeout=60)
-                                if pull_result and pull_result.returncode == 0:
-                                    log_print(f"仓库已更新: {self.local_path}", 'GIT')
-                                    return True, "仓库更新成功"
-                            
-                            # 最后尝试GitPython，但捕获所有编码错误
+                            heal_ok, heal_msg = self._self_heal_repository_state()
+                            if not heal_ok:
+                                return False, f"仓库自愈失败: {heal_msg}"
+
+                            pull_result = self._pull_repository(timeout=120)
+                            if self._git_cmd_success(pull_result):
+                                log_print(f"仓库已更新: {self.local_path}", 'GIT')
+                                return True, "仓库更新成功（自愈后）"
+
+                            # 兜底尝试GitPython
                             repo = git.Repo(self.local_path)
                             origin = repo.remotes.origin
-                            origin.pull()
+                            branch = (getattr(self.repository, "branch", "") or "").strip() if self.repository else ""
+                            if branch:
+                                origin.pull(branch)
+                            else:
+                                origin.pull()
                             log_print(f"仓库已更新: {self.local_path}", 'GIT')
-                            return True, "仓库更新成功"
+                            return True, "仓库更新成功（GitPython兜底）"
                         except Exception as git_e:
                             log_print(f"GitPython更新失败: {git_e}", 'GIT')
                             # 如果是编码错误，忽略并认为更新成功

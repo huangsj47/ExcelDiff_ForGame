@@ -918,7 +918,6 @@ def weekly_version_file_full_diff_data(config_id):
     try:
         config = WeeklyVersionConfig.query.get_or_404(config_id)
         file_path = request.args.get('file_path')
-        nocache = request.args.get('nocache', 'false').lower() == 'true'
         if not file_path:
             return jsonify({'success': False, 'message': '缺少文件路径参数'}), 400
 
@@ -952,32 +951,14 @@ def weekly_version_file_full_diff_data(config_id):
         from services.diff_service import DiffService
         diff_service = DiffService()
         file_type = diff_service.get_file_type(file_path)
-        # 生成diff HTML内容
-        if nocache:
-            log_print(f"🔄 重新计算周版本diff (绕过缓存): {file_path}", 'WEEKLY')
-            # 如果是Excel文件且有周版本Excel缓存，先清理缓存
-            if _weekly_excel_cache_service.is_excel_file(file_path):
-                try:
-                    # 清理该文件的周版本Excel缓存
-                    WeeklyVersionExcelCache.query.filter_by(
-                        config_id=config_id,
-                        file_path=file_path
-                    ).delete()
-                    db.session.commit()
-                    log_print(f"已清理周版本Excel缓存: {file_path}", 'WEEKLY')
-                except Exception as cache_e:
-                    log_print(f"清理周版本Excel缓存失败: {cache_e}", 'WEEKLY', force=True)
-            # 强制重新生成diff HTML（绕过所有缓存）
-            diff_html = generate_weekly_git_diff_html(config, diff_cache, file_path, force_recalculate=True)
-        else:
-            # 正常生成diff HTML内容（可能使用缓存）
-            diff_html = generate_weekly_git_diff_html(config, diff_cache, file_path)
+        # 生成diff HTML内容（固定走标准路径，不支持页面级手动重算）
+        diff_html = generate_weekly_git_diff_html(config, diff_cache, file_path)
         return jsonify({
             'success': True,
             'diff_html': diff_html,
             'base_commit_info': base_commit_info,
             'file_type': file_type,
-            'recalculated': nocache
+            'recalculated': False
         })
     except Exception as e:
         log_print(f"异步加载周版本diff数据失败: {e}", 'ERROR', force=True)

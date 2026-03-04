@@ -36,8 +36,20 @@
     .version-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
 
     /* ===== 统计区域 ===== */
-    .stats-container { background: #f8f9fa !important; border-radius: 0.5rem !important; padding: 0.875rem !important; border: 1px solid #e9ecef !important; position: relative !important; }
-    .stats-content { padding-right: 170px !important; position: relative !important; }
+    .stats-container {
+        --stats-actions-width: 172px;
+        --stats-actions-right: 14px;
+        --stats-actions-gap: 25px;
+        background: #f8f9fa !important;
+        border-radius: 0.5rem !important;
+        padding: 0.875rem !important;
+        border: 1px solid #e9ecef !important;
+        position: relative !important;
+    }
+    .stats-content {
+        padding-right: calc(var(--stats-actions-width) + var(--stats-actions-right) + var(--stats-actions-gap)) !important;
+        position: relative !important;
+    }
     .repository-stat-item { background: #fff; border-radius: 6px; padding: 0.6rem 0.875rem; margin-bottom: 0.5rem; border: 1px solid #edf0f4; transition: all 0.2s; }
     .repository-stat-item:hover { box-shadow: 0 2px 6px rgba(0,0,0,0.06); }
     .repository-stat-item:last-child { margin-bottom: 0; }
@@ -54,9 +66,74 @@
     .branch-tag-default { background: #e0e7ff; color: #3730a3; }
 
     /* ===== 操作按钮 ===== */
-    .stats-action-buttons { position: absolute !important; top: 2.25rem !important; right: 0.875rem !important; bottom: 0 !important; display: flex !important; flex-direction: column !important; gap: 0.4rem !important; align-items: flex-end !important; justify-content: flex-end !important; z-index: 10 !important; width: 150px !important; padding-bottom: 0.6rem !important; pointer-events: none !important; }
-    .stats-action-buttons .version-action-btn { pointer-events: auto !important; width: 100% !important; min-width: 130px !important; font-size: 0.75rem !important; white-space: nowrap !important; }
-    .version-action-btn { font-size: 0.8rem; padding: 0.35rem 0.75rem; border-radius: 6px; font-weight: 500; }
+    .stats-action-buttons {
+        position: absolute !important;
+        top: 2.1rem !important;
+        right: var(--stats-actions-right) !important;
+        bottom: 0 !important;
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 0.5rem !important;
+        align-items: flex-end !important;
+        justify-content: flex-end !important;
+        z-index: 10 !important;
+        width: var(--stats-actions-width) !important;
+        padding-bottom: 0.6rem !important;
+        pointer-events: none !important;
+    }
+    .stats-action-buttons .version-action-btn { pointer-events: auto !important; width: 100% !important; min-width: 150px !important; font-size: 0.8rem !important; white-space: nowrap !important; }
+    .version-action-btn {
+        font-size: 0.8rem;
+        padding: 0.42rem 0.78rem;
+        border-radius: 8px;
+        font-weight: 600;
+        border-width: 1px;
+        letter-spacing: 0.01em;
+        transition: all 0.18s ease;
+    }
+    .version-action-btn.version-action-diff {
+        background: linear-gradient(135deg, #0ea765 0%, #0c9158 100%);
+        border: 1px solid #0c9158;
+        color: #fff;
+        font-weight: 700;
+        box-shadow: 0 3px 10px rgba(12, 145, 88, 0.32);
+    }
+    .version-action-btn.version-action-diff:hover {
+        background: linear-gradient(135deg, #0c9158 0%, #0a7c4c 100%);
+        border-color: #0a7c4c;
+        color: #fff;
+        transform: translateY(-1px);
+        box-shadow: 0 6px 14px rgba(12, 145, 88, 0.36);
+    }
+    .version-action-btn.version-action-delete {
+        background: #fff5f5;
+        border: 1px solid #f2b8bf;
+        color: #b42332;
+        box-shadow: none;
+    }
+    .version-action-btn.version-action-delete:hover {
+        background: #fee2e2;
+        border-color: #f08d9a;
+        color: #991b1b;
+        transform: translateY(-1px);
+    }
+
+    /* ===== 仓库提交记录按钮（弱化） ===== */
+    .repo-commit-btn {
+        background: #f8fafc !important;
+        border: 1px solid #d5dee9 !important;
+        color: #526072 !important;
+        font-size: 0.82rem !important;
+        font-weight: 600 !important;
+        box-shadow: none !important;
+    }
+    .repo-commit-btn i { color: #7b8797; }
+    .repo-commit-btn:hover {
+        background: #eef2f7 !important;
+        border-color: #b8c4d5 !important;
+        color: #334155 !important;
+        transform: none !important;
+    }
 
     /* ===== 按钮通用 ===== */
     .btn { border-radius: 6px; font-weight: 500; transition: all 0.2s; }
@@ -69,7 +146,21 @@
 
     /* ===== 活跃版本 ===== */
     .border-success { border: 2px solid #198754 !important; }
-    .active-version-header { background: linear-gradient(135deg, #d1e7dd 0%, #badbcc 100%); border-radius: 0.625rem 0.625rem 0 0; padding: 0.875rem 1.25rem; }
+    .active-version-header {
+        background: linear-gradient(135deg, #e3f4ef 0%, #d1eae2 100%);
+        border-radius: 0.625rem 0.625rem 0 0;
+        padding: 0.875rem 1.25rem;
+    }
+    .active-section-title {
+        font-weight: 800 !important;
+        color: #0f766e !important;
+        letter-spacing: 0.01em;
+    }
+    .version-name-title {
+        font-weight: 800 !important;
+        color: #0f766e !important;
+        letter-spacing: 0.01em;
+    }
 
     /* ===== 右侧仓库卡片 ===== */
     .repository-card { background: #fff; border-radius: 8px; border: 1px solid #e9ecef; transition: all 0.2s; margin-bottom: 0.625rem; cursor: pointer; }
@@ -209,14 +300,14 @@
                     <!-- 当前活跃版本 -->
                     {% if active_versions %}
                     <div class="mb-4">
-                        <h6 class="text-success mb-3">
+                        <h6 class="text-success mb-3 active-section-title">
                             <i class="fas fa-play-circle me-2"></i>当前活跃版本
                         </h6>
                         {% for version in active_versions %}
                         <div class="card mb-4 border-success version-card">
                             <div class="card-header active-version-header">
                                 <div class="d-flex justify-content-between align-items-center">
-                                    <h5 class="mb-0 text-success">
+                                    <h5 class="mb-0 text-success version-name-title">
                                         <i class="fas fa-calendar-check me-2"></i>{{ version.name }}
                                     </h5>
                                     <span class="badge bg-success">
@@ -291,10 +382,10 @@
 
                                     <!-- 操作按钮区域 - 绝对定位在容器内 -->
                                     <div class="stats-action-buttons">
-                                        <a href="{{ url_for('weekly_version_diff', config_id=version.configs[0].id) }}" class="btn btn-success btn-sm version-action-btn">
+                                        <a href="{{ url_for('weekly_version_diff', config_id=version.configs[0].id) }}" class="btn btn-sm version-action-btn version-action-diff">
                                             <i class="fas fa-eye me-1"></i>查看版本diff
                                         </a>
-                                        <button class="btn btn-danger btn-sm version-action-btn" onclick="deleteVersionGroup('{{ version.name }}', [{% for config in version.configs %}{{ config.id }}{% if not loop.last %},{% endif %}{% endfor %}])">
+                                        <button class="btn btn-sm version-action-btn version-action-delete" onclick="deleteVersionGroup('{{ version.name }}', [{% for config in version.configs %}{{ config.id }}{% if not loop.last %},{% endif %}{% endfor %}])">
                                             <i class="fas fa-trash me-1"></i>删除版本
                                         </button>
                                     </div>
@@ -398,7 +489,7 @@
                                 </div>
 
                                 <div class="d-grid">
-                                    <a href="{{ url_for('commit_list', repository_id=repo.id) }}" class="btn btn-primary">
+                                    <a href="{{ url_for('commit_list', repository_id=repo.id) }}" class="btn repo-commit-btn">
                                         <i class="fas fa-list me-2"></i>提交记录
                                     </a>
                                 </div>
@@ -580,10 +671,10 @@ function createInactiveVersionHtml(version) {
 
                     <!-- 操作按钮区域 - 绝对定位在容器内 -->
                     <div class="stats-action-buttons">
-                        <a href="/weekly-version-config/${version.configs[0].id}/diff" class="btn btn-success btn-sm version-action-btn">
+                        <a href="/weekly-version-config/${version.configs[0].id}/diff" class="btn btn-sm version-action-btn version-action-diff">
                             <i class="fas fa-eye me-1"></i>查看版本diff
                         </a>
-                        <button class="btn btn-danger btn-sm version-action-btn" onclick="deleteVersionGroup('${version.name}', [${configIds.join(',')}])">
+                        <button class="btn btn-sm version-action-btn version-action-delete" onclick="deleteVersionGroup('${version.name}', [${configIds.join(',')}])">
                             <i class="fas fa-trash me-1"></i>删除版本
                         </button>
                     </div>

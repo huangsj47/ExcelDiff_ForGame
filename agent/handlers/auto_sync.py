@@ -9,6 +9,14 @@ import re
 import subprocess
 from urllib.parse import quote, urlparse, urlunparse
 
+_GIT_LOCK_FILES = (
+    os.path.join(".git", "index.lock"),
+    os.path.join(".git", "config.lock"),
+    os.path.join(".git", "HEAD.lock"),
+    os.path.join(".git", "packed-refs.lock"),
+    os.path.join(".git", "shallow.lock"),
+)
+
 
 def execute_auto_sync(task: dict, settings):
     payload = task.get("payload") or {}
@@ -86,6 +94,73 @@ def _run_git(cmd, cwd=None, timeout=120):
     return result.stdout
 
 
+def _cleanup_git_lock_files(local_repo_dir: str):
+    removed = []
+    for relative in _GIT_LOCK_FILES:
+        target = os.path.join(local_repo_dir, relative)
+        if not os.path.exists(target):
+            continue
+        try:
+            os.remove(target)
+            removed.append(relative.replace("\\", "/"))
+        except Exception:
+            continue
+    return removed
+
+
+def _ensure_branch_checked_out(local_repo_dir: str, branch: str | None):
+    if not branch:
+        return
+    try:
+        _run_git(["git", "checkout", branch], cwd=local_repo_dir, timeout=90)
+    except Exception:
+        _run_git(["git", "checkout", "-B", branch, f"origin/{branch}"], cwd=local_repo_dir, timeout=90)
+
+
+def _self_heal_repo(local_repo_dir: str, branch: str | None):
+    _cleanup_git_lock_files(local_repo_dir)
+    try:
+        _run_git(["git", "reset", "--hard", "HEAD"], cwd=local_repo_dir, timeout=120)
+    except Exception:
+        pass
+    try:
+        _run_git(["git", "clean", "-fd"], cwd=local_repo_dir, timeout=120)
+    except Exception:
+        pass
+    try:
+        _run_git(["git", "gc", "--prune=now"], cwd=local_repo_dir, timeout=180)
+    except Exception:
+        pass
+    try:
+        _run_git(["git", "fetch", "--all", "--prune"], cwd=local_repo_dir, timeout=300)
+    except Exception:
+        pass
+    _ensure_branch_checked_out(local_repo_dir, branch)
+
+
+def _sync_existing_repo(local_repo_dir: str, remote_url: str, branch: str | None):
+    attempt_error = None
+    for attempt in range(2):
+        try:
+            _cleanup_git_lock_files(local_repo_dir)
+            _run_git(["git", "remote", "set-url", "origin", remote_url], cwd=local_repo_dir, timeout=60)
+            _run_git(["git", "fetch", "--all", "--prune"], cwd=local_repo_dir, timeout=300)
+            _ensure_branch_checked_out(local_repo_dir, branch)
+            if branch:
+                _run_git(["git", "pull", "--no-rebase", "origin", branch], cwd=local_repo_dir, timeout=300)
+            else:
+                _run_git(["git", "pull", "--no-rebase", "origin"], cwd=local_repo_dir, timeout=300)
+            return
+        except Exception as exc:
+            attempt_error = exc
+            if attempt == 0:
+                _self_heal_repo(local_repo_dir, branch)
+                continue
+            raise
+    if attempt_error:
+        raise attempt_error
+
+
 def _sync_repo(local_repo_dir: str, remote_url: str, branch: str | None):
     git_dir = os.path.join(local_repo_dir, ".git")
     if not os.path.isdir(git_dir):
@@ -97,16 +172,7 @@ def _sync_repo(local_repo_dir: str, remote_url: str, branch: str | None):
         _run_git(clone_cmd, timeout=600)
         return
 
-    _run_git(["git", "remote", "set-url", "origin", remote_url], cwd=local_repo_dir, timeout=60)
-    _run_git(["git", "fetch", "--all", "--prune"], cwd=local_repo_dir, timeout=300)
-    if branch:
-        try:
-            _run_git(["git", "checkout", branch], cwd=local_repo_dir, timeout=60)
-        except Exception:
-            _run_git(["git", "checkout", "-B", branch, f"origin/{branch}"], cwd=local_repo_dir, timeout=60)
-        _run_git(["git", "pull", "--no-rebase", "origin", branch], cwd=local_repo_dir, timeout=300)
-    else:
-        _run_git(["git", "pull", "--no-rebase"], cwd=local_repo_dir, timeout=300)
+    _sync_existing_repo(local_repo_dir, remote_url, branch)
 
 
 def _collect_commits(*, repo_dir, branch, limit, path_regex, log_filter_regex, commit_filter):
@@ -197,4 +263,3 @@ def _collect_commits(*, repo_dir, branch, limit, path_regex, log_filter_regex, c
         )
 
     return commits
-

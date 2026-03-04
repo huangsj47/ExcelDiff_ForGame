@@ -69,7 +69,95 @@
         padding: 0.25rem 0.5rem;
         font-size: 0.8rem;
         border-radius: 6px;
-        border: none;
+        border-width: 1px !important;
+        font-weight: 600;
+        transition: all 0.18s ease;
+    }
+    .action-btn.btn-outline-success {
+        color: #166534 !important;
+        background: #f0fdf4 !important;
+        border-color: #86efac !important;
+    }
+    .action-btn.btn-outline-success:hover,
+    .action-btn.btn-outline-success:focus {
+        color: #14532d !important;
+        background: #dcfce7 !important;
+        border-color: #4ade80 !important;
+    }
+    .action-btn.btn-outline-danger {
+        color: #b91c1c !important;
+        background: #fff1f2 !important;
+        border-color: #fda4af !important;
+    }
+    .action-btn.btn-outline-danger:hover,
+    .action-btn.btn-outline-danger:focus {
+        color: #991b1b !important;
+        background: #ffe4e6 !important;
+        border-color: #fb7185 !important;
+    }
+    .action-btn.btn-outline-primary {
+        color: #1d4ed8 !important;
+        background: #eff6ff !important;
+        border-color: #93c5fd !important;
+    }
+    .action-btn.btn-outline-primary:hover,
+    .action-btn.btn-outline-primary:focus {
+        color: #1e40af !important;
+        background: #dbeafe !important;
+        border-color: #60a5fa !important;
+    }
+    .action-btn.btn-outline-warning {
+        color: #854d0e !important;
+        background: #fffbeb !important;
+        border-color: #fcd34d !important;
+    }
+    .action-btn.btn-outline-warning:hover,
+    .action-btn.btn-outline-warning:focus {
+        color: #713f12 !important;
+        background: #fef3c7 !important;
+        border-color: #fbbf24 !important;
+    }
+    .action-btn.btn-outline-secondary {
+        color: #334155 !important;
+        background: #f8fafc !important;
+        border-color: #cbd5e1 !important;
+    }
+    .action-btn.btn-outline-secondary:hover,
+    .action-btn.btn-outline-secondary:focus {
+        color: #1f2937 !important;
+        background: #e2e8f0 !important;
+        border-color: #94a3b8 !important;
+    }
+    .action-btn.dropdown-toggle::after {
+        margin-left: 0.35rem;
+    }
+
+    .reset-password-modal .modal-content {
+        border: 1px solid #dbe3ee;
+        border-radius: 12px;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+    }
+    .reset-password-modal .modal-header {
+        border-bottom: 1px solid #e9eef5;
+        background: #f8fbff;
+    }
+    .reset-password-modal .modal-title {
+        font-size: 1rem;
+        font-weight: 700;
+        color: #1e3a8a;
+    }
+    .reset-password-modal .form-label {
+        font-size: 0.84rem;
+        font-weight: 600;
+        color: #334155;
+    }
+    .reset-password-modal .form-text {
+        font-size: 0.78rem;
+        color: #64748b;
+    }
+    .password-toggle-btn {
+        border-color: #cbd5e1;
+        color: #475569;
     }
 
     .pending-item {
@@ -144,13 +232,13 @@
 
 <!-- Pending Requests -->
 {% if pending_join_requests or pending_create_requests %}
-<div class="section-card card">
+<div class="section-card card" id="pendingRequestsSection">
     <div class="card-header d-flex align-items-center">
         <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16" class="me-2 text-warning">
             <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16Zm.93-9.412-1 4.705c-.07.34.029.533.304.533.194 0 .487-.07.686-.246l-.088.416c-.287.346-.92.598-1.465.598-.703 0-1.002-.422-.808-1.319l.738-3.468c.064-.293.006-.399-.287-.399l-.254.146.063-.336 1.564-.694h.523ZM8 5.5a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/>
         </svg>
         待审批申请
-        <span class="badge bg-warning text-dark ms-2">{{ (pending_join_requests|length) + (pending_create_requests|length) }}</span>
+        <span class="badge bg-warning text-dark ms-2" id="pendingTotalBadge">{{ (pending_join_requests|length) + (pending_create_requests|length) }}</span>
     </div>
     <div class="card-body">
         {% for req in pending_join_requests %}
@@ -264,7 +352,7 @@
                                 <button class="btn btn-sm btn-outline-warning action-btn" onclick="toggleActive({{ user.id }})" title="{{ '禁用' if user.is_active else '启用' }}">
                                     {{ '禁用' if user.is_active else '启用' }}
                                 </button>
-                                <button class="btn btn-sm btn-outline-secondary action-btn" onclick="resetPassword({{ user.id }}, '{{ user.username }}')" title="重置密码">
+                                <button class="btn btn-sm btn-outline-secondary action-btn" onclick='openResetPasswordModal({{ user.id }}, {{ user.username|tojson }})' title="重置密码">
                                     重置密码
                                 </button>
                             </div>
@@ -284,11 +372,67 @@
         {% endif %}
     </div>
 </div>
+
+<!-- 重置密码弹窗 -->
+<div class="modal fade reset-password-modal" id="resetPasswordModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-key me-2"></i>重置用户密码
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <form id="resetPasswordForm" onsubmit="submitResetPassword(event)">
+                <div class="modal-body">
+                    <div class="alert alert-light border mb-3 py-2">
+                        <small>目标用户：<strong id="resetPwdTargetUser">-</strong></small>
+                    </div>
+                    <div class="mb-3">
+                        <label for="resetPwdInput" class="form-label">新密码</label>
+                        <div class="input-group">
+                            <input id="resetPwdInput"
+                                   type="password"
+                                   class="form-control"
+                                   minlength="6"
+                                   autocomplete="new-password"
+                                   required>
+                            <button class="btn btn-outline-secondary password-toggle-btn"
+                                    type="button"
+                                    onclick="toggleResetPasswordVisibility()"
+                                    title="显示/隐藏密码">
+                                <i class="fas fa-eye" id="resetPwdToggleIcon"></i>
+                            </button>
+                        </div>
+                        <div class="form-text">密码至少 6 位，输入默认不可见。</div>
+                    </div>
+                    <div class="mb-1">
+                        <label for="resetPwdConfirmInput" class="form-label">确认新密码</label>
+                        <input id="resetPwdConfirmInput"
+                               type="password"
+                               class="form-control"
+                               minlength="6"
+                               autocomplete="new-password"
+                               required>
+                    </div>
+                    <div id="resetPwdError" class="text-danger small mt-2 d-none"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="submit" class="btn btn-primary" id="resetPwdSubmitBtn">
+                        <i class="fas fa-check me-1"></i>确认重置
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const csrfToken = "{{ csrf_token() }}";
+let resetPwdTargetUserId = null;
 
 function apiCall(url, method, body) {
     return fetch(url, {
@@ -318,14 +462,86 @@ function toggleActive(userId) {
         });
 }
 
-function resetPassword(userId, username) {
-    const newPwd = prompt(`请输入用户 "${username}" 的新密码（至少6位）：`);
-    if (!newPwd) return;
-    if (newPwd.length < 6) { alert('密码至少6位'); return; }
-    apiCall(`/auth/api/users/${userId}/reset-password`, 'POST', { password: newPwd })
+function openResetPasswordModal(userId, username) {
+    resetPwdTargetUserId = userId;
+    document.getElementById('resetPwdTargetUser').textContent = username || '-';
+    document.getElementById('resetPwdInput').value = '';
+    document.getElementById('resetPwdConfirmInput').value = '';
+    document.getElementById('resetPwdInput').type = 'password';
+    document.getElementById('resetPwdConfirmInput').type = 'password';
+    document.getElementById('resetPwdToggleIcon').className = 'fas fa-eye';
+    hideResetPasswordError();
+
+    const modalEl = document.getElementById('resetPasswordModal');
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    modal.show();
+    setTimeout(() => {
+        document.getElementById('resetPwdInput').focus();
+    }, 150);
+}
+
+function toggleResetPasswordVisibility() {
+    const pwd = document.getElementById('resetPwdInput');
+    const confirm = document.getElementById('resetPwdConfirmInput');
+    const icon = document.getElementById('resetPwdToggleIcon');
+    const showing = pwd.type === 'text';
+
+    pwd.type = showing ? 'password' : 'text';
+    confirm.type = showing ? 'password' : 'text';
+    icon.className = showing ? 'fas fa-eye' : 'fas fa-eye-slash';
+}
+
+function showResetPasswordError(msg) {
+    const err = document.getElementById('resetPwdError');
+    err.textContent = msg;
+    err.classList.remove('d-none');
+}
+
+function hideResetPasswordError() {
+    const err = document.getElementById('resetPwdError');
+    err.textContent = '';
+    err.classList.add('d-none');
+}
+
+function submitResetPassword(event) {
+    event.preventDefault();
+    if (!resetPwdTargetUserId) return;
+
+    const newPwd = document.getElementById('resetPwdInput').value || '';
+    const confirmPwd = document.getElementById('resetPwdConfirmInput').value || '';
+    const submitBtn = document.getElementById('resetPwdSubmitBtn');
+
+    hideResetPasswordError();
+
+    if (newPwd.length < 6) {
+        showResetPasswordError('密码至少 6 位');
+        return;
+    }
+    if (newPwd !== confirmPwd) {
+        showResetPasswordError('两次输入的密码不一致');
+        return;
+    }
+
+    const originalBtnHtml = submitBtn.innerHTML;
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>提交中...';
+
+    apiCall(`/auth/api/users/${resetPwdTargetUserId}/reset-password`, 'POST', { password: newPwd })
         .then(data => {
-            if (data.success) { alert('密码已重置'); }
-            else { alert(data.message || '操作失败'); }
+            if (data.success) {
+                const modalEl = document.getElementById('resetPasswordModal');
+                bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+                alert('密码已重置');
+                return;
+            }
+            showResetPasswordError(data.message || '操作失败');
+        })
+        .catch(() => {
+            showResetPasswordError('网络错误，请重试');
+        })
+        .finally(() => {
+            submitBtn.disabled = false;
+            submitBtn.innerHTML = originalBtnHtml;
         });
 }
 
@@ -335,7 +551,9 @@ function handleJoinRequest(reqId, action) {
     apiCall(`/auth/api/join-requests/${reqId}/handle`, 'POST', { action })
         .then(data => {
             if (data.success) {
-                document.getElementById('join-req-' + reqId).remove();
+                const row = document.getElementById('join-req-' + reqId);
+                if (row) row.remove();
+                refreshPendingCounters();
                 alert(data.message);
             } else { alert(data.message || '操作失败'); }
         });
@@ -347,10 +565,33 @@ function handleCreateRequest(reqId, action) {
     apiCall(`/auth/api/create-requests/${reqId}/handle`, 'POST', { action })
         .then(data => {
             if (data.success) {
-                document.getElementById('create-req-' + reqId).remove();
+                const row = document.getElementById('create-req-' + reqId);
+                if (row) row.remove();
+                refreshPendingCounters();
                 alert(data.message);
             } else { alert(data.message || '操作失败'); }
         });
+}
+
+function refreshPendingCounters() {
+    const pendingSection = document.getElementById('pendingRequestsSection');
+    if (!pendingSection) return;
+
+    const joinCount = document.querySelectorAll('[id^="join-req-"]').length;
+    const createCount = document.querySelectorAll('[id^="create-req-"]').length;
+    const totalCount = joinCount + createCount;
+
+    const statPendingJoin = document.getElementById('statPendingJoin');
+    const statPendingCreate = document.getElementById('statPendingCreate');
+    const pendingTotalBadge = document.getElementById('pendingTotalBadge');
+
+    if (statPendingJoin) statPendingJoin.textContent = String(joinCount);
+    if (statPendingCreate) statPendingCreate.textContent = String(createCount);
+    if (pendingTotalBadge) pendingTotalBadge.textContent = String(totalCount);
+
+    if (totalCount === 0) {
+        pendingSection.remove();
+    }
 }
 
 function filterUsers() {

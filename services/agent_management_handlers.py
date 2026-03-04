@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from flask import jsonify, render_template, request
 
 from services.model_loader import get_runtime_models
+from services.repository_sync_status import clear_sync_error as clear_repository_sync_error
+from services.repository_sync_status import record_sync_error as record_repository_sync_error
 from utils.request_security import require_admin
 
 
@@ -798,10 +800,11 @@ def agent_claim_task():
 
 def agent_report_task_result(task_id):
     """Agent 回传任务结果。"""
-    db, AgentTask, BackgroundTask, log_print = get_runtime_models(
+    db, AgentTask, BackgroundTask, Repository, log_print = get_runtime_models(
         "db",
         "AgentTask",
         "BackgroundTask",
+        "Repository",
         "log_print",
     )
     try:
@@ -844,6 +847,27 @@ def agent_report_task_result(task_id):
             task.result_summary = None if effective_result_summary is None else str(effective_result_summary)
         if status == "failed":
             task.error_message = None if error_message is None else str(error_message)
+
+        repository = Repository.query.get(task.repository_id) if task.repository_id else None
+        if repository:
+            if status == "failed":
+                sync_error_message = f"Agent任务失败({task.task_type}): {task.error_message or '未知错误'}"
+                record_repository_sync_error(
+                    db.session,
+                    repository,
+                    sync_error_message,
+                    log_func=log_print,
+                    log_type="AGENT",
+                    commit=False,
+                )
+            elif status == "completed" and task.task_type == "auto_sync":
+                clear_repository_sync_error(
+                    db.session,
+                    repository,
+                    log_func=log_print,
+                    log_type="AGENT",
+                    commit=False,
+                )
 
         if task.source_task_id:
             src_task = BackgroundTask.query.get(task.source_task_id)

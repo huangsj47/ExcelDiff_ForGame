@@ -117,48 +117,100 @@ class SVNService:
 
         # 如果所有编码都失败，使用错误忽略模式
         return byte_output.decode('utf-8', errors='ignore')
+
+    def _build_auth_args(self):
+        """构建SVN认证与非交互参数。"""
+        args = []
+        username = self.repository_username or getattr(self.repository, 'username', None)
+        password = self.repository_password or getattr(self.repository, 'password', None)
+        if username and password:
+            args.extend(['--username', username, '--password', password])
+        args.extend(['--non-interactive', '--trust-server-cert'])
+        return args
+
+    def _run_svn_cleanup(self):
+        from utils.safe_print import log_print
+
+        cleanup_cmd = [self.svn_executable, 'cleanup', self.local_path] + self._build_auth_args()
+        try:
+            result = subprocess.run(cleanup_cmd, capture_output=True, text=False, timeout=120)
+            stderr_text = self._decode_subprocess_output(result.stderr)
+            if result.returncode == 0:
+                log_print(f"✅ SVN cleanup 成功: {self.local_path}", 'SVN')
+                return True, "cleanup success"
+            return False, f"cleanup failed: {stderr_text}"
+        except Exception as exc:
+            return False, f"cleanup exception: {exc}"
+
+    def _run_svn_revert(self):
+        revert_cmd = [self.svn_executable, 'revert', '-R', self.local_path] + self._build_auth_args()
+        try:
+            result = subprocess.run(revert_cmd, capture_output=True, text=False, timeout=180)
+            stderr_text = self._decode_subprocess_output(result.stderr)
+            if result.returncode == 0:
+                return True, "revert success"
+            return False, f"revert failed: {stderr_text}"
+        except Exception as exc:
+            return False, f"revert exception: {exc}"
+
+    @staticmethod
+    def _is_lock_related_error(stderr_text):
+        text = str(stderr_text or "").lower()
+        lock_keywords = [
+            "e155004",
+            "working copy locked",
+            "is locked",
+            "run 'svn cleanup'",
+            "cleanup",
+        ]
+        return any(keyword in text for keyword in lock_keywords)
+
+    def _run_svn_update_once(self):
+        cmd = [self.svn_executable, 'update', self.local_path] + self._build_auth_args()
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=False, cwd=self.local_path, timeout=300)
+        except subprocess.TimeoutExpired:
+            return False, "SVN更新超时"
+
+        stdout_text = self._decode_subprocess_output(result.stdout)
+        stderr_text = self._decode_subprocess_output(result.stderr)
+        if result.returncode == 0:
+            return True, stdout_text
+        return False, stderr_text
         
     def checkout_or_update_repository(self):
         """检出或更新本地SVN仓库"""
         try:
             if os.path.exists(self.local_path):
                 # 如果本地仓库已存在，则更新
-                cmd = [self.svn_executable, 'update', self.local_path]
-                if self.repository.username and self.repository.password:
-                    cmd.extend(['--username', self.repository.username, '--password', self.repository.password])
-
-                # 添加非交互模式参数
-                cmd.extend(['--non-interactive', '--trust-server-cert'])
-
                 from utils.safe_print import log_print
-                log_print(f"执行SVN update命令: {' '.join(cmd[:3])} [认证信息已隐藏]", 'SVN')
+                cleanup_ok, cleanup_msg = self._run_svn_cleanup()
+                if not cleanup_ok:
+                    log_print(f"⚠️ SVN cleanup 预处理失败，继续尝试update: {cleanup_msg}", 'SVN', force=True)
 
-                # 使用二进制模式避免编码问题，添加超时
-                try:
-                    result = subprocess.run(cmd, capture_output=True, text=False, cwd=self.local_path, timeout=300)
-                    log_print(f"SVN update命令完成，返回码: {result.returncode}", 'SVN')
-                except subprocess.TimeoutExpired:
-                    log_print("SVN update命令超时（5分钟）", 'SVN', force=True)
-                    return False, "SVN更新超时"
-                stdout_text = self._decode_subprocess_output(result.stdout)
-                stderr_text = self._decode_subprocess_output(result.stderr)
-
-                if result.returncode == 0:
-                    from utils.safe_print import log_print
+                log_print(f"执行SVN update命令: {self.svn_executable} update {self.local_path}", 'SVN')
+                success, output = self._run_svn_update_once()
+                if success:
                     log_print(f"SVN仓库已更新: {self.local_path}", 'SVN')
                     return True, "SVN仓库更新成功"
-                else:
-                    return False, f"SVN更新失败: {stderr_text}"
+
+                if self._is_lock_related_error(output):
+                    log_print("检测到SVN工作副本锁冲突，执行cleanup+revert后重试", 'SVN', force=True)
+                    self._run_svn_cleanup()
+                    self._run_svn_revert()
+                    retry_success, retry_output = self._run_svn_update_once()
+                    if retry_success:
+                        log_print(f"SVN仓库重试更新成功: {self.local_path}", 'SVN')
+                        return True, "SVN仓库更新成功（cleanup重试）"
+                    return False, f"SVN更新失败(重试后): {retry_output}"
+
+                return False, f"SVN更新失败: {output}"
             else:
                 # 检出新仓库
                 os.makedirs(os.path.dirname(self.local_path), exist_ok=True)
 
-                cmd = [self.svn_executable, 'checkout', self.repository.url, self.local_path]
-                if self.repository.username and self.repository.password:
-                    cmd.extend(['--username', self.repository.username, '--password', self.repository.password])
-
-                # 添加非交互模式参数
-                cmd.extend(['--non-interactive', '--trust-server-cert'])
+                cmd = [self.svn_executable, 'checkout', self.repository_url, self.local_path]
+                cmd.extend(self._build_auth_args())
 
                 from utils.safe_print import log_print
                 log_print(f"执行SVN checkout命令: {' '.join(cmd[:3])} [认证信息已隐藏] {self.local_path}", 'SVN')

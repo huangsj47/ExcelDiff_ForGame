@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 
 from utils.logger import log_print
 from utils.db_retry import db_retry
+from services.repository_sync_status import clear_sync_error as clear_repository_sync_error
+from services.repository_sync_status import record_sync_error as record_repository_sync_error
 
 # ---------------------------------------------------------------------------
 #  全局状态（由 app.py 通过 configure_task_worker 注入）
@@ -364,6 +366,12 @@ def _reset_repository_to_head(git_service, repository):
     """超时或失败后重置仓库到 HEAD 状态"""
     try:
         log_print(f"🔄 [RESET] 正在重置仓库 {repository.name} 到 HEAD 状态...", 'SYNC', force=True)
+        cleanup_locks = getattr(git_service, "_cleanup_git_lock_files", None)
+        if callable(cleanup_locks):
+            removed_locks = cleanup_locks()
+            if removed_locks:
+                log_print(f"🧹 [RESET] 已清理Git锁文件: {', '.join(removed_locks)}", 'SYNC')
+
         reset_result = git_service._run_git_command(['git', 'reset', '--hard', 'HEAD'], timeout=60)
         if reset_result and reset_result.returncode == 0:
             log_print(f"✅ [RESET] git reset --hard HEAD 成功", 'SYNC')
@@ -374,39 +382,37 @@ def _reset_repository_to_head(git_service, repository):
             log_print(f"✅ [RESET] git clean -fd 成功", 'SYNC')
         else:
             log_print(f"⚠️ [RESET] git clean -fd 失败", 'SYNC', force=True)
+
+        gc_result = git_service._run_git_command(['git', 'gc', '--prune=now'], timeout=120)
+        if gc_result and gc_result.returncode == 0:
+            log_print(f"✅ [RESET] git gc --prune=now 成功", 'SYNC')
+        else:
+            log_print(f"⚠️ [RESET] git gc --prune=now 失败", 'SYNC', force=True)
     except Exception as reset_err:
         log_print(f"❌ [RESET] 重置仓库异常: {reset_err}", 'SYNC', force=True)
 
 
 def _record_sync_error(repository, error_message):
     """将同步错误信息记录到仓库模型"""
-    try:
-        repository.last_sync_error = str(error_message)[:2000]  # 限制长度
-        repository.last_sync_error_time = datetime.now(timezone.utc)
-        _db.session.commit()
-        log_print(f"📝 已记录仓库 {repository.name} 的同步错误", 'SYNC')
-    except Exception as db_err:
-        log_print(f"❌ 记录同步错误到数据库失败: {db_err}", 'SYNC', force=True)
-        try:
-            _db.session.rollback()
-        except Exception:
-            pass
+    record_repository_sync_error(
+        _db.session,
+        repository,
+        error_message,
+        log_func=log_print,
+        log_type="SYNC",
+        commit=True,
+    )
 
 
 def _clear_sync_error(repository):
     """同步成功后清除仓库的错误信息"""
-    if repository.last_sync_error:
-        try:
-            repository.last_sync_error = None
-            repository.last_sync_error_time = None
-            _db.session.commit()
-            log_print(f"✅ 已清除仓库 {repository.name} 的同步错误状态", 'SYNC')
-        except Exception as db_err:
-            log_print(f"⚠️ 清除同步错误状态失败: {db_err}", 'SYNC', force=True)
-            try:
-                _db.session.rollback()
-            except Exception:
-                pass
+    clear_repository_sync_error(
+        _db.session,
+        repository,
+        log_func=log_print,
+        log_type="SYNC",
+        commit=True,
+    )
 
 
 def _handle_auto_sync_task(task):
@@ -588,7 +594,19 @@ def _handle_auto_sync_task_inner(task):
                     log_print(f"✅ 自动数据分析完成: {repository.name}, 添加了 {commits_added} 个提交记录，{excel_tasks_added} 个Excel缓存任务", 'SYNC')
                 elif repository.type == 'svn':
                     svn_service = _get_svn_service(repository)
+                    success, message = svn_service.checkout_or_update_repository()
+                    if not success:
+                        error_msg = f"SVN 同步失败: {message}"
+                        log_print(f"❌ [BACKGROUND_SYNC] {error_msg}", 'SYNC', force=True)
+                        _record_sync_error(repository, error_msg)
+                        if 'task_id' in task:
+                            try:
+                                update_task_status_with_retry(task['task_id'], 'failed', error_msg)
+                            except Exception:
+                                pass
+                        return
                     commits_added = svn_service.sync_repository_commits(_db, _Commit)
+                    _clear_sync_error(repository)
                     log_print(f"✅ 自动数据分析完成: {repository.name}, 添加了 {commits_added} 个提交记录", 'SYNC')
                 else:
                     raise Exception(f"不支持的仓库类型: {repository.type}")
@@ -601,6 +619,13 @@ def _handle_auto_sync_task_inner(task):
                     log_print(f"更新任务完成状态失败: {update_error}", 'TASK', force=True)
         except Exception as e:
             log_print(f"❌ 自动数据分析失败: {e}", 'SYNC', force=True)
+            try:
+                repository_id = task.get('repository_id')
+                repository = _db.session.get(_Repository, repository_id) if repository_id else None
+                if repository:
+                    _record_sync_error(repository, f"自动同步失败: {e}")
+            except Exception:
+                pass
             if 'task_id' in task:
                 db_task = _db.session.get(_BackgroundTask, task['task_id'])
                 if db_task:
