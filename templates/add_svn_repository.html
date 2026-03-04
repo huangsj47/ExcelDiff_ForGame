@@ -64,6 +64,10 @@
             <form method="POST" action="{% if is_edit %}{{ url_for('update_repository', repository_id=repository.id) }}{% else %}{{ url_for('create_svn_repository') }}{% endif %}">
                 <input type="hidden" name="project_id" value="{{ project.id }}">
                 <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                {% if is_edit %}
+                <input type="hidden" id="original_current_version" value="{{ repository.current_version or '' }}">
+                <input type="hidden" id="confirm_branch_switch" name="confirm_branch_switch" value="0">
+                {% endif %}
 
                 <!-- 第一组：基本信息 -->
                 <div class="section-title">
@@ -77,13 +81,18 @@
                 <div class="row g-3 mb-3">
                     <div class="col-md-6">
                         <label for="url" class="form-label"><span class="text-danger">*</span> SVN URL</label>
-                        <input type="text" class="form-control" id="url" name="url" placeholder="https://svn-h12.gz.netease.com/svn" value="{% if is_edit %}{{ repository.url }}{% endif %}" required>
+                        <input type="text" class="form-control" id="url" name="url" placeholder="https://svn-h12.gz.netease.com/svn" value="{% if is_edit %}{{ repository.url }}{% endif %}" {% if is_edit %}readonly{% endif %} required>
                     </div>
                     <div class="col-md-6">
                         <label for="root_directory" class="form-label"><span class="text-danger">*</span> SVN 仓库根目录</label>
-                        <input type="text" class="form-control" id="root_directory" name="root_directory" placeholder="svn info 查看 Repository Root" value="{% if is_edit %}{{ repository.root_directory }}{% endif %}" required>
+                        <input type="text" class="form-control" id="root_directory" name="root_directory" placeholder="svn info 查看 Repository Root" value="{% if is_edit %}{{ repository.root_directory }}{% endif %}" {% if is_edit %}readonly{% endif %} required>
                     </div>
                 </div>
+                {% if is_edit %}
+                <div class="mb-3">
+                    <small class="text-muted">已锁定基础地址信息（SVN URL / SVN 仓库根目录）。如需修改，请删除仓库后重新创建并执行 svn co，避免异常。</small>
+                </div>
+                {% endif %}
 
                 <!-- 第二组：认证信息 -->
                 <div class="section-title mt-4">
@@ -111,6 +120,9 @@
                     <div class="col-md-6">
                         <label for="current_version" class="form-label"><span class="text-danger">*</span> 当前版本号</label>
                         <input type="text" class="form-control" id="current_version" name="current_version" placeholder="SVN 当前版本号，可略低于最新" value="{% if is_edit %}{{ repository.current_version }}{% endif %}" required>
+                        {% if is_edit %}
+                        <small class="text-muted">修改版本号会触发保守清空并重建分析（提交记录/缓存/确认状态）。</small>
+                        {% endif %}
                     </div>
                     <div class="col-md-6">
                         <label for="resource_type" class="form-label"><span class="text-danger">*</span> 资源类型</label>
@@ -228,6 +240,52 @@ function toggleTableConfig() {
 // 页面加载时检查资源类型
 document.addEventListener('DOMContentLoaded', function() {
     toggleTableConfig();
+    setupSvnVersionSwitchConfirm();
 });
+
+function setupSvnVersionSwitchConfirm() {
+    const isEdit = {{ 'true' if is_edit else 'false' }};
+    if (!isEdit) {
+        return;
+    }
+
+    const form = document.querySelector('form');
+    const currentVersionInput = document.getElementById('current_version');
+    const originalVersionInput = document.getElementById('original_current_version');
+    const confirmSwitchInput = document.getElementById('confirm_branch_switch');
+    const hasWeeklyConfig = {{ 'true' if is_edit and (repository.weekly_version_configs|length > 0) else 'false' }};
+
+    if (!form || !currentVersionInput || !originalVersionInput || !confirmSwitchInput) {
+        return;
+    }
+
+    form.addEventListener('submit', function(event) {
+        const currentVersion = (currentVersionInput.value || '').trim();
+        const originalVersion = (originalVersionInput.value || '').trim();
+        if (currentVersion === originalVersion) {
+            confirmSwitchInput.value = '0';
+            return;
+        }
+
+        if (!window.confirm('你正在修改 SVN 仓库版本号。这是危险操作，可能导致旧版本数据与新版本不一致。确认继续吗？')) {
+            event.preventDefault();
+            return;
+        }
+
+        if (!window.confirm('切换版本号后，系统将清空当前仓库的提交记录、Diff/HTML缓存、周版本缓存与待处理任务，并重新分析新版本。确认执行吗？')) {
+            event.preventDefault();
+            return;
+        }
+
+        if (hasWeeklyConfig) {
+            if (!window.confirm('当前仓库已配置周版本。切换版本号会影响现有周版本数据与确认状态，需等待新版本分析完成后重建。确认切换吗？')) {
+                event.preventDefault();
+                return;
+            }
+        }
+
+        confirmSwitchInput.value = '1';
+    });
+}
 </script>
 {% endblock %}

@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session
 from flask_cors import CORS
-from sqlalchemy import Index, func, case, inspect
+from sqlalchemy import Index, func, case, inspect, or_
 
 from models import (
     db,
@@ -772,6 +772,61 @@ def commit_list(repository_id):
     page = max(1, request.args.get('page', 1, type=int) or 1)
     requested_per_page = request.args.get('per_page', 50, type=int) or 50
     per_page = min(max(requested_per_page, 1), 200)  # 限制每页大小，避免大页拖垮查询
+
+    def _parse_confirm_usernames(raw_value):
+        if not raw_value:
+            return []
+
+        usernames = [
+            item.strip() for item in re.split(r"[,，;；|\n\r]+", str(raw_value)) if item and item.strip()
+        ]
+        unique_usernames = []
+        for username in usernames:
+            if username not in unique_usernames:
+                unique_usernames.append(username)
+        return unique_usernames
+
+    def _extract_author_lookup_keys(raw_author):
+        """提取可用于匹配账号系统的作者标识（用户名 / 邮箱前缀）。"""
+        text = str(raw_author or '').strip()
+        if not text:
+            return []
+
+        keys = []
+        lower_text = text.lower()
+
+        # 场景1: commit.author 直接是用户名
+        if all(symbol not in lower_text for symbol in ('@', '<', '>', ' ')):
+            keys.append(lower_text)
+
+        # 场景2: commit.author 直接是邮箱
+        if '@' in lower_text and '<' not in lower_text and '>' not in lower_text:
+            email_prefix = lower_text.split('@', 1)[0].strip()
+            if email_prefix and email_prefix not in keys:
+                keys.append(email_prefix)
+
+        # 场景3: commit.author 包含邮箱，如 "name <xxx@yy.com>"
+        for email in re.findall(r'([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})', text):
+            email_prefix = email.lower().split('@', 1)[0].strip()
+            if email_prefix and email_prefix not in keys:
+                keys.append(email_prefix)
+
+        return keys
+
+    def _get_auth_user_model():
+        try:
+            from auth import get_auth_backend
+
+            if get_auth_backend() == "qkit":
+                from qkit_auth.models import QkitAuthUser as _UserModel
+            else:
+                from auth.models import AuthUser as _UserModel
+            return _UserModel
+        except Exception as model_error:
+            log_print(f"加载账号模型失败，回退原始作者显示: {model_error}", 'APP')
+            return None
+
+    _UserModel = _get_auth_user_model()
     # 构建查询
     query = Commit.query.filter_by(repository_id=repository_id)
     # 应用仓库配置的起始日期过滤
@@ -798,7 +853,39 @@ def commit_list(repository_id):
     elif base_count > 0:
         repository_status['is_data_ready'] = True
     if filters['author']:
-        query = query.filter(Commit.author.contains(filters['author']))
+        from sqlalchemy import or_
+
+        author_keyword = str(filters['author']).strip()
+        author_keyword_lower = author_keyword.lower()
+        author_conditions = [func.lower(Commit.author).like(f"%{author_keyword_lower}%")]
+
+        # 允许按姓名筛选：如果输入命中 display_name / username / email，则回查到用户名或邮箱前缀再匹配 commit.author
+        if _UserModel is not None and author_keyword:
+            matched_author_tokens = set()
+            try:
+                user_like = f"%{author_keyword}%"
+                matched_users = _UserModel.query.filter(
+                    or_(
+                        _UserModel.username.ilike(user_like),
+                        _UserModel.display_name.ilike(user_like),
+                        _UserModel.email.ilike(user_like),
+                    )
+                ).all()
+
+                for user in matched_users:
+                    username = (getattr(user, 'username', '') or '').strip().lower()
+                    if username:
+                        matched_author_tokens.add(username)
+                    email = (getattr(user, 'email', '') or '').strip().lower()
+                    if email and '@' in email:
+                        matched_author_tokens.add(email.split('@', 1)[0])
+
+                for token in matched_author_tokens:
+                    author_conditions.append(func.lower(Commit.author).like(f"%{token}%"))
+            except Exception as filter_error:
+                log_print(f"按姓名筛选作者失败，回退原始筛选: {filter_error}", 'APP')
+
+        query = query.filter(or_(*author_conditions))
     if filters['path']:
         query = query.filter(Commit.path.contains(filters['path']))
     if filters['version']:
@@ -816,45 +903,66 @@ def commit_list(repository_id):
     )
     commits = pagination.items
 
-    def _parse_confirm_usernames(raw_value):
-        if not raw_value:
-            return []
-
-        usernames = [
-            item.strip() for item in re.split(r"[,，;；|\n\r]+", str(raw_value)) if item and item.strip()
-        ]
-        unique_usernames = []
-        for username in usernames:
-            if username not in unique_usernames:
-                unique_usernames.append(username)
-        return unique_usernames
-
-    # 批量查询确认用户姓名（display_name），避免模板中逐条查询
+    # 批量查询确认用户姓名 + 提交作者姓名（display_name）
     all_confirm_usernames = set()
+    all_author_keys = set()
     for commit in commits:
         all_confirm_usernames.update(_parse_confirm_usernames(commit.status_changed_by))
+        all_author_keys.update(_extract_author_lookup_keys(commit.author))
 
     username_to_display_name = {}
-    if all_confirm_usernames:
+    username_to_display_name_lower = {}
+    email_prefix_to_display_name = {}
+    if _UserModel is not None and (all_confirm_usernames or all_author_keys):
         try:
-            from auth import get_auth_backend
+            from sqlalchemy import or_
 
-            if get_auth_backend() == "qkit":
-                from qkit_auth.models import QkitAuthUser as _UserModel
-            else:
-                from auth.models import AuthUser as _UserModel
+            username_conditions = []
+            if all_confirm_usernames:
+                username_conditions.append(func.lower(_UserModel.username).in_([u.lower() for u in all_confirm_usernames]))
+            if all_author_keys:
+                username_conditions.append(func.lower(_UserModel.username).in_(list(all_author_keys)))
+                username_conditions.extend(
+                    func.lower(_UserModel.email).like(f"{author_key}@%")
+                    for author_key in all_author_keys
+                    if author_key
+                )
 
-            users = _UserModel.query.filter(_UserModel.username.in_(list(all_confirm_usernames))).all()
-            username_to_display_name = {
-                user.username: (user.display_name or user.username) for user in users
-            }
+            users = _UserModel.query.filter(or_(*username_conditions)).all() if username_conditions else []
+            for user in users:
+                username = (getattr(user, 'username', '') or '').strip()
+                if not username:
+                    continue
+                display_name = (getattr(user, 'display_name', '') or '').strip() or username
+                username_to_display_name[username] = display_name
+                username_to_display_name_lower[username.lower()] = display_name
+
+                email = (getattr(user, 'email', '') or '').strip().lower()
+                if email and '@' in email:
+                    email_prefix_to_display_name[email.split('@', 1)[0]] = display_name
         except Exception as e:
-            log_print(f"加载确认用户姓名映射失败，回退为用户名显示: {e}", 'APP')
+            log_print(f"加载作者/确认用户姓名映射失败，回退为原始显示: {e}", 'APP')
+
+    def _resolve_author_display(raw_author):
+        text = str(raw_author or '').strip()
+        if not text:
+            return ''
+
+        for author_key in _extract_author_lookup_keys(text):
+            mapped_name = (
+                username_to_display_name_lower.get(author_key)
+                or email_prefix_to_display_name.get(author_key)
+            )
+            if mapped_name:
+                return mapped_name
+        return text
 
     for commit in commits:
         commit_confirm_users = _parse_confirm_usernames(commit.status_changed_by)
         commit_confirm_display_names = [
-            username_to_display_name.get(username, username) for username in commit_confirm_users
+            username_to_display_name.get(username)
+            or username_to_display_name_lower.get(username.lower(), username)
+            for username in commit_confirm_users
         ]
 
         confirm_users_display = ''
@@ -865,6 +973,7 @@ def commit_list(repository_id):
 
         commit.confirm_users_display = confirm_users_display
         commit.confirm_users_title = confirm_users_title
+        commit.author_display = _resolve_author_display(commit.author)
 
     # 调试信息
     log_print(f"=== 分页调试信息 ===", 'APP')
@@ -2010,6 +2119,93 @@ def edit_repository(repository_id):
                              project=project, 
                              repository=repository, 
                              is_edit=True)
+
+
+def _clear_repository_state_for_switch(repository, switch_type, old_value, new_value):
+    """分支/版本切换后的保守清空流程（不改表结构）。"""
+    repository_id = repository.id
+    pending_statuses = ['pending', 'processing']
+
+    weekly_configs = WeeklyVersionConfig.query.filter_by(repository_id=repository_id).all()
+    config_ids = [config.id for config in weekly_configs]
+    config_id_strs = [str(config_id) for config_id in config_ids]
+
+    commits_deleted = Commit.query.filter_by(repository_id=repository_id).delete(synchronize_session=False)
+    diff_deleted = DiffCache.query.filter_by(repository_id=repository_id).delete(synchronize_session=False)
+    html_deleted = ExcelHtmlCache.query.filter_by(repository_id=repository_id).delete(synchronize_session=False)
+    merged_deleted = MergedDiffCache.query.filter_by(repository_id=repository_id).delete(synchronize_session=False)
+
+    weekly_diff_query = WeeklyVersionDiffCache.query.filter_by(repository_id=repository_id)
+    weekly_excel_query = WeeklyVersionExcelCache.query.filter_by(repository_id=repository_id)
+    if config_ids:
+        weekly_diff_query = WeeklyVersionDiffCache.query.filter(
+            or_(
+                WeeklyVersionDiffCache.repository_id == repository_id,
+                WeeklyVersionDiffCache.config_id.in_(config_ids),
+            )
+        )
+        weekly_excel_query = WeeklyVersionExcelCache.query.filter(
+            or_(
+                WeeklyVersionExcelCache.repository_id == repository_id,
+                WeeklyVersionExcelCache.config_id.in_(config_ids),
+            )
+        )
+
+    weekly_diff_deleted = weekly_diff_query.delete(synchronize_session=False)
+    weekly_excel_deleted = weekly_excel_query.delete(synchronize_session=False)
+
+    repository_task_deleted = BackgroundTask.query.filter(
+        BackgroundTask.task_type.in_(['auto_sync', 'excel_diff']),
+        BackgroundTask.repository_id == repository_id,
+        BackgroundTask.status.in_(pending_statuses),
+    ).delete(synchronize_session=False)
+
+    weekly_sync_task_deleted = 0
+    weekly_excel_task_deleted = 0
+    if config_ids:
+        weekly_sync_task_deleted = BackgroundTask.query.filter(
+            BackgroundTask.task_type == 'weekly_sync',
+            BackgroundTask.commit_id.in_(config_id_strs),
+            BackgroundTask.status.in_(pending_statuses),
+        ).delete(synchronize_session=False)
+        weekly_excel_task_deleted = BackgroundTask.query.filter(
+            BackgroundTask.task_type == 'weekly_excel_cache',
+            BackgroundTask.repository_id.in_(config_ids),
+            BackgroundTask.status.in_(pending_statuses),
+        ).delete(synchronize_session=False)
+
+    repository.last_sync_commit_id = None
+    repository.last_sync_time = None
+    repository.cache_version = None
+    repository.sync_mode = 'full'
+    repository.last_sync_error = None
+    repository.last_sync_error_time = None
+
+    log_print(
+        (
+            f"检测到仓库切换: repo_id={repository_id}, type={switch_type}, "
+            f"from='{old_value}' to='{new_value}'. 清理结果: "
+            f"commits={commits_deleted}, diff={diff_deleted}, html={html_deleted}, merged={merged_deleted}, "
+            f"weekly_diff={weekly_diff_deleted}, weekly_excel={weekly_excel_deleted}, "
+            f"repo_tasks={repository_task_deleted}, weekly_sync_tasks={weekly_sync_task_deleted}, "
+            f"weekly_excel_tasks={weekly_excel_task_deleted}, weekly_configs={len(config_ids)}"
+        ),
+        'APP',
+        force=True,
+    )
+
+    return {
+        'weekly_config_count': len(config_ids),
+        'commits_deleted': commits_deleted,
+        'diff_deleted': diff_deleted,
+        'html_deleted': html_deleted,
+        'merged_deleted': merged_deleted,
+        'weekly_diff_deleted': weekly_diff_deleted,
+        'weekly_excel_deleted': weekly_excel_deleted,
+        'repository_task_deleted': repository_task_deleted,
+        'weekly_sync_task_deleted': weekly_sync_task_deleted,
+        'weekly_excel_task_deleted': weekly_excel_task_deleted,
+    }
 # 更新仓库配置 - 表单提交处理
 
 
@@ -2019,6 +2215,12 @@ def update_repository(repository_id):
     repository = Repository.query.get_or_404(repository_id)
     project_id = repository.project_id
     try:
+        def _field_changed(field_name, current_value):
+            submitted = request.form.get(field_name)
+            if submitted is None:
+                return False
+            return str(submitted).strip() != str(current_value or '').strip()
+
         # 保存旧的仓库名称，用于重命名目录
         old_name = repository.name
         new_name = (request.form.get('name') or '').strip()
@@ -2028,6 +2230,11 @@ def update_repository(repository_id):
 
         # 保存旧的文件类型过滤器，用于检测是否需要重新筛选
         old_file_type_filter = repository.path_regex if repository.type == 'git' else None
+        switch_changed = False
+        switch_type = ''
+        switch_old_value = ''
+        switch_new_value = ''
+        switch_cleanup_summary = None
         # 更新仓库信息
         repository.name = new_name
         repository.category = request.form.get('category')
@@ -2051,12 +2258,26 @@ def update_repository(repository_id):
         repository.tag_selection = request.form.get('tag_selection')
         # 根据仓库类型更新特定字段
         if repository.type == 'git':
-            repository.url = request.form.get('url')
-            repository.server_url = request.form.get('server_url')
+            if _field_changed('url', repository.url) or _field_changed('server_url', repository.server_url):
+                flash('已锁定基础地址信息（GitLab SSH URL / 服务器 URL）。如需修改，请删除仓库后重新创建并执行 clone。', 'error')
+                return redirect(url_for('edit_repository', repository_id=repository_id))
             new_token = (request.form.get('token') or '').strip()
             if new_token:
                 repository.token = new_token
-            repository.branch = request.form.get('branch')
+            new_branch = (request.form.get('branch') or '').strip()
+            if not new_branch:
+                flash('Git 分支不能为空', 'error')
+                return redirect(url_for('edit_repository', repository_id=repository_id))
+            old_branch = str(repository.branch or '').strip()
+            if new_branch != old_branch:
+                if request.form.get('confirm_branch_switch') != '1':
+                    flash('检测到分支变更，请完成切换风险确认后再提交。', 'error')
+                    return redirect(url_for('edit_repository', repository_id=repository_id))
+                switch_changed = True
+                switch_type = '分支'
+                switch_old_value = old_branch
+                switch_new_value = new_branch
+            repository.branch = new_branch
             repository.enable_webhook = 'enable_webhook' in request.form
             repository.show_latest_id = 'show_latest_id' in request.form
             repository.table_name_column = request.form.get('table_name_column')
@@ -2074,16 +2295,75 @@ def update_repository(repository_id):
                         return redirect(url_for('edit_repository', repository_id=repository_id))
 
         elif repository.type == 'svn':
-            repository.url = request.form.get('url')
+            if _field_changed('url', repository.url) or _field_changed('root_directory', repository.root_directory):
+                flash('已锁定基础地址信息（SVN URL / SVN 仓库根目录）。如需修改，请删除仓库后重新创建并执行 svn co。', 'error')
+                return redirect(url_for('edit_repository', repository_id=repository_id))
             repository.username = request.form.get('username')
             new_password = (request.form.get('password') or '').strip()
             if new_password:
                 repository.password = new_password
+            new_current_version = (request.form.get('current_version') or '').strip()
+            if not new_current_version:
+                flash('SVN 当前版本号不能为空', 'error')
+                return redirect(url_for('edit_repository', repository_id=repository_id))
+            old_current_version = str(repository.current_version or '').strip()
+            if new_current_version != old_current_version:
+                if request.form.get('confirm_branch_switch') != '1':
+                    flash('检测到 SVN 版本号变更，请完成切换风险确认后再提交。', 'error')
+                    return redirect(url_for('edit_repository', repository_id=repository_id))
+                switch_changed = True
+                switch_type = 'SVN版本号'
+                switch_old_value = old_current_version
+                switch_new_value = new_current_version
+            # SVN 编辑必须支持 current_version 更新（P0补齐缺失字段）
+            repository.current_version = new_current_version
+
+        if switch_changed:
+            switch_cleanup_summary = _clear_repository_state_for_switch(
+                repository=repository,
+                switch_type=switch_type,
+                old_value=switch_old_value,
+                new_value=switch_new_value,
+            )
         # 提交数据库更改
         db.session.commit()
         # 检查是否需要异步触发重新筛选
-        need_refilter = repository.type == 'git' and old_file_type_filter != repository.path_regex
-        if need_refilter:
+        need_refilter = (
+            repository.type == 'git'
+            and old_file_type_filter != repository.path_regex
+            and not switch_changed
+        )
+        if switch_changed:
+            task_id = create_auto_sync_task(repository.id)
+            old_display = switch_old_value or '空'
+            new_display = switch_new_value or '空'
+            if task_id:
+                if (switch_cleanup_summary or {}).get('weekly_config_count', 0) > 0:
+                    flash(
+                        (
+                            f'检测到仓库{switch_type}变更（{old_display} -> {new_display}），'
+                            f'已清空旧数据并重建分析任务（任务ID: {task_id}）。'
+                            '该仓库关联的周版本缓存与确认状态已重置。'
+                        ),
+                        'warning',
+                    )
+                else:
+                    flash(
+                        (
+                            f'检测到仓库{switch_type}变更（{old_display} -> {new_display}），'
+                            f'已清空旧数据并重建分析任务（任务ID: {task_id}）。'
+                        ),
+                        'warning',
+                    )
+            else:
+                flash(
+                    (
+                        f'仓库{switch_type}已切换（{old_display} -> {new_display}），'
+                        '旧数据已清空，但自动重建任务创建失败，请手动执行仓库同步。'
+                    ),
+                    'error',
+                )
+        elif need_refilter:
             log_print(f"文件类型过滤器已更新: '{old_file_type_filter}' -> '{repository.path_regex}'", 'APP')
             # 在主线程中获取必要的数据，避免跨线程访问SQLAlchemy对象
             repository_id = repository.id

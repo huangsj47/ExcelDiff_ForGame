@@ -92,6 +92,10 @@
             <form method="POST" action="{% if is_edit %}{{ url_for('update_repository', repository_id=repository.id) }}{% else %}{{ url_for('create_git_repository') }}{% endif %}">
                 <input type="hidden" name="project_id" value="{{ project.id }}">
                 <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                {% if is_edit %}
+                <input type="hidden" id="original_branch" value="{{ repository.branch or '' }}">
+                <input type="hidden" id="confirm_branch_switch" name="confirm_branch_switch" value="0">
+                {% endif %}
 
                 <!-- ===== 第一组：基本信息 ===== -->
                 <div class="section-title">
@@ -105,13 +109,18 @@
                 <div class="row g-3 mb-3">
                     <div class="col-md-6">
                         <label for="url" class="form-label"><span class="text-danger">*</span> GitLab SSH URL</label>
-                        <input type="text" class="form-control" id="url" name="url" placeholder="ssh://git@git-qa.gz.netease.com/..." value="{% if is_edit %}{{ repository.url }}{% endif %}" required>
+                        <input type="text" class="form-control" id="url" name="url" placeholder="ssh://git@git-qa.gz.netease.com/..." value="{% if is_edit %}{{ repository.url }}{% endif %}" {% if is_edit %}readonly{% endif %} required>
                     </div>
                     <div class="col-md-6">
                         <label for="server_url" class="form-label"><span class="text-danger">*</span> GitLab 服务器 URL</label>
-                        <input type="text" class="form-control" id="server_url" name="server_url" placeholder="http://git-qa.gz.netease.com" value="{% if is_edit %}{{ repository.server_url }}{% endif %}" required>
+                        <input type="text" class="form-control" id="server_url" name="server_url" placeholder="http://git-qa.gz.netease.com" value="{% if is_edit %}{{ repository.server_url }}{% endif %}" {% if is_edit %}readonly{% endif %} required>
                     </div>
                 </div>
+                {% if is_edit %}
+                <div class="mb-3">
+                    <small class="text-muted">已锁定基础地址信息（GitLab SSH URL / 服务器 URL）。如需修改，请删除仓库后重新创建并执行 checkout/clone，避免异常。</small>
+                </div>
+                {% endif %}
 
                 <!-- ===== 第二组：认证与分支 ===== -->
                 <div class="section-title mt-4">
@@ -127,6 +136,9 @@
                     <div class="col-md-3">
                         <label for="branch" class="form-label"><span class="text-danger">*</span> 分支</label>
                         <input type="text" class="form-control" id="branch" name="branch" value="{% if is_edit %}{{ repository.branch }}{% else %}master{% endif %}" required>
+                        {% if is_edit %}
+                        <small class="text-muted">修改分支会触发保守清空并重建分析（提交记录/缓存/确认状态）。</small>
+                        {% endif %}
                     </div>
                     <div class="col-md-3">
                         <label for="current_date" class="form-label">起始日期</label>
@@ -261,6 +273,52 @@ function toggleTableConfig() {
 
 document.addEventListener('DOMContentLoaded', function() {
     toggleTableConfig();
+    setupBranchSwitchConfirm();
 });
+
+function setupBranchSwitchConfirm() {
+    const isEdit = {{ 'true' if is_edit else 'false' }};
+    if (!isEdit) {
+        return;
+    }
+
+    const form = document.querySelector('form');
+    const branchInput = document.getElementById('branch');
+    const originalBranchInput = document.getElementById('original_branch');
+    const confirmSwitchInput = document.getElementById('confirm_branch_switch');
+    const hasWeeklyConfig = {{ 'true' if is_edit and (repository.weekly_version_configs|length > 0) else 'false' }};
+
+    if (!form || !branchInput || !originalBranchInput || !confirmSwitchInput) {
+        return;
+    }
+
+    form.addEventListener('submit', function(event) {
+        const currentBranch = (branchInput.value || '').trim();
+        const originalBranch = (originalBranchInput.value || '').trim();
+        if (currentBranch === originalBranch) {
+            confirmSwitchInput.value = '0';
+            return;
+        }
+
+        if (!window.confirm('你正在修改 Git 仓库分支。这是危险操作，可能导致旧分支数据与新分支不一致。确认继续吗？')) {
+            event.preventDefault();
+            return;
+        }
+
+        if (!window.confirm('切换分支后，系统将清空当前仓库的提交记录、Diff/HTML缓存、周版本缓存与待处理任务，并重新分析新分支。确认执行吗？')) {
+            event.preventDefault();
+            return;
+        }
+
+        if (hasWeeklyConfig) {
+            if (!window.confirm('当前仓库已配置周版本。切换分支会影响现有周版本数据与确认状态，需等待新分支分析完成后重建。确认切换吗？')) {
+                event.preventDefault();
+                return;
+            }
+        }
+
+        confirmSwitchInput.value = '1';
+    });
+}
 </script>
 {% endblock %}
