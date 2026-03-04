@@ -86,6 +86,11 @@
     .action-btn-group .btn:hover {
         transform: translateY(-1px);
     }
+    .action-btn-group .btn.project-btn-disabled {
+        pointer-events: none;
+        opacity: 0.55;
+        filter: grayscale(30%);
+    }
     .empty-state {
         padding: 4rem 2rem;
         text-align: center;
@@ -199,7 +204,7 @@
                             <a href="{{ url_for('repository_config', project_id=project.id) }}" class="btn btn-info btn-sm" style="color: #fff;">
                                 <i class="fas fa-database me-1"></i>仓库配置
                             </a>
-                            <button class="btn btn-danger btn-sm" onclick="deleteProject({{ project.id }})">
+                            <button class="btn btn-danger btn-sm" onclick="deleteProject({{ project.id }}, this)">
                                 <i class="fas fa-trash me-1"></i>删除
                             </button>
                             {% endif %}
@@ -268,22 +273,64 @@
 {% block scripts %}
 <script>
 {% if is_admin() %}
-function deleteProject(projectId) {
-    if (confirm('确定要删除这个项目吗？此操作不可恢复。')) {
-        fetch(`/projects/${projectId}/delete`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-Token': '{{ csrf_token() }}'
-            }
-        }).then(response => {
-            if (response.ok) {
-                location.reload();
-            } else {
-                alert('删除失败');
-            }
-        });
+function toggleProjectDeletingState(projectRow, deleteBtn, deleting) {
+    if (!projectRow || !deleteBtn) return;
+    const rowButtons = projectRow.querySelectorAll('.action-btn-group .btn');
+
+    rowButtons.forEach((btn) => {
+        if (btn === deleteBtn) return;
+        if (deleting) {
+            btn.classList.add('project-btn-disabled');
+            btn.setAttribute('aria-disabled', 'true');
+            btn.setAttribute('tabindex', '-1');
+        } else {
+            btn.classList.remove('project-btn-disabled');
+            btn.removeAttribute('aria-disabled');
+            btn.removeAttribute('tabindex');
+        }
+    });
+
+    if (deleting) {
+        if (!deleteBtn.dataset.originalHtml) {
+            deleteBtn.dataset.originalHtml = deleteBtn.innerHTML;
+        }
+        deleteBtn.disabled = true;
+        deleteBtn.classList.add('project-btn-disabled');
+        deleteBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>删除中...';
+    } else {
+        deleteBtn.disabled = false;
+        deleteBtn.classList.remove('project-btn-disabled');
+        if (deleteBtn.dataset.originalHtml) {
+            deleteBtn.innerHTML = deleteBtn.dataset.originalHtml;
+        }
     }
+}
+
+function deleteProject(projectId, triggerBtn) {
+    if (!triggerBtn || triggerBtn.dataset.deleting === '1') return;
+    if (!confirm('确定要删除这个项目吗？此操作不可恢复。')) return;
+
+    const projectRow = triggerBtn.closest('tr');
+    triggerBtn.dataset.deleting = '1';
+    toggleProjectDeletingState(projectRow, triggerBtn, true);
+
+    fetch(`/projects/${projectId}/delete`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': '{{ csrf_token() }}'
+        }
+    }).then(response => {
+        if (response.ok) {
+            location.reload();
+            return;
+        }
+        throw new Error('删除失败');
+    }).catch(error => {
+        toggleProjectDeletingState(projectRow, triggerBtn, false);
+        delete triggerBtn.dataset.deleting;
+        alert((error && error.message) || '删除失败');
+    });
 }
 {% endif %}
 </script>

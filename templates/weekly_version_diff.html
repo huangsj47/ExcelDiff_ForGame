@@ -30,12 +30,75 @@
     .weekly-diff-header .header-action-btn.btn-accent:hover { background: #157347; border-color: #146c43; box-shadow: 0 2px 8px rgba(25,135,84,0.25); }
     .weekly-diff-header .header-action-btn.btn-accent:disabled { background: #a3cfbb; border-color: #a3cfbb; color: #fff; cursor: not-allowed; opacity: 0.65; box-shadow: none; }
 
-    /* ===== 仓库标签页卡片 ===== */
-    .repo-tabs-card { border: 1px solid #e2e8f0; border-radius: 0.75rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); overflow: hidden; }
-    .repo-tabs-card .card-header { background: linear-gradient(135deg, #f8fafc 0%, #fff 100%); border-bottom: 2px solid #e2e8f0; padding: 0.5rem 1rem; }
-    .repo-tabs-card .nav-link { font-size: 0.82rem; font-weight: 500; color: #64748b; padding: 0.5rem 1rem; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; }
-    .repo-tabs-card .nav-link:hover { color: #0d6efd; border-bottom-color: #bfdbfe; }
-    .repo-tabs-card .nav-link.active { color: #0d6efd; border-bottom-color: #0d6efd; font-weight: 600; background: none; }
+    /* ===== 仓库标签页卡片（图1风格） ===== */
+    .repo-tabs-card {
+        border: 1px solid #d7dee7;
+        border-radius: 0.85rem;
+        background: #f8fafc;
+        box-shadow: 0 1px 6px rgba(15, 23, 42, 0.06);
+        padding: 0.8rem 0.95rem;
+    }
+    .repo-tabs-inner { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
+    .repository-tabs {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.55rem;
+        border: 0;
+        margin: 0;
+        padding: 0;
+    }
+    .repository-tabs .nav-item { margin: 0; }
+    .repo-tab-btn {
+        border: 1.5px solid transparent;
+        border-radius: 0.72rem;
+        background: transparent;
+        color: #475569;
+        padding: 0.46rem 0.85rem;
+        font-size: 0.9rem;
+        font-weight: 600;
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        transition: all 0.18s ease;
+    }
+    .repo-tab-btn:hover {
+        color: #1d4ed8;
+        background: #eef4ff;
+        border-color: #c7d9ff;
+    }
+    .repo-tab-btn.active {
+        color: #2563eb;
+        border-color: #93c5fd;
+        background: #dbeafe;
+        box-shadow: 0 1px 4px rgba(37, 99, 235, 0.12);
+    }
+    .repo-tab-btn .repo-tab-icon {
+        color: #2563eb;
+        font-size: 0.88rem;
+    }
+    .repo-tab-btn .repo-tab-name {
+        max-width: 240px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .repo-tab-btn .repo-branch-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.13rem 0.5rem;
+        border-radius: 999px;
+        background: #dcfce7;
+        color: #166534;
+        font-size: 0.72rem;
+        font-weight: 700;
+        line-height: 1.2;
+    }
+    @media (max-width: 768px) {
+        .repo-tab-btn { font-size: 0.82rem; padding: 0.4rem 0.66rem; }
+        .repo-tab-btn .repo-tab-name { max-width: 130px; }
+    }
 
     /* ===== 筛选卡片 ===== */
     .filter-card { border: 1px solid #e2e8f0; border-radius: 0.625rem; box-shadow: 0 2px 8px rgba(0,0,0,0.05); overflow: hidden; }
@@ -87,73 +150,31 @@
     <!-- 仓库标签页 -->
     {% if all_configs|length > 1 %}
     <div class="repo-tabs-card mb-4">
-        <div class="card-header">
-            <div class="d-flex justify-content-between align-items-center">
-                <ul class="nav nav-tabs card-header-tabs mb-0" id="repositoryTabs" role="tablist">
+        <div class="repo-tabs-inner">
+            <ul class="nav repository-tabs" id="repositoryTabs" role="tablist">
                     {% for cfg in all_configs %}
                     <li class="nav-item" role="presentation">
-                        <button class="nav-link {% if cfg.id == current_config_id %}active{% endif %}"
+                        <button class="nav-link repo-tab-btn {% if cfg.id == current_config_id %}active{% endif %}"
                                 id="repo-{{ cfg.id }}-tab"
-                                data-bs-toggle="tab"
-                                data-bs-target="#repo-{{ cfg.id }}"
                                 data-config-id="{{ cfg.id }}"
                                 data-repository-name="{{ cfg.repository.name }}"
                                 data-repository-type="{{ cfg.repository.resource_type or 'code' }}"
                                 type="button"
                                 role="tab"
-                                aria-controls="repo-{{ cfg.id }}"
                                 aria-selected="{% if cfg.id == current_config_id %}true{% else %}false{% endif %}"
                                 onclick="switchRepository({{ cfg.id }})">
-                            <i class="fas fa-{% if cfg.repository.type == 'git' %}code-branch{% else %}folder{% endif %} me-2"></i>
-                            {{ cfg.repository.name }}
-                            <span class="badge bg-{% if cfg.repository.type == 'git' %}success{% else %}primary{% endif %} ms-1">
-                                {{ cfg.branch }}
-                            </span>
+                            <i class="bi bi-diagram-2 repo-tab-icon"></i>
+                            <span class="repo-tab-name">{{ cfg.repository.name }}</span>
+                            <span class="repo-branch-badge">{{ cfg.branch }}</span>
                         </button>
                     </li>
                     {% endfor %}
-                </ul>
+            </ul>
 
-                <!-- 重建缓存按钮 - 动态显示 -->
-                <button type="button" class="btn btn-outline-primary btn-sm" onclick="rebuildExcelCache()" id="rebuildCacheBtn" style="display: none;">
-                    <i class="fas fa-sync-alt me-1"></i>重建缓存
-                </button>
-            </div>
-        </div>
-        <div class="card-body">
-            <div class="tab-content" id="repositoryTabContent">
-                {% for cfg in all_configs %}
-                <div class="tab-pane fade {% if cfg.id == current_config_id %}show active{% endif %}"
-                     id="repo-{{ cfg.id }}"
-                     role="tabpanel"
-                     aria-labelledby="repo-{{ cfg.id }}-tab">
-                    <!-- 配置信息 -->
-                    <div class="row">
-                        <div class="col-md-3">
-                            <strong>仓库:</strong> {{ cfg.repository.name }}
-                            <span class="badge bg-{% if cfg.repository.type == 'git' %}success{% else %}primary{% endif %} ms-1">
-                                {{ cfg.branch }}
-                            </span>
-                        </div>
-                        <div class="col-md-3">
-                            <strong>分支:</strong> {{ cfg.branch }}
-                        </div>
-                        <div class="col-md-3">
-                            <strong>时间范围:</strong><br>
-                            <small>{{ cfg.start_time.strftime('%Y-%m-%d %H:%M') }} 至 {{ cfg.end_time.strftime('%Y-%m-%d %H:%M') }}</small>
-                        </div>
-                        <div class="col-md-3">
-                            <strong>状态:</strong>
-                            <span class="badge bg-{% if cfg.status == 'active' %}success{% elif cfg.status == 'completed' %}primary{% else %}secondary{% endif %}">
-                                {% if cfg.status == 'active' %}进行中
-                                {% elif cfg.status == 'completed' %}已完成
-                                {% else %}已归档{% endif %}
-                            </span>
-                        </div>
-                    </div>
-                </div>
-                {% endfor %}
-            </div>
+            <!-- 重建缓存按钮 - 动态显示 -->
+            <button type="button" class="btn btn-outline-primary btn-sm" onclick="rebuildExcelCache()" id="rebuildCacheBtn" style="display: none;">
+                <i class="fas fa-sync-alt me-1"></i>重建缓存
+            </button>
         </div>
     </div>
     {% else %}
@@ -1016,17 +1037,20 @@ function updateTabState(activeConfigId) {
     });
 
     // 移除所有内容面板的active状态
-    document.querySelectorAll('#repositoryTabContent .tab-pane').forEach(pane => {
+    const tabPanes = document.querySelectorAll('#repositoryTabContent .tab-pane');
+    tabPanes.forEach(pane => {
         pane.classList.remove('show', 'active');
     });
 
     // 激活对应的标签和内容面板
     const activeTab = document.getElementById(`repo-${activeConfigId}-tab`);
-    const activePane = document.getElementById(`repo-${activeConfigId}`);
+    const activePane = document.getElementById(`repo-${activeConfigId}`) || null;
 
-    if (activeTab && activePane) {
+    if (activeTab) {
         activeTab.classList.add('active');
         activeTab.setAttribute('aria-selected', 'true');
+    }
+    if (activePane) {
         activePane.classList.add('show', 'active');
     }
 
@@ -1806,30 +1830,30 @@ function getDropdownMenuContent(filePath) {
 
     if (status === 'confirmed') {
         return `
-            <a class="dropdown-item" href="#" onclick="updateFileStatusQuick('${filePath}', 'pending'); hideDropdownClone();">
+            <button type="button" class="dropdown-item" onclick="updateFileStatusQuick('${filePath}', 'pending'); hideDropdownClone();">
                 <i class="bi bi-arrow-clockwise text-warning me-2"></i>重置为待确认
-            </a>
-            <a class="dropdown-item" href="#" onclick="updateFileStatusQuick('${filePath}', 'rejected'); hideDropdownClone();">
+            </button>
+            <button type="button" class="dropdown-item" onclick="updateFileStatusQuick('${filePath}', 'rejected'); hideDropdownClone();">
                 <i class="bi bi-x-circle text-danger me-2"></i>拒绝
-            </a>
+            </button>
         `;
     } else if (status === 'rejected') {
         return `
-            <a class="dropdown-item" href="#" onclick="updateFileStatusQuick('${filePath}', 'pending'); hideDropdownClone();">
+            <button type="button" class="dropdown-item" onclick="updateFileStatusQuick('${filePath}', 'pending'); hideDropdownClone();">
                 <i class="bi bi-arrow-clockwise text-warning me-2"></i>重置为待确认
-            </a>
-            <a class="dropdown-item" href="#" onclick="updateFileStatusQuick('${filePath}', 'confirmed'); hideDropdownClone();">
+            </button>
+            <button type="button" class="dropdown-item" onclick="updateFileStatusQuick('${filePath}', 'confirmed'); hideDropdownClone();">
                 <i class="bi bi-check-circle text-success me-2"></i>确认通过
-            </a>
+            </button>
         `;
     } else {
         return `
-            <a class="dropdown-item" href="#" onclick="updateFileStatusQuick('${filePath}', 'confirmed'); hideDropdownClone();">
+            <button type="button" class="dropdown-item" onclick="updateFileStatusQuick('${filePath}', 'confirmed'); hideDropdownClone();">
                 <i class="bi bi-check-circle text-success me-2"></i>确认通过
-            </a>
-            <a class="dropdown-item" href="#" onclick="updateFileStatusQuick('${filePath}', 'rejected'); hideDropdownClone();">
+            </button>
+            <button type="button" class="dropdown-item" onclick="updateFileStatusQuick('${filePath}', 'rejected'); hideDropdownClone();">
                 <i class="bi bi-x-circle text-danger me-2"></i>拒绝
-            </a>
+            </button>
         `;
     }
 }
