@@ -19,7 +19,20 @@
 
 ## 0. 账号与权限系统 (RBAC) 🆕
 
-平台内置了一套完整的多租户权限体系，支持自助注册、项目级隔离和审批工作流。
+平台支持两套账号后端，便于本地调试与线上 Qkit 登录并存。
+
+### 0.0 双账号后端切换（local / qkit）
+
+| 后端 | 环境变量 | 说明 |
+|------|----------|------|
+| **本地账号系统** | `AUTH_BACKEND=local` | 使用 `auth_*` 表，支持注册/改密/本地密码登录 |
+| **Qkit账号系统** | `AUTH_BACKEND=qkit` | 使用 `qkit_auth_*` 表，登录入口 `/qkit_auth/login`，每请求远端 JWT 校验 |
+
+切换规则：
+- 两套账号数据表隔离，切换后只读取当前后端对应表，避免本地调试与 Qkit 数据混淆。
+- Qkit 模式下屏蔽本地注册、改密、重置密码和本地登录页；仅保留用户管理与项目申请审批。
+
+以下 RBAC 说明默认针对 `local` 后端；`qkit` 后端沿用同样的平台角色/项目角色语义。
 
 ### 0.1 三级角色模型
 
@@ -64,11 +77,14 @@
 
 | 页面 | 路由 | 说明 |
 |------|------|------|
-| 登录 | `/auth/login` | 用户名 + 密码登录 |
+| 登录（local） | `/auth/login` | 用户名 + 密码登录 |
+| 登录（qkit） | `/qkit_auth/login` | 跳转 Qkit 登录服务并回调 `/qkit_auth/after_login` |
 | 注册 | `/auth/register` | 自助注册，默认角色为普通用户 |
 | 修改密码 | `/auth/change-password` | 已登录用户自行修改密码 |
 | 用户管理 | `/auth/users` | 平台管理员专属：用户列表、角色变更、审批中心 |
-| 项目成员管理 | `/auth/project/<id>/members` | 项目管理员专属：成员增删、职能分配 |
+| 项目成员管理 | `/auth/project/<id>/members` | 项目管理员专属：成员增删、导入配置与导入执行 |
+
+> 在 `AUTH_BACKEND=qkit` 模式下：`/auth/register` 与 `/auth/change-password` 会被禁用并引导到 Qkit 登录流程。
 
 ### 0.6 安全机制
 
@@ -161,13 +177,18 @@
 ## 分层结构
 
 - `app.py`: 主应用与核心路由（当前主链路）
-- `auth/`: 🆕 账号与权限模块（独立 Blueprint）
+- `auth/`: 🆕 本地账号与权限模块（`AUTH_BACKEND=local`）
   - `models.py`: RBAC 数据模型（用户、职能、项目关联、审批申请）
   - `routes.py`: 认证/管理路由（`/auth/*`）
   - `services.py`: 业务逻辑（注册、审批、自动提权等）
   - `providers.py`: 认证提供者抽象（支持数据库用户 + `.env` 环境变量管理员）
   - `decorators.py`: 权限装饰器
   - `templates/`: 认证相关页面模板
+- `qkit_auth/`: 🆕 Qkit 账号后端（`AUTH_BACKEND=qkit`）
+  - `models.py`: Qkit 专用数据表（`qkit_auth_*`）
+  - `providers.py`: 每请求 JWT 远端校验 Provider
+  - `routes.py`: `/qkit_auth/*` 登录回调 + `/auth/*` 管理/审批路由
+  - `services.py`: 项目维度导入、冲突处理、权限锁定与增量同步逻辑
 - `models/`: 数据模型（项目、仓库、提交、缓存、周版本、任务、操作日志）
 - `services/`: Git/SVN 同步、Diff 计算、缓存、状态同步等服务
 - `tasks/`: 后台任务与清理任务
@@ -191,6 +212,13 @@
 │   ├── providers.py          # 认证提供者（DB / ENV）
 │   ├── decorators.py         # 权限装饰器
 │   └── templates/            # 登录/注册/管理页面
+├── qkit_auth/                # 🆕 Qkit账号后端模块
+│   ├── config.py             # Qkit接入配置读取
+│   ├── models.py             # qkit_auth_* 数据模型
+│   ├── providers.py          # Qkit认证提供者
+│   ├── routes.py             # Qkit登录与管理路由
+│   ├── services.py           # 导入/审批/成员管理逻辑
+│   └── templates/            # Qkit管理页面模板
 ├── models/
 ├── services/
 ├── tasks/
@@ -251,11 +279,17 @@ python app.py
 
 当前主要配置位于 `app.py` / `config.py`：
 
+- `AUTH_BACKEND`（`local` / `qkit`）
 - `SECRET_KEY`
 - `SQLALCHEMY_DATABASE_URI`（默认 SQLite）
 - `DIFF_LOGIC_VERSION`（用于缓存版本控制）
 - `DEPLOYMENT_MODE`（`single`/`platform`/`agent`）
 - `AGENT_SHARED_SECRET`（平台与 agent 通信密钥）
+- `QKIT_LOCAL_HOST` / `QKIT_LOGIN_HOST`（Qkit 模式登录回调地址）
+- `QKIT_AUTH_CHECK_JWT_API`（Qkit 模式每请求 JWT 校验接口）
+- `QKIT_REQUEST_TIMEOUT_SECONDS`（Qkit 接口超时，默认 5 秒）
+- `QKIT_REDMINE_API_URL`（项目成员导入接口地址）
+- 兼容旧变量名：`LOCAL_HOST` / `LOGIN_HOST` / `AUTH_CHECK_JWT_API`（优先读取 `QKIT_*`）
 - 定时任务频率（每日清理 + 每 2 分钟周版本检查）
 - `PERF_METRICS_MAX_EVENTS`（`/admin/performance` 事件窗口总容量，默认 `8000`）
 - `PERF_METRICS_MAX_SCOPE_SHARE`（单分片最大占比，默认 `0.35`）
@@ -281,6 +315,10 @@ python app.py
   - `python agent/build_zip.py`
 - `DEPLOYMENT_MODE=platform` 时，新增 `excel_diff/auto_sync/weekly_sync` 任务会下发到 `agent_tasks`。
 - 平台管理员在 `platform/agent` 模式下创建项目时，可在首页选择绑定目标 Agent。
+- 若某 Agent 配置了 `AGENT_DEFAULT_ADMIN_USERNAME`，对应用户可直接在平台创建项目：
+  - 仅能绑定到自己被授权的 Agent；
+  - 若被多个 Agent 同时授权，可在这些 Agent 中选择；
+  - 平台不会自动删除历史项目/绑定，删除操作仅由管理员手工执行。
 - 当前执行策略：
   - `auto_sync`：默认由 Agent 本地执行（拉取 Git 仓库并回传提交清单，平台入库并继续派发 excel_diff）
   - 其他任务：仍通过 `execute-proxy` 由平台执行（过渡方案）
@@ -288,8 +326,11 @@ python app.py
   - `AGENT_NAME`（建议必填）
   - `AGENT_CODE`（可留空，自动根据 `AGENT_NAME + AGENT_HOST` 生成）
   - `AGENT_PROJECT_CODES`（可留空）
+  - `AGENT_DEFAULT_ADMIN_USERNAME`（历史累计写入，只新增不删除；可用于“按Agent授权创建项目”）
+  - `AGENT_HEARTBEAT_INTERVAL_SECONDS`（心跳上报间隔）
+  - `AGENT_REGISTER_RETRY_INTERVAL_SECONDS`（注册失败/鉴权失效重试间隔）
   - `AGENT_METRICS_INTERVAL_SECONDS=300`（CPU/内存/磁盘上报周期）
-  - `AGENT_LOCAL_TASK_TYPES=auto_sync`
+  - `AGENT_LOCAL_TASK_TYPES`（默认 `auto_sync`；可设 `all` 或 `none`）
   - `AGENT_REPOS_BASE_DIR=agent_repos`
 
 建议在生产环境替换 `SECRET_KEY`，并根据数据规模考虑迁移到 MySQL/PostgreSQL。
@@ -331,22 +372,27 @@ python app.py
   - `POST /admin/excel-cache/cleanup-expired`
   - `POST /admin/excel-cache/clear-all-diff-cache`
 - 🆕 认证与用户管理
-  - `GET/POST /auth/login` — 登录
-  - `GET/POST /auth/register` — 注册
-  - `GET /auth/logout` — 登出
-  - `GET/POST /auth/change-password` — 修改密码
+  - `GET/POST /auth/login` — 登录（`qkit` 模式下跳转到 `/qkit_auth/login`）
+  - `GET /qkit_auth/login` — Qkit 登录入口（直接可访问）
+  - `GET /qkit_auth/after_login` — Qkit 回调入口（接收 `qkitjwt`）
+  - `GET /qkit_auth/logout` — Qkit 登出
+  - `GET/POST /auth/register` — 注册（仅 `local` 模式）
+  - `GET/POST /auth/change-password` — 修改密码（仅 `local` 模式）
   - `GET /auth/users` — 用户管理页（管理员）
   - `GET /auth/api/me` — 当前用户信息
   - `POST /auth/api/users/<id>/role` — 修改用户角色
   - `POST /auth/api/users/<id>/toggle-active` — 启用/禁用用户
-  - `POST /auth/api/users/<id>/reset-password` — 重置密码
-  - `POST /auth/api/users/<id>/functions` — 分配职能
-  - `DELETE /auth/api/users/<id>/functions/<fid>` — 移除职能
+  - `POST /auth/api/users/<id>/reset-password` — 重置密码（仅 `local` 模式；`qkit` 模式禁用）
+  - `POST /auth/api/users/<id>/functions` — 分配职能（仅 `local` 模式）
+  - `DELETE /auth/api/users/<id>/functions/<fid>` — 移除职能（仅 `local` 模式）
 - 🆕 项目成员与审批
   - `GET /auth/project/<id>/members` — 项目成员管理页
   - `POST /auth/api/project/<id>/members` — 添加成员
   - `DELETE /auth/api/project/<id>/members/<uid>` — 移除成员
   - `POST /auth/api/project/<id>/members/<uid>/role` — 修改成员角色
+  - `GET /auth/api/project/<id>/qkit-import-config` — 获取项目导入配置（qkit）
+  - `POST /auth/api/project/<id>/qkit-import-config` — 保存项目导入配置（qkit）
+  - `POST /auth/api/project/<id>/qkit-import` — 按项目增量导入用户（qkit）
   - `POST /auth/api/request-join-project` — 申请加入项目
   - `POST /auth/api/join-requests/<id>/handle` — 审批加入申请
   - `POST /auth/api/request-create-project` — 申请创建项目
@@ -415,7 +461,9 @@ python tests/test_auth_e2e.py
 - 定时任务默认包含每日缓存清理及周版本同步检查。
 
 
-## 数据库表概览（`auth_` 前缀）
+## 数据库表概览（双账号后端）
+
+### local 后端（`auth_` 前缀）
 
 | 表名 | 说明 |
 |------|------|
@@ -425,5 +473,18 @@ python tests/test_auth_e2e.py
 | `auth_user_projects` | 用户-项目归属（含项目级角色 admin/member） |
 | `auth_project_join_requests` | 项目加入申请 |
 | `auth_project_create_requests` | 项目创建申请 |
+| `auth_project_pre_assignments` | 预分配（邀请）记录 |
 
-所有 `auth_` 表与业务表（`project`、`repository`、`commit` 等）通过外键关联但命名隔离，不影响原有业务逻辑。
+### qkit 后端（`qkit_auth_` 前缀）
+
+| 表名 | 说明 |
+|------|------|
+| `qkit_auth_users` | Qkit映射用户（用户名=邮箱前缀） |
+| `qkit_auth_user_projects` | Qkit项目成员关系（含项目角色与导入锁定标记） |
+| `qkit_auth_project_join_requests` | 项目加入申请 |
+| `qkit_auth_project_create_requests` | 项目创建申请 |
+| `qkit_auth_project_pre_assignments` | 预分配记录 |
+| `qkit_auth_project_import_configs` | 项目导入配置（token/host/project） |
+| `qkit_auth_import_blocks` | 导入阻断记录（删除后防回流） |
+
+运行时通过 `AUTH_BACKEND` 选择读取哪套账号表；两套数据彼此隔离，切换不会互相覆盖。

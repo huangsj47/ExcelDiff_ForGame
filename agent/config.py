@@ -32,6 +32,25 @@ def _split_csv(raw: str):
     return [item.strip() for item in (raw or "").split(",") if item.strip()]
 
 
+_AGENT_TASK_TYPE_ALLOWED = ("auto_sync", "excel_diff", "weekly_sync")
+
+
+def _normalize_local_task_types(raw: str):
+    items = [item.lower() for item in _split_csv(raw)]
+    if not items:
+        return ["auto_sync"]
+    if "none" in items:
+        return []
+    if "all" in items:
+        return list(_AGENT_TASK_TYPE_ALLOWED)
+
+    normalized = []
+    for item in items:
+        if item in _AGENT_TASK_TYPE_ALLOWED and item not in normalized:
+            normalized.append(item)
+    return normalized or ["auto_sync"]
+
+
 def _slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "-", str(value or "").strip()).strip("-").lower()
 
@@ -77,7 +96,7 @@ def load_settings() -> AgentSettings:
 
     platform_base_url = (os.environ.get("PLATFORM_BASE_URL") or "http://127.0.0.1:8002").strip().rstrip("/")
     project_codes = _split_csv(os.environ.get("AGENT_PROJECT_CODES") or "")
-    local_task_types = _split_csv(os.environ.get("AGENT_LOCAL_TASK_TYPES") or "auto_sync")
+    local_task_types = _normalize_local_task_types(os.environ.get("AGENT_LOCAL_TASK_TYPES") or "auto_sync")
     repos_base_dir = (os.environ.get("AGENT_REPOS_BASE_DIR") or "agent_repos").strip()
     configured_host = (os.environ.get("AGENT_HOST") or "").strip()
     resolved_host = configured_host or _detect_local_ip()
