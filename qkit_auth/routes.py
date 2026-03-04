@@ -232,6 +232,17 @@ def after_login():
         flash("账号已被禁用，请联系管理员。", "error")
         return redirect(url_for("qkit_auth_bp.login"))
 
+    # ensure_qkit_user() only flushes newly created users.
+    # We must commit here; otherwise the request teardown rolls back and
+    # next request cannot load auth_user_id from DB.
+    try:
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        current_app.logger.exception("Qkit login user persist failed: %s", exc)
+        flash("Qkit 登录失败：用户数据保存异常，请重试或联系管理员。", "error")
+        return redirect(url_for("qkit_auth_bp.login"))
+
     _set_user_session(user, token=token)
     next_url = session.pop("qkit_backhost", None) or url_for("index")
     if not _is_safe_redirect(next_url):

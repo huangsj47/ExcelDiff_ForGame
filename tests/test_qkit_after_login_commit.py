@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from flask import Flask, session
+
+from qkit_auth import routes as qroutes
+
+
+def _build_app_with_qkit_bp() -> Flask:
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+
+    @app.route("/", endpoint="index")
+    def index():
+        return "ok"
+
+    app.register_blueprint(qroutes.qkit_auth_bp)
+    return app
+
+
+class _FakeUser:
+    id = 101
+    username = "demo_user"
+    role = "normal"
+    is_platform_admin = False
+    is_active = True
+
+
+def test_qkit_after_login_commits_user_before_session_redirect(monkeypatch):
+    app = _build_app_with_qkit_bp()
+
+    monkeypatch.setattr(qroutes, "check_qkit_jwt_remote", lambda token: (True, "", {"ok": True}))
+    monkeypatch.setattr(qroutes, "decode_qkit_jwt_unsafe", lambda token: {"uid": "demo_user@corp.netease.com"})
+    monkeypatch.setattr(
+        qroutes,
+        "extract_identity_from_payload",
+        lambda payload: {
+            "username": "demo_user",
+            "display_name": "Demo User",
+            "email": "demo_user@corp.netease.com",
+        },
+    )
+    monkeypatch.setattr(qroutes, "ensure_qkit_user", lambda **kwargs: (_FakeUser(), None))
+
+    commit_called = {"value": False}
+
+    def _commit():
+        commit_called["value"] = True
+
+    monkeypatch.setattr(qroutes.db.session, "commit", _commit)
+
+    with app.test_request_context("/qkit_auth/after_login?qkitjwt=test-token"):
+        session["qkit_backhost"] = "/projects"
+        resp = qroutes.after_login()
+
+        assert commit_called["value"] is True
+        assert session.get("auth_user_id") == 101
+        assert session.get("auth_backend") == "qkit"
+        assert resp.status_code == 302
+        assert resp.location.endswith("/projects")
+        assert any("qkitjwt=test-token" in value for value in resp.headers.getlist("Set-Cookie"))
+
+
+def test_qkit_after_login_commit_failure_redirects_to_login(monkeypatch):
+    app = _build_app_with_qkit_bp()
+
+    monkeypatch.setattr(qroutes, "check_qkit_jwt_remote", lambda token: (True, "", {"ok": True}))
+    monkeypatch.setattr(qroutes, "decode_qkit_jwt_unsafe", lambda token: {"uid": "demo_user@corp.netease.com"})
+    monkeypatch.setattr(
+        qroutes,
+        "extract_identity_from_payload",
+        lambda payload: {
+            "username": "demo_user",
+            "display_name": "Demo User",
+            "email": "demo_user@corp.netease.com",
+        },
+    )
+    monkeypatch.setattr(qroutes, "ensure_qkit_user", lambda **kwargs: (_FakeUser(), None))
+
+    rollback_called = {"value": False}
+
+    def _commit():
+        raise RuntimeError("commit failed")
+
+    def _rollback():
+        rollback_called["value"] = True
+
+    monkeypatch.setattr(qroutes.db.session, "commit", _commit)
+    monkeypatch.setattr(qroutes.db.session, "rollback", _rollback)
+
+    with app.test_request_context("/qkit_auth/after_login?qkitjwt=test-token"):
+        resp = qroutes.after_login()
+        assert rollback_called["value"] is True
+        assert session.get("auth_user_id") is None
+        assert resp.status_code == 302
+        assert resp.location.endswith("/qkit_auth/login")
+
