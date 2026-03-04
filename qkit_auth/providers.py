@@ -8,6 +8,7 @@ from flask import g, request, session
 
 from auth.providers import AuthProvider
 from qkit_auth.services import check_qkit_jwt_remote, get_user_by_id
+from utils.logger import log_print
 
 
 class QkitAuthProvider(AuthProvider):
@@ -27,6 +28,7 @@ class QkitAuthProvider(AuthProvider):
             "admin_user",
             "auth_backend",
             "qkit_backhost",
+            "qkitjwt_session",
         ):
             session.pop(key, None)
 
@@ -40,9 +42,15 @@ class QkitAuthProvider(AuthProvider):
             g._qkit_login_valid = False
             return False
 
-        token = request.cookies.get("qkitjwt", "")
-        valid, _message, _payload = check_qkit_jwt_remote(token)
+        token = (request.cookies.get("qkitjwt", "") or session.get("qkitjwt_session", "")).strip()
+        if not token:
+            self._clear_auth_session()
+            g._qkit_login_valid = False
+            return False
+
+        valid, message, _payload = check_qkit_jwt_remote(token)
         if not valid:
+            log_print(f"Qkit 会话校验失败: {message or 'unknown'}", "AUTH", force=True)
             self._clear_auth_session()
             g._qkit_login_valid = False
             return False
@@ -58,6 +66,8 @@ class QkitAuthProvider(AuthProvider):
         session["auth_role"] = user.role
         session["is_admin"] = bool(user.is_platform_admin)
         session["admin_user"] = user.username if user.is_platform_admin else None
+        if session.get("qkitjwt_session") != token:
+            session["qkitjwt_session"] = token
         g._qkit_login_valid = True
         return True
 

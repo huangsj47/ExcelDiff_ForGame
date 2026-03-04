@@ -105,13 +105,16 @@ def _render_qkit_unavailable(next_url: str, default_message: str):
         return fallback_html, 503
 
 
-def _set_user_session(user: QkitAuthUser) -> None:
+def _set_user_session(user: QkitAuthUser, token: str | None = None) -> None:
     session["auth_user_id"] = user.id
     session["auth_username"] = user.username
     session["auth_role"] = user.role
     session["is_admin"] = bool(user.is_platform_admin)
     session["admin_user"] = user.username if user.is_platform_admin else None
     session["auth_backend"] = "qkit"
+    if token:
+        # Fallback token channel when QKIT_LOCAL_JWT_CACHE=false or cookie unavailable.
+        session["qkitjwt_session"] = token
     session.permanent = True
 
 
@@ -123,6 +126,7 @@ def _clear_user_session() -> None:
         "is_admin",
         "admin_user",
         "qkit_backhost",
+        "qkitjwt_session",
         "_csrf_token",
         "auth_backend",
     ):
@@ -186,6 +190,8 @@ def qkit_login():
     response = make_response(redirect(settings.login_service))
     if settings.local_jwt_cache:
         response.set_cookie("qkitjwt", "", expires=0)
+    # Always clear session token before login round-trip.
+    session.pop("qkitjwt_session", None)
     return response
 
 
@@ -226,7 +232,7 @@ def after_login():
         flash("账号已被禁用，请联系管理员。", "error")
         return redirect(url_for("qkit_auth_bp.login"))
 
-    _set_user_session(user)
+    _set_user_session(user, token=token)
     next_url = session.pop("qkit_backhost", None) or url_for("index")
     if not _is_safe_redirect(next_url):
         next_url = url_for("index")

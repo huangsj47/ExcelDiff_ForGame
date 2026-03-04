@@ -103,7 +103,7 @@ def _is_logged_in():
         provider = get_auth_provider()
         return provider.is_logged_in()
     except (RuntimeError, ImportError):
-        return bool(session.get("is_admin"))
+        return bool(session.get("auth_user_id") or session.get("is_admin"))
 
 
 def _get_current_user():
