@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Qkit auth routes."""
 
@@ -71,6 +71,11 @@ qkit_auth_bp = Blueprint(
     template_folder="templates",
 )
 
+def _has_routable_endpoint(endpoint: str) -> bool:
+    try:
+        return any(rule.endpoint == endpoint for rule in current_app.url_map.iter_rules())
+    except Exception:
+        return False
 
 def _set_user_session(user: QkitAuthUser) -> None:
     session["auth_user_id"] = user.id
@@ -99,7 +104,7 @@ def _clear_user_session() -> None:
 def _qkit_login_redirect(next_url: str):
     if next_url and _is_safe_redirect(next_url):
         session["qkit_backhost"] = next_url
-    if "qkit_auth_bp.login" not in current_app.view_functions:
+    if not _has_routable_endpoint("qkit_auth_bp.login"):
         init_error = str(current_app.config.get("AUTH_INIT_ERROR") or "").strip()
         if init_error:
             flash(f"Qkit 登录模块初始化失败：{init_error}", "error")
@@ -516,3 +521,4 @@ def api_current_user():
     if not user or not user.is_active:
         return jsonify({"logged_in": False}), 200
     return jsonify({"logged_in": True, "user": user.to_dict()})
+

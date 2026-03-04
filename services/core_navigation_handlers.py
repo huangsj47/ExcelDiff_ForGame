@@ -17,11 +17,19 @@ from utils.request_security import (
 )
 
 
+def _has_routable_endpoint(endpoint: str) -> bool:
+    """Return True only when endpoint exists in url_map (not just view_functions)."""
+    try:
+        return any(rule.endpoint == endpoint for rule in current_app.url_map.iter_rules())
+    except Exception:
+        return False
+
+
 def admin_login():
     auth_backend = (os.environ.get("AUTH_BACKEND") or "local").strip().lower()
     if auth_backend == "qkit":
         next_url = request.args.get("next") or request.form.get("next") or url_for("index")
-        if "qkit_auth_bp.login" in current_app.view_functions:
+        if _has_routable_endpoint("qkit_auth_bp.login"):
             return redirect(url_for("qkit_auth_bp.login", next=next_url))
 
         init_error = str(current_app.config.get("AUTH_INIT_ERROR") or "").strip()
@@ -57,7 +65,7 @@ def admin_login():
 def admin_logout():
     auth_backend = (os.environ.get("AUTH_BACKEND") or "local").strip().lower()
     if auth_backend == "qkit":
-        if "auth_bp.logout" in current_app.view_functions:
+        if _has_routable_endpoint("auth_bp.logout"):
             return redirect(url_for("auth_bp.logout"))
         session.pop("auth_user_id", None)
         session.pop("auth_username", None)

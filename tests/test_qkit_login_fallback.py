@@ -54,6 +54,27 @@ def test_admin_login_qkit_with_blueprint_redirects(monkeypatch):
     assert resp.location.endswith("/qkit_auth/login?next=/projects")
 
 
+def test_admin_login_qkit_only_view_function_without_rule_returns_503(monkeypatch):
+    app = _build_min_app()
+    monkeypatch.setenv("AUTH_BACKEND", "qkit")
+    app.config["AUTH_INIT_ERROR"] = "partial blueprint registration"
+
+    # Simulate half-registered endpoint: exists in view_functions but missing url_map rule.
+    app.view_functions["qkit_auth_bp.login"] = lambda: "stub"
+    monkeypatch.setattr(
+        cnh,
+        "render_template",
+        lambda template_name, **kwargs: f"{template_name}|{kwargs.get('next_url', '')}",
+    )
+
+    with app.test_request_context("/auth/login?next=/projects"):
+        resp = cnh.admin_login()
+
+    assert isinstance(resp, tuple)
+    assert resp[1] == 503
+    assert "admin_login.html" in resp[0]
+
+
 def test_admin_logout_qkit_missing_blueprint_clears_session(monkeypatch):
     app = _build_min_app()
     monkeypatch.setenv("AUTH_BACKEND", "qkit")
