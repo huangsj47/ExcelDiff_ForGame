@@ -10,6 +10,37 @@ from auth.providers import AuthProvider
 from qkit_auth.services import check_qkit_jwt_remote, get_user_by_id
 from utils.logger import log_print
 
+_QKITJWT_COOKIE = "qkitjwt"
+_QKITJWT_PARTS_COOKIE = "qkitjwt_parts"
+_QKITJWT_PART_PREFIX = "qkitjwt_p"
+_QKITJWT_MAX_PARTS = 8
+
+
+def _load_qkit_jwt_from_request() -> str:
+    token = (request.cookies.get(_QKITJWT_COOKIE) or "").strip()
+    if token:
+        return token
+
+    raw_parts = (request.cookies.get(_QKITJWT_PARTS_COOKIE) or "").strip()
+    if not raw_parts:
+        return ""
+
+    try:
+        part_count = int(raw_parts)
+    except (TypeError, ValueError):
+        return ""
+
+    if part_count <= 0 or part_count > _QKITJWT_MAX_PARTS:
+        return ""
+
+    chunks = []
+    for idx in range(part_count):
+        chunk = (request.cookies.get(f"{_QKITJWT_PART_PREFIX}{idx}") or "").strip()
+        if not chunk:
+            return ""
+        chunks.append(chunk)
+    return "".join(chunks).strip()
+
 
 class QkitAuthProvider(AuthProvider):
     """Qkit 登录态提供者。
@@ -42,8 +73,9 @@ class QkitAuthProvider(AuthProvider):
             g._qkit_login_valid = False
             return False
 
-        token = (request.cookies.get("qkitjwt", "") or session.get("qkitjwt_session", "")).strip()
+        token = (_load_qkit_jwt_from_request() or session.get("qkitjwt_session", "")).strip()
         if not token:
+            log_print("Qkit 会话校验失败: 缺少 qkitjwt cookie", "AUTH", force=True)
             self._clear_auth_session()
             g._qkit_login_valid = False
             return False

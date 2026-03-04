@@ -74,6 +74,12 @@ qkit_auth_bp = Blueprint(
     template_folder="templates",
 )
 
+_QKITJWT_COOKIE = "qkitjwt"
+_QKITJWT_PARTS_COOKIE = "qkitjwt_parts"
+_QKITJWT_PART_PREFIX = "qkitjwt_p"
+_QKITJWT_CHUNK_SIZE = 3500
+_QKITJWT_MAX_PARTS = 8
+
 
 def _has_routable_endpoint(endpoint: str) -> bool:
     try:
@@ -103,6 +109,38 @@ def _render_qkit_unavailable(next_url: str, default_message: str):
             f"<p>{init_error or default_message}</p>"
         )
         return fallback_html, 503
+
+
+def _clear_qkit_jwt_cookies(response) -> None:
+    response.set_cookie(_QKITJWT_COOKIE, "", expires=0)
+    response.set_cookie(_QKITJWT_PARTS_COOKIE, "", expires=0)
+    for idx in range(_QKITJWT_MAX_PARTS):
+        response.set_cookie(f"{_QKITJWT_PART_PREFIX}{idx}", "", expires=0)
+
+
+def _set_qkit_jwt_cookies(response, token: str) -> None:
+    raw = (token or "").strip()
+    _clear_qkit_jwt_cookies(response)
+    if not raw:
+        return
+
+    cookie_kwargs = {"httponly": True, "samesite": "Lax"}
+    if len(raw) <= _QKITJWT_CHUNK_SIZE:
+        response.set_cookie(_QKITJWT_COOKIE, raw, **cookie_kwargs)
+        return
+
+    chunks = [raw[i:i + _QKITJWT_CHUNK_SIZE] for i in range(0, len(raw), _QKITJWT_CHUNK_SIZE)]
+    if len(chunks) > _QKITJWT_MAX_PARTS:
+        current_app.logger.warning(
+            "Qkit jwt size=%s exceeds supported multipart cookies, fallback to single cookie",
+            len(raw),
+        )
+        response.set_cookie(_QKITJWT_COOKIE, raw, **cookie_kwargs)
+        return
+
+    response.set_cookie(_QKITJWT_PARTS_COOKIE, str(len(chunks)), **cookie_kwargs)
+    for idx, chunk in enumerate(chunks):
+        response.set_cookie(f"{_QKITJWT_PART_PREFIX}{idx}", chunk, **cookie_kwargs)
 
 
 def _set_user_session(user: QkitAuthUser, token: str | None = None) -> None:
@@ -189,7 +227,7 @@ def qkit_login():
             )
 
     response = make_response(redirect(settings.login_service))
-    response.set_cookie("qkitjwt", "", expires=0)
+    _clear_qkit_jwt_cookies(response)
     # Always clear session token before login round-trip.
     session.pop("qkitjwt_session", None)
     return response
@@ -251,12 +289,7 @@ def after_login():
     response = make_response(redirect(next_url))
     # Always keep jwt in dedicated cookie (not Flask session).
     # This keeps session payload small and avoids redirect loops after login.
-    response.set_cookie(
-        "qkitjwt",
-        token,
-        httponly=True,
-        samesite="Lax",
-    )
+    _set_qkit_jwt_cookies(response, token)
     return response
 
 
@@ -265,7 +298,7 @@ def qkit_logout():
     settings = load_qkit_settings()
     _clear_user_session()
     response = make_response(redirect(settings.logout_service))
-    response.set_cookie("qkitjwt", "", expires=0)
+    _clear_qkit_jwt_cookies(response)
     return response
 
 
