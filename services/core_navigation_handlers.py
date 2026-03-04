@@ -6,7 +6,6 @@ import hmac
 import os
 
 from flask import current_app, flash, redirect, render_template, request, session, url_for
-from werkzeug.routing import BuildError
 
 from models import AgentNode, AgentProjectBinding, Project, Repository, db
 from services.model_loader import get_runtime_model
@@ -26,24 +25,42 @@ def _has_routable_endpoint(endpoint: str) -> bool:
         return False
 
 
+def _safe_url_for(endpoint: str, **values) -> str | None:
+    """Best-effort url_for wrapper that never raises to callers."""
+    try:
+        return url_for(endpoint, **values)
+    except Exception:
+        return None
+
+
+def _qkit_login_unavailable_response(next_url: str):
+    init_error = str(current_app.config.get("AUTH_INIT_ERROR") or "").strip()
+    if init_error:
+        flash(f"Qkit 登录模块初始化失败：{init_error}", "error")
+    else:
+        flash("Qkit 登录模块未初始化，请检查 AUTH_BACKEND 配置与依赖安装。", "error")
+    return render_template("admin_login.html", next_url=next_url), 503
+
+
 def admin_login():
     auth_backend = (os.environ.get("AUTH_BACKEND") or "local").strip().lower()
     if auth_backend == "qkit":
-        next_url = request.args.get("next") or request.form.get("next") or url_for("index")
-        try:
-            if _has_routable_endpoint("qkit_auth_bp.login"):
-                return redirect(url_for("qkit_auth_bp.login", next=next_url))
-        except BuildError:
-            pass
+        next_url = request.args.get("next") or request.form.get("next") or (_safe_url_for("index") or "/")
 
-        init_error = str(current_app.config.get("AUTH_INIT_ERROR") or "").strip()
-        if init_error:
-            flash(f"Qkit 登录模块初始化失败：{init_error}", "error")
-        else:
-            flash("Qkit 登录模块未初始化，请检查 AUTH_BACKEND 配置与依赖安装。", "error")
-        return render_template("admin_login.html", next_url=next_url), 503
+        # Prefer auth_bp.login because it keeps qkit/local behavior in one place.
+        if _has_routable_endpoint("auth_bp.login"):
+            login_url = _safe_url_for("auth_bp.login", next=next_url)
+            if login_url:
+                return redirect(login_url)
 
-    next_url = request.args.get("next") or request.form.get("next") or url_for("index")
+        if _has_routable_endpoint("qkit_auth_bp.login"):
+            qkit_login_url = _safe_url_for("qkit_auth_bp.login", next=next_url)
+            if qkit_login_url:
+                return redirect(qkit_login_url)
+
+        return _qkit_login_unavailable_response(next_url)
+
+    next_url = request.args.get("next") or request.form.get("next") or (_safe_url_for("index") or "/")
     if request.method == "POST":
         configured_user = os.environ.get("ADMIN_USERNAME", "admin").strip()
         configured_password = os.environ.get("ADMIN_PASSWORD", "").strip()
@@ -59,7 +76,7 @@ def admin_login():
             session.permanent = True
             flash("管理员登录成功。", "success")
             if not _is_safe_redirect(next_url):
-                next_url = url_for("index")
+                next_url = _safe_url_for("index") or "/"
             return redirect(next_url)
 
         flash("管理员账号或密码错误。", "error")
@@ -70,7 +87,9 @@ def admin_logout():
     auth_backend = (os.environ.get("AUTH_BACKEND") or "local").strip().lower()
     if auth_backend == "qkit":
         if _has_routable_endpoint("auth_bp.logout"):
-            return redirect(url_for("auth_bp.logout"))
+            logout_url = _safe_url_for("auth_bp.logout")
+            if logout_url:
+                return redirect(logout_url)
         session.pop("auth_user_id", None)
         session.pop("auth_username", None)
         session.pop("auth_role", None)
@@ -79,14 +98,14 @@ def admin_logout():
         session.pop("auth_backend", None)
         session.pop("qkit_backhost", None)
         flash("Qkit 登录模块未初始化，已清理本地会话。", "warning")
-        return redirect(url_for("index"))
+        return redirect(_safe_url_for("index") or "/")
 
     csrf_session_key = get_runtime_model("CSRF_SESSION_KEY")
     session.pop("is_admin", None)
     session.pop("admin_user", None)
     session.pop(csrf_session_key, None)
     flash("已退出管理员登录。", "success")
-    return redirect(url_for("index"))
+    return redirect(_safe_url_for("index") or "/")
 
 
 def test():

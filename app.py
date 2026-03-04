@@ -448,6 +448,20 @@ try:
 except Exception:
     app.jinja_env.globals['auth_backend'] = lambda: "local"
 
+def public_login_url():
+    """Template helper: avoid BuildError when auth blueprints are unavailable."""
+    try:
+        if any(rule.endpoint == "auth_bp.login" for rule in app.url_map.iter_rules()):
+            return url_for("auth_bp.login")
+    except Exception:
+        pass
+    try:
+        return url_for("admin_login")
+    except Exception:
+        return "/auth/login"
+
+app.jinja_env.globals['public_login_url'] = public_login_url
+
 from utils.timezone_utils import format_beijing_time
 app.jinja_env.globals['format_beijing_time'] = format_beijing_time
 app.config['SECRET_KEY'] = secret_key
