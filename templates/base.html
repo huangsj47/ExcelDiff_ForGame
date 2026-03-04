@@ -345,12 +345,14 @@
             </button>
             <div class="collapse navbar-collapse" id="navbarMain">
                 <div class="navbar-nav ms-auto align-items-center gap-1">
+                    {% if is_logged_in() %}
                     <a class="nav-link px-3" href="{{ url_for('index') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
                         <i class="fas fa-th-large me-1" style="font-size: 0.85rem;"></i>项目列表
                     </a>
                     <a class="nav-link px-3" href="{{ url_for('excel_cache_management') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
                         <i class="fas fa-database me-1" style="font-size: 0.85rem;"></i>缓存管理
                     </a>
+                    {% endif %}
                     {% if is_admin() %}
                     <a class="nav-link px-3" href="{{ url_for('admin_performance_dashboard') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
                         <i class="fas fa-tachometer-alt me-1" style="font-size: 0.85rem;"></i>性能面板
@@ -384,10 +386,12 @@
                         </ul>
                     </div>
                     {% else %}
+                    {% if not hide_public_login_nav | default(false) %}
                     <div class="vr mx-2" style="border-color: rgba(255,255,255,0.2); height: 24px; align-self: center;"></div>
                     <a class="nav-link px-3" href="{{ public_login_url() }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
                         <i class="fas fa-sign-in-alt me-1" style="font-size: 0.85rem;"></i>登录
                     </a>
+                    {% endif %}
                     {% endif %}
                 </div>
             </div>

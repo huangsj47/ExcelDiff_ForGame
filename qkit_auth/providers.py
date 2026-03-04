@@ -66,8 +66,6 @@ class QkitAuthProvider(AuthProvider):
         session["auth_role"] = user.role
         session["is_admin"] = bool(user.is_platform_admin)
         session["admin_user"] = user.username if user.is_platform_admin else None
-        if session.get("qkitjwt_session") != token:
-            session["qkitjwt_session"] = token
         g._qkit_login_valid = True
         return True
 

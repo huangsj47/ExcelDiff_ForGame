@@ -112,9 +112,10 @@ def _set_user_session(user: QkitAuthUser, token: str | None = None) -> None:
     session["is_admin"] = bool(user.is_platform_admin)
     session["admin_user"] = user.username if user.is_platform_admin else None
     session["auth_backend"] = "qkit"
-    if token:
-        # Fallback token channel when QKIT_LOCAL_JWT_CACHE=false or cookie unavailable.
-        session["qkitjwt_session"] = token
+    # Do not store raw qkitjwt in Flask session cookie.
+    # Flask's default session is cookie-based; large JWT will easily exceed browser limits
+    # and cause silent login-state loss.
+    session.pop("qkitjwt_session", None)
     session.permanent = True
 
 
@@ -188,8 +189,7 @@ def qkit_login():
             )
 
     response = make_response(redirect(settings.login_service))
-    if settings.local_jwt_cache:
-        response.set_cookie("qkitjwt", "", expires=0)
+    response.set_cookie("qkitjwt", "", expires=0)
     # Always clear session token before login round-trip.
     session.pop("qkitjwt_session", None)
     return response
@@ -237,15 +237,15 @@ def after_login():
     if not _is_safe_redirect(next_url):
         next_url = url_for("index")
 
-    settings = load_qkit_settings()
     response = make_response(redirect(next_url))
-    if settings.local_jwt_cache:
-        response.set_cookie(
-            "qkitjwt",
-            token,
-            httponly=True,
-            samesite="Lax",
-        )
+    # Always keep jwt in dedicated cookie (not Flask session).
+    # This keeps session payload small and avoids redirect loops after login.
+    response.set_cookie(
+        "qkitjwt",
+        token,
+        httponly=True,
+        samesite="Lax",
+    )
     return response
 
 

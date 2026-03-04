@@ -13,6 +13,7 @@ from utils.request_security import (
     _get_project_create_agent_codes,
     _has_admin_access,
     _has_project_create_access,
+    _is_logged_in,
     _is_safe_redirect,
 )
 
@@ -197,6 +198,9 @@ def index():
     log_print = get_runtime_model("log_print")
     try:
         log_print("访问首页路由", "APP")
+        if not _is_logged_in():
+            return render_template("public_landing.html")
+
         from utils.request_security import _get_accessible_project_ids
 
         accessible_ids = _get_accessible_project_ids()

@@ -347,6 +347,8 @@ def log_request_info():
 # 不需要登录即可访问的端点（白名单）
 AUTH_EXEMPT_ENDPOINTS = frozenset({
     'static',
+    'index',
+    'core_management_routes.index',
     'admin_login',
     'admin_logout',
     'auth_bp.login',
