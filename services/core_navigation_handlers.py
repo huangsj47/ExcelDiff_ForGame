@@ -6,6 +6,7 @@ import hmac
 import os
 
 from flask import current_app, flash, redirect, render_template, request, session, url_for
+from werkzeug.routing import BuildError
 
 from models import AgentNode, AgentProjectBinding, Project, Repository, db
 from services.model_loader import get_runtime_model
@@ -29,8 +30,11 @@ def admin_login():
     auth_backend = (os.environ.get("AUTH_BACKEND") or "local").strip().lower()
     if auth_backend == "qkit":
         next_url = request.args.get("next") or request.form.get("next") or url_for("index")
-        if _has_routable_endpoint("qkit_auth_bp.login"):
-            return redirect(url_for("qkit_auth_bp.login", next=next_url))
+        try:
+            if _has_routable_endpoint("qkit_auth_bp.login"):
+                return redirect(url_for("qkit_auth_bp.login", next=next_url))
+        except BuildError:
+            pass
 
         init_error = str(current_app.config.get("AUTH_INIT_ERROR") or "").strip()
         if init_error:

@@ -19,6 +19,7 @@ from flask import (
     session,
     url_for,
 )
+from werkzeug.routing import BuildError
 
 from models import Project, db
 from qkit_auth.config import load_qkit_settings
@@ -111,7 +112,15 @@ def _qkit_login_redirect(next_url: str):
         else:
             flash("Qkit 登录模块未完整注册，请检查启动日志。", "error")
         return render_template("admin_login.html", next_url=next_url), 503
-    return redirect(url_for("qkit_auth_bp.login", next=next_url))
+    try:
+        return redirect(url_for("qkit_auth_bp.login", next=next_url))
+    except BuildError:
+        init_error = str(current_app.config.get("AUTH_INIT_ERROR") or "").strip()
+        if init_error:
+            flash(f"Qkit 登录模块初始化失败：{init_error}", "error")
+        else:
+            flash("Qkit 登录模块路由不可用，请检查启动日志。", "error")
+        return render_template("admin_login.html", next_url=next_url), 503
 
 
 @auth_bp.route("/login", methods=["GET", "POST"])

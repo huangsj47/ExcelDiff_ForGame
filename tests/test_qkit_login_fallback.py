@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from flask import Flask
+from werkzeug.routing import BuildError
 
 from services import core_navigation_handlers as cnh
 from qkit_auth import routes as qroutes
@@ -127,3 +128,60 @@ def test_qkit_auth_login_redirect_with_qkit_bp_redirects():
 
     assert resp.status_code == 302
     assert resp.location.endswith("/qkit_auth/login?next=/projects")
+
+
+def test_admin_login_qkit_url_for_build_error_returns_503(monkeypatch):
+    app = _build_min_app()
+    monkeypatch.setenv("AUTH_BACKEND", "qkit")
+    app.config["AUTH_INIT_ERROR"] = "BuildError: missing qkit route"
+    app.add_url_rule(
+        "/qkit_auth/login",
+        endpoint="qkit_auth_bp.login",
+        view_func=lambda: "qkit-login",
+    )
+
+    monkeypatch.setattr(
+        cnh,
+        "url_for",
+        lambda *args, **kwargs: (_ for _ in ()).throw(BuildError("qkit_auth_bp.login", kwargs, "GET")),
+    )
+    monkeypatch.setattr(
+        cnh,
+        "render_template",
+        lambda template_name, **kwargs: f"{template_name}|{kwargs.get('next_url', '')}",
+    )
+
+    with app.test_request_context("/auth/login?next=/projects"):
+        resp = cnh.admin_login()
+
+    assert isinstance(resp, tuple)
+    assert resp[1] == 503
+    assert "admin_login.html" in resp[0]
+
+
+def test_qkit_auth_login_redirect_url_for_build_error_returns_503(monkeypatch):
+    app = _build_min_app()
+    app.config["AUTH_INIT_ERROR"] = "BuildError: missing qkit route"
+    app.add_url_rule(
+        "/qkit_auth/login",
+        endpoint="qkit_auth_bp.login",
+        view_func=lambda: "qkit-login",
+    )
+
+    monkeypatch.setattr(
+        qroutes,
+        "url_for",
+        lambda *args, **kwargs: (_ for _ in ()).throw(BuildError("qkit_auth_bp.login", kwargs, "GET")),
+    )
+    monkeypatch.setattr(
+        qroutes,
+        "render_template",
+        lambda template_name, **kwargs: f"{template_name}|{kwargs.get('next_url', '')}",
+    )
+
+    with app.test_request_context("/auth/login?next=/projects"):
+        resp = qroutes._qkit_login_redirect("/projects")
+
+    assert isinstance(resp, tuple)
+    assert resp[1] == 503
+    assert "admin_login.html" in resp[0]
