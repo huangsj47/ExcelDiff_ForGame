@@ -163,7 +163,7 @@ def change_password_view():
     return redirect(url_for("index"))
 
 
-@qkit_auth_bp.route("/login", methods=["GET"], endpoint="login")
+@qkit_auth_bp.route("/login", methods=["GET"], endpoint="login", strict_slashes=False)
 def qkit_login():
     next_url = request.args.get("next") or request.referrer or url_for("index")
     if next_url and _is_safe_redirect(next_url):
@@ -189,7 +189,7 @@ def qkit_login():
     return response
 
 
-@qkit_auth_bp.route("/after_login", methods=["GET"], endpoint="after_login")
+@qkit_auth_bp.route("/after_login", methods=["GET"], endpoint="after_login", strict_slashes=False)
 def after_login():
     token = (request.args.get("qkitjwt") or "").strip()
     if not token:
@@ -243,7 +243,7 @@ def after_login():
     return response
 
 
-@qkit_auth_bp.route("/logout", methods=["GET"], endpoint="logout")
+@qkit_auth_bp.route("/logout", methods=["GET"], endpoint="logout", strict_slashes=False)
 def qkit_logout():
     settings = load_qkit_settings()
     _clear_user_session()

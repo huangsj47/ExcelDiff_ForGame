@@ -365,6 +365,7 @@ AUTH_EXEMPT_ENDPOINTS = frozenset({
 AUTH_EXEMPT_PATHS = (
     '/static/',
     '/openid/',
+    '/favicon.ico',
     '/auth/login',
     '/auth/register',
     '/auth/logout',
@@ -523,7 +524,13 @@ def _register_qkit_fallback_endpoints(app_instance):
         if _endpoint_exists(endpoint):
             continue
         try:
-            app_instance.add_url_rule(rule, endpoint=endpoint, view_func=view_func, methods=methods)
+            app_instance.add_url_rule(
+                rule,
+                endpoint=endpoint,
+                view_func=view_func,
+                methods=methods,
+                strict_slashes=False,
+            )
             log_print(f"⚠️ 已注册 qkit 兜底路由: {endpoint} -> {rule}", "AUTH", force=True)
         except Exception as exc:
             log_print(f"❌ 注册 qkit 兜底路由失败 {endpoint}: {exc}", "AUTH", force=True)
