@@ -5,7 +5,7 @@ from __future__ import annotations
 import hmac
 import os
 
-from flask import flash, redirect, render_template, request, session, url_for
+from flask import current_app, flash, redirect, render_template, request, session, url_for
 
 from models import AgentNode, AgentProjectBinding, Project, Repository, db
 from services.model_loader import get_runtime_model
@@ -21,7 +21,15 @@ def admin_login():
     auth_backend = (os.environ.get("AUTH_BACKEND") or "local").strip().lower()
     if auth_backend == "qkit":
         next_url = request.args.get("next") or request.form.get("next") or url_for("index")
-        return redirect(url_for("qkit_auth_bp.login", next=next_url))
+        if "qkit_auth_bp.login" in current_app.view_functions:
+            return redirect(url_for("qkit_auth_bp.login", next=next_url))
+
+        init_error = str(current_app.config.get("AUTH_INIT_ERROR") or "").strip()
+        if init_error:
+            flash(f"Qkit 登录模块初始化失败：{init_error}", "error")
+        else:
+            flash("Qkit 登录模块未初始化，请检查 AUTH_BACKEND 配置与依赖安装。", "error")
+        return render_template("admin_login.html", next_url=next_url), 503
 
     next_url = request.args.get("next") or request.form.get("next") or url_for("index")
     if request.method == "POST":
@@ -49,7 +57,17 @@ def admin_login():
 def admin_logout():
     auth_backend = (os.environ.get("AUTH_BACKEND") or "local").strip().lower()
     if auth_backend == "qkit":
-        return redirect(url_for("auth_bp.logout"))
+        if "auth_bp.logout" in current_app.view_functions:
+            return redirect(url_for("auth_bp.logout"))
+        session.pop("auth_user_id", None)
+        session.pop("auth_username", None)
+        session.pop("auth_role", None)
+        session.pop("is_admin", None)
+        session.pop("admin_user", None)
+        session.pop("auth_backend", None)
+        session.pop("qkit_backhost", None)
+        flash("Qkit 登录模块未初始化，已清理本地会话。", "warning")
+        return redirect(url_for("index"))
 
     csrf_session_key = get_runtime_model("CSRF_SESSION_KEY")
     session.pop("is_admin", None)

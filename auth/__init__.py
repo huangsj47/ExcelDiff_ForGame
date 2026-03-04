@@ -59,8 +59,8 @@ def register_auth_blueprints(app: Flask) -> None:
     if backend == "qkit":
         from qkit_auth.routes import auth_bp, qkit_auth_bp
 
-        app.register_blueprint(auth_bp)
         app.register_blueprint(qkit_auth_bp)
+        app.register_blueprint(auth_bp)
         return
 
     from .routes import auth_bp

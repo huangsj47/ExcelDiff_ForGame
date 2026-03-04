@@ -8,6 +8,7 @@ import os
 
 from flask import (
     Blueprint,
+    current_app,
     flash,
     jsonify,
     make_response,
@@ -98,6 +99,13 @@ def _clear_user_session() -> None:
 def _qkit_login_redirect(next_url: str):
     if next_url and _is_safe_redirect(next_url):
         session["qkit_backhost"] = next_url
+    if "qkit_auth_bp.login" not in current_app.view_functions:
+        init_error = str(current_app.config.get("AUTH_INIT_ERROR") or "").strip()
+        if init_error:
+            flash(f"Qkit 登录模块初始化失败：{init_error}", "error")
+        else:
+            flash("Qkit 登录模块未完整注册，请检查启动日志。", "error")
+        return render_template("admin_login.html", next_url=next_url), 503
     return redirect(url_for("qkit_auth_bp.login", next=next_url))
 
 

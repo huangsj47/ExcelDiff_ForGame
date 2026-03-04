@@ -462,6 +462,8 @@ db.init_app(app)
 _original_print("[TRACE] db.init_app(app) done")
 
 # ── 初始化 Auth 账号系统 ──
+app.config["AUTH_INIT_FAILED"] = False
+app.config["AUTH_INIT_ERROR"] = ""
 try:
     from auth import init_auth, init_auth_default_data, register_auth_blueprints
     init_auth(app, db)
@@ -479,8 +481,14 @@ try:
         except Exception as e:
             _original_print(f"[TRACE] auth: default data init skipped: {e}")
 except ImportError as e:
+    app.config["AUTH_INIT_FAILED"] = True
+    app.config["AUTH_INIT_ERROR"] = f"ImportError: {e}"
+    log_print(f"❌ 账号系统初始化失败（ImportError）: {e}", "AUTH", force=True)
     _original_print(f"[TRACE] auth module not available: {e}")
 except Exception as e:
+    app.config["AUTH_INIT_FAILED"] = True
+    app.config["AUTH_INIT_ERROR"] = f"{type(e).__name__}: {e}"
+    log_print(f"❌ 账号系统初始化失败: {type(e).__name__}: {e}", "AUTH", force=True)
     _original_print(f"[TRACE] auth module init failed: {e}")
     import traceback; traceback.print_exc()
 
