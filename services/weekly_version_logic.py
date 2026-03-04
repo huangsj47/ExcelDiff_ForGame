@@ -689,18 +689,49 @@ def weekly_version_files_api(config_id):
                     unique_usernames.append(username)
             return unique_usernames
 
+        def _extract_author_lookup_keys(raw_author):
+            """提取可用于匹配账号系统的作者标识（用户名 / 邮箱前缀）。"""
+            text = str(raw_author or '').strip()
+            if not text:
+                return []
+
+            keys = []
+            lower_text = text.lower()
+
+            if all(symbol not in lower_text for symbol in ('@', '<', '>', ' ')):
+                keys.append(lower_text)
+
+            if '@' in lower_text and '<' not in lower_text and '>' not in lower_text:
+                email_prefix = lower_text.split('@', 1)[0].strip()
+                if email_prefix and email_prefix not in keys:
+                    keys.append(email_prefix)
+
+            for email in re.findall(r'([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})', text):
+                email_prefix = email.lower().split('@', 1)[0].strip()
+                if email_prefix and email_prefix not in keys:
+                    keys.append(email_prefix)
+
+            return keys
+
         def _abbreviate_username(username):
             clean_name = (username or '').strip()
             if not clean_name:
                 return ''
-            return f"{clean_name[:2]}.."
+            # 列表已有省略与tooltip机制，这里返回全量用户名避免短账号被强制截断（如 admin -> ad..）
+            return clean_name
 
         all_confirm_usernames = set()
+        all_author_keys = set()
         for cache in diff_caches:
             all_confirm_usernames.update(_parse_confirm_usernames(cache.status_changed_by))
+            commit_authors = _parse_json_list(cache.commit_authors)
+            for commit_author in commit_authors:
+                all_author_keys.update(_extract_author_lookup_keys(commit_author))
 
         username_to_display_name = {}
-        if all_confirm_usernames:
+        username_to_display_name_lower = {}
+        email_prefix_to_display_name = {}
+        if all_confirm_usernames or all_author_keys:
             try:
                 from auth import get_auth_backend
 
@@ -709,12 +740,48 @@ def weekly_version_files_api(config_id):
                 else:
                     from auth.models import AuthUser as _UserModel
 
-                users = _UserModel.query.filter(_UserModel.username.in_(list(all_confirm_usernames))).all()
-                username_to_display_name = {
-                    user.username: (user.display_name or user.username) for user in users
-                }
+                from sqlalchemy import or_, func as sa_func
+
+                user_query_conditions = []
+                if all_confirm_usernames:
+                    user_query_conditions.append(
+                        sa_func.lower(_UserModel.username).in_([username.lower() for username in all_confirm_usernames])
+                    )
+                if all_author_keys:
+                    user_query_conditions.append(sa_func.lower(_UserModel.username).in_(list(all_author_keys)))
+                    user_query_conditions.extend(
+                        sa_func.lower(_UserModel.email).like(f"{author_key}@%")
+                        for author_key in all_author_keys
+                        if author_key
+                    )
+
+                users = _UserModel.query.filter(or_(*user_query_conditions)).all() if user_query_conditions else []
+                for user in users:
+                    username = (getattr(user, 'username', '') or '').strip()
+                    if not username:
+                        continue
+                    display_name = (getattr(user, 'display_name', '') or '').strip() or username
+                    username_to_display_name[username] = display_name
+                    username_to_display_name_lower[username.lower()] = display_name
+
+                    email = (getattr(user, 'email', '') or '').strip().lower()
+                    if email and '@' in email:
+                        email_prefix_to_display_name[email.split('@', 1)[0]] = display_name
             except Exception as e:
                 log_print(f"加载周版本确认用户姓名映射失败，回退为用户名显示: {e}", 'WEEKLY')
+
+        def _resolve_author_display(raw_author):
+            text = str(raw_author or '').strip()
+            if not text:
+                return ''
+            for author_key in _extract_author_lookup_keys(text):
+                mapped_name = (
+                    username_to_display_name_lower.get(author_key)
+                    or email_prefix_to_display_name.get(author_key)
+                )
+                if mapped_name:
+                    return mapped_name
+            return text
 
         files = []
         authors = set()
@@ -723,11 +790,14 @@ def weekly_version_files_api(config_id):
             commit_authors = _parse_json_list(cache.commit_authors)
             commit_messages = _parse_json_list(cache.commit_messages)
             commit_times = _parse_json_list(cache.commit_times)
-            authors.update(commit_authors)
+            mapped_commit_authors = [_resolve_author_display(author) for author in commit_authors if str(author or '').strip()]
+            authors.update(mapped_commit_authors)
 
             confirm_usernames = _parse_confirm_usernames(cache.status_changed_by)
             confirm_display_names = [
-                username_to_display_name.get(username, username) for username in confirm_usernames
+                username_to_display_name.get(username)
+                or username_to_display_name_lower.get(username.lower(), username)
+                for username in confirm_usernames
             ]
             confirm_user_display = ''
             confirm_user_title = ''
@@ -759,7 +829,7 @@ def weekly_version_files_api(config_id):
             files.append({
                 'file_path': cache.file_path,
                 'commit_count': cache.commit_count,
-                'commit_authors': json.dumps(commit_authors, ensure_ascii=False),
+                'commit_authors': json.dumps(mapped_commit_authors, ensure_ascii=False),
                 'commit_messages': json.dumps(commit_messages, ensure_ascii=False),  # 添加提交日志
                 'commit_times': json.dumps(commit_times, ensure_ascii=False),        # 添加提交时间
                 'overall_status': cache.overall_status,

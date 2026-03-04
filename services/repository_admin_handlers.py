@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from flask import flash, jsonify, redirect, request, url_for
+from sqlalchemy import or_
 
 from services.model_loader import get_runtime_model, get_runtime_models
 from services.repository_cleanup_helpers import delete_local_repository_directory
@@ -12,6 +13,13 @@ from utils.request_security import require_admin
 
 def _runtime(*names):
     return get_runtime_models(*names)
+
+
+def _optional_runtime(name):
+    try:
+        return get_runtime_model(name)
+    except Exception:
+        return None
 
 
 @require_admin
@@ -223,9 +231,205 @@ def test_repository(repository_id):
 
 @require_admin
 def delete_project(project_id):
-    db, Project = _runtime("db", "Project")
+    (
+        db,
+        Project,
+        Repository,
+        Commit,
+        DiffCache,
+        ExcelHtmlCache,
+        MergedDiffCache,
+        BackgroundTask,
+        WeeklyVersionConfig,
+        WeeklyVersionDiffCache,
+        WeeklyVersionExcelCache,
+        OperationLog,
+        AgentProjectBinding,
+        AgentTask,
+        log_print,
+    ) = _runtime(
+        "db",
+        "Project",
+        "Repository",
+        "Commit",
+        "DiffCache",
+        "ExcelHtmlCache",
+        "MergedDiffCache",
+        "BackgroundTask",
+        "WeeklyVersionConfig",
+        "WeeklyVersionDiffCache",
+        "WeeklyVersionExcelCache",
+        "OperationLog",
+        "AgentProjectBinding",
+        "AgentTask",
+        "log_print",
+    )
+
     project = Project.query.get_or_404(project_id)
-    db.session.delete(project)
-    db.session.commit()
+    repo_rows = Repository.query.filter_by(project_id=project_id).all()
+    repo_ids = [repo.id for repo in repo_rows]
+    weekly_config_ids = [row.id for row in WeeklyVersionConfig.query.filter_by(project_id=project_id).all()]
+    project_name = project.name
+
+    repo_local_paths = [
+        (
+            build_repository_local_path(project.code, repo.name, repo.id, strict=False),
+            repo.name,
+        )
+        for repo in repo_rows
+    ]
+
+    AuthUserFunction = _optional_runtime("AuthUserFunction")
+    AuthUserProject = _optional_runtime("AuthUserProject")
+    AuthProjectJoinRequest = _optional_runtime("AuthProjectJoinRequest")
+    AuthProjectCreateRequest = _optional_runtime("AuthProjectCreateRequest")
+    AuthProjectPreAssignment = _optional_runtime("AuthProjectPreAssignment")
+    QkitAuthUserProject = _optional_runtime("QkitAuthUserProject")
+    QkitAuthProjectJoinRequest = _optional_runtime("QkitAuthProjectJoinRequest")
+    QkitAuthProjectCreateRequest = _optional_runtime("QkitAuthProjectCreateRequest")
+    QkitAuthProjectPreAssignment = _optional_runtime("QkitAuthProjectPreAssignment")
+    QkitAuthProjectImportConfig = _optional_runtime("QkitAuthProjectImportConfig")
+    QkitAuthImportBlock = _optional_runtime("QkitAuthImportBlock")
+
+    def _safe_delete(query, label):
+        try:
+            count = query.delete(synchronize_session=False)
+            if count:
+                log_print(f"删除项目关联数据: {label} -> {count} 条", "DELETE")
+            return count
+        except Exception as exc:
+            log_print(f"⚠️ 删除项目关联数据失败({label}): {exc}", "DELETE", force=True)
+            return 0
+
+    def _safe_nullify_created_project(model, label):
+        if model is None:
+            return 0
+        try:
+            count = (
+                model.query.filter_by(created_project_id=project_id).update(
+                    {"created_project_id": None},
+                    synchronize_session=False,
+                )
+            )
+            if count:
+                log_print(f"清理项目创建申请引用: {label} -> {count} 条", "DELETE")
+            return count
+        except Exception as exc:
+            log_print(f"⚠️ 清理项目创建申请引用失败({label}): {exc}", "DELETE", force=True)
+            return 0
+
+    try:
+        # 先清理 auth / qkit 对项目的直接引用，避免 Project 删除时外键冲突
+        if AuthUserFunction is not None:
+            _safe_delete(AuthUserFunction.query.filter(AuthUserFunction.project_id == project_id), "AuthUserFunction")
+        if AuthUserProject is not None:
+            _safe_delete(AuthUserProject.query.filter(AuthUserProject.project_id == project_id), "AuthUserProject")
+        if AuthProjectJoinRequest is not None:
+            _safe_delete(
+                AuthProjectJoinRequest.query.filter(AuthProjectJoinRequest.project_id == project_id),
+                "AuthProjectJoinRequest",
+            )
+        if AuthProjectPreAssignment is not None:
+            _safe_delete(
+                AuthProjectPreAssignment.query.filter(AuthProjectPreAssignment.project_id == project_id),
+                "AuthProjectPreAssignment",
+            )
+        _safe_nullify_created_project(AuthProjectCreateRequest, "AuthProjectCreateRequest")
+
+        if QkitAuthUserProject is not None:
+            _safe_delete(
+                QkitAuthUserProject.query.filter(QkitAuthUserProject.project_id == project_id),
+                "QkitAuthUserProject",
+            )
+        if QkitAuthProjectJoinRequest is not None:
+            _safe_delete(
+                QkitAuthProjectJoinRequest.query.filter(QkitAuthProjectJoinRequest.project_id == project_id),
+                "QkitAuthProjectJoinRequest",
+            )
+        if QkitAuthProjectPreAssignment is not None:
+            _safe_delete(
+                QkitAuthProjectPreAssignment.query.filter(QkitAuthProjectPreAssignment.project_id == project_id),
+                "QkitAuthProjectPreAssignment",
+            )
+        if QkitAuthProjectImportConfig is not None:
+            _safe_delete(
+                QkitAuthProjectImportConfig.query.filter(QkitAuthProjectImportConfig.project_id == project_id),
+                "QkitAuthProjectImportConfig",
+            )
+        if QkitAuthImportBlock is not None:
+            _safe_delete(
+                QkitAuthImportBlock.query.filter(QkitAuthImportBlock.project_id == project_id),
+                "QkitAuthImportBlock",
+            )
+        _safe_nullify_created_project(QkitAuthProjectCreateRequest, "QkitAuthProjectCreateRequest")
+
+        # 删除 Agent 相关引用
+        background_task_ids = []
+        if repo_ids:
+            background_task_ids = [row[0] for row in db.session.query(BackgroundTask.id).filter(
+                BackgroundTask.repository_id.in_(repo_ids)
+            ).all()]
+
+        agent_task_filters = [AgentTask.project_id == project_id]
+        if repo_ids:
+            agent_task_filters.append(AgentTask.repository_id.in_(repo_ids))
+        if background_task_ids:
+            agent_task_filters.append(AgentTask.source_task_id.in_(background_task_ids))
+        _safe_delete(AgentTask.query.filter(or_(*agent_task_filters)), "AgentTask")
+        _safe_delete(
+            AgentProjectBinding.query.filter(AgentProjectBinding.project_id == project_id),
+            "AgentProjectBinding",
+        )
+
+        # 删除周版本缓存和配置
+        weekly_diff_filters = []
+        weekly_excel_filters = []
+        if weekly_config_ids:
+            weekly_diff_filters.append(WeeklyVersionDiffCache.config_id.in_(weekly_config_ids))
+            weekly_excel_filters.append(WeeklyVersionExcelCache.config_id.in_(weekly_config_ids))
+        if repo_ids:
+            weekly_diff_filters.append(WeeklyVersionDiffCache.repository_id.in_(repo_ids))
+            weekly_excel_filters.append(WeeklyVersionExcelCache.repository_id.in_(repo_ids))
+        if weekly_diff_filters:
+            _safe_delete(
+                WeeklyVersionDiffCache.query.filter(or_(*weekly_diff_filters)),
+                "WeeklyVersionDiffCache",
+            )
+        if weekly_excel_filters:
+            _safe_delete(
+                WeeklyVersionExcelCache.query.filter(or_(*weekly_excel_filters)),
+                "WeeklyVersionExcelCache",
+            )
+        _safe_delete(
+            WeeklyVersionConfig.query.filter(WeeklyVersionConfig.project_id == project_id),
+            "WeeklyVersionConfig",
+        )
+
+        # 删除仓库相关记录（按依赖顺序）
+        if repo_ids:
+            _safe_delete(OperationLog.query.filter(OperationLog.repository_id.in_(repo_ids)), "OperationLog")
+            _safe_delete(DiffCache.query.filter(DiffCache.repository_id.in_(repo_ids)), "DiffCache")
+            _safe_delete(ExcelHtmlCache.query.filter(ExcelHtmlCache.repository_id.in_(repo_ids)), "ExcelHtmlCache")
+            _safe_delete(MergedDiffCache.query.filter(MergedDiffCache.repository_id.in_(repo_ids)), "MergedDiffCache")
+            _safe_delete(Commit.query.filter(Commit.repository_id.in_(repo_ids)), "Commit")
+            _safe_delete(
+                BackgroundTask.query.filter(BackgroundTask.repository_id.in_(repo_ids)),
+                "BackgroundTask",
+            )
+
+        _safe_delete(Repository.query.filter(Repository.project_id == project_id), "Repository")
+
+        db.session.delete(project)
+        db.session.commit()
+        log_print(f"项目删除成功: {project_name} (ID: {project_id})", "DELETE")
+    except Exception as exc:
+        db.session.rollback()
+        log_print(f"删除项目失败: {project_name} (ID: {project_id}) -> {exc}", "ERROR", force=True)
+        flash(f"删除项目失败: {exc}", "error")
+        return redirect(url_for("index"))
+
+    for local_path, repo_name in repo_local_paths:
+        delete_local_repository_directory(local_path, repo_name)
+
     flash("项目删除成功", "success")
     return redirect(url_for("index"))

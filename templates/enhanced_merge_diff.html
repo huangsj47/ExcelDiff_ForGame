@@ -5,6 +5,7 @@
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.0">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/excel-diff-new.css') }}?v=2.0">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.0">
 <script src="{{ url_for('static', filename='js/diff-handlers.js') }}?v=2.2"></script>
 <style>
 /* 增强合并diff样式 */
@@ -173,7 +174,7 @@
 {% endblock %}
 
 {% block content %}
-<div class="container-fluid">
+<div class="container-fluid unified-diff-page unified-merge-page">
     <div class="row">
         <div class="col-12">
             <div class="d-flex justify-content-between align-items-center mb-4">

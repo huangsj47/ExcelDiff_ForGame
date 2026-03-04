@@ -4,10 +4,11 @@
 
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.0">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.0">
 {% endblock %}
 
 {% block content %}
-<div class="container-fluid">
+<div class="container-fluid unified-diff-page">
     <!-- 面包屑导航 -->
     <nav aria-label="breadcrumb" class="mb-3">
         <ol class="breadcrumb">

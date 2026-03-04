@@ -260,6 +260,63 @@ def test_admin_login():
         )
 
 
+def test_admin_user_management_page_with_pending_requests():
+    _banner("2.x 用户管理页在存在待审批申请时可正常渲染")
+
+    with _client() as c:
+        from auth.models import (
+            AuthProjectCreateRequest,
+            AuthProjectJoinRequest,
+            AuthUser,
+            RequestStatus,
+        )
+        from models.project import Project as ProjModel
+
+        # 准备基础数据：一个项目 + 一个普通用户 + 两类待审批申请
+        project = ProjModel(code="PENDING_CASE", name="待审批项目")
+        db.session.add(project)
+        db.session.commit()
+
+        user = AuthUser.query.filter_by(username="pending_user").first()
+        if not user:
+            _form_post(
+                c,
+                "/auth/register",
+                {
+                    "username": "pending_user",
+                    "password": "pass1234",
+                    "password_confirm": "pass1234",
+                    "display_name": "待审批用户",
+                },
+            )
+            user = AuthUser.query.filter_by(username="pending_user").first()
+
+        join_req = AuthProjectJoinRequest(
+            user_id=user.id,
+            project_id=project.id,
+            message="请审批加入",
+            status=RequestStatus.PENDING.value,
+        )
+        create_req = AuthProjectCreateRequest(
+            user_id=user.id,
+            project_code="PENDING_NEW",
+            project_name="待创建项目",
+            department="QA",
+            reason="测试渲染",
+            status=RequestStatus.PENDING.value,
+        )
+        db.session.add_all([join_req, create_req])
+        db.session.commit()
+
+        # 管理员访问用户管理页，应返回200而不是500
+        _login(c, "admin", "admin123")
+        resp = c.get("/auth/users", follow_redirects=True)
+        text = resp.data.decode("utf-8", errors="ignore")
+
+        _assert(resp.status_code == 200, "2.x 用户管理页返回200")
+        _assert("待审批申请" in text, "2.x 页面包含待审批区块")
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  测试组 3：密码修改
 # ═══════════════════════════════════════════════════════════════════

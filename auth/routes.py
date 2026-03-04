@@ -30,7 +30,12 @@ from utils.request_security import (
 )
 
 from . import get_auth_provider
-from .models import PlatformRole
+from .models import (
+    AuthProjectCreateRequest,
+    AuthProjectJoinRequest,
+    PlatformRole,
+    RequestStatus,
+)
 from .services import (
     admin_reset_password,
     assign_function,
@@ -238,8 +243,20 @@ def user_list():
 
     users = list_users(include_inactive=True)
     functions = list_functions()
-    pending_join_requests = list_pending_join_requests()
-    pending_create_requests = list_pending_create_requests()
+    # 页面模板依赖 ORM 关系字段（req.user / req.project）和 datetime 类型。
+    # 因此这里直接查询模型对象，避免 dict 结构导致模板渲染异常（500）。
+    pending_join_requests = (
+        AuthProjectJoinRequest.query
+        .filter_by(status=RequestStatus.PENDING.value)
+        .order_by(AuthProjectJoinRequest.created_at.desc())
+        .all()
+    )
+    pending_create_requests = (
+        AuthProjectCreateRequest.query
+        .filter_by(status=RequestStatus.PENDING.value)
+        .order_by(AuthProjectCreateRequest.created_at.desc())
+        .all()
+    )
     return render_template(
         "user_management.html",
         users=users,

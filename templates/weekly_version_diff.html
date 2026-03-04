@@ -407,7 +407,8 @@
 /* 文件项内容布局 - 紧凑单行版 */
 .file-content {
     display: grid;
-    grid-template-columns: 22px minmax(240px, 1.25fr) 78px 116px 108px 40px minmax(220px, 1.4fr) auto;
+    --file-action-width: 176px;
+    grid-template-columns: 22px minmax(320px, 450px) 84px 120px 112px 44px minmax(220px, 1fr) var(--file-action-width);
     align-items: center;
     width: 100%;
     gap: 10px;
@@ -487,8 +488,8 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    text-align: center;
-    justify-self: center;
+    text-align: left;
+    justify-self: start;
     max-width: 110px;
 }
 
@@ -509,6 +510,7 @@
     text-align: left;
     overflow: hidden;
     text-overflow: ellipsis;
+    cursor: help;
 }
 
 .file-actions {
@@ -517,6 +519,24 @@
     justify-self: end;
     display: flex;
     align-items: center;
+    width: var(--file-action-width);
+    flex: 0 0 var(--file-action-width);
+}
+
+.file-actions .action-buttons {
+    width: 100%;
+    justify-content: flex-end;
+    gap: 8px !important;
+}
+
+.file-actions .btn-outline-info.btn-action {
+    width: 34px;
+    min-width: 34px;
+    height: 28px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 /* 按钮样式改进 - 重新设计 */
@@ -539,18 +559,23 @@
     overflow: hidden;
     border: 1px solid #d9e3ee;
     background: #fff;
+    width: 128px;
+    min-width: 128px;
+    max-width: 128px;
+    flex: 0 0 128px;
 }
 
 .status-btn {
     border: none !important;
     border-radius: 0 !important;
     height: 28px;
-    min-width: 64px;
+    min-width: 0;
     font-family: 'Fira Sans', 'Segoe UI', sans-serif;
     font-weight: 700;
     font-size: 12px;
     letter-spacing: 0.01em;
-    padding: 0 12px;
+    padding: 0 8px;
+    flex: 1 1 0;
 }
 
 .status-btn-approve {
@@ -573,7 +598,7 @@
 }
 
 .status-state-btn {
-    min-width: 74px;
+    min-width: 0;
     color: #0f172a;
     background: #f8fbff;
 }
@@ -589,27 +614,42 @@
 }
 
 .status-more-btn {
-    min-width: 26px;
-    padding: 0 8px;
+    min-width: 28px;
+    max-width: 28px;
+    flex: 0 0 28px;
+    padding: 0 7px;
     border-left: 1px solid #d9e3ee !important;
     background: #fff;
     color: #516172;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .status-more-btn:hover {
     background: #f3f6f9;
 }
 
+.commit-log-tooltip .tooltip-inner {
+    max-width: 560px;
+    white-space: pre-line;
+    text-align: left;
+    line-height: 1.35;
+    font-size: 12px;
+}
+
 @media (max-width: 1400px) {
     .file-content {
-        grid-template-columns: 20px minmax(180px, 1fr) 72px 96px 96px 34px minmax(150px, 1fr) auto;
+        --file-action-width: 170px;
+        grid-template-columns: 20px minmax(250px, 360px) 74px 102px 98px 38px minmax(160px, 1fr) var(--file-action-width);
         gap: 8px;
     }
 }
 
 @media (max-width: 992px) {
     .file-content {
-        grid-template-columns: 20px minmax(170px, 1fr) 72px 90px auto;
+        --file-action-width: 164px;
+        grid-template-columns: 20px minmax(190px, 1fr) 72px minmax(150px, 1fr) var(--file-action-width);
     }
     .file-confirm-user, .file-author, .file-commit-count {
         display: none;
@@ -1205,19 +1245,24 @@ function renderDirectoryFiles(files) {
 
 
         // 解析提交信息
-        let commitAuthors = [];
-        let commitMessages = [];
-        try {
-            commitAuthors = file.commit_authors ? JSON.parse(file.commit_authors) : [];
-        } catch (e) {
-            commitAuthors = [];
-        }
-        try {
-            commitMessages = file.commit_messages ? JSON.parse(file.commit_messages) : [];
-        } catch (e) {
-            commitMessages = [];
-        }
-        const lastCommitMessage = commitMessages.length > 0 ? commitMessages[commitMessages.length - 1].trim() : '';
+        const commitAuthors = parseJsonArrayField(file.commit_authors, value => {
+            return String(value)
+                .split(/[,\uFF0C;\uFF1B|\n\r]+/)
+                .map(author => author.trim())
+                .filter(Boolean);
+        });
+        const commitMessages = parseJsonArrayField(file.commit_messages);
+        const normalizedCommitMessages = commitMessages
+            .map(message => String(message || '').trim())
+            .filter(Boolean);
+        const lastCommitMessage = normalizedCommitMessages.length > 0
+            ? normalizedCommitMessages[normalizedCommitMessages.length - 1]
+            : '';
+        const allCommitMessagesText = normalizedCommitMessages.length > 0
+            ? normalizedCommitMessages.map((message, index) => `${index + 1}. ${message}`).join('\n')
+            : '暂无提交日志';
+        const commitTooltipText = escapeHtmlAttribute(allCommitMessagesText).replace(/\r?\n/g, '&#10;');
+        const commitMessageDisplay = escapeHtmlText(lastCommitMessage || '暂无提交日志');
 
         // 处理提交人显示
         const uniqueAuthors = [...new Set(commitAuthors)];
@@ -1244,8 +1289,13 @@ function renderDirectoryFiles(files) {
                     <div class="file-commit-count">
                         <span class="commit-count-badge">${file.commit_count || 0}</span>
                     </div>
-                    <div class="file-commit-message" title="${lastCommitMessage}">
-                        ${lastCommitMessage || '暂无提交日志'}
+                    <div class="file-commit-message"
+                         title="${commitTooltipText}"
+                         data-bs-toggle="tooltip"
+                         data-bs-placement="top"
+                         data-bs-custom-class="commit-log-tooltip"
+                         data-bs-title="${commitTooltipText}">
+                        ${commitMessageDisplay}
                     </div>
                     <div class="file-actions">
                         <div class="action-buttons d-flex gap-3 align-items-center">
@@ -1354,6 +1404,40 @@ function getConfirmUserClass(statusClass) {
     return '';
 }
 
+function parseJsonArrayField(rawValue, fallbackParser = null) {
+    if (!rawValue) return [];
+    if (Array.isArray(rawValue)) return rawValue;
+
+    if (typeof rawValue === 'string') {
+        const trimmedValue = rawValue.trim();
+        if (!trimmedValue) return [];
+        try {
+            const parsed = JSON.parse(trimmedValue);
+            return Array.isArray(parsed) ? parsed : [parsed];
+        } catch (e) {
+            if (typeof fallbackParser === 'function') {
+                return fallbackParser(trimmedValue);
+            }
+            return [trimmedValue];
+        }
+    }
+
+    return [rawValue];
+}
+
+function escapeHtmlText(text) {
+    return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function escapeHtmlAttribute(text) {
+    return escapeHtmlText(text)
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function generateStatusButton(filePath, statusClass) {
     const buttonId = `btn-group-${filePath.replace(/[^a-zA-Z0-9]/g, '-')}`;
 
@@ -1424,9 +1508,15 @@ function openFullDiff(filePath) {
 
 function initializeTooltips() {
     // 初始化Bootstrap tooltips
-    const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
-    tooltipTriggerList.map(function (tooltipTriggerEl) {
-        return new bootstrap.Tooltip(tooltipTriggerEl);
+    const tooltipTriggerList = document.querySelectorAll('[data-bs-toggle="tooltip"]');
+    tooltipTriggerList.forEach(function (tooltipTriggerEl) {
+        const existingTooltip = bootstrap.Tooltip.getInstance(tooltipTriggerEl);
+        if (existingTooltip) {
+            existingTooltip.dispose();
+        }
+        new bootstrap.Tooltip(tooltipTriggerEl, {
+            container: 'body'
+        });
     });
 }
 

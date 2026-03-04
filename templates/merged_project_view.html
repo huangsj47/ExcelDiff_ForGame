@@ -368,7 +368,7 @@
                                     <div class="d-flex align-items-center mb-1">
                                         <i class="fas fa-tag me-2 text-muted"></i>
                                         <small class="text-muted me-2">资源类型:</small>
-                                        <span class="badge bg-secondary">
+                                        <span style="display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.72rem; font-weight: 600; {% if repo.resource_type == 'table' %}background: #fef3c7; color: #92400e;{% elif repo.resource_type == 'code' %}background: #dbeafe; color: #1e40af;{% else %}background: #f1f5f9; color: #475569;{% endif %}">
                                             {% if repo.resource_type == 'code' %}
                                                 <i class="fas fa-code me-1"></i>代码
                                             {% elif repo.resource_type == 'table' %}

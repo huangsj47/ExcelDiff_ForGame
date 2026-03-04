@@ -81,3 +81,47 @@ def test_weekly_files_api_handles_legacy_non_json_fields(monkeypatch):
     assert json.loads(first_file["commit_messages"]) == ["refs #123"]
     assert json.loads(first_file["commit_times"]) == []
     assert first_file["operations"] == []
+
+
+def test_weekly_files_api_keeps_short_confirm_username_visible(monkeypatch):
+    config = SimpleNamespace(
+        id=3,
+        project_id=1,
+        repository=SimpleNamespace(
+            name="repo_b",
+            enable_id_confirmation=True,
+        ),
+    )
+    fake_cache = SimpleNamespace(
+        file_path="src/confirm.lua",
+        commit_count=1,
+        commit_authors='["alice"]',
+        commit_messages='["ok"]',
+        commit_times='["2026-03-04 12:00:00"]',
+        overall_status="confirmed",
+        status_changed_by="admin",
+        confirmation_status='{"dev":"confirmed"}',
+        last_sync_time=None,
+        merged_diff_data='{"operations":["M"]}',
+    )
+
+    fake_config_model = SimpleNamespace(
+        query=SimpleNamespace(get_or_404=lambda _config_id: config),
+    )
+    fake_diff_model = SimpleNamespace(
+        query=SimpleNamespace(
+            filter_by=lambda **_kwargs: SimpleNamespace(all=lambda: [fake_cache]),
+        ),
+    )
+
+    monkeypatch.setattr(weekly_logic, "WeeklyVersionConfig", fake_config_model)
+    monkeypatch.setattr(weekly_logic, "WeeklyVersionDiffCache", fake_diff_model)
+
+    app = Flask(__name__)
+    with app.app_context():
+        response = weekly_logic.weekly_version_files_api(3)
+        payload = response.get_json()
+
+    assert payload["success"] is True
+    first_file = payload["files"][0]
+    assert first_file["confirm_user_display"] == "admin"

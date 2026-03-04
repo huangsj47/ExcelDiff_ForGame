@@ -1,0 +1,421 @@
+/* Unified light theme for diff detail pages (layout unchanged). */
+
+.unified-diff-page {
+    --ud-bg: linear-gradient(180deg, #f7f9fc 0%, #f3f7fb 100%);
+    --ud-card-bg: #ffffff;
+    --ud-card-border: #d9e3ee;
+    --ud-card-header-bg: linear-gradient(180deg, #f9fbfe 0%, #edf3f9 100%);
+    --ud-text: #0f172a;
+    --ud-muted: #64748b;
+    --ud-link: #1976d2;
+    --ud-code-bg: #f1f6fb;
+    --ud-code-text: #174a7a;
+    --ud-shadow: 0 6px 20px rgba(15, 23, 42, 0.06);
+    --ud-success-bg: #e8f8f1;
+    --ud-success-text: #0f8a5f;
+    --ud-success-border: #bfe5d3;
+    --ud-danger-bg: #ffefef;
+    --ud-danger-text: #b63f3f;
+    --ud-danger-border: #f4c7c7;
+    font-family: "Fira Sans", "Segoe UI", sans-serif;
+    color: var(--ud-text);
+}
+
+.unified-diff-page {
+    background: var(--ud-bg);
+    padding: 10px 8px 18px;
+    border-radius: 14px;
+}
+
+.unified-diff-page .breadcrumb {
+    margin-bottom: 0;
+    padding: 8px 12px;
+    border: 1px solid #e4ecf3;
+    border-radius: 10px;
+    background: #ffffff;
+}
+
+.unified-diff-page .breadcrumb-item + .breadcrumb-item::before {
+    color: #8aa0b5;
+}
+
+.unified-diff-page .breadcrumb a {
+    color: var(--ud-link);
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.unified-diff-page .breadcrumb a:hover {
+    text-decoration: underline;
+}
+
+.unified-diff-page .card {
+    background: var(--ud-card-bg);
+    border: 1px solid var(--ud-card-border);
+    border-radius: 12px;
+    box-shadow: var(--ud-shadow);
+    overflow: hidden;
+}
+
+.unified-diff-page .card-header {
+    border-bottom: 1px solid #dbe5ef;
+    background: var(--ud-card-header-bg) !important;
+}
+
+.unified-diff-page .card-body {
+    color: var(--ud-text);
+}
+
+.unified-diff-page .text-muted {
+    color: var(--ud-muted) !important;
+}
+
+.unified-diff-page h5,
+.unified-diff-page h6 {
+    color: #1e293b;
+    font-weight: 700;
+}
+
+.unified-diff-page code {
+    background: var(--ud-code-bg);
+    color: var(--ud-code-text);
+    border: 1px solid #dbe7f3;
+    border-radius: 6px;
+    padding: 1px 6px;
+}
+
+.unified-diff-page .btn {
+    border-radius: 9px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+
+.unified-diff-page .btn:hover {
+    transform: translateY(-1px);
+}
+
+.unified-diff-page .btn-success {
+    background: linear-gradient(180deg, #24b67b 0%, #179564 100%);
+    border: none;
+    color: #ffffff;
+    box-shadow: 0 2px 8px rgba(23, 149, 100, 0.24);
+}
+
+.unified-diff-page .btn-danger {
+    background: linear-gradient(180deg, #e85e5e 0%, #cb4343 100%);
+    border: none;
+    color: #ffffff;
+    box-shadow: 0 2px 8px rgba(203, 67, 67, 0.22);
+}
+
+.unified-diff-page .btn-warning {
+    background: linear-gradient(180deg, #ffcf66 0%, #f2b63f 100%);
+    border: none;
+    color: #5f4300;
+    box-shadow: 0 2px 8px rgba(242, 182, 63, 0.2);
+}
+
+.unified-diff-page .btn-secondary {
+    background: #f4f8fc;
+    border: 1px solid #d6e1eb;
+    color: #334155;
+}
+
+.unified-diff-page .btn-outline-primary,
+.unified-diff-page .btn-outline-secondary {
+    border-width: 1px;
+}
+
+.unified-diff-page .badge.status-pending,
+.unified-diff-page .status-pending {
+    background: #fff5cc;
+    color: #8a6700;
+}
+
+.unified-diff-page .badge.status-reviewed,
+.unified-diff-page .status-reviewed {
+    background: #eaf3ff;
+    color: #1e40af;
+}
+
+.unified-diff-page .badge.status-confirmed,
+.unified-diff-page .status-confirmed {
+    background: var(--ud-success-bg);
+    color: var(--ud-success-text);
+}
+
+.unified-diff-page .badge.status-rejected,
+.unified-diff-page .status-rejected {
+    background: var(--ud-danger-bg);
+    color: var(--ud-danger-text);
+}
+
+.unified-diff-page .version-info {
+    background: #f8fbff;
+    border: 1px solid #dce7f3;
+    border-radius: 10px;
+    padding: 12px 14px;
+}
+
+.unified-diff-page .version-info.current-version-pane {
+    background: var(--ud-success-bg) !important;
+    border-color: var(--ud-success-border) !important;
+}
+
+.unified-diff-page .version-info.base-version-pane {
+    background: #fff3f3 !important;
+    border-color: var(--ud-danger-border) !important;
+}
+
+.unified-diff-page .version-info.current-version-pane h6 {
+    color: #0e7a54 !important;
+}
+
+.unified-diff-page .version-info.base-version-pane h6 {
+    color: #9f3232 !important;
+}
+
+.unified-diff-page .version-card {
+    border-radius: 10px;
+    border: 1px solid #dce7f3;
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+}
+
+.unified-diff-page .current-version .version-header {
+    background: linear-gradient(180deg, #24b67b 0%, #179564 100%) !important;
+}
+
+.unified-diff-page .base-version .version-header {
+    background: linear-gradient(180deg, #e85e5e 0%, #cb4343 100%) !important;
+}
+
+.unified-diff-page .diff-container,
+.unified-diff-page .text-diff-container,
+.unified-diff-page .excel-diff-container,
+.unified-diff-page .image-diff-container,
+.unified-diff-page .binary-diff-container {
+    border-radius: 12px;
+    border-color: var(--ud-card-border);
+    box-shadow: 0 4px 16px rgba(15, 23, 42, 0.05);
+}
+
+.unified-diff-page .text-diff-header,
+.unified-diff-page .excel-sheet-tabs-container,
+.unified-diff-page .image-diff-header,
+.unified-diff-page .binary-diff-header {
+    border-color: #dbe5ef;
+}
+
+.unified-diff-page .excel-sheet-tab.active {
+    border-bottom-color: #1976d2;
+    color: #1976d2;
+}
+
+.unified-diff-page .excel-table-wrapper {
+    border-radius: 10px;
+    border-color: #dce7f3;
+}
+
+.unified-diff-page .diff-error {
+    border-radius: 10px;
+}
+
+@media (max-width: 992px) {
+    .unified-diff-page {
+        padding-left: 4px;
+        padding-right: 4px;
+    }
+}
+
+/* Full-screen diff pages (git_style_diff / full_file_diff) */
+.unified-diff-screen.unified-diff-page {
+    min-height: 100vh;
+    padding: 0;
+    border-radius: 0;
+}
+
+.unified-diff-screen.unified-diff-page .diff-header {
+    background: linear-gradient(180deg, #f9fbfe 0%, #edf3f9 100%) !important;
+    border-bottom: 1px solid #dbe5ef !important;
+    box-shadow: 0 2px 10px rgba(15, 23, 42, 0.06) !important;
+}
+
+.unified-diff-screen.unified-diff-page .file-path {
+    background: #f1f6fb !important;
+    border: 1px solid #dbe7f3;
+    color: #174a7a;
+    border-radius: 7px;
+}
+
+.unified-diff-screen.unified-diff-page .commit-info,
+.unified-diff-screen.unified-diff-page .version-info {
+    color: #5f7386 !important;
+}
+
+.unified-diff-screen.unified-diff-page .panel-header {
+    background: #f7fbff !important;
+    border-bottom: 1px solid #dbe5ef !important;
+    color: #334155 !important;
+    font-weight: 700;
+}
+
+.unified-diff-screen.unified-diff-page .panel-header.previous {
+    background: #fff2f2 !important;
+    color: #9f3232 !important;
+}
+
+.unified-diff-screen.unified-diff-page .panel-header.current {
+    background: #edf8ff !important;
+    color: #155fa8 !important;
+}
+
+.unified-diff-screen.unified-diff-page .diff-panel {
+    background: #ffffff !important;
+    border-right: 1px solid #dbe5ef !important;
+}
+
+.unified-diff-screen.unified-diff-page .line-number {
+    background: #f6f9fc !important;
+    color: #687a8c !important;
+    border-right: 1px solid #dbe5ef !important;
+}
+
+.unified-diff-screen.unified-diff-page .diff-line.added,
+.unified-diff-screen.unified-diff-page .code-line.added {
+    background-color: #e8f8f1 !important;
+}
+
+.unified-diff-screen.unified-diff-page .diff-line.removed,
+.unified-diff-screen.unified-diff-page .code-line.removed {
+    background-color: #ffefef !important;
+}
+
+.unified-diff-screen.unified-diff-page .diff-line.modified,
+.unified-diff-screen.unified-diff-page .code-line.modified {
+    background-color: #fff6db !important;
+}
+
+.unified-diff-screen.unified-diff-page .resizer {
+    background: #d4e0eb !important;
+}
+
+.unified-diff-screen.unified-diff-page .resizer:hover {
+    background: #1976d2 !important;
+}
+
+.unified-diff-screen.unified-diff-page .btn-outline-primary {
+    color: #1976d2;
+    border-color: #c8dbef;
+    background: #f7fbff;
+}
+
+.unified-diff-screen.unified-diff-page .btn-outline-primary:hover:not(:disabled) {
+    color: #ffffff;
+    border-color: #1976d2;
+    background: #1976d2;
+}
+
+.unified-diff-screen.unified-diff-page .btn-outline-secondary {
+    color: #334155;
+    border-color: #d6e1eb;
+    background: #f4f8fc;
+}
+
+.unified-diff-screen.unified-diff-page .badge.bg-secondary {
+    background: #eaf1f8 !important;
+    color: #465a6f !important;
+    border: 1px solid #d4e1ee;
+}
+
+.unified-diff-screen.unified-diff-page .stat-added {
+    color: #0f8a5f !important;
+}
+
+.unified-diff-screen.unified-diff-page .stat-removed {
+    color: #b63f3f !important;
+}
+
+/* Merge diff pages (merge_diff / enhanced_merge_diff) */
+.unified-merge-page.unified-diff-page {
+    padding-top: 12px;
+}
+
+.unified-merge-page.unified-diff-page .merge-diff-container,
+.unified-merge-page.unified-diff-page .diff-container {
+    border-radius: 12px;
+}
+
+.unified-merge-page.unified-diff-page .commit-list-card,
+.unified-merge-page.unified-diff-page .file-section,
+.unified-merge-page.unified-diff-page .segment,
+.unified-merge-page.unified-diff-page .single-merge-container .card {
+    border: 1px solid #d9e3ee !important;
+    border-radius: 12px !important;
+    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+    overflow: hidden;
+}
+
+.unified-merge-page.unified-diff-page .file-header,
+.unified-merge-page.unified-diff-page .segment-header,
+.unified-merge-page.unified-diff-page .diff-file-header {
+    background: linear-gradient(180deg, #f9fbfe 0%, #edf3f9 100%) !important;
+    border-bottom: 1px solid #dbe5ef !important;
+    color: #334155 !important;
+}
+
+.unified-merge-page.unified-diff-page .segment-header {
+    background: linear-gradient(180deg, #fff8df 0%, #fff1c8 100%) !important;
+}
+
+.unified-merge-page.unified-diff-page .segment-header h5 {
+    color: #8a6700 !important;
+}
+
+.unified-merge-page.unified-diff-page .file-path-code,
+.unified-merge-page.unified-diff-page .commit-id {
+    background: #f1f6fb !important;
+    border: 1px solid #dbe7f3;
+    color: #174a7a !important;
+}
+
+.unified-merge-page.unified-diff-page .commit-info,
+.unified-merge-page.unified-diff-page .segment-info,
+.unified-merge-page.unified-diff-page .commit-meta-info,
+.unified-merge-page.unified-diff-page .author-text,
+.unified-merge-page.unified-diff-page .time-text,
+.unified-merge-page.unified-diff-page .filename-text {
+    color: #5f7386 !important;
+}
+
+.unified-merge-page.unified-diff-page .commit-info-table thead th,
+.unified-merge-page.unified-diff-page .table > :not(caption) > * > th {
+    background: #f7fbff !important;
+    border-bottom: 1px solid #dbe5ef !important;
+    color: #334155 !important;
+    font-weight: 700;
+}
+
+.unified-merge-page.unified-diff-page .commit-row:hover,
+.unified-merge-page.unified-diff-page .table-hover > tbody > tr:hover > * {
+    background: #f7fbff !important;
+}
+
+.unified-merge-page.unified-diff-page .loading-container,
+.unified-merge-page.unified-diff-page .loading-state {
+    background: #f8fbff !important;
+    border: 1px solid #dce7f3 !important;
+    border-radius: 10px !important;
+    color: #5f7386 !important;
+}
+
+.unified-merge-page.unified-diff-page .loading-spinner {
+    border-top-color: #1976d2 !important;
+}
+
+.unified-merge-page.unified-diff-page .error-state {
+    background: #ffefef !important;
+    border: 1px solid #f4c7c7 !important;
+    color: #b63f3f !important;
+    border-radius: 10px !important;
+}

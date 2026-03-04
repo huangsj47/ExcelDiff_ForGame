@@ -5,6 +5,7 @@
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=1.0">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/excel-scroll-fix.css') }}?v=2.0">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.0">
 <style>
     /* 仅对diff代码区域放大到105% */
     .diff-content {
@@ -30,7 +31,7 @@
 {% endblock %}
 
 {% block content %}
-<div class="container-fluid">
+<div class="container-fluid unified-diff-page">
     <!-- 面包屑导航 -->
     <nav aria-label="breadcrumb" class="mb-3">
         <ol class="breadcrumb">
@@ -85,7 +86,7 @@
             <!-- 版本信息对比 -->
             <div class="row">
                 <div class="col-md-6">
-                    <div class="version-info p-3 rounded" style="background-color: #d4edda; border: 1px solid #c3e6cb;">
+                    <div class="version-info current-version-pane p-3 rounded" style="background-color: #d4edda; border: 1px solid #c3e6cb;">
                         <h6 class="mb-2 fw-bold" style="color: #155724;">当前版本</h6>
                         <div><strong>Commit ID:</strong> <code>{{ commit.commit_id[:8] }}</code></div>
                         <div><strong>提交时间:</strong> {{ format_beijing_time(commit.commit_time, '%Y-%m-%d %H:%M:%S') if commit.commit_time else 'N/A' }}</div>
@@ -96,7 +97,7 @@
                     </div>
                 </div>
                 <div class="col-md-6">
-                    <div class="version-info p-3 rounded" style="background-color: #f8d7da; border: 1px solid #f5c6cb;">
+                    <div class="version-info base-version-pane p-3 rounded" style="background-color: #f8d7da; border: 1px solid #f5c6cb;">
                         <h6 class="mb-2 fw-bold" style="color: #721c24;">对比版本</h6>
                         <div><strong>Commit ID:</strong> 
                             {% if previous_commit %}

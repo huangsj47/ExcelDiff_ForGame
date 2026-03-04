@@ -154,10 +154,13 @@
                 </div>
                 <div class="card-title">
                     <h3>HTML缓存统计</h3>
-                    <p>渲染结果缓存</p>
+                    <p>单提交Excel Diff渲染缓存（不含周版本Excel缓存）</p>
                 </div>
             </div>
             <div class="card-content">
+                <div id="htmlCacheRuntimeHint" style="font-size:0.75rem; color:#475569; margin-bottom:0.5rem;">
+                    说明：该统计来自提交页 Excel Diff 接口，周版本页使用下方“周版本Excel缓存统计”。
+                </div>
                 <div id="html-cache-stats" class="stats-grid">
                     <div class="stat-item">
                         <div class="stat-value" id="htmlTotalCount">-</div>
@@ -1322,6 +1325,17 @@ function updateStatsDisplay(data) {
     safeUpdateElement('weeklyExcelProcessingCount', weeklyExcelCache.processing_count);
     safeUpdateElement('weeklyExcelFailedCount', weeklyExcelCache.failed_count);
     safeUpdateElement('weeklyExcelTotalSize', weeklyExcelCache.total_size ? (weeklyExcelCache.total_size / 1024 / 1024).toFixed(2) : 0);
+
+    const htmlHint = document.getElementById('htmlCacheRuntimeHint');
+    if (htmlHint) {
+        const htmlTotal = Number(htmlCache.total_count || 0);
+        const weeklyTotal = Number(weeklyExcelCache.total_count || 0);
+        if (htmlTotal === 0 && weeklyTotal > 0) {
+            htmlHint.textContent = '当前HTML缓存为0通常表示尚未触发提交页Excel Diff接口；周版本缓存已单独统计。';
+        } else {
+            htmlHint.textContent = '说明：该统计来自提交页 Excel Diff 接口，周版本页使用下方“周版本Excel缓存统计”。';
+        }
+    }
 
     // 更新版本号
     if (data.current_version) {
