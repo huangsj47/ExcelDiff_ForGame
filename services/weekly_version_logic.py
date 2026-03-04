@@ -702,8 +702,14 @@ def weekly_version_files_api(config_id):
         username_to_display_name = {}
         if all_confirm_usernames:
             try:
-                from auth.models import AuthUser
-                users = AuthUser.query.filter(AuthUser.username.in_(list(all_confirm_usernames))).all()
+                from auth import get_auth_backend
+
+                if get_auth_backend() == "qkit":
+                    from qkit_auth.models import QkitAuthUser as _UserModel
+                else:
+                    from auth.models import AuthUser as _UserModel
+
+                users = _UserModel.query.filter(_UserModel.username.in_(list(all_confirm_usernames))).all()
                 username_to_display_name = {
                     user.username: (user.display_name or user.username) for user in users
                 }

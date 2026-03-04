@@ -816,6 +816,8 @@ def apply_pre_assignments(user: AuthUser) -> int:
             approved_by=pa.assigned_by,
         )
         db.session.add(membership)
+        if pa.role == ProjectRole.ADMIN.value and user.role == PlatformRole.NORMAL.value:
+            user.role = PlatformRole.PROJECT_ADMIN.value
 
         pa.applied = True
         pa.applied_at = datetime.now(timezone.utc)

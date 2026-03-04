@@ -1,0 +1,300 @@
+{% extends "base.html" %}
+
+{% block title %}Qkit项目成员 - {{ project.name }}{% endblock %}
+
+{% block head %}
+<style>
+    .page-header {
+        background: linear-gradient(135deg, #1f2937 0%, #0f172a 100%);
+        color: #f8fafc;
+        border-radius: 14px;
+        padding: 1.2rem 1.4rem;
+        margin-bottom: 1rem;
+    }
+    .page-header h3 { margin: 0; font-size: 1.25rem; font-weight: 700; }
+    .page-header p { margin: .26rem 0 0; opacity: .86; font-size: .87rem; }
+
+    .qkit-card {
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        box-shadow: 0 2px 10px rgba(2,6,23,.05);
+        margin-bottom: 1rem;
+        overflow: hidden;
+    }
+    .qkit-card .card-header {
+        background: #f8fafc;
+        border-bottom: 1px solid #e5e7eb;
+        font-size: .92rem;
+        font-weight: 600;
+        padding: .8rem 1rem;
+    }
+
+    .hint-box {
+        border: 1px dashed #cbd5e1;
+        border-radius: 10px;
+        background: #f8fafc;
+        padding: .7rem;
+        font-size: .81rem;
+        color: #475569;
+    }
+    .hint-box img {
+        width: 100%;
+        max-width: 360px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        margin-top: .55rem;
+    }
+
+    .report-box {
+        margin-top: .7rem;
+        border-radius: 10px;
+        border: 1px solid #cbd5e1;
+        background: #f8fafc;
+        color: #334155;
+        font-size: .81rem;
+        padding: .65rem .76rem;
+        display: none;
+    }
+    .report-line { margin: .16rem 0; }
+    .table th {
+        font-size: .75rem;
+        text-transform: uppercase;
+        letter-spacing: .03em;
+        color: #64748b;
+        white-space: nowrap;
+    }
+    .table td { font-size: .85rem; vertical-align: middle; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h3>Qkit项目成员管理 · {{ project.code }} / {{ project.name }}</h3>
+    <p>按项目配置导入参数并执行增量导入。删除成员后会阻断回流；手工改角色后导入不再覆盖该成员权限。</p>
+</div>
+
+<div class="qkit-card card">
+    <div class="card-header">1) Redmine 导入参数配置（仅当前项目）</div>
+    <div class="card-body">
+        <div class="row g-3">
+            <div class="col-md-4">
+                <label class="form-label mb-1">token</label>
+                <input id="cfgToken" type="text" class="form-control form-control-sm" value="{{ import_config.token if import_config else '' }}" placeholder="请输入 token">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label mb-1">host</label>
+                <input id="cfgHost" type="text" class="form-control form-control-sm" value="{{ import_config.host if import_config else '' }}" placeholder="如：g119.pm.netease.com">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label mb-1">project（可选）</label>
+                <input id="cfgProjectName" type="text" class="form-control form-control-sm" value="{{ import_config.project_name if import_config else '' }}" placeholder="如：G119-破碎之地">
+            </div>
+        </div>
+        <div class="mt-3 d-flex gap-2">
+            <button class="btn btn-sm btn-primary" onclick="saveImportConfig()">保存配置</button>
+            <button class="btn btn-sm btn-success" onclick="runImport()">保存并导入</button>
+        </div>
+        <div class="hint-box mt-3">
+            获取 token/host：<a href="http://redmineapi.nie.netease.com/home/#/api/myinfo" target="_blank" rel="noopener">http://redmineapi.nie.netease.com/home/#/api/myinfo</a><br>
+            `project` 参数可填写易协作项目名（非必填），填写后接口可返回用户职能字段。
+            <img src="{{ url_for('qkit_auth_bp.project_name_hint_image') }}" alt="project参数示例">
+        </div>
+        <div id="importReport" class="report-box"></div>
+    </div>
+</div>
+
+<div class="qkit-card card">
+    <div class="card-header">2) 手动添加成员（用于处理邮箱前缀冲突后的人工修正）</div>
+    <div class="card-body">
+        <div class="row g-2 align-items-end">
+            <div class="col-md-4">
+                <label class="form-label mb-1">用户名</label>
+                <input id="manualUsername" type="text" class="form-control form-control-sm" placeholder="邮箱前缀，如 abc">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-1">角色</label>
+                <select id="manualRole" class="form-select form-select-sm">
+                    <option value="member">成员</option>
+                    <option value="project_admin">项目管理员</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-1">职能（可选）</label>
+                <input id="manualFunction" type="text" class="form-control form-control-sm" placeholder="任意字符">
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-sm btn-outline-primary w-100" onclick="addManualMember()">添加</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="qkit-card card">
+    <div class="card-header">3) 当前项目成员（{{ members|length }}）</div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>用户名</th>
+                        <th>显示名</th>
+                        <th>邮箱</th>
+                        <th>项目角色</th>
+                        <th>职能</th>
+                        <th>导入状态</th>
+                        <th>加入时间</th>
+                        <th class="text-end">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for m in members %}
+                    <tr>
+                        <td><strong>{{ m.user.username }}</strong></td>
+                        <td>{{ m.user.display_name or '-' }}</td>
+                        <td>{{ m.user.email or '-' }}</td>
+                        <td>
+                            {% if m.role == 'admin' %}
+                            <span class="badge bg-primary">项目管理员</span>
+                            {% else %}
+                            <span class="badge bg-secondary">成员</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ m.function_name or '-' }}</td>
+                        <td>
+                            {% if m.imported_from_qkit %}
+                                <span class="badge bg-success-subtle text-success">导入用户</span>
+                                {% if m.import_sync_locked %}
+                                <span class="badge bg-warning-subtle text-warning">权限已锁定</span>
+                                {% endif %}
+                            {% else %}
+                                <span class="badge bg-light text-dark">手工用户</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ format_beijing_time(m.joined_at, '%Y-%m-%d %H:%M') if m.joined_at else '-' }}</td>
+                        <td class="text-end">
+                            <div class="btn-group btn-group-sm">
+                                <button class="btn btn-outline-primary dropdown-toggle" data-bs-toggle="dropdown">角色</button>
+                                <ul class="dropdown-menu dropdown-menu-end">
+                                    <li><a href="#" class="dropdown-item {% if m.role == 'admin' %}active{% endif %}" onclick="updateRole({{ m.user_id }}, 'project_admin'); return false;">项目管理员</a></li>
+                                    <li><a href="#" class="dropdown-item {% if m.role != 'admin' %}active{% endif %}" onclick="updateRole({{ m.user_id }}, 'member'); return false;">成员</a></li>
+                                </ul>
+                                <button class="btn btn-outline-danger" onclick="removeMember({{ m.user_id }}, '{{ m.user.username }}')">移除</button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    {% if not members %}
+                    <tr><td colspan="8" class="text-center text-muted py-3">暂无成员</td></tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const csrfToken = "{{ csrf_token() }}";
+const projectId = {{ project.id }};
+
+function apiCall(url, method, body) {
+    return fetch(url, {
+        method,
+        headers: {
+            "Content-Type": "application/json",
+            "X-CSRFToken": csrfToken,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+    }).then(r => r.json());
+}
+
+function showReport(lines, isError=false) {
+    const box = document.getElementById("importReport");
+    box.style.display = "block";
+    box.style.borderColor = isError ? "#fecaca" : "#cbd5e1";
+    box.style.background = isError ? "#fff1f2" : "#f8fafc";
+    box.innerHTML = lines.map(x => `<div class="report-line">${x}</div>`).join("");
+}
+
+function saveImportConfig() {
+    const token = document.getElementById("cfgToken").value.trim();
+    const host = document.getElementById("cfgHost").value.trim();
+    const project_name = document.getElementById("cfgProjectName").value.trim();
+    apiCall(`/auth/api/project/${projectId}/qkit-import-config`, "POST", { token, host, project_name })
+        .then(data => {
+            if (!data.success) {
+                showReport([data.message || "保存失败"], true);
+                return;
+            }
+            showReport(["导入配置已保存。"]);
+        });
+}
+
+function runImport() {
+    const token = document.getElementById("cfgToken").value.trim();
+    const host = document.getElementById("cfgHost").value.trim();
+    const project_name = document.getElementById("cfgProjectName").value.trim();
+    showReport(["正在保存配置并执行导入..."]);
+    apiCall(`/auth/api/project/${projectId}/qkit-import-config`, "POST", { token, host, project_name })
+        .then(cfgResp => {
+            if (!cfgResp.success) {
+                showReport([cfgResp.message || "保存配置失败"], true);
+                return Promise.reject(new Error("cfg-failed"));
+            }
+            return apiCall(`/auth/api/project/${projectId}/qkit-import`, "POST", {});
+        })
+        .then(data => {
+            if (!data.success) {
+                showReport([data.message || "导入失败"], true);
+                return;
+            }
+            const lines = [];
+            lines.push(`<strong>${data.message}</strong>`);
+            lines.push(`远端返回人数：${data.remote_count || 0}`);
+            if (Array.isArray(data.skipped_removed) && data.skipped_removed.length) {
+                lines.push(`删除阻断：<code>${data.skipped_removed.join(", ")}</code>`);
+            }
+            if (Array.isArray(data.skipped_locked) && data.skipped_locked.length) {
+                lines.push(`权限锁定跳过：<code>${data.skipped_locked.join(", ")}</code>`);
+            }
+            if (Array.isArray(data.conflicts) && data.conflicts.length) {
+                lines.push(`前缀冲突：<code>${data.conflicts.map(c => `${c.username}(${c.existing_email} != ${c.incoming_email})`).join("; ")}</code>`);
+            }
+            if (Array.isArray(data.skipped_invalid) && data.skipped_invalid.length) {
+                lines.push(`无效记录跳过：<code>${data.skipped_invalid.join(", ")}</code>`);
+            }
+            showReport(lines);
+            setTimeout(() => location.reload(), 600);
+        })
+        .catch(err => {
+            if (String(err.message || "") !== "cfg-failed") {
+                showReport(["导入过程异常，请稍后重试。"], true);
+            }
+        });
+}
+
+function addManualMember() {
+    const username = document.getElementById("manualUsername").value.trim();
+    const role = document.getElementById("manualRole").value;
+    const function_name = document.getElementById("manualFunction").value.trim();
+    if (!username) {
+        alert("请输入用户名");
+        return;
+    }
+    apiCall(`/auth/api/project/${projectId}/members`, "POST", { username, role, function_name })
+        .then(data => data.success ? location.reload() : alert(data.message || "添加失败"));
+}
+
+function updateRole(userId, role) {
+    apiCall(`/auth/api/project/${projectId}/members/${userId}/role`, "POST", { role })
+        .then(data => data.success ? location.reload() : alert(data.message || "更新失败"));
+}
+
+function removeMember(userId, username) {
+    if (!confirm(`确认移除成员 ${username}？移除后该用户将不会被导入自动回流。`)) return;
+    apiCall(`/auth/api/project/${projectId}/members/${userId}`, "DELETE", {})
+        .then(data => data.success ? location.reload() : alert(data.message || "移除失败"));
+}
+</script>
+{% endblock %}
