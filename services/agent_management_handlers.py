@@ -85,6 +85,15 @@ def _normalize_agent_code(agent_code: str, agent_name: str, host: str) -> str:
     return normalized[:100]
 
 
+def _normalize_identity_username(value: str) -> str:
+    username = str(value or "").strip()
+    if username.endswith("@corp.netease.com"):
+        username = username.split("@", 1)[0]
+    if "@" in username:
+        username = username.split("@", 1)[0]
+    return username.strip()
+
+
 def _to_int_or_none(value, min_value=None, max_value=None):
     try:
         iv = int(value)
@@ -161,7 +170,7 @@ def _apply_agent_runtime_fields(agent, payload: dict):
     agent.last_heartbeat = now_utc
 
 
-def _format_agent_rows(agents, bindings_by_agent_id):
+def _format_agent_rows(agents, bindings_by_agent_id, default_admins_by_agent_id):
     name_counter = Counter(
         (str(item.agent_name or "").strip().lower() or "agent")
         for item in agents
@@ -176,6 +185,11 @@ def _format_agent_rows(agents, bindings_by_agent_id):
             display_name = raw_name
 
         binding_rows = bindings_by_agent_id.get(agent.id, [])
+        default_admins = sorted(default_admins_by_agent_id.get(agent.id, set()))
+        latest_default_admin = _normalize_identity_username(agent.default_admin_username or "")
+        if latest_default_admin and latest_default_admin not in default_admins:
+            default_admins.append(latest_default_admin)
+            default_admins = sorted(set(default_admins))
         rows.append(
             {
                 "agent_code": agent.agent_code,
@@ -185,7 +199,8 @@ def _format_agent_rows(agents, bindings_by_agent_id):
                 "port": agent.port,
                 "status": agent.status,
                 "last_heartbeat": agent.last_heartbeat.isoformat() if agent.last_heartbeat else None,
-                "default_admin_username": agent.default_admin_username,
+                "default_admin_username": latest_default_admin,
+                "default_admin_usernames": default_admins,
                 "project_codes": [binding.project_code for binding in binding_rows],
                 "project_count": len(binding_rows),
                 "cpu_cores": agent.cpu_cores,
@@ -203,7 +218,11 @@ def _format_agent_rows(agents, bindings_by_agent_id):
 
 
 def build_agent_node_items():
-    AgentNode, AgentProjectBinding = get_runtime_models("AgentNode", "AgentProjectBinding")
+    AgentNode, AgentProjectBinding, AgentDefaultAdmin = get_runtime_models(
+        "AgentNode",
+        "AgentProjectBinding",
+        "AgentDefaultAdmin",
+    )
     agents = AgentNode.query.order_by(AgentNode.updated_at.desc()).all()
     if not agents:
         return []
@@ -217,7 +236,16 @@ def build_agent_node_items():
     bindings_by_agent_id = {}
     for row in bindings:
         bindings_by_agent_id.setdefault(row.agent_id, []).append(row)
-    return _format_agent_rows(agents, bindings_by_agent_id)
+
+    default_admins_by_agent_id = {}
+    admin_rows = AgentDefaultAdmin.query.filter(AgentDefaultAdmin.agent_id.in_(agent_ids)).all()
+    for row in admin_rows:
+        username = _normalize_identity_username(row.username or "")
+        if not username:
+            continue
+        default_admins_by_agent_id.setdefault(row.agent_id, set()).add(username)
+
+    return _format_agent_rows(agents, bindings_by_agent_id, default_admins_by_agent_id)
 
 
 def _ensure_default_admin_for_projects(db, default_admin_username: str | None, project_ids: list[int] | None):
@@ -235,8 +263,27 @@ def _ensure_default_admin_for_projects(db, default_admin_username: str | None, p
             "updated_preassignments": 0,
         }
 
+    auth_backend = "local"
     try:
-        from auth.models import AuthProjectPreAssignment, AuthUser, AuthUserProject
+        from auth import get_auth_backend
+
+        auth_backend = get_auth_backend()
+    except Exception:
+        auth_backend = "local"
+
+    try:
+        if auth_backend == "qkit":
+            from qkit_auth.models import (
+                QkitAuthProjectPreAssignment as ProjectPreAssignmentModel,
+                QkitAuthUser as UserModel,
+                QkitAuthUserProject as UserProjectModel,
+            )
+        else:
+            from auth.models import (
+                AuthProjectPreAssignment as ProjectPreAssignmentModel,
+                AuthUser as UserModel,
+                AuthUserProject as UserProjectModel,
+            )
     except Exception as exc:
         return {
             "mode": "auth_unavailable",
@@ -255,21 +302,28 @@ def _ensure_default_admin_for_projects(db, default_admin_username: str | None, p
     created_preassignments = 0
     updated_preassignments = 0
 
-    existing_user = AuthUser.query.filter_by(username=username).first()
+    existing_user = UserModel.query.filter_by(username=username).first()
     if existing_user:
+        # 不降级已有平台角色；普通用户提升为项目管理员角色（平台级标识）
+        if hasattr(existing_user, "role"):
+            current_role = str(getattr(existing_user, "role") or "").strip()
+            if current_role in {"", "normal"}:
+                existing_user.role = "project_admin"
         for project_id in normalized_project_ids:
-            membership = AuthUserProject.query.filter_by(
+            membership = UserProjectModel.query.filter_by(
                 user_id=existing_user.id,
                 project_id=project_id,
             ).first()
             if membership:
                 if membership.role != target_role:
                     membership.role = target_role
+                    if hasattr(membership, "import_sync_locked"):
+                        membership.import_sync_locked = True
                     updated_memberships += 1
                 continue
 
             db.session.add(
-                AuthUserProject(
+                UserProjectModel(
                     user_id=existing_user.id,
                     project_id=project_id,
                     role=target_role,
@@ -288,7 +342,7 @@ def _ensure_default_admin_for_projects(db, default_admin_username: str | None, p
         }
 
     for project_id in normalized_project_ids:
-        pre = AuthProjectPreAssignment.query.filter_by(
+        pre = ProjectPreAssignmentModel.query.filter_by(
             username=username,
             project_id=project_id,
         ).first()
@@ -298,7 +352,7 @@ def _ensure_default_admin_for_projects(db, default_admin_username: str | None, p
                 updated_preassignments += 1
             continue
         db.session.add(
-            AuthProjectPreAssignment(
+            ProjectPreAssignmentModel(
                 username=username,
                 project_id=project_id,
                 role=target_role,
@@ -452,10 +506,11 @@ def _apply_auto_sync_result(task, result_payload):
 
 def register_agent_node():
     """Agent 注册并申请绑定项目代号。"""
-    db, AgentNode, AgentProjectBinding, Project, log_print = get_runtime_models(
+    db, AgentNode, AgentProjectBinding, AgentDefaultAdmin, Project, log_print = get_runtime_models(
         "db",
         "AgentNode",
         "AgentProjectBinding",
+        "AgentDefaultAdmin",
         "Project",
         "log_print",
     )
@@ -472,7 +527,7 @@ def register_agent_node():
             agent_name,
             host or "",
         )
-        default_admin_username = str(payload.get("default_admin_username", "")).strip() or None
+        default_admin_username = _normalize_identity_username(payload.get("default_admin_username") or "") or None
         capabilities = payload.get("capabilities")
 
         project_specs = _normalize_project_specs(
@@ -505,6 +560,20 @@ def register_agent_node():
         agent.default_admin_username = default_admin_username
         agent.capabilities = None if capabilities is None else str(capabilities)
         agent.last_error = None
+        default_admin_record_created = False
+        if default_admin_username:
+            existed = AgentDefaultAdmin.query.filter_by(
+                agent_id=agent.id,
+                username=default_admin_username,
+            ).first()
+            if existed is None:
+                db.session.add(
+                    AgentDefaultAdmin(
+                        agent_id=agent.id,
+                        username=default_admin_username,
+                    )
+                )
+                default_admin_record_created = True
 
         created_projects = []
         idempotent_projects = []
@@ -555,15 +624,36 @@ def register_agent_node():
                 409,
             )
 
+        existing_bindings = AgentProjectBinding.query.filter_by(agent_id=agent.id).all()
+        all_bound_project_ids = sorted(
+            {
+                int(pid)
+                for pid in ([row.project_id for row in existing_bindings] + bound_project_ids)
+                if pid
+            }
+        )
+
         default_admin_assignment = _ensure_default_admin_for_projects(
             db,
             default_admin_username,
-            bound_project_ids,
+            all_bound_project_ids,
         )
+
+        default_admin_usernames = sorted(
+            {
+                _normalize_identity_username(row.username or "")
+                for row in AgentDefaultAdmin.query.filter_by(agent_id=agent.id).all()
+                if _normalize_identity_username(row.username or "")
+            }
+        )
+        if default_admin_username and default_admin_username not in default_admin_usernames:
+            default_admin_usernames.append(default_admin_username)
+            default_admin_usernames = sorted(set(default_admin_usernames))
 
         db.session.commit()
         log_print(
-            f"Agent 注册成功: {agent_code}, 创建项目={len(created_projects)}, 幂等项目={len(idempotent_projects)}",
+            f"Agent 注册成功: {agent_code}, 创建项目={len(created_projects)}, 幂等项目={len(idempotent_projects)}, "
+            f"总绑定项目={len(all_bound_project_ids)}",
             "AGENT",
         )
         return jsonify(
@@ -574,6 +664,9 @@ def register_agent_node():
                 "project_binding_count": len(project_specs),
                 "created_project_codes": created_projects,
                 "idempotent_project_codes": idempotent_projects,
+                "all_bound_project_count": len(all_bound_project_ids),
+                "default_admin_record_created": default_admin_record_created,
+                "default_admin_usernames": default_admin_usernames,
                 "default_admin_assignment": default_admin_assignment,
             }
         )

@@ -148,6 +148,73 @@ def _has_project_access(project_id):
         return False
 
 
+def _normalize_identity_username(value):
+    username = str(value or "").strip()
+    if username.endswith("@corp.netease.com"):
+        username = username.split("@", 1)[0]
+    if "@" in username:
+        username = username.split("@", 1)[0]
+    return username.strip()
+
+
+def _resolve_current_username():
+    username = _normalize_identity_username(session.get("auth_username") or session.get("admin_user") or "")
+    if username:
+        return username
+
+    user = _get_current_user()
+    if user and getattr(user, "username", None):
+        return _normalize_identity_username(user.username)
+    return ""
+
+
+def _get_project_create_agent_codes():
+    """获取当前用户可直接创建项目并绑定的 Agent 节点代号列表。"""
+    username = _resolve_current_username()
+    if not username:
+        return []
+
+    normalized = username.lower()
+    codes = set()
+    try:
+        from models import AgentNode
+
+        # 兼容旧结构：agent_nodes.default_admin_username
+        for row in AgentNode.query.all():
+            if _normalize_identity_username(row.default_admin_username or "").lower() == normalized:
+                if row.agent_code:
+                    codes.add(row.agent_code)
+
+        # 新结构：agent_default_admins（历史累计，不覆盖）
+        try:
+            from models import AgentDefaultAdmin
+
+            rows = AgentDefaultAdmin.query.all()
+            agent_ids = {
+                row.agent_id
+                for row in rows
+                if _normalize_identity_username(row.username or "").lower() == normalized and row.agent_id
+            }
+            if agent_ids:
+                agents = AgentNode.query.filter(AgentNode.id.in_(list(agent_ids))).all()
+                for agent in agents:
+                    if agent.agent_code:
+                        codes.add(agent.agent_code)
+        except Exception:
+            pass
+    except Exception:
+        return []
+
+    return sorted(codes)
+
+
+def _has_project_create_access():
+    """判断当前用户是否可直接创建项目（平台管理员或 Agent 默认管理员）。"""
+    if _has_admin_access():
+        return True
+    return bool(_get_project_create_agent_codes())
+
+
 def _get_accessible_project_ids():
     """获取当前用户可访问的所有项目 ID 列表。
 

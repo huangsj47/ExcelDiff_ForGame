@@ -30,6 +30,7 @@ EXPECTED_TABLES = [
     "agent_nodes",
     "agent_project_bindings",
     "agent_tasks",
+    "agent_default_admins",
     # 账号系统表 (auth_ 前缀)
     "auth_users",
     "auth_functions",

@@ -191,8 +191,8 @@
                 </button>
                 {% endif %}
 
-                <!-- 申请创建新项目（普通用户） / 直接创建（管理员） -->
-                {% if is_admin() %}
+                <!-- 申请创建新项目（普通用户） / 直接创建（管理员或Agent默认管理员） -->
+                {% if can_direct_create_project %}
                 <button type="button" class="btn btn-primary px-4" data-bs-toggle="modal" data-bs-target="#newProjectModal"
                         style="box-shadow: 0 2px 8px rgba(13,110,253,0.3);">
                     <i class="fas fa-plus me-2"></i>新建项目
@@ -262,7 +262,7 @@
                 <i class="fas fa-folder-open"></i>
             </div>
             <h4 style="font-weight: 700; color: #1e293b; margin-bottom: 0.5rem;">暂无可见项目</h4>
-            {% if is_admin() %}
+            {% if can_direct_create_project %}
             <p style="color: #64748b; max-width: 320px; margin: 0 auto;">点击上方「新建项目」按钮创建您的第一个项目</p>
             {% elif session.get('auth_user_id') %}
             <p style="color: #64748b; max-width: 360px; margin: 0 auto;">
@@ -276,8 +276,8 @@
     {% endif %}
 </div>
 
-{% if is_admin() %}
-<!-- 新建项目模态框（管理员直接创建） -->
+{% if can_direct_create_project %}
+<!-- 新建项目模态框（平台管理员或Agent默认管理员直接创建） -->
 <div class="modal fade" id="newProjectModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
@@ -304,7 +304,9 @@
                     <div class="mb-3">
                         <label for="agent_code" class="form-label">绑定Agent节点</label>
                         <select class="form-select" id="agent_code" name="agent_code" onchange="onProjectAgentChanged()">
+                            {% if is_admin() %}
                             <option value="">不绑定（后续可手动绑定）</option>
+                            {% endif %}
                             {% for node in agent_nodes %}
                             <option value="{{ node.agent_code }}">
                                 {{ node.display_name }} | 状态: {{ node.status or 'unknown' }} | CPU: {{ '%.1f'|format(node.cpu_usage_percent or 0) }}%
@@ -312,7 +314,11 @@
                             {% endfor %}
                         </select>
                         <div class="form-text">
+                            {% if is_admin() %}
                             平台+Agent模式下可为新项目指定执行节点。可在
+                            {% else %}
+                            当前账号仅可在授权节点下创建项目。可在
+                            {% endif %}
                             <a href="{{ url_for('agent_overview_page') }}" target="_blank" rel="noopener">Agent节点页</a>
                             查看全部节点详情。
                         </div>
@@ -371,7 +377,7 @@
 {% endif %}
 
 <!-- 申请创建项目模态框（普通用户） -->
-{% if session.get('auth_user_id') and not is_admin() %}
+{% if session.get('auth_user_id') and not can_direct_create_project %}
 <div class="modal fade" id="requestCreateProjectModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
@@ -415,8 +421,9 @@
 
 {% block scripts %}
 <script>
-{% if is_admin() %}
+{% if can_direct_create_project %}
 let projectAgentNodes = {{ (agent_nodes or [])|tojson }};
+const canSkipAgentBinding = {{ 'true' if is_admin() else 'false' }};
 
 function formatBytes(bytes) {
     const value = Number(bytes || 0);
@@ -453,9 +460,12 @@ function renderProjectAgentOptions() {
         const cpu = node.cpu_usage_percent == null ? '-' : `${Number(node.cpu_usage_percent).toFixed(1)}%`;
         return `<option value="${node.agent_code}">${node.display_name || node.agent_name || node.agent_code} | 状态: ${node.status || '-'} | CPU: ${cpu}</option>`;
     }).join('');
-    select.innerHTML = `<option value="">不绑定（后续可手动绑定）</option>${dynamicOptions}`;
+    const emptyOption = canSkipAgentBinding ? `<option value="">不绑定（后续可手动绑定）</option>` : '';
+    select.innerHTML = `${emptyOption}${dynamicOptions}`;
     if (selectedValue && projectAgentNodes.some(node => node.agent_code === selectedValue)) {
         select.value = selectedValue;
+    } else if (!canSkipAgentBinding && projectAgentNodes.length > 0) {
+        select.value = projectAgentNodes[0].agent_code;
     }
     onProjectAgentChanged();
 }
@@ -587,7 +597,7 @@ function submitCreateRequest() {
     });
 }
 
-{% if is_admin() and deployment_mode in ['platform', 'agent'] %}
+{% if can_direct_create_project and deployment_mode in ['platform', 'agent'] %}
 document.addEventListener('DOMContentLoaded', function() {
     renderProjectAgentOptions();
     refreshProjectAgentNodes();

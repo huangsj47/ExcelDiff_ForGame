@@ -19,7 +19,7 @@ from .cache import DiffCache, ExcelHtmlCache, MergedDiffCache
 from .task import BackgroundTask
 from .weekly_version import WeeklyVersionConfig, WeeklyVersionDiffCache, WeeklyVersionExcelCache
 from .operation_log import OperationLog
-from .agent import AgentNode, AgentProjectBinding, AgentTask
+from .agent import AgentNode, AgentProjectBinding, AgentTask, AgentDefaultAdmin
 
 # 导入 auth 模块的模型，确保 db.create_all() 能创建对应的表
 try:
@@ -35,6 +35,21 @@ try:
     _AUTH_MODELS_LOADED = True
 except ImportError:
     _AUTH_MODELS_LOADED = False
+
+# 导入 qkit_auth 模块模型（AUTH_BACKEND=qkit 时启用）
+try:
+    from qkit_auth.models import (
+        QkitAuthUser,
+        QkitAuthUserProject,
+        QkitAuthProjectJoinRequest,
+        QkitAuthProjectCreateRequest,
+        QkitAuthProjectPreAssignment,
+        QkitAuthProjectImportConfig,
+        QkitAuthImportBlock,
+    )
+    _QKIT_AUTH_MODELS_LOADED = True
+except ImportError:
+    _QKIT_AUTH_MODELS_LOADED = False
 
 __all__ = [
     'db',
@@ -53,6 +68,7 @@ __all__ = [
     'AgentNode',
     'AgentProjectBinding',
     'AgentTask',
+    'AgentDefaultAdmin',
 ]
 
 if _AUTH_MODELS_LOADED:
@@ -64,4 +80,15 @@ if _AUTH_MODELS_LOADED:
         'AuthProjectJoinRequest',
         'AuthProjectCreateRequest',
         'AuthProjectPreAssignment',
+    ])
+
+if _QKIT_AUTH_MODELS_LOADED:
+    __all__.extend([
+        'QkitAuthUser',
+        'QkitAuthUserProject',
+        'QkitAuthProjectJoinRequest',
+        'QkitAuthProjectCreateRequest',
+        'QkitAuthProjectPreAssignment',
+        'QkitAuthProjectImportConfig',
+        'QkitAuthImportBlock',
     ])

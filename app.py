@@ -211,6 +211,7 @@ from utils.request_security import (
     _has_admin_access,
     _has_project_admin_access,
     _has_project_access,
+    _has_project_create_access,
     _is_logged_in,
     _get_current_user,
     _get_accessible_project_ids,
@@ -347,6 +348,10 @@ AUTH_EXEMPT_ENDPOINTS = frozenset({
     'auth_bp.login',
     'auth_bp.register',
     'auth_bp.logout',
+    'qkit_auth_bp.login',
+    'qkit_auth_bp.after_login',
+    'qkit_auth_bp.logout',
+    'qkit_auth_bp.project_name_hint_image',
     'help_page',
     'core_management_routes.help_page',
     'test',
@@ -358,6 +363,10 @@ AUTH_EXEMPT_PATHS = (
     '/auth/login',
     '/auth/register',
     '/auth/logout',
+    '/qkit_auth/login',
+    '/qkit_auth/after_login',
+    '/qkit_auth/logout',
+    '/qkit_auth/assets/',
     '/help',
     '/api/agents/',
 )
@@ -389,7 +398,10 @@ def enforce_admin_access():
     # 仅写操作需要管理员权限的端点（GET 放行，POST/PUT/DELETE 等拦截）
     if request.endpoint in WRITE_PROTECTED_ENDPOINTS:
         if request.method not in {'GET', 'HEAD', 'OPTIONS'}:
-            if not _has_admin_access():
+            if request.endpoint == "projects":
+                if not _has_project_create_access():
+                    return _unauthorized_admin_response()
+            elif not _has_admin_access():
                 return _unauthorized_admin_response()
 
     return None
@@ -426,6 +438,11 @@ app.jinja_env.globals['get_current_user'] = _get_current_user
 app.jinja_env.globals['has_project_access'] = _has_project_access
 app.jinja_env.globals['has_project_admin_access'] = _has_project_admin_access
 app.jinja_env.globals['deployment_mode'] = DEPLOYMENT_MODE
+try:
+    from auth import get_auth_backend as _get_auth_backend
+    app.jinja_env.globals['auth_backend'] = _get_auth_backend
+except Exception:
+    app.jinja_env.globals['auth_backend'] = lambda: "local"
 
 from utils.timezone_utils import format_beijing_time
 app.jinja_env.globals['format_beijing_time'] = format_beijing_time
@@ -442,25 +459,19 @@ _original_print("[TRACE] db.init_app(app) done")
 
 # ── 初始化 Auth 账号系统 ──
 try:
-    from auth import init_auth
+    from auth import init_auth, init_auth_default_data, register_auth_blueprints
     init_auth(app, db)
     _original_print("[TRACE] auth module initialized")
 
-    # 注册 Auth Blueprint
-    from auth.routes import auth_bp
-    app.register_blueprint(auth_bp)
-    _original_print("[TRACE] auth_bp registered")
+    # 注册认证蓝图（按 AUTH_BACKEND 自动分流）
+    register_auth_blueprints(app)
+    _original_print("[TRACE] auth blueprints registered")
 
     # 在数据库表创建完成后初始化默认数据
     with app.app_context():
         try:
-            from auth.services import init_default_functions, migrate_env_admin_to_db
-            func_count = init_default_functions()
-            if func_count > 0:
-                _original_print(f"[TRACE] auth: initialized {func_count} default functions")
-            admin_user = migrate_env_admin_to_db()
-            if admin_user:
-                _original_print(f"[TRACE] auth: migrated env admin to db: {admin_user.username}")
+            init_auth_default_data()
+            _original_print("[TRACE] auth default data initialized")
         except Exception as e:
             _original_print(f"[TRACE] auth: default data init skipped: {e}")
 except ImportError as e:
@@ -826,8 +837,14 @@ def commit_list(repository_id):
     username_to_display_name = {}
     if all_confirm_usernames:
         try:
-            from auth.models import AuthUser
-            users = AuthUser.query.filter(AuthUser.username.in_(list(all_confirm_usernames))).all()
+            from auth import get_auth_backend
+
+            if get_auth_backend() == "qkit":
+                from qkit_auth.models import QkitAuthUser as _UserModel
+            else:
+                from auth.models import AuthUser as _UserModel
+
+            users = _UserModel.query.filter(_UserModel.username.in_(list(all_confirm_usernames))).all()
             username_to_display_name = {
                 user.username: (user.display_name or user.username) for user in users
             }
@@ -2363,7 +2380,7 @@ def create_tables():
                 'diff_cache', 'excel_html_cache', 'weekly_version_config',
                 'weekly_version_diff_cache', 'weekly_version_excel_cache',
                 'merged_diff_cache', 'operation_log',
-                'agent_nodes', 'agent_project_bindings', 'agent_tasks',
+                'agent_nodes', 'agent_project_bindings', 'agent_tasks', 'agent_default_admins',
             ]
             missing_tables = [t for t in expected_tables if t not in final_tables]
             if missing_tables:
@@ -2479,14 +2496,10 @@ def initialize_app():
         log_print("数据库表创建完成", 'APP')
         # 数据库表创建完成后，初始化 Auth 默认数据（首次启动时表不存在会跳过，需要在此补充）
         try:
-            from auth.services import init_default_functions, migrate_env_admin_to_db
+            from auth import init_auth_default_data
             with app.app_context():
-                func_count = init_default_functions()
-                if func_count > 0:
-                    log_print(f"Auth: 初始化了 {func_count} 个默认职能", 'AUTH')
-                admin_user = migrate_env_admin_to_db()
-                if admin_user:
-                    log_print(f"Auth: 迁移环境变量管理员到数据库: {admin_user.username}", 'AUTH')
+                init_auth_default_data()
+                log_print("Auth: 默认数据初始化完成", 'AUTH')
         except Exception as e:
             log_print(f"Auth 默认数据初始化跳过: {e}", 'AUTH')
         if ENABLE_LOCAL_WORKER:

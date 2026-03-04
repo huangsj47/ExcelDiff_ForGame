@@ -58,6 +58,29 @@ class AgentNode(db.Model):
     )
 
 
+class AgentDefaultAdmin(db.Model):
+    """Agent 默认管理员历史映射（仅新增，不自动删除）。"""
+
+    __tablename__ = "agent_default_admins"
+
+    id = db.Column(db.Integer, primary_key=True)
+    agent_id = db.Column(db.Integer, db.ForeignKey("agent_nodes.id"), nullable=False)
+    username = db.Column(db.String(100), nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(
+        db.DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    agent = db.relationship("AgentNode", backref=db.backref("default_admin_records", lazy="dynamic"))
+
+    __table_args__ = (
+        UniqueConstraint("agent_id", "username", name="uq_agent_default_admin_agent_user"),
+        Index("idx_agent_default_admins_agent_id", "agent_id"),
+    )
+
+
 class AgentProjectBinding(db.Model):
     """项目与 Agent 绑定关系（一个项目只能绑定一个 Agent）"""
 

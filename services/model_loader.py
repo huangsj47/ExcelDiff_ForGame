@@ -45,6 +45,7 @@ _MODEL_OBJECT_NAMES = frozenset(
         "AgentNode",
         "AgentProjectBinding",
         "AgentTask",
+        "AgentDefaultAdmin",
         "AuthUser",
         "AuthFunction",
         "AuthUserFunction",
@@ -52,6 +53,13 @@ _MODEL_OBJECT_NAMES = frozenset(
         "AuthProjectJoinRequest",
         "AuthProjectCreateRequest",
         "AuthProjectPreAssignment",
+        "QkitAuthUser",
+        "QkitAuthUserProject",
+        "QkitAuthProjectJoinRequest",
+        "QkitAuthProjectCreateRequest",
+        "QkitAuthProjectPreAssignment",
+        "QkitAuthProjectImportConfig",
+        "QkitAuthImportBlock",
     }
 )
 

@@ -9,10 +9,20 @@ from flask import flash, redirect, render_template, request, session, url_for
 
 from models import AgentNode, AgentProjectBinding, Project, Repository, db
 from services.model_loader import get_runtime_model
-from utils.request_security import _has_admin_access, _is_safe_redirect
+from utils.request_security import (
+    _get_project_create_agent_codes,
+    _has_admin_access,
+    _has_project_create_access,
+    _is_safe_redirect,
+)
 
 
 def admin_login():
+    auth_backend = (os.environ.get("AUTH_BACKEND") or "local").strip().lower()
+    if auth_backend == "qkit":
+        next_url = request.args.get("next") or request.form.get("next") or url_for("index")
+        return redirect(url_for("qkit_auth_bp.login", next=next_url))
+
     next_url = request.args.get("next") or request.form.get("next") or url_for("index")
     if request.method == "POST":
         configured_user = os.environ.get("ADMIN_USERNAME", "admin").strip()
@@ -37,6 +47,10 @@ def admin_login():
 
 
 def admin_logout():
+    auth_backend = (os.environ.get("AUTH_BACKEND") or "local").strip().lower()
+    if auth_backend == "qkit":
+        return redirect(url_for("auth_bp.logout"))
+
     csrf_session_key = get_runtime_model("CSRF_SESSION_KEY")
     session.pop("is_admin", None)
     session.pop("admin_user", None)
@@ -51,6 +65,75 @@ def test():
 
 def help_page():
     return render_template("help.html")
+
+
+def _ensure_creator_project_admin_membership(project_id: int) -> tuple[bool, str | None]:
+    """Ensure non-platform-admin creator can immediately manage/access the created project."""
+    if _has_admin_access():
+        return True, None
+
+    user_id_raw = session.get("auth_user_id")
+    try:
+        user_id = int(user_id_raw)
+    except (TypeError, ValueError):
+        return False, "未获取当前登录用户，无法创建项目。"
+
+    auth_backend = (os.environ.get("AUTH_BACKEND") or "local").strip().lower()
+    if auth_backend == "qkit":
+        from qkit_auth.models import (
+            QkitAuthUser,
+            QkitAuthUserProject,
+            QkitPlatformRole,
+            QkitProjectRole,
+        )
+
+        user = db.session.get(QkitAuthUser, user_id)
+        if not user:
+            return False, "当前登录用户不存在，无法创建项目。"
+        if str(user.role or "").strip() in {"", QkitPlatformRole.NORMAL.value}:
+            user.role = QkitPlatformRole.PROJECT_ADMIN.value
+
+        membership = QkitAuthUserProject.query.filter_by(user_id=user.id, project_id=project_id).first()
+        if membership:
+            if membership.role != QkitProjectRole.ADMIN.value:
+                membership.role = QkitProjectRole.ADMIN.value
+            if hasattr(membership, "import_sync_locked"):
+                membership.import_sync_locked = True
+        else:
+            db.session.add(
+                QkitAuthUserProject(
+                    user_id=user.id,
+                    project_id=project_id,
+                    role=QkitProjectRole.ADMIN.value,
+                    approved_by=user.id,
+                    imported_from_qkit=False,
+                    import_sync_locked=True,
+                )
+            )
+        return True, None
+
+    from auth.models import AuthUser, AuthUserProject, PlatformRole, ProjectRole
+
+    user = db.session.get(AuthUser, user_id)
+    if not user:
+        return False, "当前登录用户不存在，无法创建项目。"
+    if str(user.role or "").strip() in {"", PlatformRole.NORMAL.value}:
+        user.role = PlatformRole.PROJECT_ADMIN.value
+
+    membership = AuthUserProject.query.filter_by(user_id=user.id, project_id=project_id).first()
+    if membership:
+        if membership.role != ProjectRole.ADMIN.value:
+            membership.role = ProjectRole.ADMIN.value
+    else:
+        db.session.add(
+            AuthUserProject(
+                user_id=user.id,
+                project_id=project_id,
+                role=ProjectRole.ADMIN.value,
+                approved_by=user.id,
+            )
+        )
+    return True, None
 
 
 def index():
@@ -82,12 +165,21 @@ def index():
 
         total_projects = (len(all_projects) + len(projects)) if accessible_ids is not None else len(projects)
         deployment_mode = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
+        can_direct_create_project = _has_project_create_access()
+        creatable_agent_codes = set(_get_project_create_agent_codes())
         agent_nodes = []
-        if _has_admin_access() and deployment_mode in {"platform", "agent"}:
+        if deployment_mode in {"platform", "agent"} and (can_direct_create_project or _has_admin_access()):
             try:
                 from services.agent_management_handlers import build_agent_node_items
 
-                agent_nodes = build_agent_node_items()
+                all_nodes = build_agent_node_items()
+                if _has_admin_access():
+                    agent_nodes = all_nodes
+                else:
+                    agent_nodes = [
+                        item for item in all_nodes
+                        if str(item.get("agent_code") or "").strip() in creatable_agent_codes
+                    ]
             except Exception as exc:
                 log_print(f"加载Agent列表失败: {exc}", "AGENT", force=True)
         log_print(f"找到 {len(projects)} 个可见项目（总 {total_projects} 个）", "APP")
@@ -97,6 +189,7 @@ def index():
             joinable_projects=joinable_projects,
             is_platform_admin=_has_admin_access(),
             agent_nodes=agent_nodes,
+            can_direct_create_project=can_direct_create_project,
             deployment_mode=deployment_mode,
         )
     except Exception as exc:
@@ -109,11 +202,17 @@ def index():
 
 def projects():
     if request.method == "POST":
+        if not _has_project_create_access():
+            flash("无权限创建项目。", "error")
+            return redirect(url_for("index"))
+
         code = request.form.get("code")
         name = request.form.get("name")
         department = request.form.get("department")
         selected_agent_code = (request.form.get("agent_code") or "").strip()
         deployment_mode = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
+        is_platform_admin = _has_admin_access()
+        creatable_agent_codes = set(_get_project_create_agent_codes()) if not is_platform_admin else set()
         if not code or not name:
             flash("项目代号和名称不能为空", "error")
             return redirect(url_for("index"))
@@ -123,9 +222,30 @@ def projects():
             flash("项目代号已存在", "error")
             return redirect(url_for("index"))
 
+        if deployment_mode in {"platform", "agent"} and not is_platform_admin:
+            if not creatable_agent_codes:
+                flash("当前账号未绑定可创建项目的Agent节点，请联系管理员。", "error")
+                return redirect(url_for("index"))
+            if selected_agent_code:
+                if selected_agent_code not in creatable_agent_codes:
+                    flash("只能选择您拥有创建权限的Agent节点。", "error")
+                    return redirect(url_for("index"))
+            else:
+                if len(creatable_agent_codes) == 1:
+                    selected_agent_code = next(iter(creatable_agent_codes))
+                else:
+                    flash("请选择一个可用的Agent节点。", "error")
+                    return redirect(url_for("index"))
+
         project = Project(code=code, name=name, department=department)
         db.session.add(project)
         db.session.flush()
+
+        ok, err = _ensure_creator_project_admin_membership(project.id)
+        if not ok:
+            db.session.rollback()
+            flash(err or "创建项目失败：无法写入项目成员关系", "error")
+            return redirect(url_for("index"))
 
         if selected_agent_code and deployment_mode in {"platform", "agent"}:
             selected_agent = AgentNode.query.filter_by(agent_code=selected_agent_code).first()

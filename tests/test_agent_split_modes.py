@@ -9,7 +9,7 @@ from agent.config import load_settings
 from agent import executor as agent_executor
 from agent.system_metrics import collect_agent_metrics
 from app import app, create_tables, db
-from models import AgentNode, AgentProjectBinding, AgentTask, BackgroundTask, Commit, Project, Repository
+from models import AgentDefaultAdmin, AgentNode, AgentProjectBinding, AgentTask, BackgroundTask, Commit, Project, Repository
 
 
 def _uid(prefix: str) -> str:
@@ -516,3 +516,338 @@ def test_default_admin_username_missing_user_creates_pre_assignment(monkeypatch)
             assert pre.role == "admin"
             assert pre.applied is False
             assert AuthUser.query.filter_by(username=default_admin_username).first() is None
+
+
+def test_agent_reregister_adds_new_project_without_removing_old_binding(monkeypatch):
+    shared_secret = _uid("secret")
+    agent_code = _uid("agent")
+    first_code = "G119"
+    second_code = "G120"
+    monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
+
+    with app.app_context():
+        create_tables()
+        with app.test_client() as client:
+            _register_agent(client, shared_secret, agent_code, first_code, default_admin_username=_uid("owner"))
+
+            second_resp = client.post(
+                "/api/agents/register",
+                json={
+                    "agent_code": agent_code,
+                    "agent_name": f"{agent_code}-name",
+                    "project_codes": [second_code],
+                    "default_admin_username": _uid("owner2"),
+                },
+                headers={"X-Agent-Secret": shared_secret},
+            )
+            assert second_resp.status_code == 200, second_resp.get_data(as_text=True)
+            assert (second_resp.get_json() or {}).get("success") is True
+
+            agent = AgentNode.query.filter_by(agent_code=agent_code).first()
+            assert agent is not None
+
+            bindings = AgentProjectBinding.query.filter_by(agent_id=agent.id).all()
+            binding_codes = sorted({row.project_code for row in bindings})
+            assert binding_codes == sorted([first_code, second_code])
+
+            assert Project.query.filter_by(code=first_code).first() is not None
+            assert Project.query.filter_by(code=second_code).first() is not None
+
+
+def test_default_admin_username_change_is_accumulative(monkeypatch):
+    shared_secret = _uid("secret")
+    agent_code = _uid("agent")
+    project_code = _uid("P")
+    old_admin = _uid("owner_old")
+    new_admin = _uid("owner_new")
+    monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
+
+    with app.app_context():
+        create_tables()
+        with app.test_client() as client:
+            _register_agent(client, shared_secret, agent_code, project_code, default_admin_username=old_admin)
+            _register_agent(client, shared_secret, agent_code, None, default_admin_username=new_admin)
+
+            agent = AgentNode.query.filter_by(agent_code=agent_code).first()
+            assert agent is not None
+
+            records = AgentDefaultAdmin.query.filter_by(agent_id=agent.id).all()
+            usernames = sorted({row.username for row in records})
+            assert usernames == sorted([old_admin, new_admin])
+
+            project = Project.query.filter_by(code=project_code).first()
+            assert project is not None
+            pre_old = AuthProjectPreAssignment.query.filter_by(username=old_admin, project_id=project.id).first()
+            pre_new = AuthProjectPreAssignment.query.filter_by(username=new_admin, project_id=project.id).first()
+            assert pre_old is not None
+            assert pre_new is not None
+
+
+def test_default_admin_user_can_create_project_only_on_owned_agents(monkeypatch):
+    admin_token = _uid("admin-token")
+    shared_secret = _uid("secret")
+    user_name = _uid("owner")
+    agent_a_code = _uid("agent-a")
+    agent_b_code = _uid("agent-b")
+    monkeypatch.setenv("DEPLOYMENT_MODE", "platform")
+    monkeypatch.setenv("ADMIN_API_TOKEN", admin_token)
+    monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
+
+    with app.app_context():
+        create_tables()
+        user, err = register_user(user_name, "pass1234")
+        assert err is None
+        assert user is not None
+
+        with app.test_client() as client:
+            _register_agent(client, shared_secret, agent_a_code, None, default_admin_username=user_name)
+            _register_agent(client, shared_secret, agent_b_code, None, default_admin_username=_uid("other-owner"))
+
+            with client.session_transaction() as sess:
+                sess["auth_user_id"] = user.id
+                sess["auth_username"] = user.username
+                sess["auth_role"] = user.role
+                sess["is_admin"] = False
+                sess["_csrf_token"] = "csrf-owner"
+
+            owned_project_code = _uid("OWNP")
+            create_owned = client.post(
+                "/projects",
+                data={
+                    "_csrf_token": "csrf-owner",
+                    "code": owned_project_code,
+                    "name": "owner-created-project",
+                    # 不传 agent_code，应自动落到唯一授权的 agent_a
+                },
+                follow_redirects=False,
+            )
+            assert create_owned.status_code in (302, 303)
+            owned_project = Project.query.filter_by(code=owned_project_code).first()
+            assert owned_project is not None
+            owned_binding = AgentProjectBinding.query.filter_by(project_id=owned_project.id).first()
+            assert owned_binding is not None
+            owned_agent = AgentNode.query.get(owned_binding.agent_id)
+            assert owned_agent is not None
+            assert owned_agent.agent_code == agent_a_code
+            owned_membership = AuthUserProject.query.filter_by(
+                user_id=user.id,
+                project_id=owned_project.id,
+            ).first()
+            assert owned_membership is not None
+            assert owned_membership.role == "admin"
+            refreshed_user = db.session.get(AuthUser, user.id)
+            assert refreshed_user is not None
+            assert refreshed_user.role == "project_admin"
+
+            denied_project_code = _uid("DENY")
+            create_denied = client.post(
+                "/projects",
+                data={
+                    "_csrf_token": "csrf-owner",
+                    "code": denied_project_code,
+                    "name": "should-deny",
+                    "agent_code": agent_b_code,
+                },
+                follow_redirects=False,
+            )
+            assert create_denied.status_code in (302, 303)
+            assert Project.query.filter_by(code=denied_project_code).first() is None
+
+
+def test_default_admin_user_with_two_owned_agents_can_select_either(monkeypatch):
+    admin_token = _uid("admin-token")
+    shared_secret = _uid("secret")
+    user_name = _uid("owner")
+    agent_a_code = _uid("agent-a")
+    agent_b_code = _uid("agent-b")
+    monkeypatch.setenv("DEPLOYMENT_MODE", "platform")
+    monkeypatch.setenv("ADMIN_API_TOKEN", admin_token)
+    monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
+
+    with app.app_context():
+        create_tables()
+        user, err = register_user(user_name, "pass1234")
+        assert err is None
+        assert user is not None
+
+        with app.test_client() as client:
+            _register_agent(client, shared_secret, agent_a_code, None, default_admin_username=user_name)
+            _register_agent(client, shared_secret, agent_b_code, None, default_admin_username=user_name)
+
+            with client.session_transaction() as sess:
+                sess["auth_user_id"] = user.id
+                sess["auth_username"] = user.username
+                sess["auth_role"] = user.role
+                sess["is_admin"] = False
+                sess["_csrf_token"] = "csrf-owner-2"
+
+            code_a = _uid("PA")
+            code_b = _uid("PB")
+            resp_a = client.post(
+                "/projects",
+                data={
+                    "_csrf_token": "csrf-owner-2",
+                    "code": code_a,
+                    "name": "project-on-a",
+                    "agent_code": agent_a_code,
+                },
+                follow_redirects=False,
+            )
+            resp_b = client.post(
+                "/projects",
+                data={
+                    "_csrf_token": "csrf-owner-2",
+                    "code": code_b,
+                    "name": "project-on-b",
+                    "agent_code": agent_b_code,
+                },
+                follow_redirects=False,
+            )
+            assert resp_a.status_code in (302, 303)
+            assert resp_b.status_code in (302, 303)
+
+            p_a = Project.query.filter_by(code=code_a).first()
+            p_b = Project.query.filter_by(code=code_b).first()
+            assert p_a is not None
+            assert p_b is not None
+
+            b_a = AgentProjectBinding.query.filter_by(project_id=p_a.id).first()
+            b_b = AgentProjectBinding.query.filter_by(project_id=p_b.id).first()
+            assert b_a is not None
+            assert b_b is not None
+
+            a1 = AgentNode.query.get(b_a.agent_id)
+            a2 = AgentNode.query.get(b_b.agent_id)
+            assert a1 is not None and a1.agent_code == agent_a_code
+            assert a2 is not None and a2.agent_code == agent_b_code
+
+
+def test_default_admin_email_prefix_user_can_create_project(monkeypatch):
+    admin_token = _uid("admin-token")
+    shared_secret = _uid("secret")
+    username_prefix = _uid("prefix_owner")
+    agent_code = _uid("agent-prefix")
+    monkeypatch.setenv("DEPLOYMENT_MODE", "platform")
+    monkeypatch.setenv("ADMIN_API_TOKEN", admin_token)
+    monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
+    monkeypatch.setenv("AUTH_BACKEND", "local")
+
+    with app.app_context():
+        create_tables()
+        user, err = register_user(username_prefix, "pass1234")
+        assert err is None
+        assert user is not None
+
+        with app.test_client() as client:
+            _register_agent(
+                client,
+                shared_secret,
+                agent_code,
+                None,
+                default_admin_username=f"{username_prefix}@corp.netease.com",
+            )
+
+            with client.session_transaction() as sess:
+                sess["auth_user_id"] = user.id
+                # 使用邮箱登录态，验证权限判断按邮箱前缀归一化
+                sess["auth_username"] = f"{username_prefix}@corp.netease.com"
+                sess["auth_role"] = user.role
+                sess["is_admin"] = False
+                sess["_csrf_token"] = "csrf-prefix-owner"
+
+            code = _uid("PREFIXP")
+            resp = client.post(
+                "/projects",
+                data={
+                    "_csrf_token": "csrf-prefix-owner",
+                    "code": code,
+                    "name": "prefix-owner-project",
+                },
+                follow_redirects=False,
+            )
+            assert resp.status_code in (302, 303)
+
+            project = Project.query.filter_by(code=code).first()
+            assert project is not None
+            binding = AgentProjectBinding.query.filter_by(project_id=project.id).first()
+            assert binding is not None
+            bound_agent = AgentNode.query.get(binding.agent_id)
+            assert bound_agent is not None
+            assert bound_agent.agent_code == agent_code
+
+            membership = AuthUserProject.query.filter_by(user_id=user.id, project_id=project.id).first()
+            assert membership is not None
+            assert membership.role == "admin"
+            refreshed_user = db.session.get(AuthUser, user.id)
+            assert refreshed_user is not None
+            assert refreshed_user.role == "project_admin"
+
+
+def test_qkit_default_admin_user_can_create_project_and_auto_admin(monkeypatch):
+    admin_token = _uid("admin-token")
+    shared_secret = _uid("secret")
+    username_prefix = _uid("qkit_owner")
+    agent_code = _uid("qkit-agent")
+    monkeypatch.setenv("DEPLOYMENT_MODE", "platform")
+    monkeypatch.setenv("ADMIN_API_TOKEN", admin_token)
+    monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
+    monkeypatch.setenv("AUTH_BACKEND", "qkit")
+
+    with app.app_context():
+        create_tables()
+        from qkit_auth.models import QkitAuthUser, QkitAuthUserProject
+        from qkit_auth.services import ensure_qkit_user
+
+        user, err = ensure_qkit_user(
+            username=username_prefix,
+            display_name="Qkit Owner",
+            email=f"{username_prefix}@corp.netease.com",
+            source="test",
+        )
+        assert err is None
+        assert user is not None
+        db.session.commit()
+
+        with app.test_client() as client:
+            _register_agent(
+                client,
+                shared_secret,
+                agent_code,
+                None,
+                default_admin_username=f"{username_prefix}@corp.netease.com",
+            )
+
+            with client.session_transaction() as sess:
+                sess["auth_user_id"] = user.id
+                sess["auth_username"] = f"{username_prefix}@corp.netease.com"
+                sess["auth_role"] = user.role
+                sess["is_admin"] = False
+                sess["auth_backend"] = "qkit"
+                sess["_csrf_token"] = "csrf-qkit-owner"
+
+            code = _uid("QKITP")
+            resp = client.post(
+                "/projects",
+                data={
+                    "_csrf_token": "csrf-qkit-owner",
+                    "code": code,
+                    "name": "qkit-owner-project",
+                },
+                follow_redirects=False,
+            )
+            assert resp.status_code in (302, 303)
+
+            project = Project.query.filter_by(code=code).first()
+            assert project is not None
+            binding = AgentProjectBinding.query.filter_by(project_id=project.id).first()
+            assert binding is not None
+            bound_agent = AgentNode.query.get(binding.agent_id)
+            assert bound_agent is not None
+            assert bound_agent.agent_code == agent_code
+
+            membership = QkitAuthUserProject.query.filter_by(user_id=user.id, project_id=project.id).first()
+            assert membership is not None
+            assert membership.role == "admin"
+            refreshed_user = db.session.get(QkitAuthUser, user.id)
+            assert refreshed_user is not None
+            assert refreshed_user.role == "project_admin"
