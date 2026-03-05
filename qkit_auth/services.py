@@ -73,6 +73,10 @@ def _username_from_email(email: str) -> str:
     return raw.split("@", 1)[0].strip()
 
 
+def _resolve_qkit_admin_username() -> str:
+    return _normalize_username((os.environ.get("QKIT_ADMIN_USERNAME") or "").strip())
+
+
 def _normalize_project_role(role: str) -> str:
     normalized = (role or "").strip()
     if normalized == "project_admin":
@@ -243,7 +247,7 @@ def ensure_qkit_user(
     user = _get_user_by_username(normalized_username)
     if user is None:
         role = QkitPlatformRole.NORMAL.value
-        env_admin_user = (os.environ.get("ADMIN_USERNAME") or "").strip()
+        env_admin_user = _resolve_qkit_admin_username()
         if env_admin_user and env_admin_user == normalized_username:
             role = QkitPlatformRole.PLATFORM_ADMIN.value
         user = QkitAuthUser(
@@ -307,7 +311,7 @@ def is_default_project_admin(project_id: int, username: str) -> bool:
 
 
 def bootstrap_qkit_auth_data() -> None:
-    env_admin_user = _normalize_username((os.environ.get("ADMIN_USERNAME") or "").strip())
+    env_admin_user = _resolve_qkit_admin_username()
     if env_admin_user:
         user = _get_user_by_username(env_admin_user)
         if user is None:

@@ -7,6 +7,7 @@ from __future__ import annotations
 from flask import g, request, session
 
 from auth.providers import AuthProvider
+from qkit_auth.config import load_qkit_settings
 from qkit_auth.services import check_qkit_jwt_remote, get_user_by_id
 from utils.logger import log_print
 
@@ -73,9 +74,14 @@ class QkitAuthProvider(AuthProvider):
             g._qkit_login_valid = False
             return False
 
-        token = (_load_qkit_jwt_from_request() or session.get("qkitjwt_session", "")).strip()
+        settings = load_qkit_settings()
+        if settings.local_jwt_cache:
+            token = (_load_qkit_jwt_from_request() or session.get("qkitjwt_session", "")).strip()
+        else:
+            token = (session.get("qkitjwt_session", "") or _load_qkit_jwt_from_request()).strip()
         if not token:
-            log_print("Qkit 会话校验失败: 缺少 qkitjwt cookie", "AUTH", force=True)
+            missing_hint = "qkitjwt_session" if not settings.local_jwt_cache else "qkitjwt cookie"
+            log_print(f"Qkit 会话校验失败: 缺少 {missing_hint}", "AUTH", force=True)
             self._clear_auth_session()
             g._qkit_login_valid = False
             return False

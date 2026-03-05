@@ -144,16 +144,20 @@ def _set_qkit_jwt_cookies(response, token: str) -> None:
 
 
 def _set_user_session(user: QkitAuthUser, token: str | None = None) -> None:
+    settings = load_qkit_settings()
+    normalized_token = (token or "").strip()
     session["auth_user_id"] = user.id
     session["auth_username"] = user.username
     session["auth_role"] = user.role
     session["is_admin"] = bool(user.is_platform_admin)
     session["admin_user"] = user.username if user.is_platform_admin else None
     session["auth_backend"] = "qkit"
-    # Do not store raw qkitjwt in Flask session cookie.
-    # Flask's default session is cookie-based; large JWT will easily exceed browser limits
-    # and cause silent login-state loss.
-    session.pop("qkitjwt_session", None)
+    if settings.local_jwt_cache:
+        # Cookie mode: avoid writing raw qkitjwt into Flask session cookie.
+        session.pop("qkitjwt_session", None)
+    else:
+        # Session mode: fallback for environments where browser cookie caching is restricted.
+        session["qkitjwt_session"] = normalized_token
     session.permanent = True
 
 
@@ -281,15 +285,18 @@ def after_login():
         flash("Qkit 登录失败：用户数据保存异常，请重试或联系管理员。", "error")
         return redirect(url_for("qkit_auth_bp.login"))
 
+    settings = load_qkit_settings()
     _set_user_session(user, token=token)
     next_url = session.pop("qkit_backhost", None) or url_for("index")
     if not _is_safe_redirect(next_url):
         next_url = url_for("index")
 
     response = make_response(redirect(next_url))
-    # Always keep jwt in dedicated cookie (not Flask session).
-    # This keeps session payload small and avoids redirect loops after login.
-    _set_qkit_jwt_cookies(response, token)
+    if settings.local_jwt_cache:
+        # Keep qkitjwt in dedicated cookie to avoid oversized Flask session payload.
+        _set_qkit_jwt_cookies(response, token)
+    else:
+        _clear_qkit_jwt_cookies(response)
     return response
 
 

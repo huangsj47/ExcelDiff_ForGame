@@ -9,26 +9,24 @@
 <link href="https://fonts.googleapis.com/css2?family=Lexend:wght@500;600;700&family=Source+Sans+3:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
     :root {
-        --landing-primary: #0369a1;
-        --landing-secondary: #0ea5e9;
-        --landing-cta: #22c55e;
-        --landing-bg: #f0f9ff;
-        --landing-text: #0c4a6e;
-        --landing-muted: #475569;
-        --landing-border: #cbd5e1;
+        --landing-primary: #0969da;
+        --landing-secondary: #1e3a5f;
+        --landing-cta: #0b5ed7;
+        --landing-bg: #f6f8fa;
+        --landing-text: #1f2937;
+        --landing-muted: #64748b;
+        --landing-border: #d0d7de;
     }
 
     .public-landing {
         font-family: "Source Sans 3", "Microsoft YaHei", sans-serif;
         color: var(--landing-text);
-        background:
-            radial-gradient(circle at 92% -10%, rgba(14, 165, 233, 0.24), transparent 30%),
-            radial-gradient(circle at 8% 8%, rgba(3, 105, 161, 0.12), transparent 36%),
-            var(--landing-bg);
-        border: 1px solid rgba(14, 165, 233, 0.18);
+        background: linear-gradient(135deg, #ffffff 0%, var(--landing-bg) 100%);
+        border: 1px solid var(--landing-border);
         border-radius: 18px;
         padding: 32px 24px;
         overflow: hidden;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
     }
 
     .landing-shell {
@@ -37,11 +35,11 @@
     }
 
     .public-hero {
-        background: linear-gradient(135deg, #075985 0%, #0284c7 60%, #0ea5e9 100%);
-        color: #fff;
+        background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
+        color: #f8fbff;
         border-radius: 16px;
         padding: 32px 28px;
-        box-shadow: 0 14px 30px rgba(2, 132, 199, 0.26);
+        box-shadow: 0 12px 26px rgba(30, 58, 95, 0.24);
         position: relative;
         isolation: isolate;
     }
@@ -54,22 +52,10 @@
         z-index: -1;
     }
 
-    .public-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        background: rgba(255, 255, 255, 0.16);
-        border: 1px solid rgba(255, 255, 255, 0.24);
-        border-radius: 999px;
-        padding: 6px 12px;
-        font-size: 0.92rem;
-        font-weight: 600;
-    }
-
     .public-hero h1 {
         font-family: "Lexend", "Microsoft YaHei", sans-serif;
         font-size: clamp(1.8rem, 2.7vw, 2.35rem);
-        margin: 16px 0 10px;
+        margin: 0 0 10px;
         letter-spacing: 0.01em;
     }
 
@@ -89,20 +75,21 @@
     }
 
     .public-login-btn {
-        background: var(--landing-cta);
+        background: #ffffff;
         border: none;
-        color: #053b20;
+        color: #0d6efd;
         font-weight: 700;
         padding: 10px 20px;
         border-radius: 10px;
         transition: transform .2s ease, box-shadow .2s ease, background-color .2s ease;
+        cursor: pointer;
     }
 
     .public-login-btn:hover {
-        background: #16a34a;
-        color: #eafff4;
+        background: #e8f0fe;
+        color: #0b5ed7;
         transform: translateY(-1px);
-        box-shadow: 0 8px 18px rgba(22, 163, 74, 0.3);
+        box-shadow: 0 8px 16px rgba(13, 110, 253, 0.22);
     }
 
     .public-help-btn {
@@ -131,21 +118,21 @@
         border: 1px solid var(--landing-border);
         border-radius: 12px;
         padding: 16px 14px;
-        box-shadow: 0 7px 18px rgba(2, 132, 199, 0.07);
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
         transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
     }
 
     .public-card:hover {
         transform: translateY(-2px);
-        border-color: #7dd3fc;
-        box-shadow: 0 10px 22px rgba(2, 132, 199, 0.12);
+        border-color: #9ec5fe;
+        box-shadow: 0 10px 22px rgba(13, 110, 253, 0.12);
     }
 
     .public-card h3 {
         font-family: "Lexend", "Microsoft YaHei", sans-serif;
         font-size: 1rem;
         margin-bottom: 8px;
-        color: var(--landing-text);
+        color: #1f2937;
     }
 
     .public-card p {
@@ -156,11 +143,11 @@
 
     .public-footer-note {
         margin-top: 14px;
-        border-left: 4px solid #38bdf8;
+        border-left: 4px solid var(--landing-primary);
         padding: 10px 12px;
         border-radius: 8px;
-        background: rgba(255, 255, 255, 0.78);
-        color: #0f172a;
+        background: #f0f6ff;
+        color: #1e3a5f;
         font-size: 0.95rem;
     }
 
@@ -205,14 +192,9 @@
 <section class="public-landing">
     <div class="landing-shell">
         <div class="public-hero">
-            <span class="public-badge">
-                <i class="fas fa-shield-alt"></i>
-                企业统一登录入口
-            </span>
             <h1>欢迎使用 Diff 确认平台</h1>
             <p>
-                本平台用于项目版本差异核对、仓库数据整合与周版本对比分析。所有业务访问统一通过 Qkit 身份体系登录。
-                未登录用户可先阅读帮助文档，再进入系统。
+                本平台用于项目版本差异核对、仓库数据整合与周版本对比分析。访问前请先完成 Qkit 登录认证。
             </p>
             <div class="public-cta-row">
                 <a class="btn public-login-btn" href="{{ public_login_url() }}">
@@ -226,6 +208,10 @@
 
         <div class="public-grid">
             <article class="public-card">
+                <h3><i class="fas fa-user-lock me-1 text-primary"></i>项目仓库数据隔离</h3>
+                <p>按项目维度隔离仓库与差异数据，仅授权成员可访问对应项目代码变更与周版本结果。</p>
+            </article>
+            <article class="public-card">
                 <h3><i class="fas fa-code-branch me-1 text-primary"></i>仓库差异核对</h3>
                 <p>支持 Git 与 SVN 数据接入，结合版本范围快速定位新增、删除与修改内容。</p>
             </article>
@@ -233,14 +219,10 @@
                 <h3><i class="fas fa-calendar-check me-1 text-primary"></i>周版本对比</h3>
                 <p>按周版本维度生成多文件差异视图，辅助发布前回归检查与变更复核。</p>
             </article>
-            <article class="public-card">
-                <h3><i class="fas fa-user-shield me-1 text-primary"></i>权限与审计</h3>
-                <p>平台使用统一账号体系，登录后按项目权限开放功能，并记录关键操作轨迹。</p>
-            </article>
         </div>
 
         <div class="public-footer-note">
-            <strong>登录提示：</strong>首次进入建议先阅读帮助页中的“项目创建、仓库配置、差异确认”章节，再进行 Qkit 登录。
+            <strong>使用建议：</strong>首次进入可先阅读帮助页中的“项目创建、仓库配置、差异确认”章节，再进行 Qkit 登录。
         </div>
     </div>
 </section>

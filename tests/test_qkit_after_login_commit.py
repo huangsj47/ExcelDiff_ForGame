@@ -131,3 +131,40 @@ def test_provider_can_reassemble_multi_part_qkit_cookie():
     with app.test_request_context("/", headers={"Cookie": cookie_header}):
         token = qproviders._load_qkit_jwt_from_request()
         assert token == f"{part_a}{part_b}"
+
+
+def test_qkit_after_login_uses_session_token_when_local_cache_disabled(monkeypatch):
+    app = _build_app_with_qkit_bp()
+    monkeypatch.setenv("QKIT_LOCAL_JWT_CACHE", "false")
+
+    monkeypatch.setattr(qroutes, "check_qkit_jwt_remote", lambda token: (True, "", {"ok": True}))
+    monkeypatch.setattr(qroutes, "decode_qkit_jwt_unsafe", lambda token: {"uid": "demo_user@corp.netease.com"})
+    monkeypatch.setattr(
+        qroutes,
+        "extract_identity_from_payload",
+        lambda payload: {
+            "username": "demo_user",
+            "display_name": "Demo User",
+            "email": "demo_user@corp.netease.com",
+        },
+    )
+    monkeypatch.setattr(qroutes, "ensure_qkit_user", lambda **kwargs: (_FakeUser(), None))
+
+    with app.test_request_context("/qkit_auth/after_login?qkitjwt=test-token"):
+        resp = qroutes.after_login()
+        assert session.get("qkitjwt_session") == "test-token"
+        assert resp.status_code == 302
+
+
+def test_provider_can_validate_with_session_token_when_local_cache_disabled(monkeypatch):
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    monkeypatch.setenv("QKIT_LOCAL_JWT_CACHE", "false")
+    monkeypatch.setattr(qproviders, "check_qkit_jwt_remote", lambda token: (token == "session-token", "", {"ok": True}))
+    monkeypatch.setattr(qproviders, "get_user_by_id", lambda user_id: _FakeUser())
+
+    provider = qproviders.QkitAuthProvider()
+    with app.test_request_context("/"):
+        session["auth_user_id"] = 101
+        session["qkitjwt_session"] = "session-token"
+        assert provider.is_logged_in() is True
