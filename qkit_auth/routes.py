@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import os
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from flask import (
     Blueprint,
@@ -59,6 +59,7 @@ from utils.request_security import (
     _is_logged_in,
     _is_safe_redirect,
 )
+from utils.logger import log_print
 
 auth_bp = Blueprint(
     "auth_bp",
@@ -79,6 +80,50 @@ _QKITJWT_PARTS_COOKIE = "qkitjwt_parts"
 _QKITJWT_PART_PREFIX = "qkitjwt_p"
 _QKITJWT_CHUNK_SIZE = 3500
 _QKITJWT_MAX_PARTS = 8
+
+
+def _token_fingerprint(token: str) -> str:
+    raw = (token or "").strip()
+    if not raw:
+        return "empty"
+    head = raw[:8]
+    tail = raw[-6:] if len(raw) > 6 else raw
+    return f"len={len(raw)}, head={head}, tail={tail}"
+
+
+def _auth_center_base(login_host: str) -> str:
+    host = str(login_host or "").strip().rstrip("/")
+    if host.startswith("http://") or host.startswith("https://"):
+        return host
+    return f"http://{host}"
+
+
+def _request_public_base_url(settings) -> str:
+    configured = str(getattr(settings, "public_base_url", "") or "").strip().rstrip("/")
+    if configured:
+        return configured
+
+    forwarded_proto = (request.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip()
+    forwarded_host = (request.headers.get("X-Forwarded-Host") or "").split(",", 1)[0].strip()
+    scheme = forwarded_proto or request.scheme or "http"
+    host = forwarded_host or request.host
+    return f"{scheme}://{host}".rstrip("/")
+
+
+def _resolve_login_service(settings) -> str:
+    if getattr(settings, "login_service_explicit", False):
+        return settings.login_service
+    callback_url = f"{_request_public_base_url(settings)}/qkit_auth/after_login"
+    auth_center = _auth_center_base(settings.login_host)
+    return f"{auth_center}/openid/login?{urlencode({'next': callback_url})}"
+
+
+def _resolve_logout_service(settings) -> str:
+    if getattr(settings, "logout_service_explicit", False):
+        return settings.logout_service
+    next_url = _request_public_base_url(settings)
+    auth_center = _auth_center_base(settings.login_host)
+    return f"{auth_center}/openid/logout?{urlencode({'next': next_url})}"
 
 
 def _has_routable_endpoint(endpoint: str) -> bool:
@@ -122,11 +167,16 @@ def _set_qkit_jwt_cookies(response, token: str) -> None:
     raw = (token or "").strip()
     _clear_qkit_jwt_cookies(response)
     if not raw:
+        log_print("[QKIT_COOKIE] skip set qkitjwt: token empty", "INFO")
         return
 
     cookie_kwargs = {"httponly": True, "samesite": "Lax"}
     if len(raw) <= _QKITJWT_CHUNK_SIZE:
         response.set_cookie(_QKITJWT_COOKIE, raw, **cookie_kwargs)
+        log_print(
+            f"[QKIT_COOKIE] set single cookie, token={_token_fingerprint(raw)}",
+            "INFO",
+        )
         return
 
     chunks = [raw[i:i + _QKITJWT_CHUNK_SIZE] for i in range(0, len(raw), _QKITJWT_CHUNK_SIZE)]
@@ -136,11 +186,19 @@ def _set_qkit_jwt_cookies(response, token: str) -> None:
             len(raw),
         )
         response.set_cookie(_QKITJWT_COOKIE, raw, **cookie_kwargs)
+        log_print(
+            f"[QKIT_COOKIE] oversize fallback single cookie, parts={len(chunks)}, token={_token_fingerprint(raw)}",
+            "INFO",
+        )
         return
 
     response.set_cookie(_QKITJWT_PARTS_COOKIE, str(len(chunks)), **cookie_kwargs)
     for idx, chunk in enumerate(chunks):
         response.set_cookie(f"{_QKITJWT_PART_PREFIX}{idx}", chunk, **cookie_kwargs)
+    log_print(
+        f"[QKIT_COOKIE] set multipart cookies, part_count={len(chunks)}, token={_token_fingerprint(raw)}",
+        "INFO",
+    )
 
 
 def _set_user_session(user: QkitAuthUser, token: str | None = None) -> None:
@@ -216,8 +274,17 @@ def qkit_login():
     if next_url and _is_safe_redirect(next_url):
         session["qkit_backhost"] = next_url
     settings = load_qkit_settings()
+    login_service = _resolve_login_service(settings)
+    log_print(
+        (
+            "[QKIT_LOGIN] enter "
+            f"host={request.host}, path={request.path}, next={next_url}, "
+            f"local_cache={settings.local_jwt_cache}, login_service={login_service}"
+        ),
+        "INFO",
+    )
 
-    parsed = urlparse(settings.login_service)
+    parsed = urlparse(login_service)
     # 防止配置误指向当前服务但未提供 /openid/login 时的 302 死循环。
     if (not parsed.netloc or parsed.netloc == request.host) and parsed.path.startswith("/openid/login"):
         if not _has_local_path(parsed.path):
@@ -230,23 +297,30 @@ def qkit_login():
                 ),
             )
 
-    response = make_response(redirect(settings.login_service))
+    response = make_response(redirect(login_service))
     _clear_qkit_jwt_cookies(response)
     # Always clear session token before login round-trip.
     session.pop("qkitjwt_session", None)
+    log_print("[QKIT_LOGIN] redirecting to qkit auth center", "INFO")
     return response
 
 
 @qkit_auth_bp.route("/after_login", methods=["GET"], endpoint="after_login", strict_slashes=False)
 def after_login():
     token = (request.args.get("qkitjwt") or "").strip()
+    log_print(
+        f"[QKIT_AFTER_LOGIN] callback host={request.host}, token={_token_fingerprint(token)}",
+        "INFO",
+    )
     if not token:
         flash("Qkit 登录失败：缺少 qkitjwt。", "error")
+        log_print("[QKIT_AFTER_LOGIN] failed: missing qkitjwt in callback query", "INFO")
         return redirect(url_for("qkit_auth_bp.login"))
 
     valid, message, _payload = check_qkit_jwt_remote(token)
     if not valid:
         flash(message or "Qkit 登录校验失败，请重试。", "error")
+        log_print(f"[QKIT_AFTER_LOGIN] jwt remote verify failed: {message or 'unknown'}", "INFO")
         return redirect(url_for("qkit_auth_bp.login"))
 
     payload = decode_qkit_jwt_unsafe(token)
@@ -258,6 +332,7 @@ def after_login():
                 f"Qkit 登录依赖缺失（PyJWT）：{jwt_dep_error}",
             )
         flash("Qkit 登录失败：无法解析用户身份。", "error")
+        log_print("[QKIT_AFTER_LOGIN] failed: cannot decode jwt payload", "INFO")
         return redirect(url_for("qkit_auth_bp.login"))
 
     identity = extract_identity_from_payload(payload)
@@ -269,9 +344,11 @@ def after_login():
     )
     if err or user is None:
         flash(err or "Qkit 登录失败，无法同步用户。", "error")
+        log_print(f"[QKIT_AFTER_LOGIN] failed: ensure user error={err or 'unknown'}", "INFO")
         return redirect(url_for("qkit_auth_bp.login"))
     if not user.is_active:
         flash("账号已被禁用，请联系管理员。", "error")
+        log_print(f"[QKIT_AFTER_LOGIN] failed: inactive user username={user.username}", "INFO")
         return redirect(url_for("qkit_auth_bp.login"))
 
     # ensure_qkit_user() only flushes newly created users.
@@ -283,6 +360,7 @@ def after_login():
         db.session.rollback()
         current_app.logger.exception("Qkit login user persist failed: %s", exc)
         flash("Qkit 登录失败：用户数据保存异常，请重试或联系管理员。", "error")
+        log_print(f"[QKIT_AFTER_LOGIN] failed: db commit error={exc}", "INFO")
         return redirect(url_for("qkit_auth_bp.login"))
 
     settings = load_qkit_settings()
@@ -297,6 +375,14 @@ def after_login():
         _set_qkit_jwt_cookies(response, token)
     else:
         _clear_qkit_jwt_cookies(response)
+    log_print(
+        (
+            "[QKIT_AFTER_LOGIN] success "
+            f"user_id={session.get('auth_user_id')}, username={session.get('auth_username')}, "
+            f"next={next_url}, local_cache={settings.local_jwt_cache}"
+        ),
+        "INFO",
+    )
     return response
 
 
@@ -304,8 +390,13 @@ def after_login():
 def qkit_logout():
     settings = load_qkit_settings()
     _clear_user_session()
-    response = make_response(redirect(settings.logout_service))
+    logout_service = _resolve_logout_service(settings)
+    response = make_response(redirect(logout_service))
     _clear_qkit_jwt_cookies(response)
+    log_print(
+        f"[QKIT_LOGOUT] clear session/cookies and redirect host={request.host} -> {logout_service}",
+        "INFO",
+    )
     return response
 
 

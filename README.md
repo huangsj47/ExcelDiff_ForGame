@@ -285,6 +285,7 @@ python app.py
 - `DEPLOYMENT_MODE`（`single`/`platform`/`agent`）
 - `AGENT_SHARED_SECRET`（平台与 agent 通信密钥）
 - `QKIT_LOCAL_HOST` / `QKIT_LOGIN_HOST`（Qkit 模式登录回调地址）
+- `QKIT_PUBLIC_BASE_URL`（可选；反向代理场景下用于固定回调公网地址，如 `https://diff.example.com`）
 - `QKIT_AUTH_CHECK_JWT_API`（Qkit 模式每请求 JWT 校验接口）
 - `QKIT_REQUEST_TIMEOUT_SECONDS`（Qkit 接口超时，默认 5 秒）
 - `QKIT_REDMINE_API_URL`（项目成员导入接口地址）

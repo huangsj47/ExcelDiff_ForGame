@@ -40,6 +40,7 @@ def _int_env(name: str, default: int) -> int:
 class QkitSettings:
     local_host: str
     login_host: str
+    public_base_url: str
     jwt_secret: str
     local_jwt_cache: bool
     lock_project_id: str
@@ -47,7 +48,9 @@ class QkitSettings:
     change_project_api: str
     auth_check_jwt_api: str
     login_service: str
+    login_service_explicit: bool
     logout_service: str
+    logout_service_explicit: bool
     request_timeout_seconds: int
     redmine_api_url: str
 
@@ -55,6 +58,7 @@ class QkitSettings:
 def load_qkit_settings() -> QkitSettings:
     local_host = _first_env(("QKIT_LOCAL_HOST", "LOCAL_HOST"), "10.226.98.33:8002")
     login_host = _first_env(("QKIT_LOGIN_HOST", "LOGIN_HOST"), local_host)
+    public_base_url = _first_env(("QKIT_PUBLIC_BASE_URL", "PUBLIC_BASE_URL"), "").rstrip("/")
     jwt_secret = _first_env(("QKIT_JWT_SECRET", "JWT_SECRET"), "")
     local_jwt_cache = _bool_env("QKIT_LOCAL_JWT_CACHE", _bool_env("LOCAL_JWT_CACHE", True))
     lock_project_id = _first_env(("QKIT_LOCK_PROJECT_ID", "LOCK_PROJECT_ID"), "")
@@ -78,14 +82,12 @@ def load_qkit_settings() -> QkitSettings:
         ("QKIT_AUTH_CHECK_JWT_API", "AUTH_CHECK_JWT_API"),
         f"http://{login_host}/api/v1/users/jwt_ver/",
     )
-    login_service = _first_env(
-        ("QKIT_LOGIN_SERVICE", "LOGIN_SERVICE"),
-        f"http://{login_host}/openid/login?next=http://{local_host}/qkit_auth/after_login",
-    )
-    logout_service = _first_env(
-        ("QKIT_LOGOUT_SERVICE", "LOGOUT_SERVICE"),
-        f"http://{login_host}/openid/logout?next=http://{local_host}",
-    )
+    login_service_raw = _first_env(("QKIT_LOGIN_SERVICE", "LOGIN_SERVICE"), "")
+    logout_service_raw = _first_env(("QKIT_LOGOUT_SERVICE", "LOGOUT_SERVICE"), "")
+    login_service_explicit = bool(login_service_raw)
+    logout_service_explicit = bool(logout_service_raw)
+    login_service = login_service_raw or f"http://{login_host}/openid/login?next=http://{local_host}/qkit_auth/after_login"
+    logout_service = logout_service_raw or f"http://{login_host}/openid/logout?next=http://{local_host}"
     redmine_api_url = _first_env(
         ("QKIT_REDMINE_API_URL", "REDMINE_API_URL"),
         "http://redmineapi.nie.netease.com/api/user",
@@ -94,6 +96,7 @@ def load_qkit_settings() -> QkitSettings:
     return QkitSettings(
         local_host=local_host,
         login_host=login_host,
+        public_base_url=public_base_url,
         jwt_secret=jwt_secret,
         local_jwt_cache=local_jwt_cache,
         lock_project_id=lock_project_id,
@@ -101,7 +104,9 @@ def load_qkit_settings() -> QkitSettings:
         change_project_api=change_project_api,
         auth_check_jwt_api=auth_check_jwt_api,
         login_service=login_service,
+        login_service_explicit=login_service_explicit,
         logout_service=logout_service,
+        logout_service_explicit=logout_service_explicit,
         request_timeout_seconds=request_timeout_seconds,
         redmine_api_url=redmine_api_url,
     )

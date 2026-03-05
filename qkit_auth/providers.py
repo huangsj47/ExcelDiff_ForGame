@@ -17,6 +17,15 @@ _QKITJWT_PART_PREFIX = "qkitjwt_p"
 _QKITJWT_MAX_PARTS = 8
 
 
+def _token_fingerprint(token: str) -> str:
+    raw = (token or "").strip()
+    if not raw:
+        return "empty"
+    head = raw[:8]
+    tail = raw[-6:] if len(raw) > 6 else raw
+    return f"len={len(raw)}, head={head}, tail={tail}"
+
+
 def _load_qkit_jwt_from_request() -> str:
     token = (request.cookies.get(_QKITJWT_COOKIE) or "").strip()
     if token:
@@ -81,20 +90,41 @@ class QkitAuthProvider(AuthProvider):
             token = (session.get("qkitjwt_session", "") or _load_qkit_jwt_from_request()).strip()
         if not token:
             missing_hint = "qkitjwt_session" if not settings.local_jwt_cache else "qkitjwt cookie"
-            log_print(f"Qkit 会话校验失败: 缺少 {missing_hint}", "AUTH", force=True)
+            log_print(
+                (
+                    "[QKIT_AUTH] request auth failed: "
+                    f"missing {missing_hint}, path={request.path}, host={request.host}, "
+                    f"user_id={user_id}, local_cache={settings.local_jwt_cache}"
+                ),
+                "INFO",
+            )
             self._clear_auth_session()
             g._qkit_login_valid = False
             return False
 
         valid, message, _payload = check_qkit_jwt_remote(token)
         if not valid:
-            log_print(f"Qkit 会话校验失败: {message or 'unknown'}", "AUTH", force=True)
+            log_print(
+                (
+                    "[QKIT_AUTH] request auth failed: "
+                    f"jwt verify failed={message or 'unknown'}, path={request.path}, "
+                    f"host={request.host}, user_id={user_id}, token={_token_fingerprint(token)}"
+                ),
+                "INFO",
+            )
             self._clear_auth_session()
             g._qkit_login_valid = False
             return False
 
         user = get_user_by_id(int(user_id))
         if not user or not user.is_active:
+            log_print(
+                (
+                    "[QKIT_AUTH] request auth failed: "
+                    f"user not found or inactive, user_id={user_id}, path={request.path}"
+                ),
+                "INFO",
+            )
             self._clear_auth_session()
             g._qkit_login_valid = False
             return False
