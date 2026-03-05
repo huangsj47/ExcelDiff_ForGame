@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
-from flask import g, request, session
+import hashlib
+import hmac
+
+from flask import current_app, g, request, session
 
 from models import db
 from auth.providers import AuthProvider
@@ -31,6 +34,31 @@ def _token_fingerprint(token: str) -> str:
     head = raw[:8]
     tail = raw[-6:] if len(raw) > 6 else raw
     return f"len={len(raw)}, head={head}, tail={tail}"
+
+
+def _derive_csrf_token_from_qkitjwt(token: str) -> str:
+    """Derive a stable CSRF token for restored qkit sessions.
+
+    This keeps form token verification stable even when session cookie persistence
+    is unstable and the user session is restored from qkitjwt on each request.
+    """
+    raw = (token or "").strip()
+    if not raw:
+        return ""
+
+    payload = f"qkit-csrf|{raw}".encode("utf-8")
+    secret = str(current_app.config.get("SECRET_KEY") or current_app.secret_key or "")
+    if secret:
+        return hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _ensure_session_csrf_token(token: str) -> None:
+    if session.get("_csrf_token"):
+        return
+    csrf_value = _derive_csrf_token_from_qkitjwt(token)
+    if csrf_value:
+        session["_csrf_token"] = csrf_value
 
 
 def _load_qkit_jwt_from_request() -> str:
@@ -123,6 +151,7 @@ class QkitAuthProvider(AuthProvider):
             session.pop("qkitjwt_session", None)
         else:
             session["qkitjwt_session"] = token
+        _ensure_session_csrf_token(token)
         session.permanent = True
         log_print(
             (

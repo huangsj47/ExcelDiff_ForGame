@@ -229,11 +229,13 @@ def index():
         can_direct_create_project = _has_project_create_access()
         creatable_agent_codes = set(_get_project_create_agent_codes())
         agent_nodes = []
+        has_agent_nodes = False
         if deployment_mode in {"platform", "agent"} and (can_direct_create_project or _has_admin_access()):
             try:
                 from services.agent_management_handlers import build_agent_node_items
 
                 all_nodes = build_agent_node_items()
+                has_agent_nodes = bool(all_nodes)
                 if _has_admin_access():
                     agent_nodes = all_nodes
                 else:
@@ -250,6 +252,7 @@ def index():
             joinable_projects=joinable_projects,
             is_platform_admin=_has_admin_access(),
             agent_nodes=agent_nodes,
+            has_agent_nodes=has_agent_nodes,
             can_direct_create_project=can_direct_create_project,
             deployment_mode=deployment_mode,
         )
@@ -274,6 +277,7 @@ def projects():
         deployment_mode = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
         is_platform_admin = _has_admin_access()
         creatable_agent_codes = set(_get_project_create_agent_codes()) if not is_platform_admin else set()
+        has_any_agent_nodes = AgentNode.query.count() > 0
         if not code or not name:
             flash("项目代号和名称不能为空", "error")
             return redirect(url_for("index"))
@@ -281,6 +285,10 @@ def projects():
         existing_project = Project.query.filter_by(code=code).first()
         if existing_project:
             flash("项目代号已存在", "error")
+            return redirect(url_for("index"))
+
+        if deployment_mode in {"platform", "agent"} and not has_any_agent_nodes:
+            flash("暂未启动任何节点，请先启动并注册至少一个Agent节点后再创建项目。", "error")
             return redirect(url_for("index"))
 
         if deployment_mode in {"platform", "agent"} and not is_platform_admin:

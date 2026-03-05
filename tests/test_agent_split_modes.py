@@ -345,6 +345,56 @@ def test_platform_mode_project_create_can_bind_selected_agent(monkeypatch):
             assert agent.agent_code == agent_code
 
 
+def test_platform_mode_project_create_without_agent_nodes_is_rejected(monkeypatch):
+    monkeypatch.setenv("DEPLOYMENT_MODE", "platform")
+
+    with app.app_context():
+        create_tables()
+        AgentTask.query.delete()
+        AgentProjectBinding.query.delete()
+        AgentDefaultAdmin.query.delete()
+        AgentNode.query.delete()
+        db.session.commit()
+        with app.test_client() as client:
+            with client.session_transaction() as sess:
+                sess["is_admin"] = True
+                sess["admin_user"] = "admin"
+                sess["_csrf_token"] = "csrf-no-agent"
+
+            response = client.post(
+                "/projects",
+                data={
+                    "_csrf_token": "csrf-no-agent",
+                    "code": _uid("NOAGENT"),
+                    "name": "无节点项目",
+                },
+                follow_redirects=False,
+            )
+            assert response.status_code in (302, 303)
+            assert Project.query.filter_by(name="无节点项目").first() is None
+
+
+def test_platform_mode_index_shows_no_agent_nodes_hint(monkeypatch):
+    monkeypatch.setenv("DEPLOYMENT_MODE", "platform")
+
+    with app.app_context():
+        create_tables()
+        AgentTask.query.delete()
+        AgentProjectBinding.query.delete()
+        AgentDefaultAdmin.query.delete()
+        AgentNode.query.delete()
+        db.session.commit()
+        with app.test_client() as client:
+            with client.session_transaction() as sess:
+                sess["is_admin"] = True
+                sess["admin_user"] = "admin"
+
+            response = client.get("/", follow_redirects=True)
+            assert response.status_code == 200
+            html = response.get_data(as_text=True)
+            assert "暂未启动任何节点" in html
+
+
 def test_list_agents_uses_name_plus_ip_for_duplicate_names(monkeypatch):
     admin_token = _uid("admin-token")
     shared_secret = _uid("secret")

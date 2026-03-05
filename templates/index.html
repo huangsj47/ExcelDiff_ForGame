@@ -306,11 +306,20 @@
                         <input type="text" class="form-control" id="department" name="department" placeholder="例如: 研发部">
                     </div>
                     {% if deployment_mode in ['platform', 'agent'] %}
+                    {% if not has_agent_nodes %}
+                    <div class="alert alert-warning mb-3" style="font-size: 0.85rem; border-radius: 8px;">
+                        <i class="fas fa-exclamation-triangle me-1"></i>
+                        暂未启动任何节点。请先启动并注册至少一个 Agent 节点，再创建项目。
+                    </div>
+                    {% endif %}
                     <div class="mb-3">
                         <label for="agent_code" class="form-label">绑定Agent节点</label>
-                        <select class="form-select" id="agent_code" name="agent_code" onchange="onProjectAgentChanged()">
+                        <select class="form-select" id="agent_code" name="agent_code" onchange="onProjectAgentChanged()" {% if not has_agent_nodes %}disabled{% endif %}>
                             {% if is_admin() %}
                             <option value="">不绑定（后续可手动绑定）</option>
+                            {% endif %}
+                            {% if not has_agent_nodes %}
+                            <option value="">暂未启动任何节点</option>
                             {% endif %}
                             {% for node in agent_nodes %}
                             <option value="{{ node.agent_code }}">
@@ -336,7 +345,13 @@
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" style="border-radius: 8px;">取消</button>
-                    <button type="submit" class="btn btn-primary" style="border-radius: 8px; font-weight: 600;">
+                    <button
+                        id="createProjectSubmitBtn"
+                        type="submit"
+                        class="btn btn-primary"
+                        style="border-radius: 8px; font-weight: 600;"
+                        {% if deployment_mode in ['platform', 'agent'] and not has_agent_nodes %}disabled title="暂未启动任何节点，请先启动 Agent 节点"{% endif %}
+                    >
                         <i class="fas fa-check me-1"></i>创建项目
                     </button>
                 </div>
@@ -429,6 +444,7 @@
 {% if can_direct_create_project %}
 let projectAgentNodes = {{ (agent_nodes or [])|tojson }};
 const canSkipAgentBinding = {{ 'true' if is_admin() else 'false' }};
+const isAgentDeploymentMode = {{ 'true' if deployment_mode in ['platform', 'agent'] else 'false' }};
 
 function formatBytes(bytes) {
     const value = Number(bytes || 0);
@@ -444,7 +460,12 @@ function formatBytes(bytes) {
 }
 
 function formatAgentText(node) {
-    if (!node) return '未选择Agent节点';
+    if (!node) {
+        if (isAgentDeploymentMode && projectAgentNodes.length === 0) {
+            return '暂未启动任何节点，请先启动并注册至少一个 Agent 节点';
+        }
+        return canSkipAgentBinding ? '未选择Agent节点' : '请选择可用Agent节点';
+    }
     const cpu = node.cpu_usage_percent == null ? '-' : `${Number(node.cpu_usage_percent).toFixed(1)}%`;
     return [
         `名称: ${node.display_name || node.agent_name || node.agent_code}`,
@@ -455,6 +476,14 @@ function formatAgentText(node) {
         `系统: ${node.os_name || '-'} ${node.os_version || ''}`.trim(),
         `IP: ${node.host || '-'}`
     ].join(' | ');
+}
+
+function syncCreateProjectSubmitState() {
+    const submitBtn = document.getElementById('createProjectSubmitBtn');
+    if (!submitBtn) return;
+    const noNodes = isAgentDeploymentMode && projectAgentNodes.length === 0;
+    submitBtn.disabled = noNodes;
+    submitBtn.title = noNodes ? '暂未启动任何节点，请先启动并注册 Agent 节点' : '';
 }
 
 function renderProjectAgentOptions() {
@@ -472,6 +501,8 @@ function renderProjectAgentOptions() {
     } else if (!canSkipAgentBinding && projectAgentNodes.length > 0) {
         select.value = projectAgentNodes[0].agent_code;
     }
+    select.disabled = isAgentDeploymentMode && projectAgentNodes.length === 0;
+    syncCreateProjectSubmitState();
     onProjectAgentChanged();
 }
 
