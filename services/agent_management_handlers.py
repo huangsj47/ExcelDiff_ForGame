@@ -12,9 +12,16 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from flask import jsonify, render_template, request
+from flask import jsonify, render_template, request, send_file
 
 from services.model_loader import get_runtime_models
+from services.agent_release_service import (
+    get_release_package_path,
+    list_release_manifests,
+    load_latest_release_manifest,
+    load_release_manifest,
+    rollback_latest_release,
+)
 from services.repository_sync_status import clear_sync_error as clear_repository_sync_error
 from services.repository_sync_status import record_sync_error as record_repository_sync_error
 from utils.request_security import require_admin
@@ -1120,6 +1127,190 @@ def resolve_agent_temp_cache(cache_key):
     except Exception as exc:
         log_print(f"解析平台临时缓存失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
+
+
+def agent_get_latest_release():
+    """Agent 查询最新可用 release。"""
+    log_print = get_runtime_models("log_print")[0]
+    try:
+        ok, resp, code = _validate_agent_shared_secret()
+        if not ok:
+            return resp, code
+
+        payload = request.get_json(silent=True) or {}
+        agent_code = str(payload.get("agent_code") or request.headers.get("X-Agent-Code") or "").strip()
+        agent_token = str(payload.get("agent_token") or request.headers.get("X-Agent-Token") or "").strip()
+        current_version = str(payload.get("current_version") or "").strip()
+        if not agent_code or not agent_token:
+            return jsonify({"success": False, "message": "缺少 agent_code 或 agent_token"}), 400
+
+        agent = _get_agent_by_identity(agent_code, agent_token)
+        if not agent:
+            return jsonify({"success": False, "message": "Agent 身份无效"}), 401
+
+        latest = load_latest_release_manifest()
+        if not latest:
+            return (
+                jsonify(
+                    {
+                        "success": True,
+                        "has_update": False,
+                        "status": "no_release",
+                        "current_version": current_version,
+                    }
+                ),
+                200,
+            )
+
+        latest_version = str(latest.get("version") or "").strip()
+        if not latest_version:
+            return (
+                jsonify(
+                    {
+                        "success": True,
+                        "has_update": False,
+                        "status": "invalid_release",
+                        "current_version": current_version,
+                    }
+                ),
+                200,
+            )
+
+        has_update = latest_version != current_version
+        return (
+            jsonify(
+                {
+                    "success": True,
+                    "has_update": has_update,
+                    "status": "update_available" if has_update else "up_to_date",
+                    "current_version": current_version,
+                    "latest_version": latest_version,
+                    "release": {
+                        "version": latest_version,
+                        "commit_id": latest.get("commit_id"),
+                        "created_at": latest.get("created_at"),
+                        "notes": latest.get("notes"),
+                        "package_size": latest.get("package_size"),
+                        "package_sha256": latest.get("package_sha256"),
+                        "download_path": f"/api/agents/releases/{latest_version}/package",
+                    },
+                }
+            ),
+            200,
+        )
+    except Exception as exc:
+        log_print(f"读取 Agent release 信息失败: {exc}", "AGENT", force=True)
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+def agent_download_release_package(version: str):
+    """Agent 下载指定版本 release 包。"""
+    log_print = get_runtime_models("log_print")[0]
+    try:
+        ok, resp, code = _validate_agent_shared_secret()
+        if not ok:
+            return resp, code
+
+        agent_code = str(
+            request.args.get("agent_code")
+            or request.headers.get("X-Agent-Code")
+            or ""
+        ).strip()
+        agent_token = str(
+            request.args.get("agent_token")
+            or request.headers.get("X-Agent-Token")
+            or ""
+        ).strip()
+        if not agent_code or not agent_token:
+            return jsonify({"success": False, "message": "缺少 agent_code 或 agent_token"}), 400
+
+        agent = _get_agent_by_identity(agent_code, agent_token)
+        if not agent:
+            return jsonify({"success": False, "message": "Agent 身份无效"}), 401
+
+        manifest = load_release_manifest(version)
+        if not manifest:
+            return jsonify({"success": False, "message": "release 不存在"}), 404
+        package_path = get_release_package_path(version)
+        if not package_path:
+            return jsonify({"success": False, "message": "release 包不存在"}), 404
+
+        package_name = str(manifest.get("package_file") or os.path.basename(package_path))
+        return send_file(
+            package_path,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=package_name,
+            conditional=True,
+        )
+    except Exception as exc:
+        log_print(f"Agent 下载 release 包失败: {exc}", "AGENT", force=True)
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@require_admin
+def list_agent_releases():
+    """管理员查看 release 列表。"""
+    log_print = get_runtime_models("log_print")[0]
+    try:
+        latest = load_latest_release_manifest()
+        latest_version = str((latest or {}).get("version") or "").strip()
+        items = []
+        for item in list_release_manifests():
+            version = str(item.get("version") or "").strip()
+            if not version:
+                continue
+            items.append(
+                {
+                    "version": version,
+                    "commit_id": item.get("commit_id"),
+                    "created_at": item.get("created_at"),
+                    "notes": item.get("notes"),
+                    "package_file": item.get("package_file"),
+                    "package_size": item.get("package_size"),
+                    "package_sha256": item.get("package_sha256"),
+                    "is_latest": bool(version and version == latest_version),
+                }
+            )
+        return jsonify(
+            {
+                "success": True,
+                "latest_version": latest_version or None,
+                "items": items,
+                "count": len(items),
+            }
+        )
+    except Exception as exc:
+        log_print(f"读取 Agent release 列表失败: {exc}", "AGENT", force=True)
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@require_admin
+def rollback_agent_release():
+    """管理员一键回滚 latest release（默认回滚到上一版）。"""
+    log_print = get_runtime_models("log_print")[0]
+    try:
+        payload = request.get_json(silent=True) or {}
+        target_version = str(payload.get("target_version") or "").strip() or None
+        steps = int(payload.get("steps") or 1)
+        steps = max(1, min(50, steps))
+
+        result = rollback_latest_release(target_version=target_version, steps=steps)
+        latest = result.get("latest") if isinstance(result, dict) else None
+        latest_version = str((latest or {}).get("version") or "").strip() or None
+        return jsonify(
+            {
+                "success": True,
+                "changed": bool(result.get("changed")),
+                "from_version": result.get("from_version"),
+                "to_version": result.get("to_version"),
+                "latest_version": latest_version,
+                "latest_release": latest or None,
+            }
+        )
+    except Exception as exc:
+        log_print(f"回滚 Agent release 失败: {exc}", "AGENT", force=True)
+        return jsonify({"success": False, "message": str(exc)}), 400
 
 
 def agent_claim_task():

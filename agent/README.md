@@ -1,4 +1,4 @@
-# Agent 独立运行包
+﻿# Agent 独立运行包
 
 ## 1. 配置
 1. 复制 `.env.example` 为 `.env`
@@ -29,9 +29,42 @@ python start_agent.py
   - 默认全量本地执行：`auto_sync/excel_diff/weekly_sync/weekly_excel_cache/temp_cache_fetch`；
   - 当前版本会强制补齐上述任务类型，建议保持默认不配置。
 - `AGENT_TEMP_CACHE_THRESHOLD_BYTES` 支持表达式写法，例如：`1*1024_1024`。
+- Agent 支持 release 包自更新（默认开启）：
+  - 定时查询平台 `/api/agents/releases/latest`；
+  - 有新版本时下载 `/api/agents/releases/<version>/package`；
+  - 校验 SHA256 后覆盖 Agent 目录并自动重启进程。
+- 自更新配置项：
+  - `AGENT_AUTO_UPDATE_ENABLED`（默认 `true`）
+  - `AGENT_AUTO_UPDATE_CHECK_INTERVAL_SECONDS`（默认 `300`）
+  - `AGENT_AUTO_UPDATE_REQUEST_TIMEOUT_SECONDS`（默认 `15`）
+  - `AGENT_AUTO_UPDATE_DOWNLOAD_TIMEOUT_SECONDS`（默认 `120`）
+  - `AGENT_AUTO_UPDATE_INSTALL_DEPS`（默认 `true`）
+  - `AGENT_AUTO_UPDATE_PIP_TIMEOUT_SECONDS`（默认 `900`）
 
 ## 3. 打包分发
 ```bash
 python build_zip.py
 ```
 执行后会在当前目录输出 `agent_package_*.zip`，可直接发给其他用户部署。
+
+## 4. 平台发布 release（推荐）
+在平台项目根目录执行：
+```bash
+python scripts/publish_agent_release.py
+```
+可选参数：
+- `--version <版本号>`
+- `--notes "<发布说明>"`
+- `--force`（覆盖同版本）
+- `--allow-dirty`（允许未提交改动时发布，不建议）
+- `--rollback --rollback-steps 1`（回滚 latest 到上一版）
+- `--rollback --rollback-target-version <版本号>`（回滚到指定版本）
+
+也可使用独立回滚脚本：
+```bash
+python scripts/rollback_agent_release.py --steps 1
+```
+
+脚本包装：
+- Windows：`scripts\\publish_agent_release.bat` / `scripts\\rollback_agent_release.bat`
+- Linux/macOS：`bash scripts/publish_agent_release.sh` / `bash scripts/rollback_agent_release.sh`

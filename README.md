@@ -305,6 +305,10 @@ python app.py
   - `POST /api/agents/tasks/claim`：Agent 领取任务
   - `POST /api/agents/tasks/<task_id>/result`：Agent 回传任务结果
   - `GET /api/agents/tasks`：查看 Agent 任务状态（管理员）
+  - `POST /api/agents/releases/latest`：Agent 查询最新 release
+  - `GET /api/agents/releases/<version>/package`：Agent 下载 release 包
+  - `GET /api/agents/releases/admin/list`：管理员查看 release 列表
+  - `POST /api/agents/releases/admin/rollback`：管理员一键回滚 latest 到上一版/指定版
 - 项目代号规则：
   - 不传/空：不创建项目代号
   - 不存在：平台自动创建项目
@@ -312,6 +316,14 @@ python app.py
   - 已存在且被其他主体占用：返回冲突，不覆盖
 - 独立 Agent 运行包位于 `agent/`，可单独打包分发：
   - `python agent/build_zip.py`
+- 平台支持 Agent release 发布（自更新）：
+  - `python scripts/publish_agent_release.py`
+  - `python scripts/publish_agent_release.py --rollback --rollback-steps 1`（回滚到上一版）
+  - `python scripts/rollback_agent_release.py --steps 1`（独立回滚脚本）
+  - Windows: `scripts\\publish_agent_release.bat`
+  - Linux/macOS: `bash scripts/publish_agent_release.sh`
+  - 默认产物目录：`instance/agent_releases/`
+  - 可用环境变量 `AGENT_RELEASES_DIR` 自定义目录
 - `DEPLOYMENT_MODE=platform` 时，新增 `excel_diff/auto_sync/weekly_sync/weekly_excel_cache` 任务会下发到 `agent_tasks`。
 - 平台管理员在 `platform/agent` 模式下创建项目时，可在首页选择绑定目标 Agent。
 - 若某 Agent 配置了 `AGENT_DEFAULT_ADMIN_USERNAME`，对应用户可直接在平台创建项目：

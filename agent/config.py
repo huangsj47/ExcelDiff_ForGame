@@ -147,6 +147,12 @@ class AgentSettings:
     temp_cache_upload_enabled: bool
     temp_cache_threshold_bytes: int
     temp_cache_expire_days: int
+    auto_update_enabled: bool
+    auto_update_check_interval_seconds: int
+    auto_update_request_timeout_seconds: int
+    auto_update_download_timeout_seconds: int
+    auto_update_install_deps: bool
+    auto_update_pip_timeout_seconds: int
 
 
 def load_settings() -> AgentSettings:
@@ -195,5 +201,23 @@ def load_settings() -> AgentSettings:
         temp_cache_expire_days=max(
             1,
             int((os.environ.get("AGENT_TEMP_CACHE_EXPIRE_DAYS") or "90").strip()),
+        ),
+        auto_update_enabled=_bool_env("AGENT_AUTO_UPDATE_ENABLED", True),
+        auto_update_check_interval_seconds=max(
+            30,
+            int((os.environ.get("AGENT_AUTO_UPDATE_CHECK_INTERVAL_SECONDS") or "300").strip()),
+        ),
+        auto_update_request_timeout_seconds=max(
+            5,
+            int((os.environ.get("AGENT_AUTO_UPDATE_REQUEST_TIMEOUT_SECONDS") or "15").strip()),
+        ),
+        auto_update_download_timeout_seconds=max(
+            30,
+            int((os.environ.get("AGENT_AUTO_UPDATE_DOWNLOAD_TIMEOUT_SECONDS") or "120").strip()),
+        ),
+        auto_update_install_deps=_bool_env("AGENT_AUTO_UPDATE_INSTALL_DEPS", True),
+        auto_update_pip_timeout_seconds=max(
+            60,
+            int((os.environ.get("AGENT_AUTO_UPDATE_PIP_TIMEOUT_SECONDS") or "900").strip()),
         ),
     )

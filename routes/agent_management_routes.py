@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Agent 管理相关路由。"""
 
@@ -64,6 +64,30 @@ def agent_claim_task_route():
     return _dispatch("agent_claim_task")
 
 
+@agent_management_bp.route("/api/agents/releases/latest", methods=["POST"], endpoint="agent_get_latest_release")
+def agent_get_latest_release_route():
+    return _dispatch("agent_get_latest_release")
+
+
+@agent_management_bp.route("/api/agents/releases/admin/list", methods=["GET"], endpoint="list_agent_releases")
+def list_agent_releases_route():
+    return _dispatch("list_agent_releases")
+
+
+@agent_management_bp.route("/api/agents/releases/admin/rollback", methods=["POST"], endpoint="rollback_agent_release")
+def rollback_agent_release_route():
+    return _dispatch("rollback_agent_release")
+
+
+@agent_management_bp.route(
+    "/api/agents/releases/<string:version>/package",
+    methods=["GET"],
+    endpoint="agent_download_release_package",
+)
+def agent_download_release_package_route(version):
+    return _dispatch("agent_download_release_package", version)
+
+
 @agent_management_bp.route(
     "/api/agents/tasks/<int:task_id>/result",
     methods=["POST"],
@@ -71,4 +95,3 @@ def agent_claim_task_route():
 )
 def agent_report_task_result_route(task_id):
     return _dispatch("agent_report_task_result", task_id)
-

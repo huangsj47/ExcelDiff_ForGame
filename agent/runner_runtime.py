@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import signal
 import sys
 import time
@@ -15,11 +16,13 @@ try:
     from .config import load_settings
     from .executor import execute_task
     from .http_client import post_json
+    from .self_update import check_and_apply_update, get_local_release_version
     from .system_metrics import collect_agent_metrics
 except ImportError:
     from config import load_settings
     from executor import execute_task
     from http_client import post_json
+    from self_update import check_and_apply_update, get_local_release_version
     from system_metrics import collect_agent_metrics
 
 
@@ -93,6 +96,13 @@ def _report_task_result_once(settings, task_id, report_payload, common_headers):
     return post_json(report_url, report_payload, headers=common_headers, timeout=15)
 
 
+def _restart_process_after_update(settings):
+    _log("自更新完成，准备重启 Agent 进程", settings.log_verbose)
+    python_exe = sys.executable
+    argv = [python_exe] + sys.argv
+    os.execv(python_exe, argv)
+
+
 def run_agent():
     global _SHUTDOWN
     settings = load_settings()
@@ -115,10 +125,11 @@ def run_agent():
     heartbeat_online_logged = False
     heartbeat_offline_logged = False
     pending_report = None
+    last_auto_update_check_at = 0.0
 
     _log(
         f"启动 Agent: code={settings.agent_code}, projects={','.join(settings.project_codes)}, "
-        f"platform={settings.platform_base_url}",
+        f"platform={settings.platform_base_url}, version={get_local_release_version()}",
         settings.log_verbose,
     )
 
@@ -137,6 +148,7 @@ def run_agent():
                 "capabilities": {
                     "supports_excel_diff": True,
                     "supports_weekly_diff": True,
+                    "supports_self_update": True,
                     "runtime": "python",
                 },
                 **cached_metrics,
@@ -195,6 +207,24 @@ def run_agent():
                 continue
 
         now_ts = time.time()
+        if settings.auto_update_enabled and (now_ts - last_auto_update_check_at) >= settings.auto_update_check_interval_seconds:
+            last_auto_update_check_at = now_ts
+            try:
+                updated, update_message = check_and_apply_update(
+                    settings=settings,
+                    common_headers=common_headers,
+                    agent_token=agent_token,
+                    log_func=lambda m: _log(m, settings.log_verbose),
+                )
+                if updated:
+                    _log(f"自更新成功: {update_message}", settings.log_verbose)
+                    _restart_process_after_update(settings)
+                else:
+                    if update_message not in {"no update", ""}:
+                        _log(f"自更新检查结果: {update_message}", settings.log_verbose)
+            except Exception as update_exc:
+                _log(f"自更新失败: {update_exc}", settings.log_verbose)
+
         should_push_metrics = (not cached_metrics) or (now_ts - last_metrics_at >= settings.metrics_interval_seconds)
         if should_push_metrics:
             cached_metrics = collect_agent_metrics(settings.repos_base_dir)
