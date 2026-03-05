@@ -55,6 +55,8 @@ def run_agent():
     last_heartbeat_at = 0.0
     last_metrics_at = 0.0
     cached_metrics = {}
+    heartbeat_online_logged = False
+    heartbeat_offline_logged = False
 
     _log(
         f"启动 Agent: code={settings.agent_code}, projects={','.join(settings.project_codes)}, "
@@ -90,6 +92,8 @@ def run_agent():
                     f"注册成功，created={created}, idempotent={idem}",
                     settings.log_verbose,
                 )
+                heartbeat_online_logged = False
+                heartbeat_offline_logged = False
                 time.sleep(1)
                 continue
 
@@ -114,12 +118,20 @@ def run_agent():
                 heartbeat_payload.update(cached_metrics)
             status, data = post_json(heartbeat_url, heartbeat_payload, headers=common_headers, timeout=10)
             if status == 200 and data.get("success"):
-                _log("心跳成功", settings.log_verbose)
+                if not heartbeat_online_logged:
+                    _log("心跳连接成功", settings.log_verbose)
+                    heartbeat_online_logged = True
+                    heartbeat_offline_logged = False
                 last_heartbeat_at = now_ts
             else:
-                _log(f"心跳失败(status={status}): {data}", settings.log_verbose)
+                if not heartbeat_offline_logged:
+                    _log(f"心跳断线(status={status}): {data}", settings.log_verbose)
+                    heartbeat_offline_logged = True
+                    heartbeat_online_logged = False
                 if status in (401, 403):
                     agent_token = ""
+                    heartbeat_online_logged = False
+                    heartbeat_offline_logged = False
                     time.sleep(settings.register_retry_interval_seconds)
                     continue
 

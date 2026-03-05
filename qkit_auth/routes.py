@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import re
 from urllib.parse import urlencode, urlparse
 
 from flask import (
@@ -26,6 +27,8 @@ from models import Project, db
 from qkit_auth.config import load_qkit_settings
 from qkit_auth.models import (
     QkitAuthProjectJoinRequest,
+    QkitPlatformRole,
+    QkitProjectRole,
     QkitAuthUser,
     QkitAuthUserProject,
 )
@@ -60,6 +63,9 @@ from utils.request_security import (
     _is_safe_redirect,
 )
 from utils.logger import log_print
+
+_USERS_PER_PAGE = 20
+_USERNAME_ALLOWED_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 
 auth_bp = Blueprint(
     "auth_bp",
@@ -232,6 +238,61 @@ def _clear_user_session() -> None:
         "auth_backend",
     ):
         session.pop(key, None)
+
+
+def _current_auth_user_id() -> int | None:
+    raw = session.get("auth_user_id")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_username(value: str) -> str:
+    username = str(value or "").strip()
+    if username.endswith("@corp.netease.com"):
+        username = username.split("@", 1)[0]
+    if "@" in username:
+        username = username.split("@", 1)[0]
+    return username.strip()
+
+
+def _normalize_email(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def _project_admin_scope_project_ids(user_id: int | None) -> list[int]:
+    if not user_id:
+        return []
+    rows = QkitAuthUserProject.query.filter_by(
+        user_id=user_id,
+        role=QkitProjectRole.ADMIN.value,
+    ).all()
+    return sorted({int(row.project_id) for row in rows if row.project_id})
+
+
+def _resolve_user_mgmt_scope() -> tuple[bool, list[int], list[Project]]:
+    is_platform_admin = _has_admin_access()
+    if is_platform_admin:
+        projects = Project.query.order_by(Project.code.asc()).all()
+        return True, [item.id for item in projects], projects
+
+    manageable_ids = _project_admin_scope_project_ids(_current_auth_user_id())
+    if not manageable_ids:
+        return False, [], []
+    projects = (
+        Project.query.filter(Project.id.in_(manageable_ids))
+        .order_by(Project.code.asc())
+        .all()
+    )
+    return False, manageable_ids, projects
+
+
+def _normalize_member_role(value: str) -> str:
+    role = str(value or "").strip().lower()
+    if role in {"admin", "project_admin"}:
+        return QkitProjectRole.ADMIN.value
+    return QkitProjectRole.MEMBER.value
 
 
 def _qkit_login_redirect(next_url: str):
@@ -408,19 +469,111 @@ def project_name_hint_image():
 
 @auth_bp.route("/users")
 def user_list():
-    if not _has_admin_access():
-        flash("此页面仅限平台管理员访问。", "error")
+    is_platform_admin, scope_project_ids, projects = _resolve_user_mgmt_scope()
+    if not is_platform_admin and not scope_project_ids:
+        flash("当前账号无可管理项目，无法访问用户管理。", "error")
         return redirect(url_for("index"))
-    users = list_users(include_inactive=True)
-    pending_join_requests = list_pending_join_requests()
-    pending_create_requests = list_pending_create_requests()
-    projects = Project.query.order_by(Project.code.asc()).all()
+
+    selected_project_id = request.args.get("project_id", type=int)
+    if selected_project_id and selected_project_id not in set(scope_project_ids):
+        selected_project_id = None
+
+    page = max(1, request.args.get("page", 1, type=int))
+    per_page = _USERS_PER_PAGE
+
+    users_query = QkitAuthUser.query
+    if selected_project_id:
+        users_query = users_query.join(
+            QkitAuthUserProject,
+            QkitAuthUserProject.user_id == QkitAuthUser.id,
+        ).filter(
+            QkitAuthUserProject.project_id == selected_project_id
+        )
+    elif not is_platform_admin:
+        users_query = users_query.join(
+            QkitAuthUserProject,
+            QkitAuthUserProject.user_id == QkitAuthUser.id,
+        ).filter(
+            QkitAuthUserProject.project_id.in_(scope_project_ids)
+        )
+
+    users_query = users_query.distinct()
+    total_users = users_query.count()
+    users = (
+        users_query.order_by(QkitAuthUser.created_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
+
+    user_ids = [item.id for item in users]
+    memberships = []
+    if user_ids:
+        member_query = QkitAuthUserProject.query.filter(
+            QkitAuthUserProject.user_id.in_(user_ids)
+        ).join(Project)
+        if not is_platform_admin:
+            member_query = member_query.filter(
+                QkitAuthUserProject.project_id.in_(scope_project_ids)
+            )
+        memberships = member_query.order_by(
+            QkitAuthUserProject.user_id.asc(),
+            Project.code.asc(),
+        ).all()
+
+    user_projects_map = {}
+    user_edit_map = {}
+    for user in users:
+        user_projects_map[user.id] = []
+        user_edit_map[user.id] = {
+            "id": user.id,
+            "username": user.username,
+            "display_name": user.display_name or "",
+            "email": user.email or "",
+            "platform_role": user.role,
+            "project_ids": [],
+            "member_role": QkitProjectRole.MEMBER.value,
+        }
+
+    for item in memberships:
+        project = item.project
+        if not project:
+            continue
+        user_projects_map.setdefault(item.user_id, []).append(
+            {
+                "project_id": project.id,
+                "project_code": project.code,
+                "project_name": project.name,
+                "role": item.role,
+            }
+        )
+        edit_item = user_edit_map.get(item.user_id)
+        if edit_item is not None:
+            edit_item["project_ids"].append(project.id)
+            if item.role == QkitProjectRole.ADMIN.value:
+                edit_item["member_role"] = QkitProjectRole.ADMIN.value
+
+    total_pages = max(1, (total_users + per_page - 1) // per_page)
+    pending_join_requests = list_pending_join_requests() if is_platform_admin else []
+    pending_create_requests = list_pending_create_requests() if is_platform_admin else []
     return render_template(
         "qkit_user_management.html",
         users=users,
         pending_join_requests=pending_join_requests,
         pending_create_requests=pending_create_requests,
         projects=projects,
+        is_platform_admin=is_platform_admin,
+        selected_project_id=selected_project_id,
+        page=page,
+        per_page=per_page,
+        total_users=total_users,
+        total_pages=total_pages,
+        user_projects_map=user_projects_map,
+        user_edit_map=user_edit_map,
+        project_options=[
+            {"id": item.id, "code": item.code, "name": item.name}
+            for item in projects
+        ],
     )
 
 
@@ -449,6 +602,179 @@ def api_toggle_user_active(user_id):
     if not ok:
         return jsonify({"success": False, "message": err}), 400
     return jsonify({"success": True, "message": "用户状态已更新"})
+
+
+@auth_bp.route("/api/users/<int:user_id>/profile", methods=["POST"])
+def api_update_user_profile(user_id):
+    is_platform_admin, scope_project_ids, _projects = _resolve_user_mgmt_scope()
+    if not is_platform_admin and not scope_project_ids:
+        return jsonify({"success": False, "message": "权限不足"}), 403
+
+    user = db.session.get(QkitAuthUser, user_id)
+    if user is None:
+        return jsonify({"success": False, "message": "用户不存在"}), 404
+
+    data = request.get_json(silent=True) or {}
+    username = _normalize_username(data.get("username") or "")
+    display_name = (data.get("display_name") or "").strip()
+    email = _normalize_email(data.get("email") or "")
+    project_ids_raw = data.get("project_ids") or []
+    member_role = _normalize_member_role(data.get("member_role"))
+    platform_role = str(data.get("platform_role") or "").strip()
+
+    if not username or not _USERNAME_ALLOWED_RE.fullmatch(username):
+        return jsonify({"success": False, "message": "用户名格式不合法"}), 400
+    if not display_name:
+        return jsonify({"success": False, "message": "姓名不能为空"}), 400
+    if not email or "@" not in email:
+        return jsonify({"success": False, "message": "邮箱格式不合法"}), 400
+
+    project_ids = set()
+    for value in project_ids_raw:
+        try:
+            project_ids.add(int(value))
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "project_ids 参数非法"}), 400
+
+    if not is_platform_admin:
+        allowed = set(scope_project_ids)
+        if not project_ids.issubset(allowed):
+            return jsonify({"success": False, "message": "仅可编辑您有权限的项目成员"}), 403
+        in_scope = QkitAuthUserProject.query.filter_by(user_id=user_id).filter(
+            QkitAuthUserProject.project_id.in_(scope_project_ids)
+        ).first()
+        if in_scope is None and not project_ids:
+            return jsonify({"success": False, "message": "目标用户不在您可管理项目范围内"}), 403
+
+    username_conflict = QkitAuthUser.query.filter(
+        QkitAuthUser.username == username,
+        QkitAuthUser.id != user.id,
+    ).first()
+    if username_conflict:
+        return jsonify({"success": False, "message": "用户名已存在"}), 400
+
+    email_conflict = QkitAuthUser.query.filter(
+        db.func.lower(QkitAuthUser.email) == email,
+        QkitAuthUser.id != user.id,
+    ).first()
+    if email_conflict:
+        return jsonify({"success": False, "message": "邮箱已被其他用户使用"}), 400
+
+    user.username = username
+    user.display_name = display_name[:100]
+    user.email = email[:200]
+    if is_platform_admin and platform_role in {
+        QkitPlatformRole.PLATFORM_ADMIN.value,
+        QkitPlatformRole.PROJECT_ADMIN.value,
+        QkitPlatformRole.NORMAL.value,
+    }:
+        user.role = platform_role
+
+    editable_scope_ids = set(scope_project_ids) if not is_platform_admin else None
+    memberships_query = QkitAuthUserProject.query.filter_by(user_id=user.id)
+    if editable_scope_ids is not None:
+        memberships_query = memberships_query.filter(
+            QkitAuthUserProject.project_id.in_(list(editable_scope_ids))
+        )
+    memberships = memberships_query.all()
+    existing_ids = {item.project_id for item in memberships}
+
+    for item in memberships:
+        if item.project_id in project_ids:
+            item.role = member_role
+            item.import_sync_locked = True
+        else:
+            db.session.delete(item)
+
+    add_ids = project_ids - existing_ids
+    for project_id in add_ids:
+        project = db.session.get(Project, project_id)
+        if not project:
+            return jsonify({"success": False, "message": f"项目不存在: {project_id}"}), 400
+        db.session.add(
+            QkitAuthUserProject(
+                user_id=user.id,
+                project_id=project.id,
+                role=member_role,
+                approved_by=_current_auth_user_id(),
+                imported_from_qkit=False,
+                import_sync_locked=True,
+            )
+        )
+
+    db.session.commit()
+    return jsonify({"success": True, "message": "用户信息已更新"})
+
+
+@auth_bp.route("/api/users/manual-add", methods=["POST"])
+def api_manual_add_user():
+    is_platform_admin, scope_project_ids, _projects = _resolve_user_mgmt_scope()
+    if not is_platform_admin and not scope_project_ids:
+        return jsonify({"success": False, "message": "权限不足"}), 403
+
+    data = request.get_json(silent=True) or {}
+    display_name = (data.get("display_name") or "").strip()
+    email = _normalize_email(data.get("email") or "")
+    member_role = _normalize_member_role(data.get("member_role"))
+    project_id = data.get("project_id")
+
+    try:
+        project_id = int(project_id)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "请选择所在项目"}), 400
+
+    if not is_platform_admin and project_id not in set(scope_project_ids):
+        return jsonify({"success": False, "message": "仅可添加到您有权限的项目"}), 403
+    if not display_name:
+        return jsonify({"success": False, "message": "姓名不能为空"}), 400
+    if not email or "@" not in email:
+        return jsonify({"success": False, "message": "邮箱格式不合法"}), 400
+
+    username = _normalize_username(email.split("@", 1)[0])
+    if not _USERNAME_ALLOWED_RE.fullmatch(username):
+        return jsonify({"success": False, "message": "邮箱前缀无法作为合法用户名"}), 400
+
+    user = QkitAuthUser.query.filter_by(username=username).first()
+    if user is None:
+        user = QkitAuthUser(
+            username=username,
+            display_name=display_name[:100],
+            email=email[:200],
+            role=QkitPlatformRole.NORMAL.value,
+            is_active=True,
+            source="manual",
+        )
+        db.session.add(user)
+        db.session.flush()
+    else:
+        if user.email and user.email.lower() != email.lower():
+            return jsonify({"success": False, "message": "该用户名已绑定其他邮箱"}), 400
+        user.display_name = display_name[:100]
+        if not user.email:
+            user.email = email[:200]
+        user.source = "manual"
+
+    membership = QkitAuthUserProject.query.filter_by(
+        user_id=user.id,
+        project_id=project_id,
+    ).first()
+    if membership is None:
+        db.session.add(
+            QkitAuthUserProject(
+                user_id=user.id,
+                project_id=project_id,
+                role=member_role,
+                approved_by=_current_auth_user_id(),
+                imported_from_qkit=False,
+                import_sync_locked=True,
+            )
+        )
+    else:
+        membership.role = member_role
+        membership.import_sync_locked = True
+
+    db.session.commit()
+    return jsonify({"success": True, "message": "用户已添加并完成项目分配"})
 
 
 @auth_bp.route("/api/users/<int:user_id>/reset-password", methods=["POST"])

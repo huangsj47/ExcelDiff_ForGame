@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Agent 管理相关处理函数。"""
 
@@ -120,12 +120,59 @@ def _to_float_or_none(value, min_value=None, max_value=None):
     return fv
 
 
+
+def _parse_host_and_port(raw_value):
+    text = str(raw_value or "").strip()
+    if not text:
+        return "", None
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    text = text.split("/", 1)[0].strip()
+    if not text:
+        return "", None
+
+    host = text
+    port = None
+
+    if text.startswith("[") and "]" in text:
+        # Bracketed IPv6 format: [addr]:port
+        end_idx = text.find("]")
+        host = text[1:end_idx].strip()
+        remainder = text[end_idx + 1 :].strip()
+        if remainder.startswith(":"):
+            parsed_port = _to_int_or_none(remainder[1:].strip(), min_value=1, max_value=65535)
+            if parsed_port is not None:
+                port = parsed_port
+    elif text.count(":") == 1:
+        host_part, port_part = text.rsplit(":", 1)
+        parsed_port = _to_int_or_none(port_part.strip(), min_value=1, max_value=65535)
+        if parsed_port is not None:
+            host = host_part.strip()
+            port = parsed_port
+
+    return host.strip(), port
+
+
+def _resolve_observed_remote_addr(payload: dict):
+    x_forwarded_for = str(payload.get("_observed_forwarded_for") or "").strip()
+    if x_forwarded_for:
+        first_ip = x_forwarded_for.split(",", 1)[0].strip()
+        host, _ = _parse_host_and_port(first_ip)
+        if host:
+            return host
+
+    observed = str(payload.get("_observed_remote_addr") or "").strip()
+    host, _ = _parse_host_and_port(observed)
+    return host
+
 def _extract_agent_metrics(payload: dict):
     metrics = {
         "cpu_cores": _to_int_or_none(payload.get("cpu_cores"), min_value=1, max_value=4096),
         "cpu_usage_percent": _to_float_or_none(payload.get("cpu_usage_percent"), min_value=0, max_value=100),
+        "agent_cpu_usage_percent": _to_float_or_none(payload.get("agent_cpu_usage_percent"), min_value=0, max_value=100),
         "memory_total_bytes": _to_int_or_none(payload.get("memory_total_bytes"), min_value=0),
         "memory_available_bytes": _to_int_or_none(payload.get("memory_available_bytes"), min_value=0),
+        "agent_memory_rss_bytes": _to_int_or_none(payload.get("agent_memory_rss_bytes"), min_value=0),
         "disk_free_bytes": _to_int_or_none(payload.get("disk_free_bytes"), min_value=0),
         "os_name": str(payload.get("os_name") or "").strip()[:100] or None,
         "os_version": str(payload.get("os_version") or "").strip()[:200] or None,
@@ -140,14 +187,27 @@ def _apply_agent_runtime_fields(agent, payload: dict):
         status = str(payload.get("status") or "").strip()
         agent.status = status or agent.status or "online"
 
-    host = str(payload.get("ip") or payload.get("host") or "").strip()
-    if host:
-        agent.host = host
+    reported_host, reported_host_port = _parse_host_and_port(payload.get("ip") or payload.get("host"))
+    observed_host = _resolve_observed_remote_addr(payload)
+    platform_host, _ = _parse_host_and_port(payload.get("_platform_host"))
+    platform_host = platform_host.lower()
 
+    reported_host_lower = reported_host.lower()
+    suspicious_host = reported_host_lower in {"", "127.0.0.1", "0.0.0.0", "localhost"}
+    if platform_host and reported_host_lower == platform_host:
+        suspicious_host = True
+
+    resolved_host = observed_host if (observed_host and suspicious_host) else (reported_host or observed_host)
+    if resolved_host:
+        agent.host = resolved_host
+
+    port = None
     if "port" in payload:
         port = _to_int_or_none(payload.get("port"), min_value=1, max_value=65535)
-        if port is not None:
-            agent.port = port
+    if port is None:
+        port = reported_host_port
+    if port is not None:
+        agent.port = port
 
     if "agent_name" in payload:
         incoming_name = str(payload.get("agent_name") or "").strip()
@@ -207,8 +267,10 @@ def _format_agent_rows(agents, bindings_by_agent_id, default_admins_by_agent_id)
                 "project_count": len(binding_rows),
                 "cpu_cores": agent.cpu_cores,
                 "cpu_usage_percent": agent.cpu_usage_percent,
+                "agent_cpu_usage_percent": agent.agent_cpu_usage_percent,
                 "memory_total_bytes": agent.memory_total_bytes,
                 "memory_available_bytes": agent.memory_available_bytes,
+                "agent_memory_rss_bytes": agent.agent_memory_rss_bytes,
                 "disk_free_bytes": agent.disk_free_bytes,
                 "os_name": agent.os_name,
                 "os_version": agent.os_version,
@@ -557,6 +619,9 @@ def register_agent_node():
                 "agent_name": agent_name or agent.agent_name or agent_code,
                 "host": host or payload.get("host"),
                 "status": "online",
+                "_observed_remote_addr": request.remote_addr,
+                "_observed_forwarded_for": request.headers.get("X-Forwarded-For"),
+                "_platform_host": request.host,
             },
         )
         agent.default_admin_username = default_admin_username
@@ -702,6 +767,9 @@ def agent_heartbeat():
             {
                 **payload,
                 "status": str(payload.get("status") or "online").strip() or "online",
+                "_observed_remote_addr": request.remote_addr,
+                "_observed_forwarded_for": request.headers.get("X-Forwarded-For"),
+                "_platform_host": request.host,
             },
         )
 
@@ -988,3 +1056,12 @@ def list_agent_tasks():
         )
 
     return jsonify({"success": True, "items": items, "count": len(items)})
+
+
+
+
+
+
+
+
+

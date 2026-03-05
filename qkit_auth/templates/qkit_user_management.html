@@ -1,133 +1,185 @@
 {% extends "base.html" %}
 
-{% block title %}Qkit用户管理 - Diff确认平台{% endblock %}
+{% block title %}平台用户管理 - Diff确认平台{% endblock %}
 
 {% block head %}
 <style>
-    .qkit-header {
-        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-        border-radius: 16px;
-        color: #f8fafc;
-        padding: 1.6rem 1.8rem;
-        margin-bottom: 1.2rem;
-    }
-    .qkit-header h3 { margin: 0; font-weight: 700; }
-    .qkit-header p { margin: .3rem 0 0; opacity: 0.86; font-size: .92rem; }
-
-    .qkit-card {
-        border: 1px solid #e5e7eb;
+    .admin-header {
+        background: linear-gradient(135deg, #0b3a82 0%, #0a2f66 100%);
         border-radius: 14px;
-        box-shadow: 0 2px 12px rgba(2, 6, 23, 0.06);
+        color: #f8fbff;
+        padding: 1.3rem 1.5rem;
         margin-bottom: 1rem;
-        overflow: hidden;
+        box-shadow: 0 6px 20px rgba(10, 47, 102, 0.22);
     }
-    .qkit-card .card-header {
-        background: #f8fafc;
-        border-bottom: 1px solid #e5e7eb;
-        font-weight: 600;
-        font-size: .95rem;
-        padding: .85rem 1rem;
+    .admin-header h3 {
+        margin: 0;
+        font-size: 1.25rem;
+        font-weight: 700;
+    }
+    .admin-header p {
+        margin: .35rem 0 0;
+        font-size: .86rem;
+        opacity: .9;
     }
 
-    .qkit-stat-grid {
+    .admin-stats {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: .6rem;
+        gap: .65rem;
+        margin-top: .95rem;
     }
-    .qkit-stat {
-        background: #0b1220;
-        border: 1px solid #1f2937;
+    .admin-stat {
+        background: rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(255, 255, 255, 0.2);
         border-radius: 10px;
-        color: #e5e7eb;
+        padding: .55rem .65rem;
         text-align: center;
-        padding: .7rem .6rem;
     }
-    .qkit-stat .n { font-size: 1.15rem; font-weight: 700; }
-    .qkit-stat .l { font-size: .75rem; opacity: .84; }
+    .admin-stat .n { font-size: 1.12rem; font-weight: 700; line-height: 1.2; }
+    .admin-stat .l { font-size: .73rem; opacity: .92; }
+
+    .admin-card {
+        border: 1px solid #dbe4f1;
+        border-radius: 12px;
+        background: #ffffff;
+        box-shadow: 0 2px 12px rgba(15, 36, 74, 0.06);
+        margin-bottom: .95rem;
+        overflow: hidden;
+    }
+    .admin-card .card-header {
+        background: linear-gradient(180deg, #f8fbff 0%, #f1f6fd 100%);
+        border-bottom: 1px solid #dbe4f1;
+        padding: .78rem .95rem;
+        font-size: .9rem;
+        font-weight: 700;
+        color: #1f3b66;
+    }
 
     .pending-item {
-        border: 1px solid #e5e7eb;
+        border: 1px solid #e2e8f0;
         border-radius: 10px;
-        padding: .72rem .85rem;
-        margin-bottom: .6rem;
+        padding: .72rem .82rem;
+        margin-bottom: .58rem;
         background: #fff;
     }
     .pending-meta {
-        color: #64748b;
         font-size: .8rem;
-        margin-top: .25rem;
+        color: #5f6f86;
+        margin-top: .2rem;
     }
-
-    .table > :not(caption) > * > * { padding: .5rem .65rem; }
-    .table th {
-        font-size: .76rem;
-        letter-spacing: .03em;
-        text-transform: uppercase;
-        color: #64748b;
-        white-space: nowrap;
-    }
-    .table td { font-size: .86rem; vertical-align: middle; }
-    .badge-role { font-size: .73rem; padding: .3em .62em; }
 
     .report-box {
         border-radius: 10px;
-        border: 1px solid #cbd5e1;
-        background: #f8fafc;
+        border: 1px solid #d7e3f5;
+        background: #f4f8ff;
+        color: #344a6b;
         padding: .72rem .82rem;
         font-size: .82rem;
-        color: #334155;
         display: none;
-        margin-top: .7rem;
+        margin-top: .8rem;
     }
     .report-box .line { margin: .18rem 0; }
-    .report-box code { font-size: .78rem; }
+
+    .table > :not(caption) > * > * { padding: .48rem .62rem; }
+    .table thead th {
+        white-space: nowrap;
+        font-size: .74rem;
+        letter-spacing: .03em;
+        text-transform: uppercase;
+        color: #5f6f86;
+    }
+    .table tbody td { font-size: .84rem; vertical-align: middle; }
+
+    .project-pill {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        border: 1px solid #d8e4f5;
+        background: #f7fbff;
+        color: #1f3b66;
+        padding: .12rem .45rem;
+        margin: .08rem .18rem .08rem 0;
+        font-size: .73rem;
+    }
+
+    .pager {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: .7rem .9rem;
+        border-top: 1px solid #e2e8f0;
+        background: #fbfdff;
+        font-size: .82rem;
+    }
+
+    .project-check-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: .45rem .75rem;
+        max-height: 240px;
+        overflow: auto;
+        border: 1px solid #dbe4f1;
+        border-radius: 10px;
+        padding: .55rem .65rem;
+        background: #f8fbff;
+    }
 
     @media (max-width: 900px) {
-        .qkit-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .admin-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .project-check-grid { grid-template-columns: repeat(1, minmax(0, 1fr)); }
     }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="qkit-header">
-    <h3>Qkit 用户管理</h3>
-    <p>Qkit 模式下仅保留用户管理与项目申请审批。注册/改密/本地密码重置功能已禁用。</p>
-    <div class="qkit-stat-grid mt-3">
-        <div class="qkit-stat"><div class="n">{{ users|length }}</div><div class="l">总用户</div></div>
-        <div class="qkit-stat"><div class="n">{{ pending_join_requests|length }}</div><div class="l">待审加入</div></div>
-        <div class="qkit-stat"><div class="n">{{ pending_create_requests|length }}</div><div class="l">待审创建</div></div>
-        <div class="qkit-stat"><div class="n">{{ projects|length }}</div><div class="l">项目总数</div></div>
+<div class="admin-header">
+    <h3>平台用户管理</h3>
+    <p>统一管理用户基础信息、项目归属与成员导入。{{ '当前为平台管理员视图。' if is_platform_admin else '当前为项目管理员视图，仅可管理授权项目。' }}</p>
+    <div class="admin-stats">
+        <div class="admin-stat"><div class="n">{{ total_users }}</div><div class="l">筛选后用户数</div></div>
+        <div class="admin-stat"><div class="n">{{ pending_join_requests|length }}</div><div class="l">待审加入</div></div>
+        <div class="admin-stat"><div class="n">{{ pending_create_requests|length }}</div><div class="l">待审创建</div></div>
+        <div class="admin-stat"><div class="n">{{ projects|length }}</div><div class="l">可管理项目</div></div>
     </div>
 </div>
 
-<div class="qkit-card card">
-    <div class="card-header">按项目导入用户（Qkit）</div>
+<div class="admin-card card">
+    <div class="card-header">用户筛选与成员导入</div>
     <div class="card-body">
         <div class="row g-2 align-items-end">
-            <div class="col-md-4">
-                <label class="form-label mb-1">项目</label>
+            <div class="col-lg-4">
+                <label class="form-label mb-1">按项目筛选用户</label>
+                <form method="GET" action="{{ url_for('auth_bp.user_list') }}" id="projectFilterForm">
+                    <select class="form-select form-select-sm" name="project_id" onchange="document.getElementById('projectFilterForm').submit()">
+                        <option value="">{{ '全部项目' if is_platform_admin else '全部可管理项目' }}</option>
+                        {% for p in projects %}
+                        <option value="{{ p.id }}" {% if selected_project_id == p.id %}selected{% endif %}>{{ p.code }} - {{ p.name }}</option>
+                        {% endfor %}
+                    </select>
+                </form>
+            </div>
+            <div class="col-lg-4">
+                <label class="form-label mb-1">导入项目</label>
                 <select id="importProjectId" class="form-select form-select-sm">
+                    <option value="">请选择项目</option>
                     {% for p in projects %}
-                    <option value="{{ p.id }}">{{ p.code }} - {{ p.name }}</option>
+                    <option value="{{ p.id }}" {% if selected_project_id == p.id %}selected{% endif %}>{{ p.code }} - {{ p.name }}</option>
                     {% endfor %}
                 </select>
             </div>
-            <div class="col-md-4">
-                <div class="d-grid gap-2 d-md-block">
-                    <button class="btn btn-sm btn-outline-primary" onclick="openMembersPage()">配置token/host并查看成员页</button>
-                    <button class="btn btn-sm btn-success" onclick="runProjectImport()">直接执行导入</button>
-                </div>
-            </div>
-            <div class="col-md-4 text-muted" style="font-size:.8rem;">
-                token/host/project 参数在“项目成员管理”页面配置。若接口返回错误消息，平台将直接展示原始 `msg`。
+            <div class="col-lg-4 d-flex flex-wrap gap-2">
+                <button class="btn btn-sm btn-outline-primary" type="button" onclick="openMembersPage()">成员导入配置</button>
+                <button class="btn btn-sm btn-success" type="button" onclick="runProjectImport()">直接执行导入</button>
+                <button class="btn btn-sm btn-outline-secondary" type="button" onclick="openManualAddModal()">手动添加</button>
             </div>
         </div>
         <div id="importReport" class="report-box"></div>
     </div>
 </div>
 
-{% if pending_join_requests or pending_create_requests %}
-<div class="qkit-card card">
+{% if is_platform_admin and (pending_join_requests or pending_create_requests) %}
+<div class="admin-card card">
     <div class="card-header">待审批申请</div>
     <div class="card-body">
         {% for req in pending_join_requests %}
@@ -154,25 +206,26 @@
 </div>
 {% endif %}
 
-<div class="qkit-card card">
-    <div class="card-header">用户列表</div>
+<div class="admin-card card">
+    <div class="card-header">用户列表（每页最多 {{ per_page }} 条）</div>
     <div class="card-body p-0">
         <div class="table-responsive">
-            <table class="table table-sm mb-0 align-middle">
+            <table class="table table-sm align-middle mb-0">
                 <thead>
                     <tr>
                         <th>ID</th>
                         <th>用户名</th>
-                        <th>显示名</th>
+                        <th>姓名</th>
                         <th>邮箱</th>
-                        <th>角色</th>
+                        <th>平台角色</th>
+                        <th>所在项目</th>
                         <th>状态</th>
-                        <th>来源</th>
                         <th class="text-end">操作</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for u in users %}
+                    {% set project_list = user_projects_map.get(u.id, []) %}
                     <tr>
                         <td><code>{{ u.id }}</code></td>
                         <td><strong>{{ u.username }}</strong></td>
@@ -180,23 +233,32 @@
                         <td>{{ u.email or '-' }}</td>
                         <td>
                             {% if u.role == 'platform_admin' %}
-                            <span class="badge bg-primary badge-role">平台管理员</span>
+                            <span class="badge bg-primary">平台管理员</span>
                             {% elif u.role == 'project_admin' %}
-                            <span class="badge bg-secondary badge-role">项目管理员</span>
+                            <span class="badge bg-secondary">项目管理员</span>
                             {% else %}
-                            <span class="badge bg-light text-dark badge-role">普通用户</span>
+                            <span class="badge bg-light text-dark">普通用户</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if project_list %}
+                                {% for p in project_list %}
+                                <span class="project-pill">{{ p.project_code }}{% if p.role == 'admin' %} · 管理{% endif %}</span>
+                                {% endfor %}
+                            {% else %}
+                                <span class="text-muted">-</span>
                             {% endif %}
                         </td>
                         <td>
                             {% if u.is_active %}
-                            <span class="badge bg-success-subtle text-success badge-role">活跃</span>
+                            <span class="badge bg-success-subtle text-success">活跃</span>
                             {% else %}
-                            <span class="badge bg-danger-subtle text-danger badge-role">禁用</span>
+                            <span class="badge bg-danger-subtle text-danger">禁用</span>
                             {% endif %}
                         </td>
-                        <td><code>{{ u.source }}</code></td>
                         <td class="text-end">
                             <div class="btn-group btn-group-sm">
+                                {% if is_platform_admin %}
                                 <button class="btn btn-outline-primary dropdown-toggle" data-bs-toggle="dropdown">角色</button>
                                 <ul class="dropdown-menu dropdown-menu-end">
                                     <li><a class="dropdown-item {% if u.role == 'platform_admin' %}active{% endif %}" href="#" onclick="updateRole({{ u.id }}, 'platform_admin'); return false;">平台管理员</a></li>
@@ -204,12 +266,121 @@
                                     <li><a class="dropdown-item {% if u.role == 'normal' %}active{% endif %}" href="#" onclick="updateRole({{ u.id }}, 'normal'); return false;">普通用户</a></li>
                                 </ul>
                                 <button class="btn btn-outline-warning" onclick="toggleActive({{ u.id }})">{{ '禁用' if u.is_active else '启用' }}</button>
+                                {% endif %}
+                                <button class="btn btn-outline-info" onclick="openEditUserModal({{ u.id }})">编辑</button>
                             </div>
                         </td>
                     </tr>
                     {% endfor %}
+                    {% if not users %}
+                    <tr><td colspan="8" class="text-center text-muted py-3">当前筛选条件下暂无用户</td></tr>
+                    {% endif %}
                 </tbody>
             </table>
+        </div>
+
+        <div class="pager">
+            <div>第 {{ page }} / {{ total_pages }} 页，共 {{ total_users }} 人</div>
+            <div class="btn-group btn-group-sm">
+                <a class="btn btn-outline-secondary {% if page <= 1 %}disabled{% endif %}" href="{{ url_for('auth_bp.user_list', page=1, project_id=selected_project_id) if selected_project_id else url_for('auth_bp.user_list', page=1) }}">首页</a>
+                <a class="btn btn-outline-secondary {% if page <= 1 %}disabled{% endif %}" href="{{ url_for('auth_bp.user_list', page=page-1, project_id=selected_project_id) if selected_project_id else url_for('auth_bp.user_list', page=page-1) }}">上一页</a>
+                <a class="btn btn-outline-secondary {% if page >= total_pages %}disabled{% endif %}" href="{{ url_for('auth_bp.user_list', page=page+1, project_id=selected_project_id) if selected_project_id else url_for('auth_bp.user_list', page=page+1) }}">下一页</a>
+                <a class="btn btn-outline-secondary {% if page >= total_pages %}disabled{% endif %}" href="{{ url_for('auth_bp.user_list', page=total_pages, project_id=selected_project_id) if selected_project_id else url_for('auth_bp.user_list', page=total_pages) }}">末页</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="manualAddModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">手动添加用户</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-2">
+                    <label class="form-label">姓名</label>
+                    <input id="manualDisplayName" type="text" class="form-control" placeholder="请输入姓名">
+                </div>
+                <div class="mb-2">
+                    <label class="form-label">邮箱</label>
+                    <input id="manualEmail" type="email" class="form-control" placeholder="例如: user@corp.netease.com">
+                </div>
+                <div class="mb-2">
+                    <label class="form-label">用户权限</label>
+                    <select id="manualMemberRole" class="form-select">
+                        <option value="member">普通用户</option>
+                        <option value="admin">项目管理员</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="form-label">所在项目</label>
+                    <select id="manualProjectId" class="form-select">
+                        <option value="">请选择项目</option>
+                        {% for p in projects %}
+                        <option value="{{ p.id }}">{{ p.code }} - {{ p.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button class="btn btn-primary" type="button" onclick="submitManualAddUser()">确认添加</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="editUserModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">编辑用户</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="editUserId">
+                <div class="row g-2">
+                    <div class="col-md-4">
+                        <label class="form-label">用户名</label>
+                        <input id="editUsername" type="text" class="form-control">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">姓名</label>
+                        <input id="editDisplayName" type="text" class="form-control">
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">邮箱</label>
+                        <input id="editEmail" type="email" class="form-control">
+                    </div>
+                </div>
+                {% if is_platform_admin %}
+                <div class="mt-2">
+                    <label class="form-label">平台角色</label>
+                    <select id="editPlatformRole" class="form-select">
+                        <option value="normal">普通用户</option>
+                        <option value="project_admin">项目管理员</option>
+                        <option value="platform_admin">平台管理员</option>
+                    </select>
+                </div>
+                {% endif %}
+                <div class="mt-2">
+                    <label class="form-label">项目内权限</label>
+                    <select id="editMemberRole" class="form-select">
+                        <option value="member">普通用户</option>
+                        <option value="admin">项目管理员</option>
+                    </select>
+                </div>
+                <div class="mt-2">
+                    <label class="form-label">所在项目</label>
+                    <div class="project-check-grid" id="editProjectGrid"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button class="btn btn-primary" type="button" onclick="submitEditUser()">保存</button>
+            </div>
         </div>
     </div>
 </div>
@@ -218,34 +389,81 @@
 {% block scripts %}
 <script>
 const csrfToken = "{{ csrf_token() }}";
+const userEditMap = {{ user_edit_map|tojson }};
+const projectOptions = {{ project_options|tojson }};
+const isPlatformAdmin = {{ 'true' if is_platform_admin else 'false' }};
+let manualAddModalInstance = null;
+let editUserModalInstance = null;
 
-function apiCall(url, method, body) {
-    return fetch(url, {
-        method,
-        headers: {
-            "Content-Type": "application/json",
-            "X-CSRFToken": csrfToken,
-        },
+function ensureModals() {
+    if (!manualAddModalInstance) {
+        manualAddModalInstance = new bootstrap.Modal(document.getElementById('manualAddModal'));
+    }
+    if (!editUserModalInstance) {
+        editUserModalInstance = new bootstrap.Modal(document.getElementById('editUserModal'));
+    }
+}
+
+async function apiCall(url, method = 'GET', body = null) {
+    const headers = { 'Accept': 'application/json' };
+    const upperMethod = String(method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD'].includes(upperMethod)) {
+        headers['Content-Type'] = 'application/json';
+        headers['X-CSRFToken'] = csrfToken;
+    }
+    const response = await fetch(url, {
+        method: upperMethod,
+        headers,
         body: body ? JSON.stringify(body) : undefined,
-    }).then(r => r.json());
+    });
+    const text = await response.text();
+    let data;
+    try {
+        data = text ? JSON.parse(text) : {};
+    } catch (err) {
+        data = { success: false, message: text || `请求失败(${response.status})` };
+    }
+    if (typeof data.success === 'undefined') {
+        data.success = response.ok;
+    }
+    if (!response.ok && !data.message) {
+        data.message = `请求失败(${response.status})`;
+    }
+    return data;
+}
+
+function showImportReport(lines, isError = false) {
+    const box = document.getElementById('importReport');
+    box.style.display = 'block';
+    box.style.borderColor = isError ? '#fecaca' : '#d7e3f5';
+    box.style.background = isError ? '#fff1f2' : '#f4f8ff';
+    box.innerHTML = lines.map((line) => `<div class="line">${line}</div>`).join('');
+}
+
+function currentProjectId() {
+    const select = document.getElementById('importProjectId');
+    if (!select) return '';
+    return String(select.value || '').trim();
 }
 
 function updateRole(userId, role) {
-    apiCall(`/auth/api/users/${userId}/role`, "POST", { role })
-        .then(data => data.success ? location.reload() : alert(data.message || "操作失败"));
+    apiCall(`/auth/api/users/${userId}/role`, 'POST', { role })
+        .then((data) => data.success ? location.reload() : alert(data.message || '操作失败'))
+        .catch((err) => alert(err && err.message ? err.message : '操作失败'));
 }
 
 function toggleActive(userId) {
-    if (!confirm("确认切换该用户的启用状态？")) return;
-    apiCall(`/auth/api/users/${userId}/toggle-active`, "POST", {})
-        .then(data => data.success ? location.reload() : alert(data.message || "操作失败"));
+    if (!confirm('确认切换该用户的启用状态？')) return;
+    apiCall(`/auth/api/users/${userId}/toggle-active`, 'POST', {})
+        .then((data) => data.success ? location.reload() : alert(data.message || '操作失败'))
+        .catch((err) => alert(err && err.message ? err.message : '操作失败'));
 }
 
 function handleJoinRequest(id, action) {
-    apiCall(`/auth/api/join-requests/${id}/handle`, "POST", { action })
-        .then(data => {
+    apiCall(`/auth/api/join-requests/${id}/handle`, 'POST', { action })
+        .then((data) => {
             if (!data.success) {
-                alert(data.message || "操作失败");
+                alert(data.message || '操作失败');
                 return;
             }
             const row = document.getElementById(`join-req-${id}`);
@@ -254,10 +472,10 @@ function handleJoinRequest(id, action) {
 }
 
 function handleCreateRequest(id, action) {
-    apiCall(`/auth/api/create-requests/${id}/handle`, "POST", { action })
-        .then(data => {
+    apiCall(`/auth/api/create-requests/${id}/handle`, 'POST', { action })
+        .then((data) => {
             if (!data.success) {
-                alert(data.message || "操作失败");
+                alert(data.message || '操作失败');
                 return;
             }
             const row = document.getElementById(`create-req-${id}`);
@@ -265,46 +483,163 @@ function handleCreateRequest(id, action) {
         });
 }
 
-function currentProjectId() {
-    return document.getElementById("importProjectId").value;
-}
-
 function openMembersPage() {
     const pid = currentProjectId();
-    if (!pid) return;
+    if (!pid) {
+        alert('请先选择项目');
+        return;
+    }
     window.location.href = `/auth/project/${pid}/members`;
 }
 
 function runProjectImport() {
     const pid = currentProjectId();
-    if (!pid) return;
-    const report = document.getElementById("importReport");
-    report.style.display = "block";
-    report.innerHTML = "<div class='line'>导入中，请稍候...</div>";
-    apiCall(`/auth/api/project/${pid}/qkit-import`, "POST", {})
-        .then(data => {
+    if (!pid) {
+        showImportReport(['请先选择项目后再执行导入。'], true);
+        return;
+    }
+    showImportReport(['导入中，请稍候...']);
+    apiCall(`/auth/api/project/${pid}/qkit-import`, 'POST', {})
+        .then((data) => {
             if (!data.success) {
-                report.innerHTML = `<div class='line text-danger'>${data.message || "导入失败"}</div>`;
+                showImportReport([data.message || '导入失败'], true);
                 return;
             }
             const lines = [];
-            lines.push(`<div class='line'><strong>${data.message}</strong></div>`);
-            lines.push(`<div class='line'>远端返回：${data.remote_count || 0} 人</div>`);
+            lines.push(`<strong>${data.message || '导入完成'}</strong>`);
+            lines.push(`远端返回：${data.remote_count || 0} 人`);
             if (Array.isArray(data.skipped_removed) && data.skipped_removed.length) {
-                lines.push(`<div class='line'>删除后阻断：<code>${data.skipped_removed.join(", ")}</code></div>`);
+                lines.push(`删除阻断：<code>${data.skipped_removed.join(', ')}</code>`);
             }
             if (Array.isArray(data.skipped_locked) && data.skipped_locked.length) {
-                lines.push(`<div class='line'>权限锁定跳过：<code>${data.skipped_locked.join(", ")}</code></div>`);
+                lines.push(`权限锁定跳过：<code>${data.skipped_locked.join(', ')}</code>`);
             }
             if (Array.isArray(data.conflicts) && data.conflicts.length) {
-                const details = data.conflicts.map(x => `${x.username}(${x.existing_email} != ${x.incoming_email})`).join("; ");
-                lines.push(`<div class='line text-danger'>前缀冲突：<code>${details}</code></div>`);
+                const conflictText = data.conflicts.map((x) => `${x.username}(${x.existing_email} != ${x.incoming_email})`).join('; ');
+                lines.push(`前缀冲突：<code>${conflictText}</code>`);
             }
             if (Array.isArray(data.skipped_invalid) && data.skipped_invalid.length) {
-                lines.push(`<div class='line text-warning'>无效记录跳过：<code>${data.skipped_invalid.join(", ")}</code></div>`);
+                lines.push(`无效记录跳过：<code>${data.skipped_invalid.join(', ')}</code>`);
             }
-            report.innerHTML = lines.join("");
+            showImportReport(lines, false);
+        })
+        .catch((err) => {
+            showImportReport([`导入异常：${(err && err.message) || '未知错误'}`], true);
         });
 }
+
+function openManualAddModal() {
+    ensureModals();
+    const pid = currentProjectId();
+    const select = document.getElementById('manualProjectId');
+    if (select && pid) {
+        select.value = pid;
+    }
+    document.getElementById('manualDisplayName').value = '';
+    document.getElementById('manualEmail').value = '';
+    document.getElementById('manualMemberRole').value = 'member';
+    manualAddModalInstance.show();
+}
+
+function submitManualAddUser() {
+    const display_name = document.getElementById('manualDisplayName').value.trim();
+    const email = document.getElementById('manualEmail').value.trim();
+    const member_role = document.getElementById('manualMemberRole').value;
+    const project_id = document.getElementById('manualProjectId').value;
+
+    if (!display_name || !email || !project_id) {
+        alert('请完整填写姓名、邮箱和所在项目');
+        return;
+    }
+
+    apiCall('/auth/api/users/manual-add', 'POST', {
+        display_name,
+        email,
+        member_role,
+        project_id,
+    }).then((data) => {
+        if (!data.success) {
+            alert(data.message || '添加失败');
+            return;
+        }
+        location.reload();
+    }).catch((err) => {
+        alert((err && err.message) || '添加失败');
+    });
+}
+
+function renderEditProjects(selectedIds) {
+    const box = document.getElementById('editProjectGrid');
+    if (!box) return;
+    const selected = new Set((selectedIds || []).map((item) => Number(item)));
+    box.innerHTML = '';
+    projectOptions.forEach((item) => {
+        const id = Number(item.id);
+        const label = `${item.code} - ${item.name}`;
+        const wrapper = document.createElement('label');
+        wrapper.className = 'form-check d-flex align-items-center';
+        wrapper.innerHTML = `
+            <input class="form-check-input me-2" type="checkbox" value="${id}" ${selected.has(id) ? 'checked' : ''}>
+            <span>${label}</span>
+        `;
+        box.appendChild(wrapper);
+    });
+}
+
+function openEditUserModal(userId) {
+    const data = userEditMap[String(userId)] || userEditMap[userId];
+    if (!data) {
+        alert('未找到用户数据，请刷新重试');
+        return;
+    }
+    ensureModals();
+    document.getElementById('editUserId').value = data.id;
+    document.getElementById('editUsername').value = data.username || '';
+    document.getElementById('editDisplayName').value = data.display_name || '';
+    document.getElementById('editEmail').value = data.email || '';
+    document.getElementById('editMemberRole').value = data.member_role || 'member';
+    if (isPlatformAdmin) {
+        const roleSelect = document.getElementById('editPlatformRole');
+        if (roleSelect) roleSelect.value = data.platform_role || 'normal';
+    }
+    renderEditProjects(data.project_ids || []);
+    editUserModalInstance.show();
+}
+
+function collectEditProjectIds() {
+    const grid = document.getElementById('editProjectGrid');
+    if (!grid) return [];
+    return Array.from(grid.querySelectorAll('input[type="checkbox"]:checked')).map((node) => Number(node.value));
+}
+
+function submitEditUser() {
+    const userId = document.getElementById('editUserId').value;
+    const username = document.getElementById('editUsername').value.trim();
+    const display_name = document.getElementById('editDisplayName').value.trim();
+    const email = document.getElementById('editEmail').value.trim();
+    const member_role = document.getElementById('editMemberRole').value;
+    const project_ids = collectEditProjectIds();
+    const payload = { username, display_name, email, member_role, project_ids };
+    if (isPlatformAdmin) {
+        const roleSelect = document.getElementById('editPlatformRole');
+        payload.platform_role = roleSelect ? roleSelect.value : 'normal';
+    }
+
+    apiCall(`/auth/api/users/${userId}/profile`, 'POST', payload)
+        .then((data) => {
+            if (!data.success) {
+                alert(data.message || '保存失败');
+                return;
+            }
+            location.reload();
+        })
+        .catch((err) => {
+            alert((err && err.message) || '保存失败');
+        });
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+    ensureModals();
+});
 </script>
 {% endblock %}

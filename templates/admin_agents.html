@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 
 {% block title %}Agent 节点监控 - Diff确认平台{% endblock %}
 
@@ -39,6 +39,32 @@
     .mono {
         font-family: Consolas, Monaco, monospace;
         font-size: 0.82rem;
+    }
+    .metric-main {
+        color: #0f172a;
+        font-weight: 600;
+        font-size: 0.83rem;
+    }
+    .metric-sub {
+        color: #64748b;
+        font-size: 0.76rem;
+    }
+    .node-name {
+        color: #0f172a;
+        font-weight: 700;
+    }
+    .node-code {
+        color: #64748b;
+        font-size: 0.78rem;
+    }
+    .project-chip {
+        display: inline-block;
+        padding: 1px 6px;
+        border: 1px solid #d0d7de;
+        border-radius: 999px;
+        background: #f8fafc;
+        font-size: 0.75rem;
+        margin: 1px 3px 1px 0;
     }
 </style>
 {% endblock %}
@@ -122,6 +148,13 @@ function formatBytes(bytes) {
     return `${size.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
 }
 
+function formatPercent(value) {
+    if (value == null || value === '') return '-';
+    const num = Number(value);
+    if (Number.isNaN(num)) return '-';
+    return `${num.toFixed(1)}%`;
+}
+
 function statusBadge(status) {
     const val = String(status || '').toLowerCase();
     if (val === 'online') return '<span class="badge bg-success">online</span>';
@@ -156,24 +189,47 @@ async function loadAgentNodes() {
             tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">暂无Agent节点</td></tr>';
         } else {
             tbody.innerHTML = items.map(item => {
-                const cpuUsage = item.cpu_usage_percent == null ? '-' : `${Number(item.cpu_usage_percent).toFixed(1)}%`;
-                const memText = `${formatBytes(item.memory_available_bytes)} / ${formatBytes(item.memory_total_bytes)}`;
-                const projects = (item.project_codes || []).join(', ') || '-';
+                const cpuCores = item.cpu_cores || '-';
+                const cpuAgent = formatPercent(item.agent_cpu_usage_percent);
+                const cpuSystem = formatPercent(item.cpu_usage_percent);
+                const cpuText = `Agent占用:${cpuAgent} / 总使用:${cpuSystem} / ${cpuCores}core`;
+
+                const memTotal = Number(item.memory_total_bytes || 0);
+                const memAvail = Number(item.memory_available_bytes || 0);
+                const memUsed = memTotal > 0 ? Math.max(0, memTotal - memAvail) : 0;
+                const memAgent = formatBytes(item.agent_memory_rss_bytes);
+                const memText = `Agent占用:${memAgent} / 系统使用:${formatBytes(memUsed)} / 总内存:${formatBytes(memTotal)}`;
+
+                const diskText = item.disk_free_bytes == null
+                    ? '<span class="text-warning">采集失败</span>'
+                    : formatBytes(item.disk_free_bytes);
+
+                const projects = Array.isArray(item.project_codes) ? item.project_codes : [];
+                const projectHtml = projects.length
+                    ? projects.map(code => `<span class="project-chip">${code}</span>`).join('')
+                    : '-';
                 const osText = [item.os_name || '-', item.os_version || ''].join(' ').trim();
+                const hostText = `${item.host || '-'}${item.port ? ':' + item.port : ''}`;
                 return `
                 <tr>
                     <td>
-                        <div class="fw-bold">${item.display_name || item.agent_name || item.agent_code}</div>
-                        <div class="mono text-muted">${item.agent_code || '-'}</div>
+                        <div class="node-name">${item.display_name || item.agent_name || item.agent_code}</div>
+                        <div class="node-code mono">${item.agent_code || '-'}</div>
                     </td>
                     <td>${statusBadge(item.status)}</td>
-                    <td class="mono">${item.host || '-'}${item.port ? ':' + item.port : ''}</td>
-                    <td>${cpuUsage} / ${item.cpu_cores || '-'} 核</td>
-                    <td>${memText}</td>
-                    <td>${formatBytes(item.disk_free_bytes)}</td>
-                    <td>${osText}</td>
-                    <td title="${projects}">${projects}</td>
-                    <td>${formatTimeText(item.last_heartbeat)}</td>
+                    <td class="mono metric-main">${hostText}</td>
+                    <td><div class="metric-main">${cpuText}</div></td>
+                    <td><div class="metric-main">${memText}</div></td>
+                    <td><div class="metric-main">${diskText}</div></td>
+                    <td>
+                        <div class="metric-main">${osText}</div>
+                        <div class="metric-sub">${item.os_platform || '-'}</div>
+                    </td>
+                    <td title="${projects.join(', ')}">${projectHtml}</td>
+                    <td>
+                        <div class="metric-main">${formatTimeText(item.last_heartbeat)}</div>
+                        <div class="metric-sub">指标更新时间: ${formatTimeText(item.metrics_updated_at)}</div>
+                    </td>
                 </tr>
                 `;
             }).join('');
@@ -196,3 +252,4 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 {% endblock %}
+

@@ -2774,8 +2774,10 @@ def _migrate_agent_nodes_columns():
         {
             'cpu_cores': 'cpu_cores INTEGER',
             'cpu_usage_percent': 'cpu_usage_percent FLOAT',
+            'agent_cpu_usage_percent': 'agent_cpu_usage_percent FLOAT',
             'memory_total_bytes': 'memory_total_bytes BIGINT',
             'memory_available_bytes': 'memory_available_bytes BIGINT',
+            'agent_memory_rss_bytes': 'agent_memory_rss_bytes BIGINT',
             'disk_free_bytes': 'disk_free_bytes BIGINT',
             'os_name': 'os_name VARCHAR(100)',
             'os_version': 'os_version VARCHAR(200)',

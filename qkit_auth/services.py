@@ -729,7 +729,7 @@ def list_pending_create_requests() -> list[dict]:
 def get_project_members(project_id: int) -> list[QkitAuthUserProject]:
     return (
         QkitAuthUserProject.query.filter_by(project_id=project_id)
-        .join(QkitAuthUser)
+        .join(QkitAuthUser, QkitAuthUserProject.user_id == QkitAuthUser.id)
         .order_by(QkitAuthUser.username.asc())
         .all()
     )
