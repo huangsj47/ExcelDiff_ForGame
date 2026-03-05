@@ -17,8 +17,7 @@
 
 ## 功能全景
 
-## 0. 账号与权限系统 (RBAC) 🆕
-
+## 0. 账号与权限系统 (RBAC) 
 平台支持两套账号后端，便于本地调试与线上 Qkit 登录并存。
 
 ### 0.0 双账号后端切换（local / qkit）
@@ -177,14 +176,14 @@
 ## 分层结构
 
 - `app.py`: 主应用与核心路由（当前主链路）
-- `auth/`: 🆕 本地账号与权限模块（`AUTH_BACKEND=local`）
+- `auth/`: 本地账号与权限模块（`AUTH_BACKEND=local`）
   - `models.py`: RBAC 数据模型（用户、职能、项目关联、审批申请）
   - `routes.py`: 认证/管理路由（`/auth/*`）
   - `services.py`: 业务逻辑（注册、审批、自动提权等）
   - `providers.py`: 认证提供者抽象（支持数据库用户 + `.env` 环境变量管理员）
   - `decorators.py`: 权限装饰器
   - `templates/`: 认证相关页面模板
-- `qkit_auth/`: 🆕 Qkit 账号后端（`AUTH_BACKEND=qkit`）
+- `qkit_auth/`: Qkit 账号后端（`AUTH_BACKEND=qkit`）
   - `models.py`: Qkit 专用数据表（`qkit_auth_*`）
   - `providers.py`: 每请求 JWT 远端校验 Provider
   - `routes.py`: `/qkit_auth/*` 登录回调 + `/auth/*` 管理/审批路由
@@ -204,7 +203,7 @@
 ├── app.py                    # 主应用入口
 ├── config.py                 # 配置文件
 ├── requirements.txt
-├── auth/                     # 🆕 账号与权限模块
+├── auth/                     # 账号与权限模块
 │   ├── __init__.py           # Provider 初始化
 │   ├── models.py             # RBAC 数据模型
 │   ├── routes.py             # 认证路由 Blueprint
@@ -212,7 +211,7 @@
 │   ├── providers.py          # 认证提供者（DB / ENV）
 │   ├── decorators.py         # 权限装饰器
 │   └── templates/            # 登录/注册/管理页面
-├── qkit_auth/                # 🆕 Qkit账号后端模块
+├── qkit_auth/                # Qkit账号后端模块
 │   ├── config.py             # Qkit接入配置读取
 │   ├── models.py             # qkit_auth_* 数据模型
 │   ├── providers.py          # Qkit认证提供者
@@ -227,7 +226,7 @@
 ├── static/
 ├── utils/
 ├── tests/
-│   └── test_auth_e2e.py      # 🆕 账号系统端到端测试（62 用例）
+│   └── test_auth_e2e.py      # 账号系统端到端测试（62 用例）
 ├── instance/                 # SQLite 数据库目录（运行后生成）
 ├── repos/                    # 本地仓库工作目录
 └── logs/runlog.log
@@ -295,7 +294,7 @@ python app.py
 - `PERF_METRICS_MAX_SCOPE_SHARE`（单分片最大占比，默认 `0.35`）
 - `PERF_METRICS_MIN_SCOPE_EVENTS`（单分片软上限最小值，默认 `300`）
 
-## 平台 + Agent 模式（实验版）
+## 平台 + Agent 模式
 
 - 平台新增接口：
   - `POST /api/agents/register`：Agent 注册；可选自动创建项目代号（若传入）
@@ -371,7 +370,7 @@ python app.py
   - `GET /api/excel-cache/stats-by-project`
   - `POST /admin/excel-cache/cleanup-expired`
   - `POST /admin/excel-cache/clear-all-diff-cache`
-- 🆕 认证与用户管理
+- 认证与用户管理
   - `GET/POST /auth/login` — 登录（`qkit` 模式下跳转到 `/qkit_auth/login`）
   - `GET /qkit_auth/login` — Qkit 登录入口（直接可访问）
   - `GET /qkit_auth/after_login` — Qkit 回调入口（接收 `qkitjwt`）
@@ -385,7 +384,7 @@ python app.py
   - `POST /auth/api/users/<id>/reset-password` — 重置密码（仅 `local` 模式；`qkit` 模式禁用）
   - `POST /auth/api/users/<id>/functions` — 分配职能（仅 `local` 模式）
   - `DELETE /auth/api/users/<id>/functions/<fid>` — 移除职能（仅 `local` 模式）
-- 🆕 项目成员与审批
+- 项目成员与审批
   - `GET /auth/project/<id>/members` — 项目成员管理页
   - `POST /auth/api/project/<id>/members` — 添加成员
   - `DELETE /auth/api/project/<id>/members/<uid>` — 移除成员
@@ -406,8 +405,7 @@ python app.py
 pytest
 ```
 
-### 账号系统端到端测试 🆕
-
+### 账号系统端到端测试 
 ```bash
 python tests/test_auth_e2e.py
 ```
