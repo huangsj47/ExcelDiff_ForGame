@@ -39,7 +39,6 @@ from qkit_auth.services import (
     ensure_qkit_user,
     extract_identity_from_payload,
     get_project_import_config,
-    get_project_members,
     handle_create_project_request,
     handle_join_request,
     import_project_users_from_redmine,
@@ -65,6 +64,7 @@ from utils.request_security import (
 from utils.logger import log_print
 
 _USERS_PER_PAGE = 20
+_PROJECT_MEMBERS_PER_PAGE = 20
 _USERNAME_ALLOWED_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 
 auth_bp = Blueprint(
@@ -788,13 +788,33 @@ def project_members(project_id):
         flash("此页面仅限项目管理员访问。", "error")
         return redirect(url_for("index"))
     project = Project.query.get_or_404(project_id)
-    members = get_project_members(project_id)
-    import_config = get_project_import_config(project_id)
+    page = max(1, request.args.get("page", 1, type=int))
+    per_page = _PROJECT_MEMBERS_PER_PAGE
+    members_query = (
+        QkitAuthUserProject.query.filter_by(project_id=project_id)
+        .join(QkitAuthUser, QkitAuthUserProject.user_id == QkitAuthUser.id)
+        .order_by(QkitAuthUser.username.asc())
+    )
+    total_members = members_query.count()
+    total_pages = max(1, (total_members + per_page - 1) // per_page)
+    if page > total_pages:
+        page = total_pages
+    members = (
+        members_query
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
+    import_config = get_project_import_config(project_id, user_id=session.get("auth_user_id"))
     return render_template(
         "qkit_project_members.html",
         project=project,
         members=members,
         import_config=import_config,
+        page=page,
+        per_page=per_page,
+        total_members=total_members,
+        total_pages=total_pages,
     )
 
 
@@ -909,27 +929,15 @@ def api_search_users():
 def api_get_project_qkit_import_config(project_id):
     if not _has_project_admin_access(project_id):
         return jsonify({"success": False, "message": "权限不足"}), 403
-    config = get_project_import_config(project_id)
-    if not config:
-        return jsonify(
-            {
-                "success": True,
-                "config": {
-                    "token": "",
-                    "token_masked": "",
-                    "host": "",
-                    "project_name": "",
-                },
-            }
-        )
+    config = get_project_import_config(project_id, user_id=session.get("auth_user_id"))
     return jsonify(
         {
             "success": True,
             "config": {
-                "token": config.token or "",
-                "token_masked": config.masked_token,
-                "host": config.host or "",
-                "project_name": config.project_name or "",
+                "token": config.get("token") or "",
+                "token_masked": config.get("token_masked") or "",
+                "host": config.get("host") or "",
+                "project_name": config.get("project_name") or "",
             },
         }
     )
@@ -949,7 +957,7 @@ def api_save_project_qkit_import_config(project_id):
     )
     if err or cfg is None:
         return jsonify({"success": False, "message": err or "保存失败"}), 400
-    return jsonify({"success": True, "message": "导入配置已保存"})
+    return jsonify({"success": True, "message": "导入配置已保存（token按个人、host/project按项目）"})
 
 
 @auth_bp.route("/api/project/<int:project_id>/qkit-import", methods=["POST"])

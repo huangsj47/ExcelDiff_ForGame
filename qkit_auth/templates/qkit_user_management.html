@@ -124,10 +124,63 @@
         padding: .55rem .65rem;
         background: #f8fbff;
     }
+    .project-pick-toolbar {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto auto;
+        gap: .45rem;
+        margin-bottom: .45rem;
+    }
+    .project-selected-summary {
+        font-size: .78rem;
+        color: #5f6f86;
+    }
+    .project-option {
+        border: 1px solid #dbe4f1;
+        border-radius: 8px;
+        background: #ffffff;
+        padding: .32rem .5rem;
+    }
+    .project-option small {
+        display: block;
+        color: #64748b;
+        line-height: 1.2;
+    }
+    .project-option-code {
+        font-weight: 600;
+        color: #1f3b66;
+    }
+    .project-inline {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: .18rem;
+    }
+    .project-pill-more {
+        font-weight: 700;
+        letter-spacing: .02em;
+    }
+    .project-select-search {
+        margin-bottom: .35rem;
+    }
+    .project-select-hint {
+        margin-top: .24rem;
+        font-size: .74rem;
+        color: #64748b;
+    }
+    .btn-manual-add {
+        background: #e0f2ff;
+        border-color: #bfdbfe;
+        color: #1d4ed8;
+    }
+    .btn-manual-add:hover {
+        background: #dbeafe;
+        border-color: #93c5fd;
+        color: #1e40af;
+    }
 
     @media (max-width: 900px) {
         .admin-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .project-check-grid { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+        .project-pick-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
 </style>
 {% endblock %}
@@ -150,28 +203,33 @@
         <div class="row g-2 align-items-end">
             <div class="col-lg-4">
                 <label class="form-label mb-1">按项目筛选用户</label>
+                <input id="projectFilterSearch" class="form-control form-control-sm project-select-search" type="text" placeholder="输入项目代号/名称快速筛选" oninput="onProjectFilterSearchInput()">
                 <form method="GET" action="{{ url_for('auth_bp.user_list') }}" id="projectFilterForm">
-                    <select class="form-select form-select-sm" name="project_id" onchange="document.getElementById('projectFilterForm').submit()">
+                    <select id="projectFilterSelect" class="form-select form-select-sm" name="project_id" onchange="document.getElementById('projectFilterForm').submit()">
                         <option value="">{{ '全部项目' if is_platform_admin else '全部可管理项目' }}</option>
                         {% for p in projects %}
                         <option value="{{ p.id }}" {% if selected_project_id == p.id %}selected{% endif %}>{{ p.code }} - {{ p.name }}</option>
                         {% endfor %}
                     </select>
                 </form>
+                <div id="projectFilterHint" class="project-select-hint"></div>
             </div>
             <div class="col-lg-4">
                 <label class="form-label mb-1">导入项目</label>
+                <input id="importProjectSearch" class="form-control form-control-sm project-select-search" type="text" placeholder="输入项目代号/名称快速筛选" oninput="onImportProjectSearchInput()">
                 <select id="importProjectId" class="form-select form-select-sm">
                     <option value="">请选择项目</option>
                     {% for p in projects %}
                     <option value="{{ p.id }}" {% if selected_project_id == p.id %}selected{% endif %}>{{ p.code }} - {{ p.name }}</option>
                     {% endfor %}
                 </select>
+                <div id="importProjectHint" class="project-select-hint"></div>
             </div>
-            <div class="col-lg-4 d-flex flex-wrap gap-2">
-                <button class="btn btn-sm btn-outline-primary" type="button" onclick="openMembersPage()">成员导入配置</button>
-                <button class="btn btn-sm btn-success" type="button" onclick="runProjectImport()">直接执行导入</button>
-                <button class="btn btn-sm btn-outline-secondary" type="button" onclick="openManualAddModal()">手动添加</button>
+            <div class="col-lg-4 d-flex align-items-end">
+                <div class="d-flex flex-wrap gap-2 w-100 justify-content-end">
+                    <button class="btn btn-sm btn-outline-primary" type="button" onclick="openMembersPage()">成员导入配置</button>
+                    <button class="btn btn-sm btn-manual-add ms-auto" type="button" onclick="openManualAddModal()">手动添加</button>
+                </div>
             </div>
         </div>
         <div id="importReport" class="report-box"></div>
@@ -242,9 +300,14 @@
                         </td>
                         <td>
                             {% if project_list %}
-                                {% for p in project_list %}
-                                <span class="project-pill">{{ p.project_code }}{% if p.role == 'admin' %} · 管理{% endif %}</span>
-                                {% endfor %}
+                                <div class="project-inline" title="{% for p in project_list %}{{ p.project_code }}{% if p.role == 'admin' %}(管理){% endif %}{% if not loop.last %} {% endif %}{% endfor %}">
+                                    {% for p in project_list[:3] %}
+                                    <span class="project-pill">{{ p.project_code }}{% if p.role == 'admin' %} · 管理{% endif %}</span>
+                                    {% endfor %}
+                                    {% if project_list|length > 3 %}
+                                    <span class="project-pill project-pill-more">...</span>
+                                    {% endif %}
+                                </div>
                             {% else %}
                                 <span class="text-muted">-</span>
                             {% endif %}
@@ -373,7 +436,16 @@
                     </select>
                 </div>
                 <div class="mt-2">
-                    <label class="form-label">所在项目</label>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <label class="form-label mb-1">所在项目</label>
+                        <div id="editProjectSummary" class="project-selected-summary"></div>
+                    </div>
+                    <div class="project-pick-toolbar">
+                        <input id="editProjectSearch" type="text" class="form-control form-control-sm" placeholder="搜索项目代号/名称" oninput="onEditProjectSearchInput()">
+                        <button class="btn btn-outline-primary btn-sm" type="button" onclick="setVisibleProjectsSelected(true)">全选筛选</button>
+                        <button class="btn btn-outline-secondary btn-sm" type="button" onclick="setVisibleProjectsSelected(false)">取消筛选</button>
+                        <button class="btn btn-outline-danger btn-sm" type="button" onclick="clearAllEditProjects()">清空选择</button>
+                    </div>
                     <div class="project-check-grid" id="editProjectGrid"></div>
                 </div>
             </div>
@@ -392,8 +464,11 @@ const csrfToken = "{{ csrf_token() }}";
 const userEditMap = {{ user_edit_map|tojson }};
 const projectOptions = {{ project_options|tojson }};
 const isPlatformAdmin = {{ 'true' if is_platform_admin else 'false' }};
+const selectedProjectId = {{ selected_project_id if selected_project_id is not none else 'null' }};
 let manualAddModalInstance = null;
 let editUserModalInstance = null;
+let editProjectSelectedIds = new Set();
+let editProjectSearchKeyword = '';
 
 function ensureModals() {
     if (!manualAddModalInstance) {
@@ -444,6 +519,88 @@ function currentProjectId() {
     const select = document.getElementById('importProjectId');
     if (!select) return '';
     return String(select.value || '').trim();
+}
+
+function normalizeProjectKeyword(text) {
+    return String(text || '').trim().toLowerCase();
+}
+
+function projectLabel(item) {
+    return `${item.code || ''} - ${item.name || ''}`;
+}
+
+function findProjectById(value) {
+    const normalized = String(value || '').trim();
+    return projectOptions.find((item) => String(item.id) === normalized);
+}
+
+function filterProjectsByKeyword(keyword) {
+    const normalized = normalizeProjectKeyword(keyword);
+    if (!normalized) return projectOptions.slice();
+    return projectOptions.filter((item) => {
+        const text = `${item.code || ''} ${item.name || ''}`.toLowerCase();
+        return text.includes(normalized);
+    });
+}
+
+function renderProjectFilterOptions(keyword = '') {
+    const select = document.getElementById('projectFilterSelect');
+    const hint = document.getElementById('projectFilterHint');
+    if (!select) return;
+    const current = String(select.value || (selectedProjectId == null ? '' : selectedProjectId)).trim();
+    let list = filterProjectsByKeyword(keyword);
+    if (current) {
+        const selectedItem = findProjectById(current);
+        if (selectedItem && !list.some((item) => String(item.id) === current)) {
+            list = [selectedItem].concat(list);
+        }
+    }
+    let html = `<option value="">${isPlatformAdmin ? '全部项目' : '全部可管理项目'}</option>`;
+    html += list.map((item) => `<option value="${item.id}">${projectLabel(item)}</option>`).join('');
+    select.innerHTML = html;
+    if (current) {
+        select.value = current;
+    } else {
+        select.value = '';
+    }
+    if (hint) {
+        hint.textContent = `共 ${projectOptions.length} 个项目，当前匹配 ${list.length} 个。`;
+    }
+}
+
+function renderImportProjectOptions(keyword = '') {
+    const select = document.getElementById('importProjectId');
+    const hint = document.getElementById('importProjectHint');
+    if (!select) return;
+    const current = String(select.value || (selectedProjectId == null ? '' : selectedProjectId)).trim();
+    let list = filterProjectsByKeyword(keyword);
+    if (current) {
+        const selectedItem = findProjectById(current);
+        if (selectedItem && !list.some((item) => String(item.id) === current)) {
+            list = [selectedItem].concat(list);
+        }
+    }
+    let html = '<option value="">请选择项目</option>';
+    html += list.map((item) => `<option value="${item.id}">${projectLabel(item)}</option>`).join('');
+    select.innerHTML = html;
+    if (current) {
+        select.value = current;
+    } else {
+        select.value = '';
+    }
+    if (hint) {
+        hint.textContent = `共 ${projectOptions.length} 个项目，当前匹配 ${list.length} 个。`;
+    }
+}
+
+function onProjectFilterSearchInput() {
+    const input = document.getElementById('projectFilterSearch');
+    renderProjectFilterOptions(input ? input.value : '');
+}
+
+function onImportProjectSearchInput() {
+    const input = document.getElementById('importProjectSearch');
+    renderImportProjectOptions(input ? input.value : '');
 }
 
 function updateRole(userId, role) {
@@ -568,22 +725,86 @@ function submitManualAddUser() {
     });
 }
 
-function renderEditProjects(selectedIds) {
+function filteredProjectOptions() {
+    const keyword = (editProjectSearchKeyword || '').trim().toLowerCase();
+    if (!keyword) {
+        return projectOptions.slice();
+    }
+    return projectOptions.filter((item) => {
+        const text = `${item.code || ''} ${item.name || ''}`.toLowerCase();
+        return text.includes(keyword);
+    });
+}
+
+function refreshEditProjectSummary(visibleCount) {
+    const summary = document.getElementById('editProjectSummary');
+    if (!summary) return;
+    summary.textContent = `已选 ${editProjectSelectedIds.size} / ${projectOptions.length} · 当前筛选 ${visibleCount} 项`;
+}
+
+function renderEditProjects(selectedIds = null) {
     const box = document.getElementById('editProjectGrid');
     if (!box) return;
-    const selected = new Set((selectedIds || []).map((item) => Number(item)));
+    if (Array.isArray(selectedIds)) {
+        editProjectSelectedIds = new Set((selectedIds || []).map((item) => Number(item)));
+    }
+    const filtered = filteredProjectOptions();
     box.innerHTML = '';
-    projectOptions.forEach((item) => {
+    if (!filtered.length) {
+        box.innerHTML = '<div class="text-muted small">当前筛选无匹配项目，请调整关键字。</div>';
+        refreshEditProjectSummary(0);
+        return;
+    }
+
+    filtered.forEach((item) => {
         const id = Number(item.id);
-        const label = `${item.code} - ${item.name}`;
         const wrapper = document.createElement('label');
-        wrapper.className = 'form-check d-flex align-items-center';
+        wrapper.className = 'form-check d-flex align-items-start project-option';
         wrapper.innerHTML = `
-            <input class="form-check-input me-2" type="checkbox" value="${id}" ${selected.has(id) ? 'checked' : ''}>
-            <span>${label}</span>
+            <input class="form-check-input me-2 mt-1" type="checkbox" value="${id}" ${editProjectSelectedIds.has(id) ? 'checked' : ''}>
+            <span>
+                <span class="project-option-code">${item.code}</span>
+                <small>${item.name}</small>
+            </span>
         `;
+        const checkbox = wrapper.querySelector('input[type="checkbox"]');
+        if (checkbox) {
+            checkbox.addEventListener('change', (event) => {
+                if (event.target.checked) {
+                    editProjectSelectedIds.add(id);
+                } else {
+                    editProjectSelectedIds.delete(id);
+                }
+                refreshEditProjectSummary(filtered.length);
+            });
+        }
         box.appendChild(wrapper);
     });
+    refreshEditProjectSummary(filtered.length);
+}
+
+function onEditProjectSearchInput() {
+    const input = document.getElementById('editProjectSearch');
+    editProjectSearchKeyword = String(input ? input.value : '').trim().toLowerCase();
+    renderEditProjects();
+}
+
+function setVisibleProjectsSelected(checked) {
+    const filtered = filteredProjectOptions();
+    filtered.forEach((item) => {
+        const id = Number(item.id);
+        if (checked) {
+            editProjectSelectedIds.add(id);
+        } else {
+            editProjectSelectedIds.delete(id);
+        }
+    });
+    renderEditProjects();
+}
+
+function clearAllEditProjects() {
+    editProjectSelectedIds.clear();
+    renderEditProjects();
 }
 
 function openEditUserModal(userId) {
@@ -602,14 +823,15 @@ function openEditUserModal(userId) {
         const roleSelect = document.getElementById('editPlatformRole');
         if (roleSelect) roleSelect.value = data.platform_role || 'normal';
     }
+    editProjectSearchKeyword = '';
+    const searchInput = document.getElementById('editProjectSearch');
+    if (searchInput) searchInput.value = '';
     renderEditProjects(data.project_ids || []);
     editUserModalInstance.show();
 }
 
 function collectEditProjectIds() {
-    const grid = document.getElementById('editProjectGrid');
-    if (!grid) return [];
-    return Array.from(grid.querySelectorAll('input[type="checkbox"]:checked')).map((node) => Number(node.value));
+    return Array.from(editProjectSelectedIds);
 }
 
 function submitEditUser() {
@@ -640,6 +862,8 @@ function submitEditUser() {
 
 window.addEventListener('DOMContentLoaded', () => {
     ensureModals();
+    renderProjectFilterOptions('');
+    renderImportProjectOptions('');
 });
 </script>
 {% endblock %}

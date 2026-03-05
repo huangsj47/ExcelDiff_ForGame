@@ -1,4 +1,5 @@
 import json
+import os
 import uuid
 from types import SimpleNamespace
 
@@ -345,6 +346,46 @@ def test_platform_mode_project_create_can_bind_selected_agent(monkeypatch):
             assert agent.agent_code == agent_code
 
 
+def test_platform_mode_admin_create_without_agent_code_defaults_first_agent(monkeypatch):
+    monkeypatch.setenv("DEPLOYMENT_MODE", "platform")
+    shared_secret = _uid("secret")
+    monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
+    agent_code_a = f"a-{_uid('agent')}"
+    agent_code_z = f"z-{_uid('agent')}"
+
+    with app.app_context():
+        create_tables()
+        with app.test_client() as client:
+            # Register out-of-order to verify backend fallback uses deterministic first code.
+            _register_agent(client, shared_secret, agent_code_z, None)
+            _register_agent(client, shared_secret, agent_code_a, None)
+
+            with client.session_transaction() as sess:
+                sess["is_admin"] = True
+                sess["admin_user"] = "admin"
+                sess["_csrf_token"] = "csrf-default-agent"
+
+            response = client.post(
+                "/projects",
+                data={
+                    "_csrf_token": "csrf-default-agent",
+                    "code": _uid("P"),
+                    "name": "默认绑定项目",
+                    "department": "QA",
+                },
+                follow_redirects=False,
+            )
+            assert response.status_code in (302, 303)
+
+            project = Project.query.filter_by(name="默认绑定项目").first()
+            assert project is not None
+            binding = AgentProjectBinding.query.filter_by(project_id=project.id).first()
+            assert binding is not None
+            agent = AgentNode.query.get(binding.agent_id)
+            assert agent is not None
+            assert agent.agent_code == min(agent_code_a, agent_code_z)
+
+
 def test_platform_mode_project_create_without_agent_nodes_is_rejected(monkeypatch):
     monkeypatch.setenv("DEPLOYMENT_MODE", "platform")
 
@@ -477,6 +518,41 @@ def test_agent_heartbeat_updates_runtime_metrics(monkeypatch):
             assert saved_agent.metrics_updated_at is not None
 
 
+def test_agent_heartbeat_falls_back_to_observed_ip_when_reported_host_matches_platform(monkeypatch):
+    shared_secret = _uid("secret")
+    agent_code = _uid("agent")
+    monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
+
+    with app.app_context():
+        create_tables()
+        with app.test_client() as client:
+            agent_token = _register_agent(client, shared_secret, agent_code, None)
+
+            hb_resp = client.post(
+                "/api/agents/heartbeat",
+                json={
+                    "agent_code": agent_code,
+                    "agent_token": agent_token,
+                    "status": "online",
+                    "host": "10.226.98.33:8002",
+                    "port": 9010,
+                },
+                headers={
+                    "X-Agent-Secret": shared_secret,
+                    "Host": "10.226.98.33:8002",
+                    "X-Forwarded-For": "10.226.98.24, 10.226.98.1",
+                },
+                environ_overrides={"REMOTE_ADDR": "10.226.98.1"},
+            )
+            assert hb_resp.status_code == 200, hb_resp.get_data(as_text=True)
+            assert (hb_resp.get_json() or {}).get("success") is True
+
+            saved_agent = AgentNode.query.filter_by(agent_code=agent_code).first()
+            assert saved_agent is not None
+            assert saved_agent.host == "10.226.98.24"
+            assert saved_agent.port == 9010
+
+
 def test_admin_agents_page_accessible_with_admin_token(monkeypatch):
     admin_token = _uid("admin-token")
     monkeypatch.setenv("ADMIN_API_TOKEN", admin_token)
@@ -503,6 +579,27 @@ def test_collect_agent_metrics_has_expected_fields():
     }
     assert required_keys.issubset(metrics.keys())
     assert int(metrics["cpu_cores"]) >= 1
+
+
+def test_collect_agent_metrics_disk_usage_falls_back_when_primary_path_unavailable(monkeypatch, tmp_path):
+    from agent import system_metrics as metrics_module
+
+    missing_base = tmp_path / "missing" / "nested" / "repo"
+    disk_usage_calls = []
+    real_disk_usage = metrics_module.shutil.disk_usage
+
+    def _fake_disk_usage(path):
+        disk_usage_calls.append(os.path.abspath(path))
+        if len(disk_usage_calls) == 1:
+            raise OSError("primary path unavailable")
+        return real_disk_usage(path)
+
+    monkeypatch.setattr(metrics_module.shutil, "disk_usage", _fake_disk_usage)
+
+    metrics = collect_agent_metrics(str(missing_base))
+    assert metrics.get("disk_free_bytes") is not None
+    assert int(metrics["disk_free_bytes"]) > 0
+    assert len(disk_usage_calls) >= 2
 
 
 def test_default_admin_username_existing_user_becomes_project_admin(monkeypatch):

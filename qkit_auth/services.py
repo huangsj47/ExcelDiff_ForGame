@@ -27,6 +27,7 @@ from qkit_auth.models import (
     QkitAuthProjectImportConfig,
     QkitAuthProjectJoinRequest,
     QkitAuthProjectPreAssignment,
+    QkitAuthUserImportToken,
     QkitAuthUser,
     QkitAuthUserProject,
     QkitImportBlockType,
@@ -735,8 +736,42 @@ def get_project_members(project_id: int) -> list[QkitAuthUserProject]:
     )
 
 
-def get_project_import_config(project_id: int) -> Optional[QkitAuthProjectImportConfig]:
+def _mask_token(token: str) -> str:
+    raw = (token or "").strip()
+    if not raw:
+        return ""
+    if len(raw) <= 8:
+        return "*" * len(raw)
+    return f"{raw[:4]}{'*' * (len(raw) - 8)}{raw[-4:]}"
+
+
+def _get_project_import_config_row(project_id: int) -> Optional[QkitAuthProjectImportConfig]:
     return QkitAuthProjectImportConfig.query.filter_by(project_id=project_id).first()
+
+
+def _get_user_import_token_row(user_id: int | None) -> Optional[QkitAuthUserImportToken]:
+    if not user_id:
+        return None
+    return QkitAuthUserImportToken.query.filter_by(user_id=int(user_id)).first()
+
+
+def get_project_import_config(project_id: int, user_id: int | None = None) -> dict:
+    project_cfg = _get_project_import_config_row(project_id)
+    token_cfg = _get_user_import_token_row(user_id)
+
+    token_value = (token_cfg.token or "").strip() if token_cfg else ""
+    # Backward compatibility: keep old token visible only to the same updater.
+    if not token_value and project_cfg and user_id and int(project_cfg.updated_by or 0) == int(user_id):
+        token_value = (project_cfg.token or "").strip()
+
+    host_value = (project_cfg.host or "").strip() if project_cfg else ""
+    project_name_value = (project_cfg.project_name or "").strip() if project_cfg else ""
+    return {
+        "token": token_value,
+        "token_masked": _mask_token(token_value),
+        "host": host_value,
+        "project_name": project_name_value,
+    }
 
 
 def upsert_project_import_config(
@@ -746,29 +781,41 @@ def upsert_project_import_config(
     host: str,
     project_name: Optional[str],
     updated_by: Optional[int],
-) -> tuple[Optional[QkitAuthProjectImportConfig], Optional[str]]:
+) -> tuple[Optional[dict], Optional[str]]:
     project = db.session.get(Project, project_id)
     if not project:
         return None, "项目不存在"
+    try:
+        updater_user_id = int(updated_by or 0)
+    except (TypeError, ValueError):
+        updater_user_id = 0
+    if updater_user_id <= 0:
+        return None, "未获取当前登录用户，无法保存导入配置"
+
     token_value = (token or "").strip()
     host_value = (host or "").strip()
     project_name_value = (project_name or "").strip() or None
-    if not token_value:
-        return None, "token 不能为空"
-    if not host_value:
-        return None, "host 不能为空"
 
-    cfg = QkitAuthProjectImportConfig.query.filter_by(project_id=project_id).first()
+    token_cfg = _get_user_import_token_row(updater_user_id)
+    if token_cfg is None:
+        token_cfg = QkitAuthUserImportToken(user_id=updater_user_id)
+        db.session.add(token_cfg)
+    token_cfg.token = token_value
+    token_cfg.updated_by = updater_user_id
+    token_cfg.updated_at = _utcnow()
+
+    cfg = _get_project_import_config_row(project_id)
     if cfg is None:
         cfg = QkitAuthProjectImportConfig(project_id=project_id)
         db.session.add(cfg)
-    cfg.token = token_value
-    cfg.host = host_value
+    # Project-level shared settings.
+    cfg.token = None
+    cfg.host = host_value or None
     cfg.project_name = project_name_value
-    cfg.updated_by = updated_by
+    cfg.updated_by = updater_user_id
     cfg.updated_at = _utcnow()
     db.session.commit()
-    return cfg, None
+    return get_project_import_config(project_id, user_id=updater_user_id), None
 
 
 def _import_identity_from_item(item: dict) -> tuple[str, Optional[str], Optional[str], Optional[str]]:
@@ -784,18 +831,17 @@ def import_project_users_from_redmine(
     project_id: int,
     operator_user_id: Optional[int],
 ) -> dict:
-    config = get_project_import_config(project_id)
-    if config is None:
-        return {"success": False, "message": "请先配置该项目的 token 和 host。"}
-    token = (config.token or "").strip()
-    host = (config.host or "").strip()
+    config = get_project_import_config(project_id, user_id=operator_user_id)
+    token = str(config.get("token") or "").strip()
+    host = str(config.get("host") or "").strip()
     if not token or not host:
-        return {"success": False, "message": "token 或 host 为空，请先保存配置。"}
+        return {"success": False, "message": "token 或 host 为空，请先保存配置（token 跟随个人，host 跟随项目）。"}
 
     settings = load_qkit_settings()
     params = {"token": token, "host": host}
-    if config.project_name:
-        params["project"] = config.project_name
+    project_name = str(config.get("project_name") or "").strip()
+    if project_name:
+        params["project"] = project_name
 
     try:
         resp = requests.get(

@@ -265,3 +265,34 @@ class QkitAuthProjectImportConfig(db.Model):
             return "*" * len(token)
         return f"{token[:4]}{'*' * (len(token) - 8)}{token[-4:]}"
 
+
+class QkitAuthUserImportToken(db.Model):
+    __tablename__ = "qkit_auth_user_import_tokens"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey("qkit_auth_users.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    token = db.Column(db.String(255), nullable=True)
+    updated_by = db.Column(db.Integer, db.ForeignKey("qkit_auth_users.id"), nullable=True)
+    updated_at = db.Column(
+        db.DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    user = db.relationship("QkitAuthUser", foreign_keys=[user_id])
+    updater = db.relationship("QkitAuthUser", foreign_keys=[updated_by])
+
+    @property
+    def masked_token(self) -> str:
+        token = (self.token or "").strip()
+        if not token:
+            return ""
+        if len(token) <= 8:
+            return "*" * len(token)
+        return f"{token[:4]}{'*' * (len(token) - 8)}{token[-4:]}"

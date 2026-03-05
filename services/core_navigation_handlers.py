@@ -194,6 +194,18 @@ def _ensure_creator_project_admin_membership(project_id: int) -> tuple[bool, str
     return True, None
 
 
+def _resolve_creatable_agent_codes(is_platform_admin: bool) -> list[str]:
+    """Return selectable agent codes for project creation in deterministic order."""
+    if is_platform_admin:
+        rows = (
+            AgentNode.query.filter(AgentNode.agent_code.isnot(None))
+            .order_by(AgentNode.agent_code.asc(), AgentNode.id.asc())
+            .all()
+        )
+        return [str(row.agent_code).strip() for row in rows if str(row.agent_code or "").strip()]
+    return [code for code in _get_project_create_agent_codes() if str(code or "").strip()]
+
+
 def index():
     log_print = get_runtime_model("log_print")
     try:
@@ -276,7 +288,8 @@ def projects():
         selected_agent_code = (request.form.get("agent_code") or "").strip()
         deployment_mode = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
         is_platform_admin = _has_admin_access()
-        creatable_agent_codes = set(_get_project_create_agent_codes()) if not is_platform_admin else set()
+        creatable_agent_codes = _resolve_creatable_agent_codes(is_platform_admin)
+        creatable_agent_code_set = set(creatable_agent_codes)
         has_any_agent_nodes = AgentNode.query.count() > 0
         if not code or not name:
             flash("项目代号和名称不能为空", "error")
@@ -291,20 +304,17 @@ def projects():
             flash("暂未启动任何节点，请先启动并注册至少一个Agent节点后再创建项目。", "error")
             return redirect(url_for("index"))
 
-        if deployment_mode in {"platform", "agent"} and not is_platform_admin:
+        if deployment_mode in {"platform", "agent"}:
             if not creatable_agent_codes:
                 flash("当前账号未绑定可创建项目的Agent节点，请联系管理员。", "error")
                 return redirect(url_for("index"))
+
             if selected_agent_code:
-                if selected_agent_code not in creatable_agent_codes:
+                if selected_agent_code not in creatable_agent_code_set:
                     flash("只能选择您拥有创建权限的Agent节点。", "error")
                     return redirect(url_for("index"))
             else:
-                if len(creatable_agent_codes) == 1:
-                    selected_agent_code = next(iter(creatable_agent_codes))
-                else:
-                    flash("请选择一个可用的Agent节点。", "error")
-                    return redirect(url_for("index"))
+                selected_agent_code = creatable_agent_codes[0]
 
         project = Project(code=code, name=name, department=department)
         db.session.add(project)

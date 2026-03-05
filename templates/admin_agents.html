@@ -66,6 +66,10 @@
         font-size: 0.75rem;
         margin: 1px 3px 1px 0;
     }
+    .project-chip.project-ellipsis {
+        font-weight: 700;
+        letter-spacing: 0.02em;
+    }
 </style>
 {% endblock %}
 
@@ -171,6 +175,34 @@ function formatTimeText(isoText) {
     }
 }
 
+function escapeHtml(text) {
+    return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function renderProjectSummary(projects, maxVisible = 3) {
+    const list = Array.isArray(projects)
+        ? projects.map((code) => String(code || '').trim()).filter(Boolean)
+        : [];
+    if (!list.length) {
+        return { html: '-', title: '-' };
+    }
+    const visible = list.slice(0, maxVisible);
+    const hiddenCount = Math.max(0, list.length - visible.length);
+    const chips = visible.map((code) => `<span class="project-chip">${escapeHtml(code)}</span>`).join('');
+    const ellipsis = hiddenCount > 0
+        ? `<span class="project-chip project-ellipsis" aria-label="还有${hiddenCount}个项目">...</span>`
+        : '';
+    return {
+        html: `${chips}${ellipsis}`,
+        title: list.join(' ')
+    };
+}
+
 async function loadAgentNodes() {
     const tbody = document.getElementById('agentRowsBody');
     try {
@@ -205,9 +237,7 @@ async function loadAgentNodes() {
                     : formatBytes(item.disk_free_bytes);
 
                 const projects = Array.isArray(item.project_codes) ? item.project_codes : [];
-                const projectHtml = projects.length
-                    ? projects.map(code => `<span class="project-chip">${code}</span>`).join('')
-                    : '-';
+                const projectSummary = renderProjectSummary(projects, 3);
                 const osText = [item.os_name || '-', item.os_version || ''].join(' ').trim();
                 const hostText = `${item.host || '-'}${item.port ? ':' + item.port : ''}`;
                 return `
@@ -225,7 +255,7 @@ async function loadAgentNodes() {
                         <div class="metric-main">${osText}</div>
                         <div class="metric-sub">${item.os_platform || '-'}</div>
                     </td>
-                    <td title="${projects.join(', ')}">${projectHtml}</td>
+                    <td title="${escapeHtml(projectSummary.title)}">${projectSummary.html}</td>
                     <td>
                         <div class="metric-main">${formatTimeText(item.last_heartbeat)}</div>
                         <div class="metric-sub">指标更新时间: ${formatTimeText(item.metrics_updated_at)}</div>

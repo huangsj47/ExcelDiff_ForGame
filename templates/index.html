@@ -315,9 +315,6 @@
                     <div class="mb-3">
                         <label for="agent_code" class="form-label">绑定Agent节点</label>
                         <select class="form-select" id="agent_code" name="agent_code" onchange="onProjectAgentChanged()" {% if not has_agent_nodes %}disabled{% endif %}>
-                            {% if is_admin() %}
-                            <option value="">不绑定（后续可手动绑定）</option>
-                            {% endif %}
                             {% if not has_agent_nodes %}
                             <option value="">暂未启动任何节点</option>
                             {% endif %}
@@ -443,7 +440,6 @@
 <script>
 {% if can_direct_create_project %}
 let projectAgentNodes = {{ (agent_nodes or [])|tojson }};
-const canSkipAgentBinding = {{ 'true' if is_admin() else 'false' }};
 const isAgentDeploymentMode = {{ 'true' if deployment_mode in ['platform', 'agent'] else 'false' }};
 
 function formatBytes(bytes) {
@@ -464,7 +460,7 @@ function formatAgentText(node) {
         if (isAgentDeploymentMode && projectAgentNodes.length === 0) {
             return '暂未启动任何节点，请先启动并注册至少一个 Agent 节点';
         }
-        return canSkipAgentBinding ? '未选择Agent节点' : '请选择可用Agent节点';
+        return '请选择可用Agent节点';
     }
     const cpu = node.cpu_usage_percent == null ? '-' : `${Number(node.cpu_usage_percent).toFixed(1)}%`;
     return [
@@ -494,11 +490,10 @@ function renderProjectAgentOptions() {
         const cpu = node.cpu_usage_percent == null ? '-' : `${Number(node.cpu_usage_percent).toFixed(1)}%`;
         return `<option value="${node.agent_code}">${node.display_name || node.agent_name || node.agent_code} | 状态: ${node.status || '-'} | CPU: ${cpu}</option>`;
     }).join('');
-    const emptyOption = canSkipAgentBinding ? `<option value="">不绑定（后续可手动绑定）</option>` : '';
-    select.innerHTML = `${emptyOption}${dynamicOptions}`;
+    select.innerHTML = dynamicOptions;
     if (selectedValue && projectAgentNodes.some(node => node.agent_code === selectedValue)) {
         select.value = selectedValue;
-    } else if (!canSkipAgentBinding && projectAgentNodes.length > 0) {
+    } else if (projectAgentNodes.length > 0) {
         select.value = projectAgentNodes[0].agent_code;
     }
     select.disabled = isAgentDeploymentMode && projectAgentNodes.length === 0;

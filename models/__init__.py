@@ -45,6 +45,7 @@ try:
         QkitAuthProjectCreateRequest,
         QkitAuthProjectPreAssignment,
         QkitAuthProjectImportConfig,
+        QkitAuthUserImportToken,
         QkitAuthImportBlock,
     )
     _QKIT_AUTH_MODELS_LOADED = True
@@ -90,5 +91,6 @@ if _QKIT_AUTH_MODELS_LOADED:
         'QkitAuthProjectCreateRequest',
         'QkitAuthProjectPreAssignment',
         'QkitAuthProjectImportConfig',
+        'QkitAuthUserImportToken',
         'QkitAuthImportBlock',
     ])
