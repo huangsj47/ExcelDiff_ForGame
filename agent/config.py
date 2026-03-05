@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import socket
 import os
@@ -32,23 +33,77 @@ def _split_csv(raw: str):
     return [item.strip() for item in (raw or "").split(",") if item.strip()]
 
 
-_AGENT_TASK_TYPE_ALLOWED = ("auto_sync", "excel_diff", "weekly_sync")
+_AGENT_TASK_TYPE_ALLOWED = (
+    "auto_sync",
+    "excel_diff",
+    "weekly_sync",
+    "weekly_excel_cache",
+    "temp_cache_fetch",
+)
+_AGENT_TASK_TYPE_REQUIRED = (
+    "auto_sync",
+    "excel_diff",
+    "weekly_sync",
+    "weekly_excel_cache",
+    "temp_cache_fetch",
+)
+
+
+def _safe_eval_int_expression(raw: str, default: int) -> int:
+    """Safely evaluate simple integer expressions like `1*1024_1024`."""
+    text = str(raw or "").strip()
+    if not text:
+        return default
+    # 兼容业务习惯写法：`1*1024_1024` 解释为 `1*1024*1024`
+    if "*" in text:
+        text = re.sub(r"(?<=\d)_(?=\d)", "*", text)
+
+    try:
+        node = ast.parse(text, mode="eval")
+    except Exception:
+        return default
+
+    def _eval_expr(expr_node):
+        if isinstance(expr_node, ast.Expression):
+            return _eval_expr(expr_node.body)
+        if isinstance(expr_node, ast.Constant) and isinstance(expr_node.value, int):
+            return int(expr_node.value)
+        if isinstance(expr_node, ast.UnaryOp) and isinstance(expr_node.op, (ast.UAdd, ast.USub)):
+            value = _eval_expr(expr_node.operand)
+            return value if isinstance(expr_node.op, ast.UAdd) else -value
+        if isinstance(expr_node, ast.BinOp) and isinstance(expr_node.op, (ast.Add, ast.Sub, ast.Mult)):
+            left = _eval_expr(expr_node.left)
+            right = _eval_expr(expr_node.right)
+            if isinstance(expr_node.op, ast.Add):
+                return left + right
+            if isinstance(expr_node.op, ast.Sub):
+                return left - right
+            return left * right
+        raise ValueError("unsupported expression")
+
+    try:
+        return int(_eval_expr(node))
+    except Exception:
+        return default
 
 
 def _normalize_local_task_types(raw: str):
     items = [item.lower() for item in _split_csv(raw)]
     if not items:
-        return ["auto_sync"]
+        return list(_AGENT_TASK_TYPE_REQUIRED)
     if "none" in items:
-        return []
+        return list(_AGENT_TASK_TYPE_REQUIRED)
     if "all" in items:
-        return list(_AGENT_TASK_TYPE_ALLOWED)
+        return list(_AGENT_TASK_TYPE_REQUIRED)
 
     normalized = []
     for item in items:
         if item in _AGENT_TASK_TYPE_ALLOWED and item not in normalized:
             normalized.append(item)
-    return normalized or ["auto_sync"]
+    for required in _AGENT_TASK_TYPE_REQUIRED:
+        if required not in normalized:
+            normalized.append(required)
+    return normalized
 
 
 def _slug(value: str) -> str:
@@ -89,7 +144,6 @@ class AgentSettings:
     local_task_types: list[str]
     repos_base_dir: str
     log_verbose: bool
-    allow_execute_proxy: bool
     temp_cache_upload_enabled: bool
     temp_cache_threshold_bytes: int
     temp_cache_expire_days: int
@@ -100,7 +154,10 @@ def load_settings() -> AgentSettings:
 
     platform_base_url = (os.environ.get("PLATFORM_BASE_URL") or "http://127.0.0.1:8002").strip().rstrip("/")
     project_codes = _split_csv(os.environ.get("AGENT_PROJECT_CODES") or "")
-    local_task_types = _normalize_local_task_types(os.environ.get("AGENT_LOCAL_TASK_TYPES") or "auto_sync")
+    local_task_types = _normalize_local_task_types(
+        os.environ.get("AGENT_LOCAL_TASK_TYPES")
+        or "auto_sync,excel_diff,weekly_sync,weekly_excel_cache,temp_cache_fetch"
+    )
     repos_base_dir = (os.environ.get("AGENT_REPOS_BASE_DIR") or "agent_repos").strip()
     configured_host = (os.environ.get("AGENT_HOST") or "").strip()
     resolved_host = configured_host or _detect_local_ip()
@@ -127,11 +184,13 @@ def load_settings() -> AgentSettings:
         local_task_types=[t.lower() for t in local_task_types],
         repos_base_dir=repos_base_dir,
         log_verbose=_bool_env("AGENT_LOG_VERBOSE", True),
-        allow_execute_proxy=_bool_env("AGENT_ALLOW_EXECUTE_PROXY", False),
         temp_cache_upload_enabled=_bool_env("AGENT_TEMP_CACHE_UPLOAD_ENABLED", True),
         temp_cache_threshold_bytes=max(
             64 * 1024,
-            int((os.environ.get("AGENT_TEMP_CACHE_THRESHOLD_BYTES") or str(1024 * 1024)).strip()),
+            _safe_eval_int_expression(
+                os.environ.get("AGENT_TEMP_CACHE_THRESHOLD_BYTES") or "1*1024_1024",
+                1024 * 1024,
+            ),
         ),
         temp_cache_expire_days=max(
             1,

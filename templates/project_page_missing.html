@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+
+{% block title %}页面不存在{% endblock %}
+
+{% block content %}
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+
+:root {
+    --missing-bg-a: #f4f7ff;
+    --missing-bg-b: #e8f2ff;
+    --missing-card-bg: rgba(255, 255, 255, 0.82);
+    --missing-text: #0f172a;
+    --missing-muted: #475569;
+    --missing-accent: #2563eb;
+    --missing-accent-hover: #1d4ed8;
+    --missing-border: rgba(148, 163, 184, 0.25);
+}
+
+.missing-page-shell {
+    min-height: calc(100vh - 140px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 28px 12px;
+    background:
+        radial-gradient(circle at 16% 15%, rgba(37, 99, 235, 0.16), transparent 45%),
+        radial-gradient(circle at 84% 85%, rgba(14, 165, 233, 0.16), transparent 44%),
+        linear-gradient(135deg, var(--missing-bg-a), var(--missing-bg-b));
+}
+
+.missing-card {
+    width: min(760px, 96%);
+    border-radius: 20px;
+    border: 1px solid var(--missing-border);
+    background: var(--missing-card-bg);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 20px 44px rgba(15, 23, 42, 0.12);
+    padding: 34px 32px;
+    animation: slideIn .24s ease-out;
+    font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+.missing-kicker {
+    display: inline-flex;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--missing-accent);
+    background: rgba(37, 99, 235, 0.1);
+    border: 1px solid rgba(37, 99, 235, 0.2);
+    border-radius: 999px;
+    padding: 6px 10px;
+}
+
+.missing-title {
+    margin: 14px 0 10px;
+    font-size: clamp(26px, 4.2vw, 36px);
+    line-height: 1.2;
+    color: var(--missing-text);
+    font-weight: 700;
+}
+
+.missing-description {
+    margin: 0;
+    color: var(--missing-muted);
+    font-size: 16px;
+    line-height: 1.7;
+}
+
+.missing-meta {
+    margin-top: 18px;
+    color: #64748b;
+    font-size: 14px;
+}
+
+.missing-actions {
+    margin-top: 28px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.missing-btn-home {
+    border: none;
+    border-radius: 10px;
+    padding: 11px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #ffffff;
+    background: var(--missing-accent);
+    text-decoration: none;
+    transition: background-color .2s ease, transform .2s ease;
+}
+
+.missing-btn-home:hover {
+    color: #ffffff;
+    background: var(--missing-accent-hover);
+    transform: translateY(-1px);
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+</style>
+
+<section class="missing-page-shell">
+    <article class="missing-card" role="status" aria-live="polite">
+        <span class="missing-kicker">Project Lookup Failed</span>
+        <h1 class="missing-title">当前项目或页面不存在</h1>
+        <p class="missing-description">
+            你访问的 {{ page_label or '页面' }} 无法打开，可能是项目已被删除，或当前账号对该项目暂无访问权限。
+        </p>
+        <p class="missing-meta">项目ID：{{ project_id }}</p>
+        <div class="missing-actions">
+            <a class="missing-btn-home" href="{{ url_for('index') }}">返回主页</a>
+        </div>
+    </article>
+</section>
+{% endblock %}
+

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, text
 
 from services.performance_metrics_service import get_perf_metrics_service
+from services.commit_diff_logic import resolve_previous_commit
 
 app = None
 db = None
@@ -579,38 +580,14 @@ class ExcelDiffCacheService:
                         log_print(f"提交不存在: {commit_id}, {file_path}", 'EXCEL', force=True)
                         return
                     
-                    # 获取前一个提交
-                    previous_commit = None
-                    file_commits = None
-                    if commit.commit_time is not None:
-                        from sqlalchemy import and_, or_
-
-                        file_commits = Commit.query.filter(
-                            Commit.repository_id == repository_id,
-                            Commit.path == file_path,
-                            or_(
-                                Commit.commit_time < commit.commit_time,
-                                and_(Commit.commit_time == commit.commit_time, Commit.id < commit.id),
-                            ),
-                        ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
-                    else:
-                        log_print(
-                            f"提交时间为空，前序提交查询降级为ID排序: repo={repository_id}, commit={commit_id}, file={file_path}",
-                            'EXCEL',
-                        )
-
-                    if not file_commits:
-                        file_commits = Commit.query.filter(
-                            Commit.repository_id == repository_id,
-                            Commit.path == file_path,
-                            Commit.id < commit.id
-                        ).order_by(Commit.id.desc()).first()
+                    # 获取前一个提交（数据库缺失时自动回退到 VCS 历史）
+                    previous_commit = resolve_previous_commit(commit)
                     query_time = time.time() - query_start
                     
                     diff_start = time.time()
                     
                     # 使用统一差异服务处理
-                    diff_data = get_unified_diff_data(commit, file_commits)
+                    diff_data = get_unified_diff_data(commit, previous_commit)
                     
                     processing_time = time.time() - diff_start
                     
@@ -623,7 +600,7 @@ class ExcelDiffCacheService:
                             commit_id=commit_id,
                             file_path=file_path,
                             diff_data=diff_data,
-                            previous_commit_id=file_commits.commit_id if file_commits else None,
+                            previous_commit_id=previous_commit.commit_id if previous_commit else None,
                             processing_time=processing_time
                         )
                         cache_time = time.time() - cache_start

@@ -950,6 +950,78 @@ class GitService:
             
         except Exception as e:
             return None
+
+    @staticmethod
+    def _commit_id_matches(candidate_commit_id, target_commit_id):
+        """判断两个 commit id 是否匹配（支持长短 SHA 前缀匹配）。"""
+        candidate = str(candidate_commit_id or "").strip().lower()
+        target = str(target_commit_id or "").strip().lower()
+        if not candidate or not target:
+            return False
+        return candidate == target or candidate.startswith(target) or target.startswith(candidate)
+
+    def get_previous_file_commit(self, file_path, current_commit_id, max_count=5000):
+        """按文件历史查找当前提交的上一提交（不受业务 start_date 限制）。"""
+        try:
+            if not file_path or not current_commit_id:
+                return None
+
+            if not os.path.exists(self.local_path):
+                clone_ok, _ = self.clone_or_update_repository()
+                if not clone_ok:
+                    return None
+
+            git_cmd = [
+                "git",
+                "log",
+                "--follow",
+                f"--max-count={max(50, int(max_count or 5000))}",
+                "--format=%H|%an|%ct|%s",
+                str(current_commit_id),
+                "--",
+                str(file_path),
+            ]
+            result = self._run_git_command(git_cmd, timeout=180)
+            if not result or result.returncode != 0 or not result.stdout:
+                return None
+
+            log_lines = [line.strip() for line in str(result.stdout).splitlines() if line.strip()]
+            current_index = None
+            for idx, line in enumerate(log_lines):
+                commit_id = line.split("|", 1)[0].strip()
+                if self._commit_id_matches(commit_id, current_commit_id):
+                    current_index = idx
+                    break
+
+            if current_index is None or current_index + 1 >= len(log_lines):
+                return None
+
+            previous_line = log_lines[current_index + 1]
+            parts = previous_line.split("|")
+            if len(parts) < 4:
+                return None
+
+            previous_commit_id = parts[0].strip()
+            author = parts[1].strip()
+            timestamp_text = parts[2].strip()
+            message = "|".join(parts[3:]).strip() if len(parts) > 3 else ""
+
+            commit_time = None
+            try:
+                commit_time = datetime.fromtimestamp(int(timestamp_text))
+            except Exception:
+                commit_time = None
+
+            return {
+                "commit_id": previous_commit_id,
+                "author": author,
+                "message": message,
+                "commit_time": commit_time,
+            }
+        except Exception as e:
+            from utils.safe_print import log_print
+            log_print(f"获取文件上一提交失败: {e}", "GIT")
+            return None
     
     def get_commit_range_diff(self, from_commit, to_commit, file_path):
         """获取提交范围内的diff"""

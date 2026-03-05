@@ -1,5 +1,6 @@
 import json
 import os
+import json
 import uuid
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ from auth.services import register_user
 import services.task_worker_service as task_worker_service
 from agent.config import load_settings
 from agent import executor as agent_executor
+from agent.local_temp_cache import save_local_temp_cache
 from agent.system_metrics import collect_agent_metrics
 from app import app, create_tables, db
 from models import AgentDefaultAdmin, AgentNode, AgentProjectBinding, AgentTask, BackgroundTask, Commit, Project, Repository
@@ -88,6 +90,37 @@ def test_agent_executor_local_auto_sync_and_proxy_fallback(monkeypatch):
     assert summary is None
     assert payload is None
     assert "unsupported task_type=auto_sync" in str(error)
+
+
+def test_agent_executor_temp_cache_fetch_hit(tmp_path):
+    settings = SimpleNamespace(
+        local_task_types=["temp_cache_fetch"],
+        repos_base_dir=str(tmp_path),
+        temp_cache_expire_days=90,
+    )
+
+    payload_obj = {"k": "v"}
+    payload_json = json.dumps(payload_obj, ensure_ascii=False)
+    save_local_temp_cache(
+        settings,
+        cache_key="cache-hit-1",
+        payload_json=payload_json,
+        payload_hash="hash-1",
+        payload_size=len(payload_json.encode("utf-8")),
+        task_type="excel_diff",
+        expire_seconds=600,
+    )
+
+    status, summary, error, payload = agent_executor.execute_task(
+        {"task_type": "temp_cache_fetch", "payload": {"cache_key": "cache-hit-1", "expected_hash": "hash-1"}},
+        settings,
+    )
+    assert status == "completed"
+    assert error is None
+    assert isinstance(summary, dict) and summary.get("message") == "temp_cache_fetch hit"
+    assert isinstance(payload, dict)
+    assert payload.get("cache_key") == "cache-hit-1"
+    assert payload.get("payload_json") == payload_json
 
 
 def test_agent_settings_support_name_only_without_agent_code(monkeypatch):

@@ -766,8 +766,12 @@ function syncRepository(repoId) {
             }
         }).then(response => response.json().catch(() => ({ success: response.ok })))
         .then(data => {
+            const acceptedByAgent = data.status === 'accepted' || !!data.task_id;
             if (data.success || data.status === 'success') {
                 showToast('同步成功', '仓库提交记录已同步完成', 'success');
+                setTimeout(() => location.reload(), 1200);
+            } else if (acceptedByAgent) {
+                showToast('已派发同步', data.message || '任务已派发到绑定Agent执行，请稍后刷新查看状态', 'success');
                 setTimeout(() => location.reload(), 1200);
             } else {
                 showToast('同步失败', data.message || '请检查仓库配置后重试', 'error');

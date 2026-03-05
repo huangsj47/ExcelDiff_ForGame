@@ -1462,6 +1462,10 @@ function getConfirmUserDisplay(file) {
         return String(file.confirm_user_display);
     }
 
+    if (file && file.status_changed_by_display) {
+        return String(file.status_changed_by_display);
+    }
+
     const statusChangedBy = file ? file.status_changed_by : '';
     if (!statusChangedBy) return '';
 
@@ -1476,6 +1480,10 @@ function getConfirmUserDisplay(file) {
 function getConfirmUserTitle(file, fallbackDisplay = '') {
     if (file && file.confirm_user_title) {
         return String(file.confirm_user_title);
+    }
+
+    if (file && file.status_changed_by_title) {
+        return String(file.status_changed_by_title);
     }
 
     const statusChangedBy = file ? file.status_changed_by : '';
@@ -1665,16 +1673,26 @@ function updateFileStatusQuick(filePath, newStatus) {
         if (data.success) {
             // 更新本地数据
             const changedBy = data.status_changed_by || '';
+            const changedByDisplay = data.status_changed_by_display || '';
+            const changedByTitle = data.status_changed_by_title || '';
             const fileIndex = allFiles.findIndex(f => f.file_path === filePath);
             if (fileIndex !== -1) {
                 allFiles[fileIndex].overall_status = newStatus;
                 allFiles[fileIndex].status_changed_by = changedBy;
+                allFiles[fileIndex].status_changed_by_display = changedByDisplay;
+                allFiles[fileIndex].status_changed_by_title = changedByTitle;
+                allFiles[fileIndex].confirm_user_display = changedByDisplay;
+                allFiles[fileIndex].confirm_user_title = changedByTitle;
             }
 
             const filteredIndex = filteredFiles.findIndex(f => f.file_path === filePath);
             if (filteredIndex !== -1) {
                 filteredFiles[filteredIndex].overall_status = newStatus;
                 filteredFiles[filteredIndex].status_changed_by = changedBy;
+                filteredFiles[filteredIndex].status_changed_by_display = changedByDisplay;
+                filteredFiles[filteredIndex].status_changed_by_title = changedByTitle;
+                filteredFiles[filteredIndex].confirm_user_display = changedByDisplay;
+                filteredFiles[filteredIndex].confirm_user_title = changedByTitle;
             }
 
             // 重新渲染表格

@@ -143,6 +143,17 @@ def _get_app_func(name):
     return getattr(app_mod, name)
 
 
+def _render_project_page_missing(project_id: int, page_label: str):
+    return (
+        render_template(
+            "project_page_missing.html",
+            project_id=project_id,
+            page_label=page_label,
+        ),
+        404,
+    )
+
+
 def get_real_diff_data_for_merge(commit):
     """代理: 委托给 app.get_real_diff_data_for_merge"""
     return _get_app_func('get_real_diff_data_for_merge')(commit)
@@ -266,7 +277,9 @@ def weekly_version_config(project_id):
                          pagination=pagination)
 def weekly_version_config_api(project_id):
     """周版本配置API"""
-    project = Project.query.get_or_404(project_id)
+    project = Project.query.get(project_id)
+    if not project:
+        return jsonify({'success': False, 'message': f'项目不存在: {project_id}'}), 404
     if request.method == 'GET':
         # 获取配置列表
         configs = WeeklyVersionConfig.query.filter_by(project_id=project_id).all()
@@ -353,8 +366,8 @@ def weekly_version_config_api(project_id):
                     start_time=start_time,
                     end_time=end_time,
                     cycle_type=data.get('cycle_type', 'custom'),
-                    is_active=data.get('is_active', True),
-                    auto_sync=data.get('auto_sync', True),
+                    is_active=True,
+                    auto_sync=True,
                     status='active'
                 )
                 db.session.add(config)
@@ -383,7 +396,9 @@ def weekly_version_config_api(project_id):
 
 def weekly_version_config_detail_api(project_id, config_id):
     """周版本配置详情API"""
-    project = Project.query.get_or_404(project_id)
+    project = Project.query.get(project_id)
+    if not project:
+        return jsonify({'success': False, 'message': f'项目不存在: {project_id}'}), 404
     config = WeeklyVersionConfig.query.filter_by(id=config_id, project_id=project_id).first_or_404()
     if request.method == 'GET':
         # 获取配置详情
@@ -437,10 +452,9 @@ def weekly_version_config_detail_api(project_id, config_id):
                 config.end_time = new_end_time
             if 'cycle_type' in data:
                 config.cycle_type = data['cycle_type']
-            if 'is_active' in data:
-                config.is_active = data['is_active']
-            if 'auto_sync' in data:
-                config.auto_sync = data['auto_sync']
+            # 业务约束：周版本配置始终启用自动同步和激活状态，不允许接口层关闭。
+            config.is_active = True
+            config.auto_sync = True
             if 'status' in data:
                 config.status = data['status']
             config.updated_at = datetime.now(timezone.utc)
@@ -492,7 +506,9 @@ def weekly_version_config_detail_api(project_id, config_id):
 
 def weekly_version_list(project_id):
     """周版本diff列表页面"""
-    project = Project.query.get_or_404(project_id)
+    project = Project.query.get(project_id)
+    if not project:
+        return _render_project_page_missing(project_id, "周版本列表")
     repository_id = request.args.get('repository_id', type=int)
     # 获取配置列表
     query = WeeklyVersionConfig.query.filter_by(project_id=project_id)
@@ -505,7 +521,9 @@ def weekly_version_list(project_id):
                          selected_repository_id=repository_id)
 def merged_project_view(project_id):
     """合并的项目视图：左侧周版本列表，右侧仓库列表"""
-    project = Project.query.get_or_404(project_id)
+    project = Project.query.get(project_id)
+    if not project:
+        return _render_project_page_missing(project_id, "项目合并视图")
     # 获取所有周版本配置
     configs = WeeklyVersionConfig.query.filter_by(project_id=project_id).order_by(WeeklyVersionConfig.created_at.desc()).all()
     # 获取所有仓库
@@ -713,13 +731,6 @@ def weekly_version_files_api(config_id):
 
             return keys
 
-        def _abbreviate_username(username):
-            clean_name = (username or '').strip()
-            if not clean_name:
-                return ''
-            # 列表已有省略与tooltip机制，这里返回全量用户名避免短账号被强制截断（如 admin -> ad..）
-            return clean_name
-
         all_confirm_usernames = set()
         all_author_keys = set()
         for cache in diff_caches:
@@ -802,11 +813,9 @@ def weekly_version_files_api(config_id):
             confirm_user_display = ''
             confirm_user_title = ''
             if cache.overall_status in ('confirmed', 'rejected') and confirm_usernames:
-                if repository.enable_id_confirmation:
-                    confirm_user_display = ', '.join(_abbreviate_username(username) for username in confirm_usernames)
-                else:
-                    confirm_user_display = ', '.join(confirm_usernames)
-                confirm_user_title = ', '.join(confirm_display_names)
+                confirm_user_display = ', '.join(confirm_display_names)
+                # title 保留用户名，便于定位账号
+                confirm_user_title = ', '.join(confirm_usernames)
 
             # 解析合并diff数据以获取文件操作信息
             file_operations = []

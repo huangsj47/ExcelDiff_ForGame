@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Agent 运行主循环。"""
+"""Agent 运行主循环（增强版：失败回传重试）。"""
 
 from __future__ import annotations
 
@@ -88,6 +88,11 @@ def _maybe_upload_large_temp_cache(task, task_id, task_type, result_payload, set
     return result_payload
 
 
+def _report_task_result_once(settings, task_id, report_payload, common_headers):
+    report_url = f"{settings.platform_base_url}/api/agents/tasks/{task_id}/result"
+    return post_json(report_url, report_payload, headers=common_headers, timeout=15)
+
+
 def run_agent():
     global _SHUTDOWN
     settings = load_settings()
@@ -109,6 +114,7 @@ def run_agent():
     cached_metrics = {}
     heartbeat_online_logged = False
     heartbeat_offline_logged = False
+    pending_report = None
 
     _log(
         f"启动 Agent: code={settings.agent_code}, projects={','.join(settings.project_codes)}, "
@@ -152,6 +158,41 @@ def run_agent():
             _log(f"注册失败(status={status}): {data}", settings.log_verbose)
             time.sleep(settings.register_retry_interval_seconds)
             continue
+
+        if pending_report:
+            now_retry_ts = time.time()
+            retry_after_ts = float(pending_report.get("retry_after_ts") or 0.0)
+            if now_retry_ts >= retry_after_ts:
+                rep_status, rep_data = _report_task_result_once(
+                    settings,
+                    pending_report["task_id"],
+                    pending_report["payload"],
+                    common_headers,
+                )
+                if rep_status == 200 and rep_data.get("success"):
+                    _log(
+                        f"任务补回传成功 id={pending_report['task_id']}, status={pending_report['payload'].get('status')}",
+                        settings.log_verbose,
+                    )
+                    pending_report = None
+                else:
+                    pending_report["attempt"] = int(pending_report.get("attempt") or 0) + 1
+                    backoff_seconds = min(30, max(2, pending_report["attempt"] * 2))
+                    pending_report["retry_after_ts"] = time.time() + backoff_seconds
+                    _log(
+                        f"任务补回传失败 id={pending_report['task_id']}, status={rep_status}, "
+                        f"attempt={pending_report['attempt']}, body={rep_data}",
+                        settings.log_verbose,
+                    )
+                    if rep_status in (401, 403):
+                        agent_token = ""
+                        heartbeat_online_logged = False
+                        heartbeat_offline_logged = False
+                        time.sleep(settings.register_retry_interval_seconds)
+                        continue
+            if pending_report:
+                time.sleep(max(1, settings.task_poll_interval_seconds))
+                continue
 
         now_ts = time.time()
         should_push_metrics = (not cached_metrics) or (now_ts - last_metrics_at >= settings.metrics_interval_seconds)
@@ -229,12 +270,17 @@ def run_agent():
             "error_message": error_message,
             "result_payload": result_payload,
         }
-        report_url = f"{settings.platform_base_url}/api/agents/tasks/{task_id}/result"
-        rep_status, rep_data = post_json(report_url, report_payload, headers=common_headers, timeout=15)
+        rep_status, rep_data = _report_task_result_once(settings, task_id, report_payload, common_headers)
         if rep_status == 200 and rep_data.get("success"):
             _log(f"任务回传完成 id={task_id}, status={exec_status}", settings.log_verbose)
         else:
             _log(f"任务回传失败 id={task_id}, status={rep_status}, body={rep_data}", settings.log_verbose)
+            pending_report = {
+                "task_id": task_id,
+                "payload": report_payload,
+                "attempt": 0,
+                "retry_after_ts": time.time() + 2,
+            }
 
         time.sleep(settings.task_poll_interval_seconds)
 

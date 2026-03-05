@@ -10,6 +10,27 @@ from flask import jsonify, redirect, render_template, request, url_for
 from services.model_loader import get_runtime_models
 
 
+def _resolve_username_display_name(username: str | None) -> str | None:
+    normalized = (username or "").strip()
+    if not normalized:
+        return None
+    try:
+        from auth import get_auth_backend
+        from sqlalchemy import func
+
+        if get_auth_backend() == "qkit":
+            from qkit_auth.models import QkitAuthUser as _UserModel
+        else:
+            from auth.models import AuthUser as _UserModel
+
+        user = _UserModel.query.filter(func.lower(_UserModel.username) == normalized.lower()).first()
+        if not user:
+            return normalized
+        return (getattr(user, "display_name", "") or "").strip() or normalized
+    except Exception:
+        return normalized
+
+
 def weekly_version_file_previous_version(config_id):
     """View previous version file content for weekly config."""
     WeeklyVersionConfig, Commit, log_print = get_runtime_models("WeeklyVersionConfig", "Commit", "log_print")
@@ -230,7 +251,9 @@ def weekly_version_file_status_api(config_id):
         return jsonify({
             "success": True,
             "message": "状态更新成功",
-            "status_changed_by": diff_cache.status_changed_by
+            "status_changed_by": diff_cache.status_changed_by,
+            "status_changed_by_display": _resolve_username_display_name(diff_cache.status_changed_by),
+            "status_changed_by_title": diff_cache.status_changed_by,
         })
     except Exception as exc:
         db.session.rollback()

@@ -8,7 +8,6 @@
    - `AGENT_NAME`
    - `AGENT_PROJECT_CODES`（可留空）
    - `AGENT_DEFAULT_ADMIN_USERNAME`
-   - `AGENT_LOCAL_TASK_TYPES`（默认 `auto_sync`）
    - `AGENT_METRICS_INTERVAL_SECONDS`（默认 300 秒）
 
 ## 2. 启动
@@ -26,14 +25,10 @@ python start_agent.py
   - 若用户尚未注册，会先写入预分配，待其注册/登录后自动生效；
   - 即使 `AGENT_PROJECT_CODES` 为空，该用户也可在平台创建项目并默认绑定到该 Agent。
 - Agent 会按配置周期上报 CPU/内存/磁盘/系统信息到平台。
-- `AGENT_LOCAL_TASK_TYPES` 控制哪些任务在 Agent 本地执行：
-  - 默认 `auto_sync`：仅仓库增量扫描在 Agent 本地执行；
-  - `all`：`auto_sync/excel_diff/weekly_sync` 全部本地执行；
-  - `none`：全部任务走平台 `execute-proxy`；
-  - 逗号列表：如 `auto_sync,excel_diff`。
-- `AGENT_ALLOW_EXECUTE_PROXY` 默认 `false`：
-  - `false`：本地执行失败后不回退平台代理执行（更符合控制面/数据面拆分）；
-  - `true`：允许旧路径回退到平台 `/execute-proxy`（过渡兼容）。
+- `AGENT_LOCAL_TASK_TYPES`（可选高级项）控制哪些任务在 Agent 本地执行：
+  - 默认全量本地执行：`auto_sync/excel_diff/weekly_sync/weekly_excel_cache/temp_cache_fetch`；
+  - 当前版本会强制补齐上述任务类型，建议保持默认不配置。
+- `AGENT_TEMP_CACHE_THRESHOLD_BYTES` 支持表达式写法，例如：`1*1024_1024`。
 
 ## 3. 打包分发
 ```bash

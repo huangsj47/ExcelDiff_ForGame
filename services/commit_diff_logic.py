@@ -7,6 +7,7 @@ import json
 import threading
 from datetime import datetime, timezone
 from collections import defaultdict
+from types import SimpleNamespace
 
 from models import db, Commit, Repository, DiffCache, ExcelHtmlCache
 from services.diff_service import DiffService
@@ -87,6 +88,107 @@ def _commit_time_to_iso(commit_time):
     if isinstance(commit_time, datetime):
         return commit_time.isoformat()
     return None
+
+
+def _commit_id_matches(candidate_commit_id, target_commit_id):
+    candidate = str(candidate_commit_id or "").strip().lower()
+    target = str(target_commit_id or "").strip().lower()
+    if not candidate or not target:
+        return False
+    return candidate == target or candidate.startswith(target) or target.startswith(candidate)
+
+
+def _build_virtual_previous_commit(commit, previous_data):
+    commit_id = str((previous_data or {}).get("commit_id") or "").strip()
+    if not commit_id:
+        return None
+    return SimpleNamespace(
+        id=None,
+        repository_id=getattr(commit, "repository_id", None),
+        repository=getattr(commit, "repository", None),
+        path=getattr(commit, "path", None),
+        commit_id=commit_id,
+        version=commit_id[:8],
+        operation=str((previous_data or {}).get("operation") or "M"),
+        author=str((previous_data or {}).get("author") or ""),
+        message=str((previous_data or {}).get("message") or ""),
+        commit_time=(previous_data or {}).get("commit_time"),
+    )
+
+
+def _resolve_previous_commit_from_vcs(commit):
+    repository = getattr(commit, "repository", None)
+    file_path = str(getattr(commit, "path", "") or "").strip()
+    if repository is None or not file_path:
+        return None
+
+    try:
+        if repository.type == "git":
+            service = _get_git_service(repository) if callable(_get_git_service) else None
+            if service is None:
+                from services.threaded_git_service import ThreadedGitService
+
+                service = ThreadedGitService(
+                    repository.url,
+                    repository.root_directory,
+                    repository.username,
+                    repository.token,
+                    repository,
+                    _active_git_processes,
+                )
+            previous_data = service.get_previous_file_commit(file_path, commit.commit_id)
+            return _build_virtual_previous_commit(commit, previous_data)
+
+        if repository.type == "svn":
+            service = _get_svn_service(repository) if callable(_get_svn_service) else None
+            if service is None:
+                return None
+            commits_data = service.get_file_history(file_path, limit=1000) or []
+            target_index = None
+            for idx, item in enumerate(commits_data):
+                if _commit_id_matches(item.get("commit_id"), commit.commit_id):
+                    target_index = idx
+                    break
+            if target_index is None or target_index + 1 >= len(commits_data):
+                return None
+            return _build_virtual_previous_commit(commit, commits_data[target_index + 1])
+    except Exception as exc:
+        log_print(f"VCS 回退查找前一提交失败: {exc}", "DIFF")
+    return None
+
+
+def resolve_previous_commit(commit, file_commits=None):
+    """优先按数据库查找前一提交；缺失时回退到 VCS 文件历史。"""
+    repository = getattr(commit, "repository", None)
+    if repository is None:
+        return None
+
+    previous_commit = None
+    if getattr(commit, "commit_time", None) is not None:
+        previous_commit = Commit.query.filter(
+            Commit.repository_id == repository.id,
+            Commit.path == commit.path,
+            Commit.commit_time < commit.commit_time
+        ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
+    if previous_commit is None:
+        previous_commit = Commit.query.filter(
+            Commit.repository_id == repository.id,
+            Commit.path == commit.path,
+            Commit.id < commit.id
+        ).order_by(Commit.id.desc()).first()
+
+    if previous_commit is None and file_commits:
+        current_index = None
+        for i, item in enumerate(file_commits):
+            if getattr(item, "id", None) == getattr(commit, "id", None):
+                current_index = i
+                break
+        if current_index is not None and current_index + 1 < len(file_commits):
+            previous_commit = file_commits[current_index + 1]
+
+    if previous_commit is None:
+        previous_commit = _resolve_previous_commit_from_vcs(commit)
+    return previous_commit
 
 
 def convert_hunks_to_lines(diff_data):
@@ -269,21 +371,15 @@ def generate_merged_diff_data(repository, file_path, base_commit, latest_commit,
 #  Diff 数据获取 — get_diff_data / get_real_diff_data_for_merge
 # ---------------------------------------------------------------------------
 
-def get_diff_data(commit):
+_PREVIOUS_COMMIT_SENTINEL = object()
+
+
+def get_diff_data(commit, previous_commit=_PREVIOUS_COMMIT_SENTINEL):
     """获取真实的diff数据 - 返回数据结构而非JSON响应"""
     try:
+        if previous_commit is _PREVIOUS_COMMIT_SENTINEL:
+            previous_commit = resolve_previous_commit(commit)
         repository = commit.repository
-        previous_commit = Commit.query.filter(
-            Commit.repository_id == repository.id,
-            Commit.path == commit.path,
-            Commit.commit_time < commit.commit_time
-        ).order_by(Commit.commit_time.desc()).first()
-        if previous_commit is None:
-            previous_commit = Commit.query.filter(
-                Commit.repository_id == repository.id,
-                Commit.path == commit.path,
-                Commit.id < commit.id
-            ).order_by(Commit.id.desc()).first()
 
         log_print(f"🔍 get_diff_data - 当前提交: {commit.commit_id[:8]} ({commit.commit_time})", 'DIFF')
         if previous_commit:

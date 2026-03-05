@@ -113,6 +113,7 @@ from services.status_sync_handlers import (
 from services.commit_diff_logic import (
     configure_commit_diff_logic,
     get_diff_data,
+    resolve_previous_commit,
     get_real_diff_data_for_merge,
     get_merged_diff_data,
     generate_merged_diff_data,
@@ -172,7 +173,6 @@ from services.agent_management_handlers import (
     agent_overview_page,
     agent_claim_task,
     agent_report_task_result,
-    agent_execute_task_proxy,
 )
 from routes.agent_management_routes import agent_management_bp
 from routes.cache_management_routes import cache_management_bp
@@ -1090,8 +1090,9 @@ def commit_list(repository_id):
         confirm_users_display = ''
         confirm_users_title = ''
         if commit.status in ('confirmed', 'rejected') and commit_confirm_users:
-            confirm_users_display = ', '.join(commit_confirm_users)
-            confirm_users_title = ', '.join(commit_confirm_display_names)
+            confirm_users_display = ', '.join(commit_confirm_display_names)
+            # title 保留用户名，便于定位账号
+            confirm_users_title = ', '.join(commit_confirm_users)
 
         commit.confirm_users_display = confirm_users_display
         commit.confirm_users_title = confirm_users_title
@@ -1409,23 +1410,7 @@ def commit_diff_new(commit_id):
         Commit.repository_id == repository.id,
         Commit.path == commit.path
     ).order_by(Commit.commit_time.desc()).all()
-    # 获取上一个版本的提交信息
-    previous_commit = None
-    current_index = None
-    for i, fc in enumerate(file_commits):
-        if fc.id == commit.id:
-            current_index = i
-            break
-
-    if current_index is not None and current_index + 1 < len(file_commits):
-        previous_commit = file_commits[current_index + 1]
-    # 如果按索引未找到，尝试按时间查找
-    if previous_commit is None:
-        previous_commit = Commit.query.filter(
-            Commit.repository_id == repository.id,
-            Commit.path == commit.path,
-            Commit.commit_time < commit.commit_time
-        ).order_by(Commit.commit_time.desc()).first()
+    previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
     # 使用新的差异服务处理文件
     diff_data = get_unified_diff_data(commit, previous_commit)
     return render_template('commit_diff_new.html', 
@@ -1448,22 +1433,7 @@ def commit_full_diff(commit_id):
         Commit.repository_id == repository.id,
         Commit.path == commit.path
     ).order_by(Commit.commit_time.desc()).all()
-    previous_commit = None
-    current_index = None
-    for i, fc in enumerate(file_commits):
-        if fc.id == commit.id:
-            current_index = i
-            break
-
-    if current_index is not None and current_index + 1 < len(file_commits):
-        previous_commit = file_commits[current_index + 1]
-    # 如果按索引未找到，尝试按时间查找
-    if previous_commit is None:
-        previous_commit = Commit.query.filter(
-            Commit.repository_id == repository.id,
-            Commit.path == commit.path,
-            Commit.commit_time < commit.commit_time
-        ).order_by(Commit.commit_time.desc()).first()
+    previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
     # 获取完整文件内容
     try:
         import subprocess
@@ -1670,31 +1640,7 @@ def commit_diff(commit_id):
         Commit.repository_id == repository.id,
         Commit.path == commit.path
     ).order_by(Commit.commit_time.desc(), Commit.id.desc()).all()
-    # 获取上一个版本的提交信息 - 改进的查找逻辑
-    previous_commit = None
-    # 方法1: 直接按时间查找前一提交（最可靠的方法）
-    previous_commit = Commit.query.filter(
-        Commit.repository_id == repository.id,
-        Commit.path == commit.path,
-        Commit.commit_time < commit.commit_time
-    ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
-    # 方法2: 如果按时间未找到，尝试按ID查找（处理时间相同的情况）
-    if previous_commit is None:
-        previous_commit = Commit.query.filter(
-            Commit.repository_id == repository.id,
-            Commit.path == commit.path,
-            Commit.id < commit.id
-        ).order_by(Commit.id.desc()).first()
-    # 方法3: 如果还是未找到，使用索引方法作为最后备选
-    if previous_commit is None:
-        current_index = None
-        for i, fc in enumerate(file_commits):
-            if fc.id == commit.id:
-                current_index = i
-                break
-
-        if current_index is not None and current_index + 1 < len(file_commits):
-            previous_commit = file_commits[current_index + 1]
+    previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
     # 调试日志
     log_print(f"🔍 查找前一提交 - 文件: {commit.path}", 'DIFF', force=True)
     log_print(f"🔍 该文件总提交数: {len(file_commits)}", 'DIFF', force=True)
@@ -1828,7 +1774,7 @@ def commit_diff(commit_id):
 
     else:
         # 非Excel文件，正常同步处理
-        diff_data = get_diff_data(commit)
+        diff_data = get_diff_data(commit, previous_commit=previous_commit)
         return render_template('commit_diff.html', 
                              commit=commit, 
                              repository=repository,
@@ -3114,7 +3060,7 @@ if __name__ == '__main__':
     try:
         if DEPLOYMENT_MODE == "agent":
             log_print("以 Agent 模式启动（不启动 Flask Web 服务）", "APP", force=True)
-            from agent.runner import run_agent
+            from agent.runner_runtime import run_agent
 
             run_agent()
             sys.exit(0)

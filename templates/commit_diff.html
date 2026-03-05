@@ -101,7 +101,7 @@
                                 <code>初始版本</code>
                             {% endif %}
                         </div>
-                        {% if previous_commit %}
+                        {% if previous_commit and previous_commit.id %}
                         <div><strong>提交时间:</strong> {{ format_beijing_time(previous_commit.commit_time, '%Y-%m-%d %H:%M:%S') if previous_commit.commit_time else 'N/A' }}</div>
                         <div><strong>提交者:</strong> {{ previous_commit.author | e or 'N/A' }}</div>
                         {% if previous_commit.message %}
@@ -172,7 +172,7 @@
                             <i class="bi bi-trash fs-1 mb-3 d-block text-warning"></i>
                             <h5 class="alert-heading">Excel文件已删除</h5>
                             <p class="mb-0">{{ diff_data.message }}</p>
-                            {% if previous_commit %}
+                            {% if previous_commit and previous_commit.id %}
                             <hr>
                             <p class="mb-0">
                                 <small class="text-muted">

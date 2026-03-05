@@ -99,6 +99,8 @@ def _enqueue_agent_task_from_background_task(db_task, extra_payload=None):
                 "path_regex": repo.path_regex,
                 "log_filter_regex": repo.log_filter_regex,
                 "commit_filter": repo.commit_filter,
+                "project_code": (repo.project.code if getattr(repo, "project", None) else None),
+                "repository_name": repo.name,
             }
             payload.setdefault("limit", 1000)
     elif task_type == "weekly_sync":

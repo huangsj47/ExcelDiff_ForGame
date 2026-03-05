@@ -9,6 +9,11 @@ import re
 import subprocess
 from urllib.parse import quote, urlparse, urlunparse
 
+try:
+    from utils.path_security import build_repository_local_path
+except Exception:  # pragma: no cover - 独立Agent目录运行时可能无平台utils模块
+    build_repository_local_path = None
+
 _GIT_LOCK_FILES = (
     os.path.join(".git", "index.lock"),
     os.path.join(".git", "config.lock"),
@@ -44,7 +49,25 @@ def execute_auto_sync(task: dict, settings):
 
     base_dir = os.path.abspath(settings.repos_base_dir)
     os.makedirs(base_dir, exist_ok=True)
+    project_code = str(
+        repo_cfg.get("project_code")
+        or payload.get("project_code")
+        or ""
+    ).strip()
+    repository_name = str(
+        repo_cfg.get("repository_name")
+        or payload.get("repository_name")
+        or ""
+    ).strip()
     local_repo_dir = os.path.join(base_dir, f"repo_{repository_id}")
+    if build_repository_local_path and project_code and repository_name:
+        local_repo_dir = build_repository_local_path(
+            project_code,
+            repository_name,
+            repository_id,
+            base_dir=base_dir,
+            strict=False,
+        )
 
     auth_url = _build_auth_url(remote_url, username, token)
     _sync_repo(local_repo_dir, auth_url, branch)

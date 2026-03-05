@@ -303,7 +303,6 @@ python app.py
   - `GET /api/agents`：查看 Agent 状态（管理员）
   - `GET /admin/agents`：Agent 节点监控页（管理员）
   - `POST /api/agents/tasks/claim`：Agent 领取任务
-  - `POST /api/agents/tasks/<task_id>/execute-proxy`：平台代理执行任务（过渡模式）
   - `POST /api/agents/tasks/<task_id>/result`：Agent 回传任务结果
   - `GET /api/agents/tasks`：查看 Agent 任务状态（管理员）
 - 项目代号规则：
@@ -313,15 +312,14 @@ python app.py
   - 已存在且被其他主体占用：返回冲突，不覆盖
 - 独立 Agent 运行包位于 `agent/`，可单独打包分发：
   - `python agent/build_zip.py`
-- `DEPLOYMENT_MODE=platform` 时，新增 `excel_diff/auto_sync/weekly_sync` 任务会下发到 `agent_tasks`。
+- `DEPLOYMENT_MODE=platform` 时，新增 `excel_diff/auto_sync/weekly_sync/weekly_excel_cache` 任务会下发到 `agent_tasks`。
 - 平台管理员在 `platform/agent` 模式下创建项目时，可在首页选择绑定目标 Agent。
 - 若某 Agent 配置了 `AGENT_DEFAULT_ADMIN_USERNAME`，对应用户可直接在平台创建项目：
   - 仅能绑定到自己被授权的 Agent；
   - 若被多个 Agent 同时授权，可在这些 Agent 中选择；
   - 平台不会自动删除历史项目/绑定，删除操作仅由管理员手工执行。
 - 当前执行策略：
-  - `auto_sync`：默认由 Agent 本地执行（拉取 Git 仓库并回传提交清单，平台入库并继续派发 excel_diff）
-  - 其他任务：仍通过 `execute-proxy` 由平台执行（过渡方案）
+  - `auto_sync/excel_diff/weekly_sync/weekly_excel_cache/temp_cache_fetch`：统一由 Agent 本地执行（平台仅负责任务编排与结果落库）
 - 相关 Agent 配置：
   - `AGENT_NAME`（建议必填）
   - `AGENT_CODE`（可留空，自动根据 `AGENT_NAME + AGENT_HOST` 生成）
@@ -330,7 +328,8 @@ python app.py
   - `AGENT_HEARTBEAT_INTERVAL_SECONDS`（心跳上报间隔）
   - `AGENT_REGISTER_RETRY_INTERVAL_SECONDS`（注册失败/鉴权失效重试间隔）
   - `AGENT_METRICS_INTERVAL_SECONDS=300`（CPU/内存/磁盘上报周期）
-  - `AGENT_LOCAL_TASK_TYPES`（默认 `auto_sync`；可设 `all` 或 `none`）
+  - `AGENT_LOCAL_TASK_TYPES`（默认全量本地任务；保留为兼容配置）
+  - `AGENT_TEMP_CACHE_THRESHOLD_BYTES`（支持表达式写法，如 `1*1024_1024`）
   - `AGENT_REPOS_BASE_DIR=agent_repos`
 
 建议在生产环境替换 `SECRET_KEY`，并根据数据规模考虑迁移到 MySQL/PostgreSQL。

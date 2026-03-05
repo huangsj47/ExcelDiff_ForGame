@@ -72,11 +72,3 @@ def agent_claim_task_route():
 def agent_report_task_result_route(task_id):
     return _dispatch("agent_report_task_result", task_id)
 
-
-@agent_management_bp.route(
-    "/api/agents/tasks/<int:task_id>/execute-proxy",
-    methods=["POST"],
-    endpoint="agent_execute_task_proxy",
-)
-def agent_execute_task_proxy_route(task_id):
-    return _dispatch("agent_execute_task_proxy", task_id)

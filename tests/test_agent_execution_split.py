@@ -2,10 +2,13 @@ import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 
 from app import app, create_tables, db
 from models import AgentTask, AgentTempCache, BackgroundTask, Project, Repository
 from agent.config import load_settings
+from agent.handlers import auto_sync as auto_sync_handler
 from utils.path_security import build_repository_local_path
 
 
@@ -36,13 +39,14 @@ def test_agent_settings_include_temp_cache_options(monkeypatch):
     monkeypatch.setenv("AGENT_SHARED_SECRET", "s1")
     monkeypatch.setenv("AGENT_NAME", "node-a")
     monkeypatch.setenv("AGENT_HOST", "10.2.3.4")
-    monkeypatch.setenv("AGENT_ALLOW_EXECUTE_PROXY", "false")
     monkeypatch.setenv("AGENT_TEMP_CACHE_UPLOAD_ENABLED", "true")
-    monkeypatch.setenv("AGENT_TEMP_CACHE_THRESHOLD_BYTES", "2097152")
+    monkeypatch.setenv("AGENT_TEMP_CACHE_THRESHOLD_BYTES", "2*1024_1024")
     monkeypatch.setenv("AGENT_TEMP_CACHE_EXPIRE_DAYS", "30")
 
     settings = load_settings()
-    assert settings.allow_execute_proxy is False
+    assert {"auto_sync", "excel_diff", "weekly_sync", "weekly_excel_cache", "temp_cache_fetch"}.issubset(
+        set(settings.local_task_types or [])
+    )
     assert settings.temp_cache_upload_enabled is True
     assert settings.temp_cache_threshold_bytes == 2 * 1024 * 1024
     assert settings.temp_cache_expire_days == 30
@@ -97,6 +101,55 @@ def test_platform_mode_manual_sync_dispatches_agent_task(monkeypatch):
             project_id=project.id,
         ).first()
         assert agent_task is not None
+        task_payload = json.loads(agent_task.payload or "{}")
+        repository_payload = task_payload.get("repository") or {}
+        assert repository_payload.get("project_code") == project.code
+        assert repository_payload.get("repository_name") == repository.name
+
+
+def test_agent_auto_sync_uses_repository_name_style_local_path(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_sync_repo(local_repo_dir, remote_url, branch):
+        captured["local_repo_dir"] = local_repo_dir
+        captured["remote_url"] = remote_url
+        captured["branch"] = branch
+
+    monkeypatch.setattr(auto_sync_handler, "_sync_repo", _fake_sync_repo)
+    monkeypatch.setattr(auto_sync_handler, "_collect_commits", lambda **kwargs: [])
+
+    settings = SimpleNamespace(repos_base_dir=str(tmp_path))
+    task = {
+        "payload": {
+            "repository_id": 1,
+            "repository": {
+                "repository_id": 1,
+                "type": "git",
+                "url": "https://example.com/repo.git",
+                "branch": "main",
+                "project_code": "G120",
+                "repository_name": "abc",
+            },
+        }
+    }
+
+    status, summary, error, payload = auto_sync_handler.execute_auto_sync(task, settings)
+    expected_local_dir = build_repository_local_path(
+        "G120", "abc", 1, base_dir=str(tmp_path), strict=False
+    )
+    assert status == "completed"
+    assert error is None
+    assert summary.get("repository_id") == 1
+    assert payload.get("repository_id") == 1
+    assert captured.get("local_repo_dir") == expected_local_dir
+
+
+def test_repository_sync_js_treats_accepted_as_dispatched_success():
+    template_path = Path(__file__).resolve().parents[1] / "templates" / "repository_config.html"
+    content = template_path.read_text(encoding="utf-8")
+    assert "data.status === 'accepted'" in content
+    assert "!!data.task_id" in content
+    assert "showToast('已派发同步'" in content
 
 
 def test_agent_temp_cache_upsert_and_admin_fetch(monkeypatch):
@@ -323,7 +376,7 @@ def test_resolve_agent_temp_cache_hash_mismatch_dispatches_recompute(monkeypatch
 
         with app.test_client() as client:
             resp = client.get(
-                f"/api/agents/cache/{row.cache_key}/resolve?expected_hash=hash-other&trigger_recompute=1&repository_id={repository.id}",
+                f"/api/agents/cache/{row.cache_key}/resolve?expected_hash=hash-other&try_agent_fetch=0&trigger_recompute=1&repository_id={repository.id}",
                 headers={"X-Admin-Token": admin_token},
             )
             assert resp.status_code == 202, resp.get_data(as_text=True)
@@ -344,63 +397,16 @@ def test_resolve_agent_temp_cache_hash_mismatch_dispatches_recompute(monkeypatch
         assert task is not None
 
 
-def test_execute_proxy_api_disabled_in_strict_mode(monkeypatch):
+def test_execute_proxy_api_removed(monkeypatch):
     shared_secret = _uid("secret")
-    project_code = _uid("PX")
-    agent_code = _uid("agent")
     monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
-    monkeypatch.setenv("AGENT_STRICT_EXECUTION", "true")
 
     with app.app_context():
         create_tables()
         with app.test_client() as client:
-            agent_token = _register_agent(client, shared_secret, agent_code, project_code=project_code)
-            project = Project.query.filter_by(code=project_code).first()
-            assert project is not None
-            repository = Repository(
-                project_id=project.id,
-                name=_uid("repo"),
-                type="git",
-                url="https://example.com/repo.git",
-                branch="main",
-                clone_status="pending",
-            )
-            db.session.add(repository)
-            db.session.flush()
-
-            task = AgentTask(
-                task_type="excel_diff",
-                project_id=project.id,
-                repository_id=repository.id,
-                source_task_id=None,
-                priority=3,
-                payload=json.dumps(
-                    {
-                        "repository_id": repository.id,
-                        "commit_id": "c1",
-                        "file_path": "a.xlsx",
-                    }
-                ),
-                status="processing",
-            )
-            db.session.add(task)
-            db.session.flush()
-
-            agent = task.assigned_agent = None
-            db.session.flush()
-            # 将任务显式指派给当前agent，满足接口校验
-            from models import AgentNode
-
-            agent = AgentNode.query.filter_by(agent_code=agent_code).first()
-            assert agent is not None
-            task.assigned_agent_id = agent.id
-            db.session.commit()
-
             resp = client.post(
-                f"/api/agents/tasks/{task.id}/execute-proxy",
-                json={"agent_code": agent_code, "agent_token": agent_token},
+                "/api/agents/tasks/123/execute-proxy",
+                json={},
                 headers={"X-Agent-Secret": shared_secret},
             )
-            assert resp.status_code == 409, resp.get_data(as_text=True)
-            data = resp.get_json() or {}
-            assert data.get("success") is False
+            assert resp.status_code == 404
