@@ -168,3 +168,28 @@ def test_provider_can_validate_with_session_token_when_local_cache_disabled(monk
         session["auth_user_id"] = 101
         session["qkitjwt_session"] = "session-token"
         assert provider.is_logged_in() is True
+
+def test_provider_can_restore_session_from_qkit_cookie_when_user_id_missing(monkeypatch):
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    monkeypatch.setenv("QKIT_LOCAL_JWT_CACHE", "true")
+    monkeypatch.setattr(qproviders, "check_qkit_jwt_remote", lambda token: (token == "cookie-token", "", {"ok": True}))
+    monkeypatch.setattr(qproviders, "decode_qkit_jwt_unsafe", lambda token: {"uid": "demo_user@corp.netease.com"})
+    monkeypatch.setattr(
+        qproviders,
+        "extract_identity_from_payload",
+        lambda payload: {
+            "username": "demo_user",
+            "display_name": "Demo User",
+            "email": "demo_user@corp.netease.com",
+        },
+    )
+    monkeypatch.setattr(qproviders, "ensure_qkit_user", lambda **kwargs: (_FakeUser(), None))
+    monkeypatch.setattr(qproviders.db.session, "commit", lambda: None)
+
+    provider = qproviders.QkitAuthProvider()
+    with app.test_request_context("/", headers={"Cookie": "qkitjwt=cookie-token"}):
+        assert session.get("auth_user_id") is None
+        assert provider.is_logged_in() is True
+        assert session.get("auth_user_id") == 101
+        assert session.get("auth_backend") == "qkit"

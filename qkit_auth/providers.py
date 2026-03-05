@@ -6,9 +6,16 @@ from __future__ import annotations
 
 from flask import g, request, session
 
+from models import db
 from auth.providers import AuthProvider
 from qkit_auth.config import load_qkit_settings
-from qkit_auth.services import check_qkit_jwt_remote, get_user_by_id
+from qkit_auth.services import (
+    check_qkit_jwt_remote,
+    decode_qkit_jwt_unsafe,
+    ensure_qkit_user,
+    extract_identity_from_payload,
+    get_user_by_id,
+)
 from utils.logger import log_print
 
 _QKITJWT_COOKIE = "qkitjwt"
@@ -73,21 +80,99 @@ class QkitAuthProvider(AuthProvider):
         ):
             session.pop(key, None)
 
+    def _restore_session_from_qkit_token(self, token: str) -> bool:
+        payload = decode_qkit_jwt_unsafe(token)
+        if not payload:
+            log_print("[QKIT_AUTH] session restore skipped: cannot decode token payload", "INFO")
+            return False
+
+        try:
+            identity = extract_identity_from_payload(payload)
+        except Exception as exc:
+            log_print(f"[QKIT_AUTH] session restore failed: invalid identity payload, error={exc}", "INFO")
+            return False
+
+        user, err = ensure_qkit_user(
+            username=identity.get("username") or "",
+            display_name=identity.get("display_name") or "",
+            email=identity.get("email") or "",
+            source="qkit_session_restore",
+        )
+        if err or user is None:
+            log_print(f"[QKIT_AUTH] session restore failed: ensure user error={err or 'unknown'}", "INFO")
+            return False
+        if not user.is_active:
+            log_print(f"[QKIT_AUTH] session restore failed: inactive user username={user.username}", "INFO")
+            return False
+        try:
+            db.session.commit()
+        except Exception as exc:
+            db.session.rollback()
+            log_print(f"[QKIT_AUTH] session restore failed: db commit error={exc}", "INFO")
+            return False
+
+        session["auth_user_id"] = user.id
+        session["auth_username"] = user.username
+        session["auth_role"] = user.role
+        session["is_admin"] = bool(user.is_platform_admin)
+        session["admin_user"] = user.username if user.is_platform_admin else None
+        session["auth_backend"] = "qkit"
+
+        settings = load_qkit_settings()
+        if settings.local_jwt_cache:
+            session.pop("qkitjwt_session", None)
+        else:
+            session["qkitjwt_session"] = token
+        session.permanent = True
+        log_print(
+            (
+                "[QKIT_AUTH] session restored from token "
+                f"user_id={user.id}, username={user.username}, path={request.path}"
+            ),
+            "INFO",
+        )
+        return True
+
     def _check_current_request_login(self) -> bool:
         cached = getattr(g, "_qkit_login_valid", None)
         if cached is not None:
             return bool(cached)
 
         user_id = session.get("auth_user_id")
-        if not user_id:
-            g._qkit_login_valid = False
-            return False
-
         settings = load_qkit_settings()
         if settings.local_jwt_cache:
             token = (_load_qkit_jwt_from_request() or session.get("qkitjwt_session", "")).strip()
         else:
             token = (session.get("qkitjwt_session", "") or _load_qkit_jwt_from_request()).strip()
+
+        if not user_id and token:
+            valid, message, _payload = check_qkit_jwt_remote(token)
+            if valid and self._restore_session_from_qkit_token(token):
+                g._qkit_login_valid = True
+                return True
+            log_print(
+                (
+                    "[QKIT_AUTH] request auth failed: cannot restore session from token, "
+                    f"path={request.path}, host={request.host}, verify={message or 'unknown'}, "
+                    f"token={_token_fingerprint(token)}"
+                ),
+                "INFO",
+            )
+            self._clear_auth_session()
+            g._qkit_login_valid = False
+            return False
+
+        if not user_id:
+            log_print(
+                (
+                    "[QKIT_AUTH] request auth failed: missing auth_user_id and token, "
+                    f"path={request.path}, host={request.host}, local_cache={settings.local_jwt_cache}"
+                ),
+                "INFO",
+            )
+            g._qkit_login_valid = False
+            return False
+
         if not token:
             missing_hint = "qkitjwt_session" if not settings.local_jwt_cache else "qkitjwt cookie"
             log_print(
