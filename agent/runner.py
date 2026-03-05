@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import signal
 import sys
 import time
@@ -34,6 +36,56 @@ def _log(message: str, verbose: bool = True):
 def _handle_signal(signum, frame):
     global _SHUTDOWN
     _SHUTDOWN = True
+
+
+def _maybe_upload_large_temp_cache(task, task_id, task_type, result_payload, settings, common_headers, agent_token):
+    if not settings.temp_cache_upload_enabled:
+        return result_payload
+    if task_type not in {"excel_diff", "weekly_sync", "weekly_excel_cache"}:
+        return result_payload
+    if result_payload is None:
+        return result_payload
+    if not isinstance(result_payload, (dict, list)):
+        return result_payload
+
+    try:
+        payload_json = json.dumps(result_payload, ensure_ascii=False)
+    except Exception:
+        return result_payload
+
+    payload_size = len(payload_json.encode("utf-8"))
+    if payload_size <= int(settings.temp_cache_threshold_bytes or 0):
+        return result_payload
+
+    payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    payload_dict = task.get("payload") or {}
+    cache_key = f"{task_type}:{task_id}:{payload_hash[:16]}"
+    upsert_url = f"{settings.platform_base_url}/api/agents/cache/upsert"
+    upsert_payload = {
+        "agent_code": settings.agent_code,
+        "agent_token": agent_token,
+        "cache_key": cache_key,
+        "cache_kind": "task_result_payload",
+        "task_type": task_type,
+        "source_task_id": task_id,
+        "project_id": task.get("project_id") or payload_dict.get("project_id"),
+        "repository_id": task.get("repository_id") or payload_dict.get("repository_id"),
+        "commit_id": payload_dict.get("commit_id"),
+        "file_path": payload_dict.get("file_path"),
+        "payload_json": payload_json,
+        "payload_hash": payload_hash,
+        "payload_size": payload_size,
+        "expire_seconds": int(settings.temp_cache_expire_days) * 24 * 3600,
+    }
+    status, data = post_json(upsert_url, upsert_payload, headers=common_headers, timeout=30)
+    if status == 200 and data.get("success"):
+        return {
+            "platform_cache_key": cache_key,
+            "payload_hash": payload_hash,
+            "payload_size": payload_size,
+            "source": "platform_temp_cache",
+        }
+    return result_payload
 
 
 def run_agent():
@@ -158,7 +210,11 @@ def run_agent():
         _log(f"领取任务成功 id={task_id}, type={task_type}", settings.log_verbose)
 
         exec_status, result_summary, error_message, result_payload = execute_task(task, settings)
-        if exec_status == "failed" and task_type not in set(settings.local_task_types or []):
+        if (
+            settings.allow_execute_proxy
+            and exec_status == "failed"
+            and task_type not in set(settings.local_task_types or [])
+        ):
             exec_proxy_url = f"{settings.platform_base_url}/api/agents/tasks/{task_id}/execute-proxy"
             proxy_payload = {
                 "agent_code": settings.agent_code,
@@ -175,6 +231,16 @@ def run_agent():
                     f"代理执行失败: status={proxy_status}, body={proxy_data}",
                     settings.log_verbose,
                 )
+
+        result_payload = _maybe_upload_large_temp_cache(
+            task=task,
+            task_id=task_id,
+            task_type=task_type,
+            result_payload=result_payload,
+            settings=settings,
+            common_headers=common_headers,
+            agent_token=agent_token,
+        )
 
         report_payload = {
             "agent_code": settings.agent_code,

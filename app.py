@@ -164,6 +164,9 @@ from services.repository_sync_status import (
 from services.agent_management_handlers import (
     register_agent_node,
     agent_heartbeat,
+    agent_upsert_temp_cache,
+    get_agent_temp_cache,
+    resolve_agent_temp_cache,
     list_agent_nodes,
     list_agent_tasks,
     agent_overview_page,
@@ -299,6 +302,12 @@ if DEPLOYMENT_MODE not in {"single", "platform", "agent"}:
     log_print(f"⚠️ 非法 DEPLOYMENT_MODE={DEPLOYMENT_MODE}，回退为 single", "APP", force=True)
     DEPLOYMENT_MODE = "single"
 ENABLE_LOCAL_WORKER = DEPLOYMENT_MODE == "single"
+
+
+def is_agent_dispatch_mode() -> bool:
+    return DEPLOYMENT_MODE in {"platform", "agent"}
+
+
 log_print(
     f"服务启动模式: {DEPLOYMENT_MODE} | 本地后台任务: {'启用' if ENABLE_LOCAL_WORKER else '禁用'}",
     "APP",
@@ -1938,6 +1947,14 @@ def retry_clone_repository(repository_id):
         return redirect(url_for('repository_config', project_id=repository.project_id))
 
     project_id = repository.project_id
+    if is_agent_dispatch_mode():
+        task_id = create_auto_sync_task(repository_id)
+        if task_id:
+            flash('已派发到Agent执行仓库重试同步，请稍后查看状态', 'success')
+        else:
+            flash('派发Agent同步任务失败，请检查项目绑定的Agent节点状态', 'error')
+        return redirect(url_for('repository_config', project_id=project_id))
+
     # 启动后台线程进行重试克隆
     retry_thread = threading.Thread(target=enhanced_retry_clone_repository, args=(repository_id,), daemon=True)
     retry_thread.start()
@@ -1959,6 +1976,23 @@ def sync_repository(repository_id):
             return jsonify({'status': 'error', 'message': '仓库不存在'}), 404
 
         log_print(f"📂 [MANUAL_SYNC] 仓库信息: {repository.name} ({repository.type})")
+        if is_agent_dispatch_mode():
+            task_id = create_auto_sync_task(repository_id)
+            if task_id:
+                return jsonify(
+                    {
+                        'status': 'accepted',
+                        'message': '已派发到绑定Agent执行同步',
+                        'task_id': task_id,
+                    }
+                ), 202
+            return jsonify(
+                {
+                    'status': 'error',
+                    'message': '未能派发Agent同步任务，请检查项目绑定与Agent在线状态',
+                }
+            ), 409
+
         if repository.type == 'git':
             git_service = get_git_service(repository)
             # 立即执行git pull操作
@@ -2102,6 +2136,15 @@ def run_repository_update_and_cache(repository_id):
     """异步执行仓库更新和缓存（线程安全：按ID重新查询对象）"""
     repository = None
     try:
+        if is_agent_dispatch_mode():
+            with app.app_context():
+                task_id = create_auto_sync_task(repository_id)
+                if task_id:
+                    log_print(f"✅ [REUSE_SYNC] 已派发到Agent执行仓库同步: repository_id={repository_id}, task_id={task_id}", 'SYNC')
+                else:
+                    log_print(f"❌ [REUSE_SYNC] 派发Agent同步任务失败: repository_id={repository_id}", 'SYNC', force=True)
+            return
+
         with app.app_context():
             repository = db.session.get(Repository, repository_id)
             if not repository:
@@ -2163,6 +2206,22 @@ def reuse_repository_and_update(repository_id):
         action = data.get('action', 'pull_and_cache')
         repository = Repository.query.get_or_404(repository_id)
         log_print(f"🔄 收到仓库复用更新请求: {repository.name} (ID: {repository_id})", 'API')
+        if is_agent_dispatch_mode():
+            task_id = create_auto_sync_task(repository_id)
+            if task_id:
+                return jsonify({
+                    'success': True,
+                    'message': f'仓库 {repository.name} 已派发到Agent执行同步',
+                    'repository_id': repository_id,
+                    'action': action,
+                    'task_id': task_id,
+                }), 202
+            return jsonify({
+                'success': False,
+                'message': '派发Agent同步任务失败，请检查项目绑定和Agent在线状态',
+                'repository_id': repository_id,
+                'action': action,
+            }), 409
         update_thread = threading.Thread(target=run_repository_update_and_cache, args=(repository_id,), daemon=True)
         update_thread.start()
         return jsonify({

@@ -20,6 +20,7 @@ from .task import BackgroundTask
 from .weekly_version import WeeklyVersionConfig, WeeklyVersionDiffCache, WeeklyVersionExcelCache
 from .operation_log import OperationLog
 from .agent import AgentNode, AgentProjectBinding, AgentTask, AgentDefaultAdmin
+from .agent_temp_cache import AgentTempCache
 
 # 导入 auth 模块的模型，确保 db.create_all() 能创建对应的表
 try:
@@ -70,6 +71,7 @@ __all__ = [
     'AgentProjectBinding',
     'AgentTask',
     'AgentDefaultAdmin',
+    'AgentTempCache',
 ]
 
 if _AUTH_MODELS_LOADED:

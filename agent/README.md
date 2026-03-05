@@ -31,6 +31,9 @@ python start_agent.py
   - `all`：`auto_sync/excel_diff/weekly_sync` 全部本地执行；
   - `none`：全部任务走平台 `execute-proxy`；
   - 逗号列表：如 `auto_sync,excel_diff`。
+- `AGENT_ALLOW_EXECUTE_PROXY` 默认 `false`：
+  - `false`：本地执行失败后不回退平台代理执行（更符合控制面/数据面拆分）；
+  - `true`：允许旧路径回退到平台 `/execute-proxy`（过渡兼容）。
 
 ## 3. 打包分发
 ```bash

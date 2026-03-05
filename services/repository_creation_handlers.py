@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from datetime import datetime, timezone
 
@@ -12,6 +13,10 @@ from services.enhanced_git_service import EnhancedGitService
 from services.model_loader import get_runtime_model
 from utils.request_security import require_admin
 from utils.security_utils import validate_repository_name
+
+
+def _is_agent_dispatch_mode() -> bool:
+    return (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower() in {"platform", "agent"}
 
 
 @require_admin
@@ -105,6 +110,15 @@ def create_git_repository():
 
     repository_id = repository.id
     repository_name = repository.name
+    create_auto_sync_task = get_runtime_model("create_auto_sync_task")
+
+    if _is_agent_dispatch_mode():
+        task_id = create_auto_sync_task(repository_id)
+        if task_id:
+            flash("Git仓库创建成功，已派发到绑定Agent执行首次同步", "success")
+        else:
+            flash("Git仓库创建成功，但未能派发Agent同步任务，请检查项目与Agent绑定状态", "warning")
+        return redirect(url_for("repository_config", project_id=project_id))
 
     def async_clone():
         enhanced_async_clone_with_status_update(repository_id, repository_name)
@@ -365,6 +379,15 @@ def create_svn_repository():
 
     repository_id = repository.id
     repository_name = repository.name
+    create_auto_sync_task = get_runtime_model("create_auto_sync_task")
+
+    if _is_agent_dispatch_mode():
+        task_id = create_auto_sync_task(repository_id)
+        if task_id:
+            flash("SVN仓库创建成功，已派发到绑定Agent执行首次同步", "success")
+        else:
+            flash("SVN仓库创建成功，但未能派发Agent同步任务，请检查项目与Agent绑定状态", "warning")
+        return redirect(url_for("repository_config", project_id=project_id))
 
     def async_svn_clone():
         enhanced_async_svn_clone_with_status_update(repository_id, repository_name)

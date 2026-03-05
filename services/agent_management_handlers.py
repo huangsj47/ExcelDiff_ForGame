@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import json
 import os
 import re
@@ -21,6 +22,30 @@ from utils.request_security import require_admin
 
 _PROJECT_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{2,50}$")
 _AGENT_CODE_RE = re.compile(r"[^A-Za-z0-9_-]+")
+_TEMP_CACHE_CLEANUP_COOLDOWN_SECONDS = 600
+_last_temp_cache_cleanup_at = 0.0
+
+
+def _bool_env(key: str, default: bool) -> bool:
+    raw = os.environ.get(key)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_env(key: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
+    raw = os.environ.get(key)
+    value = default
+    if raw is not None:
+        try:
+            value = int(str(raw).strip())
+        except Exception:
+            value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
 
 
 def _agent_shared_secret() -> str:
@@ -441,6 +466,128 @@ def _get_agent_by_identity(agent_code: str, agent_token: str):
     return AgentNode.query.filter_by(agent_code=agent_code, agent_token=agent_token).first()
 
 
+def _temp_cache_retention_days() -> int:
+    return _int_env("PLATFORM_TEMP_CACHE_EXPIRE_DAYS", 90, min_value=1, max_value=365)
+
+
+def _temp_cache_max_payload_bytes() -> int:
+    return _int_env("PLATFORM_TEMP_CACHE_MAX_PAYLOAD_BYTES", 20 * 1024 * 1024, min_value=1024 * 100)
+
+
+def _cleanup_expired_agent_temp_cache(db):
+    AgentTempCache = get_runtime_models("AgentTempCache")[0]
+    now_utc = datetime.now(timezone.utc)
+    deleted = (
+        AgentTempCache.query.filter(
+            AgentTempCache.expire_at.isnot(None),
+            AgentTempCache.expire_at < now_utc,
+        ).delete(synchronize_session=False)
+    )
+    return int(deleted or 0)
+
+
+def _cleanup_expired_agent_temp_cache_if_needed(db):
+    global _last_temp_cache_cleanup_at
+    now_ts = datetime.now().timestamp()
+    if (now_ts - _last_temp_cache_cleanup_at) < _TEMP_CACHE_CLEANUP_COOLDOWN_SECONDS:
+        return 0
+    deleted = _cleanup_expired_agent_temp_cache(db)
+    _last_temp_cache_cleanup_at = now_ts
+    return deleted
+
+
+def _upsert_agent_temp_cache_entry(*, db, agent, payload: dict):
+    AgentTempCache, AgentTask = get_runtime_models("AgentTempCache", "AgentTask")
+
+    cache_key = str(payload.get("cache_key") or "").strip()
+    if not cache_key:
+        raise ValueError("缺少 cache_key")
+    if len(cache_key) > 255:
+        raise ValueError("cache_key 超长")
+
+    payload_json = payload.get("payload_json")
+    if payload_json is None:
+        raise ValueError("缺少 payload_json")
+    if not isinstance(payload_json, str):
+        payload_json = json.dumps(payload_json, ensure_ascii=False)
+
+    payload_size = int(payload.get("payload_size") or len(payload_json.encode("utf-8")))
+    if payload_size <= 0:
+        raise ValueError("payload_size 非法")
+    max_payload_bytes = _temp_cache_max_payload_bytes()
+    if payload_size > max_payload_bytes:
+        raise ValueError(f"payload_size 超过限制({payload_size} > {max_payload_bytes})")
+
+    payload_hash = str(payload.get("payload_hash") or "").strip()
+    if not payload_hash:
+        payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+
+    expire_seconds = _to_int_or_none(payload.get("expire_seconds"), min_value=60, max_value=365 * 24 * 3600)
+    if expire_seconds is not None:
+        expire_at = datetime.now(timezone.utc) + timedelta(seconds=expire_seconds)
+    else:
+        expire_at = datetime.now(timezone.utc) + timedelta(days=_temp_cache_retention_days())
+
+    source_task_id = _to_int_or_none(payload.get("source_task_id"), min_value=1)
+    if source_task_id is None:
+        source_task_id = _to_int_or_none(payload.get("task_id"), min_value=1)
+    source_task = AgentTask.query.get(source_task_id) if source_task_id else None
+
+    project_id = _to_int_or_none(payload.get("project_id"), min_value=1)
+    if project_id is None and source_task is not None:
+        project_id = source_task.project_id
+
+    repository_id = _to_int_or_none(payload.get("repository_id"), min_value=1)
+    if repository_id is None and source_task is not None:
+        repository_id = source_task.repository_id
+
+    commit_id = str(payload.get("commit_id") or "").strip() or None
+    file_path = str(payload.get("file_path") or "").strip() or None
+    task_type = str(payload.get("task_type") or "").strip() or (source_task.task_type if source_task else None)
+    cache_kind = str(payload.get("cache_kind") or "").strip() or None
+
+    row = AgentTempCache.query.filter_by(cache_key=cache_key).first()
+    if row is None:
+        row = AgentTempCache(
+            cache_key=cache_key,
+            source_agent_id=agent.id,
+        )
+        db.session.add(row)
+
+    row.task_type = task_type
+    row.cache_kind = cache_kind
+    row.project_id = project_id
+    row.repository_id = repository_id
+    row.commit_id = commit_id
+    row.file_path = file_path
+    row.payload_json = payload_json
+    row.payload_hash = payload_hash
+    row.payload_size = payload_size
+    row.source_agent_id = agent.id
+    row.source_task_id = source_task.id if source_task else source_task_id
+    row.expire_at = expire_at
+    return row
+
+
+def _dispatch_agent_local_cache_fetch(*, db, cache_key: str, expected_hash: str, project_id: int, repository_id: int | None):
+    task_payload = {
+        "cache_key": cache_key,
+        "expected_hash": expected_hash or None,
+        "project_id": project_id,
+        "repository_id": repository_id,
+    }
+    task = enqueue_agent_task(
+        task_type="temp_cache_fetch",
+        project_id=project_id,
+        repository_id=repository_id,
+        source_task_id=None,
+        priority=2,
+        payload=task_payload,
+    )
+    db.session.flush()
+    return task.id if task else None
+
+
 def enqueue_agent_task(*, task_type, project_id, repository_id=None, source_task_id=None, priority=10, payload=None):
     """平台内部调用：创建 Agent 任务。"""
     db, AgentTask = get_runtime_models("db", "AgentTask")
@@ -559,6 +706,8 @@ def _apply_auto_sync_result(task, result_payload):
     repository.last_sync_time = datetime.now(timezone.utc)
     if latest_commit_id:
         repository.last_sync_commit_id = latest_commit_id
+    repository.clone_status = "completed"
+    repository.clone_error = None
 
     return {
         "message": "auto_sync result applied",
@@ -772,12 +921,204 @@ def agent_heartbeat():
                 "_platform_host": request.host,
             },
         )
+        _cleanup_expired_agent_temp_cache_if_needed(db)
 
         db.session.commit()
         return jsonify({"success": True, "server_time": datetime.now(timezone.utc).isoformat()})
     except Exception as exc:
         db.session.rollback()
         log_print(f"Agent 心跳失败: {exc}", "AGENT", force=True)
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+def agent_upsert_temp_cache():
+    """Agent 上传临时加速缓存（平台侧仅作可过期加速，不作为主业务数据）。"""
+    db, log_print = get_runtime_models("db", "log_print")
+    try:
+        ok, resp, code = _validate_agent_shared_secret()
+        if not ok:
+            return resp, code
+
+        payload = request.get_json(silent=True) or {}
+        agent_code = str(payload.get("agent_code") or request.headers.get("X-Agent-Code") or "").strip()
+        agent_token = str(payload.get("agent_token") or request.headers.get("X-Agent-Token") or "").strip()
+        if not agent_code or not agent_token:
+            return jsonify({"success": False, "message": "缺少 agent_code 或 agent_token"}), 400
+
+        agent = _get_agent_by_identity(agent_code, agent_token)
+        if not agent:
+            return jsonify({"success": False, "message": "Agent 身份无效"}), 401
+
+        row = _upsert_agent_temp_cache_entry(db=db, agent=agent, payload=payload)
+        _cleanup_expired_agent_temp_cache_if_needed(db)
+        db.session.commit()
+        return jsonify(
+            {
+                "success": True,
+                "cache_key": row.cache_key,
+                "payload_size": row.payload_size,
+                "expire_at": row.expire_at.isoformat() if row.expire_at else None,
+            }
+        ), 200
+    except Exception as exc:
+        db.session.rollback()
+        log_print(f"Agent 临时缓存写入失败: {exc}", "AGENT", force=True)
+        return jsonify({"success": False, "message": str(exc)}), 400
+
+
+@require_admin
+def get_agent_temp_cache(cache_key):
+    """管理员读取平台临时加速缓存。"""
+    db, AgentTempCache, log_print = get_runtime_models("db", "AgentTempCache", "log_print")
+    try:
+        if not cache_key:
+            return jsonify({"success": False, "message": "缺少 cache_key"}), 400
+        _cleanup_expired_agent_temp_cache_if_needed(db)
+        row = AgentTempCache.query.filter_by(cache_key=cache_key).first()
+        if row is None:
+            return jsonify({"success": False, "message": "缓存不存在"}), 404
+        now_utc = datetime.now(timezone.utc)
+        expire_at = row.expire_at
+        if expire_at is not None and getattr(expire_at, "tzinfo", None) is None:
+            expire_at = expire_at.replace(tzinfo=timezone.utc)
+        if expire_at and expire_at < now_utc:
+            db.session.delete(row)
+            db.session.commit()
+            return jsonify({"success": False, "message": "缓存已过期"}), 404
+        return jsonify(
+            {
+                "success": True,
+                "cache_key": row.cache_key,
+                "task_type": row.task_type,
+                "cache_kind": row.cache_kind,
+                "project_id": row.project_id,
+                "repository_id": row.repository_id,
+                "commit_id": row.commit_id,
+                "file_path": row.file_path,
+                "payload_json": row.payload_json,
+                "payload_hash": row.payload_hash,
+                "payload_size": row.payload_size,
+                "expire_at": row.expire_at.isoformat() if row.expire_at else None,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
+        ), 200
+    except Exception as exc:
+        log_print(f"读取平台临时缓存失败: {exc}", "AGENT", force=True)
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
+@require_admin
+def resolve_agent_temp_cache(cache_key):
+    """解析平台临时缓存；未命中或哈希不一致时可触发重算任务。"""
+    db, AgentTempCache, Repository, log_print = get_runtime_models("db", "AgentTempCache", "Repository", "log_print")
+    try:
+        if not cache_key:
+            return jsonify({"success": False, "message": "缺少 cache_key"}), 400
+
+        expected_hash = str(request.args.get("expected_hash") or "").strip()
+        try_agent_fetch = str(request.args.get("try_agent_fetch") or "1").strip().lower() in {"1", "true", "yes"}
+        trigger_recompute = str(request.args.get("trigger_recompute") or "").strip().lower() in {"1", "true", "yes"}
+        repository_id = _to_int_or_none(request.args.get("repository_id"), min_value=1)
+        project_id = _to_int_or_none(request.args.get("project_id"), min_value=1)
+        _cleanup_expired_agent_temp_cache_if_needed(db)
+
+        row = AgentTempCache.query.filter_by(cache_key=cache_key).first()
+        now_utc = datetime.now(timezone.utc)
+        fallback_project_id = None
+        fallback_repository_id = repository_id
+        if row is not None:
+            fallback_project_id = row.project_id
+            if fallback_repository_id is None and row.repository_id:
+                fallback_repository_id = row.repository_id
+            expire_at = row.expire_at
+            if expire_at is not None and getattr(expire_at, "tzinfo", None) is None:
+                expire_at = expire_at.replace(tzinfo=timezone.utc)
+            if expire_at and expire_at < now_utc:
+                db.session.delete(row)
+                db.session.commit()
+                row = None
+            else:
+                if expected_hash and row.payload_hash and expected_hash != row.payload_hash:
+                    row = None
+                else:
+                    return (
+                        jsonify(
+                            {
+                                "success": True,
+                                "status": "hit",
+                                "source": "platform_temp_cache",
+                                "cache_key": cache_key,
+                                "payload_json": row.payload_json,
+                                "payload_hash": row.payload_hash,
+                                "payload_size": row.payload_size,
+                                "expire_at": expire_at.isoformat() if expire_at else None,
+                            }
+                        ),
+                        200,
+                    )
+
+        effective_repository_id = fallback_repository_id
+        effective_project_id = project_id or fallback_project_id
+        if effective_project_id is None and effective_repository_id:
+            repo = Repository.query.get(effective_repository_id)
+            if repo:
+                effective_project_id = repo.project_id
+
+        if try_agent_fetch and effective_project_id:
+            fetch_task_id = _dispatch_agent_local_cache_fetch(
+                db=db,
+                cache_key=cache_key,
+                expected_hash=expected_hash,
+                project_id=effective_project_id,
+                repository_id=effective_repository_id,
+            )
+            db.session.commit()
+            return (
+                jsonify(
+                    {
+                        "success": True,
+                        "status": "pending_agent_fetch",
+                        "cache_key": cache_key,
+                        "project_id": effective_project_id,
+                        "repository_id": effective_repository_id,
+                        "task_id": fetch_task_id,
+                    }
+                ),
+                202,
+            )
+
+        if trigger_recompute and effective_repository_id:
+            from services.task_worker_service import create_auto_sync_task
+
+            task_id = create_auto_sync_task(effective_repository_id)
+            if task_id:
+                return (
+                    jsonify(
+                        {
+                            "success": True,
+                            "status": "pending_recompute",
+                            "cache_key": cache_key,
+                            "repository_id": effective_repository_id,
+                            "task_id": task_id,
+                        }
+                    ),
+                    202,
+                )
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "status": "recompute_dispatch_failed",
+                        "cache_key": cache_key,
+                        "repository_id": effective_repository_id,
+                    }
+                ),
+                409,
+            )
+
+        return jsonify({"success": False, "status": "miss", "cache_key": cache_key}), 404
+    except Exception as exc:
+        log_print(f"解析平台临时缓存失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
 
 
@@ -908,6 +1249,41 @@ def agent_report_task_result(task_id):
         effective_result_summary = result_summary
         if status == "completed" and task.task_type == "auto_sync" and isinstance(result_payload, dict):
             effective_result_summary = _apply_auto_sync_result(task, result_payload)
+        if status == "completed" and task.task_type == "temp_cache_fetch" and isinstance(result_payload, dict):
+            if result_payload.get("payload_json") is not None:
+                payload_json = result_payload.get("payload_json")
+                if not isinstance(payload_json, str):
+                    payload_json = json.dumps(payload_json, ensure_ascii=False)
+                payload_hash = str(result_payload.get("payload_hash") or "").strip()
+                if not payload_hash:
+                    payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+                payload_size = int(result_payload.get("payload_size") or len(payload_json.encode("utf-8")))
+                cache_payload = {
+                    "cache_key": str(result_payload.get("cache_key") or "").strip(),
+                    "task_type": str(result_payload.get("task_type") or "").strip() or "excel_diff",
+                    "cache_kind": str(result_payload.get("cache_kind") or "").strip() or "task_result_payload",
+                    "project_id": task.project_id,
+                    "repository_id": result_payload.get("repository_id") or task.repository_id,
+                    "commit_id": result_payload.get("commit_id"),
+                    "file_path": result_payload.get("file_path"),
+                    "payload_json": payload_json,
+                    "payload_hash": payload_hash,
+                    "payload_size": payload_size,
+                    "expire_seconds": result_payload.get("expire_seconds"),
+                    "source_task_id": task.id,
+                }
+                row = _upsert_agent_temp_cache_entry(db=db, agent=agent, payload=cache_payload)
+                effective_result_summary = effective_result_summary or {
+                    "message": "temp_cache_fetch applied",
+                    "cache_key": row.cache_key,
+                    "payload_size": row.payload_size,
+                }
+            elif result_payload.get("platform_cache_key"):
+                effective_result_summary = effective_result_summary or {
+                    "message": "temp_cache_fetch uploaded to platform cache",
+                    "cache_key": result_payload.get("platform_cache_key"),
+                    "payload_size": result_payload.get("payload_size"),
+                }
 
         if isinstance(effective_result_summary, (dict, list)):
             task.result_summary = json.dumps(effective_result_summary, ensure_ascii=False)
@@ -920,6 +1296,9 @@ def agent_report_task_result(task_id):
         if repository:
             if status == "failed":
                 sync_error_message = f"Agent任务失败({task.task_type}): {task.error_message or '未知错误'}"
+                if task.task_type == "auto_sync":
+                    repository.clone_status = "failed"
+                    repository.clone_error = task.error_message or "auto_sync failed"
                 record_repository_sync_error(
                     db.session,
                     repository,
@@ -958,6 +1337,17 @@ def agent_execute_task_proxy(task_id):
     """平台代理执行任务（过渡方案，便于 platform + agent 模式先跑通）。"""
     db, AgentTask, log_print = get_runtime_models("db", "AgentTask", "log_print")
     try:
+        if _bool_env("AGENT_STRICT_EXECUTION", True):
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": "严格执行模式下已禁用 execute-proxy",
+                    }
+                ),
+                409,
+            )
+
         ok, resp, code = _validate_agent_shared_secret()
         if not ok:
             return resp, code

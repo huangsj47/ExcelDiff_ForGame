@@ -40,6 +40,25 @@ def list_agent_tasks_route():
     return _dispatch("list_agent_tasks")
 
 
+@agent_management_bp.route("/api/agents/cache/upsert", methods=["POST"], endpoint="agent_upsert_temp_cache")
+def agent_upsert_temp_cache_route():
+    return _dispatch("agent_upsert_temp_cache")
+
+
+@agent_management_bp.route("/api/agents/cache/<string:cache_key>", methods=["GET"], endpoint="get_agent_temp_cache")
+def get_agent_temp_cache_route(cache_key):
+    return _dispatch("get_agent_temp_cache", cache_key)
+
+
+@agent_management_bp.route(
+    "/api/agents/cache/<string:cache_key>/resolve",
+    methods=["GET"],
+    endpoint="resolve_agent_temp_cache",
+)
+def resolve_agent_temp_cache_route(cache_key):
+    return _dispatch("resolve_agent_temp_cache", cache_key)
+
+
 @agent_management_bp.route("/api/agents/tasks/claim", methods=["POST"], endpoint="agent_claim_task")
 def agent_claim_task_route():
     return _dispatch("agent_claim_task")

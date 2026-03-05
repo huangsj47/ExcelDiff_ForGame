@@ -89,6 +89,10 @@ class AgentSettings:
     local_task_types: list[str]
     repos_base_dir: str
     log_verbose: bool
+    allow_execute_proxy: bool
+    temp_cache_upload_enabled: bool
+    temp_cache_threshold_bytes: int
+    temp_cache_expire_days: int
 
 
 def load_settings() -> AgentSettings:
@@ -123,4 +127,14 @@ def load_settings() -> AgentSettings:
         local_task_types=[t.lower() for t in local_task_types],
         repos_base_dir=repos_base_dir,
         log_verbose=_bool_env("AGENT_LOG_VERBOSE", True),
+        allow_execute_proxy=_bool_env("AGENT_ALLOW_EXECUTE_PROXY", False),
+        temp_cache_upload_enabled=_bool_env("AGENT_TEMP_CACHE_UPLOAD_ENABLED", True),
+        temp_cache_threshold_bytes=max(
+            64 * 1024,
+            int((os.environ.get("AGENT_TEMP_CACHE_THRESHOLD_BYTES") or str(1024 * 1024)).strip()),
+        ),
+        temp_cache_expire_days=max(
+            1,
+            int((os.environ.get("AGENT_TEMP_CACHE_EXPIRE_DAYS") or "90").strip()),
+        ),
     )
