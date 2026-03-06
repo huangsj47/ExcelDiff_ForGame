@@ -281,16 +281,17 @@ from services.vcs_content_service import (
     get_svn_service,
     get_unified_diff_data,
 )
+from bootstrap.app_factory import build_runtime_settings, create_app
+from bootstrap.bootstrap import AppBootstrapManager
 
-app = Flask(__name__)
-# 启用模板自动重载（开发环境）
-app.config['TEMPLATES_AUTO_RELOAD'] = True
+app = create_app(__name__)
 # 启用CORS支持，允许跨域请求
-secret_key = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY")
+runtime_settings = build_runtime_settings(os.environ)
+secret_key = runtime_settings.secret_key
 if not secret_key:
     secret_key = secrets.token_urlsafe(48)
     log_print("⚠️ FLASK_SECRET_KEY 未配置，已使用运行期随机密钥。生产环境必须显式配置。", "APP", force=True)
-cors_allowed_origins = [origin.strip() for origin in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if origin.strip()]
+cors_allowed_origins = runtime_settings.cors_allowed_origins
 if cors_allowed_origins:
     CORS(app, resources={
         r"/status-sync/*": {"origins": cors_allowed_origins},
@@ -300,12 +301,12 @@ if cors_allowed_origins:
 else:
     log_print("ℹ️ 未配置 CORS_ALLOWED_ORIGINS，默认禁用跨域访问。", "APP", force=True)
 CSRF_SESSION_KEY = "_csrf_token"
-ENABLE_ADMIN_SECURITY = os.environ.get("ENABLE_ADMIN_SECURITY", "true").lower() != "false"
-DEPLOYMENT_MODE = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
-if DEPLOYMENT_MODE not in {"single", "platform", "agent"}:
-    log_print(f"⚠️ 非法 DEPLOYMENT_MODE={DEPLOYMENT_MODE}，回退为 single", "APP", force=True)
-    DEPLOYMENT_MODE = "single"
-ENABLE_LOCAL_WORKER = DEPLOYMENT_MODE == "single"
+ENABLE_ADMIN_SECURITY = runtime_settings.enable_admin_security
+DEPLOYMENT_MODE = runtime_settings.deployment_mode
+if runtime_settings.deployment_mode_invalid:
+    raw_mode = (os.environ.get("DEPLOYMENT_MODE") or "").strip()
+    log_print(f"⚠️ 非法 DEPLOYMENT_MODE={raw_mode}，回退为 single", "APP", force=True)
+ENABLE_LOCAL_WORKER = runtime_settings.enable_local_worker
 
 
 def is_agent_dispatch_mode() -> bool:
@@ -2955,148 +2956,46 @@ configure_task_worker(
 _original_print("[TRACE] task_worker configured")
 
 
+def _init_auth_default_data_with_context():
+    from auth import init_auth_default_data
+
+    with app.app_context():
+        init_auth_default_data()
+
+
+_bootstrap_manager = AppBootstrapManager(
+    app=app,
+    log_print=log_print,
+    enable_local_worker=ENABLE_LOCAL_WORKER,
+    create_tables_func=create_tables,
+    init_auth_default_data_func=_init_auth_default_data_with_context,
+    start_background_task_worker_func=start_background_task_worker,
+    stop_background_task_worker_func=stop_background_task_worker,
+    clear_version_mismatch_cache_func=clear_version_mismatch_cache,
+    cleanup_pending_deletions_func=cleanup_pending_deletions,
+    cleanup_git_processes_func=cleanup_git_processes,
+)
+
+
 def initialize_app():
-    """初始化应用，包括数据库和后台任务"""
-    global _app_initialized
-    if _app_initialized:
-        log_print("应用已经初始化过，跳过重复初始化", 'APP')
-        return
+    """兼容入口：调用 bootstrap 生命周期管理器执行初始化。"""
+    _bootstrap_manager.initialize_app()
 
-    try:
-        # 创建数据库表
-        create_tables()
-        log_print("数据库表创建完成", 'APP')
-        # 数据库表创建完成后，初始化 Auth 默认数据（首次启动时表不存在会跳过，需要在此补充）
-        try:
-            from auth import init_auth_default_data
-            with app.app_context():
-                init_auth_default_data()
-                log_print("Auth: 默认数据初始化完成", 'AUTH')
-        except Exception as e:
-            log_print(f"Auth 默认数据初始化跳过: {e}", 'AUTH')
-        if ENABLE_LOCAL_WORKER:
-            # 在应用上下文中启动后台任务工作线程
-            with app.app_context():
-                start_background_task_worker()
-            # 异步清理版本不匹配的缓存（避免阻塞启动）
-            import threading
 
-            def async_cache_cleanup():
-                try:
-                    with app.app_context():
-                        clear_version_mismatch_cache()
-                except Exception as e:
-                    log_print(f"异步缓存清理失败: {e}", 'APP', force=True)
-
-            cleanup_thread = threading.Thread(target=async_cache_cleanup, daemon=True)
-            cleanup_thread.start()
-            log_print("异步缓存清理已启动", 'APP')
-            # 清理待删除的仓库目录
-            cleanup_pending_deletions()
-        else:
-            log_print("当前为 platform/agent 模式，跳过本地后台任务与缓存清理线程", "APP", force=True)
-        log_print("应用初始化完成", 'APP')
-        _app_initialized = True
-    except Exception as e:
-        log_print(f"应用初始化失败: {e}", 'APP', force=True)
-        raise
 def cleanup_app():
-    """应用关闭时的清理工作"""
-    try:
-        # log_print("开始清理应用资源...", 'APP')
-        if ENABLE_LOCAL_WORKER:
-            stop_background_task_worker()
-        cleanup_git_processes()
-        # log_print("应用清理完成", 'APP')
-    except Exception as e:
-        log_print(f"应用清理过程中出现错误: {e}", 'APP', force=True)
-        # 忽略清理过程中的错误，避免阻塞退出
+    """兼容入口：调用 bootstrap 生命周期管理器执行清理。"""
+    _bootstrap_manager.cleanup_app()
+
+
 # cache management routes moved to routes/cache_management_routes.py
 # 注册清理函数
 _original_print("[TRACE] about to register atexit")
 atexit.register(cleanup_app)
-# 防止重复初始化的标志
-_app_initialized = False
 _original_print(f"[TRACE] reached if __name__ check, __name__={__name__!r}")
 
 
 if __name__ == '__main__':
-    _original_print("[TRACE] entered __main__")
-    import sys
-    import os
-    import signal
-    import threading
-    # 禁用Python输出缓冲，确保日志立即显示
-    os.environ['PYTHONUNBUFFERED'] = '1'
-    # 禁用Werkzeug的访问日志以避免日志输出错误
-    # import logging
-    # log = logging.getLogger('werkzeug')
-    # log.setLevel(logging.ERROR)
-    # 设置环境变量避免Windows控制台I/O问题
-    os.environ['PYTHONIOENCODING'] = 'utf-8'
-    # 强制设置标准输出为无缓冲模式
-    _original_print("[TRACE] about to reconfigure stdout")
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-        _original_print("[TRACE] stdout reconfigured")
-    except Exception as e:
-        _original_print(f"[TRACE] stdout reconfigure failed: {e}")
-    try:
-        sys.stderr.reconfigure(line_buffering=True)
-        _original_print("[TRACE] stderr reconfigured")
-    except Exception as e:
-        _original_print(f"[TRACE] stderr reconfigure failed: {e}")
-    # 全局标志，用于优雅关闭
-    shutdown_flag = threading.Event()
-    _original_print("[TRACE] about to call clear_log_file")
+    from bootstrap.runtime_entry import run_runtime_entry
 
-    def signal_handler(signum, frame):
-        """信号处理器，用于优雅关闭应用"""
-        log_print("\n接收到中断信号，正在关闭应用...", 'APP')
-        shutdown_flag.set()
-        cleanup_app()
-        # 强制退出，避免线程异常
-        os._exit(0)
-    # 注册信号处理器
-    signal.signal(signal.SIGINT, signal_handler)
-    if hasattr(signal, 'SIGTERM'):
-        signal.signal(signal.SIGTERM, signal_handler)
-    try:
-        if DEPLOYMENT_MODE == "agent":
-            log_print("以 Agent 模式启动（不启动 Flask Web 服务）", "APP", force=True)
-            from agent.runner_runtime import run_agent
-
-            run_agent()
-            sys.exit(0)
-        # 清空日志文件
-        clear_log_file()
-        # 初始化应用
-        initialize_app()
-        # 启动Flask应用
-        log_print("正在启动服务器...", 'APP')
-        log_print("按 Ctrl+C 停止服务器", 'APP')
-        # 禁用debug模式和reloader来避免多进程问题
-        _host = os.environ.get("HOST", "0.0.0.0")
-        _port = int(os.environ.get("PORT", "8002"))
-        app.run(debug=False, host=_host, port=_port, use_reloader=False, threaded=True)
-    except KeyboardInterrupt:
-        log_print("\n接收到键盘中断，正在关闭应用...", 'APP')
-        cleanup_app()
-    except SystemExit as se:
-        # 记录 SystemExit 以便调试
-        import traceback
-        _original_print(f"[DEBUG] SystemExit caught: code={se.code}")
-        traceback.print_exc()
-
-    except Exception as e:
-        import traceback
-        _original_print(f"[DEBUG] Exception caught: {type(e).__name__}: {e}")
-        traceback.print_exc()
-        log_print(f"应用运行异常: {e}", 'APP', force=True)
-        cleanup_app()
-        sys.exit(1)
-    finally:
-        # 确保清理工作完成
-        if not shutdown_flag.is_set():
-            cleanup_app()
+    run_runtime_entry(sys.modules[__name__])
 
