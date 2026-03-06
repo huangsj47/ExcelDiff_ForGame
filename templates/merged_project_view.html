@@ -166,6 +166,18 @@
     .repository-card { background: #fff; border-radius: 8px; border: 1px solid #e9ecef; transition: all 0.2s; margin-bottom: 0.625rem; cursor: pointer; }
     .repository-card:hover { box-shadow: 0 3px 8px rgba(0,0,0,0.08); border-color: #0d6efd; }
     .repository-card .card-body { padding: 0.875rem; }
+    .list-search-input { font-size: 0.84rem; }
+    .list-meta { font-size: 0.78rem; color: #6c757d; }
+    .repo-list-scroll { max-height: 68vh; overflow-y: auto; padding-right: 0.25rem; }
+    .repo-list-scroll::-webkit-scrollbar { width: 6px; }
+    .repo-list-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
+    .repo-virtual-viewport { position: relative; }
+    .repo-virtual-spacer { width: 100%; }
+    .repo-virtual-items { position: absolute; top: 0; left: 0; right: 0; }
+    .repo-virtual-item { position: absolute; left: 0; right: 0; padding-right: 0.25rem; }
+    .active-version-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem; }
+    .active-version-summary { font-size: 0.78rem; color: #6b7280; }
+    .active-version-controls .list-search-input { width: 300px; max-width: 100%; }
 
     /* ===== 徽章 ===== */
     .badge { font-size: 0.72rem; font-weight: 500; padding: 0.3rem 0.6rem; border-radius: 4px; }
@@ -191,6 +203,8 @@
         .repository-stat-item { flex-direction: column; align-items: flex-start !important; }
         .stats-content { padding-right: 0 !important; }
         .stats-action-buttons { position: static !important; width: 100% !important; flex-direction: row !important; margin-top: 0.75rem; }
+        .repo-list-scroll { max-height: none; overflow: visible; }
+        .active-version-controls .list-search-input { width: 100%; }
     }
 </style>
 {% endblock %}
@@ -299,12 +313,30 @@
                 <div class="card-body">
                     <!-- 当前活跃版本 -->
                     {% if active_versions %}
-                    <div class="mb-4">
-                        <h6 class="text-success mb-3 active-section-title">
+                    <div class="mb-4" id="activeVersionsSection">
+                        <h6 class="text-success mb-2 active-section-title d-flex align-items-center">
                             <i class="fas fa-play-circle me-2"></i>当前活跃版本
+                            <span class="badge bg-success ms-2" id="activeVersionTotalBadge">{{ active_versions_total_count or active_versions|length }}</span>
                         </h6>
+                        <div class="active-version-controls">
+                            <input type="text" class="form-control form-control-sm list-search-input" id="activeVersionSearch" placeholder="搜索版本名/仓库名">
+                            <button type="button" class="btn btn-sm btn-outline-success" id="activeVersionToggleBtn" style="display:none;">
+                                展开全部
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" id="activeVersionPrevBtn" style="display:none;">
+                                上一页
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" id="activeVersionNextBtn" style="display:none;">
+                                下一页
+                            </button>
+                            <span class="active-version-summary" id="activeVersionPageInfo"></span>
+                            <span class="active-version-summary" id="activeVersionSummary"></span>
+                        </div>
+                        <div id="activeVersionsList">
                         {% for version in active_versions %}
-                        <div class="card mb-4 border-success version-card">
+                        <div class="card mb-4 border-success version-card active-version-card"
+                             data-version-name="{{ version.name|lower }}"
+                             data-repo-names="{% for config in version.configs %}{{ config.repository.name|lower }} {% endfor %}">
                             <div class="card-header active-version-header">
                                 <div class="d-flex justify-content-between align-items-center">
                                     <h5 class="mb-0 text-success version-name-title">
@@ -393,6 +425,7 @@
                             </div>
                         </div>
                         {% endfor %}
+                        </div>
                     </div>
                     {% endif %}
 
@@ -401,6 +434,7 @@
                     <div class="mb-4">
                         <h6 class="text-secondary mb-3">
                             <i class="fas fa-archive me-2"></i>非活跃版本
+                            <span class="badge bg-secondary ms-1">{{ inactive_versions_total_count or inactive_versions|length }}</span>
                             <button class="btn btn-sm btn-outline-secondary ms-2" type="button" data-bs-toggle="collapse" data-bs-target="#inactiveVersions" aria-expanded="false">
                                 <i class="fas fa-chevron-down"></i> 展开/收起
                             </button>
@@ -437,13 +471,27 @@
                 <div class="card-header">
                     <h5 class="mb-0">
                         <i class="fas fa-database me-2"></i>仓库列表
-                        <span class="badge bg-primary ms-2">{{ repositories|length }}</span>
+                        <span class="badge bg-primary ms-2" id="repositoryTotalBadge">{{ repositories_total_count or repositories|length }}</span>
                     </h5>
                 </div>
                 <div class="card-body">
                     {% if repositories %}
+                        <div class="mb-2">
+                            <input type="text" class="form-control form-control-sm list-search-input" id="repositorySearch" placeholder="搜索仓库名/分支/类型">
+                            <div class="list-meta mt-1" id="repositoryListMeta"></div>
+                        </div>
+                        {% if repositories_virtual_enabled %}
+                        <div id="repositoryVirtualViewport" class="repo-list-scroll repo-virtual-viewport">
+                            <div id="repositoryVirtualSpacer" class="repo-virtual-spacer"></div>
+                            <div id="repositoryVirtualItems" class="repo-virtual-items"></div>
+                        </div>
+                        {% else %}
+                        <div id="repositoryList" class="repo-list-scroll">
                         {% for repo in repositories %}
-                        <div class="repository-card">
+                        <div class="repository-card repository-list-item"
+                             data-repo-name="{{ repo.name|lower }}"
+                             data-repo-branch="{{ (repo.branch or repo.current_version or '-')|lower }}"
+                             data-repo-type="{{ repo.type|lower }}">
                             <div class="card-body">
                                 <div class="d-flex justify-content-between align-items-start mb-2">
                                     <h6 class="mb-0 text-primary">
@@ -496,6 +544,13 @@
                             </div>
                         </div>
                         {% endfor %}
+                        </div>
+                        <div class="d-grid mt-2">
+                            <button type="button" class="btn btn-sm btn-outline-primary" id="repositoryLoadMoreBtn" style="display:none;">
+                                加载更多
+                            </button>
+                        </div>
+                        {% endif %}
                     {% else %}
                     <div class="text-center py-5">
                         <i class="fas fa-database fa-3x text-muted mb-3"></i>
@@ -516,8 +571,14 @@
 <script>
 // 非活跃版本数据
 const inactiveVersions = {{ inactive_versions_json | tojson }};
+const repositoriesData = {{ repositories_json | tojson }};
+const repositoryVirtualEnabled = {{ repositories_virtual_enabled | tojson }};
 const itemsPerPage = 5;
 let currentPage = 1;
+const ACTIVE_DEFAULT_VISIBLE = 3;
+const REPO_PAGE_SIZE = 8;
+const REPO_VIRTUAL_ITEM_HEIGHT = 236;
+const REPO_VIRTUAL_OVERSCAN = 4;
 
 // 页面加载时获取统计信息
 document.addEventListener('DOMContentLoaded', function() {
@@ -532,7 +593,326 @@ document.addEventListener('DOMContentLoaded', function() {
         renderInactiveVersions();
         renderPagination();
     }
+    initActiveVersionList();
+    initRepositoryList();
 });
+
+function initActiveVersionList() {
+    const section = document.getElementById('activeVersionsSection');
+    if (!section) return;
+
+    const cards = Array.from(section.querySelectorAll('.active-version-card'));
+    const searchInput = document.getElementById('activeVersionSearch');
+    const toggleBtn = document.getElementById('activeVersionToggleBtn');
+    const prevBtn = document.getElementById('activeVersionPrevBtn');
+    const nextBtn = document.getElementById('activeVersionNextBtn');
+    const pageInfo = document.getElementById('activeVersionPageInfo');
+    const summary = document.getElementById('activeVersionSummary');
+    let expanded = false;
+    let currentPage = 1;
+
+    function render() {
+        const query = (searchInput?.value || '').trim().toLowerCase();
+        const filteredCards = cards.filter(card => {
+            const versionName = (card.dataset.versionName || '').toLowerCase();
+            const repoNames = (card.dataset.repoNames || '').toLowerCase();
+            if (!query) return true;
+            return versionName.includes(query) || repoNames.includes(query);
+        });
+
+        const totalPages = Math.max(1, Math.ceil(filteredCards.length / ACTIVE_DEFAULT_VISIBLE));
+        if (currentPage > totalPages) currentPage = totalPages;
+        if (currentPage < 1) currentPage = 1;
+
+        let displayCards = filteredCards;
+        if (!expanded) {
+            const startIndex = (currentPage - 1) * ACTIVE_DEFAULT_VISIBLE;
+            const endIndex = startIndex + ACTIVE_DEFAULT_VISIBLE;
+            displayCards = filteredCards.slice(startIndex, endIndex);
+        }
+
+        const visibleCount = displayCards.length;
+        cards.forEach(card => { card.style.display = 'none'; });
+        displayCards.forEach(card => { card.style.display = ''; });
+
+        if (summary) {
+            if (filteredCards.length === 0) {
+                summary.textContent = `无匹配结果（总计 ${cards.length}）`;
+            } else {
+                summary.textContent = `显示 ${visibleCount} / ${filteredCards.length}（总计 ${cards.length}）`;
+            }
+        }
+
+        if (!toggleBtn) return;
+        if (filteredCards.length > ACTIVE_DEFAULT_VISIBLE) {
+            toggleBtn.style.display = '';
+            toggleBtn.textContent = expanded ? '收起' : '展开全部';
+        } else {
+            toggleBtn.style.display = 'none';
+            expanded = false;
+        }
+
+        if (pageInfo) {
+            if (!expanded && filteredCards.length > ACTIVE_DEFAULT_VISIBLE) {
+                pageInfo.textContent = `第 ${currentPage} / ${totalPages} 页`;
+            } else {
+                pageInfo.textContent = '';
+            }
+        }
+        if (prevBtn) {
+            prevBtn.style.display = (!expanded && filteredCards.length > ACTIVE_DEFAULT_VISIBLE) ? '' : 'none';
+            prevBtn.disabled = currentPage <= 1;
+        }
+        if (nextBtn) {
+            nextBtn.style.display = (!expanded && filteredCards.length > ACTIVE_DEFAULT_VISIBLE) ? '' : 'none';
+            nextBtn.disabled = currentPage >= totalPages;
+        }
+    }
+
+    if (searchInput) {
+        searchInput.addEventListener('input', function() {
+            expanded = false;
+            currentPage = 1;
+            render();
+        });
+    }
+
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', function() {
+            expanded = !expanded;
+            if (!expanded) currentPage = 1;
+            render();
+        });
+    }
+    if (prevBtn) {
+        prevBtn.addEventListener('click', function() {
+            currentPage = Math.max(1, currentPage - 1);
+            render();
+        });
+    }
+    if (nextBtn) {
+        nextBtn.addEventListener('click', function() {
+            currentPage += 1;
+            render();
+        });
+    }
+
+    render();
+}
+
+function initRepositoryList() {
+    const searchInput = document.getElementById('repositorySearch');
+    const listMeta = document.getElementById('repositoryListMeta');
+    const virtualViewport = document.getElementById('repositoryVirtualViewport');
+    const virtualSpacer = document.getElementById('repositoryVirtualSpacer');
+    const virtualItems = document.getElementById('repositoryVirtualItems');
+    const loadMoreBtn = document.getElementById('repositoryLoadMoreBtn');
+    const domItems = Array.from(document.querySelectorAll('.repository-list-item'));
+    const useVirtualList = Boolean(repositoryVirtualEnabled && virtualViewport && virtualSpacer && virtualItems);
+    if (!useVirtualList && domItems.length === 0) return;
+
+    let visibleCount = REPO_PAGE_SIZE;
+    let filteredVirtualItems = [];
+
+    function escapeHtml(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function renderResourceType(resourceTypeRaw) {
+        const resourceType = String(resourceTypeRaw || '').toLowerCase();
+        if (resourceType === 'code') {
+            return '<span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.72rem;font-weight:600;background:#dbeafe;color:#1e40af;"><i class="fas fa-code me-1"></i>代码</span>';
+        }
+        if (resourceType === 'table') {
+            return '<span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.72rem;font-weight:600;background:#fef3c7;color:#92400e;"><i class="fas fa-table me-1"></i>配置表</span>';
+        }
+        if (resourceType === 'res') {
+            return '<span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.72rem;font-weight:600;background:#f1f5f9;color:#475569;"><i class="fas fa-folder me-1"></i>资源</span>';
+        }
+        return `<span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.72rem;font-weight:600;background:#f1f5f9;color:#475569;">${escapeHtml(resourceTypeRaw || '-')}</span>`;
+    }
+
+    function createRepositoryCardHtml(repo) {
+        const type = String(repo.type || '').toLowerCase();
+        const typeIcon = type === 'git' ? 'git-alt' : 'database';
+        const typeBadgeClass = type === 'git' ? 'success' : 'primary';
+        const typeLabel = type ? type.toUpperCase() : '-';
+        const branchValue = repo.branch || repo.current_version || '-';
+        const currentVersion = repo.current_version || '-';
+        const createdDate = repo.created_date || '-';
+        const commitListUrl = repo.commit_list_url || `/repositories/${repo.id}/commits`;
+
+        return `
+            <div class="repository-card">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <h6 class="mb-0 text-primary">
+                            <i class="fas fa-${typeIcon} me-2"></i>
+                            ${escapeHtml(repo.name || '-')}
+                        </h6>
+                        <span class="badge bg-${typeBadgeClass}">
+                            ${escapeHtml(typeLabel)}
+                        </span>
+                    </div>
+
+                    <div class="mb-3">
+                        <div class="d-flex align-items-center mb-1">
+                            <i class="fas fa-tag me-2 text-muted"></i>
+                            <small class="text-muted me-2">资源类型:</small>
+                            ${renderResourceType(repo.resource_type)}
+                        </div>
+                        <div class="d-flex align-items-center mb-1">
+                            <i class="fas fa-code-branch me-2 text-muted"></i>
+                            <small class="text-muted me-2">分支:</small>
+                            <code class="small">${escapeHtml(branchValue)}</code>
+                        </div>
+                        <div class="d-flex align-items-center mb-1">
+                            <i class="fas fa-tag me-2 text-muted"></i>
+                            <small class="text-muted me-2">版本:</small>
+                            <code class="small">${escapeHtml(currentVersion)}</code>
+                        </div>
+                        <div class="d-flex align-items-center">
+                            <i class="fas fa-calendar me-2 text-muted"></i>
+                            <small class="text-muted me-2">创建:</small>
+                            <small>${escapeHtml(createdDate)}</small>
+                        </div>
+                    </div>
+
+                    <div class="d-grid">
+                        <a href="${escapeHtml(commitListUrl)}" class="btn repo-commit-btn">
+                            <i class="fas fa-list me-2"></i>提交记录
+                        </a>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    function updateMeta(showCount, filteredCount, totalCount, virtualMode = false) {
+        if (!listMeta) return;
+        if (filteredCount === 0) {
+            listMeta.textContent = `无匹配结果（总计 ${totalCount}）`;
+            return;
+        }
+        if (virtualMode) {
+            listMeta.textContent = `匹配 ${filteredCount} / 总计 ${totalCount}（虚拟滚动）`;
+            return;
+        }
+        listMeta.textContent = `显示 ${showCount} / ${filteredCount}（总计 ${totalCount}）`;
+    }
+
+    function getVirtualFilteredItems(query) {
+        const q = (query || '').trim().toLowerCase();
+        return repositoriesData.filter(repo => {
+            const repoName = String(repo.name || '').toLowerCase();
+            const repoBranch = String(repo.branch || repo.current_version || '').toLowerCase();
+            const repoType = String(repo.type || '').toLowerCase();
+            if (!q) return true;
+            return repoName.includes(q) || repoBranch.includes(q) || repoType.includes(q);
+        });
+    }
+
+    function renderVirtualList() {
+        if (!useVirtualList) return;
+        const total = filteredVirtualItems.length;
+        virtualSpacer.style.height = `${total * REPO_VIRTUAL_ITEM_HEIGHT}px`;
+
+        if (total === 0) {
+            virtualItems.innerHTML = '';
+            updateMeta(0, 0, repositoriesData.length, true);
+            if (loadMoreBtn) loadMoreBtn.style.display = 'none';
+            return;
+        }
+
+        const scrollTop = virtualViewport.scrollTop || 0;
+        const viewportHeight = Math.max(220, virtualViewport.clientHeight || 420);
+        const startIndex = Math.max(0, Math.floor(scrollTop / REPO_VIRTUAL_ITEM_HEIGHT) - REPO_VIRTUAL_OVERSCAN);
+        const visibleCount = Math.ceil(viewportHeight / REPO_VIRTUAL_ITEM_HEIGHT) + REPO_VIRTUAL_OVERSCAN * 2;
+        const endIndex = Math.min(total, startIndex + visibleCount);
+
+        let html = '';
+        for (let i = startIndex; i < endIndex; i++) {
+            const top = i * REPO_VIRTUAL_ITEM_HEIGHT;
+            html += `
+                <div class="repo-virtual-item" style="top:${top}px;height:${REPO_VIRTUAL_ITEM_HEIGHT}px;">
+                    ${createRepositoryCardHtml(filteredVirtualItems[i])}
+                </div>
+            `;
+        }
+        virtualItems.innerHTML = html;
+        updateMeta(endIndex - startIndex, total, repositoriesData.length, true);
+        if (loadMoreBtn) loadMoreBtn.style.display = 'none';
+    }
+
+    function renderDomList(query) {
+        const filteredItems = domItems.filter(item => {
+            const repoName = (item.dataset.repoName || '').toLowerCase();
+            const repoBranch = (item.dataset.repoBranch || '').toLowerCase();
+            const repoType = (item.dataset.repoType || '').toLowerCase();
+            if (!query) return true;
+            return repoName.includes(query) || repoBranch.includes(query) || repoType.includes(query);
+        });
+
+        const showCount = Math.min(visibleCount, filteredItems.length);
+        domItems.forEach(item => { item.style.display = 'none'; });
+        filteredItems.slice(0, showCount).forEach(item => { item.style.display = ''; });
+        updateMeta(showCount, filteredItems.length, domItems.length, false);
+
+        if (!loadMoreBtn) return;
+        if (showCount < filteredItems.length) {
+            loadMoreBtn.style.display = '';
+            loadMoreBtn.textContent = `加载更多（剩余 ${filteredItems.length - showCount}）`;
+        } else {
+            loadMoreBtn.style.display = 'none';
+        }
+    }
+
+    function render() {
+        const query = (searchInput?.value || '').trim().toLowerCase();
+        if (useVirtualList) {
+            filteredVirtualItems = getVirtualFilteredItems(query);
+            if (virtualViewport) virtualViewport.scrollTop = 0;
+            renderVirtualList();
+            return;
+        }
+        renderDomList(query);
+    }
+
+    if (searchInput) {
+        searchInput.addEventListener('input', function() {
+            visibleCount = REPO_PAGE_SIZE;
+            render();
+        });
+    }
+
+    if (loadMoreBtn) {
+        loadMoreBtn.addEventListener('click', function() {
+            visibleCount += REPO_PAGE_SIZE;
+            render();
+        });
+    }
+    if (useVirtualList && virtualViewport) {
+        let ticking = false;
+        virtualViewport.addEventListener('scroll', function() {
+            if (ticking) return;
+            ticking = true;
+            window.requestAnimationFrame(function() {
+                ticking = false;
+                renderVirtualList();
+            });
+        });
+        window.addEventListener('resize', function() {
+            renderVirtualList();
+        });
+    }
+
+    render();
+}
 
 function loadConfigStats(configId) {
     fetch(`/weekly-version-config/${configId}/stats`)

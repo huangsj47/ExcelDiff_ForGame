@@ -127,13 +127,29 @@
                                     {% if repo.clone_status == 'pending' %}⏳ 待克隆{% elif repo.clone_status == 'cloning' %}🔄 克隆中{% elif repo.clone_status == 'completed' %}✓ 已克隆{% elif repo.clone_status == 'failed' %}✗ 失败{% endif %}
                                 </span>
                                 {% endif %}
-                                {% if repo.last_sync_error %}
-                                <div class="sync-error-panel">
+                                {% set repo_error_text = repo.last_sync_error or repo.clone_error %}
+                                {% if repo_error_text %}
+                                <div
+                                    class="sync-error-panel sync-error-panel-clickable"
+                                    role="button"
+                                    tabindex="0"
+                                    title="点击查看完整错误信息"
+                                    onclick="openSyncErrorDetail({{ repo.id }})"
+                                    onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openSyncErrorDetail({{ repo.id }});}"
+                                >
                                     <div class="sync-error-title">
                                         <i class="fas fa-circle-exclamation me-1"></i>
-                                        {{ format_beijing_time(repo.last_sync_error_time, '%m/%d %H:%M') }} 同步失败
+                                        {% if repo.last_sync_error_time %}
+                                            {{ format_beijing_time(repo.last_sync_error_time, '%m/%d %H:%M') }}
+                                        {% else %}
+                                            最近一次
+                                        {% endif %}
+                                        {% if repo.clone_status == 'failed' and repo.clone_error and not repo.last_sync_error %}克隆失败{% else %}同步失败{% endif %}
                                     </div>
-                                    <div class="sync-error-detail">{{ repo.last_sync_error }}</div>
+                                    <div class="sync-error-detail">{{ repo_error_text }}</div>
+                                    <div class="sync-error-action">
+                                        <i class="fas fa-up-right-from-square me-1"></i>点击查看完整日志
+                                    </div>
                                 </div>
                                 {% endif %}
                             </td>
@@ -151,8 +167,8 @@
                                     <button class="btn btn-sm action-btn" onclick="deleteRepository({{ repo.id }})" title="删除仓库" style="font-size: 0.72rem; padding: 0.2rem 0.5rem; color: #dc2626; border: 1px solid #fecaca; border-radius: 5px; background: #fef2f2;">
                                         <i class="fas fa-trash-alt me-1"></i>删除
                                     </button>
-                                    {% if repo.type == 'git' and repo.clone_status == 'failed' %}
-                                    <button class="btn btn-sm action-btn" onclick="retryClone({{ repo.id }})" title="重试克隆" style="font-size: 0.72rem; padding: 0.2rem 0.5rem; color: #d97706; border: 1px solid #fde68a; border-radius: 5px; background: #fffbeb;">
+                                    {% if repo.clone_status == 'failed' or repo.last_sync_error %}
+                                    <button class="btn btn-sm action-btn" onclick="retryClone({{ repo.id }})" title="重试同步" style="font-size: 0.72rem; padding: 0.2rem 0.5rem; color: #d97706; border: 1px solid #fde68a; border-radius: 5px; background: #fffbeb;">
                                         <i class="fas fa-redo me-1"></i>重试
                                     </button>
                                     {% endif %}
@@ -321,6 +337,27 @@
                 <button type="button" class="btn btn-sm px-3" onclick="executeBatchUpdate()" style="background: #0d6efd; color: #fff; border: 1.5px solid #0d6efd; border-radius: 6px; font-weight: 600; font-size: 0.82rem;">
                     <i class="fas fa-check me-1"></i>确认更新
                 </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 同步错误详情弹窗 -->
+<div class="modal fade" id="syncErrorDetailModal" tabindex="-1" aria-labelledby="syncErrorDetailModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content" style="border: none; border-radius: 12px; box-shadow: 0 12px 36px rgba(0,0,0,0.15);">
+            <div class="modal-header" style="background: #fef2f2; border-bottom: 1px solid #fecaca;">
+                <h5 class="modal-title" id="syncErrorDetailModalLabel" style="font-size: 0.95rem; font-weight: 700; color: #991b1b;">
+                    <i class="fas fa-circle-exclamation me-2"></i>仓库同步错误详情
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" style="padding: 1rem 1.1rem;">
+                <div class="sync-error-meta" id="syncErrorDetailMeta"></div>
+                <pre class="sync-error-full-text" id="syncErrorDetailText"></pre>
+            </div>
+            <div class="modal-footer" style="border-top: 1px solid #f1f5f9; background: #f8fafc;">
+                <button type="button" class="btn btn-sm px-3" data-bs-dismiss="modal" style="background: #ffffff; color: #374151; border: 1.5px solid #e2e8f0; border-radius: 6px; font-weight: 600; font-size: 0.82rem;">关闭</button>
             </div>
         </div>
     </div>
@@ -495,6 +532,14 @@
     padding: 0.35rem 0.45rem;
     max-width: 260px;
 }
+.sync-error-panel-clickable {
+    cursor: pointer;
+    transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+.sync-error-panel-clickable:hover {
+    box-shadow: 0 4px 12px rgba(185, 28, 28, 0.12);
+    transform: translateY(-1px);
+}
 .sync-error-title {
     color: #b91c1c;
     font-size: 0.7rem;
@@ -513,6 +558,30 @@
     -webkit-line-clamp: 2;
     line-clamp: 2;
     -webkit-box-orient: vertical;
+}
+.sync-error-action {
+    margin-top: 4px;
+    color: #9f1239;
+    font-size: 0.66rem;
+    font-weight: 600;
+}
+.sync-error-meta {
+    margin-bottom: 0.65rem;
+    font-size: 0.8rem;
+    color: #334155;
+}
+.sync-error-full-text {
+    margin: 0;
+    padding: 0.75rem;
+    max-height: 58vh;
+    overflow: auto;
+    background: #0f172a;
+    color: #e2e8f0;
+    border-radius: 8px;
+    font-size: 0.76rem;
+    line-height: 1.42;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 /* ===== 响应式适配 ===== */
@@ -626,6 +695,40 @@ function showToast(title, message, type) {
     }, 4000);
 }
 
+const syncErrorDetails = {
+    {% for repo in repositories %}
+    {{ repo.id }}: {
+        repoName: {{ (repo.name or '')|tojson }},
+        projectCode: {{ (project.code or '')|tojson }},
+        cloneStatus: {{ (repo.clone_status or '')|tojson }},
+        errorTime: {{ (format_beijing_time(repo.last_sync_error_time, '%Y-%m-%d %H:%M:%S') if repo.last_sync_error_time else '')|tojson }},
+        errorText: {{ (repo.last_sync_error or repo.clone_error or '')|tojson }},
+        source: {{ ('clone' if repo.clone_status == 'failed' and repo.clone_error and not repo.last_sync_error else 'sync')|tojson }},
+    }{% if not loop.last %},{% endif %}
+    {% endfor %}
+};
+
+function openSyncErrorDetail(repoId) {
+    const detail = syncErrorDetails[String(repoId)] || syncErrorDetails[repoId];
+    if (!detail || !detail.errorText) {
+        showToast('暂无错误详情', '当前仓库没有可展示的错误日志', 'error');
+        return;
+    }
+    const metaEl = document.getElementById('syncErrorDetailMeta');
+    const textEl = document.getElementById('syncErrorDetailText');
+    if (!metaEl || !textEl) return;
+
+    const sourceText = detail.source === 'clone' ? '克隆阶段失败' : '同步/更新阶段失败';
+    const timeText = detail.errorTime ? ` | 时间: ${detail.errorTime}` : '';
+    metaEl.textContent = `项目: ${detail.projectCode} | 仓库: ${detail.repoName} | 类型: ${sourceText}${timeText}`;
+    textEl.textContent = detail.errorText;
+
+    const modalEl = document.getElementById('syncErrorDetailModal');
+    if (!modalEl) return;
+    const modal = new bootstrap.Modal(modalEl);
+    modal.show();
+}
+
 // ===== 克隆状态轮询 & 按钮禁用逻辑 =====
 (function() {
     // 后端渲染的初始状态
@@ -693,7 +796,7 @@ function showToast(title, message, type) {
             if (actionsCell && !actionsCell.querySelector('.retry-clone-btn')) {
                 const retryBtn = document.createElement('button');
                 retryBtn.className = 'btn btn-sm action-btn retry-clone-btn';
-                retryBtn.title = '重试克隆';
+                retryBtn.title = '重试同步';
                 retryBtn.style.cssText = 'font-size:0.72rem;padding:0.2rem 0.5rem;color:#d97706;border:1px solid #fde68a;border-radius:5px;background:#fffbeb;';
                 retryBtn.innerHTML = '<i class="fas fa-redo me-1"></i>重试';
                 retryBtn.onclick = function() { retryClone(repoId); };
@@ -811,7 +914,7 @@ function editRepository(repoId) {
 }
 
 function retryClone(repoId) {
-    if (confirm('确定要重试克隆该仓库吗？')) {
+    if (confirm('确定要重试该仓库吗？系统会自动判断是重克隆还是修复后同步。')) {
         fetch(`/repositories/${repoId}/retry-clone`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }

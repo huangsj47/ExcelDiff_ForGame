@@ -531,10 +531,39 @@ def merged_project_view(project_id):
         return _render_project_page_missing(project_id, "项目合并视图")
     if not _has_project_access(project_id):
         abort(403)
+    # P2: 后端可选分页参数（默认不分页，保持兼容）
+    repo_page = max(1, request.args.get("repo_page", default=1, type=int) or 1)
+    repo_size = max(0, min(100, request.args.get("repo_size", default=0, type=int) or 0))
+    active_page = max(1, request.args.get("active_page", default=1, type=int) or 1)
+    active_size = max(0, min(100, request.args.get("active_size", default=0, type=int) or 0))
+    inactive_page = max(1, request.args.get("inactive_page", default=1, type=int) or 1)
+    inactive_size = max(0, min(100, request.args.get("inactive_size", default=0, type=int) or 0))
     # 获取所有周版本配置
     configs = WeeklyVersionConfig.query.filter_by(project_id=project_id).order_by(WeeklyVersionConfig.created_at.desc()).all()
-    # 获取所有仓库
-    repositories = Repository.query.filter_by(project_id=project_id).order_by(Repository.display_order).all()
+    # 获取仓库（支持可选分页）
+    repositories_query = Repository.query.filter_by(project_id=project_id).order_by(Repository.display_order)
+    repositories_total_count = repositories_query.count()
+    if repo_size > 0:
+        repo_offset = (repo_page - 1) * repo_size
+        repositories = repositories_query.offset(repo_offset).limit(repo_size).all()
+    else:
+        repositories = repositories_query.all()
+    repo_total_pages = math.ceil(repositories_total_count / repo_size) if repo_size > 0 else 1
+    repositories_virtual_enabled = (repo_size == 0 and repositories_total_count >= 50)
+    repositories_json = []
+    for repo in repositories:
+        repositories_json.append(
+            {
+                "id": repo.id,
+                "name": repo.name,
+                "type": repo.type,
+                "resource_type": repo.resource_type,
+                "branch": repo.branch,
+                "current_version": repo.current_version,
+                "created_date": repo.created_at.strftime("%Y-%m-%d") if repo.created_at else "-",
+                "commit_list_url": url_for("commit_list", repository_id=repo.id),
+            }
+        )
     # 按时间范围和名称分组周版本配置
     now = datetime.now()
     # 分组逻辑：相同版本基础名称+相同时间范围的配置归为一组
@@ -580,6 +609,19 @@ def merged_project_view(project_id):
     # 按时间排序
     active_versions.sort(key=lambda x: x['start_time'], reverse=True)
     inactive_versions.sort(key=lambda x: x['start_time'], reverse=True)
+    active_versions_total_count = len(active_versions)
+    inactive_versions_total_count = len(inactive_versions)
+
+    # 可选分页（默认不启用）
+    if active_size > 0:
+        active_offset = (active_page - 1) * active_size
+        active_versions = active_versions[active_offset:active_offset + active_size]
+    if inactive_size > 0:
+        inactive_offset = (inactive_page - 1) * inactive_size
+        inactive_versions = inactive_versions[inactive_offset:inactive_offset + inactive_size]
+    active_total_pages = math.ceil(active_versions_total_count / active_size) if active_size > 0 else 1
+    inactive_total_pages = math.ceil(inactive_versions_total_count / inactive_size) if inactive_size > 0 else 1
+
     # 为JavaScript准备序列化的非活跃版本数据
     inactive_versions_json = []
     for version in inactive_versions:
@@ -604,9 +646,23 @@ def merged_project_view(project_id):
     return render_template('merged_project_view.html',
                          project=project,
                          active_versions=active_versions,
+                         active_versions_total_count=active_versions_total_count,
+                         active_page=active_page,
+                         active_size=active_size,
+                         active_total_pages=active_total_pages,
                          inactive_versions=inactive_versions,
+                         inactive_versions_total_count=inactive_versions_total_count,
+                         inactive_page=inactive_page,
+                         inactive_size=inactive_size,
+                         inactive_total_pages=inactive_total_pages,
                          inactive_versions_json=inactive_versions_json,
-                         repositories=repositories)
+                         repositories=repositories,
+                         repositories_json=repositories_json,
+                         repositories_virtual_enabled=repositories_virtual_enabled,
+                         repositories_total_count=repositories_total_count,
+                         repo_page=repo_page,
+                         repo_size=repo_size,
+                         repo_total_pages=repo_total_pages)
 def weekly_version_diff(config_id):
     """周版本diff详情页面 - 聚合显示同一时间段的不同仓库配置"""
     config = WeeklyVersionConfig.query.get_or_404(config_id)

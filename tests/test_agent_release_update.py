@@ -63,6 +63,29 @@ def test_publish_agent_release_creates_manifest(monkeypatch, tmp_path):
     assert (release_root / "releases" / "test-v1" / manifest.get("package_file")).exists()
 
 
+def test_publish_agent_release_skips_local_packaging_files(monkeypatch, tmp_path):
+    release_root = tmp_path / "agent_releases"
+    source_dir = tmp_path / "fake_agent"
+    _build_fake_agent_source(source_dir)
+    (source_dir / "build_zip.py").write_text("print('zip')\n", encoding="utf-8")
+    (source_dir / "打包agent.bat").write_text("@echo off\r\necho build\r\n", encoding="utf-8")
+    (source_dir / "agent.log").write_text("runtime log\n", encoding="utf-8")
+    (source_dir / "venv" / "Scripts").mkdir(parents=True, exist_ok=True)
+    (source_dir / "venv" / "Scripts" / "python.exe").write_text("fake", encoding="utf-8")
+    monkeypatch.setenv("AGENT_RELEASES_DIR", str(release_root))
+
+    manifest = publish_agent_release(
+        version="test-skip-v1",
+        source_dir=str(source_dir),
+    )
+
+    managed_files = set(manifest.get("managed_files") or [])
+    assert "build_zip.py" not in managed_files
+    assert "打包agent.bat" not in managed_files
+    assert "agent.log" not in managed_files
+    assert all(not path.startswith("venv/") for path in managed_files)
+
+
 def test_agent_release_endpoints(monkeypatch, tmp_path):
     shared_secret = _uid("secret")
     agent_code = _uid("agent")

@@ -180,6 +180,65 @@ def test_agent_auto_sync_fallback_path_and_migrate_legacy_dir(monkeypatch, tmp_p
     assert not legacy_dir.exists()
 
 
+def test_agent_auto_sync_supports_svn(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_sync_svn_repo(local_repo_dir, remote_url, username, password):
+        captured["local_repo_dir"] = local_repo_dir
+        captured["remote_url"] = remote_url
+        captured["username"] = username
+        captured["password"] = password
+
+    monkeypatch.setattr(auto_sync_handler, "_sync_svn_repo", _fake_sync_svn_repo)
+    monkeypatch.setattr(
+        auto_sync_handler,
+        "_collect_svn_commits",
+        lambda **kwargs: [
+            {
+                "commit_id": "r101",
+                "version": "101",
+                "path": "/trunk/config/demo.xlsx",
+                "operation": "M",
+                "author": "alice",
+                "author_email": "",
+                "commit_time": "2026-03-01T10:00:00+00:00",
+                "message": "update demo",
+            }
+        ],
+    )
+
+    settings = SimpleNamespace(repos_base_dir=str(tmp_path))
+    task = {
+        "payload": {
+            "repository_id": 7,
+            "repository": {
+                "repository_id": 7,
+                "type": "svn",
+                "url": "https://example.com/svn/repo",
+                "username": "u1",
+                "password": "p1",
+                "current_version": "100",
+                "project_code": "G119",
+                "repository_name": "qz_pub",
+            },
+        }
+    }
+
+    status, summary, error, payload = auto_sync_handler.execute_auto_sync(task, settings)
+    expected_local_dir = build_repository_local_path(
+        "G119", "qz_pub", 7, base_dir=str(tmp_path), strict=False
+    )
+    assert status == "completed"
+    assert error is None
+    assert summary.get("repository_type") == "svn"
+    assert summary.get("commit_count") == 1
+    assert payload.get("repository_id") == 7
+    assert len(payload.get("commits") or []) == 1
+    assert captured.get("local_repo_dir") == expected_local_dir
+    assert captured.get("username") == "u1"
+    assert captured.get("password") == "p1"
+
+
 def test_repository_sync_js_treats_accepted_as_dispatched_success():
     template_path = Path(__file__).resolve().parents[1] / "templates" / "repository_config.html"
     content = template_path.read_text(encoding="utf-8")
@@ -301,6 +360,20 @@ def test_platform_mode_create_git_repository_does_not_start_local_clone_thread(m
         assert os.path.exists(local_path) is False
         task = BackgroundTask.query.filter_by(repository_id=repository.id, task_type="auto_sync").first()
         assert task is not None
+        agent_task = AgentTask.query.filter_by(
+            source_task_id=task.id,
+            task_type="auto_sync",
+            project_id=project.id,
+        ).first()
+        assert agent_task is not None
+        task_payload = json.loads(agent_task.payload or "{}")
+        repository_payload = task_payload.get("repository") or {}
+        assert repository_payload.get("type") == "svn"
+        assert repository_payload.get("username") == "u1"
+        assert repository_payload.get("password") == "p1"
+        assert repository_payload.get("current_version") == "1"
+        assert repository_payload.get("project_code") == project.code
+        assert repository_payload.get("repository_name") == repository.name
 
 
 def test_platform_mode_create_svn_repository_does_not_start_local_clone_thread(monkeypatch):

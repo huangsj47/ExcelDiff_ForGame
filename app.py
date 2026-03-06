@@ -144,7 +144,6 @@ from services.repository_creation_handlers import (
     create_svn_repository,
     enhanced_async_clone_with_status_update,
     enhanced_async_svn_clone_with_status_update,
-    enhanced_retry_clone_repository,
 )
 from services.core_navigation_handlers import (
     add_git_repository,
@@ -1997,29 +1996,55 @@ def get_clone_status(repository_id):
     })
 
 
-# 重试克隆仓库
+def _should_retry_with_reclone(repository) -> bool:
+    """Infer retry strategy from repository state.
+
+    - Clone phase failure: remove local worktree then re-clone.
+    - Update phase failure: repair local worktree then update.
+    """
+    if repository is None:
+        return False
+    status = str(getattr(repository, "clone_status", "") or "").strip().lower()
+    has_commits = (
+        db.session.query(Commit.id)
+        .filter(Commit.repository_id == repository.id)
+        .limit(1)
+        .first()
+        is not None
+    )
+    if status in {"pending", "cloning"}:
+        return True
+    if status == "failed" and not has_commits:
+        return True
+    clone_error = str(getattr(repository, "clone_error", "") or "").strip()
+    if clone_error and not has_commits:
+        return True
+    return False
 
 
+# 重试仓库同步（按失败阶段自动分流）
 @require_admin
 def retry_clone_repository(repository_id):
     repository = Repository.query.get_or_404(repository_id)
-    if repository.type != 'git':
-        flash('只支持Git仓库的克隆重试', 'error')
-        return redirect(url_for('repository_config', project_id=repository.project_id))
-
     project_id = repository.project_id
-    if is_agent_dispatch_mode():
-        task_id = create_auto_sync_task(repository_id)
-        if task_id:
-            flash('已派发到Agent执行仓库重试同步，请稍后查看状态', 'success')
-        else:
-            flash('派发Agent同步任务失败，请检查项目绑定的Agent节点状态', 'error')
-        return redirect(url_for('repository_config', project_id=project_id))
+    force_reclone = _should_retry_with_reclone(repository)
+    extra_payload = {
+        "force_reclone": bool(force_reclone),
+        "force_repair_update": bool(not force_reclone),
+        "retry_source": "manual_retry",
+    }
 
-    # 启动后台线程进行重试克隆
-    retry_thread = threading.Thread(target=enhanced_retry_clone_repository, args=(repository_id,), daemon=True)
-    retry_thread.start()
-    flash('已启动仓库克隆重试，请稍后查看状态', 'success')
+    task_id = create_auto_sync_task(repository_id, extra_payload=extra_payload)
+    if task_id:
+        if force_reclone:
+            flash("已启动重试：将先清理本地目录，再重新克隆并同步", "success")
+        else:
+            flash("已启动重试：将先修复本地Git/SVN目录，再重新同步", "success")
+    else:
+        if is_agent_dispatch_mode():
+            flash("派发Agent重试任务失败，请检查项目绑定与Agent在线状态", "error")
+        else:
+            flash("创建重试任务失败，请查看平台日志", "error")
     return redirect(url_for('repository_config', project_id=project_id))
 
 # 同步仓库提交记录

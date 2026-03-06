@@ -9,6 +9,8 @@ import atexit
 import os
 import queue
 import signal
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -75,6 +77,38 @@ def _use_agent_dispatch():
     return _deployment_mode() in {"platform", "agent"}
 
 
+def _force_remove_repo_worktree(local_path: str):
+    target = os.path.abspath(str(local_path or "").strip())
+    if not target:
+        return True
+    if not os.path.exists(target):
+        return True
+
+    try:
+        shutil.rmtree(target, ignore_errors=False)
+    except Exception as exc:
+        log_print(f"⚠️ 删除仓库目录失败，尝试命令行兜底: {target} | {exc}", "SYNC", force=True)
+
+    if os.path.exists(target):
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["cmd", "/c", "rmdir", "/s", "/q", target],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            else:
+                shutil.rmtree(target, ignore_errors=True)
+        except Exception as exc:
+            log_print(f"⚠️ 目录删除兜底失败: {target} | {exc}", "SYNC", force=True)
+
+    if os.path.exists(target):
+        log_print(f"❌ 无法删除仓库目录: {target}", "SYNC", force=True)
+        return False
+    return True
+
+
 def _enqueue_agent_task_from_background_task(db_task, extra_payload=None):
     """将 BackgroundTask 映射为 AgentTask（平台模式）。"""
     if not _use_agent_dispatch() or db_task is None:
@@ -96,9 +130,12 @@ def _enqueue_agent_task_from_background_task(db_task, extra_payload=None):
                 "repository_id": repo.id,
                 "type": repo.type,
                 "url": repo.url,
+                "root_directory": repo.root_directory,
                 "username": repo.username,
+                "password": repo.password,
                 "token": repo.token,
                 "branch": repo.branch,
+                "current_version": repo.current_version,
                 "path_regex": repo.path_regex,
                 "log_filter_regex": repo.log_filter_regex,
                 "commit_filter": repo.commit_filter,
@@ -450,6 +487,8 @@ def _handle_auto_sync_task_inner(task):
         try:
             repository = _db.session.get(_Repository, task['repository_id'])
             if repository:
+                force_reclone = bool(task.get("force_reclone"))
+                force_repair_update = bool(task.get("force_repair_update")) and not force_reclone
                 log_print(f"开始自动分析仓库: {repository.name}", 'SYNC')
                 if repository.type == 'git':
                     from services.threaded_git_service import ThreadedGitService
@@ -459,6 +498,36 @@ def _handle_auto_sync_task_inner(task):
                     )
                     log_print(f"🚀 [BACKGROUND_SYNC] 开始后台同步仓库 ID: {repository.id}", 'SYNC')
                     log_print(f"🔧 [BACKGROUND_SYNC] 本地路径: {git_service.local_path}", 'SYNC')
+                    if force_reclone:
+                        log_print(
+                            f"🧹 [BACKGROUND_SYNC] 手动重试策略=重克隆，先清理本地目录: {git_service.local_path}",
+                            "SYNC",
+                            force=True,
+                        )
+                        if not _force_remove_repo_worktree(git_service.local_path):
+                            error_msg = f"重试失败：无法清理本地目录 {git_service.local_path}"
+                            repository.clone_status = "failed"
+                            repository.clone_error = error_msg
+                            _record_sync_error(repository, error_msg)
+                            if 'task_id' in task:
+                                try:
+                                    update_task_status_with_retry(task['task_id'], 'failed', error_msg)
+                                except Exception:
+                                    pass
+                            return
+                    elif force_repair_update and os.path.isdir(git_service.local_path):
+                        log_print(
+                            f"🩺 [BACKGROUND_SYNC] 手动重试策略=修复后更新，先执行Git自愈: {git_service.local_path}",
+                            "SYNC",
+                            force=True,
+                        )
+                        try:
+                            if hasattr(git_service, "_self_heal_repository_state"):
+                                heal_ok, heal_msg = git_service._self_heal_repository_state()
+                                if not heal_ok:
+                                    log_print(f"⚠️ Git自愈未完全成功: {heal_msg}", "SYNC", force=True)
+                        except Exception as heal_exc:
+                            log_print(f"⚠️ Git自愈异常，继续尝试同步: {heal_exc}", "SYNC", force=True)
 
                     # 使用5分钟超时的线程执行 clone_or_update
                     sync_result = [False, "未执行"]
@@ -480,6 +549,9 @@ def _handle_auto_sync_task_inner(task):
                         # 超时：记录错误并重置仓库
                         error_msg = f"Git pull 超时（超过5分钟），已中断并重置仓库"
                         log_print(f"⏰ [BACKGROUND_SYNC] {error_msg}: {repository.name}", 'SYNC', force=True)
+                        if force_reclone:
+                            repository.clone_status = "failed"
+                            repository.clone_error = error_msg
                         _reset_repository_to_head(git_service, repository)
                         _record_sync_error(repository, error_msg)
                         if 'task_id' in task:
@@ -492,6 +564,9 @@ def _handle_auto_sync_task_inner(task):
                     if sync_exception[0]:
                         error_msg = f"clone_or_update 异常: {sync_exception[0]}"
                         log_print(f"❌ [BACKGROUND_SYNC] {error_msg}", 'SYNC', force=True)
+                        if force_reclone:
+                            repository.clone_status = "failed"
+                            repository.clone_error = error_msg
                         _reset_repository_to_head(git_service, repository)
                         _record_sync_error(repository, error_msg)
                         if 'task_id' in task:
@@ -506,6 +581,9 @@ def _handle_auto_sync_task_inner(task):
 
                     if not success:
                         log_print(f"仓库克隆/更新失败: {message}", 'SYNC', force=True)
+                        if force_reclone:
+                            repository.clone_status = "failed"
+                            repository.clone_error = str(message or "clone/update failed")
                         _reset_repository_to_head(git_service, repository)
                         _record_sync_error(repository, f"同步失败: {message}")
                         if 'task_id' in task:
@@ -515,6 +593,8 @@ def _handle_auto_sync_task_inner(task):
                                 pass
                         return
 
+                    repository.clone_status = "completed"
+                    repository.clone_error = None
                     # 同步成功 → 清除之前的错误状态
                     _clear_sync_error(repository)
 
@@ -599,10 +679,44 @@ def _handle_auto_sync_task_inner(task):
                     log_print(f"✅ 自动数据分析完成: {repository.name}, 添加了 {commits_added} 个提交记录，{excel_tasks_added} 个Excel缓存任务", 'SYNC')
                 elif repository.type == 'svn':
                     svn_service = _get_svn_service(repository)
+                    if force_reclone:
+                        log_print(
+                            f"🧹 [BACKGROUND_SYNC] 手动重试策略=重检出，先清理SVN本地目录: {svn_service.local_path}",
+                            "SYNC",
+                            force=True,
+                        )
+                        if not _force_remove_repo_worktree(svn_service.local_path):
+                            error_msg = f"重试失败：无法清理SVN目录 {svn_service.local_path}"
+                            repository.clone_status = "failed"
+                            repository.clone_error = error_msg
+                            _record_sync_error(repository, error_msg)
+                            if 'task_id' in task:
+                                try:
+                                    update_task_status_with_retry(task['task_id'], 'failed', error_msg)
+                                except Exception:
+                                    pass
+                            return
+                    elif force_repair_update and os.path.isdir(svn_service.local_path):
+                        log_print(
+                            f"🩺 [BACKGROUND_SYNC] 手动重试策略=修复后更新，先执行SVN cleanup/revert: {svn_service.local_path}",
+                            "SYNC",
+                            force=True,
+                        )
+                        try:
+                            if hasattr(svn_service, "_run_svn_cleanup"):
+                                svn_service._run_svn_cleanup()
+                            if hasattr(svn_service, "_run_svn_revert"):
+                                svn_service._run_svn_revert()
+                        except Exception as heal_exc:
+                            log_print(f"⚠️ SVN预修复异常，继续尝试更新: {heal_exc}", "SYNC", force=True)
+
                     success, message = svn_service.checkout_or_update_repository()
                     if not success:
                         error_msg = f"SVN 同步失败: {message}"
                         log_print(f"❌ [BACKGROUND_SYNC] {error_msg}", 'SYNC', force=True)
+                        if force_reclone:
+                            repository.clone_status = "failed"
+                            repository.clone_error = error_msg
                         _record_sync_error(repository, error_msg)
                         if 'task_id' in task:
                             try:
@@ -610,6 +724,8 @@ def _handle_auto_sync_task_inner(task):
                             except Exception:
                                 pass
                         return
+                    repository.clone_status = "completed"
+                    repository.clone_error = None
                     commits_added = svn_service.sync_repository_commits(_db, _Commit)
                     _clear_sync_error(repository)
                     log_print(f"✅ 自动数据分析完成: {repository.name}, 添加了 {commits_added} 个提交记录", 'SYNC')
@@ -709,7 +825,13 @@ def execute_task_inline_for_agent(task_type, payload):
         repository_id = payload.get('repository_id')
         if not repository_id:
             raise ValueError("auto_sync 任务缺少 repository_id")
-        _handle_auto_sync_task({"repository_id": repository_id})
+        _handle_auto_sync_task(
+            {
+                "repository_id": repository_id,
+                "force_reclone": bool(payload.get("force_reclone")),
+                "force_repair_update": bool(payload.get("force_repair_update")),
+            }
+        )
         return {"message": "auto_sync completed"}
 
     if normalized_type == 'weekly_sync':
@@ -733,29 +855,38 @@ def execute_task_inline_for_agent(task_type, payload):
 # ---------------------------------------------------------------------------
 #  任务创建 / 队列管理
 # ---------------------------------------------------------------------------
-def create_auto_sync_task(repository_id):
+def create_auto_sync_task(repository_id, extra_payload=None):
     """为仓库创建自动数据分析任务"""
     try:
+        payload = dict(extra_payload or {})
+        force_retry = bool(payload.get("force_reclone") or payload.get("force_repair_update"))
         existing_task = _BackgroundTask.query.filter_by(
             repository_id=repository_id,
             task_type='auto_sync',
             status='pending'
         ).first()
-        if existing_task:
+        if existing_task and not force_retry:
             log_print(f"仓库 {repository_id} 已存在待处理的自动同步任务", 'SYNC')
             return existing_task.id
+        if existing_task and force_retry:
+            log_print(
+                f"仓库 {repository_id} 存在待处理 auto_sync，手动重试将创建新任务并附加重试策略",
+                'SYNC',
+            )
 
         new_task = _BackgroundTask(
             task_type='auto_sync',
             repository_id=repository_id,
-            priority=5,
+            priority=2 if force_retry else 5,
             status='pending'
         )
         _db.session.add(new_task)
         _db.session.flush()
+        enqueue_payload = {"repository_id": repository_id}
+        enqueue_payload.update(payload)
         _enqueue_agent_task_from_background_task(
             new_task,
-            extra_payload={"repository_id": repository_id},
+            extra_payload=enqueue_payload,
         )
         _db.session.commit()
         if not _use_agent_dispatch():
@@ -764,6 +895,7 @@ def create_auto_sync_task(repository_id):
                 'repository_id': repository_id,
                 'task_id': new_task.id
             }
+            task_data.update(payload)
             task_counter = int(time.time() * 1000000)
             tw = TaskWrapper(5, task_counter, task_data)
             background_task_queue.put(tw)

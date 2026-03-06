@@ -8,6 +8,8 @@ import os
 import re
 import shutil
 import subprocess
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from urllib.parse import quote, urlparse, urlunparse
 
 try:
@@ -23,6 +25,13 @@ _GIT_LOCK_FILES = (
     os.path.join(".git", "shallow.lock"),
 )
 _SAFE_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+_SVN_LOCK_KEYWORDS = (
+    "e155004",
+    "working copy locked",
+    "is locked",
+    "run 'svn cleanup'",
+    "cleanup",
+)
 
 
 def _sanitize_segment(segment: str, fallback: str) -> str:
@@ -88,8 +97,8 @@ def execute_auto_sync(task: dict, settings):
         raise ValueError("auto_sync payload 缺少 repository_id")
 
     repo_type = str(repo_cfg.get("type") or "").strip().lower()
-    if repo_type != "git":
-        raise ValueError(f"暂仅支持 git 仓库, type={repo_type}")
+    if repo_type not in {"git", "svn"}:
+        raise ValueError(f"暂仅支持 git/svn 仓库, type={repo_type}")
 
     remote_url = str(repo_cfg.get("url") or "").strip()
     if not remote_url:
@@ -103,6 +112,8 @@ def execute_auto_sync(task: dict, settings):
     commit_filter = repo_cfg.get("commit_filter")
     limit = int(payload.get("limit") or 300)
     limit = max(50, min(2000, limit))
+    force_reclone = bool(payload.get("force_reclone"))
+    force_repair_update = bool(payload.get("force_repair_update")) and not force_reclone
 
     base_dir = os.path.abspath(settings.repos_base_dir)
     os.makedirs(base_dir, exist_ok=True)
@@ -123,27 +134,76 @@ def execute_auto_sync(task: dict, settings):
         repository_name=repository_name,
     )
 
-    auth_url = _build_auth_url(remote_url, username, token)
-    _sync_repo(local_repo_dir, auth_url, branch)
-    commits = _collect_commits(
-        repo_dir=local_repo_dir,
-        branch=branch,
-        limit=limit,
-        path_regex=path_regex,
-        log_filter_regex=log_filter_regex,
-        commit_filter=commit_filter,
-    )
+    if repo_type == "git":
+        auth_url = _build_auth_url(remote_url, username, token)
+        if force_reclone:
+            _remove_repo_dir_for_reclone(local_repo_dir)
+        elif force_repair_update and os.path.isdir(os.path.join(local_repo_dir, ".git")):
+            _self_heal_repo(local_repo_dir, branch)
+        _sync_repo(local_repo_dir, auth_url, branch)
+        commits = _collect_commits(
+            repo_dir=local_repo_dir,
+            branch=branch,
+            limit=limit,
+            path_regex=path_regex,
+            log_filter_regex=log_filter_regex,
+            commit_filter=commit_filter,
+        )
+    else:
+        password = repo_cfg.get("password") or repo_cfg.get("token")
+        current_version = repo_cfg.get("current_version")
+        if force_reclone:
+            _remove_repo_dir_for_reclone(local_repo_dir)
+        elif force_repair_update and os.path.isdir(os.path.join(local_repo_dir, ".svn")):
+            _self_heal_svn_repo(local_repo_dir, username, password)
+        _sync_svn_repo(local_repo_dir, remote_url, username, password)
+        commits = _collect_svn_commits(
+            repo_dir=local_repo_dir,
+            limit=limit,
+            path_regex=path_regex,
+            log_filter_regex=log_filter_regex,
+            commit_filter=commit_filter,
+            username=username,
+            password=password,
+            current_version=current_version,
+        )
 
     summary = {
         "repository_id": repository_id,
+        "repository_type": repo_type,
         "commit_count": len(commits),
         "message": "auto_sync executed by agent",
+        "retry_strategy": "force_reclone" if force_reclone else ("force_repair_update" if force_repair_update else "default"),
     }
     result_payload = {
         "repository_id": repository_id,
         "commits": commits,
     }
     return "completed", summary, None, result_payload
+
+
+def _remove_repo_dir_for_reclone(local_repo_dir: str):
+    target = os.path.abspath(str(local_repo_dir or "").strip())
+    if not target:
+        return
+    if not os.path.exists(target):
+        return
+
+    try:
+        shutil.rmtree(target, ignore_errors=False)
+    except Exception:
+        if os.name == "nt":
+            subprocess.run(
+                ["cmd", "/c", "rmdir", "/s", "/q", target],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        else:
+            shutil.rmtree(target, ignore_errors=True)
+
+    if os.path.exists(target):
+        raise RuntimeError(f"failed to remove local repo dir before reclone: {target}")
 
 
 def _build_auth_url(url: str, username: str | None, token: str | None):
@@ -339,4 +399,197 @@ def _collect_commits(*, repo_dir, branch, limit, path_regex, log_filter_regex, c
             }
         )
 
+    return commits
+
+
+def _decode_output(byte_output):
+    if not byte_output:
+        return ""
+    for encoding in ("utf-8", "gbk", "cp936", "latin1"):
+        try:
+            return byte_output.decode(encoding)
+        except Exception:
+            continue
+    return byte_output.decode("utf-8", errors="ignore")
+
+
+def _build_svn_auth_args(username: str | None, password: str | None):
+    args = []
+    if username:
+        args.extend(["--username", str(username)])
+    if password:
+        args.extend(["--password", str(password)])
+    args.extend(["--non-interactive", "--trust-server-cert"])
+    return args
+
+
+def _run_svn(cmd, cwd=None, timeout=180):
+    result = subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=False,
+        timeout=timeout,
+    )
+    stdout = _decode_output(result.stdout)
+    stderr = _decode_output(result.stderr)
+    if result.returncode != 0:
+        raise RuntimeError(f"svn cmd failed: {' '.join(cmd[:3])} ... | stderr={stderr.strip()}")
+    return stdout
+
+
+def _is_svn_lock_error(error_text: str):
+    lowered = str(error_text or "").lower()
+    return any(keyword in lowered for keyword in _SVN_LOCK_KEYWORDS)
+
+
+def _self_heal_svn_repo(local_repo_dir: str, username: str | None, password: str | None):
+    cleanup_cmd = ["svn", "cleanup", local_repo_dir] + _build_svn_auth_args(username, password)
+    revert_cmd = ["svn", "revert", "-R", local_repo_dir] + _build_svn_auth_args(username, password)
+    try:
+        _run_svn(cleanup_cmd, timeout=180)
+    except Exception:
+        pass
+    try:
+        _run_svn(revert_cmd, timeout=240)
+    except Exception:
+        pass
+
+
+def _sync_existing_svn_repo(local_repo_dir: str, username: str | None, password: str | None):
+    last_error = None
+    for attempt in range(2):
+        try:
+            cleanup_cmd = ["svn", "cleanup", local_repo_dir] + _build_svn_auth_args(username, password)
+            try:
+                _run_svn(cleanup_cmd, timeout=120)
+            except Exception:
+                pass
+            update_cmd = ["svn", "update", local_repo_dir] + _build_svn_auth_args(username, password)
+            _run_svn(update_cmd, cwd=local_repo_dir, timeout=600)
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt == 0:
+                if _is_svn_lock_error(str(exc)):
+                    _self_heal_svn_repo(local_repo_dir, username, password)
+                    continue
+                _self_heal_svn_repo(local_repo_dir, username, password)
+                continue
+            raise
+    if last_error:
+        raise last_error
+
+
+def _sync_svn_repo(local_repo_dir: str, remote_url: str, username: str | None, password: str | None):
+    svn_dir = os.path.join(local_repo_dir, ".svn")
+    if not os.path.isdir(svn_dir):
+        if os.path.isdir(local_repo_dir):
+            _remove_repo_dir_for_reclone(local_repo_dir)
+        os.makedirs(os.path.dirname(local_repo_dir), exist_ok=True)
+        checkout_cmd = ["svn", "checkout", remote_url, local_repo_dir] + _build_svn_auth_args(username, password)
+        _run_svn(checkout_cmd, timeout=900)
+        return
+    _sync_existing_svn_repo(local_repo_dir, username, password)
+
+
+def _normalize_svn_revision(raw_revision):
+    text = str(raw_revision or "").strip()
+    if not text:
+        return None
+    if text.lower().startswith("r"):
+        text = text[1:]
+    if text.isdigit():
+        return text
+    return None
+
+
+def _normalize_iso_datetime(date_text: str):
+    text = str(date_text or "").strip()
+    if not text:
+        return ""
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    except Exception:
+        return str(date_text or "").strip()
+
+
+def _collect_svn_commits(
+    *,
+    repo_dir,
+    limit,
+    path_regex,
+    log_filter_regex,
+    commit_filter,
+    username,
+    password,
+    current_version,
+):
+    cmd = ["svn", "log", "--xml", "-v", f"-l{limit}", repo_dir]
+    normalized_revision = _normalize_svn_revision(current_version)
+    if normalized_revision:
+        cmd.extend(["-r", f"{normalized_revision}:HEAD"])
+    cmd.extend(_build_svn_auth_args(username, password))
+
+    xml_text = _run_svn(cmd, cwd=repo_dir, timeout=600)
+    root = ET.fromstring(xml_text)
+
+    path_re = re.compile(path_regex) if path_regex else None
+    msg_re = re.compile(log_filter_regex) if log_filter_regex else None
+    blocked_authors = {
+        item.strip().lower()
+        for item in str(commit_filter or "").split(",")
+        if item.strip()
+    }
+
+    commits = []
+    for logentry in root.findall("logentry"):
+        revision = str(logentry.get("revision") or "").strip()
+        if not revision:
+            continue
+        author = (logentry.findtext("author") or "").strip()
+        message = (logentry.findtext("msg") or "").strip()
+        commit_time = _normalize_iso_datetime(logentry.findtext("date") or "")
+
+        if blocked_authors and author.lower() in blocked_authors:
+            continue
+        if msg_re and msg_re.search(message):
+            continue
+
+        paths_node = logentry.find("paths")
+        if paths_node is None:
+            continue
+
+        for path_node in paths_node.findall("path"):
+            file_path = str(path_node.text or "").strip()
+            if not file_path:
+                continue
+            if path_re and not path_re.search(file_path):
+                continue
+
+            action = str(path_node.get("action") or "M").strip().upper()
+            if action.startswith("A"):
+                operation = "A"
+            elif action.startswith("D"):
+                operation = "D"
+            else:
+                operation = "M"
+
+            commits.append(
+                {
+                    "commit_id": f"r{revision}",
+                    "version": revision,
+                    "path": file_path,
+                    "operation": operation,
+                    "author": author,
+                    "author_email": "",
+                    "commit_time": commit_time,
+                    "message": message,
+                }
+            )
     return commits

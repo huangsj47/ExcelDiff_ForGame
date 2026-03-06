@@ -99,6 +99,7 @@ def _is_skip_file(rel_path: str) -> bool:
     rel_norm = rel_path.replace("\\", "/").strip("/")
     rel_lower = rel_norm.lower()
     parts = [p for p in rel_lower.split("/") if p]
+    base_name = os.path.basename(rel_lower)
 
     if not rel_norm:
         return True
@@ -117,6 +118,12 @@ def _is_skip_file(rel_path: str) -> bool:
     if rel_lower in {
         ".agent_release_state.json",
         ".agent_update.lock",
+    }:
+        return True
+    if base_name in {
+        "打包agent.bat",
+        "build_zip.py",
+        "agent.log",
     }:
         return True
     return False
