@@ -31,6 +31,10 @@ _PROJECT_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{2,50}$")
 _AGENT_CODE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 _TEMP_CACHE_CLEANUP_COOLDOWN_SECONDS = 600
 _last_temp_cache_cleanup_at = 0.0
+_INCIDENT_MAX_TITLE_LENGTH = 255
+_INCIDENT_MAX_MESSAGE_LENGTH = 4000
+_INCIDENT_MAX_ERROR_LENGTH = 16000
+_INCIDENT_MAX_LOG_EXCERPT_LENGTH = 32000
 
 
 def _bool_env(key: str, default: bool) -> bool:
@@ -152,6 +156,21 @@ def _to_float_or_none(value, min_value=None, max_value=None):
     return fv
 
 
+def _normalize_text(value, max_length: int, default: str = "") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return default
+    if len(text) <= max_length:
+        return text
+    return text[:max_length]
+
+
+def _to_iso(dt_value):
+    if isinstance(dt_value, datetime):
+        return dt_value.isoformat()
+    return None
+
+
 
 def _parse_host_and_port(raw_value):
     text = str(raw_value or "").strip()
@@ -213,6 +232,70 @@ def _extract_agent_metrics(payload: dict):
     return metrics
 
 
+def _normalize_utc_datetime(value):
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _agent_offline_timeout_seconds() -> int:
+    return _int_env("AGENT_OFFLINE_TIMEOUT_SECONDS", 90, min_value=30, max_value=24 * 3600)
+
+
+def _derive_agent_status(agent, now_utc: datetime | None = None) -> str:
+    status = str(getattr(agent, "status", "") or "").strip().lower() or "offline"
+    if status != "online":
+        return "offline"
+
+    heartbeat_at = _normalize_utc_datetime(getattr(agent, "last_heartbeat", None))
+    if heartbeat_at is None:
+        return "offline"
+
+    now = now_utc or datetime.now(timezone.utc)
+    if (now - heartbeat_at).total_seconds() > _agent_offline_timeout_seconds():
+        return "offline"
+    return "online"
+
+
+def _serialize_incident_brief(row):
+    if row is None:
+        return None
+    return {
+        "id": row.id,
+        "incident_type": row.incident_type,
+        "title": row.title,
+        "message": row.message,
+        "created_at": _to_iso(row.created_at),
+    }
+
+
+def _build_active_incident_maps(agent_ids):
+    AgentIncident = get_runtime_models("AgentIncident")[0]
+    if not agent_ids:
+        return {}, {}
+
+    rows = (
+        AgentIncident.query.filter(
+            AgentIncident.agent_id.in_(agent_ids),
+            AgentIncident.is_ignored.is_(False),
+        )
+        .order_by(AgentIncident.created_at.desc())
+        .all()
+    )
+
+    latest_by_agent_id = {}
+    count_by_agent_id = {}
+    for row in rows:
+        count_by_agent_id[row.agent_id] = int(count_by_agent_id.get(row.agent_id, 0)) + 1
+        if row.agent_id not in latest_by_agent_id:
+            latest_by_agent_id[row.agent_id] = row
+    return latest_by_agent_id, count_by_agent_id
+
+
 def _apply_agent_runtime_fields(agent, payload: dict):
     now_utc = datetime.now(timezone.utc)
     if "status" in payload:
@@ -264,7 +347,14 @@ def _apply_agent_runtime_fields(agent, payload: dict):
     agent.last_heartbeat = now_utc
 
 
-def _format_agent_rows(agents, bindings_by_agent_id, default_admins_by_agent_id):
+def _format_agent_rows(
+    agents,
+    bindings_by_agent_id,
+    default_admins_by_agent_id,
+    latest_incident_by_agent_id,
+    incident_count_by_agent_id,
+):
+    now_utc = datetime.now(timezone.utc)
     name_counter = Counter(
         (str(item.agent_name or "").strip().lower() or "agent")
         for item in agents
@@ -284,6 +374,17 @@ def _format_agent_rows(agents, bindings_by_agent_id, default_admins_by_agent_id)
         if latest_default_admin and latest_default_admin not in default_admins:
             default_admins.append(latest_default_admin)
             default_admins = sorted(set(default_admins))
+        status = _derive_agent_status(agent, now_utc=now_utc)
+        active_incident = latest_incident_by_agent_id.get(agent.id)
+        incident_count = int(incident_count_by_agent_id.get(agent.id, 0))
+        has_offline_alert = status == "offline"
+        has_incident_alert = active_incident is not None
+        is_abnormal = bool(has_offline_alert or has_incident_alert)
+        abnormal_reasons = []
+        if has_offline_alert:
+            abnormal_reasons.append("offline")
+        if has_incident_alert:
+            abnormal_reasons.append("incident")
         rows.append(
             {
                 "agent_code": agent.agent_code,
@@ -291,7 +392,7 @@ def _format_agent_rows(agents, bindings_by_agent_id, default_admins_by_agent_id)
                 "display_name": display_name,
                 "host": agent.host,
                 "port": agent.port,
-                "status": agent.status,
+                "status": status,
                 "last_heartbeat": agent.last_heartbeat.isoformat() if agent.last_heartbeat else None,
                 "default_admin_username": latest_default_admin,
                 "default_admin_usernames": default_admins,
@@ -308,6 +409,10 @@ def _format_agent_rows(agents, bindings_by_agent_id, default_admins_by_agent_id)
                 "os_version": agent.os_version,
                 "os_platform": agent.os_platform,
                 "metrics_updated_at": agent.metrics_updated_at.isoformat() if agent.metrics_updated_at else None,
+                "is_abnormal": is_abnormal,
+                "abnormal_reasons": abnormal_reasons,
+                "active_incident_count": incident_count,
+                "active_incident": _serialize_incident_brief(active_incident),
             }
         )
     return rows
@@ -341,7 +446,15 @@ def build_agent_node_items():
             continue
         default_admins_by_agent_id.setdefault(row.agent_id, set()).add(username)
 
-    return _format_agent_rows(agents, bindings_by_agent_id, default_admins_by_agent_id)
+    latest_incident_by_agent_id, incident_count_by_agent_id = _build_active_incident_maps(agent_ids)
+
+    return _format_agent_rows(
+        agents,
+        bindings_by_agent_id,
+        default_admins_by_agent_id,
+        latest_incident_by_agent_id,
+        incident_count_by_agent_id,
+    )
 
 
 def _ensure_default_admin_for_projects(db, default_admin_username: str | None, project_ids: list[int] | None):
@@ -961,6 +1074,58 @@ def agent_heartbeat():
         return jsonify({"success": False, "message": str(exc)}), 500
 
 
+def agent_report_incident():
+    """Agent 主动上报运行异常/中断事件。"""
+    db, AgentNode, AgentIncident, log_print = get_runtime_models(
+        "db",
+        "AgentNode",
+        "AgentIncident",
+        "log_print",
+    )
+    try:
+        ok, resp, code = _validate_agent_shared_secret()
+        if not ok:
+            return resp, code
+
+        payload = request.get_json(silent=True) or {}
+        agent_code = str(payload.get("agent_code") or request.headers.get("X-Agent-Code") or "").strip()
+        agent_token = str(payload.get("agent_token") or request.headers.get("X-Agent-Token") or "").strip()
+        if not agent_code or not agent_token:
+            return jsonify({"success": False, "message": "缺少 agent_code 或 agent_token"}), 400
+
+        agent = _get_agent_by_identity(agent_code, agent_token)
+        if not agent:
+            return jsonify({"success": False, "message": "Agent 身份无效"}), 401
+
+        incident_type = _normalize_text(payload.get("incident_type"), 40, default="runtime_error").lower()
+        title = _normalize_text(payload.get("title"), _INCIDENT_MAX_TITLE_LENGTH, default="Agent运行异常")
+        message = _normalize_text(payload.get("message"), _INCIDENT_MAX_MESSAGE_LENGTH, default="")
+        error_detail = _normalize_text(payload.get("error_detail"), _INCIDENT_MAX_ERROR_LENGTH, default="")
+        log_excerpt = _normalize_text(payload.get("log_excerpt"), _INCIDENT_MAX_LOG_EXCERPT_LENGTH, default="")
+
+        row = AgentIncident(
+            agent_id=agent.id,
+            incident_type=incident_type or "runtime_error",
+            title=title,
+            message=message or None,
+            error_detail=error_detail or None,
+            log_excerpt=log_excerpt or None,
+            is_ignored=False,
+        )
+        db.session.add(row)
+
+        agent.last_error = message or title
+        if incident_type in {"interrupted", "fatal", "runtime_fatal"}:
+            agent.status = "offline"
+
+        db.session.commit()
+        return jsonify({"success": True, "incident_id": row.id}), 200
+    except Exception as exc:
+        db.session.rollback()
+        log_print(f"Agent 异常上报失败: {exc}", "AGENT", force=True)
+        return jsonify({"success": False, "message": str(exc)}), 500
+
+
 def agent_upsert_temp_cache():
     """Agent 上传临时加速缓存（平台侧仅作可过期加速，不作为主业务数据）。"""
     db, log_print = get_runtime_models("db", "log_print")
@@ -1552,6 +1717,107 @@ def list_agent_nodes():
     """查看 Agent 节点状态（管理员）。"""
     rows = build_agent_node_items()
     return jsonify({"success": True, "items": rows, "count": len(rows)})
+
+
+@require_admin
+def get_agent_abnormal_summary():
+    """返回异常Agent数量，供导航角标展示。"""
+    rows = build_agent_node_items()
+    abnormal_rows = [row for row in rows if bool(row.get("is_abnormal"))]
+    offline_count = 0
+    incident_count = 0
+    for row in abnormal_rows:
+        reasons = set(row.get("abnormal_reasons") or [])
+        if "offline" in reasons:
+            offline_count += 1
+        if "incident" in reasons:
+            incident_count += 1
+    return jsonify(
+        {
+            "success": True,
+            "abnormal_count": len(abnormal_rows),
+            "offline_count": offline_count,
+            "incident_count": incident_count,
+        }
+    )
+
+
+@require_admin
+def list_agent_incidents(agent_code: str):
+    """查看指定 Agent 的异常事件。"""
+    AgentNode, AgentIncident = get_runtime_models("AgentNode", "AgentIncident")
+    limit = max(1, min(200, int(request.args.get("limit") or 50)))
+
+    agent = AgentNode.query.filter_by(agent_code=str(agent_code or "").strip()).first()
+    if not agent:
+        return jsonify({"success": False, "message": "Agent 不存在"}), 404
+
+    rows = (
+        AgentIncident.query.filter_by(agent_id=agent.id)
+        .order_by(AgentIncident.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    items = []
+    for row in rows:
+        items.append(
+            {
+                "id": row.id,
+                "incident_type": row.incident_type,
+                "title": row.title,
+                "message": row.message,
+                "error_detail": row.error_detail,
+                "log_excerpt": row.log_excerpt,
+                "is_ignored": bool(row.is_ignored),
+                "ignored_by": row.ignored_by,
+                "ignored_at": _to_iso(row.ignored_at),
+                "created_at": _to_iso(row.created_at),
+                "updated_at": _to_iso(row.updated_at),
+            }
+        )
+
+    return jsonify(
+        {
+            "success": True,
+            "agent_code": agent.agent_code,
+            "agent_name": agent.agent_name,
+            "items": items,
+            "count": len(items),
+        }
+    )
+
+
+@require_admin
+def ignore_agent_incident(incident_id: int):
+    """忽略或恢复 Agent 异常事件。"""
+    db, AgentIncident = get_runtime_models("db", "AgentIncident")
+    payload = request.get_json(silent=True) or {}
+    ignored = bool(payload.get("ignored", True))
+
+    row = db.session.get(AgentIncident, incident_id)
+    if not row:
+        return jsonify({"success": False, "message": "异常事件不存在"}), 404
+
+    username = _normalize_identity_username(request.headers.get("X-Auth-Username") or "") or None
+    if ignored:
+        row.is_ignored = True
+        row.ignored_by = username or "admin"
+        row.ignored_at = datetime.now(timezone.utc)
+    else:
+        row.is_ignored = False
+        row.ignored_by = None
+        row.ignored_at = None
+
+    db.session.commit()
+    return jsonify(
+        {
+            "success": True,
+            "incident_id": row.id,
+            "is_ignored": bool(row.is_ignored),
+            "ignored_by": row.ignored_by,
+            "ignored_at": _to_iso(row.ignored_at),
+        }
+    )
 
 
 @require_admin

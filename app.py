@@ -178,6 +178,10 @@ from services.agent_management_handlers import (
     agent_overview_page,
     agent_claim_task,
     agent_report_task_result,
+    agent_report_incident,
+    list_agent_incidents,
+    ignore_agent_incident,
+    get_agent_abnormal_summary,
 )
 from routes.agent_management_routes import agent_management_bp
 from routes.cache_management_routes import cache_management_bp
@@ -286,6 +290,57 @@ from bootstrap.app_factory import build_runtime_settings, create_app
 from bootstrap.bootstrap import AppBootstrapManager
 
 app = create_app(__name__)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+class _WerkzeugAgentAccessFilter(logging.Filter):
+    """Suppress high-frequency /api/agents access logs for 2xx/3xx responses."""
+
+    _SUPPRESS_PATH_PREFIXES = ("/api/agents",)
+    _REQUEST_LINE_PATTERN = re.compile(
+        r'"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\S+)\s+HTTP/[0-9.]+"\s+(?:\x1b\[[0-9;]*m)?(\d{3})'
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+
+        if "/api/agents" not in message:
+            return True
+
+        matched = self._REQUEST_LINE_PATTERN.search(message or "")
+        if not matched:
+            return True
+
+        path = matched.group(1)
+        try:
+            status_code = int(matched.group(2))
+        except Exception:
+            return True
+
+        if any(path.startswith(prefix) for prefix in self._SUPPRESS_PATH_PREFIXES):
+            return status_code >= 400
+        return True
+
+
+def _configure_werkzeug_access_log_filter() -> None:
+    if not _env_bool("SUPPRESS_AGENT_ACCESS_LOG", True):
+        return
+    werkzeug_logger = logging.getLogger("werkzeug")
+    if any(isinstance(item, _WerkzeugAgentAccessFilter) for item in werkzeug_logger.filters):
+        return
+    werkzeug_logger.addFilter(_WerkzeugAgentAccessFilter())
+
+
+_configure_werkzeug_access_log_filter()
 # 启用CORS支持，允许跨域请求
 runtime_settings = build_runtime_settings(os.environ)
 secret_key = runtime_settings.secret_key
@@ -358,7 +413,7 @@ configure_request_security(
 def log_request_info():
     """Record incoming request info for admin routes."""
     if request.path.startswith('/admin/'):
-        log_print(f"[REQUEST] {request.method} {request.path}", 'REQUEST', force=True)
+        log_print(f"[REQUEST] {request.method} {request.path}", 'REQUEST')
 # 不需要登录即可访问的端点（白名单）
 AUTH_EXEMPT_ENDPOINTS = frozenset({
     'static',
@@ -2925,6 +2980,7 @@ def create_tables():
                 'weekly_version_diff_cache', 'weekly_version_excel_cache',
                 'merged_diff_cache', 'operation_log',
                 'agent_nodes', 'agent_project_bindings', 'agent_tasks', 'agent_default_admins',
+                'agent_incidents',
             ]
             missing_tables = [t for t in expected_tables if t not in final_tables]
             if missing_tables:

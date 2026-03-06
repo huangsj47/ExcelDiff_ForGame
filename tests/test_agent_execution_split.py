@@ -144,6 +144,42 @@ def test_agent_auto_sync_uses_repository_name_style_local_path(monkeypatch, tmp_
     assert captured.get("local_repo_dir") == expected_local_dir
 
 
+def test_agent_auto_sync_fallback_path_and_migrate_legacy_dir(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_sync_repo(local_repo_dir, remote_url, branch):
+        captured["local_repo_dir"] = local_repo_dir
+
+    monkeypatch.setattr(auto_sync_handler, "_sync_repo", _fake_sync_repo)
+    monkeypatch.setattr(auto_sync_handler, "_collect_commits", lambda **kwargs: [])
+    monkeypatch.setattr(auto_sync_handler, "build_repository_local_path", None)
+
+    legacy_dir = tmp_path / "repo_1"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+
+    settings = SimpleNamespace(repos_base_dir=str(tmp_path))
+    task = {
+        "payload": {
+            "repository_id": 1,
+            "repository": {
+                "repository_id": 1,
+                "type": "git",
+                "url": "https://example.com/repo.git",
+                "project_code": "G119",
+                "repository_name": "qz_pub",
+            },
+        }
+    }
+
+    status, _, error, _ = auto_sync_handler.execute_auto_sync(task, settings)
+    expected_local_dir = tmp_path / "G119_qz_pub_1"
+    assert status == "completed"
+    assert error is None
+    assert captured.get("local_repo_dir") == str(expected_local_dir)
+    assert expected_local_dir.exists()
+    assert not legacy_dir.exists()
+
+
 def test_repository_sync_js_treats_accepted_as_dispatched_success():
     template_path = Path(__file__).resolve().parents[1] / "templates" / "repository_config.html"
     content = template_path.read_text(encoding="utf-8")

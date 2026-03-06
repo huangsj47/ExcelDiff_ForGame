@@ -25,9 +25,41 @@ def agent_heartbeat_route():
     return _dispatch("agent_heartbeat")
 
 
+@agent_management_bp.route("/api/agents/incidents/report", methods=["POST"], endpoint="agent_report_incident")
+def agent_report_incident_route():
+    return _dispatch("agent_report_incident")
+
+
 @agent_management_bp.route("/api/agents", methods=["GET"], endpoint="list_agent_nodes")
 def list_agent_nodes_route():
     return _dispatch("list_agent_nodes")
+
+
+@agent_management_bp.route(
+    "/api/agents/abnormal-summary",
+    methods=["GET"],
+    endpoint="agent_abnormal_summary",
+)
+def agent_abnormal_summary_route():
+    return _dispatch("get_agent_abnormal_summary")
+
+
+@agent_management_bp.route(
+    "/api/agents/<string:agent_code>/incidents",
+    methods=["GET"],
+    endpoint="list_agent_incidents",
+)
+def list_agent_incidents_route(agent_code):
+    return _dispatch("list_agent_incidents", agent_code)
+
+
+@agent_management_bp.route(
+    "/api/agents/incidents/<int:incident_id>/ignore",
+    methods=["POST"],
+    endpoint="ignore_agent_incident",
+)
+def ignore_agent_incident_route(incident_id):
+    return _dispatch("ignore_agent_incident", incident_id)
 
 
 @agent_management_bp.route("/admin/agents", methods=["GET"], endpoint="agent_overview_page")

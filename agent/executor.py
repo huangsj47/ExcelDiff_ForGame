@@ -55,17 +55,25 @@ def execute_task(task: dict, settings):
     task_type = str(task.get("task_type") or "").strip().lower()
     local_task_types = set(settings.local_task_types or [])
 
-    if task_type == "noop" and "noop" in local_task_types:
-        return "completed", "noop task completed", None, {}
+    try:
+        if task_type == "noop" and "noop" in local_task_types:
+            return "completed", "noop task completed", None, {}
 
-    if task_type == "auto_sync" and "auto_sync" in local_task_types:
-        return execute_auto_sync(task, settings)
+        if task_type == "auto_sync" and "auto_sync" in local_task_types:
+            return execute_auto_sync(task, settings)
 
-    if task_type == "temp_cache_fetch" and "temp_cache_fetch" in local_task_types:
-        return execute_temp_cache_fetch(task, settings)
+        if task_type == "temp_cache_fetch" and "temp_cache_fetch" in local_task_types:
+            return execute_temp_cache_fetch(task, settings)
 
-    if task_type in {"excel_diff", "weekly_sync", "weekly_excel_cache"} and task_type in local_task_types:
-        return _execute_task_via_local_runtime(task_type, task)
+        if task_type in {"excel_diff", "weekly_sync", "weekly_excel_cache"} and task_type in local_task_types:
+            return _execute_task_via_local_runtime(task_type, task)
+    except Exception as exc:
+        return (
+            "failed",
+            None,
+            f"agent local executor crashed for task_type={task_type}: {exc}",
+            None,
+        )
 
     # 任务类型未在本地启用，直接失败并由平台记录。
     return (

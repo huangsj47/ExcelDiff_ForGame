@@ -53,6 +53,34 @@
         color: #0f172a;
         font-weight: 700;
     }
+    .node-name-trigger {
+        color: #0f172a;
+        font-weight: 700;
+        text-decoration: none;
+        border: 0;
+    }
+    .node-name-trigger:hover {
+        color: #0d6efd;
+        text-decoration: underline;
+    }
+    .node-name-alert {
+        color: #d92d20 !important;
+        text-decoration: underline dotted;
+    }
+    .agent-row-alert {
+        background: linear-gradient(90deg, rgba(217, 45, 32, 0.07), rgba(217, 45, 32, 0.01));
+    }
+    .node-alert-chip {
+        display: inline-block;
+        margin-left: 6px;
+        padding: 1px 6px;
+        border-radius: 999px;
+        border: 1px solid rgba(217, 45, 32, 0.25);
+        color: #b42318;
+        font-size: 0.7rem;
+        font-weight: 700;
+        background: #fff5f4;
+    }
     .node-code {
         color: #64748b;
         font-size: 0.78rem;
@@ -69,6 +97,33 @@
     .project-chip.project-ellipsis {
         font-weight: 700;
         letter-spacing: 0.02em;
+    }
+    .incident-section-title {
+        color: #344054;
+        font-size: 0.82rem;
+        font-weight: 700;
+        margin-bottom: 6px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+    }
+    .incident-log-box {
+        max-height: 280px;
+        overflow: auto;
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+        background: #0b1220;
+        color: #e2e8f0;
+        padding: 10px 12px;
+        font-family: Consolas, Monaco, monospace;
+        font-size: 0.78rem;
+        line-height: 1.45;
+    }
+    .incident-list-item {
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+        padding: 8px 10px;
+        margin-bottom: 8px;
+        background: #fff;
     }
 </style>
 {% endblock %}
@@ -135,10 +190,33 @@
         </div>
     </div>
 </div>
+
+<div class="modal fade" id="agentIncidentModal" tabindex="-1" aria-labelledby="agentIncidentModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="agentIncidentModalLabel">Agent 异常详情</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="agentIncidentModalBody">
+                <div class="text-muted">加载中...</div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-danger btn-sm" id="incidentIgnoreBtn" style="display:none;">忽略该报错</button>
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+let agentRowMap = new Map();
+let incidentModalInstance = null;
+let currentAgentCodeForModal = '';
+let currentIgnoreIncidentId = null;
+
 function formatBytes(bytes) {
     const value = Number(bytes || 0);
     if (!value) return '-';
@@ -184,6 +262,30 @@ function escapeHtml(text) {
         .replace(/'/g, '&#39;');
 }
 
+function formatIncidentType(type) {
+    const value = String(type || '').trim().toLowerCase();
+    const mapping = {
+        runtime_fatal: '运行崩溃',
+        runtime_error: '运行异常',
+        interrupted: '中断退出',
+        fatal: '致命错误'
+    };
+    return mapping[value] || (type || '-');
+}
+
+function buildAlertTitle(item) {
+    const reasons = Array.isArray(item.abnormal_reasons) ? item.abnormal_reasons : [];
+    const tips = [];
+    if (reasons.includes('offline')) {
+        tips.push('节点离线');
+    }
+    if (reasons.includes('incident') && item.active_incident) {
+        const summary = String(item.active_incident.title || item.active_incident.message || '节点异常').trim();
+        tips.push(summary);
+    }
+    return tips.length ? tips.join(' | ') : '查看节点详情';
+}
+
 function renderProjectSummary(projects, maxVisible = 3) {
     const list = Array.isArray(projects)
         ? projects.map((code) => String(code || '').trim()).filter(Boolean)
@@ -203,6 +305,177 @@ function renderProjectSummary(projects, maxVisible = 3) {
     };
 }
 
+function renderLogExcerpt(logExcerpt) {
+    const text = String(logExcerpt || '').trim();
+    if (!text) {
+        return '<div class="text-muted">暂无日志片段</div>';
+    }
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const lastLines = lines.slice(Math.max(0, lines.length - 100));
+    const html = lastLines.map((line, idx) => {
+        return `<div><span style="display:inline-block; min-width:36px; color:#94a3b8;">${idx + 1}</span>${escapeHtml(line)}</div>`;
+    }).join('');
+    return `<div class="incident-log-box">${html}</div>`;
+}
+
+function renderIncidentTimeline(items) {
+    if (!Array.isArray(items) || !items.length) {
+        return '<div class="text-muted">暂无历史异常记录</div>';
+    }
+    return items.map((item) => {
+        const ignoredBadge = item.is_ignored
+            ? '<span class="badge bg-light text-secondary ms-2">已忽略</span>'
+            : '<span class="badge bg-danger ms-2">未忽略</span>';
+        return `
+            <div class="incident-list-item">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                        <strong>${escapeHtml(formatIncidentType(item.incident_type))}</strong>
+                        ${ignoredBadge}
+                    </div>
+                    <small class="text-muted">${escapeHtml(formatTimeText(item.created_at))}</small>
+                </div>
+                <div class="mt-1" style="font-weight: 600; color:#101828;">${escapeHtml(item.title || '-')}</div>
+                <div class="text-muted" style="font-size:0.84rem;">${escapeHtml(item.message || '-')}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function bindNodeTriggers() {
+    const nodes = document.querySelectorAll('.node-name-trigger');
+    nodes.forEach((el) => {
+        el.addEventListener('click', function() {
+            const code = String(this.dataset.agentCode || '').trim();
+            if (!code) return;
+            openIncidentModal(code);
+        });
+    });
+}
+
+async function ignoreCurrentIncident() {
+    if (!currentIgnoreIncidentId) return;
+    const btn = document.getElementById('incidentIgnoreBtn');
+    btn.disabled = true;
+    try {
+        const resp = await fetch(`/api/agents/incidents/${currentIgnoreIncidentId}/ignore`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: JSON.stringify({ ignored: true })
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.success) {
+            throw new Error(data.message || `HTTP ${resp.status}`);
+        }
+        await loadAgentNodes();
+        if (currentAgentCodeForModal) {
+            await openIncidentModal(currentAgentCodeForModal, true);
+        }
+    } catch (err) {
+        alert(`忽略异常失败: ${err}`);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function openIncidentModal(agentCode, alreadyOpen = false) {
+    currentAgentCodeForModal = String(agentCode || '').trim();
+    currentIgnoreIncidentId = null;
+    if (!currentAgentCodeForModal) return;
+
+    const row = agentRowMap.get(currentAgentCodeForModal) || {};
+    if (!incidentModalInstance) {
+        const modalEl = document.getElementById('agentIncidentModal');
+        incidentModalInstance = new bootstrap.Modal(modalEl);
+        document.getElementById('incidentIgnoreBtn').addEventListener('click', ignoreCurrentIncident);
+    }
+
+    const titleEl = document.getElementById('agentIncidentModalLabel');
+    const bodyEl = document.getElementById('agentIncidentModalBody');
+    const ignoreBtn = document.getElementById('incidentIgnoreBtn');
+    titleEl.textContent = `Agent 异常详情 - ${row.display_name || row.agent_name || currentAgentCodeForModal}`;
+    bodyEl.innerHTML = '<div class="text-muted">正在加载异常信息...</div>';
+    ignoreBtn.style.display = 'none';
+    if (!alreadyOpen) {
+        incidentModalInstance.show();
+    }
+
+    try {
+        const resp = await fetch(`/api/agents/${encodeURIComponent(currentAgentCodeForModal)}/incidents?limit=30`, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.success) {
+            throw new Error(data.message || `HTTP ${resp.status}`);
+        }
+
+        const items = Array.isArray(data.items) ? data.items : [];
+        const activeBrief = row.active_incident || null;
+        let activeIncident = null;
+        if (activeBrief && activeBrief.id) {
+            activeIncident = items.find((it) => Number(it.id) === Number(activeBrief.id)) || null;
+        }
+        if (!activeIncident) {
+            activeIncident = items.find((it) => !it.is_ignored) || items[0] || null;
+        }
+        if (activeIncident && !activeIncident.is_ignored) {
+            currentIgnoreIncidentId = activeIncident.id;
+            ignoreBtn.style.display = 'inline-block';
+        }
+
+        const reasons = Array.isArray(row.abnormal_reasons) ? row.abnormal_reasons : [];
+        const reasonChips = reasons.map((reason) => {
+            if (reason === 'offline') {
+                return '<span class="badge bg-danger me-1">离线异常</span>';
+            }
+            if (reason === 'incident') {
+                return '<span class="badge bg-warning text-dark me-1">报错异常</span>';
+            }
+            return `<span class="badge bg-secondary me-1">${escapeHtml(reason)}</span>`;
+        }).join('');
+        const offlineNotice = reasons.includes('offline')
+            ? '<div class="alert alert-danger py-2 mt-2 mb-0">节点当前离线，名称会保持红色，直到重新连接。</div>'
+            : '';
+
+        const detailHtml = activeIncident ? `
+            <div class="mb-3">
+                <div class="incident-section-title">当前异常详情</div>
+                <div><strong>类型：</strong>${escapeHtml(formatIncidentType(activeIncident.incident_type))}</div>
+                <div><strong>标题：</strong>${escapeHtml(activeIncident.title || '-')}</div>
+                <div><strong>时间：</strong>${escapeHtml(formatTimeText(activeIncident.created_at))}</div>
+                <div class="mt-1"><strong>信息：</strong>${escapeHtml(activeIncident.message || '-')}</div>
+                <div class="mt-1"><strong>错误详情：</strong></div>
+                <pre class="p-2 border rounded bg-light" style="white-space: pre-wrap; font-size:0.82rem;">${escapeHtml(activeIncident.error_detail || '-')}</pre>
+            </div>
+            <div class="mb-3">
+                <div class="incident-section-title">最后100行日志</div>
+                ${renderLogExcerpt(activeIncident.log_excerpt)}
+            </div>
+        ` : `
+            <div class="alert alert-light border">暂无可展示的异常详情</div>
+        `;
+
+        bodyEl.innerHTML = `
+            <div class="mb-2">
+                ${reasonChips || '<span class="badge bg-secondary">无异常标签</span>'}
+                <span class="text-muted ms-2">状态：${escapeHtml(row.status || '-')}</span>
+            </div>
+            ${offlineNotice}
+            ${detailHtml}
+            <div class="mb-2">
+                <div class="incident-section-title">最近异常记录</div>
+                ${renderIncidentTimeline(items)}
+            </div>
+        `;
+    } catch (err) {
+        bodyEl.innerHTML = `<div class="alert alert-danger py-2 mb-0">加载异常详情失败：${escapeHtml(String(err))}</div>`;
+    }
+}
+
 async function loadAgentNodes() {
     const tbody = document.getElementById('agentRowsBody');
     try {
@@ -217,10 +490,12 @@ async function loadAgentNodes() {
         }
 
         const items = Array.isArray(data.items) ? data.items : [];
+        agentRowMap = new Map(items.map((item) => [String(item.agent_code || ''), item]));
         if (!items.length) {
             tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-4">暂无Agent节点</td></tr>';
         } else {
             tbody.innerHTML = items.map(item => {
+                const isAbnormal = Boolean(item.is_abnormal);
                 const cpuCores = item.cpu_cores || '-';
                 const cpuAgent = formatPercent(item.agent_cpu_usage_percent);
                 const cpuSystem = formatPercent(item.cpu_usage_percent);
@@ -240,10 +515,21 @@ async function loadAgentNodes() {
                 const projectSummary = renderProjectSummary(projects, 3);
                 const osText = [item.os_name || '-', item.os_version || ''].join(' ').trim();
                 const hostText = `${item.host || '-'}${item.port ? ':' + item.port : ''}`;
+                const nodeTitle = buildAlertTitle(item);
+                const nodeAlertChip = isAbnormal ? '<span class="node-alert-chip">异常</span>' : '';
+                const rowClass = isAbnormal ? 'agent-row-alert' : '';
                 return `
-                <tr>
+                <tr class="${rowClass}">
                     <td>
-                        <div class="node-name">${item.display_name || item.agent_name || item.agent_code}</div>
+                        <div>
+                            <button
+                                type="button"
+                                class="btn btn-link p-0 node-name-trigger ${isAbnormal ? 'node-name-alert' : ''}"
+                                data-agent-code="${escapeHtml(item.agent_code || '')}"
+                                title="${escapeHtml(nodeTitle)}"
+                            >${escapeHtml(item.display_name || item.agent_name || item.agent_code || '-')}</button>
+                            ${nodeAlertChip}
+                        </div>
                         <div class="node-code mono">${item.agent_code || '-'}</div>
                     </td>
                     <td>${statusBadge(item.status)}</td>
@@ -263,6 +549,7 @@ async function loadAgentNodes() {
                 </tr>
                 `;
             }).join('');
+            bindNodeTriggers();
         }
 
         const onlineCount = items.filter(item => String(item.status || '').toLowerCase() === 'online').length;

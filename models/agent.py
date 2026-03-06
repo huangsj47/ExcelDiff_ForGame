@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Agent 节点模型
@@ -49,6 +49,12 @@ class AgentNode(db.Model):
 
     project_bindings = db.relationship(
         "AgentProjectBinding",
+        backref="agent",
+        lazy=True,
+        cascade="all, delete-orphan",
+    )
+    incidents = db.relationship(
+        "AgentIncident",
         backref="agent",
         lazy=True,
         cascade="all, delete-orphan",
@@ -151,3 +157,32 @@ class AgentTask(db.Model):
         Index("idx_agent_tasks_assigned_agent", "assigned_agent_id"),
         Index("idx_agent_tasks_lease", "lease_expires_at"),
     )
+
+class AgentIncident(db.Model):
+    """Agent 上报的运行异常/中断事件。"""
+
+    __tablename__ = "agent_incidents"
+
+    id = db.Column(db.Integer, primary_key=True)
+    agent_id = db.Column(db.Integer, db.ForeignKey("agent_nodes.id"), nullable=False, index=True)
+    incident_type = db.Column(db.String(40), nullable=False, default="runtime_error")
+    title = db.Column(db.String(255), nullable=False)
+    message = db.Column(db.Text)
+    error_detail = db.Column(db.Text)
+    log_excerpt = db.Column(db.Text)
+    is_ignored = db.Column(db.Boolean, nullable=False, default=False)
+    ignored_by = db.Column(db.String(100))
+    ignored_at = db.Column(db.DateTime)
+
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(
+        db.DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index("idx_agent_incidents_agent_time", "agent_id", "created_at"),
+        Index("idx_agent_incidents_ignore", "is_ignored", "created_at"),
+    )
+

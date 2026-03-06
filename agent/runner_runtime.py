@@ -10,6 +10,8 @@ import os
 import signal
 import sys
 import time
+import traceback
+from collections import deque
 from datetime import datetime
 
 try:
@@ -27,6 +29,10 @@ except ImportError:
 
 
 _SHUTDOWN = False
+_LAST_SIGNAL_NAME = ""
+_LAST_SETTINGS = None
+_LAST_COMMON_HEADERS = None
+_LAST_AGENT_TOKEN = ""
 
 
 def _log(message: str, verbose: bool = True):
@@ -37,8 +43,12 @@ def _log(message: str, verbose: bool = True):
 
 
 def _handle_signal(signum, frame):
-    global _SHUTDOWN
+    global _SHUTDOWN, _LAST_SIGNAL_NAME
     _SHUTDOWN = True
+    try:
+        _LAST_SIGNAL_NAME = signal.Signals(signum).name
+    except Exception:
+        _LAST_SIGNAL_NAME = f"SIGNAL_{signum}"
 
 
 def _is_virtual_env() -> bool:
@@ -110,8 +120,53 @@ def _restart_process_after_update(settings):
     os.execv(python_exe, argv)
 
 
+def _read_agent_log_tail(max_lines: int = 100, max_chars: int = 32000) -> str:
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.log")
+    if not os.path.exists(log_path):
+        return ""
+    try:
+        tail_lines = deque(maxlen=max(10, int(max_lines or 100)))
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fp:
+            for line in fp:
+                tail_lines.append(line.rstrip("\r\n"))
+        if not tail_lines:
+            return ""
+        text = "\n".join(tail_lines)
+        if len(text) > max_chars:
+            return text[-max_chars:]
+        return text
+    except Exception:
+        return ""
+
+
+def _report_agent_incident(
+    settings,
+    common_headers: dict,
+    agent_token: str,
+    incident_type: str,
+    title: str,
+    message: str,
+    error_detail: str = "",
+):
+    if not agent_token:
+        return
+    payload = {
+        "agent_code": settings.agent_code,
+        "agent_token": agent_token,
+        "incident_type": str(incident_type or "runtime_error"),
+        "title": str(title or "Agent运行异常"),
+        "message": str(message or "")[:4000],
+        "error_detail": str(error_detail or "")[:16000],
+        "log_excerpt": _read_agent_log_tail(max_lines=100, max_chars=32000),
+    }
+    url = f"{settings.platform_base_url}/api/agents/incidents/report"
+    status, data = post_json(url, payload, headers=common_headers, timeout=10)
+    if status != 200 or not data.get("success"):
+        _log(f"异常事件上报失败(status={status}): {data}", settings.log_verbose)
+
+
 def run_agent():
-    global _SHUTDOWN
+    global _SHUTDOWN, _LAST_SETTINGS, _LAST_COMMON_HEADERS, _LAST_AGENT_TOKEN
     settings = load_settings()
 
     if not settings.agent_shared_secret:
@@ -125,7 +180,10 @@ def run_agent():
     heartbeat_url = f"{settings.platform_base_url}/api/agents/heartbeat"
     claim_url = f"{settings.platform_base_url}/api/agents/tasks/claim"
     common_headers = {"X-Agent-Secret": settings.agent_shared_secret}
+    _LAST_SETTINGS = settings
+    _LAST_COMMON_HEADERS = common_headers
     agent_token = ""
+    _LAST_AGENT_TOKEN = ""
     last_heartbeat_at = 0.0
     last_metrics_at = 0.0
     cached_metrics = {}
@@ -177,6 +235,7 @@ def run_agent():
             status, data = post_json(register_url, register_payload, headers=common_headers, timeout=15)
             if status == 200 and data.get("success"):
                 agent_token = str(data.get("agent_token") or "").strip()
+                _LAST_AGENT_TOKEN = agent_token
                 created = data.get("created_project_codes") or []
                 idem = data.get("idempotent_project_codes") or []
                 _log(
@@ -219,6 +278,7 @@ def run_agent():
                     )
                     if rep_status in (401, 403):
                         agent_token = ""
+                        _LAST_AGENT_TOKEN = ""
                         heartbeat_online_logged = False
                         heartbeat_offline_logged = False
                         time.sleep(settings.register_retry_interval_seconds)
@@ -274,6 +334,7 @@ def run_agent():
                     heartbeat_online_logged = False
                 if status in (401, 403):
                     agent_token = ""
+                    _LAST_AGENT_TOKEN = ""
                     heartbeat_online_logged = False
                     heartbeat_offline_logged = False
                     time.sleep(settings.register_retry_interval_seconds)
@@ -289,6 +350,7 @@ def run_agent():
             _log(f"claim 失败(status={status}): {data}", settings.log_verbose)
             if status in (401, 403):
                 agent_token = ""
+                _LAST_AGENT_TOKEN = ""
             time.sleep(settings.register_retry_interval_seconds)
             continue
 
@@ -301,17 +363,27 @@ def run_agent():
         task_type = str(task.get("task_type") or "").strip().lower()
         _log(f"领取任务成功 id={task_id}, type={task_type}", settings.log_verbose)
 
-        exec_status, result_summary, error_message, result_payload = execute_task(task, settings)
-
-        result_payload = _maybe_upload_large_temp_cache(
-            task=task,
-            task_id=task_id,
-            task_type=task_type,
-            result_payload=result_payload,
-            settings=settings,
-            common_headers=common_headers,
-            agent_token=agent_token,
-        )
+        try:
+            exec_status, result_summary, error_message, result_payload = execute_task(task, settings)
+        except Exception as task_exc:
+            exec_status, result_summary, error_message, result_payload = (
+                "failed",
+                None,
+                f"execute_task crashed for task_type={task_type}: {task_exc}",
+                None,
+            )
+        try:
+            result_payload = _maybe_upload_large_temp_cache(
+                task=task,
+                task_id=task_id,
+                task_type=task_type,
+                result_payload=result_payload,
+                settings=settings,
+                common_headers=common_headers,
+                agent_token=agent_token,
+            )
+        except Exception as cache_exc:
+            _log(f"临时缓存上报异常，已跳过: {cache_exc}", settings.log_verbose)
 
         report_payload = {
             "agent_code": settings.agent_code,
@@ -335,6 +407,17 @@ def run_agent():
 
         time.sleep(settings.task_poll_interval_seconds)
 
+    if _LAST_SIGNAL_NAME and agent_token:
+        _report_agent_incident(
+            settings=settings,
+            common_headers=common_headers,
+            agent_token=agent_token,
+            incident_type="interrupted",
+            title="Agent收到中断信号",
+            message=f"进程收到 {_LAST_SIGNAL_NAME} 并退出",
+            error_detail="",
+        )
+
     _log("收到退出信号，Agent 已停止", settings.log_verbose)
 
 
@@ -342,6 +425,16 @@ def main():
     try:
         run_agent()
     except Exception as exc:
+        if _LAST_SETTINGS and _LAST_COMMON_HEADERS and _LAST_AGENT_TOKEN:
+            _report_agent_incident(
+                settings=_LAST_SETTINGS,
+                common_headers=_LAST_COMMON_HEADERS,
+                agent_token=_LAST_AGENT_TOKEN,
+                incident_type="runtime_fatal",
+                title="Agent运行异常退出",
+                message=str(exc),
+                error_detail=traceback.format_exc(),
+            )
         print(f"[AGENT][FATAL] {exc}")
         sys.exit(1)
 

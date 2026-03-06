@@ -209,17 +209,28 @@ def run_agent():
         task_type = str(task.get("task_type") or "").strip().lower()
         _log(f"领取任务成功 id={task_id}, type={task_type}", settings.log_verbose)
 
-        exec_status, result_summary, error_message, result_payload = execute_task(task, settings)
+        try:
+            exec_status, result_summary, error_message, result_payload = execute_task(task, settings)
+        except Exception as task_exc:
+            exec_status, result_summary, error_message, result_payload = (
+                "failed",
+                None,
+                f"execute_task crashed for task_type={task_type}: {task_exc}",
+                None,
+            )
 
-        result_payload = _maybe_upload_large_temp_cache(
-            task=task,
-            task_id=task_id,
-            task_type=task_type,
-            result_payload=result_payload,
-            settings=settings,
-            common_headers=common_headers,
-            agent_token=agent_token,
-        )
+        try:
+            result_payload = _maybe_upload_large_temp_cache(
+                task=task,
+                task_id=task_id,
+                task_type=task_type,
+                result_payload=result_payload,
+                settings=settings,
+                common_headers=common_headers,
+                agent_token=agent_token,
+            )
+        except Exception as cache_exc:
+            _log(f"临时缓存上报异常，已跳过: {cache_exc}", settings.log_verbose)
 
         report_payload = {
             "agent_code": settings.agent_code,

@@ -4,6 +4,8 @@ chcp 65001 >nul 2>&1
 title Agent Startup
 
 cd /d "%~dp0"
+set "LOG_FILE=%~dp0agent.log"
+if not exist "%LOG_FILE%" type nul > "%LOG_FILE%"
 
 echo ========================================
 echo   Agent - Startup Script
@@ -77,8 +79,10 @@ echo   Press Ctrl+C to stop
 echo ========================================
 echo.
 
-"%PYTHON_EXE%" start_agent.py
+echo [%date% %time%] [INFO] Agent process start >> "%LOG_FILE%"
+"%PYTHON_EXE%" start_agent.py >> "%LOG_FILE%" 2>&1
 set "APP_EXIT=%ERRORLEVEL%"
+echo [%date% %time%] [INFO] Agent process exit code=%APP_EXIT% >> "%LOG_FILE%"
 
 if not "%APP_EXIT%"=="0" (
     echo [ERROR] Agent exited with code %APP_EXIT%.

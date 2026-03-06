@@ -46,6 +46,7 @@ _MODEL_OBJECT_NAMES = frozenset(
         "AgentProjectBinding",
         "AgentTask",
         "AgentDefaultAdmin",
+        "AgentIncident",
         "AgentTempCache",
         "AuthUser",
         "AuthFunction",

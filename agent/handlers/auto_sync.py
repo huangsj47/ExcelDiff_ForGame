@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -21,6 +22,62 @@ _GIT_LOCK_FILES = (
     os.path.join(".git", "packed-refs.lock"),
     os.path.join(".git", "shallow.lock"),
 )
+_SAFE_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _sanitize_segment(segment: str, fallback: str) -> str:
+    raw = str(segment or "").strip()
+    if _SAFE_SEGMENT_PATTERN.match(raw):
+        return raw
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", raw)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("._")
+    return cleaned or fallback
+
+
+def _build_repo_local_path_fallback(project_code: str, repository_name: str, repository_id: int, base_dir: str) -> str:
+    safe_project = _sanitize_segment(project_code, "project")
+    safe_repo = _sanitize_segment(repository_name, "repository")
+    safe_id = int(repository_id)
+    base_abs = os.path.abspath(base_dir)
+    candidate = os.path.abspath(os.path.join(base_abs, f"{safe_project}_{safe_repo}_{safe_id}"))
+    if not (candidate == base_abs or candidate.startswith(base_abs + os.sep)):
+        raise ValueError("Repository path escapes base directory")
+    return candidate
+
+
+def _resolve_local_repo_dir(base_dir: str, repository_id: int, project_code: str, repository_name: str) -> str:
+    legacy_repo_dir = os.path.join(base_dir, f"repo_{repository_id}")
+    use_named_dir = bool(project_code and repository_name)
+    if not use_named_dir:
+        return legacy_repo_dir
+
+    named_repo_dir = None
+    if build_repository_local_path:
+        try:
+            named_repo_dir = build_repository_local_path(
+                project_code,
+                repository_name,
+                repository_id,
+                base_dir=base_dir,
+                strict=False,
+            )
+        except Exception:
+            named_repo_dir = None
+    if not named_repo_dir:
+        named_repo_dir = _build_repo_local_path_fallback(project_code, repository_name, repository_id, base_dir)
+
+    if os.path.isdir(legacy_repo_dir) and not os.path.exists(named_repo_dir):
+        os.makedirs(os.path.dirname(named_repo_dir), exist_ok=True)
+        try:
+            shutil.move(legacy_repo_dir, named_repo_dir)
+        except Exception:
+            return legacy_repo_dir
+
+    if os.path.isdir(named_repo_dir):
+        return named_repo_dir
+    if os.path.isdir(legacy_repo_dir):
+        return legacy_repo_dir
+    return named_repo_dir
 
 
 def execute_auto_sync(task: dict, settings):
@@ -59,15 +116,12 @@ def execute_auto_sync(task: dict, settings):
         or payload.get("repository_name")
         or ""
     ).strip()
-    local_repo_dir = os.path.join(base_dir, f"repo_{repository_id}")
-    if build_repository_local_path and project_code and repository_name:
-        local_repo_dir = build_repository_local_path(
-            project_code,
-            repository_name,
-            repository_id,
-            base_dir=base_dir,
-            strict=False,
-        )
+    local_repo_dir = _resolve_local_repo_dir(
+        base_dir=base_dir,
+        repository_id=int(repository_id),
+        project_code=project_code,
+        repository_name=repository_name,
+    )
 
     auth_url = _build_auth_url(remote_url, username, token)
     _sync_repo(local_repo_dir, auth_url, branch)

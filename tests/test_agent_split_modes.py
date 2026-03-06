@@ -14,6 +14,7 @@ from agent.system_metrics import collect_agent_metrics
 from app import app, create_tables, db
 from models import (
     AgentDefaultAdmin,
+    AgentIncident,
     AgentNode,
     AgentProjectBinding,
     AgentTask,
@@ -100,6 +101,23 @@ def test_agent_executor_local_auto_sync_and_proxy_fallback(monkeypatch):
     assert summary is None
     assert payload is None
     assert "unsupported task_type=auto_sync" in str(error)
+
+
+def test_agent_executor_handles_local_handler_exception(monkeypatch):
+    def _raise_auto_sync(task, settings):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(agent_executor, "execute_auto_sync", _raise_auto_sync)
+    local_settings = SimpleNamespace(local_task_types=["auto_sync"])
+
+    status, summary, error, payload = agent_executor.execute_task(
+        {"task_type": "auto_sync", "payload": {"repository_id": 1}},
+        local_settings,
+    )
+    assert status == "failed"
+    assert summary is None
+    assert payload is None
+    assert "crashed for task_type=auto_sync" in str(error)
 
 
 def test_agent_executor_temp_cache_fetch_hit(tmp_path):
@@ -634,6 +652,139 @@ def test_agent_heartbeat_falls_back_to_observed_ip_when_reported_host_matches_pl
             assert saved_agent is not None
             assert saved_agent.host == "10.226.98.24"
             assert saved_agent.port == 9010
+
+
+def test_agent_incident_report_and_ignore_flow(monkeypatch):
+    shared_secret = _uid("secret")
+    admin_token = _uid("admin-token")
+    agent_code = _uid("agent")
+    monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
+    monkeypatch.setenv("ADMIN_API_TOKEN", admin_token)
+
+    with app.app_context():
+        create_tables()
+        with app.test_client() as client:
+            agent_token = _register_agent(client, shared_secret, agent_code, None)
+            report_resp = client.post(
+                "/api/agents/incidents/report",
+                json={
+                    "agent_code": agent_code,
+                    "agent_token": agent_token,
+                    "incident_type": "runtime_error",
+                    "title": "Agent运行异常",
+                    "message": "worker crashed",
+                    "error_detail": "Traceback: ...",
+                    "log_excerpt": "line1\nline2",
+                },
+                headers={"X-Agent-Secret": shared_secret},
+            )
+            assert report_resp.status_code == 200, report_resp.get_data(as_text=True)
+            incident_id = (report_resp.get_json() or {}).get("incident_id")
+            assert incident_id
+
+            list_resp = client.get("/api/agents", headers={"X-Admin-Token": admin_token})
+            assert list_resp.status_code == 200
+            items = (list_resp.get_json() or {}).get("items") or []
+            row = next((it for it in items if it.get("agent_code") == agent_code), None)
+            assert row is not None
+            assert row.get("is_abnormal") is True
+            assert "incident" in (row.get("abnormal_reasons") or [])
+
+            incidents_resp = client.get(
+                f"/api/agents/{agent_code}/incidents?limit=20",
+                headers={"X-Admin-Token": admin_token},
+            )
+            assert incidents_resp.status_code == 200
+            incidents = (incidents_resp.get_json() or {}).get("items") or []
+            assert incidents
+            assert incidents[0].get("title") == "Agent运行异常"
+
+            ignore_resp = client.post(
+                f"/api/agents/incidents/{incident_id}/ignore",
+                json={"ignored": True},
+                headers={"X-Admin-Token": admin_token},
+            )
+            assert ignore_resp.status_code == 200, ignore_resp.get_data(as_text=True)
+            assert (ignore_resp.get_json() or {}).get("success") is True
+
+            row_after = next(
+                (
+                    it
+                    for it in ((client.get("/api/agents", headers={"X-Admin-Token": admin_token}).get_json() or {}).get("items") or [])
+                    if it.get("agent_code") == agent_code
+                ),
+                None,
+            )
+            assert row_after is not None
+            assert row_after.get("is_abnormal") is False
+
+
+def test_agent_abnormal_summary_counts_offline_and_incident(monkeypatch):
+    shared_secret = _uid("secret")
+    admin_token = _uid("admin-token")
+    agent_code_a = _uid("agent-a")
+    agent_code_b = _uid("agent-b")
+    monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
+    monkeypatch.setenv("ADMIN_API_TOKEN", admin_token)
+
+    with app.app_context():
+        create_tables()
+        with app.test_client() as client:
+            token_a = _register_agent(client, shared_secret, agent_code_a, None)
+            _register_agent(client, shared_secret, agent_code_b, None)
+
+            report_resp = client.post(
+                "/api/agents/incidents/report",
+                json={
+                    "agent_code": agent_code_a,
+                    "agent_token": token_a,
+                    "incident_type": "runtime_error",
+                    "title": "task failed",
+                    "message": "error",
+                },
+                headers={"X-Agent-Secret": shared_secret},
+            )
+            assert report_resp.status_code == 200
+
+            agent_b = AgentNode.query.filter_by(agent_code=agent_code_b).first()
+            assert agent_b is not None
+            agent_b.status = "online"
+            agent_b.last_heartbeat = datetime.now(timezone.utc) - timedelta(minutes=10)
+            db.session.commit()
+
+            summary_resp = client.get("/api/agents/abnormal-summary", headers={"X-Admin-Token": admin_token})
+            assert summary_resp.status_code == 200
+            summary = summary_resp.get_json() or {}
+            assert summary.get("success") is True
+            assert int(summary.get("abnormal_count") or 0) >= 2
+            assert int(summary.get("offline_count") or 0) >= 1
+            assert int(summary.get("incident_count") or 0) >= 1
+
+
+def test_list_agents_marks_stale_heartbeat_as_offline(monkeypatch):
+    shared_secret = _uid("secret")
+    admin_token = _uid("admin-token")
+    agent_code = _uid("agent")
+    monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
+    monkeypatch.setenv("ADMIN_API_TOKEN", admin_token)
+
+    with app.app_context():
+        create_tables()
+        with app.test_client() as client:
+            _register_agent(client, shared_secret, agent_code, None)
+            saved_agent = AgentNode.query.filter_by(agent_code=agent_code).first()
+            assert saved_agent is not None
+            saved_agent.status = "online"
+            saved_agent.last_heartbeat = datetime.now(timezone.utc) - timedelta(minutes=10)
+            db.session.commit()
+
+            list_resp = client.get("/api/agents", headers={"X-Admin-Token": admin_token})
+            assert list_resp.status_code == 200
+            payload = list_resp.get_json() or {}
+            items = payload.get("items") or []
+            target = next((item for item in items if item.get("agent_code") == agent_code), None)
+            assert target is not None
+            assert target.get("status") == "offline"
 
 
 def test_admin_agents_page_accessible_with_admin_token(monkeypatch):
