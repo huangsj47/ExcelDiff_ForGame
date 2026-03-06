@@ -9,13 +9,21 @@ import zipfile
 from datetime import datetime
 
 
-def should_skip(path: str) -> bool:
-    lower = path.replace("\\", "/").lower()
-    if "/__pycache__/" in lower:
+def should_skip_rel(rel_path: str) -> bool:
+    lower = rel_path.replace("\\", "/").lower()
+    name = os.path.basename(lower)
+
+    if "/__pycache__/" in f"/{lower}/":
         return True
-    if lower.endswith(".pyc"):
+    if name.endswith(".pyc"):
         return True
-    if lower.endswith("/.env"):
+    if name.endswith(".swp"):
+        return True
+    if name == ".env":
+        return True
+    if name == "打包agent.bat":
+        return True
+    if name.startswith("agent_package_") and name.endswith(".zip"):
         return True
     return False
 
@@ -26,11 +34,12 @@ def build():
     out_path = os.path.join(base_dir, out_name)
 
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, _, files in os.walk(base_dir):
+        for root, dirs, files in os.walk(base_dir):
+            dirs[:] = [d for d in dirs if d.lower() != "venv"]
             for name in files:
                 abs_path = os.path.join(root, name)
                 rel_path = os.path.relpath(abs_path, base_dir)
-                if should_skip(abs_path):
+                if should_skip_rel(rel_path):
                     continue
                 zf.write(abs_path, arcname=rel_path)
 
@@ -39,4 +48,3 @@ def build():
 
 if __name__ == "__main__":
     build()
-
