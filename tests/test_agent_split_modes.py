@@ -217,7 +217,7 @@ def test_agent_api_register_claim_report_roundtrip(monkeypatch):
             assert (report_response.get_json() or {}).get("success") is True
 
             db.session.expire_all()
-            saved_task = AgentTask.query.get(task.id)
+            saved_task = db.session.get(AgentTask, task.id)
             assert saved_task is not None
             assert saved_task.status == "completed"
             summary = json.loads(saved_task.result_summary or "{}")
@@ -314,7 +314,7 @@ def test_auto_sync_result_payload_creates_commits_and_excel_task(monkeypatch):
             assert (response.get_json() or {}).get("success") is True
 
             db.session.expire_all()
-            saved_auto_task = AgentTask.query.get(auto_task.id)
+            saved_auto_task = db.session.get(AgentTask, auto_task.id)
             assert saved_auto_task is not None
             assert saved_auto_task.status == "completed"
             summary = json.loads(saved_auto_task.result_summary or "{}")
@@ -333,12 +333,12 @@ def test_auto_sync_result_payload_creates_commits_and_excel_task(monkeypatch):
             ).first()
             assert excel_followup is not None
 
-            synced_source_task = BackgroundTask.query.get(src_task.id)
+            synced_source_task = db.session.get(BackgroundTask, src_task.id)
             assert synced_source_task is not None
             assert synced_source_task.status == "completed"
             assert synced_source_task.error_message is None
 
-            refreshed_repo = Repository.query.get(repository.id)
+            refreshed_repo = db.session.get(Repository, repository.id)
             assert refreshed_repo is not None
             assert refreshed_repo.last_sync_commit_id == commit_text
             assert refreshed_repo.last_sync_time is not None
@@ -374,7 +374,7 @@ def test_platform_mode_project_create_can_bind_selected_agent(monkeypatch):
             assert project is not None
             binding = AgentProjectBinding.query.filter_by(project_id=project.id).first()
             assert binding is not None
-            agent = AgentNode.query.get(binding.agent_id)
+            agent = db.session.get(AgentNode, binding.agent_id)
             assert agent is not None
             assert agent.agent_code == agent_code
 
@@ -414,7 +414,7 @@ def test_platform_mode_admin_create_without_agent_code_defaults_first_agent(monk
             assert project is not None
             binding = AgentProjectBinding.query.filter_by(project_id=project.id).first()
             assert binding is not None
-            agent = AgentNode.query.get(binding.agent_id)
+            agent = db.session.get(AgentNode, binding.agent_id)
             assert agent is not None
             assert agent.agent_code == min(agent_code_a, agent_code_z)
 
@@ -806,7 +806,7 @@ def test_default_admin_user_can_create_project_only_on_owned_agents(monkeypatch)
             assert owned_project is not None
             owned_binding = AgentProjectBinding.query.filter_by(project_id=owned_project.id).first()
             assert owned_binding is not None
-            owned_agent = AgentNode.query.get(owned_binding.agent_id)
+            owned_agent = db.session.get(AgentNode, owned_binding.agent_id)
             assert owned_agent is not None
             assert owned_agent.agent_code == agent_a_code
             owned_membership = AuthUserProject.query.filter_by(
@@ -896,8 +896,8 @@ def test_default_admin_user_with_two_owned_agents_can_select_either(monkeypatch)
             assert b_a is not None
             assert b_b is not None
 
-            a1 = AgentNode.query.get(b_a.agent_id)
-            a2 = AgentNode.query.get(b_b.agent_id)
+            a1 = db.session.get(AgentNode, b_a.agent_id)
+            a2 = db.session.get(AgentNode, b_b.agent_id)
             assert a1 is not None and a1.agent_code == agent_a_code
             assert a2 is not None and a2.agent_code == agent_b_code
 
@@ -951,7 +951,7 @@ def test_default_admin_email_prefix_user_can_create_project(monkeypatch):
             assert project is not None
             binding = AgentProjectBinding.query.filter_by(project_id=project.id).first()
             assert binding is not None
-            bound_agent = AgentNode.query.get(binding.agent_id)
+            bound_agent = db.session.get(AgentNode, binding.agent_id)
             assert bound_agent is not None
             assert bound_agent.agent_code == agent_code
 
@@ -1021,7 +1021,7 @@ def test_qkit_default_admin_user_can_create_project_and_auto_admin(monkeypatch):
             assert project is not None
             binding = AgentProjectBinding.query.filter_by(project_id=project.id).first()
             assert binding is not None
-            bound_agent = AgentNode.query.get(binding.agent_id)
+            bound_agent = db.session.get(AgentNode, binding.agent_id)
             assert bound_agent is not None
             assert bound_agent.agent_code == agent_code
 

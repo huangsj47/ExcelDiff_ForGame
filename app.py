@@ -22,9 +22,10 @@ import secrets
 import hmac
 from datetime import datetime, timedelta, timezone
 
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session, abort
 from flask_cors import CORS
 from sqlalchemy import Index, func, case, inspect, or_
+from werkzeug.exceptions import Forbidden, NotFound
 
 from models import (
     db,
@@ -451,6 +452,66 @@ def enforce_csrf():
 
     return None
 
+
+def _prefers_json_error_response() -> bool:
+    accept = str(request.headers.get("Accept", "") or "").lower()
+    if (
+        "text/html" not in accept
+        and request.path.startswith(("/api/", "/commits/", "/repositories/", "/weekly-version-config/"))
+    ):
+        return True
+    return (
+        request.path.startswith("/api/")
+        or request.is_json
+        or request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in accept
+    )
+
+
+def _infer_resource_label_from_path(path: str) -> str:
+    raw = str(path or "").lower()
+    if "/repositories/" in raw:
+        return "仓库页面"
+    if "/weekly-version-config/" in raw or "/weekly-version" in raw:
+        return "周版本页面"
+    if "/projects/" in raw:
+        return "项目页面"
+    return "页面"
+
+
+@app.errorhandler(NotFound)
+def handle_not_found(error):
+    if _prefers_json_error_response():
+        return jsonify({"success": False, "message": "资源不存在或已被删除"}), 404
+    resource_label = _infer_resource_label_from_path(request.path)
+    return (
+        render_template(
+            "resource_access_error.html",
+            error_code=404,
+            page_title="页面不存在",
+            resource_label=resource_label,
+            message=f"当前{resource_label}不存在，可能已被删除或访问链接已失效。",
+        ),
+        404,
+    )
+
+
+@app.errorhandler(Forbidden)
+def handle_forbidden(error):
+    if _prefers_json_error_response():
+        return jsonify({"success": False, "message": "权限不足"}), 403
+    resource_label = _infer_resource_label_from_path(request.path)
+    return (
+        render_template(
+            "resource_access_error.html",
+            error_code=403,
+            page_title="权限不足",
+            resource_label=resource_label,
+            message=f"当前账号对该{resource_label}权限不足，请联系项目管理员或平台管理员授权。",
+        ),
+        403,
+    )
+
 # Add the function to Jinja2 template globals
 app.jinja_env.globals['get_excel_column_letter'] = get_excel_column_letter
 app.jinja_env.globals['csrf_token'] = csrf_token
@@ -749,7 +810,7 @@ from services.task_worker_service import (
     create_auto_sync_task, create_weekly_sync_task,
     cleanup_git_processes, queue_missing_git_branch_refresh,
     regenerate_repository_cache,
-    setup_schedule, start_scheduler,
+    setup_schedule, start_scheduler, stop_scheduler,
 )
 
 # ---------------------------------------------------------------------------
@@ -830,6 +891,8 @@ def commit_list(repository_id):
     log_print(f"Repository ID: {repository_id}", 'APP')
     repository = Repository.query.get_or_404(repository_id)
     project = repository.project
+    if not _has_project_access(project.id):
+        abort(403)
     # 获取同一项目下的所有仓库，按名称分组
     all_repositories = project.repositories
     repository_groups = {}
@@ -2971,6 +3034,8 @@ _bootstrap_manager = AppBootstrapManager(
     init_auth_default_data_func=_init_auth_default_data_with_context,
     start_background_task_worker_func=start_background_task_worker,
     stop_background_task_worker_func=stop_background_task_worker,
+    start_scheduler_func=start_scheduler,
+    stop_scheduler_func=stop_scheduler,
     clear_version_mismatch_cache_func=clear_version_mismatch_cache,
     cleanup_pending_deletions_func=cleanup_pending_deletions,
     cleanup_git_processes_func=cleanup_git_processes,

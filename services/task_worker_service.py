@@ -42,6 +42,9 @@ _db_retry = None
 background_task_queue = queue.PriorityQueue()
 background_task_running = False
 background_task_thread = None
+scheduler_running = False
+scheduler_thread = None
+_schedule_initialized = False
 
 # 同步并发控制：同时最多5个仓库更新
 _sync_semaphore = threading.Semaphore(5)
@@ -840,6 +843,8 @@ def start_background_task_worker():
         load_pending_tasks()
         background_task_thread = threading.Thread(target=background_task_worker, daemon=True)
         background_task_thread.start()
+        # single 模式下需要本地执行任务，顺带启用清理任务调度。
+        start_scheduler(include_cleanup=not _use_agent_dispatch())
         log_print("后台任务工作线程已启动", 'APP')
 
 
@@ -860,6 +865,7 @@ def stop_background_task_worker():
                 log_print(f"停止后台任务线程时出现错误: {e}", 'APP', force=True)
         else:
             log_print("后台任务工作线程已停止", 'APP')
+        stop_scheduler()
 
 
 def add_excel_diff_task(repository_id, commit_id, file_path, priority=10, auto_commit=True):
@@ -1161,18 +1167,24 @@ def schedule_repository_sync_tasks():
         log_print(f"❌ 定时仓库同步调度失败: {e}", 'SCHEDULER', force=True)
 
 
-def setup_schedule():
+def setup_schedule(include_cleanup=True):
     """设置定时任务（由 app.py 调用）"""
+    global _schedule_initialized
+    if _schedule_initialized:
+        return
     import schedule as sched_module
-    sched_module.every().day.at("04:00").do(schedule_cleanup_task)
+    sched_module.clear()
+    if include_cleanup:
+        sched_module.every().day.at("04:00").do(schedule_cleanup_task)
     sched_module.every(2).minutes.do(schedule_weekly_sync_tasks)
     sched_module.every(2).minutes.do(schedule_repository_sync_tasks)
+    _schedule_initialized = True
 
 
 def run_scheduled_tasks():
     """运行定时任务检查器"""
     import schedule as sched_module
-    while background_task_running:
+    while scheduler_running:
         try:
             with _app.app_context():
                 sched_module.run_pending()
@@ -1181,11 +1193,29 @@ def run_scheduled_tasks():
         time.sleep(60)
 
 
-def start_scheduler():
+def start_scheduler(include_cleanup=True):
     """启动定时任务调度器"""
+    global scheduler_running, scheduler_thread
+    setup_schedule(include_cleanup=include_cleanup)
+    if scheduler_running and scheduler_thread and scheduler_thread.is_alive():
+        return
+    scheduler_running = True
     scheduler_thread = threading.Thread(target=run_scheduled_tasks, daemon=True)
     scheduler_thread.start()
     log_print("定时任务调度器已启动", 'APP')
+
+
+def stop_scheduler():
+    """停止定时任务调度器。"""
+    global scheduler_running, scheduler_thread
+    if not scheduler_running:
+        return
+    scheduler_running = False
+    if scheduler_thread and scheduler_thread.is_alive():
+        try:
+            scheduler_thread.join(timeout=2)
+        except Exception as exc:
+            log_print(f"停止定时任务调度器失败: {exc}", "APP", force=True)
 
 
 # ---------------------------------------------------------------------------

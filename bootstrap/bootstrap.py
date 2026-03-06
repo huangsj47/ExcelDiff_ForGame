@@ -20,6 +20,8 @@ class AppBootstrapManager:
         init_auth_default_data_func,
         start_background_task_worker_func,
         stop_background_task_worker_func,
+        start_scheduler_func=None,
+        stop_scheduler_func=None,
         clear_version_mismatch_cache_func,
         cleanup_pending_deletions_func,
         cleanup_git_processes_func,
@@ -31,6 +33,8 @@ class AppBootstrapManager:
         self._init_auth_default_data_func = init_auth_default_data_func
         self._start_background_task_worker_func = start_background_task_worker_func
         self._stop_background_task_worker_func = stop_background_task_worker_func
+        self._start_scheduler_func = start_scheduler_func
+        self._stop_scheduler_func = stop_scheduler_func
         self._clear_version_mismatch_cache_func = clear_version_mismatch_cache_func
         self._cleanup_pending_deletions_func = cleanup_pending_deletions_func
         self._cleanup_git_processes_func = cleanup_git_processes_func
@@ -50,6 +54,17 @@ class AppBootstrapManager:
                 self._log_print("Auth: 默认数据初始化完成", "AUTH")
             except Exception as exc:
                 self._log_print(f"Auth 默认数据初始化跳过: {exc}", "AUTH")
+
+            if callable(self._start_scheduler_func):
+                try:
+                    self._start_scheduler_func(include_cleanup=self._enable_local_worker)
+                except TypeError:
+                    # 兼容旧签名（无 include_cleanup 参数）
+                    self._start_scheduler_func()
+                if self._enable_local_worker:
+                    self._log_print("定时调度器已启动（single模式）", "APP")
+                else:
+                    self._log_print("定时调度器已启动（platform/agent模式，仅任务派发）", "APP", force=True)
 
             if self._enable_local_worker:
                 with self._app.app_context():
@@ -80,7 +95,8 @@ class AppBootstrapManager:
         try:
             if self._enable_local_worker:
                 self._stop_background_task_worker_func()
+            if callable(self._stop_scheduler_func):
+                self._stop_scheduler_func()
             self._cleanup_git_processes_func()
         except Exception as exc:
             self._log_print(f"应用清理过程中出现错误: {exc}", "APP", force=True)
-

@@ -5,13 +5,15 @@ from __future__ import annotations
 import hmac
 import os
 
-from flask import current_app, flash, redirect, render_template, request, session, url_for
+from flask import abort, current_app, flash, redirect, render_template, request, session, url_for
 
 from models import AgentNode, AgentProjectBinding, Project, Repository, db
 from services.model_loader import get_runtime_model
 from utils.request_security import (
     _get_project_create_agent_codes,
     _has_admin_access,
+    _has_project_access,
+    _has_project_admin_access,
     _has_project_create_access,
     _is_logged_in,
     _is_safe_redirect,
@@ -358,21 +360,29 @@ def project_detail(project_id):
 
 def project_detail_original(project_id):
     project = Project.query.get_or_404(project_id)
+    if not _has_project_access(project_id):
+        abort(403)
     repositories = Repository.query.filter_by(project_id=project_id).order_by(Repository.display_order).all()
     return render_template("project_detail.html", project=project, repositories=repositories)
 
 
 def repository_config(project_id):
     project = Project.query.get_or_404(project_id)
+    if not _has_project_access(project_id):
+        abort(403)
     repositories = Repository.query.filter_by(project_id=project_id).order_by(Repository.display_order).all()
     return render_template("repository_config.html", project=project, repositories=repositories)
 
 
 def add_git_repository(project_id):
     project = Project.query.get_or_404(project_id)
+    if not _has_project_admin_access(project_id):
+        abort(403)
     return render_template("add_git_repository.html", project=project)
 
 
 def add_svn_repository(project_id):
     project = Project.query.get_or_404(project_id)
+    if not _has_project_admin_access(project_id):
+        abort(403)
     return render_template("add_svn_repository.html", project=project)

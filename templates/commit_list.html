@@ -198,6 +198,85 @@
     .pagination .page-link { border-radius: 6px; margin: 0 2px; font-weight: 500; font-size: 0.82rem; }
     .pagination .page-item.active .page-link { background: #0d6efd; border-color: #0d6efd; }
 
+    /* ===== 批量操作区 ===== */
+    .batch-operations {
+        position: sticky;
+        bottom: 10px;
+        z-index: 30;
+        background: rgba(248, 250, 252, 0.9);
+        border: 1px solid #dbe4ef;
+        border-radius: 12px;
+        padding: 10px 12px;
+        backdrop-filter: blur(4px);
+    }
+    .batch-btn {
+        border-radius: 10px;
+        border: 1px solid transparent;
+        font-size: 0.84rem;
+        font-weight: 700;
+        padding: 0.52rem 1.05rem;
+        transition: transform .18s ease, box-shadow .18s ease, filter .18s ease;
+    }
+    .batch-btn:hover {
+        transform: translateY(-1px);
+        filter: brightness(1.02);
+    }
+    .batch-btn-approve {
+        color: #fff;
+        background: linear-gradient(135deg, #198754 0%, #157347 100%);
+        box-shadow: 0 4px 10px rgba(21, 128, 61, 0.26);
+    }
+    .batch-btn-reject {
+        color: #5f3700;
+        background: linear-gradient(135deg, #facc15 0%, #f59e0b 100%);
+        box-shadow: 0 4px 10px rgba(245, 158, 11, 0.25);
+    }
+    .batch-btn-merge {
+        color: #083344;
+        background: linear-gradient(135deg, #67e8f9 0%, #22d3ee 100%);
+        box-shadow: 0 4px 10px rgba(14, 116, 144, 0.2);
+    }
+
+    /* ===== 提交列表右键菜单 ===== */
+    .commit-context-menu {
+        position: fixed;
+        min-width: 210px;
+        z-index: 12000;
+        background: #ffffff;
+        border: 1px solid #dbe4ef;
+        border-radius: 10px;
+        box-shadow: 0 14px 34px rgba(15, 23, 42, 0.2);
+        overflow: hidden;
+    }
+    .commit-context-menu .context-header {
+        padding: 0.45rem 0.75rem;
+        font-size: 0.72rem;
+        font-weight: 700;
+        color: #475569;
+        background: #f8fafc;
+        border-bottom: 1px solid #e2e8f0;
+    }
+    .commit-context-menu .context-item {
+        width: 100%;
+        border: 0;
+        background: #fff;
+        text-align: left;
+        padding: 0.5rem 0.75rem;
+        font-size: 0.8rem;
+        color: #1e293b;
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+    }
+    .commit-context-menu .context-item:hover {
+        background: #f1f5f9;
+    }
+    .commit-context-menu .context-divider {
+        height: 1px;
+        background: #e2e8f0;
+        margin: 0;
+    }
+
     /* ===== 响应式 ===== */
     @media (max-width: 768px) {
         .commit-page-header { padding: 1rem; }
@@ -551,7 +630,11 @@
                                 {% if commit.operation == 'A' %}commit-row-added
                                 {% elif commit.operation == 'D' %}commit-row-deleted
                                 {% elif commit.operation == 'M' %}commit-row-modified
-                                 {% endif %}" style="line-height:1.5;">
+                                 {% endif %}"
+                                data-commit-id="{{ commit.id }}"
+                                data-status="{{ commit.status }}"
+                                data-detail-url="{{ generate_commit_diff_url(commit) }}"
+                                style="line-height:1.5;">
                                 <td class="compact-cell">
                                     <input type="checkbox" class="commit-checkbox form-check-input" value="{{ commit.id }}" onchange="updateBatchButtons()" style="transform:scale(0.9);">
                                 </td>
@@ -704,16 +787,45 @@
         <!-- 批量操作按钮 -->
         <div class="batch-operations mt-4" id="batchOperations" style="display: none;">
             <div class="d-flex justify-content-center gap-3">
-                <button type="button" class="btn btn-success" id="batchApproveBtn" onclick="batchApprove()">
-                    <i class="fas fa-check me-2"></i>通过选中项目
+                <button type="button" class="btn batch-btn batch-btn-approve" id="batchApproveBtn" onclick="batchApprove()">
+                    <i class="fas fa-check me-2"></i>批量通过
                 </button>
-                <button type="button" class="btn btn-warning" id="batchRejectBtn" onclick="batchReject()">
-                    <i class="fas fa-times me-2"></i>不通过选中项目
+                <button type="button" class="btn batch-btn batch-btn-reject" id="batchRejectBtn" onclick="batchReject()">
+                    <i class="fas fa-times me-2"></i>批量拒绝
                 </button>
-                <button type="button" class="btn btn-info" id="mergeDiffBtn" onclick="mergeDiff()">
+                <button type="button" class="btn batch-btn batch-btn-merge" id="mergeDiffBtn" onclick="mergeDiff()">
                     <i class="fas fa-code-branch me-2"></i>合并选中条目diff
                 </button>
             </div>
+        </div>
+
+        <div id="commitContextMenu" class="commit-context-menu" style="display: none;" role="menu" aria-label="提交操作菜单">
+            <div class="context-header" id="commitContextMenuHeader">1 个条目已选中</div>
+
+            <button type="button" class="context-item" data-context-action="approve">
+                <i class="fas fa-check"></i>通过
+            </button>
+            <button type="button" class="context-item" data-context-action="reject">
+                <i class="fas fa-times"></i>拒绝
+            </button>
+            <button type="button" class="context-item" data-context-action="approve-all">
+                <i class="fas fa-check-double"></i>通过该次提交的所有文件
+            </button>
+            <button type="button" class="context-item" data-context-action="detail">
+                <i class="fas fa-eye"></i>查看详情
+            </button>
+
+            <div class="context-divider"></div>
+
+            <button type="button" class="context-item" data-context-action="batch-approve">
+                <i class="fas fa-check"></i>批量通过
+            </button>
+            <button type="button" class="context-item" data-context-action="batch-reject">
+                <i class="fas fa-times"></i>批量拒绝
+            </button>
+            <button type="button" class="context-item" data-context-action="merge-diff">
+                <i class="fas fa-code-branch"></i>合并diff
+            </button>
         </div>
         
         {% else %}
@@ -882,6 +994,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // 初始化状态下拉菜单
     initStatusDropdown();
     initCommitRowSelection();
+    initCommitContextMenu();
     updateBatchButtons();
     
     // 绑定手动获取数据按钮事件
@@ -1057,6 +1170,27 @@ function initStatusDropdown() {
 }
 
 // 全选功能
+let lastSelectedRowIndex = null;
+let contextMenuAnchorRow = null;
+
+function getCommitRows() {
+    return Array.from(document.querySelectorAll('.commit-table tbody tr.commit-row'));
+}
+
+function getSelectedRows() {
+    return getCommitRows().filter(row => {
+        const checkbox = row.querySelector('.commit-checkbox');
+        return Boolean(checkbox && checkbox.checked);
+    });
+}
+
+function clearAllCommitSelections() {
+    document.querySelectorAll('.commit-checkbox').forEach(cb => {
+        cb.checked = false;
+    });
+    syncCommitRowSelectionStates();
+}
+
 function toggleSelectAll() {
     const selectAllCheckbox = document.getElementById('selectAll');
     const checkboxes = document.querySelectorAll('.commit-checkbox');
@@ -1064,6 +1198,8 @@ function toggleSelectAll() {
     checkboxes.forEach(checkbox => {
         checkbox.checked = selectAllCheckbox.checked;
     });
+    lastSelectedRowIndex = null;
+    hideCommitContextMenu();
     updateBatchButtons();
 }
 
@@ -1089,6 +1225,27 @@ function initCommitRowSelection() {
             return;
         }
 
+        const rows = getCommitRows();
+        const rowIndex = rows.indexOf(row);
+
+        if (event.target.closest('input.commit-checkbox')) {
+            if (event.shiftKey && lastSelectedRowIndex !== null && rowIndex >= 0) {
+                const targetChecked = Boolean(event.target.checked);
+                const start = Math.min(lastSelectedRowIndex, rowIndex);
+                const end = Math.max(lastSelectedRowIndex, rowIndex);
+                for (let i = start; i <= end; i += 1) {
+                    const cb = rows[i].querySelector('.commit-checkbox');
+                    if (cb) {
+                        cb.checked = targetChecked;
+                    }
+                }
+            }
+            lastSelectedRowIndex = rowIndex;
+            hideCommitContextMenu();
+            updateBatchButtons();
+            return;
+        }
+
         if (event.target.closest('a, button, input, label, .dropdown, .dropdown-menu')) {
             return;
         }
@@ -1098,8 +1255,55 @@ function initCommitRowSelection() {
             return;
         }
 
-        checkbox.checked = !checkbox.checked;
+        if (event.shiftKey && lastSelectedRowIndex !== null && rowIndex >= 0) {
+            const start = Math.min(lastSelectedRowIndex, rowIndex);
+            const end = Math.max(lastSelectedRowIndex, rowIndex);
+            for (let i = start; i <= end; i += 1) {
+                const cb = rows[i].querySelector('.commit-checkbox');
+                if (cb) {
+                    cb.checked = true;
+                }
+            }
+        } else {
+            checkbox.checked = !checkbox.checked;
+        }
+        lastSelectedRowIndex = rowIndex;
+        hideCommitContextMenu();
         updateBatchButtons();
+    });
+
+    tbody.addEventListener('contextmenu', function(event) {
+        const row = event.target.closest('tr.commit-row');
+        if (!row || !tbody.contains(row)) {
+            hideCommitContextMenu();
+            return;
+        }
+        event.preventDefault();
+
+        const checkbox = row.querySelector('.commit-checkbox');
+        const selectedRows = getSelectedRows();
+        const clickedIsSelected = Boolean(checkbox && checkbox.checked);
+        if (selectedRows.length === 0) {
+            if (checkbox) {
+                checkbox.checked = true;
+            }
+        } else if (selectedRows.length > 1 && !clickedIsSelected) {
+            clearAllCommitSelections();
+            if (checkbox) {
+                checkbox.checked = true;
+            }
+        } else if (selectedRows.length === 1 && !clickedIsSelected) {
+            clearAllCommitSelections();
+            if (checkbox) {
+                checkbox.checked = true;
+            }
+        }
+
+        contextMenuAnchorRow = row;
+        const rows = getCommitRows();
+        lastSelectedRowIndex = rows.indexOf(row);
+        updateBatchButtons();
+        showCommitContextMenu(event.clientX, event.clientY);
     });
 
     syncCommitRowSelectionStates();
@@ -1110,6 +1314,8 @@ function updateBatchButtons() {
     syncCommitRowSelectionStates();
     const checkboxes = document.querySelectorAll('.commit-checkbox:checked');
     const batchOperations = document.getElementById('batchOperations');
+    const selectAllCheckbox = document.getElementById('selectAll');
+    const allCheckboxes = document.querySelectorAll('.commit-checkbox');
 
     console.log('updateBatchButtons 被调用，选中数量:', checkboxes.length);
 
@@ -1124,6 +1330,134 @@ function updateBatchButtons() {
     } else {
         batchOperations.style.display = 'none';
         console.log('隐藏批量操作按钮');
+    }
+
+    if (selectAllCheckbox) {
+        const checkedCount = checkboxes.length;
+        const totalCount = allCheckboxes.length;
+        selectAllCheckbox.checked = totalCount > 0 && checkedCount === totalCount;
+        selectAllCheckbox.indeterminate = checkedCount > 0 && checkedCount < totalCount;
+    }
+}
+
+function initCommitContextMenu() {
+    const menu = document.getElementById('commitContextMenu');
+    if (!menu || menu.dataset.bound === '1') {
+        return;
+    }
+    menu.dataset.bound = '1';
+
+    menu.addEventListener('click', function(event) {
+        const actionEl = event.target.closest('[data-context-action]');
+        if (!actionEl) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        handleCommitContextAction(actionEl.getAttribute('data-context-action'));
+    });
+
+    document.addEventListener('click', function(event) {
+        if (!menu.contains(event.target)) {
+            hideCommitContextMenu();
+        }
+    });
+
+    window.addEventListener('scroll', hideCommitContextMenu, true);
+    window.addEventListener('resize', hideCommitContextMenu);
+}
+
+function showCommitContextMenu(clientX, clientY) {
+    const menu = document.getElementById('commitContextMenu');
+    if (!menu) {
+        return;
+    }
+    const selectedRows = getSelectedRows();
+    if (selectedRows.length === 0) {
+        hideCommitContextMenu();
+        return;
+    }
+
+    const header = document.getElementById('commitContextMenuHeader');
+    if (header) {
+        header.textContent = `${selectedRows.length} 个条目已选中`;
+    }
+
+    const isBatch = selectedRows.length > 1;
+    menu.querySelectorAll('[data-context-action="approve"], [data-context-action="reject"], [data-context-action="approve-all"], [data-context-action="detail"]').forEach(item => {
+        item.style.display = isBatch ? 'none' : 'flex';
+    });
+    menu.querySelectorAll('[data-context-action="batch-approve"], [data-context-action="batch-reject"], [data-context-action="merge-diff"]').forEach(item => {
+        item.style.display = isBatch ? 'flex' : 'none';
+    });
+
+    const divider = menu.querySelector('.context-divider');
+    if (divider) {
+        divider.style.display = isBatch ? 'none' : 'block';
+    }
+
+    menu.style.display = 'block';
+    const rect = menu.getBoundingClientRect();
+    let left = clientX;
+    let top = clientY;
+    const maxLeft = window.innerWidth - rect.width - 8;
+    const maxTop = window.innerHeight - rect.height - 8;
+    left = Math.max(8, Math.min(left, maxLeft));
+    top = Math.max(8, Math.min(top, maxTop));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+}
+
+function hideCommitContextMenu() {
+    const menu = document.getElementById('commitContextMenu');
+    if (!menu) {
+        return;
+    }
+    menu.style.display = 'none';
+}
+
+function handleCommitContextAction(action) {
+    const selectedRows = getSelectedRows();
+    if (selectedRows.length === 0) {
+        hideCommitContextMenu();
+        return;
+    }
+
+    const primaryRow = contextMenuAnchorRow && selectedRows.includes(contextMenuAnchorRow)
+        ? contextMenuAnchorRow
+        : selectedRows[0];
+    const primaryCheckbox = primaryRow ? primaryRow.querySelector('.commit-checkbox') : null;
+    const primaryCommitId = primaryCheckbox ? parseInt(primaryCheckbox.value, 10) : null;
+    const detailUrl = primaryRow ? (primaryRow.dataset.detailUrl || '') : '';
+
+    hideCommitContextMenu();
+
+    if (action === 'approve' && primaryCommitId) {
+        updateCommitStatus(primaryCommitId, 'confirmed');
+        return;
+    }
+    if (action === 'reject' && primaryCommitId) {
+        updateCommitStatus(primaryCommitId, 'rejected');
+        return;
+    }
+    if (action === 'approve-all' && primaryCommitId) {
+        approveAllFiles(primaryCommitId);
+        return;
+    }
+    if (action === 'detail' && detailUrl) {
+        window.location.href = detailUrl;
+        return;
+    }
+    if (action === 'batch-approve') {
+        batchApprove();
+        return;
+    }
+    if (action === 'batch-reject') {
+        batchReject();
+        return;
+    }
+    if (action === 'merge-diff') {
+        mergeDiff();
     }
 }
 

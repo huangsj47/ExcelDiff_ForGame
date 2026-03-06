@@ -645,7 +645,7 @@ def api_remove_pre_assignment(pre_id):
 
     # 需要检查该预分配记录所属项目的管理员权限
     from .models import AuthProjectPreAssignment
-    record = AuthProjectPreAssignment.query.get(pre_id)
+    record = AuthProjectPreAssignment.query.filter_by(id=pre_id).first()
     if not record:
         return jsonify({"success": False, "message": "预分配记录不存在"}), 404
 

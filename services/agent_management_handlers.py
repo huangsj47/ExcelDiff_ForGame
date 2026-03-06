@@ -538,7 +538,7 @@ def _upsert_agent_temp_cache_entry(*, db, agent, payload: dict):
     source_task_id = _to_int_or_none(payload.get("source_task_id"), min_value=1)
     if source_task_id is None:
         source_task_id = _to_int_or_none(payload.get("task_id"), min_value=1)
-    source_task = AgentTask.query.get(source_task_id) if source_task_id else None
+    source_task = db.session.get(AgentTask, source_task_id) if source_task_id else None
 
     project_id = _to_int_or_none(payload.get("project_id"), min_value=1)
     if project_id is None and source_task is not None:
@@ -629,7 +629,7 @@ def _parse_commit_time(raw_value):
 
 def _apply_auto_sync_result(task, result_payload):
     db, Commit, Repository = get_runtime_models("db", "Commit", "Repository")
-    repository = Repository.query.get(task.repository_id) if task.repository_id else None
+    repository = db.session.get(Repository, task.repository_id) if task.repository_id else None
     if not repository:
         return {"message": "repository missing", "commits_added": 0, "excel_tasks_added": 0}
 
@@ -1067,7 +1067,7 @@ def resolve_agent_temp_cache(cache_key):
         effective_repository_id = fallback_repository_id
         effective_project_id = project_id or fallback_project_id
         if effective_project_id is None and effective_repository_id:
-            repo = Repository.query.get(effective_repository_id)
+            repo = db.session.get(Repository, effective_repository_id)
             if repo:
                 effective_project_id = repo.project_id
 
@@ -1427,7 +1427,7 @@ def agent_report_task_result(task_id):
         if not agent:
             return jsonify({"success": False, "message": "Agent 身份无效"}), 401
 
-        task = AgentTask.query.get(task_id)
+        task = db.session.get(AgentTask, task_id)
         if not task:
             return jsonify({"success": False, "message": "任务不存在"}), 404
         if task.assigned_agent_id and task.assigned_agent_id != agent.id:
@@ -1483,7 +1483,7 @@ def agent_report_task_result(task_id):
         if status == "failed":
             task.error_message = None if error_message is None else str(error_message)
 
-        repository = Repository.query.get(task.repository_id) if task.repository_id else None
+        repository = db.session.get(Repository, task.repository_id) if task.repository_id else None
         if repository:
             if status == "failed":
                 sync_error_message = f"Agent任务失败({task.task_type}): {task.error_message or '未知错误'}"
@@ -1508,7 +1508,7 @@ def agent_report_task_result(task_id):
                 )
 
         if task.source_task_id:
-            src_task = BackgroundTask.query.get(task.source_task_id)
+            src_task = db.session.get(BackgroundTask, task.source_task_id)
             if src_task:
                 src_task.status = status
                 src_task.completed_at = now_utc

@@ -450,6 +450,14 @@ def merge_diff():
             log_print(f"- hunks数量: {len(merged_diff_data.get('hunks', []))}", 'INFO')
     else:
         log_print("- 合并diff数据为None，将使用传统逐个显示方式", 'INFO')
+    # 对于多文件或同文件非连续提交（segmented），改为分段UI逐项显示，避免单块合并区误报“无变更”。
+    merged_type = ""
+    if isinstance(merged_diff_data, dict):
+        merged_type = str(merged_diff_data.get("type") or "").strip().lower()
+    if merged_type in {"multiple_files", "segmented_diff", "segmented"}:
+        log_print(f"检测到 {merged_type}，切换为逐项diff展示模式", "INFO")
+        merged_diff_data = None
+
     # 智能构建显示列表：合并连续提交，分离不同文件
     commits_with_diff = build_smart_display_list(commits)
     # 计算缓存状态

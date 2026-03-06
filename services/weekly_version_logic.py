@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 from html import escape
 from urllib.parse import quote
 
-from flask import render_template, request, jsonify, url_for
+from flask import render_template, request, jsonify, url_for, abort
 
 from models import (
     db,
@@ -64,6 +64,7 @@ from services.diff_render_helpers import (
 from services.performance_metrics_service import get_perf_metrics_service
 from services.task_worker_service import TaskWrapper, background_task_queue
 from utils.logger import log_print
+from utils.request_security import _has_project_access
 from utils.timezone_utils import now_beijing
 
 # ---------------------------------------------------------------------------
@@ -171,6 +172,8 @@ def get_commit_pair_diff_internal(current_commit, previous_commit):
 def weekly_version_config(project_id):
     """周版本配置页面"""
     project = Project.query.get_or_404(project_id)
+    if not _has_project_access(project_id):
+        abort(403)
     repositories = Repository.query.filter_by(project_id=project_id).all()
     # 获取分页参数
     page = max(1, request.args.get('page', 1, type=int) or 1)
@@ -277,7 +280,7 @@ def weekly_version_config(project_id):
                          pagination=pagination)
 def weekly_version_config_api(project_id):
     """周版本配置API"""
-    project = Project.query.get(project_id)
+    project = db.session.get(Project, project_id)
     if not project:
         return jsonify({'success': False, 'message': f'项目不存在: {project_id}'}), 404
     if request.method == 'GET':
@@ -396,7 +399,7 @@ def weekly_version_config_api(project_id):
 
 def weekly_version_config_detail_api(project_id, config_id):
     """周版本配置详情API"""
-    project = Project.query.get(project_id)
+    project = db.session.get(Project, project_id)
     if not project:
         return jsonify({'success': False, 'message': f'项目不存在: {project_id}'}), 404
     config = WeeklyVersionConfig.query.filter_by(id=config_id, project_id=project_id).first_or_404()
@@ -506,9 +509,11 @@ def weekly_version_config_detail_api(project_id, config_id):
 
 def weekly_version_list(project_id):
     """周版本diff列表页面"""
-    project = Project.query.get(project_id)
+    project = db.session.get(Project, project_id)
     if not project:
         return _render_project_page_missing(project_id, "周版本列表")
+    if not _has_project_access(project_id):
+        abort(403)
     repository_id = request.args.get('repository_id', type=int)
     # 获取配置列表
     query = WeeklyVersionConfig.query.filter_by(project_id=project_id)
@@ -521,9 +526,11 @@ def weekly_version_list(project_id):
                          selected_repository_id=repository_id)
 def merged_project_view(project_id):
     """合并的项目视图：左侧周版本列表，右侧仓库列表"""
-    project = Project.query.get(project_id)
+    project = db.session.get(Project, project_id)
     if not project:
         return _render_project_page_missing(project_id, "项目合并视图")
+    if not _has_project_access(project_id):
+        abort(403)
     # 获取所有周版本配置
     configs = WeeklyVersionConfig.query.filter_by(project_id=project_id).order_by(WeeklyVersionConfig.created_at.desc()).all()
     # 获取所有仓库
@@ -603,6 +610,8 @@ def merged_project_view(project_id):
 def weekly_version_diff(config_id):
     """周版本diff详情页面 - 聚合显示同一时间段的不同仓库配置"""
     config = WeeklyVersionConfig.query.get_or_404(config_id)
+    if not _has_project_access(config.project_id):
+        abort(403)
     # 查找同一项目下相同时间段的其他配置
     related_configs = WeeklyVersionConfig.query.filter(
         WeeklyVersionConfig.project_id == config.project_id,
@@ -1822,7 +1831,7 @@ def create_weekly_excel_cache_task(config_id, file_path):
 
         deployment_mode = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
         if deployment_mode in {"platform", "agent"}:
-            config = WeeklyVersionConfig.query.get(config_id)
+            config = db.session.get(WeeklyVersionConfig, config_id)
             if config:
                 from services.agent_management_handlers import enqueue_agent_task
 
