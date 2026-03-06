@@ -374,6 +374,65 @@ def generate_merged_diff_data(repository, file_path, base_commit, latest_commit,
 _PREVIOUS_COMMIT_SENTINEL = object()
 
 
+def _is_renderable_code_diff(diff_data):
+    if not isinstance(diff_data, dict):
+        return False
+    hunks = diff_data.get("hunks")
+    if isinstance(hunks, list) and len(hunks) > 0:
+        return True
+    patch = diff_data.get("patch")
+    if isinstance(patch, str) and patch.strip():
+        return True
+    lines = diff_data.get("lines")
+    if isinstance(lines, list) and len(lines) > 0:
+        return True
+    return False
+
+
+def _build_diff_error_data(commit, message, detail=None):
+    payload = {
+        "type": "error",
+        "file_path": str(getattr(commit, "path", "") or ""),
+        "message": str(message or "无法获取差异数据"),
+    }
+    commit_id = str(getattr(commit, "commit_id", "") or "").strip()
+    if commit_id:
+        payload["commit_id"] = commit_id
+    detail_text = str(detail or "").strip()
+    if detail_text:
+        payload["detail"] = detail_text
+    return payload
+
+
+def _get_git_code_diff_with_retry(service, commit, previous_commit):
+    diagnostics = []
+
+    def _fetch_once():
+        if previous_commit:
+            return service.get_commit_range_diff(previous_commit.commit_id, commit.commit_id, commit.path)
+        return service.get_file_diff(commit.commit_id, commit.path)
+
+    diff_data = _fetch_once()
+    if _is_renderable_code_diff(diff_data):
+        diagnostics.append("初次获取diff成功")
+        return diff_data, diagnostics
+
+    diagnostics.append("初次获取diff失败")
+    try:
+        update_ok, update_message = service.clone_or_update_repository()
+        diagnostics.append(f"仓库更新结果: {update_message}")
+        if update_ok:
+            retry_data = _fetch_once()
+            if _is_renderable_code_diff(retry_data):
+                diagnostics.append("仓库更新后重试获取diff成功")
+                return retry_data, diagnostics
+            diagnostics.append("仓库更新后重试仍未拿到有效diff")
+    except Exception as exc:
+        diagnostics.append(f"仓库更新异常: {exc}")
+
+    return diff_data, diagnostics
+
+
 def get_diff_data(commit, previous_commit=_PREVIOUS_COMMIT_SENTINEL):
     """获取真实的diff数据 - 返回数据结构而非JSON响应"""
     try:
@@ -407,21 +466,29 @@ def get_diff_data(commit, previous_commit=_PREVIOUS_COMMIT_SENTINEL):
                     return {'error': str(e)}
             else:
                 log_print(f"开始处理commit {commit.commit_id}的代码文件diff数据: {commit.path}", 'INFO')
-                if previous_commit:
-                    diff_data = service.get_commit_range_diff(previous_commit.commit_id, commit.commit_id, commit.path)
-                else:
-                    diff_data = service.get_file_diff(commit.commit_id, commit.path)
-                if diff_data and diff_data.get('hunks'):
+                diff_data, diagnostics = _get_git_code_diff_with_retry(service, commit, previous_commit)
+                if _is_renderable_code_diff(diff_data):
                     diff_data['file_path'] = commit.path
-                    stats = service.get_performance_stats()
+                    stats = service.get_performance_stats() if hasattr(service, "get_performance_stats") else {}
                     log_print(f"Git diff处理性能统计: {stats}", 'INFO')
                     log_print(f"成功获取diff数据，hunks数量: {len(diff_data.get('hunks', []))}", 'INFO')
-                    return diff_data
-                else:
-                    log_print(f"未能获取到有效的diff数据，返回模拟数据", 'INFO')
-                    mock_data = get_mock_diff_data(commit)
-                    log_print(f"模拟数据结构: {mock_data}", 'INFO')
-                    return mock_data
+                    return clean_json_data(diff_data)
+
+                unified_data = _get_unified_diff_data(commit, previous_commit)
+                if _is_renderable_code_diff(unified_data):
+                    unified_data['file_path'] = commit.path
+                    log_print("主路径获取失败，已回退统一diff并成功", "INFO")
+                    return clean_json_data(unified_data)
+
+                detail = "；".join([item for item in diagnostics if item])
+                if previous_commit:
+                    detail = f"{detail}；previous_commit={previous_commit.commit_id}"
+                log_print(f"未能获取到有效的diff数据: {detail}", 'INFO', force=True)
+                return _build_diff_error_data(
+                    commit,
+                    "无法获取代码差异（可能本地仓库缺少目标提交），请稍后重试",
+                    detail=detail,
+                )
 
         elif repository.type == 'svn':
             service = _get_svn_service(repository)
@@ -429,16 +496,21 @@ def get_diff_data(commit, previous_commit=_PREVIOUS_COMMIT_SENTINEL):
                 return _get_unified_diff_data(commit, None)
             else:
                 diff_data = service.get_file_diff(commit.version, commit.path)
-                if diff_data and diff_data.get('hunks'):
+                if _is_renderable_code_diff(diff_data):
                     diff_data['file_path'] = commit.path
-                    return diff_data
+                    return clean_json_data(diff_data)
+                return _build_diff_error_data(
+                    commit,
+                    "无法获取SVN代码差异",
+                    detail=f"version={getattr(commit, 'version', '')}, path={getattr(commit, 'path', '')}",
+                )
 
-        log_print(f"无法获取真实diff数据，返回模拟数据", 'INFO')
-        return get_mock_diff_data(commit)
+        log_print(f"无法获取真实diff数据，返回错误结构", 'INFO')
+        return _build_diff_error_data(commit, "无法获取差异数据", detail=f"repository.type={repository.type}")
     except Exception as e:
         log_print(f"获取真实diff数据失败: {str(e)}")
         import traceback; traceback.print_exc()
-        return get_mock_diff_data(commit)
+        return _build_diff_error_data(commit, "获取差异数据失败", detail=str(e))
 
 
 def get_real_diff_data_for_merge(commit):

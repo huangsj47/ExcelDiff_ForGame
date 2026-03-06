@@ -840,7 +840,21 @@ class GitService:
                 return None
             
             repo = git.Repo(self.local_path)
-            commit = repo.commit(commit_id)
+            try:
+                commit = repo.commit(commit_id)
+            except Exception as resolve_error:
+                print(f"提交解析失败: {resolve_error}")
+                print("尝试更新本地仓库后重试提交解析...")
+                update_ok, update_message = self.clone_or_update_repository()
+                print(f"仓库更新结果: ok={update_ok}, message={update_message}")
+                if not update_ok:
+                    return None
+                try:
+                    repo = git.Repo(self.local_path)
+                    commit = repo.commit(commit_id)
+                except Exception as retry_error:
+                    print(f"仓库更新后仍无法解析提交 {commit_id}: {retry_error}")
+                    return None
             print(f"找到提交: {commit.hexsha[:8]} - {commit.message.strip()}")
             
             # 获取当前提交的文件内容
@@ -1041,6 +1055,8 @@ class GitService:
             print(f"Git仓库初始化成功")
             
             # 验证提交是否存在
+            from_commit_obj = None
+            to_commit_obj = None
             try:
                 from_commit_obj = repo.commit(from_commit)
                 to_commit_obj = repo.commit(to_commit)
@@ -1049,38 +1065,56 @@ class GitService:
                 print(f"  - 到提交: {to_commit_obj.hexsha[:8]} - {to_commit_obj.message.strip()[:50]}")
             except Exception as e:
                 print(f"✗ 提交验证失败: {e}")
-                print(f"尝试查找类似的提交...")
-                
-                # 尝试查找类似的提交（前8位匹配）
+                print("尝试更新本地仓库后重试提交解析...")
                 try:
-                    all_commits = list(repo.iter_commits('--all', max_count=200))
-                    print(f"仓库中共有 {len(all_commits)} 个提交")
+                    update_ok, update_message = self.clone_or_update_repository()
+                except Exception as update_error:
+                    update_ok = False
+                    update_message = str(update_error)
+                print(f"仓库更新结果: ok={update_ok}, message={update_message}")
+
+                if update_ok:
+                    try:
+                        repo = git.Repo(self.local_path)
+                        from_commit_obj = repo.commit(from_commit)
+                        to_commit_obj = repo.commit(to_commit)
+                        print("✓ 仓库更新后提交验证成功")
+                    except Exception as retry_error:
+                        print(f"✗ 仓库更新后提交验证仍失败: {retry_error}")
+
+                if not (from_commit_obj and to_commit_obj):
+                    print(f"尝试查找类似的提交...")
                     
-                    from_short = from_commit[:8]
-                    to_short = to_commit[:8]
-                    
-                    found_from = None
-                    found_to = None
-                    
-                    for commit in all_commits:
-                        if commit.hexsha.startswith(from_short):
-                            found_from = commit.hexsha
-                            print(f"找到匹配的from提交: {found_from[:8]} - {commit.message.strip()[:50]}")
-                        if commit.hexsha.startswith(to_short):
-                            found_to = commit.hexsha
-                            print(f"找到匹配的to提交: {found_to[:8]} - {commit.message.strip()[:50]}")
-                    
-                    if found_from and found_to:
-                        print(f"使用找到的提交进行diff")
-                        from_commit = found_from
-                        to_commit = found_to
-                    else:
-                        print(f"✗ 未找到匹配的提交")
-                        return None
+                    # 尝试查找类似的提交（前8位匹配）
+                    try:
+                        all_commits = list(repo.iter_commits('--all', max_count=200))
+                        print(f"仓库中共有 {len(all_commits)} 个提交")
                         
-                except Exception as search_e:
-                    print(f"✗ 搜索提交失败: {search_e}")
-                    return None
+                        from_short = from_commit[:8]
+                        to_short = to_commit[:8]
+                        
+                        found_from = None
+                        found_to = None
+                        
+                        for commit in all_commits:
+                            if commit.hexsha.startswith(from_short):
+                                found_from = commit.hexsha
+                                print(f"找到匹配的from提交: {found_from[:8]} - {commit.message.strip()[:50]}")
+                            if commit.hexsha.startswith(to_short):
+                                found_to = commit.hexsha
+                                print(f"找到匹配的to提交: {found_to[:8]} - {commit.message.strip()[:50]}")
+                        
+                        if found_from and found_to:
+                            print(f"使用找到的提交进行diff")
+                            from_commit = found_from
+                            to_commit = found_to
+                        else:
+                            print(f"✗ 未找到匹配的提交")
+                            return None
+                            
+                    except Exception as search_e:
+                        print(f"✗ 搜索提交失败: {search_e}")
+                        return None
             
             # 使用GitPython直接执行diff，避免subprocess环境问题
             try:

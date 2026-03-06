@@ -85,7 +85,7 @@
                         <h6 class="mb-2 fw-bold" style="color: #155724;">当前版本</h6>
                         <div><strong>Commit ID:</strong> <code>{{ commit.commit_id[:8] }}</code></div>
                         <div><strong>提交时间:</strong> {{ format_beijing_time(commit.commit_time, '%Y-%m-%d %H:%M:%S') if commit.commit_time else 'N/A' }}</div>
-                        <div><strong>提交者:</strong> {{ commit.author | e or 'N/A' }}</div>
+                        <div><strong>提交者:</strong> {{ (commit.author_display or commit.author) | e or 'N/A' }}</div>
                         {% if commit.message %}
                         <div><strong>提交信息:</strong> {{ commit.message | e }}</div>
                         {% endif %}
@@ -103,7 +103,7 @@
                         </div>
                         {% if previous_commit and previous_commit.id %}
                         <div><strong>提交时间:</strong> {{ format_beijing_time(previous_commit.commit_time, '%Y-%m-%d %H:%M:%S') if previous_commit.commit_time else 'N/A' }}</div>
-                        <div><strong>提交者:</strong> {{ previous_commit.author | e or 'N/A' }}</div>
+                        <div><strong>提交者:</strong> {{ (previous_commit.author_display or previous_commit.author) | e or 'N/A' }}</div>
                         {% if previous_commit.message %}
                         <div><strong>提交信息:</strong> {{ previous_commit.message | e }}</div>
                         {% endif %}
@@ -215,7 +215,7 @@
                     <!-- 调试信息 -->
                     
                     <!-- 代码diff显示逻辑 -->
-                    {% if diff_data is mapping and 'hunks' in diff_data %}
+                    {% if diff_data is mapping and 'hunks' in diff_data and diff_data.hunks %}
                         <!-- 处理hunks格式的diff数据 -->
                         <div class="text-diff-container">
                             {% for hunk in diff_data.hunks %}
@@ -236,10 +236,36 @@
                             </div>
                             {% endfor %}
                         </div>
+                    {% elif diff_data is mapping and diff_data.get('type') == 'error' %}
+                        <div class="p-4">
+                            <div class="alert alert-danger mb-0">
+                                <div class="fw-bold mb-1">代码差异暂时不可用</div>
+                                <div>{{ diff_data.get('message') or '无法获取代码差异数据' }}</div>
+                                {% if diff_data.get('detail') %}
+                                <div class="mt-2 small text-muted">{{ diff_data.get('detail') }}</div>
+                                {% endif %}
+                            </div>
+                        </div>
+                    {% elif diff_data is mapping and 'lines' in diff_data %}
+                        <div class="text-diff-container">
+                            {% for line in diff_data.lines %}
+                            <div class="text-diff-line {{ line.type }}">
+                                <span class="text-diff-line-number">{{ line.old_line_number if line.old_line_number is not none else '' }}</span>
+                                <span class="text-diff-line-number">{{ line.new_line_number if line.new_line_number is not none else '' }}</span>
+                                <span class="text-diff-line-content">{{ '+' if line.type == 'added' else ('-' if line.type == 'removed' else ' ') }}{{ line.content }}</span>
+                            </div>
+                            {% endfor %}
+                        </div>
                     {% elif diff_data is mapping and 'patch' in diff_data %}
                         <!-- 处理patch格式的diff数据 -->
                         <div class="text-diff-container">
                             <pre><code>{{ diff_data.patch }}</code></pre>
+                        </div>
+                    {% elif diff_data is mapping %}
+                        <div class="p-4">
+                            <div class="alert alert-warning mb-0">
+                                差异数据格式暂不支持展示，请稍后重试。
+                            </div>
                         </div>
                     {% else %}
                         <!-- 处理字符串格式的diff数据 -->

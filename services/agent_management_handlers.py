@@ -1716,7 +1716,18 @@ def agent_report_task_result(task_id):
 def list_agent_nodes():
     """查看 Agent 节点状态（管理员）。"""
     rows = build_agent_node_items()
-    return jsonify({"success": True, "items": rows, "count": len(rows)})
+    response = jsonify(
+        {
+            "success": True,
+            "items": rows,
+            "count": len(rows),
+            "server_time": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @require_admin

@@ -247,9 +247,19 @@ function statusBadge(status) {
 function formatTimeText(isoText) {
     if (!isoText) return '-';
     try {
-        return new Date(isoText).toLocaleString();
+        const dt = new Date(isoText);
+        if (Number.isNaN(dt.getTime())) return String(isoText);
+        return dt.toLocaleString('zh-CN', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        });
     } catch (err) {
-        return isoText;
+        return String(isoText);
     }
 }
 
@@ -479,8 +489,9 @@ async function openIncidentModal(agentCode, alreadyOpen = false) {
 async function loadAgentNodes() {
     const tbody = document.getElementById('agentRowsBody');
     try {
-        const resp = await fetch('{{ url_for("list_agent_nodes") }}', {
+        const resp = await fetch(`{{ url_for("list_agent_nodes") }}?_ts=${Date.now()}`, {
             method: 'GET',
+            cache: 'no-store',
             headers: { 'Accept': 'application/json' }
         });
         const data = await resp.json();
@@ -557,7 +568,8 @@ async function loadAgentNodes() {
         document.getElementById('totalNodes').textContent = String(items.length);
         document.getElementById('onlineNodes').textContent = String(onlineCount);
         document.getElementById('boundProjects').textContent = String(boundProjectCount);
-        document.getElementById('lastRefresh').textContent = new Date().toLocaleString();
+        const refreshText = formatTimeText(data.server_time);
+        document.getElementById('lastRefresh').textContent = refreshText === '-' ? formatTimeText(new Date().toISOString()) : refreshText;
     } catch (err) {
         tbody.innerHTML = `<tr><td colspan="9" class="text-center text-danger py-4">网络错误: ${err}</td></tr>`;
     }

@@ -13,7 +13,7 @@ class DiffService:
     # 文件类型定义
     TEXT_EXTENSIONS = {
         '.txt', '.py', '.js', '.html', '.css', '.json', '.xml', '.yaml', '.yml',
-        '.md', '.rst', '.c', '.cpp', '.h', '.hpp', '.java', '.php', '.rb', '.go',
+        '.md', '.rst', '.c', '.cpp', '.h', '.hpp', '.java', '.cs', '.php', '.rb', '.go',
         '.rs', '.lua', '.sql', '.sh', '.bat', '.ps1', '.ini', '.cfg', '.conf',
         '.log', '.properties', '.gitignore', '.dockerfile'
     }

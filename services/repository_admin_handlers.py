@@ -123,6 +123,7 @@ def delete_repository(repository_id):
         "Commit",
         "log_print",
     )
+    AgentTask = _optional_runtime("AgentTask")
     repository = Repository.query.get_or_404(repository_id)
     project_id = repository.project_id
     repo_name = repository.name
@@ -135,7 +136,21 @@ def delete_repository(repository_id):
 
     log_print(f"开始删除仓库 {repo_name} (ID: {repository_id})", "DELETE")
     try:
-        background_tasks_deleted = BackgroundTask.query.filter_by(repository_id=repository_id).delete()
+        background_task_ids = [
+            row[0]
+            for row in db.session.query(BackgroundTask.id).filter(
+                BackgroundTask.repository_id == repository_id
+            ).all()
+        ]
+
+        if AgentTask is not None:
+            agent_task_filters = [AgentTask.repository_id == repository_id]
+            if background_task_ids:
+                agent_task_filters.append(AgentTask.source_task_id.in_(background_task_ids))
+            agent_tasks_deleted = AgentTask.query.filter(or_(*agent_task_filters)).delete(synchronize_session=False)
+            log_print(f"删除了 {agent_tasks_deleted} 个AgentTask记录", "DELETE")
+
+        background_tasks_deleted = BackgroundTask.query.filter_by(repository_id=repository_id).delete(synchronize_session=False)
         log_print(f"删除了 {background_tasks_deleted} 个BackgroundTask记录", "DELETE")
 
         diff_cache_deleted = DiffCache.query.filter_by(repository_id=repository_id).delete()
@@ -198,6 +213,31 @@ def test_repository(repository_id):
     get_git_service = get_runtime_model("get_git_service")
 
     repository = Repository.query.get_or_404(repository_id)
+
+    def _is_ajax_request():
+        accept = request.headers.get("Accept", "")
+        return (
+            request.headers.get("X-Requested-With") == "XMLHttpRequest"
+            or request.is_json
+            or "application/json" in accept
+        )
+
+    def _respond(success: bool, message: str, *, category: str, status_code: int):
+        if _is_ajax_request():
+            return (
+                jsonify(
+                    {
+                        "success": bool(success),
+                        "status": "success" if success else "error",
+                        "message": message,
+                        "scope": "platform_local",
+                    }
+                ),
+                status_code,
+            )
+        flash(message, category)
+        return redirect(url_for("repository_config", project_id=repository.project_id))
+
     try:
         log_print(f"测试仓库连接: {repository.name}", "TEST")
         log_print(f"仓库类型: {repository.type}", "TEST")
@@ -211,22 +251,46 @@ def test_repository(repository_id):
             ssh_test_result = service.test_ssh_connection()
             log_print(f"SSH连接测试结果: {ssh_test_result}", "TEST")
             if not ssh_test_result:
-                flash("SSH连接测试失败，请检查网络连接和SSH配置", "warning")
+                return _respond(
+                    False,
+                    "SSH连接测试失败，请检查网络连接和SSH配置",
+                    category="error",
+                    status_code=400,
+                )
             else:
                 success, message = service.clone_or_update_repository()
                 if success:
-                    flash(f"仓库连接测试成功: {message}", "success")
+                    return _respond(
+                        True,
+                        f"仓库连接测试成功: {message}",
+                        category="success",
+                        status_code=200,
+                    )
                 else:
-                    flash(f"仓库连接测试失败: {message}", "error")
+                    return _respond(
+                        False,
+                        f"仓库连接测试失败: {message}",
+                        category="error",
+                        status_code=400,
+                    )
         else:
-            flash("暂时只支持Git仓库测试", "warning")
+            return _respond(
+                False,
+                "暂时只支持Git仓库测试",
+                category="warning",
+                status_code=400,
+            )
     except Exception as exc:
         log_print(f"测试过程中发生错误: {str(exc)}", "TEST", force=True)
         import traceback
 
         traceback.print_exc()
-        flash(f"测试失败: {str(exc)}", "error")
-    return redirect(url_for("repository_config", project_id=repository.project_id))
+        return _respond(
+            False,
+            f"测试失败: {str(exc)}",
+            category="error",
+            status_code=500,
+        )
 
 
 @require_admin

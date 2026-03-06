@@ -174,6 +174,77 @@
     .user-info-bar .badge {
         font-size: 0.72rem;
     }
+    .project-create-modal .modal-header {
+        align-items: flex-start;
+    }
+    .project-create-modal .modal-subtitle {
+        color: #64748b;
+        font-size: 0.82rem;
+        margin-top: 0.25rem;
+    }
+    .project-create-modal .project-form-section {
+        border: 1px solid #e5e7eb;
+        border-radius: 10px;
+        padding: 12px;
+        margin-bottom: 12px;
+        background: #f8fafc;
+    }
+    .project-create-modal .project-form-section-title {
+        font-size: 0.82rem;
+        font-weight: 700;
+        color: #334155;
+        margin-bottom: 10px;
+        letter-spacing: 0.02em;
+    }
+    .project-create-modal .project-form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+    }
+    .project-create-modal .project-form-grid .project-form-field-full {
+        grid-column: 1 / -1;
+    }
+    .project-create-modal .agent-live-card {
+        background: #ffffff;
+        border-radius: 10px;
+        border: 1px solid #dbe3f0;
+    }
+    .project-create-modal .agent-live-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+    }
+    .project-create-modal .agent-live-item {
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 8px 10px;
+        background: #f8fafc;
+    }
+    .project-create-modal .agent-live-label {
+        display: block;
+        color: #64748b;
+        font-size: 0.74rem;
+        line-height: 1.2;
+        margin-bottom: 3px;
+    }
+    .project-create-modal .agent-live-value {
+        display: block;
+        color: #0f172a;
+        font-size: 0.82rem;
+        font-weight: 600;
+        line-height: 1.35;
+        word-break: break-all;
+    }
+    .project-create-modal .agent-live-empty {
+        color: #64748b;
+        font-size: 0.82rem;
+    }
+    @media (max-width: 768px) {
+        .project-create-modal .project-form-grid,
+        .project-create-modal .agent-live-grid {
+            grid-template-columns: 1fr;
+        }
+    }
 </style>
 {% endblock %}
 
@@ -284,26 +355,34 @@
 {% if can_direct_create_project %}
 <!-- 新建项目模态框（平台管理员或Agent默认管理员直接创建） -->
 <div class="modal fade" id="newProjectModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content project-create-modal">
             <div class="modal-header">
-                <h5 class="modal-title"><i class="fas fa-plus-circle me-2" style="color: #0969da;"></i>新建项目</h5>
+                <div>
+                    <h5 class="modal-title"><i class="fas fa-plus-circle me-2" style="color: #0969da;"></i>新建项目</h5>
+                    <div class="modal-subtitle">填写项目基础信息并选择执行节点，提交后立即生效。</div>
+                </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form method="POST" action="{{ url_for('projects') }}">
                 <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                 <div class="modal-body">
-                    <div class="mb-3">
-                        <label for="code" class="form-label">项目代号 <span style="color: #cf222e;">*</span></label>
-                        <input type="text" class="form-control" id="code" name="code" required placeholder="例如: PROJECT-001">
-                    </div>
-                    <div class="mb-3">
-                        <label for="name" class="form-label">项目名称 <span style="color: #cf222e;">*</span></label>
-                        <input type="text" class="form-control" id="name" name="name" required placeholder="例如: 配表Diff确认平台">
-                    </div>
-                    <div class="mb-3">
-                        <label for="department" class="form-label">所属部门</label>
-                        <input type="text" class="form-control" id="department" name="department" placeholder="例如: 研发部">
+                    <div class="project-form-section">
+                        <div class="project-form-section-title">基础信息</div>
+                        <div class="project-form-grid">
+                            <div>
+                                <label for="code" class="form-label">项目代号 <span style="color: #cf222e;">*</span></label>
+                                <input type="text" class="form-control" id="code" name="code" required placeholder="例如: PROJECT-001">
+                            </div>
+                            <div>
+                                <label for="name" class="form-label">项目名称 <span style="color: #cf222e;">*</span></label>
+                                <input type="text" class="form-control" id="name" name="name" required placeholder="例如: 配表Diff确认平台">
+                            </div>
+                            <div class="project-form-field-full">
+                                <label for="department" class="form-label">所属部门</label>
+                                <input type="text" class="form-control" id="department" name="department" placeholder="例如: 研发部">
+                            </div>
+                        </div>
                     </div>
                     {% if deployment_mode in ['platform', 'agent'] %}
                     {% if not has_agent_nodes %}
@@ -312,31 +391,34 @@
                         暂未启动任何节点。请先启动并注册至少一个 Agent 节点，再创建项目。
                     </div>
                     {% endif %}
-                    <div class="mb-3">
-                        <label for="agent_code" class="form-label">绑定Agent节点</label>
-                        <select class="form-select" id="agent_code" name="agent_code" onchange="onProjectAgentChanged()" {% if not has_agent_nodes %}disabled{% endif %}>
-                            {% if not has_agent_nodes %}
-                            <option value="">暂未启动任何节点</option>
-                            {% endif %}
-                            {% for node in agent_nodes %}
-                            <option value="{{ node.agent_code }}">
-                                {{ node.display_name }} | 状态: {{ node.status or 'unknown' }} | CPU: {{ '%.1f'|format(node.cpu_usage_percent or 0) }}%
-                            </option>
-                            {% endfor %}
-                        </select>
-                        <div class="form-text">
-                            {% if is_admin() %}
-                            平台+Agent模式下可为新项目指定执行节点。可在
-                            {% else %}
-                            当前账号仅可在授权节点下创建项目。可在
-                            {% endif %}
-                            <a href="{{ url_for('agent_overview_page') }}" target="_blank" rel="noopener">Agent节点页</a>
-                            查看全部节点详情。
+                    <div class="project-form-section">
+                        <div class="project-form-section-title">执行节点</div>
+                        <div class="mb-3">
+                            <label for="agent_code" class="form-label">绑定Agent节点</label>
+                            <select class="form-select" id="agent_code" name="agent_code" onchange="onProjectAgentChanged()" {% if not has_agent_nodes %}disabled{% endif %}>
+                                {% if not has_agent_nodes %}
+                                <option value="">暂未启动任何节点</option>
+                                {% endif %}
+                                {% for node in agent_nodes %}
+                                <option value="{{ node.agent_code }}">
+                                    {{ node.display_name }} | 状态: {{ node.status or 'unknown' }} | CPU: {{ '%.1f'|format(node.cpu_usage_percent or 0) }}%
+                                </option>
+                                {% endfor %}
+                            </select>
+                            <div class="form-text">
+                                {% if is_admin() %}
+                                平台+Agent模式下可为新项目指定执行节点。可在
+                                {% else %}
+                                当前账号仅可在授权节点下创建项目。可在
+                                {% endif %}
+                                <a href="{{ url_for('agent_overview_page') }}" target="_blank" rel="noopener">Agent节点页</a>
+                                查看全部节点详情。
+                            </div>
                         </div>
-                    </div>
-                    <div class="alert alert-light border" id="agentLiveInfoCard" style="font-size: 0.82rem;">
-                        <div class="fw-bold mb-1">节点信息</div>
-                        <div id="agentLiveInfoText">未选择Agent节点</div>
+                        <div class="alert alert-light border agent-live-card mb-0" id="agentLiveInfoCard">
+                            <div class="fw-bold mb-2">节点信息</div>
+                            <div id="agentLiveInfoText" class="agent-live-empty">未选择Agent节点</div>
+                        </div>
                     </div>
                     {% endif %}
                 </div>
@@ -455,23 +537,57 @@ function formatBytes(bytes) {
     return `${size.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
 }
 
+function formatDateTime(isoText) {
+    if (!isoText) return '-';
+    try {
+        const dt = new Date(isoText);
+        if (Number.isNaN(dt.getTime())) return String(isoText);
+        return dt.toLocaleString('zh-CN', {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        });
+    } catch (err) {
+        return String(isoText);
+    }
+}
+
+function escapeHtml(text) {
+    return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function formatAgentText(node) {
     if (!node) {
         if (isAgentDeploymentMode && projectAgentNodes.length === 0) {
-            return '暂未启动任何节点，请先启动并注册至少一个 Agent 节点';
+            return '<div class="agent-live-empty">暂未启动任何节点，请先启动并注册至少一个 Agent 节点</div>';
         }
-        return '请选择可用Agent节点';
+        return '<div class="agent-live-empty">请选择可用Agent节点</div>';
     }
     const cpu = node.cpu_usage_percent == null ? '-' : `${Number(node.cpu_usage_percent).toFixed(1)}%`;
-    return [
-        `名称: ${node.display_name || node.agent_name || node.agent_code}`,
-        `状态: ${node.status || '-'}`,
-        `CPU: ${cpu} / ${node.cpu_cores || '-'} 核`,
-        `内存可用: ${formatBytes(node.memory_available_bytes)} / ${formatBytes(node.memory_total_bytes)}`,
-        `磁盘剩余: ${formatBytes(node.disk_free_bytes)}`,
-        `系统: ${node.os_name || '-'} ${node.os_version || ''}`.trim(),
-        `IP: ${node.host || '-'}`
-    ].join(' | ');
+    const items = [
+        { label: '名称', value: node.display_name || node.agent_name || node.agent_code || '-' },
+        { label: '状态', value: node.status || '-' },
+        { label: 'CPU', value: `${cpu} / ${node.cpu_cores || '-'} 核` },
+        { label: '内存可用', value: `${formatBytes(node.memory_available_bytes)} / ${formatBytes(node.memory_total_bytes)}` },
+        { label: '磁盘剩余', value: formatBytes(node.disk_free_bytes) },
+        { label: '系统', value: `${node.os_name || '-'} ${node.os_version || ''}`.trim() || '-' },
+        { label: 'IP', value: node.host || '-' },
+        { label: '最后心跳', value: formatDateTime(node.last_heartbeat) }
+    ];
+    return `<div class="agent-live-grid">${
+        items.map(item => (
+            `<div class="agent-live-item"><span class="agent-live-label">${escapeHtml(item.label)}</span><span class="agent-live-value">${escapeHtml(item.value)}</span></div>`
+        )).join('')
+    }</div>`;
 }
 
 function syncCreateProjectSubmitState() {
@@ -490,7 +606,7 @@ function renderProjectAgentOptions() {
         const cpu = node.cpu_usage_percent == null ? '-' : `${Number(node.cpu_usage_percent).toFixed(1)}%`;
         return `<option value="${node.agent_code}">${node.display_name || node.agent_name || node.agent_code} | 状态: ${node.status || '-'} | CPU: ${cpu}</option>`;
     }).join('');
-    select.innerHTML = dynamicOptions;
+    select.innerHTML = dynamicOptions || '<option value="">暂未启动任何节点</option>';
     if (selectedValue && projectAgentNodes.some(node => node.agent_code === selectedValue)) {
         select.value = selectedValue;
     } else if (projectAgentNodes.length > 0) {
@@ -507,13 +623,14 @@ function onProjectAgentChanged() {
     if (!select || !infoEl) return;
     const selectedCode = select.value;
     const node = projectAgentNodes.find(item => item.agent_code === selectedCode);
-    infoEl.textContent = formatAgentText(node);
+    infoEl.innerHTML = formatAgentText(node);
 }
 
 async function refreshProjectAgentNodes() {
     try {
-        const resp = await fetch('{{ url_for("list_agent_nodes") }}', {
+        const resp = await fetch(`{{ url_for("list_agent_nodes") }}?_ts=${Date.now()}`, {
             method: 'GET',
+            cache: 'no-store',
             headers: { 'Accept': 'application/json' }
         });
         const data = await resp.json();

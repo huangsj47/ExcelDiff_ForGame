@@ -91,6 +91,7 @@ from services.repository_admin_handlers import (
     update_repository_order,
 )
 from services.commit_operation_handlers import (
+    _attach_author_display,
     approve_all_files,
     batch_approve_commits,
     batch_reject_commits,
@@ -1194,6 +1195,12 @@ def commit_list(repository_id):
         commit.confirm_users_title = confirm_users_title
         commit.author_display = _resolve_author_display(commit.author)
 
+    # 兜底补齐作者显示名：同时尝试 local/qkit 账号表，避免后端切换导致映射缺失。
+    try:
+        _attach_author_display(commits)
+    except Exception as author_map_error:
+        log_print(f"补齐提交列表作者映射失败，继续使用原始作者显示: {author_map_error}", 'APP')
+
     # 调试信息
     log_print(f"=== 分页调试信息 ===", 'APP')
     log_print(f"Repository ID: {repository_id}", 'APP')
@@ -1525,6 +1532,13 @@ def commit_diff_new(commit_id):
         Commit.path == commit.path
     ).order_by(Commit.commit_time.desc()).all()
     previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
+    try:
+        commits_for_author_mapping = [commit]
+        if previous_commit:
+            commits_for_author_mapping.append(previous_commit)
+        _attach_author_display(commits_for_author_mapping)
+    except Exception as author_map_error:
+        log_print(f"commit_diff_new 作者姓名映射失败，回退原始作者: {author_map_error}", 'DIFF')
     # 使用新的差异服务处理文件
     diff_data = get_unified_diff_data(commit, previous_commit)
     return render_template('commit_diff_new.html', 
@@ -1742,6 +1756,7 @@ def commit_diff_with_path(project_code, repository_name, commit_id):
 
 
 def commit_diff(commit_id):
+    diff_request_start = time.time()
     commit = Commit.query.get_or_404(commit_id)
     repository = commit.repository
     project = repository.project
@@ -1755,6 +1770,13 @@ def commit_diff(commit_id):
         Commit.path == commit.path
     ).order_by(Commit.commit_time.desc(), Commit.id.desc()).all()
     previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
+    try:
+        commits_for_author_mapping = [commit]
+        if previous_commit:
+            commits_for_author_mapping.append(previous_commit)
+        _attach_author_display(commits_for_author_mapping)
+    except Exception as author_map_error:
+        log_print(f"commit_diff 作者姓名映射失败，回退原始作者: {author_map_error}", 'DIFF')
     # 调试日志
     log_print(f"🔍 查找前一提交 - 文件: {commit.path}", 'DIFF', force=True)
     log_print(f"🔍 该文件总提交数: {len(file_commits)}", 'DIFF', force=True)
@@ -1889,6 +1911,25 @@ def commit_diff(commit_id):
     else:
         # 非Excel文件，正常同步处理
         diff_data = get_diff_data(commit, previous_commit=previous_commit)
+        perf_tags = {
+            "source": "realtime_non_excel",
+            "repository_id": repository.id,
+            "project_id": project.id if project else "",
+            "project_code": project.code if project else "",
+            "file_path": commit.path,
+        }
+        perf_success = True
+        if isinstance(diff_data, dict) and str(diff_data.get("type") or "").lower() == "error":
+            perf_success = False
+            perf_tags["source"] = "realtime_diff_failed"
+        performance_metrics_service.record(
+            "api_commit_diff",
+            success=perf_success,
+            metrics={
+                "total_ms": (time.time() - diff_request_start) * 1000,
+            },
+            tags=perf_tags,
+        )
         return render_template('commit_diff.html', 
                              commit=commit, 
                              repository=repository,
