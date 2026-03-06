@@ -41,6 +41,13 @@ def _handle_signal(signum, frame):
     _SHUTDOWN = True
 
 
+def _is_virtual_env() -> bool:
+    if getattr(sys, "real_prefix", None):
+        return True
+    base_prefix = getattr(sys, "base_prefix", sys.prefix)
+    return bool(base_prefix and base_prefix != sys.prefix)
+
+
 def _maybe_upload_large_temp_cache(task, task_id, task_type, result_payload, settings, common_headers, agent_token):
     if not settings.temp_cache_upload_enabled:
         return result_payload
@@ -132,6 +139,20 @@ def run_agent():
         f"platform={settings.platform_base_url}, version={get_local_release_version()}",
         settings.log_verbose,
     )
+    _log(
+        f"运行时Python: exe={sys.executable}, mode={'venv' if _is_virtual_env() else 'system'}",
+        settings.log_verbose,
+    )
+    if settings.auto_update_install_deps:
+        _log(
+            "自更新依赖安装已启用：将使用当前解释器执行 `python -m pip install -r requirements.txt`",
+            settings.log_verbose,
+        )
+        if not _is_virtual_env():
+            _log(
+                "提示：当前为系统Python环境，依赖将安装到系统环境；生产建议使用venv。",
+                settings.log_verbose,
+            )
 
     while not _SHUTDOWN:
         if not agent_token:

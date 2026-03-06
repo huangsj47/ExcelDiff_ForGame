@@ -55,6 +55,13 @@ if exist "venv\Scripts\python.exe" (
 )
 
 echo [INFO] Using Python: %PYTHON_EXE%
+if /I "%PYTHON_EXE%"=="python" (
+    echo [WARN] Running with system Python.
+    echo [WARN] If AGENT_AUTO_UPDATE_INSTALL_DEPS=true, self-update will install deps into system Python.
+) else (
+    echo [INFO] Running with virtual environment Python.
+    echo [INFO] If AGENT_AUTO_UPDATE_INSTALL_DEPS=true, deps will be installed into this venv.
+)
 echo [INFO] Installing dependencies...
 "%PYTHON_EXE%" -m pip install --upgrade pip >nul
 "%PYTHON_EXE%" -m pip install --prefer-binary -r requirements.txt

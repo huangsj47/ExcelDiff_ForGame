@@ -40,6 +40,10 @@ python start_agent.py
   - `AGENT_AUTO_UPDATE_DOWNLOAD_TIMEOUT_SECONDS`（默认 `120`）
   - `AGENT_AUTO_UPDATE_INSTALL_DEPS`（默认 `true`）
   - `AGENT_AUTO_UPDATE_PIP_TIMEOUT_SECONDS`（默认 `900`）
+- 依赖安装行为说明（重要）：
+  - `AGENT_AUTO_UPDATE_INSTALL_DEPS=true` 时，Agent 使用“当前运行解释器”执行 `python -m pip install -r requirements.txt`；
+  - 使用 venv 启动时，依赖会安装到该 venv；
+  - 使用系统 Python 启动时，依赖会安装到系统环境（可能需要管理员权限，且不推荐生产这样做）。
 
 ## 3. 打包分发
 ```bash

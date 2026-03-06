@@ -128,3 +128,37 @@ def test_check_and_apply_update_success(monkeypatch, tmp_path):
     assert "new_module.py" in managed_files
     assert "start_agent.py" in managed_files
     assert any("old-v1 -> new-v2" in line for line in logs)
+
+
+def test_install_requirements_uses_current_python_interpreter(monkeypatch, tmp_path):
+    agent_root = tmp_path / "agent_runtime"
+    extracted_root = tmp_path / "extracted_release"
+    agent_root.mkdir(parents=True, exist_ok=True)
+    extracted_root.mkdir(parents=True, exist_ok=True)
+    (extracted_root / "requirements.txt").write_text("python-dotenv>=1.0.0\n", encoding="utf-8")
+
+    monkeypatch.setattr(self_update, "_agent_root", lambda: str(agent_root))
+    monkeypatch.setattr(self_update.sys, "executable", "/mock/python-exe")
+
+    captured = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["cwd"] = kwargs.get("cwd")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(self_update.subprocess, "run", _fake_run)
+
+    settings = SimpleNamespace(
+        auto_update_install_deps=True,
+        auto_update_pip_timeout_seconds=90,
+    )
+    self_update._install_requirements_if_needed(settings, str(extracted_root))
+
+    assert captured.get("cmd", [None])[0] == "/mock/python-exe"
+    assert captured.get("cmd", [None, None, None, None, None])[:3] == [
+        "/mock/python-exe",
+        "-m",
+        "pip",
+    ]
+    assert captured.get("cwd") == str(agent_root)
