@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from app import app, create_tables, db
 from models import AgentTask, AgentTempCache, BackgroundTask, Project, Repository
 from agent.config import load_settings
@@ -237,6 +239,34 @@ def test_agent_auto_sync_supports_svn(monkeypatch, tmp_path):
     assert captured.get("local_repo_dir") == expected_local_dir
     assert captured.get("username") == "u1"
     assert captured.get("password") == "p1"
+
+
+def test_run_git_classifies_project_not_found_and_hides_ssh_warning(monkeypatch):
+    stderr_text = "\n".join(
+        [
+            "** WARNING: connection is not using a post-quantum key exchange algorithm.",
+            "** This session may be vulnerable to \"store now, decrypt later\" attacks.",
+            "remote: ",
+            "remote: The project you were looking for could not be found.",
+            "fatal: Could not read from remote repository.",
+            "Please make sure you have the correct access rights",
+            "and the repository exists.",
+        ]
+    )
+
+    def _fake_run(*args, **kwargs):
+        return SimpleNamespace(returncode=128, stdout="", stderr=stderr_text)
+
+    monkeypatch.setattr(auto_sync_handler.subprocess, "run", _fake_run)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        auto_sync_handler._run_git(["git", "clone", "ssh://git@example.com/org/repo.git", "repo_dir"])
+
+    message = str(exc_info.value)
+    assert "reason=remote repository not found or access denied" in message
+    assert "hint=check repository SSH URL and ensure this agent SSH key has repository access" in message
+    assert "post-quantum" not in message
+    assert "project you were looking for could not be found" in message.lower()
 
 
 def test_repository_sync_js_treats_accepted_as_dispatched_success():

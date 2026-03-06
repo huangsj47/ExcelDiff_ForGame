@@ -65,18 +65,37 @@ def _extract_author_lookup_keys(raw_author):
     return keys
 
 
-def _get_auth_user_model():
+def _get_auth_user_models():
+    """按优先级返回可用账号模型（当前后端优先，另一套作为兜底）。"""
+    backend = None
     try:
         from auth import get_auth_backend
 
-        if get_auth_backend() == "qkit":
-            from qkit_auth.models import QkitAuthUser as user_model
-        else:
-            from auth.models import AuthUser as user_model
-        return user_model
-    except Exception as exc:
-        log_print(f"加载账号模型失败，回退原始作者显示: {exc}", "APP")
-        return None
+        backend = (get_auth_backend() or "").strip().lower()
+    except Exception:
+        backend = None
+
+    source_order = ["qkit", "local"] if backend == "qkit" else ["local", "qkit"]
+    models = []
+    seen_tables = set()
+
+    for source in source_order:
+        try:
+            if source == "qkit":
+                from qkit_auth.models import QkitAuthUser as user_model
+            else:
+                from auth.models import AuthUser as user_model
+        except Exception:
+            continue
+
+        table_name = str(getattr(user_model, "__tablename__", "") or "")
+        if table_name and table_name in seen_tables:
+            continue
+        if table_name:
+            seen_tables.add(table_name)
+        models.append(user_model)
+
+    return models
 
 
 def _resolve_author_display(raw_author, username_to_display_name_lower, email_prefix_to_display_name):
@@ -96,8 +115,8 @@ def _resolve_author_display(raw_author, username_to_display_name_lower, email_pr
 def _attach_author_display(commits):
     if not commits:
         return
-    user_model = _get_auth_user_model()
-    if user_model is None:
+    user_models = _get_auth_user_models()
+    if not user_models:
         for commit in commits:
             commit.author_display = str(commit.author or "").strip() or "未知"
         return
@@ -112,27 +131,32 @@ def _attach_author_display(commits):
 
     username_to_display_name_lower = {}
     email_prefix_to_display_name = {}
-    try:
-        conditions = [
-            func.lower(user_model.username).in_(list(author_keys)),
-        ]
-        conditions.extend(
-            func.lower(user_model.email).like(f"{author_key}@%")
-            for author_key in author_keys
-            if author_key
-        )
-        users = user_model.query.filter(or_(*conditions)).all() if conditions else []
-        for user in users:
-            username = (getattr(user, "username", "") or "").strip()
-            if not username:
-                continue
-            display_name = (getattr(user, "display_name", "") or "").strip() or username
-            username_to_display_name_lower[username.lower()] = display_name
-            email = (getattr(user, "email", "") or "").strip().lower()
-            if email and "@" in email:
-                email_prefix_to_display_name[email.split("@", 1)[0]] = display_name
-    except Exception as exc:
-        log_print(f"加载作者姓名映射失败，回退原始作者显示: {exc}", "APP")
+    for user_model in user_models:
+        try:
+            conditions = [
+                func.lower(user_model.username).in_(list(author_keys)),
+            ]
+            conditions.extend(
+                func.lower(user_model.email).like(f"{author_key}@%")
+                for author_key in author_keys
+                if author_key
+            )
+            users = user_model.query.filter(or_(*conditions)).all() if conditions else []
+            for user in users:
+                username = (getattr(user, "username", "") or "").strip()
+                if not username:
+                    continue
+                display_name = (getattr(user, "display_name", "") or "").strip() or username
+                username_key = username.lower()
+                if username_key not in username_to_display_name_lower:
+                    username_to_display_name_lower[username_key] = display_name
+                email = (getattr(user, "email", "") or "").strip().lower()
+                if email and "@" in email:
+                    email_prefix = email.split("@", 1)[0]
+                    if email_prefix not in email_prefix_to_display_name:
+                        email_prefix_to_display_name[email_prefix] = display_name
+        except Exception as exc:
+            log_print(f"加载作者姓名映射失败({getattr(user_model, '__tablename__', 'unknown')}): {exc}", "APP")
 
     for commit in commits:
         commit.author_display = _resolve_author_display(

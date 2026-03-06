@@ -1255,6 +1255,7 @@ function initCommitRowSelection() {
             return;
         }
 
+        const withCtrl = event.ctrlKey || event.metaKey;
         if (event.shiftKey && lastSelectedRowIndex !== null && rowIndex >= 0) {
             const start = Math.min(lastSelectedRowIndex, rowIndex);
             const end = Math.max(lastSelectedRowIndex, rowIndex);
@@ -1264,8 +1265,19 @@ function initCommitRowSelection() {
                     cb.checked = true;
                 }
             }
+        } else if (withCtrl) {
+            // Ctrl/Cmd 点击：保留已有选中，仅补选当前行
+            checkbox.checked = true;
         } else {
-            checkbox.checked = !checkbox.checked;
+            // 普通点击：点击其他条目时切换为单选当前条目
+            const selectedRows = getSelectedRows();
+            const clickedIsSelected = Boolean(checkbox.checked);
+            if (!clickedIsSelected) {
+                clearAllCommitSelections();
+                checkbox.checked = true;
+            } else if (selectedRows.length === 0) {
+                checkbox.checked = true;
+            }
         }
         lastSelectedRowIndex = rowIndex;
         hideCommitContextMenu();
@@ -1280,22 +1292,29 @@ function initCommitRowSelection() {
         }
         event.preventDefault();
 
+        const withCtrl = event.ctrlKey || event.metaKey;
         const checkbox = row.querySelector('.commit-checkbox');
         const selectedRows = getSelectedRows();
         const clickedIsSelected = Boolean(checkbox && checkbox.checked);
-        if (selectedRows.length === 0) {
+        if (withCtrl) {
             if (checkbox) {
                 checkbox.checked = true;
             }
-        } else if (selectedRows.length > 1 && !clickedIsSelected) {
-            clearAllCommitSelections();
-            if (checkbox) {
-                checkbox.checked = true;
-            }
-        } else if (selectedRows.length === 1 && !clickedIsSelected) {
-            clearAllCommitSelections();
-            if (checkbox) {
-                checkbox.checked = true;
+        } else {
+            if (selectedRows.length === 0) {
+                if (checkbox) {
+                    checkbox.checked = true;
+                }
+            } else if (selectedRows.length > 1 && !clickedIsSelected) {
+                clearAllCommitSelections();
+                if (checkbox) {
+                    checkbox.checked = true;
+                }
+            } else if (selectedRows.length === 1 && !clickedIsSelected) {
+                clearAllCommitSelections();
+                if (checkbox) {
+                    checkbox.checked = true;
+                }
             }
         }
 

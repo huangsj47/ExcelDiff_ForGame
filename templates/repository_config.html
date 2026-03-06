@@ -892,7 +892,10 @@ function testRepository(repoId) {
     if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>测试中...'; }
     fetch(`/repositories/${repoId}/test`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+        }
     }).then(response => response.json().catch(() => ({ success: response.ok })))
     .then(data => {
         if (data.success || data.status === 'success') {

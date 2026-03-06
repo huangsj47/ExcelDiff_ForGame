@@ -32,6 +32,7 @@ _SVN_LOCK_KEYWORDS = (
     "run 'svn cleanup'",
     "cleanup",
 )
+_GIT_ERROR_MAX_CHARS = 4000
 
 
 def _sanitize_segment(segment: str, fallback: str) -> str:
@@ -216,6 +217,73 @@ def _build_auth_url(url: str, username: str | None, token: str | None):
     return urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
 
 
+def _truncate_text(text: str, max_chars: int = _GIT_ERROR_MAX_CHARS) -> str:
+    content = str(text or "")
+    if len(content) <= max_chars:
+        return content
+    return f"{content[:max_chars]}...(truncated)"
+
+
+def _normalize_git_stderr(stderr_text: str) -> str:
+    raw = str(stderr_text or "")
+    if not raw:
+        return ""
+
+    cleaned_lines = []
+    for line in raw.splitlines():
+        stripped = line.lstrip()
+        # SSH 后量子/告警行会干扰真正报错定位，失败场景下只保留关键fatal/remote信息
+        if stripped.startswith("** "):
+            continue
+        cleaned_lines.append(line)
+
+    normalized = "\n".join(cleaned_lines).strip()
+    return normalized or raw.strip()
+
+
+def _classify_git_failure(stderr_text: str) -> tuple[str | None, str | None]:
+    lowered = str(stderr_text or "").lower()
+    if not lowered:
+        return None, None
+
+    if (
+        "the project you were looking for could not be found" in lowered
+        or "repository not found" in lowered
+    ):
+        return (
+            "remote repository not found or access denied",
+            "check repository SSH URL and ensure this agent SSH key has repository access",
+        )
+
+    if "permission denied (publickey)" in lowered:
+        return (
+            "ssh public key authentication failed",
+            "add/refresh SSH public key on git server and verify ssh -T connectivity",
+        )
+
+    if "could not read from remote repository" in lowered and (
+        "access rights" in lowered or "permission denied" in lowered
+    ):
+        return (
+            "remote repository access denied",
+            "verify repository permissions for the current SSH identity",
+        )
+
+    return None, None
+
+
+def _format_git_failure(cmd, stderr_text: str) -> str:
+    normalized_stderr = _normalize_git_stderr(stderr_text)
+    reason, hint = _classify_git_failure(normalized_stderr)
+    clipped_stderr = _truncate_text(normalized_stderr)
+    cmd_text = " ".join(cmd)
+    if reason and hint:
+        return (
+            f"git cmd failed: {cmd_text} | reason={reason} | hint={hint} | stderr={clipped_stderr}"
+        )
+    return f"git cmd failed: {cmd_text} | stderr={clipped_stderr}"
+
+
 def _run_git(cmd, cwd=None, timeout=120):
     result = subprocess.run(
         cmd,
@@ -227,7 +295,7 @@ def _run_git(cmd, cwd=None, timeout=120):
         timeout=timeout,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"git cmd failed: {' '.join(cmd)} | stderr={result.stderr.strip()}")
+        raise RuntimeError(_format_git_failure(cmd, result.stderr))
     return result.stdout
 
 
