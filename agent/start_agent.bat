@@ -48,10 +48,9 @@ if errorlevel 1 (
 )
 
 set "PYTHON_EXE=python"
-if not exist "venv\Scripts\python.exe" (
-    echo [INFO] Creating virtual environment...
-    python -m venv venv
-)
+call :ensure_venv_python
+if errorlevel 1 goto :fail
+
 if exist "venv\Scripts\python.exe" (
     set "PYTHON_EXE=venv\Scripts\python.exe"
 )
@@ -97,3 +96,33 @@ exit /b %APP_EXIT%
 
 :fail
 exit /b 1
+
+:ensure_venv_python
+if not exist "venv\Scripts\python.exe" (
+    echo [INFO] Creating virtual environment...
+    python -m venv venv
+    if errorlevel 1 (
+        echo [ERROR] Failed to create virtual environment.
+        exit /b 1
+    )
+    exit /b 0
+)
+
+venv\Scripts\python.exe -c "import sys; print(sys.executable)" >nul 2>&1
+if not errorlevel 1 exit /b 0
+
+echo [WARN] Existing venv is invalid and will be recreated.
+if exist "venv" (
+    rmdir /s /q "venv"
+)
+if exist "venv" (
+    echo [ERROR] Failed to remove invalid venv directory. Close related processes and retry.
+    exit /b 1
+)
+
+python -m venv venv
+if errorlevel 1 (
+    echo [ERROR] Failed to recreate virtual environment.
+    exit /b 1
+)
+exit /b 0
