@@ -39,9 +39,14 @@ htmlcov/
 .idea/
 node_modules/
 
-
+agent/agent_package*
+agent/venv
 
 _startup_log.txt  
-_stdout_restart.txt  
+_stdout_restart.txt
+
+findings.md
+progress.md
 task_plan.md  
 
+test_output.txt
