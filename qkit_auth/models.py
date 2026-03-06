@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Qkit账号系统数据模型（与 local auth 数据隔离）。"""
 
@@ -130,6 +130,29 @@ class QkitAuthUserProject(db.Model):
     @property
     def is_project_admin(self) -> bool:
         return self.project_role == QkitProjectRole.ADMIN
+
+class QkitProjectConfirmPermission(db.Model):
+    __tablename__ = "qkit_project_confirm_permissions"
+
+    id = db.Column(db.Integer, primary_key=True)
+    project_id = db.Column(db.Integer, db.ForeignKey("project.id", ondelete="CASCADE"), nullable=False, index=True)
+    function_name = db.Column(db.String(255), nullable=False)
+    function_key = db.Column(db.String(255), nullable=False)
+    allow_confirm = db.Column(db.Boolean, nullable=False, default=True)
+    allow_reject = db.Column(db.Boolean, nullable=False, default=True)
+    updated_by = db.Column(db.Integer, db.ForeignKey("qkit_auth_users.id"), nullable=True)
+    updated_at = db.Column(
+        db.DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint("project_id", "function_key", name="uq_qkit_project_confirm_permission"),
+    )
+
+    project = db.relationship("Project")
+    updater = db.relationship("QkitAuthUser", foreign_keys=[updated_by])
 
 
 class QkitAuthProjectJoinRequest(db.Model):
@@ -296,3 +319,5 @@ class QkitAuthUserImportToken(db.Model):
         if len(token) <= 8:
             return "*" * len(token)
         return f"{token[:4]}{'*' * (len(token) - 8)}{token[-4:]}"
+
+

@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Cache management routes extracted from app.py."""
 
+from datetime import datetime, timezone
+
 from flask import Blueprint, jsonify, render_template, request
 from sqlalchemy import case, func, text
 
@@ -17,7 +19,9 @@ cache_management_bp = Blueprint("cache_management", __name__)
 def cleanup_expired_cache():
     """Manual cleanup for expired cache records."""
     try:
-        excel_cache_service, excel_html_cache_service, weekly_excel_cache_service = get_runtime_models(
+        db, AgentTempCache, excel_cache_service, excel_html_cache_service, weekly_excel_cache_service = get_runtime_models(
+            "db",
+            "AgentTempCache",
             "excel_cache_service",
             "excel_html_cache_service",
             "weekly_excel_cache_service",
@@ -28,6 +32,14 @@ def cleanup_expired_cache():
         html_expired_count = excel_html_cache_service.cleanup_expired_cache()
         weekly_excel_expired_count = weekly_excel_cache_service.cleanup_expired_cache()
         weekly_excel_old_count = weekly_excel_cache_service.cleanup_old_cache()
+        now_utc = datetime.now(timezone.utc)
+        agent_temp_expired_count = (
+            AgentTempCache.query.filter(
+                AgentTempCache.expire_at.isnot(None),
+                AgentTempCache.expire_at < now_utc,
+            ).delete(synchronize_session=False)
+        )
+        db.session.commit()
 
         return jsonify(
             {
@@ -38,6 +50,7 @@ def cleanup_expired_cache():
                 "html_expired_count": html_expired_count,
                 "weekly_excel_expired_count": weekly_excel_expired_count,
                 "weekly_excel_old_count": weekly_excel_old_count,
+                "agent_temp_expired_count": int(agent_temp_expired_count or 0),
             }
         )
     except Exception as exc:
@@ -48,28 +61,37 @@ def cleanup_expired_cache():
 @require_admin
 def clear_all_diff_cache():
     """Clear all Excel diff cache records."""
-    db, DiffCache, BackgroundTask, log_print = get_runtime_models(
+    db, DiffCache, BackgroundTask, AgentTempCache, log_print = get_runtime_models(
         "db",
         "DiffCache",
         "BackgroundTask",
+        "AgentTempCache",
         "log_print",
     )
     try:
         log_print("🧹 开始清理Excel差异数据缓存...", "INFO")
         total_diff_cache_count = DiffCache.query.delete(synchronize_session=False)
         task_count = BackgroundTask.query.filter_by(task_type="excel_diff").delete(synchronize_session=False)
+        agent_temp_count = AgentTempCache.query.delete(synchronize_session=False)
         db.session.commit()
 
         log_print(
-            f"🧹 清理完成：{total_diff_cache_count} 条Excel差异数据缓存，{task_count} 条相关后台任务",
+            (
+                f"🧹 清理完成：{total_diff_cache_count} 条Excel差异数据缓存，"
+                f"{agent_temp_count} 条Agent临时缓存，{task_count} 条相关后台任务"
+            ),
             "INFO",
         )
 
         return jsonify(
             {
                 "success": True,
-                "message": f"已清理 {total_diff_cache_count} 条Excel差异数据缓存和 {task_count} 条相关任务",
+                "message": (
+                    f"已清理 {total_diff_cache_count} 条Excel差异数据缓存、"
+                    f"{agent_temp_count} 条Agent临时缓存和 {task_count} 条相关任务"
+                ),
                 "diff_cache_count": total_diff_cache_count,
+                "agent_temp_count": int(agent_temp_count or 0),
                 "task_count": task_count,
             }
         )
@@ -83,8 +105,8 @@ def clear_all_diff_cache():
 @require_admin
 def clear_project_cache():
     """清理指定项目的所有缓存数据"""
-    db, DiffCache, ExcelHtmlCache, Repository, BackgroundTask, log_print = get_runtime_models(
-        "db", "DiffCache", "ExcelHtmlCache", "Repository", "BackgroundTask", "log_print",
+    db, DiffCache, ExcelHtmlCache, AgentTempCache, Repository, BackgroundTask, log_print = get_runtime_models(
+        "db", "DiffCache", "ExcelHtmlCache", "AgentTempCache", "Repository", "BackgroundTask", "log_print",
     )
     try:
         data = request.get_json() or {}
@@ -106,6 +128,11 @@ def clear_project_cache():
             BackgroundTask.repository_id.in_(repo_ids),
             BackgroundTask.task_type.in_(["excel_diff", "auto_sync"])
         ).delete(synchronize_session=False)
+        # 清理平台侧 Agent 临时缓存（按项目或仓库维度）
+        agent_temp_count = AgentTempCache.query.filter(
+            (AgentTempCache.project_id == project_id)
+            | (AgentTempCache.repository_id.in_(repo_ids))
+        ).delete(synchronize_session=False)
 
         # 尝试清理周版本Excel缓存
         weekly_count = 0
@@ -123,15 +150,23 @@ def clear_project_cache():
         db.session.commit()
 
         log_print(
-            f"🧹 项目 {project_id} 缓存清理完成: {diff_count} 条Diff缓存, {html_count} 条HTML缓存, {weekly_count} 条周版本缓存, {task_count} 条任务",
+            (
+                f"🧹 项目 {project_id} 缓存清理完成: {diff_count} 条Diff缓存, "
+                f"{html_count} 条HTML缓存, {weekly_count} 条周版本缓存, "
+                f"{agent_temp_count} 条Agent临时缓存, {task_count} 条任务"
+            ),
             "INFO",
         )
         return jsonify({
             "success": True,
-            "message": f"已清理项目缓存: {diff_count} 条Diff + {html_count} 条HTML + {weekly_count} 条周版本 + {task_count} 条任务",
+            "message": (
+                f"已清理项目缓存: {diff_count} 条Diff + {html_count} 条HTML + "
+                f"{weekly_count} 条周版本 + {agent_temp_count} 条Agent临时缓存 + {task_count} 条任务"
+            ),
             "diff_count": diff_count,
             "html_count": html_count,
             "weekly_count": weekly_count,
+            "agent_temp_count": int(agent_temp_count or 0),
             "task_count": task_count,
         })
     except Exception as exc:
@@ -351,7 +386,16 @@ def excel_diff_status(cache_key):
 @cache_management_bp.route("/api/excel-html-cache/stats", methods=["GET"])
 def get_excel_html_cache_stats():
     """获取Excel HTML缓存统计信息"""
-    excel_cache_service, excel_html_cache_service, DIFF_LOGIC_VERSION, log_print = get_runtime_models(
+    (
+        db,
+        AgentTempCache,
+        excel_cache_service,
+        excel_html_cache_service,
+        DIFF_LOGIC_VERSION,
+        log_print,
+    ) = get_runtime_models(
+        "db",
+        "AgentTempCache",
         "excel_cache_service",
         "excel_html_cache_service",
         "DIFF_LOGIC_VERSION",
@@ -360,12 +404,40 @@ def get_excel_html_cache_stats():
     try:
         data_cache_stats = excel_cache_service.get_cache_statistics()
         html_cache_stats = excel_html_cache_service.get_cache_statistics()
+        now_utc = datetime.now(timezone.utc)
+        agent_row = (
+            db.session.query(
+                func.count(AgentTempCache.id).label("total_count"),
+                func.sum(func.coalesce(AgentTempCache.payload_size, 0)).label("total_size"),
+                func.sum(
+                    case(
+                        (
+                            (AgentTempCache.expire_at.isnot(None))
+                            & (AgentTempCache.expire_at < now_utc),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("expired_count"),
+            )
+            .first()
+        )
+        agent_total = int((agent_row.total_count if agent_row else 0) or 0)
+        agent_total_size = int((agent_row.total_size if agent_row else 0) or 0)
+        agent_expired = int((agent_row.expired_count if agent_row else 0) or 0)
 
         return jsonify(
             {
                 "success": True,
                 "data_cache": data_cache_stats,
                 "html_cache": html_cache_stats,
+                "agent_temp_cache": {
+                    "total_count": agent_total,
+                    "expired_count": agent_expired,
+                    "active_count": max(agent_total - agent_expired, 0),
+                    "total_size_bytes": agent_total_size,
+                    "total_size_mb": round(agent_total_size / (1024 * 1024), 2),
+                },
                 "strategy": {
                     "current_version": DIFF_LOGIC_VERSION,
                     "cache_limit": 1000,
@@ -390,6 +462,7 @@ def get_excel_cache_stats_by_project():
         DiffCache,
         ExcelHtmlCache,
         WeeklyVersionExcelCache,
+        AgentTempCache,
         excel_html_cache_service,
         weekly_excel_cache_service,
         DIFF_LOGIC_VERSION,
@@ -401,6 +474,7 @@ def get_excel_cache_stats_by_project():
         "DiffCache",
         "ExcelHtmlCache",
         "WeeklyVersionExcelCache",
+        "AgentTempCache",
         "excel_html_cache_service",
         "weekly_excel_cache_service",
         "DIFF_LOGIC_VERSION",
@@ -527,6 +601,42 @@ def get_excel_cache_stats_by_project():
                 "expire_days": weekly_excel_cache_service.expire_days,
             }
 
+        now_utc = datetime.now(timezone.utc)
+        agent_rows = (
+            db.session.query(
+                AgentTempCache.project_id.label("project_id"),
+                func.count(AgentTempCache.id).label("total_count"),
+                func.sum(func.coalesce(AgentTempCache.payload_size, 0)).label("total_size"),
+                func.sum(
+                    case(
+                        (
+                            (AgentTempCache.expire_at.isnot(None))
+                            & (AgentTempCache.expire_at < now_utc),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("expired_count"),
+            )
+            .group_by(AgentTempCache.project_id)
+            .all()
+        )
+        agent_map = {}
+        for row in agent_rows:
+            project_id = int(row.project_id) if row.project_id else None
+            if not project_id:
+                continue
+            total_count = int(row.total_count or 0)
+            expired_count = int(row.expired_count or 0)
+            total_size_bytes = int(row.total_size or 0)
+            agent_map[project_id] = {
+                "total_count": total_count,
+                "expired_count": expired_count,
+                "active_count": max(total_count - expired_count, 0),
+                "total_size_bytes": total_size_bytes,
+                "total_size_mb": round(total_size_bytes / (1024 * 1024), 2),
+            }
+
         for project in projects:
             pid = project.id
             data_cache_stats = diff_map.get(
@@ -566,6 +676,16 @@ def get_excel_cache_stats_by_project():
                     "expire_days": weekly_excel_cache_service.expire_days,
                 },
             )
+            agent_temp_cache_stats = agent_map.get(
+                pid,
+                {
+                    "total_count": 0,
+                    "expired_count": 0,
+                    "active_count": 0,
+                    "total_size_bytes": 0,
+                    "total_size_mb": 0.0,
+                },
+            )
 
             project_stats.append(
                 {
@@ -578,6 +698,7 @@ def get_excel_cache_stats_by_project():
                     "data_cache": data_cache_stats,
                     "html_cache": html_cache_stats,
                     "weekly_excel_cache": weekly_excel_cache_stats,
+                    "agent_temp_cache": agent_temp_cache_stats,
                 }
             )
 
@@ -800,9 +921,15 @@ def admin_performance_stats():
         (performance_metrics_service,) = get_runtime_models("performance_metrics_service")
         window_minutes = request.args.get("window_minutes", default=60, type=int) or 60
         recent_limit = request.args.get("recent_limit", default=500, type=int) or 500
+        diff_kind = (request.args.get("diff_kind") or "all").strip().lower()
+        mode_kind = (request.args.get("mode_kind") or "all").strip().lower()
+        project_filter = (request.args.get("project_filter") or "all").strip()
         data = performance_metrics_service.snapshot(
             window_minutes=window_minutes,
             recent_limit=recent_limit,
+            diff_kind=diff_kind,
+            mode_kind=mode_kind,
+            project_filter=project_filter,
         )
         return jsonify({"success": True, "data": data})
     except Exception as exc:

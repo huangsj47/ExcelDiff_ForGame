@@ -958,7 +958,35 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // 设置展开收起按钮事件监听器
     setupCollapseListeners();
+
+    // merged-view 空状态跳转时可通过 ?open_create=1 直接拉起新增配置弹窗
+    maybeAutoOpenCreateModal();
 });
+
+function maybeAutoOpenCreateModal() {
+    try {
+        const currentUrl = new URL(window.location.href);
+        if (currentUrl.searchParams.get('open_create') !== '1') {
+            return;
+        }
+
+        const modalEl = document.getElementById('addConfigModal');
+        if (!modalEl || typeof bootstrap === 'undefined' || !bootstrap.Modal) {
+            return;
+        }
+
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+        modal.show();
+
+        // 弹窗打开后移除参数，避免刷新页面重复自动弹窗
+        currentUrl.searchParams.delete('open_create');
+        const nextSearch = currentUrl.searchParams.toString();
+        const nextUrl = `${currentUrl.pathname}${nextSearch ? `?${nextSearch}` : ''}${currentUrl.hash}`;
+        window.history.replaceState({}, document.title, nextUrl);
+    } catch (error) {
+        console.warn('auto open create modal failed:', error);
+    }
+}
 
 // 设置展开收起按钮事件监听器
 function setupCollapseListeners() {

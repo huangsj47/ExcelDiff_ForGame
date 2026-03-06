@@ -27,6 +27,9 @@ from models import Project, db
 from qkit_auth.config import load_qkit_settings
 from qkit_auth.models import (
     QkitAuthProjectJoinRequest,
+    QkitAuthImportBlock,
+    QkitImportBlockType,
+    QkitProjectConfirmPermission,
     QkitPlatformRole,
     QkitProjectRole,
     QkitAuthUser,
@@ -42,6 +45,10 @@ from qkit_auth.services import (
     handle_create_project_request,
     handle_join_request,
     import_project_users_from_redmine,
+    get_project_confirm_permissions,
+    batch_update_project_confirm_permissions,
+    clear_project_confirm_permissions,
+    evaluate_user_confirm_permission,
     list_pending_create_requests,
     list_pending_join_requests,
     list_users,
@@ -295,6 +302,17 @@ def _normalize_member_role(value: str) -> str:
     return QkitProjectRole.MEMBER.value
 
 
+def _normalize_user_sort_params(sort_by: str | None, sort_dir: str | None) -> tuple[str, str]:
+    allowed = {"username", "display_name", "email", "role", "status", "created_at"}
+    normalized_by = str(sort_by or "username").strip().lower()
+    if normalized_by not in allowed:
+        normalized_by = "username"
+    normalized_dir = str(sort_dir or "asc").strip().lower()
+    if normalized_dir not in {"asc", "desc"}:
+        normalized_dir = "asc"
+    return normalized_by, normalized_dir
+
+
 def _qkit_login_redirect(next_url: str):
     if next_url and _is_safe_redirect(next_url):
         session["qkit_backhost"] = next_url
@@ -480,6 +498,10 @@ def user_list():
 
     page = max(1, request.args.get("page", 1, type=int))
     per_page = _USERS_PER_PAGE
+    sort_by, sort_dir = _normalize_user_sort_params(
+        request.args.get("sort_by"),
+        request.args.get("sort_dir"),
+    )
 
     users_query = QkitAuthUser.query
     if selected_project_id:
@@ -498,9 +520,20 @@ def user_list():
         )
 
     users_query = users_query.distinct()
+    sort_column_map = {
+        "username": db.func.lower(QkitAuthUser.username),
+        "display_name": db.func.lower(db.func.coalesce(QkitAuthUser.display_name, "")),
+        "email": db.func.lower(db.func.coalesce(QkitAuthUser.email, "")),
+        "role": QkitAuthUser.role,
+        "status": QkitAuthUser.is_active,
+        "created_at": QkitAuthUser.created_at,
+    }
+    sort_column = sort_column_map.get(sort_by, db.func.lower(QkitAuthUser.username))
+    users_query = users_query.order_by(sort_column.desc() if sort_dir == "desc" else sort_column.asc())
+
     total_users = users_query.count()
     users = (
-        users_query.order_by(QkitAuthUser.created_at.desc())
+        users_query
         .offset((page - 1) * per_page)
         .limit(per_page)
         .all()
@@ -523,6 +556,7 @@ def user_list():
 
     user_projects_map = {}
     user_edit_map = {}
+    user_confirm_permission_map = {}
     for user in users:
         user_projects_map[user.id] = []
         user_edit_map[user.id] = {
@@ -533,6 +567,13 @@ def user_list():
             "platform_role": user.role,
             "project_ids": [],
             "member_role": QkitProjectRole.MEMBER.value,
+        }
+        user_confirm_permission_map[user.id] = {
+            "allow_confirm": True,
+            "allow_reject": True,
+            "label": "请先按项目筛选",
+            "function_names": [],
+            "restricted": False,
         }
 
     for item in memberships:
@@ -545,6 +586,7 @@ def user_list():
                 "project_code": project.code,
                 "project_name": project.name,
                 "role": item.role,
+                "function_name": (item.function_name or "").strip() or None,
             }
         )
         edit_item = user_edit_map.get(item.user_id)
@@ -552,6 +594,14 @@ def user_list():
             edit_item["project_ids"].append(project.id)
             if item.role == QkitProjectRole.ADMIN.value:
                 edit_item["member_role"] = QkitProjectRole.ADMIN.value
+
+    if selected_project_id:
+        for user in users:
+            permission = evaluate_user_confirm_permission(
+                user_id=user.id,
+                project_id=selected_project_id,
+            )
+            user_confirm_permission_map[user.id] = permission
 
     total_pages = max(1, (total_users + per_page - 1) // per_page)
     pending_join_requests = list_pending_join_requests() if is_platform_admin else []
@@ -570,6 +620,9 @@ def user_list():
         total_pages=total_pages,
         user_projects_map=user_projects_map,
         user_edit_map=user_edit_map,
+        user_confirm_permission_map=user_confirm_permission_map,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
         project_options=[
             {"id": item.id, "code": item.code, "name": item.name}
             for item in projects
@@ -716,6 +769,7 @@ def api_manual_add_user():
     display_name = (data.get("display_name") or "").strip()
     email = _normalize_email(data.get("email") or "")
     member_role = _normalize_member_role(data.get("member_role"))
+    function_name = (data.get("function_name") or "").strip()[:255] or None
     project_id = data.get("project_id")
 
     try:
@@ -764,6 +818,7 @@ def api_manual_add_user():
                 user_id=user.id,
                 project_id=project_id,
                 role=member_role,
+                function_name=function_name,
                 approved_by=_current_auth_user_id(),
                 imported_from_qkit=False,
                 import_sync_locked=True,
@@ -771,10 +826,25 @@ def api_manual_add_user():
         )
     else:
         membership.role = member_role
+        membership.function_name = function_name
         membership.import_sync_locked = True
 
+    # 手动添加/恢复成员时，解除该项目上的“删除阻断”。
+    QkitAuthImportBlock.query.filter_by(
+        project_id=project_id,
+        username=user.username,
+        block_type=QkitImportBlockType.REMOVED.value,
+    ).delete(synchronize_session=False)
+
     db.session.commit()
-    return jsonify({"success": True, "message": "用户已添加并完成项目分配"})
+    return jsonify(
+        {
+            "success": True,
+            "message": "用户已添加并完成项目分配",
+            "function_name": function_name,
+            "project_id": int(project_id),
+        }
+    )
 
 
 @auth_bp.route("/api/users/<int:user_id>/reset-password", methods=["POST"])
@@ -970,6 +1040,92 @@ def api_import_project_users(project_id):
     )
     status_code = 200 if result.get("success") else 400
     return jsonify(result), status_code
+
+
+@auth_bp.route("/api/project/<int:project_id>/confirm-permissions", methods=["GET"])
+def api_get_project_confirm_permissions(project_id):
+    if not _has_project_admin_access(project_id):
+        return jsonify({"success": False, "message": "权限不足"}), 403
+    return jsonify(
+        {
+            "success": True,
+            **get_project_confirm_permissions(project_id),
+        }
+    )
+
+
+@auth_bp.route("/api/project/<int:project_id>/confirm-permissions/batch", methods=["POST"])
+def api_batch_update_project_confirm_permissions(project_id):
+    if not _has_project_admin_access(project_id):
+        return jsonify({"success": False, "message": "权限不足"}), 403
+
+    payload = request.get_json(silent=True) or {}
+    mode = str(payload.get("mode") or "").strip().lower()
+    updated_by = session.get("auth_user_id")
+
+    if mode == "clear_all":
+        deleted = clear_project_confirm_permissions(project_id)
+        return jsonify(
+            {
+                "success": True,
+                "message": f"已恢复默认策略（全部用户可操作），清理 {deleted} 条规则",
+                "deleted_count": deleted,
+            }
+        )
+
+    function_names = payload.get("function_names") or payload.get("functions") or []
+    if not isinstance(function_names, list):
+        return jsonify({"success": False, "message": "function_names 参数必须为数组"}), 400
+
+    if mode == "set_allowed_functions":
+        if not function_names:
+            return jsonify({"success": False, "message": "请选择至少一个职能"}), 400
+        result = batch_update_project_confirm_permissions(
+            project_id=project_id,
+            function_names=function_names,
+            allow_confirm=True,
+            allow_reject=True,
+            updated_by=updated_by,
+            replace_all=True,
+        )
+        return jsonify(
+            {
+                "success": True,
+                "message": "已更新为“仅选中职能可确认/拒绝”",
+                **result,
+            }
+        )
+
+    if mode in {"allow", "allow_both"}:
+        allow_confirm, allow_reject = True, True
+    elif mode == "confirm_only":
+        allow_confirm, allow_reject = True, False
+    elif mode == "reject_only":
+        allow_confirm, allow_reject = False, True
+    elif mode in {"deny", "deny_both"}:
+        allow_confirm, allow_reject = False, False
+    else:
+        allow_confirm = bool(payload.get("allow_confirm"))
+        allow_reject = bool(payload.get("allow_reject"))
+
+    if not function_names:
+        return jsonify({"success": False, "message": "请选择至少一个职能"}), 400
+
+    result = batch_update_project_confirm_permissions(
+        project_id=project_id,
+        function_names=function_names,
+        allow_confirm=allow_confirm,
+        allow_reject=allow_reject,
+        updated_by=updated_by,
+        replace_all=False,
+    )
+    return jsonify(
+        {
+            "success": True,
+            "message": "权限规则已更新",
+            **result,
+        }
+    )
 
 
 @auth_bp.route("/api/request-join-project", methods=["POST"])

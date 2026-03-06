@@ -212,12 +212,19 @@ def weekly_version_file_status_api(config_id):
         "log_print",
     )
     try:
-        WeeklyVersionConfig.query.get_or_404(config_id)
+        config = WeeklyVersionConfig.query.get_or_404(config_id)
         data = request.get_json() or {}
         file_path = data.get("file_path")
         status = data.get("status")
         if not file_path or not status:
             return jsonify({"success": False, "message": "缺少必需参数"}), 400
+        if status in ("confirmed", "rejected"):
+            from utils.request_security import can_current_user_operate_project_confirmation
+
+            action = "confirm" if status == "confirmed" else "reject"
+            allowed, message = can_current_user_operate_project_confirmation(config.project_id, action)
+            if not allowed:
+                return jsonify({"success": False, "message": message}), 403
 
         diff_cache = WeeklyVersionDiffCache.query.filter_by(
             config_id=config_id,

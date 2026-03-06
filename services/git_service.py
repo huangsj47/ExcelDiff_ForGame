@@ -1,7 +1,7 @@
 import os
 import subprocess
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -661,7 +661,7 @@ class GitService:
                                     'operation': 'M',  # 默认为修改
                                     'author': commit.author.name,
                                     'author_email': commit.author.email,
-                                    'commit_time': datetime.fromtimestamp(commit.committed_date),
+                                    'commit_time': datetime.fromtimestamp(commit.committed_date, tz=timezone.utc),
                                     'message': commit.message.strip()
                                 })
                         except Exception as stats_error:
@@ -698,7 +698,7 @@ class GitService:
                             'operation': operation,
                             'author': commit.author.name,
                             'author_email': commit.author.email,
-                            'commit_time': datetime.fromtimestamp(commit.committed_date),
+                            'commit_time': datetime.fromtimestamp(commit.committed_date, tz=timezone.utc),
                             'message': commit.message.strip()
                         })
                 else:
@@ -721,7 +721,7 @@ class GitService:
                             'operation': operation,
                             'author': commit.author.name,
                             'author_email': commit.author.email,
-                            'commit_time': datetime.fromtimestamp(commit.committed_date),
+                            'commit_time': datetime.fromtimestamp(commit.committed_date, tz=timezone.utc),
                             'message': commit.message.strip()
                         })
             
@@ -809,7 +809,7 @@ class GitService:
                                         'operation': operation,
                                         'author': prev_author,
                                         'author_email': prev_author_email,
-                                        'commit_time': datetime.fromtimestamp(prev_timestamp),
+                                        'commit_time': datetime.fromtimestamp(prev_timestamp, tz=timezone.utc),
                                         'message': prev_message.strip()
                                     })
                                     
@@ -1008,7 +1008,7 @@ class GitService:
 
             commit_time = None
             try:
-                commit_time = datetime.fromtimestamp(int(timestamp_text))
+                commit_time = datetime.fromtimestamp(int(timestamp_text), tz=timezone.utc)
             except Exception:
                 commit_time = None
 

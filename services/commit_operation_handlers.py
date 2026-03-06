@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime
 
 from flask import flash, jsonify, redirect, render_template, request, url_for
+from sqlalchemy import func, or_
 
 from models import Commit, DiffCache, ExcelHtmlCache, db
 from services.model_loader import get_runtime_model
-from utils.request_security import require_admin
+from utils.request_security import can_current_user_operate_project_confirmation, require_admin
 from utils.timezone_utils import format_beijing_time
 
 
@@ -36,10 +38,118 @@ get_unified_diff_data = _RuntimeProxy("get_unified_diff_data")
 get_merged_diff_data = _RuntimeProxy("get_merged_diff_data")
 build_smart_display_list = _RuntimeProxy("build_smart_display_list")
 
+
+_AUTHOR_EMAIL_RE = re.compile(r"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
+
+
+def _extract_author_lookup_keys(raw_author):
+    """提取作者可匹配的账号键（用户名、邮箱前缀）。"""
+    text = str(raw_author or "").strip()
+    if not text:
+        return []
+
+    keys = []
+    lower_text = text.lower()
+    if all(symbol not in lower_text for symbol in ("@", "<", ">", " ")):
+        keys.append(lower_text)
+
+    if "@" in lower_text and "<" not in lower_text and ">" not in lower_text:
+        email_prefix = lower_text.split("@", 1)[0].strip()
+        if email_prefix and email_prefix not in keys:
+            keys.append(email_prefix)
+
+    for email in _AUTHOR_EMAIL_RE.findall(text):
+        email_prefix = email.lower().split("@", 1)[0].strip()
+        if email_prefix and email_prefix not in keys:
+            keys.append(email_prefix)
+    return keys
+
+
+def _get_auth_user_model():
+    try:
+        from auth import get_auth_backend
+
+        if get_auth_backend() == "qkit":
+            from qkit_auth.models import QkitAuthUser as user_model
+        else:
+            from auth.models import AuthUser as user_model
+        return user_model
+    except Exception as exc:
+        log_print(f"加载账号模型失败，回退原始作者显示: {exc}", "APP")
+        return None
+
+
+def _resolve_author_display(raw_author, username_to_display_name_lower, email_prefix_to_display_name):
+    text = str(raw_author or "").strip()
+    if not text:
+        return ""
+    for author_key in _extract_author_lookup_keys(text):
+        mapped_name = (
+            username_to_display_name_lower.get(author_key)
+            or email_prefix_to_display_name.get(author_key)
+        )
+        if mapped_name:
+            return mapped_name
+    return text
+
+
+def _attach_author_display(commits):
+    if not commits:
+        return
+    user_model = _get_auth_user_model()
+    if user_model is None:
+        for commit in commits:
+            commit.author_display = str(commit.author or "").strip() or "未知"
+        return
+
+    author_keys = set()
+    for commit in commits:
+        author_keys.update(_extract_author_lookup_keys(getattr(commit, "author", "")))
+    if not author_keys:
+        for commit in commits:
+            commit.author_display = str(commit.author or "").strip() or "未知"
+        return
+
+    username_to_display_name_lower = {}
+    email_prefix_to_display_name = {}
+    try:
+        conditions = [
+            func.lower(user_model.username).in_(list(author_keys)),
+        ]
+        conditions.extend(
+            func.lower(user_model.email).like(f"{author_key}@%")
+            for author_key in author_keys
+            if author_key
+        )
+        users = user_model.query.filter(or_(*conditions)).all() if conditions else []
+        for user in users:
+            username = (getattr(user, "username", "") or "").strip()
+            if not username:
+                continue
+            display_name = (getattr(user, "display_name", "") or "").strip() or username
+            username_to_display_name_lower[username.lower()] = display_name
+            email = (getattr(user, "email", "") or "").strip().lower()
+            if email and "@" in email:
+                email_prefix_to_display_name[email.split("@", 1)[0]] = display_name
+    except Exception as exc:
+        log_print(f"加载作者姓名映射失败，回退原始作者显示: {exc}", "APP")
+
+    for commit in commits:
+        commit.author_display = _resolve_author_display(
+            getattr(commit, "author", ""),
+            username_to_display_name_lower,
+            email_prefix_to_display_name,
+        ) or (str(getattr(commit, "author", "")).strip() or "未知")
+
+
 def approve_all_files(commit_id):
     """批量确认提交的所有文件"""
     try:
         commit = Commit.query.get_or_404(commit_id)
+        project_id = commit.repository.project_id if commit.repository else None
+        allowed, message = can_current_user_operate_project_confirmation(project_id, "confirm")
+        if not allowed:
+            return jsonify({'status': 'error', 'message': message}), 403
         log_print(f"批量确认: 当前提交ID={commit.id}, commit_id={commit.commit_id}, repository_id={commit.repository_id}", 'INFO')
         # 获取同一次提交的所有文件（通过commit_id匹配）
         related_commits = Commit.query.filter_by(
@@ -80,9 +190,19 @@ def batch_approve_commits():
         sync_service = StatusSyncService(db)
         updated_count = 0
         sync_results = []
+        permission_cache = {}
         for commit_id in commit_ids:
             commit = db.session.get(Commit, commit_id)
-            if commit and commit.status != 'confirmed':
+            if not commit:
+                continue
+            project_id = commit.repository.project_id if commit.repository else None
+            if project_id not in permission_cache:
+                permission_cache[project_id] = can_current_user_operate_project_confirmation(project_id, "confirm")
+            allowed, message = permission_cache[project_id]
+            if not allowed:
+                return jsonify({'status': 'error', 'message': message}), 403
+
+            if commit.status != 'confirmed':
                 old_status = commit.status
                 commit.status = 'confirmed'
                 updated_count += 1
@@ -112,9 +232,19 @@ def batch_reject_commits():
         sync_service = StatusSyncService(db)
         updated_count = 0
         sync_results = []
+        permission_cache = {}
         for commit_id in commit_ids:
             commit = db.session.get(Commit, commit_id)
-            if commit and commit.status != 'rejected':
+            if not commit:
+                continue
+            project_id = commit.repository.project_id if commit.repository else None
+            if project_id not in permission_cache:
+                permission_cache[project_id] = can_current_user_operate_project_confirmation(project_id, "reject")
+            allowed, message = permission_cache[project_id]
+            if not allowed:
+                return jsonify({'status': 'error', 'message': message}), 403
+
+            if commit.status != 'rejected':
                 old_status = commit.status
                 commit.status = 'rejected'
                 updated_count += 1
@@ -143,6 +273,10 @@ def reject_commit():
         commit = db.session.get(Commit, commit_id)
         if not commit:
             return jsonify({'status': 'error', 'message': '提交不存在'}), 404
+        project_id = commit.repository.project_id if commit.repository else None
+        allowed, message = can_current_user_operate_project_confirmation(project_id, "reject")
+        if not allowed:
+            return jsonify({'status': 'error', 'message': message}), 403
 
         if commit.status != 'rejected':
             commit.status = 'rejected'
@@ -243,6 +377,8 @@ def get_commit_diff_data(commit_id):
             # 非Excel文件，直接计算
             diff_data = get_unified_diff_data(commit, previous_commit)
         if diff_data:
+            if previous_commit:
+                _attach_author_display([previous_commit])
             # 清理diff数据中的NaN和Infinity值
             import math
             def sanitize_data(obj):
@@ -271,7 +407,7 @@ def get_commit_diff_data(commit_id):
                 'previous_commit': {
                     'commit_id': previous_commit.commit_id[:8] if previous_commit else 'N/A',
                     'commit_time': format_beijing_time(previous_commit.commit_time, '%Y-%m-%d %H:%M:%S') if previous_commit and previous_commit.commit_time else 'N/A',
-                    'author': previous_commit.author if previous_commit else 'N/A',
+                    'author': (getattr(previous_commit, 'author_display', None) or previous_commit.author) if previous_commit else 'N/A',
                     'message': previous_commit.message if previous_commit else 'N/A'
                 } if previous_commit else None
             })
@@ -389,6 +525,7 @@ def merge_diff():
 
         # 按提交时间排序
         commits.sort(key=lambda x: x.commit_time or datetime.min, reverse=False)  # 升序排列，最早的在前
+        _attach_author_display(commits)
         # 获取项目和仓库信息
         repository = commits[0].repository
         project = repository.project

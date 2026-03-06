@@ -568,6 +568,13 @@ class ExcelDiffCacheService:
                     if not repository:
                         log_print(f"仓库不存在: {repository_id}", 'EXCEL', force=True)
                         return
+                    project_id = repository.project_id or ""
+                    project_code = ""
+                    try:
+                        if repository.project:
+                            project_code = (repository.project.code or "").strip()
+                    except Exception:
+                        project_code = ""
                     
                     # 获取提交信息
                     commit = Commit.query.filter_by(
@@ -626,6 +633,8 @@ class ExcelDiffCacheService:
                             tags={
                                 "source": "background_excel",
                                 "repository_id": repository_id,
+                                "project_id": project_id,
+                                "project_code": project_code,
                                 "file_path": file_path,
                             },
                         )
@@ -648,6 +657,8 @@ class ExcelDiffCacheService:
                             tags={
                                 "source": "background_diff_failed",
                                 "repository_id": repository_id,
+                                "project_id": project_id,
+                                "project_code": project_code,
                                 "file_path": file_path,
                             },
                         )
@@ -677,6 +688,8 @@ class ExcelDiffCacheService:
                         tags={
                             "source": "background_inner_exception",
                             "repository_id": repository_id,
+                            "project_id": project_id if "project_id" in locals() else "",
+                            "project_code": project_code if "project_code" in locals() else "",
                             "file_path": file_path,
                             "error_type": error_type,
                             "error_message": error_message or "unknown_error",
@@ -704,6 +717,8 @@ class ExcelDiffCacheService:
                 tags={
                     "source": "background_outer_exception",
                     "repository_id": repository_id,
+                    "project_id": project_id if "project_id" in locals() else "",
+                    "project_code": project_code if "project_code" in locals() else "",
                     "file_path": file_path,
                     "error_type": error_type,
                     "error_message": error_message or "unknown_error",

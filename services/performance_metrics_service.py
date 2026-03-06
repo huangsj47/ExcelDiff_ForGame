@@ -13,6 +13,53 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 from utils.timezone_utils import format_beijing_time
 
+_EXCEL_EXTENSIONS = (
+    ".xlsx",
+    ".xls",
+    ".xlsm",
+    ".xlsb",
+    ".csv",
+)
+_CODE_SOURCES = {
+    "realtime_non_excel",
+}
+_EXCEL_SOURCES = {
+    "html_cache",
+    "data_cache",
+    "background_excel",
+    "generated",
+    "cache_hit",
+    "realtime",
+    "realtime_excel",
+    "realtime_html_render_failed",
+    "realtime_excel_save_cache_failed",
+    "realtime_diff_failed",
+    "data_cache_html_render_failed",
+    "background_diff_failed",
+    "background_inner_exception",
+    "background_outer_exception",
+}
+_REALTIME_SOURCES = {
+    "realtime",
+    "realtime_excel",
+    "realtime_non_excel",
+    "realtime_html_render_failed",
+    "realtime_excel_save_cache_failed",
+    "realtime_diff_failed",
+    "data_cache_html_render_failed",
+    "diff_data_empty",
+}
+_BACKGROUND_SOURCES = {
+    "html_cache",
+    "data_cache",
+    "background_excel",
+    "generated",
+    "cache_hit",
+    "background_diff_failed",
+    "background_inner_exception",
+    "background_outer_exception",
+}
+
 
 def _now_ts() -> float:
     return time.time()
@@ -44,6 +91,73 @@ def _is_number(value: Any) -> bool:
 def _to_display_time(ts: float, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
     return format_beijing_time(dt, fmt)
+
+
+def _normalize_filter_value(value: Any, *, allowed: set[str], default: str = "all") -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return default
+    if normalized not in allowed:
+        return default
+    return normalized
+
+
+def _is_excel_path(file_path: Any) -> bool:
+    text = str(file_path or "").strip().lower()
+    return bool(text) and text.endswith(_EXCEL_EXTENSIONS)
+
+
+def _infer_diff_kind(pipeline: str, tags: Dict[str, str]) -> str:
+    source = str(tags.get("source", "") or "").strip().lower()
+    if source in _CODE_SOURCES:
+        return "code"
+    if source in _EXCEL_SOURCES:
+        return "excel"
+
+    file_path = str(tags.get("file_path", "") or "").strip()
+    if _is_excel_path(file_path):
+        return "excel"
+
+    if pipeline in {"api_excel_diff", "background_excel_cache", "weekly_excel_cache"}:
+        return "excel"
+    return "code"
+
+
+def _infer_mode_kind(pipeline: str, tags: Dict[str, str]) -> str:
+    source = str(tags.get("source", "") or "").strip().lower()
+    if source in _BACKGROUND_SOURCES:
+        return "background_cache"
+    if source in _REALTIME_SOURCES:
+        return "realtime"
+    if source.startswith("background_"):
+        return "background_cache"
+    if pipeline in {"background_excel_cache", "weekly_excel_cache"}:
+        return "background_cache"
+    return "realtime"
+
+
+def _project_filter_matches(tags: Dict[str, str], project_filter: str) -> bool:
+    if project_filter == "all":
+        return True
+    project_code = str(tags.get("project_code", "") or "").strip().lower()
+    project_id = str(tags.get("project_id", "") or "").strip().lower()
+    if not project_code and not project_id:
+        return False
+    candidates = {project_code, project_id}
+    if project_id:
+        candidates.add(f"id:{project_id}")
+    return project_filter in {item for item in candidates if item}
+
+
+def _summarize_kind(kind_counter: Dict[str, int]) -> str:
+    if not kind_counter:
+        return "unknown"
+    active = [key for key, value in kind_counter.items() if int(value or 0) > 0]
+    if len(active) == 1:
+        return active[0]
+    if len(active) > 1:
+        return "mixed"
+    return "unknown"
 
 
 def _safe_int_env(name: str, default: int, *, min_value: int, max_value: int) -> int:
@@ -194,19 +308,59 @@ class PerformanceMetricsService:
             self._scope_rebalance_evictions = 0
         return count
 
-    def snapshot(self, *, window_minutes: int = 60, recent_limit: int = 30) -> Dict[str, Any]:
-        window_minutes = max(5, min(int(window_minutes), 24 * 60))
+    def snapshot(
+        self,
+        *,
+        window_minutes: int = 60,
+        recent_limit: int = 30,
+        diff_kind: str = "all",
+        mode_kind: str = "all",
+        project_filter: str = "all",
+    ) -> Dict[str, Any]:
+        # Dashboard supports minute/hour/day windows up to 30 days.
+        window_minutes = max(5, min(int(window_minutes), 30 * 24 * 60))
         recent_limit = max(10, min(int(recent_limit), 500))
+        diff_kind = _normalize_filter_value(diff_kind, allowed={"all", "code", "excel"}, default="all")
+        mode_kind = _normalize_filter_value(mode_kind, allowed={"all", "realtime", "background_cache"}, default="all")
+        project_filter = str(project_filter or "all").strip().lower() or "all"
         now = _now_ts()
         cutoff = now - window_minutes * 60
 
         with self._lock:
             all_events = list(self._events)
-            recent_window_events = [event for event in all_events if event["ts"] >= cutoff]
+            base_window_events = [event for event in all_events if event["ts"] >= cutoff]
             active_scope_count = len(self._scope_counts)
             soft_scope_capacity = self._current_scope_capacity()
             evicted_event_count = int(self._evicted_events)
             scope_rebalance_evictions = int(self._scope_rebalance_evictions)
+
+        project_options_map: Dict[str, Dict[str, str]] = {}
+        recent_window_events = []
+        for event in base_window_events:
+            tags = event.get("tags", {}) or {}
+            event_diff_kind = _infer_diff_kind(str(event.get("pipeline", "")), tags)
+            event_mode_kind = _infer_mode_kind(str(event.get("pipeline", "")), tags)
+
+            project_code_raw = str(tags.get("project_code", "") or "").strip()
+            project_id_raw = str(tags.get("project_id", "") or "").strip()
+            if project_code_raw or project_id_raw:
+                value = project_code_raw or project_id_raw
+                label = project_code_raw or f"项目ID:{project_id_raw}"
+                if project_code_raw and project_id_raw:
+                    label = f"{project_code_raw} (ID:{project_id_raw})"
+                project_options_map[value.lower()] = {"value": value, "label": label}
+
+            if diff_kind != "all" and event_diff_kind != diff_kind:
+                continue
+            if mode_kind != "all" and event_mode_kind != mode_kind:
+                continue
+            if not _project_filter_matches(tags, project_filter):
+                continue
+
+            enriched_event = dict(event)
+            enriched_event["_diff_kind"] = event_diff_kind
+            enriched_event["_mode_kind"] = event_mode_kind
+            recent_window_events.append(enriched_event)
 
         pipeline_map: Dict[str, Dict[str, Any]] = {}
         total_success = 0
@@ -226,6 +380,8 @@ class PerformanceMetricsService:
                     "total_ms_values": [],
                     "metric_sums": {},
                     "metric_counts": {},
+                    "diff_kind_counts": {},
+                    "mode_kind_counts": {},
                 },
             )
             info["count"] += 1
@@ -235,6 +391,10 @@ class PerformanceMetricsService:
             else:
                 info["failed_count"] += 1
             info["last_ts"] = max(info["last_ts"], float(event["ts"]))
+            event_diff_kind = str(event.get("_diff_kind") or _infer_diff_kind(pipeline, event.get("tags", {}) or {}))
+            event_mode_kind = str(event.get("_mode_kind") or _infer_mode_kind(pipeline, event.get("tags", {}) or {}))
+            info["diff_kind_counts"][event_diff_kind] = int(info["diff_kind_counts"].get(event_diff_kind, 0)) + 1
+            info["mode_kind_counts"][event_mode_kind] = int(info["mode_kind_counts"].get(event_mode_kind, 0)) + 1
 
             metrics = event.get("metrics", {})
             total_ms = metrics.get("total_ms")
@@ -288,6 +448,8 @@ class PerformanceMetricsService:
                     "events_per_min": _round2(count / max(window_minutes, 1)),
                     "last_event_at": _to_display_time(info["last_ts"]) if info["last_ts"] else None,
                     "avg_metrics": avg_metrics,
+                    "diff_kind": _summarize_kind(info["diff_kind_counts"]),
+                    "mode_kind": _summarize_kind(info["mode_kind_counts"]),
                 }
             )
 
@@ -319,6 +481,8 @@ class PerformanceMetricsService:
                     "success": bool(event["success"]),
                     "metrics": event.get("metrics", {}),
                     "tags": event.get("tags", {}),
+                    "diff_kind": str(event.get("_diff_kind") or "unknown"),
+                    "mode_kind": str(event.get("_mode_kind") or "unknown"),
                 }
             )
 
@@ -346,6 +510,12 @@ class PerformanceMetricsService:
             "timeline": timeline,
             "recent_events": recent_events,
             "stored_event_count": len(all_events),
+            "available_projects": sorted(project_options_map.values(), key=lambda item: item["label"].lower()),
+            "applied_filters": {
+                "diff_kind": diff_kind,
+                "mode_kind": mode_kind,
+                "project_filter": project_filter,
+            },
         }
 
 

@@ -615,20 +615,30 @@ def _parse_commit_time(raw_value):
     if raw_value is None:
         return None
     if isinstance(raw_value, datetime):
-        return raw_value
+        if raw_value.tzinfo is None:
+            return raw_value.replace(tzinfo=timezone.utc)
+        return raw_value.astimezone(timezone.utc)
     text = str(raw_value).strip()
     if not text:
         return None
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
-        return datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     except Exception:
         return None
 
 
 def _apply_auto_sync_result(task, result_payload):
-    db, Commit, Repository = get_runtime_models("db", "Commit", "Repository")
+    db, Commit, Repository, WeeklyVersionConfig = get_runtime_models(
+        "db",
+        "Commit",
+        "Repository",
+        "WeeklyVersionConfig",
+    )
     repository = db.session.get(Repository, task.repository_id) if task.repository_id else None
     if not repository:
         return {"message": "repository missing", "commits_added": 0, "excel_tasks_added": 0}
@@ -694,8 +704,9 @@ def _apply_auto_sync_result(task, result_payload):
         db.session.bulk_save_objects(new_commit_objects)
 
     excel_tasks_added = 0
+    weekly_sync_tasks_added = 0
     if new_commit_objects:
-        from services.task_worker_service import add_excel_diff_task
+        from services.task_worker_service import add_excel_diff_task, create_weekly_sync_task
 
         for commit in new_commit_objects:
             file_path_lower = (commit.path or "").lower()
@@ -710,6 +721,17 @@ def _apply_auto_sync_result(task, result_payload):
                 if task_id:
                     excel_tasks_added += 1
 
+        weekly_configs = WeeklyVersionConfig.query.filter_by(
+            repository_id=repository.id,
+            is_active=True,
+            auto_sync=True,
+            status="active",
+        ).all()
+        for config in weekly_configs:
+            task_id = create_weekly_sync_task(config.id)
+            if task_id:
+                weekly_sync_tasks_added += 1
+
     repository.last_sync_time = datetime.now(timezone.utc)
     if latest_commit_id:
         repository.last_sync_commit_id = latest_commit_id
@@ -720,6 +742,7 @@ def _apply_auto_sync_result(task, result_payload):
         "message": "auto_sync result applied",
         "commits_added": len(new_commit_objects),
         "excel_tasks_added": excel_tasks_added,
+        "weekly_sync_tasks_added": weekly_sync_tasks_added,
         "latest_commit_id": latest_commit_id,
     }
 

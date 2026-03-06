@@ -6,9 +6,11 @@ import uuid
 from app import app, create_tables, db
 from models import Project
 from qkit_auth.services import (
+    add_user_to_project,
     ensure_qkit_user,
     get_project_import_config,
     import_project_users_from_redmine,
+    remove_user_from_project,
     upsert_project_import_config,
 )
 
@@ -138,3 +140,118 @@ def test_import_uses_current_user_token_instead_of_project_shared_token(monkeypa
         )
         assert result_b.get("success") is False
         assert "token 或 host 为空" in str(result_b.get("message") or "")
+
+
+def test_import_returns_newly_added_functions_dedup(monkeypatch):
+    with app.app_context():
+        create_tables()
+        user = _create_qkit_user(_uid("importer"))
+        project = Project(code=_uid("P"), name=_uid("Project"), department="QA")
+        db.session.add(project)
+        db.session.commit()
+
+        saved, err = upsert_project_import_config(
+            project.id,
+            token="token-import",
+            host="g130.pm.netease.com",
+            project_name="G130-测试",
+            updated_by=user.id,
+        )
+        assert err is None
+        assert saved is not None
+
+        class _FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "success": True,
+                    "data": [
+                        {"mail": "a@corp.netease.com", "name": "A", "function_name": "策划"},
+                        {"mail": "b@corp.netease.com", "name": "B", "function_name": "策划"},
+                        {"mail": "c@corp.netease.com", "name": "C", "function_name": "QA"},
+                    ],
+                }
+
+        monkeypatch.setattr("qkit_auth.services.requests.get", lambda *args, **kwargs: _FakeResponse())
+
+        result = import_project_users_from_redmine(
+            project_id=project.id,
+            operator_user_id=user.id,
+        )
+        assert result.get("success") is True
+        assert result.get("added") == 3
+        assert sorted(result.get("newly_added_functions") or []) == ["QA", "策划"]
+
+
+def test_removed_user_block_is_project_scoped(monkeypatch):
+    with app.app_context():
+        create_tables()
+        operator = _create_qkit_user(_uid("operator"))
+        user_name = _uid("member")
+        member = _create_qkit_user(user_name)
+        project_a = Project(code=_uid("PA"), name=_uid("ProjectA"), department="QA")
+        project_b = Project(code=_uid("PB"), name=_uid("ProjectB"), department="QA")
+        db.session.add(project_a)
+        db.session.add(project_b)
+        db.session.commit()
+
+        ok, err = add_user_to_project(member.id, project_a.id, "member")
+        assert ok is True
+        assert err is None
+        ok, err = remove_user_from_project(member.id, project_a.id, removed_by=operator.id)
+        assert ok is True
+        assert err is None
+
+        saved_a, err_a = upsert_project_import_config(
+            project_a.id,
+            token="token-a",
+            host="g131.pm.netease.com",
+            project_name="G131-A",
+            updated_by=operator.id,
+        )
+        assert err_a is None
+        assert saved_a is not None
+        saved_b, err_b = upsert_project_import_config(
+            project_b.id,
+            token="token-b",
+            host="g132.pm.netease.com",
+            project_name="G132-B",
+            updated_by=operator.id,
+        )
+        assert err_b is None
+        assert saved_b is not None
+
+        class _FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "success": True,
+                    "data": [
+                        {
+                            "mail": f"{user_name}@corp.netease.com",
+                            "name": user_name,
+                            "function_name": "策划",
+                        }
+                    ],
+                }
+
+        monkeypatch.setattr("qkit_auth.services.requests.get", lambda *args, **kwargs: _FakeResponse())
+
+        result_a = import_project_users_from_redmine(
+            project_id=project_a.id,
+            operator_user_id=operator.id,
+        )
+        assert result_a.get("success") is True
+        assert result_a.get("added") == 0
+        assert user_name in (result_a.get("skipped_removed") or [])
+
+        result_b = import_project_users_from_redmine(
+            project_id=project_b.id,
+            operator_user_id=operator.id,
+        )
+        assert result_b.get("success") is True
+        assert result_b.get("added") == 1

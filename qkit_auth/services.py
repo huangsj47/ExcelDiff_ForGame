@@ -26,6 +26,7 @@ from qkit_auth.models import (
     QkitAuthProjectCreateRequest,
     QkitAuthProjectImportConfig,
     QkitAuthProjectJoinRequest,
+    QkitProjectConfirmPermission,
     QkitAuthProjectPreAssignment,
     QkitAuthUserImportToken,
     QkitAuthUser,
@@ -52,6 +53,16 @@ _FUNCTION_KEYS = (
     "zhineng",
     "职能",
 )
+
+
+def _normalize_function_name(value: str) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:255]
+
+
+def _normalize_function_key(value: str) -> str:
+    return _normalize_function_name(value).lower()
 
 
 def _utcnow() -> datetime:
@@ -104,9 +115,9 @@ def _extract_function_name(item: dict) -> Optional[str]:
         value = item.get(key)
         if value is None:
             continue
-        text = str(value).strip()
+        text = _normalize_function_name(value)
         if text:
-            return text[:255]
+            return text
     return None
 
 
@@ -408,6 +419,196 @@ def list_users(*, include_inactive: bool = False) -> list[QkitAuthUser]:
     if not include_inactive:
         query = query.filter_by(is_active=True)
     return query.order_by(QkitAuthUser.created_at.desc()).all()
+
+
+def list_project_function_names(project_id: int) -> list[str]:
+    rows = (
+        QkitAuthUserProject.query
+        .filter(
+            QkitAuthUserProject.project_id == project_id,
+            QkitAuthUserProject.function_name.isnot(None),
+            QkitAuthUserProject.function_name != "",
+        )
+        .all()
+    )
+    dedup = {}
+    for row in rows:
+        normalized_name = _normalize_function_name(row.function_name)
+        key = _normalize_function_key(normalized_name)
+        if key and key not in dedup:
+            dedup[key] = normalized_name
+    return sorted(dedup.values(), key=lambda item: item.lower())
+
+
+def clear_project_confirm_permissions(project_id: int) -> int:
+    deleted = QkitProjectConfirmPermission.query.filter_by(project_id=project_id).delete(synchronize_session=False)
+    db.session.commit()
+    return int(deleted or 0)
+
+
+def batch_update_project_confirm_permissions(
+    *,
+    project_id: int,
+    function_names: list[str],
+    allow_confirm: bool,
+    allow_reject: bool,
+    updated_by: int | None,
+    replace_all: bool = False,
+) -> dict:
+    normalized_map: dict[str, str] = {}
+    for name in function_names or []:
+        normalized_name = _normalize_function_name(name)
+        key = _normalize_function_key(normalized_name)
+        if not key:
+            continue
+        normalized_map[key] = normalized_name
+
+    if replace_all:
+        QkitProjectConfirmPermission.query.filter_by(project_id=project_id).delete(synchronize_session=False)
+
+    updated_rows = 0
+    created_rows = 0
+    now = _utcnow()
+    for function_key, function_name in normalized_map.items():
+        row = QkitProjectConfirmPermission.query.filter_by(
+            project_id=project_id,
+            function_key=function_key,
+        ).first()
+        if row is None:
+            row = QkitProjectConfirmPermission(
+                project_id=project_id,
+                function_key=function_key,
+                function_name=function_name,
+            )
+            db.session.add(row)
+            created_rows += 1
+        else:
+            updated_rows += 1
+
+        row.function_name = function_name
+        row.allow_confirm = bool(allow_confirm)
+        row.allow_reject = bool(allow_reject)
+        row.updated_by = updated_by
+        row.updated_at = now
+
+    db.session.commit()
+    return {
+        "created_count": created_rows,
+        "updated_count": updated_rows,
+        "affected_count": created_rows + updated_rows,
+        "function_names": sorted(normalized_map.values(), key=lambda item: item.lower()),
+    }
+
+
+def get_project_confirm_permissions(project_id: int) -> dict:
+    rules = (
+        QkitProjectConfirmPermission.query
+        .filter_by(project_id=project_id)
+        .order_by(QkitProjectConfirmPermission.function_name.asc())
+        .all()
+    )
+    memberships = (
+        QkitAuthUserProject.query
+        .filter(
+            QkitAuthUserProject.project_id == project_id,
+            QkitAuthUserProject.function_name.isnot(None),
+            QkitAuthUserProject.function_name != "",
+        )
+        .all()
+    )
+
+    user_count_by_key: dict[str, int] = {}
+    display_name_by_key: dict[str, str] = {}
+    for membership in memberships:
+        normalized_name = _normalize_function_name(membership.function_name)
+        function_key = _normalize_function_key(normalized_name)
+        if not function_key:
+            continue
+        display_name_by_key.setdefault(function_key, normalized_name)
+        user_count_by_key[function_key] = user_count_by_key.get(function_key, 0) + 1
+
+    for rule in rules:
+        if rule.function_key not in display_name_by_key:
+            display_name_by_key[rule.function_key] = _normalize_function_name(rule.function_name)
+
+    items = []
+    rule_by_key = {row.function_key: row for row in rules}
+    for function_key in sorted(display_name_by_key.keys()):
+        row = rule_by_key.get(function_key)
+        items.append(
+            {
+                "function_name": display_name_by_key[function_key],
+                "function_key": function_key,
+                "allow_confirm": bool(row.allow_confirm) if row else True,
+                "allow_reject": bool(row.allow_reject) if row else True,
+                "user_count": int(user_count_by_key.get(function_key, 0)),
+                "customized": bool(row is not None),
+            }
+        )
+
+    return {
+        "project_id": project_id,
+        "has_rules": bool(rules),
+        "default_all_allowed": not bool(rules),
+        "items": items,
+        "function_names": [item["function_name"] for item in items],
+        "rule_count": len(rules),
+    }
+
+
+def evaluate_user_confirm_permission(
+    *,
+    user_id: int,
+    project_id: int,
+) -> dict:
+    rules = QkitProjectConfirmPermission.query.filter_by(project_id=project_id).all()
+    memberships = QkitAuthUserProject.query.filter_by(user_id=user_id, project_id=project_id).all()
+
+    function_names = []
+    function_keys = set()
+    for membership in memberships:
+        normalized_name = _normalize_function_name(membership.function_name)
+        function_key = _normalize_function_key(normalized_name)
+        if not function_key:
+            continue
+        function_names.append(normalized_name)
+        function_keys.add(function_key)
+
+    if not rules:
+        return {
+            "allow_confirm": True,
+            "allow_reject": True,
+            "label": "全部可操作",
+            "function_names": function_names,
+            "restricted": False,
+        }
+
+    allow_confirm = False
+    allow_reject = False
+    for row in rules:
+        if row.function_key not in function_keys:
+            continue
+        allow_confirm = allow_confirm or bool(row.allow_confirm)
+        allow_reject = allow_reject or bool(row.allow_reject)
+
+    if allow_confirm and allow_reject:
+        label = "可确认/可拒绝"
+    elif allow_confirm:
+        label = "仅可确认"
+    elif allow_reject:
+        label = "仅可拒绝"
+    elif not function_keys:
+        label = "无职能/不可操作"
+    else:
+        label = "不可操作"
+
+    return {
+        "allow_confirm": allow_confirm,
+        "allow_reject": allow_reject,
+        "label": label,
+        "function_names": function_names,
+        "restricted": True,
+    }
 
 
 def get_user_by_id(user_id: int) -> Optional[QkitAuthUser]:
@@ -868,6 +1069,8 @@ def import_project_users_from_redmine(
     now = _utcnow()
     added = 0
     updated = 0
+    newly_added_function_keys: set[str] = set()
+    newly_added_functions: list[str] = []
     skipped_removed: list[str] = []
     skipped_locked: list[str] = []
     skipped_invalid: list[str] = []
@@ -949,6 +1152,12 @@ def import_project_users_from_redmine(
                 import_last_synced_at=now,
             )
         )
+        if function_name:
+            normalized_name = _normalize_function_name(function_name)
+            normalized_key = _normalize_function_key(normalized_name)
+            if normalized_key and normalized_key not in newly_added_function_keys:
+                newly_added_function_keys.add(normalized_key)
+                newly_added_functions.append(normalized_name)
         added += 1
 
     db.session.commit()
@@ -962,4 +1171,5 @@ def import_project_users_from_redmine(
         "skipped_locked": sorted(set(skipped_locked)),
         "skipped_invalid": sorted(set(skipped_invalid)),
         "remote_count": len(data),
+        "newly_added_functions": sorted(newly_added_functions, key=lambda item: item.lower()),
     }

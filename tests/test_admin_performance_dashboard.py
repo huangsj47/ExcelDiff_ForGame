@@ -30,6 +30,15 @@ def test_performance_dashboard_template_wires_stats_api():
     assert "recentNextBtn" in content
     assert "PIPELINE_LABELS" in content
     assert "state.recentLimit" in content
+    assert "recentDiffKindSelect" in content
+    assert "recentModeSelect" in content
+    assert "recentProjectSelect" in content
+    assert "diff_kind" in content
+    assert "mode_kind" in content
+    assert "project_filter" in content
+    assert 'value="10080"' in content
+    assert 'value="21600"' in content
+    assert 'value="43200"' in content
 
 
 def test_performance_metrics_service_snapshot_aggregates_core_fields():
@@ -62,6 +71,8 @@ def test_performance_metrics_service_snapshot_aggregates_core_fields():
     assert snapshot["p95_total_ms"] >= snapshot["avg_total_ms"]
     assert len(snapshot["pipeline_stats"]) >= 2
     assert len(snapshot["recent_events"]) == 3
+    assert all("diff_kind" in item for item in snapshot["pipeline_stats"])
+    assert all("mode_kind" in item for item in snapshot["pipeline_stats"])
 
 
 def test_performance_metrics_service_recent_limit_clamps_to_500():
@@ -126,3 +137,66 @@ def test_performance_metrics_service_rebalances_hot_scope():
     assert snapshot["scope_rebalance_evictions"] > 0
     assert pipeline_count_map.get("api_excel_diff", 0) >= 200
     assert pipeline_count_map.get("background_excel_cache", 0) <= 800
+
+
+def test_performance_metrics_service_window_clamps_to_30_days():
+    service = PerformanceMetricsService(max_events=20)
+    snapshot = service.snapshot(window_minutes=999999, recent_limit=20)
+    assert snapshot["window_minutes"] == 30 * 24 * 60
+
+
+def test_performance_metrics_service_supports_diff_mode_project_filters():
+    service = PerformanceMetricsService(max_events=50)
+    service.record(
+        "unified_excel_diff",
+        success=True,
+        metrics={"total_ms": 55},
+        tags={
+            "source": "realtime_non_excel",
+            "project_code": "P_CODE",
+            "project_id": 1,
+            "file_path": "src/main.lua",
+        },
+    )
+    service.record(
+        "api_excel_diff",
+        success=True,
+        metrics={"total_ms": 66},
+        tags={
+            "source": "realtime_excel",
+            "project_code": "P_EXCEL",
+            "project_id": 2,
+            "file_path": "cfg/data.xlsx",
+        },
+    )
+    service.record(
+        "background_excel_cache",
+        success=True,
+        metrics={"total_ms": 77},
+        tags={
+            "source": "background_excel",
+            "project_code": "P_EXCEL",
+            "project_id": 2,
+            "file_path": "cfg/data.xlsx",
+        },
+    )
+
+    code_snapshot = service.snapshot(window_minutes=60, recent_limit=20, diff_kind="code")
+    assert code_snapshot["total_events"] == 1
+    assert code_snapshot["recent_events"][0]["diff_kind"] == "code"
+
+    background_snapshot = service.snapshot(
+        window_minutes=60,
+        recent_limit=20,
+        mode_kind="background_cache",
+    )
+    assert background_snapshot["total_events"] == 1
+    assert background_snapshot["recent_events"][0]["mode_kind"] == "background_cache"
+
+    project_snapshot = service.snapshot(
+        window_minutes=60,
+        recent_limit=20,
+        project_filter="p_excel",
+    )
+    assert project_snapshot["total_events"] == 2
+    assert len(project_snapshot["available_projects"]) >= 2

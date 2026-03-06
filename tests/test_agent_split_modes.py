@@ -1,7 +1,7 @@
-import json
 import os
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from auth.models import AuthProjectPreAssignment, AuthUser, AuthUserProject
@@ -12,7 +12,17 @@ from agent import executor as agent_executor
 from agent.local_temp_cache import save_local_temp_cache
 from agent.system_metrics import collect_agent_metrics
 from app import app, create_tables, db
-from models import AgentDefaultAdmin, AgentNode, AgentProjectBinding, AgentTask, BackgroundTask, Commit, Project, Repository
+from models import (
+    AgentDefaultAdmin,
+    AgentNode,
+    AgentProjectBinding,
+    AgentTask,
+    BackgroundTask,
+    Commit,
+    Project,
+    Repository,
+    WeeklyVersionConfig,
+)
 
 
 def _uid(prefix: str) -> str:
@@ -252,6 +262,33 @@ def test_auto_sync_result_payload_creates_commits_and_excel_task(monkeypatch):
             db.session.add(repository)
             db.session.flush()
 
+            now_utc = datetime.now(timezone.utc)
+            weekly_active_config = WeeklyVersionConfig(
+                project_id=project.id,
+                repository_id=repository.id,
+                name=_uid("weekly_active"),
+                branch="main",
+                start_time=now_utc - timedelta(days=2),
+                end_time=now_utc + timedelta(days=2),
+                is_active=True,
+                auto_sync=True,
+                status="active",
+            )
+            weekly_inactive_config = WeeklyVersionConfig(
+                project_id=project.id,
+                repository_id=repository.id,
+                name=_uid("weekly_inactive"),
+                branch="main",
+                start_time=now_utc - timedelta(days=2),
+                end_time=now_utc + timedelta(days=2),
+                is_active=False,
+                auto_sync=True,
+                status="active",
+            )
+            db.session.add(weekly_active_config)
+            db.session.add(weekly_inactive_config)
+            db.session.flush()
+
             src_task = BackgroundTask(
                 task_type="auto_sync",
                 repository_id=repository.id,
@@ -320,6 +357,7 @@ def test_auto_sync_result_payload_creates_commits_and_excel_task(monkeypatch):
             summary = json.loads(saved_auto_task.result_summary or "{}")
             assert summary.get("commits_added") == 2
             assert summary.get("excel_tasks_added") == 1
+            assert summary.get("weekly_sync_tasks_added") == 1
             assert summary.get("latest_commit_id") == commit_text
 
             inserted_commits = Commit.query.filter_by(repository_id=repository.id).all()
@@ -332,6 +370,18 @@ def test_auto_sync_result_payload_creates_commits_and_excel_task(monkeypatch):
                 file_path="config/demo/table_a.xlsx",
             ).first()
             assert excel_followup is not None
+
+            weekly_followup = BackgroundTask.query.filter_by(
+                task_type="weekly_sync",
+                commit_id=str(weekly_active_config.id),
+            ).first()
+            assert weekly_followup is not None
+
+            inactive_weekly_followup = BackgroundTask.query.filter_by(
+                task_type="weekly_sync",
+                commit_id=str(weekly_inactive_config.id),
+            ).first()
+            assert inactive_weekly_followup is None
 
             synced_source_task = db.session.get(BackgroundTask, src_task.id)
             assert synced_source_task is not None
@@ -964,6 +1014,9 @@ def test_default_admin_email_prefix_user_can_create_project(monkeypatch):
 
 
 def test_qkit_default_admin_user_can_create_project_and_auto_admin(monkeypatch):
+    import auth
+    import qkit_auth.providers as qkit_auth_providers
+
     admin_token = _uid("admin-token")
     shared_secret = _uid("secret")
     username_prefix = _uid("qkit_owner")
@@ -972,6 +1025,15 @@ def test_qkit_default_admin_user_can_create_project_and_auto_admin(monkeypatch):
     monkeypatch.setenv("ADMIN_API_TOKEN", admin_token)
     monkeypatch.setenv("AGENT_SHARED_SECRET", shared_secret)
     monkeypatch.setenv("AUTH_BACKEND", "qkit")
+    monkeypatch.setenv("QKIT_LOCAL_JWT_CACHE", "false")
+    qkit_provider = qkit_auth_providers.QkitAuthProvider()
+    monkeypatch.setattr(auth, "get_auth_provider", lambda: qkit_provider)
+    monkeypatch.setattr(auth, "get_auth_backend", lambda: "qkit")
+    monkeypatch.setattr(
+        qkit_auth_providers,
+        "check_qkit_jwt_remote",
+        lambda _token: (True, "", {}),
+    )
 
     with app.app_context():
         create_tables()
@@ -1003,6 +1065,7 @@ def test_qkit_default_admin_user_can_create_project_and_auto_admin(monkeypatch):
                 sess["auth_role"] = user.role
                 sess["is_admin"] = False
                 sess["auth_backend"] = "qkit"
+                sess["qkitjwt_session"] = "test-qkit-token"
                 sess["_csrf_token"] = "csrf-qkit-owner"
 
             code = _uid("QKITP")

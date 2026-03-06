@@ -826,35 +826,9 @@ configure_commit_diff_logic(
     get_svn_service_func=get_svn_service,
 )
 
-
-
-# 测试路由
-
-
-
-
-
-
-
-# 主页路由
-
-
-
-# 项目管理路由
-
-
-
-# 项目详情页面 - 重定向到项目概览
-
-
-
 # 保留原项目详情页面作为备用
-
-
-
 # 周版本相关路由已迁移至 routes/weekly_version_management_routes.py，
 # 此处保留处理函数供蓝图包装层复用，避免大范围业务回归。
-
 
 # ---------------------------------------------------------------------------
 #  周版本业务逻辑 — 已拆分至 services/weekly_version_logic.py
@@ -1200,6 +1174,10 @@ def get_excel_diff_data(commit_id):
     commit = Commit.query.get_or_404(commit_id)
     repository = commit.repository
     project = repository.project
+    perf_project_tags = {
+        "project_id": project.id if project else "",
+        "project_code": project.code if project else "",
+    }
     # 检查是否为Excel文件
     is_excel = excel_cache_service.is_excel_file(commit.path)
     if not is_excel:
@@ -1231,6 +1209,8 @@ def get_excel_diff_data(commit_id):
                 tags={
                     "source": "html_cache",
                     "repository_id": repository.id,
+                    "project_id": perf_project_tags["project_id"],
+                    "project_code": perf_project_tags["project_code"],
                     "file_path": commit.path,
                 },
             )
@@ -1295,6 +1275,8 @@ def get_excel_diff_data(commit_id):
                     tags={
                         "source": "data_cache",
                         "repository_id": repository.id,
+                        "project_id": perf_project_tags["project_id"],
+                        "project_code": perf_project_tags["project_code"],
                         "file_path": commit.path,
                     },
                 )
@@ -1319,6 +1301,8 @@ def get_excel_diff_data(commit_id):
                     tags={
                         "source": "data_cache_html_render_failed",
                         "repository_id": repository.id,
+                        "project_id": perf_project_tags["project_id"],
+                        "project_code": perf_project_tags["project_code"],
                         "file_path": commit.path,
                     },
                 )
@@ -1388,6 +1372,8 @@ def get_excel_diff_data(commit_id):
                     tags={
                         "source": "realtime",
                         "repository_id": repository.id,
+                        "project_id": perf_project_tags["project_id"],
+                        "project_code": perf_project_tags["project_code"],
                         "file_path": commit.path,
                     },
                 )
@@ -1416,6 +1402,8 @@ def get_excel_diff_data(commit_id):
                     tags={
                         "source": "realtime_html_render_failed",
                         "repository_id": repository.id,
+                        "project_id": perf_project_tags["project_id"],
+                        "project_code": perf_project_tags["project_code"],
                         "file_path": commit.path,
                     },
                 )
@@ -1435,6 +1423,8 @@ def get_excel_diff_data(commit_id):
                 tags={
                     "source": "realtime_diff_failed",
                     "repository_id": repository.id,
+                    "project_id": perf_project_tags["project_id"],
+                    "project_code": perf_project_tags["project_code"],
                     "file_path": commit.path,
                 },
             )
@@ -1453,6 +1443,8 @@ def get_excel_diff_data(commit_id):
             tags={
                 "source": "exception",
                 "repository_id": repository.id if repository else "",
+                "project_id": perf_project_tags["project_id"],
+                "project_code": perf_project_tags["project_code"],
                 "file_path": commit.path if commit else "",
             },
         )
@@ -2281,6 +2273,13 @@ def update_commit_status(commit_id):
             return jsonify({'status': 'error', 'message': '无效的状态值'}), 400
 
         commit = Commit.query.get_or_404(commit_id)
+        if status in ('confirmed', 'rejected'):
+            from utils.request_security import can_current_user_operate_project_confirmation
+            project_id = commit.repository.project_id if commit.repository else None
+            action = 'confirm' if status == 'confirmed' else 'reject'
+            allowed, permission_message = can_current_user_operate_project_confirmation(project_id, action)
+            if not allowed:
+                return jsonify({'status': 'error', 'message': permission_message}), 403
         old_status = commit.status
         commit.status = status
         # 记录操作者用户名
@@ -2341,9 +2340,18 @@ def batch_update_commits_compat():
         current_user = _get_current_user()
         updated_count = 0
         sync_results = []
+        from utils.request_security import can_current_user_operate_project_confirmation
+        permission_cache = {}
         for commit_id in normalized_ids:
             commit = db.session.get(Commit, commit_id)
             if commit and commit.status != target_status:
+                project_id = commit.repository.project_id if commit.repository else None
+                action = 'confirm' if target_status == 'confirmed' else 'reject'
+                if project_id not in permission_cache:
+                    permission_cache[project_id] = can_current_user_operate_project_confirmation(project_id, action)
+                allowed, permission_message = permission_cache[project_id]
+                if not allowed:
+                    return jsonify({'status': 'error', 'message': permission_message}), 403
                 commit.status = target_status
                 commit.status_changed_by = current_user.username if current_user else None
                 updated_count += 1

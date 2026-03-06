@@ -232,6 +232,43 @@
                 </div>
             </div>
         </div>
+
+        <!-- Agent临时缓存统计卡片 -->
+        <div class="dashboard-card agent-temp-cache-card">
+            <div class="card-header">
+                <div class="card-icon agent">
+                    <i class="fas fa-microchip"></i>
+                </div>
+                <div class="card-title">
+                    <h3>Agent临时缓存</h3>
+                    <p>platform+agent 联动缓存</p>
+                </div>
+            </div>
+            <div class="card-content">
+                <div id="agent-temp-cache-stats" class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-value" id="agentTempTotalCount">-</div>
+                        <div class="stat-label">总缓存数</div>
+                        <div class="stat-icon"><i class="fas fa-layer-group"></i></div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="agentTempActiveCount">-</div>
+                        <div class="stat-label">有效缓存</div>
+                        <div class="stat-icon"><i class="fas fa-check-circle"></i></div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="agentTempExpiredCount">-</div>
+                        <div class="stat-label">过期缓存</div>
+                        <div class="stat-icon"><i class="fas fa-clock"></i></div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="agentTempTotalSize">-</div>
+                        <div class="stat-label">总大小(MB)</div>
+                        <div class="stat-icon"><i class="fas fa-weight-hanging"></i></div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- 操作日志 -->
@@ -566,6 +603,10 @@
 
 .card-icon.weekly {
     background: #1a7f37;
+}
+
+.card-icon.agent {
+    background: #0f766e;
 }
 
 .card-icon i {
@@ -1174,6 +1215,7 @@ function refreshStats() {
                 html_cache: htmlCacheData.success ? htmlCacheData.html_cache : {},
                 data_cache: htmlCacheData.success ? htmlCacheData.data_cache : {},
                 weekly_excel_cache: weeklyExcelCacheData.success ? weeklyExcelCacheData.stats : {},
+                agent_temp_cache: htmlCacheData.success ? (htmlCacheData.agent_temp_cache || {}) : {},
                 current_version: htmlCacheData.success ? htmlCacheData.current_version : ''
             };
             updateStatsDisplay(combinedData);
@@ -1203,7 +1245,8 @@ function refreshProjectStats() {
                             success: true,
                             data_cache: projectData.data_cache,
                             html_cache: projectData.html_cache,
-                            weekly_excel_cache: projectData.weekly_excel_cache || {}
+                            weekly_excel_cache: projectData.weekly_excel_cache || {},
+                            agent_temp_cache: projectData.agent_temp_cache || {}
                         });
                     }
                 }
@@ -1237,6 +1280,9 @@ function cleanupExpiredCache() {
             let message = `清理完成: 过期缓存 ${data.expired_count} 条, 旧缓存 ${data.old_count} 条, HTML缓存 ${data.html_expired_count} 条`;
             if (data.weekly_excel_expired_count !== undefined) {
                 message += `, 周版本Excel缓存 ${data.weekly_excel_expired_count + data.weekly_excel_old_count} 条`;
+            }
+            if (data.agent_temp_expired_count !== undefined) {
+                message += `, Agent临时缓存 ${data.agent_temp_expired_count} 条`;
             }
             addLogEntry(message, 'success');
             refreshStats();
@@ -1290,6 +1336,7 @@ function updateStatsDisplay(data) {
     
     const htmlCache = data.html_cache || {};
     const dataCache = data.data_cache || {};
+    const agentTempCache = data.agent_temp_cache || {};
     
     console.log('htmlCache:', htmlCache);
     console.log('dataCache:', dataCache);
@@ -1325,6 +1372,12 @@ function updateStatsDisplay(data) {
     safeUpdateElement('weeklyExcelProcessingCount', weeklyExcelCache.processing_count);
     safeUpdateElement('weeklyExcelFailedCount', weeklyExcelCache.failed_count);
     safeUpdateElement('weeklyExcelTotalSize', weeklyExcelCache.total_size ? (weeklyExcelCache.total_size / 1024 / 1024).toFixed(2) : 0);
+
+    // Agent临时缓存统计
+    safeUpdateElement('agentTempTotalCount', agentTempCache.total_count);
+    safeUpdateElement('agentTempActiveCount', agentTempCache.active_count);
+    safeUpdateElement('agentTempExpiredCount', agentTempCache.expired_count);
+    safeUpdateElement('agentTempTotalSize', agentTempCache.total_size_mb);
 
     const htmlHint = document.getElementById('htmlCacheRuntimeHint');
     if (htmlHint) {

@@ -1,6 +1,6 @@
 import threading
 import concurrent.futures
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 import git
 import re
@@ -142,7 +142,7 @@ class ThreadedGitService(GitService):
                                         'operation': operation,
                                         'author': prev_author,
                                         'author_email': prev_author_email,
-                                        'commit_time': datetime.fromtimestamp(prev_timestamp),
+                                        'commit_time': datetime.fromtimestamp(prev_timestamp, tz=timezone.utc),
                                         'message': prev_message.strip()
                                     })
                                     
@@ -306,7 +306,7 @@ class ThreadedGitService(GitService):
                                     'operation': 'M',  # 默认为修改
                                     'author': commit.author.name,
                                     'author_email': commit.author.email,
-                                    'commit_time': datetime.fromtimestamp(commit.committed_date),
+                                    'commit_time': datetime.fromtimestamp(commit.committed_date, tz=timezone.utc),
                                     'message': commit.message.strip()
                                 })
                         except Exception as stats_error:
@@ -337,7 +337,7 @@ class ThreadedGitService(GitService):
                             'operation': operation,
                             'author': commit.author.name,
                             'author_email': commit.author.email,
-                            'commit_time': datetime.fromtimestamp(commit.committed_date),
+                            'commit_time': datetime.fromtimestamp(commit.committed_date, tz=timezone.utc),
                             'message': commit.message.strip()
                         })
                 else:
@@ -358,7 +358,7 @@ class ThreadedGitService(GitService):
                             'operation': 'A',  # 初始提交都是新增
                             'author': commit.author.name,
                             'author_email': commit.author.email,
-                            'commit_time': datetime.fromtimestamp(commit.committed_date),
+                            'commit_time': datetime.fromtimestamp(commit.committed_date, tz=timezone.utc),
                             'message': commit.message.strip()
                         })
             
@@ -570,7 +570,7 @@ class ThreadedGitService(GitService):
                         'operation': operation,
                         'author': commit.author.name,
                         'author_email': commit.author.email,
-                        'commit_time': datetime.fromtimestamp(commit.committed_date),
+                        'commit_time': datetime.fromtimestamp(commit.committed_date, tz=timezone.utc),
                         'message': commit.message.strip()
                     })
             

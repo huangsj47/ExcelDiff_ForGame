@@ -32,6 +32,7 @@ try:
         AuthProjectJoinRequest,
         AuthProjectCreateRequest,
         AuthProjectPreAssignment,
+        AuthProjectConfirmPermission,
     )
     _AUTH_MODELS_LOADED = True
 except ImportError:
@@ -48,6 +49,7 @@ try:
         QkitAuthProjectImportConfig,
         QkitAuthUserImportToken,
         QkitAuthImportBlock,
+        QkitProjectConfirmPermission,
     )
     _QKIT_AUTH_MODELS_LOADED = True
 except ImportError:
@@ -83,6 +85,7 @@ if _AUTH_MODELS_LOADED:
         'AuthProjectJoinRequest',
         'AuthProjectCreateRequest',
         'AuthProjectPreAssignment',
+        'AuthProjectConfirmPermission',
     ])
 
 if _QKIT_AUTH_MODELS_LOADED:
@@ -95,4 +98,5 @@ if _QKIT_AUTH_MODELS_LOADED:
         'QkitAuthProjectImportConfig',
         'QkitAuthUserImportToken',
         'QkitAuthImportBlock',
+        'QkitProjectConfirmPermission',
     ])

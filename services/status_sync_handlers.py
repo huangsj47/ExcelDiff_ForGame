@@ -103,7 +103,12 @@ def weekly_version_batch_confirm_api(config_id):
         "log_print",
     )
     try:
-        WeeklyVersionConfig.query.get_or_404(config_id)
+        config = WeeklyVersionConfig.query.get_or_404(config_id)
+        from utils.request_security import can_current_user_operate_project_confirmation
+
+        allowed, message = can_current_user_operate_project_confirmation(config.project_id, "confirm")
+        if not allowed:
+            return jsonify({"success": False, "message": message}), 403
 
         data = request.get_json() or {}
         file_paths = data.get("file_paths", [])

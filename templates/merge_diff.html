@@ -546,12 +546,17 @@ td.excel-row-number.excel-modified,
         }
         
         .filename-compact {
-            font-size: 110%; /* 文件名放大到110% */
+            font-size: 0.78rem;
             font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
             white-space: normal;
             word-wrap: break-word;
-            font-weight: 600;
-            color: #495057;
+            font-weight: 500;
+            color: #526375;
+            background: #f5f8fc;
+            border: 1px solid #dde6f0;
+            border-radius: 6px;
+            display: inline-block;
+            padding: 2px 8px;
         }
         
         .badge.status-pending {
@@ -663,7 +668,7 @@ td.excel-row-number.excel-modified,
                                 <div class="d-flex align-items-center mb-1">
                                     <code class="commit-id-compact me-3">{{ commit.commit_id[:8] }}</code>
                                     <span class="text-muted small me-3">
-                                        <i class="fas fa-user me-1"></i>{{ commit.author | e or '未知' }}
+                                        <i class="fas fa-user me-1"></i>{{ (commit.author_display or commit.author) | e or '未知' }}
                                     </span>
                                     <span class="text-muted small">
                                         <i class="fas fa-clock me-1"></i>
@@ -790,11 +795,11 @@ td.excel-row-number.excel-modified,
                                         <small class="text-muted">
                                             {% if commit_info.get('type') == 'consecutive_merge' %}
                                                 版本: {{ commit.version }} |
-                                                提交者: {{ commit.author | e }} |
+                                                提交者: {{ (commit.author_display or commit.author) | e }} |
                                                 最新时间: {{ format_beijing_time(commit.commit_time, '%m月%d日 %H:%M') if commit.commit_time else '未知时间' }}
                                             {% else %}
                                                 版本: {{ commit.version }} |
-                                                提交者: {{ commit.author | e }} |
+                                                提交者: {{ (commit.author_display or commit.author) | e }} |
                                                 {% if commit.commit_time %}
                                                     {{ format_beijing_time(commit.commit_time, '%m月%d日 %H:%M') }}
                                                 {% else %}
@@ -845,7 +850,7 @@ td.excel-row-number.excel-modified,
                                             <h6 class="mb-2 fw-bold">当前版本</h6>
                                             <div><strong>Commit ID:</strong> <code>{{ commit.commit_id[:8] }}</code></div>
                                             <div><strong>提交时间:</strong> {{ format_beijing_time(commit.commit_time, '%Y-%m-%d %H:%M:%S') if commit.commit_time else 'N/A' }}</div>
-                                            <div><strong>提交者:</strong> {{ commit.author | e or 'N/A' }}</div>
+                                            <div><strong>提交者:</strong> {{ (commit.author_display or commit.author) | e or 'N/A' }}</div>
                                             {% if commit.message %}
                                             <div><strong>提交信息:</strong> {{ commit.message | e }}</div>
                                             {% endif %}

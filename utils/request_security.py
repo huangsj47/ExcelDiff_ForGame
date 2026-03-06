@@ -168,6 +168,118 @@ def _resolve_current_username():
     return ""
 
 
+def _normalize_confirm_action(action: str) -> str:
+    value = str(action or "").strip().lower()
+    if value in {"confirm", "confirmed", "approve"}:
+        return "confirm"
+    if value in {"reject", "rejected", "deny"}:
+        return "reject"
+    return ""
+
+
+def _normalize_function_key(value: str) -> str:
+    text = str(value or "").strip().lower()
+    return " ".join(text.split())
+
+
+def can_current_user_operate_project_confirmation(project_id, action: str):
+    """判断当前用户是否有项目级确认/拒绝权限。
+
+    返回 (allowed, message)。
+    """
+    normalized_action = _normalize_confirm_action(action)
+    if not normalized_action:
+        return False, "无效的操作类型"
+
+    try:
+        project_id = int(project_id)
+    except (TypeError, ValueError):
+        return False, "缺少项目信息，无法校验权限"
+
+    # 平台管理员（含 ADMIN_API_TOKEN）始终放行，避免锁死管理能力。
+    if _has_admin_access():
+        return True, ""
+
+    user = _get_current_user()
+    if not user:
+        return False, "请先登录后再执行该操作"
+
+    try:
+        from auth import get_auth_backend
+        from models import db
+    except Exception:
+        return True, ""
+
+    backend = "local"
+    try:
+        backend = get_auth_backend()
+    except Exception:
+        backend = "local"
+
+    if backend == "qkit":
+        try:
+            from qkit_auth.models import QkitAuthUserProject, QkitProjectConfirmPermission
+        except Exception:
+            return True, ""
+
+        rules = QkitProjectConfirmPermission.query.filter_by(project_id=project_id).all()
+        if not rules:
+            return True, ""
+
+        memberships = QkitAuthUserProject.query.filter_by(user_id=user.id, project_id=project_id).all()
+        user_function_keys = {
+            _normalize_function_key(row.function_name)
+            for row in memberships
+            if getattr(row, "function_name", None)
+        }
+        user_function_keys.discard("")
+        if not user_function_keys:
+            return False, "当前账号在该项目没有职能信息，无法执行该操作"
+
+        for row in rules:
+            function_key = _normalize_function_key(getattr(row, "function_key", "") or getattr(row, "function_name", ""))
+            if function_key not in user_function_keys:
+                continue
+            if normalized_action == "confirm" and bool(getattr(row, "allow_confirm", False)):
+                return True, ""
+            if normalized_action == "reject" and bool(getattr(row, "allow_reject", False)):
+                return True, ""
+        return False, "当前职能未被授权执行该操作"
+
+    try:
+        from auth.models import AuthProjectConfirmPermission, AuthUserFunction
+    except Exception:
+        return True, ""
+
+    rules = AuthProjectConfirmPermission.query.filter_by(project_id=project_id).all()
+    if not rules:
+        return True, ""
+
+    memberships = (
+        AuthUserFunction.query
+        .filter(
+            AuthUserFunction.user_id == user.id,
+            db.or_(
+                AuthUserFunction.project_id == project_id,
+                AuthUserFunction.project_id.is_(None),
+            ),
+        )
+        .all()
+    )
+    function_ids = {row.function_id for row in memberships if row.function_id}
+    if not function_ids:
+        return False, "当前账号在该项目没有职能信息，无法执行该操作"
+
+    for row in rules:
+        if row.function_id not in function_ids:
+            continue
+        if normalized_action == "confirm" and bool(row.allow_confirm):
+            return True, ""
+        if normalized_action == "reject" and bool(row.allow_reject):
+            return True, ""
+    return False, "当前职能未被授权执行该操作"
+
+
 def _get_project_create_agent_codes():
     """获取当前用户可直接创建项目并绑定的 Agent 节点代号列表。"""
     username = _resolve_current_username()

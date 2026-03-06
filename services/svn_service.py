@@ -1,6 +1,6 @@
 import os
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 import tempfile
@@ -327,7 +327,7 @@ class SVNService:
                     try:
                         commit_time = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                     except:
-                        commit_time = datetime.now()
+                        commit_time = datetime.now(timezone.utc)
                 
                 # 使用缓存的过滤配置，避免SQLAlchemy会话问题
                 commit_filter = self.repository_commit_filter

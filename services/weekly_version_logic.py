@@ -1718,6 +1718,8 @@ def process_weekly_excel_cache(config_id, file_path):
                 tags={
                     "source": "cache_hit",
                     "config_id": config_id,
+                    "project_id": config.project_id if config else "",
+                    "project_code": (config.project.code if config and config.project else ""),
                     "file_path": file_path,
                 },
             )
@@ -1774,6 +1776,8 @@ def process_weekly_excel_cache(config_id, file_path):
                     "source": "generated",
                     "config_id": config_id,
                     "repository_id": config.repository_id,
+                    "project_id": config.project_id if config else "",
+                    "project_code": (config.project.code if config and config.project else ""),
                     "file_path": file_path,
                 },
             )
@@ -1792,6 +1796,8 @@ def process_weekly_excel_cache(config_id, file_path):
             tags={
                 "source": "exception",
                 "config_id": config_id,
+                "project_id": config.project_id if "config" in locals() and config else "",
+                "project_code": (config.project.code if "config" in locals() and config and config.project else ""),
                 "file_path": file_path,
             },
         )

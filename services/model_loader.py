@@ -54,6 +54,7 @@ _MODEL_OBJECT_NAMES = frozenset(
         "AuthProjectJoinRequest",
         "AuthProjectCreateRequest",
         "AuthProjectPreAssignment",
+        "AuthProjectConfirmPermission",
         "QkitAuthUser",
         "QkitAuthUserProject",
         "QkitAuthProjectJoinRequest",
@@ -62,6 +63,7 @@ _MODEL_OBJECT_NAMES = frozenset(
         "QkitAuthProjectImportConfig",
         "QkitAuthUserImportToken",
         "QkitAuthImportBlock",
+        "QkitProjectConfirmPermission",
     }
 )
 

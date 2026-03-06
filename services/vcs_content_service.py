@@ -245,6 +245,10 @@ def get_unified_diff_data(commit, previous_commit=None):
     excel_cache_service = ExcelDiffCacheService()
     perf_metrics_service = get_perf_metrics_service()
     repository = commit.repository
+    perf_project_tags = {
+        "project_id": repository.project_id if repository else "",
+        "project_code": (repository.project.code if repository and repository.project else ""),
+    }
     start_time = time.time()
     try:
         log_print(f"🔧 统一差异服务开始处理: {commit.path}", 'DIFF', force=True)
@@ -268,6 +272,8 @@ def get_unified_diff_data(commit, previous_commit=None):
                     tags={
                         "source": "cache_hit",
                         "repository_id": repository.id,
+                        "project_id": perf_project_tags["project_id"],
+                        "project_code": perf_project_tags["project_code"],
                         "file_path": commit.path,
                     },
                 )
@@ -353,6 +359,8 @@ def get_unified_diff_data(commit, previous_commit=None):
                         tags={
                             "source": "realtime_excel",
                             "repository_id": repository.id,
+                            "project_id": perf_project_tags["project_id"],
+                            "project_code": perf_project_tags["project_code"],
                             "file_path": commit.path,
                         },
                     )
@@ -369,6 +377,8 @@ def get_unified_diff_data(commit, previous_commit=None):
                         tags={
                             "source": "realtime_excel_save_cache_failed",
                             "repository_id": repository.id,
+                            "project_id": perf_project_tags["project_id"],
+                            "project_code": perf_project_tags["project_code"],
                             "file_path": commit.path,
                         },
                     )
@@ -384,6 +394,8 @@ def get_unified_diff_data(commit, previous_commit=None):
                     tags={
                         "source": "realtime_non_excel",
                         "repository_id": repository.id,
+                        "project_id": perf_project_tags["project_id"],
+                        "project_code": perf_project_tags["project_code"],
                         "file_path": commit.path,
                     },
                 )
@@ -397,6 +409,8 @@ def get_unified_diff_data(commit, previous_commit=None):
                 tags={
                     "source": "diff_data_empty",
                     "repository_id": repository.id,
+                    "project_id": perf_project_tags["project_id"],
+                    "project_code": perf_project_tags["project_code"],
                     "file_path": commit.path,
                 },
             )
@@ -412,6 +426,8 @@ def get_unified_diff_data(commit, previous_commit=None):
             tags={
                 "source": "exception",
                 "repository_id": repository.id if repository else "",
+                "project_id": perf_project_tags["project_id"],
+                "project_code": perf_project_tags["project_code"],
                 "file_path": commit.path if commit else "",
             },
         )

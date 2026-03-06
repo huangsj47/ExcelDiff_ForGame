@@ -248,6 +248,32 @@ class AuthUserProject(db.Model):
         return f"<AuthUserProject user={self.user_id} project={self.project_id} role={self.role}>"
 
 
+class AuthProjectConfirmPermission(db.Model):
+    """项目确认/拒绝操作的职能权限表（local 账号体系）。"""
+
+    __tablename__ = "auth_project_confirm_permissions"
+
+    id = db.Column(db.Integer, primary_key=True)
+    project_id = db.Column(db.Integer, db.ForeignKey("project.id", ondelete="CASCADE"), nullable=False, index=True)
+    function_id = db.Column(db.Integer, db.ForeignKey("auth_functions.id", ondelete="CASCADE"), nullable=False)
+    allow_confirm = db.Column(db.Boolean, nullable=False, default=True)
+    allow_reject = db.Column(db.Boolean, nullable=False, default=True)
+    updated_by = db.Column(db.Integer, db.ForeignKey("auth_users.id"), nullable=True)
+    updated_at = db.Column(
+        db.DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint("project_id", "function_id", name="uq_auth_project_confirm_permission"),
+    )
+
+    project = db.relationship("Project")
+    function = db.relationship("AuthFunction")
+    updater = db.relationship("AuthUser", foreign_keys=[updated_by])
+
+
 # ────────────────────────── 项目加入申请表 ──────────────────────────
 
 

@@ -90,6 +90,24 @@
         color: #5f6f86;
     }
     .table tbody td { font-size: .84rem; vertical-align: middle; }
+    .table-sort-btn {
+        border: 0;
+        background: transparent;
+        color: #5f6f86;
+        font-size: .74rem;
+        letter-spacing: .03em;
+        text-transform: uppercase;
+        font-weight: 700;
+        padding: 0;
+        cursor: pointer;
+    }
+    .table-sort-btn.active {
+        color: #1d4ed8;
+    }
+    .table-sort-btn .sort-indicator {
+        margin-left: .2rem;
+        font-size: .68rem;
+    }
 
     .project-pill {
         display: inline-flex;
@@ -176,6 +194,43 @@
         border-color: #93c5fd;
         color: #1e40af;
     }
+    #editUserModal .modal-content {
+        border: 1px solid #dbe4f1;
+        border-radius: 14px;
+        overflow: hidden;
+        box-shadow: 0 14px 36px rgba(15, 36, 74, 0.22);
+    }
+    #editUserModal .modal-header {
+        background: linear-gradient(135deg, #0b3a82 0%, #0a2f66 100%);
+        color: #f8fbff;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+    }
+    #editUserModal .modal-header .btn-close {
+        filter: invert(1) grayscale(1);
+        opacity: .9;
+    }
+    #editUserModal .modal-body {
+        background: #f8fbff;
+    }
+    #editUserModal .modal-footer {
+        background: #f1f6fd;
+        border-top: 1px solid #dbe4f1;
+    }
+    #editUserModal .form-label {
+        font-size: .8rem;
+        font-weight: 700;
+        color: #1f3b66;
+        margin-bottom: .3rem;
+    }
+    #editUserModal .form-control,
+    #editUserModal .form-select {
+        border-color: #c9d7eb;
+    }
+    #editUserModal .form-control:focus,
+    #editUserModal .form-select:focus {
+        border-color: #3b82f6;
+        box-shadow: 0 0 0 .15rem rgba(59, 130, 246, .18);
+    }
 
     @media (max-width: 900px) {
         .admin-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -205,6 +260,8 @@
                 <label class="form-label mb-1">按项目筛选用户</label>
                 <input id="projectFilterSearch" class="form-control form-control-sm project-select-search" type="text" placeholder="输入项目代号/名称快速筛选" oninput="onProjectFilterSearchInput()">
                 <form method="GET" action="{{ url_for('auth_bp.user_list') }}" id="projectFilterForm">
+                    <input type="hidden" name="sort_by" value="{{ sort_by }}">
+                    <input type="hidden" name="sort_dir" value="{{ sort_dir }}">
                     <select id="projectFilterSelect" class="form-select form-select-sm" name="project_id" onchange="document.getElementById('projectFilterForm').submit()">
                         <option value="">{{ '全部项目' if is_platform_admin else '全部可管理项目' }}</option>
                         {% for p in projects %}
@@ -228,6 +285,7 @@
             <div class="col-lg-4 d-flex align-items-end">
                 <div class="d-flex flex-wrap gap-2 w-100 justify-content-end">
                     <button class="btn btn-sm btn-outline-primary" type="button" onclick="openMembersPage()">成员导入配置</button>
+                    <button class="btn btn-sm btn-outline-success" type="button" onclick="runProjectImport()">导入用户</button>
                     <button class="btn btn-sm btn-manual-add ms-auto" type="button" onclick="openManualAddModal()">手动添加</button>
                 </div>
             </div>
@@ -265,27 +323,78 @@
 {% endif %}
 
 <div class="admin-card card">
-    <div class="card-header">用户列表（每页最多 {{ per_page }} 条）</div>
+    <div class="card-header">项目确认权限配置（按职能）</div>
+    <div class="card-body">
+        <div class="row g-2 align-items-end">
+            <div class="col-lg-4">
+                <label class="form-label mb-1">选择项目</label>
+                <select id="permissionProjectId" class="form-select form-select-sm" onchange="loadConfirmPermissionPanel()">
+                    <option value="">请选择项目</option>
+                    {% for p in projects %}
+                    <option value="{{ p.id }}" {% if selected_project_id == p.id %}selected{% endif %}>{{ p.code }} - {{ p.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-lg-8 d-flex flex-wrap gap-2 justify-content-lg-end">
+                <button class="btn btn-sm btn-success" type="button" onclick="batchSetConfirmPermission('allow_both')">选中职能：允许确认+拒绝</button>
+                <button class="btn btn-sm btn-outline-info" type="button" onclick="batchSetConfirmPermission('confirm_only')">选中职能：仅确认</button>
+                <button class="btn btn-sm btn-outline-warning" type="button" onclick="batchSetConfirmPermission('reject_only')">选中职能：仅拒绝</button>
+                <button class="btn btn-sm btn-outline-danger" type="button" onclick="batchSetConfirmPermission('deny_both')">选中职能：禁止确认/拒绝</button>
+                <button class="btn btn-sm btn-outline-secondary" type="button" onclick="resetConfirmPermissionPolicy()">恢复默认（全部用户可操作）</button>
+            </div>
+        </div>
+        <div class="mt-2 project-selected-summary" id="confirmPermissionSummary">请先选择项目加载职能列表。</div>
+        <div class="project-check-grid mt-2" id="confirmPermissionGrid"></div>
+    </div>
+</div>
+
+<div class="admin-card card">
+    <div class="card-header">用户列表（每页最多 {{ per_page }} 条，默认按用户名排序）</div>
     <div class="card-body p-0">
         <div class="table-responsive">
             <table class="table table-sm align-middle mb-0">
                 <thead>
                     <tr>
-                        <th>ID</th>
-                        <th>用户名</th>
-                        <th>姓名</th>
-                        <th>邮箱</th>
-                        <th>平台角色</th>
+                        <th>
+                            <button class="table-sort-btn {{ 'active' if sort_by == 'username' else '' }}" type="button" onclick="goUserSort('username')">
+                                用户名
+                                {% if sort_by == 'username' %}<span class="sort-indicator">{{ '↑' if sort_dir == 'asc' else '↓' }}</span>{% endif %}
+                            </button>
+                        </th>
+                        <th>
+                            <button class="table-sort-btn {{ 'active' if sort_by == 'display_name' else '' }}" type="button" onclick="goUserSort('display_name')">
+                                姓名
+                                {% if sort_by == 'display_name' %}<span class="sort-indicator">{{ '↑' if sort_dir == 'asc' else '↓' }}</span>{% endif %}
+                            </button>
+                        </th>
+                        <th>
+                            <button class="table-sort-btn {{ 'active' if sort_by == 'email' else '' }}" type="button" onclick="goUserSort('email')">
+                                邮箱
+                                {% if sort_by == 'email' %}<span class="sort-indicator">{{ '↑' if sort_dir == 'asc' else '↓' }}</span>{% endif %}
+                            </button>
+                        </th>
+                        <th>
+                            <button class="table-sort-btn {{ 'active' if sort_by == 'role' else '' }}" type="button" onclick="goUserSort('role')">
+                                平台角色
+                                {% if sort_by == 'role' %}<span class="sort-indicator">{{ '↑' if sort_dir == 'asc' else '↓' }}</span>{% endif %}
+                            </button>
+                        </th>
                         <th>所在项目</th>
-                        <th>状态</th>
+                        <th>确认权限</th>
+                        <th>
+                            <button class="table-sort-btn {{ 'active' if sort_by == 'status' else '' }}" type="button" onclick="goUserSort('status')">
+                                状态
+                                {% if sort_by == 'status' %}<span class="sort-indicator">{{ '↑' if sort_dir == 'asc' else '↓' }}</span>{% endif %}
+                            </button>
+                        </th>
                         <th class="text-end">操作</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for u in users %}
                     {% set project_list = user_projects_map.get(u.id, []) %}
+                    {% set permission = user_confirm_permission_map.get(u.id, {}) %}
                     <tr>
-                        <td><code>{{ u.id }}</code></td>
                         <td><strong>{{ u.username }}</strong></td>
                         <td>{{ u.display_name or '-' }}</td>
                         <td>{{ u.email or '-' }}</td>
@@ -313,6 +422,21 @@
                             {% endif %}
                         </td>
                         <td>
+                            {% if permission.restricted %}
+                                {% if permission.allow_confirm and permission.allow_reject %}
+                                <span class="badge bg-success-subtle text-success">{{ permission.label or '可确认/可拒绝' }}</span>
+                                {% elif permission.allow_confirm %}
+                                <span class="badge bg-info-subtle text-info">{{ permission.label or '仅可确认' }}</span>
+                                {% elif permission.allow_reject %}
+                                <span class="badge bg-warning-subtle text-warning">{{ permission.label or '仅可拒绝' }}</span>
+                                {% else %}
+                                <span class="badge bg-danger-subtle text-danger">{{ permission.label or '不可操作' }}</span>
+                                {% endif %}
+                            {% else %}
+                                <span class="badge bg-secondary-subtle text-secondary">{{ permission.label or '全部可操作' }}</span>
+                            {% endif %}
+                        </td>
+                        <td>
                             {% if u.is_active %}
                             <span class="badge bg-success-subtle text-success">活跃</span>
                             {% else %}
@@ -331,6 +455,9 @@
                                 <button class="btn btn-outline-warning" onclick="toggleActive({{ u.id }})">{{ '禁用' if u.is_active else '启用' }}</button>
                                 {% endif %}
                                 <button class="btn btn-outline-info" onclick="openEditUserModal({{ u.id }})">编辑</button>
+                                {% if selected_project_id %}
+                                <button class="btn btn-outline-danger" onclick="deleteUserFromCurrentProject({{ u.id }}, '{{ u.username }}')">删除</button>
+                                {% endif %}
                             </div>
                         </td>
                     </tr>
@@ -345,10 +472,10 @@
         <div class="pager">
             <div>第 {{ page }} / {{ total_pages }} 页，共 {{ total_users }} 人</div>
             <div class="btn-group btn-group-sm">
-                <a class="btn btn-outline-secondary {% if page <= 1 %}disabled{% endif %}" href="{{ url_for('auth_bp.user_list', page=1, project_id=selected_project_id) if selected_project_id else url_for('auth_bp.user_list', page=1) }}">首页</a>
-                <a class="btn btn-outline-secondary {% if page <= 1 %}disabled{% endif %}" href="{{ url_for('auth_bp.user_list', page=page-1, project_id=selected_project_id) if selected_project_id else url_for('auth_bp.user_list', page=page-1) }}">上一页</a>
-                <a class="btn btn-outline-secondary {% if page >= total_pages %}disabled{% endif %}" href="{{ url_for('auth_bp.user_list', page=page+1, project_id=selected_project_id) if selected_project_id else url_for('auth_bp.user_list', page=page+1) }}">下一页</a>
-                <a class="btn btn-outline-secondary {% if page >= total_pages %}disabled{% endif %}" href="{{ url_for('auth_bp.user_list', page=total_pages, project_id=selected_project_id) if selected_project_id else url_for('auth_bp.user_list', page=total_pages) }}">末页</a>
+                <a class="btn btn-outline-secondary {% if page <= 1 %}disabled{% endif %}" href="{{ url_for('auth_bp.user_list', page=1, project_id=selected_project_id, sort_by=sort_by, sort_dir=sort_dir) if selected_project_id else url_for('auth_bp.user_list', page=1, sort_by=sort_by, sort_dir=sort_dir) }}">首页</a>
+                <a class="btn btn-outline-secondary {% if page <= 1 %}disabled{% endif %}" href="{{ url_for('auth_bp.user_list', page=page-1, project_id=selected_project_id, sort_by=sort_by, sort_dir=sort_dir) if selected_project_id else url_for('auth_bp.user_list', page=page-1, sort_by=sort_by, sort_dir=sort_dir) }}">上一页</a>
+                <a class="btn btn-outline-secondary {% if page >= total_pages %}disabled{% endif %}" href="{{ url_for('auth_bp.user_list', page=page+1, project_id=selected_project_id, sort_by=sort_by, sort_dir=sort_dir) if selected_project_id else url_for('auth_bp.user_list', page=page+1, sort_by=sort_by, sort_dir=sort_dir) }}">下一页</a>
+                <a class="btn btn-outline-secondary {% if page >= total_pages %}disabled{% endif %}" href="{{ url_for('auth_bp.user_list', page=total_pages, project_id=selected_project_id, sort_by=sort_by, sort_dir=sort_dir) if selected_project_id else url_for('auth_bp.user_list', page=total_pages, sort_by=sort_by, sort_dir=sort_dir) }}">末页</a>
             </div>
         </div>
     </div>
@@ -375,6 +502,17 @@
                     <select id="manualMemberRole" class="form-select">
                         <option value="member">普通用户</option>
                         <option value="admin">项目管理员</option>
+                    </select>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label">职能（可选，支持逗号分隔）</label>
+                    <input id="manualFunctionName" type="text" class="form-control" placeholder="例如：策划, QA">
+                </div>
+                <div class="mb-2">
+                    <label class="form-label">确认权限策略</label>
+                    <select id="manualConfirmPolicy" class="form-select">
+                        <option value="all_users">默认：全部用户可确认/拒绝</option>
+                        <option value="set_allowed_functions">仅上述职能可确认/拒绝</option>
                     </select>
                 </div>
                 <div>
@@ -456,19 +594,54 @@
         </div>
     </div>
 </div>
+
+<div class="modal fade" id="importConfirmPermissionModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">导入后确认权限设置</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="importPermissionProjectId">
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="radio" name="importPermissionMode" id="importPermissionModeAll" value="all_users" checked>
+                    <label class="form-check-label" for="importPermissionModeAll">默认（推荐）：全部用户可确认/拒绝</label>
+                </div>
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="radio" name="importPermissionMode" id="importPermissionModeSelected" value="set_allowed_functions">
+                    <label class="form-check-label" for="importPermissionModeSelected">仅选中职能可确认/拒绝</label>
+                </div>
+                <div class="project-selected-summary mb-2">本次导入新增职能：</div>
+                <div class="project-check-grid" id="importPermissionFunctionGrid"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">跳过</button>
+                <button class="btn btn-primary" type="button" onclick="submitImportPermissionSetting()">确认</button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 const csrfToken = "{{ csrf_token() }}";
 const userEditMap = {{ user_edit_map|tojson }};
+const userConfirmPermissionMap = {{ user_confirm_permission_map|tojson }};
 const projectOptions = {{ project_options|tojson }};
 const isPlatformAdmin = {{ 'true' if is_platform_admin else 'false' }};
 const selectedProjectId = {{ selected_project_id if selected_project_id is not none else 'null' }};
+const currentSortBy = "{{ sort_by }}";
+const currentSortDir = "{{ sort_dir }}";
 let manualAddModalInstance = null;
 let editUserModalInstance = null;
+let importConfirmPermissionModalInstance = null;
 let editProjectSelectedIds = new Set();
 let editProjectSearchKeyword = '';
+let confirmPermissionRows = [];
+let confirmPermissionSelectedFunctionKeys = new Set();
+let pendingImportFunctionNames = [];
 
 function ensureModals() {
     if (!manualAddModalInstance) {
@@ -476,6 +649,9 @@ function ensureModals() {
     }
     if (!editUserModalInstance) {
         editUserModalInstance = new bootstrap.Modal(document.getElementById('editUserModal'));
+    }
+    if (!importConfirmPermissionModalInstance) {
+        importConfirmPermissionModalInstance = new bootstrap.Modal(document.getElementById('importConfirmPermissionModal'));
     }
 }
 
@@ -603,6 +779,24 @@ function onImportProjectSearchInput() {
     renderImportProjectOptions(input ? input.value : '');
 }
 
+function goUserSort(targetSortBy) {
+    const params = new URLSearchParams(window.location.search);
+    const currentBy = String(params.get('sort_by') || currentSortBy || 'username').toLowerCase();
+    const currentDir = String(params.get('sort_dir') || currentSortDir || 'asc').toLowerCase();
+    const nextDir = (currentBy === targetSortBy && currentDir === 'asc') ? 'desc' : 'asc';
+    params.set('sort_by', targetSortBy);
+    params.set('sort_dir', nextDir);
+    params.set('page', '1');
+    const projectSelect = document.getElementById('projectFilterSelect');
+    const projectId = String((projectSelect && projectSelect.value) || '').trim();
+    if (projectId) {
+        params.set('project_id', projectId);
+    } else {
+        params.delete('project_id');
+    }
+    window.location.href = `/auth/users?${params.toString()}`;
+}
+
 function updateRole(userId, role) {
     apiCall(`/auth/api/users/${userId}/role`, 'POST', { role })
         .then((data) => data.success ? location.reload() : alert(data.message || '操作失败'))
@@ -614,6 +808,35 @@ function toggleActive(userId) {
     apiCall(`/auth/api/users/${userId}/toggle-active`, 'POST', {})
         .then((data) => data.success ? location.reload() : alert(data.message || '操作失败'))
         .catch((err) => alert(err && err.message ? err.message : '操作失败'));
+}
+
+function deleteUserFromCurrentProject(userId, username) {
+    const projectSelect = document.getElementById('projectFilterSelect');
+    const projectId = String((projectSelect && projectSelect.value) || '').trim();
+    if (!projectId) {
+        alert('请先按项目筛选后再执行删除。');
+        return;
+    }
+    const selectedText = projectSelect.options[projectSelect.selectedIndex]
+        ? projectSelect.options[projectSelect.selectedIndex].text
+        : projectId;
+    const message = [
+        `确认从项目【${selectedText}】删除用户【${username}】？`,
+        '删除后该用户在此项目将被加入导入阻断名单。',
+        '后续项目批量导入会默认跳过该用户，除非你手动添加。',
+    ].join('\n');
+    if (!confirm(message)) {
+        return;
+    }
+    apiCall(`/auth/api/project/${projectId}/members/${userId}`, 'DELETE', {})
+        .then((data) => {
+            if (!data.success) {
+                alert(data.message || '删除失败');
+                return;
+            }
+            location.reload();
+        })
+        .catch((err) => alert((err && err.message) || '删除失败'));
 }
 
 function handleJoinRequest(id, action) {
@@ -679,10 +902,248 @@ function runProjectImport() {
                 lines.push(`无效记录跳过：<code>${data.skipped_invalid.join(', ')}</code>`);
             }
             showImportReport(lines, false);
+            const importedFunctions = Array.isArray(data.newly_added_functions) ? data.newly_added_functions : [];
+            if (importedFunctions.length > 0) {
+                pendingImportFunctionNames = importedFunctions;
+                openImportPermissionModal(pid, importedFunctions);
+            }
         })
         .catch((err) => {
             showImportReport([`导入异常：${(err && err.message) || '未知错误'}`], true);
         });
+}
+
+function splitFunctionNames(rawText) {
+    return String(rawText || '')
+        .split(/[,，、;；]/)
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0);
+}
+
+function openImportPermissionModal(projectId, functionNames) {
+    ensureModals();
+    document.getElementById('importPermissionProjectId').value = String(projectId || '');
+    document.getElementById('importPermissionModeAll').checked = true;
+    const grid = document.getElementById('importPermissionFunctionGrid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    functionNames.forEach((name) => {
+        const safeName = String(name);
+        const key = safeName.toLowerCase();
+        const row = document.createElement('label');
+        row.className = 'form-check d-flex align-items-center project-option';
+        row.innerHTML = `
+            <input class="form-check-input me-2" type="checkbox" value="${key}" data-name="${safeName}" checked>
+            <span>${safeName}</span>
+        `;
+        grid.appendChild(row);
+    });
+    importConfirmPermissionModalInstance.show();
+}
+
+function collectCheckedImportFunctions() {
+    const grid = document.getElementById('importPermissionFunctionGrid');
+    if (!grid) return [];
+    const checked = Array.from(grid.querySelectorAll('input[type="checkbox"]:checked'));
+    return checked
+        .map((input) => String(input.getAttribute('data-name') || '').trim())
+        .filter((name) => name.length > 0);
+}
+
+function submitImportPermissionSetting() {
+    const projectId = String(document.getElementById('importPermissionProjectId').value || '').trim();
+    if (!projectId) {
+        importConfirmPermissionModalInstance.hide();
+        return;
+    }
+    const modeNode = document.querySelector('input[name="importPermissionMode"]:checked');
+    const mode = modeNode ? modeNode.value : 'all_users';
+
+    if (mode === 'all_users') {
+        apiCall(`/auth/api/project/${projectId}/confirm-permissions/batch`, 'POST', { mode: 'clear_all' })
+            .then((data) => {
+                if (!data.success) {
+                    alert(data.message || '更新权限策略失败');
+                    return;
+                }
+                importConfirmPermissionModalInstance.hide();
+                location.reload();
+            })
+            .catch((err) => alert((err && err.message) || '更新权限策略失败'));
+        return;
+    }
+
+    const selectedFunctions = collectCheckedImportFunctions();
+    if (!selectedFunctions.length) {
+        alert('请至少选择一个职能，或切换到“全部用户可确认/拒绝”。');
+        return;
+    }
+    apiCall(`/auth/api/project/${projectId}/confirm-permissions/batch`, 'POST', {
+        mode: 'set_allowed_functions',
+        function_names: selectedFunctions,
+    })
+        .then((data) => {
+            if (!data.success) {
+                alert(data.message || '更新权限策略失败');
+                return;
+            }
+            importConfirmPermissionModalInstance.hide();
+            location.reload();
+        })
+        .catch((err) => alert((err && err.message) || '更新权限策略失败'));
+}
+
+function currentPermissionProjectId() {
+    const select = document.getElementById('permissionProjectId');
+    if (!select) return '';
+    return String(select.value || '').trim();
+}
+
+function renderConfirmPermissionPanel(data) {
+    const grid = document.getElementById('confirmPermissionGrid');
+    const summary = document.getElementById('confirmPermissionSummary');
+    if (!grid || !summary) return;
+
+    confirmPermissionRows = Array.isArray(data.items) ? data.items : [];
+    confirmPermissionSelectedFunctionKeys = new Set();
+    grid.innerHTML = '';
+
+    if (!confirmPermissionRows.length) {
+        summary.textContent = '当前项目暂无职能数据，可先导入成员后再配置。';
+        grid.innerHTML = '<div class="text-muted small">暂无可配置职能。</div>';
+        return;
+    }
+
+    const restricted = !!data.has_rules;
+    summary.textContent = restricted
+        ? `当前为“按职能限制”模式，共 ${confirmPermissionRows.length} 项职能。`
+        : `当前为默认模式（全部用户可确认/拒绝），共 ${confirmPermissionRows.length} 项职能。`;
+
+    confirmPermissionRows.forEach((item) => {
+        const key = String(item.function_key || '').trim();
+        const name = String(item.function_name || '').trim();
+        const allowConfirm = !!item.allow_confirm;
+        const allowReject = !!item.allow_reject;
+        let stateLabel = '不可操作';
+        let stateClass = 'text-danger';
+        if (allowConfirm && allowReject) {
+            stateLabel = '可确认/可拒绝';
+            stateClass = 'text-success';
+        } else if (allowConfirm) {
+            stateLabel = '仅可确认';
+            stateClass = 'text-info';
+        } else if (allowReject) {
+            stateLabel = '仅可拒绝';
+            stateClass = 'text-warning';
+        }
+        const row = document.createElement('label');
+        row.className = 'form-check d-flex align-items-start project-option';
+        row.innerHTML = `
+            <input class="form-check-input me-2 mt-1 confirm-function-check" type="checkbox" value="${key}" data-name="${name}">
+            <span class="d-flex flex-column">
+                <span class="project-option-code">${name}</span>
+                <small class="${stateClass}">${stateLabel} · 成员数 ${Number(item.user_count || 0)}</small>
+            </span>
+        `;
+        const checkbox = row.querySelector('.confirm-function-check');
+        if (checkbox) {
+            checkbox.addEventListener('change', (event) => {
+                if (event.target.checked) {
+                    confirmPermissionSelectedFunctionKeys.add(key);
+                } else {
+                    confirmPermissionSelectedFunctionKeys.delete(key);
+                }
+            });
+        }
+        grid.appendChild(row);
+    });
+}
+
+function loadConfirmPermissionPanel() {
+    const projectId = currentPermissionProjectId();
+    const grid = document.getElementById('confirmPermissionGrid');
+    const summary = document.getElementById('confirmPermissionSummary');
+    if (!grid || !summary) return;
+    if (!projectId) {
+        grid.innerHTML = '';
+        summary.textContent = '请先选择项目加载职能列表。';
+        return;
+    }
+    summary.textContent = '加载中...';
+    grid.innerHTML = '<div class="text-muted small">正在加载职能权限配置...</div>';
+    apiCall(`/auth/api/project/${projectId}/confirm-permissions`, 'GET')
+        .then((data) => {
+            if (!data.success) {
+                summary.textContent = data.message || '加载失败';
+                grid.innerHTML = '<div class="text-danger small">加载失败，请稍后重试。</div>';
+                return;
+            }
+            renderConfirmPermissionPanel(data);
+        })
+        .catch((err) => {
+            summary.textContent = (err && err.message) || '加载失败';
+            grid.innerHTML = '<div class="text-danger small">加载失败，请稍后重试。</div>';
+        });
+}
+
+function selectedConfirmFunctionNames() {
+    const names = [];
+    confirmPermissionRows.forEach((row) => {
+        if (confirmPermissionSelectedFunctionKeys.has(String(row.function_key || ''))) {
+            names.push(String(row.function_name || '').trim());
+        }
+    });
+    return names.filter((name) => name.length > 0);
+}
+
+function batchSetConfirmPermission(mode) {
+    const projectId = currentPermissionProjectId();
+    if (!projectId) {
+        alert('请先选择项目');
+        return;
+    }
+    const functionNames = selectedConfirmFunctionNames();
+    if (!functionNames.length) {
+        alert('请先勾选要操作的职能');
+        return;
+    }
+    let apiMode = 'allow_both';
+    if (mode === 'confirm_only') apiMode = 'confirm_only';
+    if (mode === 'reject_only') apiMode = 'reject_only';
+    if (mode === 'deny_both') apiMode = 'deny_both';
+
+    apiCall(`/auth/api/project/${projectId}/confirm-permissions/batch`, 'POST', {
+        mode: apiMode,
+        function_names: functionNames,
+    })
+        .then((data) => {
+            if (!data.success) {
+                alert(data.message || '批量更新失败');
+                return;
+            }
+            loadConfirmPermissionPanel();
+        })
+        .catch((err) => alert((err && err.message) || '批量更新失败'));
+}
+
+function resetConfirmPermissionPolicy() {
+    const projectId = currentPermissionProjectId();
+    if (!projectId) {
+        alert('请先选择项目');
+        return;
+    }
+    if (!confirm('确认恢复默认策略（全部用户可确认/拒绝）？')) {
+        return;
+    }
+    apiCall(`/auth/api/project/${projectId}/confirm-permissions/batch`, 'POST', { mode: 'clear_all' })
+        .then((data) => {
+            if (!data.success) {
+                alert(data.message || '恢复默认策略失败');
+                return;
+            }
+            loadConfirmPermissionPanel();
+        })
+        .catch((err) => alert((err && err.message) || '恢复默认策略失败'));
 }
 
 function openManualAddModal() {
@@ -695,6 +1156,8 @@ function openManualAddModal() {
     document.getElementById('manualDisplayName').value = '';
     document.getElementById('manualEmail').value = '';
     document.getElementById('manualMemberRole').value = 'member';
+    document.getElementById('manualFunctionName').value = '';
+    document.getElementById('manualConfirmPolicy').value = 'all_users';
     manualAddModalInstance.show();
 }
 
@@ -702,6 +1165,8 @@ function submitManualAddUser() {
     const display_name = document.getElementById('manualDisplayName').value.trim();
     const email = document.getElementById('manualEmail').value.trim();
     const member_role = document.getElementById('manualMemberRole').value;
+    const function_name = document.getElementById('manualFunctionName').value.trim();
+    const confirmPolicy = document.getElementById('manualConfirmPolicy').value;
     const project_id = document.getElementById('manualProjectId').value;
 
     if (!display_name || !email || !project_id) {
@@ -714,12 +1179,34 @@ function submitManualAddUser() {
         email,
         member_role,
         project_id,
+        function_name,
     }).then((data) => {
         if (!data.success) {
             alert(data.message || '添加失败');
             return;
         }
-        location.reload();
+        if (confirmPolicy !== 'set_allowed_functions') {
+            location.reload();
+            return;
+        }
+        const selectedFunctions = splitFunctionNames(function_name);
+        if (!selectedFunctions.length) {
+            alert('已选择“仅上述职能可确认/拒绝”，请至少填写一个职能。');
+            location.reload();
+            return;
+        }
+        apiCall(`/auth/api/project/${project_id}/confirm-permissions/batch`, 'POST', {
+            mode: 'set_allowed_functions',
+            function_names: selectedFunctions,
+        }).then((permissionResp) => {
+            if (!permissionResp.success) {
+                alert(permissionResp.message || '更新确认权限失败');
+                return;
+            }
+            location.reload();
+        }).catch((err) => {
+            alert((err && err.message) || '更新确认权限失败');
+        });
     }).catch((err) => {
         alert((err && err.message) || '添加失败');
     });
@@ -864,6 +1351,11 @@ window.addEventListener('DOMContentLoaded', () => {
     ensureModals();
     renderProjectFilterOptions('');
     renderImportProjectOptions('');
+    const permissionProjectSelect = document.getElementById('permissionProjectId');
+    if (permissionProjectSelect && !permissionProjectSelect.value && selectedProjectId != null) {
+        permissionProjectSelect.value = String(selectedProjectId);
+    }
+    loadConfirmPermissionPanel();
 });
 </script>
 {% endblock %}
