@@ -27,6 +27,7 @@
   - 进展（2026-03-08）：已新增 `services/app_runtime_wiring_service.py`，将 commit diff / weekly / task worker 运行时 wiring 编排迁出，入口仅保留单点调用。
   - 进展（2026-03-08）：已新增 `services/app_security_bootstrap_service.py`，将权限校验钩子、CSRF钩子、403/404处理与模板全局注册迁出，入口层改为统一配置调用。
   - 进展（2026-03-08）：已新增 `services/repository_update_form_service.py`，将仓库编辑表单处理与切换清理流程迁出，`app.py` 仅保留路由入口封装。
+  - 进展（2026-03-08）：已新增 `services/repository_update_api_service.py`，将仓库更新/复用/批量凭据 API 与异步更新 worker 迁出，入口路由改为薄封装调用。
   - 验收：`app.py` 降到 < 2000 行；路由注册和容器初始化清晰分层。
 - [x] 2. 建立静态检查基线（`ruff` + `flake8` 二选一，推荐先 `ruff`）
   - 已完成：新增 `pyproject.toml`（ruff 规则）、`scripts/run_ruff_changed.py`（增量检查）、`.github/workflows/quality-gate.yml`（CI 门禁）。

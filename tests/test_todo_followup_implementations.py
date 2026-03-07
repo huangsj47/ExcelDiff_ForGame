@@ -105,3 +105,21 @@ class TestWeeklyTodoFollowups:
         service_content = _read("services/repository_update_form_service.py")
         assert "def handle_update_repository_form(" in service_content
         assert "def clear_repository_state_for_switch(" in service_content
+
+    def test_repository_update_api_logic_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.repository_update_api_service import (" in app_content
+        assert "run_repository_update_and_cache_worker" in app_content
+        assert "handle_reuse_repository_and_update" in app_content
+        assert "handle_update_repository_and_cache" in app_content
+        assert "handle_batch_update_credentials" in app_content
+        assert "return run_repository_update_and_cache_worker(" in app_content
+        assert "return handle_reuse_repository_and_update(" in app_content
+        assert "return handle_update_repository_and_cache(" in app_content
+        assert "return handle_batch_update_credentials(" in app_content
+
+        service_content = _read("services/repository_update_api_service.py")
+        assert "def run_repository_update_and_cache_worker(" in service_content
+        assert "def handle_reuse_repository_and_update(" in service_content
+        assert "def handle_update_repository_and_cache(" in service_content
+        assert "def handle_batch_update_credentials(" in service_content
