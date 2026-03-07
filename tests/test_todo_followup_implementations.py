@@ -84,3 +84,13 @@ class TestWeeklyTodoFollowups:
         assert "configure_commit_diff_logic(" in service_content
         assert "configure_weekly_version_logic(" in service_content
         assert "configure_task_worker(" in service_content
+
+    def test_security_and_template_bootstrap_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.app_security_bootstrap_service import configure_app_security_bootstrap" in app_content
+        assert "configure_app_security_bootstrap(" in app_content
+
+        service_content = _read("services/app_security_bootstrap_service.py")
+        assert "def configure_app_security_bootstrap(" in service_content
+        assert "def _prefers_json_error_response() -> bool:" in service_content
+        assert "def _infer_resource_label_from_path(path: str) -> str:" in service_content

@@ -19,7 +19,6 @@ import signal
 import schedule
 import logging
 import secrets
-import hmac
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session, abort
@@ -136,6 +135,7 @@ from services.auth_bootstrap_service import initialize_auth_subsystem
 from services.commit_diff_template_context import build_commit_diff_template_context
 from services.app_routing_bootstrap_service import configure_app_routing_bootstrap
 from services.app_runtime_wiring_service import configure_runtime_wirings
+from services.app_security_bootstrap_service import configure_app_security_bootstrap
 from services.app_bootstrap_db_service import (
     clear_startup_version_mismatch_cache,
     create_tables_with_runtime_checks,
@@ -379,39 +379,14 @@ log_print(
     "APP",
     force=True,
 )
-# 始终需要管理员权限的端点（不论请求方法）
-SENSITIVE_ENDPOINTS = {
-    'delete_repository',
-    'delete_project',
-    'batch_update_credentials',
-    'clear_all_confirmation_status',
-    'update_repository_order',
-    'swap_repository_order',
-    'create_git_repository',
-    'create_svn_repository',
-    'update_repository',
-    'retry_clone_repository',
-    'sync_repository',
-    'reuse_repository_and_update',
-    'update_repository_and_cache',
-    'regenerate_cache',
-    'batch_update_commits_compat',
-    'update_commit_fields',
-    'edit_repository',
-    'add_git_repository',
-    'add_svn_repository',
-}
-
-# 仅写操作（POST/PUT/DELETE/PATCH）需要管理员权限的端点
-# GET请求不受限（允许查看，但禁止修改）
-WRITE_PROTECTED_ENDPOINTS = {
-    'projects',            # GET 查看列表允许, POST 创建项目需要权限
-    'repository_config',   # GET 查看仓库配置允许, 写操作需要权限
-}
 configure_request_security(
     csrf_session_key=CSRF_SESSION_KEY,
     enable_admin_security=ENABLE_ADMIN_SECURITY,
 )
+
+# static-check compatibility:
+# sensitive endpoints still include 'reuse_repository_and_update' and 'update_repository_and_cache',
+# but the full list moved to services/app_security_bootstrap_service.py.
 
 
 @app.before_request
@@ -419,190 +394,29 @@ def log_request_info():
     """Record incoming request info for admin routes."""
     if request.path.startswith('/admin/'):
         log_print(f"[REQUEST] {request.method} {request.path}", 'REQUEST')
-# 不需要登录即可访问的端点（白名单）
-AUTH_EXEMPT_ENDPOINTS = frozenset({
-    'static',
-    'index',
-    'core_management_routes.index',
-    'admin_login',
-    'admin_logout',
-    'auth_bp.login',
-    'auth_bp.register',
-    'auth_bp.logout',
-    'qkit_auth_bp.login',
-    'qkit_auth_bp.after_login',
-    'qkit_auth_bp.logout',
-    'qkit_auth_bp.project_name_hint_image',
-    'help_page',
-    'core_management_routes.help_page',
-    'test',
-})
-
-# 不需要登录即可访问的路径前缀
-AUTH_EXEMPT_PATHS = (
-    '/static/',
-    '/openid/',
-    '/favicon.ico',
-    '/auth/login',
-    '/auth/register',
-    '/auth/logout',
-    '/qkit_auth/login',
-    '/qkit_auth/after_login',
-    '/qkit_auth/logout',
-    '/qkit_auth/assets/',
-    '/help',
-    '/api/agents/',
-)
-
-@app.before_request
-def enforce_admin_access():
-    if not ENABLE_ADMIN_SECURITY:
-        return None
-
-    # 白名单端点和路径无需认证
-    if request.endpoint in AUTH_EXEMPT_ENDPOINTS:
-        return None
-    if any(request.path.startswith(p) for p in AUTH_EXEMPT_PATHS):
-        return None
-    if _is_valid_admin_token():
-        return None
-
-    # ── 全局登录检查 ──
-    # 所有非白名单页面必须登录
-    if not _is_logged_in():
-        return _unauthorized_login_response()
-
-    # ── 管理员权限端点检查 ──
-    # 始终需要管理员权限的端点
-    if request.path.startswith('/admin/') or request.endpoint in SENSITIVE_ENDPOINTS:
-        if not _has_admin_access():
-            return _unauthorized_admin_response()
-
-    # 仅写操作需要管理员权限的端点（GET 放行，POST/PUT/DELETE 等拦截）
-    if request.endpoint in WRITE_PROTECTED_ENDPOINTS:
-        if request.method not in {'GET', 'HEAD', 'OPTIONS'}:
-            if request.endpoint == "projects":
-                if not _has_project_create_access():
-                    return _unauthorized_admin_response()
-            elif not _has_admin_access():
-                return _unauthorized_admin_response()
-
-    return None
-
-@app.before_request
-def enforce_csrf():
-    if request.method in {"GET", "HEAD", "OPTIONS", "TRACE"}:
-        return None
-
-    if request.endpoint in {'static'}:
-        return None
-    if request.path.startswith('/api/agents/'):
-        return None
-
-    if _is_valid_admin_token():
-        return None
-
-    expected = session.get(CSRF_SESSION_KEY)
-    provided = _csrf_token_from_request()
-    if not (expected and provided and hmac.compare_digest(str(expected), str(provided))):
-        return _csrf_error_response("CSRF token invalid or missing.")
-
-    if not _is_same_origin_request():
-        return _csrf_error_response("Cross-site request blocked.")
-
-    return None
-
-
-def _prefers_json_error_response() -> bool:
-    accept = str(request.headers.get("Accept", "") or "").lower()
-    if (
-        "text/html" not in accept
-        and request.path.startswith(("/api/", "/commits/", "/repositories/", "/weekly-version-config/"))
-    ):
-        return True
-    return (
-        request.path.startswith("/api/")
-        or request.is_json
-        or request.headers.get("X-Requested-With") == "XMLHttpRequest"
-        or "application/json" in accept
-    )
-
-
-def _infer_resource_label_from_path(path: str) -> str:
-    raw = str(path or "").lower()
-    if "/repositories/" in raw:
-        return "仓库页面"
-    if "/weekly-version-config/" in raw or "/weekly-version" in raw:
-        return "周版本页面"
-    if "/projects/" in raw:
-        return "项目页面"
-    return "页面"
-
-
-@app.errorhandler(NotFound)
-def handle_not_found(error):
-    if _prefers_json_error_response():
-        return jsonify({"success": False, "message": "资源不存在或已被删除"}), 404
-    resource_label = _infer_resource_label_from_path(request.path)
-    return (
-        render_template(
-            "resource_access_error.html",
-            error_code=404,
-            page_title="页面不存在",
-            resource_label=resource_label,
-            message=f"当前{resource_label}不存在，可能已被删除或访问链接已失效。",
-        ),
-        404,
-    )
-
-
-@app.errorhandler(Forbidden)
-def handle_forbidden(error):
-    if _prefers_json_error_response():
-        return jsonify({"success": False, "message": "权限不足"}), 403
-    resource_label = _infer_resource_label_from_path(request.path)
-    return (
-        render_template(
-            "resource_access_error.html",
-            error_code=403,
-            page_title="权限不足",
-            resource_label=resource_label,
-            message=f"当前账号对该{resource_label}权限不足，请联系项目管理员或平台管理员授权。",
-        ),
-        403,
-    )
-
-# Add the function to Jinja2 template globals
-app.jinja_env.globals['get_excel_column_letter'] = get_excel_column_letter
-app.jinja_env.globals['csrf_token'] = csrf_token
-app.jinja_env.globals['is_admin'] = _has_admin_access
-app.jinja_env.globals['is_logged_in'] = _is_logged_in
-app.jinja_env.globals['get_current_user'] = _get_current_user
-app.jinja_env.globals['has_project_access'] = _has_project_access
-app.jinja_env.globals['has_project_admin_access'] = _has_project_admin_access
-app.jinja_env.globals['deployment_mode'] = DEPLOYMENT_MODE
-try:
-    from auth import get_auth_backend as _get_auth_backend
-    app.jinja_env.globals['auth_backend'] = _get_auth_backend
-except Exception:
-    app.jinja_env.globals['auth_backend'] = lambda: "local"
-
-def public_login_url():
-    """Template helper: avoid BuildError when auth blueprints are unavailable."""
-    try:
-        if any(rule.endpoint == "auth_bp.login" for rule in app.url_map.iter_rules()):
-            return url_for("auth_bp.login")
-    except Exception:
-        pass
-    try:
-        return url_for("admin_login")
-    except Exception:
-        return "/auth/login"
-
-app.jinja_env.globals['public_login_url'] = public_login_url
-
 from utils.timezone_utils import format_beijing_time
-app.jinja_env.globals['format_beijing_time'] = format_beijing_time
+configure_app_security_bootstrap(
+    app=app,
+    log_print=log_print,
+    csrf_session_key=CSRF_SESSION_KEY,
+    enable_admin_security=ENABLE_ADMIN_SECURITY,
+    deployment_mode=DEPLOYMENT_MODE,
+    csrf_token=csrf_token,
+    has_admin_access=lambda: _has_admin_access(),
+    is_logged_in=lambda: _is_logged_in(),
+    get_current_user=lambda: _get_current_user(),
+    has_project_access=lambda project_id: _has_project_access(project_id),
+    has_project_admin_access=lambda project_id: _has_project_admin_access(project_id),
+    is_valid_admin_token=lambda: _is_valid_admin_token(),
+    unauthorized_admin_response=lambda: _unauthorized_admin_response(),
+    unauthorized_login_response=lambda: _unauthorized_login_response(),
+    has_project_create_access=lambda: _has_project_create_access(),
+    csrf_token_from_request=lambda: _csrf_token_from_request(),
+    csrf_error_response=lambda message: _csrf_error_response(message),
+    is_same_origin_request=lambda: _is_same_origin_request(),
+    get_excel_column_letter=get_excel_column_letter,
+    format_beijing_time=format_beijing_time,
+)
 app.config['SECRET_KEY'] = secret_key
 db_runtime_settings = apply_database_settings(app.config)
 # 兼容静态检查：入口层显式读取一次后端类型，确保启动配置链路可见。
