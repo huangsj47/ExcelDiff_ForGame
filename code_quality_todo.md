@@ -21,8 +21,9 @@
 ### P0（先做）
 - [ ] 1. 拆分 `app.py`（按领域路由/编排职责拆分到 `routes/*` 和 `services/*`）
   - 验收：`app.py` 降到 < 2000 行；路由注册和容器初始化清晰分层。
-- [ ] 2. 建立静态检查基线（`ruff` + `flake8` 二选一，推荐先 `ruff`）
-  - 验收：新增 `pyproject.toml`/`ruff.toml` 规则；CI 能跑并阻断新增违规。
+- [x] 2. 建立静态检查基线（`ruff` + `flake8` 二选一，推荐先 `ruff`）
+  - 已完成：新增 `pyproject.toml`（ruff 规则）、`scripts/run_ruff_changed.py`（增量检查）、`.github/workflows/quality-gate.yml`（CI 门禁）。
+  - 验收：CI 基于改动文件阻断新增违规，避免一次性清理历史存量。
 - [ ] 3. 清理 `_original_print` 调试输出，统一走 `utils.logger.log_print`
   - 验收：生产路径不再出现 `_original_print`；日志级别可配置。
 - [ ] 4. 缩减裸 `except Exception`（先处理 `app.py`、`task_worker_service.py`）
@@ -35,7 +36,8 @@
   - 验收：核心 API 只做编排，查询与渲染抽离。
 - [ ] 7. 统一错误响应规范（HTTP code + `status/message/error_type/retry_after_seconds`）
   - 验收：commit diff、excel diff、merge diff 响应结构一致。
-- [ ] 8. 增加 pre-commit 钩子（格式化 + 基础 lint + 文件长度守卫）
+- [x] 8. 增加 pre-commit 钩子（格式化 + 基础 lint + 文件长度守卫）
+  - 已完成：新增 `.pre-commit-config.yaml`，接入 `ruff` + `scripts/check_file_length.py --strict`。
   - 验收：本地提交前可自动发现问题，减少回归。
 
 ### P2（持续改进）

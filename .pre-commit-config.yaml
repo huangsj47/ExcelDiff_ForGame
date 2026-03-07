@@ -1,0 +1,14 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--config=pyproject.toml]
+
+  - repo: local
+    hooks:
+      - id: file-length-guard
+        name: file-length-guard
+        entry: python scripts/check_file_length.py --strict
+        language: system
+        types: [python]

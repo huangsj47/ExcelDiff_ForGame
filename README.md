@@ -128,6 +128,29 @@ python scripts/rollback_agent_release.py --steps 1
 - 平台：`AUTH_BACKEND` / `DEPLOYMENT_MODE` / `AGENT_SHARED_SECRET` / `FLASK_SECRET_KEY`
 - Agent：`PLATFORM_BASE_URL` / `AGENT_SHARED_SECRET` / `AGENT_NAME`
 
+## 代码质量工具（新增）
+
+1. 安装开发依赖
+```bash
+pip install -r requirements-dev.txt
+```
+
+2. 运行增量 Ruff（仅检查改动文件）
+```bash
+python scripts/run_ruff_changed.py
+```
+
+3. 运行文件长度守卫
+```bash
+python scripts/check_file_length.py --strict
+```
+
+4. 启用 pre-commit
+```bash
+pre-commit install
+pre-commit run --all-files
+```
+
 ## 说明
 
 当前 README 为“重点版”，用于快速理解与落地。详细参数、模式差异、发布回滚细节以 [`平台配置说明.md`](./平台配置说明.md) 为准。
