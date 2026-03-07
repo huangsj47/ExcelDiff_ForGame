@@ -41,13 +41,15 @@ class TestWeeklyTodoFollowups:
         assert ".csv" in func_body
 
     def test_startup_version_mismatch_cleanup_uses_bulk_service_calls(self):
-        content = _read("app.py")
-        func_start = content.find("def clear_version_mismatch_cache():")
+        app_content = _read("app.py")
+        func_start = app_content.find("def clear_version_mismatch_cache():")
         assert func_start >= 0
-        func_end = content.find("\ndef initialize_app():", func_start)
-        func_body = content[func_start:func_end] if func_end > 0 else content[func_start:]
+        func_end = app_content.find("\n# ---------------------------------------------------------------------------", func_start)
+        func_body = app_content[func_start:func_end] if func_end > 0 else app_content[func_start:]
+        assert "clear_startup_version_mismatch_cache(" in func_body
 
-        assert "excel_cache_service.cleanup_version_mismatch_cache()" in func_body
-        assert "excel_html_cache_service.cleanup_old_version_cache()" in func_body
-        assert ".limit(batch_size).all()" not in func_body
-        assert "time.sleep(0.1)" not in func_body
+        service_content = _read("services/app_bootstrap_db_service.py")
+        assert "excel_cache_service.cleanup_version_mismatch_cache()" in service_content
+        assert "excel_html_cache_service.cleanup_old_version_cache()" in service_content
+        assert ".limit(batch_size).all()" not in service_content
+        assert "time.sleep(0.1)" not in service_content

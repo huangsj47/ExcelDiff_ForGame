@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session, abort
 from flask_cors import CORS
-from sqlalchemy import Index, func, case, inspect, or_, and_
+from sqlalchemy import Index, func, case, or_, and_
 from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.exceptions import Forbidden, NotFound
 
@@ -133,6 +133,10 @@ from services.commit_diff_logic import (
 )
 from services.agent_commit_diff_dispatch import maybe_dispatch_commit_diff
 from services.commit_diff_template_context import build_commit_diff_template_context
+from services.app_bootstrap_db_service import (
+    clear_startup_version_mismatch_cache,
+    create_tables_with_runtime_checks,
+)
 from services.db_migration_service import apply_schema_migrations
 from services.deployment_mode import get_commit_diff_mode_strategy
 from services.weekly_version_file_handlers import (
@@ -202,11 +206,7 @@ from utils.db_retry import db_retry
 from utils.sqlite_config import set_sqlite_pragma  # 导入SQLite优化配置
 from utils.db_config import (
     apply_database_settings,
-    get_database_backend_from_config,
-    get_sqlite_path_from_uri,
-    sanitize_database_uri,
 )
-from utils.db_safety import collect_sqlite_runtime_diagnostics
 from urllib.parse import urlparse
 from os import system
 
@@ -3112,120 +3112,21 @@ def inject_template_functions():
     )
 def create_tables():
     """创建数据库表"""
-    with app.app_context():
-        backend = get_database_backend_from_config(app.config)
-        database_uri = str(app.config.get("SQLALCHEMY_DATABASE_URI", "") or "")
-        sqlite_db_path = app.config.get("SQLITE_DB_PATH") or get_sqlite_path_from_uri(database_uri)
-        if backend == "sqlite" and sqlite_db_path:
-            instance_dir = os.path.dirname(sqlite_db_path)
-            if instance_dir and not os.path.exists(instance_dir):
-                try:
-                    os.makedirs(instance_dir, exist_ok=True)
-                    log_print(f"✅ 创建instance目录: {os.path.abspath(instance_dir)}", 'DB')
-                except Exception as e:
-                    log_print(f"❌ 创建instance目录失败: {e}", 'DB', force=True)
-                    return
-
-            elif instance_dir:
-                log_print(f"ℹ️ instance目录已存在: {os.path.abspath(instance_dir)}", 'DB')
-            if not os.path.exists(sqlite_db_path):
-                log_print(f"ℹ️ 数据库文件不存在，将创建新数据库: {os.path.abspath(sqlite_db_path)}", 'DB')
-        else:
-            log_print(
-                f"ℹ️ 使用 {backend.upper()} 数据库: {sanitize_database_uri(database_uri)}",
-                'DB'
-            )
-        existing_tables = []
-        try:
-            existing_tables = inspect(db.engine).get_table_names()
-        except Exception as e:
-            log_print(f"检查现有表失败: {e}", 'DB', force=True)
-        log_print(f"创建前的数据库表: {existing_tables}", 'DB')
-        # 创建所有表
-        try:
-            db.create_all()
-            log_print("✅ db.create_all() 执行完成", 'DB')
-        except Exception as e:
-            log_print(f"❌ 创建表失败: {e}", 'DB', force=True)
-            return
-
-        # ---- 自动迁移：为已有表补充缺失列 ----
-        apply_schema_migrations(db, log_print)
-
-        # 检查创建后的表状态
-        try:
-            final_tables = inspect(db.engine).get_table_names()
-            log_print(f"创建后的数据库表: {final_tables}", 'DB')
-            # 验证必需的表
-            expected_tables = [
-                'project', 'repository', 'commits_log',
-                'background_tasks', 'global_repository_counter',
-                'diff_cache', 'excel_html_cache', 'weekly_version_config',
-                'weekly_version_diff_cache', 'weekly_version_excel_cache',
-                'merged_diff_cache', 'operation_log',
-                'agent_nodes', 'agent_project_bindings', 'agent_tasks', 'agent_default_admins',
-                'agent_incidents',
-            ]
-            missing_tables = [t for t in expected_tables if t not in final_tables]
-            if missing_tables:
-                log_print(f"⚠️ 仍然缺失的表: {missing_tables}", 'DB', force=True)
-            else:
-                log_print("✅ 所有必需的表都已创建", 'DB')
-        except Exception as e:
-            log_print(f"检查最终表状态失败: {e}", 'DB', force=True)
-
-        # 启动诊断：记录 SQLite 文件与空闲页占比，帮助快速识别“文件很大但数据为空”场景
-        try:
-            diag = collect_sqlite_runtime_diagnostics(database_uri)
-            if diag.get("backend") == "sqlite":
-                def _fmt_mb(num_bytes):
-                    try:
-                        return f"{(float(num_bytes) / (1024 * 1024)):.2f}MB"
-                    except Exception:
-                        return "0.00MB"
-
-                log_print(
-                    "SQLite诊断: "
-                    f"path={diag.get('sqlite_path')}, "
-                    f"size={_fmt_mb(diag.get('db_size_bytes', 0))}, "
-                    f"wal={_fmt_mb(diag.get('wal_size_bytes', 0))}, "
-                    f"journal={diag.get('journal_mode')}, "
-                    f"pages={diag.get('page_count')}, "
-                    f"free_pages={diag.get('freelist_count')}, "
-                    f"free_ratio={float(diag.get('free_ratio', 0.0)):.2%}",
-                    'DB',
-                    force=True,
-                )
-                if float(diag.get("free_ratio", 0.0)) >= 0.80:
-                    log_print(
-                        "⚠️ SQLite空闲页占比超过80%，可能发生过大规模删除且未VACUUM；"
-                        "若出现数据缺失请优先核查是否误执行 drop_all/清库脚本。",
-                        'DB',
-                        force=True,
-                    )
-            if diag.get("error"):
-                log_print(f"SQLite诊断失败: {diag.get('error')}", 'DB', force=True)
-        except Exception as e:
-            log_print(f"SQLite启动诊断异常: {e}", 'DB', force=True)
+    create_tables_with_runtime_checks(
+        app=app,
+        db=db,
+        log_print=log_print,
+        apply_schema_migrations=apply_schema_migrations,
+    )
 def clear_version_mismatch_cache():
     """清理版本不匹配的缓存（自动模式）"""
-    try:
-        log_print(f"检查并清理版本不匹配的缓存 (当前版本: {DIFF_LOGIC_VERSION})", 'CACHE')
-        # 使用服务层批量清理，避免 all()+逐条 delete+sleep 带来的启动期开销
-        total_diff_cleaned = excel_cache_service.cleanup_version_mismatch_cache()
-        total_html_cleaned = excel_html_cache_service.cleanup_old_version_cache()
-
-        if total_diff_cleaned > 0 or total_html_cleaned > 0:
-            log_print(f"清理完成：{total_diff_cleaned} 条数据缓存，{total_html_cleaned} 条HTML缓存", 'CACHE')
-        else:
-            log_print("无需清理版本不匹配的缓存", 'CACHE')
-            log_print("启动成功！", 'APP')
-    except Exception as e:
-        log_print(f"清理版本不匹配缓存失败: {e}", 'CACHE', force=True)
-        try:
-            db.session.rollback()
-        except SQLAlchemyError:
-            pass
+    clear_startup_version_mismatch_cache(
+        log_print=log_print,
+        diff_logic_version=DIFF_LOGIC_VERSION,
+        excel_cache_service=excel_cache_service,
+        excel_html_cache_service=excel_html_cache_service,
+        db=db,
+    )
 
 # ---------------------------------------------------------------------------
 #  配置周版本业务逻辑的运行时依赖
