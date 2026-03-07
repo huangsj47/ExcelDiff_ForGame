@@ -39,6 +39,27 @@ def test_safe_print_delegates_to_loaded_app_log_print(monkeypatch):
     assert calls == [("hello", "INFO", True)]
 
 
+def test_safe_print_prefers_app_log_print_over_utils_logger(monkeypatch):
+    app_calls = []
+    logger_calls = []
+
+    def fake_app_log_print(message, log_type, force):
+        app_calls.append((message, log_type, force))
+
+    def fake_logger_log_print(message, log_type, force):
+        logger_calls.append((message, log_type, force))
+
+    fake_app = SimpleNamespace(log_print=fake_app_log_print, LOG_LEVEL={"INFO_VERBOSE": True})
+    fake_logger = SimpleNamespace(log_print=fake_logger_log_print, LOG_LEVEL={"INFO_VERBOSE": True})
+    monkeypatch.setitem(sys.modules, "app", fake_app)
+    monkeypatch.setitem(sys.modules, "utils.logger", fake_logger)
+
+    safe_print_module.safe_print("prefer-app", "INFO", True)
+
+    assert app_calls == [("prefer-app", "INFO", True)]
+    assert logger_calls == []
+
+
 def test_safe_print_fallback_writes_stdout_when_app_missing(monkeypatch):
     monkeypatch.delitem(sys.modules, "app", raising=False)
     buffer = io.StringIO()
