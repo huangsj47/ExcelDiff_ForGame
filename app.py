@@ -267,7 +267,6 @@ DIFF_LOGIC_VERSION = "1.8.0"
 from utils.logger import (
     LOG_LEVEL,
     _LOG_CATEGORIES,
-    _original_print,
     clear_log_file,
     install_exception_handlers,
     install_print_override,
@@ -607,7 +606,7 @@ log_print(
     force=True
 )
 db.init_app(app)
-_original_print("[TRACE] db.init_app(app) done")
+log_print("[TRACE] db.init_app(app) done", "APP")
 
 # ── 初始化 Auth 账号系统 ──
 app.config["AUTH_INIT_FAILED"] = False
@@ -695,59 +694,59 @@ def _log_auth_route_diagnostics(app_instance):
 try:
     from auth import init_auth, init_auth_default_data, register_auth_blueprints
     init_auth(app, db)
-    _original_print("[TRACE] auth module initialized")
+    log_print("[TRACE] auth module initialized", "APP")
 
     # 注册认证蓝图（按 AUTH_BACKEND 自动分流）
     register_auth_blueprints(app)
-    _original_print("[TRACE] auth blueprints registered")
+    log_print("[TRACE] auth blueprints registered", "APP")
 
     # 在数据库表创建完成后初始化默认数据
     with app.app_context():
         try:
             init_auth_default_data()
-            _original_print("[TRACE] auth default data initialized")
+            log_print("[TRACE] auth default data initialized", "APP")
         except Exception as e:
-            _original_print(f"[TRACE] auth: default data init skipped: {e}")
+            log_print(f"[TRACE] auth: default data init skipped: {e}", "APP")
 except ImportError as e:
     app.config["AUTH_INIT_FAILED"] = True
     app.config["AUTH_INIT_ERROR"] = f"ImportError: {e}"
     log_print(f"❌ 账号系统初始化失败（ImportError）: {e}", "AUTH", force=True)
-    _original_print(f"[TRACE] auth module not available: {e}")
+    log_print(f"[TRACE] auth module not available: {e}", "APP")
 except Exception as e:
     app.config["AUTH_INIT_FAILED"] = True
     app.config["AUTH_INIT_ERROR"] = f"{type(e).__name__}: {e}"
     log_print(f"❌ 账号系统初始化失败: {type(e).__name__}: {e}", "AUTH", force=True)
-    _original_print(f"[TRACE] auth module init failed: {e}")
+    log_print(f"[TRACE] auth module init failed: {e}", "APP", force=True)
     import traceback; traceback.print_exc()
 
 _register_qkit_fallback_endpoints(app)
 _log_auth_route_diagnostics(app)
 
 app.register_blueprint(cache_management_bp)
-_original_print("[TRACE] cache_management_bp registered")
+log_print("[TRACE] cache_management_bp registered", "APP")
 try:
     app.register_blueprint(commit_diff_bp)
-    _original_print("[TRACE] commit_diff_bp registered")
+    log_print("[TRACE] commit_diff_bp registered", "APP")
 except Exception as e:
-    _original_print(f"[TRACE] commit_diff_bp FAILED: {e}")
+    log_print(f"[TRACE] commit_diff_bp FAILED: {e}", "APP", force=True)
     import traceback; traceback.print_exc()
 try:
     app.register_blueprint(core_management_bp)
-    _original_print("[TRACE] core_management_bp registered")
+    log_print("[TRACE] core_management_bp registered", "APP")
 except Exception as e:
-    _original_print(f"[TRACE] core_management_bp FAILED: {e}")
+    log_print(f"[TRACE] core_management_bp FAILED: {e}", "APP", force=True)
     import traceback; traceback.print_exc()
 try:
     app.register_blueprint(weekly_version_bp)
-    _original_print("[TRACE] weekly_version_bp registered")
+    log_print("[TRACE] weekly_version_bp registered", "APP")
 except Exception as e:
-    _original_print(f"[TRACE] weekly_version_bp FAILED: {e}")
+    log_print(f"[TRACE] weekly_version_bp FAILED: {e}", "APP", force=True)
     import traceback; traceback.print_exc()
 try:
     app.register_blueprint(agent_management_bp)
-    _original_print("[TRACE] agent_management_bp registered")
+    log_print("[TRACE] agent_management_bp registered", "APP")
 except Exception as e:
-    _original_print(f"[TRACE] agent_management_bp FAILED: {e}")
+    log_print(f"[TRACE] agent_management_bp FAILED: {e}", "APP", force=True)
     import traceback; traceback.print_exc()
 
 # ---------------------------------------------------------------------------
@@ -796,7 +795,7 @@ def _register_endpoint_aliases(app):
     for new_rule in alias_rules:
         app.url_map.add(new_rule)
 
-    _original_print(f"[TRACE] Registered {len(alias_rules)} endpoint short-name aliases")
+    log_print(f"[TRACE] Registered {len(alias_rules)} endpoint short-name aliases", "APP")
 
 _register_endpoint_aliases(app)
 
@@ -852,7 +851,7 @@ performance_metrics_service = get_perf_metrics_service()
 from services.weekly_excel_cache_service import WeeklyExcelCacheService
 
 weekly_excel_cache_service = WeeklyExcelCacheService(db, DIFF_LOGIC_VERSION)
-_original_print("[TRACE] services initialized")
+log_print("[TRACE] services initialized", "APP")
 
 # ---------------------------------------------------------------------------
 # 后台任务工作服务（已拆分到 services/task_worker_service.py）
@@ -3321,7 +3320,7 @@ configure_weekly_version_logic(
     get_file_content_from_svn_func=get_file_content_from_svn,
     generate_merged_diff_data_func=generate_merged_diff_data,
 )
-_original_print("[TRACE] weekly_version_logic configured")
+log_print("[TRACE] weekly_version_logic configured", "APP")
 
 # ---------------------------------------------------------------------------
 # 后台任务工作服务 — 注入运行时依赖
@@ -3343,7 +3342,7 @@ configure_task_worker(
     process_weekly_excel_cache=process_weekly_excel_cache,
     db_retry=db_retry,
 )
-_original_print("[TRACE] task_worker configured")
+log_print("[TRACE] task_worker configured", "APP")
 
 
 def _init_auth_default_data_with_context():
@@ -3381,9 +3380,9 @@ def cleanup_app():
 
 # cache management routes moved to routes/cache_management_routes.py
 # 注册清理函数
-_original_print("[TRACE] about to register atexit")
+log_print("[TRACE] about to register atexit", "APP")
 atexit.register(cleanup_app)
-_original_print(f"[TRACE] reached if __name__ check, __name__={__name__!r}")
+log_print(f"[TRACE] reached if __name__ check, __name__={__name__!r}", "APP")
 
 
 if __name__ == '__main__':

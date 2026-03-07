@@ -103,6 +103,26 @@ def _find_latest_commit_diff_task(project_id: int, repository_id: int, commit_re
     return None, None
 
 
+def _count_failed_commit_diff_tasks(project_id: int, repository_id: int, commit_record_id: int, limit: int = 120) -> int:
+    candidates = (
+        AgentTask.query.filter_by(
+            task_type="commit_diff",
+            project_id=project_id,
+            repository_id=repository_id,
+        )
+        .order_by(AgentTask.id.desc())
+        .limit(limit)
+        .all()
+    )
+    failed_count = 0
+    for task in candidates:
+        payload = _extract_task_payload(task)
+        if _payload_matches_commit(payload, commit_record_id):
+            if str(task.status or "").strip().lower() == "failed":
+                failed_count += 1
+    return failed_count
+
+
 def _ensure_commit_diff_task(commit, project_id: int, repository_id: int, priority: int = 3):
     existing_task, _ = _find_latest_commit_diff_task(project_id, repository_id, commit.id)
     if existing_task and str(existing_task.status or "").lower() in _PENDING_STATUSES:
@@ -335,9 +355,48 @@ def dispatch_or_get_commit_diff(commit, *, force_retry: bool = False):
                     "repository_id": repository.id,
                     "agent_online": False,
                 }
-            # 失败后允许自动补派一次新任务
+            failed_count = _count_failed_commit_diff_tasks(project.id, repository.id, commit.id)
+            max_auto_retry = _int_env(
+                "AGENT_COMMIT_DIFF_MAX_AUTO_RETRY_ON_FAILURE",
+                1,
+                min_value=0,
+                max_value=10,
+            )
+            if failed_count > max_auto_retry:
+                latest_error = str(getattr(task, "error_message", "") or "").strip()
+                log_print(
+                    (
+                        f"commit_diff 任务连续失败，停止自动重试: "
+                        f"project_id={project.id}, repository_id={repository.id}, commit_record_id={commit.id}, "
+                        f"failed_count={failed_count}, max_auto_retry={max_auto_retry}, task_id={task.id}, "
+                        f"error={latest_error or 'N/A'}"
+                    ),
+                    "AGENT",
+                    force=True,
+                )
+                return {
+                    "status": "error",
+                    "message": (
+                        f"Agent diff 任务连续失败（{failed_count}次），请检查 Agent 日志后手动重试。"
+                        + (f" 最近错误: {latest_error}" if latest_error else "")
+                    ),
+                    "task_id": task.id,
+                    "project_id": project.id,
+                    "repository_id": repository.id,
+                    "agent_online": True,
+                    "failed_count": failed_count,
+                }
+            # 失败后自动补派（受上限保护）
             new_task, _created = _ensure_commit_diff_task(commit, project.id, repository.id, priority=2)
             db.session.commit()
+            log_print(
+                (
+                    f"commit_diff 任务失败后自动重派发: project_id={project.id}, repository_id={repository.id}, "
+                    f"commit_record_id={commit.id}, previous_task_id={task.id}, new_task_id={new_task.id if new_task else None}, "
+                    f"failed_count={failed_count}, max_auto_retry={max_auto_retry}"
+                ),
+                "AGENT",
+            )
             return {
                 "status": "pending",
                 "message": "diff任务失败，已重新派发",

@@ -1569,6 +1569,14 @@ def agent_claim_task():
         agent.status = "online"
         agent.last_heartbeat = now_utc
         db.session.commit()
+        if str(task.task_type or "").strip().lower() == "commit_diff":
+            log_print(
+                (
+                    f"Agent 领取 commit_diff 任务: task_id={task.id}, agent={agent.agent_code}, "
+                    f"project_id={task.project_id}, repository_id={task.repository_id}"
+                ),
+                "AGENT",
+            )
 
         response_task = {
             "id": task.id,
@@ -1737,6 +1745,15 @@ def agent_report_task_result(task_id):
                     src_task.retry_count = (src_task.retry_count or 0) + 1
 
         db.session.commit()
+        if str(task.task_type or "").strip().lower() == "commit_diff":
+            log_print(
+                (
+                    f"Agent 回传 commit_diff 结果: task_id={task.id}, agent={agent.agent_code}, "
+                    f"status={status}, error={task.error_message or 'N/A'}"
+                ),
+                "AGENT",
+                force=(status == "failed"),
+            )
         return jsonify({"success": True}), 200
     except Exception as exc:
         db.session.rollback()
