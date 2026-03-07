@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session, abort
 from flask_cors import CORS
 from sqlalchemy import Index, func, case, inspect, or_, and_
+from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.exceptions import Forbidden, NotFound
 
 from models import (
@@ -1841,7 +1842,7 @@ def refresh_commit_diff(commit_id):
                     log_print(f"✅ 已删除缓存记录: diff={deleted_count}, html={html_deleted_count} | 耗时: {cache_delete_time:.2f}秒", 'EXCEL')
                 else:
                     log_print(f"ℹ️ 没有找到需要删除的缓存记录", 'EXCEL')
-            except Exception as cache_error:
+            except SQLAlchemyError as cache_error:
                 log_print(f"⚠️ 清除缓存时出错: {cache_error}", 'EXCEL', force=True)
                 db.session.rollback()
         # 获取上一个版本的提交信息 - 优化查询
@@ -2011,7 +2012,7 @@ def commit_diff(commit_id):
                             db.session.delete(cached_diff)
                             db.session.commit()
                             log_print(f"🗑️ 已删除无效缓存记录 ID: {cached_diff.id}", 'EXCEL')
-                        except Exception as delete_error:
+                        except SQLAlchemyError as delete_error:
                             log_print(f"❌ 删除缓存记录失败: {delete_error}", 'EXCEL', force=True)
                             db.session.rollback()
                 except json.JSONDecodeError as e:
@@ -3130,7 +3131,7 @@ def _migrate_table_columns(table_name, desired_cols):
         log_print(f"⚠️ {table_name} 表自动迁移失败: {e}", 'DB', force=True)
         try:
             db.session.rollback()
-        except Exception:
+        except SQLAlchemyError:
             pass
 
 
@@ -3302,7 +3303,7 @@ def clear_version_mismatch_cache():
         log_print(f"清理版本不匹配缓存失败: {e}", 'CACHE', force=True)
         try:
             db.session.rollback()
-        except:
+        except SQLAlchemyError:
             pass
 
 # ---------------------------------------------------------------------------

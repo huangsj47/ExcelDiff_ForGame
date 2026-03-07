@@ -17,6 +17,8 @@ import time
 import traceback
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from utils.logger import log_print
 from utils.db_retry import db_retry
 from services.deployment_mode import get_deployment_mode, is_agent_dispatch_mode
@@ -300,7 +302,8 @@ def cleanup_git_processes():
             try:
                 proc.kill()
                 _active_git_processes.discard(proc)
-            except:
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as kill_error:
+                log_print(f"强制终止Git进程失败: {kill_error}", 'GIT', force=True)
                 pass
 
 
@@ -417,7 +420,7 @@ def _handle_excel_diff_task(task, priority):
             log_print(f"❌ Excel差异处理失败: {e}", 'EXCEL', force=True)
             try:
                 _db.session.rollback()
-            except Exception as rollback_error:
+            except SQLAlchemyError as rollback_error:
                 log_print(f"会话回滚失败: {rollback_error}", 'DB', force=True)
             if 'task_id' in task:
                 try:
@@ -1487,7 +1490,7 @@ def queue_missing_git_branch_refresh(project_id, repository_ids):
         except Exception as worker_error:
             try:
                 _db.session.rollback()
-            except Exception:
+            except SQLAlchemyError:
                 pass
             log_print(f"异步刷新仓库分支异常: project_id={target_project_id}, error={worker_error}", 'APP', force=True)
 

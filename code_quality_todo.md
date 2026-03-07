@@ -24,9 +24,12 @@
 - [x] 2. 建立静态检查基线（`ruff` + `flake8` 二选一，推荐先 `ruff`）
   - 已完成：新增 `pyproject.toml`（ruff 规则）、`scripts/run_ruff_changed.py`（增量检查）、`.github/workflows/quality-gate.yml`（CI 门禁）。
   - 验收：CI 基于改动文件阻断新增违规，避免一次性清理历史存量。
-- [ ] 3. 清理 `_original_print` 调试输出，统一走 `utils.logger.log_print`
+- [x] 3. 清理 `_original_print` 调试输出，统一走 `utils.logger.log_print`
+  - 已完成：`app.py` 启动/蓝图注册/初始化链路已移除 `_original_print`，统一走 `log_print`。
   - 验收：生产路径不再出现 `_original_print`；日志级别可配置。
 - [ ] 4. 缩减裸 `except Exception`（先处理 `app.py`、`task_worker_service.py`）
+  - 进展（2026-03-08）：已清理裸 `except:`，并将 DB rollback 相关分支收敛为 `SQLAlchemyError`。
+  - 下一步：继续按模块将通用 `except Exception` 拆分为更具体异常（IO/网络/数据校验）并补充错误标签。
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 
 ### P1（随后）
