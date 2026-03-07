@@ -6,6 +6,8 @@ import sys
 import json
 import os
 import threading
+import difflib
+import html
 from datetime import datetime, timezone
 from collections import defaultdict
 from types import SimpleNamespace
@@ -232,6 +234,168 @@ def convert_hunks_to_lines(diff_data):
         'file_path': diff_data.get('file_path', ''),
         'lines': all_lines
     }
+
+
+def _build_inline_change_html(old_text, new_text):
+    old_raw = str(old_text or "")
+    new_raw = str(new_text or "")
+    matcher = difflib.SequenceMatcher(None, old_raw, new_raw)
+    old_parts = []
+    new_parts = []
+    changed = False
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        old_seg = html.escape(old_raw[i1:i2])
+        new_seg = html.escape(new_raw[j1:j2])
+
+        if tag == 'equal':
+            old_parts.append(old_seg)
+            new_parts.append(new_seg)
+        elif tag == 'delete':
+            if old_seg:
+                changed = True
+                old_parts.append(f'<span class="text-diff-inline-removed">{old_seg}</span>')
+        elif tag == 'insert':
+            if new_seg:
+                changed = True
+                new_parts.append(f'<span class="text-diff-inline-added">{new_seg}</span>')
+        elif tag == 'replace':
+            if old_seg:
+                changed = True
+                old_parts.append(f'<span class="text-diff-inline-removed">{old_seg}</span>')
+            if new_seg:
+                changed = True
+                new_parts.append(f'<span class="text-diff-inline-added">{new_seg}</span>')
+
+    return ''.join(old_parts), ''.join(new_parts), changed
+
+
+def _apply_inline_highlight_to_hunks(diff_data):
+    hunks = diff_data.get('hunks')
+    if not isinstance(hunks, list):
+        return diff_data
+
+    for hunk in hunks:
+        lines = hunk.get('lines')
+        if not isinstance(lines, list):
+            continue
+
+        processed = []
+        removed_buf = []
+        added_buf = []
+
+        def flush_buffers():
+            nonlocal removed_buf, added_buf
+            if not removed_buf and not added_buf:
+                return
+
+            pair_count = min(len(removed_buf), len(added_buf))
+            paired_highlights = []
+            for idx in range(pair_count):
+                old_html, new_html, changed = _build_inline_change_html(
+                    removed_buf[idx].get('content'),
+                    added_buf[idx].get('content'),
+                )
+                paired_highlights.append((old_html, new_html, changed))
+
+            for idx, item in enumerate(removed_buf):
+                row = dict(item)
+                if idx < pair_count and paired_highlights[idx][2]:
+                    row['content_html'] = paired_highlights[idx][0]
+                    row['inline_highlight'] = True
+                processed.append(row)
+
+            for idx, item in enumerate(added_buf):
+                row = dict(item)
+                if idx < pair_count and paired_highlights[idx][2]:
+                    row['content_html'] = paired_highlights[idx][1]
+                    row['inline_highlight'] = True
+                processed.append(row)
+
+            removed_buf = []
+            added_buf = []
+
+        for line in lines:
+            line_type = str(line.get('type') or '')
+            if line_type == 'removed':
+                if added_buf:
+                    flush_buffers()
+                removed_buf.append(line)
+            elif line_type == 'added':
+                added_buf.append(line)
+            else:
+                flush_buffers()
+                processed.append(line)
+
+        flush_buffers()
+        hunk['lines'] = processed
+
+    return diff_data
+
+
+def _apply_inline_highlight_to_lines(diff_data):
+    lines = diff_data.get('lines')
+    if not isinstance(lines, list):
+        return diff_data
+
+    processed = []
+    removed_buf = []
+    added_buf = []
+
+    def flush_buffers():
+        nonlocal removed_buf, added_buf
+        if not removed_buf and not added_buf:
+            return
+
+        pair_count = min(len(removed_buf), len(added_buf))
+        paired_highlights = []
+        for idx in range(pair_count):
+            old_html, new_html, changed = _build_inline_change_html(
+                removed_buf[idx].get('content'),
+                added_buf[idx].get('content'),
+            )
+            paired_highlights.append((old_html, new_html, changed))
+
+        for idx, item in enumerate(removed_buf):
+            row = dict(item)
+            if idx < pair_count and paired_highlights[idx][2]:
+                row['content_html'] = paired_highlights[idx][0]
+                row['inline_highlight'] = True
+            processed.append(row)
+
+        for idx, item in enumerate(added_buf):
+            row = dict(item)
+            if idx < pair_count and paired_highlights[idx][2]:
+                row['content_html'] = paired_highlights[idx][1]
+                row['inline_highlight'] = True
+            processed.append(row)
+
+        removed_buf = []
+        added_buf = []
+
+    for line in lines:
+        line_type = str(line.get('type') or '')
+        if line_type == 'removed':
+            if added_buf:
+                flush_buffers()
+            removed_buf.append(line)
+        elif line_type == 'added':
+            added_buf.append(line)
+        else:
+            flush_buffers()
+            processed.append(line)
+
+    flush_buffers()
+    diff_data['lines'] = processed
+    return diff_data
+
+
+def _apply_inline_highlight_to_code_diff(diff_data):
+    if not isinstance(diff_data, dict):
+        return diff_data
+    diff_data = _apply_inline_highlight_to_hunks(diff_data)
+    diff_data = _apply_inline_highlight_to_lines(diff_data)
+    return diff_data
 
 
 def get_mock_diff_data(commit):
@@ -478,6 +642,7 @@ def get_diff_data(commit, previous_commit=_PREVIOUS_COMMIT_SENTINEL):
                 diff_data, diagnostics = _get_git_code_diff_with_retry(service, commit, previous_commit)
                 if _is_renderable_code_diff(diff_data):
                     diff_data['file_path'] = commit.path
+                    diff_data = _apply_inline_highlight_to_code_diff(diff_data)
                     stats = service.get_performance_stats() if hasattr(service, "get_performance_stats") else {}
                     log_print(f"Git diff处理性能统计: {stats}", 'INFO')
                     log_print(f"成功获取diff数据，hunks数量: {len(diff_data.get('hunks', []))}", 'INFO')
@@ -486,6 +651,7 @@ def get_diff_data(commit, previous_commit=_PREVIOUS_COMMIT_SENTINEL):
                 unified_data = _get_unified_diff_data(commit, previous_commit)
                 if _is_renderable_code_diff(unified_data):
                     unified_data['file_path'] = commit.path
+                    unified_data = _apply_inline_highlight_to_code_diff(unified_data)
                     log_print("主路径获取失败，已回退统一diff并成功", "INFO")
                     return clean_json_data(unified_data)
 
@@ -507,6 +673,7 @@ def get_diff_data(commit, previous_commit=_PREVIOUS_COMMIT_SENTINEL):
                 diff_data = service.get_file_diff(commit.version, commit.path)
                 if _is_renderable_code_diff(diff_data):
                     diff_data['file_path'] = commit.path
+                    diff_data = _apply_inline_highlight_to_code_diff(diff_data)
                     return clean_json_data(diff_data)
                 return _build_diff_error_data(
                     commit,

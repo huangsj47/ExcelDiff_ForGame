@@ -3,7 +3,7 @@
 /* ===== TEXT DIFF STYLES (GitHub-style) ===== */
 .text-diff-container {
     font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.45;
     background: #f8f9fa;
     border: 1px solid #e1e4e8;
@@ -56,15 +56,15 @@
 
 .text-diff-line {
     display: flex;
-    font-size: 12px;
-    line-height: 20px;
+    font-size: 13px;
+    line-height: 22px;
 }
 
 .text-diff-line-number {
     width: 60px;
     padding: 0 8px;
     text-align: right;
-    font-size: 11px;
+    font-size: 12px;
     color: #586069;
     background: #fafbfc;
     border-right: 1px solid #e1e4e8;
@@ -74,9 +74,37 @@
 
 .text-diff-line-content {
     flex: 1;
-    padding: 0 8px;
+    padding: 0 8px 0 6px;
     white-space: pre;
     overflow-x: auto;
+    display: flex;
+    align-items: baseline;
+}
+
+.text-diff-line-sign {
+    width: 22px;
+    min-width: 22px;
+    color: #8b949e;
+    text-align: center;
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.text-diff-line-code {
+    flex: 1;
+    color: #24292e;
+}
+
+.text-diff-inline-added {
+    background: #2f6f44;
+    color: #fff;
+    border-radius: 2px;
+}
+
+.text-diff-inline-removed {
+    background: #9a313c;
+    color: #fff;
+    border-radius: 2px;
 }
 
 .text-diff-line.added {

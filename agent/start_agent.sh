@@ -10,12 +10,17 @@ echo "========================================"
 echo
 
 if [[ ! -f ".env" ]]; then
-  if [[ ! -f ".env.example" ]]; then
-    echo "[ERROR] .env.example not found."
-    exit 1
+  template_file=".env.simple"
+  if [[ ! -f "$template_file" ]]; then
+    if [[ -f ".env.example" ]]; then
+      template_file=".env.example"
+    else
+      echo "[ERROR] .env.simple/.env.example not found."
+      exit 1
+    fi
   fi
 
-  cp ".env.example" ".env"
+  cp "$template_file" ".env"
   rand_suffix="$(python3 - <<'PY'
 import secrets
 print(secrets.token_hex(4))
@@ -44,7 +49,7 @@ PY
   ' ".env" > "$tmp_file"
   mv "$tmp_file" ".env"
 
-  echo "[INFO] .env created: AGENT_NAME=${random_agent_name}, AGENT_DEFAULT_ADMIN_USERNAME=<empty>"
+  echo "[INFO] .env created from ${template_file}: AGENT_NAME=${random_agent_name}, AGENT_DEFAULT_ADMIN_USERNAME=<empty>"
 fi
 
 if command -v python3 >/dev/null 2>&1; then

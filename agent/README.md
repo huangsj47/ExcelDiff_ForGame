@@ -1,7 +1,7 @@
 ﻿# Agent 独立运行包
 
 ## 1. 配置
-1. 复制 `.env.example` 为 `.env`
+1. 复制 `.env.simple` 为 `.env`（兼容旧包：若无 `.env.simple`，可使用 `.env.example`）
 2. 按需修改以下最少配置：
    - `PLATFORM_BASE_URL`
    - `AGENT_SHARED_SECRET`

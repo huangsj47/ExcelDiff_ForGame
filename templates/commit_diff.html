@@ -3,9 +3,9 @@
 {% block title %}Diff确认 - {{ commit.path }}{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=1.0">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=1.1">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/excel-scroll-fix.css') }}?v=2.0">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.0">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.1">
 <style>
     /* 仅对diff代码区域放大到105% */
     .diff-content {
@@ -25,6 +25,26 @@
     /* diff头部信息也放大 */
     .diff-header {
         font-size: 105%;
+    }
+
+    .text-diff-container {
+        font-size: 13px;
+    }
+
+    .text-diff-line {
+        font-size: 13px;
+        line-height: 22px;
+    }
+
+    .text-diff-line-content {
+        font-size: 13px;
+    }
+
+    .text-diff-line-sign {
+        width: 22px;
+        min-width: 22px;
+        color: #8b949e;
+        text-align: center;
     }
     
 </style>
@@ -228,7 +248,11 @@
                                 <div class="text-diff-line {{ line.type }}">
                                     <span class="text-diff-line-number">{{ ns.old_line_num if line.type != 'added' else '' }}</span>
                                     <span class="text-diff-line-number">{{ ns.new_line_num if line.type != 'removed' else '' }}</span>
-                                    <span class="text-diff-line-content">{{ '+' if line.type == 'added' else ('-' if line.type == 'removed' else ' ') }}{{ line.content }}</span>
+                                    {% set diff_sign = '+' if line.type == 'added' else ('-' if line.type == 'removed' else ' ') %}
+                                    <span class="text-diff-line-content">
+                                        <span class="text-diff-line-sign">{{ diff_sign }}</span>
+                                        <span class="text-diff-line-code">{% if line.content_html %}{{ line.content_html | safe }}{% else %}{{ line.content }}{% endif %}</span>
+                                    </span>
                                 </div>
                                 {% if line.type != 'added' %}{% set ns.old_line_num = ns.old_line_num + 1 %}{% endif %}
                                 {% if line.type != 'removed' %}{% set ns.new_line_num = ns.new_line_num + 1 %}{% endif %}
@@ -252,7 +276,11 @@
                             <div class="text-diff-line {{ line.type }}">
                                 <span class="text-diff-line-number">{{ line.old_line_number if line.old_line_number is not none else '' }}</span>
                                 <span class="text-diff-line-number">{{ line.new_line_number if line.new_line_number is not none else '' }}</span>
-                                <span class="text-diff-line-content">{{ '+' if line.type == 'added' else ('-' if line.type == 'removed' else ' ') }}{{ line.content }}</span>
+                                {% set diff_sign = '+' if line.type == 'added' else ('-' if line.type == 'removed' else ' ') %}
+                                <span class="text-diff-line-content">
+                                    <span class="text-diff-line-sign">{{ diff_sign }}</span>
+                                    <span class="text-diff-line-code">{% if line.content_html %}{{ line.content_html | safe }}{% else %}{{ line.content }}{% endif %}</span>
+                                </span>
                             </div>
                             {% endfor %}
                         </div>

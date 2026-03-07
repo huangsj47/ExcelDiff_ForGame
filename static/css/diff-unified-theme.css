@@ -29,7 +29,7 @@
 
 /* GitLab-like readable width for regular diff pages. */
 .unified-diff-page.unified-diff-centered {
-    max-width: 1320px;
+    max-width: 1600px;
     margin: 0 auto;
     padding: 12px 14px 20px;
 }

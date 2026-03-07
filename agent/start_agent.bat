@@ -15,14 +15,21 @@ echo ========================================
 echo.
 
 if not exist ".env" (
-    if not exist ".env.example" (
-        echo [ERROR] .env.example not found.
+    set "ENV_TEMPLATE=.env.simple"
+    if not exist "!ENV_TEMPLATE!" (
+        if exist ".env.example" (
+            set "ENV_TEMPLATE=.env.example"
+        )
+    )
+
+    if not exist "!ENV_TEMPLATE!" (
+        echo [ERROR] .env.simple/.env.example not found.
         goto :fail
     )
 
-    copy /Y ".env.example" ".env" >nul
+    copy /Y "!ENV_TEMPLATE!" ".env" >nul
     if errorlevel 1 (
-        echo [ERROR] Failed to create .env from .env.example.
+        echo [ERROR] Failed to create .env from !ENV_TEMPLATE!.
         goto :fail
     )
 
@@ -39,7 +46,7 @@ if not exist ".env" (
     if errorlevel 1 (
         echo [WARN] .env generated, but failed to rewrite AGENT_NAME/AGENT_DEFAULT_ADMIN_USERNAME.
     ) else (
-        echo [INFO] .env created: AGENT_NAME=!RANDOM_AGENT_NAME!, AGENT_DEFAULT_ADMIN_USERNAME=empty
+        echo [INFO] .env created from !ENV_TEMPLATE!: AGENT_NAME=!RANDOM_AGENT_NAME!, AGENT_DEFAULT_ADMIN_USERNAME=empty
     )
 )
 

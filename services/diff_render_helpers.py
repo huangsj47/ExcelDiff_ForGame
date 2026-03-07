@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import difflib
+import html
 
 from services.model_loader import get_runtime_model
 
@@ -94,7 +96,7 @@ def render_git_diff_content(diff_content, file_path, base_commit_id, latest_comm
         <style>
         .weekly-diff-content {{
             font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
-            font-size: 12px;
+            font-size: 13px;
         }}
         .file-diff-container {{
             border: 1px solid #d0d7de;
@@ -115,27 +117,32 @@ def render_git_diff_content(diff_content, file_path, base_commit_id, latest_comm
         }}
         /* 确保diff内容使用标准字体大小 */
         .weekly-diff-content .diff-container {{
-            font-size: 12px;
+            font-size: 13px;
         }}
         .weekly-diff-content .diff-line-content {{
-            font-size: 12px;
-            line-height: 20px;
+            font-size: 13px;
+            line-height: 22px;
         }}
         .weekly-diff-content .diff-line-number {{
             font-size: 12px;
         }}
+        .weekly-diff-content .diff-line-sign {{
+            color: #8b949e;
+            width: 22px;
+            min-width: 22px;
+        }}
         .weekly-diff-content .text-diff-container {{
-            font-size: 12px;
+            font-size: 13px;
         }}
         .weekly-diff-content .text-diff-line {{
-            font-size: 12px;
-            line-height: 20px;
+            font-size: 13px;
+            line-height: 22px;
         }}
         .weekly-diff-content .text-diff-line-content {{
-            font-size: 12px;
+            font-size: 13px;
         }}
         .weekly-diff-content .text-diff-line-number {{
-            font-size: 11px;
+            font-size: 12px;
         }}
         </style>
         """
@@ -145,64 +152,138 @@ def render_git_diff_content(diff_content, file_path, base_commit_id, latest_comm
         log_print(f"渲染Git diff内容失败: {e}", 'ERROR', force=True)
         return f"<div class='alert alert-danger'>渲染diff失败: {str(e)}</div>"
 
+def _build_inline_change_html(old_text, new_text):
+    old_raw = str(old_text or "")
+    new_raw = str(new_text or "")
+    matcher = difflib.SequenceMatcher(None, old_raw, new_raw)
+    old_parts = []
+    new_parts = []
+    changed = False
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        old_seg = html.escape(old_raw[i1:i2])
+        new_seg = html.escape(new_raw[j1:j2])
+        if tag == 'equal':
+            old_parts.append(old_seg)
+            new_parts.append(new_seg)
+        elif tag == 'delete':
+            if old_seg:
+                changed = True
+                old_parts.append(f'<span class="diff-inline-removed">{old_seg}</span>')
+        elif tag == 'insert':
+            if new_seg:
+                changed = True
+                new_parts.append(f'<span class="diff-inline-added">{new_seg}</span>')
+        elif tag == 'replace':
+            if old_seg:
+                changed = True
+                old_parts.append(f'<span class="diff-inline-removed">{old_seg}</span>')
+            if new_seg:
+                changed = True
+                new_parts.append(f'<span class="diff-inline-added">{new_seg}</span>')
+
+    return ''.join(old_parts), ''.join(new_parts), changed
+
+
+def _render_diff_content_cell(sign, code_html):
+    safe_sign = html.escape(sign)
+    return (
+        f'<span class="diff-line-sign">{safe_sign}</span>'
+        f'<span class="diff-line-code">{code_html}</span>'
+    )
+
+
+def _render_diff_row(row_class, old_num, new_num, sign, code_html):
+    return (
+        f'<tr class="diff-line {row_class}">'
+        f'<td class="diff-line-number diff-line-number-old">{old_num}</td>'
+        f'<td class="diff-line-number diff-line-number-new">{new_num}</td>'
+        f'<td class="diff-line-content">{_render_diff_content_cell(sign, code_html)}</td>'
+        f'</tr>'
+    )
+
+
 def render_github_style_diff(diff_content):
-    """渲染GitHub风格的diff内容"""
+    """渲染GitHub风格的diff内容（含行内字符级高亮）。"""
     try:
         if not diff_content:
             return "<div class='alert alert-info'>文件无变更</div>"
+
+        import re
 
         lines = diff_content.split('\n')
         html_content = []
         old_line_num = 0
         new_line_num = 0
+        removed_buf = []
+        added_buf = []
+
+        def flush_buffers():
+            nonlocal removed_buf, added_buf
+            if not removed_buf and not added_buf:
+                return
+
+            pair_count = min(len(removed_buf), len(added_buf))
+            pair_markup = []
+            for idx in range(pair_count):
+                old_html, new_html, changed = _build_inline_change_html(
+                    removed_buf[idx][1],
+                    added_buf[idx][1],
+                )
+                pair_markup.append((old_html, new_html, changed))
+
+            for idx, (line_no, text) in enumerate(removed_buf):
+                if idx < pair_count and pair_markup[idx][2]:
+                    code_html = pair_markup[idx][0]
+                else:
+                    code_html = html.escape(text)
+                html_content.append(
+                    _render_diff_row("diff-line-removed", line_no, "", "-", code_html)
+                )
+
+            for idx, (line_no, text) in enumerate(added_buf):
+                if idx < pair_count and pair_markup[idx][2]:
+                    code_html = pair_markup[idx][1]
+                else:
+                    code_html = html.escape(text)
+                html_content.append(
+                    _render_diff_row("diff-line-added", "", line_no, "+", code_html)
+                )
+
+            removed_buf = []
+            added_buf = []
+
         for line in lines:
             if line.startswith('@@'):
-                # 解析hunk头部信息
-                import re
+                flush_buffers()
                 match = re.match(r'@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@', line)
                 if match:
                     old_line_num = int(match.group(1)) - 1
                     new_line_num = int(match.group(2)) - 1
-                # 渲染hunk头部
-                html_content.append(f"""
-                    <tr class="diff-line diff-hunk-header">
-                        <td class="diff-line-number diff-line-number-old"></td>
-                        <td class="diff-line-number diff-line-number-new"></td>
-                        <td class="diff-line-content">{line}</td>
-                    </tr>
-                """)
+                html_content.append(
+                    '<tr class="diff-line diff-hunk-header">'
+                    '<td class="diff-line-number diff-line-number-old"></td>'
+                    '<td class="diff-line-number diff-line-number-new"></td>'
+                    f'<td class="diff-line-content">{html.escape(line)}</td>'
+                    '</tr>'
+                )
             elif line.startswith('-'):
                 old_line_num += 1
-                line_content = line[1:].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                html_content.append(f"""
-                    <tr class="diff-line diff-line-removed">
-                        <td class="diff-line-number diff-line-number-old">{old_line_num}</td>
-                        <td class="diff-line-number diff-line-number-new"></td>
-                        <td class="diff-line-content">-{line_content}</td>
-                    </tr>
-                """)
+                removed_buf.append((old_line_num, line[1:]))
             elif line.startswith('+'):
                 new_line_num += 1
-                line_content = line[1:].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                html_content.append(f"""
-                    <tr class="diff-line diff-line-added">
-                        <td class="diff-line-number diff-line-number-old"></td>
-                        <td class="diff-line-number diff-line-number-new">{new_line_num}</td>
-                        <td class="diff-line-content">+{line_content}</td>
-                    </tr>
-                """)
+                added_buf.append((new_line_num, line[1:]))
             elif line.startswith(' ') or (not line.startswith(('@@', '+', '-', '\\'))):
+                flush_buffers()
                 old_line_num += 1
                 new_line_num += 1
-                line_content = line[1:] if line.startswith(' ') else line
-                line_content = line_content.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                html_content.append(f"""
-                    <tr class="diff-line">
-                        <td class="diff-line-number diff-line-number-old">{old_line_num}</td>
-                        <td class="diff-line-number diff-line-number-new">{new_line_num}</td>
-                        <td class="diff-line-content"> {line_content}</td>
-                    </tr>
-                """)
+                text = line[1:] if line.startswith(' ') else line
+                html_content.append(
+                    _render_diff_row("", old_line_num, new_line_num, " ", html.escape(text))
+                )
+
+        flush_buffers()
+
         return f"""
         <div class="diff-container">
             <table class="diff-table">
@@ -218,7 +299,7 @@ def render_github_style_diff(diff_content):
             border-radius: 6px;
             overflow: hidden;
             font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
-            font-size: 12px;
+            font-size: 13px;
         }}
         .diff-table {{
             width: 100%;
@@ -236,16 +317,41 @@ def render_github_style_diff(diff_content):
             border-right: 1px solid #d0d7de;
             user-select: none;
             font-size: 12px;
-            line-height: 20px;
+            line-height: 22px;
         }}
         .diff-line-content {{
-            padding: 0 8px;
+            padding: 0 8px 0 6px;
             vertical-align: top;
+            line-height: 22px;
+            font-size: 13px;
+            white-space: pre;
+            display: flex;
+            align-items: baseline;
+        }}
+        .diff-line-sign {{
+            width: 22px;
+            min-width: 22px;
+            text-align: center;
+            color: #8b949e;
+            user-select: none;
+            flex-shrink: 0;
+        }}
+        .diff-line-code {{
+            flex: 1;
+            color: #24292f;
             white-space: pre;
             word-wrap: break-word;
             overflow-wrap: break-word;
-            line-height: 20px;
-            font-size: 12px;
+        }}
+        .diff-inline-added {{
+            background: #2f6f44;
+            color: #ffffff;
+            border-radius: 2px;
+        }}
+        .diff-inline-removed {{
+            background: #9a313c;
+            color: #ffffff;
+            border-radius: 2px;
         }}
         .diff-line-added {{
             background-color: #dafbe1 !important;
@@ -267,6 +373,9 @@ def render_github_style_diff(diff_content):
         .diff-hunk-header .diff-line-content {{
             color: #0969da;
             font-weight: 600;
+        }}
+        .diff-hunk-header .diff-line-sign {{
+            color: transparent;
         }}
         </style>
         """
