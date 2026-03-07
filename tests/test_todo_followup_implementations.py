@@ -53,3 +53,13 @@ class TestWeeklyTodoFollowups:
         assert "excel_html_cache_service.cleanup_old_version_cache()" in service_content
         assert ".limit(batch_size).all()" not in service_content
         assert "time.sleep(0.1)" not in service_content
+
+    def test_auth_bootstrap_logic_is_extracted_to_service(self):
+        app_content = _read("app.py")
+        assert "from services.auth_bootstrap_service import initialize_auth_subsystem" in app_content
+        assert "initialize_auth_subsystem(app=app, db=db, log_print=log_print)" in app_content
+
+        service_content = _read("services/auth_bootstrap_service.py")
+        assert "def initialize_auth_subsystem(*, app, db, log_print):" in service_content
+        assert "def register_qkit_fallback_endpoints(app_instance, log_print):" in service_content
+        assert "def log_auth_route_diagnostics(app_instance, log_print):" in service_content
