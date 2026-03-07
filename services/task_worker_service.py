@@ -982,7 +982,11 @@ def create_auto_sync_task(repository_id, extra_payload=None):
             background_task_queue.put(tw)
         log_print(f"✅ 为仓库 {repository_id} 创建自动数据分析任务 (ID: {new_task.id})", 'SYNC')
         return new_task.id
-    except Exception as e:
+    except SQLAlchemyError as e:
+        _db.session.rollback()
+        log_print(f"❌ 创建自动同步任务数据库失败: {e}", 'SYNC', force=True)
+        return None
+    except (TypeError, ValueError, RuntimeError, AttributeError) as e:
         log_print(f"❌ 创建自动同步任务失败: {e}", 'SYNC', force=True)
         return None
 
@@ -1011,7 +1015,10 @@ def check_and_create_auto_sync_tasks():
             log_print(f"✅ 为 {created_tasks} 个仓库创建了自动数据分析任务", 'SYNC')
         else:
             log_print("ℹ️ 没有发现需要自动分析的仓库", 'SYNC')
-    except Exception as e:
+    except SQLAlchemyError as e:
+        _db.session.rollback()
+        log_print(f"❌ 检查自动同步任务数据库失败: {e}", 'SYNC', force=True)
+    except (TypeError, ValueError, RuntimeError, AttributeError) as e:
         log_print(f"❌ 检查自动同步任务失败: {e}", 'SYNC', force=True)
 
 
@@ -1052,7 +1059,10 @@ def load_pending_tasks():
             _db.session.commit()
             log_print(f"重置了 {len(processing_tasks)} 个处理中的任务状态为待处理", 'TASK')
         check_and_create_auto_sync_tasks()
-    except Exception as e:
+    except SQLAlchemyError as e:
+        _db.session.rollback()
+        log_print(f"加载待处理任务数据库失败: {e}", 'TASK', force=True)
+    except (TypeError, ValueError, RuntimeError, AttributeError) as e:
         log_print(f"加载待处理任务失败: {e}", 'TASK', force=True)
 
 
@@ -1082,7 +1092,7 @@ def stop_background_task_worker():
                     log_print("后台任务线程未能在3秒内正常停止", 'APP', force=True)
                 else:
                     log_print("后台任务工作线程已停止", 'APP')
-            except Exception as e:
+            except RuntimeError as e:
                 log_print(f"停止后台任务线程时出现错误: {e}", 'APP', force=True)
         else:
             log_print("后台任务工作线程已停止", 'APP')
@@ -1325,7 +1335,11 @@ def create_weekly_sync_task(config_id):
             background_task_queue.put(tw)
         log_print(f"创建周版本同步任务: config_id={config_id}, task_id={new_task.id}", 'SYNC')
         return new_task.id
-    except Exception as e:
+    except SQLAlchemyError as e:
+        _db.session.rollback()
+        log_print(f"创建周版本同步任务数据库失败: {e}", 'ERROR', force=True)
+        return None
+    except (TypeError, ValueError, RuntimeError, AttributeError) as e:
         _db.session.rollback()
         log_print(f"创建周版本同步任务失败: {e}", 'ERROR', force=True)
         return None
@@ -1361,7 +1375,10 @@ def schedule_weekly_sync_tasks():
                             log_print(f"重置卡死的周版本同步任务: task_id={stale.id}, config_id={config.id}", 'WEEKLY', force=True)
                     create_weekly_sync_task(config.id)
             log_print(f"检查了 {len(active_configs)} 个周版本配置", 'WEEKLY')
-    except Exception as e:
+    except SQLAlchemyError as e:
+        _db.session.rollback()
+        log_print(f"调度周版本同步任务数据库失败: {e}", 'WEEKLY', force=True)
+    except (TypeError, ValueError, RuntimeError, AttributeError) as e:
         log_print(f"调度周版本同步任务失败: {e}", 'WEEKLY', force=True)
 
 
@@ -1385,12 +1402,15 @@ def schedule_repository_sync_tasks():
                     task_id = create_auto_sync_task(repository.id)
                     if task_id:
                         synced_count += 1
-                except Exception as repo_err:
+                except (SQLAlchemyError, TypeError, ValueError, RuntimeError, AttributeError) as repo_err:
                     log_print(f"⚠️ 仓库 {repository.name} 自动同步调度失败: {repo_err}", 'SCHEDULER', force=True)
                     continue
             if synced_count > 0:
                 log_print(f"📋 已调度 {synced_count} 个仓库自动同步任务", 'SCHEDULER')
-    except Exception as e:
+    except SQLAlchemyError as e:
+        _db.session.rollback()
+        log_print(f"❌ 定时仓库同步调度数据库失败: {e}", 'SCHEDULER', force=True)
+    except (TypeError, ValueError, RuntimeError, AttributeError) as e:
         log_print(f"❌ 定时仓库同步调度失败: {e}", 'SCHEDULER', force=True)
 
 
@@ -1415,7 +1435,7 @@ def run_scheduled_tasks():
         try:
             with _app.app_context():
                 sched_module.run_pending()
-        except Exception as schedule_error:
+        except (SQLAlchemyError, RuntimeError, AttributeError) as schedule_error:
             log_print(f"定时任务执行异常: {schedule_error}", 'APP', force=True)
         time.sleep(60)
 

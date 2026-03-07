@@ -79,3 +79,103 @@ def test_update_task_status_with_retry_rolls_back_on_sqlalchemy_error(monkeypatc
         worker.update_task_status_with_retry(123, "processing")
 
     assert fake_session.rollback_called == 1
+
+
+def test_create_auto_sync_task_rolls_back_on_sqlalchemy_error(monkeypatch):
+    class _FakeQuery:
+        def filter_by(self, **_kwargs):
+            return self
+
+        def first(self):
+            raise SQLAlchemyError("query failed")
+
+    class _FakeBackgroundTask:
+        query = _FakeQuery()
+
+    class _FakeSession:
+        def __init__(self):
+            self.rollback_called = 0
+
+        def rollback(self):
+            self.rollback_called += 1
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(worker, "_BackgroundTask", _FakeBackgroundTask)
+    monkeypatch.setattr(worker, "_db", SimpleNamespace(session=fake_session))
+
+    task_id = worker.create_auto_sync_task(101)
+    assert task_id is None
+    assert fake_session.rollback_called == 1
+
+
+def test_load_pending_tasks_rolls_back_on_sqlalchemy_error(monkeypatch):
+    class _OrderColumn:
+        def asc(self):
+            return self
+
+    class _FakeQuery:
+        def filter_by(self, **_kwargs):
+            return self
+
+        def order_by(self, *_args, **_kwargs):
+            return self
+
+        def all(self):
+            raise SQLAlchemyError("list failed")
+
+    class _FakeBackgroundTask:
+        query = _FakeQuery()
+        priority = _OrderColumn()
+        created_at = _OrderColumn()
+
+    class _FakeSession:
+        def __init__(self):
+            self.rollback_called = 0
+
+        def rollback(self):
+            self.rollback_called += 1
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(worker, "_BackgroundTask", _FakeBackgroundTask)
+    monkeypatch.setattr(worker, "_db", SimpleNamespace(session=fake_session))
+
+    worker.load_pending_tasks()
+    assert fake_session.rollback_called == 1
+
+
+def test_create_weekly_sync_task_rolls_back_on_sqlalchemy_error(monkeypatch):
+    class _FakeQuery:
+        def filter_by(self, **_kwargs):
+            return self
+
+        def first(self):
+            return None
+
+    class _FakeBackgroundTask:
+        query = _FakeQuery()
+
+        def __init__(self, **kwargs):
+            self.id = 999
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    class _FakeSession:
+        def __init__(self):
+            self.rollback_called = 0
+
+        def add(self, _obj):
+            return None
+
+        def flush(self):
+            raise SQLAlchemyError("flush failed")
+
+        def rollback(self):
+            self.rollback_called += 1
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(worker, "_BackgroundTask", _FakeBackgroundTask)
+    monkeypatch.setattr(worker, "_db", SimpleNamespace(session=fake_session))
+
+    task_id = worker.create_weekly_sync_task(321)
+    assert task_id is None
+    assert fake_session.rollback_called == 1
