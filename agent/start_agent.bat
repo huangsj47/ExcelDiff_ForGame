@@ -68,9 +68,18 @@ if /I "%PYTHON_EXE%"=="python" (
 )
 echo [INFO] Installing dependencies...
 "%PYTHON_EXE%" -m pip install --upgrade pip >nul
-"%PYTHON_EXE%" -m pip install --prefer-binary -r requirements.txt
+if exist "..\app.py" if exist "..\requirements.txt" (
+    echo [INFO] Platform runtime detected. Installing platform dependencies from ..\requirements.txt ...
+    "%PYTHON_EXE%" -m pip install --prefer-binary -r "..\requirements.txt"
+    if errorlevel 1 (
+        echo [ERROR] Platform dependency installation failed.
+        goto :fail
+    )
+)
+echo [INFO] Installing agent dependencies from requirements.txt ...
+"%PYTHON_EXE%" -m pip install --prefer-binary -r "requirements.txt"
 if errorlevel 1 (
-    echo [ERROR] Dependency installation failed.
+    echo [ERROR] Agent dependency installation failed.
     goto :fail
 )
 
@@ -81,10 +90,16 @@ echo   Press Ctrl+C to stop
 echo ========================================
 echo.
 
-echo [%date% %time%] [INFO] Agent process start >> "%ACTIVE_LOG_FILE%"
-"%PYTHON_EXE%" start_agent.py >> "%ACTIVE_LOG_FILE%" 2>&1
+call :append_log_line "Agent process start"
+if errorlevel 1 goto :fail_log_write
+
+call :run_agent_with_log "%PYTHON_EXE%" "start_agent.py" "%ACTIVE_LOG_FILE%"
 set "APP_EXIT=%ERRORLEVEL%"
-echo [%date% %time%] [INFO] Agent process exit code=%APP_EXIT% >> "%ACTIVE_LOG_FILE%"
+
+call :append_log_line "Agent process exit code=%APP_EXIT%"
+if errorlevel 1 (
+    echo [WARN] Failed to append exit code to log file: %ACTIVE_LOG_FILE%
+)
 
 if not "%APP_EXIT%"=="0" (
     echo [ERROR] Agent exited with code %APP_EXIT%.
@@ -96,6 +111,11 @@ exit /b 0
 
 :fail_with_code
 exit /b %APP_EXIT%
+
+:fail_log_write
+echo [ERROR] Unable to write startup logs: %ACTIVE_LOG_FILE%
+echo [ERROR] The log file may be locked by another process.
+exit /b 1
 
 :fail
 exit /b 1
@@ -129,6 +149,28 @@ if errorlevel 1 (
     exit /b 1
 )
 exit /b 0
+
+:append_log_line
+setlocal
+set "LOG_MESSAGE=%~1"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$p=$env:ACTIVE_LOG_FILE; $m=$env:LOG_MESSAGE; " ^
+    "try { Add-Content -Path $p -Value (\"[{0}] [INFO] {1}\" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m) -Encoding UTF8; exit 0 } " ^
+    "catch { exit 1 }" >nul 2>&1
+set "RC=%ERRORLEVEL%"
+endlocal & exit /b %RC%
+
+:run_agent_with_log
+setlocal
+set "RUN_PY=%~1"
+set "RUN_SCRIPT=%~2"
+set "RUN_LOG=%~3"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$py=$env:RUN_PY; $script=$env:RUN_SCRIPT; $log=$env:RUN_LOG; " ^
+    "try { & $py $script *>> $log; exit $LASTEXITCODE } " ^
+    "catch { Write-Host $_.Exception.Message; exit 1 }"
+set "RC=%ERRORLEVEL%"
+endlocal & exit /b %RC%
 
 :select_log_file
 set "ACTIVE_LOG_FILE=%LOG_FILE%"

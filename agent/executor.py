@@ -4,12 +4,24 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
 try:
     from .handlers.auto_sync import execute_auto_sync
     from .handlers.temp_cache_fetch import execute_temp_cache_fetch
 except ImportError:
     from handlers.auto_sync import execute_auto_sync
     from handlers.temp_cache_fetch import execute_temp_cache_fetch
+
+
+def _ensure_platform_runtime_import_path():
+    """Ensure parent project root is importable when launched from agent/ directory."""
+    agent_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(agent_dir, os.pardir))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    return project_root
 
 
 def _execute_task_via_local_runtime(task_type: str, task: dict):
@@ -24,6 +36,10 @@ def _execute_task_via_local_runtime(task_type: str, task: dict):
             payload["config_id"] = int(commit_id)
 
     try:
+        project_root = _ensure_platform_runtime_import_path()
+        app_py_path = os.path.join(project_root, "app.py")
+        if not os.path.exists(app_py_path):
+            raise RuntimeError(f"platform runtime app.py not found: {app_py_path}")
         import app as app_module
         from services.task_worker_service import execute_task_inline_for_agent
     except Exception as exc:
