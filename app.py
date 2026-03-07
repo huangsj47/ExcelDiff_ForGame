@@ -1229,7 +1229,8 @@ def _ensure_repository_access_or_403(repository):
     project = repository.project if repository else None
     if project is None:
         abort(404)
-    if not _has_project_access(project.id):
+    project_id = getattr(project, "id", None)
+    if project_id is not None and not _has_project_access(project_id):
         abort(403)
     return project
 
@@ -1292,8 +1293,8 @@ def get_excel_diff_data(commit_id):
     commit = Commit.query.get_or_404(commit_id)
     repository, project = _ensure_commit_access_or_403(commit)
     perf_project_tags = {
-        "project_id": project.id if project else "",
-        "project_code": project.code if project else "",
+        "project_id": getattr(project, "id", "") if project else "",
+        "project_code": getattr(project, "code", "") if project else "",
     }
     # 检查是否为Excel文件
     is_excel = excel_cache_service.is_excel_file(commit.path)

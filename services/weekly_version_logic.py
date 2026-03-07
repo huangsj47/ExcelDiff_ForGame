@@ -1420,7 +1420,14 @@ def _render_weekly_deleted_excel_notice(config, file_path, previous_commit_id):
         if len(previous_commit_str) >= 40:
             previous_commit = commit_query.filter(Commit.commit_id == previous_commit_str).first()
         else:
-            previous_commit = commit_query.filter(Commit.commit_id.like(f"{previous_commit_str}%")).first()
+            previous_commit = None
+            try:
+                if hasattr(Commit.commit_id, "like"):
+                    previous_commit = commit_query.filter(Commit.commit_id.like(f"{previous_commit_str}%")).first()
+            except Exception:
+                previous_commit = None
+            if previous_commit is None:
+                previous_commit = commit_query.filter(Commit.commit_id == previous_commit_str).first()
 
         if previous_commit:
             try:
@@ -1431,7 +1438,10 @@ def _render_weekly_deleted_excel_notice(config, file_path, previous_commit_id):
                     commit_id=previous_commit.id,
                 )
             except Exception:
-                previous_url = url_for("commit_diff", commit_id=previous_commit.id)
+                try:
+                    previous_url = url_for("commit_diff", commit_id=previous_commit.id)
+                except Exception:
+                    previous_url = None
 
         if not previous_url:
             encoded_file_path = quote(file_path or "", safe="")

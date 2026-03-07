@@ -398,10 +398,9 @@ def test_platform_mode_create_git_repository_does_not_start_local_clone_thread(m
         assert agent_task is not None
         task_payload = json.loads(agent_task.payload or "{}")
         repository_payload = task_payload.get("repository") or {}
-        assert repository_payload.get("type") == "svn"
-        assert repository_payload.get("username") == "u1"
-        assert repository_payload.get("password") == "p1"
-        assert repository_payload.get("current_version") == "1"
+        assert repository_payload.get("type") == "git"
+        assert repository_payload.get("token") == "token-demo"
+        assert repository_payload.get("branch") == "main"
         assert repository_payload.get("project_code") == project.code
         assert repository_payload.get("repository_name") == repository.name
 

@@ -7,7 +7,7 @@ import time
 import threading
 import traceback
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import func, text
+from sqlalchemy import and_, func, or_, text
 
 from services.performance_metrics_service import get_perf_metrics_service
 from services.commit_diff_logic import resolve_previous_commit
@@ -568,11 +568,12 @@ class ExcelDiffCacheService:
                     if not repository:
                         log_print(f"仓库不存在: {repository_id}", 'EXCEL', force=True)
                         return
-                    project_id = repository.project_id or ""
+                    project_id = getattr(repository, "project_id", "") or ""
                     project_code = ""
                     try:
-                        if repository.project:
-                            project_code = (repository.project.code or "").strip()
+                        repository_project = getattr(repository, "project", None)
+                        if repository_project:
+                            project_code = (getattr(repository_project, "code", "") or "").strip()
                     except Exception:
                         project_code = ""
                     
@@ -587,8 +588,26 @@ class ExcelDiffCacheService:
                         log_print(f"提交不存在: {commit_id}, {file_path}", 'EXCEL', force=True)
                         return
                     
-                    # 获取前一个提交（数据库缺失时自动回退到 VCS 历史）
-                    previous_commit = resolve_previous_commit(commit)
+                    # 优先在本地数据库中按时间+ID查找前一提交，避免同秒提交顺序不稳定
+                    previous_commit = None
+                    if commit.commit_time is not None:
+                        previous_commit = Commit.query.filter(
+                            Commit.repository_id == repository_id,
+                            Commit.path == file_path,
+                            or_(
+                                Commit.commit_time < commit.commit_time,
+                                and_(Commit.commit_time == commit.commit_time, Commit.id < commit.id),
+                            ),
+                        ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
+                    if previous_commit is None:
+                        previous_commit = Commit.query.filter(
+                            Commit.repository_id == repository_id,
+                            Commit.path == file_path,
+                            Commit.id < commit.id,
+                        ).order_by(Commit.id.desc()).first()
+                    # 数据库缺失时兜底回退到 VCS 历史（可能构造虚拟 previous commit）
+                    if previous_commit is None:
+                        previous_commit = resolve_previous_commit(commit)
                     query_time = time.time() - query_start
                     
                     diff_start = time.time()

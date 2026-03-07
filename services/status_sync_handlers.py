@@ -41,13 +41,13 @@ def get_sync_mapping_info():
 
         if config_id:
             (WeeklyVersionConfig,) = get_runtime_models("WeeklyVersionConfig")
-            config = WeeklyVersionConfig.query.get(config_id)
+            config = db.session.get(WeeklyVersionConfig, config_id)
             if config and not _has_project_access(config.project_id):
                 return jsonify({"success": False, "message": "权限不足"}), 403
 
         if repository_id:
             (Repository,) = get_runtime_models("Repository")
-            repo = Repository.query.get(repository_id)
+            repo = db.session.get(Repository, repository_id)
             if repo and not _has_project_access(repo.project_id):
                 return jsonify({"success": False, "message": "权限不足"}), 403
 
