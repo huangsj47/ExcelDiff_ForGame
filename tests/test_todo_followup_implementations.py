@@ -123,3 +123,15 @@ class TestWeeklyTodoFollowups:
         assert "def handle_reuse_repository_and_update(" in service_content
         assert "def handle_update_repository_and_cache(" in service_content
         assert "def handle_batch_update_credentials(" in service_content
+
+    def test_commit_status_api_logic_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.commit_status_api_service import (" in app_content
+        assert "handle_update_commit_status" in app_content
+        assert "handle_batch_update_commits_compat" in app_content
+        assert "return handle_update_commit_status(" in app_content
+        assert "return handle_batch_update_commits_compat(" in app_content
+
+        service_content = _read("services/commit_status_api_service.py")
+        assert "def handle_update_commit_status(" in service_content
+        assert "def handle_batch_update_commits_compat(" in service_content
