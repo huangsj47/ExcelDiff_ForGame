@@ -134,6 +134,7 @@ from services.commit_diff_logic import (
 from services.agent_commit_diff_dispatch import maybe_dispatch_commit_diff
 from services.auth_bootstrap_service import initialize_auth_subsystem
 from services.commit_diff_template_context import build_commit_diff_template_context
+from services.app_routing_bootstrap_service import configure_app_routing_bootstrap
 from services.app_bootstrap_db_service import (
     clear_startup_version_mismatch_cache,
     create_tables_with_runtime_checks,
@@ -641,79 +642,11 @@ except Exception as e:
     log_print(f"[TRACE] agent_management_bp FAILED: {e}", "APP", force=True)
     import traceback; traceback.print_exc()
 
-# ---------------------------------------------------------------------------
-# 为所有 Blueprint 端点注册短名称别名，使 url_for('index') 等继续工作
-# ---------------------------------------------------------------------------
-_bp_prefixes = [
-    "core_management_routes.",
-    "commit_diff_routes.",
-    "weekly_version_routes.",
-    "cache_management.",
-    "agent_management_routes.",
-    "main.",
-]
-
-def _register_endpoint_aliases(app):
-    """
-    遍历 app.url_map 中由蓝图注册的所有规则，为它们创建不带蓝图前缀的
-    短名称端点别名。这样模板中的 url_for('index') 会自动映射到
-    core_management_routes.index 的视图函数。
-    """
-    from werkzeug.routing import Rule
-    alias_rules = []
-    for rule in app.url_map.iter_rules():
-        for prefix in _bp_prefixes:
-            if rule.endpoint.startswith(prefix):
-                short_name = rule.endpoint[len(prefix):]
-                # 跳过已存在同名全局端点（如 static）
-                if short_name in app.view_functions:
-                    break
-                # 注册视图函数的短名称引用
-                app.view_functions[short_name] = app.view_functions[rule.endpoint]
-                # 创建一条新的路由规则，端点为短名称，路径和方法与蓝图规则一致
-                new_rule = Rule(
-                    rule.rule,
-                    endpoint=short_name,
-                    methods=rule.methods,
-                    defaults=rule.defaults,
-                    subdomain=rule.subdomain,
-                    strict_slashes=rule.strict_slashes,
-                    merge_slashes=rule.merge_slashes,
-                    redirect_to=rule.redirect_to,
-                )
-                alias_rules.append(new_rule)
-                break  # 已匹配到前缀，无需继续检查其他前缀
-
-    for new_rule in alias_rules:
-        app.url_map.add(new_rule)
-
-    log_print(f"[TRACE] Registered {len(alias_rules)} endpoint short-name aliases", "APP")
-
-_register_endpoint_aliases(app)
-
-# 添加Excel列字母转换过滤器
-
-
-@app.template_filter('excel_column_letter')
-def excel_column_letter(index):
-    """将数字索引转换为Excel列字母 (0->A, 1->B, ..., 25->Z, 26->AA)"""
-    result = ""
-    while index >= 0:
-        result = chr(65 + (index % 26)) + result
-        index = index // 26 - 1
-        if index < 0:
-            break
-
-    return result
+configure_app_routing_bootstrap(app=app, log_print=log_print)
 
 # 周版本相关路由已迁移至 routes/weekly_version_management_routes.py，
 # 此处保留处理函数供蓝图包装层复用，避免大范围业务回归。
 
-
-@app.template_filter('format_cell_value')
-def format_cell_value_filter(value):
-    """格式化单元格值，处理null、NaN等特殊值"""
-    return format_cell_value(value)
 
 # 全局变量存储Git进程
 active_git_processes = set()

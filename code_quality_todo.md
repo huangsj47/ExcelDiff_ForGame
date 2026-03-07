@@ -23,6 +23,7 @@
   - 进展（2026-03-08）：已将 schema 迁移辅助逻辑下沉到 `services/db_migration_service.py`，`create_tables()` 改为服务编排调用。
   - 进展（2026-03-08）：已新增 `services/app_bootstrap_db_service.py`，将 `create_tables` 与启动期缓存清理实现迁出，`app.py` 仅保留入口封装。
   - 进展（2026-03-08）：已新增 `services/auth_bootstrap_service.py`，将 Auth 初始化、qkit 兜底路由与诊断逻辑迁出，`app.py` 启动层改为单行调用。
+  - 进展（2026-03-08）：已新增 `services/app_routing_bootstrap_service.py`，将端点短名别名注册与模板过滤器注册迁出，`app.py` 启动入口进一步精简。
   - 验收：`app.py` 降到 < 2000 行；路由注册和容器初始化清晰分层。
 - [x] 2. 建立静态检查基线（`ruff` + `flake8` 二选一，推荐先 `ruff`）
   - 已完成：新增 `pyproject.toml`（ruff 规则）、`scripts/run_ruff_changed.py`（增量检查）、`.github/workflows/quality-gate.yml`（CI 门禁）。

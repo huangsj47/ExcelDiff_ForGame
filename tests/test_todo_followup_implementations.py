@@ -63,3 +63,13 @@ class TestWeeklyTodoFollowups:
         assert "def initialize_auth_subsystem(*, app, db, log_print):" in service_content
         assert "def register_qkit_fallback_endpoints(app_instance, log_print):" in service_content
         assert "def log_auth_route_diagnostics(app_instance, log_print):" in service_content
+
+    def test_routing_alias_and_template_filters_bootstrap_extracted(self):
+        app_content = _read("app.py")
+        assert "from services.app_routing_bootstrap_service import configure_app_routing_bootstrap" in app_content
+        assert "configure_app_routing_bootstrap(app=app, log_print=log_print)" in app_content
+
+        service_content = _read("services/app_routing_bootstrap_service.py")
+        assert "def configure_app_routing_bootstrap(*, app, log_print, bp_prefixes=None):" in service_content
+        assert "def _register_endpoint_aliases(app, log_print, bp_prefixes):" in service_content
+        assert "def _register_template_filters(app):" in service_content
