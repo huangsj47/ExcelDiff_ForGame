@@ -62,6 +62,7 @@ from services.diff_render_helpers import (
     render_new_file_content,
     render_excel_diff_html,
 )
+from services.deployment_mode import is_agent_dispatch_mode
 from services.performance_metrics_service import get_perf_metrics_service
 from services.task_worker_service import TaskWrapper, background_task_queue
 from utils.logger import log_print
@@ -1946,8 +1947,7 @@ def create_weekly_excel_cache_task(config_id, file_path):
         db.session.add(new_task)
         db.session.flush()
 
-        deployment_mode = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
-        if deployment_mode in {"platform", "agent"}:
+        if is_agent_dispatch_mode():
             config = db.session.get(WeeklyVersionConfig, config_id)
             if config:
                 from services.agent_management_handlers import enqueue_agent_task
@@ -1966,7 +1966,7 @@ def create_weekly_excel_cache_task(config_id, file_path):
                 )
         db.session.commit()
         log_print(f"✅ 数据库任务记录创建成功，任务ID: {new_task.id}", 'WEEKLY', force=True)
-        if deployment_mode in {"platform", "agent"}:
+        if is_agent_dispatch_mode():
             log_print("📡 platform/agent 模式：任务已下发到 agent_tasks", 'WEEKLY', force=True)
             return new_task.id
         # 添加到任务队列

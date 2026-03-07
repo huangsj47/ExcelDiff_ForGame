@@ -15,14 +15,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from models import AgentNode, AgentProjectBinding, AgentTask, AgentTempCache, db
+from services.deployment_mode import is_agent_dispatch_mode
 from services.agent_management_handlers import enqueue_agent_task
 from utils.logger import log_print
 
 _PENDING_STATUSES = {"pending", "processing"}
-
-
-def is_agent_dispatch_mode() -> bool:
-    return (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower() in {"platform", "agent"}
 
 
 def _int_env(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
@@ -222,6 +219,13 @@ def _extract_ready_payload_from_summary(summary: dict):
             return cached_payload
 
     return None
+
+
+def maybe_dispatch_commit_diff(commit, *, force_retry: bool = False):
+    """按部署模式决定是否走 Agent diff 分发。"""
+    if not is_agent_dispatch_mode():
+        return None
+    return dispatch_or_get_commit_diff(commit, force_retry=force_retry)
 
 
 def dispatch_or_get_commit_diff(commit, *, force_retry: bool = False):

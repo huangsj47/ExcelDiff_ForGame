@@ -121,7 +121,7 @@
                                 <code>初始版本</code>
                             {% endif %}
                         </div>
-                        {% if previous_commit and previous_commit.id %}
+                        {% if previous_commit %}
                         <div><strong>提交时间:</strong> {{ format_beijing_time(previous_commit.commit_time, '%Y-%m-%d %H:%M:%S') if previous_commit.commit_time else 'N/A' }}</div>
                         <div><strong>提交者:</strong> {{ (previous_commit.author_display or previous_commit.author) | e or 'N/A' }}</div>
                         {% if previous_commit.message %}

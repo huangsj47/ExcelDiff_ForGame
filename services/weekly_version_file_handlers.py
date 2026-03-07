@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 
 from flask import abort, jsonify, redirect, render_template, request, url_for
 from werkzeug.exceptions import HTTPException
 
+from services.deployment_mode import is_agent_dispatch_mode
 from services.model_loader import get_runtime_models
 from utils.request_security import _has_project_access
 
@@ -35,7 +35,7 @@ def _resolve_username_display_name(username: str | None) -> str | None:
 
 
 def _is_agent_dispatch_mode() -> bool:
-    return (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower() in {"platform", "agent"}
+    return is_agent_dispatch_mode()
 
 
 def weekly_version_file_previous_version(config_id):

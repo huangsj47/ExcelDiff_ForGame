@@ -10,6 +10,7 @@ import os
 import threading
 import time
 
+from services.deployment_mode import is_agent_dispatch_mode
 from utils.logger import log_print
 from services.performance_metrics_service import get_perf_metrics_service
 
@@ -30,7 +31,7 @@ _active_git_processes = None
 
 
 def _is_agent_dispatch_mode() -> bool:
-    return (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower() in {"platform", "agent"}
+    return is_agent_dispatch_mode()
 
 
 def configure_vcs_service(active_git_processes_ref):

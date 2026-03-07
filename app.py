@@ -130,7 +130,9 @@ from services.commit_diff_logic import (
     convert_hunks_to_lines,
     get_mock_diff_data,
 )
-from services.agent_commit_diff_dispatch import dispatch_or_get_commit_diff
+from services.agent_commit_diff_dispatch import maybe_dispatch_commit_diff
+from services.commit_diff_template_context import build_commit_diff_template_context
+from services.deployment_mode import get_commit_diff_mode_strategy
 from services.weekly_version_file_handlers import (
     get_file_content_at_commit,
     weekly_version_file_complete_diff,
@@ -365,10 +367,6 @@ if runtime_settings.deployment_mode_invalid:
     raw_mode = (os.environ.get("DEPLOYMENT_MODE") or "").strip()
     log_print(f"⚠️ 非法 DEPLOYMENT_MODE={raw_mode}，回退为 single", "APP", force=True)
 ENABLE_LOCAL_WORKER = runtime_settings.enable_local_worker
-
-
-def is_agent_dispatch_mode() -> bool:
-    return DEPLOYMENT_MODE in {"platform", "agent"}
 
 
 log_print(
@@ -865,6 +863,7 @@ from services.task_worker_service import (
     start_background_task_worker, stop_background_task_worker,
     add_excel_diff_task, add_excel_diff_tasks_batch,
     create_auto_sync_task, create_weekly_sync_task,
+    dispatch_auto_sync_task_when_agent_mode,
     cleanup_git_processes, queue_missing_git_branch_refresh,
     regenerate_repository_cache,
     setup_schedule, start_scheduler, stop_scheduler,
@@ -1253,26 +1252,8 @@ def _ensure_commit_route_scope_or_404(commit, project_code=None, repository_name
 
 
 def _resolve_previous_commit_db_only(commit):
-    repository = commit.repository
-    if repository is None:
-        return None
-    previous_commit = None
-    if commit.commit_time is not None:
-        previous_commit = Commit.query.filter(
-            Commit.repository_id == repository.id,
-            Commit.path == commit.path,
-            or_(
-                Commit.commit_time < commit.commit_time,
-                and_(Commit.commit_time == commit.commit_time, Commit.id < commit.id),
-            ),
-        ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
-    if previous_commit is None:
-        previous_commit = Commit.query.filter(
-            Commit.repository_id == repository.id,
-            Commit.path == commit.path,
-            Commit.id < commit.id,
-        ).order_by(Commit.id.desc()).first()
-    return previous_commit
+    # 与 single 模式保持同一套“上一版本”解析逻辑，避免双轨行为不一致。
+    return resolve_previous_commit(commit)
 
 
 def get_excel_diff_data_with_path(project_code, repository_name, commit_id):
@@ -1301,9 +1282,9 @@ def get_excel_diff_data(commit_id):
     if not is_excel:
         return jsonify({'error': True, 'message': '不是Excel文件'})
 
-    if is_agent_dispatch_mode():
-        force_retry = str(request.args.get("force_retry") or "").strip().lower() in {"1", "true", "yes"}
-        dispatch_result = dispatch_or_get_commit_diff(commit, force_retry=force_retry)
+    force_retry = str(request.args.get("force_retry") or "").strip().lower() in {"1", "true", "yes"}
+    dispatch_result = maybe_dispatch_commit_diff(commit, force_retry=force_retry)
+    if dispatch_result is not None:
         status = str(dispatch_result.get("status") or "")
         if status == "ready":
             payload = dispatch_result.get("payload") or {}
@@ -1682,6 +1663,7 @@ def commit_full_diff(commit_id):
     """显示完整文件的diff，类似Git工具的并排显示"""
     commit = Commit.query.get_or_404(commit_id)
     repository, project = _ensure_commit_access_or_403(commit)
+    mode_strategy = get_commit_diff_mode_strategy()
     # 获取上一个版本的提交信息
     file_commits = Commit.query.filter(
         Commit.repository_id == repository.id,
@@ -1700,8 +1682,8 @@ def commit_full_diff(commit_id):
             local_path = git_service.local_path
             # 如果本地路径不存在，尝试克隆
             if not os.path.exists(local_path):
-                if is_agent_dispatch_mode():
-                    message = "platform+agent 模式下禁止平台本地 clone 仓库，请在 Agent 节点完成同步后重试"
+                if not mode_strategy.allow_platform_local_git_clone:
+                    message = mode_strategy.local_clone_block_message
                     current_file_content = message
                     previous_file_content = message
                     return render_template('full_file_diff.html',
@@ -1800,8 +1782,8 @@ def refresh_commit_diff(commit_id):
     try:
         commit = Commit.query.get_or_404(commit_id)
         repository, _project = _ensure_commit_access_or_403(commit)
-        if is_agent_dispatch_mode():
-            dispatch_result = dispatch_or_get_commit_diff(commit, force_retry=True)
+        dispatch_result = maybe_dispatch_commit_diff(commit, force_retry=True)
+        if dispatch_result is not None:
             status = str(dispatch_result.get("status") or "")
             if status == "ready":
                 payload = dispatch_result.get("payload") or {}
@@ -1940,7 +1922,7 @@ def commit_diff(commit_id):
     diff_request_start = time.time()
     commit = Commit.query.get_or_404(commit_id)
     repository, project = _ensure_commit_access_or_403(commit)
-    agent_dispatch = is_agent_dispatch_mode()
+    mode_strategy = get_commit_diff_mode_strategy()
     # 检查是否为删除操作
     is_deleted = commit.operation == 'D'
     # 检查是否为Excel文件
@@ -1950,10 +1932,7 @@ def commit_diff(commit_id):
         Commit.repository_id == repository.id,
         Commit.path == commit.path
     ).order_by(Commit.commit_time.desc(), Commit.id.desc()).all()
-    if agent_dispatch:
-        previous_commit = _resolve_previous_commit_db_only(commit)
-    else:
-        previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
+    previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
     try:
         commits_for_author_mapping = [commit]
         if previous_commit:
@@ -1970,30 +1949,34 @@ def commit_diff(commit_id):
         log_print(f"❌ 未找到前一提交 - 这是初始提交", 'DIFF', force=True)
     # 如果是删除操作，返回删除信息页面
     if is_deleted:
-        return render_template('commit_diff.html', 
-                             commit=commit, 
-                             repository=repository,
-                             project=project,
-                             diff_data={'type': 'deleted', 'message': '该文件已被删除'},
-                             file_commits=file_commits,
-                             previous_commit=previous_commit,
-                             is_excel=is_excel,
-                             is_deleted=True,
-                             async_agent_diff=False,
-                             agent_diff_endpoint=url_for("get_commit_diff_data", commit_id=commit.id))
-    if agent_dispatch:
         return render_template(
-            'commit_diff.html',
-            commit=commit,
-            repository=repository,
-            project=project,
-            diff_data=None,
-            file_commits=file_commits,
-            previous_commit=previous_commit,
-            is_excel=is_excel,
-            is_deleted=False,
-            async_agent_diff=True,
-            agent_diff_endpoint=url_for("get_commit_diff_data", commit_id=commit.id),
+            "commit_diff.html",
+            **build_commit_diff_template_context(
+                commit=commit,
+                repository=repository,
+                project=project,
+                file_commits=file_commits,
+                previous_commit=previous_commit,
+                is_excel=is_excel,
+                diff_data={"type": "deleted", "message": "该文件已被删除"},
+                is_deleted=True,
+                mode_strategy=mode_strategy,
+            ),
+        )
+    if mode_strategy.async_agent_diff:
+        return render_template(
+            "commit_diff.html",
+            **build_commit_diff_template_context(
+                commit=commit,
+                repository=repository,
+                project=project,
+                file_commits=file_commits,
+                previous_commit=previous_commit,
+                is_excel=is_excel,
+                diff_data=None,
+                is_deleted=False,
+                mode_strategy=mode_strategy,
+            ),
         )
     if is_excel:
         # Excel文件处理 - 优先使用缓存
@@ -2094,18 +2077,17 @@ def commit_diff(commit_id):
         if diff_data:
             log_print(f"🔍 diff_data类型: {type(diff_data)}, 键: {list(diff_data.keys()) if isinstance(diff_data, dict) else 'N/A'}", 'EXCEL', force=True)
         # 构建模板上下文
-        template_context = {
-            'commit': commit,
-            'repository': repository,
-            'project': project,
-            'diff_data': diff_data,
-            'file_commits': file_commits,
-            'previous_commit': previous_commit,
-            'is_excel': True,
-            'is_deleted': False,
-            'async_agent_diff': False,
-            'agent_diff_endpoint': url_for("get_commit_diff_data", commit_id=commit.id),
-        }
+        template_context = build_commit_diff_template_context(
+            commit=commit,
+            repository=repository,
+            project=project,
+            file_commits=file_commits,
+            previous_commit=previous_commit,
+            is_excel=True,
+            diff_data=diff_data,
+            is_deleted=False,
+            mode_strategy=mode_strategy,
+        )
         log_print(f"🔍 模板上下文键: {list(template_context.keys())}", 'EXCEL', force=True)
         log_print(f"🔍 is_excel值: {template_context['is_excel']}, 类型: {type(template_context['is_excel'])}", 'EXCEL', force=True)
         return render_template('commit_diff.html', **template_context)
@@ -2132,17 +2114,20 @@ def commit_diff(commit_id):
             },
             tags=perf_tags,
         )
-        return render_template('commit_diff.html', 
-                             commit=commit, 
-                             repository=repository,
-                             project=project,
-                             diff_data=diff_data,
-                             file_commits=file_commits,
-                             previous_commit=previous_commit,
-                             is_excel=False,
-                             is_deleted=False,
-                             async_agent_diff=False,
-                             agent_diff_endpoint=url_for("get_commit_diff_data", commit_id=commit.id))
+        return render_template(
+            "commit_diff.html",
+            **build_commit_diff_template_context(
+                commit=commit,
+                repository=repository,
+                project=project,
+                file_commits=file_commits,
+                previous_commit=previous_commit,
+                is_excel=False,
+                diff_data=diff_data,
+                is_deleted=False,
+                mode_strategy=mode_strategy,
+            ),
+        )
 # 确认/拒绝提交（旧版本，已被新的API替代）
 # 重新生成Diff缓存
 
@@ -2281,14 +2266,19 @@ def retry_clone_repository(repository_id):
         "retry_source": "manual_retry",
     }
 
-    task_id = create_auto_sync_task(repository_id, extra_payload=extra_payload)
+    handled_by_agent, task_id = dispatch_auto_sync_task_when_agent_mode(
+        repository_id,
+        extra_payload=extra_payload,
+    )
+    if not handled_by_agent:
+        task_id = create_auto_sync_task(repository_id, extra_payload=extra_payload)
     if task_id:
         if force_reclone:
             flash("已启动重试：将先清理本地目录，再重新克隆并同步", "success")
         else:
             flash("已启动重试：将先修复本地Git/SVN目录，再重新同步", "success")
     else:
-        if is_agent_dispatch_mode():
+        if handled_by_agent:
             flash("派发Agent重试任务失败，请检查项目绑定与Agent在线状态", "error")
         else:
             flash("创建重试任务失败，请查看平台日志", "error")
@@ -2309,8 +2299,8 @@ def sync_repository(repository_id):
             return jsonify({'status': 'error', 'message': '仓库不存在'}), 404
 
         log_print(f"📂 [MANUAL_SYNC] 仓库信息: {repository.name} ({repository.type})")
-        if is_agent_dispatch_mode():
-            task_id = create_auto_sync_task(repository_id)
+        handled_by_agent, task_id = dispatch_auto_sync_task_when_agent_mode(repository_id)
+        if handled_by_agent:
             if task_id:
                 return jsonify(
                     {
@@ -2469,13 +2459,13 @@ def run_repository_update_and_cache(repository_id):
     """异步执行仓库更新和缓存（线程安全：按ID重新查询对象）"""
     repository = None
     try:
-        if is_agent_dispatch_mode():
-            with app.app_context():
-                task_id = create_auto_sync_task(repository_id)
-                if task_id:
-                    log_print(f"✅ [REUSE_SYNC] 已派发到Agent执行仓库同步: repository_id={repository_id}, task_id={task_id}", 'SYNC')
-                else:
-                    log_print(f"❌ [REUSE_SYNC] 派发Agent同步任务失败: repository_id={repository_id}", 'SYNC', force=True)
+        with app.app_context():
+            handled_by_agent, task_id = dispatch_auto_sync_task_when_agent_mode(repository_id)
+        if handled_by_agent:
+            if task_id:
+                log_print(f"✅ [REUSE_SYNC] 已派发到Agent执行仓库同步: repository_id={repository_id}, task_id={task_id}", 'SYNC')
+            else:
+                log_print(f"❌ [REUSE_SYNC] 派发Agent同步任务失败: repository_id={repository_id}", 'SYNC', force=True)
             return
 
         with app.app_context():
@@ -2539,8 +2529,8 @@ def reuse_repository_and_update(repository_id):
         action = data.get('action', 'pull_and_cache')
         repository = Repository.query.get_or_404(repository_id)
         log_print(f"🔄 收到仓库复用更新请求: {repository.name} (ID: {repository_id})", 'API')
-        if is_agent_dispatch_mode():
-            task_id = create_auto_sync_task(repository_id)
+        handled_by_agent, task_id = dispatch_auto_sync_task_when_agent_mode(repository_id)
+        if handled_by_agent:
             if task_id:
                 return jsonify({
                     'success': True,

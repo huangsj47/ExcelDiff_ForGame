@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
 import threading
 from datetime import datetime, timezone
 
 from flask import flash, redirect, request, url_for
 
 from models import GlobalRepositoryCounter, Repository, db
+from services.deployment_mode import is_agent_dispatch_mode
 from services.enhanced_git_service import EnhancedGitService
 from services.model_loader import get_runtime_model
 from utils.request_security import require_admin
@@ -16,7 +16,7 @@ from utils.security_utils import validate_repository_name
 
 
 def _is_agent_dispatch_mode() -> bool:
-    return (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower() in {"platform", "agent"}
+    return is_agent_dispatch_mode()
 
 
 @require_admin

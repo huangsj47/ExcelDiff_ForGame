@@ -42,6 +42,7 @@ background_task_queue = _RuntimeProxy("background_task_queue")
 get_unified_diff_data = _RuntimeProxy("get_unified_diff_data")
 get_merged_diff_data = _RuntimeProxy("get_merged_diff_data")
 build_smart_display_list = _RuntimeProxy("build_smart_display_list")
+resolve_previous_commit = _RuntimeProxy("resolve_previous_commit")
 
 
 _AUTHOR_EMAIL_RE = re.compile(r"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
@@ -439,11 +440,15 @@ def get_commit_diff_data(commit_id):
 
         repository = commit.repository
         is_excel = excel_cache_service.is_excel_file(commit.path)
-        previous_commit = Commit.query.filter(
-            Commit.repository_id == commit.repository_id,
-            Commit.path == commit.path,
-            Commit.commit_time < commit.commit_time
-        ).order_by(Commit.commit_time.desc()).first()
+        file_commits = (
+            Commit.query.filter(
+                Commit.repository_id == commit.repository_id,
+                Commit.path == commit.path,
+            )
+            .order_by(Commit.commit_time.desc(), Commit.id.desc())
+            .all()
+        )
+        previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
         diff_data = None
         if is_excel:
             log_print(f"🔍 合并diff异步请求Excel文件: {commit.path}", 'CACHE')

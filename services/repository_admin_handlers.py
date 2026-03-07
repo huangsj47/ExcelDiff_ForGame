@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import os
-
 from flask import flash, jsonify, redirect, request, url_for
 from sqlalchemy import or_
 
+from services.deployment_mode import is_agent_dispatch_mode
 from services.model_loader import get_runtime_model, get_runtime_models
 from services.repository_cleanup_helpers import delete_local_repository_directory
 from utils.path_security import build_repository_local_path
@@ -241,8 +240,7 @@ def test_repository(repository_id):
         flash(message, category)
         return redirect(url_for("repository_config", project_id=repository.project_id))
 
-    deployment_mode = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
-    if deployment_mode in {"platform", "agent"}:
+    if is_agent_dispatch_mode():
         task_id = create_auto_sync_task(repository.id)
         if task_id:
             return _respond(

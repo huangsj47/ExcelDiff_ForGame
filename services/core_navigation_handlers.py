@@ -8,6 +8,7 @@ import os
 from flask import abort, current_app, flash, redirect, render_template, request, session, url_for
 
 from models import AgentNode, AgentProjectBinding, Project, Repository, db
+from services.deployment_mode import get_deployment_mode, is_agent_dispatch_mode
 from services.model_loader import get_runtime_model
 from utils.request_security import (
     _get_project_create_agent_codes,
@@ -239,12 +240,12 @@ def index():
         ]
 
         total_projects = (len(all_projects) + len(projects)) if accessible_ids is not None else len(projects)
-        deployment_mode = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
+        deployment_mode = get_deployment_mode()
         can_direct_create_project = _has_project_create_access()
         creatable_agent_codes = set(_get_project_create_agent_codes())
         agent_nodes = []
         has_agent_nodes = False
-        if deployment_mode in {"platform", "agent"} and (can_direct_create_project or _has_admin_access()):
+        if is_agent_dispatch_mode() and (can_direct_create_project or _has_admin_access()):
             try:
                 from services.agent_management_handlers import build_agent_node_items
 
@@ -288,7 +289,7 @@ def projects():
         name = request.form.get("name")
         department = request.form.get("department")
         selected_agent_code = (request.form.get("agent_code") or "").strip()
-        deployment_mode = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
+        deployment_mode = get_deployment_mode()
         is_platform_admin = _has_admin_access()
         creatable_agent_codes = _resolve_creatable_agent_codes(is_platform_admin)
         creatable_agent_code_set = set(creatable_agent_codes)
@@ -302,11 +303,11 @@ def projects():
             flash("项目代号已存在", "error")
             return redirect(url_for("index"))
 
-        if deployment_mode in {"platform", "agent"} and not has_any_agent_nodes:
+        if is_agent_dispatch_mode() and not has_any_agent_nodes:
             flash("暂未启动任何节点，请先启动并注册至少一个Agent节点后再创建项目。", "error")
             return redirect(url_for("index"))
 
-        if deployment_mode in {"platform", "agent"}:
+        if is_agent_dispatch_mode():
             if not creatable_agent_codes:
                 flash("当前账号未绑定可创建项目的Agent节点，请联系管理员。", "error")
                 return redirect(url_for("index"))
@@ -328,7 +329,7 @@ def projects():
             flash(err or "创建项目失败：无法写入项目成员关系", "error")
             return redirect(url_for("index"))
 
-        if selected_agent_code and deployment_mode in {"platform", "agent"}:
+        if selected_agent_code and is_agent_dispatch_mode():
             selected_agent = AgentNode.query.filter_by(agent_code=selected_agent_code).first()
             if not selected_agent:
                 db.session.rollback()

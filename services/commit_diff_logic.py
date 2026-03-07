@@ -4,7 +4,6 @@ Commit Diff 引擎 — 从 app.py 拆分
 """
 import sys
 import json
-import os
 import threading
 import difflib
 import html
@@ -14,6 +13,7 @@ from collections import defaultdict
 from types import SimpleNamespace
 
 from models import db, Commit, Repository, DiffCache, ExcelHtmlCache
+from services.deployment_mode import is_agent_dispatch_mode
 from services.diff_service import DiffService
 from utils.diff_data_utils import clean_json_data
 from utils.logger import log_print
@@ -173,17 +173,28 @@ def resolve_previous_commit(commit, file_commits=None):
         return None
 
     previous_commit = None
-    if getattr(commit, "commit_time", None) is not None:
+    current_commit_time = getattr(commit, "commit_time", None)
+    if current_commit_time is not None:
         previous_commit = Commit.query.filter(
             Commit.repository_id == repository.id,
             Commit.path == commit.path,
-            Commit.commit_time < commit.commit_time
+            Commit.commit_time < current_commit_time,
         ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
-    if previous_commit is None:
+
+        # 同时支持同秒提交，按自增ID稳定回退。
+        if previous_commit is None:
+            previous_commit = Commit.query.filter(
+                Commit.repository_id == repository.id,
+                Commit.path == commit.path,
+                Commit.commit_time == current_commit_time,
+                Commit.id < commit.id,
+            ).order_by(Commit.id.desc()).first()
+    else:
+        # 仅在缺少 commit_time 的极端场景下，才按数据库ID回退。
         previous_commit = Commit.query.filter(
             Commit.repository_id == repository.id,
             Commit.path == commit.path,
-            Commit.id < commit.id
+            Commit.id < commit.id,
         ).order_by(Commit.id.desc()).first()
 
     if previous_commit is None and file_commits:
@@ -626,7 +637,7 @@ def _build_diff_error_data(commit, message, detail=None):
 
 
 def _is_agent_dispatch_mode():
-    return (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower() in {"platform", "agent"}
+    return is_agent_dispatch_mode()
 
 
 def _get_git_code_diff_with_retry(service, commit, previous_commit):

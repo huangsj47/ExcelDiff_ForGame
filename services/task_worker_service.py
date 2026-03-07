@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from utils.logger import log_print
 from utils.db_retry import db_retry
+from services.deployment_mode import get_deployment_mode, is_agent_dispatch_mode
 from services.repository_sync_status import clear_sync_error as clear_repository_sync_error
 from services.repository_sync_status import record_sync_error as record_repository_sync_error
 
@@ -70,11 +71,11 @@ EXCEL_TASK_ENQUEUE_COOLDOWN_MAX_KEYS = 5000
 
 
 def _deployment_mode():
-    return (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
+    return get_deployment_mode()
 
 
 def _use_agent_dispatch():
-    return _deployment_mode() in {"platform", "agent"}
+    return is_agent_dispatch_mode()
 
 
 def _force_remove_repo_worktree(local_path: str):
@@ -981,6 +982,14 @@ def create_auto_sync_task(repository_id, extra_payload=None):
     except Exception as e:
         log_print(f"❌ 创建自动同步任务失败: {e}", 'SYNC', force=True)
         return None
+
+
+def dispatch_auto_sync_task_when_agent_mode(repository_id, extra_payload=None):
+    """Agent 模式下派发 auto_sync；single 模式直接返回未处理。"""
+    if not _use_agent_dispatch():
+        return False, None
+    task_id = create_auto_sync_task(repository_id, extra_payload=extra_payload)
+    return True, task_id
 
 
 def check_and_create_auto_sync_tasks():
