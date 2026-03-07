@@ -5,7 +5,9 @@ title Agent Startup
 
 cd /d "%~dp0"
 set "LOG_FILE=%~dp0agent.log"
-if not exist "%LOG_FILE%" type nul > "%LOG_FILE%"
+set "ACTIVE_LOG_FILE=%LOG_FILE%"
+call :select_log_file
+if errorlevel 1 goto :fail
 
 echo ========================================
 echo   Agent - Startup Script
@@ -56,6 +58,7 @@ if exist "venv\Scripts\python.exe" (
 )
 
 echo [INFO] Using Python: %PYTHON_EXE%
+echo [INFO] Agent log file: %ACTIVE_LOG_FILE%
 if /I "%PYTHON_EXE%"=="python" (
     echo [WARN] Running with system Python.
     echo [WARN] If AGENT_AUTO_UPDATE_INSTALL_DEPS=true, self-update will install deps into system Python.
@@ -78,10 +81,10 @@ echo   Press Ctrl+C to stop
 echo ========================================
 echo.
 
-echo [%date% %time%] [INFO] Agent process start >> "%LOG_FILE%"
-"%PYTHON_EXE%" start_agent.py >> "%LOG_FILE%" 2>&1
+echo [%date% %time%] [INFO] Agent process start >> "%ACTIVE_LOG_FILE%"
+"%PYTHON_EXE%" start_agent.py >> "%ACTIVE_LOG_FILE%" 2>&1
 set "APP_EXIT=%ERRORLEVEL%"
-echo [%date% %time%] [INFO] Agent process exit code=%APP_EXIT% >> "%LOG_FILE%"
+echo [%date% %time%] [INFO] Agent process exit code=%APP_EXIT% >> "%ACTIVE_LOG_FILE%"
 
 if not "%APP_EXIT%"=="0" (
     echo [ERROR] Agent exited with code %APP_EXIT%.
@@ -126,3 +129,35 @@ if errorlevel 1 (
     exit /b 1
 )
 exit /b 0
+
+:select_log_file
+set "ACTIVE_LOG_FILE=%LOG_FILE%"
+call :can_write_log "%ACTIVE_LOG_FILE%"
+if not errorlevel 1 exit /b 0
+
+if not exist "%~dp0logs" mkdir "%~dp0logs" >nul 2>&1
+for /f %%i in ('powershell -NoProfile -Command "(Get-Date).ToString(\"yyyyMMdd_HHmmss\")"') do set "RUN_TS=%%i"
+if not defined RUN_TS set "RUN_TS=%RANDOM%"
+set "ACTIVE_LOG_FILE=%~dp0logs\agent_%RUN_TS%.log"
+call :can_write_log "%ACTIVE_LOG_FILE%"
+if not errorlevel 1 (
+    echo [WARN] agent.log is locked by another process; switched log output to:
+    echo [WARN]   %ACTIVE_LOG_FILE%
+    exit /b 0
+)
+
+echo [ERROR] Unable to write logs to both agent.log and fallback logs file.
+echo [ERROR] Please close tools that lock log files and retry.
+exit /b 1
+
+:can_write_log
+setlocal
+set "TARGET_PATH=%~1"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$p=$env:TARGET_PATH; try { " ^
+    "$dir=[System.IO.Path]::GetDirectoryName($p); " ^
+    "if($dir -and -not (Test-Path $dir)){ New-Item -ItemType Directory -Path $dir -Force | Out-Null }; " ^
+    "$fs=[System.IO.File]::Open($p,[System.IO.FileMode]::OpenOrCreate,[System.IO.FileAccess]::Write,[System.IO.FileShare]::ReadWrite); " ^
+    "$fs.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
+set "RC=%ERRORLEVEL%"
+endlocal & exit /b %RC%
