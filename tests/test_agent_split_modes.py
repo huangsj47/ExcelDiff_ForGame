@@ -799,6 +799,21 @@ def test_admin_agents_page_accessible_with_admin_token(monkeypatch):
             assert "Agent 节点监控" in resp.get_data(as_text=True)
 
 
+def test_admin_agents_page_has_utc8_time_display_rules(monkeypatch):
+    admin_token = _uid("admin-token")
+    monkeypatch.setenv("ADMIN_API_TOKEN", admin_token)
+
+    with app.app_context():
+        create_tables()
+        with app.test_client() as client:
+            resp = client.get("/admin/agents", headers={"X-Admin-Token": admin_token})
+            assert resp.status_code == 200
+            content = resp.get_data(as_text=True)
+            assert "TIME_DISPLAY_RULES" in content
+            assert "Asia/Shanghai" in content
+            assert "UTC+8" in content
+
+
 def test_collect_agent_metrics_has_expected_fields():
     metrics = collect_agent_metrics(".")
     required_keys = {

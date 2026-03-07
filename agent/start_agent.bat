@@ -66,6 +66,7 @@ if exist "venv\Scripts\python.exe" (
 
 echo [INFO] Using Python: %PYTHON_EXE%
 echo [INFO] Agent log file: %ACTIVE_LOG_FILE%
+echo [INFO] Log mode: realtime console + file append
 if /I "%PYTHON_EXE%"=="python" (
     echo [WARN] Running with system Python.
     echo [WARN] If AGENT_AUTO_UPDATE_INSTALL_DEPS=true, self-update will install deps into system Python.
@@ -172,9 +173,13 @@ setlocal
 set "RUN_PY=%~1"
 set "RUN_SCRIPT=%~2"
 set "RUN_LOG=%~3"
+set "PYTHONUNBUFFERED=1"
+set "PYTHONIOENCODING=utf-8"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$py=$env:RUN_PY; $script=$env:RUN_SCRIPT; $log=$env:RUN_LOG; " ^
-    "try { & $py $script *>> $log; exit $LASTEXITCODE } " ^
+    "$ErrorActionPreference='Stop'; $py=$env:RUN_PY; $script=$env:RUN_SCRIPT; $log=$env:RUN_LOG; " ^
+    "$logDir = Split-Path -Parent $log; " ^
+    "if($logDir -and -not (Test-Path $logDir)){ New-Item -ItemType Directory -Path $logDir -Force | Out-Null }; " ^
+    "try { & $py -u $script 2>&1 | Tee-Object -FilePath $log -Append; exit $LASTEXITCODE } " ^
     "catch { Write-Host $_.Exception.Message; exit 1 }"
 set "RC=%ERRORLEVEL%"
 endlocal & exit /b %RC%

@@ -133,7 +133,7 @@
     <div class="d-flex justify-content-between align-items-center mb-3">
         <div>
             <h4 class="mb-1"><i class="fas fa-server me-2 text-primary"></i>Agent 节点监控</h4>
-            <div class="text-muted" style="font-size: 0.86rem;">每30秒自动刷新，可用于项目创建时选择合适节点。</div>
+            <div class="text-muted" style="font-size: 0.86rem;">每30秒自动刷新，可用于项目创建时选择合适节点；页面时间统一按 UTC+8 展示。</div>
         </div>
         <button class="btn btn-outline-primary btn-sm" onclick="loadAgentNodes()">
             <i class="fas fa-sync-alt me-1"></i>立即刷新
@@ -161,7 +161,7 @@
         </div>
         <div class="col-6 col-md-3">
             <div class="agent-summary-card">
-                <div class="label">最近刷新</div>
+                <div class="label">最近刷新(UTC+8)</div>
                 <div class="value" style="font-size: 0.86rem;" id="lastRefresh">-</div>
             </div>
         </div>
@@ -180,7 +180,7 @@
                         <th>磁盘剩余</th>
                         <th>系统</th>
                         <th>绑定项目</th>
-                        <th>心跳</th>
+                        <th>心跳(UTC+8)</th>
                     </tr>
                 </thead>
                 <tbody id="agentRowsBody">
@@ -216,6 +216,21 @@ let agentRowMap = new Map();
 let incidentModalInstance = null;
 let currentAgentCodeForModal = '';
 let currentIgnoreIncidentId = null;
+const TIME_DISPLAY_RULES = Object.freeze({
+    timezone: 'Asia/Shanghai',
+    timezoneLabel: 'UTC+8',
+    outputPattern: 'YYYY/MM/DD HH:mm:ss'
+});
+const UTC8_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: TIME_DISPLAY_RULES.timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+});
 
 function formatBytes(bytes) {
     const value = Number(bytes || 0);
@@ -249,15 +264,16 @@ function formatTimeText(isoText) {
     try {
         const dt = new Date(isoText);
         if (Number.isNaN(dt.getTime())) return String(isoText);
-        return dt.toLocaleString('zh-CN', {
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
+        const partMap = {};
+        UTC8_TIME_FORMATTER.formatToParts(dt).forEach((part) => {
+            if (part.type !== 'literal') {
+                partMap[part.type] = part.value;
+            }
         });
+        if (partMap.year && partMap.month && partMap.day && partMap.hour && partMap.minute && partMap.second) {
+            return `${partMap.year}/${partMap.month}/${partMap.day} ${partMap.hour}:${partMap.minute}:${partMap.second}`;
+        }
+        return UTC8_TIME_FORMATTER.format(dt);
     } catch (err) {
         return String(isoText);
     }
@@ -555,7 +571,7 @@ async function loadAgentNodes() {
                     <td title="${escapeHtml(projectSummary.title)}">${projectSummary.html}</td>
                     <td>
                         <div class="metric-main">${formatTimeText(item.last_heartbeat)}</div>
-                        <div class="metric-sub">指标更新时间: ${formatTimeText(item.metrics_updated_at)}</div>
+                        <div class="metric-sub">指标更新时间(${TIME_DISPLAY_RULES.timezoneLabel}): ${formatTimeText(item.metrics_updated_at)}</div>
                     </td>
                 </tr>
                 `;
