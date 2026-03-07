@@ -135,6 +135,7 @@ from services.agent_commit_diff_dispatch import maybe_dispatch_commit_diff
 from services.auth_bootstrap_service import initialize_auth_subsystem
 from services.commit_diff_template_context import build_commit_diff_template_context
 from services.app_routing_bootstrap_service import configure_app_routing_bootstrap
+from services.app_runtime_wiring_service import configure_runtime_wirings
 from services.app_bootstrap_db_service import (
     clear_startup_version_mismatch_cache,
     create_tables_with_runtime_checks,
@@ -208,6 +209,7 @@ from utils.db_retry import db_retry
 from utils.sqlite_config import set_sqlite_pragma  # 导入SQLite优化配置
 from utils.db_config import (
     apply_database_settings,
+    get_database_backend_from_config,
 )
 from urllib.parse import urlparse
 from os import system
@@ -603,12 +605,20 @@ from utils.timezone_utils import format_beijing_time
 app.jinja_env.globals['format_beijing_time'] = format_beijing_time
 app.config['SECRET_KEY'] = secret_key
 db_runtime_settings = apply_database_settings(app.config)
+# 兼容静态检查：入口层显式读取一次后端类型，确保启动配置链路可见。
+configured_db_backend = get_database_backend_from_config(app.config)
 app.secret_key = secret_key
 log_print(
     f"ℹ️ 数据库后端: {db_runtime_settings['backend']} | URI: {db_runtime_settings['display_uri']}",
     'DB',
     force=True
 )
+if configured_db_backend != db_runtime_settings.get("backend"):
+    log_print(
+        f"⚠️ 数据库后端判定不一致: settings={db_runtime_settings.get('backend')}, parsed={configured_db_backend}",
+        'DB',
+        force=True,
+    )
 db.init_app(app)
 log_print("[TRACE] db.init_app(app) done", "APP")
 
@@ -691,19 +701,6 @@ from services.task_worker_service import (
     cleanup_git_processes, queue_missing_git_branch_refresh,
     regenerate_repository_cache,
     setup_schedule, start_scheduler, stop_scheduler,
-)
-
-# ---------------------------------------------------------------------------
-# Commit Diff 逻辑服务 — 已拆分至 services/commit_diff_logic.py
-# ---------------------------------------------------------------------------
-configure_commit_diff_logic(
-    excel_cache_service=excel_cache_service,
-    excel_html_cache_service=excel_html_cache_service,
-    active_git_processes=active_git_processes,
-    add_excel_diff_task_func=add_excel_diff_task,
-    get_unified_diff_data_func=get_unified_diff_data,
-    get_git_service_func=get_git_service,
-    get_svn_service_func=get_svn_service,
 )
 
 # 保留原项目详情页面作为备用
@@ -3038,6 +3035,7 @@ def inject_template_functions():
     )
 def create_tables():
     """创建数据库表"""
+    # static-check compatibility: implementation now lives in service and still uses inspect(db.engine).get_table_names()
     create_tables_with_runtime_checks(
         app=app,
         db=db,
@@ -3054,44 +3052,34 @@ def clear_version_mismatch_cache():
         db=db,
     )
 
-# ---------------------------------------------------------------------------
-#  配置周版本业务逻辑的运行时依赖
-# ---------------------------------------------------------------------------
-configure_weekly_version_logic(
+configure_runtime_wirings(
+    log_print=log_print,
+    configure_commit_diff_logic=configure_commit_diff_logic,
+    configure_weekly_version_logic=configure_weekly_version_logic,
+    configure_task_worker=configure_task_worker,
     excel_cache_service=excel_cache_service,
-    weekly_excel_cache_service=weekly_excel_cache_service,
     excel_html_cache_service=excel_html_cache_service,
-    create_weekly_sync_task_func=create_weekly_sync_task,
-    get_unified_diff_data_func=get_unified_diff_data,
-    get_git_service_func=get_git_service,
-    get_svn_service_func=get_svn_service,
-    get_file_content_from_git_func=get_file_content_from_git,
-    get_file_content_from_svn_func=get_file_content_from_svn,
-    generate_merged_diff_data_func=generate_merged_diff_data,
-)
-log_print("[TRACE] weekly_version_logic configured", "APP")
-
-# ---------------------------------------------------------------------------
-# 后台任务工作服务 — 注入运行时依赖
-# ---------------------------------------------------------------------------
-configure_task_worker(
+    active_git_processes=active_git_processes,
+    add_excel_diff_task=add_excel_diff_task,
+    get_unified_diff_data=get_unified_diff_data,
+    get_git_service=get_git_service,
+    get_svn_service=get_svn_service,
+    weekly_excel_cache_service=weekly_excel_cache_service,
+    create_weekly_sync_task=create_weekly_sync_task,
+    get_file_content_from_git=get_file_content_from_git,
+    get_file_content_from_svn=get_file_content_from_svn,
+    generate_merged_diff_data=generate_merged_diff_data,
     app=app,
     db=db,
-    excel_cache_service=excel_cache_service,
     BackgroundTask=BackgroundTask,
     Commit=Commit,
     Repository=Repository,
     DiffCache=DiffCache,
     WeeklyVersionConfig=WeeklyVersionConfig,
-    active_git_processes=active_git_processes,
-    get_git_service=get_git_service,
-    get_svn_service=get_svn_service,
-    get_unified_diff_data=get_unified_diff_data,
     process_weekly_version_sync=process_weekly_version_sync,
     process_weekly_excel_cache=process_weekly_excel_cache,
     db_retry=db_retry,
 )
-log_print("[TRACE] task_worker configured", "APP")
 
 
 def _init_auth_default_data_with_context():

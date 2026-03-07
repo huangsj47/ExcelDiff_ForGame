@@ -73,3 +73,14 @@ class TestWeeklyTodoFollowups:
         assert "def configure_app_routing_bootstrap(*, app, log_print, bp_prefixes=None):" in service_content
         assert "def _register_endpoint_aliases(app, log_print, bp_prefixes):" in service_content
         assert "def _register_template_filters(app):" in service_content
+
+    def test_runtime_wiring_blocks_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.app_runtime_wiring_service import configure_runtime_wirings" in app_content
+        assert "configure_runtime_wirings(" in app_content
+
+        service_content = _read("services/app_runtime_wiring_service.py")
+        assert "def configure_runtime_wirings(" in service_content
+        assert "configure_commit_diff_logic(" in service_content
+        assert "configure_weekly_version_logic(" in service_content
+        assert "configure_task_worker(" in service_content
