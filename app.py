@@ -133,6 +133,7 @@ from services.commit_diff_logic import (
 )
 from services.agent_commit_diff_dispatch import maybe_dispatch_commit_diff
 from services.commit_diff_template_context import build_commit_diff_template_context
+from services.db_migration_service import apply_schema_migrations
 from services.deployment_mode import get_commit_diff_mode_strategy
 from services.weekly_version_file_handlers import (
     get_file_content_at_commit,
@@ -3109,83 +3110,6 @@ def inject_template_functions():
         generate_excel_diff_data_url=generate_excel_diff_data_url,
         generate_refresh_diff_url=generate_refresh_diff_url
     )
-def _migrate_table_columns(table_name, desired_cols):
-    """自动为指定表补充模型中新增但数据库尚缺的列（SQLite ALTER TABLE）"""
-    try:
-        insp = inspect(db.engine)
-        if table_name not in insp.get_table_names():
-            return  # 表还不存在，create_all() 会负责创建
-        existing_cols = {col['name'] for col in insp.get_columns(table_name)}
-        added = []
-        for col_name, col_ddl in desired_cols.items():
-            if col_name not in existing_cols:
-                from sqlalchemy import text as sa_text
-                db.session.execute(sa_text(f'ALTER TABLE {table_name} ADD COLUMN {col_ddl}'))
-                added.append(col_name)
-        if added:
-            db.session.commit()
-            log_print(f"✅ 自动迁移 {table_name} 表，新增列: {', '.join(added)}", 'DB')
-        else:
-            log_print(f"ℹ️ {table_name} 表列已完整，无需迁移", 'DB')
-    except Exception as e:
-        log_print(f"⚠️ {table_name} 表自动迁移失败: {e}", 'DB', force=True)
-        try:
-            db.session.rollback()
-        except SQLAlchemyError:
-            pass
-
-
-def _migrate_repository_columns():
-    """自动为 repository 表补充模型中新增但数据库尚缺的列"""
-    _migrate_table_columns(
-        'repository',
-        {
-            'last_sync_error': 'last_sync_error TEXT',
-            'last_sync_error_time': 'last_sync_error_time DATETIME',
-        }
-    )
-
-
-def _migrate_commits_log_columns():
-    """自动为 commits_log 表补充模型中新增但数据库尚缺的列"""
-    _migrate_table_columns(
-        'commits_log',
-        {
-            'status_changed_by': 'status_changed_by VARCHAR(100)',
-        }
-    )
-
-
-def _migrate_weekly_version_diff_cache_columns():
-    """自动为 weekly_version_diff_cache 表补充模型中新增但数据库尚缺的列"""
-    _migrate_table_columns(
-        'weekly_version_diff_cache',
-        {
-            'status_changed_by': 'status_changed_by VARCHAR(100)',
-        }
-    )
-
-
-def _migrate_agent_nodes_columns():
-    """自动为 agent_nodes 表补充模型中新增但数据库尚缺的列"""
-    _migrate_table_columns(
-        'agent_nodes',
-        {
-            'cpu_cores': 'cpu_cores INTEGER',
-            'cpu_usage_percent': 'cpu_usage_percent FLOAT',
-            'agent_cpu_usage_percent': 'agent_cpu_usage_percent FLOAT',
-            'memory_total_bytes': 'memory_total_bytes BIGINT',
-            'memory_available_bytes': 'memory_available_bytes BIGINT',
-            'agent_memory_rss_bytes': 'agent_memory_rss_bytes BIGINT',
-            'disk_free_bytes': 'disk_free_bytes BIGINT',
-            'os_name': 'os_name VARCHAR(100)',
-            'os_version': 'os_version VARCHAR(200)',
-            'os_platform': 'os_platform VARCHAR(300)',
-            'metrics_updated_at': 'metrics_updated_at DATETIME',
-        }
-    )
-
-
 def create_tables():
     """创建数据库表"""
     with app.app_context():
@@ -3226,10 +3150,7 @@ def create_tables():
             return
 
         # ---- 自动迁移：为已有表补充缺失列 ----
-        _migrate_repository_columns()
-        _migrate_commits_log_columns()
-        _migrate_weekly_version_diff_cache_columns()
-        _migrate_agent_nodes_columns()
+        apply_schema_migrations(db, log_print)
 
         # 检查创建后的表状态
         try:

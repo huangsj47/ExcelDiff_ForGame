@@ -20,6 +20,7 @@
 
 ### P0（先做）
 - [ ] 1. 拆分 `app.py`（按领域路由/编排职责拆分到 `routes/*` 和 `services/*`）
+  - 进展（2026-03-08）：已将 schema 迁移辅助逻辑下沉到 `services/db_migration_service.py`，`create_tables()` 改为服务编排调用。
   - 验收：`app.py` 降到 < 2000 行；路由注册和容器初始化清晰分层。
 - [x] 2. 建立静态检查基线（`ruff` + `flake8` 二选一，推荐先 `ruff`）
   - 已完成：新增 `pyproject.toml`（ruff 规则）、`scripts/run_ruff_changed.py`（增量检查）、`.github/workflows/quality-gate.yml`（CI 门禁）。
