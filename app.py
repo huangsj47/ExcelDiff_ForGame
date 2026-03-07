@@ -2594,6 +2594,12 @@ def update_commit_status(commit_id):
     """更新提交状态"""
     try:
         data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({
+                'status': 'error',
+                'message': '请求体必须为JSON对象',
+                'error_type': 'invalid_request',
+            }), 400
         status = data.get('status')
         # 兼容历史前端：action=confirm/reject
         if not status:
@@ -2641,16 +2647,45 @@ def update_commit_status(commit_id):
             'message': '状态更新成功',
             'status_changed_by': commit.status_changed_by
         })
-
-    except Exception as e:
-        app.logger.error(f"更新提交状态失败: {str(e)}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+    except NotFound:
+        return jsonify({
+            'status': 'error',
+            'message': '提交记录不存在',
+            'error_type': 'commit_not_found',
+        }), 404
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        app.logger.error(f"更新提交状态数据库失败: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': '数据库操作失败，请稍后重试',
+            'error_type': 'database_error',
+        }), 500
+    except (TypeError, ValueError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'请求参数错误: {e}',
+            'error_type': 'invalid_request',
+        }), 400
+    except RuntimeError as e:
+        app.logger.error(f"更新提交状态运行时异常: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e),
+            'error_type': 'runtime_error',
+        }), 500
 
 @require_admin
 def batch_update_commits_compat():
     """兼容历史前端的批量更新接口（batch-approve/batch-reject 的统一入口）"""
     try:
         data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({
+                'status': 'error',
+                'message': '请求体必须为JSON对象',
+                'error_type': 'invalid_request',
+            }), 400
         commit_ids = data.get('commit_ids') or data.get('ids') or request.form.getlist('ids')
         action = (data.get('action') or request.form.get('action') or '').strip().lower()
         if not commit_ids:
@@ -2703,10 +2738,20 @@ def batch_update_commits_compat():
             'message': f'已更新 {updated_count} 个提交，同步更新 {total_weekly_updated} 个周版本记录',
             'updated_count': updated_count
         })
-    except Exception as e:
+    except SQLAlchemyError as e:
         db.session.rollback()
         log_print(f"批量更新提交失败: {str(e)}", 'APP', force=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({
+            'status': 'error',
+            'message': '数据库操作失败，请稍后重试',
+            'error_type': 'database_error',
+        }), 500
+    except (TypeError, ValueError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'请求参数错误: {e}',
+            'error_type': 'invalid_request',
+        }), 400
 
 def edit_repository(repository_id):
     repository = Repository.query.get_or_404(repository_id)
