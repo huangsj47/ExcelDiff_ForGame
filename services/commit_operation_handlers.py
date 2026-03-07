@@ -11,6 +11,7 @@ from flask import abort, flash, jsonify, redirect, render_template, request, url
 from sqlalchemy import func, or_
 
 from models import Commit, DiffCache, ExcelHtmlCache, db
+from services.agent_commit_diff_dispatch import dispatch_or_get_commit_diff, is_agent_dispatch_mode
 from services.model_loader import get_runtime_model
 from utils.request_security import (
     _has_project_access,
@@ -382,7 +383,7 @@ def request_priority_diff_with_path(project_code, repository_name, commit_id):
 # 合并diff重新计算路由
 
 def get_commit_diff_data(commit_id):
-    """异步获取单个提交的diff数据（优化版本，优先使用缓存）"""
+    """异步获取单个提交的diff数据。platform+agent 模式仅调度 Agent。"""
     try:
         start_time = time.time()
         commit = db.session.get(Commit, commit_id)
@@ -392,19 +393,60 @@ def get_commit_diff_data(commit_id):
         if not allowed:
             return jsonify({'success': False, 'message': message}), 403
 
+        if is_agent_dispatch_mode():
+            force_retry = str(request.args.get("force_retry") or "").strip().lower() in {"1", "true", "yes"}
+            dispatch_result = dispatch_or_get_commit_diff(commit, force_retry=force_retry)
+            dispatch_status = str(dispatch_result.get("status") or "").strip().lower()
+
+            if dispatch_status == "ready":
+                payload = dispatch_result.get("payload") or {}
+                diff_data = payload.get("diff_data")
+                previous_commit = payload.get("previous_commit")
+                return jsonify({
+                    "success": True,
+                    "status": "ready",
+                    "commit_id": commit_id,
+                    "diff_data": diff_data,
+                    "previous_commit": previous_commit,
+                    "source": "agent",
+                })
+
+            if dispatch_status == "unbound":
+                return jsonify({
+                    "success": False,
+                    "status": "unbound",
+                    "commit_id": commit_id,
+                    "message": dispatch_result.get("message") or "项目未绑定 Agent",
+                }), 409
+
+            if dispatch_status in {"pending", "pending_offline"}:
+                return jsonify({
+                    "success": True,
+                    "status": dispatch_status,
+                    "pending": True,
+                    "commit_id": commit_id,
+                    "message": dispatch_result.get("message") or "Agent 正在处理diff",
+                    "retry_after_seconds": dispatch_result.get("retry_after_seconds") or 60,
+                    "task_id": dispatch_result.get("task_id"),
+                }), 202
+
+            return jsonify({
+                "success": False,
+                "status": "error",
+                "commit_id": commit_id,
+                "message": dispatch_result.get("message") or "Agent diff 获取失败",
+            }), 500
+
         repository = commit.repository
         is_excel = excel_cache_service.is_excel_file(commit.path)
-        # 获取前一个提交用于diff对比
         previous_commit = Commit.query.filter(
             Commit.repository_id == commit.repository_id,
             Commit.path == commit.path,
             Commit.commit_time < commit.commit_time
         ).order_by(Commit.commit_time.desc()).first()
         diff_data = None
-        # 如果是Excel文件，优先检查缓存
         if is_excel:
             log_print(f"🔍 合并diff异步请求Excel文件: {commit.path}", 'CACHE')
-            # 检查Excel diff缓存
             cached_diff = excel_cache_service.get_cached_diff(
                 repository.id, commit.commit_id, commit.path
             )
@@ -412,44 +454,36 @@ def get_commit_diff_data(commit_id):
                 log_print(f"✅ 缓存命中，避免重复计算: {commit.path} | 耗时: {time.time() - start_time:.2f}秒", 'CACHE')
                 try:
                     diff_data = json.loads(cached_diff.diff_data)
-                    log_print(f"🔍 缓存数据解析成功: type={diff_data.get('type')}, sheets={len(diff_data.get('sheets', {}))}", 'CACHE')
                 except Exception as parse_error:
                     log_print(f"❌ 缓存数据解析失败: {parse_error}", 'CACHE')
-                    log_print(f"🔍 原始缓存数据前100字符: {cached_diff.diff_data[:100]}", 'CACHE')
                     diff_data = None
             else:
-                log_print(f"❌ 缓存未命中，开始实时计算: {commit.path}", 'CACHE')
-                # 使用统一的diff数据获取方法
                 diff_data = get_unified_diff_data(commit, previous_commit)
         else:
-            # 非Excel文件，直接计算
             diff_data = get_unified_diff_data(commit, previous_commit)
+
         if diff_data:
             if previous_commit:
                 _attach_author_display([previous_commit])
-            # 清理diff数据中的NaN和Infinity值
             import math
+
             def sanitize_data(obj):
                 if isinstance(obj, dict):
                     return {k: sanitize_data(v) for k, v in obj.items()}
-
-                elif isinstance(obj, list):
+                if isinstance(obj, list):
                     return [sanitize_data(item) for item in obj]
-
-                elif isinstance(obj, float):
+                if isinstance(obj, float):
                     if math.isnan(obj) or math.isinf(obj):
                         return None
-
                     return obj
-
-                else:
-                    return obj
+                return obj
 
             diff_data = sanitize_data(diff_data)
             total_time = time.time() - start_time
             log_print(f"✅ 合并diff异步请求完成: {commit.path} | 总耗时: {total_time:.2f}秒", 'PERF')
             return jsonify({
                 'success': True,
+                'status': 'ready',
                 'commit_id': commit_id,
                 'diff_data': diff_data,
                 'previous_commit': {
@@ -459,14 +493,14 @@ def get_commit_diff_data(commit_id):
                     'message': previous_commit.message if previous_commit else 'N/A'
                 } if previous_commit else None
             })
-        else:
-            total_time = time.time() - start_time
-            log_print(f"❌ 合并diff异步请求失败: {commit.path} | 耗时: {total_time:.2f}秒", 'PERF')
-            return jsonify({
-                'success': False,
-                'commit_id': commit_id,
-                'message': '无法获取diff数据'
-            })
+
+        total_time = time.time() - start_time
+        log_print(f"❌ 合并diff异步请求失败: {commit.path} | 耗时: {total_time:.2f}秒", 'PERF')
+        return jsonify({
+            'success': False,
+            'commit_id': commit_id,
+            'message': '无法获取diff数据'
+        })
     except Exception as e:
         total_time = time.time() - start_time if 'start_time' in locals() else 0
         log_print(f"❌ 获取提交 {commit_id} 的diff数据失败: {e} | 耗时: {total_time:.2f}秒", 'ERROR')
@@ -589,21 +623,25 @@ def merge_diff():
         log_print(f"📊 提交数量: {len(commits)}", force=True)
         for i, commit in enumerate(commits):
             log_print(f"  {i+1}. {commit.commit_id[:8]} - {commit.path}", 'APP')
-        # 添加异常处理来防止Socket错误中断处理
-        try:
-            merged_diff_data = get_merged_diff_data(commits)
-            log_print(f"=== get_merged_diff_data调用完成 ===", 'APP')
-            log_print(f"merged_diff_data结果: {merged_diff_data is not None}", 'INFO')
-            if merged_diff_data:
-                log_print(f"merged_diff_data类型: {merged_diff_data.get('type', 'INFO')}")
-                log_print(f"merged_diff_data键: {list(merged_diff_data.keys())}", 'INFO')
-            log_print(f"=== 结束get_merged_diff_data调试 ===", 'APP')
-        except Exception as merge_error:
-            log_print(f"❌ get_merged_diff_data处理失败: {str(merge_error)}", 'INFO', force=True)
-            import traceback
-            traceback.print_exc()
-            flash(f'合并diff处理失败: {str(merge_error)}', 'error')
-            return redirect(request.referrer or url_for('index'))
+        merged_diff_data = None
+        if is_agent_dispatch_mode():
+            # platform+agent 模式下不在平台本地计算合并diff，统一走前端异步逐项拉取 Agent diff。
+            log_print("platform+agent 模式：跳过平台本地 get_merged_diff_data 计算", "APP")
+        else:
+            try:
+                merged_diff_data = get_merged_diff_data(commits)
+                log_print(f"=== get_merged_diff_data调用完成 ===", 'APP')
+                log_print(f"merged_diff_data结果: {merged_diff_data is not None}", 'INFO')
+                if merged_diff_data:
+                    log_print(f"merged_diff_data类型: {merged_diff_data.get('type', 'INFO')}")
+                    log_print(f"merged_diff_data键: {list(merged_diff_data.keys())}", 'INFO')
+                log_print(f"=== 结束get_merged_diff_data调试 ===", 'APP')
+            except Exception as merge_error:
+                log_print(f"❌ get_merged_diff_data处理失败: {str(merge_error)}", 'INFO', force=True)
+                import traceback
+                traceback.print_exc()
+                flash(f'合并diff处理失败: {str(merge_error)}', 'error')
+                return redirect(request.referrer or url_for('index'))
 
     except Exception as route_error:
         log_print(f"❌ 合并diff路由处理失败: {str(route_error)}", force=True)

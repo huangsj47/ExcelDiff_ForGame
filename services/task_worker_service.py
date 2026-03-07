@@ -833,6 +833,62 @@ def execute_task_inline_for_agent(task_type, payload):
     normalized_type = str(task_type or "").strip()
     payload = payload or {}
 
+    if normalized_type == 'commit_diff':
+        from services.commit_diff_logic import get_diff_data, resolve_previous_commit
+        from services.commit_operation_handlers import _attach_author_display
+        from utils.diff_data_utils import clean_json_data
+        from utils.timezone_utils import format_beijing_time
+
+        commit_record_id = payload.get('commit_record_id') or payload.get('commit_id')
+        try:
+            commit_record_id = int(commit_record_id)
+        except Exception:
+            raise ValueError("commit_diff 任务缺少有效 commit_record_id")
+
+        commit = _db.session.get(_Commit, commit_record_id)
+        if not commit:
+            raise ValueError(f"commit_diff 任务目标提交不存在: {commit_record_id}")
+
+        repository = getattr(commit, 'repository', None)
+        if repository is None:
+            raise ValueError(f"commit_diff 任务目标提交缺少仓库信息: {commit_record_id}")
+
+        file_commits = _Commit.query.filter(
+            _Commit.repository_id == repository.id,
+            _Commit.path == commit.path
+        ).order_by(_Commit.commit_time.desc(), _Commit.id.desc()).all()
+        previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
+
+        try:
+            commits_for_author = [commit]
+            if previous_commit:
+                commits_for_author.append(previous_commit)
+            _attach_author_display(commits_for_author)
+        except Exception:
+            pass
+
+        diff_data = get_diff_data(commit, previous_commit=previous_commit)
+        if diff_data:
+            diff_data = clean_json_data(diff_data)
+
+        previous_payload = None
+        if previous_commit:
+            previous_payload = {
+                'commit_id': (previous_commit.commit_id or '')[:8] if getattr(previous_commit, 'commit_id', None) else 'N/A',
+                'commit_time': format_beijing_time(previous_commit.commit_time, '%Y-%m-%d %H:%M:%S')
+                if getattr(previous_commit, 'commit_time', None) else 'N/A',
+                'author': (getattr(previous_commit, 'author_display', None) or getattr(previous_commit, 'author', None) or 'N/A'),
+                'message': getattr(previous_commit, 'message', None) or 'N/A',
+            }
+
+        return {
+            'success': True,
+            'commit_id': commit_record_id,
+            'is_excel': bool(_excel_cache_service.is_excel_file(commit.path)),
+            'diff_data': diff_data,
+            'previous_commit': previous_payload,
+        }
+
     if normalized_type == 'excel_diff':
         repository_id = payload.get('repository_id')
         commit_id = payload.get('commit_id')

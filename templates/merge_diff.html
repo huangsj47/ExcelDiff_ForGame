@@ -750,13 +750,23 @@ td.excel-row-number.excel-modified,
                                     {% for hunk in merged_diff_data.hunks %}
                                     <div class="text-diff-hunk">
                                         <div class="text-diff-hunk-header">{{ hunk.header | e }}</div>
+                                        {% set ns = namespace(
+                                            old_line_num=(hunk.old_start if hunk.old_start is not none else 1),
+                                            new_line_num=(hunk.new_start if hunk.new_start is not none else 1)
+                                        ) %}
                                         {% for line in hunk.lines %}
                                             {% set line_type = 'added' if line.type in ['added', 'add'] else ('removed' if line.type in ['removed', 'delete'] else 'context') %}
                                             <div class="text-diff-line {{ line_type }}">
-                                                <span class="text-diff-line-number">{{ line.old_line_number if line.old_line_number is not none else '' }}</span>
-                                                <span class="text-diff-line-number">{{ line.new_line_number if line.new_line_number is not none else '' }}</span>
-                                                <span class="text-diff-line-content">{{ line.content | e }}</span>
+                                                <span class="text-diff-line-number">{{ ns.old_line_num if line_type != 'added' else '' }}</span>
+                                                <span class="text-diff-line-number">{{ ns.new_line_num if line_type != 'removed' else '' }}</span>
+                                                {% set diff_sign = '+' if line_type == 'added' else ('-' if line_type == 'removed' else ' ') %}
+                                                <span class="text-diff-line-content">
+                                                    <span class="text-diff-line-sign">{{ diff_sign }}</span>
+                                                    <span class="text-diff-line-code">{% if line.content_html %}{{ line.content_html | safe }}{% else %}{{ line.content | e }}{% endif %}</span>
+                                                </span>
                                             </div>
+                                            {% if line_type != 'added' %}{% set ns.old_line_num = ns.old_line_num + 1 %}{% endif %}
+                                            {% if line_type != 'removed' %}{% set ns.new_line_num = ns.new_line_num + 1 %}{% endif %}
                                         {% endfor %}
                                     </div>
                                     {% endfor %}
@@ -773,7 +783,11 @@ td.excel-row-number.excel-modified,
                                                 <div class="text-diff-line {{ line_type }}">
                                                     <span class="text-diff-line-number">{{ line.old_line_number if line.old_line_number is not none else '' }}</span>
                                                     <span class="text-diff-line-number">{{ line.new_line_number if line.new_line_number is not none else '' }}</span>
-                                                    <span class="text-diff-line-content">{{ line.content | e }}</span>
+                                                    {% set diff_sign = '+' if line_type == 'added' else ('-' if line_type == 'removed' else ' ') %}
+                                                    <span class="text-diff-line-content">
+                                                        <span class="text-diff-line-sign">{{ diff_sign }}</span>
+                                                        <span class="text-diff-line-code">{% if line.content_html %}{{ line.content_html | safe }}{% else %}{{ line.content | e }}{% endif %}</span>
+                                                    </span>
                                                 </div>
                                             {% endif %}
                                         {% endfor %}
@@ -959,14 +973,26 @@ function formatCellValue(value) {
 }
 
 // 异步加载单个提交的diff数据
-function loadCommitDiffData(commitId) {
+const diffPollState = {};
+
+function loadCommitDiffData(commitId, options) {
+    const opts = options || {};
     const container = document.getElementById(`diff-container-${commitId}`);
     if (!container) {
         console.error(`找不到提交 ${commitId} 的容器`);
         return;
     }
 
-    fetch(`/commits/${commitId}/diff-data`)
+    if (!diffPollState[commitId]) {
+        diffPollState[commitId] = { startedAt: Date.now() };
+    }
+    const state = diffPollState[commitId];
+    if (opts.forceRetry) {
+        state.startedAt = Date.now();
+    }
+
+    const query = opts.forceRetry ? '?force_retry=1' : '';
+    fetch(`/commits/${commitId}/diff-data${query}`)
         .then(response => response.json())
         .then(data => {
             if (data.success && data.diff_data) {
@@ -974,6 +1000,14 @@ function loadCommitDiffData(commitId) {
                 updatePreviousVersionInfo(commitId, data.previous_commit);
                 // 渲染diff内容
                 renderCommitDiff(commitId, data.diff_data);
+                return;
+            }
+
+            const status = String((data && data.status) || '');
+            if (status === 'pending' || status === 'pending_offline' || (data && data.pending)) {
+                showDiffPending(commitId, status || 'pending', data.message || '');
+                const nextDelayMs = status === 'pending_offline' ? 3000 : 1500;
+                setTimeout(() => loadCommitDiffData(commitId), nextDelayMs);
             } else {
                 showDiffError(commitId, data.message || '无法获取diff数据');
             }
@@ -982,6 +1016,30 @@ function loadCommitDiffData(commitId) {
             console.error(`加载提交 ${commitId} 的diff数据失败:`, error);
             showDiffError(commitId, '网络错误，请稍后重试');
         });
+}
+
+function showDiffPending(commitId, status, message) {
+    const container = document.getElementById(`diff-container-${commitId}`);
+    if (!container) return;
+
+    const state = diffPollState[commitId] || { startedAt: Date.now() };
+    diffPollState[commitId] = state;
+    const elapsedMs = Date.now() - state.startedAt;
+    const isOffline = status === 'pending_offline';
+    const showManualRetry = isOffline && elapsedMs >= 60000;
+    const tipText = message || (isOffline ? 'Agent 离线，等待上线后自动继续。' : 'Agent 正在处理diff，请稍候...');
+    const offlineLine = isOffline ? '<div class="small text-warning mt-2">页面持续轮询中；1分钟后可手动重试。</div>' : '';
+
+    container.innerHTML = `
+        <div class="alert alert-info mb-0">
+            <div class="d-flex align-items-center">
+                <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
+                <span>${escapeHtml(tipText)}</span>
+            </div>
+            ${offlineLine}
+            ${showManualRetry ? `<button class="btn btn-sm btn-outline-primary mt-2" onclick="loadCommitDiffData(${commitId}, { forceRetry: true })"><i class="fas fa-redo"></i> 手动重试</button>` : ''}
+        </div>
+    `;
 }
 
 // 更新前一版本信息
@@ -1017,6 +1075,48 @@ function normalizeDiffLineType(rawType) {
     return 'context';
 }
 
+function parseHunkHeaderStart(headerText) {
+    const raw = String(headerText || '');
+    const matched = raw.match(/@@\s*-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s*@@/);
+    if (!matched) {
+        return { oldStart: null, newStart: null };
+    }
+    return {
+        oldStart: parseInt(matched[1], 10),
+        newStart: parseInt(matched[2], 10),
+    };
+}
+
+function toLineNumberOrNull(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) {
+        return null;
+    }
+    return Math.max(0, Math.floor(n));
+}
+
+function renderTextDiffLineHtml(line, normalizedType, oldNumber, newNumber) {
+    const cssType = normalizedType === 'header' ? 'context' : normalizedType;
+    const sign = normalizedType === 'added' ? '+' : (normalizedType === 'removed' ? '-' : ' ');
+    const safeOld = oldNumber == null ? '' : String(oldNumber);
+    const safeNew = newNumber == null ? '' : String(newNumber);
+    const contentHtml = line && typeof line.content_html === 'string' ? line.content_html : null;
+    const content = line && line.content != null ? String(line.content) : '';
+    const renderedCode = contentHtml != null ? contentHtml : escapeHtml(content);
+    const renderedSign = sign === ' ' ? '&nbsp;' : escapeHtml(sign);
+
+    return `
+        <div class="text-diff-line ${cssType}">
+            <span class="text-diff-line-number">${escapeHtml(safeOld)}</span>
+            <span class="text-diff-line-number">${escapeHtml(safeNew)}</span>
+            <span class="text-diff-line-content">
+                <span class="text-diff-line-sign">${renderedSign}</span>
+                <span class="text-diff-line-code">${renderedCode}</span>
+            </span>
+        </div>
+    `;
+}
+
 function renderTextDiffFromHunks(hunks) {
     const validHunks = Array.isArray(hunks) ? hunks : [];
     if (!validHunks.length) {
@@ -1025,22 +1125,43 @@ function renderTextDiffFromHunks(hunks) {
 
     let html = '<div class="text-diff-container">';
     validHunks.forEach(hunk => {
+        const headerText = hunk && hunk.header ? String(hunk.header) : '';
+        const parsedStart = parseHunkHeaderStart(headerText);
+        let oldLineNum = toLineNumberOrNull(hunk && hunk.old_start);
+        let newLineNum = toLineNumberOrNull(hunk && hunk.new_start);
+        if (oldLineNum == null) {
+            oldLineNum = parsedStart.oldStart != null ? parsedStart.oldStart : 1;
+        }
+        if (newLineNum == null) {
+            newLineNum = parsedStart.newStart != null ? parsedStart.newStart : 1;
+        }
+
         html += '<div class="text-diff-hunk">';
-        html += `<div class="text-diff-hunk-header">${escapeHtml(hunk && hunk.header ? hunk.header : '')}</div>`;
+        html += `<div class="text-diff-hunk-header">${escapeHtml(headerText)}</div>`;
         const lines = Array.isArray(hunk && hunk.lines) ? hunk.lines : [];
         lines.forEach(line => {
             const normalizedType = normalizeDiffLineType(line && line.type);
-            const cssType = normalizedType === 'header' ? 'context' : normalizedType;
-            const oldNumber = line && line.old_line_number != null ? String(line.old_line_number) : '';
-            const newNumber = line && line.new_line_number != null ? String(line.new_line_number) : '';
-            const content = line && line.content != null ? String(line.content) : '';
-            html += `
-                <div class="text-diff-line ${cssType}">
-                    <span class="text-diff-line-number">${escapeHtml(oldNumber)}</span>
-                    <span class="text-diff-line-number">${escapeHtml(newNumber)}</span>
-                    <span class="text-diff-line-content">${escapeHtml(content)}</span>
-                </div>
-            `;
+            const explicitOld = toLineNumberOrNull(line && line.old_line_number);
+            const explicitNew = toLineNumberOrNull(line && line.new_line_number);
+            const oldNumber = normalizedType === 'added' ? '' : (explicitOld != null ? explicitOld : oldLineNum);
+            const newNumber = normalizedType === 'removed' ? '' : (explicitNew != null ? explicitNew : newLineNum);
+
+            html += renderTextDiffLineHtml(line, normalizedType, oldNumber, newNumber);
+
+            if (normalizedType !== 'added') {
+                if (explicitOld != null) {
+                    oldLineNum = explicitOld + 1;
+                } else if (oldLineNum != null) {
+                    oldLineNum += 1;
+                }
+            }
+            if (normalizedType !== 'removed') {
+                if (explicitNew != null) {
+                    newLineNum = explicitNew + 1;
+                } else if (newLineNum != null) {
+                    newLineNum += 1;
+                }
+            }
         });
         html += '</div>';
     });
@@ -1056,7 +1177,10 @@ function renderTextDiffFromLines(lines) {
 
     let html = '<div class="text-diff-container">';
     let hunkOpened = false;
-    validLines.forEach((line, index) => {
+    let oldLineNum = null;
+    let newLineNum = null;
+
+    validLines.forEach((line) => {
         const normalizedType = normalizeDiffLineType(line && line.type);
         if (normalizedType === 'header') {
             if (hunkOpened) {
@@ -1065,6 +1189,9 @@ function renderTextDiffFromLines(lines) {
             html += '<div class="text-diff-hunk">';
             const headerContent = line && line.content != null ? String(line.content) : '';
             html += `<div class="text-diff-hunk-header">${escapeHtml(headerContent)}</div>`;
+            const parsedStart = parseHunkHeaderStart(headerContent);
+            oldLineNum = parsedStart.oldStart;
+            newLineNum = parsedStart.newStart;
             hunkOpened = true;
             return;
         }
@@ -1073,17 +1200,26 @@ function renderTextDiffFromLines(lines) {
             html += '<div class="text-diff-hunk">';
             hunkOpened = true;
         }
-        const oldNumber = line && line.old_line_number != null ? String(line.old_line_number) : '';
-        const newNumber = line && line.new_line_number != null ? String(line.new_line_number) : '';
-        const content = line && line.content != null ? String(line.content) : '';
-        const cssType = normalizedType === 'header' ? 'context' : normalizedType;
-        html += `
-            <div class="text-diff-line ${cssType}">
-                <span class="text-diff-line-number">${escapeHtml(oldNumber)}</span>
-                <span class="text-diff-line-number">${escapeHtml(newNumber)}</span>
-                <span class="text-diff-line-content">${escapeHtml(content)}</span>
-            </div>
-        `;
+        const explicitOld = toLineNumberOrNull(line && line.old_line_number);
+        const explicitNew = toLineNumberOrNull(line && line.new_line_number);
+        const oldNumber = normalizedType === 'added' ? '' : (explicitOld != null ? explicitOld : oldLineNum);
+        const newNumber = normalizedType === 'removed' ? '' : (explicitNew != null ? explicitNew : newLineNum);
+        html += renderTextDiffLineHtml(line, normalizedType, oldNumber, newNumber);
+
+        if (normalizedType !== 'added') {
+            if (explicitOld != null) {
+                oldLineNum = explicitOld + 1;
+            } else if (oldLineNum != null) {
+                oldLineNum += 1;
+            }
+        }
+        if (normalizedType !== 'removed') {
+            if (explicitNew != null) {
+                newLineNum = explicitNew + 1;
+            } else if (newLineNum != null) {
+                newLineNum += 1;
+            }
+        }
     });
     if (hunkOpened) {
         html += '</div>';

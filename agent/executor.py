@@ -9,9 +9,11 @@ import sys
 
 try:
     from .handlers.auto_sync import execute_auto_sync
+    from .handlers.commit_diff import execute_commit_diff
     from .handlers.temp_cache_fetch import execute_temp_cache_fetch
 except ImportError:
     from handlers.auto_sync import execute_auto_sync
+    from handlers.commit_diff import execute_commit_diff
     from handlers.temp_cache_fetch import execute_temp_cache_fetch
 
 
@@ -80,6 +82,9 @@ def execute_task(task: dict, settings):
 
         if task_type == "temp_cache_fetch" and "temp_cache_fetch" in local_task_types:
             return execute_temp_cache_fetch(task, settings)
+
+        if task_type == "commit_diff" and "commit_diff" in local_task_types:
+            return execute_commit_diff(task, settings)
 
         if task_type in {"excel_diff", "weekly_sync", "weekly_excel_cache"} and task_type in local_task_types:
             return _execute_task_via_local_runtime(task_type, task)

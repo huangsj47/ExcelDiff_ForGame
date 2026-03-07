@@ -8,6 +8,7 @@ import os
 import threading
 import difflib
 import html
+import re
 from datetime import datetime, timezone
 from collections import defaultdict
 from types import SimpleNamespace
@@ -27,6 +28,11 @@ _add_excel_diff_task = None
 _get_unified_diff_data = None
 _get_git_service = None
 _get_svn_service = None
+
+_INLINE_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]+|[^A-Za-z0-9_]+")
+_INLINE_ASCII_MARK_PATTERN = re.compile(r"[A-Za-z0-9]")
+_INLINE_CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_INLINE_MAX_HIGHLIGHT_SEGMENTS = 3
 
 
 def configure_commit_diff_logic(
@@ -239,35 +245,67 @@ def convert_hunks_to_lines(diff_data):
 def _build_inline_change_html(old_text, new_text):
     old_raw = str(old_text or "")
     new_raw = str(new_text or "")
-    matcher = difflib.SequenceMatcher(None, old_raw, new_raw)
+    old_tokens = _INLINE_TOKEN_PATTERN.findall(old_raw)
+    new_tokens = _INLINE_TOKEN_PATTERN.findall(new_raw)
+    matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens)
     old_parts = []
     new_parts = []
     changed = False
+    old_highlight_count = 0
+    new_highlight_count = 0
+
+    def _should_highlight_segment(segment):
+        text = str(segment or "")
+        if not text:
+            return False
+        if not _INLINE_ASCII_MARK_PATTERN.search(text):
+            return False
+        if _INLINE_CJK_PATTERN.search(text):
+            return False
+        return True
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        old_seg = html.escape(old_raw[i1:i2])
-        new_seg = html.escape(new_raw[j1:j2])
+        old_seg_raw = ''.join(old_tokens[i1:i2])
+        new_seg_raw = ''.join(new_tokens[j1:j2])
+        old_seg = html.escape(old_seg_raw)
+        new_seg = html.escape(new_seg_raw)
 
         if tag == 'equal':
             old_parts.append(old_seg)
             new_parts.append(new_seg)
         elif tag == 'delete':
             if old_seg:
-                changed = True
-                old_parts.append(f'<span class="text-diff-inline-removed">{old_seg}</span>')
+                if _should_highlight_segment(old_seg_raw):
+                    changed = True
+                    old_highlight_count += 1
+                    old_parts.append(f'<span class="text-diff-inline-removed">{old_seg}</span>')
+                else:
+                    old_parts.append(old_seg)
         elif tag == 'insert':
             if new_seg:
-                changed = True
-                new_parts.append(f'<span class="text-diff-inline-added">{new_seg}</span>')
+                if _should_highlight_segment(new_seg_raw):
+                    changed = True
+                    new_highlight_count += 1
+                    new_parts.append(f'<span class="text-diff-inline-added">{new_seg}</span>')
+                else:
+                    new_parts.append(new_seg)
         elif tag == 'replace':
             if old_seg:
-                changed = True
-                old_parts.append(f'<span class="text-diff-inline-removed">{old_seg}</span>')
+                if _should_highlight_segment(old_seg_raw):
+                    changed = True
+                    old_highlight_count += 1
+                    old_parts.append(f'<span class="text-diff-inline-removed">{old_seg}</span>')
+                else:
+                    old_parts.append(old_seg)
             if new_seg:
-                changed = True
-                new_parts.append(f'<span class="text-diff-inline-added">{new_seg}</span>')
+                if _should_highlight_segment(new_seg_raw):
+                    changed = True
+                    new_highlight_count += 1
+                    new_parts.append(f'<span class="text-diff-inline-added">{new_seg}</span>')
+                else:
+                    new_parts.append(new_seg)
 
-    return ''.join(old_parts), ''.join(new_parts), changed
+    return ''.join(old_parts), ''.join(new_parts), changed, old_highlight_count, new_highlight_count
 
 
 def _apply_inline_highlight_to_hunks(diff_data):
@@ -292,22 +330,32 @@ def _apply_inline_highlight_to_hunks(diff_data):
             pair_count = min(len(removed_buf), len(added_buf))
             paired_highlights = []
             for idx in range(pair_count):
-                old_html, new_html, changed = _build_inline_change_html(
+                old_html, new_html, changed, old_highlight_count, new_highlight_count = _build_inline_change_html(
                     removed_buf[idx].get('content'),
                     added_buf[idx].get('content'),
                 )
-                paired_highlights.append((old_html, new_html, changed))
+                paired_highlights.append(
+                    (old_html, new_html, changed, old_highlight_count, new_highlight_count)
+                )
 
             for idx, item in enumerate(removed_buf):
                 row = dict(item)
-                if idx < pair_count and paired_highlights[idx][2]:
+                if (
+                    idx < pair_count
+                    and paired_highlights[idx][2]
+                    and max(paired_highlights[idx][3], paired_highlights[idx][4]) <= _INLINE_MAX_HIGHLIGHT_SEGMENTS
+                ):
                     row['content_html'] = paired_highlights[idx][0]
                     row['inline_highlight'] = True
                 processed.append(row)
 
             for idx, item in enumerate(added_buf):
                 row = dict(item)
-                if idx < pair_count and paired_highlights[idx][2]:
+                if (
+                    idx < pair_count
+                    and paired_highlights[idx][2]
+                    and max(paired_highlights[idx][3], paired_highlights[idx][4]) <= _INLINE_MAX_HIGHLIGHT_SEGMENTS
+                ):
                     row['content_html'] = paired_highlights[idx][1]
                     row['inline_highlight'] = True
                 processed.append(row)
@@ -350,22 +398,30 @@ def _apply_inline_highlight_to_lines(diff_data):
         pair_count = min(len(removed_buf), len(added_buf))
         paired_highlights = []
         for idx in range(pair_count):
-            old_html, new_html, changed = _build_inline_change_html(
+            old_html, new_html, changed, old_highlight_count, new_highlight_count = _build_inline_change_html(
                 removed_buf[idx].get('content'),
                 added_buf[idx].get('content'),
             )
-            paired_highlights.append((old_html, new_html, changed))
+            paired_highlights.append((old_html, new_html, changed, old_highlight_count, new_highlight_count))
 
         for idx, item in enumerate(removed_buf):
             row = dict(item)
-            if idx < pair_count and paired_highlights[idx][2]:
+            if (
+                idx < pair_count
+                and paired_highlights[idx][2]
+                and max(paired_highlights[idx][3], paired_highlights[idx][4]) <= _INLINE_MAX_HIGHLIGHT_SEGMENTS
+            ):
                 row['content_html'] = paired_highlights[idx][0]
                 row['inline_highlight'] = True
             processed.append(row)
 
         for idx, item in enumerate(added_buf):
             row = dict(item)
-            if idx < pair_count and paired_highlights[idx][2]:
+            if (
+                idx < pair_count
+                and paired_highlights[idx][2]
+                and max(paired_highlights[idx][3], paired_highlights[idx][4]) <= _INLINE_MAX_HIGHLIGHT_SEGMENTS
+            ):
                 row['content_html'] = paired_highlights[idx][1]
                 row['inline_highlight'] = True
             processed.append(row)

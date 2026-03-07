@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session, abort
 from flask_cors import CORS
-from sqlalchemy import Index, func, case, inspect, or_
+from sqlalchemy import Index, func, case, inspect, or_, and_
 from werkzeug.exceptions import Forbidden, NotFound
 
 from models import (
@@ -130,6 +130,7 @@ from services.commit_diff_logic import (
     convert_hunks_to_lines,
     get_mock_diff_data,
 )
+from services.agent_commit_diff_dispatch import dispatch_or_get_commit_diff
 from services.weekly_version_file_handlers import (
     get_file_content_at_commit,
     weekly_version_file_complete_diff,
@@ -1250,6 +1251,29 @@ def _ensure_commit_route_scope_or_404(commit, project_code=None, repository_name
     return repository, project
 
 
+def _resolve_previous_commit_db_only(commit):
+    repository = commit.repository
+    if repository is None:
+        return None
+    previous_commit = None
+    if commit.commit_time is not None:
+        previous_commit = Commit.query.filter(
+            Commit.repository_id == repository.id,
+            Commit.path == commit.path,
+            or_(
+                Commit.commit_time < commit.commit_time,
+                and_(Commit.commit_time == commit.commit_time, Commit.id < commit.id),
+            ),
+        ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
+    if previous_commit is None:
+        previous_commit = Commit.query.filter(
+            Commit.repository_id == repository.id,
+            Commit.path == commit.path,
+            Commit.id < commit.id,
+        ).order_by(Commit.id.desc()).first()
+    return previous_commit
+
+
 def get_excel_diff_data_with_path(project_code, repository_name, commit_id):
     commit = Commit.query.get_or_404(commit_id)
     _ensure_commit_route_scope_or_404(
@@ -1275,6 +1299,71 @@ def get_excel_diff_data(commit_id):
     is_excel = excel_cache_service.is_excel_file(commit.path)
     if not is_excel:
         return jsonify({'error': True, 'message': '不是Excel文件'})
+
+    if is_agent_dispatch_mode():
+        force_retry = str(request.args.get("force_retry") or "").strip().lower() in {"1", "true", "yes"}
+        dispatch_result = dispatch_or_get_commit_diff(commit, force_retry=force_retry)
+        status = str(dispatch_result.get("status") or "")
+        if status == "ready":
+            payload = dispatch_result.get("payload") or {}
+            diff_data = payload.get("diff_data")
+            if not isinstance(diff_data, dict):
+                return jsonify({
+                    "success": False,
+                    "status": "error",
+                    "message": "Agent diff 返回格式异常",
+                }), 500
+            try:
+                html_content, css_content, js_content = excel_html_cache_service.generate_excel_html(diff_data)
+            except Exception as render_exc:
+                return jsonify({
+                    "success": True,
+                    "from_agent": True,
+                    "from_data_cache": False,
+                    "html_render_failed": True,
+                    "message": f"Excel HTML 渲染失败: {render_exc}",
+                    "diff_data": diff_data,
+                })
+
+            metadata = {
+                "file_path": commit.path,
+                "commit_id": commit.commit_id,
+                "repository_name": repository.name,
+                "source": "agent_commit_diff",
+            }
+            return jsonify({
+                "success": True,
+                "from_agent": True,
+                "from_html_cache": False,
+                "from_data_cache": False,
+                "html_content": html_content,
+                "css_content": css_content,
+                "js_content": js_content,
+                "metadata": metadata,
+            })
+
+        if status == "unbound":
+            return jsonify({
+                "success": False,
+                "status": "unbound",
+                "message": dispatch_result.get("message") or "项目未绑定 Agent",
+            }), 409
+
+        if status in {"pending", "pending_offline"}:
+            return jsonify({
+                "success": True,
+                "pending": True,
+                "status": status,
+                "message": dispatch_result.get("message") or "Agent 正在处理diff",
+                "retry_after_seconds": dispatch_result.get("retry_after_seconds") or 60,
+                "task_id": dispatch_result.get("task_id"),
+            }), 202
+
+        return jsonify({
+            "success": False,
+            "status": "error",
+            "message": dispatch_result.get("message") or "Agent diff 获取失败",
+        }), 500
 
     try:
         # 首先检查HTML缓存（优先级最高）
@@ -1710,6 +1799,38 @@ def refresh_commit_diff(commit_id):
     try:
         commit = Commit.query.get_or_404(commit_id)
         repository, _project = _ensure_commit_access_or_403(commit)
+        if is_agent_dispatch_mode():
+            dispatch_result = dispatch_or_get_commit_diff(commit, force_retry=True)
+            status = str(dispatch_result.get("status") or "")
+            if status == "ready":
+                payload = dispatch_result.get("payload") or {}
+                return jsonify({
+                    "success": True,
+                    "status": "ready",
+                    "message": "Agent diff 已就绪",
+                    "diff_data": payload.get("diff_data"),
+                    "previous_commit": payload.get("previous_commit"),
+                })
+            if status == "unbound":
+                return jsonify({
+                    "success": False,
+                    "status": "unbound",
+                    "message": dispatch_result.get("message") or "项目未绑定 Agent",
+                }), 409
+            if status in {"pending", "pending_offline"}:
+                return jsonify({
+                    "success": True,
+                    "status": status,
+                    "pending": True,
+                    "message": dispatch_result.get("message") or "Agent 正在处理diff",
+                    "retry_after_seconds": dispatch_result.get("retry_after_seconds") or 60,
+                    "task_id": dispatch_result.get("task_id"),
+                }), 202
+            return jsonify({
+                "success": False,
+                "status": "error",
+                "message": dispatch_result.get("message") or "派发 Agent diff 失败",
+            }), 500
         log_print(f"🔄 开始重新计算差异: commit={commit_id}, file={commit.path}", 'APP')
         # 记录开始时间
         start_time = time.time()
@@ -1818,6 +1939,7 @@ def commit_diff(commit_id):
     diff_request_start = time.time()
     commit = Commit.query.get_or_404(commit_id)
     repository, project = _ensure_commit_access_or_403(commit)
+    agent_dispatch = is_agent_dispatch_mode()
     # 检查是否为删除操作
     is_deleted = commit.operation == 'D'
     # 检查是否为Excel文件
@@ -1827,7 +1949,10 @@ def commit_diff(commit_id):
         Commit.repository_id == repository.id,
         Commit.path == commit.path
     ).order_by(Commit.commit_time.desc(), Commit.id.desc()).all()
-    previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
+    if agent_dispatch:
+        previous_commit = _resolve_previous_commit_db_only(commit)
+    else:
+        previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
     try:
         commits_for_author_mapping = [commit]
         if previous_commit:
@@ -1852,7 +1977,23 @@ def commit_diff(commit_id):
                              file_commits=file_commits,
                              previous_commit=previous_commit,
                              is_excel=is_excel,
-                             is_deleted=True)
+                             is_deleted=True,
+                             async_agent_diff=False,
+                             agent_diff_endpoint=url_for("get_commit_diff_data", commit_id=commit.id))
+    if agent_dispatch:
+        return render_template(
+            'commit_diff.html',
+            commit=commit,
+            repository=repository,
+            project=project,
+            diff_data=None,
+            file_commits=file_commits,
+            previous_commit=previous_commit,
+            is_excel=is_excel,
+            is_deleted=False,
+            async_agent_diff=True,
+            agent_diff_endpoint=url_for("get_commit_diff_data", commit_id=commit.id),
+        )
     if is_excel:
         # Excel文件处理 - 优先使用缓存
         try:
@@ -1960,7 +2101,9 @@ def commit_diff(commit_id):
             'file_commits': file_commits,
             'previous_commit': previous_commit,
             'is_excel': True,
-            'is_deleted': False
+            'is_deleted': False,
+            'async_agent_diff': False,
+            'agent_diff_endpoint': url_for("get_commit_diff_data", commit_id=commit.id),
         }
         log_print(f"🔍 模板上下文键: {list(template_context.keys())}", 'EXCEL', force=True)
         log_print(f"🔍 is_excel值: {template_context['is_excel']}, 类型: {type(template_context['is_excel'])}", 'EXCEL', force=True)
@@ -1996,7 +2139,9 @@ def commit_diff(commit_id):
                              file_commits=file_commits,
                              previous_commit=previous_commit,
                              is_excel=False,
-                             is_deleted=False)
+                             is_deleted=False,
+                             async_agent_diff=False,
+                             agent_diff_endpoint=url_for("get_commit_diff_data", commit_id=commit.id))
 # 确认/拒绝提交（旧版本，已被新的API替代）
 # 重新生成Diff缓存
 

@@ -26,7 +26,7 @@ python start_agent.py
   - 即使 `AGENT_PROJECT_CODES` 为空，该用户也可在平台创建项目并默认绑定到该 Agent。
 - Agent 会按配置周期上报 CPU/内存/磁盘/系统信息到平台。
 - `AGENT_LOCAL_TASK_TYPES`（可选高级项）控制哪些任务在 Agent 本地执行：
-  - 默认全量本地执行：`auto_sync/excel_diff/weekly_sync/weekly_excel_cache/temp_cache_fetch`；
+  - 默认全量本地执行：`auto_sync/commit_diff/excel_diff/weekly_sync/weekly_excel_cache/temp_cache_fetch`；
   - 当前版本会强制补齐上述任务类型，建议保持默认不配置。
 - `AGENT_TEMP_CACHE_THRESHOLD_BYTES` 支持表达式写法，例如：`1*1024_1024`。
 - Agent 支持 release 包自更新（默认开启）：

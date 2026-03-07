@@ -224,10 +224,33 @@
                     </div>
                     {% endif %}
                 {% else %}
+                {% if async_agent_diff %}
+                <div id="excel-loading-indicator" class="p-4 text-center">
+                    <div class="d-flex flex-column align-items-center">
+                        <div class="spinner-border text-primary mb-3" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <h6 class="mb-2">正在等待 Agent 生成Excel差异...</h6>
+                        <p class="text-muted mb-0">
+                            <span id="loading-progress-text">正在派发任务并轮询结果，请稍候</span>
+                        </p>
+                        <div class="progress mt-3" style="width: 300px; height: 8px;">
+                            <div id="loading-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
+                                 role="progressbar" style="width: 15%" aria-valuenow="15" aria-valuemin="0" aria-valuemax="100"></div>
+                        </div>
+                        <div id="agent-diff-offline-tip" class="text-warning mt-3 small" style="display:none;"></div>
+                        <button id="agent-diff-retry-btn" class="btn btn-sm btn-outline-primary mt-2" style="display:none;">
+                            手动重试
+                        </button>
+                    </div>
+                </div>
+                <div id="excel-diff-container" class="excel-diff-container" style="display: none;"></div>
+                {% else %}
                 <div class="p-4 text-center text-muted">
                     <i class="bi bi-file-earmark-excel fs-1 mb-3"></i>
                     <p>无法获取Excel文件的差异数据</p>
                 </div>
+                {% endif %}
                 {% endif %}
             {% else %}
                 <!-- 代码diff显示 -->
@@ -302,10 +325,25 @@
                         </div>
                     {% endif %}
                 {% else %}
+                {% if async_agent_diff %}
+                <div id="agent-code-diff-loading" class="p-4 text-center text-muted">
+                    <div class="spinner-border text-primary mb-3" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <p class="mb-2">正在等待 Agent 生成代码差异...</p>
+                    <p id="agent-diff-status-text" class="small mb-0">任务已派发，正在轮询结果</p>
+                    <div id="agent-diff-offline-tip" class="text-warning mt-2 small" style="display:none;"></div>
+                    <button id="agent-diff-retry-btn" class="btn btn-sm btn-outline-primary mt-2" style="display:none;">
+                        手动重试
+                    </button>
+                </div>
+                <div id="agent-code-diff-container" style="display:none;"></div>
+                {% else %}
                 <div class="p-4 text-center text-muted">
                     <i class="bi bi-file-earmark-text fs-1 mb-3"></i>
                     <p>无法获取文件的差异数据</p>
                 </div>
+                {% endif %}
                 {% endif %}
             {% endif %}
         </div>
@@ -597,7 +635,7 @@ function updateLoadingProgress(percent, text) {
 }
 
 // Excel diff 处理 - v3.0 延迟加载优化
-{% if is_excel and diff_data %}
+{% if is_excel and diff_data and not async_agent_diff %}
 // 延迟Excel数据处理，确保页面静态内容先显示
 document.addEventListener('DOMContentLoaded', function() {
     // 等待页面完全加载后再处理Excel数据
@@ -1483,7 +1521,7 @@ function executeDiffCompare() {
 
 <!-- Excel diff处理脚本 -->
 <!-- TEMPLATE_DEBUG: is_excel={{ is_excel }} -->
-{% if is_excel %}
+{% if is_excel and not async_agent_diff %}
 <script type="application/json" id="excel-diff-data">null</script>
 <script>
 (function() {
@@ -1547,3 +1585,218 @@ function executeDiffCompare() {
 </script>
 {% endif %}
 
+{% if async_agent_diff and not is_deleted %}
+<script>
+(function() {
+    'use strict';
+
+    var apiUrl = '{{ agent_diff_endpoint }}';
+    var isExcel = {{ 'true' if is_excel else 'false' }};
+    var pollStartedAt = Date.now();
+    var pollStopped = false;
+
+    function esc(text) {
+        var div = document.createElement('div');
+        div.textContent = text == null ? '' : String(text);
+        return div.innerHTML;
+    }
+
+    function normalizeLineType(rawType) {
+        var value = String(rawType || '').toLowerCase();
+        if (value === 'added' || value === 'add' || value === '+') return 'added';
+        if (value === 'removed' || value === 'delete' || value === '-') return 'removed';
+        return 'context';
+    }
+
+    function renderCodeDiff(diffData) {
+        if (!diffData || typeof diffData !== 'object') {
+            return '<div class="alert alert-warning m-3">代码差异数据为空</div>';
+        }
+        if (String(diffData.type || '').toLowerCase() === 'error') {
+            return '<div class="alert alert-danger m-3">' + esc(diffData.message || '代码差异暂不可用') + '</div>';
+        }
+
+        var html = '<div class="text-diff-container">';
+
+        if (Array.isArray(diffData.hunks) && diffData.hunks.length > 0) {
+            diffData.hunks.forEach(function(hunk) {
+                var oldLine = Number(hunk.old_start || 1);
+                var newLine = Number(hunk.new_start || 1);
+                html += '<div class="text-diff-hunk">';
+                html += '<div class="text-diff-hunk-header"><code>' + esc(hunk.header || '') + '</code></div>';
+                (hunk.lines || []).forEach(function(line) {
+                    var lineType = normalizeLineType(line.type);
+                    var sign = lineType === 'added' ? '+' : (lineType === 'removed' ? '-' : '&nbsp;');
+                    var oldNo = lineType === 'added' ? '' : String(oldLine);
+                    var newNo = lineType === 'removed' ? '' : String(newLine);
+                    var codeHtml = (typeof line.content_html === 'string') ? line.content_html : esc(line.content || '');
+                    html += '<div class="text-diff-line ' + lineType + '">';
+                    html += '<span class="text-diff-line-number">' + esc(oldNo) + '</span>';
+                    html += '<span class="text-diff-line-number">' + esc(newNo) + '</span>';
+                    html += '<span class="text-diff-line-content">';
+                    html += '<span class="text-diff-line-sign">' + sign + '</span>';
+                    html += '<span class="text-diff-line-code">' + codeHtml + '</span>';
+                    html += '</span></div>';
+                    if (lineType !== 'added') oldLine += 1;
+                    if (lineType !== 'removed') newLine += 1;
+                });
+                html += '</div>';
+            });
+            html += '</div>';
+            return html;
+        }
+
+        if (Array.isArray(diffData.lines) && diffData.lines.length > 0) {
+            diffData.lines.forEach(function(line) {
+                var lineType = normalizeLineType(line.type);
+                var sign = lineType === 'added' ? '+' : (lineType === 'removed' ? '-' : '&nbsp;');
+                var oldNo = line.old_line_number == null ? '' : String(line.old_line_number);
+                var newNo = line.new_line_number == null ? '' : String(line.new_line_number);
+                var codeHtml = (typeof line.content_html === 'string') ? line.content_html : esc(line.content || '');
+                html += '<div class="text-diff-line ' + lineType + '">';
+                html += '<span class="text-diff-line-number">' + esc(oldNo) + '</span>';
+                html += '<span class="text-diff-line-number">' + esc(newNo) + '</span>';
+                html += '<span class="text-diff-line-content">';
+                html += '<span class="text-diff-line-sign">' + sign + '</span>';
+                html += '<span class="text-diff-line-code">' + codeHtml + '</span>';
+                html += '</span></div>';
+            });
+            html += '</div>';
+            return html;
+        }
+
+        if (diffData.patch) {
+            html += '<pre><code>' + esc(diffData.patch) + '</code></pre></div>';
+            return html;
+        }
+
+        return '<div class="alert alert-info m-3">暂无可展示的diff内容</div>';
+    }
+
+    function updatePendingUI(status, message) {
+        var elapsedMs = Date.now() - pollStartedAt;
+        var retryBtn = document.getElementById('agent-diff-retry-btn');
+        var offlineTip = document.getElementById('agent-diff-offline-tip');
+        var statusText = document.getElementById('agent-diff-status-text');
+        var loadingText = document.getElementById('loading-progress-text');
+
+        var defaultMsg = status === 'pending_offline'
+            ? 'Agent 离线，等待上线后自动继续'
+            : 'Agent 正在处理差异，请稍候';
+        var displayMsg = message || defaultMsg;
+
+        if (statusText) statusText.textContent = displayMsg;
+        if (loadingText) loadingText.textContent = displayMsg;
+
+        if (offlineTip) {
+            if (status === 'pending_offline') {
+                offlineTip.style.display = 'block';
+                offlineTip.textContent = 'Agent 离线中，页面将持续轮询；1分钟后可手动重试。';
+            } else {
+                offlineTip.style.display = 'none';
+            }
+        }
+
+        if (retryBtn) {
+            if (status === 'pending_offline' && elapsedMs >= 60000) {
+                retryBtn.style.display = 'inline-block';
+            } else {
+                retryBtn.style.display = 'none';
+            }
+        }
+    }
+
+    function showError(message) {
+        var msg = message || '获取差异失败，请稍后重试';
+        if (isExcel) {
+            var loadingEl = document.getElementById('excel-loading-indicator');
+            var container = document.getElementById('excel-diff-container');
+            if (loadingEl) loadingEl.style.display = 'none';
+            if (container) {
+                container.style.display = 'block';
+                container.innerHTML = '<div class="alert alert-warning m-3">' + esc(msg) + '</div>';
+            }
+            return;
+        }
+        var codeLoading = document.getElementById('agent-code-diff-loading');
+        var codeContainer = document.getElementById('agent-code-diff-container');
+        if (codeLoading) codeLoading.style.display = 'none';
+        if (codeContainer) {
+            codeContainer.style.display = 'block';
+            codeContainer.innerHTML = '<div class="alert alert-warning m-3">' + esc(msg) + '</div>';
+        }
+    }
+
+    function showReady(diffData) {
+        if (isExcel) {
+            if (!diffData || !diffData.sheets) {
+                showError('Excel diff 数据为空或格式异常');
+                return;
+            }
+            window.excelDiffData = diffData;
+            displayExcelDiffWithProgress(diffData);
+            return;
+        }
+        var codeLoading = document.getElementById('agent-code-diff-loading');
+        var codeContainer = document.getElementById('agent-code-diff-container');
+        if (codeLoading) codeLoading.style.display = 'none';
+        if (codeContainer) {
+            codeContainer.style.display = 'block';
+            codeContainer.innerHTML = renderCodeDiff(diffData);
+        }
+    }
+
+    function pollDiff(forceRetry) {
+        if (pollStopped) return;
+        var url = apiUrl + (forceRetry ? '?force_retry=1' : '');
+        fetch(url)
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (pollStopped) return;
+
+                if (data && data.success && data.diff_data) {
+                    pollStopped = true;
+                    showReady(data.diff_data);
+                    return;
+                }
+
+                var status = String((data && data.status) || '');
+                if (status === 'pending' || status === 'pending_offline' || (data && data.pending)) {
+                    updatePendingUI(status || 'pending', data.message || '');
+                    setTimeout(function() { pollDiff(false); }, status === 'pending_offline' ? 3000 : 1500);
+                    return;
+                }
+
+                if (status === 'unbound') {
+                    pollStopped = true;
+                    showError(data.message || '当前项目未绑定 Agent');
+                    return;
+                }
+
+                pollStopped = true;
+                showError((data && data.message) || '获取差异失败');
+            })
+            .catch(function() {
+                if (pollStopped) return;
+                updatePendingUI('pending', '网络波动，正在重试...');
+                setTimeout(function() { pollDiff(false); }, 2500);
+            });
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        var retryBtn = document.getElementById('agent-diff-retry-btn');
+        if (retryBtn) {
+            retryBtn.addEventListener('click', function() {
+                pollStartedAt = Date.now();
+                retryBtn.style.display = 'none';
+                pollStopped = false;
+                updatePendingUI('pending', '已发起手动重试，正在轮询结果...');
+                pollDiff(true);
+            });
+        }
+        updatePendingUI('pending', '正在派发 Agent diff 任务...');
+        pollDiff(false);
+    });
+})();
+</script>
+{% endif %}

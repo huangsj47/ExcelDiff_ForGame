@@ -96,14 +96,14 @@
 }
 
 .text-diff-inline-added {
-    background: #2f6f44;
-    color: #fff;
+    background: #d9f2e0;
+    color: #1f5d35;
     border-radius: 2px;
 }
 
 .text-diff-inline-removed {
-    background: #9a313c;
-    color: #fff;
+    background: #f8dde1;
+    color: #8a2c36;
     border-radius: 2px;
 }
 

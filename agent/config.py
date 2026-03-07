@@ -35,6 +35,7 @@ def _split_csv(raw: str):
 
 _AGENT_TASK_TYPE_ALLOWED = (
     "auto_sync",
+    "commit_diff",
     "excel_diff",
     "weekly_sync",
     "weekly_excel_cache",
@@ -42,6 +43,7 @@ _AGENT_TASK_TYPE_ALLOWED = (
 )
 _AGENT_TASK_TYPE_REQUIRED = (
     "auto_sync",
+    "commit_diff",
     "excel_diff",
     "weekly_sync",
     "weekly_excel_cache",
@@ -162,7 +164,7 @@ def load_settings() -> AgentSettings:
     project_codes = _split_csv(os.environ.get("AGENT_PROJECT_CODES") or "")
     local_task_types = _normalize_local_task_types(
         os.environ.get("AGENT_LOCAL_TASK_TYPES")
-        or "auto_sync,excel_diff,weekly_sync,weekly_excel_cache,temp_cache_fetch"
+        or "auto_sync,commit_diff,excel_diff,weekly_sync,weekly_excel_cache,temp_cache_fetch"
     )
     repos_base_dir = (os.environ.get("AGENT_REPOS_BASE_DIR") or "agent_repos").strip()
     configured_host = (os.environ.get("AGENT_HOST") or "").strip()

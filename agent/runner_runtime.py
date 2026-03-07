@@ -225,6 +225,7 @@ def run_agent():
                 "default_admin_username": settings.default_admin_username,
                 "project_codes": settings.project_codes,
                 "capabilities": {
+                    "supports_commit_diff": True,
                     "supports_excel_diff": True,
                     "supports_weekly_diff": True,
                     "supports_self_update": True,

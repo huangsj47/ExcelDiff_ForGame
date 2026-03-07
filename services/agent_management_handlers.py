@@ -587,7 +587,8 @@ def _get_agent_by_identity(agent_code: str, agent_token: str):
 
 
 def _temp_cache_retention_days() -> int:
-    return _int_env("PLATFORM_TEMP_CACHE_EXPIRE_DAYS", 90, min_value=1, max_value=365)
+    # 按需求：diff结果缓存保留时长直接取 Agent TTL 配置。
+    return _int_env("AGENT_TEMP_CACHE_EXPIRE_DAYS", 90, min_value=1, max_value=365)
 
 
 def _temp_cache_max_payload_bytes() -> int:
@@ -1628,6 +1629,37 @@ def agent_report_task_result(task_id):
         effective_result_summary = result_summary
         if status == "completed" and task.task_type == "auto_sync" and isinstance(result_payload, dict):
             effective_result_summary = _apply_auto_sync_result(task, result_payload)
+        if status == "completed" and task.task_type == "commit_diff" and isinstance(result_payload, dict):
+            cache_key = str(result_payload.get("cache_key") or "").strip()
+            payload_hash = str(result_payload.get("payload_hash") or "").strip()
+            payload_size = int(result_payload.get("payload_size") or 0)
+            inline_payload_json = result_payload.get("inline_payload_json")
+            summary_payload = {
+                "message": "commit_diff completed",
+                "cache_key": cache_key or None,
+                "payload_hash": payload_hash or None,
+                "payload_size": payload_size,
+                "repository_id": result_payload.get("repository_id") or task.repository_id,
+                "commit_id": result_payload.get("commit_id"),
+                "file_path": result_payload.get("file_path"),
+                "expire_seconds": result_payload.get("expire_seconds"),
+            }
+            if inline_payload_json is not None:
+                if not isinstance(inline_payload_json, str):
+                    inline_payload_json = json.dumps(inline_payload_json, ensure_ascii=False)
+                summary_payload["inline_payload_json"] = inline_payload_json
+
+            if cache_key and bool(result_payload.get("prefetch_platform_cache")):
+                fetch_task_id = _dispatch_agent_local_cache_fetch(
+                    db=db,
+                    cache_key=cache_key,
+                    expected_hash=payload_hash,
+                    project_id=task.project_id,
+                    repository_id=result_payload.get("repository_id") or task.repository_id,
+                )
+                summary_payload["prefetch_task_id"] = fetch_task_id
+
+            effective_result_summary = summary_payload
         if status == "completed" and task.task_type == "temp_cache_fetch" and isinstance(result_payload, dict):
             if result_payload.get("payload_json") is not None:
                 payload_json = result_payload.get("payload_json")
