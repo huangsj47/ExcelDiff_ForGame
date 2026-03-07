@@ -31,6 +31,7 @@
   - 验收：生产路径不再出现 `_original_print`；日志级别可配置。
 - [ ] 4. 缩减裸 `except Exception`（先处理 `app.py`、`task_worker_service.py`）
   - 进展（2026-03-08）：已清理裸 `except:`，并将 DB rollback 相关分支收敛为 `SQLAlchemyError`。
+  - 进展（2026-03-08）：`reuse_repository_and_update`/`update_repository_and_cache`/`batch_update_credentials` 已按 `NotFound`、`SQLAlchemyError`、参数错误分类处理，并新增接口异常单测覆盖。
   - 下一步：继续按模块将通用 `except Exception` 拆分为更具体异常（IO/网络/数据校验）并补充错误标签。
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 

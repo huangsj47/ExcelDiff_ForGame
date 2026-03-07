@@ -2527,6 +2527,12 @@ def reuse_repository_and_update(repository_id):
     """复用仓库并触发更新和缓存操作的API接口"""
     try:
         data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({
+                'success': False,
+                'message': '请求体必须为JSON对象',
+                'error_type': 'invalid_request',
+            }), 400
         action = data.get('action', 'pull_and_cache')
         repository = Repository.query.get_or_404(repository_id)
         log_print(f"🔄 收到仓库复用更新请求: {repository.name} (ID: {repository_id})", 'API')
@@ -2554,11 +2560,26 @@ def reuse_repository_and_update(repository_id):
             'repository_id': repository_id,
             'action': action
         })
-    except Exception as e:
-        log_print(f"❌ 仓库更新API异常: {e}", 'API', force=True)
+    except NotFound:
         return jsonify({
             'success': False,
-            'message': f'更新失败: {str(e)}'
+            'message': '仓库不存在',
+            'error_type': 'repository_not_found',
+        }), 404
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        log_print(f"❌ 仓库复用更新数据库异常: {e}", 'API', force=True)
+        return jsonify({
+            'success': False,
+            'message': '数据库操作失败，请稍后重试',
+            'error_type': 'database_error',
+        }), 500
+    except RuntimeError as e:
+        log_print(f"❌ 仓库复用更新运行时异常: {e}", 'API', force=True)
+        return jsonify({
+            'success': False,
+            'message': f'更新失败: {str(e)}',
+            'error_type': 'runtime_error',
         }), 500
 def check_local_repository_exists(project_code, repository_name, repository_id):
     """检查本地仓库是否存在"""
@@ -3029,6 +3050,12 @@ def update_repository_and_cache(repository_id):
     """更新仓库并触发缓存操作的API接口"""
     try:
         data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({
+                'success': False,
+                'message': '请求体必须为JSON对象',
+                'error_type': 'invalid_request',
+            }), 400
         action = data.get('action', 'pull_and_cache')
         repository = Repository.query.get_or_404(repository_id)
         log_print(f"🔄 收到仓库更新请求: {repository.name} (ID: {repository_id})", 'API')
@@ -3041,11 +3068,26 @@ def update_repository_and_cache(repository_id):
             'repository_id': repository_id,
             'action': action
         })
-    except Exception as e:
-        log_print(f"❌ 仓库更新API异常: {e}", 'API', force=True)
+    except NotFound:
         return jsonify({
             'success': False,
-            'message': f'更新失败: {str(e)}'
+            'message': '仓库不存在',
+            'error_type': 'repository_not_found',
+        }), 404
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        log_print(f"❌ 仓库更新数据库异常: {e}", 'API', force=True)
+        return jsonify({
+            'success': False,
+            'message': '数据库操作失败，请稍后重试',
+            'error_type': 'database_error',
+        }), 500
+    except RuntimeError as e:
+        log_print(f"❌ 仓库更新运行时异常: {e}", 'API', force=True)
+        return jsonify({
+            'success': False,
+            'message': f'更新失败: {str(e)}',
+            'error_type': 'runtime_error',
         }), 500
 # 批量更新仓库凭据
 
@@ -3054,7 +3096,13 @@ def update_repository_and_cache(repository_id):
 def batch_update_credentials():
     """批量更新项目下的仓库凭据"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({
+                'status': 'error',
+                'message': '请求体必须为JSON对象',
+                'error_type': 'invalid_request',
+            }), 400
         project_id = data.get('project_id')
         repo_type = data.get('repo_type')
         if not project_id or not repo_type:
@@ -3096,10 +3144,20 @@ def batch_update_credentials():
             'message': f'成功更新{updated_count}个{repo_type.upper()}仓库',
             'updated_count': updated_count
         })
-    except Exception as e:
+    except SQLAlchemyError as e:
         db.session.rollback()
         app.logger.error(f"批量更新仓库凭据失败: {str(e)}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({
+            'status': 'error',
+            'message': '数据库更新失败，请稍后重试',
+            'error_type': 'database_error',
+        }), 500
+    except (TypeError, ValueError) as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'请求参数错误: {e}',
+            'error_type': 'invalid_request',
+        }), 400
 
 @app.context_processor
 def inject_template_functions():
