@@ -135,3 +135,26 @@ class TestWeeklyTodoFollowups:
         service_content = _read("services/commit_status_api_service.py")
         assert "def handle_update_commit_status(" in service_content
         assert "def handle_batch_update_commits_compat(" in service_content
+
+    def test_repository_maintenance_api_logic_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.repository_maintenance_api_service import (" in app_content
+        assert "handle_regenerate_cache" in app_content
+        assert "handle_get_cache_status" in app_content
+        assert "handle_get_clone_status" in app_content
+        assert "handle_retry_clone_repository" in app_content
+        assert "handle_sync_repository" in app_content
+        assert "should_retry_with_reclone" in app_content
+        assert "return handle_regenerate_cache(" in app_content
+        assert "return handle_get_cache_status(" in app_content
+        assert "return handle_get_clone_status(" in app_content
+        assert "return handle_retry_clone_repository(" in app_content
+        assert "return handle_sync_repository(" in app_content
+
+        service_content = _read("services/repository_maintenance_api_service.py")
+        assert "def handle_regenerate_cache(" in service_content
+        assert "def handle_get_cache_status(" in service_content
+        assert "def handle_get_clone_status(" in service_content
+        assert "def should_retry_with_reclone(" in service_content
+        assert "def handle_retry_clone_repository(" in service_content
+        assert "def handle_sync_repository(" in service_content
