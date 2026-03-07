@@ -94,3 +94,14 @@ class TestWeeklyTodoFollowups:
         assert "def configure_app_security_bootstrap(" in service_content
         assert "def _prefers_json_error_response() -> bool:" in service_content
         assert "def _infer_resource_label_from_path(path: str) -> str:" in service_content
+
+    def test_repository_update_form_logic_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.repository_update_form_service import (" in app_content
+        assert "handle_update_repository_form" in app_content
+        assert "clear_repository_state_for_switch" in app_content
+        assert "return handle_update_repository_form(" in app_content
+
+        service_content = _read("services/repository_update_form_service.py")
+        assert "def handle_update_repository_form(" in service_content
+        assert "def clear_repository_state_for_switch(" in service_content
