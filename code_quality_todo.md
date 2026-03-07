@@ -33,6 +33,7 @@
   - 进展（2026-03-08）：已清理裸 `except:`，并将 DB rollback 相关分支收敛为 `SQLAlchemyError`。
   - 进展（2026-03-08）：`reuse_repository_and_update`/`update_repository_and_cache`/`batch_update_credentials` 已按 `NotFound`、`SQLAlchemyError`、参数错误分类处理，并新增接口异常单测覆盖。
   - 进展（2026-03-08）：`update_commit_status`/`batch_update_commits_compat` 已补充 JSON 参数校验与数据库异常分类处理，新增提交状态接口异常单测。
+  - 进展（2026-03-08）：`task_worker_service` 首批工具函数异常已收敛（目录删除、进程清理、任务状态更新、ID解析），并补充异常路径单测。
   - 下一步：继续按模块将通用 `except Exception` 拆分为更具体异常（IO/网络/数据校验）并补充错误标签。
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 

@@ -89,7 +89,7 @@ def _force_remove_repo_worktree(local_path: str):
 
     try:
         shutil.rmtree(target, ignore_errors=False)
-    except Exception as exc:
+    except (OSError, PermissionError) as exc:
         log_print(f"⚠️ 删除仓库目录失败，尝试命令行兜底: {target} | {exc}", "SYNC", force=True)
 
     if os.path.exists(target):
@@ -103,7 +103,7 @@ def _force_remove_repo_worktree(local_path: str):
                 )
             else:
                 shutil.rmtree(target, ignore_errors=True)
-        except Exception as exc:
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
             log_print(f"⚠️ 目录删除兜底失败: {target} | {exc}", "SYNC", force=True)
 
     if os.path.exists(target):
@@ -149,7 +149,7 @@ def _enqueue_agent_task_from_background_task(db_task, extra_payload=None):
     elif task_type == "weekly_sync":
         try:
             config_id = int(db_task.commit_id)
-        except Exception:
+        except (TypeError, ValueError):
             config_id = None
         config = _db.session.get(_WeeklyVersionConfig, config_id) if config_id else None
         if config:
@@ -199,7 +199,7 @@ def _ensure_agent_dispatch_for_background_task(db_task, extra_payload=None):
         ).first()
         if existing_agent_task:
             return False
-    except Exception as exc:
+    except (ImportError, SQLAlchemyError, RuntimeError, AttributeError) as exc:
         log_print(f"检查 AgentTask 关联关系失败，改为直接补下发: {exc}", "SYNC", force=True)
 
     return _enqueue_agent_task_from_background_task(db_task, extra_payload=extra_payload)
@@ -297,7 +297,7 @@ def cleanup_git_processes():
                 proc.terminate()
                 proc.wait(timeout=5)
             _active_git_processes.discard(proc)
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError, AttributeError, subprocess.SubprocessError) as e:
             log_print(f"清理Git进程时出错: {e}", 'GIT', force=True)
             try:
                 proc.kill()
@@ -345,7 +345,7 @@ def update_task_status_with_retry(task_id, status, error_message=None):
             log_print(f"✅ 任务状态更新成功: {task_id} -> {status}", 'TASK')
         else:
             log_print(f"⚠️ 未找到任务: {task_id}", 'TASK')
-    except Exception as e:
+    except SQLAlchemyError as e:
         log_print(f"❌ 更新任务状态失败: {task_id} -> {status}, 错误: {e}", 'TASK', force=True)
         _db.session.rollback()
         raise e
