@@ -181,6 +181,27 @@ def _enqueue_agent_task_from_background_task(db_task, extra_payload=None):
     return True
 
 
+def _ensure_agent_dispatch_for_background_task(db_task, extra_payload=None):
+    """确保 pending 的 BackgroundTask 在 platform/agent 模式下有可领取的 AgentTask。"""
+    if not _use_agent_dispatch() or db_task is None:
+        return None
+    try:
+        from services.model_loader import get_runtime_models
+
+        (AgentTask,) = get_runtime_models("AgentTask")
+        existing_agent_task = AgentTask.query.filter(
+            AgentTask.source_task_id == db_task.id,
+            AgentTask.task_type == db_task.task_type,
+            AgentTask.status.in_(["pending", "processing"]),
+        ).first()
+        if existing_agent_task:
+            return False
+    except Exception as exc:
+        log_print(f"检查 AgentTask 关联关系失败，改为直接补下发: {exc}", "SYNC", force=True)
+
+    return _enqueue_agent_task_from_background_task(db_task, extra_payload=extra_payload)
+
+
 def _make_excel_task_key(repository_id, commit_id, file_path):
     return f"{repository_id}:{commit_id}:{file_path}"
 
@@ -1202,6 +1223,12 @@ def create_weekly_sync_task(config_id):
             status='pending'
         ).first()
         if existing_task:
+            if _use_agent_dispatch():
+                _ensure_agent_dispatch_for_background_task(
+                    existing_task,
+                    extra_payload={"config_id": config_id},
+                )
+                _db.session.commit()
             log_print(f"周版本配置 {config_id} 已存在待处理的同步任务", 'SYNC')
             return existing_task.id
 
@@ -1214,7 +1241,7 @@ def create_weekly_sync_task(config_id):
         )
         _db.session.add(new_task)
         _db.session.flush()
-        _enqueue_agent_task_from_background_task(
+        _ensure_agent_dispatch_for_background_task(
             new_task,
             extra_payload={"config_id": config_id},
         )

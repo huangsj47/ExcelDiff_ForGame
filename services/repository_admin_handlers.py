@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from flask import flash, jsonify, redirect, request, url_for
 from sqlalchemy import or_
 
@@ -211,6 +213,7 @@ def delete_repository(repository_id):
 def test_repository(repository_id):
     Repository, log_print = _runtime("Repository", "log_print")
     get_git_service = get_runtime_model("get_git_service")
+    create_auto_sync_task = get_runtime_model("create_auto_sync_task")
 
     repository = Repository.query.get_or_404(repository_id)
 
@@ -237,6 +240,23 @@ def test_repository(repository_id):
             )
         flash(message, category)
         return redirect(url_for("repository_config", project_id=repository.project_id))
+
+    deployment_mode = (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower()
+    if deployment_mode in {"platform", "agent"}:
+        task_id = create_auto_sync_task(repository.id)
+        if task_id:
+            return _respond(
+                True,
+                f"已派发到 Agent 执行连通性检查与同步 (task_id={task_id})，平台不再本地 clone 仓库",
+                category="success",
+                status_code=200,
+            )
+        return _respond(
+            False,
+            "平台+Agent 模式下未能派发测试任务，请检查项目与Agent绑定状态",
+            category="error",
+            status_code=409,
+        )
 
     try:
         log_print(f"测试仓库连接: {repository.name}", "TEST")

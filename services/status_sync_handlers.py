@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from flask import flash, jsonify, redirect, render_template, request, url_for
 
 from services.model_loader import get_runtime_model, get_runtime_models
-from utils.request_security import require_admin
+from utils.request_security import _get_accessible_project_ids, _has_project_access, require_admin
 
 
 @require_admin
@@ -36,6 +36,21 @@ def get_sync_mapping_info():
         repository_id = request.args.get("repository_id", type=int)
         project_id = request.args.get("project_id", type=int)
 
+        if project_id and not _has_project_access(project_id):
+            return jsonify({"success": False, "message": "权限不足"}), 403
+
+        if config_id:
+            (WeeklyVersionConfig,) = get_runtime_models("WeeklyVersionConfig")
+            config = WeeklyVersionConfig.query.get(config_id)
+            if config and not _has_project_access(config.project_id):
+                return jsonify({"success": False, "message": "权限不足"}), 403
+
+        if repository_id:
+            (Repository,) = get_runtime_models("Repository")
+            repo = Repository.query.get(repository_id)
+            if repo and not _has_project_access(repo.project_id):
+                return jsonify({"success": False, "message": "权限不足"}), 403
+
         from services.status_sync_service import StatusSyncService
 
         sync_service = StatusSyncService(db)
@@ -60,6 +75,8 @@ def project_status_sync_management(project_code):
     if not project:
         flash(f"项目 {project_code} 不存在", "error")
         return redirect(url_for("index"))
+    if not _has_project_access(project.id):
+        return "权限不足", 403
     return render_template("status_sync_management.html", project=project)
 
 
@@ -73,7 +90,15 @@ def get_sync_configs():
     WeeklyVersionConfig, log_print = get_runtime_models("WeeklyVersionConfig", "log_print")
     try:
         project_id = request.args.get("project_id", type=int)
+        accessible_project_ids = _get_accessible_project_ids()
+        if project_id and not _has_project_access(project_id):
+            return jsonify({"success": False, "message": "权限不足"}), 403
+
         query = WeeklyVersionConfig.query
+        if accessible_project_ids is not None:
+            if not accessible_project_ids:
+                return jsonify({"success": True, "configs": []})
+            query = query.filter(WeeklyVersionConfig.project_id.in_(accessible_project_ids))
         if project_id:
             query = query.filter_by(project_id=project_id)
 

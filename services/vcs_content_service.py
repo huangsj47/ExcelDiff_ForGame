@@ -29,6 +29,10 @@ _svn_service_lock = threading.Lock()
 _active_git_processes = None
 
 
+def _is_agent_dispatch_mode() -> bool:
+    return (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower() in {"platform", "agent"}
+
+
 def configure_vcs_service(active_git_processes_ref):
     """配置 VCS 服务模块，注入 active_git_processes 引用"""
     global _active_git_processes
@@ -76,6 +80,13 @@ def get_file_content_from_svn(repository, commit_id, file_path):
         log_print(f"获取SVN文件内容: {file_path}@{revision}", 'SVN')
         # 确保本地仓库存在
         if not os.path.exists(svn_service.local_path):
+            if _is_agent_dispatch_mode():
+                log_print(
+                    "platform/agent 模式：禁止平台本地 checkout SVN 仓库，请由 Agent 节点提供数据",
+                    'SVN',
+                    force=True,
+                )
+                return None
             success, message = svn_service.checkout_or_update_repository()
             if not success:
                 log_print(f"SVN仓库检出失败: {message}", 'SVN', force=True)
@@ -165,6 +176,13 @@ def get_file_content_from_git(repository, commit_id, file_path):
         log_print(f"检查本地路径: {git_service.local_path}", 'GIT')
         log_print(f"路径是否存在: {os.path.exists(git_service.local_path)}", 'GIT')
         if not os.path.exists(git_service.local_path):
+            if _is_agent_dispatch_mode():
+                log_print(
+                    "platform/agent 模式：禁止平台本地 clone Git 仓库，请由 Agent 节点提供数据",
+                    'GIT',
+                    force=True,
+                )
+                return None
             success, message = git_service.clone_or_update_repository()
             if not success:
                 log_print(f"仓库克隆失败: {message}", 'GIT', force=True)
@@ -196,6 +214,13 @@ def get_file_content_from_git(repository, commit_id, file_path):
         except Exception as e:
             log_print(f"无法找到commit {commit_id}: {e}", 'GIT')
             # 尝试fetch最新数据
+            if _is_agent_dispatch_mode():
+                log_print(
+                    "platform/agent 模式：禁止平台本地 fetch Git 远端，返回空内容",
+                    'GIT',
+                    force=True,
+                )
+                return None
             try:
                 repo.remotes.origin.fetch()
                 commit = repo.commit(commit_id)

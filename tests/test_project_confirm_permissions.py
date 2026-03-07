@@ -72,6 +72,7 @@ def test_qkit_project_confirm_permission_evaluate_and_security(monkeypatch):
 
         monkeypatch.setattr(auth, "get_auth_backend", lambda: "qkit")
         monkeypatch.setattr(request_security, "_has_admin_access", lambda: False)
+        monkeypatch.setattr(request_security, "_has_project_access", lambda _project_id: True)
         monkeypatch.setattr(request_security, "_get_current_user", lambda: user)
 
         allowed_confirm, msg_confirm = request_security.can_current_user_operate_project_confirmation(
@@ -90,3 +91,13 @@ def test_qkit_project_confirm_permission_evaluate_and_security(monkeypatch):
 
         deleted = clear_project_confirm_permissions(project.id)
         assert deleted == 1
+
+
+def test_project_confirm_permission_denies_when_no_project_access(monkeypatch):
+    monkeypatch.setattr(request_security, "_has_admin_access", lambda: False)
+    monkeypatch.setattr(request_security, "_has_project_access", lambda _project_id: False)
+    monkeypatch.setattr(request_security, "_get_current_user", lambda: object())
+
+    allowed, message = request_security.can_current_user_operate_project_confirmation(1001, "confirm")
+    assert allowed is False
+    assert "无权访问" in message

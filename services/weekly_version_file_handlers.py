@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 
-from flask import jsonify, redirect, render_template, request, url_for
+from flask import abort, jsonify, redirect, render_template, request, url_for
+from werkzeug.exceptions import HTTPException
 
 from services.model_loader import get_runtime_models
+from utils.request_security import _has_project_access
 
 
 def _resolve_username_display_name(username: str | None) -> str | None:
@@ -31,11 +34,17 @@ def _resolve_username_display_name(username: str | None) -> str | None:
         return normalized
 
 
+def _is_agent_dispatch_mode() -> bool:
+    return (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower() in {"platform", "agent"}
+
+
 def weekly_version_file_previous_version(config_id):
     """View previous version file content for weekly config."""
     WeeklyVersionConfig, Commit, log_print = get_runtime_models("WeeklyVersionConfig", "Commit", "log_print")
     try:
         config = WeeklyVersionConfig.query.get_or_404(config_id)
+        if not _has_project_access(config.project_id):
+            abort(403)
         file_path = request.args.get("file_path")
         commit_id = request.args.get("commit_id")
         if not file_path or not commit_id:
@@ -53,12 +62,19 @@ def weekly_version_file_previous_version(config_id):
         file_content = git_service.get_file_content(commit_id, file_path)
         if file_content is None:
             # 仓库本地状态可能滞后，先尝试更新后再取一次
-            try:
-                sync_ok, _ = git_service.clone_or_update_repository()
-                if sync_ok:
-                    file_content = git_service.get_file_content(commit_id, file_path)
-            except Exception:
-                pass
+            if _is_agent_dispatch_mode():
+                log_print(
+                    "platform/agent 模式：禁止平台本地更新 Git 仓库，跳过 clone_or_update",
+                    "WEEKLY",
+                    force=True,
+                )
+            else:
+                try:
+                    sync_ok, _ = git_service.clone_or_update_repository()
+                    if sync_ok:
+                        file_content = git_service.get_file_content(commit_id, file_path)
+                except Exception:
+                    pass
 
         if file_content is None:
             lower_path = file_path.lower()
@@ -105,6 +121,8 @@ def weekly_version_file_previous_version(config_id):
             commit_info=commit_info,
             file_content=file_content,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         log_print(f"查看上一版本文件失败: {exc}", "ERROR", force=True)
         return render_template(
@@ -125,6 +143,8 @@ def weekly_version_file_complete_diff(config_id):
 
     try:
         config = WeeklyVersionConfig.query.get_or_404(config_id)
+        if not _has_project_access(config.project_id):
+            abort(403)
         file_path = request.args.get("file_path")
         if not file_path:
             return "缺少文件路径参数", 400
@@ -194,6 +214,8 @@ def weekly_version_file_complete_diff(config_id):
             current_file_content=current_file_content,
             side_by_side_diff=side_by_side_diff,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         log_print(f"获取周版本完整文件对比失败: {exc}", "ERROR", force=True)
         return render_template(
@@ -213,6 +235,8 @@ def weekly_version_file_status_api(config_id):
     )
     try:
         config = WeeklyVersionConfig.query.get_or_404(config_id)
+        if not _has_project_access(config.project_id):
+            abort(403)
         data = request.get_json() or {}
         file_path = data.get("file_path")
         status = data.get("status")
@@ -262,6 +286,8 @@ def weekly_version_file_status_api(config_id):
             "status_changed_by_display": _resolve_username_display_name(diff_cache.status_changed_by),
             "status_changed_by_title": diff_cache.status_changed_by,
         })
+    except HTTPException:
+        raise
     except Exception as exc:
         db.session.rollback()
         log_print(f"更新文件状态失败: {exc}", "ERROR", force=True)
@@ -276,7 +302,9 @@ def weekly_version_file_status_info_api(config_id):
         "log_print",
     )
     try:
-        WeeklyVersionConfig.query.get_or_404(config_id)
+        config = WeeklyVersionConfig.query.get_or_404(config_id)
+        if not _has_project_access(config.project_id):
+            abort(403)
         file_path = request.args.get("file_path")
         if not file_path:
             return jsonify({"success": False, "message": "缺少文件路径参数"}), 400
@@ -295,6 +323,8 @@ def weekly_version_file_status_info_api(config_id):
                 "file_path": file_path,
             }
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         log_print(f"获取周版本文件状态失败: {exc}", "ERROR", force=True)
         return jsonify({"success": False, "message": f"获取失败: {str(exc)}"}), 500
@@ -308,7 +338,9 @@ def weekly_version_stats_api(config_id):
         "log_print",
     )
     try:
-        WeeklyVersionConfig.query.get_or_404(config_id)
+        config = WeeklyVersionConfig.query.get_or_404(config_id)
+        if not _has_project_access(config.project_id):
+            abort(403)
         total_files = WeeklyVersionDiffCache.query.filter_by(config_id=config_id).count()
         pending_count = WeeklyVersionDiffCache.query.filter_by(config_id=config_id, overall_status="pending").count()
         confirmed_count = WeeklyVersionDiffCache.query.filter_by(
@@ -328,6 +360,8 @@ def weekly_version_stats_api(config_id):
                 },
             }
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         log_print(f"获取周版本统计信息失败: {exc}", "ERROR", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500

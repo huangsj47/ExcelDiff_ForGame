@@ -354,6 +354,47 @@ def projects():
     return redirect(url_for("index"))
 
 
+def update_project(project_id):
+    project = Project.query.get_or_404(project_id)
+    if not (_has_admin_access() or _has_project_admin_access(project_id)):
+        abort(403)
+
+    payload = request.get_json(silent=True)
+    source = payload if isinstance(payload, dict) else request.form
+    name = str(source.get("name") or "").strip()
+    department = str(source.get("department") or "").strip()
+    wants_json = (
+        request.is_json
+        or request.headers.get("X-Requested-With") == "XMLHttpRequest"
+        or "application/json" in str(request.headers.get("Accept", "")).lower()
+    )
+
+    if not name:
+        message = "项目名称不能为空"
+        if wants_json:
+            return {"success": False, "message": message}, 400
+        flash(message, "error")
+        return redirect(url_for("index"))
+
+    project.name = name
+    project.department = department or None
+    db.session.commit()
+
+    if wants_json:
+        return {
+            "success": True,
+            "message": "项目信息更新成功",
+            "project": {
+                "id": project.id,
+                "code": project.code,
+                "name": project.name,
+                "department": project.department or "",
+            },
+        }
+    flash(f'项目 "{project.code}" 信息已更新', "success")
+    return redirect(url_for("index"))
+
+
 def project_detail(project_id):
     return redirect(url_for("merged_project_view", project_id=project_id))
 

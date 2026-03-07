@@ -200,6 +200,10 @@ def can_current_user_operate_project_confirmation(project_id, action: str):
     if _has_admin_access():
         return True, ""
 
+    # 非平台管理员必须先具备项目可访问权限，避免跨项目越权确认/拒绝。
+    if not _has_project_access(project_id):
+        return False, "当前账号无权访问该项目"
+
     user = _get_current_user()
     if not user:
         return False, "请先登录后再执行该操作"

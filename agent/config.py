@@ -205,7 +205,7 @@ def load_settings() -> AgentSettings:
         auto_update_enabled=_bool_env("AGENT_AUTO_UPDATE_ENABLED", True),
         auto_update_check_interval_seconds=max(
             30,
-            int((os.environ.get("AGENT_AUTO_UPDATE_CHECK_INTERVAL_SECONDS") or "300").strip()),
+            int((os.environ.get("AGENT_AUTO_UPDATE_CHECK_INTERVAL_SECONDS") or "60").strip()),
         ),
         auto_update_request_timeout_seconds=max(
             5,

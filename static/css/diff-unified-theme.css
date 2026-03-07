@@ -27,6 +27,13 @@
     border-radius: 14px;
 }
 
+/* GitLab-like readable width for regular diff pages. */
+.unified-diff-page.unified-diff-centered {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 12px 14px 20px;
+}
+
 .unified-diff-page .breadcrumb {
     margin-bottom: 0;
     padding: 8px 12px;
@@ -225,6 +232,12 @@
     .unified-diff-page {
         padding-left: 4px;
         padding-right: 4px;
+    }
+
+    .unified-diff-page.unified-diff-centered {
+        max-width: 100%;
+        padding-left: 6px;
+        padding-right: 6px;
     }
 }
 

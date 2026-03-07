@@ -743,21 +743,42 @@ td.excel-row-number.excel-modified,
                                     </div>
                                 </div>
                             </div>
-                        {% elif merged_diff_data.hunks %}
-                            <!-- 文本合并diff显示 -->
-                            <div class="diff-content">
-                                {% for hunk in merged_diff_data.hunks %}
-                                <div class="hunk">
-                                    <div class="hunk-header">{{ hunk.header }}</div>
-                                    {% for line in hunk.lines %}
-                                    <div class="line {{ line.type }}">
-                                        <span class="line-number old">{{ line.old_line_number if line.old_line_number else '' }}</span>
-                                        <span class="line-number new">{{ line.new_line_number if line.new_line_number else '' }}</span>
-                                        <span class="line-content">{{ line.content }}</span>
+                        {% elif merged_diff_data.hunks or merged_diff_data.lines %}
+                            <!-- 文本合并diff显示（GitHub风格） -->
+                            <div class="text-diff-container">
+                                {% if merged_diff_data.hunks %}
+                                    {% for hunk in merged_diff_data.hunks %}
+                                    <div class="text-diff-hunk">
+                                        <div class="text-diff-hunk-header">{{ hunk.header | e }}</div>
+                                        {% for line in hunk.lines %}
+                                            {% set line_type = 'added' if line.type in ['added', 'add'] else ('removed' if line.type in ['removed', 'delete'] else 'context') %}
+                                            <div class="text-diff-line {{ line_type }}">
+                                                <span class="text-diff-line-number">{{ line.old_line_number if line.old_line_number is not none else '' }}</span>
+                                                <span class="text-diff-line-number">{{ line.new_line_number if line.new_line_number is not none else '' }}</span>
+                                                <span class="text-diff-line-content">{{ line.content | e }}</span>
+                                            </div>
+                                        {% endfor %}
                                     </div>
                                     {% endfor %}
-                                </div>
-                                {% endfor %}
+                                {% else %}
+                                    <div class="text-diff-hunk">
+                                        {% for line in merged_diff_data.lines %}
+                                            {% if line.type == 'header' %}
+                                                {% if not loop.first %}
+                                                    </div><div class="text-diff-hunk">
+                                                {% endif %}
+                                                <div class="text-diff-hunk-header">{{ line.content | e }}</div>
+                                            {% else %}
+                                                {% set line_type = 'added' if line.type in ['added', 'add'] else ('removed' if line.type in ['removed', 'delete'] else 'context') %}
+                                                <div class="text-diff-line {{ line_type }}">
+                                                    <span class="text-diff-line-number">{{ line.old_line_number if line.old_line_number is not none else '' }}</span>
+                                                    <span class="text-diff-line-number">{{ line.new_line_number if line.new_line_number is not none else '' }}</span>
+                                                    <span class="text-diff-line-content">{{ line.content | e }}</span>
+                                                </div>
+                                            {% endif %}
+                                        {% endfor %}
+                                    </div>
+                                {% endif %}
                             </div>
                         {% else %}
                             <div class="alert alert-info">
@@ -982,6 +1003,95 @@ function updatePreviousVersionInfo(commitId, previousCommit) {
     }
 }
 
+function normalizeDiffLineType(rawType) {
+    const value = String(rawType || '').toLowerCase();
+    if (value === 'header' || value === 'hunk-header' || value === 'hunk_header') {
+        return 'header';
+    }
+    if (value === 'removed' || value === 'delete' || value === '-') {
+        return 'removed';
+    }
+    if (value === 'added' || value === 'add' || value === '+') {
+        return 'added';
+    }
+    return 'context';
+}
+
+function renderTextDiffFromHunks(hunks) {
+    const validHunks = Array.isArray(hunks) ? hunks : [];
+    if (!validHunks.length) {
+        return '';
+    }
+
+    let html = '<div class="text-diff-container">';
+    validHunks.forEach(hunk => {
+        html += '<div class="text-diff-hunk">';
+        html += `<div class="text-diff-hunk-header">${escapeHtml(hunk && hunk.header ? hunk.header : '')}</div>`;
+        const lines = Array.isArray(hunk && hunk.lines) ? hunk.lines : [];
+        lines.forEach(line => {
+            const normalizedType = normalizeDiffLineType(line && line.type);
+            const cssType = normalizedType === 'header' ? 'context' : normalizedType;
+            const oldNumber = line && line.old_line_number != null ? String(line.old_line_number) : '';
+            const newNumber = line && line.new_line_number != null ? String(line.new_line_number) : '';
+            const content = line && line.content != null ? String(line.content) : '';
+            html += `
+                <div class="text-diff-line ${cssType}">
+                    <span class="text-diff-line-number">${escapeHtml(oldNumber)}</span>
+                    <span class="text-diff-line-number">${escapeHtml(newNumber)}</span>
+                    <span class="text-diff-line-content">${escapeHtml(content)}</span>
+                </div>
+            `;
+        });
+        html += '</div>';
+    });
+    html += '</div>';
+    return html;
+}
+
+function renderTextDiffFromLines(lines) {
+    const validLines = Array.isArray(lines) ? lines : [];
+    if (!validLines.length) {
+        return '';
+    }
+
+    let html = '<div class="text-diff-container">';
+    let hunkOpened = false;
+    validLines.forEach((line, index) => {
+        const normalizedType = normalizeDiffLineType(line && line.type);
+        if (normalizedType === 'header') {
+            if (hunkOpened) {
+                html += '</div>';
+            }
+            html += '<div class="text-diff-hunk">';
+            const headerContent = line && line.content != null ? String(line.content) : '';
+            html += `<div class="text-diff-hunk-header">${escapeHtml(headerContent)}</div>`;
+            hunkOpened = true;
+            return;
+        }
+
+        if (!hunkOpened) {
+            html += '<div class="text-diff-hunk">';
+            hunkOpened = true;
+        }
+        const oldNumber = line && line.old_line_number != null ? String(line.old_line_number) : '';
+        const newNumber = line && line.new_line_number != null ? String(line.new_line_number) : '';
+        const content = line && line.content != null ? String(line.content) : '';
+        const cssType = normalizedType === 'header' ? 'context' : normalizedType;
+        html += `
+            <div class="text-diff-line ${cssType}">
+                <span class="text-diff-line-number">${escapeHtml(oldNumber)}</span>
+                <span class="text-diff-line-number">${escapeHtml(newNumber)}</span>
+                <span class="text-diff-line-content">${escapeHtml(content)}</span>
+            </div>
+        `;
+    });
+    if (hunkOpened) {
+        html += '</div>';
+    }
+    html += '</div>';
+    return html;
+}
+
 // 渲染提交的diff内容
 function renderCommitDiff(commitId, diffData) {
     const container = document.getElementById(`diff-container-${commitId}`);
@@ -1017,25 +1127,22 @@ function renderCommitDiff(commitId, diffData) {
             console.error(`初始化Excel diff失败 (commit ${commitId}):`, e);
             showDiffError(commitId, '渲染Excel差异失败');
         }
-    } else if (diffData.hunks) {
-        // 渲染文本diff
-        let htmlContent = '<div class="diff-content">';
-        diffData.hunks.forEach(hunk => {
-            htmlContent += `<div class="hunk">`;
-            htmlContent += `<div class="hunk-header">${hunk.header}</div>`;
-            hunk.lines.forEach(line => {
-                htmlContent += `
-                    <div class="line ${line.type}">
-                        <span class="line-number old">${line.old_line_number || ''}</span>
-                        <span class="line-number new">${line.new_line_number || ''}</span>
-                        <span class="line-content">${line.content}</span>
-                    </div>
-                `;
-            });
-            htmlContent += `</div>`;
-        });
-        htmlContent += '</div>';
-        container.innerHTML = htmlContent;
+    } else if (Array.isArray(diffData.hunks) && diffData.hunks.length > 0) {
+        const htmlContent = renderTextDiffFromHunks(diffData.hunks);
+        container.innerHTML = htmlContent || `
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i>
+                无差异内容或文件无变更
+            </div>
+        `;
+    } else if (Array.isArray(diffData.lines) && diffData.lines.length > 0) {
+        const htmlContent = renderTextDiffFromLines(diffData.lines);
+        container.innerHTML = htmlContent || `
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i>
+                无差异内容或文件无变更
+            </div>
+        `;
     } else {
         container.innerHTML = `
             <div class="alert alert-info">

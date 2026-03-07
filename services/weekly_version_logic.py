@@ -42,6 +42,7 @@ from html import escape
 from urllib.parse import quote
 
 from flask import render_template, request, jsonify, url_for, abort
+from werkzeug.exceptions import HTTPException
 
 from models import (
     db,
@@ -686,6 +687,8 @@ def weekly_version_config_info_api(config_id):
     """获取周版本配置信息API"""
     try:
         config = WeeklyVersionConfig.query.get_or_404(config_id)
+        if not _has_project_access(config.project_id):
+            abort(403)
         repository = config.repository
         if not repository:
             return jsonify({'success': False, 'message': '周版本关联仓库不存在'}), 404
@@ -702,6 +705,8 @@ def weekly_version_config_info_api(config_id):
                 }
             }
         })
+    except HTTPException:
+        raise
     except Exception as e:
         log_print(f"获取周版本配置信息失败: {e}", 'ERROR', force=True)
         return jsonify({'success': False, 'message': str(e)}), 500
@@ -710,11 +715,34 @@ def weekly_version_files_api(config_id):
     """获取周版本文件列表API"""
     try:
         config = WeeklyVersionConfig.query.get_or_404(config_id)
+        if not _has_project_access(config.project_id):
+            abort(403)
         repository = config.repository
         if not repository:
             return jsonify({'success': False, 'message': '周版本关联仓库不存在'}), 404
         # 获取该配置的所有diff缓存
         diff_caches = WeeklyVersionDiffCache.query.filter_by(config_id=config_id).all()
+        sync_task_id = None
+        sync_task_status = None
+        sync_triggered = False
+
+        # platform+agent 模式下若首次未及时生成缓存，这里兜底触发一次同步任务。
+        if not diff_caches:
+            existing_sync_task = BackgroundTask.query.filter(
+                BackgroundTask.task_type == 'weekly_sync',
+                BackgroundTask.commit_id == str(config_id),
+                BackgroundTask.status.in_(['pending', 'processing']),
+            ).order_by(BackgroundTask.id.desc()).first()
+
+            if existing_sync_task:
+                sync_task_id = existing_sync_task.id
+                sync_task_status = existing_sync_task.status
+            elif config.is_active and config.auto_sync and callable(_create_weekly_sync_task):
+                created_task_id = _create_weekly_sync_task(config_id)
+                if created_task_id:
+                    sync_task_id = created_task_id
+                    sync_task_status = 'pending'
+                    sync_triggered = True
 
         def _parse_json_list(raw_value):
             if raw_value is None:
@@ -921,8 +949,13 @@ def weekly_version_files_api(config_id):
             'authors': list(authors),
             'total_files': len(files),
             'repository_name': repository.name,
-            'enable_id_confirmation': bool(repository.enable_id_confirmation)
+            'enable_id_confirmation': bool(repository.enable_id_confirmation),
+            'sync_task_id': sync_task_id,
+            'sync_task_status': sync_task_status,
+            'sync_triggered': sync_triggered,
         })
+    except HTTPException:
+        raise
     except Exception as e:
         log_print(f"获取周版本文件列表失败: {e}", 'ERROR', force=True)
         return jsonify({'success': False, 'message': str(e)}), 500
@@ -931,6 +964,8 @@ def weekly_version_file_diff_api(config_id):
     """获取单个文件的diff内容"""
     try:
         config = WeeklyVersionConfig.query.get_or_404(config_id)
+        if not _has_project_access(config.project_id):
+            abort(403)
         file_path = request.args.get('file_path')
         if not file_path:
             return "缺少文件路径参数", 400
@@ -947,6 +982,8 @@ def weekly_version_file_diff_api(config_id):
         diff_html = generate_weekly_git_diff_html(config, diff_cache, file_path)
         return diff_html
 
+    except HTTPException:
+        raise
     except Exception as e:
         log_print(f"获取文件diff失败: {e}", 'ERROR', force=True)
         return f"<div class='alert alert-danger'>加载diff失败: {str(e)}</div>"
@@ -955,6 +992,8 @@ def weekly_version_file_full_diff(config_id):
     """周版本文件完整diff页面 - 优化版本，先显示页面框架"""
     try:
         config = WeeklyVersionConfig.query.get_or_404(config_id)
+        if not _has_project_access(config.project_id):
+            abort(403)
         file_path = request.args.get('file_path')
         if not file_path:
             return "缺少文件路径参数", 400
@@ -982,6 +1021,8 @@ def weekly_version_file_full_diff(config_id):
         }
         return render_template('weekly_version_full_diff.html', **template_data)
 
+    except HTTPException:
+        raise
     except Exception as e:
         log_print(f"显示周版本完整diff失败: {e}", 'ERROR', force=True)
         return render_template('error.html',
@@ -991,6 +1032,8 @@ def weekly_version_file_full_diff_data(config_id):
     """异步加载周版本文件完整diff数据"""
     try:
         config = WeeklyVersionConfig.query.get_or_404(config_id)
+        if not _has_project_access(config.project_id):
+            abort(403)
         file_path = request.args.get('file_path')
         if not file_path:
             return jsonify({'success': False, 'message': '缺少文件路径参数'}), 400
@@ -1034,6 +1077,8 @@ def weekly_version_file_full_diff_data(config_id):
             'file_type': file_type,
             'recalculated': False
         })
+    except HTTPException:
+        raise
     except Exception as e:
         log_print(f"异步加载周版本diff数据失败: {e}", 'ERROR', force=True)
         return jsonify({'success': False, 'message': f'加载失败: {str(e)}'}), 500

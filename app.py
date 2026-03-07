@@ -156,6 +156,7 @@ from services.core_navigation_handlers import (
     project_detail,
     project_detail_original,
     projects,
+    update_project,
     repository_config,
     test,
 )
@@ -1223,7 +1224,39 @@ def commit_list(repository_id):
 # 新的带项目代号和仓库名的Excel diff数据路由
 
 
+def _ensure_repository_access_or_403(repository):
+    project = repository.project if repository else None
+    if project is None:
+        abort(404)
+    if not _has_project_access(project.id):
+        abort(403)
+    return project
+
+
+def _ensure_commit_access_or_403(commit):
+    repository = commit.repository if commit else None
+    project = _ensure_repository_access_or_403(repository)
+    return repository, project
+
+
+def _ensure_commit_route_scope_or_404(commit, project_code=None, repository_name=None):
+    repository, project = _ensure_commit_access_or_403(commit)
+    expected_project_code = str(project_code or "").strip()
+    expected_repo_name = str(repository_name or "").strip()
+    if expected_project_code and str(project.code or "").strip() != expected_project_code:
+        abort(404)
+    if expected_repo_name and str(repository.name or "").strip() != expected_repo_name:
+        abort(404)
+    return repository, project
+
+
 def get_excel_diff_data_with_path(project_code, repository_name, commit_id):
+    commit = Commit.query.get_or_404(commit_id)
+    _ensure_commit_route_scope_or_404(
+        commit,
+        project_code=project_code,
+        repository_name=repository_name,
+    )
     return get_excel_diff_data(commit_id)
 
 # 保持向后兼容的原路由
@@ -1233,8 +1266,7 @@ def get_excel_diff_data(commit_id):
     """异步获取Excel diff数据的API端点（支持HTML缓存优先）"""
     request_start = time.time()
     commit = Commit.query.get_or_404(commit_id)
-    repository = commit.repository
-    project = repository.project
+    repository, project = _ensure_commit_access_or_403(commit)
     perf_project_tags = {
         "project_id": project.id if project else "",
         "project_code": project.code if project else "",
@@ -1516,6 +1548,12 @@ def get_excel_diff_data(commit_id):
 
 
 def commit_diff_new_with_path(project_code, repository_name, commit_id):
+    commit = Commit.query.get_or_404(commit_id)
+    _ensure_commit_route_scope_or_404(
+        commit,
+        project_code=project_code,
+        repository_name=repository_name,
+    )
     return commit_diff_new(commit_id)
 
 # 保持向后兼容的原路由
@@ -1524,8 +1562,7 @@ def commit_diff_new_with_path(project_code, repository_name, commit_id):
 def commit_diff_new(commit_id):
     """使用新的差异服务显示文件差异"""
     commit = Commit.query.get_or_404(commit_id)
-    repository = commit.repository
-    project = repository.project
+    repository, project = _ensure_commit_access_or_403(commit)
     # 获取该文件的所有提交历史
     file_commits = Commit.query.filter(
         Commit.repository_id == repository.id,
@@ -1554,8 +1591,7 @@ def commit_diff_new(commit_id):
 def commit_full_diff(commit_id):
     """显示完整文件的diff，类似Git工具的并排显示"""
     commit = Commit.query.get_or_404(commit_id)
-    repository = commit.repository
-    project = repository.project
+    repository, project = _ensure_commit_access_or_403(commit)
     # 获取上一个版本的提交信息
     file_commits = Commit.query.filter(
         Commit.repository_id == repository.id,
@@ -1574,6 +1610,17 @@ def commit_full_diff(commit_id):
             local_path = git_service.local_path
             # 如果本地路径不存在，尝试克隆
             if not os.path.exists(local_path):
+                if is_agent_dispatch_mode():
+                    message = "platform+agent 模式下禁止平台本地 clone 仓库，请在 Agent 节点完成同步后重试"
+                    current_file_content = message
+                    previous_file_content = message
+                    return render_template('full_file_diff.html',
+                                         commit=commit,
+                                         repository=repository,
+                                         project=project,
+                                         previous_commit=previous_commit,
+                                         current_file_content=current_file_content,
+                                         previous_file_content=previous_file_content)
                 success, message = git_service.clone_or_update_repository()
                 if not success:
                     current_file_content = f"仓库克隆失败: {message}"
@@ -1647,6 +1694,12 @@ def commit_full_diff(commit_id):
 
 
 def refresh_commit_diff_with_path(project_code, repository_name, commit_id):
+    commit = Commit.query.get_or_404(commit_id)
+    _ensure_commit_route_scope_or_404(
+        commit,
+        project_code=project_code,
+        repository_name=repository_name,
+    )
     return refresh_commit_diff(commit_id)
 
 # 保持向后兼容的原路由
@@ -1656,7 +1709,7 @@ def refresh_commit_diff(commit_id):
     """重新计算提交的差异数据，绕过缓存 - 优化版本"""
     try:
         commit = Commit.query.get_or_404(commit_id)
-        repository = commit.repository
+        repository, _project = _ensure_commit_access_or_403(commit)
         log_print(f"🔄 开始重新计算差异: commit={commit_id}, file={commit.path}", 'APP')
         # 记录开始时间
         start_time = time.time()
@@ -1750,6 +1803,12 @@ def refresh_commit_diff(commit_id):
 
 
 def commit_diff_with_path(project_code, repository_name, commit_id):
+    commit = Commit.query.get_or_404(commit_id)
+    _ensure_commit_route_scope_or_404(
+        commit,
+        project_code=project_code,
+        repository_name=repository_name,
+    )
     return commit_diff(commit_id)
 
 # 保持向后兼容的原路由
@@ -1758,8 +1817,7 @@ def commit_diff_with_path(project_code, repository_name, commit_id):
 def commit_diff(commit_id):
     diff_request_start = time.time()
     commit = Commit.query.get_or_404(commit_id)
-    repository = commit.repository
-    project = repository.project
+    repository, project = _ensure_commit_access_or_403(commit)
     # 检查是否为删除操作
     is_deleted = commit.operation == 'D'
     # 检查是否为Excel文件
@@ -1984,6 +2042,7 @@ def get_cache_status(repository_id):
     """获取仓库的缓存状态"""
     try:
         repository = Repository.query.get_or_404(repository_id)
+        _ensure_repository_access_or_403(repository)
         # 统计缓存数据
         total_cache = DiffCache.query.filter_by(repository_id=repository_id).count()
         completed_cache = DiffCache.query.filter_by(
@@ -2025,6 +2084,7 @@ def get_clone_status(repository_id):
     repo = db.session.get(Repository, repository_id)
     if not repo:
         return jsonify({"success": False, "message": "仓库不存在"}), 404
+    _ensure_repository_access_or_403(repo)
     # 查询该仓库的提交记录数量，用于判断数据是否真正就绪
     commit_count = Commit.query.filter_by(repository_id=repository_id).count()
     is_data_ready = (repo.clone_status == 'completed' and commit_count > 0)
@@ -2394,6 +2454,7 @@ def update_commit_status(commit_id):
             return jsonify({'status': 'error', 'message': '无效的状态值'}), 400
 
         commit = Commit.query.get_or_404(commit_id)
+        _ensure_commit_access_or_403(commit)
         if status in ('confirmed', 'rejected'):
             from utils.request_security import can_current_user_operate_project_confirmation
             project_id = commit.repository.project_id if commit.repository else None

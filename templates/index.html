@@ -63,6 +63,21 @@
         font-weight: 600;
         color: #0969da;
     }
+    .project-code-edit-btn {
+        border: none;
+        background: transparent;
+        padding: 0;
+        border-radius: 6px;
+        cursor: pointer;
+    }
+    .project-code-edit-btn:hover {
+        color: #0550ae;
+        text-decoration: underline;
+    }
+    .project-code-edit-btn .edit-icon {
+        font-size: 0.72rem;
+        color: #57606a;
+    }
     .project-code-badge .dot {
         width: 8px;
         height: 8px;
@@ -298,10 +313,28 @@
                 {% for project in projects %}
                 <tr>
                     <td>
+                        {% set can_edit_project = is_admin() or has_project_admin_access(project.id) %}
+                        {% if can_edit_project %}
+                        <button
+                            type="button"
+                            class="project-code-badge project-code-edit-btn"
+                            title="点击编辑项目名称/部门"
+                            data-project-id="{{ project.id }}"
+                            data-project-code="{{ project.code }}"
+                            data-project-name="{{ project.name }}"
+                            data-project-department="{{ project.department or '' }}"
+                            onclick="openProjectEditModal(this)"
+                        >
+                            <span class="dot"></span>
+                            <span>{{ project.code }}</span>
+                            <i class="fas fa-pen edit-icon"></i>
+                        </button>
+                        {% else %}
                         <span class="project-code-badge">
                             <span class="dot"></span>
                             {{ project.code }}
                         </span>
+                        {% endif %}
                     </td>
                     <td style="font-weight: 500;">{{ project.name }}</td>
                     <td style="color: #656d76;">{{ project.department or '-' }}</td>
@@ -439,6 +472,38 @@
     </div>
 </div>
 {% endif %}
+
+<!-- 编辑项目信息模态框 -->
+<div class="modal fade" id="editProjectModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="fas fa-pen-to-square me-2" style="color: #0969da;"></i>编辑项目信息</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label for="editProjectCode" class="form-label">项目代号</label>
+                    <input type="text" class="form-control" id="editProjectCode" readonly>
+                </div>
+                <div class="mb-3">
+                    <label for="editProjectName" class="form-label">项目名称 <span style="color: #cf222e;">*</span></label>
+                    <input type="text" class="form-control" id="editProjectName" maxlength="100" required>
+                </div>
+                <div class="mb-0">
+                    <label for="editProjectDepartment" class="form-label">所属部门</label>
+                    <input type="text" class="form-control" id="editProjectDepartment" maxlength="100">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" style="border-radius: 8px;">取消</button>
+                <button type="button" class="btn btn-primary" id="editProjectSubmitBtn" onclick="submitProjectEdit()" style="border-radius: 8px; font-weight: 600;">
+                    <i class="fas fa-save me-1"></i>保存
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
 
 <!-- 申请加入项目模态框 -->
 {% if joinable_projects %}
@@ -703,6 +768,76 @@ function deleteProject(projectId, triggerBtn) {
     });
 }
 {% endif %}
+
+let editingProjectId = null;
+
+function openProjectEditModal(trigger) {
+    if (!trigger) return;
+    editingProjectId = trigger.getAttribute('data-project-id');
+    const code = trigger.getAttribute('data-project-code') || '';
+    const name = trigger.getAttribute('data-project-name') || '';
+    const department = trigger.getAttribute('data-project-department') || '';
+
+    document.getElementById('editProjectCode').value = code;
+    document.getElementById('editProjectName').value = name;
+    document.getElementById('editProjectDepartment').value = department;
+
+    const submitBtn = document.getElementById('editProjectSubmitBtn');
+    submitBtn.disabled = false;
+    submitBtn.innerHTML = '<i class="fas fa-save me-1"></i>保存';
+
+    const modalEl = document.getElementById('editProjectModal');
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    modal.show();
+}
+
+function submitProjectEdit() {
+    if (!editingProjectId) {
+        alert('未识别到项目ID');
+        return;
+    }
+    const name = (document.getElementById('editProjectName').value || '').trim();
+    const department = (document.getElementById('editProjectDepartment').value || '').trim();
+    if (!name) {
+        alert('项目名称不能为空');
+        return;
+    }
+
+    const submitBtn = document.getElementById('editProjectSubmitBtn');
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>保存中...';
+
+    fetch(`/projects/${editingProjectId}/update`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': '{{ csrf_token() }}',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': 'application/json'
+        },
+        body: JSON.stringify({ name, department })
+    })
+    .then(async (response) => {
+        let data = {};
+        try {
+            data = await response.json();
+        } catch (err) {
+            data = {};
+        }
+        if (!response.ok || !data.success) {
+            throw new Error(data.message || '保存失败');
+        }
+        const modalEl = document.getElementById('editProjectModal');
+        const modal = bootstrap.Modal.getInstance(modalEl);
+        if (modal) modal.hide();
+        location.reload();
+    })
+    .catch((err) => {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '<i class="fas fa-save me-1"></i>保存';
+        alert((err && err.message) || '保存失败');
+    });
+}
 
 /* 申请加入项目 */
 function submitJoinRequest() {

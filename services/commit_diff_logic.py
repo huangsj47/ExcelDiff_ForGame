@@ -4,6 +4,7 @@ Commit Diff 引擎 — 从 app.py 拆分
 """
 import sys
 import json
+import os
 import threading
 from datetime import datetime, timezone
 from collections import defaultdict
@@ -404,6 +405,10 @@ def _build_diff_error_data(commit, message, detail=None):
     return payload
 
 
+def _is_agent_dispatch_mode():
+    return (os.environ.get("DEPLOYMENT_MODE") or "single").strip().lower() in {"platform", "agent"}
+
+
 def _get_git_code_diff_with_retry(service, commit, previous_commit):
     diagnostics = []
 
@@ -418,6 +423,10 @@ def _get_git_code_diff_with_retry(service, commit, previous_commit):
         return diff_data, diagnostics
 
     diagnostics.append("初次获取diff失败")
+    if _is_agent_dispatch_mode():
+        diagnostics.append("platform/agent 模式下跳过平台本地仓库更新重试")
+        return diff_data, diagnostics
+
     try:
         update_ok, update_message = service.clone_or_update_repository()
         diagnostics.append(f"仓库更新结果: {update_message}")

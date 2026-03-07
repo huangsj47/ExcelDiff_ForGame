@@ -4,10 +4,26 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from flask import flash, jsonify, redirect, render_template, request, url_for
+from flask import abort, flash, jsonify, redirect, render_template, request, url_for
 
 from services.model_loader import get_runtime_model, get_runtime_models
+from utils.request_security import _has_project_access
 from utils.timezone_utils import format_beijing_time
+
+
+def _ensure_repository_access_or_403(repository):
+    project = getattr(repository, "project", None)
+    if project is None:
+        abort(404)
+    if not _has_project_access(project.id):
+        abort(403)
+    return project
+
+
+def _ensure_commit_access_or_403(commit):
+    repository = getattr(commit, "repository", None)
+    _ensure_repository_access_or_403(repository)
+    return repository
 
 
 def repository_compare():
@@ -26,6 +42,8 @@ def repository_compare():
 
     source_repo = Repository.query.get_or_404(source_repo_id)
     target_repo = Repository.query.get_or_404(target_repo_id)
+    _ensure_repository_access_or_403(source_repo)
+    _ensure_repository_access_or_403(target_repo)
 
     try:
         start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
@@ -153,11 +171,14 @@ def analyze_repository_differences(source_commits, target_commits, source_repo, 
 
 def get_commits_by_file(repository_id):
     """Get all commit records for selected file path."""
-    (Commit,) = get_runtime_models("Commit")
+    Commit, Repository = get_runtime_models("Commit", "Repository")
 
     file_path = request.args.get("path")
     if not file_path:
         return jsonify({"error": "文件路径不能为空"}), 400
+
+    repository = Repository.query.get_or_404(repository_id)
+    _ensure_repository_access_or_403(repository)
 
     commits = (
         Commit.query.filter(
@@ -198,6 +219,12 @@ def commits_compare():
 
     from_commit = Commit.query.get_or_404(from_commit_id)
     to_commit = Commit.query.get_or_404(to_commit_id)
+    from_repository = _ensure_commit_access_or_403(from_commit)
+    to_repository = _ensure_commit_access_or_403(to_commit)
+
+    if getattr(from_repository, "id", None) != getattr(to_repository, "id", None):
+        flash("只能对比同一仓库的不同版本", "error")
+        return redirect(url_for("commit_diff", commit_id=from_commit_id))
 
     if from_commit.path != to_commit.path:
         flash("只能对比同一文件的不同版本", "error")

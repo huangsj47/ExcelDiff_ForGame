@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from agent import config as agent_config
+from agent.config import load_settings
 from agent import self_update
 
 
@@ -162,3 +164,16 @@ def test_install_requirements_uses_current_python_interpreter(monkeypatch, tmp_p
         "pip",
     ]
     assert captured.get("cwd") == str(agent_root)
+
+
+def test_agent_auto_update_default_interval_is_60(monkeypatch):
+    monkeypatch.setattr(agent_config, "_try_load_dotenv", lambda: None)
+    monkeypatch.setenv("PLATFORM_BASE_URL", "http://127.0.0.1:8002")
+    monkeypatch.setenv("AGENT_SHARED_SECRET", "secret")
+    monkeypatch.setenv("AGENT_CODE", "agent-default-interval")
+    monkeypatch.setenv("AGENT_NAME", "agent-default-interval")
+    monkeypatch.setenv("AGENT_PROJECT_CODES", "")
+    monkeypatch.delenv("AGENT_AUTO_UPDATE_CHECK_INTERVAL_SECONDS", raising=False)
+
+    settings = load_settings()
+    assert settings.auto_update_check_interval_seconds == 60

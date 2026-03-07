@@ -963,6 +963,8 @@ let filteredFiles = [];
 let currentFilePath = '';
 let selectedFilePath = '';
 let allAuthors = new Set();
+let syncRetryTimer = null;
+let syncRetryAttempts = 0;
 
 // 分页相关变量
 let currentPage = 1;
@@ -1128,6 +1130,21 @@ function loadFileList() {
             // 更新仓库名称显示
             updateRepositoryName(data.repository_name);
 
+            const syncStatus = String(data.sync_task_status || '').toLowerCase();
+            const syncRunning = syncStatus === 'pending' || syncStatus === 'processing';
+            if ((data.total_files || 0) === 0 && syncRunning) {
+                if (treeContainer) {
+                    treeContainer.innerHTML = `
+                        <div class="text-center py-4 text-muted">
+                            正在生成周版本文件列表（任务 #${data.sync_task_id || '-'}，状态：${escapeHtmlText(syncStatus)}），稍后自动刷新...
+                        </div>
+                    `;
+                }
+                scheduleWeeklySyncRetry();
+            } else {
+                clearWeeklySyncRetry();
+            }
+
             // 更新重建缓存按钮显示状态
             updateRebuildCacheButtonVisibility();
         })
@@ -1136,7 +1153,31 @@ function loadFileList() {
             if (treeContainer) {
                 treeContainer.innerHTML = `<div class="text-center py-4 text-danger">加载文件列表失败: ${error.message || '请刷新页面重试'}</div>`;
             }
+            scheduleWeeklySyncRetry();
         });
+}
+
+function clearWeeklySyncRetry() {
+    if (syncRetryTimer) {
+        clearTimeout(syncRetryTimer);
+        syncRetryTimer = null;
+    }
+    syncRetryAttempts = 0;
+}
+
+function scheduleWeeklySyncRetry() {
+    if (syncRetryAttempts >= 10) {
+        return;
+    }
+    if (syncRetryTimer) {
+        clearTimeout(syncRetryTimer);
+    }
+    syncRetryAttempts += 1;
+    const delayMs = Math.min(15000, 3000 + (syncRetryAttempts - 1) * 1000);
+    syncRetryTimer = setTimeout(() => {
+        syncRetryTimer = null;
+        loadFileList();
+    }, delayMs);
 }
 
 function updateRepositoryName(repositoryName) {

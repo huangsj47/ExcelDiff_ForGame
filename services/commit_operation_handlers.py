@@ -7,12 +7,16 @@ import re
 import time
 from datetime import datetime
 
-from flask import flash, jsonify, redirect, render_template, request, url_for
+from flask import abort, flash, jsonify, redirect, render_template, request, url_for
 from sqlalchemy import func, or_
 
 from models import Commit, DiffCache, ExcelHtmlCache, db
 from services.model_loader import get_runtime_model
-from utils.request_security import can_current_user_operate_project_confirmation, require_admin
+from utils.request_security import (
+    _has_project_access,
+    can_current_user_operate_project_confirmation,
+    require_admin,
+)
 from utils.timezone_utils import format_beijing_time
 
 
@@ -164,6 +168,20 @@ def _attach_author_display(commits):
             username_to_display_name_lower,
             email_prefix_to_display_name,
         ) or (str(getattr(commit, "author", "")).strip() or "未知")
+
+
+def _commit_project_id(commit):
+    repository = getattr(commit, "repository", None)
+    return getattr(repository, "project_id", None)
+
+
+def _ensure_commit_project_access(commit):
+    project_id = _commit_project_id(commit)
+    if not project_id:
+        return False, "提交关联项目不存在"
+    if not _has_project_access(project_id):
+        return False, "当前账号无权访问该项目"
+    return True, ""
 
 
 def approve_all_files(commit_id):
@@ -322,6 +340,9 @@ def request_priority_diff(commit_id):
     """请求优先处理指定提交的diff"""
     try:
         commit = Commit.query.get_or_404(commit_id)
+        allowed, message = _ensure_commit_project_access(commit)
+        if not allowed:
+            return jsonify({'success': False, 'message': message}), 403
         repository = commit.repository
         # 检查是否为Excel文件
         if not excel_cache_service.is_excel_file(commit.path):
@@ -367,6 +388,9 @@ def get_commit_diff_data(commit_id):
         commit = db.session.get(Commit, commit_id)
         if not commit:
             return jsonify({'success': False, 'message': '提交不存在'})
+        allowed, message = _ensure_commit_project_access(commit)
+        if not allowed:
+            return jsonify({'success': False, 'message': message}), 403
 
         repository = commit.repository
         is_excel = excel_cache_service.is_excel_file(commit.path)
@@ -466,6 +490,9 @@ def refresh_merge_diff():
         for commit_id in commit_ids:
             commit = db.session.get(Commit, commit_id)
             if commit:
+                allowed, message = _ensure_commit_project_access(commit)
+                if not allowed:
+                    return jsonify({'success': False, 'message': message}), 403
                 commits.append(commit)
                 log_print(f"✅ 找到提交: {commit_id} - {commit.path}", 'INFO')
         if not commits:
@@ -542,6 +569,9 @@ def merge_diff():
         for commit_id in commit_ids:
             commit = db.session.get(Commit, commit_id)
             if commit:
+                allowed, _message = _ensure_commit_project_access(commit)
+                if not allowed:
+                    abort(403)
                 commits.append(commit)
         if not commits:
             flash('未找到有效的提交记录', 'error')

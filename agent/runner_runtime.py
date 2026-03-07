@@ -326,6 +326,9 @@ def run_agent():
                     _log("心跳连接成功", settings.log_verbose)
                     heartbeat_online_logged = True
                     heartbeat_offline_logged = False
+                    if settings.auto_update_enabled:
+                        # 断线恢复后触发下一轮立即检查，避免等待完整周期。
+                        last_auto_update_check_at = 0.0
                 last_heartbeat_at = now_ts
             else:
                 if not heartbeat_offline_logged:

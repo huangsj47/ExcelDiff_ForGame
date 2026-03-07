@@ -49,6 +49,11 @@ def projects_route():
     return _dispatch("projects")
 
 
+@core_management_bp.route("/projects/<int:project_id>/update", methods=["POST"], endpoint="update_project")
+def update_project_route(project_id):
+    return _dispatch("update_project", project_id)
+
+
 @core_management_bp.route("/projects/<int:project_id>", endpoint="project_detail")
 def project_detail_route(project_id):
     return _dispatch("project_detail", project_id)

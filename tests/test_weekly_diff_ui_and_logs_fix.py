@@ -68,11 +68,13 @@ def test_weekly_files_api_handles_legacy_non_json_fields(monkeypatch):
 
     monkeypatch.setattr(weekly_logic, "WeeklyVersionConfig", fake_config_model)
     monkeypatch.setattr(weekly_logic, "WeeklyVersionDiffCache", fake_diff_model)
+    monkeypatch.setattr(weekly_logic, "_has_project_access", lambda _project_id: True)
 
     app = Flask(__name__)
     with app.app_context():
-        response = weekly_logic.weekly_version_files_api(2)
-        payload = response.get_json()
+        with app.test_request_context("/weekly-version-config/2/files"):
+            response = weekly_logic.weekly_version_files_api(2)
+            payload = response.get_json()
 
     assert payload["success"] is True
     assert payload["total_files"] == 1
@@ -116,12 +118,89 @@ def test_weekly_files_api_keeps_short_confirm_username_visible(monkeypatch):
 
     monkeypatch.setattr(weekly_logic, "WeeklyVersionConfig", fake_config_model)
     monkeypatch.setattr(weekly_logic, "WeeklyVersionDiffCache", fake_diff_model)
+    monkeypatch.setattr(weekly_logic, "_has_project_access", lambda _project_id: True)
 
     app = Flask(__name__)
     with app.app_context():
-        response = weekly_logic.weekly_version_files_api(3)
-        payload = response.get_json()
+        with app.test_request_context("/weekly-version-config/3/files"):
+            response = weekly_logic.weekly_version_files_api(3)
+            payload = response.get_json()
 
     assert payload["success"] is True
     first_file = payload["files"][0]
     assert first_file["confirm_user_display"] == "admin"
+
+
+def test_weekly_files_api_triggers_sync_when_cache_empty(monkeypatch):
+    config = SimpleNamespace(
+        id=9,
+        project_id=1,
+        is_active=True,
+        auto_sync=True,
+        repository=SimpleNamespace(
+            name="repo_sync",
+            enable_id_confirmation=False,
+        ),
+    )
+
+    fake_config_model = SimpleNamespace(
+        query=SimpleNamespace(get_or_404=lambda _config_id: config),
+    )
+    fake_diff_model = SimpleNamespace(
+        query=SimpleNamespace(
+            filter_by=lambda **_kwargs: SimpleNamespace(all=lambda: []),
+        ),
+    )
+
+    class _Field:
+        def __eq__(self, _other):
+            return self
+
+        def in_(self, _values):
+            return self
+
+        def desc(self):
+            return self
+
+    class _BgQuery:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def order_by(self, *_args, **_kwargs):
+            return self
+
+        def first(self):
+            return None
+
+    fake_background_model = SimpleNamespace(
+        task_type=_Field(),
+        commit_id=_Field(),
+        status=_Field(),
+        id=_Field(),
+        query=_BgQuery(),
+    )
+
+    monkeypatch.setattr(weekly_logic, "WeeklyVersionConfig", fake_config_model)
+    monkeypatch.setattr(weekly_logic, "WeeklyVersionDiffCache", fake_diff_model)
+    monkeypatch.setattr(weekly_logic, "BackgroundTask", fake_background_model)
+    monkeypatch.setattr(weekly_logic, "_create_weekly_sync_task", lambda cid: 778 if cid == 9 else None)
+    monkeypatch.setattr(weekly_logic, "_has_project_access", lambda _project_id: True)
+
+    app = Flask(__name__)
+    with app.app_context():
+        with app.test_request_context("/weekly-version-config/9/files"):
+            response = weekly_logic.weekly_version_files_api(9)
+            payload = response.get_json()
+
+    assert payload["success"] is True
+    assert payload["total_files"] == 0
+    assert payload["sync_triggered"] is True
+    assert payload["sync_task_id"] == 778
+    assert payload["sync_task_status"] == "pending"
+
+
+def test_merge_diff_template_uses_text_diff_classes_and_lines_renderer():
+    content = _read("templates/merge_diff.html")
+    assert "text-diff-container" in content
+    assert "renderTextDiffFromLines" in content
+    assert "Array.isArray(diffData.lines)" in content
