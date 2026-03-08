@@ -220,6 +220,16 @@ class TestWeeklyTodoFollowups:
         assert "class _WerkzeugAgentAccessFilter(logging.Filter):" in service_content
         assert "def configure_request_logging(*, app, log_print, suppress_agent_access_log: bool) -> None:" in service_content
 
+    def test_blueprint_bootstrap_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.app_blueprint_bootstrap_service import configure_app_blueprints" in app_content
+        assert "configure_app_blueprints(" in app_content
+
+        service_content = _read("services/app_blueprint_bootstrap_service.py")
+        assert "def configure_app_blueprints(" in service_content
+        assert "def _register_blueprint_with_trace(" in service_content
+        assert "app.register_blueprint(cache_management_bp)" in service_content
+
     def test_commit_route_scope_helpers_extracted_from_app_entry(self):
         app_content = _read("app.py")
         assert "from services.commit_route_scope_service import (" in app_content

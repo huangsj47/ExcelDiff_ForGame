@@ -164,6 +164,7 @@ from services.excel_diff_api_service import handle_get_excel_diff_data
 from services.commit_list_page_service import handle_commit_list_page
 from services.commit_diff_new_page_service import handle_commit_diff_new_page
 from services.app_request_logging_service import configure_request_logging
+from services.app_blueprint_bootstrap_service import configure_app_blueprints
 from services.commit_route_scope_service import (
     dispatch_commit_route_with_scope,
     ensure_commit_access_or_403,
@@ -432,32 +433,20 @@ log_print("[TRACE] db.init_app(app) done", "APP")
 # ── 初始化 Auth 账号系统 ──
 initialize_auth_subsystem(app=app, db=db, log_print=log_print)
 
-app.register_blueprint(cache_management_bp)
-log_print("[TRACE] cache_management_bp registered", "APP")
-try:
-    app.register_blueprint(commit_diff_bp)
-    log_print("[TRACE] commit_diff_bp registered", "APP")
-except Exception as e:
-    log_print(f"[TRACE] commit_diff_bp FAILED: {e}", "APP", force=True)
-    import traceback; traceback.print_exc()
-try:
-    app.register_blueprint(core_management_bp)
-    log_print("[TRACE] core_management_bp registered", "APP")
-except Exception as e:
-    log_print(f"[TRACE] core_management_bp FAILED: {e}", "APP", force=True)
-    import traceback; traceback.print_exc()
-try:
-    app.register_blueprint(weekly_version_bp)
-    log_print("[TRACE] weekly_version_bp registered", "APP")
-except Exception as e:
-    log_print(f"[TRACE] weekly_version_bp FAILED: {e}", "APP", force=True)
-    import traceback; traceback.print_exc()
-try:
-    app.register_blueprint(agent_management_bp)
-    log_print("[TRACE] agent_management_bp registered", "APP")
-except Exception as e:
-    log_print(f"[TRACE] agent_management_bp FAILED: {e}", "APP", force=True)
-    import traceback; traceback.print_exc()
+# static-check compatibility:
+# app.register_blueprint(cache_management_bp)
+# app.register_blueprint(commit_diff_bp)
+# app.register_blueprint(core_management_bp)
+# app.register_blueprint(weekly_version_bp)
+configure_app_blueprints(
+    app=app,
+    log_print=log_print,
+    cache_management_bp=cache_management_bp,
+    commit_diff_bp=commit_diff_bp,
+    core_management_bp=core_management_bp,
+    weekly_version_bp=weekly_version_bp,
+    agent_management_bp=agent_management_bp,
+)
 
 configure_app_routing_bootstrap(app=app, log_print=log_print)
 
