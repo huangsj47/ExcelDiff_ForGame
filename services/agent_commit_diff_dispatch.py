@@ -15,17 +15,29 @@ from datetime import datetime, timezone
 from typing import Any
 
 from models import AgentNode, AgentProjectBinding, AgentTask, AgentTempCache, db
+from sqlalchemy.exc import SQLAlchemyError
 from services.deployment_mode import is_agent_dispatch_mode
 from services.agent_management_handlers import enqueue_agent_task
 from utils.logger import log_print
 
 _PENDING_STATUSES = {"pending", "processing"}
+_NUMERIC_PARSE_ERRORS = (TypeError, ValueError, OverflowError)
+_JSON_PARSE_ERRORS = (json.JSONDecodeError, TypeError, ValueError)
+_AGENT_COMMIT_DIFF_DISPATCH_ERRORS = (
+    ValueError,
+    TypeError,
+    RuntimeError,
+    KeyError,
+    AttributeError,
+    LookupError,
+    SQLAlchemyError,
+)
 
 
 def _int_env(name: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
     try:
         value = int(str(os.environ.get(name, default)).strip())
-    except Exception:
+    except _NUMERIC_PARSE_ERRORS:
         value = int(default)
     if min_value is not None:
         value = max(min_value, value)
@@ -68,7 +80,7 @@ def _safe_json_loads(raw: Any):
         return None
     try:
         return json.loads(text)
-    except Exception:
+    except _JSON_PARSE_ERRORS:
         return None
 
 
@@ -79,7 +91,7 @@ def _extract_task_payload(task):
 def _payload_matches_commit(task_payload: dict, commit_record_id: int) -> bool:
     try:
         payload_commit_id = int(task_payload.get("commit_record_id") or 0)
-    except Exception:
+    except _NUMERIC_PARSE_ERRORS:
         payload_commit_id = 0
     return payload_commit_id == int(commit_record_id)
 
@@ -203,7 +215,7 @@ def _load_platform_cache_payload(cache_key: str, expected_hash: str | None = Non
         try:
             db.session.delete(row)
             db.session.flush()
-        except Exception:
+        except SQLAlchemyError:
             pass
         return None
 
@@ -430,7 +442,7 @@ def dispatch_or_get_commit_diff(commit, *, force_retry: bool = False):
             "repository_id": repository.id,
             "agent_online": True,
         }
-    except Exception as exc:
+    except _AGENT_COMMIT_DIFF_DISPATCH_ERRORS as exc:
         db.session.rollback()
         log_print(f"派发 commit_diff 任务失败: {exc}", "AGENT", force=True)
         return {

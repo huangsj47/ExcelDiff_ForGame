@@ -115,3 +115,40 @@ def test_failed_commit_diff_auto_retries_within_threshold(monkeypatch):
     result = dispatch_module.dispatch_or_get_commit_diff(commit, force_retry=False)
     assert result.get("status") == "pending"
     assert called["ensure"] == 1
+
+
+def test_int_env_returns_default_when_value_invalid(monkeypatch):
+    import services.agent_commit_diff_dispatch as dispatch_module
+
+    monkeypatch.setenv("AGENT_TEST_INT_ENV", "invalid-number")
+    value = dispatch_module._int_env("AGENT_TEST_INT_ENV", 7, min_value=1, max_value=10)
+    assert value == 7
+
+
+def test_dispatch_commit_diff_returns_error_when_ensure_raises_known_error(monkeypatch):
+    import services.agent_commit_diff_dispatch as dispatch_module
+
+    commit = _build_commit()
+    session = SimpleNamespace(
+        get=lambda *_args, **_kwargs: SimpleNamespace(id=31),
+        commit=lambda: None,
+        flush=lambda: None,
+        rollback=lambda: None,
+    )
+    monkeypatch.setattr(
+        dispatch_module,
+        "AgentProjectBinding",
+        SimpleNamespace(query=_FakeBindingQuery(SimpleNamespace(agent_id=31))),
+    )
+    monkeypatch.setattr(dispatch_module, "db", SimpleNamespace(session=session))
+    monkeypatch.setattr(dispatch_module, "_agent_online", lambda _agent: True)
+    monkeypatch.setattr(dispatch_module, "_find_latest_commit_diff_task", lambda *_args, **_kwargs: (None, None))
+    monkeypatch.setattr(
+        dispatch_module,
+        "_ensure_commit_diff_task",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyError("dispatch-broken")),
+    )
+
+    result = dispatch_module.dispatch_or_get_commit_diff(commit, force_retry=False)
+    assert result.get("status") == "error"
+    assert "派发 Agent diff 任务失败" in str(result.get("message") or "")
