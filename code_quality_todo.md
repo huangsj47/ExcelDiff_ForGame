@@ -62,6 +62,7 @@
   - 进展（2026-03-08）：已新增 `services/task_worker_weekly_handlers.py`，将周版本同步与周版本 Excel 缓存任务处理逻辑下沉，`task_worker_service` 仅保留兼容包装与依赖注入。
   - 进展（2026-03-08）：`commit_diff_page_service` / `excel_diff_api_service` / `commit_operation_handlers` 已补充 `SQLAlchemyError`、`ValueError`、`RuntimeError` 分层异常分支；`git_service` 顶层编码初始化分支收敛了裸 `except`。
   - 进展（2026-03-08）：`commit_operation_handlers` 的确认/拒绝与优先处理接口已补充 `SQLAlchemyError` 分支和 JSON 结构校验，减少直接 `except Exception` 路径。
+  - 进展（2026-03-08）：`commit_operation_handlers` 继续收敛作者映射、缓存解析、merge_diff 处理与更新字段接口异常边界；`task_worker_service` 的同步线程执行分支改为 `NON_CRITICAL_SYNC_THREAD_ERRORS`，去除对应 `except Exception`。
   - 下一步：继续按模块将通用 `except Exception` 拆分为更具体异常（IO/网络/数据校验）并补充错误标签。
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 
@@ -87,6 +88,7 @@
 - [ ] 9. 为高复杂函数补充分层单测（边界条件、异常分支、缓存回退）
   - 进展（2026-03-08）：已新增 `tests/test_todo_contract_and_service_split_followups.py`，覆盖统一响应契约、git diff helper 行为、weekly 删除态缓存回退路径与服务拆分静态守护。
   - 进展（2026-03-08）：已新增 `tests/test_commit_diff_input_models_and_handlers.py`，覆盖 diff 请求输入模型、`refresh_merge_diff` 非法请求分支、agent 模式 `force_retry` 输入链路。
+  - 进展（2026-03-08）：已新增 `tests/test_commit_operation_handlers_error_round3.py`，覆盖批量确认/拒绝、单条拒绝、优先处理与更新字段接口的非法请求/数据库异常路径。
   - 验收：新增针对性测试，不仅是 happy path。
 - [x] 10. 统一服务层输入/输出模型（dataclass/pydantic）
   - 进展（2026-03-08）：已引入 `ErrorResponsePayload` / `SuccessResponsePayload`（dataclass），并作为 diff 相关服务统一输出模型。

@@ -81,7 +81,7 @@ def _get_auth_user_models():
         from auth import get_auth_backend
 
         backend = (get_auth_backend() or "").strip().lower()
-    except Exception:
+    except (ImportError, AttributeError, RuntimeError, TypeError, ValueError):
         backend = None
 
     source_order = ["qkit", "local"] if backend == "qkit" else ["local", "qkit"]
@@ -94,7 +94,7 @@ def _get_auth_user_models():
                 from qkit_auth.models import QkitAuthUser as user_model
             else:
                 from auth.models import AuthUser as user_model
-        except Exception:
+        except (ImportError, ModuleNotFoundError, AttributeError):
             continue
 
         table_name = str(getattr(user_model, "__tablename__", "") or "")
@@ -164,7 +164,7 @@ def _attach_author_display(commits):
                     email_prefix = email.split("@", 1)[0]
                     if email_prefix not in email_prefix_to_display_name:
                         email_prefix_to_display_name[email_prefix] = display_name
-        except Exception as exc:
+        except (SQLAlchemyError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
             log_print(f"加载作者姓名映射失败({getattr(user_model, '__tablename__', 'unknown')}): {exc}", "APP")
 
     for commit in commits:
@@ -507,7 +507,7 @@ def get_commit_diff_data(commit_id):
                 log_print(f"✅ 缓存命中，避免重复计算: {commit.path} | 耗时: {time.time() - start_time:.2f}秒", 'CACHE')
                 try:
                     diff_data = json.loads(cached_diff.diff_data)
-                except Exception as parse_error:
+                except (json.JSONDecodeError, TypeError, ValueError) as parse_error:
                     log_print(f"❌ 缓存数据解析失败: {parse_error}", 'CACHE')
                     diff_data = None
             else:
@@ -754,14 +754,14 @@ def merge_diff():
                     log_print(f"merged_diff_data类型: {merged_diff_data.get('type', 'INFO')}")
                     log_print(f"merged_diff_data键: {list(merged_diff_data.keys())}", 'INFO')
                 log_print(f"=== 结束get_merged_diff_data调试 ===", 'APP')
-            except Exception as merge_error:
+            except (SQLAlchemyError, TypeError, ValueError, RuntimeError, KeyError) as merge_error:
                 log_print(f"❌ get_merged_diff_data处理失败: {str(merge_error)}", 'INFO', force=True)
                 import traceback
                 traceback.print_exc()
                 flash(f'合并diff处理失败: {str(merge_error)}', 'error')
                 return redirect(request.referrer or url_for('index'))
 
-    except Exception as route_error:
+    except (SQLAlchemyError, TypeError, ValueError, RuntimeError, KeyError) as route_error:
         log_print(f"❌ 合并diff路由处理失败: {str(route_error)}", force=True)
         import traceback
         traceback.print_exc()
@@ -779,7 +779,7 @@ def merge_diff():
                 commit_times.append(format_beijing_time(c.commit_time, '%Y-%m-%d %H:%M:%S'))
             else:
                 commit_times.append('None')
-        except Exception as e:
+        except (TypeError, ValueError, RuntimeError) as e:
             commit_times.append(f'Error: {str(e)}')
     log_print(f"- 提交时间: {commit_times}", 'INFO')
     log_print(f"- 合并diff数据: {merged_diff_data is not None}", 'INFO')
@@ -849,8 +849,13 @@ def update_commit_fields_route():
             'message': f'成功更新 {updated_count} 条提交记录',
             'updated_count': updated_count
         })
-    except Exception as e:
+    except SQLAlchemyError as e:
         db.session.rollback()
+        return jsonify({
+            'success': False,
+            'message': '更新失败: 数据库操作异常'
+        }), 500
+    except (TypeError, ValueError, RuntimeError) as e:
         return jsonify({
             'success': False,
             'message': f'更新失败: {str(e)}'

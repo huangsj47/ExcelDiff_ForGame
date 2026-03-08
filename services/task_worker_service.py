@@ -118,6 +118,14 @@ NON_CRITICAL_WORKER_LOOP_ERRORS = (
     ValueError,
     KeyError,
 )
+NON_CRITICAL_SYNC_THREAD_ERRORS = (
+    OSError,
+    RuntimeError,
+    AttributeError,
+    TypeError,
+    ValueError,
+    subprocess.SubprocessError,
+)
 
 
 def _deployment_mode():
@@ -611,7 +619,7 @@ def _handle_auto_sync_task_inner(task):
                             s, m = git_service.clone_or_update_repository()
                             sync_result[0] = s
                             sync_result[1] = m
-                        except Exception as ex:
+                        except NON_CRITICAL_SYNC_THREAD_ERRORS as ex:
                             sync_exception[0] = ex
 
                     sync_thread = threading.Thread(target=_do_clone_or_update, daemon=True)
