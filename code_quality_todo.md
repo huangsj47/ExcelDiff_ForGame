@@ -74,6 +74,7 @@
   - 进展（2026-03-08）：`model_loader` 的 models/app 模块加载分支已收敛到 `MODEL_LOADER_IMPORT_ERRORS`，移除该模块裸 `except Exception`，并保持模块不可用时的兼容回退行为。
   - 进展（2026-03-08）：`repository_sync_status` 的记录/清理同步错误分支已收敛到 `REPOSITORY_SYNC_STATUS_ERRORS` 与 `REPOSITORY_SYNC_ROLLBACK_ERRORS`，移除该模块裸 `except Exception` 并保持回滚兜底。
   - 进展（2026-03-08）：`core_navigation_handlers` 的路由探测/`url_for` 包装/Qkit 登录兜底与首页路由异常分支已收敛到 `CORE_NAVIGATION_HELPER_ERRORS`、`CORE_NAVIGATION_HANDLER_ERRORS`，移除该模块裸 `except Exception`。
+  - 进展（2026-03-08）：`app_blueprint_bootstrap_service` / `db_migration_service` / `commit_diff_new_page_service` 已收敛为明确异常集合（蓝图注册、表结构迁移、作者映射兜底），移除对应裸 `except Exception`。
   - 下一步：继续按模块将通用 `except Exception` 拆分为更具体异常（IO/网络/数据校验）并补充错误标签。
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 
@@ -111,6 +112,7 @@
   - 进展（2026-03-08）：`tests/test_model_loader_service_decoupling.py` 已补充 import 运行时异常（`RuntimeError`）回退分支覆盖，验证 `model_loader` 收敛后的兼容性。
   - 进展（2026-03-08）：已新增 `tests/test_repository_sync_status_exception_narrowing.py`，覆盖记录/清理同步错误成功路径、数据库异常与回滚失败兜底分支。
   - 进展（2026-03-08）：已新增 `tests/test_core_navigation_exception_narrowing.py`，覆盖路由探测异常、`url_for` 构建异常与首页模板异常兜底分支，验证 `core_navigation_handlers` 收敛后的返回契约。
+  - 进展（2026-03-08）：已新增 `tests/test_small_service_exception_narrowing.py`，覆盖蓝图注册失败、数据库迁移执行失败回滚与 `commit_diff_new` 作者映射失败兜底分支。
   - 验收：新增针对性测试，不仅是 happy path。
 - [x] 10. 统一服务层输入/输出模型（dataclass/pydantic）
   - 进展（2026-03-08）：已引入 `ErrorResponsePayload` / `SuccessResponsePayload`（dataclass），并作为 diff 相关服务统一输出模型。

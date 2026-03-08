@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import traceback
 
+APP_BLUEPRINT_BOOTSTRAP_ERRORS = (
+    RuntimeError,
+    TypeError,
+    ValueError,
+    AttributeError,
+    LookupError,
+)
+
 
 def _register_blueprint_with_trace(*, app, blueprint, label: str, log_print) -> None:
     try:
         app.register_blueprint(blueprint)
         log_print(f"[TRACE] {label} registered", "APP")
-    except Exception as exc:
+    except APP_BLUEPRINT_BOOTSTRAP_ERRORS as exc:
         log_print(f"[TRACE] {label} FAILED: {exc}", "APP", force=True)
         traceback.print_exc()
 

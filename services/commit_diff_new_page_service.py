@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+AUTHOR_DISPLAY_FALLBACK_ERRORS = (
+    RuntimeError,
+    TypeError,
+    ValueError,
+    AttributeError,
+    LookupError,
+)
+
 
 def handle_commit_diff_new_page(
     *,
@@ -27,7 +35,7 @@ def handle_commit_diff_new_page(
         if previous_commit:
             commits_for_author_mapping.append(previous_commit)
         attach_author_display(commits_for_author_mapping)
-    except Exception as author_map_error:
+    except AUTHOR_DISPLAY_FALLBACK_ERRORS as author_map_error:
         log_print(f"commit_diff_new 作者姓名映射失败，回退原始作者: {author_map_error}", "DIFF")
     diff_data = get_unified_diff_data(commit, previous_commit)
     return render_template(

@@ -5,6 +5,15 @@ from __future__ import annotations
 from sqlalchemy import inspect, text as sa_text
 from sqlalchemy.exc import SQLAlchemyError
 
+DB_MIGRATION_RUNTIME_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+    AttributeError,
+    LookupError,
+)
+
 
 def _migrate_table_columns(db, table_name, desired_cols, log_print):
     """Add missing columns for existing tables using ALTER TABLE."""
@@ -23,7 +32,7 @@ def _migrate_table_columns(db, table_name, desired_cols, log_print):
             log_print(f"✅ 自动迁移 {table_name} 表，新增列: {', '.join(added)}", "DB")
         else:
             log_print(f"ℹ️ {table_name} 表列已完整，无需迁移", "DB")
-    except Exception as exc:
+    except DB_MIGRATION_RUNTIME_ERRORS as exc:
         log_print(f"⚠️ {table_name} 表自动迁移失败: {exc}", "DB", force=True)
         try:
             db.session.rollback()
