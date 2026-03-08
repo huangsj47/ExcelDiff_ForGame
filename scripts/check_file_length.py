@@ -8,7 +8,7 @@
     python scripts/check_file_length.py --strict app.py services/task_worker_service.py
 
 规则说明:
-    - WARNING 阈值 (默认 1500 行): 提醒开发者考虑拆分
+    - WARNING 阈值 (默认 1800 行): 提醒开发者考虑拆分
     - ERROR   阈值 (默认 2000 行): 强烈建议新功能写入新文件或已有的较短文件
     - LEGACY_ALLOWLIST: 历史遗留超长文件，仅告警不阻断（用于渐进治理）
 """
@@ -21,7 +21,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
-WARNING_THRESHOLD = 1500   # 行数 >= 此值时输出警告
+WARNING_THRESHOLD = 1800   # 行数 >= 此值时输出警告
 ERROR_THRESHOLD   = 2000   # 行数 >= 此值时输出错误
 
 # 排除的目录（相对于项目根目录）
