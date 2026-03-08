@@ -3,7 +3,10 @@ from pathlib import Path
 
 from app import app, create_tables
 from services.agent_release_service import (
+    detect_git_commit_id,
+    get_release_package_path,
     load_latest_release_manifest,
+    load_release_manifest,
     publish_agent_release,
     rollback_latest_release,
 )
@@ -215,3 +218,35 @@ def test_admin_release_rollback_endpoint(monkeypatch, tmp_path):
 
             latest_after = load_latest_release_manifest() or {}
             assert latest_after.get("version") == "ep-rollback-v1"
+
+
+def test_detect_git_commit_id_returns_empty_on_subprocess_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "services.agent_release_service.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("git missing")),
+    )
+    assert detect_git_commit_id(str(tmp_path)) == ""
+
+
+def test_load_latest_release_manifest_returns_none_for_invalid_json(monkeypatch, tmp_path):
+    release_root = tmp_path / "agent_releases"
+    latest_path = release_root / "latest.json"
+    latest_path.parent.mkdir(parents=True, exist_ok=True)
+    latest_path.write_text("{broken", encoding="utf-8")
+    monkeypatch.setenv("AGENT_RELEASES_DIR", str(release_root))
+
+    assert load_latest_release_manifest() is None
+
+
+def test_load_release_manifest_returns_none_for_invalid_json(monkeypatch, tmp_path):
+    release_root = tmp_path / "agent_releases"
+    manifest_path = release_root / "releases" / "release-v1" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text("{broken", encoding="utf-8")
+    monkeypatch.setenv("AGENT_RELEASES_DIR", str(release_root))
+
+    assert load_release_manifest("release-v1") is None
+
+
+def test_get_release_package_path_returns_none_for_invalid_version():
+    assert get_release_package_path("../invalid") is None

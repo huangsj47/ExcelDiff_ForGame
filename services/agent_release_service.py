@@ -17,6 +17,8 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 _VERSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_JSON_PARSE_ERRORS = (json.JSONDecodeError, OSError, ValueError)
+_SUBPROCESS_DETECT_ERRORS = (OSError, ValueError, subprocess.SubprocessError)
 
 
 def _repo_root() -> str:
@@ -80,7 +82,7 @@ def _atomic_write_json(path: str, data: dict):
         if os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
-            except Exception:
+            except OSError:
                 pass
 
 
@@ -163,7 +165,7 @@ def detect_git_commit_id(repo_root: str | None = None) -> str:
             timeout=10,
             check=False,
         )
-    except Exception:
+    except _SUBPROCESS_DETECT_ERRORS:
         return ""
     if result.returncode != 0:
         return ""
@@ -237,7 +239,7 @@ def load_latest_release_manifest() -> dict | None:
     try:
         with open(path, "r", encoding="utf-8") as fp:
             data = json.load(fp)
-    except Exception:
+    except _JSON_PARSE_ERRORS:
         return None
     if not isinstance(data, dict):
         return None
@@ -246,7 +248,7 @@ def load_latest_release_manifest() -> dict | None:
         return None
     try:
         _safe_version(version)
-    except Exception:
+    except ValueError:
         return None
     return data
 
@@ -254,7 +256,7 @@ def load_latest_release_manifest() -> dict | None:
 def load_release_manifest(version: str) -> dict | None:
     try:
         resolved = _safe_version(version)
-    except Exception:
+    except ValueError:
         return None
     path = _release_manifest_path(resolved)
     if not os.path.exists(path):
@@ -262,7 +264,7 @@ def load_release_manifest(version: str) -> dict | None:
     try:
         with open(path, "r", encoding="utf-8") as fp:
             data = json.load(fp)
-    except Exception:
+    except _JSON_PARSE_ERRORS:
         return None
     if not isinstance(data, dict):
         return None
@@ -280,7 +282,7 @@ def get_release_package_path(version: str) -> str | None:
         return None
     try:
         resolved_version = _safe_version(version)
-    except Exception:
+    except ValueError:
         return None
     package_path = os.path.join(_release_dir(resolved_version), package_name)
     if not os.path.exists(package_path):
@@ -296,7 +298,7 @@ def _parse_created_at_for_sort(value: str) -> datetime:
         text = text[:-1] + "+00:00"
     try:
         parsed = datetime.fromisoformat(text)
-    except Exception:
+    except ValueError:
         return datetime.fromtimestamp(0, tz=timezone.utc)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
