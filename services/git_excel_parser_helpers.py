@@ -7,6 +7,34 @@ import time
 
 import git
 
+GIT_EXCEL_PARSE_ERRORS = (RuntimeError, ValueError, TypeError, AttributeError, KeyError, OSError)
+GIT_EXCEL_REPO_INIT_ERRORS = (
+    git.exc.GitError,
+    OSError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+)
+GIT_EXCEL_WORKBOOK_PARSE_ERRORS = (
+    ImportError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    OSError,
+)
+GIT_EXCEL_EXTRACT_ERRORS = (
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    OSError,
+)
+GIT_EXCEL_SIMPLE_EXTRACT_ERRORS = (RuntimeError, ValueError, TypeError, OSError)
+
 
 def parse_excel_diff(service, commit_id, file_path):
     """Parse Excel diff for a file at a commit."""
@@ -41,14 +69,14 @@ def parse_excel_diff(service, commit_id, file_path):
                 except KeyError:
                     pass
             return service._generate_excel_diff_data(current_data, previous_data, file_path)
-        except Exception as exc:
+        except GIT_EXCEL_PARSE_ERRORS as exc:
             return {
                 "type": "excel",
                 "file_type": "Excel",
                 "error": True,
                 "message": f"无法解析Excel差异: {str(exc)}",
             }
-    except Exception:
+    except GIT_EXCEL_REPO_INIT_ERRORS:
         return None
 
 
@@ -106,9 +134,9 @@ def extract_excel_data(service, commit, file_path):
                 sheets_data[sheet_name] = sheet_rows
             workbook.close()
             return sheets_data
-        except Exception:
+        except GIT_EXCEL_WORKBOOK_PARSE_ERRORS:
             return service._extract_excel_data_simple(excel_data, file_path)
-    except Exception:
+    except GIT_EXCEL_EXTRACT_ERRORS:
         return None
 
 
@@ -166,7 +194,7 @@ def extract_excel_data_simple(excel_data, file_path):
                 }
             ]
         }
-    except Exception:
+    except GIT_EXCEL_SIMPLE_EXTRACT_ERRORS:
         return None
 
 
