@@ -219,3 +219,16 @@ class TestWeeklyTodoFollowups:
         service_content = _read("services/app_request_logging_service.py")
         assert "class _WerkzeugAgentAccessFilter(logging.Filter):" in service_content
         assert "def configure_request_logging(*, app, log_print, suppress_agent_access_log: bool) -> None:" in service_content
+
+    def test_commit_route_scope_helpers_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.commit_route_scope_service import (" in app_content
+        assert "dispatch_commit_route_with_scope" in app_content
+        assert "ensure_commit_route_scope_or_404" in app_content
+        assert "return dispatch_commit_route_with_scope(" in app_content
+
+        service_content = _read("services/commit_route_scope_service.py")
+        assert "def ensure_repository_access_or_403(" in service_content
+        assert "def ensure_commit_access_or_403(" in service_content
+        assert "def ensure_commit_route_scope_or_404(" in service_content
+        assert "def dispatch_commit_route_with_scope(" in service_content

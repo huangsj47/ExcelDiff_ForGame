@@ -164,6 +164,12 @@ from services.excel_diff_api_service import handle_get_excel_diff_data
 from services.commit_list_page_service import handle_commit_list_page
 from services.commit_diff_new_page_service import handle_commit_diff_new_page
 from services.app_request_logging_service import configure_request_logging
+from services.commit_route_scope_service import (
+    dispatch_commit_route_with_scope,
+    ensure_commit_access_or_403,
+    ensure_commit_route_scope_or_404,
+    ensure_repository_access_or_403,
+)
 from services.app_bootstrap_db_service import (
     clear_startup_version_mismatch_cache,
     create_tables_with_runtime_checks,
@@ -557,30 +563,28 @@ def commit_list(repository_id):
 
 
 def _ensure_repository_access_or_403(repository):
-    project = repository.project if repository else None
-    if project is None:
-        abort(404)
-    project_id = getattr(project, "id", None)
-    if project_id is not None and not _has_project_access(project_id):
-        abort(403)
-    return project
+    return ensure_repository_access_or_403(
+        repository=repository,
+        has_project_access=_has_project_access,
+        abort=abort,
+    )
 
 
 def _ensure_commit_access_or_403(commit):
-    repository = commit.repository if commit else None
-    project = _ensure_repository_access_or_403(repository)
-    return repository, project
+    return ensure_commit_access_or_403(
+        commit=commit,
+        ensure_repository_access_or_403_func=_ensure_repository_access_or_403,
+    )
 
 
 def _ensure_commit_route_scope_or_404(commit, project_code=None, repository_name=None):
-    repository, project = _ensure_commit_access_or_403(commit)
-    expected_project_code = str(project_code or "").strip()
-    expected_repo_name = str(repository_name or "").strip()
-    if expected_project_code and str(project.code or "").strip() != expected_project_code:
-        abort(404)
-    if expected_repo_name and str(repository.name or "").strip() != expected_repo_name:
-        abort(404)
-    return repository, project
+    return ensure_commit_route_scope_or_404(
+        commit=commit,
+        project_code=project_code,
+        repository_name=repository_name,
+        ensure_commit_access_or_403_func=_ensure_commit_access_or_403,
+        abort=abort,
+    )
 
 
 def _resolve_previous_commit_db_only(commit):
@@ -589,13 +593,14 @@ def _resolve_previous_commit_db_only(commit):
 
 
 def get_excel_diff_data_with_path(project_code, repository_name, commit_id):
-    commit = Commit.query.get_or_404(commit_id)
-    _ensure_commit_route_scope_or_404(
-        commit,
+    return dispatch_commit_route_with_scope(
+        commit_id=commit_id,
         project_code=project_code,
         repository_name=repository_name,
+        Commit=Commit,
+        ensure_commit_route_scope_or_404_func=_ensure_commit_route_scope_or_404,
+        target_handler=get_excel_diff_data,
     )
-    return get_excel_diff_data(commit_id)
 
 # 保持向后兼容的原路由
 
@@ -627,13 +632,14 @@ def get_excel_diff_data(commit_id):
 
 
 def commit_diff_new_with_path(project_code, repository_name, commit_id):
-    commit = Commit.query.get_or_404(commit_id)
-    _ensure_commit_route_scope_or_404(
-        commit,
+    return dispatch_commit_route_with_scope(
+        commit_id=commit_id,
         project_code=project_code,
         repository_name=repository_name,
+        Commit=Commit,
+        ensure_commit_route_scope_or_404_func=_ensure_commit_route_scope_or_404,
+        target_handler=commit_diff_new,
     )
-    return commit_diff_new(commit_id)
 
 # 保持向后兼容的原路由
 
@@ -672,13 +678,14 @@ def commit_full_diff(commit_id):
 
 
 def refresh_commit_diff_with_path(project_code, repository_name, commit_id):
-    commit = Commit.query.get_or_404(commit_id)
-    _ensure_commit_route_scope_or_404(
-        commit,
+    return dispatch_commit_route_with_scope(
+        commit_id=commit_id,
         project_code=project_code,
         repository_name=repository_name,
+        Commit=Commit,
+        ensure_commit_route_scope_or_404_func=_ensure_commit_route_scope_or_404,
+        target_handler=refresh_commit_diff,
     )
-    return refresh_commit_diff(commit_id)
 
 # 保持向后兼容的原路由
 
@@ -704,13 +711,14 @@ def refresh_commit_diff(commit_id):
 
 
 def commit_diff_with_path(project_code, repository_name, commit_id):
-    commit = Commit.query.get_or_404(commit_id)
-    _ensure_commit_route_scope_or_404(
-        commit,
+    return dispatch_commit_route_with_scope(
+        commit_id=commit_id,
         project_code=project_code,
         repository_name=repository_name,
+        Commit=Commit,
+        ensure_commit_route_scope_or_404_func=_ensure_commit_route_scope_or_404,
+        target_handler=commit_diff,
     )
-    return commit_diff(commit_id)
 
 # 保持向后兼容的原路由
 
