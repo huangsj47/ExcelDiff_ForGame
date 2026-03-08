@@ -170,6 +170,10 @@ from services.commit_route_scope_service import (
     ensure_commit_route_scope_or_404,
     ensure_repository_access_or_403,
 )
+from services.repository_misc_page_service import (
+    check_local_repository_exists as check_local_repository_exists_service,
+    render_edit_repository_page,
+)
 from services.app_bootstrap_db_service import (
     clear_startup_version_mismatch_cache,
     create_tables_with_runtime_checks,
@@ -882,12 +886,12 @@ def reuse_repository_and_update(repository_id):
     )
 def check_local_repository_exists(project_code, repository_name, repository_id):
     """检查本地仓库是否存在"""
-    try:
-        local_path = build_repository_local_path(project_code, repository_name, repository_id, strict=False)
-    except (TypeError, ValueError):
-        return False
-
-    return os.path.exists(local_path)
+    return check_local_repository_exists_service(
+        project_code=project_code,
+        repository_name=repository_name,
+        repository_id=repository_id,
+        build_repository_local_path=build_repository_local_path,
+    )
 
 def update_commit_status(commit_id):
     """更新提交状态"""
@@ -944,18 +948,11 @@ def batch_update_commits_compat():
     )
 
 def edit_repository(repository_id):
-    repository = Repository.query.get_or_404(repository_id)
-    project = repository.project
-    if repository.type == 'git':
-        return render_template('add_git_repository.html', 
-                             project=project, 
-                             repository=repository, 
-                             is_edit=True)
-    else:
-        return render_template('add_svn_repository.html', 
-                             project=project, 
-                             repository=repository, 
-                             is_edit=True)
+    return render_edit_repository_page(
+        repository_id=repository_id,
+        Repository=Repository,
+        render_template=render_template,
+    )
 
 
 def _clear_repository_state_for_switch(repository, switch_type, old_value, new_value):

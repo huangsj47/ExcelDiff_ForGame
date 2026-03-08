@@ -232,3 +232,15 @@ class TestWeeklyTodoFollowups:
         assert "def ensure_commit_access_or_403(" in service_content
         assert "def ensure_commit_route_scope_or_404(" in service_content
         assert "def dispatch_commit_route_with_scope(" in service_content
+
+    def test_repository_misc_page_helpers_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.repository_misc_page_service import (" in app_content
+        assert "render_edit_repository_page" in app_content
+        assert "check_local_repository_exists as check_local_repository_exists_service" in app_content
+        assert "return render_edit_repository_page(" in app_content
+        assert "return check_local_repository_exists_service(" in app_content
+
+        service_content = _read("services/repository_misc_page_service.py")
+        assert "def render_edit_repository_page(" in service_content
+        assert "def check_local_repository_exists(" in service_content
