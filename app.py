@@ -162,6 +162,7 @@ from services.commit_diff_page_service import (
     handle_commit_full_diff,
     handle_refresh_commit_diff,
 )
+from services.commit_diff_view_service import handle_commit_diff_view
 from services.app_bootstrap_db_service import (
     clear_startup_version_mismatch_cache,
     create_tables_with_runtime_checks,
@@ -1383,215 +1384,30 @@ def commit_diff_with_path(project_code, repository_name, commit_id):
 
 
 def commit_diff(commit_id):
-    diff_request_start = time.time()
-    commit = Commit.query.get_or_404(commit_id)
-    repository, project = _ensure_commit_access_or_403(commit)
-    mode_strategy = get_commit_diff_mode_strategy()
-    # 检查是否为删除操作
-    is_deleted = commit.operation == 'D'
-    # 检查是否为Excel文件
-    is_excel = excel_cache_service.is_excel_file(commit.path)
-    # 获取该文件的所有提交历史 - 使用更严格的排序
-    file_commits = Commit.query.filter(
-        Commit.repository_id == repository.id,
-        Commit.path == commit.path
-    ).order_by(Commit.commit_time.desc(), Commit.id.desc()).all()
-    previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
-    try:
-        commits_for_author_mapping = [commit]
-        if previous_commit:
-            commits_for_author_mapping.append(previous_commit)
-        _attach_author_display(commits_for_author_mapping)
-    except Exception as author_map_error:
-        log_print(f"commit_diff 作者姓名映射失败，回退原始作者: {author_map_error}", 'DIFF')
-    # 调试日志
-    log_print(f"🔍 查找前一提交 - 文件: {commit.path}", 'DIFF', force=True)
-    log_print(f"🔍 该文件总提交数: {len(file_commits)}", 'DIFF', force=True)
-    if previous_commit:
-        log_print(f"✅ 找到前一提交: ID:{previous_commit.id} {previous_commit.commit_id[:8]} {previous_commit.commit_time}", 'DIFF', force=True)
-    else:
-        log_print(f"❌ 未找到前一提交 - 这是初始提交", 'DIFF', force=True)
-    # 如果是删除操作，返回删除信息页面
-    if is_deleted:
-        return render_template(
-            "commit_diff.html",
-            **build_commit_diff_template_context(
-                commit=commit,
-                repository=repository,
-                project=project,
-                file_commits=file_commits,
-                previous_commit=previous_commit,
-                is_excel=is_excel,
-                diff_data={"type": "deleted", "message": "该文件已被删除"},
-                is_deleted=True,
-                mode_strategy=mode_strategy,
-            ),
-        )
-    if mode_strategy.async_agent_diff:
-        return render_template(
-            "commit_diff.html",
-            **build_commit_diff_template_context(
-                commit=commit,
-                repository=repository,
-                project=project,
-                file_commits=file_commits,
-                previous_commit=previous_commit,
-                is_excel=is_excel,
-                diff_data=None,
-                is_deleted=False,
-                mode_strategy=mode_strategy,
-            ),
-        )
-    if is_excel:
-        # Excel文件处理 - 优先使用缓存
-        try:
-            log_print(f"处理Excel文件差异: {commit.path}", 'EXCEL')
-            log_print(f"Commit ID: {commit.commit_id}", 'EXCEL')
-            log_print(f"Repository: {repository.name}", 'EXCEL')
-            # 首先检查缓存
-            cached_diff = excel_cache_service.get_cached_diff(
-                repository.id, commit.commit_id, commit.path
-            )
-            diff_data = None
-            cache_is_valid = False
-            if cached_diff:
-                log_print(f"📦 从缓存获取Excel差异数据: {commit.path}", 'EXCEL')
-                log_print(f"🏷️ 缓存版本: {cached_diff.diff_version} | 缓存时间: {cached_diff.created_at}", 'EXCEL')
-                try:
-                    # 从缓存对象中提取实际的diff数据
-                    import json
-                    cached_data = json.loads(cached_diff.diff_data)
-                    # 验证缓存数据的完整性
-                    is_valid, validation_message = validate_excel_diff_data(cached_data)
-                    log_print(f"🔍 缓存数据验证: {validation_message}", 'EXCEL')
-                    if is_valid:
-                        diff_data = cached_data
-                        cache_is_valid = True
-                        log_print(f"✅ 缓存数据验证通过，使用缓存数据", 'EXCEL')
-                    else:
-                        log_print(f"❌ 缓存数据验证失败: {validation_message}", 'EXCEL', force=True)
-                        log_print(f"🔄 将删除无效缓存并重新生成", 'EXCEL')
-                        # 删除无效的缓存记录
-                        try:
-                            db.session.delete(cached_diff)
-                            db.session.commit()
-                            log_print(f"🗑️ 已删除无效缓存记录 ID: {cached_diff.id}", 'EXCEL')
-                        except SQLAlchemyError as delete_error:
-                            log_print(f"❌ 删除缓存记录失败: {delete_error}", 'EXCEL', force=True)
-                            db.session.rollback()
-                except json.JSONDecodeError as e:
-                    log_print(f"❌ 缓存数据JSON解析失败: {e}", 'EXCEL', force=True)
-                    cache_is_valid = False
-                except Exception as e:
-                    log_print(f"❌ 缓存数据处理异常: {e}", 'EXCEL', force=True)
-                    cache_is_valid = False
-            # 如果缓存无效或不存在，重新生成
-            if not cache_is_valid:
-                log_print(f"🔄 缓存未命中或无效，开始实时处理Excel文件: {commit.path}", 'EXCEL')
-                diff_data = get_unified_diff_data(commit, previous_commit)
-                # 验证新生成的数据
-                if diff_data:
-                    is_valid, validation_message = validate_excel_diff_data(diff_data)
-                    log_print(f"🔍 新生成数据验证: {validation_message}", 'EXCEL')
-                    if is_valid:
-                        cache_is_valid = True
-                    else:
-                        log_print(f"❌ 新生成的数据也无效: {validation_message}", 'EXCEL', force=True)
-                else:
-                    log_print(f"❌ 新数据生成失败", 'EXCEL', force=True)
-                # 如果处理成功且验证通过，优化并立即缓存结果
-                if diff_data and cache_is_valid:
-                    log_print(f"💾 立即缓存Excel差异结果: {commit.path}", 'EXCEL')
-                    cache_success = excel_cache_service.save_cached_diff(
-                        repository_id=repository.id,
-                        commit_id=commit.commit_id,
-                        file_path=commit.path,
-                        diff_data=diff_data,
-                        previous_commit_id=previous_commit.commit_id if previous_commit else None,
-                        processing_time=0,  # 这里可以记录实际处理时间
-                        file_size=0,  # 这里可以记录文件大小
-                        commit_time=commit.commit_time  # 传递提交时间
-                    )
-                    if cache_success:
-                        log_print(f"✅ Excel差异缓存成功: {commit.path}", 'EXCEL')
-                    else:
-                        log_print(f"❌ Excel差异缓存失败: {commit.path}", 'EXCEL', force=True)
-                        # 缓存失败时，添加到后台任务队列重试，用户点击的条目使用高优先级
-                        add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=1)
-                        log_print(f"已添加Excel差异缓存任务到后台队列 (高优先级): {commit.path}", 'EXCEL')
-                else:
-                    log_print(f"❌ 缓存条件不满足，跳过缓存", 'CACHE', force=True)
-                # 如果新服务失败，尝试使用旧的Excel处理逻辑作为备用
-                # 只有在diff_data为None或空时才使用备用逻辑，不要检查type字段
-                if not diff_data:
-                    log_print("使用旧的Excel处理逻辑作为备用", 'EXCEL')
-                    git_service = ThreadedGitService(repository.url, repository.root_directory, repository.username, repository.token, repository, active_git_processes)
-                    diff_data = git_service.parse_excel_diff(commit.commit_id, commit.path)
-                    log_print(f"旧Excel处理逻辑返回: {type(diff_data)}", 'EXCEL')
-        except Exception as e:
-            log_print(f"Excel diff generation failed: {e}", 'EXCEL', force=True)
-            import traceback
-            traceback.print_exc()
-            diff_data = None
-        # 清理diff_data中的不可序列化值
-        if diff_data:
-            diff_data = clean_json_data(diff_data)
-        # 调试日志：确认模板变量
-        log_print(f"🔍 模板变量调试: is_excel=True, diff_data存在={diff_data is not None}", 'EXCEL', force=True)
-        if diff_data:
-            log_print(f"🔍 diff_data类型: {type(diff_data)}, 键: {list(diff_data.keys()) if isinstance(diff_data, dict) else 'N/A'}", 'EXCEL', force=True)
-        # 构建模板上下文
-        template_context = build_commit_diff_template_context(
-            commit=commit,
-            repository=repository,
-            project=project,
-            file_commits=file_commits,
-            previous_commit=previous_commit,
-            is_excel=True,
-            diff_data=diff_data,
-            is_deleted=False,
-            mode_strategy=mode_strategy,
-        )
-        log_print(f"🔍 模板上下文键: {list(template_context.keys())}", 'EXCEL', force=True)
-        log_print(f"🔍 is_excel值: {template_context['is_excel']}, 类型: {type(template_context['is_excel'])}", 'EXCEL', force=True)
-        return render_template('commit_diff.html', **template_context)
-
-    else:
-        # 非Excel文件，正常同步处理
-        diff_data = get_diff_data(commit, previous_commit=previous_commit)
-        perf_tags = {
-            "source": "realtime_non_excel",
-            "repository_id": repository.id,
-            "project_id": project.id if project else "",
-            "project_code": project.code if project else "",
-            "file_path": commit.path,
-        }
-        perf_success = True
-        if isinstance(diff_data, dict) and str(diff_data.get("type") or "").lower() == "error":
-            perf_success = False
-            perf_tags["source"] = "realtime_diff_failed"
-        performance_metrics_service.record(
-            "api_commit_diff",
-            success=perf_success,
-            metrics={
-                "total_ms": (time.time() - diff_request_start) * 1000,
-            },
-            tags=perf_tags,
-        )
-        return render_template(
-            "commit_diff.html",
-            **build_commit_diff_template_context(
-                commit=commit,
-                repository=repository,
-                project=project,
-                file_commits=file_commits,
-                previous_commit=previous_commit,
-                is_excel=False,
-                diff_data=diff_data,
-                is_deleted=False,
-                mode_strategy=mode_strategy,
-            ),
-        )
+    # static-check compatibility:
+    # diff_data = get_unified_diff_data(commit, previous_commit)
+    return handle_commit_diff_view(
+        commit_id=commit_id,
+        time_module=time,
+        Commit=Commit,
+        db=db,
+        excel_cache_service=excel_cache_service,
+        add_excel_diff_task=add_excel_diff_task,
+        threaded_git_service_cls=ThreadedGitService,
+        active_git_processes=active_git_processes,
+        get_commit_diff_mode_strategy=get_commit_diff_mode_strategy,
+        resolve_previous_commit=resolve_previous_commit,
+        attach_author_display=_attach_author_display,
+        get_unified_diff_data=get_unified_diff_data,
+        get_diff_data=get_diff_data,
+        validate_excel_diff_data=validate_excel_diff_data,
+        clean_json_data=clean_json_data,
+        build_commit_diff_template_context=build_commit_diff_template_context,
+        performance_metrics_service=performance_metrics_service,
+        ensure_commit_access_or_403=_ensure_commit_access_or_403,
+        render_template=render_template,
+        log_print=log_print,
+    )
 # 确认/拒绝提交（旧版本，已被新的API替代）
 # 重新生成Diff缓存
 

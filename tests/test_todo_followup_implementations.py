@@ -170,3 +170,12 @@ class TestWeeklyTodoFollowups:
         service_content = _read("services/commit_diff_page_service.py")
         assert "def handle_commit_full_diff(" in service_content
         assert "def handle_refresh_commit_diff(" in service_content
+
+    def test_commit_diff_view_logic_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.commit_diff_view_service import handle_commit_diff_view" in app_content
+        assert "return handle_commit_diff_view(" in app_content
+        assert "# diff_data = get_unified_diff_data(commit, previous_commit)" in app_content
+
+        service_content = _read("services/commit_diff_view_service.py")
+        assert "def handle_commit_diff_view(" in service_content
