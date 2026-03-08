@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 
 from utils.db_safety import (
     assert_destructive_db_allowed,
@@ -51,6 +52,6 @@ def test_destructive_guard_blocks_non_sqlite_without_override(monkeypatch):
 
 
 def test_recreate_db_script_has_safety_guard():
-    content = open("recreate_db.py", "r", encoding="utf-8").read()
+    content = Path("recreate_db.py").read_text(encoding="utf-8")
     assert "assert_destructive_db_allowed" in content
     assert "db.drop_all()" in content

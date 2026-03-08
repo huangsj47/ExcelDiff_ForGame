@@ -6,9 +6,49 @@ import json
 from datetime import datetime, timezone
 
 from flask import flash, jsonify, redirect, render_template, request, url_for
+from sqlalchemy.exc import SQLAlchemyError
+from werkzeug.exceptions import HTTPException
 
 from services.model_loader import get_runtime_model, get_runtime_models
 from utils.request_security import _get_accessible_project_ids, _has_project_access, require_admin
+
+STATUS_SYNC_CLEAR_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    ImportError,
+    HTTPException,
+)
+STATUS_SYNC_MAPPING_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    ImportError,
+    HTTPException,
+)
+STATUS_SYNC_CONFIG_LIST_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    HTTPException,
+)
+STATUS_SYNC_WEEKLY_BATCH_CONFIRM_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    json.JSONDecodeError,
+    ImportError,
+    HTTPException,
+)
 
 
 @require_admin
@@ -23,7 +63,7 @@ def clear_all_confirmation_status():
         if result.get("success"):
             return jsonify(result)
         return jsonify(result), 500
-    except Exception as exc:
+    except STATUS_SYNC_CLEAR_ERRORS as exc:
         log_print(f"清空确认状态失败: {exc}", "ERROR", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
 
@@ -58,7 +98,7 @@ def get_sync_mapping_info():
         if result.get("success"):
             return jsonify(result)
         return jsonify(result), 500
-    except Exception as exc:
+    except STATUS_SYNC_MAPPING_ERRORS as exc:
         log_print(f"获取同步映射信息失败: {exc}", "ERROR", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
 
@@ -114,7 +154,7 @@ def get_sync_configs():
                 }
             )
         return jsonify({"success": True, "configs": config_list})
-    except Exception as exc:
+    except STATUS_SYNC_CONFIG_LIST_ERRORS as exc:
         log_print(f"获取同步配置失败: {exc}", "ERROR", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
 
@@ -197,7 +237,7 @@ def weekly_version_batch_confirm_api(config_id):
                 "updated_count": updated_count,
             }
         )
-    except Exception as exc:
+    except STATUS_SYNC_WEEKLY_BATCH_CONFIRM_ERRORS as exc:
         db.session.rollback()
         log_print(f"批量确认失败: {exc}", "ERROR", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500

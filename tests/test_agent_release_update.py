@@ -136,8 +136,11 @@ def test_agent_release_endpoints(monkeypatch, tmp_path):
                     "X-Agent-Token": agent_token,
                 },
             )
-            assert download_resp.status_code == 200, download_resp.get_data(as_text=True)
-            assert len(download_resp.data or b"") > 0
+            try:
+                assert download_resp.status_code == 200, download_resp.get_data(as_text=True)
+                assert len(download_resp.data or b"") > 0
+            finally:
+                download_resp.close()
 
             up_to_date_resp = client.post(
                 "/api/agents/releases/latest",
