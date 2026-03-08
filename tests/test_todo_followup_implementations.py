@@ -201,3 +201,11 @@ class TestWeeklyTodoFollowups:
 
         service_content = _read("services/commit_list_page_service.py")
         assert "def handle_commit_list_page(" in service_content
+
+    def test_commit_diff_new_page_logic_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.commit_diff_new_page_service import handle_commit_diff_new_page" in app_content
+        assert "return handle_commit_diff_new_page(" in app_content
+
+        service_content = _read("services/commit_diff_new_page_service.py")
+        assert "def handle_commit_diff_new_page(" in service_content

@@ -165,6 +165,7 @@ from services.commit_diff_page_service import (
 from services.commit_diff_view_service import handle_commit_diff_view
 from services.excel_diff_api_service import handle_get_excel_diff_data
 from services.commit_list_page_service import handle_commit_list_page
+from services.commit_diff_new_page_service import handle_commit_diff_new_page
 from services.app_bootstrap_db_service import (
     clear_startup_version_mismatch_cache,
     create_tables_with_runtime_checks,
@@ -686,30 +687,16 @@ def commit_diff_new_with_path(project_code, repository_name, commit_id):
 
 def commit_diff_new(commit_id):
     """使用新的差异服务显示文件差异"""
-    commit = Commit.query.get_or_404(commit_id)
-    repository, project = _ensure_commit_access_or_403(commit)
-    # 获取该文件的所有提交历史
-    file_commits = Commit.query.filter(
-        Commit.repository_id == repository.id,
-        Commit.path == commit.path
-    ).order_by(Commit.commit_time.desc()).all()
-    previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
-    try:
-        commits_for_author_mapping = [commit]
-        if previous_commit:
-            commits_for_author_mapping.append(previous_commit)
-        _attach_author_display(commits_for_author_mapping)
-    except Exception as author_map_error:
-        log_print(f"commit_diff_new 作者姓名映射失败，回退原始作者: {author_map_error}", 'DIFF')
-    # 使用新的差异服务处理文件
-    diff_data = get_unified_diff_data(commit, previous_commit)
-    return render_template('commit_diff_new.html', 
-                         commit=commit, 
-                         repository=repository,
-                         project=project,
-                         diff_data=diff_data,
-                         file_commits=file_commits,
-                         previous_commit=previous_commit)
+    return handle_commit_diff_new_page(
+        commit_id=commit_id,
+        Commit=Commit,
+        resolve_previous_commit=resolve_previous_commit,
+        attach_author_display=_attach_author_display,
+        get_unified_diff_data=get_unified_diff_data,
+        ensure_commit_access_or_403=_ensure_commit_access_or_403,
+        render_template=render_template,
+        log_print=log_print,
+    )
 # 完整文件diff路由
 
 
