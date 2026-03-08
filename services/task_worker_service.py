@@ -71,6 +71,29 @@ EXCEL_TASK_ENQUEUE_COOLDOWN_SECONDS = max(
 )
 EXCEL_TASK_ENQUEUE_COOLDOWN_MAX_KEYS = 5000
 
+NON_CRITICAL_TASK_STATUS_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    AttributeError,
+    TypeError,
+    ValueError,
+)
+NON_CRITICAL_QUEUE_ENQUEUE_ERRORS = (
+    queue.Full,
+    RuntimeError,
+    AttributeError,
+    TypeError,
+    ValueError,
+)
+NON_CRITICAL_VCS_PREHEAL_ERRORS = (
+    OSError,
+    RuntimeError,
+    AttributeError,
+    TypeError,
+    ValueError,
+    subprocess.SubprocessError,
+)
+
 
 def _deployment_mode():
     return get_deployment_mode()
@@ -405,7 +428,7 @@ def _handle_excel_diff_task(task, priority):
         if 'task_id' in task:
             try:
                 update_task_status_with_retry(task['task_id'], 'processing')
-            except Exception as update_error:
+            except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                 log_print(f"更新任务开始状态失败: {update_error}", 'TASK', force=True)
         try:
             _excel_cache_service.process_excel_diff_background(
@@ -414,7 +437,7 @@ def _handle_excel_diff_task(task, priority):
             if 'task_id' in task:
                 try:
                     update_task_status_with_retry(task['task_id'], 'completed')
-                except Exception as update_error:
+                except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                     log_print(f"更新任务完成状态失败: {update_error}", 'TASK', force=True)
         except Exception as e:
             log_print(f"❌ Excel差异处理失败: {e}", 'EXCEL', force=True)
@@ -425,7 +448,7 @@ def _handle_excel_diff_task(task, priority):
             if 'task_id' in task:
                 try:
                     update_task_status_with_retry(task['task_id'], 'failed', str(e))
-                except Exception as update_error:
+                except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                     log_print(f"更新任务状态失败: {update_error}", 'TASK', force=True)
 
 
@@ -455,7 +478,7 @@ def _reset_repository_to_head(git_service, repository):
             log_print(f"✅ [RESET] git gc --prune=now 成功", 'SYNC')
         else:
             log_print(f"⚠️ [RESET] git gc --prune=now 失败", 'SYNC', force=True)
-    except Exception as reset_err:
+    except NON_CRITICAL_VCS_PREHEAL_ERRORS as reset_err:
         log_print(f"❌ [RESET] 重置仓库异常: {reset_err}", 'SYNC', force=True)
 
 
@@ -507,7 +530,7 @@ def _handle_auto_sync_task_inner(task):
         if 'task_id' in task:
             try:
                 update_task_status_with_retry(task['task_id'], 'processing')
-            except Exception as update_error:
+            except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                 log_print(f"更新任务开始状态失败: {update_error}", 'TASK', force=True)
         try:
             repository = _db.session.get(_Repository, task['repository_id'])
@@ -537,7 +560,7 @@ def _handle_auto_sync_task_inner(task):
                             if 'task_id' in task:
                                 try:
                                     update_task_status_with_retry(task['task_id'], 'failed', error_msg)
-                                except Exception:
+                                except NON_CRITICAL_TASK_STATUS_ERRORS:
                                     pass
                             return
                     elif force_repair_update and os.path.isdir(git_service.local_path):
@@ -551,7 +574,7 @@ def _handle_auto_sync_task_inner(task):
                                 heal_ok, heal_msg = git_service._self_heal_repository_state()
                                 if not heal_ok:
                                     log_print(f"⚠️ Git自愈未完全成功: {heal_msg}", "SYNC", force=True)
-                        except Exception as heal_exc:
+                        except NON_CRITICAL_VCS_PREHEAL_ERRORS as heal_exc:
                             log_print(f"⚠️ Git自愈异常，继续尝试同步: {heal_exc}", "SYNC", force=True)
 
                     # 使用5分钟超时的线程执行 clone_or_update
@@ -582,7 +605,7 @@ def _handle_auto_sync_task_inner(task):
                         if 'task_id' in task:
                             try:
                                 update_task_status_with_retry(task['task_id'], 'failed', error_msg)
-                            except Exception:
+                            except NON_CRITICAL_TASK_STATUS_ERRORS:
                                 pass
                         return
 
@@ -597,7 +620,7 @@ def _handle_auto_sync_task_inner(task):
                         if 'task_id' in task:
                             try:
                                 update_task_status_with_retry(task['task_id'], 'failed', error_msg)
-                            except Exception:
+                            except NON_CRITICAL_TASK_STATUS_ERRORS:
                                 pass
                         return
 
@@ -614,7 +637,7 @@ def _handle_auto_sync_task_inner(task):
                         if 'task_id' in task:
                             try:
                                 update_task_status_with_retry(task['task_id'], 'failed', message)
-                            except Exception:
+                            except NON_CRITICAL_TASK_STATUS_ERRORS:
                                 pass
                         return
 
@@ -694,7 +717,7 @@ def _handle_auto_sync_task_inner(task):
                             tw = TaskWrapper(8, task_counter, task_data)
                             background_task_queue.put(tw)
                             excel_tasks_added += 1
-                        except Exception as e:
+                        except NON_CRITICAL_QUEUE_ENQUEUE_ERRORS as e:
                             log_print(f"❌ [BACKGROUND_SYNC] 添加Excel缓存任务失败: {e}", 'SYNC', force=True)
                     if excel_tasks_added > 0:
                         log_print(f"📊 [BACKGROUND_SYNC] 批量添加 {excel_tasks_added} 个Excel缓存任务", 'SYNC')
@@ -718,7 +741,7 @@ def _handle_auto_sync_task_inner(task):
                             if 'task_id' in task:
                                 try:
                                     update_task_status_with_retry(task['task_id'], 'failed', error_msg)
-                                except Exception:
+                                except NON_CRITICAL_TASK_STATUS_ERRORS:
                                     pass
                             return
                     elif force_repair_update and os.path.isdir(svn_service.local_path):
@@ -732,7 +755,7 @@ def _handle_auto_sync_task_inner(task):
                                 svn_service._run_svn_cleanup()
                             if hasattr(svn_service, "_run_svn_revert"):
                                 svn_service._run_svn_revert()
-                        except Exception as heal_exc:
+                        except NON_CRITICAL_VCS_PREHEAL_ERRORS as heal_exc:
                             log_print(f"⚠️ SVN预修复异常，继续尝试更新: {heal_exc}", "SYNC", force=True)
 
                     success, message = svn_service.checkout_or_update_repository()
@@ -746,7 +769,7 @@ def _handle_auto_sync_task_inner(task):
                         if 'task_id' in task:
                             try:
                                 update_task_status_with_retry(task['task_id'], 'failed', error_msg)
-                            except Exception:
+                            except NON_CRITICAL_TASK_STATUS_ERRORS:
                                 pass
                         return
                     repository.clone_status = "completed"
@@ -761,7 +784,7 @@ def _handle_auto_sync_task_inner(task):
             if 'task_id' in task:
                 try:
                     update_task_status_with_retry(task['task_id'], 'completed')
-                except Exception as update_error:
+                except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                     log_print(f"更新任务完成状态失败: {update_error}", 'TASK', force=True)
         except Exception as e:
             log_print(f"❌ 自动数据分析失败: {e}", 'SYNC', force=True)
@@ -770,7 +793,7 @@ def _handle_auto_sync_task_inner(task):
                 repository = _db.session.get(_Repository, repository_id) if repository_id else None
                 if repository:
                     _record_sync_error(repository, f"自动同步失败: {e}")
-            except Exception:
+            except NON_CRITICAL_TASK_STATUS_ERRORS:
                 pass
             if 'task_id' in task:
                 db_task = _db.session.get(_BackgroundTask, task['task_id'])
@@ -789,21 +812,21 @@ def _handle_weekly_sync_task(task):
         if 'task_id' in task:
             try:
                 update_task_status_with_retry(task['task_id'], 'processing')
-            except Exception as update_error:
+            except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                 log_print(f"更新任务开始状态失败: {update_error}", 'TASK', force=True)
         try:
             _process_weekly_version_sync(task['config_id'])
             if 'task_id' in task:
                 try:
                     update_task_status_with_retry(task['task_id'], 'completed')
-                except Exception as update_error:
+                except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                     log_print(f"更新任务完成状态失败: {update_error}", 'TASK', force=True)
         except Exception as e:
             log_print(f"❌ 周版本同步失败: {e}", 'WEEKLY', force=True)
             if 'task_id' in task:
                 try:
                     update_task_status_with_retry(task['task_id'], 'failed', str(e))
-                except Exception as update_error:
+                except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                     log_print(f"更新任务状态失败: {update_error}", 'TASK', force=True)
 
 
@@ -814,21 +837,21 @@ def _handle_weekly_excel_cache_task(task):
         if 'id' in task:
             try:
                 update_task_status_with_retry(task['id'], 'processing')
-            except Exception as update_error:
+            except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                 log_print(f"更新任务开始状态失败: {update_error}", 'TASK', force=True)
         try:
             _process_weekly_excel_cache(task['data']['config_id'], task['data']['file_path'])
             if 'id' in task:
                 try:
                     update_task_status_with_retry(task['id'], 'completed')
-                except Exception as update_error:
+                except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                     log_print(f"更新任务完成状态失败: {update_error}", 'TASK', force=True)
         except Exception as e:
             log_print(f"❌ 周版本Excel缓存生成失败: {e}", 'WEEKLY', force=True)
             if 'id' in task:
                 try:
                     update_task_status_with_retry(task['id'], 'failed', str(e))
-                except Exception as update_error:
+                except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                     log_print(f"更新任务状态失败: {update_error}", 'TASK', force=True)
 
 
@@ -846,7 +869,7 @@ def execute_task_inline_for_agent(task_type, payload):
         commit_record_id = payload.get('commit_record_id') or payload.get('commit_id')
         try:
             commit_record_id = int(commit_record_id)
-        except Exception:
+        except (TypeError, ValueError):
             raise ValueError("commit_diff 任务缺少有效 commit_record_id")
 
         commit = _db.session.get(_Commit, commit_record_id)
@@ -868,7 +891,7 @@ def execute_task_inline_for_agent(task_type, payload):
             if previous_commit:
                 commits_for_author.append(previous_commit)
             _attach_author_display(commits_for_author)
-        except Exception:
+        except (TypeError, ValueError, RuntimeError, AttributeError):
             pass
 
         diff_data = get_diff_data(commit, previous_commit=previous_commit)
@@ -1271,7 +1294,7 @@ def regenerate_repository_cache(repository_id):
             add_excel_diff_task(repository_id, commit.commit_id, commit.path)
         log_print(f"已添加 {len(recent_commits)} 个缓存重建任务", 'CACHE')
         return len(recent_commits)
-    except Exception as e:
+    except (SQLAlchemyError, RuntimeError, AttributeError, TypeError, ValueError) as e:
         log_print(f"重新生成仓库缓存失败: {e}", 'CACHE', force=True)
         traceback.print_exc()
 
@@ -1461,7 +1484,7 @@ def stop_scheduler():
     if scheduler_thread and scheduler_thread.is_alive():
         try:
             scheduler_thread.join(timeout=2)
-        except Exception as exc:
+        except RuntimeError as exc:
             log_print(f"停止定时任务调度器失败: {exc}", "APP", force=True)
 
 

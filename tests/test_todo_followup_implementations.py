@@ -253,6 +253,14 @@ class TestWeeklyTodoFollowups:
         assert "@app.context_processor" in service_content
         assert "generate_commit_diff_url=generate_commit_diff_url" in service_content
 
+    def test_task_worker_exception_guards_are_narrowed_for_status_and_heal_paths(self):
+        content = _read("services/task_worker_service.py")
+        assert "NON_CRITICAL_TASK_STATUS_ERRORS" in content
+        assert "NON_CRITICAL_VCS_PREHEAL_ERRORS" in content
+        assert "NON_CRITICAL_QUEUE_ENQUEUE_ERRORS" in content
+        assert "except Exception as update_error" not in content
+        assert "except Exception as heal_exc" not in content
+
     def test_commit_route_scope_helpers_extracted_from_app_entry(self):
         app_content = _read("app.py")
         assert "from services.commit_route_scope_service import (" in app_content
