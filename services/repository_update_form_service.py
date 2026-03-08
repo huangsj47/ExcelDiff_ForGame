@@ -2,6 +2,35 @@
 
 from __future__ import annotations
 
+from sqlalchemy.exc import SQLAlchemyError
+
+
+REPOSITORY_UPDATE_FORM_FORCE_SYNC_ERRORS = (
+    ImportError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    OSError,
+)
+REPOSITORY_UPDATE_FORM_ASYNC_REFILTER_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    OSError,
+)
+REPOSITORY_UPDATE_FORM_SUBMIT_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+)
+
 
 def clear_repository_state_for_switch(
     *,
@@ -318,10 +347,10 @@ def handle_update_repository_form(
                                 log_print(f"❌ 全量同步失败: {message}", "APP", force=True)
                             else:
                                 log_print("✅ 全量同步成功", "APP")
-                        except Exception as sync_exc:
+                        except REPOSITORY_UPDATE_FORM_FORCE_SYNC_ERRORS as sync_exc:
                             log_print(f"❌ 全量同步异常: {sync_exc}", "APP", force=True)
                     log_print("仓库内容重新筛选完成", "APP")
-                except Exception as exc:
+                except REPOSITORY_UPDATE_FORM_ASYNC_REFILTER_ERRORS as exc:
                     log_print(f"重新筛选仓库内容时出错: {exc}", "APP", force=True)
                     import traceback
 
@@ -335,7 +364,7 @@ def handle_update_repository_form(
         else:
             flash(f'仓库 "{repository.name}" 更新成功', "success")
         return redirect(url_for("repository_config", project_id=project_id))
-    except Exception as exc:
+    except REPOSITORY_UPDATE_FORM_SUBMIT_ERRORS as exc:
         db.session.rollback()
         flash(f"更新仓库失败: {str(exc)}", "error")
         return redirect(url_for("edit_repository", repository_id=repository_id))
