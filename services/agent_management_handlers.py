@@ -13,6 +13,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from flask import jsonify, render_template, request, send_file
+from sqlalchemy.exc import SQLAlchemyError
 
 from services.model_loader import get_runtime_models
 from services.agent_release_service import (
@@ -38,6 +39,14 @@ _INCIDENT_MAX_LOG_EXCERPT_LENGTH = 32000
 _NUMERIC_PARSE_ERRORS = (TypeError, ValueError, OverflowError)
 _AUTH_BACKEND_DISCOVERY_ERRORS = (ImportError, ModuleNotFoundError, AttributeError, TypeError, ValueError, RuntimeError)
 _AUTH_MODEL_IMPORT_ERRORS = (ImportError, ModuleNotFoundError, AttributeError)
+_AGENT_RELEASE_HANDLER_ERRORS = (
+    OSError,
+    ValueError,
+    TypeError,
+    RuntimeError,
+    KeyError,
+    SQLAlchemyError,
+)
 
 
 def _bool_env(key: str, default: bool) -> bool:
@@ -1390,7 +1399,7 @@ def agent_get_latest_release():
             ),
             200,
         )
-    except Exception as exc:
+    except _AGENT_RELEASE_HANDLER_ERRORS as exc:
         log_print(f"读取 Agent release 信息失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
 
@@ -1435,7 +1444,7 @@ def agent_download_release_package(version: str):
             download_name=package_name,
             conditional=True,
         )
-    except Exception as exc:
+    except _AGENT_RELEASE_HANDLER_ERRORS as exc:
         log_print(f"Agent 下载 release 包失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
 
@@ -1472,7 +1481,7 @@ def list_agent_releases():
                 "count": len(items),
             }
         )
-    except Exception as exc:
+    except _AGENT_RELEASE_HANDLER_ERRORS as exc:
         log_print(f"读取 Agent release 列表失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
 
@@ -1500,7 +1509,7 @@ def rollback_agent_release():
                 "latest_release": latest or None,
             }
         )
-    except Exception as exc:
+    except _AGENT_RELEASE_HANDLER_ERRORS as exc:
         log_print(f"回滚 Agent release 失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 400
 
