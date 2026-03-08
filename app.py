@@ -10,14 +10,11 @@ if os.path.exists(_env_path):
 
 import json
 import math
-import re
 import threading
-import queue
 import time
 import atexit
 import signal
 import schedule
-import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -166,6 +163,7 @@ from services.commit_diff_view_service import handle_commit_diff_view
 from services.excel_diff_api_service import handle_get_excel_diff_data
 from services.commit_list_page_service import handle_commit_list_page
 from services.commit_diff_new_page_service import handle_commit_diff_new_page
+from services.app_request_logging_service import configure_request_logging
 from services.app_bootstrap_db_service import (
     clear_startup_version_mismatch_cache,
     create_tables_with_runtime_checks,
@@ -232,9 +230,6 @@ from routes.commit_diff_routes import commit_diff_bp
 from routes.core_management_routes import core_management_bp
 from routes.weekly_version_management_routes import weekly_version_bp
 from utils.url_helpers import generate_commit_diff_url, generate_excel_diff_data_url, generate_refresh_diff_url
-import threading
-import queue
-import logging
 from utils.db_retry import db_retry
 from utils.sqlite_config import set_sqlite_pragma  # 导入SQLite优化配置
 from utils.db_config import (
@@ -338,48 +333,11 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
-class _WerkzeugAgentAccessFilter(logging.Filter):
-    """Suppress high-frequency /api/agents access logs for 2xx/3xx responses."""
-
-    _SUPPRESS_PATH_PREFIXES = ("/api/agents",)
-    _REQUEST_LINE_PATTERN = re.compile(
-        r'"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\S+)\s+HTTP/[0-9.]+"\s+(?:\x1b\[[0-9;]*m)?(\d{3})'
-    )
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            message = record.getMessage()
-        except Exception:
-            return True
-
-        if "/api/agents" not in message:
-            return True
-
-        matched = self._REQUEST_LINE_PATTERN.search(message or "")
-        if not matched:
-            return True
-
-        path = matched.group(1)
-        try:
-            status_code = int(matched.group(2))
-        except Exception:
-            return True
-
-        if any(path.startswith(prefix) for prefix in self._SUPPRESS_PATH_PREFIXES):
-            return status_code >= 400
-        return True
-
-
-def _configure_werkzeug_access_log_filter() -> None:
-    if not _env_bool("SUPPRESS_AGENT_ACCESS_LOG", True):
-        return
-    werkzeug_logger = logging.getLogger("werkzeug")
-    if any(isinstance(item, _WerkzeugAgentAccessFilter) for item in werkzeug_logger.filters):
-        return
-    werkzeug_logger.addFilter(_WerkzeugAgentAccessFilter())
-
-
-_configure_werkzeug_access_log_filter()
+configure_request_logging(
+    app=app,
+    log_print=log_print,
+    suppress_agent_access_log=_env_bool("SUPPRESS_AGENT_ACCESS_LOG", True),
+)
 # 启用CORS支持，允许跨域请求
 runtime_settings = build_runtime_settings(os.environ)
 secret_key = runtime_settings.secret_key
@@ -419,11 +377,6 @@ configure_request_security(
 # but the full list moved to services/app_security_bootstrap_service.py.
 
 
-@app.before_request
-def log_request_info():
-    """Record incoming request info for admin routes."""
-    if request.path.startswith('/admin/'):
-        log_print(f"[REQUEST] {request.method} {request.path}", 'REQUEST')
 from utils.timezone_utils import format_beijing_time
 configure_app_security_bootstrap(
     app=app,

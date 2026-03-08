@@ -209,3 +209,13 @@ class TestWeeklyTodoFollowups:
 
         service_content = _read("services/commit_diff_new_page_service.py")
         assert "def handle_commit_diff_new_page(" in service_content
+
+    def test_request_logging_bootstrap_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.app_request_logging_service import configure_request_logging" in app_content
+        assert "configure_request_logging(" in app_content
+        assert "suppress_agent_access_log=_env_bool(\"SUPPRESS_AGENT_ACCESS_LOG\", True)" in app_content
+
+        service_content = _read("services/app_request_logging_service.py")
+        assert "class _WerkzeugAgentAccessFilter(logging.Filter):" in service_content
+        assert "def configure_request_logging(*, app, log_print, suppress_agent_access_log: bool) -> None:" in service_content
