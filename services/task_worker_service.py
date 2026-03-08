@@ -93,6 +93,15 @@ NON_CRITICAL_VCS_PREHEAL_ERRORS = (
     ValueError,
     subprocess.SubprocessError,
 )
+NON_CRITICAL_BRANCH_REFRESH_ERRORS = (
+    SQLAlchemyError,
+    OSError,
+    RuntimeError,
+    AttributeError,
+    TypeError,
+    ValueError,
+    subprocess.SubprocessError,
+)
 
 
 def _deployment_mode():
@@ -1523,14 +1532,14 @@ def queue_missing_git_branch_refresh(project_id, repository_ids):
                         if branches:
                             repo.branch = branches[0]
                             updated_count += 1
-                    except Exception as branch_error:
+                    except NON_CRITICAL_BRANCH_REFRESH_ERRORS as branch_error:
                         log_print(f"异步刷新仓库分支失败: repo_id={repo.id}, error={branch_error}", 'APP')
                 if updated_count > 0:
                     _db.session.commit()
                     log_print(f"异步刷新仓库分支完成: project_id={target_project_id}, updated={updated_count}", 'APP')
                 else:
                     _db.session.rollback()
-        except Exception as worker_error:
+        except NON_CRITICAL_BRANCH_REFRESH_ERRORS as worker_error:
             try:
                 _db.session.rollback()
             except SQLAlchemyError:
