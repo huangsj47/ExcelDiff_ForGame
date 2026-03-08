@@ -5,6 +5,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from sqlalchemy.exc import SQLAlchemyError
+
+
+REPOSITORY_SYNC_STATUS_ERRORS = (AttributeError, TypeError, ValueError, RuntimeError, SQLAlchemyError)
+REPOSITORY_SYNC_ROLLBACK_ERRORS = (AttributeError, RuntimeError, SQLAlchemyError)
 
 
 def _normalize_error_message(error_message, max_length=2000):
@@ -29,13 +34,13 @@ def record_sync_error(session, repository, error_message, *, log_func=None, log_
                 log_type,
             )
         return True
-    except Exception as exc:
+    except REPOSITORY_SYNC_STATUS_ERRORS as exc:
         if log_func:
             log_func(f"❌ 记录同步错误失败: {exc}", log_type, force=True)
         if commit:
             try:
                 session.rollback()
-            except Exception:
+            except REPOSITORY_SYNC_ROLLBACK_ERRORS:
                 pass
         return False
 
@@ -57,12 +62,12 @@ def clear_sync_error(session, repository, *, log_func=None, log_type="SYNC", com
                 log_type,
             )
         return True
-    except Exception as exc:
+    except REPOSITORY_SYNC_STATUS_ERRORS as exc:
         if log_func:
             log_func(f"⚠️ 清除同步错误状态失败: {exc}", log_type, force=True)
         if commit:
             try:
                 session.rollback()
-            except Exception:
+            except REPOSITORY_SYNC_ROLLBACK_ERRORS:
                 pass
         return False
