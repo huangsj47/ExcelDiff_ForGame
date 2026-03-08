@@ -243,6 +243,16 @@ class TestWeeklyTodoFollowups:
         assert "def register_cleanup_hook(" in service_content
         assert "AppBootstrapManager(" in service_content
 
+    def test_template_context_bootstrap_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.app_template_context_service import configure_template_context_processors" in app_content
+        assert "configure_template_context_processors(" in app_content
+
+        service_content = _read("services/app_template_context_service.py")
+        assert "def configure_template_context_processors(" in service_content
+        assert "@app.context_processor" in service_content
+        assert "generate_commit_diff_url=generate_commit_diff_url" in service_content
+
     def test_commit_route_scope_helpers_extracted_from_app_entry(self):
         app_content = _read("app.py")
         assert "from services.commit_route_scope_service import (" in app_content

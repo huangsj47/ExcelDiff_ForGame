@@ -169,6 +169,7 @@ from services.app_lifecycle_bootstrap_service import (
     create_bootstrap_manager,
     register_cleanup_hook,
 )
+from services.app_template_context_service import configure_template_context_processors
 from services.commit_route_scope_service import (
     dispatch_commit_route_with_scope,
     ensure_commit_access_or_403,
@@ -1025,15 +1026,15 @@ def batch_update_credentials():
         app_logger=app.logger,
     )
 
-@app.context_processor
-def inject_template_functions():
-    """注入模板函数"""
-    return dict(
-        get_diff_data=get_diff_data,
-        generate_commit_diff_url=generate_commit_diff_url,
-        generate_excel_diff_data_url=generate_excel_diff_data_url,
-        generate_refresh_diff_url=generate_refresh_diff_url
-    )
+configure_template_context_processors(
+    app=app,
+    get_diff_data=get_diff_data,
+    generate_commit_diff_url=generate_commit_diff_url,
+    generate_excel_diff_data_url=generate_excel_diff_data_url,
+    generate_refresh_diff_url=generate_refresh_diff_url,
+)
+
+
 def create_tables():
     """创建数据库表"""
     # static-check compatibility: implementation now lives in service and still uses inspect(db.engine).get_table_names()
