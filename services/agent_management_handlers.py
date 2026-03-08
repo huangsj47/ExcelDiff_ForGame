@@ -35,6 +35,9 @@ _INCIDENT_MAX_TITLE_LENGTH = 255
 _INCIDENT_MAX_MESSAGE_LENGTH = 4000
 _INCIDENT_MAX_ERROR_LENGTH = 16000
 _INCIDENT_MAX_LOG_EXCERPT_LENGTH = 32000
+_NUMERIC_PARSE_ERRORS = (TypeError, ValueError, OverflowError)
+_AUTH_BACKEND_DISCOVERY_ERRORS = (ImportError, ModuleNotFoundError, AttributeError, TypeError, ValueError, RuntimeError)
+_AUTH_MODEL_IMPORT_ERRORS = (ImportError, ModuleNotFoundError, AttributeError)
 
 
 def _bool_env(key: str, default: bool) -> bool:
@@ -50,7 +53,7 @@ def _int_env(key: str, default: int, min_value: int | None = None, max_value: in
     if raw is not None:
         try:
             value = int(str(raw).strip())
-        except Exception:
+        except _NUMERIC_PARSE_ERRORS:
             value = default
     if min_value is not None:
         value = max(min_value, value)
@@ -135,7 +138,7 @@ def _normalize_identity_username(value: str) -> str:
 def _to_int_or_none(value, min_value=None, max_value=None):
     try:
         iv = int(value)
-    except Exception:
+    except _NUMERIC_PARSE_ERRORS:
         return None
     if min_value is not None and iv < min_value:
         return None
@@ -147,7 +150,7 @@ def _to_int_or_none(value, min_value=None, max_value=None):
 def _to_float_or_none(value, min_value=None, max_value=None):
     try:
         fv = float(value)
-    except Exception:
+    except _NUMERIC_PARSE_ERRORS:
         return None
     if min_value is not None and fv < min_value:
         return None
@@ -477,7 +480,7 @@ def _ensure_default_admin_for_projects(db, default_admin_username: str | None, p
         from auth import get_auth_backend
 
         auth_backend = get_auth_backend()
-    except Exception:
+    except _AUTH_BACKEND_DISCOVERY_ERRORS:
         auth_backend = "local"
 
     try:
@@ -493,7 +496,7 @@ def _ensure_default_admin_for_projects(db, default_admin_username: str | None, p
                 AuthUser as UserModel,
                 AuthUserProject as UserProjectModel,
             )
-    except Exception as exc:
+    except _AUTH_MODEL_IMPORT_ERRORS as exc:
         return {
             "mode": "auth_unavailable",
             "username": username,
@@ -742,7 +745,7 @@ def _parse_commit_time(raw_value):
         if parsed.tzinfo is None:
             return parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
-    except Exception:
+    except ValueError:
         return None
 
 

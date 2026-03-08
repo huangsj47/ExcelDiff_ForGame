@@ -64,6 +64,7 @@
   - 进展（2026-03-08）：`commit_operation_handlers` 的确认/拒绝与优先处理接口已补充 `SQLAlchemyError` 分支和 JSON 结构校验，减少直接 `except Exception` 路径。
   - 进展（2026-03-08）：`commit_operation_handlers` 继续收敛作者映射、缓存解析、merge_diff 处理与更新字段接口异常边界；`task_worker_service` 的同步线程执行分支改为 `NON_CRITICAL_SYNC_THREAD_ERRORS`，去除对应 `except Exception`。
   - 进展（2026-03-08）：`commit_operation_handlers` 的 `get_commit_diff_data` / `refresh_merge_diff` 已改为 `COMMIT_OPERATION_UNEXPECTED_ERRORS` 明确异常集合，去除该文件剩余裸 `except Exception`。
+  - 进展（2026-03-08）：`agent_management_handlers` 的环境变量/数值解析与 commit_time 解析辅助函数已改为明确异常集合（`_NUMERIC_PARSE_ERRORS` 等），默认管理员权限同步链路中的 auth backend 发现与模型导入分支已收敛裸 `except Exception`。
   - 下一步：继续按模块将通用 `except Exception` 拆分为更具体异常（IO/网络/数据校验）并补充错误标签。
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 
@@ -91,6 +92,7 @@
   - 进展（2026-03-08）：已新增 `tests/test_commit_diff_input_models_and_handlers.py`，覆盖 diff 请求输入模型、`refresh_merge_diff` 非法请求分支、agent 模式 `force_retry` 输入链路。
   - 进展（2026-03-08）：已新增 `tests/test_commit_operation_handlers_error_round3.py`，覆盖批量确认/拒绝、单条拒绝、优先处理与更新字段接口的非法请求/数据库异常路径。
   - 进展（2026-03-08）：`tests/test_commit_diff_input_models_and_handlers.py` 已补充 `get_commit_diff_data` 与 `refresh_merge_diff` fallback 异常分支测试，验证 `unexpected_error` 返回契约。
+  - 进展（2026-03-08）：已新增 `tests/test_agent_management_exception_narrowing.py`，覆盖 agent 管理辅助函数的数值解析、时间解析及 auth 导入失败回退分支。
   - 验收：新增针对性测试，不仅是 happy path。
 - [x] 10. 统一服务层输入/输出模型（dataclass/pydantic）
   - 进展（2026-03-08）：已引入 `ErrorResponsePayload` / `SuccessResponsePayload`（dataclass），并作为 diff 相关服务统一输出模型。
