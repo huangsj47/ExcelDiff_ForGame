@@ -7,6 +7,9 @@ import re
 
 from flask import request
 
+REQUEST_LOG_MESSAGE_ERRORS = (RuntimeError, ValueError, TypeError, AttributeError)
+REQUEST_LOG_STATUS_PARSE_ERRORS = (ValueError, TypeError)
+
 
 class _WerkzeugAgentAccessFilter(logging.Filter):
     """Suppress high-frequency /api/agents access logs for 2xx/3xx responses."""
@@ -19,7 +22,7 @@ class _WerkzeugAgentAccessFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             message = record.getMessage()
-        except Exception:
+        except REQUEST_LOG_MESSAGE_ERRORS:
             return True
 
         if "/api/agents" not in message:
@@ -32,7 +35,7 @@ class _WerkzeugAgentAccessFilter(logging.Filter):
         path = matched.group(1)
         try:
             status_code = int(matched.group(2))
-        except Exception:
+        except REQUEST_LOG_STATUS_PARSE_ERRORS:
             return True
 
         if any(path.startswith(prefix) for prefix in self._SUPPRESS_PATH_PREFIXES):
