@@ -19,7 +19,7 @@
 ## TODO 列表（按优先级）
 
 ### P0（先做）
-- [ ] 1. 拆分 `app.py`（按领域路由/编排职责拆分到 `routes/*` 和 `services/*`）
+- [x] 1. 拆分 `app.py`（按领域路由/编排职责拆分到 `routes/*` 和 `services/*`）
   - 进展（2026-03-08）：已将 schema 迁移辅助逻辑下沉到 `services/db_migration_service.py`，`create_tables()` 改为服务编排调用。
   - 进展（2026-03-08）：已新增 `services/app_bootstrap_db_service.py`，将 `create_tables` 与启动期缓存清理实现迁出，`app.py` 仅保留入口封装。
   - 进展（2026-03-08）：已新增 `services/auth_bootstrap_service.py`，将 Auth 初始化、qkit 兜底路由与诊断逻辑迁出，`app.py` 启动层改为单行调用。
@@ -41,6 +41,7 @@
   - 进展（2026-03-08）：已新增 `services/app_template_context_service.py`，将模板上下文处理器注册逻辑迁出，`app.py` 仅保留配置调用。
   - 进展（2026-03-08）：已新增 `services/commit_route_scope_service.py`，将 commit 访问校验与 `*_with_path` 路由分发逻辑统一下沉，入口层减少重复实现。
   - 进展（2026-03-08）：已新增 `services/repository_misc_page_service.py`，将仓库编辑页渲染与本地目录存在性检查迁出，`app.py` 继续保持薄封装。
+  - 进展（2026-03-08）：`app.py` 已降至 1014 行，并新增回归测试守护文件长度预算（<2000 行）。
   - 验收：`app.py` 降到 < 2000 行；路由注册和容器初始化清晰分层。
 - [x] 2. 建立静态检查基线（`ruff` + `flake8` 二选一，推荐先 `ruff`）
   - 已完成：新增 `pyproject.toml`（ruff 规则）、`scripts/run_ruff_changed.py`（增量检查）、`.github/workflows/quality-gate.yml`（CI 门禁）。

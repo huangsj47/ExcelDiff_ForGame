@@ -9,6 +9,10 @@ def _read(path: str) -> str:
 
 
 class TestWeeklyTodoFollowups:
+    def test_app_entry_file_length_budget(self):
+        app_lines = _read("app.py").splitlines()
+        assert len(app_lines) < 2000
+
     def test_weekly_excel_task_dedup_is_enabled(self):
         content = _read("services/weekly_version_logic.py")
         assert "def create_weekly_excel_cache_task(config_id, file_path):" in content
