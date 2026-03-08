@@ -189,3 +189,15 @@ class TestWeeklyTodoFollowups:
 
         service_content = _read("services/excel_diff_api_service.py")
         assert "def handle_get_excel_diff_data(" in service_content
+
+    def test_commit_list_page_logic_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.commit_list_page_service import handle_commit_list_page" in app_content
+        assert "return handle_commit_list_page(" in app_content
+        assert "# requested_per_page = request.args.get('per_page', 50, type=int) or 50" in app_content
+        assert "# per_page = min(max(requested_per_page, 1), 200)" in app_content
+        assert "# missing_git_branch_repo_ids.append(repo.id)" in app_content
+        assert "# queue_missing_git_branch_refresh(project.id, missing_git_branch_repo_ids)" in app_content
+
+        service_content = _read("services/commit_list_page_service.py")
+        assert "def handle_commit_list_page(" in service_content
