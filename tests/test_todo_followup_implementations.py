@@ -179,3 +179,13 @@ class TestWeeklyTodoFollowups:
 
         service_content = _read("services/commit_diff_view_service.py")
         assert "def handle_commit_diff_view(" in service_content
+
+    def test_excel_diff_api_logic_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.excel_diff_api_service import handle_get_excel_diff_data" in app_content
+        assert "return handle_get_excel_diff_data(" in app_content
+        assert "# Commit.commit_time == commit.commit_time" in app_content
+        assert "# Commit.id < commit.id" in app_content
+
+        service_content = _read("services/excel_diff_api_service.py")
+        assert "def handle_get_excel_diff_data(" in service_content

@@ -32,6 +32,7 @@
   - 进展（2026-03-08）：已新增 `services/repository_maintenance_api_service.py`，将缓存重建、缓存状态、clone状态、重试同步与手动同步流程迁出，`app.py` 进一步收敛为入口编排。
   - 进展（2026-03-08）：已新增 `services/commit_diff_page_service.py`，将完整文件diff与刷新diff流程迁出，`app.py` 进一步聚焦路由入口与依赖注入。
   - 进展（2026-03-08）：已新增 `services/commit_diff_view_service.py`，将 commit diff 主页面渲染与 Excel 缓存回退逻辑迁出，`app.py` 保留薄入口与兼容注释。
+  - 进展（2026-03-08）：已新增 `services/excel_diff_api_service.py`，将 Excel diff API（Agent派发/HTML缓存/数据缓存/实时回退）迁出，`app.py` 仅保留入口封装。
   - 验收：`app.py` 降到 < 2000 行；路由注册和容器初始化清晰分层。
 - [x] 2. 建立静态检查基线（`ruff` + `flake8` 二选一，推荐先 `ruff`）
   - 已完成：新增 `pyproject.toml`（ruff 规则）、`scripts/run_ruff_changed.py`（增量检查）、`.github/workflows/quality-gate.yml`（CI 门禁）。
