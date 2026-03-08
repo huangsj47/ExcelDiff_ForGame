@@ -2,6 +2,33 @@
 
 from __future__ import annotations
 
+from sqlalchemy.exc import SQLAlchemyError
+
+
+REPOSITORY_MAINTENANCE_CACHE_REBUILD_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+)
+REPOSITORY_MAINTENANCE_CACHE_STATUS_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+)
+REPOSITORY_MAINTENANCE_SYNC_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    OSError,
+)
+
 
 def handle_regenerate_cache(
     *,
@@ -35,7 +62,7 @@ def handle_regenerate_cache(
         else:
             message = f"仓库 {repository.name} 最近2周内没有Excel文件提交，无需重新生成缓存。"
         return jsonify({"success": True, "message": message, "task_count": task_count})
-    except Exception as exc:
+    except REPOSITORY_MAINTENANCE_CACHE_REBUILD_ERRORS as exc:
         log_print(f"重新生成缓存失败: {exc}", "INFO")
         return jsonify({"success": False, "message": f"重新生成缓存失败: {str(exc)}"}), 500
 
@@ -74,7 +101,7 @@ def handle_get_cache_status(
                 "cache_coverage": f"{completed_cache}/{total_excel_commits}" if total_excel_commits > 0 else "0/0",
             }
         )
-    except Exception as exc:
+    except REPOSITORY_MAINTENANCE_CACHE_STATUS_ERRORS as exc:
         log_print(f"获取缓存状态失败: {exc}", "INFO")
         return jsonify({"success": False, "message": f"获取缓存状态失败: {str(exc)}"}), 500
 
@@ -325,7 +352,7 @@ def handle_sync_repository(
             return jsonify({"status": "success", "message": f"同步成功，添加了 {commits_added} 个新提交", "commits_added": commits_added}), 200
 
         return jsonify({"status": "error", "message": f"不支持的仓库类型: {repository.type}"}), 400
-    except Exception as exc:
+    except REPOSITORY_MAINTENANCE_SYNC_ERRORS as exc:
         import traceback
 
         error_details = traceback.format_exc()
