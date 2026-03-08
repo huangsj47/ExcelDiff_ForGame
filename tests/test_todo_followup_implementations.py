@@ -284,6 +284,19 @@ class TestWeeklyTodoFollowups:
         assert "NON_CRITICAL_BRANCH_REFRESH_ERRORS" in service_content
         assert "db.session.commit()" in service_content
 
+    def test_task_worker_weekly_handlers_extracted_to_service(self):
+        worker_content = _read("services/task_worker_service.py")
+        assert "from services.task_worker_weekly_handlers import (" in worker_content
+        assert "handle_weekly_sync_task as handle_weekly_sync_task_service" in worker_content
+        assert "handle_weekly_excel_cache_task as handle_weekly_excel_cache_task_service" in worker_content
+        assert "return handle_weekly_sync_task_service(" in worker_content
+        assert "return handle_weekly_excel_cache_task_service(" in worker_content
+
+        service_content = _read("services/task_worker_weekly_handlers.py")
+        assert "def handle_weekly_sync_task(" in service_content
+        assert "def handle_weekly_excel_cache_task(" in service_content
+        assert "update_task_status_with_retry" in service_content
+
     def test_commit_route_scope_helpers_extracted_from_app_entry(self):
         app_content = _read("app.py")
         assert "from services.commit_route_scope_service import (" in app_content

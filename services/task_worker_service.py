@@ -26,6 +26,10 @@ from services.branch_refresh_service import (
     NON_CRITICAL_BRANCH_REFRESH_ERRORS,
     queue_missing_git_branch_refresh as queue_missing_git_branch_refresh_service,
 )
+from services.task_worker_weekly_handlers import (
+    handle_weekly_excel_cache_task as handle_weekly_excel_cache_task_service,
+    handle_weekly_sync_task as handle_weekly_sync_task_service,
+)
 from services.repository_sync_status import clear_sync_error as clear_repository_sync_error
 from services.repository_sync_status import record_sync_error as record_repository_sync_error
 
@@ -828,52 +832,28 @@ def _handle_auto_sync_task_inner(task):
 
 def _handle_weekly_sync_task(task):
     """处理周版本同步任务"""
-    log_print(f"📅 周版本同步: 配置 {task['config_id']}", 'WEEKLY')
-    with _app.app_context():
-        if 'task_id' in task:
-            try:
-                update_task_status_with_retry(task['task_id'], 'processing')
-            except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
-                log_print(f"更新任务开始状态失败: {update_error}", 'TASK', force=True)
-        try:
-            _process_weekly_version_sync(task['config_id'])
-            if 'task_id' in task:
-                try:
-                    update_task_status_with_retry(task['task_id'], 'completed')
-                except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
-                    log_print(f"更新任务完成状态失败: {update_error}", 'TASK', force=True)
-        except NON_CRITICAL_TASK_EXECUTION_ERRORS as e:
-            log_print(f"❌ 周版本同步失败: {e}", 'WEEKLY', force=True)
-            if 'task_id' in task:
-                try:
-                    update_task_status_with_retry(task['task_id'], 'failed', str(e))
-                except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
-                    log_print(f"更新任务状态失败: {update_error}", 'TASK', force=True)
+    return handle_weekly_sync_task_service(
+        task=task,
+        app=_app,
+        update_task_status_with_retry=update_task_status_with_retry,
+        process_weekly_version_sync=_process_weekly_version_sync,
+        non_critical_task_status_errors=NON_CRITICAL_TASK_STATUS_ERRORS,
+        non_critical_task_execution_errors=NON_CRITICAL_TASK_EXECUTION_ERRORS,
+        log_print=log_print,
+    )
 
 
 def _handle_weekly_excel_cache_task(task):
     """处理周版本Excel缓存任务"""
-    log_print(f"📊 周版本Excel缓存: 配置 {task['data']['config_id']}, 文件 {task['data']['file_path']}", 'WEEKLY')
-    with _app.app_context():
-        if 'id' in task:
-            try:
-                update_task_status_with_retry(task['id'], 'processing')
-            except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
-                log_print(f"更新任务开始状态失败: {update_error}", 'TASK', force=True)
-        try:
-            _process_weekly_excel_cache(task['data']['config_id'], task['data']['file_path'])
-            if 'id' in task:
-                try:
-                    update_task_status_with_retry(task['id'], 'completed')
-                except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
-                    log_print(f"更新任务完成状态失败: {update_error}", 'TASK', force=True)
-        except NON_CRITICAL_TASK_EXECUTION_ERRORS as e:
-            log_print(f"❌ 周版本Excel缓存生成失败: {e}", 'WEEKLY', force=True)
-            if 'id' in task:
-                try:
-                    update_task_status_with_retry(task['id'], 'failed', str(e))
-                except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
-                    log_print(f"更新任务状态失败: {update_error}", 'TASK', force=True)
+    return handle_weekly_excel_cache_task_service(
+        task=task,
+        app=_app,
+        update_task_status_with_retry=update_task_status_with_retry,
+        process_weekly_excel_cache=_process_weekly_excel_cache,
+        non_critical_task_status_errors=NON_CRITICAL_TASK_STATUS_ERRORS,
+        non_critical_task_execution_errors=NON_CRITICAL_TASK_EXECUTION_ERRORS,
+        log_print=log_print,
+    )
 
 
 def execute_task_inline_for_agent(task_type, payload):
