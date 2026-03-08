@@ -6,6 +6,27 @@ import os
 import traceback
 
 from flask import redirect, session, url_for
+from sqlalchemy.exc import SQLAlchemyError
+
+
+AUTH_ROUTE_DISCOVERY_ERRORS = (RuntimeError, AttributeError, TypeError)
+AUTH_QKIT_ROUTE_REGISTER_ERRORS = (AssertionError, RuntimeError, TypeError, ValueError)
+AUTH_DEFAULT_DATA_INIT_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+)
+AUTH_MODULE_INIT_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+)
 
 
 def register_qkit_fallback_endpoints(app_instance, log_print):
@@ -17,7 +38,7 @@ def register_qkit_fallback_endpoints(app_instance, log_print):
     def _endpoint_exists(endpoint: str) -> bool:
         try:
             return any(rule.endpoint == endpoint for rule in app_instance.url_map.iter_rules())
-        except Exception:
+        except AUTH_ROUTE_DISCOVERY_ERRORS:
             return False
 
     def _qkit_unavailable_page():
@@ -55,7 +76,7 @@ def register_qkit_fallback_endpoints(app_instance, log_print):
                 strict_slashes=False,
             )
             log_print(f"⚠️ 已注册 qkit 兜底路由: {endpoint} -> {rule}", "AUTH", force=True)
-        except Exception as exc:
+        except AUTH_QKIT_ROUTE_REGISTER_ERRORS as exc:
             log_print(f"❌ 注册 qkit 兜底路由失败 {endpoint}: {exc}", "AUTH", force=True)
 
 
@@ -63,7 +84,7 @@ def log_auth_route_diagnostics(app_instance, log_print):
     backend = (os.environ.get("AUTH_BACKEND") or "local").strip().lower()
     try:
         endpoints = {rule.endpoint for rule in app_instance.url_map.iter_rules()}
-    except Exception:
+    except AUTH_ROUTE_DISCOVERY_ERRORS:
         endpoints = set()
     log_print(
         "AUTH 路由诊断: "
@@ -101,14 +122,14 @@ def initialize_auth_subsystem(*, app, db, log_print):
             try:
                 init_auth_default_data()
                 log_print("[TRACE] auth default data initialized", "APP")
-            except Exception as exc:
+            except AUTH_DEFAULT_DATA_INIT_ERRORS as exc:
                 log_print(f"[TRACE] auth: default data init skipped: {exc}", "APP")
     except ImportError as exc:
         app.config["AUTH_INIT_FAILED"] = True
         app.config["AUTH_INIT_ERROR"] = f"ImportError: {exc}"
         log_print(f"❌ 账号系统初始化失败（ImportError）: {exc}", "AUTH", force=True)
         log_print(f"[TRACE] auth module not available: {exc}", "APP")
-    except Exception as exc:
+    except AUTH_MODULE_INIT_ERRORS as exc:
         app.config["AUTH_INIT_FAILED"] = True
         app.config["AUTH_INIT_ERROR"] = f"{type(exc).__name__}: {exc}"
         log_print(f"❌ 账号系统初始化失败: {type(exc).__name__}: {exc}", "AUTH", force=True)

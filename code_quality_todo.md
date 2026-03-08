@@ -79,6 +79,7 @@
   - 进展（2026-03-08）：`app_request_logging_service` 的 Agent 访问日志过滤分支已收敛到 `REQUEST_LOG_MESSAGE_ERRORS` / `REQUEST_LOG_STATUS_PARSE_ERRORS`，移除该模块剩余裸 `except Exception`。
   - 进展（2026-03-08）：`app_bootstrap_db_service` 已将启动建表/表探测/SQLite 诊断/版本缓存清理分支收敛到 `DB_STARTUP_*_ERRORS` 明确异常集合，移除该模块裸 `except Exception` 并保留原有日志兜底语义。
   - 进展（2026-03-08）：`app_security_bootstrap_service` 的 auth backend 导入兜底与 `public_login_url` 路由构建分支已收敛到 `APP_SECURITY_*_ERRORS`，移除该模块剩余裸 `except Exception`。
+  - 进展（2026-03-08）：`auth_bootstrap_service` 的 qkit 路由探测/注册、auth 路由诊断、默认数据初始化与 auth 模块初始化分支已收敛到 `AUTH_*_ERRORS` 明确异常集合，移除该模块剩余裸 `except Exception`。
   - 下一步：继续按模块将通用 `except Exception` 拆分为更具体异常（IO/网络/数据校验）并补充错误标签。
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 
@@ -121,6 +122,7 @@
   - 进展（2026-03-08）：已新增 `tests/test_app_request_logging_exception_narrowing.py`，覆盖 Agent 访问日志过滤（2xx 抑制/5xx保留/消息读取异常）与过滤器幂等注册分支。
   - 进展（2026-03-08）：已新增 `tests/test_app_bootstrap_db_exception_narrowing.py`，覆盖启动建表流程中的目录创建失败、表探测失败后继续创建、SQLite 诊断字节格式兜底与版本缓存清理回滚失败分支。
   - 进展（2026-03-08）：已新增 `tests/test_app_security_bootstrap_exception_narrowing.py`，覆盖 auth 模块导入失败回退、`public_login_url` 的 auth 优先/管理员登录回退/构建失败硬编码回退分支。
+  - 进展（2026-03-08）：已新增 `tests/test_auth_bootstrap_exception_narrowing.py`，覆盖 qkit 路由探测失败回退注册、路由注册失败日志、auth 路由诊断失败兜底、`initialize_auth_subsystem` 的 ImportError/默认数据初始化异常/模块初始化异常分支。
   - 验收：新增针对性测试，不仅是 happy path。
 - [x] 10. 统一服务层输入/输出模型（dataclass/pydantic）
   - 进展（2026-03-08）：已引入 `ErrorResponsePayload` / `SuccessResponsePayload`（dataclass），并作为 diff 相关服务统一输出模型。
