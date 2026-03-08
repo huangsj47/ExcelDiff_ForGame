@@ -8,6 +8,26 @@ import time
 
 from services.api_response_service import json_error, json_success
 
+COMMIT_FULL_DIFF_FILE_READ_ERRORS = (subprocess.SubprocessError, OSError, ValueError, TypeError, RuntimeError)
+COMMIT_FULL_DIFF_PIPELINE_ERRORS = (
+    subprocess.SubprocessError,
+    OSError,
+    ValueError,
+    TypeError,
+    RuntimeError,
+    AttributeError,
+    KeyError,
+)
+COMMIT_REFRESH_CACHE_SAVE_ERRORS = (
+    OSError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+)
+COMMIT_REFRESH_UNEXPECTED_ERRORS = (AttributeError, KeyError, OSError, subprocess.SubprocessError)
+
 
 def handle_commit_full_diff(
     *,
@@ -94,7 +114,7 @@ def handle_commit_full_diff(
             else:
                 current_file_content = f"无法获取文件内容: {result.stderr}"
                 log_print(f"Git show error: {result.stderr}", "INFO")
-        except Exception as exc:
+        except COMMIT_FULL_DIFF_FILE_READ_ERRORS as exc:
             current_file_content = f"获取当前版本失败: {str(exc)}"
 
         previous_file_content = ""
@@ -119,11 +139,11 @@ def handle_commit_full_diff(
                     previous_file_content = result.stdout
                 else:
                     previous_file_content = f"无法获取文件内容: {result.stderr}"
-            except Exception as exc:
+            except COMMIT_FULL_DIFF_FILE_READ_ERRORS as exc:
                 previous_file_content = f"获取前一版本失败: {str(exc)}"
         else:
             previous_file_content = ""
-    except Exception as exc:
+    except COMMIT_FULL_DIFF_PIPELINE_ERRORS as exc:
         log_print(f"获取文件内容失败: {exc}", "INFO")
         current_file_content = "无法获取文件内容"
         previous_file_content = "无法获取文件内容"
@@ -254,7 +274,7 @@ def handle_refresh_commit_diff(
                     )
                     cache_time = time.time() - cache_start
                     log_print(f"💾 缓存保存完成，耗时: {cache_time:.2f}秒", "EXCEL")
-                except Exception as cache_error:
+                except COMMIT_REFRESH_CACHE_SAVE_ERRORS as cache_error:
                     log_print(f"⚠️ 保存缓存时出错: {cache_error}", "EXCEL")
             total_time = time.time() - start_time
             log_print(
@@ -303,7 +323,7 @@ def handle_refresh_commit_diff(
             http_status=500,
             total_time=total_time,
         )
-    except Exception as exc:
+    except COMMIT_REFRESH_UNEXPECTED_ERRORS as exc:
         total_time = time.time() - start_time if start_time is not None else 0
         log_print(f"❌ 重新计算差异未知异常: {exc} | 耗时: {total_time:.2f}秒", "APP", force=True)
         import traceback
