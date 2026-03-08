@@ -2,6 +2,18 @@
 
 from __future__ import annotations
 
+from sqlalchemy.exc import SQLAlchemyError
+
+
+REPOSITORY_UPDATE_WORKER_ERRORS = (
+    RuntimeError,
+    TypeError,
+    ValueError,
+    LookupError,
+    AttributeError,
+    SQLAlchemyError,
+)
+
 
 def run_repository_update_and_cache_worker(
     *,
@@ -76,7 +88,7 @@ def run_repository_update_and_cache_worker(
                     log_type="SYNC",
                     commit=True,
                 )
-    except Exception as exc:
+    except REPOSITORY_UPDATE_WORKER_ERRORS as exc:
         log_print(f"❌ 异步更新和缓存操作异常: {exc}", "API", force=True)
         if repository is not None:
             record_repository_sync_error(
