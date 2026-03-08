@@ -22,6 +22,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from utils.logger import log_print
 from utils.db_retry import db_retry
 from services.deployment_mode import get_deployment_mode, is_agent_dispatch_mode
+from services.branch_refresh_service import (
+    NON_CRITICAL_BRANCH_REFRESH_ERRORS,
+    queue_missing_git_branch_refresh as queue_missing_git_branch_refresh_service,
+)
 from services.repository_sync_status import clear_sync_error as clear_repository_sync_error
 from services.repository_sync_status import record_sync_error as record_repository_sync_error
 
@@ -86,15 +90,6 @@ NON_CRITICAL_QUEUE_ENQUEUE_ERRORS = (
     ValueError,
 )
 NON_CRITICAL_VCS_PREHEAL_ERRORS = (
-    OSError,
-    RuntimeError,
-    AttributeError,
-    TypeError,
-    ValueError,
-    subprocess.SubprocessError,
-)
-NON_CRITICAL_BRANCH_REFRESH_ERRORS = (
-    SQLAlchemyError,
     OSError,
     RuntimeError,
     AttributeError,
@@ -1519,55 +1514,15 @@ def stop_scheduler():
 # ---------------------------------------------------------------------------
 def queue_missing_git_branch_refresh(project_id, repository_ids):
     """Asynchronously refresh missing git branches to avoid blocking page rendering."""
-    unique_repo_ids = sorted({int(repo_id) for repo_id in (repository_ids or []) if repo_id})
-    if not unique_repo_ids:
-        return False
-
-    now_ts = time.time()
-    with branch_refresh_lock:
-        cooldown_until = branch_refresh_cooldown_until.get(project_id, 0.0)
-        if cooldown_until > now_ts:
-            return False
-        branch_refresh_cooldown_until[project_id] = now_ts + BRANCH_REFRESH_COOLDOWN_SECONDS
-
-    def refresh_worker(target_project_id, target_repo_ids):
-        updated_count = 0
-        try:
-            with _app.app_context():
-                repositories = _Repository.query.filter(
-                    _Repository.project_id == target_project_id,
-                    _Repository.type == 'git',
-                    _Repository.id.in_(target_repo_ids),
-                    (_Repository.branch.is_(None)) | (_Repository.branch == '')
-                ).all()
-                if not repositories:
-                    return
-                for repo in repositories:
-                    try:
-                        git_service = _get_git_service(repo)
-                        branches = git_service.get_branches()
-                        if branches:
-                            repo.branch = branches[0]
-                            updated_count += 1
-                    except NON_CRITICAL_BRANCH_REFRESH_ERRORS as branch_error:
-                        log_print(f"异步刷新仓库分支失败: repo_id={repo.id}, error={branch_error}", 'APP')
-                if updated_count > 0:
-                    _db.session.commit()
-                    log_print(f"异步刷新仓库分支完成: project_id={target_project_id}, updated={updated_count}", 'APP')
-                else:
-                    _db.session.rollback()
-        except NON_CRITICAL_BRANCH_REFRESH_ERRORS as worker_error:
-            try:
-                _db.session.rollback()
-            except SQLAlchemyError:
-                pass
-            log_print(f"异步刷新仓库分支异常: project_id={target_project_id}, error={worker_error}", 'APP', force=True)
-
-    refresh_thread = threading.Thread(
-        target=refresh_worker,
-        args=(project_id, unique_repo_ids),
-        daemon=True,
-        name=f"branch-refresh-{project_id}",
+    return queue_missing_git_branch_refresh_service(
+        project_id=project_id,
+        repository_ids=repository_ids,
+        branch_refresh_lock=branch_refresh_lock,
+        branch_refresh_cooldown_until=branch_refresh_cooldown_until,
+        branch_refresh_cooldown_seconds=BRANCH_REFRESH_COOLDOWN_SECONDS,
+        app=_app,
+        db=_db,
+        repository_model=_Repository,
+        get_git_service=_get_git_service,
+        log_print=log_print,
     )
-    refresh_thread.start()
-    return True

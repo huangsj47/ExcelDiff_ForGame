@@ -269,6 +269,17 @@ class TestWeeklyTodoFollowups:
         assert "except Exception as worker_error" not in content
         assert "except Exception as e:" not in content
 
+    def test_task_worker_branch_refresh_logic_extracted_to_service(self):
+        worker_content = _read("services/task_worker_service.py")
+        assert "from services.branch_refresh_service import (" in worker_content
+        assert "queue_missing_git_branch_refresh as queue_missing_git_branch_refresh_service" in worker_content
+        assert "return queue_missing_git_branch_refresh_service(" in worker_content
+
+        service_content = _read("services/branch_refresh_service.py")
+        assert "def queue_missing_git_branch_refresh(" in service_content
+        assert "NON_CRITICAL_BRANCH_REFRESH_ERRORS" in service_content
+        assert "db.session.commit()" in service_content
+
     def test_commit_route_scope_helpers_extracted_from_app_entry(self):
         app_content = _read("app.py")
         assert "from services.commit_route_scope_service import (" in app_content

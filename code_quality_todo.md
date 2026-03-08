@@ -57,6 +57,7 @@
   - 进展（2026-03-08）：`task_worker_service` 第三批运行链路异常已收敛（任务状态更新失败兜底、Git/SVN预修复异常、Excel任务入队异常），将多处 `except Exception` 收敛为明确异常集合。
   - 进展（2026-03-08）：`task_worker_service` 第四批分支刷新异常已收敛（仓库分支拉取与 worker 外层错误处理），减少通用 `except Exception` 并保持回滚兜底。
   - 进展（2026-03-08）：`task_worker_service` 第五批任务执行异常已收敛（worker 主循环、Excel/周版本/自动同步主流程），并将仓库类型/不存在错误改为 `ValueError` 进入统一异常路径。
+  - 进展（2026-03-08）：已新增 `services/branch_refresh_service.py`，将异步分支刷新 worker 逻辑从 `task_worker_service` 下沉为独立服务，`task_worker_service` 保留兼容入口包装。
   - 下一步：继续按模块将通用 `except Exception` 拆分为更具体异常（IO/网络/数据校验）并补充错误标签。
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 
