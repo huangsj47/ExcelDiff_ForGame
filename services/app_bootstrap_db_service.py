@@ -14,6 +14,20 @@ from utils.db_config import (
 )
 from utils.db_safety import collect_sqlite_runtime_diagnostics
 
+DB_STARTUP_DIR_CREATE_ERRORS = (OSError, ValueError, TypeError)
+DB_STARTUP_INSPECT_ERRORS = (SQLAlchemyError, AttributeError, ValueError, TypeError, RuntimeError)
+DB_STARTUP_CREATE_ALL_ERRORS = (SQLAlchemyError, AttributeError, ValueError, TypeError, RuntimeError)
+DB_STARTUP_DIAGNOSTIC_ERRORS = (OSError, SQLAlchemyError, ValueError, TypeError, AttributeError, RuntimeError)
+DB_STARTUP_SIZE_FORMAT_ERRORS = (ValueError, TypeError, ArithmeticError)
+DB_STARTUP_CACHE_CLEANUP_ERRORS = (
+    SQLAlchemyError,
+    OSError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    RuntimeError,
+)
+
 
 def create_tables_with_runtime_checks(*, app, db, log_print, apply_schema_migrations):
     """Create tables and run lightweight startup diagnostics."""
@@ -27,7 +41,7 @@ def create_tables_with_runtime_checks(*, app, db, log_print, apply_schema_migrat
                 try:
                     os.makedirs(instance_dir, exist_ok=True)
                     log_print(f"✅ 创建instance目录: {os.path.abspath(instance_dir)}", "DB")
-                except Exception as exc:
+                except DB_STARTUP_DIR_CREATE_ERRORS as exc:
                     log_print(f"❌ 创建instance目录失败: {exc}", "DB", force=True)
                     return
 
@@ -43,13 +57,13 @@ def create_tables_with_runtime_checks(*, app, db, log_print, apply_schema_migrat
         existing_tables = []
         try:
             existing_tables = inspect(db.engine).get_table_names()
-        except Exception as exc:
+        except DB_STARTUP_INSPECT_ERRORS as exc:
             log_print(f"检查现有表失败: {exc}", "DB", force=True)
         log_print(f"创建前的数据库表: {existing_tables}", "DB")
         try:
             db.create_all()
             log_print("✅ db.create_all() 执行完成", "DB")
-        except Exception as exc:
+        except DB_STARTUP_CREATE_ALL_ERRORS as exc:
             log_print(f"❌ 创建表失败: {exc}", "DB", force=True)
             return
 
@@ -82,7 +96,7 @@ def create_tables_with_runtime_checks(*, app, db, log_print, apply_schema_migrat
                 log_print(f"⚠️ 仍然缺失的表: {missing_tables}", "DB", force=True)
             else:
                 log_print("✅ 所有必需的表都已创建", "DB")
-        except Exception as exc:
+        except DB_STARTUP_INSPECT_ERRORS as exc:
             log_print(f"检查最终表状态失败: {exc}", "DB", force=True)
 
         try:
@@ -92,7 +106,7 @@ def create_tables_with_runtime_checks(*, app, db, log_print, apply_schema_migrat
                 def _fmt_mb(num_bytes):
                     try:
                         return f"{(float(num_bytes) / (1024 * 1024)):.2f}MB"
-                    except Exception:
+                    except DB_STARTUP_SIZE_FORMAT_ERRORS:
                         return "0.00MB"
 
                 log_print(
@@ -116,7 +130,7 @@ def create_tables_with_runtime_checks(*, app, db, log_print, apply_schema_migrat
                     )
             if diag.get("error"):
                 log_print(f"SQLite诊断失败: {diag.get('error')}", "DB", force=True)
-        except Exception as exc:
+        except DB_STARTUP_DIAGNOSTIC_ERRORS as exc:
             log_print(f"SQLite启动诊断异常: {exc}", "DB", force=True)
 
 
@@ -139,7 +153,7 @@ def clear_startup_version_mismatch_cache(
         else:
             log_print("无需清理版本不匹配的缓存", "CACHE")
             log_print("启动成功！", "APP")
-    except Exception as exc:
+    except DB_STARTUP_CACHE_CLEANUP_ERRORS as exc:
         log_print(f"清理版本不匹配缓存失败: {exc}", "CACHE", force=True)
         try:
             db.session.rollback()
