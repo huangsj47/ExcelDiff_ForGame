@@ -259,10 +259,15 @@ class TestWeeklyTodoFollowups:
         assert "NON_CRITICAL_VCS_PREHEAL_ERRORS" in content
         assert "NON_CRITICAL_QUEUE_ENQUEUE_ERRORS" in content
         assert "NON_CRITICAL_BRANCH_REFRESH_ERRORS" in content
+        assert "NON_CRITICAL_TASK_EXECUTION_ERRORS" in content
+        assert "NON_CRITICAL_WORKER_LOOP_ERRORS" in content
+        assert "raise ValueError(f\"不支持的仓库类型: {repository.type}\")" in content
+        assert "raise ValueError(f\"仓库不存在: {task['repository_id']}\")" in content
         assert "except Exception as update_error" not in content
         assert "except Exception as heal_exc" not in content
         assert "except Exception as branch_error" not in content
         assert "except Exception as worker_error" not in content
+        assert "except Exception as e:" not in content
 
     def test_commit_route_scope_helpers_extracted_from_app_entry(self):
         app_content = _read("app.py")

@@ -102,6 +102,23 @@ NON_CRITICAL_BRANCH_REFRESH_ERRORS = (
     ValueError,
     subprocess.SubprocessError,
 )
+NON_CRITICAL_TASK_EXECUTION_ERRORS = (
+    SQLAlchemyError,
+    OSError,
+    RuntimeError,
+    AttributeError,
+    TypeError,
+    ValueError,
+    subprocess.SubprocessError,
+)
+NON_CRITICAL_WORKER_LOOP_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    AttributeError,
+    TypeError,
+    ValueError,
+    KeyError,
+)
 
 
 def _deployment_mode():
@@ -418,7 +435,7 @@ def background_task_worker():
             log_print(f"✅ 后台任务完成: {task['type']} (优先级: {priority}) | 队列剩余: {background_task_queue.qsize()}", 'TASK')
         except queue.Empty:
             continue
-        except Exception as e:
+        except NON_CRITICAL_WORKER_LOOP_ERRORS as e:
             log_print(f"后台任务处理异常: {e}", 'APP', force=True)
             traceback.print_exc()
         finally:
@@ -448,7 +465,7 @@ def _handle_excel_diff_task(task, priority):
                     update_task_status_with_retry(task['task_id'], 'completed')
                 except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                     log_print(f"更新任务完成状态失败: {update_error}", 'TASK', force=True)
-        except Exception as e:
+        except NON_CRITICAL_TASK_EXECUTION_ERRORS as e:
             log_print(f"❌ Excel差异处理失败: {e}", 'EXCEL', force=True)
             try:
                 _db.session.rollback()
@@ -787,15 +804,15 @@ def _handle_auto_sync_task_inner(task):
                     _clear_sync_error(repository)
                     log_print(f"✅ 自动数据分析完成: {repository.name}, 添加了 {commits_added} 个提交记录", 'SYNC')
                 else:
-                    raise Exception(f"不支持的仓库类型: {repository.type}")
+                    raise ValueError(f"不支持的仓库类型: {repository.type}")
             else:
-                raise Exception(f"仓库不存在: {task['repository_id']}")
+                raise ValueError(f"仓库不存在: {task['repository_id']}")
             if 'task_id' in task:
                 try:
                     update_task_status_with_retry(task['task_id'], 'completed')
                 except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                     log_print(f"更新任务完成状态失败: {update_error}", 'TASK', force=True)
-        except Exception as e:
+        except NON_CRITICAL_TASK_EXECUTION_ERRORS as e:
             log_print(f"❌ 自动数据分析失败: {e}", 'SYNC', force=True)
             try:
                 repository_id = task.get('repository_id')
@@ -830,7 +847,7 @@ def _handle_weekly_sync_task(task):
                     update_task_status_with_retry(task['task_id'], 'completed')
                 except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                     log_print(f"更新任务完成状态失败: {update_error}", 'TASK', force=True)
-        except Exception as e:
+        except NON_CRITICAL_TASK_EXECUTION_ERRORS as e:
             log_print(f"❌ 周版本同步失败: {e}", 'WEEKLY', force=True)
             if 'task_id' in task:
                 try:
@@ -855,7 +872,7 @@ def _handle_weekly_excel_cache_task(task):
                     update_task_status_with_retry(task['id'], 'completed')
                 except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                     log_print(f"更新任务完成状态失败: {update_error}", 'TASK', force=True)
-        except Exception as e:
+        except NON_CRITICAL_TASK_EXECUTION_ERRORS as e:
             log_print(f"❌ 周版本Excel缓存生成失败: {e}", 'WEEKLY', force=True)
             if 'id' in task:
                 try:
