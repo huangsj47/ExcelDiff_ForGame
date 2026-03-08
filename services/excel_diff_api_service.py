@@ -8,6 +8,7 @@ import traceback
 from sqlalchemy import and_, or_
 from sqlalchemy.exc import SQLAlchemyError
 
+from services.commit_diff_input_models import CommitDiffQueryInput
 from services.api_response_service import json_error, json_success
 
 
@@ -46,8 +47,8 @@ def handle_get_excel_diff_data(
             error=True,
         )
 
-    force_retry = str(request.args.get("force_retry") or "").strip().lower() in {"1", "true", "yes"}
-    dispatch_result = maybe_dispatch_commit_diff(commit, force_retry=force_retry)
+    query_input = CommitDiffQueryInput.from_request(request)
+    dispatch_result = maybe_dispatch_commit_diff(commit, force_retry=query_input.force_retry)
     if dispatch_result is not None:
         status = str(dispatch_result.get("status") or "")
         if status == "ready":

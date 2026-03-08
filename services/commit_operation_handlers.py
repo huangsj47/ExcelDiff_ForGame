@@ -11,6 +11,7 @@ from flask import abort, flash, jsonify, redirect, render_template, request, url
 from sqlalchemy import func, or_
 from sqlalchemy.exc import SQLAlchemyError
 
+from services.commit_diff_input_models import CommitDiffQueryInput, MergeDiffRefreshInput
 from models import Commit, DiffCache, ExcelHtmlCache, db
 from services.api_response_service import json_error, json_success
 from services.agent_commit_diff_dispatch import dispatch_or_get_commit_diff, is_agent_dispatch_mode
@@ -218,16 +219,20 @@ def approve_all_files(commit_id):
             'status': 'success', 
             'message': f'已确认 {len(related_commits)} 个文件 (更新了 {updated_count} 个)'
         })
-    except Exception as e:
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        log_print(f"批量确认数据库失败: {str(e)}")
+        return jsonify({'status': 'error', 'message': '数据库操作失败，请稍后重试'}), 500
+    except (TypeError, ValueError, RuntimeError) as e:
         log_print(f"批量确认失败: {str(e)}")
-        import traceback
-        traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 def batch_approve_commits():
     """批量通过选中的提交"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({'status': 'error', 'message': '请求体必须为JSON对象'}), 400
         commit_ids = data.get('commit_ids', [])
         if not commit_ids:
             return jsonify({'status': 'error', 'message': '未选择任何提交'}), 400
@@ -262,14 +267,20 @@ def batch_approve_commits():
             'status': 'success',
             'message': f'已通过 {updated_count} 个提交，同步更新了 {total_weekly_updated} 个周版本记录'
         })
-    except Exception as e:
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        log_print(f"批量通过数据库失败: {str(e)}")
+        return jsonify({'status': 'error', 'message': '数据库操作失败，请稍后重试'}), 500
+    except (TypeError, ValueError, RuntimeError) as e:
         log_print(f"批量通过失败: {str(e)}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 def batch_reject_commits():
     """批量拒绝选中的提交"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({'status': 'error', 'message': '请求体必须为JSON对象'}), 400
         commit_ids = data.get('commit_ids', [])
         if not commit_ids:
             return jsonify({'status': 'error', 'message': '未选择任何提交'}), 400
@@ -304,14 +315,20 @@ def batch_reject_commits():
             'status': 'success',
             'message': f'已拒绝 {updated_count} 个提交，同步更新了 {total_weekly_updated} 个周版本记录'
         })
-    except Exception as e:
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        log_print(f"批量拒绝数据库失败: {str(e)}")
+        return jsonify({'status': 'error', 'message': '数据库操作失败，请稍后重试'}), 500
+    except (TypeError, ValueError, RuntimeError) as e:
         log_print(f"批量拒绝失败: {str(e)}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 def reject_commit():
     """拒绝单个提交"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({'status': 'error', 'message': '请求体必须为JSON对象'}), 400
         commit_id = data.get('commit_id')
         if not commit_id:
             return jsonify({'status': 'error', 'message': '未指定提交ID'}), 400
@@ -336,7 +353,11 @@ def reject_commit():
                 'status': 'error',
                 'message': '提交已经是拒绝状态'
             })
-    except Exception as e:
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        log_print(f"拒绝提交数据库失败: {str(e)}")
+        return jsonify({'status': 'error', 'message': '数据库操作失败，请稍后重试'}), 500
+    except (TypeError, ValueError, RuntimeError) as e:
         log_print(f"拒绝提交失败: {str(e)}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -372,7 +393,14 @@ def request_priority_diff(commit_id):
             'cached': False,
             'queue_size': background_task_queue.qsize()
         })
-    except Exception as e:
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        log_print(f"请求优先处理数据库失败: {e}", 'INFO')
+        return jsonify({
+            'success': False,
+            'message': '请求失败: 数据库操作异常'
+        }), 500
+    except (TypeError, ValueError, RuntimeError) as e:
         log_print(f"请求优先处理失败: {e}", 'INFO')
         return jsonify({
             'success': False, 
@@ -409,8 +437,8 @@ def get_commit_diff_data(commit_id):
             )
 
         if is_agent_dispatch_mode():
-            force_retry = str(request.args.get("force_retry") or "").strip().lower() in {"1", "true", "yes"}
-            dispatch_result = dispatch_or_get_commit_diff(commit, force_retry=force_retry)
+            query_input = CommitDiffQueryInput.from_request(request)
+            dispatch_result = dispatch_or_get_commit_diff(commit, force_retry=query_input.force_retry)
             dispatch_status = str(dispatch_result.get("status") or "").strip().lower()
 
             if dispatch_status == "ready":
@@ -565,16 +593,17 @@ def refresh_merge_diff():
     """重新计算合并diff数据，绕过缓存"""
     try:
         log_print("🔄 开始处理合并diff重新计算请求", 'APP')
-        commit_ids = request.json.get('commit_ids', [])
-        log_print(f"📋 收到提交ID: {commit_ids}", 'APP')
-        if not commit_ids:
-            log_print("❌ 未提供提交ID", 'INFO')
+        try:
+            refresh_input = MergeDiffRefreshInput.from_request_json(request)
+            commit_ids = refresh_input.commit_ids
+        except ValueError as input_error:
             return json_error(
                 jsonify=jsonify,
-                message="未提供提交ID",
+                message=str(input_error),
                 error_type="invalid_request",
                 http_status=400,
             )
+        log_print(f"📋 收到提交ID: {commit_ids}", 'APP')
 
         commits = []
         for commit_id in commit_ids:
