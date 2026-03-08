@@ -11,6 +11,23 @@ from sqlalchemy.exc import SQLAlchemyError
 from services.commit_diff_input_models import CommitDiffQueryInput
 from services.api_response_service import json_error, json_success
 
+EXCEL_DIFF_API_AGENT_RENDER_ERRORS = (
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+)
+EXCEL_DIFF_API_HTML_RENDER_ERRORS = (
+    json.JSONDecodeError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+)
+EXCEL_DIFF_API_UNEXPECTED_ERRORS = (AttributeError, KeyError, OSError)
+
 
 def handle_get_excel_diff_data(
     *,
@@ -63,7 +80,7 @@ def handle_get_excel_diff_data(
                 )
             try:
                 html_content, css_content, js_content = excel_html_cache_service.generate_excel_html(diff_data)
-            except Exception as render_exc:
+            except EXCEL_DIFF_API_AGENT_RENDER_ERRORS as render_exc:
                 return jsonify(
                     {
                         "success": True,
@@ -227,7 +244,7 @@ def handle_get_excel_diff_data(
                         "from_data_cache": True,
                     }
                 )
-            except Exception as exc:
+            except EXCEL_DIFF_API_HTML_RENDER_ERRORS as exc:
                 log_print(f"⚠️ HTML生成失败，返回原始数据: {exc}", "INFO")
                 performance_metrics_service.record(
                     "api_excel_diff",
@@ -323,7 +340,7 @@ def handle_get_excel_diff_data(
                         "real_time": True,
                     }
                 )
-            except Exception as exc:
+            except EXCEL_DIFF_API_HTML_RENDER_ERRORS as exc:
                 log_print(f"⚠️ HTML生成失败，返回原始数据: {exc}", "INFO")
                 add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=1)
                 performance_metrics_service.record(
@@ -414,7 +431,7 @@ def handle_get_excel_diff_data(
             http_status=500,
             error=True,
         )
-    except Exception as exc:
+    except EXCEL_DIFF_API_UNEXPECTED_ERRORS as exc:
         log_print(f"❌ Excel diff处理失败: {str(exc)}")
         traceback.print_exc()
         performance_metrics_service.record(
