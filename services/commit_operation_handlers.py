@@ -49,6 +49,7 @@ resolve_previous_commit = _RuntimeProxy("resolve_previous_commit")
 
 
 _AUTHOR_EMAIL_RE = re.compile(r"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
+COMMIT_OPERATION_UNEXPECTED_ERRORS = (AttributeError, KeyError, LookupError, OSError)
 
 
 def _extract_author_lookup_keys(raw_author):
@@ -578,7 +579,7 @@ def get_commit_diff_data(commit_id):
             http_status=500,
             commit_id=commit_id,
         )
-    except Exception as e:
+    except COMMIT_OPERATION_UNEXPECTED_ERRORS as e:
         total_time = time.time() - start_time if 'start_time' in locals() else 0
         log_print(f"❌ 获取提交 {commit_id} 的diff数据未知失败: {e} | 耗时: {total_time:.2f}秒", 'ERROR')
         return json_error(
@@ -699,7 +700,7 @@ def refresh_merge_diff():
             error_type="runtime_error",
             http_status=500,
         )
-    except Exception as e:
+    except COMMIT_OPERATION_UNEXPECTED_ERRORS as e:
         log_print(f"重新计算合并diff失败: {e}", 'INFO')
         return json_error(
             jsonify=jsonify,
