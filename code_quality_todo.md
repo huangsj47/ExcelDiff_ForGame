@@ -65,11 +65,15 @@
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 
 ### P1（随后）
-- [ ] 5. 拆分 `services/git_service.py`（clone/sync/diff/excel 逻辑分模块）
-  - 进展（2026-03-08）：已新增 `services/git_diff_helpers.py`，将 unified diff 解析、基础 diff 生成、初始提交 diff 生成、DataFrame 比较从主类中拆出；`git_service.py` 已降至 2267 行。
+- [x] 5. 拆分 `services/git_service.py`（clone/sync/diff/excel 逻辑分模块）
+  - 进展（2026-03-08）：已新增 `services/git_diff_helpers.py`，将 unified diff 解析、基础 diff 生成、初始提交 diff 生成、DataFrame 比较从主类中拆出。
+  - 进展（2026-03-08）：已新增 `services/git_excel_parser_helpers.py`，将 Excel 解析与 diff 组装主逻辑下沉为 helper；`git_service.py` 主类方法改为薄包装。
+  - 进展（2026-03-08）：已移除未使用的旧并行/批处理方法，`git_service.py` 已降至 1655 行；函数长度检查结果中无 `>=120` 行的核心函数。
   - 验收：单文件 < 1800 行；核心函数长度 < 120 行。
-- [ ] 6. 拆分 `services/weekly_version_logic.py`（查询、聚合、渲染分离）
+- [x] 6. 拆分 `services/weekly_version_logic.py`（查询、聚合、渲染分离）
   - 进展（2026-03-08）：已新增 `services/weekly_deleted_excel_helpers.py`，将“Excel 删除态识别/回退版本定位/提示 HTML 组装”拆出；`weekly_version_logic.py` 已降至 1968 行（脱离 ERROR 区间）。
+  - 进展（2026-03-08）：已新增 `services/weekly_excel_merge_helpers.py`，将 segmented 合并/Excel payload 提取/缓存回退加载逻辑拆出；`weekly_version_logic.py` 已降至 1795 行。
+  - 进展（2026-03-08）：`weekly_version_logic.py` 已进一步降至 1796 行，核心缓存提取/合并/删除态判断均已拆到服务 helper，主入口以编排为主。
   - 验收：核心 API 只做编排，查询与渲染抽离。
 - [x] 7. 统一错误响应规范（HTTP code + `status/message/error_type/retry_after_seconds`）
   - 已完成（2026-03-08）：新增 `services/api_response_models.py` + `services/api_response_service.py`，并接入 `commit_diff_page_service`、`excel_diff_api_service`、`commit_operation_handlers` 的 commit diff / excel diff / merge diff 响应链路。

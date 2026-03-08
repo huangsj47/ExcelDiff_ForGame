@@ -10,10 +10,17 @@ import urllib.parse
 from urllib.parse import urlparse
 import git
 from services.git_diff_helpers import (
-    compare_dataframes,
     generate_basic_diff,
     generate_initial_commit_diff,
     parse_unified_diff,
+)
+from services.git_excel_parser_helpers import (
+    detect_data_bounds,
+    extract_excel_data,
+    extract_excel_data_simple,
+    generate_excel_diff_data,
+    get_column_letter,
+    parse_excel_diff,
 )
 from utils.path_security import build_repository_local_path
 from utils.security_utils import sanitize_text, sanitize_url
@@ -919,7 +926,7 @@ class GitService:
                         
                         # 解析patch内容
                         if patch_text:
-                            hunks = self._parse_unified_diff(patch_text)
+                            hunks = parse_unified_diff(patch_text)
                             diff_result = {
                                 'type': 'code',
                                 'file_path': file_path,
@@ -928,7 +935,7 @@ class GitService:
                             }
                         else:
                             # 如果没有patch内容，生成基本的diff结构
-                            diff_result = self._generate_basic_diff(previous_content, current_content, file_path)
+                            diff_result = generate_basic_diff(previous_content, current_content, file_path)
                     else:
                         print("未找到diff，可能文件无变化")
                         return None
@@ -936,11 +943,11 @@ class GitService:
                 except Exception as git_e:
                     print(f"GitPython diff失败: {git_e}")
                     # 使用基本diff生成作为备用
-                    diff_result = self._generate_basic_diff(previous_content, current_content, file_path)
+                    diff_result = generate_basic_diff(previous_content, current_content, file_path)
             else:
                 # 初始提交，所有内容都是新增的
                 print("初始提交，生成新增文件的diff")
-                diff_result = self._generate_initial_commit_diff(current_content, file_path)
+                diff_result = generate_initial_commit_diff(current_content, file_path)
             
             # 更新性能统计
             processing_time = time.time() - start_time
@@ -1174,7 +1181,7 @@ class GitService:
                 return None
                 
             # 解析diff输出
-            hunks = self._parse_unified_diff(diff_output)
+            hunks = parse_unified_diff(diff_output)
             
             diff_data = {
                 'type': 'code',
@@ -1258,372 +1265,27 @@ class GitService:
     
     def parse_excel_diff(self, commit_id, file_path):
         """解析Excel文件的差异，返回表格对比数据"""
-        try:
-            print(f"开始解析Excel差异: commit_id={commit_id}, file_path={file_path}")
-            if not os.path.exists(self.local_path):
-                print(f"本地路径不存在: {self.local_path}")
-                return None
-            
-            print("正在初始化Git仓库...")
-            repo = git.Repo(self.local_path)
-            
-            try:
-                print(f"正在获取commit: {commit_id}")
-                commit = repo.commit(commit_id)
-                
-                # 检查文件是否在当前提交中存在（可能是删除操作）
-                try:
-                    commit.tree[file_path]
-                    file_exists_in_current = True
-                except KeyError:
-                    file_exists_in_current = False
-                    print(f"文件在当前提交中不存在，可能是删除操作: {file_path}")
-                
-                # 如果文件在当前提交中不存在，这是删除操作
-                if not file_exists_in_current:
-                    return {
-                        'type': 'excel',
-                        'file_type': 'Excel',
-                        'operation': 'deleted',
-                        'message': '该Excel文件已被删除',
-                        'file_path': file_path
-                    }
-                
-                print("正在提取当前版本Excel数据...")
-                current_data = self._extract_excel_data(commit, file_path)
-                
-                previous_data = None
-                if commit.parents:
-                    parent_commit = commit.parents[0]
-                    try:
-                        previous_data = self._extract_excel_data(parent_commit, file_path)
-                    except KeyError:
-                        # 文件在父提交中不存在，是新增文件
-                        pass
-                
-                # 生成表格对比数据
-                return self._generate_excel_diff_data(current_data, previous_data, file_path)
-                    
-            except Exception as e:
-                return {
-                    'type': 'excel',
-                    'file_type': 'Excel',
-                    'error': True,
-                    'message': f'无法解析Excel差异: {str(e)}'
-                }
-                
-        except Exception as e:
-            print(f"解析Excel差异失败: {str(e)}")
-            return None
+        return parse_excel_diff(self, commit_id, file_path)
     
     def _extract_excel_data(self, commit, file_path):
         """从指定提交中提取Excel数据"""
-        try:
-            # 检查文件是否存在于该提交中
-            try:
-                blob = commit.tree / file_path
-            except KeyError:
-                print(f"文件在提交 {commit.hexsha[:8]} 中不存在: {file_path}")
-                return None
-                
-            excel_data = blob.data_stream.read()
-            
-            # 使用openpyxl直接读取Excel数据，避免pandas/numpy兼容性问题
-            import io
-            import warnings
-            # 抑制openpyxl的Data Validation警告
-            warnings.filterwarnings('ignore', message='Data Validation extension is not supported and will be removed')
-            from openpyxl import load_workbook
-            
-            excel_file = io.BytesIO(excel_data)
-            
-            # 读取所有工作表
-            sheets_data = {}
-            try:
-                workbook = load_workbook(excel_file, data_only=True)
-                
-                for sheet_name in workbook.sheetnames:
-                    worksheet = workbook[sheet_name]
-                    
-                    # 获取工作表数据 - 修复空数据问题
-                    sheet_rows = []
-                    max_row = worksheet.max_row
-                    max_col = worksheet.max_column
-                    
-                    print(f"工作表 {sheet_name}: max_row={max_row}, max_col={max_col}")
-                    
-                    # 检查工作表是否真的有数据
-                    if max_row > 0 and max_col > 0:
-                        # 先检查是否有实际内容
-                        has_content = False
-                        for row in range(1, min(max_row + 1, 11)):  # 检查前10行
-                            for col in range(1, min(max_col + 1, 11)):  # 检查前10列
-                                cell_value = worksheet.cell(row=row, column=col).value
-                                if cell_value is not None and str(cell_value).strip():
-                                    has_content = True
-                                    break
-                            if has_content:
-                                break
-                        
-                        if has_content:
-                            # 智能检测实际数据边界
-                            actual_bounds = self._detect_data_bounds(worksheet, max_row, max_col)
-                            actual_max_row = actual_bounds['max_row']
-                            actual_max_col = actual_bounds['max_col']
-                            if 'rows' in sheets_data:
-                                print(f"- 工作表行数: {len(sheets_data['rows'])}")
-                                if sheets_data['rows']:
-                                    print(f"- 第一行数据示例: {sheets_data['rows'][0]}")
-                                else:
-                                    print(f"- 工作表rows为空，状态: {sheets_data.get('status')}")
-                                    print(f"- has_changes: {sheets_data.get('has_changes')}")
-                            print(f"工作表 {sheet_name} 数据边界: 行1-{actual_max_row}, 列1-{actual_max_col}")
-                            
-                            for row in range(1, actual_max_row + 1):
-                                row_data = {}
-                                row_has_data = False
-                                
-                                for col in range(1, actual_max_col + 1):
-                                    cell_value = worksheet.cell(row=row, column=col).value
-                                    col_letter = self._get_column_letter(col)
-                                    cell_str = str(cell_value) if cell_value is not None else ''
-                                    row_data[col_letter] = cell_str
-                                    if cell_str.strip():
-                                        row_has_data = True
-                                
-                                # 添加所有行（包括空行），但记录数据边界
-                                sheet_rows.append(row_data)
-                        
-                        print(f"工作表 {sheet_name} 实际读取到 {len(sheet_rows)} 行数据")
-                    
-                    sheets_data[sheet_name] = sheet_rows
-                
-                workbook.close()
-                return sheets_data
-                
-            except Exception as e:
-                print(f"使用openpyxl读取Excel失败: {str(e)}")
-                # 如果openpyxl失败，尝试简化的处理方式
-                return self._extract_excel_data_simple(excel_data, file_path)
-            
-        except Exception as e:
-            print(f"提取Excel数据失败: {str(e)}")
-            return None
+        return extract_excel_data(self, commit, file_path)
     
     def _get_column_letter(self, col_num):
         """将列号转换为Excel列字母 (1->A, 2->B, ...)"""
-        result = ""
-        while col_num > 0:
-            col_num -= 1
-            result = chr(col_num % 26 + ord('A')) + result
-            col_num //= 26
-        return result
+        return get_column_letter(col_num)
     
     def _detect_data_bounds(self, worksheet, max_row, max_col):
         """检测工作表的实际数据边界，排除空白行列"""
-        actual_max_row = 0
-        actual_max_col = 0
-        
-        # 从后往前扫描，找到最后一个有数据的行
-        for row in range(max_row, 0, -1):
-            has_data = False
-            for col in range(1, max_col + 1):
-                cell_value = worksheet.cell(row=row, column=col).value
-                if cell_value is not None and str(cell_value).strip():
-                    has_data = True
-                    break
-            if has_data:
-                actual_max_row = row
-                break
-        
-        # 从右往左扫描，找到最后一个有数据的列
-        for col in range(max_col, 0, -1):
-            has_data = False
-            for row in range(1, actual_max_row + 1):
-                cell_value = worksheet.cell(row=row, column=col).value
-                if cell_value is not None and str(cell_value).strip():
-                    has_data = True
-                    break
-            if has_data:
-                actual_max_col = col
-                break
-        
-        # 安全边界检查，至少保留一些列
-        actual_max_col = max(actual_max_col, 10)
-        actual_max_row = max(actual_max_row, 1)
-        
-        return {
-            'max_row': actual_max_row,
-            'max_col': actual_max_col
-        }
+        return detect_data_bounds(worksheet, max_row, max_col)
     
     def _extract_excel_data_simple(self, excel_data, file_path):
         """简化的Excel数据提取，返回基本信息"""
-        try:
-            return {
-                'Sheet1': [{
-                    'A': f'Excel文件: {file_path}',
-                    'B': f'文件大小: {len(excel_data)} 字节',
-                    'C': '由于兼容性问题，无法显示详细内容'
-                }]
-            }
-        except Exception as e:
-            print(f"简化Excel数据提取失败: {str(e)}")
-            return None
+        return extract_excel_data_simple(excel_data, file_path)
     
     def _generate_excel_diff_data(self, current_data, previous_data, file_path):
         """生成Excel差异对比数据 - 智能空白区域处理版本"""
-        start_time = time.time()
-        
-        if not current_data:
-            return {
-                'type': 'excel',
-                'file_type': 'Excel',
-                'error': True,
-                'message': '无法读取Excel文件内容'
-            }
-        
-        if not previous_data:
-            # 新增文件 - 优化显示边界
-            optimized_sheets = self._optimize_sheet_display_bounds(current_data, None)
-            return {
-                'type': 'excel',
-                'file_type': 'Excel',
-                'is_new_file': True,
-                'sheets': optimized_sheets,
-                'message': '新增的Excel文件'
-            }
-        
-        # 并行对比工作表数据，并优化显示边界
-        diff_sheets = self._parallel_compare_sheets_optimized(current_data, previous_data)
-        
-        # 检查是否有删除的工作表
-        for sheet_name in previous_data.keys():
-            if sheet_name not in current_data:
-                diff_sheets[sheet_name] = {
-                    'status': 'deleted',
-                    'rows': []
-                }
-        
-        # 更新性能统计
-        processing_time = time.time() - start_time
-        self.performance_stats['excel_processing_time'] += processing_time
-        
-        print(f"Excel diff处理完成，耗时: {processing_time:.2f}秒，工作表数量: {len(diff_sheets)}")
-        
-        # 详细打印每个工作表的数据结构
-        for sheet_name, sheet_data in diff_sheets.items():
-            print(f"工作表 '{sheet_name}' 数据结构:")
-            print(f"  - status: {sheet_data.get('status', 'unknown')}")
-            print(f"  - has_changes: {sheet_data.get('has_changes', False)}")
-            print(f"  - headers: {sheet_data.get('headers', [])}")
-            if 'rows' in sheet_data:
-                print(f"  - rows数量: {len(sheet_data['rows'])}")
-                if sheet_data['rows']:
-                    first_row = sheet_data['rows'][0]
-                    print(f"  - 第一行示例: {first_row}")
-                    if 'cells' in first_row:
-                        print(f"  - 第一行cells数量: {len(first_row['cells'])}")
-                        if first_row['cells']:
-                            print(f"  - 第一个cell示例: {first_row['cells'][0]}")
-                else:
-                    print(f"  - rows为空")
-        
-        result = {
-            'type': 'excel',  # 添加type字段供模板识别
-            'file_type': 'Excel',
-            'file_path': file_path,
-            'sheets': diff_sheets,
-            'has_changes': any(sheet.get('has_changes', False) for sheet in diff_sheets.values())
-        }
-        
-        print(f"最终返回的Excel diff数据结构: type={result['type']}, sheets数量={len(result['sheets'])}, has_changes={result['has_changes']}")
-        
-        return result
-    
-    def _parallel_compare_sheets(self, current_data, previous_data):
-        """并行对比多个工作表"""
-        diff_sheets = {}
-        
-        # 准备任务列表
-        sheet_tasks = []
-        for sheet_name in current_data.keys():
-            current_sheet = current_data[sheet_name]
-            previous_sheet = previous_data.get(sheet_name, [])
-            sheet_tasks.append((sheet_name, current_sheet, previous_sheet))
-        
-        # 计算总数据量来智能选择处理方式
-        total_rows = sum(max(len(current_sheet), len(previous_sheet)) 
-                        for _, current_sheet, previous_sheet in sheet_tasks)
-        
-        # 大幅提高并行处理阈值，避免小数据集的线程开销
-        use_parallel = len(sheet_tasks) >= 5 and total_rows >= 10000
-        
-        if not use_parallel:
-            print(f"使用高性能串行处理 {len(sheet_tasks)} 个工作表 (总计 {total_rows} 行)")
-            for sheet_name, current_sheet, previous_sheet in sheet_tasks:
-                diff_sheets[sheet_name] = self._compare_sheet_data(current_sheet, previous_sheet)
-            return diff_sheets
-        
-        # 多线程并行处理
-        print(f"开始并行处理 {len(sheet_tasks)} 个工作表...")
-        self.performance_stats['parallel_tasks_count'] += len(sheet_tasks)
-        
-        executor = self._get_thread_pool()
-        # 提交任务
-        future_to_sheet = {
-            executor.submit(self._compare_sheet_data_safe, current_sheet, previous_sheet): sheet_name
-            for sheet_name, current_sheet, previous_sheet in sheet_tasks
-        }
-        
-        # 收集结果
-        for future in as_completed(future_to_sheet):
-            sheet_name = future_to_sheet[future]
-            try:
-                result = future.result(timeout=5)  # 减少超时时间到5秒
-                diff_sheets[sheet_name] = result
-            except Exception as e:
-                print(f"工作表 '{sheet_name}' 处理失败: {str(e)}")
-                # 失败时使用串行处理作为备选
-                current_sheet = next(cs for sn, cs, _ in sheet_tasks if sn == sheet_name)
-                previous_sheet = next(ps for sn, _, ps in sheet_tasks if sn == sheet_name)
-                diff_sheets[sheet_name] = self._compare_sheet_data(current_sheet, previous_sheet)
-        
-        return diff_sheets
-    
-    def _compare_sheet_data_safe(self, current_sheet, previous_sheet):
-        """线程安全的工作表对比方法"""
-        try:
-            return self._compare_sheet_data(current_sheet, previous_sheet)
-        except Exception as e:
-            print(f"工作表对比出错: {str(e)}")
-            # 返回基本的错误结果
-            return {
-                'status': 'error',
-                'headers': [],
-                'rows': [],
-                'has_changes': False,
-                'error_message': str(e)
-            }
-    
-    def _format_excel_sheets_for_display(self, sheets_data):
-        """格式化Excel工作表数据用于显示"""
-        formatted_sheets = {}
-        
-        for sheet_name, rows in sheets_data.items():
-            if not rows:
-                continue
-                
-            # 获取列名（第一行作为表头）
-            headers = list(rows[0].keys()) if rows else []
-            
-            formatted_sheets[sheet_name] = {
-                'headers': headers,
-                'rows': rows,
-                'status': 'new'
-            }
-        
-        return formatted_sheets
+        return generate_excel_diff_data(self, current_data, previous_data, file_path)
     
     def _optimize_sheet_display_bounds(self, current_data, previous_data):
         """优化工作表显示边界，隐藏重叠的空白区域"""
@@ -1966,265 +1628,6 @@ class GitService:
             'has_changes': has_changes
         }
     
-    def _ultra_fast_compare_rows(self, current_sheet, previous_sheet):
-        """超快速行比较 - 最小化处理开销"""
-        # 获取表头
-        if current_sheet and isinstance(current_sheet[0], dict):
-            headers = list(current_sheet[0].keys())
-        else:
-            headers = []
-        
-        # 快速检查是否有变化 - 更宽松的检查
-        has_changes = False
-        if len(current_sheet) != len(previous_sheet):
-            has_changes = True
-        else:
-            # 检查前几行是否有变化，避免完整比较
-            check_rows = min(10, len(current_sheet), len(previous_sheet))
-            for i in range(check_rows):
-                if current_sheet[i] != previous_sheet[i]:
-                    has_changes = True
-                    break
-        
-        if not has_changes:
-            return {
-                'status': 'unchanged',
-                'headers': headers,
-                'rows': [],
-                'has_changes': False
-            }
-        
-        # 只处理有变化的行，简化数据结构
-        diff_rows = []
-        max_rows = max(len(current_sheet), len(previous_sheet))
-        
-        for i in range(min(50, max_rows)):  # 限制处理前50行以提高性能
-            if i < len(current_sheet) and i < len(previous_sheet):
-                if current_sheet[i] != previous_sheet[i]:
-                    # 简化的单元格变化检测
-                    cell_changes = {}
-                    if isinstance(current_sheet[i], dict) and isinstance(previous_sheet[i], dict):
-                        for key in headers[:10]:  # 只检查前10列
-                            curr_val = str(current_sheet[i].get(key, ''))
-                            prev_val = str(previous_sheet[i].get(key, ''))
-                            if curr_val != prev_val:
-                                cell_changes[key] = {'old': prev_val, 'new': curr_val}
-                    
-                    diff_rows.append({
-                        'row_number': i + 1,
-                        'status': 'modified',
-                        'row_data': current_sheet[i],
-                        'previous_data': previous_sheet[i],
-                        'cell_changes': cell_changes
-                    })
-            elif i < len(current_sheet):
-                diff_rows.append({
-                    'row_number': i + 1,
-                    'status': 'added',
-                    'row_data': current_sheet[i],
-                    'previous_data': {},
-                    'cell_changes': {}
-                })
-            else:
-                diff_rows.append({
-                    'row_number': i + 1,
-                    'status': 'removed',
-                    'row_data': {},
-                    'previous_data': previous_sheet[i],
-                    'cell_changes': {}
-                })
-        
-        return {
-            'status': 'modified',
-            'headers': headers,
-            'rows': diff_rows,
-            'has_changes': True
-        }
-    
-    def _parallel_compare_rows(self, current_sheet, previous_sheet, headers, max_rows):
-        """并行比较行数据"""
-        print(f"使用并行处理比较 {max_rows} 行数据...")
-        
-        # 分批处理，每批500行
-        batch_size = 500
-        batches = []
-        
-        for start_idx in range(0, max_rows, batch_size):
-            end_idx = min(start_idx + batch_size, max_rows)
-            batches.append((start_idx, end_idx))
-        
-        diff_rows = []
-        has_changes = False
-        
-        executor = self._get_thread_pool()
-        # 提交批处理任务
-        future_to_batch = {
-            executor.submit(self._compare_row_batch, current_sheet, previous_sheet, headers, start_idx, end_idx): (start_idx, end_idx)
-            for start_idx, end_idx in batches
-        }
-        
-        # 收集结果并按顺序合并
-        batch_results = {}
-        for future in as_completed(future_to_batch):
-            start_idx, end_idx = future_to_batch[future]
-            try:
-                batch_diff_rows, batch_has_changes = future.result(timeout=60)
-                batch_results[start_idx] = (batch_diff_rows, batch_has_changes)
-                if batch_has_changes:
-                    has_changes = True
-            except Exception as e:
-                print(f"批处理 {start_idx}-{end_idx} 失败: {str(e)}")
-                # 失败时使用串行处理
-                batch_diff_rows, batch_has_changes = self._compare_row_batch(
-                    current_sheet, previous_sheet, headers, start_idx, end_idx
-                )
-                batch_results[start_idx] = (batch_diff_rows, batch_has_changes)
-                if batch_has_changes:
-                    has_changes = True
-        
-        # 按顺序合并结果
-        for start_idx in sorted(batch_results.keys()):
-            batch_diff_rows, _ = batch_results[start_idx]
-            diff_rows.extend(batch_diff_rows)
-        
-        return {
-            'status': 'modified' if has_changes else 'unchanged',
-            'headers': headers,
-            'rows': diff_rows,
-            'has_changes': has_changes
-        }
-    
-    def _compare_row_batch(self, current_sheet, previous_sheet, headers, start_idx, end_idx):
-        """比较一批行数据"""
-        diff_rows = []
-        has_changes = False
-        
-        for i in range(start_idx, end_idx):
-            current_row = current_sheet[i] if i < len(current_sheet) else {}
-            previous_row = previous_sheet[i] if i < len(previous_sheet) else {}
-            
-            if not current_row and previous_row:
-                # 删除的行
-                diff_rows.append({
-                    'row_number': i + 1,
-                    'status': 'removed',
-                    'previous_data': previous_row
-                })
-                has_changes = True
-            elif current_row and not previous_row:
-                # 新增的行
-                diff_rows.append({
-                    'row_number': i + 1,
-                    'status': 'added',
-                    'row_data': current_row
-                })
-                has_changes = True
-            elif current_row != previous_row:
-                # 修改的行
-                cell_changes = {}
-                for col in headers:
-                    current_val = current_row.get(col, '')
-                    previous_val = previous_row.get(col, '')
-                    if current_val != previous_val:
-                        cell_changes[col] = {
-                            'old': previous_val,
-                            'new': current_val
-                        }
-                
-                if cell_changes:
-                    diff_rows.append({
-                        'row_number': i + 1,
-                        'status': 'modified',
-                        'row_data': current_row,
-                        'previous_data': previous_row,
-                        'cell_changes': cell_changes
-                    })
-                    has_changes = True
-                else:
-                    # 无变化的行
-                    diff_rows.append({
-                        'row_number': i + 1,
-                        'status': 'unchanged',
-                        'row_data': current_row
-                    })
-            else:
-                # 无变化的行
-                diff_rows.append({
-                    'row_number': i + 1,
-                    'status': 'unchanged',
-                    'row_data': current_row
-                })
-        
-        return diff_rows, has_changes
-    
-    def _serial_compare_rows(self, current_sheet, previous_sheet, headers, max_rows):
-        """串行比较行数据（用于小数据集）"""
-        diff_rows = []
-        has_changes = False
-        
-        for i in range(max_rows):
-            current_row = current_sheet[i] if i < len(current_sheet) else {}
-            previous_row = previous_sheet[i] if i < len(previous_sheet) else {}
-            
-            if not current_row and previous_row:
-                # 删除的行
-                diff_rows.append({
-                    'row_number': i + 1,
-                    'status': 'removed',
-                    'previous_data': previous_row
-                })
-                has_changes = True
-            elif current_row and not previous_row:
-                # 新增的行
-                diff_rows.append({
-                    'row_number': i + 1,
-                    'status': 'added',
-                    'row_data': current_row
-                })
-                has_changes = True
-            elif current_row != previous_row:
-                # 修改的行
-                cell_changes = {}
-                for col in headers:
-                    current_val = current_row.get(col, '')
-                    previous_val = previous_row.get(col, '')
-                    if current_val != previous_val:
-                        cell_changes[col] = {
-                            'old': previous_val,
-                            'new': current_val
-                        }
-                
-                if cell_changes:
-                    diff_rows.append({
-                        'row_number': i + 1,
-                        'status': 'modified',
-                        'row_data': current_row,
-                        'previous_data': previous_row,
-                        'cell_changes': cell_changes
-                    })
-                    has_changes = True
-                else:
-                    # 无变化的行
-                    diff_rows.append({
-                        'row_number': i + 1,
-                        'status': 'unchanged',
-                        'row_data': current_row
-                    })
-            else:
-                # 无变化的行
-                diff_rows.append({
-                    'row_number': i + 1,
-                    'status': 'unchanged',
-                    'row_data': current_row
-                })
-        
-        return {
-            'status': 'modified' if has_changes else 'unchanged',
-            'headers': headers,
-            'rows': diff_rows,
-            'has_changes': has_changes
-        }
-    
     def get_performance_stats(self):
         """获取性能统计信息"""
         return {
@@ -2251,17 +1654,10 @@ class GitService:
         self.cleanup_thread_pool()
     
     def _parse_unified_diff(self, patch_text):
-        """解析unified diff格式，返回结构化的hunks数据。"""
+        """兼容旧调用入口：解析 unified diff。"""
         return parse_unified_diff(patch_text)
-
-    def _compare_dataframes(self, old_df, new_df, sheet_name):
-        """比较两个DataFrame的差异。"""
-        return compare_dataframes(old_df, new_df, sheet_name)
     
     def _generate_basic_diff(self, previous_content, current_content, file_path):
-        """生成基本的diff结构。"""
+        """兼容旧调用入口：生成基础文本 diff。"""
         return generate_basic_diff(previous_content, current_content, file_path)
     
-    def _generate_initial_commit_diff(self, current_content, file_path):
-        """生成初始提交的diff（所有内容都是新增的）。"""
-        return generate_initial_commit_diff(current_content, file_path)
