@@ -153,6 +153,20 @@ class TestModelLoader:
             model_loader.get_runtime_model("MissingModel")
         model_loader.clear_model_loader_cache()
 
+    def test_import_runtime_error_is_treated_as_unavailable_module(self, monkeypatch):
+        model_loader.clear_model_loader_cache()
+
+        def fake_import_module(name):
+            if name == "models":
+                raise RuntimeError("models init failed")
+            if name == "app":
+                return SimpleNamespace(log_print="fallback_log")
+            raise ImportError(name)
+
+        monkeypatch.setattr(model_loader.importlib, "import_module", fake_import_module)
+        assert model_loader.get_runtime_model("log_print") == "fallback_log"
+        model_loader.clear_model_loader_cache()
+
 
 class TestSvnModelAdapter:
     def test_get_db_models_uses_runtime_loader(self, monkeypatch):

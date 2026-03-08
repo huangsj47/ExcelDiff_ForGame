@@ -11,11 +11,21 @@ from functools import lru_cache
 from typing import Any, Tuple
 
 
+MODEL_LOADER_IMPORT_ERRORS = (
+    ImportError,
+    ModuleNotFoundError,
+    RuntimeError,
+    AttributeError,
+    ValueError,
+    SyntaxError,
+)
+
+
 @lru_cache(maxsize=1)
 def _load_models_module():
     try:
         return importlib.import_module("models")
-    except Exception:
+    except MODEL_LOADER_IMPORT_ERRORS:
         return None
 
 
@@ -23,7 +33,7 @@ def _load_models_module():
 def _load_app_module():
     try:
         return importlib.import_module("app")
-    except Exception:
+    except MODEL_LOADER_IMPORT_ERRORS:
         return None
 
 
