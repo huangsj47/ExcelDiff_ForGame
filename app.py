@@ -158,6 +158,10 @@ from services.repository_maintenance_api_service import (
     handle_sync_repository,
     should_retry_with_reclone,
 )
+from services.commit_diff_page_service import (
+    handle_commit_full_diff,
+    handle_refresh_commit_diff,
+)
 from services.app_bootstrap_db_service import (
     clear_startup_version_mismatch_cache,
     create_tables_with_runtime_checks,
@@ -1318,106 +1322,18 @@ def commit_diff_new(commit_id):
 
 def commit_full_diff(commit_id):
     """显示完整文件的diff，类似Git工具的并排显示"""
-    commit = Commit.query.get_or_404(commit_id)
-    repository, project = _ensure_commit_access_or_403(commit)
-    mode_strategy = get_commit_diff_mode_strategy()
-    # 获取上一个版本的提交信息
-    file_commits = Commit.query.filter(
-        Commit.repository_id == repository.id,
-        Commit.path == commit.path
-    ).order_by(Commit.commit_time.desc()).all()
-    previous_commit = resolve_previous_commit(commit, file_commits=file_commits)
-    # 获取完整文件内容
-    try:
-        import subprocess
-        import os
-        # 获取仓库的本地路径
-        if repository.type == 'git':
-            from services.threaded_git_service import ThreadedGitService
-            git_service = ThreadedGitService(repository.url, repository.root_directory, 
-                                   repository.username, repository.token, repository, set())
-            local_path = git_service.local_path
-            # 如果本地路径不存在，尝试克隆
-            if not os.path.exists(local_path):
-                if not mode_strategy.allow_platform_local_git_clone:
-                    message = mode_strategy.local_clone_block_message
-                    current_file_content = message
-                    previous_file_content = message
-                    return render_template('full_file_diff.html',
-                                         commit=commit,
-                                         repository=repository,
-                                         project=project,
-                                         previous_commit=previous_commit,
-                                         current_file_content=current_file_content,
-                                         previous_file_content=previous_file_content)
-                success, message = git_service.clone_or_update_repository()
-                if not success:
-                    current_file_content = f"仓库克隆失败: {message}"
-                    previous_file_content = f"仓库克隆失败: {message}"
-                    return render_template('full_file_diff.html',
-                                         commit=commit,
-                                         repository=repository,
-                                         project=project,
-                                         previous_commit=previous_commit,
-                                         current_file_content=current_file_content,
-                                         previous_file_content=previous_file_content)
-        else:
-            svn_service = get_svn_service(repository)
-            local_path = svn_service.local_path
-        # 获取当前版本文件内容
-        try:
-            if repository.type == 'git':
-                result = subprocess.run([
-                    'git', 'show', f'{commit.commit_id}:{commit.path}'
-                ], cwd=local_path, capture_output=True, text=True, encoding='utf-8')
-            else:
-                # SVN处理
-                result = subprocess.run([
-                    'svn', 'cat', f'{repository.url}/{commit.path}@{commit.commit_id}'
-                ], capture_output=True, text=True, encoding='utf-8')
-            if result.returncode == 0:
-                current_file_content = result.stdout
-                log_print(f"Current file content length: {len(current_file_content)}")
-            else:
-                current_file_content = f"无法获取文件内容: {result.stderr}"
-                log_print(f"Git show error: {result.stderr}", 'INFO')
-        except Exception as e:
-            current_file_content = f"获取当前版本失败: {str(e)}"
-        # 获取前一版本文件内容
-        previous_file_content = ""
-        if previous_commit:
-            try:
-                if repository.type == 'git':
-                    result = subprocess.run([
-                        'git', 'show', f'{previous_commit.commit_id}:{commit.path}'
-                    ], cwd=local_path, capture_output=True, text=True, encoding='utf-8')
-                else:
-                    # SVN处理
-                    result = subprocess.run([
-                        'svn', 'cat', f'{repository.url}/{commit.path}@{previous_commit.commit_id}'
-                    ], capture_output=True, text=True, encoding='utf-8')
-                if result.returncode == 0:
-                    previous_file_content = result.stdout
-                else:
-                    previous_file_content = f"无法获取文件内容: {result.stderr}"
-            except Exception as e:
-                previous_file_content = f"获取前一版本失败: {str(e)}"
-        else:
-            previous_file_content = ""
-    except Exception as e:
-        log_print(f"获取文件内容失败: {e}", 'INFO')
-        current_file_content = "无法获取文件内容"
-        previous_file_content = "无法获取文件内容"
-    # 生成Git风格的并排diff数据
-    side_by_side_diff = generate_side_by_side_diff(current_file_content, previous_file_content)
-    return render_template('git_style_diff.html',
-                         commit=commit,
-                         repository=repository,
-                         project=project,
-                         previous_commit=previous_commit,
-                         current_file_content=current_file_content,
-                         previous_file_content=previous_file_content,
-                         side_by_side_diff=side_by_side_diff)
+    return handle_commit_full_diff(
+        commit_id=commit_id,
+        Commit=Commit,
+        get_svn_service=get_svn_service,
+        threaded_git_service_cls=ThreadedGitService,
+        get_commit_diff_mode_strategy=get_commit_diff_mode_strategy,
+        ensure_commit_access_or_403=_ensure_commit_access_or_403,
+        resolve_previous_commit=resolve_previous_commit,
+        generate_side_by_side_diff=generate_side_by_side_diff,
+        render_template=render_template,
+        log_print=log_print,
+    )
 # 重新计算差异API
 # 新的带项目代号和仓库名的刷新diff路由
 
@@ -1436,130 +1352,21 @@ def refresh_commit_diff_with_path(project_code, repository_name, commit_id):
 
 def refresh_commit_diff(commit_id):
     """重新计算提交的差异数据，绕过缓存 - 优化版本"""
-    try:
-        commit = Commit.query.get_or_404(commit_id)
-        repository, _project = _ensure_commit_access_or_403(commit)
-        dispatch_result = maybe_dispatch_commit_diff(commit, force_retry=True)
-        if dispatch_result is not None:
-            status = str(dispatch_result.get("status") or "")
-            if status == "ready":
-                payload = dispatch_result.get("payload") or {}
-                return jsonify({
-                    "success": True,
-                    "status": "ready",
-                    "message": "Agent diff 已就绪",
-                    "diff_data": payload.get("diff_data"),
-                    "previous_commit": payload.get("previous_commit"),
-                })
-            if status == "unbound":
-                return jsonify({
-                    "success": False,
-                    "status": "unbound",
-                    "message": dispatch_result.get("message") or "项目未绑定 Agent",
-                }), 409
-            if status in {"pending", "pending_offline"}:
-                return jsonify({
-                    "success": True,
-                    "status": status,
-                    "pending": True,
-                    "message": dispatch_result.get("message") or "Agent 正在处理diff",
-                    "retry_after_seconds": dispatch_result.get("retry_after_seconds") or 60,
-                    "task_id": dispatch_result.get("task_id"),
-                }), 202
-            return jsonify({
-                "success": False,
-                "status": "error",
-                "message": dispatch_result.get("message") or "派发 Agent diff 失败",
-            }), 500
-        log_print(f"🔄 开始重新计算差异: commit={commit_id}, file={commit.path}", 'APP')
-        # 记录开始时间
-        start_time = time.time()
-        # 如果是Excel文件，先清除相关缓存
-        if excel_cache_service.is_excel_file(commit.path):
-            log_print(f"🗑️ 清除Excel缓存: {commit.path}", 'EXCEL')
-            # 优化的批量删除缓存，减少数据库操作和锁定时间
-            try:
-                cache_delete_start = time.time()
-                # 删除diff缓存
-                deleted_count = DiffCache.query.filter_by(
-                    repository_id=repository.id,
-                    commit_id=commit.commit_id,
-                    file_path=commit.path
-                ).delete()
-                # 删除HTML缓存 - 直接在这里执行，避免额外的函数调用开销
-                html_deleted_count = ExcelHtmlCache.query.filter_by(
-                    repository_id=repository.id,
-                    commit_id=commit.commit_id,
-                    file_path=commit.path
-                ).delete()
-                # 一次性提交所有删除操作
-                if deleted_count > 0 or html_deleted_count > 0:
-                    db.session.commit()
-                    cache_delete_time = time.time() - cache_delete_start
-                    log_print(f"✅ 已删除缓存记录: diff={deleted_count}, html={html_deleted_count} | 耗时: {cache_delete_time:.2f}秒", 'EXCEL')
-                else:
-                    log_print(f"ℹ️ 没有找到需要删除的缓存记录", 'EXCEL')
-            except SQLAlchemyError as cache_error:
-                log_print(f"⚠️ 清除缓存时出错: {cache_error}", 'EXCEL', force=True)
-                db.session.rollback()
-        # 获取上一个版本的提交信息 - 优化查询
-        file_commits = Commit.query.filter(
-            Commit.repository_id == repository.id,
-            Commit.path == commit.path,
-            Commit.commit_time < commit.commit_time
-        ).order_by(Commit.commit_time.desc()).first()
-        # 强制重新计算差异
-        diff_calculation_start = time.time()
-        diff_data = get_unified_diff_data(commit, file_commits)
-        diff_calculation_time = time.time() - diff_calculation_start
-        if diff_data:
-            # 如果是Excel文件，重新缓存结果
-            if excel_cache_service.is_excel_file(commit.path) and diff_data.get('type') == 'excel':
-                cache_start = time.time()
-                log_print(f"💾 重新缓存Excel差异数据", 'EXCEL')
-                try:
-                    excel_cache_service.save_cached_diff(
-                        repository_id=repository.id,
-                        commit_id=commit.commit_id,
-                        file_path=commit.path,
-                        diff_data=diff_data,
-                        previous_commit_id=file_commits.commit_id if file_commits else None,
-                        processing_time=diff_calculation_time,
-                        commit_time=commit.commit_time
-                    )
-                    cache_time = time.time() - cache_start
-                    log_print(f"💾 缓存保存完成，耗时: {cache_time:.2f}秒", 'EXCEL')
-                except Exception as cache_error:
-                    log_print(f"⚠️ 保存缓存时出错: {cache_error}", 'EXCEL')
-            total_time = time.time() - start_time
-            log_print(f"✅ 差异重新计算完成: {commit.path} | 计算耗时: {diff_calculation_time:.2f}秒 | 总耗时: {total_time:.2f}秒", 'APP')
-            # 使用安全的JSON序列化处理diff_data中的NaN值
-            safe_diff_data = safe_json_serialize(diff_data)
-            return jsonify({
-                'success': True,
-                'message': f'差异重新计算完成，计算耗时 {diff_calculation_time:.2f} 秒',
-                'processing_time': diff_calculation_time,
-                'total_time': total_time,
-                'diff_data': safe_diff_data  # 使用清理后的数据，避免NaN导致JSON解析错误
-            })
-        else:
-            total_time = time.time() - start_time
-            log_print(f"❌ 差异重新计算失败: {commit.path} | 耗时: {total_time:.2f}秒", 'APP', force=True)
-            return jsonify({
-                'success': False,
-                'message': '差异重新计算失败，请检查文件内容',
-                'total_time': total_time
-            })
-    except Exception as e:
-        total_time = time.time() - start_time if 'start_time' in locals() else 0
-        log_print(f"❌ 重新计算差异异常: {e} | 耗时: {total_time:.2f}秒", 'APP', force=True)
-        import traceback
-        traceback.print_exc()
-        return jsonify({
-            'success': False,
-            'message': f'重新计算差异失败: {str(e)}',
-            'total_time': total_time
-        }), 500
+    return handle_refresh_commit_diff(
+        commit_id=commit_id,
+        Commit=Commit,
+        DiffCache=DiffCache,
+        ExcelHtmlCache=ExcelHtmlCache,
+        db=db,
+        SQLAlchemyError=SQLAlchemyError,
+        excel_cache_service=excel_cache_service,
+        maybe_dispatch_commit_diff=maybe_dispatch_commit_diff,
+        get_unified_diff_data=get_unified_diff_data,
+        safe_json_serialize=safe_json_serialize,
+        ensure_commit_access_or_403=_ensure_commit_access_or_403,
+        jsonify=jsonify,
+        log_print=log_print,
+    )
 # 新的带项目代号和仓库名的路由
 
 

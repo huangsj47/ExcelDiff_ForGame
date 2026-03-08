@@ -158,3 +158,15 @@ class TestWeeklyTodoFollowups:
         assert "def should_retry_with_reclone(" in service_content
         assert "def handle_retry_clone_repository(" in service_content
         assert "def handle_sync_repository(" in service_content
+
+    def test_commit_diff_page_logic_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.commit_diff_page_service import (" in app_content
+        assert "handle_commit_full_diff" in app_content
+        assert "handle_refresh_commit_diff" in app_content
+        assert "return handle_commit_full_diff(" in app_content
+        assert "return handle_refresh_commit_diff(" in app_content
+
+        service_content = _read("services/commit_diff_page_service.py")
+        assert "def handle_commit_full_diff(" in service_content
+        assert "def handle_refresh_commit_diff(" in service_content
