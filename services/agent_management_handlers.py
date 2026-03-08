@@ -48,6 +48,16 @@ _AGENT_RELEASE_HANDLER_ERRORS = (
     KeyError,
     SQLAlchemyError,
 )
+_AGENT_ENDPOINT_HANDLER_ERRORS = (
+    OSError,
+    ValueError,
+    TypeError,
+    RuntimeError,
+    KeyError,
+    AttributeError,
+    LookupError,
+    SQLAlchemyError,
+)
 
 
 def _bool_env(key: str, default: bool) -> bool:
@@ -1043,7 +1053,7 @@ def register_agent_node():
                 "default_admin_assignment": default_admin_assignment,
             }
         )
-    except Exception as exc:
+    except _AGENT_ENDPOINT_HANDLER_ERRORS as exc:
         db.session.rollback()
         log_print(f"Agent 注册失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
@@ -1082,7 +1092,7 @@ def agent_heartbeat():
 
         db.session.commit()
         return jsonify({"success": True, "server_time": datetime.now(timezone.utc).isoformat()})
-    except Exception as exc:
+    except _AGENT_ENDPOINT_HANDLER_ERRORS as exc:
         db.session.rollback()
         log_print(f"Agent 心跳失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
@@ -1134,7 +1144,7 @@ def agent_report_incident():
 
         db.session.commit()
         return jsonify({"success": True, "incident_id": row.id}), 200
-    except Exception as exc:
+    except _AGENT_ENDPOINT_HANDLER_ERRORS as exc:
         db.session.rollback()
         log_print(f"Agent 异常上报失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
@@ -1169,7 +1179,7 @@ def agent_upsert_temp_cache():
                 "expire_at": row.expire_at.isoformat() if row.expire_at else None,
             }
         ), 200
-    except Exception as exc:
+    except _AGENT_ENDPOINT_HANDLER_ERRORS as exc:
         db.session.rollback()
         log_print(f"Agent 临时缓存写入失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 400
@@ -1211,7 +1221,7 @@ def get_agent_temp_cache(cache_key):
                 "updated_at": row.updated_at.isoformat() if row.updated_at else None,
             }
         ), 200
-    except Exception as exc:
+    except _AGENT_ENDPOINT_HANDLER_ERRORS as exc:
         log_print(f"读取平台临时缓存失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
 
@@ -1326,7 +1336,7 @@ def resolve_agent_temp_cache(cache_key):
             )
 
         return jsonify({"success": False, "status": "miss", "cache_key": cache_key}), 404
-    except Exception as exc:
+    except _AGENT_ENDPOINT_HANDLER_ERRORS as exc:
         log_print(f"解析平台临时缓存失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
 
@@ -1602,7 +1612,7 @@ def agent_claim_task():
             "lease_expires_at": task.lease_expires_at.isoformat() if task.lease_expires_at else None,
         }
         return jsonify({"success": True, "task": response_task}), 200
-    except Exception as exc:
+    except _AGENT_ENDPOINT_HANDLER_ERRORS as exc:
         db.session.rollback()
         log_print(f"Agent claim 失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500

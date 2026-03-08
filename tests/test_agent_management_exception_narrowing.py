@@ -122,3 +122,145 @@ def test_rollback_agent_release_returns_400_for_invalid_steps(monkeypatch):
     status_code, payload = _extract_response(result)
     assert status_code == 400
     assert payload["success"] is False
+
+
+def test_register_agent_node_returns_500_for_endpoint_fallback_error(monkeypatch):
+    session = SimpleNamespace(rollback_called=False)
+
+    def _rollback():
+        session.rollback_called = True
+
+    session.rollback = _rollback
+    fake_db = SimpleNamespace(session=session)
+    monkeypatch.setattr(
+        agent_handlers,
+        "get_runtime_models",
+        lambda *_args: (fake_db, None, None, None, None, lambda *_a, **_k: None),
+    )
+    monkeypatch.setattr(agent_handlers, "_validate_agent_shared_secret", lambda: (True, None, None))
+    monkeypatch.setattr(
+        agent_handlers,
+        "_normalize_project_specs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyError("bad-project-spec")),
+    )
+
+    with app.test_request_context("/api/agents/register", method="POST", json={"agent_code": "a1"}):
+        result = agent_handlers.register_agent_node()
+
+    status_code, payload = _extract_response(result)
+    assert status_code == 500
+    assert payload["success"] is False
+    assert session.rollback_called is True
+
+
+def test_agent_heartbeat_returns_500_for_endpoint_fallback_error(monkeypatch):
+    session = SimpleNamespace(rollback_called=False)
+
+    def _rollback():
+        session.rollback_called = True
+
+    session.rollback = _rollback
+    session.commit = lambda: None
+    fake_db = SimpleNamespace(session=session)
+    monkeypatch.setattr(
+        agent_handlers,
+        "get_runtime_models",
+        lambda *_args: (fake_db, SimpleNamespace(), lambda *_a, **_k: None),
+    )
+    monkeypatch.setattr(agent_handlers, "_validate_agent_shared_secret", lambda: (True, None, None))
+    monkeypatch.setattr(agent_handlers, "_get_agent_by_identity", lambda *_args, **_kwargs: SimpleNamespace(id=1))
+    monkeypatch.setattr(
+        agent_handlers,
+        "_apply_agent_runtime_fields",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyError("bad-runtime-payload")),
+    )
+
+    with app.test_request_context(
+        "/api/agents/heartbeat",
+        method="POST",
+        json={"agent_code": "a1", "agent_token": "t1"},
+    ):
+        result = agent_handlers.agent_heartbeat()
+
+    status_code, payload = _extract_response(result)
+    assert status_code == 500
+    assert payload["success"] is False
+    assert session.rollback_called is True
+
+
+def test_get_agent_temp_cache_returns_500_for_endpoint_fallback_error(monkeypatch):
+    monkeypatch.setattr(
+        agent_handlers,
+        "get_runtime_models",
+        lambda *_args: (SimpleNamespace(session=SimpleNamespace()), SimpleNamespace(), lambda *_a, **_k: None),
+    )
+    monkeypatch.setattr(
+        agent_handlers,
+        "_cleanup_expired_agent_temp_cache_if_needed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("cleanup-fail")),
+    )
+
+    with app.test_request_context("/api/agents/cache/cache-1"):
+        result = agent_handlers.get_agent_temp_cache.__wrapped__("cache-1")
+
+    status_code, payload = _extract_response(result)
+    assert status_code == 500
+    assert payload["success"] is False
+
+
+def test_resolve_agent_temp_cache_returns_500_for_endpoint_fallback_error(monkeypatch):
+    monkeypatch.setattr(
+        agent_handlers,
+        "get_runtime_models",
+        lambda *_args: (
+            SimpleNamespace(session=SimpleNamespace()),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            lambda *_a, **_k: None,
+        ),
+    )
+    monkeypatch.setattr(
+        agent_handlers,
+        "_cleanup_expired_agent_temp_cache_if_needed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("cleanup-fail")),
+    )
+
+    with app.test_request_context("/api/agents/cache/cache-2/resolve"):
+        result = agent_handlers.resolve_agent_temp_cache.__wrapped__("cache-2")
+
+    status_code, payload = _extract_response(result)
+    assert status_code == 500
+    assert payload["success"] is False
+
+
+def test_agent_claim_task_returns_500_for_endpoint_fallback_error(monkeypatch):
+    session = SimpleNamespace(rollback_called=False)
+
+    def _rollback():
+        session.rollback_called = True
+
+    session.rollback = _rollback
+    fake_db = SimpleNamespace(session=session)
+    monkeypatch.setattr(
+        agent_handlers,
+        "get_runtime_models",
+        lambda *_args: (fake_db, SimpleNamespace(), SimpleNamespace(), lambda *_a, **_k: None),
+    )
+    monkeypatch.setattr(agent_handlers, "_validate_agent_shared_secret", lambda: (True, None, None))
+    monkeypatch.setattr(
+        agent_handlers,
+        "_get_agent_by_identity",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyError("agent-not-found-map")),
+    )
+
+    with app.test_request_context(
+        "/api/agents/tasks/claim",
+        method="POST",
+        json={"agent_code": "a1", "agent_token": "t1"},
+    ):
+        result = agent_handlers.agent_claim_task()
+
+    status_code, payload = _extract_response(result)
+    assert status_code == 500
+    assert payload["success"] is False
+    assert session.rollback_called is True
