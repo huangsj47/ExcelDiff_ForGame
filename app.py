@@ -165,6 +165,10 @@ from services.commit_list_page_service import handle_commit_list_page
 from services.commit_diff_new_page_service import handle_commit_diff_new_page
 from services.app_request_logging_service import configure_request_logging
 from services.app_blueprint_bootstrap_service import configure_app_blueprints
+from services.app_lifecycle_bootstrap_service import (
+    create_bootstrap_manager,
+    register_cleanup_hook,
+)
 from services.commit_route_scope_service import (
     dispatch_commit_route_with_scope,
     ensure_commit_access_or_403,
@@ -332,7 +336,6 @@ from services.vcs_content_service import (
     get_unified_diff_data,
 )
 from bootstrap.app_factory import build_runtime_settings, create_app
-from bootstrap.bootstrap import AppBootstrapManager
 
 app = create_app(__name__)
 
@@ -1080,19 +1083,11 @@ configure_runtime_wirings(
 )
 
 
-def _init_auth_default_data_with_context():
-    from auth import init_auth_default_data
-
-    with app.app_context():
-        init_auth_default_data()
-
-
-_bootstrap_manager = AppBootstrapManager(
+_bootstrap_manager = create_bootstrap_manager(
     app=app,
     log_print=log_print,
     enable_local_worker=ENABLE_LOCAL_WORKER,
     create_tables_func=create_tables,
-    init_auth_default_data_func=_init_auth_default_data_with_context,
     start_background_task_worker_func=start_background_task_worker,
     stop_background_task_worker_func=stop_background_task_worker,
     start_scheduler_func=start_scheduler,
@@ -1114,10 +1109,13 @@ def cleanup_app():
 
 
 # cache management routes moved to routes/cache_management_routes.py
-# 注册清理函数
-log_print("[TRACE] about to register atexit", "APP")
-atexit.register(cleanup_app)
-log_print(f"[TRACE] reached if __name__ check, __name__={__name__!r}", "APP")
+# 注册清理函数（已下沉到 app_lifecycle_bootstrap_service）
+register_cleanup_hook(
+    atexit_module=atexit,
+    cleanup_app=cleanup_app,
+    log_print=log_print,
+    module_name=__name__,
+)
 
 
 if __name__ == '__main__':

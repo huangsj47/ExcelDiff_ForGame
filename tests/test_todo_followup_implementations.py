@@ -230,6 +230,19 @@ class TestWeeklyTodoFollowups:
         assert "def _register_blueprint_with_trace(" in service_content
         assert "app.register_blueprint(cache_management_bp)" in service_content
 
+    def test_app_lifecycle_bootstrap_extracted_from_app_entry(self):
+        app_content = _read("app.py")
+        assert "from services.app_lifecycle_bootstrap_service import (" in app_content
+        assert "create_bootstrap_manager" in app_content
+        assert "register_cleanup_hook" in app_content
+        assert "_bootstrap_manager = create_bootstrap_manager(" in app_content
+        assert "register_cleanup_hook(" in app_content
+
+        service_content = _read("services/app_lifecycle_bootstrap_service.py")
+        assert "def create_bootstrap_manager(" in service_content
+        assert "def register_cleanup_hook(" in service_content
+        assert "AppBootstrapManager(" in service_content
+
     def test_commit_route_scope_helpers_extracted_from_app_entry(self):
         app_content = _read("app.py")
         assert "from services.commit_route_scope_service import (" in app_content

@@ -37,6 +37,7 @@
   - 进展（2026-03-08）：已新增 `services/commit_diff_new_page_service.py`，将 `commit_diff_new` 页面逻辑迁出，`app.py` 继续收敛为入口编排。
   - 进展（2026-03-08）：已新增 `services/app_request_logging_service.py`，将 Agent 访问日志过滤与 admin 请求日志钩子迁出，`app.py` 启动入口仅保留配置调用。
   - 进展（2026-03-08）：已新增 `services/app_blueprint_bootstrap_service.py`，将蓝图注册与失败日志追踪下沉，`app.py` 入口改为单行编排调用。
+  - 进展（2026-03-08）：已新增 `services/app_lifecycle_bootstrap_service.py`，将生命周期管理器构建、Auth 默认数据初始化与 atexit 注册日志迁出，入口层保留兼容壳函数。
   - 进展（2026-03-08）：已新增 `services/commit_route_scope_service.py`，将 commit 访问校验与 `*_with_path` 路由分发逻辑统一下沉，入口层减少重复实现。
   - 进展（2026-03-08）：已新增 `services/repository_misc_page_service.py`，将仓库编辑页渲染与本地目录存在性检查迁出，`app.py` 继续保持薄封装。
   - 验收：`app.py` 降到 < 2000 行；路由注册和容器初始化清晰分层。
