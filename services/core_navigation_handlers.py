@@ -6,6 +6,8 @@ import hmac
 import os
 
 from flask import abort, current_app, flash, redirect, render_template, request, session, url_for
+from sqlalchemy.exc import SQLAlchemyError
+from werkzeug.routing import BuildError
 
 from models import AgentNode, AgentProjectBinding, Project, Repository, db
 from services.deployment_mode import get_deployment_mode, is_agent_dispatch_mode
@@ -20,12 +22,30 @@ from utils.request_security import (
     _is_safe_redirect,
 )
 
+CORE_NAVIGATION_HELPER_ERRORS = (
+    RuntimeError,
+    AttributeError,
+    TypeError,
+    ValueError,
+    LookupError,
+    BuildError,
+)
+
+CORE_NAVIGATION_HANDLER_ERRORS = (
+    RuntimeError,
+    AttributeError,
+    TypeError,
+    ValueError,
+    LookupError,
+    SQLAlchemyError,
+)
+
 
 def _has_routable_endpoint(endpoint: str) -> bool:
     """Return True only when endpoint exists in url_map (not just view_functions)."""
     try:
         return any(rule.endpoint == endpoint for rule in current_app.url_map.iter_rules())
-    except Exception:
+    except CORE_NAVIGATION_HELPER_ERRORS:
         return False
 
 
@@ -33,7 +53,7 @@ def _safe_url_for(endpoint: str, **values) -> str | None:
     """Best-effort url_for wrapper that never raises to callers."""
     try:
         return url_for(endpoint, **values)
-    except Exception:
+    except CORE_NAVIGATION_HELPER_ERRORS:
         return None
 
 
@@ -45,7 +65,7 @@ def _qkit_login_unavailable_response(next_url: str):
         flash("Qkit 登录模块未初始化，请检查 AUTH_BACKEND 配置与依赖安装。", "error")
     try:
         return render_template("admin_login.html", next_url=next_url), 503
-    except Exception:
+    except CORE_NAVIGATION_HELPER_ERRORS:
         # Last-resort guard: avoid 500 when base template itself references missing endpoints.
         fallback_html = (
             "<h3>Qkit 登录模块不可用</h3>"
@@ -258,7 +278,7 @@ def index():
                         item for item in all_nodes
                         if str(item.get("agent_code") or "").strip() in creatable_agent_codes
                     ]
-            except Exception as exc:
+            except CORE_NAVIGATION_HANDLER_ERRORS as exc:
                 log_print(f"加载Agent列表失败: {exc}", "AGENT", force=True)
         log_print(f"找到 {len(projects)} 个可见项目（总 {total_projects} 个）", "APP")
         return render_template(
@@ -271,7 +291,7 @@ def index():
             can_direct_create_project=can_direct_create_project,
             deployment_mode=deployment_mode,
         )
-    except Exception as exc:
+    except CORE_NAVIGATION_HANDLER_ERRORS as exc:
         log_print(f"首页路由错误: {str(exc)}", "APP", force=True)
         import traceback
 
