@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 
 from flask import jsonify, render_template, request, session, url_for
+from werkzeug.routing import BuildError
 from werkzeug.exceptions import Forbidden, NotFound
 
 
@@ -69,6 +70,10 @@ AUTH_EXEMPT_PATHS = (
     "/help",
     "/api/agents/",
 )
+
+APP_SECURITY_AUTH_BACKEND_IMPORT_ERRORS = (ImportError, RuntimeError, AttributeError)
+APP_SECURITY_PUBLIC_LOGIN_DISCOVERY_ERRORS = (RuntimeError, AttributeError, TypeError)
+APP_SECURITY_PUBLIC_LOGIN_BUILD_ERRORS = (BuildError, RuntimeError, AttributeError, TypeError)
 
 
 def _prefers_json_error_response() -> bool:
@@ -209,18 +214,18 @@ def configure_app_security_bootstrap(
         from auth import get_auth_backend as _get_auth_backend
 
         app.jinja_env.globals["auth_backend"] = _get_auth_backend
-    except Exception:
+    except APP_SECURITY_AUTH_BACKEND_IMPORT_ERRORS:
         app.jinja_env.globals["auth_backend"] = lambda: "local"
 
     def public_login_url():
         try:
             if any(rule.endpoint == "auth_bp.login" for rule in app.url_map.iter_rules()):
                 return url_for("auth_bp.login")
-        except Exception:
+        except APP_SECURITY_PUBLIC_LOGIN_DISCOVERY_ERRORS:
             pass
         try:
             return url_for("admin_login")
-        except Exception:
+        except APP_SECURITY_PUBLIC_LOGIN_BUILD_ERRORS:
             return "/auth/login"
 
     app.jinja_env.globals["public_login_url"] = public_login_url
