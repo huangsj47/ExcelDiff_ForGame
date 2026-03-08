@@ -88,6 +88,7 @@
   - 进展（2026-03-08）：`excel_diff_api_service` 的 agent 就绪后 HTML 渲染兜底、数据缓存/实时渲染兜底与外层未知异常兜底已收敛到 `EXCEL_DIFF_API_*_ERRORS` 明确异常集合，移除该模块剩余裸 `except Exception`。
   - 进展（2026-03-08）：`git_diff_helpers` 的 DataFrame 比较兜底、基础文本 diff 兜底与初始提交 diff 兜底已收敛到 `GIT_DIFF_HELPER_*_ERRORS` 明确异常集合，移除该模块剩余裸 `except Exception`。
   - 进展（2026-03-08）：`git_excel_parser_helpers` 的 Excel 解析主流程兜底、Repo 初始化兜底、workbook 解析回退兜底、提取外层兜底与 simple fallback 兜底已收敛到 `GIT_EXCEL_*_ERRORS` 明确异常集合，移除该模块剩余裸 `except Exception`。
+  - 进展（2026-03-08）：`repository_compare_helpers` 的时间解析兜底与 commits compare diff 生成兜底已收敛到 `REPOSITORY_COMPARE_*_ERRORS` 明确异常集合，移除该模块剩余裸 `except Exception`。
   - 下一步：继续按模块将通用 `except Exception` 拆分为更具体异常（IO/网络/数据校验）并补充错误标签。
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 
@@ -139,6 +140,7 @@
   - 进展（2026-03-08）：已新增 `tests/test_excel_diff_api_exception_narrowing.py`，覆盖 agent ready 渲染失败回退、数据缓存渲染失败回退、实时渲染失败回退与外层未知异常返回契约。
   - 进展（2026-03-08）：已新增 `tests/test_git_diff_helpers_exception_narrowing.py`，覆盖 DataFrame 比较异常回退、基础文本 diff 异常回退与初始提交 diff 异常回退返回契约。
   - 进展（2026-03-08）：已新增 `tests/test_git_excel_parser_helpers_exception_narrowing.py`，覆盖 Repo 初始化失败回退、commit 解析失败回退、workbook 解析失败 fallback、提取外层异常回退与 simple fallback 异常回退契约。
+  - 进展（2026-03-08）：已新增 `tests/test_repository_compare_exception_narrowing.py`，覆盖仓库对比时间解析失败回退与 commits compare diff 生成失败兜底分支。
   - 验收：新增针对性测试，不仅是 happy path。
 - [x] 10. 统一服务层输入/输出模型（dataclass/pydantic）
   - 进展（2026-03-08）：已引入 `ErrorResponsePayload` / `SuccessResponsePayload`（dataclass），并作为 diff 相关服务统一输出模型。

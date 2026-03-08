@@ -10,6 +10,17 @@ from services.model_loader import get_runtime_model, get_runtime_models
 from utils.request_security import _has_project_access
 from utils.timezone_utils import format_beijing_time
 
+REPOSITORY_COMPARE_TIME_PARSE_ERRORS = (ValueError, TypeError, AttributeError)
+REPOSITORY_COMPARE_DIFF_GENERATION_ERRORS = (
+    ImportError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    OSError,
+)
+
 
 def _ensure_repository_access_or_403(repository):
     project = getattr(repository, "project", None)
@@ -48,7 +59,7 @@ def repository_compare():
     try:
         start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
         end_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
-    except Exception:
+    except REPOSITORY_COMPARE_TIME_PARSE_ERRORS:
         flash("时间格式错误", "error")
         return redirect(url_for("index"))
 
@@ -293,7 +304,7 @@ def generate_compare_diff(from_commit, to_commit, from_diff_data, to_diff_data):
                 },
             ],
         }
-    except Exception as exc:
+    except REPOSITORY_COMPARE_DIFF_GENERATION_ERRORS as exc:
         log_print(f"生成对比diff失败: {exc}")
         return {
             "type": "code",
