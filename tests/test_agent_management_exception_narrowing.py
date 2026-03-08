@@ -2,7 +2,10 @@ from datetime import timezone
 from types import ModuleType, SimpleNamespace
 import sys
 
+from sqlalchemy.exc import SQLAlchemyError
+
 import services.agent_management_handlers as agent_handlers
+import services.agent_task_result_service as agent_task_result_service
 from app import app
 
 
@@ -259,6 +262,100 @@ def test_agent_claim_task_returns_500_for_endpoint_fallback_error(monkeypatch):
         json={"agent_code": "a1", "agent_token": "t1"},
     ):
         result = agent_handlers.agent_claim_task()
+
+    status_code, payload = _extract_response(result)
+    assert status_code == 500
+    assert payload["success"] is False
+    assert session.rollback_called is True
+
+
+def test_agent_task_result_returns_500_for_fallback_keyerror(monkeypatch):
+    fake_agent_task_model = object()
+    fake_bg_task_model = object()
+    fake_repo_model = object()
+    session = SimpleNamespace(rollback_called=False)
+
+    def _rollback():
+        session.rollback_called = True
+
+    def _get(_model, _task_id):
+        raise KeyError("missing-task")
+
+    session.rollback = _rollback
+    session.get = _get
+    fake_db = SimpleNamespace(session=session)
+    monkeypatch.setattr(
+        agent_handlers,
+        "get_runtime_models",
+        lambda *_args: (fake_db, fake_agent_task_model, fake_bg_task_model, fake_repo_model, lambda *_a, **_k: None),
+    )
+    monkeypatch.setattr(agent_handlers, "_validate_agent_shared_secret", lambda: (True, None, None))
+    monkeypatch.setattr(agent_handlers, "_get_agent_by_identity", lambda *_args, **_kwargs: SimpleNamespace(id=1))
+
+    with app.test_request_context(
+        "/api/agents/tasks/11/result",
+        method="POST",
+        json={"agent_code": "a1", "agent_token": "t1", "status": "completed"},
+    ):
+        result = agent_task_result_service.handle_agent_report_task_result(11)
+
+    status_code, payload = _extract_response(result)
+    assert status_code == 500
+    assert payload["success"] is False
+    assert session.rollback_called is True
+
+
+def test_agent_task_result_returns_500_for_sqlalchemy_commit_error(monkeypatch):
+    fake_agent_task_model = object()
+    fake_bg_task_model = object()
+    fake_repo_model = object()
+    task = SimpleNamespace(
+        id=12,
+        assigned_agent_id=None,
+        task_type="weekly_sync",
+        repository_id=None,
+        source_task_id=None,
+        error_message=None,
+        result_summary=None,
+        lease_expires_at=None,
+        status="processing",
+        completed_at=None,
+    )
+    session = SimpleNamespace(rollback_called=False)
+
+    def _rollback():
+        session.rollback_called = True
+
+    def _get(model, _task_id):
+        if model is fake_agent_task_model:
+            return task
+        return None
+
+    def _commit():
+        raise SQLAlchemyError("db-commit-failed")
+
+    session.rollback = _rollback
+    session.get = _get
+    session.commit = _commit
+    fake_db = SimpleNamespace(session=session)
+    monkeypatch.setattr(
+        agent_handlers,
+        "get_runtime_models",
+        lambda *_args: (fake_db, fake_agent_task_model, fake_bg_task_model, fake_repo_model, lambda *_a, **_k: None),
+    )
+    monkeypatch.setattr(agent_handlers, "_validate_agent_shared_secret", lambda: (True, None, None))
+    monkeypatch.setattr(
+        agent_handlers,
+        "_get_agent_by_identity",
+        lambda *_args, **_kwargs: SimpleNamespace(id=1, agent_code="a1"),
+    )
+
+    with app.test_request_context(
+        "/api/agents/tasks/12/result",
+        method="POST",
+        json={"agent_code": "a1", "agent_token": "t1", "status": "completed"},
+    ):
+        result = agent_task_result_service.handle_agent_report_task_result(12)
 
     status_code, payload = _extract_response(result)
     assert status_code == 500

@@ -68,6 +68,7 @@
   - 进展（2026-03-08）：`agent_management_handlers` 的环境变量/数值解析与 commit_time 解析辅助函数已改为明确异常集合（`_NUMERIC_PARSE_ERRORS` 等），默认管理员权限同步链路中的 auth backend 发现与模型导入分支已收敛裸 `except Exception`。
   - 进展（2026-03-08）：`agent_management_handlers` 的 release 查询/下载/列表/回滚接口已统一收敛到 `_AGENT_RELEASE_HANDLER_ERRORS`，替换对应 `except Exception` 分支并保持原有错误响应语义。
   - 进展（2026-03-08）：`agent_management_handlers` 的 register/heartbeat/incident/upsert temp cache/get temp cache/resolve temp cache/claim task 接口已统一收敛到 `_AGENT_ENDPOINT_HANDLER_ERRORS`，移除该文件剩余裸 `except Exception`。
+  - 进展（2026-03-08）：`agent_task_result_service` 的 `handle_agent_report_task_result` 已收敛到 `AGENT_TASK_RESULT_HANDLER_ERRORS`，移除该服务内裸 `except Exception`。
   - 下一步：继续按模块将通用 `except Exception` 拆分为更具体异常（IO/网络/数据校验）并补充错误标签。
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 
@@ -99,6 +100,7 @@
   - 进展（2026-03-08）：已新增 `tests/test_agent_management_exception_narrowing.py`，覆盖 agent 管理辅助函数的数值解析、时间解析及 auth 导入失败回退分支。
   - 进展（2026-03-08）：`tests/test_agent_management_exception_narrowing.py` 已补充 release 相关异常分支覆盖（latest/download/list/rollback），验证收敛后错误路径稳定返回。
   - 进展（2026-03-08）：`tests/test_agent_management_exception_narrowing.py` 已补充 register/heartbeat/get cache/resolve cache/claim task 的 fallback 异常分支，覆盖 `_AGENT_ENDPOINT_HANDLER_ERRORS` 返回契约。
+  - 进展（2026-03-08）：`tests/test_agent_management_exception_narrowing.py` 已补充 `agent_task_result_service` 的 fallback 异常分支（KeyError/SQLAlchemyError），覆盖任务回传失败回滚契约。
   - 验收：新增针对性测试，不仅是 happy path。
 - [x] 10. 统一服务层输入/输出模型（dataclass/pydantic）
   - 进展（2026-03-08）：已引入 `ErrorResponsePayload` / `SuccessResponsePayload`（dataclass），并作为 diff 相关服务统一输出模型。

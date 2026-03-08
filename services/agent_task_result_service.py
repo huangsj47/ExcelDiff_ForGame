@@ -8,6 +8,19 @@ import json
 from datetime import datetime, timezone
 
 from flask import jsonify, request
+from sqlalchemy.exc import SQLAlchemyError
+
+
+AGENT_TASK_RESULT_HANDLER_ERRORS = (
+    OSError,
+    ValueError,
+    TypeError,
+    RuntimeError,
+    KeyError,
+    AttributeError,
+    LookupError,
+    SQLAlchemyError,
+)
 
 
 def handle_agent_report_task_result(task_id):
@@ -174,8 +187,7 @@ def handle_agent_report_task_result(task_id):
                 force=(status == "failed"),
             )
         return jsonify({"success": True}), 200
-    except Exception as exc:
+    except AGENT_TASK_RESULT_HANDLER_ERRORS as exc:
         db.session.rollback()
         log_print(f"Agent 回传结果失败: {exc}", "AGENT", force=True)
         return jsonify({"success": False, "message": str(exc)}), 500
-
