@@ -82,6 +82,7 @@
   - 进展（2026-03-08）：`auth_bootstrap_service` 的 qkit 路由探测/注册、auth 路由诊断、默认数据初始化与 auth 模块初始化分支已收敛到 `AUTH_*_ERRORS` 明确异常集合，移除该模块剩余裸 `except Exception`。
   - 进展（2026-03-08）：`repository_maintenance_api_service` 的缓存重建、缓存状态查询与手动同步外层兜底分支已收敛到 `REPOSITORY_MAINTENANCE_*_ERRORS` 明确异常集合，移除该模块剩余裸 `except Exception`。
   - 进展（2026-03-08）：`repository_update_form_service` 的全量同步异常兜底、异步重筛外层兜底与表单提交流程外层兜底已收敛到 `REPOSITORY_UPDATE_FORM_*_ERRORS` 明确异常集合，移除该模块剩余裸 `except Exception`。
+  - 进展（2026-03-08）：`commit_diff_view_service` 的作者映射兜底、缓存数据处理兜底与 Excel 主流程兜底分支已收敛到 `COMMIT_DIFF_VIEW_*_ERRORS` 明确异常集合，移除该模块剩余裸 `except Exception`。
   - 下一步：继续按模块将通用 `except Exception` 拆分为更具体异常（IO/网络/数据校验）并补充错误标签。
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 
@@ -127,6 +128,7 @@
   - 进展（2026-03-08）：已新增 `tests/test_auth_bootstrap_exception_narrowing.py`，覆盖 qkit 路由探测失败回退注册、路由注册失败日志、auth 路由诊断失败兜底、`initialize_auth_subsystem` 的 ImportError/默认数据初始化异常/模块初始化异常分支。
   - 进展（2026-03-08）：已新增 `tests/test_repository_maintenance_api_exception_narrowing.py`，覆盖缓存重建失败、缓存状态查询失败、手动同步中 commit payload 缺字段触发的外层异常兜底与错误记录分支。
   - 进展（2026-03-08）：已新增 `tests/test_repository_update_form_exception_narrowing.py`，覆盖表单提交异常触发回滚、异步重筛中 `force_full_sync` 异常兜底日志与流程继续返回分支。
+  - 进展（2026-03-08）：已新增 `tests/test_commit_diff_view_exception_narrowing.py`，覆盖作者映射失败回退、缓存数据处理异常回退与 Excel 主流程异常兜底分支。
   - 验收：新增针对性测试，不仅是 happy path。
 - [x] 10. 统一服务层输入/输出模型（dataclass/pydantic）
   - 进展（2026-03-08）：已引入 `ErrorResponsePayload` / `SuccessResponsePayload`（dataclass），并作为 diff 相关服务统一输出模型。

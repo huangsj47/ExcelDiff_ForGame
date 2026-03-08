@@ -7,6 +7,18 @@ import traceback
 
 from sqlalchemy.exc import SQLAlchemyError
 
+COMMIT_DIFF_VIEW_AUTHOR_MAP_ERRORS = (RuntimeError, ValueError, TypeError, AttributeError)
+COMMIT_DIFF_VIEW_CACHE_PROCESS_ERRORS = (RuntimeError, ValueError, TypeError, AttributeError, KeyError)
+COMMIT_DIFF_VIEW_EXCEL_PIPELINE_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    KeyError,
+    OSError,
+)
+
 
 def handle_commit_diff_view(
     *,
@@ -48,7 +60,7 @@ def handle_commit_diff_view(
         if previous_commit:
             commits_for_author_mapping.append(previous_commit)
         attach_author_display(commits_for_author_mapping)
-    except Exception as author_map_error:
+    except COMMIT_DIFF_VIEW_AUTHOR_MAP_ERRORS as author_map_error:
         log_print(f"commit_diff 作者姓名映射失败，回退原始作者: {author_map_error}", "DIFF")
     log_print(f"🔍 查找前一提交 - 文件: {commit.path}", "DIFF", force=True)
     log_print(f"🔍 该文件总提交数: {len(file_commits)}", "DIFF", force=True)
@@ -122,7 +134,7 @@ def handle_commit_diff_view(
                 except json.JSONDecodeError as exc:
                     log_print(f"❌ 缓存数据JSON解析失败: {exc}", "EXCEL", force=True)
                     cache_is_valid = False
-                except Exception as exc:
+                except COMMIT_DIFF_VIEW_CACHE_PROCESS_ERRORS as exc:
                     log_print(f"❌ 缓存数据处理异常: {exc}", "EXCEL", force=True)
                     cache_is_valid = False
             if not cache_is_valid:
@@ -169,7 +181,7 @@ def handle_commit_diff_view(
                     )
                     diff_data = git_service.parse_excel_diff(commit.commit_id, commit.path)
                     log_print(f"旧Excel处理逻辑返回: {type(diff_data)}", "EXCEL")
-        except Exception as exc:
+        except COMMIT_DIFF_VIEW_EXCEL_PIPELINE_ERRORS as exc:
             log_print(f"Excel diff generation failed: {exc}", "EXCEL", force=True)
             traceback.print_exc()
             diff_data = None
