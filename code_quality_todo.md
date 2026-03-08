@@ -60,15 +60,19 @@
   - 进展（2026-03-08）：`task_worker_service` 第五批任务执行异常已收敛（worker 主循环、Excel/周版本/自动同步主流程），并将仓库类型/不存在错误改为 `ValueError` 进入统一异常路径。
   - 进展（2026-03-08）：已新增 `services/branch_refresh_service.py`，将异步分支刷新 worker 逻辑从 `task_worker_service` 下沉为独立服务，`task_worker_service` 保留兼容入口包装。
   - 进展（2026-03-08）：已新增 `services/task_worker_weekly_handlers.py`，将周版本同步与周版本 Excel 缓存任务处理逻辑下沉，`task_worker_service` 仅保留兼容包装与依赖注入。
+  - 进展（2026-03-08）：`commit_diff_page_service` / `excel_diff_api_service` / `commit_operation_handlers` 已补充 `SQLAlchemyError`、`ValueError`、`RuntimeError` 分层异常分支；`git_service` 顶层编码初始化分支收敛了裸 `except`。
   - 下一步：继续按模块将通用 `except Exception` 拆分为更具体异常（IO/网络/数据校验）并补充错误标签。
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 
 ### P1（随后）
 - [ ] 5. 拆分 `services/git_service.py`（clone/sync/diff/excel 逻辑分模块）
+  - 进展（2026-03-08）：已新增 `services/git_diff_helpers.py`，将 unified diff 解析、基础 diff 生成、初始提交 diff 生成、DataFrame 比较从主类中拆出；`git_service.py` 已降至 2267 行。
   - 验收：单文件 < 1800 行；核心函数长度 < 120 行。
 - [ ] 6. 拆分 `services/weekly_version_logic.py`（查询、聚合、渲染分离）
+  - 进展（2026-03-08）：已新增 `services/weekly_deleted_excel_helpers.py`，将“Excel 删除态识别/回退版本定位/提示 HTML 组装”拆出；`weekly_version_logic.py` 已降至 1968 行（脱离 ERROR 区间）。
   - 验收：核心 API 只做编排，查询与渲染抽离。
-- [ ] 7. 统一错误响应规范（HTTP code + `status/message/error_type/retry_after_seconds`）
+- [x] 7. 统一错误响应规范（HTTP code + `status/message/error_type/retry_after_seconds`）
+  - 已完成（2026-03-08）：新增 `services/api_response_models.py` + `services/api_response_service.py`，并接入 `commit_diff_page_service`、`excel_diff_api_service`、`commit_operation_handlers` 的 commit diff / excel diff / merge diff 响应链路。
   - 验收：commit diff、excel diff、merge diff 响应结构一致。
 - [x] 8. 增加 pre-commit 钩子（格式化 + 基础 lint + 文件长度守卫）
   - 已完成：新增 `.pre-commit-config.yaml`，接入 `ruff` + `scripts/check_file_length.py --strict`。
@@ -76,8 +80,10 @@
 
 ### P2（持续改进）
 - [ ] 9. 为高复杂函数补充分层单测（边界条件、异常分支、缓存回退）
+  - 进展（2026-03-08）：已新增 `tests/test_todo_contract_and_service_split_followups.py`，覆盖统一响应契约、git diff helper 行为、weekly 删除态缓存回退路径与服务拆分静态守护。
   - 验收：新增针对性测试，不仅是 happy path。
 - [ ] 10. 统一服务层输入/输出模型（dataclass/pydantic）
+  - 进展（2026-03-08）：已引入 `ErrorResponsePayload` / `SuccessResponsePayload`（dataclass），并作为 diff 相关服务统一输出模型。
   - 验收：跨模块 payload 字段约束明确，减少隐式字段依赖。
 
 ## 修改风险建议

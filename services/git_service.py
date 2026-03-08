@@ -9,6 +9,12 @@ import time
 import urllib.parse
 from urllib.parse import urlparse
 import git
+from services.git_diff_helpers import (
+    compare_dataframes,
+    generate_basic_diff,
+    generate_initial_commit_diff,
+    parse_unified_diff,
+)
 from utils.path_security import build_repository_local_path
 from utils.security_utils import sanitize_text, sanitize_url
 
@@ -16,7 +22,7 @@ from utils.security_utils import sanitize_text, sanitize_url
 try:
     import pandas as pd
     PANDAS_AVAILABLE = True
-except Exception as e:
+except (ImportError, ModuleNotFoundError, ValueError, OSError) as e:
     from utils.safe_print import log_print
     log_print(f"警告: pandas导入失败: {e}", 'GIT', force=True)
     log_print("将使用openpyxl作为Excel处理的替代方案", 'GIT', force=True)
@@ -37,10 +43,10 @@ if sys.platform.startswith('win'):
     os.environ['PYTHONLEGACYWINDOWSSTDIO'] = '1'
     try:
         locale.setlocale(locale.LC_ALL, 'C.UTF-8')
-    except:
+    except locale.Error:
         try:
             locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
-        except:
+        except locale.Error:
             pass
 
 # 猴子补丁GitPython的编码处理
@@ -165,7 +171,7 @@ class GitService:
                     self.stdout = ""
                     self.stderr = "命令执行超时"
             return TimeoutResult()
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError, ValueError) as e:
             from utils.safe_print import log_print
             log_print(f"Git命令执行失败: {e}", 'GIT', force=True)
             return None
@@ -2245,175 +2251,17 @@ class GitService:
         self.cleanup_thread_pool()
     
     def _parse_unified_diff(self, patch_text):
-        """解析unified diff格式，返回结构化的hunks数据"""
-        hunks = []
-        lines = patch_text.split('\n')
-        current_hunk = None
-        
-        for line in lines:
-            # 匹配hunk头部，如 @@ -31,17 +36,20 @@
-            if line.startswith('@@'):
-                if current_hunk:
-                    hunks.append(current_hunk)
-                
-                # 解析hunk头部信息
-                import re
-                match = re.match(r'@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@(.*)', line)
-                if match:
-                    old_start = int(match.group(1))
-                    old_count = int(match.group(2)) if match.group(2) else 1
-                    new_start = int(match.group(3))
-                    new_count = int(match.group(4)) if match.group(4) else 1
-                    context = match.group(5).strip()
-                    
-                    current_hunk = {
-                        'header': line,
-                        'old_start': old_start,
-                        'old_count': old_count,
-                        'new_start': new_start,
-                        'new_count': new_count,
-                        'context': context,
-                        'lines': []
-                    }
-            elif current_hunk and (line.startswith(' ') or line.startswith('+') or line.startswith('-')):
-                # 解析diff行
-                if line.startswith(' '):
-                    line_type = 'context'
-                elif line.startswith('+'):
-                    line_type = 'added'
-                elif line.startswith('-'):
-                    line_type = 'removed'
-                else:
-                    continue
-                
-                current_hunk['lines'].append({
-                    'type': line_type,
-                    'content': line[1:] if len(line) > 0 else '',  # 去掉前缀符号
-                    'raw': line
-                })
-                # print(f"解析diff行: {line_type} - {line[:50]}")
-        
-        # 添加最后一个hunk
-        if current_hunk:
-            hunks.append(current_hunk)
-        
-        return hunks
+        """解析unified diff格式，返回结构化的hunks数据。"""
+        return parse_unified_diff(patch_text)
 
     def _compare_dataframes(self, old_df, new_df, sheet_name):
-        """比较两个DataFrame的差异"""
-        changes = []
-        
-        try:
-            # 转换为字符串以便比较
-            old_df = old_df.astype(str).fillna('')
-            new_df = new_df.astype(str).fillna('')
-            
-            # 比较行数变化
-            old_rows, old_cols = old_df.shape
-            new_rows, new_cols = new_df.shape
-            
-            if new_rows > old_rows:
-                for i in range(old_rows, new_rows):
-                    row_data = {}
-                    for j, col in enumerate(new_df.columns):
-                        if j < len(new_df.columns):
-                            row_data[chr(65 + j)] = new_df.iloc[i, j] if i < len(new_df) else ''
-                    
-                    changes.append({
-                        'type': 'added',
-                        'sheet_name': sheet_name,
-                        'row': i + 1,
-                        'data': row_data,
-                        'message': f'{sheet_name} 第{i+1}行新增'
-                    })
-            
-                
-                min_rows = min(old_rows, new_rows)
-                for i in range(min_rows):
-                    row_changed = False
-                    old_row_data = {}
-                    new_row_data = {}
-                    
-        except Exception as e:
-            print(f"DataFrame比较失败: {str(e)}")
-            return []
-        
-        return changes
+        """比较两个DataFrame的差异。"""
+        return compare_dataframes(old_df, new_df, sheet_name)
     
     def _generate_basic_diff(self, previous_content, current_content, file_path):
-        """生成基本的diff结构"""
-        try:
-            import difflib
-            
-            previous_lines = previous_content.splitlines() if previous_content else []
-            current_lines = current_content.splitlines() if current_content else []
-            
-            # 使用difflib生成unified diff
-            diff_lines = list(difflib.unified_diff(
-                previous_lines, 
-                current_lines, 
-                fromfile=f'a/{file_path}', 
-                tofile=f'b/{file_path}',
-                lineterm=''
-            ))
-            
-            if not diff_lines:
-                return None
-                
-            patch_text = '\n'.join(diff_lines)
-            hunks = self._parse_unified_diff(patch_text)
-            
-            return {
-                'type': 'code',
-                'file_path': file_path,
-                'patch': patch_text,
-                'hunks': hunks
-            }
-            
-        except Exception as e:
-            print(f"生成基本diff失败: {str(e)}")
-            return None
+        """生成基本的diff结构。"""
+        return generate_basic_diff(previous_content, current_content, file_path)
     
     def _generate_initial_commit_diff(self, current_content, file_path):
-        """生成初始提交的diff（所有内容都是新增的）"""
-        try:
-            lines = current_content.splitlines() if current_content else []
-            
-            # 创建一个表示全新文件的hunk
-            hunk = {
-                'header': f'@@ -0,0 +1,{len(lines)} @@',
-                'old_start': 0,
-                'old_count': 0,
-                'new_start': 1,
-                'new_count': len(lines),
-                'context': '',
-                'lines': []
-            }
-            
-            # 所有行都标记为新增
-            for i, line in enumerate(lines):
-                hunk['lines'].append({
-                    'type': 'added',
-                    'content': line,
-                    'raw': f'+{line}',
-                    'old_line_number': None,
-                    'new_line_number': i + 1
-                })
-            
-            # 生成patch文本
-            patch_lines = [f'--- /dev/null', f'+++ b/{file_path}', hunk['header']]
-            for line_info in hunk['lines']:
-                patch_lines.append(line_info['raw'])
-            
-            patch_text = '\n'.join(patch_lines)
-            
-            return {
-                'type': 'code',
-                'file_path': file_path,
-                'patch': patch_text,
-                'hunks': [hunk]
-            }
-            
-        except Exception as e:
-            print(f"生成初始提交diff失败: {str(e)}")
-            return None
+        """生成初始提交的diff（所有内容都是新增的）。"""
+        return generate_initial_commit_diff(current_content, file_path)

@@ -8,6 +8,8 @@ import traceback
 from sqlalchemy import and_, or_
 from sqlalchemy.exc import SQLAlchemyError
 
+from services.api_response_service import json_error, json_success
+
 
 def handle_get_excel_diff_data(
     *,
@@ -36,7 +38,13 @@ def handle_get_excel_diff_data(
     }
 
     if not excel_cache_service.is_excel_file(commit.path):
-        return jsonify({"error": True, "message": "不是Excel文件"})
+        return json_error(
+            jsonify=jsonify,
+            message="不是Excel文件",
+            error_type="invalid_file_type",
+            http_status=400,
+            error=True,
+        )
 
     force_retry = str(request.args.get("force_retry") or "").strip().lower() in {"1", "true", "yes"}
     dispatch_result = maybe_dispatch_commit_diff(commit, force_retry=force_retry)
@@ -46,9 +54,11 @@ def handle_get_excel_diff_data(
             payload = dispatch_result.get("payload") or {}
             diff_data = payload.get("diff_data")
             if not isinstance(diff_data, dict):
-                return (
-                    jsonify({"success": False, "status": "error", "message": "Agent diff 返回格式异常"}),
-                    500,
+                return json_error(
+                    jsonify=jsonify,
+                    message="Agent diff 返回格式异常",
+                    error_type="invalid_agent_payload",
+                    http_status=500,
                 )
             try:
                 html_content, css_content, js_content = excel_html_cache_service.generate_excel_html(diff_data)
@@ -84,41 +94,30 @@ def handle_get_excel_diff_data(
             )
 
         if status == "unbound":
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "status": "unbound",
-                        "message": dispatch_result.get("message") or "项目未绑定 Agent",
-                    }
-                ),
-                409,
+            return json_error(
+                jsonify=jsonify,
+                message=dispatch_result.get("message") or "项目未绑定 Agent",
+                error_type="agent_unbound",
+                status="unbound",
+                http_status=409,
             )
 
         if status in {"pending", "pending_offline"}:
-            return (
-                jsonify(
-                    {
-                        "success": True,
-                        "pending": True,
-                        "status": status,
-                        "message": dispatch_result.get("message") or "Agent 正在处理diff",
-                        "retry_after_seconds": dispatch_result.get("retry_after_seconds") or 60,
-                        "task_id": dispatch_result.get("task_id"),
-                    }
-                ),
-                202,
+            return json_success(
+                jsonify=jsonify,
+                message=dispatch_result.get("message") or "Agent 正在处理diff",
+                status=status,
+                http_status=202,
+                pending=True,
+                retry_after_seconds=dispatch_result.get("retry_after_seconds") or 60,
+                task_id=dispatch_result.get("task_id"),
             )
 
-        return (
-            jsonify(
-                {
-                    "success": False,
-                    "status": "error",
-                    "message": dispatch_result.get("message") or "Agent diff 获取失败",
-                }
-            ),
-            500,
+        return json_error(
+            jsonify=jsonify,
+            message=dispatch_result.get("message") or "Agent diff 获取失败",
+            error_type="agent_dispatch_failed",
+            http_status=500,
         )
 
     try:
@@ -363,7 +362,57 @@ def handle_get_excel_diff_data(
                 "file_path": commit.path,
             },
         )
-        return jsonify({"error": True, "message": error_msg})
+        return json_error(
+            jsonify=jsonify,
+            message=error_msg,
+            error_type="excel_diff_failed",
+            http_status=500,
+            error=True,
+        )
+    except SQLAlchemyError as exc:
+        log_print(f"❌ Excel diff处理数据库失败: {str(exc)}")
+        traceback.print_exc()
+        performance_metrics_service.record(
+            "api_excel_diff",
+            success=False,
+            metrics={"total_ms": (time_module.time() - request_start) * 1000},
+            tags={
+                "source": "sqlalchemy_exception",
+                "repository_id": repository.id if repository else "",
+                "project_id": perf_project_tags["project_id"],
+                "project_code": perf_project_tags["project_code"],
+                "file_path": commit.path if commit else "",
+            },
+        )
+        return json_error(
+            jsonify=jsonify,
+            message="Excel文件处理失败: 数据库访问异常",
+            error_type="database_error",
+            http_status=500,
+            error=True,
+        )
+    except (ValueError, TypeError, RuntimeError) as exc:
+        log_print(f"❌ Excel diff处理失败: {str(exc)}")
+        traceback.print_exc()
+        performance_metrics_service.record(
+            "api_excel_diff",
+            success=False,
+            metrics={"total_ms": (time_module.time() - request_start) * 1000},
+            tags={
+                "source": "runtime_exception",
+                "repository_id": repository.id if repository else "",
+                "project_id": perf_project_tags["project_id"],
+                "project_code": perf_project_tags["project_code"],
+                "file_path": commit.path if commit else "",
+            },
+        )
+        return json_error(
+            jsonify=jsonify,
+            message=f"Excel文件处理失败: {str(exc)}",
+            error_type="runtime_error",
+            http_status=500,
+            error=True,
+        )
     except Exception as exc:
         log_print(f"❌ Excel diff处理失败: {str(exc)}")
         traceback.print_exc()
@@ -379,4 +428,10 @@ def handle_get_excel_diff_data(
                 "file_path": commit.path if commit else "",
             },
         )
-        return jsonify({"error": True, "message": f"Excel文件处理失败: {str(exc)}"})
+        return json_error(
+            jsonify=jsonify,
+            message=f"Excel文件处理失败: {str(exc)}",
+            error_type="unexpected_error",
+            http_status=500,
+            error=True,
+        )

@@ -6,6 +6,8 @@ import os
 import subprocess
 import time
 
+from services.api_response_service import json_error, json_success
+
 
 def handle_commit_full_diff(
     *,
@@ -165,49 +167,37 @@ def handle_refresh_commit_diff(
             status = str(dispatch_result.get("status") or "")
             if status == "ready":
                 payload = dispatch_result.get("payload") or {}
-                return jsonify(
-                    {
-                        "success": True,
-                        "status": "ready",
-                        "message": "Agent diff 已就绪",
-                        "diff_data": payload.get("diff_data"),
-                        "previous_commit": payload.get("previous_commit"),
-                    }
+                return json_success(
+                    jsonify=jsonify,
+                    status="ready",
+                    message="Agent diff 已就绪",
+                    diff_data=payload.get("diff_data"),
+                    previous_commit=payload.get("previous_commit"),
                 )
             if status == "unbound":
-                return (
-                    jsonify(
-                        {
-                            "success": False,
-                            "status": "unbound",
-                            "message": dispatch_result.get("message") or "项目未绑定 Agent",
-                        }
-                    ),
-                    409,
+                return json_error(
+                    jsonify=jsonify,
+                    status="unbound",
+                    message=dispatch_result.get("message") or "项目未绑定 Agent",
+                    error_type="agent_unbound",
+                    http_status=409,
                 )
             if status in {"pending", "pending_offline"}:
-                return (
-                    jsonify(
-                        {
-                            "success": True,
-                            "status": status,
-                            "pending": True,
-                            "message": dispatch_result.get("message") or "Agent 正在处理diff",
-                            "retry_after_seconds": dispatch_result.get("retry_after_seconds") or 60,
-                            "task_id": dispatch_result.get("task_id"),
-                        }
-                    ),
-                    202,
+                return json_success(
+                    jsonify=jsonify,
+                    status=status,
+                    message=dispatch_result.get("message") or "Agent 正在处理diff",
+                    pending=True,
+                    retry_after_seconds=dispatch_result.get("retry_after_seconds") or 60,
+                    task_id=dispatch_result.get("task_id"),
+                    http_status=202,
                 )
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "status": "error",
-                        "message": dispatch_result.get("message") or "派发 Agent diff 失败",
-                    }
-                ),
-                500,
+            return json_error(
+                jsonify=jsonify,
+                status="error",
+                message=dispatch_result.get("message") or "派发 Agent diff 失败",
+                error_type="agent_dispatch_failed",
+                http_status=500,
             )
 
         log_print(f"🔄 开始重新计算差异: commit={commit_id}, file={commit.path}", "APP")
@@ -272,34 +262,57 @@ def handle_refresh_commit_diff(
                 "APP",
             )
             safe_diff_data = safe_json_serialize(diff_data)
-            return jsonify(
-                {
-                    "success": True,
-                    "message": f"差异重新计算完成，计算耗时 {diff_calculation_time:.2f} 秒",
-                    "processing_time": diff_calculation_time,
-                    "total_time": total_time,
-                    "diff_data": safe_diff_data,
-                }
+            return json_success(
+                jsonify=jsonify,
+                status="ready",
+                message=f"差异重新计算完成，计算耗时 {diff_calculation_time:.2f} 秒",
+                processing_time=diff_calculation_time,
+                total_time=total_time,
+                diff_data=safe_diff_data,
             )
         total_time = time.time() - start_time
         log_print(f"❌ 差异重新计算失败: {commit.path} | 耗时: {total_time:.2f}秒", "APP", force=True)
-        return jsonify(
-            {
-                "success": False,
-                "message": "差异重新计算失败，请检查文件内容",
-                "total_time": total_time,
-            }
+        return json_error(
+            jsonify=jsonify,
+            message="差异重新计算失败，请检查文件内容",
+            error_type="diff_recompute_failed",
+            http_status=500,
+            total_time=total_time,
         )
-    except Exception as exc:
+    except SQLAlchemyError as exc:
+        total_time = time.time() - start_time if start_time is not None else 0
+        db.session.rollback()
+        log_print(f"❌ 重新计算差异数据库异常: {exc} | 耗时: {total_time:.2f}秒", "APP", force=True)
+        return json_error(
+            jsonify=jsonify,
+            message="重新计算差异失败: 数据库操作异常",
+            error_type="database_error",
+            http_status=500,
+            total_time=total_time,
+        )
+    except (ValueError, TypeError, RuntimeError) as exc:
         total_time = time.time() - start_time if start_time is not None else 0
         log_print(f"❌ 重新计算差异异常: {exc} | 耗时: {total_time:.2f}秒", "APP", force=True)
         import traceback
 
         traceback.print_exc()
-        return jsonify(
-            {
-                "success": False,
-                "message": f"重新计算差异失败: {str(exc)}",
-                "total_time": total_time,
-            }
-        ), 500
+        return json_error(
+            jsonify=jsonify,
+            message=f"重新计算差异失败: {str(exc)}",
+            error_type="runtime_error",
+            http_status=500,
+            total_time=total_time,
+        )
+    except Exception as exc:
+        total_time = time.time() - start_time if start_time is not None else 0
+        log_print(f"❌ 重新计算差异未知异常: {exc} | 耗时: {total_time:.2f}秒", "APP", force=True)
+        import traceback
+
+        traceback.print_exc()
+        return json_error(
+            jsonify=jsonify,
+            message=f"重新计算差异失败: {str(exc)}",
+            error_type="unexpected_error",
+            http_status=500,
+            total_time=total_time,
+        )

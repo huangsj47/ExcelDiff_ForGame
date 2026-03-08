@@ -9,8 +9,10 @@ from datetime import datetime
 
 from flask import abort, flash, jsonify, redirect, render_template, request, url_for
 from sqlalchemy import func, or_
+from sqlalchemy.exc import SQLAlchemyError
 
 from models import Commit, DiffCache, ExcelHtmlCache, db
+from services.api_response_service import json_error, json_success
 from services.agent_commit_diff_dispatch import dispatch_or_get_commit_diff, is_agent_dispatch_mode
 from services.model_loader import get_runtime_model
 from utils.request_security import (
@@ -389,10 +391,22 @@ def get_commit_diff_data(commit_id):
         start_time = time.time()
         commit = db.session.get(Commit, commit_id)
         if not commit:
-            return jsonify({'success': False, 'message': '提交不存在'})
+            return json_error(
+                jsonify=jsonify,
+                message="提交不存在",
+                error_type="commit_not_found",
+                http_status=404,
+                commit_id=commit_id,
+            )
         allowed, message = _ensure_commit_project_access(commit)
         if not allowed:
-            return jsonify({'success': False, 'message': message}), 403
+            return json_error(
+                jsonify=jsonify,
+                message=message,
+                error_type="forbidden",
+                http_status=403,
+                commit_id=commit_id,
+            )
 
         if is_agent_dispatch_mode():
             force_retry = str(request.args.get("force_retry") or "").strip().lower() in {"1", "true", "yes"}
@@ -403,40 +417,46 @@ def get_commit_diff_data(commit_id):
                 payload = dispatch_result.get("payload") or {}
                 diff_data = payload.get("diff_data")
                 previous_commit = payload.get("previous_commit")
-                return jsonify({
-                    "success": True,
-                    "status": "ready",
-                    "commit_id": commit_id,
-                    "diff_data": diff_data,
-                    "previous_commit": previous_commit,
-                    "source": "agent",
-                })
+                return json_success(
+                    jsonify=jsonify,
+                    message="Agent diff 已就绪",
+                    status="ready",
+                    commit_id=commit_id,
+                    diff_data=diff_data,
+                    previous_commit=previous_commit,
+                    source="agent",
+                )
 
             if dispatch_status == "unbound":
-                return jsonify({
-                    "success": False,
-                    "status": "unbound",
-                    "commit_id": commit_id,
-                    "message": dispatch_result.get("message") or "项目未绑定 Agent",
-                }), 409
+                return json_error(
+                    jsonify=jsonify,
+                    message=dispatch_result.get("message") or "项目未绑定 Agent",
+                    error_type="agent_unbound",
+                    status="unbound",
+                    http_status=409,
+                    commit_id=commit_id,
+                )
 
             if dispatch_status in {"pending", "pending_offline"}:
-                return jsonify({
-                    "success": True,
-                    "status": dispatch_status,
-                    "pending": True,
-                    "commit_id": commit_id,
-                    "message": dispatch_result.get("message") or "Agent 正在处理diff",
-                    "retry_after_seconds": dispatch_result.get("retry_after_seconds") or 60,
-                    "task_id": dispatch_result.get("task_id"),
-                }), 202
+                return json_success(
+                    jsonify=jsonify,
+                    message=dispatch_result.get("message") or "Agent 正在处理diff",
+                    status=dispatch_status,
+                    http_status=202,
+                    pending=True,
+                    commit_id=commit_id,
+                    retry_after_seconds=dispatch_result.get("retry_after_seconds") or 60,
+                    task_id=dispatch_result.get("task_id"),
+                )
 
-            return jsonify({
-                "success": False,
-                "status": "error",
-                "commit_id": commit_id,
-                "message": dispatch_result.get("message") or "Agent diff 获取失败",
-            }), 500
+            return json_error(
+                jsonify=jsonify,
+                message=dispatch_result.get("message") or "Agent diff 获取失败",
+                error_type="agent_dispatch_failed",
+                status="error",
+                http_status=500,
+                commit_id=commit_id,
+            )
 
         repository = commit.repository
         is_excel = excel_cache_service.is_excel_file(commit.path)
@@ -486,34 +506,60 @@ def get_commit_diff_data(commit_id):
             diff_data = sanitize_data(diff_data)
             total_time = time.time() - start_time
             log_print(f"✅ 合并diff异步请求完成: {commit.path} | 总耗时: {total_time:.2f}秒", 'PERF')
-            return jsonify({
-                'success': True,
-                'status': 'ready',
-                'commit_id': commit_id,
-                'diff_data': diff_data,
-                'previous_commit': {
+            return json_success(
+                jsonify=jsonify,
+                message="diff数据就绪",
+                status="ready",
+                commit_id=commit_id,
+                diff_data=diff_data,
+                previous_commit={
                     'commit_id': previous_commit.commit_id[:8] if previous_commit else 'N/A',
                     'commit_time': format_beijing_time(previous_commit.commit_time, '%Y-%m-%d %H:%M:%S') if previous_commit and previous_commit.commit_time else 'N/A',
                     'author': (getattr(previous_commit, 'author_display', None) or previous_commit.author) if previous_commit else 'N/A',
                     'message': previous_commit.message if previous_commit else 'N/A'
-                } if previous_commit else None
-            })
+                } if previous_commit else None,
+            )
 
         total_time = time.time() - start_time
         log_print(f"❌ 合并diff异步请求失败: {commit.path} | 耗时: {total_time:.2f}秒", 'PERF')
-        return jsonify({
-            'success': False,
-            'commit_id': commit_id,
-            'message': '无法获取diff数据'
-        })
-    except Exception as e:
+        return json_error(
+            jsonify=jsonify,
+            message="无法获取diff数据",
+            error_type="diff_unavailable",
+            http_status=500,
+            commit_id=commit_id,
+        )
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        total_time = time.time() - start_time if 'start_time' in locals() else 0
+        log_print(f"❌ 获取提交 {commit_id} 的diff数据数据库失败: {e} | 耗时: {total_time:.2f}秒", 'ERROR')
+        return json_error(
+            jsonify=jsonify,
+            message="获取diff数据失败: 数据库操作异常",
+            error_type="database_error",
+            http_status=500,
+            commit_id=commit_id,
+        )
+    except (ValueError, TypeError, RuntimeError) as e:
         total_time = time.time() - start_time if 'start_time' in locals() else 0
         log_print(f"❌ 获取提交 {commit_id} 的diff数据失败: {e} | 耗时: {total_time:.2f}秒", 'ERROR')
-        return jsonify({
-            'success': False,
-            'commit_id': commit_id,
-            'message': f'获取diff数据失败: {str(e)}'
-        })
+        return json_error(
+            jsonify=jsonify,
+            message=f"获取diff数据失败: {str(e)}",
+            error_type="runtime_error",
+            http_status=500,
+            commit_id=commit_id,
+        )
+    except Exception as e:
+        total_time = time.time() - start_time if 'start_time' in locals() else 0
+        log_print(f"❌ 获取提交 {commit_id} 的diff数据未知失败: {e} | 耗时: {total_time:.2f}秒", 'ERROR')
+        return json_error(
+            jsonify=jsonify,
+            message=f"获取diff数据失败: {str(e)}",
+            error_type="unexpected_error",
+            http_status=500,
+            commit_id=commit_id,
+        )
 
 def refresh_merge_diff():
     """重新计算合并diff数据，绕过缓存"""
@@ -523,7 +569,12 @@ def refresh_merge_diff():
         log_print(f"📋 收到提交ID: {commit_ids}", 'APP')
         if not commit_ids:
             log_print("❌ 未提供提交ID", 'INFO')
-            return jsonify({'success': False, 'message': '未提供提交ID'})
+            return json_error(
+                jsonify=jsonify,
+                message="未提供提交ID",
+                error_type="invalid_request",
+                http_status=400,
+            )
 
         commits = []
         for commit_id in commit_ids:
@@ -531,12 +582,22 @@ def refresh_merge_diff():
             if commit:
                 allowed, message = _ensure_commit_project_access(commit)
                 if not allowed:
-                    return jsonify({'success': False, 'message': message}), 403
+                    return json_error(
+                        jsonify=jsonify,
+                        message=message,
+                        error_type="forbidden",
+                        http_status=403,
+                    )
                 commits.append(commit)
                 log_print(f"✅ 找到提交: {commit_id} - {commit.path}", 'INFO')
         if not commits:
             log_print("❌ 未找到有效的提交记录", 'INFO')
-            return jsonify({'success': False, 'message': '未找到有效的提交记录'})
+            return json_error(
+                jsonify=jsonify,
+                message="未找到有效的提交记录",
+                error_type="not_found",
+                http_status=404,
+            )
 
         # 临时暂停后台缓存任务，避免冲突
         log_print("🔄 临时暂停后台缓存任务处理...", 'INFO')
@@ -585,15 +646,38 @@ def refresh_merge_diff():
         log_print("🔄 恢复后台缓存任务处理...", 'INFO')
         from services.background_task_service import resume_background_tasks
         resume_background_tasks()
-        return jsonify({
-            'success': True,
-            'message': f'已清除 {cleared_count} 个文件的缓存，缓存清理耗时 {cache_clear_time:.2f} 秒，请刷新页面查看重新计算的结果',
-            'cleared_count': cleared_count,
-            'cache_clear_time': cache_clear_time
-        })
+        return json_success(
+            jsonify=jsonify,
+            message=f'已清除 {cleared_count} 个文件的缓存，缓存清理耗时 {cache_clear_time:.2f} 秒，请刷新页面查看重新计算的结果',
+            status="ready",
+            cleared_count=cleared_count,
+            cache_clear_time=cache_clear_time,
+        )
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        log_print(f"重新计算合并diff数据库失败: {e}", 'INFO')
+        return json_error(
+            jsonify=jsonify,
+            message="重新计算失败: 数据库操作异常",
+            error_type="database_error",
+            http_status=500,
+        )
+    except (ValueError, TypeError, RuntimeError) as e:
+        log_print(f"重新计算合并diff失败: {e}", 'INFO')
+        return json_error(
+            jsonify=jsonify,
+            message=f"重新计算失败: {str(e)}",
+            error_type="runtime_error",
+            http_status=500,
+        )
     except Exception as e:
         log_print(f"重新计算合并diff失败: {e}", 'INFO')
-        return jsonify({'success': False, 'message': f'重新计算失败: {str(e)}'})
+        return json_error(
+            jsonify=jsonify,
+            message=f"重新计算失败: {str(e)}",
+            error_type="unexpected_error",
+            http_status=500,
+        )
 
 def merge_diff():
     """合并选中条目的diff显示页面"""
