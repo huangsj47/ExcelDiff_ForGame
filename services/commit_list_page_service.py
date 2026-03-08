@@ -5,6 +5,25 @@ from __future__ import annotations
 import re
 
 from sqlalchemy import func, or_
+from sqlalchemy.exc import SQLAlchemyError
+
+
+COMMIT_LIST_PAGE_USER_MODEL_ERRORS = (ImportError, RuntimeError, AttributeError, TypeError)
+COMMIT_LIST_PAGE_AUTHOR_FILTER_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+)
+COMMIT_LIST_PAGE_USER_MAPPING_ERRORS = (
+    SQLAlchemyError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+)
+COMMIT_LIST_PAGE_AUTHOR_ATTACH_ERRORS = (RuntimeError, ValueError, TypeError, AttributeError)
 
 
 def handle_commit_list_page(
@@ -134,7 +153,7 @@ def handle_commit_list_page(
             else:
                 from auth.models import AuthUser as _UserModel
             return _UserModel
-        except Exception as model_error:
+        except COMMIT_LIST_PAGE_USER_MODEL_ERRORS as model_error:
             log_print(f"加载账号模型失败，回退原始作者显示: {model_error}", "APP")
             return None
 
@@ -187,7 +206,7 @@ def handle_commit_list_page(
 
                 for token in matched_author_tokens:
                     author_conditions.append(func.lower(Commit.author).like(f"%{token}%"))
-            except Exception as filter_error:
+            except COMMIT_LIST_PAGE_AUTHOR_FILTER_ERRORS as filter_error:
                 log_print(f"按姓名筛选作者失败，回退原始筛选: {filter_error}", "APP")
         query = query.filter(or_(*author_conditions))
     if filters["path"]:
@@ -238,7 +257,7 @@ def handle_commit_list_page(
                 email = (getattr(user, "email", "") or "").strip().lower()
                 if email and "@" in email:
                     email_prefix_to_display_name[email.split("@", 1)[0]] = display_name
-        except Exception as exc:
+        except COMMIT_LIST_PAGE_USER_MAPPING_ERRORS as exc:
             log_print(f"加载作者/确认用户姓名映射失败，回退为原始显示: {exc}", "APP")
 
     def _resolve_author_display(raw_author):
@@ -271,7 +290,7 @@ def handle_commit_list_page(
 
     try:
         attach_author_display(commits)
-    except Exception as author_map_error:
+    except COMMIT_LIST_PAGE_AUTHOR_ATTACH_ERRORS as author_map_error:
         log_print(f"补齐提交列表作者映射失败，继续使用原始作者显示: {author_map_error}", "APP")
 
     log_print("=== 分页调试信息 ===", "APP")
