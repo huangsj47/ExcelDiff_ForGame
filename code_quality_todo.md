@@ -86,6 +86,7 @@
   - 进展（2026-03-08）：`commit_list_page_service` 的账号模型加载兜底、作者筛选兜底、用户映射加载兜底与作者补齐兜底分支已收敛到 `COMMIT_LIST_PAGE_*_ERRORS` 明确异常集合，移除该模块剩余裸 `except Exception`。
   - 进展（2026-03-08）：`commit_diff_page_service` 的 full diff 文件读取兜底、full diff 主流程兜底、refresh 缓存保存兜底与 refresh 未知异常兜底已收敛到 `COMMIT_REFRESH_*` / `COMMIT_FULL_DIFF_*` 明确异常集合，移除该模块剩余裸 `except Exception`。
   - 进展（2026-03-08）：`excel_diff_api_service` 的 agent 就绪后 HTML 渲染兜底、数据缓存/实时渲染兜底与外层未知异常兜底已收敛到 `EXCEL_DIFF_API_*_ERRORS` 明确异常集合，移除该模块剩余裸 `except Exception`。
+  - 进展（2026-03-08）：`git_diff_helpers` 的 DataFrame 比较兜底、基础文本 diff 兜底与初始提交 diff 兜底已收敛到 `GIT_DIFF_HELPER_*_ERRORS` 明确异常集合，移除该模块剩余裸 `except Exception`。
   - 下一步：继续按模块将通用 `except Exception` 拆分为更具体异常（IO/网络/数据校验）并补充错误标签。
   - 验收：关键流程改为“可预期异常 + 明确兜底”；异常标签可观测。
 
@@ -135,6 +136,7 @@
   - 进展（2026-03-08）：已新增 `tests/test_commit_list_page_exception_narrowing.py`，覆盖账号模型导入失败回退、作者筛选失败回退、用户映射加载失败回退与作者补齐失败兜底分支。
   - 进展（2026-03-08）：已新增 `tests/test_commit_diff_page_exception_narrowing.py`，覆盖 full diff 文件读取异常回退、full diff 主流程异常兜底、refresh 缓存保存异常日志分支与 refresh 未知异常返回契约。
   - 进展（2026-03-08）：已新增 `tests/test_excel_diff_api_exception_narrowing.py`，覆盖 agent ready 渲染失败回退、数据缓存渲染失败回退、实时渲染失败回退与外层未知异常返回契约。
+  - 进展（2026-03-08）：已新增 `tests/test_git_diff_helpers_exception_narrowing.py`，覆盖 DataFrame 比较异常回退、基础文本 diff 异常回退与初始提交 diff 异常回退返回契约。
   - 验收：新增针对性测试，不仅是 happy path。
 - [x] 10. 统一服务层输入/输出模型（dataclass/pydantic）
   - 进展（2026-03-08）：已引入 `ErrorResponsePayload` / `SuccessResponsePayload`（dataclass），并作为 diff 相关服务统一输出模型。

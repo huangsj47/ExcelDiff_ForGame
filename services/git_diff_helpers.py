@@ -5,6 +5,10 @@ from __future__ import annotations
 import difflib
 import re
 
+GIT_DIFF_HELPER_DF_COMPARE_ERRORS = (AttributeError, TypeError, ValueError, IndexError, KeyError)
+GIT_DIFF_HELPER_BASIC_DIFF_ERRORS = (AttributeError, TypeError, ValueError)
+GIT_DIFF_HELPER_INITIAL_DIFF_ERRORS = (AttributeError, TypeError, ValueError)
+
 
 def parse_unified_diff(patch_text):
     """Parse unified diff patch text into hunks."""
@@ -80,7 +84,7 @@ def compare_dataframes(old_df, new_df, sheet_name):
         for _i in range(min_rows):
             # Legacy placeholder loop retained for compatibility with historical behavior.
             pass
-    except Exception as exc:
+    except GIT_DIFF_HELPER_DF_COMPARE_ERRORS as exc:
         print(f"DataFrame比较失败: {str(exc)}")
         return []
     return changes
@@ -110,7 +114,7 @@ def generate_basic_diff(previous_content, current_content, file_path):
             "patch": patch_text,
             "hunks": hunks,
         }
-    except Exception as exc:
+    except GIT_DIFF_HELPER_BASIC_DIFF_ERRORS as exc:
         print(f"生成基本diff失败: {str(exc)}")
         return None
 
@@ -148,6 +152,6 @@ def generate_initial_commit_diff(current_content, file_path):
             "patch": patch_text,
             "hunks": [hunk],
         }
-    except Exception as exc:
+    except GIT_DIFF_HELPER_INITIAL_DIFF_ERRORS as exc:
         print(f"生成初始提交diff失败: {str(exc)}")
         return None
