@@ -10,6 +10,22 @@ import sys
 import threading
 
 
+def _resolve_original_print(app_module):
+    candidate = getattr(app_module, "_original_print", None)
+    if callable(candidate):
+        return candidate
+
+    try:
+        from utils.logger import _original_print as logger_original_print
+
+        if callable(logger_original_print):
+            return logger_original_print
+    except Exception:
+        pass
+
+    return print
+
+
 def _configure_runtime_io(_original_print):
     os.environ["PYTHONUNBUFFERED"] = "1"
     os.environ["PYTHONIOENCODING"] = "utf-8"
@@ -28,7 +44,7 @@ def _configure_runtime_io(_original_print):
 
 def run_runtime_entry(app_module):
     """Run startup/shutdown flow using app module runtime objects."""
-    _original_print = getattr(app_module, "_original_print")
+    _original_print = _resolve_original_print(app_module)
     log_print = getattr(app_module, "log_print")
     cleanup_app = getattr(app_module, "cleanup_app")
     initialize_app = getattr(app_module, "initialize_app")
@@ -86,4 +102,3 @@ def run_runtime_entry(app_module):
     finally:
         if not shutdown_flag.is_set():
             cleanup_app()
-
