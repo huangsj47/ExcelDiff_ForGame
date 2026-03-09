@@ -100,6 +100,20 @@
         font-weight: 600;
     }
 
+    .public-register-btn {
+        border-radius: 10px;
+        padding: 10px 18px;
+        border-color: rgba(255, 255, 255, 0.72);
+        color: #fff;
+        font-weight: 600;
+    }
+
+    .public-register-btn:hover {
+        background: rgba(255, 255, 255, 0.2);
+        color: #fff;
+        border-color: #fff;
+    }
+
     .public-help-btn:hover {
         background: rgba(255, 255, 255, 0.2);
         color: #fff;
@@ -173,6 +187,7 @@
         }
 
         .public-login-btn,
+        .public-register-btn,
         .public-help-btn {
             width: 100%;
             justify-content: center;
@@ -189,17 +204,24 @@
 {% endblock %}
 
 {% block content %}
+{% set _is_qkit_backend = (auth_backend() == 'qkit') %}
+{% set _show_register = (public_register_enabled is defined and public_register_enabled()) %}
 <section class="public-landing">
     <div class="landing-shell">
         <div class="public-hero">
             <h1>欢迎使用 Diff 确认平台</h1>
             <p>
-                本平台用于项目版本差异核对、仓库数据整合与周版本对比分析。访问前请先完成 Qkit 登录认证。
+                本平台用于项目版本差异核对、仓库数据整合与周版本对比分析。访问前请先完成{{ " Qkit 登录" if _is_qkit_backend else "" }}认证。
             </p>
             <div class="public-cta-row">
                 <a class="btn public-login-btn" href="{{ public_login_url() }}">
-                    <i class="fas fa-sign-in-alt me-1"></i>使用 Qkit 登录
+                    <i class="fas fa-sign-in-alt me-1"></i>{{ "使用 Qkit 登录" if _is_qkit_backend else "登录" }}
                 </a>
+                {% if _show_register %}
+                <a class="btn btn-outline-light public-register-btn" href="{{ public_register_url() }}">
+                    <i class="fas fa-user-plus me-1"></i>注册
+                </a>
+                {% endif %}
                 <a class="btn btn-outline-light public-help-btn" href="{{ url_for('help_page') }}">
                     <i class="fas fa-book-open me-1"></i>查看帮助
                 </a>
@@ -222,7 +244,7 @@
         </div>
 
         <div class="public-footer-note">
-            <strong>使用建议：</strong>首次进入可先阅读帮助页中的“项目创建、仓库配置、差异确认”章节，再进行 Qkit 登录。
+            <strong>使用建议：</strong>首次进入可先阅读帮助页中的“项目创建、仓库配置、差异确认”章节，再进行{{ " Qkit 登录" if _is_qkit_backend else "账号登录" }}。
         </div>
     </div>
 </section>

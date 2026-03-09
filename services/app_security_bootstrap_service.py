@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import os
 
 from flask import jsonify, render_template, request, session, url_for
 from werkzeug.routing import BuildError
@@ -74,6 +75,8 @@ AUTH_EXEMPT_PATHS = (
 APP_SECURITY_AUTH_BACKEND_IMPORT_ERRORS = (ImportError, RuntimeError, AttributeError)
 APP_SECURITY_PUBLIC_LOGIN_DISCOVERY_ERRORS = (RuntimeError, AttributeError, TypeError)
 APP_SECURITY_PUBLIC_LOGIN_BUILD_ERRORS = (BuildError, RuntimeError, AttributeError, TypeError)
+APP_SECURITY_PUBLIC_REGISTER_DISCOVERY_ERRORS = (RuntimeError, AttributeError, TypeError)
+APP_SECURITY_PUBLIC_REGISTER_BUILD_ERRORS = (BuildError, RuntimeError, AttributeError, TypeError)
 
 
 def _prefers_json_error_response() -> bool:
@@ -228,7 +231,31 @@ def configure_app_security_bootstrap(
         except APP_SECURITY_PUBLIC_LOGIN_BUILD_ERRORS:
             return "/auth/login"
 
+    def _read_bool_env(var_name: str, default: bool) -> bool:
+        raw = str(os.environ.get(var_name, "") or "").strip().lower()
+        if not raw:
+            return default
+        return raw in {"1", "true", "yes", "on"}
+
+    def public_register_enabled() -> bool:
+        auth_backend = str(os.environ.get("AUTH_BACKEND", "local") or "local").strip().lower()
+        default_enabled = auth_backend != "qkit"
+        return _read_bool_env("AUTH_ENABLE_REGISTER", default_enabled)
+
+    def public_register_url():
+        try:
+            if any(rule.endpoint == "auth_bp.register" for rule in app.url_map.iter_rules()):
+                return url_for("auth_bp.register")
+        except APP_SECURITY_PUBLIC_REGISTER_DISCOVERY_ERRORS:
+            pass
+        try:
+            return url_for("auth_bp.register")
+        except APP_SECURITY_PUBLIC_REGISTER_BUILD_ERRORS:
+            return "/auth/register"
+
     app.jinja_env.globals["public_login_url"] = public_login_url
+    app.jinja_env.globals["public_register_enabled"] = public_register_enabled
+    app.jinja_env.globals["public_register_url"] = public_register_url
     app.jinja_env.globals["format_beijing_time"] = format_beijing_time
 
     log_print("[TRACE] app security bootstrap configured", "APP")

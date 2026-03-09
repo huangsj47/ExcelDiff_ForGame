@@ -37,6 +37,8 @@ def test_security_bootstrap_exception_tuples_are_declared():
     assert hasattr(security_bootstrap, "APP_SECURITY_AUTH_BACKEND_IMPORT_ERRORS")
     assert hasattr(security_bootstrap, "APP_SECURITY_PUBLIC_LOGIN_DISCOVERY_ERRORS")
     assert hasattr(security_bootstrap, "APP_SECURITY_PUBLIC_LOGIN_BUILD_ERRORS")
+    assert hasattr(security_bootstrap, "APP_SECURITY_PUBLIC_REGISTER_DISCOVERY_ERRORS")
+    assert hasattr(security_bootstrap, "APP_SECURITY_PUBLIC_REGISTER_BUILD_ERRORS")
 
 
 def test_auth_backend_falls_back_to_local_when_auth_import_fails(monkeypatch):
@@ -90,3 +92,64 @@ def test_public_login_url_uses_hardcoded_path_when_url_build_fails(monkeypatch):
 
     with app.test_request_context("/"):
         assert app.jinja_env.globals["public_login_url"]() == "/auth/login"
+
+
+def test_public_register_enabled_defaults_to_true_in_local(monkeypatch):
+    app = Flask(__name__)
+    app.secret_key = "test-key"
+    monkeypatch.setenv("AUTH_BACKEND", "local")
+    monkeypatch.delenv("AUTH_ENABLE_REGISTER", raising=False)
+
+    _configure(app)
+
+    with app.test_request_context("/"):
+        assert app.jinja_env.globals["public_register_enabled"]() is True
+
+
+def test_public_register_enabled_defaults_to_false_in_qkit(monkeypatch):
+    app = Flask(__name__)
+    app.secret_key = "test-key"
+    monkeypatch.setenv("AUTH_BACKEND", "qkit")
+    monkeypatch.delenv("AUTH_ENABLE_REGISTER", raising=False)
+
+    _configure(app)
+
+    with app.test_request_context("/"):
+        assert app.jinja_env.globals["public_register_enabled"]() is False
+
+
+def test_public_register_enabled_allows_env_override(monkeypatch):
+    app = Flask(__name__)
+    app.secret_key = "test-key"
+    monkeypatch.setenv("AUTH_BACKEND", "local")
+    monkeypatch.setenv("AUTH_ENABLE_REGISTER", "false")
+
+    _configure(app)
+
+    with app.test_request_context("/"):
+        assert app.jinja_env.globals["public_register_enabled"]() is False
+
+
+def test_public_register_url_prefers_auth_register_route():
+    app = Flask(__name__)
+    app.secret_key = "test-key"
+    app.add_url_rule("/auth/register", endpoint="auth_bp.register", view_func=lambda: "ok")
+
+    _configure(app)
+    with app.test_request_context("/"):
+        assert app.jinja_env.globals["public_register_url"]() == "/auth/register"
+
+
+def test_public_register_url_uses_hardcoded_path_when_url_build_fails(monkeypatch):
+    app = Flask(__name__)
+    app.secret_key = "test-key"
+
+    _configure(app)
+    monkeypatch.setattr(
+        security_bootstrap,
+        "url_for",
+        lambda _endpoint: (_ for _ in ()).throw(BuildError("auth_bp.register", {}, None)),
+    )
+
+    with app.test_request_context("/"):
+        assert app.jinja_env.globals["public_register_url"]() == "/auth/register"
