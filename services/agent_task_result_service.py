@@ -177,6 +177,21 @@ def handle_agent_report_task_result(task_id):
                     src_task.retry_count = (src_task.retry_count or 0) + 1
 
         db.session.commit()
+        handlers.log_structured_event(
+            "agent_task_result_reported",
+            log_type="AGENT",
+            force=(status == "failed"),
+            task_id=task.id,
+            task_type=task.task_type,
+            status=status,
+            agent_id=agent.id,
+            agent_code=getattr(agent, "agent_code", None),
+            project_id=task.project_id,
+            repository_id=task.repository_id,
+            source_task_id=task.source_task_id,
+            background_task_id=task.source_task_id,
+            error_message=task.error_message if status == "failed" else None,
+        )
         if str(task.task_type or "").strip().lower() == "commit_diff":
             log_print(
                 (

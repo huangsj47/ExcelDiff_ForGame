@@ -24,9 +24,14 @@ from services.agent_release_service import (
     rollback_latest_release,
 )
 from services.agent_task_result_service import handle_agent_report_task_result
+from services.agent_task_payload_schema import (
+    get_agent_task_payload_schema_version,
+    normalize_agent_task_payload,
+)
 from services.repository_sync_status import clear_sync_error as clear_repository_sync_error
 from services.repository_sync_status import record_sync_error as record_repository_sync_error
 from utils.request_security import require_admin
+from utils.logger import log_structured_event
 
 
 _PROJECT_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{2,50}$")
@@ -735,16 +740,28 @@ def _dispatch_agent_local_cache_fetch(*, db, cache_key: str, expected_hash: str,
 def enqueue_agent_task(*, task_type, project_id, repository_id=None, source_task_id=None, priority=10, payload=None):
     """平台内部调用：创建 Agent 任务。"""
     db, AgentTask = get_runtime_models("db", "AgentTask")
+    normalized_payload = normalize_agent_task_payload(payload if isinstance(payload, dict) else {})
     agent_task = AgentTask(
         task_type=task_type,
         project_id=project_id,
         repository_id=repository_id,
         source_task_id=source_task_id,
         priority=priority,
-        payload=json.dumps(payload or {}, ensure_ascii=False),
+        payload=json.dumps(normalized_payload, ensure_ascii=False),
         status="pending",
     )
     db.session.add(agent_task)
+    log_structured_event(
+        "agent_task_enqueued",
+        log_type="AGENT",
+        task_type=task_type,
+        project_id=project_id,
+        repository_id=repository_id,
+        source_task_id=source_task_id,
+        priority=priority,
+        payload_schema_version=get_agent_task_payload_schema_version(normalized_payload),
+        payload_keys=sorted(list(normalized_payload.keys())),
+    )
     return agent_task
 
 
@@ -1592,11 +1609,25 @@ def agent_claim_task():
         agent.status = "online"
         agent.last_heartbeat = now_utc
         db.session.commit()
+        task_payload = normalize_agent_task_payload(json.loads(task.payload or "{}"))
+        payload_schema_version = get_agent_task_payload_schema_version(task_payload)
+        log_structured_event(
+            "agent_task_claimed",
+            log_type="AGENT",
+            task_id=task.id,
+            task_type=task.task_type,
+            project_id=task.project_id,
+            repository_id=task.repository_id,
+            source_task_id=task.source_task_id,
+            assigned_agent_id=agent.id,
+            assigned_agent_code=agent.agent_code,
+            payload_schema_version=payload_schema_version,
+        )
         if str(task.task_type or "").strip().lower() == "commit_diff":
             log_print(
                 (
                     f"Agent 领取 commit_diff 任务: task_id={task.id}, agent={agent.agent_code}, "
-                    f"project_id={task.project_id}, repository_id={task.repository_id}"
+                    f"project_id={task.project_id}, repository_id={task.repository_id}, schema={payload_schema_version}"
                 ),
                 "AGENT",
             )
@@ -1608,7 +1639,7 @@ def agent_claim_task():
             "project_id": task.project_id,
             "repository_id": task.repository_id,
             "source_task_id": task.source_task_id,
-            "payload": json.loads(task.payload or "{}"),
+            "payload": task_payload,
             "lease_expires_at": task.lease_expires_at.isoformat() if task.lease_expires_at else None,
         }
         return jsonify({"success": True, "task": response_task}), 200

@@ -7,6 +7,7 @@ import subprocess
 import time
 
 from services.api_response_service import json_error, json_success
+from services.exception_rollout_service import resolve_exception_narrowing_rollout
 
 COMMIT_FULL_DIFF_FILE_READ_ERRORS = (subprocess.SubprocessError, OSError, ValueError, TypeError, RuntimeError)
 COMMIT_FULL_DIFF_PIPELINE_ERRORS = (
@@ -179,9 +180,42 @@ def handle_refresh_commit_diff(
 ):
     """Refresh commit diff and bypass cache when needed."""
     start_time = None
+    commit = None
+    repository = None
+    rollout_decision = resolve_exception_narrowing_rollout(repository_id=None, file_path=None)
+
+    def _maybe_compat_pending_response(*, error_type: str):
+        if rollout_decision.enabled:
+            return None
+        log_print(
+            (
+                f"⚠️ 异常灰度兼容模式命中，降级为 pending_compat: "
+                f"error_type={error_type}, mode={rollout_decision.mode}, "
+                f"repo_id={getattr(repository, 'id', None)}, file_path={getattr(commit, 'path', None)}"
+            ),
+            "APP",
+            force=True,
+        )
+        return json_success(
+            jsonify=jsonify,
+            status="pending_compat",
+            message="灰度模式：异常已记录，任务稍后重试",
+            http_status=202,
+            pending=True,
+            retry_after_seconds=60,
+            compat_mode=True,
+            error_type=error_type,
+            rollout_mode=rollout_decision.mode,
+            rollout_matched_by=rollout_decision.matched_by,
+        )
+
     try:
         commit = Commit.query.get_or_404(commit_id)
         repository, _project = ensure_commit_access_or_403(commit)
+        rollout_decision = resolve_exception_narrowing_rollout(
+            repository_id=getattr(repository, "id", None),
+            file_path=getattr(commit, "path", None),
+        )
         dispatch_result = maybe_dispatch_commit_diff(commit, force_retry=True)
         if dispatch_result is not None:
             status = str(dispatch_result.get("status") or "")
@@ -303,6 +337,9 @@ def handle_refresh_commit_diff(
         total_time = time.time() - start_time if start_time is not None else 0
         db.session.rollback()
         log_print(f"❌ 重新计算差异数据库异常: {exc} | 耗时: {total_time:.2f}秒", "APP", force=True)
+        compat_response = _maybe_compat_pending_response(error_type="database_error")
+        if compat_response is not None:
+            return compat_response
         return json_error(
             jsonify=jsonify,
             message="重新计算差异失败: 数据库操作异常",
@@ -316,6 +353,9 @@ def handle_refresh_commit_diff(
         import traceback
 
         traceback.print_exc()
+        compat_response = _maybe_compat_pending_response(error_type="runtime_error")
+        if compat_response is not None:
+            return compat_response
         return json_error(
             jsonify=jsonify,
             message=f"重新计算差异失败: {str(exc)}",
@@ -329,6 +369,9 @@ def handle_refresh_commit_diff(
         import traceback
 
         traceback.print_exc()
+        compat_response = _maybe_compat_pending_response(error_type="unexpected_error")
+        if compat_response is not None:
+            return compat_response
         return json_error(
             jsonify=jsonify,
             message=f"重新计算差异失败: {str(exc)}",

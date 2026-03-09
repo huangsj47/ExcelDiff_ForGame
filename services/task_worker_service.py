@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from utils.logger import log_print
+from utils.logger import log_print, log_structured_event
 from utils.db_retry import db_retry
 from services.deployment_mode import get_deployment_mode, is_agent_dispatch_mode
 from services.branch_refresh_service import (
@@ -229,13 +229,24 @@ def _enqueue_agent_task_from_background_task(db_task, extra_payload=None):
     payload.setdefault("commit_id", db_task.commit_id)
     payload.setdefault("file_path", db_task.file_path)
 
-    enqueue_agent_task(
+    agent_task = enqueue_agent_task(
         task_type=task_type,
         project_id=project_id,
         repository_id=repository_id,
         source_task_id=db_task.id,
         priority=db_task.priority if db_task.priority is not None else 10,
         payload=payload,
+    )
+    log_structured_event(
+        "background_task_dispatched_to_agent",
+        log_type="AGENT",
+        background_task_id=db_task.id,
+        source_task_id=db_task.id,
+        agent_task_id=getattr(agent_task, "id", None),
+        task_type=task_type,
+        project_id=project_id,
+        repository_id=repository_id,
+        payload_schema_version=payload.get("schema_version"),
     )
     return True
 
@@ -399,6 +410,13 @@ def update_task_status_with_retry(task_id, status, error_message=None):
                     db_task.retry_count += 1
             _db.session.commit()
             log_print(f"✅ 任务状态更新成功: {task_id} -> {status}", 'TASK')
+            log_structured_event(
+                "background_task_status_updated",
+                log_type="TASK",
+                background_task_id=task_id,
+                status=status,
+                retry_count=getattr(db_task, "retry_count", None),
+            )
         else:
             log_print(f"⚠️ 未找到任务: {task_id}", 'TASK')
     except SQLAlchemyError as e:

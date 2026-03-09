@@ -190,3 +190,22 @@ def test_unexpected_key_error_returns_unexpected_error_contract(monkeypatch):
     assert payload["error_type"] == "unexpected_error"
     assert any("Excel diff处理失败" in item for item in logs)
     assert any(record[1].get("tags", {}).get("source") == "exception" for record in metrics_records)
+
+
+def test_unexpected_key_error_rolls_out_as_pending_when_repository_not_enabled(monkeypatch):
+    metrics_records = []
+    logs = []
+    commit = SimpleNamespace(id=5, commit_id="e5", path="e.xlsx", commit_time=5)
+    kwargs = _base_kwargs(commit=commit, metrics_records=metrics_records, logs=logs)
+    monkeypatch.setattr(excel_api, "and_", lambda *args: ("and", args))
+    monkeypatch.setattr(excel_api, "or_", lambda *args: ("or", args))
+    monkeypatch.setenv("EXCEPTION_NARROWING_ROLLOUT_MODE", "repository")
+    monkeypatch.setenv("EXCEPTION_NARROWING_ROLLOUT_REPOSITORIES", "999")
+    kwargs["get_unified_diff_data"] = lambda *_a, **_k: (_ for _ in ()).throw(KeyError("missing"))
+
+    payload, status = excel_api.handle_get_excel_diff_data(**kwargs)
+
+    assert status == 202
+    assert payload["status"] == "pending_compat"
+    assert payload["compat_mode"] is True
+    assert payload["error_type"] == "unexpected_error"

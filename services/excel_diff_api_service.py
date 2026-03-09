@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from services.commit_diff_input_models import CommitDiffQueryInput
 from services.api_response_service import json_error, json_success
+from services.exception_rollout_service import resolve_exception_narrowing_rollout
 
 EXCEL_DIFF_API_AGENT_RENDER_ERRORS = (
     RuntimeError,
@@ -48,8 +49,32 @@ def handle_get_excel_diff_data(
 ):
     """Handle API: fetch excel diff payload with HTML/data cache strategy."""
     request_start = time_module.time()
+    commit = None
+    repository = None
+    rollout_decision = resolve_exception_narrowing_rollout(repository_id=None, file_path=None)
+
+    def _maybe_compat_pending_response(*, error_type: str):
+        if rollout_decision.enabled:
+            return None
+        return json_success(
+            jsonify=jsonify,
+            status="pending_compat",
+            message="灰度模式：异常已记录，任务稍后重试",
+            http_status=202,
+            pending=True,
+            retry_after_seconds=60,
+            compat_mode=True,
+            error_type=error_type,
+            rollout_mode=rollout_decision.mode,
+            rollout_matched_by=rollout_decision.matched_by,
+        )
+
     commit = Commit.query.get_or_404(commit_id)
     repository, project = ensure_commit_access_or_403(commit)
+    rollout_decision = resolve_exception_narrowing_rollout(
+        repository_id=getattr(repository, "id", None),
+        file_path=getattr(commit, "path", None),
+    )
     perf_project_tags = {
         "project_id": getattr(project, "id", "") if project else "",
         "project_code": getattr(project, "code", "") if project else "",
@@ -400,8 +425,13 @@ def handle_get_excel_diff_data(
                 "project_id": perf_project_tags["project_id"],
                 "project_code": perf_project_tags["project_code"],
                 "file_path": commit.path if commit else "",
+                "exception_rollout_enabled": rollout_decision.enabled,
+                "exception_rollout_mode": rollout_decision.mode,
             },
         )
+        compat_response = _maybe_compat_pending_response(error_type="database_error")
+        if compat_response is not None:
+            return compat_response
         return json_error(
             jsonify=jsonify,
             message="Excel文件处理失败: 数据库访问异常",
@@ -422,8 +452,13 @@ def handle_get_excel_diff_data(
                 "project_id": perf_project_tags["project_id"],
                 "project_code": perf_project_tags["project_code"],
                 "file_path": commit.path if commit else "",
+                "exception_rollout_enabled": rollout_decision.enabled,
+                "exception_rollout_mode": rollout_decision.mode,
             },
         )
+        compat_response = _maybe_compat_pending_response(error_type="runtime_error")
+        if compat_response is not None:
+            return compat_response
         return json_error(
             jsonify=jsonify,
             message=f"Excel文件处理失败: {str(exc)}",
@@ -444,8 +479,13 @@ def handle_get_excel_diff_data(
                 "project_id": perf_project_tags["project_id"],
                 "project_code": perf_project_tags["project_code"],
                 "file_path": commit.path if commit else "",
+                "exception_rollout_enabled": rollout_decision.enabled,
+                "exception_rollout_mode": rollout_decision.mode,
             },
         )
+        compat_response = _maybe_compat_pending_response(error_type="unexpected_error")
+        if compat_response is not None:
+            return compat_response
         return json_error(
             jsonify=jsonify,
             message=f"Excel文件处理失败: {str(exc)}",

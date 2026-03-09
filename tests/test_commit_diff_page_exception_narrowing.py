@@ -195,3 +195,43 @@ def test_handle_refresh_commit_diff_returns_unexpected_error_for_key_error():
     assert status == 500
     assert payload["error_type"] == "unexpected_error"
     assert any("未知异常" in log for log in logs)
+
+
+def test_handle_refresh_commit_diff_returns_pending_compat_when_rollout_disabled(monkeypatch):
+    logs = []
+    commit = SimpleNamespace(id=4, commit_id="jkl45678", path="qux.lua", commit_time=400)
+    repository = SimpleNamespace(id=1200)
+    commit_model = SimpleNamespace(
+        repository_id=_Field("repository_id"),
+        path=_Field("path"),
+        commit_time=_Field("commit_time"),
+        query=SimpleNamespace(
+            get_or_404=lambda _id: commit,
+            filter=lambda *_args, **_kwargs: _FilterQuery([]),
+        ),
+    )
+
+    monkeypatch.setenv("EXCEPTION_NARROWING_ROLLOUT_MODE", "repository")
+    monkeypatch.setenv("EXCEPTION_NARROWING_ROLLOUT_REPOSITORIES", "999")
+
+    result = diff_page_service.handle_refresh_commit_diff(
+        commit_id=4,
+        Commit=commit_model,
+        DiffCache=SimpleNamespace(query=SimpleNamespace(filter_by=lambda **_kwargs: SimpleNamespace(delete=lambda: 0))),
+        ExcelHtmlCache=SimpleNamespace(query=SimpleNamespace(filter_by=lambda **_kwargs: SimpleNamespace(delete=lambda: 0))),
+        db=SimpleNamespace(session=SimpleNamespace(commit=lambda: None, rollback=lambda: None)),
+        SQLAlchemyError=SQLAlchemyError,
+        excel_cache_service=SimpleNamespace(is_excel_file=lambda _path: False, save_cached_diff=lambda **_kwargs: True),
+        maybe_dispatch_commit_diff=lambda *_args, **_kwargs: None,
+        get_unified_diff_data=lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyError("missing payload")),
+        safe_json_serialize=lambda payload: payload,
+        ensure_commit_access_or_403=lambda _commit: (repository, None),
+        jsonify=lambda payload: payload,
+        log_print=lambda msg, *_args, **_kwargs: logs.append(str(msg)),
+    )
+
+    payload, status = result
+    assert status == 202
+    assert payload["status"] == "pending_compat"
+    assert payload["compat_mode"] is True
+    assert payload["error_type"] == "unexpected_error"

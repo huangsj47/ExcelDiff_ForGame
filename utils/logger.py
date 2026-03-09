@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import builtins
+import json
 from datetime import datetime
 from glob import glob
 import time
@@ -123,6 +124,35 @@ def _write_to_any_console(text: str) -> bool:
 def _original_print(msg, **kwargs):
     """安全的底层输出，优先 stdout，失败时自动回退。"""
     _write_to_any_console(str(msg) + '\n')
+
+
+def _sanitize_structured_field(value):
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_structured_field(item) for item in list(value)]
+    if isinstance(value, dict):
+        return {str(key): _sanitize_structured_field(item) for key, item in value.items()}
+    return str(value)
+
+
+def log_structured_event(event: str, log_type: str = "INFO", force: bool = False, **fields):
+    """Write one structured JSON log line for machine-readable diagnostics."""
+    payload = {"event": str(event)}
+    for key, value in fields.items():
+        payload[str(key)] = _sanitize_structured_field(value)
+    try:
+        message = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        message = str(payload)
+    log_print(message, log_type=log_type, force=force)
 
 
 def log_print(message, log_type='INFO', force=False):
