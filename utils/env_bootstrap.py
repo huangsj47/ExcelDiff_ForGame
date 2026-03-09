@@ -24,6 +24,8 @@ def build_default_env_lines() -> Tuple[list[str], Dict[str, str]]:
         "# Auto-generated .env for Diff Platform",
         "HOST=0.0.0.0",
         "PORT=8002",
+        "DEPLOYMENT_MODE=single",
+        "AGENT_SHARED_SECRET=please-change-me",
         "AUTH_BACKEND=local",
         f"FLASK_SECRET_KEY={flask_secret}",
         "ADMIN_USERNAME=admin",

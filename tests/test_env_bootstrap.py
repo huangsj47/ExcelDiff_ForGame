@@ -36,10 +36,17 @@ def test_ensure_env_file_generates_defaults_when_missing(tmp_path):
     assert content.startswith("# Auto-generated .env for Diff Platform\n")
     assert "\\n" not in content
     assert "HOST=0.0.0.0\n" in content
+    assert "DEPLOYMENT_MODE=single\n" in content
+    assert "AGENT_SHARED_SECRET=please-change-me\n" in content
     assert "DB_BACKEND=sqlite\n" in content
     assert "BRANCH_REFRESH_COOLDOWN_SECONDS=120\n" in content
 
 
 def test_start_bat_uses_bootstrap_module():
     content = Path("start.bat").read_text(encoding="utf-8")
+    assert "-m utils.env_bootstrap" in content
+
+
+def test_start_sh_uses_bootstrap_module():
+    content = Path("start.sh").read_text(encoding="utf-8")
     assert "-m utils.env_bootstrap" in content

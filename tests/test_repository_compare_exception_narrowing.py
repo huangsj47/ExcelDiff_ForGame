@@ -93,3 +93,63 @@ def test_generate_compare_diff_returns_fallback_payload_on_runtime_error(monkeyp
     assert result["file_path"] == "foo.lua"
     assert any("diff生成失败" in line["content"] for line in result["lines"])
     assert any("生成对比diff失败" in log for log in logs)
+
+
+def test_repository_compare_rejects_mismatched_repository_types(monkeypatch):
+    flash_records = []
+    project = SimpleNamespace(id=1)
+    source_repo = SimpleNamespace(id=11, name="src", type="git", project=project)
+    target_repo = SimpleNamespace(id=12, name="dst", type="svn", project=project)
+
+    repo_map = {"11": source_repo, "12": target_repo}
+    repository_model = SimpleNamespace(
+        query=SimpleNamespace(get_or_404=lambda repo_id: repo_map[str(repo_id)])
+    )
+    commit_model = SimpleNamespace(query=None)
+
+    monkeypatch.setattr(compare_helpers, "get_runtime_models", lambda *_args: (repository_model, commit_model))
+    monkeypatch.setattr(
+        compare_helpers,
+        "request",
+        SimpleNamespace(
+            args=_Args(
+                {
+                    "source": "11",
+                    "target": "12",
+                    "start_time": "2026-03-02T00:00:00Z",
+                    "end_time": "2026-03-08T00:00:00Z",
+                }
+            )
+        ),
+    )
+    monkeypatch.setattr(compare_helpers, "_has_project_access", lambda _project_id: True)
+    monkeypatch.setattr(compare_helpers, "flash", lambda message, category: flash_records.append((category, message)))
+    monkeypatch.setattr(compare_helpers, "redirect", lambda url: {"redirect": url})
+    monkeypatch.setattr(compare_helpers, "url_for", lambda endpoint: f"/{endpoint}")
+
+    result = compare_helpers.repository_compare()
+
+    assert result == {"redirect": "/index"}
+    assert ("error", "仓库类型不匹配：Git 只能与 Git 对比，SVN 只能与 SVN 对比") in flash_records
+
+
+def test_analyze_repository_differences_uses_commit_push_time_without_interval_threshold():
+    source_repo = SimpleNamespace(name="src")
+    target_repo = SimpleNamespace(name="dst")
+    source_commits = [
+        SimpleNamespace(path="src/a.lua", commit_time=compare_helpers.datetime(2026, 3, 8, 10, 0, 0))
+    ]
+    target_commits = [
+        SimpleNamespace(path="src/a.lua", commit_time=compare_helpers.datetime(2026, 3, 8, 9, 58, 0))
+    ]
+
+    result = compare_helpers.analyze_repository_differences(
+        source_commits,
+        target_commits,
+        source_repo,
+        target_repo,
+    )
+
+    assert result["total_differences"] == 1
+    assert result["differences"][0]["type"] == "source_newer"
+    assert result["differences"][0]["time_diff_minutes"] == 2

@@ -44,6 +44,15 @@ from services.weekly_excel_merge_helpers import (
     load_weekly_excel_diff_from_cache as _load_weekly_excel_diff_from_cache_helper,
     merge_segmented_excel_diff_payload as _merge_segmented_excel_diff_payload_helper,
 )
+from services.weekly_version_files_api_helpers import (
+    extract_author_lookup_keys,
+    is_stale_sync_task,
+    normalize_naive_datetime,
+    parse_confirm_usernames,
+    parse_json_list,
+    parse_json_obj,
+    resolve_author_display,
+)
 from utils.logger import log_print
 from utils.request_security import _has_project_access
 from utils.timezone_utils import now_beijing
@@ -547,6 +556,7 @@ def merged_project_view(project_id):
         )
     # 按时间范围和名称分组周版本配置
     now = datetime.now()
+    today_date = now.strftime("%Y-%m-%d")
     # 分组逻辑：相同版本基础名称+相同时间范围的配置归为一组
     version_groups = {}
     for config in configs:
@@ -626,6 +636,7 @@ def merged_project_view(project_id):
         inactive_versions_json.append(version_data)
     return render_template('merged_project_view.html',
                          project=project,
+                         today_date=today_date,
                          active_versions=active_versions,
                          active_versions_total_count=active_versions_total_count,
                          active_page=active_page,
@@ -705,112 +716,94 @@ def weekly_version_files_api(config_id):
         sync_task_id = None
         sync_task_status = None
         sync_triggered = False
+        sync_blocking = False
+        initial_sync_waiting = False
+        initial_sync_window = timedelta(minutes=20)
+        config_is_active = bool(getattr(config, 'is_active', True))
+        config_auto_sync = bool(getattr(config, 'auto_sync', True))
+        now_local = normalize_naive_datetime(now_beijing()) or datetime.utcnow()
 
-        # platform+agent 模式下若首次未及时生成缓存，这里兜底触发一次同步任务。
-        if not diff_caches:
-            existing_sync_task = BackgroundTask.query.filter(
+        latest_sync_task = BackgroundTask.query.filter(
+            BackgroundTask.task_type == 'weekly_sync',
+            BackgroundTask.commit_id == str(config_id),
+        ).order_by(BackgroundTask.id.desc()).first()
+        if latest_sync_task:
+            sync_task_id = latest_sync_task.id
+            sync_task_status = latest_sync_task.status
+
+        # 无论是否已有部分缓存，都先探测当前正在执行中的同步任务状态。
+        existing_sync_task = BackgroundTask.query.filter(
+            BackgroundTask.task_type == 'weekly_sync',
+            BackgroundTask.commit_id == str(config_id),
+            BackgroundTask.status.in_(['pending', 'processing']),
+        ).order_by(BackgroundTask.id.desc()).first()
+        if existing_sync_task and is_stale_sync_task(existing_sync_task, now_local):
+            stale_task_id = getattr(existing_sync_task, 'id', None)
+            stale_task_status = getattr(existing_sync_task, 'status', None)
+            log_print(
+                f"检测到陈旧周版本同步任务，按非阻塞处理: config_id={config_id}, task_id={stale_task_id}, status={stale_task_status}",
+                'WEEKLY',
+                force=True,
+            )
+            try:
+                existing_sync_task.status = 'failed'
+                if not getattr(existing_sync_task, 'error_message', None):
+                    existing_sync_task.error_message = '任务长时间未推进，已自动标记为失败并解除页面阻塞'
+                db.session.commit()
+                sync_task_id = stale_task_id
+                sync_task_status = 'failed'
+            except Exception as stale_update_error:
+                db.session.rollback()
+                log_print(f"更新陈旧周版本任务状态失败: {stale_update_error}", 'WEEKLY', force=True)
+            existing_sync_task = None
+
+        if existing_sync_task:
+            sync_task_id = existing_sync_task.id
+            sync_task_status = existing_sync_task.status
+
+        config_created_at = normalize_naive_datetime(getattr(config, 'created_at', None))
+        is_recent_config = (
+            config_created_at is not None
+            and now_local >= config_created_at
+            and (now_local - config_created_at) <= initial_sync_window
+        )
+
+        if is_recent_config and config_is_active and config_auto_sync:
+            completed_sync_task = BackgroundTask.query.filter(
                 BackgroundTask.task_type == 'weekly_sync',
                 BackgroundTask.commit_id == str(config_id),
-                BackgroundTask.status.in_(['pending', 'processing']),
+                BackgroundTask.status == 'completed',
             ).order_by(BackgroundTask.id.desc()).first()
+            has_initial_cache_data = any(getattr(cache, 'last_sync_time', None) is not None for cache in diff_caches)
+            # 一旦已经有初版数据（缓存具备 last_sync_time），后续不再阻塞页面。
+            initial_sync_waiting = (completed_sync_task is None) and (not has_initial_cache_data)
 
-            if existing_sync_task:
-                sync_task_id = existing_sync_task.id
-                sync_task_status = existing_sync_task.status
-            elif config.is_active and config.auto_sync and callable(_create_weekly_sync_task):
-                created_task_id = _create_weekly_sync_task(config_id)
-                if created_task_id:
-                    sync_task_id = created_task_id
-                    sync_task_status = 'pending'
-                    sync_triggered = True
+        # 新建周版本在首轮同步完成前一律展示“处理中”，避免先看到不完整数据。
+        should_trigger_sync = (
+            not existing_sync_task
+            and config_is_active
+            and config_auto_sync
+            and (initial_sync_waiting or not diff_caches)
+            and callable(_create_weekly_sync_task)
+        )
+        if should_trigger_sync:
+            created_task_id = _create_weekly_sync_task(config_id)
+            if created_task_id:
+                sync_task_id = created_task_id
+                sync_task_status = 'pending'
+                sync_triggered = True
 
-        def _parse_json_list(raw_value):
-            if raw_value is None:
-                return []
-            if isinstance(raw_value, list):
-                return raw_value
-            if isinstance(raw_value, tuple):
-                return list(raw_value)
-            if isinstance(raw_value, str):
-                text_value = raw_value.strip()
-                if not text_value:
-                    return []
-                try:
-                    parsed = json.loads(text_value)
-                    if isinstance(parsed, list):
-                        return parsed
-                    if isinstance(parsed, tuple):
-                        return list(parsed)
-                except Exception:
-                    # 历史脏数据兜底：按分隔符拆分字符串
-                    return [
-                        item.strip()
-                        for item in re.split(r"[,，;；|\n\r]+", text_value)
-                        if item and item.strip()
-                    ]
-            return []
-
-        def _parse_json_obj(raw_value):
-            if raw_value is None:
-                return {}
-            if isinstance(raw_value, dict):
-                return raw_value
-            if isinstance(raw_value, str):
-                text_value = raw_value.strip()
-                if not text_value:
-                    return {}
-                try:
-                    parsed = json.loads(text_value)
-                    if isinstance(parsed, dict):
-                        return parsed
-                except Exception:
-                    return {}
-            return {}
-
-        def _parse_confirm_usernames(raw_value):
-            if not raw_value:
-                return []
-
-            usernames = [
-                item.strip() for item in re.split(r"[,，;；|\n\r]+", str(raw_value)) if item and item.strip()
-            ]
-            unique_usernames = []
-            for username in usernames:
-                if username not in unique_usernames:
-                    unique_usernames.append(username)
-            return unique_usernames
-
-        def _extract_author_lookup_keys(raw_author):
-            """提取可用于匹配账号系统的作者标识（用户名 / 邮箱前缀）。"""
-            text = str(raw_author or '').strip()
-            if not text:
-                return []
-
-            keys = []
-            lower_text = text.lower()
-
-            if all(symbol not in lower_text for symbol in ('@', '<', '>', ' ')):
-                keys.append(lower_text)
-
-            if '@' in lower_text and '<' not in lower_text and '>' not in lower_text:
-                email_prefix = lower_text.split('@', 1)[0].strip()
-                if email_prefix and email_prefix not in keys:
-                    keys.append(email_prefix)
-
-            for email in re.findall(r'([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})', text):
-                email_prefix = email.lower().split('@', 1)[0].strip()
-                if email_prefix and email_prefix not in keys:
-                    keys.append(email_prefix)
-
-            return keys
+        # 仅在“首轮同步尚未完成”时阻塞页面，避免后续周期性同步导致反复卡加载态。
+        if initial_sync_waiting and (existing_sync_task or sync_triggered):
+            sync_blocking = True
 
         all_confirm_usernames = set()
         all_author_keys = set()
         for cache in diff_caches:
-            all_confirm_usernames.update(_parse_confirm_usernames(cache.status_changed_by))
-            commit_authors = _parse_json_list(cache.commit_authors)
+            all_confirm_usernames.update(parse_confirm_usernames(cache.status_changed_by))
+            commit_authors = parse_json_list(cache.commit_authors)
             for commit_author in commit_authors:
-                all_author_keys.update(_extract_author_lookup_keys(commit_author))
+                all_author_keys.update(extract_author_lookup_keys(commit_author))
 
         username_to_display_name = {}
         username_to_display_name_lower = {}
@@ -854,30 +847,25 @@ def weekly_version_files_api(config_id):
             except Exception as e:
                 log_print(f"加载周版本确认用户姓名映射失败，回退为用户名显示: {e}", 'WEEKLY')
 
-        def _resolve_author_display(raw_author):
-            text = str(raw_author or '').strip()
-            if not text:
-                return ''
-            for author_key in _extract_author_lookup_keys(text):
-                mapped_name = (
-                    username_to_display_name_lower.get(author_key)
-                    or email_prefix_to_display_name.get(author_key)
-                )
-                if mapped_name:
-                    return mapped_name
-            return text
-
         files = []
         authors = set()
         for cache in diff_caches:
             # 解析提交者信息
-            commit_authors = _parse_json_list(cache.commit_authors)
-            commit_messages = _parse_json_list(cache.commit_messages)
-            commit_times = _parse_json_list(cache.commit_times)
-            mapped_commit_authors = [_resolve_author_display(author) for author in commit_authors if str(author or '').strip()]
+            commit_authors = parse_json_list(cache.commit_authors)
+            commit_messages = parse_json_list(cache.commit_messages)
+            commit_times = parse_json_list(cache.commit_times)
+            mapped_commit_authors = [
+                resolve_author_display(
+                    author,
+                    username_to_display_name_lower=username_to_display_name_lower,
+                    email_prefix_to_display_name=email_prefix_to_display_name,
+                )
+                for author in commit_authors
+                if str(author or '').strip()
+            ]
             authors.update(mapped_commit_authors)
 
-            confirm_usernames = _parse_confirm_usernames(cache.status_changed_by)
+            confirm_usernames = parse_confirm_usernames(cache.status_changed_by)
             confirm_display_names = [
                 username_to_display_name.get(username)
                 or username_to_display_name_lower.get(username.lower(), username)
@@ -894,7 +882,7 @@ def weekly_version_files_api(config_id):
             file_operations = []
             if cache.merged_diff_data:
                 try:
-                    merged_data = _parse_json_obj(cache.merged_diff_data)
+                    merged_data = parse_json_obj(cache.merged_diff_data)
                     file_operations = merged_data.get('operations', [])
                 except:
                     pass
@@ -933,6 +921,7 @@ def weekly_version_files_api(config_id):
             'sync_task_id': sync_task_id,
             'sync_task_status': sync_task_status,
             'sync_triggered': sync_triggered,
+            'sync_blocking': sync_blocking,
         })
     except HTTPException:
         raise

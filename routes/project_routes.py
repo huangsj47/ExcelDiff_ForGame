@@ -123,6 +123,7 @@ def merged_project_view(project_id):
 
     return render_template('merged_project_view.html',
                          project=project,
+                         today_date=now.strftime('%Y-%m-%d'),
                          repositories=repositories,
                          active_versions=active_versions,
                          inactive_versions=inactive_versions)

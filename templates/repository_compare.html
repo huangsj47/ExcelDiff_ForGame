@@ -12,7 +12,8 @@
                 <div class="card">
                     <div class="card-body">
                         <h6 class="card-title">外放分支仓库</h6>
-                        <p class="card-text">{{ source_repo.name }}_{{ source_repo.type }}</p>
+                        {% set _source_branch_label = source_repo.branch if source_repo.branch else (source_repo.current_version if source_repo.current_version else 'master') %}
+                        <p class="card-text">{{ source_repo.name }} ({{ _source_branch_label }}标签)</p>
                         <small class="text-muted">文件数: {{ comparison_result.source_files_count }}</small>
                     </div>
                 </div>
@@ -21,7 +22,8 @@
                 <div class="card">
                     <div class="card-body">
                         <h6 class="card-title">主分支仓库</h6>
-                        <p class="card-text">{{ target_repo.name }}_{{ target_repo.type }}</p>
+                        {% set _target_branch_label = target_repo.branch if target_repo.branch else (target_repo.current_version if target_repo.current_version else 'master') %}
+                        <p class="card-text">{{ target_repo.name }} ({{ _target_branch_label }}标签)</p>
                         <small class="text-muted">文件数: {{ comparison_result.target_files_count }}</small>
                     </div>
                 </div>
@@ -39,9 +41,6 @@
                 </div>
                 <div class="col-md-3">
                     <strong>结束时间:</strong> {{ format_beijing_time(end_time, '%Y-%m-%d %H:%M') }}
-                </div>
-                <div class="col-md-3">
-                    <strong>时间间隔阈值:</strong> {{ interval_minutes }} 分钟
                 </div>
                 <div class="col-md-3">
                     <strong>共同文件数:</strong> {{ comparison_result.common_files_count }}
@@ -154,7 +153,7 @@
     {% else %}
     <div class="alert alert-success">
         <h6><i class="fas fa-check-circle me-2"></i>对比完成</h6>
-        <p class="mb-0">在指定的时间范围和间隔阈值内，两个仓库没有发现差异。</p>
+        <p class="mb-0">在指定时间范围内，两个仓库没有发现差异。</p>
     </div>
     {% endif %}
 

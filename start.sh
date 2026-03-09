@@ -100,69 +100,24 @@ echo -e "${BLUE}  按 Ctrl+C 停止服务${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 
-# 检查 .env 配置文件，不存在则自动生成（含随机密钥）
-if [ ! -f ".env" ]; then
-    echo -e "${YELLOW}[提示] 未检测到 .env 配置文件，正在自动生成...${NC}"
-    $PYTHON_CMD -c "
-import secrets
-
-fk = secrets.token_urlsafe(48)
-ap = secrets.token_urlsafe(16)
-at = secrets.token_urlsafe(32)
-
-content = '''# ============================================================
-#  配表代码版本Diff平台 - 环境配置文件 (自动生成)
-# ============================================================
-
-# 服务器配置
-HOST=0.0.0.0
-PORT=8002
-
-# Flask 安全密钥 (已自动随机生成)
-FLASK_SECRET_KEY={fk}
-
-# 管理员账号配置
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD={ap}
-
-# 管理员 API Token
-ADMIN_API_TOKEN={at}
-
-# 是否启用管理员安全校验 (true/false)
-ENABLE_ADMIN_SECURITY=true
-
-AUTH_DEBUG_MODE=false
-
-# 数据库配置
-DB_BACKEND=sqlite
-
-# 调试与日志
-DEBUG_LOG=false
-
-# 分支刷新冷却时间 (秒)
-BRANCH_REFRESH_COOLDOWN_SECONDS=120
-'''.format(fk=fk, ap=ap, at=at)
-
-with open('.env', 'w', encoding='utf-8') as f:
-    f.write(content)
-
-print(f'  FLASK_SECRET_KEY = {fk}')
-print(f'  ADMIN_USERNAME   = admin')
-print(f'  ADMIN_PASSWORD   = {ap}')
-print(f'  ADMIN_API_TOKEN  = {at}')
-"
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}[信息] .env 文件已自动生成，密钥已随机生成${NC}"
-        echo -e "${YELLOW}[提示] 请记录上面的管理员密码，或在 .env 文件中查看${NC}"
-    else
-        echo -e "${YELLOW}[警告] 自动生成 .env 失败，尝试从模板复制...${NC}"
+# 检查 .env 配置并修复格式；缺失时自动生成
+echo -e "${GREEN}[信息] 检查 .env 配置并修复格式...${NC}"
+if ! $PYTHON_CMD -m utils.env_bootstrap --env-path ".env"; then
+    echo -e "${YELLOW}[警告] .env bootstrap 执行失败${NC}"
+    if [ ! -f ".env" ]; then
         if [ -f ".env.simple" ]; then
             cp .env.simple .env
             echo -e "${YELLOW}[提示] 已从 .env.simple 复制默认配置，请手动修改密钥${NC}"
+        else
+            echo -e "${RED}[错误] 未找到 .env.simple，无法创建 .env${NC}"
+            exit 1
         fi
+    else
+        echo -e "${RED}[错误] .env 已存在但 bootstrap 失败，请检查 Python traceback${NC}"
+        exit 1
     fi
-    echo ""
 fi
+echo ""
 
 # 设置环境变量
 export FLASK_APP=app.py

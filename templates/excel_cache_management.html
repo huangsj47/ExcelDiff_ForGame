@@ -147,7 +147,7 @@
         </div>
 
         <!-- HTML缓存统计卡片 -->
-        <div class="dashboard-card html-cache-card">
+        <div class="dashboard-card html-cache-card hidden-html-cache-card" aria-hidden="true">
             <div class="card-header">
                 <div class="card-icon html">
                     <i class="fas fa-code"></i>
@@ -567,6 +567,15 @@
     transform: translateY(-2px);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
     border-color: #0969da;
+}
+
+.strategy-card { order: 1; }
+.data-cache-card { order: 2; }
+.weekly-excel-cache-card { order: 3; }
+.agent-temp-cache-card { order: 4; }
+.hidden-html-cache-card {
+    display: none !important;
+    order: 99;
 }
 
 .dashboard-card .card-header {

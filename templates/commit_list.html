@@ -914,7 +914,10 @@
                             <select class="form-select" id="sourceRepository" name="source_repository" style="border-radius: 8px; border: 1.5px solid #e2e8f0; font-size: 0.85rem; padding: 0.5rem 0.75rem;">
                                 <option value="">请选择仓库</option>
                                 {% for repo in repositories %}
-                                <option value="{{ repo.id }}">{{ repo.name }}_{{ repo.type }}</option>
+                                {% set _repo_branch_label = repo.branch if repo.branch else (repo.current_version if repo.current_version else 'master') %}
+                                <option value="{{ repo.id }}" data-repo-type="{{ repo.type|lower }}" data-branch-label="{{ _repo_branch_label }}">
+                                    {{ repo.name }} ({{ _repo_branch_label }}标签)
+                                </option>
                                 {% endfor %}
                             </select>
                         </div>
@@ -925,7 +928,10 @@
                             <select class="form-select" id="targetRepository" name="target_repository" style="border-radius: 8px; border: 1.5px solid #e2e8f0; font-size: 0.85rem; padding: 0.5rem 0.75rem;">
                                 <option value="">请选择仓库</option>
                                 {% for repo in repositories %}
-                                <option value="{{ repo.id }}">{{ repo.name }}_{{ repo.type }}</option>
+                                {% set _repo_branch_label = repo.branch if repo.branch else (repo.current_version if repo.current_version else 'master') %}
+                                <option value="{{ repo.id }}" data-repo-type="{{ repo.type|lower }}" data-branch-label="{{ _repo_branch_label }}">
+                                    {{ repo.name }} ({{ _repo_branch_label }}标签)
+                                </option>
                                 {% endfor %}
                             </select>
                         </div>
@@ -961,18 +967,6 @@
                         </div>
                     </div>
                     
-                    <!-- 提交间隔 -->
-                    <div class="row mb-0">
-                        <div class="col-md-6">
-                            <label for="intervalMinutes" class="form-label" style="font-weight: 600; font-size: 0.82rem; color: #374151;">
-                                <i class="fas fa-stopwatch me-1" style="color: #10b981;"></i>提交间隔不超过
-                            </label>
-                            <div class="input-group" style="border-radius: 8px; overflow: hidden;">
-                                <input type="number" class="form-control" id="intervalMinutes" name="interval_minutes" value="5" min="1" style="border: 1.5px solid #e2e8f0; font-size: 0.85rem; padding: 0.5rem 0.75rem; border-right: none;">
-                                <span class="input-group-text" style="background: #f8fafc; border: 1.5px solid #e2e8f0; border-left: none; font-size: 0.82rem; color: #64748b;">分钟</span>
-                            </div>
-                        </div>
-                    </div>
                 </form>
             </div>
             <div class="modal-footer" style="background: #f8fafc; border-top: 1px solid #e5e7eb; border-radius: 0 0 12px 12px; padding: 0.75rem 1.25rem;">
@@ -996,6 +990,11 @@ document.addEventListener('DOMContentLoaded', function() {
     initCommitRowSelection();
     initCommitContextMenu();
     updateBatchButtons();
+    const sourceRepositorySelect = document.getElementById('sourceRepository');
+    if (sourceRepositorySelect) {
+        sourceRepositorySelect.addEventListener('change', syncRepositoryCompareTargetOptions);
+        syncRepositoryCompareTargetOptions();
+    }
     
     // 绑定手动获取数据按钮事件
     const syncButton = document.getElementById('syncButton');
@@ -1269,17 +1268,23 @@ function initCommitRowSelection() {
             // Ctrl/Cmd 点击：保留已有选中，仅补选当前行
             checkbox.checked = true;
         } else {
-            // 普通点击：点击其他条目时切换为单选当前条目
+            // 普通点击：
+            // 1) 已单选当前行时再次点击 => 取消选中
+            // 2) 其他情况 => 切换为仅选中当前行
             const selectedRows = getSelectedRows();
             const clickedIsSelected = Boolean(checkbox.checked);
-            if (!clickedIsSelected) {
+            if (clickedIsSelected && selectedRows.length === 1) {
+                checkbox.checked = false;
+                lastSelectedRowIndex = null;
+            } else if (!clickedIsSelected) {
                 clearAllCommitSelections();
                 checkbox.checked = true;
-            } else if (selectedRows.length === 0) {
+            } else {
+                clearAllCommitSelections();
                 checkbox.checked = true;
             }
         }
-        lastSelectedRowIndex = rowIndex;
+        lastSelectedRowIndex = checkbox.checked ? rowIndex : null;
         hideCommitContextMenu();
         updateBatchButtons();
     });
@@ -1343,7 +1348,7 @@ function updateBatchButtons() {
         return;
     }
 
-    if (checkboxes.length > 0) {
+    if (checkboxes.length >= 2) {
         batchOperations.style.display = 'block';
         console.log('✅ 显示批量操作按钮');
     } else {
@@ -1485,8 +1490,8 @@ function batchApprove() {
     const checkboxes = document.querySelectorAll('.commit-checkbox:checked');
     const commitIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
     
-    if (commitIds.length === 0) {
-        alert('请选择要通过的提交');
+    if (commitIds.length < 2) {
+        alert('请至少选择 2 条提交再执行批量通过');
         return;
     }
     
@@ -1523,8 +1528,8 @@ function batchReject() {
     const checkboxes = document.querySelectorAll('.commit-checkbox:checked');
     const commitIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
     
-    if (commitIds.length === 0) {
-        alert('请选择要拒绝的提交');
+    if (commitIds.length < 2) {
+        alert('请至少选择 2 条提交再执行批量拒绝');
         return;
     }
     
@@ -1561,8 +1566,8 @@ function mergeDiff() {
     const checkboxes = document.querySelectorAll('.commit-checkbox:checked');
     const commitIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
     
-    if (commitIds.length === 0) {
-        alert('请选择要合并diff的提交');
+    if (commitIds.length < 2) {
+        alert('请至少选择 2 条提交再合并diff');
         return;
     }
     
@@ -2146,8 +2151,42 @@ function regenerateCache() {
 
 // 显示仓库对比弹窗
 function showRepositoryCompareModal() {
+    syncRepositoryCompareTargetOptions();
     const modal = new bootstrap.Modal(document.getElementById('repositoryCompareModal'));
     modal.show();
+}
+
+function syncRepositoryCompareTargetOptions() {
+    const sourceSelect = document.getElementById('sourceRepository');
+    const targetSelect = document.getElementById('targetRepository');
+    if (!sourceSelect || !targetSelect) {
+        return;
+    }
+
+    const sourceOption = sourceSelect.selectedOptions && sourceSelect.selectedOptions.length > 0
+        ? sourceSelect.selectedOptions[0]
+        : null;
+    const sourceType = sourceOption ? String(sourceOption.dataset.repoType || '').toLowerCase() : '';
+
+    targetSelect.querySelectorAll('option').forEach(option => {
+        if (!option.value) {
+            option.disabled = false;
+            option.hidden = false;
+            return;
+        }
+        const optionType = String(option.dataset.repoType || '').toLowerCase();
+        const mismatch = Boolean(sourceType) && optionType !== sourceType;
+        option.disabled = mismatch;
+        option.hidden = mismatch;
+    });
+
+    if (
+        targetSelect.value &&
+        targetSelect.selectedOptions.length > 0 &&
+        targetSelect.selectedOptions[0].disabled
+    ) {
+        targetSelect.value = '';
+    }
 }
 
 // 时间范围选择切换
@@ -2171,6 +2210,8 @@ document.addEventListener('change', function(event) {
 function executeRepositoryCompare() {
     const form = document.getElementById('repositoryCompareForm');
     const formData = new FormData(form);
+    const sourceSelect = document.getElementById('sourceRepository');
+    const targetSelect = document.getElementById('targetRepository');
     
     const sourceRepo = formData.get('source_repository');
     const targetRepo = formData.get('target_repository');
@@ -2182,6 +2223,15 @@ function executeRepositoryCompare() {
     
     if (sourceRepo === targetRepo) {
         alert('请选择不同的仓库进行对比');
+        return;
+    }
+
+    const sourceOption = sourceSelect && sourceSelect.selectedOptions.length > 0 ? sourceSelect.selectedOptions[0] : null;
+    const targetOption = targetSelect && targetSelect.selectedOptions.length > 0 ? targetSelect.selectedOptions[0] : null;
+    const sourceType = sourceOption ? String(sourceOption.dataset.repoType || '').toLowerCase() : '';
+    const targetType = targetOption ? String(targetOption.dataset.repoType || '').toLowerCase() : '';
+    if (sourceType && targetType && sourceType !== targetType) {
+        alert('仓库类型不匹配：Git 只能与 Git 对比，SVN 只能与 SVN 对比');
         return;
     }
     
@@ -2198,10 +2248,8 @@ function executeRepositoryCompare() {
         endTime = new Date(formData.get('end_time')).toISOString();
     }
     
-    const intervalMinutes = formData.get('interval_minutes');
-    
     // 构建对比URL
-    const compareUrl = `/repositories/compare?source=${sourceRepo}&target=${targetRepo}&start_time=${encodeURIComponent(startTime)}&end_time=${encodeURIComponent(endTime)}&interval=${intervalMinutes}`;
+    const compareUrl = `/repositories/compare?source=${sourceRepo}&target=${targetRepo}&start_time=${encodeURIComponent(startTime)}&end_time=${encodeURIComponent(endTime)}`;
     
     // 关闭弹窗并打开对比页面
     const modal = bootstrap.Modal.getInstance(document.getElementById('repositoryCompareModal'));

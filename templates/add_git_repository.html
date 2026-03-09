@@ -107,11 +107,11 @@
                     <input type="text" class="form-control" id="name" name="name" placeholder="请输入git仓库名称" value="{% if is_edit %}{{ repository.name }}{% endif %}" required>
                 </div>
                 <div class="row g-3 mb-3">
-                    <div class="col-md-6">
+                    <div class="col-md-9">
                         <label for="url" class="form-label"><span class="text-danger">*</span> GitLab SSH URL</label>
                         <input type="text" class="form-control" id="url" name="url" placeholder="ssh://git@git-qa.gz.netease.com/..." value="{% if is_edit %}{{ repository.url }}{% endif %}" {% if is_edit %}readonly{% endif %} required>
                     </div>
-                    <div class="col-md-6">
+                    <div class="col-md-3">
                         <label for="server_url" class="form-label"><span class="text-danger">*</span> GitLab 服务器 URL</label>
                         <input type="text" class="form-control" id="server_url" name="server_url" placeholder="http://git-qa.gz.netease.com" value="{% if is_edit %}{{ repository.server_url }}{% endif %}" {% if is_edit %}readonly{% endif %} required>
                     </div>

@@ -45,7 +45,6 @@ def repository_compare():
     target_repo_id = request.args.get("target")
     start_time = request.args.get("start_time")
     end_time = request.args.get("end_time")
-    interval_minutes = int(request.args.get("interval", 5))
 
     if not source_repo_id or not target_repo_id:
         flash("请选择要对比的仓库", "error")
@@ -55,6 +54,11 @@ def repository_compare():
     target_repo = Repository.query.get_or_404(target_repo_id)
     _ensure_repository_access_or_403(source_repo)
     _ensure_repository_access_or_403(target_repo)
+    source_type = str(getattr(source_repo, "type", "") or "").lower()
+    target_type = str(getattr(target_repo, "type", "") or "").lower()
+    if source_type != target_type:
+        flash("仓库类型不匹配：Git 只能与 Git 对比，SVN 只能与 SVN 对比", "error")
+        return redirect(url_for("index"))
 
     try:
         start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
@@ -87,7 +91,6 @@ def repository_compare():
         target_commits,
         source_repo,
         target_repo,
-        interval_minutes,
     )
 
     return render_template(
@@ -96,12 +99,11 @@ def repository_compare():
         target_repo=target_repo,
         start_time=start_dt,
         end_time=end_dt,
-        interval_minutes=interval_minutes,
         comparison_result=comparison_result,
     )
 
 
-def analyze_repository_differences(source_commits, target_commits, source_repo, target_repo, interval_minutes):
+def analyze_repository_differences(source_commits, target_commits, source_repo, target_repo):
     """Analyze differences between two repositories."""
     source_files = {}
     target_files = {}
@@ -145,7 +147,7 @@ def analyze_repository_differences(source_commits, target_commits, source_repo, 
         target_latest = max(target_file_commits, key=lambda item: item.commit_time)
         time_diff = abs((source_latest.commit_time - target_latest.commit_time).total_seconds() / 60)
 
-        if time_diff <= interval_minutes:
+        if source_latest.commit_time == target_latest.commit_time:
             continue
 
         if source_latest.commit_time > target_latest.commit_time:

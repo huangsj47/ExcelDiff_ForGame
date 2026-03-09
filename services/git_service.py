@@ -1052,20 +1052,31 @@ class GitService:
     
     def get_commit_range_diff(self, from_commit, to_commit, file_path):
         """获取提交范围内的diff"""
+        from utils.safe_print import log_print
+        verbose_flag = str(os.environ.get("VERBOSE_GIT_DIFF_RANGE_LOGS", "")).strip().lower()
+        debug_enabled = verbose_flag in {"1", "true", "yes", "on"}
+
+        def debug_log(message):
+            if debug_enabled:
+                log_print(message, "GIT")
+
+        def warning_log(message):
+            log_print(message, "GIT", force=True)
+
         try:
-            print(f"=== Git diff range调试信息 ===")
-            print(f"本地路径: {self.local_path}")
-            print(f"路径存在: {os.path.exists(self.local_path)}")
-            print(f"从提交: {from_commit}")
-            print(f"到提交: {to_commit}")
-            print(f"文件路径: {file_path}")
+            debug_log("=== Git diff range调试信息 ===")
+            debug_log(f"本地路径: {self.local_path}")
+            debug_log(f"路径存在: {os.path.exists(self.local_path)}")
+            debug_log(f"从提交: {from_commit}")
+            debug_log(f"到提交: {to_commit}")
+            debug_log(f"文件路径: {file_path}")
             
             if not os.path.exists(self.local_path):
-                print("✗ 本地路径不存在")
+                warning_log(f"✗ 本地路径不存在: {self.local_path}")
                 return None
                 
             repo = git.Repo(self.local_path)
-            print(f"Git仓库初始化成功")
+            debug_log("Git仓库初始化成功")
             
             # 验证提交是否存在
             from_commit_obj = None
@@ -1073,35 +1084,35 @@ class GitService:
             try:
                 from_commit_obj = repo.commit(from_commit)
                 to_commit_obj = repo.commit(to_commit)
-                print(f"✓ 提交验证成功:")
-                print(f"  - 从提交: {from_commit_obj.hexsha[:8]} - {from_commit_obj.message.strip()[:50]}")
-                print(f"  - 到提交: {to_commit_obj.hexsha[:8]} - {to_commit_obj.message.strip()[:50]}")
+                debug_log("✓ 提交验证成功:")
+                debug_log(f"  - 从提交: {from_commit_obj.hexsha[:8]} - {from_commit_obj.message.strip()[:50]}")
+                debug_log(f"  - 到提交: {to_commit_obj.hexsha[:8]} - {to_commit_obj.message.strip()[:50]}")
             except Exception as e:
-                print(f"✗ 提交验证失败: {e}")
-                print("尝试更新本地仓库后重试提交解析...")
+                warning_log(f"✗ 提交验证失败: {e}")
+                debug_log("尝试更新本地仓库后重试提交解析...")
                 try:
                     update_ok, update_message = self.clone_or_update_repository()
                 except Exception as update_error:
                     update_ok = False
                     update_message = str(update_error)
-                print(f"仓库更新结果: ok={update_ok}, message={update_message}")
+                debug_log(f"仓库更新结果: ok={update_ok}, message={update_message}")
 
                 if update_ok:
                     try:
                         repo = git.Repo(self.local_path)
                         from_commit_obj = repo.commit(from_commit)
                         to_commit_obj = repo.commit(to_commit)
-                        print("✓ 仓库更新后提交验证成功")
+                        debug_log("✓ 仓库更新后提交验证成功")
                     except Exception as retry_error:
-                        print(f"✗ 仓库更新后提交验证仍失败: {retry_error}")
+                        warning_log(f"✗ 仓库更新后提交验证仍失败: {retry_error}")
 
                 if not (from_commit_obj and to_commit_obj):
-                    print(f"尝试查找类似的提交...")
+                    debug_log("尝试查找类似的提交...")
                     
                     # 尝试查找类似的提交（前8位匹配）
                     try:
                         all_commits = list(repo.iter_commits('--all', max_count=200))
-                        print(f"仓库中共有 {len(all_commits)} 个提交")
+                        debug_log(f"仓库中共有 {len(all_commits)} 个提交")
                         
                         from_short = from_commit[:8]
                         to_short = to_commit[:8]
@@ -1112,29 +1123,28 @@ class GitService:
                         for commit in all_commits:
                             if commit.hexsha.startswith(from_short):
                                 found_from = commit.hexsha
-                                print(f"找到匹配的from提交: {found_from[:8]} - {commit.message.strip()[:50]}")
+                                debug_log(f"找到匹配的from提交: {found_from[:8]} - {commit.message.strip()[:50]}")
                             if commit.hexsha.startswith(to_short):
                                 found_to = commit.hexsha
-                                print(f"找到匹配的to提交: {found_to[:8]} - {commit.message.strip()[:50]}")
+                                debug_log(f"找到匹配的to提交: {found_to[:8]} - {commit.message.strip()[:50]}")
                         
                         if found_from and found_to:
-                            print(f"使用找到的提交进行diff")
+                            debug_log("使用找到的提交进行diff")
                             from_commit = found_from
                             to_commit = found_to
                         else:
-                            print(f"✗ 未找到匹配的提交")
+                            warning_log("✗ 未找到匹配的提交")
                             return None
                             
                     except Exception as search_e:
-                        print(f"✗ 搜索提交失败: {search_e}")
+                        warning_log(f"✗ 搜索提交失败: {search_e}")
                         return None
             
             # 使用GitPython直接执行diff，避免subprocess环境问题
             try:
-                import time
                 start_time = time.time()
                 
-                print(f"使用GitPython执行diff: {from_commit[:8]}..{to_commit[:8]} -- {file_path}")
+                debug_log(f"使用GitPython执行diff: {from_commit[:8]}..{to_commit[:8]} -- {file_path}")
                 
                 # 直接使用GitPython的diff功能
                 from_commit_obj = repo.commit(from_commit)
@@ -1154,27 +1164,28 @@ class GitService:
                         diff_output = repo.git.diff(from_commit, to_commit, file_path, unified=3)
                     
                     end_time = time.time()
-                    print(f"✓ GitPython diff执行成功，耗时: {end_time - start_time:.2f}秒")
-                    print(f"输出长度: {len(diff_output)} 字符")
+                    debug_log(f"✓ GitPython diff执行成功，耗时: {end_time - start_time:.2f}秒")
+                    debug_log(f"输出长度: {len(diff_output)} 字符")
                     
                 else:
-                    print("✗ 未找到diff内容")
+                    debug_log("✗ 未找到diff内容")
                     return None
                     
             except Exception as git_e:
                 end_time = time.time()
-                print(f"✗ GitPython diff失败，耗时: {end_time - start_time:.2f}秒，错误: {git_e}")
+                elapsed = end_time - start_time if "start_time" in locals() else 0
+                warning_log(f"✗ GitPython diff失败，耗时: {elapsed:.2f}秒，错误: {git_e}")
                 
                 # 备用方案：使用repo.git.diff
                 try:
-                    print("尝试备用方案：使用repo.git.diff")
+                    debug_log("尝试备用方案：使用repo.git.diff")
                     start_time = time.time()
                     diff_output = repo.git.diff(from_commit, to_commit, file_path, unified=3)
                     end_time = time.time()
-                    print(f"✓ 备用方案成功，耗时: {end_time - start_time:.2f}秒")
-                    print(f"输出长度: {len(diff_output)} 字符")
+                    debug_log(f"✓ 备用方案成功，耗时: {end_time - start_time:.2f}秒")
+                    debug_log(f"输出长度: {len(diff_output)} 字符")
                 except Exception as backup_e:
-                    print(f"✗ 备用方案也失败: {backup_e}")
+                    warning_log(f"✗ 备用方案也失败: {backup_e}")
                     return None
             
             if not diff_output:
@@ -1193,6 +1204,7 @@ class GitService:
             return diff_data
             
         except Exception as e:
+            warning_log(f"获取提交范围diff失败: {e}")
             return None
 
     def get_commit_info(self, commit_id):

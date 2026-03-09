@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import difflib
 import html
+import re
 
 from services.model_loader import get_runtime_model
 
@@ -17,6 +18,15 @@ def log_print(message, log_type='INFO', force=False):
         runtime_log(message, log_type, force=force)
     except Exception:
         pass
+
+
+_INLINE_TOKEN_PATTERN = re.compile(r"\s+|\w+|[^\w\s]+", re.UNICODE)
+_INLINE_WORD_PATTERN = re.compile(r"^\w+$", re.UNICODE)
+_INLINE_HIGHLIGHT_IGNORED_KEYWORDS = {
+    "if", "then", "else", "elseif", "end", "while", "do", "for",
+    "function", "local", "return", "repeat", "until", "break", "in",
+    "and", "or", "not", "nil", "true", "false",
+}
 
 
 def render_excel_diff_html(merged_diff_data, file_path):
@@ -112,8 +122,8 @@ def render_git_diff_content(diff_content, file_path, base_commit_id, latest_comm
         }}
         .diff-content-wrapper {{
             background-color: #ffffff;
-            max-height: 70vh;
-            overflow-y: auto;
+            max-height: 20000px;
+            overflow-y: visible;
         }}
         /* 确保diff内容使用标准字体大小 */
         .weekly-diff-content .diff-container {{
@@ -152,35 +162,63 @@ def render_git_diff_content(diff_content, file_path, base_commit_id, latest_comm
         log_print(f"渲染Git diff内容失败: {e}", 'ERROR', force=True)
         return f"<div class='alert alert-danger'>渲染diff失败: {str(e)}</div>"
 
+def _tokenize_inline_text(raw_text):
+    tokens = []
+    for segment in _INLINE_TOKEN_PATTERN.findall(str(raw_text or "")):
+        if segment.isspace():
+            kind = "space"
+        elif _INLINE_WORD_PATTERN.match(segment):
+            kind = "word"
+        else:
+            kind = "symbol"
+        tokens.append({"text": segment, "kind": kind})
+    return tokens
+
+
+def _should_highlight_inline_token(token):
+    if not token or token.get("kind") != "word":
+        return False
+    normalized = str(token.get("text") or "").strip().lower()
+    if not normalized:
+        return False
+    return normalized not in _INLINE_HIGHLIGHT_IGNORED_KEYWORDS
+
+
 def _build_inline_change_html(old_text, new_text):
     old_raw = str(old_text or "")
     new_raw = str(new_text or "")
-    matcher = difflib.SequenceMatcher(None, old_raw, new_raw)
+    old_tokens = _tokenize_inline_text(old_raw)
+    new_tokens = _tokenize_inline_text(new_raw)
+    matcher = difflib.SequenceMatcher(
+        None,
+        [token["text"] for token in old_tokens],
+        [token["text"] for token in new_tokens],
+    )
     old_parts = []
     new_parts = []
     changed = False
 
+    def _append_tokens(parts, token_list, highlight_class=None):
+        nonlocal changed
+        for token in token_list:
+            escaped = html.escape(token["text"])
+            if highlight_class and _should_highlight_inline_token(token):
+                changed = True
+                parts.append(f'<span class="{highlight_class}">{escaped}</span>')
+            else:
+                parts.append(escaped)
+
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        old_seg = html.escape(old_raw[i1:i2])
-        new_seg = html.escape(new_raw[j1:j2])
         if tag == 'equal':
-            old_parts.append(old_seg)
-            new_parts.append(new_seg)
+            _append_tokens(old_parts, old_tokens[i1:i2])
+            _append_tokens(new_parts, new_tokens[j1:j2])
         elif tag == 'delete':
-            if old_seg:
-                changed = True
-                old_parts.append(f'<span class="diff-inline-removed">{old_seg}</span>')
+            _append_tokens(old_parts, old_tokens[i1:i2], "diff-inline-removed")
         elif tag == 'insert':
-            if new_seg:
-                changed = True
-                new_parts.append(f'<span class="diff-inline-added">{new_seg}</span>')
+            _append_tokens(new_parts, new_tokens[j1:j2], "diff-inline-added")
         elif tag == 'replace':
-            if old_seg:
-                changed = True
-                old_parts.append(f'<span class="diff-inline-removed">{old_seg}</span>')
-            if new_seg:
-                changed = True
-                new_parts.append(f'<span class="diff-inline-added">{new_seg}</span>')
+            _append_tokens(old_parts, old_tokens[i1:i2], "diff-inline-removed")
+            _append_tokens(new_parts, new_tokens[j1:j2], "diff-inline-added")
 
     return ''.join(old_parts), ''.join(new_parts), changed
 
@@ -328,6 +366,11 @@ def render_github_style_diff(diff_content):
             display: flex;
             align-items: baseline;
         }}
+        /* 全局样式里会通过 ::before 再渲染一次 +/-，这里关闭避免重复符号 */
+        .diff-container .diff-line-content::before {{
+            content: none !important;
+            display: none !important;
+        }}
         .diff-line-sign {{
             width: 22px;
             min-width: 22px;
@@ -344,14 +387,16 @@ def render_github_style_diff(diff_content):
             overflow-wrap: break-word;
         }}
         .diff-inline-added {{
-            background: #2f6f44;
-            color: #ffffff;
+            background: #abf2bc;
+            color: #24292f;
             border-radius: 2px;
+            box-shadow: inset 0 0 0 1px rgba(27, 31, 36, 0.08);
         }}
         .diff-inline-removed {{
-            background: #9a313c;
-            color: #ffffff;
+            background: #ffb8bd;
+            color: #24292f;
             border-radius: 2px;
+            box-shadow: inset 0 0 0 1px rgba(27, 31, 36, 0.08);
         }}
         .diff-line-added {{
             background-color: #dafbe1 !important;
@@ -873,8 +918,8 @@ def render_new_file_content(file_content, file_path, commit_id):
         }}
         .diff-content-wrapper {{
             background-color: #ffffff;
-            max-height: 70vh;
-            overflow-y: auto;
+            max-height: 20000px;
+            overflow-y: visible;
         }}
         .diff-container {{
             background: #fff;

@@ -56,6 +56,22 @@
     .repository-name { display: flex; align-items: center; gap: 0.35rem; font-size: 0.9rem; color: #334155; font-weight: 600; flex-shrink: 1 !important; min-width: 0 !important; margin-right: 0.75rem !important; }
     .stats-info { font-size: 0.8rem; flex-wrap: nowrap !important; }
     .stat-item { white-space: nowrap; display: flex; align-items: center; gap: 0.2rem; }
+    .pass-rate-pill {
+        display: inline-flex;
+        align-items: center;
+        margin-left: 0.35rem;
+        padding: 0.12rem 0.45rem;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        line-height: 1.15;
+        background: #f8fafc;
+        color: #334155;
+        border: 1px solid #cbd5e1;
+    }
+    .pass-rate-pill.pass-rate-high { background: #dcfce7; color: #166534; border-color: #86efac; }
+    .pass-rate-pill.pass-rate-mid { background: #fef9c3; color: #854d0e; border-color: #fde047; }
+    .pass-rate-pill.pass-rate-low { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
     .branch-tag { display: inline-flex; align-items: center; gap: 3px; font-size: 0.68rem; font-weight: 600; padding: 0.16rem 0.48rem; border-radius: 10px; line-height: 1.1; }
     .branch-tag i { font-size: 0.58rem; }
     .branch-tag-master { background: #dcfce7; color: #166534; }
@@ -160,6 +176,45 @@
         font-weight: 800 !important;
         color: #0f766e !important;
         letter-spacing: 0.01em;
+    }
+    .version-time-meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.45rem;
+    }
+    .version-time-range-highlight {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.22rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid #c7d2fe;
+        background: #eef2ff;
+        color: #1e3a8a;
+        font-size: 0.79rem;
+        font-weight: 800;
+        line-height: 1.2;
+    }
+    .version-time-range-highlight strong {
+        font-weight: 900;
+        color: #1e40af;
+    }
+    .version-today-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.22rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid #bbf7d0;
+        background: #ecfdf3;
+        color: #166534;
+        font-size: 0.78rem;
+        font-weight: 800;
+        line-height: 1.2;
+    }
+    .version-today-badge strong {
+        font-weight: 900;
     }
 
     /* ===== 右侧仓库卡片 ===== */
@@ -347,10 +402,17 @@
                                     </span>
                                 </div>
                                 <div class="mt-2">
-                                    <small class="text-muted">
-                                        <i class="fas fa-clock me-1"></i>
-                                        时间范围: {{ version.start_time.strftime('%Y-%m-%d %H:%M') }} 至 {{ version.end_time.strftime('%Y-%m-%d %H:%M') }}
-                                    </small>
+                                    <div class="version-time-meta">
+                                        <span class="version-time-range-highlight">
+                                            <i class="fas fa-clock"></i>
+                                            周版本时间范围：
+                                            <strong>{{ version.start_time.strftime('%Y-%m-%d %H:%M') }} 至 {{ version.end_time.strftime('%Y-%m-%d %H:%M') }}</strong>
+                                        </span>
+                                        <span class="version-today-badge">
+                                            <i class="fas fa-calendar-day"></i>
+                                            今天：<strong>{{ today_date }}</strong>
+                                        </span>
+                                    </div>
                                 </div>
                             </div>
                             <div class="card-body">
@@ -387,6 +449,7 @@
                                                 <span class="branch-tag {% if _branch_lower.startswith('master') %}branch-tag-master{% elif _branch_lower.startswith('dev') or _branch_lower.startswith('develop') %}branch-tag-dev{% elif _branch_lower.startswith('release') %}branch-tag-release{% elif _branch_lower.startswith('feature') %}branch-tag-feature{% elif _branch_lower.startswith('hotfix') %}branch-tag-hotfix{% else %}branch-tag-default{% endif %}">
                                                     <i class="fas fa-code-branch"></i>{{ _branch_text }}
                                                 </span>
+                                                <span class="pass-rate-pill" id="passRate-{{ config.id }}">通过率：--</span>
                                             </div>
                                             <div class="stats-info d-flex gap-3">
                                                 <span class="stat-item">
@@ -573,6 +636,7 @@
 const inactiveVersions = {{ inactive_versions_json | tojson }};
 const repositoriesData = {{ repositories_json | tojson }};
 const repositoryVirtualEnabled = {{ repositories_virtual_enabled | tojson }};
+const todayDateLabel = {{ today_date | tojson }};
 const itemsPerPage = 5;
 let currentPage = 1;
 const ACTIVE_DEFAULT_VISIBLE = 3;
@@ -919,14 +983,58 @@ function loadConfigStats(configId) {
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                document.getElementById(`fileCount-${configId}`).textContent = data.stats.total_files;
-                document.getElementById(`pendingCount-${configId}`).textContent = data.stats.pending_count;
-                document.getElementById(`confirmedCount-${configId}`).textContent = data.stats.confirmed_count;
+                const totalFiles = Number(data?.stats?.total_files || 0);
+                const pendingCount = Number(data?.stats?.pending_count || 0);
+                const confirmedCount = Number(data?.stats?.confirmed_count || 0);
+                const passRateValue = calculatePassRate(totalFiles, confirmedCount);
+
+                document.getElementById(`fileCount-${configId}`).textContent = totalFiles;
+                document.getElementById(`pendingCount-${configId}`).textContent = pendingCount;
+                document.getElementById(`confirmedCount-${configId}`).textContent = confirmedCount;
+                updatePassRateDisplay(configId, passRateValue);
             }
         })
         .catch(error => {
             console.error('Error loading stats:', error);
         });
+}
+
+function calculatePassRate(totalFiles, confirmedCount) {
+    const safeTotal = Number(totalFiles || 0);
+    const safeConfirmed = Number(confirmedCount || 0);
+    if (safeTotal <= 0) {
+        return 0;
+    }
+    const rawPercent = (safeConfirmed / safeTotal) * 100;
+    return Math.max(0, Math.min(100, rawPercent));
+}
+
+function formatPassRate(passRateValue) {
+    const rounded = Math.round(Number(passRateValue || 0) * 10) / 10;
+    if (Number.isInteger(rounded)) {
+        return `${rounded}%`;
+    }
+    return `${rounded.toFixed(1)}%`;
+}
+
+function getPassRateClass(passRateValue) {
+    if (passRateValue >= 80) {
+        return 'pass-rate-high';
+    }
+    if (passRateValue >= 50) {
+        return 'pass-rate-mid';
+    }
+    return 'pass-rate-low';
+}
+
+function updatePassRateDisplay(configId, passRateValue) {
+    const passRateEl = document.getElementById(`passRate-${configId}`);
+    if (!passRateEl) {
+        return;
+    }
+    passRateEl.textContent = `通过率：${formatPassRate(passRateValue)}`;
+    passRateEl.classList.remove('pass-rate-high', 'pass-rate-mid', 'pass-rate-low');
+    passRateEl.classList.add(getPassRateClass(passRateValue));
 }
 
 function renderInactiveVersions() {
@@ -960,9 +1068,21 @@ function getBranchTagClass(branch) {
     return 'branch-tag-default';
 }
 
+function getTodayDateLabel() {
+    if (todayDateLabel) {
+        return todayDateLabel;
+    }
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
 function createInactiveVersionHtml(version) {
     const startTime = new Date(version.start_time).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
     const endTime = new Date(version.end_time).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
+    const todayText = getTodayDateLabel();
     
     let configsHtml = '';
     let statsHtml = '';
@@ -984,6 +1104,7 @@ function createInactiveVersionHtml(version) {
                     <span class="branch-tag ${getBranchTagClass(config.branch)}">
                         <i class="fas fa-code-branch"></i>${config.branch || '-'}
                     </span>
+                    <span class="pass-rate-pill" id="passRate-${config.id}">通过率：--</span>
                 </div>
                 <div class="stats-info d-flex gap-3">
                     <span class="stat-item">
@@ -1021,10 +1142,17 @@ function createInactiveVersionHtml(version) {
                     </span>
                 </div>
                 <div class="mt-2">
-                    <small class="text-muted">
-                        <i class="fas fa-clock me-1"></i>
-                        时间范围: ${startTime} 至 ${endTime}
-                    </small>
+                    <div class="version-time-meta">
+                        <span class="version-time-range-highlight">
+                            <i class="fas fa-clock"></i>
+                            周版本时间范围：
+                            <strong>${startTime} 至 ${endTime}</strong>
+                        </span>
+                        <span class="version-today-badge">
+                            <i class="fas fa-calendar-day"></i>
+                            今天：<strong>${todayText}</strong>
+                        </span>
+                    </div>
                 </div>
             </div>
             <div class="card-body">

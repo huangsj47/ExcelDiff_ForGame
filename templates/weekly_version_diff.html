@@ -965,6 +965,7 @@ let selectedFilePath = '';
 let allAuthors = new Set();
 let syncRetryTimer = null;
 let syncRetryAttempts = 0;
+const MAX_SYNC_RETRY_ATTEMPTS = 120;
 
 // 分页相关变量
 let currentPage = 1;
@@ -1113,6 +1114,23 @@ function loadFileList() {
             return data;
         })
         .then(data => {
+            const syncStatus = String(data.sync_task_status || '').toLowerCase();
+            // 历史兼容参考（旧逻辑，不再执行）: const syncBlocking = Boolean(data.sync_blocking) || syncRunning;
+            const syncBlocking = Boolean(data.sync_blocking);
+            updateRepositoryName(data.repository_name);
+
+            if (syncBlocking) {
+                allFiles = [];
+                filteredFiles = [];
+                selectedFilePath = '';
+                updateAuthorFilter([]);
+                renderWeeklySyncProcessing(syncStatus || 'pending', data.sync_task_id, Boolean(data.sync_triggered));
+                scheduleWeeklySyncRetry();
+                updateRebuildCacheButtonVisibility();
+                return;
+            }
+            clearWeeklySyncRetry();
+
             allFiles = data.files || [];
             if (selectedFilePath && !allFiles.some(file => file.file_path === selectedFilePath)) {
                 selectedFilePath = '';
@@ -1127,24 +1145,6 @@ function loadFileList() {
                 totalCountEl.textContent = `${data.total_files || 0} 个文件`;
             }
 
-            // 更新仓库名称显示
-            updateRepositoryName(data.repository_name);
-
-            const syncStatus = String(data.sync_task_status || '').toLowerCase();
-            const syncRunning = syncStatus === 'pending' || syncStatus === 'processing';
-            if ((data.total_files || 0) === 0 && syncRunning) {
-                if (treeContainer) {
-                    treeContainer.innerHTML = `
-                        <div class="text-center py-4 text-muted">
-                            正在生成周版本文件列表（任务 #${data.sync_task_id || '-'}，状态：${escapeHtmlText(syncStatus)}），稍后自动刷新...
-                        </div>
-                    `;
-                }
-                scheduleWeeklySyncRetry();
-            } else {
-                clearWeeklySyncRetry();
-            }
-
             // 更新重建缓存按钮显示状态
             updateRebuildCacheButtonVisibility();
         })
@@ -1157,6 +1157,44 @@ function loadFileList() {
         });
 }
 
+function renderWeeklySyncProcessing(syncStatus, syncTaskId, syncTriggered) {
+    const treeContainer = document.getElementById('fileTreeContainer');
+    const totalCountEl = document.getElementById('totalFilesCount');
+    const normalizedStatus = String(syncStatus || 'pending').toLowerCase();
+    const statusLabelMap = {
+        pending: '排队中',
+        processing: '处理中',
+        failed: '重试中',
+    };
+    const statusLabel = statusLabelMap[normalizedStatus] || '处理中';
+    const retryTip = normalizedStatus === 'failed'
+        ? '<div class="small mt-1 text-warning">检测到任务失败，系统正在自动重试，请稍候。</div>'
+        : '';
+    const triggeredTip = syncTriggered
+        ? '<div class="small mt-1 text-primary">已触发首轮同步任务，请稍候。</div>'
+        : '';
+    if (totalCountEl) {
+        totalCountEl.textContent = '处理中...';
+    }
+    if (!treeContainer) {
+        return;
+    }
+    treeContainer.innerHTML = `
+        <div class="text-center py-5 text-muted">
+            <div class="spinner-border text-primary mb-3" role="status">
+                <span class="visually-hidden">加载中...</span>
+            </div>
+            <div class="fw-semibold">周版本数据处理中</div>
+            <div class="small mt-2">
+                任务 #${syncTaskId || '-'}，状态：${escapeHtmlText(statusLabel)}。
+            </div>
+            <div class="small mt-1">处理完成后将自动刷新并展示完整数据。</div>
+            ${retryTip}
+            ${triggeredTip}
+        </div>
+    `;
+}
+
 function clearWeeklySyncRetry() {
     if (syncRetryTimer) {
         clearTimeout(syncRetryTimer);
@@ -1166,7 +1204,7 @@ function clearWeeklySyncRetry() {
 }
 
 function scheduleWeeklySyncRetry() {
-    if (syncRetryAttempts >= 10) {
+    if (syncRetryAttempts >= MAX_SYNC_RETRY_ATTEMPTS) {
         return;
     }
     if (syncRetryTimer) {
