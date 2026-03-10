@@ -251,6 +251,94 @@
     .pagination .page-link { border-radius: 6px; margin: 0 2px; font-weight: 500; font-size: 0.85rem; }
     .pagination .page-item.active .page-link { background: #0d6efd; border-color: #0d6efd; }
 
+    /* ===== 版本AI风险标签 ===== */
+    .version-risk-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.2rem 0.6rem;
+        border-radius: 999px;
+        font-size: 0.74rem;
+        font-weight: 700;
+        cursor: pointer;
+        border: 1px solid #e2e8f0;
+        background: #f8fafc;
+        color: #475569;
+        transition: all 0.2s ease;
+    }
+    .version-risk-label:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 3px 10px rgba(15, 23, 42, 0.12);
+    }
+    .version-risk-label.risk-low { background: #dcfce7; color: #166534; border-color: #86efac; }
+    .version-risk-label.risk-mid-low { background: #ecfccb; color: #3f6212; border-color: #bef264; }
+    .version-risk-label.risk-medium { background: #fef9c3; color: #854d0e; border-color: #fde047; }
+    .version-risk-label.risk-mid-high { background: #ffe4e6; color: #9f1239; border-color: #fda4af; }
+    .version-risk-label.risk-high { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
+
+    /* ===== AI 抽屉 ===== */
+    .ai-drawer-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.45);
+        opacity: 0;
+        visibility: hidden;
+        transition: all 0.2s ease;
+        z-index: 1050;
+    }
+    body.ai-drawer-open { overflow: hidden; }
+    .ai-drawer-overlay.open { opacity: 1; visibility: visible; }
+    .ai-drawer {
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: 460px;
+        max-width: 92%;
+        height: 100%;
+        background: #fff;
+        box-shadow: -10px 0 30px rgba(15, 23, 42, 0.18);
+        transform: translateX(100%);
+        transition: transform 0.25s ease;
+        z-index: 1060;
+        display: flex;
+        flex-direction: column;
+    }
+    .ai-drawer.open { transform: translateX(0); }
+    .ai-drawer-header {
+        padding: 0.85rem 1rem;
+        border-bottom: 1px solid #e2e8f0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background: #fff;
+    }
+    .ai-drawer-body {
+        padding: 1rem;
+        background: #f8fafc;
+        flex: 1;
+        overflow-y: auto;
+    }
+    .ai-drawer-footer {
+        padding: 0.75rem 1rem;
+        border-top: 1px solid #e2e8f0;
+        background: #fff;
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.5rem;
+    }
+    .ai-analysis-output {
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 12px;
+        min-height: 180px;
+        font-size: 0.82rem;
+        white-space: pre-wrap;
+        font-family: "Fira Code", "Consolas", "Courier New", monospace;
+        color: #1f2937;
+    }
+    .ai-analysis-output.is-empty { color: #94a3b8; }
+
     /* ===== 响应式 ===== */
     @media (max-width: 768px) {
         .page-header { padding: 1rem; }
@@ -293,6 +381,77 @@
                     <a href="{{ url_for('repository_config', project_id=project.id) }}" class="btn btn-outline-light">
                         <i class="fas fa-database me-1"></i>配置仓库
                     </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% set _ai_can_edit = is_admin() or has_project_admin_access(project.id) %}
+    <div class="card mb-4" id="aiConfigCard">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">
+                <i class="fas fa-robot me-2"></i>AI分析配置
+            </h5>
+            <span class="badge bg-secondary" id="aiKeyStatusBadge">检测中</span>
+        </div>
+        <div class="card-body">
+            <ul class="nav nav-tabs" id="aiConfigTabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link active" id="ai-token-tab" data-bs-toggle="tab" data-bs-target="#ai-token-panel" type="button" role="tab" aria-controls="ai-token-panel" aria-selected="true">API Token</button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" id="ai-settings-tab" data-bs-toggle="tab" data-bs-target="#ai-settings-panel" type="button" role="tab" aria-controls="ai-settings-panel" aria-selected="false">AI分析设置</button>
+                </li>
+            </ul>
+            <div class="tab-content pt-3">
+                <div class="tab-pane fade show active" id="ai-token-panel" role="tabpanel" aria-labelledby="ai-token-tab">
+                    <div class="row g-3 align-items-center">
+                        <div class="col-md-6">
+                            <div class="text-muted small">API Key 仅支持更新，无法查看明文。</div>
+                            <div class="small text-muted" id="aiKeyMeta">用于周版本风险评估与测试建议生成。</div>
+                        </div>
+                        <div class="col-md-6">
+                            {% if _ai_can_edit %}
+                            <div class="input-group">
+                                <input type="password" class="form-control form-control-sm" id="aiKeyInput" placeholder="输入新的 API Key">
+                                <button class="btn btn-primary btn-sm" type="button" id="aiKeySaveBtn">更新</button>
+                            </div>
+                            <div class="form-text" id="aiKeyFeedback"></div>
+                            {% else %}
+                            <div class="text-muted small">仅项目管理员可更新 API Key。</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                <div class="tab-pane fade" id="ai-settings-panel" role="tabpanel" aria-labelledby="ai-settings-tab">
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label class="form-label">周版本自动分析</label>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="aiWeeklyAutoToggle" checked>
+                                <label class="form-check-label" for="aiWeeklyAutoToggle">启用</label>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">分析间隔（分钟）</label>
+                            <input type="number" min="1" class="form-control form-control-sm" id="aiWeeklyIntervalInput" placeholder="例如 60">
+                            <div class="form-text">最小 1 分钟，无变更不触发分析。</div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">单次最大文件数</label>
+                            <input type="number" min="10" class="form-control form-control-sm" id="aiMaxFilesInput" placeholder="例如 200">
+                            <div class="form-text">用于控制 token 与分析范围。</div>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">AI分析提示词</label>
+                            <textarea class="form-control form-control-sm" rows="6" id="aiPromptInput" placeholder="请输入分析提示词"></textarea>
+                            <div class="form-text">可在此描述项目背景、技术栈、输出格式要求。</div>
+                        </div>
+                        <div class="col-12 d-flex justify-content-end align-items-center gap-2">
+                            <span class="small text-muted" id="aiConfigFeedback"></span>
+                            <button class="btn btn-primary btn-sm" id="aiConfigSaveBtn">保存配置</button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -397,9 +556,16 @@
                                     <h5 class="mb-0 text-success version-name-title">
                                         <i class="fas fa-calendar-check me-2"></i>{{ version.name }}
                                     </h5>
-                                    <span class="badge bg-success">
-                                        <i class="fas fa-play-circle me-1"></i>活跃中
-                                    </span>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <span class="version-risk-label risk-unknown"
+                                              data-config-id="{{ version.configs[0].id }}"
+                                              data-version-name="{{ version.name }}">
+                                            版本AI分析：未分析
+                                        </span>
+                                        <span class="badge bg-success">
+                                            <i class="fas fa-play-circle me-1"></i>活跃中
+                                        </span>
+                                    </div>
                                 </div>
                                 <div class="mt-2">
                                     <div class="version-time-meta">
@@ -631,6 +797,28 @@
     {% endif %}
 </div>
 
+<div class="ai-drawer-overlay" id="weeklyAiDrawerOverlay"></div>
+<aside class="ai-drawer" id="weeklyAiDrawer">
+    <div class="ai-drawer-header">
+        <div class="d-flex align-items-center gap-2">
+            <span class="fw-semibold" id="weeklyAiDrawerTitle">AI分析</span>
+            <span class="badge bg-warning text-dark">Beta</span>
+            <span class="badge bg-secondary" id="weeklyAiStatusBadge">待分析</span>
+        </div>
+        <button type="button" class="btn btn-sm btn-light" id="weeklyAiDrawerCloseBtn">
+            <i class="fas fa-times"></i>
+        </button>
+    </div>
+    <div class="ai-drawer-body">
+        <div class="small text-muted mb-2" id="weeklyAiMeta">自动分析每 1 小时触发，可手动补跑。</div>
+        <pre class="ai-analysis-output is-empty" id="weeklyAiOutput">暂无分析结果。</pre>
+    </div>
+    <div class="ai-drawer-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="weeklyAiRefreshBtn">刷新结果</button>
+        <button type="button" class="btn btn-sm btn-primary" id="weeklyAiStartBtn">重新分析</button>
+    </div>
+</aside>
+
 <script>
 // 非活跃版本数据
 const inactiveVersions = {{ inactive_versions_json | tojson }};
@@ -638,15 +826,433 @@ const repositoriesData = {{ repositories_json | tojson }};
 const repositoryVirtualEnabled = {{ repositories_virtual_enabled | tojson }};
 const todayDateLabel = {{ today_date | tojson }};
 const WEEKLY_STATS_SYNC_EVENT_KEY = 'weeklyVersionStatsChanged';
+const aiProjectId = {{ project.id }};
+const aiCanEdit = {{ 'true' if _ai_can_edit else 'false' }};
 const itemsPerPage = 5;
 let currentPage = 1;
 const ACTIVE_DEFAULT_VISIBLE = 3;
 const REPO_PAGE_SIZE = 8;
 const REPO_VIRTUAL_ITEM_HEIGHT = 236;
 const REPO_VIRTUAL_OVERSCAN = 4;
+let weeklyAiCurrentConfigId = null;
+let weeklyAiSource = null;
+let weeklyAiHasCached = false;
+const weeklyAiCache = new Map();
+
+const RISK_LEVEL_MAP = {
+    low: { label: '低风险', className: 'risk-low' },
+    mid_low: { label: '中低风险', className: 'risk-mid-low' },
+    medium: { label: '中风险', className: 'risk-medium' },
+    mid_high: { label: '中高风险', className: 'risk-mid-high' },
+    high: { label: '高风险', className: 'risk-high' },
+};
+
+function setAiKeyStatusBadge(text, variant) {
+    const badge = document.getElementById('aiKeyStatusBadge');
+    if (!badge) return;
+    badge.textContent = text;
+    badge.className = `badge bg-${variant}`;
+}
+
+async function refreshAiKeyStatus() {
+    const meta = document.getElementById('aiKeyMeta');
+    try {
+        const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/api-key/status`);
+        const data = await resp.json();
+        if (data && data.configured) {
+            setAiKeyStatusBadge('已配置', 'success');
+            if (meta) {
+                meta.textContent = data.updated_at ? `API Key 最近更新：${data.updated_at}` : 'API Key 已配置';
+            }
+        } else {
+            setAiKeyStatusBadge('未配置', 'warning');
+            if (meta) meta.textContent = '尚未配置 API Key。';
+        }
+    } catch (_err) {
+        setAiKeyStatusBadge('检测失败', 'danger');
+        if (meta) meta.textContent = '无法获取 API Key 状态。';
+    }
+}
+
+function initAiKeyUpdater() {
+    if (!aiCanEdit) {
+        refreshAiKeyStatus();
+        return;
+    }
+    const input = document.getElementById('aiKeyInput');
+    const btn = document.getElementById('aiKeySaveBtn');
+    const feedback = document.getElementById('aiKeyFeedback');
+    async function submit() {
+        const value = input ? String(input.value || '').trim() : '';
+        if (!value) {
+            if (feedback) feedback.textContent = '请输入新的 API Key。';
+            return;
+        }
+        if (btn) btn.disabled = true;
+        if (feedback) feedback.textContent = '正在更新...';
+        try {
+            const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/api-key`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ api_key: value })
+            });
+            const data = await resp.json();
+            if (data && data.success) {
+                if (feedback) feedback.textContent = '更新成功。';
+                if (input) input.value = '';
+                refreshAiKeyStatus();
+            } else {
+                if (feedback) feedback.textContent = data.message || '更新失败。';
+            }
+        } catch (_err) {
+            if (feedback) feedback.textContent = '更新失败，请稍后重试。';
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+    if (btn) btn.addEventListener('click', submit);
+    if (input) {
+        input.addEventListener('keydown', function(event) {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                submit();
+            }
+        });
+    }
+    refreshAiKeyStatus();
+}
+
+function setAiConfigFeedback(text, isError) {
+    const feedback = document.getElementById('aiConfigFeedback');
+    if (!feedback) return;
+    feedback.textContent = text || '';
+    feedback.style.color = isError ? '#b42332' : '#64748b';
+}
+
+async function refreshAiAnalysisConfig() {
+    const intervalInput = document.getElementById('aiWeeklyIntervalInput');
+    const autoToggle = document.getElementById('aiWeeklyAutoToggle');
+    const maxFilesInput = document.getElementById('aiMaxFilesInput');
+    const promptInput = document.getElementById('aiPromptInput');
+    try {
+        const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/config`, { cache: 'no-store' });
+        const data = await resp.json();
+        if (!data || !data.success) {
+            setAiConfigFeedback('无法加载 AI 配置。', true);
+            return;
+        }
+        if (intervalInput) intervalInput.value = data.weekly_interval_minutes ?? 60;
+        if (autoToggle) autoToggle.checked = data.auto_weekly_enabled !== false;
+        if (maxFilesInput) maxFilesInput.value = data.max_files_per_run ?? 200;
+        if (promptInput) promptInput.value = data.prompt_template || '';
+        if (data.updated_at) {
+            setAiConfigFeedback(`最近更新：${data.updated_at}`, false);
+        } else {
+            setAiConfigFeedback('', false);
+        }
+    } catch (_err) {
+        setAiConfigFeedback('无法加载 AI 配置。', true);
+    }
+}
+
+function initAiAnalysisConfigForm() {
+    const intervalInput = document.getElementById('aiWeeklyIntervalInput');
+    const autoToggle = document.getElementById('aiWeeklyAutoToggle');
+    const maxFilesInput = document.getElementById('aiMaxFilesInput');
+    const promptInput = document.getElementById('aiPromptInput');
+    const saveBtn = document.getElementById('aiConfigSaveBtn');
+
+    if (!aiCanEdit) {
+        [intervalInput, autoToggle, maxFilesInput, promptInput, saveBtn].forEach(el => {
+            if (el) el.disabled = true;
+        });
+        setAiConfigFeedback('仅项目管理员可更新 AI 配置。', true);
+        refreshAiAnalysisConfig();
+        return;
+    }
+
+    async function submit() {
+        const payload = {
+            weekly_interval_minutes: intervalInput ? Number(intervalInput.value || 0) : 0,
+            auto_weekly_enabled: autoToggle ? !!autoToggle.checked : true,
+            max_files_per_run: maxFilesInput ? Number(maxFilesInput.value || 0) : 0,
+            prompt_template: promptInput ? String(promptInput.value || '').trim() : ''
+        };
+        if (saveBtn) saveBtn.disabled = true;
+        setAiConfigFeedback('正在保存...', false);
+        try {
+            const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/config`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await resp.json();
+            if (data && data.success) {
+                setAiConfigFeedback('保存成功。', false);
+                refreshAiAnalysisConfig();
+            } else {
+                setAiConfigFeedback(data.message || '保存失败。', true);
+            }
+        } catch (_err) {
+            setAiConfigFeedback('保存失败，请稍后重试。', true);
+        } finally {
+            if (saveBtn) saveBtn.disabled = false;
+        }
+    }
+
+    if (saveBtn) saveBtn.addEventListener('click', submit);
+    refreshAiAnalysisConfig();
+}
+
+function normalizeRiskLevel(level) {
+    if (!level) return '';
+    const raw = String(level).toLowerCase();
+    if (raw === 'mid-low' || raw === 'mid_low') return 'mid_low';
+    if (raw === 'mid-high' || raw === 'mid_high') return 'mid_high';
+    return raw;
+}
+
+function applyRiskLabel(el, level) {
+    if (!el) return;
+    const normalized = normalizeRiskLevel(level);
+    const config = RISK_LEVEL_MAP[normalized];
+    el.classList.remove('risk-low', 'risk-mid-low', 'risk-medium', 'risk-mid-high', 'risk-high');
+    if (!config) {
+        el.textContent = '版本AI分析：未分析';
+        el.classList.add('risk-unknown');
+        return;
+    }
+    el.classList.remove('risk-unknown');
+    el.classList.add(config.className);
+    el.textContent = `版本AI分析：${config.label}`;
+}
+
+function updateRiskLabelByConfig(configId, level) {
+    document.querySelectorAll(`.version-risk-label[data-config-id="${configId}"]`).forEach(el => {
+        applyRiskLabel(el, level);
+    });
+}
+
+async function fetchWeeklyAiKeyStatus() {
+    try {
+        const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/api-key/status`);
+        return await resp.json();
+    } catch (_err) {
+        return null;
+    }
+}
+
+async function getWeeklyAiResult(configId, force = false) {
+    if (!force && weeklyAiCache.has(configId)) {
+        return weeklyAiCache.get(configId);
+    }
+    try {
+        const resp = await fetch(`/ai-analysis/weekly/${configId}/latest`, { cache: 'no-store' });
+        const data = await resp.json();
+        const result = (data && data.result) ? data.result : null;
+        weeklyAiCache.set(configId, result);
+        return result;
+    } catch (_err) {
+        return null;
+    }
+}
+
+async function refreshRiskLabels(root = document) {
+    const labels = Array.from(root.querySelectorAll('.version-risk-label'));
+    if (labels.length === 0) return;
+    await Promise.all(labels.map(async (label) => {
+        const configId = label.dataset.configId;
+        if (!configId) return;
+        const result = await getWeeklyAiResult(configId);
+        const riskLevel = result && result.result ? result.result.risk_level : null;
+        applyRiskLabel(label, riskLevel);
+    }));
+}
+
+function setWeeklyAiStatusBadge(text, variant) {
+    const badge = document.getElementById('weeklyAiStatusBadge');
+    if (!badge) return;
+    badge.textContent = text;
+    badge.className = `badge bg-${variant}`;
+}
+
+function setWeeklyAiOutput(text, isEmpty) {
+    const output = document.getElementById('weeklyAiOutput');
+    if (!output) return;
+    output.textContent = text;
+    if (isEmpty) {
+        output.classList.add('is-empty');
+    } else {
+        output.classList.remove('is-empty');
+    }
+}
+
+function appendWeeklyAiLine(text) {
+    const output = document.getElementById('weeklyAiOutput');
+    if (!output) return;
+    if (output.classList.contains('is-empty')) {
+        output.textContent = '';
+        output.classList.remove('is-empty');
+    }
+    output.textContent += (output.textContent ? '\n' : '') + text;
+    output.scrollTop = output.scrollHeight;
+}
+
+function closeWeeklyAiStream() {
+    if (weeklyAiSource) {
+        weeklyAiSource.close();
+        weeklyAiSource = null;
+    }
+}
+
+function openWeeklyAiDrawer(configId, versionName) {
+    weeklyAiCurrentConfigId = configId;
+    const overlay = document.getElementById('weeklyAiDrawerOverlay');
+    const drawer = document.getElementById('weeklyAiDrawer');
+    const title = document.getElementById('weeklyAiDrawerTitle');
+    if (title) {
+        title.textContent = versionName ? `AI分析 - ${versionName}` : 'AI分析';
+    }
+    if (overlay) overlay.classList.add('open');
+    if (drawer) drawer.classList.add('open');
+    document.body.classList.add('ai-drawer-open');
+}
+
+function closeWeeklyAiDrawer() {
+    const overlay = document.getElementById('weeklyAiDrawerOverlay');
+    const drawer = document.getElementById('weeklyAiDrawer');
+    if (overlay) overlay.classList.remove('open');
+    if (drawer) drawer.classList.remove('open');
+    document.body.classList.remove('ai-drawer-open');
+    closeWeeklyAiStream();
+}
+
+async function refreshWeeklyAiLatest(configId) {
+    const meta = document.getElementById('weeklyAiMeta');
+    const result = await getWeeklyAiResult(configId, true);
+    if (result && result.response_text) {
+        weeklyAiHasCached = true;
+        const risk = result.result?.risk_level || '-';
+        const createdAt = result.created_at || '-';
+        const scope = result.scope || '-';
+        if (meta) {
+            meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`;
+        }
+        setWeeklyAiOutput(result.response_text, false);
+        setWeeklyAiStatusBadge('已有结果', 'success');
+        updateRiskLabelByConfig(configId, risk);
+        return true;
+    }
+    weeklyAiHasCached = false;
+    setWeeklyAiOutput('暂无分析结果。', true);
+    setWeeklyAiStatusBadge('待分析', 'secondary');
+    return false;
+}
+
+async function startWeeklyAiAnalysis(force = false) {
+    if (!weeklyAiCurrentConfigId) return;
+    if (!force && weeklyAiHasCached) {
+        return;
+    }
+    closeWeeklyAiStream();
+    setWeeklyAiStatusBadge('分析中', 'primary');
+    setWeeklyAiOutput('AI 分析进行中...', false);
+    const startBtn = document.getElementById('weeklyAiStartBtn');
+    if (startBtn) startBtn.disabled = true;
+    weeklyAiSource = new EventSource(`/ai-analysis/weekly/${weeklyAiCurrentConfigId}/stream?source=manual`);
+    weeklyAiSource.addEventListener('chunk', function(event) {
+        try {
+            const payload = JSON.parse(event.data || '{}');
+            if (payload.text) {
+                appendWeeklyAiLine(payload.text);
+            }
+        } catch (_err) {
+            appendWeeklyAiLine('解析 AI 输出失败');
+        }
+    });
+    weeklyAiSource.addEventListener('result', function(event) {
+        try {
+            const payload = JSON.parse(event.data || '{}');
+            if (payload.risk_level) {
+                appendWeeklyAiLine(`\n风险等级：${payload.risk_level}`);
+                updateRiskLabelByConfig(weeklyAiCurrentConfigId, payload.risk_level);
+            }
+        } catch (_err) {}
+        setWeeklyAiStatusBadge('完成', 'success');
+        if (startBtn) startBtn.disabled = false;
+        weeklyAiCache.delete(weeklyAiCurrentConfigId);
+        closeWeeklyAiStream();
+    });
+    weeklyAiSource.addEventListener('cached', function() {
+        setWeeklyAiStatusBadge('已有结果', 'success');
+    });
+    weeklyAiSource.addEventListener('error', function(event) {
+        let message = 'AI 分析失败或连接中断';
+        if (event && event.data) {
+            try {
+                const payload = JSON.parse(event.data);
+                if (payload.message) message = payload.message;
+            } catch (_err) {}
+        }
+        setWeeklyAiOutput(message, false);
+        setWeeklyAiStatusBadge('失败', 'danger');
+        if (startBtn) startBtn.disabled = false;
+        closeWeeklyAiStream();
+    });
+}
+
+function initWeeklyAiDrawer() {
+    const overlay = document.getElementById('weeklyAiDrawerOverlay');
+    const closeBtn = document.getElementById('weeklyAiDrawerCloseBtn');
+    const startBtn = document.getElementById('weeklyAiStartBtn');
+    const refreshBtn = document.getElementById('weeklyAiRefreshBtn');
+
+    if (overlay) overlay.addEventListener('click', closeWeeklyAiDrawer);
+    if (closeBtn) closeBtn.addEventListener('click', closeWeeklyAiDrawer);
+    if (startBtn) {
+        startBtn.addEventListener('click', function() {
+            if (weeklyAiHasCached && !confirm('已有分析结果，确定重新分析吗？')) {
+                return;
+            }
+            startWeeklyAiAnalysis(true);
+        });
+    }
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', function() {
+            if (weeklyAiCurrentConfigId) {
+                refreshWeeklyAiLatest(weeklyAiCurrentConfigId);
+            }
+        });
+    }
+
+    document.addEventListener('click', function(event) {
+        const label = event.target.closest('.version-risk-label');
+        if (!label) return;
+        const configId = label.dataset.configId;
+        const versionName = label.dataset.versionName || '';
+        if (!configId) return;
+        openWeeklyAiDrawer(configId, versionName);
+        fetchWeeklyAiKeyStatus().then(status => {
+            if (status && status.configured) {
+                setWeeklyAiStatusBadge('已配置', 'success');
+            } else if (status && status.configured === false) {
+                setWeeklyAiStatusBadge('未配置', 'warning');
+                setWeeklyAiOutput('请先在项目概览页配置 API Key。', false);
+                return;
+            }
+        });
+        refreshWeeklyAiLatest(configId).then(hasCached => {
+            if (!hasCached) {
+                startWeeklyAiAnalysis();
+            }
+        });
+    });
+}
 
 // 页面加载时获取统计信息
 document.addEventListener('DOMContentLoaded', function() {
+    initAiKeyUpdater();
+    initAiAnalysisConfigForm();
     refreshAllVisibleConfigStats();
     
     // 初始化非活跃版本分页
@@ -656,6 +1262,8 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     initActiveVersionList();
     initRepositoryList();
+    initWeeklyAiDrawer();
+    refreshRiskLabels();
 
     window.addEventListener('pageshow', function() {
         refreshAllVisibleConfigStats();
@@ -1094,6 +1702,8 @@ function renderInactiveVersions() {
             loadConfigStats(config.id);
         });
     });
+
+    refreshRiskLabels(container);
 }
 
 function getBranchTagClass(branch) {
@@ -1175,9 +1785,16 @@ function createInactiveVersionHtml(version) {
                     <h5 class="mb-0 text-secondary">
                         <i class="fas fa-archive me-2"></i>${version.name}
                     </h5>
-                    <span class="badge bg-secondary">
-                        <i class="fas fa-archive me-1"></i>已归档
-                    </span>
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="version-risk-label risk-unknown"
+                              data-config-id="${version.configs[0].id}"
+                              data-version-name="${version.name}">
+                            版本AI分析：未分析
+                        </span>
+                        <span class="badge bg-secondary">
+                            <i class="fas fa-archive me-1"></i>已归档
+                        </span>
+                    </div>
                 </div>
                 <div class="mt-2">
                     <div class="version-time-meta">

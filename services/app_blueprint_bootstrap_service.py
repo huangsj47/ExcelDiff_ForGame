@@ -31,6 +31,7 @@ def configure_app_blueprints(
     core_management_bp,
     weekly_version_bp,
     agent_management_bp,
+    ai_analysis_bp,
 ) -> None:
     """Register all split blueprints with startup trace logging."""
     app.register_blueprint(cache_management_bp)
@@ -58,5 +59,11 @@ def configure_app_blueprints(
         app=app,
         blueprint=agent_management_bp,
         label="agent_management_bp",
+        log_print=log_print,
+    )
+    _register_blueprint_with_trace(
+        app=app,
+        blueprint=ai_analysis_bp,
+        label="ai_analysis_bp",
         log_print=log_print,
     )

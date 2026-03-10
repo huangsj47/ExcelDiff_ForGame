@@ -245,6 +245,7 @@ from routes.cache_management_routes import cache_management_bp
 from routes.commit_diff_routes import commit_diff_bp
 from routes.core_management_routes import core_management_bp
 from routes.weekly_version_management_routes import weekly_version_bp
+from routes.ai_analysis_routes import ai_analysis_bp
 from utils.url_helpers import generate_commit_diff_url, generate_excel_diff_data_url, generate_refresh_diff_url
 from utils.db_retry import db_retry
 from utils.sqlite_config import set_sqlite_pragma  # 导入SQLite优化配置
@@ -450,6 +451,7 @@ configure_app_blueprints(
     core_management_bp=core_management_bp,
     weekly_version_bp=weekly_version_bp,
     agent_management_bp=agent_management_bp,
+    ai_analysis_bp=ai_analysis_bp,
 )
 
 configure_app_routing_bootstrap(app=app, log_print=log_print)

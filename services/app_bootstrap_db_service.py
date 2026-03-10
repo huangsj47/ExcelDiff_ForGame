@@ -90,6 +90,10 @@ def create_tables_with_runtime_checks(*, app, db, log_print, apply_schema_migrat
                 "agent_tasks",
                 "agent_default_admins",
                 "agent_incidents",
+                "ai_project_api_key",
+                "ai_project_analysis_config",
+                "ai_analysis_run",
+                "ai_weekly_analysis_state",
             ]
             missing_tables = [table_name for table_name in expected_tables if table_name not in final_tables]
             if missing_tables:

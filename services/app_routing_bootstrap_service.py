@@ -13,6 +13,7 @@ DEFAULT_BLUEPRINT_PREFIXES = (
     "weekly_version_routes.",
     "cache_management.",
     "agent_management_routes.",
+    "ai_analysis_routes.",
     "main.",
 )
 

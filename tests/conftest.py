@@ -9,10 +9,84 @@ import sys
 import os
 import io
 import tempfile
+import uuid
+import shutil
 import atexit
+from pathlib import Path
+
+import pytest
+import tempfile
+import _pytest.pathlib as _pytest_pathlib
+import _pytest.tmpdir as _pytest_tmpdir
 
 from utils.db_config import get_sqlite_path_from_uri
 from utils.db_safety import is_temp_sqlite_path
+
+# Guard pytest cleanup against permission quirks on this host.
+_orig_cleanup_dead_symlinks = _pytest_pathlib.cleanup_dead_symlinks
+
+
+def _safe_cleanup_dead_symlinks(root):
+    try:
+        return _orig_cleanup_dead_symlinks(root)
+    except PermissionError:
+        return None
+
+
+_pytest_pathlib.cleanup_dead_symlinks = _safe_cleanup_dead_symlinks
+_pytest_tmpdir.cleanup_dead_symlinks = _safe_cleanup_dead_symlinks
+
+# Force temp dirs into workspace to avoid permission issues.
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_pytest_tmp_parent = os.path.join(PROJECT_ROOT, ".pytest_tmp")
+_pytest_basetemp_root = os.path.join(_pytest_tmp_parent, f"run_{uuid.uuid4().hex}")
+_pytest_work_root = os.path.join(_pytest_tmp_parent, "work")
+_pytest_db_root = os.path.join(_pytest_tmp_parent, "db")
+os.makedirs(_pytest_basetemp_root, exist_ok=True)
+os.makedirs(_pytest_work_root, exist_ok=True)
+os.makedirs(_pytest_db_root, exist_ok=True)
+os.environ.setdefault("PYTEST_TMPDIR", _pytest_basetemp_root)
+os.environ.setdefault("TMPDIR", _pytest_work_root)
+os.environ.setdefault("TEMP", _pytest_work_root)
+os.environ.setdefault("TMP", _pytest_work_root)
+tempfile.tempdir = _pytest_work_root
+
+
+def _safe_mkdtemp(suffix=None, prefix=None, dir=None):
+    suffix = "" if suffix is None else str(suffix)
+    prefix = "tmp" if prefix is None else str(prefix)
+    base = dir or _pytest_work_root
+    os.makedirs(base, exist_ok=True)
+    while True:
+        name = f"{prefix}{uuid.uuid4().hex}{suffix}"
+        path = os.path.join(base, name)
+        try:
+            os.makedirs(path, exist_ok=False)
+            return path
+        except FileExistsError:
+            continue
+
+
+class _SafeTemporaryDirectory:
+    def __init__(self, suffix=None, prefix=None, dir=None):
+        self.name = _safe_mkdtemp(suffix=suffix, prefix=prefix, dir=dir)
+
+    def __enter__(self):
+        return self.name
+
+    def __exit__(self, exc_type, exc, tb):
+        self.cleanup()
+
+    def cleanup(self):
+        shutil.rmtree(self.name, ignore_errors=True)
+
+
+# Override tempfile helpers to avoid restricted temp folders on this host.
+tempfile.mkdtemp = _safe_mkdtemp
+tempfile.TemporaryDirectory = _SafeTemporaryDirectory
+
+# Ensure app.py sees TESTING before any module import.
+os.environ.setdefault("TESTING", "1")
 
 # ── 在任何测试 import app 之前，保存原始 I/O 对象 ──
 _real_stdout = sys.stdout
@@ -20,6 +94,52 @@ _real_stderr = sys.stderr
 _real_print = builtins.print
 _created_test_db_path = None
 _cleanup_test_db_on_exit = True
+
+# Ignore pytest tmp folders with restricted permissions.
+collect_ignore = ["_pytest_tmp_run"]
+
+
+class _NonClosingStream:
+    """Proxy stream that ignores close() to keep pytest terminal output alive."""
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, data):
+        try:
+            return self._stream.write(data)
+        except ValueError:
+            # Ignore writes to closed stream to keep pytest alive.
+            return 0
+
+    def flush(self):
+        try:
+            return self._stream.flush()
+        except ValueError:
+            return None
+
+    def close(self):
+        # Intentionally ignore close to avoid losing terminal output.
+        return None
+
+    @property
+    def closed(self):
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _wrap_stream(stream):
+    if stream is None:
+        return None
+    if isinstance(stream, _NonClosingStream):
+        return stream
+    return _NonClosingStream(stream)
+
+
+# Wrap streams early to prevent accidental close during tests.
+sys.stdout = _wrap_stream(sys.stdout)
+sys.stderr = _wrap_stream(sys.stderr)
 
 
 def _ensure_test_sqlite_db_env():
@@ -39,7 +159,12 @@ def _ensure_test_sqlite_db_env():
         _created_test_db_path = db_path
     elif not _created_test_db_path:
         _cleanup_test_db_on_exit = True
-        tmp_file = tempfile.NamedTemporaryFile(prefix="diff_platform_test_", suffix=".db", delete=False)
+        tmp_file = tempfile.NamedTemporaryFile(
+            prefix="diff_platform_test_",
+            suffix=".db",
+            delete=False,
+            dir=_pytest_db_root,
+        )
         tmp_file.close()
         _created_test_db_path = tmp_file.name
 
@@ -101,26 +226,30 @@ _ensure_test_sqlite_db_env()
 
 def _guard_io():
     """确保 sys.stdout/stderr/builtins.print 为健康状态"""
+    def _pick_stream(primary, fallback):
+        for stream in (primary, fallback):
+            if stream is None:
+                continue
+            if getattr(stream, "closed", False):
+                continue
+            return stream
+        return primary or fallback
+
     # 恢复 stdout
     try:
-        if sys.stdout is not _real_stdout:
-            # 如果当前的 stdout 已经关闭，必须恢复
-            if hasattr(sys.stdout, 'closed') and sys.stdout.closed:
-                sys.stdout = _real_stdout
-            else:
-                sys.stdout = _real_stdout
+        desired_stdout = _pick_stream(_real_stdout, getattr(sys, "__stdout__", None))
+        if sys.stdout is not desired_stdout:
+            sys.stdout = _wrap_stream(desired_stdout)
     except Exception:
-        sys.stdout = _real_stdout
+        sys.stdout = _wrap_stream(_pick_stream(_real_stdout, getattr(sys, "__stdout__", None)))
 
     # 恢复 stderr
     try:
-        if sys.stderr is not _real_stderr:
-            if hasattr(sys.stderr, 'closed') and sys.stderr.closed:
-                sys.stderr = _real_stderr
-            else:
-                sys.stderr = _real_stderr
+        desired_stderr = _pick_stream(_real_stderr, getattr(sys, "__stderr__", None))
+        if sys.stderr is not desired_stderr:
+            sys.stderr = _wrap_stream(desired_stderr)
     except Exception:
-        sys.stderr = _real_stderr
+        sys.stderr = _wrap_stream(_pick_stream(_real_stderr, getattr(sys, "__stderr__", None)))
 
     # 恢复 print
     if builtins.print is not _real_print:
@@ -129,6 +258,8 @@ def _guard_io():
 
 def pytest_configure(config):
     """pytest 初始化最早阶段，设置环境变量阻止 app.py 的 IO 副作用"""
+    if getattr(config.option, "basetemp", None) is None:
+        config.option.basetemp = _pytest_basetemp_root
     # 告诉 app.py 不要修改 stdout（如果 app.py 支持的话）
     os.environ.setdefault("TESTING", "1")
     _ensure_test_sqlite_db_env()
@@ -151,4 +282,20 @@ def pytest_runtest_teardown(item, nextitem):
 def pytest_runtest_call(item):
     """每个测试执行前，再次确保 IO 正常"""
     _assert_test_db_isolation()
+    _guard_io()
+
+
+@pytest.fixture
+def tmp_path():
+    """Custom tmp_path to avoid pytest basetemp permission issues on this host."""
+    path = Path(_safe_mkdtemp(prefix="pytest-"))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionfinish(session, exitstatus):
+    """会话结束前，确保终端输出可写，避免 pytest 退出时 IO 关闭。"""
     _guard_io()

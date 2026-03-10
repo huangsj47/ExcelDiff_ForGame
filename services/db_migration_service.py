@@ -94,6 +94,16 @@ def _migrate_agent_nodes_columns(db, log_print):
         log_print,
     )
 
+def _migrate_ai_weekly_analysis_state_columns(db, log_print):
+    _migrate_table_columns(
+        db,
+        "ai_weekly_analysis_state",
+        {
+            "last_triggered_at": "last_triggered_at DATETIME",
+        },
+        log_print,
+    )
+
 
 def apply_schema_migrations(db, log_print):
     """Apply all lightweight runtime schema migrations."""
@@ -101,3 +111,4 @@ def apply_schema_migrations(db, log_print):
     _migrate_commits_log_columns(db, log_print)
     _migrate_weekly_version_diff_cache_columns(db, log_print)
     _migrate_agent_nodes_columns(db, log_print)
+    _migrate_ai_weekly_analysis_state_columns(db, log_print)

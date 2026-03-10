@@ -43,6 +43,7 @@ from .weekly_version import WeeklyVersionConfig, WeeklyVersionDiffCache, WeeklyV
 from .operation_log import OperationLog
 from .agent import AgentNode, AgentProjectBinding, AgentTask, AgentDefaultAdmin, AgentIncident
 from .agent_temp_cache import AgentTempCache
+from .ai_analysis import AiProjectApiKey, AiAnalysisRun, AiWeeklyAnalysisState, AiProjectAnalysisConfig
 
 # 导入 auth 模块的模型，确保 db.create_all() 能创建对应的表
 try:
@@ -97,6 +98,10 @@ __all__ = [
     'AgentDefaultAdmin',
     'AgentIncident',
     'AgentTempCache',
+    'AiProjectApiKey',
+    'AiAnalysisRun',
+    'AiWeeklyAnalysisState',
+    'AiProjectAnalysisConfig',
 ]
 
 if _AUTH_MODELS_LOADED:

@@ -5,6 +5,88 @@
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.0">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.0">
+<style>
+    .ai-analysis-trigger {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.32rem 0.7rem;
+        border-radius: 999px;
+        background: #eef2ff;
+        border: 1px solid #c7d2fe;
+        color: #1e3a8a;
+        font-weight: 600;
+        font-size: 0.78rem;
+        transition: all 0.2s ease;
+    }
+    .ai-analysis-trigger:hover {
+        background: #e0e7ff;
+        border-color: #a5b4fc;
+        color: #1e40af;
+        transform: translateY(-1px);
+    }
+    .ai-drawer-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.45);
+        opacity: 0;
+        visibility: hidden;
+        transition: all 0.2s ease;
+        z-index: 1050;
+    }
+    .ai-drawer-overlay.open { opacity: 1; visibility: visible; }
+    body.ai-drawer-open { overflow: hidden; }
+    .ai-drawer {
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: 460px;
+        max-width: 92%;
+        height: 100%;
+        background: #fff;
+        box-shadow: -10px 0 30px rgba(15, 23, 42, 0.18);
+        transform: translateX(100%);
+        transition: transform 0.25s ease;
+        z-index: 1060;
+        display: flex;
+        flex-direction: column;
+    }
+    .ai-drawer.open { transform: translateX(0); }
+    .ai-drawer-header {
+        padding: 0.85rem 1rem;
+        border-bottom: 1px solid #e2e8f0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background: #fff;
+    }
+    .ai-drawer-body {
+        padding: 1rem;
+        background: #f8fafc;
+        flex: 1;
+        overflow-y: auto;
+    }
+    .ai-drawer-footer {
+        padding: 0.75rem 1rem;
+        border-top: 1px solid #e2e8f0;
+        background: #fff;
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.5rem;
+    }
+    .ai-analysis-output {
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 12px;
+        min-height: 180px;
+        font-size: 0.82rem;
+        white-space: pre-wrap;
+        font-family: "Fira Code", "Consolas", "Courier New", monospace;
+        color: #1f2937;
+    }
+    .ai-analysis-output.is-empty { color: #94a3b8; }
+</style>
 {% endblock %}
 
 {% block content %}
@@ -46,6 +128,9 @@
                 </span>
             </div>
             <div>
+                <button type="button" class="ai-analysis-trigger me-2" id="aiDrawerOpenBtn">
+                    <i class="bi bi-stars"></i> AI分析
+                </button>
                 {% if commit.status in ['pending', 'reviewed'] %}
                 <button class="btn btn-success btn-sm me-2" onclick="updateCommitStatus('{{ commit.id }}', 'confirmed')">
                     <i class="bi bi-check-circle"></i> 确认
@@ -129,6 +214,28 @@
         {% endif %}
     </div>
 </div>
+
+<div class="ai-drawer-overlay" id="aiDrawerOverlay"></div>
+<aside class="ai-drawer" id="aiDrawer">
+    <div class="ai-drawer-header">
+        <div class="d-flex align-items-center gap-2">
+            <span class="fw-semibold">AI分析</span>
+            <span class="badge bg-warning text-dark">Beta</span>
+            <span class="badge bg-secondary" id="aiAnalysisKeyStatus">检测中</span>
+        </div>
+        <button type="button" class="btn btn-sm btn-light" id="aiDrawerCloseBtn">
+            <i class="bi bi-x-lg"></i>
+        </button>
+    </div>
+    <div class="ai-drawer-body">
+        <div class="small text-muted mb-2" id="aiAnalysisMeta">分析结果将以流式输出展示。</div>
+        <pre class="ai-analysis-output is-empty" id="aiAnalysisOutput">暂无分析结果。</pre>
+    </div>
+    <div class="ai-drawer-footer">
+        <button class="btn btn-outline-secondary btn-sm" id="aiRefreshBtn">刷新结果</button>
+        <button class="btn btn-primary btn-sm" id="aiAnalyzeBtn">重新分析</button>
+    </div>
+</aside>
 {% endblock %}
 
 {% block scripts %}
@@ -180,6 +287,212 @@ function updateCommitStatus(commitId, status) {
     });
 }
 
+function setAiStatusBadge(text, variant) {
+    const badge = document.getElementById('aiAnalysisKeyStatus');
+    if (!badge) return;
+    badge.textContent = text;
+    badge.className = `badge bg-${variant}`;
+}
+
+function setAiOutput(text, isEmpty) {
+    const output = document.getElementById('aiAnalysisOutput');
+    if (!output) return;
+    output.textContent = text;
+    if (isEmpty) {
+        output.classList.add('is-empty');
+    } else {
+        output.classList.remove('is-empty');
+    }
+}
+
+function appendAiLine(text) {
+    const output = document.getElementById('aiAnalysisOutput');
+    if (!output) return;
+    if (output.classList.contains('is-empty')) {
+        output.textContent = '';
+        output.classList.remove('is-empty');
+    }
+    output.textContent += (output.textContent ? '\n' : '') + text;
+    output.scrollTop = output.scrollHeight;
+}
+
+function initCommitAiAnalysis() {
+    const commitId = {{ commit.id }};
+    const projectId = {{ project.id }};
+    const openBtn = document.getElementById('aiDrawerOpenBtn');
+    const closeBtn = document.getElementById('aiDrawerCloseBtn');
+    const overlay = document.getElementById('aiDrawerOverlay');
+    const startBtn = document.getElementById('aiAnalyzeBtn');
+    const refreshBtn = document.getElementById('aiRefreshBtn');
+    const meta = document.getElementById('aiAnalysisMeta');
+    let eventSource = null;
+    let hasCached = false;
+    let keyReady = false;
+
+    function cleanupStream() {
+        if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+        }
+        if (startBtn) startBtn.disabled = false;
+    }
+
+    async function refreshKeyStatus() {
+        try {
+            const resp = await fetch(`/ai-analysis/projects/${projectId}/api-key/status`);
+            const data = await resp.json();
+            if (data && data.configured) {
+                setAiStatusBadge('已配置', 'success');
+                keyReady = true;
+                if (startBtn) startBtn.disabled = false;
+                if (meta) {
+                    meta.textContent = data.updated_at ? `API Key 最近更新：${data.updated_at}` : 'API Key 已配置';
+                }
+            } else {
+                setAiStatusBadge('未配置', 'warning');
+                keyReady = false;
+                if (startBtn) startBtn.disabled = true;
+                if (meta) meta.textContent = '请在项目概览页配置 API Key。';
+            }
+        } catch (err) {
+            setAiStatusBadge('检测失败', 'danger');
+            keyReady = false;
+            if (startBtn) startBtn.disabled = true;
+            if (meta) meta.textContent = '无法获取 API Key 状态。';
+        }
+    }
+
+    async function loadLatestResult(force = false) {
+        try {
+            const resp = await fetch(`/ai-analysis/commit/${commitId}/latest`, { cache: 'no-store' });
+            const data = await resp.json();
+            if (data && data.result) {
+                const result = data.result;
+                hasCached = true;
+                setAiStatusBadge('已有结果', 'success');
+                if (meta) {
+                    const risk = result.result?.risk_level || '-';
+                    const createdAt = result.created_at || '-';
+                    const scope = result.scope || '-';
+                    meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`;
+                }
+                if (result.response_text) {
+                    setAiOutput(result.response_text, false);
+                }
+                return true;
+            }
+        } catch (_err) {
+        }
+        if (force) {
+            setAiOutput('获取最近分析失败。', false);
+            setAiStatusBadge('失败', 'danger');
+            hasCached = false;
+            return false;
+        }
+        hasCached = false;
+        setAiOutput('暂无分析结果。', true);
+        setAiStatusBadge('待分析', 'secondary');
+        return false;
+    }
+
+    function startAnalysis(force = false) {
+        if (!keyReady) {
+            setAiOutput('请先配置 API Key。', false);
+            return;
+        }
+        if (!force && hasCached) {
+            return;
+        }
+        cleanupStream();
+        setAiStatusBadge('分析中', 'primary');
+        setAiOutput('AI 分析进行中...', false);
+        if (startBtn) startBtn.disabled = true;
+        eventSource = new EventSource(`/ai-analysis/commit/${commitId}/stream`);
+        eventSource.addEventListener('chunk', function(event) {
+            try {
+                const payload = JSON.parse(event.data || '{}');
+                if (payload.text) {
+                    appendAiLine(payload.text);
+                }
+            } catch (error) {
+                appendAiLine('解析 AI 输出失败');
+            }
+        });
+        eventSource.addEventListener('cached', function() {
+            setAiStatusBadge('已有结果', 'success');
+        });
+        eventSource.addEventListener('result', function(event) {
+            try {
+                const payload = JSON.parse(event.data || '{}');
+                if (payload.risk_level) {
+                    appendAiLine(`\n风险等级：${payload.risk_level}`);
+                }
+            } catch (_err) {
+            }
+            setAiStatusBadge('完成', 'success');
+            cleanupStream();
+            loadLatestResult(true);
+        });
+        eventSource.addEventListener('error', function(event) {
+            let message = 'AI 分析失败或连接中断';
+            if (event && event.data) {
+                try {
+                    const payload = JSON.parse(event.data);
+                    if (payload.message) message = payload.message;
+                } catch (_err) {
+                }
+            }
+            setAiOutput(message, false);
+            setAiStatusBadge('失败', 'danger');
+            cleanupStream();
+        });
+    }
+
+    function openDrawer() {
+        const drawer = document.getElementById('aiDrawer');
+        if (overlay) overlay.classList.add('open');
+        if (drawer) drawer.classList.add('open');
+        document.body.classList.add('ai-drawer-open');
+    }
+
+    function closeDrawer() {
+        const drawer = document.getElementById('aiDrawer');
+        if (overlay) overlay.classList.remove('open');
+        if (drawer) drawer.classList.remove('open');
+        document.body.classList.remove('ai-drawer-open');
+        cleanupStream();
+    }
+
+    if (openBtn) {
+        openBtn.addEventListener('click', async function() {
+            openDrawer();
+            await refreshKeyStatus();
+            const hasLatest = await loadLatestResult();
+            if (!hasLatest) {
+                startAnalysis();
+            }
+        });
+    }
+    if (closeBtn) closeBtn.addEventListener('click', closeDrawer);
+    if (overlay) overlay.addEventListener('click', closeDrawer);
+
+    if (startBtn) {
+        startBtn.addEventListener('click', function() {
+            if (hasCached && !confirm('已有分析结果，确定重新分析吗？')) {
+                return;
+            }
+            startAnalysis(true);
+        });
+    }
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', function() {
+            loadLatestResult(true);
+        });
+    }
+
+    refreshKeyStatus();
+}
+
 // 初始化diff处理器
 document.addEventListener('DOMContentLoaded', function() {
     {% if diff_data %}
@@ -193,6 +506,7 @@ document.addEventListener('DOMContentLoaded', function() {
             initBinaryDiff({{ diff_data | tojson }});
         {% endif %}
     {% endif %}
+    initCommitAiAnalysis();
 });
 </script>
 {% endblock %}

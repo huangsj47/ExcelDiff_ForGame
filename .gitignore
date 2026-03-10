@@ -24,6 +24,8 @@ test.py
 *.pyd
 *.swp
 .pytest_cache/
+.pytest_tmp/
+tests/_pytest_tmp_run/
 .mypy_cache/
 .ruff_cache/
 
@@ -51,3 +53,5 @@ progress.md
 task_plan.md  
 
 test_output.txt
+
+docs/notes/

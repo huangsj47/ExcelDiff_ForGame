@@ -113,6 +113,88 @@
     .config-info-card { border: 1px solid #e2e8f0; border-radius: 0.5rem; box-shadow: 0 1px 4px rgba(0,0,0,0.04); overflow: hidden; }
     .config-info-header { background: #f8fafc; padding: 0.65rem 1.25rem; color: #1e293b; border-bottom: 1px solid #e2e8f0; }
     .config-info-header h6 { color: #1e293b; margin: 0; font-size: 0.88rem; font-weight: 600; }
+
+    /* ===== AI 分析按钮与抽屉 ===== */
+    .ai-analysis-trigger {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.35rem 0.85rem;
+        border-radius: 999px;
+        background: #eef2ff;
+        border: 1px solid #c7d2fe;
+        color: #1e3a8a;
+        font-weight: 600;
+        font-size: 0.8rem;
+        transition: all 0.2s ease;
+    }
+    .ai-analysis-trigger:hover {
+        background: #e0e7ff;
+        border-color: #a5b4fc;
+        color: #1e40af;
+        transform: translateY(-1px);
+    }
+    .ai-drawer-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.45);
+        opacity: 0;
+        visibility: hidden;
+        transition: all 0.2s ease;
+        z-index: 1050;
+    }
+    .ai-drawer-overlay.open { opacity: 1; visibility: visible; }
+    body.ai-drawer-open { overflow: hidden; }
+    .ai-drawer {
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: 460px;
+        max-width: 92%;
+        height: 100%;
+        background: #fff;
+        box-shadow: -10px 0 30px rgba(15, 23, 42, 0.18);
+        transform: translateX(100%);
+        transition: transform 0.25s ease;
+        z-index: 1060;
+        display: flex;
+        flex-direction: column;
+    }
+    .ai-drawer.open { transform: translateX(0); }
+    .ai-drawer-header {
+        padding: 0.85rem 1rem;
+        border-bottom: 1px solid #e2e8f0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background: #fff;
+    }
+    .ai-drawer-body {
+        padding: 1rem;
+        background: #f8fafc;
+        flex: 1;
+        overflow-y: auto;
+    }
+    .ai-drawer-footer {
+        padding: 0.75rem 1rem;
+        border-top: 1px solid #e2e8f0;
+        background: #fff;
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.5rem;
+    }
+    .ai-analysis-output {
+        background: #fff;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 12px;
+        min-height: 180px;
+        font-size: 0.82rem;
+        white-space: pre-wrap;
+        font-family: "Fira Code", "Consolas", "Courier New", monospace;
+        color: #1f2937;
+    }
+    .ai-analysis-output.is-empty { color: #94a3b8; }
 </style>
 {% endblock %}
 
@@ -133,6 +215,9 @@
                 </nav>
             </div>
             <div class="d-flex gap-2">
+                <button type="button" class="ai-analysis-trigger" id="weeklyAiDrawerOpenBtn">
+                    <i class="bi bi-stars"></i> AI分析
+                </button>
                 <button type="button" class="header-action-btn" id="toggleFoldersBtn" onclick="toggleAllFolders()">
                     <i class="fas fa-compress-arrows-alt me-1" id="toggleFoldersIcon"></i>
                     <span id="toggleFoldersText">收起全部</span>
@@ -955,6 +1040,28 @@
 }
 </style>
 
+<div class="ai-drawer-overlay" id="weeklyAiDrawerOverlay"></div>
+<aside class="ai-drawer" id="weeklyAiDrawer">
+    <div class="ai-drawer-header">
+        <div class="d-flex align-items-center gap-2">
+            <span class="fw-semibold">AI分析</span>
+            <span class="badge bg-warning text-dark">Beta</span>
+            <span class="badge bg-secondary" id="weeklyAiStatusBadge">待分析</span>
+        </div>
+        <button type="button" class="btn btn-sm btn-light" id="weeklyAiDrawerCloseBtn">
+            <i class="bi bi-x-lg"></i>
+        </button>
+    </div>
+    <div class="ai-drawer-body">
+        <div class="small text-muted mb-2" id="weeklyAiMeta">自动分析每 1 小时触发，可手动补跑。</div>
+        <pre class="ai-analysis-output is-empty" id="weeklyAiOutput">暂无分析结果。</pre>
+    </div>
+    <div class="ai-drawer-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="weeklyAiRefreshBtn">刷新结果</button>
+        <button type="button" class="btn btn-sm btn-primary" id="weeklyAiStartBtn">重新分析</button>
+    </div>
+</aside>
+
 <script>
 let configId = {{ config.id }};
 let currentConfigId = {{ current_config_id }};
@@ -967,14 +1074,224 @@ let syncRetryTimer = null;
 let syncRetryAttempts = 0;
 const MAX_SYNC_RETRY_ATTEMPTS = 120;
 const WEEKLY_STATS_SYNC_EVENT_KEY = 'weeklyVersionStatsChanged';
+const weeklyAiProjectId = {{ config.project_id }};
+let weeklyAiSource = null;
+let weeklyAiHasCached = false;
+let weeklyAiKeyReady = false;
 
 // 分页相关变量
 let currentPage = 1;
 let itemsPerPage = 50;
 let totalPages = 1;
 
+function setWeeklyAiStatusBadge(text, variant) {
+    const badge = document.getElementById('weeklyAiStatusBadge');
+    if (!badge) return;
+    badge.textContent = text;
+    badge.className = `badge bg-${variant}`;
+}
+
+function setWeeklyAiOutput(text, isEmpty) {
+    const output = document.getElementById('weeklyAiOutput');
+    if (!output) return;
+    output.textContent = text;
+    if (isEmpty) {
+        output.classList.add('is-empty');
+    } else {
+        output.classList.remove('is-empty');
+    }
+}
+
+function appendWeeklyAiLine(text) {
+    const output = document.getElementById('weeklyAiOutput');
+    if (!output) return;
+    if (output.classList.contains('is-empty')) {
+        output.textContent = '';
+        output.classList.remove('is-empty');
+    }
+    output.textContent += (output.textContent ? '\n' : '') + text;
+    output.scrollTop = output.scrollHeight;
+}
+
+function closeWeeklyAiStream() {
+    if (weeklyAiSource) {
+        weeklyAiSource.close();
+        weeklyAiSource = null;
+    }
+}
+
+async function refreshWeeklyAiKeyStatus() {
+    const btn = document.getElementById('weeklyAiStartBtn');
+    const meta = document.getElementById('weeklyAiMeta');
+    try {
+        const resp = await fetch(`/ai-analysis/projects/${weeklyAiProjectId}/api-key/status`);
+        const data = await resp.json();
+        if (data && data.configured) {
+            weeklyAiKeyReady = true;
+            if (btn) btn.disabled = false;
+            setWeeklyAiStatusBadge('已配置', 'success');
+            if (meta && data.updated_at) {
+                meta.textContent = `自动分析每 1 小时触发，可手动补跑。API Key 最近更新：${data.updated_at}`;
+            }
+        } else {
+            weeklyAiKeyReady = false;
+            if (btn) btn.disabled = true;
+            setWeeklyAiStatusBadge('未配置', 'warning');
+            if (meta) meta.textContent = '请在项目概览页配置 API Key。';
+        }
+    } catch (_err) {
+        weeklyAiKeyReady = false;
+        if (btn) btn.disabled = true;
+        setWeeklyAiStatusBadge('检测失败', 'danger');
+        if (meta) meta.textContent = '无法获取 API Key 状态。';
+    }
+}
+
+async function loadWeeklyAiLatest(force = false) {
+    const meta = document.getElementById('weeklyAiMeta');
+    try {
+        const resp = await fetch(`/ai-analysis/weekly/${configId}/latest`, { cache: 'no-store' });
+        const data = await resp.json();
+        if (data && data.result) {
+            const result = data.result;
+            weeklyAiHasCached = true;
+            const risk = result.result?.risk_level || '-';
+            const createdAt = result.created_at || '-';
+            const scope = result.scope || '-';
+            if (meta) {
+                meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`;
+            }
+            if (result.response_text) {
+                setWeeklyAiOutput(result.response_text, false);
+            }
+            setWeeklyAiStatusBadge('已有结果', 'success');
+            return true;
+        }
+    } catch (_err) {
+        if (force) {
+            setWeeklyAiOutput('获取最近分析失败。', false);
+            setWeeklyAiStatusBadge('失败', 'danger');
+        }
+    }
+    weeklyAiHasCached = false;
+    setWeeklyAiOutput('暂无分析结果。', true);
+    setWeeklyAiStatusBadge('待分析', 'secondary');
+    return false;
+}
+
+function openWeeklyAiDrawer() {
+    const overlay = document.getElementById('weeklyAiDrawerOverlay');
+    const drawer = document.getElementById('weeklyAiDrawer');
+    if (overlay) overlay.classList.add('open');
+    if (drawer) drawer.classList.add('open');
+    document.body.classList.add('ai-drawer-open');
+}
+
+function closeWeeklyAiDrawer() {
+    const overlay = document.getElementById('weeklyAiDrawerOverlay');
+    const drawer = document.getElementById('weeklyAiDrawer');
+    if (overlay) overlay.classList.remove('open');
+    if (drawer) drawer.classList.remove('open');
+    document.body.classList.remove('ai-drawer-open');
+    closeWeeklyAiStream();
+}
+
+function startWeeklyAiAnalysis(force = false) {
+    if (!weeklyAiKeyReady) {
+        setWeeklyAiOutput('请先配置 API Key。', false);
+        return;
+    }
+    if (!force && weeklyAiHasCached) {
+        return;
+    }
+    closeWeeklyAiStream();
+    setWeeklyAiStatusBadge('分析中', 'primary');
+    setWeeklyAiOutput('AI 分析进行中...', false);
+    const startBtn = document.getElementById('weeklyAiStartBtn');
+    if (startBtn) startBtn.disabled = true;
+    weeklyAiSource = new EventSource(`/ai-analysis/weekly/${configId}/stream?source=manual`);
+    weeklyAiSource.addEventListener('chunk', function(event) {
+        try {
+            const payload = JSON.parse(event.data || '{}');
+            if (payload.text) {
+                appendWeeklyAiLine(payload.text);
+            }
+        } catch (_err) {
+            appendWeeklyAiLine('解析 AI 输出失败');
+        }
+    });
+    weeklyAiSource.addEventListener('result', function(event) {
+        try {
+            const payload = JSON.parse(event.data || '{}');
+            if (payload.risk_level) {
+                appendWeeklyAiLine(`\n风险等级：${payload.risk_level}`);
+            }
+        } catch (_err) {
+        }
+        setWeeklyAiStatusBadge('完成', 'success');
+        if (startBtn) startBtn.disabled = false;
+        weeklyAiHasCached = true;
+        closeWeeklyAiStream();
+        loadWeeklyAiLatest(true);
+    });
+    weeklyAiSource.addEventListener('cached', function() {
+        setWeeklyAiStatusBadge('已有结果', 'success');
+    });
+    weeklyAiSource.addEventListener('error', function(event) {
+        let message = 'AI 分析失败或连接中断';
+        if (event && event.data) {
+            try {
+                const payload = JSON.parse(event.data);
+                if (payload.message) message = payload.message;
+            } catch (_err) {
+            }
+        }
+        setWeeklyAiOutput(message, false);
+        setWeeklyAiStatusBadge('失败', 'danger');
+        if (startBtn) startBtn.disabled = false;
+        closeWeeklyAiStream();
+    });
+}
+
+function initWeeklyAiAnalysis() {
+    const openBtn = document.getElementById('weeklyAiDrawerOpenBtn');
+    const closeBtn = document.getElementById('weeklyAiDrawerCloseBtn');
+    const overlay = document.getElementById('weeklyAiDrawerOverlay');
+    const startBtn = document.getElementById('weeklyAiStartBtn');
+    const refreshBtn = document.getElementById('weeklyAiRefreshBtn');
+
+    if (openBtn) {
+        openBtn.addEventListener('click', async function() {
+            openWeeklyAiDrawer();
+            await refreshWeeklyAiKeyStatus();
+            const hasLatest = await loadWeeklyAiLatest();
+            if (!hasLatest) {
+                startWeeklyAiAnalysis();
+            }
+        });
+    }
+    if (closeBtn) closeBtn.addEventListener('click', closeWeeklyAiDrawer);
+    if (overlay) overlay.addEventListener('click', closeWeeklyAiDrawer);
+    if (startBtn) {
+        startBtn.addEventListener('click', function() {
+            if (weeklyAiHasCached && !confirm('已有分析结果，确定重新分析吗？')) {
+                return;
+            }
+            startWeeklyAiAnalysis(true);
+        });
+    }
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', function() {
+            loadWeeklyAiLatest(true);
+        });
+    }
+    refreshWeeklyAiKeyStatus();
+    loadWeeklyAiLatest();
+}
+
 // 页面加载时初始化
 document.addEventListener('DOMContentLoaded', function() {
+    initWeeklyAiAnalysis();
     initFileItemSelection();
     loadFileList();
 
@@ -1006,6 +1323,8 @@ function switchRepository(newConfigId) {
     // 更新当前配置ID
     configId = newConfigId;
     currentConfigId = newConfigId;
+    closeWeeklyAiStream();
+    loadWeeklyAiLatest();
 
     // 清空当前数据
     allFiles = [];
@@ -1039,6 +1358,8 @@ function switchRepositoryInternal(newConfigId) {
     // 更新当前配置ID
     configId = newConfigId;
     currentConfigId = newConfigId;
+    closeWeeklyAiStream();
+    refreshWeeklyAiLatest();
 
     // 清空当前数据
     allFiles = [];

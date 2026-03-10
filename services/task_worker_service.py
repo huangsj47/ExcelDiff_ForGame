@@ -32,6 +32,15 @@ from services.task_worker_weekly_handlers import (
 )
 from services.repository_sync_status import clear_sync_error as clear_repository_sync_error
 from services.repository_sync_status import record_sync_error as record_repository_sync_error
+from services.ai_analysis_service import (
+    build_weekly_group_key,
+    run_weekly_analysis_background,
+    select_primary_weekly_config,
+    cleanup_expired_analysis_runs,
+    get_project_analysis_config,
+    has_weekly_changes,
+)
+from models.ai_analysis import AiWeeklyAnalysisState
 
 # ---------------------------------------------------------------------------
 #  全局状态（由 app.py 通过 configure_task_worker 注入）
@@ -78,6 +87,7 @@ EXCEL_TASK_ENQUEUE_COOLDOWN_SECONDS = max(
     5, int(os.environ.get("EXCEL_TASK_ENQUEUE_COOLDOWN_SECONDS", "45") or 45)
 )
 EXCEL_TASK_ENQUEUE_COOLDOWN_MAX_KEYS = 5000
+WEEKLY_AI_TASK_STALE_SECONDS = max(600, int(os.environ.get("WEEKLY_AI_TASK_STALE_SECONDS", "7200") or 7200))
 
 NON_CRITICAL_TASK_STATUS_ERRORS = (
     SQLAlchemyError,
@@ -220,6 +230,17 @@ def _enqueue_agent_task_from_background_task(db_task, extra_payload=None):
             project_id = config.project_id
             payload.setdefault("config_id", config_id)
             payload.setdefault("file_path", db_task.file_path)
+    elif task_type == "weekly_ai_analysis":
+        try:
+            config_id = int(db_task.commit_id)
+        except (TypeError, ValueError):
+            config_id = None
+        config = _db.session.get(_WeeklyVersionConfig, config_id) if config_id else None
+        if config:
+            repository_id = config.repository_id
+            project_id = config.project_id
+            payload.setdefault("config_id", config_id)
+            payload.setdefault("group_key", db_task.file_path)
 
     if not project_id:
         return None
@@ -447,6 +468,9 @@ def background_task_worker():
             elif task['type'] == 'cleanup_cache':
                 log_print(f"🧹 清理缓存: {task.get('days', 30)} 天前的数据", 'CACHE')
                 _excel_cache_service.cleanup_old_cache(task.get('days', 30))
+                cleaned = cleanup_expired_analysis_runs()
+                if cleaned:
+                    log_print(f"🧹 清理AI分析缓存: {cleaned} 条过期记录", 'AI')
             elif task['type'] == 'regenerate_cache':
                 log_print(f"🔄 重新生成缓存: 仓库 {task['repository_id']}", 'CACHE')
                 task_count = regenerate_repository_cache(task['repository_id'])
@@ -457,6 +481,8 @@ def background_task_worker():
                 _handle_weekly_sync_task(task)
             elif task['type'] == 'weekly_excel_cache':
                 _handle_weekly_excel_cache_task(task)
+            elif task['type'] == 'weekly_ai_analysis':
+                _handle_weekly_ai_analysis_task(task)
             log_print(f"✅ 后台任务完成: {task['type']} (优先级: {priority}) | 队列剩余: {background_task_queue.qsize()}", 'TASK')
         except queue.Empty:
             continue
@@ -882,6 +908,47 @@ def _handle_weekly_excel_cache_task(task):
     )
 
 
+def _handle_weekly_ai_analysis_task(task):
+    """处理周版本AI分析任务"""
+    with _app.app_context():
+        task_id = task.get("task_id")
+        if task_id is not None:
+            try:
+                update_task_status_with_retry(task_id, "processing")
+            except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
+                log_print(f"更新AI分析任务开始状态失败: {update_error}", "AI", force=True)
+        try:
+            config_id = task.get("config_id") or task.get("commit_id") or task.get("repository_id")
+            try:
+                config_id = int(config_id)
+            except (TypeError, ValueError):
+                config_id = None
+            if not config_id:
+                raise ValueError("weekly_ai_analysis 缺少有效 config_id")
+
+            result = run_weekly_analysis_background(config_id, task_id=task_id)
+            status = result.get("status")
+            if task_id is not None:
+                if status == "succeeded":
+                    update_task_status_with_retry(task_id, "completed")
+                elif status == "skipped":
+                    reason = result.get("reason") or "skipped"
+                    update_task_status_with_retry(task_id, "completed", f"skipped:{reason}")
+                else:
+                    update_task_status_with_retry(task_id, "failed", str(result.get("reason") or "analysis_failed"))
+        except NON_CRITICAL_TASK_EXECUTION_ERRORS as exc:
+            log_print(f"❌ 周版本AI分析失败: {exc}", "AI", force=True)
+            try:
+                _db.session.rollback()
+            except SQLAlchemyError:
+                pass
+            if task_id is not None:
+                try:
+                    update_task_status_with_retry(task_id, "failed", str(exc))
+                except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
+                    log_print(f"更新AI分析任务失败状态异常: {update_error}", "AI", force=True)
+
+
 def execute_task_inline_for_agent(task_type, payload):
     """供 Agent 代理调用：在当前进程内直接执行任务逻辑并返回摘要。"""
     normalized_type = str(task_type or "").strip()
@@ -979,6 +1046,13 @@ def execute_task_inline_for_agent(task_type, payload):
             raise ValueError("weekly_excel_cache 任务缺少 config_id/file_path")
         _process_weekly_excel_cache(int(config_id), file_path)
         return {"message": "weekly_excel_cache completed"}
+
+    if normalized_type == 'weekly_ai_analysis':
+        config_id = payload.get('config_id') or payload.get('commit_id')
+        if not config_id:
+            raise ValueError("weekly_ai_analysis 任务缺少 config_id")
+        result = run_weekly_analysis_background(int(config_id))
+        return {"message": "weekly_ai_analysis completed", "result": result}
 
     raise ValueError(f"不支持的任务类型: {normalized_type}")
 
@@ -1087,6 +1161,18 @@ def load_pending_tasks():
                         'config_id': db_task.repository_id,
                         'file_path': db_task.file_path
                     }
+                }
+            elif db_task.task_type == 'weekly_ai_analysis':
+                try:
+                    config_id = int(db_task.commit_id)
+                except (TypeError, ValueError):
+                    config_id = None
+                task_data = {
+                    'type': 'weekly_ai_analysis',
+                    'config_id': config_id,
+                    'group_key': db_task.file_path,
+                    'commit_id': db_task.commit_id,
+                    'task_id': db_task.id
                 }
             else:
                 task_data = {
@@ -1395,6 +1481,68 @@ def create_weekly_sync_task(config_id):
         return None
 
 
+def create_weekly_ai_analysis_task(config_id, group_key=None):
+    """为周版本配置创建AI分析任务（按组去重）。"""
+    try:
+        config = _db.session.get(_WeeklyVersionConfig, config_id)
+        if not config:
+            log_print(f"周版本配置不存在，无法创建AI分析任务: {config_id}", "AI", force=True)
+            return None
+
+        group_key = group_key or build_weekly_group_key(config)
+        existing_task = _BackgroundTask.query.filter(
+            _BackgroundTask.task_type == 'weekly_ai_analysis',
+            _BackgroundTask.file_path == group_key,
+            _BackgroundTask.status.in_(['pending', 'processing']),
+        ).first()
+        if existing_task:
+            if _use_agent_dispatch():
+                _ensure_agent_dispatch_for_background_task(
+                    existing_task,
+                    extra_payload={"config_id": config_id, "group_key": group_key},
+                )
+                _db.session.commit()
+            log_print(f"周版本AI分析任务已存在: group_key={group_key}", "AI")
+            return existing_task.id
+
+        new_task = _BackgroundTask(
+            task_type='weekly_ai_analysis',
+            repository_id=None,
+            commit_id=str(config_id),
+            file_path=group_key,
+            priority=6,
+            status='pending',
+        )
+        _db.session.add(new_task)
+        _db.session.flush()
+        _ensure_agent_dispatch_for_background_task(
+            new_task,
+            extra_payload={"config_id": config_id, "group_key": group_key},
+        )
+        _db.session.commit()
+        if not _use_agent_dispatch():
+            task_data = {
+                'type': 'weekly_ai_analysis',
+                'config_id': config_id,
+                'group_key': group_key,
+                'commit_id': str(config_id),
+                'task_id': new_task.id,
+            }
+            task_counter = int(time.time() * 1000000)
+            tw = TaskWrapper(6, task_counter, task_data)
+            background_task_queue.put(tw)
+        log_print(f"创建周版本AI分析任务: config_id={config_id}, task_id={new_task.id}", "AI")
+        return new_task.id
+    except SQLAlchemyError as e:
+        _db.session.rollback()
+        log_print(f"创建周版本AI分析任务数据库失败: {e}", "AI", force=True)
+        return None
+    except (TypeError, ValueError, RuntimeError, AttributeError) as e:
+        _db.session.rollback()
+        log_print(f"创建周版本AI分析任务失败: {e}", "AI", force=True)
+        return None
+
+
 def schedule_weekly_sync_tasks():
     """调度周版本同步任务"""
     try:
@@ -1430,6 +1578,74 @@ def schedule_weekly_sync_tasks():
         log_print(f"调度周版本同步任务数据库失败: {e}", 'WEEKLY', force=True)
     except (TypeError, ValueError, RuntimeError, AttributeError) as e:
         log_print(f"调度周版本同步任务失败: {e}", 'WEEKLY', force=True)
+
+
+def schedule_weekly_ai_analysis_tasks():
+    """按组调度周版本AI分析任务（默认每小时执行）。"""
+    try:
+        with _app.app_context():
+            active_configs = _WeeklyVersionConfig.query.filter_by(
+                is_active=True, auto_sync=True, status='active'
+            ).all()
+            if not active_configs:
+                return
+            grouped = {}
+            for cfg in active_configs:
+                group_key = build_weekly_group_key(cfg)
+                grouped.setdefault(group_key, []).append(cfg)
+
+            for group_key, configs in grouped.items():
+                project_id = configs[0].project_id
+                project_cfg = get_project_analysis_config(project_id)
+                if not project_cfg.get("auto_weekly_enabled", True):
+                    continue
+                interval_minutes = int(project_cfg.get("weekly_interval_minutes") or 60)
+                now_utc = datetime.now(timezone.utc)
+                state = AiWeeklyAnalysisState.query.filter_by(group_key=group_key).first()
+                if state and state.last_triggered_at:
+                    last_triggered = state.last_triggered_at
+                    if getattr(last_triggered, "tzinfo", None) is None:
+                        last_triggered = last_triggered.replace(tzinfo=timezone.utc)
+                    if (now_utc - last_triggered).total_seconds() < interval_minutes * 60:
+                        continue
+
+                stale_tasks = _BackgroundTask.query.filter(
+                    _BackgroundTask.task_type == 'weekly_ai_analysis',
+                    _BackgroundTask.file_path == group_key,
+                    _BackgroundTask.status == 'pending',
+                ).all()
+                for stale in stale_tasks:
+                    stale_created = stale.created_at.replace(tzinfo=None) if stale.created_at and stale.created_at.tzinfo else stale.created_at
+                    if stale_created and (datetime.now() - stale_created).total_seconds() > WEEKLY_AI_TASK_STALE_SECONDS:
+                        stale.status = 'failed'
+                        stale.error_message = 'AI分析任务超时，已被调度器重置'
+                        _db.session.commit()
+                        log_print(f"重置卡死的周版本AI分析任务: task_id={stale.id}, group_key={group_key}", "AI", force=True)
+
+                primary = select_primary_weekly_config(configs)
+                config_ids = [cfg.id for cfg in configs]
+                if not has_weekly_changes(config_ids, state.last_analyzed_at if state else None):
+                    continue
+
+                task_id = create_weekly_ai_analysis_task(primary.id, group_key=group_key)
+                if task_id:
+                    if not state:
+                        state = AiWeeklyAnalysisState(
+                            project_id=project_id,
+                            group_key=group_key,
+                            base_name=primary.name,
+                            start_time=primary.start_time,
+                            end_time=primary.end_time,
+                        )
+                        _db.session.add(state)
+                    state.last_triggered_at = now_utc
+                    _db.session.commit()
+            log_print(f"调度了 {len(grouped)} 组周版本AI分析任务", "AI")
+    except SQLAlchemyError as e:
+        _db.session.rollback()
+        log_print(f"调度周版本AI分析任务数据库失败: {e}", "AI", force=True)
+    except (TypeError, ValueError, RuntimeError, AttributeError) as e:
+        log_print(f"调度周版本AI分析任务失败: {e}", "AI", force=True)
 
 
 def schedule_repository_sync_tasks():
@@ -1474,6 +1690,7 @@ def setup_schedule(include_cleanup=True):
     if include_cleanup:
         sched_module.every().day.at("04:00").do(schedule_cleanup_task)
     sched_module.every(2).minutes.do(schedule_weekly_sync_tasks)
+    sched_module.every(1).minutes.do(schedule_weekly_ai_analysis_tasks)
     sched_module.every(2).minutes.do(schedule_repository_sync_tasks)
     _schedule_initialized = True
 
