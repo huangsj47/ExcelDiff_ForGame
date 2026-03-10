@@ -966,6 +966,7 @@ let allAuthors = new Set();
 let syncRetryTimer = null;
 let syncRetryAttempts = 0;
 const MAX_SYNC_RETRY_ATTEMPTS = 120;
+const WEEKLY_STATS_SYNC_EVENT_KEY = 'weeklyVersionStatsChanged';
 
 // 分页相关变量
 let currentPage = 1;
@@ -1776,6 +1777,7 @@ function updateFileStatusQuick(filePath, newStatus) {
 
             // 重新渲染表格
             updateFileTable();
+            notifyWeeklyVersionStatsChanged(configId);
 
             // 状态更新成功，无需显示提示
         } else {
@@ -1790,6 +1792,20 @@ function updateFileStatusQuick(filePath, newStatus) {
         loadFileList();
         showToast('状态更新失败，请重试', 'error');
     });
+}
+
+function notifyWeeklyVersionStatsChanged(currentConfigId) {
+    try {
+        localStorage.setItem(
+            WEEKLY_STATS_SYNC_EVENT_KEY,
+            JSON.stringify({
+                config_id: Number(currentConfigId),
+                ts: Date.now(),
+            }),
+        );
+    } catch (error) {
+        console.warn('notifyWeeklyVersionStatsChanged failed:', error);
+    }
 }
 
 function getStatusText(status) {
@@ -2167,6 +2183,7 @@ function updateFileStatus(filePath, status) {
     .then(response => response.json())
     .then(data => {
         if (data.success) {
+            notifyWeeklyVersionStatsChanged(configId);
             // 刷新文件列表
             loadFileList();
             // 关闭模态框
@@ -2220,6 +2237,7 @@ function confirmAllPending() {
         .then(data => {
             if (data.success) {
                 showToast(`成功确认了 ${data.updated_count} 个文件`, 'success');
+                notifyWeeklyVersionStatsChanged(configId);
                 loadFileList();
             } else {
                 showToast('批量确认失败: ' + data.message, 'error');

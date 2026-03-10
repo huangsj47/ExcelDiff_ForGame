@@ -637,6 +637,7 @@ const inactiveVersions = {{ inactive_versions_json | tojson }};
 const repositoriesData = {{ repositories_json | tojson }};
 const repositoryVirtualEnabled = {{ repositories_virtual_enabled | tojson }};
 const todayDateLabel = {{ today_date | tojson }};
+const WEEKLY_STATS_SYNC_EVENT_KEY = 'weeklyVersionStatsChanged';
 const itemsPerPage = 5;
 let currentPage = 1;
 const ACTIVE_DEFAULT_VISIBLE = 3;
@@ -646,11 +647,7 @@ const REPO_VIRTUAL_OVERSCAN = 4;
 
 // 页面加载时获取统计信息
 document.addEventListener('DOMContentLoaded', function() {
-    {% for version in active_versions %}
-        {% for config in version.configs %}
-        loadConfigStats({{ config.id }});
-        {% endfor %}
-    {% endfor %}
+    refreshAllVisibleConfigStats();
     
     // 初始化非活跃版本分页
     if (inactiveVersions.length > 0) {
@@ -659,7 +656,48 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     initActiveVersionList();
     initRepositoryList();
+
+    window.addEventListener('pageshow', function() {
+        refreshAllVisibleConfigStats();
+    });
+
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) {
+            refreshAllVisibleConfigStats();
+        }
+    });
+
+    window.addEventListener('storage', function(event) {
+        if (event.key !== WEEKLY_STATS_SYNC_EVENT_KEY || !event.newValue) {
+            return;
+        }
+        try {
+            const payload = JSON.parse(event.newValue);
+            const changedConfigId = Number(payload?.config_id || 0);
+            if (changedConfigId > 0 && document.getElementById(`passRate-${changedConfigId}`)) {
+                loadConfigStats(changedConfigId);
+                return;
+            }
+        } catch (_error) {
+        }
+        refreshAllVisibleConfigStats();
+    });
 });
+
+function getVisibleConfigIds() {
+    const ids = new Set();
+    document.querySelectorAll('.pass-rate-pill[id^="passRate-"]').forEach(element => {
+        const configId = Number(String(element.id || '').replace('passRate-', ''));
+        if (Number.isFinite(configId) && configId > 0) {
+            ids.add(configId);
+        }
+    });
+    return Array.from(ids);
+}
+
+function refreshAllVisibleConfigStats() {
+    getVisibleConfigIds().forEach(loadConfigStats);
+}
 
 function initActiveVersionList() {
     const section = document.getElementById('activeVersionsSection');
@@ -979,7 +1017,7 @@ function initRepositoryList() {
 }
 
 function loadConfigStats(configId) {
-    fetch(`/weekly-version-config/${configId}/stats`)
+    fetch(`/weekly-version-config/${configId}/stats`, { cache: 'no-store' })
         .then(response => response.json())
         .then(data => {
             if (data.success) {

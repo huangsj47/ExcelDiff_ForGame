@@ -21,6 +21,7 @@ def test_merged_view_template_updates_pass_rate_when_stats_loaded():
     content = _read("templates/merged_project_view.html")
     assert "const passRateValue = calculatePassRate(totalFiles, confirmedCount);" in content
     assert "updatePassRateDisplay(configId, passRateValue);" in content
+    assert "fetch(`/weekly-version-config/${configId}/stats`, { cache: 'no-store' })" in content
     assert "pass-rate-high" in content
     assert "pass-rate-mid" in content
     assert "pass-rate-low" in content
@@ -33,3 +34,12 @@ def test_merged_view_template_highlights_time_range_and_shows_today_date():
     assert "version-today-badge" in content
     assert "今天：<strong>{{ today_date }}</strong>" in content
     assert "const todayDateLabel = {{ today_date | tojson }};" in content
+
+
+def test_merged_view_template_refreshes_pass_rate_on_visibility_and_storage_events():
+    content = _read("templates/merged_project_view.html")
+    assert "const WEEKLY_STATS_SYNC_EVENT_KEY = 'weeklyVersionStatsChanged';" in content
+    assert "function refreshAllVisibleConfigStats()" in content
+    assert "window.addEventListener('pageshow'" in content
+    assert "document.addEventListener('visibilitychange'" in content
+    assert "window.addEventListener('storage'" in content
