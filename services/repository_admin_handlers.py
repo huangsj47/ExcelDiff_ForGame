@@ -209,7 +209,18 @@ def delete_repository(repository_id):
     return redirect(url_for("repository_config", project_id=project_id))
 
 
+@require_admin
 def test_repository(repository_id):
+    """测试仓库连通性 / 触发同步。
+
+    权限：本文件其他四个维护接口（update_repository_order / swap_repository_order /
+    delete_repository / delete_project）都带 `@require_admin`，唯独这个没有，
+    也不在 `SENSITIVE_ENDPOINTS` 里。于是任意已登录用户可以对**任意**
+    repository_id 触发真实同步任务（agent 模式下会给别的项目的仓库派发任务）
+    或本地 `clone_or_update_repository()`，并把 git 错误文本回显出来。
+    现已补 `@require_admin`，并把它一并加入 `SENSITIVE_ENDPOINTS` 作第二道防线
+    （该表原先写的是裸 endpoint 名，整体失效，已修为全限定名）。
+    """
     Repository, log_print = _runtime("Repository", "log_print")
     get_git_service = get_runtime_model("get_git_service")
     create_auto_sync_task = get_runtime_model("create_auto_sync_task")
