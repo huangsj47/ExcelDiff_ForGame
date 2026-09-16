@@ -96,6 +96,46 @@ def truncate_text(text: str, limit: int) -> tuple[str, bool]:
     return content[:room] + TRUNCATION_SUFFIX, True
 
 
+def elision_marker(omitted: int) -> str:
+    """中间省略的标记，带上**被省略了多少字**。"""
+    return f"\n\n... [中间省略 {omitted} 字，内容未完整展示] ...\n\n"
+
+
+def truncate_text_middle(text: str, limit: int) -> tuple[str, bool]:
+    """保留**开头和结尾**、省略中间。
+
+    为什么不是只砍尾巴：本平台要分析的是 Excel 配表，而结构化 diff 是按「表 → 行 → 单元格」
+    顺序线性排列的。只砍尾巴意味着**后面的表整张都看不到**——模型会以为自己看到的就是
+    全部变更，而那些没露面的表恰恰可能是最危险的（比如「道具表改了、商城表跟着要改」）。
+
+    保留首尾之后，模型至少能看到全部被改动的表名（它们分布在序列两端与中间），缺的只是
+    中间某几张表的逐行细节。相比之下这是个小得多的损失，而且省略标记会把「缺了多少」
+    说清楚。
+    """
+    if limit <= 0:
+        raise ValueError("limit 必须为正数")
+    content = str(text or "")
+    if len(content) <= limit:
+        return content, False
+
+    # 标记的长度依赖被省略的字数，所以先按「标记大约 40 字」预留，再回填准确值。
+    # 一次回填足够：预估值偏大时结果只会比上限短，不会超。
+    reserved = len(elision_marker(len(content)))
+    room = max(0, limit - reserved)
+    head = room // 2
+    tail = room - head
+    omitted = len(content) - head - tail
+    marker = elision_marker(omitted)
+    result = content[:head] + marker + (content[-tail:] if tail > 0 else "")
+    while len(result) > limit and head > 0:
+        # 预估值偏小时（标记随位数变长）逐步收紧，保证结果不超上限。
+        head -= 1
+        tail = max(0, room - head)
+        omitted = len(content) - head - tail
+        result = content[:head] + elision_marker(omitted) + (content[-tail:] if tail else "")
+    return result, True
+
+
 def _summary_item(item: ContextItem, level: int) -> ContextItem:
     """把整条内容换成一句说明，只保留「这里原本有什么」。"""
     summary = (

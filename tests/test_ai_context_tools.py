@@ -1,0 +1,456 @@
+"""白名单工具的执行、缓存、预算与失败降级。
+
+这个模块的价值全在「出错的时候怎么办」，所以用例也集中在那里：
+
+* 取数**失败**与**确实没有内容**必须给出不同的文本。把失败静默成空字符串，模型会把
+  「我们没读到」当成「这里没有改动」，然后基于这个前提写出一条看起来很确定的结论。
+* 工具炸了不能作废整轮，但也不能悄悄少给一条。
+* 预算是**一次分析的总量**。第一版按「本轮请求列表的下标」判断，第二轮又从 0 开始，
+  预算永远不会触发 —— `test_budget_is_cumulative_across_rounds` 就是抓它的。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from services.ai.budget import TRUNCATION_SUFFIX, ContextItem, elision_marker, truncate_text_middle
+from services.ai.context_tools import (
+    ContextTools,
+    ToolBatch,
+    describe_request,
+)
+from services.ai.protocol import ContextRequest
+
+COMMIT_A = "a" * 40
+COMMIT_B = "b" * 40
+PATH_A = "config/30_goods/item.xlsx"
+PATH_B = "scripts/export.py"
+
+
+class FakeProvider:
+    """可控的 provider。记录调用，方便断言「有没有真的去取数」。"""
+
+    def __init__(self, **responses):
+        self.responses = responses
+        self.calls: list[tuple[str, tuple]] = []
+
+    def _respond(self, key: str, *args):
+        self.calls.append((key, args))
+        value = self.responses.get(key)
+        # 必须是 BaseException 而不是 Exception：KeyboardInterrupt 不属于 Exception，
+        # 用 Exception 判断的话它会被当成一个「正常返回值」交给下游，于是
+        # `test_a_keyboard_interrupt_is_not_swallowed` 测的其实是一个空字符串。
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    def commit_detail(self, commit):
+        return self._respond("commit_detail", commit)
+
+    def file_diff(self, commit, path):
+        return self._respond("file_diff", commit, path)
+
+    def file_content(self, commit, path):
+        return self._respond("file_content", commit, path)
+
+    def read_reference(self, name):
+        return self._respond("read_reference", name)
+
+
+def _diff_request(path=PATH_A, commit=COMMIT_A) -> ContextRequest:
+    return ContextRequest(type="file_diff", commit=commit, path=path)
+
+
+# ==========================================================================
+# 正常取数
+# ==========================================================================
+
+
+def test_a_successful_fetch_becomes_a_labelled_item():
+    tools = ContextTools(FakeProvider(file_diff="+ 100012 攻击力 100"))
+    batch = tools.execute([_diff_request()])
+
+    assert len(batch.items) == 1
+    item = batch.items[0]
+    assert item.kind == "file_diff"
+    assert "100012" in item.text
+    assert PATH_A in item.label
+    assert batch.executions == 1
+    assert not batch.has_failures
+
+
+def test_each_request_type_reaches_its_provider_method():
+    provider = FakeProvider(
+        commit_detail="提交说明",
+        file_diff="差异",
+        file_content="全文",
+        read_reference="参考文档",
+    )
+    tools = ContextTools(provider)
+    tools.execute(
+        [
+            ContextRequest(type="commit_detail", commit=COMMIT_A),
+            _diff_request(),
+            ContextRequest(type="file_content", commit=COMMIT_A, path=PATH_B),
+            ContextRequest(type="read_reference", name="incident-checklist.md"),
+        ]
+    )
+
+    assert [name for name, _ in provider.calls] == [
+        "commit_detail",
+        "file_diff",
+        "file_content",
+        "read_reference",
+    ]
+
+
+def test_paths_are_normalized_before_reaching_the_provider():
+    """模型常把分隔符写成反斜杠。归一化后 provider 才拿得到（它按正斜杠查 git）。"""
+    provider = FakeProvider(file_diff="差异")
+    ContextTools(provider).execute(
+        [ContextRequest(type="file_diff", commit=COMMIT_A, path="config\\30_goods\\item.xlsx")]
+    )
+
+    assert provider.calls[0][1] == (COMMIT_A, PATH_A)
+
+
+def test_commit_is_passed_through_unchanged():
+    provider = FakeProvider(commit_detail="说明")
+    ContextTools(provider).execute([ContextRequest(type="commit_detail", commit=COMMIT_B)])
+    assert provider.calls[0][1] == (COMMIT_B,)
+
+
+# ==========================================================================
+# 缓存
+# ==========================================================================
+
+
+def test_the_same_request_is_fetched_only_once():
+    """模型会忘，跨轮次反复要同一个文件是常态。不缓存就要一遍遍重跑 Excel diff。"""
+    provider = FakeProvider(file_diff="差异")
+    tools = ContextTools(provider)
+
+    tools.execute([_diff_request()])
+    tools.execute([_diff_request()])
+
+    assert len(provider.calls) == 1
+    assert tools.executions == 1
+    assert tools.cache_hits == 1
+
+
+def test_a_different_path_is_a_different_cache_entry():
+    provider = FakeProvider(file_diff="差异")
+    tools = ContextTools(provider)
+    tools.execute([_diff_request(), _diff_request(path=PATH_B)])
+
+    assert len(provider.calls) == 2
+    assert tools.cache_hits == 0
+
+
+def test_a_different_commit_is_a_different_cache_entry():
+    provider = FakeProvider(file_diff="差异")
+    tools = ContextTools(provider)
+    tools.execute([_diff_request(), _diff_request(commit=COMMIT_B)])
+
+    assert len(provider.calls) == 2
+
+
+def test_the_cache_does_not_outlive_one_analysis():
+    """**缓存是一次分析的，不是进程的。**
+
+    仓库被重新导入或 force-push 之后，同一个 commit 的 diff 会变。按 commit 做的全局
+    缓存会一直吐旧结果，于是分析报告与页面上看到的 diff 对不上——最难查的一类不一致。
+    """
+    provider = FakeProvider(file_diff="差异")
+    ContextTools(provider).execute([_diff_request()])
+    ContextTools(provider).execute([_diff_request()])
+
+    assert len(provider.calls) == 2
+
+
+def test_a_cached_item_keeps_its_original_accounting():
+    """缓存命中回放的是同一条记账，不能重新渲染成「没截断」的样子。"""
+    tools = ContextTools(FakeProvider(file_diff="x" * 50_000), limits={"file_diff": 500})
+    first = tools.execute([_diff_request()]).items[0]
+    second = tools.execute([_diff_request()]).items[0]
+
+    assert second.meta == first.meta
+    assert second.text == first.text
+
+
+# ==========================================================================
+# 失败与空内容
+# ==========================================================================
+
+
+def test_a_failed_fetch_tells_the_model_not_to_guess():
+    """**这条是模块的核心性质。**
+
+    只给空字符串的话，模型会把「没读到」当成「没有改动」，然后基于这个前提给出一条
+    看起来很有把握的结论。所以失败必须显式说出来，并且明确禁止猜测。
+    """
+    batch = ContextTools(FakeProvider(file_diff=None)).execute([_diff_request()])
+    item = batch.items[0]
+
+    assert item.meta["tool_failed"] is True
+    assert batch.has_failures
+    assert "没有" in item.text and "不要" in item.text
+    assert "信息缺口" in item.text
+
+
+def test_a_raising_tool_is_downgraded_not_fatal():
+    provider = FakeProvider(file_diff=RuntimeError("git 超时"))
+    batch = ContextTools(provider).execute([_diff_request()])
+
+    assert batch.has_failures
+    assert "git 超时" in batch.items[0].text
+    assert any("RuntimeError" in record.reason for record in batch.dropped)
+
+
+def test_a_keyboard_interrupt_is_not_swallowed():
+    """工具失败只该让那一条降级，但 Ctrl-C 必须继续往上抛。
+
+    `except Exception` 与 `except BaseException` 的差别就在这里，值得钉一条用例。
+    """
+    provider = FakeProvider(file_diff=KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        ContextTools(provider).execute([_diff_request()])
+
+
+def test_an_empty_result_is_distinguishable_from_a_failure():
+    """「取数成功但没有内容」是确定性结论（例如新增文件没有旧版本），与失败不同。"""
+    batch = ContextTools(FakeProvider(file_diff="")).execute([_diff_request()])
+    item = batch.items[0]
+
+    assert item.meta.get("tool_empty") is True
+    assert not item.meta.get("tool_failed")
+    assert not batch.has_failures
+    assert "没有风险" in item.text, "空内容不能被当成「没问题」"
+
+
+def test_one_failure_does_not_discard_the_other_results():
+    provider = FakeProvider(file_diff=None, file_content="全文")
+    batch = ContextTools(provider).execute(
+        [_diff_request(), ContextRequest(type="file_content", commit=COMMIT_A, path=PATH_B)]
+    )
+
+    assert len(batch.items) == 2
+    assert batch.has_failures
+    assert "全文" in batch.items[1].text
+
+
+def test_an_unknown_type_reports_a_failure_instead_of_empty_text():
+    """走到这里说明 `sanitize_requests` 漏了一种类型。
+
+    此时宁可如实报失败，也不要静默返回空 —— 那会让模型以为拿到了内容。
+    """
+    batch = ContextTools(FakeProvider()).execute(
+        [ContextRequest(type="read_secret_file", commit=COMMIT_A, path=PATH_A)]
+    )
+    assert batch.items[0].meta["tool_failed"] is True
+
+
+# ==========================================================================
+# 预算
+# ==========================================================================
+
+
+def test_requests_beyond_the_budget_are_refused_with_a_notice():
+    provider = FakeProvider(file_diff="差异")
+    tools = ContextTools(provider, max_tool_requests=2)
+    batch = tools.execute(
+        [
+            _diff_request(path="a/1.xlsx"),
+            _diff_request(path="a/2.xlsx"),
+            _diff_request(path="a/3.xlsx"),
+            _diff_request(path="a/4.xlsx"),
+        ]
+    )
+
+    assert len(provider.calls) == 2
+    assert batch.refused_by_budget == 2
+    assert len(batch.dropped) == 2
+    assert any(item.kind == "budget_notice" for item in batch.items)
+    assert tools.requests_remaining == 0
+
+
+def test_budget_is_cumulative_across_rounds():
+    """**预算是一次分析的总量，不是每轮一份。**
+
+    第一版按「本轮请求列表的下标」判断，于是第二轮又从下标 0 开始、永远不会触发 ——
+    这等于没有预算，模型可以无限要下去。
+    """
+    provider = FakeProvider(file_diff="差异")
+    tools = ContextTools(provider, max_tool_requests=2)
+
+    first = tools.execute([_diff_request(path="a/1.xlsx"), _diff_request(path="a/2.xlsx")])
+    second = tools.execute([_diff_request(path="a/3.xlsx")])
+
+    assert first.refused_by_budget == 0
+    assert second.refused_by_budget == 1
+    assert len(provider.calls) == 2
+    assert tools.requests_seen == 2
+
+
+def test_a_cache_hit_still_consumes_the_budget():
+    """命中缓存省下的是我们的耗时，不是模型的索取额度。
+
+    重复索要同一个文件正是「它没在收敛」的信号，把这种请求也计入，预算才真正起到
+    逼模型收敛的作用。
+    """
+    tools = ContextTools(FakeProvider(file_diff="差异"), max_tool_requests=2)
+    tools.execute([_diff_request()])
+    batch = tools.execute([_diff_request()])
+
+    assert batch.cache_hits == 1
+    assert batch.refused_by_budget == 0
+    assert tools.requests_remaining == 0
+
+    refused = tools.execute([_diff_request()])
+    assert refused.refused_by_budget == 1
+
+
+def test_a_zero_budget_refuses_everything():
+    batch = ContextTools(FakeProvider(file_diff="差异"), max_tool_requests=0).execute(
+        [_diff_request()]
+    )
+    assert batch.items[0].kind == "budget_notice"
+    assert batch.refused_by_budget == 1
+
+
+# ==========================================================================
+# 截断
+# ==========================================================================
+
+
+def test_a_long_diff_is_truncated_but_keeps_its_tail():
+    """结构化 diff **保留首尾**。
+
+    只砍尾巴会让排在后面的整张表完全不可见，而「配表 A 改了、配表 B 也要跟着改」正是
+    这个平台最关心的风险。保留尾巴之后，至少每张被改动的表都露过面。
+    """
+    content = "开头-" + "中" * 20_000 + "-结尾"
+    batch = ContextTools(FakeProvider(file_diff=content), limits={"file_diff": 2_000}).execute(
+        [_diff_request()]
+    )
+    item = batch.items[0]
+
+    assert item.meta["truncated"] is True
+    assert item.meta["original_chars"] == len(content)
+    assert item.text.startswith("开头-")
+    assert item.text.endswith("-结尾")
+    assert "中间省略" in item.text
+    assert batch.truncated == 1
+
+
+def test_a_long_plain_text_keeps_the_head_only():
+    """普通文本没有「必须看到结尾」的性质，用带截断标记的头部截断即可。"""
+    content = "y" * 30_000
+    batch = ContextTools(FakeProvider(file_content=content), limits={"file_content": 1_000}).execute(
+        [ContextRequest(type="file_content", commit=COMMIT_A, path=PATH_B)]
+    )
+    item = batch.items[0]
+
+    assert item.text.endswith(TRUNCATION_SUFFIX)
+    assert len(item.text) <= 1_000
+
+
+def test_content_within_the_limit_is_not_marked_as_truncated():
+    """反向自检：没有截断就不该打上截断标记，否则模型会去重新索取它已经有的东西。"""
+    batch = ContextTools(FakeProvider(file_diff="短"), limits={"file_diff": 1_000}).execute(
+        [_diff_request()]
+    )
+    assert "truncated" not in batch.items[0].meta
+    assert batch.truncated == 0
+
+
+def test_each_type_has_its_own_limit():
+    batch = ContextTools(
+        FakeProvider(commit_detail="c" * 5_000, file_diff="d" * 5_000),
+        limits={"commit_detail": 100, "file_diff": 10_000},
+    ).execute(
+        [
+            ContextRequest(type="commit_detail", commit=COMMIT_A),
+            _diff_request(),
+        ]
+    )
+
+    assert batch.items[0].meta.get("truncated") is True
+    assert "truncated" not in batch.items[1].meta
+
+
+# ==========================================================================
+# 标签
+# ==========================================================================
+
+
+def test_labels_identify_the_context_without_the_whole_body():
+    assert describe_request(ContextRequest(type="commit_detail", commit=COMMIT_A)) == (
+        "commit_detail " + COMMIT_A[:12]
+    )
+    assert describe_request(
+        ContextRequest(type="file_diff", commit=COMMIT_A, path=PATH_A)
+    ) == f"file_diff {COMMIT_A[:12]} {PATH_A}"
+    assert describe_request(
+        ContextRequest(type="read_reference", name="incident-checklist.md")
+    ) == "read_reference incident-checklist.md"
+
+
+def test_tool_batch_defaults_are_empty():
+    assert ToolBatch().items == ()
+    assert not ToolBatch().has_failures
+
+
+# ==========================================================================
+# 保留首尾的截断（budget 侧的性质，用在这里更方便对照）
+# ==========================================================================
+
+
+def test_middle_truncation_reports_how_much_was_elided():
+    """**标注的省略量 + 实际保留的字数 = 原文长度**。
+
+    标注一个编出来的数字比不标更糟：模型会据此判断「缺口有多大」。第一版用例自己
+    算错了首尾长度（把标记自身的字符也算进了保留量），断言失败——是测试的算术错了，
+    代码是对的。所以这里改成用正则把标记整段切出来，剩下的就是真正的保留量。
+    """
+    import re
+
+    content = "x" * 5_000
+    result, truncated = truncate_text_middle(content, 1_000)
+    assert truncated
+    assert len(result) == 1_000
+
+    match = re.search(r"\n\n\.\.\. \[中间省略 (\d+) 字，内容未完整展示\] \.\.\.\n\n", result)
+    assert match, f"标记格式不符合预期：{result[:120]!r}"
+
+    head, tail = result[: match.start()], result[match.end() :]
+    assert head and tail, "保留首尾的截断必须两端都留下内容"
+    assert int(match.group(1)) == 5_000 - len(head) - len(tail)
+
+
+def test_middle_truncation_is_a_no_op_within_the_limit():
+    result, truncated = truncate_text_middle("短文本", 100)
+    assert result == "短文本"
+    assert not truncated
+
+
+def test_middle_truncation_never_exceeds_the_limit_even_when_tiny():
+    """标记本身要占位，很小的上限也不能被撑破。"""
+    for limit in (60, 100, 137, 500):
+        result, truncated = truncate_text_middle("z" * 10_000, limit)
+        assert truncated
+        assert len(result) <= limit, f"limit={limit} 时结果 {len(result)} 字，超了"
+
+
+@pytest.mark.parametrize("limit", [0, -5])
+def test_middle_truncation_rejects_a_non_positive_limit(limit):
+    with pytest.raises(ValueError):
+        truncate_text_middle("abc", limit)
+
+
+def test_elision_marker_states_the_count():
+    assert "123" in elision_marker(123)
+
+
+def test_context_item_char_count_tracks_text():
+    assert ContextItem(kind="k", label="l", text="abc").char_count == 3
