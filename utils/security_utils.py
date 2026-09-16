@@ -10,14 +10,111 @@ from cryptography.fernet import Fernet, InvalidToken
 ENCRYPTION_PREFIX = "enc::"
 REPO_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
+# 自动生成的凭据加密密钥落盘位置（相对于仓库根，见 utils/runtime_paths.py）。
+_AUTO_KEY_FILENAME = ".credential_encryption_key"
+_auto_key_cache = None
+
+
+def _auto_generated_key_material():
+    """没有显式配置密钥时，生成并**持久化**一个本机随机密钥。返回 bytes。
+
+    ## 为什么不能再用固定常量
+
+    这里原先的兜底值是硬编码的 `"diff-platform-local-key"` —— 一个**逐字节写在
+    公开仓库里**的常量。它派生出的 Fernet 密钥用来加解密仓库凭据
+    （git/SVN 的 token 与口令，`encrypt_credential` / `decrypt_credential`）。
+    于是「没配 FLASK_SECRET_KEY」的部署会把所有仓库凭据用公开密钥加密：
+    任何拿到数据库备份/导出的人都能直接解出全部 token。这比 FLASK_SECRET_KEY
+    可猜更严重 —— 那个只能伪造会话，这个能直接还原凭据。
+
+    注意 `utils/env_bootstrap.py` 的启动校验已经把 `diff-platform-local-key`
+    列进占位值黑名单，但那只能拦住「显式把它填进 .env」；**不配置**才是原来的
+    实际路径，黑名单拦不住。
+
+    ## 为什么落盘而不是每次随机
+
+    纯 per-process 随机也能去掉公开常量，但会让**重启后旧值解不开** ——
+    库里已加密的凭据全部作废，仓库连接集体失效。落盘一个本机随机密钥同时满足
+    「不是公开的」与「跨重启稳定」。
+
+    文件写不出来（只读文件系统 / 权限不足）时退回 per-process 随机并告警：
+    仍然不是公开常量，只是重启后需要重新录入凭据。
+    """
+    global _auto_key_cache
+    if _auto_key_cache:
+        return _auto_key_cache
+
+    import secrets
+
+    try:
+        from utils.runtime_paths import resolve_runtime_path
+
+        key_path = resolve_runtime_path(os.path.join("instance", _AUTO_KEY_FILENAME))
+        os.makedirs(os.path.dirname(key_path), exist_ok=True)
+
+        if os.path.exists(key_path):
+            with open(key_path, "rb") as handle:
+                stored = handle.read().strip()
+            if stored:
+                _auto_key_cache = stored
+                return stored
+
+        generated = secrets.token_bytes(48)
+        # O_EXCL：两个进程同时首启时，先建成功的那个胜出，另一个改用已存在的值。
+        try:
+            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(generated)
+        except FileExistsError:
+            with open(key_path, "rb") as handle:
+                stored = handle.read().strip()
+            if stored:
+                _auto_key_cache = stored
+                return stored
+        try:
+            os.chmod(key_path, 0o600)  # Windows 上是尽力而为
+        except OSError:
+            pass
+        _auto_key_cache = generated
+        _log_auto_key_warning(key_path)
+        return generated
+    except Exception as exc:  # pragma: no cover - 兜底路径
+        _safe_log(
+            f"⚠️ 无法持久化凭据加密密钥（{type(exc).__name__}: {exc}），"
+            "本次运行使用进程内随机密钥：重启后已加密的仓库凭据将无法解密，需重新录入。",
+            force=True,
+        )
+        _auto_key_cache = secrets.token_bytes(48)
+        return _auto_key_cache
+
+
+def _safe_log(message, force=False):
+    try:
+        from utils.safe_print import log_print
+
+        log_print(message, "SECURITY", force=force)
+    except Exception:  # pragma: no cover
+        pass
+
+
+def _log_auto_key_warning(key_path):
+    _safe_log(
+        "⚠️ 未配置 CREDENTIAL_ENCRYPTION_KEY / FLASK_SECRET_KEY："
+        f"已自动生成凭据加密密钥并保存到 {key_path}（权限 600）。\n"
+        "    该文件与数据库同等敏感 —— 丢失它等于库里的仓库凭据全部作废，"
+        "泄露它等于凭据全部泄露。生产环境请显式配置 CREDENTIAL_ENCRYPTION_KEY。",
+        force=True,
+    )
+
 
 def _derive_fernet_key() -> bytes:
     raw_key = os.environ.get("CREDENTIAL_ENCRYPTION_KEY")
     if raw_key:
         material = raw_key.encode("utf-8")
     else:
-        fallback = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY") or "diff-platform-local-key"
-        material = fallback.encode("utf-8")
+        explicit = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY")
+        # 绝不回退到硬编码常量（理由见 _auto_generated_key_material 的 docstring）。
+        material = explicit.encode("utf-8") if explicit else _auto_generated_key_material()
     digest = hashlib.sha256(material).digest()
     return base64.urlsafe_b64encode(digest)
 

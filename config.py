@@ -68,10 +68,23 @@ LOG_LEVEL = {
     'LOGGING_VERBOSE': True   # 通用日志输出（重载print函数使用）
 }
 
+from utils.db_config import DEFAULT_SQLITE_PATH as _DEFAULT_SQLITE_PATH  # noqa: E402
+
+
 # Flask配置
 class Config:
-    SECRET_KEY = 'your-secret-key-here'
-    SQLALCHEMY_DATABASE_URI = f'sqlite:///{os.path.abspath("instance/diff_platform.db")}'
+    # ⚠️ 本类**没有**被 `app.config.from_object(Config)` 使用（全仓无该调用）。
+    # 运行期真正生效的两个值来自：
+    #   * SECRET_KEY            → bootstrap/app_factory.py::build_runtime_settings()
+    #                             读 FLASK_SECRET_KEY / SECRET_KEY，缺省再生成运行期随机值
+    #   * SQLALCHEMY_DATABASE_URI → utils/db_config.py::apply_database_settings()
+    #                             读 DATABASE_URL / DB_* 
+    # 这里原先写的是字面量占位值 'your-secret-key-here' 与一个 CWD 相关的
+    # sqlite 路径。它们现在都改成**引用同一份来源**，而不是各留一份会在运行时
+    # 被覆盖的假默认值 —— 那种「看起来配了、其实从来没生效」的值，会让人在排查
+    # 会话丢失或数据库路径不对时白跑很久。
+    SECRET_KEY = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY") or None
+    SQLALCHEMY_DATABASE_URI = f'sqlite:///{_DEFAULT_SQLITE_PATH}'
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     
     # 服务器配置
@@ -90,7 +103,6 @@ class Config:
 # 路径取自 utils/db_config.py 的 DEFAULT_SQLITE_PATH，不再自己 abspath ——
 # 那份默认值锚定在**仓库根目录**，而 `os.path.abspath("instance/...")` 是相对
 # 当前工作目录的：换个目录启动就会指向另一个库文件。详见 utils/runtime_paths.py。
-from utils.db_config import DEFAULT_SQLITE_PATH as _DEFAULT_SQLITE_PATH  # noqa: E402
 
 DATABASE_CONFIG = {
     'db_path': _DEFAULT_SQLITE_PATH,
