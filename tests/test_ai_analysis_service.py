@@ -1,10 +1,10 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import services.ai_analysis_service as ai_service
 from app import app, create_tables, db
 from models import Project, Repository, WeeklyVersionConfig, WeeklyVersionDiffCache
-from models.ai_analysis import AiProjectApiKey, AiWeeklyAnalysisState
-import services.ai_analysis_service as ai_service
+from models.ai_analysis import AiAnalysisRun, AiProjectApiKey, AiWeeklyAnalysisState
 
 
 def _uid(prefix: str) -> str:
@@ -373,3 +373,141 @@ def test_build_endpoint_client_falls_back_to_the_saved_key():
         )
         assert errors == []
         assert client.model == "typed-model"
+
+# ==========================================================================
+# run 溯源：这结论是哪套 prompt / skill / 规则 / 模型跑出来的
+# ==========================================================================
+
+
+def test_the_provenance_names_the_prompt_skill_rules_and_model():
+    """四个溯源值都要有内容，且模型取自项目当前配置。"""
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        db.session.commit()
+        ai_service.update_project_analysis_config(project.id, {"api_model": "m-1"})
+        db.session.commit()
+
+        provenance = ai_service._current_provenance(project.id)
+
+        assert provenance["prompt_version"].startswith("prompt-")
+        assert provenance["rules_version"], "规则版本为空，改了规则也不会让缓存失效"
+        assert provenance["skill_version"], "skill 版本为空，改了 skill 也不会让缓存失效"
+        assert provenance["model"] == "m-1"
+
+
+def test_a_weekly_run_records_its_provenance():
+    """**写入路径**：跑完一次分析，run 上要留下「谁跑出来的」。
+
+    这些列在数据模型里加好了，但此前**没有任何写入路径** —— 不记录就没法说明一份结论
+    是怎么来的，也没法判断「改了 skill 之后这份结论还算不算数」。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo = _create_repo(project.id, _uid("code"), "git", "code")
+        cfg = _create_weekly_config(
+            project.id, repo, "W1", datetime(2026, 3, 1), datetime(2026, 3, 8)
+        )
+        _seed_diff_cache(cfg, repo, "src/absorber.lua", datetime.now(timezone.utc))
+        db.session.commit()
+        ai_service.set_project_api_key(project.id, "k")
+        ai_service.update_project_analysis_config(project.id, {"api_model": "m-w"})
+        db.session.commit()
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+        assert outcome["status"] == "succeeded", outcome
+
+        run = db.session.get(AiAnalysisRun, outcome["run_id"])
+        assert run.prompt_version and run.rules_version and run.skill_version
+        assert run.model == "m-w"
+
+
+def test_a_run_without_provenance_is_never_reused():
+    """老库上的行这些列是 NULL，**一律判为不可复用**。
+
+    代价是老提交会被重新分析一次，换来的是「绝不会把旧规则下的结论当成新规则下的
+    结论展示给用户」。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        db.session.commit()
+
+        stale = AiAnalysisRun(
+            project_id=project.id,
+            target_type="commit",
+            target_id=1,
+            status="succeeded",
+            response_text="旧结论",
+            finished_at=datetime.now(timezone.utc),
+        )
+        db.session.add(stale)
+        db.session.commit()
+
+        assert ai_service._is_run_fresh(stale) is False
+
+
+def test_changing_the_skill_prompt_or_model_invalidates_the_cache():
+    """**这条是这次要修的核心**：改了 skill / 提示词 / 规则 / 模型，旧结论就不能再当
+    「现成的」拿来用。
+
+    以前缓存只按「目标 + 时间」命中，于是改完 skill 之后 90 天内重看老提交，拿到的还是
+    旧规则下的结论 —— 从用户角度看就是「我的改动没生效」。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        db.session.commit()
+        ai_service.update_project_analysis_config(project.id, {"api_model": "m-1"})
+        db.session.commit()
+
+        fresh = AiAnalysisRun(
+            project_id=project.id,
+            target_type="commit",
+            target_id=1,
+            status="succeeded",
+            response_text="结论",
+            finished_at=datetime.now(timezone.utc),
+            **ai_service._current_provenance(project.id),
+        )
+        db.session.add(fresh)
+        db.session.commit()
+
+        assert ai_service._is_run_fresh(fresh) is True, "完全一致的溯源应当可复用"
+
+        for field, value in (
+            ("prompt_version", "prompt-outdated"),
+            ("skill_version", "skill-outdated"),
+            ("rules_version", "rules-outdated"),
+            ("model", "another-model"),
+        ):
+            original = getattr(fresh, field)
+            setattr(fresh, field, value)
+            assert ai_service._is_run_fresh(fresh) is False, f"{field} 变了却仍被当成现成的"
+            setattr(fresh, field, original)
+
+        assert ai_service._is_run_fresh(fresh) is True, "改回去之后应当恢复可复用"
+
+
+def test_the_freshness_check_still_honours_the_time_window():
+    """时间窗不能被溯源判等挤掉：太老的结论即使版本一致也不复用。"""
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        db.session.commit()
+
+        ancient = AiAnalysisRun(
+            project_id=project.id,
+            target_type="commit",
+            target_id=1,
+            status="succeeded",
+            response_text="结论",
+            finished_at=datetime.now(timezone.utc)
+            - timedelta(days=ai_service.ANALYSIS_CACHE_DAYS + 1),
+            **ai_service._current_provenance(project.id),
+        )
+        db.session.add(ancient)
+        db.session.commit()
+
+        assert ai_service._is_run_fresh(ancient) is False

@@ -284,6 +284,22 @@ def load_skills(
     )
 
 
+def skill_revision(repo_root: Path, *, project_code: str | None = None) -> str:
+    """当前 skill 内容的版本标识，与 `prompt_version()` / `rules_version()` 同一个用途。
+
+    它进 run 的溯源字段，也是「上一次的结论还能不能拿来复用」的判据之一：skill 变了，
+    按老 skill 得出的结论就不再可信。
+
+    **失败不抛异常**，返回 `"unavailable"`：调用它的是分析路径，文件缺失时宁可用一个
+    明确的、会让缓存失效的值（缓存判等时它永远不等于上一次的值），也不要因为一个
+    版本号把整次分析炸掉。
+    """
+    try:
+        return load_skills(repo_root, project_code=project_code).revision
+    except (SkillLoadError, OSError):
+        return "unavailable"
+
+
 def build_skill_index(loaded: LoadedSkills) -> str:
     """渲染注入提示词的「可读文档索引」。
 

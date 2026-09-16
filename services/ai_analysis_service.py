@@ -10,12 +10,14 @@ import json
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from sqlalchemy.exc import SQLAlchemyError
 
 from models import (
     Commit,
+    Project,
     Repository,
     WeeklyVersionConfig,
     WeeklyVersionDiffCache,
@@ -41,6 +43,9 @@ from services.ai.endpoint_service import (
     validate_field,
     validate_payload,
 )
+from services.ai.prompt import prompt_version
+from services.ai.rules import rules_version
+from services.ai.skill_loader import skill_revision
 from utils.dpapi_utils import DPAPI_PREFIX, decrypt_dpapi
 from utils.logger import log_print
 from utils.security_utils import decrypt_credential, encrypt_credential
@@ -221,7 +226,54 @@ def build_weekly_group_key(config: WeeklyVersionConfig) -> str:
     return f"{config.project_id}|{start_key}|{end_key}|{safe_base}"
 
 
-def _is_run_fresh(run: Optional[AiAnalysisRun]) -> bool:
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _current_provenance(project_id: int) -> dict:
+    """这批结论是由「哪套提示词 / skill / 规则 / 模型」产生的。
+
+    **必须落库，也必须参与缓存判等**，理由有两条：
+
+    1. 不记录就没法说明一份结论是怎么来的。改了 skill 之后重看同一份结论，无法判断
+       它是新规则跑出来的还是旧的。
+    2. 缓存目前只按「目标 + 时间」命中。于是改了 skill、提示词、规则或换了模型之后，
+       90 天内重看老提交拿到的仍然是**旧结论** —— 从用户角度看就是「我的改动没生效」。
+       三个版本号都是源码内容哈希，改了文件就变，缓存自然失效。
+    """
+    project = db.session.get(Project, project_id)
+    project_code = getattr(project, "code", None) if project else None
+    row = _get_project_config_row(project_id)
+    model = ""
+    if row is not None:
+        model = str(row.resolved().get("api_model") or "")
+    return {
+        "prompt_version": prompt_version(),
+        "skill_version": skill_revision(_REPO_ROOT, project_code=project_code),
+        "rules_version": rules_version(),
+        "model": model.strip(),
+    }
+
+
+def _provenance_matches(run: AiAnalysisRun, expected: Optional[dict]) -> bool:
+    """run 的溯源字段是否与「现在这套」一致。
+
+    老库上的行这些列是 NULL —— 一律判为**不一致**（即不可复用）。代价是老提交会被
+    重新分析一次，换来的是「绝不会把旧规则下的结论当成新规则下的结论」。
+    """
+    if not expected:
+        return True
+    for key, value in expected.items():
+        if str(getattr(run, key, None) or "") != str(value or ""):
+            return False
+    return True
+
+
+def _is_run_fresh(run: Optional[AiAnalysisRun], *, expected: Optional[dict] = None) -> bool:
+    """这份历史结论现在还能不能直接复用。
+
+    除了时间窗，还要求产生它的那套 prompt/skill/rules/model 与现在一致（见
+    `_current_provenance`）。不传 `expected` 时按 run 自己的项目现算。
+    """
     if not run:
         return False
     if not (run.response_text or run.response_payload):
@@ -231,7 +283,11 @@ def _is_run_fresh(run: Optional[AiAnalysisRun]) -> bool:
         return False
     if getattr(ts, "tzinfo", None) is None:
         ts = ts.replace(tzinfo=timezone.utc)
-    return ts >= _analysis_cache_cutoff()
+    if ts < _analysis_cache_cutoff():
+        return False
+    if expected is None and run.project_id:
+        expected = _current_provenance(run.project_id)
+    return _provenance_matches(run, expected)
 
 
 def _parse_response_payload(raw: Optional[str]) -> Optional[dict]:
@@ -679,6 +735,7 @@ def stream_commit_analysis(commit_id: int, user_label: str = "") -> Iterable[str
         scope="full",
         trigger_source="manual",
         trace_id=trace_id,
+        **_current_provenance(project_id),
         request_payload=_json_dumps(payload),
         started_at=_utcnow(),
     )
@@ -729,6 +786,7 @@ def stream_weekly_analysis(config_id: int, trigger_source: str = "manual") -> It
         scope=scope,
         trigger_source=trigger_source,
         trace_id=trace_id,
+        **_current_provenance(project_id),
         request_payload=_json_dumps(payload),
         delta_summary=_json_dumps({
             "delta_files": payload.get("summary", {}).get("delta_files", 0),
@@ -782,6 +840,7 @@ def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None
         scope=scope,
         trigger_source="scheduled",
         trace_id=f"weekly-{config_id}-{int(_utcnow().timestamp())}",
+        **_current_provenance(project_id),
         request_payload=_json_dumps(payload),
         delta_summary=_json_dumps({
             "delta_files": payload.get("summary", {}).get("delta_files", 0),
