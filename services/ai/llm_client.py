@@ -1,0 +1,501 @@
+"""OpenAI 兼容的模型客户端。
+
+## 为什么用 `requests` 手写而不用官方 SDK
+
+`requests==2.31.0` 已经在 `requirements.txt` 里，而 `openai` / `anthropic` 都不在。
+这个仓库的依赖一直很克制，为了一个 `POST /chat/completions` 引入一整套 SDK 不划算，
+而且内部网关的兼容层经常只实现子集，SDK 反而会因为严格校验而失败。
+
+## 重试栈刻意做得很浅
+
+要评审的那份外部工具叠了四层重试（HTTP 4 次 × 预算降级 4 次 × 整单 2 次 × 批量队尾
+1 次），单个任务最坏 32 次调用，且每层各自 sleep、没有全局 deadline —— 一个坏任务
+就能拖垮整个队列。这里只保留**一层**：传输层最多 `MAX_ATTEMPTS` 次，指数退避 + 上限，
+并尊重上游的 `Retry-After`。上层的「换更小的上下文再试」是另一回事（那是构造问题，
+不是网络问题），由编排层决定，不在这里叠。
+
+## 密钥绝不出现在错误信息里
+
+错误信息会被写进日志、写进数据库的 `error_message`、再展示到页面上。上游返回体、
+URL、异常字符串都可能带上密钥（内网网关把 token 放在 query 里并不罕见），所以一律
+先过 `redact_secret`。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Iterator
+from urllib.parse import urlparse, urlunparse
+
+import requests
+
+from utils.security_utils import sanitize_text
+
+# 传输层重试上限。刻意不设成 4 层叠加 —— 见模块 docstring。
+MAX_ATTEMPTS = 3
+# 指数退避的基础与上限（秒）。上限防止上游持续过载时把 worker 占死。
+BACKOFF_BASE_SECONDS = 1.5
+BACKOFF_MAX_SECONDS = 20.0
+# 默认单次请求超时（秒）。多轮分析里每一轮都可能是一次完整生成，所以给得比较宽。
+DEFAULT_TIMEOUT_SECONDS = 300
+# 模型列表最多回传多少条：防止某个网关返回上千条把页面和上下文都撑坏。
+MAX_MODELS = 500
+# 模型列表响应体大小上限：防御上游返回异常大的响应。
+MODELS_RESPONSE_MAX_BYTES = 2 * 1024 * 1024
+
+# 这些 HTTP 状态码值得重试：限流与上游故障。
+RETRYABLE_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
+# 会被收窄的异常元组（与仓库其它模块的 `*_ERRORS` 约定一致，
+# 便于 tests/test_*_exception_narrowing.py 这类守卫统一检查）。
+LLM_TRANSPORT_ERRORS = (
+    requests.exceptions.Timeout,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.ContentDecodingError,
+)
+LLM_RESPONSE_ERRORS = (
+    ValueError,  # json.JSONDecodeError 是它的子类，不必单列
+    TypeError,
+    KeyError,
+    AttributeError,
+)
+
+
+class LLMError(RuntimeError):
+    """模型调用相关的错误基类。"""
+
+
+class LLMConfigError(LLMError):
+    """配置问题（地址非法、缺模型名等）。**不该重试**——重试也不会变好。"""
+
+
+class LLMTransportError(LLMError):
+    """传输/上游故障。已耗尽重试次数。"""
+
+
+class LLMResponseError(LLMError):
+    """拿到了响应但无法解析。"""
+
+
+def redact_secret(text: str, secret: str | None = None) -> str:
+    """抹掉文本里的密钥与 URL 里的凭据。
+
+    两层：先把显式传入的密钥替换掉（上游有时会把 token 回显在错误体里），再过一遍
+    仓库既有的 `sanitize_text`（它认常见的凭据形态）。宁可多抹，也不能把密钥写进
+    日志或数据库。
+    """
+    redacted = str(text or "")
+    secret = str(secret or "").strip()
+    if secret:
+        redacted = redacted.replace(secret, "<redacted>")
+    return sanitize_text(redacted)
+
+
+def normalize_base_url(base_url: str) -> str:
+    """把用户填的各种形态归一成「协议 + 主机 + 可选前缀」的 base。
+
+    用户会填出很多形态，最常见的是把**完整端点**粘进来：
+
+        https://host/v1/chat/completions   →  https://host/v1
+        https://host/v1/models             →  https://host/v1
+        https://host/v1/                   →  https://host/v1
+        https://host                       →  https://host
+
+    不归一的话会拼出 `https://host/v1/chat/completions/models` 这种低级错误，而它
+    表现为「模型列表拿不到」——用户只会以为自己 token 配错了。
+    """
+    raw = str(base_url or "").strip()
+    if not raw:
+        raise LLMConfigError("未配置模型接口地址")
+
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"}:
+        raise LLMConfigError(f"模型接口地址必须以 http:// 或 https:// 开头：{redact_secret(raw)}")
+    if not parsed.netloc:
+        raise LLMConfigError(f"模型接口地址缺少主机名：{redact_secret(raw)}")
+
+    path = parsed.path.rstrip("/")
+    for suffix in ("/chat/completions", "/completions", "/models"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+
+    # 去掉 URL 里的凭据：这个地址会进日志，凭据不该跟着走。
+    netloc = parsed.hostname or ""
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunparse((parsed.scheme, netloc, path, "", "", "")).rstrip("/")
+
+
+def chat_completions_url(base_url: str) -> str:
+    return f"{normalize_base_url(base_url)}/chat/completions"
+
+
+def models_url(base_url: str) -> str:
+    return f"{normalize_base_url(base_url)}/models"
+
+
+def _build_headers(api_key: str | None) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    key = str(api_key or "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def _retry_after_seconds(response: "requests.Response | None") -> float | None:
+    """读上游的 `Retry-After`（秒数形态）。
+
+    有它就以它为准——这是上游在明确告诉我们多久之后再来，比我们自己猜退避曲线准。
+    只认数字形态，HTTP-date 形态在本场景不常见，解析它得不偿失。
+    """
+    if response is None:
+        return None
+    raw = str(response.headers.get("Retry-After") or "").strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return None
+    if seconds < 0:
+        return None
+    return min(seconds, BACKOFF_MAX_SECONDS)
+
+
+def _backoff_seconds(attempt: int) -> float:
+    return min(BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), BACKOFF_MAX_SECONDS)
+
+
+def _should_retry_status(status_code: int) -> bool:
+    return status_code in RETRYABLE_STATUS_CODES
+
+
+@dataclass(frozen=True)
+class ChatResult:
+    """一次对话补全的结果。"""
+
+    text: str
+    model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    finish_reason: str = ""
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+
+def _extract_message_text(payload: Any) -> str:
+    """从响应体里取出正文。
+
+    兼容几种真实存在的形态：标准 `choices[0].message.content`、以及部分网关只给
+    `choices[0].text`。取不到就报错，**不返回空字符串** —— 空字符串会被上层当成
+    「模型什么都没说」，从而去走协议纠错回路，把一个解析问题伪装成模型问题。
+    """
+    if not isinstance(payload, dict):
+        raise LLMResponseError("响应体不是 JSON 对象")
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise LLMResponseError("响应体里没有 choices")
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise LLMResponseError("choices[0] 不是对象")
+
+    message = first.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        # 有些网关把 content 拆成分片数组。
+        if isinstance(content, list):
+            parts = [
+                str(item.get("text", ""))
+                for item in content
+                if isinstance(item, dict) and item.get("text")
+            ]
+            if parts:
+                return "".join(parts)
+    text = first.get("text")
+    if isinstance(text, str):
+        return text
+    raise LLMResponseError("响应体里找不到可用的正文（message.content / text 均为空）")
+
+
+def _extract_usage(payload: Any) -> tuple[int, int]:
+    if not isinstance(payload, dict):
+        return 0, 0
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return 0, 0
+
+    def _as_int(value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    return _as_int(usage.get("prompt_tokens")), _as_int(usage.get("completion_tokens"))
+
+
+class LLMClient:
+    """一个项目维度上的模型客户端。
+
+    实例持有 base_url / api_key / model，但**不持有连接**——每次调用现开现关，避免
+    长连接在多线程 Flask 下被跨请求复用。
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str | None = None,
+        model: str = "",
+        timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.base_url = normalize_base_url(base_url)
+        self._api_key = str(api_key or "").strip()
+        self.model = str(model or "").strip()
+        self.timeout_seconds = max(1, int(timeout_seconds or DEFAULT_TIMEOUT_SECONDS))
+        # 注入 sleep 让重试测试不必真的等待。
+        self._sleep = sleep
+
+    # -- 内部 ---------------------------------------------------------------
+
+    def _raise_for_status(self, response: "requests.Response", *, purpose: str) -> None:
+        """把非 2xx 的响应转成异常。
+
+        **3xx 也算失败**：请求一律 `allow_redirects=False`（密钥不能跟着 302 跑到
+        另一台主机上去），所以 3xx 会原样回到这里。若不显式处理，`status_code < 400`
+        会把它判成成功，接着 `response.json()` 在登录页的 HTML 上抛一个含义不明的
+        解析错误 —— 用户看到的是「响应不是 OpenAI 形态」，而真实原因是端点把他重定向了。
+        """
+        if 200 <= response.status_code < 300:
+            return
+
+        detail = ""
+        try:
+            detail = response.text[:500]
+        except requests.exceptions.RequestException:
+            detail = ""
+
+        if 300 <= response.status_code < 400:
+            location = str(response.headers.get("Location") or "").strip()
+            raise LLMConfigError(
+                f"{purpose}收到重定向（HTTP {response.status_code} → {redact_secret(location, self._api_key)}）。"
+                "出于安全考虑不自动跟随（避免密钥被转发到其它主机），请把地址改成最终端点"
+            )
+
+        message = (
+            f"{purpose}失败（HTTP {response.status_code}）："
+            f"{redact_secret(detail, self._api_key)}"
+        )
+        if _should_retry_status(response.status_code):
+            raise LLMTransportError(message)
+        # 401/403 是配置问题，重试无意义，必须让用户看到「密钥不对」而不是「网络错误」。
+        raise LLMConfigError(message)
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        purpose: str,
+        json_body: dict | None = None,
+        stream: bool = False,
+    ) -> "requests.Response":
+        last_error: Exception | None = None
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            response = None
+            try:
+                response = requests.request(
+                    method,
+                    url,
+                    headers=_build_headers(self._api_key),
+                    json=json_body,
+                    timeout=self.timeout_seconds,
+                    stream=stream,
+                    allow_redirects=False,
+                )
+            except LLM_TRANSPORT_ERRORS as exc:
+                last_error = exc
+            except requests.exceptions.RequestException as exc:  # 兜住 requests 的其它异常
+                last_error = exc
+            else:
+                if 200 <= response.status_code < 300:
+                    return response
+                try:
+                    # 非 2xx（含 3xx）统一走这里转成异常；见 _raise_for_status。
+                    self._raise_for_status(response, purpose=purpose)
+                except LLMTransportError as exc:
+                    last_error = exc
+                except LLMConfigError:
+                    response.close()
+                    raise  # 配置问题不重试
+                finally:
+                    if response.status_code >= 300:
+                        response.close()
+
+                delay = _retry_after_seconds(response)
+                if delay is None:
+                    delay = _backoff_seconds(attempt)
+                if attempt < MAX_ATTEMPTS:
+                    self._sleep(delay)
+                continue
+
+            if attempt < MAX_ATTEMPTS:
+                self._sleep(_backoff_seconds(attempt))
+
+        raise LLMTransportError(
+            f"{purpose}失败，已重试 {MAX_ATTEMPTS} 次：{redact_secret(str(last_error), self._api_key)}"
+        )
+
+    # -- 对外 ---------------------------------------------------------------
+
+    def list_models(self) -> tuple[str, ...]:
+        """取可用模型 id 列表。
+
+        端点不支持时抛 `LLMConfigError` —— 调用方据此提示「请手动填写模型名」，
+        **不要**把它当成硬失败去阻断配置保存。
+        """
+        response = self._request(
+            "GET", models_url(self.base_url), purpose="获取模型列表"
+        )
+        try:
+            # 限制读取量：`content` 会一次性读进内存，上游异常时可能非常大。
+            raw = response.content[:MODELS_RESPONSE_MAX_BYTES]
+            payload = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+        except LLM_RESPONSE_ERRORS as exc:
+            raise LLMResponseError(
+                f"模型列表响应无法解析：{redact_secret(str(exc), self._api_key)}"
+            ) from exc
+        finally:
+            response.close()
+
+        entries = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(entries, list):
+            raise LLMResponseError("模型列表响应不是 OpenAI 形态（缺少 data 数组）")
+
+        models: list[str] = []
+        for entry in entries:
+            if isinstance(entry, dict):
+                identifier = entry.get("id") or entry.get("name")
+            else:
+                identifier = entry
+            text = str(identifier or "").strip()
+            if text and text not in models:
+                models.append(text)
+
+        if not models:
+            raise LLMResponseError("模型列表为空")
+        return tuple(sorted(models)[:MAX_MODELS])
+
+    def complete(self, messages: list[dict[str, str]], *, temperature: float | None = None) -> ChatResult:
+        """一次非流式补全。"""
+        if not self.model:
+            raise LLMConfigError("未配置模型名")
+        if not messages:
+            raise LLMConfigError("消息为空")
+
+        body: dict[str, Any] = {"model": self.model, "messages": messages}
+        if temperature is not None:
+            body["temperature"] = temperature
+
+        response = self._request(
+            "POST",
+            chat_completions_url(self.base_url),
+            purpose="模型调用",
+            json_body=body,
+        )
+        try:
+            payload = response.json()
+        except LLM_RESPONSE_ERRORS as exc:
+            raise LLMResponseError(
+                f"模型响应不是合法 JSON：{redact_secret(str(exc), self._api_key)}"
+            ) from exc
+        finally:
+            response.close()
+
+        prompt_tokens, completion_tokens = _extract_usage(payload)
+        finish_reason = ""
+        choices = payload.get("choices") if isinstance(payload, dict) else None
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            finish_reason = str(choices[0].get("finish_reason") or "")
+
+        return ChatResult(
+            text=_extract_message_text(payload),
+            model=str(payload.get("model") or self.model) if isinstance(payload, dict) else self.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            finish_reason=finish_reason,
+        )
+
+    def stream(
+        self, messages: list[dict[str, str]], *, temperature: float | None = None
+    ) -> Iterator[str]:
+        """流式补全，逐段产出正文增量。
+
+        用 `iter_lines` 而不是自己按字节切：SSE 的一帧以空行结束，`iter_lines` 已经
+        帮我们分好行，剩下的只是按 `data:` 前缀取值。
+        """
+        if not self.model:
+            raise LLMConfigError("未配置模型名")
+        if not messages:
+            raise LLMConfigError("消息为空")
+
+        body: dict[str, Any] = {"model": self.model, "messages": messages, "stream": True}
+        if temperature is not None:
+            body["temperature"] = temperature
+
+        response = self._request(
+            "POST",
+            chat_completions_url(self.base_url),
+            purpose="模型流式调用",
+            json_body=body,
+            stream=True,
+        )
+        try:
+            yield from self._iter_sse_content(response, self._api_key)
+        finally:
+            response.close()
+
+    @staticmethod
+    def _iter_sse_content(response: "requests.Response", api_key: str) -> Iterator[str]:
+        for raw_line in response.iter_lines(decode_unicode=True):
+            line = (raw_line or "").strip()
+            if not line or line.startswith(":"):
+                continue  # SSE 的心跳/注释帧
+            if not line.startswith("data:"):
+                continue
+            data = line[len("data:") :].strip()
+            if data == "[DONE]":
+                return
+            try:
+                payload = json.loads(data)
+            except LLM_RESPONSE_ERRORS:
+                continue  # 单帧坏了不中断整个流，后面的内容仍然有效
+            choices = payload.get("choices") if isinstance(payload, dict) else None
+            if not isinstance(choices, list) or not choices:
+                continue
+            delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+            if isinstance(delta, dict):
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    yield content
+
+
+def resolve_default_timeout_seconds() -> int:
+    """从环境变量读默认超时，非法值回落到常量。"""
+    raw = str(os.environ.get("AI_REQUEST_TIMEOUT_SECONDS") or "").strip()
+    if not raw:
+        return DEFAULT_TIMEOUT_SECONDS
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_TIMEOUT_SECONDS
