@@ -829,21 +829,44 @@ class SVNService:
                 log_print(f"🔍 第一个提交记录结构: {list(first_commit.keys())}", 'SVN')
                 log_print(f"🔍 第一个提交记录内容: commit_id={first_commit.get('commit_id', 'N/A')}, author={first_commit.get('author', 'N/A')}", 'SVN')
 
+            # 一次批量查出本批已存在的 (commit_id, path) 组合。
+            #
+            # 【为什么必须带上 path】`_parse_svn_log` 对 paths 里的**每一个** path
+            # 各产出一条记录，它们的 commit_id 都是同一个 `r{revision}`（见
+            # _parse_svn_log 里的 for path in paths.findall('path')）。
+            # 原来只按 (repository_id, commit_id) 判重，于是同一个 revision 的第 2 个
+            # 文件起全被判为「已存在」而跳过 —— 实测：一个 revision 改了 3 个文件，
+            # commits_log 里只落下第 1 个。这会让评审者在提交列表里看不到其余文件，
+            # 确认了这条提交就等于确认了没看过的改动。
+            # 行标识是三元组 (repository_id, commit_id, path)，与
+            # task_worker_service._make_excel_task_key 的口径一致。
+            incoming_ids = sorted({c.get('commit_id') for c in commits if c.get('commit_id')})
+            existing_pairs = set()
+            for batch_start in range(0, len(incoming_ids), 500):
+                batch_ids = incoming_ids[batch_start:batch_start + 500]
+                rows = db.session.query(Commit.commit_id, Commit.path).filter(
+                    Commit.repository_id == repository_id,
+                    Commit.commit_id.in_(batch_ids),
+                ).all()
+                existing_pairs.update((row[0], row[1] or '') for row in rows)
+            log_print(
+                f"🔍 已存在 {len(existing_pairs)} 条 (commit_id, path) 记录",
+                'SVN',
+            )
+
             for i, commit_data in enumerate(commits):
                 try:
                     if i < 3:  # 只为前3个提交记录打印详细日志
                         log_print(f"🔄 处理提交 {i+1}/{len(commits)}: {commit_data.get('commit_id', 'unknown')}", 'SVN')
 
-                    # 检查提交是否已存在
-                    existing_commit = Commit.query.filter_by(
-                        repository_id=repository_id,
-                        commit_id=commit_data['commit_id']  # 修复字段名
-                    ).first()
-
-                    if existing_commit:
+                    # 判重键必须含 path：同一 revision 的多个文件都要落库
+                    pair = (commit_data['commit_id'], commit_data.get('path', '') or '')
+                    if pair in existing_pairs:
                         if i < 3:
-                            log_print(f"⏭️ 跳过已存在的提交: {commit_data['commit_id']}", 'SVN')
+                            log_print(f"⏭️ 跳过已存在的提交: {commit_data['commit_id']} {pair[1]}", 'SVN')
                         continue  # 跳过已存在的提交
+
+                    existing_pairs.add(pair)
 
                     # 创建新的提交记录
                     if i < 3:

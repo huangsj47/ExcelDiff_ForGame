@@ -793,25 +793,38 @@ def _handle_auto_sync_task_inner(task):
                     commits_added = 0
                     excel_tasks_added = 0
 
-                    # 批量查询已存在的commit
-                    existing_commit_ids = set()
+                    # 批量查询已存在的 (commit_id, path) 组合
+                    #
+                    # 【为什么必须带上 path】git_service.get_commits 对一次提交里
+                    # **每一个**变更文件各产出一条记录，它们的 commit_id 都是同一个
+                    # hexsha（见 git_service 里 for file_path in ... / diff 循环）。
+                    # 原来只按 commit_id 判重，于是同一次提交的第 2 个文件起全被跳过
+                    # —— 实测：一次提交改了 3 个文件，commits_log 里只落下第 1 个。
+                    # 评审者在提交列表里看不到其余文件，确认了这条提交就等于确认了
+                    # 没看过的改动。行标识是三元组 (repository_id, commit_id, path)，
+                    # 与 _make_excel_task_key 的口径一致。
+                    existing_pairs = set()
                     all_incoming_ids = list(set(cd['commit_id'] for cd in commits))
                     BATCH_SIZE = 500
                     for batch_start in range(0, len(all_incoming_ids), BATCH_SIZE):
                         batch_ids = all_incoming_ids[batch_start:batch_start + BATCH_SIZE]
-                        existing_rows = _db.session.query(_Commit.commit_id).filter(
+                        existing_rows = _db.session.query(_Commit.commit_id, _Commit.path).filter(
                             _Commit.repository_id == repository.id,
                             _Commit.commit_id.in_(batch_ids)
                         ).all()
-                        existing_commit_ids.update(row[0] for row in existing_rows)
-                    log_print(f"🔍 [BACKGROUND_SYNC] 批量查询完成: {len(existing_commit_ids)}/{len(all_incoming_ids)} 已存在", 'SYNC')
+                        existing_pairs.update((row[0], row[1] or '') for row in existing_rows)
+                    log_print(
+                        f"🔍 [BACKGROUND_SYNC] 批量查询完成: {len(existing_pairs)} 条 (commit_id, path) 已存在",
+                        'SYNC',
+                    )
 
                     new_commit_objects = []
                     excel_task_list = []
                     for commit_data in commits:
-                        if commit_data['commit_id'] in existing_commit_ids:
+                        pair = (commit_data['commit_id'], commit_data.get('path', '') or '')
+                        if pair in existing_pairs:
                             continue
-                        existing_commit_ids.add(commit_data['commit_id'])
+                        existing_pairs.add(pair)
                         new_commit = _Commit(
                             repository_id=repository.id,
                             commit_id=commit_data['commit_id'],
