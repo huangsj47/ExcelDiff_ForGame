@@ -30,9 +30,10 @@ from werkzeug.exceptions import Forbidden, NotFound
 # 前缀问题，这里漏了）。
 #
 # 【为什么不改成「取裸名再比对」】
-# 实测存在短名冲突（`projects` 同时属于 core_management_routes 与 project_bp；
+# 实测存在短名冲突（`projects` 同时属于 core_management_routes 与当时的
+# project_bp —— 后者所在的遗留路由包从未被注册，现已删除；
 # `index`/`help_page`/`test`/`project_detail` 等也有多蓝图同名）。取裸名会让
-# `project_bp.projects` 也被当成平台管理员专属，误伤正常功能。所以这里统一
+# 同名端点被一并当成平台管理员专属，误伤正常功能。所以这里统一
 # 改写成全限定名精确匹配。
 #
 # 【为什么少了三个原本列在表里的项目级页面】

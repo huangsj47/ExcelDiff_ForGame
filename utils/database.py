@@ -5,8 +5,10 @@
 ## 这个模块的范围（曾经不是这样）
 
 这里原先还有 `ensure_instance_directory()` 与 `create_tables(db)` 两个函数，
-它们**从未被任何生产代码调用**（全仓只有 `get_database_info` 被
-`routes/main_routes.py` 的 `/api/system/info` 引用），却各自是一份**会走偏的
+它们**从未被任何生产代码调用**（当时全仓只有 `get_database_info` 被
+`routes/main_routes.py` 的 `/api/system/info` 引用 —— 而那个模块从未被注册，
+`/api/system/info` 实测不在 `app.url_map` 里，该模块已删除；`get_database_info`
+因此也不再有任何调用方），却各自是一份**会走偏的
 第二实现**：
 
 * `create_tables(db)` 用 `sqlite3.connect(DATABASE_CONFIG['db_path'])` 自己连一个

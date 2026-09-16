@@ -15,9 +15,9 @@
 
 ## 另一个钉住的点：端点必须注册在**活着的**蓝图上
 
-平台里存在一套**从未被注册**的遗留路由包（`routes/__init__.py` 定义了
-`main_bp` 等 5 个蓝图，`register_blueprints()` 全仓无调用方）。往
-`routes/main_routes.py` 里加路由**不会生效，也不会报错** —— 实测加完
+平台里曾存在一套**从未被注册**的遗留路由包（`routes/__init__.py` 定义了
+`main_bp` 等 5 个蓝图，`register_blueprints()` 全仓无调用方；那 5 个模块已删除）。
+往这类模块里加路由**不会生效，也不会报错** —— 实测当年加完
 `GET /healthz` 仍然是 404。所以这里断言 `request.endpoint` 的全限定名，
 确保实现挂在真正注册的 `core_management_routes` 上。
 """
@@ -213,7 +213,7 @@ class TestHealthzIsOnALiveBlueprint:
         """必须挂在真正注册的蓝图上。
 
         `routes/main_routes.py` 的 `main_bp` 从未被注册
-        （`routes/__init__.py::register_blueprints()` 全仓无调用方），
+        （`routes/__init__.py::register_blueprints()` 全仓无调用方，该模块已删除），
         路由写在那里不会生效、也不会报错 —— 实测加完仍是 404。
         """
         matches = [

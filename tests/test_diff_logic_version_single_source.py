@@ -9,7 +9,7 @@
   `DiffCache` / `ExcelHtmlCache` / `WeeklyVersionExcelCache` 的 `diff_version`，
   缓存的查询条件里带着它（见 `services/excel_diff_cache_service.py:254`、
   `services/excel_html_cache_service.py:84`）。改了它，旧缓存才会失效重算。
-* `config.py` —— 由 `routes/main_routes.py` 读去做**界面展示**。
+* `config.py` —— 由 `tasks/cache_cleanup.py` 读，用来**删除**版本不匹配的缓存。
 
 两者一旦不一致，会出现**不报错的静默错误**，且两个方向都很糟：
 

@@ -308,8 +308,11 @@ if sys.platform == 'win32' and not _IS_TESTING:
 # Diff逻辑版本号 - 当diff算法或逻辑发生变化时需要更新此版本号
 #
 # ⚠️ 这是**驱动缓存失效**的那一份（下面用它构造 DiffCache / ExcelHtmlCache /
-# WeeklyVersionExcelCache 的 diff_version）。仓库里 config.py 还有一份同名字面量，
-# 供 routes/main_routes.py 做界面展示；两者必须同时改，
+# WeeklyVersionExcelCache 的 diff_version，并经运行时注册表供缓存管理页展示）。
+# 仓库里 config.py 还有一份同名字面量，由 tasks/cache_cleanup.py 用来**删除**
+# 版本不匹配的缓存 —— 所以两份必须同时改：
+#   * 只改 app.py：清理任务仍按旧版本号比对，会把**刚生成的当前版本缓存**当成过期数据删掉；
+#   * 只改 config.py：缓存不失效，修复在界面上看不见。
 # 一致性由 tests/test_diff_logic_version_single_source.py 锁定。
 #
 # 1.9.0：Excel/CSV 改为按文本原样读取（dtype=str + keep_default_na=False），

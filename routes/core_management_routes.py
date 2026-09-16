@@ -59,10 +59,11 @@ def healthz_route():
     3. **不泄露任何敏感信息**：响应体只有固定的 `status` / `database` 两个字段，
        不含版本号、路径、连接串、表名；失败详情只写服务端日志。
 
-    ⚠️ 本路由注册在 `core_management_routes` 上，而不是同样定义了 `/test`
-    的 `routes/main_routes.py` —— **后者的 `main_bp` 从未被注册到 app**
-    （`routes/__init__.py::register_blueprints()` 全仓无调用方），
-    写在那里等于没写（实测加完仍是 404，且不报错）。
+    ⚠️ 本路由注册在 `core_management_routes` 上。仓库里曾有一套**从未被注册**的
+    遗留路由包（`routes/main_routes.py` 等 5 个模块定义了同名蓝图，但
+    `register_blueprints()` 全仓无调用方），写在那里等于没写（实测加完仍是 404，
+    且不报错）。那 5 个模块已删除，`routes/__init__.py` 里写明了原因。
+    新增路由请一律确认对应蓝图**真的被 app.py 注册**了。
     """
     ok, exc = _probe_database_ok()
     if ok:
