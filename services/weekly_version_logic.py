@@ -27,9 +27,7 @@ from models import (
 )
 from services.diff_service import DiffService
 from services.diff_render_helpers import (
-    render_git_diff_content,
-    render_new_file_content,
-    render_excel_diff_html,
+    render_git_diff_content, render_new_file_content, render_excel_diff_html,
 )
 from services.deployment_mode import is_agent_dispatch_mode
 from services.performance_metrics_service import get_perf_metrics_service
@@ -62,9 +60,7 @@ from utils.timezone_utils import now_beijing, beijing_window_to_utc_naive
 def weekly_window_in_utc(config):
     """北京墙钟窗口 → 与 Commit.commit_time 同口径的 (start_utc, end_utc)，均为 naive-UTC。"""
     return beijing_window_to_utc_naive(
-        getattr(config, 'start_time', None),
-        getattr(config, 'end_time', None),
-    )
+        getattr(config, 'start_time', None), getattr(config, 'end_time', None))
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +279,11 @@ def weekly_version_config_api(project_id):
     project = db.session.get(Project, project_id)
     if not project:
         return jsonify({'success': False, 'message': f'项目不存在: {project_id}'}), 404
+    # 权限：本文件另有 9 处接口都做了项目校验（6 处以 config.project_id、3 处以
+    # project_id），唯独这个**写接口**漏了 —— 下面 POST 分支会创建配置并派发同步
+    # 任务，normal 角色用户可枚举 project_id 跨项目读/建配置。
+    if not _has_project_access(project_id):
+        return jsonify({'success': False, 'message': '无权访问该项目'}), 403
     if request.method == 'GET':
         # 获取配置列表
         configs = WeeklyVersionConfig.query.filter_by(project_id=project_id).all()
@@ -402,6 +403,11 @@ def weekly_version_config_detail_api(project_id, config_id):
     project = db.session.get(Project, project_id)
     if not project:
         return jsonify({'success': False, 'message': f'项目不存在: {project_id}'}), 404
+    # 权限：config 已按 URL 的 project_id 限定，不存在串项目；但从未校验调用者
+    # 能否访问该 project —— 而 PUT 会删 WeeklyVersionDiffCache 后重建同步任务，
+    # DELETE 会删配置及其 Excel/diff 缓存与后台任务。
+    if not _has_project_access(project_id):
+        return jsonify({'success': False, 'message': '无权访问该项目'}), 403
     config = WeeklyVersionConfig.query.filter_by(id=config_id, project_id=project_id).first_or_404()
     if request.method == 'GET':
         # 获取配置详情
@@ -952,9 +958,7 @@ def weekly_version_file_diff_api(config_id):
 
         # 获取该文件的diff缓存
         diff_cache = WeeklyVersionDiffCache.query.filter_by(
-            config_id=config_id,
-            file_path=file_path
-        ).first()
+            config_id=config_id, file_path=file_path).first()
         if not diff_cache:
             return "<div class='alert alert-warning'>未找到该文件的diff数据</div>"
 
@@ -980,9 +984,7 @@ def weekly_version_file_full_diff(config_id):
 
         # 获取该文件的diff缓存基本信息
         diff_cache = WeeklyVersionDiffCache.query.filter_by(
-            config_id=config_id,
-            file_path=file_path
-        ).first()
+            config_id=config_id, file_path=file_path).first()
         if not diff_cache:
             return render_template('error.html',
                                  error_message="未找到该文件的diff数据",
@@ -1020,9 +1022,7 @@ def weekly_version_file_full_diff_data(config_id):
 
         # 获取该文件的diff缓存
         diff_cache = WeeklyVersionDiffCache.query.filter_by(
-            config_id=config_id,
-            file_path=file_path
-        ).first()
+            config_id=config_id, file_path=file_path).first()
         if not diff_cache:
             return jsonify({'success': False, 'message': '未找到该文件的diff数据'}), 404
 
@@ -1513,9 +1513,7 @@ def process_weekly_excel_cache(config_id, file_path):
         if not config:
             raise Exception(f"周版本配置不存在: {config_id}")
         diff_cache = WeeklyVersionDiffCache.query.filter_by(
-            config_id=config_id,
-            file_path=file_path
-        ).first()
+            config_id=config_id, file_path=file_path).first()
         if not diff_cache:
             raise Exception(f"周版本diff缓存不存在: {file_path}")
         lookup_time = time.time() - lookup_start
