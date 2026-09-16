@@ -43,11 +43,18 @@ from services.ai.protocol import ContextRequest, DroppedItem
 from services.ai.scope import normalize_path
 
 # 单条上下文的字符上限。Excel 的 diff 通常是最大的，但也不该无限大。
+#
+# 这三个 12,000 是**与预算对账出来的**，不是拍的：150 个提交的版本上，变更摘要要占掉约
+# 39,000 字符，加上平台 skill 与知识包约 12,000，预算 200,000 里剩下约 149,000 给上下文；
+# 按 12 次索取分摊，每条的上限就是 12,000。
+# 原先是 14,000 —— 12 次 × 14,000 = 168,000，加上摘要就已经超预算，模型索要 12 个文件
+# 会有一半被截断。**条数上限 8 与 `DEFAULT_MAX_TOOL_REQUESTS` 是两回事**：前者约束同一次
+# 分析里能同时带多少条，后者约束整个分析期间能要多少次。
 DEFAULT_TOOL_LIMITS: Mapping[str, int] = {
     "commit_detail": 6_000,
-    "file_diff": 14_000,
-    "file_content": 14_000,
-    "read_reference": 14_000,
+    "file_diff": 12_000,
+    "file_content": 12_000,
+    "read_reference": 12_000,
 }
 
 # 工具请求的总预算（按「次数」计，不是按条数）。

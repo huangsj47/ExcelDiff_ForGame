@@ -36,7 +36,10 @@ SHRINK_LEVEL_LIMITS = (4000, 1200)
 MAX_SHRINK_LEVEL = len(SHRINK_LEVEL_LIMITS) + 1
 
 DEFAULT_MAX_ITEMS = 8
-DEFAULT_TOTAL_CHARS = 120_000
+# 必须与 `models.ai_analysis.project_config.DEFAULT_PROMPT_CHAR_BUDGET` 相等
+# （`test_model_defaults_agree_with_the_budget_layer` 会拦住漂移）。取值依据见那边的注释：
+# 它要装得下「系统提示词 + 150 个提交的变更摘要 + 索取次数 × 单条上限」。
+DEFAULT_TOTAL_CHARS = 200_000
 
 
 @dataclass(frozen=True)
@@ -249,22 +252,29 @@ def enforce_budget(
     **某一级什么都没改就停止升级**。否则会出现这种情况：200 条各 100 字的短上下文
     超了条数上限，1 级与 2 级都无事可做（本来就不长），却一路升到 3 级把所有内容换成
     说明文字——信息被毁掉了，而真正该做的是丢条目。升级的前提是上一级确实压出了东西。
+
+    **体积判断只看「最终会留下的那些条目」。** 超出条数上限的那些反正会被
+    `limit_item_count` 丢掉，把它们算进体积，循环就永远满足不了条件（条数是丢条目才能
+    解决的），于是一路升到 3 级、把所有内容换成说明文字 —— 又一次毁掉信息。
+    真实触发路径：模型一次索要 12 个文件（预算本来就允许 12 次），而条数上限是 8；
+    12 条各 14,000 字的情况下，修之前的结果是 8 条共 682 字的说明文字。
     """
     current = tuple(items)
     notes: list[str] = []
     level = 0
 
-    def _over_budget(entries: tuple[ContextItem, ...]) -> bool:
-        return len(entries) > max_items or sum(e.char_count for e in entries) > total_chars
+    def _survivors_over_size(entries: tuple[ContextItem, ...]) -> bool:
+        kept, _, _ = limit_item_count(entries, max_items)
+        return sum(item.char_count for item in kept) > total_chars
 
-    if _over_budget(current):
+    if _survivors_over_size(current):
         for candidate_level in range(1, MAX_SHRINK_LEVEL + 1):
             shrunk = tuple(shrink_item(item, candidate_level) for item in current)
             if shrunk == current and candidate_level < MAX_SHRINK_LEVEL:
                 break
             current = shrunk
             level = candidate_level
-            if not _over_budget(current):
+            if not _survivors_over_size(current):
                 break
 
         if level:

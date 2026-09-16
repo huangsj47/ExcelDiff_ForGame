@@ -511,3 +511,62 @@ def test_run_to_dict_is_json_safe():
     assert payload["stored_status"] == "pending"
     assert payload["created_at"] is None
     assert payload["tokens_input"] is None
+
+# 150 个提交、600 个文件的真实量级下，变更摘要要占多少字符。
+# **这是实测值**：用 `render_change_summary` 渲染 150 个提交 × 4 个文件得到 39,283 字符，
+# 不是估的。真实周版本的文件数会变，但数量级就是这个。
+_LARGE_VERSION_SUMMARY_CHARS = 39_283
+
+# 平台内置 SKILL.md（约 8,300 字符）加项目知识包，按 12,000 算常驻开销。
+# references 是按需索取的，索取时占用的是上下文那部分预算，所以不重复计入这里。
+_SYSTEM_PROMPT_CHARS = 12_000
+
+
+def test_the_prompt_budget_can_honor_the_request_budget():
+    """**四个数字必须互相自洽，不能各看各的。**
+
+    真实关系是：
+
+        prompt_char_budget ≥ 系统提示词 + 变更摘要 + 索取次数 × 单条上限
+
+    旧默认值（120,000 / 12 次 / 14,000）在 150 个提交的版本上，右边是
+    12,000 + 39,283 + 12 × 14,000 = 219,283，**超了 1.8 倍**。超了不会报错：模型照样
+    索要 12 个文件，其中一半被截断，而它无法区分「预算不够」与「文件就这么大」。
+
+    这条测试锁的是「改其中任何一个数字都要同时看另外三个」——只调预算会浪费模型的窗口，
+    只调单条上限会丢掉 diff 细节，只调索取次数会让模型一次要不够。
+    """
+    from services.ai.budget import DEFAULT_TOTAL_CHARS
+    from services.ai.context_tools import DEFAULT_TOOL_LIMITS
+
+    per_item = max(DEFAULT_TOOL_LIMITS.values())
+    needed = (
+        _SYSTEM_PROMPT_CHARS
+        + _LARGE_VERSION_SUMMARY_CHARS
+        + DEFAULT_MAX_TOOL_REQUESTS * per_item
+    )
+
+    assert DEFAULT_PROMPT_CHAR_BUDGET >= needed, (
+        f"提示词预算 {DEFAULT_PROMPT_CHAR_BUDGET:,} 装不下：系统提示词 "
+        f"{_SYSTEM_PROMPT_CHARS:,} + 变更摘要 {_LARGE_VERSION_SUMMARY_CHARS:,} + "
+        f"{DEFAULT_MAX_TOOL_REQUESTS} 次 × {per_item:,} = {needed:,}。"
+        "要么调大预算，要么调小单条上限或索取次数"
+    )
+    assert DEFAULT_TOTAL_CHARS == DEFAULT_PROMPT_CHAR_BUDGET, "预算两处不一致"
+
+    # 预算也不该离谱地大：模型窗口有限，超了会让请求直接失败而不是降级。
+    assert DEFAULT_PROMPT_CHAR_BUDGET <= 400_000, (
+        "预算超过 40 万字符后，小窗口模型（端点里最小的声明 200,000 tokens）会直接报错"
+    )
+
+
+def test_the_reference_limit_is_not_larger_than_the_diff_limit():
+    """读参考文档与读 diff 用的是同一档上限。
+
+    参考文档比 diff 小得多，单独给更大的额度只会让「12 次索取」里最不值钱的那类
+    占掉最多预算。
+    """
+    from services.ai.context_tools import DEFAULT_TOOL_LIMITS
+
+    assert DEFAULT_TOOL_LIMITS["read_reference"] <= DEFAULT_TOOL_LIMITS["file_diff"]
+    assert DEFAULT_TOOL_LIMITS["commit_detail"] <= DEFAULT_TOOL_LIMITS["file_diff"]

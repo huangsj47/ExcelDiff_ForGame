@@ -517,3 +517,98 @@ def test_the_drawer_start_button_stays_disabled_until_ready():
     assert handler.index("drawerStartBtn.disabled = true;") < handler.index(
         "drawerStartBtn.disabled = false;"
     ), "先放开再禁用等于没禁用"
+
+# ==========================================================================
+# 10. 服务来源 radio 与地址的联动
+# ==========================================================================
+
+
+def test_choosing_the_official_source_fills_the_url():
+    """选「OpenAI 官方」要把官方地址填进输入框。
+
+    地址是必填项。选着「官方」却留一个空框，界面上看不出到底会请求哪个地址 ——
+    而后端把空地址当作官方默认值，两边显示的东西对不上。
+    """
+    script = _ai_script()
+    assert "function fillOfficialAiUrl()" in script
+    assert "openai.addEventListener('change'" in script
+    assert "if (openai.checked) fillOfficialAiUrl();" in script
+    assert "url.value = official;" in script
+
+
+def test_the_official_url_is_shown_on_load_even_when_never_configured():
+    """从未配置过的项目打开配置时也要显示官方地址，而不是「选中官方 + 空地址框」。"""
+    script = _ai_script()
+    body = script[script.index("function fillAiConfigForm") : script.index("function renderAiConfigSummary")]
+    assert "if (data.source !== 'custom' && !String(data.api_base_url || '').trim())" in body
+    assert "fillOfficialAiUrl();" in body
+
+
+def test_switching_to_custom_clears_only_the_official_url():
+    """切到「自定义端点」时清掉自动填入的官方地址，**但不动用户自己敲的内容**。
+
+    留着官方地址会让人以为「自定义」用的就是它，存下去才发现请求的还是官方端点；
+    而把用户手输的地址也一并清掉，是比留着更糟的意外。
+    """
+    script = _ai_script()
+    body = script[script.index("function clearOfficialAiUrl") : script.index("function initAiSourceRadios")]
+    assert "custom.addEventListener('change'" in script
+    assert "if (custom.checked) clearOfficialAiUrl();" in script
+    assert (
+        "if (url && official && String(url.value || '').trim() === official) url.value = '';" in body
+    ), "清空条件必须限定为「当前值等于官方地址」"
+
+
+def test_both_source_radios_are_still_there():
+    html = _modal_html()
+    for element_id in ("aiSourceOpenai", "aiSourceCustom"):
+        assert f'id="{element_id}"' in html
+    assert 'name="aiEndpointSource"' in html
+
+
+# ==========================================================================
+# 11. 两个文本域的填写示例
+# ==========================================================================
+
+
+def test_the_prompt_and_knowledge_fields_carry_a_fill_in_example():
+    """示例要给在**提示区**里，输入框本身保持为空。
+
+    往输入框里预填内容会被用户当成「已经配好的配置」，直接保存下去 ——
+    所以示例是说明文字，不是默认值。
+    """
+    html = _modal_html()
+    for dom_id in ("aiPromptInput", "aiProjectKnowledgeInput"):
+        tag = re.search(rf'<textarea[^>]*id="{dom_id}"[^>]*>', html, re.S)
+        assert tag, f"找不到 {dom_id}"
+        assert ">" in tag.group(0)
+        # textarea 的开始标签与结束标签之间必须是空的
+        after = html[html.index(tag.group(0)) + len(tag.group(0)) :]
+        assert after.lstrip().startswith("</textarea>"), f"{dom_id} 被预填了内容"
+
+    assert html.count("看一个填写示例") == 2, "两个字段都该有示例入口"
+    assert html.count("<details") == 2
+
+
+def test_the_examples_use_the_g119_project_vocabulary():
+    """示例要用本项目的真实词汇，否则用户不知道该怎么往里填。
+
+    这里只钉住几个「写错了会误导人」的事实点：号段规则、四个阶段、吸灵器交互链。
+    """
+    html = _modal_html()
+    for phrase in ("qz_config", "CfgXxx.lua", "6 位", "类型段", "吸灵器", "返程撤离", "Loot"):
+        assert phrase in html, f"示例里缺了 {phrase}"
+
+
+def test_the_examples_are_collapsed_by_default():
+    """示例是长文本，默认折叠——否则这个模态框会长到没法用。"""
+    html = _modal_html()
+    assert html.count("<details") == html.count("</details>")
+    assert "<summary" in html
+
+
+def test_the_examples_do_not_leak_internal_tool_names():
+    """示例会进版本库，不能带上内部工具、内部系统或同事的名字。"""
+    html = _modal_html()
+    for banned in ("luna", "gaia", "jelly", "阿拉丁", "unisdk", "刘彦钟"):
+        assert banned not in html, f"示例里出现了内部名称：{banned}"

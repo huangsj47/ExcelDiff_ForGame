@@ -601,6 +601,29 @@
                                   aria-describedby="aiPromptInputHelp aiPromptInputError"></textarea>
                         <div class="form-text" id="aiPromptInputHelp">分析协议（检查维度、输出格式、证据与置信度门槛、反误报条款）由平台内置 skill 强制提供，这里只写本项目特有的事实与偏好。<strong>留空也能正常分析。</strong></div>
                         <div class="form-text text-danger d-none" id="aiPromptInputError"></div>
+                        <details class="mt-2">
+                            <summary class="small text-primary" style="cursor: pointer;">看一个填写示例（G119）</summary>
+                            <div class="small text-muted border rounded bg-light p-2 mt-2" style="white-space: pre-wrap;">1. 技术栈与工程结构
+   Unity + C# + Lua。配表在 qz_config 下，导表产物是 CfgXxx.lua，且生成物要提交进版本库
+   （否则无法 diff、无法追溯）。表名形如 [30]道具表_CfgItem.xlsx，[NN] 就是 ID 段位。
+
+2. 配表规范要点
+   ID 为 6 位，前两位是类型段（10-19 角色、20-29 场景地图关卡、30-39 道具、40-49 怪物、
+   50-59 武器、60-69 技能，其余见项目知识包）。已放出的 ID 不能删改；新增 ID 不能越段；
+   国服与海外版各自占段、不能重叠。能分表则分表，字段尽量少用 custom 类型。
+
+3. 重点模块（改了要压测或完整回归）
+   一局流程的四个阶段：出生区域集结、野外接近或传送入场、地宫探索、返程撤离。
+   以及吸灵器交互链、Loot 与背包、四人协作、怪物压力、撤离结算。
+
+4. 本项目的红线与历史高频事故
+   删改已放出的 ID 导致玩家存档数据错乱；国服与海外版号段冲突，玩家手里的物品
+   从不值钱变成值钱；改吸灵器只回归了单点、没回归整条交互链；撤离结算与带出价值不一致。
+
+5. 输出偏好
+   风险点要写清复现条件（哪个阶段、单人还是四人队、哪个地宫或房间）与影响范围；
+   按严重度排序；报告正文控制在 1200 字以内。</div>
+                        </details>
                     </div>
                     <div class="mb-3">
                         <label class="form-label" for="aiProjectKnowledgeInput">项目补充知识</label>
@@ -608,6 +631,26 @@
                                   aria-describedby="aiProjectKnowledgeInputHelp aiProjectKnowledgeInputError"></textarea>
                         <div class="form-text" id="aiProjectKnowledgeInputHelp">在项目知识包之外追加的补充说明。与内置规则冲突时，以内置规则为准。</div>
                         <div class="form-text text-danger d-none" id="aiProjectKnowledgeInputError"></div>
+                        <details class="mt-2">
+                            <summary class="small text-primary" style="cursor: pointer;">看一个填写示例（G119）</summary>
+                            <div class="small text-muted border rounded bg-light p-2 mt-2" style="white-space: pre-wrap;">- 一局流程分四个阶段，而且「固定集结等待」「步行入场」「传送入场」是**不同阶段**。
+  所以看到「首次交互慢」「进入地宫后无响应」这类描述，要先确认发生在哪个阶段，
+  不能直接归因到吸灵器或地宫逻辑上。
+
+- 吸灵器的交互链按物件分六类，每类的验收路径不一样：
+  持续吸取（土堆、挂画、小动物）／直接吸收（书籍、报纸、现金堆）／两段式拖拽（窗帘、绳索木箱）／
+  吸后喷出（零钱罐）／容器与 QTE（衣柜、棺椁）／散件 Loot（地面掉落物）。
+  改动任一子行为，回归面是这六条链加拾取衔接，不是单点。
+
+- Loot 与背包：满包时玩家可能先丢弃低价值物再重拾，所以「最终带出的价值」要和
+  「丢弃／回拾的记录」一起看，只看最终价值会漏掉丢错东西的问题。
+
+- 同名美术物件可能因为运行时组件不同而走不同流程，不要凭物件名称断言实现方式。
+
+- 职能路由：吸灵器／Loot／背包／奖励／撤离规则 → 玩法逻辑；地宫／楼层／房间／传送落点 →
+  关卡地图；拾取列表／HUD／提示 → UI；仇恨／寻路／行为树 → 怪物 AI；组队／同步／结算 →
+  网络服务。</div>
+                        </details>
                     </div>
                 </fieldset>
             </div>
@@ -1198,6 +1241,14 @@ function fillAiConfigForm(data) {
     const sourceInput = aiEl(data.source === 'custom' ? 'aiSourceCustom' : 'aiSourceOpenai');
     if (sourceInput) sourceInput.checked = true;
 
+    // 判成「OpenAI 官方」但库里没有地址（从未配置过）时，把官方地址显示出来。
+    // 后端把空地址视为官方默认值，界面就该显示成同一个东西 —— 否则打开配置看到的是
+    // 「选中官方 + 地址空着」，而后端按官方地址发请求，两边对不上。
+    // 这只是显示，用户点保存时才会真正写进库里。
+    if (data.source !== 'custom' && !String(data.api_base_url || '').trim()) {
+        fillOfficialAiUrl();
+    }
+
     // Token 输入框永远留空：服务端不回显，留空表示沿用已保存的那个。
     const keyInput = aiEl('aiKeyInput');
     if (keyInput) keyInput.value = '';
@@ -1512,17 +1563,42 @@ function initAiKeyToggle() {
     });
 }
 
+function aiOfficialBaseUrl() {
+    return (aiConfigCache && aiConfigCache.openai_base_url) || '';
+}
+
+// 选「OpenAI 官方」就把官方地址填进输入框。否则选了「官方」却留着一个空地址框，
+// 看不出到底会请求哪个地址 —— 而地址是必填项，空着就是「还没就绪」。
+function fillOfficialAiUrl() {
+    const url = aiEl('aiBaseUrlInput');
+    const official = aiOfficialBaseUrl();
+    if (!url || !official) return;
+    url.value = official;
+    setAiFieldError('api_base_url', '');
+}
+
+// 切到「自定义端点」时，如果框里还是刚才自动填进去的官方地址，就清掉 ——
+// 留着它会让人以为「自定义」用的就是这个地址，存下去才发现请求的还是官方端点。
+// **用户自己敲进去的内容不动**：清掉别人的输入比留着更糟。
+function clearOfficialAiUrl() {
+    const url = aiEl('aiBaseUrlInput');
+    const official = aiOfficialBaseUrl();
+    if (url && official && String(url.value || '').trim() === official) url.value = '';
+}
+
 function initAiSourceRadios() {
     const openai = aiEl('aiSourceOpenai');
-    if (!openai) return;
-    openai.addEventListener('change', () => {
-        if (!openai.checked) return;
-        const url = aiEl('aiBaseUrlInput');
-        const official = aiConfigCache ? aiConfigCache.openai_base_url : '';
-        // 选「官方」时填入官方地址；切回「自定义」**不清空**输入框 —— 清空会把他
-        // 刚填好的地址删掉，而自定义端点正是本功能要支持的主要场景。
-        if (url && official) url.value = official;
-    });
+    const custom = aiEl('aiSourceCustom');
+    if (openai) {
+        openai.addEventListener('change', () => {
+            if (openai.checked) fillOfficialAiUrl();
+        });
+    }
+    if (custom) {
+        custom.addEventListener('change', () => {
+            if (custom.checked) clearOfficialAiUrl();
+        });
+    }
 }
 
 function initAiConfig() {

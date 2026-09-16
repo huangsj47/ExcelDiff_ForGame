@@ -21,7 +21,13 @@ DEFAULT_WEEKLY_INTERVAL_MINUTES = 60
 DEFAULT_MAX_FILES_PER_RUN = 200
 DEFAULT_MAX_ANALYSIS_ROUNDS = 8
 DEFAULT_MAX_TOOL_REQUESTS = 12
-DEFAULT_PROMPT_CHAR_BUDGET = 120_000
+# 与「索取次数 × 单条上限」互相自洽的预算值。150 个提交的版本上，变更摘要本身要占掉约
+# 39,000 字符，再算上平台 skill 与项目知识包，12 次 × 12,000 的上下文才装得下（约 195,000）。
+# 旧的 120,000 装不下，后果是模型索要 12 个文件、其中一半被截断，而它分不清是预算不够
+# 还是文件就这么大。**改这个值必须同时看 `DEFAULT_MAX_TOOL_REQUESTS` 与
+# `services/ai/context_tools.DEFAULT_TOOL_LIMITS`**，`test_the_prompt_budget_can_honor_
+# the_request_budget` 会拦住只顾一个的改法。
+DEFAULT_PROMPT_CHAR_BUDGET = 200_000
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 300
 DEFAULT_MIN_SEVERITY = "high"
 DEFAULT_MIN_CONFIDENCE = "high"

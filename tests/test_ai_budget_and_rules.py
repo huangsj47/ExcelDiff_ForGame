@@ -274,6 +274,61 @@ def test_a_lot_of_long_items_gets_both_compressed_and_trimmed():
     assert result.shrink_level >= 1
     assert result.omitted_total > 0
     assert result.total_chars <= 8_000
+    # 40 条各 20,000 字：留下的 5 条应当压到第 2 级（1,200 字）就够，而不是被换成说明
+    # 文字。原先这里只断言 `shrink_level >= 1`，所以「内容全被换成说明」也能通过。
+    assert all(not item.meta.get("omitted_for_budget") for item in result.items)
+    assert result.total_chars > 1_000, f"留下的应该还是真实内容，实际只有 {result.total_chars} 字"
+
+
+def test_a_batch_over_the_item_cap_keeps_real_content():
+    """**回归守卫**：一次索要的条数超过条数上限时，不能把内容全换成说明文字。
+
+    真实触发路径：模型一次索要 12 个文件（预算本来就允许 12 次请求），而条数上限是 8。
+    体积判断若把「反正会被丢掉的那 4 条」也算进去，循环就永远满足不了条件 —— 条数是
+    丢条目才能解决的，靠压缩解决不了 —— 于是一路升到 3 级、把 12 条内容全部换成说明。
+    修之前的实测结果：保留 8 条共 682 字的说明文字；修之后是 32,000 字的真实内容。
+    """
+    items = [_item(label=f"i{n}", size=14_000) for n in range(12)]
+
+    # 预算装得下 8 条各 14,000 字时：只丢条目，一点内容都不用压
+    roomy = enforce_budget(items, max_items=8, total_chars=120_000)
+    assert roomy.shrink_level == 0
+    assert roomy.total_chars == 8 * 14_000
+
+    # 150 个提交的真实残额：变更摘要本身要占掉约 39,000 字，剩下的不够装 8 条完整 diff
+    tight = enforce_budget(items, max_items=8, total_chars=80_000)
+    assert len(tight.items) == 8
+    assert tight.omitted_by_count == 4
+    assert tight.shrink_level == 1, "截断到 4,000 字就已经进预算了，不该继续升级"
+    assert all(not item.meta.get("omitted_for_budget") for item in tight.items), "内容被换成了说明文字"
+    assert tight.total_chars == 8 * 4_000, "留下的应该是 8 条各 4,000 字的真实内容"
+
+
+def test_going_over_the_item_cap_alone_does_not_trigger_shrinking():
+    """条数超标但体积没超标：只丢条目，不要说「已压缩到第 N 级」。
+
+    一句不该出现的压缩说明会让模型以为内容被截断过，进而反复重新索取。
+    """
+    items = [_item(label=f"i{n}", size=100) for n in range(12)]
+    result = enforce_budget(items, max_items=8, total_chars=120_000)
+
+    assert len(result.items) == 8
+    assert result.omitted_by_count == 4
+    assert result.shrink_level == 0
+    assert not any("压缩到第" in note for note in result.notes)
+    assert all(item.char_count == 100 for item in result.items)
+
+
+def test_content_is_only_replaced_by_markers_when_nothing_else_can_fit():
+    """最后一级（换成说明文字）只在连截断都装不下时才允许出现。
+
+    把预算压到比「条数上限 × 1,200 字」还小，才轮到它。
+    """
+    items = [_item(label=f"i{n}", size=14_000) for n in range(12)]
+    result = enforce_budget(items, max_items=8, total_chars=600)
+    assert result.shrink_level == MAX_SHRINK_LEVEL
+    assert all(item.meta.get("omitted_for_budget") for item in result.items)
+    assert result.notes, "内容被换成了说明文字，必须告诉模型"
 
 
 def test_every_omission_comes_with_a_note():
