@@ -54,7 +54,7 @@ commit_time)`（`services/task_worker_service.py::_handle_auto_sync_task_inner`�
 
 （我最初在本文件的说明里写了「或触发一次 force_reclone」，那是**错的** ——
  复核 `_handle_auto_sync_task_inner` 的 `since_date` 推导后才改正。
- 详细运维步骤见 `平台配置说明.md` §12.3。）
+ 详细运维步骤见 `docs/平台配置说明.md` §12.3。）
 """
 from __future__ import annotations
 
