@@ -19,6 +19,59 @@ def _is_agent_dispatch_mode() -> bool:
     return is_agent_dispatch_mode()
 
 
+def allocate_repository_id():
+    """原子分配一个全局唯一的仓库 ID。
+
+    原实现（本文件两处创建入口各写了一遍）是「读 counter.max_repository_id
+    → 在 Python 里 +1 → 写回」，典型 read-modify-write。并发下两个管理员同时提交
+    创建表单时，两个请求会读到同一个 N、都算出 N+1：
+
+        A: counter = query.first()        # N
+        B: counter = query.first()        # N（A 还没提交）
+        A: counter.max_repository_id = N+1; INSERT id=N+1; COMMIT   ✅
+        B: counter.max_repository_id = N+1; INSERT id=N+1; COMMIT   ❌ 主键冲突 → 500
+
+    改成「先原子自增、再把结果读回来」：
+
+        UPDATE global_repository_counter
+           SET max_repository_id = max_repository_id + 1
+         WHERE id = ?
+
+    这条 UPDATE 在 MySQL 上是加锁读（并发事务在该行上串行），在 SQLite (WAL) 上
+    也实测能读到最新已提交值 —— 两种后端都不会有两个请求拿到同一个号。
+
+    注意：**不要**把 `new_id = counter.max_repository_id + 1` 这种写法加回来，
+    也不要在这里用 `counter.max_repository_id = ...` 赋值 —— 那正是本缺陷的形态。
+    tests/test_repository_id_allocation_is_atomic.py 会把这两种形态都判红。
+    """
+    counter = GlobalRepositoryCounter.query.first()
+    if counter is None:
+        max_existing_id = db.session.query(db.func.max(Repository.id)).scalar() or 0
+        counter = GlobalRepositoryCounter(max_repository_id=max_existing_id)
+        db.session.add(counter)
+        db.session.flush()
+
+    updated = (
+        db.session.query(GlobalRepositoryCounter)
+        .filter(GlobalRepositoryCounter.id == counter.id)
+        .update(
+            {
+                GlobalRepositoryCounter.max_repository_id: (
+                    GlobalRepositoryCounter.max_repository_id + 1
+                ),
+                GlobalRepositoryCounter.updated_at: datetime.now(timezone.utc),
+            },
+            synchronize_session=False,
+        )
+    )
+    if updated != 1:
+        raise RuntimeError("分配仓库 ID 失败：计数器行不存在或未更新")
+
+    # 用 expire 触发一次 SELECT 把自增后的值读回来。同事务内能看见自己刚写的值。
+    db.session.expire(counter)
+    return counter.max_repository_id
+
+
 @require_admin
 def create_git_repository():
     project_id = request.form.get("project_id")
@@ -68,16 +121,7 @@ def create_git_repository():
         flash("必填字段不能为空", "error")
         return redirect(url_for("add_git_repository", project_id=project_id))
 
-    counter = GlobalRepositoryCounter.query.first()
-    if not counter:
-        max_existing_id = db.session.query(db.func.max(Repository.id)).scalar() or 0
-        counter = GlobalRepositoryCounter(max_repository_id=max_existing_id)
-        db.session.add(counter)
-        db.session.flush()
-
-    new_repository_id = counter.max_repository_id + 1
-    counter.max_repository_id = new_repository_id
-    counter.updated_at = datetime.now(timezone.utc)
+    new_repository_id = allocate_repository_id()
 
     repository = Repository(
         id=new_repository_id,
@@ -336,16 +380,7 @@ def create_svn_repository():
         flash("必填字段不能为空", "error")
         return redirect(url_for("add_svn_repository", project_id=project_id))
 
-    counter = GlobalRepositoryCounter.query.first()
-    if not counter:
-        max_existing_id = db.session.query(db.func.max(Repository.id)).scalar() or 0
-        counter = GlobalRepositoryCounter(max_repository_id=max_existing_id)
-        db.session.add(counter)
-        db.session.flush()
-
-    new_repository_id = counter.max_repository_id + 1
-    counter.max_repository_id = new_repository_id
-    counter.updated_at = datetime.now(timezone.utc)
+    new_repository_id = allocate_repository_id()
 
     repository = Repository(
         id=new_repository_id,
