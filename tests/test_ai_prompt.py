@@ -289,6 +289,59 @@ def test_the_round_counter_is_visible():
     assert "第 3/8 轮" in _message(round_index=3, max_rounds=8)
 
 
+# --------------------------------------------------------------------------
+# 历史结论基线（增量分析）
+# --------------------------------------------------------------------------
+
+
+def test_the_first_round_carries_the_baseline_in_full():
+    """基线要整份给：模型得逐条对照才知道哪些是新的。"""
+    digest = "# 这个版本截至上次分析已经报过的问题\n共 1 条：仍待处理 1。\n- [high] 【道具】ID 被删除 #12345678\n"
+
+    message = _message(baseline_digest=digest)
+
+    assert "【道具】ID 被删除" in message
+    assert "#12345678" in message
+
+
+def test_a_first_run_without_history_says_nothing_extra():
+    """没有历史结论时不要硬塞一句空的「暂无」——第一轮的消息已经够长了。
+
+    （第一次分析的那种说明由 `build_baseline_digest` 自己写在摘要里：它知道上下文，
+    这里不知道。）
+    """
+    message = _message()
+    assert "已经报过的问题" not in message
+
+
+def test_later_rounds_remind_instead_of_resending_the_baseline():
+    """**后续轮次只提醒一句，不重发整份。**
+
+    重发一遍要花约 6,000 字符，而那是上下文条目的额度：多发一次基线，模型就少看一个
+    文件的 diff。但完全不说也不行 —— 多轮之后注意力会从第一轮飘走，而「不要重复报」
+    是输出层面的硬要求。所以两头都要断言：条目不在，要求还在。
+    """
+    digest = "# 这个版本截至上次分析已经报过的问题\n共 1 条：仍待处理 1。\n- [high] 【道具】ID 被删除 #12345678\n"
+
+    message = _message(round_index=2, baseline_digest=digest)
+
+    assert "#12345678" not in message, "整份基线被重发了，白花 6,000 字符"
+    assert "【道具】ID 被删除" not in message
+    assert "不要把它里面的问题当作" in message, "提醒也没了：模型会开始重复报"
+    assert "已修复" in message and "已被推翻" in message, "没说要标注状态"
+
+
+def test_later_rounds_stay_silent_about_the_baseline_when_there_is_none():
+    message = _message(round_index=2, baseline_digest="")
+    assert "不要把它里面的问题当作" not in message
+
+
+def test_a_whitespace_only_baseline_counts_as_no_baseline():
+    """上游渲染失败时可能给回一串空白，别把它当成一份基线插进提示词。"""
+    message = _message(baseline_digest="   \n\n  ")
+    assert "已经报过的问题" not in message
+
+
 def test_budget_notes_are_passed_through_and_flagged_as_important():
     message = _message(budget_notes=["有 3 条 file_diff 上下文因条数上限未提供给你。"])
     assert "条数上限" in message

@@ -50,6 +50,15 @@ _LATER_ROUND_HINT = (
     "不够就继续点名索取具体文件。"
 )
 
+# 后续轮次对基线的一句提醒。**不重复整份基线**：它已经在第一轮的消息里，重发一遍要花
+# 6,000 字符左右，而这份预算正是上下文条目的额度（见 `budget.DEFAULT_TOTAL_CHARS` 的算式）。
+# 但也不能完全不说 —— 多轮之后注意力会从第一轮飘走，而「不要重复报」是输出层面的硬要求。
+_BASELINE_REMINDER = (
+    "提醒：第一轮给你的那份「已经报过的问题」清单**仍然有效**。不要把它里面的问题当作"
+    "新发现重复报；每条标出现在的状态（仍成立 / 已修复 / 已被推翻）并给出依据。"
+    "标为「已忽略」的不要再提，除非它是被这次改动重新触发的。"
+)
+
 # 第一轮的强制性声明。放在最前面，且不依赖模型把长文读完。
 _PRIMACY_NOTICE = """本协议由平台强制注入，**优先级高于你的通用习惯与默认风格**。
 
@@ -230,6 +239,7 @@ def build_user_message(
     round_index: int,
     max_rounds: int,
     items: Iterable[ContextItem] = (),
+    baseline_digest: str = "",
     budget_notes: Iterable[str] = (),
     requests_remaining: int = 0,
     correction_hint: str = "",
@@ -239,6 +249,10 @@ def build_user_message(
 
     轮次、剩余预算、以及**被省略了什么**，都要写进来。模型看不到这些就会以为自己
     已经掌握全部信息 —— 或者反过来，无休止地索要下去。
+
+    `baseline_digest` 是上一轮为止的结论（`baseline.build_baseline_digest` 的输出），
+    **只在第一轮整份给出**，后续轮次只带一句提醒：它每轮重发要花掉约 6,000 字符，而那
+    正是上下文条目的额度。第一轮也是模型决定整体策略的一轮，那时看到它最有效。
     """
     is_first_round = round_index <= 1
     blocks: list[str] = []
@@ -247,9 +261,14 @@ def build_user_message(
     blocks.append(change_summary)
 
     if is_first_round:
+        if baseline_digest.strip():
+            # 放在变更清单之后：先看「改了什么」，再看「其中哪些已经有人看过了」。
+            blocks.append(baseline_digest.strip())
         blocks.append(_FIRST_ROUND_HINT)
     else:
         blocks.append(_LATER_ROUND_HINT)
+        if baseline_digest.strip():
+            blocks.append(_BASELINE_REMINDER)
         blocks.append(render_context_items(items))
 
     notes = [note for note in budget_notes if str(note).strip()]
