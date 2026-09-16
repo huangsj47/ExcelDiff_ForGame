@@ -69,7 +69,42 @@ def allocate_repository_id():
 
     # 用 expire 触发一次 SELECT 把自增后的值读回来。同事务内能看见自己刚写的值。
     db.session.expire(counter)
-    return counter.max_repository_id
+    allocated = counter.max_repository_id
+
+    if db.session.get(Repository, allocated) is not None:
+        # 计数器**落后于实际数据**。上面那个重建分支只处理「计数器行不存在」，
+        # 这里处理「行在、但值比现有最大 id 小」：数据库从备份恢复、手工插过带显式
+        # id 的仓库、或计数器行被单独清过之后都会出现。
+        # 旧行为是直接返回一个已被占用的号，创建请求在 INSERT 时撞主键 → 500，
+        # 管理员只看到「创建失败」，没有任何可操作提示。
+        # 这里把计数器对齐到 max(Repository.id) 后重新分配一次。只重试一次、不循环：
+        # 对齐后仍撞号说明有别的东西在并发写，那就该如实报错而不是空转。
+        max_existing_id = db.session.query(db.func.max(Repository.id)).scalar() or 0
+        # log_print 在本模块是**惰性**解析的（get_runtime_model），不能在模块级直接用。
+        try:
+            get_runtime_model("log_print")(
+                f"⚠️ 仓库 ID 计数器落后于实际数据（分配到的 {allocated} 已存在），"
+                f"已对齐到 max(id)={max_existing_id} 后重新分配",
+                'DB',
+                force=True,
+            )
+        except Exception:  # pragma: no cover - 日志不可用不该让分配失败
+            pass
+        (
+            db.session.query(GlobalRepositoryCounter)
+            .filter(GlobalRepositoryCounter.id == counter.id)
+            .update(
+                {
+                    GlobalRepositoryCounter.max_repository_id: max_existing_id + 1,
+                    GlobalRepositoryCounter.updated_at: datetime.now(timezone.utc),
+                },
+                synchronize_session=False,
+            )
+        )
+        db.session.expire(counter)
+        allocated = counter.max_repository_id
+
+    return allocated
 
 
 @require_admin

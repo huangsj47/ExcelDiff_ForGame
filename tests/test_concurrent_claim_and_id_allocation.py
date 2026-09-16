@@ -64,6 +64,7 @@ from models import (  # noqa: E402
     AgentTask,
     GlobalRepositoryCounter,
     Project,
+    Repository,
 )
 from services.repository_creation_handlers import allocate_repository_id  # noqa: E402
 
@@ -95,22 +96,43 @@ def _register_agent(client, shared_secret, agent_code, project_code):
 
 class TestRepositoryIdAllocationIsAtomic:
     def test_sequential_allocation_yields_distinct_increasing_ids(self):
+        """连续分配必须**互不相同、严格递增**，且不落在已占用的号上。
+
+        ## 为什么不断言「恰好等于 before+1/+2/+3」
+
+        那是个更弱的契约的伪装：它假定「计数器当前值 + 1 一定是空闲号」。
+        这个假定在**全量套件里并不成立** —— 别的用例可能插过带显式 id 的仓库
+        （`repository` 表里存在 id 大于计数器的行），此时 `allocate_repository_id()`
+        会把计数器对齐到 `max(Repository.id)` 再发号。单个文件跑绿、全量跑红，
+        正是先前在 `test_commit_rows_keep_every_path.py` 踩过的同一类坑。
+
+        真正要保证的是：**号不重复、不倒退、不与已有行冲突** ——
+        这三条才是「不会 IntegrityError、不会两个仓库同一个主键」的充分条件。
+        """
         with app.app_context():
             create_tables()
-            before = GlobalRepositoryCounter.query.first()
-            if before is None:
+            counter = GlobalRepositoryCounter.query.first()
+            if counter is None:
                 db.session.add(GlobalRepositoryCounter(max_repository_id=0))
                 db.session.commit()
-                before = 0
-            else:
-                before = before.max_repository_id
+                counter = GlobalRepositoryCounter.query.first()
+            before = counter.max_repository_id
+            max_existing_id = db.session.query(db.func.max(Repository.id)).scalar() or 0
 
             allocated = [allocate_repository_id() for _ in range(3)]
             db.session.commit()
 
-            assert allocated == [before + 1, before + 2, before + 3]
-            assert len(set(allocated)) == 3
-            assert GlobalRepositoryCounter.query.first().max_repository_id == before + 3
+            assert len(set(allocated)) == 3, f"三次分配出现了重复号：{allocated}"
+            assert allocated == sorted(allocated), f"分配号不是递增的：{allocated}"
+            assert allocated[0] > before, (
+                f"分配号 {allocated} 没有超过分配前的计数器值 {before}"
+            )
+            assert allocated[0] > max_existing_id, (
+                f"分配号 {allocated} 没有超过库里已有的最大 id {max_existing_id} —— 会撞主键"
+            )
+            assert GlobalRepositoryCounter.query.first().max_repository_id >= allocated[-1], (
+                "计数器没有被推进到刚发出的号，下一次分配会重复发号"
+            )
 
     def test_concurrent_writer_cannot_be_given_the_same_id(self):
         """核心用例：模拟「另一个请求在本请求读完之后、写回之前抢走了 N+1」。
@@ -404,3 +426,136 @@ class TestAgentTaskClaimIsAtomic:
             assert owned.assigned_agent_id == binding.agent_id
             assert owned.lease_expires_at is not None
             assert owned.started_at is not None
+
+
+class TestStaleCounterSelfHeals:
+    """计数器**落后于实际数据**时必须自愈，而不是发出一个已被占用的号。
+
+    ## 缺陷
+
+    `allocate_repository_id()` 只在「计数器行**不存在**」时才用
+    `max(Repository.id)` 重建。若行在、但值比现有最大 id 小，它就会返回一个
+    已被占用的号 —— 创建请求在 INSERT 时撞主键 → 500，管理员只看到「创建失败」，
+    没有任何可操作提示。
+
+    真实触发场景：数据库从备份恢复、手工插过带显式 id 的仓库、或计数器行被单独
+    清过（**测试套件里就发生了**：`tests/test_auth_debug_register_mode.py::_client`
+    每个用例都 `drop_all()` + `create_all()`，会把 `global_repository_counter`
+    整张表清掉，而 `repository` 表里可能还留着显式 id 的行）。
+
+    ## 变红意味着什么
+
+    创建仓库会随机 500，且只在「计数器被清过/落后过」的环境里复现 ——
+    正是那种「我这儿好好的」的偶发故障。
+    """
+
+    def _ensure_counter(self):
+        counter = GlobalRepositoryCounter.query.first()
+        if counter is None:
+            db.session.add(GlobalRepositoryCounter(max_repository_id=0))
+            db.session.commit()
+            counter = GlobalRepositoryCounter.query.first()
+        return counter
+
+    def _make_project(self, tag):
+        project = Project(code=f"STALE{tag}"[:12], name=f"stale_counter_{tag}")
+        db.session.add(project)
+        db.session.commit()
+        return project
+
+    def _make_repository(self, project_id, repository_id, tag):
+        repository = Repository(
+            id=repository_id,
+            project_id=project_id,
+            name=f"stale_repo_{tag}",
+            type="git",
+            url="https://example.invalid/stale.git",
+            resource_type="table",
+        )
+        db.session.add(repository)
+        db.session.commit()
+        return repository
+
+    def test_allocation_skips_an_id_the_counter_has_not_caught_up_to(self):
+        with app.app_context():
+            create_tables()
+            counter = self._ensure_counter()
+            # 用一个远高于当前计数器的显式 id 造一个「计数器不知道」的仓库
+            taken_id = counter.max_repository_id + 500
+            project = self._make_project(uuid.uuid4().hex[:5].upper())
+            repository = self._make_repository(project.id, taken_id, uuid.uuid4().hex[:6])
+
+            try:
+                # 把计数器压到 taken_id - 1：下一次自增正好要发 taken_id
+                db.session.query(GlobalRepositoryCounter).filter(
+                    GlobalRepositoryCounter.id == counter.id
+                ).update(
+                    {GlobalRepositoryCounter.max_repository_id: taken_id - 1},
+                    synchronize_session=False,
+                )
+                db.session.commit()
+                db.session.expire_all()
+
+                allocated = allocate_repository_id()
+                db.session.commit()
+
+                assert allocated != taken_id, (
+                    f"分配到了已被占用的 {taken_id} —— INSERT 会撞主键报 500。"
+                    "计数器落后时应当对齐到 max(Repository.id) 后重发。"
+                )
+                assert db.session.get(Repository, allocated) is None, (
+                    f"分配到的 {allocated} 已经存在"
+                )
+                assert allocated > taken_id, (
+                    f"应当分配比 max(id)={taken_id} 更大的号，实际 {allocated}"
+                )
+            finally:
+                db.session.query(Repository).filter_by(id=repository.id).delete()
+                db.session.query(Project).filter_by(id=project.id).delete()
+                db.session.commit()
+
+    def test_healed_counter_is_persisted_for_the_next_allocation(self):
+        """自愈后计数器要落库 —— 否则下一个请求又会拿到同一个坏号。"""
+        with app.app_context():
+            create_tables()
+            counter = self._ensure_counter()
+            taken_id = counter.max_repository_id + 600
+            project = self._make_project(uuid.uuid4().hex[:5].upper())
+            repository = self._make_repository(project.id, taken_id, uuid.uuid4().hex[:6])
+
+            try:
+                db.session.query(GlobalRepositoryCounter).filter(
+                    GlobalRepositoryCounter.id == counter.id
+                ).update(
+                    {GlobalRepositoryCounter.max_repository_id: taken_id - 1},
+                    synchronize_session=False,
+                )
+                db.session.commit()
+                db.session.expire_all()
+
+                first = allocate_repository_id()
+                db.session.commit()
+                second = allocate_repository_id()
+                db.session.commit()
+
+                assert second == first + 1, (
+                    f"连续两次分配应当相差 1（{first} → {second}）—— "
+                    "自愈没落库的话第二次会再撞一次同样的号"
+                )
+                assert second > taken_id
+            finally:
+                db.session.query(Repository).filter(
+                    Repository.id == repository.id
+                ).delete(synchronize_session=False)
+                db.session.query(Project).filter_by(id=project.id).delete()
+                db.session.commit()
+
+    def test_normal_allocation_is_unchanged(self):
+        """没有落后时不该触发自愈（计数器值就是分配值）。"""
+        with app.app_context():
+            create_tables()
+            counter = self._ensure_counter()
+            before = counter.max_repository_id
+            allocated = allocate_repository_id()
+            db.session.commit()
+            assert allocated == before + 1
