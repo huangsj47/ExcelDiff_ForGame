@@ -57,7 +57,7 @@ def repo_root() -> str:
 
 
 def resolve_runtime_path(path: str, *, default_relative: str = "") -> str:
-    """把运行期路径解析成绝对路径。
+    r"""把运行期路径解析成绝对路径。
 
     * `path` 为空 → 用 `default_relative`（同样是仓库根相对）。
     * 绝对路径 → 原样返回。

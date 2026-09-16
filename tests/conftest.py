@@ -169,7 +169,12 @@ def _ensure_test_sqlite_db_env():
         _created_test_db_path = tmp_file.name
 
     assert _created_test_db_path is not None
-    sqlite_uri = f"sqlite:///{os.path.abspath(_created_test_db_path).replace('\\', '/')}"
+    # 用 as_posix() 而不是 .replace('\\', '/')：反斜杠字面量出现在 f-string 的
+    # **表达式部分**里是 Python 3.12 才允许的写法（PEP 701），CI 跑的是 3.11
+    # （.github/workflows/quality-gate.yml 的 python-version），会直接 SyntaxError
+    # 导致 conftest 加载失败、整个测试任务挂掉。而本机是 3.13，本地全绿、CI 全红。
+    # as_posix() 本身就是「转成正斜杠」，语义与原来的 replace 等价且不需要转义。
+    sqlite_uri = "sqlite:///" + Path(os.path.abspath(_created_test_db_path)).as_posix()
     os.environ["DB_BACKEND"] = "sqlite"
     os.environ["SQLITE_DB_PATH"] = _created_test_db_path
     # DATABASE_URL has higher priority in app.py, force it to temp sqlite.

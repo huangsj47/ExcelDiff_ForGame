@@ -9,13 +9,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # v4 跑在 Node 20 上，GitHub 已开始对 Node 20 告警（"target Node.js 20 but
+      # they are being forced to run on Node.js 24"）。v5 / v6 的 action.yml 里
+      # `runs.using` 已是 node24，升到这里即可消警；没有直接跳到最新的 v7，
+      # 是为了避免捎带引入无关的行为变更。
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
