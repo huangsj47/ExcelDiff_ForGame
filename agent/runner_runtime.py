@@ -18,12 +18,14 @@ try:
     from .config import load_settings
     from .executor import execute_task
     from .http_client import post_json
+    from .task_heartbeat import TaskHeartbeat, renew_task_lease
     from .self_update import check_and_apply_update, get_local_release_version
     from .system_metrics import collect_agent_metrics
 except ImportError:
     from config import load_settings
     from executor import execute_task
     from http_client import post_json
+    from task_heartbeat import TaskHeartbeat, renew_task_lease
     from self_update import check_and_apply_update, get_local_release_version
     from system_metrics import collect_agent_metrics
 
@@ -321,6 +323,12 @@ def run_agent():
             now_retry_ts = time.time()
             retry_after_ts = float(pending_report.get("retry_after_ts") or 0.0)
             if now_retry_ts >= retry_after_ts:
+                # 重新注册后必须更新回传凭据；旧凭据会导致永久 401 循环。
+                pending_report["payload"]["agent_token"] = agent_token
+                renew_task_lease(settings, {
+                    "id": pending_report["task_id"],
+                    "attempt": pending_report["payload"].get("attempt", 0),
+                }, agent_token, common_headers)
                 rep_status, rep_data = _report_task_result_once(
                     settings,
                     pending_report["task_id"],
@@ -333,6 +341,9 @@ def run_agent():
                         settings.log_verbose,
                     )
                     pending_report = None
+                elif rep_status in (403, 404, 409):
+                    _log(f"放弃已失效任务回传 id={pending_report['task_id']}, status={rep_status}", settings.log_verbose)
+                    pending_report = None
                 else:
                     pending_report["attempt"] = int(pending_report.get("attempt") or 0) + 1
                     backoff_seconds = min(30, max(2, pending_report["attempt"] * 2))
@@ -342,7 +353,7 @@ def run_agent():
                         f"attempt={pending_report['attempt']}, body={rep_data}",
                         settings.log_verbose,
                     )
-                    if rep_status in (401, 403):
+                    if rep_status == 401:
                         agent_token = ""
                         _LAST_AGENT_TOKEN = ""
                         heartbeat_online_logged = False
@@ -432,29 +443,31 @@ def run_agent():
         task_type = str(task.get("task_type") or "").strip().lower()
         _log(f"领取任务成功 id={task_id}, type={task_type}", settings.log_verbose)
 
-        try:
-            exec_status, result_summary, error_message, result_payload = execute_task(task, settings)
-        except Exception as task_exc:
-            exec_status, result_summary, error_message, result_payload = (
-                "failed",
-                None,
-                f"execute_task crashed for task_type={task_type}: {task_exc}",
-                None,
-            )
-        try:
-            result_payload = _maybe_upload_large_temp_cache(
-                task=task,
-                task_id=task_id,
-                task_type=task_type,
-                result_payload=result_payload,
-                settings=settings,
-                common_headers=common_headers,
-                agent_token=agent_token,
-            )
-        except Exception as cache_exc:
-            _log(f"临时缓存上报异常，已跳过: {cache_exc}", settings.log_verbose)
+        with TaskHeartbeat(settings, task, agent_token, common_headers):
+            try:
+                exec_status, result_summary, error_message, result_payload = execute_task(task, settings)
+            except Exception as task_exc:
+                exec_status, result_summary, error_message, result_payload = (
+                    "failed",
+                    None,
+                    f"execute_task crashed for task_type={task_type}: {task_exc}",
+                    None,
+                )
+            try:
+                result_payload = _maybe_upload_large_temp_cache(
+                    task=task,
+                    task_id=task_id,
+                    task_type=task_type,
+                    result_payload=result_payload,
+                    settings=settings,
+                    common_headers=common_headers,
+                    agent_token=agent_token,
+                )
+            except Exception as cache_exc:
+                _log(f"临时缓存上报异常，已跳过: {cache_exc}", settings.log_verbose)
 
         report_payload = {
+            "attempt": task.get("attempt", 0),
             "agent_code": settings.agent_code,
             "agent_token": agent_token,
             "status": exec_status,
@@ -465,6 +478,8 @@ def run_agent():
         rep_status, rep_data = _report_task_result_once(settings, task_id, report_payload, common_headers)
         if rep_status == 200 and rep_data.get("success"):
             _log(f"任务回传完成 id={task_id}, status={exec_status}", settings.log_verbose)
+        elif rep_status in (403, 404, 409):
+            _log(f"任务回传已失效 id={task_id}, status={rep_status}", settings.log_verbose)
         else:
             _log(f"任务回传失败 id={task_id}, status={rep_status}, body={rep_data}", settings.log_verbose)
             pending_report = {

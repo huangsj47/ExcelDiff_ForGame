@@ -56,10 +56,33 @@ def handle_agent_report_task_result(task_id):
         task = db.session.get(AgentTask, task_id)
         if not task:
             return jsonify({"success": False, "message": "任务不存在"}), 404
-        if task.assigned_agent_id and task.assigned_agent_id != agent.id:
+        if task.assigned_agent_id != agent.id:
             return jsonify({"success": False, "message": "任务不属于当前 Agent"}), 403
 
+        # retry_count 仅在租约回收时递增，用作执行批次栅栏；兼容旧 Agent 的首次执行。
+        attempt = handlers._to_int_or_none(payload.get("attempt", 0), min_value=0)
+        if attempt is None or attempt != int(task.retry_count or 0):
+            return jsonify({"success": False, "message": "任务执行批次已失效"}), 409
+        if task.status in {"completed", "failed"}:
+            if task.status == status:
+                return jsonify({"success": True, "duplicate": True}), 200
+            return jsonify({"success": False, "message": "任务已结束，不能覆盖结果"}), 409
+
         now_utc = datetime.now(timezone.utc)
+        # 在同一事务中抢占回传处理权，副作用只由获胜请求执行。
+        updated = AgentTask.query.filter(
+            AgentTask.id == task_id,
+            AgentTask.status == "processing",
+            AgentTask.assigned_agent_id == agent.id,
+            db.func.coalesce(AgentTask.retry_count, 0) == attempt,
+        ).update({AgentTask.status: status}, synchronize_session=False)
+        if updated != 1:
+            db.session.rollback()
+            db.session.refresh(task)
+            if (task.assigned_agent_id == agent.id and int(task.retry_count or 0) == attempt
+                    and task.status == status):
+                return jsonify({"success": True, "duplicate": True}), 200
+            return jsonify({"success": False, "message": "任务执行批次或状态已变化"}), 409
         task.status = status
         task.completed_at = now_utc
         task.lease_expires_at = None

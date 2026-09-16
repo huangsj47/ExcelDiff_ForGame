@@ -15,11 +15,13 @@ try:
     from .config import load_settings
     from .executor import execute_task
     from .http_client import post_json
+    from .task_heartbeat import TaskHeartbeat
     from .system_metrics import collect_agent_metrics
 except ImportError:
     from config import load_settings
     from executor import execute_task
     from http_client import post_json
+    from task_heartbeat import TaskHeartbeat
     from system_metrics import collect_agent_metrics
 
 
@@ -210,30 +212,32 @@ def run_agent():
         task_type = str(task.get("task_type") or "").strip().lower()
         _log(f"领取任务成功 id={task_id}, type={task_type}", settings.log_verbose)
 
-        try:
-            exec_status, result_summary, error_message, result_payload = execute_task(task, settings)
-        except Exception as task_exc:
-            exec_status, result_summary, error_message, result_payload = (
-                "failed",
-                None,
-                f"execute_task crashed for task_type={task_type}: {task_exc}",
-                None,
-            )
+        with TaskHeartbeat(settings, task, agent_token, common_headers):
+            try:
+                exec_status, result_summary, error_message, result_payload = execute_task(task, settings)
+            except Exception as task_exc:
+                exec_status, result_summary, error_message, result_payload = (
+                    "failed",
+                    None,
+                    f"execute_task crashed for task_type={task_type}: {task_exc}",
+                    None,
+                )
 
-        try:
-            result_payload = _maybe_upload_large_temp_cache(
-                task=task,
-                task_id=task_id,
-                task_type=task_type,
-                result_payload=result_payload,
-                settings=settings,
-                common_headers=common_headers,
-                agent_token=agent_token,
-            )
-        except Exception as cache_exc:
-            _log(f"临时缓存上报异常，已跳过: {cache_exc}", settings.log_verbose)
+            try:
+                result_payload = _maybe_upload_large_temp_cache(
+                    task=task,
+                    task_id=task_id,
+                    task_type=task_type,
+                    result_payload=result_payload,
+                    settings=settings,
+                    common_headers=common_headers,
+                    agent_token=agent_token,
+                )
+            except Exception as cache_exc:
+                _log(f"临时缓存上报异常，已跳过: {cache_exc}", settings.log_verbose)
 
         report_payload = {
+            "attempt": task.get("attempt", 0),
             "agent_code": settings.agent_code,
             "agent_token": agent_token,
             "status": exec_status,

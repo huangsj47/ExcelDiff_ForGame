@@ -1523,7 +1523,7 @@ def schedule_cleanup_task():
     log_print("添加缓存清理任务到队列", 'TASK')
 
 
-def create_weekly_sync_task(config_id):
+def create_weekly_sync_task(config_id, auto_commit=True):
     """为周版本配置创建同步任务"""
     try:
         existing_task = _BackgroundTask.query.filter_by(
@@ -1537,7 +1537,8 @@ def create_weekly_sync_task(config_id):
                     existing_task,
                     extra_payload={"config_id": config_id},
                 )
-                _db.session.commit()
+                if auto_commit:
+                    _db.session.commit()
             log_print(f"周版本配置 {config_id} 已存在待处理的同步任务", 'SYNC')
             return existing_task.id
 
@@ -1554,7 +1555,8 @@ def create_weekly_sync_task(config_id):
             new_task,
             extra_payload={"config_id": config_id},
         )
-        _db.session.commit()
+        if auto_commit:
+            _db.session.commit()
         if not _use_agent_dispatch():
             task_data = {
                 'type': 'weekly_sync',
@@ -1567,10 +1569,14 @@ def create_weekly_sync_task(config_id):
         log_print(f"创建周版本同步任务: config_id={config_id}, task_id={new_task.id}", 'SYNC')
         return new_task.id
     except SQLAlchemyError as e:
+        if not auto_commit:
+            raise
         _db.session.rollback()
         log_print(f"创建周版本同步任务数据库失败: {e}", 'ERROR', force=True)
         return None
     except (TypeError, ValueError, RuntimeError, AttributeError) as e:
+        if not auto_commit:
+            raise
         _db.session.rollback()
         log_print(f"创建周版本同步任务失败: {e}", 'ERROR', force=True)
         return None

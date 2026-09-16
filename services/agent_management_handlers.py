@@ -885,7 +885,7 @@ def _apply_auto_sync_result(task, result_payload):
             status="active",
         ).all()
         for config in weekly_configs:
-            task_id = create_weekly_sync_task(config.id)
+            task_id = create_weekly_sync_task(config.id, auto_commit=False)
             if task_id:
                 weekly_sync_tasks_added += 1
 
@@ -1097,6 +1097,23 @@ def agent_heartbeat():
         agent = _get_agent_by_identity(agent_code, agent_token)
         if not agent:
             return jsonify({"success": False, "message": "Agent 身份无效"}), 401
+
+        if payload.get("task_id") is not None:
+            AgentTask = get_runtime_models("AgentTask")[0]
+            attempt = _to_int_or_none(payload.get("attempt"), min_value=0)
+            lease_seconds = _to_int_or_none(payload.get("lease_seconds")) or 120
+            renewed = AgentTask.query.filter(
+                AgentTask.id == payload["task_id"],
+                AgentTask.assigned_agent_id == agent.id,
+                AgentTask.status == "processing",
+                db.func.coalesce(AgentTask.retry_count, 0) == attempt,
+            ).update({
+                AgentTask.lease_expires_at: datetime.now(timezone.utc)
+                + timedelta(seconds=max(30, min(600, lease_seconds))),
+            }, synchronize_session=False) if attempt is not None else 0
+            if renewed != 1:
+                db.session.rollback()
+                return jsonify({"success": False, "message": "任务执行批次已失效"}), 409
 
         _apply_agent_runtime_fields(
             agent,
@@ -1579,18 +1596,21 @@ def agent_claim_task():
             return jsonify({"success": True, "task": None, "message": "当前 Agent 未绑定项目"}), 200
 
         now_utc = datetime.now(timezone.utc)
-        reclaimable_processing = AgentTask.query.filter(
+        # 回收也必须使用条件 UPDATE，不能用过期快照覆盖并发续租/完成。
+        expired_query = AgentTask.query.filter(
             AgentTask.status == "processing",
             AgentTask.project_id.in_(project_ids),
             AgentTask.lease_expires_at.isnot(None),
             AgentTask.lease_expires_at < now_utc,
-        ).all()
-        for item in reclaimable_processing:
-            item.status = "pending"
-            item.assigned_agent_id = None
-            item.started_at = None
-            item.lease_expires_at = None
-            item.retry_count = (item.retry_count or 0) + 1
+        )
+        if expired_query.first() is not None:
+            expired_query.update({
+                AgentTask.status: "pending",
+                AgentTask.assigned_agent_id: None,
+                AgentTask.started_at: None,
+                AgentTask.lease_expires_at: None,
+                AgentTask.retry_count: db.func.coalesce(AgentTask.retry_count, 0) + 1,
+            }, synchronize_session="fetch")
 
         # 原子抢占。原实现是「SELECT ... WHERE status='pending' 取第一条 → 在 Python
         # 里改成 processing → commit」，两个 Agent 同时轮询时会**各自读到同一条**
@@ -1678,6 +1698,7 @@ def agent_claim_task():
 
         response_task = {
             "id": task.id,
+            "attempt": int(task.retry_count or 0),
             "task_type": task.task_type,
             "priority": task.priority,
             "project_id": task.project_id,

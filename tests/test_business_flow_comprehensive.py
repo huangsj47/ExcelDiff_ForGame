@@ -126,8 +126,13 @@ class TestWeeklySyncScheduler:
 
     def test_create_weekly_sync_task_function_exists(self):
         """create_weekly_sync_task 函数应存在并接受 config_id 参数"""
-        content = _read_source("services/task_worker_service.py")
-        assert "def create_weekly_sync_task(config_id):" in content
+        from inspect import signature
+
+        from services.task_worker_service import create_weekly_sync_task
+
+        parameters = signature(create_weekly_sync_task).parameters
+        assert "config_id" in parameters
+        assert parameters["auto_commit"].default is True
 
     def test_process_weekly_version_sync_function_exists(self):
         """process_weekly_version_sync 函数应存在"""

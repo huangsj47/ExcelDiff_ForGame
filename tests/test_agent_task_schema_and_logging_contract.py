@@ -126,6 +126,7 @@ def test_agent_claim_task_backfills_schema_version_for_legacy_payload(monkeypatc
         source_task_id=33,
         payload=json.dumps({"repository_id": 2}, ensure_ascii=False),
         status="pending",
+        retry_count=0,
         assigned_agent_id=None,
         lease_expires_at=None,
         started_at=None,
@@ -141,6 +142,8 @@ def test_agent_claim_task_backfills_schema_version_for_legacy_payload(monkeypatc
             self.update_calls = []
 
         def filter(self, *_args, **_kwargs):
+            if ("status", "eq", "processing") in _args:
+                return _Query()
             return self
 
         def filter_by(self, **_kwargs):

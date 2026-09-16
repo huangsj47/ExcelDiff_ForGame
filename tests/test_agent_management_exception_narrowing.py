@@ -306,12 +306,16 @@ def test_agent_task_result_returns_500_for_fallback_keyerror(monkeypatch):
 
 
 def test_agent_task_result_returns_500_for_sqlalchemy_commit_error(monkeypatch):
-    fake_agent_task_model = object()
+    from unittest.mock import MagicMock
+
+    fake_agent_task_model = MagicMock()
+    fake_agent_task_model.query.filter.return_value.update.return_value = 1
     fake_bg_task_model = object()
     fake_repo_model = object()
     task = SimpleNamespace(
         id=12,
-        assigned_agent_id=None,
+        assigned_agent_id=1,
+        retry_count=0,
         task_type="weekly_sync",
         repository_id=None,
         source_task_id=None,
@@ -337,7 +341,7 @@ def test_agent_task_result_returns_500_for_sqlalchemy_commit_error(monkeypatch):
     session.rollback = _rollback
     session.get = _get
     session.commit = _commit
-    fake_db = SimpleNamespace(session=session)
+    fake_db = SimpleNamespace(session=session, func=MagicMock())
     monkeypatch.setattr(
         agent_handlers,
         "get_runtime_models",
@@ -359,5 +363,6 @@ def test_agent_task_result_returns_500_for_sqlalchemy_commit_error(monkeypatch):
 
     status_code, payload = _extract_response(result)
     assert status_code == 500
+    assert "db-commit-failed" in payload["message"]
     assert payload["success"] is False
     assert session.rollback_called is True
