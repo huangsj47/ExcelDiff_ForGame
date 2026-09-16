@@ -32,6 +32,12 @@ from services.task_worker_weekly_handlers import (
 )
 from services.repository_sync_status import clear_sync_error as clear_repository_sync_error
 from services.repository_sync_status import record_sync_error as record_repository_sync_error
+# process_excel_diff_background 的返回状态：用它判断 excel_diff 任务该标 completed 还是 failed。
+# 原先忽略返回值、无条件标 completed，导致「仓库已删/提交查不到」也被记为成功。
+from services.excel_diff_cache_service import (
+    BG_STATUS_COMPLETED as _BG_STATUS_COMPLETED,
+    BG_STATUS_SKIPPED_IN_PROGRESS as _BG_STATUS_SKIPPED_IN_PROGRESS,
+)
 from services.ai_analysis_service import (
     build_weekly_group_key,
     run_weekly_analysis_background,
@@ -466,15 +472,41 @@ def background_task_worker():
             if task['type'] == 'excel_diff':
                 _handle_excel_diff_task(task, priority)
             elif task['type'] == 'cleanup_cache':
-                log_print(f"🧹 清理缓存: {task.get('days', 30)} 天前的数据", 'CACHE')
-                _excel_cache_service.cleanup_old_cache(task.get('days', 30))
-                cleaned = cleanup_expired_analysis_runs()
-                if cleaned:
-                    log_print(f"🧹 清理AI分析缓存: {cleaned} 条过期记录", 'AI')
+                # ⚠️ 必须自带 app context。本函数由 threading.Thread 启动，**不继承**
+                # 主线程的 app context（bootstrap 里那个 `with app.app_context()`
+                # 只包住了「启动线程」这一瞬间）。而 cleanup_old_cache /
+                # cleanup_expired_analysis_runs 内部用的是模块级 Model.query，
+                # 没有 context 就抛 RuntimeError: Working outside of application context。
+                #
+                # 历史后果（已实测复现）：cleanup_old_cache 把 RuntimeError 吞成 return 0
+                # → 每天 04:00 的缓存清理**从未真正清理过任何数据**；
+                # cleanup_expired_analysis_runs 则把 RuntimeError 抛到外层，
+                # 被 NON_CRITICAL_WORKER_LOOP_ERRORS 接住只打一行日志。
+                with _app.app_context():
+                    log_print(f"🧹 清理缓存: {task.get('days', 30)} 天前的数据", 'CACHE')
+                    cleaned = _excel_cache_service.cleanup_old_cache(task.get('days', 30))
+                    if cleaned is None:
+                        log_print("❌ 清理缓存失败（返回 None，与「清理 0 条」区分开）", 'CACHE', force=True)
+                    else:
+                        log_print(f"🧹 清理缓存完成: {cleaned} 条", 'CACHE')
+                    ai_cleaned = cleanup_expired_analysis_runs()
+                    if ai_cleaned is None:
+                        log_print("❌ 清理AI分析缓存失败", 'AI', force=True)
+                    elif ai_cleaned:
+                        log_print(f"🧹 清理AI分析缓存: {ai_cleaned} 条过期记录", 'AI')
             elif task['type'] == 'regenerate_cache':
-                log_print(f"🔄 重新生成缓存: 仓库 {task['repository_id']}", 'CACHE')
-                task_count = regenerate_repository_cache(task['repository_id'])
-                log_print(f"✅ 缓存重新生成完成，已添加 {task_count} 个任务到队列", 'CACHE')
+                # 同上：regenerate_repository_cache 用 _db.session.get()，必须有 context，
+                # 否则 RuntimeError 被它自己的 except 吞掉、且没有 return → 返回 None，
+                # 调用方随即打印「✅ 缓存重新生成完成，已添加 None 个任务到队列」——
+                # 失败被一个 ✅ 成功语句盖住。回归保护见
+                # tests/test_worker_tasks_have_app_context.py。
+                with _app.app_context():
+                    log_print(f"🔄 重新生成缓存: 仓库 {task['repository_id']}", 'CACHE')
+                    task_count = regenerate_repository_cache(task['repository_id'])
+                    if task_count is None:
+                        log_print(f"❌ 缓存重新生成失败: 仓库 {task['repository_id']}", 'CACHE', force=True)
+                    else:
+                        log_print(f"✅ 缓存重新生成完成，已添加 {task_count} 个任务到队列", 'CACHE')
             elif task['type'] == 'auto_sync':
                 _handle_auto_sync_task(task)
             elif task['type'] == 'weekly_sync':
@@ -508,12 +540,29 @@ def _handle_excel_diff_task(task, priority):
             except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                 log_print(f"更新任务开始状态失败: {update_error}", 'TASK', force=True)
         try:
-            _excel_cache_service.process_excel_diff_background(
+            # 必须看返回值决定任务终态。原实现忽略返回值、无条件标 completed，
+            # 于是「仓库已删 / 提交查不到」这类什么都没做的情况也被记为成功，
+            # 与真的生成成功在任务表里完全同形（管理员无法区分「已完成」和「根本没做」）。
+            status = _excel_cache_service.process_excel_diff_background(
                 task['repository_id'], task['commit_id'], task['file_path']
             )
             if 'task_id' in task:
                 try:
-                    update_task_status_with_retry(task['task_id'], 'completed')
+                    if status == _BG_STATUS_COMPLETED:
+                        update_task_status_with_retry(task['task_id'], 'completed')
+                    elif status == _BG_STATUS_SKIPPED_IN_PROGRESS:
+                        # 同一 (repo, commit, file) 正被另一线程处理 —— 工作确实在推进，
+                        # 本任务无需重试，标 completed 是合理的。
+                        log_print(f"任务与在途处理重复，跳过: {task['task_id']}", 'TASK')
+                        update_task_status_with_retry(task['task_id'], 'completed')
+                    else:
+                        # repository_missing / commit_missing / error → 显式失败，
+                        # 让管理员在任务列表里看得见，而不是被 ✅ 盖住。
+                        update_task_status_with_retry(
+                            task['task_id'], 'failed',
+                            f'Excel差异未生成（{status}）: repo={task["repository_id"]}, '
+                            f'commit={task["commit_id"]}, file={task["file_path"]}'
+                        )
                 except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                     log_print(f"更新任务完成状态失败: {update_error}", 'TASK', force=True)
         except NON_CRITICAL_TASK_EXECUTION_ERRORS as e:
@@ -1390,7 +1439,9 @@ def regenerate_repository_cache(repository_id):
         repository = _db.session.get(_Repository, repository_id)
         if not repository:
             log_print(f"仓库不存在: {repository_id}", 'CACHE', force=True)
-            return 0
+            # 返回 None（失败）而不是 0：调用方原先把 0 渲染成
+            # 「✅ 已添加 0 个任务到队列」，仓库已删这种情况看起来像「正常，只是没东西」。
+            return None
         log_print(f"清理仓库 {repository_id} 的现有队列任务", 'CACHE')
         pending_tasks_deleted = _BackgroundTask.query.filter(
             _BackgroundTask.repository_id == repository_id,
@@ -1408,8 +1459,18 @@ def regenerate_repository_cache(repository_id):
         log_print(f"已添加 {len(recent_commits)} 个缓存重建任务", 'CACHE')
         return len(recent_commits)
     except (SQLAlchemyError, RuntimeError, AttributeError, TypeError, ValueError) as e:
+        # 必须 rollback：本函数在 commit 之前有两次 DELETE，失败时不清会话会留下
+        # 脏事务（后续同一 session 上的写入会抛 PendingRollbackError），
+        # 违反 .claude/rules/rules.mdc 第 8.5 条。
+        try:
+            _db.session.rollback()
+        except SQLAlchemyError as rollback_error:
+            log_print(f"重新生成仓库缓存失败后回滚也失败: {rollback_error}", 'CACHE', force=True)
         log_print(f"重新生成仓库缓存失败: {e}", 'CACHE', force=True)
         traceback.print_exc()
+        # 返回 None 而不是「掉出函数末尾」：调用方（worker 的 regenerate_cache 分支）
+        # 原本据此打印「✅ ... 已添加 None 个任务」，把失败伪装成成功。
+        return None
 
 
 # ---------------------------------------------------------------------------
