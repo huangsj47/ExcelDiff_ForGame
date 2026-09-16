@@ -415,25 +415,33 @@
     font-weight: bold;
 }
 
-/* 状态显示样式 */
+/* 状态显示样式
+   三个渐变徽章的白色文字实测都不达标（WCAG AA 正文 4.5:1）：
+     #ffffff on #28a745=3.13 / #20c997=2.13
+     #ffffff on #dc3545=4.53 / #e83e8c=3.82
+     #ffffff on #ffc107=1.63 / #fd7e14=2.57
+   下面按同一语义把渐变两端压深，或改用深色文字：
+     成功 #157347→#0f5132 = 5.87 / 9.36
+     失败 #dc3545→#c2185b = 4.53 / 5.87
+     待确认 保持原琥珀色渐变，文字改 #212529 = 9.46 / 6.00 */
 #statusDisplay .badge {
     padding: 8px 12px;
     font-size: 0.9rem;
 }
 
 #statusDisplay .badge.status-confirmed {
-    background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+    background: linear-gradient(135deg, #157347 0%, #0f5132 100%);
     color: white;
 }
 
 #statusDisplay .badge.status-rejected {
-    background: linear-gradient(135deg, #dc3545 0%, #e83e8c 100%);
+    background: linear-gradient(135deg, #dc3545 0%, #c2185b 100%);
     color: white;
 }
 
 #statusDisplay .badge.status-pending {
     background: linear-gradient(135deg, #ffc107 0%, #fd7e14 100%);
-    color: white;
+    color: #212529;
 }
 
 /* 按钮组间距优化 */
@@ -991,12 +999,12 @@ window.showWeeklyExcelSheet = function(contentContainer, sheetName, sheetData) {
     // 添加表头 - 包含修改列的黄色背景标识
     if (sheetData.headers && sheetData.headers.length > 0) {
         tableHtml += '<thead><tr>';
-        tableHtml += '<th class="excel-row-header">行号</th>';
+        tableHtml += '<th scope="col" class="excel-row-header">行号</th>';
 
         sheetData.headers.forEach(header => {
             var isModified = modifiedColumns.indexOf(header) !== -1;
             var headerClass = isModified ? 'excel-column-header excel-modified-column-header' : 'excel-column-header';
-            tableHtml += `<th class="${headerClass}">${header}</th>`;
+            tableHtml += `<th scope="col" class="${headerClass}">${header}</th>`;
         });
         tableHtml += '</tr></thead>';
     }

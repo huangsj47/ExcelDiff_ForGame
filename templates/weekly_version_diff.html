@@ -388,7 +388,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title" id="diffModalTitle">文件diff</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <div class="modal-body p-0">
                 <div id="diffContent">
@@ -1048,7 +1048,7 @@
             <span class="badge bg-warning text-dark">Beta</span>
             <span class="badge bg-secondary" id="weeklyAiStatusBadge">待分析</span>
         </div>
-        <button type="button" class="btn btn-sm btn-light" id="weeklyAiDrawerCloseBtn">
+        <button type="button" class="btn btn-sm btn-light" id="weeklyAiDrawerCloseBtn" aria-label="关闭 AI 分析面板">
             <i class="bi bi-x-lg"></i>
         </button>
     </div>
@@ -1792,7 +1792,7 @@ function renderDirectoryFiles(files) {
                     <div class="file-actions">
                         <div class="action-buttons d-flex gap-3 align-items-center">
                             <a href="/weekly-version-config/${configId}/file-full-diff?file_path=${encodeURIComponent(file.file_path)}"
-                               class="btn btn-outline-info btn-action" title="完整diff">
+                               class="btn btn-outline-info btn-action" title="完整diff" aria-label="打开完整 diff">
                                 <i class="bi bi-arrows-fullscreen"></i>
                             </a>
                             ${generateStatusButton(file.file_path, statusClass)}

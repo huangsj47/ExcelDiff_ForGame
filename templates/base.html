@@ -25,15 +25,13 @@
         .table-hover tbody tr:hover {
             background-color: #f8f9fa;
         }
-        .status-pending {
-            color: #ffc107;
-        }
-        .status-confirmed {
-            color: #198754;
-        }
-        .status-rejected {
-            color: #dc3545;
-        }
+        /* 注意：此处原有 .status-pending(color:#ffc107) / .status-confirmed(color:#198754)
+           / .status-rejected(color:#dc3545) 三条规则，与 static/css/style.css 里的同名规则
+           重复；行内 <style> 在文档里更靠后，实际生效的是这里 —— 结果是
+           .status-badge.status-pending 变成 #ffc107 文字配 style.css 的 #fef3cd 底色，
+           实测对比度仅 1.47:1（WCAG AA 正文要求 >= 4.5:1，白底上也只有 1.63:1）；
+           .status-confirmed 被压到 #198754，在 #e8f5e8 底上只有 4.03:1。
+           已删除，统一由 style.css 提供达标的语义色（#856404 / #157347 / #b3261e）。 */
         .diff-added {
             background-color: #d4edda;
             border-left: 4px solid #28a745;
@@ -352,6 +350,9 @@
     </style>
 </head>
 <body>
+    {# 跳过导航：键盘 / 读屏用户按下的第一个 Tab 就能直接进入主内容，
+       不必每次先穿过整条导航栏。样式见 static/css/style.css 的 .skip-link #}
+    <a class="skip-link" href="#main-content">跳到主内容</a>
     <nav class="navbar navbar-expand-lg" style="background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%); box-shadow: 0 2px 12px rgba(0,0,0,0.15); padding: 0.6rem 0;">
         <div class="container-fluid px-4">
             <a class="navbar-brand d-flex align-items-center" href="{{ url_for('index') }}" style="margin-left: 0; color: #fff; font-weight: 700; font-size: 1.15rem; letter-spacing: 0.02em;">
@@ -420,13 +421,14 @@
         </div>
     </nav>
 
-    <main class="container-fluid mt-4">
+    {# tabindex="-1" 让 skip-link 能把焦点落进来（<main> 默认不可聚焦，否则跳转后焦点仍在导航里） #}
+    <main class="container-fluid mt-4" id="main-content" tabindex="-1">
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% for category, message in messages %}
                     <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert" style="border-radius: 8px; border: none; box-shadow: 0 2px 8px rgba(0,0,0,0.08); font-weight: 500;">
                         {{ message }}
-                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="关闭"></button>
                     </div>
                 {% endfor %}
             {% endif %}

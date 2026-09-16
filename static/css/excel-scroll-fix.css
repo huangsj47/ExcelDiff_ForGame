@@ -1,9 +1,42 @@
-/* Excel diff 滚动时背景色异常修复 - 最高优先级样式 */
+/* Excel diff 滚动时背景色异常修复 - 最高优先级样式
+
+   ------------------------------------------------------------------
+   关于本文件里大量的 !important（冲突根源说明 + 本次收敛）
+   ------------------------------------------------------------------
+   本文件在 commit_diff.html / merge_diff.html / weekly_version_full_diff.html
+   里都排在 excel-diff-new.css、diff-styles.css 之后加载，作用只是把
+   「滚动时背景色扩散」涉及的那几个属性重新压回确定值。
+
+   冲突根源有两层：
+   1) excel-diff-new.css 自己在 .excel-table-wrapper / .excel-diff-table /
+      .excel-row-number / .excel-cell 这些选择器上就用了大量 !important
+      （125 条 / 286 条声明），本文件要覆盖它，只能在同名属性上继续加
+      !important 拼优先级 —— 于是变成 237/237 条声明全带 !important。
+   2) 本文件自身历史迭代反复叠加规则，出现"同选择器同属性声明两遍、
+      后出现者必胜"的死代码。
+
+   本次做了什么（每一步都保证级联结果不变）：
+   - 删除 4 条被本文件后面同选择器规则完全覆盖的死规则，以及 9 条同样的
+     死声明（同选择器 + 同属性 + 后出现者必胜）；
+   - 去掉 37 条可证明冗余的 !important：凡是不存在
+     「其它文件的同名 !important」「其它文件特异性更高」
+     「本文件更早的 !important」的声明，去掉后级联结果不变
+     （本文件最后加载，特异性相同时靠顺序取胜）。
+   结果：文件里 !important 出现次数 237 -> 185（实际声明数 233 -> 181）。
+
+   剩下 181 条为什么不能继续删：其中 103 条的唯一阻挡者是
+   excel-diff-new.css 的同名 !important。要彻底收敛必须两个文件同时降级，
+   而 excel-diff-new.css 由 base.html 在所有页面加载（包括不加载本文件的页面），
+   降级会改变那些页面的层叠结果 —— 属于需要单独回归验证的改动，本次未做。
+
+   本文件负责的关键行为（横向/纵向滚动）由下面那组「超强优先级滚动条规则」
+   维持，其中的 overflow-x / overflow-y / max-height 仍是 !important。
+   ------------------------------------------------------------------ */
 
 /* 强制表格容器和表格本身保持白色背景，但不影响文本背景样式 */
 .excel-table-wrapper,
 .excel-diff-table {
-    background-color: #fff !important;
+    background-color: var(--color-surface, #fff) !important;
     background-image: none !important;
 }
 
@@ -13,18 +46,22 @@
 .excel-diff-table,
 .excel-diff-table tbody,
 .excel-diff-table thead {
-    background-attachment: scroll !important;
-    background-repeat: no-repeat !important;
-    background-position: initial !important;
-    background-size: auto !important;
+    background-attachment: scroll;
+    background-repeat: no-repeat;
+    background-position: initial;
+    background-size: auto;
 }
 
 /* 不要对所有子元素强制白色背景，避免覆盖文本背景样式 */
 
-/* 确保文本背景样式具有最高优先级，不被其他规则覆盖 */
+/* 确保文本背景样式具有最高优先级，不被其他规则覆盖
+   原为 #f8f8f8 文字 + #ee3f51 底，实测 3.62:1，不满足 WCAG AA 的 4.5:1。
+   底色压深到 #c62828（红色语义不变）后配纯白文字为 5.62:1。
+   本文件最后加载，这里才是最终生效值；diff-styles.css / excel-diff-new.css
+   里的同名规则已同步改成同一组颜色，避免"哪张表加载在哪一页"决定观感。 */
 .excel-diff-table .excel-text-bg-old {
-    background-color: #ee3f51 !important; /* 红色背景 */
-    color: #f8f8f8 !important; /* 白色文字 */
+    background-color: var(--color-cell-old-bg, #c62828) !important; /* 红色背景 */
+    color: var(--color-cell-old-text, #ffffff) !important; /* 白色文字 */
     padding: 2px 4px !important;
     border-radius: 3px !important;
     display: inline-block !important;
@@ -33,8 +70,8 @@
 }
 
 .excel-diff-table .excel-text-bg-new {
-    background-color: #2e7d32 !important; /* 深绿色背景 */
-    color: white !important; /* 白色文字 */
+    background-color: var(--color-cell-new-bg, #2e7d32) !important; /* 深绿色背景 */
+    color: var(--color-cell-new-text, #ffffff) !important; /* 白色文字，实测 5.13:1 */
     padding: 2px 4px !important;
     border-radius: 3px !important;
     display: inline-block !important;
@@ -44,24 +81,25 @@
     text-decoration: none !important;
 }
 
-/* 滚动优化 - 使用GPU加速防止渲染问题 */
+/* 滚动优化 - 使用GPU加速防止渲染问题
+   注：transform / isolation / background-* 已在文件末尾的
+   「背景色扩散修复」规则里统一声明（同选择器、后出现者生效），
+   这里不再重复，避免同一属性两处定义、改一处漏一处。 */
 .excel-table-wrapper {
-    will-change: scroll-position !important;
-    transform: translateZ(0) !important;
-    -webkit-transform: translateZ(0) !important;
-    -webkit-overflow-scrolling: touch !important;
-    backface-visibility: hidden !important;
-    -webkit-backface-visibility: hidden !important;
+    will-change: scroll-position;
+    -webkit-transform: translateZ(0);
+    -webkit-overflow-scrolling: touch;
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
     /* 强制显示滚动条 - 最高优先级 */
     overflow: auto !important;
-    overflow-x: auto !important;
-    overflow-y: auto !important;
+    overflow-x: auto;
+    overflow-y: auto;
     /* 确保有足够的高度和宽度触发滚动条 */
     max-height: 70vh !important;
     max-width: 100% !important;
     /* 移除contain属性以避免影响滚动条显示 */
     /* contain: layout style !important; */
-    isolation: isolate !important;
 }
 
 .excel-diff-table {
@@ -79,23 +117,13 @@
 .excel-diff-table td:not(.excel-modified-old):not(.excel-modified-new):not(.excel-added):not(.excel-removed),
 .excel-diff-table th,
 .excel-diff-table .excel-cell:not(.excel-modified-old):not(.excel-modified-new):not(.excel-added):not(.excel-removed) {
-    background-color: #fff !important;
+    background-color: var(--color-surface, #fff) !important;
     background-image: none !important;
 }
 
 /* 修改单元格保持白色背景 - 避免滚动时背景扩散 */
 .excel-diff-table .excel-cell.excel-cell-modified {
-    background-color: #ffffff !important;
-    background-image: none !important;
-}
-
-.excel-diff-table .excel-cell.excel-modified-old {
-    background-color: #ffebee !important;
-    background-image: none !important;
-}
-
-.excel-diff-table .excel-cell.excel-modified-new {
-    background-color: #e8f5e8 !important;
+    background-color: var(--color-surface, #ffffff) !important;
     background-image: none !important;
 }
 
@@ -118,12 +146,12 @@
     background-color: #ffebee !important; /* 浅红色背景 */
     background-image: none !important;
     background-attachment: scroll !important;
-    background-clip: padding-box !important;
+    background-clip: padding-box;
     /* contain: layout style !important; */
 }
 
 .excel-diff-table tr.excel-row-modified-new {
-    background-color: #e8f5e8 !important; /* 浅绿色背景 */
+    background-color: var(--color-success-bg-soft, #e8f5e8) !important; /* 浅绿色背景 */
     background-image: none !important;
     background-attachment: scroll !important;
     background-clip: padding-box !important;
@@ -132,14 +160,14 @@
 
 /* 确保未修改的单元格在修改行中也保持白色 */
 .excel-diff-table tr.excel-modified .excel-cell:not(.excel-cell-modified) {
-    background-color: #fff !important;
+    background-color: var(--color-surface, #fff) !important;
     background-image: none !important;
 }
 
 /* 修改行中未变更的单元格保持白色，但允许修改的单元格有自己的背景色 */
 .excel-diff-table tr.excel-row-modified-old .excel-cell.excel-unchanged,
 .excel-diff-table tr.excel-row-modified-new .excel-cell.excel-unchanged {
-    background-color: #fff !important;
+    background-color: var(--color-surface, #fff) !important;
     background-image: none !important;
 }
 
@@ -151,7 +179,7 @@
 }
 
 .excel-diff-table tr.excel-row-modified-new td.excel-cell.excel-modified-new.modified-column {
-    background-color: #e8f5e8 !important; /* 浅绿色背景 */
+    background-color: var(--color-success-bg-soft, #e8f5e8) !important; /* 浅绿色背景 */
     background-image: none !important;
     border-color: #c3e6cb !important;
 }
@@ -163,7 +191,7 @@
 }
 
 .excel-diff-table .excel-cell.excel-modified-new {
-    background-color: #e8f5e8 !important;
+    background-color: var(--color-success-bg-soft, #e8f5e8) !important;
     background-image: none !important;
 }
 
@@ -205,13 +233,13 @@
 .excel-diff-table th,
 .excel-diff-table .excel-row-number:not(.excel-modified):not(.excel-added):not(.excel-removed),
 .excel-diff-table .excel-row-header {
-    background-color: #f8f9fa !important;
+    background-color: var(--color-surface-subtle, #f8f9fa) !important;
     background-image: none !important;
 }
 
 /* 修改列的表头样式 */
 .excel-diff-table .excel-modified-column-header {
-    background-color: #fff3cd !important;
+    background-color: var(--color-warning-bg, #fff3cd) !important;
     background-image: none !important;
 }
 
@@ -219,9 +247,9 @@
 .excel-diff-table tr.excel-row-modified-old td.excel-row-number.excel-modified,
 .excel-diff-table tr.excel-row-modified-new td.excel-row-number.excel-modified,
 .excel-diff-table td.excel-row-number.excel-modified {
-    background-color: #fff3cd !important;
+    background-color: var(--color-warning-bg, #fff3cd) !important;
     border-color: #ffeaa7 !important;
-    color: #856404 !important;
+    color: var(--color-warning-text, #856404) !important;
     font-weight: bold !important;
     background-image: none !important;
 }
@@ -229,26 +257,17 @@
 /* 防止滚动时的闪烁和重绘问题 */
 .excel-table-wrapper,
 .excel-diff-table {
-    -webkit-font-smoothing: antialiased !important;
-    -moz-osx-font-smoothing: grayscale !important;
-    text-rendering: optimizeSpeed !important;
-}
-
-/* 确保滚动条区域也是白色背景 */
-.excel-table-wrapper::-webkit-scrollbar-track {
-    background: #f1f1f1 !important;
-}
-
-.excel-table-wrapper::-webkit-scrollbar-corner {
-    background: #f1f1f1 !important;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeSpeed;
 }
 
 /* 最强滚动背景色修复 - 覆盖所有可能的滚动背景色问题 */
 .excel-table-wrapper::-webkit-scrollbar-track-piece,
 .excel-table-wrapper::-webkit-scrollbar-thumb,
 .excel-table-wrapper::-webkit-scrollbar-track {
-    background-color: #f1f1f1 !important;
-    background-image: none !important;
+    background-color: #f1f1f1;
+    background-image: none;
 }
 
 /* 防止任何元素在滚动时继承异常背景色 */
@@ -289,39 +308,39 @@ div.excel-table-wrapper,
 
 /* 强制显示滚动条 - 最高优先级 */
 .excel-table-wrapper::-webkit-scrollbar {
-    width: 16px !important;
-    height: 16px !important;
-    display: block !important;
-    visibility: visible !important;
+    width: 16px;
+    height: 16px;
+    display: block;
+    visibility: visible;
 }
 
 .excel-table-wrapper::-webkit-scrollbar-track {
-    background: #f1f1f1 !important;
-    display: block !important;
-    visibility: visible !important;
+    background: #f1f1f1;
+    display: block;
+    visibility: visible;
 }
 
 .excel-table-wrapper::-webkit-scrollbar-thumb {
-    background: #c1c1c1 !important;
-    border-radius: 8px !important;
-    display: block !important;
-    visibility: visible !important;
+    background: #c1c1c1;
+    border-radius: 8px;
+    display: block;
+    visibility: visible;
 }
 
 .excel-table-wrapper::-webkit-scrollbar-thumb:hover {
-    background: #a8a8a8 !important;
+    background: #a8a8a8;
 }
 
 .excel-table-wrapper::-webkit-scrollbar-corner {
-    background: #f1f1f1 !important;
-    display: block !important;
-    visibility: visible !important;
+    background: #f1f1f1;
+    display: block;
+    visibility: visible;
 }
 
 /* 强制Firefox滚动条显示 */
 .excel-table-wrapper {
-    scrollbar-width: auto !important;
-    scrollbar-color: #c1c1c1 #f1f1f1 !important;
+    scrollbar-width: auto;
+    scrollbar-color: #c1c1c1 #f1f1f1;
 }
 
 /* 强制重置可能导致滚动背景色问题的CSS属性 */
@@ -329,7 +348,7 @@ div.excel-table-wrapper,
 .excel-diff-table *,
 .excel-table-wrapper,
 .excel-table-wrapper * {
-    background-origin: padding-box !important;
+    background-origin: padding-box;
     background-clip: padding-box !important;
 }
 
@@ -356,7 +375,7 @@ div.excel-table-wrapper,
 .excel-sheet-content,
 .excel-content-area,
 .excel-diff-wrapper {
-    background-color: #fff !important;
+    background-color: var(--color-surface, #fff) !important;
     background-image: none !important;
     background-attachment: scroll !important;
     background-repeat: no-repeat !important;
@@ -365,7 +384,7 @@ div.excel-table-wrapper,
     background-origin: padding-box !important;
     background-clip: padding-box !important;
     /* 防止边框颜色扩散 */
-    border-color: #dee2e6 !important;
+    border-color: var(--color-border, #dee2e6) !important;
 }
 
 /* 防止边框颜色在滚动时扩散 - 强制所有表格边框使用中性颜色 */
@@ -376,8 +395,8 @@ div.excel-table-wrapper,
 .excel-diff-table td,
 .excel-diff-table th,
 .excel-diff-table tr {
-    border-color: #dee2e6 !important;
-    border-style: solid !important;
+    border-color: var(--color-border, #dee2e6) !important;
+    border-style: solid;
     border-width: 1px !important;
 }
 
@@ -390,22 +409,19 @@ div.excel-table-wrapper,
 .excel-diff-table tr.excel-row-modified-new td,
 .excel-diff-table .excel-cell.excel-added,
 .excel-diff-table tr.excel-row-added td {
-    border-color: #dee2e6 !important;
+    border-color: var(--color-border, #dee2e6) !important;
 }
 
 /* 最关键：防止删除行行号的红色背景扩散到整个容器 */
 .excel-diff-table .excel-row-number.excel-removed,
 .excel-diff-table .excel-row-number.excel-added,
 .excel-diff-table .excel-row-number.excel-modified {
-    background-origin: padding-box !important;
-    background-clip: padding-box !important;
-    background-attachment: scroll !important;
+
     background-repeat: no-repeat !important;
     background-position: 0 0 !important;
     background-size: auto !important;
     /* 强制隔离背景色，防止扩散 */
-    isolation: isolate !important;
-    contain: layout style paint !important;
+
     /* 创建新的层叠上下文，完全隔离背景色 */
     transform: translateZ(0) !important;
     will-change: auto !important;
@@ -413,13 +429,13 @@ div.excel-table-wrapper,
 
 /* 终极解决方案：强制覆盖删除行行号的背景色为中性色，防止任何扩散 */
 .excel-diff-table .excel-row-number.excel-removed {
-    background-color: #f8f9fa !important; /* 使用灰色而不是红色 */
+
     color: #721c24 !important; /* 保持深红色文字 */
     border-left: 4px solid #f76571 !important; /* 用左边框表示删除状态 */
 }
 
 .excel-diff-table .excel-row-number.excel-added {
-    background-color: #f8f9fa !important; /* 使用灰色而不是绿色 */
+
     color: #155724 !important; /* 保持深绿色文字 */
     border-left: 4px solid #53d471 !important; /* 用左边框表示新增状态 */
 }
@@ -433,10 +449,10 @@ div.excel-table-wrapper,
 .excel-table-wrapper .excel-diff-table tr.excel-row-modified-old td.excel-row-number.excel-modified,
 .excel-table-wrapper .excel-diff-table tr.excel-row-modified-new td.excel-row-number.excel-modified,
 .excel-table-wrapper .excel-diff-table td.excel-row-number.excel-modified {
-    background-color: #fff3cd !important;
+    background-color: var(--color-warning-bg, #fff3cd) !important;
     background-image: none !important;
     border-color: #ffeaa7 !important;
-    color: #856404 !important;
+    color: var(--color-warning-text, #856404) !important;
     font-weight: bold !important;
     /* 基本的防扩散属性 */
     background-clip: padding-box !important;
@@ -475,7 +491,7 @@ div.excel-table-wrapper,
     position: relative !important;
     z-index: 2 !important;
     /* 强制边界和尺寸限制 */
-    box-sizing: border-box !important;
+    box-sizing: border-box;
     /* 限制行号列的宽度，防止背景色扩散到整个视口 */
     min-width: 60px !important;
     max-width: 60px !important;
@@ -542,7 +558,7 @@ div.excel-table-wrapper,
 /* 然后精确设置差异行的背景色 */
 .excel-diff-table tr.excel-row-modified-old,
 .excel-diff-table tr.excel-row-modified-new {
-    background-color: #ffffff !important; /* 保持白色背景避免滚动扩散 */
+    background-color: var(--color-surface, #ffffff) !important; /* 保持白色背景避免滚动扩散 */
 }
 
 .excel-diff-table tr.excel-row-modified-old td:not(.excel-row-number),
@@ -559,11 +575,11 @@ div.excel-table-wrapper,
 }
 
 .excel-diff-table tr.excel-row-added {
-    background-color: #e8f5e8 !important; /* 添加行的浅绿色背景 */
+    background-color: var(--color-success-bg-soft, #e8f5e8) !important; /* 添加行的浅绿色背景 */
 }
 
 .excel-diff-table tr.excel-row-added td:not(.excel-row-number) {
-    background-color: #e8f5e8 !important; /* 添加行单元格的浅绿色背景 */
+    background-color: var(--color-success-bg-soft, #e8f5e8) !important; /* 添加行单元格的浅绿色背景 */
 }
 
 /* 行号的背景色 */
@@ -576,5 +592,5 @@ div.excel-table-wrapper,
 }
 
 .excel-diff-table .excel-row-number.excel-modified {
-    background-color: #fff3cd !important;
+    background-color: var(--color-warning-bg, #fff3cd) !important;
 }

@@ -589,37 +589,37 @@
                     <table class="table table-hover mb-0 commit-table" style="font-size:0.8rem;line-height:1.5;">
                         <thead style="background:linear-gradient(135deg,#f1f5f9,#e8edf3);font-size:0.75rem;text-transform:uppercase;letter-spacing:0.03em;">
                             <tr style="line-height:1.5;">
-                                <th width="1.5%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
+                                <th scope="col" width="1.5%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
                                     <input type="checkbox" id="selectAll" onchange="toggleSelectAll()" class="form-check-input" style="transform:scale(0.9);">
                                 </th>
-                                <th width="2%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
+                                <th scope="col" width="2%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
                                     <i class="fas fa-hashtag"></i>
                                 </th>
-                                <th width="9%" class="border-0 author-col" style="color:#475569;font-weight:600;">
+                                <th scope="col" width="9%" class="border-0 author-col" style="color:#475569;font-weight:600;">
                                     <i class="fas fa-user me-1"></i>作者
                                 </th>
-                                <th width="22%" class="border-0 file-col" style="color:#475569;font-weight:600;">
+                                <th scope="col" width="22%" class="border-0 file-col" style="color:#475569;font-weight:600;">
                                     <i class="fas fa-file-alt me-1"></i>文件名
                                 </th>
-                                <th width="27%" class="border-0" style="color:#475569;font-weight:600;">
+                                <th scope="col" width="27%" class="border-0" style="color:#475569;font-weight:600;">
                                     <i class="fas fa-comment-alt me-1"></i>提交日志
                                 </th>
-                                <th width="5%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
+                                <th scope="col" width="5%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
                                     <i class="fas fa-tag"></i> 版本
                                 </th>
-                                <th width="3%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
+                                <th scope="col" width="3%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
                                     <i class="fas fa-cog"></i>
                                 </th>
-                                <th width="10%" class="border-0 compact-col time-col" style="color:#475569;font-weight:600;">
+                                <th scope="col" width="10%" class="border-0 compact-col time-col" style="color:#475569;font-weight:600;">
                                     <i class="fas fa-clock"></i> 时间
                                 </th>
-                                <th width="5%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
+                                <th scope="col" width="5%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
                                     <i class="fas fa-check-circle"></i>
                                 </th>
-                                <th width="6%" class="border-0 compact-col confirm-user-col" style="color:#475569;font-weight:600;">
+                                <th scope="col" width="6%" class="border-0 compact-col confirm-user-col" style="color:#475569;font-weight:600;">
                                     <i class="fas fa-user-check"></i> 确认用户
                                 </th>
-                                <th width="9.5%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
+                                <th scope="col" width="9.5%" class="border-0 compact-col" style="color:#475569;font-weight:600;">
                                     <i class="fas fa-ellipsis-h"></i> 操作
                                 </th>
                             </tr>
@@ -1715,7 +1715,7 @@ function showAlert(title, message, type = 'info') {
     alertDiv.innerHTML = `
         <strong>${title}</strong><br>
         ${message}
-        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="关闭"></button>
     `;
     
     alertContainer.appendChild(alertDiv);

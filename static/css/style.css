@@ -1,4 +1,122 @@
 /* 自定义样式 */
+
+/* ===================================================================
+   设计 token 层（Design Tokens）—— 全局唯一定义处
+   -------------------------------------------------------------------
+   style.css 由 base.html 在所有页面最先加载，所以全局变量定义放这里。
+   项目原有的 token 用法都是"页面级"的（diff-unified-theme.css 的 --ud-*、
+   各模板内联 <style> 里的 --err-* / --landing-* / --missing-*），那是刻意
+   做页面级换肤用的，保持不动；这里补的是跨页面复用的基础 token。
+
+   引用规则：一律写成 var(--x, 字面量) 的带兜底形式。理由是本文件并非在
+   所有页面都加载（例如 git_style_diff.html / full_file_diff.html 这类
+   全屏 diff 页），带兜底可以保证那些页面渲染结果与改动前完全一致。
+
+   颜色 token 的注释里给出实测 WCAG 对比度（相对实际底色）。
+   WCAG 2.1 AA 正文要求 >= 4.5:1：https://www.w3.org/TR/WCAG21/#contrast-minimum
+   =================================================================== */
+:root {
+    /* --- 表面与文字 --- */
+    --color-surface: #ffffff;
+    --color-surface-subtle: #f8f9fa;
+    --color-surface-muted: #e9ecef;
+    --color-border: #dee2e6;
+    --color-border-strong: #d0d7de;
+    --color-text: #212529;
+    --color-text-secondary: #495057;
+    /* 原 #6c757d 在 #f8f9fa 上只有 4.45:1，改用 #656d76（4.98:1） */
+    --color-text-muted: #656d76;
+    --color-focus: #0b5ed7;
+
+    /* --- 语义色（文字色均已按实际底色实测 >= 4.5:1） --- */
+    --color-primary: #0d6efd;
+    --color-primary-strong: #0b5ed7;
+
+    /* 成功：#157347 在 #ffffff=5.87 / #f8f9fa=5.57 / #dafbe1=5.28 / #e8f5e8=5.22 */
+    --color-success: #198754;
+    --color-success-text: #157347;
+    --color-success-bg: #dafbe1;
+    --color-success-bg-soft: #e8f5e8;
+
+    /* 警告：#856404 在 #ffffff=5.49 / #f8f9fa=5.21 / #fff3cd=4.96 / #ffecb5=4.69 */
+    --color-warning: #ffc107;
+    --color-warning-text: #856404;
+    --color-warning-bg: #fff3cd;
+    --color-warning-bg-strong: #ffecb5;
+
+    /* 危险：#b3261e 在 #ffffff=6.54 / #f8f9fa=6.20 / #ffebe9=5.70 / #fdeced=5.73 / #ffcdd2=4.64 */
+    --color-danger: #dc3545;
+    --color-danger-text: #b3261e;
+    --color-danger-bg: #ffebe9;
+
+    /* 信息：#0b7285 在 #ffffff=5.59 / #f8f9fa=5.30 / #e7f3ff=4.96；
+       Bootstrap 原生的 #0dcaf0 在白色上只有 1.96:1，不能当文字色 */
+    --color-info: #0dcaf0;
+    --color-info-text: #0b7285;
+    --color-info-bg: #e7f3ff;
+
+    /* Excel 单元格内"旧值/新值"高亮：深底白字
+       #ffffff on #c62828 = 5.62:1（原 #f8f8f8 on #ee3f51 仅 3.62:1） */
+    --color-cell-old-bg: #c62828;
+    --color-cell-old-text: #ffffff;
+    --color-cell-new-bg: #2e7d32;
+    --color-cell-new-text: #ffffff;
+
+    /* --- 间距（4px 基准） --- */
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 20px;
+    --space-6: 24px;
+    --space-8: 32px;
+
+    /* --- 字号 --- */
+    --font-size-xs: 11px;
+    --font-size-sm: 12px;
+    --font-size-base: 13px;
+    --font-size-md: 14px;
+    --font-size-lg: 16px;
+
+    /* --- 字体族（含中文字体回退链） --- */
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC",
+        "Source Han Sans SC", "WenQuanYi Micro Hei", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas,
+        "Liberation Mono", Menlo, "Courier New", "PingFang SC",
+        "Microsoft YaHei", "Noto Sans CJK SC", monospace;
+
+    /* --- 圆角 --- */
+    --radius-sm: 3px;
+    --radius-md: 4px;
+    --radius-lg: 6px;
+    --radius-xl: 8px;
+    --radius-pill: 12px;
+
+    /* --- 阴影 --- */
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.1);
+    --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.1);
+    --shadow-lg: 0 0.5rem 1rem rgba(0, 0, 0, 0.175);
+
+    /* --- 层级 --- */
+    --z-sticky: 10;
+    --z-dropdown: 1000;
+    --z-navbar: 200000;
+    --z-modal: 300001;
+
+    /* --- 动效 --- */
+    --motion-fast: 0.15s;
+    --motion-base: 0.25s;
+    --motion-slow: 0.4s;
+    --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+/* 中文字体回退链：Bootstrap 默认栈只声明西文字体，中文会落到浏览器默认字体，
+   显式声明后 Windows=微软雅黑、macOS=苹方，跨平台观感一致 */
+body {
+    font-family: var(--font-sans, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif);
+}
+
 .navbar-brand {
     font-weight: bold;
 }
@@ -6,13 +124,13 @@
 /* 导航栏链接悬停效果 */
 .navbar .nav-link:hover {
     background: rgba(255,255,255,0.12) !important;
-    color: #fff !important;
+    color: var(--color-surface, #fff) !important;
 }
 
 /* 全局按钮圆角和光标 */
 .btn {
     cursor: pointer;
-    border-radius: 6px;
+    border-radius: var(--radius-lg, 6px);
 }
 
 /* 全局卡片圆角 */
@@ -67,7 +185,7 @@ body {
     background: rgba(255, 255, 255, 0.95);
     backdrop-filter: blur(3px);
     z-index: 1000;
-    border-radius: 8px;
+    border-radius: var(--radius-xl, 8px);
     min-height: 200px;
 }
 
@@ -144,43 +262,47 @@ body {
 }
 
 .commit-row-modified:hover {
-    background-color: #f8f9fa !important;
+    background-color: var(--color-surface-subtle, #f8f9fa) !important;
 }
 
 .table-hover tbody tr:hover {
-    background-color: #f8f9fa;
+    background-color: var(--color-surface-subtle, #f8f9fa);
 }
 
+/* 状态文字色（用于表格里的纯文本状态，自身不带底色）。
+   取值要同时满足"白底 / #f8f9fa 条纹底 / 语义浅底"三种情况，实测：
+   #856404 on #ffffff=5.49、#157347 on #ffffff=5.87、#b3261e on #ffffff=6.54。
+   原值 #ffc107(白底 1.63:1)、#198754(#e8f5e8 底上 4.03:1)、#dc3545(#ffebe9 底上 3.95:1) 均不达标。 */
 .status-pending {
-    color: #ffc107;
+    color: var(--color-warning-text, #856404);
 }
 
 .status-confirmed {
-    color: #198754;
+    color: var(--color-success-text, #157347);
 }
 
 .status-rejected {
-    color: #dc3545;
+    color: var(--color-danger-text, #b3261e);
 }
 
 .diff-added {
     background-color: #d4edda;
     border-left: 4px solid #28a745;
-    padding: 8px;
+    padding: var(--space-2, 8px);
     margin: 2px 0;
 }
 
 .diff-removed {
     background-color: #f8d7da;
-    border-left: 4px solid #dc3545;
-    padding: 8px;
+    border-left: 4px solid var(--color-danger, #dc3545);
+    padding: var(--space-2, 8px);
     margin: 2px 0;
 }
 
 .diff-modified {
-    background-color: #fff3cd;
-    border-left: 3px solid #ffc107;
-    padding: 8px;
+    background-color: var(--color-warning-bg, #fff3cd);
+    border-left: 3px solid var(--color-warning, #ffc107);
+    padding: var(--space-2, 8px);
     margin: 2px 0;
 }
 
@@ -189,7 +311,7 @@ body {
 }
 
 .excel-table th, .excel-table td {
-    border: 1px solid #dee2e6;
+    border: 1px solid var(--color-border, #dee2e6);
     padding: 0.375rem;
     text-align: center;
     white-space: nowrap;
@@ -198,8 +320,8 @@ body {
 .footer {
     margin-top: 50px;
     padding: 20px 0;
-    background-color: #f8f9fa;
-    border-top: 1px solid #dee2e6;
+    background-color: var(--color-surface-subtle, #f8f9fa);
+    border-top: 1px solid var(--color-border, #dee2e6);
 }
 
 /* 项目卡片样式 */
@@ -226,7 +348,7 @@ body {
 }
 
 .repo-status.inactive {
-    background-color: #dc3545;
+    background-color: var(--color-danger, #dc3545);
 }
 
 /* 提交记录表格样式 */
@@ -238,17 +360,17 @@ body {
 
 /* Excel差异容器 */
 .excel-diff-container {
-    border: 1px solid #dee2e6;
-    border-radius: 8px;
+    border: 1px solid var(--color-border, #dee2e6);
+    border-radius: var(--radius-xl, 8px);
     overflow: hidden;
-    background: #ffffff;
+    background: var(--color-surface, #ffffff);
 }
 
 /* Sheet标签栏 */
 .excel-sheet-tabs {
     display: flex;
-    background: #f8f9fa;
-    border-bottom: 1px solid #dee2e6;
+    background: var(--color-surface-subtle, #f8f9fa);
+    border-bottom: 1px solid var(--color-border, #dee2e6);
     padding: 0;
     margin: 0;
     overflow-x: auto;
@@ -257,31 +379,31 @@ body {
 .excel-sheet-tab {
     padding: 8px 16px;
     cursor: pointer;
-    border-right: 1px solid #dee2e6;
+    border-right: 1px solid var(--color-border, #dee2e6);
     white-space: nowrap;
-    font-size: 13px;
+    font-size: var(--font-size-base, 13px);
     font-weight: 500;
     transition: all 0.2s ease;
     position: relative;
 }
 
 .excel-sheet-tab.active {
-    background: #ffffff;
+    background: var(--color-surface, #ffffff);
     border-bottom: 2px solid #007bff;
 }
 
 .excel-sheet-tab.modified {
-    background: #fff3cd;
-    color: #856404;
+    background: var(--color-warning-bg, #fff3cd);
+    color: var(--color-warning-text, #856404);
 }
 
 .excel-sheet-tab.unchanged {
-    background: #e9ecef;
+    background: var(--color-surface-muted, #e9ecef);
     color: #6c757d;
 }
 
 .excel-sheet-tab:hover {
-    background: #e9ecef;
+    background: var(--color-surface-muted, #e9ecef);
 }
 
 /* 主表格容器 */
@@ -289,7 +411,7 @@ body {
     position: relative;
     overflow: auto;
     max-height: 600px;
-    border: 1px solid #dee2e6;
+    border: 1px solid var(--color-border, #dee2e6);
 }
 
 /* Excel差异表格样式 */
@@ -297,7 +419,7 @@ body {
     table-layout: fixed;
     border-collapse: separate;
     border-spacing: 0;
-    font-size: 12px;
+    font-size: var(--font-size-sm, 12px);
     margin: 0;
     min-width: 100%;
 }
@@ -305,10 +427,10 @@ body {
 /* 列标题（A, B, C, D...） */
 .excel-column-header {
     background: #f1f3f4;
-    border: 1px solid #dee2e6;
+    border: 1px solid var(--color-border, #dee2e6);
     text-align: center;
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--font-size-xs, 11px);
     color: #5f6368;
     padding: 4px 8px;
     min-width: 80px;
@@ -319,19 +441,19 @@ body {
 
 /* 有变化的列标题 */
 .excel-column-header-modified {
-    background: #fff3cd !important;
-    border: 1px solid #ffc107 !important;
-    color: #856404 !important;
+    background: var(--color-warning-bg, #fff3cd) !important;
+    border: 1px solid var(--color-warning, #ffc107) !important;
+    color: var(--color-warning-text, #856404) !important;
     font-weight: 700 !important;
 }
 
 /* 行标题（1, 2, 3, 4...） */
 .excel-row-header {
     background: #f1f3f4;
-    border: 1px solid #dee2e6;
+    border: 1px solid var(--color-border, #dee2e6);
     text-align: center;
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--font-size-xs, 11px);
     color: #5f6368;
     padding: 4px 8px;
     width: 50px;
@@ -350,27 +472,27 @@ body {
 
 .excel-row-header-removed {
     background: #f8d7da !important;
-    border: 1px solid #dc3545 !important;
+    border: 1px solid var(--color-danger, #dc3545) !important;
     color: #721c24 !important;
 }
 
 .excel-row-header-modified {
-    background: #fff3cd !important;
-    border: 1px solid #ffc107 !important;
-    color: #856404 !important;
+    background: var(--color-warning-bg, #fff3cd) !important;
+    border: 1px solid var(--color-warning, #ffc107) !important;
+    color: var(--color-warning-text, #856404) !important;
 }
 
 /* 左上角交叉单元格 */
 .excel-corner-cell {
     background: #f1f3f4;
-    border: 1px solid #dee2e6;
+    border: 1px solid var(--color-border, #dee2e6);
     width: 50px;
     min-width: 50px;
     position: sticky;
     left: 0;
     top: 0;
     z-index: 15;
-    background-color: #e9ecef !important;
+    background-color: var(--color-surface-muted, #e9ecef) !important;
     text-align: center;
     font-weight: bold;
     min-width: 50px !important;
@@ -379,21 +501,21 @@ body {
 
 /* 表头行（多行表头支持） */
 .excel-header-row {
-    background: #f8f9fa;
-    border-bottom: 2px solid #dee2e6;
+    background: var(--color-surface-subtle, #f8f9fa);
+    border-bottom: 2px solid var(--color-border, #dee2e6);
 }
 
 .excel-header-cell {
-    background: #f8f9fa;
-    border: 1px solid #dee2e6;
-    padding: 8px;
+    background: var(--color-surface-subtle, #f8f9fa);
+    border: 1px solid var(--color-border, #dee2e6);
+    padding: var(--space-2, 8px);
     text-align: center;
     font-weight: 600;
-    font-size: 12px;
+    font-size: var(--font-size-sm, 12px);
     white-space: nowrap;
     position: sticky;
     z-index: 8;
-    background-color: #f8f9fa;
+    background-color: var(--color-surface-subtle, #f8f9fa);
     font-weight: bold;
     min-width: 100px;
     max-width: 200px;
@@ -409,9 +531,9 @@ body {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    font-size: 12px;
+    font-size: var(--font-size-sm, 12px);
     min-width: 80px;
-    background: #ffffff;
+    background: var(--color-surface, #ffffff);
     font-family: 'Courier New', monospace;
     min-width: 100px;
     max-width: 200px;
@@ -428,13 +550,13 @@ body {
 
 .excel-cell-removed {
     background-color: #f8d7da !important;
-    border-left: 3px solid #dc3545;
+    border-left: 3px solid var(--color-danger, #dc3545);
 }
 
 .excel-cell-modified {
-    background-color: #fff3cd !important;
-    border-left: 3px solid #ffc107;
-    background-color: #fff3cd !important;
+    background-color: var(--color-warning-bg, #fff3cd) !important;
+    border-left: 3px solid var(--color-warning, #ffc107);
+    background-color: var(--color-warning-bg, #fff3cd) !important;
     border-color: #ffeaa7 !important;
 }
 
@@ -442,7 +564,7 @@ body {
 .excel-modified-cell-old {
     background-color: #f8d7da !important;
     color: #721c24;
-    border-left: 3px solid #dc3545;
+    border-left: 3px solid var(--color-danger, #dc3545);
 }
 
 .excel-modified-cell-new {
@@ -452,51 +574,51 @@ body {
 }
 
 .excel-unchanged-cell {
-    background-color: #ffffff !important;
-    color: #495057;
+    background-color: var(--color-surface, #ffffff) !important;
+    color: var(--color-text-secondary, #495057);
 }
 
 /* 修改详情显示 */
 .excel-modified-section {
-    margin-top: 20px;
-    border: 1px solid #dee2e6;
-    border-radius: 6px;
+    margin-top: var(--space-5, 20px);
+    border: 1px solid var(--color-border, #dee2e6);
+    border-radius: var(--radius-lg, 6px);
     overflow: hidden;
 }
 
 .excel-modified-header {
-    background: #f8f9fa;
+    background: var(--color-surface-subtle, #f8f9fa);
     padding: 12px 16px;
-    border-bottom: 1px solid #dee2e6;
+    border-bottom: 1px solid var(--color-border, #dee2e6);
     font-weight: 600;
-    color: #495057;
+    color: var(--color-text-secondary, #495057);
 }
 
 .excel-modified-row {
     display: flex;
-    border-bottom: 1px solid #e9ecef;
+    border-bottom: 1px solid var(--color-surface-muted, #e9ecef);
 }
 
 .excel-modified-cell {
     flex: 1;
     min-width: 120px;
-    border-right: 1px solid #e9ecef;
+    border-right: 1px solid var(--color-surface-muted, #e9ecef);
 }
 
 .excel-modified-cell-header {
     background: #f1f3f4;
     padding: 8px 12px;
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--font-size-xs, 11px);
     color: #5f6368;
-    border-bottom: 1px solid #dee2e6;
+    border-bottom: 1px solid var(--color-border, #dee2e6);
 }
 
 .excel-modified-cell-old {
     background: #f8d7da;
     padding: 8px 12px;
     color: #721c24;
-    font-size: 12px;
+    font-size: var(--font-size-sm, 12px);
     border-bottom: 1px solid #f5c6cb;
 }
 
@@ -504,22 +626,22 @@ body {
     background: #d4edda;
     padding: 8px 12px;
     color: #155724;
-    font-size: 12px;
+    font-size: var(--font-size-sm, 12px);
 }
 
 /* Excel变更区域样式 */
 .excel-changes-section {
-    border: 1px solid #e9ecef;
-    border-radius: 6px;
+    border: 1px solid var(--color-surface-muted, #e9ecef);
+    border-radius: var(--radius-lg, 6px);
     padding: 0;
-    background-color: #ffffff;
+    background-color: var(--color-surface, #ffffff);
 }
 
 .excel-changes-section h6 {
-    background-color: #f8f9fa;
+    background-color: var(--color-surface-subtle, #f8f9fa);
     padding: 12px 16px;
     margin: 0 0 16px 0;
-    border-bottom: 1px solid #e9ecef;
+    border-bottom: 1px solid var(--color-surface-muted, #e9ecef);
     border-radius: 6px 6px 0 0;
 }
 
@@ -537,15 +659,15 @@ body {
 }
 
 .table-responsive::-webkit-scrollbar-track {
-    background: #f8f9fa;
-    border-radius: 6px;
-    border: 1px solid #e9ecef;
+    background: var(--color-surface-subtle, #f8f9fa);
+    border-radius: var(--radius-lg, 6px);
+    border: 1px solid var(--color-surface-muted, #e9ecef);
 }
 
 .table-responsive::-webkit-scrollbar-thumb {
     background: linear-gradient(180deg, #007bff 0%, #0056b3 100%);
-    border-radius: 6px;
-    border: 2px solid #f8f9fa;
+    border-radius: var(--radius-lg, 6px);
+    border: 2px solid var(--color-surface-subtle, #f8f9fa);
     min-height: 30px;
 }
 
@@ -555,7 +677,7 @@ body {
 }
 
 .table-responsive::-webkit-scrollbar-corner {
-    background: #f8f9fa;
+    background: var(--color-surface-subtle, #f8f9fa);
 }
 
 /* 滚动进度指示器 */
@@ -566,7 +688,7 @@ body {
     width: 120px;
     height: 20px;
     background: rgba(255, 255, 255, 0.9);
-    border: 1px solid #dee2e6;
+    border: 1px solid var(--color-border, #dee2e6);
     border-radius: 10px;
     padding: 2px;
     z-index: 15;
@@ -583,7 +705,7 @@ body {
     top: 2px;
     height: 16px;
     background: linear-gradient(90deg, #28a745 0%, #20c997 100%);
-    border-radius: 8px;
+    border-radius: var(--radius-xl, 8px);
     transition: width 0.1s ease;
     min-width: 2px;
 }
@@ -591,7 +713,7 @@ body {
 .scroll-progress-text {
     position: relative;
     z-index: 2;
-    color: #495057;
+    color: var(--color-text-secondary, #495057);
     font-weight: 600;
     text-shadow: 0 1px 2px rgba(255,255,255,0.8);
 }
@@ -601,22 +723,22 @@ body {
     position: sticky;
     top: 0;
     z-index: 10;
-    background-color: #f8f9fa !important;
+    background-color: var(--color-surface-subtle, #f8f9fa) !important;
 }
 
 /* 优化无变化行的样式 */
 .excel-row-unchanged {
-    background-color: #ffffff !important;
+    background-color: var(--color-surface, #ffffff) !important;
 }
 
 .excel-row-unchanged td {
-    background-color: #ffffff;
+    background-color: var(--color-surface, #ffffff);
 }
 
 .commit-table th {
-    background-color: #f8f9fa;
+    background-color: var(--color-surface-subtle, #f8f9fa);
     font-weight: 600;
-    border-bottom: 2px solid #dee2e6;
+    border-bottom: 2px solid var(--color-border, #dee2e6);
     padding: 4px 3px;
     vertical-align: middle;
     text-align: center;
@@ -649,7 +771,7 @@ body {
 
 .commit-table td.author-cell {
     text-align: left;
-    padding-left: 4px;
+    padding-left: var(--space-1, 4px);
     padding-top: 2.6px;
     padding-bottom: 2.6px;
     line-height: 1.1;
@@ -657,7 +779,7 @@ body {
 
 .commit-table td.path-cell {
     text-align: left;
-    padding-left: 4px;
+    padding-left: var(--space-1, 4px);
     padding-right: 2px;
     padding-top: 2.6px;
     padding-bottom: 2.6px;
@@ -666,7 +788,7 @@ body {
 
 .commit-table td.message-cell {
     text-align: left;
-    padding-left: 4px;
+    padding-left: var(--space-1, 4px);
     padding-right: 2px;
     padding-top: 2.6px;
     padding-bottom: 2.6px;
@@ -681,7 +803,7 @@ body {
 }
 
 .commit-message-cell .text-truncate {
-    color: #495057;
+    color: var(--color-text-secondary, #495057);
     font-size: 11.55px;
     line-height: 1.1;
     word-break: break-word;
@@ -713,8 +835,8 @@ body {
 
 .commit-table th,
 .commit-table td {
-    border-right: 1px solid #dee2e6;
-    border-bottom: 1px solid #dee2e6;
+    border-right: 1px solid var(--color-border, #dee2e6);
+    border-bottom: 1px solid var(--color-border, #dee2e6);
 }
 
 .commit-table th:last-child,
@@ -743,7 +865,7 @@ td .dropdown-menu {
     min-width: 150px;
     background: white;
     border: 1px solid #ccc;
-    border-radius: 4px;
+    border-radius: var(--radius-md, 4px);
     box-shadow: 0 2px 8px rgba(0,0,0,0.1);
     white-space: nowrap;
     pointer-events: auto;
@@ -763,7 +885,7 @@ td .dropdown-menu a {
     color: #333;
     text-decoration: none;
     white-space: nowrap;
-    font-size: 12px;
+    font-size: var(--font-size-sm, 12px);
 }
 
 td .dropdown-menu a:hover {
@@ -780,7 +902,7 @@ td .dropdown-menu a:hover {
     padding: 2px 6px;
     font-size: 10px;
     border: none;
-    border-radius: 3px;
+    border-radius: var(--radius-sm, 3px);
     margin-right: 2px;
     cursor: pointer;
 }
@@ -814,14 +936,14 @@ td .dropdown-menu a:hover {
 
 /* 差异显示样式 */
 .diff-container {
-    background-color: #f8f9fa;
+    background-color: var(--color-surface-subtle, #f8f9fa);
     border-radius: 5px;
     padding: 15px;
 }
 
 .diff-line {
     font-family: 'Courier New', monospace;
-    font-size: 13px;
+    font-size: var(--font-size-base, 13px);
     line-height: 1.4;
     margin: 1px 0;
     padding: 2px 5px;
@@ -838,19 +960,19 @@ td .dropdown-menu a:hover {
 }
 
 .diff-line.modified {
-    background-color: #fff3cd;
-    color: #856404;
+    background-color: var(--color-warning-bg, #fff3cd);
+    color: var(--color-warning-text, #856404);
 }
 
 /* 表单样式改进 */
 .form-label {
     font-weight: 500;
-    color: #495057;
+    color: var(--color-text-secondary, #495057);
 }
 
 .required-field::after {
     content: " *";
-    color: #dc3545;
+    color: var(--color-danger, #dc3545);
 }
 
 /* 按钮组样式 */
@@ -883,24 +1005,24 @@ td .dropdown-menu a:hover {
     }
     
     .table-responsive {
-        font-size: 12px;
+        font-size: var(--font-size-sm, 12px);
     }
     
     .btn-group-custom .btn {
-        font-size: 12px;
+        font-size: var(--font-size-sm, 12px);
         padding: 4px 8px;
     }
 }
 
 /* 标签页样式 */
 .nav-tabs .nav-link {
-    color: #495057;
+    color: var(--color-text-secondary, #495057);
     border: 1px solid transparent;
 }
 
 .nav-tabs .nav-link.active {
-    background-color: #fff;
-    border-color: #dee2e6 #dee2e6 #fff;
+    background-color: var(--color-surface, #fff);
+    border-color: var(--color-border, #dee2e6) var(--color-border, #dee2e6) var(--color-surface, #fff);
 }
 
 /* 徽章样式 */
@@ -911,9 +1033,9 @@ td .dropdown-menu a:hover {
 
 /* GitHub风格的代码diff样式 */
 .diff-container {
-    background: #fff;
-    border: 1px solid #d0d7de;
-    border-radius: 6px;
+    background: var(--color-surface, #fff);
+    border: 1px solid var(--color-border-strong, #d0d7de);
+    border-radius: var(--radius-lg, 6px);
     margin: 16px 0;
     overflow: hidden;
     font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
@@ -921,9 +1043,9 @@ td .dropdown-menu a:hover {
 
 .diff-file-header {
     background: #f6f8fa;
-    border-bottom: 1px solid #d0d7de;
+    border-bottom: 1px solid var(--color-border-strong, #d0d7de);
     padding: 8px 16px;
-    font-size: 12px;
+    font-size: var(--font-size-sm, 12px);
     font-weight: 600;
     color: #24292f;
     display: flex;
@@ -945,10 +1067,10 @@ td .dropdown-menu a:hover {
 
 .diff-hunk-header {
     background: #f6f8fa;
-    border-bottom: 1px solid #d0d7de;
+    border-bottom: 1px solid var(--color-border-strong, #d0d7de);
     padding: 5px 16px;
-    font-size: 12px;
-    color: #656d76;
+    font-size: var(--font-size-sm, 12px);
+    color: var(--color-text-muted, #656d76);
     font-weight: normal;
     line-height: 1.45;
 }
@@ -956,7 +1078,7 @@ td .dropdown-menu a:hover {
 .diff-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--font-size-sm, 12px);
     line-height: 20px;
 }
 
@@ -966,11 +1088,11 @@ td .dropdown-menu a:hover {
     padding: 0 8px;
     text-align: right;
     vertical-align: top;
-    color: #656d76;
+    color: var(--color-text-muted, #656d76);
     background: #f6f8fa;
-    border-right: 1px solid #d0d7de;
+    border-right: 1px solid var(--color-border-strong, #d0d7de);
     user-select: none;
-    font-size: 12px;
+    font-size: var(--font-size-sm, 12px);
     font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
 }
 
@@ -985,7 +1107,7 @@ td .dropdown-menu a:hover {
 }
 
 .diff-line-added {
-    background-color: #dafbe1 !important;
+    background-color: var(--color-success-bg, #dafbe1) !important;
 }
 
 .diff-line-added .diff-line-number {
@@ -994,11 +1116,11 @@ td .dropdown-menu a:hover {
 }
 
 .diff-line-added .diff-line-content {
-    background-color: #dafbe1 !important;
+    background-color: var(--color-success-bg, #dafbe1) !important;
 }
 
 .diff-line-removed {
-    background-color: #ffebe9 !important;
+    background-color: var(--color-danger-bg, #ffebe9) !important;
 }
 
 .diff-line-removed .diff-line-number {
@@ -1007,20 +1129,20 @@ td .dropdown-menu a:hover {
 }
 
 .diff-line-removed .diff-line-content {
-    background-color: #ffebe9 !important;
+    background-color: var(--color-danger-bg, #ffebe9) !important;
 }
 
 .diff-line-context {
-    background-color: #fff !important;
+    background-color: var(--color-surface, #fff) !important;
 }
 
 .diff-line-context .diff-line-number {
     background-color: #f6f8fa !important;
-    color: #656d76 !important;
+    color: var(--color-text-muted, #656d76) !important;
 }
 
 .diff-line-context .diff-line-content {
-    background-color: #fff !important;
+    background-color: var(--color-surface, #fff) !important;
 }
 
 /* 添加前缀符号显示 */
@@ -1050,9 +1172,9 @@ td .dropdown-menu a:hover {
 
 /* 提交列表表格样式 */
 .commits-table-container {
-    background: #fff;
-    border: 1px solid #d0d7de;
-    border-radius: 6px;
+    background: var(--color-surface, #fff);
+    border: 1px solid var(--color-border-strong, #d0d7de);
+    border-radius: var(--radius-lg, 6px);
     overflow: visible;
     position: relative;
     z-index: 1;
@@ -1061,13 +1183,13 @@ td .dropdown-menu a:hover {
 .commits-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 12px;
+    font-size: var(--font-size-sm, 12px);
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
 }
 
 .commits-table thead {
     background: #f6f8fa;
-    border-bottom: 1px solid #d0d7de;
+    border-bottom: 1px solid var(--color-border-strong, #d0d7de);
 }
 
 .commits-table th {
@@ -1075,7 +1197,7 @@ td .dropdown-menu a:hover {
     text-align: left;
     font-weight: 600;
     color: #24292f;
-    border-right: 1px solid #d0d7de;
+    border-right: 1px solid var(--color-border-strong, #d0d7de);
     white-space: nowrap;
 }
 
@@ -1085,7 +1207,7 @@ td .dropdown-menu a:hover {
 
 .commits-table tbody tr {
     height: 52.5px; 
-    border-bottom: 1px solid #d0d7de;
+    border-bottom: 1px solid var(--color-border-strong, #d0d7de);
     position: relative;
 }
 
@@ -1096,7 +1218,7 @@ td .dropdown-menu a:hover {
 
 .commits-table td {
     padding: 6px 12px;
-    border-right: 1px solid #d0d7de;
+    border-right: 1px solid var(--color-border-strong, #d0d7de);
     vertical-align: middle;
 }
 
@@ -1130,15 +1252,15 @@ td .dropdown-menu a:hover {
 .operation-badge {
     display: inline-block;
     padding: 2px 6px;
-    border-radius: 3px;
+    border-radius: var(--radius-sm, 3px);
     font-weight: 600;
-    font-size: 11px;
+    font-size: var(--font-size-xs, 11px);
     text-align: center;
     min-width: 20px;
 }
 
 .operation-A {
-    background: #dafbe1;
+    background: var(--color-success-bg, #dafbe1);
     color: #1a7f37;
 }
 
@@ -1148,50 +1270,50 @@ td .dropdown-menu a:hover {
 }
 
 .operation-D {
-    background: #ffebe9;
+    background: var(--color-danger-bg, #ffebe9);
     color: #cf222e;
 }
 
 .operation-other {
     background: #f6f8fa;
-    color: #656d76;
+    color: var(--color-text-muted, #656d76);
 }
 
-/* 状态标记样式 */
+/* 状态标记样式（带底色，用于 .status-badge 组合；文字/底色对比度均 >= 4.5:1） */
 .status-badge {
     display: inline-block;
     padding: 2px 8px;
-    border-radius: 12px;
+    border-radius: var(--radius-pill, 12px);
     font-weight: 500;
-    font-size: 11px;
+    font-size: var(--font-size-xs, 11px);
     text-align: center;
 }
 
 .status-pending {
-    background: #fef3cd;
+    background: var(--color-warning-bg, #fff3cd);
     color: #664d03;
-    border: 1px solid #ffecb5;
+    border: 1px solid var(--color-warning-bg-strong, #ffecb5);
 }
 
 .status-reviewed {
-    background: #fff3cd;
-    color: #856404;
+    background: var(--color-warning-bg, #fff3cd);
+    color: var(--color-warning-text, #856404);
     border: 1px solid #ffeaa7;
 }
 
 .status-confirmed {
-    background: #dafbe1;
+    background: var(--color-success-bg, #dafbe1);
     color: #1a7f37;
 }
 
 .status-rejected {
-    background: #ffebe9;
+    background: var(--color-danger-bg, #ffebe9);
     color: #cf222e;
 }
 
 .status-other {
     background: #f6f8fa;
-    color: #656d76;
+    color: var(--color-text-muted, #656d76);
 }
 
 /* 作者名样式 */
@@ -1207,26 +1329,26 @@ td .dropdown-menu a:hover {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: #656d76;
+    color: var(--color-text-muted, #656d76);
 }
 
 /* 操作按钮样式 */
 .action-buttons {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-1, 4px);
     justify-content: center;
     position: relative;
 }
 
 .action-btn {
     padding: 4px 8px;
-    border: 1px solid #d0d7de;
-    border-radius: 3px;
+    border: 1px solid var(--color-border-strong, #d0d7de);
+    border-radius: var(--radius-sm, 3px);
     background: #f6f8fa;
     color: #24292f;
     text-decoration: none;
-    font-size: 11px;
+    font-size: var(--font-size-xs, 11px);
     font-weight: 500;
     cursor: pointer;
     transition: all 0.15s ease;
@@ -1240,14 +1362,14 @@ td .dropdown-menu a:hover {
 
 .view-btn {
     background: #0969da;
-    color: #fff;
+    color: var(--color-surface, #fff);
     border-color: #0969da;
 }
 
 .view-btn:hover {
     background: #0860ca;
     border-color: #0860ca;
-    color: #fff;
+    color: var(--color-surface, #fff);
 }
 
 .dropdown-btn {
@@ -1256,16 +1378,16 @@ td .dropdown-menu a:hover {
 }
 
 .approve-btn {
-    background: #198754;
-    color: #fff;
-    border-color: #198754;
+    background: var(--color-success, #198754);
+    color: var(--color-surface, #fff);
+    border-color: var(--color-success, #198754);
     font-weight: 600;
 }
 
 .approve-btn:hover {
-    background: #157347;
+    background: var(--color-success-text, #157347);
     border-color: #146c43;
-    color: #fff;
+    color: var(--color-surface, #fff);
 }
 
 .reviewed-btn {
@@ -1273,7 +1395,7 @@ td .dropdown-menu a:hover {
 }
 
 .reviewed-btn:hover {
-    color: #fff;
+    color: var(--color-surface, #fff);
     border-color: #fd7e14;
     font-weight: 600;
 }
@@ -1297,7 +1419,7 @@ td .dropdown-menu a:hover {
 .detail-btn {
     background: #f6f8fa;
     color: #24292f;
-    border-color: #d0d7de;
+    border-color: var(--color-border-strong, #d0d7de);
 }
 
 .detail-btn:hover {
@@ -1322,10 +1444,10 @@ td .dropdown-menu a:hover {
     display: none;
     float: left;
     font-size: 0.875rem;
-    color: #212529;
+    color: var(--color-text, #212529);
     text-align: left;
     list-style: none;
-    background-color: #fff;
+    background-color: var(--color-surface, #fff);
     background-clip: padding-box;
     border: 1px solid rgba(0, 0, 0, 0.15);
     border-radius: 0.25rem;
@@ -1342,7 +1464,7 @@ td .dropdown-menu a:hover {
     padding: 0.25rem 1rem;
     clear: both;
     font-weight: 400;
-    color: #212529;
+    color: var(--color-text, #212529);
     text-align: inherit;
     text-decoration: none;
     white-space: nowrap;
@@ -1351,7 +1473,7 @@ td .dropdown-menu a:hover {
 }
 
 .dropdown-menu.custom-dropdown .dropdown-item:hover {
-    background-color: #f8f9fa;
+    background-color: var(--color-surface-subtle, #f8f9fa);
 }
 
 .dropdown-menu.custom-dropdown .form-check {
@@ -1372,9 +1494,9 @@ td .dropdown-menu a:hover {
 
 /* 筛选区域下拉菜单特殊处理 */
 .filter-container {
-    background: #fff;
-    border: 1px solid #d0d7de;
-    border-radius: 12px;
+    background: var(--color-surface, #fff);
+    border: 1px solid var(--color-border-strong, #d0d7de);
+    border-radius: var(--radius-pill, 12px);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
     transform: scale(0.8);
     transform-origin: top left;
@@ -1388,14 +1510,14 @@ td .dropdown-menu a:hover {
 }
 
 .filter-container .form-floating > label {
-    color: #656d76;
+    color: var(--color-text-muted, #656d76);
     font-size: 0.875rem;
     font-weight: 500;
 }
 
 .filter-container .form-control {
-    border: 1px solid #d0d7de;
-    border-radius: 6px;
+    border: 1px solid var(--color-border-strong, #d0d7de);
+    border-radius: var(--radius-lg, 6px);
     font-size: 0.875rem;
     transition: all 0.2s ease;
 }
@@ -1406,8 +1528,8 @@ td .dropdown-menu a:hover {
 }
 
 .filter-container .form-select {
-    border: 1px solid #d0d7de;
-    border-radius: 6px;
+    border: 1px solid var(--color-border-strong, #d0d7de);
+    border-radius: var(--radius-lg, 6px);
     font-size: 0.875rem;
     background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23343a40' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m1 6 7 7 7-7'/%3e%3c/svg%3e");
 }
@@ -1427,7 +1549,7 @@ td .dropdown-menu a:hover {
     padding: 8px 0;
     background: white;
     border: 1px solid #ddd;
-    border-radius: 4px;
+    border-radius: var(--radius-md, 4px);
     box-shadow: 0 2px 8px rgba(0,0,0,0.1);
     overflow: visible !important;
 }
@@ -1492,7 +1614,7 @@ td .dropdown-menu a:hover {
     padding: 8px 12px;
     color: #333;
     text-decoration: none;
-    font-size: 12px;
+    font-size: var(--font-size-sm, 12px);
     white-space: nowrap;
     border: none;
     background: none;
@@ -1512,7 +1634,7 @@ td .dropdown-menu a:hover {
     white-space: nowrap;
     cursor: pointer;
     background: none;
-    font-size: 12px;
+    font-size: var(--font-size-sm, 12px);
 }
 
 .dropdown .dropdown-menu a:hover {
@@ -1523,7 +1645,7 @@ td .dropdown-menu a:hover {
 /* 响应式diff样式 */
 @media (max-width: 768px) {
     .diff-table {
-        font-size: 11px;
+        font-size: var(--font-size-xs, 11px);
     }
     
     .line-number {
@@ -1536,53 +1658,97 @@ td .dropdown-menu a:hover {
     }
 }
 
-.excel-table {
-    font-size: 0.9rem;
+/* 注意：此处原有 .excel-table / .footer / .status-* / .diff-* 的复制粘贴残留，
+   与文件开头的同名规则逐字重复（同选择器、同声明），已删除 —— 保留开头那一份，
+   以后改值不会出现"改一处漏一处"。
+   其中 .status-pending 的重复尤其危险：它和 templates/base.html 内联 <style>
+   里的同名规则一起把徽章文字色改回了 #ffc107，实测对比度只有 1.47:1。 */
+
+/* ===================================================================
+   全局通用补丁（对比度 / 键盘焦点 / 跳过导航 / 减少动效）
+   =================================================================== */
+
+/* Bootstrap 5.1 的 .badge 固定 color:#fff，配 .bg-warning / .bg-info / .bg-light
+   对比度分别只有 1.63:1 / 1.96:1 / 1.05:1，完全不可读（5.2 才引入 .text-bg-* 修正）。
+   这里按语义改成深色文字：#212529 on #ffc107=9.46、on #0dcaf0=7.88、on #f8f9fa=14.63。
+   本仓库模板里这三类徽章共出现 15+8+10 次。 */
+.badge.bg-warning,
+.badge.bg-info,
+.badge.bg-light {
+    color: var(--color-text, #212529);
 }
 
-.excel-table th, .excel-table td {
-    border: 1px solid #dee2e6;
-    padding: 0.375rem;
-    text-align: center;
-    white-space: nowrap;
+/* Bootstrap 文本工具类自带 !important，覆盖它也必须用 !important。
+   .text-warning 原为 #ffc107（白底 1.63:1，模板里用了 15 处），
+   .text-info 原为 #0dcaf0（白底 1.96:1，用了 2 处）。 */
+.text-warning {
+    color: var(--color-warning-text, #856404) !important;
 }
 
-.footer {
-    margin-top: 50px;
-    padding: 20px 0;
-    background-color: #f8f9fa;
-    border-top: 1px solid #dee2e6;
+.text-info {
+    color: var(--color-info-text, #0b7285) !important;
 }
 
-.status-pending {
-    color: #ffc107;
+/* 跳过导航：键盘用户按下的第一个 Tab 就能直接进入主内容，
+   不必每次先穿过整条导航栏（base.html 里对应一个 <a class="skip-link">） */
+.skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    z-index: 9999;
+    padding: var(--space-2, 8px) var(--space-4, 16px);
+    background: var(--color-surface, #fff);
+    color: var(--color-primary-strong, #0b5ed7);
+    border: 2px solid var(--color-primary-strong, #0b5ed7);
+    border-radius: 0 0 var(--radius-lg, 6px) 0;
+    font-weight: 600;
+    text-decoration: none;
 }
 
-.status-confirmed {
-    color: #198754;
+.skip-link:focus {
+    left: 0;
+    outline: none;
 }
 
-.status-rejected {
-    color: #dc3545;
+/* 主内容是 skip-link 的落点，不是可点目标，不画默认焦点框 */
+main:focus {
+    outline: none;
 }
 
-.diff-added {
-    background-color: #d4edda;
-    border-left: 4px solid #28a745;
-    padding: 8px;
-    margin: 2px 0;
+/* 统一键盘焦点样式：:focus-visible 只在键盘操作时出现，不干扰鼠标点击观感。
+   #0b5ed7 on #fff = 5.84:1，满足 WCAG 2.2 焦点指示 3:1 的非文本对比要求 */
+:focus-visible {
+    outline: 2px solid var(--color-focus, #0b5ed7);
+    outline-offset: 2px;
 }
 
-.diff-removed {
-    background-color: #f8d7da;
-    border-left: 4px solid #dc3545;
-    padding: 8px;
-    margin: 2px 0;
-}
+/* 尊重系统"减少动态效果"偏好：只保留表达进度的旋转指示（WCAG 允许的例外），
+   其余淡入/位移类动画与过渡全部关掉，避免前庭失调用户不适 */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
 
-.diff-modified {
-    background-color: #fff3cd;
-    border-left: 3px solid #ffc107;
-    padding: 8px;
-    margin: 2px 0;
+    /* 纯进度指示放慢而不是停掉，否则用户无法判断"还在跑" */
+    .spin,
+    .loading,
+    .spinner-border,
+    .progress-bar-striped.progress-bar-animated {
+        animation-duration: 1.5s !important;
+        animation-iteration-count: infinite !important;
+    }
+
+    /* 位移类反馈取消，颜色/透明度变化保留 */
+    .project-card:hover,
+    .excel-diff-container.loading,
+    .excel-diff-table,
+    .unified-diff-page .btn:hover {
+        transform: none !important;
+        animation: none !important;
+    }
 }

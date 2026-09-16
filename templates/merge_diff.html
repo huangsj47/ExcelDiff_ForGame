@@ -694,7 +694,7 @@ td.excel-row-number.excel-modified,
                                 <div class="d-flex align-items-center">
                                     <a href="{{ url_for('commit_diff_with_path', project_code=commit.repository.project.code, repository_name=commit.repository.name, commit_id=commit.id) }}" 
                                        class="btn btn-outline-primary btn-xs me-2" 
-                                       title="查看详细差异">
+                                       title="查看详细差异" aria-label="查看该文件的详细差异">
                                         <i class="fas fa-eye"></i>
                                     </a>
                                     {% if commit.status != 'confirmed' %}
@@ -1519,9 +1519,9 @@ function showMergedExcelSheet(contentContainer, sheetName, sheetData) {
     // 添加表头
     if (sheetData.headers && sheetData.headers.length > 0) {
         tableHtml += '<thead><tr>';
-        tableHtml += '<th class="excel-row-header">行号</th>';
+        tableHtml += '<th scope="col" class="excel-row-header">行号</th>';
         sheetData.headers.forEach(header => {
-            tableHtml += `<th class="excel-column-header">${header}</th>`;
+            tableHtml += `<th scope="col" class="excel-column-header">${header}</th>`;
         });
         tableHtml += '</tr></thead>';
     }
@@ -1644,7 +1644,7 @@ function showToast(message, type = 'info') {
     toast.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
     toast.innerHTML = `
         ${message}
-        <button type="button" class="btn-close" onclick="this.parentElement.remove()"></button>
+        <button type="button" class="btn-close" onclick="this.parentElement.remove()" aria-label="关闭"></button>
     `;
 
     document.body.appendChild(toast);
@@ -1903,11 +1903,11 @@ function showExcelSheetInContainer(containerId, sheetName, diffData) {
     // 添加表头 - 高亮修改的列
     if (sheetData.headers && sheetData.headers.length > 0) {
         tableHtml += '<thead><tr>';
-        tableHtml += '<th class="excel-row-header">行号</th>';
+        tableHtml += '<th scope="col" class="excel-row-header">行号</th>';
         sheetData.headers.forEach(function(header) {
             const isModified = modifiedColumns.has(header);
             const headerClass = isModified ? 'excel-column-header excel-modified-column-header' : 'excel-column-header';
-            tableHtml += '<th class="' + headerClass + '">' + header + '</th>';
+            tableHtml += '<th scope="col" class="' + headerClass + '">' + header + '</th>';
         });
         tableHtml += '</tr></thead>';
     } else if (sheetData.rows.length > 0 && sheetData.rows[0].data) {
@@ -1915,11 +1915,11 @@ function showExcelSheetInContainer(containerId, sheetName, diffData) {
         const firstRowData = sheetData.rows[0].data;
         const headers = Object.keys(firstRowData);
         tableHtml += '<thead><tr>';
-        tableHtml += '<th class="excel-row-header">行号</th>';
+        tableHtml += '<th scope="col" class="excel-row-header">行号</th>';
         headers.forEach(function(header) {
             const isModified = modifiedColumns.has(header);
             const headerClass = isModified ? 'excel-column-header excel-modified-column-header' : 'excel-column-header';
-            tableHtml += '<th class="' + headerClass + '">' + header + '</th>';
+            tableHtml += '<th scope="col" class="' + headerClass + '">' + header + '</th>';
         });
         tableHtml += '</tr></thead>';
     }

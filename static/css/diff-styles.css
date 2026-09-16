@@ -3,11 +3,11 @@
 /* ===== TEXT DIFF STYLES (GitHub-style) ===== */
 .text-diff-container {
     font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
-    font-size: 13px;
+    font-size: var(--font-size-base, 13px);
     line-height: 1.45;
-    background: #f8f9fa;
+    background: var(--color-surface-subtle, #f8f9fa);
     border: 1px solid #e1e4e8;
-    border-radius: 6px;
+    border-radius: var(--radius-lg, 6px);
     overflow: hidden;
 }
 
@@ -24,19 +24,22 @@
 
 .text-diff-stats {
     display: flex;
-    gap: 12px;
-    font-size: 11px;
+    gap: var(--space-3, 12px);
+    font-size: var(--font-size-xs, 11px);
 }
 
 .text-diff-stat {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: var(--space-1, 4px);
 }
 
-.text-diff-stat.added { color: #28a745; }
-.text-diff-stat.removed { color: #d73a49; }
-.text-diff-stat.modified { color: #f66a0a; }
+/* 差异统计文字位于 .text-diff-header 的 #fafbfc 底色上，
+   原色实测：#28a745=3.02:1、#d73a49=4.42:1、#f66a0a=2.90:1，均低于 WCAG AA 的 4.5:1。
+   改用同色系加深后：#1a7f37=4.90:1、#cf222e=5.17:1、#b45309=4.85:1。 */
+.text-diff-stat.added { color: #1a7f37; }
+.text-diff-stat.removed { color: #cf222e; }
+.text-diff-stat.modified { color: #b45309; }
 
 .text-diff-hunk {
     border-bottom: 1px solid #e1e4e8;
@@ -50,13 +53,13 @@
     background: #f1f8ff;
     color: #586069;
     padding: 4px 16px;
-    font-size: 11px;
+    font-size: var(--font-size-xs, 11px);
     border-bottom: 1px solid #c8e1ff;
 }
 
 .text-diff-line {
     display: flex;
-    font-size: 13px;
+    font-size: var(--font-size-base, 13px);
     line-height: 22px;
 }
 
@@ -64,7 +67,7 @@
     width: 60px;
     padding: 0 8px;
     text-align: right;
-    font-size: 12px;
+    font-size: var(--font-size-sm, 12px);
     color: #586069;
     background: #fafbfc;
     border-right: 1px solid #e1e4e8;
@@ -110,7 +113,7 @@
 }
 
 .text-diff-line.added {
-    background: #dafbe1;
+    background: var(--color-success-bg, #dafbe1);
 }
 
 .text-diff-line.added .text-diff-line-number {
@@ -119,11 +122,11 @@
 }
 
 .text-diff-line.added .text-diff-line-content {
-    background: #dafbe1;
+    background: var(--color-success-bg, #dafbe1);
 }
 
 .text-diff-line.removed {
-    background: #ffebe9;
+    background: var(--color-danger-bg, #ffebe9);
 }
 
 .text-diff-line.removed .text-diff-line-number {
@@ -132,7 +135,7 @@
 }
 
 .text-diff-line.removed .text-diff-line-content {
-    background: #ffebe9;
+    background: var(--color-danger-bg, #ffebe9);
 }
 
 .text-diff-line.context .text-diff-line-content {
@@ -141,9 +144,9 @@
 
 /* ===== EXCEL DIFF STYLES (Enhanced Table) ===== */
 .excel-diff-container {
-    background: #fff;
+    background: var(--color-surface, #fff);
     border: 1px solid #e1e4e8;
-    border-radius: 6px;
+    border-radius: var(--radius-lg, 6px);
     overflow: hidden;
 }
 
@@ -155,12 +158,12 @@
 
 .excel-cell.excel-cell-removed {
     background: #f8d7da !important;
-    border-left: 3px solid #dc3545 !important;
+    border-left: 3px solid var(--color-danger, #dc3545) !important;
 }
 
 .excel-cell.excel-cell-modified {
-    background: #ffffff !important; /* 保持白色背景避免滚动扩散 */
-    border-left: 3px solid #dee2e6 !important;
+    background: var(--color-surface, #ffffff) !important; /* 保持白色背景避免滚动扩散 */
+    border-left: 3px solid var(--color-border, #dee2e6) !important;
 }
 
 .excel-diff-header {
@@ -173,13 +176,13 @@
 }
 
 .excel-diff-title {
-    font-size: 16px;
+    font-size: var(--font-size-lg, 16px);
     font-weight: 600;
     margin: 0;
 }
 
 .excel-sheet-tabs-container {
-    background: #f8f9fa;
+    background: var(--color-surface-subtle, #f8f9fa);
     border-bottom: 1px solid #e1e4e8;
     overflow-x: auto;
 }
@@ -201,11 +204,11 @@
 }
 
 .excel-sheet-tab:hover:not(.excel-tab-disabled) {
-    background: #e9ecef;
+    background: var(--color-surface-muted, #e9ecef);
 }
 
 .excel-sheet-tab.active {
-    background: #fff;
+    background: var(--color-surface, #fff);
     border-bottom-color: #007bff;
     color: #007bff;
 }
@@ -222,10 +225,15 @@
     font-size: 8px;
 }
 
+/* 无变更标签：底色是 .excel-sheet-tabs-container 的 #f8f9fa，
+   原 #6c757d 实测 4.45:1，略低于 AA 的 4.5:1；改用 --color-text-muted(#656d76) 后 4.98:1 */
 .excel-tab-no-changes {
-    color: #6c757d;
+    color: var(--color-text-muted, #656d76);
 }
 
+/* .excel-tab-disabled 的 #adb5bd(白底 2.07:1) 不再调整：
+   WCAG 1.4.3 明确豁免"非活动控件"，且这里另有 opacity:0.6 + pointer-events:none
+   两重非颜色提示，用户不会把它误当成可点项。 */
 .excel-tab-disabled {
     color: #adb5bd;
     cursor: not-allowed;
@@ -238,7 +246,7 @@
 
 .excel-sheet-content {
     display: none;
-    padding: 20px;
+    padding: var(--space-5, 20px);
 }
 
 .excel-sheet-content.active {
@@ -248,28 +256,28 @@
 .excel-table-wrapper {
     overflow: auto;
     max-height: 600px;
-    border: 1px solid #dee2e6;
-    border-radius: 4px;
+    border: 1px solid var(--color-border, #dee2e6);
+    border-radius: var(--radius-md, 4px);
 }
 
 .excel-diff-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 13px;
-    background: #fff;
+    font-size: var(--font-size-base, 13px);
+    background: var(--color-surface, #fff);
 }
 
 .excel-diff-table th,
 .excel-diff-table td {
-    border: 1px solid #dee2e6;
+    border: 1px solid var(--color-border, #dee2e6);
     padding: 8px 12px;
     text-align: left;
     vertical-align: top;
 }
 
 .excel-header-row th {
-    background: #f8f9fa;
-    color: #495057;
+    background: var(--color-surface-subtle, #f8f9fa);
+    color: var(--color-text-secondary, #495057);
     font-weight: 600;
     text-align: center;
     position: sticky;
@@ -278,8 +286,8 @@
 }
 
 .excel-field-row th {
-    background: #f8f9fa;
-    color: #495057;
+    background: var(--color-surface-subtle, #f8f9fa);
+    color: var(--color-text-secondary, #495057);
     font-weight: 500;
     position: sticky;
     top: 32px;
@@ -287,7 +295,7 @@
 }
 
 .excel-row-header {
-    background: #f8f9fa;
+    background: var(--color-surface-subtle, #f8f9fa);
     font-weight: 600;
     text-align: center;
     min-width: 60px;
@@ -321,13 +329,13 @@
 
 .excel-cell.excel-removed {
     background: #f76571 !important; /* 使用与行号一致的深红色背景 */
-    border-left: 2px solid #dc3545;
+    border-left: 2px solid var(--color-danger, #dc3545);
     color: #000 !important; /* 使用黑色文字 */
     font-weight: bold !important;
 }
 
 .excel-row-modified-old {
-    background: #ffffff; /* 保持白色背景避免滚动扩散 */
+    background: var(--color-surface, #ffffff); /* 保持白色背景避免滚动扩散 */
 }
 
 .excel-row-modified-new {
@@ -335,8 +343,8 @@
 }
 
 .excel-cell.excel-modified-old {
-    background: #fff !important;
-    border-left: 2px solid #ffc107;
+    background: var(--color-surface, #fff) !important;
+    border-left: 2px solid var(--color-warning, #ffc107);
 }
 
 /* 修改单元格的背景色样式 - 使用更高优先级 */
@@ -344,32 +352,35 @@
     background-color: #ffebee !important; /* 浅红色背景 */
     color: #c50303 !important; /* 深红色文字 */
     padding: 4px !important;
-    border-left: 2px solid #ffc107 !important; /* 黄色左边框 */
+    border-left: 2px solid var(--color-warning, #ffc107) !important; /* 黄色左边框 */
 }
 
 .excel-diff-table .excel-cell.excel-modified-new {
     background-color: #a2eea2 !important; /* 浅绿色背景 */
     color: #146d18 !important; /* 深绿色文字 */
     padding: 4px !important;
-    border-left: 2px solid #ffc107 !important; /* 黄色左边框 */
+    border-left: 2px solid var(--color-warning, #ffc107) !important; /* 黄色左边框 */
 }
 
-/* 修改单元格的文字背景色 */
+/* 修改单元格的文字背景色
+   原为 #f8f8f8 文字 + #ee3f51 底，实测仅 3.62:1（WCAG AA 需 >= 4.5:1）。
+   底色压深到 #c62828（仍是同一个红色语义），配纯白文字后为 5.62:1。
+   见 static/css/style.css 顶部的 --color-cell-old-* token。 */
 .excel-text-bg-old {
-    background-color: #ee3f51 !important; /* 红色背景 */
-    color: #f8f8f8 !important; /* 白色文字 */
+    background-color: var(--color-cell-old-bg, #c62828) !important; /* 红色背景 */
+    color: var(--color-cell-old-text, #ffffff) !important; /* 白色文字 */
     padding: 2px 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-sm, 3px);
     display: inline-block;
     text-align: left !important;
     vertical-align: top !important;
 }
 
 .excel-text-bg-new {
-    background-color: #2e7d32 !important; /* 深绿色背景 */
-    color: white !important; /* 白色文字 */
+    background-color: var(--color-cell-new-bg, #2e7d32) !important; /* 深绿色背景 */
+    color: var(--color-cell-new-text, #ffffff) !important; /* 白色文字，实测 5.13:1 */
     padding: 2px 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-sm, 3px);
     display: inline-block;
     text-align: left !important;
     vertical-align: top !important;
@@ -378,29 +389,29 @@
 /* 使用更高特异性确保样式生效 */
 .excel-diff-table .excel-cell.excel-modified-new {
     background-color: #c8f3c8 !important; /* 浅绿色背景 */
-    border-left: 2px solid #ffc107 !important; /* 黄色左边框 */
+    border-left: 2px solid var(--color-warning, #ffc107) !important; /* 黄色左边框 */
     padding: 4px !important;
     text-align: left !important;
 }
 
 .excel-summary {
-    margin-top: 20px;
-    padding: 16px;
-    background: #f8f9fa;
-    border-radius: 6px;
-    border: 1px solid #e9ecef;
+    margin-top: var(--space-5, 20px);
+    padding: var(--space-4, 16px);
+    background: var(--color-surface-subtle, #f8f9fa);
+    border-radius: var(--radius-lg, 6px);
+    border: 1px solid var(--color-surface-muted, #e9ecef);
 }
 
 .excel-summary h6 {
-    margin-bottom: 12px;
-    color: #495057;
+    margin-bottom: var(--space-3, 12px);
+    color: var(--color-text-secondary, #495057);
 }
 
 /* ===== IMAGE DIFF STYLES (Side-by-side) ===== */
 .image-diff-container {
-    background: #fff;
+    background: var(--color-surface, #fff);
     border: 1px solid #e1e4e8;
-    border-radius: 6px;
+    border-radius: var(--radius-lg, 6px);
     overflow: hidden;
 }
 
@@ -414,32 +425,32 @@
 }
 
 .image-diff-content {
-    padding: 20px;
+    padding: var(--space-5, 20px);
 }
 
 .image-diff-comparison {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 20px;
-    margin-bottom: 20px;
+    gap: var(--space-5, 20px);
+    margin-bottom: var(--space-5, 20px);
 }
 
 .image-diff-side {
-    border: 1px solid #dee2e6;
-    border-radius: 6px;
+    border: 1px solid var(--color-border, #dee2e6);
+    border-radius: var(--radius-lg, 6px);
     overflow: hidden;
 }
 
 .image-diff-side-header {
-    background: #f8f9fa;
+    background: var(--color-surface-subtle, #f8f9fa);
     padding: 12px 16px;
-    border-bottom: 1px solid #dee2e6;
+    border-bottom: 1px solid var(--color-border, #dee2e6);
     font-weight: 600;
-    color: #495057;
+    color: var(--color-text-secondary, #495057);
 }
 
 .image-diff-side-content {
-    padding: 16px;
+    padding: var(--space-4, 16px);
     text-align: center;
     min-height: 200px;
     display: flex;
@@ -450,33 +461,33 @@
 .image-diff-image {
     max-width: 100%;
     max-height: 300px;
-    border: 1px solid #dee2e6;
-    border-radius: 4px;
+    border: 1px solid var(--color-border, #dee2e6);
+    border-radius: var(--radius-md, 4px);
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
 
 .image-diff-info {
-    margin-top: 12px;
-    font-size: 12px;
+    margin-top: var(--space-3, 12px);
+    font-size: var(--font-size-sm, 12px);
     color: #6c757d;
 }
 
 .image-diff-stats {
-    background: #f8f9fa;
-    padding: 16px;
-    border-radius: 6px;
-    border: 1px solid #e9ecef;
+    background: var(--color-surface-subtle, #f8f9fa);
+    padding: var(--space-4, 16px);
+    border-radius: var(--radius-lg, 6px);
+    border: 1px solid var(--color-surface-muted, #e9ecef);
 }
 
 .image-diff-stats h6 {
-    margin-bottom: 12px;
-    color: #495057;
+    margin-bottom: var(--space-3, 12px);
+    color: var(--color-text-secondary, #495057);
 }
 
 .image-diff-stat-row {
     display: flex;
     justify-content: space-between;
-    margin-bottom: 8px;
+    margin-bottom: var(--space-2, 8px);
 }
 
 .image-diff-stat-row:last-child {
@@ -484,9 +495,9 @@
 }
 
 .image-diff-no-previous {
-    background: #e7f3ff;
+    background: var(--color-info-bg, #e7f3ff);
     border: 1px solid #b8daff;
-    border-radius: 6px;
+    border-radius: var(--radius-lg, 6px);
     padding: 40px 20px;
     text-align: center;
     color: #004085;
@@ -494,9 +505,9 @@
 
 /* ===== BINARY DIFF STYLES (Info Display) ===== */
 .binary-diff-container {
-    background: #fff;
+    background: var(--color-surface, #fff);
     border: 1px solid #e1e4e8;
-    border-radius: 6px;
+    border-radius: var(--radius-lg, 6px);
     overflow: hidden;
 }
 
@@ -517,35 +528,35 @@
 .binary-diff-icon {
     font-size: 64px;
     color: #6c757d;
-    margin-bottom: 20px;
+    margin-bottom: var(--space-5, 20px);
 }
 
 .binary-diff-message {
     font-size: 18px;
-    color: #495057;
-    margin-bottom: 16px;
+    color: var(--color-text-secondary, #495057);
+    margin-bottom: var(--space-4, 16px);
 }
 
 .binary-diff-info {
-    background: #f8f9fa;
-    border: 1px solid #e9ecef;
-    border-radius: 6px;
-    padding: 20px;
-    margin-top: 20px;
+    background: var(--color-surface-subtle, #f8f9fa);
+    border: 1px solid var(--color-surface-muted, #e9ecef);
+    border-radius: var(--radius-lg, 6px);
+    padding: var(--space-5, 20px);
+    margin-top: var(--space-5, 20px);
     text-align: left;
 }
 
 .binary-diff-info h6 {
-    margin-bottom: 16px;
-    color: #495057;
+    margin-bottom: var(--space-4, 16px);
+    color: var(--color-text-secondary, #495057);
 }
 
 .binary-info-row {
     display: flex;
     justify-content: space-between;
-    margin-bottom: 12px;
+    margin-bottom: var(--space-3, 12px);
     padding: 8px 0;
-    border-bottom: 1px solid #e9ecef;
+    border-bottom: 1px solid var(--color-surface-muted, #e9ecef);
 }
 
 .binary-info-row:last-child {
@@ -555,7 +566,7 @@
 
 .binary-info-label {
     font-weight: 600;
-    color: #495057;
+    color: var(--color-text-secondary, #495057);
 }
 
 .binary-info-value {
@@ -564,7 +575,7 @@
 
 .binary-size-change {
     padding: 8px 12px;
-    border-radius: 4px;
+    border-radius: var(--radius-md, 4px);
     font-weight: 600;
 }
 
@@ -587,15 +598,15 @@
 .diff-type-badge {
     display: inline-block;
     padding: 4px 8px;
-    border-radius: 12px;
-    font-size: 11px;
+    border-radius: var(--radius-pill, 12px);
+    font-size: var(--font-size-xs, 11px);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
 
 .diff-type-badge.text {
-    background: #e7f3ff;
+    background: var(--color-info-bg, #e7f3ff);
     color: #004085;
 }
 
@@ -605,8 +616,8 @@
 }
 
 .diff-type-badge.image {
-    background: #fff3cd;
-    color: #856404;
+    background: var(--color-warning-bg, #fff3cd);
+    color: var(--color-warning-text, #856404);
 }
 
 .diff-type-badge.binary {
@@ -630,14 +641,14 @@
     background: #f8d7da;
     border: 1px solid #f5c6cb;
     color: #721c24;
-    padding: 20px;
-    border-radius: 6px;
+    padding: var(--space-5, 20px);
+    border-radius: var(--radius-lg, 6px);
     text-align: center;
 }
 
 .diff-error-icon {
     font-size: 48px;
-    margin-bottom: 16px;
+    margin-bottom: var(--space-4, 16px);
 }
 
 /* ===== RESPONSIVE DESIGN ===== */
@@ -652,7 +663,7 @@
     
     .excel-sheet-tab {
         padding: 8px 12px;
-        font-size: 14px;
+        font-size: var(--font-size-md, 14px);
     }
     
     .text-diff-line-number {
@@ -692,7 +703,7 @@
 
 /* ===== EXCEL COLUMN ID AND BOLD TEXT STYLES ===== */
 .excel-column-id {
-    font-size: 11px;
+    font-size: var(--font-size-xs, 11px);
     color: #6c757d;
     font-weight: 500;
     text-align: center;
@@ -702,13 +713,13 @@
 
 .excel-bold-text {
     font-weight: 700 !important;
-    color: #212529 !important;
+    color: var(--color-text, #212529) !important;
 }
 
 .excel-row-header.excel-bold-text {
     font-weight: 700 !important;
-    background-color: #f8f9fa;
-    border-right: 2px solid #dee2e6;
+    background-color: var(--color-surface-subtle, #f8f9fa);
+    border-right: 2px solid var(--color-border, #dee2e6);
 }
 
 .excel-column-header .excel-bold-text {
@@ -728,7 +739,7 @@
     .image-diff-header,
     .binary-diff-header,
     .text-diff-header {
-        background: #f8f9fa !important;
+        background: var(--color-surface-subtle, #f8f9fa) !important;
         color: #000 !important;
     }
     

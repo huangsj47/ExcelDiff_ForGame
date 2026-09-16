@@ -303,10 +303,10 @@
         <table class="table table-hover">
             <thead>
                 <tr>
-                    <th>项目代号</th>
-                    <th>易协作代号</th>
-                    <th>所属部门</th>
-                    <th style="width: 540px;">操作</th>
+                    <th scope="col">项目代号</th>
+                    <th scope="col">易协作代号</th>
+                    <th scope="col">所属部门</th>
+                    <th scope="col" style="width: 540px;">操作</th>
                 </tr>
             </thead>
             <tbody>
@@ -395,7 +395,7 @@
                     <h5 class="modal-title"><i class="fas fa-plus-circle me-2" style="color: #0969da;"></i>新建项目</h5>
                     <div class="modal-subtitle">填写项目基础信息并选择执行节点，提交后立即生效。</div>
                 </div>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <form method="POST" action="{{ url_for('projects') }}">
                 <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
@@ -479,7 +479,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title"><i class="fas fa-pen-to-square me-2" style="color: #0969da;"></i>编辑项目信息</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <div class="modal-body">
                 <div class="mb-3">
@@ -512,7 +512,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title"><i class="fas fa-sign-in-alt me-2" style="color: #0969da;"></i>申请加入项目</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <div class="modal-body">
                 <div class="mb-3">
@@ -547,7 +547,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title"><i class="fas fa-paper-plane me-2" style="color: #198754;"></i>申请创建项目</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <div class="modal-body">
                 <div class="alert alert-info" style="font-size: 0.85rem; border-radius: 8px;">

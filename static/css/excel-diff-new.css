@@ -55,9 +55,12 @@
 }
 
 /* 无变更的标签页样式 */
+/* 底色 #f8f9fa 上 #6c757d 只有 4.45:1，改用同族更深的 #656d76（4.98:1）。
+   注意 diff-styles.css 里也有同名规则且加载更晚，这里同步改是为了在
+   不加载 diff-styles.css 的页面上同样达标。 */
 .excel-tab-no-changes {
     background-color: #f8f9fa;
-    color: #6c757d;
+    color: #656d76;
     border-color: #dee2e6;
 }
 
@@ -426,10 +429,12 @@
     display: block !important;
 }
 
-/* 修改单元格的文字背景色 */
+/* 修改单元格的文字背景色
+   原为 #c62828 文字 + #ffcdd2 底，实测 3.99:1；底色压深到 #c62828 并改纯白文字后
+   为 5.62:1（与 diff-styles.css / excel-scroll-fix.css 里的同名规则保持同一组颜色） */
 .excel-text-bg-old {
-    background-color: #ffcdd2 !important; /* 浅红色背景 */
-    color: #c62828 !important; /* 深红色文字 */
+    background-color: #c62828 !important; /* 深红色背景 */
+    color: #ffffff !important; /* 白色文字 */
     padding: 2px 4px;
     border-radius: 3px;
     display: inline-block;

@@ -176,11 +176,11 @@
         <table class="table table-hover">
             <thead>
                 <tr>
-                    <th>项目代号</th>
-                    <th>项目名称</th>
-                    <th>所属部门</th>
-                    <th>创建时间</th>
-                    <th>操作</th>
+                    <th scope="col">项目代号</th>
+                    <th scope="col">项目名称</th>
+                    <th scope="col">所属部门</th>
+                    <th scope="col">创建时间</th>
+                    <th scope="col">操作</th>
                 </tr>
             </thead>
             <tbody>
@@ -239,7 +239,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title"><i class="fas fa-plus-circle me-2" style="color: #0969da;"></i>新建项目</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <form method="POST" action="{{ url_for('projects') }}">
                 <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">

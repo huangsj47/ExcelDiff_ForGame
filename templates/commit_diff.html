@@ -357,7 +357,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title">Excel版本对比</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <div class="modal-body">
                 <form id="diffCompareForm">
@@ -535,7 +535,7 @@ function showStatusUpdateSuccess(status) {
     toast.innerHTML = 
         '<i class="bi bi-check-circle me-2"></i>' +
         '状态已更新为: ' + message +
-        '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+        '<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="关闭"></button>';
     
     document.body.appendChild(toast);
     
@@ -937,7 +937,7 @@ function renderLargeSheetInBatches(container, sheetName, sheetData, callback) {
                    '<table class="excel-diff-table">' +
                    '<thead>' +
                    '<tr class="excel-header-row">' +
-                   '<th class="excel-row-header">ID</th>';
+                   '<th scope="col" class="excel-row-header">ID</th>';
     
     // 添加列标题
     for (var i = 0; i < sheetData.headers.length; i++) {
@@ -945,18 +945,18 @@ function renderLargeSheetInBatches(container, sheetName, sheetData, callback) {
         var header = sheetData.headers[i];
         var isModified = modifiedColumns.indexOf(header) !== -1;
         var headerClass = isModified ? 'excel-column-header excel-modified-column-header' : 'excel-column-header';
-        tableHtml += '<th class="' + headerClass + '">' + columnLetter + '</th>';
+        tableHtml += '<th scope="col" class="' + headerClass + '">' + columnLetter + '</th>';
     }
     
     tableHtml += '</tr><tr class="excel-field-row">' +
-                '<th class="excel-row-header">字段</th>';
+                '<th scope="col" class="excel-row-header">字段</th>';
     
     // 添加字段名
     for (var i = 0; i < sheetData.headers.length; i++) {
         var header = sheetData.headers[i];
         var isModified = modifiedColumns.indexOf(header) !== -1;
         var headerClass = isModified ? 'excel-field-header excel-modified-column-header' : 'excel-field-header';
-        tableHtml += '<th class="' + headerClass + '" title="' + header + '">' + header + '</th>';
+        tableHtml += '<th scope="col" class="' + headerClass + '" title="' + header + '">' + header + '</th>';
     }
     
     tableHtml += '</tr></thead><tbody id="sheet-tbody-' + sheetName + '"></tbody></table></div>';
@@ -1102,7 +1102,7 @@ function createExcelDiffTable(sheetName, sheetData) {
                '<table class="excel-diff-table">' +
                '<thead>' +
                '<tr class="excel-header-row">' +
-               '<th class="excel-row-header">ID</th>';
+               '<th scope="col" class="excel-row-header">ID</th>';
     
     // 添加列标题 (A, B, C, D...)
     for (var i = 0; i < sheetData.headers.length; i++) {
@@ -1110,18 +1110,18 @@ function createExcelDiffTable(sheetName, sheetData) {
         var header = sheetData.headers[i];
         var isModified = modifiedColumns.indexOf(header) !== -1;
         var headerClass = isModified ? 'excel-column-header excel-modified-column-header' : 'excel-column-header';
-        html += '<th class="' + headerClass + '">' + columnLetter + '</th>';
+        html += '<th scope="col" class="' + headerClass + '">' + columnLetter + '</th>';
     }
     
     html += '</tr><tr class="excel-field-row">' +
-            '<th class="excel-row-header">字段</th>';
+            '<th scope="col" class="excel-row-header">字段</th>';
     
     // 添加字段名
     for (var i = 0; i < sheetData.headers.length; i++) {
         var header = sheetData.headers[i];
         var isModified = modifiedColumns.indexOf(header) !== -1;
         var headerClass = isModified ? 'excel-field-header excel-modified-column-header' : 'excel-field-header';
-        html += '<th class="' + headerClass + '" title="' + header + '">' + header + '</th>';
+        html += '<th scope="col" class="' + headerClass + '" title="' + header + '">' + header + '</th>';
     }
     
     html += '</tr></thead><tbody>';
