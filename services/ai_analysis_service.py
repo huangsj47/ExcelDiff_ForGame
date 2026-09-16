@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AI analysis framework service (stubbed executor).
+AI analysis service（真实执行器）。
 """
 
 from __future__ import annotations
@@ -24,12 +24,22 @@ from models import (
     db,
 )
 from models.ai_analysis import (
+    AiAnalysisAnomaly,
     AiAnalysisRun,
+    AiAnalysisTrace,
     AiProjectAnalysisConfig,
     AiProjectApiKey,
     AiWeeklyAnalysisState,
 )
 from models.ai_analysis.project_config import DEFAULT_MAX_FILES_PER_RUN
+from services.ai.baseline import (
+    DISPOSITION_PENDING,
+    BaselineFinding,
+    build_baseline_digest,
+    classify,
+    suppressed_fingerprints,
+)
+from services.ai.change_set import ChangeSet, from_commit_payload, from_weekly_payload
 from services.ai.endpoint_service import (
     FIELD_DEFAULTS,
     OPENAI_BASE_URL,
@@ -43,9 +53,19 @@ from services.ai.endpoint_service import (
     validate_field,
     validate_payload,
 )
+from services.ai.engine import (
+    STATUS_FAILED,
+    EngineLimits,
+    EngineOutcome,
+    run_analysis,
+)
+from services.ai.engine import (
+    failed as engine_failed,
+)
+from services.ai.platform_provider import PlatformContextProvider
 from services.ai.prompt import prompt_version
-from services.ai.rules import rules_version
-from services.ai.skill_loader import skill_revision
+from services.ai.rules import RuleThresholds, anomaly_fingerprint, rules_version
+from services.ai.skill_loader import load_skills, skill_revision
 from utils.dpapi_utils import DPAPI_PREFIX, decrypt_dpapi
 from utils.logger import log_print
 from utils.security_utils import decrypt_credential, encrypt_credential
@@ -648,54 +668,347 @@ def _determine_risk_level(summary: dict) -> str:
     return "low"
 
 
-def _build_stub_result(payload: dict) -> Tuple[dict, str]:
-    summary = payload.get("summary") or {}
-    risk_level = _determine_risk_level(summary)
-    mode = payload.get("mode")
-    scope = payload.get("scope")
-    total_files = summary.get("total_files", 0)
-    delta_files = summary.get("delta_files", 0)
+def _load_project_skills(project_id: int):
+    """加载平台 skill 与项目知识包。**加载失败不阻断分析**：skill 是提示词的一部分，
+    提示词装不上不该让用户连一次分析都跑不了。"""
+    project = db.session.get(Project, project_id)
+    code = getattr(project, "code", None) if project else None
+    try:
+        return load_skills(_REPO_ROOT, project_code=code)
+    except Exception as exc:  # noqa: BLE001
+        log_print(f"⚠️ AI 分析：skill 加载失败（project={project_id}）: {exc}")
+        return None
 
-    risk_reasons = [
-        f"Scope: {scope}",
-        f"Total files: {total_files}",
-        f"Delta files: {delta_files}",
+
+def _engine_limits(project_config: dict) -> EngineLimits:
+    """项目配置 → 引擎额度。
+
+    用 `or` 而不是 `dict.get(key, 默认)`：配置行是懒创建的，没填过的列读出来是 `None`，
+    而 `None` 会让 `range(1, None + 1)` 在半夜的自动轮询里炸掉。
+    """
+    defaults = EngineLimits()
+    return EngineLimits(
+        max_rounds=int(project_config.get("max_analysis_rounds") or defaults.max_rounds),
+        max_tool_requests=int(project_config.get("max_tool_requests") or defaults.max_tool_requests),
+        prompt_char_budget=int(
+            project_config.get("prompt_char_budget") or defaults.prompt_char_budget
+        ),
+    )
+
+
+def _previous_run(target_type: str, target_key: Optional[str]) -> Optional[AiAnalysisRun]:
+    if not target_key:
+        return None
+    return (
+        AiAnalysisRun.query.filter_by(target_type=target_type, target_key=target_key)
+        .filter(AiAnalysisRun.status == "succeeded")
+        .order_by(AiAnalysisRun.created_at.desc())
+        .first()
+    )
+
+
+def _baseline_findings(target_type: str, target_key: Optional[str]) -> List[BaselineFinding]:
+    """上一次成功运行报出的那批结论。
+
+    **取「上一次运行的那批」而不是把历次运行并起来**：每次运行产出的本来就是「这个版本
+    当前仍成立的问题全集」（skill 里定死了这个语义），所以上一次那批就是当前基线。
+    并起来反而会把已经修好的旧条目重新翻出来。
+    """
+    previous = _previous_run(target_type, target_key)
+    if previous is None:
+        return []
+    return [
+        BaselineFinding(
+            fingerprint=row.fingerprint or "",
+            title=row.title or "",
+            severity=row.severity or "high",
+            category=row.category or "",
+            file_path=row.file_path or "",
+            commit_ref=row.commit_ref or "",
+            disposition=row.disposition or DISPOSITION_PENDING,
+        )
+        for row in AiAnalysisAnomaly.query.filter_by(run_id=previous.id).all()
+        if row.fingerprint
+    ]
+
+
+def _baseline_digest(target_type: str, target_key: Optional[str], change: ChangeSet) -> str:
+    """给模型看的「已经报过的问题」。
+
+    `changed_paths` 传「上次报过、这次又变了」的文件：那类结论的证据已经过期，要重新
+    确认 —— 包括人工标过「已忽略」的。这是「忽略」不会变成「永远看不见」的保证。
+
+    **先 `classify` 再渲染，两件事必须分开做**：`build_baseline_digest` 刻意不收
+    `changed_paths`，因为它再判一遍状态会把刚判成「需要重新确认」的结论判回「已忽略」
+    并从摘要里抹掉 —— 而且是静默的（报告里只是少一条）。
+    """
+    findings = _baseline_findings(target_type, target_key)
+    if not findings:
+        return ""
+    return build_baseline_digest(classify(findings, changed_paths=change.paths))
+
+
+def _suppressed(target_type: str, target_key: Optional[str], change: ChangeSet) -> frozenset:
+    """人工已忽略、且相关文件没有再变的指纹。这些不再进清单。"""
+    findings = _baseline_findings(target_type, target_key)
+    if not findings:
+        return frozenset()
+    return suppressed_fingerprints(classify(findings, changed_paths=change.paths))
+
+
+def _risk_level_from_outcome(outcome: EngineOutcome, summary: dict) -> Tuple[str, List[str]]:
+    """风险等级与依据。
+
+    **有结论时按结论定级；没有结论时按变更规模定级，并明说那不是模型结论。**
+    反过来做（没结论就报「低」）正是这套机制最该避免的事：用户分不出「模型看完说没问题」
+    和「模型压根没答上来」，而这两件事的处理方式完全相反。
+    """
+    if outcome.anomalies:
+        severities = {item.severity for item in outcome.anomalies}
+        level = "high" if "critical" in severities else "mid_high"
+        reasons = [f"模型报出 {len(outcome.anomalies)} 条达门槛的问题"]
+        if "critical" in severities:
+            reasons.append("其中含 critical")
+        if outcome.degradation:
+            reasons.append(outcome.degradation_label or outcome.degradation)
+        return level, reasons
+
+    level = _determine_risk_level(summary)
+    reasons = [
+        f"变更规模：{summary.get('total_files', 0)} 个文件"
+        f"（本次变化 {summary.get('delta_files', 0)} 个）"
     ]
     if summary.get("critical_paths"):
-        risk_reasons.append("Critical paths detected.")
+        reasons.append("含关键路径")
+    if outcome.succeeded:
+        reasons.append("模型未报出达门槛的问题")
+    else:
+        reasons.append(
+            f"⚠️ 本次未取得完整结论（{outcome.degradation_label or outcome.degradation or '原因未知'}），"
+            "该等级仅按变更规模估算，**不是**模型评估结果"
+        )
+    return level, reasons
 
-    test_suggestions = [
-        "Run smoke tests on core user flows.",
-        "Verify configuration loading and permissions.",
-        "Validate data migration or schema changes if applicable.",
-    ]
-    smoke_list = [
-        "Login / auth flow",
-        "Primary business flow",
-        "Error handling / rollback",
-    ]
-    unknowns = [
-        "Exact runtime impact depends on downstream integrations.",
-    ]
 
-    result = {
+def _result_payload(
+    outcome: EngineOutcome,
+    payload: dict,
+    *,
+    suppressed: frozenset = frozenset(),
+) -> dict:
+    """给前端与后续读取用的结果。
+
+    保留既有的 `risk_level`（界面在读它），其余键是真实产出。被人工忽略的结论不进
+    `anomalies` —— 尊重分诊结果，而不是每轮再问一次。
+    """
+    summary = payload.get("summary") or {}
+    risk_level, risk_reasons = _risk_level_from_outcome(outcome, summary)
+    kept = [item for item in outcome.anomalies if anomaly_fingerprint(item) not in suppressed]
+
+    return {
         "risk_level": risk_level,
         "risk_reasons": risk_reasons,
-        "impact_scope": [mode, scope],
-        "test_suggestions": test_suggestions,
-        "smoke_list": smoke_list,
-        "unknowns": unknowns,
+        "report_markdown": outcome.report_markdown,
+        "status": outcome.status,
+        "degradation": outcome.degradation,
+        "degradation_label": outcome.degradation_label,
+        "error_message": outcome.error_message,
+        "anomalies": [
+            {
+                "fingerprint": anomaly_fingerprint(item),
+                "title": item.title,
+                "category": item.category,
+                "severity": item.severity,
+                "confidence": item.confidence,
+                "evidence": list(item.evidence),
+                "commit_ref": item.commit or "",
+                "file_path": item.file_path or "",
+                "impact": item.impact or "",
+                "suggestion": item.suggestion or "",
+            }
+            for item in kept
+        ],
+        "suppressed_count": len(outcome.anomalies) - len(kept),
+        "rounds_used": outcome.rounds_used,
+        "requests_used": outcome.requests_used,
+        "dropped": [
+            {"kind": item.kind, "reason": item.reason, "detail": item.detail}
+            for item in outcome.dropped
+        ],
     }
 
-    text_lines = [
-        f"AI Analysis ({mode})",
-        f"Risk Level: {risk_level}",
-        "Reasons:",
-        *[f"- {item}" for item in risk_reasons],
-        "Test Suggestions:",
-        *[f"- {item}" for item in test_suggestions],
-    ]
-    return result, "\n".join(text_lines)
+
+def _persist_outcome(run: AiAnalysisRun, outcome: EngineOutcome, result: dict) -> None:
+    """把引擎结果落库：run 上写状态与账目，逐轮写 trace，逐条写异常。
+
+    `error_message` 这一列此前**从来没有被写入过**，于是失败的分析在界面上永远是
+    「分析中」，用户无从判断。这是这次要修的一部分。
+    """
+    run.status = "failed" if outcome.status == STATUS_FAILED else "succeeded"
+    run.finished_at = _utcnow()
+    run.response_payload = _json_dumps(result)
+    run.response_text = outcome.report_markdown or outcome.error_message or ""
+    run.rounds_used = outcome.rounds_used
+    run.tokens_input = outcome.prompt_tokens
+    run.tokens_output = outcome.completion_tokens
+    run.error_message = outcome.error_message or None
+
+    for record in outcome.rounds:
+        db.session.add(
+            AiAnalysisTrace(
+                run_id=run.id,
+                round_index=record.index,
+                outcome=record.status,
+                parsed_ok=record.status != "unparsable",
+                requests_json=_json_dumps({"count": record.request_count}),
+                executed_json=_json_dumps({"items": record.item_count}),
+                dropped_json=_json_dumps(
+                    {"refused_by_budget": record.refused_by_budget, "truncated": record.truncated}
+                ),
+                error=record.note or None,
+            )
+        )
+
+    for item in result.get("anomalies") or []:
+        db.session.add(
+            AiAnalysisAnomaly(
+                run_id=run.id,
+                project_id=run.project_id,
+                fingerprint=item["fingerprint"],
+                title=item["title"] or "（无标题）",
+                category=item["category"],
+                severity=item["severity"],
+                confidence=item["confidence"],
+                evidence=_json_dumps(item["evidence"]),
+                commit_ref=item["commit_ref"],
+                file_path=item["file_path"],
+                impact=item["impact"],
+                suggestion=item["suggestion"],
+            )
+        )
+
+    db.session.commit()
+
+
+def _failed_result(summary: dict, message: str) -> dict:
+    """没发起分析时的结果。**等级按规模估算并写明原因** —— 不伪装成模型结论。"""
+    return {
+        "risk_level": _determine_risk_level(summary),
+        "risk_reasons": [message, "该等级仅按变更规模估算，**不是**模型评估结果"],
+        "report_markdown": "",
+        "status": "failed",
+        "degradation": "not_started",
+        "degradation_label": message,
+        "error_message": message,
+        "anomalies": [],
+        "suppressed_count": 0,
+        "rounds_used": 0,
+        "requests_used": 0,
+        "dropped": [],
+    }
+
+
+def _create_run(
+    *,
+    project_id: int,
+    target_type: str,
+    target_id: int,
+    target_key: Optional[str],
+    response_mode: str,
+    scope: str,
+    trigger_source: str,
+    payload: dict,
+) -> AiAnalysisRun:
+    """建一条 running 的 run 记录。
+
+    **先落库再跑**：分析要花几十秒到几分钟，这期间界面上必须能看到「正在分析」。等跑完
+    才写库的话，用户在这段时间里看到的是一片空白，看起来像按钮没生效。
+
+    溯源四个值（prompt / skill / rules / model）在这里一次写全：它们同时是缓存键，
+    缺一个就会出现「改了 skill 却还在复用旧结论」——那个坑已经踩过一次。
+    """
+    summary = payload.get("summary") or {}
+    run = AiAnalysisRun(
+        project_id=project_id,
+        target_type=target_type,
+        target_id=target_id,
+        target_key=target_key,
+        status="running",
+        response_mode=response_mode,
+        scope=scope,
+        trigger_source=trigger_source,
+        trace_id=f"{target_type}-{target_id}-{int(_utcnow().timestamp())}",
+        **_current_provenance(project_id),
+        request_payload=_json_dumps(payload),
+        delta_summary=_json_dumps(
+            {
+                "delta_files": summary.get("delta_files", 0),
+                "total_files": summary.get("total_files", 0),
+                "scope": scope,
+            }
+        ),
+        started_at=_utcnow(),
+    )
+    db.session.add(run)
+    db.session.commit()
+    return run
+
+
+def _execute_analysis(
+    run: AiAnalysisRun,
+    *,
+    project_id: int,
+    payload: dict,
+    project_config: dict,
+    target_type: str,
+    target_key: Optional[str],
+) -> dict:
+    """跑一次真实分析并把结果落库。**不抛异常** —— 失败要变成带原因的结论。
+
+    调用方在后台线程或 SSE 生成器里跑，抛出去只会变成一个没人看的堆栈，而用户那边
+    是「分析中」永远转下去。
+    """
+    summary = payload.get("summary") or {}
+
+    client, errors = build_endpoint_client(project_id, {})
+    if client is None:
+        message = "接口配置不完整：" + "；".join(item["message"] for item in errors)
+        result = _failed_result(summary, message)
+        _persist_outcome(run, engine_failed(message), result)
+        return result
+
+    loaded = _load_project_skills(project_id)
+    if loaded is None:
+        message = "分析协议（skill）加载失败，未发起分析。"
+        result = _failed_result(summary, message)
+        _persist_outcome(run, engine_failed(message), result)
+        return result
+
+    readable = sorted(getattr(loaded, "readable", {}) or {})
+    change = (
+        from_commit_payload(payload, readable_references=readable)
+        if payload.get("mode") == "commit"
+        else from_weekly_payload(payload, readable_references=readable)
+    )
+
+    outcome = run_analysis(
+        client=client,
+        provider=PlatformContextProvider(loaded=loaded),
+        loaded=loaded,
+        scope=change.scope,
+        change_summary=change.summary,
+        limits=_engine_limits(project_config),
+        thresholds=RuleThresholds.from_config(project_config),
+        project_knowledge=project_config.get("project_knowledge") or "",
+        project_instructions=project_config.get("prompt_template") or "",
+        baseline_digest=_baseline_digest(target_type, target_key, change),
+    )
+
+    result = _result_payload(
+        outcome, payload, suppressed=_suppressed(target_type, target_key, change)
+    )
+    _persist_outcome(run, outcome, result)
+    return result
 
 
 def _sse_event(event: str, payload: dict) -> str:
@@ -723,34 +1036,27 @@ def stream_commit_analysis(commit_id: int, user_label: str = "") -> Iterable[str
         return
 
     payload = build_commit_payload(commit_id)
-    trace_id = f"commit-{commit_id}-{int(_utcnow().timestamp())}"
-
-    run = AiAnalysisRun(
+    run = _create_run(
         project_id=project_id,
         target_type="commit",
         target_id=commit_id,
         target_key=None,
-        status="running",
         response_mode="streaming",
         scope="full",
         trigger_source="manual",
-        trace_id=trace_id,
-        **_current_provenance(project_id),
-        request_payload=_json_dumps(payload),
-        started_at=_utcnow(),
+        payload=payload,
     )
-    db.session.add(run)
-    db.session.commit()
 
-    result, text = _build_stub_result(payload)
-    for line in text.splitlines():
+    result = _execute_analysis(
+        run,
+        project_id=project_id,
+        payload=payload,
+        project_config=get_project_analysis_config(project_id),
+        target_type="commit",
+        target_key=None,
+    )
+    for line in (result.get("report_markdown") or "").splitlines():
         yield _sse_event("chunk", {"text": line})
-
-    run.status = "succeeded"
-    run.finished_at = _utcnow()
-    run.response_payload = _json_dumps(result)
-    run.response_text = text
-    db.session.commit()
     yield _sse_event("result", result)
 
 
@@ -773,40 +1079,28 @@ def stream_weekly_analysis(config_id: int, trigger_source: str = "manual") -> It
         yield _sse_event("error", {"message": "Project API key not configured."})
         return
 
-    trace_id = f"weekly-{config_id}-{int(_utcnow().timestamp())}"
     group_key = payload["group"]["key"]
-    scope = payload.get("scope", "full")
-    run = AiAnalysisRun(
+    run = _create_run(
         project_id=project_id,
         target_type="weekly",
         target_id=config_id,
         target_key=group_key,
-        status="running",
         response_mode="streaming",
-        scope=scope,
+        scope=payload.get("scope", "full"),
         trigger_source=trigger_source,
-        trace_id=trace_id,
-        **_current_provenance(project_id),
-        request_payload=_json_dumps(payload),
-        delta_summary=_json_dumps({
-            "delta_files": payload.get("summary", {}).get("delta_files", 0),
-            "total_files": payload.get("summary", {}).get("total_files", 0),
-            "scope": scope,
-        }),
-        started_at=_utcnow(),
+        payload=payload,
     )
-    db.session.add(run)
-    db.session.commit()
 
-    result, text = _build_stub_result(payload)
-    for line in text.splitlines():
+    result = _execute_analysis(
+        run,
+        project_id=project_id,
+        payload=payload,
+        project_config=get_project_analysis_config(project_id),
+        target_type="weekly",
+        target_key=group_key,
+    )
+    for line in (result.get("report_markdown") or "").splitlines():
         yield _sse_event("chunk", {"text": line})
-
-    run.status = "succeeded"
-    run.finished_at = _utcnow()
-    run.response_payload = _json_dumps(result)
-    run.response_text = text
-    db.session.commit()
 
     _update_weekly_state(payload, run, state)
     yield _sse_event("result", result)
@@ -829,38 +1123,32 @@ def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None
         return {"status": "skipped", "reason": "missing_api_key"}
 
     group_key = payload["group"]["key"]
-    scope = payload.get("scope", "full")
-    run = AiAnalysisRun(
+    run = _create_run(
         project_id=project_id,
         target_type="weekly",
         target_id=config_id,
         target_key=group_key,
-        status="running",
         response_mode="blocking",
-        scope=scope,
+        scope=payload.get("scope", "full"),
         trigger_source="scheduled",
-        trace_id=f"weekly-{config_id}-{int(_utcnow().timestamp())}",
-        **_current_provenance(project_id),
-        request_payload=_json_dumps(payload),
-        delta_summary=_json_dumps({
-            "delta_files": payload.get("summary", {}).get("delta_files", 0),
-            "total_files": payload.get("summary", {}).get("total_files", 0),
-            "scope": scope,
-        }),
-        started_at=_utcnow(),
+        payload=payload,
     )
-    db.session.add(run)
-    db.session.commit()
 
-    result, text = _build_stub_result(payload)
-    run.status = "succeeded"
-    run.finished_at = _utcnow()
-    run.response_payload = _json_dumps(result)
-    run.response_text = text
-    db.session.commit()
+    result = _execute_analysis(
+        run,
+        project_id=project_id,
+        payload=payload,
+        project_config=get_project_analysis_config(project_id),
+        target_type="weekly",
+        target_key=group_key,
+    )
 
     _update_weekly_state(payload, run, state)
-    return {"status": "succeeded", "run_id": run.id}
+    return {
+        "status": "succeeded" if result.get("status") != "failed" else "failed",
+        "run_id": run.id,
+        "error_message": result.get("error_message") or None,
+    }
 
 
 def _update_weekly_state(payload: dict, run: AiAnalysisRun, state: Optional[AiWeeklyAnalysisState]) -> None:

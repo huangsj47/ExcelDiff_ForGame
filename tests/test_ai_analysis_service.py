@@ -52,13 +52,20 @@ def _create_weekly_config(project_id: int, repo: Repository, base_name: str, sta
     return cfg
 
 
-def _seed_diff_cache(config: WeeklyVersionConfig, repo: Repository, path: str, updated_at: datetime):
+def _seed_diff_cache(
+    config: WeeklyVersionConfig,
+    repo: Repository,
+    path: str,
+    updated_at: datetime,
+    *,
+    commit_id: str | None = None,
+):
     cache = WeeklyVersionDiffCache(
         config_id=config.id,
         repository_id=repo.id,
         file_path=path,
         file_type="code",
-        latest_commit_id=_uid("c"),
+        latest_commit_id=commit_id or _uid("c"),
         commit_count=1,
         updated_at=updated_at,
     )
@@ -397,10 +404,16 @@ def test_the_provenance_names_the_prompt_skill_rules_and_model():
 
 
 def test_a_weekly_run_records_its_provenance():
-    """**写入路径**：跑完一次分析，run 上要留下「谁跑出来的」。
+    """**写入路径**：跑一次分析，run 上要留下「谁跑出来的」。
 
     这些列在数据模型里加好了，但此前**没有任何写入路径** —— 不记录就没法说明一份结论
     是怎么来的，也没法判断「改了 skill 之后这份结论还算不算数」。
+
+    溯源是在**建 run 的时候**写下的（早于任何模型调用），所以这里不需要真跑通一次分析。
+
+    顺带钉住新行为：**没配好接口就不再假装成功。** 以前这条用例能拿到 `succeeded`，
+    因为执行器是假的 —— 它按变更条数算个风险等级就返回了，密钥只当布尔阀门用。
+    现在会如实失败，并给出「缺什么」。
     """
     with app.app_context():
         create_tables()
@@ -416,11 +429,42 @@ def test_a_weekly_run_records_its_provenance():
         db.session.commit()
 
         outcome = ai_service.run_weekly_analysis_background(cfg.id)
-        assert outcome["status"] == "succeeded", outcome
+
+        assert outcome["status"] == "failed", "接口没配全却报了成功"
+        assert "接口地址" in outcome["error_message"], "失败原因没说清缺什么"
 
         run = db.session.get(AiAnalysisRun, outcome["run_id"])
         assert run.prompt_version and run.rules_version and run.skill_version
         assert run.model == "m-w"
+
+
+def test_a_failed_run_is_marked_failed_with_a_readable_reason():
+    """**`error_message` 这一列此前从来没被写入过。**
+
+    后果是失败的分析在界面上永远是「分析中」，用户看不出它已经失败、更不知道该怎么办。
+    现在失败要落 `status="failed"` 加一句能对上号的原因。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo = _create_repo(project.id, _uid("code"), "git", "code")
+        cfg = _create_weekly_config(
+            project.id, repo, "W1", datetime(2026, 3, 1), datetime(2026, 3, 8)
+        )
+        _seed_diff_cache(cfg, repo, "src/absorber.lua", datetime.now(timezone.utc))
+        db.session.commit()
+        # Token 有、但接口地址与模型没填：这是「配了一半」的状态，必须建出 run 并如实
+        # 记失败。连 Token 都没有的情况会更早返回 skipped（那时还没有 run 可记）。
+        ai_service.set_project_api_key(project.id, "k")
+        db.session.commit()
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+
+        run = db.session.get(AiAnalysisRun, outcome["run_id"])
+        assert run.status == "failed"
+        assert run.error_message, "失败了却没写原因"
+        assert run.finished_at is not None, "失败的 run 也要收尾，否则界面上永远转着"
+        assert run.rounds_used == 0, "一次模型调用都没发生"
 
 
 def test_a_run_without_provenance_is_never_reused():
@@ -511,3 +555,208 @@ def test_the_freshness_check_still_honours_the_time_window():
         db.session.commit()
 
         assert ai_service._is_run_fresh(ancient) is False
+
+
+# ==========================================================================
+# 端到端：模型真的被调用了，结论真的落库了
+# ==========================================================================
+
+
+COMMIT_SHA = "a" * 40
+TABLE_PATH = "config/[30]道具表_CfgItem.xlsx"
+
+
+class _FakeClient:
+    """只回答一次 final。记录它收到的消息，用来断言上下文真的组装过。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def complete(self, messages, *, temperature=None):
+        from services.ai.llm_client import ChatResult
+
+        self.calls.append([dict(item) for item in messages])
+        import json as _json
+
+        return ChatResult(
+            text=_json.dumps(
+                {
+                    "status": "final",
+                    "report_markdown": "# 变更理解\n\n道具表删了一行。\n\n# 风险评估\n\n中高。\n",
+                    "anomalies": [
+                        {
+                            "title": "【道具】删除了已放出的 ID",
+                            "category": "config_id",
+                            "severity": "critical",
+                            "confidence": "high",
+                            "evidence": [f"{TABLE_PATH} 删除了 ID 1001"],
+                            "commit": COMMIT_SHA,
+                            "file_path": TABLE_PATH,
+                            "impact": "老存档引用的道具会失效",
+                            "suggestion": "确认是否有意下线",
+                        }
+                    ],
+                    "dimensions": [{"id": "config_id", "hit": True, "note": "有删除"}],
+                },
+                ensure_ascii=False,
+            ),
+            model="fake",
+            prompt_tokens=120,
+            completion_tokens=80,
+        )
+
+
+def test_a_real_run_calls_the_model_and_persists_the_findings(monkeypatch):
+    """**这条是「线接上了」的证据。**
+
+    在它之前，平台的执行器是假的：按变更条数算个风险等级就返回，密钥只当布尔阀门用，
+    `ai_analysis_anomaly` 与 `ai_analysis_trace` 两张表从来没有被写入过。
+
+    这里用一个假 client 替掉真实 HTTP，断言完整的链路：配置 → 变更集 → 提示词 →
+    引擎 → 接地校验 → 门槛过滤 → run / trace / anomaly 三张表。
+    """
+    from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisTrace
+
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo = _create_repo(project.id, _uid("table"), "svn", "table")
+        cfg = _create_weekly_config(
+            project.id, repo, "W1", datetime(2026, 3, 1), datetime(2026, 3, 8)
+        )
+        _seed_diff_cache(
+            cfg, repo, TABLE_PATH, datetime.now(timezone.utc), commit_id=COMMIT_SHA
+        )
+        db.session.commit()
+
+        ai_service.set_project_api_key(project.id, "k")
+        ai_service.update_project_analysis_config(
+            project.id,
+            {"api_base_url": "http://127.0.0.1:15721/v1", "api_model": "deepseek-v4-flash"},
+        )
+        db.session.commit()
+
+        client = _FakeClient()
+        monkeypatch.setattr(ai_service, "build_endpoint_client", lambda *a, **k: (client, []))
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+
+        assert outcome["status"] == "succeeded", outcome
+        assert len(client.calls) == 1, "模型没有被调用"
+
+        # 提示词真的组装过：变更清单里有那个文件，且明确说了「diff 不在这里」。
+        user = client.calls[0][-1]["content"]
+        assert TABLE_PATH in user
+        assert "没有任何 diff" in user
+
+        run = db.session.get(AiAnalysisRun, outcome["run_id"])
+        assert run.status == "succeeded"
+        assert "道具表删了一行" in run.response_text
+        assert run.rounds_used == 1
+        assert run.tokens_input == 120 and run.tokens_output == 80
+
+        rows = AiAnalysisAnomaly.query.filter_by(run_id=run.id).all()
+        assert [row.title for row in rows] == ["【道具】删除了已放出的 ID"]
+        assert rows[0].severity == "critical"
+        assert rows[0].fingerprint, "没有指纹，下一轮就没法判重"
+        assert AiAnalysisTrace.query.filter_by(run_id=run.id).count() == 1
+
+
+def test_a_finding_below_the_configured_bar_is_not_persisted(monkeypatch):
+    """门槛是**落库前**的过滤：没达标的条目不该进 `ai_analysis_anomaly`。
+
+    进不了库才是真正的「不给人工跟进」—— 只在界面上不显示是不够的。
+    """
+    from models.ai_analysis import AiAnalysisAnomaly
+
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo = _create_repo(project.id, _uid("table"), "svn", "table")
+        cfg = _create_weekly_config(
+            project.id, repo, "W1", datetime(2026, 3, 1), datetime(2026, 3, 8)
+        )
+        _seed_diff_cache(
+            cfg, repo, TABLE_PATH, datetime.now(timezone.utc), commit_id=COMMIT_SHA
+        )
+        db.session.commit()
+
+        ai_service.set_project_api_key(project.id, "k")
+        ai_service.update_project_analysis_config(
+            project.id,
+            {
+                "api_base_url": "http://127.0.0.1:15721/v1",
+                "api_model": "m",
+                "min_confidence": "very_high",
+            },
+        )
+        db.session.commit()
+
+        monkeypatch.setattr(
+            ai_service, "build_endpoint_client", lambda *a, **k: (_FakeClient(), [])
+        )
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+
+        run = db.session.get(AiAnalysisRun, outcome["run_id"])
+        assert AiAnalysisAnomaly.query.filter_by(run_id=run.id).count() == 0
+        assert run.status == "succeeded", "门槛没过不等于这次分析失败"
+
+
+def test_the_second_run_carries_the_first_runs_findings_as_a_baseline(monkeypatch):
+    """**这就是「1 小时前分析过、现在只多了 1 个 commit」要说的事。**
+
+    第二次分析不能从零开始：它必须带上「这个版本截至目前已经报过什么」，否则模型会把
+    上一轮报过的问题再报一遍，而 QA 每轮的分诊成果都被作废一次 —— 这正是增量评审用不
+    下去的根本原因。
+
+    同时钉住「累积一份」：基线取的是**上一次成功运行的那批结论**，不是历次运行的并集。
+    并起来会把已经修好的旧条目重新翻出来。
+    """
+    from tests.test_ai_analysis_service import COMMIT_SHA, TABLE_PATH, _FakeClient
+
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo = _create_repo(project.id, _uid("table"), "svn", "table")
+        cfg = _create_weekly_config(
+            project.id, repo, "W1", datetime(2026, 3, 1), datetime(2026, 3, 8)
+        )
+        _seed_diff_cache(cfg, repo, TABLE_PATH, datetime.now(timezone.utc), commit_id=COMMIT_SHA)
+        db.session.commit()
+
+        ai_service.set_project_api_key(project.id, "k")
+        ai_service.update_project_analysis_config(
+            project.id,
+            {"api_base_url": "http://127.0.0.1:15721/v1", "api_model": "m"},
+        )
+        db.session.commit()
+
+        first_client = _FakeClient()
+        monkeypatch.setattr(
+            ai_service, "build_endpoint_client", lambda *a, **k: (first_client, [])
+        )
+        first = ai_service.run_weekly_analysis_background(cfg.id)
+        assert first["status"] == "succeeded", first
+
+        # 第一次分析里不该有「历史结论」——那时确实是第一次。
+        assert "已经报过的问题" not in first_client.calls[0][-1]["content"]
+
+        # 又来了一个提交：把那条缓存记录推到「上次分析之后」。
+        entry = WeeklyVersionDiffCache.query.filter_by(config_id=cfg.id).first()
+        entry.updated_at = datetime.now(timezone.utc) + timedelta(minutes=1)
+        db.session.commit()
+
+        second_client = _FakeClient()
+        monkeypatch.setattr(
+            ai_service, "build_endpoint_client", lambda *a, **k: (second_client, [])
+        )
+        second = ai_service.run_weekly_analysis_background(cfg.id)
+        assert second["status"] == "succeeded", second
+
+        user = second_client.calls[0][-1]["content"]
+        assert "已经报过的问题" in user, "第二次分析没有带上历史结论"
+        assert "【道具】删除了已放出的 ID" in user, "上一轮报过的那条没进基线"
+        assert "不要当作新发现重复报" in user
+        # 判重靠指纹，指纹得跟着进提示词，模型才能逐条对照。
+        assert "#" in user
