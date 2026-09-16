@@ -58,6 +58,16 @@ def _execute_task_via_local_runtime(task_type: str, task: dict):
             raise RuntimeError("app.app not found")
         with flask_app.app_context():
             result_summary = execute_task_inline_for_agent(task_type, payload)
+        # ⚠️ 平台的上报接口只接受 `completed` / `failed` 两个取值
+        # （services/agent_task_result_service.py 里 `status not in {"completed","failed"}`
+        # 直接返回 400），所以**不要**在这里引入第三个状态。
+        # 后果是「部分失败」只能报成 failed —— 但信息并没有丢：
+        # `execute_task_inline_for_agent` 的 weekly_sync 分支在失败/部分失败时抛异常，
+        # 本文件下面的 except 把异常文本放进 error_message，其中已经写明
+        # 「周版本同步部分失败：共 N 个文件，失败 M 个（成功 K 个）；失败明细…」
+        # （见 services/weekly_version_sync_status.build_partial_failure_outcome）。
+        # 要真正区分「部分」得先扩展 Agent 上报协议的取值集合与所有消费方，
+        # 那是协议变更，不该顺手做。
         return "completed", result_summary, None, None
     except Exception as exc:
         return (
