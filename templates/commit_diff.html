@@ -1729,6 +1729,14 @@ function executeDiffCompare() {
 
     function showReady(diffData) {
         if (isExcel) {
+            // 后端取不到真实差异时返回 {type:'error', message, detail}
+            // （见 services/commit_diff_logic.py 的 _build_diff_error_data）。
+            // 这里必须把 message 透出来：只说一句笼统的「格式异常」，
+            // 用户无法判断是文件被删、仓库取不到，还是后端出错了。
+            if (diffData && String(diffData.type || '').toLowerCase() === 'error') {
+                showError(diffData.detail ? (diffData.message + '：' + diffData.detail) : diffData.message);
+                return;
+            }
             if (!diffData || !diffData.sheets) {
                 showError('Excel diff 数据为空或格式异常');
                 return;

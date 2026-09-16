@@ -465,37 +465,14 @@ def _apply_inline_highlight_to_code_diff(diff_data):
     return diff_data
 
 
-def get_mock_diff_data(commit):
-    """获取模拟的diff数据"""
-    if commit.path and (commit.path.endswith('.xlsx') or commit.path.endswith('.xls')):
-        return {
-            'type': 'table',
-            'sheet_name': 'Sheet1',
-            'changes': [
-                {
-                    'type': 'added', 'row': 5,
-                    'data': {'A': 'ID5', 'B': 'New Item', 'C': '新增项目', 'D': '描述', 'E': '备注'}
-                },
-                {
-                    'type': 'modified', 'row': 3,
-                    'data': {'A': 'ID3', 'B': 'Modified Item', 'C': '修改项目', 'D': '新描述', 'E': '更新'}
-                }
-            ]
-        }
-    else:
-        return {
-            'type': 'code',
-            'file_path': commit.path,
-            'lines': [
-                {'type': 'header', 'content': '@@ -1,3 +1,3 @@', 'old_line_number': None, 'new_line_number': None},
-                {'type': 'removed', 'content': 'function oldFunction() {', 'old_line_number': 1, 'new_line_number': None},
-                {'type': 'added', 'content': 'function newFunction() {', 'old_line_number': None, 'new_line_number': 1},
-                {'type': 'context', 'content': '    // 函数体', 'old_line_number': 2, 'new_line_number': 2},
-                {'type': 'removed', 'content': '    return "old";', 'old_line_number': 3, 'new_line_number': None},
-                {'type': 'added', 'content': '    return "new";', 'old_line_number': None, 'new_line_number': 3},
-                {'type': 'context', 'content': '}', 'old_line_number': 4, 'new_line_number': 4}
-            ]
-        }
+# 这里原本有一个 get_mock_diff_data(commit)，返回**写死的虚构变更**：
+#   表    -> {'A': 'ID5', 'B': 'New Item', 'C': '新增项目', ...}
+#   代码  -> 'function oldFunction() { ... return "old"; }'
+# 它在「无法获取真实diff数据」与异常兜底两条分支上被真实返回给调用方。
+# 对本平台（变更确认）来说这比漏审更危险：审核者会对着一份**根本不存在于仓库里**的
+# 变更点按下「确认」，确认记录因此彻底失去意义。
+# 现在两条分支都改用下方的 _build_diff_error_data（返回 type='error'，前端渲染红色告警条）。
+# 回归保护见 tests/test_excel_literal_fidelity.py::TestNoMockDiffPayload。
 
 
 # ---------------------------------------------------------------------------
@@ -845,12 +822,14 @@ def get_real_diff_data_for_merge(commit):
                 if diff_data and diff_data.get('hunks'):
                     return convert_hunks_to_lines(diff_data)
 
-        log_print(f"无法获取真实diff数据，返回模拟数据", 'INFO')
-        return get_mock_diff_data(commit)
+        # 这里以前返回写死的假 diff（见文件上方说明）。取不到真实差异就必须显式报错 ——
+        # 宁可让审核者看到「无法获取差异」，也不能让他对一份不存在的变更签字。
+        log_print(f"⚠️ 无法获取真实diff数据（该提交/文件可能已不在仓库中）", force=True)
+        return _build_diff_error_data(commit, "无法获取差异数据，请稍后重试或联系管理员")
     except Exception as e:
-        log_print(f"获取合并diff数据失败: {str(e)}")
+        log_print(f"获取合并diff数据失败: {str(e)}", force=True)
         import traceback; traceback.print_exc()
-        return get_mock_diff_data(commit)
+        return _build_diff_error_data(commit, "获取差异数据时出错", detail=str(e))
 
 
 # ---------------------------------------------------------------------------
