@@ -38,6 +38,9 @@ _PROJECT_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{2,50}$")
 _AGENT_CODE_RE = re.compile(r"[^A-Za-z0-9_-]+")
 _TEMP_CACHE_CLEANUP_COOLDOWN_SECONDS = 600
 _last_temp_cache_cleanup_at = 0.0
+# 抢占 pending 任务时的最大尝试次数。每次失败都意味着「那条被别的 Agent 抢走了」，
+# 正常情况下第 2 次就会拿到下一条；这个上限只是防止在极端争抢下无限循环。
+_AGENT_CLAIM_MAX_ATTEMPTS = 10
 _INCIDENT_MAX_TITLE_LENGTH = 255
 _INCIDENT_MAX_MESSAGE_LENGTH = 4000
 _INCIDENT_MAX_ERROR_LENGTH = 16000
@@ -1589,23 +1592,64 @@ def agent_claim_task():
             item.lease_expires_at = None
             item.retry_count = (item.retry_count or 0) + 1
 
-        task = (
-            AgentTask.query.filter(
-                AgentTask.status == "pending",
-                AgentTask.project_id.in_(project_ids),
+        # 原子抢占。原实现是「SELECT ... WHERE status='pending' 取第一条 → 在 Python
+        # 里改成 processing → commit」，两个 Agent 同时轮询时会**各自读到同一条**
+        # pending 任务，于是同一条任务被派给两个 Agent 执行（实测可复现）——
+        # auto_sync / temp_cache_fetch 这类任务被重复执行会重复写库、重复拉取缓存。
+        #
+        # 改成带条件的 UPDATE：只有目标行**仍是 pending** 时才更新得到，rowcount 为 1
+        # 才算真正抢到。这是 SQLite 与 MySQL 都支持的写法（SQLite 不支持
+        # SELECT ... FOR UPDATE，所以不能用行锁方案）。
+        #
+        # 循环是必要的：抢失败说明那条已被别人拿走，要换下一条继续试，而不是直接
+        # 返回「没有任务」——那会让 Agent 在争抢时白白空转一轮。
+        claimed_task = None
+        for _attempt in range(_AGENT_CLAIM_MAX_ATTEMPTS):
+            candidate = (
+                AgentTask.query.filter(
+                    AgentTask.status == "pending",
+                    AgentTask.project_id.in_(project_ids),
+                )
+                .order_by(AgentTask.priority.asc(), AgentTask.created_at.asc())
+                .first()
             )
-            .order_by(AgentTask.priority.asc(), AgentTask.created_at.asc())
-            .first()
-        )
+            if candidate is None:
+                break
 
+            claimed_at = now_utc
+            claimed_lease = now_utc + timedelta(seconds=lease_seconds)
+            updated = (
+                db.session.query(AgentTask)
+                .filter(AgentTask.id == candidate.id, AgentTask.status == "pending")
+                .update(
+                    {
+                        AgentTask.status: "processing",
+                        AgentTask.assigned_agent_id: agent.id,
+                        AgentTask.started_at: claimed_at,
+                        AgentTask.lease_expires_at: claimed_lease,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if updated == 1:
+                # 抢到了。同步内存对象，让后面的 commit 与属性读取与库内一致。
+                candidate.status = "processing"
+                candidate.assigned_agent_id = agent.id
+                candidate.started_at = claimed_at
+                candidate.lease_expires_at = claimed_lease
+                claimed_task = candidate
+                break
+
+            # 没抢到（被别的 Agent 拿走了）。让这条从本会话失效，下一轮 filter
+            # 会自然跳过它 —— 若对方尚未提交，我们可能再看到一次 pending，
+            # 那时 UPDATE 会等到对方提交后返回 0，由尝试次数上限兜底。
+            db.session.expire(candidate)
+
+        task = claimed_task
         if not task:
             db.session.commit()
             return jsonify({"success": True, "task": None}), 200
 
-        task.status = "processing"
-        task.assigned_agent_id = agent.id
-        task.started_at = now_utc
-        task.lease_expires_at = now_utc + timedelta(seconds=lease_seconds)
         agent.status = "online"
         agent.last_heartbeat = now_utc
         db.session.commit()

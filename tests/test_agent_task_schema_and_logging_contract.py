@@ -15,8 +15,17 @@ def _extract_response(result):
 
 
 class _FakeField:
+    """模拟列对象：支持比较/排序，并能当 dict 的键。
+
+    `__hash__` 是必需的：原子抢占用 `{Model.status: "processing", ...}` 这种
+    列→值 的字典构造 SET 子句，而定义了 `__eq__` 的类默认不可哈希。
+    """
+
     def __init__(self, name: str):
         self.name = name
+
+    def __hash__(self):
+        return hash(self.name)
 
     def __eq__(self, other):
         return (self.name, "eq", other)
@@ -101,6 +110,13 @@ def test_enqueue_agent_task_injects_schema_version_for_key_task_types(monkeypatc
 
 
 def test_agent_claim_task_backfills_schema_version_for_legacy_payload(monkeypatch):
+    """legacy payload（缺 schema_version）在领取时应被补全。
+
+    注意：抢占任务已从「SELECT → 改属性 → commit」改为**带条件的原子 UPDATE**
+    （只有目标行仍是 pending 时才更新得到，rowcount == 1 才算抢到）。因此下面的桩
+    必须能承接 `db.session.query(Model).filter(...).update(...)`，否则测的就不再是
+    产品代码而是桩本身。这里让 `update()` 返回 1，表示「本次抢占成功」。
+    """
     task = SimpleNamespace(
         id=101,
         task_type="auto_sync",
@@ -118,9 +134,11 @@ def test_agent_claim_task_backfills_schema_version_for_legacy_payload(monkeypatc
     fake_agent = SimpleNamespace(id=7, agent_code="agent-a", status="offline", last_heartbeat=None)
 
     class _Query:
-        def __init__(self, all_result=None, first_result=None):
+        def __init__(self, all_result=None, first_result=None, update_rowcount=1):
             self._all = all_result or []
             self._first = first_result
+            self._update_rowcount = update_rowcount
+            self.update_calls = []
 
         def filter(self, *_args, **_kwargs):
             return self
@@ -137,12 +155,22 @@ def test_agent_claim_task_backfills_schema_version_for_legacy_payload(monkeypatc
         def first(self):
             return self._first
 
+        def update(self, values, **kwargs):
+            """带条件的 UPDATE：返回受影响行数（1 = 抢到了）。"""
+            self.update_calls.append((values, kwargs))
+            return self._update_rowcount
+
     class _FakeAgentProjectBinding:
         query = _Query(all_result=[SimpleNamespace(project_id=1)])
 
     class _FakeAgentTaskModel:
+        id = _FakeField("id")
         status = _FakeField("status")
         project_id = _FakeField("project_id")
+        # 原子抢占的 UPDATE 会把这四个字段当字典键（映射到 SET 子句），
+        # 所以桩上必须存在 —— 缺一个就会 TypeError，测的就不是产品代码了。
+        assigned_agent_id = _FakeField("assigned_agent_id")
+        started_at = _FakeField("started_at")
         lease_expires_at = _FakeField("lease_expires_at")
         priority = _FakeField("priority")
         created_at = _FakeField("created_at")
@@ -152,6 +180,8 @@ def test_agent_claim_task_backfills_schema_version_for_legacy_payload(monkeypatc
         session=SimpleNamespace(
             rollback=lambda: None,
             commit=lambda: None,
+            expire=lambda *_a, **_k: None,
+            query=lambda *_a, **_k: _Query(first_result=None, update_rowcount=1),
         )
     )
 
