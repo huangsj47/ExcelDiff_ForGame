@@ -10,31 +10,66 @@ from werkzeug.routing import BuildError
 from werkzeug.exceptions import Forbidden, NotFound
 
 
+# ---------------------------------------------------------------------------
+# 平台管理员专属 endpoint 表
+#
+# 【这些名字必须写**全限定**形式（`<blueprint>.<endpoint>`）】
+#
+# 原实现写的是裸名（`"delete_repository"` 等 19 条），而 Flask 在注册蓝图路由时
+# 会给 endpoint 加上蓝图前缀 —— **即使显式传了 `endpoint=` 也一样**：
+#
+#     routes/core_management_routes.py
+#     @core_management_bp.route("/repositories/<id>/delete", methods=["POST"],
+#                               endpoint="delete_repository")
+#
+#     → app.url_map 里的 endpoint 是 "core_management_routes.delete_repository"
+#
+# 而判定处写的是 `request.endpoint in SENSITIVE_ENDPOINTS`，裸名永远匹配不上，
+# 于是这两张表**整体是死代码**（同文件 `AUTH_EXEMPT_ENDPOINTS` 同时写了
+# `"index"` 与 `"core_management_routes.index"` 两种形式，说明作者在那边意识到了
+# 前缀问题，这里漏了）。
+#
+# 【为什么不改成「取裸名再比对」】
+# 实测存在短名冲突（`projects` 同时属于 core_management_routes 与 project_bp；
+# `index`/`help_page`/`test`/`project_detail` 等也有多蓝图同名）。取裸名会让
+# `project_bp.projects` 也被当成平台管理员专属，误伤正常功能。所以这里统一
+# 改写成全限定名精确匹配。
+#
+# 【为什么少了三个原本列在表里的项目级页面】
+# `edit_repository` / `add_git_repository` / `add_svn_repository` 原本也在表里。
+# 它们是**项目级**页面，各自在函数体内用 `_has_project_access` /
+# `_has_project_admin_access` 判权（后者允许项目管理员）。若把它们改成生效的
+# 平台管理员门禁，会**把项目管理员挡在门外** —— 那是功能回退，不是加固。
+# 因此保留其函数体内的项目级判定，从本表移除。`edit_repository` 原先连函数体
+# 判定都没有（表又失效 → 完全无鉴权），已在
+# `services/repository_misc_page_service.py::render_edit_repository_page` 补上。
+#
+# 说明：下表多数 handler 自身已带 `@require_admin` 装饰器，本表是**第二道**防线
+# （纵深防御）—— 万一将来有人漏加装饰器，这里仍然拦得住。
+# ---------------------------------------------------------------------------
 SENSITIVE_ENDPOINTS = {
-    "delete_repository",
-    "delete_project",
-    "batch_update_credentials",
-    "clear_all_confirmation_status",
-    "update_repository_order",
-    "swap_repository_order",
-    "create_git_repository",
-    "create_svn_repository",
-    "update_repository",
-    "retry_clone_repository",
-    "sync_repository",
-    "reuse_repository_and_update",
-    "update_repository_and_cache",
-    "regenerate_cache",
-    "batch_update_commits_compat",
-    "update_commit_fields",
-    "edit_repository",
-    "add_git_repository",
-    "add_svn_repository",
+    "core_management_routes.batch_update_credentials",
+    "core_management_routes.clear_all_confirmation_status",
+    "core_management_routes.create_git_repository",
+    "core_management_routes.create_svn_repository",
+    "core_management_routes.delete_project",
+    "core_management_routes.delete_repository",
+    "core_management_routes.regenerate_cache",
+    "core_management_routes.retry_clone_repository",
+    "core_management_routes.reuse_repository_and_update",
+    "core_management_routes.swap_repository_order",
+    "core_management_routes.sync_repository",
+    "core_management_routes.test_repository",
+    "core_management_routes.update_repository",
+    "core_management_routes.update_repository_and_cache",
+    "core_management_routes.update_repository_order",
+    "commit_diff_routes.batch_update_commits_compat",
+    "commit_diff_routes.update_commit_fields_route",
 }
 
 WRITE_PROTECTED_ENDPOINTS = {
-    "projects",
-    "repository_config",
+    "core_management_routes.projects",
+    "core_management_routes.repository_config",
 }
 
 AUTH_EXEMPT_ENDPOINTS = frozenset(
@@ -147,7 +182,7 @@ def configure_app_security_bootstrap(
                 return unauthorized_admin_response()
         if request.endpoint in WRITE_PROTECTED_ENDPOINTS:
             if request.method not in {"GET", "HEAD", "OPTIONS"}:
-                if request.endpoint == "projects":
+                if request.endpoint == "core_management_routes.projects":
                     if not has_project_create_access():
                         return unauthorized_admin_response()
                 elif not has_admin_access():
