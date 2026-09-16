@@ -1057,8 +1057,20 @@ td .dropdown-menu a:hover {
 }
 
 .diff-file-header::before {
-    content: "📄";
+    /* 原先这里写的是 emoji 字符 "📄"。emoji 由**系统字体**渲染：字形与颜色跨平台
+       不可控（有的平台渲染成彩色、有的成黑白），而且会被读屏当作正文念出来。
+       改用内联 SVG —— 不依赖任何图标字体（渲染这段的页面不一定加载 Font Awesome，
+       本项目的图标约定是 Bootstrap Icons，而 CSS 伪元素的 content 用不了那个类名），
+       并配 mask + currentColor 让它跟随标题文字颜色。 */
+    content: "";
+    display: inline-block;
+    width: 1em;
+    height: 1em;
     margin-right: 8px;
+    vertical-align: -0.125em;
+    background-color: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 0h5l4 4v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2zm5 1.6V4h2.4L9 1.6zM6 8h5v1H6V8zm0 2.5h5v1H6v-1zM6 5.5h2v1H6v-1z'/%3E%3C/svg%3E") no-repeat center / contain;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 0h5l4 4v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2zm5 1.6V4h2.4L9 1.6zM6 8h5v1H6V8zm0 2.5h5v1H6v-1zM6 5.5h2v1H6v-1z'/%3E%3C/svg%3E") no-repeat center / contain;
 }
 
 .diff-hunk {
