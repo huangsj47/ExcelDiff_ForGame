@@ -5,13 +5,16 @@
 """
 
 from datetime import datetime, timezone
+
+from sqlalchemy import Index
+
 from . import db
 
 
 class BackgroundTask(db.Model):
     """后台任务模型"""
     __tablename__ = 'background_tasks'
-    
+
     id = db.Column(db.Integer, primary_key=True)
     task_type = db.Column(db.String(50), nullable=False)  # 'excel_diff', 'cleanup_cache', etc.
     repository_id = db.Column(db.Integer, nullable=True)
@@ -24,7 +27,20 @@ class BackgroundTask(db.Model):
     completed_at = db.Column(db.DateTime, nullable=True)
     error_message = db.Column(db.Text, nullable=True)
     retry_count = db.Column(db.Integer, default=0)
-    
+
+    # 只补两个被真实高频查询反复使用的组合索引（对照 models/agent.py 的
+    # AgentTask.__table_args__ 写法）。不加那些没有查询形态支撑的索引：
+    # 索引本身会拖慢任务写入，而 background_tasks 是写多读多的队列表。
+    __table_args__ = (
+        # worker 拉取待处理任务：WHERE status='pending'
+        # ORDER BY priority ASC, created_at ASC
+        # （services/task_worker_service.py::load_pending_tasks）
+        Index('idx_background_tasks_status_priority', 'status', 'priority', 'created_at'),
+        # 任务去重与清理：WHERE task_type=? AND repository_id=? AND status IN (...)
+        # （task_worker_service.add_excel_diff_task / repository_update_form_service）
+        Index('idx_background_tasks_type_repo_status', 'task_type', 'repository_id', 'status'),
+    )
+
     def __repr__(self):
         return f'<BackgroundTask {self.id}: {self.task_type} - {self.status}>'
     
