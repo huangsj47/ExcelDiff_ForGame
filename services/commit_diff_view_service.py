@@ -34,6 +34,7 @@ def handle_commit_diff_view(
     resolve_previous_commit,
     attach_author_display,
     get_unified_diff_data,
+    get_deleted_file_diff_data,
     get_diff_data,
     validate_excel_diff_data,
     clean_json_data,
@@ -73,6 +74,20 @@ def handle_commit_diff_view(
     else:
         log_print("❌ 未找到前一提交 - 这是初始提交", "DIFF", force=True)
     if is_deleted:
+        # 删除提交要能看到**被删掉的内容**，不能只给一句「文件已删除」。
+        #
+        # 原实现直接短路成一个「该文件在此提交中被删除，无法显示差异内容」的提示，
+        # 配上一句「可以查看上一个版本」—— 而那个链接指向的是那条提交自己的变更，
+        # 并不是被删掉的内容。配表整份删除时（一次提交删掉整个目录、或者改名被建模
+        # 成「删旧名 + 加新名」），评审者只被告知「有东西没了」却看不到没的是什么。
+        # 现在：Excel 文件用基线版本的内容算出「整表删除 + 全部行」，走与其它提交
+        # 完全相同的渲染路径；拿不到基线字节时才退回提示（见
+        # get_deleted_file_diff_data 的说明）。
+        deleted_diff_data = None
+        if is_excel and previous_commit:
+            deleted_diff_data = get_deleted_file_diff_data(commit, previous_commit)
+        if not deleted_diff_data or not deleted_diff_data.get("sheets"):
+            deleted_diff_data = {"type": "deleted", "message": "该文件已被删除"}
         return render_template(
             "commit_diff.html",
             **build_commit_diff_template_context(
@@ -82,7 +97,7 @@ def handle_commit_diff_view(
                 file_commits=file_commits,
                 previous_commit=previous_commit,
                 is_excel=is_excel,
-                diff_data={"type": "deleted", "message": "该文件已被删除"},
+                diff_data=deleted_diff_data,
                 is_deleted=True,
                 mode_strategy=mode_strategy,
             ),

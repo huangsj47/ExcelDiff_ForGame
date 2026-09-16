@@ -255,6 +255,62 @@ def get_file_content_from_git(repository, commit_id, file_path):
 PREVIOUS_COMMIT_UNSET = object()
 
 
+def get_deleted_file_diff_data(commit, previous_commit):
+    """整份文件被删除时的差异数据：把**基线版本的每一张工作表**渲染成「已删除」。
+
+    调用方必须已经确认「这份文件在这个提交里被删除了」（`commit.operation == 'D'`）。
+    这里不再自己判断删除，也不通过「当前内容为空」来推断 —— 见
+    `DiffService.process_deleted_file` 的说明。
+
+    返回 None 表示**取不到基线的字节**（仓库没同步、路径对不上、git 出错）。
+    这种时候上层必须显示「无法获取差异」，不能退化成空差异。
+    """
+    from services.diff_service import DiffService
+    from services.excel_diff_cache_service import ExcelDiffCacheService
+
+    if commit is None or not _has_previous_commit(previous_commit):
+        return None
+    repository = commit.repository
+    excel_cache_service = ExcelDiffCacheService()
+    baseline_id = previous_commit.commit_id
+    try:
+        cached_diff = excel_cache_service.get_cached_diff(
+            repository.id, commit.commit_id, commit.path, previous_commit_id=baseline_id
+        )
+        if cached_diff:
+            log_print(f"✅ 删除文件的差异命中缓存: {commit.path}", 'CACHE')
+            return json.loads(cached_diff.diff_data)
+
+        previous_content = None
+        if repository.type == 'git':
+            previous_content = get_file_content_from_git(repository, baseline_id, commit.path)
+        elif repository.type == 'svn':
+            previous_content = get_file_content_from_svn(repository, baseline_id, commit.path)
+        if not previous_content:
+            log_print(
+                f"⚠️ 删除文件取不到基线内容，无法展示被删内容: {commit.path} "
+                f"| 基线={str(baseline_id)[:8]}",
+                'DIFF', force=True
+            )
+            return None
+
+        diff_data = DiffService().process_deleted_file(commit.path, previous_content)
+        if diff_data and diff_data.get('sheets'):
+            excel_cache_service.save_cached_diff(
+                repository_id=repository.id,
+                commit_id=commit.commit_id,
+                file_path=commit.path,
+                diff_data=diff_data,
+                processing_time=0.0,
+                previous_commit_id=baseline_id,
+                commit_time=commit.commit_time,
+            )
+        return diff_data
+    except Exception as exc:
+        log_print(f"❌ 生成删除文件差异失败: {commit.path} | {exc}", 'DIFF', force=True)
+        return None
+
+
 def _has_previous_commit(previous_commit):
     """调用方是否真的交了一个用来做对比的提交（而不是 None / 没传）。"""
     return previous_commit is not None and previous_commit is not PREVIOUS_COMMIT_UNSET

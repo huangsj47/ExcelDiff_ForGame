@@ -75,6 +75,33 @@ class DiffService:
                 'message': f'处理文件差异时发生错误: {str(e)}'
             }
     
+    def process_deleted_file(self, file_path: str, previous_content: bytes) -> Dict[str, Any]:
+        """整份文件被删除时的差异：基线的**每一张工作表**都按「已删除」处理。
+
+        为什么不复用 `process_diff(path, None, previous_content)`：通用路径上
+        `current_content=None` 有两种彼此相反的语义 ——
+          * 「文件在这个提交里不存在」（真删除）：要把被删掉的内容全渲染出来；
+          * 「从 VCS 读内容失败」（git 超时、路径写错、仓库没同步）：**必须报错**，
+            渲染成「全表删除」等于让评审者把一次读取失败当成一次真实的删除确认掉。
+        通用路径对空内容抛错正是为了守住后者，所以「删除」只能由调用方**显式声明**，
+        绝不靠 None 推断（`services/vcs_content_service.py::get_deleted_file_diff_data`
+        就是这样做的：它已经确认了 `commit.operation == 'D'`，并且拿到的是真实基线的字节）。
+
+        实现上与「工作表被删除」共用一条路径：current 传 `{}` ⇒ 每张表都走
+        `_compare_dataframes` 的 deleted 分支，行数据（status='removed' + data）被保留。
+        """
+        if not previous_content:
+            # 基线的字节也拿不到：给一个诚实的空结果，让上层显示「无法获取差异」，
+            # 而不是编造一份「没有任何内容的删除」。
+            return {
+                'type': 'excel',
+                'file_path': file_path,
+                'sheets': {},
+                'summary': {'added': 0, 'removed': 0, 'modified': 0, 'total': 0},
+            }
+        previous_data = self._read_excel_data(previous_content, file_path)
+        return self._compare_excel_data({}, previous_data, file_path)
+
     def _process_text_diff(self, file_path: str, current_content: bytes, previous_content: bytes = None) -> Dict[str, Any]:
         """处理文本文件差异"""
         import time

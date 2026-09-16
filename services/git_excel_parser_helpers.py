@@ -52,6 +52,29 @@ def parse_excel_diff(service, commit_id, file_path):
                 file_exists_in_current = False
 
             if not file_exists_in_current:
+                # 整份 Excel 被删除：用**父提交**的内容把每一张工作表渲染成「已删除」。
+                # 原实现只回一个没有 sheets 的提示（「该Excel文件已被删除」），
+                # 评审者看得到「有东西没了」，看不到没的是什么 —— 而父提交的内容
+                # 就在手边（`commit.parents[0]`），读一次就能给出来。
+                previous_data = None
+                if commit.parents:
+                    try:
+                        previous_data = service._extract_excel_data(commit.parents[0], file_path)
+                    except KeyError:
+                        previous_data = None
+                if previous_data:
+                    return {
+                        "type": "excel",
+                        "file_type": "Excel",
+                        "operation": "deleted",
+                        "message": "该Excel文件已被删除",
+                        "file_path": file_path,
+                        "sheets": {
+                            sheet_name: service._deleted_sheet_diff(sheet_data)
+                            for sheet_name, sheet_data in previous_data.items()
+                        },
+                        "has_changes": True,
+                    }
                 return {
                     "type": "excel",
                     "file_type": "Excel",
@@ -221,9 +244,11 @@ def generate_excel_diff_data(service, current_data, previous_data, file_path):
         }
 
     diff_sheets = service._parallel_compare_sheets_optimized(current_data, previous_data)
-    for sheet_name in previous_data.keys():
+    for sheet_name, previous_sheet in previous_data.items():
         if sheet_name not in current_data:
-            diff_sheets[sheet_name] = {"status": "deleted", "rows": []}
+            # 整张工作表被删除：必须带上 rows（原先是 `{"status": "deleted", "rows": []}`，
+            # 正文里什么都看不到）。行格式与「新增工作表」分支一致。
+            diff_sheets[sheet_name] = service._deleted_sheet_diff(previous_sheet)
 
     processing_time = time.time() - start_time
     service.performance_stats["excel_processing_time"] += processing_time

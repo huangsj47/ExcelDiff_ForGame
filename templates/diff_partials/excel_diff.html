@@ -27,18 +27,17 @@
     <div class="excel-content-area" id="excel-content-area">
         {% for sheet_name, sheet_data in excel_data.sheets.items() %}
         <div class="excel-sheet-content {% if loop.first %}active{% endif %}" id="sheet-{{ sheet_name }}">
-            {# 工作表级的「整张表新增/删除」提示。
-               判据是 `operation`：这是 pandas 路径（services/diff_service.py::_compare_dataframes）
-               真正写出来的字段，取值 added / deleted。
-               原先这里判的是 `sheet_data.status` —— 两种产出方都不会把 status 写成
-               added/deleted（另一种产出方 services/git_service.py 的 sheet 级 status 只有
-               modified / unchanged），所以这两个分支从来没生效过，
-               整表被删除时也只会显示成「没有数据或无变更」。 #}
-            {% if sheet_data.operation == 'deleted' %}
+            {# 工作表级的「整张表新增/删除」提示。两个产出方用的字段名不同，都要认：
+               * `operation`（services/diff_service.py::_compare_dataframes，取值 added / deleted）；
+               * `status`（services/git_service.py::_deleted_sheet_diff 与
+                 git_excel_parser_helpers.generate_excel_diff_data，取值 deleted；
+                 它的其它取值 modified / unchanged / new 不表示整表增删）。
+               只判其中一个，另一边就会退化成「工作表 X 没有数据或无变更」。 #}
+            {% if sheet_data.operation == 'deleted' or sheet_data.status == 'deleted' %}
             <div class="alert alert-danger">
                 <i class="bi bi-trash me-2"></i>工作表 "{{ sheet_name }}" 已被删除
             </div>
-            {% elif sheet_data.operation == 'added' %}
+            {% elif sheet_data.operation == 'added' or sheet_data.status == 'new' %}
             <div class="alert alert-success">
                 <i class="bi bi-plus-circle me-2"></i>工作表 "{{ sheet_name }}" 是新增的
             </div>
@@ -106,8 +105,12 @@
                             {% endfor %}
                         </tr>
                         {% else %}
-                        <!-- 普通行或修改行 - 按单元格显示差异 -->
-                        <tr class="excel-row-normal">
+                        <!-- 修改行 - 逐单元格显示改前/改后；未变更的行按普通行显示。
+                             修改行必须带自己的行级标记（改前/改后的视觉信号由单元格上的
+                             excel-cell-modified 承担，行级这个类不需要 CSS）：原先这里对
+                             修改行和未变更行一视同仁地输出同一个类，任何按 class 统计变更行
+                             的下游（归档 / 截图 / 外部评审）都会把「只有修改」的提交数成 0 行。 -->
+                        <tr class="{% if row.status == 'modified' %}excel-row-modified{% else %}excel-row-normal{% endif %}">
                             <td class="excel-row-number excel-bold-text">{{ row.row_number }}</td>
                             {% for cell in cells %}
                             {% if cell.status == 'changed' %}

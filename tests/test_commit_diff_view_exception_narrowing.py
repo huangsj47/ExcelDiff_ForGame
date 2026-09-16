@@ -81,6 +81,7 @@ def _build_common_kwargs(commit, logs):
         get_commit_diff_mode_strategy=lambda: SimpleNamespace(async_agent_diff=False),
         resolve_previous_commit=lambda *_args, **_kwargs: None,
         get_unified_diff_data=lambda *_args, **_kwargs: {"rows": []},
+        get_deleted_file_diff_data=lambda *_args, **_kwargs: None,
         get_diff_data=lambda *_args, **_kwargs: {"type": "ok"},
         clean_json_data=lambda data: data,
         build_commit_diff_template_context=lambda **kwargs: kwargs,

@@ -1295,6 +1295,29 @@ class GitService:
         """简化的Excel数据提取，返回基本信息"""
         return extract_excel_data_simple(excel_data, file_path)
     
+    def _deleted_sheet_diff(self, previous_sheet):
+        """把「前版本里存在、当前版本已不存在」的整张工作表转成可渲染的 rows。
+
+        行格式与 `_compare_sheet_data` 的「新增工作表」分支逐字段对称
+        （`{'row_number', 'status', 'cells': [{'value', 'status'}]}`），
+        因为 `templates/diff_partials/excel_diff.html` 与前端
+        `static/js/diff-handlers.js` 读的就是这个形状。
+
+        `status` 取 'deleted'：模板与前端都用它来显示「工作表已被删除」的提示；
+        每一行取 'removed'，逐格标 'removed' —— 这是评审者唯一能看到
+        「到底删掉了什么」的地方，不能为了省体积只留一个计数。
+        """
+        if not previous_sheet or not isinstance(previous_sheet[0], dict):
+            return {'status': 'deleted', 'headers': [], 'rows': [], 'has_changes': False}
+
+        headers = list(previous_sheet[0].keys())
+        rows = []
+        for index, row in enumerate(previous_sheet):
+            cells = [{'value': row.get(header, ''), 'status': 'removed'} for header in headers]
+            rows.append({'row_number': index + 1, 'status': 'removed', 'cells': cells})
+
+        return {'status': 'deleted', 'headers': headers, 'rows': rows, 'has_changes': True}
+
     def _generate_excel_diff_data(self, current_data, previous_data, file_path):
         """生成Excel差异对比数据 - 智能空白区域处理版本"""
         return generate_excel_diff_data(self, current_data, previous_data, file_path)
@@ -1459,8 +1482,11 @@ class GitService:
             }
         
         if not current_sheet:
-            return {'status': 'deleted', 'rows': []}
-        
+            # 工作表被删除（前版本有、当前版本没有）：与上面的「新增工作表」严格对称，
+            # **必须留下 rows**。原先这里返回 `{'status': 'deleted', 'rows': []}`，
+            # 于是「整表被删除」在正文里一个字都看不到（顶部统计却照样计了行数）。
+            return self._deleted_sheet_diff(previous_sheet)
+
         # 使用快速比较，确保能检测到变化
         return self._fast_compare_rows(current_sheet, previous_sheet)
     

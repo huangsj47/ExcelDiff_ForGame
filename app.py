@@ -352,6 +352,7 @@ from services.vcs_content_service import (
     get_git_service,
     get_svn_service,
     get_unified_diff_data,
+    get_deleted_file_diff_data,
 )
 from bootstrap.app_factory import build_runtime_settings, create_app
 
@@ -754,6 +755,7 @@ def commit_diff(commit_id):
         resolve_previous_commit=resolve_previous_commit,
         attach_author_display=_attach_author_display,
         get_unified_diff_data=get_unified_diff_data,
+        get_deleted_file_diff_data=get_deleted_file_diff_data,
         get_diff_data=get_diff_data,
         validate_excel_diff_data=validate_excel_diff_data,
         clean_json_data=clean_json_data,

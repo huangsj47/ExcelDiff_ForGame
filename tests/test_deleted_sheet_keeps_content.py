@@ -182,7 +182,25 @@ class TestPartialRendersBothShapes:
         )
         assert 'server' in html, "cell_changes 里的旧值没有渲染出来（修改行看不到改前内容）"
         assert html.count('excel-row-removed') >= 1
-        assert html.count('excel-row-normal') >= 1
+        # 修改行必须带自己的行级标记。原先 modified 和 unchanged 都输出 normal，
+        # 于是「只有修改」的提交在这份 HTML 里数出来是 0 个变更行。
+        assert '<tr class="excel-row-modified">' in html, (
+            "修改行没有行级标记，按 class 统计变更行的下游会把「只有修改」数成 0 行"
+        )
+
+    def test_shape_one_deleted_sheet_shows_notice(self):
+        """形态一的产出方把整表删除写成 sheet 级 `status='deleted'`（不是 operation），
+        模板必须同时认这两个字段，否则那条路径上「工作表已被删除」的提示不会出现。"""
+        sheet = {
+            'status': 'deleted',
+            'headers': ['A'],
+            'rows': [{'row_number': 1, 'status': 'removed',
+                      'cells': [{'value': 'TYPE', 'status': 'removed'}]}],
+            'has_changes': True,
+        }
+        html = self._render(self._payload(sheet))
+        assert '已被删除' in html, "形态一的整表删除提示没渲染（status=deleted 未被识别）"
+        assert 'TYPE' in html, "形态一的删除行没有渲染出被删内容"
 
     def test_shape_two_shows_deleted_sheet_notice(self):
         html = self._render(self._payload(self._shape_two_sheet()))

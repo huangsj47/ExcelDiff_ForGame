@@ -169,11 +169,16 @@
         </div>
         <div class="card-body p-0">
             {% if is_deleted %}
-                <div class="p-4 text-center">
-                    <div class="alert alert-warning mb-4">
+                {# 删除提交：先明确告诉评审者「这个文件被删了」，然后把**被删掉的内容**
+                   渲染出来（payload 由服务端用基线版本算出：每张表都是「已删除工作表」，
+                   每一行都是删除行）。原先这里只有一个提示 + 一个「上一个版本」链接，
+                   而那个链接指向的是那条提交自己的变更，不是被删掉的内容 ——
+                   配表整表删除时评审者等于什么都看不到。 #}
+                <div class="p-4 text-center{% if is_excel and diff_data and diff_data.sheets %} pb-0{% endif %}">
+                    <div class="alert alert-warning mb-0">
                         <i class="bi bi-trash fs-1 mb-3 d-block text-warning"></i>
                         <h5 class="alert-heading">文件已删除</h5>
-                        <p class="mb-0">该文件在此提交中被删除，无法显示差异内容。</p>
+                        <p class="mb-0">该文件在此提交中被删除，以下是删除前的内容。</p>
                         {% if previous_commit %}
                         <hr>
                         <p class="mb-0">
@@ -184,11 +189,15 @@
                         {% endif %}
                     </div>
                 </div>
+                {% if is_excel and diff_data and diff_data.sheets %}
+                {% set loading_title = '正在加载被删除的内容...' %}
+                {% include 'diff_partials/excel_diff_loader.html' %}
+                {% endif %}
             {% elif is_excel %}
                 {% if diff_data %}
                     {% if diff_data.operation == 'deleted' %}
-                    <div class="p-4 text-center">
-                        <div class="alert alert-warning mb-4">
+                    <div class="p-4 text-center{% if diff_data.sheets %} pb-0{% endif %}">
+                        <div class="alert alert-warning mb-0">
                             <i class="bi bi-trash fs-1 mb-3 d-block text-warning"></i>
                             <h5 class="alert-heading">Excel文件已删除</h5>
                             <p class="mb-0">{{ diff_data.message }}</p>
@@ -202,26 +211,15 @@
                             {% endif %}
                         </div>
                     </div>
+                    {# 载荷里带了 sheets（产出方从基线版本还原出来的工作表）就渲染出来 ——
+                       只给提示不给内容，评审者看不到被删掉的是什么。 #}
+                    {% if diff_data.sheets %}
+                    {% set loading_title = '正在加载被删除的内容...' %}
+                    {% include 'diff_partials/excel_diff_loader.html' %}
+                    {% endif %}
                     {% else %}
                     <!-- Excel 加载指示器 - 默认显示 -->
-                    <div id="excel-loading-indicator" class="p-4 text-center">
-                        <div class="d-flex flex-column align-items-center">
-                            <div class="spinner-border text-primary mb-3" role="status">
-                                <span class="visually-hidden">Loading...</span>
-                            </div>
-                            <h6 class="mb-2">正在加载Excel差异数据...</h6>
-                            <p class="text-muted mb-0">
-                                <span id="loading-progress-text">正在从服务器获取数据，请稍候</span>
-                            </p>
-                            <div class="progress mt-3" style="width: 300px; height: 8px;">
-                                <div id="loading-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" 
-                                     role="progressbar" style="width: 10%" aria-valuenow="10" aria-valuemin="0" aria-valuemax="100"></div>
-                            </div>
-                        </div>
-                    </div>
-                    <div id="excel-diff-container" class="excel-diff-container" style="display: none;">
-                        <!-- Excel diff 内容将在这里显示 -->
-                    </div>
+                    {% include 'diff_partials/excel_diff_loader.html' %}
                     {% endif %}
                 {% else %}
                 {% if async_agent_diff %}
@@ -603,6 +601,16 @@ function showExcelLoadingIndicator() {
     }
 }
 
+// 往 Excel 渲染容器里写内容。容器**可能不存在**：删除提交的提示分支、
+// 以及「载荷里没有 sheets」的情况都不会渲染 #excel-diff-container，
+// 直接 .innerHTML = 会在 null 上抛异常，把后面的清理逻辑一起带走。
+function setExcelDiffContainerHtml(html) {
+    var containerEl = document.getElementById('excel-diff-container');
+    if (containerEl) {
+        containerEl.innerHTML = html;
+    }
+}
+
 function hideExcelLoadingIndicator() {
     var loadingEl = document.getElementById('excel-loading-indicator');
     var containerEl = document.getElementById('excel-diff-container');
@@ -659,20 +667,20 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 console.log('No Excel sheets data found');
                 hideExcelLoadingIndicator();
-                document.getElementById('excel-diff-container').innerHTML = 
+                setExcelDiffContainerHtml(
                     '<div class="p-4 text-center text-muted">' +
                     '<i class="bi bi-file-earmark-excel fs-1 mb-3"></i>' +
                     '<p>Excel数据格式错误</p>' +
-                    '</div>';
+                    '</div>');
             }
         } catch (error) {
             console.error('Excel diff processing error:', error);
             hideExcelLoadingIndicator();
-            document.getElementById('excel-diff-container').innerHTML = 
+            setExcelDiffContainerHtml(
                 '<div class="p-4 text-center text-muted">' +
                 '<i class="bi bi-exclamation-triangle fs-1 mb-3"></i>' +
                 '<p>Excel数据处理失败: ' + error.message + '</p>' +
-                '</div>';
+                '</div>');
         }
         console.log('=== EXCEL DIFF PROCESSING END ===');
     }, 300); // 延迟300ms确保静态内容先渲染
@@ -694,6 +702,12 @@ function displayExcelDiffWithProgress(diffData) {
 function displayExcelDiff(diffData) {
     console.log('=== NEW DISPLAY EXCEL DIFF FUNCTION CALLED v2.0 ===');
     var container = document.getElementById('excel-diff-container');
+    if (!container) {
+        // 没有渲染容器就没有可写的地方（载荷没有 sheets 的删除提交等）。
+        // 之前这里会直接在 null 上抛异常。
+        console.warn('excel-diff-container 不存在，跳过 Excel 渲染');
+        return;
+    }
     var html = '';
     
     if (diffData && diffData.sheets && Object.keys(diffData.sheets).length > 0) {
