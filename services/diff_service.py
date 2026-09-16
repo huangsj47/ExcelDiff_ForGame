@@ -30,7 +30,26 @@ class DiffService:
         '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg', '.tiff', '.ico',
         '.heic', '.heif', '.raw', '.psd'
     }
-    
+
+    # ------------------------------------------------------------------
+    #  行匹配参数 —— **小表与大表共用同一套**
+    #
+    #  历史行为（已修）：同一次比较会按表的行数走两条不同的路径，
+    #  `len(rows) > 100` 走 `_fast_row_matching`（哈希阈值 0.85、位置匹配 0.5），
+    #  否则走小表路径（阈值 0.6）。于是**同一个改动、同一份表，仅仅因为行数跨过
+    #  100 行，结论就不同**：既不可复现，也让「为什么这张表准、那张表不准」无法解释
+    #  （线上审计：5988 报 3 行而 git 是 456 行的表，正是大表路径）。
+    #
+    #  哈希索引保留，但它的职责收窄成「认出完全没变的行」——哈希是「非空值小写去空白」
+    #  的拼串，本来就有碰撞，用它去接受 0.85 相似度的行等于让碰撞决定配对结果。
+    #  变了多少一律交给位置阶段，用同一个阈值判定。
+    # ------------------------------------------------------------------
+    ROW_SIMILARITY_THRESHOLD = 0.6      # 认定为「同一行被修改」的最低相似度
+    LARGE_TABLE_ROW_THRESHOLD = 100     # 超过此行数改用哈希加速（只是加速，不换口径）
+    ROW_POSITION_SEARCH_MIN = 10        # 位置匹配的最小搜索半径
+    ROW_POSITION_SEARCH_RATIO = 0.1     # 搜索半径 = 表大小 × 该比例（取两者较大值）
+    DEFAULT_KEY_COLUMN_COUNT = 3        # 未配置关键列时，快速预检用前 N 列
+
     def __init__(self):
         self.performance_stats = {
             'text_diff_time': 0,
@@ -54,15 +73,25 @@ class DiffService:
         else:
             return 'binary'
     
-    def process_diff(self, file_path: str, current_content: bytes, previous_content: bytes = None) -> Dict[str, Any]:
-        """处理文件差异，根据文件类型选择合适的处理方式"""
+    def process_diff(self, file_path: str, current_content: bytes, previous_content: bytes = None,
+                     key_columns: str = None) -> Dict[str, Any]:
+        """处理文件差异，根据文件类型选择合适的处理方式。
+
+        key_columns：仓库上配置的「关键列」（`Repository.key_columns`，列号从 1 开始、
+        英文逗号分隔，如 `1,2,3`）。配了它，行匹配就按这些列的值认「同一行」——
+        这是帮助文档已经写明的契约（`templates/help.html` 的「关键列」一节），
+        但引擎历史上从来没读过这个配置，只按前 3 列的相似度猜配对，
+        于是把不同的行配成一条「修改」，报出来的改前值是另一行的
+        （线上审计：5988 报的行 9 里 old 取自第 21 行、new 取自第 10 行）。
+        """
         file_type = self.get_file_type(file_path)
-        
+
         try:
             if file_type == 'text':
                 return self._process_text_diff(file_path, current_content, previous_content)
             elif file_type == 'excel':
-                return self._process_excel_diff(file_path, current_content, previous_content)
+                return self._process_excel_diff(file_path, current_content, previous_content,
+                                                key_columns=key_columns)
             elif file_type == 'image':
                 return self._process_image_diff(file_path, current_content, previous_content)
             else:
@@ -147,7 +176,8 @@ class DiffService:
                 'message': f'文本文件处理失败: {str(e)}'
             }
     
-    def _process_excel_diff(self, file_path: str, current_content: bytes, previous_content: bytes = None) -> Dict[str, Any]:
+    def _process_excel_diff(self, file_path: str, current_content: bytes, previous_content: bytes = None,
+                            key_columns: str = None) -> Dict[str, Any]:
         """处理Excel文件差异"""
         import time
         start_time = time.time()
@@ -175,7 +205,8 @@ class DiffService:
             previous_data = self._read_excel_data(previous_content, file_path) if previous_content else {}
             
             # 生成Excel差异
-            diff_result = self._compare_excel_data(current_data, previous_data, file_path)
+            diff_result = self._compare_excel_data(current_data, previous_data, file_path,
+                                                   key_columns=key_columns)
             
             self.performance_stats['excel_diff_time'] += time.time() - start_time
             
@@ -398,7 +429,8 @@ class DiffService:
         except Exception as e:
             raise Exception(f"读取Excel文件失败: {str(e)}")
     
-    def _compare_excel_data(self, current_data: Dict, previous_data: Dict, file_path: str) -> Dict[str, Any]:
+    def _compare_excel_data(self, current_data: Dict, previous_data: Dict, file_path: str,
+                            key_columns: str = None) -> Dict[str, Any]:
         """比较Excel数据"""
         import pandas as pd
         
@@ -416,7 +448,8 @@ class DiffService:
             current_df = current_data.get(sheet_name)
             previous_df = previous_data.get(sheet_name)
             
-            sheet_diff = self._compare_dataframes(current_df, previous_df, sheet_name)
+            sheet_diff = self._compare_dataframes(current_df, previous_df, sheet_name,
+                                                  key_columns=key_columns)
             result['sheets'][sheet_name] = sheet_diff
             
             # 更新统计信息
@@ -428,7 +461,8 @@ class DiffService:
         
         return result
     
-    def _compare_dataframes(self, current_df, previous_df, sheet_name: str) -> Dict[str, Any]:
+    def _compare_dataframes(self, current_df, previous_df, sheet_name: str,
+                            key_columns: str = None) -> Dict[str, Any]:
         """比较两个DataFrame"""
         import pandas as pd
         
@@ -492,9 +526,9 @@ class DiffService:
             }
         
         # 比较现有工作表
-        return self._detailed_dataframe_comparison(current_df, previous_df)
+        return self._detailed_dataframe_comparison(current_df, previous_df, key_columns=key_columns)
     
-    def _detailed_dataframe_comparison(self, current_df, previous_df) -> Dict[str, Any]:
+    def _detailed_dataframe_comparison(self, current_df, previous_df, key_columns: str = None) -> Dict[str, Any]:
         """详细比较两个DataFrame，支持行插入/删除的智能识别"""
         import pandas as pd
         import numpy as np
@@ -519,15 +553,110 @@ class DiffService:
             previous_df = previous_df.reindex(columns=ordered_columns, fill_value='')
         
         # 使用智能diff算法处理行插入/删除
-        return self._smart_row_diff(current_df, previous_df, ordered_columns)
+        return self._smart_row_diff(current_df, previous_df, ordered_columns, key_columns=key_columns)
 
     def _dataframe_rows_with_index(self, df):
         """高效转换 DataFrame 为带原始行号的记录列表。"""
         records = df.to_dict(orient='records')
         return [(idx + 1, row_data) for idx, row_data in enumerate(records)]
     
-    def _smart_row_diff(self, current_df, previous_df, all_columns) -> Dict[str, Any]:
-        """智能行差异算法，正确处理行插入、删除和修改"""
+    def _resolve_key_columns(self, raw_value, columns):
+        """把仓库配置的「关键列」解析成本次比较可用的列标签。
+
+        配置口径见 `templates/help.html` 的「关键列」一节：列号**从 1 开始**、
+        英文逗号分隔，如 `1,2,3`；「如果默认第二列（即 B 列）为 ID，可以设置关键列为 2」。
+        读取用 `header=0`，列名取自第 1 行，但**左右顺序与 Excel 一致**，
+        所以「列号 N」= 本次读出来的第 N 列（`columns[N-1]`）。
+        也接受列字母（`A,B`）：界面上没写，但把 `B` 当成「列号 2」没有歧义。
+
+        解析不出来的项一律忽略并记录：一个填错的关键列不该让整份 diff 失败 ——
+        那会让用户既看不到差异，也不知道是配置问题。全部解析不出来时返回 []，
+        调用方退回「未配置关键列」的行为。
+        """
+        if not raw_value:
+            return []
+        if not columns:
+            return []
+        labels = []
+        seen = set()
+        for piece in re.split(r'[,，;；\s]+', str(raw_value).strip()):
+            if not piece:
+                continue
+            index = None
+            if piece.isdigit():
+                index = int(piece) - 1        # 配置从 1 开始，columns 从 0 开始
+            elif re.fullmatch(r'[A-Za-z]{1,3}', piece):
+                index = 0
+                for char in piece.upper():
+                    index = index * 26 + (ord(char) - ord('A') + 1)
+                index -= 1
+            if index is None or index < 0 or index >= len(columns):
+                from utils.logger import log_print
+                log_print(f"⚠️ 关键列配置项无效已忽略: {piece!r}（共 {len(columns)} 列）", 'EXCEL')
+                continue
+            label = columns[index]
+            if label not in seen:
+                seen.add(label)
+                labels.append(label)
+        return labels
+
+    def _row_key(self, row, key_columns):
+        """取一行的关键列取值。任一关键列为空 → 这一行没有身份，返回 None。
+
+        取的是 `_normalize_value` 归一后的值（与 `_values_equal` 同一处口径），
+        所以 `null` 字面量与真空白不会因为写法不同被当成两个键。
+        """
+        values = []
+        for column in key_columns:
+            value = self._normalize_value(row.get(column, ''))
+            if value is None:
+                return None
+            values.append(value)
+        return tuple(values)
+
+    def _match_rows_by_key(self, current_rows, previous_rows, key_columns):
+        """按关键列配对两版的行，返回 [(current_idx, previous_idx), ...]。
+
+        只在**键在两版里都唯一**时配对：键重复就说明这组配置并不能唯一标识一行
+        （配表里 类型+id 才是唯一键的情况很常见），这时硬配对只会把 A 行配到 B 行，
+        所以重复键的行留给相似度阶段处理。
+
+        也返回「哪些行的键是可用的」，供调用方决定谁可以进入相似度阶段。
+        """
+        def _index(rows):
+            mapping = {}
+            duplicates = set()
+            for index, row in enumerate(rows):
+                key = self._row_key(row, key_columns)
+                if key is None:
+                    continue
+                if key in mapping:
+                    duplicates.add(key)
+                else:
+                    mapping[key] = index
+            return mapping, duplicates
+
+        current_map, current_duplicates = _index(current_rows)
+        previous_map, previous_duplicates = _index(previous_rows)
+
+        pairs = []
+        for key, current_idx in current_map.items():
+            if key in current_duplicates or key in previous_duplicates:
+                continue
+            previous_idx = previous_map.get(key)
+            if previous_idx is None:
+                continue
+            pairs.append((current_idx, previous_idx))
+        pairs.sort()
+        return pairs, current_duplicates, previous_duplicates
+
+    def _smart_row_diff(self, current_df, previous_df, all_columns, key_columns=None) -> Dict[str, Any]:
+        """智能行差异算法，正确处理行插入、删除和修改
+
+        key_columns 有值时先按关键列配对（见 `_resolve_key_columns`），
+        配上的行不再参与相似度匹配 —— 否则一个「ID 从 5 改成 7」的行会被
+        相似度匹配认成「同一行被修改」，而按关键列的契约那是「删一行 + 加一行」。
+        """
         # 转换为列表便于处理，保留原始行号
         current_rows_with_index = self._dataframe_rows_with_index(current_df)
         previous_rows_with_index = self._dataframe_rows_with_index(previous_df)
@@ -569,13 +698,56 @@ class DiffService:
                 'columns': all_columns
             }
         
-        # 使用改进的匹配算法
-        matches = self._find_row_matches(current_rows, previous_rows, all_columns)
-        
-        # 创建匹配映射
+        # 1) 关键列优先配对（仓库配了关键列时）。配表几乎都有 ID 列，
+        #    按 ID 配对是唯一「不会把两行错配」的做法；相似度匹配只能猜。
+        key_labels = self._resolve_key_columns(key_columns, all_columns)
+        matches = []
         current_matched = set()
         previous_matched = set()
-        
+        if key_labels:
+            key_pairs, current_duplicates, previous_duplicates = self._match_rows_by_key(
+                current_rows, previous_rows, key_labels)
+            for current_idx, previous_idx in key_pairs:
+                similarity = self._calculate_row_similarity(
+                    current_rows[current_idx], previous_rows[previous_idx], all_columns)
+                matches.append({
+                    'type': 'match',
+                    'matched_by': 'key',
+                    'current_idx': current_idx,
+                    'previous_idx': previous_idx,
+                    'similarity': similarity,
+                })
+                current_matched.add(current_idx)
+                previous_matched.add(previous_idx)
+            # 谁能进相似度阶段：键不可用的行（表头/汇总这类没有 ID 的行），
+            # 以及键重复的行（那组配置不足以唯一标识一行，只能按内容猜）。
+            similarity_current = [
+                idx for idx, row in enumerate(current_rows)
+                if self._row_key(row, key_labels) is None
+                or self._row_key(row, key_labels) in current_duplicates
+                or self._row_key(row, key_labels) in previous_duplicates
+            ]
+            similarity_previous = [
+                idx for idx, row in enumerate(previous_rows)
+                if self._row_key(row, key_labels) is None
+                or self._row_key(row, key_labels) in current_duplicates
+                or self._row_key(row, key_labels) in previous_duplicates
+            ]
+        else:
+            similarity_current = list(range(len(current_rows)))
+            similarity_previous = list(range(len(previous_rows)))
+
+        if similarity_current and similarity_previous:
+            matches.extend(self._find_row_matches(
+                [current_rows[i] for i in similarity_current],
+                [previous_rows[j] for j in similarity_previous],
+                all_columns,
+                index_offset_current=similarity_current,
+                index_offset_previous=similarity_previous,
+            ))
+
+        matches.sort(key=lambda x: x['current_idx'])
+
         rows = []
         
         # 处理匹配的行
@@ -680,15 +852,24 @@ class DiffService:
         """
         return [row for row in rows if self._has_valid_data(row, columns)]
     
-    def _find_row_matches(self, current_rows, previous_rows, columns):
-        """优化的行匹配算法 - 减少时间复杂度"""
-        matches = []
-        
-        # 如果数据量很大，使用快速匹配策略
-        if len(current_rows) > 100 or len(previous_rows) > 100:
-            return self._fast_row_matching(current_rows, previous_rows, columns)
+    def _find_row_matches(self, current_rows, previous_rows, columns,
+                          index_offset_current=None, index_offset_previous=None):
+        """优化的行匹配算法 - 减少时间复杂度
+
+        index_offset_*：传入的是**子集**时（关键列阶段已经配掉的行不再参与相似度
+        匹配），用它在返回前把下标映射回完整行列表的下标 —— 否则结果会指到错误的行上。
+        """
+        offsets_current = list(index_offset_current) if index_offset_current is not None             else list(range(len(current_rows)))
+        offsets_previous = list(index_offset_previous) if index_offset_previous is not None             else list(range(len(previous_rows)))
+
+        # 如果数据量很大，使用快速匹配策略（只是加速，阈值与下面同一套）
+        if (len(current_rows) > self.LARGE_TABLE_ROW_THRESHOLD
+                or len(previous_rows) > self.LARGE_TABLE_ROW_THRESHOLD):
+            matches = self._fast_row_matching(current_rows, previous_rows, columns)
+            return self._remap_match_indices(matches, offsets_current, offsets_previous)
         
         # 对于小数据集，使用精确匹配
+        matches = []
         used_previous = set()
         
         for i, current_row in enumerate(current_rows):
@@ -707,8 +888,8 @@ class DiffService:
                 # 计算详细相似度
                 score = self._calculate_row_similarity(current_row, previous_row, columns)
                 
-                # 降低相似度阈值以更好地识别修改行
-                if score > 0.6:  # 从0.95降低到0.6
+                # 相似度阈值：与小表/大表统一（见 ROW_SIMILARITY_THRESHOLD 的说明）
+                if score > self.ROW_SIMILARITY_THRESHOLD:
                     if score == 1.0:  # 完全匹配，直接使用
                         best_match = j
                         best_score = score
@@ -727,15 +908,37 @@ class DiffService:
                 used_previous.add(best_match)
         
         matches.sort(key=lambda x: x['current_idx'])
-        return matches
-    
+        return self._remap_match_indices(matches, offsets_current, offsets_previous)
+
+    @staticmethod
+    def _remap_match_indices(matches, offsets_current, offsets_previous):
+        """把「子集下标」的匹配结果映射回完整行列表的下标。
+
+        关键列阶段已经把一部分行配掉了，相似度阶段只在剩下的行上跑；
+        返回时必须还原成完整列表的下标，否则 modified/added/removed 会挂到别的行上。
+        """
+        remapped = []
+        for match in matches:
+            current_idx = match['current_idx']
+            previous_idx = match['previous_idx']
+            if current_idx >= len(offsets_current) or previous_idx >= len(offsets_previous):
+                continue
+            new_match = dict(match)
+            new_match['current_idx'] = offsets_current[current_idx]
+            new_match['previous_idx'] = offsets_previous[previous_idx]
+            remapped.append(new_match)
+        remapped.sort(key=lambda x: x['current_idx'])
+        return remapped
+
     def _fast_row_matching(self, current_rows, previous_rows, columns):
-        """大数据集的快速匹配算法（改进版）
-        
-        改进点：
-        1. 哈希匹配阈值从0.95降至0.85，允许命中轻微修改的行
-        2. 哈希未命中的行也进入位置匹配阶段，避免遗漏
-        3. 位置匹配搜索范围自适应数据集大小
+        """大数据集的快速匹配算法
+
+        哈希索引的职责**只有一件事**：认出完全没变的行（相似度 == 1.0），
+        把它们从后续的相似度扫描里摘出去，省下大部分比较。
+
+        历史行为（已修）：这里曾用哈希（「非空值小写去空白」的拼串，本来就有碰撞）
+        去接受 0.85 相似度的行 —— 等于让哈希碰撞决定配对结果，而小表路径的阈值是 0.6。
+        同一个改动，表一大结论就变。现在两条路径共用 `ROW_SIMILARITY_THRESHOLD`。
         """
         matches = []
         
@@ -752,28 +955,21 @@ class DiffService:
         for i, current_row in enumerate(current_rows):
             current_hash = self._calculate_row_hash(current_row, columns)
             
-            # 查找相同哈希的行
+            # 查找相同哈希的行：只接受**完全相等**的配对（哈希只是预筛）
             if current_hash in previous_hashes:
                 best_j = None
-                best_score = 0
                 for j in previous_hashes[current_hash]:
                     if j not in used_previous:
-                        # 验证是否真正匹配
-                        score = self._calculate_row_similarity(current_row, previous_rows[j], columns)
-                        if score == 1.0:
+                        if self._calculate_row_similarity(current_row, previous_rows[j], columns) == 1.0:
                             best_j = j
-                            best_score = score
                             break
-                        elif score > 0.85 and score > best_score:
-                            best_j = j
-                            best_score = score
                 
                 if best_j is not None:
                     matches.append({
                         'type': 'match',
                         'current_idx': i,
                         'previous_idx': best_j,
-                        'similarity': best_score
+                        'similarity': 1.0
                     })
                     used_previous.add(best_j)
         
@@ -786,18 +982,18 @@ class DiffService:
         return matches
     
     def _find_position_based_matches(self, current_rows, previous_rows, columns, used_previous, used_current):
-        """基于位置的匹配逻辑，用于识别部分修改的行（改进版）
-        
-        改进点：
-        1. 搜索范围从固定±3改为自适应：max(10, 数据集大小的10%)
-        2. 使用累计偏移量跟踪插入/删除导致的整体位移
-        3. 相似度阈值降至0.5以覆盖更多修改场景
+        """基于位置的匹配逻辑，用于识别部分修改的行
+
+        搜索半径与相似度阈值都取自类常量，与其它路径**共用同一套**：
+        搜索半径 = max(ROW_POSITION_SEARCH_MIN, 表大小 × ROW_POSITION_SEARCH_RATIO)，
+        阈值 = ROW_SIMILARITY_THRESHOLD。
         """
         matches = []
         
-        # 自适应搜索范围：至少10行，最多为数据集大小的10%
+        # 自适应搜索范围：至少 ROW_POSITION_SEARCH_MIN 行，最多为数据集大小的 ROW_POSITION_SEARCH_RATIO
         data_size = max(len(current_rows), len(previous_rows))
-        search_range = max(10, int(data_size * 0.1))
+        search_range = max(self.ROW_POSITION_SEARCH_MIN,
+                           int(data_size * self.ROW_POSITION_SEARCH_RATIO))
         
         # 对于未匹配的当前行，尝试与相近位置的前一版本行匹配
         for i, current_row in enumerate(current_rows):
@@ -822,8 +1018,8 @@ class DiffService:
                 
                 score = self._calculate_row_similarity(current_row, previous_rows[j], columns)
                 
-                # 使用更宽松的阈值（0.5）覆盖较大修改
-                if score > 0.5 and score > best_score:
+                # 与其它路径同一个阈值
+                if score > self.ROW_SIMILARITY_THRESHOLD and score > best_score:
                     best_score = score
                     best_match = j
             
@@ -841,11 +1037,12 @@ class DiffService:
     
     def _quick_similarity_check(self, row1, row2, columns):
         """快速相似度预检，避免不必要的详细计算
-        
-        改进点：阈值从 >0 修正为 >=2（与注释语义对齐），
-        同时对仅有1-2个关键列的情况做降级处理
+
+        未配置关键列时的兜底启发式：用前 DEFAULT_KEY_COLUMN_COUNT 列做预检。
+        配了关键列的仓库不走这里 —— 那时行身份由 `_match_rows_by_key` 决定，
+        相似度阶段只处理键不可用的行（表头/汇总这类），再拿「前 3 列」当键没有意义。
         """
-        key_columns = columns[:min(3, len(columns))]
+        key_columns = columns[:min(self.DEFAULT_KEY_COLUMN_COUNT, len(columns))]
         
         matching_key_cols = 0
         for col in key_columns:
@@ -956,9 +1153,11 @@ class DiffService:
         """检查两个值是否相等，改进空值处理"""
         return self._normalize_value(val1) == self._normalize_value(val2)
     
-    def calculate_excel_diff(self, current_content: bytes, previous_content: bytes, file_path: str) -> Dict[str, Any]:
+    def calculate_excel_diff(self, current_content: bytes, previous_content: bytes, file_path: str,
+                             key_columns: str = None) -> Dict[str, Any]:
         """计算Excel文件差异的公共接口"""
-        return self._process_excel_diff(file_path, current_content, previous_content)
+        return self._process_excel_diff(file_path, current_content, previous_content,
+                                        key_columns=key_columns)
     
     def _get_image_info(self, content: bytes) -> Dict[str, Any]:
         """获取图片基本信息"""

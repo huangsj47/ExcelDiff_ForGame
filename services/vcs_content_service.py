@@ -427,7 +427,12 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
         # 处理差异
         diff_service = DiffService()
         calc_start_time = time.time()
-        diff_data = diff_service.process_diff(commit.path, current_content, previous_content)
+        # 关键列（Repository.key_columns，列号从 1 开始）决定「怎么认同一行」。
+        # 帮助文档已经写明按它匹配新旧版本的同一行，但引擎历史上没读过这个配置，
+        # 只按前 3 列相似度猜配对 —— 会把不同的行配成一条「修改」。
+        diff_data = diff_service.process_diff(
+            commit.path, current_content, previous_content,
+            key_columns=getattr(repository, 'key_columns', None))
         processing_time = time.time() - calc_start_time
         if diff_data:
             total_time = time.time() - start_time

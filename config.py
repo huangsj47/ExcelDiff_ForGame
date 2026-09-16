@@ -59,7 +59,7 @@ system("title SEOTool - diff-confirmation-platform")
 # 1.10.0：行过滤（_has_valid_data / _filter_nan_rows）与 _normalize_value 统一口径 ——
 #        整行都是 null/None/空白串的行不再被当成空行丢掉（这些行的改动原先全部漏报）；
 #        .tsv 按制表符读取，不再必然报「Excel file format cannot be determined」。
-DIFF_LOGIC_VERSION = "1.11.0"
+DIFF_LOGIC_VERSION = "1.12.0"
 
 # 日志级别配置
 LOG_LEVEL = {
