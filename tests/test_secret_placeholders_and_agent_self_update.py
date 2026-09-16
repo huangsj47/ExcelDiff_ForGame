@@ -65,14 +65,34 @@ def _capture_startup_output(monkeypatch):
     return out, err
 
 
+def _clear_secret_env(monkeypatch) -> None:
+    """清掉环境里的密钥，让断言只看**传进去的那个 .env 文件**。
+
+    为什么必须清：`app.py` 顶层是 `load_dotenv(override=False)`，只要仓库里存在
+    真 `.env`（任何部署过的机器都有），**一次 `import app` 就会把
+    FLASK_SECRET_KEY / AGENT_SHARED_SECRET 灌进 `os.environ`**；
+    而 `utils/env_bootstrap.effective_env_values` 让真实环境变量**优先于文件**。
+    于是「文件里写的是占位值」会被环境里的强值掩盖，`check_env_file_secrets`
+    返回空列表，前置断言直接失败。
+
+    触发条件只是「本次会话里有没有别的用例先 import 过 app」—— 谁先 import 取决于
+    pytest 的收集顺序。实测：全量跑必红，单跑本文件绿。CI 上没有 `.env`
+    所以一直没暴露。
+
+    键名从 `_SECRET_MIN_LENGTHS` 取，避免以后新增密钥时这里悄悄漏掉。
+    """
+    for key in env_bootstrap._SECRET_MIN_LENGTHS:
+        monkeypatch.delenv(key, raising=False)
+
+
 def _no_testing_env(monkeypatch) -> None:
     """把进程切到「非 TESTING」模式，让启动校验真正生效。
 
     tests/conftest.py 全局设置了 `TESTING=1`，不删掉的话所有用例都会被
     当成测试环境放行，专测就永远看不到拒绝分支。
     """
-    for key in ("TESTING", "FLASK_SECRET_KEY", "AGENT_SHARED_SECRET"):
-        monkeypatch.delenv(key, raising=False)
+    _clear_secret_env(monkeypatch)
+    monkeypatch.delenv("TESTING", raising=False)
 
 
 def _sha256_file(path: Path) -> str:
@@ -245,6 +265,11 @@ def test_startup_gate_is_lenient_under_testing(monkeypatch, tmp_path):
 
     这条变红意味着：pytest 套件会因为占位值而起不来（或该豁免被删掉）。
     """
+    # 这条要保留 TESTING=1，所以不能直接用 _no_testing_env；但**必须**清掉环境里的
+    # 密钥 —— 否则有真 .env 的机器上，import app 灌进来的强密钥会盖掉这里写的占位值，
+    # 前置断言在「别的用例先 import 过 app」时失败（本文件其它用例都调了
+    # _no_testing_env，只有这条漏了）。
+    _clear_secret_env(monkeypatch)
     monkeypatch.setenv("TESTING", "1")
     env_path = _write_env_file(
         tmp_path / ".env",
