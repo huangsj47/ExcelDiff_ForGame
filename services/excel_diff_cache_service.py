@@ -14,12 +14,33 @@ from services.commit_diff_logic import resolve_previous_commit
 
 app = None
 db = None
-DIFF_LOGIC_VERSION = "1.8.0"
+# 这里的值只是**未 configure 时的兜底**；configure_excel_diff_cache_service() 会用
+# app.py 的值覆盖它（见下方 global 赋值）。但它是仓库里 DIFF_LOGIC_VERSION 的
+# **第三份字面量**，必须与 app.py / config.py 保持一致：
+# cleanup_old_cache() 用它判定「diff_version 不匹配 → 当作过期缓存删掉」，
+# 一旦它比真实版本旧，就会把**刚生成的当前版本缓存**当成过期数据清掉。
+# 一致性由 tests/test_diff_logic_version_single_source.py 锁定（该测试会扫描全部三处）。
+DIFF_LOGIC_VERSION = "1.9.0"
 DiffCache = None
 OperationLog = None
 Commit = None
 Repository = None
 get_unified_diff_data = None
+
+# ---------------------------------------------------------------------------
+#  process_excel_diff_background() 的返回状态
+#
+#  历史行为：成功与失败**都返回 None**，于是调用方（services/task_worker_service.py
+#  的 _handle_excel_diff_task）没有任何判断依据，只能无条件把任务标成 completed ——
+#  「仓库已删」「提交查不到」这类什么都没做的情况也被记为成功，与真的生成成功在
+#  任务表里完全同形（管理员无法区分「已完成」和「根本没做」）。
+#  现在显式区分，调用方据此决定 completed / failed。
+# ---------------------------------------------------------------------------
+BG_STATUS_COMPLETED = 'completed'                        # 真的算完并落了缓存
+BG_STATUS_SKIPPED_IN_PROGRESS = 'skipped_in_progress'    # 同一 (repo,commit,file) 已在别的线程处理中
+BG_STATUS_REPOSITORY_MISSING = 'repository_missing'      # 仓库不存在 → 调用方应标 failed
+BG_STATUS_COMMIT_MISSING = 'commit_missing'              # 提交记录不存在 → 调用方应标 failed
+BG_STATUS_ERROR = 'error'                                # 未预期异常 → 调用方应标 failed
 
 
 def _noop_log(*args, **kwargs):
@@ -547,17 +568,21 @@ class ExcelDiffCacheService:
             return []
     
     def process_excel_diff_background(self, repository_id, commit_id, file_path):
-        """后台处理Excel文件差异"""
+        """后台处理Excel文件差异。
+
+        返回值（BG_STATUS_*）供调用方判断任务该标 completed 还是 failed。
+        历史行为是「成功与失败都返回 None」，导致调用方只能无条件标 completed。
+        """
         perf_metrics_service = get_perf_metrics_service()
         try:
             log_print(f"开始后台处理Excel差异: repo={repository_id}, commit={commit_id}, file={file_path}", 'EXCEL')
-            
+
             # 检查是否已在处理中（线程安全）
             task_key = f"{repository_id}_{commit_id}_{file_path}"
             with self._processing_lock:
                 if task_key in self._processing_commits:
                     log_print(f"任务已在处理中，跳过: {task_key}", 'EXCEL')
-                    return
+                    return BG_STATUS_SKIPPED_IN_PROGRESS
                 self._processing_commits.add(task_key)
             
             # 确保在Flask应用上下文中执行
@@ -567,7 +592,7 @@ class ExcelDiffCacheService:
                     repository = db.session.get(Repository, repository_id)
                     if not repository:
                         log_print(f"仓库不存在: {repository_id}", 'EXCEL', force=True)
-                        return
+                        return BG_STATUS_REPOSITORY_MISSING
                     project_id = getattr(repository, "project_id", "") or ""
                     project_code = ""
                     try:
@@ -586,7 +611,7 @@ class ExcelDiffCacheService:
                     
                     if not commit:
                         log_print(f"提交不存在: {commit_id}, {file_path}", 'EXCEL', force=True)
-                        return
+                        return BG_STATUS_COMMIT_MISSING
                     
                     # 优先在本地数据库中按时间+ID查找前一提交，避免同秒提交顺序不稳定
                     previous_commit = None
@@ -717,7 +742,11 @@ class ExcelDiffCacheService:
                 finally:
                     with self._processing_lock:
                         self._processing_commits.discard(task_key)
-                
+
+            # 走到这里说明上下文内的处理没有抛异常 → 真的算完并落了缓存。
+            # 显式返回而不是靠「掉出函数末尾得到 None」——后者与失败无法区分。
+            return BG_STATUS_COMPLETED
+
         except Exception as e:
             error_type = type(e).__name__
             error_message = str(e).replace('\n', ' ').strip()
@@ -743,9 +772,13 @@ class ExcelDiffCacheService:
                     "error_message": error_message or "unknown_error",
                 },
             )
-    
+            return BG_STATUS_ERROR
+
     def cleanup_expired_cache(self):
-        """清理已过期的缓存记录（expire_at 已过期 + 状态为 outdated/failed 的记录）"""
+        """清理已过期的缓存记录（expire_at 已过期 + 状态为 outdated/failed 的记录）
+
+        返回：清理条数（int）；**失败返回 None**（理由见 cleanup_old_cache 的说明）。
+        """
         try:
             from sqlalchemy import or_
             now = datetime.now(timezone.utc)
@@ -765,12 +798,20 @@ class ExcelDiffCacheService:
             log_print(f"❌ 清理过期缓存失败: {e}", 'CACHE', force=True)
             try:
                 db.session.rollback()
-            except Exception:
-                pass
-            return 0
+            except Exception as rollback_error:
+                log_print(f"清理过期缓存失败后回滚也失败: {rollback_error}", 'CACHE', force=True)
+            return None
 
     def cleanup_old_cache(self, days=30):
-        """清理超过指定天数的缓存数据和旧版本缓存（合并OR查询，#39）"""
+        """清理超过指定天数的缓存数据和旧版本缓存（合并OR查询，#39）
+
+        返回：清理条数（int）；**失败返回 None**。
+
+        为什么失败不返回 0：调用方（services/task_worker_service.py 的 cleanup_cache
+        分支、routes/cache_management_routes.py 的清理接口）原先把返回值直接当成
+        「清理了 N 条」展示，于是「执行失败」与「本来就没东西可清」在管理界面上
+        完全同形 —— 缓存表可能长期只增不减而无人察觉。返回 None 让调用方必须区分。
+        """
         try:
             from sqlalchemy import or_
             cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
@@ -792,9 +833,10 @@ class ExcelDiffCacheService:
             log_print(f"清理缓存失败: {e}", 'CACHE', force=True)
             try:
                 db.session.rollback()
-            except Exception:
-                pass
-            return 0
+            except Exception as rollback_error:
+                # 原为裸 `except Exception: pass`，回滚失败完全没痕迹
+                log_print(f"清理缓存失败后回滚也失败: {rollback_error}", 'CACHE', force=True)
+            return None
     
     def cleanup_version_mismatch_cache(self):
         """专门清理版本号不匹配的缓存（批量DELETE）"""
@@ -813,7 +855,11 @@ class ExcelDiffCacheService:
             return 0
     
     def _cleanup_old_cache(self, repository_id=None):
-        """清理超过1000条的旧缓存（不包括长处理文件）- 使用子查询批量DELETE"""
+        """清理超过1000条的旧缓存（不包括长处理文件）- 使用子查询批量DELETE
+
+        返回：清理条数（int）；**失败返回 None**。调用方（cache_management_routes 的
+        清理接口）据此区分「执行失败」与「本来就没东西可清」。
+        """
         try:
             base_filter = [
                 DiffCache.cache_status == 'completed',
@@ -848,8 +894,11 @@ class ExcelDiffCacheService:
                 
         except Exception as e:
             log_print(f"❌ 清理旧缓存失败: {e}", 'CACHE', force=True)
-            db.session.rollback()
-            return 0
+            try:
+                db.session.rollback()
+            except Exception as rollback_error:
+                log_print(f"清理旧缓存失败后回滚也失败: {rollback_error}", 'CACHE', force=True)
+            return None
     
     def get_cache_statistics(self, repository_id=None):
         """获取缓存统计信息"""

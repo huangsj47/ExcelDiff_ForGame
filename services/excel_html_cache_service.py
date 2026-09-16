@@ -428,10 +428,12 @@ class ExcelHtmlCacheService:
         except Exception as e:
             try:
                 self.db.session.rollback()
-            except Exception:
-                pass
+            except Exception as rollback_error:
+                self._log_exception("清理过期HTML缓存失败后回滚也失败", rollback_error)
             self._log_exception("清理过期HTML缓存失败", e)
-            return 0
+            # 返回 None 而不是 0：0 是「本来就没东西可清」，两者在管理界面上
+            # 原先是同一个「清理了 0 条」，无法区分（见 cache_management_routes 的清理接口）。
+            return None
     
     def get_cache_statistics(self, repository_id=None):
         """获取HTML缓存统计信息"""

@@ -438,8 +438,11 @@ class WeeklyExcelCacheService:
             )
             return False
 
-    def cleanup_expired_cache(self) -> int:
-        """清理过期缓存（超过90天）- 使用批量DELETE"""
+    def cleanup_expired_cache(self):
+        """清理过期缓存（超过90天）- 使用批量DELETE
+
+        返回：清理条数（int）；**失败返回 None**（区分「执行失败」与「本来就没东西可清」）。
+        """
         try:
             WeeklyVersionExcelCache, flask_app = self._get_model("WeeklyVersionExcelCache", "app")
 
@@ -455,12 +458,19 @@ class WeeklyExcelCacheService:
                 return count
 
         except Exception as e:
-            self.db.session.rollback()
+            try:
+                self.db.session.rollback()
+            except Exception as rollback_error:
+                self._log_exception("清理过期周版本Excel缓存失败后回滚也失败", rollback_error)
             self._log_exception("清理过期周版本Excel缓存失败", e)
-            return 0
+            return None
 
-    def cleanup_old_cache(self) -> int:
-        """清理超过1000条的旧缓存 - 使用子查询批量DELETE"""
+    def cleanup_old_cache(self):
+        """清理超过1000条的旧缓存 - 使用子查询批量DELETE
+
+        返回：清理条数（int）；**失败返回 None**。返回 0 表示「未超限，无需清理」，
+        与失败必须可区分（见 cache_management_routes 的清理接口）。
+        """
         try:
             WeeklyVersionExcelCache, flask_app = self._get_model("WeeklyVersionExcelCache", "app")
 
@@ -487,9 +497,12 @@ class WeeklyExcelCacheService:
                 return count
 
         except Exception as e:
-            self.db.session.rollback()
+            try:
+                self.db.session.rollback()
+            except Exception as rollback_error:
+                self._log_exception("清理超限周版本Excel缓存失败后回滚也失败", rollback_error)
             self._log_exception("清理超限周版本Excel缓存失败", e)
-            return 0
+            return None
 
     def get_cache_stats(self) -> Dict[str, Any]:
         """获取缓存统计信息"""

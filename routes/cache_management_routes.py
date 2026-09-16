@@ -41,15 +41,33 @@ def cleanup_expired_cache():
         )
         db.session.commit()
 
+        # 这些清理方法失败时返回 None（而不是 0），以便与「本来就没东西可清」区分。
+        # 原实现把 None 也当成条数直接展示，于是「清理失败」在管理界面上显示为
+        # 「清理了 0 条」—— 与成功无法区分，缓存表可能长期只增不减而无人察觉。
+        counts = {
+            "expired_count": expired_count,
+            "old_count": old_count,
+            "html_expired_count": html_expired_count,
+            "weekly_excel_expired_count": weekly_excel_expired_count,
+            "weekly_excel_old_count": weekly_excel_old_count,
+        }
+        failed = sorted(name for name, value in counts.items() if value is None)
+        if failed:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "部分清理任务执行失败：" + "、".join(failed),
+                    "failed_tasks": failed,
+                    **counts,
+                    "agent_temp_expired_count": int(agent_temp_expired_count or 0),
+                }
+            ), 500
+
         return jsonify(
             {
                 "success": True,
                 "message": "清理完成",
-                "expired_count": expired_count,
-                "old_count": old_count,
-                "html_expired_count": html_expired_count,
-                "weekly_excel_expired_count": weekly_excel_expired_count,
-                "weekly_excel_old_count": weekly_excel_old_count,
+                **counts,
                 "agent_temp_expired_count": int(agent_temp_expired_count or 0),
             }
         )
@@ -734,6 +752,24 @@ def cleanup_weekly_excel_cache():
     try:
         expired_count = weekly_excel_cache_service.cleanup_expired_cache()
         old_count = weekly_excel_cache_service.cleanup_old_cache()
+
+        # 失败时这两个方法返回 None（0 表示「本来就没东西可清」）。
+        # 原实现把 None 当成条数展示，于是「清理失败」显示为「清理了 0 条」，与成功无法区分。
+        if expired_count is None or old_count is None:
+            failed = [
+                name for name, value in
+                (("expired_count", expired_count), ("old_count", old_count))
+                if value is None
+            ]
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "部分清理任务执行失败：" + "、".join(failed),
+                    "failed_tasks": failed,
+                    "expired_count": expired_count,
+                    "old_count": old_count,
+                }
+            ), 500
 
         return jsonify(
             {

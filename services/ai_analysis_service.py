@@ -191,7 +191,13 @@ def _stream_cached_run(run: AiAnalysisRun) -> Iterable[str]:
         yield _sse_event("result", payload)
 
 
-def cleanup_expired_analysis_runs(retention_days: int = ANALYSIS_CACHE_DAYS) -> int:
+def cleanup_expired_analysis_runs(retention_days: int = ANALYSIS_CACHE_DAYS):
+    """清理过期的 AI 分析记录。
+
+    返回清理条数（int）；**失败返回 None**。
+    失败不返回 0：0 表示「本来就没东西可清」，两者在调用方的日志/界面上无法区分
+    （同 services/excel_diff_cache_service.py::cleanup_old_cache 的说明）。
+    """
     cutoff = _utcnow() - timedelta(days=retention_days)
     try:
         deleted = (
@@ -204,7 +210,7 @@ def cleanup_expired_analysis_runs(retention_days: int = ANALYSIS_CACHE_DAYS) -> 
     except Exception as exc:
         db.session.rollback()
         log_print(f"清理AI分析缓存失败: {exc}", "AI", force=True)
-        return 0
+        return None
 
 
 def _repo_priority(repo: Repository) -> int:
