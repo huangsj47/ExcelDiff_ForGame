@@ -16,6 +16,32 @@ from sqlalchemy import func
 from services.model_loader import get_runtime_models
 
 
+# 与 services/excel_diff_cache_service.py 的 TRUNCATED_NOTICE 保持一致：
+# 那边负责「把截断结果单独标记出来」，这边负责「把它显示出来」。
+# 两边一旦不同，用户看到的就是两套说法，所以文案只在这里再声明一份常量并写清来源。
+TRUNCATED_NOTICE = '文件过大，未完整比对'
+
+# HTML 缓存元数据里记录基线的键（previous_commit_id 是缓存键的一部分，
+# 见 services/excel_diff_cache_service.py 文件头的「基线」注释块）
+BASELINE_METADATA_KEY = 'previous_commit_id'
+
+# 元数据里没有基线键 / 基线解析不出来时的哨兵：含义是「本次不校验」。
+# 它必须区别于 None —— None 是「这个 commit 没有基线（新增文件）」，
+# 是**要求** previous 为空的有效取值。
+BASELINE_UNKNOWN = object()
+
+
+def payload_is_truncated(diff_data) -> bool:
+    """diff_data 是否只是「文件过大」的摘要（行明细已被丢弃）。
+
+    截断负载的 sheets 里 rows 是空的，直接渲染就会落到模板的
+    「工作表 "X" 没有数据或无变更」分支 —— 把「没比完」显示成「没改动」。
+    """
+    if not isinstance(diff_data, dict):
+        return False
+    return bool(diff_data.get('truncated'))
+
+
 class ExcelHtmlCacheService:
     """Excel HTML缓存服务类"""
     
@@ -37,6 +63,48 @@ class ExcelHtmlCacheService:
             log_print(f"{detail}\n{stack}", category, force=True)
         except Exception:
             print(f"[ERROR] {detail}\n{stack}")
+
+    def _log_message(self, message: str, category: str = "CACHE"):
+        """无异常对象的日志出口（与 _log_exception 走同一个 log_print）。"""
+        try:
+            from utils.logger import log_print
+            log_print(message, category, force=True)
+        except Exception:
+            print(f"[WARN] {message}")
+
+    def _resolve_baseline_for_cache(self, repository_id: int, commit_id: str, file_path: str):
+        """解析权威基线（与 ExcelDiffCacheService 同源），失败返回 BASELINE_UNKNOWN。
+
+        HTML 缓存同样不能跨基线复用：同一 commit 用不同 previous 渲染出的 HTML
+        长得一样、但内容完全不同。解析不出来时必须「放弃校验」而不是当成
+        「基线为空」，否则 HTML 缓存会永远不命中。
+        """
+        try:
+            # 延迟导入：避免 excel_diff_cache_service → commit_diff_logic 这条
+            # 较重的依赖链在模块导入期被拉进来（也规避潜在循环导入）。
+            from services.excel_diff_cache_service import (
+                normalize_baseline_id,
+                resolve_authoritative_baseline,
+            )
+        except Exception as exc:
+            self._log_exception("导入基线解析器失败，本次不校验HTML缓存基线", exc)
+            return BASELINE_UNKNOWN
+        try:
+            resolved, baseline = resolve_authoritative_baseline(repository_id, commit_id, file_path)
+        except Exception as exc:
+            self._log_exception("解析HTML缓存基线失败，本次不校验基线", exc)
+            return BASELINE_UNKNOWN
+        if not resolved:
+            return BASELINE_UNKNOWN
+        return normalize_baseline_id(baseline)
+
+    # 与 diff 缓存同源的基线归一化（None / 空串 → None）
+    @staticmethod
+    def _normalize_baseline(value):
+        if value is None or value is BASELINE_UNKNOWN:
+            return value
+        text = str(value).strip()
+        return text or None
 
     @staticmethod
     def _normalize_model_results(names, resolved):
@@ -99,11 +167,28 @@ class ExcelHtmlCacheService:
             
                 if cache_record:
                     # 在 session 上下文内提取所有属性，避免 DetachedInstanceError
+                    metadata = json.loads(cache_record.cache_metadata) if cache_record.cache_metadata else {}
+                    # 基线校验：同一条 (repo, commit, file) 用不同 previous 渲染出来的
+                    # HTML 完全不同，却会命中同一行缓存 —— 必须比对元数据里记录的基线。
+                    stored_baseline = metadata.get(BASELINE_METADATA_KEY, BASELINE_UNKNOWN)
+                    expected_baseline = self._resolve_baseline_for_cache(repository_id, commit_id, file_path)
+                    if (
+                        stored_baseline is not BASELINE_UNKNOWN
+                        and expected_baseline is not BASELINE_UNKNOWN
+                        and self._normalize_baseline(stored_baseline)
+                        != self._normalize_baseline(expected_baseline)
+                    ):
+                        self._log_message(
+                            "⚠️ HTML缓存基线不一致，按未命中处理（避免复用别的基线渲染的HTML）: "
+                            f"file={file_path}, commit={commit_id}, "
+                            f"缓存基线={stored_baseline or '(无)'}, 本次要求={expected_baseline or '(无)'}"
+                        )
+                        return None
                     result = {
                         'html_content': cache_record.html_content,
                         'css_content': cache_record.css_content,
                         'js_content': cache_record.js_content,
-                        'metadata': json.loads(cache_record.cache_metadata) if cache_record.cache_metadata else {},
+                        'metadata': metadata,
                         'created_at': cache_record.created_at,
                         'from_cache': True
                     }
@@ -127,19 +212,27 @@ class ExcelHtmlCacheService:
             
             with flask_app.app_context():
                 cache_key = self.generate_cache_key(repository_id, commit_id, file_path)
-                
+
+                # 把「这份 HTML 是按哪个基线渲染的」写进元数据，供 get_cached_html 校验。
+                # 不改调用方传进来的 dict（它们可能复用同一个 dict），复制一份再补键。
+                persisted_metadata = dict(metadata) if metadata else {}
+                baseline = self._resolve_baseline_for_cache(repository_id, commit_id, file_path)
+                if baseline is not BASELINE_UNKNOWN:
+                    persisted_metadata[BASELINE_METADATA_KEY] = baseline
+                metadata_json = json.dumps(persisted_metadata) if persisted_metadata else None
+
                 existing_cache = ExcelHtmlCache.query.filter_by(
                     repository_id=repository_id,
                     commit_id=commit_id,
                     file_path=file_path,
                     diff_version=self.diff_logic_version
                 ).first()
-            
+
                 if existing_cache:
                     existing_cache.html_content = html_content
                     existing_cache.css_content = css_content
                     existing_cache.js_content = js_content
-                    existing_cache.cache_metadata = json.dumps(metadata) if metadata else None
+                    existing_cache.cache_metadata = metadata_json
                     existing_cache.cache_status = 'completed'
                     existing_cache.updated_at = datetime.utcnow()
                 else:
@@ -151,7 +244,7 @@ class ExcelHtmlCacheService:
                         html_content=html_content,
                         css_content=css_content,
                         js_content=js_content,
-                        cache_metadata=json.dumps(metadata) if metadata else None,
+                        cache_metadata=metadata_json,
                         cache_status='completed',
                         diff_version=self.diff_logic_version
                     )
@@ -176,20 +269,49 @@ class ExcelHtmlCacheService:
         try:
             if not diff_data or diff_data.get('type') != 'excel':
                 raise ValueError("无效的Excel差异数据")
-            
+
             html_content = self._render_excel_diff_html(diff_data)
             css_content = self._generate_excel_diff_css()
             js_content = self._generate_excel_diff_js()
-            
+
             return html_content, css_content, js_content
-            
+
         except Exception as e:
             self._log_exception("生成Excel HTML失败", e)
             raise
-    
+
+    def _render_truncated_notice_html(self, diff_data: Dict[str, Any]) -> str:
+        """截断负载的专用渲染：明确说「文件过大，未完整比对」。
+
+        不再把空 rows 交给模板 —— 那样每个 sheet 都会显示「没有数据或无变更」，
+        与「文件真的没改动」在界面上完全同形，用户会被误导。
+        """
+        original_size = diff_data.get('original_size_mb')
+        max_size = diff_data.get('max_size_mb')
+        size_hint = ''
+        if original_size:
+            size_hint = f'（原始 diff 约 {original_size} MB'
+            if max_size:
+                size_hint += f'，超过 {max_size} MB 的缓存上限'
+            size_hint += '）'
+        detail = diff_data.get('error') or ''
+        return (
+            '<div class="excel-diff-wrapper">'
+            '<div class="alert alert-warning excel-truncated-notice" data-truncated="true">'
+            f'<i class="bi bi-exclamation-triangle me-2"></i>'
+            f'<strong>{TRUNCATED_NOTICE}</strong>{size_hint}'
+            f'<div class="mt-1 small">{detail}</div>'
+            '</div>'
+            '</div>'
+        )
+
     def _render_excel_diff_html(self, diff_data: Dict[str, Any]) -> str:
         """渲染Excel差异HTML模板"""
         try:
+            # 截断负载走专用分支：绝不能落到「没有数据或无变更」的空表格分支
+            if payload_is_truncated(diff_data):
+                return self._render_truncated_notice_html(diff_data)
+
             from flask import current_app
             
             with current_app.app_context():

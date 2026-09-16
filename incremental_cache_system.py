@@ -11,10 +11,58 @@ from services.model_loader import get_runtime_models
 
 class IncrementalCacheManager:
     """增量缓存管理器"""
-    
+
+    # 缓存表里代表「这条缓存可用」的状态。
+    # 取值来自 services/excel_diff_cache_service.py 的 CACHE_STATUS_*：
+    #   completed  正常算完
+    #   truncated  文件过大只存了摘要（**可用但未完整比对**，不应重复排任务）
+    USABLE_CACHE_STATUSES = ('completed', 'truncated')
+
     def __init__(self):
-        self.diff_logic_version = "1.7.0"  # 从app.py获取当前版本
-    
+        # 原先这里硬编码 "1.7.0"（还带着「从app.py获取当前版本」的注释）。
+        # 它和真正的版本源 app.py 的 DIFF_LOGIC_VERSION（当前 1.9.0）早已脱节：
+        #   * 拿去比 repository.cache_version 永远不相等 → 「版本不匹配 → 全量同步」
+        #     被误判成常态；
+        #   * 拿去过滤缓存表则一行都命中不了（且下面那处还过滤了一个不存在的列）。
+        # 现在改成惰性从唯一版本源取，见 diff_logic_version 属性。
+        self._diff_logic_version = None
+
+    @property
+    def diff_logic_version(self):
+        """当前 diff 逻辑版本 —— 唯一版本源是 app.py 的 DIFF_LOGIC_VERSION。
+
+        本模块不允许顶层直接 import app 全局对象（见 .claude/rules/rules.mdc 与
+        tests/test_model_loader_service_decoupling.py），所以通过
+        services/model_loader.get_runtime_models 在运行时取。
+        """
+        if self._diff_logic_version is None:
+            self._diff_logic_version = self._load_diff_logic_version()
+        return self._diff_logic_version
+
+    @staticmethod
+    def _load_diff_logic_version():
+        """取 DIFF_LOGIC_VERSION；取不到则退到 models.cache 的同源解析，再不行返回 None。
+
+        返回 None 时调用方必须**放弃版本过滤**而不是拿一个编造的版本号去过滤：
+        编造的版本号会让过滤条件恒不命中，等价于「永远没有缓存」。
+        """
+        try:
+            version = get_runtime_models("DIFF_LOGIC_VERSION")[0]
+            if version:
+                return str(version)
+        except Exception as exc:
+            print(f"⚠️ 无法从运行时对象取到 DIFF_LOGIC_VERSION: {type(exc).__name__}: {exc}")
+        try:
+            from models.cache import default_diff_logic_version
+            version = default_diff_logic_version()
+            if version:
+                return str(version)
+        except Exception as exc:
+            print(f"⚠️ 无法从 models.cache 解析 DIFF_LOGIC_VERSION: {type(exc).__name__}: {exc}")
+        print("⚠️ 取不到 DIFF_LOGIC_VERSION，缓存查询本次不做版本过滤")
+        return None
+
+
     def add_repository_sync_fields(self):
         """为Repository表添加同步跟踪字段"""
         db = None
@@ -98,24 +146,39 @@ class IncrementalCacheManager:
         """获取已有缓存的文件列表"""
         try:
             DiffCache, = get_runtime_models("DiffCache")
-            
+
             cached_files = set()
-            
-            # 从DiffCache表获取已缓存的文件
-            cached_diffs = DiffCache.query.filter_by(
-                repository_id=repository_id,
-                diff_logic_version=self.diff_logic_version,
-                diff_version=self.diff_logic_version
-            ).all()
-            
+            version = self.diff_logic_version
+
+            # 这里曾经是：
+            #     DiffCache.query.filter_by(repository_id=...,
+            #                               diff_logic_version=self.diff_logic_version,
+            #                               diff_version=self.diff_logic_version)
+            # DiffCache 上**没有 diff_logic_version 这一列**（真名是 diff_version），
+            # SQLAlchemy 在构造查询时直接抛 InvalidRequestError，被下面的 except 吞掉，
+            # 于是本函数**永远返回空集合** —— 调用方（incremental_sync_repository）
+            # 据此认为「一个文件都没缓存过」，每次增量同步都把全部 Excel 重新排进
+            # 任务队列，做的是全量重算，而日志里只有一句含糊的「获取已有缓存失败」。
+            query = DiffCache.query.filter(
+                DiffCache.repository_id == repository_id,
+                DiffCache.cache_status.in_(self.USABLE_CACHE_STATUSES),
+            )
+            if version:
+                # 只认当前版本的缓存：升级 DIFF_LOGIC_VERSION 后旧结果必须重算
+                query = query.filter(DiffCache.diff_version == version)
+            cached_diffs = query.all()
+
             for cache in cached_diffs:
                 cached_files.add(f"{cache.commit_id}:{cache.file_path}")
-            
+
             print(f"📁 仓库 {repository_id} 已有 {len(cached_files)} 个文件缓存")
             return cached_files
-            
+
         except Exception as e:
-            print(f"❌ 获取已有缓存失败: {e}")
+            # 不再静默吞掉：把异常类型和消息打出来。
+            # 「列名写错」与「真的一个缓存都没有」在调用方看来都是空集合，
+            # 只有日志里能看到区别 —— 之前连日志都只是一句无信息量的 print。
+            print(f"❌ 获取已有缓存失败({type(e).__name__}): {e}")
             return set()
     
     def incremental_sync_repository(self, repository_id):

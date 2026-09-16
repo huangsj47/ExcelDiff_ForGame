@@ -75,6 +75,17 @@ class WeeklyVersionDiffCache(db.Model):
     processing_time = db.Column(db.Float)  # 处理时间（秒）
     file_size = db.Column(db.Integer)      # 文件大小（字节）
 
+    # 比较口径版本（DIFF_LOGIC_VERSION）
+    #
+    # DiffCache / ExcelHtmlCache / WeeklyVersionExcelCache 都有这一列，升级
+    # DIFF_LOGIC_VERSION 就会让旧缓存失效；本表原先**没有**，于是合并口径变了
+    # （例如 1.9.0 改成按文本原样读取 Excel）周版本合并 diff 还在用旧结果，
+    # 而且合并 diff 的输入是窗口内多条提交，比单文件缓存更难靠人工发现。
+    #
+    # ⚠️ 这是**新增列**，老库需要迁移（ALTER TABLE weekly_version_diff_cache
+    #    ADD COLUMN diff_version VARCHAR(20)），见报告里的「需要接线」。
+    diff_version = db.Column(db.String(20))
+
     # 时间戳
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -91,6 +102,7 @@ class WeeklyVersionDiffCache(db.Model):
         Index('idx_weekly_diff_status', 'overall_status'),
         Index('idx_weekly_diff_cache_status', 'cache_status'),
         Index('idx_weekly_diff_sync_time', 'last_sync_time'),
+        Index('idx_weekly_diff_version', 'diff_version'),
     )
 
 

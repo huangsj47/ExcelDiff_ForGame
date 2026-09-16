@@ -8,10 +8,12 @@
             {% for sheet_name in excel_data.sheets.keys() %}
             <button class="excel-sheet-tab {% if loop.first %}active{% endif %}"
                     data-sheet="{{ sheet_name }}"
+                    aria-current="{{ 'true' if loop.first else 'false' }}"
                     onclick="showExcelSheet('{{ sheet_name }}')">
                 {{ sheet_name }}
                 {% set sheet = excel_data.sheets[sheet_name] %}
                 {% if sheet.has_changes %}
+                {# 有变更 = 文字 + 颜色双重表达，不让颜色单独承载信息 #}
                 <span class="badge bg-warning ms-1">变更</span>
                 {% endif %}
             </button>
@@ -39,9 +41,9 @@
                     {% if sheet_data.headers %}
                     <thead>
                         <tr>
-                            <th class="excel-row-header excel-bold-text">行号</th>
+                            <th scope="col" class="excel-row-header excel-bold-text">行号</th>
                             {% for header in sheet_data.headers %}
-                            <th class="excel-column-header">
+                            <th scope="col" class="excel-column-header">
                                 <div class="excel-column-id">{{ loop.index0 | excel_column_letter }}</div>
                                 <div class="excel-bold-text">{{ header }}</div>
                             </th>
@@ -98,10 +100,26 @@
                     </table>
                 </div>
             {% else %}
+                {% if excel_data.truncated %}
+                {# 「文件太大、只存了摘要」被清空了 rows，绝不能显示成「没有改动」——
+                   那等于让评审者把没看过的内容当成无变更确认掉。 #}
+                <div class="alert alert-warning excel-truncated-notice mb-0" data-truncated="true">
+                    <i class="bi bi-exclamation-triangle me-2"></i>
+                    <strong>{{ excel_data.notice or '文件过大，未完整比对' }}</strong>
+                    {% if excel_data.original_size_mb and excel_data.max_size_mb %}
+                    （原始 diff 约 {{ '%.1f'|format(excel_data.original_size_mb) }}MB，
+                    超过 {{ '%.0f'|format(excel_data.max_size_mb) }}MB 的缓存上限）
+                    {% endif %}
+                    <div class="mt-1 small">
+                        {{ excel_data.error or '出于缓存体积限制，本文件的逐行差异未保存，请在线重新生成。' }}
+                    </div>
+                </div>
+                {% else %}
                 <div class="p-3 text-muted text-center">
                     <i class="bi bi-file-earmark-spreadsheet fs-3 mb-2"></i>
                     <p>工作表 "{{ sheet_name }}" 没有数据或无变更</p>
                 </div>
+                {% endif %}
             {% endif %}
             </div>
         </div>
@@ -114,20 +132,28 @@
         document.querySelectorAll('.excel-sheet-content').forEach(content => {
             content.classList.remove('active');
         });
-        
+
         // 移除所有标签的active状态
         document.querySelectorAll('.excel-sheet-tab').forEach(tab => {
             tab.classList.remove('active');
+            tab.setAttribute('aria-current', 'false');
         });
-        
+
         // 显示选中的工作表
         const targetSheet = document.getElementById('sheet-' + sheetName);
         if (targetSheet) {
             targetSheet.classList.add('active');
         }
-        
-        // 激活对应的标签
-        event.target.classList.add('active');
+
+        // 激活对应的标签。
+        // 必须用 event.currentTarget 而不是 event.target：标签里还有一个
+        // .badge 子元素（「变更」），点在徽章上时 event.target 是那个 <span>，
+        // active 会加到 span 上，结果标签栏一个高亮都没有。
+        const tab = event.currentTarget;
+        if (tab) {
+            tab.classList.add('active');
+            tab.setAttribute('aria-current', 'true');
+        }
     }
     </script>
     {% else %}

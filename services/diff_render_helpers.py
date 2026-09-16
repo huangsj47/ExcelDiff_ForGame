@@ -10,6 +10,62 @@ import re
 
 from services.model_loader import get_runtime_model
 
+# 截断提示语（与 services/excel_diff_cache_service.py 的 TRUNCATED_NOTICE 同一个口径）。
+# 只在这里再写一份字面量是因为本模块刻意不 import 那个服务：它依赖 DB session，
+# 而渲染函数也被无应用上下文的脚本路径调用（`get_runtime_model` 就是为此存在的）。
+_TRUNCATED_NOTICE = '文件过大，未完整比对'
+
+
+def _payload_is_truncated(payload):
+    """负载是不是「只存了摘要」的超大文件结果。
+
+    判定与 `excel_diff_cache_service.payload_is_truncated` 同口径：先看解析后的
+    dict，再看原始 JSON 文本。这里必须容忍**字符串**形态 —— 本函数的入参来自
+    缓存行（`cache.diff_data` 是 Text 列）或已解析的 dict，两种都会遇到。
+    """
+    if payload is None:
+        return False
+    if isinstance(payload, dict):
+        return bool(payload.get('truncated'))
+    if isinstance(payload, (bytes, bytearray)):
+        payload = payload.decode('utf-8', errors='replace')
+    if isinstance(payload, str):
+        text = payload.lstrip()
+        # 只在确实是 JSON 对象时才解析，避免对普通文本做无意义的 json.loads 开销。
+        if not text.startswith('{'):
+            return False
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            return False
+        return bool(isinstance(parsed, dict) and parsed.get('truncated'))
+    return False
+
+
+def _render_truncated_notice_html(payload, file_path):
+    """截断负载的显式提示（**不能**长得像「无变更」）。"""
+    if not isinstance(payload, dict):
+        payload = {}
+    notice = str(payload.get('notice') or _TRUNCATED_NOTICE)
+    original_mb = payload.get('original_size_mb')
+    max_mb = payload.get('max_size_mb')
+    size_hint = ''
+    if isinstance(original_mb, (int, float)) and isinstance(max_mb, (int, float)):
+        size_hint = f'（原始 diff 约 {original_mb:.1f}MB，超过 {max_mb:.0f}MB 的缓存上限）'
+    detail = str(payload.get('error') or '出于缓存体积限制，本文件的逐行差异未保存，请在线重新生成。')
+    safe_path = html.escape(str(file_path or ''))
+
+    return (
+        '<div class="excel-diff-wrapper">'
+        '<div class="alert alert-warning excel-truncated-notice" data-truncated="true">'
+        '<i class="bi bi-exclamation-triangle me-2"></i>'
+        f'<strong>{html.escape(notice)}</strong>{html.escape(size_hint)}'
+        f'<div class="mt-1 small">{html.escape(detail)}</div>'
+        + (f'<div class="mt-1 small text-muted">{safe_path}</div>' if safe_path else '')
+        + '</div>'
+        '</div>'
+    )
+
 
 def log_print(message, log_type='INFO', force=False):
     """Best-effort runtime logger proxy."""
@@ -32,6 +88,12 @@ _INLINE_HIGHLIGHT_IGNORED_KEYWORDS = {
 def render_excel_diff_html(merged_diff_data, file_path):
     """渲染Excel diff数据为HTML - 完全使用合并diff的样式和结构"""
     try:
+        # 截断负载必须**先**判：它的 sheets 里 rows 是空的（只留了统计），
+        # 落到下面「Excel文件无变更数据」分支就会把「文件太大、没比完」显示成
+        # 「这个文件没有改动」—— 评审者据此确认提交，等于确认了没看过的东西。
+        if _payload_is_truncated(merged_diff_data):
+            return _render_truncated_notice_html(merged_diff_data, file_path)
+
         if not merged_diff_data or not merged_diff_data.get('sheets'):
             return "<div class='alert alert-warning'>Excel文件无变更数据</div>"
 

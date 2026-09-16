@@ -47,6 +47,14 @@ class WeeklyExcelCacheService:
         except Exception:
             print(f"[ERROR] {detail}\n{stack}")
 
+    def _log_message(self, message: str, category: str = "WEEKLY"):
+        """无异常对象的日志出口（与 _log_exception 走同一个 log_print）。"""
+        try:
+            from utils.logger import log_print
+            log_print(message, category, force=True)
+        except Exception:
+            print(f"[WARN] {message}")
+
     @staticmethod
     def _normalize_model_results(names, resolved):
         """规范化 get_runtime_models 返回值，兼容单模型 tuple/plain object。"""
@@ -306,8 +314,37 @@ class WeeklyExcelCacheService:
         except Exception as e:
             self._log_exception("清理旧周版本操作日志失败", e)
 
+    def is_merged_diff_cache_current(self, diff_cache) -> bool:
+        """这条 WeeklyVersionDiffCache 的合并口径是不是当前 DIFF_LOGIC_VERSION。
+
+        为什么需要它：DiffCache / ExcelHtmlCache / WeeklyVersionExcelCache 都有
+        diff_version 列，升级 DIFF_LOGIC_VERSION 就会让旧缓存失效；WeeklyVersionDiffCache
+        原先**没有**这一列（本次补上，见 models/weekly_version.py），于是比较口径变了
+        它还在被复用 —— 周版本合并 diff 是「窗口内多条提交」的结果，比单文件缓存
+        更难靠人工发现，界面上的新旧口径完全同形。
+
+        判定规则：
+          * diff_version 与本服务版本不同 → **不可用**，必须重算
+            （这就是「升级 DIFF_LOGIC_VERSION 后周版本合并 diff 缓存失效」那条路径）；
+          * diff_version 缺失（老库刚加列，值为 NULL）→ 按**可用**处理：这些历史行
+            无法区分「旧口径」和「当前口径」，一律判成不可用会让每次周版本同步都
+            重刷全部 Excel HTML 缓存，而写入方不在本文件、这个开关在这里关不掉。
+            写入方补上 diff_version 之后（见报告「需要接线」），NULL 会自然消失。
+        """
+        if diff_cache is None:
+            return False
+        stored_version = getattr(diff_cache, 'diff_version', None)
+        if not stored_version:
+            return True
+        return stored_version == self.diff_logic_version
+
     def needs_merged_diff_cache(self, config_id: int, file_path: str) -> bool:
-        """判断是否需要合并Diff缓存（只有多次连续提交的Excel文件才需要）"""
+        """判断是否需要合并Diff缓存（只有多次连续提交的Excel文件才需要）
+
+        「已有的合并 diff 是否可用」现在带**版本校验**：合并口径变了
+        （DIFF_LOGIC_VERSION 升级、行上带着旧版本号）就必须重算，否则周版本页面
+        会继续展示用旧口径算出来的合并结果。
+        """
         try:
             if not self.is_excel_file(file_path):
                 return False
@@ -325,6 +362,15 @@ class WeeklyExcelCacheService:
             )
             if not latest_diff_cache or not latest_diff_cache.latest_commit_id:
                 return False
+
+            if not self.is_merged_diff_cache_current(latest_diff_cache):
+                self._log_message(
+                    "⚠️ 周版本合并diff缓存版本不匹配，需要重算: "
+                    f"config_id={config_id}, file={file_path}, "
+                    f"缓存版本={getattr(latest_diff_cache, 'diff_version', None) or 'NULL'} "
+                    f"→ 当前版本={self.diff_logic_version}"
+                )
+                return True
 
             base_commit_id = latest_diff_cache.base_commit_id or ''
             existing_cache = WeeklyVersionExcelCache.query.filter_by(

@@ -186,6 +186,12 @@ def _migrate_weekly_version_diff_cache_columns(db, log_print):
         "weekly_version_diff_cache",
         {
             "status_changed_by": "status_changed_by VARCHAR(100)",
+            # 比较口径版本。DiffCache / ExcelHtmlCache / WeeklyVersionExcelCache 都
+            # 有这一列，本表原先没有 —— 于是 DIFF_LOGIC_VERSION 升级（合并口径变了）
+            # 之后，旧合并 diff 仍会被 needs_merged_diff_cache() 判为可复用。
+            # 合并 diff 的输入是窗口内多条提交，比单文件缓存更难靠人工发现口径过期。
+            # 老库缺这一列时读侧会直接抛 `no such column: diff_version`。
+            "diff_version": "diff_version VARCHAR(20)",
         },
         log_print,
     )

@@ -8,7 +8,29 @@ from datetime import datetime, timezone
 from sqlalchemy import Index
 from . import db
 
-DIFF_LOGIC_VERSION = "1.8.0"
+
+def default_diff_logic_version():
+    """diff_version 列的默认值：**懒惰取唯一版本源**，不再自带一份字面量。
+
+    历史问题：这里曾写死 `DIFF_LOGIC_VERSION = "1.8.0"`，而真正驱动缓存失效的是
+    app.py 的 DIFF_LOGIC_VERSION（当前 1.9.0）。凡是没显式传 diff_version 就落库的
+    缓存记录（例如 cache_diff_error 写的失败记录、脚本/测试直接构造的记录）都会带着
+    一个**过期版本号**出生，随后被「版本不匹配」逻辑当成旧缓存清掉 —— 一个
+    没有任何运行时信号、只能靠人去比字面量才能发现的静默不一致。
+
+    改成按行插入时惰性解析（SQLAlchemy 的列默认值是在 INSERT 时求值的），
+    全仓库就只剩 app.py 那一份字面量（config.py 那份只做界面展示，由
+    tests/test_diff_logic_version_single_source.py 锁定两者一致）。
+    解析不出来时返回 None（= 未标注版本），由写入方显式赋值，绝不猜一个版本号。
+    """
+    try:
+        from services.model_loader import get_runtime_model
+        version = get_runtime_model("DIFF_LOGIC_VERSION")
+        if version:
+            return str(version)
+    except Exception:
+        pass
+    return None
 
 
 class DiffCache(db.Model):
@@ -26,7 +48,7 @@ class DiffCache(db.Model):
     processing_time = db.Column(db.Float, default=0.0)
     cache_status = db.Column(db.String(50), default='pending')  # pending, completed, failed
     error_message = db.Column(db.Text)
-    diff_version = db.Column(db.String(20), default=DIFF_LOGIC_VERSION)
+    diff_version = db.Column(db.String(20), default=default_diff_logic_version)
     commit_time = db.Column(db.DateTime)
     is_long_processing = db.Column(db.Boolean, default=False)
     expire_at = db.Column(db.DateTime)
@@ -62,7 +84,7 @@ class ExcelHtmlCache(db.Model):
     cache_metadata = db.Column(db.Text)
 
     cache_status = db.Column(db.String(50), default='pending')
-    diff_version = db.Column(db.String(20), default=DIFF_LOGIC_VERSION)
+    diff_version = db.Column(db.String(20), default=default_diff_logic_version)
 
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -102,7 +124,7 @@ class MergedDiffCache(db.Model):
     cache_status = db.Column(db.String(50), default='pending')
     processing_time = db.Column(db.Float)
     file_size = db.Column(db.Integer)
-    diff_version = db.Column(db.String(20), default=DIFF_LOGIC_VERSION)
+    diff_version = db.Column(db.String(20), default=default_diff_logic_version)
 
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

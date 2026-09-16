@@ -42,6 +42,100 @@ BG_STATUS_REPOSITORY_MISSING = 'repository_missing'      # 仓库不存在 → �
 BG_STATUS_COMMIT_MISSING = 'commit_missing'              # 提交记录不存在 → 调用方应标 failed
 BG_STATUS_ERROR = 'error'                                # 未预期异常 → 调用方应标 failed
 
+# ---------------------------------------------------------------------------
+#  缓存状态
+#
+#  CACHE_STATUS_TRUNCATED：diff_data 超过 MAX_DIFF_DATA_BYTES 时只保存了摘要
+#  （行明细被丢弃）。历史行为是**仍然写 completed**，于是页面上每个 sheet 都渲染
+#  「工作表 "X" 没有数据或无变更」（templates/diff_partials/excel_diff.html：空 rows
+#  分支）—— 用户以为「这个文件真的没改动」，实际是「太大没比完」。
+#  现在单独用一个状态，统计/清理/界面都能把它和「真的没有变更」区分开。
+# ---------------------------------------------------------------------------
+CACHE_STATUS_COMPLETED = 'completed'
+CACHE_STATUS_TRUNCATED = 'truncated'
+
+# 界面上应该显示的提示语（渲染层直接用它，别再自己拼字符串）
+TRUNCATED_NOTICE = '文件过大，未完整比对'
+
+TRUNCATED_PAYLOAD_MARKER = '"truncated"'
+
+# ---------------------------------------------------------------------------
+#  基线（previous_commit_id）—— 必须进缓存键
+#
+#  同一条 (repository_id, commit_id, file_path) 的缓存记录，「和谁比」在仓库里
+#  至少有 5 条**互不相同**的解析路径：
+#
+#   1) 后台缓存任务：本文件 process_excel_diff_background()。先按
+#      (commit_time, id) 双键取前一条，取不到退到 id 单键，最后回退
+#      resolve_previous_commit()（可能走 VCS 文件历史）。
+#   2) 提交 diff 页/新页：services/commit_diff_view_service.py、
+#      services/commit_diff_page_service.py、services/commit_diff_new_page_service.py。
+#      统一用 resolve_previous_commit(commit, file_commits=...)，而那里的
+#      file_commits 是该文件全部提交**按 commit_time 单键降序**（同秒提交的先后
+#      由数据库返回顺序决定），与 (1) 的 id 次序键并不等价。
+#   3) 「重新计算差异」刷新接口：commit_diff_page_service 里那段
+#      `Commit.query.filter(commit_time < commit.commit_time).order_by(commit_time.desc())`
+#      —— 没有同秒 id 兜底、也没有 VCS 回退；同秒提交会算出 previous=None，
+#      于是整份文件被当成「新增」。
+#   4) 显式传入的 previous：services/vcs_content_service.get_unified_diff_data(commit,
+#      previous_commit) 的入参，来自 services/commit_diff_logic.py 的区间基准
+#      （get_commit_pair_diff_internal 的 base_commit、
+#       `file_commits[1]`、`all_file_commits[pos + 1]` 等）——「区间起点」与
+#      「紧邻前一条」通常不是同一个提交。
+#   5) 周版本窗口起点：services/weekly_version_logic.generate_weekly_merged_diff()，
+#      按 `commit_time < 窗口起点(UTC)` 取前一条；且新缓存建完后若 base 为空，
+#      还会被 get_real_base_commit_from_vcs() 二次改写成 VCS 的真实基准。
+#   6) 增量同步记录的 Repository.last_sync_commit_id：
+#      incremental_cache_system.py 的 get_existing_cached_files() 用它当
+#      「这个提交有没有缓存」的判据（它过去还按一个不存在的列过滤，见该文件注释）。
+#
+#  在这之前缓存键只有 (repository_id, commit_id, file_path, diff_version)：
+#  上面任意一条路径先写入，其它路径就会**直接命中别人基线算出来的结果** ——
+#  结果错、但不报错、也不重算（第二个人看到的是第一个人的基线）。
+#  所以现在：
+#    * 读：get_cached_diff() 把 previous_commit_id 纳入过滤条件，
+#      基线不一致 = 未命中 → 调用方重算；
+#    * 写：save_cached_diff() 把 previous_commit_id 纳入「是否已存在」判定，
+#      不同基线各占一行，不再互相覆盖。
+# ---------------------------------------------------------------------------
+
+# 调用方「没传基线」与「明确要求无基线（新增文件）」是两件事，用哨兵区分：
+# 不传 → 服务自己解析权威基线；传 None → 就是要 previous 为 NULL 的那一行。
+BASELINE_UNSET = object()
+
+
+def normalize_baseline_id(value):
+    """基线标识归一化：None / 空串 / 纯空白统一成 None（= 没有基线）。"""
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def payload_is_truncated(payload):
+    """diff_data 负载是不是「文件过大只存了摘要」。
+
+    先做一次廉价的子串预筛再 json.loads：命中截断时负载已经被换成摘要（很小），
+    但正常负载可能接近 20MB，不该为每条缓存命中都付一次完整解析。
+    我们的写入方（save_cached_diff）总把 'truncated' 放在 JSON 前几个键，
+    因此只看前 4096 字符足够；预筛只是「可能命中」，最终以顶层标记为准。
+    """
+    if not payload:
+        return False
+    if isinstance(payload, dict):
+        return bool(payload.get('truncated'))
+    try:
+        text = str(payload)
+    except Exception:
+        return False
+    if TRUNCATED_PAYLOAD_MARKER not in text[:4096]:
+        return False
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return False
+    return bool(isinstance(parsed, dict) and parsed.get('truncated'))
+
 
 def _noop_log(*args, **kwargs):
     """Fallback no-op logger when log_print is not configured."""
@@ -62,6 +156,79 @@ def configure_excel_diff_cache_service(*, app_instance, db_instance, diff_logic_
     Repository = repository_model
     log_print = log_print_func
     get_unified_diff_data = unified_diff_func
+
+
+def find_previous_commit_in_db(repository_id, commit, file_path):
+    """在数据库里找「紧邻的前一条提交」（基线）。
+
+    这是路径 (1)(2)(3) 共用的**数据库内**基线定义：
+      * 优先按 (commit_time, id) 双键降序取前一条 —— 同秒提交靠自增 id 定序，
+        避免同一秒内多条提交的前后关系随数据库返回顺序漂移；
+      * 取不到再退到纯 id 单键（commit_time 缺失的历史数据）。
+    只查数据库，不触发 VCS 子进程 —— 缓存读路径会高频调用它。
+
+    注意：process_excel_diff_background() 里保留了**同样逻辑的内联查询**
+    （tests/test_excel_diff_performance_safety.py 的
+    test_background_excel_previous_commit_query_has_time_and_id_tiebreak 直接断言
+    那个函数体里必须有 `Commit.commit_time == commit.commit_time` 与
+    `Commit.id < commit.id`）。两处必须保持一致：本函数是读缓存时的基线口径，
+    那个函数是写缓存时的基线口径，不一致就等于缓存键白加。
+    """
+    if Commit is None or commit is None:
+        return None
+    previous_commit = None
+    if commit.commit_time is not None:
+        previous_commit = Commit.query.filter(
+            Commit.repository_id == repository_id,
+            Commit.path == file_path,
+            or_(
+                Commit.commit_time < commit.commit_time,
+                and_(Commit.commit_time == commit.commit_time, Commit.id < commit.id),
+            ),
+        ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
+    if previous_commit is None:
+        previous_commit = Commit.query.filter(
+            Commit.repository_id == repository_id,
+            Commit.path == file_path,
+            Commit.id < commit.id,
+        ).order_by(Commit.id.desc()).first()
+    return previous_commit
+
+
+def resolve_authoritative_baseline(repository_id, commit_id, file_path):
+    """解析「权威基线」，返回 (是否解析成功, previous_commit_id)。
+
+    只做数据库解析（见 find_previous_commit_in_db），**不**走 VCS 回退：缓存读路径
+    不该为了校验一个基线去起 git 子进程。数据库判不出来时返回 (False, None)，
+    调用方必须退化为「不校验基线」而不是当成「基线为空」—— 后者会让所有缓存
+    永远不命中、每次访问都全量重算。
+    """
+    if Commit is None or db is None:
+        return False, None
+    try:
+        commit = Commit.query.filter_by(
+            repository_id=repository_id,
+            commit_id=commit_id,
+            path=file_path,
+        ).first()
+        if commit is None:
+            # 少数调用方只按 commit_id 建缓存（path 可能带/不带前缀），放宽一次
+            commit = Commit.query.filter_by(
+                repository_id=repository_id,
+                commit_id=commit_id,
+            ).first()
+        if commit is None:
+            return False, None
+        previous_commit = find_previous_commit_in_db(repository_id, commit, file_path)
+        if previous_commit is None:
+            # 解析成功，结论就是「该文件在这条提交之前没有更早的提交」。
+            # 此时后台路径可能仍会通过 VCS 回退拿到一个真实基线，两边会不一致；
+            # 那种情况留给调用方显式传 previous_commit_id（见 get_cached_diff）。
+            return True, None
+        return True, normalize_baseline_id(getattr(previous_commit, 'commit_id', None))
+    except Exception as exc:
+        log_print(f"⚠️ 解析缓存基线失败 repo={repository_id}, commit={commit_id}: {exc}", 'CACHE')
+        return False, None
 
 class ExcelDiffCacheService:
     """Excel文件差异缓存服务"""
@@ -272,58 +439,130 @@ class ExcelDiffCacheService:
         except Exception as e:
             log_print(f"清理旧操作日志失败: {e}", 'ERROR')
     
-    def get_cached_diff(self, repository_id, commit_id, file_path):
-        """获取缓存的差异数据，检查版本号匹配"""
+    def _resolve_expected_baseline(self, repository_id, commit_id, file_path, previous_commit_id):
+        """决定这次查询要求缓存记录带哪个基线。
+
+        返回 (是否校验基线, 期望的 previous_commit_id)。
+        「不校验」只发生在两种情况下：调用方明确交出了决定权而数据库又判不出来。
+        这两种情况下宁可退回历史行为（取最新一行），也不要误判成「基线不一致」
+        —— 后者会让缓存永远不命中、每次访问都重算整份大文件。
+        """
+        if previous_commit_id is not BASELINE_UNSET:
+            return True, normalize_baseline_id(previous_commit_id)
+        resolved, baseline = resolve_authoritative_baseline(repository_id, commit_id, file_path)
+        if not resolved:
+            log_print(
+                f"⚠️ 无法解析缓存基线（数据库里找不到对应提交），"
+                f"本次不校验 previous_commit_id: repo={repository_id}, commit={commit_id}, file={file_path}",
+                'CACHE'
+            )
+        return resolved, baseline
+
+    @staticmethod
+    def _build_cache_query(repository_id, commit_id, file_path, expected_baseline, diff_version=BASELINE_UNSET,
+                           statuses=(CACHE_STATUS_COMPLETED, CACHE_STATUS_TRUNCATED)):
+        """按 (仓库, 提交, 文件, 状态[, 版本][, 基线]) 构造缓存查询。
+
+        基线是**缓存键的一部分**：expected_baseline 传 BASELINE_UNSET 表示本次不校验，
+        传 None 表示要求 previous_commit_id IS NULL（新增文件），传字符串则要求精确匹配。
+        `Column == None` 在 SQLAlchemy 里渲染成 IS NULL，正是我们要的语义。
+        """
+        query = (
+            DiffCache.query
+            .populate_existing()
+            .filter(DiffCache.repository_id == repository_id)
+            .filter(DiffCache.commit_id == commit_id)
+            .filter(DiffCache.file_path == file_path)
+            .filter(DiffCache.cache_status.in_(statuses))
+        )
+        if diff_version is not BASELINE_UNSET:
+            query = query.filter(DiffCache.diff_version == diff_version)
+        if expected_baseline is not BASELINE_UNSET:
+            query = query.filter(DiffCache.previous_commit_id == expected_baseline)
+        return query
+
+    def get_cached_diff(self, repository_id, commit_id, file_path, previous_commit_id=BASELINE_UNSET):
+        """获取缓存的差异数据，检查**版本号 + 基线**匹配。
+
+        previous_commit_id：
+          * 不传（BASELINE_UNSET）：服务自己解析权威基线再校验（推荐，老调用方无需改动）；
+          * 传 None：明确要「无基线」的缓存（新增文件）；
+          * 传字符串：明确要该基线的缓存（调用方自己知道和谁比，例如区间合并 diff）。
+        基线不一致 → 当未命中，让调用方重算。绝不返回「别人基线算出来的」diff，
+        因为那种结果**看不出错**（同样的表格、同样格式，只是比错了对象）。
+        """
         try:
             log_print(f"🔍 查询缓存: repo={repository_id}, commit={commit_id[:8]}, file={file_path}", 'CACHE')
 
-            # 只刷新本次查询命中的对象，避免会话全量失效带来的额外开销
-            cache = (
-                DiffCache.query
-                .populate_existing()
-                .filter_by(
-                repository_id=repository_id,
-                commit_id=commit_id,
-                file_path=file_path,
-                cache_status='completed',
-                diff_version=DIFF_LOGIC_VERSION  # 只返回当前版本的缓存
-                )
-                .order_by(DiffCache.updated_at.desc())
-                .first()
+            baseline_checked, expected_baseline = self._resolve_expected_baseline(
+                repository_id, commit_id, file_path, previous_commit_id
             )
-            
+            baseline_filter = expected_baseline if baseline_checked else BASELINE_UNSET
+
+            cache = self._build_cache_query(
+                repository_id, commit_id, file_path, baseline_filter, DIFF_LOGIC_VERSION
+            ).order_by(DiffCache.updated_at.desc()).first()
+
             if cache:
                 log_print(f"✅ 缓存命中: {file_path} | 版本: {cache.diff_version} | 创建时间: {cache.created_at}", 'CACHE')
                 log_print(f"📊 缓存数据大小: {len(cache.diff_data)} 字符 | 处理时间: {cache.processing_time:.2f}秒", 'CACHE')
-                return cache
-            else:
-                # 检查是否存在旧版本的缓存
-                old_cache = (
-                    DiffCache.query
-                    .populate_existing()
-                    .filter_by(
-                        repository_id=repository_id,
-                        commit_id=commit_id,
-                        file_path=file_path,
-                        cache_status='completed'
+                if baseline_filter is not BASELINE_UNSET:
+                    log_print(f"🧷 基线校验通过: previous={expected_baseline or '(无)'}", 'CACHE')
+                if cache.cache_status == CACHE_STATUS_TRUNCATED or payload_is_truncated(cache.diff_data):
+                    # 明确喊出来：这条缓存**不是**「没有变更」，而是「太大没比完」。
+                    log_print(
+                        f"⚠️ 命中截断缓存（{TRUNCATED_NOTICE}）: {file_path} | 状态={cache.cache_status}",
+                        'CACHE', force=True
                     )
-                    .first()
+                return cache
+
+            # 未命中：区分「根本没有」和「有但基线/版本对不上」，后者要清掉以免反复被查到
+            stale = self._build_cache_query(
+                repository_id, commit_id, file_path, baseline_filter
+            ).order_by(DiffCache.updated_at.desc()).first()
+
+            if stale is not None:
+                log_print(
+                    f"⚠️ 发现基线或版本不匹配的缓存: {file_path} | "
+                    f"缓存版本: {stale.diff_version} → 当前版本: {DIFF_LOGIC_VERSION} | "
+                    f"缓存基线: {stale.previous_commit_id or '(无)'} → 本次要求: "
+                    f"{expected_baseline if baseline_checked else '(不校验)'}",
+                    'CACHE', force=True
                 )
-                
-                if old_cache and old_cache.diff_version != DIFF_LOGIC_VERSION:
-                    log_print(f"⚠️ 发现旧版本缓存: {file_path} | 旧版本: {old_cache.diff_version} → 当前版本: {DIFF_LOGIC_VERSION}", 'CACHE')
+                if stale.diff_version != DIFF_LOGIC_VERSION:
                     # 标记旧缓存为过期，稍后清理
-                    old_cache.cache_status = 'outdated'
+                    stale.cache_status = 'outdated'
                     db.session.commit()
                     log_print(f"🗑️ 旧版本缓存已标记为过期", 'CACHE')
                 else:
-                    log_print(f"❌ 缓存未命中: {file_path} | 需要重新计算diff", 'CACHE')
-                
+                    log_print("🧷 基线不一致 → 视为未命中，交给调用方重算", 'CACHE', force=True)
+            else:
+                log_print(f"❌ 缓存未命中: {file_path} | 需要重新计算diff", 'CACHE')
+
             return None
         except Exception as e:
             log_print(f"❌ 获取缓存差异失败: {e}", 'CACHE', force=True)
+            # 上面可能执行过 `stale.cache_status = 'outdated'` 的写操作：
+            # 出错不 rollback 会把脏事务留在 session 里，影响后续查询。
+            try:
+                db.session.rollback()
+            except Exception as rollback_error:
+                log_print(f"获取缓存差异失败后回滚也失败: {rollback_error}", 'CACHE', force=True)
             return None
-    
+
+    @staticmethod
+    def is_truncated_cache(cache_row):
+        """这条缓存是不是「文件过大只存了摘要」。
+
+        渲染层/API 层应当据此显示 TRUNCATED_NOTICE，而不是把空 rows 当「无变更」。
+        兼容历史数据：过去截断记录的状态是 completed，只能看负载里的 truncated 标记。
+        """
+        if cache_row is None:
+            return False
+        if getattr(cache_row, 'cache_status', None) == CACHE_STATUS_TRUNCATED:
+            return True
+        return payload_is_truncated(getattr(cache_row, 'diff_data', None))
+
     def optimize_diff_data(self, diff_data):
         """优化diff数据，只保留有变更的行"""
         if not diff_data or diff_data.get('type') != 'excel':
@@ -389,10 +628,27 @@ class ExcelDiffCacheService:
     # diff_data 序列化后最大允许 20MB (#40)
     MAX_DIFF_DATA_BYTES = 20 * 1024 * 1024
 
-    def save_cached_diff(self, repository_id, commit_id, file_path, diff_data, processing_time=0.0, file_size=0, previous_commit_id=None, commit_time=None):
-        """保存差异数据到缓存，支持智能缓存策略"""
+    def save_cached_diff(self, repository_id, commit_id, file_path, diff_data, processing_time=0.0, file_size=0, previous_commit_id=BASELINE_UNSET, commit_time=None):
+        """保存差异数据到缓存，支持智能缓存策略。
+
+        previous_commit_id 现在是**缓存键的一部分**（见文件头「基线」注释块）：
+          * 不传（BASELINE_UNSET）：服务自己解析权威基线后落库（老调用方无需改动）；
+          * 传 None：这条提交没有基线（新增文件）；
+          * 传具体值：调用方自己知道和谁比（例如区间合并 diff 的起点）。
+        「是否已存在」的判定也带基线，因此两个不同基线各占一行，不会互相覆盖 ——
+        否则后者会把前者刚算出来的、属于别的基线结果直接改写成自己的。
+        """
         try:
             log_print(f"💾 保存缓存: repo={repository_id}, commit={commit_id[:8]}, file={file_path}", 'CACHE')
+
+            if previous_commit_id is BASELINE_UNSET:
+                baseline_known, resolved_baseline = resolve_authoritative_baseline(
+                    repository_id, commit_id, file_path
+                )
+                # 解析不出来时落 NULL：读路径同样解析不出来 → 同样不校验，两边一致。
+                previous_commit_id = resolved_baseline if baseline_known else None
+            else:
+                previous_commit_id = normalize_baseline_id(previous_commit_id)
 
             # 统一在保存入口执行轻量化，确保所有调用方行为一致
             normalized_diff_data = diff_data
@@ -403,7 +659,8 @@ class ExcelDiffCacheService:
             diff_json = json.dumps(normalized_diff_data)
             diff_bytes = len(diff_json.encode('utf-8'))
             payload_mb = diff_bytes / (1024 * 1024)
-            if diff_bytes > self.MAX_DIFF_DATA_BYTES:
+            is_truncated = diff_bytes > self.MAX_DIFF_DATA_BYTES
+            if is_truncated:
                 log_print(
                     f"⚠️ diff_data 超出大小限制: {file_path} | "
                     f"{payload_mb:.2f}MB > {self.MAX_DIFF_DATA_BYTES / (1024*1024):.0f}MB，"
@@ -412,7 +669,11 @@ class ExcelDiffCacheService:
                 summary_data = {
                     'type': normalized_diff_data.get('type', 'excel'),
                     'truncated': True,
+                    # 显式写清楚「为什么只有摘要」，让渲染层不必靠猜
+                    'truncation_reason': 'payload_too_large',
+                    'notice': TRUNCATED_NOTICE,
                     'original_size_mb': round(payload_mb, 2),
+                    'max_size_mb': round(self.MAX_DIFF_DATA_BYTES / (1024 * 1024), 2),
                     'error': f'数据过大({payload_mb:.1f}MB)，已截断。请在线查看差异。',
                 }
                 if 'sheets' in normalized_diff_data:
@@ -426,9 +687,13 @@ class ExcelDiffCacheService:
                 diff_json = json.dumps(summary_data)
                 log_print(f"📦 已替换为摘要数据: {len(diff_json)} 字符", 'CACHE')
 
+            # 截断结果绝不能标成 completed：那会让界面上把「太大没比完」显示成
+            # 「工作表没有数据或无变更」，用户以为文件真的没改动。
+            cache_status = CACHE_STATUS_TRUNCATED if is_truncated else CACHE_STATUS_COMPLETED
+
             # 判断是否为长处理时间文件
             is_long_processing = processing_time > self.long_processing_threshold
-            
+
             # 计算过期时间
             expire_at = None
             if is_long_processing:
@@ -438,20 +703,21 @@ class ExcelDiffCacheService:
             else:
                 # 普通文件根据1000条限制管理，不设置过期时间
                 log_print(f"⚡ 普通处理文件({processing_time:.2f}s)，按1000条限制管理", 'CACHE')
-            
-            # 检查是否已存在
+
+            # 检查是否已存在（**带基线**：不同基线是不同缓存，不互相覆盖）
             existing_cache = DiffCache.query.filter_by(
                 repository_id=repository_id,
                 commit_id=commit_id,
-                file_path=file_path
-            ).first()
-            
+                file_path=file_path,
+                previous_commit_id=previous_commit_id,
+            ).order_by(DiffCache.updated_at.desc()).first()
+
             if existing_cache:
                 # 更新现有缓存（使用已序列化的 diff_json）
                 existing_cache.diff_data = diff_json
                 existing_cache.processing_time = processing_time
                 existing_cache.file_size = file_size
-                existing_cache.cache_status = 'completed'
+                existing_cache.cache_status = cache_status
                 existing_cache.diff_version = DIFF_LOGIC_VERSION
                 existing_cache.is_long_processing = is_long_processing
                 existing_cache.expire_at = expire_at
@@ -469,7 +735,7 @@ class ExcelDiffCacheService:
                     diff_data=diff_json,
                     processing_time=processing_time,
                     file_size=file_size,
-                    cache_status='completed',
+                    cache_status=cache_status,
                     diff_version=DIFF_LOGIC_VERSION,
                     commit_time=commit_time,
                     is_long_processing=is_long_processing,
@@ -477,26 +743,32 @@ class ExcelDiffCacheService:
                 )
                 db.session.add(new_cache)
                 log_print(f"💾 创建新缓存: {file_path}", 'CACHE')
-            
+
             db.session.commit()
-            
+
             # 保存后检查是否需要清理旧缓存 (#33: 移除冗余验证查询)
             if not is_long_processing:
                 self._cleanup_old_cache(repository_id)
-            
+
             final_bytes = len(diff_json.encode('utf-8'))
             log_print(
-                f"✅ 缓存保存成功: {file_path} | 处理时间: {processing_time:.2f}秒 | "
-                f"payload={final_bytes / 1024:.1f}KB",
+                f"✅ 缓存保存成功: {file_path} | 状态: {cache_status} | 基线: {previous_commit_id or '(无)'} | "
+                f"处理时间: {processing_time:.2f}秒 | payload={final_bytes / 1024:.1f}KB",
                 'CACHE'
             )
+            if is_truncated:
+                log_print(
+                    f"📢 该缓存只保存了摘要（{TRUNCATED_NOTICE}），状态记作 {CACHE_STATUS_TRUNCATED}，"
+                    f"界面必须显示「{TRUNCATED_NOTICE}」而不是「无变更」: {file_path}",
+                    'CACHE', force=True
+                )
             return True
-            
+
         except Exception as e:
             log_print(f"❌ 保存缓存失败: {e}", 'CACHE', force=True)
             db.session.rollback()
             return False
-    
+
     def cache_diff_error(self, repository_id, commit_id, file_path, error_message):
         """缓存错误信息"""
         try:
@@ -827,7 +1099,8 @@ class ExcelDiffCacheService:
                     DiffCache.created_at < cutoff_date,                                       # 超期缓存
                     DiffCache.cache_status == 'outdated',                                     # 标记过期
                     db.and_(DiffCache.diff_version != DIFF_LOGIC_VERSION,
-                            DiffCache.cache_status == 'completed'),                           # 版本不匹配
+                            DiffCache.cache_status.in_((
+                                CACHE_STATUS_COMPLETED, CACHE_STATUS_TRUNCATED))),        # 版本不匹配
                 )
             ).delete(synchronize_session=False)
             
@@ -867,7 +1140,8 @@ class ExcelDiffCacheService:
         """
         try:
             base_filter = [
-                DiffCache.cache_status == 'completed',
+                # 截断缓存同样占配额：它不参与「版本不匹配」清理，漏掉会让表只增不减
+                DiffCache.cache_status.in_((CACHE_STATUS_COMPLETED, CACHE_STATUS_TRUNCATED)),
                 DiffCache.is_long_processing == False  # 不清理长处理文件
             ]
             
@@ -917,28 +1191,32 @@ class ExcelDiffCacheService:
             processing_count = query.filter(DiffCache.cache_status == 'processing').count()
             failed_count = query.filter(DiffCache.cache_status == 'failed').count()
             outdated_count = query.filter(DiffCache.cache_status == 'outdated').count()
-            
+            # 截断（文件过大只存摘要）必须与 completed 分开统计：
+            # 否则管理界面上「已完成」包含了「根本没比完」的缓存。
+            truncated_count = query.filter(DiffCache.cache_status == CACHE_STATUS_TRUNCATED).count()
+
             # 获取当前版本的缓存数量
             current_version_count = query.filter(
                 DiffCache.diff_version == DIFF_LOGIC_VERSION,
                 DiffCache.cache_status == 'completed'
             ).count()
-            
+
             # 获取长处理文件数量
             long_processing_count = query.filter(
                 DiffCache.is_long_processing == True,
                 DiffCache.cache_status == 'completed'
             ).count()
-            
+
             # 计算普通处理文件数量
             normal_processing_count = completed_count - long_processing_count
-            
+
             return {
                 'total_count': total_count,
                 'completed_count': completed_count,
                 'processing_count': processing_count,
                 'failed_count': failed_count,
                 'outdated_count': outdated_count,
+                'truncated_count': truncated_count,
                 'current_version_count': current_version_count,
                 'long_processing_count': long_processing_count,
                 'normal_processing_count': normal_processing_count,
@@ -952,6 +1230,7 @@ class ExcelDiffCacheService:
                 'processing_count': 0,
                 'failed_count': 0,
                 'outdated_count': 0,
+                'truncated_count': 0,
                 'current_version_count': 0,
                 'long_processing_count': 0,
                 'normal_processing_count': 0,
@@ -971,6 +1250,7 @@ class ExcelDiffCacheService:
                     'processing_count': 0,
                     'failed_count': 0,
                     'outdated_count': 0,
+                    'truncated_count': 0,
                     'current_version_count': 0,
                     'long_processing_count': 0,
                     'normal_processing_count': 0,
@@ -984,13 +1264,16 @@ class ExcelDiffCacheService:
             processing_count = query.filter(DiffCache.cache_status == 'processing').count()
             failed_count = query.filter(DiffCache.cache_status == 'failed').count()
             outdated_count = query.filter(DiffCache.cache_status == 'outdated').count()
-            
+            # 截断（文件过大只存摘要）与 completed 分开统计，避免管理界面把
+            # 「根本没比完」算进「已完成」。
+            truncated_count = query.filter(DiffCache.cache_status == CACHE_STATUS_TRUNCATED).count()
+
             # 获取当前版本的缓存数量
             current_version_count = query.filter(
                 DiffCache.diff_version == DIFF_LOGIC_VERSION,
                 DiffCache.cache_status == 'completed'
             ).count()
-            
+
             # 获取长处理文件数量
             long_processing_count = query.filter(
                 DiffCache.is_long_processing == True,
@@ -1025,6 +1308,7 @@ class ExcelDiffCacheService:
                 'processing_count': processing_count,
                 'failed_count': failed_count,
                 'outdated_count': outdated_count,
+                'truncated_count': truncated_count,
                 'current_version_count': current_version_count,
                 'long_processing_count': long_processing_count,
                 'normal_processing_count': normal_processing_count,
@@ -1038,6 +1322,7 @@ class ExcelDiffCacheService:
                 'processing_count': 0,
                 'failed_count': 0,
                 'outdated_count': 0,
+                'truncated_count': 0,
                 'current_version_count': 0,
                 'long_processing_count': 0,
                 'normal_processing_count': 0,
