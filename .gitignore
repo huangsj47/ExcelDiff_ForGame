@@ -55,3 +55,9 @@ task_plan.md
 test_output.txt
 
 docs/notes/
+
+# 项目专属 skill 目录由平台运行期创建/上传（见 skills/projects/）。
+# 它们属于部署实例的数据，不是源码，因此默认忽略；随仓库分发的那份用 `!` 放行。
+# 注意：git 不会进入被排除的目录，所以必须先放行目录本身，其内容才可能被跟踪。
+skills/projects/*/
+!skills/projects/g119/
