@@ -299,3 +299,43 @@ def tmp_path():
 def pytest_sessionfinish(session, exitstatus):
     """会话结束前，确保终端输出可写，避免 pytest 退出时 IO 关闭。"""
     _guard_io()
+
+
+@pytest.fixture
+def stub_thread_in(monkeypatch):
+    """把**某个模块里**的 `threading.Thread` 换成桩，不碰全局 threading 模块。
+
+    ## 为什么不能用 `monkeypatch.setattr("<模块>.threading.Thread", Stub)`
+
+    `monkeypatch.setattr` 遇到带点的路径会逐级 getattr。路径里的 `threading` 是
+    **全局模块对象本身**，`.Thread` 是它的属性 —— 于是这么写等于把
+    `threading.Thread` 在整个进程里换掉，而不只是被测模块的那次引用。
+
+    后果是进程里任何别的地方都会拿到桩：gitpython 执行 git 命令时用
+    `threading.Thread(...)` 起线程读管道，然后 `.join()` —— 桩没有 `join()`，
+    报错是 AttributeError 而且指向跟本测试无关的栈；pytest 自己的插件同理。
+    测试当时可能是绿的（被测路径没触发），但它给后续任何真实子进程调用埋了雷。
+
+    正确做法是把模块的 `threading` **名字**换成一个代理：`Thread` 用桩，
+    其余属性照常透传给真的 threading（`Lock` / `Event` / `current_thread` 等）。
+
+    用法：
+        def test_x(stub_thread_in):
+            stub_thread_in("services.repository_creation_handlers", _NoStartThread)
+    """
+    import importlib
+    import threading as real_threading
+
+    def _apply(module_path: str, thread_cls):
+        module = importlib.import_module(module_path)
+
+        class _ThreadingProxy:
+            Thread = thread_cls
+
+            def __getattr__(self, name):
+                return getattr(real_threading, name)
+
+        monkeypatch.setattr(module, "threading", _ThreadingProxy(), raising=True)
+        return thread_cls
+
+    return _apply

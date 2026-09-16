@@ -124,7 +124,7 @@ def _confirm_commit(client, admin_token: str, commit_id: int):
     assert data.get("success") is True
 
 
-def test_single_mode_full_chain_project_repo_cache_diff_confirm(monkeypatch):
+def test_single_mode_full_chain_project_repo_cache_diff_confirm(monkeypatch, stub_thread_in):
     admin_token = _uid("admin-token")
     monkeypatch.setenv("DEPLOYMENT_MODE", "single")
     monkeypatch.setenv("ADMIN_API_TOKEN", admin_token)
@@ -138,7 +138,7 @@ def test_single_mode_full_chain_project_repo_cache_diff_confirm(monkeypatch):
             # single 模式测试仅验证业务链路，不执行真实 clone。
             return None
 
-    monkeypatch.setattr("services.repository_creation_handlers.threading.Thread", _NoStartThread)
+    stub_thread_in("services.repository_creation_handlers", _NoStartThread)
 
     with app.app_context():
         create_tables()

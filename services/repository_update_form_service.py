@@ -32,6 +32,27 @@ REPOSITORY_UPDATE_FORM_SUBMIT_ERRORS = (
 )
 
 
+def start_background_thread(target, *, daemon=True):
+    """启动一个后台线程，并把「启动」收成一个**模块级接缝**。
+
+    为什么要有这个函数：`threading` 原本是在调用处**函数内** import 的
+    （`import threading` 写在 handle_update_repository_form 的深层嵌套里）。
+    那种写法让测试没有下手的地方 —— 想拦住线程启动，只能去改全局的
+    `threading.Thread`，而那会把整个进程里的线程创建都换掉：pytest 自身、
+    gitpython 读子进程管道（`threading.Thread(...)` 之后还要 `.join()`）
+    都会拿到桩，报错还指向跟被测代码无关的栈。
+
+    收成模块级函数后，测试只要 monkeypatch 本模块的这个名字，影响范围就只剩
+    本模块。函数内保留 `import threading`（本文件顶层不导入它，改动会牵动
+    import 顺序），只是不再散落在业务逻辑中间。
+    """
+    import threading
+
+    thread = threading.Thread(target=target, daemon=daemon)
+    thread.start()
+    return thread
+
+
 def clear_repository_state_for_switch(
     *,
     repository,
@@ -356,10 +377,7 @@ def handle_update_repository_form(
 
                     log_print(f"详细错误信息: {traceback.format_exc()}", "APP", force=True)
 
-            import threading
-
-            thread = threading.Thread(target=async_refilter, daemon=True)
-            thread.start()
+            start_background_thread(async_refilter)
             flash("仓库设置已保存，正在后台重新筛选文件，请稍后查看提交列表。", "info")
         else:
             flash(f'仓库 "{repository.name}" 更新成功', "success")

@@ -349,7 +349,7 @@ def test_agent_temp_cache_expired_entry_returns_404(monkeypatch):
             assert resp.status_code == 404
 
 
-def test_platform_mode_create_git_repository_does_not_start_local_clone_thread(monkeypatch):
+def test_platform_mode_create_git_repository_does_not_start_local_clone_thread(monkeypatch, stub_thread_in):
     admin_token = _uid("admin-token")
     monkeypatch.setenv("DEPLOYMENT_MODE", "platform")
     monkeypatch.setenv("ADMIN_API_TOKEN", admin_token)
@@ -357,7 +357,7 @@ def test_platform_mode_create_git_repository_does_not_start_local_clone_thread(m
     def _fail_thread(*args, **kwargs):
         raise AssertionError("platform模式不应创建本地克隆线程")
 
-    monkeypatch.setattr("services.repository_creation_handlers.threading.Thread", _fail_thread)
+    stub_thread_in("services.repository_creation_handlers", _fail_thread)
 
     with app.app_context():
         create_tables()
@@ -405,7 +405,7 @@ def test_platform_mode_create_git_repository_does_not_start_local_clone_thread(m
         assert repository_payload.get("repository_name") == repository.name
 
 
-def test_platform_mode_create_svn_repository_does_not_start_local_clone_thread(monkeypatch):
+def test_platform_mode_create_svn_repository_does_not_start_local_clone_thread(monkeypatch, stub_thread_in):
     admin_token = _uid("admin-token")
     monkeypatch.setenv("DEPLOYMENT_MODE", "platform")
     monkeypatch.setenv("ADMIN_API_TOKEN", admin_token)
@@ -413,7 +413,7 @@ def test_platform_mode_create_svn_repository_does_not_start_local_clone_thread(m
     def _fail_thread(*args, **kwargs):
         raise AssertionError("platform模式不应创建本地SVN克隆线程")
 
-    monkeypatch.setattr("services.repository_creation_handlers.threading.Thread", _fail_thread)
+    stub_thread_in("services.repository_creation_handlers", _fail_thread)
 
     with app.app_context():
         create_tables()

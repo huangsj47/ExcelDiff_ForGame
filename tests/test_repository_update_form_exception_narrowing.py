@@ -144,15 +144,14 @@ def test_handle_update_repository_form_refilter_logs_force_sync_exception(monkey
         }
     )
 
-    class _InlineThread:
-        def __init__(self, target, daemon=None):
-            self._target = target
-            self.daemon = daemon
-
-        def start(self):
-            self._target()
-
-    monkeypatch.setattr("threading.Thread", _InlineThread)
+    # 直接替换本模块的后台线程启动接缝，线程体同步执行 ——
+    # 不要去改全局的 threading.Thread（见 services/repository_update_form_service.py
+    # 里 start_background_thread 的说明）。
+    monkeypatch.setattr(
+        update_form_service,
+        "start_background_thread",
+        lambda target, **kwargs: target(),
+    )
 
     fake_incremental_module = ModuleType("incremental_cache_system")
 
