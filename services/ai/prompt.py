@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from services.ai.budget import ContextItem
+from services.ai.protocol import build_budget_exhausted_hint
 from services.ai.skill_loader import LoadedSkills
 
 # 参与提示词版本哈希的源文件。
@@ -284,11 +285,11 @@ def build_user_message(
     )
 
     if budget_exhausted:
-        blocks.append(
-            "**索取额度已耗尽。** 请立刻基于已有证据输出 `final`，"
-            "证据不足的维度写 `hit: false` 并在 note 里说明「信息不足」，"
-            "同时在报告里标注信息缺口。"
-        )
+        # 这段文案**只有一份**（在 `protocol` 里，与纠正提示放在一起）。以前这里另写了
+        # 一段同义的，两句话不一样：这里只说「请立刻输出 final」，没有明说「禁止继续
+        # 请求上下文」—— 而那句正是要模型别把最后一轮浪费在又一次索取上。两份文案的
+        # 后果是改一处漏一处，所以合到一处。
+        blocks.append(build_budget_exhausted_hint())
 
     if correction_hint.strip():
         blocks.append("## 上一轮的问题\n\n" + correction_hint.strip())
