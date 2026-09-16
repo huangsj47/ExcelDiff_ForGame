@@ -208,17 +208,48 @@ def approve_all_files(commit_id):
         for rc in related_commits:
             log_print(f"  - ID={rc.id}, path={rc.path}, 当前状态={rc.status}", 'INFO')
         # 将所有相关提交状态设为已确认
+        # 与批量入口同一写法：状态 + 操作者 + 周版本同步（原先这里既不写
+        # status_changed_by 也不做周版本同步，于是从本入口确认后周版本页仍显示
+        # 「未确认」、weekly_version_stats_api 统计不到）
+        from services.commit_status_apply import (
+            apply_commit_status,
+            summarize_sync_results,
+        )
+        from services.status_sync_service import StatusSyncService
+        from utils.request_security import _get_current_user
+
+        sync_service = StatusSyncService(db)
+        current_user = _get_current_user()
+        current_username = current_user.username if current_user else None
+
         updated_count = 0
+        sync_results = []
         for related_commit in related_commits:
-            if related_commit.status != 'confirmed':
-                related_commit.status = 'confirmed'
+            if related_commit.status == 'confirmed':
+                continue
+            outcome = apply_commit_status(
+                related_commit,
+                'confirmed',
+                current_username=current_username,
+                sync_service=sync_service,
+            )
+            if outcome['changed']:
                 updated_count += 1
                 log_print(f"  更新提交 {related_commit.id} 状态为 confirmed", 'INFO')
+            if outcome['sync_result'] is not None:
+                sync_results.append(outcome['sync_result'])
+        # 事务收敛到最外层一次提交（同步以 auto_commit=False 调用）
         db.session.commit()
+        _, sync_failed = summarize_sync_results(sync_results)
         log_print(f"批量确认完成，更新了 {updated_count} 个文件", 'INFO')
+        message = f'已确认 {len(related_commits)} 个文件 (更新了 {updated_count} 个)'
+        if sync_failed:
+            message += f'（{sync_failed} 条周版本同步失败）'
         return jsonify({
-            'status': 'success', 
-            'message': f'已确认 {len(related_commits)} 个文件 (更新了 {updated_count} 个)'
+            'status': 'success',
+            'message': message,
+            'updated_count': updated_count,
+            'sync_failed_count': sync_failed,
         })
     except SQLAlchemyError as e:
         db.session.rollback()
@@ -238,35 +269,57 @@ def batch_approve_commits():
         if not commit_ids:
             return jsonify({'status': 'error', 'message': '未选择任何提交'}), 400
 
+        from services.commit_status_apply import (
+            apply_commit_status,
+            build_batch_result_message,
+            precheck_batch_permissions,
+            summarize_sync_results,
+        )
         from services.status_sync_service import StatusSyncService
+        from utils.request_security import _get_current_user
+
         sync_service = StatusSyncService(db)
-        updated_count = 0
+        current_user = _get_current_user()
+        current_username = current_user.username if current_user else None
         sync_results = []
         permission_cache = {}
+
+        # 先收集本次真正要改的提交（已是目标状态的跳过，保持既有计数口径）
+        targets = []
         for commit_id in commit_ids:
             commit = db.session.get(Commit, commit_id)
-            if not commit:
-                continue
-            project_id = commit.repository.project_id if commit.repository else None
-            if project_id not in permission_cache:
-                permission_cache[project_id] = can_current_user_operate_project_confirmation(project_id, "confirm")
-            allowed, message = permission_cache[project_id]
-            if not allowed:
-                return jsonify({'status': 'error', 'message': message}), 403
+            if commit and commit.status != 'confirmed':
+                targets.append(commit)
 
-            if commit.status != 'confirmed':
-                old_status = commit.status
-                commit.status = 'confirmed'
-                updated_count += 1
-                # 同步状态到周版本diff
-                sync_result = sync_service.sync_commit_to_weekly(commit_id, 'confirmed')
-                sync_results.append(sync_result)
+        # 权限预检必须在任何写入之前完成（原先在循环里边写边判：第二条无权限时
+        # 第一条已经落库，403 之后回滚不掉）
+        allowed, message = precheck_batch_permissions(
+            targets,
+            action="confirm",
+            can_operate=can_current_user_operate_project_confirmation,
+            permission_cache=permission_cache,
+        )
+        if not allowed:
+            return jsonify({'status': 'error', 'message': message}), 403
+
+        for commit in targets:
+            outcome = apply_commit_status(
+                commit,
+                'confirmed',
+                current_username=current_username,
+                sync_service=sync_service,
+            )
+            if outcome['sync_result'] is not None:
+                sync_results.append(outcome['sync_result'])
+
         db.session.commit()
-        # 统计同步结果
-        total_weekly_updated = sum(r.get('updated_count', 0) for r in sync_results if r.get('success'))
+        updated_count = len(targets)
+        total_weekly_updated, sync_failed = summarize_sync_results(sync_results)
         return jsonify({
             'status': 'success',
-            'message': f'已通过 {updated_count} 个提交，同步更新了 {total_weekly_updated} 个周版本记录'
+            'message': build_batch_result_message(updated_count, total_weekly_updated, sync_failed),
+            'updated_count': updated_count,
+            'sync_failed_count': sync_failed,
         })
     except SQLAlchemyError as e:
         db.session.rollback()
@@ -286,35 +339,56 @@ def batch_reject_commits():
         if not commit_ids:
             return jsonify({'status': 'error', 'message': '未选择任何提交'}), 400
 
+        from services.commit_status_apply import (
+            apply_commit_status,
+            build_batch_result_message,
+            precheck_batch_permissions,
+            summarize_sync_results,
+        )
         from services.status_sync_service import StatusSyncService
+        from utils.request_security import _get_current_user
+
         sync_service = StatusSyncService(db)
-        updated_count = 0
+        current_user = _get_current_user()
+        current_username = current_user.username if current_user else None
         sync_results = []
         permission_cache = {}
+
+        # 先收集本次真正要改的提交（已是目标状态的跳过，保持既有计数口径）
+        targets = []
         for commit_id in commit_ids:
             commit = db.session.get(Commit, commit_id)
-            if not commit:
-                continue
-            project_id = commit.repository.project_id if commit.repository else None
-            if project_id not in permission_cache:
-                permission_cache[project_id] = can_current_user_operate_project_confirmation(project_id, "reject")
-            allowed, message = permission_cache[project_id]
-            if not allowed:
-                return jsonify({'status': 'error', 'message': message}), 403
+            if commit and commit.status != 'rejected':
+                targets.append(commit)
 
-            if commit.status != 'rejected':
-                old_status = commit.status
-                commit.status = 'rejected'
-                updated_count += 1
-                # 同步状态到周版本diff
-                sync_result = sync_service.sync_commit_to_weekly(commit_id, 'rejected')
-                sync_results.append(sync_result)
+        # 权限预检必须在任何写入之前完成（理由同 batch_approve_commits）
+        allowed, message = precheck_batch_permissions(
+            targets,
+            action="reject",
+            can_operate=can_current_user_operate_project_confirmation,
+            permission_cache=permission_cache,
+        )
+        if not allowed:
+            return jsonify({'status': 'error', 'message': message}), 403
+
+        for commit in targets:
+            outcome = apply_commit_status(
+                commit,
+                'rejected',
+                current_username=current_username,
+                sync_service=sync_service,
+            )
+            if outcome['sync_result'] is not None:
+                sync_results.append(outcome['sync_result'])
+
         db.session.commit()
-        # 统计同步结果
-        total_weekly_updated = sum(r.get('updated_count', 0) for r in sync_results if r.get('success'))
+        updated_count = len(targets)
+        total_weekly_updated, sync_failed = summarize_sync_results(sync_results)
         return jsonify({
             'status': 'success',
-            'message': f'已拒绝 {updated_count} 个提交，同步更新了 {total_weekly_updated} 个周版本记录'
+            'message': build_batch_result_message(updated_count, total_weekly_updated, sync_failed),
+            'updated_count': updated_count,
+            'sync_failed_count': sync_failed,
         })
     except SQLAlchemyError as e:
         db.session.rollback()
@@ -343,11 +417,36 @@ def reject_commit():
             return jsonify({'status': 'error', 'message': message}), 403
 
         if commit.status != 'rejected':
-            commit.status = 'rejected'
+            # 与其它入口同一写法：状态 + 操作者 + 周版本同步（原先这里既不写
+            # status_changed_by 也不做周版本同步 → merge diff 页拒绝后周版本页
+            # 仍显示未确认）
+            from services.commit_status_apply import (
+                apply_commit_status,
+                summarize_sync_results,
+            )
+            from services.status_sync_service import StatusSyncService
+            from utils.request_security import _get_current_user
+
+            sync_service = StatusSyncService(db)
+            current_user = _get_current_user()
+            current_username = current_user.username if current_user else None
+            outcome = apply_commit_status(
+                commit,
+                'rejected',
+                current_username=current_username,
+                sync_service=sync_service,
+            )
             db.session.commit()
+            _, sync_failed = summarize_sync_results(
+                [outcome['sync_result']] if outcome['sync_result'] is not None else []
+            )
+            message = '提交已拒绝'
+            if sync_failed:
+                message += '（周版本同步失败）'
             return jsonify({
                 'status': 'success',
-                'message': '提交已拒绝'
+                'message': message,
+                'sync_failed_count': sync_failed,
             })
         else:
             return jsonify({

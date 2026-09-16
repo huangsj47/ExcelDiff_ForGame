@@ -31,6 +31,10 @@ _PROTECTED_FILES = {
 _PROTECTED_DIRS = {
     "venv",
     ".venv",
+    # 节点的仓库工作副本目录：`repos` 是现在的默认值（见 agent/repo_paths.py），
+    # `agent_repos` 是历史默认值/显式覆盖值。两者都要保护 —— 发布包不该覆盖或
+    # 删除节点上的工作副本（否则每次自更新都要把每个仓库重新 clone 一遍）。
+    "repos",
     "agent_repos",
     "logs",
     "__pycache__",

@@ -5,10 +5,15 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 import socket
-import os
 from dataclasses import dataclass
+
+try:
+    from . import repo_paths
+except ImportError:  # pragma: no cover - start_agent.py 直接以 agent/ 为根运行时
+    import repo_paths
 
 
 def _try_load_dotenv():
@@ -166,7 +171,14 @@ def load_settings() -> AgentSettings:
         os.environ.get("AGENT_LOCAL_TASK_TYPES")
         or "auto_sync,commit_diff,excel_diff,weekly_sync,weekly_excel_cache,temp_cache_fetch"
     )
-    repos_base_dir = (os.environ.get("AGENT_REPOS_BASE_DIR") or "agent_repos").strip()
+    # 工作副本根目录：这里就解析成**绝对路径**（锚定 agent 安装根；平台源码与
+    # agent 同级时锚定平台仓库根），此后所有消费方取到的都是同一个与 CWD 无关的
+    # 目录。默认值与平台 `build_repository_local_path()` 的默认值同名（`repos`），
+    # 显式覆盖用 `AGENT_REPOS_BASE_DIR` —— 平台读同一个变量，于是「auto_sync 写入
+    # 的目录」与「Diff 读取的目录」必然相同（详见 agent/repo_paths.py 的模块文档）。
+    repos_base_dir = repo_paths.resolve_repos_base_dir(
+        os.environ.get("AGENT_REPOS_BASE_DIR") or ""
+    )
     configured_host = (os.environ.get("AGENT_HOST") or "").strip()
     resolved_host = configured_host or _detect_local_ip()
     configured_name = (os.environ.get("AGENT_NAME") or "").strip()

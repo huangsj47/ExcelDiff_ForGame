@@ -951,6 +951,12 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// 属性值专用转义：escapeHtml 不转义引号，放进 data-* / title 里仍会被 `"` 逃出去
+function escapeHtmlAttribute(text) {
+    if (text == null) return '';
+    return escapeHtml(String(text)).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 // 格式化单元格值函数
 function formatCellValue(value) {
     // 处理空值、null值、undefined值和NaN值
@@ -1477,8 +1483,7 @@ function initMergedExcelDiff(diffData) {
 // 生成合并Excel工作表标签
 function generateMergedExcelTabs(tabsContainer, sheets) {
     const sheetNames = Object.keys(sheets);
-    let tabsHtml = '';
-    
+
     // 分析工作表变更状态
     const sheetAnalysis = sheetNames.map(name => {
         const sheet = sheets[name];
@@ -1495,21 +1500,27 @@ function generateMergedExcelTabs(tabsContainer, sheets) {
         return a.name.localeCompare(b.name);
     });
     
+    // 标签用 DOM API 建：表名来自被审核的 Excel（不可信），
+    // 拼 onclick 会被属性值解码后的单引号逃逸，拼 innerHTML 会被 `"` 逃出属性。
+    tabsContainer.textContent = '';
     sortedSheets.forEach((sheet, index) => {
         const isActive = index === 0 && sheet.hasChanges ? 'active' : '';
         const hasChangesClass = sheet.hasChanges ? 'excel-tab-with-changes' : 'excel-tab-no-changes';
-        const clickable = sheet.hasChanges ? `onclick="switchMergedExcelSheet('${sheet.name}')"` : '';
         const disabled = sheet.hasChanges ? '' : 'excel-tab-disabled';
-        
-        tabsHtml += `
-            <div class="excel-sheet-tab ${hasChangesClass} ${isActive} ${disabled}" 
-                 ${clickable} data-sheet="${sheet.name}">
-                ${sheet.name}
-            </div>
-        `;
+
+        const tab = document.createElement('div');
+        tab.className = ['excel-sheet-tab', hasChangesClass, isActive, disabled].filter(Boolean).join(' ');
+        tab.setAttribute('data-sheet', sheet.name);
+        tab.textContent = sheet.name;
+
+        if (sheet.hasChanges) {
+            tab.addEventListener('click', function() {
+                switchMergedExcelSheet(sheet.name);
+            });
+        }
+
+        tabsContainer.appendChild(tab);
     });
-    
-    tabsContainer.innerHTML = tabsHtml;
 }
 
 // 显示合并Excel工作表内容
@@ -1527,7 +1538,8 @@ function showMergedExcelSheet(contentContainer, sheetName, sheetData) {
         tableHtml += '<thead><tr>';
         tableHtml += '<th scope="col" class="excel-row-header">行号</th>';
         sheetData.headers.forEach(header => {
-            tableHtml += `<th scope="col" class="excel-column-header">${header}</th>`;
+            // 表头来自 Excel 第一行（不可信）
+            tableHtml += `<th scope="col" class="excel-column-header">${escapeHtml(header)}</th>`;
         });
         tableHtml += '</tr></thead>';
     }
@@ -1571,14 +1583,14 @@ function showMergedExcelSheet(contentContainer, sheetName, sheetData) {
                 if (change) {
                     if (change.status === 'removed') {
                         cellClass += ' excel-removed';
-                        cellContent = `<div class="excel-diff-removed">${formatCellValue(change.old_value)}</div>`;
+                        cellContent = `<div class="excel-diff-removed">${escapeHtml(formatCellValue(change.old_value))}</div>`;
                     } else if (change.status === 'added') {
                         cellClass += ' excel-added';
-                        cellContent = `<div class="excel-diff-added">${formatCellValue(change.new_value || cellValue)}</div>`;
+                        cellContent = `<div class="excel-diff-added">${escapeHtml(formatCellValue(change.new_value || cellValue))}</div>`;
                     } else if (change.status === 'modified') {
                         cellClass += ' excel-modified-new';
-                        cellContent = `<div class="excel-diff-old">${formatCellValue(change.old_value)}</div>` +
-                                    `<div class="excel-diff-new">${formatCellValue(change.new_value || cellValue)}</div>`;
+                        cellContent = `<div class="excel-diff-old">${escapeHtml(formatCellValue(change.old_value))}</div>` +
+                                    `<div class="excel-diff-new">${escapeHtml(formatCellValue(change.new_value || cellValue))}</div>`;
                     }
                 }
                 
@@ -1754,8 +1766,6 @@ function generateExcelTabsForContainer(container, sheets) {
     
     const reorderedSheets = changedSheets.concat(unchangedSheets);
 
-    // 生成标签HTML
-    let tabsHtml = '';
     let defaultActiveSheetName = null;
     
     // 选择默认激活的工作表
@@ -1775,32 +1785,43 @@ function generateExcelTabsForContainer(container, sheets) {
         defaultActiveSheetName = reorderedSheets[0].name;
     }
     
+    let tabsHtml = '';
+
     for (let i = 0; i < reorderedSheets.length; i++) {
         const sheet = reorderedSheets[i];
         const sheetName = sheet.name;
         const hasChanges = sheet.hasChanges;
         const isActive = sheetName === defaultActiveSheetName ? 'active' : '';
-        
+
         const tabClass = hasChanges ? 'excel-tab-with-changes' : 'excel-tab-no-changes';
         const activeClass = isActive ? ' active' : '';
-        
+
         // 无变更的sheet和"召唤物"sheet不可点击
         const isSummonSheet = sheetName.includes('召唤物');
         const isClickable = hasChanges && !isSummonSheet;
-        const clickHandler = isClickable ? `onclick="switchExcelSheetInContainer(this, '${sheetName}')"` : '';
         const disabledClass = isClickable ? '' : ' excel-tab-disabled';
-        
+
         // 如果是召唤物sheet，添加特殊标识
         if (isSummonSheet) {
             disabledClass += ' excel-tab-summon-disabled';
         }
-        
+
         tabsHtml += `<div class="excel-sheet-tab ${tabClass}${activeClass}${disabledClass}" ` +
-                   `${clickHandler} ` +
-                   `data-sheet="${sheetName}" data-has-changes="${hasChanges}">${sheetName}</div>`;
+                   `data-sheet="${escapeHtmlAttribute(sheetName)}" data-has-changes="${hasChanges}">` +
+                   `${escapeHtml(sheetName)}</div>`;
     }
-    
+
     tabsContainer.innerHTML = tabsHtml;
+
+    // 点击事件在插入 DOM 后绑定：表名只从 data-sheet 读取，绝不拼进 onclick。
+    // 不可点击的标签（无变更 / 召唤物）带 excel-tab-disabled，跳过。
+    const renderedTabs = tabsContainer.querySelectorAll('.excel-sheet-tab');
+    renderedTabs.forEach(function(tab) {
+        if (tab.classList.contains('excel-tab-disabled')) return;
+        tab.addEventListener('click', function() {
+            switchExcelSheetInContainer(tab, tab.getAttribute('data-sheet'));
+        });
+    });
 }
 
 // 创建修改行的双行结构 - 与单文件diff一致
@@ -1831,7 +1852,7 @@ function createModifiedRowForContainer(row, headers, rowIndex) {
             html += '<td class="excel-cell excel-modified-old modified-column">';
             // 对于null/nan/空值，不显示文本块
             if (oldValue && oldValue.trim() !== '' && oldValue.toLowerCase() !== 'null' && oldValue.toLowerCase() !== 'nan') {
-                html += '<span class="excel-text-bg-old">' + oldValue + '</span>';
+                html += '<span class="excel-text-bg-old">' + escapeHtml(oldValue) + '</span>';
             } else {
                 html += ''; // 空值不显示任何内容
             }
@@ -1839,7 +1860,7 @@ function createModifiedRowForContainer(row, headers, rowIndex) {
         } else {
             // 未变更的单元格 - 使用rowspan=2合并
             const cellValue = formatCellValue(row.data && row.data[header]);
-            html += '<td class="excel-cell excel-unchanged" rowspan="2">' + cellValue + '</td>';
+            html += '<td class="excel-cell excel-unchanged" rowspan="2">' + escapeHtml(cellValue) + '</td>';
         }
     });
 
@@ -1857,7 +1878,7 @@ function createModifiedRowForContainer(row, headers, rowIndex) {
             html += '<td class="excel-cell excel-modified-new modified-column">';
             // 对于null/nan/空值，不显示文本块
             if (newValue && newValue.trim() !== '' && newValue.toLowerCase() !== 'null' && newValue.toLowerCase() !== 'nan') {
-                html += '<span class="excel-text-bg-new">' + newValue + '</span>';
+                html += '<span class="excel-text-bg-new">' + escapeHtml(newValue) + '</span>';
             } else {
                 html += ''; // 空值不显示任何内容
             }
@@ -1913,7 +1934,8 @@ function showExcelSheetInContainer(containerId, sheetName, diffData) {
         sheetData.headers.forEach(function(header) {
             const isModified = modifiedColumns.has(header);
             const headerClass = isModified ? 'excel-column-header excel-modified-column-header' : 'excel-column-header';
-            tableHtml += '<th scope="col" class="' + headerClass + '">' + header + '</th>';
+            // 表头来自 Excel 第一行（不可信）
+            tableHtml += '<th scope="col" class="' + headerClass + '">' + escapeHtml(header) + '</th>';
         });
         tableHtml += '</tr></thead>';
     } else if (sheetData.rows.length > 0 && sheetData.rows[0].data) {
@@ -1925,7 +1947,8 @@ function showExcelSheetInContainer(containerId, sheetName, diffData) {
         headers.forEach(function(header) {
             const isModified = modifiedColumns.has(header);
             const headerClass = isModified ? 'excel-column-header excel-modified-column-header' : 'excel-column-header';
-            tableHtml += '<th scope="col" class="' + headerClass + '">' + header + '</th>';
+            // 表头来自 Excel 第一行（不可信）
+            tableHtml += '<th scope="col" class="' + headerClass + '">' + escapeHtml(header) + '</th>';
         });
         tableHtml += '</tr></thead>';
     }
@@ -1972,7 +1995,7 @@ function showExcelSheetInContainer(containerId, sheetName, diffData) {
                     cellClass += ' excel-removed';
                 }
 
-                tableHtml += '<td class="' + cellClass + '">' + cellValue + '</td>';
+                tableHtml += '<td class="' + cellClass + '">' + escapeHtml(cellValue) + '</td>';
             });
         } else if (row.cells && Array.isArray(row.cells)) {
             // 如果row有cells属性 - 根据行状态添加相应的CSS类
@@ -1987,7 +2010,7 @@ function showExcelSheetInContainer(containerId, sheetName, diffData) {
                     cellClass += ' excel-removed';
                 }
 
-                tableHtml += '<td class="' + cellClass + '">' + cellValue + '</td>';
+                tableHtml += '<td class="' + cellClass + '">' + escapeHtml(cellValue) + '</td>';
             });
         } else if (row.data && typeof row.data === 'object') {
             // 如果row有data属性 - 根据行状态添加相应的CSS类
@@ -2003,7 +2026,7 @@ function showExcelSheetInContainer(containerId, sheetName, diffData) {
                     cellClass += ' excel-removed';
                 }
 
-                tableHtml += '<td class="' + cellClass + '">' + cellValue + '</td>';
+                tableHtml += '<td class="' + cellClass + '">' + escapeHtml(cellValue) + '</td>';
             });
         } else {
             console.warn(`⚠️ 未知的行格式:`, row);

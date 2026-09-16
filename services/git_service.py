@@ -1466,7 +1466,31 @@ class GitService:
     
     @staticmethod
     def _normalize_cell_value(val):
-        """标准化单元格值，统一处理NaN/None/空字符串，避免假diff"""
+        """标准化单元格值：**只**把真正的空值归一为 None，不改写任何字面量。
+
+        口径与主引擎 `services/diff_service.py` 的 `_normalize_value` 一致（本仓库
+        「表里怎么写就怎么比」）：只有 None / NaN / NaT / pd.NA / 空字符串算空；
+        文本 `null` / `None` / `nan` / `<NA>` / `undefined` 与空白串（`'   '`）都是**取值**。
+
+        历史行为（已修）：这里曾做 `str(val).strip()` 并把结果喂给黑名单
+        `('', 'nan', 'none', 'null', '<na>', 'undefined')`，且**返回 strip 后的值**。
+        两个后果都是静默漏审（本方法是 `_fast_compare_rows` 判定「有没有变」的唯一依据）：
+          * 文本 `null` → 空单元格、`null` → `None`：判「相等」→ 不报变更；
+          * `'  x  '` → `'x'`：strip 后判「相等」→ 首尾空格变更不报。
+        这条链路是活的（commit_diff_view_service 的「使用旧的Excel处理逻辑作为备用」、
+        commit_diff_logic 的 Excel 兜底与合并分支），不是死代码。
+
+        为什么 `'undefined'` 不算空：本链路的取值只来自 openpyxl 读到的单元格
+        （`git_excel_parser_helpers.extract_excel_data` 用 `str(cell_value)`），
+        前端 JS 的 `undefined` 不会出现在这里 —— 请求体里它会被 JSON 序列化成
+        `null` 或缺键，`JSON.stringify` 也不产出字符串 `"undefined"`。所以它只能是
+        **配表里真实写下的文本**，按口径必须与空区分。
+
+        为什么不再 strip：读取层原样透传（不 NA 转换、不 strip），比较层再 strip 就等于
+        把「首尾空格变了」这类改动吃掉；空白串本身也是取值。
+
+        回归保护见 tests/test_git_service_cell_fidelity.py。
+        """
         import math
         if val is None:
             return None
@@ -1477,12 +1501,14 @@ class GitService:
         # 尝试 pandas isna
         try:
             import pandas as pd
-            if pd.isna(val):
+            # pd.isna 对标量返回 np.bool_（`x is True` 会失败），必须显式 bool()；
+            # 入参是列表/数组时返回数组，bool() 抛 ValueError → 落到下面按字符串处理。
+            if bool(pd.isna(val)):
                 return None
         except (TypeError, ValueError, ImportError):
             pass
-        val_str = str(val).strip()
-        if val_str.lower() in ('', 'nan', 'none', 'null', '<na>', 'undefined'):
+        val_str = str(val)
+        if val_str == '':
             return None
         return val_str
 

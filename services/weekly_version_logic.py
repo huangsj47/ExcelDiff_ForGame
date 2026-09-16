@@ -1454,11 +1454,11 @@ def generate_weekly_merged_diff(config, file_path, commits):
             # 合并 diff 自动失效」就永远不生效。详见 models/weekly_version.py。
             existing_cache.diff_version = _current_diff_logic_version()
             existing_cache.last_sync_time = datetime.now(timezone.utc)
-            existing_cache.updated_at = datetime.now(timezone.utc)
-            # 如果有新的提交，重置确认状态
             if previous_latest_commit_id != latest_commit.commit_id:
+                # 重置确认状态时操作者必须一起清（否则留下「待确认 + 有确认人」的记录）
                 existing_cache.confirmation_status = json.dumps({"dev": "pending"})
                 existing_cache.overall_status = 'pending'
+                existing_cache.status_changed_by = None
             log_print(f"更新周版本diff缓存: {file_path}", 'WEEKLY')
         else:
             # 创建新缓存

@@ -103,8 +103,17 @@ def admin_login():
             return render_template("admin_login.html", next_url=next_url), 500
 
         if hmac.compare_digest(username, configured_user) and hmac.compare_digest(password, configured_password):
+            # 环境变量管理员在数据库里没有账号，必须把 auth_user_id 显式置空。
+            #
+            # 授权判定（auth/providers.py::is_env_admin_session）用「会话有没有绑定
+            # 数据库用户」来区分两种会话：绑定了就只认数据库当前角色。若这里只是
+            # 盖上 is_admin 而留着上一次数据库登录残留的 auth_user_id，管理员身份
+            # 就会被当成数据库用户会话判定 —— 轻则快照失效、重则身份串号。
             session["is_admin"] = True
             session["admin_user"] = username
+            session["auth_user_id"] = None
+            session["auth_username"] = username
+            session["auth_role"] = "platform_admin"
             session.permanent = True
             flash("管理员登录成功。", "success")
             if not _is_safe_redirect(next_url):

@@ -19,6 +19,7 @@ from services.ai_analysis_service import (
     stream_weekly_analysis,
     update_project_analysis_config,
 )
+from utils.json_body import read_json_object
 from utils.request_security import (
     _get_current_user,
     _has_project_access,
@@ -40,8 +41,14 @@ def ai_project_key_status(project_id):
 def ai_project_key_update(project_id):
     if not _has_project_admin_access(project_id):
         return jsonify({"success": False, "message": "Admin permission required."}), 403
-    payload = request.get_json(silent=True) or {}
+    payload, error = read_json_object()
+    if error is not None:
+        return error
     api_key = payload.get("api_key", "")
+    if not isinstance(api_key, str):
+        # Token 只有字符串这一种合法形态。**不 str() 兜底**：那会把 123 静默存成
+        # "123"、把 [1,2] 存成 "[1, 2]"，用户以为配上的东西根本不是他填的。
+        return jsonify({"success": False, "message": "API Token 必须是字符串。"}), 400
     user = _get_current_user()
     username = getattr(user, "username", "") if user else ""
     ok, message = set_project_api_key(project_id, api_key, updated_by=username)
@@ -61,7 +68,9 @@ def ai_project_config(project_id):
 def ai_project_config_update(project_id):
     if not _has_project_admin_access(project_id):
         return jsonify({"success": False, "message": "Admin permission required."}), 403
-    payload = request.get_json(silent=True) or {}
+    payload, error = read_json_object()
+    if error is not None:
+        return error
     user = _get_current_user()
     username = getattr(user, "username", "") if user else ""
     ok, message, errors = update_project_analysis_config(
@@ -97,7 +106,13 @@ def ai_project_models(project_id):
     if denied is not None:
         return denied
 
-    client, errors = build_endpoint_client(project_id, request.get_json(silent=True) or {})
+    # body 形状必须在**建客户端之前**判定：这个接口会带着项目密钥去请求用户填的地址，
+    # 解析失败就不该有任何出网动作。
+    payload, error = read_json_object()
+    if error is not None:
+        return error
+
+    client, errors = build_endpoint_client(project_id, payload)
     if client is None:
         return jsonify({"success": False, "message": "配置不完整", "errors": errors}), 400
 
@@ -117,7 +132,11 @@ def ai_project_test_connection(project_id):
     if denied is not None:
         return denied
 
-    client, errors = build_endpoint_client(project_id, request.get_json(silent=True) or {})
+    payload, error = read_json_object()
+    if error is not None:
+        return error
+
+    client, errors = build_endpoint_client(project_id, payload)
     if client is None:
         return jsonify({"success": False, "message": "配置不完整", "errors": errors}), 400
 

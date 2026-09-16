@@ -7,6 +7,7 @@ import json
 import difflib
 import html
 import re
+from urllib.parse import quote
 
 from services.model_loader import get_runtime_model
 
@@ -85,6 +86,17 @@ _INLINE_HIGHLIGHT_IGNORED_KEYWORDS = {
 }
 
 
+def _json_payload_safe(payload):
+    r"""把 payload 序列化成可以安全嵌进 <script type="application/json"> 的文本。
+
+    json.dumps 不会转义 `</script>`，所以必须手工把 `</` 变成 `<\/`
+    （JSON 里 `\/` 等价于 `/`），否则内容里的 `</script>` 会提前闭合标签，
+    后面的文本就落回 HTML 解析上下文 —— 那是一条完整的注入链。
+    `</` 在合法 JSON 里只可能出现在字符串内部，因此替换不会破坏 JSON 结构。
+    """
+    return json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+
+
 def render_excel_diff_html(merged_diff_data, file_path):
     """渲染Excel diff数据为HTML - 完全使用合并diff的样式和结构"""
     try:
@@ -118,21 +130,14 @@ def render_excel_diff_html(merged_diff_data, file_path):
                 </div>
             </div>
         </div>
-        <script>
-        // 存储Excel diff数据到全局变量
-        window.weeklyExcelDiffData = """ + json.dumps(merged_diff_data) + """;
-        // 标记数据已准备好
-        window.weeklyExcelDiffDataReady = true;
-        console.log('📊 Excel数据已设置到window.weeklyExcelDiffData');
-        console.log('📊 数据内容:', window.weeklyExcelDiffData);
-        </script>
-        <!-- 将初始化逻辑移到单独的script标签，确保在DOM插入后执行 -->
-        <script>
-        // 通知父页面数据已准备好，可以开始初始化
-        if (typeof window.initWeeklyExcelDiffWhenReady === 'function') {
-            window.initWeeklyExcelDiffWhenReady();
-        }
-        </script>
+        <!-- Excel diff 数据载荷。
+             刻意用 type="application/json"：它**不执行**，页面侧只 JSON.parse。
+             旧实现是两段可执行内联 script（一段赋值、一段调 init），而宿主页面
+             （weekly_version_full_diff.html）对插入内容逐个 eval(script.textContent)，
+             于是被审核文件里的任意文本都能变成可执行代码。
+             json.dumps 不转义 script 结束标签，所以内容里的斜杠必须按 JSON 的转义
+             写法输出（见 _json_payload_safe），否则 sheet 名里的结束标签会直接闭合本标签。 -->
+        <script type="application/json" id="weekly-excel-diff-data" data-weekly-excel-diff="1">{_json_payload_safe(merged_diff_data)}</script>
         """
         return excel_html
 
@@ -158,7 +163,7 @@ def render_git_diff_content(diff_content, file_path, base_commit_id, latest_comm
         <div class="weekly-diff-content">
             <div class="file-diff-container">
                 <div class="file-header">
-                    <i class="fas fa-file-code me-2"></i>{file_path}
+                    <i class="fas fa-file-code me-2"></i>{html.escape(str(file_path or ''))}
                 </div>
                 <div class="diff-content-wrapper">
                     {github_diff_html}
@@ -530,7 +535,13 @@ def render_deleted_file_content(diff_content, file_path, config=None, diff_cache
         previous_version_url = ""
         if config and diff_cache and diff_cache.base_commit_id:
             # 构建查看基准版本文件的URL
-            previous_version_url = f"/weekly-version-config/{config.id}/file-previous-version?file_path={file_path}&commit_id={diff_cache.base_commit_id}"
+            # file_path 是仓库里的路径（不可信），进 query 必须 urlencode：
+            # 否则 `&` / `#` / `"` 能改写 URL，`"` 还能逃出 href="..."
+            previous_version_url = (
+                f"/weekly-version-config/{quote(str(config.id), safe='')}"
+                f"/file-previous-version?file_path={quote(str(file_path or ''), safe='')}"
+                f"&commit_id={quote(str(diff_cache.base_commit_id or ''), safe='')}"
+            )
         # 获取文件扩展名用于显示合适的图标
         file_extension = file_path.split('.')[-1].lower() if '.' in file_path else ''
         file_icon = get_file_icon(file_extension)
@@ -561,7 +572,7 @@ def render_deleted_file_content(diff_content, file_path, config=None, diff_cache
                         <div class="stat-item">
                             <i class="fas fa-file-alt me-2"></i>
                             <span class="stat-label">文件名：</span>
-                            <code class="stat-value">{file_path.split('/')[-1]}</code>
+                            <code class="stat-value">{html.escape(str(file_path or '').split('/')[-1])}</code>
                         </div>
                         <div class="stat-item">
                             <i class="fas fa-minus-circle me-2"></i>
@@ -600,7 +611,7 @@ def render_deleted_file_content(diff_content, file_path, config=None, diff_cache
                 </div>
                 <div class="deleted-content-preview">
                     <div class="code-container">
-                        {''.join([f'<div class="code-line deleted-line"><div class="line-number">{i+1}</div><div class="line-text">{line if line.strip() else " "}</div></div>' for i, line in enumerate(deleted_content_preview)])}
+                        {''.join([f'<div class="code-line deleted-line"><div class="line-number">{i+1}</div><div class="line-text">{html.escape(line) if line.strip() else " "}</div></div>' for i, line in enumerate(deleted_content_preview)])}
                     </div>
                     {f'<div class="more-content-hint"><i class="fas fa-ellipsis-h me-2"></i>还有 {deleted_lines_count - len(deleted_content_preview)} 行内容被删除</div>' if deleted_lines_count > len(deleted_content_preview) else ''}
                 </div>
@@ -850,7 +861,7 @@ def render_deleted_content_details(diff_content):
                     <tr class="diff-line diff-hunk-header">
                         <td class="diff-line-number diff-line-number-old"></td>
                         <td class="diff-line-number diff-line-number-new"></td>
-                        <td class="diff-line-content">{line}</td>
+                        <td class="diff-line-content">{html.escape(line)}</td>
                     </tr>
                 """)
             elif line.startswith('-'):
@@ -948,7 +959,7 @@ def render_new_file_content(file_content, file_path, commit_id):
         <div class="weekly-diff-content">
             <div class="file-diff-container">
                 <div class="file-header">
-                    <i class="fas fa-file-plus me-2"></i>{file_path}
+                    <i class="fas fa-file-plus me-2"></i>{html.escape(str(file_path or ''))}
                 </div>
                 <div class="diff-content-wrapper">
                     <div class="diff-container">
@@ -1059,7 +1070,7 @@ def parse_and_render_diff(diff_content):
                     <div class="diff-line diff-hunk-header">
                         <span class="line-number"></span>
                         <span class="line-number"></span>
-                        <span class="line-content">{line}</span>
+                        <span class="line-content">{html.escape(line)}</span>
                     </div>
                 """)
             elif line.startswith('-'):

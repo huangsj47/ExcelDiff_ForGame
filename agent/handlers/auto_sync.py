@@ -17,6 +17,37 @@ try:
 except Exception:  # pragma: no cover - 独立Agent目录运行时可能无平台utils模块
     build_repository_local_path = None
 
+
+def _load_sibling_repo_paths():
+    """按**文件路径**加载同级的 `agent/repo_paths.py`。
+
+    为什么不能只写 `from .. import repo_paths` / `import repo_paths`：
+    本模块有时是按文件路径直接加载的 —— 独立部署时以 `agent/` 为根运行（此时
+    `import repo_paths` 恰好可用，但没有包上下文），而
+    `tests/test_credential_redaction.py` 的脱敏探针用
+    `importlib.util.spec_from_file_location` 直接执行本文件，那时两种写法都不成立。
+    锚点解析绝不能因为「怎么被导入的」而失效或退回 CWD 相对路径 —— 那正是本次
+    要修的缺陷（`os.path.abspath(相对路径)` 的落点取决于进程 CWD，见
+    agent/repo_paths.py 的模块文档）。
+    """
+    import importlib.util
+
+    path = os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "repo_paths.py")
+    )
+    spec = importlib.util.spec_from_file_location("_agent_repo_paths_standalone", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - 打包缺失时才可能
+        raise ImportError(f"cannot load agent repo path resolver from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+try:
+    from .. import repo_paths
+except ImportError:  # pragma: no cover - 见 _load_sibling_repo_paths 的说明
+    repo_paths = _load_sibling_repo_paths()
+
 _GIT_LOCK_FILES = (
     os.path.join(".git", "index.lock"),
     os.path.join(".git", "config.lock"),
@@ -48,8 +79,12 @@ def _build_repo_local_path_fallback(project_code: str, repository_name: str, rep
     safe_project = _sanitize_segment(project_code, "project")
     safe_repo = _sanitize_segment(repository_name, "repository")
     safe_id = int(repository_id)
-    base_abs = os.path.abspath(base_dir)
-    candidate = os.path.abspath(os.path.join(base_abs, f"{safe_project}_{safe_repo}_{safe_id}"))
+    # 这条分支在 `agent/` 单独打包部署（没有平台 utils）时生效，必须与平台
+    # `build_repository_local_path()` 算出**同一个**路径 —— 这里曾经是
+    # `os.path.abspath(base_dir)`，于是 fallback 分支与平台分支在工作目录不同的
+    # 时候落到两个目录上。锚定规则见 agent/repo_paths.py。
+    base_abs = repo_paths.resolve_repos_base_dir(base_dir)
+    candidate = os.path.normpath(os.path.join(base_abs, f"{safe_project}_{safe_repo}_{safe_id}"))
     if not (candidate == base_abs or candidate.startswith(base_abs + os.sep)):
         raise ValueError("Repository path escapes base directory")
     return candidate
@@ -116,7 +151,10 @@ def execute_auto_sync(task: dict, settings):
     force_reclone = bool(payload.get("force_reclone"))
     force_repair_update = bool(payload.get("force_repair_update")) and not force_reclone
 
-    base_dir = os.path.abspath(settings.repos_base_dir)
+    # 工作副本根目录锚定 agent 安装根（平台源码与 agent 同级时锚定平台仓库根），
+    # 不再用 `os.path.abspath`（相对 CWD）—— 平台 Diff 读的是它自己按同一条规则
+    # 算出的目录，两侧必须逐字符相同。见 agent/repo_paths.py 的模块文档。
+    base_dir = repo_paths.resolve_repos_base_dir(getattr(settings, "repos_base_dir", ""))
     os.makedirs(base_dir, exist_ok=True)
     project_code = str(
         repo_cfg.get("project_code")

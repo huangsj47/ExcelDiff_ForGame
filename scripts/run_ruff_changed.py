@@ -18,8 +18,16 @@ _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 
 def _run_git(args: list[str]) -> str:
+    # `core.quotepath=false`：git 默认把含非 ASCII 的路径按 C 风格**加引号转义**输出
+    # （`diff --git "a/docs/\351\231\267..." "b/docs/..."`）。本模块靠
+    # `diff --git a/(.+?) b/(.+)` 识别文件边界，遇到带引号的路径就匹配不上 ——
+    # 于是 `current_file` 停留在**上一个文件**，下一个文件的 hunk 行号被记到它头上。
+    # 后果是行号归属错乱：本仓库文档用中文名，只要提交里新增/改名一个中文路径，
+    # 紧邻其前的那个 .py 就会把全文件行号当成「改动行」，历史 lint 债被误报成新增问题
+    # （实测：新增 docs/缺陷复核与修复复测报告.md 后 config.py 被记成 1..226 行）。
+    # 关掉转义让路径原样输出，正则即可正确切分。
     proc = subprocess.run(
-        ["git", *args],
+        ["git", "-c", "core.quotepath=false", *args],
         capture_output=True,
         text=True,
         encoding="utf-8",

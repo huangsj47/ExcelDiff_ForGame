@@ -8,6 +8,7 @@ from flask import Blueprint, jsonify, render_template, request
 from sqlalchemy import case, func, text
 
 from services.model_loader import get_runtime_models
+from utils.json_body import read_json_object
 from utils.request_security import require_admin
 
 
@@ -127,7 +128,9 @@ def clear_project_cache():
         "db", "DiffCache", "ExcelHtmlCache", "AgentTempCache", "Repository", "BackgroundTask", "log_print",
     )
     try:
-        data = request.get_json() or {}
+        data, error = read_json_object(silent=False)
+        if error is not None:
+            return error
         project_id = data.get("project_id")
         if not project_id:
             return jsonify({"success": False, "message": "缺少 project_id 参数"}), 400

@@ -71,10 +71,44 @@ class AuthProvider(ABC):
         """
 
 
+SESSION_AUTH_USER_ID_KEY = "auth_user_id"
+
+
+def is_env_admin_session() -> bool:
+    """当前会话是否为「环境变量管理员」会话（.env 超级管理员），而非数据库用户会话。
+
+    ## 为什么授权判定必须先回答这个问题
+
+    ``session["is_admin"]`` 是**登录那一刻的角色快照**
+    （``DatabaseAuthProvider.authenticate`` 写入）。数据库用户的角色可以在会话存活
+    期间被管理员改掉（``auth/services.py::update_user_role``），快照却不会跟着变。
+    只要还有人拿这份快照当授权依据，被降级的用户就能用旧 cookie 继续当管理员 ——
+    甚至把自己改回 platform_admin（该接口的守卫正是平台管理员判定）。
+
+    环境变量管理员（.env）在数据库里没有记录，没有「当前角色」可查，只能以快照为准；
+    所以「要不要信快照」这件事，只能靠**会话有没有绑定数据库用户**来区分：
+
+    - 绑定（``auth_user_id`` 非空）：数据库用户会话 → 授权一律回查数据库，
+      快照只当兼容标记，不参与判定；
+    - 未绑定（``auth_user_id`` 为空/不存在）：环境变量管理员会话 → 快照即授权。
+
+    这里的判据特意用「有没有 auth_user_id」而不是新加一个来源标记：
+    ``DatabaseAuthProvider.authenticate`` 成功时必然写入该字段，
+    ``EnvAuthProvider.authenticate`` 与历史 ``admin_login`` 也都会把它显式置空，
+    两条链路的写入点都是现成的，不会出现标记与实际身份不一致的中间态。
+    """
+    return not session.get(SESSION_AUTH_USER_ID_KEY)
+
+
 class EnvAuthProvider(AuthProvider):
     """环境变量认证提供者 — 兼容现有 .env 超级管理员逻辑。
 
     当数据库 Provider 找不到用户时，回退到此 Provider。
+
+    注意：本 Provider 的四个 ``has_*`` 判定都只对**环境变量管理员会话**成立
+    （见 ``is_env_admin_session``）。数据库用户的 session 里同样有 ``is_admin``，
+    但那是过期快照 —— 早期实现直接读它，等于让 ``CompositeAuthProvider`` 的
+    ``primary or fallback`` 把被降级的数据库用户又放回管理员，故现在必须过滤。
     """
 
     def authenticate(self, username: str, password: str) -> Optional["AuthUser"]:
@@ -108,17 +142,17 @@ class EnvAuthProvider(AuthProvider):
         return None
 
     def is_logged_in(self) -> bool:
-        return bool(session.get("is_admin"))
+        return is_env_admin_session() and bool(session.get("is_admin"))
 
     def has_platform_admin_access(self) -> bool:
-        return bool(session.get("is_admin"))
+        return is_env_admin_session() and bool(session.get("is_admin"))
 
     def has_project_admin_access(self, project_id: int) -> bool:
         # 环境变量管理员拥有所有权限
-        return bool(session.get("is_admin"))
+        return is_env_admin_session() and bool(session.get("is_admin"))
 
     def has_project_access(self, project_id: int) -> bool:
-        return bool(session.get("is_admin"))
+        return is_env_admin_session() and bool(session.get("is_admin"))
 
     def get_accessible_project_ids(self) -> list[int]:
         # 环境变量管理员可访问所有项目
@@ -174,6 +208,11 @@ class DatabaseAuthProvider(AuthProvider):
             return None
 
         # 写入 Session
+        #
+        # auth_user_id 是「本会话绑定到数据库用户」的唯一凭据：授权判定靠它区分
+        # 数据库用户会话与环境变量管理员会话（见 is_env_admin_session）。写了它，
+        # 后续每个请求的权限都回查数据库当前角色；下面的 is_admin 只是给模板/兼容
+        # 代码看的登录快照，**不参与授权**，角色被改后它不会自动更新。
         session["auth_user_id"] = user.id
         session["auth_username"] = user.username
         session["auth_role"] = user.role

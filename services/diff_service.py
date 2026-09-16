@@ -341,10 +341,21 @@ class DiffService:
             # 空值（见 _normalize_value），所以「清空单元格」这类变更不会被吃掉。
             READ_KWARGS = {'dtype': str, 'keep_default_na': False}
 
-            if ext == '.csv':
-                # CSV文件处理
+            if ext in ('.csv', '.tsv'):
+                # 文本表格（CSV / TSV）：**按扩展名显式指定分隔符**走同一个文本解析器。
+                #
+                # 修前只判 `ext == '.csv'`，`.tsv` —— 它在 CSV_EXTENSIONS 里被声明支持
+                # （:26），get_file_type 也判为 'excel'（:48）—— 落进了下面的 pd.ExcelFile
+                # 分支，而 .tsv 不是 Excel 容器，于是整份文件以
+                # "Excel file format cannot be determined" 收场，一个单元格都读不出来。
+                # TSV 是配表常见导出格式，声明支持就必须真的能读。
+                #
+                # 分隔符只按扩展名决定（csv→','、tsv→'\t'），不做内容嗅探：
+                # 嗅探会在「逗号/制表符同时出现在字段里」的表上静默选错分隔符，
+                # 那正是本文件要避免的静默形态。
+                separator = '\t' if ext == '.tsv' else ','
                 text_content = self._decode_text(content)
-                df = pd.read_csv(io.StringIO(text_content), **READ_KWARGS)
+                df = pd.read_csv(io.StringIO(text_content), sep=separator, **READ_KWARGS)
                 return {'Sheet1': df}
             else:
                 # Excel文件处理
@@ -588,39 +599,33 @@ class DiffService:
         }
     
     def _has_valid_data(self, row_data, columns):
-        """检查行是否包含有效数据"""
-        import pandas as pd
-        
+        """检查行是否包含有效数据（**只有真正的空才算空**）
+
+        判空口径与 `_normalize_value` 共用：None / NaN / NaT / pd.NA / 空字符串算空；
+        文本 `null` / `None` / `nan` / `<NA>` / `N/A` 和空白串（`' '`）都是**取值**。
+        与读取阶段（dtype=str, keep_default_na=False）保持同一口径：表里怎么写就怎么比。
+
+        历史行为（已修）：这里曾用 `str(val).strip().lower()` 与黑名单
+        `['', 'nan', 'none', 'null', '<na>']` 判空 —— 与同文件 `_normalize_value` 的口径
+        正好相反，于是同一行数据在比较层算「有值」、在过滤层算「空行」。
+        后果不是「少显示一行」，而是**整行在比较之前就被丢掉**：当一行的每个格子都
+        落在黑名单里时（一行 `null`、一行空格），这行的任何改动都不报，
+        summary 是 `{'added': 0, 'removed': 0, 'modified': 0}` → 界面显示「没有变更」，
+        连 `_read_excel_data` 注释里承诺的「清空单元格不会被吃掉」在整行字面量时也失效。
+        回归保护见 tests/test_diff_service_fidelity.py。
+        """
         for col in columns:
-            val = row_data.get(col, '')
-            if val is not None and not pd.isna(val):
-                val_str = str(val).strip().lower()
-                if val_str not in ['', 'nan', 'none', 'null', '<na>']:
-                    return True
+            if self._normalize_value(row_data.get(col, '')) is not None:
+                return True
         return False
-    
+
     def _filter_nan_rows(self, rows, columns):
-        """过滤掉全NaN的空行"""
-        import pandas as pd
-        import numpy as np
-        
-        filtered_rows = []
-        for row in rows:
-            # 检查是否所有值都是NaN或空
-            has_data = False
-            for col in columns:
-                val = row.get(col, '')
-                # 改进NaN值的判断逻辑
-                if val is not None and not pd.isna(val):
-                    val_str = str(val).strip().lower()
-                    if val_str not in ['', 'nan', 'none', 'null', '<na>']:
-                        has_data = True
-                        break
-            
-            if has_data:
-                filtered_rows.append(row)
-        
-        return filtered_rows
+        """过滤掉全空行
+
+        与 `_has_valid_data` 共用同一处判空口径 —— 历史上这里是黑名单的第二个副本
+        （同样把文本 `null` / 空白串当空），两处必须一起改，不能只改一个。
+        """
+        return [row for row in rows if self._has_valid_data(row, columns)]
     
     def _find_row_matches(self, current_rows, previous_rows, columns):
         """优化的行匹配算法 - 减少时间复杂度"""

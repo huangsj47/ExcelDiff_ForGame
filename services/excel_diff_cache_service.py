@@ -19,8 +19,9 @@ db = None
 # **第三份字面量**，必须与 app.py / config.py 保持一致：
 # cleanup_old_cache() 用它判定「diff_version 不匹配 → 当作过期缓存删掉」，
 # 一旦它比真实版本旧，就会把**刚生成的当前版本缓存**当成过期数据清掉。
-# 一致性由 tests/test_diff_logic_version_single_source.py 锁定（该测试会扫描全部三处）。
-DIFF_LOGIC_VERSION = "1.9.0"
+# 一致性由 tests/test_diff_service_fidelity.py::TestDiffLogicVersionSingleSource
+# 扫描全部三处锁定（tests/test_diff_logic_version_single_source.py 只覆盖 app.py / config.py）。
+DIFF_LOGIC_VERSION = "1.10.0"
 DiffCache = None
 OperationLog = None
 Commit = None

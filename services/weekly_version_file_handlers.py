@@ -10,6 +10,8 @@ from werkzeug.exceptions import HTTPException
 
 from services.deployment_mode import is_agent_dispatch_mode
 from services.model_loader import get_runtime_models
+from services.weekly_file_status import WEEKLY_FILE_STATUSES, is_valid_weekly_file_status
+from utils.json_body import read_json_object
 from utils.request_security import _has_project_access
 
 
@@ -237,11 +239,26 @@ def weekly_version_file_status_api(config_id):
         config = WeeklyVersionConfig.query.get_or_404(config_id)
         if not _has_project_access(config.project_id):
             abort(403)
-        data = request.get_json() or {}
+        data, error = read_json_object(silent=False)
+        if error is not None:
+            return error
         file_path = data.get("file_path")
         status = data.get("status")
         if not file_path or not status:
             return jsonify({"success": False, "message": "缺少必需参数"}), 400
+        # 取值校验必须在**任何写库之前**：这个接口要写两处
+        # （WeeklyVersionDiffCache 与同步过去的 Commit.status），
+        # 放到写库之后校验会留下「缓存改了、提交没改」的半成品。
+        if not is_valid_weekly_file_status(status):
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "message": f"无效的文件状态: {status!r}，仅支持 {', '.join(WEEKLY_FILE_STATUSES)}",
+                    }
+                ),
+                400,
+            )
         if status in ("confirmed", "rejected"):
             from utils.request_security import can_current_user_operate_project_confirmation
 

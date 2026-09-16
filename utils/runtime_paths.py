@@ -50,10 +50,39 @@ import os
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# 节点仓库目录（工作副本根）的显式覆盖变量。Agent 与平台**读同一个变量**，见
+# `default_repos_base_dir()` 与 `agent/repo_paths.py`。
+REPOS_BASE_DIR_ENV = "AGENT_REPOS_BASE_DIR"
+# 默认值——**不要改**：平台现有部署的工作副本都在 `<仓库根>/repos`，
+# 改这个默认值会让平台把所有仓库重新 clone 一遍（见本模块顶部文档第 2 条）。
+DEFAULT_REPOS_BASE_DIR = "repos"
+
 
 def repo_root() -> str:
     """仓库根目录（绝对路径，与 CWD 无关）。"""
     return _REPO_ROOT
+
+
+def default_repos_base_dir(env=None) -> str:
+    """工作副本根目录的默认 base_dir。
+
+    取值规则：`AGENT_REPOS_BASE_DIR`（去空白后非空）优先，否则 `repos`。
+
+    为什么平台侧也要读 Agent 的环境变量：Agent 节点上的 Diff 是**平台代码在 Agent
+    进程内**执行的（`agent/executor.py` 把平台源码根加进 sys.path 后 `import app`，
+    再调 `services.task_worker_service.execute_task_inline_for_agent`）。同一个
+    repository，「auto_sync 写入的工作副本」与「Diff 读取的工作副本」必须是同一个
+    目录，否则同步明明成功、Diff 仍报未克隆，于是把每个仓库重新 clone 一遍。
+    两侧都从这一个变量取值，一致性就是**构造出来的**，而不是靠两处默认值碰巧同名。
+
+    变量没设时返回 `repos`，平台现有部署的行为逐字节不变。
+    """
+    source = os.environ if env is None else env
+    try:
+        raw = str(source.get(REPOS_BASE_DIR_ENV) or "").strip()
+    except Exception:
+        raw = ""
+    return raw or DEFAULT_REPOS_BASE_DIR
 
 
 def resolve_runtime_path(path: str, *, default_relative: str = "") -> str:

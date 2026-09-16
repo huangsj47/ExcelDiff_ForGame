@@ -15,7 +15,6 @@ from urllib.parse import urlparse
 from flask import flash, jsonify, redirect, request, session, url_for
 from werkzeug.exceptions import Forbidden
 
-
 CSRF_SESSION_KEY = "_csrf_token"
 ENABLE_ADMIN_SECURITY = True
 
@@ -75,6 +74,19 @@ def _is_valid_admin_token():
     return bool(expected and provided and hmac.compare_digest(expected, provided))
 
 
+def _is_env_admin_session():
+    """当前会话是否为环境变量管理员会话（未绑定数据库用户）。
+
+    AuthProvider 不可用时也要能判断，故这里懒加载；拿不到就按「否」处理
+    （保守方向：拒绝，而不是把未知来源的会话当成管理员）。
+    """
+    try:
+        from auth.providers import is_env_admin_session
+    except (RuntimeError, ImportError):
+        return False
+    return is_env_admin_session()
+
+
 def _has_admin_access():
     """判断当前请求是否拥有平台管理员权限。
 
@@ -94,7 +106,11 @@ def _has_admin_access():
         pass
 
     # 3. 回退到原始 Session 兼容
-    return bool(session.get("is_admin"))
+    #
+    #    只对环境变量管理员会话生效：`session["is_admin"]` 是**登录那一刻的角色快照**，
+    #    数据库用户被降级后它依然是 True。早先直接 `return bool(session.get("is_admin"))`
+    #    等于给旧 cookie 留了一条提权路径（见 tests/test_admin_demotion_stale_session.py）。
+    return _is_env_admin_session() and bool(session.get("is_admin"))
 
 
 def _is_logged_in():
@@ -429,8 +445,13 @@ def _csrf_token_from_request():
     if form_token:
         return form_token
     if request.is_json:
-        payload = request.get_json(silent=True) or {}
-        return payload.get("_csrf_token")
+        payload = request.get_json(silent=True)
+        # 根节点不是对象时**不能**接着 `.get`：`[1]`、`"str"`、`123` 都是 truthy，
+        # `or {}` 兜不住，会在 CSRF 校验这一步抛 AttributeError → 500（每个写接口都会
+        # 先走到这里，所以畸形 body 的代价是 500 而不是 400）。这里只是「找 token」，
+        # 形状不对就当没有 token，交给正常的校验失败分支回 400。
+        if isinstance(payload, dict):
+            return payload.get("_csrf_token")
     return None
 
 

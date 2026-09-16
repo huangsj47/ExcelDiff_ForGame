@@ -247,6 +247,19 @@ def get_file_content_from_git(repository, commit_id, file_path):
 #  统一差异计算
 # ---------------------------------------------------------------------------
 
+# 「调用方没交 previous_commit」与「调用方明确说这条提交没有基线（None）」是
+# 两件事，用哨兵区分（语义与 services/excel_diff_cache_service.py 的
+# BASELINE_UNSET 一一对应）：
+#   * 没传   → 读缓存时不指定基线，让服务自己解析权威基线（老调用方行为不变）；
+#   * 传 None → 就是要「和空版本比」（新增文件）那一行。
+PREVIOUS_COMMIT_UNSET = object()
+
+
+def _has_previous_commit(previous_commit):
+    """调用方是否真的交了一个用来做对比的提交（而不是 None / 没传）。"""
+    return previous_commit is not None and previous_commit is not PREVIOUS_COMMIT_UNSET
+
+
 def _collect_excel_metrics(diff_data):
     metrics = {'sheet_count': 0, 'changed_rows': 0, 'summary': {}}
     if not isinstance(diff_data, dict) or diff_data.get('type') != 'excel':
@@ -264,14 +277,32 @@ def _collect_excel_metrics(diff_data):
     return metrics
 
 
-def get_unified_diff_data(commit, previous_commit=None):
-    """使用新的统一差异服务获取差异数据（优化版本，优先使用缓存）"""
+def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
+    """使用新的统一差异服务获取差异数据（优化版本，优先使用缓存）
+
+    previous_commit 是**这次比较的基线**，必须同时喂给缓存的读与写：缓存键包含
+    previous_commit_id（见 excel_diff_cache_service 头部「基线」注释块），读的
+    时候不传、让服务去解析「权威基线」，而写的时候用真实基线落库，两边就会**各
+    说各话** —— 请求「c3 对 c1」的区间比较会直接命中先前「c3 对 c2」留下的缓存行，
+    返回的内容是 c2 的，不报错、也不重算（本文件历史缺陷）。
+    """
     from services.diff_service import DiffService
-    from services.excel_diff_cache_service import ExcelDiffCacheService
+    from services.excel_diff_cache_service import BASELINE_UNSET, ExcelDiffCacheService
 
     excel_cache_service = ExcelDiffCacheService()
     perf_metrics_service = get_perf_metrics_service()
     repository = commit.repository
+    has_previous = _has_previous_commit(previous_commit)
+    # 读缓存要校验的基线：真的传了提交就精确匹配它的 commit_id；明确传 None 就是
+    # 要 previous_commit_id IS NULL 那一行；没传才退回「服务自解析」。
+    read_baseline = (
+        BASELINE_UNSET if previous_commit is PREVIOUS_COMMIT_UNSET
+        else (previous_commit.commit_id if has_previous else None)
+    )
+    # 写缓存按**实际比较对象**落库：没传/传 None 都是与空版本比 → 落 NULL。
+    # 这里绝不能跟着 read_baseline 去自解析权威基线，否则会把「与空版本比」的
+    # 结果冒充成「与权威基线比」的结果，反过来污染权威基线那一行。
+    write_baseline = previous_commit.commit_id if has_previous else None
     perf_project_tags = {
         "project_id": repository.project_id if repository else "",
         "project_code": (repository.project.code if repository and repository.project else ""),
@@ -279,15 +310,15 @@ def get_unified_diff_data(commit, previous_commit=None):
     start_time = time.time()
     try:
         log_print(f"🔧 统一差异服务开始处理: {commit.path}", 'DIFF', force=True)
-        log_print(f"📂 当前提交: {commit.commit_id[:8]} | 前一提交: {previous_commit.commit_id[:8] if previous_commit else 'None'}", 'DIFF', force=True)
+        log_print(f"📂 当前提交: {commit.commit_id[:8]} | 前一提交: {previous_commit.commit_id[:8] if has_previous else 'None'}", 'DIFF', force=True)
         # 如果是Excel文件，优先检查缓存
         is_excel = excel_cache_service.is_excel_file(commit.path)
         cache_lookup_start = time.time()
         if is_excel:
             log_print(f"🔍 Excel文件，检查缓存: {commit.path}", 'CACHE')
-            # 检查Excel diff缓存
+            # 检查Excel diff缓存 —— 必须带上本次的基线，不能交给服务自解析
             cached_diff = excel_cache_service.get_cached_diff(
-                repository.id, commit.commit_id, commit.path
+                repository.id, commit.commit_id, commit.path, previous_commit_id=read_baseline
             )
             if cached_diff:
                 cache_time = time.time() - start_time
@@ -310,8 +341,8 @@ def get_unified_diff_data(commit, previous_commit=None):
                 log_print(f"❌ 缓存未命中，开始实时计算: {commit.path}", 'CACHE')
                 log_print(f"⏱️ 缓存查询耗时: {time.time() - cache_lookup_start:.2f}秒", 'DIFF')
         # 如果没有前一提交，这可能是问题所在
-        if previous_commit is None:
-            log_print(f"⚠️ 警告: 没有前一提交，将与空版本比较 - 这可能导致显示为初始版本", 'DIFF', force=True)
+        if not has_previous:
+            log_print("⚠️ 警告: 没有前一提交，将与空版本比较 - 这可能导致显示为初始版本", 'DIFF', force=True)
         # 根据仓库类型获取文件内容
         read_start = time.time()
         if repository.type == 'git':
@@ -319,14 +350,14 @@ def get_unified_diff_data(commit, previous_commit=None):
             current_content = get_file_content_from_git(repository, commit.commit_id, commit.path)
             # 获取前一版本文件内容
             previous_content = None
-            if previous_commit:
+            if has_previous:
                 previous_content = get_file_content_from_git(repository, previous_commit.commit_id, commit.path)
         elif repository.type == 'svn':
             # 获取SVN文件内容
             current_content = get_file_content_from_svn(repository, commit.commit_id, commit.path)
             # 获取前一版本文件内容
             previous_content = None
-            if previous_commit:
+            if has_previous:
                 previous_content = get_file_content_from_svn(repository, previous_commit.commit_id, commit.path)
         else:
             log_print(f"❌ 不支持的仓库类型: {repository.type}", 'DIFF', force=True)
@@ -361,7 +392,7 @@ def get_unified_diff_data(commit, previous_commit=None):
                         diff_data=diff_data,  # 传递原始对象，不要预先JSON编码
                         processing_time=processing_time,
                         file_size=0,
-                        previous_commit_id=previous_commit.commit_id if previous_commit else None,
+                        previous_commit_id=write_baseline,
                         commit_time=commit.commit_time
                     )
                     cache_save_time = time.time() - cache_save_start

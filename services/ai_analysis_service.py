@@ -11,7 +11,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -159,6 +159,9 @@ def update_project_analysis_config(
     **校验失败不改库、不回填、不夹取。** 旧实现用 `_clamp_int` 把越界值悄悄改成边界值：
     用户填 5000、界面回填 1000，中间没有任何提示，他以为存进去的是 5000。现在的做法是
     把「范围是多少、你填的是多少」原样告诉他，让他自己改。
+
+    非 dict 的 payload（例如请求体根节点是 `[1]`）由 `validate_payload` 转成
+    字段级错误 —— 在这里 `dict()` 会直接抛 TypeError，那是 500 而不是 400。
     """
     row = _get_project_config_row(project_id)
     if row is None:
@@ -166,7 +169,7 @@ def update_project_analysis_config(
         db.session.add(row)
 
     try:
-        normalized = validate_payload(payload or {})
+        normalized = validate_payload(payload)
     except ConfigValidationError as exc:
         db.session.rollback()
         return False, str(exc), [item.as_dict() for item in exc.errors]
@@ -191,7 +194,13 @@ def build_endpoint_client(
     「未保存也能测」是刻意的：用户填完地址/Token/模型名之后，第一件想做的事就是
     确认这组配置能不能用。要求他先保存一个可能错的配置再测，是很别扭的顺序。
     输入框留空表示「沿用已保存的值」，而不是「清空」。
+
+    `override` 不是 dict（例如请求体根节点是 `[1]`）时返回**字段级错误**而不是抛
+    TypeError：这一层也会被后台任务直接调用，且路由靠 `client is None` 回 400。
     """
+    if override is not None and not isinstance(override, Mapping):
+        return None, [FieldError("__body__", "请求体", "必须是 JSON 对象").as_dict()]
+
     config = get_project_analysis_config(project_id)
     payload = dict(override or {})
 

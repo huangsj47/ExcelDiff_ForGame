@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections import Counter
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -30,6 +31,7 @@ from services.agent_task_payload_schema import (
 )
 from services.repository_sync_status import clear_sync_error as clear_repository_sync_error
 from services.repository_sync_status import record_sync_error as record_repository_sync_error
+from utils.json_body import read_json_object
 from utils.request_security import require_admin
 from utils.logger import log_structured_event
 
@@ -99,7 +101,11 @@ def _validate_agent_shared_secret():
     provided = (request.headers.get("X-Agent-Secret") or "").strip()
     if not expected:
         return False, jsonify({"success": False, "message": "平台未配置 AGENT_SHARED_SECRET"}), 503
-    if not provided or provided != expected:
+    # 定长时间比较：这是长期对称凭据，用 `!=` 逐字节短路比较会泄漏「前 N 位猜对」
+    # 的计时信号。同仓库的 ADMIN_API_TOKEN 校验（utils/request_security.py）早已用
+    # hmac.compare_digest，这里保持一致。encode 成 bytes 是因为 compare_digest 对
+    # 非 ASCII 的 str 会抛 TypeError，而密钥由运维填写、不能假定是 ASCII。
+    if not provided or not hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8")):
         return False, jsonify({"success": False, "message": "Agent 鉴权失败"}), 401
     return True, None, None
 
@@ -919,7 +925,9 @@ def register_agent_node():
         if not ok:
             return resp, code
 
-        payload = request.get_json(silent=True) or {}
+        payload, error = read_json_object()
+        if error is not None:
+            return error
         host = str(payload.get("ip") or payload.get("host") or "").strip() or None
         agent_name = str(payload.get("agent_name") or "").strip()
         agent_code = _normalize_agent_code(
@@ -1087,7 +1095,9 @@ def agent_heartbeat():
         if not ok:
             return resp, code
 
-        payload = request.get_json(silent=True) or {}
+        payload, error = read_json_object()
+        if error is not None:
+            return error
         agent_code = str(payload.get("agent_code") or request.headers.get("X-Agent-Code") or "").strip()
         agent_token = str(payload.get("agent_token") or request.headers.get("X-Agent-Token") or "").strip()
 
@@ -1098,6 +1108,7 @@ def agent_heartbeat():
         if not agent:
             return jsonify({"success": False, "message": "Agent 身份无效"}), 401
 
+        lease_ok = True
         if payload.get("task_id") is not None:
             AgentTask = get_runtime_models("AgentTask")[0]
             attempt = _to_int_or_none(payload.get("attempt"), min_value=0)
@@ -1112,8 +1123,11 @@ def agent_heartbeat():
                 + timedelta(seconds=max(30, min(600, lease_seconds))),
             }, synchronize_session=False) if attempt is not None else 0
             if renewed != 1:
+                # 批次失效只否决「续租」这一件事。节点本身还活着（长任务期间任务被回收），
+                # 下面的 runtime 字段与 commit 必须照常落库，否则管理页会把仍在计算的
+                # 活节点显示成离线；409 必须保留，Agent 侧靠它退出续租线程。
                 db.session.rollback()
-                return jsonify({"success": False, "message": "任务执行批次已失效"}), 409
+                lease_ok = False
 
         _apply_agent_runtime_fields(
             agent,
@@ -1128,6 +1142,8 @@ def agent_heartbeat():
         _cleanup_expired_agent_temp_cache_if_needed(db)
 
         db.session.commit()
+        if not lease_ok:
+            return jsonify({"success": False, "message": "任务执行批次已失效"}), 409
         return jsonify({"success": True, "server_time": datetime.now(timezone.utc).isoformat()})
     except _AGENT_ENDPOINT_HANDLER_ERRORS as exc:
         db.session.rollback()
@@ -1148,7 +1164,9 @@ def agent_report_incident():
         if not ok:
             return resp, code
 
-        payload = request.get_json(silent=True) or {}
+        payload, error = read_json_object()
+        if error is not None:
+            return error
         agent_code = str(payload.get("agent_code") or request.headers.get("X-Agent-Code") or "").strip()
         agent_token = str(payload.get("agent_token") or request.headers.get("X-Agent-Token") or "").strip()
         if not agent_code or not agent_token:
@@ -1195,7 +1213,9 @@ def agent_upsert_temp_cache():
         if not ok:
             return resp, code
 
-        payload = request.get_json(silent=True) or {}
+        payload, error = read_json_object()
+        if error is not None:
+            return error
         agent_code = str(payload.get("agent_code") or request.headers.get("X-Agent-Code") or "").strip()
         agent_token = str(payload.get("agent_token") or request.headers.get("X-Agent-Token") or "").strip()
         if not agent_code or not agent_token:
@@ -1386,7 +1406,9 @@ def agent_get_latest_release():
         if not ok:
             return resp, code
 
-        payload = request.get_json(silent=True) or {}
+        payload, error = read_json_object()
+        if error is not None:
+            return error
         agent_code = str(payload.get("agent_code") or request.headers.get("X-Agent-Code") or "").strip()
         agent_token = str(payload.get("agent_token") or request.headers.get("X-Agent-Token") or "").strip()
         current_version = str(payload.get("current_version") or "").strip()
@@ -1539,7 +1561,9 @@ def rollback_agent_release():
     """管理员一键回滚 latest release（默认回滚到上一版）。"""
     log_print = get_runtime_models("log_print")[0]
     try:
-        payload = request.get_json(silent=True) or {}
+        payload, error = read_json_object()
+        if error is not None:
+            return error
         target_version = str(payload.get("target_version") or "").strip() or None
         steps = int(payload.get("steps") or 1)
         steps = max(1, min(50, steps))
@@ -1575,7 +1599,9 @@ def agent_claim_task():
         if not ok:
             return resp, code
 
-        payload = request.get_json(silent=True) or {}
+        payload, error = read_json_object()
+        if error is not None:
+            return error
         agent_code = str(payload.get("agent_code") or request.headers.get("X-Agent-Code") or "").strip()
         agent_token = str(payload.get("agent_token") or request.headers.get("X-Agent-Token") or "").strip()
         lease_seconds = int(payload.get("lease_seconds") or 120)
@@ -1809,7 +1835,9 @@ def list_agent_incidents(agent_code: str):
 def ignore_agent_incident(incident_id: int):
     """忽略或恢复 Agent 异常事件。"""
     db, AgentIncident = get_runtime_models("db", "AgentIncident")
-    payload = request.get_json(silent=True) or {}
+    payload, error = read_json_object()
+    if error is not None:
+        return error
     ignored = bool(payload.get("ignored", True))
 
     row = db.session.get(AgentIncident, incident_id)

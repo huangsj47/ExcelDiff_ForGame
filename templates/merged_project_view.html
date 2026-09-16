@@ -852,7 +852,11 @@
                                         <a href="{{ url_for('weekly_version_diff', config_id=version.configs[0].id) }}" class="btn btn-sm version-action-btn version-action-diff">
                                             <i class="fas fa-eye me-1"></i>查看版本diff
                                         </a>
-                                        <button class="btn btn-sm version-action-btn version-action-delete" onclick="deleteVersionGroup('{{ version.name }}', [{% for config in version.configs %}{{ config.id }}{% if not loop.last %},{% endif %}{% endfor %}])">
+                                        {# 版本名是用户输入（不可信）：只放 data-*，点击由下面委托的事件监听处理。
+                                           拼进 onclick 会被属性值解码后的单引号逃逸。 #}
+                                        <button class="btn btn-sm version-action-btn version-action-delete"
+                                                data-version-name="{{ version.name }}"
+                                                data-config-ids="{% for config in version.configs %}{{ config.id }}{% if not loop.last %},{% endif %}{% endfor %}">
                                             <i class="fas fa-trash me-1"></i>删除版本
                                         </button>
                                     </div>
@@ -2498,7 +2502,9 @@ function createInactiveVersionHtml(version) {
                         <a href="/weekly-version-config/${version.configs[0].id}/diff" class="btn btn-sm version-action-btn version-action-diff">
                             <i class="fas fa-eye me-1"></i>查看版本diff
                         </a>
-                        <button class="btn btn-sm version-action-btn version-action-delete" onclick="deleteVersionGroup('${version.name}', [${configIds.join(',')}])">
+                        <button class="btn btn-sm version-action-btn version-action-delete"
+                                data-version-name="${escapeHtmlAttribute(version.name)}"
+                                data-config-ids="${configIds.join(',')}">
                             <i class="fas fa-trash me-1"></i>删除版本
                         </button>
                     </div>
@@ -2633,6 +2639,32 @@ function changePage(page) {
         checkAllCloneStatuses();
     });
 })();
+
+// 属性值专用转义（版本名等用户输入放进 data-* 时用）。
+// 不能只靠 textContent → innerHTML 那套：它不转义引号，`"` 仍会逃出属性。
+function escapeHtmlAttribute(text) {
+    return String(text ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// 「删除版本」按钮的点击统一在这里处理：版本名是用户输入（不可信），
+// 只经 data-version-name 传递，不拼进 onclick。
+// 用委托而不是逐个绑定 —— 这些按钮在服务端渲染和 JS 重建的列表里都会出现。
+document.addEventListener('click', function (event) {
+    const btn = event.target && event.target.closest
+        ? event.target.closest('.version-action-delete')
+        : null;
+    if (!btn) return;
+    const ids = (btn.getAttribute('data-config-ids') || '')
+        .split(',')
+        .map(function (value) { return value.trim(); })
+        .filter(Boolean);
+    deleteVersionGroup(btn.getAttribute('data-version-name') || '', ids);
+});
 
 function deleteVersionGroup(versionName, configIds) {
     if (!confirm(`确定要删除版本组 "${versionName}" 吗？这将删除该版本组下的所有配置。`)) {

@@ -9,9 +9,18 @@ import json
 import os
 import time
 
+try:
+    from . import repo_paths
+except ImportError:  # pragma: no cover - 以 agent/ 为根直接运行时
+    import repo_paths
+
 
 def _cache_root(settings) -> str:
-    base_dir = os.path.abspath(str(getattr(settings, "repos_base_dir", "agent_repos") or "agent_repos"))
+    # 与 auto_sync 的工作副本目录用同一条解析规则：缓存落下时也不能受 CWD 影响，
+    # 否则换个启动方式就换了一个 `_temp_cache`（旧缓存成为孤儿、全部当作未命中）。
+    base_dir = repo_paths.resolve_repos_base_dir(
+        str(getattr(settings, "repos_base_dir", "") or "")
+    )
     target = os.path.join(base_dir, "_temp_cache")
     os.makedirs(target, exist_ok=True)
     return target

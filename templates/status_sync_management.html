@@ -1046,8 +1046,8 @@ function renderTable() {
                     <div class="d-flex align-items-center">
                         <i class="fas fa-file-code text-muted me-2"></i>
                         <div>
-                            <div class="fw-medium file-path-content" title="${info.file_path}">${info.file_path}</div>
-                            <small class="text-muted">${getFileExtension(info.file_path)}</small>
+                            <div class="fw-medium file-path-content" title="${escapeHtmlAttribute(info.file_path)}">${escapeHtmlText(info.file_path)}</div>
+                            <small class="text-muted">${escapeHtmlText(getFileExtension(info.file_path))}</small>
                         </div>
                     </div>
                 </td>
@@ -1389,6 +1389,21 @@ function getFileExtension(filePath) {
     return extMap[ext] || ext.toUpperCase();
 }
 
+// 文件路径来自被审核仓库（不可信），插进 innerHTML / 属性前必须转义。
+// 属性上下文额外转义引号：escapeHtmlText 不处理引号，`"` 能逃出 title="..."。
+function escapeHtmlText(text) {
+    return String(text ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function escapeHtmlAttribute(text) {
+    return escapeHtmlText(text)
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function truncateText(text, maxLength) {
     if (!text || text.length <= maxLength) {
         return text || '';
@@ -1399,10 +1414,12 @@ function truncateText(text, maxLength) {
 function showAlert(type, message) {
     const alert = document.getElementById('resultAlert');
     alert.className = `alert alert-${type}`;
+    // message 里会拼进服务端返回的文本（失败原因可能回显用户/仓库内容），
+    // 所以按文本转义后再插入，不走 HTML。
     alert.innerHTML = `
         <div class="d-flex align-items-center">
             <i class="fas fa-${type === 'success' ? 'check-circle' : 'exclamation-circle'} me-2"></i>
-            ${message}
+            ${escapeHtmlText(message)}
         </div>
     `;
     alert.style.display = 'block';

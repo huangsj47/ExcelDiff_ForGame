@@ -330,7 +330,8 @@ def test_agent_task_result_returns_500_for_sqlalchemy_commit_error(monkeypatch):
     def _rollback():
         session.rollback_called = True
 
-    def _get(model, _task_id):
+    def _get(model, _task_id, **_kwargs):
+        # 真实 Session.get 支持 populate_existing 等关键字（结果接口用它强制读库内当前行）。
         if model is fake_agent_task_model:
             return task
         return None

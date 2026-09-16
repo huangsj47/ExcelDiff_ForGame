@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from werkzeug.exceptions import HTTPException
 
 from services.model_loader import get_runtime_model, get_runtime_models
+from utils.json_body import read_json_object
 from utils.request_security import _get_accessible_project_ids, _has_project_access, require_admin
 
 STATUS_SYNC_CLEAR_ERRORS = (
@@ -175,7 +176,9 @@ def weekly_version_batch_confirm_api(config_id):
         if not allowed:
             return jsonify({"success": False, "message": message}), 403
 
-        data = request.get_json() or {}
+        data, error = read_json_object(silent=False)
+        if error is not None:
+            return error
         file_paths = data.get("file_paths", [])
 
         if file_paths:

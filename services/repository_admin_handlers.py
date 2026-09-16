@@ -8,8 +8,40 @@ from sqlalchemy import or_
 from services.deployment_mode import is_agent_dispatch_mode
 from services.model_loader import get_runtime_model, get_runtime_models
 from services.repository_cleanup_helpers import delete_local_repository_directory
+from utils.json_body import read_json_object
 from utils.path_security import build_repository_local_path
 from utils.request_security import require_admin
+from utils.security_utils import sanitize_text
+
+# 短于该长度的「凭据」不做文本替换：几个字符的子串会误伤正常文本
+# （例如 token 恰为 "abc" 时把 "abclog" 里的子串也换掉）。
+_MIN_REPLACEABLE_SECRET_LEN = 6
+
+
+def _redact_repository_secrets(text, repository) -> str:
+    """把仓库 URL / token 从「要落日志或回显给浏览器」的文本里抹掉。
+
+    仓库 URL 常以 `https://oauth2:<PAT>@git.example.com/x.git` 的形式粘贴保存，
+    于是 URL 本身就是凭据载体。本模块测试连接时会把 URL、以及底层 git 返回的
+    错误文本（其中常带整条 remote URL）写进日志并回显，等于把 token 明文落到
+    logs/runlog.log 与浏览器页面上 —— 同仓库的 `services/git_service.py` 早已
+    统一过 `sanitize_url()`，此处是漏网的一处。
+
+    只替换**本仓库自己的** URL 与 token，而不是对整个文本跑通用脱敏：
+    git 的错误文本形态不可枚举，但我们要防的是自己这条链路把凭据带出去。
+    """
+    redacted = "" if text is None else str(text)
+    candidates = (
+        getattr(repository, "url", None),
+        getattr(repository, "token", None),
+    )
+    for secret in candidates:
+        if not secret or not isinstance(secret, str):
+            continue
+        if len(secret) < _MIN_REPLACEABLE_SECRET_LEN:
+            continue
+        redacted = redacted.replace(secret, sanitize_text(secret))
+    return redacted
 
 
 def _runtime(*names):
@@ -27,7 +59,9 @@ def _optional_runtime(name):
 def update_repository_order():
     db, Repository = _runtime("db", "Repository")
     try:
-        data = request.get_json(silent=True) or {}
+        data, error = read_json_object()
+        if error is not None:
+            return error
         repo_id = data.get("repo_id")
         new_order = data.get("new_order")
         project_id = data.get("project_id")
@@ -66,7 +100,9 @@ def update_repository_order():
 def swap_repository_order():
     db, Repository = _runtime("db", "Repository")
     try:
-        data = request.get_json(silent=True) or {}
+        data, error = read_json_object()
+        if error is not None:
+            return error
         first_repo_id = data.get("first_repo_id")
         second_repo_id = data.get("second_repo_id")
         project_id = data.get("project_id")
@@ -270,7 +306,7 @@ def test_repository(repository_id):
     try:
         log_print(f"测试仓库连接: {repository.name}", "TEST")
         log_print(f"仓库类型: {repository.type}", "TEST")
-        log_print(f"仓库URL: {repository.url}", "TEST")
+        log_print(f"仓库URL: {_redact_repository_secrets(repository.url, repository)}", "TEST")
         log_print(f"分支: {repository.branch}", "TEST")
         log_print(f"Token: {'已设置' if repository.token else '未设置'}", "TEST")
 
@@ -291,14 +327,14 @@ def test_repository(repository_id):
                 if success:
                     return _respond(
                         True,
-                        f"仓库连接测试成功: {message}",
+                        f"仓库连接测试成功: {_redact_repository_secrets(message, repository)}",
                         category="success",
                         status_code=200,
                     )
                 else:
                     return _respond(
                         False,
-                        f"仓库连接测试失败: {message}",
+                        f"仓库连接测试失败: {_redact_repository_secrets(message, repository)}",
                         category="error",
                         status_code=400,
                     )
@@ -310,13 +346,18 @@ def test_repository(repository_id):
                 status_code=400,
             )
     except Exception as exc:
-        log_print(f"测试过程中发生错误: {str(exc)}", "TEST", force=True)
+        # git 的异常文本同样会带 remote URL（含凭据），落日志与回显前都要过一遍。
+        safe_exc = _redact_repository_secrets(str(exc), repository)
+        log_print(f"测试过程中发生错误: {safe_exc}", "TEST", force=True)
         import traceback
 
-        traceback.print_exc()
+        # 栈里同样有那条 URL：先取文本、过脱敏、再输出，别用 print_exc() 直接打原文
+        # （stderr 常被启动脚本重定向进日志文件）。
+        safe_traceback = _redact_repository_secrets(traceback.format_exc(), repository)
+        log_print(safe_traceback, "TEST", force=True)
         return _respond(
             False,
-            f"测试失败: {str(exc)}",
+            f"测试失败: {safe_exc}",
             category="error",
             status_code=500,
         )

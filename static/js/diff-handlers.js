@@ -57,64 +57,73 @@ function initBinaryDiff(diffData) {
 }
 
 // Excel相关函数
+// 表名、表头、单元格值都来自被审核的 Excel 文件（=不可信）：
+//   * 拼进内联事件处理器 → 属性值先被 HTML 解码再交给 JS 编译，`'` 能闭合字符串；
+//   * 拼进 innerHTML → 里面的 onclick= 会被编译成真处理器，`"` 还能逃出属性。
+// 所以标签一律用 DOM API + textContent 建，事件一律用 addEventListener 绑。
 function generateExcelTabs(sheets) {
     const tabsContainer = document.getElementById('excel-sheet-tabs');
     if (!tabsContainer) return;
-    
+
     const sheetNames = Object.keys(sheets);
-    let tabsHtml = '';
-    
+
     // 分析工作表变更状态
     const sheetAnalysis = sheetNames.map(name => {
         const sheet = sheets[name];
-        const hasChanges = sheet.rows && sheet.rows.some(row => 
+        const hasChanges = sheet.rows && sheet.rows.some(row =>
             row.status === 'added' || row.status === 'removed' || row.status === 'modified'
         );
         return { name, hasChanges };
     });
-    
+
     // 排序：有变更的在前
     const sortedSheets = sheetAnalysis.sort((a, b) => {
         if (a.hasChanges && !b.hasChanges) return -1;
         if (!a.hasChanges && b.hasChanges) return 1;
         return a.name.localeCompare(b.name);
     });
-    
+
+    tabsContainer.textContent = '';
     sortedSheets.forEach((sheet, index) => {
         const isActive = index === 0 ? 'active' : '';
         const hasChangesClass = sheet.hasChanges ? 'excel-tab-with-changes' : 'excel-tab-no-changes';
-        const clickable = sheet.hasChanges ? `onclick="switchExcelSheet('${sheet.name}')"` : '';
         const disabled = sheet.hasChanges ? '' : 'excel-tab-disabled';
-        
-        tabsHtml += `
-            <div class="excel-sheet-tab ${hasChangesClass} ${isActive} ${disabled}" 
-                 ${clickable} data-sheet="${sheet.name}">
-                ${sheet.name}
-            </div>
-        `;
+
+        const tab = document.createElement('div');
+        tab.className = ['excel-sheet-tab', hasChangesClass, isActive, disabled]
+            .filter(Boolean).join(' ');
+        // 表名只作为数据与文本存在，不参与任何代码位置的构造
+        tab.setAttribute('data-sheet', sheet.name);
+        tab.textContent = sheet.name;
+
+        if (sheet.hasChanges) {
+            tab.addEventListener('click', function() {
+                switchExcelSheet(sheet.name);
+            });
+        }
+
+        tabsContainer.appendChild(tab);
     });
-    
-    tabsContainer.innerHTML = tabsHtml;
 }
 
 function generateExcelContent(sheets) {
     const contentContainer = document.getElementById('excel-content');
     if (!contentContainer) return;
-    
+
     const sheetNames = Object.keys(sheets);
     let contentHtml = '';
-    
+
     sheetNames.forEach((sheetName, index) => {
         const sheet = sheets[sheetName];
         const isActive = index === 0 ? 'active' : '';
-        
+
         contentHtml += `
-            <div class="excel-sheet-content ${isActive}" id="sheet-content-${sheetName}">
+            <div class="excel-sheet-content ${isActive}" id="sheet-content-${escapeHtmlAttribute(sheetName)}">
                 ${generateExcelTable(sheetName, sheet)}
             </div>
         `;
     });
-    
+
     contentContainer.innerHTML = contentHtml;
 }
 
@@ -126,7 +135,7 @@ function generateExcelTable(sheetName, sheetData) {
         console.log('❌ 工作表数据不完整');
         return `
             <div class="p-4 text-center text-muted">
-                <p>工作表 "${sheetName}" 数据不完整</p>
+                <p>工作表 "${escapeHtml(sheetName)}" 数据不完整</p>
             </div>
         `;
     }
@@ -162,9 +171,11 @@ function generateExcelTable(sheetName, sheetData) {
                         <th class="excel-row-header">字段</th>
     `;
     
-    // 添加字段名
+    // 添加字段名。表头是 Excel 的第一行（不可信）：标题属性要转义引号，
+    // 否则 `"` 能闭合 title 并顶出 onerror= 之类的新属性；文本也要转义，
+    // 否则 `<img ...>` 会被 innerHTML 解析成真标签。
     sheetData.headers.forEach(header => {
-        html += `<th class="excel-field-header" title="${header}">${header}</th>`;
+        html += `<th class="excel-field-header" title="${escapeHtmlAttribute(header)}">${escapeHtml(header)}</th>`;
     });
     
     html += `
@@ -408,26 +419,31 @@ function highlightBracketParameterList(oldValue, newValue, type) {
     for (let index = 0; index < maxLength; index++) {
         const targetPair = targetPairs[index];
         const comparePair = comparePairs[index];
-        
+
         if (!targetPair) {
             // 目标没有这个参数对，跳过
             continue;
         }
-        
+
+        // 键与值同样来自 Excel 单元格（不可信），必须转义后再拼进 innerHTML。
+        // escapeHtml 只做实体化，显示出来仍是原字符，所以视觉上与原逻辑一致。
+        const key = escapeHtml(targetPair.key);
+        const value = escapeHtml(targetPair.value);
+
         if (!comparePair) {
-            // 比较对象没有这个参数对，整个高亮 - 不转义
-            result.push(`<span class="excel-text-bg-${type}">{${targetPair.key},${targetPair.value}}</span>`);
+            // 比较对象没有这个参数对，整个高亮
+            result.push(`<span class="excel-text-bg-${type}">{${key},${value}}</span>`);
         } else if (targetPair.key === comparePair.key && targetPair.value !== comparePair.value) {
-            // 键相同但值不同，只高亮值部分 - 不转义HTML标签
-            const highlightedPair = `{${targetPair.key},<span class="excel-text-bg-${type}">${targetPair.value}</span>}`;
+            // 键相同但值不同，只高亮值部分
+            const highlightedPair = `{${key},<span class="excel-text-bg-${type}">${value}</span>}`;
             console.log(`Generated value-only highlight: ${highlightedPair}`);
             result.push(highlightedPair);
         } else if (targetPair.key !== comparePair.key || targetPair.value !== comparePair.value) {
-            // 键或值都不同，整个参数对高亮 - 不转义
-            result.push(`<span class="excel-text-bg-${type}">{${targetPair.key},${targetPair.value}}</span>`);
+            // 键或值都不同，整个参数对高亮
+            result.push(`<span class="excel-text-bg-${type}">{${key},${value}}</span>`);
         } else {
-            // 参数对完全相同，正常显示 - 不转义
-            result.push(`{${targetPair.key},${targetPair.value}}`);
+            // 参数对完全相同，正常显示
+            result.push(`{${key},${value}}`);
         }
     }
     
@@ -516,23 +532,36 @@ function switchExcelSheet(sheetName) {
     document.querySelectorAll('.excel-sheet-content').forEach(content => {
         content.classList.remove('active');
     });
-    
-    // 移除所有标签的active状态
-    document.querySelectorAll('.excel-sheet-tab').forEach(tab => {
+
+    // 移除所有标签的active状态。
+    // 用 data-sheet 逐个比对，而不是把表名拼进 CSS 选择器：
+    // 表名里的 `"` / `\` 会让 querySelector 抛 SyntaxError，整段切换直接失效。
+    const tabs = document.querySelectorAll('.excel-sheet-tab');
+    tabs.forEach(tab => {
         tab.classList.remove('active');
     });
-    
+
     // 显示选中的内容
     const targetContent = document.getElementById(`sheet-content-${sheetName}`);
     if (targetContent) {
         targetContent.classList.add('active');
     }
-    
+
     // 激活选中的标签
-    const targetTab = document.querySelector(`.excel-sheet-tab[data-sheet="${sheetName}"]`);
+    const targetTab = findTabBySheetName(tabs, sheetName);
     if (targetTab) {
         targetTab.classList.add('active');
     }
+}
+
+// 按 data-sheet 精确匹配标签（避免把不可信表名拼进选择器）
+function findTabBySheetName(tabs, sheetName) {
+    for (let i = 0; i < tabs.length; i++) {
+        if (tabs[i].dataset.sheet === sheetName) {
+            return tabs[i];
+        }
+    }
+    return null;
 }
 
 function getExcelColumnLetter(index) {
@@ -645,6 +674,17 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// escapeHtml() 走的是 textContent → innerHTML，只覆盖文本上下文（不转义引号），
+// 放进属性值里仍会被 `"` 逃出去。属性上下文需要额外转义引号。
+function escapeHtmlAttribute(text) {
+    if (text === null || text === undefined) {
+        return '';
+    }
+    return escapeHtml(String(text))
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // 合并diff页面专用函数
 function showExcelSheetInContainer(diffData, containerId) {
     console.log('🔍 showExcelSheetInContainer called with:', {
@@ -668,39 +708,44 @@ function showExcelSheetInContainer(diffData, containerId) {
     
     const sheets = diffData.sheets;
     const sheetNames = Object.keys(sheets);
-    
-    // 生成工作表标签和内容
+
+    // 生成工作表内容（表名只作为**转义后的属性值/文本**参与 HTML；
+    // 标签本身稍后用 DOM API 建，绝不拼 onclick）
     let html = '';
-    
-    // 如果有多个工作表，显示标签
-    if (sheetNames.length > 1) {
-        html += '<div class="excel-sheet-tabs">';
-        sheetNames.forEach((sheetName, index) => {
-            const isActive = index === 0 ? 'active' : '';
-            html += `<div class="excel-sheet-tab ${isActive}" onclick="switchExcelSheetInContainer('${sheetName}', '${containerId}')" data-sheet="${sheetName}">${sheetName}</div>`;
-        });
-        html += '</div>';
-    }
-    
-    // 生成工作表内容
     html += '<div class="excel-content">';
     sheetNames.forEach((sheetName, index) => {
         const sheet = sheets[sheetName];
         const isActive = index === 0 ? 'active' : '';
-        
-        html += `<div class="excel-sheet-content ${isActive}" id="sheet-content-${containerId}-${sheetName}">`;
+
+        html += `<div class="excel-sheet-content ${isActive}" id="sheet-content-${escapeHtmlAttribute(containerId)}-${escapeHtmlAttribute(sheetName)}">`;
         html += generateExcelTableForContainer(sheetName, sheet);
         html += '</div>';
     });
     html += '</div>';
-    
+
     console.log('📝 Generated HTML length:', html.length);
-    console.log('📝 HTML preview:', html.substring(0, 200) + '...');
-    
+
     container.innerHTML = html;
-    
+
+    // 如果有多个工作表，用 DOM API 生成标签并绑定点击事件
+    if (sheetNames.length > 1) {
+        const tabsContainer = container.querySelector('.excel-sheet-tabs');
+        if (tabsContainer) {
+            sheetNames.forEach((sheetName, index) => {
+                const isActive = index === 0 ? 'active' : '';
+                const tab = document.createElement('div');
+                tab.className = ['excel-sheet-tab', isActive].filter(Boolean).join(' ');
+                tab.setAttribute('data-sheet', sheetName);
+                tab.textContent = sheetName;
+                tab.addEventListener('click', function() {
+                    switchExcelSheetInContainer(sheetName, containerId);
+                });
+                tabsContainer.appendChild(tab);
+            });
+        }
+    }
+
     console.log('✅ HTML inserted into container:', containerId);
-    console.log('📊 Final container HTML length:', container.innerHTML.length);
 }
 
 function generateExcelTableForContainer(sheetName, sheetData) {
@@ -709,7 +754,7 @@ function generateExcelTableForContainer(sheetName, sheetData) {
 
     if (!sheetData.headers || !sheetData.rows) {
         console.log('❌ 容器工作表数据不完整');
-        return `<div class="p-4 text-center text-muted"><p>工作表 "${sheetName}" 数据不完整</p></div>`;
+        return `<div class="p-4 text-center text-muted"><p>工作表 "${escapeHtml(sheetName)}" 数据不完整</p></div>`;
     }
 
     // 调试：分析行状态
@@ -739,9 +784,11 @@ function generateExcelTableForContainer(sheetName, sheetData) {
     
     html += `</tr><tr class="excel-field-row"><th class="excel-row-header">字段</th>`;
     
-    // 添加字段名
+    // 添加字段名。表头是 Excel 的第一行（不可信）：标题属性要转义引号，
+    // 否则 `"` 能闭合 title 并顶出 onerror= 之类的新属性；文本也要转义，
+    // 否则 `<img ...>` 会被 innerHTML 解析成真标签。
     sheetData.headers.forEach(header => {
-        html += `<th class="excel-field-header" title="${header}">${header}</th>`;
+        html += `<th class="excel-field-header" title="${escapeHtmlAttribute(header)}">${escapeHtml(header)}</th>`;
     });
     
     html += `</tr></thead><tbody>`;
@@ -770,24 +817,30 @@ function generateExcelTableForContainer(sheetName, sheetData) {
 }
 
 function switchExcelSheetInContainer(sheetName, containerId) {
+    const container = document.getElementById(containerId);
+    if (!container) {
+        return;
+    }
+
     // 隐藏该容器内所有工作表内容
-    document.querySelectorAll(`#${containerId} .excel-sheet-content`).forEach(content => {
+    container.querySelectorAll('.excel-sheet-content').forEach(content => {
         content.classList.remove('active');
     });
-    
+
     // 移除该容器内所有标签的active状态
-    document.querySelectorAll(`#${containerId} .excel-sheet-tab`).forEach(tab => {
+    const tabs = container.querySelectorAll('.excel-sheet-tab');
+    tabs.forEach(tab => {
         tab.classList.remove('active');
     });
-    
+
     // 显示选中的内容
     const targetContent = document.getElementById(`sheet-content-${containerId}-${sheetName}`);
     if (targetContent) {
         targetContent.classList.add('active');
     }
-    
-    // 激活选中的标签
-    const targetTab = document.querySelector(`#${containerId} .excel-sheet-tab[data-sheet="${sheetName}"]`);
+
+    // 激活选中的标签（同样按 data-sheet 比对，不拼选择器）
+    const targetTab = findTabBySheetName(tabs, sheetName);
     if (targetTab) {
         targetTab.classList.add('active');
     }

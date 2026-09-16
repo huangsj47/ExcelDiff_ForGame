@@ -1311,6 +1311,7 @@ function initWeeklyAiAnalysis() {
 document.addEventListener('DOMContentLoaded', function() {
     initWeeklyAiAnalysis();
     initFileItemSelection();
+    bindFileStatusActions();
     loadFileList();
 
     // 初始化重建缓存按钮显示状态
@@ -1644,7 +1645,47 @@ function initFileItemSelection() {
         if (!fileItem || !treeContainer.contains(fileItem)) {
             return;
         }
-        setSelectedFileItem(fileItem.getAttribute('data-file-path') || '');
+        const filePath = fileItem.getAttribute('data-file-path') || '';
+        // 点文件名 = 打开完整 diff（原来是内联 onclick，路径不可信）
+        if (event.target.closest('[data-open-full-diff]')) {
+            openFullDiff(filePath);
+        }
+        setSelectedFileItem(filePath);
+    });
+}
+
+// 文件状态按钮 / 下拉菜单的点击：路径只从 data-file-path 读取，
+// 不拼进 onclick（路径来自被审核仓库，含引号时会变成代码）。
+function bindFileStatusActions() {
+    if (document.body.dataset.fileStatusActionsBound === '1') {
+        return;
+    }
+    document.body.dataset.fileStatusActionsBound = '1';
+
+    document.addEventListener('click', function(event) {
+        const target = event.target;
+        if (!target || !target.closest) return;
+
+        const statusBtn = target.closest('[data-file-status-set]');
+        if (statusBtn) {
+            updateFileStatusQuick(
+                statusBtn.getAttribute('data-file-path') || '',
+                statusBtn.getAttribute('data-file-status-set') || ''
+            );
+            if (statusBtn.hasAttribute('data-dropdown-close')) {
+                hideDropdownClone();
+            }
+            return;
+        }
+
+        const dropdownBtn = target.closest('[data-file-dropdown]');
+        if (dropdownBtn) {
+            const group = dropdownBtn.closest('.btn-group');
+            showDropdownClone(
+                group ? group.id : '',
+                dropdownBtn.getAttribute('data-file-path') || ''
+            );
+        }
     });
 }
 
@@ -1720,11 +1761,11 @@ function renderFileTree(tree) {
         const confirmRatioClass = allConfirmed ? 'text-success' : (confirmedFiles > 0 ? 'text-primary' : 'text-secondary');
 
         html += `
-            <div class="directory-item expanded" data-dir-path="${dirPath}">
+            <div class="directory-item expanded" data-dir-path="${escapeHtmlAttribute(dirPath)}">
                 <div class="directory-header" onclick="toggleDirectory('${dirId}')">
                     <i class="bi bi-chevron-right directory-toggle"></i>
                     <i class="bi bi-folder me-2 text-warning"></i>
-                    <span class="directory-path">${dirPath}</span>
+                    <span class="directory-path">${escapeHtmlText(dirPath)}</span>
                     <span class="badge bg-light text-dark ms-2">${totalFiles} 个文件</span>
                     <span class="badge bg-light ${confirmRatioClass} ms-1" style="font-size:0.72rem;font-weight:600;" title="已确认/总文件数">
                         <i class="bi bi-check-circle me-1" style="font-size:0.68rem;"></i>${confirmedFiles}/${totalFiles}
@@ -1783,19 +1824,19 @@ function renderDirectoryFiles(files) {
         const selectedClass = selectedFilePath === file.file_path ? 'is-selected' : '';
 
         html += `
-            <div class="file-item ${statusClass} ${selectedClass}" data-file-path="${file.file_path}">
+            <div class="file-item ${statusClass} ${selectedClass}" data-file-path="${escapeHtmlAttribute(file.file_path)}">
                 <div class="file-content">
                     <div class="file-icon">
                         <i class="bi bi-file-earmark-text ${operationClass}"></i>
                     </div>
-                    <div class="file-name ${operationClass}" onclick="openFullDiff('${file.file_path}')" title="${file.file_path}">
-                        ${file.fileName}
+                    <div class="file-name ${operationClass}" data-open-full-diff="1" title="${escapeHtmlAttribute(file.file_path)}">
+                        ${escapeHtmlText(file.fileName)}
                     </div>
                     <div class="file-status">
                         <span class="badge ${statusBadgeClass}">${statusText}</span>
                     </div>
-                    <div class="file-confirm-user ${confirmUserClass}" title="${confirmUserTitle}">${confirmUserDisplay}</div>
-                    <div class="file-author" title="${uniqueAuthors.join(', ')}">${authorsDisplay}</div>
+                    <div class="file-confirm-user ${confirmUserClass}" title="${escapeHtmlAttribute(confirmUserTitle)}">${escapeHtmlText(confirmUserDisplay)}</div>
+                    <div class="file-author" title="${escapeHtmlAttribute(uniqueAuthors.join(', '))}">${authorsDisplay}</div>
                     <div class="file-commit-count">
                         <span class="commit-count-badge">${file.commit_count || 0}</span>
                     </div>
@@ -1864,16 +1905,13 @@ function formatAuthorsDisplay(authors) {
 }
 
 function formatAuthorsForTree(authors) {
+    // 作者名来自被审核仓库的提交，不可信
     if (authors.length === 0) {
         return '<span class="text-muted">未知</span>';
     }
 
-    if (authors.length === 1) {
-        return `<span>${authors[0]}</span>`;
-    }
-
     // 树形结构中简化显示
-    return `<span>${authors[0]}</span>`;
+    return `<span>${escapeHtmlText(authors[0])}</span>`;
 }
 
 function getConfirmUserDisplay(file) {
@@ -1956,19 +1994,22 @@ function escapeHtmlAttribute(text) {
         .replace(/'/g, '&#39;');
 }
 
+// 文件路径来自被审核仓库，不可信：只经 data-file-path 传递，
+// 点击统一由 bindFileStatusActions() 的委托监听处理，绝不拼进 onclick。
 function generateStatusButton(filePath, statusClass) {
     const buttonId = `btn-group-${filePath.replace(/[^a-zA-Z0-9]/g, '-')}`;
+    const fileAttr = escapeHtmlAttribute(filePath);
 
     if (statusClass === 'confirmed') {
         // 已确认状态：显示文本按钮，点击可重置
         return `
             <div class="btn-group status-actions" role="group" id="${buttonId}">
                 <button type="button" class="btn-action status-btn status-state-btn confirmed"
-                        onclick="updateFileStatusQuick('${filePath}', 'pending')" title="已通过，点击重置">
+                        data-file-status-set="pending" data-file-path="${fileAttr}" title="已通过，点击重置">
                     已通过
                 </button>
                 <button type="button" class="btn-action status-btn status-more-btn dropdown-toggle dropdown-toggle-split"
-                        onclick="showDropdownClone('${buttonId}', '${filePath}')" title="更多操作">
+                        data-file-dropdown="1" data-file-path="${fileAttr}" title="更多操作">
                     <span class="visually-hidden">更多操作</span>
                 </button>
             </div>
@@ -1978,11 +2019,11 @@ function generateStatusButton(filePath, statusClass) {
         return `
             <div class="btn-group status-actions" role="group" id="${buttonId}">
                 <button type="button" class="btn-action status-btn status-state-btn rejected"
-                        onclick="updateFileStatusQuick('${filePath}', 'pending')" title="已拒绝，点击重置">
+                        data-file-status-set="pending" data-file-path="${fileAttr}" title="已拒绝，点击重置">
                     已拒绝
                 </button>
                 <button type="button" class="btn-action status-btn status-more-btn dropdown-toggle dropdown-toggle-split"
-                        onclick="showDropdownClone('${buttonId}', '${filePath}')" title="更多操作">
+                        data-file-dropdown="1" data-file-path="${fileAttr}" title="更多操作">
                     <span class="visually-hidden">更多操作</span>
                 </button>
             </div>
@@ -1992,11 +2033,11 @@ function generateStatusButton(filePath, statusClass) {
         return `
             <div class="btn-group status-actions" role="group" id="${buttonId}">
                 <button type="button" class="btn-action status-btn status-btn-approve"
-                        onclick="updateFileStatusQuick('${filePath}', 'confirmed')" title="通过">
+                        data-file-status-set="confirmed" data-file-path="${fileAttr}" title="通过">
                     通过
                 </button>
                 <button type="button" class="btn-action status-btn status-btn-reject"
-                        onclick="updateFileStatusQuick('${filePath}', 'rejected')" title="拒绝">
+                        data-file-status-set="rejected" data-file-path="${fileAttr}" title="拒绝">
                     拒绝
                 </button>
             </div>
@@ -2346,31 +2387,39 @@ function getDropdownMenuContent(filePath) {
     // 根据文件路径获取当前状态
     const file = allFiles.find(f => f.file_path === filePath);
     const status = file ? file.overall_status : 'pending';
+    // 文件路径不可信：只经 data-file-path 传递
+    const fileAttr = escapeHtmlAttribute(filePath);
 
     if (status === 'confirmed') {
         return `
-            <button type="button" class="dropdown-item" onclick="updateFileStatusQuick('${filePath}', 'pending'); hideDropdownClone();">
+            <button type="button" class="dropdown-item"
+                    data-file-status-set="pending" data-file-path="${fileAttr}" data-dropdown-close="1">
                 <i class="bi bi-arrow-clockwise text-warning me-2"></i>重置为待确认
             </button>
-            <button type="button" class="dropdown-item" onclick="updateFileStatusQuick('${filePath}', 'rejected'); hideDropdownClone();">
+            <button type="button" class="dropdown-item"
+                    data-file-status-set="rejected" data-file-path="${fileAttr}" data-dropdown-close="1">
                 <i class="bi bi-x-circle text-danger me-2"></i>拒绝
             </button>
         `;
     } else if (status === 'rejected') {
         return `
-            <button type="button" class="dropdown-item" onclick="updateFileStatusQuick('${filePath}', 'pending'); hideDropdownClone();">
+            <button type="button" class="dropdown-item"
+                    data-file-status-set="pending" data-file-path="${fileAttr}" data-dropdown-close="1">
                 <i class="bi bi-arrow-clockwise text-warning me-2"></i>重置为待确认
             </button>
-            <button type="button" class="dropdown-item" onclick="updateFileStatusQuick('${filePath}', 'confirmed'); hideDropdownClone();">
+            <button type="button" class="dropdown-item"
+                    data-file-status-set="confirmed" data-file-path="${fileAttr}" data-dropdown-close="1">
                 <i class="bi bi-check-circle text-success me-2"></i>确认通过
             </button>
         `;
     } else {
         return `
-            <button type="button" class="dropdown-item" onclick="updateFileStatusQuick('${filePath}', 'confirmed'); hideDropdownClone();">
+            <button type="button" class="dropdown-item"
+                    data-file-status-set="confirmed" data-file-path="${fileAttr}" data-dropdown-close="1">
                 <i class="bi bi-check-circle text-success me-2"></i>确认通过
             </button>
-            <button type="button" class="dropdown-item" onclick="updateFileStatusQuick('${filePath}', 'rejected'); hideDropdownClone();">
+            <button type="button" class="dropdown-item"
+                    data-file-status-set="rejected" data-file-path="${fileAttr}" data-dropdown-close="1">
                 <i class="bi bi-x-circle text-danger me-2"></i>拒绝
             </button>
         `;

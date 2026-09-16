@@ -107,7 +107,9 @@ def _is_skip_file(rel_path: str) -> bool:
         return True
     if any(p in {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"} for p in parts):
         return True
-    if any(p in {"venv", ".venv", "agent_repos", "logs"} for p in parts):
+    # `repos` 是节点仓库工作副本的当前默认目录名（见 agent/repo_paths.py），
+    # `agent_repos` 是历史默认值/显式覆盖值 —— 工作副本绝不能打进发布包。
+    if any(p in {"venv", ".venv", "agent_repos", "repos", "logs"} for p in parts):
         return True
     if rel_lower.endswith((".pyc", ".pyo", ".swp", ".tmp")):
         return True

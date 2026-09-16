@@ -314,7 +314,13 @@ if sys.platform == 'win32' and not _IS_TESTING:
 #
 # 1.9.0：Excel/CSV 改为按文本原样读取（dtype=str + keep_default_na=False），
 #        并修掉 _normalize_value 把文本 null/none/nan/<na> 当空值、以及 strip 首尾空格的问题。
-DIFF_LOGIC_VERSION = "1.9.0"
+# 1.10.0：把「行过滤」也拉回同一口径。_has_valid_data / _filter_nan_rows 原先自带
+#         一份与 _normalize_value 相反的黑名单，会把整行都是 null/None/空白串的行
+#         在比较之前丢掉 —— 这些行的任何改动都不报（含「清空单元格」）。
+#         同时修掉 .tsv 落进 pd.ExcelFile 必然读取失败的问题（CSV_EXTENSIONS 早就
+#         声明支持 .tsv，get_file_type 也判为 excel）。
+#         不升版本号的后果：已缓存的 diff（旧版本号）继续命中，修复在界面上**看不见**。
+DIFF_LOGIC_VERSION = "1.10.0"
 
 # ---------------------------------------------------------------------------
 #  日志系统 — 已拆分至 utils/logger.py

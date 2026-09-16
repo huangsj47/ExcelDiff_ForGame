@@ -793,39 +793,41 @@ function displayExcelDiff(diffData) {
             // 无变更的sheet和"召唤物"sheet不可点击
             var isSummonSheet = sheetName.includes('召唤物');
             var isClickable = hasChanges && !isSummonSheet;
-            var clickHandler = isClickable ? 'onclick="switchExcelSheet(\'' + sheetName + '\')"' : '';
             var disabledClass = isClickable ? '' : ' excel-tab-disabled';
-            
+
             // 如果是召唤物sheet，添加特殊标识
             if (isSummonSheet) {
                 disabledClass += ' excel-tab-summon-disabled';
                 console.log('召唤物 sheet detected and disabled:', sheetName);
             }
-            
+
+            // 表名来自被审核的 Excel，不可信：只作为 data-* 与文本存在，
+            // 点击事件在插入 DOM 后由 bindExcelSheetTabClicks() 绑定
+            // （拼 onclick 会被属性值解码后的单引号逃逸）。
             html += '<div class="excel-sheet-tab ' + tabClass + disabledClass + '" ' +
-                   clickHandler + ' ' +
-                   'data-sheet="' + sheetName + '" data-has-changes="' + hasChanges + '">' + sheetName + '</div>';
-            
+                   'data-sheet="' + escapeHtmlAttribute(sheetName) + '" data-has-changes="' + hasChanges + '">' +
+                   escapeHtml(sheetName) + '</div>';
+
             console.log('Generated tab HTML for "' + sheetName + '" at position ' + i + ', active: ' + isActive);
         }
-        
+
         html += '</div></div>';
-        
+
         console.log('Final HTML tabs section:', html.substring(html.indexOf('<div class="excel-sheet-tabs">'), html.indexOf('</div></div>') + 12));
-        
+
         // 创建表格内容区域
         html += '<div class="excel-content-area">';
-        
+
         // 先创建容器，稍后异步渲染内容
         for (var i = 0; i < reorderedSheets.length; i++) {
             var sheet = reorderedSheets[i];
             var sheetName = sheet.name;
             var isActive = sheetName === defaultActiveSheetName ? 'active' : '';
-            
-            html += '<div class="excel-sheet-content ' + isActive + '" id="sheet-content-' + sheetName + '">';
+
+            html += '<div class="excel-sheet-content ' + isActive + '" id="sheet-content-' + escapeHtmlAttribute(sheetName) + '">';
             html += '<div class="p-4 text-center text-muted">' +
                    '<div class="spinner-border spinner-border-sm me-2" role="status"></div>' +
-                   '正在加载工作表 "' + sheetName + '"...' +
+                   '正在加载工作表 "' + escapeHtml(sheetName) + '"...' +
                    '</div>';
             html += '</div>';
         }
@@ -872,7 +874,8 @@ function displayExcelDiff(diffData) {
     setTimeout(function() {
         container.innerHTML = html;
         console.log('Container HTML updated with reordered tabs');
-        
+        bindExcelSheetTabClicks(container);
+
         // 开始异步渲染工作表内容
         updateLoadingProgress(30, '正在渲染工作表内容...');
         renderSheetsProgressively(diffData, reorderedSheets, 0);
@@ -1116,12 +1119,13 @@ function createExcelDiffTable(sheetName, sheetData) {
     html += '</tr><tr class="excel-field-row">' +
             '<th scope="col" class="excel-row-header">字段</th>';
     
-    // 添加字段名
+    // 添加字段名（表头是 Excel 第一行，不可信：属性与文本都要转义）
     for (var i = 0; i < sheetData.headers.length; i++) {
         var header = sheetData.headers[i];
         var isModified = modifiedColumns.indexOf(header) !== -1;
         var headerClass = isModified ? 'excel-field-header excel-modified-column-header' : 'excel-field-header';
-        html += '<th scope="col" class="' + headerClass + '" title="' + header + '">' + header + '</th>';
+        html += '<th scope="col" class="' + headerClass + '" title="' + escapeHtmlAttribute(header) + '">' +
+                escapeHtml(header) + '</th>';
     }
     
     html += '</tr></thead><tbody>';
@@ -1360,8 +1364,16 @@ function performTabSwitch(sheetName) {
         }
     }
     
-    // 激活选中的标签
-    var targetTab = document.querySelector('.excel-sheet-tab[data-sheet="' + sheetName + '"]');
+    // 激活选中的标签。
+    // 按 data-sheet 逐个比对，不把表名拼进 CSS 选择器 —— 表名里的引号
+    // 会让 querySelector 抛 SyntaxError，整段切换失效。
+    var targetTab = null;
+    for (var i = 0; i < tabs.length; i++) {
+        if (tabs[i].getAttribute('data-sheet') === sheetName) {
+            targetTab = tabs[i];
+            break;
+        }
+    }
     if (targetTab) {
         targetTab.classList.add('active');
     }
@@ -1423,6 +1435,30 @@ function escapeHtml(text) {
     var div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// 属性值专用转义：escapeHtml 走 textContent → innerHTML，不转义引号，
+// 放进 data-*/title 里仍会被 `"` 逃出去顶出新属性。
+function escapeHtmlAttribute(text) {
+    if (text === null || text === undefined) {
+        return '';
+    }
+    return escapeHtml(String(text)).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// 给工作表标签绑定点击：表名只从 data-sheet 读取，不拼进 onclick。
+// 不可点击的标签（无变更 / 召唤物）带 excel-tab-disabled，跳过。
+function bindExcelSheetTabClicks(root) {
+    if (!root) return;
+    var tabs = root.querySelectorAll('.excel-sheet-tab');
+    for (var i = 0; i < tabs.length; i++) {
+        (function (tab) {
+            if (tab.classList.contains('excel-tab-disabled')) return;
+            tab.addEventListener('click', function () {
+                switchExcelSheet(tab.getAttribute('data-sheet'));
+            });
+        })(tabs[i]);
+    }
 }
 
 // 获取Excel列字母

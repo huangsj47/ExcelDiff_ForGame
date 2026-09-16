@@ -615,20 +615,25 @@ function loadDiffContent() {
                 const diffContainer = document.getElementById('diffContent');
                 diffContainer.innerHTML = data.diff_html;
 
-                // 检查是否有Excel相关的脚本执行
-
-                // 手动执行插入HTML中的脚本
-                const scripts = diffContainer.querySelectorAll('script');
-
-                scripts.forEach((script, index) => {
+                // 插入内容里的 <script> 一律**不执行**。
+                // 旧实现在这里 querySelectorAll('script') 逐个 eval(script.textContent)，
+                // 等于把"被审核仓库里的任意文本"提升成可执行代码：文件内容里的
+                // <script>…</script>、或文件名里的 HTML，都能经这条汇点落地。
+                // 现在只读取一个非可执行的 JSON 载荷（type="application/json"
+                // 不会被浏览器执行），显式解析后交给同一个初始化函数。
+                const excelDataNode = diffContainer.querySelector('[data-weekly-excel-diff]');
+                if (excelDataNode) {
                     try {
-                        eval(script.textContent);
+                        window.weeklyExcelDiffData = JSON.parse(excelDataNode.textContent || 'null');
+                        window.weeklyExcelDiffDataReady = true;
                     } catch (error) {
-                        console.error(`脚本 ${index + 1} 执行失败:`, error);
+                        console.error('Excel diff 数据载荷解析失败:', error);
+                        window.weeklyExcelDiffData = null;
                     }
-                });
+                }
 
                 // 如果是Excel文件且数据已准备好，手动触发初始化
+                // （时序与旧实现一致：数据就绪后立即初始化）
                 if (data.file_type === 'excel' && window.weeklyExcelDiffData) {
                     if (typeof window.initWeeklyExcelDiffWhenReady === 'function') {
                         window.initWeeklyExcelDiffWhenReady();
@@ -939,18 +944,30 @@ window.generateWeeklyExcelTabs = function(tabsContainer, sheets) {
     sortedSheets.forEach((sheet, index) => {
         const isActive = sheet.name === activeSheetName ? 'active' : '';
         const hasChangesClass = sheet.hasChanges ? 'excel-tab-with-changes' : 'excel-tab-no-changes';
-        const clickable = sheet.hasChanges ? `onclick="window.switchWeeklyExcelSheet('${sheet.name}')"` : '';
         const disabled = sheet.hasChanges ? '' : 'excel-tab-disabled';
 
+        // 表名来自被审核的 Excel（不可信）：只作为 data-* 与文本存在，
+        // 点击在插入 DOM 后由下面的 addEventListener 绑定（拼 onclick 会被
+        // 属性值解码后的单引号逃逸）。本文件的 escapeHtml 连引号一起转义，
+        // 所以文本与属性两个上下文都用它。
         tabsHtml += `
             <div class="excel-sheet-tab ${hasChangesClass} ${isActive} ${disabled}"
-                 ${clickable} data-sheet="${sheet.name}">
-                ${sheet.name}
+                 data-sheet="${escapeHtml(sheet.name)}">
+                ${escapeHtml(sheet.name)}
             </div>
         `;
     });
 
     tabsContainer.innerHTML = tabsHtml;
+
+    // 绑定点击：表名只从 data-sheet 读取，不拼进内联脚本。
+    // 不可点击的标签（无变更）带 excel-tab-disabled，跳过。
+    tabsContainer.querySelectorAll('.excel-sheet-tab').forEach(tab => {
+        if (tab.classList.contains('excel-tab-disabled')) return;
+        tab.addEventListener('click', function() {
+            window.switchWeeklyExcelSheet(tab.getAttribute('data-sheet'));
+        });
+    });
 
     // 显示激活的sheet内容
     if (activeSheetName && sheets[activeSheetName]) {

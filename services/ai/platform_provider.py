@@ -240,6 +240,24 @@ def _render_error(payload: Mapping[str, Any], *, path: str) -> str:
 # 纯文本内容（Excel 渲染成表）
 # --------------------------------------------------------------------------
 
+# 能进 `_read_excel_sheets` 的扩展名：判定依据是**解析器的实际能力**，不是平台的配表清单。
+#
+# `_read_excel_sheets` 用 openpyxl，只认 OOXML 工作簿。平台的配表清单
+# （`ExcelDiffCacheService.is_excel_file` = `.xlsx/.xls/.xlsm/.xlsb/.csv`）比它宽，
+# 直接拿来会踩两个坑：
+#   * `.csv` / `.tsv` 本来是纯文本，文本分支能把**完整内容**交给模型；若按「配表」进
+#     表格分支，`load_workbook` 解析失败 → 模型只收到「内容无法解析成文本表格」，
+#     等于把读得到的内容说成读不了；
+#   * `.xls` / `.xlsb` 是 OLE/二进制，openpyxl 同样不支持，进文本分支会得到显式的
+#     「不是文本也不是配表」说明（不会抛异常）。
+# 所以这里只放 openpyxl 真正能打开的那几种。
+_WORKBOOK_EXTENSIONS = ('.xlsx', '.xlsm', '.xltx', '.xltm')
+
+
+def _is_openpyxl_workbook(path: str) -> bool:
+    """这个路径该按工作簿解析吗（= openpyxl 读得动吗）。"""
+    return Path(str(path or '')).suffix.lower() in _WORKBOOK_EXTENSIONS
+
 
 def _read_excel_sheets(raw: bytes, *, max_rows: int) -> Optional[str]:
     """把 xlsx 的字节渲染成文本表格。
@@ -382,9 +400,11 @@ class PlatformContextProvider:
             # 取到了、长度为零：这是「确实没有内容」，按契约返回空串。
             return ""
 
-        from services.excel_cache_service import is_excel_file
-
-        if is_excel_file(path):
+        # 判定用 openpyxl 的实际能力，而不是平台的「配表」清单：见 _WORKBOOK_EXTENSIONS
+        # 上方注释（`.csv`/`.tsv` 走文本分支才能把完整内容交给模型，`.xls`/`.xlsb`
+        # openpyxl 也读不了）。这里原先 import 的 `services.excel_cache_service` 并不存在，
+        # 且 import 在 try 之外 → 任何非空内容都会抛 ModuleNotFoundError。
+        if _is_openpyxl_workbook(path):
             rendered = _read_excel_sheets(raw, max_rows=self._max_rows)
             if rendered is None:
                 return (

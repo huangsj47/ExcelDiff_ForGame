@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from flask import jsonify, request
 from sqlalchemy.exc import SQLAlchemyError
 
+from utils.json_body import read_json_object
+
 
 AGENT_TASK_RESULT_HANDLER_ERRORS = (
     OSError,
@@ -38,7 +40,9 @@ def handle_agent_report_task_result(task_id):
         if not ok:
             return resp, code
 
-        payload = request.get_json(silent=True) or {}
+        payload, error = read_json_object()
+        if error is not None:
+            return error
         agent_code = str(payload.get("agent_code") or request.headers.get("X-Agent-Code") or "").strip()
         agent_token = str(payload.get("agent_token") or request.headers.get("X-Agent-Token") or "").strip()
         status = str(payload.get("status") or "").strip().lower()
@@ -53,7 +57,11 @@ def handle_agent_report_task_result(task_id):
         if not agent:
             return jsonify({"success": False, "message": "Agent 身份无效"}), 401
 
-        task = db.session.get(AgentTask, task_id)
+        # 必须按主键重新读库：身份映射里可能残留该任务的旧快照（同一 app context 内
+        # 已被别的路径加载过），用它判断终态/批次会把新批次的有效回传误判成
+        # duplicate 直接丢弃（result_summary 永远不落库）。populate_existing 强制
+        # 以库内当前行为准，随后的条件 UPDATE 才是最终裁决。
+        task = db.session.get(AgentTask, task_id, populate_existing=True)
         if not task:
             return jsonify({"success": False, "message": "任务不存在"}), 404
         if task.assigned_agent_id != agent.id:
@@ -191,7 +199,9 @@ def handle_agent_report_task_result(task_id):
                 )
 
         if task.source_task_id:
-            src_task = db.session.get(BackgroundTask, task.source_task_id)
+            # 同样按库内当前行读取：源任务的重试计数是「在现值上 +1」，
+            # 用旧快照会丢掉并发批次已经加过的那一次。
+            src_task = db.session.get(BackgroundTask, task.source_task_id, populate_existing=True)
             if src_task:
                 src_task.status = status
                 src_task.completed_at = now_utc

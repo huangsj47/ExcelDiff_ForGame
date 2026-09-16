@@ -83,6 +83,27 @@ def require_login(func):
     return wrapper
 
 
+def _current_platform_role():
+    """当前用户的平台角色，以**数据库当前角色**为准；取不到时返回 None。
+
+    ## 为什么不能直接读 `session["auth_role"]`
+
+    那是登录那一刻的角色快照，用户被降级后不会跟着变 —— 直接读它等于让旧会话
+    保留降级前的权限（与 `session["is_admin"]` 是同一类问题，见
+    `auth/providers.py::is_env_admin_session` 的说明）。环境变量管理员在数据库里
+    没有记录，仍然只能以会话标记为准，故保留一条显式兜底。
+    """
+    user = _get_provider().get_current_user()
+    if user is not None:
+        return user.role
+
+    from .providers import is_env_admin_session
+    if is_env_admin_session() and session.get("is_admin"):
+        from .models import PlatformRole
+        return PlatformRole.PLATFORM_ADMIN.value
+    return None
+
+
 def require_role(*roles: str):
     """要求用户拥有指定的平台角色之一。
 
@@ -105,8 +126,7 @@ def require_role(*roles: str):
             if not provider.is_logged_in():
                 return _unauthorized_response("请先登录。")
 
-            current_role = session.get("auth_role")
-            if current_role not in roles:
+            if _current_platform_role() not in roles:
                 return _forbidden_response("您没有权限执行此操作。")
 
             return func(*args, **kwargs)

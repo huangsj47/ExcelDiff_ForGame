@@ -243,10 +243,21 @@ def validate_payload(payload: Mapping[str, Any]) -> dict:
 
     **收集全部错误再抛**，而不是遇到第一个就返回 —— 一次把所有问题标红，用户改一轮
     就好；逐个报会让他改五遍。
+
+    根节点不是对象时**也走同一条出口**（`ConfigValidationError` → 路由回 400）：服务层
+    还会被脚本、后台任务直接调用，`dict(payload or {})` 在那里抛的是 TypeError，
+    调用方拿到的是一个 500 而不是结构化错误。
     """
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, Mapping):
+        raise ConfigValidationError(
+            [FieldError("__body__", "请求体", "必须是 JSON 对象")]
+        )
+
     errors: list[FieldError] = []
     normalized: dict[str, Any] = {}
-    for field_name, raw in dict(payload or {}).items():
+    for field_name, raw in dict(payload).items():
         if field_name not in FIELD_RULES:
             continue  # 未知字段忽略，不报错（前端可能带上别的 state）
         try:
