@@ -523,19 +523,26 @@ _SYSTEM_PROMPT_CHARS = 12_000
 
 
 def test_the_prompt_budget_can_honor_the_request_budget():
-    """**四个数字必须互相自洽，不能各看各的。**
+    """**五个数字必须互相自洽，不能各看各的。**
 
     真实关系是：
 
-        prompt_char_budget ≥ 系统提示词 + 变更摘要 + 索取次数 × 单条上限
+        prompt_char_budget ≥ 系统提示词 + 变更摘要 + 历史结论基线 + 索取次数 × 单条上限
 
     旧默认值（120,000 / 12 次 / 14,000）在 150 个提交的版本上，右边是
     12,000 + 39,283 + 12 × 14,000 = 219,283，**超了 1.8 倍**。超了不会报错：模型照样
     索要 12 个文件，其中一半被截断，而它无法区分「预算不够」与「文件就这么大」。
 
-    这条测试锁的是「改其中任何一个数字都要同时看另外三个」——只调预算会浪费模型的窗口，
-    只调单条上限会丢掉 diff 细节，只调索取次数会让模型一次要不够。
+    增量分析上线后，历史结论基线摘要（`baseline.DEFAULT_BASELINE_CHARS`）也从同一份
+    预算里出。它**必须**算进来：每轮都带着它，而被它挤掉的正是本轮上下文条目的空间 ——
+    漏算的后果是「分析跑得越勤，每次能看到的新代码反而越少」，而且没人会把它和基线
+    联系起来（两个数字在代码里离得很远）。
+
+    这条测试锁的是「改其中任何一个数字都要同时看另外几个」——只调预算会浪费模型的窗口，
+    只调单条上限会丢掉 diff 细节，只调索取次数会让模型一次要不够，
+    只调基线会让增量分析悄悄吃掉上下文预算。
     """
+    from services.ai.baseline import DEFAULT_BASELINE_CHARS
     from services.ai.budget import DEFAULT_TOTAL_CHARS
     from services.ai.context_tools import DEFAULT_TOOL_LIMITS
 
@@ -543,12 +550,17 @@ def test_the_prompt_budget_can_honor_the_request_budget():
     needed = (
         _SYSTEM_PROMPT_CHARS
         + _LARGE_VERSION_SUMMARY_CHARS
+        + DEFAULT_BASELINE_CHARS
         + DEFAULT_MAX_TOOL_REQUESTS * per_item
     )
 
+    assert DEFAULT_BASELINE_CHARS < _LARGE_VERSION_SUMMARY_CHARS, (
+        "基线只是历史结论的索引，不该比本轮的变更摘要还大 —— 那会让模型盯着旧结论看"
+    )
     assert DEFAULT_PROMPT_CHAR_BUDGET >= needed, (
         f"提示词预算 {DEFAULT_PROMPT_CHAR_BUDGET:,} 装不下：系统提示词 "
         f"{_SYSTEM_PROMPT_CHARS:,} + 变更摘要 {_LARGE_VERSION_SUMMARY_CHARS:,} + "
+        f"历史结论基线 {DEFAULT_BASELINE_CHARS:,} + "
         f"{DEFAULT_MAX_TOOL_REQUESTS} 次 × {per_item:,} = {needed:,}。"
         "要么调大预算，要么调小单条上限或索取次数"
     )
