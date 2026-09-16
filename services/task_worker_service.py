@@ -21,6 +21,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from utils.logger import log_print, log_structured_event
 from utils.db_retry import db_retry
+from utils.timezone_utils import now_beijing
 from services.deployment_mode import get_deployment_mode, is_agent_dispatch_mode
 from services.branch_refresh_service import (
     NON_CRITICAL_BRANCH_REFRESH_ERRORS,
@@ -1612,9 +1613,20 @@ def schedule_weekly_sync_tasks():
                 is_active=True, auto_sync=True
             ).all()
             for config in active_configs:
-                now_local = datetime.now()
+                # ⚠️ 这里有两个不同口径的「现在」，混用会出静默错误：
+                #   * config.end_time 是**北京墙钟**（用户在 datetime-local 里填的）
+                #     → 判断窗口是否结束要用北京墙钟；
+                #   * BackgroundTask.created_at 是 **naive-UTC**（ORM 默认
+                #     datetime.now(timezone.utc)，SQLite 丢 tzinfo）
+                #     → 算任务年龄要用 naive-UTC。
+                # 原实现两处都用 datetime.now()（**宿主机**本地时间）：在 UTC+8 开发机上
+                # 「任务年龄」恒定多算 28800 秒，两个阈值（300s / WEEKLY_AI_TASK_STALE_SECONDS）
+                # 必定被击穿 → 每 2 分钟把所有 pending 任务直接置 failed；
+                # 在 UTC 容器上则是版本结束判定晚 8 小时。
+                now_beijing_naive = now_beijing().replace(tzinfo=None)
+                now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
                 config_end = config.end_time.replace(tzinfo=None) if config.end_time.tzinfo else config.end_time
-                if now_local > config_end and config.status == 'active':
+                if now_beijing_naive > config_end and config.status == 'active':
                     config.status = 'completed'
                     _db.session.commit()
                     log_print(f"周版本配置已完成: {config.name}", 'WEEKLY')
@@ -1627,7 +1639,7 @@ def schedule_weekly_sync_tasks():
                     ).all()
                     for stale in stale_tasks:
                         stale_created = stale.created_at.replace(tzinfo=None) if stale.created_at and stale.created_at.tzinfo else stale.created_at
-                        if stale_created and (datetime.now() - stale_created).total_seconds() > 300:
+                        if stale_created and (now_utc_naive - stale_created).total_seconds() > 300:
                             stale.status = 'failed'
                             stale.error_message = '任务超时，已被调度器重置'
                             _db.session.commit()
@@ -1677,7 +1689,11 @@ def schedule_weekly_ai_analysis_tasks():
                 ).all()
                 for stale in stale_tasks:
                     stale_created = stale.created_at.replace(tzinfo=None) if stale.created_at and stale.created_at.tzinfo else stale.created_at
-                    if stale_created and (datetime.now() - stale_created).total_seconds() > WEEKLY_AI_TASK_STALE_SECONDS:
+                    # 用 naive-UTC 的「现在」与 created_at 同口径。
+                    # 原本用 datetime.now()（宿主机本地时间）：UTC+8 开发机上任务年龄恒多算
+                    # 28800 秒，会让**刚创建**的 pending 任务立刻被判定超时并置 failed。
+                    _now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+                    if stale_created and (_now_utc_naive - stale_created).total_seconds() > WEEKLY_AI_TASK_STALE_SECONDS:
                         stale.status = 'failed'
                         stale.error_message = 'AI分析任务超时，已被调度器重置'
                         _db.session.commit()

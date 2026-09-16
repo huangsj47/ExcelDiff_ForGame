@@ -8,6 +8,7 @@ from typing import Dict, List
 from sqlalchemy import and_
 from services.model_loader import get_runtime_models
 from utils.safe_print import log_print
+from utils.timezone_utils import beijing_window_to_utc_naive
 
 
 class StatusSyncService:
@@ -137,24 +138,44 @@ class StatusSyncService:
             return {'success': False, 'message': str(e)}
     
     def _find_related_weekly_caches(self, commit) -> List:
-        """查找与提交记录相关的周版本diff缓存"""
+        """查找与提交记录相关的周版本diff缓存
+
+        时区：`WeeklyVersionConfig.start_time/end_time` 是**北京墙钟**（用户在
+        datetime-local 里填的），而 `Commit.commit_time` 是 **naive-UTC 墙钟**。
+        原来直接把两列在 SQL 里比大小，会整体偏移 8 小时且不报错 —— 落在窗口
+        前 8 小时的提交会匹配不到任何周版本缓存，状态同步因此静默失效。
+
+        这里不能在 SQL 里换算：两侧都是**列**，而 SQLite 与 MySQL 的日期加减
+        语法不同（`datetime(col,'+8 hours')` vs `DATE_ADD`）。所以先用
+        repository_id + file_path 把候选集缩到「某个文件的若干缓存」（量很小），
+        再在 Python 侧用换算后的窗口过滤。
+        """
         WeeklyVersionDiffCache, WeeklyVersionConfig = get_runtime_models(
             "WeeklyVersionDiffCache",
             "WeeklyVersionConfig",
         )
-        
-        # 通过文件路径和时间范围查找相关的周版本配置
-        weekly_caches = self.db.session.query(WeeklyVersionDiffCache).join(
+
+        candidates = self.db.session.query(
+            WeeklyVersionDiffCache, WeeklyVersionConfig
+        ).join(
             WeeklyVersionConfig, WeeklyVersionDiffCache.config_id == WeeklyVersionConfig.id
         ).filter(
             and_(
                 WeeklyVersionDiffCache.repository_id == commit.repository_id,
                 WeeklyVersionDiffCache.file_path == commit.path,
-                WeeklyVersionConfig.start_time <= commit.commit_time,
-                WeeklyVersionConfig.end_time >= commit.commit_time
             )
         ).all()
-        
+
+        commit_time = commit.commit_time
+        weekly_caches = []
+        for cache, config in candidates:
+            start_utc, end_utc = beijing_window_to_utc_naive(config.start_time, config.end_time)
+            if start_utc is None or end_utc is None:
+                # 没有可用窗口的配置不参与匹配（原来这些会被 SQL 的 NULL 比较静默排除）
+                continue
+            if start_utc <= commit_time <= end_utc:
+                weekly_caches.append(cache)
+
         return weekly_caches
     
     def _find_related_commits(self, cache) -> List:
@@ -175,13 +196,15 @@ class StatusSyncService:
             # 获取时间范围内的所有相关提交
             config = self.db.session.get(WeeklyVersionConfig, cache.config_id)
             if config:
+                # 窗口是北京墙钟、commit_time 是 naive-UTC，必须先换算（见本文件另一处说明）
+                start_utc, end_utc = beijing_window_to_utc_naive(config.start_time, config.end_time)
                 # 查找该文件在时间范围内的所有提交
                 all_file_commits = self.db.session.query(Commit).filter(
                     and_(
                         Commit.repository_id == cache.repository_id,
                         Commit.path == cache.file_path,
-                        Commit.commit_time >= config.start_time,
-                        Commit.commit_time <= config.end_time
+                        Commit.commit_time >= start_utc,
+                        Commit.commit_time <= end_utc
                     )
                 ).order_by(Commit.commit_time.asc()).all()
 

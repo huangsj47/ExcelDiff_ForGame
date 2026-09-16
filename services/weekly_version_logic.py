@@ -55,7 +55,17 @@ from services.weekly_version_files_api_helpers import (
 )
 from utils.logger import log_print
 from utils.request_security import _has_project_access
-from utils.timezone_utils import now_beijing
+from utils.timezone_utils import now_beijing, beijing_window_to_utc_naive
+
+# 窗口：config 的 start/end 是 naive 北京墙钟，commit_time 是 naive-UTC 墙钟；比较前
+# 必须先过 weekly_window_in_utc()，否则窗口偏移 8 小时、窗口前 8 小时的提交被静默丢弃。
+def weekly_window_in_utc(config):
+    """北京墙钟窗口 → 与 Commit.commit_time 同口径的 (start_utc, end_utc)，均为 naive-UTC。"""
+    return beijing_window_to_utc_naive(
+        getattr(config, 'start_time', None),
+        getattr(config, 'end_time', None),
+    )
+
 
 # ---------------------------------------------------------------------------
 #  运行时依赖 — 由 configure_weekly_version_logic() 注入
@@ -554,8 +564,9 @@ def merged_project_view(project_id):
                 "commit_list_url": url_for("commit_list", repository_id=repo.id),
             }
         )
-    # 按时间范围和名称分组周版本配置
-    now = datetime.now()
+    # 必须用北京墙钟而非 datetime.now()（宿主机本地时间）：在 UTC+8 开发机上
+    # 碰巧正确，部署到 UTC 容器后活跃判定会前后各错 8 小时。
+    now = now_beijing().replace(tzinfo=None)
     today_date = now.strftime("%Y-%m-%d")
     # 分组逻辑：相同版本基础名称+相同时间范围的配置归为一组
     version_groups = {}
@@ -579,7 +590,7 @@ def merged_project_view(project_id):
         # 判断是否为活跃版本（当前时间在版本时间范围内）
         # 处理时区问题：统一转换为无时区的本地时间进行比较
         try:
-            # now已经是naive本地时间，确保数据库时间也是无时区的
+            # now 与 config.start_time/end_time 都是 naive 北京墙钟，同口径可直接比较
             start_time = config.start_time.replace(tzinfo=None) if config.start_time and config.start_time.tzinfo else config.start_time
             end_time = config.end_time.replace(tzinfo=None) if config.end_time and config.end_time.tzinfo else config.end_time
             if start_time and end_time and start_time <= now <= end_time:
@@ -1219,12 +1230,13 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
         else:
             log_print(f"周版本缓存缺少可用Excel合并数据，回退实时计算: {file_path}", 'WEEKLY')
             from sqlalchemy import and_, or_
-            # 优先使用周版本时间窗口内的完整提交集合，避免仅对比首尾提交导致漏掉中间变更
+            # 优先使用窗口内的完整提交集合；窗口须换算（见 weekly_window_in_utc 说明）
+            _win_start_utc, _win_end_utc = weekly_window_in_utc(config)
             commits = Commit.query.filter(
                 Commit.repository_id == repository.id,
                 Commit.path == file_path,
-                Commit.commit_time >= config.start_time,
-                Commit.commit_time <= config.end_time,
+                Commit.commit_time >= _win_start_utc,
+                Commit.commit_time <= _win_end_utc,
             ).order_by(Commit.commit_time.asc(), Commit.id.asc()).all()
 
             # 向后兼容：历史缓存缺失时间窗口提交时，回退到首尾提交兜底
@@ -1254,7 +1266,7 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
                 base_commit = Commit.query.filter(
                     Commit.repository_id == repository.id,
                     Commit.path == file_path,
-                    Commit.commit_time < config.start_time,
+                    Commit.commit_time < _win_start_utc,
                 ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
 
             recomputed_payload = _generate_merged_diff_data(
@@ -1356,11 +1368,12 @@ def process_weekly_version_sync(config_id):
 
         repository = config.repository
         log_print(f"开始处理周版本同步: {config.name} (仓库: {repository.name})", 'WEEKLY')
-        # 获取时间范围内的提交记录
+        # 时间范围内的提交（窗口须换算，见 weekly_window_in_utc 说明）
+        _win_start_utc, _win_end_utc = weekly_window_in_utc(config)
         commits_in_range = Commit.query.filter(
             Commit.repository_id == repository.id,
-            Commit.commit_time >= config.start_time,
-            Commit.commit_time <= config.end_time
+            Commit.commit_time >= _win_start_utc,
+            Commit.commit_time <= _win_end_utc
         ).order_by(Commit.commit_time.asc()).all()
         log_print(f"找到 {len(commits_in_range)} 个时间范围内的提交", 'WEEKLY')
         if not commits_in_range:
@@ -1395,11 +1408,12 @@ def generate_weekly_merged_diff(config, file_path, commits):
             return
 
         repository = config.repository
-        # 获取基准版本（时间范围开始前的最后一个提交）
+        # 基准版本（窗口起始前的最后一个提交；窗口须换算，否则基准会被选晚 8 小时）
+        _win_start_utc, _ = weekly_window_in_utc(config)
         base_commit = Commit.query.filter(
             Commit.repository_id == repository.id,
             Commit.path == file_path,
-            Commit.commit_time < config.start_time
+            Commit.commit_time < _win_start_utc
         ).order_by(Commit.commit_time.desc()).first()
         # 优化策略：如果数据库中没有找到基准版本，直接查询Git/SVN获取真实的提交历史
         if not base_commit:
@@ -1735,14 +1749,14 @@ def get_real_base_commit_from_vcs(config, file_path):
         for commit_data in commits_data:
             commit_time = commit_data.get('commit_time')
             if commit_time:
-                # 确保时间比较的时区一致性
                 if commit_time.tzinfo is None:
-                    # 如果commit_time没有时区信息，假设为UTC
                     commit_time = commit_time.replace(tzinfo=timezone.utc)
-                config_start_time = config.start_time
-                if config_start_time.tzinfo is None:
-                    # 如果config.start_time没有时区信息，假设为UTC
-                    config_start_time = config_start_time.replace(tzinfo=timezone.utc)
+                # config.start_time 是北京墙钟，不能按 UTC 解释（原注释「假设为UTC」
+                # 正是窗口偏移 8 小时的根源）
+                config_start_time = beijing_window_to_utc_naive(config.start_time)
+                if config_start_time is None:
+                    continue
+                config_start_time = config_start_time.replace(tzinfo=timezone.utc)
                 if commit_time < config_start_time:
                     base_commit_data = commit_data
                     break

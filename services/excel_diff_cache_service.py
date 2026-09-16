@@ -533,8 +533,13 @@ class ExcelDiffCacheService:
             query = Commit.query.filter(Commit.repository_id == repository.id)
             
             # 应用仓库配置的起始日期过滤
+            # repository.start_date 是**北京墙钟**（纯文本日期输入框），
+            # Commit.commit_time 是 naive-UTC 墙钟 —— 必须先换算，
+            # 否则起始日 00:00–08:00（北京）的提交会被排除在缓存预热之外。
             if repository.start_date:
-                query = query.filter(Commit.commit_time >= repository.start_date)
+                from utils.timezone_utils import beijing_wallclock_to_utc_naive
+                start_date_utc = beijing_wallclock_to_utc_naive(repository.start_date)
+                query = query.filter(Commit.commit_time >= start_date_utc)
             
             recent_commits = query.order_by(Commit.commit_time.desc()).limit(limit).all()
             

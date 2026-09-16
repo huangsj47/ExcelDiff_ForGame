@@ -160,8 +160,13 @@ def handle_commit_list_page(
     _UserModel = _get_auth_user_model()
     query = Commit.query.filter_by(repository_id=repository_id)
     if repository.start_date:
-        query = query.filter(Commit.commit_time >= repository.start_date)
-        log_print(f"应用仓库起始日期过滤: {repository.start_date}", "APP")
+        # repository.start_date 来自纯文本日期输入框 → **北京墙钟**；
+        # Commit.commit_time 是 naive-UTC 墙钟。直接比较会整体偏移 8 小时，
+        # 于是起始日 00:00–08:00（北京）的提交不出现在列表里 —— 窗口起点被推后 8 小时。
+        from utils.timezone_utils import beijing_wallclock_to_utc_naive
+        start_date_utc = beijing_wallclock_to_utc_naive(repository.start_date)
+        query = query.filter(Commit.commit_time >= start_date_utc)
+        log_print(f"应用仓库起始日期过滤: {repository.start_date}（北京）→ {start_date_utc}（UTC）", "APP")
 
     repository_status = {
         "clone_status": repository.clone_status,

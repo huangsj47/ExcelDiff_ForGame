@@ -45,31 +45,60 @@ def _read_source(relative_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 class TestWeeklySyncScheduler:
-    """验证周版本同步调度器的时区修复和调度逻辑"""
+    """验证周版本同步调度器的时区修复和调度逻辑
 
-    def test_scheduler_uses_naive_datetime_for_comparison(self):
-        """调度器应使用 naive datetime 而非 UTC-aware datetime 做比较"""
+    ⚠️ 契约变更（以下三条原先断言的是**有缺陷的实现**，已重写）：
+
+    原断言是「schedule_weekly_sync_tasks 里必须出现 `now_local = datetime.now()`」、
+    「merged_project_view 里必须出现 `now = datetime.now()`」。
+    而 `datetime.now()` 取的是**宿主机本地时间**，被拿来和两种**库里存的墙钟**比较，
+    这是缺陷本身，不是修复：
+
+      * 与 `WeeklyVersionConfig.end_time`（用户在 datetime-local 里填的 naive
+        **北京**墙钟）比较 → 在 UTC 容器里版本结束判定晚 8 小时；
+      * 与 `BackgroundTask.created_at`（ORM 默认 datetime.now(timezone.utc) 写入、
+        SQLite 丢弃 tzinfo 后的 naive **UTC** 墙钟）相减 → 在 UTC+8 宿主机上
+        「任务年龄」恒定多算 28800 秒，两个阈值（300s / WEEKLY_AI_TASK_STALE_SECONDS）
+        必定被击穿，每 2 分钟把所有 pending 任务直接置 failed。
+
+    这两个缺陷在开发机（UTC+8）上「碰巧」表现正常，所以能长期潜伏；而原测试
+    用字符串匹配把这种脆弱写法锁死，等于**禁止别人修它**。
+
+    现在改为断言正确的口径，并保留一条极窄的结构守卫（禁止回退到宿主机本地时间）。
+    """
+
+    def test_scheduler_window_uses_beijing_wallclock(self):
+        """窗口是否结束必须按**北京墙钟**判断，不能用 datetime.now()（宿主机本地时间）。"""
         content = _read_source("services/task_worker_service.py")
-        # schedule_weekly_sync_tasks 函数中不应出现
-        # datetime.now(timezone.utc) 用于与 config 时间比较
+        func_start = content.find("def schedule_weekly_sync_tasks")
+        assert func_start != -1, "找不到 schedule_weekly_sync_tasks"
+        func_end = content.find("\ndef ", func_start + 10)
+        func_body = content[func_start:func_end]
+
+        assert "now_beijing()" in func_body, (
+            "调度器判断「周版本窗口是否已结束」时必须用北京墙钟（now_beijing()）——"
+            "config.end_time 存的就是用户填的 naive 北京墙钟。\n"
+            "用 datetime.now() 取宿主机本地时间：UTC+8 开发机上碰巧正确，"
+            "部署到 UTC 容器后版本结束判定会晚 8 小时（已结束的版本继续同步）。"
+        )
+        assert "now_local = datetime.now()" not in func_body, (
+            "调度器又回到了 datetime.now()（宿主机本地时间）—— 见上面的说明，"
+            "这是缺陷的形态而不是修复。"
+        )
+
+    def test_stale_task_detection_uses_utc_naive_time(self):
+        """任务年龄必须用 naive-UTC 的「现在」，与 created_at 同口径。"""
+        content = _read_source("services/task_worker_service.py")
         func_start = content.find("def schedule_weekly_sync_tasks")
         func_end = content.find("\ndef ", func_start + 10)
         func_body = content[func_start:func_end]
-        # 关键修复：应使用 datetime.now() 而非 datetime.now(timezone.utc)
-        assert "now_local = datetime.now()" in func_body, \
-            "调度器应使用 datetime.now() 获取本地时间"
-        assert "datetime.now(timezone.utc)" not in func_body, \
-            "调度器不应使用 datetime.now(timezone.utc) 与 naive 时间比较"
 
-    def test_stale_task_detection_uses_naive_time(self):
-        """卡死任务检测应使用 naive 本地时间比较"""
-        content = _read_source("services/task_worker_service.py")
-        func_start = content.find("def schedule_weekly_sync_tasks")
-        func_end = content.find("\ndef ", func_start + 10)
-        func_body = content[func_start:func_end]
-        assert "datetime.now() -" in func_body or \
-               "(datetime.now() - stale_created)" in func_body, \
-            "卡死任务检测应使用 naive datetime.now()"
+        assert "now_utc_naive" in func_body, (
+            "卡死任务检测必须用 naive-UTC 的「现在」与 created_at 同口径。\n"
+            "created_at 由 datetime.now(timezone.utc) 写入、SQLite 丢弃 tzinfo 后是"
+            "naive-UTC；用 datetime.now()（宿主机本地时间）相减，在 UTC+8 机器上"
+            "任务年龄恒多算 28800 秒 → 刚创建 5 秒的 pending 任务也会被判超时置 failed。"
+        )
 
     def test_scheduler_registered_every_2_minutes(self):
         """定时器应注册为每 2 分钟执行"""
@@ -77,15 +106,23 @@ class TestWeeklySyncScheduler:
         content = _read_source("services/task_worker_service.py")
         assert "every(2).minutes.do(schedule_weekly_sync_tasks)" in content
 
-    def test_merged_project_view_uses_naive_now(self):
-        """合并项目视图的活跃状态判断应使用 naive 本地时间"""
+    def test_merged_project_view_uses_beijing_now(self):
+        """合并项目视图的活跃状态判断必须用北京墙钟（与 config 窗口同口径）。"""
         content = _read_source("services/weekly_version_logic.py")
         func_start = content.find("def merged_project_view(")
+        assert func_start != -1, "找不到 merged_project_view"
         func_end = content.find("\ndef ", func_start + 10)
         func_body = content[func_start:func_end]
-        # 应使用 datetime.now() 而非 datetime.now(timezone.utc)
-        assert "now = datetime.now()" in func_body, \
-            "merged_project_view 应使用 datetime.now()"
+
+        assert "now_beijing()" in func_body, (
+            "merged_project_view 判断版本是否活跃时，要拿「现在」和 config 的窗口比较，"
+            "而窗口是 naive 北京墙钟 —— 所以必须用 now_beijing()。\n"
+            "用 datetime.now() 取的宿主机本地时间：UTC 容器里每个版本会在真实起止"
+            "前后各 8 小时被判错活跃状态。"
+        )
+        assert "now = datetime.now()" not in func_body, (
+            "merged_project_view 又回到了 datetime.now()（宿主机本地时间）"
+        )
 
     def test_create_weekly_sync_task_function_exists(self):
         """create_weekly_sync_task 函数应存在并接受 config_id 参数"""
