@@ -303,6 +303,95 @@ class TestMatchingPolicyIsSizeIndependent:
 
 
 # ---------------------------------------------------------------------------
+#  阈值边界：相似度**等于**阈值也要认成「修改」
+# ---------------------------------------------------------------------------
+
+class TestSimilarityThresholdIsInclusive:
+    """`ROW_SIMILARITY_THRESHOLD` 是「**最低**相似度」，判定必须取等号。
+
+    五列里改两格 → 相似度恰好 0.6。用严格大于会把它拒配，同一行的改写就降级成
+    「删一行 + 加一行」：线上审计 6549（Loot点位物资表）`{19, M4-折纸房-19旋转金币}`
+    被改成 `{9, M4-折纸房-旋转金币}`（列 D、E 两格），平台报的是 added 1 + removed 1，
+    页面上同一行既红又绿。
+    """
+
+    @staticmethod
+    def _frames():
+        previous = pd.DataFrame({'id': ['1'], 'a': ['x'], 'b': ['y'], 'c': ['z'], 'd': ['w']})
+        current = pd.DataFrame({'id': ['9'], 'a': ['x'], 'b': ['y'], 'c': ['z'], 'd': ['QQ']})
+        return previous, current
+
+    def test_row_at_exactly_the_threshold_is_a_modification(self):
+        previous, current = self._frames()
+        sheet = _sheet({'S': previous}, {'S': current}, 'S')
+
+        statuses = [r['status'] for r in sheet['rows']]
+        assert statuses == ['modified'], (
+            f"三列相同（3/5 = 0.6，正好等于阈值）却被判成 {statuses} —— "
+            "同一行的改写被拆成「删一行 + 加一行」"
+        )
+        assert_diff_is_faithful(previous, current, sheet, context='相似度正好等于阈值')
+
+
+class TestAlignmentTracksCumulativeOffset:
+    """插入 40 行之后，被改动的那一行对应的前一版行号偏移了 40。
+
+    窗口如果固定钉在 `i` 上（而不是跟着累计位移走），那一片「插入 + 改动」会被
+    算成一大片「删除 + 新增」—— 评审者看到的就是几十行红绿，而真实改动只有一行。
+    """
+
+    @staticmethod
+    def _frames(insert_count):
+        previous = pd.DataFrame({
+            'id': ['h'] + [str(i) for i in range(1, 61)],
+            '名字': ['表头'] + [f'name{i}' for i in range(1, 61)],
+            '数值': [''] + ['0'] * 60,
+        })
+        inserted = pd.DataFrame({'id': [str(900 + i) for i in range(insert_count)],
+                                 '名字': [f'新{i}' for i in range(insert_count)],
+                                 '数值': ['0'] * insert_count})
+        # 在第 20 行之后插入一整块，并改动块后面的一行
+        current = pd.concat([previous.iloc[:20], inserted, previous.iloc[20:]], ignore_index=True)
+        current.loc[20 + insert_count + 5, '数值'] = '999'
+        return previous, current
+
+    def test_change_after_a_large_block_insertion(self):
+        previous, current = self._frames(40)
+        sheet = _sheet({'S': previous}, {'S': current}, 'S', key_columns='1')
+        statuses = sorted(r['status'] for r in sheet['rows'])
+        assert statuses.count('added') == 40, f"插入的 40 行没被完整识别: {statuses}"
+        assert statuses.count('modified') == 1, (
+            f"插入 40 行后改的那一行没被认成「修改」，而是 {statuses} —— "
+            "配对窗口没有跟着累计位移走"
+        )
+        assert_diff_is_faithful(previous, current, sheet, context='大块插入后修改')
+
+    def test_change_after_a_large_block_insertion_without_key_columns(self):
+        """不配关键列也要能认出来：靠的是「锚点切段 + 段内对齐」，
+        而不是把改动的那一行错配成「删一行 + 加一行」。"""
+        previous, current = self._frames(40)
+        sheet = _sheet({'S': previous}, {'S': current}, 'S')
+        statuses = sorted(r['status'] for r in sheet['rows'])
+        assert statuses.count('added') == 40, f"插入的 40 行没被完整识别: {statuses}"
+        assert statuses.count('modified') == 1, (
+            f"插入 40 行后改的那一行被算成了 {statuses} —— "
+            "对齐窗口没跟着位移走（应当是 40 个 added + 1 个 modified）"
+        )
+        assert_diff_is_faithful(previous, current, sheet, context='无关键列+大块插入后修改')
+
+    def test_change_after_a_large_block_deletion(self):
+        previous, current = self._frames(0)
+        # 反向：从当前版本里删掉 40 行，并改一行
+        trimmed = previous.drop(index=range(20, 60)).reset_index(drop=True)
+        trimmed.loc[5, '数值'] = '888'
+        sheet = _sheet({'S': previous}, {'S': trimmed}, 'S', key_columns='1')
+        statuses = sorted(r['status'] for r in sheet['rows'])
+        assert statuses.count('removed') == 40, f"删除的 40 行没被完整识别: {statuses}"
+        assert statuses.count('modified') == 1, f"删块之后改的行没被认成修改: {statuses}"
+        assert_diff_is_faithful(previous, trimmed, sheet, context='大块删除后修改')
+
+
+# ---------------------------------------------------------------------------
 #  不变量本身要能抓住线上那两类错
 # ---------------------------------------------------------------------------
 

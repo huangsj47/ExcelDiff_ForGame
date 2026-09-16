@@ -35,20 +35,21 @@ class DiffService:
     #  行匹配参数 —— **小表与大表共用同一套**
     #
     #  历史行为（已修）：同一次比较会按表的行数走两条不同的路径，
-    #  `len(rows) > 100` 走 `_fast_row_matching`（哈希阈值 0.85、位置匹配 0.5），
+    #  `len(rows) > 100` 走大表路径（哈希阈值 0.85、位置匹配 0.5），
     #  否则走小表路径（阈值 0.6）。于是**同一个改动、同一份表，仅仅因为行数跨过
     #  100 行，结论就不同**：既不可复现，也让「为什么这张表准、那张表不准」无法解释
     #  （线上审计：5988 报 3 行而 git 是 456 行的表，正是大表路径）。
+    #  大表分支与它专用的那一套阈值已经删掉，只剩下面这一条路径。
     #
     #  哈希索引保留，但它的职责收窄成「认出完全没变的行」——哈希是「非空值小写去空白」
     #  的拼串，本来就有碰撞，用它去接受 0.85 相似度的行等于让碰撞决定配对结果。
-    #  变了多少一律交给位置阶段，用同一个阈值判定。
+    #  变了多少一律交给对齐阶段，用同一个阈值判定。
     # ------------------------------------------------------------------
     ROW_SIMILARITY_THRESHOLD = 0.6      # 认定为「同一行被修改」的最低相似度
-    LARGE_TABLE_ROW_THRESHOLD = 100     # 超过此行数改用哈希加速（只是加速，不换口径）
     ROW_POSITION_SEARCH_MIN = 10        # 位置匹配的最小搜索半径
     ROW_POSITION_SEARCH_RATIO = 0.1     # 搜索半径 = 表大小 × 该比例（取两者较大值）
     DEFAULT_KEY_COLUMN_COUNT = 3        # 未配置关键列时，快速预检用前 N 列
+    ALIGN_SEGMENT_MAX_CELLS = 200_000   # 段内 DP 的规模上限（行数乘积），超过退回贪心
 
     def __init__(self):
         self.performance_stats = {
@@ -854,60 +855,26 @@ class DiffService:
     
     def _find_row_matches(self, current_rows, previous_rows, columns,
                           index_offset_current=None, index_offset_previous=None):
-        """优化的行匹配算法 - 减少时间复杂度
+        """行匹配入口：**小表大表同一条路径**。
+
+        1. 先认出完全没变的行（哈希预筛 + 逐格确认，允许出现在任意位置）——
+           这些行不需要报变更，同时充当对齐的锚点；
+        2. 以锚点把两侧切成若干段，段内独立对齐（DP，超规模退回带位移的贪心）。
+
+        为什么按段对齐：插入了 40 行之后，被改动的那一行对应的前一版行号偏移了 40，
+        固定窗口（无论 ±10 还是 ±10%）都够不着 —— 那一片「插入 + 改动」会被算成
+        一大片「删除 + 新增」。按锚点切段后，位移只影响它所在的那一段，
+        段内 DP 能正确地把「插入的 40 行」与「改动的 1 行」分开。
 
         index_offset_*：传入的是**子集**时（关键列阶段已经配掉的行不再参与相似度
         匹配），用它在返回前把下标映射回完整行列表的下标 —— 否则结果会指到错误的行上。
         """
-        offsets_current = list(index_offset_current) if index_offset_current is not None             else list(range(len(current_rows)))
-        offsets_previous = list(index_offset_previous) if index_offset_previous is not None             else list(range(len(previous_rows)))
+        offsets_current = (list(index_offset_current) if index_offset_current is not None
+                           else list(range(len(current_rows))))
+        offsets_previous = (list(index_offset_previous) if index_offset_previous is not None
+                            else list(range(len(previous_rows))))
 
-        # 如果数据量很大，使用快速匹配策略（只是加速，阈值与下面同一套）
-        if (len(current_rows) > self.LARGE_TABLE_ROW_THRESHOLD
-                or len(previous_rows) > self.LARGE_TABLE_ROW_THRESHOLD):
-            matches = self._fast_row_matching(current_rows, previous_rows, columns)
-            return self._remap_match_indices(matches, offsets_current, offsets_previous)
-        
-        # 对于小数据集，使用精确匹配
-        matches = []
-        used_previous = set()
-        
-        for i, current_row in enumerate(current_rows):
-            best_match = None
-            best_score = 0
-            
-            # 早期退出：如果找到完全匹配，直接使用
-            for j, previous_row in enumerate(previous_rows):
-                if j in used_previous:
-                    continue
-                
-                # 快速预检：比较关键字段
-                if not self._quick_similarity_check(current_row, previous_row, columns):
-                    continue
-                
-                # 计算详细相似度
-                score = self._calculate_row_similarity(current_row, previous_row, columns)
-                
-                # 相似度阈值：与小表/大表统一（见 ROW_SIMILARITY_THRESHOLD 的说明）
-                if score > self.ROW_SIMILARITY_THRESHOLD:
-                    if score == 1.0:  # 完全匹配，直接使用
-                        best_match = j
-                        best_score = score
-                        break
-                    elif score > best_score:
-                        best_match = j
-                        best_score = score
-            
-            if best_match is not None:
-                matches.append({
-                    'type': 'match',
-                    'current_idx': i,
-                    'previous_idx': best_match,
-                    'similarity': best_score
-                })
-                used_previous.add(best_match)
-        
-        matches.sort(key=lambda x: x['current_idx'])
+        matches = self._match_rows(current_rows, previous_rows, columns)
         return self._remap_match_indices(matches, offsets_current, offsets_previous)
 
     @staticmethod
@@ -927,102 +894,229 @@ class DiffService:
             new_match['current_idx'] = offsets_current[current_idx]
             new_match['previous_idx'] = offsets_previous[previous_idx]
             remapped.append(new_match)
-        remapped.sort(key=lambda x: x['current_idx'])
+        remapped.sort(key=lambda m: m['current_idx'])
         return remapped
 
-    def _fast_row_matching(self, current_rows, previous_rows, columns):
-        """大数据集的快速匹配算法
+    def _match_rows(self, current_rows, previous_rows, columns):
+        """认没变的行 → 切段 → 段内对齐，返回匹配列表。"""
+        identical = self._match_identical_rows(current_rows, previous_rows, columns)
+        anchors = self._pick_monotonic_anchors(identical)
+        matched_current = {m['current_idx'] for m in identical}
+        matched_previous = {m['previous_idx'] for m in identical}
 
-        哈希索引的职责**只有一件事**：认出完全没变的行（相似度 == 1.0），
-        把它们从后续的相似度扫描里摘出去，省下大部分比较。
+        matches = list(identical)
+        matches.extend(self._align_segments(current_rows, previous_rows, columns,
+                                            anchors, matched_current, matched_previous))
+        matches.sort(key=lambda m: (m['current_idx'], m['previous_idx']))
+        return matches
 
-        历史行为（已修）：这里曾用哈希（「非空值小写去空白」的拼串，本来就有碰撞）
-        去接受 0.85 相似度的行 —— 等于让哈希碰撞决定配对结果，而小表路径的阈值是 0.6。
-        同一个改动，表一大结论就变。现在两条路径共用 `ROW_SIMILARITY_THRESHOLD`。
+    def _match_identical_rows(self, current_rows, previous_rows, columns):
+        """配对两版里**完全相等**的行（任意位置）。
+
+        哈希只是预筛（「非空值小写去空白」的拼串有碰撞），最终以逐格相似度 == 1.0 确认。
+        这些行不产生任何差异输出，但它们是后面切段对齐的锚点。
         """
-        matches = []
-        
-        # 创建哈希索引以加速查找
-        previous_hashes = {}
+        index = {}
         for j, row in enumerate(previous_rows):
-            row_hash = self._calculate_row_hash(row, columns)
-            if row_hash not in previous_hashes:
-                previous_hashes[row_hash] = []
-            previous_hashes[row_hash].append(j)
-        
+            index.setdefault(self._calculate_row_hash(row, columns), []).append(j)
+
         used_previous = set()
-        
-        for i, current_row in enumerate(current_rows):
-            current_hash = self._calculate_row_hash(current_row, columns)
-            
-            # 查找相同哈希的行：只接受**完全相等**的配对（哈希只是预筛）
-            if current_hash in previous_hashes:
-                best_j = None
-                for j in previous_hashes[current_hash]:
-                    if j not in used_previous:
-                        if self._calculate_row_similarity(current_row, previous_rows[j], columns) == 1.0:
-                            best_j = j
-                            break
-                
-                if best_j is not None:
+        matches = []
+        for i, row in enumerate(current_rows):
+            for j in index.get(self._calculate_row_hash(row, columns), []):
+                if j in used_previous:
+                    continue
+                if self._calculate_row_similarity(row, previous_rows[j], columns) == 1.0:
                     matches.append({
                         'type': 'match',
+                        'matched_by': 'identical',
                         'current_idx': i,
-                        'previous_idx': best_j,
-                        'similarity': 1.0
+                        'previous_idx': j,
+                        'similarity': 1.0,
                     })
-                    used_previous.add(best_j)
-        
-        # 添加基于位置的匹配逻辑，用于处理部分修改的行
-        used_current = set(match['current_idx'] for match in matches)
-        position_matches = self._find_position_based_matches(current_rows, previous_rows, columns, used_previous, used_current)
-        matches.extend(position_matches)
-        
-        matches.sort(key=lambda x: x['current_idx'])
+                    used_previous.add(j)
+                    break
         return matches
-    
-    def _find_position_based_matches(self, current_rows, previous_rows, columns, used_previous, used_current):
-        """基于位置的匹配逻辑，用于识别部分修改的行
 
-        搜索半径与相似度阈值都取自类常量，与其它路径**共用同一套**：
+    @staticmethod
+    def _pick_monotonic_anchors(matches):
+        """从「完全相等」的配对里取一个不交叉的子序列当锚点。
+
+        内容相同的行可能被配到任意位置（两行互换时就会交叉），交叉的锚点无法用来
+        切段；被剔掉的配对**仍然算已匹配**，只是不参与切段。
+        做法：按 previous_idx 排序后，对 current_idx 求最长递增子序列。
+        """
+        from bisect import bisect_left
+        ordered = sorted(matches, key=lambda m: (m['previous_idx'], m['current_idx']))
+        tails = []
+        tails_idx = []
+        prev_link = [-1] * len(ordered)
+        for pos, match in enumerate(ordered):
+            value = match['current_idx']
+            slot = bisect_left(tails, value)
+            if slot == len(tails):
+                tails.append(value)
+                tails_idx.append(pos)
+            else:
+                tails[slot] = value
+                tails_idx[slot] = pos
+            prev_link[pos] = tails_idx[slot - 1] if slot > 0 else -1
+        if not tails_idx:
+            return []
+        chain = []
+        cursor = tails_idx[-1]
+        while cursor != -1:
+            chain.append(ordered[cursor])
+            cursor = prev_link[cursor]
+        chain.reverse()
+        return chain
+
+    def _align_segments(self, current_rows, previous_rows, columns,
+                        anchors, matched_current, matched_previous):
+        """以锚点切段，段内对齐（DP；超规模退回带位移的贪心）。"""
+        matches = []
+        ordered = sorted(anchors, key=lambda m: m['current_idx'])
+        bounds = [(-1, -1)]
+        bounds.extend((m['current_idx'], m['previous_idx']) for m in ordered)
+        bounds.append((len(current_rows), len(previous_rows)))
+        for (prev_c, prev_p), (next_c, next_p) in zip(bounds, bounds[1:]):
+            cur_lo, cur_hi = prev_c + 1, next_c
+            prev_lo, prev_hi = prev_p + 1, next_p
+            if cur_lo >= cur_hi or prev_lo >= prev_hi:
+                continue
+            cur_idx = [i for i in range(cur_lo, cur_hi) if i not in matched_current]
+            prev_idx = [j for j in range(prev_lo, prev_hi) if j not in matched_previous]
+            if not cur_idx or not prev_idx:
+                continue
+            if len(cur_idx) * len(prev_idx) <= self.ALIGN_SEGMENT_MAX_CELLS:
+                matches.extend(self._align_segment_dp(
+                    current_rows, previous_rows, columns, cur_idx, prev_idx))
+            else:
+                # 段太大（例如整表重排）：退回带位移的贪心，代价有界
+                compact_current = [current_rows[i] for i in cur_idx]
+                compact_previous = [previous_rows[j] for j in prev_idx]
+                greedy = self._find_position_based_matches(
+                    compact_current, compact_previous, columns, set(), set())
+                for match in greedy:
+                    matches.append({
+                        'type': 'match',
+                        'matched_by': 'greedy',
+                        'current_idx': cur_idx[match['current_idx']],
+                        'previous_idx': prev_idx[match['previous_idx']],
+                        'similarity': match['similarity'],
+                    })
+        return matches
+
+    def _align_segment_dp(self, current_rows, previous_rows, columns, cur_idx, prev_idx):
+        """段内对齐：把「哪些行配成一对」建成 DP。
+
+        dp[i][j] = 前 i 条当前行与前 j 条前一版行能配出的最大得分；
+        配对得分 = 1 + 相似度（相似度必须超过阈值才允许配对），跳过不得分。
+        于是优先「配出最多的对数」，同分时偏好相似度更高的配对 —— 插在中间的行
+        会被当作跳过（新增），而不是把后面的行一一错配。
+
+        规模由 `ALIGN_SEGMENT_MAX_CELLS` 兜住（本函数只在段内行数乘积不超限时调用）。
+        """
+        a, b = len(cur_idx), len(prev_idx)
+        # 阈值是「**最低**相似度」，所以取等号：五列里改两格恰好是 0.6，
+        # 用严格大于会把它拒配，同一行的改写就降级成「删一行 + 加一行」
+        # （线上审计 6549：`{19, M4-折纸房-19旋转金币}` → `{9, M4-折纸房-旋转金币}`
+        # 被报成 added 1 + removed 1，而它其实是 1 行修改）。
+        threshold = self.ROW_SIMILARITY_THRESHOLD
+        similarities = {}
+        dp = [[0.0] * (b + 1) for _ in range(a + 1)]
+        for i in range(1, a + 1):
+            current_row = current_rows[cur_idx[i - 1]]
+            for j in range(1, b + 1):
+                similarity = self._calculate_row_similarity(
+                    current_row, previous_rows[prev_idx[j - 1]], columns)
+                similarities[(i, j)] = similarity
+                best = max(dp[i - 1][j], dp[i][j - 1])
+                if similarity >= threshold:
+                    best = max(best, dp[i - 1][j - 1] + 1.0 + similarity)
+                dp[i][j] = best
+
+        matches = []
+        i, j = a, b
+        while i > 0 and j > 0:
+            similarity = similarities[(i, j)]
+            if similarity >= threshold and abs(
+                    dp[i][j] - (dp[i - 1][j - 1] + 1.0 + similarity)) < 1e-9:
+                matches.append({
+                    'type': 'match',
+                    'matched_by': 'aligned',
+                    'current_idx': cur_idx[i - 1],
+                    'previous_idx': prev_idx[j - 1],
+                    'similarity': similarity,
+                })
+                i -= 1
+                j -= 1
+            elif dp[i - 1][j] >= dp[i][j - 1]:
+                i -= 1
+            else:
+                j -= 1
+        matches.reverse()
+        return matches
+
+    def _find_position_based_matches(self, current_rows, previous_rows, columns,
+                                     used_previous, used_current, last_matched_previous=-1):
+        """按位置（带**单调约束**）配对剩下的行，识别「被修改的行」。
+
+        单调约束：当前行按顺序扫，配到的前一版行号必须**严格递增**
+        （`last_matched_previous` 只增不减），搜索区间也从它之后开始。
+
+        为什么必须单调：行在配表里是有序的，真实对应关系不会交叉。原实现允许
+        任意配对（每个当前行都在 ±range 内独立找最相似的未用行），于是出现
+        「第 10 行被配给了第 21 行的对手方」这种交叉 —— 线上审计 5988 报的那条
+        「修改」里 old 取自 Excel 第 21 行、new 取自第 10 行，就是交叉配对的产物；
+        而真正的对手方被别的行抢走后，只剩「未匹配」可走，整块变更还会被压成一行。
+        贪心 + 无约束的配对结果也依赖扫描顺序，同一份表换个行序结论就变。
+
+        另外跟踪**累计位移** `delta`：插入了 30 行之后，第 i 行对应的前一版行是
+        i+30 而不是 i，窗口必须跟着位移走，否则整块「插入 + 改动」会被算成
+        一大片「删除 + 新增」。delta 每次配对成功后更新为 `j - i`。
+
         搜索半径 = max(ROW_POSITION_SEARCH_MIN, 表大小 × ROW_POSITION_SEARCH_RATIO)，
-        阈值 = ROW_SIMILARITY_THRESHOLD。
+        阈值 = ROW_SIMILARITY_THRESHOLD（与其它路径共用同一套）。
         """
         matches = []
-        
+
         # 自适应搜索范围：至少 ROW_POSITION_SEARCH_MIN 行，最多为数据集大小的 ROW_POSITION_SEARCH_RATIO
         data_size = max(len(current_rows), len(previous_rows))
         search_range = max(self.ROW_POSITION_SEARCH_MIN,
                            int(data_size * self.ROW_POSITION_SEARCH_RATIO))
-        
+
+        # 累计位移：当前行 i 对应的前一版行 ≈ i + delta
+        delta = 0
+
         # 对于未匹配的当前行，尝试与相近位置的前一版本行匹配
         for i, current_row in enumerate(current_rows):
             if i in used_current:
                 continue
-                
-            # 搜索中心：优先以当前行号为中心
-            center = i
-            start_idx = max(0, center - search_range)
+
+            # 单调：只能往 last_matched_previous 之后找；窗口跟着累计位移走
+            center = i + delta
+            start_idx = max(last_matched_previous + 1, center - search_range, 0)
             end_idx = min(len(previous_rows), center + search_range + 1)
-            
+
             best_match = None
             best_score = 0
-            
+
             for j in range(start_idx, end_idx):
                 if j in used_previous:
                     continue
-                    
+
                 # 快速预检：跳过明显不相关的行
                 if not self._quick_similarity_check(current_row, previous_rows[j], columns):
                     continue
-                
+
                 score = self._calculate_row_similarity(current_row, previous_rows[j], columns)
-                
-                # 与其它路径同一个阈值
-                if score > self.ROW_SIMILARITY_THRESHOLD and score > best_score:
+
+                # 与其它路径同一个阈值（含等号：阈值是「最低相似度」）
+                if score >= self.ROW_SIMILARITY_THRESHOLD and score > best_score:
                     best_score = score
                     best_match = j
-            
+
             if best_match is not None:
                 matches.append({
                     'type': 'modified',
@@ -1032,7 +1126,9 @@ class DiffService:
                 })
                 used_previous.add(best_match)
                 used_current.add(i)
-        
+                last_matched_previous = best_match
+                delta = best_match - i      # 后面几行的窗口跟着这次配对整体平移
+
         return matches
     
     def _quick_similarity_check(self, row1, row2, columns):

@@ -323,7 +323,7 @@ if sys.platform == 'win32' and not _IS_TESTING:
 #         同时修掉 .tsv 落进 pd.ExcelFile 必然读取失败的问题（CSV_EXTENSIONS 早就
 #         声明支持 .tsv，get_file_type 也判为 excel）。
 #         不升版本号的后果：已缓存的 diff（旧版本号）继续命中，修复在界面上**看不见**。
-DIFF_LOGIC_VERSION = "1.12.0"
+DIFF_LOGIC_VERSION = "1.13.0"
 
 # ---------------------------------------------------------------------------
 #  日志系统 — 已拆分至 utils/logger.py

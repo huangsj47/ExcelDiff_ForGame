@@ -95,7 +95,11 @@ def _detected(stats):
 
 
 def _big_table(n=120):
-    """120 行普通数据，用来把匹配算法推过 `>100 行` 的分支（`_fast_row_matching`）。"""
+    """120 行普通数据：把表推到历史上「大表分支」的行数区间（>100 行）。
+
+    那条分支已经删掉，行匹配只剩一条路径；这里仍然用 120 行，是为了挡住
+    「行数一变结论就变」的回归。
+    """
     return [[str(i), 'c%d' % i, 'A', 't', 'v', 'd'] for i in range(n)]
 
 
@@ -207,11 +211,12 @@ class TestLiteralRowChangesAreReported:
         assert stats['removed'] == 0, stats
 
     def test_literal_row_change_is_reported_in_large_table(self, svc):
-        """大表（>100 行）会切到另一条匹配算法，那边同样不得吞掉整行字面量的变更。
+        """大表（>100 行）同样不得吞掉整行字面量的变更。
 
-        `_find_row_matches`（:630）在任一侧超过 100 行时改走 `_fast_row_matching`
-        （:679，哈希桶 + 基于位置匹配，阈值降到 0.5）。这条路径上的漏报与表大小无关，
-        但代码路径不同，必须单独钉住（实测修前同样是 0 变更）。
+        行匹配现在只有一条路径（`_find_row_matches` → 认没变的行 → 锚点切段 →
+        段内对齐），历史上那条「超 100 行改走哈希桶 + 位置匹配、阈值降到 0.5」的
+        大表分支已经删掉。这条测试留着，是为了挡住「行数一变结论就变」的回归
+        （实测修前同样是 0 变更）。
         """
         before = _xlsx(_big_table() + [['null'] * 6], WIDE)
         after = _xlsx(_big_table() + [['null', 'null', 'null', 'null', 'None', 'null']], WIDE)

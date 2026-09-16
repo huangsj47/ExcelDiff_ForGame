@@ -278,8 +278,19 @@ def get_deleted_file_diff_data(commit, previous_commit):
             repository.id, commit.commit_id, commit.path, previous_commit_id=baseline_id
         )
         if cached_diff:
-            log_print(f"✅ 删除文件的差异命中缓存: {commit.path}", 'CACHE')
-            return json.loads(cached_diff.diff_data)
+            cached_payload = json.loads(cached_diff.diff_data)
+            if cached_payload.get("sheets"):
+                log_print(f"✅ 删除文件的差异命中缓存: {commit.path}", 'CACHE')
+                return cached_payload
+            # 缓存里一行内容都没有 —— 对「删除提交」来说这份载荷等于什么都没有。
+            # 历史缺陷：通用路径（get_unified_diff_data）不知道这是删除，算出的是
+            # 「没有工作表的 excel」，接口把它回成「没有找到Excel工作表数据」，
+            # 后台任务还会把它写进**同一把缓存键**；页面随后读缓存拿到这份空载荷，
+            # 被删掉的内容就再也显示不出来（线上实测：同一批删除提交里，先被接口
+            # 访问过的那几条页面全空，没被访问过的正常渲染）。当作未命中去重算。
+            log_print(
+                f"⚠️ 删除文件的缓存里没有工作表内容，忽略并重算: {commit.path}", 'CACHE', force=True
+            )
 
         previous_content = None
         if repository.type == 'git':
@@ -359,6 +370,17 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
     # 这里绝不能跟着 read_baseline 去自解析权威基线，否则会把「与空版本比」的
     # 结果冒充成「与权威基线比」的结果，反过来污染权威基线那一行。
     write_baseline = previous_commit.commit_id if has_previous else None
+    # 删除提交必须走删除自己的路径。
+    #
+    # 通用路径不知道「这个文件已经没了」：它拿不到当前内容，算出来的是一个
+    # **没有工作表的 excel 载荷**。接口把这份空载荷回成「没有找到Excel工作表数据」，
+    # 后台任务还会把它写进缓存（键与页面完全相同）；页面随后读缓存拿到它，
+    # 删除前的内容就再也显示不出来。线上实测：同一批删除提交里，先被接口访问过的
+    # 那几条页面全空，没被访问过的正常渲染出全部被删行。
+    if getattr(commit, "operation", None) == "D" and has_previous:
+        deleted_diff = get_deleted_file_diff_data(commit, previous_commit)
+        if deleted_diff and deleted_diff.get("sheets"):
+            return deleted_diff
     perf_project_tags = {
         "project_id": repository.project_id if repository else "",
         "project_code": (repository.project.code if repository and repository.project else ""),

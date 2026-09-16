@@ -786,7 +786,11 @@ class TestRouteEndpointsChain:
 # ---------------------------------------------------------------------------
 
 class TestDiffAccuracyLargeDataset:
-    """验证大数据集（>100行）Excel diff 的准确性"""
+    """验证大数据集（>100行）Excel diff 的准确性。
+
+    「大数据集」曾经是一条独立的匹配分支（阈值不同），现在只是普通的一批行；
+    这些用例仍在，用来保证行数变大不会让配对质量下降。
+    """
 
     @pytest.fixture(autouse=True)
     def setup_diff_service(self):
@@ -808,7 +812,7 @@ class TestDiffAccuracyLargeDataset:
         cols = ["ID", "Name", "Value", "Category", "Score"]
         rows = self._generate_rows(200, cols)
         
-        matches = self.service._fast_row_matching(rows, rows, cols)
+        matches = self.service._match_rows(rows, rows, cols)
         
         # 所有行都应被匹配
         assert len(matches) == 200
@@ -824,7 +828,7 @@ class TestDiffAccuracyLargeDataset:
         current = list(previous)
         current.insert(100, {"ID": "NEW", "Name": "inserted", "Value": "new_val"})
         
-        matches = self.service._fast_row_matching(current, previous, cols)
+        matches = self.service._match_rows(current, previous, cols)
         matched_current = set(m["current_idx"] for m in matches)
         
         # 至少80%的原有行应该被正确匹配（改进后应>90%）
@@ -844,7 +848,7 @@ class TestDiffAccuracyLargeDataset:
         for i in range(50, 70):
             current[i]["Status"] = "CHANGED"
         
-        matches = self.service._fast_row_matching(current, previous, cols)
+        matches = self.service._match_rows(current, previous, cols)
         matched_current = set(m["current_idx"] for m in matches)
         
         # 被修改的行也应该被匹配（虽然相似度 < 1.0）
@@ -867,7 +871,7 @@ class TestDiffAccuracyLargeDataset:
         previous = self._generate_rows(100, cols)
         current = list(previous[20:])  # 删除前20行
         
-        matches = self.service._fast_row_matching(current, previous, cols)
+        matches = self.service._match_rows(current, previous, cols)
         
         # 后80行应被匹配
         assert len(matches) >= 70, (

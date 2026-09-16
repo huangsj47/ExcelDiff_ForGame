@@ -61,6 +61,51 @@ BASELINE_BYTES = _xlsx_bytes({
 })
 
 
+def _deleted_commit():
+    """一个「文件在此提交里被删除」的提交（只用到这几个字段）。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        commit_id="a" * 40,
+        path="config/奖励模式_CfgRewardMode.xlsx",
+        commit_time=None,
+        operation="D",
+        repository=SimpleNamespace(id=7, type="git", project_id=None, project=None),
+    )
+
+
+@pytest.fixture()
+def patched(monkeypatch):
+    """真实引擎 + 真实字节，只把缓存与 VCS 读内容换成假件。"""
+    import services.excel_diff_cache_service as cache_module
+    import services.vcs_content_service as vcs_module
+
+    saved = {}
+
+    class _FakeCacheService:
+        def __init__(self):
+            self.saved_rows = []
+            self.cached_json = None  # 设为 JSON 文本即模拟「缓存命中」
+
+        def get_cached_diff(self, *_args, **_kwargs):
+            if self.cached_json is None:
+                return None
+            from types import SimpleNamespace
+            return SimpleNamespace(diff_data=self.cached_json)
+
+        def save_cached_diff(self, **kwargs):
+            self.saved_rows.append(kwargs)
+            return True
+
+    fake_cache = _FakeCacheService()
+    monkeypatch.setattr(cache_module, "ExcelDiffCacheService", lambda: fake_cache)
+    monkeypatch.setattr(
+        vcs_module, "get_file_content_from_git",
+        lambda repository, commit_id, path: BASELINE_BYTES if commit_id == "b" * 40 else None,
+    )
+    saved["cache"] = fake_cache
+    return saved
+
+
 class TestProcessDeletedFile:
     def test_every_sheet_is_marked_deleted_with_all_rows(self):
         result = DiffService().process_deleted_file("config/x.xlsx", BASELINE_BYTES)
@@ -105,42 +150,9 @@ class TestGeneralPathIsNotReused:
 class TestDeletedFileDiffData:
     """编排层：把缓存与 VCS 换成假件，引擎与真实字节都走真的。"""
 
-    @pytest.fixture()
-    def patched(self, monkeypatch):
-        import services.excel_diff_cache_service as cache_module
-        import services.vcs_content_service as vcs_module
-
-        saved = {}
-
-        class _FakeCacheService:
-            def __init__(self):
-                self.saved_rows = []
-
-            def get_cached_diff(self, *_args, **_kwargs):
-                return None
-
-            def save_cached_diff(self, **kwargs):
-                self.saved_rows.append(kwargs)
-                return True
-
-        fake_cache = _FakeCacheService()
-        monkeypatch.setattr(cache_module, "ExcelDiffCacheService", lambda: fake_cache)
-        monkeypatch.setattr(
-            vcs_module, "get_file_content_from_git",
-            lambda repository, commit_id, path: BASELINE_BYTES if commit_id == "b" * 40 else None,
-        )
-        saved["cache"] = fake_cache
-        return saved
-
     @staticmethod
     def _commit():
-        from types import SimpleNamespace
-        return SimpleNamespace(
-            commit_id="a" * 40,
-            path="config/奖励模式_CfgRewardMode.xlsx",
-            commit_time=None,
-            repository=SimpleNamespace(id=7, type="git"),
-        )
+        return _deleted_commit()
 
     def test_builds_payload_from_the_baseline_and_caches_it(self, patched):
         from services.vcs_content_service import get_deleted_file_diff_data
@@ -165,6 +177,62 @@ class TestDeletedFileDiffData:
         from services.vcs_content_service import get_deleted_file_diff_data
 
         assert get_deleted_file_diff_data(self._commit(), None) is None
+
+    def test_cached_payload_without_sheets_is_ignored_and_recomputed(self, patched):
+        """缓存里那份「没有工作表的 excel」是通用路径写下的（历史缺陷）：对删除提交
+        来说它等于什么都没有。必须当作未命中重算并覆盖 —— 否则**先被接口或后台任务
+        碰过**的那条删除提交，页面上被删内容就永远不显示（线上实测：同一批删除提交里
+        先被接口访问过的页面全空，没被访问过的正常渲染出全部被删行）。
+        """
+        import json
+
+        from services.vcs_content_service import get_deleted_file_diff_data
+
+        patched["cache"].cached_json = json.dumps({"type": "excel", "sheets": {}})
+        previous = type("P", (), {"commit_id": "b" * 40})()
+
+        result = get_deleted_file_diff_data(self._commit(), previous)
+
+        assert result and result["sheets"], "缓存里的空载荷被当成结果返回了 —— 页面又会只剩一句「文件已删除」"
+        assert len(result["sheets"]["奖励模式"]["rows"]) == 3
+        assert patched["cache"].saved_rows, "重算之后没有覆盖那份空载荷，下次还是读到它"
+
+    def test_cached_payload_with_sheets_is_still_served(self, patched):
+        """有内容的缓存仍要命中（这是缓存存在的意义）。"""
+        import json
+
+        from services.vcs_content_service import get_deleted_file_diff_data
+
+        cached = {"type": "excel", "sheets": {"奖励模式": {"operation": "deleted", "rows": [{"row_number": 1}]}}}
+        patched["cache"].cached_json = json.dumps(cached)
+        previous = type("P", (), {"commit_id": "b" * 40})()
+
+        result = get_deleted_file_diff_data(self._commit(), previous)
+
+        assert result == cached
+        assert not patched["cache"].saved_rows, "命中缓存却又重算了一遍"
+
+
+class TestUnifiedDiffRoutesDeletions:
+    """`get_unified_diff_data` 是接口与后台任务共用的入口。
+
+    它不知道「这个文件已经没了」：拿不到当前内容就只算出一个**没有工作表的 excel
+    载荷**，接口把它回成「没有找到Excel工作表数据」、后台任务把它写进缓存。
+    删除提交必须在这里就转到删除自己的路径。
+    """
+
+    def test_deleted_commit_returns_the_deleted_payload(self, patched):
+        from services.vcs_content_service import get_unified_diff_data
+
+        previous = type("P", (), {"commit_id": "b" * 40})()
+        payload = get_unified_diff_data(_deleted_commit(), previous)
+
+        assert payload and payload.get("sheets"), (
+            "删除提交在统一入口上没有走删除路径 —— 接口会回「没有找到Excel工作表数据」，"
+            "并把这份空载荷写进缓存供页面读取"
+        )
+        assert len(payload["sheets"]["奖励模式"]["rows"]) == 3
+        assert payload["sheets"]["奖励模式"]["operation"] == "deleted"
 
 
 class TestDeletedShapeOneProducers:
