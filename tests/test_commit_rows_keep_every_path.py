@@ -35,10 +35,26 @@
 `services/agent_management_handlers.py` 里的 Agent 回传路径本来就是对的 ——
 它用的就是 `pair = (commit_id, file_path)`。本文件把另外两条统一到这个口径。
 
-## 注意：修复后需要一次全量重同步
+## 注意：修复后需要重同步才能补齐历史（且 force_reclone 不够）
 
-增量同步按 `since_date` / 最新 commit_time 往前推，之前被丢掉的文件不会自动补回来。
-已部署的实例要么全量重同步，要么手工触发一次 `force_reclone`。
+增量同步的起点是 `since_date = max(repository.start_date, commits_log 中最新
+commit_time)`（`services/task_worker_service.py::_handle_auto_sync_task_inner`）。
+修复前被跳过、**从未落进 commits_log** 的历史文件不在这个时间窗口内，所以**普通
+增量同步不会把它们补回来**。
+
+而 `force_reclone` **也不足以**补齐：它只清理本地工作副本再重新克隆，并不重置
+`since_date`（`since_date` 来自数据库里的 `commits_log` 最新 `commit_time`，而
+那些行并没有变）。要补齐必须让采集回到历史起点：
+
+* Agent 模式：`agent/handlers/auto_sync.py::_collect_commits` 用 `git log -n<limit>`
+  采集、**不带日期过滤**，重派一次 auto_sync 即可；`limit` 缺省 300、夹在 50~2000，
+  历史更早时要把 `limit` 调大。
+* 单机模式：清掉该仓库在 `commits_log` 的记录（或删仓库重建）后再同步，
+  并确认 `repository.start_date` 为空或早于要补齐的起点。
+
+（我最初在本文件的说明里写了「或触发一次 force_reclone」，那是**错的** ——
+ 复核 `_handle_auto_sync_task_inner` 的 `since_date` 推导后才改正。
+ 详细运维步骤见 `平台配置说明.md` §12.3。）
 """
 from __future__ import annotations
 
