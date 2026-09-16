@@ -298,9 +298,21 @@ def get_excel_cache_logs():
         return jsonify({"success": False, "message": f"获取日志失败: {str(exc)}"}), 500
 
 
-@cache_management_bp.route("/api/excel-html-cache/clear")
+@cache_management_bp.route("/api/excel-html-cache/clear", methods=["POST"])
+@require_admin
 def clear_excel_html_cache():
-    """清理Excel HTML缓存（版本检查）"""
+    """清理Excel HTML缓存（版本检查 / force_all 全清）。
+
+    安全修复：
+      * 原先只有 `@cache_management_bp.route(...)`，**没有 `@require_admin`** ——
+        而同文件其余 7 个清理/重置接口全部有。于是任意已登录用户都能调用。
+      * 原先默认 GET，而 `enforce_csrf` 对 GET/HEAD/OPTIONS/TRACE 直接放行 ——
+        于是 `force_all=true` 这个「DELETE FROM excel_html_cache」的全平台破坏性
+        操作**完全在 CSRF 保护之外**。浏览器对顶层导航会带上会话 Cookie，
+        攻击者页面只要 `location.href = '.../api/excel-html-cache/clear?force_all=true'`
+        就能在受害者登录态下清空全平台 HTML diff 缓存（下轮访问全部重算）。
+      改为 POST + `@require_admin`（POST 会走 CSRF 校验）。
+    """
     db, excel_html_cache_service, log_print = get_runtime_models(
         "db",
         "excel_html_cache_service",
@@ -330,9 +342,23 @@ def clear_excel_html_cache():
         return jsonify({"success": False, "message": f"清理失败: {str(exc)}"})
 
 
-@cache_management_bp.route("/api/excel-html-cache/regenerate")
+@cache_management_bp.route("/api/excel-html-cache/regenerate", methods=["POST"])
+@require_admin
 def regenerate_excel_html_cache():
-    """重新生成Excel HTML缓存"""
+    """重新生成Excel HTML缓存
+
+    安全修复：本接口原先默认 GET、无 `@require_admin`，却在内部对
+    `ExcelHtmlCache` 执行 `db.session.delete(...)` + `commit()`，随后调用
+    `get_excel_diff_data(commit.id)` 触发重算。三点后果：
+
+      1. 任意已登录用户可直接调用 —— 无需任何前端入口，攻击者自己构造 URL 即可；
+      2. GET 完全绕过 CSRF（`enforce_csrf` 对 GET/HEAD/OPTIONS/TRACE 直接放行），
+         跨站顶层导航即可在受害者登录态下删缓存；
+      3. `repository_id` / `commit_id` / `file_path` 全部取自查询串且**不做归属校验**，
+         可对任意仓库的任意文件踢掉缓存并触发昂贵重算（放大攻击面）。
+
+    改为 POST + `@require_admin`，与本文件其余 7 个缓存管理写接口口径一致。
+    """
     db, Commit, ExcelHtmlCache, get_excel_diff_data, log_print = get_runtime_models(
         "db",
         "Commit",

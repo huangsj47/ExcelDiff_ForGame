@@ -1414,7 +1414,9 @@ function clearOldCache() {
     
     addLogEntry('开始清理旧版本缓存...', 'warning');
     
-    fetch('/api/excel-html-cache/clear?force_all=false')
+    // 该接口已改为 POST + 平台管理员（原先是无鉴权的 GET，而 GET 不受 CSRF 保护）。
+    // base.html 的全局 fetch 包装器会自动补 X-CSRF-Token，这里无需手工带。
+    fetch('/api/excel-html-cache/clear?force_all=false', { method: 'POST' })
         .then(response => response.json())
         .then(data => {
             if (data.success) {
@@ -1470,8 +1472,8 @@ function clearAllCache() {
 
     addLogEntry('开始清理所有缓存...', 'warning');
 
-    // 先清理HTML缓存
-    fetch('/api/excel-html-cache/clear?force_all=true')
+    // 先清理HTML缓存（改为 POST，见 clearOldCache 处的说明）
+    fetch('/api/excel-html-cache/clear?force_all=true', { method: 'POST' })
         .then(response => response.json())
         .then(data => {
             if (data.success) {

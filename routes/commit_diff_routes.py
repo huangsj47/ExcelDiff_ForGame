@@ -201,9 +201,14 @@ def merge_diff_route():
 
 @commit_diff_bp.route(
     "/update_commit_fields",
+    methods=["POST"],
     endpoint="update_commit_fields_route",
 )
 def update_commit_fields_route_wrapper():
+    # 该接口会**遍历并改写** commits_log 里所有 version/operation 为空的记录，
+    # 原先是 GET —— 而 `enforce_csrf` 对 GET/HEAD/OPTIONS/TRACE 直接放行，
+    # 于是这次批量写库完全在 CSRF 保护之外（攻击者页面一个 <img src> 就能触发
+    # 管理员会话下的全表改写）。仓库内无任何调用方，改为 POST 无兼容性影响。
     return _dispatch("update_commit_fields_route")
 
 
