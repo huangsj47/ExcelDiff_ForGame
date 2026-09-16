@@ -591,6 +591,12 @@ td.excel-row-number.excel-modified,
             padding: 0.25rem 0.5rem;
             font-size: 0.75rem;
             line-height: 1;
+            /* WCAG 2.2 SC 2.5.8：目标至少 24×24 CSS px。line-height:1 把内容高
+               压到 12px，加 8px 内边距与 2px 边框只有 22px —— 「查看详细差异」
+               那个按钮里只有一个图标，横向也就图标那点宽，两个方向都不够。
+               给最小盒补上阈值，视觉上仍是明显小于默认按钮的小按钮。 */
+            min-width: 24px;
+            min-height: 24px;
         }
         
         .btn-group-sm .btn {

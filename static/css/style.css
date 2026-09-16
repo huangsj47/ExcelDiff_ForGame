@@ -1726,6 +1726,28 @@ main:focus {
     outline-offset: 2px;
 }
 
+/* 表头排序按钮（status_sync_management.html 的三个 [data-sort] 按钮）。
+   WCAG 2.2 SC 2.5.8 要求指针目标至少 24×24 CSS px，且该条只有
+   Inline / Essential / Equivalent 三个例外 —— 表头里的排序按钮是块级排布，
+   不适用 Inline 例外。
+
+   原先这三个按钮带 Bootstrap 的 `p-0` 工具类（`padding:0 !important`），
+   盒模型退化成图标本身：Bootstrap 5.1.3 的 .btn-sm 字号 .875rem、line-height 1.5
+   → 内容高 21px，加 1px 上下边框 ≈ 23px；宽只有图标推进宽 ≈ 14px。
+   两个方向都不足 24px。
+
+   这里显式给 24×24 的最小盒、用 flex 把图标居中：图标字号与视觉密度都不变，
+   只是把「可点区域」补齐到阈值 —— 所以不再需要 p-0（已从模板里移除）。 */
+.sort-header-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    min-height: 24px;
+    padding: 0;
+    vertical-align: middle;
+}
+
 /* 尊重系统"减少动态效果"偏好：只保留表达进度的旋转指示（WCAG 允许的例外），
    其余淡入/位移类动画与过渡全部关掉，避免前庭失调用户不适 */
 @media (prefers-reduced-motion: reduce) {

@@ -207,21 +207,21 @@
                 <table class="table table-hover mb-0" id="mappingTable">
                     <thead class="table-light sticky-top">
                         <tr>
-                            <th scope="col" style="width: 35%;">
+                            <th scope="col" data-sort-column="0" aria-sort="none" style="width: 35%;">
                                 <i class="fas fa-file-code me-1"></i>文件路径
-                                <button class="btn btn-sm btn-link p-0 ms-1" type="button" data-sort="0" aria-label="按文件路径排序">
+                                <button class="btn btn-sm btn-link sort-header-btn ms-1" type="button" data-sort="0" aria-label="按文件路径排序">
                                     <i class="fas fa-sort"></i>
                                 </button>
                             </th>
-                            <th scope="col" style="width: 12%;">
+                            <th scope="col" data-sort-column="1" aria-sort="none" style="width: 12%;">
                                 <i class="fas fa-flag me-1"></i>周版本状态
-                                <button class="btn btn-sm btn-link p-0 ms-1" type="button" data-sort="1" aria-label="按周版本状态排序">
+                                <button class="btn btn-sm btn-link sort-header-btn ms-1" type="button" data-sort="1" aria-label="按周版本状态排序">
                                     <i class="fas fa-sort"></i>
                                 </button>
                             </th>
-                            <th scope="col" style="width: 10%;">
+                            <th scope="col" data-sort-column="2" aria-sort="none" style="width: 10%;">
                                 <i class="fas fa-hashtag me-1"></i>提交数
-                                <button class="btn btn-sm btn-link p-0 ms-1" type="button" data-sort="2" aria-label="按提交数排序">
+                                <button class="btn btn-sm btn-link sort-header-btn ms-1" type="button" data-sort="2" aria-label="按提交数排序">
                                     <i class="fas fa-sort"></i>
                                 </button>
                             </th>
@@ -1313,9 +1313,22 @@ function sortMappingTable(columnIndex) {
         }
     });
 
+    // 同步 aria-sort：读屏播报表头时只认这个属性，不会去解读 fa-sort 图标。
+    // 不同步的话，视力正常的用户看到箭头变了、读屏用户听到的还是「未排序」。
+    syncAriaSort(columnIndex, isAscending);
+
     currentPage = 1; // 重置到第一页
     renderTable();
     console.log('Sort completed, ascending:', isAscending);
+}
+
+function syncAriaSort(columnIndex, isAscending) {
+    // 三个表头互斥：被点的那列是 ascending/descending，其余必须复位成 none
+    // （同时只能有一列是当前排序列，这是 aria-sort 的语义要求）。
+    document.querySelectorAll('[data-sort-column]').forEach((th) => {
+        const isTarget = parseInt(th.getAttribute('data-sort-column'), 10) === columnIndex;
+        th.setAttribute('aria-sort', isTarget ? (isAscending ? 'ascending' : 'descending') : 'none');
+    });
 }
 
 function toggleTableView() {
