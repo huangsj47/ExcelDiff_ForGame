@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from services.weekly_version_sync_status import (
+    task_status_and_message as weekly_sync_task_status_and_message,
+)
+
 
 def handle_weekly_sync_task(
     *,
@@ -22,10 +26,18 @@ def handle_weekly_sync_task(
             except non_critical_task_status_errors as update_error:
                 log_print(f"更新任务开始状态失败: {update_error}", "TASK", force=True)
         try:
-            process_weekly_version_sync(task["config_id"])
+            # process_weekly_version_sync 返回显式结局（见 weekly_version_sync_status）：
+            # 无提交 → skipped（正常跳过），配置缺失/禁用 → failed，有文件失败 →
+            # partial_failed。过去这里无条件标 "completed"，把失败和「本来就没数据」
+            # 抹成同一个样子。
+            sync_status, sync_message = weekly_sync_task_status_and_message(
+                process_weekly_version_sync(task["config_id"])
+            )
+            if sync_status != "completed":
+                log_print(f"📅 周版本同步结局: {sync_status} - {sync_message}", "WEEKLY")
             if "task_id" in task:
                 try:
-                    update_task_status_with_retry(task["task_id"], "completed")
+                    update_task_status_with_retry(task["task_id"], sync_status, sync_message)
                 except non_critical_task_status_errors as update_error:
                     log_print(f"更新任务完成状态失败: {update_error}", "TASK", force=True)
         except non_critical_task_execution_errors as exc:

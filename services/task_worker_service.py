@@ -48,6 +48,16 @@ from services.ai_analysis_service import (
     has_weekly_changes,
 )
 from models.ai_analysis import AiWeeklyAnalysisState
+# 周版本同步的显式结局 → 任务状态映射：process_weekly_version_sync 过去用 None
+# 同时表示「配置不存在/被禁用/窗口内无提交/正常跑完」四种结局，调用方只能无条件
+# 标 completed，于是真正的失败与「这周本来就没数据」在任务列表里长得一模一样。
+from services.weekly_version_sync_status import (
+    FAILURE_TASK_STATUSES,
+    STATUSES_WITH_REASON,
+    TASK_STATUS_FAILED,
+    TERMINAL_TASK_STATUSES,
+    task_status_and_message as weekly_sync_task_status_and_message,
+)
 
 # ---------------------------------------------------------------------------
 #  全局状态（由 app.py 通过 configure_task_worker 注入）
@@ -431,11 +441,15 @@ def update_task_status_with_retry(task_id, status, error_message=None):
             db_task.status = status
             if status == 'processing':
                 db_task.started_at = datetime.now(timezone.utc)
-            elif status in ['completed', 'failed']:
+            elif status in TERMINAL_TASK_STATUSES:
                 db_task.completed_at = datetime.now(timezone.utc)
-                if status == 'failed':
+                # failed / skipped / partial_failed 都要把原因落库：error_message 是
+                # 任务上唯一的文本字段，周版本模板靠它回答「为什么这个周版本没数据」。
+                # 只有 failed 才累加 retry_count —— 跳过是正常结局，不该被算成一次重试。
+                if status in STATUSES_WITH_REASON:
                     db_task.error_message = error_message
-                    db_task.retry_count += 1
+                    if status == TASK_STATUS_FAILED:
+                        db_task.retry_count += 1
             _db.session.commit()
             log_print(f"✅ 任务状态更新成功: {task_id} -> {status}", 'TASK')
             log_structured_event(
@@ -1099,8 +1113,14 @@ def execute_task_inline_for_agent(task_type, payload):
         config_id = payload.get('config_id')
         if not config_id:
             raise ValueError("weekly_sync 任务缺少 config_id")
-        _process_weekly_version_sync(int(config_id))
-        return {"message": "weekly_sync completed"}
+        outcome = _process_weekly_version_sync(int(config_id))
+        sync_status, sync_message = weekly_sync_task_status_and_message(outcome)
+        # Agent 端（agent/executor.py）把「返回值」一律当成 completed，只有抛异常才
+        # 上报 failed。所以真正的失败必须用异常表达，否则配置不存在/被禁用/部分失败
+        # 又会被 Agent 报成成功。无数据的 skipped 不算失败，照常返回。
+        if sync_status in FAILURE_TASK_STATUSES:
+            raise RuntimeError(sync_message)
+        return {"message": sync_message, "status": sync_status}
 
     if normalized_type == 'weekly_excel_cache':
         config_id = payload.get('config_id')

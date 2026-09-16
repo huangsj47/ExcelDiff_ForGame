@@ -370,6 +370,47 @@
 {% endblock %}
 
 {% block content %}
+{#
+  周版本同步提示：把「为什么这个周版本没有数据」显示出来。
+
+  数据来自 services/weekly_version_sync_status.py::latest_weekly_sync_tasks()，即
+  BackgroundTask 上最近一次 task_type='weekly_sync' 的 status / error_message。
+  error_message 过去没有任何周版本模板读它，于是「窗口内无提交」（skipped）、
+  「配置被禁用」（failed）、「部分文件失败」（partial_failed）在界面上完全不可见，
+  用户只看到「暂无数据」。
+
+  只做自动转义输出、不用 |safe：error_message 里含文件路径、异常文本等外部输入，
+  |safe 会把它变成存储型 XSS。
+#}
+{% macro weekly_sync_notice(config, sync_task_by_config) %}
+    {% set sync_task = (sync_task_by_config or {}).get(config.id|string) %}
+    {% if sync_task %}
+        {% set sync_status = sync_task.status %}
+        {% if sync_status in ('failed', 'partial_failed') %}
+            {% set notice_class = 'text-danger' %}
+            {% set notice_icon = 'fa-circle-exclamation' %}
+        {% elif sync_status == 'skipped' %}
+            {% set notice_class = 'text-muted' %}
+            {% set notice_icon = 'fa-circle-info' %}
+        {% elif sync_status in ('pending', 'processing') %}
+            {% set notice_class = 'text-primary' %}
+            {% set notice_icon = 'fa-spinner' %}
+        {% else %}
+            {% set notice_class = 'text-success' %}
+            {% set notice_icon = 'fa-circle-check' %}
+        {% endif %}
+        <div class="small mt-1 {{ notice_class }}" title="最近一次周版本同步：{{ sync_status }}">
+            <i class="fas {{ notice_icon }} me-1"></i>
+            {% if sync_task.error_message %}
+                {{ sync_task.error_message }}
+            {% elif sync_status in ('pending', 'processing') %}
+                同步任务{{ '排队中' if sync_status == 'pending' else '处理中' }}，请稍候。
+            {% else %}
+                同步正常。
+            {% endif %}
+        </div>
+    {% endif %}
+{% endmacro %}
 <div class="container-fluid" style="max-width: 1700px;">
     <!-- Deep Blue 页面头部 -->
     <div class="weekly-page-header">
@@ -437,13 +478,14 @@
                                                         {{ config.repository.name }}
                                                     </span>
                                                 </h6>
-                                                <button type="button" class="btn-refresh-stats badge bg-info" title="点击刷新统计" style="font-size:0.65rem;" onclick="refreshConfigStats({{ config.id }}, this)">
+                                                <button type="button" class="btn-refresh-stats badge bg-info" title="点击刷新统计" aria-label="刷新该版本配置的统计" style="font-size:0.65rem;" onclick="refreshConfigStats({{ config.id }}, this)">
                                                     <i class="fas fa-sync-alt"></i>
                                                 </button>
                                             </div>
                                             <div class="small text-muted mb-2">
                                                 <div><i class="fas fa-code-branch me-1"></i>{{ config.branch }}</div>
                                             </div>
+                                            {{ weekly_sync_notice(config, sync_task_by_config) }}
                                             <!-- 异步加载统计信息 -->
                                             <div class="stats-container mb-2" data-config-id="{{ config.id }}">
                                                 <div class="d-flex justify-content-between small">
@@ -456,10 +498,10 @@
                                                 <a href="{{ url_for('weekly_version_diff', config_id=config.id) }}" class="btn btn-view btn-sm flex-fill" title="查看diff">
                                                     <i class="fas fa-eye"></i>
                                                 </a>
-                                                <button type="button" class="btn btn-outline-primary btn-sm flex-fill" onclick="editConfig({{ config.id }})" title="修改">
+                                                <button type="button" class="btn btn-outline-primary btn-sm flex-fill" onclick="editConfig({{ config.id }})" title="修改" aria-label="修改该版本配置">
                                                     <i class="fas fa-edit"></i>
                                                 </button>
-                                                <button type="button" class="btn btn-outline-danger btn-sm flex-fill" onclick="deleteConfig({{ config.id }})" title="删除">
+                                                <button type="button" class="btn btn-outline-danger btn-sm flex-fill" onclick="deleteConfig({{ config.id }})" title="删除" aria-label="删除该版本配置">
                                                     <i class="fas fa-trash"></i>
                                                 </button>
                                             </div>
@@ -525,6 +567,7 @@
                                             <div class="small text-muted mb-2">
                                                 <div><i class="fas fa-code-branch me-1"></i>{{ config.branch }}</div>
                                             </div>
+                                            {{ weekly_sync_notice(config, sync_task_by_config) }}
                                             <!-- 异步加载统计信息 -->
                                             <div class="stats-container mb-2" data-config-id="{{ config.id }}">
                                                 <div class="d-flex justify-content-between small">
@@ -537,10 +580,10 @@
                                                 <a href="{{ url_for('weekly_version_diff', config_id=config.id) }}" class="btn btn-view btn-sm flex-fill" title="查看diff">
                                                     <i class="fas fa-eye"></i>
                                                 </a>
-                                                <button type="button" class="btn btn-outline-primary btn-sm flex-fill" onclick="editConfig({{ config.id }})" title="修改">
+                                                <button type="button" class="btn btn-outline-primary btn-sm flex-fill" onclick="editConfig({{ config.id }})" title="修改" aria-label="修改该版本配置">
                                                     <i class="fas fa-edit"></i>
                                                 </button>
-                                                <button type="button" class="btn btn-outline-danger btn-sm flex-fill" onclick="deleteConfig({{ config.id }})" title="删除">
+                                                <button type="button" class="btn btn-outline-danger btn-sm flex-fill" onclick="deleteConfig({{ config.id }})" title="删除" aria-label="删除该版本配置">
                                                     <i class="fas fa-trash"></i>
                                                 </button>
                                             </div>
@@ -606,6 +649,7 @@
                                             <div class="small text-muted mb-2">
                                                 <div><i class="fas fa-code-branch me-1"></i>{{ config.branch }}</div>
                                             </div>
+                                            {{ weekly_sync_notice(config, sync_task_by_config) }}
                                             <!-- 异步加载统计信息 -->
                                             <div class="stats-container mb-2" data-config-id="{{ config.id }}">
                                                 <div class="d-flex justify-content-between small">
@@ -618,10 +662,10 @@
                                                 <a href="{{ url_for('weekly_version_diff', config_id=config.id) }}" class="btn btn-view btn-sm flex-fill" title="查看diff">
                                                     <i class="fas fa-eye"></i>
                                                 </a>
-                                                <button type="button" class="btn btn-outline-primary btn-sm flex-fill" onclick="editConfig({{ config.id }})" title="修改">
+                                                <button type="button" class="btn btn-outline-primary btn-sm flex-fill" onclick="editConfig({{ config.id }})" title="修改" aria-label="修改该版本配置">
                                                     <i class="fas fa-edit"></i>
                                                 </button>
-                                                <button type="button" class="btn btn-outline-danger btn-sm flex-fill" onclick="deleteConfig({{ config.id }})" title="删除">
+                                                <button type="button" class="btn btn-outline-danger btn-sm flex-fill" onclick="deleteConfig({{ config.id }})" title="删除" aria-label="删除该版本配置">
                                                     <i class="fas fa-trash"></i>
                                                 </button>
                                             </div>
@@ -728,7 +772,7 @@
                         <small class="modal-subtitle">为项目创建新的周版本 Diff 配置</small>
                     </div>
                 </div>
-                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <form id="addConfigForm" method="POST" action="{{ url_for('weekly_version_config_api', project_id=project.id) }}">
                 <div class="modal-body add-config-modal-body">
@@ -864,7 +908,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title">编辑周版本配置</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <form id="editConfigForm" method="POST">
                 <div class="modal-body">

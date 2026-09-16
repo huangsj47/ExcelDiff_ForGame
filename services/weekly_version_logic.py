@@ -51,6 +51,20 @@ from services.weekly_version_files_api_helpers import (
     parse_json_obj,
     resolve_author_display,
 )
+# 显式结局与「初始缓存遮罩」判定：为什么需要它，见该模块的模块级 docstring。
+from services.weekly_version_sync_status import (
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_SKIPPED,
+    build_partial_failure_outcome,
+    collect_target_file_paths,
+    completed_outcome,
+    config_inactive_outcome,
+    config_missing_outcome,
+    initial_cache_readiness,
+    latest_weekly_sync_tasks,
+    no_commits_outcome,
+    should_log_mask_decision,
+)
 from utils.logger import log_print
 from utils.request_security import _has_project_access
 from utils.timezone_utils import now_beijing, beijing_window_to_utc_naive
@@ -61,7 +75,6 @@ def weekly_window_in_utc(config):
     """北京墙钟窗口 → 与 Commit.commit_time 同口径的 (start_utc, end_utc)，均为 naive-UTC。"""
     return beijing_window_to_utc_naive(
         getattr(config, 'start_time', None), getattr(config, 'end_time', None))
-
 
 # ---------------------------------------------------------------------------
 #  运行时依赖 — 由 configure_weekly_version_logic() 注入
@@ -78,7 +91,6 @@ _get_svn_service = None
 _get_file_content_from_git = None
 _get_file_content_from_svn = None
 _generate_merged_diff_data = None
-
 
 def configure_weekly_version_logic(
     *,
@@ -111,9 +123,23 @@ def configure_weekly_version_logic(
     _get_file_content_from_svn = get_file_content_from_svn_func
     _generate_merged_diff_data = generate_merged_diff_data_func
 
-
 # ---------------------------------------------------------------------------
 #  辅助函数（本模块私有）
+
+def _current_diff_logic_version():
+    """当前比较口径版本号；唯一来源 `models.cache.default_diff_logic_version()`。
+
+    不用 `from config import ...`：仓库里有两份字面量，那个函数才解析「真正生效那份」。
+    解析不出返回 None（未标注版本）而不猜 —— 猜出来的版本号会让缓存静默失效。
+    """
+    try:
+        from models.cache import default_diff_logic_version
+
+        return default_diff_logic_version()
+    except Exception as exc:  # pragma: no cover - 取不到版本不该阻断同步
+        log_print(f"⚠️ 取 DIFF_LOGIC_VERSION 失败，本次缓存不标注版本: {exc}", 'WEEKLY', force=True)
+        return None
+
 # ---------------------------------------------------------------------------
 
 def _commit_sort_key_for_merge(commit):
@@ -130,7 +156,6 @@ def _commit_sort_key_for_merge(commit):
     commit_db_id = getattr(commit, 'id', 0) or 0
     return commit_ts, commit_db_id
 
-
 def _get_app_func(name):
     """延迟从 app 模块获取函数引用，避免循环导入。"""
     import sys
@@ -139,27 +164,16 @@ def _get_app_func(name):
         import app as app_mod
     return getattr(app_mod, name)
 
-
 def _render_project_page_missing(project_id: int, page_label: str):
-    return (
-        render_template(
-            "project_page_missing.html",
-            project_id=project_id,
-            page_label=page_label,
-        ),
-        404,
-    )
-
+    return render_template("project_page_missing.html", project_id=project_id, page_label=page_label), 404
 
 def get_real_diff_data_for_merge(commit):
     """代理: 委托给 app.get_real_diff_data_for_merge"""
     return _get_app_func('get_real_diff_data_for_merge')(commit)
 
-
 def get_commit_pair_diff_internal(current_commit, previous_commit):
     """代理: 委托给 app.get_commit_pair_diff_internal"""
     return _get_app_func('get_commit_pair_diff_internal')(current_commit, previous_commit)
-
 
 # ---------------------------------------------------------------------------
 #  以下为从 app.py 拆分出来的周版本业务逻辑
@@ -273,15 +287,17 @@ def weekly_version_config(project_id):
                          active_versions=active_versions,
                          future_versions=future_versions,
                          ended_versions=ended_versions,
+                         # 每个 config 最近一次 weekly_sync 任务：模板据此显示「为什么没有数据」
+                         sync_task_by_config=latest_weekly_sync_tasks(BackgroundTask, all_configs),
                          pagination=pagination)
 def weekly_version_config_api(project_id):
     """周版本配置API"""
     project = db.session.get(Project, project_id)
     if not project:
         return jsonify({'success': False, 'message': f'项目不存在: {project_id}'}), 404
-    # 权限：本文件另有 9 处接口都做了项目校验（6 处以 config.project_id、3 处以
-    # project_id），唯独这个**写接口**漏了 —— 下面 POST 分支会创建配置并派发同步
-    # 任务，normal 角色用户可枚举 project_id 跨项目读/建配置。
+    # 权限：本文件另有 9 处接口都做了项目校验（6 处以 config.project_id、3 处以 project_id），
+    # 唯独这个**写接口**漏了 —— 下面 POST 分支会创建配置并派发同步任务，normal 角色
+    # 用户可枚举 project_id 跨项目读/建配置。
     if not _has_project_access(project_id):
         return jsonify({'success': False, 'message': '无权访问该项目'}), 403
     if request.method == 'GET':
@@ -403,9 +419,9 @@ def weekly_version_config_detail_api(project_id, config_id):
     project = db.session.get(Project, project_id)
     if not project:
         return jsonify({'success': False, 'message': f'项目不存在: {project_id}'}), 404
-    # 权限：config 已按 URL 的 project_id 限定，不存在串项目；但从未校验调用者
-    # 能否访问该 project —— 而 PUT 会删 WeeklyVersionDiffCache 后重建同步任务，
-    # DELETE 会删配置及其 Excel/diff 缓存与后台任务。
+    # 权限：config 已按 URL 的 project_id 限定，不存在串项目；但从未校验调用者能否
+    # 访问该 project —— PUT 会删 WeeklyVersionDiffCache 后重建同步任务，DELETE 会删
+    # 配置及其 Excel/diff 缓存与后台任务。
     if not _has_project_access(project_id):
         return jsonify({'success': False, 'message': '无权访问该项目'}), 403
     config = WeeklyVersionConfig.query.filter_by(id=config_id, project_id=project_id).first_or_404()
@@ -489,21 +505,16 @@ def weekly_version_config_detail_api(project_id, config_id):
             return jsonify({'success': False, 'message': f'更新失败: {str(e)}'}), 500
 
     elif request.method == 'DELETE':
-        # 删除配置
         try:
-            # 删除相关的Excel缓存
             excel_cache_deleted = WeeklyVersionExcelCache.query.filter_by(config_id=config_id).delete()
             log_print(f"删除了 {excel_cache_deleted} 个Excel缓存记录", 'WEEKLY')
-            # 删除相关的diff缓存
             diff_cache_deleted = WeeklyVersionDiffCache.query.filter_by(config_id=config_id).delete()
             log_print(f"删除了 {diff_cache_deleted} 个diff缓存记录", 'WEEKLY')
-            # 删除相关的后台任务
             task_deleted = BackgroundTask.query.filter(
                 BackgroundTask.repository_id == config_id,
                 BackgroundTask.task_type.in_(['weekly_excel_cache', 'weekly_sync'])
             ).delete(synchronize_session=False)
             log_print(f"删除了 {task_deleted} 个后台任务", 'WEEKLY')
-            # 删除配置
             db.session.delete(config)
             db.session.commit()
             return jsonify({'success': True, 'message': '配置删除成功'})
@@ -570,15 +581,14 @@ def merged_project_view(project_id):
                 "commit_list_url": url_for("commit_list", repository_id=repo.id),
             }
         )
-    # 必须用北京墙钟而非 datetime.now()（宿主机本地时间）：在 UTC+8 开发机上
-    # 碰巧正确，部署到 UTC 容器后活跃判定会前后各错 8 小时。
+    # 必须用北京墙钟而非 datetime.now()（宿主机本地时间）：在 UTC+8 开发机上碰巧
+    # 正确，部署到 UTC 容器后活跃判定会前后各错 8 小时。
     now = now_beijing().replace(tzinfo=None)
     today_date = now.strftime("%Y-%m-%d")
     # 分组逻辑：相同版本基础名称+相同时间范围的配置归为一组
     version_groups = {}
     for config in configs:
-        # 提取版本基础名称（去掉仓库后缀）
-        # 例如："第一周版本 - qz_client_lua" -> "第一周版本"
+        # 提取版本基础名称（去掉仓库后缀），例如 "第一周版本 - qz_client_lua" -> "第一周版本"
         base_name = config.name
         if ' - ' in config.name:
             base_name = config.name.split(' - ')[0]
@@ -593,8 +603,7 @@ def merged_project_view(project_id):
                 'is_active': False
             }
         version_groups[group_key]['configs'].append(config)
-        # 判断是否为活跃版本（当前时间在版本时间范围内）
-        # 处理时区问题：统一转换为无时区的本地时间进行比较
+        # 判断是否为活跃版本（当前时间在版本时间范围内）；统一转成无时区本地时间再比
         try:
             # now 与 config.start_time/end_time 都是 naive 北京墙钟，同口径可直接比较
             start_time = config.start_time.replace(tzinfo=None) if config.start_time and config.start_time.tzinfo else config.start_time
@@ -786,14 +795,27 @@ def weekly_version_files_api(config_id):
         )
 
         if is_recent_config and config_is_active and config_auto_sync:
+            # 「首轮同步已有结论」= completed 或 skipped（窗口内无提交、明确跳过）。
+            # skipped 必须算数，否则无数据的周版本会被判成「首轮未结束」，每次轮询都重派任务。
             completed_sync_task = BackgroundTask.query.filter(
                 BackgroundTask.task_type == 'weekly_sync',
                 BackgroundTask.commit_id == str(config_id),
-                BackgroundTask.status == 'completed',
+                BackgroundTask.status.in_((TASK_STATUS_COMPLETED, TASK_STATUS_SKIPPED)),
             ).order_by(BackgroundTask.id.desc()).first()
-            has_initial_cache_data = any(getattr(cache, 'last_sync_time', None) is not None for cache in diff_caches)
-            # 一旦已经有初版数据（缓存具备 last_sync_time），后续不再阻塞页面。
-            initial_sync_waiting = (completed_sync_task is None) and (not has_initial_cache_data)
+            # 目标文件 = 窗口内有提交的文件。缓存行是同步过程中逐个创建的，只看缓存行会
+            # 漏掉「还没来得及建缓存的文件」—— 那正是「大部分文件还没缓存时页面就放行」的成因。
+            target_paths = set()
+            try:
+                target_paths = collect_target_file_paths(
+                    Commit, repository.id, *weekly_window_in_utc(config))
+            except Exception as target_error:
+                # 枚举失败时降级为只按已有缓存行判定，避免页面永久卡在加载态。
+                log_print(f"枚举周版本目标文件失败，降级为按已有缓存判定: {target_error}", 'WEEKLY')
+            initial_cache_ready, mask_detail = initial_cache_readiness(target_paths, diff_caches)
+            if should_log_mask_decision(config_id, initial_cache_ready):
+                log_print(f"周版本初始缓存遮罩: config_id={config_id}, 放行={initial_cache_ready}, {mask_detail}", 'WEEKLY')
+            # 要求「全部目标文件都成功」才放行：旧实现是 any()，第一个文件成功就解锁。
+            initial_sync_waiting = (completed_sync_task is None) and (not initial_cache_ready)
 
         # 新建周版本在首轮同步完成前一律展示“处理中”，避免先看到不完整数据。
         should_trigger_sync = (
@@ -962,7 +984,6 @@ def weekly_version_file_diff_api(config_id):
         if not diff_cache:
             return "<div class='alert alert-warning'>未找到该文件的diff数据</div>"
 
-        # 生成真实的Git diff内容
         diff_html = generate_weekly_git_diff_html(config, diff_cache, file_path)
         return diff_html
 
@@ -1063,15 +1084,6 @@ def weekly_version_file_full_diff_data(config_id):
         log_print(f"异步加载周版本diff数据失败: {e}", 'ERROR', force=True)
         return jsonify({'success': False, 'message': f'加载失败: {str(e)}'}), 500
 
-
-
-
-
-
-
-
-
-
 def generate_weekly_git_diff_html(config, diff_cache, file_path, force_recalculate=False):
     """生成周版本的真实Git diff HTML内容"""
     try:
@@ -1159,10 +1171,8 @@ def _load_weekly_excel_diff_from_cache(repository, diff_cache, file_path):
         generate_merged_diff_data=_generate_merged_diff_data,
     )
 
-
 def _is_deleted_operation(operation):
     return _is_deleted_operation_helper(operation)
-
 
 def _resolve_weekly_deleted_excel_state(config, diff_cache, file_path):
     """判断周版本Excel是否为最终删除状态，并返回可用的上一版本commit_id。"""
@@ -1172,7 +1182,6 @@ def _resolve_weekly_deleted_excel_state(config, diff_cache, file_path):
         diff_cache=diff_cache,
         file_path=file_path,
     )
-
 
 def _render_weekly_deleted_excel_notice(config, file_path, previous_commit_id):
     """复用提交页删除提示语义，展示周版本Excel文件已删除提示。"""
@@ -1320,51 +1329,33 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
         log_print(f"生成周版本Excel合并diff失败: {e}", 'ERROR', force=True)
         return f"<div class='alert alert-danger'>生成Excel diff失败: {str(e)}</div>"
 
-
 # render_excel_sheet_html函数已删除，现在使用JavaScript动态生成
-
-
-
-
-
-
-
-
-
-
-
 
 def get_status_text(status):
     """获取状态文本"""
-    status_map = {
-        'pending': '待确认',
-        'confirmed': '已确认',
-        'rejected': '已拒绝'
-    }
-    return status_map.get(status, '未知')
+    return {'pending': '待确认', 'confirmed': '已确认', 'rejected': '已拒绝'}.get(status, '未知')
 
 def get_status_badge_class(status):
     """获取状态徽章样式类"""
-    class_map = {
-        'pending': 'warning',
-        'confirmed': 'success',
-        'rejected': 'danger'
-    }
-    return class_map.get(status, 'secondary')
+    return {'pending': 'warning', 'confirmed': 'success', 'rejected': 'danger'}.get(status, 'secondary')
 
 # create_weekly_sync_task 已移至 services/task_worker_service.py
 
 def process_weekly_version_sync(config_id):
-    """处理周版本同步任务"""
+    """处理周版本同步任务。
+
+    返回显式的 WeeklySyncOutcome（见 services/weekly_version_sync_status.py）：过去这里
+    在「配置不存在 / 被禁用 / 窗口内无提交 / 正常跑完」四条路径上都 `return None`。
+    """
     try:
         config = db.session.get(WeeklyVersionConfig, config_id)
         if not config:
             log_print(f"周版本配置不存在: {config_id}", 'WEEKLY', force=True)
-            return
+            return config_missing_outcome(config_id)
 
         if not config.is_active:
             log_print(f"周版本配置已禁用: {config_id}", 'WEEKLY')
-            return
+            return config_inactive_outcome(config)
 
         repository = config.repository
         log_print(f"开始处理周版本同步: {config.name} (仓库: {repository.name})", 'WEEKLY')
@@ -1377,28 +1368,37 @@ def process_weekly_version_sync(config_id):
         ).order_by(Commit.commit_time.asc()).all()
         log_print(f"找到 {len(commits_in_range)} 个时间范围内的提交", 'WEEKLY')
         if not commits_in_range:
-            log_print(f"时间范围内无提交记录，跳过同步", 'WEEKLY')
-            return
+            # 这周本来就没改动 —— 常态而非故障：不打失败，也不算「完成」。
+            outcome = no_commits_outcome(config)
+            log_print(f"周版本同步跳过（无数据）: {config.name} - {outcome.describe()}", 'WEEKLY')
+            _weekly_excel_cache_service.log_cache_operation(f"⏭️ 周版本同步跳过（窗口内无提交）: {config.name}", 'info', repository_id=config.repository_id, config_id=config.id)
+            return outcome
 
         # 按文件路径分组提交
         files_commits = {}
         for commit in commits_in_range:
-            if commit.path not in files_commits:
-                files_commits[commit.path] = []
-            files_commits[commit.path].append(commit)
+            files_commits.setdefault(commit.path, []).append(commit)
         log_print(f"涉及 {len(files_commits)} 个文件", 'WEEKLY')
-        # 为每个文件生成合并diff缓存
+        # 单文件失败必须累计上报：过去 continue 掉之后照样打「同步完成」并标 completed。
+        failed_details = []
         for file_path, file_commits in files_commits.items():
             try:
                 generate_weekly_merged_diff(config, file_path, file_commits)
             except Exception as e:
-                log_print(f"生成文件 {file_path} 的合并diff失败: {e}", 'WEEKLY', force=True)
-                continue
+                failed_details.append((file_path, str(e)))
+                log_print(f"生成文件 {file_path} 的合并diff失败（第 {len(failed_details)} 个失败）: {e}", 'WEEKLY', force=True)
+
+        if failed_details:
+            outcome = build_partial_failure_outcome(len(files_commits), failed_details)
+            log_print(f"❌ 周版本同步部分失败: {config.name} - {outcome.describe()}", 'WEEKLY', force=True)
+            _weekly_excel_cache_service.log_cache_operation(f"❌ 周版本同步部分失败: {config.name} - {outcome.describe()}", 'error', repository_id=config.repository_id, config_id=config.id)
+            return outcome
 
         log_print(f"周版本同步完成: {config.name}", 'WEEKLY')
-        # 记录到操作日志
         _weekly_excel_cache_service.log_cache_operation(f"✅ 周版本同步完成: {config.name} - 处理了 {len(files_commits)} 个文件", 'success', repository_id=config.repository_id, config_id=config.id)
+        return completed_outcome(config, len(files_commits))
     except Exception as e:
+        db.session.rollback()  # 错误路径必须回滚，避免脏事务残留（rule 4.2）
         log_print(f"周版本同步处理失败: {e}", 'WEEKLY', force=True)
         raise e
 def generate_weekly_merged_diff(config, file_path, commits):
@@ -1449,6 +1449,10 @@ def generate_weekly_merged_diff(config, file_path, commits):
             existing_cache.commit_times = json.dumps(commit_times)
             existing_cache.commit_count = len(commits)
             existing_cache.cache_status = 'completed'
+            # 打上本次比较口径的版本号：不写则本表 diff_version 恒为 NULL，读侧
+            # （is_merged_diff_cache_current）只能把 NULL 当历史行宽容处理，「升级版本后
+            # 合并 diff 自动失效」就永远不生效。详见 models/weekly_version.py。
+            existing_cache.diff_version = _current_diff_logic_version()
             existing_cache.last_sync_time = datetime.now(timezone.utc)
             existing_cache.updated_at = datetime.now(timezone.utc)
             # 如果有新的提交，重置确认状态
@@ -1472,6 +1476,7 @@ def generate_weekly_merged_diff(config, file_path, commits):
                 confirmation_status=json.dumps({"dev": "pending"}),
                 overall_status='pending',
                 cache_status='completed',
+                diff_version=_current_diff_logic_version(),  # 理由见上「更新现有缓存」分支
                 last_sync_time=datetime.now(timezone.utc)
             )
             db.session.add(new_cache)
@@ -1626,7 +1631,6 @@ def process_weekly_excel_cache(config_id, file_path):
                 "file_path": file_path,
             },
         )
-        # 记录到操作日志
         _weekly_excel_cache_service.log_cache_operation(f"❌ 周版本Excel缓存生成失败: {file_path} - {str(e)}", 'error', config_id=config_id, file_path=file_path)
         raise e
 def create_weekly_excel_cache_task(config_id, file_path):
@@ -1647,8 +1651,7 @@ def create_weekly_excel_cache_task(config_id, file_path):
             )
             return None
 
-        # 创建后台任务来生成Excel HTML缓存
-        # 使用repository_id字段存储config_id
+        # 创建后台任务来生成Excel HTML缓存；使用repository_id字段存储config_id
         log_print(f"🗃️ 创建数据库任务记录...", 'WEEKLY', force=True)
         new_task = BackgroundTask(
             task_type='weekly_excel_cache',
@@ -1708,7 +1711,6 @@ def create_weekly_excel_cache_task(config_id, file_path):
         db.session.rollback()
         raise e
 
-
 def get_real_base_commit_from_vcs(config, file_path):
     """从Git/SVN获取文件的真实基准版本提交"""
     try:
@@ -1749,8 +1751,8 @@ def get_real_base_commit_from_vcs(config, file_path):
             if commit_time:
                 if commit_time.tzinfo is None:
                     commit_time = commit_time.replace(tzinfo=timezone.utc)
-                # config.start_time 是北京墙钟，不能按 UTC 解释（原注释「假设为UTC」
-                # 正是窗口偏移 8 小时的根源）
+                # config.start_time 是北京墙钟，不能按 UTC 解释（原注释「假设为UTC」正是
+                # 窗口偏移 8 小时的根源）
                 config_start_time = beijing_window_to_utc_naive(config.start_time)
                 if config_start_time is None:
                     continue
