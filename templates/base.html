@@ -519,13 +519,18 @@
         if (originalFetch) {
             window.fetch = function(input, init) {
                 const requestInit = init ? Object.assign({}, init) : {};
-                const method = (requestInit.method || 'GET').toUpperCase();
                 let url = '';
                 if (typeof input === 'string') {
                     url = input;
                 } else if (input && typeof input.url === 'string') {
                     url = input.url;
                 }
+                // 方法可能写在 Request 对象里：fetch(new Request(url, {method:'POST'}))。
+                // 只读 init.method 会把它当成 GET —— 请求于是**不带** CSRF 头，
+                // 服务端回 400「CSRF token invalid or missing.」。
+                // 这与「包装器没生效」是同一类故障，所以在源头一起兜住。
+                const inputMethod = (input && typeof input.method === 'string') ? input.method : '';
+                const method = String(requestInit.method || inputMethod || 'GET').toUpperCase();
 
                 if (isWriteMethod(method) && isSameOrigin(url)) {
                     const headers = new Headers(requestInit.headers || (input && input.headers) || {});

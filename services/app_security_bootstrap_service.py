@@ -208,6 +208,20 @@ def configure_app_security_bootstrap(
         expected = session.get(csrf_session_key)
         provided = csrf_token_from_request()
         if not (expected and provided and hmac.compare_digest(str(expected), str(provided))):
+            # 只在「会话里确实有 token」时记一条：那说明请求来自一个真实登录态，
+            # 却带着对不上的 token（会话被重建 / 页面是旧的），是真正要排查的异常。
+            # 未登录来源必然也没有 expected，不记录 —— 否则任何人裸 POST 一下
+            # 就能把这个分支刷成日志洪水。token 本身**不入日志**，只记有无。
+            if expected:
+                log_print(
+                    f"CSRF 校验失败: path={request.path} method={request.method} "
+                    f"请求token={'有' if provided else '无'} "
+                    f"auth_backend={session.get('auth_backend') or '-'} "
+                    f"→ 会话里有 token 但请求对不上：通常是会话被重建"
+                    f"（进程重启 / FLASK_SECRET_KEY 变更 / 浏览器丢 cookie），"
+                    f"而用户手上的页面还是旧的；刷新页面即可恢复",
+                    "ERROR",
+                )
             return csrf_error_response("CSRF token invalid or missing.")
         if not is_same_origin_request():
             return csrf_error_response("Cross-site request blocked.")

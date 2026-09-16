@@ -79,6 +79,48 @@ def _ensure_session_csrf_token(token: str) -> None:
         session["_csrf_token"] = csrf_value
 
 
+def fix_session_csrf_token_from_qkitjwt(token: str) -> None:
+    """登录完成时把会话的 CSRF token **无条件**钉成「由 qkitjwt 派生」的确定值。
+
+    ## 与 `_ensure_session_csrf_token` 的差别，以及为什么必须有这个差别
+
+    两者都写同一个派生值 D（同一个 qkitjwt + 同一个 SECRET_KEY ⇒ 同一个 D），
+    区别只有一条：会话里**已经有** token 时，`_ensure_...` 保留原值，
+    本函数覆盖它。
+
+    ## 不覆盖会怎样（这是线上真实踩到的形态）
+
+    CSRF token 是**会话级**的，页面里那份（`base.html` 的
+    `<meta name="csrf-token">`）取自渲染那一刻的会话：
+
+    * 登录时若**不**把 token 钉成 D，它就会由 `csrf_token()` 随机生成 R；
+    * 页面渲染出来的是 R，正常情况下服务端会话里也是 R，提交没问题；
+    * 可一旦会话 cookie 被重建（进程重启、`FLASK_SECRET_KEY` 变更、
+      浏览器丢 cookie、多进程密钥不一致），服务端会话变成空的 →
+      恢复路径派生出的却是 **D ≠ R** →
+      用户手上那个页面点任何写操作，服务端都答
+      **「CSRF token invalid or missing.」**，而且**刷新一下就好了** ——
+      这正是最难排查的那种「偶发、刷新即消失」的报障。
+      更隐蔽的是：因为 qkitjwt 还在，用户看起来**一直是登录状态**，
+      所以报障听起来像是「权限/网络问题」，而不是「会话丢了」。
+
+    登录那一刻把 token 钉成 D 之后，页面渲染的就是 D；之后无论会话丢几次，
+    恢复路径派生的都是同一个 D —— 旧页面依旧能提交，故障不再复现。
+    这就是 `_derive_csrf_token_from_qkitjwt` 存在的全部理由（见其 docstring
+    「keep form token verification stable … session cookie persistence is unstable」），
+    原先只在恢复路径实现了一半。
+
+    ## 为什么在登录时覆盖是安全的
+
+    登录那一刻还没有任何「已发出的页面」依赖旧值（登录流程本身全是 GET：
+    `/qkit_auth/login` → 认证中心 → `/qkit_auth/after_login`），
+    因此覆盖不会作废任何在途表单。
+    """
+    csrf_value = _derive_csrf_token_from_qkitjwt(token)
+    if csrf_value:
+        session["_csrf_token"] = csrf_value
+
+
 def _load_qkit_jwt_from_request() -> str:
     token = (request.cookies.get(_QKITJWT_COOKIE) or "").strip()
     if token:

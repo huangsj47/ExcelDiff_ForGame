@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from urllib.parse import urlencode, urlparse
 
@@ -35,6 +34,7 @@ from qkit_auth.models import (
     QkitAuthUser,
     QkitAuthUserProject,
 )
+from qkit_auth.providers import fix_session_csrf_token_from_qkitjwt
 from qkit_auth.services import (
     add_user_to_project,
     check_qkit_jwt_remote,
@@ -229,6 +229,14 @@ def _set_user_session(user: QkitAuthUser, token: str | None = None) -> None:
     else:
         # Session mode: fallback for environments where browser cookie caching is restricted.
         session["qkitjwt_session"] = normalized_token
+    # 把 CSRF token 钉成「由 qkitjwt 派生」的确定值。
+    #
+    # 必须在这里做，而不是等页面渲染时由 csrf_token() 随机生成：登录后如果会话
+    # cookie 被重建（重启 / 换 FLASK_SECRET_KEY / 丢 cookie），恢复路径会派生出
+    # 确定值 D，而随机生成的 R 与之对不上 —— 用户在这个页面上点任何写操作都会收到
+    # 「CSRF token invalid or missing.」，刷新后又正常，极难归因。
+    # 传播细节与安全性论证见 qkit_auth/providers.py::fix_session_csrf_token_from_qkitjwt。
+    fix_session_csrf_token_from_qkitjwt(normalized_token)
     session.permanent = True
 
 
@@ -481,8 +489,18 @@ def qkit_logout():
 
 @qkit_auth_bp.route("/assets/project-name-simple-image", methods=["GET"], endpoint="project_name_hint_image")
 def project_name_hint_image():
-    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "img"))
-    return send_from_directory(root_dir, "project_name_simple.png")
+    """项目成员页里的「project 参数示例」截图。
+
+    图片实际放在 Flask 的静态目录下（`static/img/project_name_simple.png`），
+    但原实现取的是**仓库根**的 `img/`（`os.path.join(<qkit_auth>, "..", "img")`）——
+    那个目录不存在，于是这个接口**恒 404**，成员页上的示例图一直加载不出来
+    （浏览器控制台表现为 `project-name-simple-image: 404`）。
+
+    改为锚定 `current_app.static_folder`：与 Flask 静态路由指向同一个目录，
+    以后静态资源再挪位置也不会两边不一致。文件缺失时 `send_from_directory`
+    会抛 404（这是期望行为，比返回空白 200 更容易发现）。
+    """
+    return send_from_directory(current_app.static_folder, "img/project_name_simple.png")
 
 
 @auth_bp.route("/users")
