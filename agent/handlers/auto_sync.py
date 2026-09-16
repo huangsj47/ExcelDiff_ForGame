@@ -272,11 +272,57 @@ def _classify_git_failure(stderr_text: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _redact_secrets(text: str) -> str:
+    """脱敏：URL 内嵌凭据 + `--password/--token value` 形式的参数。
+
+    为什么 Agent 侧要用**自带**实现而不是 import 平台的 utils.security_utils：
+    Agent 是独立部署的（agent/ 目录可单独打包运行），平台 utils 未必存在 ——
+    同文件顶部的 `build_repository_local_path` 就是为这个原因加了 try/except。
+    脱敏绝不能因为「模块不存在」而静默失效。
+
+    实际的泄漏点：`_build_auth_url()` 会拼出 `https://<user>:<token>@host/path`
+    交给 git clone，而 `_format_git_failure` 把 `" ".join(cmd)` 原样拼进
+    RuntimeError 消息 → 该消息经 agent/executor.py → runner_runtime 回传平台，
+    落进 `AgentTask.error_message` 并显示在管理页面上，
+    **绕过了 models/repository.py 的落库加密**。
+    """
+    if not text:
+        return ""
+    safe = str(text)
+
+    # URL 内嵌凭据。用 rpartition('@') 取**最后一个** @ 之前的整段 userinfo ——
+    # 口令/token 本身含 `@` 或 `/` 时才不会漏出尾部片段。
+    # 例：`https://oauth2:ghp_AA/BB@host/x` 若用 `[^/\s]+@` 会完全不匹配，
+    # token 原样输出；用 rpartition 则得到 `https://oauth2:***@host/x`。
+    def _mask_url(match):
+        scheme, rest = match.group(1), match.group(2)
+        if "@" not in rest:
+            return match.group(0)
+        userinfo, _, hostpart = rest.rpartition("@")
+        if ":" not in userinfo:
+            return match.group(0)
+        user, _, _pwd = userinfo.partition(":")
+        return f"{scheme}{user}:***@{hostpart}"
+
+    safe = re.sub(r"([A-Za-z][A-Za-z0-9+.\-]*://)([^\s]+)", _mask_url, safe)
+    # --password value / --password=value / '--password', 'value'（列表 repr 形态）
+    safe = re.sub(
+        r"(?i)(--?(?:password|passwd|pwd|token|api-token|auth-token|access-token|secret))"
+        r"(\s*[=:]\s*|\s*['\"]\s*,\s*['\"]\s*|\s+)"
+        r"(['\"]?)([^'\"\s,]+)\3",
+        r"\1\2\3***\3",
+        safe,
+    )
+    return safe
+
+
 def _format_git_failure(cmd, stderr_text: str) -> str:
     normalized_stderr = _normalize_git_stderr(stderr_text)
     reason, hint = _classify_git_failure(normalized_stderr)
-    clipped_stderr = _truncate_text(normalized_stderr)
-    cmd_text = " ".join(cmd)
+    # 命令与 stderr 都必须脱敏：cmd 里可能带 `https://user:token@host`，
+    # stderr 里 git 也可能回显 URL。原实现两者都原样输出（见 _redact_secrets 说明）。
+    clipped_stderr = _redact_secrets(_truncate_text(normalized_stderr))
+    cmd_text = _redact_secrets(" ".join(cmd))
     if reason and hint:
         return (
             f"git cmd failed: {cmd_text} | reason={reason} | hint={hint} | stderr={clipped_stderr}"
@@ -502,7 +548,10 @@ def _run_svn(cmd, cwd=None, timeout=180):
     stdout = _decode_output(result.stdout)
     stderr = _decode_output(result.stderr)
     if result.returncode != 0:
-        raise RuntimeError(f"svn cmd failed: {' '.join(cmd[:3])} ... | stderr={stderr.strip()}")
+        # cmd[:3] 里含仓库 URL，URL 内嵌凭据时必须脱敏（见 _redact_secrets）
+        raise RuntimeError(
+            f"svn cmd failed: {_redact_secrets(' '.join(cmd[:3]))} ... | stderr={stderr.strip()}"
+        )
     return stdout
 
 

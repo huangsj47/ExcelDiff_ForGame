@@ -139,8 +139,15 @@ class SVNService:
                 log_print(f"✅ SVN cleanup 成功: {self.local_path}", 'SVN')
                 return True, "cleanup success"
             return False, f"cleanup failed: {stderr_text}"
+        except subprocess.TimeoutExpired:
+            # 单独接住：TimeoutExpired.__str__ 会把**整条命令行原样拼进异常信息**
+            # （实测：`Command '['svn','cleanup',...,'--password','S3CR3T',...]' timed out`），
+            # 而调用方会以 force=True 把它写进 logs/runlog.log —— 明文口令就此落盘。
+            # 返回固定串，绝不插值异常对象。
+            return False, "cleanup timed out after 120s"
         except Exception as exc:
-            return False, f"cleanup exception: {exc}"
+            from utils.security_utils import sanitize_text
+            return False, f"cleanup exception: {sanitize_text(exc)}"
 
     def _run_svn_revert(self):
         revert_cmd = [self.svn_executable, 'revert', '-R', self.local_path] + self._build_auth_args()
@@ -150,8 +157,12 @@ class SVNService:
             if result.returncode == 0:
                 return True, "revert success"
             return False, f"revert failed: {stderr_text}"
+        except subprocess.TimeoutExpired:
+            # 同 _run_svn_cleanup：TimeoutExpired 的字符串里带整条命令行（含 --password）
+            return False, "revert timed out after 180s"
         except Exception as exc:
-            return False, f"revert exception: {exc}"
+            from utils.security_utils import sanitize_text
+            return False, f"revert exception: {sanitize_text(exc)}"
 
     @staticmethod
     def _is_lock_related_error(stderr_text):
@@ -213,7 +224,8 @@ class SVNService:
                 cmd.extend(self._build_auth_args())
 
                 from utils.safe_print import log_print
-                log_print(f"执行SVN checkout命令: {' '.join(cmd[:3])} [认证信息已隐藏] {self.local_path}", 'SVN')
+                from utils.security_utils import redact_command_args
+                log_print(f"执行SVN checkout命令: {redact_command_args(cmd)}", 'SVN')
 
                 # 使用二进制模式避免编码问题，添加超时
                 try:
@@ -263,7 +275,11 @@ class SVNService:
             cmd.extend(['--non-interactive', '--trust-server-cert'])
 
             from utils.safe_print import log_print
-            log_print(f"执行SVN log命令: {' '.join(cmd[:3])} [认证信息已隐藏] {' '.join(cmd[6:])}", 'SVN')
+            # 按参数名脱敏，不要用索引切片：原先的 `cmd[6:]` 假设「凭据正好落在第 5~6 位」，
+            # 而 -r 与 --username/--password 的实际下标使它把 --password 的**值**原样写进了
+            # logs/runlog.log（已实测复现，三处参数分支全部命中）。
+            from utils.security_utils import redact_command_args
+            log_print(f"执行SVN log命令: {redact_command_args(cmd)}", 'SVN')
             log_print(f"工作目录: {self.local_path}", 'SVN')
 
             # 使用二进制模式避免编码问题，添加超时

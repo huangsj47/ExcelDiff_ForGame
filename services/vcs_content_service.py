@@ -138,10 +138,11 @@ def get_file_content_from_svn(repository, commit_id, file_path):
 
         # 添加非交互模式参数
         cmd.extend(['--non-interactive', '--trust-server-cert'])
-        log_print(f"SVN cat命令: {' '.join(cmd[:2])} [URL和认证信息已隐藏]", 'SVN')
+        from utils.security_utils import redact_command_args
+        log_print(f"SVN cat命令: {redact_command_args(cmd)}", 'SVN')
         log_print(f"SVN URL: {svn_url}", 'SVN')
         log_print(f"完整命令参数: {len(cmd)} 个参数", 'SVN')
-        log_print(f"调试 - 完整命令: {cmd[:3] + ['[认证信息已隐藏]'] + cmd[7:]}", 'SVN')
+        log_print(f"调试 - 完整命令: {redact_command_args(cmd)}", 'SVN')
         try:
             # SVN cat命令不需要工作目录，直接使用完整URL
             # 设置环境变量确保使用UTF-8编码
