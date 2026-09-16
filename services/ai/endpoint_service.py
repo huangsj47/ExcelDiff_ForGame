@@ -274,6 +274,26 @@ def validate_endpoint_ready(config: Mapping[str, Any], *, has_key: bool) -> list
     return errors
 
 
+def describe_field_schema() -> dict:
+    """把规则表序列化成前端可用的结构（标签、类型、范围、选项、默认值）。
+
+    前端**从接口读它**来渲染 `min`/`max` 与提示文案，而不是在模板里写死 —— 否则就会
+    出现「界面写着 1~30、后端按别的范围校验」这类前后端不一致，而这正是本次要修的东西。
+    """
+    return {
+        name: {
+            "label": rule.label,
+            "kind": rule.kind,
+            "min": rule.minimum,
+            "max": rule.maximum,
+            "choices": list(rule.choices),
+            "max_length": rule.max_length,
+            "default": FIELD_DEFAULTS.get(name),
+        }
+        for name, rule in FIELD_RULES.items()
+    }
+
+
 def source_of(base_url: str) -> str:
     """判断当前地址属于哪个来源，用于界面回显选中哪个单选项。"""
     normalized = normalize_base_url(base_url) if base_url else ""

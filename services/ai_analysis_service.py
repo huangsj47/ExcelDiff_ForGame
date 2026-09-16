@@ -9,44 +9,65 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from models import (
-    db,
-    Project,
-    Repository,
     Commit,
+    Repository,
     WeeklyVersionConfig,
     WeeklyVersionDiffCache,
+    db,
 )
 from models.ai_analysis import (
-    AiProjectApiKey,
     AiAnalysisRun,
-    AiWeeklyAnalysisState,
     AiProjectAnalysisConfig,
+    AiProjectApiKey,
+    AiWeeklyAnalysisState,
 )
-from utils.dpapi_utils import encrypt_dpapi, decrypt_dpapi
+from models.ai_analysis.project_config import DEFAULT_MAX_FILES_PER_RUN
+from services.ai.endpoint_service import (
+    FIELD_DEFAULTS,
+    OPENAI_BASE_URL,
+    PROBE_TIMEOUT_SECONDS,
+    ConfigValidationError,
+    FieldError,
+    build_probe_client,
+    describe_field_schema,
+    source_of,
+    validate_endpoint_ready,
+    validate_field,
+    validate_payload,
+)
+from utils.dpapi_utils import DPAPI_PREFIX, decrypt_dpapi
 from utils.logger import log_print
+from utils.security_utils import decrypt_credential, encrypt_credential
 
-
-MAX_FILES_DEFAULT = 200
+MAX_FILES_DEFAULT = DEFAULT_MAX_FILES_PER_RUN
 FULL_ANALYSIS_FILE_THRESHOLD = 50
 FULL_ANALYSIS_RATIO_THRESHOLD = 0.30
 EXECUTION_VERSION = "latest"
 ANALYSIS_CACHE_DAYS = int(os.environ.get("AI_ANALYSIS_CACHE_DAYS", "90"))
-DEFAULT_WEEKLY_INTERVAL_MINUTES = 60
-DEFAULT_PROMPT_TEMPLATE = (
-    "你是资深游戏QA与发布风险评估专家。当前游戏基于Unity引擎开发，"
-    "使用C#与Lua脚本语言，类型为FPS射击游戏。\n"
-    "请基于以下变更diff与提交信息输出：\n"
-    "1. 版本质量评估（高/中高/中/中低/低）及依据\n"
-    "2. 主要风险点列表（按影响排序）\n"
-    "3. 建议的测试范围与优先级\n"
-    "4. 回归测试与冒烟测试清单\n"
-    "5. 需要补充信息的疑点\n"
-    "输出要求：中文、分点列出、必要时说明假设。"
-)
+DEFAULT_PROMPT_TEMPLATE = """以下内容用于补充平台内置的分析协议。
+
+内置协议（检查维度、输出格式、证据与置信度门槛、反误报条款）由平台强制提供，
+请**不要在这里重复，也不要试图放宽**它们。这里只写本项目特有的事实与偏好。
+
+请按下面几项填写；没有把握的**留空即可，不要编造** —— 模型会把缺失当作
+「信息缺口」标出来，而编造出来的事实会被当成真的。
+
+1. 技术栈与工程结构
+   （例：Unity + C# + Lua；配表放在 config/ 下，生成物是 CfgXxx.lua）
+2. 配表规范要点
+   （例：ID 为六位制、前两位表示类型段；能分表则分表）
+3. 重点模块（这些模块的改动需要压测或完整回归）
+   （例：登录、充值、匹配、战斗、邮件、排行榜、全服推送）
+4. 本项目的红线与历史高频事故
+5. 输出偏好
+   （例：风险点请附复现步骤与影响范围；报告控制在 800 字内）
+"""
 CRITICAL_PATH_PATTERNS = (
     r"/config/",
     r"/configs/",
@@ -68,69 +89,117 @@ def _analysis_cache_cutoff() -> datetime:
     return _utcnow() - timedelta(days=ANALYSIS_CACHE_DAYS)
 
 
-def _clamp_int(value, default: int, *, min_value: int = 1, max_value: int = 1440) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(min_value, min(parsed, max_value))
-
-
-def _normalize_bool(value, default: bool = True) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    return text in {"1", "true", "yes", "on"}
-
-
 def _get_project_config_row(project_id: int) -> Optional[AiProjectAnalysisConfig]:
     return AiProjectAnalysisConfig.query.filter_by(project_id=project_id).first()
 
 
 def get_project_analysis_config(project_id: int) -> dict:
+    """读项目维度的 AI 配置。
+
+    返回体里额外带上 `field_schema` / `field_defaults`，让界面**从同一个事实源**渲染
+    标签、范围与默认值。范围写死在模板里就会出现「界面写着 1~30、后端按别的范围校验」
+    这类前后端不一致，而那正是这次要修掉的东西之一。
+
+    **API Key 只回状态，绝不回显**（连掩码都不给）：掩码会让用户误以为能对出来。
+    """
     row = _get_project_config_row(project_id)
-    if not row:
-        return {
-            "configured": False,
-            "auto_weekly_enabled": True,
-            "weekly_interval_minutes": DEFAULT_WEEKLY_INTERVAL_MINUTES,
-            "max_files_per_run": MAX_FILES_DEFAULT,
-            "prompt_template": DEFAULT_PROMPT_TEMPLATE,
-            "updated_by": None,
-            "updated_at": None,
+    if row is None:
+        values = dict(FIELD_DEFAULTS)
+        meta = {"configured": False, "updated_by": None, "updated_at": None}
+    else:
+        values = row.resolved()
+        meta = {
+            "configured": True,
+            "updated_by": row.updated_by,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         }
+
+    key_state = get_project_api_key_status(project_id)
     return {
-        "configured": True,
-        "auto_weekly_enabled": bool(row.auto_weekly_enabled),
-        "weekly_interval_minutes": int(row.weekly_interval_minutes or DEFAULT_WEEKLY_INTERVAL_MINUTES),
-        "max_files_per_run": int(row.max_files_per_run or MAX_FILES_DEFAULT),
-        "prompt_template": row.prompt_template or DEFAULT_PROMPT_TEMPLATE,
-        "updated_by": row.updated_by,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        **meta,
+        **values,
+        "source": source_of(values.get("api_base_url", "")),
+        "openai_base_url": OPENAI_BASE_URL,
+        "api_key": key_state,
+        "field_schema": describe_field_schema(),
+        "endpoint_ready": not validate_endpoint_ready(values, has_key=bool(key_state.get("configured"))),
     }
 
 
-def update_project_analysis_config(project_id: int, payload: dict, updated_by: str = "") -> Tuple[bool, str]:
+def update_project_analysis_config(
+    project_id: int, payload: dict, updated_by: str = ""
+) -> Tuple[bool, str, list]:
+    """保存项目配置。返回 `(成功, 提示语, 字段级错误列表)`。
+
+    **校验失败不改库、不回填、不夹取。** 旧实现用 `_clamp_int` 把越界值悄悄改成边界值：
+    用户填 5000、界面回填 1000，中间没有任何提示，他以为存进去的是 5000。现在的做法是
+    把「范围是多少、你填的是多少」原样告诉他，让他自己改。
+    """
     row = _get_project_config_row(project_id)
-    if not row:
+    if row is None:
         row = AiProjectAnalysisConfig(project_id=project_id)
         db.session.add(row)
 
-    row.auto_weekly_enabled = _normalize_bool(payload.get("auto_weekly_enabled"), True)
-    row.weekly_interval_minutes = _clamp_int(
-        payload.get("weekly_interval_minutes"), DEFAULT_WEEKLY_INTERVAL_MINUTES, min_value=1, max_value=1440
-    )
-    row.max_files_per_run = _clamp_int(
-        payload.get("max_files_per_run"), MAX_FILES_DEFAULT, min_value=10, max_value=1000
-    )
-    prompt = str(payload.get("prompt_template") or "").strip()
-    row.prompt_template = prompt if prompt else DEFAULT_PROMPT_TEMPLATE
-    row.updated_by = (updated_by or "").strip()
-    row.updated_at = _utcnow()
+    try:
+        normalized = validate_payload(payload or {})
+    except ConfigValidationError as exc:
+        db.session.rollback()
+        return False, str(exc), [item.as_dict() for item in exc.errors]
+
+    for field_name, value in normalized.items():
+        setattr(row, field_name, value)
+    if normalized:
+        row.updated_by = (updated_by or "").strip()
+        row.updated_at = _utcnow()
     db.session.commit()
-    return True, "AI analysis config updated."
+    return True, "AI 分析配置已保存。", []
+
+
+def build_endpoint_client(
+    project_id: int, override: Optional[dict] = None
+) -> Tuple[Optional[object], list]:
+    """按「请求体优先、已保存配置回退」构造探测用的客户端。
+
+    返回 `(client, errors)`；errors 是字段级列表，**格式与保存配置时的 400 一致** ——
+    前端因此可以复用同一套「哪一栏错了」的渲染，不必为测试连接再写一份。
+
+    「未保存也能测」是刻意的：用户填完地址/Token/模型名之后，第一件想做的事就是
+    确认这组配置能不能用。要求他先保存一个可能错的配置再测，是很别扭的顺序。
+    输入框留空表示「沿用已保存的值」，而不是「清空」。
+    """
+    config = get_project_analysis_config(project_id)
+    payload = dict(override or {})
+
+    base_url = str(payload.get("api_base_url") or config.get("api_base_url") or "").strip()
+    model = str(payload.get("api_model") or config.get("api_model") or "").strip()
+    typed_key = str(payload.get("api_key") or "").strip()
+    api_key = typed_key or (_get_project_api_key(project_id) or "")
+
+    problems: list = []
+    if not base_url:
+        problems.append(FieldError("api_base_url", "接口地址", "请先填写接口地址"))
+    else:
+        try:
+            base_url = validate_field("api_base_url", base_url)
+        except FieldError as exc:
+            problems.append(exc)
+    if not model:
+        problems.append(FieldError("api_model", "模型名字", "请先填写模型名字"))
+    if not api_key:
+        problems.append(FieldError("api_key", "API Token", "请先填写 API Token"))
+
+    if problems:
+        return None, [item.as_dict() for item in problems]
+
+    return (
+        build_probe_client(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            timeout_seconds=PROBE_TIMEOUT_SECONDS,
+        ),
+        [],
+    )
 
 
 def _json_dumps(payload: dict) -> str:
@@ -234,7 +303,7 @@ def _is_critical_path(path: str) -> bool:
 def set_project_api_key(project_id: int, api_key: str, updated_by: str = "") -> Tuple[bool, str]:
     if not api_key or not str(api_key).strip():
         return False, "API key is empty."
-    encrypted = encrypt_dpapi(api_key)
+    encrypted = encrypt_credential(api_key)
     if not encrypted:
         return False, "API key encryption failed."
     record = AiProjectApiKey.query.filter_by(project_id=project_id).first()
@@ -256,16 +325,50 @@ def set_project_api_key(project_id: int, api_key: str, updated_by: str = "") -> 
 def get_project_api_key_status(project_id: int) -> Dict[str, Optional[str]]:
     record = AiProjectApiKey.query.filter_by(project_id=project_id).first()
     if not record:
-        return {"configured": False, "updated_at": None}
-    updated_at = record.updated_at.isoformat() if record.updated_at else None
-    return {"configured": True, "updated_at": updated_at}
+        return {"configured": False, "updated_at": None, "format": None}
+    return {
+        "configured": True,
+        "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+        # 让界面能区分「已配置」与「已配置但需要重新保存一次」（旧密文在当前平台解不开）。
+        "format": "dpapi" if str(record.encrypted_key or "").startswith(DPAPI_PREFIX) else "fernet",
+    }
 
 
 def _get_project_api_key(project_id: int) -> Optional[str]:
+    """取明文 Token。
+
+    兼容读旧的 `dpapi::` 密文 —— 否则已经配过密钥的项目会突然全部失效。读到旧格式时：
+    Windows 上解密成功就**顺手以新格式重写一遍**（懒迁移，以后再换平台就不用解 DPAPI）；
+    非 Windows 上解不开，返回 None 让调用方给出可读指引，而不是抛一个
+    `RuntimeError: DPAPI is only available on Windows.` 让用户完全摸不着头脑。
+    """
     record = AiProjectApiKey.query.filter_by(project_id=project_id).first()
     if not record:
         return None
-    return decrypt_dpapi(record.encrypted_key)
+
+    stored = record.encrypted_key or ""
+    if not stored.startswith(DPAPI_PREFIX):
+        return decrypt_credential(stored)
+
+    legacy = decrypt_dpapi(stored)
+    if not legacy:
+        log_print(
+            "该项目保存的 API Key 是 Windows DPAPI 加密的，当前平台无法解密。"
+            "请到本项目的 AI 配置里重新保存一次 Token。",
+            "AI",
+            force=True,
+        )
+        return None
+
+    try:
+        migrated = encrypt_credential(legacy)
+        if migrated:
+            record.encrypted_key = migrated
+            db.session.commit()
+    except SQLAlchemyError:
+        # 懒迁移失败不该影响本次分析 —— 明文已经拿到了。
+        db.session.rollback()
+    return legacy
 
 
 def _limit_items(items: List[dict], max_items: int) -> List[dict]:

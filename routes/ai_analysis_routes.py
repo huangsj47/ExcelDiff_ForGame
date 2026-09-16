@@ -6,23 +6,24 @@ AI analysis routes.
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
-from models import db, Commit, Repository, WeeklyVersionConfig
+from models import Commit, Repository, WeeklyVersionConfig, db
+from services.ai.endpoint_service import probe_connection, probe_models
 from services.ai_analysis_service import (
+    build_endpoint_client,
+    get_latest_commit_result,
+    get_latest_weekly_result,
+    get_project_analysis_config,
     get_project_api_key_status,
     set_project_api_key,
     stream_commit_analysis,
     stream_weekly_analysis,
-    get_latest_weekly_result,
-    get_latest_commit_result,
-    get_project_analysis_config,
     update_project_analysis_config,
 )
 from utils.request_security import (
+    _get_current_user,
     _has_project_access,
     _has_project_admin_access,
-    _get_current_user,
 )
-
 
 ai_analysis_bp = Blueprint("ai_analysis_routes", __name__)
 
@@ -63,9 +64,65 @@ def ai_project_config_update(project_id):
     payload = request.get_json(silent=True) or {}
     user = _get_current_user()
     username = getattr(user, "username", "") if user else ""
-    ok, message = update_project_analysis_config(project_id, payload, updated_by=username)
-    status_code = 200 if ok else 400
-    return jsonify({"success": ok, "message": message}), status_code
+    ok, message, errors = update_project_analysis_config(
+        project_id, payload, updated_by=username
+    )
+    body = {"success": ok, "message": message}
+    if errors:
+        # 字段级明细：界面据此把错误标到具体那一栏，而不是只在顶部说一句「保存失败」。
+        body["errors"] = errors
+    return jsonify(body), 200 if ok else 400
+
+
+def _probe_guard(project_id):
+    """两个探测接口共用的权限判定。
+
+    用**管理员**权限而不是访问权限：这两个接口会带着项目密钥去请求外部地址，
+    普通成员不该有能力触发它（也就没人能拿它当探测内网的跳板）。
+    """
+    if not _has_project_admin_access(project_id):
+        return jsonify({"success": False, "message": "Admin permission required."}), 403
+    return None
+
+
+@ai_analysis_bp.route("/ai-analysis/projects/<int:project_id>/models", methods=["POST"])
+def ai_project_models(project_id):
+    """取可用模型列表。
+
+    **由服务端带着密钥去请求**，只把模型 id 字符串回给浏览器 —— 密钥绝不能下发到前端。
+    取不到列表时返回 `success=True` + `supported=False`（**不是错误**）：实测存在
+    「能正常对话但不在列表里」的模型，所以这不阻断任何操作，界面引导用户手填即可。
+    """
+    denied = _probe_guard(project_id)
+    if denied is not None:
+        return denied
+
+    client, errors = build_endpoint_client(project_id, request.get_json(silent=True) or {})
+    if client is None:
+        return jsonify({"success": False, "message": "配置不完整", "errors": errors}), 400
+
+    result = probe_models(client)
+    return jsonify({"success": True, **result.as_dict()}), 200
+
+
+@ai_analysis_bp.route(
+    "/ai-analysis/projects/<int:project_id>/test-connection", methods=["POST"]
+)
+def ai_project_test_connection(project_id):
+    """用**请求体里当前填的**地址/Token/模型发一次最小对话。
+
+    未保存也能测，用户不必先把一个可能错的配置存下来。输入框留空表示沿用已保存的值。
+    """
+    denied = _probe_guard(project_id)
+    if denied is not None:
+        return denied
+
+    client, errors = build_endpoint_client(project_id, request.get_json(silent=True) or {})
+    if client is None:
+        return jsonify({"success": False, "message": "配置不完整", "errors": errors}), 400
+
+    result = probe_connection(client)
+    return jsonify({"success": True, **result.as_dict()}), 200
 
 
 @ai_analysis_bp.route("/ai-analysis/commit/<int:commit_id>/stream", methods=["GET"])
