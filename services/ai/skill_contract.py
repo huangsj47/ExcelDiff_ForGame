@@ -70,6 +70,16 @@ REPORT_SECTIONS = (
     "上线与回滚关注点",
 )
 
+# 模型可以索要的上下文类型。**必须与 SKILL.md 里给模型看的清单逐字一致**：
+# 文档里写了而运行期不认的类型，模型会一直请求、一直被丢弃，看起来像「模型不听话」，
+# 实际是两边没对齐。
+REQUEST_TYPES = ("commit_detail", "file_diff", "file_content", "read_reference")
+
+# 异常条目只接受这两档严重度与置信度。更低的置信度按契约只能写进报告正文，
+# 不该出现在给人工跟进的清单里。
+SEVERITIES = ("critical", "high")
+CONFIDENCES = ("high", "very_high")
+
 # 值里不允许出现的片段：`": "` 会被 YAML 当成新的键值对，`" #"` 会被当成注释。
 _FORBIDDEN_VALUE_FRAGMENTS = (": ", " #")
 # 值不允许以这些字符开头：YAML 会把它们当成流式集合、锚点、标签或块标量的引导符。
@@ -133,6 +143,14 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     return fields, body
 
 
+def _extract_string_enum(body: str, key: str) -> tuple[str, ...]:
+    """取出形如 `"key": "a | b | c"` 的枚举定义。"""
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]+)"', body)
+    if not match:
+        raise SkillContractError(f'SKILL.md 里找不到形如 `"{key}": "a | b | c"` 的枚举定义')
+    return tuple(item.strip() for item in match.group(1).split("|") if item.strip())
+
+
 def extract_category_enum(body: str) -> tuple[str, ...]:
     """从 SKILL.md 的 JSON 骨架里取出 `category` 的枚举值。
 
@@ -140,10 +158,30 @@ def extract_category_enum(body: str) -> tuple[str, ...]:
     两边一旦不同步，模型就会输出服务端不认的类别、异常被静默丢弃 —— 所以这里读回来
     比对。取不到就抛错，不静默返回空。
     """
-    match = re.search(r'"category"\s*:\s*"([^"]+)"', body)
-    if not match:
-        raise SkillContractError('SKILL.md 里找不到形如 `"category": "a | b | c"` 的枚举定义')
-    return tuple(item.strip() for item in match.group(1).split("|") if item.strip())
+    return _extract_string_enum(body, "category")
+
+
+def extract_request_types(body: str) -> tuple[str, ...]:
+    """取出 SKILL.md 里给模型看的可索要上下文类型。
+
+    它们在文档里是四个独立的 JSON 对象（不是 `|` 枚举），所以按 `"type": "X"` 逐个抓。
+    """
+    found = re.findall(r'"type"\s*:\s*"([A-Za-z_]+)"', body)
+    if not found:
+        raise SkillContractError('SKILL.md 里找不到形如 `"type": "file_diff"` 的请求类型定义')
+    ordered: list[str] = []
+    for item in found:
+        if item not in ordered:
+            ordered.append(item)
+    return tuple(ordered)
+
+
+def extract_severity_enum(body: str) -> tuple[str, ...]:
+    return _extract_string_enum(body, "severity")
+
+
+def extract_confidence_enum(body: str) -> tuple[str, ...]:
+    return _extract_string_enum(body, "confidence")
 
 
 def extract_report_sections(body: str) -> tuple[str, ...]:
@@ -252,16 +290,30 @@ def validate_skill_dir(
 
 
 def _check_body_contract(body: str) -> list[str]:
+    """正文里给模型看的每一个枚举，都必须等于运行期用的那一组。
+
+    这四组枚举不同步的后果都是**静默**的：模型输出服务端不认的值 → 那一条被丢弃，
+    而报告里看不出少了东西；反过来文档里少写了一项 → 模型永远不会用那种类型请求，
+    该读的上下文读不到。
+    """
     problems: list[str] = []
-    try:
-        declared = extract_category_enum(body)
-    except SkillContractError as exc:
-        problems.append(str(exc))
-    else:
-        if set(declared) != set(DIMENSION_IDS):
+
+    checks = (
+        ("category", extract_category_enum, DIMENSION_IDS),
+        ("请求类型", extract_request_types, REQUEST_TYPES),
+        ("severity", extract_severity_enum, SEVERITIES),
+        ("confidence", extract_confidence_enum, CONFIDENCES),
+    )
+    for label, extractor, expected in checks:
+        try:
+            declared = extractor(body)
+        except SkillContractError as exc:
+            problems.append(str(exc))
+            continue
+        if set(declared) != set(expected):
             problems.append(
-                "SKILL.md 里 category 的枚举与运行期的 DIMENSION_IDS 不一致："
-                f"文档写的是 {sorted(declared)}，代码要求 {sorted(DIMENSION_IDS)}"
+                f"SKILL.md 里的 {label} 与运行期常量不一致："
+                f"文档写的是 {sorted(declared)}，代码要求 {sorted(expected)}"
             )
 
     try:
