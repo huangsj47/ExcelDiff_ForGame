@@ -880,7 +880,15 @@ def handle_different_files_merge(file_groups):
                 log_print(f"  - 单个提交处理: {file_commits[0].commit_id[:8]}", 'APP')
                 try:
                     log_print(f"  - 调用get_unified_diff_data函数...", 'APP')
-                    previous_commit = file_commits[1] if len(file_commits) > 1 else None
+                    # 单个提交的组，基线是该文件**在这条提交之前**的那一版，
+                    # 不在本次选择范围内，必须去解析。
+                    #
+                    # 原先写的是 `file_commits[1] if len(file_commits) > 1 else None`，
+                    # 而这里已经确定 len(file_commits) == 1 —— 条件恒假，于是永远传 None：
+                    # 「和空版本比」= 整份文件都被当成**新增**，一个「改了 3 行」的配表
+                    # 在合并视图里会显示成整表新增（并且以 previous_commit_id=NULL 落进
+                    # 缓存 —— 页头写的是「对比版本 X」，正文却是凭空的新增）。
+                    previous_commit = resolve_previous_commit(file_commits[0])
                     diff_data = _get_unified_diff_data(file_commits[0], previous_commit)
                     log_print(f"  - 函数调用完成，返回值类型: {type(diff_data)}", force=True)
                 except Exception as get_error:
@@ -989,7 +997,18 @@ def handle_consecutive_commits_merge_internal(file_commits):
                 else:
                     log_print(f"❌ 无法获取最早提交的父提交: {earliest_commit.commit_id[:8]}", 'APP')
                 log_print("⚠️ 范围diff失败，回退到单个提交diff", 'APP')
-                previous_commit = file_commits[1] if len(file_commits) > 1 else None
+                # 回退时的基线必须是**合并区间起点之前**的那一条提交。
+                #
+                # 原先写的是 `file_commits[1]`，而 file_commits 在本函数里是按时间
+                # **升序**排的（见开头 `earliest_commit = file_commits[0]` /
+                # `latest_commit = file_commits[-1]`），所以 file_commits[1] 是
+                # 「区间内的第二条提交」——比区间起点**更新**：
+                #   * 区间只有两条提交时它就是 latest_commit 本身 → 「自己和自己比」，
+                #     整段区间明明有变更，却被算成无变更；
+                #   * 区间更多条时基线落在区间中间 → 只显示区间尾部，而页头/合并视图
+                #     声称覆盖整段区间。
+                # 也不该退而求其次用 file_commits 里的任何一条：真正的基线不在区间内。
+                previous_commit = resolve_previous_commit(earliest_commit)
                 diff_data = _get_unified_diff_data(latest_commit, previous_commit)
                 return clean_json_data(diff_data) if diff_data else None
             else:

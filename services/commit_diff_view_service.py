@@ -122,7 +122,19 @@ def handle_commit_diff_view(
             log_print(f"处理Excel文件差异: {commit.path}", "EXCEL")
             log_print(f"Commit ID: {commit.commit_id}", "EXCEL")
             log_print(f"Repository: {repository.name}", "EXCEL")
-            cached_diff = excel_cache_service.get_cached_diff(repository.id, commit.commit_id, commit.path)
+            # 读缓存必须带上**页头已经解析出来的**基线。
+            #
+            # 不传的话服务会自己去解析（只查数据库），解析不出来就退化成「不校验基线」，
+            # 于是同一 (提交, 文件) 下**任何基线**算出来的缓存行都可能被当成这一页的正文
+            # —— 页头写着「对比版本 = 上一个版本」，正文却是与更晚版本比出来的结果，
+            # 界面上完全看不出来（线上抽样的 100 条里有 13 条属于这一类，含「基线竟然
+            # 晚于被审提交」的情形）。
+            # 页头用的 resolve_previous_commit 比缓存服务内部那套更强（同秒有 id 兜底、
+            # 库里缺失还能回退 VCS），两边口径不一致就等于缓存键白加。
+            cached_baseline = previous_commit.commit_id if previous_commit else None
+            cached_diff = excel_cache_service.get_cached_diff(
+                repository.id, commit.commit_id, commit.path, previous_commit_id=cached_baseline
+            )
             diff_data = None
             cache_is_valid = False
             if cached_diff:
