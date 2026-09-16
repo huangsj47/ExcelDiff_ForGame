@@ -85,14 +85,54 @@ def assert_destructive_db_allowed(
 
 
 def reset_sqlalchemy_engine_cache(app) -> None:
-    """Clear Flask-SQLAlchemy engine cache for current app.
+    """丢弃本 app 已缓存的引擎，使下一次 `db.engine` 按**当前** config 重建。
 
-    Needed when tests switch SQLALCHEMY_DATABASE_URI at runtime.
+    用途：测试在运行时改掉 `SQLALCHEMY_DATABASE_URI`（例如
+    `tests/test_auth_e2e.py` 想把连接切到临时库再 `drop_all`）。
+
+    【原实现的缺陷】判断写的是 `isinstance(app_engines, dict)`，而 Flask-SQLAlchemy
+    3.0.x 里 `ext._app_engines` 是 `weakref.WeakKeyDictionary` —— 它**不是** dict
+    的子类，于是这个判断恒为假，函数**静默什么都不做**。
+
+    实测（改前）：
+        URI in config AFTER : sqlite:///...\\Temp\\tmpXXXX.db
+        engine.url AFTER    : sqlite:///...\\instance\\diff_platform.db   ← 没换过去
+
+    危害不只是「测试跑不起来」：调用方以为已经切到临时库了，接着就会对**真实
+    生产库**执行 `drop_all()`。本项目里唯一挡住它的是 `assert_destructive_db_allowed`
+    的那道保险 —— 而一道「靠另一处守卫侥幸没出事」的静默失败，迟早会出事。
+
+    【必须清内层而不是 pop 掉 app】Flask-SQLAlchemy 3.0.x 把 `_app_engines` 同时当作
+    **注册记录**用：`engines` 属性先查 `if app not in self._app_engines` 再抛
+    「The current Flask app is not registered with this 'SQLAlchemy' instance」。
+    直接 `pop(app)` 会把 app 的注册一并删掉；而清空内层 dict 又会让 `engines[None]`
+    抛 KeyError —— 因为 FSA 3.0.x **只在 `init_app` 里创建引擎**（extension.py:314
+    `engines = self._app_engines.setdefault(app, {})`），访问时不会惰性重建。
+
+    所以「按新 config 重建引擎」的可行路径只有一条：摘掉注册 → 再跑一次 `init_app`。
+    `init_app` 自己就支持这种重入（源码注释：`Dispose existing engines in case
+    init_app is called again.`），只是它开头会拦「已注册」：
+    `if "sqlalchemy" in app.extensions: raise RuntimeError(...)`。
+
+    【调用时机】必须在 app **处理第一个请求之前**调用。`init_app` 内部会调用
+    `app.shell_context_processor(...)` 这类 Flask 的 setup 方法，而 Flask 禁止在
+    首个请求之后再调用（会抛「The setup method 'shell_context_processor' can no
+    longer be called...」）。这里提前给出中文提示，免得读到那句难懂的英文。
     """
     ext = app.extensions.get("sqlalchemy")
-    app_engines = getattr(ext, "_app_engines", None)
-    if isinstance(app_engines, dict):
-        app_engines.pop(app, None)
+    if ext is None:
+        return
+    init_app = getattr(ext, "init_app", None)
+    if not callable(init_app):
+        return
+    if getattr(app, "_got_first_request", False):
+        raise RuntimeError(
+            "reset_sqlalchemy_engine_cache 必须在 app 处理第一个请求之前调用："
+            "重建引擎要重跑 Flask-SQLAlchemy 的 init_app，而 Flask 不允许在首个请求"
+            "之后再调用 setup 方法。请在导入后、发起任何请求前切换数据库连接。"
+        )
+    app.extensions.pop("sqlalchemy", None)
+    init_app(app)
 
 
 def collect_sqlite_runtime_diagnostics(database_uri: str) -> Dict[str, Any]:

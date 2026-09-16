@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import os
-import tempfile
 from contextlib import contextmanager
 
+import auth.services as auth_services
 from app import app, db
 from auth import routes as auth_routes
 from auth.models import (
@@ -17,7 +17,6 @@ from auth.models import (
     PlatformRole,
     RequestStatus,
 )
-import auth.services as auth_services
 from auth.services import (
     add_user_to_project,
     handle_create_project_request,
@@ -28,18 +27,31 @@ from auth.services import (
     toggle_user_active,
 )
 from models.project import Project
-from utils.db_safety import assert_destructive_db_allowed, reset_sqlalchemy_engine_cache
+from utils.db_safety import assert_destructive_db_allowed
 
 
 @contextmanager
 def _client():
-    temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    temp_db.close()
+    """每个用例一套干净的表。
+
+    【为什么这里不再切换 SQLALCHEMY_DATABASE_URI】原实现每个用例新建一个临时
+    sqlite 文件、改 `app.config["SQLALCHEMY_DATABASE_URI"]` 再调
+    `reset_sqlalchemy_engine_cache(app)`，但那次切换**从来没有生效过**：
+    `reset_sqlalchemy_engine_cache` 当时是个静默空操作（它判断
+    `isinstance(app_engines, dict)`，而 Flask-SQLAlchemy 3.0.x 的 `_app_engines`
+    是 `WeakKeyDictionary`，不是 dict 的子类）。于是这些用例实际一直跑在
+    tests/conftest.py 隔离出来的临时库上，靠下面的 drop_all / create_all 拿到干净
+    的初始状态 —— 这也确实是它们需要的隔离粒度。
+
+    该函数现在被修成真正可用（重建引擎 = 重跑 FSA 的 init_app），但 init_app 会调用
+    `app.shell_context_processor(...)` 这类 Flask setup 方法，而 Flask 禁止在首个请求
+    之后再调用；`_client()` 是用例里每次都进的，第 2 个用例就会炸。所以这里明确改为
+    「用 conftest 的隔离库 + 每用例重置表」这个**本来就生效**的策略，而不是继续写一个
+    做不到的切换。
+    """
     app.config["TESTING"] = True
     app.config["WTF_CSRF_ENABLED"] = False
     app.config["SERVER_NAME"] = "localhost"
-    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{temp_db.name}"
-    reset_sqlalchemy_engine_cache(app)
     os.environ["ADMIN_USERNAME"] = "admin"
     os.environ["ADMIN_PASSWORD"] = "admin123"
     os.environ.setdefault("SECRET_KEY", "test-secret-key-for-debug-register")
@@ -66,10 +78,6 @@ def _client():
         )
         db.drop_all()
         db.engine.dispose()
-    try:
-        os.unlink(temp_db.name)
-    except OSError:
-        pass
 
 
 def _post_register(client, username: str, role: str):
@@ -413,12 +421,14 @@ def test_deactivated_user_session_is_not_treated_as_logged_in():
 
 
 def test_login_does_not_500_when_auth_tables_missing():
+    """认证表不存在时登录不应 500。
+
+    本用例要的就是「表被删掉」这个状态：先 drop_all，再打登录接口，最后把表建回来。
+    数据库沿用 tests/conftest.py 的隔离临时库（详见文件内 `_client()` 的说明 ——
+    原先那套「运行时切换 URI」从来没生效过，而修好之后也不能在首个请求之后调用）。
+    """
     app.config["TESTING"] = True
     app.config["WTF_CSRF_ENABLED"] = False
-    tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    tmp_db.close()
-    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{tmp_db.name}"
-    reset_sqlalchemy_engine_cache(app)
 
     with app.app_context():
         runtime_uri = str(db.engine.url)
@@ -448,7 +458,3 @@ def test_login_does_not_500_when_auth_tables_missing():
     finally:
         with app.app_context():
             db.create_all()
-        try:
-            os.unlink(tmp_db.name)
-        except OSError:
-            pass

@@ -21,6 +21,7 @@ import os
 import sys
 import tempfile
 import traceback
+import uuid
 from contextlib import contextmanager
 from typing import Optional
 
@@ -33,14 +34,32 @@ if ROOT_DIR not in sys.path:
 # 使用临时数据库，不影响实际数据
 _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _tmp_db.close()
-_TMP_DB_URI = f"sqlite:///{_tmp_db.name}"
+_TMP_DB_URI = f"sqlite:///{os.path.abspath(_tmp_db.name).replace(chr(92), '/')}"
 os.environ["ADMIN_USERNAME"] = "admin"
 os.environ["ADMIN_PASSWORD"] = "admin123"
 os.environ["AUTH_DEBUG_MODE"] = "false"
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-e2e")
 
+# 在 **import app 之前**把数据库指向本文件的临时库。
+#
+# 为什么不能在 _client() 里运行时切换：Flask-SQLAlchemy 3.0.x 只在 init_app 里建引擎，
+# 运行时换 URI 必须重跑 init_app，而 init_app 会调用 `app.shell_context_processor(...)`
+# 这类 Flask setup 方法 —— Flask 禁止在首个请求之后再调用，于是第 2 个用例就会抛
+# 「The setup method 'shell_context_processor' can no longer be called on the
+# application」。而 _client() 是每个用例都进的。
+#
+# 变量名必须是 DATABASE_URL：app.py 里它的优先级高于 config.py 的
+# `SQLALCHEMY_DATABASE_URI = sqlite:///<cwd>/instance/diff_platform.db`，
+# 这也正是 tests/conftest.py 隔离测试库用的机制。
+#
+# 用 setdefault：pytest 下 conftest 已经设过 DATABASE_URL（指向它自己的隔离库），
+# 此时这里不覆盖，保持既有行为；只有独立运行 (`python tests/test_auth_e2e.py`) 时才
+# 指向本文件的临时库 —— 那时 app 从一开始就在临时库上，不会碰真实数据库。
+os.environ.setdefault("DB_BACKEND", "sqlite")
+os.environ.setdefault("DATABASE_URL", _TMP_DB_URI)
+
 from app import app, db  # noqa: E402
-from utils.db_safety import assert_destructive_db_allowed, reset_sqlalchemy_engine_cache  # noqa: E402
+from utils.db_safety import assert_destructive_db_allowed  # noqa: E402
 
 # ── 统计 ──
 _passed = 0
@@ -73,32 +92,43 @@ def _fail(name: str, detail: str = ""):
     _errors.append(msg)
 
 
+class _E2EFailure(AssertionError):
+    """某个断言失败。
+
+    继承 AssertionError，这样 pytest 会把它算作真正的失败（而不是只打印一行 ❌
+    却让用例通过）；同时独立运行模式能靠类型区分「断言失败」与「代码抛异常」，
+    避免重复计数。
+    """
+
+
 def _assert(cond: bool, name: str, detail: str = ""):
+    """断言，**失败时抛出**。
+
+    原实现失败时只 print + 记账、不抛异常，于是本文件被 pytest 收集到的 12 个
+    `test_*` 函数**永远不会失败** —— 断言全挂也只是打印若干行 ❌，pytest 依旧报
+    「12 passed」。本文件覆盖注册/登录/项目隔离/角色授权/CSRF/注入这些最该有回归
+    保护的部分，等于长期没有门禁。
+    """
     if cond:
         _ok(name)
-    else:
-        _fail(name, detail)
+        return
+    _fail(name, detail)
+    raise _E2EFailure(f"{name} —— {detail}" if detail else name)
 
 
 @contextmanager
 def _client():
     """Return a test client with fresh tables.
 
-    Uses the production database (same as app) but creates/drops auth tables
-    in each test. CSRF enforcement is temporarily disabled.
+    数据库指向在模块 import 之前就已确定（见文件顶部 `os.environ.setdefault`）：
+    pytest 下是 conftest 的隔离临时库，独立运行时是本文件的临时库。两种情况下都
+    不会碰真实数据库 —— 而且下面还会用 `assert_destructive_db_allowed` 再确认一次。
+    CSRF 通过在 session 里预设 token 放行。
     """
     app.config["TESTING"] = True
     app.config["WTF_CSRF_ENABLED"] = False
     app.config["SERVER_NAME"] = "localhost"
 
-    # 暂存原始 CSRF enforce 函数
-    _orig_enable_security = os.environ.get("ENABLE_ADMIN_SECURITY")
-    # 使 enforce_csrf 不拦截测试请求：通过在 session 中预设 token
-    # 更直接的方式：用 SQLALCHEMY_DATABASE_URI 切换到临时数据库
-    app.config["SQLALCHEMY_DATABASE_URI"] = _TMP_DB_URI
-    reset_sqlalchemy_engine_cache(app)
-
-    # 重新绑定引擎到临时数据库
     with app.app_context():
         runtime_uri = str(db.engine.url)
         assert_destructive_db_allowed(
@@ -224,9 +254,25 @@ def test_register_login_logout():
         resp = c.get("/auth/logout", follow_redirects=True)
         _assert(resp.status_code == 200, "1.6 登出成功")
 
-        # --- 1.7 登出后访问首页跳转到登录 ---
+        # --- 1.7 登出后访问首页：必须拿不到任何业务数据，且给出登录入口 ---
+        #
+        # 原断言写的是「必须 302 重定向到登录页」，但首页 endpoint (`index`) 本身就在
+        # AUTH_EXEMPT_ENDPOINTS 里 —— 匿名访问返回 200 是**设计如此**（页面对未登录
+        # 访客渲染登录引导，而不是重定向）。所以原来这条断言一直不成立。
+        #
+        # 换成断言真正的安全属性：匿名访客拿不到项目数据，只看到登录引导。
+        # 这比「状态码是 302」有意义得多 —— 状态码不是契约，不泄露数据才是。
+        from models import Project
+
+        sentinel = f"LEAKPROBE_{uuid.uuid4().hex[:8]}"
+        db.session.add(Project(code=f"LP{uuid.uuid4().hex[:6]}", name=sentinel))
+        db.session.commit()
+
         resp = c.get("/", follow_redirects=False)
-        _assert(resp.status_code in (302, 301), "1.7 未登录被重定向")
+        anon_text = resp.data.decode("utf-8")
+        assert resp.status_code == 200, f"匿名访问首页不应报错，实际 {resp.status_code}"
+        _assert(sentinel not in anon_text, "1.7 未登录看不到项目数据", f"页面里出现了 {sentinel}")
+        _assert("登录" in anon_text, "1.7 未登录首页给出登录入口")
 
         # --- 1.8 错误密码 ---
         resp = _login_follow(c, "testuser1", "wrong_password")
@@ -916,6 +962,10 @@ def run_all():
     for t in tests:
         try:
             t()
+        except _E2EFailure:
+            # 断言失败已经在 _assert 里记过一笔（含具体断言名），这里不再重复计数。
+            # 代价是这个函数后面的断言不再执行 —— 换来的是「断言真的会让用例失败」。
+            continue
         except Exception as e:
             _fail(t.__name__, f"EXCEPTION: {e}")
             traceback.print_exc()
