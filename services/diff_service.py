@@ -410,11 +410,37 @@ class DiffService:
         
         if current_df is None:
             # 工作表被删除
+            #
+            # 行数据**必须留下** —— 这是评审者唯一能看到「删掉了什么」的地方。
+            #
+            # 原实现只留计数（`'rows': []`），于是两边渲染都不认：
+            #   * 前端 `static/js/diff-handlers.js` 判断一个 sheet 有没有变更是看
+            #     `rows.some(status ∈ added/removed/modified)` —— rows 为空即「无变更」；
+            #   * 服务端 `templates/diff_partials/excel_diff.html` 也是逐 `rows` 渲染。
+            # 结果是顶部统计照样写着「删除 232」，每一张表却都显示
+            # 「工作表 X 没有数据或无变更」——**统计说有 232 行删除、正文一个字都看不到**，
+            # 评审者只能盲签。（线上实例：`config/60_skill/角色属性表.xlsx` 一次删除
+            # 232 行，正文只渲染出 1 行。）
+            #
+            # 与下面「新增工作表」分支对齐：那个分支一直是保留全部行的。
+            # 负载变大的风险由既有的按体积截断机制兜底（`excel_diff_cache_service`
+            # 的 MAX_DIFF_DATA_BYTES / truncated 标记，模板另有专门提示分支）。
+            headers = list(previous_df.columns) if previous_df is not None else []
+            rows = []
+            if previous_df is not None:
+                rows = [
+                    {
+                        'row_number': row_number,
+                        'status': 'removed',
+                        'data': row_data,
+                    }
+                    for row_number, row_data in self._dataframe_rows_with_index(previous_df)
+                ]
             return {
                 'operation': 'deleted',
                 'message': f'工作表 "{sheet_name}" 已被删除',
-                'headers': list(previous_df.columns) if previous_df is not None else [],
-                'rows': [],
+                'headers': headers,
+                'rows': rows,
                 'stats': {'added': 0, 'removed': len(previous_df) if previous_df is not None else 0, 'modified': 0}
             }
         

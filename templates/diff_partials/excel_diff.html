@@ -27,11 +27,18 @@
     <div class="excel-content-area" id="excel-content-area">
         {% for sheet_name, sheet_data in excel_data.sheets.items() %}
         <div class="excel-sheet-content {% if loop.first %}active{% endif %}" id="sheet-{{ sheet_name }}">
-            {% if sheet_data.status == 'deleted' %}
+            {# 工作表级的「整张表新增/删除」提示。
+               判据是 `operation`：这是 pandas 路径（services/diff_service.py::_compare_dataframes）
+               真正写出来的字段，取值 added / deleted。
+               原先这里判的是 `sheet_data.status` —— 两种产出方都不会把 status 写成
+               added/deleted（另一种产出方 services/git_service.py 的 sheet 级 status 只有
+               modified / unchanged），所以这两个分支从来没生效过，
+               整表被删除时也只会显示成「没有数据或无变更」。 #}
+            {% if sheet_data.operation == 'deleted' %}
             <div class="alert alert-danger">
                 <i class="bi bi-trash me-2"></i>工作表 "{{ sheet_name }}" 已被删除
             </div>
-            {% elif sheet_data.status == 'added' %}
+            {% elif sheet_data.operation == 'added' %}
             <div class="alert alert-success">
                 <i class="bi bi-plus-circle me-2"></i>工作表 "{{ sheet_name }}" 是新增的
             </div>
@@ -56,11 +63,37 @@
                     {% endif %}
                     <tbody>
                         {% for row in sheet_data.rows %}
+                        {# 行内单元格有两种数据形态，这里统一成 `cells` 再渲染：
+                           * 形态一（services/git_service.py）：行自带 `cells`，
+                             每格 {value, old_value, new_value, status}；
+                           * 形态二（services/diff_service.py，即提交页/缓存实际用的那种）：
+                             行只有 `data`（列名→值）与 `cell_changes`（[{column, old_value, new_value}]），
+                             **没有 cells**。
+                           原实现只读 `row.cells`，形态二下每一行都渲染成「只有行号、没有任何内容」
+                           的表格 —— 线上表现为 diff 正文里一排排光秃秃的行号，或整块看起来像没变更。 #}
+                        {% set row_changes = {} %}
+                        {% for change in row.cell_changes or [] %}
+                        {% if change.column %}{% set _ = row_changes.update({change.column: change}) %}{% endif %}
+                        {% endfor %}
+                        {% set cells = row.cells %}
+                        {% if not cells %}
+                        {% set cells = [] %}
+                        {% for header in sheet_data.headers or [] %}
+                        {% set change = row_changes.get(header) %}
+                        {% if change %}
+                        {% set _ = cells.append({'value': change.new_value, 'old_value': change.old_value,
+                                                 'new_value': change.new_value, 'status': 'changed'}) %}
+                        {% else %}
+                        {% set _ = cells.append({'value': (row.data or {}).get(header, ''),
+                                                 'status': row.status}) %}
+                        {% endif %}
+                        {% endfor %}
+                        {% endif %}
                         {% if row.status == 'added' %}
                         <!-- 新增行 - 绿色背景 -->
                         <tr class="excel-row-added">
                             <td class="excel-row-number excel-bold-text">{{ row.row_number }}</td>
-                            {% for cell in row.cells %}
+                            {% for cell in cells %}
                             <td class="excel-cell">{{ cell.value | format_cell_value }}</td>
                             {% endfor %}
                         </tr>
@@ -68,7 +101,7 @@
                         <!-- 删除行 - 红色背景 -->
                         <tr class="excel-row-removed">
                             <td class="excel-row-number excel-bold-text">{{ row.row_number }}</td>
-                            {% for cell in row.cells %}
+                            {% for cell in cells %}
                             <td class="excel-cell">{{ cell.value | format_cell_value }}</td>
                             {% endfor %}
                         </tr>
@@ -76,7 +109,7 @@
                         <!-- 普通行或修改行 - 按单元格显示差异 -->
                         <tr class="excel-row-normal">
                             <td class="excel-row-number excel-bold-text">{{ row.row_number }}</td>
-                            {% for cell in row.cells %}
+                            {% for cell in cells %}
                             {% if cell.status == 'changed' %}
                             <td class="excel-cell excel-cell-modified">
                                 {% if cell.old_value %}

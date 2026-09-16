@@ -21,7 +21,7 @@ db = None
 # 一旦它比真实版本旧，就会把**刚生成的当前版本缓存**当成过期数据清掉。
 # 一致性由 tests/test_diff_service_fidelity.py::TestDiffLogicVersionSingleSource
 # 扫描全部三处锁定（tests/test_diff_logic_version_single_source.py 只覆盖 app.py / config.py）。
-DIFF_LOGIC_VERSION = "1.10.0"
+DIFF_LOGIC_VERSION = "1.11.0"
 DiffCache = None
 OperationLog = None
 Commit = None
