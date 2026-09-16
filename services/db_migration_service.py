@@ -228,6 +228,56 @@ def _migrate_ai_weekly_analysis_state_columns(db, log_print):
     )
 
 
+def _migrate_ai_analysis_columns(db, log_print):
+    """AI 分析相关表的新增列。
+
+    **注意这里没有写 DEFAULT 子句**（`_migrate_table_columns` 的 DDL 只带列名与类型），
+    所以已部署库里的老行在新列上是 NULL。`AiProjectAnalysisConfig.resolved()` 负责把
+    NULL 读成默认值 —— 不要假设数据库会替我们补上。
+
+    新表（`ai_analysis_anomaly` / `ai_analysis_trace`）不在这里出现：`db.create_all()`
+    在启动时会创建它们（它只建不存在的表，不会动已有的表）。只有**给已存在的表加列**
+    才需要走这里。若将来给这两张新表补索引，则要同时加进 `REQUIRED_INDEXES`
+    （老库里表已建好，`create_all` 不会再给它补索引）。
+    """
+    _migrate_table_columns(
+        db,
+        "ai_project_analysis_config",
+        {
+            "api_base_url": "api_base_url VARCHAR(500)",
+            "api_model": "api_model VARCHAR(200)",
+            "max_analysis_rounds": "max_analysis_rounds INTEGER",
+            "max_tool_requests": "max_tool_requests INTEGER",
+            "prompt_char_budget": "prompt_char_budget INTEGER",
+            "request_timeout_seconds": "request_timeout_seconds INTEGER",
+            "min_severity": "min_severity VARCHAR(20)",
+            "min_confidence": "min_confidence VARCHAR(20)",
+            "max_anomalies_per_run": "max_anomalies_per_run INTEGER",
+            "project_knowledge": "project_knowledge TEXT",
+        },
+        log_print,
+    )
+    _migrate_table_columns(
+        db,
+        "ai_analysis_run",
+        {
+            "analysis_revision": "analysis_revision VARCHAR(80)",
+            "model": "model VARCHAR(200)",
+            "prompt_version": "prompt_version VARCHAR(80)",
+            "skill_version": "skill_version VARCHAR(80)",
+            "rules_version": "rules_version VARCHAR(80)",
+            "rounds_used": "rounds_used INTEGER",
+            "tool_requests_used": "tool_requests_used INTEGER",
+            "tokens_input": "tokens_input INTEGER",
+            "tokens_output": "tokens_output INTEGER",
+            "anomalies_found": "anomalies_found INTEGER",
+            "dropped_count": "dropped_count INTEGER",
+            "context_chars": "context_chars INTEGER",
+        },
+        log_print,
+    )
+
+
 def apply_schema_migrations(db, log_print):
     """Apply all lightweight runtime schema migrations."""
     _migrate_repository_columns(db, log_print)
@@ -235,5 +285,6 @@ def apply_schema_migrations(db, log_print):
     _migrate_weekly_version_diff_cache_columns(db, log_print)
     _migrate_agent_nodes_columns(db, log_print)
     _migrate_ai_weekly_analysis_state_columns(db, log_print)
+    _migrate_ai_analysis_columns(db, log_print)
     # 索引放在最后：列迁移先跑完，避免出现「列还没 add 就要给它建索引」。
     apply_index_migrations(db, log_print)

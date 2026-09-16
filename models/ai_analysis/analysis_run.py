@@ -4,8 +4,19 @@
 AI analysis run records.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
 from .. import db
+
+# 运行状态。原实现只有 pending/running/succeeded 三种，**没有 failed**，于是
+# 「进程中断」「模型返回不可用」这类情况只能留下一条永远 running 的僵尸记录，
+# `error_message` 列存在但从未被写入过 —— 用户看到的是「一直在分析中」，无从判断。
+RUN_STATUSES = ("pending", "running", "succeeded", "failed")
+
+# 超过这个时长仍是 running 的记录，视为僵尸（进程被杀 / 容器重启留下的）。
+# 判定放在读取侧而不是靠定时清理：定时任务本身也会被杀，而读取侧判断是幂等的、
+# 不依赖任何后台组件。
+STALE_RUNNING_SECONDS = 3600
 
 
 class AiAnalysisRun(db.Model):
@@ -30,6 +41,29 @@ class AiAnalysisRun(db.Model):
     response_text = db.Column(db.Text)
     error_message = db.Column(db.Text)
 
+    # --- 幂等与可复现标识 ---
+    # 输入内容哈希 + 版本标识合成，决定「这次能不能复用上一次的结果」。
+    # 这几个字段分开存而不是只存一个合成值：出问题时第一个要回答的问题是
+    # 「是提示词变了、规则变了，还是只是模型换了」。
+    analysis_revision = db.Column(db.String(80))
+    model = db.Column(db.String(200))
+    prompt_version = db.Column(db.String(80))
+    skill_version = db.Column(db.String(80))
+    rules_version = db.Column(db.String(80))
+
+    # --- 本轮消耗（账要算清楚，「为什么这次慢/贵」才答得上来）---
+    rounds_used = db.Column(db.Integer)
+    tool_requests_used = db.Column(db.Integer)
+    tokens_input = db.Column(db.Integer)
+    tokens_output = db.Column(db.Integer)
+
+    # --- 产出与裁剪记账 ---
+    anomalies_found = db.Column(db.Integer)
+    # 被丢弃 / 合并 / 因封顶砍掉的条数合计。**必须记账**：只报「发现 3 条」而不说
+    # 「另外 5 条被门槛过滤了」，用户没法判断门槛是不是设得太严。
+    dropped_count = db.Column(db.Integer)
+    context_chars = db.Column(db.Integer)
+
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     started_at = db.Column(db.DateTime)
     finished_at = db.Column(db.DateTime)
@@ -40,6 +74,60 @@ class AiAnalysisRun(db.Model):
     )
 
     project = db.relationship("Project", backref="ai_analysis_runs")
+
+    __table_args__ = (
+        # 运行历史列表：WHERE project_id = ? ORDER BY created_at DESC
+        db.Index("idx_ai_run_project_created", "project_id", "created_at"),
+    )
+
+    @property
+    def is_stale_running(self) -> bool:
+        """进程被杀留下的僵尸 running 记录。"""
+        if self.status != "running":
+            return False
+        reference = self.started_at or self.created_at
+        if reference is None:
+            return False
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - reference > timedelta(seconds=STALE_RUNNING_SECONDS)
+
+    @property
+    def effective_status(self) -> str:
+        """给界面用的状态：僵尸 running 显示成 failed，而不是永远转圈。
+
+        不改库里的值 —— 那个进程可能只是慢，还没死。只是不给用户看一个永远停在
+        「分析中」的界面。
+        """
+        return "failed" if self.is_stale_running else (self.status or "pending")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "project_id": self.project_id,
+            "target_type": self.target_type,
+            "target_id": self.target_id,
+            "target_key": self.target_key,
+            "status": self.effective_status,
+            "stored_status": self.status,
+            "scope": self.scope,
+            "trigger_source": self.trigger_source,
+            "analysis_revision": self.analysis_revision,
+            "model": self.model,
+            "prompt_version": self.prompt_version,
+            "skill_version": self.skill_version,
+            "rules_version": self.rules_version,
+            "rounds_used": self.rounds_used,
+            "tool_requests_used": self.tool_requests_used,
+            "tokens_input": self.tokens_input,
+            "tokens_output": self.tokens_output,
+            "anomalies_found": self.anomalies_found,
+            "dropped_count": self.dropped_count,
+            "context_chars": self.context_chars,
+            "error_message": self.error_message,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+        }
 
     def __repr__(self):
         return f"<AiAnalysisRun {self.id} {self.target_type}:{self.target_id or self.target_key}>"
