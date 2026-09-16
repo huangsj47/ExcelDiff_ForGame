@@ -34,6 +34,69 @@ _LAST_SETTINGS = None
 _LAST_COMMON_HEADERS = None
 _LAST_AGENT_TOKEN = ""
 
+# `.env.simple` 模板里逐字节出现的占位值。照抄模板部署时 AGENT_SHARED_SECRET 就是
+# 这个公开常量，任何人都能拿它调 /api/agents/register 注册假 Agent、领取真实任务。
+_PLACEHOLDER_AGENT_SECRETS = frozenset(
+    {
+        "please-change-me",
+        "please_change_me",
+        "pleasechangeme",
+        "change-me",
+        "change_me",
+        "changeme",
+        "replace-me",
+        "replace_me",
+        "replaceme",
+        "your-secret",
+        "your_secret",
+        "placeholder",
+        "secret",
+        "test",
+        "testing",
+        "default",
+        "none",
+        "null",
+    }
+)
+
+# 措辞型占位（子串匹配，大小写不敏感）。
+_PLACEHOLDER_AGENT_SECRET_KEYWORDS = (
+    "change-me",
+    "change_me",
+    "changeme",
+    "replace",
+    "placeholder",
+    "your-secret",
+    "your_secret",
+)
+
+
+def _assert_agent_secret_is_usable(secret: str) -> None:
+    """拒绝占位/说明文字形式的 AGENT_SHARED_SECRET（fail-closed）。
+
+    为什么不 import `utils.env_bootstrap`：Agent 是**独立打包部署**的
+    （`agent/` + `runner_runtime.py` 自成一体），平台 `utils` 在 Agent 节点上未必存在
+    —— 与 `agent/self_update.py::_safe_join_within` 同一个理由。安全校验绝不能因为
+    「模块不存在」而静默失效。
+
+    Agent 节点通常直接跑 `start_agent.py`，**不会**经过平台的
+    `bootstrap/runtime_entry.py`，所以这条检查必须在 Agent 侧自带一份。
+    """
+    text = str(secret or "").strip()
+    lowered = text.lower()
+    is_placeholder = lowered in _PLACEHOLDER_AGENT_SECRETS or any(
+        keyword in lowered for keyword in _PLACEHOLDER_AGENT_SECRET_KEYWORDS
+    )
+    # 含中日韩字符的「密钥」一定是人写的说明文字（如「请替换为一个随机字符串」）。
+    has_cjk = any("一" <= char <= "鿿" for char in text)
+    if is_placeholder or has_cjk:
+        raise RuntimeError(
+            "AGENT_SHARED_SECRET 仍是 .env.simple 模板里的占位值（公开可猜），"
+            "任何人都能冒充本 Agent 领取任务。请生成随机值后重新启动：\n"
+            '  python -c "import secrets;print(secrets.token_urlsafe(48))"\n'
+            "该值必须与平台侧 .env 的 AGENT_SHARED_SECRET 完全一致。"
+        )
+
 
 def _log(message: str, verbose: bool = True):
     if not verbose:
@@ -171,6 +234,8 @@ def run_agent():
 
     if not settings.agent_shared_secret:
         raise RuntimeError("缺少 AGENT_SHARED_SECRET")
+    # 「没配」与「配了占位值」是两回事：后者看起来配好了，实际用的是公开常量。
+    _assert_agent_secret_is_usable(settings.agent_shared_secret)
 
     signal.signal(signal.SIGINT, _handle_signal)
     if hasattr(signal, "SIGTERM"):

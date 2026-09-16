@@ -7,9 +7,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from zipfile import ZipFile
@@ -35,9 +37,97 @@ _PROTECTED_DIRS = {
     _TEMP_UPDATE_DIR_NAME,
 }
 
+# 版本号只允许「字母数字开头 + 字母数字._-」。这一条就排除了：
+# `../../..`、`/etc/cron.d`、`C:\Windows`、`..\..\` 等一切穿越/绝对路径写法。
+_SAFE_RELEASE_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_MAX_RELEASE_VERSION_LENGTH = 128
+
+# 发布包摘要必须是完整的 sha256 十六进制串。
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
 
 def _agent_root() -> str:
     return str(Path(__file__).resolve().parent)
+
+
+def _safe_join_within(base_dir: str, *parts: str) -> str:
+    """在 `base_dir` 内安全拼接路径，越界即抛 RuntimeError。
+
+    为什么 Agent 侧要用**自带**实现而不是 import 平台的 utils.path_security：
+    与 `agent/handlers/auto_sync.py` 的 `_redact_secrets` 同一个原因 —— Agent 是
+    独立部署的（`agent/` 可单独打包运行），平台 `utils` 未必存在；而
+    `utils/path_security.py` 也**没有**通用的安全拼接函数（只有仓库路径专用
+    的 `build_repository_local_path`）。安全校验绝不能因为「模块不存在」而
+    静默失效，所以这里自包含实现。
+
+    为什么不用「`..` 黑名单」而用 realpath + commonpath：黑名单漏判的形式太多
+    （`....//`、URL 编码、Windows 盘符、UNC、软链接）。包含性校验把判断权交给
+    文件系统本身，判定的是**最终落点**而不是字面量。
+    """
+    base_abs = os.path.realpath(os.path.abspath(str(base_dir)))
+    candidate = os.path.realpath(os.path.join(base_abs, *[str(part) for part in parts]))
+    if candidate != base_abs:
+        try:
+            common = os.path.commonpath([base_abs, candidate])
+        except ValueError:
+            # 不同盘符 / 不同驱动器（Windows）—— 一定越界。
+            raise RuntimeError(f"path escapes base directory: {candidate!r} not under {base_abs!r}")
+        if common != base_abs:
+            raise RuntimeError(f"path escapes base directory: {candidate!r} not under {base_abs!r}")
+    return candidate
+
+
+def _is_safe_release_version(version: str) -> bool:
+    """版本号必须是单一安全路径段（防目录穿越 / 绝对路径）。"""
+    text = str(version or "").strip()
+    if not text or len(text) > _MAX_RELEASE_VERSION_LENGTH:
+        return False
+    if not _SAFE_RELEASE_VERSION_PATTERN.match(text):
+        return False
+    # 正则已排除 `.` / `..`（首字符必须是字母数字），这里再挡一次以防正则被放宽。
+    return text not in {".", ".."}
+
+
+def _resolve_origin(url: str):
+    """把 URL 归一成 `(scheme, host, port)`；非法或非 http(s) 返回 None。
+
+    port 显式补全默认值，避免 `https://h` 与 `https://h:443` 被判定为不同源，
+    也避免省略端口时绕过同源比较。
+    """
+    try:
+        parsed = urllib.parse.urlsplit(str(url or "").strip())
+    except Exception:
+        return None
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in _DEFAULT_PORTS:
+        return None
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        # 端口不是合法数字（例如 `http://host:abc/`）。
+        return None
+    if port is None:
+        port = _DEFAULT_PORTS[scheme]
+    return scheme, host, port
+
+
+def _is_same_origin(base_url: str, target_url: str) -> bool:
+    """下载地址必须与平台 base URL 同源（scheme + host + port 全等）。
+
+    自更新的下载请求会带上 `X-Agent-Token` / Agent 共享凭据。如果下载地址由
+    服务端返回的 `download_path` 决定、且允许绝对 URL，那么一个被篡改的发布清单
+    就能把集群凭据发给任意主机 —— 那是比「装到坏包」更严重的凭据外泄。
+    """
+    base_origin = _resolve_origin(base_url)
+    target_origin = _resolve_origin(target_url)
+    if base_origin is None or target_origin is None:
+        return False
+    return base_origin == target_origin
 
 
 def _state_path() -> str:
@@ -233,12 +323,33 @@ def check_and_apply_update(settings, common_headers: dict, agent_token: str, log
     version = str(release.get("version") or "").strip()
     if not version:
         return False, "invalid release version"
+    if not _is_safe_release_version(version):
+        # fail-closed：版本号直接参与 temp 目录拼接，绝不放行可疑值。
+        log_func(f"拒绝自更新：发布版本号不合法 version={version!r}")
+        return False, f"拒绝更新：发布版本号不合法 version={version!r}（只允许字母数字与 . _ -）"
     download_path = str(release.get("download_path") or "").strip()
     if not download_path:
         return False, "invalid download path"
 
     download_url = _join_platform_url(settings.platform_base_url, download_path)
-    temp_root = os.path.join(_agent_root(), _TEMP_UPDATE_DIR_NAME, version)
+    if not _is_same_origin(settings.platform_base_url, download_url):
+        # 下载会带上 Agent 凭据，只允许发回平台自身。
+        log_func(
+            f"拒绝自更新：下载地址与平台不同源 download_url={download_url!r} "
+            f"platform_base_url={settings.platform_base_url!r}"
+        )
+        return (
+            False,
+            f"拒绝更新：下载地址 {download_url!r} 与平台 {settings.platform_base_url!r} 不同源"
+            "（自更新请求会携带 Agent 凭据，禁止发往第三方主机）",
+        )
+
+    try:
+        temp_root = _safe_join_within(_agent_root(), _TEMP_UPDATE_DIR_NAME, version)
+    except RuntimeError as path_exc:
+        log_func(f"拒绝自更新：临时目录越界 version={version!r} error={path_exc}")
+        return False, f"拒绝更新：版本号导致临时目录越界（{path_exc}）"
+
     if os.path.exists(temp_root):
         shutil.rmtree(temp_root, ignore_errors=True)
     os.makedirs(temp_root, exist_ok=True)
@@ -256,11 +367,22 @@ def check_and_apply_update(settings, common_headers: dict, agent_token: str, log
     if dl_status != 200:
         return False, f"download update failed: status={dl_status}, body={dl_data}"
 
+    # 完整性校验 fail-closed：旧实现写作 `if expect_sha256:`，清单里不写摘要就
+    # 完全不校验 —— 一个能篡改发布清单的攻击者只要删掉这个字段即可投递任意包。
     expect_sha256 = str(release.get("package_sha256") or "").strip().lower()
-    if expect_sha256:
-        real_sha256 = _sha256_file(package_path).lower()
-        if real_sha256 != expect_sha256:
-            raise RuntimeError(f"package sha256 mismatch: expected={expect_sha256}, got={real_sha256}")
+    if not _SHA256_PATTERN.match(expect_sha256):
+        log_func(f"拒绝自更新：发布清单缺少合法 package_sha256 value={expect_sha256!r}")
+        return (
+            False,
+            "拒绝更新：发布清单缺少合法的 package_sha256（不能跳过完整性校验）",
+        )
+    real_sha256 = _sha256_file(package_path).lower()
+    if real_sha256 != expect_sha256:
+        log_func(f"拒绝自更新：安装包 sha256 校验失败 expected={expect_sha256} got={real_sha256}")
+        return (
+            False,
+            f"拒绝更新：安装包 sha256 校验失败 expected={expect_sha256} got={real_sha256}",
+        )
 
     expect_size = int(release.get("package_size") or 0)
     if expect_size > 0:

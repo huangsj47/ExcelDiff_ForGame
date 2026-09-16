@@ -101,6 +101,40 @@ Windows:
 copy .env.simple .env
 ```
 
+> ⚠️ **`.env.simple` 是模板，复制后必须替换两个密钥，否则平台不会启动。**
+>
+> 模板里 `FLASK_SECRET_KEY` 与 `AGENT_SHARED_SECRET` 的值是占位串
+> （形如 `__REPLACE_ME_WITH_A_RANDOM_...__`），不是可用密钥。校验有两道，覆盖面不同：
+>
+> 1. 启动脚本 `start.bat` / `start.sh` → `python -m utils.env_bootstrap`
+>    （退出码 2 即中止）；
+> 2. 进程入口 `bootstrap/runtime_entry.py::_enforce_env_secrets_or_exit`
+>    —— Web 模式与 `DEPLOYMENT_MODE=agent` 都走这里，所以**直接 `python app.py`
+>    也绕不过去**。
+>
+> 判定标准：这两个键仍是占位值，或长度不足（`FLASK_SECRET_KEY` < 32 字符、
+> `AGENT_SHARED_SECRET` < 16 字符）→ **拒绝启动**并打印中文修复指引。
+>
+> 生成随机密钥（两个键各生成一次，不要复用同一个值）：
+> ```bash
+> python -c "import secrets;print(secrets.token_urlsafe(48))"
+> ```
+> 填入 `.env` 的 `FLASK_SECRET_KEY` 与 `AGENT_SHARED_SECRET`；Agent 节点机的
+> `AGENT_SHARED_SECRET` 必须与平台侧完全一致。
+>
+> Agent 节点机通常直接跑 `agent/start_agent.py`（既不过启动脚本，也不过
+> `runtime_entry`），所以 Agent 侧自带一份同等校验
+> （`agent/runner_runtime.py::_assert_agent_secret_is_usable`，独立实现 ——
+> Agent 是单独打包部署的，平台 `utils` 在节点机上未必存在）。
+>
+> 本地调试临时放行（**切勿用于生产**）：`set TESTING=1`（Windows cmd）或
+> `export TESTING=1`（Linux/macOS）。pytest 环境（`tests/conftest.py` 已设
+> `TESTING=1`）不受此校验影响。
+>
+> 该密钥为空（未配置）时不拒绝启动，只保留既有降级行为（运行期随机
+> `FLASK_SECRET_KEY`，Agent 接口返回 503）—— 只有「看起来配好了、实际是公开常量」
+> 才是必须拦下的情形。
+
 3. 启动平台
 Linux/macOS:
 ```bash
@@ -150,6 +184,25 @@ python scripts/publish_agent_release.py --rollback --rollback-target-version <�
 python scripts/rollback_agent_release.py --steps 1
 ```
 
+### 自更新安全约束（Agent 侧强校验）
+
+Agent 执行自更新时（`agent/self_update.py`）现在有三条 fail-closed 规则，
+发布清单不满足即**拒绝安装**，原因会写进返回平台的消息与 Agent 日志：
+
+1. **`version` 必须是单一安全路径段**（只允许字母数字与 `.` `_` `-`，且首字符为字母数字）。
+   该值会参与临时目录拼接，历史实现直接 `shutil.rmtree(os.path.join(root, ".agent_update_tmp", version))`，
+   `version="../../.."`、绝对路径、Windows 盘符都能删掉任意目录。现在改为
+   `realpath` + `commonpath` 的包含性校验，落点必须仍在 Agent 目录内。
+2. **下载地址必须与 `PLATFORM_BASE_URL` 同源**（scheme + host + port 全等）。
+   下载请求携带 `X-Agent-Token` 与共享凭据，`download_path` 若允许绝对 URL，
+   等于把机群凭据发给任意主机。
+3. **`package_sha256` 变为必填**，且必须是 64 位十六进制串；缺失、格式非法或
+   摘要不匹配一律拒绝安装。历史实现写作 `if expect_sha256:` —— 清单里不写摘要
+   就完全不校验，篡改发布清单者只要删掉该字段即可投递任意包。
+
+> 平台侧 `scripts/publish_agent_release.py` 生成的清单已始终包含 `package_sha256`，
+> 正常发布流程不受影响。
+
 ## 文档导航
 
 - 平台配置与部署总说明：[`平台配置说明.md`](./平台配置说明.md)
@@ -160,6 +213,9 @@ python scripts/rollback_agent_release.py --steps 1
 
 - 平台：`AUTH_BACKEND` / `DEPLOYMENT_MODE` / `AGENT_SHARED_SECRET` / `FLASK_SECRET_KEY`
 - Agent：`PLATFORM_BASE_URL` / `AGENT_SHARED_SECRET` / `AGENT_NAME`
+
+> `AGENT_SHARED_SECRET` 与 `FLASK_SECRET_KEY` 必须替换掉 `.env.simple` 里的占位串，
+> 否则启动脚本会拒绝启动（见「快速开始 → 2. 准备配置」）。
 
 ## 代码质量工具（新增）
 

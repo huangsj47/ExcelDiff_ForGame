@@ -5,9 +5,15 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import signal
 import sys
 import threading
+
+# 仓根（app.py 所在目录）。`.env` 的定位必须与 app.py 顶部
+# `os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")` 完全一致 ——
+# 否则从别的 cwd 启动时这里查的是另一个文件，校验就落空了。
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def _resolve_original_print(app_module):
@@ -42,6 +48,46 @@ def _configure_runtime_io(_original_print):
         _original_print(f"[TRACE] stderr reconfigure failed: {exc}")
 
 
+def _enforce_env_secrets_or_exit(_original_print):
+    """启动前拒绝「照抄模板」的占位密钥；不合格直接以退出码 2 终止。
+
+    为什么需要这一层（`start.bat` / `start.sh` 已经跑过 `utils.env_bootstrap`）：
+    那两个脚本会检查 `utils.env_bootstrap` 的退出码并中止，但**直接 `python app.py`
+    会整条绕过它** —— 而文档、容器编排、以及不少运维习惯正是这么起的。
+    这里补在 Web 模式与 Agent 模式**共用的唯一咽喉** `run_runtime_entry` 上，
+    让「看起来配好了、其实用的是公开常量」的部署无法启动。
+
+    失败要放在 `run_runtime_entry` 的 `try` **之外**：该函数里有
+    `except SystemExit as exc:` 分支，会把异常吞掉并让进程以 0 退出 —— 那就成了
+    「拒绝启动」却报成功。
+
+    校验失败抛 `SystemExit` 而非返回布尔值，是为了让任何调用方都无法忽略它。
+    """
+    try:
+        from utils.env_bootstrap import (
+            check_env_file_secrets,
+            format_insecure_secret_guidance,
+            is_testing_mode,
+        )
+    except Exception as exc:  # pragma: no cover - 模块缺失不应阻断启动
+        _original_print(f"[WARN] .env 密钥校验不可用，已跳过: {exc}")
+        return
+
+    if is_testing_mode():
+        return
+
+    env_path = _REPO_ROOT / ".env"
+    issues = check_env_file_secrets(env_path)
+    if not issues:
+        return
+
+    _original_print(
+        format_insecure_secret_guidance(issues, env_path),
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
 def run_runtime_entry(app_module):
     """Run startup/shutdown flow using app module runtime objects."""
     _original_print = _resolve_original_print(app_module)
@@ -54,6 +100,10 @@ def run_runtime_entry(app_module):
 
     _original_print("[TRACE] entered __main__")
     _configure_runtime_io(_original_print)
+
+    # 必须早于 clear_log_file 那一步（它会清空日志文件，失败原因会被抹掉），
+    # 也必须早于 signal/initialize_app —— 密钥不合格时不该碰任何运行时状态。
+    _enforce_env_secrets_or_exit(_original_print)
 
     shutdown_flag = threading.Event()
     _original_print("[TRACE] about to call clear_log_file")

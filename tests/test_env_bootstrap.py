@@ -37,7 +37,15 @@ def test_ensure_env_file_generates_defaults_when_missing(tmp_path):
     assert "\\n" not in content
     assert "HOST=0.0.0.0\n" in content
     assert "DEPLOYMENT_MODE=single\n" in content
-    assert "AGENT_SHARED_SECRET=please-change-me\n" in content
+    # 自动生成的 .env 必须是**可直接启动**的安全配置：AGENT_SHARED_SECRET 不能再是
+    # 与 .env.simple 逐字节相同的公开常量（照抄即可被冒充 Agent 领任务）。
+    agent_secret = next(
+        line.split("=", 1)[1]
+        for line in content.splitlines()
+        if line.startswith("AGENT_SHARED_SECRET=")
+    )
+    assert agent_secret != "please-change-me"
+    assert len(agent_secret) >= 16
     assert "DB_BACKEND=sqlite\n" in content
     assert "BRANCH_REFRESH_COOLDOWN_SECONDS=120\n" in content
 
