@@ -114,6 +114,55 @@ def test_ai_weekly_payload_scope_and_policy():
         assert payload["policy"]["reason"] == "delta_small"
 
 
+def test_the_default_prompt_is_project_agnostic():
+    """平台默认提示词**不能写死某个项目的技术栈**。
+
+    旧文案是「当前游戏基于 Unity 引擎开发，使用 C# 与 Lua 脚本语言，类型为 FPS 射击游戏」。
+    这是**平台级**默认值：接入任何一个别的项目，模型都会被告知这是 G119 的技术栈，
+    于是按 FPS 的常识去判断改动的影响面。
+
+    旧文案还有第二个病：「请基于以下**变更 diff** 与提交信息输出」，而当时的 payload
+    里根本没有 diff 内容 —— 要求模型基于它拿不到的东西作答。
+
+    现在技术栈只作为**示例**出现在模板里，用户按自己项目的情况填。
+    """
+    from services.ai_analysis_service import DEFAULT_PROMPT_TEMPLATE as tpl
+
+    for banned in ("FPS", "射击", "请基于以下变更 diff"):
+        assert banned not in tpl, f"默认提示词里又出现了写死的项目事实：{banned}"
+
+    # 技术栈只以示例形式出现，且要求用户填自己项目的情况
+    assert "Unity + C# + Lua" in tpl, "技术栈示例不见了 —— 用户会不知道该填什么格式"
+    assert "例：" in tpl
+    # 必须交代「没把握就留空」：否则模型会把信息缺口编成事实
+    assert "不要编造" in tpl
+    # 内置协议是平台强制的，不能被这里的补充指令放宽
+    assert "不要在这里重复" in tpl
+    assert "放宽" in tpl
+
+
+def test_an_empty_prompt_template_stays_empty():
+    """用户清空补充指令 = 真的清空，不是被写回默认值。
+
+    旧实现在空值时写回 `DEFAULT_PROMPT_TEMPLATE`：用户想清空却得到一坨文本，
+    而且看不出来那不是自己写的。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        db.session.commit()
+
+        ai_service.update_project_analysis_config(
+            project.id, {"prompt_template": "自定义"}, updated_by="tester"
+        )
+        ok, _message, errors = ai_service.update_project_analysis_config(
+            project.id, {"prompt_template": ""}, updated_by="tester"
+        )
+        assert ok is True
+        assert errors == []
+        assert ai_service.get_project_analysis_config(project.id)["prompt_template"] == ""
+
+
 def test_ai_project_api_key_uses_cross_platform_encryption():
     """**Token 必须走跨平台的 Fernet，不再用 Windows-only 的 DPAPI。**
 

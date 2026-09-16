@@ -327,7 +327,7 @@ function initCommitAiAnalysis() {
     const meta = document.getElementById('aiAnalysisMeta');
     let eventSource = null;
     let hasCached = false;
-    let keyReady = false;
+    let aiEndpointReady = false;
 
     function cleanupStream() {
         if (eventSource) {
@@ -337,28 +337,44 @@ function initCommitAiAnalysis() {
         if (startBtn) startBtn.disabled = false;
     }
 
-    async function refreshKeyStatus() {
+    // 说清楚**缺哪一样**，比笼统的一句「未配置」有用得多。
+    function describeMissingAiConfig(data) {
+        const missing = [];
+        if (!data.api_base_url) missing.push('接口地址');
+        if (!data.api_model) missing.push('模型名字');
+        if (!(data.api_key && data.api_key.configured)) missing.push('Token');
+        return missing.join('、') || '配置';
+    }
+
+    async function refreshAiReadiness() {
         try {
-            const resp = await fetch(`/ai-analysis/projects/${projectId}/api-key/status`);
+            // 读 /config 而不是 /api-key/status：分析要跑起来需要**接口地址、模型名字、Token**
+            // 三样齐全。只看密钥的话，「只配了 Token」的项目也能点分析，然后跑到一半才失败。
+            const resp = await fetch(`/ai-analysis/projects/${projectId}/config`, { cache: 'no-store' });
             const data = await resp.json();
-            if (data && data.configured) {
-                setAiStatusBadge('已配置', 'success');
-                keyReady = true;
-                if (startBtn) startBtn.disabled = false;
-                if (meta) {
-                    meta.textContent = data.updated_at ? `API Key 最近更新：${data.updated_at}` : 'API Key 已配置';
-                }
-            } else {
-                setAiStatusBadge('未配置', 'warning');
-                keyReady = false;
+            if (!data || !data.success) {
+                setAiStatusBadge('无法读取', 'warning');
+                aiEndpointReady = false;
                 if (startBtn) startBtn.disabled = true;
-                if (meta) meta.textContent = '请在项目概览页配置 API Key。';
+                if (meta) meta.textContent = '无法读取 AI 配置（可能没有该项目的访问权限）。';
+            } else if (data.endpoint_ready) {
+                setAiStatusBadge('已配置', 'success');
+                aiEndpointReady = true;
+                if (startBtn) startBtn.disabled = false;
+                if (meta) meta.textContent = `模型 ${data.api_model} · Token 已配置`;
+            } else {
+                setAiStatusBadge('配置不全', 'warning');
+                aiEndpointReady = false;
+                if (startBtn) startBtn.disabled = true;
+                if (meta) {
+                    meta.textContent = `请在项目概览页的「AI 分析配置」里补全：${describeMissingAiConfig(data)}。`;
+                }
             }
         } catch (err) {
             setAiStatusBadge('检测失败', 'danger');
-            keyReady = false;
+            aiEndpointReady = false;
             if (startBtn) startBtn.disabled = true;
-            if (meta) meta.textContent = '无法获取 API Key 状态。';
+            if (meta) meta.textContent = '无法获取 AI 配置状态。';
         }
     }
 
@@ -396,8 +412,8 @@ function initCommitAiAnalysis() {
     }
 
     function startAnalysis(force = false) {
-        if (!keyReady) {
-            setAiOutput('请先配置 API Key。', false);
+        if (!aiEndpointReady) {
+            setAiOutput('请在项目概览页的「AI 分析配置」里填好接口地址、模型名字与 Token。', false);
             return;
         }
         if (!force && hasCached) {
@@ -466,7 +482,7 @@ function initCommitAiAnalysis() {
     if (openBtn) {
         openBtn.addEventListener('click', async function() {
             openDrawer();
-            await refreshKeyStatus();
+            await refreshAiReadiness();
             const hasLatest = await loadLatestResult();
             if (!hasLatest) {
                 startAnalysis();
@@ -490,7 +506,7 @@ function initCommitAiAnalysis() {
         });
     }
 
-    refreshKeyStatus();
+    refreshAiReadiness();
 }
 
 // 初始化diff处理器

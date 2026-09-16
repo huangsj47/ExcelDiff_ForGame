@@ -388,74 +388,237 @@
 
     {% set _ai_can_edit = is_admin() or has_project_admin_access(project.id) %}
     <div class="card mb-4" id="aiConfigCard">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <h5 class="mb-0">
-                <i class="fas fa-robot me-2"></i>AI分析配置
-            </h5>
-            <span class="badge bg-secondary" id="aiKeyStatusBadge">检测中</span>
+    <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-3">
+        <div class="flex-grow-1">
+            <div class="d-flex align-items-center gap-2 mb-1">
+                <h6 class="mb-0">AI 分析配置</h6>
+                <span class="badge bg-secondary" id="aiKeyStatusBadge">检测中</span>
+            </div>
+            <div class="small text-muted" id="aiConfigSummary">正在加载配置…</div>
+            <div class="small" id="aiConnectionStatus" role="status" aria-live="polite"></div>
         </div>
-        <div class="card-body">
-            <ul class="nav nav-tabs" id="aiConfigTabs" role="tablist">
-                <li class="nav-item" role="presentation">
-                    <button class="nav-link active" id="ai-token-tab" data-bs-toggle="tab" data-bs-target="#ai-token-panel" type="button" role="tab" aria-controls="ai-token-panel" aria-selected="true">API Token</button>
-                </li>
-                <li class="nav-item" role="presentation">
-                    <button class="nav-link" id="ai-settings-tab" data-bs-toggle="tab" data-bs-target="#ai-settings-panel" type="button" role="tab" aria-controls="ai-settings-panel" aria-selected="false">AI分析设置</button>
-                </li>
-            </ul>
-            <div class="tab-content pt-3">
-                <div class="tab-pane fade show active" id="ai-token-panel" role="tabpanel" aria-labelledby="ai-token-tab">
-                    <div class="row g-3 align-items-center">
-                        <div class="col-md-6">
-                            <div class="text-muted small">API Key 仅支持更新，无法查看明文。</div>
-                            <div class="small text-muted" id="aiKeyMeta">用于周版本风险评估与测试建议生成。</div>
+        <div class="flex-shrink-0">
+            <button type="button" class="btn btn-primary btn-sm" id="aiConfigOpenBtn"
+                    data-bs-toggle="modal" data-bs-target="#aiConfigModal">
+                <i class="fas fa-sliders-h me-1" aria-hidden="true"></i>修改配置
+            </button>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="aiConfigModal" tabindex="-1" aria-labelledby="aiConfigModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="aiConfigModalLabel">AI 分析配置</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-danger d-none" id="aiConfigErrorSummary" role="alert" tabindex="-1">
+                    <div class="fw-semibold mb-1" id="aiConfigErrorTitle">有内容需要修改</div>
+                    <ul class="mb-0 small" id="aiConfigErrorList"></ul>
+                </div>
+                {% if not _ai_can_edit %}
+                <div class="alert alert-warning small mb-3">仅项目管理员可修改 AI 配置，当前为只读。</div>
+                {% endif %}
+
+                <fieldset class="mb-4">
+                    <legend class="fs-6 fw-semibold text-primary border-bottom pb-1 mb-3">连接配置</legend>
+
+                    <div class="mb-3">
+                        <span class="form-label d-block" id="aiSourceLabel">服务来源</span>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="radio" name="aiEndpointSource"
+                                   id="aiSourceOpenai" value="openai" aria-describedby="aiSourceHelp">
+                            <label class="form-check-label" for="aiSourceOpenai">OpenAI 官方</label>
                         </div>
-                        <div class="col-md-6">
-                            {% if _ai_can_edit %}
-                            <div class="input-group">
-                                <input type="password" class="form-control form-control-sm" id="aiKeyInput" placeholder="输入新的 API Key">
-                                <button class="btn btn-primary btn-sm" type="button" id="aiKeySaveBtn">更新</button>
-                            </div>
-                            <div class="form-text" id="aiKeyFeedback"></div>
-                            {% else %}
-                            <div class="text-muted small">仅项目管理员可更新 API Key。</div>
-                            {% endif %}
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="radio" name="aiEndpointSource"
+                                   id="aiSourceCustom" value="custom" aria-describedby="aiSourceHelp">
+                            <label class="form-check-label" for="aiSourceCustom">自定义端点</label>
+                        </div>
+                        <div class="form-text" id="aiSourceHelp">
+                            任何 OpenAI 兼容接口都可以：本地中转、自建网关、公司内网网关都行。
+                            选「OpenAI 官方」会自动填入官方地址；选「自定义端点」请自行填写。
                         </div>
                     </div>
-                </div>
-                <div class="tab-pane fade" id="ai-settings-panel" role="tabpanel" aria-labelledby="ai-settings-tab">
+
+                    <div class="mb-3">
+                        <label class="form-label" for="aiBaseUrlInput">接口地址</label>
+                        <input type="text" class="form-control form-control-sm" id="aiBaseUrlInput"
+                               placeholder="例如 http://127.0.0.1:15721/v1"
+                               aria-describedby="aiBaseUrlInputHelp aiBaseUrlInputError">
+                        <div class="form-text" id="aiBaseUrlInputHelp">
+                            填到 <code>/v1</code> 即可；粘成完整的 <code>/chat/completions</code> 也会自动纠正。
+                            必须带 <code>http://</code> 或 <code>https://</code>。
+                        </div>
+                        <div class="form-text text-danger d-none" id="aiBaseUrlInputError"></div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label" for="aiModelInput">模型名字</label>
+                        <div class="input-group input-group-sm">
+                            <input type="text" class="form-control" id="aiModelInput" list="aiModelOptions"
+                                   placeholder="例如 deepseek-v4-flash" autocomplete="off"
+                                   aria-describedby="aiModelInputHelp aiModelStatus aiModelInputError">
+                            <button class="btn btn-outline-secondary" type="button" id="aiFetchModelsBtn">
+                                <i class="fas fa-sync-alt me-1" aria-hidden="true"></i>获取可用模型
+                            </button>
+                            <datalist id="aiModelOptions"></datalist>
+                        </div>
+                        <div class="form-text" id="aiModelInputHelp">
+                            <strong>可以直接手填。</strong>有些网关的模型列表里不含实际可用的模型，
+                            所以这里不做成只能从列表里选；下面的按钮只是给建议。
+                        </div>
+                        <div class="form-text" id="aiModelStatus" role="status" aria-live="polite"></div>
+                        <div class="form-text text-danger d-none" id="aiModelInputError"></div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label" for="aiKeyInput">API Token</label>
+                        <div class="input-group input-group-sm">
+                            <input type="password" class="form-control" id="aiKeyInput"
+                                   placeholder="留空表示不修改已保存的 Token" autocomplete="new-password"
+                                   aria-describedby="aiKeyInputHelp aiKeyInputError">
+                            <button class="btn btn-outline-secondary" type="button" id="aiKeyToggleBtn"
+                                    aria-label="显示或隐藏 Token" aria-pressed="false">
+                                <i class="fas fa-eye" aria-hidden="true"></i>
+                            </button>
+                        </div>
+                        <div class="form-text" id="aiKeyInputHelp">
+                            Token 只以密文保存在服务端，<strong>不会回显</strong>。
+                            这里留空表示沿用已保存的那个。
+                        </div>
+                        <div class="form-text text-danger d-none" id="aiKeyInputError"></div>
+                    </div>
+
+                    <div class="d-flex align-items-center gap-2">
+                        <button type="button" class="btn btn-outline-primary btn-sm" id="aiTestConnectionBtn">
+                            <i class="fas fa-plug me-1" aria-hidden="true"></i>测试连接
+                        </button>
+                        <span class="form-text mb-0" id="aiTestResult" role="status" aria-live="polite"></span>
+                    </div>
+                </fieldset>
+
+                <fieldset class="mb-4">
+                    <legend class="fs-6 fw-semibold text-primary border-bottom pb-1 mb-3">分析策略</legend>
                     <div class="row g-3">
-                        <div class="col-md-4">
-                            <label class="form-label">周版本自动分析</label>
+                        <div class="col-md-6">
+                            <label class="form-label" for="aiWeeklyAutoToggle">周版本自动分析</label>
                             <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" id="aiWeeklyAutoToggle" checked>
+                                <input class="form-check-input" type="checkbox" id="aiWeeklyAutoToggle">
                                 <label class="form-check-label" for="aiWeeklyAutoToggle">启用</label>
                             </div>
+                            <div class="form-text">关闭后只保留手动分析。</div>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label">分析间隔（分钟）</label>
-                            <input type="number" min="1" class="form-control form-control-sm" id="aiWeeklyIntervalInput" placeholder="例如 60">
-                            <div class="form-text">最小 1 分钟，无变更不触发分析。</div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="aiWeeklyIntervalInput">分析间隔（分钟）</label>
+                            <input type="number" class="form-control form-control-sm" id="aiWeeklyIntervalInput"
+                                   aria-describedby="aiWeeklyIntervalInputHelp aiWeeklyIntervalInputError">
+                            <div class="form-text" id="aiWeeklyIntervalInputHelp">最小 5 分钟。没有变更时不会触发分析。</div>
+                            <div class="form-text text-danger d-none" id="aiWeeklyIntervalInputError"></div>
                         </div>
-                        <div class="col-md-4">
-                            <label class="form-label">单次最大文件数</label>
-                            <input type="number" min="10" class="form-control form-control-sm" id="aiMaxFilesInput" placeholder="例如 200">
-                            <div class="form-text">用于控制 token 与分析范围。</div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="aiMaxFilesInput">单次最大文件数</label>
+                            <input type="number" class="form-control form-control-sm" id="aiMaxFilesInput"
+                                   aria-describedby="aiMaxFilesInputHelp aiMaxFilesInputError">
+                            <div class="form-text" id="aiMaxFilesInputHelp">单次分析最多纳入多少个文件，用于控制 token 消耗。</div>
+                            <div class="form-text text-danger d-none" id="aiMaxFilesInputError"></div>
                         </div>
-                        <div class="col-12">
-                            <label class="form-label">AI分析提示词</label>
-                            <textarea class="form-control form-control-sm" rows="6" id="aiPromptInput" placeholder="请输入分析提示词"></textarea>
-                            <div class="form-text">可在此描述项目背景、技术栈、输出格式要求。</div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="aiMaxRoundsInput">最大分析轮次</label>
+                            <input type="number" class="form-control form-control-sm" id="aiMaxRoundsInput"
+                                   aria-describedby="aiMaxRoundsInputHelp aiMaxRoundsInputError">
+                            <div class="form-text" id="aiMaxRoundsInputHelp">模型最多可以来回几轮。轮次越多结论越细，也更慢更贵。</div>
+                            <div class="form-text text-danger d-none" id="aiMaxRoundsInputError"></div>
                         </div>
-                        <div class="col-12 d-flex justify-content-end align-items-center gap-2">
-                            <span class="small text-muted" id="aiConfigFeedback"></span>
-                            <button class="btn btn-primary btn-sm" id="aiConfigSaveBtn">保存配置</button>
+                        <div class="col-md-6">
+                            <label class="form-label" for="aiMaxToolRequestsInput">上下文索取上限（次）</label>
+                            <input type="number" class="form-control form-control-sm" id="aiMaxToolRequestsInput"
+                                   aria-describedby="aiMaxToolRequestsInputHelp aiMaxToolRequestsInputError">
+                            <div class="form-text" id="aiMaxToolRequestsInputHelp">整次分析允许索取上下文的总次数（跨轮次累计，重复索要同一个文件也计入）。</div>
+                            <div class="form-text text-danger d-none" id="aiMaxToolRequestsInputError"></div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="aiPromptCharBudgetInput">提示词字符预算</label>
+                            <input type="number" class="form-control form-control-sm" id="aiPromptCharBudgetInput"
+                                   aria-describedby="aiPromptCharBudgetInputHelp aiPromptCharBudgetInputError">
+                            <div class="form-text" id="aiPromptCharBudgetInputHelp">带入提示词的上下文总量上限。超出时按「保留首尾」压缩，并在内容里标注省略了多少。</div>
+                            <div class="form-text text-danger d-none" id="aiPromptCharBudgetInputError"></div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="aiRequestTimeoutInput">单次请求超时（秒）</label>
+                            <input type="number" class="form-control form-control-sm" id="aiRequestTimeoutInput"
+                                   aria-describedby="aiRequestTimeoutInputHelp aiRequestTimeoutInputError">
+                            <div class="form-text" id="aiRequestTimeoutInputHelp">单次请求的超时时间，多轮分析中每一轮各自计时。</div>
+                            <div class="form-text text-danger d-none" id="aiRequestTimeoutInputError"></div>
                         </div>
                     </div>
-                </div>
+                </fieldset>
+
+                <fieldset class="mb-4">
+                    <legend class="fs-6 fw-semibold text-primary border-bottom pb-1 mb-3">告警门槛</legend>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label" for="aiMinSeveritySelect">严重度门槛</label>
+                            <select class="form-select form-select-sm" id="aiMinSeveritySelect"
+                                    aria-describedby="aiMinSeveritySelectHelp aiMinSeveritySelectError">
+                                <option value="high">高及以上（默认）</option>
+                                <option value="critical">仅严重</option>
+                            </select>
+                            <div class="form-text" id="aiMinSeveritySelectHelp">
+                                低于门槛的结论只写进报告正文，不进异常清单。
+                            </div>
+                            <div class="form-text text-danger d-none" id="aiMinSeveritySelectError"></div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="aiMinConfidenceSelect">置信度门槛</label>
+                            <select class="form-select form-select-sm" id="aiMinConfidenceSelect"
+                                    aria-describedby="aiMinConfidenceSelectHelp aiMinConfidenceSelectError">
+                                <option value="high">高及以上（默认）</option>
+                                <option value="very_high">仅极高</option>
+                            </select>
+                            <div class="form-text" id="aiMinConfidenceSelectHelp">
+                                调高可以减少误报，代价是可能漏掉证据略弱的问题。
+                            </div>
+                            <div class="form-text text-danger d-none" id="aiMinConfidenceSelectError"></div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="aiMaxAnomaliesInput">单次异常上限</label>
+                            <input type="number" class="form-control form-control-sm" id="aiMaxAnomaliesInput"
+                                   aria-describedby="aiMaxAnomaliesInputHelp aiMaxAnomaliesInputError">
+                            <div class="form-text" id="aiMaxAnomaliesInputHelp">超出的条目按严重度优先保留，被截掉的会在报告里记账。</div>
+                            <div class="form-text text-danger d-none" id="aiMaxAnomaliesInputError"></div>
+                        </div>
+                    </div>
+                </fieldset>
+
+                <fieldset>
+                    <legend class="fs-6 fw-semibold text-primary border-bottom pb-1 mb-3">提示词与知识</legend>
+                    <div class="mb-3">
+                        <label class="form-label" for="aiPromptInput">项目补充指令</label>
+                        <textarea class="form-control form-control-sm" id="aiPromptInput" rows="7"
+                                  aria-describedby="aiPromptInputHelp aiPromptInputError"></textarea>
+                        <div class="form-text" id="aiPromptInputHelp">分析协议（检查维度、输出格式、证据与置信度门槛、反误报条款）由平台内置 skill 强制提供，这里只写本项目特有的事实与偏好。<strong>留空也能正常分析。</strong></div>
+                        <div class="form-text text-danger d-none" id="aiPromptInputError"></div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="aiProjectKnowledgeInput">项目补充知识</label>
+                        <textarea class="form-control form-control-sm" id="aiProjectKnowledgeInput" rows="7"
+                                  aria-describedby="aiProjectKnowledgeInputHelp aiProjectKnowledgeInputError"></textarea>
+                        <div class="form-text" id="aiProjectKnowledgeInputHelp">在项目知识包之外追加的补充说明。与内置规则冲突时，以内置规则为准。</div>
+                        <div class="form-text text-danger d-none" id="aiProjectKnowledgeInputError"></div>
+                    </div>
+                </fieldset>
+            </div>
+            <div class="modal-footer">
+                <span class="small text-muted me-auto" id="aiConfigFeedback"></span>
+                <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary btn-sm" id="aiConfigSaveBtn">保存配置</button>
             </div>
         </div>
     </div>
+</div>
 
     {% if not repositories %}
     <!-- ===== 无仓库空状态：引导用户先创建仓库 ===== -->
@@ -847,93 +1010,226 @@ const RISK_LEVEL_MAP = {
     high: { label: '高风险', className: 'risk-high' },
 };
 
+// ---------------------------------------------------------------------------
+// AI 分析配置：页面摘要行 + 居中模态框
+// ---------------------------------------------------------------------------
+
+// 字段名 → DOM id。保存失败时后端只回字段名，界面靠这张表把错误落到具体那一栏。
+// 表里没有的字段不会静默丢掉：它会照样出现在顶部摘要里（showAiConfigErrors 不依赖这张表）。
+const AI_FIELD_DOM = {
+    api_base_url: 'aiBaseUrlInput',
+    api_model: 'aiModelInput',
+    api_key: 'aiKeyInput',
+    weekly_interval_minutes: 'aiWeeklyIntervalInput',
+    max_files_per_run: 'aiMaxFilesInput',
+    max_analysis_rounds: 'aiMaxRoundsInput',
+    max_tool_requests: 'aiMaxToolRequestsInput',
+    prompt_char_budget: 'aiPromptCharBudgetInput',
+    request_timeout_seconds: 'aiRequestTimeoutInput',
+    min_severity: 'aiMinSeveritySelect',
+    min_confidence: 'aiMinConfidenceSelect',
+    max_anomalies_per_run: 'aiMaxAnomaliesInput',
+    prompt_template: 'aiPromptInput',
+    project_knowledge: 'aiProjectKnowledgeInput'
+};
+
+// 选项的中文名。后端只回 `high` / `critical` 这种值，这里负责翻译。
+// 翻译表缺项时回落到原值 —— 显示 `very_high` 很难看，但比显示一个错的标签安全。
+const AI_CHOICE_LABELS = {
+    min_severity: { high: '高及以上（默认）', critical: '仅严重' },
+    min_confidence: { high: '高及以上（默认）', very_high: '仅极高' }
+};
+
+// 只读用户不该动的东西（radio 与开关不在 AI_FIELD_DOM 里，单独列）。
+const AI_READONLY_EXTRA = ['aiWeeklyAutoToggle', 'aiSourceOpenai', 'aiSourceCustom', 'aiKeyToggleBtn'];
+
+// 最近一次读到的配置。范围提示与本地校验都从它取 field_schema，
+// **不在模板里写死范围**，否则会出现「界面写 1~30、后端按别的范围校验」。
+let aiConfigCache = null;
+
+function aiEl(id) {
+    return document.getElementById(id);
+}
+
+function aiChoiceLabel(field, value) {
+    const map = AI_CHOICE_LABELS[field];
+    return (map && map[value]) || value;
+}
+
 function setAiKeyStatusBadge(text, variant) {
-    const badge = document.getElementById('aiKeyStatusBadge');
+    const badge = aiEl('aiKeyStatusBadge');
     if (!badge) return;
     badge.textContent = text;
     badge.className = `badge bg-${variant}`;
 }
 
-async function refreshAiKeyStatus() {
-    const meta = document.getElementById('aiKeyMeta');
-    try {
-        const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/api-key/status`);
-        const data = await resp.json();
-        if (data && data.configured) {
-            setAiKeyStatusBadge('已配置', 'success');
-            if (meta) {
-                meta.textContent = data.updated_at ? `API Key 最近更新：${data.updated_at}` : 'API Key 已配置';
-            }
-        } else {
-            setAiKeyStatusBadge('未配置', 'warning');
-            if (meta) meta.textContent = '尚未配置 API Key。';
-        }
-    } catch (_err) {
-        setAiKeyStatusBadge('检测失败', 'danger');
-        if (meta) meta.textContent = '无法获取 API Key 状态。';
-    }
-}
-
-function initAiKeyUpdater() {
-    if (!aiCanEdit) {
-        refreshAiKeyStatus();
-        return;
-    }
-    const input = document.getElementById('aiKeyInput');
-    const btn = document.getElementById('aiKeySaveBtn');
-    const feedback = document.getElementById('aiKeyFeedback');
-    async function submit() {
-        const value = input ? String(input.value || '').trim() : '';
-        if (!value) {
-            if (feedback) feedback.textContent = '请输入新的 API Key。';
-            return;
-        }
-        if (btn) btn.disabled = true;
-        if (feedback) feedback.textContent = '正在更新...';
-        try {
-            const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/api-key`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ api_key: value })
-            });
-            const data = await resp.json();
-            if (data && data.success) {
-                if (feedback) feedback.textContent = '更新成功。';
-                if (input) input.value = '';
-                refreshAiKeyStatus();
-            } else {
-                if (feedback) feedback.textContent = data.message || '更新失败。';
-            }
-        } catch (_err) {
-            if (feedback) feedback.textContent = '更新失败，请稍后重试。';
-        } finally {
-            if (btn) btn.disabled = false;
-        }
-    }
-    if (btn) btn.addEventListener('click', submit);
-    if (input) {
-        input.addEventListener('keydown', function(event) {
-            if (event.key === 'Enter') {
-                event.preventDefault();
-                submit();
-            }
-        });
-    }
-    refreshAiKeyStatus();
-}
-
 function setAiConfigFeedback(text, isError) {
-    const feedback = document.getElementById('aiConfigFeedback');
+    const feedback = aiEl('aiConfigFeedback');
     if (!feedback) return;
     feedback.textContent = text || '';
-    feedback.style.color = isError ? '#b42332' : '#64748b';
+    feedback.className = isError ? 'small me-auto text-danger' : 'small me-auto text-muted';
+}
+
+function setAiFieldError(field, message) {
+    const domId = AI_FIELD_DOM[field];
+    if (!domId) return;
+    const box = aiEl(`${domId}Error`);
+    if (!box) return;
+    box.textContent = message || '';
+    box.classList.toggle('d-none', !message);
+}
+
+function clearAiConfigErrors() {
+    const summary = aiEl('aiConfigErrorSummary');
+    if (summary) summary.classList.add('d-none');
+    const list = aiEl('aiConfigErrorList');
+    if (list) list.innerHTML = '';
+    Object.keys(AI_FIELD_DOM).forEach(field => setAiFieldError(field, ''));
+}
+
+function focusAiField(field) {
+    const domId = AI_FIELD_DOM[field];
+    const input = domId ? aiEl(domId) : null;
+    if (!input) return;
+    // 模态框正文是可滚动的：先把它滚进视野再聚焦，否则焦点会落在屏幕外。
+    if (typeof input.scrollIntoView === 'function') {
+        input.scrollIntoView({ block: 'center' });
+    }
+    input.focus();
+}
+
+function showAiConfigErrors(errors) {
+    clearAiConfigErrors();
+    const items = Array.isArray(errors) ? errors : [];
+    if (!items.length) return;
+
+    const list = aiEl('aiConfigErrorList');
+    if (list) {
+        list.innerHTML = '';
+        items.forEach(item => {
+            const li = document.createElement('li');
+            const link = document.createElement('a');
+            link.href = '#';
+            link.className = 'alert-link';
+            link.textContent = `${item.label || item.field}：${item.message || ''}`;
+            // 摘要里的每一条都能点回出错的输入框，用户不必自己找是哪一栏。
+            link.addEventListener('click', event => {
+                event.preventDefault();
+                focusAiField(item.field);
+            });
+            li.appendChild(link);
+            list.appendChild(li);
+        });
+    }
+    const title = aiEl('aiConfigErrorTitle');
+    if (title) title.textContent = `有 ${items.length} 处需要修改：`;
+
+    const summary = aiEl('aiConfigErrorSummary');
+    if (summary) {
+        summary.classList.remove('d-none');
+        summary.focus();  // 焦点移到错误摘要，读屏用户立刻听到是什么问题
+    }
+    items.forEach(item => setAiFieldError(item.field, item.message || ''));
+}
+
+function applyAiFieldSchema(schema) {
+    if (!schema) return;
+
+    Object.keys(AI_FIELD_DOM).forEach(field => {
+        const rule = schema[field];
+        if (!rule || rule.kind !== 'int') return;
+        const input = aiEl(AI_FIELD_DOM[field]);
+        if (!input) return;
+        if (rule.min !== null && rule.min !== undefined) input.min = rule.min;
+        if (rule.max !== null && rule.max !== undefined) input.max = rule.max;
+
+        const help = aiEl(`${AI_FIELD_DOM[field]}Help`);
+        if (!help) return;
+        let hint = help.querySelector('.ai-range-hint');
+        if (!hint) {
+            hint = document.createElement('span');
+            hint.className = 'ai-range-hint ms-1';
+            help.appendChild(hint);
+        }
+        hint.textContent = (rule.min !== null && rule.max !== null)
+            ? `（可填 ${rule.min}~${rule.max}）`
+            : '';
+    });
+
+    [['min_severity', 'aiMinSeveritySelect'], ['min_confidence', 'aiMinConfidenceSelect']].forEach(pair => {
+        const rule = schema[pair[0]];
+        const select = aiEl(pair[1]);
+        if (!rule || !select || !rule.choices || !rule.choices.length) return;
+        const current = select.value;
+        select.innerHTML = '';
+        rule.choices.forEach(choice => {
+            const option = document.createElement('option');
+            option.value = choice;
+            option.textContent = aiChoiceLabel(pair[0], choice);
+            select.appendChild(option);
+        });
+        if (rule.choices.indexOf(current) >= 0) select.value = current;
+    });
+}
+
+function fillAiConfigForm(data) {
+    function setValue(id, value) {
+        const el = aiEl(id);
+        // 空字符串要照填（表示「这一项确实没配」），所以只挡 undefined / null。
+        if (el && value !== undefined && value !== null) el.value = value;
+    }
+    setValue('aiBaseUrlInput', data.api_base_url);
+    setValue('aiModelInput', data.api_model);
+    setValue('aiWeeklyIntervalInput', data.weekly_interval_minutes);
+    setValue('aiMaxFilesInput', data.max_files_per_run);
+    setValue('aiMaxRoundsInput', data.max_analysis_rounds);
+    setValue('aiMaxToolRequestsInput', data.max_tool_requests);
+    setValue('aiPromptCharBudgetInput', data.prompt_char_budget);
+    setValue('aiRequestTimeoutInput', data.request_timeout_seconds);
+    setValue('aiMaxAnomaliesInput', data.max_anomalies_per_run);
+    setValue('aiMinSeveritySelect', data.min_severity);
+    setValue('aiMinConfidenceSelect', data.min_confidence);
+    setValue('aiPromptInput', data.prompt_template);
+    setValue('aiProjectKnowledgeInput', data.project_knowledge);
+
+    const autoToggle = aiEl('aiWeeklyAutoToggle');
+    if (autoToggle) autoToggle.checked = data.auto_weekly_enabled !== false;
+
+    const sourceInput = aiEl(data.source === 'custom' ? 'aiSourceCustom' : 'aiSourceOpenai');
+    if (sourceInput) sourceInput.checked = true;
+
+    // Token 输入框永远留空：服务端不回显，留空表示沿用已保存的那个。
+    const keyInput = aiEl('aiKeyInput');
+    if (keyInput) keyInput.value = '';
+}
+
+function renderAiConfigSummary(data) {
+    const keyConfigured = !!(data.api_key && data.api_key.configured);
+    setAiKeyStatusBadge(data.endpoint_ready ? '已就绪' : '待配置',
+        data.endpoint_ready ? 'success' : 'warning');
+
+    const summary = aiEl('aiConfigSummary');
+    if (!summary) return;
+
+    if (!data.api_base_url && !data.api_model) {
+        // 空状态要给出下一步，而不是只说「没有」。
+        summary.textContent = '尚未配置：点「修改配置」填好接口地址、模型名字与 Token，AI 分析才能运行。';
+        return;
+    }
+
+    const parts = [];
+    parts.push(data.source === 'custom' ? '自定义端点' : 'OpenAI 官方');
+    parts.push(data.api_model || '模型名未填');
+    parts.push(keyConfigured ? 'Token 已配置' : 'Token 未配置');
+    if (data.updated_at) {
+        parts.push(`最近更新 ${String(data.updated_at).replace('T', ' ').slice(0, 16)}`);
+    }
+    let text = parts.join(' · ');
+    if (!data.endpoint_ready) text += '（还没就绪，AI 分析无法运行）';
+    summary.textContent = text;
 }
 
 async function refreshAiAnalysisConfig() {
-    const intervalInput = document.getElementById('aiWeeklyIntervalInput');
-    const autoToggle = document.getElementById('aiWeeklyAutoToggle');
-    const maxFilesInput = document.getElementById('aiMaxFilesInput');
-    const promptInput = document.getElementById('aiPromptInput');
     try {
         const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/config`, { cache: 'no-store' });
         const data = await resp.json();
@@ -941,66 +1237,333 @@ async function refreshAiAnalysisConfig() {
             setAiConfigFeedback('无法加载 AI 配置。', true);
             return;
         }
-        if (intervalInput) intervalInput.value = data.weekly_interval_minutes ?? 60;
-        if (autoToggle) autoToggle.checked = data.auto_weekly_enabled !== false;
-        if (maxFilesInput) maxFilesInput.value = data.max_files_per_run ?? 200;
-        if (promptInput) promptInput.value = data.prompt_template || '';
-        if (data.updated_at) {
-            setAiConfigFeedback(`最近更新：${data.updated_at}`, false);
-        } else {
-            setAiConfigFeedback('', false);
-        }
+        aiConfigCache = data;
+        applyAiFieldSchema(data.field_schema);
+        fillAiConfigForm(data);
+        renderAiConfigSummary(data);
     } catch (_err) {
         setAiConfigFeedback('无法加载 AI 配置。', true);
     }
 }
 
-function initAiAnalysisConfigForm() {
-    const intervalInput = document.getElementById('aiWeeklyIntervalInput');
-    const autoToggle = document.getElementById('aiWeeklyAutoToggle');
-    const maxFilesInput = document.getElementById('aiMaxFilesInput');
-    const promptInput = document.getElementById('aiPromptInput');
-    const saveBtn = document.getElementById('aiConfigSaveBtn');
+// 「未保存也能测」：把当前填的地址/模型/Token 交给后端，留空表示沿用已保存的值。
+function aiEndpointPayload() {
+    const payload = {};
+    const url = aiEl('aiBaseUrlInput');
+    const model = aiEl('aiModelInput');
+    const key = aiEl('aiKeyInput');
+    if (url) payload.api_base_url = String(url.value || '').trim();
+    if (model) payload.api_model = String(model.value || '').trim();
+    const typedKey = key ? String(key.value || '').trim() : '';
+    if (typedKey) payload.api_key = typedKey;
+    return payload;
+}
 
-    if (!aiCanEdit) {
-        [intervalInput, autoToggle, maxFilesInput, promptInput, saveBtn].forEach(el => {
-            if (el) el.disabled = true;
-        });
-        setAiConfigFeedback('仅项目管理员可更新 AI 配置。', true);
-        refreshAiAnalysisConfig();
-        return;
+// 表单里的值原样收集。整数字段留空时**送空字符串而不是 0**：0 会被后端的范围校验
+// 当成「填了个越界值」而报「不能小于 N」，那句提示对着一个空输入框看很莫名其妙；
+// 送空字符串拿到的是「请填写一个整数」，说的才是真实情况。
+function collectAiConfigPayload() {
+    const payload = {};
+    function numberValue(id, field) {
+        const el = aiEl(id);
+        if (!el) return;
+        const raw = String(el.value || '').trim();
+        if (raw === '') {
+            payload[field] = '';
+            return;
+        }
+        const num = Number(raw);
+        payload[field] = Number.isFinite(num) ? num : raw;
+    }
+    function textValue(id, field) {
+        const el = aiEl(id);
+        if (el) payload[field] = String(el.value || '');
     }
 
-    async function submit() {
-        const payload = {
-            weekly_interval_minutes: intervalInput ? Number(intervalInput.value || 0) : 0,
-            auto_weekly_enabled: autoToggle ? !!autoToggle.checked : true,
-            max_files_per_run: maxFilesInput ? Number(maxFilesInput.value || 0) : 0,
-            prompt_template: promptInput ? String(promptInput.value || '').trim() : ''
-        };
-        if (saveBtn) saveBtn.disabled = true;
-        setAiConfigFeedback('正在保存...', false);
-        try {
-            const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/config`, {
+    textValue('aiBaseUrlInput', 'api_base_url');
+    textValue('aiModelInput', 'api_model');
+    numberValue('aiWeeklyIntervalInput', 'weekly_interval_minutes');
+    numberValue('aiMaxFilesInput', 'max_files_per_run');
+    numberValue('aiMaxRoundsInput', 'max_analysis_rounds');
+    numberValue('aiMaxToolRequestsInput', 'max_tool_requests');
+    numberValue('aiPromptCharBudgetInput', 'prompt_char_budget');
+    numberValue('aiRequestTimeoutInput', 'request_timeout_seconds');
+    numberValue('aiMaxAnomaliesInput', 'max_anomalies_per_run');
+    textValue('aiPromptInput', 'prompt_template');
+    textValue('aiProjectKnowledgeInput', 'project_knowledge');
+
+    const severity = aiEl('aiMinSeveritySelect');
+    if (severity) payload.min_severity = severity.value;
+    const confidence = aiEl('aiMinConfidenceSelect');
+    if (confidence) payload.min_confidence = confidence.value;
+
+    const autoToggle = aiEl('aiWeeklyAutoToggle');
+    if (autoToggle) payload.auto_weekly_enabled = !!autoToggle.checked;
+
+    return payload;
+}
+
+// blur 时的本地校验只做「数字 / 范围」这一类，范围数字取自 field_schema（与后端同源）。
+// 读不到 schema（配置还没加载出来）时就跳过，交给后端 —— 本地校验只是提前反馈，
+// 服务端校验始终是唯一权威。
+function validateAiFieldLocally(field) {
+    const rule = aiConfigCache && aiConfigCache.field_schema ? aiConfigCache.field_schema[field] : null;
+    const domId = AI_FIELD_DOM[field];
+    const input = domId ? aiEl(domId) : null;
+    if (!rule || !input || rule.kind !== 'int') return;
+
+    const raw = String(input.value || '').trim();
+    if (raw === '') {
+        setAiFieldError(field, '');
+        return;
+    }
+    const num = Number(raw);
+    if (!Number.isFinite(num)) {
+        setAiFieldError(field, '请填写数字');
+        return;
+    }
+    if (rule.min !== null && rule.min !== undefined && num < rule.min) {
+        setAiFieldError(field, `不能小于 ${rule.min}`);
+        return;
+    }
+    if (rule.max !== null && rule.max !== undefined && num > rule.max) {
+        setAiFieldError(field, `不能大于 ${rule.max}`);
+        return;
+    }
+    setAiFieldError(field, '');
+}
+
+function fillAiModelOptions(models) {
+    const list = aiEl('aiModelOptions');
+    if (!list) return;
+    list.innerHTML = '';
+    (Array.isArray(models) ? models : []).forEach(model => {
+        const option = document.createElement('option');
+        option.value = String(model);
+        list.appendChild(option);
+    });
+    // 刻意**不**改写输入框里的值：用户可能在用的是列表里没有的模型（实测就有这种情况），
+    // 替他「选中第一个」等于把他的配置改掉。
+}
+
+async function aiFetchModels() {
+    const btn = aiEl('aiFetchModelsBtn');
+    const status = aiEl('aiModelStatus');
+    clearAiConfigErrors();
+    if (btn) {
+        btn.disabled = true;
+        btn.setAttribute('aria-busy', 'true');
+    }
+    if (status) {
+        status.className = 'form-text text-muted';
+        status.textContent = '正在获取模型列表...';
+    }
+    try {
+        const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/models`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(aiEndpointPayload())
+        });
+        const data = await resp.json();
+        if (!data || !data.success) {
+            showAiConfigErrors(data && data.errors);
+            if (status) status.textContent = '';
+            return;
+        }
+        fillAiModelOptions(data.models);
+        const count = Array.isArray(data.models) ? data.models.length : 0;
+        if (data.ok && count) {
+            if (status) {
+                status.className = 'form-text text-success';
+                status.textContent = `已获取 ${count} 个模型，可在输入框的下拉建议里选，也可以继续手填。`;
+            }
+        } else if (status) {
+            // 取不到列表**不是错误**，所以用中性提示 + 手填指引，不用红色。
+            status.className = 'form-text text-muted';
+            const reason = data.message || '该端点没有提供模型列表。';
+            status.textContent = `${reason}请直接手动填写模型名字。`;
+        }
+    } catch (_err) {
+        if (status) {
+            status.className = 'form-text text-danger';
+            status.textContent = '获取失败，请检查网络或接口地址后重试，也可以直接手动填写模型名字。';
+        }
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.removeAttribute('aria-busy');
+        }
+    }
+}
+
+async function aiTestConnection() {
+    const btn = aiEl('aiTestConnectionBtn');
+    const result = aiEl('aiTestResult');
+    clearAiConfigErrors();
+    if (btn) {
+        btn.disabled = true;
+        btn.setAttribute('aria-busy', 'true');
+    }
+    if (result) {
+        result.className = 'form-text mb-0 text-muted';
+        result.textContent = '正在测试连接...';
+    }
+    try {
+        const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/test-connection`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(aiEndpointPayload())
+        });
+        const data = await resp.json();
+        if (!data || !data.success) {
+            showAiConfigErrors(data && data.errors);
+            if (result) result.textContent = '';
+            return;
+        }
+        if (result) {
+            if (data.ok) {
+                const latency = data.latency_ms ? `（${data.latency_ms} ms）` : '';
+                result.className = 'form-text mb-0 text-success';
+                result.textContent = `${data.message || '连接正常。'}${latency}`;
+            } else {
+                result.className = 'form-text mb-0 text-danger';
+                result.textContent = data.message || '连接失败。';
+            }
+        }
+    } catch (_err) {
+        if (result) {
+            result.className = 'form-text mb-0 text-danger';
+            result.textContent = '连接测试没有发出去，请稍后重试。';
+        }
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.removeAttribute('aria-busy');
+        }
+    }
+}
+
+async function aiSaveConfig() {
+    const saveBtn = aiEl('aiConfigSaveBtn');
+    clearAiConfigErrors();
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.setAttribute('aria-busy', 'true');
+    }
+    setAiConfigFeedback('正在保存...', false);
+    try {
+        const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(collectAiConfigPayload())
+        });
+        const data = await resp.json();
+        if (!data || !data.success) {
+            showAiConfigErrors(data && data.errors);
+            setAiConfigFeedback((data && data.message) || '保存失败。', true);
+            return;
+        }
+
+        // Token 走另一条接口（它不在 /config 的字段表里），只在用户真的填了的时候提交，
+        // 留空表示沿用已保存的那个。
+        const keyInput = aiEl('aiKeyInput');
+        const typedKey = keyInput ? String(keyInput.value || '').trim() : '';
+        if (typedKey) {
+            const keyResp = await fetch(`/ai-analysis/projects/${aiProjectId}/api-key`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                body: JSON.stringify({ api_key: typedKey })
             });
-            const data = await resp.json();
-            if (data && data.success) {
-                setAiConfigFeedback('保存成功。', false);
-                refreshAiAnalysisConfig();
-            } else {
-                setAiConfigFeedback(data.message || '保存失败。', true);
+            const keyData = await keyResp.json();
+            if (!keyData || !keyData.success) {
+                // 配置已经存进去了，只是 Token 没存上。必须说清楚 —— 只说「保存失败」的话
+                // 用户会以为整份配置都没生效，然后把所有栏重填一遍。
+                setAiFieldError('api_key', (keyData && keyData.message) || 'Token 更新失败。');
+                setAiConfigFeedback('配置已保存，但 Token 更新失败。', true);
+                await refreshAiAnalysisConfig();
+                return;
             }
-        } catch (_err) {
-            setAiConfigFeedback('保存失败，请稍后重试。', true);
-        } finally {
-            if (saveBtn) saveBtn.disabled = false;
+            if (keyInput) keyInput.value = '';
+        }
+
+        await refreshAiAnalysisConfig();
+        setAiConfigFeedback('保存成功。', false);
+    } catch (_err) {
+        setAiConfigFeedback('保存失败，请稍后重试。', true);
+    } finally {
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.removeAttribute('aria-busy');
+        }
+    }
+}
+
+function initAiKeyToggle() {
+    const btn = aiEl('aiKeyToggleBtn');
+    const input = aiEl('aiKeyInput');
+    if (!btn || !input) return;
+    btn.addEventListener('click', () => {
+        const hidden = input.type === 'password';
+        input.type = hidden ? 'text' : 'password';
+        btn.setAttribute('aria-pressed', String(hidden));
+        btn.innerHTML = hidden
+            ? '<i class="fas fa-eye-slash" aria-hidden="true"></i>'
+            : '<i class="fas fa-eye" aria-hidden="true"></i>';
+    });
+}
+
+function initAiSourceRadios() {
+    const openai = aiEl('aiSourceOpenai');
+    if (!openai) return;
+    openai.addEventListener('change', () => {
+        if (!openai.checked) return;
+        const url = aiEl('aiBaseUrlInput');
+        const official = aiConfigCache ? aiConfigCache.openai_base_url : '';
+        // 选「官方」时填入官方地址；切回「自定义」**不清空**输入框 —— 清空会把他
+        // 刚填好的地址删掉，而自定义端点正是本功能要支持的主要场景。
+        if (url && official) url.value = official;
+    });
+}
+
+function initAiConfig() {
+    const fieldEls = Object.values(AI_FIELD_DOM).map(aiEl).filter(Boolean);
+    const actionBtns = [aiEl('aiFetchModelsBtn'), aiEl('aiTestConnectionBtn')].filter(Boolean);
+    const saveBtn = aiEl('aiConfigSaveBtn');
+
+    if (!aiCanEdit) {
+        // 只读用户：能看不能改。界面禁用只是提示，服务端才是权威 ——
+        // 直接 POST /config 或 /models 会得到 403。
+        AI_READONLY_EXTRA.map(aiEl).filter(Boolean).forEach(el => { el.disabled = true; });
+        fieldEls.concat(actionBtns).forEach(el => { el.disabled = true; });
+        if (saveBtn) saveBtn.classList.add('d-none');
+        setAiConfigFeedback('仅项目管理员可修改 AI 配置。', false);
+    } else {
+        if (saveBtn) saveBtn.addEventListener('click', aiSaveConfig);
+        const fetchBtn = aiEl('aiFetchModelsBtn');
+        if (fetchBtn) fetchBtn.addEventListener('click', aiFetchModels);
+        const testBtn = aiEl('aiTestConnectionBtn');
+        if (testBtn) testBtn.addEventListener('click', aiTestConnection);
+
+        Object.keys(AI_FIELD_DOM).forEach(field => {
+            const el = aiEl(AI_FIELD_DOM[field]);
+            if (!el) return;
+            el.addEventListener('blur', () => validateAiFieldLocally(field));
+            el.addEventListener('input', () => setAiFieldError(field, ''));
+        });
+        initAiKeyToggle();
+        initAiSourceRadios();
+
+        const modal = aiEl('aiConfigModal');
+        if (modal) {
+            // 每次打开都重新读一次：用户在别处改过配置、或者上次没保存就关了，
+            // 打开时看到的应该是服务端的当前状态。
+            modal.addEventListener('show.bs.modal', () => {
+                clearAiConfigErrors();
+                refreshAiAnalysisConfig();
+            });
         }
     }
 
-    if (saveBtn) saveBtn.addEventListener('click', submit);
     refreshAiAnalysisConfig();
 }
 
@@ -1033,9 +1596,19 @@ function updateRiskLabelByConfig(configId, level) {
     });
 }
 
-async function fetchWeeklyAiKeyStatus() {
+// 说清楚**缺哪一样**，比笼统的一句「未配置」有用得多。
+function describeMissingWeeklyAiConfig(data) {
+    const missing = [];
+    if (!data.api_base_url) missing.push('接口地址');
+    if (!data.api_model) missing.push('模型名字');
+    if (!(data.api_key && data.api_key.configured)) missing.push('Token');
+    return missing.join('、') || '配置';
+}
+
+async function fetchWeeklyAiReadiness() {
+    // 读 /config 而不是 /api-key/status：地址与模型名同样是跑分析的必要条件。
     try {
-        const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/api-key/status`);
+        const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/config`, { cache: 'no-store' });
         return await resp.json();
     } catch (_err) {
         return null;
@@ -1232,27 +1805,39 @@ function initWeeklyAiDrawer() {
         const versionName = label.dataset.versionName || '';
         if (!configId) return;
         openWeeklyAiDrawer(configId, versionName);
-        fetchWeeklyAiKeyStatus().then(status => {
-            if (status && status.configured) {
-                setWeeklyAiStatusBadge('已配置', 'success');
-            } else if (status && status.configured === false) {
-                setWeeklyAiStatusBadge('未配置', 'warning');
-                setWeeklyAiOutput('请先在项目概览页配置 API Key。', false);
+        const drawerStartBtn = document.getElementById('weeklyAiStartBtn');
+        if (drawerStartBtn) drawerStartBtn.disabled = true;
+        fetchWeeklyAiReadiness().then(status => {
+            if (!status || !status.success) {
+                setWeeklyAiStatusBadge('无法读取', 'warning');
+                setWeeklyAiOutput('无法读取 AI 配置（可能没有该项目的访问权限）。', false);
                 return;
             }
-        });
-        refreshWeeklyAiLatest(configId).then(hasCached => {
-            if (!hasCached) {
-                startWeeklyAiAnalysis();
+            if (!status.endpoint_ready) {
+                setWeeklyAiStatusBadge('配置不全', 'warning');
+                setWeeklyAiOutput(
+                    `请先在项目概览页的「AI 分析配置」里补全：${describeMissingWeeklyAiConfig(status)}。`,
+                    false
+                );
+                return;
             }
+            setWeeklyAiStatusBadge('已配置', 'success');
+            if (drawerStartBtn) drawerStartBtn.disabled = false;
+            // 查缓存与自动开跑都放在「就绪」这一支**里面**。原来它们是和密钥检查并列的
+            // 两条 promise 链 —— 上面那句 return 只结束了自己的回调，未配置的项目照样会
+            // 自动把分析跑起来，然后在服务端失败，用户看到的是「请先配置」和一堆报错。
+            refreshWeeklyAiLatest(configId).then(hasCached => {
+                if (!hasCached) {
+                    startWeeklyAiAnalysis();
+                }
+            });
         });
     });
 }
 
 // 页面加载时获取统计信息
 document.addEventListener('DOMContentLoaded', function() {
-    initAiKeyUpdater();
-    initAiAnalysisConfigForm();
+    initAiConfig();
     refreshAllVisibleConfigStats();
     
     // 初始化非活跃版本分页

@@ -1077,7 +1077,7 @@ const WEEKLY_STATS_SYNC_EVENT_KEY = 'weeklyVersionStatsChanged';
 const weeklyAiProjectId = {{ config.project_id }};
 let weeklyAiSource = null;
 let weeklyAiHasCached = false;
-let weeklyAiKeyReady = false;
+let weeklyAiEndpointReady = false;
 
 // 分页相关变量
 let currentPage = 1;
@@ -1120,30 +1120,48 @@ function closeWeeklyAiStream() {
     }
 }
 
-async function refreshWeeklyAiKeyStatus() {
+// 说清楚**缺哪一样**，比笼统的一句「未配置」有用得多。
+function describeMissingWeeklyAiConfig(data) {
+    const missing = [];
+    if (!data.api_base_url) missing.push('接口地址');
+    if (!data.api_model) missing.push('模型名字');
+    if (!(data.api_key && data.api_key.configured)) missing.push('Token');
+    return missing.join('、') || '配置';
+}
+
+async function refreshWeeklyAiReadiness() {
     const btn = document.getElementById('weeklyAiStartBtn');
     const meta = document.getElementById('weeklyAiMeta');
     try {
-        const resp = await fetch(`/ai-analysis/projects/${weeklyAiProjectId}/api-key/status`);
+        // 读 /config 而不是 /api-key/status：地址与模型名同样是跑分析的必要条件，
+        // 只看 Token 会让「只配了 Token」的项目也能点分析，然后跑到一半才失败。
+        const resp = await fetch(`/ai-analysis/projects/${weeklyAiProjectId}/config`, { cache: 'no-store' });
         const data = await resp.json();
-        if (data && data.configured) {
-            weeklyAiKeyReady = true;
+        if (!data || !data.success) {
+            weeklyAiEndpointReady = false;
+            if (btn) btn.disabled = true;
+            setWeeklyAiStatusBadge('无法读取', 'warning');
+            if (meta) meta.textContent = '无法读取 AI 配置（可能没有该项目的访问权限）。';
+        } else if (data.endpoint_ready) {
+            weeklyAiEndpointReady = true;
             if (btn) btn.disabled = false;
             setWeeklyAiStatusBadge('已配置', 'success');
-            if (meta && data.updated_at) {
-                meta.textContent = `自动分析每 1 小时触发，可手动补跑。API Key 最近更新：${data.updated_at}`;
+            if (meta) {
+                meta.textContent = `自动分析每 1 小时触发，可手动补跑。模型 ${data.api_model} · Token 已配置`;
             }
         } else {
-            weeklyAiKeyReady = false;
+            weeklyAiEndpointReady = false;
             if (btn) btn.disabled = true;
-            setWeeklyAiStatusBadge('未配置', 'warning');
-            if (meta) meta.textContent = '请在项目概览页配置 API Key。';
+            setWeeklyAiStatusBadge('配置不全', 'warning');
+            if (meta) {
+                meta.textContent = `请在项目概览页的「AI 分析配置」里补全：${describeMissingWeeklyAiConfig(data)}。`;
+            }
         }
     } catch (_err) {
-        weeklyAiKeyReady = false;
+        weeklyAiEndpointReady = false;
         if (btn) btn.disabled = true;
         setWeeklyAiStatusBadge('检测失败', 'danger');
-        if (meta) meta.textContent = '无法获取 API Key 状态。';
+        if (meta) meta.textContent = '无法获取 AI 配置状态。';
     }
 }
 
@@ -1197,8 +1215,8 @@ function closeWeeklyAiDrawer() {
 }
 
 function startWeeklyAiAnalysis(force = false) {
-    if (!weeklyAiKeyReady) {
-        setWeeklyAiOutput('请先配置 API Key。', false);
+    if (!weeklyAiEndpointReady) {
+        setWeeklyAiOutput('请在项目概览页的「AI 分析配置」里填好接口地址、模型名字与 Token。', false);
         return;
     }
     if (!force && weeklyAiHasCached) {
@@ -1263,7 +1281,7 @@ function initWeeklyAiAnalysis() {
     if (openBtn) {
         openBtn.addEventListener('click', async function() {
             openWeeklyAiDrawer();
-            await refreshWeeklyAiKeyStatus();
+            await refreshWeeklyAiReadiness();
             const hasLatest = await loadWeeklyAiLatest();
             if (!hasLatest) {
                 startWeeklyAiAnalysis();
@@ -1285,7 +1303,7 @@ function initWeeklyAiAnalysis() {
             loadWeeklyAiLatest(true);
         });
     }
-    refreshWeeklyAiKeyStatus();
+    refreshWeeklyAiReadiness();
     loadWeeklyAiLatest();
 }
 
