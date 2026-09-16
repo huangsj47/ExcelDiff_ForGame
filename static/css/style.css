@@ -31,6 +31,9 @@
     /* --- 语义色（文字色均已按实际底色实测 >= 4.5:1） --- */
     --color-primary: #0d6efd;
     --color-primary-strong: #0b5ed7;
+    --color-muted-text: #495057;   /* 次要文字（灰底上仍达 4.5:1） */
+    --color-primary-text: #0056b3;  /* 链接/激活态文字（白底 7.04:1） */
+    --color-line-number: #57606a;   /* diff 行号（浅蓝底 6.05:1） */
 
     /* 成功：#157347 在 #ffffff=5.87 / #f8f9fa=5.57 / #dafbe1=5.28 / #e8f5e8=5.22 */
     --color-success: #198754;
@@ -399,7 +402,8 @@ body {
 
 .excel-sheet-tab.unchanged {
     background: var(--color-surface-muted, #e9ecef);
-    color: #6c757d;
+    /* #6c757d 在 #e9ecef 上只有 3.95:1，未达 4.5:1（#495057 是 6.90:1）。 */
+    color: var(--color-muted-text, #495057);
 }
 
 .excel-sheet-tab:hover {

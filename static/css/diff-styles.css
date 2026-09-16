@@ -209,8 +209,11 @@
 
 .excel-sheet-tab.active {
     background: var(--color-surface, #fff);
+    /* 文字色用 #0056b3 而不是 Bootstrap 的 #007bff：后者在白底上只有 3.98:1，
+       未达 WCAG 2.1 AA 的 4.5:1（#0056b3 是 7.04:1）。下划线边框保留原色，
+       非文字元素不受该阈值约束。 */
     border-bottom-color: #007bff;
-    color: #007bff;
+    color: var(--color-primary-text, #0056b3);
 }
 
 .excel-tab-with-changes {

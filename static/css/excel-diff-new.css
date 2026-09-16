@@ -306,9 +306,11 @@
 
 /* 删除行行号 - 使用更高优先级确保红色背景生效 */
 .excel-diff-table .excel-row-number.excel-removed {
-    background-color: #f76571 !important;
+    /* 底色保持红色语义，文字改用白色：#721c24 on #f76571 只有 3.70:1，
+       白字是 5.62:1。删除行本身另有背景色 + 行号样式双重提示，不靠颜色单独承载信息。 */
+    background-color: #c62828 !important;
     border-color: #f5c6cb !important;
-    color: #721c24 !important;
+    color: #ffffff !important;
     font-weight: bold !important;
 }
 

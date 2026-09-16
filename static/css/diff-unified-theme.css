@@ -290,7 +290,8 @@
 
 .unified-diff-screen.unified-diff-page .line-number {
     background: #f6f9fc !important;
-    color: #687a8c !important;
+    /* #687a8c 在 #f6f9fc 上只有 4.18:1，未达 4.5:1（#57606a 是 6.05:1）。 */
+    color: var(--color-line-number, #57606a) !important;
     border-right: 1px solid #dbe5ef !important;
 }
 
@@ -318,7 +319,8 @@
 }
 
 .unified-diff-screen.unified-diff-page .btn-outline-primary {
-    color: #1976d2;
+    /* #1976d2 在 #f7fbff 上只有 4.43:1，未达 4.5:1（#0b5ed7 是 5.62:1）。 */
+    color: var(--color-primary-strong, #0b5ed7);
     border-color: #c8dbef;
     background: #f7fbff;
 }
