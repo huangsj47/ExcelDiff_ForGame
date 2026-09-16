@@ -230,3 +230,6 @@ pre-commit run --all-files
 ## 说明
 
 当前 README 为“重点版”，用于快速理解与落地。详细参数、模式差异、发布回滚细节以 [`平台配置说明.md`](./docs/平台配置说明.md) 为准。
+
+## 后续优化方向
+基于 https://github.com/alibaba/open-code-review.git 去实现AI框架拓展。
