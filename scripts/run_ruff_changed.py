@@ -35,6 +35,40 @@ def _normalize_path(path: str) -> str:
     return str(path or "").replace("\\", "/").strip()
 
 
+def _repo_root() -> str:
+    """仓库根目录（POSIX 分隔符）。"""
+    try:
+        return _normalize_path(_run_git(["rev-parse", "--show-toplevel"]).strip()).rstrip("/")
+    except RuntimeError:
+        return _normalize_path(os.getcwd()).rstrip("/")
+
+
+def _to_repo_relative(path: str, repo_root: str) -> str:
+    """把 ruff 报出来的路径换算成**相对仓库根**的形式。
+
+    这一步是必须的：`ruff check --output-format json <相对路径>` 在 JSON 里回填的是
+    **绝对路径**（实测 Windows 上是 `C:\\...\\services\\task_worker_service.py`），
+    而 `changed_lines` 的键来自 `git diff`，是仓库相对路径
+    （`services/task_worker_service.py`）。不做换算时 `filename not in changed_lines`
+    恒为真，于是**每一条**诊断都被当成「新增行上的问题」保留 —— 本脚本宣称的
+    「只检查改动行」完全失效，任何被碰过的文件里的历史 lint 债都会挡住 CI。
+    """
+    normalized = _normalize_path(path)
+    if not normalized:
+        return ""
+    root = _normalize_path(repo_root).rstrip("/")
+    if root and normalized.lower().startswith(root.lower() + "/"):
+        return normalized[len(root) + 1 :]
+    # 已经是相对路径（ruff 在某些 cwd 下会返回相对路径）就直接用
+    is_absolute = bool(re.match(r"^[A-Za-z]:/", normalized)) or normalized.startswith("/")
+    if not is_absolute:
+        return normalized
+    try:
+        return _normalize_path(os.path.relpath(normalized, root or os.getcwd()))
+    except ValueError:
+        return normalized
+
+
 def _extract_changed_lines_from_patch(patch_text: str) -> dict[str, set[int]]:
     changed_lines: dict[str, set[int]] = {}
     current_file: str | None = None
@@ -182,12 +216,14 @@ def _run_ruff_json(py_files: list[str]) -> tuple[int, list[dict[str, Any]]]:
 def _filter_ruff_issues_by_changed_lines(
     issues: list[dict[str, Any]],
     changed_lines: dict[str, set[int] | None],
+    repo_root: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     kept: list[dict[str, Any]] = []
     ignored: list[dict[str, Any]] = []
+    root = _normalize_path(repo_root) if repo_root else _repo_root()
 
     for issue in issues:
-        filename = _normalize_path(issue.get("filename") or "")
+        filename = _to_repo_relative(issue.get("filename") or "", root)
         if not filename or filename not in changed_lines:
             kept.append(issue)
             continue
@@ -213,8 +249,10 @@ def _filter_ruff_issues_by_changed_lines(
 
 
 def _print_issues(issues: list[dict[str, Any]]) -> None:
+    root = _repo_root()
     for issue in issues:
-        filename = _normalize_path(issue.get("filename") or "")
+        # 打印成仓库相对路径：绝对路径在 CI 日志里很吵，也没法直接点开
+        filename = _to_repo_relative(issue.get("filename") or "", root)
         location = issue.get("location") or {}
         row = location.get("row") or 0
         col = location.get("column") or 0
