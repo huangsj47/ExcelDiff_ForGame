@@ -75,7 +75,16 @@ class TestPathSecurity:
 
 class TestAppSecurityBehavior:
     @pytest.fixture(scope="class")
-    def app_module(self):
+    @classmethod
+    def app_module(cls):
+        """导入 app 并打开 TESTING。
+
+        必须写成 `@classmethod`：类作用域的 fixture 若写成实例方法，pytest 会警告
+        「Instance attributes set in this fixture will NOT be visible to test
+        methods, as each test gets a new instance while the fixture runs only once
+        per class」—— fixture 只跑一次、值却挂在每个用例各一份的实例上，语义与直觉
+        不一致（将来有人在 fixture 里设 `self.xxx` 会在用例里神秘地拿不到）。
+        """
         try:
             import app as app_module
         except Exception as exc:

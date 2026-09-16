@@ -1,3 +1,9 @@
 -r requirements.txt
 ruff==0.6.9
 pre-commit==3.8.0
+
+# 测试框架。此前没有在任何 requirements 里声明 —— 于是 CI 里
+# `python -m pytest` 根本不存在，800+ 条用例从未被当作门禁跑过；
+# 新同学照 requirements-dev.txt 装完也跑不了测试。
+# 版本取自当前验证通过的本地环境（Python 3.13 + pytest 9.1.1）。
+pytest==9.1.1

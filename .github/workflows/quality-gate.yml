@@ -35,3 +35,13 @@ jobs:
             BASE_REF="${{ github.event.pull_request.base.sha }}"
           fi
           python scripts/run_ruff_changed.py --base-ref "${BASE_REF}"
+
+      # 这个 step 长期缺失：整仓库 800+ 条用例此前**从未**在 CI 里跑过，
+      # 唯一的质量门禁只有「文件长度」和「改动行的 lint」。
+      #
+      # 注意 pytest.ini 里的 addopts 带了 `-s`（为了看到 log_print 的输出）——
+      # 这是有意的，别在 CI 里覆盖掉，否则失败时看不到业务日志。
+      # 测试库由 tests/conftest.py 隔离到 .pytest_tmp/ 下的临时 sqlite，
+      # 并带一道「目标不是临时库就中止」的保护，不会碰真实数据。
+      - name: Run tests
+        run: python -m pytest -q
