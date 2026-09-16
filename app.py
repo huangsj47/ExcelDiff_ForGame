@@ -125,7 +125,6 @@ from services.commit_diff_logic import (
     are_commits_consecutive_internal,
     get_commit_pair_diff_internal,
     convert_hunks_to_lines,
-    get_mock_diff_data,
 )
 from services.agent_commit_diff_dispatch import maybe_dispatch_commit_diff
 from services.auth_bootstrap_service import initialize_auth_subsystem
@@ -307,7 +306,15 @@ if sys.platform == 'win32' and not _IS_TESTING:
     # 设置控制台代码页为UTF-8
     os.system('chcp 65001 >nul 2>&1')
 # Diff逻辑版本号 - 当diff算法或逻辑发生变化时需要更新此版本号
-DIFF_LOGIC_VERSION = "1.8.0"
+#
+# ⚠️ 这是**驱动缓存失效**的那一份（下面用它构造 DiffCache / ExcelHtmlCache /
+# WeeklyVersionExcelCache 的 diff_version）。仓库里 config.py 还有一份同名字面量，
+# 供 routes/main_routes.py 做界面展示；两者必须同时改，
+# 一致性由 tests/test_diff_logic_version_single_source.py 锁定。
+#
+# 1.9.0：Excel/CSV 改为按文本原样读取（dtype=str + keep_default_na=False），
+#        并修掉 _normalize_value 把文本 null/none/nan/<na> 当空值、以及 strip 首尾空格的问题。
+DIFF_LOGIC_VERSION = "1.9.0"
 
 # ---------------------------------------------------------------------------
 #  日志系统 — 已拆分至 utils/logger.py

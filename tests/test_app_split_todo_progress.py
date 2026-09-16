@@ -57,7 +57,13 @@ class TestAppSplitTodoProgress:
 
         assert get_excel_column_letter(0) == "A"
         assert get_excel_column_letter(27) == "AB"
-        assert format_cell_value(" null ") == ""
+        # 契约变更（DIFF_LOGIC_VERSION 1.9.0）：原断言是 format_cell_value(" null ") == ""，
+        # 即把**文本** null 渲染成空串。那会让真实的取值 null 与真空白长得一样，
+        # 且与比较层不一致（比较层认为 'null' ≠ 空 → 会报变更），
+        # 审核者会看到一行「空 → 空」的变更却看不出改了什么。现在原样显示。
+        assert format_cell_value(" null ") == " null "
+        assert format_cell_value(None) == ""
+        assert format_cell_value(float("nan")) == ""
         assert format_cell_value(123) == "123"
 
     def test_app_uses_extracted_excel_diff_cache_service(self):

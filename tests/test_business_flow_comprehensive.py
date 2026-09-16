@@ -583,13 +583,20 @@ class TestDiffServiceEdgeCases:
         assert elapsed < 30, f"处理 500 行 CSV 耗时 {elapsed:.1f}s，应 <30s"
 
     def test_normalize_value_edge_cases(self):
-        """_normalize_value 对各种特殊值的处理"""
+        """_normalize_value 对各种特殊值的处理
+
+        ⚠️ 契约变更（DIFF_LOGIC_VERSION 1.9.0）：原断言 `nv("  hello  ") == "hello"`
+        依赖的是 `_normalize_value` 末尾的 `str(val).strip()`。那个 strip 会把
+        `'  x  '` 与 `'x'` 判成同一个值 → 「首尾空格被改动」这条真实变更不报。
+        现在不 strip：首尾空格是真实内容（配表里常用于对齐/占位，且会改变下游解析结果）。
+        注意展示层需要把空格显式可视化，否则审核者会看到两个「看起来一样」的单元格。
+        """
         nv = self.service._normalize_value
         assert nv(False) == "False"
         assert nv(0) == "0"
         assert nv(0.0) == "0.0"
         assert nv([]) == "[]"
-        assert nv("  hello  ") == "hello"
+        assert nv("  hello  ") == "  hello  "
 
     def test_row_similarity_completely_different(self):
         """完全不同的行相似度应为 0"""

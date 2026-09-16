@@ -80,13 +80,27 @@ def get_excel_column_letter(index):
 
 
 def format_cell_value(value):
-    """Normalize cell values for HTML rendering."""
-    if value is None or value == "null" or value == "None":
+    """把单元格值渲染成展示文本：**只**把真正的空值显示为空。
+
+    这是 `_normalize_value`（services/diff_service.py）在展示层的对应物，
+    两者口径必须一致 —— 见下方「为什么」。
+
+    ⚠️ 历史行为（已修，DIFF_LOGIC_VERSION 1.9.0）：这里曾把**文本**
+    `'null'` / `'None'` / `'nan'` / `'undefined'` 也渲染成空串，并对结果 `strip()`。
+    两个后果：
+
+    1. 配表里真实的取值 `null`（表示「无掉落 / 无引用」很常见）在界面上**显示为空**，
+       与真正的空单元格长得一模一样；
+    2. 更严重的是**与比较层不一致**：比较层现在认为 `'null'` ≠ 空（会报变更），
+       若展示层把两边都渲染成空，审核者会看到一行「空 → 空」的变更行，
+       **完全无法判断到底改了什么** —— 这比不报变更更难排查。
+
+    因此本函数的契约是：**表里怎么写就怎么显示**，不做任何改写、不 strip。
+    首尾空格与连续空格由 CSS 的 `white-space: pre-wrap` 原样呈现
+    （见 static/css/excel-diff-new.css 的 `.excel-cell`）。
+    """
+    if value is None:
         return ""
     if isinstance(value, float) and math.isnan(value):
         return ""
-
-    str_value = str(value).strip()
-    if str_value.lower() in ["nan", "null", "undefined", ""]:
-        return ""
-    return str_value
+    return str(value)

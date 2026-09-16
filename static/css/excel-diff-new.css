@@ -232,9 +232,15 @@
     background-color: #fff !important;
     min-width: 100px;
     max-width: 400px;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
+    /* pre-wrap：**原样呈现空格**，同时允许换行。
+       为什么必须是 pre-wrap 而不是 nowrap：
+       比较层现在按字面量比对，`'  x  '` 与 `'x'` 会被报成一条变更；若这里用
+       nowrap/normal，HTML 会把连续空格与首尾空格折叠掉，审核者看到的是两个
+       **一模一样**的单元格，无法判断改了什么 —— 一条「看不出差异的变更」比漏报更难排查。
+       顺带解决原来的 `nowrap + overflow:hidden + text-overflow:ellipsis`
+       把超长配置串静默截断、且没有任何途径看全文的问题（现在换行显示，且模板带 title）。 */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
     word-wrap: break-word;
     font-weight: normal;
     padding: 8px 4px;

@@ -324,10 +324,27 @@ class DiffService:
             # 根据文件扩展名选择读取方式
             ext = os.path.splitext(file_path.lower())[1]
             
+            # dtype=str + keep_default_na=False：**按文本原样读取，不做类型推断、不做 NA 转换**。
+            #
+            # 为什么必须显式关掉这两个默认值：pandas 默认会在**读取阶段**就改写字面量，
+            # 于是不等比较就已经丢掉了差异：
+            #     '00123' -> int 123        前导零丢失
+            #     '1.10'  -> float 1.1      尾零丢失
+            #     '1e3'   -> float 1000.0   字面量被改写
+            #     'TRUE'  -> bool True      大小写丢失
+            #     'NULL'/'nan'/'N/A'/'None'/'NA'/'<NA>' -> NaN   **真实取值被当成空值**
+            # 对本平台（变更确认）来说这是最坏的失败方式：不是报错，而是把「有变更」
+            # 显示成「没有变更」，审核者看不到也就不会核对 → 直接漏审。
+            #
+            # 代价：diff 数量会比关闭前变多（这是预期），旧缓存由 DIFF_LOGIC_VERSION 失效。
+            # 注意 keep_default_na=False 只关闭「把文本当 NA」，真正的空单元格读数仍是
+            # 空值（见 _normalize_value），所以「清空单元格」这类变更不会被吃掉。
+            READ_KWARGS = {'dtype': str, 'keep_default_na': False}
+
             if ext == '.csv':
                 # CSV文件处理
                 text_content = self._decode_text(content)
-                df = pd.read_csv(io.StringIO(text_content))
+                df = pd.read_csv(io.StringIO(text_content), **READ_KWARGS)
                 return {'Sheet1': df}
             else:
                 # Excel文件处理
@@ -337,7 +354,7 @@ class DiffService:
                     excel_file = pd.ExcelFile(io.BytesIO(content))
                     sheets = {}
                     for sheet_name in excel_file.sheet_names:
-                        sheets[sheet_name] = pd.read_excel(excel_file, sheet_name=sheet_name)
+                        sheets[sheet_name] = pd.read_excel(excel_file, sheet_name=sheet_name, **READ_KWARGS)
                 return sheets
                 
         except Exception as e:
@@ -817,18 +834,34 @@ class DiffService:
     
     @staticmethod
     def _normalize_value(val):
-        """标准化单元格值，统一处理NaN/空值（#31: 提取为类方法，消除热路径闭包开销）"""
+        """标准化单元格值：**只**把真正的空值归一为 None，不改写任何字面量。
+
+        这是「什么算变更」的总闸门 —— `_values_equal` / `_calculate_row_similarity`
+        / `_rows_equal` 全都走它。
+
+        历史行为（已修）：这里曾把 `'nan' / 'none' / 'null' / '<na>'` 这些
+        **文本**也判成空值，并对返回值做 `strip()`。两个后果都是静默漏审：
+          * 文本 `null` 与真空白被判「相等」→ 「NULL 改成空」不报变更；
+          * `'  x  '` 与 `'x'` 被判「相等」→ 首尾空格变更不报变更。
+        配表里用 `null` / `None` 表示「无掉落 / 无引用」极常见，所以这不是理论问题。
+
+        现在的口径与读取阶段（dtype=str, keep_default_na=False）一致：**表里怎么写就怎么比**。
+        只有 None / NaN / NaT / pd.NA / 空字符串算空；空白串（如 `'   '`）算**有值**，
+        因为「有空格」与「没有内容」在配表里是两种不同的写法。
+        """
         if val is None:
             return None
         try:
-            if pd.isna(val):
+            # pd.isna 对标量返回 np.bool_（`x is True` 会失败），必须显式 bool()；
+            # 入参是列表/数组时返回数组，bool() 抛 ValueError → 落到下面按字符串处理。
+            if bool(pd.isna(val)):
                 return None
         except (TypeError, ValueError):
             pass
-        val_str = str(val).strip().lower()
-        if val_str in ('', 'nan', 'none', 'null', '<na>'):
+        val_str = str(val)
+        if val_str == '':
             return None
-        return str(val).strip()
+        return val_str
 
     def _calculate_row_similarity(self, row1, row2, columns):
         """计算两行之间的相似度，改进NaN和空值处理"""

@@ -22,7 +22,17 @@ from os import system
 system("title SEOTool - diff-confirmation-platform")
 
 # Diff逻辑版本号 - 当diff算法或逻辑发生变化时需要更新此版本号
-DIFF_LOGIC_VERSION = "1.8.0"
+#
+# ⚠️ 本常量在仓库里有**两处**字面量：这里与 app.py。驱动缓存失效的是 app.py 那一份
+# （它被用来构造 DiffCache / ExcelHtmlCache / WeeklyVersionExcelCache 的 diff_version），
+# 本文件这一份由 routes/main_routes.py 读去做界面展示。两者必须一致 —— 只改一处会出现
+# 「版本号升了但缓存没清」或反过来的静默不一致，且不会报错。
+# 一致性由 tests/test_diff_logic_version_single_source.py 锁定。
+#
+# 1.9.0：Excel/CSV 改为按文本原样读取（dtype=str + keep_default_na=False），并修掉
+#        _normalize_value 把文本 null/none/nan/<na> 当空值、以及 strip 掉首尾空格的问题。
+#        影响：升级后 diff 数量会比以前多（这是预期，见 README）。
+DIFF_LOGIC_VERSION = "1.9.0"
 
 # 日志级别配置
 LOG_LEVEL = {

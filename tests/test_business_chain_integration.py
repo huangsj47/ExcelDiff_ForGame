@@ -154,17 +154,34 @@ class TestDiffServiceChain:
     # -- normalize_value 静态方法 --
 
     def test_normalize_value_nan_handling(self):
-        """_normalize_value 应正确处理 NaN/None/空字符串"""
+        """_normalize_value 应正确处理 NaN/None/空字符串
+
+        ⚠️ 契约变更（DIFF_LOGIC_VERSION 1.9.0）：本测试原先断言
+        `nv("nan") / nv("None") / nv("null") / nv("<NA>") / nv("  ")` **全部为 None**。
+        那个契约本身就是缺陷：它让**文本** `null` 与真正的空单元格被判「相等」，
+        于是「把 NULL 改成空」「把 null 改成 None」「去掉首尾空格」这三类真实变更
+        全部不报变更 —— 审核者看不到，直接漏审。配表里用 `null`/`None` 表示
+        「无掉落 / 无引用」极常见，所以这不是理论问题。
+
+        现在的契约是「表里怎么写就怎么比」：只有 None / NaN / NaT / pd.NA / 空字符串算空。
+        配合读取阶段的 dtype=str + keep_default_na=False，字面量不再被改写。
+        回归保护见 tests/test_excel_literal_fidelity.py。
+        """
         nv = self.service._normalize_value
+        # 真正的空值 —— 仍然必须归一为 None
         assert nv(None) is None
         assert nv(float("nan")) is None
-        assert nv("nan") is None
-        assert nv("None") is None
-        assert nv("null") is None
         assert nv("") is None
-        assert nv("  ") is None
-        assert nv("<NA>") is None
+        # 看起来像空值的**文本** —— 是取值，不是空
+        assert nv("nan") == "nan"
+        assert nv("None") == "None"
+        assert nv("null") == "null"
+        assert nv("<NA>") == "<NA>"
+        # 空白串：与「没有内容」是两种不同写法，不能等价
+        assert nv("  ") == "  "
+        # 一般值
         assert nv("hello") == "hello"
+        assert nv("  hello  ") == "  hello  "  # 首尾空格是真实内容，不 strip
         assert nv(123) == "123"
         assert nv(0) == "0"
 
@@ -202,9 +219,17 @@ class TestDiffServiceChain:
         assert self.service._rows_equal(r1, r3, cols) is False
 
     def test_values_equal_with_normalization(self):
-        """_values_equal 应对空值做归一化"""
+        """_values_equal 应对空值做归一化
+
+        ⚠️ 契约变更（DIFF_LOGIC_VERSION 1.9.0）：原断言
+        `_values_equal("nan", None) is True` 是缺陷本身 —— 它宣布「文本 nan」与
+        「空单元格」是同一个东西，于是「把 nan 改成空」这条真实变更被静默吞掉。
+        现在只有真正的空值之间相等（None / NaN / ''）。
+        """
         assert self.service._values_equal(None, "") is True
-        assert self.service._values_equal("nan", None) is True
+        assert self.service._values_equal(float("nan"), "") is True
+        # 文本 'nan' 是取值，与空单元格不等 —— 否则该变更不会出现在 diff 里
+        assert self.service._values_equal("nan", None) is False
         assert self.service._values_equal("hello", "hello") is True
         assert self.service._values_equal("hello", "world") is False
 
@@ -869,7 +894,11 @@ class TestUtilFunctionsChain:
         
         # 基础功能验证
         assert clean_json_data({"x": float("nan")}) == {"x": None}
-        assert format_cell_value(" null ") == ""
+        # 契约变更（DIFF_LOGIC_VERSION 1.9.0）：文本 'null' 不再被渲染成空串。
+        # 否则真实取值 null 与真空白在界面上无法区分，且与比较层口径不一致
+        # （比较层认为 'null' ≠ 空），审核者会看到一行「空 → 空」却看不出改了什么。
+        assert format_cell_value(" null ") == " null "
+        assert format_cell_value(None) == ""
         assert get_excel_column_letter(0) == "A"
         assert get_excel_column_letter(25) == "Z"
         assert get_excel_column_letter(26) == "AA"
