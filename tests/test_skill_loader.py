@@ -282,3 +282,66 @@ def test_skill_index_says_so_when_a_project_has_no_documents():
     loaded = load_skills(REPO_ROOT, project_code=None)
     index = build_skill_index(loaded)
     assert "尚未维护专属知识文档" in index
+
+
+# --------------------------------------------------------------------------
+# 知识包内部一致性
+# --------------------------------------------------------------------------
+
+
+def _segments(raw: str) -> dict[tuple[str, str], str]:
+    """从一行行 `| ... | ... |` 里抽出 `(起, 止) -> 名称`。"""
+    import re
+
+    return {
+        (start, end): name.strip()
+        for name, start, end in re.findall(
+            r"\|\s*([^|（）]+?)\s*（`?(\d+)`?[–-]`?(\d+)`?）\s*\|", raw
+        )
+    }
+
+
+def _type_segments(raw: str) -> dict[tuple[str, str], str]:
+    import re
+
+    return {
+        (start, end): name.strip()
+        for start, end, name in re.findall(
+            r"\|\s*`(\d+)`[–-]`(\d+)`\s*\|\s*([^|]+?)\s*\|", raw
+        )
+    }
+
+
+def test_the_id_segment_tables_in_the_knowledge_pack_agree():
+    """**同一份文档里的两张表必须说同一件事。**
+
+    这里出过一次真实的矛盾：号段表写 `70–79 物品相关`，表划分表写 `任务（70–79）任务节点表、
+    任务组`。模型读到两个不同的说法，70–79 段的改动就会被归错系统，进而给错回归范围 ——
+    而它不会报错，只会安静地给出一个错的结论。
+
+    判据是两个字的重合：号段说「任务相关」，表划分就该出现「任务」。这不需要两张表的
+    措辞完全一致（它们本来就一张写「角色相关（含属性）」、一张写「角色」），但**不能
+    一个说任务、一个说物品**。
+    """
+    raw = (REPO_ROOT / "skills/projects/g119/references/config-table-spec.md").read_text(
+        encoding="utf-8"
+    )
+    types = _type_segments(raw)
+    systems = _segments(raw)
+
+    assert types, "号段表没解析出来 —— 表头或格式变了，下面的断言会变成空转"
+    assert systems, "表划分表没解析出来 —— 表头或格式变了"
+
+    shared = set(types) & set(systems)
+    assert len(shared) >= 6, f"两张表对得上号的段太少（{sorted(shared)}），检查解析是否失效"
+
+    for segment in sorted(shared):
+        type_name = types[segment]
+        system_name = systems[segment]
+        bigrams = {type_name[index : index + 2] for index in range(len(type_name) - 1)}
+        assert bigrams & {
+            system_name[index : index + 2] for index in range(len(system_name) - 1)
+        }, (
+            f"{segment[0]}–{segment[1]} 段在两处说法不一致："
+            f"号段表说「{type_name}」，表划分表说「{system_name}」"
+        )
