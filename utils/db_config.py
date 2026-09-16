@@ -13,10 +13,15 @@ from urllib.parse import quote_plus
 
 from sqlalchemy.engine import make_url
 
+from utils.runtime_paths import repo_root, resolve_runtime_path
+
 
 SUPPORTED_BACKENDS = {"sqlite", "mysql"}
 DEFAULT_DB_BACKEND = "sqlite"
-DEFAULT_SQLITE_PATH = os.path.abspath(os.path.join("instance", "diff_platform.db"))
+# 锚定到**仓库根目录**，不是当前工作目录 —— 见 utils/runtime_paths.py 的模块文档：
+# `os.path.abspath("instance/...")` 会让同一个程序从不同目录启动时落到不同的
+# 数据库文件上（表现为「数据凭空消失」，而旧库还躺在磁盘上）。
+DEFAULT_SQLITE_PATH = os.path.join(repo_root(), "instance", "diff_platform.db")
 
 
 def _get_env(env: Mapping[str, str], *keys: str, default: Optional[str] = None) -> Optional[str]:
@@ -72,8 +77,9 @@ def build_sqlite_uri(env: Mapping[str, str]) -> Tuple[str, str]:
     db_path = _get_env(env, "SQLITE_DB_PATH", "DB_PATH", default=DEFAULT_SQLITE_PATH)
     assert db_path is not None
 
-    if not os.path.isabs(db_path):
-        db_path = os.path.abspath(db_path)
+    # 相对路径按**仓库根目录**解析（不是 CWD）。运维写
+    # `SQLITE_DB_PATH=instance/diff_platform.db` 时，无论从哪里启动都指同一个文件。
+    db_path = resolve_runtime_path(db_path)
 
     instance_dir = os.path.dirname(db_path)
     if instance_dir:
@@ -199,6 +205,12 @@ def get_sqlite_path_from_uri(database_uri: str) -> Optional[str]:
     if not db_path:
         return None
     if not os.path.isabs(db_path):
+        # 这里**故意**用 CWD 解析（不用 resolve_runtime_path）：本函数的契约是
+        # 「报告 SQLAlchemy 实际把文件放哪儿了」，而对 `sqlite:///相对路径`
+        # 这种 URL，SQLAlchemy 自己就是按 CWD 解析的。若改成按仓库根解析，
+        # 报告出来的路径会与实际文件不是同一个 —— 那正是本模块要消灭的那类问题。
+        # 走 env 配置（SQLITE_DB_PATH）时不会进这个分支：build_sqlite_uri
+        # 产出的已经是绝对路径。
         db_path = os.path.abspath(db_path)
     return db_path
 

@@ -105,6 +105,10 @@ AUTH_EXEMPT_PATHS = (
     "/qkit_auth/assets/",
     "/help",
     "/api/agents/",
+    # 存活探针：负载均衡 / systemd watchdog / k8s probe 拿不到会话 Cookie，
+    # 需要鉴权的探针根本没法用。响应体不含版本号、路径、连接串、表名。
+    # 注意它仍受 CSRF 校验约束，但 enforce_csrf 对 GET 直接放行，而探针只会用 GET。
+    "/healthz",
 )
 
 APP_SECURITY_AUTH_BACKEND_IMPORT_ERRORS = (ImportError, RuntimeError, AttributeError)

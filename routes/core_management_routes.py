@@ -6,7 +6,7 @@ This module extracts the remaining non-weekly/non-cache/non-commit route
 registration from app.py. Handlers stay in app.py for low-risk behavior parity.
 """
 
-from flask import Blueprint
+from flask import Blueprint, jsonify
 
 from services.model_loader import get_runtime_model
 
@@ -17,6 +17,75 @@ core_management_bp = Blueprint("core_management_routes", __name__)
 def _dispatch(handler_name, *args, **kwargs):
     handler = get_runtime_model(handler_name)
     return handler(*args, **kwargs)
+
+
+def _probe_database_ok():
+    """做一次 `SELECT 1`，确认连接池与数据库真的可用。返回 `(ok, error)`。
+
+    单独抽成函数是为了可测：探针最有价值的性质是「数据库挂了返回 503」，
+    而直接往路由里塞一个坏引擎需要 monkeypatch Flask-SQLAlchemy 的 `engine`
+    属性（那是需要应用上下文的 property），既别扭又会影响其他 fixture 的收尾。
+    """
+    try:
+        from flask import current_app
+
+        from sqlalchemy import text as sa_text
+
+        db = current_app.extensions["sqlalchemy"]
+        with db.engine.connect() as conn:
+            conn.execute(sa_text("SELECT 1"))
+        return True, None
+    except Exception as exc:  # noqa: BLE001 - 探针必须把所有失败都归类为「不健康」
+        return False, exc
+
+
+@core_management_bp.route("/healthz", methods=["GET"], endpoint="healthz")
+def healthz_route():
+    """存活/就绪探针（供负载均衡、systemd watchdog、k8s probe 使用）。
+
+    为什么需要它：此前唯一的存活判断手段是 `/test`（恒返回 200，不碰数据库）
+    或 `/`（要渲染项目列表）。两者都不适合做探针：
+
+    * `/test` 在数据库已挂、磁盘写满、迁移失败时**照样返回 200** ——
+      探针会把一个已经不可用的实例一直留在负载均衡后面；
+    * `/` 要渲染模板并查询项目列表，把它当探针等于每次探测都做一次业务查询。
+
+    本接口的三个刻意选择：
+
+    1. **免鉴权**（`/healthz` 已注册进 `AUTH_EXEMPT_PATHS`）——
+       探针拿不到会话 Cookie，需要鉴权的探针根本没法用。
+    2. 只做一次 `SELECT 1`，数据库不可用时返回 **503**（不是 200）
+       —— 这是探针能起作用的唯一前提。
+    3. **不泄露任何敏感信息**：响应体只有固定的 `status` / `database` 两个字段，
+       不含版本号、路径、连接串、表名；失败详情只写服务端日志。
+
+    ⚠️ 本路由注册在 `core_management_routes` 上，而不是同样定义了 `/test`
+    的 `routes/main_routes.py` —— **后者的 `main_bp` 从未被注册到 app**
+    （`routes/__init__.py::register_blueprints()` 全仓无调用方），
+    写在那里等于没写（实测加完仍是 404，且不报错）。
+    """
+    ok, exc = _probe_database_ok()
+    if ok:
+        return jsonify({"status": "ok", "database": "ok"}), 200
+
+    try:
+        from utils.safe_print import log_print
+        from utils.security_utils import sanitize_text
+
+        # 详细原因只进服务端日志，不出现在响应体里。
+        #
+        # 必须过 sanitize_text：数据库连接类异常的消息里常常带着完整连接串
+        # （`mysql+pymysql://user:pw@host/db`），直接写日志等于把口令落到日志文件。
+        # 实测未脱敏时日志里会出现 `secret-dsn-user:pw@10.1.2.3/diff_platform`。
+        log_print(
+            f"健康检查失败: {type(exc).__name__}: {sanitize_text(str(exc))}",
+            "APP",
+            force=True,
+        )
+    except Exception:  # pragma: no cover - 日志不可用不影响探针语义
+        pass
+
+    return jsonify({"status": "degraded", "database": "unavailable"}), 503
 
 
 @core_management_bp.route("/auth/login", methods=["GET", "POST"], endpoint="admin_login")

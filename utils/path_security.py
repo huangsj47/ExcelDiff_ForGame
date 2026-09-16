@@ -2,6 +2,8 @@ import os
 import re
 from typing import Optional
 
+from utils.runtime_paths import resolve_runtime_path
+
 SAFE_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -31,7 +33,12 @@ def build_repository_local_path(project_code: str, repository_name: str, reposit
     safe_repo = _sanitize_segment(repository_name, "repository")
     safe_id = int(repository_id)
 
-    base_abs = os.path.abspath(base_dir)
+    # base_dir 的相对路径按**仓库根目录**解析，不是当前工作目录。
+    # 这里曾经是 `os.path.abspath(base_dir)`：于是 git/svn 工作副本的落点取决于
+    # 进程的 CWD。换个目录启动（Windows 服务、systemd 的 WorkingDirectory、
+    # `cd /` 后跟绝对路径）就会在别处新建一个空的 repos/，所有仓库都被判定为
+    # 「未克隆」而重新 clone 一遍，旧目录成为孤儿。详见 utils/runtime_paths.py。
+    base_abs = resolve_runtime_path(base_dir)
     candidate = os.path.abspath(os.path.join(base_abs, f"{safe_project}_{safe_repo}_{safe_id}"))
 
     if not (candidate == base_abs or candidate.startswith(base_abs + os.sep)):
