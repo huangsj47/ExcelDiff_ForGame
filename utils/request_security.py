@@ -13,6 +13,7 @@ from functools import wraps
 from urllib.parse import urlparse
 
 from flask import flash, jsonify, redirect, request, session, url_for
+from werkzeug.exceptions import Forbidden
 
 
 CSRF_SESSION_KEY = "_csrf_token"
@@ -353,8 +354,36 @@ def _get_accessible_project_ids():
 
 
 def _unauthorized_admin_response():
+    """当前用户不具备平台管理员权限时的响应。
+
+    ## 为什么必须区分「未登录」与「已登录但权限不足」
+
+    原实现对两种情况都跳登录页，而 `auth_bp.login` 开头的逻辑是
+    「**已登录则直接跳 next**」：
+
+        /admin/excel-cache
+          → 302 /auth/login?next=/admin/excel-cache   （守卫：不是管理员）
+          → 302 /admin/excel-cache                    （登录页：已登录，跳 next）
+          → 302 /auth/login?next=/admin/excel-cache   （守卫：还不是管理员）
+          → … 无限
+
+    浏览器最终报「将您重定向的次数过多」。而且**每绕一圈都往 session 里塞一条
+    flash**，绕 N 圈之后用户看到的就是一屏「请先使用管理员账号登录。」—— 实测
+    一次浏览就累积 5 条。
+
+    语义上也本就该分开：401/跳登录是「你是谁」的问题，重登能解决；
+    这里的用户身份已经确定，只是权限不够，重登一万次也没用 —— 那是 403。
+    """
     if _is_api_request():
+        if _is_logged_in():
+            # 已登录 → 权限不足（403）。返回 401 会让客户端反复重试登录。
+            return jsonify({"success": False, "message": "权限不足"}), 403
         return jsonify({"success": False, "message": "Admin authentication required"}), 401
+    if _is_logged_in():
+        # 已登录但权限不足：交给已注册的 Forbidden 处理器渲染权限不足页
+        # （services/app_security_bootstrap_service.py 里有 @app.errorhandler(Forbidden)，
+        #  会按 HTML / JSON 分别给出「权限不足」页与 403 JSON）。
+        raise Forbidden()
     # POST/PUT/DELETE 等非 GET 请求的 URL 不能作为登录后跳转目标（会导致 405）
     if request.method == "GET":
         next_url = request.url
