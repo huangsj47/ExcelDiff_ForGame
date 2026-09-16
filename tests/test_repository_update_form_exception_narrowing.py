@@ -153,14 +153,18 @@ def test_handle_update_repository_form_refilter_logs_force_sync_exception(monkey
         lambda target, **kwargs: target(),
     )
 
-    fake_incremental_module = ModuleType("incremental_cache_system")
+    # 键名必须与真实导入路径一致：生产代码写的是 from services.incremental_cache_system
+    # import ...，所以只有这个键能拦住它。写成裸 "incremental_cache_system" 时
+    # setitem 仍然「成功」，但导入系统查的是 services.incremental_cache_system，
+    # 于是打桩静默失效、测试改走真实实现。
+    fake_incremental_module = ModuleType("services.incremental_cache_system")
 
     class _FakeIncrementalCacheManager:
         def force_full_sync(self, _repository_id):
             raise RuntimeError("full sync failed")
 
     fake_incremental_module.IncrementalCacheManager = _FakeIncrementalCacheManager
-    monkeypatch.setitem(sys.modules, "incremental_cache_system", fake_incremental_module)
+    monkeypatch.setitem(sys.modules, "services.incremental_cache_system", fake_incremental_module)
 
     commit_query = SimpleNamespace(filter_by=lambda **_kwargs: SimpleNamespace(all=lambda: []))
     commit_model = SimpleNamespace(query=commit_query)
@@ -185,5 +189,13 @@ def test_handle_update_repository_form_refilter_logs_force_sync_exception(monkey
     assert result == {"redirect": "/repository_config/21"}
     assert any(category == "info" and "后台重新筛选文件" in message for category, message in flashes)
     assert any("全量同步异常" in message for message in logs)
+    # 光断言「有『全量同步异常』」是**不够**的：那句 except 的元组里含 ImportError，
+    # 所以哪怕 import 本身挂了（ModuleNotFoundError）也会走进来记同一句话 ——
+    # 断言照样绿，而增量全量同步其实一次都没跑。这里改成钉住**桩自己抛的文本**：
+    # 只有注入的假模块真的被用上，日志里才会有 "full sync failed"。
+    assert any("full sync failed" in message for message in logs), (
+        "日志里没有出现桩抛出的 'full sync failed' —— 说明 sys.modules 注入没生效，"
+        "被测代码走的是真实实现（或 import 失败）。检查注入键名是否与真实导入路径一致。"
+    )
     assert any("仓库内容重新筛选完成" in message for message in logs)
     assert redirects[-1] == "/repository_config/21"

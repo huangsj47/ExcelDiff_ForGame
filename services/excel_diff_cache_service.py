@@ -86,7 +86,7 @@ TRUNCATED_PAYLOAD_MARKER = '"truncated"'
 #      按 `commit_time < 窗口起点(UTC)` 取前一条；且新缓存建完后若 base 为空，
 #      还会被 get_real_base_commit_from_vcs() 二次改写成 VCS 的真实基准。
 #   6) 增量同步记录的 Repository.last_sync_commit_id：
-#      incremental_cache_system.py 的 get_existing_cached_files() 用它当
+#      services/incremental_cache_system.py 的 get_existing_cached_files() 用它当
 #      「这个提交有没有缓存」的判据（它过去还按一个不存在的列过滤，见该文件注释）。
 #
 #  在这之前缓存键只有 (repository_id, commit_id, file_path, diff_version)：

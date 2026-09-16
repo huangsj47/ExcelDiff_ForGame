@@ -27,7 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import incremental_cache_system
+from services import incremental_cache_system
 from app import app, create_tables, db
 from models import Commit, DiffCache, Project, Repository, WeeklyVersionDiffCache
 from services.excel_diff_cache_service import ExcelDiffCacheService

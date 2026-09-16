@@ -360,7 +360,12 @@ def handle_update_repository_form(
                             except re.error as exc:
                                 log_print(f"正则表达式编译失败: {exc}", "APP", force=True)
                         try:
-                            from incremental_cache_system import IncrementalCacheManager
+                            # 本模块在 services/ 包内，必须走包路径；写成裸模块名
+                            # （`from incremental_cache_system import ...`）会 ModuleNotFoundError，
+                            # 而它被下面 REPOSITORY_UPDATE_FORM_FORCE_SYNC_ERRORS（含 ImportError）
+                            # 兜住 → 不会崩，只会每次记一句「全量同步异常」，
+                            # 增量全量同步永远不跑（静默失效）。
+                            from services.incremental_cache_system import IncrementalCacheManager
 
                             cache_system = IncrementalCacheManager()
                             success, message = cache_system.force_full_sync(target_repository_id)
