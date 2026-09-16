@@ -2,12 +2,9 @@
 
 ## 为什么值得单独一条守卫
 
-原来它在仓库根目录，所以生产代码写的是裸模块名：
-
-    from incremental_cache_system import IncrementalCacheManager
-
-现在它在 `services/incremental_cache_system.py`，裸模块名会 `ModuleNotFoundError`。
-但这个失败**不会有人发现**：
+原来它在仓库根目录，所以生产代码写的是裸模块名（`from incremental_cache_system
+import IncrementalCacheManager` 这种形式）。现在它在 `services/incremental_cache_system.py`，
+裸模块名会 `ModuleNotFoundError`。但这个失败**不会有人发现**：
 
 * 那行 import 位于 `try:` 内，而 `except REPOSITORY_UPDATE_FORM_FORCE_SYNC_ERRORS`
   的元组里**含 `ImportError`**（`ModuleNotFoundError` 是它的子类），
@@ -19,6 +16,13 @@
 **行为测试挡不住它** —— 现有那条 `test_..._refilter_logs_force_sync_exception`
 断言的是「日志里有『全量同步异常』」，import 挂掉时同样满足。所以这里从源码层面
 直接禁止这种写法，并让它与那条行为断言互为补充（见该测试里对桩文本的断言）。
+
+## 注意：本模块只扫**被跟踪**的文件
+
+新写的文件在 `git add` 之前不在 `git ls-files` 里，因此扫不到自己。
+这不是理论问题 —— 本文件第一版把裸模块名的例子写在 docstring 里（顶格成行），
+提交前跑是绿的（还没被跟踪），提交后才红。所以上面的例子改成了行内引用，
+写这类守卫时也别把被禁的模式顶格写进自己的说明文字里。
 """
 
 from __future__ import annotations

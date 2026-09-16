@@ -52,6 +52,11 @@ def test_destructive_guard_blocks_non_sqlite_without_override(monkeypatch):
 
 
 def test_recreate_db_script_has_safety_guard():
-    content = Path("recreate_db.py").read_text(encoding="utf-8")
+    # 路径锚定仓库根，不用 `Path("recreate_db.py")` —— 那是 CWD 相对的：
+    # 从别的目录跑 pytest，或脚本再挪一次，它就变成静默的 FileNotFoundError，
+    # 而这条是「破坏性操作必须带守卫」的唯一守卫。
+    script = Path(__file__).resolve().parents[1] / "scripts" / "recreate_db.py"
+    assert script.is_file(), f"找不到 {script}"
+    content = script.read_text(encoding="utf-8")
     assert "assert_destructive_db_allowed" in content
     assert "db.drop_all()" in content

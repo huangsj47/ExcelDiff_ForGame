@@ -3,7 +3,9 @@
 从HTML中提取diff修改行信息
 """
 import re
+
 import requests
+
 
 def extract_diff_lines():
     """从diff页面提取修改行信息"""

@@ -2,12 +2,19 @@
 简化的HTML缓存表初始化脚本
 通过Flask应用上下文直接创建表
 """
-import os
 import sys
-from services.model_loader import get_runtime_models
+from pathlib import Path
 
-# 确保可以导入app模块
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 必须**早于**下面所有 `from services...`：`python scripts/init_html_cache.py` 时
+# sys.path[0] 是 scripts/，不是仓库根，晚一步就是 ModuleNotFoundError。
+#
+# 这里原先也有一行 sys.path.insert，但写在了 `from services.model_loader import ...`
+# **之后** —— 对本次导入已经来不及，是一句死代码；它之所以看起来「能用」，
+# 只是因为文件当时躺在仓库根目录、sys.path[0] 恰好就是根。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from services.model_loader import get_runtime_models  # noqa: E402
+
 
 def init_html_cache_table():
     """初始化HTML缓存表"""

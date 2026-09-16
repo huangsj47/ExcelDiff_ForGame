@@ -3,16 +3,23 @@
 """数据库初始化脚本（支持 sqlite / mysql）"""
 
 import os
+import sys
+from pathlib import Path
 
 from sqlalchemy import inspect
 
-from services.model_loader import get_runtime_models
-from utils.db_config import (
+# `python scripts/init_database.py` 时 sys.path[0] 是 **scripts/**，不是仓库根 ——
+# 下面的 `from services...` 会直接 ModuleNotFoundError。本文件原先躺在根目录，
+# 靠的正是「脚本所在目录恰好就是仓库根」这个巧合，所以这行不能省。
+# 与 scripts/publish_agent_release.py 的 _append_repo_root_to_syspath 同一做法。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from services.model_loader import get_runtime_models  # noqa: E402
+from utils.db_config import (  # noqa: E402
     get_database_backend_from_config,
     get_sqlite_path_from_uri,
     sanitize_database_uri,
 )
-
 
 EXPECTED_TABLES = [
     "project",

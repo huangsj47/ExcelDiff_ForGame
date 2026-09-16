@@ -48,7 +48,11 @@ class TestServiceAppCoupling:
         assert "get_runtime_models(" in content
 
     def test_init_scripts_use_model_loader(self):
-        for path in ["init_database.py", "init_html_cache.py", "recreate_db.py"]:
+        for path in [
+            "scripts/init_database.py",
+            "scripts/init_html_cache.py",
+            "scripts/recreate_db.py",
+        ]:
             content = _read(path)
             assert "from app import" not in content
             assert "get_runtime_models(" in content

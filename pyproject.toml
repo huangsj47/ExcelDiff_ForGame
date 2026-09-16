@@ -20,3 +20,7 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 "app.py" = ["E402"]
 "tests/**/*.py" = ["E402", "F401"]
+# scripts/ 下的都是「直接 python scripts/X.py 执行」的入口脚本，必须在 import
+# 之前先把仓库根插进 sys.path（脚本的 sys.path[0] 是 scripts/，不是仓库根），
+# 这与 app.py 需要 E402 是同一类情况。
+"scripts/**/*.py" = ["E402"]
