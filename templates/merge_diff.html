@@ -1554,6 +1554,52 @@ function sheetNoticesHtml(sheetData) {
     return sheetOperationHtml(sheetData) + headerChangesHtml(sheetData);
 }
 
+// 没有变更行、也没有表级/列级变更时的说明（与周版本完整 diff 页同形，两处改要一起改）。
+//
+// 按 `stats` 分三种说法，**不合并成一句**：统计说有变更却一行都拿不出来，那是平台
+// 自己的问题，把它一起说成「没有变更」就等于把 bug 藏起来 —— 而「没有变更」正是
+// 评审者最不会去追问的一句话。
+function noNetChangeHtml(sheetData) {
+    var stats = (sheetData && sheetData.stats) || null;
+    var changed = null;
+    if (stats) {
+        changed = (stats.added || 0) + (stats.removed || 0) + (stats.modified || 0);
+    }
+
+    if (changed === 0) {
+        var before = stats.total_rows_previous;
+        var after = stats.total_rows_current;
+        var detail = '新增、删除、变更均为 0。文件在这个区间里被提交过，但内容与区间起点一致';
+        if (typeof before === 'number' && typeof after === 'number') {
+            // 两边行数不同却一个变更计数都没有，本身就是件怪事 —— 那就把两个数都念出来，
+            // 不做「前后都是 N 行」这种会把差异抹平的说法。
+            detail = (before === after
+                ? '前后都是 ' + before + ' 行，'
+                : '提交前 ' + before + ' 行、现在 ' + after + ' 行，') + detail;
+        }
+        return '<div class="p-4 text-center text-muted">' +
+               '<i class="bi bi-check2-circle fs-1 mb-3 d-block"></i>' +
+               '<p class="mb-1">这张表在这个区间内<b>没有净变更</b></p>' +
+               '<p class="mb-0 small">' + escapeHtml(detail + '（常见于重新导出后又改回）。') + '</p>' +
+               '</div>';
+    }
+
+    if (changed > 0) {
+        return '<div class="p-4 text-center text-muted">' +
+               '<i class="bi bi-exclamation-triangle fs-1 mb-3 d-block text-warning"></i>' +
+               '<p class="mb-1">统计说有 ' + changed + ' 处变更，但平台没有给出可展示的行</p>' +
+               '<p class="mb-0 small">统计与内容对不上，属于平台侧的问题 —— ' +
+               '请把这张表的文件路径反馈给维护者。</p>' +
+               '</div>';
+    }
+
+    // 载荷里没有 stats（老缓存）：不断言「没有变更」，因为无从判断。
+    return '<div class="p-4 text-center text-muted">' +
+           '<i class="bi bi-table fs-1 mb-3 d-block"></i>' +
+           '<p class="mb-0">该工作表没有变更行</p>' +
+           '</div>';
+}
+
 // 生成合并Excel工作表标签（返回选中展示的表名）
 function generateMergedExcelTabs(tabsContainer, sheets) {
     const sheetNames = Object.keys(sheets);
@@ -1617,6 +1663,16 @@ function showMergedExcelSheet(contentContainer, sheetName, sheetData) {
             '<i class="bi bi-table fs-1 mb-3 d-block"></i>' +
             '<p class="mb-0">该工作表没有数据行</p>' +
             '</div>';
+        return;
+    }
+
+    // 没有变更行、也没有表级/列级变更 → 这张表在这个区间里**没有净变更**。
+    // 必须显式说出来：`rows` 是**空数组**，而空数组在 JS 里是真值，上面两个
+    // 「无数据」分支都拦不住它（headers 非空），于是渲染出一张只有表头、一行都没有的
+    // 表，看起来就跟坏了一样。同形逻辑在周版本完整 diff 页
+    // （weekly_version_full_diff.html），两处改要一起改。
+    if (!(sheetData.rows || []).length && !noticesHtml) {
+        contentContainer.innerHTML = noNetChangeHtml(sheetData);
         return;
     }
 
