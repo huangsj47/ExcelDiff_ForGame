@@ -384,3 +384,65 @@ def test_a_degenerate_round_index_is_treated_as_the_first_round(round_index):
     """不能因为轮次下标异常就把上下文渲染漏掉或重复渲染。"""
     message = _message(round_index=round_index)
     assert "没有任何 diff" in message
+
+
+def test_change_summary_states_the_true_total_when_the_list_is_truncated():
+    """清单被截断时，首行必须写出**截断前**的真实文件数。
+
+    线上那个周版本真实变更 767 个文件、清单只列了 200 个，而首行写的是「共 200 个文件」——
+    模型于是写出「本版本共 67 个提交、200 个文件」，读者与它自己都以为这就是全量，
+    后面「结论强度受限」的免责声明因此显得没来由（没人知道还有 567 个文件没进清单）。
+
+    `summary.total_files` 一直躺在 payload 里，只是从没进过提示词。
+    """
+    commits = [
+        _commit(files=(FileChange(path="a.py"), FileChange(path="b.py"))),
+        _commit(commit="c" * 40, files=(FileChange(path="c.py"),)),
+    ]
+    text = render_change_summary(commits, total_files=767)
+
+    assert "767" in text, "没有写出截断前的真实文件数"
+    assert "3 个" in text, "没有写出清单里实际有多少个"
+    assert "还有 764 个文件没有列出来" in text, "没有说明模型看不到多少内容"
+    assert "本次只看到" in text, "没有给出「只看到 M/N」的写法引导"
+
+
+def test_change_summary_keeps_the_plain_wording_when_nothing_is_omitted():
+    """没截断时保持原来的句子 —— 不要凭空多出一段免责声明。"""
+    text = render_change_summary(
+        [_commit(files=(FileChange(path="a.py"), FileChange(path="b.py")))]
+    )
+    assert "共 1 个提交、2 个文件" in text
+    assert "没有列出来" not in text
+
+
+def test_change_summary_does_not_trust_a_total_smaller_than_the_list():
+    """总数比清单还小时按清单算 —— 脏数据不能把首行写小。"""
+    text = render_change_summary(
+        [_commit(files=(FileChange(path="a.py"), FileChange(path="b.py")))],
+        total_files=1,
+    )
+    assert "共 1 个提交、2 个文件" in text
+
+
+def test_from_weekly_payload_passes_the_real_total_into_the_prompt():
+    """接线守卫：真实文件数必须从 payload 一路传到渲染出来的提示词里。
+
+    只测 `render_change_summary(..., total_files=767)` 只能证明那个参数管用，
+    证明不了它被传了 —— 把 `change_set` 里那一行删掉，那些用例照样全绿。
+    """
+    from services.ai.change_set import from_weekly_payload
+
+    payload = {
+        "summary": {"total_files": 767, "delta_files": 767},
+        "delta_files": [
+            {"latest_commit_id": "a" * 40, "file_path": "config/奖励模式_CfgRewardMode.xlsx"},
+            {"latest_commit_id": "b" * 40, "file_path": "code/qz_pub/cfg/SeasonRankCfgMod.lua"},
+        ],
+        "delta_truncated": True,
+    }
+    summary = from_weekly_payload(payload, readable_references=()).summary
+
+    assert "767" in summary, "真实文件数没有进提示词"
+    assert "2 个" in summary, "清单里实际有几个也没写"
+    assert "没有列出来" in summary, "没有告诉模型它看不到大部分文件"

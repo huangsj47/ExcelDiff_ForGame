@@ -59,6 +59,7 @@ from services.ai.endpoint_service import (
 )
 from services.ai.engine import (
     STATUS_FAILED,
+    STATUS_SUCCEEDED,
     EngineLimits,
     EngineOutcome,
     run_analysis,
@@ -73,6 +74,7 @@ from services.ai.skill_loader import load_skills, skill_revision
 from utils.dpapi_utils import DPAPI_PREFIX, decrypt_dpapi
 from utils.logger import log_print
 from utils.security_utils import decrypt_credential, encrypt_credential
+from utils.timezone_utils import format_beijing_time
 
 MAX_FILES_DEFAULT = DEFAULT_MAX_FILES_PER_RUN
 FULL_ANALYSIS_FILE_THRESHOLD = 50
@@ -366,12 +368,30 @@ def _parse_response_payload(raw: Optional[str]) -> Optional[dict]:
         return None
 
 
+# 界面上的「最近分析」时间一律走北京时间（UTC+8）。
+#
+# 库里存的是 naive-UTC 墙钟（SQLite 会丢掉 tzinfo，口径见 utils/timezone_utils），
+# 而 created_at 直接 isoformat() 出来是「带时间、不带偏移、还带微秒」的串，界面上
+# 就长成 2026-09-17T12:53:28.872891 —— 既不是北京时间，也不是人看的格式。
+#
+# 为什么在**服务端**格式化而不是交给前端：ES 规范里「带时间但不带偏移」的 ISO 串
+# 按**浏览器本地时区**解析，非 UTC+8 的机器上再转换一次就又多错 8 小时。在服务端
+# 算好、前端只负责显示，这类错就没有发生的余地。
+def _created_at_display(run: AiAnalysisRun) -> Optional[str]:
+    created_at = getattr(run, "created_at", None)
+    if created_at is None:
+        return None
+    # format_beijing_time 把 naive 入参当 UTC 解释，与库里的 naive-UTC 口径一致
+    return format_beijing_time(created_at, "%Y-%m-%d %H:%M:%S")
+
+
 def _stream_cached_run(run: AiAnalysisRun) -> Iterable[str]:
     yield _sse_event(
         "cached",
         {
             "run_id": run.id,
             "created_at": run.created_at.isoformat() if run.created_at else None,
+            "created_at_display": _created_at_display(run),
             "scope": run.scope,
         },
     )
@@ -406,11 +426,18 @@ def cleanup_expired_analysis_runs(retention_days: int = ANALYSIS_CACHE_DAYS):
 
 
 def _repo_priority(repo: Repository) -> int:
+    """取样时仓库的先手顺序：代码仓库优先于配表仓库。
+
+    **判据只能是 `resource_type`，不能加上 `type == "git"`。** 线上两个仓库的
+    `type` 都是 `git`，那一句会让「代码仓库」和「配表仓库」一起返回 2 —— 优先级
+    形同虚设，`policy.sample_strategy` 写着 `priority_then_commit_count` 而实际
+    只按 `commit_count` 排。
+
+    注意这个值**只用于取样的发牌顺序**，不再被 `select_primary_weekly_config`
+    复用（那里关心的是分组身份，不是取样偏好）。
+    """
     resource_type = str(getattr(repo, "resource_type", "") or "").lower()
-    repo_type = str(getattr(repo, "type", "") or "").lower()
-    if resource_type == "code" or repo_type == "git":
-        return 2
-    return 1
+    return 2 if resource_type == "code" else 1
 
 
 def _is_critical_path(path: str) -> bool:
@@ -498,6 +525,55 @@ def _limit_items(items: List[dict], max_items: int) -> List[dict]:
     if max_items <= 0:
         return items
     return items[:max_items]
+
+
+def _sample_with_repo_fairness(
+    items: List[dict], max_items: int, *, repo_key: str = "repository_id"
+) -> List[dict]:
+    """按「各仓库轮流发牌」取样，保证没有仓库会被整个挤出清单。
+
+    **不能只按全局排序截断。** 线上一次周版本有 767 个文件：748 个 lua（代码仓库）
+    加 19 个配表，取前 200 时配表**一个都进不去** —— 而配表改的正是数值、ID、奖励
+    这些评审最关心的东西。（当时的实际排序按 `commit_count` 降序，19 张配表因为
+    改动次数少而排在后面。）
+
+    做法是轮转发牌：按各仓库**优先级最高的那条**决定发牌顺序，然后每轮给每个仓库
+    各发一条，直到取满或全部发完。文件少的仓库很快发完，剩下的名额自然全归文件多的
+    仓库 —— 上例里配表 19 条全进，代码仓库拿走其余 181 条。
+
+    `items` 必须**已按全局优先级降序排好**：桶内顺序、以及返回值的展示顺序都依赖它。
+    """
+    if max_items <= 0 or len(items) <= max_items:
+        return list(items)
+
+    buckets: Dict[object, List[int]] = {}
+    for position, item in enumerate(items):
+        buckets.setdefault(item.get(repo_key), []).append(position)
+
+    # 每个仓库的第一条就是它优先级最高的那条（items 已全局排序），
+    # 用它代表这个仓库的先手顺序。sorted 是稳定的，同优先级时保持首次出现的顺序。
+    deal_order = sorted(
+        buckets.values(),
+        key=lambda positions: -int(items[positions[0]].get("priority") or 0),
+    )
+
+    chosen: List[int] = []
+    round_index = 0
+    while len(chosen) < max_items:
+        dealt = False
+        for positions in deal_order:
+            if round_index >= len(positions):
+                continue
+            chosen.append(positions[round_index])
+            dealt = True
+            if len(chosen) >= max_items:
+                break
+        if not dealt:      # 所有仓库都发完了
+            break
+        round_index += 1
+
+    chosen.sort()          # 回到全局优先级顺序，展示口径与改动前一致
+    return [items[position] for position in chosen]
 
 
 def _summarize_weekly_files(
@@ -665,7 +741,7 @@ def build_weekly_payload(
     repo_details.sort(key=lambda item: (item.get("priority", 1), item.get("repository_name", "")), reverse=True)
 
     delta_files = details.get("delta_files", [])
-    limited_delta_files = _limit_items(delta_files, max_files)
+    limited_delta_files = _sample_with_repo_fairness(delta_files, max_files)
 
     truncated = len(delta_files) > len(limited_delta_files)
     payload = {
@@ -1164,7 +1240,7 @@ def stream_weekly_analysis(config_id: int, trigger_source: str = "manual") -> It
     for line in (result.get("report_markdown") or "").splitlines():
         yield _sse_event("chunk", {"text": line})
 
-    _update_weekly_state(payload, run, state)
+    _update_weekly_state(payload, run, state, engine_status=result.get("status"))
     yield _sse_event("result", result)
 
 
@@ -1205,7 +1281,7 @@ def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None
         target_key=group_key,
     )
 
-    _update_weekly_state(payload, run, state)
+    _update_weekly_state(payload, run, state, engine_status=result.get("status"))
     return {
         "status": "succeeded" if result.get("status") != "failed" else "failed",
         "run_id": run.id,
@@ -1213,16 +1289,31 @@ def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None
     }
 
 
-def _update_weekly_state(payload: dict, run: AiAnalysisRun, state: Optional[AiWeeklyAnalysisState]) -> None:
+def _update_weekly_state(
+    payload: dict,
+    run: AiAnalysisRun,
+    state: Optional[AiWeeklyAnalysisState],
+    *,
+    engine_status: Optional[str],
+) -> None:
     """推进这个周版本分组的「分析水位线」。
 
-    **只有成功的 run 才推进。** `last_analyzed_at` 是增量分析的水位线
+    **只有真正跑完整了的 run 才推进。** `last_analyzed_at` 是增量分析的水位线
     （`_summarize_weekly_files` 用它筛 `updated_at > last_analyzed_at` 的文件），
-    一次失败的分析如果把它推到当前时刻，那批变更就被整体判成「已看过」——
+    一次没跑完的分析如果把它推到当前时刻，那批变更就被整体判成「已看过」——
     下一次分析直接返回 no_change 静默跳过，用户再点多少次都跑不动。
-    失败就保持水位线不动，下次重跑同一批变更。
+
+    这里刻意**不看 `run.status`**：`_persist_outcome` 把 `degraded`（降级但有报告，
+    例如「上下文索取额度用尽，基于已有证据出结论」）也存成 `"succeeded"`，所以
+    `run.status` 分不出「跑完了」与「没跑完就出结论」。而 degraded 恰恰是水位线
+    最不该推进的那一类：线上有一次 767 个文件里有 748 个 `.lua` 的 diff 根本没读到，
+    却被标成「已分析」，增量从此只看得到水位线之后的新文件。
+
+    判据用引擎侧的 `outcome.status`（`STATUS_SUCCEEDED` 才推进），
+    所以这是个**必填的关键字参数** —— 将来新增调用点时，忘了传会直接报错，
+    而不是悄悄退回一个分不出 degraded 的判据。
     """
-    if run.status != "succeeded":
+    if engine_status != STATUS_SUCCEEDED:
         return
     group = payload.get("group") or {}
     summary = payload.get("summary") or {}
@@ -1273,6 +1364,7 @@ def get_latest_weekly_result(config_id: int) -> Optional[dict]:
         "scope": run.scope,
         "trigger_source": run.trigger_source,
         "created_at": run.created_at.isoformat() if run.created_at else None,
+            "created_at_display": _created_at_display(run),
         "response_text": run.response_text,
         "result": payload,
     }
@@ -1293,13 +1385,23 @@ def get_latest_commit_result(commit_id: int) -> Optional[dict]:
         "scope": run.scope,
         "trigger_source": run.trigger_source,
         "created_at": run.created_at.isoformat() if run.created_at else None,
+            "created_at_display": _created_at_display(run),
         "response_text": run.response_text,
         "result": payload,
     }
 
 
 def select_primary_weekly_config(configs: List[WeeklyVersionConfig]) -> WeeklyVersionConfig:
-    def _score(cfg: WeeklyVersionConfig) -> Tuple[int, int]:
-        return (_repo_priority(cfg.repository), -cfg.id)
+    """挑一个 config，用来给**新建分组**命名（`base_name`）并定窗口。
 
-    return sorted(configs, key=_score, reverse=True)[0]
+    **刻意不跟随取样的仓库优先级。** 这个值决定 `AiWeeklyAnalysisState.base_name`，
+    而 base_name 参与 `group_key` 的计算 —— 换个仓库当 primary 就是换了分组身份，
+    已有分组的增量水位线会对不上。所以这里保持既有口径：**取 id 最小的那个**
+    （部署上就是先建的配表仓库那一侧）。
+
+    以前这里写的是 `sorted(configs, key=(_repo_priority, -cfg.id), reverse=True)[0]`。
+    当时 `_repo_priority` 对两个仓库都返回 2（`type == "git"` 那一句），于是实际
+    行为就是「id 最小」；把它显式写出来，是为了在 `_repo_priority` 修好之后不再
+    阴差阳错地改成「代码仓库当主」。
+    """
+    return min(configs, key=lambda cfg: cfg.id)

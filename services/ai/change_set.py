@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Optional, Sequence
 
 from services.ai.bundles import build_bundles, describe_bundles
 from services.ai.prompt import CommitSummary, FileChange, render_change_summary
@@ -121,11 +121,20 @@ def from_weekly_payload(
             "不是全部改动。）"
         )
 
+    # 截断前的真实文件数（`summary.total_files`）。清单是取样出来的，
+    # 不把这个数传下去，模型会把清单长度当成「本版本的文件数」。
+    summary = payload.get("summary") or {}
+    try:
+        total_files = int(summary.get("total_files"))
+    except (TypeError, ValueError):
+        total_files = None
+
     return build(
         commits,
         readable_references=readable_references,
         scope_note=scope_note,
         bundle_limit=bundle_limit,
+        total_files=total_files,
     )
 
 
@@ -135,6 +144,7 @@ def build(
     readable_references: Iterable[str] = (),
     scope_note: str = "",
     bundle_limit: int = DEFAULT_BUNDLE_LIMIT,
+    total_files: Optional[int] = None,
 ) -> ChangeSet:
     """渲染清单并算出白名单范围。两种模式共用。"""
     ordered = tuple(commits)
@@ -143,7 +153,7 @@ def build(
     bundles = build_bundles(paths)
     bundle_lines = tuple(describe_bundles(bundles, limit=bundle_limit))
 
-    body = render_change_summary(ordered)
+    body = render_change_summary(ordered, total_files=total_files)
     if scope_note:
         body = f"{scope_note}\n\n{body}"
     if bundle_lines:

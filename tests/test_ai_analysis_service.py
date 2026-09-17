@@ -932,3 +932,128 @@ def test_the_second_run_carries_the_first_runs_findings_as_a_baseline(monkeypatc
         assert "不要当作新发现重复报" in user
         # 判重靠指纹，指纹得跟着进提示词，模型才能逐条对照。
         assert "#" in user
+
+
+# ==========================================================================
+# 增量水位线：只有「真正跑完」的 run 才能推进
+# ==========================================================================
+
+
+def test_a_degraded_run_does_not_advance_the_weekly_watermark():
+    """`degraded`（降级但有报告）不许推进水位线。
+
+    `_persist_outcome` 把 degraded 也存成 `run.status == "succeeded"`，所以旧的
+    `if run.status != "succeeded": return` 拦不住它 —— 而 degraded 恰恰是最不该
+    推进的那一类：线上那个周版本 767 个文件里有 748 个 `.lua` 的 diff 根本没读到，
+    照样被判成「已分析」，增量从此只看得到水位线之后的新文件，那批变更再也不会被
+    重新分析。判据必须是引擎侧的 `outcome.status`。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        # 不需要建仓库/周版本配置：`_update_weekly_state` 只看 payload、run、state。
+        start = datetime(2026, 3, 1, 0, 0)
+        end = datetime(2026, 3, 8, 0, 0)
+
+        run = AiAnalysisRun(
+            project_id=project.id,
+            target_type="weekly",
+            target_key="W1",
+            status="succeeded",      # degraded 落库后的样子
+            scope="full",
+            trigger_source="manual",
+        )
+        db.session.add(run)
+        db.session.commit()
+
+        state = AiWeeklyAnalysisState(
+            project_id=project.id,
+            group_key="W1",
+            base_name="W1",
+            start_time=start,
+            end_time=end,
+            last_analyzed_at=None,
+        )
+        db.session.add(state)
+        db.session.commit()
+
+        payload = {"group": {"project_id": project.id, "key": "W1",
+                             "base_name": "W1",
+                             "start_time": start.isoformat(), "end_time": end.isoformat()},
+                   "summary": {"total_files": 3}}
+
+        # degraded：水位线必须原地不动，下次才会重跑同一批变更
+        ai_service._update_weekly_state(payload, run, state, engine_status="degraded")
+        assert state.last_analyzed_at is None, "降级的分析推进了水位线，那批变更再也不会被重跑"
+        assert state.last_analysis_run_id is None
+
+        # failed：同样不许推进
+        ai_service._update_weekly_state(payload, run, state, engine_status="failed")
+        assert state.last_analyzed_at is None
+
+        # succeeded：正常推进
+        ai_service._update_weekly_state(payload, run, state, engine_status="succeeded")
+        assert state.last_analyzed_at is not None, "跑完了却没推进水位线，增量会重复分析"
+        assert state.last_analysis_run_id == run.id
+
+
+def test_the_watermark_judgement_cannot_silently_fall_back_to_run_status():
+    """`engine_status` 是必填关键字参数。
+
+    给它默认值（或让它可选）就等于留了一条「忘了传就退回 run.status」的路，
+    而 run.status 分不出 degraded —— 那正是这个缺陷本身。
+    """
+    import inspect
+
+    signature = inspect.signature(ai_service._update_weekly_state)
+    param = signature.parameters.get("engine_status")
+    assert param is not None, "engine_status 参数没了"
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY, "engine_status 应当是仅关键字参数"
+    assert param.default is inspect.Parameter.empty, (
+        "engine_status 有默认值 —— 忘了传就会退回分不出 degraded 的 run.status"
+    )
+
+
+def test_a_small_repository_still_reaches_the_payload_when_truncated(monkeypatch):
+    """端到端：取样必须真的作用在 payload 构建上。
+
+    **这条是接线守卫。** 直接测 `_sample_with_repo_fairness` 只能证明那个函数对，
+    证明不了它被用上了 —— 把调用点换回 `_limit_items`（原来的直接截断），
+    只测函数的用例照样全绿。线上那个「配表被整个挤出清单」的缺陷，
+    只有从 `build_weekly_payload` 一路看到 `delta_files` 才拦得住。
+
+    两个仓库的 `type` 都设成 `git`，复刻线上「配表仓库也是 git」这个前提 ——
+    优先级退化的根因就在那里。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo_code = _create_repo(project.id, _uid("code"), "git", "code")
+        repo_table = _create_repo(project.id, _uid("table"), "git", "table")
+
+        start = datetime(2026, 3, 1, 0, 0)
+        end = datetime(2026, 3, 8, 0, 0)
+        cfg_code = _create_weekly_config(project.id, repo_code, "W1", start, end)
+        cfg_table = _create_weekly_config(project.id, repo_table, "W1", start, end)
+
+        base = datetime.now(timezone.utc) - timedelta(hours=2)
+        for i in range(30):
+            _seed_diff_cache(cfg_code, repo_code, f"src/file_{i}.lua", base)
+        for i in range(3):
+            _seed_diff_cache(cfg_table, repo_table, f"config/table_{i}.xlsx", base)
+        db.session.commit()
+
+        monkeypatch.setattr(
+            ai_service, "get_project_analysis_config",
+            lambda *a, **k: {"max_files_per_run": 10},
+        )
+        payload, _state, skip_reason = ai_service.build_weekly_payload(cfg_code.id)
+        assert skip_reason is None
+
+        paths = [item["file_path"] for item in payload["delta_files"]]
+        assert len(paths) == 10, f"没有按上限截断：{len(paths)}"
+        table_paths = [path for path in paths if path.startswith("config/")]
+        assert len(table_paths) == 3, (
+            f"配表仓库被挤出了清单（进了 {len(table_paths)}/3 个）：{paths}"
+        )
+        assert payload["summary"]["total_files"] == 33

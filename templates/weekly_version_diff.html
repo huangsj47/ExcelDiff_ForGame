@@ -282,17 +282,92 @@
         border-radius: var(--radius-xl, 8px);
         padding: var(--space-5, 20px);
         /* 正文是中文分析散文，不是代码：等宽字体让每个汉字占两个字宽，每行字数直接腰斩。
-           pre-wrap 保留（报告里的换行与缩进有意义），字体回到无衬线、字号提到 14px、行高 1.7。 */
+           字体回到无衬线、字号提到 14px、行高 1.7。 */
         font-family: var(--font-sans, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
                      "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC",
                      Arial, sans-serif);
         font-size: var(--font-size-md, 14px);
         line-height: 1.7;
-        white-space: pre-wrap;
+        /* 这里**没有** white-space: pre-wrap：正文已经是渲染后的 HTML（标题/段落/列表），
+           换行由块级元素负责。留着 pre-wrap 会把标签间的空白也当正文渲染出来。 */
         /* 长路径 / URL 就地折行，不撑出横向滚动条 */
         overflow-wrap: anywhere;
         overflow: auto;
         color: var(--color-text, #1f2937);
+    }
+    /* ---- 渲染后的报告正文（Markdown 子集，见 static/js/ai-report-markdown.js）----
+       这是阅读面不是表单：标题要分级、列表要有缩进、段与段要有间距，
+       否则一份七章节的报告会糊成一片。 */
+    .ai-analysis-output > :first-child { margin-top: 0; }
+    .ai-analysis-output > :last-child { margin-bottom: 0; }
+    .ai-analysis-output h1,
+    .ai-analysis-output h2,
+    .ai-analysis-output h3,
+    .ai-analysis-output h4,
+    .ai-analysis-output h5,
+    .ai-analysis-output h6 {
+        margin: var(--space-5, 20px) 0 var(--space-3, 12px);
+        font-weight: 600;
+        line-height: 1.4;
+        color: var(--color-text, #212529);
+    }
+    /* 一级标题是报告的七个章节，给一条分隔线让章节边界看得见；
+       首个标题贴顶，不要在上面留出空白。 */
+    .ai-analysis-output h1 {
+        padding-bottom: var(--space-2, 8px);
+        border-bottom: 1px solid var(--color-border, #dee2e6);
+        font-size: var(--font-size-lg, 16px);
+    }
+    .ai-analysis-output h2 { font-size: var(--font-size-md, 14px); }
+    .ai-analysis-output h3,
+    .ai-analysis-output h4,
+    .ai-analysis-output h5,
+    .ai-analysis-output h6 { font-size: var(--font-size-base, 13px); }
+    .ai-analysis-output p { margin: 0 0 var(--space-3, 12px); }
+    .ai-analysis-output ul,
+    .ai-analysis-output ol {
+        margin: 0 0 var(--space-3, 12px);
+        padding-left: var(--space-6, 24px);
+    }
+    .ai-analysis-output li { margin-bottom: var(--space-1, 4px); }
+    /* 报告里的列表项常常很长（一条测试建议就是一整句），
+       让 li 内的多行文本与首行对齐，不要绕到序号下面。 */
+    .ai-analysis-output li > p { margin-bottom: var(--space-2, 8px); }
+    .ai-analysis-output strong {
+        font-weight: 600;
+        color: var(--color-text, #212529);
+    }
+    .ai-analysis-output code {
+        padding: 0.1em 0.35em;
+        border-radius: var(--radius-sm, 3px);
+        background: var(--color-surface-muted, #e9ecef);
+        font-family: var(--font-mono, "Consolas", "Courier New", monospace);
+        font-size: 0.9em;
+        color: var(--color-danger-text, #b3261e);
+    }
+    .ai-analysis-output blockquote {
+        margin: 0 0 var(--space-3, 12px);
+        padding-left: var(--space-4, 16px);
+        border-left: 3px solid var(--color-border-strong, #d0d7de);
+        color: var(--color-text-secondary, #495057);
+    }
+    .ai-analysis-output pre {
+        margin: 0 0 var(--space-3, 12px);
+        padding: var(--space-3, 12px);
+        background: var(--color-surface-subtle, #f8f9fa);
+        border: 1px solid var(--color-border, #dee2e6);
+        border-radius: var(--radius-lg, 6px);
+        /* 代码不折行，改由自身横向滚动 —— 折行会把缩进和列对齐毁掉。
+           父级的 overflow-wrap: anywhere 会继承下来，这里要显式收回去。 */
+        overflow-x: auto;
+        overflow-wrap: normal;
+        white-space: pre;
+    }
+    .ai-analysis-output pre code {
+        padding: 0;
+        background: none;
+        color: var(--color-text, #212529);
+        font-size: 0.85em;
     }
     /* 空态 / 进行中：内容是提示语而不是报告，居中显示，别让一行字吊在大白框的左上角 */
     .ai-analysis-output.is-empty,
@@ -1206,7 +1281,9 @@
     </div>
     <div class="ai-drawer-body">
         <div class="ai-drawer-meta" id="weeklyAiMeta">自动分析每 1 小时触发，可手动补跑。</div>
-        <pre class="ai-analysis-output is-empty" id="weeklyAiOutput">暂无分析结果。</pre>
+        <!-- 正文渲染成 HTML（Markdown 子集），所以是 div 而不是 pre：
+             pre 的 white-space:pre-wrap 会和块级元素打架 -->
+        <div class="ai-analysis-output is-empty" id="weeklyAiOutput">暂无分析结果。</div>
     </div>
     <div class="ai-drawer-footer">
         <button type="button" class="btn btn-sm btn-outline-secondary" id="weeklyAiRefreshBtn">刷新结果</button>
@@ -1248,24 +1325,52 @@ function setWeeklyAiStatusBadge(text, variant) {
 function setWeeklyAiOutput(text, isEmpty, variant) {
     const output = document.getElementById('weeklyAiOutput');
     if (!output) return;
+    weeklyAiBuffer = '';
+    // 走 textContent 而不是 innerHTML：占位语、进行中、失败这三种都是**平台自己的
+    // 文案**（失败那条还会带上网关/模型的原文）。它们不该被当 Markdown 解析 ——
+    // 错误信息里的尖括号、竖线、井号被当成标记只会显示得更乱。
     output.textContent = text;
     output.classList.toggle('is-empty', !!isEmpty);
     output.classList.toggle('is-busy', variant === 'busy');
     output.classList.toggle('is-error', variant === 'error');
 }
 
+// 成功报告走这里：累积原始 Markdown，再整体渲染。
+// **不能逐行渲染**：列表、代码围栏、引用都可能跨行，一行一行渲染会把一个列表
+// 拆成一串单元素列表。
+function setWeeklyAiReport(markdown) {
+    weeklyAiBuffer = String(markdown === null || markdown === undefined ? '' : markdown);
+    renderWeeklyAi();
+}
+
 function appendWeeklyAiLine(text) {
     const output = document.getElementById('weeklyAiOutput');
     if (!output) return;
     // 占位文案（「暂无分析结果。」「AI 分析进行中...」）在第一段真实内容到达时清掉，
-    // 否则报告的第一行会一直挂着那句占位。
-    if (output.classList.contains('is-empty') || output.classList.contains('is-busy')) {
-        output.textContent = '';
-        output.classList.remove('is-empty');
-        output.classList.remove('is-busy');
-    }
-    output.textContent += (output.textContent ? '\n' : '') + text;
+    // 否则报告的开头会一直挂着那句占位。
+    output.classList.remove('is-empty');
+    output.classList.remove('is-busy');
+    weeklyAiBuffer += (weeklyAiBuffer ? '\n' : '') + text;
+    scheduleWeeklyAi();
+}
+
+function renderWeeklyAi() {
+    const output = document.getElementById('weeklyAiOutput');
+    if (!output) return;
+    // 渲染器先整体转义再套白名单标签，模型给的内容永远以实体形式出现
+    // （见 static/js/ai-report-markdown.js），所以这里赋 innerHTML 是安全的。
+    output.innerHTML = AiReportMarkdown.render(weeklyAiBuffer);
     output.scrollTop = output.scrollHeight;
+}
+
+// 逐行推送时若每行都整篇重解析，几百行的报告会明显卡顿；合并到一帧只渲染一次。
+function scheduleWeeklyAi() {
+    if (weeklyAiRenderQueued) return;
+    weeklyAiRenderQueued = true;
+    requestAnimationFrame(function () {
+        weeklyAiRenderQueued = false;
+        renderWeeklyAi();
+    });
 }
 
 function closeWeeklyAiStream() {
@@ -1336,19 +1441,19 @@ async function loadWeeklyAiLatest(force = false) {
                     `上次分析失败：${result.error_message || '原因未知'}`, false, 'error');
                 setWeeklyAiStatusBadge('失败', 'danger');
                 if (meta) {
-                    meta.textContent = `最近一次分析失败（${result.created_at || '-'}）`;
+                    meta.textContent = `最近一次分析失败（${result.created_at_display || result.created_at || '-'}）`;
                 }
                 return false;
             }
             weeklyAiHasCached = true;
             const risk = result.result?.risk_level || '-';
-            const createdAt = result.created_at || '-';
+            const createdAt = result.created_at_display || result.created_at || '-';
             const scope = result.scope || '-';
             if (meta) {
                 meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`;
             }
             if (result.response_text) {
-                setWeeklyAiOutput(result.response_text, false);
+                setWeeklyAiReport(result.response_text);
             }
             setWeeklyAiStatusBadge('已有结果', 'success');
             return true;

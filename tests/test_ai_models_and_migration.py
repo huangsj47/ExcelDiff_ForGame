@@ -517,7 +517,7 @@ def test_run_to_dict_is_json_safe():
 # 不是估的。真实周版本的文件数会变，但数量级就是这个。
 _LARGE_VERSION_SUMMARY_CHARS = 39_283
 
-# 平台内置 SKILL.md（约 8,300 字符）加项目知识包，按 12,000 算常驻开销。
+# 平台内置 SKILL.md（约 9,600 字符）加项目知识包，按 12,000 算常驻开销。
 # references 是按需索取的，索取时占用的是上下文那部分预算，所以不重复计入这里。
 _SYSTEM_PROMPT_CHARS = 12_000
 

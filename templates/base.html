@@ -550,6 +550,7 @@
     </script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/ai-report-markdown.js') }}"></script>
     {% if is_admin() and deployment_mode in ['platform', 'agent'] %}
     <script>
     (function() {

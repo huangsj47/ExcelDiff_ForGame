@@ -30,7 +30,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Optional, Sequence
 
 from services.ai.budget import ContextItem
 from services.ai.protocol import build_budget_exhausted_hint
@@ -109,16 +109,36 @@ def render_change_summary(
     commits: Sequence[CommitSummary],
     *,
     omitted_files_note: str = "",
+    total_files: Optional[int] = None,
 ) -> str:
     """把变更批次渲染成给模型看的清单。
 
     「共 N 个文件」这类计数必须准确 —— 模型会用它们判断自己看到的是不是全部。
+
+    `total_files` 是**截断前的真实文件数**。清单是按优先级取样出来的，不给这个值时
+    首行会把「清单里的文件数」说成「本版本的文件数」：线上那个周版本真实变更 767 个文件、
+    清单只列了 200 个，模型于是写出「本版本共 67 个提交、200 个文件」，读者与它自己
+    都以为这就是全量 —— 后面「结论强度受限」的免责声明显得没来由，因为没人知道
+    还有 567 个文件根本没进清单。
     """
-    total_files = sum(len(commit.files) for commit in commits)
-    lines = [
-        f"本次变更共 {len(commits)} 个提交、{total_files} 个文件。",
-        "",
-    ]
+    listed_files = sum(len(commit.files) for commit in commits)
+    actual_total = listed_files if total_files is None else max(total_files, listed_files)
+
+    if actual_total > listed_files:
+        lines = [
+            f"本次变更的文件共 {actual_total} 个，下面按优先级列出其中的 {listed_files} 个"
+            f"（涉及 {len(commits)} 个提交）。",
+            f"**还有 {actual_total - listed_files} 个文件没有列出来，你也看不到它们。**"
+            "所以不要写成「本版本共改了 N 个文件」这类把清单当成全量的说法，"
+            "也不要把结论强度说得比手上的证据更高 —— 需要时明确写出"
+            "「本次只看到 M/N 个文件」。",
+            "",
+        ]
+    else:
+        lines = [
+            f"本次变更共 {len(commits)} 个提交、{listed_files} 个文件。",
+            "",
+        ]
     if omitted_files_note:
         lines.extend([omitted_files_note, ""])
 
