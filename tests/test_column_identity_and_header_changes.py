@@ -28,8 +28,8 @@
 from __future__ import annotations
 
 import io
-import re
 import os
+import re
 import sys
 from collections import Counter
 
