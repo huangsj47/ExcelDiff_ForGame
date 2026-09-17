@@ -323,6 +323,26 @@ class TestModalStructure:
             'white-space 又写回内联 style 了 —— 它应该在样式段里定义'
         )
 
+    def test_the_example_body_fills_the_available_width(self):
+        """示例正文不许用 `ch` 单位限制宽度。
+
+        实测缺陷：这里曾写 `max-width: 68ch`。`ch` 是数字 "0" 的宽度
+        （约 0.5em ≈ 6px），68ch ≈ 408px ≈ **34 个汉字**/行；而示例原文是按约
+        45 字手工折行的。容器比原文窄 → 硬换行被二次折行，右侧空一大截、
+        末尾留下「索、返程撤离。」这种半行。
+
+        这条用例拦的是「有人又用 `ch` 给中文内容定宽」——`ch` 对 CJK 是错的单位，
+        因为它量的是西文数字，不是汉字。
+        """
+        rule = re.search(r'\.ai-example__body\s*\{([^}]*)\}', _panel_css())
+        assert rule, '.ai-example__body 没有样式定义'
+        # 先去掉注释再断言：规则里那段解释「为什么不能用 ch」的注释本身会提到
+        # max-width，按字面搜会把说明文字当成声明（这条断言第一版就这么误报过）。
+        body = re.sub(r'/\*.*?\*/', '', rule.group(1), flags=re.S)
+        assert not re.search(r'max-width\s*:', body), (
+            '示例正文又设了 max-width（多半是 ch）—— 右侧会空出来'
+        )
+
     def test_the_fields_use_a_grid_that_collapses_on_phones(self):
         """字段容器一律带 `col-12`，不许剩裸的 `col-md-*` / `col-6`。
 

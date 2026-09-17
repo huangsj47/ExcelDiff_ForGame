@@ -640,7 +640,14 @@
     .ai-example[open] > .ai-example__toggle .fas { transform: rotate(90deg); }
     /* 正文原来是 20 行 white-space: pre-wrap 的纯文本墙：行高、行宽、内滚都补上 */
     .ai-example__body {
-        max-width: 68ch;
+        /* 不设 max-width：这块要**占满**可用列宽。
+           原先写的是 `max-width: 68ch` —— 在中文内容上这个单位是错的：`ch` 是数字
+           "0" 的宽度（约 0.5em ≈ 6px），68ch ≈ 408px ≈ **34 个汉字**/行；而示例原文
+           是按约 45 字手工折行的。两个宽度对不上，于是原文的硬换行被二次折行，
+           右侧空出一大截、末尾还留下「索、返程撤离。」这种半行。
+           去掉上限后容器 ≈ 列宽（modal-lg 去掉左栏与内边距约 550px ≈ 46 汉字），
+           正好接住原文的手工折行，不再二次折行，右侧也不再空着。
+           ⚠️ 别再用 `ch` 给中文内容定宽度。 */
         max-height: 320px;
         margin-top: var(--space-2, 8px);
         padding: var(--space-3, 12px) var(--space-4, 16px);
