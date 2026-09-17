@@ -2289,6 +2289,17 @@ function closeWeeklyAiDrawer() {
 async function refreshWeeklyAiLatest(configId) {
     const meta = document.getElementById('weeklyAiMeta');
     const result = await getWeeklyAiResult(configId, true);
+    // 失败也是一条带 status/error_message 的 run：只判 response_text 会把错误文本
+    // 当成结论渲染，还会附上按变更规模估出来的兜底风险等级。必须按 status 分叉。
+    if (result && result.status === 'failed') {
+        weeklyAiHasCached = false;
+        setWeeklyAiOutput(`上次分析失败：${result.error_message || '原因未知'}`, true);
+        setWeeklyAiStatusBadge('失败', 'danger');
+        if (meta) {
+            meta.textContent = `最近一次分析失败（${result.created_at || '-'}）`;
+        }
+        return false;
+    }
     if (result && result.response_text) {
         weeklyAiHasCached = true;
         const risk = result.result?.risk_level || '-';
@@ -2330,14 +2341,21 @@ async function startWeeklyAiAnalysis(force = false) {
         }
     });
     weeklyAiSource.addEventListener('result', function(event) {
+        let payload = {};
         try {
-            const payload = JSON.parse(event.data || '{}');
+            payload = JSON.parse(event.data || '{}');
+        } catch (_err) {}
+        // 失败也走 `result` 事件，所以不能无条件打「完成」（见 refreshWeeklyAiLatest）。
+        if (payload.status === 'failed') {
+            appendWeeklyAiLine(`\n分析失败：${payload.error_message || '原因未知'}`);
+            setWeeklyAiStatusBadge('失败', 'danger');
+        } else {
             if (payload.risk_level) {
                 appendWeeklyAiLine(`\n风险等级：${payload.risk_level}`);
                 updateRiskLabelByConfig(weeklyAiCurrentConfigId, payload.risk_level);
             }
-        } catch (_err) {}
-        setWeeklyAiStatusBadge('完成', 'success');
+            setWeeklyAiStatusBadge('完成', 'success');
+        }
         if (startBtn) startBtn.disabled = false;
         weeklyAiCache.delete(weeklyAiCurrentConfigId);
         closeWeeklyAiStream();

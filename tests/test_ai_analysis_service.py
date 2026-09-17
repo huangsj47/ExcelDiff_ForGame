@@ -467,6 +467,178 @@ def test_a_failed_run_is_marked_failed_with_a_readable_reason():
         assert run.rounds_used == 0, "一次模型调用都没发生"
 
 
+def test_a_failed_run_writes_no_conclusion_fields():
+    """失败**不许**留下看起来像结论的字段。
+
+    缺陷形态（线上实测）：模型调用超时（Read timed out），但库里那条 run 照样写了
+    response_payload / response_text，于是它长得和成功记录一样 —— 内嵌的结论里有
+    `risk_level: high`。而那个 high 根本不是模型给的，是 `_determine_risk_level`
+    按变更规模（total_files >= 120）估出来的兜底值，模型压根没答上来。
+    前端只判「有没有结果」，就把面板从「待分析」显示成「已有结果 · 风险等级 high」。
+    失败只该留错误，「有没有成功结论」在数据层必须无歧义。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo = _create_repo(project.id, _uid("code"), "git", "code")
+        cfg = _create_weekly_config(
+            project.id, repo, "W1", datetime(2026, 3, 1), datetime(2026, 3, 8)
+        )
+        _seed_diff_cache(cfg, repo, "src/absorber.lua", datetime.now(timezone.utc))
+        db.session.commit()
+        ai_service.set_project_api_key(project.id, "k")
+        db.session.commit()
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+
+        run = db.session.get(AiAnalysisRun, outcome["run_id"])
+        assert run.status == "failed"
+        assert run.response_payload is None, (
+            "失败的 run 写了 response_payload —— 前端会把它当结论渲染，"
+            "连按变更规模估出来的兜底风险等级一起显示成「已有结果」"
+        )
+        assert not (run.response_text or "").strip(), (
+            "失败的 run 写了 response_text —— 前端只判这个字段就能显示「已有结果」"
+        )
+        assert run.error_message, "失败原因仍然要留着，否则用户不知道该改什么"
+
+
+def test_a_failed_run_is_never_reused_as_a_cached_result():
+    """失败的 run 不能当缓存命中，也不能被当成「最近结果」返回。
+
+    缺陷形态：`_is_run_fresh` 只判「有没有内容 / 是不是过期 / 溯源对不对」，不判
+    status。失败记录有 response_text（错误文本）、有 finished_at、溯源也齐，
+    于是被判为可用 → `stream_*` 直接**回放**这条失败：用户再点一次分析，拿到的是
+    上次的失败，而不是重新跑。
+
+    这条用例刻意构造一条**除 status 外完全可复用**的 run：内容非空、时间在窗口内、
+    溯源与当前配置逐字一致（`**ai_service._current_provenance(...)`）。否则它会因为
+    「溯源对不上」而被拒，测试就变成「无论有没有 status 判断都通过」—— 什么也没证明。
+    （第一版就踩了这个坑：mutation 掉 status 判断后它照样过。）
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        db.session.commit()
+        ai_service.update_project_analysis_config(project.id, {"api_model": "m-1"})
+        db.session.commit()
+
+        failed = AiAnalysisRun(
+            project_id=project.id,
+            target_type="commit",
+            target_id=1,
+            status="failed",
+            response_text="调用模型失败（LLMTransportError）：Read timed out.",
+            finished_at=datetime.now(timezone.utc),
+            **ai_service._current_provenance(project.id),
+        )
+        db.session.add(failed)
+        db.session.commit()
+
+        # 先确认这条 run 除了 status 之外确实「够格」被复用：把 status 改成成功就该判 True。
+        failed.status = "succeeded"
+        db.session.commit()
+        assert ai_service._is_run_fresh(failed) is True, (
+            "构造的 run 本身不可复用 —— 那下面的断言就不是在验 status 了"
+        )
+
+        failed.status = "failed"
+        db.session.commit()
+        assert ai_service._is_run_fresh(failed) is False, (
+            "失败的 run 被判成可用 —— 会被 stream_* 当缓存回放，"
+            "用户再点分析拿到的还是上次的失败"
+        )
+
+
+def test_a_failed_run_does_not_advance_the_weekly_watermark():
+    """失败不能推进增量水位线。
+
+    `last_analyzed_at` 是增量分析的水位线（用它筛 `updated_at > last_analyzed_at`
+    的文件）。一次失败的分析若把它推到当前时刻，那批变更就被整体判成「已看过」，
+    下一次分析直接返回 no_change 静默跳过 —— 用户再点多少次都跑不动。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo = _create_repo(project.id, _uid("code"), "git", "code")
+        cfg = _create_weekly_config(
+            project.id, repo, "W1", datetime(2026, 3, 1), datetime(2026, 3, 8)
+        )
+        _seed_diff_cache(cfg, repo, "src/absorber.lua", datetime.now(timezone.utc))
+        db.session.commit()
+        ai_service.set_project_api_key(project.id, "k")
+        db.session.commit()
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+        assert outcome["status"] == "failed", "这条用例的前提是这次分析失败"
+
+        state = AiWeeklyAnalysisState.query.filter_by(project_id=project.id).first()
+        assert state is None or state.last_analyzed_at is None, (
+            "失败的分析推进了水位线 —— 这批变更会被判成「已看过」，"
+            "下次分析静默跳过"
+        )
+
+
+def test_the_analysis_client_uses_the_configured_timeout():
+    """正式分析要用配置里的单次请求超时，不能用探测用的 30 秒。
+
+    缺陷形态：探测（测试连接，prompt 是「只回复两个字」）与正式分析共用
+    `build_endpoint_client`，而它把 timeout 写死成 `PROBE_TIMEOUT_SECONDS = 30`。
+    正式分析是**非流式**请求，requests 的 timeout 对非流式响应等价于「整个响应体要在
+    30 秒内到齐」—— 网关得先吃下几百 KB 的 prompt 再生成完整 JSON 报告，必然超时。
+    症状就是「测试连接 1.4 秒成功、正式分析永远 Read timed out」。
+    """
+    from services.ai.endpoint_service import PROBE_TIMEOUT_SECONDS
+
+    captured = {}
+
+    def _fake_build_probe_client(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        ai_service.set_project_api_key(project.id, "k")
+        ai_service.update_project_analysis_config(
+            project.id, {"api_base_url": "https://gw.example.com/v1", "api_model": "m"}
+        )
+        db.session.commit()
+
+        monkeypatch_target = ai_service.build_probe_client
+        ai_service.build_probe_client = _fake_build_probe_client
+        try:
+            ai_service.build_endpoint_client(project.id, {}, timeout_seconds=300)
+            assert captured["timeout_seconds"] == 300, (
+                f"分析超时没传下去，拿到的是 {captured['timeout_seconds']}"
+            )
+            captured.clear()
+            # 不传时仍然是探测值 —— 测试连接必须继续用短超时
+            ai_service.build_endpoint_client(project.id, {})
+            assert captured["timeout_seconds"] == PROBE_TIMEOUT_SECONDS
+        finally:
+            ai_service.build_probe_client = monkeypatch_target
+
+
+def test_the_configured_timeout_is_clamped_and_never_falls_back_to_probe():
+    """配置里的超时是脏值时按范围夹紧，绝不能退回探测用的 30 秒。
+
+    退回 30 秒 = 分析必然超时，而这正是这次要修的缺陷本身。
+    """
+    from models.ai_analysis.project_config import (
+        DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        REQUEST_TIMEOUT_RANGE,
+    )
+
+    low, high = REQUEST_TIMEOUT_RANGE
+    assert ai_service._coerce_timeout(None) == DEFAULT_REQUEST_TIMEOUT_SECONDS
+    assert ai_service._coerce_timeout("not-a-number") == DEFAULT_REQUEST_TIMEOUT_SECONDS
+    assert ai_service._coerce_timeout(1) == low, "低于下界要夹紧"
+    assert ai_service._coerce_timeout(999999) == high, "高于上界要夹紧"
+    assert ai_service._coerce_timeout("120") == 120, "表单来的是字符串"
+    assert ai_service._coerce_timeout(None) > 30, "回落的默认值必须大于探测值"
+
+
 def test_a_run_without_provenance_is_never_reused():
     """老库上的行这些列是 NULL，**一律判为不可复用**。
 

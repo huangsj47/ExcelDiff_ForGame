@@ -384,6 +384,18 @@ function initCommitAiAnalysis() {
             const data = await resp.json();
             if (data && data.result) {
                 const result = data.result;
+                // 失败也是一条带 status/error_message 的 run（见
+                // services/ai_analysis_service.py:_persist_outcome）。只判「有没有
+                // result」会把失败显示成「已有结果」，并附上按变更规模估出来的兜底风险等级。
+                if (result.status === 'failed') {
+                    hasCached = false;
+                    setAiOutput(`上次分析失败：${result.error_message || '原因未知'}`, true);
+                    setAiStatusBadge('失败', 'danger');
+                    if (meta) {
+                        meta.textContent = `最近一次分析失败（${result.created_at || '-'}）`;
+                    }
+                    return false;
+                }
                 hasCached = true;
                 setAiStatusBadge('已有结果', 'success');
                 if (meta) {
@@ -438,14 +450,21 @@ function initCommitAiAnalysis() {
             setAiStatusBadge('已有结果', 'success');
         });
         eventSource.addEventListener('result', function(event) {
+            let payload = {};
             try {
-                const payload = JSON.parse(event.data || '{}');
+                payload = JSON.parse(event.data || '{}');
+            } catch (_err) {
+            }
+            // 失败也走 `result` 事件，所以不能无条件打「完成」（见 loadLatestResult）。
+            if (payload.status === 'failed') {
+                appendAiLine(`\n分析失败：${payload.error_message || '原因未知'}`);
+                setAiStatusBadge('失败', 'danger');
+            } else {
                 if (payload.risk_level) {
                     appendAiLine(`\n风险等级：${payload.risk_level}`);
                 }
-            } catch (_err) {
+                setAiStatusBadge('完成', 'success');
             }
-            setAiStatusBadge('完成', 'success');
             cleanupStream();
             loadLatestResult(true);
         });

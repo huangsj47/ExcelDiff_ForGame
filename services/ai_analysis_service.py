@@ -31,7 +31,11 @@ from models.ai_analysis import (
     AiProjectApiKey,
     AiWeeklyAnalysisState,
 )
-from models.ai_analysis.project_config import DEFAULT_MAX_FILES_PER_RUN
+from models.ai_analysis.project_config import (
+    DEFAULT_MAX_FILES_PER_RUN,
+    DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    REQUEST_TIMEOUT_RANGE,
+)
 from services.ai.baseline import (
     DISPOSITION_PENDING,
     BaselineFinding,
@@ -118,6 +122,21 @@ def _get_project_config_row(project_id: int) -> Optional[AiProjectAnalysisConfig
     return AiProjectAnalysisConfig.query.filter_by(project_id=project_id).first()
 
 
+def _coerce_timeout(value) -> int:
+    """把配置里的单次请求超时收成合法整数秒。
+
+    配置是从表单来的，可能是字符串、可能是脏值、也可能是 None。这里按
+    `REQUEST_TIMEOUT_RANGE`（同一份给界面渲染范围的事实源）夹紧并回落默认值 ——
+    超时值直接决定「分析能不能跑完」，不能因为一个脏值就退回到 30 秒那种必然超时的值。
+    """
+    low, high = REQUEST_TIMEOUT_RANGE
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        seconds = DEFAULT_REQUEST_TIMEOUT_SECONDS
+    return max(low, min(high, seconds))
+
+
 def get_project_analysis_config(project_id: int) -> dict:
     """读项目维度的 AI 配置。
 
@@ -184,9 +203,17 @@ def update_project_analysis_config(
 
 
 def build_endpoint_client(
-    project_id: int, override: Optional[dict] = None
+    project_id: int, override: Optional[dict] = None, *, timeout_seconds: Optional[int] = None
 ) -> Tuple[Optional[object], list]:
-    """按「请求体优先、已保存配置回退」构造探测用的客户端。
+    """按「请求体优先、已保存配置回退」构造客户端。
+
+    `timeout_seconds` 要按用途区分：探测（测试连接 / 拉模型列表）用默认的
+    `PROBE_TIMEOUT_SECONDS`，**正式分析必须传配置里的 `request_timeout_seconds`**。
+    这里曾把两者混为一谈，于是正式分析也拿到 30 秒 —— 而它是**非流式**请求
+    （`LLMClient._request(..., stream=False)`），requests 的 timeout 对非流式响应
+    等价于「整个响应体要在 30 秒内到齐」。网关得先吃下几百 KB 的 prompt 再生成完整
+    JSON 报告，30 秒根本不够；症状就是「测试连接 1.4 秒成功、正式分析必然 Read
+    timed out」——用户会以为配置有问题，其实是超时值用错了。
 
     返回 `(client, errors)`；errors 是字段级列表，**格式与保存配置时的 400 一致** ——
     前端因此可以复用同一套「哪一栏错了」的渲染，不必为测试连接再写一份。
@@ -230,7 +257,9 @@ def build_endpoint_client(
             base_url=base_url,
             api_key=api_key,
             model=model,
-            timeout_seconds=PROBE_TIMEOUT_SECONDS,
+            timeout_seconds=(
+                timeout_seconds if timeout_seconds else PROBE_TIMEOUT_SECONDS
+            ),
         ),
         [],
     )
@@ -302,8 +331,17 @@ def _is_run_fresh(run: Optional[AiAnalysisRun], *, expected: Optional[dict] = No
 
     除了时间窗，还要求产生它的那套 prompt/skill/rules/model 与现在一致（见
     `_current_provenance`）。不传 `expected` 时按 run 自己的项目现算。
+
+    **失败的 run 一律不可复用。** 这一条以前漏了，后果比「显示错了」更严重：
+    失败的 run 也写了 `response_text`（内容是错误文本）与 `finished_at`，溯源也在
+    建 run 时就写全了，于是 `_is_run_fresh` 判它可用 → 失败记录被当成「已有结果」，
+    还会被 `stream_*` 当缓存**直接回放**：用户再点一次分析，拿到的是上次的失败，
+    而不是重新跑。读侧必须自己判 status，不能指望写入侧不写。
+    （`_previous_run()` 一直只取 `status == "succeeded"`，说明这是本来的设计意图。）
     """
     if not run:
+        return False
+    if run.status != "succeeded":
         return False
     if not (run.response_text or run.response_payload):
         return False
@@ -855,8 +893,18 @@ def _persist_outcome(run: AiAnalysisRun, outcome: EngineOutcome, result: dict) -
     """
     run.status = "failed" if outcome.status == STATUS_FAILED else "succeeded"
     run.finished_at = _utcnow()
-    run.response_payload = _json_dumps(result)
-    run.response_text = outcome.report_markdown or outcome.error_message or ""
+    if run.status == "failed":
+        # 失败**不写结论字段**。以前这里照样写 response_payload / response_text，
+        # 于是库里那条失败记录长得和成功记录一样：有「结论」、有风险等级、有范围，
+        # 前端只判「有没有结果」就把徽章显示成「已有结果」并附上「风险等级 high」。
+        # 而那个 high 根本不是模型给的 —— 是 _determine_risk_level 按变更规模
+        # （total_files >= 120）估出来的兜底值，模型压根没答上来。
+        # 失败应当只留错误，让「有没有成功结论」这件事在数据层就无歧义。
+        run.response_payload = None
+        run.response_text = ""
+    else:
+        run.response_payload = _json_dumps(result)
+        run.response_text = outcome.report_markdown or outcome.error_message or ""
     run.rounds_used = outcome.rounds_used
     run.tokens_input = outcome.prompt_tokens
     run.tokens_output = outcome.completion_tokens
@@ -979,7 +1027,12 @@ def _execute_analysis(
     """
     summary = payload.get("summary") or {}
 
-    client, errors = build_endpoint_client(project_id, {})
+    # 正式分析用配置里的单次请求超时（默认 300 秒，界面可改），**不是**探测用的 30 秒。
+    # 这两者混用会让分析必然超时，见 build_endpoint_client 的说明。
+    configured_timeout = get_project_analysis_config(project_id).get("request_timeout_seconds")
+    client, errors = build_endpoint_client(
+        project_id, {}, timeout_seconds=_coerce_timeout(configured_timeout)
+    )
     if client is None:
         message = "接口配置不完整：" + "；".join(item["message"] for item in errors)
         result = _failed_result(summary, message)
@@ -1161,6 +1214,16 @@ def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None
 
 
 def _update_weekly_state(payload: dict, run: AiAnalysisRun, state: Optional[AiWeeklyAnalysisState]) -> None:
+    """推进这个周版本分组的「分析水位线」。
+
+    **只有成功的 run 才推进。** `last_analyzed_at` 是增量分析的水位线
+    （`_summarize_weekly_files` 用它筛 `updated_at > last_analyzed_at` 的文件），
+    一次失败的分析如果把它推到当前时刻，那批变更就被整体判成「已看过」——
+    下一次分析直接返回 no_change 静默跳过，用户再点多少次都跑不动。
+    失败就保持水位线不动，下次重跑同一批变更。
+    """
+    if run.status != "succeeded":
+        return
     group = payload.get("group") or {}
     summary = payload.get("summary") or {}
     if not group:

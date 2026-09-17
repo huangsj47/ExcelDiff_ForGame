@@ -1172,6 +1172,19 @@ async function loadWeeklyAiLatest(force = false) {
         const data = await resp.json();
         if (data && data.result) {
             const result = data.result;
+            // 后端会把失败也作为一条 run 返回（它带 status 与 error_message）。
+            // 这里必须按 status 分叉：只判「有没有 result」会把一次失败的调用显示成
+            // 「已有结果」，还会把按变更规模估出来的兜底风险等级当成模型结论展示。
+            if (result.status === 'failed') {
+                weeklyAiHasCached = false;
+                setWeeklyAiOutput(
+                    `上次分析失败：${result.error_message || '原因未知'}`, true);
+                setWeeklyAiStatusBadge('失败', 'danger');
+                if (meta) {
+                    meta.textContent = `最近一次分析失败（${result.created_at || '-'}）`;
+                }
+                return false;
+            }
             weeklyAiHasCached = true;
             const risk = result.result?.risk_level || '-';
             const createdAt = result.created_at || '-';
@@ -1239,16 +1252,25 @@ function startWeeklyAiAnalysis(force = false) {
         }
     });
     weeklyAiSource.addEventListener('result', function(event) {
+        let payload = {};
         try {
-            const payload = JSON.parse(event.data || '{}');
+            payload = JSON.parse(event.data || '{}');
+        } catch (_err) {
+        }
+        // 失败也是走 `result` 事件（引擎的契约是「失败变成一个结果对象，不抛异常」），
+        // 所以这里不能无条件打「完成」—— 那正是「失败显示成已有结果」的来源。
+        const failed = payload.status === 'failed';
+        if (failed) {
+            appendWeeklyAiLine(`\n分析失败：${payload.error_message || '原因未知'}`);
+            setWeeklyAiStatusBadge('失败', 'danger');
+        } else {
             if (payload.risk_level) {
                 appendWeeklyAiLine(`\n风险等级：${payload.risk_level}`);
             }
-        } catch (_err) {
+            setWeeklyAiStatusBadge('完成', 'success');
         }
-        setWeeklyAiStatusBadge('完成', 'success');
         if (startBtn) startBtn.disabled = false;
-        weeklyAiHasCached = true;
+        weeklyAiHasCached = !failed;
         closeWeeklyAiStream();
         loadWeeklyAiLatest(true);
     });
