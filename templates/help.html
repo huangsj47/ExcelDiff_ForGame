@@ -30,6 +30,10 @@
                 <i class="fas fa-calendar-week"></i>
                 <span>周版本管理</span>
             </a>
+            <a href="#section-ai" class="help-tab" data-section="section-ai">
+                <i class="fas fa-robot"></i>
+                <span>AI 分析</span>
+            </a>
             <a href="#section-diff" class="help-tab" data-section="section-diff">
                 <i class="fas fa-file-excel"></i>
                 <span>查看Diff</span>
@@ -269,10 +273,130 @@
             </div>
         </section>
 
-        <!-- 第4节：查看 Excel Diff -->
-        <section class="help-section" id="section-diff" style="display:none;">
+        <!-- 第4节：AI 分析 -->
+        <section class="help-section" id="section-ai" style="display:none;">
             <div class="section-header">
                 <div class="section-number">4</div>
+                <div>
+                    <h2>AI 分析</h2>
+                    <p>让平台读完整个版本的变更，告诉你「重点测哪里」</p>
+                </div>
+            </div>
+            <div class="section-body">
+                <div class="tip-box">
+                    <i class="fas fa-lightbulb"></i>
+                    <span>AI 分析产出的是<strong>面向回归的风险说明</strong>：这次改了什么、影响哪些系统、
+                    <strong>建议测什么</strong>、<strong>回归哪些老功能</strong>。它不是「自动验收」，
+                    也不替代你看 Diff —— 它给的是「先看哪里」，不是「这里一定没问题」。</span>
+                </div>
+
+                <div class="step-list">
+                    <div class="step-item">
+                        <div class="step-badge">1</div>
+                        <div class="step-content">
+                            <h4>在哪里发起</h4>
+                            <ul class="info-list">
+                                <li><strong>周版本 Diff 页</strong>：右上角 <strong>「AI分析」</strong> 按钮
+                                    —— 覆盖整个周版本，<strong>会自动跑</strong>（默认每小时检查，有变更才跑）</li>
+                                <li><strong>单次提交 Diff 页</strong>：右上角 <strong>「AI分析」</strong> 按钮
+                                    —— 只覆盖这一次提交，<strong>只能手动</strong></li>
+                                <li><strong>项目合并视图</strong>：版本卡片上的
+                                    <strong>「版本AI分析：未分析」</strong> 标签，点它打开抽屉</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">2</div>
+                        <div class="step-content">
+                            <h4>抽屉里的两个按钮</h4>
+                            <ul class="info-list">
+                                <li><strong>「刷新结果」</strong>：只读已保存的结果，不重跑</li>
+                                <li><strong>「重新分析」</strong>：重跑一次（已有结果时会先确认）</li>
+                            </ul>
+                            <p><strong>打开抽屉不会自动开跑</strong>，想跑就按「重新分析」。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">3</div>
+                        <div class="step-content">
+                            <h4>报告怎么读</h4>
+                            <p>报告固定 7 个章节，顺序固定：</p>
+                            <ul class="info-list">
+                                <li><strong>变更理解</strong> / <strong>变更内容摘要</strong>：这次到底改了什么</li>
+                                <li><strong>影响面分析</strong>：牵动哪些系统、哪些老功能</li>
+                                <li><strong>风险评估</strong>：结论在这里</li>
+                                <li><strong>测试建议</strong> / <strong>回归建议</strong>：<strong>测试直接拿去排用例</strong></li>
+                                <li><strong>上线与回滚关注点</strong>：上线盯什么、怎么回退</li>
+                            </ul>
+                            <p>抽屉顶部那一行是元信息：
+                                <code>最近分析：时间 | 风险等级 | 范围</code>。
+                                风险等级共 5 档：低 / 中低 / 中 / 中高 / 高风险。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge">4</div>
+                        <div class="step-content">
+                            <h4>分析范围（只影响「下一次」分析）</h4>
+                            <p>当版本关联了多个仓库时，抽屉里有「分析范围」下拉：
+                                <strong>全部仓库 / 只看配表仓库 / 只看代码仓库 / 只看某个仓库</strong>。</p>
+                            <ul class="info-list">
+                                <li>它<strong>只影响下次分析</strong>；当前结果显示的范围，看元信息那一行</li>
+                                <li>报告里会写明本次范围 —— 所以别把「配表仓库没问题」读成「整个版本没问题」</li>
+                                <li>选的范围里没有改动文件时，会直接提示换一个范围，不会空跑</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tip-box warning">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <span><strong>它看不到什么</strong>（知道这些，你才知道什么时候该追问）：</span>
+                </div>
+                <ul class="info-list">
+                    <li><strong>不知道「为什么这么改」</strong>：周版本的变更清单里没有提交说明，
+                        改动意图是它推测的 —— 有疑问以提交说明和程序员的说法为准。</li>
+                    <li><strong>只覆盖这次提交进仓库的文件</strong>：没 commit 的改动它看不到。</li>
+                    <li><strong>清单很长时只列出部分文件名</strong>：但没列出来的文件它<strong>依然可以点名索取 Diff</strong> ——
+                        报告里说「还有 N 个文件的名字没有列出来」，指的是「不知道路」，不是「读不到」。</li>
+                    <li><strong>每次取数都有字数上限</strong>，超出会截断并写明「省略了多少字」；
+                        取数失败的地方它被要求写成<strong>「信息缺口」</strong>，而不是说成「没问题」。</li>
+                    <li><strong>「没报」不等于「没问题」</strong>：模型被要求没把握就别报，
+                        所以报告里没提的地方，只是它没有足够证据认定是问题。</li>
+                </ul>
+
+                <h3 style="margin: 28px 0 16px; font-size: 1.1rem; font-weight: 700; color: #24292f;">
+                    <i class="fas fa-circle-question" style="color: #0969da; margin-right: 8px;"></i>常见疑问
+                </h3>
+                <ul class="info-list">
+                    <li><strong>一直显示「AI 分析进行中...」？</strong>
+                        可能真在跑（首次要几分钟）；也可能是上次被<strong>平台重启</strong>打断
+                        —— 会显示「平台重启，本次分析被中断（未跑完，可以重新分析）」，直接重新分析即可。</li>
+                    <li><strong>提示要补全「接口地址 / 模型名字 / Token」？</strong>
+                        这是项目管理员在「AI 分析配置」里的配置，找管理员补。</li>
+                    <li><strong>报告只写了一半？</strong>
+                        模型没按约定格式输出时，平台会按 Markdown 降级保存并标明原因 ——
+                        报告仍可用，只是可能不完整。</li>
+                    <li><strong>报告说没问题，但我发现了 bug？</strong>
+                        依次确认：① 它在分析范围外吗（看元信息）？② 这个文件是这次改的吗？
+                        ③ 报告里有没有写「信息缺口」？<strong>报告是辅助，不是验收结论。</strong></li>
+                    <li><strong>为什么两次结果不一样？</strong>
+                        第一次是全量，之后是<strong>增量</strong>（只带上次之后的变更），
+                        并且每次都带上「上次报过的问题」要求它标注仍成立 / 已修复 / 已被推翻。
+                        报告是「这个版本截至目前的那一份」，不是「本轮新增 N 条」。</li>
+                </ul>
+
+                <div class="tip-box">
+                    <i class="fas fa-info-circle"></i>
+                    <span>「待确认 / 已确认 / 已忽略」这套人工处置，数据层已经具备，但<strong>界面还没有入口</strong>
+                        —— 现在不用找那个按钮，需要标记时联系平台维护者。</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 第5节：查看 Excel Diff -->
+        <section class="help-section" id="section-diff" style="display:none;">
+            <div class="section-header">
+                <div class="section-number">5</div>
                 <div>
                     <h2>查看 Excel Diff</h2>
                     <p>对比 Excel 配表文件的变更内容</p>
@@ -411,7 +535,7 @@
         <!-- 第5节：确认提交 -->
         <section class="help-section" id="section-confirm" style="display:none;">
             <div class="section-header">
-                <div class="section-number">5</div>
+                <div class="section-number">6</div>
                 <div>
                     <h2>确认提交</h2>
                     <p>管理提交记录和周版本文件的审阅状态</p>
@@ -516,7 +640,7 @@
         <!-- 第6节：缓存管理 -->
         <section class="help-section" id="section-cache" style="display:none;">
             <div class="section-header">
-                <div class="section-number">6</div>
+                <div class="section-number">7</div>
                 <div>
                     <h2>缓存管理</h2>
                     <p>管理系统的 Diff 缓存数据，优化性能</p>

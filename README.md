@@ -37,6 +37,14 @@
 - 支持 release 包发布与 Agent 自动更新
 - 支持一键回滚到上一 release 或指定版本
 
+7. AI 变更风险分析（Beta）
+- 对**周版本**或**单次提交**产出一份面向回归的风险说明：影响面分析、**测试建议**、
+  **回归建议**、上线与回滚关注点
+- 模型**看不到 diff**，只能通过四个只读工具（`commit_detail` / `file_diff` /
+  `file_content` / `read_reference`）按需点名索取，并按门槛过滤结论
+- 增量累积：第二次起带上「上次报过的问题」并要求标注「仍成立 / 已修复 / 已被推翻」
+- 面向测试同学的完整说明（含它**看不到什么**）：[`AI分析使用说明.md`](./docs/AI分析使用说明.md)
+
 ## Excel/CSV 单元格的比较口径（`DIFF_LOGIC_VERSION` 1.10.0）
 
 **表里怎么写就怎么比。** Excel/CSV 一律**按文本原样读取**
@@ -198,6 +206,7 @@ Agent 执行自更新时（`agent/self_update.py`）现在有三条 fail-closed 
 
 ## 文档导航
 
+- AI 变更风险分析（**面向测试同学**）：[`AI分析使用说明.md`](./docs/AI分析使用说明.md)
 - 平台配置与部署总说明：[`平台配置说明.md`](./docs/平台配置说明.md)
 - 代码架构与模块实现说明：[`代码架构说明.md`](./docs/代码架构说明.md)
 - Agent 独立运行说明：[`agent/README.md`](./agent/README.md)
@@ -238,4 +247,7 @@ pre-commit run --all-files
 当前 README 为“重点版”，用于快速理解与落地。详细参数、模式差异、发布回滚细节以 [`平台配置说明.md`](./docs/平台配置说明.md) 为准。
 
 ## 后续优化方向
-基于 https://github.com/alibaba/open-code-review.git 去实现AI框架拓展。
+
+- AI 分析：人工处置（待确认/已确认/已忽略）的界面入口与异常清单的结构化渲染 ——
+  两者的数据层都已具备（见 [`AI分析使用说明.md`](./docs/AI分析使用说明.md) 第 4 节）。
+- AI 框架拓展：参考 https://github.com/alibaba/open-code-review.git 。
