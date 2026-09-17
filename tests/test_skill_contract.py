@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -119,6 +120,53 @@ def test_category_enum_in_the_doc_equals_the_runtime_dimension_ids():
 def test_report_sections_in_the_doc_equal_the_runtime_report_sections():
     """报告章节必须与降级判定用的标题清单一致。"""
     assert extract_report_sections(_platform_body()) == REPORT_SECTIONS
+
+
+def test_the_shipped_skill_requires_coupling_analysis_and_test_risks():
+    """耦合分析是**内置提示词**的一部分，不是可选的加分项。
+
+    用户要的是「分析模块之间的耦合状态，有耦合内容需提示相关测试风险点」。
+    这三条缺一条，落地的效果就变了：
+
+    * 少了「必须给出测试风险点」→ 报告会写一句「这里存在耦合，注意回归」就完事，
+      QA 拿不到可执行的用例；
+    * 少了「本该成对改动的两边只改了一边」→ 最值钱的那类信号（改表没导表、
+      改客户端没改服务端）根本不会被找出来；
+    * 少了「读不到另一端时写成待确认」→ 模型会凭文件名相似断言另一端有问题，
+      而那正是这个 skill 反复强调要避免的过度归因。
+    """
+    body = _platform_body()
+
+    assert "就必须给出与之对应的测试风险点" in body, "没有把「耦合 → 测试风险点」写成硬要求"
+    assert "本该成对改动的两边只改了一边" in body, "没有点出「只改一半」这类信号"
+    assert "待确认的耦合点" in body, "没有规定「读不到另一端」时该怎么写"
+    assert "只能读到**本批次改动过的文件**" in body, "没有讲清建模能读到什么，耦合会被凭空断言"
+
+
+def test_every_dimension_id_has_a_section_explaining_it():
+    """枚举里列的每个维度，正文都要有一节讲「这个维度要查什么」。
+
+    **为什么这条值得单独钉**：枚举与正文是两套东西。只在枚举里加一个 id、忘了写正文，
+    模型就会知道有这么个维度、却不知道要查什么 —— 而它**照样会按枚举填 `dimensions`**，
+    于是那一项永远是 `hit: false` 加一句勉强的理由。报告看起来「七个维度都过了一遍」，
+    实际上那个维度从来没被真正检查过，而且没有任何报错。
+
+    顺带要求编号连续：`### 1.`…`### N.` 中间漏号或重号，读的人会以为少了一节。
+    """
+    numbers = [int(n) for n in re.findall(r"^### (\d+)\. `", _platform_body(), flags=re.M)]
+    assert len(numbers) == len(DIMENSION_IDS), (
+        f"正文里的维度小节有 {len(numbers)} 节，枚举里是 {len(DIMENSION_IDS)} 个维度"
+    )
+    assert numbers == list(range(1, len(numbers) + 1)), f"维度小节编号不连续：{numbers}"
+
+
+def test_the_dimension_section_ids_match_the_runtime_ids():
+    """正文小节标题里的 id 必须与运行期常量同一组（顺序不同不算错，缺一个才算）。"""
+    declared = set(re.findall(r"^### \d+\. `([a-z_]+)`", _platform_body(), flags=re.M))
+    assert declared == set(DIMENSION_IDS), (
+        f"正文讲了但枚举里没有：{sorted(declared - set(DIMENSION_IDS))}；"
+        f"枚举里有但正文没讲：{sorted(set(DIMENSION_IDS) - declared)}"
+    )
 
 
 def test_the_enum_extractors_actually_read_the_document():

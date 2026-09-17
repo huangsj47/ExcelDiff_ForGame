@@ -536,6 +536,11 @@ def test_budget_hint_forces_convergence_without_failing():
 
 
 def test_dimension_ids_used_in_tests_are_the_real_ones():
-    """防止本文件里的示例用了不存在的维度 id 而让上面几条变成空转。"""
-    assert len(DIMENSION_IDS) == 6
+    """防止本文件里的示例用了不存在的维度 id 而让上面几条变成空转。
+
+    这个数量断言是**有意的 tripwire**：加维度时它会红，逼你回来确认本文件的示例
+    （`"id": "config_id"`、`category="..."`）是不是也该覆盖新维度。数字本身不是重点，
+    「停下来看一眼」才是。7 个维度是 2026-09 加入 `module_coupling` 之后的数。
+    """
+    assert len(DIMENSION_IDS) == 7
     assert "config_id" in DIMENSION_IDS

@@ -36,7 +36,7 @@ from models.ai_analysis.project_config import (
     REQUEST_TIMEOUT_RANGE,
     WEEKLY_INTERVAL_RANGE,
 )
-from services.ai.skill_contract import REPORT_SECTIONS
+from services.ai.skill_contract import DIMENSION_IDS, REPORT_SECTIONS
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HELP_PAGE = os.path.join(PROJECT_ROOT, "templates", "help.html")
@@ -65,6 +65,29 @@ def test_the_help_page_lists_every_report_section():
     help_html = _read(HELP_PAGE)
     missing = [name for name in REPORT_SECTIONS if name not in help_html]
     assert not missing, f"帮助页漏了报告章节：{missing}"
+
+
+def test_the_doc_names_every_dimension_id():
+    """说明文档要写出**每个检查维度**的 id。
+
+    文档里写 id 而不是只写中文名，是为了让这条断言能精确比对：中文名与 id 各写一套，
+    加维度时漏改一边，读文档的人就会按一份缺了维度的清单去理解报告。
+    """
+    doc = _read(AI_DOC)
+    missing = [dimension for dimension in DIMENSION_IDS if dimension not in doc]
+    assert not missing, f"说明文档漏了检查维度：{missing}"
+
+
+def test_the_help_page_tells_qa_about_coupling_analysis():
+    """耦合分析是给 QA 看的重点，帮助页不能只字不提。
+
+    它决定了 QA 拿到报告后会不会去关注「成对改动只改了一半」这类结论，
+    以及看到「待确认的耦合点」时知不知道那是要人工确认另一端。
+    """
+    help_html = _read(HELP_PAGE)
+    assert "模块之间的耦合" in help_html
+    assert "只改了一边" in help_html
+    assert "待确认的耦合点" in help_html, "没有说清「读不到另一端」时报告会怎么写"
 
 
 # ==========================================================================

@@ -47,12 +47,19 @@ SKILL_MD_MAX_LINES = 500
 # 超过这个行数的 reference 必须带目录（skill-creator: ">300 lines, include a TOC"）。
 REFERENCE_TOC_THRESHOLD_LINES = 300
 
-# 六个检查维度。**这是运行期契约**：模型的 `dimensions[].id` 与异常的 `category`
-# 都必须落在这个集合里，服务端按它校验。改这里就必须同步改 SKILL.md 里的枚举。
+# 七个检查维度。**这是运行期契约**：模型的 `dimensions[].id` 与异常的 `category`
+# 都必须落在这个集合里，服务端按它校验。改这里就必须同步改 SKILL.md 里的枚举，
+# 而且**顺序也要一致** —— `test_category_enum_in_the_doc_equals_the_runtime_dimension_ids`
+# 是按元组比对的，文档里的枚举顺序与这里不同就会红。
+#
+# `module_coupling` 放在 `config_linkage` 之后是有意的：两者是同一族问题的两个尺度 ——
+# `config_linkage` 看**一张表**改动的连锁，`module_coupling` 看**模块之间**的耦合。
+# 放在一起，模型读到前一个时会自然顺着想到后一个。
 DIMENSION_IDS = (
     "config_id",
     "config_value",
     "config_linkage",
+    "module_coupling",
     "code_logic",
     "version_branch",
     "process",
