@@ -30,6 +30,10 @@ BASELINE_METADATA_KEY = 'previous_commit_id'
 # 是**要求** previous 为空的有效取值。
 BASELINE_UNKNOWN = object()
 
+# 调用方**没有交代**基线（老调用方）时的哨兵：这时才自己去解析权威基线。
+# 语义与 services/excel_diff_cache_service.py 的 BASELINE_UNSET 一一对应。
+BASELINE_UNSET = object()
+
 
 def payload_is_truncated(diff_data) -> bool:
     """diff_data 是否只是「文件过大」的摘要（行明细已被丢弃）。
@@ -149,8 +153,14 @@ class ExcelHtmlCacheService:
         key_data = f"{repository_id}:{commit_id}:{file_path}:{self.diff_logic_version}"
         return hashlib.sha256(key_data.encode('utf-8')).hexdigest()
     
-    def get_cached_html(self, repository_id: int, commit_id: str, file_path: str) -> Optional[Dict[str, Any]]:
-        """获取缓存的HTML内容"""
+    def get_cached_html(self, repository_id: int, commit_id: str, file_path: str,
+                        previous_commit_id=BASELINE_UNSET) -> Optional[Dict[str, Any]]:
+        """获取缓存的HTML内容。
+
+        `previous_commit_id` 是**调用方这次实际要用的基线**。传了就以它为准做校验；
+        没传才退回「自己解析权威基线」。少了这个参数，接口会拿到别的基线渲染的 HTML
+        （线上 6767：页面同一时刻是对的，接口那条链却渲染出只存在于更晚版本的旧值）。
+        """
         try:
             ExcelHtmlCache, flask_app = self._get_model("ExcelHtmlCache", "app")
             
@@ -171,7 +181,11 @@ class ExcelHtmlCacheService:
                     # 基线校验：同一条 (repo, commit, file) 用不同 previous 渲染出来的
                     # HTML 完全不同，却会命中同一行缓存 —— 必须比对元数据里记录的基线。
                     stored_baseline = metadata.get(BASELINE_METADATA_KEY, BASELINE_UNKNOWN)
-                    expected_baseline = self._resolve_baseline_for_cache(repository_id, commit_id, file_path)
+                    expected_baseline = (
+                        self._normalize_baseline(previous_commit_id)
+                        if previous_commit_id is not BASELINE_UNSET
+                        else self._resolve_baseline_for_cache(repository_id, commit_id, file_path)
+                    )
                     if (
                         stored_baseline is not BASELINE_UNKNOWN
                         and expected_baseline is not BASELINE_UNKNOWN
@@ -203,10 +217,16 @@ class ExcelHtmlCacheService:
             )
             return None
     
-    def save_html_cache(self, repository_id: int, commit_id: str, file_path: str, 
+    def save_html_cache(self, repository_id: int, commit_id: str, file_path: str,
                        html_content: str, css_content: str = "", js_content: str = "",
-                       metadata: Dict[str, Any] = None) -> bool:
-        """保存HTML缓存"""
+                       metadata: Dict[str, Any] = None,
+                       previous_commit_id=BASELINE_UNSET) -> bool:
+        """保存HTML缓存。
+
+        元数据里记的必须是**渲染这份 HTML 时真正用的那个基线**（调用方传进来）。
+        历史上这里自己解析「权威基线」再记下来 —— 渲染用的却是调用方给的那一个，
+        两者不一致时校验形同虚设：错配的 HTML 会被当成「基线正确」长期命中。
+        """
         try:
             ExcelHtmlCache, flask_app = self._get_model("ExcelHtmlCache", "app")
             
@@ -216,7 +236,11 @@ class ExcelHtmlCacheService:
                 # 把「这份 HTML 是按哪个基线渲染的」写进元数据，供 get_cached_html 校验。
                 # 不改调用方传进来的 dict（它们可能复用同一个 dict），复制一份再补键。
                 persisted_metadata = dict(metadata) if metadata else {}
-                baseline = self._resolve_baseline_for_cache(repository_id, commit_id, file_path)
+                baseline = (
+                    self._normalize_baseline(previous_commit_id)
+                    if previous_commit_id is not BASELINE_UNSET
+                    else self._resolve_baseline_for_cache(repository_id, commit_id, file_path)
+                )
                 if baseline is not BASELINE_UNKNOWN:
                     persisted_metadata[BASELINE_METADATA_KEY] = baseline
                 metadata_json = json.dumps(persisted_metadata) if persisted_metadata else None

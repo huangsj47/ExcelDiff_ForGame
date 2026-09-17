@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, func, or_, text
 
 from services.performance_metrics_service import get_perf_metrics_service
-from services.commit_diff_logic import resolve_previous_commit
+from services.commit_diff_logic import resolve_page_previous_commit
 
 app = None
 db = None
@@ -21,7 +21,7 @@ db = None
 # 一旦它比真实版本旧，就会把**刚生成的当前版本缓存**当成过期数据清掉。
 # 一致性由 tests/test_diff_service_fidelity.py::TestDiffLogicVersionSingleSource
 # 扫描全部三处锁定（tests/test_diff_logic_version_single_source.py 只覆盖 app.py / config.py）。
-DIFF_LOGIC_VERSION = "1.14.0"
+DIFF_LOGIC_VERSION = "1.15.0"
 DiffCache = None
 OperationLog = None
 Commit = None
@@ -891,26 +891,11 @@ class ExcelDiffCacheService:
                         log_print(f"提交不存在: {commit_id}, {file_path}", 'EXCEL', force=True)
                         return BG_STATUS_COMMIT_MISSING
                     
-                    # 优先在本地数据库中按时间+ID查找前一提交，避免同秒提交顺序不稳定
-                    previous_commit = None
-                    if commit.commit_time is not None:
-                        previous_commit = Commit.query.filter(
-                            Commit.repository_id == repository_id,
-                            Commit.path == file_path,
-                            or_(
-                                Commit.commit_time < commit.commit_time,
-                                and_(Commit.commit_time == commit.commit_time, Commit.id < commit.id),
-                            ),
-                        ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
-                    if previous_commit is None:
-                        previous_commit = Commit.query.filter(
-                            Commit.repository_id == repository_id,
-                            Commit.path == file_path,
-                            Commit.id < commit.id,
-                        ).order_by(Commit.id.desc()).first()
-                    # 数据库缺失时兜底回退到 VCS 历史（可能构造虚拟 previous commit）
-                    if previous_commit is None:
-                        previous_commit = resolve_previous_commit(commit)
+                    # 与页头/正文/接口**共用同一个**「前一提交」解析。
+                    # 后台任务以前自己写了一条按 (commit_time, id) 的查询、解析不出来
+                    # 才回退，于是它写进缓存的差异可以属于另一条基线，而这份缓存会被
+                    # 页面和接口读走（线上 6767 的接口 HTML 就是这么错的）。
+                    previous_commit = resolve_page_previous_commit(commit)
                     query_time = time.time() - query_start
                     
                     diff_start = time.time()

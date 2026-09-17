@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import traceback
 
-from sqlalchemy import and_, or_
 from sqlalchemy.exc import SQLAlchemyError
 
-from services.commit_diff_input_models import CommitDiffQueryInput
 from services.api_response_service import json_error, json_success
+from services.commit_diff_input_models import CommitDiffQueryInput
 from services.exception_rollout_service import resolve_exception_narrowing_rollout
 
 EXCEL_DIFF_API_AGENT_RENDER_ERRORS = (
@@ -45,6 +44,7 @@ def handle_get_excel_diff_data(
     get_unified_diff_data,
     add_excel_diff_task,
     ensure_commit_access_or_403,
+    resolve_previous_commit,
     log_print,
 ):
     """Handle API: fetch excel diff payload with HTML/data cache strategy."""
@@ -79,6 +79,14 @@ def handle_get_excel_diff_data(
         "project_id": getattr(project, "id", "") if project else "",
         "project_code": getattr(project, "code", "") if project else "",
     }
+
+    # 这条链的「对比版本」必须与页头写的那一个是同一个。
+    #
+    # 以前接口只写了一条按 (commit_time, id) 的查询，而且读缓存时**不带基线** ——
+    # 于是它可能读到/写出属于别的基线渲染的 HTML 与差异：线上 6767 的接口 HTML 里
+    # 出现只存在于更晚版本的旧值（页面同一时刻是对的）。解析一次，后面每次读写都带上。
+    previous_commit = resolve_previous_commit(commit)
+    expected_baseline = getattr(previous_commit, "commit_id", None) if previous_commit else None
 
     if not excel_cache_service.is_excel_file(commit.path):
         return json_error(
@@ -165,7 +173,9 @@ def handle_get_excel_diff_data(
 
     try:
         html_lookup_start = time_module.time()
-        cached_html = excel_html_cache_service.get_cached_html(repository.id, commit.commit_id, commit.path)
+        cached_html = excel_html_cache_service.get_cached_html(
+            repository.id, commit.commit_id, commit.path, previous_commit_id=expected_baseline
+        )
         if cached_html:
             html_lookup_time = time_module.time() - html_lookup_start
             total_time = time_module.time() - request_start
@@ -211,7 +221,9 @@ def handle_get_excel_diff_data(
             )
 
         data_lookup_start = time_module.time()
-        cached_diff = excel_cache_service.get_cached_diff(repository.id, commit.commit_id, commit.path)
+        cached_diff = excel_cache_service.get_cached_diff(
+            repository.id, commit.commit_id, commit.path, previous_commit_id=expected_baseline
+        )
         data_lookup_time = time_module.time() - data_lookup_start
         if cached_diff:
             log_print(f"📊 从数据缓存获取Excel差异，生成HTML: {commit.path}", "EXCEL")
@@ -234,6 +246,7 @@ def handle_get_excel_diff_data(
                     css_content,
                     js_content,
                     metadata,
+                    previous_commit_id=expected_baseline,
                 )
                 total_time = time_module.time() - request_start
                 log_print(
@@ -289,22 +302,9 @@ def handle_get_excel_diff_data(
                 return jsonify({"success": True, "diff_data": json.loads(cached_diff.diff_data), "from_cache": True})
 
         log_print(f"🔄 缓存未命中，开始实时处理Excel文件: {commit.path}", "INFO")
-        previous_lookup_start = time_module.time()
-        previous_commit = Commit.query.filter(
-            Commit.repository_id == repository.id,
-            Commit.path == commit.path,
-            or_(
-                Commit.commit_time < commit.commit_time,
-                and_(Commit.commit_time == commit.commit_time, Commit.id < commit.id),
-            ),
-        ).order_by(Commit.commit_time.desc(), Commit.id.desc()).first()
-        if not previous_commit:
-            previous_commit = Commit.query.filter(
-                Commit.repository_id == repository.id,
-                Commit.path == commit.path,
-                Commit.id < commit.id,
-            ).order_by(Commit.id.desc()).first()
-        previous_lookup_time = time_module.time() - previous_lookup_start
+        # 基线在上面已经解析过一次（与页头同一套），这里不再自己查一遍 ——
+        # 两条查询给出的「前一提交」可以不同，那正是这条链渲染出别的基线内容的原因。
+        previous_lookup_time = 0.0
         diff_start = time_module.time()
         diff_data = get_unified_diff_data(commit, previous_commit)
         diff_time = time_module.time() - diff_start
@@ -327,6 +327,7 @@ def handle_get_excel_diff_data(
                     css_content,
                     js_content,
                     metadata,
+                    previous_commit_id=expected_baseline,
                 )
                 add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=1)
                 total_time = time_module.time() - request_start

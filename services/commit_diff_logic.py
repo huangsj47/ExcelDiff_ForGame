@@ -166,6 +166,30 @@ def _resolve_previous_commit_from_vcs(commit):
     return None
 
 
+def resolve_page_previous_commit(commit):
+    """页头、正文、接口、后台任务共用的「前一提交」。
+
+    这四条链路必须给出同一个答案。页头写着「对比版本 = X」，正文却按 Y 去算，
+    界面上完全看不出来 —— 线上 6767 就是这样：页面的结论是对的，接口那条链渲染出的
+    HTML 里却出现只存在于**更晚**版本的旧值（`呼呼吸尘器 → 吸灵器`，而本提交的真实
+    变更是另一行）。
+
+    差别在解析强度：页面把「该文件在这条仓库里的提交序列」也交给解析器
+    （同秒提交有 `id` 兜底、库里缺记录还能回退 VCS 文件历史），而接口与后台任务
+    各自只写了一条按 `(commit_time, id)` 的查询，解析不出来就直接放弃。
+    统一走这里，别在每个入口各写一份。
+    """
+    repository_id = getattr(commit, "repository_id", None)
+    if repository_id is None:
+        repository = getattr(commit, "repository", None)
+        repository_id = getattr(repository, "id", None)
+    file_commits = Commit.query.filter(
+        Commit.repository_id == repository_id,
+        Commit.path == commit.path,
+    ).order_by(Commit.commit_time.desc(), Commit.id.desc()).all()
+    return resolve_previous_commit(commit, file_commits=file_commits)
+
+
 def resolve_previous_commit(commit, file_commits=None):
     """优先按数据库查找前一提交；缺失时回退到 VCS 文件历史。"""
     repository = getattr(commit, "repository", None)

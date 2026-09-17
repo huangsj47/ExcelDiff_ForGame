@@ -280,6 +280,9 @@ def test_get_excel_diff_data_accepts_string_created_at_from_cache(monkeypatch):
     )
 
     monkeypatch.setattr(app_module, "Commit", fake_commit_model)
+    # 接口的「前一提交」现在是共用解析器（会去查库），这条用例只关心 HTML 缓存的
+    # created_at 形态，把它换成替身。
+    monkeypatch.setattr(app_module, "resolve_page_previous_commit", lambda _commit: None)
     monkeypatch.setattr(app_module.excel_cache_service, "is_excel_file", lambda _path: True)
     monkeypatch.setattr(
         app_module.excel_html_cache_service,
@@ -302,7 +305,22 @@ def test_get_excel_diff_data_accepts_string_created_at_from_cache(monkeypatch):
     assert payload["created_at"] == "2026-03-03 18:00:00"
 
 
-def test_repository_excel_previous_commit_query_has_time_and_id_tiebreak():
-    content = _read("app.py")
-    assert "Commit.commit_time == commit.commit_time" in content
-    assert "Commit.id < commit.id" in content
+def test_previous_commit_resolution_is_shared_and_has_a_stable_tiebreak():
+    """「前一提交」的解析必须**只有一处**，且同秒提交有 id 兜底。
+
+    历史上页头、正文、接口、后台任务各写了一份：接口与后台任务只查数据库，
+    解析不出来就放弃，于是同一条提交在不同链路上比的是不同版本
+    （线上 6767：页面对，接口渲染出的 HTML 里是只存在于更晚版本的旧值）。
+    """
+    logic = _read("services/commit_diff_logic.py")
+    assert "def resolve_page_previous_commit(" in logic
+    assert "Commit.commit_time == current_commit_time" in logic
+    assert "Commit.id < commit.id" in logic
+
+    api = _read("services/excel_diff_api_service.py")
+    assert "resolve_previous_commit(commit)" in api, "接口端点没有走共用的前一提交解析"
+
+    background = _read("services/excel_diff_cache_service.py")
+    assert "resolve_page_previous_commit(commit)" in background, (
+        "后台任务又自己查了一遍前一提交 —— 它写下的缓存会属于另一条基线"
+    )

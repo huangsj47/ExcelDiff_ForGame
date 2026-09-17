@@ -53,12 +53,12 @@ def test_save_cached_diff_centralizes_optimize_diff_data():
     assert "diff_json = json.dumps(normalized_diff_data)" in body
 
 
-def test_background_excel_previous_commit_query_has_time_and_id_tiebreak():
+def test_background_excel_previous_commit_uses_the_shared_resolver():
+    """后台任务不再自己查前一提交：查两遍就会写出属于另一条基线的缓存。"""
     content = _read("services/excel_diff_cache_service.py")
     body = _function_body(content, "process_excel_diff_background")
 
-    assert "Commit.commit_time == commit.commit_time" in body
-    assert "Commit.id < commit.id" in body
+    assert "resolve_page_previous_commit(commit)" in body
 
 
 def test_diff_service_uses_dataframe_bulk_conversion_path():

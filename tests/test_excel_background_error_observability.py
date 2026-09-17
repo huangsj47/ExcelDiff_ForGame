@@ -60,7 +60,7 @@ class _PerfProbe:
         )
 
 
-def _patch_runtime(monkeypatch, query, repository, get_unified_diff_data):
+def _patch_runtime(monkeypatch, query, repository, get_unified_diff_data, previous_commit=None):
     fake_commit_model = type(
         "FakeCommitModel",
         (),
@@ -88,6 +88,18 @@ def _patch_runtime(monkeypatch, query, repository, get_unified_diff_data):
     monkeypatch.setattr(excel_cache_module, "log_print", lambda *_args, **_kwargs: None, raising=False)
     monkeypatch.setattr(excel_cache_module, "get_unified_diff_data", get_unified_diff_data, raising=False)
 
+    # 「前一提交」现在统一由 commit_diff_logic.resolve_page_previous_commit 解析
+    # （同一个答案要喂给页头、正文、接口和后台任务）。这里把它换成替身：
+    # 解析规则本身由 commit_diff_logic 的测试覆盖，这个文件只管后台任务的观测口径。
+    resolved = []
+
+    def _fake_resolve(commit_obj):
+        resolved.append(commit_obj)
+        return previous_commit
+
+    monkeypatch.setattr(excel_cache_module, "resolve_page_previous_commit", _fake_resolve, raising=False)
+    return resolved
+
 
 def test_background_cache_falls_back_to_id_query_when_commit_time_missing(monkeypatch):
     repository = SimpleNamespace(id=1)
@@ -96,11 +108,12 @@ def test_background_cache_falls_back_to_id_query_when_commit_time_missing(monkey
     query = _CommitQuery(commit, previous_commit)
     perf_probe = _PerfProbe()
 
-    _patch_runtime(
+    resolved = _patch_runtime(
         monkeypatch,
         query=query,
         repository=repository,
         get_unified_diff_data=lambda *_args, **_kwargs: {"type": "excel", "sheets": {}},
+        previous_commit=previous_commit,
     )
     monkeypatch.setattr(excel_cache_module, "get_perf_metrics_service", lambda: perf_probe, raising=False)
 
@@ -110,7 +123,7 @@ def test_background_cache_falls_back_to_id_query_when_commit_time_missing(monkey
 
     service.process_excel_diff_background(repository.id, commit.commit_id, commit.path)
 
-    assert query.filter_calls == 1
+    assert resolved, "后台任务没有走共用的「前一提交」解析 —— 它写进缓存的差异可能属于另一条基线"
     assert any(
         record["pipeline"] == "background_excel_cache"
         and record["success"] is True

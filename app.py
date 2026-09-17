@@ -112,6 +112,7 @@ from services.status_sync_handlers import (
 from services.commit_diff_logic import (
     configure_commit_diff_logic,
     get_diff_data,
+    resolve_page_previous_commit,
     resolve_previous_commit,
     get_real_diff_data_for_merge,
     get_merged_diff_data,
@@ -323,7 +324,7 @@ if sys.platform == 'win32' and not _IS_TESTING:
 #         同时修掉 .tsv 落进 pd.ExcelFile 必然读取失败的问题（CSV_EXTENSIONS 早就
 #         声明支持 .tsv，get_file_type 也判为 excel）。
 #         不升版本号的后果：已缓存的 diff（旧版本号）继续命中，修复在界面上**看不见**。
-DIFF_LOGIC_VERSION = "1.14.0"
+DIFF_LOGIC_VERSION = "1.15.0"
 
 # ---------------------------------------------------------------------------
 #  日志系统 — 已拆分至 utils/logger.py
@@ -623,9 +624,9 @@ def get_excel_diff_data_with_path(project_code, repository_name, commit_id):
 
 def get_excel_diff_data(commit_id):
     """异步获取Excel diff数据的API端点（支持HTML缓存优先）"""
-    # static-check compatibility:
-    # Commit.commit_time == commit.commit_time
-    # Commit.id < commit.id
+    # 「前一提交」与页头/正文/后台任务共用同一个解析（见
+    # services/commit_diff_logic.py::resolve_page_previous_commit）：
+    # 同秒提交按 id 兜底、库里缺记录回退 VCS 文件历史。
     return handle_get_excel_diff_data(
         commit_id=commit_id,
         request=request,
@@ -640,6 +641,7 @@ def get_excel_diff_data(commit_id):
         get_unified_diff_data=get_unified_diff_data,
         add_excel_diff_task=add_excel_diff_task,
         ensure_commit_access_or_403=_ensure_commit_access_or_403,
+        resolve_previous_commit=resolve_page_previous_commit,
         log_print=log_print,
     )
 
