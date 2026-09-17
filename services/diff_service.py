@@ -425,10 +425,79 @@ class DiffService:
                     sheets = {}
                     for sheet_name in excel_file.sheet_names:
                         sheets[sheet_name] = pd.read_excel(excel_file, sheet_name=sheet_name, **READ_KWARGS)
-                return sheets
-                
+                return self._repair_inferred_cells(content, sheets)
+
         except Exception as e:
             raise Exception(f"读取Excel文件失败: {str(e)}")
+
+    # 布尔单元格在 dtype=str 下的两种写法（见 _repair_inferred_cells）
+    _BOOL_TEXTS = ('True', 'False')
+
+    def _repair_inferred_cells(self, content: bytes, sheets: Dict[str, Any]) -> Dict[str, Any]:
+        """把**被列级类型推断改写过的格子**改回原始单元格的字面量。
+
+        为什么还需要这一步：`dtype=str` 防住的是「字面量被当成类型改写」（`'00123'`→123、
+        `'TRUE'`→True…），但**列级**的类型推断发生在它之前 —— 一列里只要混进一个布尔，
+        同列的数字与布尔就会互相转换，而 `dtype=str` 只是把转换后的结果转成字符串：
+
+        * 数字变布尔：线上 6684 `硬直类型表.xlsx` 的「清理吸灵器吸住状态」列里有 16 个
+          数字 `0`，读出来是 `False` —— 页面显示的取值根本不是文件里的那个；
+        * 布尔变数字：同批语料里另一张表把文件里的 `TRUE` 显示成 `1`。
+          两版之间只要有一版多了一个布尔，同一个格子就会一边显示 `0`、一边显示 `False`，
+          于是报出一条**没人改过的变更**（变更确认平台上，这种假变更与漏报同样致命：
+          评审者要去核对一个不存在的差异）。
+
+        只改这些格子：判断依据是**原始单元格的类型**（openpyxl `data_only=True`，
+        与 pandas 读的是同一份字节），其余格子一律保持 `dtype=str` 的读数不动。
+        因此这一步不会改变「文本/数字/日期怎么显示」的任何既有口径，只把这两种
+        被推断改写过的形态还原。代价是每份 Excel 多一遍原始扫描（read_only 流式，
+        实测与 pandas 那一遍同量级；diff 有缓存，一个 (文件, 版本) 只付一次）。
+        """
+        if not sheets:
+            return sheets
+        try:
+            import io
+
+            import openpyxl
+
+            workbook = openpyxl.load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+        except Exception:
+            # 读不出原始类型就保持原样：宁可维持既有读数，也不能让读取整份失败
+            return sheets
+        try:
+            for sheet_name, df in sheets.items():
+                if df is None or not hasattr(df, 'iat'):
+                    continue
+                try:
+                    worksheet = workbook[sheet_name]
+                except Exception:
+                    continue
+                columns = list(df.columns)
+                for row_offset, raw_row in enumerate(worksheet.iter_rows(values_only=True)):
+                    if row_offset == 0:
+                        continue                    # 第 1 行是表头，已经成了列名
+                    row_index = row_offset - 1      # pandas 的行号从 0 起
+                    if row_index >= len(df):
+                        break
+                    for column_index, raw_value in enumerate(raw_row):
+                        if column_index >= len(columns):
+                            break
+                        if isinstance(raw_value, bool):
+                            # 布尔被读成 1/0 → 还原成布尔
+                            current = str(df.iat[row_index, column_index])
+                            if current in ('1', '0'):
+                                df.iat[row_index, column_index] = 'True' if raw_value else 'False'
+                        elif isinstance(raw_value, (int, float)):
+                            # 数字被读成 True/False → 还原成数字
+                            current = str(df.iat[row_index, column_index])
+                            if current in self._BOOL_TEXTS:
+                                df.iat[row_index, column_index] = str(raw_value)
+        finally:
+            try:
+                workbook.close()
+            except Exception:
+                pass
+        return sheets
     
     def _compare_excel_data(self, current_data: Dict, previous_data: Dict, file_path: str,
                             key_columns: str = None) -> Dict[str, Any]:
@@ -554,27 +623,33 @@ class DiffService:
                     header_changes.append({
                         'change': 'renamed',
                         'column_index': cur_idx + 1,      # 从 1 开始，与 Excel 列序一致
-                        'column': new_name,
-                        'old_name': old_name,
-                        'new_name': new_name,
+                        'column': self._display_column_name(new_name, current_columns),
+                        'old_name': self._display_column_name(old_name, previous_columns),
+                        'new_name': self._display_column_name(new_name, current_columns),
                     })
                 mapped[prev_idx] = new_name
             previous_df = previous_df.copy()
             previous_df.columns = mapped
             for cur_idx in current_only:
+                name = current_columns[cur_idx]
+                if not self._is_reportable_column_change(name, current_columns, previous_columns):
+                    continue
                 header_changes.append({
                     'change': 'added',
                     'column_index': cur_idx + 1,
-                    'column': current_columns[cur_idx],
+                    'column': self._display_column_name(name, current_columns),
                     'old_name': '',
-                    'new_name': current_columns[cur_idx],
+                    'new_name': self._display_column_name(name, current_columns),
                 })
             for prev_idx in previous_only:
+                name = previous_columns[prev_idx]
+                if not self._is_reportable_column_change(name, previous_columns, current_columns):
+                    continue
                 header_changes.append({
                     'change': 'removed',
                     'column_index': prev_idx + 1,
-                    'column': previous_columns[prev_idx],
-                    'old_name': previous_columns[prev_idx],
+                    'column': self._display_column_name(name, previous_columns),
+                    'old_name': self._display_column_name(name, previous_columns),
                     'new_name': '',
                 })
 
@@ -618,6 +693,49 @@ class DiffService:
     @classmethod
     def _is_placeholder_pair(cls, old_name, new_name):
         return cls._is_placeholder_column_name(old_name) and cls._is_placeholder_column_name(new_name)
+
+    @classmethod
+    def _is_reportable_column_change(cls, name, own_columns, other_columns) -> bool:
+        """未配对的这一列，值不值得报成「新增列 / 删除列」。
+
+        两个否决条件，都是**位置型伪名**在提示里的形态：
+
+        1. **另一版的表头里有同名列** —— 那它就不是新增/删除，只是排在了别的位置
+           （前面插了一列，后面整体后移）。线上 6685：插一个「出生点id」，平台报了
+           13 条列变更，其中「完成进度增加」「标题」既被报新增又被报删除；而 6095 那种
+           整段重复列名（`属性修改` / `属性修改.1` / …）的表上，同一列号被同时报
+           新增与删除的有 38 处。同一张表同一个列名，两版都有 → 没有任何人改过列名。
+        2. **占位名**（表头为空时 pandas 起的 `Unnamed: 7`）。名字里带的是列的位置，
+           插一列就会让后面所有空表头列「换个名字」。与 `_pair_columns` 里不当锚点、
+           不报改名同一条理由（见 `_is_placeholder_column_name`）——列还在、值还在，
+           只是它没有名字，报「新增列 Unnamed: 11」对评审者没有任何信息量。
+
+        注意这里只影响**列变更提示**：列仍然照常参与逐格比较（配对结果不变），
+        没被配上的列的单元格值依旧会以「旧值→空 / 空→新值」的形式显示出来。
+        """
+        if cls._is_placeholder_column_name(name):
+            return False
+        return name not in set(other_columns)
+
+    @classmethod
+    def _display_column_name(cls, name, all_columns) -> str:
+        """列变更提示里显示的列名：**去重后缀还原成原名 + 出现次序**。
+
+        pandas 读到同名表头时，会把第 2 个起改名为 `X.1`、`X.2`…（配表里 `From`、
+        `属性修改` 这类重复列很多，线上 6225 的表头里有 82 个 `From*`）。这个名字里
+        带着**出现次序**，所以只要在前面插一个同名列，它后面所有 `X.k` 都会整体错位 ——
+        直接报出来就是「新增列 From.79」，评审者会去找一个叫 `From.79` 的列，而表里
+        根本没有这个名字的列。只有当一个列名就是另一个列名的 `.数字` 后缀、且**那个
+        原名本身也在这份表头里**时才这样还原：表里真有一列叫 `X.N`（而没有 `X`）时，
+        原样保留。
+        """
+        match = re.fullmatch(r'(.+)\.(\d+)', str(name or ''))
+        if not match:
+            return name
+        base, occurrence = match.group(1), int(match.group(2))
+        if base not in set(all_columns):
+            return name
+        return f'{base}（同名列第 {occurrence + 1} 个）'
 
     @staticmethod
     def _pair_columns(current_columns, previous_columns):
