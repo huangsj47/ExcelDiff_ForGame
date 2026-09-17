@@ -44,6 +44,7 @@ from services.ai_analysis_service import (
     run_weekly_analysis_background,
     select_primary_weekly_config,
     cleanup_expired_analysis_runs,
+    fail_orphaned_analysis_runs,
     get_project_analysis_config,
     has_weekly_changes,
 )
@@ -1290,6 +1291,13 @@ def start_background_task_worker():
     global background_task_running, background_task_thread
     if not background_task_running:
         background_task_running = True
+        # **先清墓碑，再收活**：平台重启会留下 status='running' 的 AI 分析记录，
+        # 那些 run 永远不会再被写完成（持有它们的进程已经没了）。它们会让
+        # `/ai-analysis/.../latest` 报「没有结果」，界面据此又去自动开跑一次 ——
+        # 用户看到的就是「重启后点一下 AI分析，它自己跑起来了」。
+        # 必须在 `load_pending_tasks()`（会把上次残留的 processing 任务改回 pending
+        # 重新入队）之前做，否则新一轮分析会与幽灵记录混在一起。
+        fail_orphaned_analysis_runs()
         load_pending_tasks()
         background_task_thread = threading.Thread(target=background_task_worker, daemon=True)
         background_task_thread.start()

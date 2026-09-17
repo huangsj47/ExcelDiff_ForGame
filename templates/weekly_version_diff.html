@@ -1449,6 +1449,18 @@ async function loadWeeklyAiLatest(force = false) {
                 }
                 return false;
             }
+            // 正在进行中：如实说「进行中」，**不要**落进下面的「暂无分析结果。」
+            // —— 那句话会让打开抽屉的回调以为没有结果，进而又起一次分析。
+            if (result.status === 'running' || result.in_progress) {
+                weeklyAiHasCached = false;
+                setWeeklyAiOutput('AI 分析进行中...', false, 'busy');
+                setWeeklyAiStatusBadge('分析中', 'primary');
+                if (meta) {
+                    meta.textContent =
+                        `分析开始于 ${result.created_at_display || result.created_at || '-'}`;
+                }
+                return false;
+            }
             weeklyAiHasCached = true;
             const risk = result.result?.risk_level || '-';
             const createdAt = result.created_at_display || result.created_at || '-';
@@ -1577,10 +1589,14 @@ function initWeeklyAiAnalysis() {
         openBtn.addEventListener('click', async function() {
             openWeeklyAiDrawer();
             await refreshWeeklyAiReadiness();
-            const hasLatest = await loadWeeklyAiLatest();
-            if (!hasLatest) {
-                startWeeklyAiAnalysis();
-            }
+            // **打开抽屉不替用户开跑分析。** 这里原来是
+            // `const hasLatest = await loadWeeklyAiLatest(); if (!hasLatest) startWeeklyAiAnalysis();`
+            // —— 于是「看一眼结果」这个纯查看动作会把分析跑起来，用户只是点了一下
+            // 「AI分析」就看到「AI 分析进行中...」。更糟的是「没有结果」的判定包含
+            // 「有一条被重启中断的 running 记录」，所以重启后点一次必定跑一次，
+            // 而用户明明把「周版本自动分析」关掉了 —— 那个开关管的是后台调度，
+            // 管不到这里。要跑就按抽屉里的「开始分析」。
+            await loadWeeklyAiLatest();
         });
     }
     if (closeBtn) closeBtn.addEventListener('click', closeWeeklyAiDrawer);

@@ -2534,6 +2534,18 @@ async function refreshWeeklyAiLatest(configId) {
         }
         return false;
     }
+    // 正在进行中：如实说「进行中」，不要落进下面的「暂无分析结果。」——
+    // 那句话会让调用方以为没有结果，进而又起一次分析。
+    if (result && (result.status === 'running' || result.in_progress)) {
+        weeklyAiHasCached = false;
+        setWeeklyAiOutput('AI 分析进行中...', false, 'busy');
+        setWeeklyAiStatusBadge('分析中', 'primary');
+        if (meta) {
+            meta.textContent =
+                `分析开始于 ${result.created_at_display || result.created_at || '-'}`;
+        }
+        return false;
+    }
     if (result && result.response_text) {
         weeklyAiHasCached = true;
         const risk = result.result?.risk_level || '-';
@@ -2661,14 +2673,17 @@ function initWeeklyAiDrawer() {
             }
             setWeeklyAiStatusBadge('已配置', 'success');
             if (drawerStartBtn) drawerStartBtn.disabled = false;
-            // 查缓存与自动开跑都放在「就绪」这一支**里面**。原来它们是和密钥检查并列的
-            // 两条 promise 链 —— 上面那句 return 只结束了自己的回调，未配置的项目照样会
-            // 自动把分析跑起来，然后在服务端失败，用户看到的是「请先配置」和一堆报错。
-            refreshWeeklyAiLatest(configId).then(hasCached => {
-                if (!hasCached) {
-                    startWeeklyAiAnalysis();
-                }
-            });
+            // 查缓存与「是否要开跑」都放在「就绪」这一支**里面**。原来它们是和密钥检查
+            // 并列的两条 promise 链 —— 上面那句 return 只结束了自己的回调，未配置的
+            // 项目照样会自动把分析跑起来，然后在服务端失败，用户看到的是「请先配置」
+            // 和一堆报错。
+            //
+            // **打开抽屉本身不再自动开跑**：这里原来是 `if (!hasCached)
+            // startWeeklyAiAnalysis();`，于是「看一眼结果」会把分析跑起来。而
+            // 「没有结果」的判定包含「有一条被重启中断的 running 记录」，所以重启后
+            // 点一次必定跑一次 —— 用户明明关掉了「周版本自动分析」（那个开关管的是
+            // 后台调度，管不到这里）。要跑就按抽屉里的「开始分析」。
+            refreshWeeklyAiLatest(configId);
         });
     });
 }

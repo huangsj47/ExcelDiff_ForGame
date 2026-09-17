@@ -425,6 +425,43 @@ def cleanup_expired_analysis_runs(retention_days: int = ANALYSIS_CACHE_DAYS):
         return None
 
 
+def fail_orphaned_analysis_runs() -> int:
+    """把平台重启后遗留的 `running` 记录判为失败，返回处理条数。
+
+    **重启是「这些 run 已经死了」的确定性证据**：持有它们的进程已经不在了，它们永远
+    不会再被写完成。留在库里就是一条两头骗人的幽灵记录：
+
+    * 读侧 `_is_run_fresh` 要求 `status == "succeeded"`，所以 `/latest` 看不见它 ——
+      界面以为「这个版本从没分析过」，或者悄悄退回更早的那次成功记录；
+    * 界面拿到「没有结果」就会去自动开跑一次，于是用户每次重启后点一下「AI分析」
+      都会莫名跑起一次分析，而且页面上一直是「进行中」。
+
+    为什么不等 `AiAnalysisRun.effective_status` 那 1 小时超时：那 1 小时里界面会一直
+    误判，而重启已经把答案给出来了。`effective_status` 那条兜底留给另一种情况 ——
+    进程活着、但某次分析真的卡死了。
+    """
+    try:
+        orphans = AiAnalysisRun.query.filter_by(status="running").all()
+        if not orphans:
+            return 0
+        now = _utcnow()
+        for run in orphans:
+            run.status = "failed"
+            run.finished_at = now
+            # 与 `_persist_outcome` 的失败语义一致：失败的 run 不留结论字段。
+            # running 记录本来也没有结论，这里是防御性的。
+            run.response_payload = None
+            run.response_text = ""
+            run.error_message = "平台重启，本次分析被中断（未跑完，可以重新分析）。"
+        db.session.commit()
+        log_print(f"重置被重启中断的 AI 分析记录: {len(orphans)} 条", "AI", force=True)
+        return len(orphans)
+    except Exception as exc:
+        db.session.rollback()
+        log_print(f"重置中断的 AI 分析记录失败: {exc}", "AI", force=True)
+        return 0
+
+
 def _repo_priority(repo: Repository) -> int:
     """取样时仓库的先手顺序：代码仓库优先于配表仓库。
 
@@ -1245,6 +1282,23 @@ def stream_weekly_analysis(config_id: int, trigger_source: str = "manual") -> It
 
 
 def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None) -> dict:
+    # **执行前再查一次开关。** `schedule_weekly_ai_analysis_tasks` 在建任务时查过，
+    # 但任务一旦入队就独立于开关了：关掉自动分析**不会**取消已经排队的任务，而重启时
+    # `load_pending_tasks` 还会把上次残留的 `processing` 任务改回 `pending` 重新入队
+    # （`task_worker_service.py:1273-1279`）。于是「关掉开关 + 重启」必定跑一次 ——
+    # 这正是用户报的「停止了自动分析后仍然自动触发」。
+    #
+    # 闸设在这里是安全的：本函数是**后台路径的唯一入口**（两个调用点都在
+    # `task_worker_service`），手动分析走的是 `stream_weekly_analysis`，不受影响。
+    config = db.session.get(WeeklyVersionConfig, config_id)
+    if config is not None:
+        project_cfg = get_project_analysis_config(config.project_id)
+        if not project_cfg.get("auto_weekly_enabled", True):
+            log_print(
+                f"周版本自动分析已关闭，跳过已排队的任务: config_id={config_id}", "AI", force=True,
+            )
+            return {"status": "skipped", "reason": "auto_weekly_disabled"}
+
     payload, state, skip_reason = build_weekly_payload(config_id)
     if skip_reason == "no_change":
         cached = get_latest_weekly_result(config_id)
@@ -1347,6 +1401,21 @@ def _parse_iso_datetime(raw: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _in_progress_result(run: AiAnalysisRun) -> dict:
+    """「正在进行中」的读侧形态：给得出身份，给不出结论。"""
+    return {
+        "run_id": run.id,
+        "status": "running",
+        "in_progress": True,
+        "scope": run.scope,
+        "trigger_source": run.trigger_source,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "created_at_display": _created_at_display(run),
+        "response_text": "",
+        "result": None,
+    }
+
+
 def get_latest_weekly_result(config_id: int) -> Optional[dict]:
     config = WeeklyVersionConfig.query.get_or_404(config_id)
     group_key = build_weekly_group_key(config)
@@ -1355,7 +1424,16 @@ def get_latest_weekly_result(config_id: int) -> Optional[dict]:
         .order_by(AiAnalysisRun.created_at.desc())
         .first()
     )
-    if not run or not _is_run_fresh(run):
+    if not run:
+        return None
+    if not _is_run_fresh(run):
+        # 正在进行中的分析要**如实报出去**，不能报成「没有结果」。报成没有结果的
+        # 后果不只是少显示一条：界面拿到「没有结果」会去自动开跑一次，于是同一次
+        # 分析在用户眼里变成两次、页面上永远挂着「进行中」——用户报的就是这个。
+        # 进程已死的幽灵记录由启动时的 `fail_orphaned_analysis_runs` 清掉，
+        # 所以这里剩下的 running 是真的在跑。
+        if run.status == "running" and not run.is_stale_running:
+            return _in_progress_result(run)
         return None
     payload = _parse_response_payload(run.response_payload)
     return {
@@ -1376,7 +1454,12 @@ def get_latest_commit_result(commit_id: int) -> Optional[dict]:
         .order_by(AiAnalysisRun.created_at.desc())
         .first()
     )
-    if not run or not _is_run_fresh(run):
+    if not run:
+        return None
+    if not _is_run_fresh(run):
+        # 同 `get_latest_weekly_result`：正在进行中的要如实报出去。
+        if run.status == "running" and not run.is_stale_running:
+            return _in_progress_result(run)
         return None
     payload = _parse_response_payload(run.response_payload)
     return {

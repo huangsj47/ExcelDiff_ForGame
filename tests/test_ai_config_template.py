@@ -488,26 +488,40 @@ def test_every_drawer_names_what_is_missing():
 
 
 def test_the_weekly_drawer_does_not_auto_start_when_not_ready():
-    """**回归守卫**：查缓存与自动开跑必须待在「就绪」那一支里面。
+    """**回归守卫**：打开抽屉**任何情况下**都不替用户开跑分析。
 
-    原来的写法是两条并列的 promise 链：
+    这个用例原本守的是「查缓存与自动开跑必须待在『就绪』那一支里面」——
+    当时的写法是两条并列的 promise 链：
 
         fetchKeyStatus().then(status => { ... return; });     // 「请先配置」+ return
         refreshLatest(configId).then(c => { if (!c) startAnalysis(); });
 
     上面那个 `return` 只结束了自己的回调 —— 未配置的项目照样会自动把分析跑起来，
     界面上同时出现「请先配置」和一堆服务端报错。
+
+    现在自动开跑整条路**去掉了**：用户点一下「AI分析」只是想看结果，不该替他起一次
+    分析；而「没有结果」的判定里还包含「有一条被重启中断的 running 记录」，所以
+    重启后点一次必定跑一次 —— 用户明明关掉了「周版本自动分析」（那个开关管后台
+    调度，管不到这里）。所以这里守的东西比原来更强，并且**顺带覆盖了原来那个 bug**：
+    入口里根本没有开跑调用，未就绪时当然也不会跑。
+
+    相关：`tests/test_weekly_ai_auto_trigger_gate.py` 是这一条的服务端与三模板版本。
     """
     handler = _weekly_click_handler()
 
     assert "if (!status.endpoint_ready) {" in handler, "没有就绪判定"
-    latest_at = handler.index("refreshWeeklyAiLatest(configId).then(")
-    ready_at = handler.index("if (!status.endpoint_ready) {")
-    assert ready_at < latest_at, "自动开跑不在就绪判定之后"
-    between = handler[ready_at:latest_at]
-    # 两者之间不能出现链的收尾 —— 出现了就说明它们是并列的两条链（就是上面那个 bug）。
-    assert "});" not in between, "自动开跑又跑到了就绪判定所在回调的外面"
-    assert "startWeeklyAiAnalysis();" in handler
+    assert "refreshWeeklyAiLatest(configId)" in handler, "打开抽屉时没查最近一次结果"
+    # 就绪判定必须**留在**这个回调里（而不是被挪到外面去），否则未就绪也不会提示。
+    assert handler.index("if (!status.endpoint_ready) {") < handler.index(
+        "refreshWeeklyAiLatest(configId)"
+    ), "查结果跑到了就绪判定之前"
+    # 断言前先剥掉 `//` 注释：本仓库的习惯是把**被去掉的那个写法原样写进说明注释**
+    # （这次就是在注释里引了 `if (!hasCached) startWeeklyAiAnalysis();`），
+    # 不剥离的话说明文字会被当成真实代码 —— 这个坑本次会话已经踩过两次。
+    code_only = re.sub(r"//[^\n]*", " ", handler)
+    assert "startWeeklyAiAnalysis" not in code_only, (
+        "打开抽屉的这支回调里出现了开跑调用 —— 「看一眼结果」不该把分析跑起来"
+    )
 
 
 def test_the_drawer_start_button_stays_disabled_until_ready():
