@@ -490,6 +490,9 @@ class DiffService:
             headers = list(previous_df.columns) if previous_df is not None else []
             rows = []
             if previous_df is not None:
+                # 整行空白的行不发 —— 判空口径与比较分支（`_has_valid_data`）保持一致。
+                # 不筛的话，表里本来就有的空行会被算成「删除行」：线上 6011 报
+                # 「删除 5653 行」，其中大片是空行；6136 一张表报 1699 行、1686 行全空。
                 rows = [
                     {
                         'row_number': row_number,
@@ -497,15 +500,16 @@ class DiffService:
                         'data': row_data,
                     }
                     for row_number, row_data in self._dataframe_rows_with_index(previous_df)
+                    if self._has_valid_data(row_data, headers)
                 ]
             return {
                 'operation': 'deleted',
                 'message': f'工作表 "{sheet_name}" 已被删除',
                 'headers': headers,
                 'rows': rows,
-                'stats': {'added': 0, 'removed': len(previous_df) if previous_df is not None else 0, 'modified': 0}
+                'stats': {'added': 0, 'removed': len(rows), 'modified': 0}
             }
-        
+
         if previous_df is None:
             # 新增工作表
             headers = list(current_df.columns)
@@ -516,14 +520,15 @@ class DiffService:
                     'data': row_data
                 }
                 for row_number, row_data in self._dataframe_rows_with_index(current_df)
+                if self._has_valid_data(row_data, headers)
             ]
-            
+
             return {
                 'operation': 'added',
                 'message': f'新增工作表 "{sheet_name}"',
                 'headers': headers,
                 'rows': rows,
-                'stats': {'added': len(current_df), 'removed': 0, 'modified': 0}
+                'stats': {'added': len(rows), 'removed': 0, 'modified': 0}
             }
         
         # 比较现有工作表
@@ -531,35 +536,153 @@ class DiffService:
     
     def _detailed_dataframe_comparison(self, current_df, previous_df, key_columns: str = None) -> Dict[str, Any]:
         """详细比较两个DataFrame，支持行插入/删除的智能识别"""
-        import pandas as pd
-        import numpy as np
-        
+        # 列身份不能只看列名 —— 见 _pair_columns 的说明。
+        current_columns = list(current_df.columns) if current_df is not None else []
+        previous_columns = list(previous_df.columns) if previous_df is not None else []
+
+        pairs, current_only, previous_only = self._pair_columns(current_columns, previous_columns)
+
+        header_changes = []
+        if current_df is not None and previous_df is not None:
+            # 把上一版的列名**按配对结果改写成当前列名**，再逐格比。
+            # 不改名的话，一次列改名会让「旧名」和「新名」同时出现在列并集里，
+            # 每一行都会多出「旧值→空」「空→新值」两处假变更（线上审计 6657）。
+            mapped = list(previous_columns)
+            for cur_idx, prev_idx in pairs:
+                old_name, new_name = previous_columns[prev_idx], current_columns[cur_idx]
+                if old_name != new_name and not self._is_placeholder_pair(old_name, new_name):
+                    header_changes.append({
+                        'change': 'renamed',
+                        'column_index': cur_idx + 1,      # 从 1 开始，与 Excel 列序一致
+                        'column': new_name,
+                        'old_name': old_name,
+                        'new_name': new_name,
+                    })
+                mapped[prev_idx] = new_name
+            previous_df = previous_df.copy()
+            previous_df.columns = mapped
+            for cur_idx in current_only:
+                header_changes.append({
+                    'change': 'added',
+                    'column_index': cur_idx + 1,
+                    'column': current_columns[cur_idx],
+                    'old_name': '',
+                    'new_name': current_columns[cur_idx],
+                })
+            for prev_idx in previous_only:
+                header_changes.append({
+                    'change': 'removed',
+                    'column_index': prev_idx + 1,
+                    'column': previous_columns[prev_idx],
+                    'old_name': previous_columns[prev_idx],
+                    'new_name': '',
+                })
+
         # 保持原始列顺序，优先使用当前文件的列顺序
-        if current_df is not None:
-            ordered_columns = list(current_df.columns)
-            # 添加只在previous_df中存在的列
-            if previous_df is not None:
-                for col in previous_df.columns:
-                    if col not in ordered_columns:
-                        ordered_columns.append(col)
-        elif previous_df is not None:
-            ordered_columns = list(previous_df.columns)
-        else:
-            ordered_columns = []
-        
+        ordered_columns = list(current_columns)
+        for prev_idx in previous_only:
+            name = previous_columns[prev_idx]
+            # 被删掉的列仍然要留在表里（它的旧值要能显示出来），但同名的不重复列。
+            if name not in ordered_columns:
+                ordered_columns.append(name)
+
         # 重新索引DataFrame以便比较，保持原始列顺序
         if current_df is not None:
             current_df = current_df.reindex(columns=ordered_columns, fill_value='')
         if previous_df is not None:
             previous_df = previous_df.reindex(columns=ordered_columns, fill_value='')
-        
+
         # 使用智能diff算法处理行插入/删除
-        return self._smart_row_diff(current_df, previous_df, ordered_columns, key_columns=key_columns)
+        result = self._smart_row_diff(current_df, previous_df, ordered_columns, key_columns=key_columns)
+        if header_changes:
+            result['header_changes'] = header_changes
+        return result
+
+    @staticmethod
+    def _is_placeholder_column_name(name):
+        """pandas 给「表头为空」的列起的占位名（`Unnamed: 7`）。
+
+        占位名里带着**列的位置**，所以插/删一列之后，后面所有空表头列的占位名都会
+        「变」一次 —— 那是位置造成的，不是有人改了列名。两个用途：
+
+        * **不当锚点**：拿它按名字配对等于用位置配对，而位置正是插列之后最不可靠的
+          东西（线上 6556 插一列，`Unnamed: 76` 会被错认成基线里的 `Unnamed: 75`，
+          于是新列被报成「新增」的同时还漏掉一组列的归属）；
+        * **不报列名变更**：两侧都是占位名时不必提示 —— 一次插列附赠一串
+          `Unnamed: 75 → Unnamed: 76` 只会淹没真正的列变更。
+
+        取值比较照旧（配对结果仍然参与逐格比），变的只是「谁是谁」和「报不报」。
+        """
+        return bool(re.fullmatch(r'\s*Unnamed: \d+(\.\d+)?\s*', str(name or '')))
+
+    @classmethod
+    def _is_placeholder_pair(cls, old_name, new_name):
+        return cls._is_placeholder_column_name(old_name) and cls._is_placeholder_column_name(new_name)
+
+    @staticmethod
+    def _pair_columns(current_columns, previous_columns):
+        """决定「当前的第 i 列」对应「上一版的第 j 列」。
+
+        列身份**不能只看列名**：`header=0` 之后列名取自第 1 行，而第 1 行本身也是
+        会被改的（表头改名、两行表头互换）。只按列名配对时，一次改名会让「旧名的列」
+        与「新名的列」同时出现在列并集里，于是**每一行**都多出「旧值→空 / 空→新值」
+        两处假变更，两列的值恰好相等时还会产出「零净变更」的幽灵行：
+        线上审计 6657 只把两行表头互换（14 格），被报成 9 行、92 条变更，其中一行
+        同时被报「新增」和「删除」；6408/6427 是同一形态。
+
+        规则：
+        1. 先按**同名列**配对（唯一、保持左右顺序不交叉）—— 最强的身份证据，也能把
+           「中间插了一列」之后的所有列各自认回原位；
+        2. 相邻两个锚点之间剩下的列，**只有两侧数量相等时才按顺序两两配对**：
+           数量相等说明这一段的列是「改名」，数量不等说明有增删 —— 这时宁可按
+           新增/删除报，也不要把一列的值挂到另一列名下（那正是审计里的「编造」形态）。
+        """
+        index = {}
+        for j, name in enumerate(previous_columns):
+            if DiffService._is_placeholder_column_name(name):
+                continue
+            index.setdefault(name, []).append(j)
+
+        anchors = []
+        used_previous = set()
+        last_previous = -1
+        for i, name in enumerate(current_columns):
+            if DiffService._is_placeholder_column_name(name):
+                continue        # 占位名带的是位置，不是身份 —— 不能当锚点
+            for j in index.get(name, []):
+                if j in used_previous or j <= last_previous:
+                    continue
+                anchors.append((i, j))
+                used_previous.add(j)
+                last_previous = j
+                break
+
+        anchored_current = {i for i, _ in anchors}
+        pairs = list(anchors)
+        bounds = [(-1, -1)] + anchors + [(len(current_columns), len(previous_columns))]
+        for (prev_c, prev_p), (next_c, next_p) in zip(bounds, bounds[1:]):
+            current_gap = [i for i in range(prev_c + 1, next_c) if i not in anchored_current]
+            previous_gap = [j for j in range(prev_p + 1, next_p) if j not in used_previous]
+            if current_gap and len(current_gap) == len(previous_gap):
+                pairs.extend(zip(current_gap, previous_gap))
+
+        paired_current = {i for i, _ in pairs}
+        paired_previous = {j for _, j in pairs}
+        current_only = [i for i in range(len(current_columns)) if i not in paired_current]
+        previous_only = [j for j in range(len(previous_columns)) if j not in paired_previous]
+        return sorted(pairs), current_only, previous_only
 
     def _dataframe_rows_with_index(self, df):
-        """高效转换 DataFrame 为带原始行号的记录列表。"""
+        """高效转换 DataFrame 为带原始行号的记录列表。
+
+        行号是**Excel 行号**：`header=0` 读入时第 1 行已经被当作列名吃掉，
+        所以第 0 条数据的物理行号是 2。修前这里是 `idx + 1`，页面上显示的行号
+        比文件里真实行号小 1（线上 8 个分片独立复核 20/20 一致，例：平台 74 ↔
+        Excel 75），而 `templates/help.html` 又把行号写成「方便快速定位」——
+        评审者按它回文件里核对会整体错一行。
+        """
         records = df.to_dict(orient='records')
-        return [(idx + 1, row_data) for idx, row_data in enumerate(records)]
+        return [(idx + 2, row_data) for idx, row_data in enumerate(records)]
     
     def _resolve_key_columns(self, raw_value, columns):
         """把仓库配置的「关键列」解析成本次比较可用的列标签。

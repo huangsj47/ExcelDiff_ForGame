@@ -42,6 +42,22 @@
                 <i class="bi bi-plus-circle me-2"></i>工作表 "{{ sheet_name }}" 是新增的
             </div>
             {% endif %}
+
+            {# 列级变更：列名改了 / 加了列 / 删了列。
+               列名取自表头行，所以「改列名」本身过去既不作为行变更呈现（第 1 行被当列名吃掉），
+               又会把列身份整体错位放大成整表逐行修改。载荷里的 header_changes 就是它。 #}
+            {% if sheet_data.header_changes %}
+            <div class="alert alert-info py-2 px-3">
+                <i class="bi bi-type me-2"></i><strong>列变更（{{ sheet_data.header_changes | length }}）：</strong>
+                {% for change in sheet_data.header_changes -%}
+                    {%- if change.change == 'added' -%}新增列 {{ change.column }}
+                    {%- elif change.change == 'removed' -%}删除列 {{ change.old_name }}
+                    {%- else -%}列名 {{ change.old_name }} → {{ change.new_name }}
+                    {%- endif -%}
+                    {%- if not loop.last %}；{% endif %}
+                {%- endfor %}
+            </div>
+            {% endif %}
             
             <div class="excel-table-container">
             {% if sheet_data.rows %}

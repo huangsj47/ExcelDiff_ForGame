@@ -386,8 +386,19 @@
                         <div class="legend-desc">
                             <strong>行号颜色</strong>
                             <p>行号列也会用不同颜色标识该行的变更类型，方便快速定位。</p>
+                            <p>行号是<strong> Excel 里的真实行号</strong>（第 1 行是字段名行，所以数据从第 2 行开始），
+                               可以直接照着它回表格里定位。</p>
                         </div>
                     </div>
+                </div>
+
+                <h4 class="sub-title" style="margin-top: 28px;">列变更</h4>
+                <div class="tip-box">
+                    <i class="fas fa-lightbulb"></i>
+                    <span>列名取自表格第 1 行，所以「改列名」「加一列」「删一列」会单独列在每张表顶部的
+                        <strong>列变更</strong>提示里（例如 <code>列名 保险箱模态房比例 → 双人风轮ID</code>），
+                        <strong>不会</strong>被展开成每一行的逐格修改。加列/删列造成的那一列逐行「空 → 值 / 值 → 空」
+                        仍会按行显示。</span>
                 </div>
 
                 <div class="tip-box">

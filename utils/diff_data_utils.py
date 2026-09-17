@@ -40,6 +40,7 @@ def validate_excel_diff_data(diff_data):
 
     valid_sheets_count = 0
     total_rows = 0
+    header_changes = 0
     for _sheet_name, sheet_data in sheets.items():
         if not isinstance(sheet_data, dict):
             continue
@@ -47,9 +48,17 @@ def validate_excel_diff_data(diff_data):
         if isinstance(rows, list) and len(rows) > 0:
             valid_sheets_count += 1
             total_rows += len(rows)
+        # 列级变更（列名改了 / 加了列 / 删了列）也是内容。
+        # 只按 rows 判的话，「一次提交只改了列名」这种载荷会被判成
+        # 「所有工作表都没有差异数据」，页面每次访问都要重算一遍。
+        sheet_header_changes = sheet_data.get("header_changes")
+        if isinstance(sheet_header_changes, list):
+            header_changes += len(sheet_header_changes)
 
-    if total_rows == 0:
+    if total_rows == 0 and header_changes == 0:
         return False, f"所有工作表都没有差异数据 (共{len(sheets)}个工作表)"
+    if total_rows == 0:
+        return True, f"验证通过: {header_changes}处列变更, 0行差异"
     return True, f"验证通过: {valid_sheets_count}个有效工作表, 共{total_rows}行差异"
 
 

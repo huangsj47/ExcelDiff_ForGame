@@ -736,6 +736,11 @@ function displayExcelDiff(diffData) {
                     return row.status === 'added' || row.status === 'removed' || row.status === 'modified';
                 });
             }
+            // 只改了列名的工作表同样「有变更」：不然它会被排到无变更区、
+            // 顶部还会显示「平台未检测出变更」。
+            if (!hasChanges && sheetData && sheetData.header_changes && sheetData.header_changes.length) {
+                hasChanges = true;
+            }
             
             console.log('Sheet "' + sheetName + '" (original index ' + i + ') has changes:', hasChanges);
             if (sheetData && sheetData.rows) {
@@ -851,8 +856,9 @@ function displayExcelDiff(diffData) {
         // 添加统计信息
         if (diffData.summary) {
             var totalChanges = (diffData.summary.added || 0) + (diffData.summary.modified || 0) + (diffData.summary.removed || 0);
+            var headerChangeCount = countHeaderChanges(diffData);
             
-            if (totalChanges === 0) {
+            if (totalChanges === 0 && headerChangeCount === 0) {
                 // 没有检测到变更时显示友好提示
                 html += '<div class="excel-summary mt-3 p-4 bg-warning bg-opacity-10 border border-warning rounded">' +
                        '<div class="d-flex align-items-center">' +
@@ -897,6 +903,48 @@ function displayExcelDiff(diffData) {
 }
 
 // 渐进式渲染工作表内容
+// 列级变更提示：列名改了 / 加了列 / 删了列。
+//
+// 列名来自表头行（`header=0` 之后第 1 行就成了列名），所以「改列名」这件事
+// 历史上对评审者完全隐形：只改列名的一次提交会显示「平台未检测出变更」，
+// 而列名一改还会把列身份整体错位、放大成整表逐行修改。载荷里的
+// `header_changes` 就是为这件事留的（见 services/diff_service.py::_pair_columns）。
+function headerChangesHtml(sheetData) {
+    var changes = sheetData && sheetData.header_changes;
+    if (!changes || !changes.length) {
+        return '';
+    }
+    var items = [];
+    for (var i = 0; i < changes.length; i++) {
+        var change = changes[i];
+        if (change.change === 'added') {
+            items.push('新增列 ' + change.column);
+        } else if (change.change === 'removed') {
+            items.push('删除列 ' + change.old_name);
+        } else {
+            items.push('列名 ' + change.old_name + ' → ' + change.new_name);
+        }
+    }
+    return '<div class="alert alert-info py-2 px-3 mb-2 excel-header-changes">' +
+           '<i class="bi bi-type me-2"></i><strong>列变更（' + changes.length + '）：</strong>' +
+           escapeHtml(items.join('；')) +
+           '</div>';
+}
+
+function countHeaderChanges(diffData) {
+    var total = 0;
+    var sheets = (diffData && diffData.sheets) || {};
+    for (var name in sheets) {
+        if (Object.prototype.hasOwnProperty.call(sheets, name)) {
+            var changes = sheets[name] && sheets[name].header_changes;
+            if (changes && changes.length) {
+                total += changes.length;
+            }
+        }
+    }
+    return total;
+}
+
 function renderSheetsProgressively(diffData, reorderedSheets, currentIndex) {
     if (currentIndex >= reorderedSheets.length) {
         // 所有工作表渲染完成
@@ -926,7 +974,8 @@ function renderSheetsProgressively(diffData, reorderedSheets, currentIndex) {
                 });
             } else {
                 // 小数据集直接渲染
-                contentContainer.innerHTML = createExcelDiffTable(sheetName, sheetData);
+                contentContainer.innerHTML = headerChangesHtml(sheetData) +
+                                             createExcelDiffTable(sheetName, sheetData);
                 renderSheetsProgressively(diffData, reorderedSheets, currentIndex + 1);
             }
         } else {
@@ -978,7 +1027,7 @@ function renderLargeSheetInBatches(container, sheetName, sheetData, callback) {
     
     tableHtml += '</tr></thead><tbody id="sheet-tbody-' + sheetName + '"></tbody></table></div>';
     
-    container.innerHTML = tableHtml;
+    container.innerHTML = headerChangesHtml(sheetData) + tableHtml;
 
     // 在分批渲染完成后调试滚动条状态
     window.debugScrollbarAfterRender = function() {
@@ -1410,7 +1459,8 @@ function renderSheetContentIfNeeded(sheetName) {
                 });
             } else {
                 // 小数据集直接渲染
-                contentContainer.innerHTML = createExcelDiffTable(sheetName, sheetData);
+                contentContainer.innerHTML = headerChangesHtml(sheetData) +
+                                             createExcelDiffTable(sheetName, sheetData);
                 console.log('Small sheet rendered:', sheetName);
             }
         }

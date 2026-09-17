@@ -89,9 +89,9 @@ class TestDeletedSheetProducer:
     def test_deleted_sheet_keeps_headers_and_values(self, service):
         result = service._compare_dataframes(None, _PREV, '奖励模式')
         assert list(result['headers']) == list(_PREV.columns)
-        # 行号从 1 起，且内容与原始表逐格一致（不能因为「整表删除」就丢掉值）
+        # 行号是 **Excel 行号**：第 1 行被读成列名，所以第一条数据的物理行号是 2。
         first = result['rows'][0]
-        assert first['row_number'] == 1
+        assert first['row_number'] == 2
         assert first['data']['id'] == 'TYPE'
         assert result['rows'][2]['data']['每日获得次数上限'] == '1000'
 

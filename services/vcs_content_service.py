@@ -235,6 +235,21 @@ def get_file_content_from_git(repository, commit_id, file_path):
             return blob.data_stream.read()
 
         except KeyError:
+            # 文件在基线里叫别的名字（提交做了改名：`git diff-tree -M` 会把它记成
+            # R0xx "旧名" -> "新名"）。这时按新路径取内容是空的，而空内容会被上层
+            # 当成「上一版什么都没有」——整份表被渲染成「新增工作表」。
+            # 线上实例 6140：一次改名，真实差异只有 5 格，页面写「257 行全部新增」。
+            renamed_from = _find_rename_source(repo, commit_id, file_path)
+            if renamed_from:
+                try:
+                    blob = commit.tree[renamed_from]
+                    log_print(
+                        f"文件在 {commit_id[:8]} 中是改名前的 {renamed_from}，按旧路径取内容: {file_path}",
+                        'GIT', force=True,
+                    )
+                    return blob.data_stream.read()
+                except KeyError:
+                    log_print(f"改名来源在 {commit_id[:8]} 中也取不到: {renamed_from}", 'GIT')
             log_print(f"文件在提交 {commit_id[:8]} 中不存在: {file_path}", 'GIT')
             return None
 
@@ -253,6 +268,53 @@ def get_file_content_from_git(repository, commit_id, file_path):
 #   * 没传   → 读缓存时不指定基线，让服务自己解析权威基线（老调用方行为不变）；
 #   * 传 None → 就是要「和空版本比」（新增文件）那一行。
 PREVIOUS_COMMIT_UNSET = object()
+
+
+def _find_rename_source(repo, commit_id, file_path):
+    """`file_path` 在 `commit_id` 里不存在时，找出它改名前的路径。
+
+    配表里「改名」很常见（`【40】怪物表_Object_物件.xlsx` → 加个「——废弃」后缀之类）。
+    改名之后按新路径去基线版本取内容会取到空 —— 而空内容会被上层当成「上一版什么都
+    没有」，整份表被渲染成「新增工作表」。线上 6140 就是这样：一次改名，真实差异
+    只有 5 个单元格，页面写的是「257 行全部新增」。
+
+    两条路都试：
+    1. `git log --follow` 从这一版往前追 —— 这一版自己就是改名那次提交时直接命中；
+    2. 基线在改名**之前**时上面那条追不到（往前追看不到未来的改名），于是先找
+       「新增了这个路径」的那次提交（关掉改名检测，改名看起来就是一次新增），
+       再在那次提交上开改名检测把 `R0xx 旧名 新名` 里的旧名读出来。
+
+    只往前追一跳：连续多次改名时给出的是一跳之前的名字，仍然取不到就如实返回 None。
+    """
+    def _parse(output):
+        tokens = output.split('\x00')
+        for index, token in enumerate(tokens):
+            status = token.strip()
+            if len(status) >= 2 and status[0] in ('R', 'C') and status[1:].isdigit():
+                if index + 2 < len(tokens) and tokens[index + 2] == file_path:
+                    return tokens[index + 1] or None
+        return None
+
+    try:
+        direct = repo.git.log('--follow', '--name-status', '-M', '-z', '-1',
+                              '--format=%H', commit_id, '--', file_path)
+        source = _parse(direct)
+        if source:
+            return source
+    except Exception as exc:
+        log_print(f"查询改名来源失败(顺历史): {file_path} | {exc}", 'GIT')
+
+    try:
+        added_by = repo.git.log('--no-renames', '--diff-filter=A', '--format=%H',
+                                '-1', 'HEAD', '--', file_path).strip()
+        if not added_by:
+            return None
+        status = repo.git.diff_tree('-r', '-M', '--name-status', '--no-commit-id',
+                                    '-z', added_by)
+        return _parse(status)
+    except Exception as exc:
+        log_print(f"查询改名来源失败(找新增提交): {file_path} | {exc}", 'GIT')
+        return None
 
 
 def get_deleted_file_diff_data(commit, previous_commit):
