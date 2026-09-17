@@ -437,21 +437,25 @@
 .excel-text-bg-old {
     background-color: #c62828 !important; /* 深红色背景 */
     color: #ffffff !important; /* 白色文字 */
-    padding: 2px 4px;
+    /* 高亮不能移动文字（同 diff-styles.css / excel-scroll-fix.css 的说明：
+       高亮段比同行未高亮文字低 2px、右 4px 会让被高亮的数字跟前面的前缀对不齐）。 */
+    padding: 2px 0;
     border-radius: 3px;
-    display: inline-block;
-    text-align: left !important;
-    vertical-align: top !important;
+    display: inline;
+    text-align: left;
+    vertical-align: baseline;
+    box-shadow: 3px 0 0 #c62828, -3px 0 0 #c62828;
 }
 
 .excel-text-bg-new {
     background-color: #2e7d32 !important; /* 深绿色背景 */
     color: white !important; /* 白色文字 */
-    padding: 2px 4px;
+    padding: 2px 0;
     border-radius: 3px;
-    display: inline-block;
-    text-align: left !important;
-    vertical-align: top !important;
+    display: inline;
+    text-align: left;
+    vertical-align: baseline;
+    box-shadow: 3px 0 0 #2e7d32, -3px 0 0 #2e7d32;
     border: none !important;
     text-decoration: none !important;
 }

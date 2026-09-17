@@ -372,21 +372,28 @@
 .excel-text-bg-old {
     background-color: var(--color-cell-old-bg, #c62828) !important; /* 红色背景 */
     color: var(--color-cell-old-text, #ffffff) !important; /* 白色文字 */
-    padding: 2px 4px;
+    /* 高亮**不能移动文字**：原先 display:inline-block + vertical-align:top +
+       左右各 4px padding，会让高亮的那一段比同一格里没高亮的文字**低 2px、右 4px**，
+       于是「13,39,10000」与「13,39,10001」里被高亮的 10000/10001 跟前面的 13,39
+       对不齐（线上 5966 反馈）。改回行内元素、按基线对齐，左右留白用不占布局的
+       box-shadow 撑出来 —— 文字位置与「压根没高亮」时完全一致。 */
+    padding: 2px 0;
     border-radius: var(--radius-sm, 3px);
-    display: inline-block;
-    text-align: left !important;
-    vertical-align: top !important;
+    display: inline;
+    text-align: left;
+    vertical-align: baseline;
+    box-shadow: 3px 0 0 var(--color-cell-old-bg, #c62828), -3px 0 0 var(--color-cell-old-bg, #c62828);
 }
 
 .excel-text-bg-new {
     background-color: var(--color-cell-new-bg, #2e7d32) !important; /* 深绿色背景 */
     color: var(--color-cell-new-text, #ffffff) !important; /* 白色文字，实测 5.13:1 */
-    padding: 2px 4px;
+    padding: 2px 0;
     border-radius: var(--radius-sm, 3px);
-    display: inline-block;
-    text-align: left !important;
-    vertical-align: top !important;
+    display: inline;
+    text-align: left;
+    vertical-align: baseline;
+    box-shadow: 3px 0 0 var(--color-cell-new-bg, #2e7d32), -3px 0 0 var(--color-cell-new-bg, #2e7d32);
 }
 
 /* 使用更高特异性确保样式生效 */

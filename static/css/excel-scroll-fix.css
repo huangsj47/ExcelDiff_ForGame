@@ -62,21 +62,30 @@
 .excel-diff-table .excel-text-bg-old {
     background-color: var(--color-cell-old-bg, #c62828) !important; /* 红色背景 */
     color: var(--color-cell-old-text, #ffffff) !important; /* 白色文字 */
-    padding: 2px 4px !important;
+    /* 高亮**不能移动文字**。原先 display:inline-block + vertical-align:top +
+       左右各 4px padding，会让高亮段比同一格里没高亮的文字低 2px、右 4px：
+       线上 5966 的「13,39,10000」/「13,39,10001」里，被高亮的 10000/10001
+       就是这样跟前面的 13,39 对不齐的。改回行内元素 + 基线对齐，左右留白改用
+       不占布局的 box-shadow（阴影不参与排版，所以文字位置与未高亮时完全一致）。
+       同一组规则在 diff-styles.css / excel-diff-new.css / merge_diff.html 里各有一份，
+       改一处必须四处一起改（本文件最后加载，这里才是最终生效值）。 */
+    padding: 2px 0 !important;
     border-radius: 3px !important;
-    display: inline-block !important;
+    display: inline !important;
     text-align: left !important;
-    vertical-align: top !important;
+    vertical-align: baseline !important;
+    box-shadow: 3px 0 0 var(--color-cell-old-bg, #c62828), -3px 0 0 var(--color-cell-old-bg, #c62828) !important;
 }
 
 .excel-diff-table .excel-text-bg-new {
     background-color: var(--color-cell-new-bg, #2e7d32) !important; /* 深绿色背景 */
     color: var(--color-cell-new-text, #ffffff) !important; /* 白色文字，实测 5.13:1 */
-    padding: 2px 4px !important;
+    padding: 2px 0 !important;
     border-radius: 3px !important;
-    display: inline-block !important;
+    display: inline !important;
     text-align: left !important;
-    vertical-align: top !important;
+    vertical-align: baseline !important;
+    box-shadow: 3px 0 0 var(--color-cell-new-bg, #2e7d32), -3px 0 0 var(--color-cell-new-bg, #2e7d32) !important;
     border: none !important;
     text-decoration: none !important;
 }

@@ -3,9 +3,9 @@
 {% block title %}diff多版本合并显示{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.0">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.1">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/excel-diff-new.css') }}?v=2.0">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-scroll-fix.css') }}?v=2.0">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-scroll-fix.css') }}?v=2.1">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.0">
 <style>
 /* 加载状态样式 */
@@ -73,23 +73,27 @@
 
 /* 确保文本背景样式不被覆盖 - 最高优先级 */
 .excel-diff-table .excel-text-bg-old {
-    background-color: #ee3f51 !important; /* 红色背景 */
-    color: #f8f8f8 !important; /* 白色文字 */
-    padding: 2px 4px !important;
+    background-color: #c62828 !important; /* 红色背景（与 diff-styles.css 同一组 WCAG 值） */
+    color: #ffffff !important; /* 白色文字 */
+    /* 高亮不能移动文字：inline-block + vertical-align:top + 左右 4px padding 会让
+       高亮段比同行未高亮的文字低 2px、右 4px，被高亮的数字就会跟前面的前缀对不齐。 */
+    padding: 2px 0 !important;
     border-radius: 3px !important;
-    display: inline-block !important;
+    display: inline !important;
     text-align: left !important;
-    vertical-align: top !important;
+    vertical-align: baseline !important;
+    box-shadow: 3px 0 0 #c62828, -3px 0 0 #c62828 !important;
 }
 
 .excel-diff-table .excel-text-bg-new {
     background-color: #2e7d32 !important; /* 深绿色背景 */
     color: white !important; /* 白色文字 */
-    padding: 2px 4px !important;
+    padding: 2px 0 !important;
     border-radius: 3px !important;
-    display: inline-block !important;
+    display: inline !important;
     text-align: left !important;
-    vertical-align: top !important;
+    vertical-align: baseline !important;
+    box-shadow: 3px 0 0 #2e7d32, -3px 0 0 #2e7d32 !important;
     border: none !important;
     text-decoration: none !important;
 }
