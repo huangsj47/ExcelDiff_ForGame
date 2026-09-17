@@ -339,6 +339,366 @@
     }
     .ai-analysis-output.is-empty { color: #94a3b8; }
 
+    /* ===================================================================
+       AI 分析配置面板（摘要卡片 + 配置模态框）
+       -------------------------------------------------------------------
+       设计方向：Swiss / 极简 —— 栅格、克制的边框、清晰的字体层级、没有多余装饰。
+       两份作用域 token 只做**映射**，全部指向 style.css 的全局 token，不新增颜色；
+       按仓库规则一律写成 var(--x, 字面量) 带兜底。
+       =================================================================== */
+    .ai-config-scope {
+        --ai-surface: var(--color-surface, #ffffff);
+        --ai-surface-subtle: var(--color-surface-subtle, #f8f9fa);
+        --ai-border: var(--color-border, #dee2e6);
+        --ai-border-strong: var(--color-border-strong, #d0d7de);
+        --ai-text: var(--color-text, #212529);
+        --ai-text-secondary: var(--color-text-secondary, #495057);
+        --ai-text-muted: var(--color-text-muted, #656d76);
+        --ai-accent: var(--color-primary, #0d6efd);
+        --ai-accent-strong: var(--color-primary-strong, #0b5ed7);
+        --ai-focus: var(--color-focus, #0b5ed7);
+        --ai-ring: var(--color-info-bg, #e7f3ff);
+        --ai-danger-text: var(--color-danger-text, #b3261e);
+        --ai-success-text: var(--color-success-text, #157347);
+        --ai-warning-text: var(--color-warning-text, #856404);
+        --ai-gap: var(--space-4, 16px);
+        --ai-radius: var(--radius-lg, 6px);
+        --ai-transition: background-color var(--motion-base, 0.25s) var(--ease-out, ease),
+            border-color var(--motion-base, 0.25s) var(--ease-out, ease),
+            color var(--motion-base, 0.25s) var(--ease-out, ease);
+    }
+
+    /* ---------- 摘要卡片 ---------- */
+    .ai-config-card {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: var(--ai-gap);
+    }
+    .ai-config-card__main { flex: 1 1 320px; min-width: 0; }
+    .ai-config-card__head {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2, 8px);
+        margin-bottom: var(--space-2, 8px);
+    }
+    .ai-config-card__icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        width: 28px;
+        height: 28px;
+        border-radius: var(--radius-md, 4px);
+        background: var(--ai-ring);
+        color: var(--ai-accent-strong);
+        font-size: var(--font-size-sm, 12px);
+    }
+    .ai-config-card__title {
+        margin: 0;
+        color: var(--ai-text);
+        font-size: var(--font-size-md, 14px);
+        font-weight: 600;
+        letter-spacing: 0.01em;
+    }
+    /* 徽章保留 JS 给的 bg-* 语义，但换成仓库的「浅底 + 深字」组合：
+       实底 bg-success / bg-warning 在浅色管理台里太抢眼，文字对比度也只在 4.5 上下。 */
+    #aiKeyStatusBadge.bg-success {
+        background-color: var(--color-success-bg, #dafbe1) !important;
+        color: var(--ai-success-text) !important;
+    }
+    #aiKeyStatusBadge.bg-warning {
+        background-color: var(--color-warning-bg, #fff3cd) !important;
+        color: var(--ai-warning-text) !important;
+    }
+    #aiKeyStatusBadge.bg-secondary {
+        background-color: var(--color-surface-muted, #e9ecef) !important;
+        color: var(--ai-text-secondary) !important;
+    }
+
+    /* 一行配置摘要：分段 + 细分隔线，不再是「·」拼出来的一长串灰字 */
+    .ai-config-card__meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-2, 8px) 0;
+        min-height: 18px;
+        font-size: var(--font-size-sm, 12px);
+        color: var(--ai-text-muted);
+    }
+    .ai-meta-item { display: inline-flex; align-items: baseline; gap: var(--space-2, 8px); }
+    .ai-meta-item:not(:first-child) {
+        margin-left: var(--space-4, 16px);
+        padding-left: var(--space-4, 16px);
+        border-left: 1px solid var(--ai-border);
+    }
+    .ai-meta-item__key { color: var(--ai-text-muted); }
+    .ai-meta-item__val { color: var(--ai-text-secondary); font-weight: 600; }
+    .ai-meta-item__val.is-mono {
+        font-family: var(--font-mono, monospace);
+        font-size: var(--font-size-xs, 11px);
+        font-weight: 500;
+    }
+    /* 未就绪时给一句结论，而不是让用户自己去比对上面几个值 */
+    .ai-config-card__notice {
+        margin-top: var(--space-2, 8px);
+        font-size: var(--font-size-sm, 12px);
+        color: var(--ai-warning-text);
+    }
+    /* 加载中：文案下面走一条不定长进度条 —— 「什么都没发生」和「正在加载」要能分辨 */
+    .ai-config-card__meta.is-loading::after {
+        content: '';
+        display: block;
+        flex-basis: 100%;
+        height: 3px;
+        margin-top: var(--space-2, 8px);
+        border-radius: 2px;
+        background: linear-gradient(90deg, transparent, var(--ai-accent), transparent) no-repeat;
+        background-size: 40% 100%;
+        opacity: 0.5;
+        animation: ai-config-progress 1.2s linear infinite;
+    }
+    @keyframes ai-config-progress {
+        from { background-position: -40% 0; }
+        to { background-position: 140% 0; }
+    }
+    /* 加载失败：左侧色标 + 浅底，给出原因与重试入口。
+       以前失败只把模态框里的一行小字染红 —— 用户没打开模态框就永远不知道。 */
+    .ai-config-card__error {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--space-2, 8px);
+        margin-top: var(--space-2, 8px);
+        padding: var(--space-2, 8px) var(--space-3, 12px);
+        border-left: 3px solid var(--color-danger, #dc3545);
+        border-radius: 0 var(--radius-sm, 3px) var(--radius-sm, 3px) 0;
+        background: var(--color-danger-bg, #ffebe9);
+        color: var(--ai-danger-text);
+        font-size: var(--font-size-sm, 12px);
+    }
+    .ai-config-card__actions { display: flex; align-items: center; gap: var(--space-2, 8px); flex-shrink: 0; }
+
+    /* ---------- 模态框骨架 ---------- */
+    .ai-config-header { align-items: flex-start; }
+    .ai-config-header__hint {
+        margin-top: var(--space-1, 4px);
+        color: var(--ai-text-muted);
+        font-size: var(--font-size-sm, 12px);
+    }
+    .ai-config-body { padding: var(--space-5, 20px); }
+    .ai-config-footer { gap: var(--space-2, 8px); }
+    /* 反馈色走 token（Bootstrap 的 .text-* 带 !important，这里必须跟一句 !important） */
+    #aiConfigFeedback.text-success { color: var(--ai-success-text) !important; }
+    #aiConfigFeedback.text-danger { color: var(--ai-danger-text) !important; }
+
+    /* ---------- 正文：左分区导航 + 右分区 ---------- */
+    .ai-config-layout {
+        display: grid;
+        grid-template-columns: 168px minmax(0, 1fr);
+        gap: var(--space-6, 24px);
+        align-items: start;
+    }
+    .ai-config-rail {
+        position: sticky;
+        top: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding-right: var(--space-3, 12px);
+        border-right: 1px solid var(--ai-border);
+    }
+    .ai-config-rail__item {
+        appearance: none;
+        padding: var(--space-2, 8px) var(--space-3, 12px);
+        border: 0;
+        border-left: 2px solid transparent;
+        border-radius: var(--radius-md, 4px);
+        background: none;
+        color: var(--ai-text-secondary);
+        font-size: var(--font-size-sm, 12px);
+        text-align: left;
+        cursor: pointer;
+        transition: var(--ai-transition);
+    }
+    .ai-config-rail__item:hover { background: var(--ai-surface-subtle); color: var(--ai-text); }
+    /* 导航只是跳转清单，用视觉类标记「刚跳到哪一节」，不用 aria-current ——
+       那是在向读屏软件断言「你正处在这一节」，而这里没有滚动联动，说了就是假的。 */
+    .ai-config-rail__item.is-current {
+        border-left-color: var(--ai-accent);
+        background: var(--ai-ring);
+        color: var(--ai-accent-strong);
+        font-weight: 600;
+    }
+
+    .ai-config-sections { display: flex; flex-direction: column; gap: var(--space-6, 24px); min-width: 0; }
+    .ai-config-section { min-width: 0; margin: 0; padding: 0; border: 0; }
+    /* legend 默认不参与 fieldset 的布局，要显式撑满才排得整齐 */
+    .ai-config-section__title {
+        float: none;
+        width: 100%;
+        margin: 0;
+        padding: 0 0 var(--space-2, 8px);
+        border-bottom: 1px solid var(--ai-border);
+        color: var(--ai-text);
+        font-size: var(--font-size-lg, 16px);
+        font-weight: 600;
+        letter-spacing: 0.01em;
+    }
+    .ai-config-section__desc {
+        max-width: 62ch;
+        margin: var(--space-2, 8px) 0 var(--space-4, 16px);
+        color: var(--ai-text-muted);
+        font-size: var(--font-size-sm, 12px);
+        line-height: 1.6;
+    }
+
+    /* ---------- 字段 ---------- */
+    .ai-config-field { min-width: 0; }
+    .ai-config-scope .ai-config-field .form-label {
+        margin-bottom: var(--space-1, 4px);
+        color: var(--ai-text);
+        font-size: var(--font-size-sm, 12px);
+        font-weight: 600;
+    }
+    .ai-config-scope .ai-config-field .form-text {
+        margin-top: var(--space-1, 4px);
+        color: var(--ai-text-muted);
+        font-size: var(--font-size-xs, 11px);
+        line-height: 1.55;
+    }
+    /* 平台的内联错误语言是 .form-text.text-danger，这里换上对比度更高的 token 色
+       （Bootstrap 的 .text-danger 自带 !important，覆盖必须同权重） */
+    .ai-config-scope .ai-config-field .form-text.text-danger { color: var(--ai-danger-text) !important; }
+    /* JS 会给整数字段的帮助文案尾部追加一个范围提示（范围由 field_schema 下发）。
+       以前这个 span 没有任何 CSS 定义，只是碰巧继承了 .form-text。 */
+    .ai-range-hint {
+        color: var(--ai-text-muted);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+    }
+
+    .ai-config-scope .form-control,
+    .ai-config-scope .form-select {
+        border-color: var(--ai-border-strong);
+        color: var(--ai-text);
+        transition: var(--ai-transition);
+    }
+    .ai-config-scope .form-control:focus,
+    .ai-config-scope .form-select:focus {
+        border-color: var(--ai-focus);
+        box-shadow: 0 0 0 3px var(--ai-ring);
+    }
+    .ai-config-scope .form-control::placeholder { color: var(--ai-text-muted); opacity: 0.75; }
+    .ai-config-scope .form-check-input { border-color: var(--ai-border-strong); transition: var(--ai-transition); }
+    .ai-config-scope .form-check-input:checked {
+        background-color: var(--ai-accent);
+        border-color: var(--ai-accent);
+    }
+    .ai-config-scope .form-check-input:focus {
+        border-color: var(--ai-focus);
+        box-shadow: 0 0 0 3px var(--ai-ring);
+    }
+    /* 键盘焦点样式不在这里定义：style.css 已有一条全局的
+       `:focus-visible { outline: 2px solid var(--color-focus, #0b5ed7); outline-offset: 2px; }`
+       （实测 5.84:1，满足 WCAG 2.2 焦点指示 ≥3:1）。面板里不覆盖它、更不能写 outline: none。 */
+
+    /* 区块标题：<legend> 的 class 字符串在测试里是逐字钉死的（它是「四个分组都在」
+       那条断言的判据），所以这里不动 markup，只在 CSS 里把观感掰回来。
+       最关键的一条是颜色：Bootstrap 的 .fs-6 是 16px、.text-primary 是 #0d6efd ——
+       16px 粗体不算「大文本」，#0d6efd on #fff 只有 3.65:1，**不满足 WCAG AA 的 4.5:1**。
+       换成中性正文色（#212529 on #fff = 15.4:1），层级交给字号/字重/留白去表达。
+       Bootstrap 的 .fs-6 / .text-primary / .pb-1 / .mb-3 都带 !important，覆盖必须同权重。 */
+    #aiConfigModal .ai-config-section > legend {
+        color: var(--ai-text) !important;
+        border-bottom-color: var(--ai-border) !important;
+    }
+
+    /* ---------- 填写示例（长文本，默认折叠） ---------- */
+    .ai-example { margin-top: var(--space-3, 12px); }
+    .ai-example__toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-2, 8px);
+        margin-left: calc(var(--space-2, 8px) * -1);
+        padding: var(--space-1, 4px) var(--space-2, 8px);
+        border-radius: var(--radius-md, 4px);
+        color: var(--ai-accent-strong);
+        font-size: var(--font-size-sm, 12px);
+        font-weight: 600;
+        cursor: pointer;
+        /* 去掉浏览器自带的三角标记（Firefox 走 list-style，WebKit 走下面那行） */
+        list-style: none;
+        transition: var(--ai-transition);
+    }
+    .ai-example__toggle::-webkit-details-marker { display: none; }
+    .ai-example__toggle:hover { background: var(--ai-surface-subtle); }
+    .ai-example__toggle .fas {
+        font-size: 10px;
+        transition: transform var(--motion-base, 0.25s) var(--ease-out, ease);
+    }
+    .ai-example[open] > .ai-example__toggle .fas { transform: rotate(90deg); }
+    /* 正文原来是 20 行 white-space: pre-wrap 的纯文本墙：行高、行宽、内滚都补上 */
+    .ai-example__body {
+        max-width: 68ch;
+        max-height: 320px;
+        margin-top: var(--space-2, 8px);
+        padding: var(--space-3, 12px) var(--space-4, 16px);
+        overflow-y: auto;
+        border: 1px solid var(--ai-border);
+        border-left: 3px solid var(--ai-border-strong);
+        border-radius: 0 var(--radius-md, 4px) var(--radius-md, 4px) 0;
+        background: var(--ai-surface-subtle);
+        color: var(--ai-text-secondary);
+        font-size: var(--font-size-sm, 12px);
+        line-height: 1.75;
+        white-space: pre-wrap;
+    }
+
+    /* ---------- 窄屏 ---------- */
+    @media (max-width: 991.98px) {
+        .ai-config-layout { grid-template-columns: minmax(0, 1fr); gap: var(--space-4, 16px); }
+        .ai-config-rail {
+            position: static;
+            flex-direction: row;
+            flex-wrap: wrap;
+            gap: var(--space-1, 4px);
+            padding: 0 0 var(--space-2, 8px);
+            border-right: 0;
+            border-bottom: 1px solid var(--ai-border);
+        }
+        .ai-config-rail__item {
+            padding: var(--space-1, 4px) var(--space-2, 8px);
+            border-left: 0;
+            border-bottom: 2px solid transparent;
+        }
+        .ai-config-rail__item.is-current {
+            border-bottom-color: var(--ai-accent);
+            background: none;
+        }
+    }
+    @media (max-width: 767.98px) {
+        .ai-config-card { flex-direction: column; }
+        .ai-config-card__actions { width: 100%; }
+        .ai-config-card__actions .btn { flex: 1 1 auto; }
+        .ai-config-body { padding: var(--space-4, 16px); }
+        .ai-config-section__title { font-size: var(--font-size-md, 14px); }
+        .ai-config-footer { flex-wrap: wrap; }
+        .ai-config-footer .btn { flex: 1 1 auto; }
+        .ai-example__body { max-height: 240px; }
+    }
+    /* 动效偏好：过渡与位移由 style.css 的全局 prefers-reduced-motion 块统一关掉
+       （它把全站 animation-duration / transition-duration 压到 0.01ms），这里只需要
+       给加载进度条一个**静态**替代 —— 全局那条会把迭代次数压到 1，动画条会停在起点
+       （background-position: -40%）上，也就是一条看不见的条。 */
+    @media (prefers-reduced-motion: reduce) {
+        .ai-config-card__meta.is-loading::after {
+            background: var(--color-surface-muted, #e9ecef);
+            opacity: 1;
+            animation: none;
+        }
+    }
+
     /* ===== 响应式 ===== */
     @media (max-width: 768px) {
         .page-header { padding: 1rem; }
@@ -388,16 +748,21 @@
 
     {% set _ai_can_edit = is_admin() or has_project_admin_access(project.id) %}
     <div class="card mb-4" id="aiConfigCard">
-    <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-3">
-        <div class="flex-grow-1">
-            <div class="d-flex align-items-center gap-2 mb-1">
-                <h6 class="mb-0">AI 分析配置</h6>
+    <div class="card-body ai-config-card ai-config-scope">
+        <div class="ai-config-card__main">
+            <div class="ai-config-card__head">
+                <span class="ai-config-card__icon"><i class="fas fa-robot" aria-hidden="true"></i></span>
+                <h6 class="ai-config-card__title">AI 分析配置</h6>
                 <span class="badge bg-secondary" id="aiKeyStatusBadge">检测中</span>
             </div>
-            <div class="small text-muted" id="aiConfigSummary">正在加载配置…</div>
-            <div class="small" id="aiConnectionStatus" role="status" aria-live="polite"></div>
+            <div class="ai-config-card__meta is-loading" id="aiConfigSummary">正在加载配置…</div>
+            <div class="ai-config-card__notice" id="aiConnectionStatus" role="status" aria-live="polite"></div>
+            <div class="ai-config-card__error d-none" id="aiConfigLoadError" role="alert"></div>
         </div>
-        <div class="flex-shrink-0">
+        <div class="ai-config-card__actions">
+            <button type="button" class="btn btn-outline-secondary btn-sm d-none" id="aiConfigRetryBtn">
+                <i class="fas fa-redo me-1" aria-hidden="true"></i>重试
+            </button>
             <button type="button" class="btn btn-primary btn-sm" id="aiConfigOpenBtn"
                     data-bs-toggle="modal" data-bs-target="#aiConfigModal">
                 <i class="fas fa-sliders-h me-1" aria-hidden="true"></i>修改配置
@@ -407,13 +772,18 @@
 </div>
 
 <div class="modal fade" id="aiConfigModal" tabindex="-1" aria-labelledby="aiConfigModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-dialog modal-lg modal-xl modal-dialog-centered modal-dialog-scrollable ai-config-scope">
         <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="aiConfigModalLabel">AI 分析配置</h5>
+            <div class="modal-header ai-config-header">
+                <div>
+                    <h5 class="modal-title" id="aiConfigModalLabel">AI 分析配置</h5>
+                    <div class="ai-config-header__hint">
+                        四项分组，从上到下依次配好即可。「测试连接」用当前填写的地址与模型直接探测，不必先保存。
+                    </div>
+                </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
-            <div class="modal-body">
+            <div class="modal-body ai-config-body">
                 <div class="alert alert-danger d-none" id="aiConfigErrorSummary" role="alert" tabindex="-1">
                     <div class="fw-semibold mb-1" id="aiConfigErrorTitle">有内容需要修改</div>
                     <ul class="mb-0 small" id="aiConfigErrorList"></ul>
@@ -422,10 +792,28 @@
                 <div class="alert alert-warning small mb-3">仅项目管理员可修改 AI 配置，当前为只读。</div>
                 {% endif %}
 
-                <fieldset class="mb-4">
-                    <legend class="fs-6 fw-semibold text-primary border-bottom pb-1 mb-3">连接配置</legend>
+                <!-- 左分区导航 + 右分区。四个分组容器留在外层缩进不动：
+                     整段重排缩进会让这张 250 行的 diff 变成「每一行都改过」，
+                     反而看不出真正改了什么。 -->
+                <!-- 注意：这里不要写出 fieldset 的开标签字面量（连注释里也不要）——
+                     「四个分组都在」那条断言数的是 markup 里 fieldset 开标签的出现次数。 -->
+                <div class="ai-config-layout">
+                    <nav class="ai-config-rail" aria-label="配置分组">
+                        <button type="button" class="ai-config-rail__item" data-ai-section="aiSectionConnection">连接配置</button>
+                        <button type="button" class="ai-config-rail__item" data-ai-section="aiSectionStrategy">分析策略</button>
+                        <button type="button" class="ai-config-rail__item" data-ai-section="aiSectionThreshold">告警门槛</button>
+                        <button type="button" class="ai-config-rail__item" data-ai-section="aiSectionPrompt">提示词与知识</button>
+                    </nav>
+                    <div class="ai-config-sections">
 
-                    <div class="mb-3">
+                <fieldset class="ai-config-section" id="aiSectionConnection">
+                    <legend class="fs-6 fw-semibold text-primary border-bottom pb-1 mb-3">连接配置</legend>
+                    <p class="ai-config-section__desc">
+                        AI 分析走哪个端点、用哪个模型、凭证存在哪里。三项齐全才算「已就绪」。
+                    </p>
+
+                    <div class="row g-3">
+                    <div class="col-12 ai-config-field">
                         <span class="form-label d-block" id="aiSourceLabel">服务来源</span>
                         <div class="form-check form-check-inline">
                             <input class="form-check-input" type="radio" name="aiEndpointSource"
@@ -443,7 +831,7 @@
                         </div>
                     </div>
 
-                    <div class="mb-3">
+                    <div class="col-12 col-lg-6 ai-config-field">
                         <label class="form-label" for="aiBaseUrlInput">接口地址</label>
                         <input type="text" class="form-control form-control-sm" id="aiBaseUrlInput"
                                placeholder="例如 http://127.0.0.1:15721/v1"
@@ -455,7 +843,7 @@
                         <div class="form-text text-danger d-none" id="aiBaseUrlInputError"></div>
                     </div>
 
-                    <div class="mb-3">
+                    <div class="col-12 col-lg-6 ai-config-field">
                         <label class="form-label" for="aiModelInput">模型名字</label>
                         <div class="input-group input-group-sm">
                             <input type="text" class="form-control" id="aiModelInput" list="aiModelOptions"
@@ -474,7 +862,7 @@
                         <div class="form-text text-danger d-none" id="aiModelInputError"></div>
                     </div>
 
-                    <div class="mb-3">
+                    <div class="col-12 col-lg-6 ai-config-field">
                         <label class="form-label" for="aiKeyInput">API Token</label>
                         <div class="input-group input-group-sm">
                             <input type="password" class="form-control" id="aiKeyInput"
@@ -492,18 +880,22 @@
                         <div class="form-text text-danger d-none" id="aiKeyInputError"></div>
                     </div>
 
-                    <div class="d-flex align-items-center gap-2">
+                    <div class="col-12 col-lg-6 ai-config-field d-flex align-items-center gap-2">
                         <button type="button" class="btn btn-outline-primary btn-sm" id="aiTestConnectionBtn">
                             <i class="fas fa-plug me-1" aria-hidden="true"></i>测试连接
                         </button>
                         <span class="form-text mb-0" id="aiTestResult" role="status" aria-live="polite"></span>
                     </div>
+                    </div>
                 </fieldset>
 
-                <fieldset class="mb-4">
+                <fieldset class="ai-config-section" id="aiSectionStrategy">
                     <legend class="fs-6 fw-semibold text-primary border-bottom pb-1 mb-3">分析策略</legend>
+                    <p class="ai-config-section__desc">
+                        每次分析跑多大、跑多久、花多少 token。不确定就先用默认值，跑一轮看报告再回来调。
+                    </p>
                     <div class="row g-3">
-                        <div class="col-md-6">
+                        <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiWeeklyAutoToggle">周版本自动分析</label>
                             <div class="form-check form-switch">
                                 <input class="form-check-input" type="checkbox" id="aiWeeklyAutoToggle">
@@ -511,44 +903,44 @@
                             </div>
                             <div class="form-text">关闭后只保留手动分析。</div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiWeeklyIntervalInput">分析间隔（分钟）</label>
-                            <input type="number" class="form-control form-control-sm" id="aiWeeklyIntervalInput"
+                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiWeeklyIntervalInput"
                                    aria-describedby="aiWeeklyIntervalInputHelp aiWeeklyIntervalInputError">
                             <div class="form-text" id="aiWeeklyIntervalInputHelp">最小 5 分钟。没有变更时不会触发分析。</div>
                             <div class="form-text text-danger d-none" id="aiWeeklyIntervalInputError"></div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiMaxFilesInput">单次最大文件数</label>
-                            <input type="number" class="form-control form-control-sm" id="aiMaxFilesInput"
+                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiMaxFilesInput"
                                    aria-describedby="aiMaxFilesInputHelp aiMaxFilesInputError">
                             <div class="form-text" id="aiMaxFilesInputHelp">单次分析最多纳入多少个文件，用于控制 token 消耗。</div>
                             <div class="form-text text-danger d-none" id="aiMaxFilesInputError"></div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiMaxRoundsInput">最大分析轮次</label>
-                            <input type="number" class="form-control form-control-sm" id="aiMaxRoundsInput"
+                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiMaxRoundsInput"
                                    aria-describedby="aiMaxRoundsInputHelp aiMaxRoundsInputError">
                             <div class="form-text" id="aiMaxRoundsInputHelp">模型最多可以来回几轮。轮次越多结论越细，也更慢更贵。</div>
                             <div class="form-text text-danger d-none" id="aiMaxRoundsInputError"></div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiMaxToolRequestsInput">上下文索取上限（次）</label>
-                            <input type="number" class="form-control form-control-sm" id="aiMaxToolRequestsInput"
+                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiMaxToolRequestsInput"
                                    aria-describedby="aiMaxToolRequestsInputHelp aiMaxToolRequestsInputError">
                             <div class="form-text" id="aiMaxToolRequestsInputHelp">整次分析允许索取上下文的总次数（跨轮次累计，重复索要同一个文件也计入）。</div>
                             <div class="form-text text-danger d-none" id="aiMaxToolRequestsInputError"></div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiPromptCharBudgetInput">提示词字符预算</label>
-                            <input type="number" class="form-control form-control-sm" id="aiPromptCharBudgetInput"
+                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiPromptCharBudgetInput"
                                    aria-describedby="aiPromptCharBudgetInputHelp aiPromptCharBudgetInputError">
                             <div class="form-text" id="aiPromptCharBudgetInputHelp">带入提示词的上下文总量上限。超出时按「保留首尾」压缩，并在内容里标注省略了多少。</div>
                             <div class="form-text text-danger d-none" id="aiPromptCharBudgetInputError"></div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiRequestTimeoutInput">单次请求超时（秒）</label>
-                            <input type="number" class="form-control form-control-sm" id="aiRequestTimeoutInput"
+                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiRequestTimeoutInput"
                                    aria-describedby="aiRequestTimeoutInputHelp aiRequestTimeoutInputError">
                             <div class="form-text" id="aiRequestTimeoutInputHelp">单次请求的超时时间，多轮分析中每一轮各自计时。</div>
                             <div class="form-text text-danger d-none" id="aiRequestTimeoutInputError"></div>
@@ -556,10 +948,13 @@
                     </div>
                 </fieldset>
 
-                <fieldset class="mb-4">
+                <fieldset class="ai-config-section" id="aiSectionThreshold">
                     <legend class="fs-6 fw-semibold text-primary border-bottom pb-1 mb-3">告警门槛</legend>
+                    <p class="ai-config-section__desc">
+                        哪些结论值得进异常清单。调高门槛减少误报，代价是可能漏掉证据略弱的问题。
+                    </p>
                     <div class="row g-3">
-                        <div class="col-md-6">
+                        <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiMinSeveritySelect">严重度门槛</label>
                             <select class="form-select form-select-sm" id="aiMinSeveritySelect"
                                     aria-describedby="aiMinSeveritySelectHelp aiMinSeveritySelectError">
@@ -571,7 +966,7 @@
                             </div>
                             <div class="form-text text-danger d-none" id="aiMinSeveritySelectError"></div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiMinConfidenceSelect">置信度门槛</label>
                             <select class="form-select form-select-sm" id="aiMinConfidenceSelect"
                                     aria-describedby="aiMinConfidenceSelectHelp aiMinConfidenceSelectError">
@@ -583,9 +978,9 @@
                             </div>
                             <div class="form-text text-danger d-none" id="aiMinConfidenceSelectError"></div>
                         </div>
-                        <div class="col-md-6">
+                        <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiMaxAnomaliesInput">单次异常上限</label>
-                            <input type="number" class="form-control form-control-sm" id="aiMaxAnomaliesInput"
+                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiMaxAnomaliesInput"
                                    aria-describedby="aiMaxAnomaliesInputHelp aiMaxAnomaliesInputError">
                             <div class="form-text" id="aiMaxAnomaliesInputHelp">超出的条目按严重度优先保留，被截掉的会在报告里记账。</div>
                             <div class="form-text text-danger d-none" id="aiMaxAnomaliesInputError"></div>
@@ -593,17 +988,21 @@
                     </div>
                 </fieldset>
 
-                <fieldset>
+                <fieldset class="ai-config-section" id="aiSectionPrompt">
                     <legend class="fs-6 fw-semibold text-primary border-bottom pb-1 mb-3">提示词与知识</legend>
-                    <div class="mb-3">
+                    <p class="ai-config-section__desc">
+                        只写本项目特有的事实与偏好：分析协议（检查维度、输出格式、置信度门槛、反误报条款）
+                        由平台内置提供，不用在这里重复。
+                    </p>
+                    <div class="ai-config-field">
                         <label class="form-label" for="aiPromptInput">项目补充指令</label>
                         <textarea class="form-control form-control-sm" id="aiPromptInput" rows="7"
                                   aria-describedby="aiPromptInputHelp aiPromptInputError"></textarea>
                         <div class="form-text" id="aiPromptInputHelp">分析协议（检查维度、输出格式、证据与置信度门槛、反误报条款）由平台内置 skill 强制提供，这里只写本项目特有的事实与偏好。<strong>留空也能正常分析。</strong></div>
                         <div class="form-text text-danger d-none" id="aiPromptInputError"></div>
-                        <details class="mt-2">
-                            <summary class="small text-primary" style="cursor: pointer;">看一个填写示例（G119）</summary>
-                            <div class="small text-muted border rounded bg-light p-2 mt-2" style="white-space: pre-wrap;">1. 技术栈与工程结构
+                        <details class="ai-example">
+                            <summary class="ai-example__toggle">看一个填写示例（G119）<i class="fas fa-chevron-right" aria-hidden="true"></i></summary>
+                            <div class="ai-example__body">1. 技术栈与工程结构
    Unity + C# + Lua。配表在 qz_config 下，导表产物是 CfgXxx.lua，且生成物要提交进版本库
    （否则无法 diff、无法追溯）。表名形如 [30]道具表_CfgItem.xlsx，[NN] 就是 ID 段位。
 
@@ -625,15 +1024,15 @@
    按严重度排序；报告正文控制在 1200 字以内。</div>
                         </details>
                     </div>
-                    <div class="mb-3">
+                    <div class="ai-config-field">
                         <label class="form-label" for="aiProjectKnowledgeInput">项目补充知识</label>
                         <textarea class="form-control form-control-sm" id="aiProjectKnowledgeInput" rows="7"
                                   aria-describedby="aiProjectKnowledgeInputHelp aiProjectKnowledgeInputError"></textarea>
                         <div class="form-text" id="aiProjectKnowledgeInputHelp">在项目知识包之外追加的补充说明。与内置规则冲突时，以内置规则为准。</div>
                         <div class="form-text text-danger d-none" id="aiProjectKnowledgeInputError"></div>
-                        <details class="mt-2">
-                            <summary class="small text-primary" style="cursor: pointer;">看一个填写示例（G119）</summary>
-                            <div class="small text-muted border rounded bg-light p-2 mt-2" style="white-space: pre-wrap;">- 一局流程分四个阶段，而且「固定集结等待」「步行入场」「传送入场」是**不同阶段**。
+                        <details class="ai-example">
+                            <summary class="ai-example__toggle">看一个填写示例（G119）<i class="fas fa-chevron-right" aria-hidden="true"></i></summary>
+                            <div class="ai-example__body">- 一局流程分四个阶段，而且「固定集结等待」「步行入场」「传送入场」是**不同阶段**。
   所以看到「首次交互慢」「进入地宫后无响应」这类描述，要先确认发生在哪个阶段，
   不能直接归因到吸灵器或地宫逻辑上。
 
@@ -653,8 +1052,10 @@
                         </details>
                     </div>
                 </fieldset>
+                    </div>
+                </div>
             </div>
-            <div class="modal-footer">
+            <div class="modal-footer ai-config-footer">
                 <span class="small text-muted me-auto" id="aiConfigFeedback"></span>
                 <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">取消</button>
                 <button type="button" class="btn btn-primary btn-sm" id="aiConfigSaveBtn">保存配置</button>
@@ -1110,11 +1511,14 @@ function setAiKeyStatusBadge(text, variant) {
     badge.className = `badge bg-${variant}`;
 }
 
-function setAiConfigFeedback(text, isError) {
+// 反馈行的语气：中性 / 成功 / 失败。颜色由 CSS 从设计 token 取（#aiConfigFeedback.text-*）。
+function setAiConfigFeedback(text, variant) {
     const feedback = aiEl('aiConfigFeedback');
     if (!feedback) return;
     feedback.textContent = text || '';
-    feedback.className = isError ? 'small me-auto text-danger' : 'small me-auto text-muted';
+    const tone = variant === 'success' ? 'text-success'
+        : (variant === 'error' || variant === true) ? 'text-danger' : 'text-muted';
+    feedback.className = `small me-auto ${tone}`;
 }
 
 function setAiFieldError(field, message) {
@@ -1258,46 +1662,107 @@ function fillAiConfigForm(data) {
     if (keyInput) keyInput.value = '';
 }
 
+// 摘要卡片里的一格：「标签 + 值」。
+// 用 createElement / textContent 拼，**不用 innerHTML 拼字符串** —— 本文件里确实有
+// escapeHtml，但它在另一段作用域里（AI 配置这段拿不到），拼字符串就等于把服务端返回的
+// 模型名、接口地址原样插进 DOM。
+function aiMetaItem(key, value, mono) {
+    const item = document.createElement('span');
+    item.className = 'ai-meta-item';
+    const label = document.createElement('span');
+    label.className = 'ai-meta-item__key';
+    label.textContent = key;
+    const val = document.createElement('span');
+    val.className = mono ? 'ai-meta-item__val is-mono' : 'ai-meta-item__val';
+    // 空值一律显示成「未配置」：直接 String(undefined) 会让卡片上出现一个 undefined。
+    val.textContent = (value === undefined || value === null || value === '') ? '未配置' : String(value);
+    item.appendChild(label);
+    item.appendChild(val);
+    return item;
+}
+
 function renderAiConfigSummary(data) {
     const keyConfigured = !!(data.api_key && data.api_key.configured);
     setAiKeyStatusBadge(data.endpoint_ready ? '已就绪' : '待配置',
         data.endpoint_ready ? 'success' : 'warning');
 
     const summary = aiEl('aiConfigSummary');
+    const status = aiEl('aiConnectionStatus');
     if (!summary) return;
+
+    summary.classList.remove('is-loading');
+    summary.textContent = '';
+    if (status) status.textContent = '';
 
     if (!data.api_base_url && !data.api_model) {
         // 空状态要给出下一步，而不是只说「没有」。
+        // 这里**不再**补一句「还没就绪：还缺…」—— 这句话已经把要填的三样都说了，
+        // 卡片上并排两句同义提示只是噪音。
         summary.textContent = '尚未配置：点「修改配置」填好接口地址、模型名字与 Token，AI 分析才能运行。';
         return;
     }
 
-    const parts = [];
-    parts.push(data.source === 'custom' ? '自定义端点' : 'OpenAI 官方');
-    parts.push(data.api_model || '模型名未填');
-    parts.push(keyConfigured ? 'Token 已配置' : 'Token 未配置');
-    if (data.updated_at) {
-        parts.push(`最近更新 ${String(data.updated_at).replace('T', ' ').slice(0, 16)}`);
+    // 缺项清单复用周版本抽屉那一份，两边说的才是同一句话。
+    // 各写一份的下场：卡片说「密钥」、抽屉说「Token」，用户对不上该填哪一栏。
+    if (status && !data.endpoint_ready) {
+        status.textContent = `还没就绪：还缺${describeMissingWeeklyAiConfig(data)}，补齐后 AI 分析才能运行。`;
     }
-    let text = parts.join(' · ');
-    if (!data.endpoint_ready) text += '（还没就绪，AI 分析无法运行）';
-    summary.textContent = text;
+
+    summary.appendChild(aiMetaItem('来源', data.source === 'custom' ? '自定义端点' : 'OpenAI 官方'));
+    summary.appendChild(aiMetaItem('模型', data.api_model, true));
+    summary.appendChild(aiMetaItem('Token', keyConfigured ? '已配置' : '未配置'));
+    if (data.updated_at) {
+        summary.appendChild(aiMetaItem('最近更新',
+            String(data.updated_at).replace('T', ' ').slice(0, 16)));
+    }
 }
 
 async function refreshAiAnalysisConfig() {
+    const summary = aiEl('aiConfigSummary');
+    const errorBox = aiEl('aiConfigLoadError');
+    const retryBtn = aiEl('aiConfigRetryBtn');
+    if (summary) summary.classList.add('is-loading');
+    if (errorBox) {
+        errorBox.classList.add('d-none');
+        errorBox.textContent = '';
+    }
+    if (retryBtn) {
+        retryBtn.disabled = true;
+        retryBtn.classList.add('d-none');
+    }
+
+    // 失败要说在摘要卡片里。模态框底部那行反馈只有打开模态框才看得见，而这个请求是
+    // 页面加载时就发的 —— 用户不打开模态框，就只会看到一行永远的「正在加载配置…」。
+    function aiConfigLoadFailed(reason) {
+        if (summary) {
+            summary.classList.remove('is-loading');
+            summary.textContent = '配置读取失败，当前设置未知。';
+        }
+        if (errorBox) {
+            errorBox.textContent = reason;
+            errorBox.classList.remove('d-none');
+        }
+        if (retryBtn) {
+            retryBtn.disabled = false;
+            retryBtn.classList.remove('d-none');
+        }
+        setAiConfigFeedback('无法加载 AI 配置。', 'error');
+    }
+
     try {
         const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/config`, { cache: 'no-store' });
         const data = await resp.json();
         if (!data || !data.success) {
-            setAiConfigFeedback('无法加载 AI 配置。', true);
+            aiConfigLoadFailed((data && (data.message || data.error)) || '服务端没有返回配置内容。');
             return;
         }
         aiConfigCache = data;
         applyAiFieldSchema(data.field_schema);
         fillAiConfigForm(data);
         renderAiConfigSummary(data);
+        if (retryBtn) retryBtn.classList.add('d-none');
     } catch (_err) {
-        setAiConfigFeedback('无法加载 AI 配置。', true);
+        aiConfigLoadFailed('连不上服务端，请检查网络后重试。');
     }
 }
 
@@ -1505,7 +1970,7 @@ async function aiSaveConfig() {
         saveBtn.disabled = true;
         saveBtn.setAttribute('aria-busy', 'true');
     }
-    setAiConfigFeedback('正在保存...', false);
+    setAiConfigFeedback('正在保存...', 'muted');
     try {
         const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/config`, {
             method: 'POST',
@@ -1515,7 +1980,7 @@ async function aiSaveConfig() {
         const data = await resp.json();
         if (!data || !data.success) {
             showAiConfigErrors(data && data.errors);
-            setAiConfigFeedback((data && data.message) || '保存失败。', true);
+            setAiConfigFeedback((data && data.message) || '保存失败。', 'error');
             return;
         }
 
@@ -1534,7 +1999,7 @@ async function aiSaveConfig() {
                 // 配置已经存进去了，只是 Token 没存上。必须说清楚 —— 只说「保存失败」的话
                 // 用户会以为整份配置都没生效，然后把所有栏重填一遍。
                 setAiFieldError('api_key', (keyData && keyData.message) || 'Token 更新失败。');
-                setAiConfigFeedback('配置已保存，但 Token 更新失败。', true);
+                setAiConfigFeedback('配置已保存，但 Token 更新失败。', 'error');
                 await refreshAiAnalysisConfig();
                 return;
             }
@@ -1542,9 +2007,9 @@ async function aiSaveConfig() {
         }
 
         await refreshAiAnalysisConfig();
-        setAiConfigFeedback('保存成功。', false);
+        setAiConfigFeedback('保存成功。', 'success');
     } catch (_err) {
-        setAiConfigFeedback('保存失败，请稍后重试。', true);
+        setAiConfigFeedback('保存失败，请稍后重试。', 'error');
     } finally {
         if (saveBtn) {
             saveBtn.disabled = false;
@@ -1605,10 +2070,44 @@ function initAiSourceRadios() {
     }
 }
 
+// 左分区导航：跳到对应的分组。四个分组都在这一个滚动区里，跳转靠 scrollIntoView
+// （它会滚动最近的滚动祖先，也就是 .modal-body）。
+// 刻意**不做滚动联动**：那需要 IntersectionObserver + 一个调好的 rootMargin，而根边距
+// 只能靠真浏览器反复试；调歪了会在每次滚动时高亮错的那一节，比不高亮更糟。
+function initAiSectionNav() {
+    const rail = document.querySelector('#aiConfigModal .ai-config-rail');
+    if (!rail) return;
+    const items = Array.prototype.slice.call(rail.querySelectorAll('[data-ai-section]'));
+
+    items.forEach(item => {
+        item.addEventListener('click', () => {
+            const target = aiEl(item.getAttribute('data-ai-section'));
+            if (!target) return;
+            items.forEach(other => other.classList.toggle('is-current', other === item));
+            if (typeof target.scrollIntoView === 'function') {
+                target.scrollIntoView({ block: 'start' });
+            }
+        });
+    });
+}
+
+// 摘要卡片上的「重试」。读配置是只读 GET，所以只读用户也用得上，不放进 aiCanEdit 分支。
+function initAiConfigRetry() {
+    const retryBtn = aiEl('aiConfigRetryBtn');
+    if (!retryBtn) return;
+    retryBtn.addEventListener('click', () => {
+        retryBtn.disabled = true;
+        refreshAiAnalysisConfig();
+    });
+}
+
 function initAiConfig() {
     const fieldEls = Object.values(AI_FIELD_DOM).map(aiEl).filter(Boolean);
     const actionBtns = [aiEl('aiFetchModelsBtn'), aiEl('aiTestConnectionBtn')].filter(Boolean);
     const saveBtn = aiEl('aiConfigSaveBtn');
+
+    initAiConfigRetry();
+    initAiSectionNav();
 
     if (!aiCanEdit) {
         // 只读用户：能看不能改。界面禁用只是提示，服务端才是权威 ——
@@ -1616,7 +2115,7 @@ function initAiConfig() {
         AI_READONLY_EXTRA.map(aiEl).filter(Boolean).forEach(el => { el.disabled = true; });
         fieldEls.concat(actionBtns).forEach(el => { el.disabled = true; });
         if (saveBtn) saveBtn.classList.add('d-none');
-        setAiConfigFeedback('仅项目管理员可修改 AI 配置。', false);
+        setAiConfigFeedback('仅项目管理员可修改 AI 配置。', 'muted');
     } else {
         if (saveBtn) saveBtn.addEventListener('click', aiSaveConfig);
         const fetchBtn = aiEl('aiFetchModelsBtn');
