@@ -25,67 +25,189 @@
         color: #1e40af;
         transform: translateY(-1px);
     }
+    /* ===== AI 抽屉样式 开始：本段在三份模板里逐字相同（tests/test_ai_drawer_css_sync.py） ===== */
     .ai-drawer-overlay {
         position: fixed;
         inset: 0;
         background: rgba(15, 23, 42, 0.45);
         opacity: 0;
         visibility: hidden;
-        transition: all 0.2s ease;
-        z-index: 1050;
+        transition: opacity var(--motion-base, 0.25s) var(--ease-out, ease),
+                    visibility 0s linear var(--motion-base, 0.25s);
+        z-index: var(--z-drawer-overlay, 1200);
     }
-    .ai-drawer-overlay.open { opacity: 1; visibility: visible; }
+    .ai-drawer-overlay.open {
+        opacity: 1;
+        visibility: visible;
+        transition: opacity var(--motion-base, 0.25s) var(--ease-out, ease), visibility 0s;
+    }
     body.ai-drawer-open { overflow: hidden; }
     .ai-drawer {
         position: fixed;
         top: 0;
         right: 0;
-        width: 460px;
-        max-width: 92%;
-        height: 100%;
-        background: #fff;
+        /* 宽度按「正文一行放得下多少字」定，不按「放得下一个表单」定。
+           原来 460px：body 左右各 20px、正文框再各 20px 内边距，正文只剩约 380px，
+           而正文当时是等宽字体 —— 一个汉字占两个字宽，一行只放得下 27 个汉字，
+           稍长的报告全是折行（用户反馈「放不下多少文本」）。
+           720px 是上限：14px 无衬线下正文区实测 638px、一行 45 个汉字（旧版实测 402px / 30 字），
+           落在「中文 40~50 字」这个中文字行的常用区间里，再宽一行就过长。
+           62vw 是中段的相对值：视口不足 1161px 时抽屉按 62% 收，不把小笔记本横着占满
+           （1366 上仍是 720px，1024 上实测 635px）；手机（<=576px）反过来铺到 92vw，
+           并把内边距收到 12px，否则正文只剩十几字一行。 */
+        width: clamp(340px, 62vw, 720px);
+        height: 100%;    /* 无 dvh 支持时的兜底 */
+        height: 100dvh;  /* 移动端按动态视口高度，避免地址栏遮挡 */
+        background: var(--color-surface, #fff);
         box-shadow: -10px 0 30px rgba(15, 23, 42, 0.18);
         transform: translateX(100%);
-        transition: transform 0.25s ease;
-        z-index: 1060;
+        /* 关闭态用 visibility: hidden 而不是只靠 transform 移出屏幕：
+           移出屏幕的抽屉依然在 Tab 顺序与读屏里，键盘会跳进一个看不见的面板。 */
+        visibility: hidden;
+        transition: transform var(--motion-base, 0.25s) var(--ease-out, ease),
+                    visibility 0s linear var(--motion-base, 0.25s);
+        z-index: var(--z-drawer, 1210);
         display: flex;
         flex-direction: column;
     }
-    .ai-drawer.open { transform: translateX(0); }
+    .ai-drawer.open {
+        transform: translateX(0);
+        visibility: visible;
+        transition: transform var(--motion-base, 0.25s) var(--ease-out, ease), visibility 0s;
+    }
+    /* 顶部 3px 品牌渐变：和导航栏同一组颜色，抽屉看起来是这个应用的一部分 */
+    .ai-drawer::before {
+        content: "";
+        flex: none;
+        height: 3px;
+        background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
+    }
     .ai-drawer-header {
-        padding: 0.85rem 1rem;
-        border-bottom: 1px solid #e2e8f0;
+        flex: none;
+        padding: var(--space-4, 16px) var(--space-5, 20px);
+        border-bottom: 1px solid var(--color-border, #e2e8f0);
         display: flex;
         justify-content: space-between;
         align-items: center;
-        background: #fff;
+        gap: var(--space-3, 12px);
+        background: var(--color-surface, #fff);
+    }
+    .ai-drawer-title {
+        margin: 0;
+        font-size: var(--font-size-lg, 16px);
+        font-weight: 600;
+        line-height: 1.4;
+        color: var(--color-text, #1e293b);
     }
     .ai-drawer-body {
-        padding: 1rem;
-        background: #f8fafc;
+        /* flex:1 + min-height:0 才能让正文框吃掉抽屉的剩余高度。
+           原来正文框固定 min-height:180px，抽屉高 900px 时下面 600 多 px 全是灰底空白
+           （用户反馈的「中段也是空的、观感很散」）。 */
         flex: 1;
+        min-height: 0;
+        padding: var(--space-5, 20px);
+        background: var(--color-surface-subtle, #f8fafc);
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3, 12px);
+        /* 常态下正文框撑满、body 不滚动；只有极矮的窗口才由 body 兜底滚动 */
         overflow-y: auto;
     }
+    .ai-drawer-meta {
+        flex: none;
+        font-size: var(--font-size-sm, 12px);
+        line-height: 1.6;
+        color: var(--color-text-muted, #656d76);
+    }
     .ai-drawer-footer {
-        padding: 0.75rem 1rem;
-        border-top: 1px solid #e2e8f0;
-        background: #fff;
+        flex: none;
+        padding: var(--space-3, 12px) var(--space-5, 20px);
+        border-top: 1px solid var(--color-border, #e2e8f0);
+        background: var(--color-surface, #fff);
         display: flex;
         justify-content: flex-end;
-        gap: 0.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: var(--space-2, 8px);
+    }
+    /* 抽屉里只有两个动作，给到 32px 高、8px 间距：比 btn-sm 的 29px 好点，也不用做成 44px 的大按钮 */
+    .ai-drawer-footer .btn {
+        min-height: 32px;
+        padding: 0.3rem 0.9rem;
+        font-size: var(--font-size-md, 14px);
+        border-radius: var(--radius-lg, 6px);
     }
     .ai-analysis-output {
-        background: #fff;
-        border: 1px solid #e2e8f0;
-        border-radius: 8px;
-        padding: 12px;
-        min-height: 180px;
-        font-size: 0.82rem;
+        /* 撑满抽屉剩余高度：正文区就是「阅读面」，不再是一个浮在灰底上的小盒子 */
+        flex: 1;
+        min-height: 96px;
+        margin: 0;
+        background: var(--color-surface, #fff);
+        border: 1px solid var(--color-border, #e2e8f0);
+        border-radius: var(--radius-xl, 8px);
+        padding: var(--space-5, 20px);
+        /* 正文是中文分析散文，不是代码：等宽字体让每个汉字占两个字宽，每行字数直接腰斩。
+           pre-wrap 保留（报告里的换行与缩进有意义），字体回到无衬线、字号提到 14px、行高 1.7。 */
+        font-family: var(--font-sans, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+                     "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC",
+                     Arial, sans-serif);
+        font-size: var(--font-size-md, 14px);
+        line-height: 1.7;
         white-space: pre-wrap;
-        font-family: "Fira Code", "Consolas", "Courier New", monospace;
-        color: #1f2937;
+        /* 长路径 / URL 就地折行，不撑出横向滚动条 */
+        overflow-wrap: anywhere;
+        overflow: auto;
+        color: var(--color-text, #1f2937);
     }
-    .ai-analysis-output.is-empty { color: #94a3b8; }
+    /* 空态 / 进行中：内容是提示语而不是报告，居中显示，别让一行字吊在大白框的左上角 */
+    .ai-analysis-output.is-empty,
+    .ai-analysis-output.is-busy {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: var(--space-3, 12px);
+        text-align: center;
+        /* 原 #94a3b8 在白底上只有 2.8:1，换成 --color-text-muted(#656d76) 的 4.98:1 */
+        color: var(--color-text-muted, #656d76);
+    }
+    .ai-analysis-output.is-busy::before {
+        content: "";
+        flex: none;
+        width: 18px;
+        height: 18px;
+        border: 2px solid rgba(13, 110, 253, 0.25);
+        border-top-color: var(--color-primary, #0d6efd);
+        border-radius: 50%;
+        animation: ai-drawer-spin 0.8s linear infinite;
+    }
+    @keyframes ai-drawer-spin { to { transform: rotate(360deg); } }
+    /* 失败：里面是真的错误信息，用危险色实底 + 左对齐，和「暂无分析结果」的灰色提示区分开 */
+    .ai-analysis-output.is-error {
+        color: var(--color-danger-text, #b3261e);
+        background: var(--color-danger-bg, #ffebe9);
+        border-color: var(--color-danger, #dc3545);
+    }
+    /* 键盘焦点：抽屉铺满半屏，焦点必须看得见（Bootstrap 5.1 只给 .btn 加了 box-shadow） */
+    .ai-analysis-trigger:focus-visible,
+    .ai-drawer .btn:focus-visible {
+        outline: 2px solid var(--color-focus, #0b5ed7);
+        outline-offset: 2px;
+    }
+    @media (max-width: 575.98px) {
+        .ai-drawer { width: 92vw; }
+        /* 窄屏把内边距收回 12px：358px 的抽屉左右各留 20px，正文就只剩 19 个字一行了 */
+        .ai-drawer-body,
+        .ai-analysis-output { padding: var(--space-3, 12px); }
+        .ai-drawer-header,
+        .ai-drawer-footer { padding-left: var(--space-4, 16px); padding-right: var(--space-4, 16px); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .ai-drawer,
+        .ai-drawer-overlay { transition: none !important; }
+        .ai-analysis-output.is-busy::before { animation: none !important; }
+    }
+    /* ===== AI 抽屉样式 结束 ===== */
 </style>
 {% endblock %}
 
@@ -129,7 +251,7 @@
             </div>
             <div>
                 <button type="button" class="ai-analysis-trigger me-2" id="aiDrawerOpenBtn">
-                    <i class="bi bi-stars"></i> AI分析
+                    <i class="bi bi-stars" aria-hidden="true"></i> AI分析
                 </button>
                 {% if commit.status in ['pending', 'reviewed'] %}
                 <button class="btn btn-success btn-sm me-2" onclick="updateCommitStatus('{{ commit.id }}', 'confirmed')">
@@ -216,19 +338,19 @@
 </div>
 
 <div class="ai-drawer-overlay" id="aiDrawerOverlay"></div>
-<aside class="ai-drawer" id="aiDrawer">
+<aside class="ai-drawer" id="aiDrawer" role="dialog" aria-modal="true" aria-label="AI 分析">
     <div class="ai-drawer-header">
         <div class="d-flex align-items-center gap-2">
-            <span class="fw-semibold">AI分析</span>
+            <span class="ai-drawer-title">AI分析</span>
             <span class="badge bg-warning text-dark">Beta</span>
-            <span class="badge bg-secondary" id="aiAnalysisKeyStatus">检测中</span>
+            <span class="badge bg-secondary" id="aiAnalysisKeyStatus" role="status" aria-live="polite">检测中</span>
         </div>
         <button type="button" class="btn btn-sm btn-light" id="aiDrawerCloseBtn" aria-label="关闭 AI 分析面板">
-            <i class="bi bi-x-lg"></i>
+            <i class="bi bi-x-lg" aria-hidden="true"></i>
         </button>
     </div>
     <div class="ai-drawer-body">
-        <div class="small text-muted mb-2" id="aiAnalysisMeta">分析结果将以流式输出展示。</div>
+        <div class="ai-drawer-meta" id="aiAnalysisMeta">分析结果将以流式输出展示。</div>
         <pre class="ai-analysis-output is-empty" id="aiAnalysisOutput">暂无分析结果。</pre>
     </div>
     <div class="ai-drawer-footer">
@@ -294,23 +416,26 @@ function setAiStatusBadge(text, variant) {
     badge.className = `badge bg-${variant}`;
 }
 
-function setAiOutput(text, isEmpty) {
+// variant：'busy'（进行中，居中给个转圈）/ 'error'（失败，危险色实底）/ 省略（普通正文或提示语）。
+// 进行中与失败是两种完全不同的状态，不能混进「暂无分析结果」那套灰色提示里。
+function setAiOutput(text, isEmpty, variant) {
     const output = document.getElementById('aiAnalysisOutput');
     if (!output) return;
     output.textContent = text;
-    if (isEmpty) {
-        output.classList.add('is-empty');
-    } else {
-        output.classList.remove('is-empty');
-    }
+    output.classList.toggle('is-empty', !!isEmpty);
+    output.classList.toggle('is-busy', variant === 'busy');
+    output.classList.toggle('is-error', variant === 'error');
 }
 
 function appendAiLine(text) {
     const output = document.getElementById('aiAnalysisOutput');
     if (!output) return;
-    if (output.classList.contains('is-empty')) {
+    // 占位文案（「暂无分析结果。」「AI 分析进行中...」）在第一段真实内容到达时清掉，
+    // 否则报告的第一行会一直挂着那句占位。
+    if (output.classList.contains('is-empty') || output.classList.contains('is-busy')) {
         output.textContent = '';
         output.classList.remove('is-empty');
+        output.classList.remove('is-busy');
     }
     output.textContent += (output.textContent ? '\n' : '') + text;
     output.scrollTop = output.scrollHeight;
@@ -389,7 +514,7 @@ function initCommitAiAnalysis() {
                 // result」会把失败显示成「已有结果」，并附上按变更规模估出来的兜底风险等级。
                 if (result.status === 'failed') {
                     hasCached = false;
-                    setAiOutput(`上次分析失败：${result.error_message || '原因未知'}`, true);
+                    setAiOutput(`上次分析失败：${result.error_message || '原因未知'}`, false, 'error');
                     setAiStatusBadge('失败', 'danger');
                     if (meta) {
                         meta.textContent = `最近一次分析失败（${result.created_at || '-'}）`;
@@ -412,7 +537,7 @@ function initCommitAiAnalysis() {
         } catch (_err) {
         }
         if (force) {
-            setAiOutput('获取最近分析失败。', false);
+            setAiOutput('获取最近分析失败。', false, 'error');
             setAiStatusBadge('失败', 'danger');
             hasCached = false;
             return false;
@@ -433,7 +558,7 @@ function initCommitAiAnalysis() {
         }
         cleanupStream();
         setAiStatusBadge('分析中', 'primary');
-        setAiOutput('AI 分析进行中...', false);
+        setAiOutput('AI 分析进行中...', false, 'busy');
         if (startBtn) startBtn.disabled = true;
         eventSource = new EventSource(`/ai-analysis/commit/${commitId}/stream`);
         eventSource.addEventListener('chunk', function(event) {
@@ -477,7 +602,7 @@ function initCommitAiAnalysis() {
                 } catch (_err) {
                 }
             }
-            setAiOutput(message, false);
+            setAiOutput(message, false, 'error');
             setAiStatusBadge('失败', 'danger');
             cleanupStream();
         });

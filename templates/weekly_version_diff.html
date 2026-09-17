@@ -8,6 +8,32 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@500;600&family=Fira+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
+    /* ===================================================================
+       层级刻度（z-index scale）
+       -------------------------------------------------------------------
+       本页所有 z-index 都从这套刻度取值，不再出现 99999 / 999999 这类
+       「越大越好」的临时值 —— 那些值当初是为了修「下拉菜单被 overflow 裁掉」
+       一层层加上去的，加到最后谁都说不清谁在上，抽屉反而被页面里的按钮盖住。
+
+       排序：页面内容 < 下拉 < 克隆下拉 < 抽屉遮罩 < 抽屉 < 全局提示。
+       整体低于 style.css 的 --z-navbar(200000) / --z-modal(300001)，
+       所以平台级的导航与弹窗仍然压在抽屉之上。
+       每个变量都写成 var(--x, 字面量) 引用，作为 style.css 缺失时的兜底。
+       注意兜底值只是「大致相当」而非逐字相等（例如 --color-border 兜 #e2e8f0、
+       令牌实为 #dee2e6）—— 正常页面里 style.css 一定加载，生效的是令牌值，
+       兜底只在极端的资源加载失败场景下顶上。
+       =================================================================== */
+    :root {
+        --z-content: 1;            /* 需要相对定位的页面内容（文件条目 / 目录 / 文件内容） */
+        --z-content-raised: 2;     /* 内容里的浮起块（文件行的操作按钮区） */
+        --z-sticky: 10;            /* 内容内部再高一档（文件列表里的按钮组） */
+        --z-dropdown: 1000;        /* 下拉菜单（与 style.css 的 --z-dropdown 同值同义） */
+        --z-dropdown-clone: 1100;  /* JS 克隆到 body 的下拉：要逃出 overflow，且高于同层下拉 */
+        --z-drawer-overlay: 1200;  /* AI 抽屉遮罩：必须高于页面里的一切内容 */
+        --z-drawer: 1210;          /* AI 抽屉本体，比遮罩高 10（同一档里分主次） */
+        --z-toast: 9999;           /* 全局提示条：沿用原值，提示要能压过抽屉，不参与这次收敛 */
+    }
+
     /* ===== 页面头部 - 白底简洁风格 ===== */
     .weekly-diff-header {
         background: #ffffff;
@@ -134,67 +160,189 @@
         color: #1e40af;
         transform: translateY(-1px);
     }
+    /* ===== AI 抽屉样式 开始：本段在三份模板里逐字相同（tests/test_ai_drawer_css_sync.py） ===== */
     .ai-drawer-overlay {
         position: fixed;
         inset: 0;
         background: rgba(15, 23, 42, 0.45);
         opacity: 0;
         visibility: hidden;
-        transition: all 0.2s ease;
-        z-index: 1050;
+        transition: opacity var(--motion-base, 0.25s) var(--ease-out, ease),
+                    visibility 0s linear var(--motion-base, 0.25s);
+        z-index: var(--z-drawer-overlay, 1200);
     }
-    .ai-drawer-overlay.open { opacity: 1; visibility: visible; }
+    .ai-drawer-overlay.open {
+        opacity: 1;
+        visibility: visible;
+        transition: opacity var(--motion-base, 0.25s) var(--ease-out, ease), visibility 0s;
+    }
     body.ai-drawer-open { overflow: hidden; }
     .ai-drawer {
         position: fixed;
         top: 0;
         right: 0;
-        width: 460px;
-        max-width: 92%;
-        height: 100%;
-        background: #fff;
+        /* 宽度按「正文一行放得下多少字」定，不按「放得下一个表单」定。
+           原来 460px：body 左右各 20px、正文框再各 20px 内边距，正文只剩约 380px，
+           而正文当时是等宽字体 —— 一个汉字占两个字宽，一行只放得下 27 个汉字，
+           稍长的报告全是折行（用户反馈「放不下多少文本」）。
+           720px 是上限：14px 无衬线下正文区实测 638px、一行 45 个汉字（旧版实测 402px / 30 字），
+           落在「中文 40~50 字」这个中文字行的常用区间里，再宽一行就过长。
+           62vw 是中段的相对值：视口不足 1161px 时抽屉按 62% 收，不把小笔记本横着占满
+           （1366 上仍是 720px，1024 上实测 635px）；手机（<=576px）反过来铺到 92vw，
+           并把内边距收到 12px，否则正文只剩十几字一行。 */
+        width: clamp(340px, 62vw, 720px);
+        height: 100%;    /* 无 dvh 支持时的兜底 */
+        height: 100dvh;  /* 移动端按动态视口高度，避免地址栏遮挡 */
+        background: var(--color-surface, #fff);
         box-shadow: -10px 0 30px rgba(15, 23, 42, 0.18);
         transform: translateX(100%);
-        transition: transform 0.25s ease;
-        z-index: 1060;
+        /* 关闭态用 visibility: hidden 而不是只靠 transform 移出屏幕：
+           移出屏幕的抽屉依然在 Tab 顺序与读屏里，键盘会跳进一个看不见的面板。 */
+        visibility: hidden;
+        transition: transform var(--motion-base, 0.25s) var(--ease-out, ease),
+                    visibility 0s linear var(--motion-base, 0.25s);
+        z-index: var(--z-drawer, 1210);
         display: flex;
         flex-direction: column;
     }
-    .ai-drawer.open { transform: translateX(0); }
+    .ai-drawer.open {
+        transform: translateX(0);
+        visibility: visible;
+        transition: transform var(--motion-base, 0.25s) var(--ease-out, ease), visibility 0s;
+    }
+    /* 顶部 3px 品牌渐变：和导航栏同一组颜色，抽屉看起来是这个应用的一部分 */
+    .ai-drawer::before {
+        content: "";
+        flex: none;
+        height: 3px;
+        background: linear-gradient(135deg, #1e3a5f 0%, #0d6efd 100%);
+    }
     .ai-drawer-header {
-        padding: 0.85rem 1rem;
-        border-bottom: 1px solid #e2e8f0;
+        flex: none;
+        padding: var(--space-4, 16px) var(--space-5, 20px);
+        border-bottom: 1px solid var(--color-border, #e2e8f0);
         display: flex;
         justify-content: space-between;
         align-items: center;
-        background: #fff;
+        gap: var(--space-3, 12px);
+        background: var(--color-surface, #fff);
+    }
+    .ai-drawer-title {
+        margin: 0;
+        font-size: var(--font-size-lg, 16px);
+        font-weight: 600;
+        line-height: 1.4;
+        color: var(--color-text, #1e293b);
     }
     .ai-drawer-body {
-        padding: 1rem;
-        background: #f8fafc;
+        /* flex:1 + min-height:0 才能让正文框吃掉抽屉的剩余高度。
+           原来正文框固定 min-height:180px，抽屉高 900px 时下面 600 多 px 全是灰底空白
+           （用户反馈的「中段也是空的、观感很散」）。 */
         flex: 1;
+        min-height: 0;
+        padding: var(--space-5, 20px);
+        background: var(--color-surface-subtle, #f8fafc);
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3, 12px);
+        /* 常态下正文框撑满、body 不滚动；只有极矮的窗口才由 body 兜底滚动 */
         overflow-y: auto;
     }
+    .ai-drawer-meta {
+        flex: none;
+        font-size: var(--font-size-sm, 12px);
+        line-height: 1.6;
+        color: var(--color-text-muted, #656d76);
+    }
     .ai-drawer-footer {
-        padding: 0.75rem 1rem;
-        border-top: 1px solid #e2e8f0;
-        background: #fff;
+        flex: none;
+        padding: var(--space-3, 12px) var(--space-5, 20px);
+        border-top: 1px solid var(--color-border, #e2e8f0);
+        background: var(--color-surface, #fff);
         display: flex;
         justify-content: flex-end;
-        gap: 0.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: var(--space-2, 8px);
+    }
+    /* 抽屉里只有两个动作，给到 32px 高、8px 间距：比 btn-sm 的 29px 好点，也不用做成 44px 的大按钮 */
+    .ai-drawer-footer .btn {
+        min-height: 32px;
+        padding: 0.3rem 0.9rem;
+        font-size: var(--font-size-md, 14px);
+        border-radius: var(--radius-lg, 6px);
     }
     .ai-analysis-output {
-        background: #fff;
-        border: 1px solid #e2e8f0;
-        border-radius: 8px;
-        padding: 12px;
-        min-height: 180px;
-        font-size: 0.82rem;
+        /* 撑满抽屉剩余高度：正文区就是「阅读面」，不再是一个浮在灰底上的小盒子 */
+        flex: 1;
+        min-height: 96px;
+        margin: 0;
+        background: var(--color-surface, #fff);
+        border: 1px solid var(--color-border, #e2e8f0);
+        border-radius: var(--radius-xl, 8px);
+        padding: var(--space-5, 20px);
+        /* 正文是中文分析散文，不是代码：等宽字体让每个汉字占两个字宽，每行字数直接腰斩。
+           pre-wrap 保留（报告里的换行与缩进有意义），字体回到无衬线、字号提到 14px、行高 1.7。 */
+        font-family: var(--font-sans, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+                     "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC",
+                     Arial, sans-serif);
+        font-size: var(--font-size-md, 14px);
+        line-height: 1.7;
         white-space: pre-wrap;
-        font-family: "Fira Code", "Consolas", "Courier New", monospace;
-        color: #1f2937;
+        /* 长路径 / URL 就地折行，不撑出横向滚动条 */
+        overflow-wrap: anywhere;
+        overflow: auto;
+        color: var(--color-text, #1f2937);
     }
-    .ai-analysis-output.is-empty { color: #94a3b8; }
+    /* 空态 / 进行中：内容是提示语而不是报告，居中显示，别让一行字吊在大白框的左上角 */
+    .ai-analysis-output.is-empty,
+    .ai-analysis-output.is-busy {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: var(--space-3, 12px);
+        text-align: center;
+        /* 原 #94a3b8 在白底上只有 2.8:1，换成 --color-text-muted(#656d76) 的 4.98:1 */
+        color: var(--color-text-muted, #656d76);
+    }
+    .ai-analysis-output.is-busy::before {
+        content: "";
+        flex: none;
+        width: 18px;
+        height: 18px;
+        border: 2px solid rgba(13, 110, 253, 0.25);
+        border-top-color: var(--color-primary, #0d6efd);
+        border-radius: 50%;
+        animation: ai-drawer-spin 0.8s linear infinite;
+    }
+    @keyframes ai-drawer-spin { to { transform: rotate(360deg); } }
+    /* 失败：里面是真的错误信息，用危险色实底 + 左对齐，和「暂无分析结果」的灰色提示区分开 */
+    .ai-analysis-output.is-error {
+        color: var(--color-danger-text, #b3261e);
+        background: var(--color-danger-bg, #ffebe9);
+        border-color: var(--color-danger, #dc3545);
+    }
+    /* 键盘焦点：抽屉铺满半屏，焦点必须看得见（Bootstrap 5.1 只给 .btn 加了 box-shadow） */
+    .ai-analysis-trigger:focus-visible,
+    .ai-drawer .btn:focus-visible {
+        outline: 2px solid var(--color-focus, #0b5ed7);
+        outline-offset: 2px;
+    }
+    @media (max-width: 575.98px) {
+        .ai-drawer { width: 92vw; }
+        /* 窄屏把内边距收回 12px：358px 的抽屉左右各留 20px，正文就只剩 19 个字一行了 */
+        .ai-drawer-body,
+        .ai-analysis-output { padding: var(--space-3, 12px); }
+        .ai-drawer-header,
+        .ai-drawer-footer { padding-left: var(--space-4, 16px); padding-right: var(--space-4, 16px); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .ai-drawer,
+        .ai-drawer-overlay { transition: none !important; }
+        .ai-analysis-output.is-busy::before { animation: none !important; }
+    }
+    /* ===== AI 抽屉样式 结束 ===== */
 </style>
 {% endblock %}
 
@@ -216,7 +364,7 @@
             </div>
             <div class="d-flex gap-2">
                 <button type="button" class="ai-analysis-trigger" id="weeklyAiDrawerOpenBtn">
-                    <i class="bi bi-stars"></i> AI分析
+                    <i class="bi bi-stars" aria-hidden="true"></i> AI分析
                 </button>
                 <button type="button" class="header-action-btn" id="toggleFoldersBtn" onclick="toggleAllFolders()">
                     <i class="fas fa-compress-arrows-alt me-1" id="toggleFoldersIcon"></i>
@@ -884,7 +1032,7 @@
 .dropdown-menu {
     font-size: 0.85em;
     min-width: 120px;
-    z-index: 99999 !important; /* 设置超高层级 */
+    z-index: var(--z-dropdown, 1000) !important; /* 层级见文件顶部「层级刻度」 */
     box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15) !important;
     border: 1px solid rgba(0, 0, 0, 0.15);
     border-radius: 0.375rem;
@@ -905,66 +1053,70 @@
     left: 0 !important;
     right: auto !important;
     position: absolute !important;
-    z-index: 99999 !important;
+    z-index: var(--z-dropdown, 1000) !important;
 }
 
-/* 确保下拉菜单容器有正确的定位 */
-.btn-group {
+/* 只有「自己就能弹出下拉菜单」的按钮组才需要提层（为了菜单不被父级 overflow 裁掉）。
+   原来这里是一句裸的 .btn-group —— 页面里每个按钮组都吃到 99999，包括
+   #paginationControls（上一页 / 下一页）。层级一旦是 99999，抽屉的遮罩(1200)与
+   抽屉(1210)就都压不住它，抽屉打开时那两个翻页按钮浮在最上层（用户截图里的现象）。
+   收窄成 :has() 之后，翻页按钮回到普通层级；本页文件列表用的是 JS 克隆到 body 的
+   .dropdown-menu-clone（它有自己的层级），所以这里列出的两种形态都是为了兜住
+   将来直接内联的 Bootstrap 下拉。 */
+.btn-group:has(> .dropdown-menu),
+.btn-group:has(> [data-file-dropdown]) {
     position: relative;
-    z-index: 99999 !important;
+    z-index: var(--z-dropdown, 1000) !important;
 }
 
-/* 强制所有下拉菜单使用最高层级 */
+/* 下拉菜单展开时同样取「下拉」这一档 */
 .dropdown-menu.show {
-    z-index: 99999 !important;
+    z-index: var(--z-dropdown, 1000) !important;
     position: absolute !important;
 }
 
 /* 确保文件列表容器不会遮挡下拉菜单 */
 .modern-file-list {
     position: relative;
-    z-index: 1;
+    z-index: var(--z-content, 1);
 }
 
 .file-item {
     position: relative;
-    z-index: 1;
+    z-index: var(--z-content, 1);
 }
 
 /* 确保文件条目的层级低于下拉菜单 */
 .directory-item {
     position: relative;
-    z-index: 1;
+    z-index: var(--z-content, 1);
 }
 
 .file-content {
     position: relative;
-    z-index: 1;
+    z-index: var(--z-content, 1);
 }
 
 /* 确保按钮组在需要时能显示下拉菜单 */
 .action-buttons {
     position: relative;
-    z-index: 2;
-}
-
-.action-buttons .btn-group {
-    position: relative;
-    z-index: 99999;
+    z-index: var(--z-content-raised, 2);
 }
 
 /* 强制下拉菜单在所有情况下都使用最高层级 */
 .dropdown-menu,
 .btn-group .dropdown-menu,
 .action-buttons .dropdown-menu {
-    z-index: 99999 !important;
+    z-index: var(--z-dropdown, 1000) !important;
     position: absolute !important;
 }
 
-/* 复制的下拉菜单样式 - 最高层级 */
+/* 复制的下拉菜单样式 - 逃出表格容器的 overflow，挂到 body 上。
+   层级取「克隆下拉」这一档：高于页面内容与普通下拉，但**低于抽屉** ——
+   抽屉打开时不该有任何下拉浮在它上面。 */
 .dropdown-menu-clone {
     position: fixed !important;
-    z-index: 999999 !important;
+    z-index: var(--z-dropdown-clone, 1100) !important;
     background: white !important;
     border: 1px solid rgba(0, 0, 0, 0.15) !important;
     border-radius: 0.375rem !important;
@@ -1041,19 +1193,19 @@
 </style>
 
 <div class="ai-drawer-overlay" id="weeklyAiDrawerOverlay"></div>
-<aside class="ai-drawer" id="weeklyAiDrawer">
+<aside class="ai-drawer" id="weeklyAiDrawer" role="dialog" aria-modal="true" aria-label="AI 分析">
     <div class="ai-drawer-header">
         <div class="d-flex align-items-center gap-2">
-            <span class="fw-semibold">AI分析</span>
+            <span class="ai-drawer-title">AI分析</span>
             <span class="badge bg-warning text-dark">Beta</span>
-            <span class="badge bg-secondary" id="weeklyAiStatusBadge">待分析</span>
+            <span class="badge bg-secondary" id="weeklyAiStatusBadge" role="status" aria-live="polite">待分析</span>
         </div>
         <button type="button" class="btn btn-sm btn-light" id="weeklyAiDrawerCloseBtn" aria-label="关闭 AI 分析面板">
-            <i class="bi bi-x-lg"></i>
+            <i class="bi bi-x-lg" aria-hidden="true"></i>
         </button>
     </div>
     <div class="ai-drawer-body">
-        <div class="small text-muted mb-2" id="weeklyAiMeta">自动分析每 1 小时触发，可手动补跑。</div>
+        <div class="ai-drawer-meta" id="weeklyAiMeta">自动分析每 1 小时触发，可手动补跑。</div>
         <pre class="ai-analysis-output is-empty" id="weeklyAiOutput">暂无分析结果。</pre>
     </div>
     <div class="ai-drawer-footer">
@@ -1091,23 +1243,26 @@ function setWeeklyAiStatusBadge(text, variant) {
     badge.className = `badge bg-${variant}`;
 }
 
-function setWeeklyAiOutput(text, isEmpty) {
+// variant：'busy'（进行中，居中给个转圈）/ 'error'（失败，危险色实底）/ 省略（普通正文或提示语）。
+// 进行中与失败是两种完全不同的状态，不能混进「暂无分析结果」那套灰色提示里。
+function setWeeklyAiOutput(text, isEmpty, variant) {
     const output = document.getElementById('weeklyAiOutput');
     if (!output) return;
     output.textContent = text;
-    if (isEmpty) {
-        output.classList.add('is-empty');
-    } else {
-        output.classList.remove('is-empty');
-    }
+    output.classList.toggle('is-empty', !!isEmpty);
+    output.classList.toggle('is-busy', variant === 'busy');
+    output.classList.toggle('is-error', variant === 'error');
 }
 
 function appendWeeklyAiLine(text) {
     const output = document.getElementById('weeklyAiOutput');
     if (!output) return;
-    if (output.classList.contains('is-empty')) {
+    // 占位文案（「暂无分析结果。」「AI 分析进行中...」）在第一段真实内容到达时清掉，
+    // 否则报告的第一行会一直挂着那句占位。
+    if (output.classList.contains('is-empty') || output.classList.contains('is-busy')) {
         output.textContent = '';
         output.classList.remove('is-empty');
+        output.classList.remove('is-busy');
     }
     output.textContent += (output.textContent ? '\n' : '') + text;
     output.scrollTop = output.scrollHeight;
@@ -1178,7 +1333,7 @@ async function loadWeeklyAiLatest(force = false) {
             if (result.status === 'failed') {
                 weeklyAiHasCached = false;
                 setWeeklyAiOutput(
-                    `上次分析失败：${result.error_message || '原因未知'}`, true);
+                    `上次分析失败：${result.error_message || '原因未知'}`, false, 'error');
                 setWeeklyAiStatusBadge('失败', 'danger');
                 if (meta) {
                     meta.textContent = `最近一次分析失败（${result.created_at || '-'}）`;
@@ -1200,7 +1355,7 @@ async function loadWeeklyAiLatest(force = false) {
         }
     } catch (_err) {
         if (force) {
-            setWeeklyAiOutput('获取最近分析失败。', false);
+            setWeeklyAiOutput('获取最近分析失败。', false, 'error');
             setWeeklyAiStatusBadge('失败', 'danger');
         }
     }
@@ -1216,6 +1371,10 @@ function openWeeklyAiDrawer() {
     if (overlay) overlay.classList.add('open');
     if (drawer) drawer.classList.add('open');
     document.body.classList.add('ai-drawer-open');
+    // 焦点进抽屉：键盘 / 读屏用户不该还停在遮罩后面那个「AI分析」按钮上。
+    // preventScroll：这个按钮在固定定位的抽屉里，不带上会在某些浏览器里把页面滚动一下。
+    const closeBtn = document.getElementById('weeklyAiDrawerCloseBtn');
+    if (closeBtn) closeBtn.focus({ preventScroll: true });
 }
 
 function closeWeeklyAiDrawer() {
@@ -1225,6 +1384,11 @@ function closeWeeklyAiDrawer() {
     if (drawer) drawer.classList.remove('open');
     document.body.classList.remove('ai-drawer-open');
     closeWeeklyAiStream();
+    // 焦点还给触发按钮，Tab 不会从文档开头重新走一遍。
+    // preventScroll：触发按钮在页面顶部，用户可能已经滚到文件列表深处，
+    // 不带这个参数会把页面滚回顶部（关个抽屉顺手丢掉阅读位置）。
+    const openBtn = document.getElementById('weeklyAiDrawerOpenBtn');
+    if (openBtn) openBtn.focus({ preventScroll: true });
 }
 
 function startWeeklyAiAnalysis(force = false) {
@@ -1237,7 +1401,7 @@ function startWeeklyAiAnalysis(force = false) {
     }
     closeWeeklyAiStream();
     setWeeklyAiStatusBadge('分析中', 'primary');
-    setWeeklyAiOutput('AI 分析进行中...', false);
+    setWeeklyAiOutput('AI 分析进行中...', false, 'busy');
     const startBtn = document.getElementById('weeklyAiStartBtn');
     if (startBtn) startBtn.disabled = true;
     weeklyAiSource = new EventSource(`/ai-analysis/weekly/${configId}/stream?source=manual`);
@@ -1286,7 +1450,7 @@ function startWeeklyAiAnalysis(force = false) {
             } catch (_err) {
             }
         }
-        setWeeklyAiOutput(message, false);
+        setWeeklyAiOutput(message, false, 'error');
         setWeeklyAiStatusBadge('失败', 'danger');
         if (startBtn) startBtn.disabled = false;
         closeWeeklyAiStream();
@@ -1312,6 +1476,14 @@ function initWeeklyAiAnalysis() {
     }
     if (closeBtn) closeBtn.addEventListener('click', closeWeeklyAiDrawer);
     if (overlay) overlay.addEventListener('click', closeWeeklyAiDrawer);
+    // Esc 关闭：抽屉占掉半屏，键盘用户需要一个不依赖鼠标的退出方式（WCAG 2.1.2）
+    document.addEventListener('keydown', function(event) {
+        if (event.key !== 'Escape') return;
+        const drawer = document.getElementById('weeklyAiDrawer');
+        if (drawer && drawer.classList.contains('open')) {
+            closeWeeklyAiDrawer();
+        }
+    });
     if (startBtn) {
         startBtn.addEventListener('click', function() {
             if (weeklyAiHasCached && !confirm('已有分析结果，确定重新分析吗？')) {
@@ -2248,7 +2420,7 @@ function showToast(message, type = 'info') {
     // 创建简单的提示消息
     const toast = document.createElement('div');
     toast.className = `alert alert-${type === 'success' ? 'success' : type === 'error' ? 'danger' : 'info'} position-fixed`;
-    toast.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
+    toast.style.cssText = 'top: 20px; right: 20px; z-index: var(--z-toast, 9999); min-width: 300px;';
     toast.innerHTML = `
         <div class="d-flex align-items-center">
             <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'} me-2"></i>
