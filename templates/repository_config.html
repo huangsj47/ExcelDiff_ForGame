@@ -1099,7 +1099,7 @@ function updateSwapPreview() {
             {% for repo in repositories %}
             {
                 id: {{ repo.id }},
-                name: "{{ repo.name }}",
+                name: {{ (repo.name or '')|tojson }},
                 type: "{{ repo.type }}",
                 display_order: {{ repo.display_order or 0 }}
             }{% if not loop.last %},{% endif %}

@@ -257,12 +257,20 @@ from urllib.parse import urlparse
 from os import system
 
 from utils.security_utils import (
+    REPOSITORY_NAME_ERROR_MESSAGE,
     decrypt_credential,
     encrypt_credential,
+    normalize_repository_name,
     sanitize_text,
     validate_repository_name,
 )
 from utils.path_security import build_repository_local_path
+from services.repository_local_dir_service import (
+    BLOCKING_REASONS,
+    REASON_MOVED,
+    relocate_repository_local_dir,
+    undo_repository_local_dir_move,
+)
 from utils.diff_data_utils import (
     clean_json_data,
     format_cell_value,
@@ -1007,6 +1015,8 @@ def update_repository(repository_id):
         flash=flash,
         db=db,
         validate_repository_name=validate_repository_name,
+        normalize_repository_name=normalize_repository_name,
+        repository_name_error_message=REPOSITORY_NAME_ERROR_MESSAGE,
         log_print=log_print,
         create_auto_sync_task=create_auto_sync_task,
         app=app,
@@ -1014,6 +1024,10 @@ def update_repository(repository_id):
         Repository=Repository,
         DiffCache=DiffCache,
         clear_repository_state_for_switch_func=_clear_repository_state_for_switch,
+        relocate_repository_local_dir=relocate_repository_local_dir,
+        undo_repository_local_dir_move=undo_repository_local_dir_move,
+        BLOCKING_REASONS=BLOCKING_REASONS,
+        REASON_MOVED=REASON_MOVED,
     )
 
 # 更新仓库配置 - API接口

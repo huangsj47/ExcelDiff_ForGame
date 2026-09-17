@@ -12,7 +12,11 @@ from services.deployment_mode import is_agent_dispatch_mode
 from services.enhanced_git_service import EnhancedGitService
 from services.model_loader import get_runtime_model
 from utils.request_security import require_admin
-from utils.security_utils import validate_repository_name
+from utils.security_utils import (
+    REPOSITORY_NAME_ERROR_MESSAGE,
+    normalize_repository_name,
+    validate_repository_name,
+)
 
 
 def _is_agent_dispatch_mode() -> bool:
@@ -110,7 +114,7 @@ def allocate_repository_id():
 @require_admin
 def create_git_repository():
     project_id = request.form.get("project_id")
-    name = (request.form.get("name") or "").strip()
+    name = normalize_repository_name(request.form.get("name"))
     category = request.form.get("category")
     url = request.form.get("url")
     server_url = request.form.get("server_url")
@@ -144,7 +148,7 @@ def create_git_repository():
                 return redirect(url_for("add_git_repository", project_id=project_id))
 
     if not validate_repository_name(name):
-        flash("仓库名称仅允许字母、数字、点、下划线和短横线", "error")
+        flash(REPOSITORY_NAME_ERROR_MESSAGE, "error")
         return redirect(url_for("add_git_repository", project_id=project_id))
 
     required_fields = [name, url, server_url, token, branch, resource_type]
@@ -384,7 +388,7 @@ def clone_svn_repository_to_local(repository):
 @require_admin
 def create_svn_repository():
     project_id = request.form.get("project_id")
-    name = (request.form.get("name") or "").strip()
+    name = normalize_repository_name(request.form.get("name"))
     category = request.form.get("category")
     url = request.form.get("url")
     root_directory = request.form.get("root_directory")
@@ -407,7 +411,7 @@ def create_svn_repository():
     tag_selection = request.form.get("tag_selection")
 
     if not validate_repository_name(name):
-        flash("仓库名称仅允许字母、数字、点、下划线和短横线", "error")
+        flash(REPOSITORY_NAME_ERROR_MESSAGE, "error")
         return redirect(url_for("add_svn_repository", project_id=project_id))
 
     required = [name, url, root_directory, username, password, current_version, resource_type]

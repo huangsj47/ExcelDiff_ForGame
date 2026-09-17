@@ -8,11 +8,11 @@ from utils.path_security import build_repository_local_path, validate_segment
 from utils.security_utils import (
     decrypt_credential,
     encrypt_credential,
+    normalize_repository_name,
     sanitize_text,
     sanitize_url,
     validate_repository_name,
 )
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -50,6 +50,33 @@ class TestSecurityUtils:
         assert not validate_repository_name("../evil")
         assert not validate_repository_name("name with space")
         assert not validate_repository_name("")
+
+    def test_validate_repository_name_accepts_unicode(self):
+        """仓库名是展示名，磁盘目录另走 path_security 的 ASCII sanitize，
+        所以字符集从白名单改成黑名单之后必须放行中文等 Unicode 字母。
+        拦的是「放宽了但只放宽了一半」：漏掉某类文字，用户就建不进来。"""
+        for name in ("中文配置库", "コンフィグ", "Конфиг", "Café", "설정"):
+            assert validate_repository_name(name), f"{name!r} 应该被接受"
+
+    def test_validate_repository_name_still_rejects_dangerous_chars(self):
+        """黑名单逐条钉住。白名单换成黑名单最容易漏掉路径分隔符与 URL 敏感字符 ——
+        这些字符不是「不好看」：/ \\ 改变路径层级，# % 会截断/改写 URL，
+        " < > | 在 Windows 文件名里非法，& 会被 HTML 二次解码。"""
+        for name in ('a/b', 'a\\b', 'a:b', 'a*b', 'a?b', 'a"b', 'a<b', 'a>b',
+                     'a|b', 'a#b', 'a%b', 'a&b', '../evil', '..', '.a', 'a.',
+                     '  ', 'a　b', 'a b', 'a\x00b', 'a\tb', 'x' * 101):
+            assert not validate_repository_name(name), f"{name!r} 应该被拒绝"
+
+    def test_repository_name_is_nfc_normalized_on_write(self):
+        """深链是按精确字符串比对的（services/commit_route_scope_service.py），
+        同一个「é」的合成/去组合两种编码是两个不同字符串 —— 不归一化就有一半链接 404。"""
+        import unicodedata
+
+        decomposed = unicodedata.normalize("NFD", "Café")
+        assert decomposed != "Café"
+        assert normalize_repository_name(decomposed) == unicodedata.normalize("NFC", "Café")
+        assert normalize_repository_name("  abc  ") == "abc"
+        assert normalize_repository_name(None) == ""
 
 
 class TestPathSecurity:

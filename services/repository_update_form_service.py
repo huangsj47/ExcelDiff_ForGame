@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from sqlalchemy.exc import SQLAlchemyError
 
-
 REPOSITORY_UPDATE_FORM_FORCE_SYNC_ERRORS = (
     ImportError,
     RuntimeError,
@@ -165,6 +164,10 @@ def handle_update_repository_form(
     flash,
     db,
     validate_repository_name,
+    normalize_repository_name,
+    repository_name_error_message,
+    relocate_repository_local_dir,
+    undo_repository_local_dir_move,
     log_print,
     create_auto_sync_task,
     app,
@@ -172,10 +175,17 @@ def handle_update_repository_form(
     Repository,
     DiffCache,
     clear_repository_state_for_switch_func,
+    BLOCKING_REASONS,
+    REASON_MOVED,
 ):
     """Handle repository edit form submit."""
     repository_id = repository.id
     project_id = repository.project_id
+    # 改名前先记下旧名字：本地工作副本路径是按当前名字实时算出来的，改名之后
+    # 就算不出旧路径了（见 services/repository_local_dir_service.py）。
+    old_name = repository.name
+    # 目录迁移的结果。必须在 try 之前初始化，except 分支要用它决定要不要搬回去。
+    rename_move = None
     try:
         def _field_changed(field_name, current_value):
             submitted = request.form.get(field_name)
@@ -183,9 +193,9 @@ def handle_update_repository_form(
                 return False
             return str(submitted).strip() != str(current_value or "").strip()
 
-        new_name = (request.form.get("name") or "").strip()
+        new_name = normalize_repository_name(request.form.get("name"))
         if not validate_repository_name(new_name):
-            flash("仓库名称仅允许字母、数字、点、下划线和短横线", "error")
+            flash(repository_name_error_message, "error")
             return redirect(url_for("edit_repository", repository_id=repository_id))
 
         old_file_type_filter = repository.path_regex if repository.type == "git" else None
@@ -272,6 +282,30 @@ def handle_update_repository_form(
                 switch_old_value = old_current_version
                 switch_new_value = new_current_version
             repository.current_version = new_current_version
+
+        # 改名会改变工作副本目录（路径按当前名字实时算出，没有 local_path 列），
+        # 所以必须在落库之前把目录搬过去。放在这里 —— 所有提前 return 的校验之后、
+        # switch 清理之前 —— 有两个理由：
+        #   1) 提前 return 的路径上什么都没动过，不会出现「目录搬了、名字没落库」；
+        #   2) 迁移失败时 switch 清理还没执行，不会留下「删了一堆缓存但改名没成」。
+        # 失败就放弃这次改名：库里的名字与盘上的目录是同一个身份的两半，只改一半
+        # 会让平台换个目录重新 clone，且旧副本静默失联（比报错更难查）。
+        if str(old_name or "") != str(new_name or ""):
+            rename_move = relocate_repository_local_dir(
+                project_code=getattr(getattr(repository, "project", None), "code", None),
+                old_name=old_name,
+                new_name=new_name,
+                repository_id=repository_id,
+            )
+            log_print(
+                f"仓库改名目录迁移: {old_name!r} -> {new_name!r} 结果={rename_move['reason']} "
+                f"{rename_move['old_path']} -> {rename_move['new_path']}",
+                "APP",
+            )
+            if rename_move["reason"] in BLOCKING_REASONS:
+                db.session.rollback()
+                flash(rename_move["message"], "error")
+                return redirect(url_for("edit_repository", repository_id=repository_id))
 
         if switch_changed:
             switch_cleanup_summary = clear_repository_state_for_switch_func(
@@ -389,5 +423,13 @@ def handle_update_repository_form(
         return redirect(url_for("repository_config", project_id=project_id))
     except REPOSITORY_UPDATE_FORM_SUBMIT_ERRORS as exc:
         db.session.rollback()
-        flash(f"更新仓库失败: {str(exc)}", "error")
+        # 目录已经搬过去了，但名字没落库 —— 路径会重算回旧位置，又变成「未克隆」。
+        # 搬回去是最省事的一致性恢复；搬不动就如实告知，绝不假装没事。
+        undo_note = ""
+        if rename_move and rename_move.get("reason") == REASON_MOVED:
+            undo_ok, undo_note = undo_repository_local_dir_move(
+                old_path=rename_move["old_path"], new_path=rename_move["new_path"])
+            if not undo_ok:
+                log_print(f"仓库改名回退目录失败: {undo_note}", "APP", force=True)
+        flash(f"更新仓库失败: {str(exc)}{undo_note}", "error")
         return redirect(url_for("edit_repository", repository_id=repository_id))

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import unicodedata
+
 
 def ensure_repository_access_or_403(*, repository, has_project_access, abort):
     """Ensure repository belongs to an accessible project."""
@@ -32,10 +34,16 @@ def ensure_commit_route_scope_or_404(
     """Ensure commit route path params match commit's repository scope."""
     repository, project = ensure_commit_access_or_403_func(commit)
     expected_project_code = str(project_code or "").strip()
-    expected_repo_name = str(repository_name or "").strip()
+    # 仓库名要按 NFC 比较：同一个「é」/汉字，输入法或外部粘贴可能给出**去组合形态**，
+    # 与库里存的**合成形态**是两个不同的字符串，不归一化就会让一部分深链 404。
+    # 写入侧已经统一成 NFC（utils/security_utils.py:normalize_repository_name），
+    # 这里再归一化一次是为了容忍手工输入/外部粘贴的链接。
+    # **两侧都要归一化**：只归一化一边等于没归一化。
+    expected_repo_name = unicodedata.normalize("NFC", str(repository_name or "").strip())
     if expected_project_code and str(project.code or "").strip() != expected_project_code:
         abort(404)
-    if expected_repo_name and str(repository.name or "").strip() != expected_repo_name:
+    actual_repo_name = unicodedata.normalize("NFC", str(repository.name or "").strip())
+    if expected_repo_name and actual_repo_name != expected_repo_name:
         abort(404)
     return repository, project
 

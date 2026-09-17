@@ -2,13 +2,40 @@ import base64
 import hashlib
 import os
 import re
+import unicodedata
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from cryptography.fernet import Fernet, InvalidToken
 
 ENCRYPTION_PREFIX = "enc::"
-REPO_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+
+# 仓库名（展示名）的禁用字符。
+#
+# 规则从「ASCII 白名单」换成「黑名单 + 结构约束」，是因为仓库名与磁盘路径已经解耦：
+# 克隆目录由 utils/path_security.py 按 `{project}_{sanitize(repo)}_{id}` 生成，
+# 中文名在那里会折叠成 fallback "repository"，唯一性由 `_{id}` 保证
+# （utils/path_security.py:_sanitize_segment / build_repository_local_path）。
+# 所以这里放行什么字符，不再影响任何路径、也不再影响任何 subprocess 的 argv/cwd。
+#
+# 剩下的这些字符各自有明确理由，不是「不好看」：
+#   / \      会改变路径层级
+#   :        在 Windows 上是数据流分隔符（ADS）
+#   * ?      在 Windows 文件名里非法 / URL 查询串语义
+#   " < > |  在 Windows 文件名里非法；" 还会把模板里的 JS 字符串字面量拆坏
+#   #         URL 片段起始
+#   %         会被当成百分号转义的前导符
+#   &         会被 Jinja/HTML 二次解码
+# 空白与首尾点号另见 validate_repository_name。
+REPOSITORY_NAME_FORBIDDEN_CHARS = '/\\:*?"<>|#%&'
+REPOSITORY_NAME_WHITESPACE_RE = re.compile(r"\s")
+REPOSITORY_NAME_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+# 三处写入口（Git 建 / SVN 建 / 改名）共用一句提示，避免三份文案各说各话。
+REPOSITORY_NAME_ERROR_MESSAGE = (
+    '仓库名称支持中文；不能包含空格及 / \\ : * ? " < > | # % & 等字符，'
+    "也不能以点号开头或结尾，长度不超过 100 个字符"
+)
 
 # 自动生成的凭据加密密钥落盘位置（相对于仓库根，见 utils/runtime_paths.py）。
 _AUTO_KEY_FILENAME = ".credential_encryption_key"
@@ -283,7 +310,48 @@ def sanitize_text(text: Optional[str]) -> str:
 
 
 def validate_repository_name(name: Optional[str]) -> bool:
+    """仓库名（展示名）是否可用。
+
+    这里过去是 ASCII 白名单 `^[A-Za-z0-9._-]+$`。改成黑名单的理由见
+    `REPOSITORY_NAME_FORBIDDEN_CHARS` 上方的说明 —— 一句话：仓库名是**展示名**，
+    磁盘目录由 utils/path_security.py 单独 sanitize 成 ASCII（中文会折叠成
+    fallback "repository"，靠 `_{id}` 保唯一），所以放行什么字符与路径安全解耦了。
+    """
     if not name:
         return False
-    return bool(REPO_NAME_PATTERN.match(name))
+    text = unicodedata.normalize("NFC", str(name))
+    if not text:
+        return False
+    # 边界：与 models/repository.py 的 String(100) 对齐。SQLite 不在乎长度、MySQL 在乎，
+    # 不在这里拦就会变成「本机建得进、生产插入报错」的经典分歧。
+    if len(text) > 100:
+        return False
+    # 空白一律拒绝（内部空格、制表符、全角空格 U+3000、NBSP）。
+    # `\s` 在 Python 3 的 str 模式里是 Unicode 感知的，所以上面这些都能命中。
+    # 内部空格是**既有契约**：tests/test_p0_security_tools.py 钉着
+    # "name with space" 必须为 False，这条不能因为放宽字符集而丢掉。
+    if REPOSITORY_NAME_WHITESPACE_RE.search(text):
+        return False
+    if REPOSITORY_NAME_CONTROL_RE.search(text):
+        return False
+    if any(ch in REPOSITORY_NAME_FORBIDDEN_CHARS for ch in text):
+        return False
+    # 首尾点号：Windows 会静默吃掉结尾的点，"." / ".." 又是路径语义，直接拒干净。
+    if text.startswith(".") or text.endswith("."):
+        return False
+    return True
+
+
+def normalize_repository_name(name: Optional[str]) -> str:
+    """写入前把仓库名统一成 NFC 形态（并去掉首尾空白）。
+
+    为什么非做不可：仓库名会逐字符出现在深链
+    `/<project_code>/<repository_name>/commits/<id>/diff` 里，而那条路由是
+    **字符串精确比较**（services/commit_route_scope_service.py）。同一个「é」，
+    输入法/复制粘贴可能给出**去组合形态（NFD）**，它与库里存的**合成形态（NFC）**
+    是两个不同的字符串 —— 于是同一份链接在两种写法下一半会 404。
+    写入时统一成 NFC，库里就只有一种形态，平台生成的链接必然自洽。
+    """
+    return unicodedata.normalize("NFC", str(name or "").strip())
+
 

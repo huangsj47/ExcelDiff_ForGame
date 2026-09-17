@@ -77,6 +77,8 @@
                 <div class="mb-3">
                     <label for="name" class="form-label"><span class="text-danger">*</span> 仓库名称</label>
                     <input type="text" class="form-control" id="name" name="name" placeholder="如 trunk 条常变更" value="{% if is_edit %}{{ repository.name }}{% endif %}" required>
+                    {# 同 add_git_repository.html：只提示，不加 HTML pattern 属性。 #}
+                    <div class="form-text">支持中文；不能含空格与 / \ : * ? " &lt; &gt; | # % &amp;，不能以点号开头或结尾</div>
                 </div>
                 <div class="row g-3 mb-3">
                     <div class="col-md-6">
