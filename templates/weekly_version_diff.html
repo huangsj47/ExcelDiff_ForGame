@@ -1344,12 +1344,6 @@ function setWeeklyAiReport(markdown) {
 }
 
 function appendWeeklyAiLine(text) {
-    const output = document.getElementById('weeklyAiOutput');
-    if (!output) return;
-    // 占位文案（「暂无分析结果。」「AI 分析进行中...」）在第一段真实内容到达时清掉，
-    // 否则报告的开头会一直挂着那句占位。
-    output.classList.remove('is-empty');
-    output.classList.remove('is-busy');
     weeklyAiBuffer += (weeklyAiBuffer ? '\n' : '') + text;
     scheduleWeeklyAi();
 }
@@ -1357,6 +1351,16 @@ function appendWeeklyAiLine(text) {
 function renderWeeklyAi() {
     const output = document.getElementById('weeklyAiOutput');
     if (!output) return;
+    // 一有正文就摘掉空态/进行中的样式。
+    // **必须在这里摘，不能只放在 appendWeeklyAiLine 里**：报告不一定逐行推过来 ——
+    // 打开抽屉时若已有结果（loadWeeklyAiLatest）就直接走 setWeeklyAiReport，那条路径
+    // 一个 chunk 都没有，`is-empty` 会从服务端渲染的初始 class 一路留到最后。
+    // 而 `.ai-analysis-output.is-empty/.is-busy` 是**居中 flex 列**（见上面的规则），
+    // 留着它整篇报告会居中，且每条都被 align-items:center 收缩成内容宽度。
+    if (weeklyAiBuffer.trim() !== '') {
+        output.classList.remove('is-empty');
+        output.classList.remove('is-busy');
+    }
     // 渲染器先整体转义再套白名单标签，模型给的内容永远以实体形式出现
     // （见 static/js/ai-report-markdown.js），所以这里赋 innerHTML 是安全的。
     output.innerHTML = AiReportMarkdown.render(weeklyAiBuffer);
