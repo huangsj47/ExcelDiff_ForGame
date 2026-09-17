@@ -131,9 +131,72 @@ def test_the_incremental_scope_is_stated_in_the_summary():
 
 
 def test_a_truncated_file_list_is_disclosed():
-    change = from_weekly_payload(_weekly_payload(delta_truncated=True))
+    """清单被截断时必须说明，而且要**同时说清「没列出来 ≠ 读不到」**。
 
-    assert "不是全部改动" in change.summary
+    平台现在用两份清单表达截断：`delta_files` 是全部改动（白名单），`list_files` 是
+    列出来的那部分。老实说「还有 N 个没列出来」是不够的 —— 模型会把它当成「读不到」，
+    于是白写一段信息缺口。所以要给出发现路径的办法（`commit_detail`）。
+    """
+    change = from_weekly_payload(
+        _weekly_payload(
+            files=[
+                {"file_path": TABLE, "latest_commit_id": "c1"},
+                {"file_path": LUA, "latest_commit_id": "c1"},
+                {"file_path": OTHER, "latest_commit_id": "c2"},
+            ],
+            list_files=[{"file_path": TABLE, "latest_commit_id": "c1"}],
+            delta_truncated=True,
+        )
+    )
+
+    assert "还有 2 个文件的名字没有列出来" in change.summary
+    assert "commit_detail" in change.summary, "没说清怎么找出没列出来的那些文件"
+
+
+def test_a_full_file_list_carries_no_truncation_note():
+    """全列时不许出现截断说明 —— 那会让模型以为有东西没看到。"""
+    change = from_weekly_payload(_weekly_payload())
+
+    assert "没有列出来" not in change.summary
+    assert "本次变更共 2 个提交、3 个文件" in change.summary
+
+
+def test_the_whitelist_covers_files_that_are_not_listed():
+    """**核心不变量**：名字没列出来，不等于读不到。
+
+    这是「清单」与「白名单」拆开的意义所在。以前两者是同一份（取样 200 个），没列出来的
+    文件连 `file_diff` 都会被 `sanitize_requests` 丢掉；现在白名单给全部改动文件，
+    清单只是名字没列全。
+    """
+    change = from_weekly_payload(
+        _weekly_payload(
+            files=[
+                {"file_path": TABLE, "latest_commit_id": "c1"},
+                {"file_path": LUA, "latest_commit_id": "c1"},
+                {"file_path": OTHER, "latest_commit_id": "c2"},
+            ],
+            list_files=[{"file_path": TABLE, "latest_commit_id": "c1"}],
+            delta_truncated=True,
+        )
+    )
+
+    # 清单里只列了 TABLE，但白名单必须认 LUA 与 OTHER
+    allowed, dropped = sanitize_requests(
+        [
+            ContextRequest(type="file_diff", commit="c1", path=LUA),
+            ContextRequest(type="file_diff", commit="c2", path=OTHER),
+        ],
+        change.scope,
+    )
+    assert [request.path for request in allowed] == [LUA, OTHER], (
+        f"没列出来的文件读不到（被丢掉的原因：{[(item.reason, item.detail) for item in dropped]}）"
+    )
+    # 越权仍然要被拒：这个提交根本没碰过的文件
+    refused, _ = sanitize_requests(
+        [ContextRequest(type="file_diff", commit="c1", path="src/从未改动.lua")],
+        change.scope,
+    )
+    assert refused == (), "白名单放宽到了「没改动过的文件」，这是越权"
 
 
 def test_an_unrecognised_scope_adds_no_note():

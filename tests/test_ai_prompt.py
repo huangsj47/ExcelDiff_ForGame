@@ -403,7 +403,13 @@ def test_change_summary_states_the_true_total_when_the_list_is_truncated():
 
     assert "767" in text, "没有写出截断前的真实文件数"
     assert "3 个" in text, "没有写出清单里实际有多少个"
-    assert "还有 764 个文件没有列出来" in text, "没有说明模型看不到多少内容"
+    assert "还有 764 个文件的名字没有列出来" in text, "没有说明模型看不到多少名字"
+    # 「名字没列出来」不等于「读不到」：截断说明必须给出发现路径的办法，
+    # 否则模型会把「看不到名字」当成「读不到内容」，信息缺口的免责声明就白写了。
+    assert "commit_detail" in text, "没有告诉模型怎么查出没列出来的那些文件"
+    assert "读不到" in text or "读到它们的 diff" in text, (
+        "没有说明这些文件其实是可读的"
+    )
     assert "本次只看到" in text, "没有给出「只看到 M/N」的写法引导"
 
 

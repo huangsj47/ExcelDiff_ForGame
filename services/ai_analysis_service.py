@@ -77,6 +77,16 @@ from utils.security_utils import decrypt_credential, encrypt_credential
 from utils.timezone_utils import format_beijing_time
 
 MAX_FILES_DEFAULT = DEFAULT_MAX_FILES_PER_RUN
+
+# 变更清单「全列」的字符上限。一行约 60 字符（`  - [M] <path>`），所以 60,000 字符
+# 约合 1,000 个文件。实测线上那一轮 767 个文件的全量清单是 45,777 字符 —— 装得下，
+# 所以取样退化成兜底而不是常态。取值不更大的原因：清单每轮都要进提示词，而它每涨
+# 一万字符就直接挤掉一条 diff（单条上限 11,000 字符）。
+MAX_LIST_CHARS = 60_000
+
+# 「分析范围」的取值之一：不筛。其余取值见 `_filter_delta_files_by_focus`。
+FOCUS_ALL = "all"
+
 FULL_ANALYSIS_FILE_THRESHOLD = 50
 FULL_ANALYSIS_RATIO_THRESHOLD = 0.30
 EXECUTION_VERSION = "latest"
@@ -564,6 +574,30 @@ def _limit_items(items: List[dict], max_items: int) -> List[dict]:
     return items[:max_items]
 
 
+def _select_listed_files(
+    delta_files: List[dict], max_files: int
+) -> tuple[List[dict], bool]:
+    """决定变更清单里**列哪些文件**，返回 (清单, 是否截断)。
+
+    ## 为什么默认全列
+
+    清单里一行就是一个路径（`  - [M] code/qz_pub/xxx/SeasonRankCfgMod.lua`，约 60 字符），
+    **便宜**；而它换来的是模型能自己判断「该看什么」。实测线上那一轮 767 个文件的
+    全量清单是 45,777 字符，只占提示词预算的一小部分 —— 也就是说绝大多数版本都会走到
+    「全列」这一支，取样只是兜底。
+
+    以前 200 这个上限同时管着「列多少」和「能读多少」，代价是没列出来的 567 个文件
+    连 `file_diff` 都被拒。现在两者分开了：白名单给全部改动文件，**这里只影响名字列不列**。
+    所以即使退化到取样，模型仍然能靠 `commit_detail` 查出提交的完整文件清单再点名索取
+    （`render_change_summary` 的截断说明里写清了这条路）。
+    """
+    total_chars = sum(len(str(item.get("file_path") or "")) + 10 for item in delta_files)
+    if total_chars <= MAX_LIST_CHARS:
+        return list(delta_files), False
+    sampled = _sample_with_repo_fairness(delta_files, max_files)
+    return sampled, len(sampled) < len(delta_files)
+
+
 def _sample_with_repo_fairness(
     items: List[dict], max_items: int, *, repo_key: str = "repository_id"
 ) -> List[dict]:
@@ -747,10 +781,55 @@ def build_commit_payload(commit_id: int) -> dict:
     return payload
 
 
+def _resource_type_of(repo) -> str:
+    return str(getattr(repo, "resource_type", "") or "").lower()
+
+
+def _filter_delta_files_by_focus(
+    delta_files: List[dict], focus: Optional[str], configs: List[WeeklyVersionConfig]
+) -> Tuple[List[dict], str]:
+    """按用户选的「分析范围」筛文件，返回 (筛选后的清单, 给人看的范围名)。
+
+    ## 为什么要有这个
+
+    一个 767 个文件的版本，**人比任何自动策略都清楚这周该看哪一半**：这周改的是配表数值，
+    下几周才轮到代码。让用户先选范围，比在服务端猜「哪 200 个更重要」准得多，而且成本是
+    线性的（筛选之后清单短了、额度也集中了）。
+
+    取值：`all`（或空）不筛；`table` / `code` 按仓库的 `resource_type` 筛；数字按
+    仓库 id 筛。**认不出来的一律不筛**（`focus` 是 URL 参数，不能让它把分析变成空跑）。
+    """
+    text = str(focus or "").strip().lower()
+    if not text or text == FOCUS_ALL:
+        return list(delta_files), ""
+
+    repo_by_id = {cfg.repository_id: cfg.repository for cfg in configs}
+
+    if text in ("table", "code"):
+        kept = [
+            item for item in delta_files
+            if _resource_type_of(repo_by_id.get(item.get("repository_id"))) == text
+        ]
+        label = "仅配表仓库" if text == "table" else "仅代码仓库"
+        return kept, label
+
+    try:
+        repo_id = int(text)
+    except (TypeError, ValueError):
+        return list(delta_files), ""
+
+    repo = repo_by_id.get(repo_id)
+    if repo is None:
+        return list(delta_files), ""
+    kept = [item for item in delta_files if item.get("repository_id") == repo_id]
+    return kept, f"仅仓库「{repo.name}」"
+
+
 def build_weekly_payload(
     config_id: int,
     *,
     force_full: bool = False,
+    focus: Optional[str] = None,
 ) -> Tuple[Optional[dict], Optional[AiWeeklyAnalysisState], Optional[str]]:
     config = WeeklyVersionConfig.query.get_or_404(config_id)
     configs = WeeklyVersionConfig.query.filter(
@@ -778,9 +857,21 @@ def build_weekly_payload(
     repo_details.sort(key=lambda item: (item.get("priority", 1), item.get("repository_name", "")), reverse=True)
 
     delta_files = details.get("delta_files", [])
-    limited_delta_files = _sample_with_repo_fairness(delta_files, max_files)
+    focus_label = ""
+    if focus:
+        delta_files, focus_label = _filter_delta_files_by_focus(delta_files, focus, configs)
+        if not delta_files:
+            return None, state, "focus_empty"
+        # **计数要跟着筛选走。** 不跟着改的话，提示词会告诉模型「本次变更共 767 个文件」
+        # 而它只看得到 19 个 —— 那正是「把清单当全量」的镜像错误：这次是把全量说大了。
+        summary = {
+            **summary,
+            "total_files": len(delta_files),
+            "delta_files": len(delta_files),
+        }
+    list_files, list_truncated = _select_listed_files(delta_files, max_files)
 
-    truncated = len(delta_files) > len(limited_delta_files)
+    truncated = list_truncated
     payload = {
         "mode": "weekly",
         "scope": scope,
@@ -795,6 +886,9 @@ def build_weekly_payload(
             "sample_strategy": "priority_then_commit_count",
             "allow_cross_file": True,
         },
+        # 用户选的「分析范围」。`label` 会被渲染进提示词（见 change_set._scope_note），
+        # 所以报告与界面都能说清「这次只看了一半」。
+        "focus": {"key": str(focus or FOCUS_ALL), "label": focus_label},
         "group": {
             "key": group_key,
             "base_name": base_name,
@@ -804,7 +898,10 @@ def build_weekly_payload(
         },
         "summary": summary,
         "repositories": repo_details,
-        "delta_files": limited_delta_files,
+        # 白名单：本批次**全部**改动过的文件。模型能读的 diff 就是这个集合。
+        "delta_files": delta_files,
+        # 提示词里**列出来**的那部分。绝大多数版本与 `delta_files` 相同（见下面的说明）。
+        "list_files": list_files,
         "delta_truncated": truncated,
     }
     payload["policy"]["truncated"] = truncated
@@ -1235,8 +1332,10 @@ def stream_commit_analysis(commit_id: int, user_label: str = "") -> Iterable[str
     yield _sse_event("result", result)
 
 
-def stream_weekly_analysis(config_id: int, trigger_source: str = "manual") -> Iterable[str]:
-    payload, state, skip_reason = build_weekly_payload(config_id)
+def stream_weekly_analysis(
+    config_id: int, trigger_source: str = "manual", focus: Optional[str] = None
+) -> Iterable[str]:
+    payload, state, skip_reason = build_weekly_payload(config_id, focus=focus)
     if skip_reason == "no_change":
         cached = get_latest_weekly_result(config_id)
         if cached and cached.get("run_id"):
@@ -1244,7 +1343,13 @@ def stream_weekly_analysis(config_id: int, trigger_source: str = "manual") -> It
             if run and _is_run_fresh(run):
                 yield from _stream_cached_run(run)
                 return
-        payload, state, skip_reason = build_weekly_payload(config_id, force_full=True)
+        payload, state, skip_reason = build_weekly_payload(config_id, force_full=True, focus=focus)
+    if skip_reason == "focus_empty":
+        yield _sse_event(
+            "error",
+            {"message": "选定的分析范围里没有改动过的文件，换一个范围再试。"},
+        )
+        return
     if payload is None:
         yield _sse_event("error", {"message": "Weekly analysis payload not ready."})
         return
@@ -1401,6 +1506,23 @@ def _parse_iso_datetime(raw: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _focus_from_run(run: AiAnalysisRun) -> dict:
+    """这次 run 用的「分析范围」。存在它自己的 request_payload 里。
+
+    为什么要读出来给界面：结果是按范围筛过的，界面若只说「最近分析」而不说范围，
+    用户会把「只看配表仓库」那份结论当成对全版本的结论 —— 与「把清单当全量」是同一类
+    错误。老记录没有这个字段，读不到就按「全部」处理。
+    """
+    stored = _parse_response_payload(run.request_payload)
+    focus = (stored or {}).get("focus") if isinstance(stored, dict) else None
+    if isinstance(focus, dict):
+        return {
+            "key": str(focus.get("key") or FOCUS_ALL),
+            "label": str(focus.get("label") or ""),
+        }
+    return {"key": FOCUS_ALL, "label": ""}
+
+
 def _in_progress_result(run: AiAnalysisRun) -> dict:
     """「正在进行中」的读侧形态：给得出身份，给不出结论。"""
     return {
@@ -1440,6 +1562,7 @@ def get_latest_weekly_result(config_id: int) -> Optional[dict]:
         "run_id": run.id,
         "status": run.status,
         "scope": run.scope,
+        "focus": _focus_from_run(run),
         "trigger_source": run.trigger_source,
         "created_at": run.created_at.isoformat() if run.created_at else None,
             "created_at_display": _created_at_display(run),

@@ -97,7 +97,11 @@ FIELD_RULES: Mapping[str, FieldRule] = {
     "weekly_interval_minutes": FieldRule(
         "分析间隔（分钟）", "int", *WEEKLY_INTERVAL_RANGE
     ),
-    "max_files_per_run": FieldRule("单次最大文件数", "int", *MAX_FILES_PER_RUN_RANGE),
+    # 标签改过：这个值**不再**限制「一次分析能处理多少个文件」（那由变更清单与
+    # `MAX_LIST_CHARS` 决定），也不再限制「模型能读多少」（白名单给本批次全部改动文件）。
+    # 它现在只在**清单长到列不下**的时候决定取样多少个 —— 旧的「单次最大文件数」
+    # 会让用户以为调大它就能多看文件，而实际上绝大多数版本根本走不到这一支。
+    "max_files_per_run": FieldRule("清单过长时的取样上限", "int", *MAX_FILES_PER_RUN_RANGE),
     "max_analysis_rounds": FieldRule("最大分析轮次", "int", *MAX_ANALYSIS_ROUNDS_RANGE),
     "max_tool_requests": FieldRule("上下文索取上限", "int", *MAX_TOOL_REQUESTS_RANGE),
     "prompt_char_budget": FieldRule("提示词字符预算", "int", *PROMPT_CHAR_BUDGET_RANGE),

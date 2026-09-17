@@ -1020,10 +1020,15 @@ def test_a_small_repository_still_reaches_the_payload_when_truncated(monkeypatch
     **这条是接线守卫。** 直接测 `_sample_with_repo_fairness` 只能证明那个函数对，
     证明不了它被用上了 —— 把调用点换回 `_limit_items`（原来的直接截断），
     只测函数的用例照样全绿。线上那个「配表被整个挤出清单」的缺陷，
-    只有从 `build_weekly_payload` 一路看到 `delta_files` 才拦得住。
+    只有从 `build_weekly_payload` 一路看到清单才拦得住。
 
     两个仓库的 `type` 都设成 `git`，复刻线上「配表仓库也是 git」这个前提 ——
     优先级退化的根因就在那里。
+
+    **清单的截断现在是按字符算的**（`MAX_LIST_CHARS`），所以这里把它压小来逼出
+    退化那一支；`max_files_per_run` 退居「退化时取多少个」。同时断言**白名单不受影响**：
+    `delta_files` 仍然是全部 33 个 —— 清单可以少列，白名单不能少给，否则模型连
+    `file_diff` 都会被拒（这正是这次要修的信息缺口）。
     """
     with app.app_context():
         create_tables()
@@ -1047,13 +1052,53 @@ def test_a_small_repository_still_reaches_the_payload_when_truncated(monkeypatch
             ai_service, "get_project_analysis_config",
             lambda *a, **k: {"max_files_per_run": 10},
         )
+        monkeypatch.setattr(ai_service, "MAX_LIST_CHARS", 100)
         payload, _state, skip_reason = ai_service.build_weekly_payload(cfg_code.id)
         assert skip_reason is None
 
-        paths = [item["file_path"] for item in payload["delta_files"]]
-        assert len(paths) == 10, f"没有按上限截断：{len(paths)}"
-        table_paths = [path for path in paths if path.startswith("config/")]
+        listed = [item["file_path"] for item in payload["list_files"]]
+        assert len(listed) == 10, f"没有按上限截断：{len(listed)}"
+        table_paths = [path for path in listed if path.startswith("config/")]
         assert len(table_paths) == 3, (
-            f"配表仓库被挤出了清单（进了 {len(table_paths)}/3 个）：{paths}"
+            f"配表仓库被挤出了清单（进了 {len(table_paths)}/3 个）：{listed}"
         )
+        assert payload["delta_truncated"] is True
         assert payload["summary"]["total_files"] == 33
+
+        # 白名单必须是全部 33 个 —— 清单少列不等于少给可读范围。
+        whitelist = {item["file_path"] for item in payload["delta_files"]}
+        assert len(whitelist) == 33, (
+            f"白名单被清单的截断连累了（只有 {len(whitelist)}/33 个可读）：{sorted(whitelist)}"
+        )
+        assert set(listed) <= whitelist
+        assert "src/file_29.lua" in whitelist, "没列出来的文件也必须在白名单里"
+
+
+def test_the_whole_list_is_rendered_when_it_fits(monkeypatch):
+    """清单装得下时**不截断**：全列是默认行为，取样只是兜底。
+
+    这条守的是 `MAX_LIST_CHARS` 那个判断本身。没有它，「把取样换成无条件截断」这种
+    回退不会被任何用例发现 —— 而那个回退正好会重新制造信息缺口。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo = _create_repo(project.id, _uid("code"), "git", "code")
+        cfg = _create_weekly_config(project.id, repo, "W1",
+                                    datetime(2026, 3, 1), datetime(2026, 3, 8))
+        base = datetime.now(timezone.utc) - timedelta(hours=2)
+        for i in range(30):
+            _seed_diff_cache(cfg, repo, f"src/file_{i}.lua", base)
+        db.session.commit()
+
+        # max_files_per_run 故意设得很小：它不该再决定「列多少」
+        monkeypatch.setattr(
+            ai_service, "get_project_analysis_config",
+            lambda *a, **k: {"max_files_per_run": 5},
+        )
+        payload, _state, _skip = ai_service.build_weekly_payload(cfg.id)
+
+        assert len(payload["list_files"]) == 30, (
+            "清单被 max_files_per_run 截断了 —— 全列才是默认行为"
+        )
+        assert payload["delta_truncated"] is False

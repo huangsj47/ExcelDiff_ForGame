@@ -35,11 +35,11 @@ SHRINK_LEVEL_LIMITS = (4000, 1200)
 # 到这一级时整个内容被替换成说明文字，只保留「这里原本有什么」。
 MAX_SHRINK_LEVEL = len(SHRINK_LEVEL_LIMITS) + 1
 
-DEFAULT_MAX_ITEMS = 8
+DEFAULT_MAX_ITEMS = 20
 # 必须与 `models.ai_analysis.project_config.DEFAULT_PROMPT_CHAR_BUDGET` 相等
 # （`test_model_defaults_agree_with_the_budget_layer` 会拦住漂移）。取值依据见那边的注释：
-# 它要装得下「系统提示词 + 150 个提交的变更摘要 + 索取次数 × 单条上限」。
-DEFAULT_TOTAL_CHARS = 200_000
+# 它要装得下「系统提示词 + 变更清单（现在是全量列出的，上限 MAX_LIST_CHARS）+ 索取次数 × 单条上限」。
+DEFAULT_TOTAL_CHARS = 360_000
 
 
 @dataclass(frozen=True)

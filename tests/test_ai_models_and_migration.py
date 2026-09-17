@@ -512,14 +512,38 @@ def test_run_to_dict_is_json_safe():
     assert payload["created_at"] is None
     assert payload["tokens_input"] is None
 
-# 150 个提交、600 个文件的真实量级下，变更摘要要占多少字符。
-# **这是实测值**：用 `render_change_summary` 渲染 150 个提交 × 4 个文件得到 39,283 字符，
-# 不是估的。真实周版本的文件数会变，但数量级就是这个。
-_LARGE_VERSION_SUMMARY_CHARS = 39_283
+# 变更清单**全量列出**时的最坏字符数。**这是实测值**，不是估的：
+# 用 `render_change_summary` 渲染一份「刚好顶到 `ai_analysis_service.MAX_LIST_CHARS`
+# （60,000）的清单」—— 约 1,016 个文件、240 个提交 —— 得到 87,055 字符。
+# 提交数越多，每个提交的头部（提交号/信息/作者/时间/文件数）重复得越多，所以最坏情况
+# 取提交数大的那一档。清单现在默认全列（见 `_select_listed_files`），所以这个数取代了
+# 原来「600 个文件、取样 200 个」的 39,283。
+_LARGE_VERSION_SUMMARY_CHARS = 87_055
 
 # 平台内置 SKILL.md（约 9,600 字符）加项目知识包，按 12,000 算常驻开销。
 # references 是按需索取的，索取时占用的是上下文那部分预算，所以不重复计入这里。
 _SYSTEM_PROMPT_CHARS = 12_000
+
+
+def test_the_context_item_cap_never_wastes_a_paid_request():
+    """**`max_items` 不许小于 `max_tool_requests`。**
+
+    这两个数字分在两个模块里（`budget.DEFAULT_MAX_ITEMS` 与
+    `context_tools.DEFAULT_MAX_TOOL_REQUESTS`），谁也不知道对方存在。旧默认值是 8 与
+    12：模型索要 12 个文件、平台老老实实取了 12 次，然后 `enforce_budget` 按条数上限
+    把其中 4 条**丢掉**并写一句「有 4 条因条数上限未提供给你」。也就是说三分之一的
+    索取额度被买了又扔 —— 用户为此付了 token 与时间，模型却以为自己没要过。
+
+    上限关系必须反过来：条数上限**不小于**索取次数，取回来的都要带得走（带不走的原因是
+    字符预算不足时，那由 `enforce_budget` 逐级压缩处理，并且会如实说明被压缩了）。
+    """
+    from services.ai.budget import DEFAULT_MAX_ITEMS
+    from services.ai.context_tools import DEFAULT_MAX_TOOL_REQUESTS
+
+    assert DEFAULT_MAX_ITEMS >= DEFAULT_MAX_TOOL_REQUESTS, (
+        f"条数上限 {DEFAULT_MAX_ITEMS} 小于索取次数 {DEFAULT_MAX_TOOL_REQUESTS}："
+        f"每次分析都会白白丢掉 {DEFAULT_MAX_TOOL_REQUESTS - DEFAULT_MAX_ITEMS} 条已取回的内容"
+    )
 
 
 def test_the_prompt_budget_can_honor_the_request_budget():

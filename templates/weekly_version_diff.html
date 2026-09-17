@@ -1280,6 +1280,31 @@
         </button>
     </div>
     <div class="ai-drawer-body">
+        {% set repo_ns = namespace(has_table=false, has_code=false) %}
+        {% for cfg in all_configs %}
+            {% if (cfg.repository.resource_type or 'code') == 'table' %}
+                {% set repo_ns.has_table = true %}
+            {% else %}
+                {% set repo_ns.has_code = true %}
+            {% endif %}
+        {% endfor %}
+        {% if all_configs|length > 1 %}
+        {# 文件多的版本里，人比服务端的排序策略更清楚「这周该看哪一半」：
+           选了范围之后清单短了、索取额度也集中了。只影响下次分析；
+           已保存结果覆盖的范围由下面那行 meta 说明。 #}
+        <div class="d-flex align-items-center gap-2 mb-2">
+            <label class="form-label mb-0 text-muted small" for="weeklyAiFocus">分析范围</label>
+            <select class="form-select form-select-sm" id="weeklyAiFocus" style="max-width: 18rem"
+                    title="只影响下次分析；下面显示的是已保存结果所覆盖的范围">
+                <option value="all">全部仓库（{{ all_configs|length }} 个）</option>
+                {% if repo_ns.has_table %}<option value="table">只看配表仓库</option>{% endif %}
+                {% if repo_ns.has_code %}<option value="code">只看代码仓库</option>{% endif %}
+                {% for cfg in all_configs %}
+                <option value="{{ cfg.repository.id }}">只看「{{ cfg.repository.name }}」</option>
+                {% endfor %}
+            </select>
+        </div>
+        {% endif %}
         <div class="ai-drawer-meta" id="weeklyAiMeta">自动分析每 1 小时触发，可手动补跑。</div>
         <!-- 正文渲染成 HTML（Markdown 子集），所以是 div 而不是 pre：
              pre 的 white-space:pre-wrap 会和块级元素打架 -->
@@ -1465,8 +1490,12 @@ async function loadWeeklyAiLatest(force = false) {
             const risk = result.result?.risk_level || '-';
             const createdAt = result.created_at_display || result.created_at || '-';
             const scope = result.scope || '-';
+            // 这份结果覆盖哪一半要写出来：它是按「分析范围」筛过的，
+            // 不说清就会被当成对全版本的结论（与「把清单当全量」是同一类错误）。
+            const focusLabel = (result.focus && result.focus.label) || '';
             if (meta) {
-                meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`;
+                meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`
+                    + (focusLabel ? ` | ${focusLabel}` : '');
             }
             if (result.response_text) {
                 setWeeklyAiReport(result.response_text);
@@ -1512,6 +1541,12 @@ function closeWeeklyAiDrawer() {
     if (openBtn) openBtn.focus({ preventScroll: true });
 }
 
+// 用户选的「分析范围」。认不出来的值服务端会退回「不筛」，所以这里不必兜。
+function weeklyAiFocusValue() {
+    const select = document.getElementById('weeklyAiFocus');
+    return select ? select.value : 'all';
+}
+
 function startWeeklyAiAnalysis(force = false) {
     if (!weeklyAiEndpointReady) {
         setWeeklyAiOutput('请在项目概览页的「AI 分析配置」里填好接口地址、模型名字与 Token。', false);
@@ -1525,7 +1560,9 @@ function startWeeklyAiAnalysis(force = false) {
     setWeeklyAiOutput('AI 分析进行中...', false, 'busy');
     const startBtn = document.getElementById('weeklyAiStartBtn');
     if (startBtn) startBtn.disabled = true;
-    weeklyAiSource = new EventSource(`/ai-analysis/weekly/${configId}/stream?source=manual`);
+    const focus = encodeURIComponent(weeklyAiFocusValue());
+    weeklyAiSource = new EventSource(
+        `/ai-analysis/weekly/${configId}/stream?source=manual&focus=${focus}`);
     weeklyAiSource.addEventListener('chunk', function(event) {
         try {
             const payload = JSON.parse(event.data || '{}');

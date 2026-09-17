@@ -99,9 +99,19 @@ def from_weekly_payload(
 
     同一个提交下可能有多个文件（同一个提交改了多张表），所以这里按提交分组，而不是
     一个文件一个提交 —— 否则变更清单里会出现同一个提交号重复十几次。
+
+    ## 两个清单不是一回事
+
+    * `delta_files` = 本批次**全部**改动过的文件 → 决定**白名单**（模型能读哪些 diff）。
+    * `list_files`  = 提示词里**列出来**的那部分 → 决定模型**看得见哪些名字**。
+
+    以前它们是同一份：取样 200 个，既是清单也是白名单，于是没列出来的 567 个文件连
+    `file_diff` 都会被拒 —— 模型说「还有 567 个没看到」时，它其实**连读都不允许**。
+    现在名字没列全只是「不知道路」，不是「读不到」：白名单给全部，模型可以用
+    `commit_detail` 查出某个提交的完整文件清单再点名索取。
     """
     grouped: dict[str, list[FileChange]] = {}
-    for item in payload.get("delta_files") or []:
+    for item in payload.get("list_files") or payload.get("delta_files") or []:
         entry = dict(item or {})
         commit_id = str(entry.get("latest_commit_id") or "")
         path = normalize_path(str(entry.get("file_path") or ""))
@@ -114,27 +124,37 @@ def from_weekly_payload(
         for commit_id, files in grouped.items()
     )
 
-    scope_note = _scope_note(payload)
-    if payload.get("delta_truncated"):
-        scope_note += (
-            f"（只列出了优先级最高的 {len(payload.get('delta_files') or [])} 个文件，"
-            "不是全部改动。）"
-        )
+    # 白名单：本批次全部改动过的文件。缺失时（老 payload / 单提交模式）退回清单本身。
+    whitelist: dict[str, list[str]] = {}
+    for item in payload.get("delta_files") or []:
+        entry = dict(item or {})
+        commit_id = str(entry.get("latest_commit_id") or "")
+        path = normalize_path(str(entry.get("file_path") or ""))
+        if commit_id and path:
+            whitelist.setdefault(commit_id, []).append(path)
 
-    # 截断前的真实文件数（`summary.total_files`）。清单是取样出来的，
-    # 不把这个数传下去，模型会把清单长度当成「本版本的文件数」。
+    # 截断说明由 `render_change_summary` 统一写（它会说清「没列出来但可以索取」），
+    # 这里不再重复一句同义的话 —— 两处各写一半的后果是改一处漏一处。
+    #
+    # 真实总数：`summary.total_files`（平台算好的）优先；缺值时用**白名单的条数** ——
+    # `delta_files` 现在是本批次全部改动文件，所以它的条数就是真实总数。
+    # **不能在缺值时退回「清单长度」**：那正是「把清单当全量」的老毛病，而截断说明
+    # 要不要写、写多少，全看这个数。
+    whitelist_total = sum(len(paths) for paths in whitelist.values())
     summary = payload.get("summary") or {}
     try:
-        total_files = int(summary.get("total_files"))
+        declared_total = int(summary.get("total_files"))
     except (TypeError, ValueError):
-        total_files = None
+        declared_total = None
+    total_files = declared_total if declared_total is not None else (whitelist_total or None)
 
     return build(
         commits,
         readable_references=readable_references,
-        scope_note=scope_note,
+        scope_note=_scope_note(payload),
         bundle_limit=bundle_limit,
         total_files=total_files,
+        whitelist=whitelist or None,
     )
 
 
@@ -145,10 +165,30 @@ def build(
     scope_note: str = "",
     bundle_limit: int = DEFAULT_BUNDLE_LIMIT,
     total_files: Optional[int] = None,
+    whitelist: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> ChangeSet:
-    """渲染清单并算出白名单范围。两种模式共用。"""
+    """渲染清单并算出白名单范围。两种模式共用。
+
+    `whitelist` 给白名单一个**独立于清单**的来源（提交号 → 该提交改动过的全部路径）。
+    不传时白名单就是清单里那些文件（单提交模式的正常情形）。两者分开是必须的：
+    清单可以为了省字符而只列一部分，而白名单少一个路径，模型就**彻底读不到**那个文件。
+    """
     ordered = tuple(commits)
-    paths = _collect_paths(ordered)
+    rendered_paths = _collect_paths(ordered)
+
+    if whitelist is None:
+        resolved_whitelist: Mapping[str, Iterable[str]] = {
+            commit.commit: [change.path for change in commit.files if change.path]
+            for commit in ordered
+            if commit.commit and commit.files
+        }
+    else:
+        resolved_whitelist = whitelist
+
+    # 「表 ↔ 生成物」的配对按**白名单**（全部改动）来算，而不是按列出来的那部分：
+    # 配对的另一半常常是没被列进清单的那个文件，只按清单配对等于把最容易出问题的一对
+    # 拆开（表改了、产物没跟上，正是要靠配对才看得见）。
+    paths = _collect_whitelist_paths(resolved_whitelist) or rendered_paths
 
     bundles = build_bundles(paths)
     bundle_lines = tuple(describe_bundles(bundles, limit=bundle_limit))
@@ -167,18 +207,34 @@ def build(
     return ChangeSet(
         summary=body,
         scope=AnalysisScope(
-            commits=tuple(commit.commit for commit in ordered if commit.commit),
+            commits=tuple(
+                commit_id for commit_id, _ in resolved_whitelist.items() if commit_id
+            ),
             paths_by_commit={
-                commit.commit: frozenset(change.path for change in commit.files if change.path)
-                for commit in ordered
-                if commit.commit and commit.files
+                commit_id: frozenset(paths_)
+                for commit_id, paths_ in resolved_whitelist.items()
+                if commit_id
             },
             readable_references=frozenset(str(name) for name in readable_references if name),
         ),
-        paths=paths,
+        paths=paths or rendered_paths,
         commits=ordered,
         bundle_lines=bundle_lines,
     )
+
+
+def _collect_whitelist_paths(whitelist: Mapping[str, Iterable[str]]) -> tuple[str, ...]:
+    """白名单里的全部路径，规范化 + 去重 + 保持先后顺序（顺序稳定性同 `_collect_paths`）。"""
+    seen: set[str] = set()
+    result: list[str] = []
+    for paths in whitelist.values():
+        for raw in paths:
+            path = normalize_path(str(raw or ""))
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            result.append(path)
+    return tuple(result)
 
 
 def _collect_paths(commits: Iterable[CommitSummary]) -> tuple[str, ...]:
@@ -209,6 +265,15 @@ def _operation(value: object) -> str:
 def _scope_note(payload: Mapping[str, object]) -> str:
     scope = str(payload.get("scope") or "")
     label = _SCOPE_LABELS.get(scope)
-    if not label:
-        return ""
-    return f"本次分析范围：{label}。"
+    note = f"本次分析范围：{label}。" if label else ""
+
+    # 用户选的分析范围（只看配表仓库 / 只看某个仓库…）。**必须写进提示词**：不写的话
+    # 模型以为自己看到的就是整个版本，会把「这个范围内没发现问题」说成「本版本没问题」。
+    focus = payload.get("focus")
+    focus_label = str((focus or {}).get("label") or "") if isinstance(focus, Mapping) else ""
+    if focus_label:
+        note += (
+            f"**本次只分析了{focus_label}**，其它仓库的改动不在这次输入里 —— "
+            "报告里要写明这一点，不要把结论说成覆盖了整个版本。"
+        )
+    return note

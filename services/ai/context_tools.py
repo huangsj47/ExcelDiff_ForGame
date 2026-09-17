@@ -59,7 +59,14 @@ DEFAULT_TOOL_LIMITS: Mapping[str, int] = {
 }
 
 # 工具请求的总预算（按「次数」计，不是按条数）。
-DEFAULT_MAX_TOOL_REQUESTS = 12
+#
+# 12 → 20：线上那一轮 767 个文件里，模型只能看 12 个 diff，而它连一份 767 行的清单
+# 都消化不了 —— 决定结论质量的是「看了多少内容」，不是「知道有多少名字」。20 次之后，
+# 一个 767 文件的版本能覆盖到约 60,000 字符的真实 diff。
+#
+# 这个数字与 `budget.DEFAULT_MAX_ITEMS` **必须不小于**：小于就会出现「付了 12 次索取、
+# 只带走 8 条」的浪费（`enforce_budget` 按 `max_items` 裁掉多余的），有测试钉住。
+DEFAULT_MAX_TOOL_REQUESTS = 20
 
 # 结构化内容（按行块排列）用保留首尾的截断；纯文本用普通截断。
 _STRUCTURED_KINDS = frozenset({"file_diff"})

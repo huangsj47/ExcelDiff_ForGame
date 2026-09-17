@@ -163,12 +163,15 @@ def ai_commit_stream(commit_id):
 @ai_analysis_bp.route("/ai-analysis/weekly/<int:config_id>/stream", methods=["GET"])
 def ai_weekly_stream(config_id):
     trigger_source = request.args.get("source", "manual")
+    # 分析范围：all（默认）/ table / code / <repository_id>。认不出来的值不会把分析变成
+    # 空跑 —— `_filter_delta_files_by_focus` 一律退回「不筛」。
+    focus = request.args.get("focus", "all")
     config = WeeklyVersionConfig.query.get_or_404(config_id)
     if not _has_project_access(config.project_id):
         return jsonify({"success": False, "message": "Access denied."}), 403
 
     def _generate():
-        yield from stream_weekly_analysis(config_id, trigger_source=trigger_source)
+        yield from stream_weekly_analysis(config_id, trigger_source=trigger_source, focus=focus)
 
     return Response(stream_with_context(_generate()), mimetype="text/event-stream")
 
