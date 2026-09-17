@@ -25,6 +25,7 @@ from services.deployment_mode import is_agent_dispatch_mode
 from services.diff_render_helpers import render_excel_diff_html, render_git_diff_content, render_new_file_content
 from services.diff_service import DiffService
 from services.performance_metrics_service import get_perf_metrics_service
+from services.repository_ordering import weekly_config_order_key
 from services.task_worker_service import TaskWrapper, background_task_queue
 from services.weekly_deleted_excel_helpers import render_weekly_deleted_excel as _render_weekly_deleted_excel_helper
 from services.weekly_deleted_excel_helpers import (
@@ -623,6 +624,9 @@ def merged_project_view(project_id):
     active_versions = []
     inactive_versions = []
     for group in version_groups.values():
+        # 「第一个仓库」的唯一口径（services/repository_ordering.py）：同时决定进入链接的
+        # configs[0]、版本卡片的 AI 徽章代表哪个仓库、以及 inactive_versions_json 的顺序。
+        group['configs'].sort(key=weekly_config_order_key)
         if group['is_active']:
             active_versions.append(group)
         else:
@@ -697,9 +701,9 @@ def weekly_version_diff(config_id):
         WeeklyVersionConfig.end_time == config.end_time,
         WeeklyVersionConfig.id != config_id  # 排除当前配置
     ).order_by(WeeklyVersionConfig.repository_id.asc()).all()
-    # 将当前配置和相关配置合并，按仓库名排序
     all_configs = [config] + related_configs
-    all_configs.sort(key=lambda c: c.repository.name)
+    # 标签顺序与「第一个仓库」同一把尺子（services/repository_ordering.py），否则各说各话。
+    all_configs.sort(key=weekly_config_order_key)
     return render_template('weekly_version_diff.html',
                          config=config,
                          all_configs=all_configs,
@@ -1747,9 +1751,10 @@ def get_real_base_commit_from_vcs(config, file_path):
             if commit_time:
                 if commit_time.tzinfo is None:
                     commit_time = commit_time.replace(tzinfo=timezone.utc)
-                # config.start_time 是北京墙钟，不能按 UTC 解释（原注释「假设为UTC」正是
-                # 窗口偏移 8 小时的根源）
-                config_start_time = beijing_window_to_utc_naive(config.start_time)
+                # config.start_time 是北京墙钟，不能按 UTC 解释（原注释「假设为UTC」正是窗口
+                # 偏移 8 小时的根源）。这里只取起点，故走 weekly_window_in_utc 解包 —— 直接调
+                # beijing_window_to_utc_naive 会因少传 end_time 抛 TypeError 而被末尾 except 吞掉。
+                config_start_time, _ = weekly_window_in_utc(config)
                 if config_start_time is None:
                     continue
                 config_start_time = config_start_time.replace(tzinfo=timezone.utc)
