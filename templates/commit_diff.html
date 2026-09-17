@@ -580,10 +580,16 @@ document.addEventListener('DOMContentLoaded', function() {
     var links = document.querySelectorAll('a[href*="/diff"]');
     links.forEach(function(link) {
         link.addEventListener('click', function(e) {
-            // 添加加载状态
+            // 添加加载状态。
+            // 类名必须是 is-loading 而不是 loading：全局样式里的 .loading 是
+            // 「20×20 圆点 spinner」工具类（style.css），它带 width/height/
+            // border-radius:50% 和 animation:spin infinite。加到容器上会把整个
+            // diff 容器变成一颗持续旋转的圆点，而容器内容远超 20px 且不裁剪，
+            // 于是整页内容看起来在打转（点「上一个版本」时能看到）。
+            // 容器状态用 .excel-diff-container.is-loading（style.css）。
             var container = document.getElementById('excel-diff-container');
             if (container) {
-                container.classList.add('loading');
+                container.classList.add('is-loading');
             }
         });
     });
@@ -620,7 +626,7 @@ function hideExcelLoadingIndicator() {
         setTimeout(function() {
             loadingEl.style.display = 'none';
             containerEl.style.display = 'block';
-            containerEl.classList.remove('loading');
+            containerEl.classList.remove('is-loading');
             // 触发内容渐入动画
             setTimeout(function() {
                 containerEl.style.opacity = '1';

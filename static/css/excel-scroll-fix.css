@@ -491,6 +491,19 @@ div.excel-table-wrapper,
     isolation: isolate !important;
 }
 
+/* 冻结的第一列在表头也必须压住同排的其它表头。
+   ID / 字段 这两格与同排的列头、字段头**处于同一个层叠上下文**（thead 与两条
+   表头 tr 都是 static，不生成上下文），谁在上面只看 z-index。而
+   `.excel-row-header` 自己写的 z-index: 8 根本轮不到生效：
+   excel-diff-new.css 里 `.excel-diff-table th`(10) 与 `.excel-field-row th`(9)
+   的特异性都比它高，于是 ID 实际拿到 10、字段拿到 9 —— 与同排其它表头**正好
+   相等**。z-index 相等时由 DOM 顺序决定，而第一列在最前面，所以它被后面的
+   表头盖住：横向滚动时左上角那格会串字/滑走。
+   按电子表格的习惯，把左上角这一列抬到最高（表体那两级 2/3 仍在其下）。 */
+.excel-diff-table th.excel-row-header {
+    z-index: 12 !important;
+}
+
 /* 专门针对水平滚动时sticky定位元素的背景色扩散问题 */
 .excel-diff-table .excel-row-number,
 .excel-diff-table .excel-row-header {
@@ -518,8 +531,16 @@ div.excel-table-wrapper,
 .excel-diff-table .excel-row-number.excel-modified {
     /* 核心修复：强制使用scroll而不是local，防止滚动时背景扩散 */
     background-attachment: scroll !important;
-    /* 创建新的层叠上下文 */
-    position: relative !important;
+    /* 创建新的层叠上下文。
+       这里原本是 position: relative —— 但 relative 会把行号列**踢出
+       position: sticky**（excel-diff-new.css 给 .excel-row-number 设了
+       sticky; left:0）。后果是新增/删除/修改行的第一列不再冻结，横向滚动时
+       跟着滑走；而未修改行是冻结的，于是同一张表里第一列时冻时不冻。
+       sticky + z-index 同样生成层叠上下文，原有的「背景不扩散」意图不受影响。
+       left: 0 必须显式写：低特异性那条虽已给 left:0，但这里要保证被
+       其它文件的 !important 压过时仍然是 0。 */
+    position: sticky !important;
+    left: 0 !important;
     z-index: 2 !important;
     /* 强制边界和尺寸限制 */
     box-sizing: border-box;
@@ -559,6 +580,20 @@ div.excel-table-wrapper,
     isolation: isolate !important;
     /* 防止背景色向上扩散 */
     contain: style !important;
+}
+
+/* 承载「修改行」冻结行号列的那一行必须压在 -new 之上。
+   -old 与 -new 因为上面那句 isolation:isolate + contain:style 各自成了**层叠
+   上下文**（z-index auto）。行号列虽然自己有 z-index，但它被困在 -old 这个
+   上下文里、出不来，于是与同级、DOM 更靠后的 -new 相比就落在下面 —— 横向滚动
+   时第一列被 -new 的单元格盖住（新增/删除行没有这一层上下文，所以它们是好的，
+   于是同一张表里第一列时冻时不冻）。
+   给 -old 一个更高的层叠级别即可。两行纵向不重叠（-new 只有发生变化的列），
+   所以提高 -old 不改变任何内容的观感。z-index 需配 position: relative 才生效；
+   不带偏移量的 relative 不影响表格布局。 */
+.excel-diff-table tr.excel-row-modified-old {
+    position: relative;
+    z-index: 3;
 }
 
 /* 确保修改行的单元格背景色不会扩散 */

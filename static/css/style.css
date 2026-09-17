@@ -211,7 +211,11 @@ body {
     transition: opacity 0.3s ease-in-out, transform 0.3s ease-in-out;
 }
 
-.excel-diff-container.loading {
+/* 容器级「正在离开/加载」状态。
+   类名刻意用 is-loading 而不是 loading —— 下面那个 .loading 是圆点 spinner
+   工具类，会把被加上的元素压成 20×20 并持续旋转。容器一旦误用 loading，
+   整个 diff 内容会跟着打转（commit_diff.html 曾如此）。 */
+.excel-diff-container.is-loading {
     opacity: 0.7;
     transform: translateY(10px);
 }
@@ -991,7 +995,9 @@ td .dropdown-menu a:hover {
     margin-bottom: 5px;
 }
 
-/* 加载动画 */
+/* 圆点 spinner。**只能加在空的指示元素上**：它带固定 20×20、border-radius:50%
+   和 animation:spin infinite，加到容器上会把容器连同内容一起旋转
+   （容器状态请用 .excel-diff-container.is-loading，见文件上方）。 */
 .loading {
     display: inline-block;
     width: 20px;
@@ -1789,7 +1795,7 @@ main:focus {
 
     /* 位移类反馈取消，颜色/透明度变化保留 */
     .project-card:hover,
-    .excel-diff-container.loading,
+    .excel-diff-container.is-loading,
     .excel-diff-table,
     .unified-diff-page .btn:hover {
         transform: none !important;
