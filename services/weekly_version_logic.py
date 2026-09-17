@@ -33,7 +33,7 @@ from services.deployment_mode import is_agent_dispatch_mode
 from services.performance_metrics_service import get_perf_metrics_service
 from services.task_worker_service import TaskWrapper, background_task_queue
 from services.weekly_deleted_excel_helpers import (
-    is_deleted_operation as _is_deleted_operation_helper,
+    render_weekly_deleted_excel as _render_weekly_deleted_excel_helper,
     render_weekly_deleted_excel_notice as _render_weekly_deleted_excel_notice_helper,
     resolve_weekly_deleted_excel_state as _resolve_weekly_deleted_excel_state_helper,
 )
@@ -65,6 +65,7 @@ from services.weekly_version_sync_status import (
     no_commits_outcome,
     should_log_mask_decision,
 )
+from utils.diff_data_utils import clean_json_data
 from utils.logger import log_print
 from utils.request_security import _has_project_access
 from utils.timezone_utils import now_beijing, beijing_window_to_utc_naive
@@ -1171,9 +1172,6 @@ def _load_weekly_excel_diff_from_cache(repository, diff_cache, file_path):
         generate_merged_diff_data=_generate_merged_diff_data,
     )
 
-def _is_deleted_operation(operation):
-    return _is_deleted_operation_helper(operation)
-
 def _resolve_weekly_deleted_excel_state(config, diff_cache, file_path):
     """判断周版本Excel是否为最终删除状态，并返回可用的上一版本commit_id。"""
     return _resolve_weekly_deleted_excel_state_helper(
@@ -1193,14 +1191,26 @@ def _render_weekly_deleted_excel_notice(config, file_path, previous_commit_id):
         previous_commit_id=previous_commit_id,
     )
 
+def _render_weekly_deleted_excel(config, file_path, previous_commit_id, repository):
+    """删除态 Excel 的正文：整份渲染删除前的内容，取不到基线字节才退回删除提示。
+
+    与提交页的删除提交、非 Excel 的删除同一个口径（编排在 helper 里，这里注入依赖）。
+    """
+    return _render_weekly_deleted_excel_helper(
+        commit_model=Commit, url_for=url_for, config=config, file_path=file_path,
+        previous_commit_id=previous_commit_id, repository=repository,
+        readers={'git': _get_file_content_from_git, 'svn': _get_file_content_from_svn},
+        diff_service=DiffService(), render_excel_html=render_excel_diff_html,
+        render_notice=_render_weekly_deleted_excel_notice, log_print=log_print,
+    )
+
 def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_recalculate=False):
     """生成周版本Excel文件的合并diff HTML内容"""
     try:
         repository = config.repository
-        is_deleted, previous_commit_id = _resolve_weekly_deleted_excel_state(config, diff_cache, file_path)
-        if is_deleted:
-            log_print(f"周版本Excel文件已删除，返回删除提示: {file_path}", 'WEEKLY')
-            return _render_weekly_deleted_excel_notice(config, file_path, previous_commit_id)
+        # 缓存读与「强制重算的清理」都排在「删除」判定**之前**：删除态文件同样进这份 HTML
+        # 缓存（后台任务用同一个键写），读留在判定之后就等于每次打开页面都重读整份基线
+        # Excel，清理留在判定之后则会让删除文件的手动重算留下旧的那一行。
         if not force_recalculate:
             try:
                 cached_html = _weekly_excel_cache_service.get_cached_html(
@@ -1218,7 +1228,6 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
                     'WEEKLY',
                     force=True,
                 )
-        # 如果强制重新计算，先检查并清理缓存
         if force_recalculate:
             log_print(f"🔄 强制重新计算周版本Excel diff: {file_path}", 'WEEKLY')
             try:
@@ -1232,6 +1241,9 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
                     log_print(f"已清理 {deleted_count} 条周版本Excel缓存: {file_path}", 'WEEKLY')
             except Exception as cache_e:
                 log_print(f"清理周版本Excel缓存失败: {cache_e}", 'WEEKLY', force=True)
+        is_deleted, previous_commit_id = _resolve_weekly_deleted_excel_state(config, diff_cache, file_path)
+        if is_deleted:
+            return _render_weekly_deleted_excel(config, file_path, previous_commit_id, repository)
         merged_diff_data = _load_weekly_excel_diff_from_cache(repository, diff_cache, file_path)
 
         if merged_diff_data:
@@ -1305,22 +1317,9 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
                     log_print(f"  - 消息: {merged_diff_data.get('message')}", 'WEEKLY', force=True)
             return "<div class='alert alert-warning'>无法生成Excel合并diff数据</div>"
 
-        # 清理NaN值
-        import math
-        def clean_nan(obj):
-            if isinstance(obj, dict):
-                return {k: clean_nan(v) for k, v in obj.items()}
-
-            elif isinstance(obj, list):
-                return [clean_nan(item) for item in obj]
-
-            elif isinstance(obj, float) and math.isnan(obj):
-                return None
-
-            else:
-                return obj
-
-        cleaned_diff_data = clean_nan(merged_diff_data)
+        # 清理NaN/Inf值。用共用工具而不是本文件原先那份只处理 NaN 的闭包：`inf` 会让
+        # json.dumps 写出非法的 `Infinity`，前端 JSON.parse 直接失败、整份 diff 不显示。
+        cleaned_diff_data = clean_json_data(merged_diff_data)
         # 生成Excel diff HTML
         excel_diff_html = render_excel_diff_html(cleaned_diff_data, file_path)
         return excel_diff_html
