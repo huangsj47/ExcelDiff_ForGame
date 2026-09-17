@@ -164,7 +164,16 @@ class DiffService:
                 'file_path': file_path,
                 'hunks': hunks,
                 'stats': stats,
-                'raw_diff': ''.join(diff_lines),
+                # 逐行剥掉行尾换行后再用 '\n' 连接。
+                #
+                # 这里两种想当然的写法都不对，原因在 unified_diff 的两种行混在一起：
+                #   * 正文行来自 `splitlines(keepends=True)`，**自带换行符**；
+                #   * `--- a/x` / `+++ b/x` / `@@ … @@` 这三行是 difflib 自己合成的，
+                #     在 `lineterm=""` 下**不带换行符**。
+                # 于是 `''.join` 会把三个头行和紧随其后的第一行正文粘成一整行
+                # （`--- a/x.lua+++ b/x.lua@@ -1,3 +1,5 @@ function …`），
+                # 而 `'\n'.join` 又给正文行多加一个空行、整份 diff 变成双倍行距。
+                'raw_diff': '\n'.join(line.rstrip('\r\n') for line in diff_lines),
                 'current_content': current_text,
                 'previous_content': previous_text
             }

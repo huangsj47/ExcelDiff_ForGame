@@ -62,6 +62,10 @@ def render_diff_payload(
         return _render_excel(diff_data, path=path, max_rows=max_rows_per_sheet)
     if kind == "code":
         return _render_code(diff_data, path=path)
+    if kind == "text":
+        return _render_text(diff_data, path=path)
+    if kind == "image":
+        return _render_image(diff_data, path=path)
     if kind == "binary":
         return _render_binary(diff_data, path=path)
     if kind == "error":
@@ -218,6 +222,56 @@ def _render_code(payload: Mapping[str, Any], *, path: str) -> str:
     if not patch.strip():
         return f"[代码] {where}：取到了记录但没有补丁内容。"
     return f"代码差异：{where}\n\n{patch}"
+
+
+def _render_text(payload: Mapping[str, Any], *, path: str) -> str:
+    """纯文本 / 代码文件的差异（`.lua`、`.py`、`.md`…）。
+
+    `DiffService._process_text_diff` 交出来的形状是
+    `{'type': 'text', 'raw_diff': …, 'hunks': …}` —— 补丁在 **`raw_diff`**，
+    而不是 `patch`（`patch` 是 git 侧 `get_commit_range_diff` 的键名）。
+
+    这里曾经根本没有 `text` 分支，于是所有纯文本文件一路落到 `return None`；
+    而按 `ContextTools` 的契约，`None` 的含义是「取不到内容」，上层就把它报成
+    「取数失败」。后果是**代码仓库的 AI 分析整个看不到 diff** —— 清单里有文件、
+    diff 却永远取不到，模型只能写「代码侧几乎无 diff 可判」。平台的 diff 其实
+    早就算好了，只是没人把它渲染出来。
+    """
+    where = path or str(payload.get("file_path") or "")
+    patch = str(payload.get("raw_diff") or "")
+    if not patch.strip():
+        # `raw_diff` 正常都在；hunks 是它的结构化等价物（@@ 头 + 逐行 raw），
+        # 作为兜底而不是主路径。
+        pieces = []
+        for hunk in payload.get("hunks") or []:
+            if not isinstance(hunk, Mapping):
+                continue
+            pieces.append(str(hunk.get("header") or ""))
+            for line in hunk.get("lines") or []:
+                if isinstance(line, Mapping) and line.get("raw") is not None:
+                    pieces.append(str(line["raw"]))
+        patch = "\n".join(pieces)
+    if not patch.strip():
+        return f"[文本] {where}：取到了记录但没有补丁内容。"
+    return f"文件差异：{where}\n\n{patch}"
+
+
+def _render_image(payload: Mapping[str, Any], *, path: str) -> str:
+    """图片差异：只说变化，**绝不把 base64 倒给模型**。
+
+    与 `_render_binary` 同一个道理 —— 写成「没有内容」会让模型当成「没改动」。
+    `current_image` / `previous_image` 里是整张图的 base64，粘进上下文能瞬间
+    吃掉整个预算，所以这里只取 `operation` / `is_same` 这类结论性字段。
+    """
+    where = path or str(payload.get("file_path") or "")
+    operation = str(payload.get("operation") or "").strip()
+    changed = payload.get("is_same") is False or operation in ("added", "modified")
+    detail = "这张图确实变了" if changed else "这张图的内容没有变化"
+    return (
+        f"[图片] {where}：{detail}（{operation or '未知操作'}）。\n"
+        "**图片的像素差异平台无法展示** —— **「无法展示」不等于「没有改动」**，"
+        "需要确认画面本身时请说明「图片内容无法核对」。"
+    )
 
 
 def _render_binary(payload: Mapping[str, Any], *, path: str) -> str:
