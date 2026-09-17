@@ -292,6 +292,60 @@ def test_a_lone_table_is_a_single_unit_until_its_product_shows_up():
     assert bundles[0].members == ("config/[30]道具表_CfgScene.xlsx",)
 
 
+def test_a_repository_wide_suffix_convention_is_not_a_module_name():
+    """**线上真实数据抓到的第一个误配。**
+
+    G119 的产物叫 `<模块名>CfgMod.lua`，`Cfg` 落在名字**中间**、后面拖着全项目共有的
+    `Mod`。按「`Cfg` + 后续字符」抓记号，这 5 个互不相干的 lua 会共用一个记号 `CfgMod`
+    被并成一组，于是提示词里多出一句「这几个文件是一次改动，必须一起看」—— 模型会照着
+    这个前提去找它们之间的关系，而那关系根本不存在。这 5 个名字来自线上真实改动文件。
+    """
+    bundles = build_bundles(
+        [
+            "code/qz_pub/cfg/BagAttrCfgMod.lua",
+            "code/qz_pub/cfg/DramaCfgMod.lua",
+            "code/qz_pub/cfg/RoleAttrCfgMod.lua",
+            "code/qz_pub/cfg/SeasonRankCfgMod.lua",
+            "code/qz_pub/core/scene/sceneTrigger/sceneInteractive/TrapConfig/TrapCfgMod.lua",
+        ]
+    )
+
+    assert len(bundles) == 5, "同名后缀被当成了同一个模块"
+    assert not any(bundle.is_multi for bundle in bundles)
+    assert describe_bundles(bundles) == [], "提示词里出现了不存在的关联"
+
+
+def test_two_tables_sharing_a_token_are_not_a_generated_pair():
+    """**线上真实数据抓到的第二个误配。**
+
+    `奖励模式_CfgRewardMode.xlsx` 与 `奖励模式表_CfgRewardMode.xlsx` 记号相同，但两侧
+    都是表、**没有生成物**。并成一组就等于在提示词里写「表与其生成物，必须一起看」——
+    一句不成立的话。两个名字来自线上真实改动文件。
+    """
+    bundles = build_bundles(
+        ["奖励模式_CfgRewardMode.xlsx", "奖励模式表_CfgRewardMode.xlsx"]
+    )
+
+    assert len(bundles) == 2
+    assert not any(bundle.is_multi for bundle in bundles)
+    lines = describe_bundles(bundles)
+    assert lines == []
+    assert not any("生成物" in line for line in lines)
+
+
+def test_a_token_right_after_a_chinese_name_still_matches():
+    """中文名后面直接跟记号（没有下划线）也要认。
+
+    判定「记号是不是从分量起点开始」**必须按 ASCII 判**，不能用正则的 `\\w`/`isalnum()`：
+    中文在它们眼里算字母数字，于是 `图标表CfgItem` 会被判成「记号前面有字母」而漏配。
+    """
+    bundles = build_bundles(["config/图标表CfgItem.xlsx", "build/CfgItem.lua"])
+
+    assert len(bundles) == 1
+    assert bundles[0].kind == KIND_GENERATED_PAIR
+    assert bundles[0].key == "CfgItem"
+
+
 def test_unit_order_follows_first_appearance_and_is_stable():
     paths = [
         "src/lua/absorber.lua",

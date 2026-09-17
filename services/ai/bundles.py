@@ -16,8 +16,30 @@
 `<前缀><名字>` 记号（默认前缀 `Cfg`，例：`CfgItem`、`CfgModuleSub`），它们就属于同一个
 变更单元。表名里的 `[30]道具表_` 前缀、目录、扩展名都不参与匹配。
 
-项目用什么前缀由项目知识包决定（G119 是 `Cfg`，产物是 `CfgXxx.lua`），默认值只是
-「配表项目的常见约定」；识别不出记号的路径各自成为一个单元 —— **不猜，也不硬凑**。
+项目用什么前缀由项目知识包决定（默认前缀只是「配表项目的常见约定」）；识别不出记号的
+路径各自成为一个单元 —— **不猜，也不硬凑**。
+
+## 两个条件，都来自线上真实数据
+
+拿 G119 线上一次周版本的**全部 767 个改动文件**跑过一遍，结果是 762 个单元里只有 2 组
+多成员，而且两组都是错的。两次误配各自暴露了一个必须补上的条件：
+
+1. **记号必须从名字分量的起点开始。** 生成物叫 `<模块名>CfgMod.lua`（`BagAttrCfgMod`、
+   `DramaCfgMod`、`RoleAttrCfgMod`、`SeasonRankCfgMod`、`TrapCfgMod`），`Cfg` 出现在
+   名字**中间**、后面拖着共有的 `Mod`。只按「`Cfg` + 后续字符」抓，这 5 个互不相干的
+   lua 会共用一个记号 `CfgMod` 被并成一组 —— 等于在提示词里断言「这 5 个文件是一次改动」。
+2. **一组里必须同时有「表」和「生成物」。** `奖励模式_CfgRewardMode.xlsx` 与
+   `奖励模式表_CfgRewardMode.xlsx` 都是表，记号相同但**没有生成物**；配对说明写的是
+   「表与其生成物，必须一起看」，把它们并起来就是把一句不存在的话写进提示词。
+
+同一份数据里，**真正该配对的那些反而配不上**。项目的知识包里写着「导表产物是
+`CfgXxx.lua`」、表名形如 `[30]道具表_CfgItem.xlsx`，规则就是照这个写的；但**这一次
+改动到的产物**都是 `code/qz_pub/cfg/<模块名>CfgMod.lua` 这一种，而它们的表（`角色属性表`、
+`背包属性表`、`剧情表` …）在名字层面与产物**没有任何共同记号**：表名是中文、没有 `Cfg`，
+产物里的模块名是英文。名字配对在这里做不到，**也不该硬做**（靠猜「RoleAttr 就是
+角色属性」配出来的对，猜错了没人会发现）。所以这个项目里 bundle 会长期是 0 组 ——
+这是**如实**的结果，不是没生效：宁可什么都不说，也不说一句「这几个文件是一件事」
+而其实不是。
 
 ## 边界
 
@@ -35,15 +57,28 @@ from typing import Iterable, Mapping, Sequence, Tuple
 
 from services.ai.scope import normalize_path
 
-# 生成物模块名的前缀。G119 的产物是 `CfgXxx.lua`，表名形如 `[30]道具表_CfgItem.xlsx`。
+# 生成物模块名的前缀。项目知识里写的产物是 `CfgXxx.lua`、表名形如 `[30]道具表_CfgItem.xlsx`，
+# 默认值就是照这个约定取的；实际改动里也会出现 `<模块名>CfgMod.lua` 这种（见模块文档）。
 DEFAULT_GENERATED_PREFIXES = ("Cfg",)
 
 # 单元类型，用于在提示词里说明「这一组为什么在一起」。
 KIND_GENERATED_PAIR = "generated_pair"
 KIND_SINGLE = "single"
 
+# 「表」那一侧的文件后缀。判定「这一组算不算一次改动」需要知道记号两侧是不是**不同
+# 性质**的产物（见 `_spans_table_and_code`），所以这里只需要分得出「表」与「非表」，
+# 不需要认全所有配表格式。
+_TABLE_SUFFIXES = (".xlsx", ".xlsm", ".xls", ".csv")
+
 # 记号后的部分至少要有这么多字符，否则 `Cfg.lua` 这种会被当成一个巨大的公共记号。
 _MIN_TOKEN_TAIL = 2
+
+# 记号必须从**名字分量的起点**开始。前缀前不能是 ASCII 字母数字：
+# `SeasonRankCfgMod` 里的 `Cfg` 前面是 `k` → 不是分量起点，不认；
+# `[30]道具表_CfgItem`（前面是 `_`）与 `图标表CfgItem`（前面是中文）→ 认。
+# 下划线与中文都算分量边界，因为这两种写法在配表项目里都是分隔符。
+# 必须按 **ASCII** 判，不能用 `\w`：中文在 `\w` 里算字母数字，上面那个中文例子会被误判。
+_NOT_AT_COMPONENT_START = re.compile(r"[A-Za-z0-9]")
 
 
 @dataclass(frozen=True)
@@ -78,14 +113,35 @@ class Bundle:
 
 
 def _token_of(path: str, prefixes: Sequence[str]) -> str:
-    """取出文件名里的「生成物模块名」记号，取不到返回空串。"""
+    """取出文件名里的「生成物模块名」记号，取不到返回空串。
+
+    前缀必须落在**名字分量的起点**上，理由见模块文档第 1 条（`<模块名>CfgMod.lua` 这种
+    命名会让中间那个 `Cfg` 变成一个全项目共有的假记号）。
+    """
     name = path.rsplit("/", 1)[-1]
     stem = name.rsplit(".", 1)[0] if "." in name else name
     for prefix in prefixes:
         for match in re.finditer(re.escape(prefix) + r"[A-Za-z0-9_]+", stem):
-            if len(match.group(0)) - len(prefix) >= _MIN_TOKEN_TAIL:
-                return match.group(0)
+            if len(match.group(0)) - len(prefix) < _MIN_TOKEN_TAIL:
+                continue
+            start = match.start()
+            if start > 0 and _NOT_AT_COMPONENT_START.match(stem[start - 1]):
+                continue
+            return match.group(0)
     return ""
+
+
+def _is_table_side(path: str) -> bool:
+    return path.lower().endswith(_TABLE_SUFFIXES)
+
+
+def _spans_table_and_code(members: Sequence[str]) -> bool:
+    """这一组的成员是不是跨越了「表」和「生成物」两侧。
+
+    全是表、或全是生成物时返回 False：那时共有的记号只是这个项目里的命名约定
+    （`<模块名>CfgMod.lua` 就是），不是「一次改动」的证据。理由见模块文档第 2 条。
+    """
+    return len({_is_table_side(path) for path in members}) > 1
 
 
 def build_bundles(
@@ -120,9 +176,16 @@ def build_bundles(
 
     bundles: list[Bundle] = []
     for token, members in tokens.items():
-        # 同一记号的多个文件就是一个单元；只有一个文件时退化成单文件单元。
-        kind = KIND_GENERATED_PAIR if len(members) > 1 else KIND_SINGLE
-        bundles.append(Bundle(key=token, kind=kind, members=tuple(members)))
+        if len(members) > 1 and _spans_table_and_code(members):
+            bundles.append(
+                Bundle(key=token, kind=KIND_GENERATED_PAIR, members=tuple(members))
+            )
+            continue
+        # 只有一个成员，或者同记号的成员**全在同一侧** → 不成一组，各自成为一个单元。
+        # 后一种情况下那个记号不是「模块名」，而是项目共有的命名约定（见模块文档），
+        # 并成一组等于在提示词里断言「这几个文件是一次改动」。
+        for path in members:
+            bundles.append(Bundle(key=path, kind=KIND_SINGLE, members=(path,)))
     for path in singles:
         bundles.append(Bundle(key=path, kind=KIND_SINGLE, members=(path,)))
 

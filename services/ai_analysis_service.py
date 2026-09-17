@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple
@@ -43,6 +44,7 @@ from services.ai.baseline import (
     classify,
     suppressed_fingerprints,
 )
+from services.ai.budget import clamp_to_model_window
 from services.ai.change_set import ChangeSet, from_commit_payload, from_weekly_payload
 from services.ai.endpoint_service import (
     FIELD_DEFAULTS,
@@ -67,6 +69,7 @@ from services.ai.engine import (
 from services.ai.engine import (
     failed as engine_failed,
 )
+from services.ai.llm_client import LLMError
 from services.ai.platform_provider import PlatformContextProvider
 from services.ai.prompt import prompt_version
 from services.ai.rules import RuleThresholds, anomaly_fingerprint, rules_version
@@ -937,6 +940,40 @@ def _load_project_skills(project_id: int):
         return None
 
 
+def _apply_model_window(
+    client: object, project_config: dict, limits: EngineLimits
+) -> Tuple[EngineLimits, str]:
+    """把字符预算压回模型的上下文窗口。返回 `(额度, 说明)`。
+
+    **窗口只能向端点问**（`/v1/models` 里有时会声明），所以这件事天然是「尽力而为」：
+    端点不支持列模型、没声明窗口、或者报了个不合理的值，都按「未知」处理 ——
+    不改任何东西，也不让分析失败。额外的保护不该成为新的失败点。
+
+    **不维护「模型名 → 窗口」对照表**：那是猜出来的数字，模型一迭代就过期，而按过期的
+    窗口压预算会静默地砍掉分析质量（用户看到的是「这次分析浅了」，看不出原因）。
+
+    只有 `budget.clamp_to_model_window` 能断定的那一档才会真的压，理由见那边的说明。
+    """
+    model = str(project_config.get("api_model") or "").strip()
+    if not model:
+        return limits, ""
+    contexts = getattr(client, "model_contexts", None)
+    if contexts is None:
+        return limits, ""
+    try:
+        window = contexts().get(model)
+    except LLMError as exc:
+        log_print(f"AI 分析：取模型上下文窗口失败（不影响本次分析）: {exc}")
+        return limits, ""
+    if not window:
+        return limits, ""
+
+    budget, note = clamp_to_model_window(limits.prompt_char_budget, int(window))
+    if not note:
+        return limits, ""
+    return replace(limits, prompt_char_budget=budget), note
+
+
 def _engine_limits(project_config: dict) -> EngineLimits:
     """项目配置 → 引擎额度。
 
@@ -944,9 +981,16 @@ def _engine_limits(project_config: dict) -> EngineLimits:
     而 `None` 会让 `range(1, None + 1)` 在半夜的自动轮询里炸掉。
     """
     defaults = EngineLimits()
+    requests = int(project_config.get("max_tool_requests") or defaults.max_tool_requests)
     return EngineLimits(
         max_rounds=int(project_config.get("max_analysis_rounds") or defaults.max_rounds),
-        max_tool_requests=int(project_config.get("max_tool_requests") or defaults.max_tool_requests),
+        max_tool_requests=requests,
+        # 条数上限**不得小于**索取次数：小于就会出现「付了 N 次索取、只带走 max_items 条」
+        # —— 取回来的上下文被 `enforce_budget` 按条数静默裁掉，白花额度（见
+        # `context_tools.DEFAULT_MAX_TOOL_REQUESTS` 的说明）。索取次数是用户可配的
+        # （取值上限 100），所以这个下限必须跟着**配置**走，只在两个默认值上成立是不够的：
+        # 用户把索取上限调到 40 的那一刻，20 条的条数上限就会开始丢他的东西。
+        max_items=max(defaults.max_items, requests),
         prompt_char_budget=int(
             project_config.get("prompt_char_budget") or defaults.prompt_char_budget
         ),
@@ -1263,13 +1307,17 @@ def _execute_analysis(
         else from_weekly_payload(payload, readable_references=readable)
     )
 
+    limits, budget_note = _apply_model_window(client, project_config, _engine_limits(project_config))
+    if budget_note:
+        log_print(f"⚠️ AI 分析：{budget_note}", "AI", force=True)
+
     outcome = run_analysis(
         client=client,
         provider=PlatformContextProvider(loaded=loaded),
         loaded=loaded,
         scope=change.scope,
         change_summary=change.summary,
-        limits=_engine_limits(project_config),
+        limits=limits,
         thresholds=RuleThresholds.from_config(project_config),
         project_knowledge=project_config.get("project_knowledge") or "",
         project_instructions=project_config.get("prompt_template") or "",

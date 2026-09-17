@@ -29,6 +29,12 @@ tests/_pytest_tmp_run/
 .mypy_cache/
 .ruff_cache/
 
+# 编码助手（Claude Code 等）落在工作目录里的会话流水，形如
+# `.appdump/sessions/<session-id>.events.ndjson`。它是**本地工具产物**，不是源码：
+# 内容包含完整的对话记录与工具输出（可能夹带线上数据、路径、被探测过的配置值），
+# 且每次会话都换一份。绝不入库。
+/.appdump/
+
 .coverage
 coverage.xml
 htmlcov/

@@ -22,6 +22,7 @@ import requests
 
 from services.ai import llm_client as llm
 from services.ai.llm_client import (
+    CONTEXT_WINDOW_KEYS,
     DEFAULT_TIMEOUT_SECONDS,
     MAX_ATTEMPTS,
     MAX_MODELS,
@@ -213,6 +214,97 @@ def test_list_models_does_not_follow_redirects(monkeypatch):
     calls = _patch(monkeypatch, lambda *_: FakeResponse(payload=_models_payload("m")))
     _client().list_models()
     assert calls[0]["allow_redirects"] is False
+
+
+# --------------------------------------------------------------------------
+# 上下文窗口
+#
+# 只有一个用途：判断项目配的字符预算会不会**明显**超出模型窗口
+# （`budget.clamp_to_model_window`）。所以这些用例守的是「宁可认不出来，也不要认错」。
+# --------------------------------------------------------------------------
+
+
+def _context_payload(*entries):
+    return {"object": "list", "data": list(entries)}
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["context_length", "context_window", "max_context_length", "max_context_tokens",
+     "max_model_len", "n_ctx"],
+)
+def test_the_declared_context_window_is_read_under_any_of_its_common_names(monkeypatch, key):
+    """各家网关的字段名不一样（vLLM 用 `max_model_len`，有的用 `context_length`）。"""
+    _patch(monkeypatch, lambda *_: FakeResponse(
+        payload=_context_payload({"id": "m", key: 131072})
+    ))
+    assert _client().model_contexts() == {"m": 131072}
+
+
+def test_a_numeric_string_window_is_accepted(monkeypatch):
+    """同一个字段有的网关给数字、有的给字符串。"""
+    _patch(monkeypatch, lambda *_: FakeResponse(
+        payload=_context_payload({"id": "m", "context_length": "65536"})
+    ))
+    assert _client().model_contexts() == {"m": 65536}
+
+
+def test_an_endpoint_that_declares_nothing_yields_nothing(monkeypatch):
+    """**这是本功能最重要的性质**：端点没声明窗口时返回空 dict，调用方据此不压缩任何
+    东西。返回一个猜出来的默认窗口会静默地砍掉分析质量。"""
+    _patch(monkeypatch, lambda *_: FakeResponse(payload=_models_payload("m")))
+    assert _client().model_contexts() == {}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None, "abc", True, False, 0, -1, 512, 10 ** 9,
+        # 最容易认错的一个：`max_tokens` 是「单次最多生成多少」，不是窗口。
+        # 它落在合理区间外时会被区间挡掉；这条用例里的值本身就在区间外。
+    ],
+)
+def test_implausible_windows_are_treated_as_undeclared(monkeypatch, value):
+    """认不出来就当没有 —— **不猜**。把 `n_ctx: 0` 或一个荒谬的值当真，预算会被压到
+    一个荒唐的大小，而用户只看到「这次分析特别浅」。"""
+    _patch(monkeypatch, lambda *_: FakeResponse(
+        payload=_context_payload({"id": "m", "context_length": value})
+    ))
+    assert _client().model_contexts() == {}
+
+
+def test_the_declared_key_priority_decides_not_the_json_order(monkeypatch):
+    """同一个模型声明了多个窗口字段时，按 `CONTEXT_WINDOW_KEYS` 的顺序取第一个认得的。
+
+    与 JSON 里的键顺序无关 —— 否则同一个端点两次请求的解析结果会跟着上游的键顺序变。
+    `context_length` 在优先级表里排在 `n_ctx` 前面，所以取前者。
+    """
+    assert CONTEXT_WINDOW_KEYS.index("context_length") < CONTEXT_WINDOW_KEYS.index("n_ctx")
+    _patch(monkeypatch, lambda *_: FakeResponse(
+        payload=_context_payload({"id": "m", "n_ctx": 8192, "context_length": 32768})
+    ))
+    assert _client().model_contexts() == {"m": 32768}
+
+
+def test_models_without_a_window_are_simply_absent(monkeypatch):
+    """一部分模型有、一部分没有时，只返回有的那些。"""
+    _patch(monkeypatch, lambda *_: FakeResponse(
+        payload=_context_payload(
+            {"id": "with", "context_length": 200000},
+            {"id": "without"},
+            {"id": "with", "context_length": 999999},
+        )
+    ))
+    contexts = _client().model_contexts()
+    assert contexts == {"with": 200000}
+    assert "without" not in contexts
+
+
+def test_model_contexts_shares_the_models_response_parsing(monkeypatch):
+    """两个接口读的是同一个 `/v1/models`，解析规则（含错误处理）不能各写一份。"""
+    _patch(monkeypatch, lambda *_: FakeResponse(payload={"data": "nope"}))
+    with pytest.raises(LLMResponseError):
+        _client().model_contexts()
 
 
 # --------------------------------------------------------------------------

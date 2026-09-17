@@ -46,6 +46,21 @@ MAX_MODELS = 500
 # 模型列表响应体大小上限：防御上游返回异常大的响应。
 MODELS_RESPONSE_MAX_BYTES = 2 * 1024 * 1024
 
+# `/v1/models` 里声明上下文窗口的常见字段名。各家写法不一样（vLLM 是 `max_model_len`，
+# 有的网关是 `context_length`，有的用 `context_window`），这里都认一遍。
+CONTEXT_WINDOW_KEYS = (
+    "context_length",
+    "context_window",
+    "max_context_length",
+    "max_context_tokens",
+    "max_model_len",
+    "n_ctx",
+)
+# 窗口的合理区间。落在外面的值一律当成「没声明」而不是当真：把 `max_tokens`（单次最多
+# 生成多少）误读成窗口、或把 `n_ctx` 报成 0，都会让预算被压到一个荒唐的值。
+_MIN_PLAUSIBLE_CONTEXT = 4_000
+_MAX_PLAUSIBLE_CONTEXT = 100_000_000
+
 # 这些 HTTP 状态码值得重试：限流与上游故障。
 RETRYABLE_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
@@ -137,6 +152,21 @@ def chat_completions_url(base_url: str) -> str:
 
 def models_url(base_url: str) -> str:
     return f"{normalize_base_url(base_url)}/models"
+
+
+def _positive_int(raw: Any) -> int | None:
+    """把可能是数字也可能是数字字符串的值读成正整数，读不出来返回 None。
+
+    字符串也认：同一个字段有的网关给 `65536`、有的给 `"65536"`。
+    `True`/`False` 与 `"abc"` 一律算「没给」—— 认不出来就当没有，**不猜**。
+    """
+    if isinstance(raw, bool) or raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 def _build_headers(api_key: str | None) -> dict[str, str]:
@@ -358,12 +388,8 @@ class LLMClient:
 
     # -- 对外 ---------------------------------------------------------------
 
-    def list_models(self) -> tuple[str, ...]:
-        """取可用模型 id 列表。
-
-        端点不支持时抛 `LLMConfigError` —— 调用方据此提示「请手动填写模型名」，
-        **不要**把它当成硬失败去阻断配置保存。
-        """
+    def _models_entries(self) -> list:
+        """请求 `/v1/models` 并返回 `data` 数组。`list_models` 与 `model_contexts` 共用。"""
         response = self._request(
             "GET", models_url(self.base_url), purpose="获取模型列表"
         )
@@ -381,20 +407,58 @@ class LLMClient:
         entries = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(entries, list):
             raise LLMResponseError("模型列表响应不是 OpenAI 形态（缺少 data 数组）")
+        return entries
 
+    @staticmethod
+    def _entry_identifier(entry: Any) -> str:
+        """一条模型记录的 id。端点的写法不止一种，这里统一取。"""
+        if isinstance(entry, dict):
+            identifier = entry.get("id") or entry.get("name")
+        else:
+            identifier = entry
+        return str(identifier or "").strip()
+
+    def list_models(self) -> tuple[str, ...]:
+        """取可用模型 id 列表。
+
+        端点不支持时抛 `LLMConfigError` —— 调用方据此提示「请手动填写模型名」，
+        **不要**把它当成硬失败去阻断配置保存。
+        """
         models: list[str] = []
-        for entry in entries:
-            if isinstance(entry, dict):
-                identifier = entry.get("id") or entry.get("name")
-            else:
-                identifier = entry
-            text = str(identifier or "").strip()
+        for entry in self._models_entries():
+            text = self._entry_identifier(entry)
             if text and text not in models:
                 models.append(text)
 
         if not models:
             raise LLMResponseError("模型列表为空")
         return tuple(sorted(models)[:MAX_MODELS])
+
+    def model_contexts(self) -> dict[str, int]:
+        """取「模型 id → 上下文窗口（token 数）」。
+
+        用途只有一个：判断项目配的字符预算会不会**明显**超出模型窗口（见
+        `budget.clamp_to_model_window`）。所以这里刻意**什么都不猜**：
+
+        * 端点没声明窗口 → 返回空 dict，调用方按「未知」处理，不压缩任何东西；
+        * 不维护「模型名 → 窗口」对照表。那是猜出来的数字，模型一迭代就过期，
+          而按过期的窗口压预算会静默地砍掉分析质量；
+        * 值落在明显不合理的范围外（< 4,000 或 > 1 亿 token）时当成没声明 ——
+          把 `max_tokens`、`n_ctx` 之类的字段误读成窗口是最容易犯的错。
+        """
+        contexts: dict[str, int] = {}
+        for entry in self._models_entries():
+            if not isinstance(entry, dict):
+                continue
+            text = self._entry_identifier(entry)
+            if not text or text in contexts:
+                continue
+            for key in CONTEXT_WINDOW_KEYS:
+                tokens = _positive_int(entry.get(key))
+                if tokens is not None and _MIN_PLAUSIBLE_CONTEXT <= tokens <= _MAX_PLAUSIBLE_CONTEXT:
+                    contexts[text] = tokens
+                    break
+        return contexts
 
     def complete(self, messages: list[dict[str, str]], *, temperature: float | None = None) -> ChatResult:
         """一次非流式补全。"""

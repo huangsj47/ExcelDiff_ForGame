@@ -320,3 +320,29 @@ def build_continuation_summary(items: Iterable[ContextItem], *, keep: int = 3) -
 def estimate_chars(messages: Iterable[dict[str, str]]) -> int:
     """粗估一组消息的字符总量，用于判断是否接近预算。"""
     return sum(len(str(message.get("content") or "")) for message in messages)
+
+
+def clamp_to_model_window(budget_chars: int, context_tokens: int) -> tuple[int, str]:
+    """预算**明显**超出模型上下文窗口时压回窗口大小；否则原样返回。
+
+    返回 `(生效预算, 说明)`；说明为空表示没有压缩。
+
+    ## 为什么只压「明显」的那一档
+
+    本模块按**字符**估算（见模块文档），而模型窗口是按 **token** 计的。中英混排下一个
+    字符大致对应 0.3~1 个 token，这个比例取决于提示词里中文占多少，**平台无从知道**。
+
+    于是只有一种情形是不需要换算比例就能断定的：预算字符数 **大于** 窗口 token 数。
+    此时就算按最乐观的 1 字 1 token 算也已经装不下，超窗是必然的，压回窗口只会砍掉
+    装不下的部分。反过来的情形（预算字符数 ≤ 窗口 token 数）是否装得下要看语言构成，
+    压它就是在没有依据的情况下砍掉分析质量，而且用户看不出发生了什么 —— 所以不压。
+
+    这也是为什么这里**没有**留「安全系数」：留系数等于假装知道那个换算比例。
+    """
+    if context_tokens <= 0 or budget_chars <= context_tokens:
+        return budget_chars, ""
+    note = (
+        f"提示词字符预算 {budget_chars:,} 字超过模型上下文窗口 {context_tokens:,} token，"
+        f"本次按 {context_tokens:,} 字执行（字与 token 最乐观按 1:1 算也已超窗）。"
+    )
+    return context_tokens, note
