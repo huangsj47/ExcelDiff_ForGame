@@ -253,10 +253,10 @@ tr.excel-row-modified-old td.excel-cell:not(.excel-added):not(.excel-removed) {
 
 /* 确保新增行和删除行的单元格背景色与行号一致 */
 .excel-diff-table .excel-row-added .excel-cell.excel-added {
-    background-color: #53d471 !important; /* 与行号一致的深绿色背景 */
+    background-color: var(--color-success-bg-soft, #e8f5e8) !important; /* 与行号一致的深绿色背景 */
     border-color: #28a745 !important;
-    font-weight: bold !important;
-    color: #000 !important; /* 黑色文字确保可读性 */
+    font-weight: normal !important;
+    color: #155724 !important; /* 黑色文字确保可读性 */
 }
 
 /* 修改行中旧值单元格的样式 - 浅红色背景，使用最高优先级选择器 */
@@ -284,25 +284,25 @@ tr.excel-row-modified-old td.excel-cell:not(.excel-added):not(.excel-removed) {
 }
 
 .excel-diff-table .excel-row-removed .excel-cell.excel-removed {
-    background-color: #f76571 !important; /* 使用与行号一致的深红色背景 */
+    background-color: var(--color-danger-bg-soft, #ffebee) !important; /* 与「修改行」的旧值行同一浅红 */
     border-color: #f5c6cb !important;
-    font-weight: bold !important;
-    color: #000 !important; /* 使用黑色文字 */
+    font-weight: normal !important;
+    color: #721c24 !important; /* 浅底上用深色文字，与修改行一致 */
 }
 
 /* 确保新增行和删除行的样式具有最高优先级 */
 .excel-diff-table tr.excel-row-added td.excel-cell.excel-added {
-    background-color: #53d471 !important; /* 与行号一致的深绿色背景 */
+    background-color: var(--color-success-bg-soft, #e8f5e8) !important; /* 与行号一致的深绿色背景 */
     border-color: #28a745 !important;
-    color: #000 !important; /* 黑色文字确保可读性 */
-    font-weight: bold !important;
+    color: #155724 !important; /* 黑色文字确保可读性 */
+    font-weight: normal !important;
 }
 
 .excel-diff-table tr.excel-row-removed td.excel-cell.excel-removed {
-    background-color: #f76571 !important; /* 使用与行号一致的深红色背景 */
+    background-color: var(--color-danger-bg-soft, #ffebee) !important; /* 与「修改行」的旧值行同一浅红 */
     border-color: #f5c6cb !important;
-    color: #000 !important; /* 使用黑色文字 */
-    font-weight: bold !important;
+    color: #721c24 !important; /* 浅底上用深色文字，与修改行一致 */
+    font-weight: normal !important;
 }
 
 /* 确保有变更的单元格容器样式正确 - 使用与单文件diff一致的样式 */

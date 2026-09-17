@@ -269,22 +269,22 @@
 }
 
 .excel-row-added .excel-cell {
-    background-color: #d4edda !important;
+    background-color: var(--color-success-bg-soft, #e8f5e8) !important;
     border-color: #c3e6cb;
     font-weight: bold;
 }
 
 .excel-row-added .excel-row-number {
-    background-color: #53d471 !important;
+    background-color: var(--color-rownum-added-bg, #d8f0da) !important; /* 行号格比行底色深一档 */
     font-weight: bold;
 }
 
-/* 新增行单元格 - 背景色与行号一致，使用深绿色 */
+/* 新增行单元格 - 浅绿底（与修改行新值行同色），文字用深绿 */
 .excel-diff-table .excel-row-added .excel-cell {
-    background-color: #53d471 !important; /* 使用与行号一致的深绿色背景 */
+    background-color: var(--color-success-bg-soft, #e8f5e8) !important; /* 与「修改行」的新值行同一浅绿 */
     border-color: #28a745 !important;
-    font-weight: bold !important;
-    color: #000 !important; /* 使用黑色文字确保可读性 */
+    font-weight: normal !important;
+    color: #155724 !important; /* 浅底上用深色文字，与修改行一致 */
 }
 
 /* 删除行样式 - 红色 - 修复合并diff页面显示问题 */
@@ -293,24 +293,24 @@
 }
 
 .excel-removed {
-    background-color: #f8d7da !important;
+    background-color: var(--color-danger-bg-soft, #ffebee) !important;
 }
 
-/* 删除行单元格 - 使用更高优先级确保红色背景生效 */
+/* 删除行单元格 - 浅红底（与修改行旧值行同色），文字用深红 */
 .excel-diff-table .excel-row-removed .excel-cell {
-    background-color: #f76571 !important; /* 使用与行号一致的深红色背景 */
+    background-color: var(--color-danger-bg-soft, #ffebee) !important; /* 与「修改行」的旧值行同一浅红 */
     border-color: #f5c6cb !important;
-    font-weight: bold !important;
-    color: #000 !important; /* 使用黑色文字 */
+    font-weight: normal !important;
+    color: #721c24 !important; /* 浅底上用深色文字，与修改行一致 */
 }
 
-/* 删除行行号 - 使用更高优先级确保红色背景生效 */
+/* 删除行行号 - 使用更高优先级确保红色背景生效
+   （底色与行底色同一套浅红、行号格深一档；文字用深红 #721c24，
+   在 #ffe0e4 上对比度 9.3:1。历史上这里是深红底 + 白字，与「底色太深」一起改掉。） */
 .excel-diff-table .excel-row-number.excel-removed {
-    /* 底色保持红色语义，文字改用白色：#721c24 on #f76571 只有 3.70:1，
-       白字是 5.62:1。删除行本身另有背景色 + 行号样式双重提示，不靠颜色单独承载信息。 */
-    background-color: #c62828 !important;
+    background-color: var(--color-rownum-removed-bg, #ffe0e4) !important;
     border-color: #f5c6cb !important;
-    color: #ffffff !important;
+    color: #721c24 !important;
     font-weight: bold !important;
 }
 

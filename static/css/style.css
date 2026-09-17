@@ -40,6 +40,12 @@
     --color-success-text: #157347;
     --color-success-bg: #dafbe1;
     --color-success-bg-soft: #e8f5e8;
+    /* 新增/删除行的底色：与「修改行」的旧值/新值行**完全同一套浅色**，
+       不再是深绿/深红实底（线上反馈「新增删除的底色太深」）。
+       行号列各深一档，保持「行号格是这行的色标」的层次。 */
+    --color-danger-bg-soft: #ffebee;
+    --color-rownum-added-bg: #d8f0da;
+    --color-rownum-removed-bg: #ffe0e4;
 
     /* 警告：#856404 在 #ffffff=5.49 / #f8f9fa=5.21 / #fff3cd=4.96 / #ffecb5=4.69 */
     --color-warning: #ffc107;

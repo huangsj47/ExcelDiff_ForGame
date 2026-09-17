@@ -1034,23 +1034,11 @@ window.showWeeklyExcelSheet = function(contentContainer, sheetName, sheetData) {
         tableHtml += '</tr></thead>';
     }
 
-    // 添加表体
+    // 添加表体：按「删除行数据 / 新增行数据 / 变更行数据」分段（段内按 Excel 行号升序）
     tableHtml += '<tbody>';
 
     if (sheetData.rows && sheetData.rows.length > 0) {
-        sheetData.rows.forEach((row, rowIndex) => {
-            const rowStatus = row.status || 'unchanged';
-
-            if (rowStatus === 'added') {
-                tableHtml += createAddedRow(row, sheetData.headers);
-            } else if (rowStatus === 'removed') {
-                tableHtml += createRemovedRow(row, sheetData.headers);
-            } else if (rowStatus === 'modified') {
-                tableHtml += createModifiedRow(row, sheetData.headers);
-            } else {
-                tableHtml += createUnchangedRow(row, sheetData.headers);
-            }
-        });
+        tableHtml += changedRowsGroupedHtml(sheetData.rows, sheetData.headers);
     }
 
     tableHtml += '</tbody></table></div>';
@@ -1063,6 +1051,84 @@ window.showWeeklyExcelSheet = function(contentContainer, sheetName, sheetData) {
 
 
 };
+
+// 变更行的分组顺序与标题（与提交页 diff 完全同一形态，两处改要一起改）。
+//
+// 整行删除、整行新增各自成段，逐格修改排最后；段内按 Excel 行号升序；每段前插一条
+// 横跨「行号 + 全部列」的标题行。只改渲染顺序与分段标题，不动载荷。
+var DIFF_ROW_GROUPS = [
+    {status: 'removed', label: '删除行数据'},
+    {status: 'added', label: '新增行数据'},
+    {status: 'modified', label: '变更行数据'}
+];
+
+function groupChangedRows(rows) {
+    var list = rows || [];
+    var groups = [];
+    var grouped = {};
+
+    for (var i = 0; i < DIFF_ROW_GROUPS.length; i++) {
+        var spec = DIFF_ROW_GROUPS[i];
+        var members = [];
+        for (var j = 0; j < list.length; j++) {
+            if ((list[j].status || '') === spec.status) {
+                members.push(list[j]);
+            }
+        }
+        grouped[spec.status] = true;
+        if (!members.length) {
+            continue;
+        }
+        members.sort(function (a, b) {
+            return (a.row_number || 0) - (b.row_number || 0);
+        });
+        groups.push({label: spec.label, rows: members});
+    }
+
+    var rest = [];
+    for (var k = 0; k < list.length; k++) {
+        if (!grouped[list[k].status || '']) {
+            rest.push(list[k]);
+        }
+    }
+    if (rest.length) {
+        groups.push({label: null, rows: rest});
+    }
+    return groups;
+}
+
+function groupHeaderRowHtml(label, columnCount) {
+    return '<tr class="excel-row-group-header">' +
+           '<td class="excel-group-header" colspan="' + (columnCount + 1) + '">' +
+           escapeHtml(label) + '：</td></tr>';
+}
+
+function changedRowHtml(row, headers) {
+    if (row.status === 'added') {
+        return createAddedRow(row, headers);
+    }
+    if (row.status === 'removed') {
+        return createRemovedRow(row, headers);
+    }
+    if (row.status === 'modified') {
+        return createModifiedRow(row, headers);
+    }
+    return createUnchangedRow(row, headers);
+}
+
+function changedRowsGroupedHtml(rows, headers) {
+    var groups = groupChangedRows(rows);
+    var html = '';
+    for (var i = 0; i < groups.length; i++) {
+        if (groups[i].label) {
+            html += groupHeaderRowHtml(groups[i].label, headers.length);
+        }
+        for (var j = 0; j < groups[i].rows.length; j++) {
+            html += changedRowHtml(groups[i].rows[j], headers);
+        }
+    }
+    return html;
+}
 
 // 获取修改的列
 function getModifiedColumns(sheetData) {

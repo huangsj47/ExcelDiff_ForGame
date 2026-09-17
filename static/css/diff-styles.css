@@ -308,33 +308,33 @@
 }
 
 .excel-row-added {
-    background: #d4edda;
+    background: var(--color-success-bg-soft, #e8f5e8);
 }
 
 .excel-row-added .excel-row-header {
-    background: #c3e6cb;
+    background: var(--color-rownum-added-bg, #d8f0da);
 }
 
 .excel-cell.excel-added {
-    background: #53d471 !important; /* 使用与行号一致的深绿色背景 */
+    background: var(--color-success-bg-soft, #e8f5e8) !important; /* 与「修改行」的新值行同一浅绿 */
     border-left: 2px solid #28a745;
-    color: #000 !important; /* 使用黑色文字确保可读性 */
-    font-weight: bold !important;
+    color: #155724 !important; /* 浅底上用深色文字，与修改行一致 */
+    font-weight: normal !important;
 }
 
 .excel-row-removed {
-    background: #f8d7da;
+    background: var(--color-danger-bg-soft, #ffebee);
 }
 
 .excel-row-removed .excel-row-header {
-    background: #f5c6cb;
+    background: var(--color-rownum-removed-bg, #ffe0e4);
 }
 
 .excel-cell.excel-removed {
-    background: #f76571 !important; /* 使用与行号一致的深红色背景 */
+    background: var(--color-danger-bg-soft, #ffebee) !important; /* 与「修改行」的旧值行同一浅红 */
     border-left: 2px solid var(--color-danger, #dc3545);
-    color: #000 !important; /* 使用黑色文字 */
-    font-weight: bold !important;
+    color: #721c24 !important; /* 浅底上用深色文字，与修改行一致 */
+    font-weight: normal !important;
 }
 
 .excel-row-modified-old {
@@ -761,4 +761,17 @@
         max-height: none;
         overflow: visible;
     }
+}
+
+/* 变更行分组标题行：删除行数据 / 新增行数据 / 变更行数据。
+   表体按这三段分段（段内按 Excel 行号升序），标题行横跨「行号 + 全部列」。
+   背景沿用浅灰蓝，与行级增删的红/绿底色区分开，不参与「颜色即状态」的表达。 */
+.excel-diff-table tr.excel-row-group-header > td.excel-group-header {
+    background-color: #eef2f7 !important;
+    color: #334155 !important;
+    font-weight: 600 !important;
+    text-align: left !important;
+    padding: 6px 10px !important;
+    border-top: 1px solid #d7dee8 !important;
+    border-bottom: 1px solid #d7dee8 !important;
 }
