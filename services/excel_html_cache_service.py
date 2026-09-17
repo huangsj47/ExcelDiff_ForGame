@@ -2,19 +2,19 @@
 Excel HTML缓存服务
 提供Excel差异结果的HTML缓存功能，包括HTML内容和CSS样式
 """
-import os
-import json
-import time
 import hashlib
+import json
 import threading
 import traceback
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, Tuple
-from flask import render_template
-from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import func
-from services.model_loader import get_runtime_models
+from html import escape
+from typing import Any, Dict, Optional, Tuple
 
+from flask import render_template
+from sqlalchemy import func
+
+from services.model_loader import get_runtime_models
+from utils.diff_data_utils import format_cell_value
 
 # 与 services/excel_diff_cache_service.py 的 TRUNCATED_NOTICE 保持一致：
 # 那边负责「把截断结果单独标记出来」，这边负责「把它显示出来」。
@@ -165,8 +165,9 @@ class ExcelHtmlCacheService:
             ExcelHtmlCache, flask_app = self._get_model("ExcelHtmlCache", "app")
             
             with flask_app.app_context():
-                cache_key = self.generate_cache_key(repository_id, commit_id, file_path)
-
+                # 这里按 (repository_id, commit_id, file_path, diff_version) 查，
+                # 不用 generate_cache_key()：那个 key 在**写入**侧才用得上，
+                # 早先这里算过一遍但从没被读过（死赋值）。
                 cache_record = ExcelHtmlCache.query.filter_by(
                     repository_id=repository_id,
                     commit_id=commit_id,
@@ -354,12 +355,23 @@ class ExcelHtmlCacheService:
             return self._generate_simple_excel_html(diff_data)
     
     def _generate_simple_excel_html(self, diff_data: Dict[str, Any]) -> str:
-        """生成简单的Excel差异HTML结构"""
+        """生成简单的Excel差异HTML结构。
+
+        这是 `render_template('diff_partials/excel_diff.html')` 抛异常时的**兜底**路径。
+        它拼的是 HTML 字符串，所以两件事必须和模板一致：
+
+        * **转义**：表名、列名、单元格值全部来自被审核的 Excel，是不可信内容。
+          原实现直接 `f'<td>{value}</td>'` —— 单元格里写 `<img src=x onerror=…>`
+          就会被 innerHTML 当标签执行；写 `<b>` 则表头/正文直接错位。
+        * **展示口径**：单元格走 `format_cell_value`（与主路径同一个函数），
+          否则同一个单元格在正常渲染与兜底渲染下显示不同 —— 兜底路径本来就是
+          「主路径坏了」的时候才走，再显示成另一个样子会让审核者更难判断。
+        """
         html_parts = ['<div class="excel-diff-container">']
-        
-        file_path = diff_data.get('file_path', '')
-        html_parts.append(f'<div class="file-header"><h3>Excel文件差异: {file_path}</h3></div>')
-        
+
+        file_path = format_cell_value(diff_data.get('file_path', ''))
+        html_parts.append(f'<div class="file-header"><h3>Excel文件差异: {escape(file_path)}</h3></div>')
+
         summary = diff_data.get('summary', {})
         if summary:
             html_parts.append('<div class="diff-summary">')
@@ -367,45 +379,47 @@ class ExcelHtmlCacheService:
             html_parts.append(f'<span class="removed">删除: {summary.get("removed", 0)}</span>')
             html_parts.append(f'<span class="modified">修改: {summary.get("modified", 0)}</span>')
             html_parts.append('</div>')
-        
+
         sheets = diff_data.get('sheets', {})
         for sheet_name, sheet_data in sheets.items():
-            html_parts.append(f'<div class="sheet-container" data-sheet="{sheet_name}">')
-            html_parts.append(f'<h4 class="sheet-title">工作表: {sheet_name}</h4>')
-            
+            safe_sheet = escape(format_cell_value(sheet_name))
+            html_parts.append(f'<div class="sheet-container" data-sheet="{safe_sheet}">')
+            html_parts.append(f'<h4 class="sheet-title">工作表: {safe_sheet}</h4>')
+
             if 'rows' in sheet_data and sheet_data['rows']:
                 html_parts.append('<div class="table-container">')
                 html_parts.append('<table class="excel-diff-table">')
-                
+
                 headers = sheet_data.get('headers', [])
                 if headers:
                     html_parts.append('<thead><tr>')
                     html_parts.append('<th>行号</th><th>状态</th>')
                     for header in headers:
-                        html_parts.append(f'<th>{header}</th>')
+                        html_parts.append(f'<th>{escape(format_cell_value(header))}</th>')
                     html_parts.append('</tr></thead>')
-                
+
                 html_parts.append('<tbody>')
                 for row in sheet_data['rows']:
                     status = row.get('status', 'unchanged')
                     row_number = row.get('row_number', '')
                     data = row.get('data', {})
-                    
-                    html_parts.append(f'<tr class="row-{status}">')
-                    html_parts.append(f'<td>{row_number}</td>')
-                    html_parts.append(f'<td class="status-{status}">{status}</td>')
-                    
+
+                    html_parts.append(f'<tr class="row-{escape(str(status))}">')
+                    html_parts.append(f'<td>{escape(format_cell_value(row_number))}</td>')
+                    html_parts.append(
+                        f'<td class="status-{escape(str(status))}">{escape(str(status))}</td>')
+
                     for header in headers:
-                        value = data.get(header, '')
-                        html_parts.append(f'<td>{value}</td>')
-                    
+                        value = format_cell_value(data.get(header, ''))
+                        html_parts.append(f'<td>{escape(value)}</td>')
+
                     html_parts.append('</tr>')
-                
+
                 html_parts.append('</tbody></table>')
                 html_parts.append('</div>')
-            
+
             html_parts.append('</div>')
-        
+
         html_parts.append('</div>')
         return ''.join(html_parts)
     

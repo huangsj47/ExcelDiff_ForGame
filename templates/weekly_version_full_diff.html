@@ -3,9 +3,9 @@
 {% block title %}{{ file_path }} - 周版本完整diff{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=1.2">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-diff-new.css') }}?v=1.1">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-scroll-fix.css') }}?v=1.4">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.2">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-diff-new.css') }}?v=2.1">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-scroll-fix.css') }}?v=2.2">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.1">
 {% endblock %}
 
@@ -574,22 +574,8 @@ window.initWeeklyExcelDiff = function(diffData) {
     }
 
     // 生成工作表标签 - 使用与合并diff相同的函数
+    // （正文也由它按同一口径渲染：URL 指定的表 > 第一张有变更的表 > 第一张表）
     window.generateWeeklyExcelTabs(tabsContainer, diffData.sheets);
-
-    // 显示第一个有变更的工作表
-    const sheetNames = Object.keys(diffData.sheets);
-
-    const firstChangedSheet = sheetNames.find(sheetName => {
-        const sheet = diffData.sheets[sheetName];
-        const hasChanges = sheet.rows && sheet.rows.some(row => {
-            return row.status === 'added' || row.status === 'removed' || row.status === 'modified';
-        });
-        return hasChanges;
-    });
-
-    if (firstChangedSheet) {
-        window.showWeeklyExcelSheet(contentContainer, firstChangedSheet, diffData.sheets[firstChangedSheet]);
-    }
 };
 
 function loadDiffContent() {
@@ -914,6 +900,41 @@ function updateUrlSheet(sheetName) {
     window.history.replaceState({}, '', url);
 }
 
+// 一张工作表算不算「有变更」。
+//
+// 行级变更（整行增删改）、列级变更（改列名/加列/删列）之外，**工作表级**
+// 变更也算：整张表被新增或被删除。这一点不能漏 —— 它决定标签是否可点、
+// 以及默认展示哪张表；漏了就会把「整张表被删掉、且删掉的是一张空表」
+// 这种载荷当成「没有任何变更」，正文区一片空白。
+// 与提交页同名函数逐字节一致（见 tests/test_sheet_level_operation_is_visible.py）。
+function sheetHasChanges(sheet) {
+    if (!sheet) return false;
+    if ((sheet.rows || []).some(row =>
+        row.status === 'added' || row.status === 'removed' || row.status === 'modified')) {
+        return true;
+    }
+    if (sheet.header_changes && sheet.header_changes.length) {
+        return true;
+    }
+    const operation = String(sheet.operation || '').toLowerCase();
+    return operation === 'added' || operation === 'deleted';
+}
+
+// 选中哪张工作表：URL 指定的（且确实有变更）> 第一张有变更的 > 第一张表。
+// 最后这一档不能省：整份载荷只有工作表级增删、没有内容行变更时
+// （线上 90_新手关卡流程.xlsx / 91_专项教学关.xlsx 就是），一个「有变更」
+// 的都没有 —— 之前这里保持 null，正文区于是一片空白，评审者什么都看不到。
+function pickActiveSheet(sortedSheets, urlSheet) {
+    const list = sortedSheets || [];
+    if (urlSheet) {
+        const matched = list.find(s => s.name === urlSheet && s.hasChanges);
+        if (matched) return matched.name;
+    }
+    const firstChangedSheet = list.find(s => s.hasChanges);
+    if (firstChangedSheet) return firstChangedSheet.name;
+    return list.length ? list[0].name : null;
+}
+
 // 生成周版本Excel工作表标签 - 复制合并diff的逻辑
 window.generateWeeklyExcelTabs = function(tabsContainer, sheets) {
     const sheetNames = Object.keys(sheets);
@@ -922,9 +943,7 @@ window.generateWeeklyExcelTabs = function(tabsContainer, sheets) {
     // 分析工作表变更状态
     const sheetAnalysis = sheetNames.map(name => {
         const sheet = sheets[name];
-        const hasChanges = sheet.rows && sheet.rows.some(row =>
-            row.status === 'added' || row.status === 'removed' || row.status === 'modified'
-        );
+        const hasChanges = sheetHasChanges(sheet);
         return { name, hasChanges };
     });
 
@@ -935,19 +954,9 @@ window.generateWeeklyExcelTabs = function(tabsContainer, sheets) {
         return a.name.localeCompare(b.name);
     });
 
-    // 获取URL参数中的sheet名称，如果存在且有变更则使用，否则使用第一个有变更的sheet
+    // 选中要展示的工作表（口径见 pickActiveSheet）
     const urlSheet = getSheetFromUrl();
-    let activeSheetName = null;
-
-    if (urlSheet && sortedSheets.find(s => s.name === urlSheet && s.hasChanges)) {
-        activeSheetName = urlSheet;
-    } else {
-        // 找到第一个有变更的sheet
-        const firstChangedSheet = sortedSheets.find(s => s.hasChanges);
-        if (firstChangedSheet) {
-            activeSheetName = firstChangedSheet.name;
-        }
-    }
+    const activeSheetName = pickActiveSheet(sortedSheets, urlSheet);
 
     sortedSheets.forEach((sheet, index) => {
         const isActive = sheet.name === activeSheetName ? 'active' : '';
@@ -1013,7 +1022,21 @@ window.switchWeeklyExcelSheet = function(sheetName) {
 window.showWeeklyExcelSheet = function(contentContainer, sheetName, sheetData) {
 
     if (!sheetData || !sheetData.rows) {
-        contentContainer.innerHTML = '<div class="alert alert-info">该工作表无数据</div>';
+        contentContainer.innerHTML = sheetNoticesHtml(sheetData) +
+                                     '<div class="alert alert-info">该工作表无数据</div>';
+        return;
+    }
+
+    var noticesHtml = sheetNoticesHtml(sheetData);
+
+    // 既没有表头也没有数据行：工作表级新增/删除一张空表就是这种形态
+    // （线上 5974/5975）。渲染一张没有列的空表格没有意义，把事实说出来。
+    if (!(sheetData.headers || []).length && !(sheetData.rows || []).length) {
+        contentContainer.innerHTML = noticesHtml +
+            '<div class="p-4 text-center text-muted">' +
+            '<i class="bi bi-table fs-1 mb-3 d-block"></i>' +
+            '<p class="mb-0">该工作表没有数据行</p>' +
+            '</div>';
         return;
     }
 
@@ -1043,14 +1066,57 @@ window.showWeeklyExcelSheet = function(contentContainer, sheetName, sheetData) {
 
     tableHtml += '</tbody></table></div>';
 
-    contentContainer.innerHTML = tableHtml;
-
-
-
-
-
-
+    contentContainer.innerHTML = noticesHtml + tableHtml;
 };
+
+// 工作表级变更：整张表被新增 / 被删除。
+//
+// 载荷在表上带 operation（added / deleted）与 message（后端生成，例如
+// 「工作表 "Sheet1" 已被删除」）。这张表可能一行内容都没有 —— 删掉的是一张
+// 空表时 rows 是空的。不渲染这条，评审者只会看到一片空白，而载荷明明说了
+// 「工作表已被删除」（线上 5974/5975）。与提交页的同名实现保持一致，
+// 两处改要一起改（见 tests/test_sheet_level_operation_is_visible.py）。
+function sheetOperationHtml(sheetData) {
+    var operation = String((sheetData && sheetData.operation) || '').toLowerCase();
+    if (operation !== 'added' && operation !== 'deleted') {
+        return '';
+    }
+    var fallback = operation === 'added' ? '新增工作表' : '工作表已被删除';
+    var message = (sheetData && sheetData.message) || fallback;
+    var isAdded = operation === 'added';
+    return '<div class="alert ' + (isAdded ? 'alert-success' : 'alert-warning') +
+           ' py-2 px-3 mb-2 excel-sheet-operation">' +
+           '<i class="bi ' + (isAdded ? 'bi-plus-circle' : 'bi-trash') + ' me-2"></i>' +
+           escapeHtml(message) + '</div>';
+}
+
+// 列级变更提示（改列名/加列/删列）—— 与提交页同一形态，两处改要一起改。
+function headerChangesHtml(sheetData) {
+    var changes = sheetData && sheetData.header_changes;
+    if (!changes || !changes.length) {
+        return '';
+    }
+    var items = [];
+    for (var i = 0; i < changes.length; i++) {
+        var change = changes[i];
+        if (change.change === 'added') {
+            items.push('新增列 ' + change.column);
+        } else if (change.change === 'removed') {
+            items.push('删除列 ' + change.old_name);
+        } else {
+            items.push('列名 ' + change.old_name + ' → ' + change.new_name);
+        }
+    }
+    return '<div class="alert alert-info py-2 px-3 mb-2 excel-header-changes">' +
+           '<i class="bi bi-type me-2"></i><strong>列变更（' + changes.length + '）：</strong>' +
+           escapeHtml(items.join('；')) +
+           '</div>';
+}
+
+// 表级提示合在一处：工作表级新增/删除 + 列级变更。
+function sheetNoticesHtml(sheetData) {
+    return sheetOperationHtml(sheetData) + headerChangesHtml(sheetData);
+}
 
 // 变更行的分组顺序与标题（与提交页 diff 完全同一形态，两处改要一起改）。
 //
@@ -1210,15 +1276,15 @@ function createModifiedRow(row, headers) {
         if (cellChange) {
             var oldValue = window.formatCellValue(cellChange.old_value);
             if (oldValue === '') {
-                html += '<td class="excel-cell excel-modified-old modified-column">' + escapeHtml(oldValue) + '</td>';
+                html += '<td class="excel-cell excel-modified-old modified-column"><span class="excel-cell-inner">' + escapeHtml(oldValue) + '</span></td>';
             } else {
                 // 使用精确高亮函数处理参数级别的差异
                 var highlightedOldValue = highlightDifferences(oldValue, window.formatCellValue(cellChange.new_value), 'old');
-                html += '<td class="excel-cell excel-modified-old modified-column">' + highlightedOldValue + '</td>';
+                html += '<td class="excel-cell excel-modified-old modified-column"><span class="excel-cell-inner">' + highlightedOldValue + '</span></td>';
             }
         } else {
             var cellValue = window.formatCellValue(row.data && row.data[header]);
-            html += '<td class="excel-cell excel-unchanged" rowspan="2">' + escapeHtml(cellValue) + '</td>';
+            html += '<td class="excel-cell excel-unchanged" rowspan="2"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
         }
     }
 
@@ -1234,11 +1300,11 @@ function createModifiedRow(row, headers) {
         if (cellChange) {
             var newValue = window.formatCellValue(cellChange.new_value);
             if (newValue === '') {
-                html += '<td class="excel-cell excel-modified-new modified-column">' + escapeHtml(newValue) + '</td>';
+                html += '<td class="excel-cell excel-modified-new modified-column"><span class="excel-cell-inner">' + escapeHtml(newValue) + '</span></td>';
             } else {
                 // 使用精确高亮函数处理参数级别的差异
                 var highlightedNewValue = highlightDifferences(window.formatCellValue(cellChange.old_value), newValue, 'new');
-                html += '<td class="excel-cell excel-modified-new modified-column">' + highlightedNewValue + '</td>';
+                html += '<td class="excel-cell excel-modified-new modified-column"><span class="excel-cell-inner">' + highlightedNewValue + '</span></td>';
             }
         }
         // 未修改的单元格已经在上一行用rowspan=2处理了
@@ -1257,7 +1323,7 @@ function createAddedRow(row, headers) {
     for (var i = 0; i < headers.length; i++) {
         var header = headers[i];
         var cellValue = window.formatCellValue(row.data && row.data[header]);
-        html += '<td class="excel-cell excel-added">' + cellValue + '</td>';
+        html += '<td class="excel-cell excel-added"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
     }
 
     html += '</tr>';
@@ -1272,7 +1338,7 @@ function createRemovedRow(row, headers) {
     for (var i = 0; i < headers.length; i++) {
         var header = headers[i];
         var cellValue = window.formatCellValue(row.data && row.data[header]);
-        html += '<td class="excel-cell excel-removed">' + cellValue + '</td>';
+        html += '<td class="excel-cell excel-removed"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
     }
 
     html += '</tr>';
@@ -1287,20 +1353,30 @@ function createUnchangedRow(row, headers) {
     for (var i = 0; i < headers.length; i++) {
         var header = headers[i];
         var cellValue = window.formatCellValue(row.data && row.data[header]);
-        html += '<td class="excel-cell">' + cellValue + '</td>';
+        html += '<td class="excel-cell"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
     }
 
     html += '</tr>';
     return html;
 }
 
-// 格式化单元格值
-window.formatCellValue = function(value) {
-    if (value === null || value === undefined || value === '') {
-        return ''; // 空单元格显示为空，不显示"-"
+// 单元格值 → 展示文本：与提交页/服务端同一契约 —— **表里怎么写就怎么显示**。
+// 只把真正的空值显示为空；不 trim、不把文本 'null'/'nan' 折叠成空串。
+//
+// 这里**不做 HTML 转义**：转义由调用方在使用返回值拼 HTML 时用 escapeHtml 做**一次**。
+// 早先这里内联转义 < >，于是调用方有的再用 escapeHtml 转一遍（`&lt;` → `&amp;lt;`，
+// 页面上显示字面 `&lt;`），有的地方直接裸插（连 `&` 都没转义，文件里写的 `&lt;`
+// 被浏览器解码成 `<`）—— 同一个字面量在不同行状态显示不同，且总有一边是错的。
+function formatCellValue(value) {
+    if (value === null || value === undefined) {
+        return '';
     }
-    return String(value).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-};
+    if (typeof value === 'number' && isNaN(value)) {
+        return '';
+    }
+    return String(value);
+}
+window.formatCellValue = formatCellValue;
 
 </script>
 {% endblock %}

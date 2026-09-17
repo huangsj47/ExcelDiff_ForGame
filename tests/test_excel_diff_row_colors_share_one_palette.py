@@ -38,6 +38,9 @@ _REMOVED = re.compile(r'excel-row-removed|excel-cell\.excel-removed|\.excel-remo
 _NOT_CLAUSE = re.compile(r':not\([^)]*\)')
 _RULE = re.compile(r'([^{}]+)\{([^{}]*)\}', re.S)
 _DECL = re.compile(r'(background(?:-color)?)\s*:\s*([^;]+)', re.I)
+_BORDER_DECL = re.compile(r'border(?:-(?:top|right|bottom|left))?(?:-(?:color|width|style))?\s*:\s*([^;]+)', re.I)
+# 行号格左侧那道状态色条是有意的行标记（不是单元格线框），单独放行
+_ROW_NUMBER_ACCENT = re.compile(r'excel-row-number\.excel-(added|removed)')
 
 # 允许的底色：同一套浅色 token，加两个「非状态色」（透明 / 白）
 ALLOWED = (
@@ -47,6 +50,9 @@ ALLOWED = (
 )
 # 历史深色实底：出现即说明又有人把某一处改回深色
 FORBIDDEN = ('#53d471', '#f76571', '#c62828', '#2e7d32', '#4caf50', '#ef5350', '#d32f2f', '#388e3c')
+# 线框不许用的状态色（底色已经是浅色，线框再上状态色就是把每个格子框一圈）
+FORBIDDEN_BORDER = ('#28a745', '#dc3545', '#f5c6cb', '#c3e6cb', '#53d471', '#f76571', '#c62828', '#2e7d32',
+                    'var(--color-success', 'var(--color-danger')
 
 
 def _sources():
@@ -55,7 +61,8 @@ def _sources():
     return paths
 
 
-def _row_rules():
+def _added_removed_rules():
+    """产出 (相对路径, 行号, 选择器, 规则体) —— 所有命中新增/删除行的规则。"""
     for path in _sources():
         with open(path, encoding='utf-8') as handle:
             text = handle.read()
@@ -63,12 +70,17 @@ def _row_rules():
             selector = _NOT_CLAUSE.sub('', match.group(1))
             if not (_ADDED.search(selector) or _REMOVED.search(selector)):
                 continue
-            backgrounds = [value.strip() for _prop, value in _DECL.findall(match.group(2))]
-            if not backgrounds:
-                continue
             line_no = text.count('\n', 0, match.start()) + 1
             yield (os.path.relpath(path, PROJECT_ROOT), line_no,
-                   ' '.join(selector.split()), backgrounds)
+                   ' '.join(selector.split()), match.group(2))
+
+
+def _row_rules():
+    for path, line_no, selector, body in _added_removed_rules():
+        backgrounds = [value.strip() for _prop, value in _DECL.findall(body)]
+        if not backgrounds:
+            continue
+        yield path, line_no, selector, backgrounds
 
 
 def test_added_and_removed_rows_use_the_shared_light_palette():
@@ -103,6 +115,27 @@ def test_added_and_removed_text_is_not_compensating_for_a_dark_fill():
                 problems.append(f'{path}:{line_no} {" ".join(selector.split())}：'
                                 f'浅底上不该再用黑/白字补偿（用 #155724 / #721c24，与修改行一致）')
     assert not problems, '浅色底配上深底时代的文字补偿写法：\n  ' + '\n  '.join(problems)
+
+
+def test_added_and_removed_cell_borders_are_the_table_default():
+    """新增/删除行的**线框**必须是表格默认色，不能跟着状态变色。
+
+    线上 5969：新增行每个格子的格线都是深绿 #28a745，而表里其余部分是灰线框 ——
+    底色已经表达了状态，线框再上色就是把整行框起来，评审者的视线被框到格线上。
+
+    行号格左侧那道 4px 状态色条（`excel-row-number.excel-added` /
+    `.excel-removed` 上的 border-left）是有意的行标记，不在此列。
+    """
+    problems = []
+    for path, line_no, selector, body in _added_removed_rules():
+        if _ROW_NUMBER_ACCENT.search(selector):
+            continue
+        for value in _BORDER_DECL.findall(body):
+            lowered = value.strip().lower()
+            if any(bad in lowered for bad in FORBIDDEN_BORDER):
+                problems.append(f'{path}:{line_no} {selector}：线框 {value.strip()!r} 用了状态色 —— '
+                                f'新增/删除行必须用表格默认线框 var(--color-border, #dee2e6)')
+    assert not problems, '新增/删除行的线框跟着状态变色了：\n  ' + '\n  '.join(problems)
 
 
 def test_the_palette_tokens_exist():

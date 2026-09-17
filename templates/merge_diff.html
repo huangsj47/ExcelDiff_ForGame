@@ -3,9 +3,9 @@
 {% block title %}diff多版本合并显示{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.1">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-diff-new.css') }}?v=2.0">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-scroll-fix.css') }}?v=2.1">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.2">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-diff-new.css') }}?v=2.1">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-scroll-fix.css') }}?v=2.2">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.0">
 <style>
 /* 加载状态样式 */
@@ -72,17 +72,20 @@
 }
 
 /* 确保文本背景样式不被覆盖 - 最高优先级 */
+/* 高亮不能移动文字：inline-block + vertical-align:top + 左右 4px padding 会让
+   高亮段比同行未高亮的文字低 2px、右 4px，被高亮的数字就会跟前面的前缀对不齐。
+   也不能盖住旁边的字：不透明的左右 box-shadow 会涂掉紧挨着的分隔符
+   （线上 5978 的 `&`）。完整推导见 excel-scroll-fix.css 里同一组规则。 */
 .excel-diff-table .excel-text-bg-old {
     background-color: #c62828 !important; /* 红色背景（与 diff-styles.css 同一组 WCAG 值） */
     color: #ffffff !important; /* 白色文字 */
-    /* 高亮不能移动文字：inline-block + vertical-align:top + 左右 4px padding 会让
-       高亮段比同行未高亮的文字低 2px、右 4px，被高亮的数字就会跟前面的前缀对不齐。 */
     padding: 2px 0 !important;
     border-radius: 3px !important;
     display: inline !important;
     text-align: left !important;
     vertical-align: baseline !important;
-    box-shadow: 3px 0 0 #c62828, -3px 0 0 #c62828 !important;
+    box-shadow: none !important;
+    border: 0 !important;
 }
 
 .excel-diff-table .excel-text-bg-new {
@@ -93,8 +96,8 @@
     display: inline !important;
     text-align: left !important;
     vertical-align: baseline !important;
-    box-shadow: 3px 0 0 #2e7d32, -3px 0 0 #2e7d32 !important;
-    border: none !important;
+    box-shadow: none !important;
+    border: 0 !important;
     text-decoration: none !important;
 }
 
@@ -251,10 +254,13 @@ tr.excel-row-modified-old td.excel-cell:not(.excel-added):not(.excel-removed) {
     background-color: #fff !important;
 }
 
-/* 确保新增行和删除行的单元格背景色与行号一致 */
+/* 确保新增行和删除行的单元格背景色与行号一致
+   线框一律用表格默认色（--color-border）：状态由底色表达，
+   深绿/浅红线框会把整行格子框一圈，与表格其余部分的灰线框对不上。
+   同一组规则在三份 CSS 与本文件的内联 <style> 里各有一份，改一处必须一起改。 */
 .excel-diff-table .excel-row-added .excel-cell.excel-added {
     background-color: var(--color-success-bg-soft, #e8f5e8) !important; /* 与行号一致的深绿色背景 */
-    border-color: #28a745 !important;
+    border-color: var(--color-border, #dee2e6) !important;
     font-weight: normal !important;
     color: #155724 !important; /* 黑色文字确保可读性 */
 }
@@ -285,7 +291,7 @@ tr.excel-row-modified-old td.excel-cell:not(.excel-added):not(.excel-removed) {
 
 .excel-diff-table .excel-row-removed .excel-cell.excel-removed {
     background-color: var(--color-danger-bg-soft, #ffebee) !important; /* 与「修改行」的旧值行同一浅红 */
-    border-color: #f5c6cb !important;
+    border-color: var(--color-border, #dee2e6) !important;
     font-weight: normal !important;
     color: #721c24 !important; /* 浅底上用深色文字，与修改行一致 */
 }
@@ -293,14 +299,14 @@ tr.excel-row-modified-old td.excel-cell:not(.excel-added):not(.excel-removed) {
 /* 确保新增行和删除行的样式具有最高优先级 */
 .excel-diff-table tr.excel-row-added td.excel-cell.excel-added {
     background-color: var(--color-success-bg-soft, #e8f5e8) !important; /* 与行号一致的深绿色背景 */
-    border-color: #28a745 !important;
+    border-color: var(--color-border, #dee2e6) !important;
     color: #155724 !important; /* 黑色文字确保可读性 */
     font-weight: normal !important;
 }
 
 .excel-diff-table tr.excel-row-removed td.excel-cell.excel-removed {
     background-color: var(--color-danger-bg-soft, #ffebee) !important; /* 与「修改行」的旧值行同一浅红 */
-    border-color: #f5c6cb !important;
+    border-color: var(--color-border, #dee2e6) !important;
     color: #721c24 !important; /* 浅底上用深色文字，与修改行一致 */
     font-weight: normal !important;
 }
@@ -961,31 +967,20 @@ function escapeHtmlAttribute(text) {
     return escapeHtml(String(text)).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-// 格式化单元格值函数
+// 单元格值 → 展示文本：**表里怎么写就怎么显示**，不做任何改写。
+// 与服务端 format_cell_value（utils/diff_data_utils.py）同一契约：只把真正的
+// 空值显示为空；**不 trim、不把文本 'null'/'nan'/'none'/'undefined' 折叠成空串**。
+// 那个函数的 docstring 写了为什么：展示层一旦改写，比较层报出的变更就会在界面上
+// 变成「空 → 空」或者「两边一模一样」—— 比漏报更难排查。
+// HTML 转义是另一件事：由调用方在使用返回值拼 HTML 时用 escapeHtml 做一次。
 function formatCellValue(value) {
-    // 处理空值、null值、undefined值和NaN值
     if (value === null || value === undefined) {
         return '';
     }
-
-    // 处理NaN值
     if (typeof value === 'number' && isNaN(value)) {
         return '';
     }
-
-    // 转换为字符串并去除多余空格
-    var strValue = String(value).trim();
-
-    // 检查是否为字符串形式的NaN、null等
-    if (strValue.toLowerCase() === 'nan' ||
-        strValue.toLowerCase() === 'null' ||
-        strValue.toLowerCase() === 'undefined' ||
-        strValue.toLowerCase() === 'none' ||
-        strValue === '') {
-        return '';
-    }
-
-    return strValue;
+    return String(value);
 }
 
 // 异步加载单个提交的diff数据
@@ -1468,47 +1463,122 @@ function initMergedExcelDiff(diffData) {
         return;
     }
 
-    // 生成工作表标签
-    generateMergedExcelTabs(tabsContainer, diffData.sheets);
+    // 生成工作表标签（返回选中的表名，正文用同一个口径渲染）
+    const activeSheetName = generateMergedExcelTabs(tabsContainer, diffData.sheets);
 
-    // 显示第一个有变更的工作表
-    const firstChangedSheet = Object.keys(diffData.sheets).find(sheetName => {
-        const sheet = diffData.sheets[sheetName];
-        return sheet.rows && sheet.rows.some(row =>
-            row.status === 'added' || row.status === 'removed' || row.status === 'modified'
-        );
-    });
-
-    if (firstChangedSheet) {
-        showMergedExcelSheet(contentContainer, firstChangedSheet, diffData.sheets[firstChangedSheet]);
+    if (activeSheetName && diffData.sheets[activeSheetName]) {
+        showMergedExcelSheet(contentContainer, activeSheetName, diffData.sheets[activeSheetName]);
     }
 }
 
-// 生成合并Excel工作表标签
+// 一张工作表算不算「有变更」。
+//
+// 行级变更（整行增删改）、列级变更（改列名/加列/删列）之外，**工作表级**
+// 变更也算：整张表被新增或被删除。这一点不能漏 —— 它决定标签是否可点、
+// 以及默认展示哪张表；漏了就会把「整张表被删掉、且删掉的是一张空表」
+// 这种载荷当成「没有任何变更」，正文区一片空白。
+// 与提交页/周版本页同名函数逐字节一致（见 tests/test_sheet_level_operation_is_visible.py）。
+function sheetHasChanges(sheet) {
+    if (!sheet) return false;
+    if ((sheet.rows || []).some(row =>
+        row.status === 'added' || row.status === 'removed' || row.status === 'modified')) {
+        return true;
+    }
+    if (sheet.header_changes && sheet.header_changes.length) {
+        return true;
+    }
+    const operation = String(sheet.operation || '').toLowerCase();
+    return operation === 'added' || operation === 'deleted';
+}
+
+// 选中哪张工作表：URL 指定的（且确实有变更）> 第一张有变更的 > 第一张表。
+// 最后一档不能省：整份载荷只有工作表级增删、没有内容行变更时，一个「有变更」
+// 的都没有 —— 保持 null 的话正文区一片空白，评审者什么都看不到。
+// 与周版本页同名函数逐字节一致。
+function pickActiveSheet(sortedSheets, urlSheet) {
+    const list = sortedSheets || [];
+    if (urlSheet) {
+        const matched = list.find(s => s.name === urlSheet && s.hasChanges);
+        if (matched) return matched.name;
+    }
+    const firstChangedSheet = list.find(s => s.hasChanges);
+    if (firstChangedSheet) return firstChangedSheet.name;
+    return list.length ? list[0].name : null;
+}
+
+// 工作表级变更：整张表被新增 / 被删除。
+//
+// 载荷在表上带 operation（added / deleted）与 message（后端生成，例如
+// 「工作表 "Sheet1" 已被删除」）。这张表可能一行内容都没有 —— 删掉的是一张
+// 空表时 rows 是空的。不渲染这条，评审者只会看到一片空白，而载荷明明说了
+// 「工作表已被删除」。与提交页/周版本页同名函数逐字节一致。
+function sheetOperationHtml(sheetData) {
+    var operation = String((sheetData && sheetData.operation) || '').toLowerCase();
+    if (operation !== 'added' && operation !== 'deleted') {
+        return '';
+    }
+    var fallback = operation === 'added' ? '新增工作表' : '工作表已被删除';
+    var message = (sheetData && sheetData.message) || fallback;
+    var isAdded = operation === 'added';
+    return '<div class="alert ' + (isAdded ? 'alert-success' : 'alert-warning') +
+           ' py-2 px-3 mb-2 excel-sheet-operation">' +
+           '<i class="bi ' + (isAdded ? 'bi-plus-circle' : 'bi-trash') + ' me-2"></i>' +
+           escapeHtml(message) + '</div>';
+}
+
+// 列级变更提示（改列名/加列/删列）。
+function headerChangesHtml(sheetData) {
+    var changes = sheetData && sheetData.header_changes;
+    if (!changes || !changes.length) {
+        return '';
+    }
+    var items = [];
+    for (var i = 0; i < changes.length; i++) {
+        var change = changes[i];
+        if (change.change === 'added') {
+            items.push('新增列 ' + change.column);
+        } else if (change.change === 'removed') {
+            items.push('删除列 ' + change.old_name);
+        } else {
+            items.push('列名 ' + change.old_name + ' → ' + change.new_name);
+        }
+    }
+    return '<div class="alert alert-info py-2 px-3 mb-2 excel-header-changes">' +
+           '<i class="bi bi-type me-2"></i><strong>列变更（' + changes.length + '）：</strong>' +
+           escapeHtml(items.join('；')) +
+           '</div>';
+}
+
+// 表级提示合在一处：工作表级新增/删除 + 列级变更。
+function sheetNoticesHtml(sheetData) {
+    return sheetOperationHtml(sheetData) + headerChangesHtml(sheetData);
+}
+
+// 生成合并Excel工作表标签（返回选中展示的表名）
 function generateMergedExcelTabs(tabsContainer, sheets) {
     const sheetNames = Object.keys(sheets);
 
     // 分析工作表变更状态
     const sheetAnalysis = sheetNames.map(name => {
         const sheet = sheets[name];
-        const hasChanges = sheet.rows && sheet.rows.some(row => 
-            row.status === 'added' || row.status === 'removed' || row.status === 'modified'
-        );
+        const hasChanges = sheetHasChanges(sheet);
         return { name, hasChanges };
     });
-    
+
     // 排序：有变更的在前
     const sortedSheets = sheetAnalysis.sort((a, b) => {
         if (a.hasChanges && !b.hasChanges) return -1;
         if (!a.hasChanges && b.hasChanges) return 1;
         return a.name.localeCompare(b.name);
     });
-    
+
+    const activeSheetName = pickActiveSheet(sortedSheets, null);
+
     // 标签用 DOM API 建：表名来自被审核的 Excel（不可信），
     // 拼 onclick 会被属性值解码后的单引号逃逸，拼 innerHTML 会被 `"` 逃出属性。
     tabsContainer.textContent = '';
     sortedSheets.forEach((sheet, index) => {
-        const isActive = index === 0 && sheet.hasChanges ? 'active' : '';
+        const isActive = sheet.name === activeSheetName ? 'active' : '';
         const hasChangesClass = sheet.hasChanges ? 'excel-tab-with-changes' : 'excel-tab-no-changes';
         const disabled = sheet.hasChanges ? '' : 'excel-tab-disabled';
 
@@ -1525,15 +1595,31 @@ function generateMergedExcelTabs(tabsContainer, sheets) {
 
         tabsContainer.appendChild(tab);
     });
+
+    return activeSheetName;
 }
 
 // 显示合并Excel工作表内容
 function showMergedExcelSheet(contentContainer, sheetName, sheetData) {
     if (!sheetData || !sheetData.rows) {
-        contentContainer.innerHTML = '<div class="alert alert-info">该工作表无数据</div>';
+        contentContainer.innerHTML = sheetNoticesHtml(sheetData) +
+                                     '<div class="alert alert-info">该工作表无数据</div>';
         return;
     }
-    
+
+    const noticesHtml = sheetNoticesHtml(sheetData);
+
+    // 既没有表头也没有数据行：工作表级新增/删除一张空表就是这种形态。
+    // 渲染一张没有列的空表格没有意义，把事实说出来。
+    if (!(sheetData.headers || []).length && !(sheetData.rows || []).length) {
+        contentContainer.innerHTML = noticesHtml +
+            '<div class="p-4 text-center text-muted">' +
+            '<i class="bi bi-table fs-1 mb-3 d-block"></i>' +
+            '<p class="mb-0">该工作表没有数据行</p>' +
+            '</div>';
+        return;
+    }
+
     // 生成表格HTML
     let tableHtml = '<table class="excel-diff-table">';
     
@@ -1610,7 +1696,7 @@ function showMergedExcelSheet(contentContainer, sheetName, sheetData) {
     
     tableHtml += '</tbody></table>';
     
-    contentContainer.innerHTML = tableHtml;
+    contentContainer.innerHTML = noticesHtml + tableHtml;
 }
 
 // 更新提交状态
@@ -1853,18 +1939,24 @@ function createModifiedRowForContainer(row, headers, rowIndex) {
         if (cellChange) {
             // 有变更的单元格 - 显示旧值
             const oldValue = formatCellValue(cellChange.old_value);
-            html += '<td class="excel-cell excel-modified-old modified-column">';
-            // 对于null/nan/空值，不显示文本块
-            if (oldValue && oldValue.trim() !== '' && oldValue.toLowerCase() !== 'null' && oldValue.toLowerCase() !== 'nan') {
+            html += '<td class="excel-cell excel-modified-old modified-column"><span class="excel-cell-inner">';
+            // 只有**真正的空**才不显示文本块 —— formatCellValue 已经把 null / undefined /
+            // NaN 数字归一成 ''，所以 `!== ''` 就是正确的判空。
+            //
+            // 这里原先还叠了一层 `oldValue.trim() !== '' && oldValue.toLowerCase() !== 'null'
+            // && !== 'nan'`。那是 formatCellValue 旧口径（会把文本 null/nan 折叠成空串）
+            // 的重复实现：旧口径下它永远是死代码，而 formatCellValue 改成「表里怎么写就
+            // 怎么显示」之后它就**变成了真的黑名单** —— 文本 `null` / `nan`、以及只由空白
+            // 组成的取值都会被渲染成空白，而比较层认为它们与空不等、会报变更，
+            // 于是审核者看到一行「空 → 空」，无法判断改了什么。
+            if (oldValue !== '') {
                 html += '<span class="excel-text-bg-old">' + escapeHtml(oldValue) + '</span>';
-            } else {
-                html += ''; // 空值不显示任何内容
             }
-            html += '</td>';
+            html += '</span></td>';
         } else {
             // 未变更的单元格 - 使用rowspan=2合并
             const cellValue = formatCellValue(row.data && row.data[header]);
-            html += '<td class="excel-cell excel-unchanged" rowspan="2">' + escapeHtml(cellValue) + '</td>';
+            html += '<td class="excel-cell excel-unchanged" rowspan="2"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
         }
     });
 
@@ -1879,14 +1971,12 @@ function createModifiedRowForContainer(row, headers, rowIndex) {
         if (cellChange) {
             // 有变更的单元格 - 显示新值
             const newValue = formatCellValue(cellChange.new_value);
-            html += '<td class="excel-cell excel-modified-new modified-column">';
-            // 对于null/nan/空值，不显示文本块
-            if (newValue && newValue.trim() !== '' && newValue.toLowerCase() !== 'null' && newValue.toLowerCase() !== 'nan') {
+            html += '<td class="excel-cell excel-modified-new modified-column"><span class="excel-cell-inner">';
+            // 判空口径与上面旧值那一格相同：只有真正的空才不显示文本块。
+            if (newValue !== '') {
                 html += '<span class="excel-text-bg-new">' + escapeHtml(newValue) + '</span>';
-            } else {
-                html += ''; // 空值不显示任何内容
             }
-            html += '</td>';
+            html += '</span></td>';
         }
         // 未变更的单元格已经在上一行用rowspan=2处理了
     });
@@ -2033,7 +2123,9 @@ function showExcelSheetInContainer(containerId, sheetName, diffData) {
                 tableHtml += '<td class="' + cellClass + '">' + escapeHtml(cellValue) + '</td>';
             });
         } else {
-            console.warn(`⚠️ 未知的行格式:`, row);
+            // 只报「走到了这个分支」，不要把整行对象打出来 —— row 里是被审核文件的
+            // 单元格内容，控制台不该成为查看它的旁路。
+            console.warn('⚠️ 未知的行格式');
             tableHtml += '<td colspan="100%">未知格式的行数据</td>';
         }
         tableHtml += '</tr>';

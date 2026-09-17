@@ -234,14 +234,32 @@
 .excel-diff-table .excel-cell {
     background-color: #fff !important;
     min-width: 100px;
-    max-width: 400px;
+    /* 单元格默认最长 300px：内容超过 300px 才换行（线上要求）。
+       这一份由 base.html 全站加载，单提交的 Excel diff 与周版本的 Excel diff
+       都走这里，所以改这一处两边的上限一起变。 */
+    max-width: 300px;
+    /* line-height 必须留够，否则高亮块的底色会盖住上下一行的文字。
+       高亮是行内元素（见 .excel-text-bg-*），它的背景盒 = 内容区（约 1.15em）
+       + 上下各 2px padding ≈ 18.5px；行高不够时这个盒子会溢出到相邻行上，
+       看起来就是「字被颜色色块挡住」。
+       1.7 × 12.6px = 21.4px > 18.5px，上下各留约 1.4px 余量。
+       改 font-size 或高亮的上下 padding 时要同步重算这里。 */
+    line-height: 1.7;
     /* pre-wrap：**原样呈现空格**，同时允许换行。
        为什么必须是 pre-wrap 而不是 nowrap：
        比较层现在按字面量比对，`'  x  '` 与 `'x'` 会被报成一条变更；若这里用
        nowrap/normal，HTML 会把连续空格与首尾空格折叠掉，审核者看到的是两个
        **一模一样**的单元格，无法判断改了什么 —— 一条「看不出差异的变更」比漏报更难排查。
        顺带解决原来的 `nowrap + overflow:hidden + text-overflow:ellipsis`
-       把超长配置串静默截断、且没有任何途径看全文的问题（现在换行显示，且模板带 title）。 */
+       把超长配置串静默截断、且没有任何途径看全文的问题（现在换行显示）。
+
+       ⚠️ 这条只是「基准」：**任何能命中单元格的规则都必须是 pre-wrap 值**，
+       否则层叠里赢的那条会把空格又折回去。`.excel-cell.modified-column` 就曾经
+       写成 `normal`（特异性相同、位置更靠后，于是恰好把「改前/改后」覆盖掉了）。
+       用例 test_excel_literal_fidelity.py::TestDisplayMatchesComparison::
+       test_no_rule_reintroduces_whitespace_collapsing_on_cells 会扫全部规则拦这件事。
+       另外：**数据单元格并没有 title 兜底**（只有 `<th class="excel-field-header">`
+       带 title），所以空格一旦被折叠就真的没有别的途径看到原文。 */
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     word-wrap: break-word;
@@ -252,13 +270,46 @@
     background-image: none !important;
 }
 
-/* 修改列的单元格 - 自动调整宽度以显示完整内容 */
+/* 单元格内容的宽度上限。
+   为什么需要这一层容器：`max-width` 作用在 table-cell 上，在 `table-layout: auto`
+   下浏览器并不采纳 —— 实测把 `.excel-cell` 设成 max-width:300px 后，Chrome 仍把
+   该列渲染成 357px，连只有 8 个字的短单元格也是 357px（宽度完全由表格
+   `width: 100%` 的剩余空间分配决定，与内容无关）。
+   改成在 td 里放一个块级容器：它的 max-width 会参与列宽的内在尺寸计算，
+   于是「内容不超过 300px 就不换行、超过 300px 才换行」才真的成立。
+   三个页面的单元格拼接处都要带这一层（commit_diff.html /
+   weekly_version_full_diff.html / merge_diff.html）。
+
+   必须显式清掉 border：excel-scroll-fix.css 末尾的通配规则
+   （`.excel-table-wrapper *, .excel-diff-table * { border-width: 1px !important }`）
+   会给这一层也套上 1px 灰框，整张表每个格子都会多出一圈线。 */
+.excel-diff-table .excel-cell > .excel-cell-inner {
+    display: block;
+    max-width: 300px;
+    border: 0 !important;
+}
+
+/* 修改列的单元格 */
 .excel-cell.modified-column {
     min-width: 200px;
-    max-width: 1000px;
+    /* 与普通单元格同一个上限：这里原先放到 1000px，长文本会横占大半屏，
+       把同一行其余的列挤出视野。 */
+    max-width: 300px;
     width: auto;
     overflow: visible;
-    white-space: normal;
+    line-height: 1.7;
+    /* pre-wrap：**与普通单元格同一口径**（见上面 `.excel-diff-table .excel-cell`）。
+       这里原先是 `normal`，而选择器特异性 (0,2,0) 与上面那条相同、又更靠后，
+       于是**恰好把「改前/改后」这两种最需要看清差异的单元格**的 pre-wrap 覆盖掉了：
+       HTML 会把连续空格折成一个、并把首尾空格整个去掉，于是
+       `'   x   '` 与 `'x'`、`'a  b'` 与 `'a b'` 渲染出来**一模一样**
+       （实测墨迹宽度分别都是 7.2px / 21.6px，而普通单元格是 50.4px / 28.8px）。
+
+       比较层是按字面量比对的（`_normalize_value`：`'  x  '` ≠ `'x'`，首尾与连续空格
+       都算差异），所以这不是观感问题：后端报了一条变更，界面上两行长得完全相同 ——
+       正是 test_excel_literal_fidelity.py 要防的「看不出差异的变更」。
+       更不能靠 trim 抹平：那会让审核者看到的不是文件里写的内容。 */
+    white-space: pre-wrap;
     word-wrap: break-word;
     padding: 8px 15px;
 }
@@ -270,7 +321,7 @@
 
 .excel-row-added .excel-cell {
     background-color: var(--color-success-bg-soft, #e8f5e8) !important;
-    border-color: #c3e6cb;
+    border-color: var(--color-border, #dee2e6);
     font-weight: bold;
 }
 
@@ -279,10 +330,15 @@
     font-weight: bold;
 }
 
-/* 新增行单元格 - 浅绿底（与修改行新值行同色），文字用深绿 */
+/* 新增行单元格 - 浅绿底（与修改行新值行同色），文字用深绿
+
+   线框用表格默认色：状态由底色表达，深绿线框会把整行格子框一圈
+   （线上 5969 的新增行）。同一组规则在三份 CSS（本文件 /
+   diff-styles.css / excel-scroll-fix.css，后者最后加载）与
+   merge_diff.html 的内联 <style> 里各有一份，改一处必须一起改。 */
 .excel-diff-table .excel-row-added .excel-cell {
     background-color: var(--color-success-bg-soft, #e8f5e8) !important; /* 与「修改行」的新值行同一浅绿 */
-    border-color: #28a745 !important;
+    border-color: var(--color-border, #dee2e6) !important;
     font-weight: normal !important;
     color: #155724 !important; /* 浅底上用深色文字，与修改行一致 */
 }
@@ -296,10 +352,10 @@
     background-color: var(--color-danger-bg-soft, #ffebee) !important;
 }
 
-/* 删除行单元格 - 浅红底（与修改行旧值行同色），文字用深红 */
+/* 删除行单元格 - 浅红底（与修改行旧值行同色），文字用深红；线框同新增行，用默认色 */
 .excel-diff-table .excel-row-removed .excel-cell {
     background-color: var(--color-danger-bg-soft, #ffebee) !important; /* 与「修改行」的旧值行同一浅红 */
-    border-color: #f5c6cb !important;
+    border-color: var(--color-border, #dee2e6) !important;
     font-weight: normal !important;
     color: #721c24 !important; /* 浅底上用深色文字，与修改行一致 */
 }
@@ -309,7 +365,7 @@
    在 #ffe0e4 上对比度 9.3:1。历史上这里是深红底 + 白字，与「底色太深」一起改掉。） */
 .excel-diff-table .excel-row-number.excel-removed {
     background-color: var(--color-rownum-removed-bg, #ffe0e4) !important;
-    border-color: #f5c6cb !important;
+    border-color: var(--color-border, #dee2e6) !important;
     color: #721c24 !important;
     font-weight: bold !important;
 }
@@ -437,14 +493,17 @@
 .excel-text-bg-old {
     background-color: #c62828 !important; /* 深红色背景 */
     color: #ffffff !important; /* 白色文字 */
-    /* 高亮不能移动文字（同 diff-styles.css / excel-scroll-fix.css 的说明：
-       高亮段比同行未高亮文字低 2px、右 4px 会让被高亮的数字跟前面的前缀对不齐）。 */
+    /* 高亮不能移动文字，也不能盖住旁边的字（同 diff-styles.css /
+       excel-scroll-fix.css 的说明：高亮段比同行未高亮文字低 2px、右 4px 会让被高亮的
+       数字跟前面的前缀对不齐；不透明的左右 box-shadow 会涂掉紧挨着的分隔符）。
+       完整推导见 excel-scroll-fix.css 里同一组规则。 */
     padding: 2px 0;
     border-radius: 3px;
     display: inline;
     text-align: left;
     vertical-align: baseline;
-    box-shadow: 3px 0 0 #c62828, -3px 0 0 #c62828;
+    box-shadow: none;
+    border: 0;
 }
 
 .excel-text-bg-new {
@@ -455,8 +514,8 @@
     display: inline;
     text-align: left;
     vertical-align: baseline;
-    box-shadow: 3px 0 0 #2e7d32, -3px 0 0 #2e7d32;
-    border: none !important;
+    box-shadow: none;
+    border: 0;
     text-decoration: none !important;
 }
 

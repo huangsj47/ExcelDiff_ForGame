@@ -3,8 +3,8 @@
 {% block title %}Diff确认 - {{ commit.path }}{% endblock %}
 
 {% block head %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=1.2">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-scroll-fix.css') }}?v=2.1">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.2">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/excel-scroll-fix.css') }}?v=2.2">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.1">
 <style>
     /* 仅对diff代码区域放大到105% */
@@ -654,8 +654,7 @@ document.addEventListener('DOMContentLoaded', function() {
         
         try {
             var diffData = {{ diff_data | tojson }};
-            console.log('Excel diff data loaded:', diffData);
-            
+
             // 存储到全局变量供标签页切换使用
             window.excelDiffData = diffData;
             
@@ -667,11 +666,28 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 console.log('No Excel sheets data found');
                 hideExcelLoadingIndicator();
-                setExcelDiffContainerHtml(
-                    '<div class="p-4 text-center text-muted">' +
-                    '<i class="bi bi-file-earmark-excel fs-1 mb-3"></i>' +
-                    '<p>Excel数据格式错误</p>' +
-                    '</div>');
+                // 后端取不到真实差异时会返回 {type:'error', message, detail}
+                // （见 services/commit_diff_logic.py 的 _build_diff_error_data）。
+                // 与代码 diff 的 error 分支同一口径：把原因透出来 —— 只说一句
+                // 「Excel数据格式错误」，评审者无法区分「文件被删」「仓库取不到」
+                // 「文件损坏」还是后端出错（Agent 那条路径已经这么做了）。
+                var reason = diffData && (diffData.message || diffData.error);
+                if (reason) {
+                    var detail = diffData && diffData.detail
+                        ? '<div class="mt-2 small text-muted">' + escapeHtml(diffData.detail) + '</div>'
+                        : '';
+                    setExcelDiffContainerHtml(
+                        '<div class="p-4"><div class="alert alert-warning mb-0">' +
+                        '<div class="fw-bold mb-1">Excel差异暂不可用</div>' +
+                        '<div>' + escapeHtml(reason) + '</div>' + detail +
+                        '</div></div>');
+                } else {
+                    setExcelDiffContainerHtml(
+                        '<div class="p-4 text-center text-muted">' +
+                        '<i class="bi bi-file-earmark-excel fs-1 mb-3"></i>' +
+                        '<p>Excel数据格式错误</p>' +
+                        '</div>');
+                }
             }
         } catch (error) {
             console.error('Excel diff processing error:', error);
@@ -721,37 +737,13 @@ function displayExcelDiff(diffData) {
         // 分析每个sheet的变更状态
         var sheetAnalysis = [];
         
-        console.log('=== DEBUGGING SHEET SELECTION ===');
-        console.log('Total sheets:', originalSheetNames.length);
-        console.log('Original sheet names:', originalSheetNames);
-        
         for (var i = 0; i < originalSheetNames.length; i++) {
             var sheetName = originalSheetNames[i];
             var sheetData = diffData.sheets[sheetName];
-            
-            // 检查是否有变更内容
-            var hasChanges = false;
-            if (sheetData && sheetData.rows) {
-                hasChanges = sheetData.rows.some(function(row) {
-                    return row.status === 'added' || row.status === 'removed' || row.status === 'modified';
-                });
-            }
-            // 只改了列名的工作表同样「有变更」：不然它会被排到无变更区、
-            // 顶部还会显示「平台未检测出变更」。
-            if (!hasChanges && sheetData && sheetData.header_changes && sheetData.header_changes.length) {
-                hasChanges = true;
-            }
-            
-            console.log('Sheet "' + sheetName + '" (original index ' + i + ') has changes:', hasChanges);
-            if (sheetData && sheetData.rows) {
-                console.log('  - Total rows:', sheetData.rows.length);
-                var statusCounts = {};
-                sheetData.rows.forEach(function(row) {
-                    statusCounts[row.status] = (statusCounts[row.status] || 0) + 1;
-                });
-                console.log('  - Row status counts:', statusCounts);
-            }
-            
+
+            // 检查是否有变更内容（口径见 sheetHasChanges，与周版本页同一份实现）
+            var hasChanges = sheetHasChanges(sheetData);
+
             sheetAnalysis.push({
                 name: sheetName,
                 originalIndex: i,
@@ -773,12 +765,7 @@ function displayExcelDiff(diffData) {
         });
         
         var reorderedSheets = changedSheets.concat(unchangedSheets);
-        
-        console.log('Changed sheets:', changedSheets.map(function(s) { return s.name; }));
-        console.log('Unchanged sheets:', unchangedSheets.map(function(s) { return s.name; }));
-        console.log('Final order:', reorderedSheets.map(function(s) { return s.name; }));
-        console.log('REORDERING LOGIC EXECUTED - v1.9 with Sheet1 priority');
-        
+
         var defaultActiveSheetName;
         var treasureSheet;
         
@@ -857,8 +844,9 @@ function displayExcelDiff(diffData) {
         if (diffData.summary) {
             var totalChanges = (diffData.summary.added || 0) + (diffData.summary.modified || 0) + (diffData.summary.removed || 0);
             var headerChangeCount = countHeaderChanges(diffData);
+            var sheetOperationCount = countSheetOperations(diffData);
             
-            if (totalChanges === 0 && headerChangeCount === 0) {
+            if (totalChanges === 0 && headerChangeCount === 0 && sheetOperationCount === 0) {
                 // 没有检测到变更时显示友好提示
                 html += '<div class="excel-summary mt-3 p-4 bg-warning bg-opacity-10 border border-warning rounded">' +
                        '<div class="d-flex align-items-center">' +
@@ -868,6 +856,15 @@ function displayExcelDiff(diffData) {
                        '<p class="mb-0 text-muted">请与提交人确认是否存在实际变更内容</p>' +
                        '</div>' +
                        '</div>' +
+                       '</div>';
+            } else if (totalChanges === 0 && headerChangeCount === 0) {
+                // 只有工作表级变更（整张表被新增/删除）而没有内容行变更：
+                // 这时候说「未检测出变更」是自相矛盾的（线上 5974/5975 的
+                // 空表增删就是这样），把实际发生了什么说清楚。
+                html += '<div class="excel-summary mt-3 p-3 bg-light rounded">' +
+                       '<h6>变更统计</h6>' +
+                       '<div class="text-muted">工作表级变更：' + sheetOperationCount +
+                       ' 张工作表被新增/删除，没有内容行变更。</div>' +
                        '</div>';
             } else {
                 // 有变更时显示正常统计信息
@@ -945,6 +942,83 @@ function countHeaderChanges(diffData) {
     return total;
 }
 
+// 一张工作表算不算「有变更」。
+//
+// 行级变更（整行增删改）、列级变更（改列名/加列/删列）之外，**工作表级**
+// 变更也算：整张表被新增或被删除。这一点不能漏 —— 它决定标签是否可点、
+// 以及默认展示哪张表；漏了就会把「整张表被删掉、且删掉的是一张空表」
+// 这种载荷当成「没有任何变更」，页面只剩一句「平台未检测出变更」。
+// 与周版本页同名函数逐字节一致（见 tests/test_sheet_level_operation_is_visible.py）。
+function sheetHasChanges(sheet) {
+    if (!sheet) return false;
+    if ((sheet.rows || []).some(row =>
+        row.status === 'added' || row.status === 'removed' || row.status === 'modified')) {
+        return true;
+    }
+    if (sheet.header_changes && sheet.header_changes.length) {
+        return true;
+    }
+    const operation = String(sheet.operation || '').toLowerCase();
+    return operation === 'added' || operation === 'deleted';
+}
+
+// 工作表级变更：整张表被新增 / 被删除。
+//
+// 载荷在表上带 `operation`（added / deleted）与 `message`（后端生成，例如
+// 「工作表 "Sheet1" 已被删除」）。**这张表可能一行内容都没有** —— 删掉的
+// 就是一张空表时，rows 是空的。不把这条渲染出来，页面就只剩一张没有列的
+// 空表格加一句「平台未检测出变更」，而载荷明明说了「工作表已被删除」：
+// 线上 5974（删除空表）、5975（新增空表）就是这样，评审者什么都看不到。
+// 表名与 message 都来自被审核的 Excel，必须转义。
+function sheetOperationHtml(sheetData) {
+    var operation = String((sheetData && sheetData.operation) || '').toLowerCase();
+    if (operation !== 'added' && operation !== 'deleted') {
+        return '';
+    }
+    var fallback = operation === 'added' ? '新增工作表' : '工作表已被删除';
+    var message = (sheetData && sheetData.message) || fallback;
+    var isAdded = operation === 'added';
+    return '<div class="alert ' + (isAdded ? 'alert-success' : 'alert-warning') +
+           ' py-2 px-3 mb-2 excel-sheet-operation">' +
+           '<i class="bi ' + (isAdded ? 'bi-plus-circle' : 'bi-trash') + ' me-2"></i>' +
+           escapeHtml(message) + '</div>';
+}
+
+// 表级提示合在一处：工作表级新增/删除 + 列级变更（改列名/加列/删列）。
+function sheetNoticesHtml(sheetData) {
+    return sheetOperationHtml(sheetData) + headerChangesHtml(sheetData);
+}
+
+// 表的正文：既没有表头也没有数据行时（工作表级新增/删除一张空表），
+// 渲染一张没有列的空表格没有意义，直接把这个事实说出来。
+function sheetBodyHtml(sheetName, sheetData) {
+    var notices = sheetNoticesHtml(sheetData);
+    var headers = (sheetData && sheetData.headers) || [];
+    var rows = (sheetData && sheetData.rows) || [];
+    if (!headers.length && !rows.length) {
+        return notices +
+               '<div class="p-4 text-center text-muted">' +
+               '<i class="bi bi-table fs-1 mb-3 d-block"></i>' +
+               '<p class="mb-0">该工作表没有数据行</p>' +
+               '</div>';
+    }
+    return notices + createExcelDiffTable(sheetName, sheetData);
+}
+
+// 工作表级新增/删除的张数（用于判断「平台未检测出变更」这句话能不能说）
+function countSheetOperations(diffData) {
+    var total = 0;
+    var sheets = (diffData && diffData.sheets) || {};
+    for (var name in sheets) {
+        if (!Object.prototype.hasOwnProperty.call(sheets, name)) continue;
+        var operation = String((sheets[name] && sheets[name].operation) || '').toLowerCase();
+        if (operation === 'added' || operation === 'deleted') {
+            total += 1;
+        }
+    }
+    return total;
+}
+
 function renderSheetsProgressively(diffData, reorderedSheets, currentIndex) {
     if (currentIndex >= reorderedSheets.length) {
         // 所有工作表渲染完成
@@ -974,8 +1048,7 @@ function renderSheetsProgressively(diffData, reorderedSheets, currentIndex) {
                 });
             } else {
                 // 小数据集直接渲染
-                contentContainer.innerHTML = headerChangesHtml(sheetData) +
-                                             createExcelDiffTable(sheetName, sheetData);
+                contentContainer.innerHTML = sheetBodyHtml(sheetName, sheetData);
                 renderSheetsProgressively(diffData, reorderedSheets, currentIndex + 1);
             }
         } else {
@@ -1025,12 +1098,13 @@ function renderLargeSheetInBatches(container, sheetName, sheetData, callback) {
         var header = sheetData.headers[i];
         var isModified = modifiedColumns.indexOf(header) !== -1;
         var headerClass = isModified ? 'excel-field-header excel-modified-column-header' : 'excel-field-header';
-        tableHtml += '<th scope="col" class="' + headerClass + '" title="' + header + '">' + header + '</th>';
+        tableHtml += '<th scope="col" class="' + headerClass + '" title="' + escapeHtmlAttribute(header) + '">' +
+                escapeHtml(header) + '</th>';
     }
     
     tableHtml += '</tr></thead><tbody id="sheet-tbody-' + sheetName + '"></tbody></table></div>';
     
-    container.innerHTML = headerChangesHtml(sheetData) + tableHtml;
+    container.innerHTML = sheetNoticesHtml(sheetData) + tableHtml;
 
     // 在分批渲染完成后调试滚动条状态
     window.debugScrollbarAfterRender = function() {
@@ -1307,7 +1381,7 @@ function createAddedRow(row, headers) {
     for (var i = 0; i < headers.length; i++) {
         var header = headers[i];
         var cellValue = formatCellValue(row.data && row.data[header]);
-        html += '<td class="excel-cell excel-added">' + escapeHtml(cellValue) + '</td>';
+        html += '<td class="excel-cell excel-added"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
     }
     
     html += '</tr>';
@@ -1322,7 +1396,7 @@ function createRemovedRow(row, headers) {
     for (var i = 0; i < headers.length; i++) {
         var header = headers[i];
         var cellValue = formatCellValue(row.data && row.data[header]);
-        html += '<td class="excel-cell excel-removed">' + escapeHtml(cellValue) + '</td>';
+        html += '<td class="excel-cell excel-removed"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
     }
     
     html += '</tr>';
@@ -1355,15 +1429,15 @@ function createModifiedRow(row, headers) {
         if (cellChange) {
             var oldValue = formatCellValue(cellChange.old_value);
             if (oldValue === '') {
-                html += '<td class="excel-cell excel-modified-old modified-column">' + escapeHtml(oldValue) + '</td>';
+                html += '<td class="excel-cell excel-modified-old modified-column"><span class="excel-cell-inner">' + escapeHtml(oldValue) + '</span></td>';
             } else {
                 // 使用精确高亮函数处理参数级别的差异
                 var highlightedOldValue = highlightDifferences(oldValue, formatCellValue(cellChange.new_value), 'old');
-                html += '<td class="excel-cell excel-modified-old modified-column">' + highlightedOldValue + '</td>';
+                html += '<td class="excel-cell excel-modified-old modified-column"><span class="excel-cell-inner">' + highlightedOldValue + '</span></td>';
             }
         } else {
             var cellValue = formatCellValue(row.data && row.data[header]);
-            html += '<td class="excel-cell excel-unchanged" rowspan="2">' + escapeHtml(cellValue) + '</td>';
+            html += '<td class="excel-cell excel-unchanged" rowspan="2"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
         }
     }
     
@@ -1379,11 +1453,11 @@ function createModifiedRow(row, headers) {
         if (cellChange) {
             var newValue = formatCellValue(cellChange.new_value);
             if (newValue === '') {
-                html += '<td class="excel-cell excel-modified-new modified-column">' + escapeHtml(newValue) + '</td>';
+                html += '<td class="excel-cell excel-modified-new modified-column"><span class="excel-cell-inner">' + escapeHtml(newValue) + '</span></td>';
             } else {
                 // 使用精确高亮函数处理参数级别的差异
                 var highlightedNewValue = highlightDifferences(formatCellValue(cellChange.old_value), newValue, 'new');
-                html += '<td class="excel-cell excel-modified-new modified-column">' + highlightedNewValue + '</td>';
+                html += '<td class="excel-cell excel-modified-new modified-column"><span class="excel-cell-inner">' + highlightedNewValue + '</span></td>';
             }
         }
         // 未修改的单元格已经在上一行用rowspan=2处理了
@@ -1402,7 +1476,7 @@ function createUnchangedRow(row, headers) {
     for (var i = 0; i < headers.length; i++) {
         var header = headers[i];
         var cellValue = formatCellValue(row.data && row.data[header]);
-        html += '<td class="excel-cell">' + escapeHtml(cellValue) + '</td>';
+        html += '<td class="excel-cell"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
     }
     
     html += '</tr>';
@@ -1541,39 +1615,27 @@ function renderSheetContentIfNeeded(sheetName) {
                 });
             } else {
                 // 小数据集直接渲染
-                contentContainer.innerHTML = headerChangesHtml(sheetData) +
-                                             createExcelDiffTable(sheetName, sheetData);
+                contentContainer.innerHTML = sheetBodyHtml(sheetName, sheetData);
                 console.log('Small sheet rendered:', sheetName);
             }
         }
     }
 }
 
-// 格式化单元格值函数
+// 单元格值 → 展示文本：**表里怎么写就怎么显示**，不做任何改写。
+// 与服务端 format_cell_value（utils/diff_data_utils.py）同一契约：只把真正的
+// 空值显示为空；**不 trim、不把文本 'null'/'nan'/'none'/'undefined' 折叠成空串**。
+// 那个函数的 docstring 写了为什么：展示层一旦改写，比较层报出的变更就会在界面上
+// 变成「空 → 空」或者「两边一模一样」—— 比漏报更难排查。
+// HTML 转义是另一件事：由调用方在使用返回值拼 HTML 时用 escapeHtml 做一次。
 function formatCellValue(value) {
-    // 处理空值、null值、undefined值和NaN值
     if (value === null || value === undefined) {
         return '';
     }
-
-    // 处理NaN值
     if (typeof value === 'number' && isNaN(value)) {
         return '';
     }
-
-    // 转换为字符串并去除多余空格
-    var strValue = String(value).trim();
-
-    // 检查是否为字符串形式的NaN、null等
-    if (strValue.toLowerCase() === 'nan' ||
-        strValue.toLowerCase() === 'null' ||
-        strValue.toLowerCase() === 'undefined' ||
-        strValue.toLowerCase() === 'none' ||
-        strValue === '') {
-        return '';
-    }
-
-    return strValue;
+    return String(value);
 }
 
 // HTML转义函数

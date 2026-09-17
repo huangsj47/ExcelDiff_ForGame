@@ -317,7 +317,9 @@
 
 .excel-cell.excel-added {
     background: var(--color-success-bg-soft, #e8f5e8) !important; /* 与「修改行」的新值行同一浅绿 */
-    border-left: 2px solid #28a745;
+    /* 线框用表格默认色：状态由底色表达（深绿/深红的格线会把每个格子框一圈，
+       线上 5969 的新增行就是这样）。宽度保持不变，避免动布局把文字挤偏。 */
+    border-left: 2px solid var(--color-border, #dee2e6);
     color: #155724 !important; /* 浅底上用深色文字，与修改行一致 */
     font-weight: normal !important;
 }
@@ -332,7 +334,7 @@
 
 .excel-cell.excel-removed {
     background: var(--color-danger-bg-soft, #ffebee) !important; /* 与「修改行」的旧值行同一浅红 */
-    border-left: 2px solid var(--color-danger, #dc3545);
+    border-left: 2px solid var(--color-border, #dee2e6);
     color: #721c24 !important; /* 浅底上用深色文字，与修改行一致 */
     font-weight: normal !important;
 }
@@ -375,14 +377,21 @@
     /* 高亮**不能移动文字**：原先 display:inline-block + vertical-align:top +
        左右各 4px padding，会让高亮的那一段比同一格里没高亮的文字**低 2px、右 4px**，
        于是「13,39,10000」与「13,39,10001」里被高亮的 10000/10001 跟前面的 13,39
-       对不齐（线上 5966 反馈）。改回行内元素、按基线对齐，左右留白用不占布局的
-       box-shadow 撑出来 —— 文字位置与「压根没高亮」时完全一致。 */
+       对不齐（线上 5966 反馈）。改回行内元素、按基线对齐。
+
+       也**不能盖住旁边的字**：左右留白曾经用不占布局的 box-shadow 撑出来，
+       但不透明阴影会把紧挨着的字符涂掉 —— 线上 5978 的「玩家不带动作&不打断技能」
+       里，那个只有几像素宽的 `&` 被两侧各 3px 的阴影盖掉大半。所以左右不留余白。
+       完整推导见 excel-scroll-fix.css 里同一组规则（那份最后加载，是最终生效值）。 */
     padding: 2px 0;
     border-radius: var(--radius-sm, 3px);
     display: inline;
     text-align: left;
     vertical-align: baseline;
-    box-shadow: 3px 0 0 var(--color-cell-old-bg, #c62828), -3px 0 0 var(--color-cell-old-bg, #c62828);
+    box-shadow: none;
+    /* 清掉 border：excel-scroll-fix.css 的通配规则会给行内 span 套 1px 灰框，
+       而左右边框参与排版，会把这一段之后的文字右移 2px。 */
+    border: 0;
 }
 
 .excel-text-bg-new {
@@ -393,7 +402,8 @@
     display: inline;
     text-align: left;
     vertical-align: baseline;
-    box-shadow: 3px 0 0 var(--color-cell-new-bg, #2e7d32), -3px 0 0 var(--color-cell-new-bg, #2e7d32);
+    box-shadow: none;
+    border: 0;
 }
 
 /* 使用更高特异性确保样式生效 */

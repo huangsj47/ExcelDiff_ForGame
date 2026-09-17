@@ -13,6 +13,36 @@ def is_deleted_operation(operation: Any) -> bool:
     return op in {"D", "DEL", "DELETE", "DELETED", "REMOVE", "REMOVED"}
 
 
+def resolve_primary_operation(operations: Any) -> str:
+    """周版本列表里给文件上色的操作类型：跟**窗口内的最终状态**走。
+
+    `operations` 是该文件在窗口内按提交时间升序的操作序列（见
+    `commit_diff_logic.generate_merged_diff_data`）。旧口径是「序列里出现过 D 就
+    标红」，于是一个**被删掉又建回来**的文件在列表里是红的「删除文件」，
+    而它的 diff 页（比对窗口首末两版）显示的是新增内容 —— 列表与页面互相打脸。
+    线上 奖励模式_CfgRewardMode.xlsx 就是：A→D→A→M→M，列表标红，
+    页面却是 5 行新增。
+
+    现在的口径：
+
+    * 最后一次操作是删除 → `D`（文件在窗口结束时确实不存在，与 diff 页的
+      「已删除」判定同源，见 `resolve_weekly_deleted_excel_state`）；
+    * 首次操作是新增（且没被删掉）→ `A`（窗口内新建、且仍然存在）；
+    * 其余 → `M`。
+    """
+    if not operations:
+        return "M"
+    try:
+        ops = [str(op or "").strip().upper() for op in operations]
+    except TypeError:
+        return "M"
+    if is_deleted_operation(ops[-1]):
+        return "D"
+    if ops[0] == "A":
+        return "A"
+    return "M"
+
+
 def resolve_weekly_deleted_excel_state(
     *,
     commit_model,

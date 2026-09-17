@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""修改行里的「高亮片段」不能移动文字。
+"""修改行里的「高亮片段」不能移动文字，也不能盖住旁边的字。
 
 ## 缺陷形态（线上实测）
 
@@ -18,6 +18,13 @@
 **低 2px**；左右各 4px 的 padding 又让高亮段的文字比原位置**右移 4px**。于是
 「前缀 + 高亮片段」这种拼接出来的单元格，被高亮的那一段总是偏下偏右。
 
+线上 5978 反馈（同一个类的另一半约束）：`玩家不带动作&不打断技能` 里那个 `&`
+**显示不全，被颜色色块挡住了**。为了补上面的左右留白，这两个类一度改成用
+不占布局的 `box-shadow: 3px 0 0 …, -3px 0 0 …`，但阴影是不透明的、会真的画出去 ——
+`&` 只有几像素宽，被两侧各 3px 盖掉大半。同时 `excel-scroll-fix.css` 末尾的通配
+规则还给高亮 span 套了个 1px 边框，行内元素的左右边框参与排版，又把后面的文字
+推走 2px。做法见下面第二条测试。
+
 ## 这里钉住什么
 
 凡是 `.excel-text-bg-old` / `.excel-text-bg-new` 的规则（`static/css/*.css` 与各模板
@@ -25,9 +32,11 @@
 
 1. 不得 `display: inline-block`（要用行内元素，按基线参与排版）；
 2. 不得 `vertical-align: top`，必须是 `vertical-align: baseline`；
-3. 左右 padding 必须为 0（改由不占布局的 `box-shadow` 撑出留白）。
+3. 左右 padding 必须为 0；
+4. **左右不得有 box-shadow / border** —— 高亮段两侧没有预留空间，向左右画出去
+   就会盖住或推走紧挨着的分隔符。
 
-这样「高亮」纯粹是视觉，文字位置与压根没高亮时**完全一致**。
+这样「高亮」纯粹是视觉：既不移动文字，也不挡住别人的文字。
 """
 from __future__ import annotations
 
@@ -123,6 +132,62 @@ def test_every_highlight_definition_agrees():
     assert not disagreements, (
         '同名高亮类在不同文件里的关键属性不一致（最后加载的那份才生效，改一处必须一起改）：\n  '
         + '\n  '.join(f'{cls}.{key}: {values}' for (cls, key), values in disagreements.items()))
+
+
+# 会向左右画出去、或推走后续文字的声明。
+_SIDE_EFFECTS = (
+    'border-left', 'border-right', 'border-width', 'border-left-width', 'border-right-width',
+)
+_NEUTRAL = ('0', '0px', 'none')
+
+
+def test_the_highlight_does_not_cover_the_neighbouring_character():
+    """高亮**不能盖住紧挨着的那个字符**（线上 5978）。
+
+    分隔符（`,` `/` `&` `|`）只有几像素宽，而高亮段**没有**为左右余白预留空间 ——
+    相邻文字就紧贴在它后面。所以任何向左右延伸的绘制都会画在人家身上：
+
+    * `box-shadow: 3px 0 0 <色>, -3px 0 0 <色>`（曾用来撑左右留白）：阴影不参与排版，
+      但会**画**出去。「玩家不带动作&不打断技能」里那个 `&` 被两侧各 3px 盖掉大半，
+      用户看到的就是「显示不全，被颜色色块挡住了」。逗号、斜杠同样窄，一样躲不过。
+    * `border-left/right`：除了多画一圈框，行内元素的左右边框还参与排版，会把这一段
+      之后的文字整体推走 2px（正是本文件开头要避免的「移动文字」）。
+      `excel-scroll-fix.css` 末尾的通配规则
+      （`.excel-table-wrapper *, .excel-diff-table * { border-width: 1px !important }`）
+      会给高亮 span 也套上 1px —— 所以必须在高亮自己的规则里显式清掉。
+
+    结论：高亮的左右一律不留余白，背景**恰好**覆盖改动的那几个字符。
+    """
+    problems = []
+    for path, line_no, selector, decls in _highlight_rules():
+        where = f'{path}:{line_no} {selector}'
+        shadow = (decls.get('box-shadow') or '').replace('!important', '').strip()
+        if shadow != 'none':
+            problems.append(
+                f'{where}：box-shadow={shadow or "(未声明)"!r} —— 必须是 none。'
+                '向左右画出去会盖住紧挨着的分隔符（线上 5978 的 `&`）'
+            )
+        # 必须**显式**清掉边框，而不是「没写就行」：通配规则
+        # （`.excel-table-wrapper *, .excel-diff-table * { border-width: 1px !important }`）
+        # 会给高亮 span 也套上 1px，不显式清掉就会多出一圈灰框、并把后面的文字推走 2px。
+        border = (decls.get('border') or '').replace('!important', '').strip()
+        width = (decls.get('border-width') or '').replace('!important', '').strip()
+        style = (decls.get('border-style') or '').replace('!important', '').strip()
+        cleared = border in _NEUTRAL or (width in _NEUTRAL and style in ('none', '0'))
+        if not cleared:
+            problems.append(
+                f'{where}：没有显式清掉 border（border={border or "(未声明)"!r}, '
+                f'border-width={width or "(未声明)"!r}, border-style={style or "(未声明)"!r}）—— '
+                '通配规则会给高亮套上 1px 灰框并把后面的文字推走 2px'
+            )
+        for side in _SIDE_EFFECTS:
+            value = (decls.get(side) or '').replace('!important', '').strip()
+            if value and value not in _NEUTRAL:
+                problems.append(f'{where}：{side}={value!r} —— 会推走后面的文字并多画一圈框')
+    assert not problems, (
+        '高亮会盖住或推走紧挨着的字符（线上 5978：「玩家不带动作&不打断技能」的 `&` 显示不全）：\n  '
+        + '\n  '.join(problems)
+    )
 
 
 if __name__ == '__main__':

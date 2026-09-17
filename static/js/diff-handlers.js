@@ -3,7 +3,6 @@
 
 // 文本差异处理器
 function initTextDiff(diffData) {
-    console.log('初始化文本差异显示:', diffData);
     
     // 添加行号点击事件
     document.querySelectorAll('.text-diff-line').forEach(line => {
@@ -18,10 +17,8 @@ function initTextDiff(diffData) {
 
 // Excel差异处理器
 function initExcelDiff(diffData) {
-    console.log('初始化Excel差异显示:', diffData);
     
     if (!diffData || !diffData.sheets || Object.keys(diffData.sheets).length === 0) {
-        console.log('没有Excel工作表数据');
         return;
     }
     
@@ -37,7 +34,6 @@ function initExcelDiff(diffData) {
 
 // 图片差异处理器
 function initImageDiff(diffData) {
-    console.log('初始化图片差异显示:', diffData);
     
     // 添加图片缩放功能
     addImageZoom();
@@ -50,7 +46,6 @@ function initImageDiff(diffData) {
 
 // 二进制文件差异处理器
 function initBinaryDiff(diffData) {
-    console.log('初始化二进制文件差异显示:', diffData);
     
     // 添加文件信息展开/折叠功能
     addBinaryInfoToggle();
@@ -128,11 +123,8 @@ function generateExcelContent(sheets) {
 }
 
 function generateExcelTable(sheetName, sheetData) {
-    console.log('🔧 generateExcelTable called for:', sheetName);
-    console.log('📊 sheetData:', sheetData);
 
     if (!sheetData.headers || !sheetData.rows) {
-        console.log('❌ 工作表数据不完整');
         return `
             <div class="p-4 text-center text-muted">
                 <p>工作表 "${escapeHtml(sheetName)}" 数据不完整</p>
@@ -140,17 +132,6 @@ function generateExcelTable(sheetName, sheetData) {
         `;
     }
 
-    // 调试：分析行状态
-    const rowStatusCounts = {};
-    sheetData.rows.forEach((row, index) => {
-        const status = row.status || 'unchanged';
-        rowStatusCounts[status] = (rowStatusCounts[status] || 0) + 1;
-        if (status === 'added') {
-            console.log(`🟢 Found added row ${index}:`, row);
-        }
-    });
-    console.log('📊 行状态统计:', rowStatusCounts);
-    
     let html = `
         <div class="excel-table-wrapper">
             <table class="excel-diff-table">
@@ -158,7 +139,7 @@ function generateExcelTable(sheetName, sheetData) {
                     <tr class="excel-header-row">
                         <th class="excel-row-header">行号</th>
     `;
-    
+
     // 添加列标题 (A, B, C...)
     sheetData.headers.forEach((header, index) => {
         const columnLetter = getExcelColumnLetter(index);
@@ -213,17 +194,15 @@ function generateExcelTable(sheetName, sheetData) {
 }
 
 function createAddedRow(row, headers) {
-    console.log('🟢 Creating added row:', row);
     let html = `<tr class="excel-row-added">
         <td class="excel-row-number excel-added">${row.row_number || ''}</td>`;
 
     headers.forEach(header => {
         const cellValue = formatCellValue(row.data && row.data[header]);
-        html += `<td class="excel-cell excel-added">${escapeHtml(cellValue)}</td>`;
+        html += `<td class="excel-cell excel-added"><span class="excel-cell-inner">${escapeHtml(cellValue)}</span></td>`;
     });
 
     html += '</tr>';
-    console.log('🟢 Generated added row HTML:', html);
     return html;
 }
 
@@ -233,7 +212,7 @@ function createRemovedRow(row, headers) {
     
     headers.forEach(header => {
         const cellValue = formatCellValue(row.data && row.data[header]);
-        html += `<td class="excel-cell excel-removed">${escapeHtml(cellValue)}</td>`;
+        html += `<td class="excel-cell excel-removed"><span class="excel-cell-inner">${escapeHtml(cellValue)}</span></td>`;
     });
     
     html += '</tr>';
@@ -265,13 +244,12 @@ function createModifiedRow(row, headers) {
             const oldValue = formatCellValue(cellChange.old_value);
             const newValue = formatCellValue(cellChange.new_value);
             const highlightedOldValue = highlightDifferences(oldValue, newValue, 'old');
-            console.log('🔥 About to insert OLD HTML:', JSON.stringify(highlightedOldValue));
-            html += `<td class="excel-cell excel-modified-old modified-column">
+            html += `<td class="excel-cell excel-modified-old modified-column"><span class="excel-cell-inner">
                 ${highlightedOldValue}
-            </td>`;
+            </span></td>`;
         } else {
             const cellValue = formatCellValue(row.data && row.data[header]);
-            html += `<td class="excel-cell excel-unchanged" rowspan="2">${escapeHtml(cellValue)}</td>`;
+            html += `<td class="excel-cell excel-unchanged" rowspan="2"><span class="excel-cell-inner">${escapeHtml(cellValue)}</span></td>`;
         }
     });
     
@@ -287,10 +265,9 @@ function createModifiedRow(row, headers) {
             const oldValue = formatCellValue(cellChange.old_value);
             const newValue = formatCellValue(cellChange.new_value);
             const highlightedNewValue = highlightDifferences(oldValue, newValue, 'new');
-            console.log('🔥 About to insert NEW HTML:', JSON.stringify(highlightedNewValue));
-            html += `<td class="excel-cell excel-modified-new modified-column">
+            html += `<td class="excel-cell excel-modified-new modified-column"><span class="excel-cell-inner">
                 ${highlightedNewValue}
-            </td>`;
+            </span></td>`;
         }
     });
     
@@ -315,13 +292,7 @@ function highlightDifferences(oldValue, newValue, type) {
     
     // 检查是否为大括号分组的参数列表 {key,value},{key,value}
     if ((oldStr.includes('{') && oldStr.includes('}')) || (newStr.includes('{') && newStr.includes('}'))) {
-        console.log('🔍 Detected bracket parameter format, calling highlightBracketParameterList');
-        console.log('📥 Input oldStr:', JSON.stringify(oldStr));
-        console.log('📥 Input newStr:', JSON.stringify(newStr));
-        console.log('📥 Type:', type);
         const result = highlightBracketParameterList(oldStr, newStr, type);
-        console.log('📤 highlightBracketParameterList returned:', JSON.stringify(result));
-        console.log('📤 Result length:', result.length);
         return result;
     }
     
@@ -330,7 +301,6 @@ function highlightDifferences(oldValue, newValue, type) {
     const hasSeparator = separators.some(sep => oldStr.includes(sep) || newStr.includes(sep));
     
     if (hasSeparator) {
-        console.log('Detected parameter format with separators, calling highlightParameterList');
         return highlightParameterList(oldStr, newStr, type);
     }
     
@@ -342,16 +312,33 @@ function highlightDifferences(oldValue, newValue, type) {
     }
 }
 
+// 按分隔符把值切成 [段, 分隔符, 段, 分隔符, …, 段]，**段保留原样**（不 trim）。
+// 不能用 split(sep) + join(sep)：那样会把分隔符两侧的空格吃掉，页面上显示的内容
+// 就与文件不一致（原因见 highlightParameterList 里的说明）。
+function splitKeepingSeparators(value, separator) {
+    const parts = [];
+    let rest = String(value);
+    let at = rest.indexOf(separator);
+    while (at >= 0) {
+        parts.push(rest.slice(0, at));
+        parts.push(separator);
+        rest = rest.slice(at + separator.length);
+        at = rest.indexOf(separator);
+    }
+    parts.push(rest);
+    return parts;
+}
+
 // 高亮参数列表差异 - 支持{key,value}格式
 function highlightParameterList(oldValue, newValue, type) {
     // 检查是否为大括号分组的参数格式
     if (oldValue.includes('{') && oldValue.includes('}')) {
         return highlightBracketParameterList(oldValue, newValue, type);
     }
-    
+
     // 智能分割参数 - 支持多种分隔符
     const separators = [',', ';', '@', '$', '&', '/', '\\', '_', '|'];
-    
+
     // 找到实际使用的分隔符
     let usedSeparator = ','; // 默认逗号
     for (const sep of separators) {
@@ -360,10 +347,23 @@ function highlightParameterList(oldValue, newValue, type) {
             break;
         }
     }
-    
-    // 使用找到的分隔符分割参数
-    const oldParams = oldValue.split(usedSeparator).map(p => p.trim());
-    const newParams = newValue.split(usedSeparator).map(p => p.trim());
+
+    // 切成 [段, 分隔符, 段, …]，段与分隔符都**原样保留**。
+    //
+    // 早先的写法是 `split(sep).map(trim)` 再 `join(sep)`，有两个后果：
+    //   1. 显示失真：分隔符后面的空格被吃掉。文件里是 `玩家带动作, 打断技能`，
+    //      页面上显示成 `玩家带动作,打断技能` —— 审核者看到的内容与文件不一致。
+    //   2. 变更被藏起来：只差空格的两条记录（`a,b` 与 `a, b`）trim 之后完全相同，
+    //      于是「有变更」却一格都不高亮，加了 (1) 之后两边还长得一模一样。
+    //      这正是 .excel-cell 的 `white-space: pre-wrap` 注释里要防的那种
+    //      「看不出差异的变更」，只是发生在 JS 层而不是 CSS 层。
+    //
+    // 现在显示用原样文本、比较也用原样文本 —— 与后端按字面量比对的口径一致：
+    // 后端说这一格变了，界面就得让审核者看见变在哪。
+    const oldParts = splitKeepingSeparators(oldValue, usedSeparator);
+    const newParts = splitKeepingSeparators(newValue, usedSeparator);
+    const oldParams = oldParts.filter((_unused, index) => index % 2 === 0);
+    const newParams = newParts.filter((_unused, index) => index % 2 === 0);
 
     // 分隔后超过1段发生变化时，按整格变更展示，避免出现碎片化高亮
     const maxLength = Math.max(oldParams.length, newParams.length);
@@ -381,96 +381,106 @@ function highlightParameterList(oldValue, newValue, type) {
         return `<span class="excel-text-bg-new">${escapeHtml(newValue)}</span>`;
     }
 
+    const targetParts = type === 'old' ? oldParts : newParts;
     const targetParams = type === 'old' ? oldParams : newParams;
     const compareParams = type === 'old' ? newParams : oldParams;
-    
-    const result = [];
-    
-    for (let i = 0; i < targetParams.length; i++) {
-        const param = targetParams[i];
-        const compareParam = compareParams[i];
-        
-        if (compareParam === undefined || param !== compareParam) {
-            // 参数发生变化，高亮显示
-            result.push(`<span class="excel-text-bg-${type}">${escapeHtml(param)}</span>`);
-        } else {
-            // 参数未变化，正常显示
-            result.push(escapeHtml(param));
-        }
-    }
-    
-    return result.join(usedSeparator);
-}
 
-// 处理大括号分组的参数列表 {key,value},{key,value}
-function highlightBracketParameterList(oldValue, newValue, type) {
-    const targetValue = type === 'old' ? oldValue : newValue;
-    const compareValue = type === 'old' ? newValue : oldValue;
-    
-    // 解析参数对
-    const targetPairs = parseParameterPairs(targetValue);
-    const comparePairs = parseParameterPairs(compareValue);
-    
     const result = [];
-    
-    // 确保两个数组长度一致，处理可能的长度差异
-    const maxLength = Math.max(targetPairs.length, comparePairs.length);
-    
-    for (let index = 0; index < maxLength; index++) {
-        const targetPair = targetPairs[index];
-        const comparePair = comparePairs[index];
 
-        if (!targetPair) {
-            // 目标没有这个参数对，跳过
+    for (let i = 0; i < targetParts.length; i++) {
+        const chunk = targetParts[i];
+
+        // 分隔符单独成项：原样输出（也要转义 —— 分隔符可能是 `&`）
+        if (i % 2 === 1) {
+            result.push(escapeHtml(chunk));
             continue;
         }
 
-        // 键与值同样来自 Excel 单元格（不可信），必须转义后再拼进 innerHTML。
-        // escapeHtml 只做实体化，显示出来仍是原字符，所以视觉上与原逻辑一致。
-        const key = escapeHtml(targetPair.key);
-        const value = escapeHtml(targetPair.value);
+        const compareParam = compareParams[i / 2];
+
+        if (compareParam === undefined || chunk !== compareParam) {
+            // 参数发生变化，高亮显示
+            result.push(`<span class="excel-text-bg-${type}">${escapeHtml(chunk)}</span>`);
+        } else {
+            // 参数未变化，正常显示
+            result.push(escapeHtml(chunk));
+        }
+    }
+
+    return result.join('');
+}
+
+// 处理大括号分组的参数列表 {key,value},{key,value}
+//
+// 与 highlightParameterList 同一条原则：**显示用原样文本，比较也用原样文本**。
+// 早先的实现把每个键值 trim 之后重新拼成 `{key,value}`、再用 `,` 把参数对连起来，
+// 于是：
+//   * `{a, b}, {c, d}` 显示成 `{a,b},{c,d}` —— 括号内和参数对之间的空格都被吃掉，
+//     审核者看到的与文件不一致；
+//   * 只差空格的两条记录（`{id, 100 }` 与 `{id, 100}`）trim 之后完全相同，
+//     于是「有变更」却一格都不高亮，两边还长得一模一样 —— 正是 .excel-cell 的
+//     `white-space: pre-wrap` 注释里要防的那种「看不出差异的变更」。
+// 现在按匹配位置在原串上拼接：括号、逗号、以及参数对之间的原样文本全部保留。
+function highlightBracketParameterList(oldValue, newValue, type) {
+    const targetValue = String(type === 'old' ? oldValue : newValue);
+    const compareValue = String(type === 'old' ? newValue : oldValue);
+
+    function collectPairs(text) {
+        const pairRegex = /\{([^,}]+),([^}]+)\}/g;
+        const found = [];
+        let match;
+        while ((match = pairRegex.exec(text)) !== null) {
+            found.push({
+                raw: match[0],
+                key: match[1],
+                value: match[2],
+                start: match.index,
+                end: match.index + match[0].length
+            });
+        }
+        return found;
+    }
+
+    const targetPairs = collectPairs(targetValue);
+    const comparePairs = collectPairs(compareValue);
+
+    const result = [];
+    let cursor = 0;
+
+    for (let index = 0; index < targetPairs.length; index++) {
+        const targetPair = targetPairs[index];
+        const comparePair = comparePairs[index];
+
+        // 上一个参数对与这一个之间的原样文本（`}, {` 里的 `, ` 就在这一段里）
+        result.push(escapeHtml(targetValue.slice(cursor, targetPair.start)));
+        cursor = targetPair.end;
 
         if (!comparePair) {
             // 比较对象没有这个参数对，整个高亮
-            result.push(`<span class="excel-text-bg-${type}">{${key},${value}}</span>`);
-        } else if (targetPair.key === comparePair.key && targetPair.value !== comparePair.value) {
-            // 键相同但值不同，只高亮值部分
-            const highlightedPair = `{${key},<span class="excel-text-bg-${type}">${value}</span>}`;
-            console.log(`Generated value-only highlight: ${highlightedPair}`);
-            result.push(highlightedPair);
-        } else if (targetPair.key !== comparePair.key || targetPair.value !== comparePair.value) {
-            // 键或值都不同，整个参数对高亮
-            result.push(`<span class="excel-text-bg-${type}">{${key},${value}}</span>`);
+            result.push(`<span class="excel-text-bg-${type}">${escapeHtml(targetPair.raw)}</span>`);
+            continue;
+        }
+
+        const keySame = targetPair.key === comparePair.key;
+        const valueSame = targetPair.value === comparePair.value;
+
+        if (keySame && !valueSame) {
+            // 键相同但值不同，只高亮值部分。
+            // `{` / `,` / `}` 是正则里固定的定界符，原样重拼即为原文。
+            result.push('{' + escapeHtml(targetPair.key) + ',' +
+                `<span class="excel-text-bg-${type}">${escapeHtml(targetPair.value)}</span>` + '}');
+        } else if (!keySame || !valueSame) {
+            // 键或值不同，整个参数对高亮
+            result.push(`<span class="excel-text-bg-${type}">${escapeHtml(targetPair.raw)}</span>`);
         } else {
             // 参数对完全相同，正常显示
-            result.push(`{${key},${value}}`);
+            result.push(escapeHtml(targetPair.raw));
         }
     }
-    
-    const finalResult = result.join(',');
-    console.log('Final result:', finalResult);
-    console.log('Final result HTML:', finalResult);
-    return finalResult;
-}
 
-// 解析参数对 {key,value},{key,value} -> [{key, value}, {key, value}]
-function parseParameterPairs(value) {
-    console.log('parseParameterPairs input:', value);
-    const pairs = [];
-    const regex = /\{([^,}]+),([^}]+)\}/g;
-    let match;
-    
-    while ((match = regex.exec(value)) !== null) {
-        const pair = {
-            key: match[1].trim(),
-            value: match[2].trim()
-        };
-        console.log('Parsed pair:', pair);
-        pairs.push(pair);
-    }
-    
-    console.log('All parsed pairs:', pairs);
-    return pairs;
+    // 最后一个参数对之后的原样文本
+    result.push(escapeHtml(targetValue.slice(cursor)));
+    return result.join('');
 }
 
 // 高亮字符级别差异
@@ -504,7 +514,7 @@ function createUnchangedRow(row, headers) {
     
     headers.forEach(header => {
         const cellValue = formatCellValue(row.data && row.data[header]);
-        html += `<td class="excel-cell">${escapeHtml(cellValue)}</td>`;
+        html += `<td class="excel-cell"><span class="excel-cell-inner">${escapeHtml(cellValue)}</span></td>`;
     });
     
     html += '</tr>';
@@ -607,7 +617,6 @@ function addImageZoom() {
 
 function addImageComparison() {
     // 添加图片对比滑块功能（可选）
-    console.log('图片对比功能已初始化');
 }
 
 function addBinaryInfoToggle() {
@@ -642,30 +651,20 @@ function formatFileSize(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+// 单元格值 → 展示文本：**表里怎么写就怎么显示**，不做任何改写。
+// 与服务端 format_cell_value（utils/diff_data_utils.py）同一契约：只把真正的
+// 空值显示为空；**不 trim、不把文本 'null'/'nan'/'none'/'undefined' 折叠成空串**。
+// 那个函数的 docstring 写了为什么：展示层一旦改写，比较层报出的变更就会在界面上
+// 变成「空 → 空」或者「两边一模一样」—— 比漏报更难排查。
+// HTML 转义是另一件事：由调用方在使用返回值拼 HTML 时用 escapeHtml 做一次。
 function formatCellValue(value) {
-    // 处理空值、null值、undefined值和NaN值
     if (value === null || value === undefined) {
         return '';
     }
-
-    // 处理NaN值
     if (typeof value === 'number' && isNaN(value)) {
         return '';
     }
-
-    // 转换为字符串并去除多余空格
-    const strValue = String(value).trim();
-
-    // 检查是否为字符串形式的NaN、null等
-    if (strValue.toLowerCase() === 'nan' ||
-        strValue.toLowerCase() === 'null' ||
-        strValue.toLowerCase() === 'undefined' ||
-        strValue.toLowerCase() === 'none' ||
-        strValue === '') {
-        return '';
-    }
-
-    return strValue;
+    return String(value);
 }
 
 function escapeHtml(text) {
@@ -687,11 +686,6 @@ function escapeHtmlAttribute(text) {
 
 // 合并diff页面专用函数
 function showExcelSheetInContainer(diffData, containerId) {
-    console.log('🔍 showExcelSheetInContainer called with:', {
-        diffData: diffData,
-        containerId: containerId,
-        hasSheets: diffData && diffData.sheets ? Object.keys(diffData.sheets).length : 0
-    });
     
     const container = document.getElementById(containerId);
     if (!container) {
@@ -699,7 +693,6 @@ function showExcelSheetInContainer(diffData, containerId) {
         return;
     }
     
-    console.log('✅ Container found:', container.id);
     
     if (!diffData || !diffData.sheets || Object.keys(diffData.sheets).length === 0) {
         container.innerHTML = '<div class="alert alert-warning">没有Excel工作表数据</div>';
@@ -723,7 +716,6 @@ function showExcelSheetInContainer(diffData, containerId) {
     });
     html += '</div>';
 
-    console.log('📝 Generated HTML length:', html.length);
 
     container.innerHTML = html;
 
@@ -745,29 +737,14 @@ function showExcelSheetInContainer(diffData, containerId) {
         }
     }
 
-    console.log('✅ HTML inserted into container:', containerId);
 }
 
 function generateExcelTableForContainer(sheetName, sheetData) {
-    console.log('🔧 generateExcelTableForContainer called for:', sheetName);
-    console.log('📊 sheetData:', sheetData);
 
     if (!sheetData.headers || !sheetData.rows) {
-        console.log('❌ 容器工作表数据不完整');
         return `<div class="p-4 text-center text-muted"><p>工作表 "${escapeHtml(sheetName)}" 数据不完整</p></div>`;
     }
 
-    // 调试：分析行状态
-    const rowStatusCounts = {};
-    sheetData.rows.forEach((row, index) => {
-        const status = row.status || 'unchanged';
-        rowStatusCounts[status] = (rowStatusCounts[status] || 0) + 1;
-        if (status === 'added') {
-            console.log(`🟢 Found added row ${index} in container:`, row);
-        }
-    });
-    console.log('📊 容器行状态统计:', rowStatusCounts);
-    
     let html = `
         <div class="excel-table-wrapper">
             <table class="excel-diff-table">
@@ -775,7 +752,7 @@ function generateExcelTableForContainer(sheetName, sheetData) {
                     <tr class="excel-header-row">
                         <th class="excel-row-header">行号</th>
     `;
-    
+
     // 添加列标题
     sheetData.headers.forEach((header, index) => {
         const columnLetter = getExcelColumnLetter(index);

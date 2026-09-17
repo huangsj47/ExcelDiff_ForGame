@@ -109,7 +109,7 @@
                         <tr class="excel-row-added">
                             <td class="excel-row-number excel-bold-text">{{ row.row_number }}</td>
                             {% for cell in cells %}
-                            <td class="excel-cell">{{ cell.value | format_cell_value }}</td>
+                            <td class="excel-cell"><span class="excel-cell-inner">{{ cell.value | format_cell_value }}</span></td>
                             {% endfor %}
                         </tr>
                         {% elif row.status == 'removed' %}
@@ -117,7 +117,7 @@
                         <tr class="excel-row-removed">
                             <td class="excel-row-number excel-bold-text">{{ row.row_number }}</td>
                             {% for cell in cells %}
-                            <td class="excel-cell">{{ cell.value | format_cell_value }}</td>
+                            <td class="excel-cell"><span class="excel-cell-inner">{{ cell.value | format_cell_value }}</span></td>
                             {% endfor %}
                         </tr>
                         {% else %}
@@ -131,21 +131,29 @@
                             {% for cell in cells %}
                             {% if cell.status == 'changed' %}
                             <td class="excel-cell excel-cell-modified">
-                                {% if cell.old_value %}
-                                <div class="excel-cell-old">{{ cell.old_value | format_cell_value }}</div>
+                                <span class="excel-cell-inner">
+                                {# 改前值必须用**格式化之后**的文本判空，不能写 `{% if cell.old_value %}`：
+                                   Jinja 的 if 走的是 Python 真值 —— 数字 0 / 0.0、布尔 False、
+                                   以及某些形态的空值全都是「假」，于是 `0 → 1` 这种改动只会渲染出
+                                   「1」那一行，「改前是 0」整个消失，审核者无法判断改了什么。
+                                   判空口径与 format_cell_value 保持一致：只有真正的空值才不出这一行。 #}
+                                {% set old_text = cell.old_value | format_cell_value %}
+                                {% if old_text != '' %}
+                                <div class="excel-cell-old">{{ old_text }}</div>
                                 {% endif %}
                                 <div class="excel-cell-new">{{ cell.value | format_cell_value }}</div>
+                                </span>
                             </td>
                             {% elif cell.status == 'added' %}
                             <td class="excel-cell excel-cell-added">
-                                <span class="excel-text-bg-new">{{ cell.value | format_cell_value }}</span>
+                                <span class="excel-cell-inner"><span class="excel-text-bg-new">{{ cell.value | format_cell_value }}</span></span>
                             </td>
                             {% elif cell.status == 'removed' %}
                             <td class="excel-cell excel-cell-removed">
-                                <span class="excel-text-bg-old">{{ cell.value | format_cell_value }}</span>
+                                <span class="excel-cell-inner"><span class="excel-text-bg-old">{{ cell.value | format_cell_value }}</span></span>
                             </td>
                             {% else %}
-                            <td class="excel-cell">{{ cell.value | format_cell_value }}</td>
+                            <td class="excel-cell"><span class="excel-cell-inner">{{ cell.value | format_cell_value }}</span></td>
                             {% endif %}
                             {% endfor %}
                         </tr>

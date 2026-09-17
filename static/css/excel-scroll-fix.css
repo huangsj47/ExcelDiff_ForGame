@@ -54,27 +54,44 @@
 
 /* 不要对所有子元素强制白色背景，避免覆盖文本背景样式 */
 
-/* 确保文本背景样式具有最高优先级，不被其他规则覆盖
-   原为 #f8f8f8 文字 + #ee3f51 底，实测 3.62:1，不满足 WCAG AA 的 4.5:1。
-   底色压深到 #c62828（红色语义不变）后配纯白文字为 5.62:1。
-   本文件最后加载，这里才是最终生效值；diff-styles.css / excel-diff-new.css
-   里的同名规则已同步改成同一组颜色，避免"哪张表加载在哪一页"决定观感。 */
+/* 确保文本背景样式具有最高优先级，不被其他规则覆盖。
+   底色原为 #f8f8f8 文字 + #ee3f51 底，实测 3.62:1，不满足 WCAG AA 的 4.5:1；
+   压深到 #c62828（红色语义不变）后配纯白文字为 5.62:1。本文件最后加载，
+   这里才是最终生效值。
+
+   高亮**既不能移动文字，也不能盖住旁边的字**。两条约束把做法夹到只剩一种。
+
+   1) 不能移动文字。原先 display:inline-block + vertical-align:top + 左右各 4px
+      padding，会让高亮段比同一格里没高亮的文字低 2px、右 4px：线上 5966 的
+      「13,39,10000」/「13,39,10001」里，被高亮的 10000/10001 就是这样跟前面的
+      13,39 对不齐的。
+      → 必须是 display:inline + vertical-align:baseline，左右 padding 为 0。
+
+   2) 不能盖住旁边的字。为了给高亮块留左右余白，这里曾经用
+      `box-shadow: 3px 0 0 …, -3px 0 0 …`（阴影不占布局，看起来正好）。
+      但阴影是**不透明**的，会把紧挨着的那个字符涂掉。线上 5978 的
+      「玩家不带动作&不打断技能」就是这样：高亮段前面的 `&` 只有几像素宽，
+      被两侧各 3px 的阴影盖掉大半，看着就是「显示不全，被颜色色块挡住了」。
+      逗号、斜杠、`|` 这些分隔符同样窄，全都躲不过。
+      → 左右一律不留余白，高亮背景**恰好**覆盖改动的那几个字符。
+
+   还要清掉 border：本文件末尾的通配规则
+   （`.excel-table-wrapper *, .excel-diff-table * { border-width: 1px !important }`）
+   会给高亮 span 也套一个 1px 灰框 —— 既多画一圈边框，又因为行内元素的左右边框
+   参与排版，把那一段之后的文字整体右移 2px（正是第 1) 条要避免的）。
+
+   同一组规则在 diff-styles.css / excel-diff-new.css / merge_diff.html 里各有一份，
+   改一处必须四处一起改（本文件最后加载，这里才是最终生效值）。 */
 .excel-diff-table .excel-text-bg-old {
     background-color: var(--color-cell-old-bg, #c62828) !important; /* 红色背景 */
     color: var(--color-cell-old-text, #ffffff) !important; /* 白色文字 */
-    /* 高亮**不能移动文字**。原先 display:inline-block + vertical-align:top +
-       左右各 4px padding，会让高亮段比同一格里没高亮的文字低 2px、右 4px：
-       线上 5966 的「13,39,10000」/「13,39,10001」里，被高亮的 10000/10001
-       就是这样跟前面的 13,39 对不齐的。改回行内元素 + 基线对齐，左右留白改用
-       不占布局的 box-shadow（阴影不参与排版，所以文字位置与未高亮时完全一致）。
-       同一组规则在 diff-styles.css / excel-diff-new.css / merge_diff.html 里各有一份，
-       改一处必须四处一起改（本文件最后加载，这里才是最终生效值）。 */
     padding: 2px 0 !important;
     border-radius: 3px !important;
     display: inline !important;
     text-align: left !important;
     vertical-align: baseline !important;
-    box-shadow: 3px 0 0 var(--color-cell-old-bg, #c62828), -3px 0 0 var(--color-cell-old-bg, #c62828) !important;
+    box-shadow: none !important;
+    border: 0 !important;
 }
 
 .excel-diff-table .excel-text-bg-new {
@@ -85,8 +102,8 @@
     display: inline !important;
     text-align: left !important;
     vertical-align: baseline !important;
-    box-shadow: 3px 0 0 var(--color-cell-new-bg, #2e7d32), -3px 0 0 var(--color-cell-new-bg, #2e7d32) !important;
-    border: none !important;
+    box-shadow: none !important;
+    border: 0 !important;
     text-decoration: none !important;
 }
 
@@ -204,11 +221,16 @@
     background-image: none !important;
 }
 
-/* 新增行和删除行的单元格样式 - 最高优先级 */
+/* 新增行和删除行的单元格样式 - 最高优先级
+
+   线框（border-color）一律用表格默认的 --color-border：状态由**底色**表达，
+   线框跟着变色会把整行的每个格子都框一圈（线上 5969 的新增行就是一圈深绿线框
+   #28a745，与表格其余部分的灰线框对不上）。同一组规则在 diff-styles.css /
+   excel-diff-new.css / merge_diff.html 里各有一份，改一处必须四处一起改。 */
 .excel-diff-table .excel-cell.excel-added {
     background-color: var(--color-success-bg-soft, #e8f5e8) !important; /* 与「修改行」的新值行同一浅绿 */
     background-image: none !important;
-    border-color: #28a745 !important;
+    border-color: var(--color-border, #dee2e6) !important;
     font-weight: normal !important;
     color: #155724 !important; /* 浅底上用深色文字，与修改行一致 */
 }
@@ -216,7 +238,7 @@
 .excel-diff-table .excel-cell.excel-removed {
     background-color: var(--color-danger-bg-soft, #ffebee) !important; /* 与「修改行」的旧值行同一浅红 */
     background-image: none !important;
-    border-color: #f5c6cb !important;
+    border-color: var(--color-border, #dee2e6) !important;
     font-weight: normal !important;
     color: #721c24 !important; /* 浅底上用深色文字，与修改行一致 */
 }
@@ -225,7 +247,7 @@
 .excel-diff-table tr.excel-row-added td.excel-cell.excel-added {
     background-color: var(--color-success-bg-soft, #e8f5e8) !important; /* 与「修改行」的新值行同一浅绿 */
     background-image: none !important;
-    border-color: #28a745 !important;
+    border-color: var(--color-border, #dee2e6) !important;
     font-weight: normal !important;
     color: #155724 !important; /* 浅底上用深色文字，与修改行一致 */
 }
@@ -233,7 +255,7 @@
 .excel-diff-table tr.excel-row-removed td.excel-cell.excel-removed {
     background-color: var(--color-danger-bg-soft, #ffebee) !important; /* 与「修改行」的旧值行同一浅红 */
     background-image: none !important;
-    border-color: #f5c6cb !important;
+    border-color: var(--color-border, #dee2e6) !important;
     font-weight: normal !important;
     color: #721c24 !important; /* 浅底上用深色文字，与修改行一致 */
 }

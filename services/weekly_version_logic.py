@@ -4,42 +4,43 @@
 
 import json
 import math
-import os
-import re
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
-from flask import render_template, request, jsonify, url_for, abort
+from flask import abort, jsonify, render_template, request, url_for
 from werkzeug.exceptions import HTTPException
 
 from models import (
-    db,
+    BackgroundTask,
+    Commit,
     Project,
     Repository,
-    Commit,
-    BackgroundTask,
     WeeklyVersionConfig,
     WeeklyVersionDiffCache,
     WeeklyVersionExcelCache,
-    DiffCache,
-    ExcelHtmlCache,
-)
-from services.diff_service import DiffService
-from services.diff_render_helpers import (
-    render_git_diff_content, render_new_file_content, render_excel_diff_html,
+    db,
 )
 from services.deployment_mode import is_agent_dispatch_mode
+from services.diff_render_helpers import render_excel_diff_html, render_git_diff_content, render_new_file_content
+from services.diff_service import DiffService
 from services.performance_metrics_service import get_perf_metrics_service
 from services.task_worker_service import TaskWrapper, background_task_queue
+from services.weekly_deleted_excel_helpers import render_weekly_deleted_excel as _render_weekly_deleted_excel_helper
 from services.weekly_deleted_excel_helpers import (
-    render_weekly_deleted_excel as _render_weekly_deleted_excel_helper,
     render_weekly_deleted_excel_notice as _render_weekly_deleted_excel_notice_helper,
+)
+from services.weekly_deleted_excel_helpers import resolve_primary_operation as _resolve_primary_operation_helper
+from services.weekly_deleted_excel_helpers import (
     resolve_weekly_deleted_excel_state as _resolve_weekly_deleted_excel_state_helper,
 )
 from services.weekly_excel_merge_helpers import (
     extract_excel_diff_from_payload as _extract_excel_diff_from_payload_helper,
+)
+from services.weekly_excel_merge_helpers import (
     load_weekly_excel_diff_from_cache as _load_weekly_excel_diff_from_cache_helper,
+)
+from services.weekly_excel_merge_helpers import (
     merge_segmented_excel_diff_payload as _merge_segmented_excel_diff_payload_helper,
 )
 from services.weekly_version_files_api_helpers import (
@@ -51,6 +52,7 @@ from services.weekly_version_files_api_helpers import (
     parse_json_obj,
     resolve_author_display,
 )
+
 # 显式结局与「初始缓存遮罩」判定：为什么需要它，见该模块的模块级 docstring。
 from services.weekly_version_sync_status import (
     TASK_STATUS_COMPLETED,
@@ -68,7 +70,8 @@ from services.weekly_version_sync_status import (
 from utils.diff_data_utils import clean_json_data
 from utils.logger import log_print
 from utils.request_security import _has_project_access
-from utils.timezone_utils import now_beijing, beijing_window_to_utc_naive
+from utils.timezone_utils import beijing_window_to_utc_naive, now_beijing
+
 
 # 窗口：config 的 start/end 是 naive 北京墙钟，commit_time 是 naive-UTC 墙钟；比较前
 # 必须先过 weekly_window_in_utc()，否则窗口偏移 8 小时、窗口前 8 小时的提交被静默丢弃。
@@ -493,7 +496,7 @@ def weekly_version_config_detail_api(project_id, config_id):
                 # 如果启用了自动同步，创建新的同步任务
                 if config.auto_sync and config.is_active:
                     _create_weekly_sync_task(config_id)
-                    log_print(f"已创建新的同步任务", 'WEEKLY')
+                    log_print("已创建新的同步任务", 'WEEKLY')
             db.session.commit()
             return jsonify({
                 'success': True,
@@ -857,7 +860,8 @@ def weekly_version_files_api(config_id):
                 else:
                     from auth.models import AuthUser as _UserModel
 
-                from sqlalchemy import or_, func as sa_func
+                from sqlalchemy import func as sa_func
+                from sqlalchemy import or_
 
                 user_query_conditions = []
                 if all_confirm_usernames:
@@ -924,18 +928,14 @@ def weekly_version_files_api(config_id):
                 try:
                     merged_data = parse_json_obj(cache.merged_diff_data)
                     file_operations = merged_data.get('operations', [])
-                except:
+                except Exception:
                     pass
 
             # 确定文件的主要操作类型（用于颜色编码）
-            primary_operation = 'M'  # 默认为修改
-            if file_operations:
-                if 'D' in file_operations:
-                    primary_operation = 'D'  # 删除优先级最高
-                elif 'A' in file_operations:
-                    primary_operation = 'A'  # 新增次之
-                else:
-                    primary_operation = 'M'  # 修改
+            # 跟**窗口内的最终状态**走，而不是「操作里出现过 D 就标红」：
+            # 文件被删掉又建回来时，旧口径会把它标成红色的「删除文件」，而它的
+            # diff 页显示的是新增内容（线上 奖励模式_CfgRewardMode.xlsx）。
+            primary_operation = _resolve_primary_operation_helper(file_operations)
             files.append({
                 'file_path': cache.file_path,
                 'commit_count': cache.commit_count,
@@ -1103,12 +1103,9 @@ def generate_weekly_git_diff_html(config, diff_cache, file_path, force_recalcula
             # Excel文件使用合并diff逻辑
             return generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_recalculate=force_recalculate)
 
-        # 解析提交信息
-        commit_authors = json.loads(diff_cache.commit_authors) if diff_cache.commit_authors else []
-        commit_messages = json.loads(diff_cache.commit_messages) if diff_cache.commit_messages else []
-        commit_times = json.loads(diff_cache.commit_times) if diff_cache.commit_times else []
-        # 不再生成重复的版本信息头部，因为完整diff页面已经有了
-        header_html = ""
+        # 原先这里解析 diff_cache 的 commit_authors / commit_messages / commit_times
+        # 拼一个版本信息头部；完整 diff 页已有那一块，重复渲染只会让人以为两处应当
+        # 一致，而解析结果没有任何读者。删掉（顺带去掉「缓存 JSON 坏掉即抛异常」的失败面）。
         # 使用现有的Git服务获取真实的diff内容
         try:
             from services.threaded_git_service import ThreadedGitService
@@ -1306,7 +1303,7 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
                 else:
                     merged_diff_data = get_commit_pair_diff_internal(commits[-1], commits[0])
         if not merged_diff_data or merged_diff_data.get('type') != 'excel':
-            log_print(f"❌ Excel合并diff数据检查失败:", 'WEEKLY', force=True)
+            log_print("❌ Excel合并diff数据检查失败:", 'WEEKLY', force=True)
             log_print(f"  - merged_diff_data存在: {merged_diff_data is not None}", 'WEEKLY', force=True)
             if merged_diff_data:
                 log_print(f"  - merged_diff_data类型: {merged_diff_data.get('type', 'None')}", 'WEEKLY', force=True)
@@ -1421,7 +1418,7 @@ def generate_weekly_merged_diff(config, file_path, commits):
             if base_commit:
                 log_print(f"✅ 从Git/SVN获取到真实基准版本: {base_commit.commit_id[:8]} ({base_commit.commit_time})", 'WEEKLY', force=True)
             else:
-                log_print(f"ℹ️ Git/SVN中也未找到更早的提交，确认为新文件", 'WEEKLY', force=True)
+                log_print("ℹ️ Git/SVN中也未找到更早的提交，确认为新文件", 'WEEKLY', force=True)
         # 获取最新版本（时间范围内的最后一个提交）
         latest_commit = commits[-1]
         # 检查是否已存在缓存
@@ -1651,7 +1648,7 @@ def create_weekly_excel_cache_task(config_id, file_path):
             return None
 
         # 创建后台任务来生成Excel HTML缓存；使用repository_id字段存储config_id
-        log_print(f"🗃️ 创建数据库任务记录...", 'WEEKLY', force=True)
+        log_print("🗃️ 创建数据库任务记录...", 'WEEKLY', force=True)
         new_task = BackgroundTask(
             task_type='weekly_excel_cache',
             repository_id=config_id,  # 存储config_id
@@ -1792,7 +1789,6 @@ def get_real_base_commit_from_vcs(config, file_path):
 
     except Exception as e:
         log_print(f"❌ 从{repository.type.upper()}获取基准版本失败: {e}", 'WEEKLY', force=True)
-        import traceback
         traceback.print_exc()
         return None
 
