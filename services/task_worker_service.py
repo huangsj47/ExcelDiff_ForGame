@@ -49,6 +49,7 @@ from services.ai_analysis_service import (
     has_weekly_changes,
 )
 from models.ai_analysis import AiWeeklyAnalysisState
+from services.ai.analysis_budget import budget_gate_reason
 # 周版本同步的显式结局 → 任务状态映射：process_weekly_version_sync 过去用 None
 # 同时表示「配置不存在/被禁用/窗口内无提交/正常跑完」四种结局，调用方只能无条件
 # 标 completed，于是真正的失败与「这周本来就没数据」在任务列表里长得一模一样。
@@ -1785,6 +1786,25 @@ def schedule_weekly_ai_analysis_tasks():
                         last_triggered = last_triggered.replace(tzinfo=timezone.utc)
                     if (now_utc - last_triggered).total_seconds() < interval_minutes * 60:
                         continue
+
+                # 预算闸门：超预算就不排队。放在间隔判定**之后**，所以这条日志最多
+                # 每个分析间隔出现一条，不会每分钟刷屏。执行前
+                # `run_weekly_analysis_background` 还会再查一次 —— 那是最后一道，
+                # 覆盖「排好队之后才超预算」的情况。放在这里是为了不产生一个注定
+                # 被跳过的后台任务（任务列表里会多出一堆 skipped 记录）。
+                over_budget_reason = budget_gate_reason(project_id, entry="weekly_schedule")
+                if over_budget_reason:
+                    log_print(
+                        f"⏸️ 周版本自动分析不排队（{over_budget_reason}）: group_key={group_key}",
+                        "AI",
+                        force=True,
+                    )
+                    # 推进触发水位线让这次判定也被间隔节流；预算回到额度内（例如跨月）
+                    # 之后，下一个间隔自然会重新尝试。
+                    if state is not None:
+                        state.last_triggered_at = now_utc
+                        _db.session.commit()
+                    continue
 
                 stale_tasks = _BackgroundTask.query.filter(
                     _BackgroundTask.task_type == 'weekly_ai_analysis',

@@ -431,3 +431,64 @@ def estimate_cost(
 def price_table_doc_shape() -> str:
     """配置界面要展示的格式示例。"""
     return _DOC_SHAPE
+
+
+def _model_signature(table: PriceTable) -> dict[str, tuple[str, str, str, str]]:
+    """单价表里**真正决定金额**的那部分：模式名 → 三（四）档单价。
+
+    只取单价，不取 `note`：给一条模型加一句备注不会让历史费用对不上，而改一个数字会。
+    """
+    return {
+        str(pattern): (
+            money(price.input_per_million) or "",
+            money(price.output_per_million) or "",
+            money(price.cache_read_per_million) or "",
+            money(price.cache_write_per_million) or "",
+        )
+        for pattern, price in table.models.items()
+    }
+
+
+def price_change_requires_version_bump(
+    previous_json: str | None, next_json: str | None
+) -> str | None:
+    """改了单价却没改 `version` → 返回一句可以直接显示的中文；没问题返回 `None`。
+
+    ## 为什么这条规矩要写成代码
+
+    每次运行会把当时的 `version` 落进 `ai_analysis_run.pricing_version`，用来回答
+    「这条历史费用是按哪版单价算的」（见 `services/ai/usage.py::usage_from_run`）。
+    价格改了、版本没改的后果不是报错，而是**安静地把历史解释弄错**：库里前后两批
+    运行记着同一个版本号，金额却不一样，而且没有任何办法分辨哪条是改价前算的。
+
+    ## 什么时候**不**报错
+
+    * 新的表是空的（= 移除项目价格表，回落到平台默认表）；
+    * 新的表解析不了（那是 `parse_price_table` 的错，由它去报，这里不抢）；
+    * 之前没有可用的表（第一次配，没有可比对的旧版本）；
+    * 只有 `version` 变了、单价没变（重新标版本是允许的）。
+    """
+    next_text = (next_json or "").strip()
+    if not next_text:
+        return None
+
+    next_table, _next_errors = parse_price_table(next_text)
+    if next_table is None:
+        return None
+
+    prev_text = (previous_json or "").strip()
+    if not prev_text:
+        return None
+    prev_table, _prev_errors = parse_price_table(prev_text)
+    if prev_table is None:
+        return None
+
+    if _model_signature(prev_table) == _model_signature(next_table):
+        return None
+    if str(prev_table.version) != str(next_table.version):
+        return None
+    return (
+        f"单价改了，但 version 还是「{next_table.version}」。改单价必须同时改 version —— "
+        "每次运行会把当时的版本号记下来，用来解释历史费用是按哪版算的；"
+        "版本不变的话，改价前后的费用在库里分不开。"
+    )

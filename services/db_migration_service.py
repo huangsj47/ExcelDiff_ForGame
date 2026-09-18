@@ -261,6 +261,12 @@ def _migrate_ai_analysis_columns(db, log_print):
             "project_knowledge": "project_knowledge TEXT",
             # 费用估算用的单价表（JSON 文本）。平台出厂不带单价，见 services/ai/pricing.py。
             "model_price_table": "model_price_table TEXT",
+            # 预算闸门（2026-09）：超了就不让 AI 分析跑起来。
+            # 这两列**没有 DEFAULT 子句**，老行是 NULL —— 而 NULL 的语义正好是
+            # 「不限制」，所以不需要回填，也不该回填成 0（0 = 一个 token 都不许花）。
+            "budget_period": "budget_period VARCHAR(20)",
+            "budget_token_limit": "budget_token_limit BIGINT",
+            "budget_cost_limit": "budget_cost_limit VARCHAR(40)",
         },
         log_print,
     )

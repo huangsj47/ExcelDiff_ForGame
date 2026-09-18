@@ -1463,10 +1463,23 @@ async function refreshWeeklyAiReadiness() {
             if (meta) meta.textContent = '无法读取 AI 配置（可能没有该项目的访问权限）。';
         } else if (data.endpoint_ready) {
             weeklyAiEndpointReady = true;
-            if (btn) btn.disabled = false;
-            setWeeklyAiStatusBadge('已配置', 'success');
-            if (meta) {
-                meta.textContent = `自动分析每 1 小时触发，可手动补跑。模型 ${data.api_model} · Token 已配置`;
+            // 预算闸门：**超预算就不让点**，而且必须把原因写在旁边 —— 一个只变灰、
+            // 不给理由的按钮，用户只会以为页面坏了。判定用的 `data.budget` 与服务端的
+            // 拦截（services/ai/analysis_budget.py）是同一份数据、同一套口径。
+            const budget = data.budget;
+            if (budget && budget.over) {
+                weeklyAiEndpointReady = false;
+                if (btn) btn.disabled = true;
+                setWeeklyAiStatusBadge('超预算', 'danger');
+                if (meta) {
+                    meta.textContent = `${budget.reason} 调整方式：项目概览页 →「AI 分析配置」→ 预算周期 / 周期内 token 上限 / 周期内费用上限。`;
+                }
+            } else {
+                if (btn) btn.disabled = false;
+                setWeeklyAiStatusBadge('已配置', 'success');
+                if (meta) {
+                    meta.textContent = `自动分析每 1 小时触发，可手动补跑。模型 ${data.api_model} · Token 已配置`;
+                }
             }
         } else {
             weeklyAiEndpointReady = false;

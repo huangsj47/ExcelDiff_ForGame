@@ -31,6 +31,59 @@
     </div>
 
     <div id="aiuBody" hidden>
+        <!-- 筛选：条件走服务端聚合，并同步进 URL query（刷新、分享、收藏都不丢） -->
+        <section class="aiu-card" id="aiuFilterCard">
+            <div class="aiu-card-head">
+                <h2>筛选</h2>
+                <span class="aiu-meta" id="aiuFilterNote" role="status" aria-live="polite"></span>
+            </div>
+            <form class="aiu-filters" id="aiuFilterForm" role="search" aria-label="筛选 AI 消耗数据">
+                <div class="aiu-field">
+                    <label class="aiu-label" for="aiuFilterProject">项目</label>
+                    <select class="aiu-select" id="aiuFilterProject">
+                        <option value="">全部项目</option>
+                    </select>
+                </div>
+                <div class="aiu-field">
+                    <label class="aiu-label" for="aiuFilterRange">时间范围</label>
+                    <select class="aiu-select" id="aiuFilterRange"></select>
+                </div>
+                <div class="aiu-field" id="aiuFilterFromField" hidden>
+                    <label class="aiu-label" for="aiuFilterFrom">起始日期</label>
+                    <input type="date" class="aiu-input" id="aiuFilterFrom">
+                </div>
+                <div class="aiu-field" id="aiuFilterToField" hidden>
+                    <label class="aiu-label" for="aiuFilterTo">结束日期</label>
+                    <input type="date" class="aiu-input" id="aiuFilterTo">
+                </div>
+                <div class="aiu-field">
+                    <label class="aiu-label" for="aiuFilterSource">触发来源</label>
+                    <select class="aiu-select" id="aiuFilterSource"></select>
+                </div>
+                <div class="aiu-field">
+                    <label class="aiu-label" for="aiuFilterStatus">状态</label>
+                    <select class="aiu-select" id="aiuFilterStatus"></select>
+                </div>
+                <div class="aiu-filter-actions">
+                    <button type="submit" class="aiu-btn primary" id="aiuFilterApplyBtn">
+                        <i class="fas fa-filter" aria-hidden="true"></i> 应用
+                    </button>
+                    <button type="button" class="aiu-btn secondary" id="aiuFilterClearBtn">
+                        <i class="fas fa-eraser" aria-hidden="true"></i> 清空条件
+                    </button>
+                    <button type="button" class="aiu-btn secondary" id="aiuFilterResetBtn">
+                        <i class="fas fa-rotate-left" aria-hidden="true"></i> 重置为默认
+                    </button>
+                </div>
+            </form>
+            <p class="aiu-hint">
+                「清空条件」只取消项目 / 来源 / 状态这三项，<strong>保留你正在看的时间范围</strong>；
+                「重置为默认」把时间范围也回到「全部」，等于刚打开这一页的状态。
+                两者都不会删除任何用量记录 —— 这个页面上没有破坏性操作。
+                条件写在地址栏里，刷新、分享、收藏都不会丢。
+            </p>
+        </section>
+
         <!-- 顶部 KPI：先给「一共花了多少」，再给细节 -->
         <div class="aiu-kpi-grid" id="aiuKpis"></div>
 
@@ -53,11 +106,114 @@
                             <th scope="col" class="num">输出 token</th>
                             <th scope="col" class="num">缓存命中率</th>
                             <th scope="col" class="num">费用估算</th>
+                            <th scope="col" class="num">本期预算</th>
                             <th scope="col">最近一次</th>
                         </tr>
                     </thead>
                     <tbody id="aiuProjectRows"></tbody>
                 </table>
+            </div>
+        </section>
+
+        <section class="aiu-card" id="aiuPriceCard">
+            <div class="aiu-card-head">
+                <h2>模型单价表</h2>
+                <span class="aiu-meta">费用估算只按这张表算；接口只回 token 数、不回金额</span>
+            </div>
+            <p class="aiu-hint">
+                单位是<strong>每 100 万 token</strong>。模型名按「精确 → 前缀 <code>xxx-*</code>」匹配，
+                <strong>不做包含匹配</strong>（那会让 <code>gpt-4</code> 命中 <code>gpt-4o</code>，价格差一个量级却毫无提示）。
+                「命中缓存价」留空时，命中那部分按未命中价计入，费用偏保守。
+                <strong>改单价必须同时改版本</strong> —— 每次运行会把当时的版本号记下来，
+                用来解释历史费用是按哪版算的；版本不变的话，改价前后的费用在库里分不开。
+                面板上的金额一律按<strong>当前</strong>价格表重算，并在明细里注明该次落库时的版本。
+                留空 = 不显示费用（<strong>不是</strong>「免费」）。
+            </p>
+
+            <div class="aiu-price-head">
+                <label class="aiu-label" for="aiuPriceProject">项目</label>
+                <select class="aiu-select" id="aiuPriceProject"></select>
+                <span class="aiu-meta" id="aiuPriceState" role="status" aria-live="polite">正在读取…</span>
+            </div>
+
+            <div id="aiuPriceError" class="aiu-state aiu-error" role="alert" hidden>
+                <i class="fas fa-triangle-exclamation" aria-hidden="true"></i>
+                <span id="aiuPriceErrorText">单价表加载失败。</span>
+            </div>
+
+            <div id="aiuPriceEditor" hidden>
+                <div class="aiu-price-bar">
+                    <span class="aiu-price-bar__title">
+                        <i class="fas fa-table-list" aria-hidden="true"></i> 按行编辑
+                    </span>
+                    <label class="aiu-price-field">
+                        <span class="aiu-price-field__label">版本</span>
+                        <input type="text" class="aiu-input" id="aiuPriceVersionInput"
+                               placeholder="2026-09-18" autocomplete="off">
+                    </label>
+                    <label class="aiu-price-field">
+                        <span class="aiu-price-field__label">币种</span>
+                        <input type="text" class="aiu-input" id="aiuPriceCurrencyInput"
+                               placeholder="CNY" autocomplete="off" maxlength="8">
+                    </label>
+                    <button type="button" class="aiu-btn secondary" id="aiuPriceAddRowBtn">
+                        <i class="fas fa-plus" aria-hidden="true"></i> 增加一行
+                    </button>
+                </div>
+
+                <div class="aiu-table-wrap">
+                    <table class="aiu-table aiu-price-table">
+                        <caption class="aiu-caption">
+                            每一行是一个模型的三档单价。修改后会自动同步到下面的 JSON。
+                        </caption>
+                        <thead>
+                            <tr>
+                                <th scope="col">模型名（或 <code>前缀-*</code>）</th>
+                                <th scope="col" class="num">输入价</th>
+                                <th scope="col" class="num">命中缓存价</th>
+                                <th scope="col" class="num">输出价</th>
+                                <th scope="col"><span class="visually-hidden">操作</span></th>
+                            </tr>
+                        </thead>
+                        <tbody id="aiuPriceRows"></tbody>
+                    </table>
+                </div>
+                <p class="aiu-hint" id="aiuPriceEmpty">
+                    还没有任何单价。点「增加一行」填一条，或在下面的高级模式里直接粘贴 JSON。
+                </p>
+                <p class="aiu-price-warn" id="aiuPriceWarn" role="status" hidden></p>
+
+                <div class="aiu-price-json">
+                    <button type="button" class="aiu-btn secondary" id="aiuPriceJsonToggleBtn"
+                            aria-expanded="false" aria-controls="aiuPriceJsonPanel">
+                        <i class="fas fa-chevron-right" aria-hidden="true"></i> 高级模式：直接编辑 JSON
+                    </button>
+                    <div id="aiuPriceJsonPanel" hidden>
+                        <label class="aiu-label" for="aiuPriceJsonInput">模型单价表（JSON 原文）</label>
+                        <textarea class="aiu-input aiu-price-json__input" id="aiuPriceJsonInput" rows="8"
+                                  aria-describedby="aiuPriceJsonHelp aiuPriceJsonError"></textarea>
+                        <p class="aiu-hint" id="aiuPriceJsonHelp">
+                            展开这个面板时会用当前 JSON 重新生成上面的行；反过来，改动上面的行会把结果写回这里。
+                            <strong>谁最后被编辑，就以谁为准。</strong>
+                            <span id="aiuPriceDoc" class="aiu-price-doc"></span>
+                        </p>
+                        <p class="aiu-price-error" id="aiuPriceJsonError" hidden></p>
+                    </div>
+                </div>
+
+                <div class="aiu-price-actions">
+                    <button type="button" class="aiu-btn primary" id="aiuPriceSaveBtn">
+                        <i class="fas fa-floppy-disk" aria-hidden="true"></i> 保存单价表
+                    </button>
+                    <button type="button" class="aiu-btn secondary" id="aiuPriceResetBtn">
+                        <i class="fas fa-rotate-left" aria-hidden="true"></i> 放弃改动
+                    </button>
+                    <span class="aiu-meta" id="aiuPriceFeedback" role="status" aria-live="polite"></span>
+                </div>
+                <p class="aiu-hint" id="aiuPriceReadonly" hidden>
+                    <i class="fas fa-lock" aria-hidden="true"></i>
+                    只读：要改单价表需要这个项目的<strong>管理员</strong>权限。
+                </p>
             </div>
         </section>
 
@@ -189,6 +345,11 @@
     --aiu-miss: var(--color-warning-text, #856404);
     --aiu-danger: var(--color-danger-text, #b3261e);
     --aiu-bar-track: var(--color-surface-muted, #e9ecef);
+    /* 单价表编辑器（本轮新增）*/
+    --aiu-border-strong: var(--color-border-strong, #d0d7de);
+    --aiu-warning: var(--color-warning-text, #856404);
+    --aiu-warning-bg: var(--color-warning-bg, #fff3cd);
+    --aiu-mono: var(--font-mono, ui-monospace, monospace);
 }
 
 .aiu-page { color: var(--aiu-text); padding-bottom: 32px; }
@@ -204,7 +365,7 @@
 .aiu-meta { color: var(--aiu-muted); font-size: 0.82rem; }
 
 .aiu-btn {
-    min-height: 40px; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+    min-height: 44px; padding: 8px 14px; border-radius: 8px; cursor: pointer;
     border: 1px solid var(--aiu-border); background: var(--aiu-card); color: var(--aiu-text);
     font-size: 0.88rem; display: inline-flex; align-items: center; gap: 6px;
     transition: background-color 180ms ease, border-color 180ms ease;
@@ -253,7 +414,12 @@
 .aiu-hint { color: var(--aiu-muted); font-size: 0.82rem; margin: 0 0 10px 0; }
 .aiu-pricing-note { color: var(--aiu-muted); font-size: 0.82rem; margin: 6px 0 10px 0; }
 
-.aiu-table-wrap { overflow-x: auto; }
+/* `position: relative` 不是排版，是堵一个实测到的坑：滚动容器只裁剪「包含块在它
+   内部」的后代。表头里如果有一个 absolutely positioned 的 sr-only 文本（「操作」），
+   而滚动容器是 static，它的包含块就落到初始包含块上，于是**逃出裁剪**，在 375px 下
+   把整页横向撑出 63px（无头 Chrome 实测：documentElement.scrollWidth 438 vs 375）。
+   页面上任何一处 `<span class="visually-hidden">` 写进表格，都会重新踩到它。 */
+.aiu-table-wrap { overflow-x: auto; position: relative; }
 .aiu-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
 .aiu-table caption {
     caption-side: top; text-align: left; color: var(--aiu-muted);
@@ -298,10 +464,89 @@
 .aiu-back { background: none; border: none; color: var(--aiu-primary); cursor: pointer; padding: 0; font-size: 0.82rem; }
 .aiu-back:hover { text-decoration: underline; }
 
+/* ---------------------------------------------------------------------------
+   模型单价表：结构化行编辑 + JSON 高级模式
+   ---------------------------------------------------------------------------
+   两种模式编辑的是**同一份文本**（`#aiuPriceJsonInput`）。行编辑器把行序列化成 JSON
+   写回那个 textarea，保存时提交的还是 `model_price_table` 这一个字段 —— 校验、错误
+   定位、服务端的「改价必须改版本」判定全都不用改。两边各存一份状态必然漂移，而漂移的
+   方向是「界面上显示 A、存下去的是 B」。 */
+/* ---------------------------------------------------------------------------
+   本轮新增：筛选栏 + 模型单价表编辑器
+   ---------------------------------------------------------------------------
+   下面这一段里的颜色一律走 `var(--token, 字面量)`，**不写裸 hex** —— 仓库的
+   token 注释里记着实测 WCAG 对比度，在页面里另写一个颜色就等于绕过了那套实测值。 */
+/* 筛选栏：一行放得下就一行，放不下就换行；375px 下每个控件都占满一行，
+   不会出现横向滚动。 */
+.aiu-filters { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.aiu-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.aiu-filter-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.aiu-budget-over { color: var(--aiu-danger); font-weight: 600; }
+.aiu-label { color: var(--aiu-text); font-size: 0.86rem; font-weight: 500; }
+/* 触控目标 ≥44px：本页的按钮、下拉、输入框一律到这个高度（无头 Chrome 实测原为
+   40/35px，低于仓库硬约束）。表格里的单价输入同样按 44px，否则手机上点不中。 */
+.aiu-select, .aiu-input {
+    min-height: 44px; padding: 6px 10px; border-radius: 8px;
+    border: 1px solid var(--aiu-border-strong); background: var(--aiu-card); color: var(--aiu-text);
+    font-size: 0.86rem; font-family: inherit;
+}
+.aiu-select { min-width: 220px; }
+.aiu-select:focus-visible, .aiu-input:focus-visible {
+    outline: 3px solid var(--color-focus, #0b5ed7); outline-offset: 1px;
+}
+.aiu-price-bar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin-top: 10px; padding: 10px 12px;
+    border: 1px solid var(--aiu-border); border-bottom: 0;
+    border-radius: 10px 10px 0 0; background: var(--aiu-bg);
+}
+.aiu-price-bar__title {
+    display: inline-flex; align-items: center; gap: 6px; margin-right: auto;
+    color: var(--aiu-text); font-size: 0.86rem; font-weight: 600;
+}
+.aiu-price-field { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+.aiu-price-field__label { color: var(--aiu-muted); font-size: 0.78rem; white-space: nowrap; }
+.aiu-price-field .aiu-input { width: 130px; }
+.aiu-price-table { border: 1px solid var(--aiu-border); border-top: 0; }
+.aiu-price-table .aiu-input { width: 100%; min-width: 44px; font-variant-numeric: tabular-nums; }
+.aiu-price-table th.num, .aiu-price-table td.num { font-variant-numeric: tabular-nums; }
+.aiu-price-table td:last-child, .aiu-price-table th:last-child { width: 56px; text-align: right; }
+/* 「删掉这一行」是个 42×40 的小按钮，手机点不中。给足 44×44。 */
+.aiu-price-remove { min-width: 44px; }
+.aiu-price-readonly-row { color: var(--aiu-muted); }
+.aiu-price-warn {
+    margin: 10px 0 0; padding: 8px 12px; border-radius: 8px;
+    border: 1px solid var(--aiu-warning); background: var(--aiu-warning-bg);
+    color: var(--aiu-warning); font-size: 0.8rem; line-height: 1.6;
+}
+/* 单价表的内联错误：平台自己的错误语言是「红字 + 就地说明」，不用 Bootstrap 的
+   .text-danger（它带 !important，且颜色不是本页实测过对比度的那个 token）。 */
+.aiu-price-error {
+    margin: 6px 0 0; padding: 8px 12px; border-radius: 8px;
+    border: 1px solid var(--aiu-danger); background: var(--color-danger-bg, #ffebe9);
+    color: var(--aiu-danger); font-size: 0.8rem; line-height: 1.6;
+}
+.aiu-price-json { margin-top: 12px; }
+.aiu-price-json__input { display: block; width: 100%; font-family: var(--aiu-mono); }
+.aiu-price-doc {
+    display: block; margin-top: 6px; padding: 8px; border-radius: 6px;
+    border: 1px solid var(--aiu-border); background: var(--aiu-bg);
+    font-family: var(--aiu-mono); font-size: 0.78rem; line-height: 1.5;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.aiu-price-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.aiu-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+.aiu-btn[disabled]:hover { background: var(--aiu-card); }
+.aiu-btn.primary[disabled]:hover { background: var(--aiu-primary); }
+
 @media (max-width: 767px) {
     .aiu-kpi-value { font-size: 1.3rem; }
     .aiu-hero { padding: 14px; }
     .aiu-card { padding: 12px; }
+    /* 375px：筛选控件与单价表那一行都占满，避免挤成两三个字的窄格 */
+    .aiu-field, .aiu-select, .aiu-price-field { width: 100%; }
+    .aiu-price-field .aiu-input { width: 100%; }
+    .aiu-filters { align-items: stretch; }
 }
 @media (prefers-reduced-motion: reduce) {
     .aiu-skeleton-line { animation: none; }
@@ -418,6 +663,173 @@ function aiuToolLabel(kind) {
         });
     }
 
+    // -----------------------------------------------------------------------
+    //  筛选：条件进 URL query，聚合在服务端做
+    // -----------------------------------------------------------------------
+    // 为什么条件要进 URL：这一页的数字常常被贴到群里、被收藏。「刷新就回到全量」
+    // 会让看的人和贴的人看到的不是同一个数，而且没人知道不一样。
+    var FILTER_KEYS = ['project', 'range', 'from', 'to', 'source', 'status'];
+
+    function currentParams() {
+        // 从**地址栏**读，不从表单读：首次加载时表单里的选项还没填进去
+        // （要等接口把 filter_options 回过来），读到的会是空的。
+        var incoming = new URLSearchParams(window.location.search);
+        var params = new URLSearchParams();
+        FILTER_KEYS.forEach(function (key) {
+            var value = incoming.get(key);
+            if (value !== null && value !== '') params.set(key, value);
+        });
+        return params;
+    }
+
+    function formParams() {
+        var params = new URLSearchParams();
+        var project = $('aiuFilterProject').value;
+        if (project) params.set('project', project);
+        var range = $('aiuFilterRange').value;
+        if (range && range !== 'all') params.set('range', range);
+        if (range === 'custom') {
+            if ($('aiuFilterFrom').value) params.set('from', $('aiuFilterFrom').value);
+            if ($('aiuFilterTo').value) params.set('to', $('aiuFilterTo').value);
+        }
+        var source = $('aiuFilterSource').value;
+        if (source && source !== 'all') params.set('source', source);
+        var status = $('aiuFilterStatus').value;
+        if (status && status !== 'all') params.set('status', status);
+        return params;
+    }
+
+    /** 只带非默认值，地址栏才短；`replaceState` 而不是 `pushState` —— 筛选不是导航，
+     *  不该把浏览器的后退键变成「撤销上一步筛选」。 */
+    function syncUrl(filters) {
+        var params = new URLSearchParams();
+        var data = filters || {};
+        if (data.project_id !== null && data.project_id !== undefined) params.set('project', String(data.project_id));
+        if (data.range && data.range !== 'all') params.set('range', data.range);
+        if (data.range === 'custom') {
+            if (data.from) params.set('from', data.from);
+            if (data.to) params.set('to', data.to);
+        }
+        if (data.source && data.source !== 'all') params.set('source', data.source);
+        if (data.status && data.status !== 'all') params.set('status', data.status);
+        var query = params.toString();
+        window.history.replaceState(null, '',
+            window.location.pathname + (query ? '?' + query : '') + window.location.hash);
+    }
+
+    function optionNode(value, label) {
+        var option = document.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        return option;
+    }
+
+    function replaceOptions(select, items, placeholder) {
+        var current = select.value;
+        select.textContent = '';
+        if (placeholder !== null && placeholder !== undefined) {
+            select.appendChild(optionNode('', placeholder));
+        }
+        (items || []).forEach(function (item) {
+            select.appendChild(optionNode(String(item.value), String(item.label)));
+        });
+        if (current && select.querySelector('option[value="' + current + '"]')) select.value = current;
+    }
+
+    /** 下拉选项由服务端下发（`filter_options` / `project_options`），不在模板里写死 ——
+     *  写死就会出现「界面上有个选项、后端认不出来（回落默认）」，用户选了却没生效。 */
+    function fillFilterOptions(body) {
+        var options = body.filter_options || {};
+        replaceOptions($('aiuFilterRange'), options.ranges ||
+            [{ value: 'all', label: '全部' }], null);
+        replaceOptions($('aiuFilterSource'), options.sources || [{ value: 'all', label: '全部来源' }], null);
+        replaceOptions($('aiuFilterStatus'), options.statuses || [{ value: 'all', label: '全部状态' }], null);
+        var projects = (body.project_options || []).map(function (item) {
+            return { value: item.project_id, label: item.name };
+        });
+        replaceOptions($('aiuFilterProject'), projects, '全部项目');
+    }
+
+    function toggleCustomFields() {
+        var custom = $('aiuFilterRange').value === 'custom';
+        $('aiuFilterFromField').hidden = !custom;
+        $('aiuFilterToField').hidden = !custom;
+    }
+
+    /** 按**服务端实际生效的**筛选回填表单。传来的条件非法时后端会回落默认，
+     *  界面必须跟着回落到同一处 —— 否则界面显示的条件与实际生效的不是同一套。 */
+    function applyFiltersToForm(filters) {
+        var data = filters || {};
+        var project = $('aiuFilterProject');
+        project.value = (data.project_id === null || data.project_id === undefined)
+            ? '' : String(data.project_id);
+        $('aiuFilterRange').value = data.range || 'all';
+        $('aiuFilterFrom').value = data.from || '';
+        $('aiuFilterTo').value = data.to || '';
+        $('aiuFilterSource').value = data.source || 'all';
+        $('aiuFilterStatus').value = data.status || 'all';
+        toggleCustomFields();
+        var note = $('aiuFilterNote');
+        if (note) {
+            var notes = data.notes || [];
+            note.textContent = notes.length ? notes.join(' ') : '';
+        }
+    }
+
+    function applyAndReload() {
+        // 表单 → 地址栏 → 重新取数。先改地址栏再取数：取数走的就是地址栏那份，
+        // 两者不可能不一致。
+        var params = formParams();
+        var query = params.toString();
+        window.history.replaceState(null, '',
+            window.location.pathname + (query ? '?' + query : '') + window.location.hash);
+        return loadOverview();
+    }
+
+    function initFilters() {
+        var form = $('aiuFilterForm');
+        if (form) {
+            form.addEventListener('submit', function (event) {
+                event.preventDefault();
+                applyAndReload();
+            });
+        }
+        var range = $('aiuFilterRange');
+        if (range) {
+            range.addEventListener('change', function () {
+                toggleCustomFields();
+                // 只切到「自定义」时不立刻查（日期还没填），其余情况立刻生效。
+                if (range.value !== 'custom') applyAndReload();
+            });
+        }
+        var clearBtn = $('aiuFilterClearBtn');
+        if (clearBtn) {
+            // 只清「筛选」三项，**保留时间范围** —— 用户很可能正在看某个区间，
+            // 只是想取消项目的限定。要连区间一起回到默认，用「重置为默认」。
+            clearBtn.addEventListener('click', function () {
+                $('aiuFilterProject').value = '';
+                $('aiuFilterSource').value = 'all';
+                $('aiuFilterStatus').value = 'all';
+                applyAndReload();
+            });
+        }
+        var resetBtn = $('aiuFilterResetBtn');
+        if (resetBtn) {
+            // 全部回默认 + 清掉地址栏参数。**只动筛选状态**，不碰任何用量记录 ——
+            // 这个页面上没有任何破坏性操作。
+            resetBtn.addEventListener('click', function () {
+                $('aiuFilterProject').value = '';
+                $('aiuFilterRange').value = 'all';
+                $('aiuFilterFrom').value = '';
+                $('aiuFilterTo').value = '';
+                $('aiuFilterSource').value = 'all';
+                $('aiuFilterStatus').value = 'all';
+                toggleCustomFields();
+                applyAndReload();
+            });
+        }
+    }
+
     function cell(text, className) {
         var td = document.createElement('td');
         if (className) td.className = className;
@@ -447,7 +859,7 @@ function aiuToolLabel(kind) {
         return card;
     }
 
-    function renderKpis(totals) {
+    function renderKpis(totals, overBudget) {
         var host = $('aiuKpis');
         host.textContent = '';
         var tokens = totals.tokens || {};
@@ -479,6 +891,12 @@ function aiuToolLabel(kind) {
         if (costText !== null) {
             host.appendChild(kpi('费用估算', costText, '按当前价格表估算：' + (totals.cost.price_version || '未标版本')));
         }
+        // 超预算项目数：**只在这上面有事的时候出现**。0 个项目超预算不是一条信息，
+        // 摆一个恒为 0 的卡片只会让人以为哪里没配好。
+        if (overBudget > 0) {
+            host.appendChild(kpi('已超预算的项目', String(overBudget) + ' 个',
+                '这些项目的 AI 分析已被暂停（手动与定时都停），见下表的「本期预算」列'));
+        }
     }
 
     function renderPricingNote(pricing) {
@@ -496,14 +914,49 @@ function aiuToolLabel(kind) {
         host.appendChild(span);
     }
 
+    /** 预算单元：`已用 / 上限`＋百分比。**未配上限 = 不限制**，不是 0。 */
+    function budgetCell(budget) {
+        var td = document.createElement('td');
+        td.className = 'num';
+        if (!budget || !budget.limited) {
+            td.textContent = '未设上限';
+            td.classList.add('aiu-unknown');
+            return td;
+        }
+        var limits = budget.limits || {};
+        var used = budget.used || {};
+        var parts = [];
+        if (limits.tokens !== null && limits.tokens !== undefined) {
+            parts.push(aiuOrUnknown(aiuFmtTokens(used.tokens), AIU_UNKNOWN)
+                + ' / ' + aiuFmtTokens(limits.tokens));
+        }
+        if (limits.cost !== null && limits.cost !== undefined) {
+            var symbol = { CNY: '¥', USD: '$', EUR: '€' }[limits.currency] || '';
+            parts.push(symbol + (used.cost === null || used.cost === undefined ? AIU_UNKNOWN : used.cost)
+                + ' / ' + symbol + limits.cost);
+        }
+        td.textContent = (budget.period_label ? budget.period_label + ' ' : '') + parts.join(' · ');
+        if (budget.over) {
+            // 颜色不是唯一线索：标签里写着「已超」，hover 与读屏都能拿到原因。
+            td.classList.add('aiu-budget-over');
+            td.title = budget.reason || '已超出预算';
+            var badge = document.createElement('span');
+            badge.className = 'aiu-badge failed';
+            badge.textContent = '已超';
+            td.appendChild(document.createTextNode(' '));
+            td.appendChild(badge);
+        }
+        return td;
+    }
+
     function renderProjects(overview) {
         var tbody = $('aiuProjectRows');
         tbody.textContent = '';
         var projects = overview.projects || [];
         if (!projects.length) {
             var tr = document.createElement('tr');
-            var td = cell('还没有用量数据。这个功能上线之后跑过的分析才会出现在这里。', 'empty-row');
-            td.colSpan = 8;
+            var td = cell('没有匹配的数据。换个筛选条件试试，或者点「重置为默认」。', 'empty-row');
+            td.colSpan = 9;
             tr.appendChild(td);
             tbody.appendChild(tr);
             return;
@@ -535,6 +988,7 @@ function aiuToolLabel(kind) {
             var rate = aiuFmtRate((item.cache || {}).hit_rate);
             tr.appendChild(numCell(rate, 'num'));
             tr.appendChild(numCell(aiuFmtCost(item.cost)));
+            tr.appendChild(budgetCell(item.budget));
             tr.appendChild(cell(aiuFmtTime(item.last_run_at)));
 
             var open = function () { loadDrill(item.project_id, item.name); };
@@ -708,11 +1162,21 @@ function aiuToolLabel(kind) {
     function loadOverview() {
         clearError();
         setLoading(true);
-        return fetchJson('/ai-analysis/usage/overview').then(function (body) {
+        var params = currentParams();
+        var query = params.toString();
+        return fetchJson('/ai-analysis/usage/overview' + (query ? '?' + query : '')).then(function (body) {
             state.overview = body;
-            renderKpis(body.totals || {});
+            fillFilterOptions(body);
+            // 表单与地址栏都按**服务端实际生效的**那份筛选来回填：传来的条件非法时
+            // 后端会回落默认，界面得跟着回落到同一处，并把它写明白（filters.notes）。
+            applyFiltersToForm(body.filters);
+            syncUrl(body.filters);
+            renderKpis(body.totals || {}, body.over_budget_projects || 0);
             renderPricingNote((body.projects || [])[0] ? body.projects[0].pricing : null);
             renderProjects(body);
+            // 单价表的项目下拉用**全量**项目清单（不受当前筛选影响）—— 拿筛选后的清单
+            // 会让下拉里只剩一个项目，用户换不回别的。
+            aiuPriceSetProjects(body.project_options || []);
             $('aiuGeneratedAt').textContent = '更新时间 ' + aiuFmtTime(body.generated_at);
             setLoading(false);
         }).catch(function (error) {
@@ -728,7 +1192,12 @@ function aiuToolLabel(kind) {
         $('aiuToolRows').innerHTML = '<tr><td colspan="8" class="empty-row">加载中...</td></tr>';
         $('aiuRunRows').innerHTML = '<tr><td colspan="10" class="empty-row">加载中...</td></tr>';
         $('aiuDrillCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
-        return fetchJson('/ai-analysis/usage/project/' + projectId).then(function (body) {
+        // 下钻带上同一份筛选（项目那一项除外：它就是这条路径的一部分）。
+        var params = currentParams();
+        params.delete('project');
+        var query = params.toString();
+        return fetchJson('/ai-analysis/usage/project/' + projectId + (query ? '?' + query : ''))
+            .then(function (body) {
             state.drill = body;
             renderWeekly(body.weekly_versions || []);
             renderTools((body.totals || {}).tools || {});
@@ -837,7 +1306,545 @@ function aiuToolLabel(kind) {
         state.drillProjectId = null;
     });
 
+    initFilters();
+
     loadOverview();
+
+    // 单价表保存成功后要重算上面的费用 —— 直接复用这一条取数路径，不另写一份。
+    window.aiuReloadOverview = loadOverview;
 })();
+
+// ---------------------------------------------------------------------------
+//  模型单价表：结构化行编辑 + JSON 高级模式
+// ---------------------------------------------------------------------------
+// 为什么这一块在消耗面板上、而不在「AI 分析配置」里：单价表只影响这一页的费用数字，
+// 它属于这里。放进项目配置会让「配置」这个词同时表示「跑多大」和「钱怎么算」两件事。
+//
+// 两种模式编辑的是**同一份文本**（`#aiuPriceJsonInput`）：行编辑器把行序列化成 JSON
+// 写回那个 textarea，保存时提交的还是 `model_price_table` 这一个字段。这样校验、
+// 错误定位、服务端那条「改价必须改版本」的判定（services/ai/pricing.py）全都不用改。
+// 两边各存一份状态的写法必然漂移，而漂移的方向是「界面上显示 A、存下去的是 B」。
+
+// 从 JSON 读进来、序列化时原样写回的键。`note` / `cache_write` 没有对应的输入框，
+// 但**丢掉它们就是丢数据** —— 手写的备注会在一次「保存」之后无声消失。
+var AIU_PRICE_KEEP_KEYS = ['note', 'cache_write'];
+var AIU_PRICE_FIELDS = ['input', 'cache_read', 'output'];
+
+var aiuPriceProjectId = null;
+var aiuPriceRows = [];
+// 载入时的那份 JSON 原文 + 服务端已保存的原文，用来判断「改了价没改版本」和「有没有未保存改动」。
+var aiuPriceSnapshot = '';
+var aiuPriceSaved = '';
+// JSON 文本框在行编辑器最后一次同步之后被改过 → 以 JSON 为准，保存时不再用行去覆盖它。
+var aiuPriceJsonDirty = false;
+var aiuPriceMaxLength = 0;
+// 有没有这个项目的管理员权限。读得到配置但改不了，是常态（普通成员也能看这一页）。
+var aiuPriceCanEdit = true;
+
+function aiuPriceEl(id) { return document.getElementById(id); }
+
+function aiuPriceText(value) {
+    return value === null || value === undefined ? '' : String(value);
+}
+
+/** JSON 文本 → `{version, currency, models}`。解析不了返回 null。 */
+function aiuPriceParse(text) {
+    var raw = String(text || '').trim();
+    if (!raw) return { version: '', currency: '', models: {} };
+    var data;
+    try {
+        data = JSON.parse(raw);
+    } catch (_err) {
+        return null;
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+    var models = (data.models && typeof data.models === 'object' && !Array.isArray(data.models))
+        ? data.models : {};
+    return { version: aiuPriceText(data.version), currency: aiuPriceText(data.currency), models: models };
+}
+
+/** 单价表的内容指纹，只取决定金额的四个数字。用来判断价格有没有真的变过。 */
+function aiuPriceFingerprint(models) {
+    return Object.keys(models || {}).sort().map(function (pattern) {
+        var entry = models[pattern] || {};
+        var cells = AIU_PRICE_FIELDS.concat(['cache_write']).map(function (field) {
+            return (entry[field] === undefined || entry[field] === null) ? '' : String(entry[field]);
+        });
+        return pattern + '|' + cells.join(',');
+    }).join('\n');
+}
+
+/** JSON 文本 → 行。返回 `null` 表示这份 JSON 读不出来（**不清空已有的行**）。 */
+function aiuPriceRowsFromText(text) {
+    var parsed = aiuPriceParse(text);
+    if (parsed === null) return null;
+    var rows = Object.keys(parsed.models).map(function (pattern) {
+        var entry = parsed.models[pattern];
+        var model = (entry && typeof entry === 'object' && !Array.isArray(entry)) ? entry : {};
+        var extra = {};
+        AIU_PRICE_KEEP_KEYS.forEach(function (key) {
+            if (model[key] !== undefined && model[key] !== null && model[key] !== '') extra[key] = model[key];
+        });
+        return {
+            pattern: pattern,
+            input: aiuPriceText(model.input),
+            cache_read: aiuPriceText(model.cache_read),
+            output: aiuPriceText(model.output),
+            extra: extra
+        };
+    });
+    return { version: parsed.version, currency: parsed.currency, rows: rows };
+}
+
+/** 校验当前的行。返回 `{rows, errors}`；错误是**给人看的中文**，一条一条说清楚。 */
+function aiuPriceValidateRows() {
+    var errors = [];
+    var rows = [];
+    var seen = {};
+    var labels = { input: '输入价', cache_read: '命中缓存价', output: '输出价' };
+    aiuPriceRows.forEach(function (row, index) {
+        var pattern = String(row.pattern || '').trim();
+        var values = {
+            input: String(row.input || '').trim(),
+            cache_read: String(row.cache_read || '').trim(),
+            output: String(row.output || '').trim()
+        };
+        var blank = !pattern && !values.input && !values.cache_read && !values.output;
+        // 空行直接跳过：刚点「增加一行」还没填，不该立刻报错。
+        if (blank) return;
+        var where = '第 ' + (index + 1) + ' 行';
+        if (!pattern) {
+            errors.push(where + '：模型名不能为空（不要的那一行请点右侧的删除）');
+            return;
+        }
+        var key = pattern.toLowerCase();
+        if (seen[key]) {
+            errors.push('模型名「' + pattern + '」重复了（' + where + '）—— 重复的条目只有最后一条会生效');
+            return;
+        }
+        if (!values.input || !values.output) {
+            errors.push(where + '「' + pattern + '」：输入价与输出价都必须填（命中缓存价可以留空）');
+            return;
+        }
+        var bad = false;
+        AIU_PRICE_FIELDS.forEach(function (field) {
+            if (values[field] === '' || bad) return;
+            var num = Number(values[field]);
+            if (!isFinite(num) || num < 0) {
+                errors.push(where + '「' + pattern + '」：' + labels[field] + '必须是非负数字');
+                bad = true;
+            }
+        });
+        if (bad) return;
+        if (values.cache_read !== '' && Number(values.cache_read) > Number(values.input)) {
+            // 与 services/ai/pricing.py 的 parse_price_table 同一条判据：
+            // 命中价比未命中价还贵，几乎一定是填反了。
+            errors.push(where + '「' + pattern + '」：命中缓存价高于输入价，疑似填反了');
+            return;
+        }
+        seen[key] = true;
+        rows.push({
+            pattern: pattern,
+            input: values.input,
+            cache_read: values.cache_read,
+            output: values.output,
+            extra: row.extra || {}
+        });
+    });
+    return { rows: rows, errors: errors };
+}
+
+/** 行 → JSON 文本。一行都没有时给空串（= 不配置价格表，不是「免费」）。 */
+function aiuPriceSerialize(rows) {
+    if (!rows.length) return '';
+    var versionInput = aiuPriceEl('aiuPriceVersionInput');
+    var currencyInput = aiuPriceEl('aiuPriceCurrencyInput');
+    var version = versionInput ? String(versionInput.value || '').trim() : '';
+    var currency = (currencyInput ? String(currencyInput.value || '').trim() : '') || 'CNY';
+    var models = {};
+    rows.forEach(function (row) {
+        var entry = { input: Number(row.input), output: Number(row.output) };
+        if (row.cache_read !== '') entry.cache_read = Number(row.cache_read);
+        AIU_PRICE_KEEP_KEYS.forEach(function (key) {
+            if (row.extra && row.extra[key] !== undefined) entry[key] = row.extra[key];
+        });
+        models[row.pattern] = entry;
+    });
+    return JSON.stringify({ version: version, currency: currency, models: models }, null, 2);
+}
+
+function aiuPriceSetJsonError(message) {
+    var box = aiuPriceEl('aiuPriceJsonError');
+    if (!box) return;
+    box.textContent = message || '';
+    box.hidden = !message;
+}
+
+/** 「价格改了但版本没变」的提前提示。服务端的拒绝才是权威，这里只是让用户早一步看见。 */
+function aiuPriceUpdateWarn() {
+    var box = aiuPriceEl('aiuPriceWarn');
+    if (!box) return;
+    var textarea = aiuPriceEl('aiuPriceJsonInput');
+    var before = aiuPriceParse(aiuPriceSnapshot);
+    var after = aiuPriceParse(textarea ? textarea.value : '');
+    var text = '';
+    if (before && after) {
+        var changed = aiuPriceFingerprint(before.models) !== aiuPriceFingerprint(after.models);
+        if (changed && String(before.version) === String(after.version)) {
+            text = '价格已经改动，但「版本」还是 ' + (after.version || '（空）')
+                + ' —— 保存会被拒绝。请把版本改成新的一版（例如日期），历史费用才分得清是哪版算的。';
+        }
+    }
+    box.hidden = !text;
+    box.textContent = text;
+}
+
+/** 行 → textarea，外加一次校验。`false` 表示行里还有说不通的地方（textarea 保持不动）。 */
+function aiuPriceSync() {
+    var result = aiuPriceValidateRows();
+    if (result.errors.length) {
+        aiuPriceSetJsonError(result.errors[0]);
+        aiuPriceUpdateWarn();
+        return false;
+    }
+    aiuPriceSetJsonError('');
+    var textarea = aiuPriceEl('aiuPriceJsonInput');
+    var text = aiuPriceSerialize(result.rows);
+    if (aiuPriceMaxLength && text.length > aiuPriceMaxLength) {
+        aiuPriceSetJsonError('单价表太长了（' + text.length + ' 字，上限 ' + aiuPriceMaxLength + '）');
+        return false;
+    }
+    if (textarea) textarea.value = text;
+    aiuPriceJsonDirty = false;
+    aiuPriceUpdateWarn();
+    return true;
+}
+
+/** textarea → 行。`false` 表示 JSON 读不出来。 */
+function aiuPriceLoadFromText() {
+    var textarea = aiuPriceEl('aiuPriceJsonInput');
+    var raw = textarea ? textarea.value : '';
+    aiuPriceSnapshot = raw;
+    var parsed = aiuPriceRowsFromText(raw);
+    if (parsed === null) {
+        aiuPriceJsonDirty = true;   // 别让一次行编辑把用户手上的 JSON 覆盖掉
+        aiuPriceRenderRows();
+        aiuPriceSetJsonError('这段 JSON 读不出来（行编辑器没有跟着变），改行会覆盖它。');
+        return false;
+    }
+    aiuPriceRows = parsed.rows;
+    var versionInput = aiuPriceEl('aiuPriceVersionInput');
+    if (versionInput) versionInput.value = parsed.version;
+    var currencyInput = aiuPriceEl('aiuPriceCurrencyInput');
+    if (currencyInput) currencyInput.value = parsed.currency;
+    aiuPriceJsonDirty = false;
+    aiuPriceSetJsonError('');
+    aiuPriceRenderRows();
+    aiuPriceUpdateWarn();
+    return true;
+}
+
+function aiuPriceRowNode(row, index) {
+    var tr = document.createElement('tr');
+    tr.dataset.index = String(index);
+
+    var cells = [
+        ['pattern', '模型名', 'text', false],
+        ['input', '输入价', 'number', true],
+        ['cache_read', '命中缓存价', 'number', true],
+        ['output', '输出价', 'number', true]
+    ];
+    cells.forEach(function (cell) {
+        var field = cell[0];
+        var td = document.createElement('td');
+        if (cell[3]) td.className = 'num';
+        var input = document.createElement('input');
+        input.type = cell[2];
+        input.className = 'aiu-input';
+        input.value = aiuPriceText(row[field]);
+        input.setAttribute('data-field', field);
+        // 表格里的输入框没有可见 label，必须自带可访问名。
+        input.setAttribute('aria-label', '第 ' + (index + 1) + ' 行的' + cell[1]);
+        if (cell[3]) input.setAttribute('min', '0');
+        if (aiuPriceCanEdit === false) input.disabled = true;
+        td.appendChild(input);
+        tr.appendChild(td);
+    });
+
+    var actionCell = document.createElement('td');
+    var remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'aiu-btn secondary aiu-price-remove';
+    remove.setAttribute('data-aiu-price-remove', '1');
+    remove.setAttribute('aria-label', '删除第 ' + (index + 1) + ' 行「' + (row.pattern || '未命名') + '」');
+    remove.innerHTML = '<i class="fas fa-trash-can" aria-hidden="true"></i>';
+    if (aiuPriceCanEdit === false) remove.disabled = true;
+    actionCell.appendChild(remove);
+    tr.appendChild(actionCell);
+    return tr;
+}
+
+function aiuPriceRenderRows() {
+    var body = aiuPriceEl('aiuPriceRows');
+    if (!body) return;
+    body.textContent = '';
+    aiuPriceRows.forEach(function (row, index) { body.appendChild(aiuPriceRowNode(row, index)); });
+    var empty = aiuPriceEl('aiuPriceEmpty');
+    if (empty) empty.hidden = aiuPriceRows.length > 0;
+}
+
+function aiuPriceToggleJson(forceOpen) {
+    var panel = aiuPriceEl('aiuPriceJsonPanel');
+    var btn = aiuPriceEl('aiuPriceJsonToggleBtn');
+    if (!panel) return;
+    var open = (forceOpen === undefined) ? panel.hidden : !!forceOpen;
+    panel.hidden = !open;
+    if (btn) {
+        btn.setAttribute('aria-expanded', String(open));
+        var icon = btn.querySelector('.fas');
+        if (icon) icon.classList.toggle('is-open', open);
+    }
+    // 打开高级模式 = 「接下来我按 JSON 来」：用当前 JSON 重新生成行。
+    if (open) aiuPriceLoadFromText();
+}
+
+function aiuPriceSetCanEdit(canEdit) {
+    aiuPriceCanEdit = canEdit;
+    ['aiuPriceAddRowBtn', 'aiuPriceSaveBtn', 'aiuPriceResetBtn', 'aiuPriceVersionInput',
+     'aiuPriceCurrencyInput', 'aiuPriceJsonInput'].forEach(function (id) {
+        var node = aiuPriceEl(id);
+        if (node) node.disabled = !canEdit;
+    });
+    var readonly = aiuPriceEl('aiuPriceReadonly');
+    if (readonly) readonly.hidden = canEdit;
+}
+
+function aiuPriceSetState(text) {
+    var node = aiuPriceEl('aiuPriceState');
+    if (node) node.textContent = text;
+}
+
+function aiuPriceShowError(message) {
+    var box = aiuPriceEl('aiuPriceError');
+    var text = aiuPriceEl('aiuPriceErrorText');
+    if (text) text.textContent = message || '单价表加载失败。';
+    if (box) box.hidden = false;
+}
+
+function aiuPriceClearError() {
+    var box = aiuPriceEl('aiuPriceError');
+    if (box) box.hidden = true;
+}
+
+function aiuPriceSetFeedback(text, tone) {
+    var node = aiuPriceEl('aiuPriceFeedback');
+    if (!node) return;
+    node.textContent = text || '';
+    node.style.color = tone === 'error' ? 'var(--aiu-danger)'
+        : (tone === 'success' ? 'var(--aiu-hit)' : '');
+}
+
+/** 项目下拉：直接用总览已经取回来的那份项目清单，不再多打一次接口。 */
+function aiuPriceSetProjects(projects) {
+    var select = aiuPriceEl('aiuPriceProject');
+    if (!select) return;
+    var current = select.value;
+    select.textContent = '';
+    (projects || []).forEach(function (item) {
+        var option = document.createElement('option');
+        option.value = String(item.project_id);
+        option.textContent = item.name || ('项目 ' + item.project_id);
+        select.appendChild(option);
+    });
+    if (!select.options.length) {
+        aiuPriceSetState('没有可访问的项目。');
+        return;
+    }
+    if (current && select.querySelector('option[value="' + current + '"]')) {
+        select.value = current;
+    }
+    if (String(select.value) !== String(aiuPriceProjectId)) {
+        aiuPriceLoad(select.value);
+    }
+}
+
+function aiuPriceLoad(projectId) {
+    if (!projectId) return;
+    aiuPriceProjectId = String(projectId);
+    aiuPriceClearError();
+    aiuPriceSetFeedback('');
+    aiuPriceSetState('正在读取…');
+    var editor = aiuPriceEl('aiuPriceEditor');
+    if (editor) editor.hidden = true;
+    fetch('/ai-analysis/projects/' + aiuPriceProjectId + '/config', {
+        credentials: 'same-origin', cache: 'no-store'
+    }).then(function (response) {
+        return response.json().then(function (body) {
+            if (!response.ok || !body || body.success === false) {
+                throw new Error((body && body.message) || ('HTTP ' + response.status));
+            }
+            return body;
+        });
+    }).then(function (data) {
+        var textarea = aiuPriceEl('aiuPriceJsonInput');
+        if (textarea) textarea.value = aiuPriceText(data.model_price_table);
+        var schema = (data.field_schema || {}).model_price_table || {};
+        aiuPriceMaxLength = Number(schema.max_length) || 0;
+        // 格式示例由后端下发（services/ai/pricing.py 的那一份），这里不抄第二份 ——
+        // 抄一份就会在改格式时漏改，而用户照着过期示例填会存不进去。
+        var doc = aiuPriceEl('aiuPriceDoc');
+        if (doc) doc.textContent = data.price_table_doc ? ('格式示例：' + data.price_table_doc) : '';
+        aiuPriceSnapshot = aiuPriceText(data.model_price_table);
+        aiuPriceSaved = aiuPriceSnapshot;
+        aiuPriceLoadFromText();
+        aiuPriceSetCanEdit(true);
+        if (editor) editor.hidden = false;
+        var budget = data.budget || {};
+        aiuPriceSetState((aiuPriceRows.length ? ('已配置 ' + aiuPriceRows.length + ' 条单价')
+            : '还没有配置单价（费用一列会留空）')
+            + (budget.limited ? ' · 预算按' + (budget.period_label || '周期') + '统计' : ''));
+    }).catch(function (error) {
+        aiuPriceSetState('');
+        aiuPriceSetCanEdit(false);
+        aiuPriceShowError('读取单价表失败：' + (error && error.message ? error.message : error)
+            + '（看得到费用但读不到配置时，通常是这个项目的访问权限问题。）');
+    });
+}
+
+function aiuPriceSave() {
+    var projectId = aiuPriceProjectId;
+    if (!projectId) return;
+    var saveBtn = aiuPriceEl('aiuPriceSaveBtn');
+    // 行编辑器与 JSON 高级模式编辑的是同一份文本，保存前同步一次。
+    // 行里还有说不通的地方就**停下来** —— 否则存下去的是上一次同步的旧 JSON，
+    // 而用户以为自己的改动生效了。
+    if (!aiuPriceJsonDirty && !aiuPriceSync()) {
+        aiuPriceSetFeedback('单价表还有要改的地方，见上面的红字。', 'error');
+        return;
+    }
+    var textarea = aiuPriceEl('aiuPriceJsonInput');
+    var text = textarea ? String(textarea.value || '') : '';
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.setAttribute('aria-busy', 'true');
+    }
+    aiuPriceSetFeedback('正在保存…', 'muted');
+    fetch('/ai-analysis/projects/' + projectId + '/config', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        // **只提交单价表这一个字段**：服务端按 payload 里出现的字段逐个 setattr，
+        // 所以这条请求不会碰到别的配置项。
+        body: JSON.stringify({ model_price_table: text })
+    }).then(function (response) {
+        return response.json().then(function (body) {
+            return { ok: response.ok, status: response.status, body: body || {} };
+        });
+    }).then(function (result) {
+        var body = result.body || {};
+        if (!result.ok || body.success === false) {
+            var detail = (body.errors && body.errors.length)
+                ? body.errors.map(function (item) { return item.message; }).join('；')
+                : (body.message || ('HTTP ' + result.status));
+            aiuPriceSetJsonError(detail);
+            aiuPriceSetFeedback(body.message || '保存失败。', 'error');
+            return;
+        }
+        aiuPriceSetJsonError('');
+        aiuPriceSaved = text;
+        aiuPriceSnapshot = text;
+        aiuPriceUpdateWarn();
+        aiuPriceSetFeedback('已保存。上面的费用会按新价格表重算。', 'success');
+        // 费用是用当前价格表算的，保存后要重算一遍 —— 复用总览那条取数路径。
+        if (typeof window.aiuReloadOverview === 'function') window.aiuReloadOverview();
+    }).catch(function (error) {
+        aiuPriceSetFeedback('保存失败：' + (error && error.message ? error.message : error), 'error');
+    }).then(function () {
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.removeAttribute('aria-busy');
+        }
+    });
+}
+
+function initAiUsagePriceEditor() {
+    var body = aiuPriceEl('aiuPriceRows');
+    if (body) {
+        // 事件委托：行是动态生成的，逐行挂监听会在每次增删后留下悬空引用。
+        body.addEventListener('input', function (event) {
+            var input = event.target;
+            var tr = (input && input.closest) ? input.closest('tr') : null;
+            var field = (input && input.dataset) ? input.dataset.field : '';
+            if (!tr || !field) return;
+            var row = aiuPriceRows[Number(tr.dataset.index)];
+            if (!row) return;
+            row[field] = input.value;
+            aiuPriceSync();
+        });
+        body.addEventListener('click', function (event) {
+            var btn = (event.target && event.target.closest)
+                ? event.target.closest('[data-aiu-price-remove]') : null;
+            if (!btn) return;
+            var tr = btn.closest('tr');
+            if (!tr) return;
+            aiuPriceRows.splice(Number(tr.dataset.index), 1);
+            aiuPriceRenderRows();
+            aiuPriceSync();
+        });
+    }
+
+    var addBtn = aiuPriceEl('aiuPriceAddRowBtn');
+    if (addBtn) {
+        addBtn.addEventListener('click', function () {
+            aiuPriceRows.push({ pattern: '', input: '', cache_read: '', output: '', extra: {} });
+            aiuPriceRenderRows();
+            // 空行不触发同步（它会被跳过，写回的结果与原来一致），但把焦点送过去，
+            // 否则键盘用户点完「增加一行」还要自己 Tab 进新行。
+            var rowsBody = aiuPriceEl('aiuPriceRows');
+            var last = rowsBody ? rowsBody.querySelector('tr:last-child input') : null;
+            if (last) last.focus();
+        });
+    }
+
+    ['aiuPriceVersionInput', 'aiuPriceCurrencyInput'].forEach(function (id) {
+        var el = aiuPriceEl(id);
+        if (el) el.addEventListener('input', function () { aiuPriceSync(); });
+    });
+
+    var textarea = aiuPriceEl('aiuPriceJsonInput');
+    if (textarea) {
+        textarea.addEventListener('input', function () {
+            aiuPriceJsonDirty = true;
+            aiuPriceUpdateWarn();
+        });
+    }
+
+    var jsonBtn = aiuPriceEl('aiuPriceJsonToggleBtn');
+    if (jsonBtn) jsonBtn.addEventListener('click', function () { aiuPriceToggleJson(); });
+
+    var saveBtn = aiuPriceEl('aiuPriceSaveBtn');
+    if (saveBtn) saveBtn.addEventListener('click', aiuPriceSave);
+
+    var resetBtn = aiuPriceEl('aiuPriceResetBtn');
+    if (resetBtn) {
+        // 「放弃改动」把编辑区退回**服务端已保存的那一份**，不动库里任何数据 ——
+        // 这个页面上不该有删除按钮，所以「重置」只能是这个意思。
+        resetBtn.addEventListener('click', function () {
+            var box = aiuPriceEl('aiuPriceJsonInput');
+            if (box) box.value = aiuPriceSaved;
+            aiuPriceJsonDirty = false;
+            aiuPriceLoadFromText();
+            aiuPriceSetJsonError('');
+            aiuPriceSetFeedback('已放弃未保存的改动。', 'muted');
+        });
+    }
+
+    var select = aiuPriceEl('aiuPriceProject');
+    if (select) {
+        select.addEventListener('change', function () { aiuPriceLoad(select.value); });
+    }
+}
+
+initAiUsagePriceEditor();
 </script>
 {% endblock %}

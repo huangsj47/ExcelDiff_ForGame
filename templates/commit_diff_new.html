@@ -625,10 +625,24 @@ function initCommitAiAnalysis() {
                 if (startBtn) startBtn.disabled = true;
                 if (meta) meta.textContent = '无法读取 AI 配置（可能没有该项目的访问权限）。';
             } else if (data.endpoint_ready) {
-                setAiStatusBadge('已配置', 'success');
                 aiEndpointReady = true;
-                if (startBtn) startBtn.disabled = false;
-                if (meta) meta.textContent = `模型 ${data.api_model} · Token 已配置`;
+                // 预算闸门：超了就禁用「重新分析」，并把原因写在 meta 行上。
+                // 判定用的 `data.budget` 与服务端的拦截
+                // （services/ai/analysis_budget.py）是同一份数据、同一套口径 ——
+                // 否则会出现「界面说超预算、后端其实会跑」这种自相矛盾的组合。
+                const budget = data.budget;
+                if (budget && budget.over) {
+                    aiEndpointReady = false;
+                    setAiStatusBadge('超预算', 'danger');
+                    if (startBtn) startBtn.disabled = true;
+                    if (meta) {
+                        meta.textContent = `${budget.reason} 调整方式：项目概览页 →「AI 分析配置」→ 预算周期 / 周期内 token 上限 / 周期内费用上限。`;
+                    }
+                } else {
+                    setAiStatusBadge('已配置', 'success');
+                    if (startBtn) startBtn.disabled = false;
+                    if (meta) meta.textContent = `模型 ${data.api_model} · Token 已配置`;
+                }
             } else {
                 setAiStatusBadge('配置不全', 'warning');
                 aiEndpointReady = false;

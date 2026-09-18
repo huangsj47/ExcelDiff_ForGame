@@ -25,10 +25,17 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Mapping
 
 from models.ai_analysis.project_config import (
+    BUDGET_COST_LIMIT_MAX,
+    BUDGET_PERIOD_CHOICES,
+    BUDGET_TOKEN_LIMIT_RANGE,
     CONFIDENCE_CHOICES,
+    DEFAULT_BUDGET_COST_LIMIT,
+    DEFAULT_BUDGET_PERIOD,
+    DEFAULT_BUDGET_TOKEN_LIMIT,
     DEFAULT_MAX_ANALYSIS_ROUNDS,
     DEFAULT_MAX_ANOMALIES_PER_RUN,
     DEFAULT_MAX_FILES_PER_RUN,
@@ -82,7 +89,9 @@ class FieldRule:
     """
 
     label: str
-    kind: str  # int / bool / text / url / choice
+    # int / optional_int / optional_money / bool / text / url / choice / price_table
+    # `optional_*` 两种是**可为空**的：空 = 不限制（预算那一栏），见 _coerce_optional_*。
+    kind: str
     minimum: int | None = None
     maximum: int | None = None
     choices: tuple[str, ...] = ()
@@ -118,6 +127,16 @@ FIELD_RULES: Mapping[str, FieldRule] = {
     # 而不是等到算费用时才发现——那时用户只看到「费用算不出来」，原因在几步之外。
     "model_price_table": FieldRule("模型单价表（JSON）", "price_table", max_length=20_000),
     "project_knowledge": FieldRule("项目补充知识", "text", max_length=20_000),
+    # --- 预算闸门。**空 = 不限制**，所以用 optional_* 两种 kind：它们收空串/NULL，
+    # 收成一个 `None`；用 kind="int" 的话「留空」会被判成「请填写一个整数」，
+    # 用户就没法表达「不限制」这个意思了。
+    "budget_period": FieldRule("预算周期", "choice", choices=BUDGET_PERIOD_CHOICES),
+    "budget_token_limit": FieldRule(
+        "周期内 token 上限", "optional_int", *BUDGET_TOKEN_LIMIT_RANGE
+    ),
+    "budget_cost_limit": FieldRule(
+        "周期内费用上限", "optional_money", minimum=0, maximum=BUDGET_COST_LIMIT_MAX
+    ),
 }
 
 # 界面上显示默认值时要用的值（与模型层的列默认值同源）。
@@ -137,6 +156,11 @@ FIELD_DEFAULTS: Mapping[str, Any] = {
     "prompt_template": "",
     "project_knowledge": "",
     "model_price_table": "",
+    # 预算：`None` 是**有意义的取值**（不限制），不是「还没填」。界面据此留空输入框，
+    # 而不是显示一个 0。
+    "budget_period": DEFAULT_BUDGET_PERIOD,
+    "budget_token_limit": DEFAULT_BUDGET_TOKEN_LIMIT,
+    "budget_cost_limit": DEFAULT_BUDGET_COST_LIMIT,
 }
 
 
@@ -192,6 +216,49 @@ def _coerce_int(field_name: str, rule: FieldRule, raw: Any) -> int:
             field_name, rule.label, f"不能大于 {rule.maximum}（当前填的是 {value}）"
         )
     return value
+
+
+def _coerce_optional_int(field_name: str, rule: FieldRule, raw: Any) -> int | None:
+    """可空整数上限。**空 = 不限制（`None`）**，非空则照 `_coerce_int` 那套范围校验。
+
+    刻意不把空串当成 0：0 会被预算闸门读成「一个 token 都不许花」，于是「没配预算」
+    与「不许花钱」变成同一件事 —— 而用户只是没填这一栏。
+    """
+    if raw is None or (not isinstance(raw, bool) and str(raw).strip() == ""):
+        return None
+    return _coerce_int(field_name, rule, raw)
+
+
+def _coerce_optional_money(field_name: str, rule: FieldRule, raw: Any) -> str | None:
+    """可空金额上限。空 = 不限制；非空必须是**非负**的十进制数。
+
+    金额存成字符串而不是 float：费用那一整套（`services/ai/pricing.py`）用 `Decimal`
+    算，存 float 会在这里埋一个二进制浮点误差。负数直接报错 —— 「-1 元上限」在任何
+    解释下都不成立，而闸门会把它当成「已经超了」，静默锁死分析。
+    """
+    if raw is None or (not isinstance(raw, bool) and str(raw).strip() == ""):
+        return None
+    if isinstance(raw, bool):
+        raise FieldError(field_name, rule.label, "请填写一个数字")
+    text = str(raw).strip()
+    try:
+        number = Decimal(text)
+    except (InvalidOperation, ValueError):
+        raise FieldError(field_name, rule.label, f"「{raw}」不是数字") from None
+    if not number.is_finite():
+        raise FieldError(field_name, rule.label, f"「{raw}」不是有效数字")
+    if number <= 0:
+        # 0 与负数一样挡掉：0 是一个「一毛钱都不许花」的上限，等价于把 AI 分析关掉，
+        # 而用户想表达的通常是「不限制」—— 那应该是**留空**，不是填 0。
+        raise FieldError(
+            field_name, rule.label, f"必须大于 0（当前填的是 {text}）；留空表示不限制"
+        )
+    if rule.maximum is not None and number > Decimal(rule.maximum):
+        raise FieldError(
+            field_name, rule.label, f"不能大于 {rule.maximum}（当前填的是 {text}）"
+        )
+    # 去掉尾随 0 之外的任何改写都不做：用户填 12.50 就存 12.50，回显时看到的还是他填的。
+    return format(number, "f")
 
 
 def _coerce_bool(raw: Any) -> bool:
@@ -254,6 +321,10 @@ def validate_field(field_name: str, raw: Any) -> Any:
         raise FieldError(field_name, field_name, "不是可配置的字段")
     if rule.kind == "int":
         return _coerce_int(field_name, rule, raw)
+    if rule.kind == "optional_int":
+        return _coerce_optional_int(field_name, rule, raw)
+    if rule.kind == "optional_money":
+        return _coerce_optional_money(field_name, rule, raw)
     if rule.kind == "bool":
         return _coerce_bool(raw)
     if rule.kind == "url":

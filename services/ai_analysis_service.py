@@ -37,6 +37,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     REQUEST_TIMEOUT_RANGE,
 )
+from services.ai.analysis_budget import budget_gate_reason
 from services.ai.baseline import (
     DISPOSITION_PENDING,
     BaselineFinding,
@@ -71,7 +72,12 @@ from services.ai.engine import (
 )
 from services.ai.llm_client import LLMError
 from services.ai.platform_provider import PlatformContextProvider
-from services.ai.pricing import PriceTable, load_price_table, price_table_doc_shape
+from services.ai.pricing import (
+    PriceTable,
+    load_price_table,
+    price_change_requires_version_bump,
+    price_table_doc_shape,
+)
 from services.ai.prompt import prompt_version
 from services.ai.rules import RuleThresholds, anomaly_fingerprint, rules_version
 from services.ai.skill_loader import load_skills, skill_revision
@@ -212,6 +218,19 @@ def update_project_analysis_config(
     except ConfigValidationError as exc:
         db.session.rollback()
         return False, str(exc), [item.as_dict() for item in exc.errors]
+
+    # 改单价必须同时改 version（见 pricing.price_change_requires_version_bump）。
+    # 判定要拿**库里现在这一份**去比，不能用界面加载时那一份 —— 两个人同时开着配置
+    # 界面时，后者手上的旧快照会让这条规矩形同虚设。放在 setattr 之前：
+    # 校验失败就一个字段都不落库。
+    if "model_price_table" in normalized:
+        version_error = price_change_requires_version_bump(
+            row.model_price_table, normalized.get("model_price_table")
+        )
+        if version_error:
+            db.session.rollback()
+            errors = [FieldError("model_price_table", "模型单价表（JSON）", version_error)]
+            return False, version_error, [item.as_dict() for item in errors]
 
     for field_name, value in normalized.items():
         setattr(row, field_name, value)
@@ -1474,6 +1493,13 @@ def stream_commit_analysis(commit_id: int, user_label: str = "") -> Iterable[str
         yield _sse_event("error", {"message": "Project API key not configured."})
         return
 
+    # 预算闸门（手动·单提交）。放在缓存复用之后：回放一份已有结论不花钱，不该被拦；
+    # 也放在真正开跑之前：超预算就不发起任何请求。
+    budget_reason = budget_gate_reason(project_id, entry="commit_manual")
+    if budget_reason:
+        yield _sse_event("error", {"message": budget_reason})
+        return
+
     payload = build_commit_payload(commit_id)
     run = _create_run(
         project_id=project_id,
@@ -1525,6 +1551,13 @@ def stream_weekly_analysis(
         return
 
     project_id = payload["group"]["project_id"]
+
+    # 预算闸门（手动·周版本）。与 commit 那条同理：缓存复用之后、真正开跑之前。
+    budget_reason = budget_gate_reason(project_id, entry="weekly_manual")
+    if budget_reason:
+        yield _sse_event("error", {"message": budget_reason})
+        return
+
     if not _get_project_api_key(project_id):
         yield _sse_event("error", {"message": "Project API key not configured."})
         return
@@ -1576,6 +1609,20 @@ def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None
                 f"周版本自动分析已关闭，跳过已排队的任务: config_id={config_id}", "AI", force=True,
             )
             return {"status": "skipped", "reason": "auto_weekly_disabled"}
+
+        # 预算闸门（后台·周版本）。与开关那道闸同理放在这里：本函数是后台路径的
+        # 唯一入口，闸设在这里既覆盖调度器，也覆盖「开关被关掉之前就已经排好队」的
+        # 残留任务。**记成 skipped 并写日志**，不静默 —— 静默跳过的表现是
+        # 「自动分析不跑了，但没有任何地方说为什么」。
+        budget_reason = budget_gate_reason(config.project_id, entry="weekly_background")
+        if budget_reason:
+            log_print(
+                f"周版本自动分析被预算拦截，跳过已排队的任务: config_id={config_id} "
+                f"project={config.project_id} —— {budget_reason}",
+                "AI",
+                force=True,
+            )
+            return {"status": "skipped", "reason": "over_budget", "message": budget_reason}
 
     payload, state, skip_reason = build_weekly_payload(config_id)
     if skip_reason == "no_change":

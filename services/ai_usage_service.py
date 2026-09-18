@@ -9,21 +9,44 @@
 
 ## 每个项目的价格表是各自的
 
-单价表存在**项目配置**里（`ai_project_analysis_config.model_price_table`），所以
-跨项目总览的合计金额只有在「每个项目都算得出、且币种一致」时才给 —— 否则给 `None`
-加一句理由。混着几种币种加出来的数字比没有数字更糟。
+单价表存在**项目配置**里（`ai_project_analysis_config.model_price_table`），编辑入口在
+本页的「模型单价表」卡片上（写入走同一个配置接口）。所以跨项目总览的合计金额只有在
+「每个项目都算得出、且币种一致」时才给 —— 否则给 `None` 加一句理由。混着几种币种
+加出来的数字比没有数字更糟。
+
+## 筛选在**服务端**做
+
+项目 / 时间范围 / 触发来源 / 状态四个条件都由服务端解析并落到查询上，不把全量数据
+拉到前端再过滤：那样「合计」会随浏览器里的数据量变化，而且权限过滤一旦漏在前端就是
+数据泄露。筛选条件经 URL query 传入（刷新、分享、后退都不丢），非法值**回落默认**
+而不是 500 —— 一个手改坏的 URL 不该变成一个错误页。
+
+## 预算与筛选是两套时段
+
+筛选里的「本月」决定**表里显示哪些运行**；预算那一列永远按项目自己配置的预算周期
+（默认本月）算。两者刻意分开：预算数字必须与 `services/ai/analysis_budget.py` 的
+闸门判定**逐字一致**，否则会出现「面板说已超预算，按钮却还能点」这种自相矛盾的界面。
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import re
+from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from models import Project, WeeklyVersionConfig
 from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace
+from services.ai.analysis_budget import (
+    PERIOD_LABELS,
+    as_utc,
+    budget_rows_for_overview,
+    budget_status,
+)
 from services.ai.pricing import money
 from services.ai.usage import aggregate_runs, usage_from_run
 from services.ai_analysis_service import project_price_table
+from utils.timezone_utils import BEIJING_TZ
 
 # 单次运行明细里最多回多少轮。轮次上限由配置决定（默认 8，最大 30），这个数字只是
 # 「别再多了」的兜底，避免一条异常数据把界面撑爆。
@@ -32,6 +55,275 @@ MAX_ROUNDS = 60
 # 下钻页每次最多列多少条运行记录。汇总数字仍然按**全部**运行算 —— 只截断列表，
 # 不截断统计，否则页面上的合计会随着「看多少行」变化。
 MAX_RUNS = 200
+
+# ---------------------------------------------------------------------------
+# 筛选条件
+# ---------------------------------------------------------------------------
+RANGE_THIS_WEEK = "this_week"
+RANGE_THIS_MONTH = "this_month"
+RANGE_LAST_30D = "last_30d"
+RANGE_ALL = "all"
+RANGE_CUSTOM = "custom"
+RANGE_CHOICES = (
+    RANGE_THIS_WEEK,
+    RANGE_THIS_MONTH,
+    RANGE_LAST_30D,
+    RANGE_CUSTOM,
+    RANGE_ALL,
+)
+RANGE_LABELS = {
+    RANGE_THIS_WEEK: "本周",
+    RANGE_THIS_MONTH: "本月",
+    RANGE_LAST_30D: "近 30 天",
+    RANGE_CUSTOM: "自定义",
+    RANGE_ALL: "全部",
+}
+DEFAULT_RANGE = RANGE_ALL
+
+SOURCE_ALL = "all"
+SOURCE_MANUAL = "manual"
+SOURCE_SCHEDULED = "scheduled"
+SOURCE_CHOICES = (SOURCE_ALL, SOURCE_MANUAL, SOURCE_SCHEDULED)
+SOURCE_LABELS = {SOURCE_ALL: "全部来源", SOURCE_MANUAL: "手动", SOURCE_SCHEDULED: "定时"}
+
+STATUS_ALL = "all"
+STATUS_CHOICES = (STATUS_ALL, "succeeded", "failed", "running")
+STATUS_LABELS = {
+    STATUS_ALL: "全部状态",
+    "succeeded": "成功",
+    "failed": "失败",
+    "running": "进行中",
+}
+
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+@dataclass(frozen=True)
+class UsageFilters:
+    """一次查询的筛选条件。**所有字段都已经过校验**，非法值在解析时就回落掉了。"""
+
+    project_id: Optional[int] = None
+    range_key: str = DEFAULT_RANGE
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    source: str = SOURCE_ALL
+    status: str = STATUS_ALL
+    notes: tuple[str, ...] = field(default=())
+
+    @property
+    def active(self) -> bool:
+        """有没有偏离默认值。「清空筛选」按钮据此决定是否可点。"""
+        return (
+            self.project_id is not None
+            or self.range_key != DEFAULT_RANGE
+            or self.source != SOURCE_ALL
+            or self.status != STATUS_ALL
+        )
+
+    def as_query(self) -> dict[str, str]:
+        """规范化后的 query。前端据此改写地址栏 —— 只带非默认值，URL 才短。"""
+        query: dict[str, str] = {}
+        if self.project_id is not None:
+            query["project"] = str(self.project_id)
+        if self.range_key != DEFAULT_RANGE:
+            query["range"] = self.range_key
+        if self.range_key == RANGE_CUSTOM:
+            if self.date_from:
+                query["from"] = self.date_from.isoformat()
+            if self.date_to:
+                query["to"] = self.date_to.isoformat()
+        if self.source != SOURCE_ALL:
+            query["source"] = self.source
+        if self.status != STATUS_ALL:
+            query["status"] = self.status
+        return query
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "range": self.range_key,
+            "range_label": RANGE_LABELS.get(self.range_key, RANGE_LABELS[DEFAULT_RANGE]),
+            "from": self.date_from.isoformat() if self.date_from else None,
+            "to": self.date_to.isoformat() if self.date_to else None,
+            "source": self.source,
+            "status": self.status,
+            "active": self.active,
+            "notes": list(self.notes),
+        }
+
+
+def _first_arg(args: Mapping[str, Any], *names: str) -> str:
+    for name in names:
+        if name in args:
+            value = args.get(name)
+            if value is None:
+                continue
+            return str(value).strip()
+    return ""
+
+
+def _parse_int(raw: str) -> Optional[int]:
+    if not raw or raw.lower() in {"all", "none", "0"}:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _parse_date(raw: str) -> Optional[date]:
+    if not DATE_RE.match(raw or ""):
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def parse_usage_filters(args: Mapping[str, Any]) -> UsageFilters:
+    """把 URL query 解析成筛选条件。**任何非法值都回落默认，绝不抛异常。**
+
+    这是刻意的：这些参数从地址栏来，用户会手改、会分享被截断的链接、会收藏一个
+    半年前的范围。让它们变成 500 的话，页面直接白屏，而用户没有任何办法回到正常状态
+    （筛选状态在 URL 里，改不回去就永远打不开）。回落的每一处都记进 `notes`，
+    由界面如实显示出来 —— 悄悄换掉用户填的条件，和报错一样让人摸不着头脑。
+    """
+    notes: list[str] = []
+
+    project_id = _parse_int(_first_arg(args, "project", "project_id"))
+    if _first_arg(args, "project", "project_id") and project_id is None:
+        notes.append("项目筛选值不是有效编号，已按「全部项目」显示。")
+
+    raw_range = _first_arg(args, "range").lower()
+    range_key = raw_range if raw_range in RANGE_CHOICES else DEFAULT_RANGE
+    if raw_range and raw_range not in RANGE_CHOICES:
+        notes.append(f"时间范围「{raw_range}」认不出来，已按「{RANGE_LABELS[DEFAULT_RANGE]}」显示。")
+
+    raw_from = _first_arg(args, "from", "date_from", "start")
+    raw_to = _first_arg(args, "to", "date_to", "end")
+    date_from = _parse_date(raw_from)
+    date_to = _parse_date(raw_to)
+    if raw_from and date_from is None:
+        notes.append(f"起始日期「{raw_from}」不是 YYYY-MM-DD，已忽略。")
+    if raw_to and date_to is None:
+        notes.append(f"结束日期「{raw_to}」不是 YYYY-MM-DD，已忽略。")
+
+    if range_key == RANGE_CUSTOM:
+        if date_from is None and date_to is None:
+            # 选了「自定义」却没给日期：退回默认范围，并在界面上说清楚。
+            range_key = DEFAULT_RANGE
+            notes.append("自定义范围缺少起止日期，已按「全部」显示。")
+        elif date_from and date_to and date_from > date_to:
+            # 起止写反了。**不静默对调**：对调之后界面上输入的还是反的，
+            # 显示的结果却是正的，用户没法从界面上看出发生了什么。
+            range_key = DEFAULT_RANGE
+            date_from = date_to = None
+            notes.append("起止日期反了，已按「全部」显示。")
+
+    raw_source = _first_arg(args, "source", "trigger").lower()
+    source = raw_source if raw_source in SOURCE_CHOICES else SOURCE_ALL
+    if raw_source and raw_source not in SOURCE_CHOICES:
+        notes.append(f"触发来源「{raw_source}」认不出来，已按「全部来源」显示。")
+
+    raw_status = _first_arg(args, "status").lower()
+    status = raw_status if raw_status in STATUS_CHOICES else STATUS_ALL
+    if raw_status and raw_status not in STATUS_CHOICES:
+        notes.append(f"状态「{raw_status}」认不出来，已按「全部状态」显示。")
+
+    return UsageFilters(
+        project_id=project_id,
+        range_key=range_key,
+        date_from=date_from,
+        date_to=date_to,
+        source=source,
+        status=status,
+        notes=tuple(notes),
+    )
+
+
+def resolve_window(
+    filters: UsageFilters, *, now: Optional[datetime] = None
+) -> tuple[Optional[datetime], Optional[datetime]]:
+    """筛选条件 → `[since, until)`（UTC）。`None` 表示这一头不设限。
+
+    全部按**北京时间**的日历切分（用户看的日历是北京时间），再换算成 UTC 与库里的
+    `created_at` 同口径比较。边界统一用**左闭右开**：`until` 是「结束日期的次日 00:00」，
+    而不是「结束日期 23:59:59」—— 后者会把那一秒里的记录漏掉，而且只在特定时刻复现。
+    """
+    moment = as_utc(now) or datetime.now(timezone.utc)
+    beijing = moment.astimezone(BEIJING_TZ)
+    key = filters.range_key
+
+    if key == RANGE_THIS_WEEK:
+        start = (beijing - timedelta(days=beijing.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        return start.astimezone(timezone.utc), None
+    if key == RANGE_THIS_MONTH:
+        start = beijing.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return start.astimezone(timezone.utc), None
+    if key == RANGE_LAST_30D:
+        return moment - timedelta(days=30), None
+    if key == RANGE_CUSTOM and (filters.date_from or filters.date_to):
+        since = (
+            datetime.combine(filters.date_from, time.min, tzinfo=BEIJING_TZ).astimezone(timezone.utc)
+            if filters.date_from
+            else None
+        )
+        until = (
+            datetime.combine(
+                filters.date_to + timedelta(days=1), time.min, tzinfo=BEIJING_TZ
+            ).astimezone(timezone.utc)
+            if filters.date_to
+            else None
+        )
+        return since, until
+    return None, None
+
+
+def run_matches(
+    run: AiAnalysisRun,
+    filters: UsageFilters,
+    window: tuple[Optional[datetime], Optional[datetime]],
+) -> bool:
+    """一条运行是否符合筛选。时间比较在 Python 侧做，理由见 `analysis_budget.runs_in_window`。"""
+    since, until = window
+    stamp = as_utc(getattr(run, "created_at", None))
+    if since is not None or until is not None:
+        # 没有时间的记录不进任何时间窗；选「全部」时它照样显示。
+        if stamp is None:
+            return False
+        if since is not None and stamp < since:
+            return False
+        if until is not None and stamp >= until:
+            return False
+
+    if filters.source == SOURCE_SCHEDULED:
+        if str(getattr(run, "trigger_source", "") or "") != "scheduled":
+            return False
+    elif filters.source == SOURCE_MANUAL:
+        # 「手动」= 不是定时。`trigger_source` 的值有一部分来自 URL 参数
+        # （`/ai-analysis/weekly/<id>/stream?source=...`），所以不能写成
+        # `== 'manual'`：那样一个拼错的 source 会让这次运行在任何筛选下都看不见。
+        if str(getattr(run, "trigger_source", "") or "") == "scheduled":
+            return False
+
+    if filters.status != STATUS_ALL:
+        if str(getattr(run, "effective_status", "") or "") != filters.status:
+            return False
+    return True
+
+
+def filter_runs(
+    runs: Iterable[AiAnalysisRun],
+    filters: UsageFilters,
+    *,
+    now: Optional[datetime] = None,
+) -> list[AiAnalysisRun]:
+    """按筛选条件过滤运行记录（保持传入顺序）。"""
+    window = resolve_window(filters, now=now)
+    return [run for run in runs if run_matches(run, filters, window)]
 
 
 def _price_block(table, errors: Sequence[str]) -> dict[str, Any]:
@@ -42,6 +334,33 @@ def _price_block(table, errors: Sequence[str]) -> dict[str, Any]:
         "source": table.source if table else "",
         "configured": bool(table and table.models),
         "errors": list(errors or ()),
+    }
+
+
+def _budget_block(project_id: int, status: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """面板上的预算一格。
+
+    **直接复用闸门那份判定**（`analysis_budget.budget_status`），不在这里另算一遍：
+    两套算法的必然结果是某天开始互相矛盾 ——「面板说已超预算，按钮却还能点」，
+    而两个数字看上去都很正常。
+    """
+    data = status if status is not None else budget_status(project_id)
+    period = str(data.get("period") or "")
+    return {
+        "limited": bool(data.get("limited")),
+        "over": bool(data.get("over")),
+        "period": period,
+        "period_label": str(
+            data.get("period_label") or PERIOD_LABELS.get(period, "")
+        ),
+        "since": data.get("since"),
+        "until": data.get("until"),
+        "limits": data.get("limits") or {"tokens": None, "cost": None, "currency": ""},
+        "used": data.get("used") or {"tokens": None, "cost": None, "currency": "", "runs": 0},
+        "ratios": data.get("ratios") or {"tokens": None, "cost": None},
+        "over_limits": list(data.get("over_limits") or ()),
+        "reason": str(data.get("reason") or ""),
+        "notes": list(data.get("notes") or ()),
     }
 
 
@@ -85,18 +404,37 @@ def _totals_cost(entries: Sequence[dict]) -> Optional[dict[str, Any]]:
     }
 
 
-def usage_overview(accessible_project_ids: Optional[Iterable[int]]) -> dict[str, Any]:
+def usage_overview(
+    accessible_project_ids: Optional[Iterable[int]] = None,
+    filters: Optional[UsageFilters] = None,
+) -> dict[str, Any]:
     """跨项目总览。`accessible_project_ids=None` 表示全部（平台管理员）。
 
     权限过滤在这里做**查询级**过滤（`project_id IN (...)`），而不是查完再筛：
     后者一旦哪天有人漏了那一步，就是「无权用户看到别人的消耗」。
+
+    `filters` 里的项目筛选**只能收窄**权限范围，不能扩大：它先与可访问清单求交，
+    求不到就是空结果，不会因为 URL 里写了个别人的项目号而读到别人的数。
     """
+    active = filters or UsageFilters()
     query = _runs_query(accessible_project_ids)
     entries: list[dict[str, Any]] = []
     all_runs: list[AiAnalysisRun] = []
+    allowed: Optional[set[int]] = (
+        None if accessible_project_ids is None else set(accessible_project_ids)
+    )
 
     if query is not None:
-        all_runs = query.order_by(AiAnalysisRun.created_at.desc()).all()
+        if active.project_id is not None:
+            if allowed is not None and active.project_id not in allowed:
+                # 无权访问 / 不存在的项目：给空结果，而不是 403 —— 这是一个筛选条件，
+                # 不是一次越权访问；而且页面要能正常渲染出「没有匹配的数据」。
+                query = None
+            else:
+                query = query.filter(AiAnalysisRun.project_id == active.project_id)
+
+    if query is not None:
+        all_runs = filter_runs(query.order_by(AiAnalysisRun.created_at.desc()).all(), active)
         grouped: dict[int, list[AiAnalysisRun]] = {}
         for run in all_runs:
             grouped.setdefault(run.project_id, []).append(run)
@@ -105,6 +443,7 @@ def usage_overview(accessible_project_ids: Optional[Iterable[int]]) -> dict[str,
             project.id: (project.name or project.code or f"项目 {project.id}")
             for project in Project.query.filter(Project.id.in_(list(grouped))).all()
         }
+        budgets = budget_rows_for_overview(list(grouped))
         for project_id, runs in grouped.items():
             table, errors = project_price_table(project_id)
             stats = aggregate_runs(runs, price_table=table)
@@ -120,6 +459,7 @@ def usage_overview(accessible_project_ids: Optional[Iterable[int]]) -> dict[str,
                     "missing_runs": stats["missing_runs"],
                     "cost": stats["cost"],
                     "pricing": _price_block(table, errors),
+                    "budget": _budget_block(project_id, budgets.get(project_id)),
                     "last_run_at": _iso(
                         max((run.created_at for run in runs if run.created_at), default=None)
                     ),
@@ -146,23 +486,71 @@ def usage_overview(accessible_project_ids: Optional[Iterable[int]]) -> dict[str,
         "success": True,
         "projects": entries,
         "totals": totals,
+        "filters": active.to_dict(),
+        "filter_options": filter_options(),
+        "project_options": _project_options(accessible_project_ids),
+        "over_budget_projects": sum(1 for item in entries if item["budget"]["over"]),
         "generated_at": _iso(datetime.now(timezone.utc)),
     }
 
 
-def project_usage(project_id: int) -> dict[str, Any]:
+def _project_options(accessible_project_ids: Optional[Iterable[int]]) -> list[dict[str, Any]]:
+    """筛选下拉用的项目清单。**永远是全量（按权限），不受当前筛选影响。**
+
+    不能拿结果里的 `projects` 当下拉选项：一旦按项目筛过，那份清单就只剩一个项目，
+    下拉里别的选项会消失 —— 用户换不回「全部项目」，只能改地址栏。
+    """
+    if accessible_project_ids is None:
+        rows = Project.query.order_by(Project.id.asc()).all()
+    else:
+        ids = list(accessible_project_ids)
+        if not ids:
+            return []
+        rows = Project.query.filter(Project.id.in_(ids)).order_by(Project.id.asc()).all()
+    return [
+        {"project_id": project.id, "name": project.name or project.code or f"项目 {project.id}"}
+        for project in rows
+    ]
+
+
+def filter_options() -> dict[str, Any]:
+    """筛选下拉的选项。由服务端下发而不是写死在模板里 —— 选项与解析规则必须同源，
+    否则会出现「界面上有个选项、后端认不出来（回落默认）」，用户选了却没生效。"""
+    return {
+        "ranges": [
+            {"value": key, "label": RANGE_LABELS[key]}
+            for key in (RANGE_THIS_WEEK, RANGE_THIS_MONTH, RANGE_LAST_30D, RANGE_ALL, RANGE_CUSTOM)
+        ],
+        "sources": [
+            {"value": key, "label": SOURCE_LABELS[key]} for key in SOURCE_CHOICES
+        ],
+        "statuses": [
+            {"value": key, "label": STATUS_LABELS[key]} for key in STATUS_CHOICES
+        ],
+        "defaults": {"range": DEFAULT_RANGE, "source": SOURCE_ALL, "status": STATUS_ALL},
+    }
+
+
+def project_usage(
+    project_id: int, filters: Optional[UsageFilters] = None
+) -> dict[str, Any]:
     """单项目下钻：周版本维度 + 逐次运行 + 按工具类型。
 
     「当前周版本」取**最近分析过**的那个 group_key（`is_latest=True`）—— 界面上写的是
     「最近分析的周版本」，不叫「当前周版本」：平台无法从分析记录反推出用户心里那个
     「当前」，用词必须与事实一致。
+
+    筛选同样在服务端做：`totals`、`weekly_versions` 与 `runs` 三者用的是**同一批**
+    过滤后的运行，不会出现「合计按全部算、明细按筛选列」这种对不上的情形。
     """
+    active = filters or UsageFilters()
     table, errors = project_price_table(project_id)
-    runs = (
+    all_runs = (
         AiAnalysisRun.query.filter_by(project_id=project_id)
         .order_by(AiAnalysisRun.created_at.desc())
         .all()
     )
+    runs = filter_runs(all_runs, active)
     stats = aggregate_runs(runs, price_table=table)
     pricing = _price_block(table, errors)
 
@@ -226,6 +614,8 @@ def project_usage(project_id: int) -> dict[str, Any]:
         "runs": [_run_row(run, table) for run in runs[:MAX_RUNS]],
         "runs_truncated": len(runs) > MAX_RUNS,
         "pricing": pricing,
+        "budget": _budget_block(project_id),
+        "filters": active.to_dict(),
         "generated_at": _iso(datetime.now(timezone.utc)),
     }
 

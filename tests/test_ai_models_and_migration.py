@@ -28,6 +28,7 @@ from models.ai_analysis import (
     AiProjectAnalysisConfig,
 )
 from models.ai_analysis.project_config import (
+    DEFAULT_BUDGET_PERIOD,
     DEFAULT_MAX_ANALYSIS_ROUNDS,
     DEFAULT_MAX_ANOMALIES_PER_RUN,
     DEFAULT_MAX_FILES_PER_RUN,
@@ -37,6 +38,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_PROMPT_CHAR_BUDGET,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_WEEKLY_INTERVAL_MINUTES,
+    NULLABLE_RESOLVED_KEYS,
 )
 
 # 迁移前就存在的表（只保留新列加入之前的样子）。
@@ -98,6 +100,11 @@ CONFIG_NEW_COLUMNS = (
     "max_anomalies_per_run",
     "project_knowledge",
     "model_price_table",
+    # 预算闸门（2026-09）。老行在这三列上是 NULL，而 NULL 的语义就是「不限制」——
+    # 这正是这个功能要的默认行为，所以没有回填这一步。
+    "budget_period",
+    "budget_token_limit",
+    "budget_cost_limit",
 )
 
 RUN_NEW_COLUMNS = (
@@ -374,10 +381,72 @@ def test_resolved_never_returns_none_for_any_key():
 
     `None` 是这里最危险的返回值：`min_severity=None` 会让规则层「什么都过滤不掉」，
     `max_analysis_rounds=None` 会让循环条件比较时报错或永不收敛。
+
+    **例外**是 `NULLABLE_RESOLVED_KEYS` 里那两栏：它们的 `None` 是一个有意义的取值
+    （预算「不限制」），不是漏补的默认值。例外清单本身也在这里被校验 ——
+    它必须真的在 `resolved()` 的返回体里，也不能被随手扩大成「谁的 None 都放行」：
+    下面两条反向断言把这件事钉死。
     """
     resolved = AiProjectAnalysisConfig(project_id=1).resolved()
+    assert set(NULLABLE_RESOLVED_KEYS).issubset(resolved), (
+        "例外清单里出现了 resolved() 根本不返回的键 —— 那这条例外就白开了"
+    )
     for key, value in resolved.items():
+        if key in NULLABLE_RESOLVED_KEYS:
+            continue
         assert value is not None, f"{key} 读出来是 None"
+
+
+def test_the_nullable_resolved_keys_are_only_the_budget_limits():
+    """**反向守卫**：例外清单只许装预算那两栏。
+
+    没有这一条，将来有人加了一栏新配置、又不想补默认值，最省事的做法就是把它塞进
+    这个清单 —— 上面那条用例照样全绿，而 `resolved()` 又开始返回 None 了。
+    """
+    assert tuple(NULLABLE_RESOLVED_KEYS) == ("budget_token_limit", "budget_cost_limit")
+
+
+def test_resolved_treats_an_unset_budget_as_unlimited():
+    """**未配置 = 不限制**，不是 0、也不是任何默认值。
+
+    0 会被预算闸门读成「一个 token 都不许花」，把 AI 分析整个锁死；而界面上
+    找不到任何解释（那一栏是空的）。
+    """
+    resolved = AiProjectAnalysisConfig(project_id=1).resolved()
+    assert resolved["budget_token_limit"] is None
+    assert resolved["budget_cost_limit"] is None
+    assert resolved["budget_period"] == DEFAULT_BUDGET_PERIOD
+
+
+def test_resolved_keeps_a_configured_budget():
+    """反向自检：配了的值不能被「不限制」那条口径吃掉。"""
+    config = AiProjectAnalysisConfig(
+        project_id=1,
+        budget_period="weekly",
+        budget_token_limit=5_000_000,
+        budget_cost_limit="12.50",
+    )
+    resolved = config.resolved()
+    assert resolved["budget_period"] == "weekly"
+    assert resolved["budget_token_limit"] == 5_000_000
+    # 金额读回来仍是十进制字符串（走 float 会在费用那一套 Decimal 计算里引入误差）。
+    assert resolved["budget_cost_limit"] == "12.50"
+
+
+def test_resolved_treats_a_zero_or_garbage_budget_as_unset():
+    """0 / 负数 / 空串 / 乱码一律读成「不限制」。
+
+    0 尤其要紧：它要么是「用户手动填的 0」（= 不许花钱，那是另一件事，应该报错让他
+    改），要么是「某个上游把 NULL 写成了 0」。这两种在库里分不开，而把功能锁死的
+    代价远大于放过一次 —— 所以按「不限制」处理，并在配置界面那一栏写明留空即不限制。
+    """
+    for raw in (0, -5, "", "   ", None, "abc"):
+        config = AiProjectAnalysisConfig(
+            project_id=1, budget_token_limit=raw, budget_cost_limit=raw
+        )
+        resolved = config.resolved()
+        assert resolved["budget_token_limit"] is None, f"budget_token_limit={raw!r}"
+        assert resolved["budget_cost_limit"] is None, f"budget_cost_limit={raw!r}"
 
 
 def test_resolved_prefers_stored_values():

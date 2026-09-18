@@ -8,6 +8,7 @@ from flask import Blueprint, Response, jsonify, render_template, request, stream
 
 from models import Commit, Repository, WeeklyVersionConfig, db
 from models.ai_analysis import AiAnalysisRun
+from services.ai.analysis_budget import budget_status
 from services.ai.endpoint_service import probe_connection, probe_models
 from services.ai_analysis_service import (
     build_endpoint_client,
@@ -20,7 +21,12 @@ from services.ai_analysis_service import (
     stream_weekly_analysis,
     update_project_analysis_config,
 )
-from services.ai_usage_service import project_usage, run_usage, usage_overview
+from services.ai_usage_service import (
+    parse_usage_filters,
+    project_usage,
+    run_usage,
+    usage_overview,
+)
 from utils.json_body import read_json_object
 from utils.request_security import (
     _get_accessible_project_ids,
@@ -64,7 +70,23 @@ def ai_project_config(project_id):
     if not _has_project_access(project_id):
         return jsonify({"success": False, "message": "Access denied."}), 403
     config = get_project_analysis_config(project_id)
-    return jsonify({"success": True, **config})
+    # 预算状态挂在这里下发，而不是塞进 `get_project_analysis_config`：
+    # 后者被 `project_price_table` 调用，而预算判定自己要读价格表 —— 塞进去就是
+    # 一条 `project_price_table → get_project_analysis_config → budget_status →
+    # project_price_table` 的无限递归。这一层只读、只多查一次，没有这个环。
+    return jsonify({"success": True, **config, "budget": budget_status(project_id)})
+
+
+@ai_analysis_bp.route("/ai-analysis/projects/<int:project_id>/budget", methods=["GET"])
+def ai_project_budget(project_id):
+    """只读的预算状态。
+
+    单独一个端点是为了给「分析被拦下之后」用：抽屉拿到一条预算拦截的报错，需要
+    说清楚是哪个周期、已用多少、上限多少，而这些数在那个时刻未必是最新的。
+    """
+    if not _has_project_access(project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+    return jsonify({"success": True, "budget": budget_status(project_id)}), 200
 
 
 @ai_analysis_bp.route("/ai-analysis/projects/<int:project_id>/config", methods=["POST"])
@@ -230,8 +252,13 @@ def ai_usage_dashboard():
 
 @ai_analysis_bp.route("/ai-analysis/usage/overview", methods=["GET"])
 def ai_usage_overview():
-    """跨项目总览：每个项目的运行次数、token、命中率、费用，外加一行平台合计。"""
-    payload = usage_overview(_get_accessible_project_ids())
+    """跨项目总览：每个项目的运行次数、token、命中率、费用、预算，外加一行平台合计。
+
+    筛选条件从 query 来（项目 / 时间范围 / 触发来源 / 状态），**在服务端聚合**。
+    非法值由 `parse_usage_filters` 回落默认并在 `filters.notes` 里说明，不会 500。
+    """
+    filters = parse_usage_filters(request.args)
+    payload = usage_overview(_get_accessible_project_ids(), filters)
     return jsonify(payload), 200
 
 
@@ -240,7 +267,8 @@ def ai_usage_project(project_id):
     """单项目下钻：周版本维度 + 逐次运行 + 按工具类型。"""
     if not _has_project_access(project_id):
         return jsonify({"success": False, "message": "Access denied."}), 403
-    return jsonify(project_usage(project_id)), 200
+    filters = parse_usage_filters(request.args)
+    return jsonify(project_usage(project_id, filters)), 200
 
 
 @ai_analysis_bp.route("/ai-analysis/runs/<int:run_id>/usage", methods=["GET"])

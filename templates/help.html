@@ -416,7 +416,11 @@
                     <li><strong>「命中缓存」</strong>指<strong>上游接口</strong>报的 prompt cache 命中（按更低的单价计费），
                         与「工具结果在本次分析里的内存缓存」是两件事。</li>
                     <li><strong>「未上报」不是 0。</strong>接口不回缓存字段时显示「未上报」—— 那表示未知，不是没命中。</li>
-                    <li><strong>费用是估算</strong>，需要配单价表；没配或算不出时<strong>不显示金额</strong>，也不显示 0。</li>
+                    <li><strong>费用是估算</strong>，单价表在<strong>「AI 消耗」页面</strong>上配（改单价必须同时改版本号）；
+                        没配或算不出时<strong>不显示金额</strong>，也不显示 0。</li>
+                    <li><strong>预算能卡住分析</strong>：项目「AI 分析配置」里可设周期内的 token / 费用上限
+                        （<strong>留空 = 不限制</strong>）。超了之后「重新分析」会变灰并写明已用多少、上限多少，
+                        定时分析也会跳过；调高上限、或等到下个周期自动恢复。算不出费用时<strong>不按费用拦</strong>。</li>
                     <li>功能上线<strong>之前</strong>跑的分析没有采集过用量，明细里显示「本次用量未采集」。</li>
                 </ul>
             </div>
