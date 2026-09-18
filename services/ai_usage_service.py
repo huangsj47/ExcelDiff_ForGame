@@ -38,11 +38,16 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from models import Project, WeeklyVersionConfig
 from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace
 from services.ai.analysis_budget import (
+    PERIOD_ALL_TIME,
     PERIOD_LABELS,
+    PERIOD_MONTHLY,
+    PERIOD_WEEKLY,
     as_utc,
     budget_rows_for_overview,
     budget_status,
+    platform_budget_status,
 )
+from services.ai.platform_budget import platform_budget_public
 from services.ai.pricing import money
 from services.ai.usage import aggregate_runs, usage_from_run
 from services.ai_analysis_service import project_price_table
@@ -337,15 +342,26 @@ def _price_block(table, errors: Sequence[str]) -> dict[str, Any]:
     }
 
 
-def _budget_block(project_id: int, status: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def _budget_block(
+    project_id: int,
+    status: Mapping[str, Any] | None = None,
+    *,
+    range_key: str = DEFAULT_RANGE,
+) -> dict[str, Any]:
     """面板上的预算一格。
 
     **直接复用闸门那份判定**（`analysis_budget.budget_status`），不在这里另算一遍：
     两套算法的必然结果是某天开始互相矛盾 ——「面板说已超预算，按钮却还能点」，
     而两个数字看上去都很正常。
+
+    `range_key` 只用于**说明口径**（见 `period_alignment`）：预算那一列永远按各项目
+    自己的预算周期统计，与上面的筛选范围是两回事。把这件事写在行上，是因为「同一屏上
+    出现两个『本月』」正是最容易读错的地方。
     """
     data = status if status is not None else budget_status(project_id)
     period = str(data.get("period") or "")
+    platform = data.get("platform") or {}
+    over_scopes = list(data.get("over_scopes") or ())
     return {
         "limited": bool(data.get("limited")),
         "over": bool(data.get("over")),
@@ -361,6 +377,110 @@ def _budget_block(project_id: int, status: Mapping[str, Any] | None = None) -> d
         "over_limits": list(data.get("over_limits") or ()),
         "reason": str(data.get("reason") or ""),
         "notes": list(data.get("notes") or ()),
+        # 平台档：与项目档并列显示。没配平台总预算时 `limited=False`，界面据此不渲染。
+        "platform": {
+            "limited": bool(platform.get("limited")),
+            "over": bool(platform.get("over")),
+            "period": str(platform.get("period") or ""),
+            "period_label": str(
+                platform.get("period_label")
+                or PERIOD_LABELS.get(str(platform.get("period") or ""), "")
+            ),
+            "limits": platform.get("limits") or {"tokens": None, "cost": None, "currency": ""},
+            "used": platform.get("used")
+            or {"tokens": None, "cost": None, "currency": "", "runs": 0},
+            "ratios": platform.get("ratios") or {"tokens": None, "cost": None},
+            "over_limits": list(platform.get("over_limits") or ()),
+        },
+        # 超的是哪一档 —— 界面据此说清「是项目超了还是平台超了」。两档都超时两处都要说。
+        "over_scopes": over_scopes,
+        "align_range": budget_period_range(period),
+        "matches_filter": budget_period_range(period) == range_key,
+    }
+
+
+# 预算周期 → 筛选里的「时间范围」。**这张表是联动的地基**：
+# 预算说「本月」而筛选说「近 30 天」时，两列数字不是一回事，界面必须能说清、
+# 并给出「一键切成同口径」的动作。没有对应关系的两个范围（近 30 天 / 自定义）
+# 一律映射成 `None` —— 它们与任何预算周期都不同口径，这一点不能含糊。
+PERIOD_TO_RANGE = {
+    PERIOD_MONTHLY: RANGE_THIS_MONTH,
+    PERIOD_WEEKLY: RANGE_THIS_WEEK,
+    PERIOD_ALL_TIME: RANGE_ALL,
+}
+RANGE_TO_PERIOD = {value: key for key, value in PERIOD_TO_RANGE.items()}
+
+
+def budget_period_range(period: str) -> Optional[str]:
+    """预算周期对应哪个筛选范围；对不上（或认不出）返回 `None`。"""
+    return PERIOD_TO_RANGE.get(str(period or "").strip().lower())
+
+
+def period_alignment(
+    filters: UsageFilters,
+    periods: Sequence[str],
+    *,
+    platform_period: str = "",
+) -> dict[str, Any]:
+    """筛选范围与预算周期是不是同一个口径，以及「要同口径该切成哪个范围」。
+
+    为什么要有这一层：面板上「时间范围：本月」管的是**表里列出哪些运行**，而「本期预算」
+    那一列永远按**各项目自己配置的预算周期**统计（这是刻意的 —— 它必须与闸门判定逐字
+    一致，否则会出现「面板说超了、按钮还能点」）。两个「本月」在同一屏上含义不同，
+    读的人几乎一定会把它们当成一回事。所以：
+
+    * 口径一致时明说一致；
+    * 不一致时给出**一键对齐**的目标范围（`target_range`），而不是让用户自己去猜该选哪个；
+    * 各项目周期不一致时 `mixed=True`、`target_range=None` —— 这时**没有**能一次对齐的
+      选项，硬选一个（比如取最常见的）会让另外几个项目的数字继续不同口径，而界面上
+      看起来却「已经对齐了」。
+    """
+    counts: dict[str, int] = {}
+    for period in periods:
+        key = str(period or "").strip().lower()
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    if platform_period:
+        key = str(platform_period).strip().lower()
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+
+    entries = [
+        {"period": key, "label": PERIOD_LABELS.get(key, key), "count": count}
+        for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    mixed = len(counts) > 1
+    target_range: Optional[str] = None
+    if len(counts) == 1:
+        target_range = budget_period_range(next(iter(counts)))
+    aligned = target_range is not None and target_range == filters.range_key
+
+    current_label = RANGE_LABELS.get(filters.range_key, RANGE_LABELS[DEFAULT_RANGE])
+    if not counts:
+        note = "这一屏里没有可判定的预算周期（没有任何项目配置了预算）。"
+    elif mixed:
+        detail = " / ".join(f"{item['label']}（{item['count']} 个）" for item in entries)
+        note = (
+            f"预算周期不统一（{detail}），没有能一次对齐的筛选范围；"
+            "下面的「本期预算」逐行按各自周期统计。"
+        )
+    elif aligned:
+        note = f"筛选范围（{current_label}）与预算周期一致，本页「已用」与筛选范围同口径。"
+    else:
+        label = entries[0]["label"]
+        note = (
+            f"筛选范围是「{current_label}」，而预算周期是「{label}」—— "
+            "预算那一列永远按各项目自己的预算周期统计，与上面的筛选范围是两回事。"
+        )
+    return {
+        "filter_range": filters.range_key,
+        "filter_label": current_label,
+        "periods": entries,
+        "mixed": mixed,
+        "aligned": aligned,
+        "target_range": target_range,
+        "target_label": RANGE_LABELS.get(target_range, "") if target_range else "",
+        "note": note,
     }
 
 
@@ -447,6 +567,9 @@ def usage_overview(
         for project_id, runs in grouped.items():
             table, errors = project_price_table(project_id)
             stats = aggregate_runs(runs, price_table=table)
+            budget_block = _budget_block(
+                project_id, budgets.get(project_id), range_key=active.range_key
+            )
             entries.append(
                 {
                     "project_id": project_id,
@@ -459,7 +582,7 @@ def usage_overview(
                     "missing_runs": stats["missing_runs"],
                     "cost": stats["cost"],
                     "pricing": _price_block(table, errors),
-                    "budget": _budget_block(project_id, budgets.get(project_id)),
+                    "budget": budget_block,
                     "last_run_at": _iso(
                         max((run.created_at for run in runs if run.created_at), default=None)
                     ),
@@ -467,6 +590,25 @@ def usage_overview(
             )
 
     entries.sort(key=lambda item: item["runs"], reverse=True)
+
+    platform_config = platform_budget_public()
+    platform_status = platform_budget_status()
+    # 联动只看**真的配了上限**的项目：一个没配预算的项目也有个默认周期（本月），
+    # 把它算进来的话，界面会对一批根本没设预算的项目宣称「与预算周期一致」。
+    linked_periods = [
+        str(item["budget"].get("period") or "")
+        for item in entries
+        if item["budget"].get("limited")
+    ]
+    budget_link = period_alignment(
+        active,
+        linked_periods,
+        platform_period=(
+            str(platform_config.get("period") or "")
+            if platform_config.get("configured")
+            else ""
+        ),
+    )
 
     totals = {"runs": 0, "tokens": {}, "cache": {}, "tools": {}, "cost": None}
     if all_runs:
@@ -490,6 +632,24 @@ def usage_overview(
         "filter_options": filter_options(),
         "project_options": _project_options(accessible_project_ids),
         "over_budget_projects": sum(1 for item in entries if item["budget"]["over"]),
+        # 预算这一屏的两件事：平台总预算（配置 + 当前状态）与「筛选范围 vs 预算周期」的
+        # 口径联动。两者都是**只读**的判定，写侧在 `/ai-analysis/usage/budget`。
+        "platform_budget": platform_config,
+        "platform_status": {
+            "limited": bool(platform_status.get("limited")),
+            "over": bool(platform_status.get("over")),
+            "period": str(platform_status.get("period") or ""),
+            "period_label": str(platform_status.get("period_label") or ""),
+            "limits": platform_status.get("limits")
+            or {"tokens": None, "cost": None, "currency": ""},
+            "used": platform_status.get("used")
+            or {"tokens": None, "cost": None, "currency": "", "runs": 0},
+            "ratios": platform_status.get("ratios") or {"tokens": None, "cost": None},
+            "over_limits": list(platform_status.get("over_limits") or ()),
+            "reason": str(platform_status.get("reason") or ""),
+            "notes": list(platform_status.get("notes") or ()),
+        },
+        "budget_link": budget_link,
         "generated_at": _iso(datetime.now(timezone.utc)),
     }
 
@@ -545,6 +705,7 @@ def project_usage(
     """
     active = filters or UsageFilters()
     table, errors = project_price_table(project_id)
+    budget_block = _budget_block(project_id, range_key=active.range_key)
     all_runs = (
         AiAnalysisRun.query.filter_by(project_id=project_id)
         .order_by(AiAnalysisRun.created_at.desc())
@@ -614,8 +775,13 @@ def project_usage(
         "runs": [_run_row(run, table) for run in runs[:MAX_RUNS]],
         "runs_truncated": len(runs) > MAX_RUNS,
         "pricing": pricing,
-        "budget": _budget_block(project_id),
+        "budget": budget_block,
         "filters": active.to_dict(),
+        # 下钻页只有一个项目，联动目标就是它自己的预算周期（配了的话）。
+        "budget_link": period_alignment(
+            active,
+            [str(budget_block["period"] or "")] if budget_block["limited"] else [],
+        ),
         "generated_at": _iso(datetime.now(timezone.utc)),
     }
 

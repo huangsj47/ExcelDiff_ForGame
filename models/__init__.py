@@ -43,7 +43,13 @@ from .weekly_version import WeeklyVersionConfig, WeeklyVersionDiffCache, WeeklyV
 from .operation_log import OperationLog
 from .agent import AgentNode, AgentProjectBinding, AgentTask, AgentDefaultAdmin, AgentIncident
 from .agent_temp_cache import AgentTempCache
-from .ai_analysis import AiProjectApiKey, AiAnalysisRun, AiWeeklyAnalysisState, AiProjectAnalysisConfig
+from .ai_analysis import (  # noqa: E402 —— 本文件刻意先定义 `db` 再导入模型（见上）
+    AiAnalysisRun,
+    AiPlatformBudget,
+    AiProjectAnalysisConfig,
+    AiProjectApiKey,
+    AiWeeklyAnalysisState,
+)
 
 # 导入 auth 模块的模型，确保 db.create_all() 能创建对应的表
 try:
@@ -102,6 +108,7 @@ __all__ = [
     'AiAnalysisRun',
     'AiWeeklyAnalysisState',
     'AiProjectAnalysisConfig',
+    'AiPlatformBudget',
 ]
 
 if _AUTH_MODELS_LOADED:

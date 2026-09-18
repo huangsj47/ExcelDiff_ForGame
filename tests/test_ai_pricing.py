@@ -253,7 +253,7 @@ def test_amounts_are_serialized_as_strings_so_the_frontend_never_does_float_math
         "cheap-model", tokens_input=1_000_000, tokens_output=1_000_000, cache_read=0, table=_table()
     )
     payload = estimate.to_dict()
-    assert payload["amount"] == "10"  # 2.0 + 8.0
+    assert payload["amount"] == "10.00"  # 2.0 + 8.0，定点 2 位小数
     assert isinstance(payload["amount"], str)
     for line in payload["lines"]:
         assert isinstance(line["amount"], str)
@@ -266,3 +266,67 @@ def test_the_documented_shape_is_actually_parseable():
     assert errors == ()
     assert table is not None
     assert table.models, "示例里至少要有一个模型条目"
+
+
+# ==========================================================================
+# 金额展示：全平台统一 2 位小数
+# ==========================================================================
+# 在这之前是「量化到 6 位再去掉尾随 0」，同一个面板上会同时出现 ¥86.40、¥0.001980、
+# ¥2 三种形态 —— 费用是拿来横向比的一列，读的人不该先去数小数点后几位。
+
+
+def test_money_is_always_two_decimal_places():
+    cases = {
+        Decimal("86.4"): "86.40",
+        Decimal("86.400000"): "86.40",
+        Decimal("2"): "2.00",
+        Decimal("0"): "0.00",
+        Decimal("1234567.891"): "1234567.89",   # 不进科学计数法
+        Decimal("1.005"): "1.01",               # 四舍五入（HALF_UP），不是截断
+        Decimal("1.004"): "1.00",
+    }
+    for value, expected in cases.items():
+        assert pricing.money(value) == expected, f"{value} → {pricing.money(value)}"
+
+
+def test_money_never_uses_scientific_notation():
+    """`normalize()` 会把 10.00 变成 1E+1，前端拿到的就是「1E+1 元」。"""
+    for value in (Decimal("10"), Decimal("1000000"), Decimal("0.5"), Decimal("1E+3")):
+        text = pricing.money(value)
+        assert "E" not in text.upper(), f"{value} → {text}"
+
+
+def test_a_non_zero_amount_below_one_cent_is_not_shown_as_zero():
+    """**不足一分钱不等于没花钱。**
+
+    显示 `0.00` 会让读的人以为这次运行免费 —— 而它确实花了钱。本模块从头到尾守着
+    「0 与算不出是两件事」这条口径，展示层不能反过来把「很小」说成「没有」。反向自检：
+    真正的 0 必须仍然显示 0.00，否则这条规矩就变成了「所有小数字都不显示」。
+    """
+    assert pricing.money(Decimal("0.00198")) == pricing.MONEY_BELOW_ONE_CENT
+    assert pricing.money(Decimal("0.0049")) == pricing.MONEY_BELOW_ONE_CENT
+    assert pricing.money(Decimal("0")) == "0.00"
+    assert pricing.money(Decimal("0.005")) == "0.01"   # 四舍五入到一分，不算「不足」
+
+
+def test_money_returns_none_for_junk_instead_of_rendering_it():
+    """脏数据不能被当成金额渲染出来。"""
+    assert pricing.money(None) is None
+    assert pricing.money(Decimal("NaN")) is None
+    assert pricing.money(Decimal("Infinity")) is None
+    assert pricing.money("不是数") is None
+
+
+def test_the_price_change_signature_keeps_full_precision():
+    """判等**不能**跟着展示精度走。
+
+    展示是 2 位小数，判等是 6 位（`_exact_text`，与改动前的 `money()` 同一精度）。
+    若 `_model_signature` 改用展示值判等，`2.0` → `2.000001` 这种改价就再也看不出，
+    于是「改单价必须改 version」被静默绕过 —— 而那条规矩守的是「历史费用按哪版单价
+    算的」能不能追溯。
+    """
+    bumped = VALID_TABLE.replace('"input": 2.0', '"input": 2.000001')
+    assert pricing.money(Decimal("2.0")) == pricing.money(Decimal("2.000001")) == "2.00"
+    assert pricing._model_signature(_table()) != pricing._model_signature(_table(bumped))
+    reason = pricing.price_change_requires_version_bump(VALID_TABLE, bumped)
+    assert reason, "改了单价却没改 version，必须被拦下"

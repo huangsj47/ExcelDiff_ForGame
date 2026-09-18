@@ -9,8 +9,9 @@ from flask import Blueprint, Response, jsonify, render_template, request, stream
 from models import Commit, Project, Repository, WeeklyVersionConfig, db
 from models.ai_analysis import AiAnalysisRun
 from services.ai import project_pack_service
-from services.ai.analysis_budget import budget_status
+from services.ai.analysis_budget import budget_status, platform_budget_status
 from services.ai.endpoint_service import ConfigValidationError, probe_connection, probe_models
+from services.ai.platform_budget import platform_budget_public, set_platform_budget
 from services.ai_analysis_service import (
     build_endpoint_client,
     get_latest_commit_result,
@@ -34,6 +35,7 @@ from utils.request_security import (
     _get_current_user,
     _has_project_access,
     _has_project_admin_access,
+    require_admin,
 )
 
 ai_analysis_bp = Blueprint("ai_analysis_routes", __name__)
@@ -244,11 +246,66 @@ def ai_commit_latest(commit_id):
 def ai_usage_dashboard():
     """AI 消耗面板页面。
 
-    页面的登录闸门由全局 `enforce_admin_access` 统一把守（与缓存管理页一致），
-    这里不再挂第二个装饰器 —— 重复的鉴权只会让人以为两处规则不同。
-    页面本身不含数据，数据由下面的三个端点按**当前用户可访问的项目**回。
+    **这个页面只需要登录**（`enforce_admin_access` 对它的要求就是登录，它不是
+    `/admin/` 下的路径，也不在 `SENSITIVE_ENDPOINTS` 里），**没有**第二个装饰器 ——
+    与 `/ai-analysis/*` 其余接口「有项目权限就能看」是同一条口径。
+
+    页面本身**不含任何数据**：数据由下面的三个端点按**当前用户可访问的项目**回，
+    所以「谁能打开这一页」与「他能看到什么」是两件事 —— 后者才是权限边界，
+    前者只是一个空壳。（这里原先的注释写成「闸门由全局 enforce_admin_access 把守，
+    与缓存管理页一致」，那是错的：缓存管理页在 `/admin/` 下，会被按路径要求管理员。）
     """
     return render_template("ai_usage_dashboard.html")
+
+
+# ---------------------------------------------------------------------------
+#  平台总预算（全平台合计的上限）
+# ---------------------------------------------------------------------------
+# **刻意不挂在 `/ai-analysis/usage/` 下面**：那一族路径被一条测试钉着「只能是 GET、
+# 不能有 POST」（`test_the_three_endpoints_are_read_only`），守的是「别在一个只读页面上
+# 顺手放一个会真花钱的『重新分析』按钮」。预算保存不是计费动作，但它确实是个写接口 ——
+# 与其放宽那条护栏，不如把写接口放在它该在的地方：**配置**。
+# 这也与单价表一致（单价表的写侧走 `/ai-analysis/projects/<id>/config`，同样不在 /usage 下）。
+#
+# 权限是**平台管理员**：它回的是全平台合计的消耗，跨项目总览只回「你有权限的那几个项目」，
+# 而这个数把所有人的加起来，能从中反推出别人的花费。
+
+@ai_analysis_bp.route("/ai-analysis/platform-budget", methods=["GET"])
+@require_admin
+def ai_platform_budget():
+    """平台总预算：配置 + 当前状态。"""
+    return jsonify(
+        {
+            "success": True,
+            "budget": platform_budget_public(),
+            "status": platform_budget_status(),
+        }
+    ), 200
+
+
+@ai_analysis_bp.route("/ai-analysis/platform-budget", methods=["POST"])
+@require_admin
+def ai_platform_budget_update():
+    """保存平台总预算。**部分更新**：只写提交里出现的字段。
+
+    校验复用项目档那一套（`services/ai/platform_budget.py`），所以「填 0」这类会在
+    两处得到同一句错误，而不是一处允许、另一处拒绝。
+    """
+    payload, error = read_json_object()
+    if error is not None:
+        return error
+    user = _get_current_user()
+    username = getattr(user, "username", "") if user else ""
+    ok, message, errors = set_platform_budget(payload, updated_by=username)
+    body = {"success": ok, "message": message}
+    if errors:
+        body["errors"] = errors
+    if ok:
+        # 保存后立刻回一份新状态：界面要马上显示「现在限制到多少、已用多少」，
+        # 让它再发一次 GET 会把「保存成功」与「状态刷新」变成两次可能不一致的往返。
+        body["budget"] = platform_budget_public()
+        body["status"] = platform_budget_status()
+    return jsonify(body), 200 if ok else 400
 
 
 @ai_analysis_bp.route("/ai-analysis/usage/overview", methods=["GET"])

@@ -60,6 +60,17 @@ PERIOD_LABELS = {
 }
 DEFAULT_PERIOD = PERIOD_MONTHLY
 
+# 两档预算。**它们是叠加的，不是二选一**：任意一档超了就挡住下一次分析。
+#
+# * `project` —— 这个项目在它自己的周期里花了多少（`AiProjectAnalysisConfig.budget_*`）；
+# * `platform` —— **所有项目加起来**花了多少（`AiPlatformBudget`，单行表）。
+#
+# 为什么要两档：项目级上限管不住总量（30 个项目各设 100 元，账单一万），而不设项目级
+# 上限又会让某一个项目把整个额度吃掉。两档各自回答一个不同的问题。
+SCOPE_PROJECT = "project"
+SCOPE_PLATFORM = "platform"
+SCOPE_LABELS = {SCOPE_PROJECT: "项目预算", SCOPE_PLATFORM: "平台总预算"}
+
 
 def as_utc(value: datetime | None) -> datetime | None:
     """把库里的时间读成带 UTC 时区的 datetime。
@@ -178,9 +189,10 @@ def _fmt_money(value: Decimal | None, currency: str) -> str:
     return f"{symbol}{text}" if symbol else f"{text} {currency or ''}".strip()
 
 
-def _unlimited(reason: str, **extra: Any) -> dict[str, Any]:
+def _unlimited(reason: str, *, scope: str = SCOPE_PROJECT, **extra: Any) -> dict[str, Any]:
     """一张「不拦」的判定结果。任何一处读不出数都用它，见模块 docstring 第 2 条。"""
     payload: dict[str, Any] = {
+        "scope": scope,
         "limited": False,
         "over": False,
         "blocks_analysis": False,
@@ -200,19 +212,140 @@ def _unlimited(reason: str, **extra: Any) -> dict[str, Any]:
     return payload
 
 
-def budget_status(project_id: int) -> dict[str, Any]:
-    """这个项目当前的预算状态，以及「要不要拦住下一次分析」。
+def _cost_totals(groups: Sequence[tuple[Sequence[AiAnalysisRun], Any]]) -> tuple[Decimal | None, str, str]:
+    """把若干「一组运行 + 它们该用的价格表」的费用加起来。
 
-    返回体的关键字段（界面与闸门都读这几个）：
+    返回 `(金额, 币种, 算不出的原因)`。金额是 `None` 时原因一定是一句人话。
 
-    * `limited`：配了至少一个上限。未配置 = 不限制。
-    * `over`：**确定**已经超了（判据见模块 docstring 第 2、3 条）。
-    * `used` / `limits`：已用量与上限（token 是整数，金额是十进制字符串）。
-    * `reason`：一句可以直接显示给用户的中文；没超时是空串。
-
-    **这个函数不抛异常。** 任何一步出问题都降级成「不拦 + 一句说明」——
-    闸门要是会因为一个意外的脏数据抛异常，那条路径上的分析就再也没人跑得起来了。
+    **一组都算不出，合计就是算不出**（不是「把算得出的加起来」）：少算一个项目的费用，
+    得到的那个数字看起来完全正常、实际偏小，而它会被拿去和上限比。混币种同理 ——
+    人民币与美元相加没有意义。这两条是 `services/ai_usage_service._totals_cost` 的同一
+    口径，跨项目合计只在这一处实现。
     """
+    if not groups:
+        return None, "", "这个周期内没有任何运行记录"
+    total = Decimal(0)
+    currency = ""
+    for runs, table in groups:
+        stats = aggregate_runs(runs, price_table=table)
+        cost = (stats.get("cost") or {}) if stats else {}
+        amount = cost.get("amount")
+        if amount is None:
+            return None, "", str(cost.get("reason") or "价格表或 token 数不可用")
+        this_currency = str(cost.get("currency") or "")
+        if currency and this_currency and this_currency != currency:
+            return None, "", f"周期内混用了多种币种（{currency} / {this_currency}），无法相加"
+        currency = currency or this_currency
+        try:
+            total += Decimal(str(amount))
+        except (InvalidOperation, ValueError):
+            return None, "", f"费用合计（{amount}）读不成数字"
+    return total, currency, ""
+
+
+def _evaluate_scope(
+    *,
+    scope: str,
+    label: str,
+    runs: Sequence[AiAnalysisRun],
+    token_limit: int | None,
+    cost_limit: Decimal | None,
+    period: str,
+    since: datetime | None,
+    until: datetime | None,
+    cost_groups: Sequence[tuple[Sequence[AiAnalysisRun], Any]],
+    cost_detail_fallback: str = "",
+) -> dict[str, Any]:
+    """一段「谁在用、用了多少、超没超」的判定。**项目档与平台档共用这一个实现。**
+
+    为什么要共用：这两档的判据必须逐字一致（token 取已上报部分的下界、费用算不出就不判），
+    而各写一份的必然结果是某天开始两边松紧不同 —— 那时「平台说没超、项目说超了」，
+    两个数字看上去都很正常。`scope` 只影响措辞与归因，不参与计算。
+    """
+    base: dict[str, Any] = {
+        "scope": scope,
+        "limited": True,
+        "over": False,
+        "blocks_analysis": False,
+        "checked": True,
+        "period": period,
+        "period_label": label,
+        "since": since.isoformat() if since else None,
+        "until": until.isoformat() if until else None,
+        "limits": {
+            "tokens": token_limit,
+            "cost": money(cost_limit),
+            # 币种来自价格表（金额只按价格表算）。拿不到价格表时先给默认币种：
+            # 这一档此时本来就不做判定（见下面的费用分支），显示什么符号都不影响结论。
+            "currency": DEFAULT_CURRENCY,
+        },
+        "used": {"tokens": None, "cost": None, "currency": "", "runs": len(runs)},
+        "ratios": {"tokens": None, "cost": None},
+        "over_limits": [],
+        "reason": "",
+        "notes": [],
+    }
+
+    notes: list[str] = []
+    over_limits: list[str] = []
+    reasons: list[str] = []
+
+    # --- token 那一档：用**已上报部分的下界** ---
+    if token_limit is not None:
+        partial = 0
+        missing = 0
+        for run in runs:
+            bucket = usage_from_run(run, price_table=None)["tokens"]
+            for value in (bucket.get("input"), bucket.get("output")):
+                if value is None:
+                    missing += 1
+                else:
+                    partial += int(value)
+        base["used"]["tokens"] = partial
+        if missing:
+            # 下界已经是「所有报上来的数之和」：它超了就是真超了；它没超时不能拦人。
+            notes.append(
+                f"有 {missing} 处 token 数上游未上报，已用量是下界（只统计报上来的部分）"
+            )
+        base["ratios"]["tokens"] = partial / token_limit if token_limit else None
+        if partial > token_limit:
+            over_limits.append("tokens")
+            reasons.append(
+                f"{label}的 token 已用 {_fmt_tokens(partial)}，超过上限 {_fmt_tokens(token_limit)}"
+            )
+
+    # --- 费用那一档：只要有**任何一处**算不出金额，就不判定 ---
+    if cost_limit is not None:
+        total, currency, detail = _cost_totals(cost_groups)
+        if total is None:
+            # 算不出费用 → **不许拦**。这是本模块最要紧的一条行为：价格表没配、
+            # 模型名对不上、上游没报 token，都不该变成「分析按钮变灰且说不清原因」。
+            notes.append(
+                f"费用上限已配置，但{label}的金额算不出来"
+                f"（{detail or cost_detail_fallback or '没有可用价格表或上游未上报 token'}），"
+                "因此不按费用拦截"
+            )
+        else:
+            base["used"]["cost"] = money(total)
+            base["used"]["currency"] = currency or base["limits"]["currency"]
+            base["ratios"]["cost"] = float(total / cost_limit) if cost_limit else None
+            if total > cost_limit:
+                over_limits.append("cost")
+                reasons.append(
+                    f"{label}的费用已用 {_fmt_money(total, currency)}，"
+                    f"超过上限 {_fmt_money(cost_limit, currency)}"
+                )
+
+    base["over_limits"] = over_limits
+    base["over"] = bool(over_limits)
+    base["blocks_analysis"] = bool(over_limits)
+    base["notes"] = notes
+    base["reason"] = "；".join(reasons)
+    return base
+
+
+def _project_scope(project_id: int) -> dict[str, Any]:
+    """项目档：这个项目在它自己的预算周期里用了多少、超没超。"""
     from services.ai_analysis_service import (  # 延迟导入：本模块被该模块依赖
         get_project_analysis_config,
     )
@@ -235,115 +368,178 @@ def budget_status(project_id: int) -> dict[str, Any]:
         return status
 
     since, until = period_window(period)
-
-    base: dict[str, Any] = {
-        "limited": True,
-        "over": False,
-        "blocks_analysis": False,
-        "checked": True,
-        "period": period,
-        "period_label": label,
-        "since": since.isoformat() if since else None,
-        "until": until.isoformat() if until else None,
-        "limits": {
-            "tokens": token_limit,
-            "cost": money(cost_limit),
-            # 币种来自价格表（金额只按价格表算）。拿不到价格表时先给默认币种：
-            # 这一档此时本来就不做判定（见下面的费用分支），显示什么符号都不影响结论。
-            "currency": DEFAULT_CURRENCY,
-        },
-        "used": {"tokens": None, "cost": None, "currency": "", "runs": 0},
-        "ratios": {"tokens": None, "cost": None},
-        "over_limits": [],
-        "reason": "",
-        "notes": [],
-    }
-
     try:
         all_runs = AiAnalysisRun.query.filter_by(project_id=project_id).all()
     except Exception as exc:  # noqa: BLE001
         log_print(f"⚠️ AI 预算判定查运行记录失败，本次放行: project={project_id} {exc}", "AI", force=True)
-        base.update(_unlimited(f"读用量失败（{exc}），本次不按预算拦截", period=period, period_label=label))
-        return base
+        return _unlimited(
+            f"读用量失败（{exc}），本次不按预算拦截", period=period, period_label=label
+        )
 
     runs = runs_in_window(all_runs, since, until)
-    base["used"]["runs"] = len(runs)
-
-    notes: list[str] = []
-    over_limits: list[str] = []
-    reasons: list[str] = []
-
-    # --- token 那一档：用**已上报部分的下界** ---
-    if token_limit is not None:
-        reported = [
-            item["tokens"] for item in (usage_from_run(run, price_table=None) for run in runs)
-        ]
-        partial = 0
-        missing = 0
-        for bucket in reported:
-            for value in (bucket.get("input"), bucket.get("output")):
-                if value is None:
-                    missing += 1
-                else:
-                    partial += int(value)
-        base["used"]["tokens"] = partial
-        if missing:
-            # 下界已经是「所有报上来的数之和」：它超了就是真超了；它没超时不能拦人。
-            notes.append(
-                f"有 {missing} 处 token 数上游未上报，已用量是下界（只统计报上来的部分）"
-            )
-        ratio = partial / token_limit if token_limit else None
-        base["ratios"]["tokens"] = ratio
-        if partial > token_limit:
-            over_limits.append("tokens")
-            reasons.append(
-                f"{label}的 token 已用 {_fmt_tokens(partial)}，超过上限 {_fmt_tokens(token_limit)}"
-            )
-
-    # --- 费用那一档：只要有**任何一次**算不出金额，就不判定 ---
-    if cost_limit is not None:
-        table, price_errors = _price_table_for(project_id)
-        stats = aggregate_runs(runs, price_table=table)
-        cost = (stats.get("cost") or {}) if stats else {}
-        amount = cost.get("amount")
-        currency = str(cost.get("currency") or "") or base["limits"]["currency"]
-        if amount is None:
-            # 算不出费用 → **不许拦**。这是本模块最要紧的一条行为：价格表没配、
-            # 模型名对不上、上游没报 token，都不该变成「分析按钮变灰且说不清原因」。
-            if price_errors:
-                detail = "价格表不可用：" + "；".join(price_errors)
-            else:
-                detail = _first_reason(runs, table) or "没有可用价格表或上游未上报 token"
-            notes.append(
-                f"费用上限已配置，但{label}的金额算不出来（{detail}），因此不按费用拦截"
-            )
-        else:
-            try:
-                used = Decimal(str(amount))
-            except (InvalidOperation, ValueError):
-                used = None
-            if used is None:
-                notes.append(f"费用合计（{amount}）读不成数字，不按费用拦截")
-            else:
-                base["used"]["cost"] = money(used)
-                base["used"]["currency"] = currency
-                base["ratios"]["cost"] = float(used / cost_limit) if cost_limit else None
-                if used > cost_limit:
-                    over_limits.append("cost")
-                    reasons.append(
-                        f"{label}的费用已用 {_fmt_money(used, currency)}，"
-                        f"超过上限 {_fmt_money(cost_limit, currency)}"
-                    )
-
-    base["over_limits"] = over_limits
-    base["over"] = bool(over_limits)
-    base["blocks_analysis"] = bool(over_limits)
-    base["notes"] = notes
-    base["reason"] = (
-        "；".join(reasons) + "。已暂停 AI 分析，请在项目的「AI 分析配置」里调高预算或等下个周期。"
-        if reasons else ""
+    table, price_errors = _price_table_for(project_id)
+    fallback = ("价格表不可用：" + "；".join(price_errors)) if price_errors else ""
+    return _evaluate_scope(
+        scope=SCOPE_PROJECT,
+        label=label,
+        runs=runs,
+        token_limit=token_limit,
+        cost_limit=cost_limit,
+        period=period,
+        since=since,
+        until=until,
+        cost_groups=[(runs, table)],
+        cost_detail_fallback=fallback or _first_reason(runs, table),
     )
-    return base
+
+
+def platform_budget_status(*, now: datetime | None = None) -> dict[str, Any]:
+    """平台档：**所有项目加起来**在这个周期里用了多少、超没超。
+
+    费用那一档的算法与项目档不同但同源：按项目分组，每组用**它自己**的价格表算，
+    再要求「每组都算得出、且币种一致」才给合计（见 `_cost_totals`）。混币种相加得到的
+    数字比没有数字更危险。
+
+    **不抛异常**，与 `budget_status` 同一条纪律。
+    """
+    from services.ai.platform_budget import get_platform_budget
+
+    try:
+        config = get_platform_budget() or {}
+    except Exception as exc:  # noqa: BLE001
+        log_print(f"⚠️ 平台预算判定读配置失败，本次放行: {exc}", "AI", force=True)
+        return _unlimited(f"读平台预算配置失败（{exc}），本次不按平台预算拦截", scope=SCOPE_PLATFORM)
+
+    period = normalize_period(config.get("period"))
+    token_limit = _int_or_none(config.get("token_limit"))
+    cost_limit = _decimal_or_none(config.get("cost_limit"))
+    label = period_label(period)
+
+    if token_limit is None and cost_limit is None:
+        # **没配平台总预算时不产出任何 note。** 平台没设上限是一件不需要在每一个项目的
+        # 界面上说一遍的事，而且那会让「项目档的说明」被一句无关的话稀释掉。
+        status = _unlimited("", scope=SCOPE_PLATFORM, period=period, period_label=label)
+        status["checked"] = True
+        return status
+
+    since, until = period_window(period, now=now)
+    try:
+        all_runs = AiAnalysisRun.query.all()
+    except Exception as exc:  # noqa: BLE001
+        log_print(f"⚠️ 平台预算判定查运行记录失败，本次放行: {exc}", "AI", force=True)
+        return _unlimited(
+            f"读用量失败（{exc}），本次不按平台预算拦截",
+            scope=SCOPE_PLATFORM,
+            period=period,
+            period_label=label,
+        )
+
+    runs = runs_in_window(all_runs, since, until)
+
+    # 按项目分组：费用必须用各项目自己的价格表算。
+    by_project: dict[int, list[AiAnalysisRun]] = {}
+    for run in runs:
+        by_project.setdefault(int(getattr(run, "project_id", 0) or 0), []).append(run)
+    groups: list[tuple[Sequence[AiAnalysisRun], Any]] = []
+    for project_id, group_runs in by_project.items():
+        table, _errors = _price_table_for(project_id)
+        groups.append((group_runs, table))
+
+    return _evaluate_scope(
+        scope=SCOPE_PLATFORM,
+        label=label,
+        runs=runs,
+        token_limit=token_limit,
+        cost_limit=cost_limit,
+        period=period,
+        since=since,
+        until=until,
+        cost_groups=groups,
+        cost_detail_fallback=(
+            "在所有项目里都找不到可用价格表" if groups else ""
+        ),
+    )
+
+
+def _merge_scopes(project: dict[str, Any], platform: dict[str, Any]) -> dict[str, Any]:
+    """把两档判定合成一张「要不要拦住下一次分析」的结果。
+
+    **顶层字段仍然是项目档那一份**（`limits` / `used` / `ratios` / `period`）：界面上的
+    「本期预算」列、`test_ai_usage_filters_and_budget.py` 的断言读的都是它，改语义会让
+    「这一列到底在说什么」变得没有答案。平台档整份挂在 `platform` 键下，并且：
+
+    * `over` / `blocks_analysis` / `limited` 是**两档的或**（任意一档超了就拦）；
+    * `over_scopes` 说清是哪一档超的；
+    * `notes` 里平台那一档的说明带上前缀，避免和项目档的说明混在一起分不出谁是谁；
+    * `reason` 的结尾按「谁超了」给不同的去处（平台的上限在「AI 消耗」页面，不在项目配置里）。
+
+    平台**没配**预算时，这一层等于原样返回项目档并附一份「不限制」的平台档 ——
+    不产生任何 note，也不改 `reason`。
+    """
+    merged = dict(project)
+    merged["platform"] = platform
+    over_scopes = [
+        name
+        for name, scope in ((SCOPE_PROJECT, project), (SCOPE_PLATFORM, platform))
+        if scope.get("over")
+    ]
+    merged["over_scopes"] = over_scopes
+
+    if platform.get("limited") or over_scopes:
+        # 配了就把平台档那几句带上（含「为什么没判」），否则用户会以为平台上限没生效。
+        # **没配平台预算时这里一个 note 都不加**，行为与改动前逐字一致。
+        merged["notes"] = [
+            *project.get("notes", ()),
+            *(f"平台总预算：{note}" for note in platform.get("notes", ())),
+        ]
+
+    if over_scopes:
+        reasons = [
+            scope.get("reason")
+            for scope in (project, platform)
+            if scope.get("over") and scope.get("reason")
+        ]
+        merged["limited"] = True
+        merged["over"] = True
+        merged["blocks_analysis"] = True
+        merged["reason"] = "；".join(reasons) + _remedy_tail(over_scopes)
+    return merged
+
+
+def _remedy_tail(over_scopes: Sequence[str]) -> str:
+    """「超了之后该怎么办」的那句话。**按谁超了给不同的去处** —— 平台的上限不在项目配置里，
+    让用户去项目的「AI 分析配置」找平台总预算，他会找不到，然后以为是个 bug。"""
+    if list(over_scopes) == [SCOPE_PLATFORM]:
+        return "。已暂停 AI 分析，请在「AI 消耗」页面的「平台总预算」里调高上限，或等下个周期。"
+    if SCOPE_PLATFORM in over_scopes:
+        return (
+            "。已暂停 AI 分析，请调高平台总预算（「AI 消耗」页面）或项目预算"
+            "（项目的「AI 分析配置」），或等下个周期。"
+        )
+    return "。已暂停 AI 分析，请在项目的「AI 分析配置」里调高预算或等下个周期。"
+
+
+def budget_status(project_id: int, *, platform: dict[str, Any] | None = None) -> dict[str, Any]:
+    """这个项目当前的预算状态，以及「要不要拦住下一次分析」。
+
+    返回体的关键字段（界面与闸门都读这几个）：
+
+    * `limited`：配了至少一个上限（项目档**或**平台档）。未配置 = 不限制。
+    * `over`：**确定**已经超了（任意一档，判据见模块 docstring 第 2、3 条）。
+    * `used` / `limits`：**项目档**的已用量与上限（token 是整数，金额是十进制字符串）。
+    * `platform`：平台档的同一套字段（`used` / `limits` / `over` / `period_label` / ...）。
+    * `over_scopes`：超的是哪一档（`["project"]` / `["platform"]` / 两个都有）。
+    * `reason`：一句可以直接显示给用户的中文；没超时是空串。
+
+    `platform` 参数用于**批量场景**（消耗面板逐个项目渲染）：平台档跟项目无关，算一次就够，
+    逐个项目重算一遍等于把同一份全表查询做 N 次。不传则自己算。
+
+    **这个函数不抛异常。** 任何一步出问题都降级成「不拦 + 一句说明」——
+    闸门要是会因为一个意外的脏数据抛异常，那条路径上的分析就再也没人跑得起来了。
+    """
+    scope = _project_scope(project_id)
+    platform_scope = platform if platform is not None else platform_budget_status()
+    return _merge_scopes(scope, platform_scope)
 
 
 def _price_table_for(project_id: int):
@@ -392,12 +588,19 @@ def budget_rows_for_overview(project_ids: Sequence[int]) -> dict[int, dict[str, 
     面板上「已用 / 上限 / 百分比」必须与闸门**用同一份判定**，否则会出现
     「面板显示已超预算，但按钮还能点」（或反过来）。所以这里直接复用
     `budget_status`，不另写一套算法。
+
+    **平台档只算一次**，然后传给每一个项目（`budget_status(..., platform=...)`）：
+    平台档要查全表运行记录，逐个项目重算一遍等于把同一份查询做 N 次。项目档之间没有
+    共享的部分，仍然各算各的。
     """
+    platform = platform_budget_status()
     result: dict[int, dict[str, Any]] = {}
     for project_id in project_ids:
         try:
-            result[project_id] = budget_status(project_id)
+            result[project_id] = budget_status(project_id, platform=platform)
         except Exception as exc:  # noqa: BLE001 —— 面板不能因为一个项目算不出来就整页报错
             log_print(f"⚠️ AI 预算判定失败（面板）: project={project_id} {exc}", "AI", force=True)
-            result[project_id] = _unlimited("预算判定失败，这一行不做限制")
+            result[project_id] = _merge_scopes(
+                _unlimited("预算判定失败，这一行不做限制"), platform
+            )
     return result

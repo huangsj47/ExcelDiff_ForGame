@@ -257,7 +257,13 @@ def test_cost_appears_only_when_a_price_table_is_configured():
     with flask_app.app_context():
         create_tables()
         project_id = _project()
-        run = _run(project_id)
+        # 用量放大到「金额够 2 位小数展示」的量级（见 pricing.money 的展示口径）。
+        #
+        # 原来这里用默认的 1000/200/900：金额 0.00198 元，展示层量化到分之后是 `<0.01`，
+        # 而 `<0.01` **分辨不出**「命中档按 0.2/M 单独计价」（0.00198）与「命中档被并进
+        # 未命中价」（0.002）—— 那正是这条断言要守的东西。放大之后两档差出 1.62 元，
+        # 断言重新变得有区分力，而不是被放宽成「有个数就行」。
+        run = _run(project_id, tokens_input=1_000_000, tokens_output=200_000, cache_read=900_000)
 
         assert usage_from_run(run, price_table=None)["cost"] is None
 
@@ -270,9 +276,9 @@ def test_cost_appears_only_when_a_price_table_is_configured():
 
         assert usage["cost"]["amount"] is not None
         assert usage["cost"]["currency"] == "CNY"
-        # 900 命中按 0.2/M、100 未命中按 2/M、200 输出按 8/M
-        # = 0.00018 + 0.0002 + 0.0016 = 0.00198
-        assert usage["cost"]["amount"] == "0.00198", usage["cost"]
+        # 900k 命中按 0.2/M、100k 未命中按 2/M、200k 输出按 8/M
+        # = 0.18 + 0.20 + 1.60 = 1.98（若命中被并进未命中价则是 3.60）
+        assert usage["cost"]["amount"] == "1.98", usage["cost"]
         labels = [line["label"] for line in usage["cost"]["lines"]]
         assert "输入（命中缓存）" in labels, "命中那一档被合进了未命中价"
 
@@ -470,12 +476,16 @@ def test_the_run_detail_includes_rounds(client, monkeypatch):
         create_tables()
         project_id = _project()
         _set_price_table(project_id, PRICE_TABLE)
-        run = _run(project_id, target_key="g")
+        # 同上：放大到金额能被 2 位小数分辨的量级。
+        run = _run(
+            project_id, target_key="g", tokens_input=1_000_000, tokens_output=200_000,
+            cache_read=900_000,
+        )
         run_id = run.id
         db.session.add(
             AiAnalysisTrace(
-                run_id=run_id, round_index=1, outcome="final", tokens_input=1000,
-                tokens_output=200, cache_read_tokens=900, request_chars=5000,
+                run_id=run_id, round_index=1, outcome="final", tokens_input=1_000_000,
+                tokens_output=200_000, cache_read_tokens=900_000, request_chars=5000,
                 context_chars=4000, duration_ms=800,
             )
         )
@@ -485,10 +495,10 @@ def test_the_run_detail_includes_rounds(client, monkeypatch):
     body = client.get(f"/ai-analysis/runs/{run_id}/usage").get_json()
 
     assert body["success"] is True
-    assert body["run"]["usage"]["tokens"]["total"] == 1200
-    assert body["run"]["usage"]["cost"]["amount"] == "0.00198"
+    assert body["run"]["usage"]["tokens"]["total"] == 1_200_000
+    assert body["run"]["usage"]["cost"]["amount"] == "1.98"
     assert [row["round_index"] for row in body["rounds"]] == [1]
-    assert body["rounds"][0]["cache_read_tokens"] == 900
+    assert body["rounds"][0]["cache_read_tokens"] == 900_000
 
 
 def test_a_missing_run_returns_404_not_500(client, monkeypatch):

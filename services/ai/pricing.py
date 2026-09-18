@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Mapping
 
 # 默认表的版本号。**改 DEFAULT_PRICE_TABLE 必须同步改这里** —— 它会随每次运行落进
@@ -153,13 +153,63 @@ class CostEstimate:
         }
 
 
-def money(value: Decimal | None) -> str | None:
-    """金额 → 字符串。前端只展示、不做算术，所以走字符串避免二进制浮点误差。
+# 金额的展示精度。**2 位小数，全平台统一。**
+#
+# 在这之前是「量化到 6 位再去掉尾随 0」，于是同一个面板上会同时出现 `¥86.40`、
+# `¥0.001980`、`¥2` 三种形态：读的人得先数小数点后几位才知道这个数有多大，而费用恰恰是
+# 拿来横向比的一列。统一到分之后，「¥86.40 / ¥0.00 / ¥2.00」一眼可比。
+#
+# 金额的**计算**不受这里影响：算的是未舍入的 Decimal，只有展示这一步量化
+# （见 `estimate_cost` / `usage.aggregate_runs`）。所以「每条都显示 0.00、合计却是 3.00」
+# 这种正常的四舍五入是可能的，而它比「显示 6 位小数」更符合钱的读法。
+MONEY_QUANTUM = Decimal("0.01")
+# 非零但不足一分钱的金额怎么显示。
+#
+# **不显示 `0.00`**：那是「这次没花钱」这个确定的结论，而本模块从头到尾都在守
+# 「0 与算不出是两件事」这条口径（见模块 docstring 第 3 条）。一次几厘钱的运行显示成
+# `0.00`，读的人会以为它免费 —— 而它确实花了钱，只是不足一分。所以给一个明确的
+# 「小于一分」，既保住了 2 位小数的统一读法，又不撒谎。
+MONEY_BELOW_ONE_CENT = "<0.01"
 
-    **不用 `normalize()`**：它会把 `10.000000` 变成 `1E+1`，前端拿到的就是「1E+1 元」。
-    这里改成定点格式化再去掉尾随的 0。
+
+def money(value: Decimal | None) -> str | None:
+    """金额 → 字符串（**定点 2 位小数**）。前端只展示、不做算术，所以走字符串。
+
+    三条口径：
+
+    * **不用 `normalize()`**：它会把 `10.00` 变成 `1E+1`，前端拿到的就是「1E+1 元」。
+    * **不用科学计数法**：一律 `format(..., "f")`。
+    * **非零但不足一分** → `"<0.01"`（见 `MONEY_BELOW_ONE_CENT`）。`0` 进 `0` 出。
+
+    读不出数字（脏数据）时返回 `None`，与「金额是 `None`」同一个出口：界面会把
+    `None` 显示成「未配置 / 算不出」，而一个 `NaN` 或 `1E+1` 会直接被当成金额渲染。
     """
     if value is None:
+        return None
+    try:
+        amount = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not amount.is_finite():
+        return None
+
+    rounded = amount.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+    if rounded == 0 and amount != 0:
+        return MONEY_BELOW_ONE_CENT
+    return format(rounded, "f")
+
+
+def _exact_text(value: Decimal | None) -> str | None:
+    """**不做展示舍入**的金额文本，只给「两个单价表是不是同一份」这类判等用。
+
+    展示走 `money()`（2 位小数），但判等不能跟着它走：`2.0000001` 与 `2.0000002` 在
+    展示上都是 `2.00`，而 `price_change_requires_version_bump` 正是靠逐档比对这个签名
+    来抓「改了单价却没改 version」。用展示值判等等于给那条规矩开了一个静默的后门 ——
+    改价改到小数点后第三位就不再要求升版本了。
+    """
+    if value is None:
+        return None
+    if not value.is_finite():
         return None
     text = format(value.quantize(Decimal("0.000001")), "f")
     if "." in text:
@@ -437,13 +487,16 @@ def _model_signature(table: PriceTable) -> dict[str, tuple[str, str, str, str]]:
     """单价表里**真正决定金额**的那部分：模式名 → 三（四）档单价。
 
     只取单价，不取 `note`：给一条模型加一句备注不会让历史费用对不上，而改一个数字会。
+
+    **用 `_exact_text` 而不是 `money()`**：展示精度是 2 位小数，而判等要能分辨
+    `2.0000001` 与 `2.0000002`。理由见 `_exact_text` 的 docstring。
     """
     return {
         str(pattern): (
-            money(price.input_per_million) or "",
-            money(price.output_per_million) or "",
-            money(price.cache_read_per_million) or "",
-            money(price.cache_write_per_million) or "",
+            _exact_text(price.input_per_million) or "",
+            _exact_text(price.output_per_million) or "",
+            _exact_text(price.cache_read_per_million) or "",
+            _exact_text(price.cache_write_per_million) or "",
         )
         for pattern, price in table.models.items()
     }

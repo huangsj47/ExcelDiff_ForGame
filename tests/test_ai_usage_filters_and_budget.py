@@ -570,7 +570,7 @@ def test_a_cost_overrun_blocks_when_the_amount_is_known():
 
         status = budget_status(project_id)
 
-        assert status["used"]["cost"] == "2"
+        assert status["used"]["cost"] == "2.00"
         assert status["over_limits"] == ["cost"]
         assert status["over"] is True
         assert "¥2" in status["reason"], status["reason"]
