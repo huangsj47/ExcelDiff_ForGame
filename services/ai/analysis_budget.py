@@ -183,12 +183,25 @@ def _fmt_tokens(value: int | None) -> str:
     return str(value)
 
 
+def _money_with_symbol(text: str, symbol: str, currency: str) -> str:
+    """把币种符号加到金额文本上。
+
+    `money()` 对「非零但不足一分」给的是 `<0.01` —— 那是**一个整体**（前缀在数字
+    左边），符号要插在它前面而不是最前面：`<¥0.01` 读作「不到一分钱」，
+    `¥<0.01` 读起来像币种后面跟了个比较符。四处拼金额的地方（这里、前端两份、
+    顶部用量条）用的是同一条规则。
+    """
+    if text.startswith("<"):
+        return f"<{symbol}{text[1:]}" if symbol else f"<{text[1:]} {currency or ''}".strip()
+    return f"{symbol}{text}" if symbol else f"{text} {currency or ''}".strip()
+
+
 def _fmt_money(value: Decimal | None, currency: str) -> str:
     text = money(value)
     if text is None:
         return "未配置"
     symbol = {"CNY": "¥", "USD": "$", "EUR": "€"}.get(currency or "", "")
-    return f"{symbol}{text}" if symbol else f"{text} {currency or ''}".strip()
+    return _money_with_symbol(text, symbol, currency or "")
 
 
 def _unlimited(reason: str, *, scope: str = SCOPE_PROJECT, **extra: Any) -> dict[str, Any]:

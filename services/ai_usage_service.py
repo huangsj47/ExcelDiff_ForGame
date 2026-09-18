@@ -39,6 +39,7 @@ from models import Project, WeeklyVersionConfig
 from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace
 from services.ai.analysis_budget import (
     PERIOD_ALL_TIME,
+    PERIOD_CHOICES,
     PERIOD_LABELS,
     PERIOD_MONTHLY,
     PERIOD_WEEKLY,
@@ -672,6 +673,14 @@ def usage_overview(
             "notes": list(platform_status.get("notes") or ()),
         },
         "budget_link": budget_link,
+        # 预算周期选项表**随接口下发**：事实源是服务端的 `PERIOD_CHOICES` / `PERIOD_LABELS`，
+        # 界面照它渲染下拉即可。原先页面自带一份同内容的表（`AIU_PERIOD_LABELS`），
+        # 靠一条测试钉住「两边逐字一致」—— 那等于把「服务端加一个周期」变成一次
+        # 「改了服务端还要记得改前端，忘了就红」的联动。这一份仍是回落：老页面/缓存
+        # 里的前端拿不到字段时照旧用自带的表。
+        "periods": [
+            {"value": key, "label": PERIOD_LABELS.get(key, key)} for key in PERIOD_CHOICES
+        ],
         "generated_at": _iso(datetime.now(timezone.utc)),
     }
 

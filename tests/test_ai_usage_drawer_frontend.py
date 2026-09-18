@@ -161,6 +161,58 @@ def test_unknown_values_never_become_numbers(results, name):
         assert value is None or isinstance(value, str), f"{name}.{key} = {value!r}"
 
 
+# ---------------------------------------------------------------------------
+#  「不足一分钱」的符号位置
+# ---------------------------------------------------------------------------
+# 后端对**算得出来但不到一分钱**的费用给的是字符串 `"<0.01"`
+# （`services/ai/pricing.py`），不是数字 —— 前端只补币种符号、不做算术。
+#
+# 风险全在拼接顺序上：「符号 + 数字」这种写法一遇到 `<0.01` 就变成 `¥<0.01`，
+# 读起来像「币种后面跟了个比较符」。正确的读法是 `<¥0.01`（不到一分钱），
+# 符号要插在 `<` **之后**。静态断言看不见这个区别（两种拼法都是合法字符串），
+# 所以照旧用 node 真跑。
+_COST_CASES = [
+    {"name": "不足一分钱", "cost": {"amount": "<0.01", "currency": "CNY"}},
+    {"name": "不足一分钱美元", "cost": {"amount": "<0.01", "currency": "USD"}},
+    {"name": "不足一分钱且认不出币种", "cost": {"amount": "<0.01", "currency": "XYZ"}},
+    {"name": "正常金额", "cost": {"amount": "1.23", "currency": "CNY"}},
+    {"name": "认不出币种的正常金额", "cost": {"amount": "1.23", "currency": "XYZ"}},
+    {"name": "没有金额", "cost": {"amount": None, "currency": "CNY"}},
+    {"name": "没有费用对象", "cost": None},
+]
+
+
+@pytest.fixture(scope="module")
+def cost_results() -> dict:
+    return _run(_COST_CASES)
+
+
+def test_a_sub_cent_amount_keeps_the_symbol_inside_the_less_than(cost_results):
+    """`<0.01` 是一个整体：符号插在 `<` 之后 → `<¥0.01`。"""
+    text = cost_results["不足一分钱"]["cost"]
+    assert text == "<¥0.01", text
+    # 反向自检：这一条才是缺陷本身。谁把拼接顺序改回去（`symbol + text`），
+    # 上面那条 still 会红，但这条能直接说出错在哪。
+    assert "¥<" not in text, f"符号排到了 `<` 前面：{text}"
+    assert cost_results["不足一分钱美元"]["cost"] == "<$0.01"
+
+
+def test_an_unknown_currency_still_does_not_get_a_symbol(cost_results):
+    """认不出的币种**不猜符号** —— `<` 那一条支路也一样（不许拼成 `<¥0.01`）。"""
+    assert cost_results["不足一分钱且认不出币种"]["cost"] == "<0.01 XYZ"
+
+
+def test_a_normal_amount_is_untouched_by_that_rule(cost_results):
+    """没有 `<` 的金额走原路：符号在前、数字原样。"""
+    assert cost_results["正常金额"]["cost"] == "¥1.23"
+    assert cost_results["认不出币种的正常金额"]["cost"] == "1.23 XYZ"
+
+
+def test_a_missing_amount_stays_missing_instead_of_becoming_zero(cost_results):
+    assert cost_results["没有金额"]["cost"] is None
+    assert cost_results["没有费用对象"]["cost"] is None
+
+
 def test_the_script_is_referenced_by_all_three_templates():
     """三份模板都要引它 —— 少引一份，那份抽屉就永远不显示这一行（且不会报错）。"""
     for name in TEMPLATES:

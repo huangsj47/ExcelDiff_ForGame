@@ -56,11 +56,18 @@
         return num + ' ms';
     }
 
-    /** 费用：后端给的是字符串（避免前端浮点），这里只补币种符号，不做算术。 */
+    /** 费用：后端给的是字符串（避免前端浮点），这里只补币种符号，不做算术。
+     *  不足一分钱时后端给的是 `<0.01` —— 那是一个整体，符号要插在 `<` 之后：
+     *  `<¥0.01` 读作「不到一分钱」，`¥<0.01` 读起来像币种后面跟了个比较符。 */
     function fmtCost(cost) {
         if (!cost || cost.amount === null || cost.amount === undefined) return null;
         var symbol = { CNY: '¥', USD: '$', EUR: '€' }[cost.currency] || '';
-        return symbol + cost.amount + (symbol ? '' : ' ' + (cost.currency || ''));
+        var text = String(cost.amount);
+        if (text.charAt(0) === '<') {
+            return symbol ? '<' + symbol + text.slice(1)
+                          : '<' + text.slice(1) + ' ' + (cost.currency || '');
+        }
+        return symbol + text + (symbol ? '' : ' ' + (cost.currency || ''));
     }
 
     /** 一行文案。拆出来是为了能单独用 node 断言（含「未上报」与「0」的区别）。 */

@@ -218,7 +218,42 @@ _NODE_CASES = {
     "overScopesLabel": [["project"], ["platform"], ["project", "platform"], [], None],
     "meterPercent": [None, 0, 0.0042, 0.5, 1, 1.5, "abc", -1, 0.375],
     "fmtMoney": [["12.00", "CNY"], ["860.00", "CNY"], ["0.01", "USD"], ["1000.00", "EUR"],
-                 ["12.00", "XYZ"], ["12.00", ""], [None, "CNY"], ["", "CNY"], ["1234.50", "CNY"]],
+                 ["12.00", "XYZ"], ["12.00", ""], [None, "CNY"], ["", "CNY"], ["1234.50", "CNY"],
+                 # 9 起：不足一分钱。后端给的是**字符串** `"<0.01"`（整体，不是数字）。
+                 ["<0.01", "CNY"], ["<0.01", "USD"], ["<0.01", "XYZ"]],
+    # `aiuFmtCost(cost)` 收的是整个 `{amount, currency}` 对象（明细表里那一格）。
+    "fmtCost": [{"amount": "<0.01", "currency": "CNY"},
+                {"amount": "<0.01", "currency": "USD"},
+                {"amount": "<0.01", "currency": "XYZ"},
+                {"amount": "1.23", "currency": "CNY"},
+                {"amount": None, "currency": "CNY"},
+                None],
+    # 周期下拉：`[当前周期, 服务端给的当前标签, 服务端下发的整张表]`。
+    "periodSelect": [
+        # 0：服务端下发了整张表，其中 `quarterly` 是本页自带那份表里**没有**的
+        #    —— 下拉必须跟着多出这一项（「服务端加一个周期」不该再要人改前端）。
+        {"period": "monthly", "label": "本月",
+         "periods": [{"value": "monthly", "label": "本月"},
+                     {"value": "quarterly", "label": "本季度"},
+                     {"value": "all_time", "label": "全部时间"}]},
+        # 1：服务端**没**下发（老缓存 / 请求失败后回落的那一帧）→ 用本页自带的表。
+        {"period": "weekly", "label": "本周", "periods": None},
+        # 2：下发了一个空数组，与「没下发」同义 —— 不能渲染出一个空下拉。
+        {"period": "weekly", "label": "本周", "periods": []},
+        # 3：非当前项的文案以**服务端**那份为准；当前项的文案用服务端刚回的 label。
+        {"period": "monthly", "label": "本月（自然月）",
+         "periods": [{"value": "monthly", "label": "月度"},
+                     {"value": "all_time", "label": "所有时间"}]},
+        # 4：当前周期不在下发的表里 → 补一项，否则 `select.value = current` 会落空
+        #    （下拉显示的是第一项，用户一保存就把周期改掉了）。
+        {"period": "weekly", "label": "本周",
+         "periods": [{"value": "monthly", "label": "本月"},
+                     {"value": "all_time", "label": "全部时间"}]},
+        # 5：脏数据（没有 value 的条目）跳过。
+        {"period": "monthly", "label": "本月",
+         "periods": [{"value": "", "label": "空"}, None,
+                     {"value": "monthly", "label": "本月"}]},
+    ],
     "budgetFormPayload": [["monthly", "", ""], ["weekly", "1000", "12.50"],
                           ["all_time", "  2000  ", "  "], ["monthly", "abc", "xyz"],
                           ["monthly", "0", "0"], [None, None, None],
@@ -228,7 +263,19 @@ _NODE_CASES = {
 }
 
 
-def _run_node(script: str, cases: dict) -> dict:
+def _function_source(script: str, name: str) -> str:
+    """`function <name>(…) { … }` 的**完整源码**（含参数表）。
+
+    与 `_function_body` 的区别：这份能直接喂给 node 求值，所以 IIFE 里的函数也能
+    **真跑**（不必为了测试把内部函数挂到 `window` 上）。取的那段代码是模板里逐字的
+    那一份 —— 抄写一份进测试就失去意义了。
+    """
+    start = script.index(f"function {name}(")
+    head = script[start: script.index("{", start)]
+    return head + _function_body(script, name)
+
+
+def _run_node(script: str, cases: dict, probe_source: str = "") -> dict:
     if not shutil.which("node"):
         pytest.skip("环境里没有 Node，跳过真实运行的纯函数断言")
     driver = _DOM_STUB + """
@@ -257,6 +304,10 @@ const sandbox = {
 sandbox.window.document = sandbox.document;
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: 'ai_usage_dashboard.js' });
+// 探针：把 IIFE 里的函数（模板里逐字那段源码）放进**同一个**上下文求值，
+// 于是它照样能看见 `AIU_PERIOD_ORDER` 这些全局量，还能用上面那个 DOM stub。
+const PROBE = __PROBE__;
+if (PROBE) vm.runInContext(PROBE, sandbox, { filename: 'probe.js' });
 
 const A = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
 const out = {
@@ -265,8 +316,10 @@ const out = {
         aiuOverScopesLabel: typeof sandbox.aiuOverScopesLabel,
         aiuMeterPercent: typeof sandbox.aiuMeterPercent,
         aiuFmtMoney: typeof sandbox.aiuFmtMoney,
+        aiuFmtCost: typeof sandbox.aiuFmtCost,
         aiuBudgetFormPayload: typeof sandbox.aiuBudgetFormPayload,
-        aiuPeriodLabel: typeof sandbox.aiuPeriodLabel
+        aiuPeriodLabel: typeof sandbox.aiuPeriodLabel,
+        fillPeriodSelect: typeof sandbox.__probeFillPeriodSelect
     },
     periodLabels: sandbox.AIU_PERIOD_LABELS,
     periodOrder: sandbox.AIU_PERIOD_ORDER,
@@ -274,14 +327,30 @@ const out = {
     overScopesLabel: A.overScopesLabel.map(function (x) { return sandbox.aiuOverScopesLabel(x); }),
     meterPercent: A.meterPercent.map(function (x) { return sandbox.aiuMeterPercent(x); }),
     fmtMoney: A.fmtMoney.map(function (p) { return sandbox.aiuFmtMoney(p[0], p[1]); }),
+    fmtCost: A.fmtCost.map(function (x) { return sandbox.aiuFmtCost(x); }),
     budgetFormPayload: A.budgetFormPayload.map(function (p) {
         return sandbox.aiuBudgetFormPayload(p[0], p[1], p[2]);
     }),
     periodLabel: A.periodLabel.map(function (x) { return sandbox.aiuPeriodLabel(x); }),
-    fmtTokens: A.fmtTokens.map(function (x) { return sandbox.aiuFmtTokens(x); })
+    fmtTokens: A.fmtTokens.map(function (x) { return sandbox.aiuFmtTokens(x); }),
+    // 真建一个 <select>、真调 `fillPeriodSelect`，再把渲染出来的 option 读回来。
+    periodSelect: typeof sandbox.__probeFillPeriodSelect !== 'function' ? null
+        : A.periodSelect.map(function (item) {
+            const select = makeElement('select');
+            sandbox.__probeFillPeriodSelect(select, item.period, item.label, item.periods);
+            return {
+                value: select.value,
+                options: select.children.map(function (option) {
+                    return option.value + '=' + option.textContent;
+                })
+            };
+        })
 };
 process.stdout.write(JSON.stringify(out));
 """
+    driver = driver.replace("__PROBE__",
+                            json.dumps(probe_source and
+                                       "__probeFillPeriodSelect = " + probe_source))
     with tempfile.TemporaryDirectory() as tmp:
         script_path = Path(tmp) / "ai_usage_dashboard.js"
         script_path.write_text(script, encoding="utf-8")
@@ -299,7 +368,11 @@ process.stdout.write(JSON.stringify(out));
 
 @pytest.fixture(scope="module")
 def js() -> dict:
-    return _run_node(_dashboard_script(), _NODE_CASES)
+    script = _dashboard_script()
+    # `fillPeriodSelect` 在 IIFE 里，外面拿不到 —— 把模板里**逐字那段源码**求值进
+    # 同一个上下文，于是可以真建一个 <select> 断言渲染出来的 option。
+    return _run_node(script, _NODE_CASES,
+                     probe_source=_function_source(script, "fillPeriodSelect"))
 
 
 # ==========================================================================
@@ -309,14 +382,20 @@ def js() -> dict:
 
 class TestThePureFunctionsForReal:
     def test_the_module_actually_defines_every_probe(self, js):
-        """探针函数都得真的存在 —— 有人重命名时，后面的 `map` 会静默产出 null 数组。"""
+        """探针函数都得真的存在 —— 有人重命名时，后面的 `map` 会静默产出 null 数组。
+
+        `fillPeriodSelect` 是**求值进同一个上下文**的那一个（它在 IIFE 里，外面本来
+        拿不到）：`null` 就是探针没跑起来的信号，所以它必须在这里被钉住。
+        """
         assert js["typeofs"] == {
             "aiuBudgetScopeText": "function",
             "aiuOverScopesLabel": "function",
             "aiuMeterPercent": "function",
             "aiuFmtMoney": "function",
+            "aiuFmtCost": "function",
             "aiuBudgetFormPayload": "function",
             "aiuPeriodLabel": "function",
+            "fillPeriodSelect": "function",
         }
 
     def test_a_limited_scope_shows_used_over_limit(self, js):
@@ -406,6 +485,32 @@ class TestThePureFunctionsForReal:
         assert js["fmtMoney"][6] is None
         assert js["fmtMoney"][7] is None
 
+    def test_a_sub_cent_amount_keeps_the_symbol_inside_the_less_than(self, js):
+        """**不足一分钱**：后端给的是字符串 `"<0.01"`（`services/ai/pricing.py`），
+        它是一个**整体**，所以符号要插在 `<` 之后 —— `<¥0.01`（不到一分钱）。
+
+        写成 `¥<0.01` 就成了「币种后面跟了个比较符」，读起来是另一句话。两种拼法都是
+        合法字符串，静态断言看不出来，只能真跑。
+        """
+        assert js["fmtMoney"][9] == "<¥0.01"
+        assert js["fmtMoney"][10] == "<$0.01"
+        # 反向自检：这一条才是缺陷本身（谁把拼接顺序写回符号在前，上面那条也红，
+        # 但这条直接说出错在哪）。
+        assert "¥<" not in js["fmtMoney"][9]
+        # 认不出的币种照旧不猜符号，`<` 那一支也一样。
+        assert js["fmtMoney"][11] == "<0.01 XYZ"
+
+    def test_the_detail_table_uses_the_same_money_rule(self, js):
+        """明细里那一格走的是 `aiuFmtCost(cost)`（收整个对象）—— 同一条规则。
+
+        两份实现（`aiuFmtCost` 与 `aiuFmtMoney`）都拼金额，只改一处的话，同一笔
+        「不到一分钱」在表格里显示 `¥<0.01`、在卡片里显示 `<¥0.01`。
+        """
+        assert js["fmtCost"][0] == "<¥0.01"
+        assert js["fmtCost"][3] == "¥1.23"
+        assert js["fmtCost"][4] is None
+        assert js["fmtCost"][5] is None
+
     def test_a_blank_limit_is_submitted_as_null(self, js):
         assert js["budgetFormPayload"][0] == {
             "budget_period": "monthly",
@@ -444,14 +549,92 @@ class TestThePureFunctionsForReal:
 
 
 # ==========================================================================
-#  二、周期选项表与服务端同源
+#  二、周期选项表：服务端下发，本页自带的那份只是回落
 # ==========================================================================
 
 
-class TestThePeriodOptionsMatchTheServer:
-    """接口**没有**下发整张周期选项表，所以本页自带一份 —— 自带的那一份必须与
-    服务端的 `PERIOD_LABELS` / `PERIOD_CHOICES` 逐字一致，否则界面上会出现一个
-    后端认不出来的选项（用户选了、保存被拒，或者更糟：被回落成默认周期）。"""
+class TestThePeriodOptionsComeFromTheServer:
+    """**事实源是服务端，且整张表随总览接口下发**（`payload.periods`）。
+
+    这里原来钉的是「本页自带的那份表与服务端逐字一致」—— 那等于把「服务端加一个
+    周期」变成一次「改了服务端还要记得改前端，忘了就红」的联动。现在正常路径走接口
+    下发的那份，本页自带的那份退化成回落（老缓存 / 请求失败后回落的那一帧）。
+
+    所以本类守两条：**下发了就用下发的**（含本页不认识的周期），**没下发才回落**。
+    回落表仍然要与服务端一致 —— 它一旦漂了，只在出问题的那一帧显形，那种漂移最难发现。
+    """
+
+    def test_the_overview_ships_the_whole_table(self):
+        """接口真的下发了这张表，且顺序、文案与服务端常量一致。"""
+        with flask_app.app_context():
+            create_tables()
+            body = usage_overview([], None)
+
+        assert body["periods"] == [
+            {"value": key, "label": PERIOD_LABELS.get(key, key)} for key in PERIOD_CHOICES
+        ], "总览响应里的周期选项表与服务端常量不一致（界面会渲染出一个后端不认的选项）"
+
+    def test_the_server_table_wins_over_the_built_in_one(self, js):
+        """服务端下发的那张表里加一个本页**不认识**的周期，下拉里就得有它。
+
+        这是本类存在的理由：回落那条路在「两种来源恰好一样」时是分辨不出来的。
+        """
+        rendered = js["periodSelect"][0]
+        assert rendered["options"] == [
+            "monthly=本月", "quarterly=本季度", "all_time=全部时间",
+        ], rendered
+        assert rendered["value"] == "monthly"
+        # 反向自检：`quarterly` 只可能来自服务端下发的那张表（本页只有三个周期）。
+        assert "quarterly" not in js["periodOrder"]
+
+    def test_the_built_in_table_only_backs_the_missing_payload(self, js):
+        """没下发 / 下发空数组 → 用本页自带的那份（三个周期，与今天一样）。
+
+        空数组与「没下发」同义：渲染出一个空下拉会让用户以为预算不能选周期。
+        """
+        assert js["periodSelect"][1]["options"] == [
+            "monthly=本月", "weekly=本周", "all_time=全部时间",
+        ]
+        assert js["periodSelect"][1]["value"] == "weekly"
+        assert js["periodSelect"][2] == js["periodSelect"][1]
+
+    def test_a_non_current_option_uses_the_servers_label(self, js):
+        """非当前项的文案以**服务端**那份为准（运营改文案不该要人改模板）。
+
+        当前那一项的文案用服务端**刚回的那份** `period_label` —— 它比常量更准
+        （例如「本月」被服务端渲染成带年份的说法）。
+        """
+        rendered = js["periodSelect"][3]
+        assert rendered["options"] == ["monthly=本月（自然月）", "all_time=所有时间"]
+        assert rendered["value"] == "monthly"
+
+    def test_the_current_period_is_never_dropped_from_the_select(self, js):
+        """当前周期不在下发的表里 → **补一项**。
+
+        不补的话 `select.value = current` 落空，下拉会停在第一项上 —— 用户什么都没改、
+        点保存，周期就被改成了第一项（一个静默的数据改写）。
+        """
+        rendered = js["periodSelect"][4]
+        assert rendered["options"] == ["monthly=本月", "all_time=全部时间", "weekly=本周"]
+        assert rendered["value"] == "weekly"
+
+    def test_a_dirty_entry_is_skipped_instead_of_rendering_an_empty_option(self, js):
+        assert js["periodSelect"][5]["options"] == ["monthly=本月"]
+        assert js["periodSelect"][5]["value"] == "monthly"
+
+    def test_both_selects_are_filled_from_the_payload_not_the_constants(self):
+        """三处下拉（平台卡片、项目预算弹层打开时、弹层重新拉数后）都要把接口下发的
+        那份传进去 —— 漏传一处，那一处就永远停在回落表上，服务端加周期时只有
+        一半界面对。"""
+        script = _dashboard_script()
+        calls = re.findall(r"fillPeriodSelect\(\$\([^;]*;", script, re.S)
+        assert len(calls) == 3, f"fillPeriodSelect 的调用点变了：{len(calls)}"
+        for call in calls:
+            assert "aiPeriodChoices()" in call, (
+                f"这个调用点没把接口下发的那张表传进去：{call.strip()}"
+            )
+        load = _function_body(script, "loadOverview")
+        assert "Array.isArray(body.periods) ? body.periods : null" in load
 
     def test_the_labels_are_the_servers_labels(self, js):
         assert js["periodLabels"] == PERIOD_LABELS, (
@@ -641,7 +824,11 @@ class TestThePlatformBudgetCard:
         assert "超预算会挡住下一次分析（手动与定时都挡），已经在跑的分析不会被中断。" in body
         html = _read(DASHBOARD)
         marker = html.index('id="aiuPlatformOverNotice"')
-        assert 'role="alert"' in html[marker - 200: marker + 120]
+        # 卡片内这一条**不**播报：同一次超预算在这里与顶部横幅都会出现，
+        # 两处都挂 aria-live 会让屏幕阅读器连读两遍。播报交给顶部那条。
+        assert 'role="alert"' not in html[marker - 200: marker + 120], (
+            "卡片内的超预算提示又挂上了 role=\"alert\" —— 它与顶部横幅会重复播报"
+        )
 
     def test_the_form_saves_through_the_platform_endpoint(self):
         body = _function_body(_dashboard_script(), "savePlatformBudget")
@@ -763,13 +950,61 @@ class TestTheProjectBudgetModal:
         assert "on || !budgetModalState.canEdit" in busy
 
     def test_the_modal_backfills_the_effective_limits_not_zero(self):
-        body = _function_body(_dashboard_script(), "openBudgetModal")
-        assert "limits.tokens === null || limits.tokens === undefined" in body
-        assert "limits.cost === null || limits.cost === undefined" in body
+        # 回填逻辑在 `applyBudgetLimitsToModal`（打开弹层时先用总览那一行的值画上、
+        # 再拉一次权威值，两处都走这一个函数）。
+        body = _function_body(_dashboard_script(), "applyBudgetLimitsToModal")
+        assert "source.tokens === null || source.tokens === undefined" in body
+        assert "source.cost === null || source.cost === undefined" in body
+        # 打开时**重新拉一次**：保存是把周期 + 两个上限整份写回的，拿旧值提交会覆盖
+        # 别处的改动（见 refreshBudgetModal）。
+        modal = _function_body(_dashboard_script(), "openBudgetModal")
+        assert "refreshBudgetModal(" in modal
 
     def test_the_modal_reuses_the_shared_period_select(self):
         body = _function_body(_dashboard_script(), "openBudgetModal")
         assert "fillPeriodSelect(" in body
+
+    def test_the_modal_refetches_before_it_can_be_saved(self):
+        """**打开弹层时重新拉一次这个项目的预算。**
+
+        保存是把「周期 + 两个上限」**整份写回**的，而弹层里那份来自总览那一行 ——
+        页面加载那一刻的快照。用户可能在另一个标签页里刚改过，拿旧值提交就是把别人的
+        改动覆盖回去（用户看不到任何提示，只会发现预算过一会儿又变回去了）。
+        """
+        script = _dashboard_script()
+        body = _function_body(script, "refreshBudgetModal")
+        assert "'/ai-analysis/projects/' + projectId + '/budget'" in body
+        assert "credentials: 'same-origin'" in body
+        assert "'Accept': 'application/json'" in body
+        # 拉回来的是**权威值**，要重新画一遍周期与两个上限。
+        assert "applyBudgetLimitsToModal(fresh.limits || {})" in body
+        assert "fillPeriodSelect(" in body
+        # 读接口是 GET：带上 method 就变成「往预算端点上写」了。
+        assert "method:" not in body, "读预算的请求带了 method"
+        # 先画上总览那一行的值（弹层不该空一帧），再拉权威值。
+        modal = _function_body(script, "openBudgetModal")
+        assert modal.index("applyBudgetLimitsToModal(") < modal.index("refreshBudgetModal(")
+
+    def test_a_failed_refetch_says_so_instead_of_pretending_it_is_fresh(self):
+        """拉不到时**不装作没事**，也不把已经画好的值抹掉。
+
+        值照旧可编辑（回落到打开页面时的那份），但必须说清是哪一份 —— 否则用户会以为
+        看到的是最新值，然后拿旧值覆盖别人刚做的改动。
+        """
+        body = _function_body(_dashboard_script(), "refreshBudgetModal")
+        failure = body[body.index("if (!result.ok || !result.body.budget)"):]
+        failure = failure[: failure.index("var fresh =")]
+        assert "applyBudgetLimitsToModal" not in failure, (
+            "读取失败时还去回填了一次 —— 失败响应里的空值会把已画好的上限抹成「不限制」"
+        )
+        assert "return null" in failure
+        assert "打开页面时的值" in failure, "没告诉用户看到的是哪一份值"
+        # 忙碌态的解除要排在**异常分支之后**（成功、失败、抛异常三条路都会走到那里）。
+        # 只在成功那一支解除的话，一次网络抖动就会让保存按钮一直灰着 —— 而那时候
+        # 弹层里明明摆着一份可以编辑、可以提交的值。
+        assert body.rindex("setBudgetModalBusy(false)") > body.index(".catch("), (
+            "解除忙碌态的那一步排在了异常分支之前，失败时保存按钮会一直是灰的"
+        )
 
 
 class TestTheTopLevelAlert:

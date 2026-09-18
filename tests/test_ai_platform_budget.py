@@ -431,6 +431,9 @@ def test_a_sub_cent_limit_is_displayed_as_below_one_cent():
 
     钉住它是因为这个角落没有别的测试会走到：金额一律 2 位小数展示，0.001 元的上限
     四舍五入成 0.00 就成了「限额零元」，而那是另一件事。
+
+    币种符号插在 `<` **之后**：`<¥0.01` 读作「不到一分钱」，`¥<0.01` 读起来像币种
+    后面跟了个比较符。四处拼金额的地方（后端一处、前端两份、顶部用量条）同一规则。
     """
     with flask_app.app_context():
         create_tables()
@@ -444,7 +447,10 @@ def test_a_sub_cent_limit_is_displayed_as_below_one_cent():
         status = platform_budget_status()
 
         assert status["used"]["cost"] == "2.00"
-        assert "¥<0.01" in status["reason"], status["reason"]
+        assert "<¥0.01" in status["reason"], status["reason"]
+        assert "¥<0.01" not in status["reason"], (
+            f"符号插在比较符前面了：{status['reason']}"
+        )
 
 
 # ==========================================================================

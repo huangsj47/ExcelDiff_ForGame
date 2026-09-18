@@ -284,7 +284,11 @@
             </div>
 
             <div id="aiuPlatformBudgetBody" hidden>
-                <div id="aiuPlatformOverNotice" class="aiu-alert" role="alert" hidden></div>
+                {# 这一条**不是** live region（没有 role="alert"）：同一次「平台档超了」
+                   在页面上会出现两处（这里 + 顶部横幅 `aiuPlatformAlert`），两处都挂
+                   aria-live 的话屏幕阅读器会把同一件事连读两遍。横幅在第一屏、位置更早，
+                   播报交给它；这里只作为卡片内的可见说明。 #}
+                <div id="aiuPlatformOverNotice" class="aiu-alert" hidden></div>
 
                 <div class="aiu-meter-group">
                     <div class="aiu-meter-row">
@@ -870,11 +874,22 @@ function aiuFmtRate(rate) {
     return (num * 100).toFixed(1) + '%';
 }
 
-/** 费用：后端给的是字符串（避免前端浮点），这里只加币种符号，不做算术。 */
+/** 费用：后端给的是字符串（避免前端浮点），这里只加币种符号，不做算术。
+ *  不足一分钱时后端给的是 `<0.01` —— 那是一个整体，符号要插在 `<` 之后：
+ *  `<¥0.01` 读作「不到一分钱」，`¥<0.01` 读起来像币种后面跟了个比较符。 */
 function aiuFmtCost(cost) {
     if (!cost || cost.amount === null || cost.amount === undefined) return null;
-    var symbol = { CNY: '¥', USD: '$', EUR: '€' }[cost.currency] || '';
-    return symbol + cost.amount + (symbol ? '' : ' ' + (cost.currency || ''));
+    return aiuJoinMoney(String(cost.amount), cost.currency);
+}
+
+/** 金额文本 + 币种：符号插在 `<` 之后（见 aiuFmtCost）；认不出的币种不猜符号。 */
+function aiuJoinMoney(amount, currency) {
+    var symbol = aiuCurrencySymbol(currency);
+    var text = String(amount);
+    if (text.charAt(0) === '<') {
+        return symbol ? '<' + symbol + text.slice(1) : '<' + text.slice(1) + ' ' + (currency || '');
+    }
+    return symbol ? symbol + text : text + (currency ? ' ' + currency : '');
 }
 
 /** 「有值就显示，没有就说未上报」。0 会走「有值」这一支，这是刻意的。 */
@@ -917,16 +932,25 @@ function aiuToolLabel(kind) {
 // ---------------------------------------------------------------------------
 // 预算周期只有三个取值，事实源在服务端（`services/ai/analysis_budget.PERIOD_LABELS`
 // / `models/ai_analysis/project_config.BUDGET_PERIOD_CHOICES`）。接口**没有**下发这份
-// 选项表（`platform_status` 只回当前那一个周期的标签、`budget.period` 只回当前值），
-// 所以这里只能自带一份 —— 但自带的那一份必须与服务端逐字一致，否则界面上会出现一个
-// 后端认不出来的选项（用户选了、保存被拒，或者更糟：被回落成默认周期）。
-// `test_ai_usage_budget_ui.py` 把这三个键与三个标签逐一对照服务端的表，改一边就红。
+// 周期选项表的**回落**。事实源是服务端（`analysis_budget.PERIOD_CHOICES/PERIOD_LABELS`），
+// 总览接口现在把它整表下发（`payload.periods`），所以正常路径下这份不会被用到 ——
+// 它只在「接口还没下发」（老缓存、接口异常后回落的那一帧）时顶上。
+// `test_ai_usage_budget_ui.py` 仍然钉住它与服务端逐字一致：回落表一旦漂了，
+// 只有在出问题的那一帧才会显形，那种漂移最难发现。
 var AIU_PERIOD_LABELS = { monthly: '本月', weekly: '本周', all_time: '全部时间' };
 var AIU_PERIOD_ORDER = ['monthly', 'weekly', 'all_time'];
 
 function aiuPeriodLabel(period) {
     var key = String(period === null || period === undefined ? '' : period).trim().toLowerCase();
     return AIU_PERIOD_LABELS[key] || key;
+}
+
+// 接口最后一次下发的周期选项表（`usage_overview` 的 `periods`）。null = 还没拿到，
+// 那时 `fillPeriodSelect` 用上面那份回落表。
+var AIU_PERIOD_CHOICES = null;
+
+function aiPeriodChoices() {
+    return AIU_PERIOD_CHOICES;
 }
 
 /** 币种符号。认不出来的币种**不猜**：符号位留空、原样写币种码。 */
@@ -939,8 +963,7 @@ function aiuCurrencySymbol(currency) {
  *  `null` / 空串 → `null`（调用方决定显示「未上报」还是「不限制」）。 */
 function aiuFmtMoney(amount, currency) {
     if (amount === null || amount === undefined || amount === '') return null;
-    var symbol = aiuCurrencySymbol(currency);
-    return symbol + amount + (symbol ? '' : (currency ? ' ' + currency : ''));
+    return aiuJoinMoney(amount, currency);
 }
 
 /** 平台档被收掉时，代替它那两个数字的那句话。
@@ -1718,22 +1741,32 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         budget_cost_limit: 'aiuPlatformCostError'
     };
 
-    /** 周期下拉。事实源是服务端（`PERIOD_LABELS` / `BUDGET_PERIOD_CHOICES`），但接口
-     *  **没有下发整张选项表** —— `platform_status` 只回当前那一个周期的标签。
-     *  所以本页自带三个键与三个标签（`AIU_PERIOD_LABELS`，测试逐字钉住与服务端一致），
-     *  而**当前那一个**的标签优先用服务端刚回的那份；服务端将来多出第四个取值时也照原样
-     *  列出来，不会出现「服务端认得出、界面上没有」的选项。 */
-    function fillPeriodSelect(select, currentPeriod, currentLabel) {
+    /** 周期下拉。事实源是服务端，且**整张表随总览接口下发**（`payload.periods`，
+     *  `fillPeriodSelect` 的第四个参数）—— 服务端加一个周期，界面自动多一个选项。
+     *  接口没给（老缓存 / 请求失败后回落的那一帧）时才用本页自带的那份
+     *  （`AIU_PERIOD_LABELS`，测试钉住与服务端一致）；**当前那一个**的标签始终优先用
+     *  服务端刚回的那份。 */
+    function fillPeriodSelect(select, currentPeriod, currentLabel, periods) {
         if (!select) return;
         var current = String(currentPeriod || '');
-        var keys = AIU_PERIOD_ORDER.slice();
+        var keys = [];
+        var labels = {};
+        (periods || []).forEach(function (item) {
+            if (!item || !item.value) return;
+            keys.push(String(item.value));
+            labels[String(item.value)] = String(item.label || item.value);
+        });
+        if (!keys.length) {
+            keys = AIU_PERIOD_ORDER.slice();
+            AIU_PERIOD_ORDER.forEach(function (key) { labels[key] = aiuPeriodLabel(key); });
+        }
         if (current && keys.indexOf(current) < 0) keys.push(current);
         select.textContent = '';
         keys.forEach(function (key) {
             var option = document.createElement('option');
             option.value = key;
             option.textContent = (key === current && currentLabel)
-                ? String(currentLabel) : aiuPeriodLabel(key);
+                ? String(currentLabel) : (labels[key] || aiuPeriodLabel(key));
             select.appendChild(option);
         });
         if (current) select.value = current;
@@ -1841,7 +1874,8 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
     function renderPlatformBudget(budget, status) {
         var config = budget || {};
         var data = status || {};
-        fillPeriodSelect($('aiuPlatformPeriodSelect'), config.period, data.period_label);
+        fillPeriodSelect($('aiuPlatformPeriodSelect'), config.period, data.period_label,
+                         aiPeriodChoices());
         var tokenInput = $('aiuPlatformTokenInput');
         if (tokenInput) {
             tokenInput.value = (config.token_limit === null || config.token_limit === undefined)
@@ -2045,18 +2079,9 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         budgetModalState.projectId = item ? item.project_id : null;
         budgetModalState.name = (item && item.name) || '';
         $('aiuBudgetModalTitle').textContent = '调整项目预算 · ' + budgetModalState.name;
-        fillPeriodSelect($('aiuBudgetPeriodSelect'), budget.period, budget.period_label);
-        // 回填的是**这一档实际生效的上限**：没配就是空（= 不限制），**不是 0**。
-        var tokenInput = $('aiuBudgetTokenInput');
-        if (tokenInput) {
-            tokenInput.value = (limits.tokens === null || limits.tokens === undefined)
-                ? '' : String(limits.tokens);
-        }
-        var costInput = $('aiuBudgetCostInput');
-        if (costInput) {
-            costInput.value = (limits.cost === null || limits.cost === undefined)
-                ? '' : String(limits.cost);
-        }
+        fillPeriodSelect($('aiuBudgetPeriodSelect'), budget.period, budget.period_label,
+                         aiPeriodChoices());
+        applyBudgetLimitsToModal(limits);
         clearBudgetModalErrors();
         setBudgetModalFeedback('', '');
         setBudgetModalReadonly(false);
@@ -2064,6 +2089,63 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             budgetModalInstance = new bootstrap.Modal($('aiuBudgetModal'));
         }
         budgetModalInstance.show();
+        // 先把总览那一行的值画上去（弹层不该空一帧），再拉一次权威值。
+        refreshBudgetModal(budgetModalState.projectId);
+    }
+
+    /** 把一份预算的**上限**填进弹层。回填的是**这一档实际生效的上限**：
+     *  没配就是空（= 不限制），**不是 0**。 */
+    function applyBudgetLimitsToModal(limits) {
+        var source = limits || {};
+        var tokenInput = $('aiuBudgetTokenInput');
+        if (tokenInput) {
+            tokenInput.value = (source.tokens === null || source.tokens === undefined)
+                ? '' : String(source.tokens);
+        }
+        var costInput = $('aiuBudgetCostInput');
+        if (costInput) {
+            costInput.value = (source.cost === null || source.cost === undefined)
+                ? '' : String(source.cost);
+        }
+    }
+
+    /** 打开弹层时重新拉一次这个项目的预算。
+     *
+     *  为什么不能只用总览那一行的值：保存是把**周期 + 两个上限整份写回**的
+     *  （`aiuBudgetFormPayload`），而总览那一行是页面加载那一刻取的 ——
+     *  用户可能在另一个标签页里刚改过，拿旧值提交就是把别人的改动覆盖回去。
+     *
+     *  拉不到时**不装作没事**：值照旧可编辑，但明确说「显示的是打开页面时的值」，
+     *  让用户自己决定要不要先刷新。 */
+    function refreshBudgetModal(projectId) {
+        if (!projectId) return;
+        setBudgetModalBusy(true);
+        setBudgetModalFeedback('正在读取最新预算…', 'muted');
+        return fetch('/ai-analysis/projects/' + projectId + '/budget', {
+            credentials: 'same-origin',
+            headers: { 'Accept': 'application/json' }
+        }).then(function (response) {
+            return response.json().catch(function () { return {}; }).then(function (payload) {
+                return { ok: response.ok, body: payload || {} };
+            });
+        }).then(function (result) {
+            if (!result.ok || !result.body.budget) {
+                setBudgetModalFeedback('读取最新预算失败，下面显示的是打开页面时的值。', 'error');
+                return null;
+            }
+            var fresh = result.body.budget || {};
+            fillPeriodSelect($('aiuBudgetPeriodSelect'), fresh.period, fresh.period_label,
+                             aiPeriodChoices());
+            applyBudgetLimitsToModal(fresh.limits || {});
+            setBudgetModalFeedback('', '');
+            return fresh;
+        }).catch(function () {
+            setBudgetModalFeedback('读取最新预算失败，下面显示的是打开页面时的值。', 'error');
+            return null;
+        }).then(function (fresh) {
+            setBudgetModalBusy(false);
+            return fresh;
+        });
     }
 
     function saveBudgetModal() {
@@ -2121,6 +2203,10 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         var query = params.toString();
         return fetchJson('/ai-analysis/usage/overview' + (query ? '?' + query : '')).then(function (body) {
             state.overview = body;
+            // 周期选项表随接口下发（服务端 `PERIOD_CHOICES/PERIOD_LABELS` 是事实源）：
+            // 记下来给两处下拉用（平台卡片 + 项目预算弹层）。拿不到就保持 null，
+            // `fillPeriodSelect` 会退回本页自带的那份。
+            AIU_PERIOD_CHOICES = Array.isArray(body.periods) ? body.periods : null;
             fillFilterOptions(body);
             // 表单与地址栏都按**服务端实际生效的**那份筛选来回填：传来的条件非法时
             // 后端会回落默认，界面得跟着回落到同一处，并把它写明白（filters.notes）。
