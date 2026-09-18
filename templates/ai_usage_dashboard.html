@@ -124,9 +124,9 @@
                 <strong>任意一档超了都会挡住下一次分析</strong>（手动与定时都挡）。
             </p>
             <div class="aiu-bars" id="aiuProjectBars"></div>
-            <div class="aiu-table-wrap">
+            <div class="aiu-table-wrap" role="region" tabindex="0" aria-labelledby="aiuProjectTableCaption">
                 <table class="aiu-table">
-                    <caption class="aiu-caption">各项目的 AI 分析用量。表格与柱条是同一份数据，柱条只是帮助看相对量级。</caption>
+                    <caption class="aiu-caption" id="aiuProjectTableCaption">各项目的 AI 分析用量。表格与柱条是同一份数据，柱条只是帮助看相对量级。</caption>
                     <thead>
                         <tr>
                             <th scope="col">项目</th>
@@ -192,9 +192,9 @@
                     </button>
                 </div>
 
-                <div class="aiu-table-wrap">
+                <div class="aiu-table-wrap" role="region" tabindex="0" aria-labelledby="aiuPriceTableCaption">
                     <table class="aiu-table aiu-price-table">
-                        <caption class="aiu-caption">
+                        <caption class="aiu-caption" id="aiuPriceTableCaption">
                             每一行是一个模型的三档单价。修改后会自动同步到下面的 JSON。
                         </caption>
                         <thead>
@@ -360,9 +360,9 @@
                 按周版本（分组键）聚合。「最近分析的」指本项目里最近一次分析所属的那个周版本 ——
                 平台无法从分析记录反推你心里那个「当前」。
             </p>
-            <div class="aiu-table-wrap">
+            <div class="aiu-table-wrap" role="region" tabindex="0" aria-labelledby="aiuWeeklyTableCaption">
                 <table class="aiu-table">
-                    <caption class="aiu-caption">每个周版本的运行次数、token、缓存命中率与费用估算。</caption>
+                    <caption class="aiu-caption" id="aiuWeeklyTableCaption">每个周版本的运行次数、token、缓存命中率与费用估算。</caption>
                     <thead>
                         <tr>
                             <th scope="col">周版本</th>
@@ -384,9 +384,9 @@
                 模型索要上下文的次数与取回量。「本地缓存命中」是工具结果**在一次分析内**的
                 内存缓存命中，与上面的 provider 缓存是两件事。
             </p>
-            <div class="aiu-table-wrap">
+            <div class="aiu-table-wrap" role="region" tabindex="0" aria-labelledby="aiuToolTableCaption">
                 <table class="aiu-table">
-                    <caption class="aiu-caption">按工具类型聚合的调用次数、取回字符与被拒绝/截断条数。</caption>
+                    <caption class="aiu-caption" id="aiuToolTableCaption">按工具类型聚合的调用次数、取回字符与被拒绝/截断条数。</caption>
                     <thead>
                         <tr>
                             <th scope="col">工具</th>
@@ -405,9 +405,9 @@
 
             <h3 class="aiu-subhead">逐次运行</h3>
             <p class="aiu-hint">点一行看这一轮的逐轮明细。</p>
-            <div class="aiu-table-wrap">
+            <div class="aiu-table-wrap" role="region" tabindex="0" aria-labelledby="aiuRunTableCaption">
                 <table class="aiu-table">
-                    <caption class="aiu-caption">本项目最近的 AI 分析运行。汇总数字按全部运行计算，列表只列最近的一部分。</caption>
+                    <caption class="aiu-caption" id="aiuRunTableCaption">本项目最近的 AI 分析运行。汇总数字按全部运行计算，列表只列最近的一部分。</caption>
                     <thead>
                         <tr>
                             <th scope="col">时间</th>
@@ -545,15 +545,15 @@
     background: linear-gradient(135deg, #f1f8ff 0%, #eef4fb 60%, #f7fbf7 100%);
     border: 1px solid var(--aiu-border); border-radius: 14px; padding: 18px 20px; margin-bottom: 16px;
 }
-.aiu-hero h1 { font-size: 1.35rem; font-weight: 600; margin: 0 0 4px 0; }
-.aiu-hero p { margin: 0; color: var(--aiu-muted); font-size: 0.92rem; }
+.aiu-hero h1 { font-size: 1.5rem; font-weight: 600; margin: 0 0 4px 0; }
+.aiu-hero p { margin: 0; color: var(--aiu-muted); font-size: 0.875rem; }
 .aiu-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.aiu-meta { color: var(--aiu-muted); font-size: 0.82rem; }
+.aiu-meta { color: var(--aiu-muted); font-size: 0.75rem; }
 
 .aiu-btn {
     min-height: 44px; padding: 8px 14px; border-radius: 8px; cursor: pointer;
     border: 1px solid var(--aiu-border); background: var(--aiu-card); color: var(--aiu-text);
-    font-size: 0.88rem; display: inline-flex; align-items: center; gap: 6px;
+    font-size: 0.875rem; display: inline-flex; align-items: center; gap: 6px;
     transition: background-color 180ms ease, border-color 180ms ease;
 }
 .aiu-btn.primary { background: var(--aiu-primary); border-color: var(--aiu-primary); color: #fff; }
@@ -582,23 +582,23 @@
     background: var(--aiu-card); border: 1px solid var(--aiu-border); border-radius: 12px;
     padding: 14px 16px; display: flex; flex-direction: column; gap: 6px;
 }
-.aiu-kpi-label { color: var(--aiu-muted); font-size: 0.82rem; }
+.aiu-kpi-label { color: var(--aiu-muted); font-size: 0.75rem; }
 .aiu-kpi-value {
     font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums;
     font-family: "Fira Code", ui-monospace, monospace;
 }
-.aiu-kpi-sub { color: var(--aiu-muted); font-size: 0.78rem; }
-.aiu-kpi-value.is-unknown { font-size: 1.05rem; color: var(--aiu-muted); font-weight: 500; }
+.aiu-kpi-sub { color: var(--aiu-muted); font-size: 0.75rem; line-height: 1.5; }
+.aiu-kpi-value.is-unknown { font-size: 1rem; color: var(--aiu-muted); font-weight: 500; }
 
 .aiu-card {
     background: var(--aiu-card); border: 1px solid var(--aiu-border); border-radius: 12px;
     padding: 16px; margin-bottom: 16px;
 }
 .aiu-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-.aiu-card-head h2 { font-size: 1.02rem; font-weight: 600; margin: 0 0 4px 0; }
-.aiu-subhead { font-size: 0.95rem; font-weight: 600; margin: 18px 0 6px 0; }
-.aiu-hint { color: var(--aiu-muted); font-size: 0.82rem; margin: 0 0 10px 0; }
-.aiu-pricing-note { color: var(--aiu-muted); font-size: 0.82rem; margin: 6px 0 10px 0; }
+.aiu-card-head h2 { font-size: 1rem; font-weight: 600; margin: 0 0 4px 0; }
+.aiu-subhead { font-size: 1rem; font-weight: 600; margin: 18px 0 6px 0; }
+.aiu-hint { color: var(--aiu-muted); font-size: 0.75rem; line-height: 1.6; margin: 0 0 10px 0; }
+.aiu-pricing-note { color: var(--aiu-muted); font-size: 0.75rem; margin: 6px 0 10px 0; }
 
 /* `position: relative` 不是排版，是堵一个实测到的坑：滚动容器只裁剪「包含块在它
    内部」的后代。表头里如果有一个 absolutely positioned 的 sr-only 文本（「操作」），
@@ -606,10 +606,10 @@
    把整页横向撑出 63px（无头 Chrome 实测：documentElement.scrollWidth 438 vs 375）。
    页面上任何一处 `<span class="visually-hidden">` 写进表格，都会重新踩到它。 */
 .aiu-table-wrap { overflow-x: auto; position: relative; }
-.aiu-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+.aiu-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
 .aiu-table caption {
     caption-side: top; text-align: left; color: var(--aiu-muted);
-    font-size: 0.78rem; padding-bottom: 6px;
+    font-size: 0.75rem; padding-bottom: 6px;
 }
 .aiu-table th, .aiu-table td {
     padding: 8px 10px; border-bottom: 1px solid var(--aiu-border); text-align: left; vertical-align: middle;
@@ -620,7 +620,7 @@
 .aiu-table tbody tr.is-clickable:hover { background: var(--aiu-primary-soft); }
 .aiu-table .empty-row { text-align: center; color: var(--aiu-muted); padding: 18px 10px; }
 .aiu-name { display: block; font-weight: 500; }
-.aiu-name-sub { display: block; color: var(--aiu-muted); font-size: 0.76rem; }
+.aiu-name-sub { display: block; color: var(--aiu-muted); font-size: 0.75rem; }
 .aiu-unknown { color: var(--aiu-muted); }
 
 /* 柱条：只是相对量级的辅助，数值就在旁边那格，所以整块对读屏隐藏。
@@ -632,21 +632,21 @@
 
 .aiu-badge {
     display: inline-block; padding: 2px 8px; border-radius: 999px;
-    font-size: 0.76rem; border: 1px solid var(--aiu-border); background: var(--aiu-bg);
+    font-size: 0.75rem; border: 1px solid var(--aiu-border); background: var(--aiu-bg);
 }
 .aiu-badge.hit { color: var(--aiu-hit); border-color: var(--aiu-hit); }
 .aiu-badge.miss { color: var(--aiu-miss); border-color: var(--aiu-miss); }
 .aiu-badge.failed { color: var(--aiu-danger); border-color: var(--aiu-danger); }
 
-.aiu-notes { margin: 0; padding-left: 20px; color: var(--aiu-text); font-size: 0.86rem; line-height: 1.7; }
-.aiu-legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--aiu-muted); font-size: 0.78rem; margin-top: 8px; }
+.aiu-notes { margin: 0; padding-left: 20px; color: var(--aiu-text); font-size: 0.875rem; line-height: 1.7; }
+.aiu-legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--aiu-muted); font-size: 0.75rem; margin-top: 8px; }
 .aiu-legend i { margin-right: 4px; }
 .aiu-bars { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .aiu-bar-row { display: grid; grid-template-columns: minmax(120px, 220px) 1fr auto; gap: 10px; align-items: center; }
-.aiu-bar-label { font-size: 0.82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.aiu-bar-value { font-size: 0.82rem; font-variant-numeric: tabular-nums; color: var(--aiu-muted); min-width: 64px; text-align: right; }
+.aiu-bar-label { font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aiu-bar-value { font-size: 0.75rem; font-variant-numeric: tabular-nums; color: var(--aiu-muted); min-width: 64px; text-align: right; }
 
-.aiu-back { background: none; border: none; color: var(--aiu-primary); cursor: pointer; padding: 0; font-size: 0.82rem; }
+.aiu-back { background: none; border: none; color: var(--aiu-primary); cursor: pointer; padding: 0; font-size: 0.75rem; }
 .aiu-back:hover { text-decoration: underline; }
 
 /* ---------------------------------------------------------------------------
@@ -667,13 +667,13 @@
 .aiu-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .aiu-filter-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .aiu-budget-over { color: var(--aiu-danger); font-weight: 600; }
-.aiu-label { color: var(--aiu-text); font-size: 0.86rem; font-weight: 500; }
+.aiu-label { color: var(--aiu-text); font-size: 0.875rem; font-weight: 500; }
 /* 触控目标 ≥44px：本页的按钮、下拉、输入框一律到这个高度（无头 Chrome 实测原为
    40/35px，低于仓库硬约束）。表格里的单价输入同样按 44px，否则手机上点不中。 */
 .aiu-select, .aiu-input {
     min-height: 44px; padding: 6px 10px; border-radius: 8px;
     border: 1px solid var(--aiu-border-strong); background: var(--aiu-card); color: var(--aiu-text);
-    font-size: 0.86rem; font-family: inherit;
+    font-size: 0.875rem; font-family: inherit;
 }
 .aiu-select { min-width: 220px; }
 .aiu-select:focus-visible, .aiu-input:focus-visible {
@@ -687,10 +687,10 @@
 }
 .aiu-price-bar__title {
     display: inline-flex; align-items: center; gap: 6px; margin-right: auto;
-    color: var(--aiu-text); font-size: 0.86rem; font-weight: 600;
+    color: var(--aiu-text); font-size: 0.875rem; font-weight: 600;
 }
 .aiu-price-field { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
-.aiu-price-field__label { color: var(--aiu-muted); font-size: 0.78rem; white-space: nowrap; }
+.aiu-price-field__label { color: var(--aiu-muted); font-size: 0.75rem; white-space: nowrap; }
 .aiu-price-field .aiu-input { width: 130px; }
 .aiu-price-table { border: 1px solid var(--aiu-border); border-top: 0; }
 .aiu-price-table .aiu-input { width: 100%; min-width: 44px; font-variant-numeric: tabular-nums; }
@@ -702,21 +702,21 @@
 .aiu-price-warn {
     margin: 10px 0 0; padding: 8px 12px; border-radius: 8px;
     border: 1px solid var(--aiu-warning); background: var(--aiu-warning-bg);
-    color: var(--aiu-warning); font-size: 0.8rem; line-height: 1.6;
+    color: var(--aiu-warning); font-size: 0.75rem; line-height: 1.6;
 }
 /* 单价表的内联错误：平台自己的错误语言是「红字 + 就地说明」，不用 Bootstrap 的
    .text-danger（它带 !important，且颜色不是本页实测过对比度的那个 token）。 */
 .aiu-price-error {
     margin: 6px 0 0; padding: 8px 12px; border-radius: 8px;
     border: 1px solid var(--aiu-danger); background: var(--color-danger-bg, #ffebe9);
-    color: var(--aiu-danger); font-size: 0.8rem; line-height: 1.6;
+    color: var(--aiu-danger); font-size: 0.75rem; line-height: 1.6;
 }
 .aiu-price-json { margin-top: 12px; }
 .aiu-price-json__input { display: block; width: 100%; font-family: var(--aiu-mono); }
 .aiu-price-doc {
     display: block; margin-top: 6px; padding: 8px; border-radius: 6px;
     border: 1px solid var(--aiu-border); background: var(--aiu-bg);
-    font-family: var(--aiu-mono); font-size: 0.78rem; line-height: 1.5;
+    font-family: var(--aiu-mono); font-size: 0.75rem; line-height: 1.5;
     white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .aiu-price-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
@@ -740,7 +740,7 @@
 .aiu-linkage__note {
     display: flex; align-items: baseline; gap: 6px;
     flex: 1 1 320px; min-width: 0;
-    color: var(--aiu-muted); font-size: 0.82rem; line-height: 1.6;
+    color: var(--aiu-muted); font-size: 0.75rem; line-height: 1.6;
 }
 .aiu-linkage__note > span { min-width: 0; overflow-wrap: anywhere; }
 .aiu-linkage__action { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
@@ -750,7 +750,7 @@
     display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap;
     margin: 0 0 16px; padding: 12px 14px; border-radius: 10px;
     border: 1px solid var(--aiu-danger); background: var(--color-danger-bg, #ffebe9);
-    color: var(--aiu-danger); font-size: 0.86rem; font-weight: 600; line-height: 1.6;
+    color: var(--aiu-danger); font-size: 0.875rem; font-weight: 600; line-height: 1.6;
 }
 .aiu-alert__body { min-width: 0; overflow-wrap: anywhere; }
 .aiu-alert__detail { display: block; margin-top: 4px; font-weight: 400; }
@@ -759,7 +759,7 @@
     display: flex; align-items: flex-start; gap: 8px;
     padding: 10px 12px; border-radius: 8px; margin-top: 8px;
     border: 1px solid var(--aiu-border); background: var(--aiu-bg);
-    color: var(--aiu-muted); font-size: 0.84rem; line-height: 1.6;
+    color: var(--aiu-muted); font-size: 0.875rem; line-height: 1.6;
 }
 .aiu-loading { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
 
@@ -769,9 +769,9 @@
     display: grid; gap: 4px 10px; align-items: center;
     grid-template-columns: minmax(64px, auto) minmax(0, 1fr) minmax(120px, 240px);
 }
-.aiu-meter-row__label { color: var(--aiu-text); font-size: 0.84rem; font-weight: 500; }
+.aiu-meter-row__label { color: var(--aiu-text); font-size: 0.875rem; font-weight: 500; }
 .aiu-meter-row__value {
-    color: var(--aiu-text); font-size: 0.84rem;
+    color: var(--aiu-text); font-size: 0.875rem;
     font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
 }
 .aiu-meter {
@@ -793,11 +793,11 @@
     grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
 }
 .aiu-field-help {
-    color: var(--aiu-muted); font-size: 0.78rem; line-height: 1.6;
+    color: var(--aiu-muted); font-size: 0.75rem; line-height: 1.6;
     overflow-wrap: anywhere;
 }
 .aiu-field-error {
-    color: var(--aiu-danger); font-size: 0.78rem; font-weight: 500; line-height: 1.6;
+    color: var(--aiu-danger); font-size: 0.75rem; font-weight: 500; line-height: 1.6;
     overflow-wrap: anywhere;
 }
 /* 表格里那个「与筛选范围不同口径」的小标记。它不是唯一的线索：`title` 与
@@ -820,7 +820,7 @@
 .aiu-name-btn:focus-visible { outline: 3px solid var(--color-focus, #0b5ed7); outline-offset: 2px; }
 
 @media (max-width: 767px) {
-    .aiu-kpi-value { font-size: 1.3rem; }
+    .aiu-kpi-value { font-size: 1.125rem; }
     .aiu-hero { padding: 14px; }
     .aiu-card { padding: 12px; }
     /* 375px：筛选控件与单价表那一行都占满，避免挤成两三个字的窄格 */
@@ -837,6 +837,34 @@
     .aiu-skeleton-line { animation: none; }
     .aiu-btn { transition: none; }
 }
+
+/* ---------------------------------------------------------------------------
+   字号刻度与阅读宽度（这一页**文字比数字多**，所以先管这两件事）
+   ---------------------------------------------------------------------------
+   1. **字号只留五档：12 / 14 / 16 / 18 / 24px**（0.75 / 0.875 / 1 / 1.125 / 1.5rem）。
+      改之前实测有九档（11 12 13 14 15 16 17 22 24）—— 其中 13 与 14 只差 1px，
+      于是「说明」与「数据」看起来是同一层，整页读起来就是一片文字。
+      12px 是仓库的下限，所以行内的 `code` 要跟着周围字号走：Bootstrap 的
+      `code { font-size: .875em }` 在 12px 的说明里会掉到 10.5px。
+   2. **说明文字限宽 900px（≈75 个汉字一行）。** 1440px 下这些段落本来铺满 1382px，
+      一行上百字，眼睛回行时找不着下一行的开头。**不要用 `ch` 限中文**：`ch` 是数字 0
+      的宽度（12px 下约 6.5px），一个汉字约占两个 `ch`，`68ch` 量出来只有 440px —— 那是
+      把中文挤成窄条，不是限宽。（这条坑本仓库踩过，见 tests 里的说明。）
+   3. **表格在窄屏整体横向滚动**，而不是把某一列压成一字一行：实测 420px 下「项目」那
+      一列只剩 48px，「新手引导配表」竖着排成六行，整页被撑到 5169px 高。项目名那一列
+      要 `nowrap`（中文可以在任意两字之间断行，`min-content` 宽度只有一个字 —— 这正是
+      它被压成竖排的原因），再加一个下限；表格本身给个最小宽度，滚动条才会出现。
+   4. **卡片头右侧那句 `aiu-meta` 也跟着限宽**：它常是一整句话（「费用估算只按这张表算；
+      接口只回 token 数、不回金额」），在宽屏上会和标题拉成遥遥相对的两端。 */
+.aiu-page code { font-size: 1em; }
+.aiu-hint, .aiu-pricing-note, .aiu-notes { max-width: 900px; }
+.aiu-card-head .aiu-meta { max-width: 620px; }
+.aiu-name { white-space: nowrap; }
+.aiu-table { min-width: 640px; }
+.aiu-table th:first-child, .aiu-table td:first-child { min-width: 132px; }
+/* 横滚容器拿得到焦点（`tabindex="0"`）之后，焦点圈就归它管了：没有圈的话键盘用户
+   不知道自己现在停在哪儿 —— 给了可达性却看不见焦点，等于没给。 */
+.aiu-table-wrap:focus-visible { outline: 3px solid var(--color-focus, #0b5ed7); outline-offset: 2px; }
 </style>
 {% endblock %}
 
@@ -2300,9 +2328,14 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             body.appendChild(head);
             var wrap = document.createElement('div');
             wrap.className = 'aiu-table-wrap';
+            // 与上面几张表同一套：窄屏靠横向滚动看右边几列，键盘用户要能滚
+            // （`aria-labelledby` 指下面那个 caption，不另写一句说明）。
+            wrap.setAttribute('role', 'region');
+            wrap.setAttribute('tabindex', '0');
+            wrap.setAttribute('aria-labelledby', 'aiuRoundTableCaption');
             var table = document.createElement('table');
             table.className = 'aiu-table';
-            table.innerHTML = '<caption class="aiu-caption">每一轮的 token 与耗时。输入 token 是累计值：每轮都会把上一轮的上下文重发一遍。</caption>'
+            table.innerHTML = '<caption class="aiu-caption" id="aiuRoundTableCaption">每一轮的 token 与耗时。输入 token 是累计值：每轮都会把上一轮的上下文重发一遍。</caption>'
                 + '<thead><tr><th scope="col">轮次</th><th scope="col">结局</th>'
                 + '<th scope="col" class="num">输入 token</th><th scope="col" class="num">其中命中</th>'
                 + '<th scope="col" class="num">输出 token</th><th scope="col" class="num">提示词字符</th>'
