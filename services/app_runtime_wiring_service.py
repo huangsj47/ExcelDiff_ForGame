@@ -61,6 +61,7 @@ def configure_runtime_wirings(
         app=app,
         db=db,
         excel_cache_service=excel_cache_service,
+        weekly_excel_cache_service=weekly_excel_cache_service,
         BackgroundTask=BackgroundTask,
         Commit=Commit,
         Repository=Repository,

@@ -48,10 +48,16 @@ system("title SEOTool - diff-confirmation-platform")
 #
 # ⚠️ 本常量在仓库里有**两处**字面量：这里与 app.py。驱动缓存失效的是 app.py 那一份
 # （它被用来构造 DiffCache / ExcelHtmlCache / WeeklyVersionExcelCache 的 diff_version，
-# 并经运行时注册表供缓存管理页展示）。本文件这一份由 tasks/cache_cleanup.py 读取，
-# 用来**删除版本不匹配的缓存**。两者必须一致 —— 只改一处会出现
-# 「版本号升了但缓存没清」或「当前版本的缓存被当过期数据删掉」这类静默不一致，且不会报错。
-# 一致性由 tests/test_diff_logic_version_single_source.py 锁定。
+# 并经运行时注册表供缓存管理页展示；版本不匹配的缓存清理由启动路径
+# services/app_bootstrap_db_service.clear_startup_version_mismatch_cache 按那个版本执行）。
+#
+# **本文件这一份目前没有生产读者。** 它原先由 tasks/cache_cleanup.py 读取，而那个模块
+# （连同整个 tasks/ 包）没有任何调用者，已整包删除。所以现在「只改 config.py」不会造成
+# 任何运行时后果，只会在下面那条一致性测试上报红。保留它有两个理由：
+#   1) 它是版本升级的**变更记录** —— 下面按版本号记着每次口径变化及其影响；
+#   2) 仓库外可能有读取 config.DIFF_LOGIC_VERSION 的工具或脚本。
+# 两份仍然必须一致，一致性由 tests/test_diff_logic_version_single_source.py 锁定；
+# 那一层现在是纯粹的防漂移，不再是「不报错的静默错误」。
 #
 # 1.9.0：Excel/CSV 改为按文本原样读取（dtype=str + keep_default_na=False），并修掉
 #        _normalize_value 把文本 null/none/nan/<na> 当空值、以及 strip 掉首尾空格的问题。

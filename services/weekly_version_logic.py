@@ -1481,15 +1481,14 @@ def generate_weekly_merged_diff(config, file_path, commits):
             )
             db.session.add(new_cache)
             log_print(f"创建周版本diff缓存: {file_path}", 'WEEKLY')
-            # 如果基准版本为空，应用优化策略
-            if not base_commit:
-                log_print(f"🔄 应用基准版本优化策略: {file_path}", 'WEEKLY')
-                db.session.commit()  # 先提交新缓存
-                # 尝试从Git/SVN获取真实基准版本
-                real_base_commit = get_real_base_commit_from_vcs(config, file_path)
-                if real_base_commit:
-                    new_cache.base_commit_id = real_base_commit.commit_id
-                    log_print(f"✅ 基准版本优化成功: {file_path} -> {real_base_commit.commit_id[:8]}", 'WEEKLY')
+            # 这里原先有一段「基准版本优化」：base 为空时再查一次 VCS，把查到的提交写进
+            # base_commit_id。它是**取不到的** —— 走到这里意味着上面那次
+            # get_real_base_commit_from_vcs 已经返回 None（库里与 VCS 都确认没有更早的
+            # 提交），而它对同一 (config, file_path) 的判定是确定的，第二次调用只会再
+            # 返回 None。而它一旦真被触发，就会留下一行自相矛盾的数据：payload 是按
+            # base=None 算的（整份文件读作新增），base_commit_id 却写着真实提交，而
+            # 该列是 Excel 缓存键的一部分、也是「删除了哪些行」的比较基准。
+            # 已删除：base 为空时该列保持 NULL，与 payload 里的 'base_commit': None 一致。
         db.session.commit()
         # 检查是否需要生成Excel合并diff缓存
         if _weekly_excel_cache_service.needs_merged_diff_cache(config.id, file_path):

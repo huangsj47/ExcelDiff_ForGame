@@ -144,17 +144,40 @@ def clear_startup_version_mismatch_cache(
     diff_logic_version,
     excel_cache_service,
     excel_html_cache_service,
+    weekly_excel_cache_service,
     db,
 ):
-    """Clear startup cache entries that do not match the current diff logic version."""
+    """Clear startup cache entries that do not match the current diff logic version.
+
+    `weekly_excel_cache_service` 是**必填**而不是可选：漏传一次就意味着周版本 Excel
+    缓存的版本清理永远不跑，而它正是三张表里最占空间的那张（每行一整份 HTML/CSS/JS）。
+    「可选参数忘了传」的失败形态与「清理本来就没东西可清」在日志上完全一样 ——
+    必填参数则会当场抛 TypeError。
+    """
     try:
         log_print(f"检查并清理版本不匹配的缓存 (当前版本: {diff_logic_version})", "CACHE")
-        total_diff_cleaned = excel_cache_service.cleanup_version_mismatch_cache()
-        total_html_cleaned = excel_html_cache_service.cleanup_old_version_cache()
+        results = (
+            ("数据缓存", excel_cache_service.cleanup_version_mismatch_cache()),
+            ("HTML缓存", excel_html_cache_service.cleanup_old_version_cache()),
+            ("周版本Excel缓存", weekly_excel_cache_service.cleanup_version_mismatch_cache()),
+        )
 
-        if total_diff_cleaned > 0 or total_html_cleaned > 0:
-            log_print(f"清理完成：{total_diff_cleaned} 条数据缓存，{total_html_cleaned} 条HTML缓存", "CACHE")
-        else:
+        # **不能写成 `count > 0`**：这几家的清理方法用 None 表示「执行失败」，
+        # 0 才是「本来就没东西可清」。而 `None > 0` 在 Python 3 里直接抛 TypeError，
+        # 于是「清理失败」会被外层 except 包装成一句笼统的启动告警，
+        # 既看不出是哪张表，也和「没东西可清」分不开。
+        cleaned = [f"{count} 条{label}" for label, count in results if count]
+        failed = [label for label, count in results if count is None]
+
+        if cleaned:
+            log_print(f"清理完成：{'，'.join(cleaned)}", "CACHE")
+        if failed:
+            log_print(
+                f"❌ 版本清理执行失败（不是「没东西可清」）：{'、'.join(failed)}",
+                "CACHE",
+                force=True,
+            )
+        if not cleaned and not failed:
             log_print("无需清理版本不匹配的缓存", "CACHE")
             log_print("启动成功！", "APP")
     except DB_STARTUP_CACHE_CLEANUP_ERRORS as exc:

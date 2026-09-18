@@ -9,16 +9,15 @@
   `DiffCache` / `ExcelHtmlCache` / `WeeklyVersionExcelCache` 的 `diff_version`，
   缓存的查询条件里带着它（见 `services/excel_diff_cache_service.py:254`、
   `services/excel_html_cache_service.py:84`）。改了它，旧缓存才会失效重算。
-* `config.py` —— 由 `tasks/cache_cleanup.py` 读，用来**删除**版本不匹配的缓存。
+* `config.py` —— **版本升级的变更记录**。它原先的生产读者是
+  `tasks/cache_cleanup.py`（用它删除版本不匹配的缓存），而那个模块连带整个
+  `tasks/` 包没有任何调用者，已整包删除。
 
-两者一旦不一致，会出现**不报错的静默错误**，且两个方向都很糟：
-
-* 只改 `config.py`：页面上显示「已升级到 1.9.0」，但缓存依旧按 1.8.0 命中，
-  **修复完全看不出效果** —— 排查者会以为修复失败，而其实是版本号没生效。
-* 只改 `app.py`：缓存被清空重算（用户多等一次），但界面仍显示旧版本号，
-  事后完全无法从界面判断某份 diff 是新算法还是旧算法算出来的。
-
-这类「改了一处、另一处没跟上」没有任何运行时信号，只能靠测试锁住。
+**所以本测试现在守的是「防漂移」，不是「防静默错误」。** 两份不一致不会再造成运行时
+后果（没有代码按 config.py 那一份做任何判断），它只会在本文件上报红。留着这条断言是
+因为它便宜，且那个数字是全仓唯一一处按版本号记着每次口径变化的地方 —— 漂了会误导人。
+先前这里写着「只改 config.py → 缓存不失效、修复看不出效果」，那句话在
+`tasks/cache_cleanup.py` 被删之后已经不成立了，别再照着它推理。
 
 ## 这个测试断言什么
 
@@ -54,10 +53,10 @@ def test_two_literals_are_identical():
     config_version = _read_literal('config.py')
     assert app_version == config_version, (
         f'DIFF_LOGIC_VERSION 两处不一致：app.py={app_version!r}，config.py={config_version!r}。\n'
-        f'app.py 那份驱动缓存失效，config.py 那份只做界面展示 —— '
-        f'不一致会导致「界面显示已升级但缓存没清」（修复看不出效果）'
-        f'或「缓存清了但界面显示旧版本」（无法判断 diff 是新算法还是旧算法）。\n'
-        f'请同时修改这两处。'
+        f'app.py 那份驱动缓存失效（缓存键、界面展示、启动清理都用它）；'
+        f'config.py 那份是版本变更记录、没有生产读者了。\n'
+        f'不一致不会再造成运行时后果（见本文件 docstring），但那个数字是全仓唯一一处'
+        f'按版本号记着每次口径变化的地方，漂了会误导后来者。请同时修改这两处。'
     )
 
 

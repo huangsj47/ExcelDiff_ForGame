@@ -136,9 +136,18 @@ def test_a_queued_task_does_not_run_after_the_switch_is_turned_off():
         assert outcome == {"status": "skipped", "reason": "auto_weekly_disabled"}, (
             f"关掉开关后后台任务照样跑了：{outcome}"
         )
-        assert AiAnalysisRun.query.filter_by(target_type="weekly").count() == 0, (
-            "跳过了却还是留下了一条 run 记录"
-        )
+        # **必须按 project 过滤。** 测试库是整个会话共用的（`tests/conftest.py` 只守 IO，
+        # 没有逐用例重置），而别的文件真跑过周版本分析就会留下 `target_type='weekly'` 的行。
+        # 原先是不带过滤的全局 `count()`，于是「这条用例红不红」取决于它跟谁一起被选中：
+        # 全量跑恰好被 `test_auth_e2e` 的 `drop_all()` 清干净而变绿，而只跑
+        # `-k "engine or ai_"` 时那两个整库清空的文件被排除，污染留到这里 → 必红。
+        # 按 project 过滤后，断言的仍然是本用例真正关心的事：这个项目没留下 run。
+        assert (
+            AiAnalysisRun.query.filter_by(
+                target_type="weekly", project_id=project.id
+            ).count()
+            == 0
+        ), "跳过了却还是留下了一条 run 记录"
 
 
 def test_the_gate_does_not_block_a_run_while_the_switch_is_on():

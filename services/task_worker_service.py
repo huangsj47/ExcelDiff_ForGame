@@ -66,6 +66,7 @@ from services.weekly_version_sync_status import (
 _app = None
 _db = None
 _excel_cache_service = None
+_weekly_excel_cache_service = None
 _BackgroundTask = None
 _Commit = None
 _Repository = None
@@ -88,6 +89,11 @@ _schedule_initialized = False
 
 # 同步并发控制：同时最多5个仓库更新
 _sync_semaphore = threading.Semaphore(5)
+# 等不到并发许可就不再占着任务：等太久会把单线程的 worker 卡死（队列里还有
+# excel_diff / cleanup 等任务），所以给一个有界的等待窗口。
+# 单机模式下这条路径**不可达** —— worker 只有一个线程、且信号量只在这一处
+# acquire，自己不会和自己抢；它是为 Agent/平台模式的并发派发留的。
+SYNC_SEMAPHORE_TIMEOUT_SECONDS = 120
 
 # Git 进程集合（由 configure_task_worker 注入）
 _active_git_processes = None
@@ -338,6 +344,7 @@ def _mark_excel_task_cooldown(task_key):
 
 
 def configure_task_worker(*, app, db, excel_cache_service,
+                          weekly_excel_cache_service,
                           BackgroundTask, Commit, Repository, DiffCache,
                           WeeklyVersionConfig,
                           active_git_processes,
@@ -347,7 +354,7 @@ def configure_task_worker(*, app, db, excel_cache_service,
                           process_weekly_excel_cache,
                           db_retry):
     """注入 Flask 应用和数据库等依赖"""
-    global _app, _db, _excel_cache_service
+    global _app, _db, _excel_cache_service, _weekly_excel_cache_service
     global _BackgroundTask, _Commit, _Repository, _DiffCache
     global _WeeklyVersionConfig
     global _active_git_processes
@@ -357,6 +364,7 @@ def configure_task_worker(*, app, db, excel_cache_service,
     _app = app
     _db = db
     _excel_cache_service = excel_cache_service
+    _weekly_excel_cache_service = weekly_excel_cache_service
     _BackgroundTask = BackgroundTask
     _Commit = Commit
     _Repository = Repository
@@ -505,6 +513,17 @@ def background_task_worker():
                         log_print("❌ 清理缓存失败（返回 None，与「清理 0 条」区分开）", 'CACHE', force=True)
                     else:
                         log_print(f"🧹 清理缓存完成: {cleaned} 条", 'CACHE')
+                    # 周版本 Excel 缓存：每行是一整份渲染好的 HTML/CSS/JS，是本库最占
+                    # 空间的表。它的**过期清理此前只挂在 `tasks/cache_cleanup.py` 上**，
+                    # 而那个模块没有任何调用者（已整包删除），于是这张表从上线起就没被
+                    # 自动清过，只能靠管理页上的手动按钮。
+                    # 分工：版本对不上的行由启动清理负责（cleanup_version_mismatch_cache），
+                    # 这里负责「超过 expire_days 没用过」的行。
+                    weekly_cleaned = _weekly_excel_cache_service.cleanup_expired_cache()
+                    if weekly_cleaned is None:
+                        log_print("❌ 清理周版本Excel缓存失败（返回 None，与「清理 0 条」区分开）", 'CACHE', force=True)
+                    elif weekly_cleaned:
+                        log_print(f"🧹 清理周版本Excel缓存: {weekly_cleaned} 条", 'CACHE')
                     ai_cleaned = cleanup_expired_analysis_runs()
                     if ai_cleaned is None:
                         log_print("❌ 清理AI分析缓存失败", 'AI', force=True)
@@ -647,15 +666,47 @@ def _clear_sync_error(repository):
     )
 
 
+def _abandon_timed_out_auto_sync_task(task, message):
+    """并发许可等不到时，把任务**真正了结掉**，而不是留下一行 pending。
+
+    原先这里只打一行日志就 `return`：任务已经从内存队列里弹掉（单机模式下内存队列是
+    唯一执行路径），而库里的行仍是 `pending` —— 它既不会被执行、也不会被重新入队，
+    却仍然占着 `create_auto_sync_task` 的「同仓库已有 pending」去重位。于是这个仓库
+    此后每一次「更新仓库 / 重试同步」都会被去重成一个返回 `existing_task.id` 的空操作，
+    调用方却以为任务已经派下去了 —— 一次并发等待超时 = 该仓库静默停止同步，直到进程
+    重启（重启时 `load_pending_tasks` 才会把它捞回队列）。
+
+    标成 failed 的作用就是**把去重位释放掉**：下一次触发会创建一个新任务。
+    `update_task_status_with_retry` 会顺手累加 `retry_count`，但本仓库没有任何代码
+    读它做自动重试（`BackgroundTask.retry_count` 只在界面上展示），所以不会因此
+    变成「重试次数用尽」。
+    """
+    task_id = task.get('task_id')
+    if task_id is None:
+        # Agent 派发路径不传 task_id（见 _dispatch_agent_task 的 auto_sync 分支）：
+        # 那条路径的任务状态由 agent 侧管理，这里不能替它改。
+        log_print(f"⚠️ 任务无 task_id（Agent 派发路径），跳过状态标记：{message}", 'SYNC', force=True)
+        return
+    try:
+        # 必须自带 app context：本函数由 Thread 启动的 worker 调用，不继承主线程的
+        # context，而 update_task_status_with_retry 用的是模块级 _db.session.get()。
+        with _app.app_context():
+            update_task_status_with_retry(task_id, TASK_STATUS_FAILED, message)
+    except NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
+        log_print(f"标记超时任务为失败时出错: {update_error}", 'TASK', force=True)
+
+
 def _handle_auto_sync_task(task):
     """处理自动同步任务（含并发控制和超时处理）"""
     repo_id = task['repository_id']
     log_print(f"🔄 自动数据分析: 仓库 {repo_id}，等待并发许可...", 'SYNC')
 
     # 并发控制：最多同时5个仓库更新
-    acquired = _sync_semaphore.acquire(timeout=120)
+    acquired = _sync_semaphore.acquire(timeout=SYNC_SEMAPHORE_TIMEOUT_SECONDS)
     if not acquired:
-        log_print(f"⏰ 仓库 {repo_id} 等待并发许可超时(120s)，跳过本次同步", 'SYNC', force=True)
+        message = f"等待同步并发许可超时({SYNC_SEMAPHORE_TIMEOUT_SECONDS}s)，本次同步未执行"
+        log_print(f"⏰ 仓库 {repo_id} {message}", 'SYNC', force=True)
+        _abandon_timed_out_auto_sync_task(task, message)
         return
 
     try:
@@ -1233,6 +1284,19 @@ def check_and_create_auto_sync_tasks():
 def load_pending_tasks():
     """从数据库加载待处理的任务到内存队列"""
     try:
+        # **先收回上次残留的 processing，再查 pending。** 顺序曾经是反的：收回只改库、
+        # 不再入队，而单机模式下内存队列是唯一执行路径（worker 只从队列取任务），
+        # 于是崩溃/重启时被中断的任务在本轮进程里永远不会被执行；期间它还是 pending，
+        # 会占着业务键堵住同键任务的重建（add_excel_diff_task 等按 pending/processing
+        # 去重）。收回必须发生在下面那条 pending 查询之前，这些行才会在同一次调用里
+        # 被捞到并真正入队。
+        processing_tasks = _BackgroundTask.query.filter_by(status='processing').all()
+        for task in processing_tasks:
+            task.status = 'pending'
+            task.started_at = None
+        if processing_tasks:
+            _db.session.commit()
+            log_print(f"重置了 {len(processing_tasks)} 个处理中的任务状态为待处理", 'TASK')
         pending_tasks = _BackgroundTask.query.filter_by(status='pending').order_by(
             _BackgroundTask.priority.asc(), _BackgroundTask.created_at.asc()
         ).all()
@@ -1271,13 +1335,6 @@ def load_pending_tasks():
             tw = TaskWrapper(priority, task_counter, task_data)
             background_task_queue.put(tw)
         log_print(f"从数据库加载了 {len(pending_tasks)} 个待处理任务到队列", 'TASK')
-        processing_tasks = _BackgroundTask.query.filter_by(status='processing').all()
-        for task in processing_tasks:
-            task.status = 'pending'
-            task.started_at = None
-        if processing_tasks:
-            _db.session.commit()
-            log_print(f"重置了 {len(processing_tasks)} 个处理中的任务状态为待处理", 'TASK')
         check_and_create_auto_sync_tasks()
     except SQLAlchemyError as e:
         _db.session.rollback()

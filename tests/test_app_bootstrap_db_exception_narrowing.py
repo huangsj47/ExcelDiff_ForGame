@@ -186,12 +186,14 @@ def test_clear_startup_cache_cleanup_handles_runtime_error_and_rollback_failure(
         cleanup_version_mismatch_cache=lambda: (_ for _ in ()).throw(RuntimeError("cleanup failed"))
     )
     excel_html_cache_service = SimpleNamespace(cleanup_old_version_cache=lambda: 0)
+    weekly_excel_cache_service = SimpleNamespace(cleanup_version_mismatch_cache=lambda: 0)
 
     bootstrap_db.clear_startup_version_mismatch_cache(
         log_print=log_print,
         diff_logic_version="v-test",
         excel_cache_service=excel_cache_service,
         excel_html_cache_service=excel_html_cache_service,
+        weekly_excel_cache_service=weekly_excel_cache_service,
         db=db,
     )
 

@@ -419,18 +419,52 @@ def _stream_cached_run(run: AiAnalysisRun) -> Iterable[str]:
 def cleanup_expired_analysis_runs(retention_days: int = ANALYSIS_CACHE_DAYS):
     """清理过期的 AI 分析记录。
 
-    返回清理条数（int）；**失败返回 None**。
+    返回清理条数（int，按 **run** 计）；**失败返回 None**。
     失败不返回 0：0 表示「本来就没东西可清」，两者在调用方的日志/界面上无法区分
     （同 services/excel_diff_cache_service.py::cleanup_old_cache 的说明）。
+
+    ## 为什么必须显式删子表（这条保留策略此前等于没跑）
+
+    `AiAnalysisTrace` / `AiAnalysisAnomaly` 的 `run_id` 外键**没有** `ON DELETE CASCADE`
+    （全仓 models/ 里没有一处 ondelete），而 SQLite 的 `PRAGMA foreign_keys=ON` 在
+    `utils/sqlite_config.py` 里是真的开着的（app.py:251 导入那个监听器）。于是删父行
+    会直接抛 `FOREIGN KEY constraint failed`：整条 DELETE 回滚，**一条都删不掉** ——
+    不是「留下孤儿行」，而是「保留策略整体失效」，run/trace 表只涨不减。
+
+    实测（给一条过期 run 挂一行 trace）：`cleanup_expired_analysis_runs()` 返回 None
+    并打印「清理AI分析缓存失败: (sqlite3.IntegrityError) FOREIGN KEY constraint failed」，
+    过期 run / trace / anomaly 一行都没少。
+
+    **先子后父**，同一个事务里做完。两张子表都要删：trace 是逐轮明细，anomaly 是异常
+    条目（含人工处置状态）—— 它们都只挂在 run 上，run 一删就再也读不到
+    （`AiAnalysisAnomaly.queue` 只按 run_id 查），留着就是谁都取不到的死行。
     """
     cutoff = _utcnow() - timedelta(days=retention_days)
     try:
+        expired_run_ids = AiAnalysisRun.query.with_entities(AiAnalysisRun.id).filter(
+            AiAnalysisRun.created_at.isnot(None)
+        ).filter(AiAnalysisRun.created_at < cutoff)
+
+        children = (
+            AiAnalysisTrace.query.filter(
+                AiAnalysisTrace.run_id.in_(expired_run_ids)
+            ).delete(synchronize_session=False),
+            AiAnalysisAnomaly.query.filter(
+                AiAnalysisAnomaly.run_id.in_(expired_run_ids)
+            ).delete(synchronize_session=False),
+        )
         deleted = (
             AiAnalysisRun.query.filter(AiAnalysisRun.created_at.isnot(None))
             .filter(AiAnalysisRun.created_at < cutoff)
             .delete(synchronize_session=False)
         )
         db.session.commit()
+        if any(children):
+            log_print(
+                f"🧹 随过期分析记录一并清理: {children[0] or 0} 条轮次明细，"
+                f"{children[1] or 0} 条异常",
+                "AI",
+            )
         return int(deleted or 0)
     except Exception as exc:
         db.session.rollback()

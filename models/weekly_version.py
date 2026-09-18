@@ -83,7 +83,10 @@ class WeeklyVersionDiffCache(db.Model):
     # 而且合并 diff 的输入是窗口内多条提交，比单文件缓存更难靠人工发现。
     #
     # ⚠️ 这是**新增列**，老库需要迁移（ALTER TABLE weekly_version_diff_cache
-    #    ADD COLUMN diff_version VARCHAR(20)），见报告里的「需要接线」。
+    #    ADD COLUMN diff_version VARCHAR(20)）。口径校验点**不在**读 payload 的那个
+    #    helper（weekly_excel_merge_helpers.load_weekly_excel_diff_from_cache）里，
+    #    而在它调用方的上层：needs_merged_diff_cache() → is_merged_diff_cache_current()
+    #    （services/weekly_excel_cache_service.py）。排查时别只搜 helper。
     diff_version = db.Column(db.String(20))
 
     # 时间戳

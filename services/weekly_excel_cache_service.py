@@ -328,8 +328,10 @@ class WeeklyExcelCacheService:
             （这就是「升级 DIFF_LOGIC_VERSION 后周版本合并 diff 缓存失效」那条路径）；
           * diff_version 缺失（老库刚加列，值为 NULL）→ 按**可用**处理：这些历史行
             无法区分「旧口径」和「当前口径」，一律判成不可用会让每次周版本同步都
-            重刷全部 Excel HTML 缓存，而写入方不在本文件、这个开关在这里关不掉。
-            写入方补上 diff_version 之后（见报告「需要接线」），NULL 会自然消失。
+            重刷全部 Excel HTML 缓存，而这个开关在本函数里关不掉（本函数是纯判定）。
+            写入侧的接线已经完成：generate_weekly_merged_diff 的两个分支都会写
+            diff_version（services/weekly_version_logic.py），所以 NULL 只剩迁移前的
+            历史行，新写入的行不会再落成 NULL。
         """
         if diff_cache is None:
             return False
@@ -483,6 +485,56 @@ class WeeklyExcelCacheService:
                 e
             )
             return False
+
+    def cleanup_version_mismatch_cache(self):
+        """清理 diff_version 与当前口径不一致的周版本 Excel 缓存 - 使用批量DELETE
+
+        **这些行永远读不出来**：`get_cached_html` 与 `needs_merged_diff_cache` 的查询
+        都带 `diff_version=self.diff_logic_version` 过滤（本文件 `:407` / `:383`），版本
+        对不上就不会命中；而全仓没有一处只按 `cache_key` 反查本表。所以
+        DIFF_LOGIC_VERSION 一升级，全库旧行当场变成不可达数据 —— 而每行是**一整份
+        渲染好的 HTML/CSS/JS**，这是本库最占空间的表。
+
+        此前没有任何代码清理它们：每日 04:00 的 `cleanup_cache` 只清 DiffCache 与 AI
+        运行记录，启动清理只清 DiffCache 与 ExcelHtmlCache。于是一次「把口径修对」的
+        版本升级，反而把旧口径的整份 HTML 永久留在库里。
+
+        NULL 版本的行**不在这里清**（与 ExcelHtmlCache 的同类清理同一口径：SQL 的
+        `!=` 天然跳过 NULL，这里把 `isnot(None)` 显式写出来是为了说明这不是漏写）。
+        它们同样读不出来，但会被 `cleanup_expired_cache` 的 90 天过期清理回收，
+        不是漏网。
+
+        **`WeeklyVersionDiffCache`（同目录另一张表）刻意不在这里删。** 它与本表不同：
+        同一行上带着 `confirmation_status` / `overall_status` / `status_changed_by`，
+        也就是人工的「待确认 / 已确认 / 已忽略」处置进度，按版本号整行 delete 会把人的
+        结论一起抹掉。它的口径过期由**读侧闸门**负责，不靠删除：
+        `needs_merged_diff_cache()` → `is_merged_diff_cache_current()`（本文件上方）。
+        这段理由原先写在 `tasks/cache_cleanup.py` 里，而那个模块没有任何调用者、
+        已整包删除 —— 理由跟着代码搬到真正会跑的位置，免得后来者顺手把这张表补进清理清单。
+
+        返回：清理条数（int）；**失败返回 None**（与同文件其他清理方法一致 ——
+        「执行失败」与「本来就没东西可清」必须可区分，见调用方
+        `app_bootstrap_db_service.clear_startup_version_mismatch_cache`）。
+        """
+        try:
+            WeeklyVersionExcelCache, flask_app = self._get_model("WeeklyVersionExcelCache", "app")
+
+            with flask_app.app_context():
+                count = WeeklyVersionExcelCache.query.filter(
+                    WeeklyVersionExcelCache.diff_version.isnot(None),
+                    WeeklyVersionExcelCache.diff_version != self.diff_logic_version,
+                ).delete(synchronize_session=False)
+
+                self.db.session.commit()
+                return count
+
+        except Exception as e:
+            try:
+                self.db.session.rollback()
+            except Exception as rollback_error:
+                self._log_exception("清理版本不匹配的周版本Excel缓存失败后回滚也失败", rollback_error)
+            self._log_exception("清理版本不匹配的周版本Excel缓存失败", e)
+            return None
 
     def cleanup_expired_cache(self):
         """清理过期缓存（超过90天）- 使用批量DELETE

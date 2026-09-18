@@ -179,3 +179,81 @@ def test_create_weekly_sync_task_rolls_back_on_sqlalchemy_error(monkeypatch):
     task_id = worker.create_weekly_sync_task(321)
     assert task_id is None
     assert fake_session.rollback_called == 1
+
+
+def _fake_task_row(row_id, status, task_type='excel_diff'):
+    return SimpleNamespace(
+        id=row_id,
+        status=status,
+        started_at='2026-01-01T00:00:00+00:00' if status == 'processing' else None,
+        task_type=task_type,
+        repository_id=1,
+        commit_id='c' * 40,
+        file_path='config/30_goods/item.xlsx',
+        priority=5,
+    )
+
+
+def test_load_pending_tasks_requeues_interrupted_tasks_in_the_same_call(monkeypatch):
+    """重启时被中断（库里还停在 processing）的任务必须**在同一次启动里**重新入队。
+
+    `load_pending_tasks` 曾经把「processing 改回 pending」放在装载循环之后，且只改库、
+    不再入队。单机模式下内存队列是唯一执行路径（worker 只从队列取任务），所以那些任务
+    要等到**下一次**重启才会跑；期间它们还是 pending，还会占着业务键堵住同键任务的重建
+    （add_excel_diff_task 等按 pending/processing 去重）。
+
+    这里断言的是**行为**，不是语句顺序：假库按行的实时 status 回答，所以把重置放回后面
+    就会立刻红 —— 那时 pending 查询只看到 id=2，队列里也就只有它。
+    """
+
+    class _OrderColumn:
+        def asc(self):
+            return self
+
+    class _Query:
+        def filter_by(self, **kwargs):
+            self._status = kwargs.get('status')
+            return self
+
+        def order_by(self, *_args, **_kwargs):
+            return self
+
+        def all(self):
+            return [row for row in rows if row.status == self._status]
+
+    class _FakeBackgroundTask:
+        query = _Query()
+        priority = _OrderColumn()
+        created_at = _OrderColumn()
+
+    class _FakeSession:
+        def __init__(self):
+            self.committed = 0
+            self.rollback_called = 0
+
+        def commit(self):
+            self.committed += 1
+
+        def rollback(self):
+            self.rollback_called += 1
+
+    interrupted = _fake_task_row(1, 'processing')
+    waiting = _fake_task_row(2, 'pending')
+    rows = [interrupted, waiting]
+
+    enqueued = []
+    fake_session = _FakeSession()
+    monkeypatch.setattr(worker, "_BackgroundTask", _FakeBackgroundTask)
+    monkeypatch.setattr(worker, "_db", SimpleNamespace(session=fake_session))
+    monkeypatch.setattr(worker, "background_task_queue", SimpleNamespace(put=enqueued.append))
+    monkeypatch.setattr(worker, "TaskWrapper", lambda priority, counter, data: (priority, data))
+    monkeypatch.setattr(worker, "check_and_create_auto_sync_tasks", lambda: None)
+
+    worker.load_pending_tasks()
+
+    queued_ids = sorted(entry[1]['task_id'] for entry in enqueued)
+    assert queued_ids == [1, 2], "被中断的任务没有在同一次启动里重新入队"
+    assert len(enqueued) == 2, "同一个任务被重复入队了"
+    assert interrupted.status == 'pending', "库里那行没有被收回成 pending"
+    assert interrupted.started_at is None
+    assert fake_session.rollback_called == 0
