@@ -446,11 +446,35 @@
 
                 <h4>让 AI 懂这个项目：项目专属知识</h4>
                 <p>
-                    项目页面「AI 分析配置」旁边的<strong>「项目专属知识」</strong>里，可以维护这个项目自己的
-                    配置表说明与分析规程（知识包清单、按需读取的知识文档、子 skill），改完<strong>当场生效</strong>；
-                    保存之后<strong>此前的分析结论会被标记为「旧」</strong>。详见
-                    <code>docs/AI分析使用说明.md</code>。
+                    位置：项目页面「AI 分析配置」旁边的<strong>「项目专属知识」</strong>。它维护的是
+                    这个项目自己的配置表说明与分析规程 —— 在这之前只能靠人往服务器上放文件，
+                    界面上没有任何入口。<strong>仅项目管理员可修改</strong>，其他成员可以打开看；
+                    改完<strong>当场生效</strong>。
                 </p>
+                <ul class="info-list">
+                    <li><strong>三类内容各管一件事</strong>：<strong>知识包清单</strong>是模型的
+                        <strong>目录</strong>（AI 先看到它的一句话说明）；<strong>知识文档</strong>与
+                        <strong>子 skill</strong> 是正文，AI 判断「属于哪个系统」「按什么规则编号」
+                        「这个改动算不算越界」时才去读。</li>
+                    <li><strong>只写一句「配表规范很重要」不会有任何效果</strong>：只有<strong>在清单里
+                        用反引号写出文件名、并且那份文档真的存在</strong>，AI 才会去读它。清单与文档
+                        之间是双向强制的，所以<strong>新建 / 删除文档时平台会同时替你在清单里补一行 /
+                        摘掉那一行</strong> —— 别手改清单，两种顺序都会撞上校验。</li>
+                    <li><strong>保存之后，此前的分析结论会被标记为「旧」</strong>（不会消失，仍然看得到）：
+                        每份结论都记着当时的规则版本号，知识包一变，旧结论就不再是「当前规则下」的结论。</li>
+                    <li><strong>名字只能用小写字母、数字、连字符</strong>（如 <code>config-table-spec</code>，
+                        会自动补 <code>.md</code>）—— 它会变成磁盘路径。单份 ≤ 64 KB、整个知识包 ≤ 512 KB、
+                        子 skill ≤ 500 行，超长会被拒绝并说明原因：文档会进提示词，超长必被压缩，
+                        你会拿到「我明明写了、模型却说没看到」。</li>
+                    <li><strong>知识包只存在于这台服务器上</strong>（不进版本库）：它是运营数据，
+                        跟着部署走，换一台部署就是空的。这是设计如此，不是缺陷。</li>
+                </ul>
+                <div class="tip-box">
+                    <i class="fas fa-lightbulb"></i>
+                    <span>打开「项目专属知识」面板，顶部就写着这三类内容分别是干什么的；
+                        第一次用可以直接点<strong>「从模板创建知识包」</strong>，一次建好清单 + 两份
+                        起始文档，再把里面的骨架改成这个项目的真实情况。</span>
+                </div>
             </div>
         </section>
 
@@ -895,6 +919,31 @@
     margin: 0 0 8px; font-size: 1.05rem; font-weight: 600; color: #24292f;
 }
 .step-content p { margin: 0 0 8px; font-size: 0.92rem; color: #3d4451; line-height: 1.7; }
+
+/* 没有「步骤」语义的分节：段落与小标题**直接**放在 .section-body 下（AI 那一节就是
+   这样写的 —— 它不是一串操作步骤，套 .step-list 会凭空多出序号与缩进）。
+   这两条是补漏的：`.step-content p/h4` 只认步骤区，所以直接放在 .section-body 下的
+   <p>/<h4> 一直在吃默认值 —— 段落 16px（其它分节 14.72px）、小标题 24px/500
+   （其它分节 17.6px/700）。差得不算多，但**同一节里的小标题互相不一样大**这件事
+   一眼就能看出来，而它又不是有意做出的层级差别，只是一段没人管的样式。
+
+   取值不是新定的，是**抄**的，抄的是同一个页面上同一角色的那两处：
+   * 段落抄 `.step-content p`（步骤里的正文）；
+   * 小标题抄第 389 行那个 `<h3>「常见疑问」` 的内联样式 —— 它和这三处是**同一种东西**
+     （跟在段落/列表后面、上面不带分隔线的小标题），位置上就有 `<hr>` 的那 4 个小标题
+     是另一种（上边距 0，紧跟分隔线），值不一样是对的。
+
+   两处守卫都是刻意的：`>` 不许漏进 .step-content；`:not([class])` 只兜**没写 class**
+   的元素 —— 分节里还有 `<h4 class="sub-title">`（颜色说明那一节的小标题，自带下边框），
+   那是有意的另一种层级，论特异性它压不过 `.section-body > h4`，不写 `:not([class])`
+   就会连它一起改掉。 */
+.section-body > h4:not([class]) {
+    margin: 28px 0 16px; font-size: 1.1rem; font-weight: 700; color: #24292f;
+}
+.section-body > p:not([class]) {
+    margin: 0 0 8px; font-size: 0.92rem; color: #3d4451; line-height: 1.7;
+}
+
 .info-list {
     margin: 6px 0 0; padding-left: 20px;
     font-size: 0.9rem; color: #3d4451; line-height: 1.75;

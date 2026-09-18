@@ -197,3 +197,34 @@ def test_the_readme_lists_ai_analysis_as_a_feature():
     readme = _read(README)
     features = readme.split("## 核心功能（重点）")[1].split("## ")[0]
     assert "AI 变更风险分析" in features, "README 的核心功能里没有 AI 分析"
+
+
+# ==========================================================================
+# 六、给用户看的话里不许出现他打不开的东西
+# ==========================================================================
+
+
+# 这些是**仓库里**的路径。帮助页的读者只有浏览器，没有仓库。
+_DEAD_END_PATH_HINTS = ("docs/", "skills/", "scripts/", "README", "requirements")
+
+
+def test_the_help_page_does_not_point_at_files_the_reader_cannot_open():
+    """帮助页里的「详见 …」必须是读者能打开的东西。
+
+    ## 这条是被用户发现的
+
+    AI 那一节原来以「详见 `docs/AI分析使用说明.md`」结尾。写这句话的人手边就有仓库，
+    而读它的人只有这个平台 —— 那句话对读者是一条死路，他点了打不开，也不知道该去哪儿问。
+
+    这类话很容易被顺手写上去（「细节在文档里」在心里是对的），所以只能靠一条断言拦：
+    **要讲的内容就写在页面上**，写不下就先精简再写；真要指向别处，只能是平台里的页面。
+
+    注：`docs/` 这类路径**写给维护者看**是合理的（README、代码注释、docs 目录内部互相
+    引用都不受这条约束）—— 这条只管用户界面的模板。
+    """
+    help_html = _read(HELP_PAGE)
+    found = [hint for hint in _DEAD_END_PATH_HINTS if hint in help_html]
+    assert not found, (
+        f"帮助页里出现了读者打不开的仓库路径 {found} —— 把要讲的内容写进页面，"
+        f"或者指向平台里真实存在的页面"
+    )
