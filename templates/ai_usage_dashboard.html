@@ -82,10 +82,34 @@
                 两者都不会删除任何用量记录 —— 这个页面上没有破坏性操作。
                 条件写在地址栏里，刷新、分享、收藏都不会丢。
             </p>
+
+            {# 口径联动：上面的「时间范围」决定表里列出哪些运行，而「本期预算」那一列永远
+               按各项目自己的预算周期统计。同一屏上出现两个「本月」时，读的人几乎一定会把
+               它们当成一回事，所以服务端把这件事说清（`budget_link.note`），这里只负责
+               显示 + 在能对齐时给一个一键动作。 #}
+            <div class="aiu-linkage">
+                <div class="aiu-linkage__note">
+                    <i class="fas fa-circle-info" aria-hidden="true"></i>
+                    <span id="aiuBudgetLinkNote" role="status" aria-live="polite"></span>
+                </div>
+                <div class="aiu-linkage__action">
+                    <span class="aiu-badge hit aiu-linkage__chip" id="aiuBudgetAlignedChip" hidden>
+                        <i class="fas fa-circle-check" aria-hidden="true"></i> 已同口径
+                    </span>
+                    <button type="button" class="aiu-btn secondary" id="aiuBudgetAlignBtn" hidden>
+                        <i class="fas fa-right-left" aria-hidden="true"></i>
+                        <span id="aiuBudgetAlignLabel">按预算周期对齐</span>
+                    </button>
+                </div>
+            </div>
         </section>
 
         <!-- 顶部 KPI：先给「一共花了多少」，再给细节 -->
         <div class="aiu-kpi-grid" id="aiuKpis"></div>
+
+        {# 平台档超预算的**第一落点**：它挡的不是一个项目，而是全平台所有项目的下一次分析。
+           放在 KPI 与表格之间，是因为它比任何一个数字都更需要先被看到。 #}
+        <div class="aiu-alert" id="aiuPlatformAlert" role="alert" hidden></div>
 
         <section class="aiu-card">
             <div class="aiu-card-head">
@@ -93,6 +117,12 @@
                 <span class="aiu-meta">点一行看这个项目的周版本与逐次明细</span>
             </div>
             <div class="aiu-pricing-note" id="aiuPricingNote"></div>
+            <p class="aiu-hint" id="aiuBudgetColumnNote">
+                「本期预算」一列<strong>永远按各项目自己配置的预算周期统计</strong>，与上面的「时间范围」
+                各算各的 —— 它必须与拦截判定的口径逐字一致，否则会出现「面板说超了、按钮却还能点」。
+                两者口径不同时行里会有说明。项目档与平台档都配了上限时两档分别列出，
+                <strong>任意一档超了都会挡住下一次分析</strong>（手动与定时都挡）。
+            </p>
             <div class="aiu-bars" id="aiuProjectBars"></div>
             <div class="aiu-table-wrap">
                 <table class="aiu-table">
@@ -108,6 +138,7 @@
                             <th scope="col" class="num">费用估算</th>
                             <th scope="col" class="num">本期预算</th>
                             <th scope="col">最近一次</th>
+                            <th scope="col">操作</th>
                         </tr>
                     </thead>
                     <tbody id="aiuProjectRows"></tbody>
@@ -214,6 +245,98 @@
                     <i class="fas fa-lock" aria-hidden="true"></i>
                     只读：要改单价表需要这个项目的<strong>管理员</strong>权限。
                 </p>
+            </div>
+        </section>
+
+        {# 平台总预算：与项目档**叠加**的一档上限，管的是「全平台一个月烧了多少」——
+           项目级上限管不住总量（30 个项目各设 100 元，账单一万）。
+           接口是平台管理员专属，所以普通用户看到的是这句只读说明，**不是错误态**。 #}
+        <section class="aiu-card" id="aiuPlatformBudgetCard">
+            <div class="aiu-card-head">
+                <h2>平台总预算</h2>
+                <span class="aiu-meta" id="aiuPlatformBudgetMeta">所有项目加起来的上限</span>
+            </div>
+            <p class="aiu-hint">
+                与每个项目自己的预算<strong>叠加</strong>：任意一档超了，都会挡住下一次分析。
+                平台档回答的是「整个平台一共能花多少」，项目档回答的是「这个项目能花多少」——
+                少了哪一档都会失控。两个上限都<strong>留空 = 不限制</strong>（不是 0）。
+            </p>
+
+            <div class="aiu-readonly" id="aiuPlatformBudgetReadonly" hidden>
+                <i class="fas fa-lock" aria-hidden="true"></i>
+                平台总预算只有平台管理员能查看和修改。
+            </div>
+
+            <div id="aiuPlatformBudgetLoading" class="aiu-loading" role="status" aria-live="polite" hidden>
+                <span class="aiu-skeleton-line"></span>
+                <span class="aiu-skeleton-line short"></span>
+            </div>
+
+            <div id="aiuPlatformBudgetError" class="aiu-state aiu-error" role="alert" hidden>
+                <i class="fas fa-triangle-exclamation" aria-hidden="true"></i>
+                <span id="aiuPlatformBudgetErrorText">平台总预算加载失败。</span>
+                <button class="aiu-btn secondary" id="aiuPlatformBudgetRetryBtn" type="button">
+                    <i class="fas fa-rotate-right" aria-hidden="true"></i> 重试
+                </button>
+            </div>
+
+            <div id="aiuPlatformBudgetBody" hidden>
+                <div id="aiuPlatformOverNotice" class="aiu-alert" role="alert" hidden></div>
+
+                <div class="aiu-meter-group">
+                    <div class="aiu-meter-row">
+                        <span class="aiu-meter-row__label" id="aiuPlatformTokenLabel">Token</span>
+                        <span class="aiu-meter-row__value" id="aiuPlatformTokenValue">—</span>
+                        <span class="aiu-meter" aria-hidden="true">
+                            <span class="aiu-meter__fill" id="aiuPlatformTokenFill"></span>
+                        </span>
+                    </div>
+                    <div class="aiu-meter-row">
+                        <span class="aiu-meter-row__label" id="aiuPlatformCostLabel">费用</span>
+                        <span class="aiu-meter-row__value" id="aiuPlatformCostValue">—</span>
+                        <span class="aiu-meter" aria-hidden="true">
+                            <span class="aiu-meter__fill" id="aiuPlatformCostFill"></span>
+                        </span>
+                    </div>
+                </div>
+                <p class="aiu-hint" id="aiuPlatformNotes"></p>
+
+                <form class="aiu-budget-form" id="aiuPlatformBudgetForm">
+                    <div class="aiu-field">
+                        <label class="aiu-label" for="aiuPlatformPeriodSelect">预算周期</label>
+                        <select class="aiu-select" id="aiuPlatformPeriodSelect"></select>
+                        <span class="aiu-field-help" id="aiuPlatformPeriodHelp">
+                            按这个周期统计全平台的用量，每周一 / 每月 1 日从头算。
+                        </span>
+                        <span class="aiu-field-error" id="aiuPlatformPeriodError" hidden></span>
+                    </div>
+                    <div class="aiu-field">
+                        <label class="aiu-label" for="aiuPlatformTokenInput">周期内 token 上限</label>
+                        <input type="text" inputmode="numeric" autocomplete="off"
+                               class="aiu-input" id="aiuPlatformTokenInput">
+                        <span class="aiu-field-help" id="aiuPlatformTokenHelp">
+                            留空 = 不限制。填 0 不是「不限制」，会被拒绝 —— 那等于把全平台的分析关掉。
+                        </span>
+                        <span class="aiu-field-error" id="aiuPlatformTokenError" hidden></span>
+                    </div>
+                    <div class="aiu-field">
+                        <label class="aiu-label" for="aiuPlatformCostInput">周期内费用上限</label>
+                        <input type="text" inputmode="decimal" autocomplete="off"
+                               class="aiu-input" id="aiuPlatformCostInput">
+                        <span class="aiu-field-help" id="aiuPlatformCostHelp">
+                            留空 = 不限制。金额按单价表的币种，最多 2 位小数。
+                        </span>
+                        <span class="aiu-field-error" id="aiuPlatformCostError" hidden></span>
+                    </div>
+                    <div class="aiu-budget-form__actions">
+                        <button type="submit" class="aiu-btn primary" id="aiuPlatformSaveBtn">
+                            <i class="fas fa-floppy-disk" aria-hidden="true"></i> 保存平台总预算
+                        </button>
+                        <span class="aiu-meta" id="aiuPlatformFeedback" role="status" aria-live="polite"></span>
+                    </div>
+                </form>
+                <p class="aiu-price-error" id="aiuPlatformFormError" role="alert" hidden></p>
+                <p class="aiu-hint" id="aiuPlatformUpdated"></p>
             </div>
         </section>
 
@@ -328,6 +451,62 @@
     </div>
 </div>
 
+{# 单个项目的预算调整。走的是项目配置那个已经存在的部分更新接口
+   （`POST /ai-analysis/projects/<id>/config`），只提交三个 `budget_*` 字段 ——
+   它不会碰到这个项目的其他配置项。 #}
+<div class="modal fade" id="aiuBudgetModal" tabindex="-1" aria-labelledby="aiuBudgetModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="aiuBudgetModalTitle">调整项目预算</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <p class="aiu-hint" id="aiuBudgetModalIntro">
+                    改的是这个项目<strong>自己</strong>那一档预算。平台总预算在下面那张卡片里改，
+                    两档是<strong>叠加</strong>的：任意一档超了都会挡住下一次分析。
+                </p>
+                <div class="aiu-readonly" id="aiuBudgetModalReadonly" hidden>
+                    <i class="fas fa-lock" aria-hidden="true"></i>
+                    需要该项目的管理员权限。
+                </div>
+                <form class="aiu-budget-form" id="aiuBudgetModalForm">
+                    <div class="aiu-field">
+                        <label class="aiu-label" for="aiuBudgetPeriodSelect">预算周期</label>
+                        <select class="aiu-select" id="aiuBudgetPeriodSelect"></select>
+                        <span class="aiu-field-help" id="aiuBudgetPeriodHelp">
+                            按这个周期统计本项目的用量。改周期会改变「本期已用」的起点。
+                        </span>
+                        <span class="aiu-field-error" id="aiuBudgetPeriodError" hidden></span>
+                    </div>
+                    <div class="aiu-field">
+                        <label class="aiu-label" for="aiuBudgetTokenInput">周期内 token 上限</label>
+                        <input type="text" inputmode="numeric" autocomplete="off"
+                               class="aiu-input" id="aiuBudgetTokenInput">
+                        <span class="aiu-field-help" id="aiuBudgetTokenHelp">留空 = 不限制。</span>
+                        <span class="aiu-field-error" id="aiuBudgetTokenError" hidden></span>
+                    </div>
+                    <div class="aiu-field">
+                        <label class="aiu-label" for="aiuBudgetCostInput">周期内费用上限</label>
+                        <input type="text" inputmode="decimal" autocomplete="off"
+                               class="aiu-input" id="aiuBudgetCostInput">
+                        <span class="aiu-field-help" id="aiuBudgetCostHelp">留空 = 不限制。</span>
+                        <span class="aiu-field-error" id="aiuBudgetCostError" hidden></span>
+                    </div>
+                </form>
+                <p class="aiu-price-error" id="aiuBudgetModalError" role="alert" hidden></p>
+            </div>
+            <div class="modal-footer">
+                <span class="aiu-meta" id="aiuBudgetModalFeedback" role="status" aria-live="polite"></span>
+                <button type="button" class="aiu-btn secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="aiu-btn primary" id="aiuBudgetModalSaveBtn">
+                    <i class="fas fa-floppy-disk" aria-hidden="true"></i> 保存
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <style>
 /* 页面级令牌。**上游一律 var(--color-*, 字面量)**：style.css 的兜底写法，见那里的说明。
    组件里不写裸 hex —— 要新颜色就在这一层加一个令牌。 */
@@ -432,7 +611,6 @@
 .aiu-table td.num, .aiu-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .aiu-table tbody tr.is-clickable { cursor: pointer; }
 .aiu-table tbody tr.is-clickable:hover { background: var(--aiu-primary-soft); }
-.aiu-table tbody tr.is-clickable:focus-visible { outline: 3px solid var(--color-focus, #0b5ed7); outline-offset: -3px; }
 .aiu-table .empty-row { text-align: center; color: var(--aiu-muted); padding: 18px 10px; }
 .aiu-name { display: block; font-weight: 500; }
 .aiu-name-sub { display: block; color: var(--aiu-muted); font-size: 0.76rem; }
@@ -539,6 +717,101 @@
 .aiu-btn[disabled]:hover { background: var(--aiu-card); }
 .aiu-btn.primary[disabled]:hover { background: var(--aiu-primary); }
 
+/* ---------------------------------------------------------------------------
+   平台总预算 + 口径联动 + 项目预算调整
+   ---------------------------------------------------------------------------
+   同样是「组件里不写裸 hex」：这一段的颜色全部走 `var(--token, 字面量)`，
+   其中 `--aiu-*` 是上面那一层别名，字面量只是它自己的兜底值。 */
+
+/* 筛选区的口径说明行。**`flex-wrap: wrap` 与 `min-width: 0` 不是排版**：
+   中文没有空格，一个 flex 子项被压窄时会在任意字之间断行，整段会变成一字一行。
+   这里让它换行而不是被压。 */
+.aiu-linkage {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+    margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--aiu-border);
+}
+.aiu-linkage__note {
+    display: flex; align-items: baseline; gap: 6px;
+    flex: 1 1 320px; min-width: 0;
+    color: var(--aiu-muted); font-size: 0.82rem; line-height: 1.6;
+}
+.aiu-linkage__note > span { min-width: 0; overflow-wrap: anywhere; }
+.aiu-linkage__action { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.aiu-linkage__chip { display: inline-flex; align-items: center; gap: 6px; }
+
+.aiu-alert {
+    display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap;
+    margin: 0 0 16px; padding: 12px 14px; border-radius: 10px;
+    border: 1px solid var(--aiu-danger); background: var(--color-danger-bg, #ffebe9);
+    color: var(--aiu-danger); font-size: 0.86rem; font-weight: 600; line-height: 1.6;
+}
+.aiu-alert__body { min-width: 0; overflow-wrap: anywhere; }
+.aiu-alert__detail { display: block; margin-top: 4px; font-weight: 400; }
+
+.aiu-readonly {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 10px 12px; border-radius: 8px; margin-top: 8px;
+    border: 1px solid var(--aiu-border); background: var(--aiu-bg);
+    color: var(--aiu-muted); font-size: 0.84rem; line-height: 1.6;
+}
+.aiu-loading { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+
+/* 进度条：手写 CSS，不引图表库。数值就在旁边那行文字里，所以整条对读屏隐藏。 */
+.aiu-meter-group { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 6px; }
+.aiu-meter-row {
+    display: grid; gap: 4px 10px; align-items: center;
+    grid-template-columns: minmax(64px, auto) minmax(0, 1fr) minmax(120px, 240px);
+}
+.aiu-meter-row__label { color: var(--aiu-text); font-size: 0.84rem; font-weight: 500; }
+.aiu-meter-row__value {
+    color: var(--aiu-text); font-size: 0.84rem;
+    font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.aiu-meter {
+    display: block; height: 10px; border-radius: 5px; overflow: hidden;
+    background: var(--aiu-bar-track);
+}
+.aiu-meter__fill { display: block; height: 100%; width: 0; background: var(--aiu-primary); }
+.aiu-meter__fill.is-over { background: var(--aiu-danger); }
+.aiu-meter__fill.is-unknown { background: var(--aiu-border-strong); }
+
+/* 预算表单：两栏放得下就两栏，放不下换行；每个控件自己占满一行即可。 */
+.aiu-budget-form {
+    display: grid; gap: 12px; margin-top: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+.aiu-budget-form .aiu-field { min-width: 0; }
+.aiu-budget-form .aiu-select, .aiu-budget-form .aiu-input { width: 100%; }
+.aiu-budget-form__actions {
+    grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.aiu-field-help {
+    color: var(--aiu-muted); font-size: 0.78rem; line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+.aiu-field-error {
+    color: var(--aiu-danger); font-size: 0.78rem; font-weight: 500; line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+/* 表格里那个「与筛选范围不同口径」的小标记。它不是唯一的线索：`title` 与
+   `aria-label` 里都是同一句话，读屏与 hover 都拿得到。 */
+.aiu-scope-mark {
+    display: inline-flex; align-items: center; margin-left: 4px;
+    color: var(--aiu-muted); vertical-align: middle;
+}
+.aiu-scope-line { display: block; }
+.aiu-scope-line__name { color: var(--aiu-muted); }
+.aiu-scope-line__mark { color: var(--aiu-muted); }
+/* 项目名那一格里的按钮：长得像文字，但**是真的按钮** —— 整行的 `role="button"`
+   会把行里其它按钮从可访问性树上抹掉（`button` 角色的后代一律是装饰），
+   所以键盘用户走这里。44px 是因为它就是这一格唯一的指针目标。 */
+.aiu-name-btn {
+    display: block; width: 100%; min-height: 44px; padding: 0; margin: 0;
+    background: none; border: 0; text-align: left; cursor: pointer;
+    color: inherit; font: inherit;
+}
+.aiu-name-btn:focus-visible { outline: 3px solid var(--color-focus, #0b5ed7); outline-offset: 2px; }
+
 @media (max-width: 767px) {
     .aiu-kpi-value { font-size: 1.3rem; }
     .aiu-hero { padding: 14px; }
@@ -547,8 +820,13 @@
     .aiu-field, .aiu-select, .aiu-price-field { width: 100%; }
     .aiu-price-field .aiu-input { width: 100%; }
     .aiu-filters { align-items: stretch; }
-}
-@media (prefers-reduced-motion: reduce) {
+    /* 进度条那一行在窄屏上把「已用 / 上限」放到条子下面，条子占满一整行 ——
+       三列挤在一起会把中文标签压成一字一行。 */
+    .aiu-meter-row { grid-template-columns: 1fr; }
+    .aiu-meter { width: 100%; }
+    .aiu-budget-form { grid-template-columns: 1fr; }
+    .aiu-linkage__note { flex-basis: 100%; }
+}@media (prefers-reduced-motion: reduce) {
     .aiu-skeleton-line { animation: none; }
     .aiu-btn { transition: none; }
 }
@@ -629,6 +907,102 @@ var AIU_TOOL_LABELS = {
 };
 function aiuToolLabel(kind) {
     return AIU_TOOL_LABELS[kind] || kind;
+}
+
+// ---------------------------------------------------------------------------
+//  预算周期与金额：同样是**纯函数**（`tests/test_ai_usage_budget_ui.py` 用 node 真跑）
+// ---------------------------------------------------------------------------
+// 预算周期只有三个取值，事实源在服务端（`services/ai/analysis_budget.PERIOD_LABELS`
+// / `models/ai_analysis/project_config.BUDGET_PERIOD_CHOICES`）。接口**没有**下发这份
+// 选项表（`platform_status` 只回当前那一个周期的标签、`budget.period` 只回当前值），
+// 所以这里只能自带一份 —— 但自带的那一份必须与服务端逐字一致，否则界面上会出现一个
+// 后端认不出来的选项（用户选了、保存被拒，或者更糟：被回落成默认周期）。
+// `test_ai_usage_budget_ui.py` 把这三个键与三个标签逐一对照服务端的表，改一边就红。
+var AIU_PERIOD_LABELS = { monthly: '本月', weekly: '本周', all_time: '全部时间' };
+var AIU_PERIOD_ORDER = ['monthly', 'weekly', 'all_time'];
+
+function aiuPeriodLabel(period) {
+    var key = String(period === null || period === undefined ? '' : period).trim().toLowerCase();
+    return AIU_PERIOD_LABELS[key] || key;
+}
+
+/** 币种符号。认不出来的币种**不猜**：符号位留空、原样写币种码。 */
+function aiuCurrencySymbol(currency) {
+    return { CNY: '¥', USD: '$', EUR: '€' }[currency] || '';
+}
+
+/** 金额：接口回的就是**定点 2 位小数的字符串**，这里只加符号，不做任何算术 ——
+ *  前端再 `toFixed` 一次等于把服务端已经定好的精度改写一遍。
+ *  `null` / 空串 → `null`（调用方决定显示「未上报」还是「不限制」）。 */
+function aiuFmtMoney(amount, currency) {
+    if (amount === null || amount === undefined || amount === '') return null;
+    var symbol = aiuCurrencySymbol(currency);
+    return symbol + amount + (symbol ? '' : (currency ? ' ' + currency : ''));
+}
+
+/** 一档预算（项目档或平台档）的「已用 / 上限」。
+ *
+ *  **三件事必须守住**：
+ *  * 没配上限（`limited` 为假 / `limits` 全为 `null`）返回 `null` —— 由调用方写
+ *    「不限制」，**不是 0**；
+ *  * 已用是 `null`（上游未上报 / 算不出费用）写「未上报」，**不是 0**；
+ *  * 金额直接用接口回的字符串（见 `aiuFmtMoney`）。
+ */
+function aiuBudgetScopeText(scope) {
+    if (!scope || !scope.limited) return null;
+    var limits = scope.limits || {};
+    var used = scope.used || {};
+    var parts = [];
+    if (limits.tokens !== null && limits.tokens !== undefined) {
+        parts.push(aiuOrUnknown(aiuFmtTokens(used.tokens), AIU_UNKNOWN)
+            + ' / ' + aiuFmtTokens(limits.tokens));
+    }
+    if (limits.cost !== null && limits.cost !== undefined) {
+        parts.push(aiuOrUnknown(aiuFmtMoney(used.cost, used.currency || limits.currency), AIU_UNKNOWN)
+            + ' / ' + aiuFmtMoney(limits.cost, limits.currency));
+    }
+    return parts.length ? parts.join(' · ') : null;
+}
+
+/** 超的是哪一档（`over_scopes` 是 `["project"]` / `["platform"]` / 两个都有）。
+ *  一档都没超时返回空串 —— 调用方据此不渲染任何标记。 */
+function aiuOverScopesLabel(overScopes) {
+    var scopes = overScopes || [];
+    var project = scopes.indexOf('project') >= 0;
+    var platform = scopes.indexOf('platform') >= 0;
+    if (project && platform) return '项目与平台都已超';
+    if (project) return '项目已超';
+    if (platform) return '平台已超';
+    return '';
+}
+
+/** 进度条的百分比（0~100 的整数）。`ratio` 为 `null` 时返回 `null` ——
+ *  **不返回 0**：0% 会被读成「一点都没用」，而 `null` 说的是「算不出 / 未上报」。
+ *  超了不截断成 100：条子画满 + 一个「已超」标记，比一个恰好停在 100% 的条子诚实。 */
+function aiuMeterPercent(ratio) {
+    if (ratio === null || ratio === undefined) return null;
+    var num = Number(ratio);
+    if (!isFinite(num) || num < 0) return null;
+    return Math.min(100, Math.round(num * 100));
+}
+
+/** 预算表单 → POST body。
+ *
+ *  **留空 = 不限制**，提交 `null`（不是 0，也不是空串 —— 空串虽然也被服务端读成
+ *  不限制，但 `null` 把「不限制」这件事说得更直白）。
+ *
+ *  这里**刻意不做数值转换**：`Number('abc')` 是 NaN，`JSON.stringify` 会把它写成
+ *  `null` —— 一个填错的数会被静默读成「随便花」。所以原样把用户填的字符串交给服务端，
+ *  由 `FIELD_RULES` 那套校验回一句「「abc」不是数字」，界面再落到对应那一栏。
+ */
+function aiuBudgetFormPayload(period, tokenText, costText) {
+    var token = String(tokenText === null || tokenText === undefined ? '' : tokenText).trim();
+    var cost = String(costText === null || costText === undefined ? '' : costText).trim();
+    return {
+        budget_period: String(period === null || period === undefined ? '' : period),
+        budget_token_limit: token === '' ? null : token,
+        budget_cost_limit: cost === '' ? null : cost
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -914,37 +1288,75 @@ function aiuToolLabel(kind) {
         host.appendChild(span);
     }
 
-    /** 预算单元：`已用 / 上限`＋百分比。**未配上限 = 不限制**，不是 0。 */
+    /** 预算单元里的一档（项目档 / 平台档）。
+     *
+     *  **没配上限的那一档也要写出来**（「未设上限」），不能留空：留空会让人以为这一格
+     *  坏了，或者以为「没显示 = 没超」。
+     */
+    function addScopeLine(td, name, scope) {
+        var line = document.createElement('span');
+        line.className = 'aiu-scope-line';
+        var label = document.createElement('span');
+        label.className = 'aiu-scope-line__name';
+        label.textContent = name + ' ';
+        line.appendChild(label);
+        var text = aiuBudgetScopeText(scope);
+        if (text === null) {
+            line.appendChild(document.createTextNode('未设上限'));
+            line.classList.add('aiu-unknown');
+        } else {
+            line.appendChild(document.createTextNode(
+                (scope.period_label ? scope.period_label + ' ' : '') + text));
+        }
+        td.appendChild(line);
+    }
+
+    /** 预算单元：`已用 / 上限`＋百分比。**未配上限 = 不限制**，不是 0。
+     *
+     *  **这一列永远按各项目自己的预算周期统计**（与服务端闸门判定逐字一致），与上面的
+     *  「时间范围」各算各的 —— 口径不同时行里会打一个标记，但数字**不会**藏起来。
+     *
+     *  项目档与平台档都配了上限时**两档都列出来**：任意一档超了都会挡住下一次分析，
+     *  只显示项目档会让「项目没超、却被拦住了」变成一个没有解释的现象。
+     */
     function budgetCell(budget) {
         var td = document.createElement('td');
         td.className = 'num';
-        if (!budget || !budget.limited) {
+        if (!budget) {
             td.textContent = '未设上限';
             td.classList.add('aiu-unknown');
             return td;
         }
-        var limits = budget.limits || {};
-        var used = budget.used || {};
-        var parts = [];
-        if (limits.tokens !== null && limits.tokens !== undefined) {
-            parts.push(aiuOrUnknown(aiuFmtTokens(used.tokens), AIU_UNKNOWN)
-                + ' / ' + aiuFmtTokens(limits.tokens));
-        }
-        if (limits.cost !== null && limits.cost !== undefined) {
-            var symbol = { CNY: '¥', USD: '$', EUR: '€' }[limits.currency] || '';
-            parts.push(symbol + (used.cost === null || used.cost === undefined ? AIU_UNKNOWN : used.cost)
-                + ' / ' + symbol + limits.cost);
-        }
-        td.textContent = (budget.period_label ? budget.period_label + ' ' : '') + parts.join(' · ');
-        if (budget.over) {
-            // 颜色不是唯一线索：标签里写着「已超」，hover 与读屏都能拿到原因。
+        var platform = budget.platform || {};
+        addScopeLine(td, '项目', budget);
+        if (platform.limited) addScopeLine(td, '平台', platform);
+
+        // 超的是哪一档要写出来。颜色不是唯一线索：标签里带着「已超」，
+        // `title` 与读屏都能拿到原因。
+        var overLabel = aiuOverScopesLabel(budget.over_scopes);
+        if (budget.over || overLabel) {
             td.classList.add('aiu-budget-over');
             td.title = budget.reason || '已超出预算';
             var badge = document.createElement('span');
             badge.className = 'aiu-badge failed';
-            badge.textContent = '已超';
+            badge.textContent = overLabel || '已超';
             td.appendChild(document.createTextNode(' '));
             td.appendChild(badge);
+        }
+
+        // 与当前筛选范围不同口径时的标记。**只加标记，不动数字** ——
+        // 预算那一列按各项目自己的周期统计是刻意的（它必须与闸门判定逐字一致）。
+        if (budget.matches_filter === false) {
+            var why = '这一行按' + (budget.period_label || '项目自己的预算周期')
+                + '统计，与当前筛选范围不同口径';
+            var mark = document.createElement('span');
+            mark.className = 'aiu-scope-mark';
+            mark.setAttribute('role', 'img');
+            mark.setAttribute('aria-label', why);
+            mark.title = why;
+            mark.innerHTML = '<i class="fas fa-circle-info" aria-hidden="true"></i>';
+            td.appendChild(document.createTextNode(' '));
+            td.appendChild(mark);
         }
         return td;
     }
@@ -956,7 +1368,7 @@ function aiuToolLabel(kind) {
         if (!projects.length) {
             var tr = document.createElement('tr');
             var td = cell('没有匹配的数据。换个筛选条件试试，或者点「重置为默认」。', 'empty-row');
-            td.colSpan = 9;
+            td.colSpan = 10;
             tr.appendChild(td);
             tbody.appendChild(tr);
             return;
@@ -969,16 +1381,21 @@ function aiuToolLabel(kind) {
         projects.forEach(function (item) {
             var tr = document.createElement('tr');
             tr.className = 'is-clickable';
-            tr.tabIndex = 0;
-            tr.setAttribute('role', 'button');
-            tr.setAttribute('aria-label', '查看项目 ' + item.name + ' 的消耗明细');
 
             var nameCell = document.createElement('td');
+            // 这一格是**真的按钮**，不是给整行加 `role="button"`：`button` 角色的后代
+            // 一律被当成装饰（Children Presentational），行里那个「调整」按钮于是对
+            // 读屏用户**完全不存在**。整行的 click 留作鼠标的方便路径，键盘走这里。
+            var nameBtn = document.createElement('button');
+            nameBtn.type = 'button';
+            nameBtn.className = 'aiu-name-btn';
+            nameBtn.setAttribute('aria-label', '查看项目 ' + item.name + ' 的消耗明细');
             var name = document.createElement('span'); name.className = 'aiu-name'; name.textContent = item.name;
             var sub = document.createElement('span');
             sub.className = 'aiu-name-sub';
             sub.textContent = item.runs + ' 次运行 · ' + (item.collected_runs || 0) + ' 次采集到用量';
-            nameCell.appendChild(name); nameCell.appendChild(sub);
+            nameBtn.appendChild(name); nameBtn.appendChild(sub);
+            nameCell.appendChild(nameBtn);
             tr.appendChild(nameCell);
 
             tr.appendChild(cell(aiuFmtInt(item.runs) || '0', 'num'));
@@ -991,11 +1408,25 @@ function aiuToolLabel(kind) {
             tr.appendChild(budgetCell(item.budget));
             tr.appendChild(cell(aiuFmtTime(item.last_run_at)));
 
-            var open = function () { loadDrill(item.project_id, item.name); };
-            tr.addEventListener('click', open);
-            tr.addEventListener('keydown', function (event) {
-                if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
+            var actionCell = document.createElement('td');
+            var adjust = document.createElement('button');
+            adjust.type = 'button';
+            adjust.className = 'aiu-btn secondary';
+            adjust.setAttribute('aria-label', '调整项目 ' + item.name + ' 的预算');
+            adjust.innerHTML = '<i class="fas fa-sliders" aria-hidden="true"></i> 调整';
+            adjust.addEventListener('click', function (event) {
+                event.stopPropagation();
+                openBudgetModal(item);
             });
+            actionCell.appendChild(adjust);
+            tr.appendChild(actionCell);
+
+            var open = function () { loadDrill(item.project_id, item.name); };
+            nameBtn.addEventListener('click', function (event) {
+                event.stopPropagation();
+                open();
+            });
+            tr.addEventListener('click', open);
             tbody.appendChild(tr);
         });
 
@@ -1159,6 +1590,494 @@ function aiuToolLabel(kind) {
             ? '只列出最近的 ' + rows.length + ' 次运行；上面的合计按全部运行计算。' : '';
     }
 
+    // -----------------------------------------------------------------------
+    //  口径联动：筛选「时间范围」 vs 预算「周期」
+    // -----------------------------------------------------------------------
+    // 说明文字**整句来自服务端**（`budget_link.note`）：该说什么取决于「各项目的预算
+    // 周期是否一致」「当前筛选是不是同口径」，这些判断只有服务端做得出来，界面另写一份
+    // 必然与它对不上。界面只负责显示，外加一个「一键切成同口径」的动作。
+    var budgetLinkState = { targetRange: null };
+
+    function renderBudgetLink(link) {
+        var data = link || {};
+        budgetLinkState.targetRange = data.target_range || null;
+        var note = $('aiuBudgetLinkNote');
+        if (note) note.textContent = data.note || '';
+        // 三种状态**互斥**，别的组合都是错的：
+        //   `aligned`      → 只给一个安静的正向标记，**不给按钮**（已经同口径了，
+        //                    再放一个「对齐」按钮会让人以为它还没生效）；
+        //   能对齐         → 给按钮，标签里带上目标范围（不让用户自己去猜该选哪个）；
+        //   `mixed`        → `target_range` 是 `null`，两样都不给 —— 硬选一个范围
+        //                    只会让另外几个项目的数字继续不同口径，而界面看起来
+        //                    却「已经对齐了」。
+        var btn = $('aiuBudgetAlignBtn');
+        if (btn) {
+            btn.hidden = !(!data.aligned && budgetLinkState.targetRange);
+            var label = $('aiuBudgetAlignLabel');
+            if (label) {
+                label.textContent = data.target_label
+                    ? '按预算周期对齐（' + data.target_label + '）'
+                    : '按预算周期对齐';
+            }
+        }
+        var chip = $('aiuBudgetAlignedChip');
+        if (chip) chip.hidden = !data.aligned;
+    }
+
+    function initBudgetLink() {
+        var btn = $('aiuBudgetAlignBtn');
+        if (!btn) return;
+        btn.addEventListener('click', function () {
+            var target = budgetLinkState.targetRange;
+            if (!target) return;
+            // **复用页面已有的那条应用筛选路径**（表单 → 地址栏 → 取数）。
+            // 另写一套 URL 拼装的必然结果是刷新 / 后退之后条件与地址栏对不上，
+            // 而且没人知道它们不一样。
+            var range = $('aiuFilterRange');
+            if (range) {
+                range.value = target;
+                toggleCustomFields();
+            }
+            applyAndReload();
+        });
+    }
+
+    /** 平台档超预算的顶部提示。**平台档超了挡的是所有项目**，不是某一个，
+     *  所以它必须出现在「各项目消耗」之前。 */
+    function renderPlatformAlert(status) {
+        var box = $('aiuPlatformAlert');
+        if (!box) return;
+        var data = status || {};
+        box.textContent = '';
+        if (!data.over) {
+            box.hidden = true;
+            return;
+        }
+        box.hidden = false;
+        var icon = document.createElement('i');
+        icon.className = 'fas fa-triangle-exclamation';
+        icon.setAttribute('aria-hidden', 'true');
+        var body = document.createElement('span');
+        body.className = 'aiu-alert__body';
+        body.textContent = '平台总预算已超（' + (data.period_label || '本周期')
+            + '）：所有项目的下一次 AI 分析都会被挡住（手动与定时都挡）。';
+        if (data.reason) {
+            var detail = document.createElement('span');
+            detail.className = 'aiu-alert__detail';
+            detail.textContent = data.reason;
+            body.appendChild(detail);
+        }
+        box.appendChild(icon);
+        box.appendChild(body);
+    }
+
+    // -----------------------------------------------------------------------
+    //  平台总预算卡片
+    // -----------------------------------------------------------------------
+    // 这两个端点是**平台管理员专属**（回的是全平台合计的消耗，能从中反推出别人的花费）。
+    // 所以 401/403 **不是错误态**：这一页对普通用户是合法的，只是这张卡片看不到 ——
+    // 换成错误态会让人以为页面坏了，然后去「重试」一个永远不会成功的请求。
+    var AIU_PLATFORM_FIELD_MAP = {
+        budget_period: 'aiuPlatformPeriodError',
+        budget_token_limit: 'aiuPlatformTokenError',
+        budget_cost_limit: 'aiuPlatformCostError'
+    };
+
+    /** 周期下拉。事实源是服务端（`PERIOD_LABELS` / `BUDGET_PERIOD_CHOICES`），但接口
+     *  **没有下发整张选项表** —— `platform_status` 只回当前那一个周期的标签。
+     *  所以本页自带三个键与三个标签（`AIU_PERIOD_LABELS`，测试逐字钉住与服务端一致），
+     *  而**当前那一个**的标签优先用服务端刚回的那份；服务端将来多出第四个取值时也照原样
+     *  列出来，不会出现「服务端认得出、界面上没有」的选项。 */
+    function fillPeriodSelect(select, currentPeriod, currentLabel) {
+        if (!select) return;
+        var current = String(currentPeriod || '');
+        var keys = AIU_PERIOD_ORDER.slice();
+        if (current && keys.indexOf(current) < 0) keys.push(current);
+        select.textContent = '';
+        keys.forEach(function (key) {
+            var option = document.createElement('option');
+            option.value = key;
+            option.textContent = (key === current && currentLabel)
+                ? String(currentLabel) : aiuPeriodLabel(key);
+            select.appendChild(option);
+        });
+        if (current) select.value = current;
+    }
+
+    function setMeter(fill, ratio, isOver) {
+        if (!fill) return;
+        var percent = aiuMeterPercent(ratio);
+        fill.className = 'aiu-meter__fill'
+            + (isOver ? ' is-over' : (percent === null ? ' is-unknown' : ''));
+        fill.style.width = (percent === null ? 0 : percent) + '%';
+        // 算不出比例时**整条不画**：一条停在 0% 的条子会被读成「一点都没用」，
+        // 而紧挨着的文字说的是「未上报」。数值本身始终在文字里，条子只是辅助。
+        var meter = fill.parentNode;
+        if (meter) meter.style.display = percent === null ? 'none' : '';
+    }
+
+    function renderPlatformMeters(status) {
+        var data = status || {};
+        var limits = data.limits || {};
+        var used = data.used || {};
+        var ratios = data.ratios || {};
+        var overLimits = data.over_limits || [];
+
+        var tokenValue = $('aiuPlatformTokenValue');
+        if (tokenValue) {
+            tokenValue.textContent = (limits.tokens === null || limits.tokens === undefined)
+                ? '不限制（没有配置 token 上限）'
+                : (aiuOrUnknown(aiuFmtTokens(used.tokens), AIU_UNKNOWN)
+                   + ' / ' + aiuFmtTokens(limits.tokens) + ' token');
+        }
+        setMeter($('aiuPlatformTokenFill'), ratios.tokens, overLimits.indexOf('tokens') >= 0);
+
+        var currency = used.currency || limits.currency || '';
+        var costValue = $('aiuPlatformCostValue');
+        if (costValue) {
+            costValue.textContent = (limits.cost === null || limits.cost === undefined)
+                ? '不限制（没有配置费用上限）'
+                : (aiuOrUnknown(aiuFmtMoney(used.cost, currency), AIU_UNKNOWN)
+                   + ' / ' + aiuFmtMoney(limits.cost, currency));
+        }
+        setMeter($('aiuPlatformCostFill'), ratios.cost, overLimits.indexOf('cost') >= 0);
+
+        var notes = $('aiuPlatformNotes');
+        if (notes) notes.textContent = (data.notes || []).join('；') || '';
+    }
+
+    function renderPlatformOverNotice(status) {
+        var box = $('aiuPlatformOverNotice');
+        if (!box) return;
+        var data = status || {};
+        box.textContent = '';
+        if (!data.over) {
+            box.hidden = true;
+            return;
+        }
+        box.hidden = false;
+        var icon = document.createElement('i');
+        icon.className = 'fas fa-triangle-exclamation';
+        icon.setAttribute('aria-hidden', 'true');
+        var body = document.createElement('span');
+        body.className = 'aiu-alert__body';
+        body.textContent = '超预算会挡住下一次分析（手动与定时都挡），已经在跑的分析不会被中断。';
+        if (data.reason) {
+            var detail = document.createElement('span');
+            detail.className = 'aiu-alert__detail';
+            detail.textContent = data.reason;
+            body.appendChild(detail);
+        }
+        box.appendChild(icon);
+        box.appendChild(body);
+    }
+
+    function clearPlatformFieldErrors() {
+        Object.keys(AIU_PLATFORM_FIELD_MAP).forEach(function (field) {
+            var node = $(AIU_PLATFORM_FIELD_MAP[field]);
+            if (node) { node.textContent = ''; node.hidden = true; }
+        });
+        var summary = $('aiuPlatformFormError');
+        if (summary) { summary.textContent = ''; summary.hidden = true; }
+    }
+
+    function setPlatformFeedback(text, tone) {
+        var node = $('aiuPlatformFeedback');
+        if (!node) return;
+        node.textContent = text || '';
+        node.style.color = tone === 'error' ? 'var(--aiu-danger)'
+            : (tone === 'success' ? 'var(--aiu-hit)' : '');
+    }
+
+    function setPlatformBusy(on) {
+        var btn = $('aiuPlatformSaveBtn');
+        if (!btn) return;
+        btn.disabled = on;
+        if (on) btn.setAttribute('aria-busy', 'true'); else btn.removeAttribute('aria-busy');
+    }
+
+    function showPlatformBudgetError(message) {
+        var box = $('aiuPlatformBudgetError');
+        var text = $('aiuPlatformBudgetErrorText');
+        if (text) text.textContent = message || '平台总预算加载失败。';
+        if (box) box.hidden = false;
+    }
+
+    function renderPlatformBudget(budget, status) {
+        var config = budget || {};
+        var data = status || {};
+        fillPeriodSelect($('aiuPlatformPeriodSelect'), config.period, data.period_label);
+        var tokenInput = $('aiuPlatformTokenInput');
+        if (tokenInput) {
+            tokenInput.value = (config.token_limit === null || config.token_limit === undefined)
+                ? '' : String(config.token_limit);
+        }
+        var costInput = $('aiuPlatformCostInput');
+        if (costInput) {
+            costInput.value = (config.cost_limit === null || config.cost_limit === undefined)
+                ? '' : String(config.cost_limit);
+        }
+        renderPlatformMeters(data);
+        renderPlatformOverNotice(data);
+        var meta = $('aiuPlatformBudgetMeta');
+        if (meta) {
+            meta.textContent = config.configured
+                ? ('已配置 · 按' + (data.period_label || aiuPeriodLabel(config.period)) + '统计')
+                : '还没有配置（当前不限制）';
+        }
+        var updated = $('aiuPlatformUpdated');
+        if (updated) {
+            updated.textContent = config.configured
+                ? ('最后修改：' + aiuFmtTime(config.updated_at)
+                   + (config.updated_by ? ' · ' + config.updated_by : ''))
+                : '两个上限都留空 = 不限制；任意一栏填了数，就按那一栏拦住下一次分析。';
+        }
+    }
+
+    function loadPlatformBudget() {
+        var loading = $('aiuPlatformBudgetLoading');
+        var body = $('aiuPlatformBudgetBody');
+        var readonly = $('aiuPlatformBudgetReadonly');
+        var error = $('aiuPlatformBudgetError');
+        if (error) error.hidden = true;
+        if (body) body.hidden = true;
+        if (readonly) readonly.hidden = true;
+        if (loading) loading.hidden = false;
+        return fetch('/ai-analysis/platform-budget', {
+            credentials: 'same-origin',
+            cache: 'no-store',
+            // **必须显式要 JSON**：非管理员时服务端按 Accept 分流（`_prefers_json_error_response`）——
+            // 不带这个头会拿到一个 302 跳登录页，`fetch` 跟过去之后是一份 HTML，
+            // 于是「没权限」会以「JSON 解析失败」的形式出现在错误态里。
+            headers: { 'Accept': 'application/json' }
+        }).then(function (response) {
+            return response.json().catch(function () { return {}; }).then(function (payload) {
+                return { status: response.status, ok: response.ok, body: payload || {} };
+            });
+        }).then(function (result) {
+            if (loading) loading.hidden = true;
+            if (result.status === 401 || result.status === 403) {
+                // 权限不足**不是错误**：这一页对普通用户是合法的，只是这张卡片看不到。
+                if (readonly) readonly.hidden = false;
+                return;
+            }
+            if (!result.ok || result.body.success === false) {
+                showPlatformBudgetError(result.body.message || ('HTTP ' + result.status));
+                return;
+            }
+            if (body) body.hidden = false;
+            renderPlatformBudget(result.body.budget, result.body.status);
+        }).catch(function (err) {
+            if (loading) loading.hidden = true;
+            showPlatformBudgetError(err && err.message ? err.message : String(err));
+        });
+    }
+
+    function savePlatformBudget(event) {
+        if (event) event.preventDefault();
+        var period = $('aiuPlatformPeriodSelect');
+        var token = $('aiuPlatformTokenInput');
+        var cost = $('aiuPlatformCostInput');
+        clearPlatformFieldErrors();
+        setPlatformFeedback('正在保存…', 'muted');
+        setPlatformBusy(true);
+        return fetch('/ai-analysis/platform-budget', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(aiuBudgetFormPayload(
+                period ? period.value : '',
+                token ? token.value : '',
+                cost ? cost.value : ''
+            ))
+        }).then(function (response) {
+            return response.json().catch(function () { return {}; }).then(function (payload) {
+                return { status: response.status, ok: response.ok, body: payload || {} };
+            });
+        }).then(function (result) {
+            var body = result.body || {};
+            if (result.status === 401 || result.status === 403) {
+                // 会话中途失去了权限：与 GET 同一条口径 —— 不是错误态，是权限说明。
+                var editor = $('aiuPlatformBudgetBody');
+                var readonly = $('aiuPlatformBudgetReadonly');
+                if (editor) editor.hidden = true;
+                if (readonly) readonly.hidden = false;
+                setPlatformFeedback('', '');
+                return;
+            }
+            if (!result.ok || body.success === false) {
+                // 字段级错误落到对应输入框；**没有对应字段的错误落到顶部摘要**，
+                // 一条都不丢 —— 丢掉的那条会让用户对着一个「保存失败」找不到原因。
+                var leftover = applyBudgetFieldErrors(body.errors, AIU_PLATFORM_FIELD_MAP);
+                if (leftover.length) {
+                    var summary = $('aiuPlatformFormError');
+                    if (summary) {
+                        summary.textContent = leftover.join('；');
+                        summary.hidden = false;
+                    }
+                }
+                setPlatformFeedback(body.message || '保存失败。', 'error');
+                return;
+            }
+            clearPlatformFieldErrors();
+            setPlatformFeedback(body.message || '已保存。', 'success');
+            // 保存后服务端直接回一份新状态，界面不必再发一次 GET（那会把「保存成功」
+            // 与「状态刷新」变成两次可能不一致的往返）。
+            if (body.budget && body.status) renderPlatformBudget(body.budget, body.status);
+            // 上面「各项目消耗」里每一行的平台档也要跟着变 —— 复用总览那条取数路径。
+            loadOverview();
+        }).catch(function (err) {
+            setPlatformFeedback('保存失败：' + (err && err.message ? err.message : err), 'error');
+        }).then(function () {
+            setPlatformBusy(false);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    //  项目预算调整弹层
+    // -----------------------------------------------------------------------
+    // 走的是项目配置那个**已经存在**的部分更新接口，只提交三个 `budget_*` 字段。
+    // 当前值直接来自表格那一行的 `budget`（它就是服务端闸门判定用的那一份），
+    // 不再多发一次请求 —— 多发一次只会让弹层里的数和刚才看到的数有机会不一样。
+    var AIU_MODAL_FIELD_MAP = {
+        budget_period: 'aiuBudgetPeriodError',
+        budget_token_limit: 'aiuBudgetTokenError',
+        budget_cost_limit: 'aiuBudgetCostError'
+    };
+    var budgetModalInstance = null;
+    var budgetModalState = { projectId: null, name: '', canEdit: true };
+
+    /** 把 `errors[].field` 落到对应的输入框下面，返回**没有对应字段**的那些文案。 */
+    function applyBudgetFieldErrors(errors, map) {
+        var leftover = [];
+        (errors || []).forEach(function (item) {
+            var node = map[(item && item.field) || ''];
+            var target = node ? $(node) : null;
+            var text = ((item && item.label) ? item.label + '：' : '') + ((item && item.message) || '');
+            if (!target) {
+                leftover.push(text);
+                return;
+            }
+            target.textContent = text;
+            target.hidden = false;
+        });
+        return leftover;
+    }
+
+    function clearBudgetModalErrors() {
+        Object.keys(AIU_MODAL_FIELD_MAP).forEach(function (field) {
+            var node = $(AIU_MODAL_FIELD_MAP[field]);
+            if (node) { node.textContent = ''; node.hidden = true; }
+        });
+        var box = $('aiuBudgetModalError');
+        if (box) { box.textContent = ''; box.hidden = true; }
+    }
+
+    function setBudgetModalFeedback(text, tone) {
+        var node = $('aiuBudgetModalFeedback');
+        if (!node) return;
+        node.textContent = text || '';
+        node.style.color = tone === 'error' ? 'var(--aiu-danger)'
+            : (tone === 'success' ? 'var(--aiu-hit)' : '');
+    }
+
+    function setBudgetModalBusy(on) {
+        var btn = $('aiuBudgetModalSaveBtn');
+        if (!btn) return;
+        btn.disabled = on || !budgetModalState.canEdit;
+        if (on) btn.setAttribute('aria-busy', 'true'); else btn.removeAttribute('aria-busy');
+    }
+
+    /** 403：需要的是**这个项目的**管理员权限（与平台管理员是两回事）。
+     *  这时禁用保存并把原因写在弹层里 —— 一个只变灰、不给理由的按钮，
+     *  用户只会以为页面坏了。 */
+    function setBudgetModalReadonly(readonly) {
+        budgetModalState.canEdit = !readonly;
+        ['aiuBudgetPeriodSelect', 'aiuBudgetTokenInput', 'aiuBudgetCostInput']
+            .forEach(function (id) {
+                var node = $(id);
+                if (node) node.disabled = readonly;
+            });
+        var note = $('aiuBudgetModalReadonly');
+        if (note) note.hidden = !readonly;
+        setBudgetModalBusy(false);
+    }
+
+    function openBudgetModal(item) {
+        var budget = (item && item.budget) || {};
+        var limits = budget.limits || {};
+        budgetModalState.projectId = item ? item.project_id : null;
+        budgetModalState.name = (item && item.name) || '';
+        $('aiuBudgetModalTitle').textContent = '调整项目预算 · ' + budgetModalState.name;
+        fillPeriodSelect($('aiuBudgetPeriodSelect'), budget.period, budget.period_label);
+        // 回填的是**这一档实际生效的上限**：没配就是空（= 不限制），**不是 0**。
+        var tokenInput = $('aiuBudgetTokenInput');
+        if (tokenInput) {
+            tokenInput.value = (limits.tokens === null || limits.tokens === undefined)
+                ? '' : String(limits.tokens);
+        }
+        var costInput = $('aiuBudgetCostInput');
+        if (costInput) {
+            costInput.value = (limits.cost === null || limits.cost === undefined)
+                ? '' : String(limits.cost);
+        }
+        clearBudgetModalErrors();
+        setBudgetModalFeedback('', '');
+        setBudgetModalReadonly(false);
+        if (budgetModalInstance === null) {
+            budgetModalInstance = new bootstrap.Modal($('aiuBudgetModal'));
+        }
+        budgetModalInstance.show();
+    }
+
+    function saveBudgetModal() {
+        var projectId = budgetModalState.projectId;
+        if (!projectId) return;
+        clearBudgetModalErrors();
+        setBudgetModalFeedback('正在保存…', 'muted');
+        setBudgetModalBusy(true);
+        return fetch('/ai-analysis/projects/' + projectId + '/config', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            // **只提交这三个 `budget_*` 字段**：服务端按 payload 里出现的字段逐个
+            // setattr，所以这条请求不会碰到这个项目的其他配置项。
+            body: JSON.stringify(aiuBudgetFormPayload(
+                $('aiuBudgetPeriodSelect').value,
+                $('aiuBudgetTokenInput').value,
+                $('aiuBudgetCostInput').value
+            ))
+        }).then(function (response) {
+            return response.json().catch(function () { return {}; }).then(function (payload) {
+                return { status: response.status, ok: response.ok, body: payload || {} };
+            });
+        }).then(function (result) {
+            var body = result.body || {};
+            if (result.status === 401 || result.status === 403) {
+                setBudgetModalReadonly(true);
+                setBudgetModalFeedback('', '');
+                return;
+            }
+            if (!result.ok || body.success === false) {
+                var leftover = applyBudgetFieldErrors(body.errors, AIU_MODAL_FIELD_MAP);
+                if (leftover.length) {
+                    var box = $('aiuBudgetModalError');
+                    if (box) { box.textContent = leftover.join('；'); box.hidden = false; }
+                }
+                setBudgetModalFeedback(body.message || '保存失败。', 'error');
+                return;
+            }
+            setBudgetModalFeedback(body.message || '已保存。', 'success');
+            if (budgetModalInstance) budgetModalInstance.hide();
+            // 行里那一格（含平台档那一行）要跟着变 —— 复用总览那条取数路径。
+            loadOverview();
+        }).catch(function (err) {
+            setBudgetModalFeedback('保存失败：' + (err && err.message ? err.message : err), 'error');
+        }).then(function () {
+            setBudgetModalBusy(false);
+        });
+    }
+
     function loadOverview() {
         clearError();
         setLoading(true);
@@ -1173,6 +2092,8 @@ function aiuToolLabel(kind) {
             syncUrl(body.filters);
             renderKpis(body.totals || {}, body.over_budget_projects || 0);
             renderPricingNote((body.projects || [])[0] ? body.projects[0].pricing : null);
+            renderBudgetLink(body.budget_link);
+            renderPlatformAlert(body.platform_status);
             renderProjects(body);
             // 单价表的项目下拉用**全量**项目清单（不受当前筛选影响）—— 拿筛选后的清单
             // 会让下拉里只剩一个项目，用户换不回别的。
@@ -1299,7 +2220,12 @@ function aiuToolLabel(kind) {
         });
     }
 
-    $('aiuRefreshBtn').addEventListener('click', function () { loadOverview(); });
+    // 「刷新」要把这一页**两块**数据都重新取一遍：总览与平台总预算。它们挂在不同的
+    // 端点上（权限口径也不同），但用户按的是同一个按钮。
+    $('aiuRefreshBtn').addEventListener('click', function () {
+        loadOverview();
+        loadPlatformBudget();
+    });
     $('aiuRetryBtn').addEventListener('click', function () { loadOverview(); });
     $('aiuDrillClose').addEventListener('click', function () {
         $('aiuDrillCard').hidden = true;
@@ -1307,8 +2233,21 @@ function aiuToolLabel(kind) {
     });
 
     initFilters();
+    initBudgetLink();
+
+    var platformForm = $('aiuPlatformBudgetForm');
+    if (platformForm) platformForm.addEventListener('submit', savePlatformBudget);
+    var platformRetry = $('aiuPlatformBudgetRetryBtn');
+    if (platformRetry) {
+        platformRetry.addEventListener('click', function () { loadPlatformBudget(); });
+    }
+    var modalSave = $('aiuBudgetModalSaveBtn');
+    if (modalSave) modalSave.addEventListener('click', saveBudgetModal);
 
     loadOverview();
+    // 平台总预算单独一条请求：它挂在管理员专属端点上，与总览的权限口径不同 ——
+    // 合成一条的话，普通用户会因为「看不到平台预算」而整个页面进错误态。
+    loadPlatformBudget();
 
     // 单价表保存成功后要重算上面的费用 —— 直接复用这一条取数路径，不另写一份。
     window.aiuReloadOverview = loadOverview;

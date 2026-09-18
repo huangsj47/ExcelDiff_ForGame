@@ -336,13 +336,20 @@ def test_the_model_is_told_the_history_was_compressed():
     """模型也必须被告知：它一开始看到过、后来「不见了」的内容去哪了。
 
     不说的话，它会把「压缩掉了」当成「我没拿到过」，于是重新索取 —— 额度花两遍。
+
+    而且要**说清被压掉的是哪几轮、那几轮取到了什么**。这一条同时守着 `memos` 与轮次的
+    对齐（`compact_history` 靠位置对应，错位的话记录会挂到别的轮次上 —— 那比不记更糟：
+    模型会以为「第 1 轮拿过 LUA」，于是不再去要它）。
     """
     client = _chatty_client()
 
     _run_big(client)
 
-    assert "已压缩的历史" in client.calls[-1][-1]["content"]
-    assert "重新索取" in client.calls[-1][-1]["content"]
+    notice = client.calls[-1][-1]["content"]
+    assert "已压缩的历史" in notice
+    assert "重新索取" in notice
+    assert "第 1 轮：索取了上下文" in notice, "没有说清被压掉的是哪一轮"
+    assert TABLE in notice, "被压掉的那一轮取到了什么，必须留在记录里"
 
 
 def test_a_run_inside_the_budget_never_compacts():

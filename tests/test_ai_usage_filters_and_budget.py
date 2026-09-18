@@ -1030,6 +1030,21 @@ def _declarations(css: str) -> str:
     return re.sub(r"/\*.*?\*/", "", css, flags=re.S)
 
 
+def _post_targets(script: str) -> list:
+    """每个 `method: 'POST'` 所在那次 `fetch` 的第一个参数（目标 URL）。
+
+    只看 POST 的那几次调用：`'/ai-analysis/platform-budget'` 这个字面量在 GET 与 POST
+    里各出现一次，按字面量计数会把 GET 也算进来，于是「条数对得上」变成一个假结论。
+    """
+    targets = []
+    for match in re.finditer(r"method: 'POST'", script):
+        window = script[max(0, match.start() - 800): match.start()]
+        at = window.rfind("fetch(")
+        assert at >= 0, "一个 POST 不在任何 fetch 调用里"
+        targets.append(window[at + len("fetch("):].split(",")[0].strip())
+    return targets
+
+
 def _added_dashboard_css() -> str:
     """只取本轮新增的那一段样式（筛选栏 + 单价表编辑器）。
 
@@ -1105,16 +1120,32 @@ class TestTheFrontendHoldsTheHouseRules:
         assert "usage/project/' + projectId + (query ? '?' + query : '')" in script
 
     def test_the_clear_and_reset_buttons_are_not_destructive(self):
-        """「清空 / 重置」只动筛选状态，这个页面上不该有删除用量记录的入口。"""
+        """「清空 / 重置」只动筛选状态，这个页面上不该有删除用量记录的入口。
+
+        ## 2026-09 的期望值更新（原本是 `count("method: 'POST'") == 1`）
+
+        这一页新增了两个**配置**写接口：平台总预算（`/ai-analysis/platform-budget`）
+        与单个项目的预算（`/ai-analysis/projects/<id>/config`），所以 POST 从 1 条
+        变成 3 条。这条断言守的性质是「页面上没有破坏性写操作」，不是「只能有一个
+        POST」—— 所以改法不是把数字从 1 改成 3 就完事，而是换成**更强**的不变量：
+        每一个 POST 的**目标 URL** 都必须落在允许的那两个配置端点上。原来只数条数，
+        多一个打向别处的 POST 只要总数对得上就看不出来。
+        """
         script = _read(DASHBOARD)
 
         assert "aiuFilterClearBtn" in script and "aiuFilterResetBtn" in script
-        # 这个页面上唯一的写操作是「保存单价表」，而且它只打配置接口；
+        targets = _post_targets(script)
+        assert len(targets) == 3, f"写接口的数量变了，请逐个核对：{targets}"
+        for target in targets:
+            assert (
+                target == "'/ai-analysis/platform-budget'"
+                or re.fullmatch(
+                    r"'/ai-analysis/projects/' \+ projectId \+ '/config'", target
+                )
+            ), f"消耗面板上出现了一个不写配置的 POST：{target}"
         # 删用量记录那类动作一个都不该有。
         for banned in ("method: 'DELETE'", "method: 'PUT'", "method: 'PATCH'"):
             assert banned not in script, f"消耗面板上出现了破坏性写操作：{banned}"
-        assert script.count("method: 'POST'") == 1, "多了一个写请求"
-        assert "projects/' + projectId + '/config'" in script, "那个 POST 不是打配置接口的"
 
     def test_the_budget_column_says_what_unlimited_means(self):
         script = _read(DASHBOARD)
