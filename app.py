@@ -160,6 +160,10 @@ from services.commit_diff_page_service import (
     handle_refresh_commit_diff,
 )
 from services.commit_diff_view_service import handle_commit_diff_view
+from services.commit_compare_api_service import (
+    handle_get_commit_compare_candidates,
+    handle_get_commit_compare_diff,
+)
 from services.excel_diff_api_service import handle_get_excel_diff_data
 from services.commit_list_page_service import handle_commit_list_page
 from services.commit_diff_new_page_service import handle_commit_diff_new_page
@@ -774,6 +778,67 @@ def commit_diff(commit_id):
         performance_metrics_service=performance_metrics_service,
         ensure_commit_access_or_403=_ensure_commit_access_or_403,
         render_template=render_template,
+        log_print=log_print,
+    )
+
+# 「Excel版本对比」：候选提交列表
+# 新的带项目代号和仓库名的路由
+
+
+def get_commit_compare_candidates_with_path(project_code, repository_name, commit_id):
+    return dispatch_commit_route_with_scope(
+        commit_id=commit_id,
+        project_code=project_code,
+        repository_name=repository_name,
+        Commit=Commit,
+        ensure_commit_route_scope_or_404_func=_ensure_commit_route_scope_or_404,
+        target_handler=get_commit_compare_candidates,
+    )
+
+# 保持向后兼容的原路由
+
+
+def get_commit_compare_candidates(commit_id):
+    """列出同一仓库、同一文件路径的历史提交，供对比下拉使用。"""
+    return handle_get_commit_compare_candidates(
+        commit_id=commit_id,
+        jsonify=jsonify,
+        Commit=Commit,
+        ensure_commit_access_or_403=_ensure_commit_access_or_403,
+        # 与页面正文同一个解析器（带 file_commits 的那一个）：
+        # 下拉里标成「当前对比版本」的那一条必须就是页头写着的那一条。
+        resolve_previous_commit=resolve_previous_commit,
+        attach_author_display=_attach_author_display,
+        log_print=log_print,
+    )
+
+# 「Excel版本对比」：按指定提交现算差异
+# 新的带项目代号和仓库名的路由
+
+
+def get_commit_compare_diff_with_path(project_code, repository_name, commit_id):
+    return dispatch_commit_route_with_scope(
+        commit_id=commit_id,
+        project_code=project_code,
+        repository_name=repository_name,
+        Commit=Commit,
+        ensure_commit_route_scope_or_404_func=_ensure_commit_route_scope_or_404,
+        target_handler=get_commit_compare_diff,
+    )
+
+# 保持向后兼容的原路由
+
+
+def get_commit_compare_diff(commit_id):
+    """按 target_commit_id / direction 现算一份差异。"""
+    return handle_get_commit_compare_diff(
+        commit_id=commit_id,
+        request=request,
+        jsonify=jsonify,
+        Commit=Commit,
+        ensure_commit_access_or_403=_ensure_commit_access_or_403,
+        get_unified_diff_data=get_unified_diff_data,
+        attach_author_display=_attach_author_display,
         log_print=log_print,
     )
 # 确认/拒绝提交（旧版本，已被新的API替代）

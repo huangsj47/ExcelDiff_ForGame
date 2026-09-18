@@ -101,6 +101,45 @@ def commit_diff_route(commit_id):
     return _dispatch("commit_diff", commit_id)
 
 
+# 「Excel 版本对比」的两条数据接口。
+#
+# 都要带 project_code / repository_name 的那一份：页面上的对比弹窗是从
+# `/<project_code>/<repository_name>/commits/<id>/diff` 打开的，用带作用域的那条
+# 才能让「路径参数与提交的仓库/项目不一致」在进入 handler 之前就 404
+# （见 services/commit_route_scope_service.py::ensure_commit_route_scope_or_404）。
+# 不带作用域的那一份与其它接口一样保留，供内部/旧链接使用。
+@commit_diff_bp.route(
+    "/<project_code>/<repository_name>/commits/<int:commit_id>/compare-candidates",
+    endpoint="get_commit_compare_candidates_with_path",
+)
+def get_commit_compare_candidates_with_path_route(project_code, repository_name, commit_id):
+    return _dispatch("get_commit_compare_candidates_with_path", project_code, repository_name, commit_id)
+
+
+@commit_diff_bp.route(
+    "/commits/<int:commit_id>/compare-candidates",
+    endpoint="get_commit_compare_candidates",
+)
+def get_commit_compare_candidates_route(commit_id):
+    return _dispatch("get_commit_compare_candidates", commit_id)
+
+
+@commit_diff_bp.route(
+    "/<project_code>/<repository_name>/commits/<int:commit_id>/compare-diff",
+    endpoint="get_commit_compare_diff_with_path",
+)
+def get_commit_compare_diff_with_path_route(project_code, repository_name, commit_id):
+    return _dispatch("get_commit_compare_diff_with_path", project_code, repository_name, commit_id)
+
+
+@commit_diff_bp.route(
+    "/commits/<int:commit_id>/compare-diff",
+    endpoint="get_commit_compare_diff",
+)
+def get_commit_compare_diff_route(commit_id):
+    return _dispatch("get_commit_compare_diff", commit_id)
+
+
 @commit_diff_bp.route(
     "/commits/<int:commit_id>/status",
     methods=["POST"],

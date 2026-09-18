@@ -51,7 +51,360 @@
         color: #8b949e;
         text-align: center;
     }
-    
+
+    /* =================================================================
+       Excel 版本对比（弹窗 + 结果区）
+       -----------------------------------------------------------------
+       只服务本页，所以放这里（`diff-table-ux.css` 是**表体呈现**的唯一所有者，
+       与表格无关的东西不许往那儿塞）。表体一行样式都没写在这儿 —— 对比结果
+       的表体仍然由 `static/js/excel_diff_table.js` 渲染、由那份 CSS 决定观感。
+
+       颜色一律 var(--color-*, 字面量)（令牌见 static/css/style.css 头部）。
+       对比度实测：正文 #212529 / 次要 #495057 / 弱化 #656d76 在白底与
+       #f8f9fa 底上均 >= 4.5:1；激活标签用 #0056b3 on #e7f3ff ≈ 6.7:1。
+       ================================================================= */
+    .dc-modal .modal-header {
+        align-items: flex-start;
+        gap: var(--space-3, 12px);
+    }
+
+    .dc-modal__title {
+        display: flex;
+        align-items: center;
+        gap: var(--space-3, 12px);
+    }
+
+    .dc-modal__title-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 40px;
+        width: 40px;
+        height: 40px;
+        border-radius: var(--radius-pill, 12px);
+        background-color: var(--color-info-bg, #e7f3ff);
+        color: var(--color-primary-text, #0056b3);
+        font-size: var(--font-size-lg, 16px);
+    }
+
+    .dc-modal__subtitle {
+        color: var(--color-text-muted, #656d76);
+        font-size: var(--font-size-sm, 12px);
+    }
+
+    .dc-field {
+        margin-bottom: var(--space-4, 16px);
+    }
+
+    .dc-label {
+        font-weight: 600;
+        font-size: var(--font-size-base, 13px);
+        color: var(--color-text-secondary, #495057);
+    }
+
+    .dc-required {
+        color: var(--color-danger-text, #b3261e);
+    }
+
+    .dc-search {
+        position: relative;
+    }
+
+    .dc-search__icon {
+        position: absolute;
+        left: var(--space-3, 12px);
+        top: 50%;
+        transform: translateY(-50%);
+        color: var(--color-text-muted, #656d76);
+        pointer-events: none;
+    }
+
+    /* 输入框给图标留位（图标 12px 起 + 自身宽度），否则文字压在放大镜上 */
+    .dc-search__input {
+        padding-left: 34px;
+    }
+
+    /* 触控目标 >= 44px：下拉与按钮都是这一页的主要操作点 */
+    .dc-search__input,
+    .dc-select,
+    .dc-btn {
+        min-height: 44px;
+    }
+
+    .dc-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+    }
+
+    /* Bootstrap 的 .btn-close 默认只有 1em 见方（约 16px），达不到触控目标。
+       只放大盒子，背景图仍按 center/1em 居中，图标本身不变形。 */
+    .dc-modal .btn-close {
+        width: 44px;
+        height: 44px;
+        margin: 0;
+        padding: 0;
+        flex: 0 0 44px;
+    }
+
+    .dc-hint {
+        margin-top: var(--space-1, 4px);
+        font-size: var(--font-size-sm, 12px);
+        color: var(--color-text-muted, #656d76);
+    }
+
+    /* 焦点环 2-4px：这里所有新控件统一 3px，别让浏览器默认那圈细线 */
+    .dc-modal :focus-visible,
+    .dc-compare :focus-visible {
+        outline: 3px solid var(--color-focus, #0b5ed7);
+        outline-offset: 2px;
+    }
+
+    .dc-alert {
+        display: flex;
+        gap: var(--space-2, 8px);
+        align-items: flex-start;
+        padding: var(--space-3, 12px);
+        border: 1px solid var(--color-danger, #dc3545);
+        border-radius: var(--radius-lg, 6px);
+        background-color: var(--color-danger-bg, #ffebe9);
+        color: var(--color-danger-text, #b3261e);
+        font-size: var(--font-size-base, 13px);
+    }
+
+    .dc-modal__foot {
+        justify-content: flex-end;
+        gap: var(--space-2, 8px);
+        flex-wrap: wrap;
+    }
+
+    .dc-modal__foot-note {
+        margin-right: auto;
+        color: var(--color-text-muted, #656d76);
+        font-size: var(--font-size-sm, 12px);
+    }
+
+    /* ---------------------------------------------------- 对比结果区 */
+    /* hidden 属性必须真的藏住：Bootstrap 的 .card 是 display: flex，
+       低优先级的 [hidden] 兜不住它（.dc-compare__body 里也有 flex 布局的块）。 */
+    #currentCommitDiffCard[hidden],
+    #diffCompareResult[hidden],
+    #diffCompareResult [hidden] {
+        display: none !important;
+    }
+
+    .dc-compare {
+        border-left: 4px solid var(--color-primary, #0d6efd);
+    }
+
+    .dc-compare__head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-3, 12px);
+    }
+
+    .dc-compare__headline {
+        display: flex;
+        align-items: center;
+        gap: var(--space-3, 12px);
+        min-width: 0;
+    }
+
+    .dc-compare__badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 32px;
+        width: 32px;
+        height: 32px;
+        border-radius: var(--radius-pill, 12px);
+        background-color: var(--color-info-bg, #e7f3ff);
+        color: var(--color-primary-text, #0056b3);
+    }
+
+    /* 时间/提交号是数据列：等宽数字，两个版本对比时不会左右跳 */
+    .dc-compare__route {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        margin-top: 2px;
+        font-size: var(--font-size-sm, 12px);
+        color: var(--color-text-secondary, #495057);
+        font-variant-numeric: tabular-nums;
+        font-feature-settings: "tnum" 1;
+    }
+
+    .dc-compare__chip {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 6px;
+        padding: 2px var(--space-2, 8px);
+        border-radius: var(--radius-pill, 12px);
+        background-color: var(--color-surface-muted, #e9ecef);
+        color: var(--color-text, #212529);
+        overflow-wrap: anywhere;
+    }
+
+    .dc-compare__chip--to {
+        background-color: var(--color-success-bg-soft, #e8f5e8);
+    }
+
+    .dc-compare__chip-tag {
+        font-weight: 700;
+        color: var(--color-text-secondary, #495057);
+    }
+
+    .dc-compare__actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-2, 8px);
+    }
+
+    .dc-compare__body {
+        padding: 0;
+    }
+
+    /* ------------------------------------------------- 三态（加载/空/错） */
+    .dc-state {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: var(--space-2, 8px);
+        padding: var(--space-8, 32px) var(--space-4, 16px);
+        text-align: center;
+    }
+
+    .dc-state--inline {
+        padding: var(--space-4, 16px);
+    }
+
+    .dc-state__icon {
+        font-size: 36px;
+        color: var(--color-text-muted, #656d76);
+    }
+
+    .dc-state--empty .dc-state__icon {
+        color: var(--color-success-text, #157347);
+    }
+
+    .dc-state--error .dc-state__icon {
+        color: var(--color-danger-text, #b3261e);
+    }
+
+    .dc-state__title {
+        margin: 0;
+        font-weight: 600;
+        color: var(--color-text, #212529);
+    }
+
+    .dc-state__hint {
+        margin: 0;
+        font-size: var(--font-size-base, 13px);
+        color: var(--color-text-muted, #656d76);
+        max-width: 60ch;
+    }
+
+    /* 「无差异」不占整屏：它是结果区顶部的一条横幅，下面照常列出工作表 */
+    .dc-nochange {
+        display: flex;
+        gap: var(--space-3, 12px);
+        align-items: flex-start;
+        margin: var(--space-3, 12px);
+        padding: var(--space-3, 12px);
+        border: 1px solid var(--color-success, #198754);
+        border-radius: var(--radius-lg, 6px);
+        background-color: var(--color-success-bg-soft, #e8f5e8);
+        color: var(--color-text, #212529);
+    }
+
+    .dc-nochange__icon {
+        color: var(--color-success-text, #157347);
+        font-size: var(--font-size-lg, 16px);
+    }
+
+    /* ------------------------------------------------- 工作表标签与面板 */
+    .dc-sheet-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        padding: var(--space-3, 12px);
+        background-color: var(--color-surface-subtle, #f8f9fa);
+        border-bottom: 1px solid var(--color-border, #dee2e6);
+    }
+
+    .dc-sheet-tab {
+        min-height: 40px;
+        padding: 6px var(--space-3, 12px);
+        border: 1px solid var(--color-border, #dee2e6);
+        border-radius: var(--radius-lg, 6px);
+        background-color: var(--color-surface, #ffffff);
+        color: var(--color-text, #212529);
+        font-size: var(--font-size-base, 13px);
+        cursor: pointer;
+    }
+
+    .dc-sheet-tab:hover {
+        background-color: var(--color-surface-subtle, #f8f9fa);
+        border-color: var(--color-border-strong, #d0d7de);
+    }
+
+    /* 选中态不靠颜色单独表达：还有加粗与底部色条 */
+    .dc-sheet-tab[aria-selected="true"] {
+        background-color: var(--color-info-bg, #e7f3ff);
+        border-color: var(--color-primary, #0d6efd);
+        color: var(--color-primary-text, #0056b3);
+        font-weight: 600;
+        box-shadow: inset 0 -3px 0 0 var(--color-primary, #0d6efd);
+    }
+
+    .dc-sheet-tabs__count {
+        align-self: center;
+        margin-left: auto;
+        font-size: var(--font-size-sm, 12px);
+        color: var(--color-text-muted, #656d76);
+    }
+
+    .dc-sheet-panel > .dc-state {
+        padding: var(--space-6, 24px);
+    }
+
+    /* 动效：本页所有过渡统一走 --motion-fast，尊重 prefers-reduced-motion */
+    .dc-sheet-tab,
+    .dc-btn {
+        transition: background-color var(--motion-fast, 0.15s) var(--ease-out, ease),
+                    border-color var(--motion-fast, 0.15s) var(--ease-out, ease),
+                    color var(--motion-fast, 0.15s) var(--ease-out, ease);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .dc-sheet-tab,
+        .dc-btn {
+            transition: none;
+        }
+    }
+
+    /* 375px 宽：标签、按钮、页脚都换行，不产生横向滚动 */
+    @media (max-width: 575.98px) {
+        .dc-compare__head,
+        .dc-compare__actions,
+        .dc-modal__foot {
+            width: 100%;
+        }
+
+        .dc-compare__actions .dc-btn,
+        .dc-modal__foot .dc-btn {
+            flex: 1 1 auto;
+        }
+
+        .dc-modal__foot-note {
+            flex: 1 0 100%;
+            margin-right: 0;
+        }
+    }
 </style>
 {% endblock %}
 
@@ -140,7 +493,9 @@
     </div>
 
     <!-- Diff内容 -->
-    <div class="card">
+    {# id 是「版本对比」模式切换用的：进入对比态时这张卡整体收起，
+       由 #diffCompareResult 顶替它的位置（见 exitDiffCompare 的注释）。 #}
+    <div class="card" id="currentCommitDiffCard">
         <div class="card-header bg-light d-flex justify-content-between align-items-center">
             <h6 class="mb-0">{{ commit.path }}</h6>
             <div class="d-flex align-items-center gap-3">
@@ -158,7 +513,10 @@
                 </div>
                 {% if is_excel %}
                 <div>
-                    <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#diffCompareModal">
+                    {# id 给「返回当前提交对比」用：退出对比态时焦点要回到这个按钮上，
+                       否则键盘用户被留在已经收起的区域里（WCAG 焦点不丢失）。 #}
+                    <button class="btn btn-outline-primary btn-sm" id="openDiffCompareBtn"
+                            data-bs-toggle="modal" data-bs-target="#diffCompareModal">
                         <i class="bi bi-arrow-left-right"></i> 版本对比
                     </button>
                 </div>
@@ -351,37 +709,133 @@
             {% endif %}
         </div>
     </div>
+
+    {# 版本对比结果区。默认 hidden，点「开始对比」后才显示，并且把上面那张
+       当前提交的 diff 卡收起 —— 两块表同时铺在页面上，用户分不清哪张是哪个版本。 #}
+    <section class="card dc-compare" id="diffCompareResult" hidden aria-labelledby="diffCompareResultTitle">
+        <div class="card-header bg-light dc-compare__head">
+            <div class="dc-compare__headline">
+                <span class="dc-compare__badge" aria-hidden="true"><i class="bi bi-arrow-left-right"></i></span>
+                <div>
+                    <h6 class="mb-0" id="diffCompareResultTitle">版本对比结果</h6>
+                    {# 「A（时间）→ B（时间）」：A 是旧侧（基线），B 是新侧。
+                       两侧提交都由服务端按 direction 决定，前端只负责显示。 #}
+                    <div class="dc-compare__route" id="diffCompareRoute"></div>
+                </div>
+            </div>
+            <div class="dc-compare__actions">
+                <button type="button" class="btn btn-sm btn-outline-secondary dc-btn" id="diffCompareChangeBtn"
+                        data-bs-toggle="modal" data-bs-target="#diffCompareModal">
+                    <i class="bi bi-sliders" aria-hidden="true"></i> 换个版本
+                </button>
+                <button type="button" class="btn btn-sm btn-primary dc-btn" id="diffCompareBackBtn"
+                        onclick="exitDiffCompare()">
+                    <i class="bi bi-arrow-return-left" aria-hidden="true"></i> 返回当前提交对比
+                </button>
+            </div>
+        </div>
+        <div class="card-body dc-compare__body">
+            <div class="dc-state" id="diffCompareLoading" hidden>
+                <div class="spinner-border text-primary" role="status" aria-hidden="true"></div>
+                <p class="dc-state__title">正在计算这两个版本的差异…</p>
+                <p class="dc-state__hint" id="diffCompareLoadingHint">首次对比大表可能需要几秒，请不要关闭页面</p>
+            </div>
+            <div class="dc-state dc-state--error" id="diffCompareResultError" role="alert" hidden>
+                <i class="bi bi-exclamation-triangle-fill dc-state__icon" aria-hidden="true"></i>
+                <p class="dc-state__title" id="diffCompareResultErrorTitle">对比失败</p>
+                <p class="dc-state__hint" id="diffCompareResultErrorBody"></p>
+                <button type="button" class="btn btn-outline-danger dc-btn" id="diffCompareResultRetryBtn">
+                    <i class="bi bi-arrow-clockwise" aria-hidden="true"></i> 重试
+                </button>
+            </div>
+            <div class="dc-state dc-state--empty" id="diffCompareEmpty" role="status" hidden>
+                <i class="bi bi-file-earmark-excel dc-state__icon" aria-hidden="true"></i>
+                <p class="dc-state__title" id="diffCompareEmptyTitle">这两个版本之间没有可展示的差异</p>
+                <p class="dc-state__hint" id="diffCompareEmptyBody"></p>
+            </div>
+            <div id="diffCompareSheets" hidden></div>
+        </div>
+    </section>
 </div>
 
 <!-- Excel版本对比模态框 -->
+{# 「选择对比的提交版本」原先是一个**永远只有占位 option** 的下拉：
+   没有任何 JS 往里面塞过选项（全仓 `targetCommitSelect` 只命中这一行声明），
+   点「开始对比」弹的是 `alert('版本对比功能开发中...')`。
+   现在候选由 `show.bs.modal` 懒加载（见本页脚本里的 loadDiffCompareCandidates），
+   搜索框与下拉的联动在 renderCompareOptions 里。 #}
 {% if is_excel %}
-<div class="modal fade" id="diffCompareModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
+<div class="modal fade" id="diffCompareModal" tabindex="-1" aria-labelledby="diffCompareModalLabel">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable modal-dialog-centered">
+        <div class="modal-content dc-modal">
             <div class="modal-header">
-                <h5 class="modal-title">Excel版本对比</h5>
+                <div class="dc-modal__title">
+                    <span class="dc-modal__title-icon" aria-hidden="true"><i class="bi bi-arrow-left-right"></i></span>
+                    <div>
+                        <h5 class="modal-title" id="diffCompareModalLabel">Excel 版本对比</h5>
+                        <p class="dc-modal__subtitle mb-0">选择这个文件的另一个版本，逐表对比</p>
+                    </div>
+                </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
             </div>
             <div class="modal-body">
                 <form id="diffCompareForm">
-                    <div class="mb-3">
-                        <label class="form-label">选择对比的提交版本:</label>
-                        <select class="form-select" id="targetCommitSelect" name="target_commit">
-                            <option value="">选择提交版本...</option>
-                        </select>
+                    <div class="dc-field">
+                        <label class="form-label dc-label" for="compareCommitFilter">筛选</label>
+                        <div class="dc-search">
+                            <i class="bi bi-search dc-search__icon" aria-hidden="true"></i>
+                            {# 过滤用原生 input，下拉仍是原生 select：select 本身就是
+                               「上下键可选项 + 键入首字母跳转 + 移动端原生选择器」，
+                               自绘 listbox 要把这些重新实现一遍，收益只有样式。 #}
+                            <input type="search" class="form-control dc-search__input" id="compareCommitFilter"
+                                   placeholder="版本号 / 提交号 / 作者 / 提交信息" autocomplete="off"
+                                   aria-label="筛选可对比的提交版本" disabled>
+                        </div>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">对比方向:</label>
-                        <select class="form-select" id="compareDirection" name="direction">
-                            <option value="current_to_target">当前提交 → 选择的提交</option>
-                            <option value="target_to_current">选择的提交 → 当前提交</option>
+                    <div class="dc-field">
+                        <label class="form-label dc-label" for="targetCommitSelect">
+                            选择对比的提交版本 <span class="dc-required" aria-hidden="true">*</span>
+                        </label>
+                        <select class="form-select dc-select" id="targetCommitSelect" name="target_commit"
+                                required aria-describedby="compareCandidateHint">
+                            <option value="">正在加载可选版本…</option>
                         </select>
+                        <div class="dc-hint" id="compareCandidateHint" role="status" aria-live="polite">
+                            正在加载可选版本…
+                        </div>
+                    </div>
+                    <div class="dc-field mb-0">
+                        <label class="form-label dc-label" for="compareDirection">对比方向</label>
+                        <select class="form-select dc-select" id="compareDirection" name="direction">
+                            {# 默认「选择的提交（旧）→ 当前提交（新）」：这与页头「对比版本」
+                               以及正文的口径一致。选中「当前对比版本」那一条时，对比结果
+                               与页面正文是同一份，用户不会觉得平台算了两套。 #}
+                            <option value="target_to_current" selected>选择的提交（旧）→ 当前提交（新）</option>
+                            <option value="current_to_target">当前提交（旧）→ 选择的提交（新）</option>
+                        </select>
+                        <div class="dc-hint">箭头左边是旧版本、右边是新版本，增删行按这个方向判定。</div>
+                    </div>
+                    {# 弹窗自己的错误态：候选列表拉不到时在这里说清楚，并给重试 #}
+                    <div class="dc-alert mt-3" id="diffCompareModalError" role="alert" hidden>
+                        <i class="bi bi-exclamation-triangle-fill" aria-hidden="true"></i>
+                        <div>
+                            <div class="fw-semibold" id="diffCompareModalErrorTitle">可选版本加载失败</div>
+                            <div id="diffCompareModalErrorBody"></div>
+                            <button type="button" class="btn btn-sm btn-outline-danger dc-btn mt-2"
+                                    id="diffCompareCandidatesRetryBtn">
+                                <i class="bi bi-arrow-clockwise" aria-hidden="true"></i> 重新加载
+                            </button>
+                        </div>
                     </div>
                 </form>
             </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                <button type="button" class="btn btn-primary" onclick="executeDiffCompare()">开始对比</button>
+            <div class="modal-footer dc-modal__foot">
+                <span class="dc-modal__foot-note" id="diffCompareFootNote"></span>
+                <button type="button" class="btn btn-outline-secondary dc-btn" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary dc-btn" id="diffCompareSubmitBtn"
+                        onclick="executeDiffCompare()" disabled>
+                    <i class="bi bi-arrow-left-right" aria-hidden="true"></i> 开始对比
+                </button>
             </div>
         </div>
     </div>
@@ -1408,12 +1862,629 @@ function bindExcelSheetTabClicks(root) {
     }
 }
 
-// Excel版本对比功能
-function executeDiffCompare() {
-    console.log('Executing diff compare');
-    // 这里可以添加版本对比的具体实现
-    alert('版本对比功能开发中...');
+/* Excel版本对比功能
+ *
+ * ## 这个功能原先是个空壳
+ *
+ * `#targetCommitSelect` 从来没有被任何 JS 填过 option（全仓只有一个声明处），
+ * `executeDiffCompare()` 的实现是一句 `alert('版本对比功能开发中...')` ——
+ * 用户看到的就是「选择对比的提交版本: 没有任何可选内容」。
+ *
+ * ## 几个刻意的选择
+ *
+ * 1. **候选懒加载**：只在第一次 `show.bs.modal` 时拉。放在页面加载时拉的话，
+ *    每个打开 diff 页的人都要为「可能不会点开的弹窗」付一次查询（同一仓库同一
+ *    文件路径的全部历史提交）。
+ * 2. **过滤用原生 input + 原生 select**，不引第三方库也不自绘 listbox：
+ *    select 自带上下键选项、键入首字母跳转、移动端原生选择器、屏幕阅读器语义；
+ *    自绘要把这些逐条重新实现一遍，而收益只有样式。过滤只重建 option 列表，
+ *    不改变控件的语义与键盘行为。
+ * 3. **表体只走 `ExcelDiffTable.mountSheetTable`**（单一实现）。本页历史上自己
+ *    拼过一份单元格，2026 重构收进了 `static/js/excel_diff_table.js`；这里再拼
+ *    一份就等于把那次重构撤销。表级提示复用本页的 `sheetNoticesHtml`。
+ * 4. **进对比态时收起当前提交那张卡**：两块表同时铺在页面上，用户分不清哪张是
+ *    哪个版本。收起后由 `#diffCompareResult` 顶替它的位置，并给一个明确的
+ *    「返回当前提交对比」出口。
+ * 5. **三态齐全**：加载（转圈 + 提示）、空（区分「没有可比较的工作表」与
+ *    「有工作表但两边内容一样」）、错误（含重试）。
+ */
+{% if is_excel %}
+// 两条接口都带 project_code / repository_name：作用域参数让「提交的仓库/项目与
+// 路径对不上」在进入 handler 之前就 404（见 routes/commit_diff_routes.py 的注释）。
+var COMPARE_CANDIDATES_URL = {{ url_for('get_commit_compare_candidates_with_path', project_code=project.code, repository_name=repository.name, commit_id=commit.id) | tojson }};
+var COMPARE_DIFF_URL = {{ url_for('get_commit_compare_diff_with_path', project_code=project.code, repository_name=repository.name, commit_id=commit.id) | tojson }};
+
+var diffCompareState = {
+    loaded: false,        // 候选是否已拉过（懒加载用）
+    loading: false,
+    candidates: [],
+    total: 0,
+    truncated: false,
+    sheets: [],           // [{name, data}]，按载荷里的原始顺序
+    mounted: {},          // 已渲染的工作表下标 -> true（切换标签时按需渲染）
+    lastRequest: null     // 错误态「重试」要重放的那次请求
+};
+
+function diffCompareEl(id) {
+    return document.getElementById(id);
 }
+
+function diffCompareSetHidden(element, hidden) {
+    if (element) {
+        element.hidden = !!hidden;
+    }
+}
+
+function diffCompareShortId(commit) {
+    if (!commit) return '未知';
+    var raw = String(commit.short_id || commit.commit_id || '');
+    return raw ? raw.slice(0, 8) : '未知';
+}
+
+// 提交的完整一行（短号 · 版本 · 时间 · 作者），对比头部与选中项摘要共用
+function diffCompareCommitLabel(commit) {
+    if (!commit) return '未知版本';
+    var parts = [diffCompareShortId(commit)];
+    if (commit.version) parts.push(commit.version);
+    if (commit.commit_time) parts.push(commit.commit_time);
+    if (commit.author) parts.push(commit.author);
+    return parts.join(' · ');
+}
+
+// 下拉里的一项。顺序按需求：短号 + 版本 + 时间 + 作者 + 提交信息首行。
+function diffCompareOptionText(item) {
+    var parts = [diffCompareShortId(item)];
+    if (item.version) parts.push(item.version);
+    if (item.commit_time) parts.push(item.commit_time);
+    if (item.author) parts.push(item.author);
+    var text = parts.join(' · ');
+    if (item.message) text += ' · ' + item.message;
+    if (item.is_page_baseline) {
+        // 用文字前缀而不是符号：这个标记必须能被搜索到，也不能只靠颜色区分
+        text = '[当前对比版本] ' + text;
+    }
+    return text;
+}
+
+// 过滤用的可搜索文本（全部小写）。提交号既有短号也有全长，
+// 用户从 git 里复制来的通常是全长。
+function diffCompareSearchText(item) {
+    return [item.short_id, item.commit_id, item.version, item.commit_time, item.author, item.message]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+}
+
+function diffCompareSelectedItem() {
+    var select = diffCompareEl('targetCommitSelect');
+    if (!select || !select.value) return null;
+    var value = String(select.value);
+    for (var i = 0; i < diffCompareState.candidates.length; i++) {
+        if (String(diffCompareState.candidates[i].id) === value) {
+            return diffCompareState.candidates[i];
+        }
+    }
+    return null;
+}
+
+function diffCompareUpdateSubmitState() {
+    var select = diffCompareEl('targetCommitSelect');
+    var button = diffCompareEl('diffCompareSubmitBtn');
+    if (button) {
+        button.disabled = !(select && select.value);
+    }
+}
+
+function diffCompareUpdateFootNote() {
+    var note = diffCompareEl('diffCompareFootNote');
+    if (!note) return;
+    var item = diffCompareSelectedItem();
+    note.textContent = item ? ('将对比：' + diffCompareCommitLabel(item)) : '';
+}
+
+function diffCompareUpdateHint(matchedCount, keyword) {
+    var hint = diffCompareEl('compareCandidateHint');
+    if (!hint) return;
+    var total = diffCompareState.candidates.length;
+    if (!total) {
+        hint.textContent = '这个文件没有其它历史版本可以对比';
+        return;
+    }
+    var text = '共 ' + diffCompareState.total + ' 个可对比版本';
+    if (diffCompareState.truncated) {
+        text += '，只列出最近的 ' + total + ' 个';
+    }
+    if (keyword) {
+        text += '；匹配「' + keyword + '」的 ' + matchedCount + ' 个';
+    }
+    hint.textContent = text;
+}
+
+// 按当前筛选词重建 option 列表。
+//
+// 选中项的优先级：用户已经选中的那一条 > 页面当前正在对比的那一条 > 第一条。
+// 中间那一档是必须的：用户打开弹窗直接点「开始对比」时，应该看到与页面正文
+// 同一份差异，而不是「最近的一条」算出来的另一份。
+function renderCompareOptions() {
+    var select = diffCompareEl('targetCommitSelect');
+    if (!select) return;
+    var filterInput = diffCompareEl('compareCommitFilter');
+    var keyword = String((filterInput && filterInput.value) || '').trim().toLowerCase();
+    var matched = diffCompareState.candidates.filter(function (item) {
+        return !keyword || diffCompareSearchText(item).indexOf(keyword) !== -1;
+    });
+    var previous = String(select.value || '');
+
+    select.textContent = '';
+
+    if (!diffCompareState.candidates.length) {
+        select.appendChild(new Option('没有可对比的历史版本', ''));
+        select.disabled = true;
+        diffCompareUpdateHint(0, keyword);
+        diffCompareUpdateSubmitState();
+        diffCompareUpdateFootNote();
+        return;
+    }
+
+    if (!matched.length) {
+        select.appendChild(new Option('没有匹配的版本', ''));
+        select.disabled = true;
+        diffCompareUpdateHint(0, keyword);
+        diffCompareUpdateSubmitState();
+        diffCompareUpdateFootNote();
+        return;
+    }
+
+    var i;
+    for (i = 0; i < matched.length; i++) {
+        select.appendChild(new Option(diffCompareOptionText(matched[i]), String(matched[i].id)));
+    }
+    select.disabled = false;
+
+    var desired = null;
+    for (i = 0; i < matched.length; i++) {
+        if (String(matched[i].id) === previous) { desired = previous; break; }
+    }
+    if (desired === null) {
+        for (i = 0; i < matched.length; i++) {
+            if (matched[i].is_page_baseline) { desired = String(matched[i].id); break; }
+        }
+    }
+    if (desired === null) {
+        desired = String(matched[0].id);
+    }
+    select.value = desired;
+
+    diffCompareUpdateHint(matched.length, keyword);
+    diffCompareUpdateSubmitState();
+    diffCompareUpdateFootNote();
+}
+
+function diffCompareSetModalError(message) {
+    var box = diffCompareEl('diffCompareModalError');
+    var body = diffCompareEl('diffCompareModalErrorBody');
+    if (!box || !body) return;
+    if (!message) {
+        diffCompareSetHidden(box, true);
+        body.textContent = '';
+        return;
+    }
+    body.textContent = message;
+    diffCompareSetHidden(box, false);
+}
+
+function loadDiffCompareCandidates(forceReload) {
+    if (diffCompareState.loading) return;
+    if (diffCompareState.loaded && !forceReload) return;
+    diffCompareState.loading = true;
+    diffCompareSetModalError(null);
+
+    var select = diffCompareEl('targetCommitSelect');
+    var filterInput = diffCompareEl('compareCommitFilter');
+    var hint = diffCompareEl('compareCandidateHint');
+
+    if (select) {
+        select.disabled = true;
+        select.textContent = '';
+        select.appendChild(new Option('正在加载可选版本…', ''));
+    }
+    if (filterInput) {
+        filterInput.disabled = true;
+        if (forceReload) filterInput.value = '';
+    }
+    if (hint) hint.textContent = '正在加载可选版本…';
+    diffCompareUpdateSubmitState();
+
+    fetch(COMPARE_CANDIDATES_URL, {headers: {'Accept': 'application/json'}})
+        .then(function (response) {
+            return response.json().catch(function () { return null; }).then(function (payload) {
+                if (!response.ok || !payload || payload.success !== true) {
+                    throw new Error((payload && payload.message) || ('请求失败（HTTP ' + response.status + '）'));
+                }
+                return payload;
+            });
+        })
+        .then(function (payload) {
+            diffCompareState.loading = false;
+            diffCompareState.loaded = true;
+            diffCompareState.candidates = payload.candidates || [];
+            diffCompareState.total = typeof payload.total === 'number'
+                ? payload.total : diffCompareState.candidates.length;
+            diffCompareState.truncated = !!payload.truncated;
+            if (filterInput) {
+                filterInput.disabled = !diffCompareState.candidates.length;
+            }
+            renderCompareOptions();
+        })
+        .catch(function (error) {
+            diffCompareState.loading = false;
+            diffCompareState.loaded = false;
+            if (select) {
+                select.textContent = '';
+                select.appendChild(new Option('加载失败，请重试', ''));
+                select.disabled = true;
+            }
+            if (hint) hint.textContent = '可选版本加载失败';
+            diffCompareSetModalError((error && error.message) || '网络异常，请稍后重试');
+            diffCompareUpdateSubmitState();
+        });
+}
+
+function diffCompareHideModal() {
+    var modalEl = diffCompareEl('diffCompareModal');
+    if (!modalEl || typeof bootstrap === 'undefined' || !bootstrap.Modal) return;
+    var instance = bootstrap.Modal.getInstance(modalEl) || bootstrap.Modal.getOrCreateInstance(modalEl);
+    if (instance) instance.hide();
+}
+
+// 「开始对比」：读下拉与方向，关掉弹窗，进入对比态。
+function executeDiffCompare() {
+    var select = diffCompareEl('targetCommitSelect');
+    var targetId = select ? String(select.value || '') : '';
+    if (!targetId) {
+        diffCompareSetModalError('请先选择一个要对比的提交版本');
+        if (select && !select.disabled) select.focus();
+        return;
+    }
+    var directionSelect = diffCompareEl('compareDirection');
+    // 默认与 <option selected> 一致：选择的提交是旧侧、当前提交是新侧
+    var direction = directionSelect && directionSelect.value
+        ? directionSelect.value : 'target_to_current';
+    diffCompareSetModalError(null);
+    diffCompareHideModal();
+    startDiffCompare(targetId, direction);
+}
+
+function diffCompareScrollTo(element) {
+    if (!element || !element.scrollIntoView) return;
+    var reduceMotion = false;
+    try {
+        reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    } catch (error) {
+        reduceMotion = false;
+    }
+    try {
+        element.scrollIntoView({behavior: reduceMotion ? 'auto' : 'smooth', block: 'start'});
+    } catch (error) {
+        element.scrollIntoView();
+    }
+}
+
+// 进入对比态：收起当前提交的 diff 卡，显示结果区。
+// 两块表同时在页面上时，用户无法分辨「这张表是哪个版本的」—— 页头也只有一份
+// 版本信息，属于当前提交。所以这里是一次显式的模式切换，并且给明确的返回出口。
+function enterDiffCompareMode() {
+    var card = diffCompareEl('currentCommitDiffCard');
+    var panel = diffCompareEl('diffCompareResult');
+    if (card) card.hidden = true;
+    diffCompareSetHidden(panel, false);
+    diffCompareScrollTo(panel);
+}
+
+function setDiffCompareLoading(loading) {
+    diffCompareSetHidden(diffCompareEl('diffCompareLoading'), !loading);
+    if (loading) {
+        diffCompareSetHidden(diffCompareEl('diffCompareResultError'), true);
+        diffCompareSetHidden(diffCompareEl('diffCompareEmpty'), true);
+        diffCompareSetHidden(diffCompareEl('diffCompareSheets'), true);
+    }
+}
+
+function showDiffCompareError(title, message) {
+    var titleEl = diffCompareEl('diffCompareResultErrorTitle');
+    var bodyEl = diffCompareEl('diffCompareResultErrorBody');
+    if (titleEl) titleEl.textContent = title || '对比失败';
+    if (bodyEl) bodyEl.textContent = message || '';
+    diffCompareSetHidden(diffCompareEl('diffCompareResultError'), false);
+}
+
+function showDiffCompareEmpty(title, message) {
+    var titleEl = diffCompareEl('diffCompareEmptyTitle');
+    var bodyEl = diffCompareEl('diffCompareEmptyBody');
+    if (titleEl) titleEl.textContent = title;
+    if (bodyEl) bodyEl.textContent = message || '';
+    diffCompareSetHidden(diffCompareEl('diffCompareEmpty'), false);
+}
+
+function startDiffCompare(targetId, direction) {
+    diffCompareState.lastRequest = {targetId: targetId, direction: direction};
+    enterDiffCompareMode();
+    setDiffCompareLoading(true);
+
+    var url = COMPARE_DIFF_URL +
+        '?target_commit_id=' + encodeURIComponent(targetId) +
+        '&direction=' + encodeURIComponent(direction);
+
+    fetch(url, {headers: {'Accept': 'application/json'}})
+        .then(function (response) {
+            return response.json().catch(function () { return null; }).then(function (payload) {
+                if (!response.ok || !payload || payload.success !== true) {
+                    throw new Error((payload && payload.message) || ('请求失败（HTTP ' + response.status + '）'));
+                }
+                return payload;
+            });
+        })
+        .then(function (payload) {
+            setDiffCompareLoading(false);
+            renderDiffCompareResult(payload);
+        })
+        .catch(function (error) {
+            setDiffCompareLoading(false);
+            showDiffCompareError('对比失败', (error && error.message) || '网络异常，请稍后重试');
+        });
+}
+
+function retryDiffCompare() {
+    if (!diffCompareState.lastRequest) return;
+    startDiffCompare(diffCompareState.lastRequest.targetId, diffCompareState.lastRequest.direction);
+}
+
+// 结果头部：「A（时间）→ B（时间）」。A 是旧侧（基线）、B 是新侧，
+// 谁当旧侧由服务端按 direction 决定 —— 前端不做第二次翻转，避免两边各翻一次
+// 变成没翻。
+function renderDiffCompareRoute(from, to) {
+    var box = diffCompareEl('diffCompareRoute');
+    if (!box) return;
+    var fromLabel = diffCompareCommitLabel(from);
+    var toLabel = diffCompareCommitLabel(to);
+    box.innerHTML =
+        '<span class="dc-compare__chip">' +
+        '<span class="dc-compare__chip-tag">A · 旧</span>' + escapeHtml(fromLabel) +
+        '</span>' +
+        '<i class="bi bi-arrow-right" aria-hidden="true"></i>' +
+        '<span class="dc-compare__chip dc-compare__chip--to">' +
+        '<span class="dc-compare__chip-tag">B · 新</span>' + escapeHtml(toLabel) +
+        '</span>';
+}
+
+function diffCompareSheetNames(sheets) {
+    return Object.keys(sheets || {});
+}
+
+function renderDiffCompareResult(payload) {
+    renderDiffCompareRoute(payload.from_commit, payload.to_commit);
+    diffCompareState.mounted = {};
+
+    var sheets = (payload.diff_data && payload.diff_data.sheets) || {};
+    var names = diffCompareSheetNames(sheets);
+
+    // 后端说 empty = 这两个提交之间压根没有可比较的工作表（不是「内容一样」）。
+    if (payload.empty || !names.length) {
+        diffCompareState.sheets = [];
+        diffCompareSetHidden(diffCompareEl('diffCompareSheets'), true);
+        showDiffCompareEmpty(
+            '这两个版本之间没有可比较的工作表',
+            payload.empty_reason || '差异服务没有给出工作表内容，可能这个文件在其中一个版本里不存在。'
+        );
+        return;
+    }
+
+    var noChangeNames = names.filter(function (name) {
+        return !sheetHasChanges(sheets[name]);
+    });
+
+    diffCompareState.sheets = names.map(function (name) {
+        return {name: name, data: sheets[name]};
+    });
+
+    var html = '';
+    if (noChangeNames.length === names.length) {
+        // 「内容一样」和「没有可比较的工作表」是两件事，界面上必须说不同的话。
+        // 这里仍然把工作表列出来（而不是只留一句提示）：用户可能想确认某张表
+        // 真的没变，而不是被一句结论挡住。
+        html += '<div class="dc-nochange">' +
+                '<i class="bi bi-check2-circle dc-nochange__icon" aria-hidden="true"></i>' +
+                '<div><div class="fw-semibold">这两个版本之间没有差异</div>' +
+                '<div class="small">逐表比对后没有发现行级、列级或工作表级变更；' +
+                '下面仍是该文件的全部工作表，供你核对。</div></div>' +
+                '</div>';
+    }
+    html += '<div class="dc-sheet-tabs" role="tablist" aria-label="工作表">';
+    var index;
+    for (index = 0; index < names.length; index++) {
+        var name = names[index];
+        var hasChanges = sheetHasChanges(sheets[name]);
+        html += '<button type="button" role="tab" class="dc-sheet-tab" id="dc-sheet-tab-' + index + '"' +
+                ' aria-controls="dc-sheet-panel-' + index + '"' +
+                ' aria-selected="' + (index === 0 ? 'true' : 'false') + '"' +
+                ' tabindex="' + (index === 0 ? '0' : '-1') + '"' +
+                ' data-sheet-index="' + index + '">' +
+                escapeHtml(name) +
+                (hasChanges ? ' <span class="badge bg-warning text-dark">变更</span>' : '') +
+                '</button>';
+    }
+    html += '<span class="dc-sheet-tabs__count">' + names.length + ' 张工作表</span>';
+    html += '</div>';
+
+    for (index = 0; index < names.length; index++) {
+        html += '<div class="dc-sheet-panel" id="dc-sheet-panel-' + index + '"' +
+                ' role="tabpanel" aria-labelledby="dc-sheet-tab-' + index + '"' +
+                (index === 0 ? '' : ' hidden') + '>' +
+                '<div class="dc-state dc-state--inline">' +
+                '<div class="spinner-border spinner-border-sm text-primary" role="status" aria-hidden="true"></div>' +
+                '<p class="dc-state__hint mb-0">正在渲染工作表…</p>' +
+                '</div></div>';
+    }
+
+    var box = diffCompareEl('diffCompareSheets');
+    if (!box) return;
+    box.innerHTML = html;
+    diffCompareSetHidden(box, false);
+    // 只渲染第一张：一次把所有工作表都塞进 DOM，大文件会卡住主线程，
+    // 而用户同一时刻只看得到一张。切换标签时按需渲染（mounted 记账）。
+    mountCompareSheet(0);
+}
+
+function mountCompareSheet(index) {
+    var sheet = diffCompareState.sheets[index];
+    if (!sheet || diffCompareState.mounted[index]) return;
+    var panel = diffCompareEl('dc-sheet-panel-' + index);
+    if (!panel) return;
+    diffCompareState.mounted[index] = true;
+    try {
+        // **表体的唯一实现**：表头 / 行 / 分段 / 工具栏 / 筛选开关全在这里。
+        // 表级提示（工作表新增删除、列名变更）沿用本页的 sheetNoticesHtml。
+        ExcelDiffTable.mountSheetTable(panel, sheet.data, {
+            sheetName: sheet.name,
+            noticesHtml: sheetNoticesHtml(sheet.data)
+        });
+    } catch (error) {
+        diffCompareState.mounted[index] = false;
+        panel.textContent = '';
+        var alertBox = document.createElement('div');
+        alertBox.className = 'alert alert-warning m-3 mb-0';
+        alertBox.setAttribute('role', 'alert');
+        alertBox.textContent = '工作表「' + sheet.name + '」渲染失败：' +
+            ((error && error.message) || '未知错误');
+        panel.appendChild(alertBox);
+    }
+}
+
+function activateCompareSheet(index) {
+    var box = diffCompareEl('diffCompareSheets');
+    if (!box) return;
+    var tabs = box.querySelectorAll('.dc-sheet-tab');
+    var panels = box.querySelectorAll('.dc-sheet-panel');
+    var i;
+    for (i = 0; i < tabs.length; i++) {
+        var selected = String(i) === String(index);
+        tabs[i].setAttribute('aria-selected', selected ? 'true' : 'false');
+        tabs[i].tabIndex = selected ? 0 : -1;
+    }
+    for (i = 0; i < panels.length; i++) {
+        panels[i].hidden = String(i) !== String(index);
+    }
+    mountCompareSheet(index);
+}
+
+// 标签的点击与键盘都走**事件委托**，且只认 data-sheet-index 这个数字：
+// 工作表名来自被审核的 Excel，拼进选择器或 onclick 都会出问题
+// （表名里的引号能让 querySelector 抛 SyntaxError，见本页 performTabSwitch 的注释）。
+function onCompareSheetTabsClick(event) {
+    var target = event.target;
+    while (target && target !== event.currentTarget) {
+        if (target.classList && target.classList.contains('dc-sheet-tab')) {
+            activateCompareSheet(Number(target.getAttribute('data-sheet-index')));
+            return;
+        }
+        target = target.parentNode;
+    }
+}
+
+function onCompareSheetTabsKeydown(event) {
+    var key = event.key;
+    if (key !== 'ArrowRight' && key !== 'ArrowLeft' && key !== 'Home' && key !== 'End') return;
+    var box = diffCompareEl('diffCompareSheets');
+    if (!box) return;
+    var tabs = box.querySelectorAll('.dc-sheet-tab');
+    if (!tabs.length) return;
+    var current = 0;
+    for (var i = 0; i < tabs.length; i++) {
+        if (tabs[i] === document.activeElement) { current = i; break; }
+    }
+    var next = current;
+    if (key === 'ArrowRight') next = (current + 1) % tabs.length;
+    if (key === 'ArrowLeft') next = (current - 1 + tabs.length) % tabs.length;
+    if (key === 'Home') next = 0;
+    if (key === 'End') next = tabs.length - 1;
+    event.preventDefault();
+    activateCompareSheet(next);
+    if (tabs[next] && tabs[next].focus) tabs[next].focus();
+}
+
+// 「返回当前提交对比」：退出对比态。
+function exitDiffCompare() {
+    diffCompareSetHidden(diffCompareEl('diffCompareResult'), true);
+    var card = diffCompareEl('currentCommitDiffCard');
+    if (card) card.hidden = false;
+    // 焦点回到打开弹窗的那个按钮：对比区已经收起，留在里面的焦点会丢
+    var opener = diffCompareEl('openDiffCompareBtn');
+    if (opener) {
+        try {
+            opener.focus({preventScroll: true});
+        } catch (error) {
+            opener.focus();
+        }
+        diffCompareScrollTo(card);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    var modalEl = diffCompareEl('diffCompareModal');
+    if (modalEl) {
+        // 懒加载：第一次打开弹窗时才拉候选（见函数头注释）
+        modalEl.addEventListener('show.bs.modal', function () {
+            loadDiffCompareCandidates(false);
+        });
+    }
+
+    var filterInput = diffCompareEl('compareCommitFilter');
+    if (filterInput) {
+        filterInput.addEventListener('input', function () { renderCompareOptions(); });
+    }
+
+    var select = diffCompareEl('targetCommitSelect');
+    if (select) {
+        select.addEventListener('change', function () {
+            diffCompareUpdateSubmitState();
+            diffCompareUpdateFootNote();
+        });
+    }
+
+    var candidatesRetry = diffCompareEl('diffCompareCandidatesRetryBtn');
+    if (candidatesRetry) {
+        candidatesRetry.addEventListener('click', function () { loadDiffCompareCandidates(true); });
+    }
+
+    var resultRetry = diffCompareEl('diffCompareResultRetryBtn');
+    if (resultRetry) {
+        resultRetry.addEventListener('click', function () { retryDiffCompare(); });
+    }
+
+    var form = diffCompareEl('diffCompareForm');
+    if (form) {
+        // 表单里没有 type=submit 的按钮，但浏览器仍会在单行输入框里回车时提交表单 ——
+        // 拦下来，让回车等于「开始对比」。
+        form.addEventListener('submit', function (event) {
+            event.preventDefault();
+            executeDiffCompare();
+        });
+    }
+
+    var sheetsBox = diffCompareEl('diffCompareSheets');
+    if (sheetsBox) {
+        sheetsBox.addEventListener('click', onCompareSheetTabsClick);
+        sheetsBox.addEventListener('keydown', onCompareSheetTabsKeydown);
+    }
+});
+
+window.executeDiffCompare = executeDiffCompare;
+window.exitDiffCompare = exitDiffCompare;
+{% else %}
+// 非 Excel 页面没有「版本对比」入口（弹窗只在 is_excel 时渲染），
+// 保留同名空函数，免得别处引用时 ReferenceError。
+function executeDiffCompare() {}
+{% endif %}
 
 </script>
 {% endblock %}
