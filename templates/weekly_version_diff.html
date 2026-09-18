@@ -1305,6 +1305,10 @@
             </select>
         </div>
         {% endif %}
+        <!-- 超预算横幅：`role="alert"` 是因为它在跑的过程中**会出现**（一次分析可能把
+             当月额度顶过上限），而那时用户正盯着这一页等结果。文案由
+             static/js/ai_budget_notice.js 生成（三份模板逐字复制，逻辑只写一份）。 -->
+        <div class="ai-budget-banner" id="aiBudgetBanner" role="alert" hidden></div>
         <div class="ai-drawer-meta" id="weeklyAiMeta">自动分析每 1 小时触发，可手动补跑。</div>
         <!-- 正文渲染成 HTML（Markdown 子集），所以是 div 而不是 pre：
              pre 的 white-space:pre-wrap 会和块级元素打架 -->
@@ -1345,6 +1349,11 @@
     </div>
 
     <script src="{{ url_for('static', filename='js/ai_usage_line.js') }}"></script>
+{# 预算提示的判定与文案：三份抽屉模板逐字复制这段 JS 的代价是漏改一份，
+   所以逻辑集中在 static/js/ai_budget_notice.js（与 ai_usage_line.js 同一打法）。 #}
+<script src="{{ url_for('static', filename='js/ai_budget_notice.js') }}"></script>
+{# 降级与上下文压缩的提示：与预算提示同一个打法（唯一事实源在共享模块里）。 #}
+<script src="{{ url_for('static', filename='js/ai_context_notice.js') }}"></script>
 
 <script>
 let configId = {{ config.id }};
@@ -1432,11 +1441,61 @@ function scheduleWeeklyAi() {
     });
 }
 
+// --- 预算横幅与「跑中」轮询 ---------------------------------------------------
+// 判定、文案、去哪儿调，全部在 static/js/ai_budget_notice.js 里 —— 这一段在三份模板里
+// 是同一份实现（逻辑抄三遍的代价是漏改其中一份，而症状是「某个页面让你去一个不存在
+// 那个上限的地方调预算」）。
+let aiBudgetTimer = null;
+
+function aiBudgetHost() {
+    return document.getElementById('aiBudgetBanner');
+}
+
+function renderAiBudget(budget) {
+    if (window.AiBudgetNotice) AiBudgetNotice.renderBanner(aiBudgetHost(), budget);
+}
+
+function stopAiBudgetWatch() {
+    if (aiBudgetTimer) {
+        clearInterval(aiBudgetTimer);
+        aiBudgetTimer = null;
+    }
+}
+
+// 分析是**阻塞**跑的（服务端在跑完之前一个事件都推不出来），所以进度靠轮询。
+// **读不到进度不是错误**：多进程部署、或跑在别的 worker 里时 `progress` 恒为 null，
+// 这时什么也不说 —— 不显示 0，也不假装「正在跑第 0 轮」。
+function startAiBudgetWatch(runId, metaEl) {
+    stopAiBudgetWatch();
+    const tick = function () {
+        fetch(`/ai-analysis/runs/${runId}/progress`, { cache: 'no-store' })
+            .then(function (resp) { return resp.json(); })
+            .then(function (data) {
+                if (!data || !data.success) return;
+                renderAiBudget(data.budget);
+                if (data.progress && metaEl) {
+                    const p = data.progress;
+                    metaEl.textContent = `分析中：第 ${p.round}/${p.max_rounds} 轮`
+                        + ` · 本次已用 ${p.live_tokens} tokens`
+                        + `（尚未落库，只含上游已上报的部分）`;
+                }
+            })
+            .catch(function () {
+                // 轮询失败不影响分析本身：下一次 tick 还会试。
+            });
+    };
+    tick();
+    aiBudgetTimer = setInterval(tick, 3000);
+}
+
 function closeWeeklyAiStream() {
     if (weeklyAiSource) {
         weeklyAiSource.close();
         weeklyAiSource = null;
     }
+    // 停止轮询也挂在这里：所有出口（result / error / 关抽屉）都会走它，在每处各写
+    // 一遍必然会漏一处，而漏掉的那次会一直轮询下去。
+    stopAiBudgetWatch();
 }
 
 // 说清楚**缺哪一样**，比笼统的一句「未配置」有用得多。
@@ -1472,7 +1531,7 @@ async function refreshWeeklyAiReadiness() {
                 if (btn) btn.disabled = true;
                 setWeeklyAiStatusBadge('超预算', 'danger');
                 if (meta) {
-                    meta.textContent = `${budget.reason} 调整方式：项目概览页 →「AI 分析配置」→ 预算周期 / 周期内 token 上限 / 周期内费用上限。`;
+                    meta.textContent = AiBudgetNotice.metaText(budget, AiUsageLine.fmtTokens);
                 }
             } else {
                 if (btn) btn.disabled = false;
@@ -1617,6 +1676,15 @@ function startWeeklyAiAnalysis(force = false) {
     const focus = encodeURIComponent(weeklyAiFocusValue());
     weeklyAiSource = new EventSource(
         `/ai-analysis/weekly/${configId}/stream?source=manual&focus=${focus}`);
+    // 开跑之前服务端先把运行号发过来，界面据此轮询「跑到第几轮、现在超了没」。
+    weeklyAiSource.addEventListener('run', function(event) {
+        let payload = {};
+        try {
+            payload = JSON.parse(event.data || '{}');
+        } catch (_err) {
+        }
+        if (payload.run_id) startAiBudgetWatch(payload.run_id, document.getElementById('weeklyAiMeta'));
+    });
     weeklyAiSource.addEventListener('chunk', function(event) {
         try {
             const payload = JSON.parse(event.data || '{}');
@@ -1644,6 +1712,9 @@ function startWeeklyAiAnalysis(force = false) {
             if (payload.risk_level) {
                 appendWeeklyAiLine(`\n风险等级：${payload.risk_level}`);
             }
+            // 降级 / 压过上下文时补一行说明。文案在 static/js/ai_context_notice.js。
+            const contextNotice = AiContextNotice.contextNotice(payload);
+            if (contextNotice) { appendWeeklyAiLine(contextNotice); }
             setWeeklyAiStatusBadge('完成', 'success');
         }
         if (startBtn) startBtn.disabled = false;

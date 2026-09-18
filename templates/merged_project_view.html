@@ -1372,6 +1372,37 @@
                         </button>
                         <span class="form-text mb-0" id="aiTestResult" role="status" aria-live="polite"></span>
                     </div>
+                                            <!-- 提示词缓存：这两栏是「这个端点接受什么」的一部分，所以留在连接这一组。
+                                 多轮分析每轮都重发整份提示词，支持前缀缓存的端点会自动命中没变的部分
+                                 （按便宜得多的价格计费）；只有需要**显式标记**的端点才要动这里。
+                                 改错了不会让分析失败：被拒之后平台会自动去掉标记重试一次。 -->
+                            <div class="col-12 col-lg-6 ai-config-field">
+                                <label class="form-label" for="aiPromptCacheModeSelect">缓存标记</label>
+                                <select class="form-select form-select-sm" id="aiPromptCacheModeSelect"
+                                        aria-describedby="aiPromptCacheModeSelectHelp aiPromptCacheModeSelectError">
+                                    <option value="auto">自动（默认：按下面的「标记约定」决定发不发）</option>
+                                    <option value="explicit">总是发送（我确认这个端点接受缓存标记）</option>
+                                    <option value="off">从不发送</option>
+                                </select>
+                                <div class="form-text" id="aiPromptCacheModeSelectHelp">
+                                    <strong>默认不发。</strong>大多数 OpenAI 兼容端点是自动缓存、不接受也不认识
+                                    缓存标记；发过去会被 400 拒绝（平台会自动重试，但那一轮就不带标记了）。
+                                </div>
+                                <div class="form-text text-danger d-none" id="aiPromptCacheModeSelectError"></div>
+                            </div>
+                            <div class="col-12 col-lg-6 ai-config-field">
+                                <label class="form-label" for="aiPromptCacheFormatSelect">标记约定</label>
+                                <select class="form-select form-select-sm" id="aiPromptCacheFormatSelect"
+                                        aria-describedby="aiPromptCacheFormatSelectHelp aiPromptCacheFormatSelectError">
+                                    <option value="none">不声明（默认）</option>
+                                    <option value="anthropic">anthropic（内容块上的 cache_control）</option>
+                                </select>
+                                <div class="form-text" id="aiPromptCacheFormatSelectHelp">
+                                    端点用哪种写法表达「这段前缀可以缓存」。<strong>平台不猜</strong> ——
+                                    主机名或模型名像谁都不构成证据，猜错的代价是整个功能被端点拒掉。
+                                </div>
+                                <div class="form-text text-danger d-none" id="aiPromptCacheFormatSelectError"></div>
+                            </div>
                     </div>
                 </fieldset>
 
@@ -1468,6 +1499,7 @@
                         </div>
                     </div>
                 </fieldset>
+
 
                 <fieldset class="ai-config-section" id="aiSectionThreshold">
                     <legend class="fs-6 fw-semibold text-primary border-bottom pb-1 mb-3">告警门槛</legend>
@@ -2129,6 +2161,10 @@
         </button>
     </div>
     <div class="ai-drawer-body">
+        <!-- 超预算横幅：`role="alert"` 是因为它在跑的过程中**会出现**（一次分析可能把
+             当月额度顶过上限），而那时用户正盯着这一页等结果。文案由
+             static/js/ai_budget_notice.js 生成（三份模板逐字复制，逻辑只写一份）。 -->
+        <div class="ai-budget-banner" id="aiBudgetBanner" role="alert" hidden></div>
         <div class="ai-drawer-meta" id="weeklyAiMeta">自动分析每 1 小时触发，可手动补跑。</div>
         <!-- 正文渲染成 HTML（Markdown 子集），所以是 div 而不是 pre：
              pre 的 white-space:pre-wrap 会和块级元素打架 -->
@@ -2169,6 +2205,11 @@
     </div>
 
     <script src="{{ url_for('static', filename='js/ai_usage_line.js') }}"></script>
+{# 预算提示的判定与文案：三份抽屉模板逐字复制这段 JS 的代价是漏改一份，
+   所以逻辑集中在 static/js/ai_budget_notice.js（与 ai_usage_line.js 同一打法）。 #}
+<script src="{{ url_for('static', filename='js/ai_budget_notice.js') }}"></script>
+{# 降级与上下文压缩的提示：与预算提示同一个打法（唯一事实源在共享模块里）。 #}
+<script src="{{ url_for('static', filename='js/ai_context_notice.js') }}"></script>
 
 <script>
 // 非活跃版本数据
@@ -2221,7 +2262,9 @@ const AI_FIELD_DOM = {
     project_knowledge: 'aiProjectKnowledgeInput',
     budget_period: 'aiBudgetPeriodSelect',
     budget_token_limit: 'aiBudgetTokenInput',
-    budget_cost_limit: 'aiBudgetCostInput'
+    budget_cost_limit: 'aiBudgetCostInput',
+    prompt_cache_mode: 'aiPromptCacheModeSelect',
+    prompt_cache_format: 'aiPromptCacheFormatSelect'
 };
 
 // 选项的中文名。后端只回 `high` / `critical` 这种值，这里负责翻译。
@@ -2233,6 +2276,15 @@ const AI_CHOICE_LABELS = {
         monthly: '本月（自然月，按北京时间切分）',
         weekly: '本周（周一为一周之始）',
         all_time: '全部时间（不重置）'
+    },
+    prompt_cache_mode: {
+        auto: '自动（默认：按「标记约定」决定发不发）',
+        explicit: '总是发送（我确认这个端点接受缓存标记）',
+        off: '从不发送'
+    },
+    prompt_cache_format: {
+        none: '不声明（默认）',
+        anthropic: 'anthropic（内容块上的 cache_control）'
     }
 };
 
@@ -2370,7 +2422,9 @@ function applyAiFieldSchema(schema) {
     });
 
     [['min_severity', 'aiMinSeveritySelect'], ['min_confidence', 'aiMinConfidenceSelect'],
-     ['budget_period', 'aiBudgetPeriodSelect']].forEach(pair => {
+     ['budget_period', 'aiBudgetPeriodSelect'],
+     ['prompt_cache_mode', 'aiPromptCacheModeSelect'],
+     ['prompt_cache_format', 'aiPromptCacheFormatSelect']].forEach(pair => {
         const rule = schema[pair[0]];
         const select = aiEl(pair[1]);
         if (!rule || !select || !rule.choices || !rule.choices.length) return;
@@ -2406,6 +2460,11 @@ function fillAiConfigForm(data) {
     setValue('aiPromptInput', data.prompt_template);
     setValue('aiProjectKnowledgeInput', data.project_knowledge);
     setValue('aiBudgetPeriodSelect', data.budget_period);
+    // 缓存标记两栏：`null`（老库上的新列）要清成空、由 `setValue` 之外的兜底补默认值 ——
+    // 这里直接用 `||` 给一个确定的值，避免下拉停在浏览器默认的第一项上（那会显示成
+    // 「自动」，而库里其实是空的；两者目前等价，但显示的前提必须是数据本身）。
+    setValue('aiPromptCacheModeSelect', data.prompt_cache_mode || 'auto');
+    setValue('aiPromptCacheFormatSelect', data.prompt_cache_format || 'none');
     // 预算那两栏是「留空 = 不限制」，所以服务端回 null 时**必须清空输入框**：
     // `setValue` 对 null 是「不动」，留着上一轮的旧数字会让界面显示一个库里并不存在的
     // 上限；而用户按这个数字去推算「还能跑几次」会完全错。
@@ -2499,9 +2558,14 @@ function renderAiConfigSummary(data) {
     // 没配预算的项目不该多出一格写着「不限制」的噪音。
     const budget = data.budget;
     if (budget && budget.over) {
-        const over = aiMetaItem('预算', budget.reason || '已超出预算，AI 分析已暂停。');
+        // 超的是哪一档要说清：项目档在这个抽屉里调，平台档在「AI 消耗」页面调。
+        // 两档的措辞与「去哪儿调」都来自 static/js/ai_budget_notice.js（只此一份），
+        // 免得这里与三份抽屉各说一套。
+        const over = aiMetaItem(AiBudgetNotice.overTitle(budget), budget.reason || '已超出预算，AI 分析已暂停。');
         over.classList.add('is-over-budget');
         summary.appendChild(over);
+        const howto = AiBudgetNotice.guidance(budget);
+        if (howto) summary.appendChild(aiMetaItem('调整方式', howto));
     } else if (budget && budget.limited) {
         const limits = budget.limits || {};
         const used = budget.used || {};
@@ -2516,6 +2580,18 @@ function renderAiConfigSummary(data) {
         }
         if (parts.length) {
             summary.appendChild(aiMetaItem('预算（' + (budget.period_label || '') + '）', parts.join(' · ')));
+        }
+        // 平台总预算与项目预算并列显示（两档是叠加的）：
+        // **只读**，它在这里改不了 —— 改的地方在「AI 消耗」页面，所以这一格要写明去处。
+        const platform = budget.platform || {};
+        if (platform.limited) {
+            const platformLine = AiBudgetNotice.scopeLine(platform, aiBudgetTokens);
+            if (platformLine) {
+                const item = aiMetaItem('平台总预算（' + (platform.period_label || '') + '）',
+                    platformLine.replace((platform.period_label || '') + ' ', ''));
+                if (platform.over) item.classList.add('is-over-budget');
+                summary.appendChild(item);
+            }
         }
     }
     if (data.updated_at) {
@@ -2629,6 +2705,10 @@ function collectAiConfigPayload() {
     if (confidence) payload.min_confidence = confidence.value;
     const budgetPeriod = aiEl('aiBudgetPeriodSelect');
     if (budgetPeriod) payload.budget_period = budgetPeriod.value;
+    const cacheMode = aiEl('aiPromptCacheModeSelect');
+    if (cacheMode) payload.prompt_cache_mode = cacheMode.value;
+    const cacheFormat = aiEl('aiPromptCacheFormatSelect');
+    if (cacheFormat) payload.prompt_cache_format = cacheFormat.value;
 
     const autoToggle = aiEl('aiWeeklyAutoToggle');
     if (autoToggle) payload.auto_weekly_enabled = !!autoToggle.checked;
@@ -3847,11 +3927,61 @@ function scheduleWeeklyAi() {
     });
 }
 
+// --- 预算横幅与「跑中」轮询 ---------------------------------------------------
+// 判定、文案、去哪儿调，全部在 static/js/ai_budget_notice.js 里 —— 这一段在三份模板里
+// 是同一份实现（逻辑抄三遍的代价是漏改其中一份，而症状是「某个页面让你去一个不存在
+// 那个上限的地方调预算」）。
+let aiBudgetTimer = null;
+
+function aiBudgetHost() {
+    return document.getElementById('aiBudgetBanner');
+}
+
+function renderAiBudget(budget) {
+    if (window.AiBudgetNotice) AiBudgetNotice.renderBanner(aiBudgetHost(), budget);
+}
+
+function stopAiBudgetWatch() {
+    if (aiBudgetTimer) {
+        clearInterval(aiBudgetTimer);
+        aiBudgetTimer = null;
+    }
+}
+
+// 分析是**阻塞**跑的（服务端在跑完之前一个事件都推不出来），所以进度靠轮询。
+// **读不到进度不是错误**：多进程部署、或跑在别的 worker 里时 `progress` 恒为 null，
+// 这时什么也不说 —— 不显示 0，也不假装「正在跑第 0 轮」。
+function startAiBudgetWatch(runId, metaEl) {
+    stopAiBudgetWatch();
+    const tick = function () {
+        fetch(`/ai-analysis/runs/${runId}/progress`, { cache: 'no-store' })
+            .then(function (resp) { return resp.json(); })
+            .then(function (data) {
+                if (!data || !data.success) return;
+                renderAiBudget(data.budget);
+                if (data.progress && metaEl) {
+                    const p = data.progress;
+                    metaEl.textContent = `分析中：第 ${p.round}/${p.max_rounds} 轮`
+                        + ` · 本次已用 ${p.live_tokens} tokens`
+                        + `（尚未落库，只含上游已上报的部分）`;
+                }
+            })
+            .catch(function () {
+                // 轮询失败不影响分析本身：下一次 tick 还会试。
+            });
+    };
+    tick();
+    aiBudgetTimer = setInterval(tick, 3000);
+}
+
 function closeWeeklyAiStream() {
     if (weeklyAiSource) {
         weeklyAiSource.close();
         weeklyAiSource = null;
     }
+    // 停止轮询也挂在这里：所有出口（result / error / 关抽屉）都会走它，在每处各写
+    // 一遍必然会漏一处，而漏掉的那次会一直轮询下去。
+    stopAiBudgetWatch();
 }
 
 function openWeeklyAiDrawer(configId, versionName) {
@@ -3943,6 +4073,15 @@ async function startWeeklyAiAnalysis(force = false) {
     const startBtn = document.getElementById('weeklyAiStartBtn');
     if (startBtn) startBtn.disabled = true;
     weeklyAiSource = new EventSource(`/ai-analysis/weekly/${weeklyAiCurrentConfigId}/stream?source=manual`);
+    // 开跑之前服务端先把运行号发过来，界面据此轮询「跑到第几轮、现在超了没」。
+    weeklyAiSource.addEventListener('run', function(event) {
+        let payload = {};
+        try {
+            payload = JSON.parse(event.data || '{}');
+        } catch (_err) {
+        }
+        if (payload.run_id) startAiBudgetWatch(payload.run_id, document.getElementById('weeklyAiMeta'));
+    });
     weeklyAiSource.addEventListener('chunk', function(event) {
         try {
             const payload = JSON.parse(event.data || '{}');
@@ -3968,6 +4107,9 @@ async function startWeeklyAiAnalysis(force = false) {
                 appendWeeklyAiLine(`\n风险等级：${payload.risk_level}`);
                 updateRiskLabelByConfig(weeklyAiCurrentConfigId, payload.risk_level);
             }
+            // 降级 / 压过上下文时补一行说明。文案在 static/js/ai_context_notice.js。
+            const contextNotice = AiContextNotice.contextNotice(payload);
+            if (contextNotice) { appendWeeklyAiLine(contextNotice); }
             setWeeklyAiStatusBadge('完成', 'success');
         }
         if (startBtn) startBtn.disabled = false;
@@ -4043,10 +4185,11 @@ function initWeeklyAiDrawer() {
             // `status.budget` 与服务端的拦截（services/ai/analysis_budget.py）
             // 是同一份数据 —— 界面说不能跑、后端其实会跑，是最坏的那种组合。
             const budget = status.budget;
+            renderAiBudget(budget);
             if (budget && budget.over) {
                 setWeeklyAiStatusBadge('超预算', 'danger');
                 setWeeklyAiOutput(
-                    `${budget.reason}\n\n调整方式：项目概览页 →「AI 分析配置」→ 预算周期 / 周期内 token 上限 / 周期内费用上限。`,
+                    AiBudgetNotice.metaText(budget, AiUsageLine.fmtTokens),
                     false,
                     'error'
                 );

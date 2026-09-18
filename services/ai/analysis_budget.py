@@ -36,9 +36,10 @@
 """
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from models.ai_analysis import AiAnalysisRun
 from services.ai.pricing import DEFAULT_CURRENCY, money
@@ -517,6 +518,131 @@ def _remedy_tail(over_scopes: Sequence[str]) -> str:
             "（项目的「AI 分析配置」），或等下个周期。"
         )
     return "。已暂停 AI 分析，请在项目的「AI 分析配置」里调高预算或等下个周期。"
+
+
+def with_live_usage(
+    status: Mapping[str, Any],
+    *,
+    tokens: int = 0,
+    cost: Decimal | None = None,
+    currency: str = "",
+) -> dict[str, Any]:
+    """把「**本次运行尚未落库**的用量」加进一份已有判定里，返回一份新的判定。
+
+    用途只有一个：**分析正在跑的时候**告诉用户「现在就已经超了」（界面轮询，
+    见 `services/ai/run_progress.py`）。它**不参与闸门** —— 闸门判的是「下一次能不能
+    起跑」，在开跑前判一次就够（模块 docstring 第 2、3 条）。
+
+    为什么要有这个函数而不是在路由里加一下数字：两档（项目 / 平台）都要加、`over` 与
+    `over_scopes` 都要重算、`reason` 要重写，而**判据必须与闸门逐字一致** —— 在别处
+    重写一遍的必然结果是某天开始「跑中提示说超了、闸门说没超」。
+
+    三条与闸门一致的纪律：
+
+    * **传进来的 token 也是下界**（`RoundProgress` 只累加上游报上来的部分）。下界加上
+      已落库的下界仍然超了 → 确定超了；没超 → 什么都不说。
+    * **金额算不出就不判**（`cost=None`）。宁可不说，也不给一个偏小的假超支。
+    * **不修改入参**：调用方（路由）手里那份还要原样用。
+    """
+    # 深拷贝：`status` 里有嵌套的 dict（limits / used / ratios / notes / over_limits /
+    # platform），浅拷贝之后改 `used` 会把调用方那份一起改掉 —— 而调用方（路由）手里
+    # 那份还要原样用（它要同时回给界面做对比）。
+    merged = copy.deepcopy(dict(status))
+    live_tokens = max(0, int(tokens or 0))
+    live_cost = cost if isinstance(cost, Decimal) else None
+    if live_tokens == 0 and live_cost is None:
+        return merged
+
+    scopes = [SCOPE_PROJECT, SCOPE_PLATFORM]
+    added: dict[str, Any] = {}
+    for scope_name in scopes:
+        node = merged if scope_name == SCOPE_PROJECT else merged.get("platform")
+        if not isinstance(node, dict) or not node.get("limited"):
+            continue
+        limits = node.get("limits") or {}
+        used = node.get("used") or {}
+        over_limits = list(node.get("over_limits") or ())
+        reasons: list[str] = []
+
+        if live_tokens and limits.get("tokens") is not None:
+            base_tokens = used.get("tokens")
+            # 已落库那一档可能是 `None`（一处都没上报）—— 那它按 0 加，并在下面说明。
+            used["tokens"] = int(base_tokens or 0) + live_tokens
+            limit_tokens = limits.get("tokens")
+            node["ratios"] = {**(node.get("ratios") or {})}
+            node["ratios"]["tokens"] = (
+                used["tokens"] / limit_tokens if limit_tokens else None
+            )
+            if used["tokens"] > limit_tokens and "tokens" not in over_limits:
+                over_limits.append("tokens")
+                reasons.append(
+                    f"{node.get('period_label') or ''}的 token 已用 "
+                    f"{_fmt_tokens(used['tokens'])}（含本次运行），超过上限 "
+                    f"{_fmt_tokens(limit_tokens)}"
+                )
+
+        if live_cost is not None and limits.get("cost") is not None:
+            try:
+                limit_cost = Decimal(str(limits.get("cost")))
+            except (InvalidOperation, ValueError):
+                limit_cost = None
+            if limit_cost is not None:
+                base_cost = used.get("cost")
+                try:
+                    total_cost = (Decimal(str(base_cost)) if base_cost is not None else Decimal(0)) + live_cost
+                except (InvalidOperation, ValueError):
+                    total_cost = None
+                if total_cost is not None:
+                    used["cost"] = money(total_cost)
+                    used["currency"] = used.get("currency") or currency or limits.get("currency") or ""
+                    node["ratios"] = {**(node.get("ratios") or {})}
+                    node["ratios"]["cost"] = float(total_cost / limit_cost) if limit_cost else None
+                    if total_cost > limit_cost and "cost" not in over_limits:
+                        over_limits.append("cost")
+                        reasons.append(
+                            f"{node.get('period_label') or ''}的费用已用 "
+                            f"{_fmt_money(total_cost, used['currency'])}（含本次运行），"
+                            f"超过上限 {_fmt_money(limit_cost, used['currency'])}"
+                        )
+                    node["used"] = used
+
+        node["used"] = used
+        node["over_limits"] = over_limits
+        node["over"] = bool(over_limits)
+        node["blocks_analysis"] = bool(over_limits)
+        if reasons:
+            node["reason"] = "；".join(reasons)
+            added[scope_name] = reasons
+
+    if not added:
+        return merged
+
+    over_scopes = [
+        name
+        for name, node in ((SCOPE_PROJECT, merged), (SCOPE_PLATFORM, merged.get("platform")))
+        if isinstance(node, dict) and node.get("over")
+    ]
+    merged["over_scopes"] = over_scopes
+    merged["over"] = bool(over_scopes)
+    merged["blocks_analysis"] = bool(over_scopes)
+    merged["limited"] = True
+    reasons = [text for group in added.values() for text in group]
+    merged["reason"] = "；".join(reasons) + _remedy_tail(over_scopes)
+    merged["live_included"] = {
+        "tokens": live_tokens,
+        "cost": money(live_cost),
+        # **必须写在给用户看的话里**：这个数还没落库，与「已用量」不是一个口径。
+        "note": (
+            f"其中含本次运行已消耗的 {_fmt_tokens(live_tokens)} token"
+            "（尚未落库，是只统计上游已上报部分的下界）"
+            if live_tokens else "其中含本次运行已消耗的费用（尚未落库）"
+        ),
+    }
+    merged["notes"] = [
+        *(merged.get("notes") or ()),
+        merged["live_included"]["note"],
+    ]
+    return merged
 
 
 def budget_status(project_id: int, *, platform: dict[str, Any] | None = None) -> dict[str, Any]:

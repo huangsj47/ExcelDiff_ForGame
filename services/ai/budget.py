@@ -16,6 +16,17 @@
 「上下文还剩多少」的相关性已经够用。代价是估算偏保守，所以对外的预算值会留出余量
 （由调用方决定留多少），这里只负责「给定预算，把内容压到预算内」。
 
+## 三处裁剪，越靠后越狠
+
+| 裁剪 | 对象 | 触发 |
+|---|---|---|
+| `shrink_item` / `enforce_budget` | **本轮**取回来的上下文 | 单条超长、条数超限、总量超预算 |
+| `compact_history` | **中间那几轮的对话** | 整份提示词（含历史）超出窗口水位 |
+| `looks_like_context_overflow` + 引擎里的收尾请求 | 上游已经拒过一次 | 估算失准、发出去被拒 |
+
+前两处是「先手」：在发出去之前把体积压下来。第三处是兜底 —— 估算终究是估算，
+上游真的拒了也不能让一次已经跑了几轮的分析连结论一起作废。
+
 ## 纯函数
 
 本模块不读文件、不发请求、不碰数据库，全部输入输出都是值。这样它可以被完整单测，
@@ -25,7 +36,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, Sequence
 
 # 截断标记。模型认识这个写法，且它对人类读者也是明确的。
 TRUNCATION_SUFFIX = "\n\n... [truncated by local tool]"
@@ -303,6 +314,8 @@ def build_continuation_summary(items: Iterable[ContextItem], *, keep: int = 3) -
 
     用于「上下文怎么压都还是超预算」时的兜底——此时不能再把内容带过去了，但至少要
     让模型知道上一轮进行到哪、拿到过什么，否则它会从头再来一遍，白烧预算。
+
+    调用方是 `compact_history`：压掉中间几轮历史时，把那些轮次取过的内容目录留下来。
     """
     ordered = tuple(items)
     recent = ordered[-keep:] if keep > 0 else ()
@@ -322,27 +335,268 @@ def estimate_chars(messages: Iterable[dict[str, str]]) -> int:
     return sum(len(str(message.get("content") or "")) for message in messages)
 
 
-def clamp_to_model_window(budget_chars: int, context_tokens: int) -> tuple[int, str]:
-    """预算**明显**超出模型上下文窗口时压回窗口大小；否则原样返回。
+# ==========================================================================
+# 上下文窗口：水位、压历史、以及「上游说装不下」的兜底
+# ==========================================================================
 
-    返回 `(生效预算, 说明)`；说明为空表示没有压缩。
+# 窗口未知时的默认值。**这是一个口径，不是猜某个具体模型**：问不到端点声明的窗口时
+# 按 1M token 处理，而不是不设防（见 `effective_prompt_budget`）。
+#
+# 取 1M 还有一层刻意：当前默认预算是 360,000 字，小于 1M 的 60%（600,000 字），
+# 所以「默认窗口」不会悄悄改变已有项目的行为 —— 只有把预算配到 600,000 字以上的
+# 项目才会吃到这层水位。
+DEFAULT_CONTEXT_TOKENS = 1_000_000
 
-    ## 为什么只压「明显」的那一档
+# 水位：窗口用到这个比例就开始压历史。留 40% 是给「模型的回复 + 估算误差」的。
+COMPACT_AT_RATIO = 0.6
 
-    本模块按**字符**估算（见模块文档），而模型窗口是按 **token** 计的。中英混排下一个
-    字符大致对应 0.3~1 个 token，这个比例取决于提示词里中文占多少，**平台无从知道**。
+# 1 token 按多少字符算。取 **1.0**，也就是假设「一个字符至少一个 token」——
+# 中英混排下这是最保守的方向（英文约 4 字 1 token、中文约 1 字 1 token），于是
+# 「字符数 ≤ 窗口 × 60%」能推出「token 数 ≤ 窗口 × 60%」。
+#
+# 这个假设**偏保守**：真实占用只会更小，代价是少塞了一些本来装得下的内容。这个方向的
+# 错可以接受；反过来的错（以为装得下、发出去被上游拒绝）会把一次已经跑了几轮的分析
+# 连结论一起作废 —— 那正是要避免的。
+CHARS_PER_TOKEN = 1.0
 
-    于是只有一种情形是不需要换算比例就能断定的：预算字符数 **大于** 窗口 token 数。
-    此时就算按最乐观的 1 字 1 token 算也已经装不下，超窗是必然的，压回窗口只会砍掉
-    装不下的部分。反过来的情形（预算字符数 ≤ 窗口 token 数）是否装得下要看语言构成，
-    压它就是在没有依据的情况下砍掉分析质量，而且用户看不出发生了什么 —— 所以不压。
+# 压历史时**至少**保留最近几轮原文。1 轮是下限（模型当下的推理是从最近一轮继续的）；
+# 溢出兜底路径会传 0，意思是「连最近一轮也可以丢」。
+MIN_KEEP_TURNS = 1
 
-    这也是为什么这里**没有**留「安全系数」：留系数等于假装知道那个换算比例。
+
+def resolve_context_window(declared: object) -> tuple[int, bool]:
+    """把端点声明的窗口收敛成一个可用的值。返回 `(窗口 token, 是否用了默认值)`。
+
+    第二个返回值必须一路带到界面上去：**「按默认 1M 压的」与「端点声明了 1M」是两件事**，
+    不说清的话读的人会以为平台问到了窗口。
     """
-    if context_tokens <= 0 or budget_chars <= context_tokens:
-        return budget_chars, ""
-    note = (
-        f"提示词字符预算 {budget_chars:,} 字超过模型上下文窗口 {context_tokens:,} token，"
-        f"本次按 {context_tokens:,} 字执行（字与 token 最乐观按 1:1 算也已超窗）。"
+    try:
+        value = int(declared or 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        value = 0
+    if value <= 0:
+        return DEFAULT_CONTEXT_TOKENS, True
+    return value, False
+
+
+def context_watermark_chars(window_tokens: int) -> int:
+    """窗口对应的字符水位（窗口 × 60%，按 `CHARS_PER_TOKEN` 折算）。"""
+    window, _ = resolve_context_window(window_tokens)
+    return max(1, int(window * COMPACT_AT_RATIO * CHARS_PER_TOKEN))
+
+
+def effective_prompt_budget(configured_chars: object, window_tokens: int) -> tuple[int, str]:
+    """配置的字符预算与窗口水位取小，返回 `(生效预算, 说明)`。说明为空表示没压。
+
+    ## 与以前那条规则的关系（为什么改了）
+
+    以前是 `clamp_to_model_window`：只在「预算字符数 **大于** 窗口 token 数」时才压，
+    理由是字符与 token 的换算比例平台无从知道，没有依据就不该砍分析质量。顾虑是对的，
+    但它留下了一个更糟的口子 —— 窗口**问不到**时它什么都不做（`window` 为空直接返回），
+    于是把预算配到 2,000,000 字的项目会拿着一份 2M 字符的提示词去撞一个 128k 的模型，
+    **必然被拒**，而拒绝的后果是整次分析连结论一起作废。
+
+    现在按「窗口 × 60%」压，并且把字符当 token 算（见 `CHARS_PER_TOKEN`）：这个方向是
+    保守的，压出来的提示词在 token 意义上一定装得下。少塞的那部分内容由「压历史」承担
+    （`compact_history`），而它压掉的是**重复**，不是信息。
+    """
+    configured = max(0, int(configured_chars or 0))
+    window, defaulted = resolve_context_window(window_tokens)
+    watermark = context_watermark_chars(window)
+    if configured <= watermark:
+        return configured, ""
+    source = "端点未声明窗口，按默认值" if defaulted else "端点声明的窗口"
+    return watermark, (
+        f"上下文窗口 {window:,} token（{source}），按 {int(COMPACT_AT_RATIO * 100)}% 水位"
+        f"压到 {watermark:,} 字执行；配置的 {configured:,} 字预算只作为上限。"
+        "提示词超出水位时，平台会压掉最早几轮的历史（保留最近几轮原文），"
+        "被压掉的内容可以重新索取。"
     )
-    return context_tokens, note
+
+
+def looks_like_context_overflow(text: object) -> bool:
+    """上游的报错像不像「提示词装不下」。
+
+    ## 为什么敢用文本匹配
+
+    各家网关的报错文案完全不同（OpenAI 系是 `context_length_exceeded`，vLLM 会说
+    `maximum context length`，自建网关什么写法都有），没有统一的错误码可认。而两种
+    判错的代价是**不对称**的：
+
+    * **认错（把别的错当成超窗）**：多花一次压缩后的调用 —— 压缩后还是失败，末尾仍然
+      报失败，用户看到的失败原因不变。代价是一次请求。
+    * **漏认（超窗了却没认出来）**：这次分析直接作废，前面几轮的钱白花 —— 也就是
+      这个函数存在的理由。
+
+    所以这里宁可放宽一点。匹配到的文本同时会写进失败原因里，用户能自己核对。
+    """
+    haystack = str(text or "").lower()
+    if not haystack:
+        return False
+    for needle in (
+        "context_length_exceeded",
+        "context length",
+        "maximum context",
+        "max context",
+        "context window",
+        "reduce the length",
+        "too many tokens",
+        "exceeds the maximum",
+        "prompt is too long",
+        "input is too long",
+        # 中文网关的常见写法（有的会把上游文案翻一遍再回吐）
+        "上下文长度",
+        "上下文超",
+        "超出最大上下文",
+        "too long",
+    ):
+        if needle in haystack:
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class TurnMemo:
+    """一轮的「事后来看值得留一句」的记录，给压历史用。
+
+    **只记标签，不记正文**：正文本来就在对话里，压历史时才需要一句「这一轮索取了什么」。
+    条数按 `labels` 截断是为了让摘要本身足够小 —— 摘要要是也很大，压历史就白压了。
+    """
+
+    index: int
+    status: str = ""
+    items: tuple[ContextItem, ...] = ()
+    max_labels: int = 6
+
+    def describe(self) -> str:
+        label = _ROUND_STATUS_LABELS.get(self.status, self.status or "无记录")
+        if not self.items:
+            return label
+        labels = "、".join(str(item.label) for item in self.items[: self.max_labels])
+        if len(self.items) > self.max_labels:
+            labels += f" 等 {len(self.items)} 条"
+        return f"{label}：{labels}"
+
+
+_ROUND_STATUS_LABELS = {
+    "requests": "索取了上下文",
+    "final": "给出了结论",
+    "unparsable": "输出无法解析",
+}
+
+
+@dataclass(frozen=True)
+class CompactionResult:
+    """压历史的结果。`dropped_turns == 0` 表示什么都没做。"""
+
+    messages: tuple[dict, ...] = ()
+    # 要并进「本轮」用户消息的那段摘要。为空表示没有历史要交代。
+    recap: str = ""
+    dropped_turns: int = 0
+    dropped_chars: int = 0
+    notes: tuple[str, ...] = ()
+
+    @property
+    def compacted(self) -> bool:
+        return self.dropped_turns > 0
+
+
+def _group_turns(messages: Iterable[Mapping[str, Any]]) -> list[list[dict]]:
+    """把消息按「轮」分组：遇到 user 就开新的一轮。
+
+    不假设严格交替：模型回了个空的 assistant、或者某个上游一次给了两条 assistant，
+    都只会把几条并进同一轮，不会丢消息。
+    """
+    turns: list[list[dict]] = []
+    for message in messages:
+        entry = dict(message)
+        if not turns or entry.get("role") == "user":
+            turns.append([entry])
+        else:
+            turns[-1].append(entry)
+    return turns
+
+
+def compact_history(
+    messages: Sequence[Mapping[str, Any]],
+    *,
+    target_chars: int,
+    keep_recent_turns: int = MIN_KEEP_TURNS,
+    memos: Sequence[TurnMemo] = (),
+) -> CompactionResult:
+    """把**中间那些轮次**压成一段摘要：只留 system、第一轮、以及最近几轮原文。
+
+    ## 为什么只动中间
+
+    * `messages[0]`（system）与 `messages[1]`（第一轮的 user 消息）是**跨运行复用的缓存
+      前缀** —— 两个 `cache_control` 断点都挂在那里，动一下就把命中让给了别人；
+    * 第一轮里是**变更清单与历史结论基线**，也就是这次分析要回答的问题本身。
+
+    能压的只有「要过什么、拿到过什么」的那几轮，而它们恰好最占体积、信息密度最低：
+    每一轮都把整份上下文重发一遍。压掉它们换来的是「分析能跑到底」，而不是「少花点钱」。
+
+    ## 压的是重复，不是信息
+
+    被丢掉的轮次不会消失：`recap` 里有一行一行的记录（第几轮、索取了什么），并且会带上
+    一句「需要就重新索取」。这是本模块一贯的口径（见模块文档第 1 条）——**绝不静默裁剪**。
+
+    ## `memos` 与轮次是按位置一一对应的
+
+    第 i 个 memo 描述 tail 里的第 i 轮。调用方必须在「上一轮的 assistant 已经进了 messages、
+    本轮的 user 还没进」这个时刻调用它，此时两者恰好对齐（引擎里的调用点就是这里）。
+    """
+    ordered = [dict(message) for message in messages]
+    if len(ordered) <= 2:
+        return CompactionResult(messages=tuple(ordered))
+
+    head, tail = ordered[:2], ordered[2:]
+    turns = _group_turns(tail)
+    keep = max(0, int(keep_recent_turns))
+
+    dropped = 0
+    while dropped < len(turns) - keep:
+        kept = head + [item for turn in turns[dropped:] for item in turn]
+        if estimate_chars(kept) <= target_chars:
+            break
+        dropped += 1
+    if dropped == 0:
+        return CompactionResult(messages=tuple(ordered))
+
+    kept_turns = turns[dropped:]
+    dropped_messages = [item for turn in turns[:dropped] for item in turn]
+    dropped_chars = estimate_chars(dropped_messages)
+    recap = _recap_for(dropped, turns[:dropped], memos)
+    return CompactionResult(
+        messages=tuple(head + [item for turn in kept_turns for item in turn]),
+        recap=recap,
+        dropped_turns=dropped,
+        dropped_chars=dropped_chars,
+        notes=(
+            f"为控制上下文体积，最早的 {dropped} 轮历史已压成一段摘要"
+            f"（省下约 {dropped_chars:,} 字，最近 {len(kept_turns)} 轮原文保留）。"
+            "被压掉的轮次里取过的内容若仍需要，可以重新索取。",
+        ),
+    )
+
+
+def _recap_for(
+    dropped: int, turns: Sequence[Sequence[Mapping[str, Any]]], memos: Sequence[TurnMemo]
+) -> str:
+    """把被压掉的轮次写成一段给模型看的记录。"""
+    lines = [
+        "## 已压缩的历史（为控制上下文体积）",
+        "",
+        f"下面是最早 {dropped} 轮里发生过的事。**这几轮的正文已从对话里移除**，只剩这份"
+        "记录 —— 如果某份内容对你的结论是必需的，请重新索取（索取额度仍然有效）。",
+    ]
+    for offset, _turn in enumerate(turns, start=1):
+        memo = memos[offset - 1] if offset - 1 < len(memos) else None
+        if memo is None:
+            lines.append(f"- 第 {offset} 轮")
+        else:
+            lines.append(f"- 第 {offset} 轮：{memo.describe()}")
+    items = [item for memo in memos[:dropped] for item in memo.items]
+    if items:
+        lines.append("")
+        lines.append(build_continuation_summary(items))
+    return "\n".join(lines)

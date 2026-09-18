@@ -41,9 +41,15 @@ from services.ai.baseline import DEFAULT_BASELINE_CHARS
 from services.ai.budget import (
     DEFAULT_MAX_ITEMS,
     DEFAULT_TOTAL_CHARS,
+    MIN_KEEP_TURNS,
     ContextItem,
+    TurnMemo,
+    build_continuation_summary,
+    compact_history,
     enforce_budget,
     estimate_chars,
+    looks_like_context_overflow,
+    truncate_text,
 )
 from services.ai.context_tools import (
     DEFAULT_MAX_TOOL_REQUESTS,
@@ -51,7 +57,7 @@ from services.ai.context_tools import (
     ContextTools,
     describe_request,
 )
-from services.ai.prompt import build_system_prompt, build_user_message
+from services.ai.prompt import build_system_prompt, build_user_message, change_block
 from services.ai.prompt_cache import CACHE_BREAKPOINT_KEY, mark_cache_breakpoint
 from services.ai.protocol import (
     AnalysisPayload,
@@ -81,16 +87,24 @@ DEGRADE_ROUNDS = "rounds_exhausted"
 DEGRADE_REQUESTS = "requests_exhausted"
 DEGRADE_MARKDOWN = "markdown_report"
 DEGRADE_PROTOCOL = "protocol_corrections_exhausted"
+# 上游以「上下文超长」拒绝了请求，平台收缩提示词后把结论收回来了。**它是一次退化**：
+# 模型是在一份被压过的提示词上作答的，与正常跑完不是一回事，必须说出来。
+DEGRADE_CONTEXT = "context_overflow"
 
 DEGRADATION_LABELS = {
     DEGRADE_ROUNDS: "轮次用尽，基于已有证据出结论",
     DEGRADE_REQUESTS: "上下文索取额度用尽，基于已有证据出结论",
     DEGRADE_MARKDOWN: "模型没有按协议输出 JSON，已按 markdown 报告降级保存",
     DEGRADE_PROTOCOL: "连续多轮无法解析出协议要求的 JSON",
+    DEGRADE_CONTEXT: "提示词超出模型上下文窗口，已压掉历史后收尾出结论",
 }
 
 # 给上下文条目留的最小额度。低于这个值就没什么可给的了，与其压到 0 不如如实记账。
 _MIN_ITEM_BUDGET = 4_000
+
+# 收尾提示词里保留多少变更清单（字符）。只要够模型认出「这次改的是哪一片」即可：
+# 收尾请求的前提就是「装不下」，所以它必须小到任何窗口都装得下。
+_SALVAGE_SUMMARY_CHARS = 1_500
 
 
 class _ChatClient(Protocol):
@@ -180,6 +194,35 @@ class RoundProgress:
 
 
 @dataclass(frozen=True)
+class CompactionReport:
+    """这次分析压过几次历史、压掉了多少。
+
+    存在的理由与 `degradation` 一样：**压缩不能悄悄发生**。一次「看起来正常、其实是在被
+    压过的提示词上作答」的分析，与一次正常跑完的分析，读报告的人必须能分辨 —— 否则
+    「这次结论怎么这么浅」永远查不出原因。
+    """
+
+    # 压了几次（每次是一条 `BudgetsOverflow` 或上游拒绝）。
+    events: int = 0
+    dropped_turns: int = 0
+    dropped_chars: int = 0
+    # 上游已经拒过一次、靠压缩/收尾救回来了。
+    overflow_recovered: bool = False
+
+    @property
+    def happened(self) -> bool:
+        return self.events > 0 or self.overflow_recovered
+
+    def to_dict(self) -> dict:
+        return {
+            "events": self.events,
+            "dropped_turns": self.dropped_turns,
+            "dropped_chars": self.dropped_chars,
+            "overflow_recovered": self.overflow_recovered,
+        }
+
+
+@dataclass(frozen=True)
 class EngineOutcome:
     """一次分析的全部产出。"""
 
@@ -209,6 +252,8 @@ class EngineOutcome:
     # 口径：那个是工具取回的原始量，可能被截断/被预算砍掉之后才进提示词。
     context_chars: int = 0
     duration_ms: int = 0
+    # 上下文压缩的记账（见 CompactionReport）。
+    compaction: CompactionReport = field(default_factory=CompactionReport)
 
     @property
     def succeeded(self) -> bool:
@@ -243,6 +288,7 @@ class EngineOutcome:
             "cache_source": self.cache_source,
             "context_chars": self.context_chars,
             "duration_ms": self.duration_ms,
+            "compaction": self.compaction.to_dict(),
             "tool_stats": {kind: dict(counters) for kind, counters in self.tool_stats.items()},
             "anomaly_count": len(self.anomalies),
             "dropped": [
@@ -360,6 +406,26 @@ def run_analysis(
     cache_sources: list[str] = []
     context_chars = 0
     started_at = time.monotonic()
+    # 上下文压缩的记账（见 CompactionReport）。这里只累加，出口在 _usage_fields。
+    compaction_events = 0
+    compaction_turns = 0
+    compaction_chars = 0
+    overflow_recovered = False
+    # 每一轮留一句「索取了什么」，压历史时用它生成摘要（见 budget.compact_history）。
+    round_memos: list[TurnMemo] = []
+    # 这次分析**取到过**的全部上下文。收尾请求（上游拒绝之后）只带它们的目录。
+    seen_items: list[ContextItem] = []
+    # 压过历史之后补进本轮消息的那段记录。一旦压过就每轮都带着 —— 它描述的那些轮次
+    # 已经不在对话里了，只带一次的话下一轮模型就再也看不到。
+    recap_text = ""
+
+    def _compaction_report() -> CompactionReport:
+        return CompactionReport(
+            events=compaction_events,
+            dropped_turns=compaction_turns,
+            dropped_chars=compaction_chars,
+            overflow_recovered=overflow_recovered,
+        )
 
     def _usage_fields() -> dict:
         """所有 `EngineOutcome` 构造点共用的用量字段。
@@ -376,6 +442,7 @@ def run_analysis(
             "tool_stats": tools.stats,
             "context_chars": context_chars,
             "duration_ms": int((time.monotonic() - started_at) * 1000),
+            "compaction": _compaction_report(),
         }
 
     def _emit(record: RoundRecord) -> None:
@@ -419,29 +486,54 @@ def run_analysis(
 
     for round_index in range(1, limits.max_rounds + 1):
         exhausted = tools.requests_remaining <= 0
-        items, item_notes = _fit_items(
-            pending_items,
-            messages=messages,
-            change_summary=change_summary,
-            limits=limits,
-        )
-        # 真正进了提示词的字符数（不是工具取回的原始量，见 EngineOutcome.context_chars）。
-        # 逐轮也算一份：总账说明「这次分析塞了多少进去」，而逐轮才说明**是哪一轮塞的**
-        # —— 后几轮重发前几轮的全部上下文，钱正是花在那里。
-        round_context_chars = sum(len(item.text) for item in items)
-        context_chars += round_context_chars
-
-        user_message = build_user_message(
-            change_summary=change_summary,
+        # 这一轮要写进 trace 的补充说明：压过历史、被上游拒过、走了收尾 —— 都是「这次分析
+        # 不是正常跑完的」的证据，只留在日志里等于没说。
+        round_notes: list[str] = []
+        brief = _RoundBrief(
             round_index=round_index,
             max_rounds=limits.max_rounds,
-            items=items,
+            change_summary=change_summary,
             baseline_digest=baseline_digest,
-            budget_notes=[*budget_notes, *item_notes],
-            requests_remaining=tools.requests_remaining,
             correction_hint=correction_hint,
             budget_exhausted=exhausted,
+            budget_notes=tuple(budget_notes),
+            pending_items=tuple(pending_items),
+            recap=recap_text,
+            requests_remaining=tools.requests_remaining,
+            limits=limits,
         )
+        items, user_message = _prepare_round(brief, messages)
+
+        # **整份提示词**（系统提示词 + 变更清单 + 历史 + 本轮上下文）超出预算时压历史。
+        #
+        # 这一步补的是一个真窟窿：以前只有「本轮取回的上下文」受预算约束（`_fit_items`
+        # 按剩余额度压条目），**历史不受任何约束** —— 每一轮都把上一轮的整条消息再发一遍，
+        # 于是提示词随轮次单调增长，最后撞上模型窗口被上游拒绝，一次已经跑了几轮的分析
+        # 连结论一起作废。压掉的是重复，不是信息：被压的轮次会留下一条记录（见
+        # `budget.compact_history`），而且可以重新索取。
+        if estimate_chars(messages) + len(user_message) > limits.prompt_char_budget:
+            # 目标里**先扣掉本轮消息自己的位置**：只按总预算压历史的话，压到刚好等于预算、
+            # 再把本轮消息加上去就又超了。而且条目的额度有下限（`_MIN_ITEM_BUDGET`）——
+            # 压到负数它也会给 4,000 字，那 4,000 字必须有地方放。
+            compacted = compact_history(
+                messages,
+                target_chars=max(0, limits.prompt_char_budget - len(user_message)),
+                keep_recent_turns=MIN_KEEP_TURNS,
+                memos=round_memos,
+            )
+            if compacted.compacted:
+                messages[:] = list(compacted.messages)
+                recap_text = _join_recap(recap_text, compacted.recap)
+                compaction_events += 1
+                compaction_turns += compacted.dropped_turns
+                compaction_chars += compacted.dropped_chars
+                round_notes.extend(compacted.notes)
+                log_print(f"ℹ️ AI 分析：{compacted.notes[0]}", "AI", force=True)
+                # 重算一遍：条目额度取决于「除条目之外占了多少」，压历史正是为了把它腾出来。
+                # 少算这一步，压出来的空间就白压了（条目仍按旧额度被裁）。
+                brief = replace(brief, recap=recap_text)
+                items, user_message = _prepare_round(brief, messages)
+
         # 断点 ②：**第一轮** user 消息的末尾。变更清单（全量列出，顶到上限时约 87,000
         # 字符）、历史结论基线、首轮指引这三段在一批变更里是恒定的，而且占了整份提示词的
         # 大头 —— 跨运行复用缓存主要靠它。它**只挂第一轮**：后续轮次的 user 消息里有本轮
@@ -454,51 +546,104 @@ def run_analysis(
         #
         # 两个断点都只加在**消息字典上的内部标记**上，不改内容：摘掉/挪动断点不会让任何
         # 一条消息的字节发生变化，所以「挪断点」与「append-extension」不冲突。
-        entry: dict[str, Any] = {"role": "user", "content": user_message}
-        if movable_breakpoint is not None:
-            movable_breakpoint.pop(CACHE_BREAKPOINT_KEY, None)
-        mark_cache_breakpoint(entry)
+        entry = _mark_current({"role": "user", "content": user_message}, movable_breakpoint)
         if round_index > 1:
             movable_breakpoint = entry
-        messages.append(entry)
 
         round_started = time.monotonic()
+        salvaged = False
         try:
-            result = client.complete(messages, temperature=limits.temperature)
+            result = client.complete([*messages, entry], temperature=limits.temperature)
         except Exception as exc:  # noqa: BLE001 —— 网络/鉴权/超时都归为「这次没跑成」
-            return EngineOutcome(
-                status=STATUS_FAILED,
-                rounds=tuple(rounds),
-                dropped=tuple(dropped),
-                requests_used=tools.requests_seen,
-                cache_hits=tools.cache_hits,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                error_message=f"调用模型失败（{type(exc).__name__}）：{exc}",
-                **_usage_fields(),
-            )
+            error_text = f"{type(exc).__name__}: {exc}"
+            if not looks_like_context_overflow(error_text):
+                return EngineOutcome(
+                    status=STATUS_FAILED,
+                    rounds=tuple(rounds),
+                    dropped=tuple(dropped),
+                    requests_used=tools.requests_seen,
+                    cache_hits=tools.cache_hits,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    error_message=f"调用模型失败（{type(exc).__name__}）：{exc}",
+                    **_usage_fields(),
+                )
 
-        text = str(getattr(result, "text", "") or "")
-        round_prompt = int(getattr(result, "prompt_tokens", 0) or 0)
-        round_completion = int(getattr(result, "completion_tokens", 0) or 0)
-        prompt_tokens += round_prompt
-        completion_tokens += round_completion
-        round_cache_read = getattr(result, "cache_read_tokens", None)
-        round_cache_write = getattr(result, "cache_write_tokens", None)
-        cache_reads.append(round_cache_read)
-        cache_writes.append(round_cache_write)
-        cache_sources.append(str(getattr(result, "cache_source", "") or ""))
+            # 上游说装不下。**不能认输**：前面几轮的钱已经花了，空手而归是最坏的结果。
+            #
+            # 补救只有一步：换成一段**必然装得下**的「收尾」提示词，把结论要回来。
+            #
+            # 为什么不「压掉历史再试一次」：上游拒了，说明我们按字符估的那个水位在这台
+            # 模型上不准（水位本身只有窗口的 60%，还被拒就意味着真实可用的量远小于声明
+            # 的窗口）。那种偏差不是「少发一轮历史」能补上的 —— 压完还是超，只是多等一次
+            # 超时、多留一条失败日志。而收尾提示词是千字符级的，任何窗口都装得下。
+            log_print(
+                f"⚠️ AI 分析：上游拒绝了本次请求（{error_text[:300]}）。"
+                "按「提示词超出上下文窗口」处理，改用收尾提示词。",
+                "AI",
+                force=True,
+            )
+            # 上游**确实**以超长拒过 —— 这件事本身就要记下来：它意味着这次的结论是在一份
+            # 被大幅裁剪的提示词上得到的。彻底失败的那条路径读的是 `error_message`。
+            overflow_recovered = True
+            salvaged = True
+            messages[:] = messages[:1]
+            items = ()
+            user_message = _salvage_user_message(change_summary, seen_items)
+            entry = _mark_current({"role": "user", "content": user_message}, movable_breakpoint)
+            movable_breakpoint = entry
+            round_notes.append(
+                "上游以「上下文超长」拒绝了这次请求（累计已用 "
+                f"{len(rounds)} 轮、{tools.requests_seen} 次索取），已改用「收尾」提示词"
+                "（只带变更清单开头与已取内容目录）。"
+            )
+            try:
+                result = client.complete([*messages, entry], temperature=limits.temperature)
+            except Exception as final_exc:  # noqa: BLE001
+                return EngineOutcome(
+                    status=STATUS_FAILED,
+                    rounds=tuple(rounds),
+                    dropped=tuple(dropped),
+                    requests_used=tools.requests_seen,
+                    cache_hits=tools.cache_hits,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    error_message=(
+                        "模型上下文不足：收尾请求也被拒绝"
+                        f"（{type(final_exc).__name__}: {final_exc}）。"
+                        "建议缩小本次分析的范围（按单个提交或指定文件分析），"
+                        "或改用上下文窗口更大的模型。"
+                    ),
+                    **_usage_fields(),
+                )
+
+        usage = _usage_of(result)
+        text = usage["text"]
+        prompt_tokens += usage["prompt_tokens"]
+        completion_tokens += usage["completion_tokens"]
+        cache_reads.append(usage["cache_read_tokens"])
+        cache_writes.append(usage["cache_write_tokens"])
+        cache_sources.append(usage["cache_source"])
+        # 真正进了提示词的字符数（不是工具取回的原始量，见 EngineOutcome.context_chars）。
+        # 逐轮也算一份：总账说明「这次分析塞了多少进去」，而逐轮才说明**是哪一轮塞的**
+        # —— 后几轮重发前几轮的全部上下文，钱正是花在那里。
+        #
+        # 记的是**最后真的发出去的那一份**：重试过一次的话，第一次那些条目根本没到模型手上，
+        # 算进去会让「这一轮塞了多少」虚高。
+        round_context_chars = sum(len(item.text) for item in items)
+        context_chars += round_context_chars
         # 本轮用量挂到每一个 RoundRecord 上（下面有 5 个构造点）。同样用 splat：逐处复制
         # 字段一定会漏，而漏掉的那一轮在 trace 里看着就像「这一轮没花钱」。
         round_extra = {
-            "prompt_tokens": round_prompt,
-            "completion_tokens": round_completion,
-            "cache_read_tokens": round_cache_read,
-            "cache_write_tokens": round_cache_write,
+            "prompt_tokens": usage["prompt_tokens"],
+            "completion_tokens": usage["completion_tokens"],
+            "cache_read_tokens": usage["cache_read_tokens"],
+            "cache_write_tokens": usage["cache_write_tokens"],
             "prompt_chars": len(user_message),
             "context_chars": round_context_chars,
             "duration_ms": int((time.monotonic() - round_started) * 1000),
         }
+        messages.append(entry)
         messages.append({"role": "assistant", "content": text})
 
         try:
@@ -507,27 +652,44 @@ def run_analysis(
             if looks_like_markdown_report(text):
                 # 模型给了一份像样的 markdown 报告。与其把它扔掉重问，不如留下来当降级产出：
                 # 内容通常是有用的，用户至少能读到。
-                _emit(RoundRecord(round_index, "unparsable", note="按 markdown 报告降级", **round_extra))
+                _emit(RoundRecord(
+                    round_index, "unparsable",
+                    note=_combine_notes(round_notes, "按 markdown 报告降级"), **round_extra,
+                ))
                 payload = None
                 markdown_fallback = text.strip()
                 degradation = DEGRADE_MARKDOWN
                 break
             if limits.max_corrections <= 0:
-                _emit(RoundRecord(round_index, "unparsable", note=str(exc)[:200], **round_extra))
+                _emit(RoundRecord(
+                    round_index, "unparsable",
+                    note=_combine_notes(round_notes, str(exc)[:200]), **round_extra,
+                ))
                 degradation = DEGRADE_PROTOCOL
                 break
             # 重问也要占一轮：否则一个不肯说 JSON 的模型能把循环变成无限次重试。
             limits = replace(limits, max_corrections=limits.max_corrections - 1)
             correction_hint = build_correction_hint(exc)
-            _emit(RoundRecord(round_index, "unparsable", note=str(exc)[:200], **round_extra))
+            _emit(RoundRecord(
+                round_index, "unparsable",
+                note=_combine_notes(round_notes, str(exc)[:200]), **round_extra,
+            ))
             pending_items = ()
             budget_notes = []
+            round_memos.append(TurnMemo(index=round_index, status="unparsable"))
             continue
 
         correction_hint = ""
         if parsed.is_final:
             payload = parsed
-            _emit(RoundRecord(round_index, "final", item_count=len(items), **round_extra))
+            if salvaged:
+                # 这份结论是在**被压过的提示词**上得出的，与正常跑完不是一回事。
+                degradation = DEGRADE_CONTEXT
+            _emit(RoundRecord(
+                round_index, "final",
+                item_count=len(items), note=_combine_notes(round_notes), **round_extra,
+            ))
+            round_memos.append(TurnMemo(index=round_index, status="final", items=tuple(items)))
             break
 
         # `sanitize_requests` 同时返回「通过白名单的」与「被丢掉的及原因」——两样都要：
@@ -538,6 +700,10 @@ def run_analysis(
         batch = tools.execute(requests)
         dropped.extend(batch.dropped)
         pending_items = batch.items
+        # **取到什么就记什么**，而不是「发出什么才记什么」：收尾提示词要用这份目录回答
+        # 「你已经取到过哪些内容」，而它恰恰可能发生在「这一轮取到了、但这一轮的消息被
+        # 上游拒了」之后 —— 那时按「发出去的」记就是空的，模型会以为自己什么都没看过。
+        seen_items.extend(batch.items)
         budget_notes = _batch_notes(batch)
         _emit(
             RoundRecord(
@@ -547,9 +713,14 @@ def run_analysis(
                 item_count=len(batch.items),
                 refused_by_budget=batch.refused_by_budget,
                 truncated=batch.truncated,
+                note=_combine_notes(round_notes),
                 **round_extra,
             )
         )
+        # 这一轮索取了什么要留下来：压历史时它就是被压掉的那几轮的「记录」（见
+        # budget.compact_history）。不留的话，压完历史模型就只知道自己拿过东西、
+        # 不知道拿过什么，于是重新要一遍 —— 额度花两遍，还是没看到内容。
+        round_memos.append(TurnMemo(index=round_index, status="requests", items=tuple(batch.items)))
     else:
         degradation = DEGRADE_ROUNDS
 
@@ -621,6 +792,155 @@ def run_analysis(
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# 一轮消息的组装
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _RoundBrief:
+    """一轮里「与历史无关」的那些输入。
+
+    攒成一包是因为**同一轮可能要组装两次**：压掉历史之后条目额度会变大，必须重算一遍
+    （见 `_prepare_round`）。散着传十几个参数，两次调用之间漏传一个就是一条静默的错
+    —— 而它表现为「分析结果说不清哪里不对」。
+    """
+
+    round_index: int
+    max_rounds: int
+    change_summary: str
+    baseline_digest: str
+    correction_hint: str
+    budget_exhausted: bool
+    budget_notes: tuple[str, ...]
+    pending_items: tuple[ContextItem, ...]
+    recap: str
+    requests_remaining: int
+    limits: EngineLimits
+
+
+def _prepare_round(
+    brief: _RoundBrief, messages: Sequence[Mapping[str, Any]]
+) -> tuple[tuple[ContextItem, ...], str]:
+    """组装本轮要发的 user 消息，返回 `(真正进得去的上下文, 消息文本)`。
+
+    **预算与消息必须用同一份变更清单文本**（`prompt.change_block`）：按清单全文算预算、
+    消息里只放指针，会让平台白白少用几十万字符的额度；反过来的组合则是超预算。
+    """
+    block = change_block(brief.change_summary, round_index=brief.round_index)
+    items, item_notes = _fit_items(
+        brief.pending_items,
+        messages=messages,
+        change_summary=block,
+        limits=brief.limits,
+    )
+    message = build_user_message(
+        change_summary=brief.change_summary,
+        round_index=brief.round_index,
+        max_rounds=brief.max_rounds,
+        items=items,
+        baseline_digest=brief.baseline_digest,
+        budget_notes=[*brief.budget_notes, *item_notes],
+        requests_remaining=brief.requests_remaining,
+        correction_hint=brief.correction_hint,
+        budget_exhausted=brief.budget_exhausted,
+        history_recap=brief.recap,
+    )
+    return items, message
+
+
+def _mark_current(
+    entry: dict[str, Any], previous: dict[str, Any] | None
+) -> dict[str, Any]:
+    """把「可挪动的缓存断点」挪到这一条消息上（见 `run_analysis` 里断点 ③ 的说明）。
+
+    返回的就是 `entry` 本身（原地打了标记），返回值是为了让调用处写成
+    `entry = _mark_current(entry, movable_breakpoint)` —— 少一层「忘了把新断点记下来」。
+    """
+    if previous is not None:
+        # 上一条可能已经不在 messages 里了（压历史把它丢掉了）：从一个不再发送的字典上
+        # 摘标记是空操作，不会出错，也不需要额外判断。
+        previous.pop(CACHE_BREAKPOINT_KEY, None)
+    mark_cache_breakpoint(entry)
+    return entry
+
+
+def _usage_of(result: Any) -> dict[str, Any]:
+    """把一次模型调用的用量读出来（字段口径见 `llm_client.ChatResult`）。
+
+    集中一处是为了让「重试之后那一次调用」与正常路径用同一套读法 —— 分散在三处读
+    `getattr(result, ...)`，漏掉哪一处都是「这一轮看着没花钱」。
+    """
+    return {
+        "text": str(getattr(result, "text", "") or ""),
+        "prompt_tokens": int(getattr(result, "prompt_tokens", 0) or 0),
+        "completion_tokens": int(getattr(result, "completion_tokens", 0) or 0),
+        "cache_read_tokens": getattr(result, "cache_read_tokens", None),
+        "cache_write_tokens": getattr(result, "cache_write_tokens", None),
+        "cache_source": str(getattr(result, "cache_source", "") or ""),
+    }
+
+
+def _combine_notes(notes: Sequence[str], extra: str = "") -> str:
+    """把这一轮的补充说明与构造点自己那句拼成一条 trace 备注。"""
+    parts = [str(item).strip() for item in notes if str(item).strip()]
+    if str(extra).strip():
+        parts.append(str(extra).strip())
+    return "；".join(parts)
+
+
+def _join_recap(first: str, second: str) -> str:
+    """把两段压缩记录接起来（一次分析可能压了不止一次）。空的那段不留空行。"""
+    parts = [str(part).strip() for part in (first, second) if str(part or "").strip()]
+    return "\n\n".join(parts)
+
+
+def _salvage_user_message(change_summary: str, seen_items: Sequence[ContextItem]) -> str:
+    """上游反复拒绝之后的**收尾**提示词。
+
+    ## 为什么值得单独写一段
+
+    这时的局面是：前面几轮的钱已经花了，模型也确实看到过一些内容，但整份提示词塞不进
+    它的窗口。丢掉这次分析 = 全部白花；而**一份「证据不足、缺口写清楚了」的报告**仍然
+    是用户能用的东西（`rules`/`protocol` 那一层本来就会按证据强度压结论）。
+
+    ## 它必须小到任何窗口都装得下
+
+    所以正文一条都不带：只带**变更清单的开头**（够认出改的是哪一片）与**取到过什么的
+    目录**（`build_continuation_summary`，只有标签）。这两段加起来是千字符级，
+    128k 窗口的模型也装得下。
+    """
+    head, truncated = truncate_text(str(change_summary or ""), _SALVAGE_SUMMARY_CHARS)
+    blocks = [
+        "# 本次变更（收尾请求）",
+        "",
+        "这次分析的提示词超出了模型的上下文窗口，平台已经把历史压过一轮，仍然装不下。"
+        "所以这一轮只给你这些：变更清单的开头，以及你之前取到过什么的目录。",
+        "",
+        "## 变更清单（开头部分）",
+        head + ("\n\n（清单在此处被截断，后面还有内容。）" if truncated else ""),
+    ]
+    if seen_items:
+        blocks.extend(
+            [
+                "",
+                "## 你已经取到过的内容",
+                build_continuation_summary(seen_items, keep=8),
+            ]
+        )
+    blocks.extend(
+        [
+            "",
+            "## 现在要做的",
+            "**立刻输出协议要求的 JSON**，用你已经看到过的内容作答：",
+            "- 只报有证据支持的问题，每条的证据必须来自你确实看过的内容；",
+            "- 你没能看完的部分写进报告的「信息缺口」，不要用猜测填补；",
+            "- 不要再索取上下文 —— 这一轮之后本次分析就结束了。",
+        ]
+    )
+    return "\n".join(blocks)
+
+
 def _fit_items(
     items: Sequence[ContextItem],
     *,
@@ -681,11 +1001,13 @@ def request_labels(payload: AnalysisPayload | None) -> list[str]:
 # 保留给调用方做「轮次摘要」用。
 __all__ = [
     "DEGRADATION_LABELS",
+    "DEGRADE_CONTEXT",
     "DEGRADE_MARKDOWN",
     "DEGRADE_NONE",
     "DEGRADE_PROTOCOL",
     "DEGRADE_REQUESTS",
     "DEGRADE_ROUNDS",
+    "CompactionReport",
     "EngineLimits",
     "EngineOutcome",
     "RoundProgress",

@@ -1870,3 +1870,43 @@ main:focus {
 @media (prefers-reduced-motion: reduce) {
     .ai-usage-detail-btn { transition: none; }
 }
+
+/* ==========================================================================
+   AI 分析抽屉里的超预算横幅
+   ==========================================================================
+   放在全局样式表而不是抽屉那一段里：抽屉的 CSS 块要三份模板逐字相同
+   （tests/test_ai_drawer_css_sync.py），塞进去等于三处同步 + 容易被后来者改歪。
+   颜色一律走令牌（带字面量兜底），不写裸 hex。 */
+.ai-budget-banner {
+    flex: none;
+    display: block;
+    padding: var(--space-3, 12px) var(--space-4, 16px);
+    border: 1px solid var(--color-danger, #dc3545);
+    border-left-width: 4px;
+    border-radius: var(--radius-lg, 6px);
+    background: var(--color-danger-bg, #ffebe9);
+    color: var(--color-danger-text, #b3261e);
+    font-size: var(--font-size-md, 14px);
+    line-height: 1.6;
+}
+
+.ai-budget-banner__title {
+    display: block;
+    font-weight: 600;
+    margin-bottom: var(--space-1, 4px);
+}
+
+.ai-budget-banner__reason {
+    margin: 0 0 var(--space-1, 4px);
+}
+
+.ai-budget-banner__howto {
+    margin: 0;
+    color: var(--color-text, #1f2937);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .ai-budget-banner {
+        transition: background-color var(--motion-base, 0.25s) var(--ease-out, ease);
+    }
+}

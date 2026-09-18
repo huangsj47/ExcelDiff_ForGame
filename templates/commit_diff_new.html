@@ -428,6 +428,10 @@
         </button>
     </div>
     <div class="ai-drawer-body">
+        <!-- 超预算横幅：`role="alert"` 是因为它在跑的过程中**会出现**（一次分析可能把
+             当月额度顶过上限），而那时用户正盯着这一页等结果。文案由
+             static/js/ai_budget_notice.js 生成（三份模板逐字复制，逻辑只写一份）。 -->
+        <div class="ai-budget-banner" id="aiBudgetBanner" role="alert" hidden></div>
         <div class="ai-drawer-meta" id="aiAnalysisMeta">分析结果将以流式输出展示。</div>
         <!-- 正文渲染成 HTML（Markdown 子集），所以是 div 而不是 pre：
              pre 的 white-space:pre-wrap 会和块级元素打架 -->
@@ -468,6 +472,11 @@
     </div>
 
     <script src="{{ url_for('static', filename='js/ai_usage_line.js') }}"></script>
+{# 预算提示的判定与文案：三份抽屉模板逐字复制这段 JS 的代价是漏改一份，
+   所以逻辑集中在 static/js/ai_budget_notice.js（与 ai_usage_line.js 同一打法）。 #}
+<script src="{{ url_for('static', filename='js/ai_budget_notice.js') }}"></script>
+{# 降级与上下文压缩的提示：与预算提示同一个打法（唯一事实源在共享模块里）。 #}
+<script src="{{ url_for('static', filename='js/ai_context_notice.js') }}"></script>
 {% endblock %}
 
 {% block scripts %}
@@ -596,11 +605,59 @@ function initCommitAiAnalysis() {
     let hasCached = false;
     let aiEndpointReady = false;
 
+    // --- 预算横幅与「跑中」轮询 -------------------------------------------------
+    // 判定、文案、去哪儿调，全部在 static/js/ai_budget_notice.js 里 —— 三份模板的
+    // AI 抽屉块是逐字复制的，把逻辑抄三遍的代价是漏改其中一份，而症状是「某个页面
+    // 让你去一个不存在那个上限的地方调预算」。
+    const budgetHost = document.getElementById('aiBudgetBanner');
+    let budgetTimer = null;
+
+    function renderBudget(budget) {
+        if (window.AiBudgetNotice) AiBudgetNotice.renderBanner(budgetHost, budget);
+    }
+
+    function stopBudgetWatch() {
+        if (budgetTimer) {
+            clearInterval(budgetTimer);
+            budgetTimer = null;
+        }
+    }
+
+    // 分析是**阻塞**跑的（服务端在跑完之前一个事件都推不出来），所以进度靠轮询。
+    // **读不到进度不是错误**：多进程部署、或者跑在别的 worker 里时 `progress` 恒为
+    // null，这时什么都不说 —— 不显示 0，也不假装「正在跑第 0 轮」。
+    function startBudgetWatch(runId) {
+        stopBudgetWatch();
+        const tick = function () {
+            fetch(`/ai-analysis/runs/${runId}/progress`, { cache: 'no-store' })
+                .then(function (resp) { return resp.json(); })
+                .then(function (data) {
+                    if (!data || !data.success) return;
+                    renderBudget(data.budget);
+                    if (data.progress && meta) {
+                        const p = data.progress;
+                        // 这一行只在跑的时候出现，跑完由 loadLatestResult 覆盖成结论状态。
+                        meta.textContent = `分析中：第 ${p.round}/${p.max_rounds} 轮`
+                            + ` · 本次已用 ${p.live_tokens} tokens`
+                            + `（尚未落库，只含上游已上报的部分）`;
+                    }
+                })
+                .catch(function () {
+                    // 轮询失败不影响分析本身：下一次 tick 还会试。
+                });
+        };
+        tick();
+        budgetTimer = setInterval(tick, 3000);
+    }
+
     function cleanupStream() {
         if (eventSource) {
             eventSource.close();
             eventSource = null;
         }
+        // 停止轮询也挂在这里：所有出口（result / error / 关抽屉）都会走它，
+        // 在每处各写一遍必然会漏一处，而漏掉的那次会一直轮询下去。
+        stopBudgetWatch();
         if (startBtn) startBtn.disabled = false;
     }
 
@@ -636,7 +693,7 @@ function initCommitAiAnalysis() {
                     setAiStatusBadge('超预算', 'danger');
                     if (startBtn) startBtn.disabled = true;
                     if (meta) {
-                        meta.textContent = `${budget.reason} 调整方式：项目概览页 →「AI 分析配置」→ 预算周期 / 周期内 token 上限 / 周期内费用上限。`;
+                        meta.textContent = AiBudgetNotice.metaText(budget, AiUsageLine.fmtTokens);
                     }
                 } else {
                     setAiStatusBadge('已配置', 'success');
@@ -739,6 +796,17 @@ function initCommitAiAnalysis() {
         setAiOutput('AI 分析进行中...', false, 'busy');
         if (startBtn) startBtn.disabled = true;
         eventSource = new EventSource(`/ai-analysis/commit/${commitId}/stream`);
+        // 开跑之前服务端先把运行号发过来，界面据此轮询「跑到第几轮、现在超了没」。
+        // 判定与文案都在 static/js/ai_budget_notice.js 里（三份模板逐字复制，
+        // 逻辑集中在一处才不会漏改其中一份）。
+        eventSource.addEventListener('run', function(event) {
+            let payload = {};
+            try {
+                payload = JSON.parse(event.data || '{}');
+            } catch (_err) {
+            }
+            if (payload.run_id) startBudgetWatch(payload.run_id);
+        });
         eventSource.addEventListener('chunk', function(event) {
             try {
                 const payload = JSON.parse(event.data || '{}');
@@ -767,6 +835,9 @@ function initCommitAiAnalysis() {
                 if (payload.risk_level) {
                     appendAiLine(`\n风险等级：${payload.risk_level}`);
                 }
+                // 降级 / 压过上下文时补一行说明。文案在 static/js/ai_context_notice.js。
+                const contextNotice = AiContextNotice.contextNotice(payload);
+                if (contextNotice) { appendAiLine(contextNotice); }
                 setAiStatusBadge('完成', 'success');
             }
             cleanupStream();

@@ -45,7 +45,7 @@ from services.ai.baseline import (
     classify,
     suppressed_fingerprints,
 )
-from services.ai.budget import clamp_to_model_window
+from services.ai.budget import effective_prompt_budget
 from services.ai.change_set import ChangeSet, from_commit_payload, from_weekly_payload
 from services.ai.endpoint_service import (
     FIELD_DEFAULTS,
@@ -80,6 +80,8 @@ from services.ai.pricing import (
 )
 from services.ai.prompt import prompt_version
 from services.ai.rules import RuleThresholds, anomaly_fingerprint, rules_version
+from services.ai.run_progress import clear as clear_run_progress
+from services.ai.run_progress import publish as publish_run_progress
 from services.ai.skill_loader import load_skills, skill_revision
 from services.ai.usage import encode_tools, usage_from_outcome
 from utils.dpapi_utils import DPAPI_PREFIX, decrypt_dpapi
@@ -1033,32 +1035,30 @@ def _load_project_skills(project_id: int):
 def _apply_model_window(
     client: object, project_config: dict, limits: EngineLimits
 ) -> Tuple[EngineLimits, str]:
-    """把字符预算压回模型的上下文窗口。返回 `(额度, 说明)`。
+    """按模型窗口的水位压提示词预算。返回 `(额度, 说明)`。
 
-    **窗口只能向端点问**（`/v1/models` 里有时会声明），所以这件事天然是「尽力而为」：
-    端点不支持列模型、没声明窗口、或者报了个不合理的值，都按「未知」处理 ——
-    不改任何东西，也不让分析失败。额外的保护不该成为新的失败点。
+    窗口**尽量向端点问**（`/v1/models` 里有时会声明）：端点不支持列模型、没声明窗口、
+    或者报了个不合理的值，就按 `budget.DEFAULT_CONTEXT_TOKENS`（1M）这个**口径值**处理，
+    并在说明里写明「按默认值处理」——**不能让人以为平台问到了**，那是假设不是事实。
 
-    **不维护「模型名 → 窗口」对照表**：那是猜出来的数字，模型一迭代就过期，而按过期的
-    窗口压预算会静默地砍掉分析质量（用户看到的是「这次分析浅了」，看不出原因）。
+    压到「窗口 × 60%」，理由与取值见 `budget.effective_prompt_budget`：以前的规则是
+    「只在按 1:1 算也超窗时才压」，而窗口问不到时它什么都不做 —— 于是一个把预算配到
+    2M 字的项目会拿一份 2M 字符的提示词去撞模型，必然被拒，整次分析连结论一起作废。
 
-    只有 `budget.clamp_to_model_window` 能断定的那一档才会真的压，理由见那边的说明。
+    说明为空表示没压（默认 360,000 字的预算在所有窗口下都不触发水位）。
     """
     model = str(project_config.get("api_model") or "").strip()
-    if not model:
-        return limits, ""
-    contexts = getattr(client, "model_contexts", None)
-    if contexts is None:
-        return limits, ""
-    try:
-        window = contexts().get(model)
-    except LLMError as exc:
-        log_print(f"AI 分析：取模型上下文窗口失败（不影响本次分析）: {exc}")
-        return limits, ""
-    if not window:
-        return limits, ""
+    window: object = None
+    if model:
+        contexts = getattr(client, "model_contexts", None)
+        if contexts is not None:
+            try:
+                window = contexts().get(model)
+            except LLMError as exc:
+                # 问不到窗口不是失败点：下面按默认窗口继续（见 docstring）。
+                log_print(f"AI 分析：取模型上下文窗口失败（按默认窗口处理）: {exc}")
 
-    budget, note = clamp_to_model_window(limits.prompt_char_budget, int(window))
+    budget, note = effective_prompt_budget(limits.prompt_char_budget, window)
     if not note:
         return limits, ""
     return replace(limits, prompt_char_budget=budget), note
@@ -1186,11 +1186,16 @@ def _result_payload(
     payload: dict,
     *,
     suppressed: frozenset = frozenset(),
+    context_budget_note: str = "",
 ) -> dict:
     """给前端与后续读取用的结果。
 
     保留既有的 `risk_level`（界面在读它），其余键是真实产出。被人工忽略的结论不进
     `anomalies` —— 尊重分诊结果，而不是每轮再问一次。
+
+    `context_budget_note` 是「这次分析的提示词预算被窗口压过」的说明（`_apply_model_window`）。
+    以前它只写进日志 —— 于是「这次分析浅了」在界面上完全看不出原因，而它正是最需要
+    被看见的一类降级。
     """
     summary = payload.get("summary") or {}
     risk_level, risk_reasons = _risk_level_from_outcome(outcome, summary)
@@ -1204,6 +1209,12 @@ def _result_payload(
         "degradation": outcome.degradation,
         "degradation_label": outcome.degradation_label,
         "error_message": outcome.error_message,
+        # 上下文预算与压缩的账。放在这里（而不是只写日志）的理由与 usage 一样：
+        # SSE 的 result 事件与 /latest 自动都有，界面不必再拉一次接口。
+        "context": {
+            "budget_note": str(context_budget_note or ""),
+            "compaction": outcome.compaction.to_dict(),
+        },
         "anomalies": [
             {
                 "fingerprint": anomaly_fingerprint(item),
@@ -1413,7 +1424,33 @@ def _execute_analysis(
 
     调用方在后台线程或 SSE 生成器里跑，抛出去只会变成一个没人看的堆栈，而用户那边
     是「分析中」永远转下去。
+
+    这层是**薄壳**：真正的活在 `_run_engine_and_persist` 里，这里只负责「跑完之后一定
+    要把进度快照清掉」。清不掉的后果是界面一直显示「正在跑」—— 那条进程内的表没有
+    别的清理时机（`run_progress` 的过期时限只是兜底）。
     """
+    try:
+        return _run_engine_and_persist(
+            run,
+            project_id=project_id,
+            payload=payload,
+            project_config=project_config,
+            target_type=target_type,
+            target_key=target_key,
+        )
+    finally:
+        clear_run_progress(run.id)
+
+
+def _run_engine_and_persist(
+    run: AiAnalysisRun,
+    *,
+    project_id: int,
+    payload: dict,
+    project_config: dict,
+    target_type: str,
+    target_key: Optional[str],
+) -> dict:
     summary = payload.get("summary") or {}
 
     # 正式分析用配置里的单次请求超时（默认 300 秒，界面可改），**不是**探测用的 30 秒。
@@ -1451,7 +1488,6 @@ def _execute_analysis(
     limits, budget_note = _apply_model_window(client, project_config, _engine_limits(project_config))
     if budget_note:
         log_print(f"⚠️ AI 分析：{budget_note}", "AI", force=True)
-
     outcome = run_analysis(
         client=client,
         provider=PlatformContextProvider(loaded=loaded),
@@ -1463,10 +1499,17 @@ def _execute_analysis(
         project_knowledge=project_config.get("project_knowledge") or "",
         project_instructions=project_config.get("prompt_template") or "",
         baseline_digest=_baseline_digest(target_type, target_key, change),
+        # 每跑完一轮把累计用量写进进程内的进度快照：界面一边跑一边轮询它
+        # （见 services/ai/run_progress.py）。**它是给界面看的一眼，不是账** ——
+        # 落库的账仍在 _persist_outcome 那一处。
+        on_round=lambda progress: publish_run_progress(run.id, project_id, progress),
     )
 
     result = _result_payload(
-        outcome, payload, suppressed=_suppressed(target_type, target_key, change)
+        outcome,
+        payload,
+        suppressed=_suppressed(target_type, target_key, change),
+        context_budget_note=budget_note,
     )
     _persist_outcome(
         run, outcome, result, pricing_version=_price_version_for(project_config)
@@ -1516,6 +1559,10 @@ def stream_commit_analysis(commit_id: int, user_label: str = "") -> Iterable[str
         trigger_source="manual",
         payload=payload,
     )
+    # **开跑之前**先把运行号发出去：界面要按它轮询「跑到第几轮、现在超了没」
+    # （`/ai-analysis/runs/<id>/progress`），而分析是阻塞跑的 —— 等结束再给号，
+    # 那个提示就只能在跑完之后才可能出现，也就没有意义了。
+    yield _sse_event("run", {"run_id": run.id})
 
     result = _execute_analysis(
         run,
@@ -1578,6 +1625,8 @@ def stream_weekly_analysis(
         trigger_source=trigger_source,
         payload=payload,
     )
+    # 与单提交那条同理：运行号必须在**开跑之前**给出去，界面才能一边跑一边问进度。
+    yield _sse_event("run", {"run_id": run.id})
 
     result = _execute_analysis(
         run,

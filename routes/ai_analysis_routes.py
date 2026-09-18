@@ -8,16 +8,18 @@ from flask import Blueprint, Response, jsonify, render_template, request, stream
 
 from models import Commit, Project, Repository, WeeklyVersionConfig, db
 from models.ai_analysis import AiAnalysisRun
-from services.ai import project_pack_service
-from services.ai.analysis_budget import budget_status, platform_budget_status
+from services.ai import project_pack_service, run_progress
+from services.ai.analysis_budget import budget_status, platform_budget_status, with_live_usage
 from services.ai.endpoint_service import ConfigValidationError, probe_connection, probe_models
 from services.ai.platform_budget import platform_budget_public, set_platform_budget
+from services.ai.pricing import estimate_cost
 from services.ai_analysis_service import (
     build_endpoint_client,
     get_latest_commit_result,
     get_latest_weekly_result,
     get_project_analysis_config,
     get_project_api_key_status,
+    project_price_table,
     set_project_api_key,
     stream_commit_analysis,
     stream_weekly_analysis,
@@ -226,6 +228,66 @@ def ai_commit_latest(commit_id):
     if not result:
         return jsonify({"success": True, "result": None})
     return jsonify({"success": True, "result": result})
+
+
+@ai_analysis_bp.route("/ai-analysis/runs/<int:run_id>/progress", methods=["GET"])
+def ai_run_progress(run_id):
+    """**跑的过程中的一眼**：第几轮、已用多少 token、现在有没有超预算。
+
+    为什么要轮询而不是 SSE 推：分析入口是「生成器里跑一次阻塞调用」，
+    `_execute_analysis` 返回之前一个事件都 yield 不出去（见 services/ai/run_progress.py
+    的模块 docstring）。引擎每跑完一轮把累计用量写进进程内的快照，这里读它。
+
+    三件事必须说清：
+
+    * `progress` 为 `null` 表示**读不到**（没在跑 / 跑在别的进程 / 已过期），
+      界面要显示「进度不可用」，**不是显示 0**；
+    * `budget` 是把**本次运行尚未落库**的用量算进去之后的判定（`with_live_usage`），
+      所以它可能比 `/config` 返回的那份更早显示「已超」—— 这正是这个端点的用途；
+    * 权限按**这条运行自己的 project_id** 判，不接受调用方指定项目（换个号就能读别人的
+      消耗与预算）。只读库 + 读进程内快照，**不发起任何计费调用**。
+    """
+    run = db.session.get(AiAnalysisRun, run_id)
+    if run is None:
+        return jsonify({"success": False, "message": "Not found."}), 404
+    if not _has_project_access(run.project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+
+    snap = run_progress.snapshot(run_id)
+    status = budget_status(run.project_id)
+    payload = {
+        "success": True,
+        "run_id": run_id,
+        "project_id": run.project_id,
+        "status": run.effective_status,
+        "progress": snap.to_dict() if snap else None,
+        "budget": status,
+    }
+    if snap is None:
+        return jsonify(payload), 200
+
+    # 本次运行**还没落库**的那部分用量：token 直接取快照，费用按这条运行的模型与项目
+    # 价格表现算（算不出就是 `None`，`with_live_usage` 会据此**不判**费用那一档）。
+    table, _errors = project_price_table(run.project_id)
+    live_cost = None
+    currency = ""
+    if table is not None:
+        estimate = estimate_cost(
+            str(run.model or ""),
+            tokens_input=snap.prompt_tokens,
+            tokens_output=snap.completion_tokens,
+            cache_read=snap.cache_read_tokens,
+            table=table,
+        )
+        live_cost = estimate.amount
+        currency = str(estimate.currency or "")
+    payload["budget"] = with_live_usage(
+        status,
+        tokens=snap.live_tokens,
+        cost=live_cost,
+        currency=currency,
+    )
+    return jsonify(payload), 200
 
 
 # ---------------------------------------------------------------------------

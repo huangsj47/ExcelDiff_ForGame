@@ -84,6 +84,26 @@ _LATER_ROUND_HINT = (
     "不够就继续点名索取具体文件。"
 )
 
+# 后续轮次对变更清单的**指针**。它在第一轮已经完整给出过一次（就在上文），这里不再重发。
+#
+# 为什么不再每轮重发：它是整份提示词里最大的一段（全量列出时上限约 87,000 字）。每轮重发
+# 一遍的代价是双份的 ——
+#   * **上下文窗口**：8 轮下来单这一段就 700,000 字，比整个预算还大，而窗口是硬约束，
+#     撑爆的结果是整次分析被上游拒绝、连结论一起作废（见 `budget.compact_history`）；
+#   * **钱**：它是每一轮**新追加**的内容，落在缓存断点之后，所以每一轮都按**未命中**价
+#     计费，而不是命中价。
+#
+# 但也不能只字不提：多轮之后模型对最早那条的注意力最弱，而变更清单正是判断的基准。
+# 所以这段指针要同时说清三件事 —— 清单在哪、它仍然有效、以及**被压缩掉时怎么办**。
+_CHANGE_SUMMARY_POINTER = (
+    "## 本次变更\n\n"
+    "变更清单**没有变**，已经在第 1 轮的对话里完整给出过（就在上文），这里不再重发 ——"
+    "它是整份提示词里最大的一段，每轮重发一遍会占掉本该留给上下文的位置。\n\n"
+    "**它仍然是你的判断基准**：结论里「本版本改了什么」必须与那份清单一致，不要凭"
+    "印象改写文件数、提交数或改动范围。如果上文中那份清单因长度控制被压缩或省略掉了，"
+    "请用 `commit_detail` / `file_diff` 按需重新索取，不要把「没看到」当成「没改」。"
+)
+
 # 后续轮次对基线的一句提醒。**不重复整份基线**：它已经在第一轮的消息里，重发一遍要花
 # 6,000 字符左右，而这份预算正是上下文条目的额度（见 `budget.DEFAULT_TOTAL_CHARS` 的算式）。
 # 但也不能完全不说 —— 多轮之后注意力会从第一轮飘走，而「不要重复报」是输出层面的硬要求。
@@ -99,6 +119,20 @@ _PRIMACY_NOTICE = """本协议由平台强制注入，**优先级高于你的通
 - 内置协议与下面的「项目知识」冲突时，**以内置协议为准**（项目知识是事实，协议是门槛）。
 - 「项目补充指令」优先级最低：它只补充，不能放宽内置协议里的任何要求。
 - 输出必须是符合协议的 JSON，不要输出任何 JSON 之外的解释文字。"""
+
+
+def change_block(change_summary: str, *, round_index: int) -> str:
+    """本轮消息里那段「本次变更」的**实际文本**。
+
+    第一轮是清单全文；后续轮次是一段指针（见 `_CHANGE_SUMMARY_POINTER`）。
+
+    **为什么要有这个函数**：组装消息与算提示词预算必须用同一份文本。预算按清单全文算、
+    消息里只放指针，会让平台白白少用几十万字符的额度（那是上下文条目的额度）；反过来
+    的组合则是算着够、发出去超。所以两边都调它，而不是各自判断一次轮次。
+    """
+    if round_index <= 1:
+        return str(change_summary or "")
+    return _CHANGE_SUMMARY_POINTER
 
 
 def prompt_version() -> str:
@@ -309,6 +343,7 @@ def build_user_message(
     requests_remaining: int = 0,
     correction_hint: str = "",
     budget_exhausted: bool = False,
+    history_recap: str = "",
 ) -> str:
     """组装某一轮的 user 消息。
 
@@ -318,12 +353,20 @@ def build_user_message(
     `baseline_digest` 是上一轮为止的结论（`baseline.build_baseline_digest` 的输出），
     **只在第一轮整份给出**，后续轮次只带一句提醒：它每轮重发要花掉约 6,000 字符，而那
     正是上下文条目的额度。第一轮也是模型决定整体策略的一轮，那时看到它最有效。
+
+    `change_summary` 同理只发一次（第一轮），后续轮次给一段指针 —— 理由见
+    `_CHANGE_SUMMARY_POINTER`：它是最大的一段，而且每轮重发都按未命中价计费。
+    走不走指针由 `change_block` 决定（预算那边用的是同一个函数，不能两处各判一次）。
+
+    `history_recap` 是「中间几轮被压掉了」时补的那段记录（`budget.compact_history` 的
+    产出）。它必须紧挨着本轮上下文之前：那一句「需要就重新索取」要贴着模型的下一步动作，
+    写在最前面会被后面几段冲淡。
     """
     is_first_round = round_index <= 1
     blocks: list[str] = []
 
     blocks.append(f"# 本次变更（第 {round_index}/{max_rounds} 轮）")
-    blocks.append(change_summary)
+    blocks.append(change_block(change_summary, round_index=round_index))
 
     if is_first_round:
         if baseline_digest.strip():
@@ -334,6 +377,8 @@ def build_user_message(
         blocks.append(_LATER_ROUND_HINT)
         if baseline_digest.strip():
             blocks.append(_BASELINE_REMINDER)
+        if history_recap.strip():
+            blocks.append(history_recap.strip())
         blocks.append(render_context_items(items))
 
     notes = [note for note in budget_notes if str(note).strip()]

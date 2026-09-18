@@ -230,14 +230,31 @@ def test_the_model_can_ask_for_context_and_gets_it_back():
 
     assert outcome.rounds_used == 2
     assert outcome.requests_used == 1
-    assert "本次变更共 1 个提交" in client.calls[1][-1]["content"], "第二轮没带变更清单"
     assert "+ 一行改动" in client.calls[1][-1]["content"], "要来的 diff 没有回灌"
     assert TABLE in client.calls[1][-1]["content"]
+    # 第二轮**不再重发**变更清单，而是给一段指向它的说明。清单本身仍在这次请求里
+    # （就是第 1 轮那条消息），所以模型并没有失去它 —— 见下一条用例。
+    assert "本次变更共 1 个提交" not in client.calls[1][-1]["content"], (
+        "变更清单又被重发了一遍 —— 它是最大的一段，每轮重发既挤窗口又按未命中价计费"
+    )
+    assert "已经在第 1 轮" in client.calls[1][-1]["content"], "也没有告诉模型清单在哪"
 
 
-def test_the_change_summary_is_present_in_every_round():
-    """多轮的对话历史里第一轮就带过摘要，但每轮的 user 消息仍要重新给 —— 长对话里
-    模型对最早那条的注意力最弱，而它正是判断的基准。"""
+def test_the_change_summary_is_sent_once_and_still_in_context_afterwards():
+    """变更清单**只发一次**，但它一直在模型的上下文里，并且后续轮次必须被提醒回去看它。
+
+    ## 这条用例原来的样子与为什么改
+
+    原来它叫 `test_the_change_summary_is_present_in_every_round`，断言每一轮的 user
+    消息里都重新出现整份清单，理由是「长对话里模型对最早那条的注意力最弱，而它正是判断
+    的基准」。那个顾虑是真的，但付的代价太大：清单顶到上限时约 87,000 字，8 轮下来单这
+    一段就 700,000 字 —— 比整个提示词预算还大，而窗口是硬约束，撑爆的结果是整次分析被
+    上游拒绝（`budget.compact_history` 与引擎里的收尾路径就是为它准备的）。而且它是每轮
+    **新追加**的内容，落在缓存断点之后，每一轮都按**未命中**价计费。
+
+    改成「发一次 + 后续轮次给指针」之后，两件事都必须成立，所以这里两条都钉：
+    清单仍然在请求里（第 1 轮那条消息没有被压掉），以及后续轮次说了「它在哪、它仍然有效」。
+    """
     client = ScriptedClient(
         _requests({"type": "commit_detail", "commit": COMMIT}),
         _requests({"type": "commit_detail", "commit": COMMIT}),
@@ -246,8 +263,15 @@ def test_the_change_summary_is_present_in_every_round():
 
     _run(client)
 
+    # 第一条消息就是第 1 轮的 user 消息：清单**始终**在这次请求里，只是不再重复。
     for call in client.calls:
-        assert "本次变更共 1 个提交" in call[-1]["content"]
+        assert "本次变更共 1 个提交" in call[1]["content"], "变更清单从上下文里消失了"
+    assert "本次变更共 1 个提交" in client.calls[0][-1]["content"], "第一轮没有给清单"
+    for call in client.calls[1:]:
+        assert "本次变更共 1 个提交" not in call[-1]["content"]
+        assert "仍然是你的判断基准" in call[-1]["content"], (
+            "没有提醒模型「清单仍然有效」—— 那正是原来那条用例担心的事"
+        )
 
 
 def test_the_baseline_is_carried_into_the_first_round():

@@ -24,7 +24,6 @@ from services.ai.budget import (
     TRUNCATION_SUFFIX,
     ContextItem,
     build_continuation_summary,
-    clamp_to_model_window,
     enforce_budget,
     estimate_chars,
     limit_item_count,
@@ -375,52 +374,13 @@ def test_estimate_chars_sums_message_contents():
 
 
 # ==========================================================================
-# 模型上下文窗口：只在**能断定**超窗时才压
+# 模型上下文窗口：**规则已经改了**，用例搬到了 tests/test_ai_budget_vs_model_window.py
 #
-# 这里守的是一条容易被「顺手加强」破坏的边界：字符 ≠ token，平台不知道换算比例，
-# 所以只有「按最乐观的 1 字 1 token 也超了」才允许压缩。
+# 原先这里有 `clamp_to_model_window` 的三条用例，守的是「只在按最乐观的 1 字 1 token
+# 也算得超窗时才压」。那条规则后来被 `budget.effective_prompt_budget`（窗口 × 60% 水位）
+# 取代 —— 理由见那边的 docstring：旧规则在**窗口问不到**时什么都不做，于是把预算配得很大
+# 的项目必然撞窗被拒、整次分析作废。新规则与它的全部用例都在那个文件里。
 # ==========================================================================
-
-
-def test_a_budget_that_clearly_exceeds_the_window_is_clamped():
-    budget, note = clamp_to_model_window(360_000, 200_000)
-
-    assert budget == 200_000
-    assert "360,000" in note and "200,000" in note
-    assert "1:1" in note, "说明里要写清凭什么断定超窗，否则用户以为平台知道换算比例"
-
-
-@pytest.mark.parametrize(
-    "budget,tokens",
-    [
-        (200_000, 200_000),   # 相等：最乐观的算法刚好装得下，压它没有依据
-        (120_000, 200_000),
-        (360_000, 1_000_000),
-    ],
-)
-def test_a_budget_inside_the_window_is_left_alone(budget, tokens):
-    """**这是本函数最重要的性质。**
-
-    预算字符数不大于窗口 token 数时是否真的装得下，取决于提示词里中文占多少 ——
-    平台无从判断。在没有依据的情况下压缩，损失的是分析质量，而用户看到的是
-    「这次分析浅了」，看不出原因。所以这一档一律不动。
-    """
-    assert clamp_to_model_window(budget, tokens) == (budget, "")
-
-
-@pytest.mark.parametrize("tokens", [0, -1])
-def test_an_unknown_or_silly_window_changes_nothing(tokens):
-    """窗口未知（0 / 负数）时不能压缩：那等于按一个不存在的窗口砍预算。"""
-    assert clamp_to_model_window(360_000, tokens) == (360_000, "")
-
-
-def test_clamping_leaves_no_safety_margin():
-    """刻意**不留**安全系数：留系数等于假装知道那个换算比例。
-
-    压到的目标就是窗口本身，留下的余量由调用方按自己的语言构成去调预算。
-    """
-    budget, _ = clamp_to_model_window(500_000, 128_000)
-    assert budget == 128_000
 
 
 # ==========================================================================

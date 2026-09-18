@@ -1237,9 +1237,29 @@ class TestTheDrawersSayWhyTheButtonIsDisabled:
 
     @pytest.mark.parametrize("path", [WEEKLY_DRAWER, COMMIT_DRAWER, PROJECT_VIEW])
     def test_every_drawer_shows_the_reason_not_just_a_disabled_button(self, path):
+        """超预算时**必须写明原因与怎么恢复**。
+
+        这条断言在「预算分两档」之后改过一次口径：「调整方式」那句话从三份模板里
+        搬进了 `static/js/ai_budget_notice.js`（唯一事实源）。理由是两档预算的恢复去处
+        不同 —— 项目档在项目的「AI 分析配置」，平台档在「AI 消耗」页面的「平台总预算」。
+        继续在模板里写死一句，必然有一档是错的，而用户会按那句话去找、找不到。
+
+        所以这里改成断言**意图**：抽屉把判定交给共享模块，而共享模块里真的有那句话
+        （后者由 `tests/test_ai_run_budget_warning.py` 逐条钉住）。这不是放宽 ——
+        「三份模板各写一份文案」本来就不可能同时对。
+        """
         source = _read(path)
-        assert "budget.reason" in source or "budget.reason" in source, f"{path} 没有显示拦截原因"
-        assert "调整方式" in source, f"{path} 没有告诉用户怎么恢复"
+        assert "budget.reason" in source or "AiBudgetNotice.metaText(budget" in source, (
+            f"{path} 没有显示拦截原因"
+        )
+        assert "AiBudgetNotice.metaText(budget" in source or "AiBudgetNotice.guidance(budget)" in source, (
+            f"{path} 没有把「怎么恢复」交给共享模块 —— 那句文案必须来自唯一事实源"
+        )
+        notice = _read("static/js/ai_budget_notice.js")
+        assert "调整方式：" in notice, "共享模块里没有「怎么恢复」那句话"
+        assert "PROJECT_HOWTO" in notice and "PLATFORM_HOWTO" in notice, (
+            "两档预算的恢复去处没有分别给出"
+        )
 
     def test_the_drawers_disable_before_they_check(self):
         """按钮先禁用再判定，不能「先放开、再禁用」——那等于没禁用。"""
