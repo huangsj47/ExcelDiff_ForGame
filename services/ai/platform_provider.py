@@ -37,6 +37,13 @@ _MAX_CELL_CHARS = 160
 
 _ROW_LABELS = {"added": "新增", "removed": "删除", "modified": "修改", "unchanged": "未变"}
 
+# 表头块里「有改动」的三种状态（`unchanged` 是常驻行，见 `_render_header_block`）。
+# 与 `utils/diff_data_utils.header_rows_have_changes`、前端模块的 `CHANGED_ROW_STATUSES`
+# 是同一个判据的三个副本（三种语言各一份，改动时一起改）。
+_HEADER_CHANGED_STATUSES = ("added", "removed", "modified")
+# 表头块最多列几行。表头行就那么几行，单独给一个小上限即可。
+_MAX_HEADER_ROWS = 20
+
 
 def render_diff_payload(
     diff_data: Any,
@@ -131,7 +138,12 @@ def _render_sheet(name: str, sheet: Any, *, max_rows: int) -> list[str]:
         return head + [f"- 解析失败：{sheet.get('message') or sheet.get('error')}"]
 
     rows = sheet.get("rows") or []
+    header_lines = _render_header_block(sheet)
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or not rows:
+        if header_lines:
+            # 「只改了表头」的提交：rows 是空的，但表头行真的变了 ——
+            # 这里说「没有差异行」等于让 AI 告诉评审者这次提交什么都没改。
+            return head + header_lines
         return head + ["- 没有差异行。"]
 
     # 优先展示有变化的行：整表几千行时，未变的行是纯噪音。
@@ -144,6 +156,8 @@ def _render_sheet(name: str, sheet: Any, *, max_rows: int) -> list[str]:
             f"- 本次：新增 {stats.get('added', 0)}、删除 {stats.get('removed', 0)}、"
             f"修改 {stats.get('modified', 0)}（表内共 {len(rows)} 行差异记录）。"
         )
+    # 表头行紧跟在统计之后、数据行之前 —— 与页面上的位置一致（表头块在最上面）。
+    head.extend(header_lines)
 
     for row in shown[:max_rows]:
         rendered = _render_row(row)
@@ -154,6 +168,29 @@ def _render_sheet(name: str, sheet: Any, *, max_rows: int) -> list[str]:
             f"- （另有 {len(shown) - max_rows} 行差异未列出，需要时请针对具体行索取。）"
         )
     return head
+
+
+def _render_header_block(sheet: Mapping) -> list:
+    """表头块（物理第 2..N 行，见 `services/diff_service.py::_build_header_rows`）。
+
+    与数据行同一个口径：**只列有改动的表头行** —— 块里含未改动的行（页面拿它们说明
+    「表头共 3 行」），但那些进提示词只是噪音。
+
+    必须列出来：表头行的改动**不在 `rows` 里**，不列的话「这次提交只改了表头」
+    在 AI 眼里就是「没有差异行」，它会如实告诉评审者这次提交什么都没改。
+    """
+    rows = sheet.get("header_rows")
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        return []
+    changed = [row for row in rows if _row_status(row) in _HEADER_CHANGED_STATUSES]
+    if not changed:
+        return []
+    lines = [f"- 表头 {len(rows)} 行中有 {len(changed)} 处改动。"]
+    for row in changed[:_MAX_HEADER_ROWS]:
+        rendered = _render_row(row)
+        if rendered:
+            lines.append(rendered)
+    return lines
 
 
 def _row_status(row: Any) -> str:
@@ -168,6 +205,11 @@ def _render_row(row: Any) -> str:
     status = _ROW_LABELS.get(_row_status(row), _row_status(row) or "变更")
     number = row.get("row_number")
     prefix = f"- [{status}]" + (f" 第 {number} 行：" if number is not None else " ")
+    # 修改行还要说清它在**上一版本**里是第几行：插/删一行之后两版行号会不同
+    # （实测 12 ↔ 11），只说一个数会让模型（和读报告的人）按错的行号去定位。
+    previous_number = row.get("previous_row_number")
+    if previous_number is not None and str(previous_number) != str(number):
+        prefix = f"- [{status}] 第 {number} 行（上一版第 {previous_number} 行）："
 
     cell_changes = row.get("cell_changes") or []
     if cell_changes:

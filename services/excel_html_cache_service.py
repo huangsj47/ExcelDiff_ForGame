@@ -386,7 +386,10 @@ class ExcelHtmlCacheService:
             html_parts.append(f'<div class="sheet-container" data-sheet="{safe_sheet}">')
             html_parts.append(f'<h4 class="sheet-title">工作表: {safe_sheet}</h4>')
 
-            if 'rows' in sheet_data and sheet_data['rows']:
+            header_rows = sheet_data.get('header_rows') or []
+            # 表头行也算「有内容」：只改表头的一次提交里 rows 是空的，只按 rows 判的话
+            # 整张表会被跳过 —— 兜底路径下这次改动就完全看不见了。
+            if (sheet_data.get('rows') if 'rows' in sheet_data else None) or header_rows:
                 html_parts.append('<div class="table-container">')
                 html_parts.append('<table class="excel-diff-table">')
 
@@ -399,13 +402,32 @@ class ExcelHtmlCacheService:
                     html_parts.append('</tr></thead>')
 
                 html_parts.append('<tbody>')
-                for row in sheet_data['rows']:
+                # 表头块排在最前面，与主模板/前端模块的位置一致，单元格写法也一致
+                # （`format_cell_value` + `escape`，见本方法 docstring）。
+                #
+                # 行号按**块里实际的行号**写，不写死「第 2 行起」：配了「名称行 = 2」的
+                # 仓库，表头块里第一行是物理第 1 行（那行大标题），块里的行号是 1、3…
+                if header_rows:
+                    numbers = [row.get('row_number') for row in header_rows]
+                    span = (f'第 {numbers[0]} 行起' if len(numbers) == 1
+                            else f'第 {numbers[0]}–{numbers[-1]} 行')
+                    html_parts.append(
+                        f'<tr class="header-block-title"><td colspan="{len(headers) + 2}">'
+                        f'表头（{span}，共 {len(header_rows)} 行）</td></tr>')
+                for row in list(header_rows) + list(sheet_data['rows']):
                     status = row.get('status', 'unchanged')
                     row_number = row.get('row_number', '')
                     data = row.get('data', {})
+                    # 修改行把上一版本的行号一并写出来（插/删一行之后两版行号会不同）。
+                    # 这一份是「模板渲染失败」时的兜底，没有上下两行的结构，所以跟
+                    # 另一个兜底形态一样写成 `旧 → 新`。
+                    previous_number = row.get('previous_row_number')
+                    number_text = format_cell_value(row_number)
+                    if previous_number not in (None, '') and str(previous_number) != str(row_number):
+                        number_text = f'{format_cell_value(previous_number)} → {number_text}'
 
                     html_parts.append(f'<tr class="row-{escape(str(status))}">')
-                    html_parts.append(f'<td>{escape(format_cell_value(row_number))}</td>')
+                    html_parts.append(f'<td>{escape(number_text)}</td>')
                     html_parts.append(
                         f'<td class="status-{escape(str(status))}">{escape(str(status))}</td>')
 
@@ -487,6 +509,14 @@ class ExcelHtmlCacheService:
         .row-added { background-color: #d4edda; }
         .row-removed { background-color: #f8d7da; }
         .row-modified { background-color: #fff3cd; }
+        .row-unchanged { color: #6c757d; }
+        /* 表头块的分节标题（见 _generate_simple_excel_html）：与数据行分开显示 */
+        .header-block-title td {
+            background: #eef1f4;
+            color: #495057;
+            font-weight: 600;
+            font-size: 13px;
+        }
         .status-added { color: #155724; font-weight: bold; }
         .status-removed { color: #721c24; font-weight: bold; }
         .status-modified { color: #856404; font-weight: bold; }

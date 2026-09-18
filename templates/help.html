@@ -161,7 +161,16 @@
                         <div class="step-badge"><i class="fas fa-heading" style="font-size: 12px;"></i></div>
                         <div class="step-content">
                             <h4>表头行数 <span class="badge bg-danger" style="font-size: 0.7rem; vertical-align: middle;">必填</span></h4>
-                            <p>指定 Excel 文件中表头占据的行数。系统根据此值区分表头和数据行，正确解析 Diff。例如表头占 <code>3</code> 行，则第 4 行开始为数据。</p>
+                            <p>指定 Excel 文件里表头占前几行（<b>含第 1 行</b>）。第 2 行到第 N 行会被当作<b>表头</b>单独成段显示。</p>
+                            <p class="text-muted">表头行的改动<b>同样会显示出来</b>（逐格显示改前 / 改后），只是不占「数据行」的统计 —— 表头是每张表都有的固定几行，混进数据行的增删改里会让真正的数据变更被淹掉。例如表头占 <code>3</code> 行：第 2、3 行在 Diff 页面上归入「表头行数据」一段，第 4 行起才是数据行。不填或填 <code>1</code> 时，第 2 行起全部按数据行处理。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-heading" style="font-size: 12px;"></i></div>
+                        <div class="step-content">
+                            <h4>名称行</h4>
+                            <p><b>列名取自表头块里的第几行。</b>留空（或填 <code>1</code>）表示第 1 行就是字段名行 —— 与一直以来一样。填 <code>2</code> 用于「第 1 行是大标题（合并单元格）、第 2 行才是字段名」的表。</p>
+                            <p class="text-muted">留空时，形如「第 1 行 <code>道具配置表 / 空 / 空</code>、第 2 行 <code>id / name / icon</code>」的表，列头上会显示 <code>Unnamed: 1</code>、<code>Unnamed: 2</code>，而只改第 1 行的标题会被报成「某一列改了名」。填 <code>2</code> 之后：列头显示 <code>id / name / icon</code>；只改标题 → 显示成<b>表头第 1 行</b>的一处单元格改动；名称行本身改名 → 照旧显示成列改名。<b>第 1 行不会被藏起来</b>，它照样在「表头行数据」一段里逐格显示。取值不能超过「表头行数」。</p>
                         </div>
                     </div>
                     <div class="step-item">

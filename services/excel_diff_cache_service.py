@@ -21,7 +21,7 @@ db = None
 # 一旦它比真实版本旧，就会把**刚生成的当前版本缓存**当成过期数据清掉。
 # 一致性由 tests/test_diff_service_fidelity.py::TestDiffLogicVersionSingleSource
 # 扫描全部三处锁定（tests/test_diff_logic_version_single_source.py 只覆盖 app.py / config.py）。
-DIFF_LOGIC_VERSION = "1.17.0"
+DIFF_LOGIC_VERSION = "1.18.0"
 DiffCache = None
 OperationLog = None
 Commit = None
@@ -684,6 +684,10 @@ class ExcelDiffCacheService:
                             'stats': sheet_info.get('stats', {}),
                             'rows': [],            # 清空行数据
                             'headers': sheet_info.get('headers', []),
+                            # 表头行的**计数**留下（行详情与 rows 一样为了体积丢掉）：
+                            # stats 现在只数数据行，不留这个计数的话，「这次提交只改了
+                            # 表头」的大文件会显示成「0 处改动」。键很小，不占体积。
+                            'header_stats': sheet_info.get('header_stats', {}),
                         }
                 diff_json = json.dumps(summary_data)
                 log_print(f"📦 已替换为摘要数据: {len(diff_json)} 字符", 'CACHE')

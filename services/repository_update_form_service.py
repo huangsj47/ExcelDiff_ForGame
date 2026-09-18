@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from services.repository_diff_cache_reset import (
+    diff_settings_changed,
+    parse_header_name_row,
+    reset_repository_diff_caches,
+)
+
 REPOSITORY_UPDATE_FORM_FORCE_SYNC_ERRORS = (
     ImportError,
     RuntimeError,
@@ -217,8 +223,18 @@ def handle_update_repository_form(
         repository.unconfirmed_history = bool(request.form.get("unconfirmed_history"))
         repository.delete_table_alert = bool(request.form.get("delete_table_alert"))
         repository.weekly_version_setting = request.form.get("weekly_version_setting")
+        # 比较配置（表头行数 / 关键列）改了吗？要**在写入之前**比 —— 写完之后再比等于
+        # 拿新值比新值，永远「没变」。改了就清该仓库的 diff 缓存（见下面 commit 之前的
+        # reset_repository_diff_caches 调用与 services/repository_diff_cache_reset.py）。
+        changed_diff_settings = diff_settings_changed(repository, request.form)
         header_rows = request.form.get("header_rows")
+        # 名称行的校验要在**写入之前**：越界（> 表头行数）时整份表单退回，不留半份改动。
+        header_name_row, name_row_error = parse_header_name_row(request.form, header_rows)
+        if name_row_error:
+            flash(name_row_error, "error")
+            return redirect(url_for("edit_repository", repository_id=repository_id))
         repository.header_rows = int(header_rows) if header_rows else None
+        repository.header_name_row = header_name_row
         repository.key_columns = request.form.get("key_columns")
         repository.enable_id_confirmation = bool(request.form.get("enable_id_confirmation"))
         repository.show_duplicate_id_warning = bool(request.form.get("show_duplicate_id_warning"))
@@ -313,6 +329,15 @@ def handle_update_repository_form(
                 switch_type=switch_type,
                 old_value=switch_old_value,
                 new_value=switch_new_value,
+            )
+        elif changed_diff_settings:
+            # 只清缓存，**不**动提交记录与同步状态：文件没变，变的只是「怎么读它」。
+            # 位置必须在 db.session.commit() 之前 —— 同一个事务，commit 一起生效；
+            # 否则请求结束时回滚，缓存一条没删而日志说删了（静默失败）。
+            reset_repository_diff_caches(
+                repository_id,
+                changed_fields=changed_diff_settings,
+                log_print=log_print,
             )
 
         db.session.commit()

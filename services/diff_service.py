@@ -75,7 +75,8 @@ class DiffService:
             return 'binary'
     
     def process_diff(self, file_path: str, current_content: bytes, previous_content: bytes = None,
-                     key_columns: str = None) -> Dict[str, Any]:
+                     key_columns: str = None, header_rows: int = None,
+                     header_name_row: int = None) -> Dict[str, Any]:
         """处理文件差异，根据文件类型选择合适的处理方式。
 
         key_columns：仓库上配置的「关键列」（`Repository.key_columns`，列号从 1 开始、
@@ -84,6 +85,17 @@ class DiffService:
         但引擎历史上从来没读过这个配置，只按前 3 列的相似度猜配对，
         于是把不同的行配成一条「修改」，报出来的改前值是另一行的
         （线上审计：5988 报的行 9 里 old 取自第 21 行、new 取自第 10 行）。
+
+        header_rows：仓库上配置的「表头行数」（`Repository.header_rows`）。这个值
+        **只用来把表头行与数据行分开**，不改读取方式：第 1 行照旧是列名（`header=0`），
+        物理行 `2..header_rows` 归到每张表自己的 `header_rows` 块里，`rows`/`stats`
+        只剩数据行。详见 `_build_header_rows`。
+
+        header_name_row：仓库上配置的「名称行」（`Repository.header_name_row`）——
+        **列名取表头块里的第几行**。1（或空）就是今天的行为（第 1 行是字段名行）；
+        配 2 用于「第 1 行是大标题、第 2 行才是字段名」的表。取列名的动作放在
+        改名之后仍按 `header=0` 的读法进行（见 `_plan_name_row`），所以行号口径
+        （物理行 `idx + 2`）一个字都没变。
         """
         file_type = self.get_file_type(file_path)
 
@@ -92,7 +104,9 @@ class DiffService:
                 return self._process_text_diff(file_path, current_content, previous_content)
             elif file_type == 'excel':
                 return self._process_excel_diff(file_path, current_content, previous_content,
-                                                key_columns=key_columns)
+                                                key_columns=key_columns,
+                                                header_rows=header_rows,
+                                                header_name_row=header_name_row)
             elif file_type == 'image':
                 return self._process_image_diff(file_path, current_content, previous_content)
             else:
@@ -105,7 +119,9 @@ class DiffService:
                 'message': f'处理文件差异时发生错误: {str(e)}'
             }
     
-    def process_deleted_file(self, file_path: str, previous_content: bytes) -> Dict[str, Any]:
+    def process_deleted_file(self, file_path: str, previous_content: bytes,
+                             header_rows: int = None,
+                             header_name_row: int = None) -> Dict[str, Any]:
         """整份文件被删除时的差异：基线的**每一张工作表**都按「已删除」处理。
 
         为什么不复用 `process_diff(path, None, previous_content)`：通用路径上
@@ -130,7 +146,8 @@ class DiffService:
                 'summary': {'added': 0, 'removed': 0, 'modified': 0, 'total': 0},
             }
         previous_data = self._read_excel_data(previous_content, file_path)
-        return self._compare_excel_data({}, previous_data, file_path)
+        return self._compare_excel_data({}, previous_data, file_path, header_rows=header_rows,
+                                        header_name_row=header_name_row)
 
     def _process_text_diff(self, file_path: str, current_content: bytes, previous_content: bytes = None) -> Dict[str, Any]:
         """处理文本文件差异"""
@@ -187,7 +204,8 @@ class DiffService:
             }
     
     def _process_excel_diff(self, file_path: str, current_content: bytes, previous_content: bytes = None,
-                            key_columns: str = None) -> Dict[str, Any]:
+                            key_columns: str = None, header_rows: int = None,
+                            header_name_row: int = None) -> Dict[str, Any]:
         """处理Excel文件差异"""
         import time
         start_time = time.time()
@@ -216,7 +234,9 @@ class DiffService:
             
             # 生成Excel差异
             diff_result = self._compare_excel_data(current_data, previous_data, file_path,
-                                                   key_columns=key_columns)
+                                                   key_columns=key_columns,
+                                                   header_rows=header_rows,
+                                                   header_name_row=header_name_row)
             
             self.performance_stats['excel_diff_time'] += time.time() - start_time
             
@@ -509,26 +529,32 @@ class DiffService:
         return sheets
     
     def _compare_excel_data(self, current_data: Dict, previous_data: Dict, file_path: str,
-                            key_columns: str = None) -> Dict[str, Any]:
+                            key_columns: str = None, header_rows: int = None,
+                            header_name_row: int = None) -> Dict[str, Any]:
         """比较Excel数据"""
         import pandas as pd
-        
+
+        header_count = self._header_row_count(header_rows)
+        name_row = self._header_name_row(header_name_row, header_count)
+
         result = {
             'type': 'excel',
             'file_path': file_path,
             'sheets': {},
             'summary': {'added': 0, 'removed': 0, 'modified': 0, 'total': 0}
         }
-        
+
         # 获取所有工作表名称
         all_sheets = set(current_data.keys()) | set(previous_data.keys())
-        
+
         for sheet_name in all_sheets:
             current_df = current_data.get(sheet_name)
             previous_df = previous_data.get(sheet_name)
-            
+
             sheet_diff = self._compare_dataframes(current_df, previous_df, sheet_name,
-                                                  key_columns=key_columns)
+                                                  key_columns=key_columns,
+                                                  header_rows=header_count,
+                                                  header_name_row=name_row)
             result['sheets'][sheet_name] = sheet_diff
             
             # 更新统计信息
@@ -541,13 +567,26 @@ class DiffService:
         return result
     
     def _compare_dataframes(self, current_df, previous_df, sheet_name: str,
-                            key_columns: str = None) -> Dict[str, Any]:
-        """比较两个DataFrame"""
+                            key_columns: str = None, header_rows: int = None,
+                            header_name_row: int = None) -> Dict[str, Any]:
+        """比较两个DataFrame
+
+        header_rows 是「表头块占前几行」（含第 1 行的列名行，见 `_header_row_count`）。
+        整个工作表增/删的两条分支同样要把表头行分出来 —— 否则新加一张三行表头的表，
+        表头那两行会被算进「新增 N 行」的计数里。
+
+        header_name_row 是名称行的物理行号（见 `_header_name_row`）。增/删工作表这两条
+        分支也要按它取列名：不然同一张表在「整表新增」与「改了一格」两种提交里，
+        列头会显示成两套名字（一边是第 1 行的标题占位名、一边是字段名）。
+        """
         import pandas as pd
-        
+
+        header_count = self._header_row_count(header_rows)
+        name_row = self._header_name_row(header_name_row, header_count)
+
         if current_df is None and previous_df is None:
             return {'headers': [], 'rows': [], 'stats': {'added': 0, 'removed': 0, 'modified': 0}}
-        
+
         if current_df is None:
             # 工作表被删除
             #
@@ -565,62 +604,112 @@ class DiffService:
             # 与下面「新增工作表」分支对齐：那个分支一直是保留全部行的。
             # 负载变大的风险由既有的按体积截断机制兜底（`excel_diff_cache_service`
             # 的 MAX_DIFF_DATA_BYTES / truncated 标记，模板另有专门提示分支）。
-            headers = list(previous_df.columns) if previous_df is not None else []
-            rows = []
+            # 列名取「名称行」（配了的话）：整表删除时列头显示的也该是字段名。
+            # 顺序要紧：改名必须排在取行**之前** —— `_dataframe_rows_with_index` 出来的
+            # 行字典是按列名取值的，先取行再改名会让两边的键对不上。
+            first_row = None
             if previous_df is not None:
-                # 整行空白的行不发 —— 判空口径与比较分支（`_has_valid_data`）保持一致。
-                # 不筛的话，表里本来就有的空行会被算成「删除行」：线上 6011 报
-                # 「删除 5653 行」，其中大片是空行；6136 一张表报 1699 行、1686 行全空。
-                rows = [
-                    {
-                        'row_number': row_number,
-                        'status': 'removed',
-                        'data': row_data,
-                    }
-                    for row_number, row_data in self._dataframe_rows_with_index(previous_df)
-                    if self._has_valid_data(row_data, headers)
-                ]
-            return {
+                previous_df, first_row = self._rename_by_name_row(previous_df, name_row)
+            headers = list(previous_df.columns) if previous_df is not None else []
+            # 整行空白的行不发 —— 判空口径与比较分支（`_has_valid_data`）保持一致。
+            # 不筛的话，表里本来就有的空行会被算成「删除行」：线上 6011 报
+            # 「删除 5653 行」，其中大片是空行；6136 一张表报 1699 行、1686 行全空。
+            filtered = [
+                (row_number, row_data)
+                for row_number, row_data in self._dataframe_rows_with_index(previous_df)
+                if self._has_valid_data(row_data, headers)
+            ] if previous_df is not None else []
+            header_block, header_stats = self._build_header_rows(
+                [], filtered, headers, header_count,
+                name_row=name_row, first_rows=(None, first_row))
+            rows = [
+                {
+                    'row_number': row_number,
+                    'status': 'removed',
+                    'data': row_data,
+                }
+                for row_number, row_data in filtered
+                if row_number > header_count
+            ]
+            return self._with_header_block({
                 'operation': 'deleted',
                 'message': f'工作表 "{sheet_name}" 已被删除',
                 'headers': headers,
                 'rows': rows,
                 'stats': {'added': 0, 'removed': len(rows), 'modified': 0}
-            }
+            }, header_block, header_stats)
 
         if previous_df is None:
             # 新增工作表
+            # 改名同样要排在取行之前（理由见上面「工作表被删除」那一支）。
+            first_row = None
+            current_df, first_row = self._rename_by_name_row(current_df, name_row)
             headers = list(current_df.columns)
+            filtered = [
+                (row_number, row_data)
+                for row_number, row_data in self._dataframe_rows_with_index(current_df)
+                if self._has_valid_data(row_data, headers)
+            ]
+            header_block, header_stats = self._build_header_rows(
+                filtered, [], headers, header_count,
+                name_row=name_row, first_rows=(first_row, None))
             rows = [
                 {
                     'row_number': row_number,
                     'status': 'added',
                     'data': row_data
                 }
-                for row_number, row_data in self._dataframe_rows_with_index(current_df)
-                if self._has_valid_data(row_data, headers)
+                for row_number, row_data in filtered
+                if row_number > header_count
             ]
 
-            return {
+            return self._with_header_block({
                 'operation': 'added',
                 'message': f'新增工作表 "{sheet_name}"',
                 'headers': headers,
                 'rows': rows,
                 'stats': {'added': len(rows), 'removed': 0, 'modified': 0}
-            }
-        
+            }, header_block, header_stats)
+
         # 比较现有工作表
-        return self._detailed_dataframe_comparison(current_df, previous_df, key_columns=key_columns)
-    
-    def _detailed_dataframe_comparison(self, current_df, previous_df, key_columns: str = None) -> Dict[str, Any]:
-        """详细比较两个DataFrame，支持行插入/删除的智能识别"""
+        return self._detailed_dataframe_comparison(current_df, previous_df,
+                                                   key_columns=key_columns,
+                                                   header_rows=header_count,
+                                                   header_name_row=name_row)
+
+    def _detailed_dataframe_comparison(self, current_df, previous_df, key_columns: str = None,
+                                       header_rows: int = None,
+                                       header_name_row: int = None) -> Dict[str, Any]:
+        """详细比较两个DataFrame，支持行插入/删除的智能识别
+
+        `header_name_row` 是名称行的物理行号：**列名取表头块里的第几行**（配 2 用于
+        「第 1 行是大标题、第 2 行才是字段名」的表）。改名发生在这条链路的**最前面**
+        （比 `_pair_columns` 与 `header_changes` 都早），否则「名称行改名」会被报成
+        一串无名的假变更：配对按旧名认不出任何一列，列变更提示里还会同时出现旧名与
+        新名。改名前的列名另存一份，供第 1 行的呈现用（见 `_plan_name_row`）。
+        """
         # 列身份不能只看列名 —— 见 _pair_columns 的说明。
+        # `header_rows`/`header_name_row` 到这里都已经是规范化过的值（`_compare_dataframes`
+        # 传下来的），再规范化一次是幂等的，直接调用本方法的地方也不用自己先算。
+        header_count = self._header_row_count(header_rows)
+        name_row = self._header_name_row(header_name_row, header_count)
+        rename_plan = self._plan_name_row(current_df, previous_df, name_row)
+        raw_current = list(current_df.columns) if current_df is not None else []
+        raw_previous = list(previous_df.columns) if previous_df is not None else []
+        if rename_plan is not None:
+            # `set_axis` 而不是 `df.columns = …`：传进来的帧是调用方（`_read_excel_data`
+            # 的结果）持有的，就地改列名会让**同一次读取的第二遍比较**看到一份已经被
+            # 改过名的帧 —— 那时「第 1 行的原文」会变成字段名，第 1 行也跟着显示错。
+            current_df = current_df.set_axis(rename_plan['current'][0], axis=1)
+            previous_df = previous_df.set_axis(rename_plan['previous'][0], axis=1)
+
         current_columns = list(current_df.columns) if current_df is not None else []
         previous_columns = list(previous_df.columns) if previous_df is not None else []
 
         pairs, current_only, previous_only = self._pair_columns(current_columns, previous_columns)
 
         header_changes = []
+        first_rows = None
         if current_df is not None and previous_df is not None:
             # 把上一版的列名**按配对结果改写成当前列名**，再逐格比。
             # 不改名的话，一次列改名会让「旧名」和「新名」同时出现在列并集里，
@@ -639,6 +728,19 @@ class DiffService:
                 mapped[prev_idx] = new_name
             previous_df = previous_df.copy()
             previous_df.columns = mapped
+            # 第 1 行的两版原文：`mapped` 正是上一版各列改叫的名字，所以它同时也是
+            # 「上一版第 1 行的那一格该落在哪一列下」的对照表。
+            #
+            # **只有真的改过名才补**（`rename_plan`）：名称行还是第 1 行时，第 1 行就是
+            # 列名本身，它的改动由 `header_changes` 表达、重名列也已由列头显示 ——
+            # 再补一行出来会让未配置的仓库凭空多出表头块（载荷与今天不再逐字一致）。
+            if rename_plan is not None:
+                first_rows = (
+                    {current_columns[i]: self._raw_first_row_cell(raw_current[i], raw_current)
+                     for i in range(len(current_columns))},
+                    {mapped[j]: self._raw_first_row_cell(raw_previous[j], raw_previous)
+                     for j in range(len(mapped))},
+                )
             for cur_idx in current_only:
                 name = current_columns[cur_idx]
                 if not self._is_reportable_column_change(name, current_columns, previous_columns):
@@ -677,7 +779,9 @@ class DiffService:
             previous_df = previous_df.reindex(columns=ordered_columns, fill_value='')
 
         # 使用智能diff算法处理行插入/删除
-        result = self._smart_row_diff(current_df, previous_df, ordered_columns, key_columns=key_columns)
+        result = self._smart_row_diff(current_df, previous_df, ordered_columns,
+                                      key_columns=key_columns, header_rows=header_rows,
+                                      name_row=name_row, first_rows=first_rows)
         if header_changes:
             result['header_changes'] = header_changes
         return result
@@ -901,28 +1005,46 @@ class DiffService:
         pairs.sort()
         return pairs, current_duplicates, previous_duplicates
 
-    def _smart_row_diff(self, current_df, previous_df, all_columns, key_columns=None) -> Dict[str, Any]:
+    def _smart_row_diff(self, current_df, previous_df, all_columns, key_columns=None,
+                        header_rows: int = None, name_row: int = None,
+                        first_rows=None) -> Dict[str, Any]:
         """智能行差异算法，正确处理行插入、删除和修改
 
         key_columns 有值时先按关键列配对（见 `_resolve_key_columns`），
         配上的行不再参与相似度匹配 —— 否则一个「ID 从 5 改成 7」的行会被
         相似度匹配认成「同一行被修改」，而按关键列的契约那是「删一行 + 加一行」。
+
+        header_rows 是表头块的行数（含第 1 行的列名行）。表头行**不参与**行匹配与
+        数据行统计，单独成块 —— 见 `_build_header_rows` 里为什么要分出来。
+
+        name_row/first_rows 见 `_plan_name_row`：名称行不是第 1 行时，第 1 行不在
+        任何一帧里（pandas 把它读成了列名），只能由 `first_rows` 补进表头块。
         """
         # 转换为列表便于处理，保留原始行号
         current_rows_with_index = self._dataframe_rows_with_index(current_df)
         previous_rows_with_index = self._dataframe_rows_with_index(previous_df)
-        
+
         # 过滤掉全NaN行，但保留原始行号
         current_filtered = []
         for orig_row_num, row_data in current_rows_with_index:
             if self._has_valid_data(row_data, all_columns):
                 current_filtered.append((orig_row_num, row_data))
-        
+
         previous_filtered = []
         for orig_row_num, row_data in previous_rows_with_index:
             if self._has_valid_data(row_data, all_columns):
                 previous_filtered.append((orig_row_num, row_data))
-        
+
+        # 表头块（物理行 2..header_rows）先分出来，再拿剩下的数据行做匹配。
+        # 顺序要紧：`total_rows_current` 之类的计数只该数数据行。
+        header_count = self._header_row_count(header_rows)
+        header_block, header_stats = self._build_header_rows(
+            current_filtered, previous_filtered, all_columns, header_count,
+            name_row=self._header_name_row(name_row, header_count), first_rows=first_rows)
+        if header_count > 1:
+            current_filtered = [item for item in current_filtered if item[0] > header_count]
+            previous_filtered = [item for item in previous_filtered if item[0] > header_count]
+
         # 提取纯数据用于匹配
         current_rows = [row_data for _, row_data in current_filtered]
         previous_rows = [row_data for _, row_data in previous_filtered]
@@ -936,7 +1058,7 @@ class DiffService:
                     rows_equal = False
                     break
         if rows_equal:
-            return {
+            return self._with_header_block({
                 'rows': [],
                 'stats': {
                     'total_rows_current': len(current_filtered),
@@ -947,7 +1069,7 @@ class DiffService:
                 },
                 'headers': all_columns,
                 'columns': all_columns
-            }
+            }, header_block, header_stats)
         
         # 1) 关键列优先配对（仓库配了关键列时）。配表几乎都有 ID 列，
         #    按 ID 配对是唯一「不会把两行错配」的做法；相似度匹配只能猜。
@@ -1015,23 +1137,18 @@ class DiffService:
             
             # 使用当前行在过滤后列表中的原始行号
             orig_row_num = current_filtered[current_idx][0]
-            
+            # 匹配到的**上一版本**那一行的行号。插/删一行之后，同一个逻辑行在两版里
+            # 的行号会不同（线上实测：当前第 11 行对应上一版第 12 行）—— 只报当前行号
+            # 的话，评审者拿它回旧文件里核对就会整体错一行。
+            previous_row_num = previous_filtered[previous_idx][0]
+
             if similarity < 1.0:
                 # 计算具体的字段变更
-                cell_changes = []
-                for col in all_columns:
-                    old_val = previous_row.get(col, '')
-                    new_val = current_row.get(col, '')
-                    
-                    if not self._values_equal(old_val, new_val):
-                        cell_changes.append({
-                            'column': col,
-                            'old_value': old_val,
-                            'new_value': new_val
-                        })
-                
+                cell_changes = self._row_cell_changes(current_row, previous_row, all_columns)
+
                 rows.append({
                     'row_number': orig_row_num,
+                    'previous_row_number': previous_row_num,
                     'status': 'modified',
                     'data': current_row,
                     'cell_changes': cell_changes
@@ -1067,12 +1184,271 @@ class DiffService:
             'modified': len([r for r in rows if r['status'] == 'modified'])
         }
         
-        return {
+        return self._with_header_block({
             'rows': rows,
             'stats': stats,
             'headers': all_columns,
             'columns': all_columns
+        }, header_block, header_stats)
+
+    @staticmethod
+    def _header_row_count(raw_value) -> int:
+        """把仓库配置的「表头行数」规范化成「表头块占前几行」（**含第 1 行的列名行**）。
+
+        读取用 `header=0`，第 1 行已经被当作列名吃掉，所以：
+
+        * `1`（或空/非法值）= 只有第 1 行是表头，**与今天逐字一致**（没有表头块）；
+        * `3` = 第 1 行是列名，物理行 2、3 也是表头，它们归到 `header_rows` 里。
+
+        「配了就一定要生效」这句话在这里的具体含义是：配了 3，第 2、3 行就不再被报成
+        数据行的变更（`templates/help.html` 的「表头行数」一节承诺过这件事，
+        而引擎从初始提交起就没读过这个配置）。
+        """
+        try:
+            count = int(raw_value)
+        except (TypeError, ValueError):
+            return 1
+        return count if count > 1 else 1
+
+    @staticmethod
+    def _header_name_row(raw_value, header_count) -> int:
+        """把仓库配置的「名称行」规范化成**物理行号**（列名取第几行）。
+
+        * 空/非法/`1` = 今天的行为：第 1 行就是字段名行，一个字都不动；
+        * `2` = 第 1 行是大标题、第 2 行才是字段名（配表里很常见）；
+        * 超出表头块（`> header_count`）时**收到最后一行**：名称行只能在表头块里，
+          这是表单那一层也要校验的约束
+          （`services/repository_diff_cache_reset.parse_header_name_row`，越界会打回
+          整份表单并说明原因）；引擎这一层再夹一次是为了让手写调用（脚本、测试、
+          老数据）不会越界读到数据行上去。
+        """
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return 1
+        if value < 2:
+            return 1
+        return value if value <= header_count else header_count
+
+    def _plan_name_row(self, current_df, previous_df, name_row):
+        """决定这次比较「列名换成什么」，返回 `None`（不改名）或两边的改名方案。
+
+        为什么要有这个函数，而不是各自 `df.columns = ...` 了事：**两边必须一起改**。
+        只改一边的话，`_pair_columns` 会拿「改后的名字」去比对「没改的名字」，
+        每一列都被判成「旧列删除 + 新列新增」，于是**整张表每一行都会多出两处假变更**
+        （这正是 `_pair_columns` 的 docstring 里那类审计事故的形态）。所以任一边取不到
+        名称行（表短到根本没有那一行、或那一行没有列）时，两边都不改，退回今天的行为。
+
+        名称行整行留白不算异常：那一行的列名会全变成占位名（`Unnamed: i`），而占位名
+        本来就不当锚点、不报改名，落点与今天一致。
+
+        返回 `{'current': (列名列表, 第 1 行字典), 'previous': (…)}`。第 1 行的字典是
+        `_build_header_rows` 要用的：改名之后，第 1 行的原文与列身份再无关系，
+        只能靠这里顺带留下的一份（`header=0` 把它读成了列名）。
+        """
+        if name_row <= 1 or current_df is None or previous_df is None:
+            return None
+        plan = {}
+        for side, df in (('current', current_df), ('previous', previous_df)):
+            index = name_row - 2        # `header=0` 下物理行 p ↔ 帧索引 p-2
+            if index >= len(df) or df.shape[1] == 0:
+                return None
+            raw_names = [str(name) for name in df.columns]
+            names = self._build_column_names(list(df.iloc[index]))
+            plan[side] = (names, {names[i]: self._raw_first_row_cell(raw_names[i], raw_names)
+                                  for i in range(len(names))})
+        return plan
+
+    def _rename_by_name_row(self, df, name_row):
+        """单边改名（整张工作表新增/删除时只有一边有帧）。
+
+        返回 `(帧, 第 1 行字典)`；取不到名称行时原样返回 `(帧, None)` —— 与
+        `_plan_name_row` 同一口径。返回的是 `set_axis` 出来的**新帧**（列名换了、
+        数据共用），调用方拿到的原帧一个字节都不变。
+        """
+        plan = self._plan_name_row(df, df, name_row)
+        if plan is None:
+            return df, None
+        return df.set_axis(plan['current'][0], axis=1), plan['current'][1]
+
+    def _build_column_names(self, cells) -> list:
+        """一行的单元格文本 → 列名列表，**规则与 pandas 的 `header=0` 一致**。
+
+        为什么必须自己算这一遍：`_pair_columns`（同名锚点 + 等宽顺序配对）、
+        `_is_placeholder_column_name`（`Unnamed: 7` 不当锚点、不报改名）、
+        `_display_column_name`（`X.1` 渲染成「同名列第 2 个」）三处都建立在这套命名
+        约定上。名称行读出来的这一行如果不按同样的规则命名，三处一起失效 ——
+        重名列会被当成不同的列、空列名会被当成有名字的列，而且失效方式是静默的
+        （多报/漏报列变更，不报错）。
+
+        算法是 pandas 那份的逐句移植（`pandas/io/parsers/python_parser.py` 的
+        `col_loop_order` 那一段），两处细节都不能省：
+
+        * 空单元格（`None`/NaN/空串，口径同 `_normalize_value`）→ `Unnamed: i`，
+          `i` 是**位置**（与 pandas 的 `Unnamed: 0` 起算一致）。空白串（`'  '`）是
+          **取值**，不是空 —— 与 `_values_equal` 同一口径。
+        * 重名从 `.1` 起往后找**第一个没被占用的**后缀（`['id','id','id.1']` →
+          `['id','id.2','id.1']`，不是 `id.1` 撞 `id.1`）；且**具名列先命名、占位名
+          后命名**，否则「表里真有一列叫 `Unnamed: 2`」的表上，谁被改名会与今天相反。
+
+        读取口径的差别只剩一处：名称行是**按 dtype=str 读成文本**的，所以数字表头
+        出来是 `'1'` 而不是 pandas 表头解析得到的 `1`（`'00123'` 也因此保住了前导零）。
+        这是本平台「按文本原样读」的读取纪律，不是偏差。
+        """
+        names = []
+        unnamed = []
+        for index, cell in enumerate(cells):
+            value = self._normalize_value(cell)
+            if value is None:
+                names.append(f'Unnamed: {index}')
+                unnamed.append(index)
+            else:
+                names.append(str(value))
+        counts: Dict[Any, int] = {}
+        # 具名列先、占位名后（pandas 的 `col_loop_order`）。
+        unnamed_set = set(unnamed)
+        order = [i for i in range(len(names)) if i not in unnamed_set] + unnamed
+        for index in order:
+            base = names[index]
+            name = base
+            count = counts.get(name, 0)
+            while count > 0:
+                counts[base] = count + 1
+                name = f'{base}.{count}'
+                if name in names:
+                    count += 1
+                else:
+                    count = counts.get(name, 0)
+            names[index] = name
+            counts[name] = count + 1
+        return names
+
+    @classmethod
+    def _raw_first_row_cell(cls, name, raw_names) -> str:
+        """把「改名前的列名」还原成第 1 行那一格的**原文**。
+
+        名称行不是第 1 行时，第 1 行的内容只存在于改名前的列名里，而那份列名已经被
+        pandas 改写过了，得反着还原两件事：
+
+        * 空单元格被起了占位名（`Unnamed: 3`）—— 它的原文就是空，照原样显示出来
+          只会让「改了个标题」的评审者看到一墙 `Unnamed: 3`；
+        * 重名被加了 `.1`/`.2` 后缀 —— 原文没有后缀。
+
+        两处还原都只在**能确定是合成出来的**时候做（占位名、且原名确实也在这份列名里），
+        与 `_display_column_name` 的判据同源。
+        """
+        if cls._is_placeholder_column_name(name):
+            return ''
+        match = re.fullmatch(r'(.+)\.(\d+)', str(name or ''))
+        if match and match.group(1) in set(raw_names):
+            return match.group(1)
+        return name
+
+    def _build_header_rows(self, current_pairs, previous_pairs, columns, header_count,
+                           name_row: int = 1, first_rows=None):
+        """把物理行 `2..header_count`（表头块）单独算一份 diff，返回 `(rows, stats)`。
+
+        **为什么不把表头行留在 `rows` 里**：`rows` 的契约是「有变更的数据行」，
+        表头行整块常驻，四处下游会按这个契约把它们弄错 ——
+        `optimize_diff_data` 的状态白名单（未知状态写缓存时被静默删掉）、
+        `validate_excel_diff_data` 的「有没有变更」（常驻行会让「完全没变」也判成有内容）、
+        前端 `groupChangedRows` 的分组顺序（未知状态落到表尾）、
+        AI 摘要的变更行过滤（`status not in ("", "unchanged")` 就算变更）。
+        放进独立键这四处都不受影响（`optimize_diff_data` 用 `dict(sheet_data)` 复制整张表）。
+
+        配对按**行号**（第 2 行对第 2 行）：表头是固定位置的几行，不是可增删的数据行，
+        相似度匹配在这里只会把「表头第 2 行」配到别处去。
+
+        未改动的行**也留在结果里**（界面据此写「表头 3 行 · 无改动」并让评审者看到
+        表头长什么样），所以判「有没有变」不能看列表是否为空 ——
+        用 `utils.diff_data_utils.header_rows_have_changes`。
+
+        `name_row > 1`（列名取自第 2 行及以后）时，块里要**排除名称行**（它的改动由
+        `header_changes` 的列改名/增删表达，同一件事不报两遍），并**补上第 1 行**
+        （`first_rows`，见 `_plan_name_row`）—— 否则「只改标题行」会什么也不显示，
+        比修之前更差：那时它至少会以「某一列改了名」的形式冒出来。
+        """
+        def _block(pairs, first_row):
+            block = {
+                row_number: row_data
+                for row_number, row_data in pairs
+                if row_number <= header_count and row_number != name_row
+            }
+            # 第 1 行整行没有内容（例如它只是一行留白）时不补 —— 与数据行同一判空口径，
+            # 免得表头块里凭空多出一行空格子。两边都留白时它同样不会出现。
+            if first_row is not None and self._has_valid_data(first_row, columns):
+                block[1] = first_row
+            return block
+
+        current_first, previous_first = first_rows if first_rows else (None, None)
+        current_block = _block(current_pairs, current_first)
+        previous_block = _block(previous_pairs, previous_first)
+
+        rows = []
+        for row_number in sorted(set(current_block) | set(previous_block)):
+            current_row = current_block.get(row_number)
+            previous_row = previous_block.get(row_number)
+            if current_row is None:
+                # 表头行本身被删了（表头行数配得比实际多，或提交里抽掉一行表头）。
+                rows.append({
+                    'row_number': row_number,
+                    'status': 'removed',
+                    'data': previous_row,
+                })
+            elif previous_row is None:
+                rows.append({
+                    'row_number': row_number,
+                    'status': 'added',
+                    'data': current_row,
+                })
+            elif self._rows_equal(current_row, previous_row, columns):
+                rows.append({
+                    'row_number': row_number,
+                    'status': 'unchanged',
+                    'data': current_row,
+                })
+            else:
+                rows.append({
+                    'row_number': row_number,
+                    'status': 'modified',
+                    'data': current_row,
+                    'cell_changes': self._row_cell_changes(current_row, previous_row, columns),
+                })
+
+        stats = {
+            'total_rows_current': len(current_block),
+            'total_rows_previous': len(previous_block),
+            'added': len([r for r in rows if r['status'] == 'added']),
+            'removed': len([r for r in rows if r['status'] == 'removed']),
+            'modified': len([r for r in rows if r['status'] == 'modified']),
         }
+        return rows, stats
+
+    @staticmethod
+    def _with_header_block(result, header_block, header_stats):
+        """把表头块挂到工作表结果上。
+
+        表头块为空（没配表头行数、或那几行整行空白）就**不加这两个键** ——
+        未配置的仓库载荷与今天逐字一致，缓存与断言都不受影响。
+        """
+        if header_block:
+            result['header_rows'] = header_block
+            result['header_stats'] = header_stats
+        return result
+
+    def _row_cell_changes(self, current_row, previous_row, columns):
+        """一行之内逐列的取值变更（判等口径统一走 `_values_equal`）。"""
+        changes = []
+        for col in columns:
+            old_val = previous_row.get(col, '')
+            new_val = current_row.get(col, '')
+            if not self._values_equal(old_val, new_val):
+                changes.append({
+                    'column': col,
+                    'old_value': old_val,
+                    'new_value': new_val
+                })
+        return changes
     
     def _has_valid_data(self, row_data, columns):
         """检查行是否包含有效数据（**只有真正的空才算空**）

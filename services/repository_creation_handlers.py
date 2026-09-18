@@ -11,6 +11,7 @@ from models import GlobalRepositoryCounter, Repository, db
 from services.deployment_mode import is_agent_dispatch_mode
 from services.enhanced_git_service import EnhancedGitService
 from services.model_loader import get_runtime_model
+from services.repository_diff_cache_reset import parse_header_name_row
 from utils.request_security import require_admin
 from utils.security_utils import (
     REPOSITORY_NAME_ERROR_MESSAGE,
@@ -160,6 +161,11 @@ def create_git_repository():
         flash("必填字段不能为空", "error")
         return redirect(url_for("add_git_repository", project_id=project_id))
 
+    header_name_row, name_row_error = parse_header_name_row(request.form, header_rows)
+    if name_row_error:
+        flash(name_row_error, "error")
+        return redirect(url_for("add_git_repository", project_id=project_id))
+
     new_repository_id = allocate_repository_id()
 
     repository = Repository(
@@ -182,6 +188,7 @@ def create_git_repository():
         delete_table_alert=delete_table_alert,
         weekly_version_setting=weekly_version_setting,
         header_rows=int(header_rows) if header_rows else None,
+        header_name_row=header_name_row,
         key_columns=key_columns,
         enable_id_confirmation=enable_id_confirmation,
         show_duplicate_id_warning=show_duplicate_id_warning,
@@ -419,6 +426,11 @@ def create_svn_repository():
         flash("必填字段不能为空", "error")
         return redirect(url_for("add_svn_repository", project_id=project_id))
 
+    header_name_row, name_row_error = parse_header_name_row(request.form, header_rows)
+    if name_row_error:
+        flash(name_row_error, "error")
+        return redirect(url_for("add_svn_repository", project_id=project_id))
+
     new_repository_id = allocate_repository_id()
 
     repository = Repository(
@@ -443,6 +455,7 @@ def create_svn_repository():
         weekly_version_setting=weekly_version_setting,
         clone_status="pending",
         header_rows=int(header_rows) if header_rows else None,
+        header_name_row=header_name_row,
         key_columns=key_columns,
         enable_id_confirmation=enable_id_confirmation,
         show_duplicate_id_warning=show_duplicate_id_warning,

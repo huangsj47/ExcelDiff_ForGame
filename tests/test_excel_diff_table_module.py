@@ -69,13 +69,12 @@ if (request.op === 'render') {
 }
 if (request.op === 'filter') {
     const container = makeContainer(request.state);
-    const state = T.getViewState(container);
-    const headers = sheet.headers || [];
-    const matched = T.filterRows(sheet.rows || [], headers, state);
-    out.rows = matched.map(function (r) { return r.row_number; });
-    // 与 buildView 一样：列集合按**本次要渲染的行**（筛选之后）算空列
-    out.columns = T.resolveVisibleColumns(sheet, headers, matched, state);
-    out.columnNames = out.columns.indexes.map(function (i) { return headers[i]; });
+    // 直接用**真实**的 view（不是在这里照抄一遍 buildView 的算法）：列集合怎么算、
+    // 哪些行要渲染，都由实现说了算 —— 抄一遍就会与实现漂移。
+    const view = T.resolveView(sheet, {sheetName: 'S1', container: container});
+    out.rows = view.matched.map(function (r) { return r.row_number; });
+    out.columns = {indexes: view.visibleIndexes, hiddenCount: view.hiddenCount};
+    out.columnNames = view.visibleHeaders;
     out.html = T.renderSheetTable(sheet, {sheetName: 'S1', container: container});
 }
 if (request.op === 'batch') {
@@ -88,6 +87,22 @@ if (request.op === 'batch') {
     out.headOpen = T.tableHeadHtml(sheet, {});
     out.full = T.renderSheetTable(sheet, {});
     out.unitKinds = units.map(function (u) { return u.row ? 'row' : 'group'; });
+}
+if (request.op === 'batchview') {
+    // 提交页 >100 行那条路径的写法：从 resolveView 取「本帧的列集合与渲染计划」，
+    // 再按单元分批。（上面的 'batch' 是直接 buildRowRenderPlan，看不到表头块。）
+    const container = makeContainer(request.state);
+    const view = T.resolveView(sheet, {container: container});
+    const units = view.units;
+    const cut = Math.max(1, Math.floor(units.length / 2));
+    out.oneShot = T.tableBodyHtml(units, view.visibleHeaders, {});
+    out.batched = T.tableBodyHtml(units.slice(0, cut), view.visibleHeaders, {}) +
+                  T.tableBodyHtml(units.slice(cut), view.visibleHeaders, {});
+    out.unitKinds = units.map(function (u) {
+        return u.row ? 'row' : (u.note !== undefined ? 'note' : 'group');
+    });
+    out.visibleHeaders = view.visibleHeaders;
+    out.full = T.renderSheetTable(sheet, {container: container});
 }
 process.stdout.write(JSON.stringify(out));
 '''
@@ -446,6 +461,131 @@ class TestBatchingStillUsesTheSharedImplementation:
         assert re.search(r'innerHTML \+= batchHtml', source), '分批追加的写法不见了（一次性塞进去会卡）'
         assert re.search(r'setTimeout\(renderNextBatch', source), (
             '分批之间不再让出主线程 —— 大表会把页面卡住')
+
+
+# --------------------------------------------------------------------------
+# (e) 表头块（物理第 2..N 行）：单独的 HeaderRowsBlock
+# --------------------------------------------------------------------------
+
+
+def _sheet_with_header_rows(header_rows, rows=None, headers=None):
+    sheet = {
+        'headers': headers or ['id', '名字', '备注'],
+        'rows': rows if rows is not None else [
+            {'row_number': 5, 'status': 'modified', 'data': {'id': '1', '名字': 'B', '备注': 'y'},
+             'cell_changes': [{'column': '名字', 'old_value': 'A', 'new_value': 'B'}]},
+        ],
+        'header_rows': header_rows,
+        'header_stats': {'total_rows_current': 2, 'total_rows_previous': 2,
+                         'added': 0, 'removed': 0, 'modified': 0},
+    }
+    return sheet
+
+
+HEADER_ROWS_CLEAN = [
+    {'row_number': 2, 'status': 'unchanged', 'data': {'id': '编号', '名字': '名称', '备注': '备注'}},
+    {'row_number': 3, 'status': 'unchanged', 'data': {'id': 'ID', '名字': 'Name', '备注': 'Desc'}},
+]
+
+HEADER_ROWS_CHANGED = [
+    {'row_number': 2, 'status': 'modified', 'data': {'id': '编号', '名字': '名字', '备注': '备注'},
+     'cell_changes': [{'column': '名字', 'old_value': '名称', 'new_value': '名字'}]},
+    {'row_number': 3, 'status': 'unchanged', 'data': {'id': 'ID', '名字': 'Name', '备注': 'Desc'}},
+]
+
+
+class TestHeaderRowsBlock:
+    def test_a_changed_header_row_is_rendered_above_the_data_sections(self):
+        sheet = _sheet_with_header_rows(HEADER_ROWS_CHANGED)
+        html = _run({'op': 'render', 'sheet': sheet})['html']
+
+        assert '表头行数据：' in html, '改了表头行，却没有任何「表头行数据」这一段'
+        assert html.index('表头行数据：') < html.index('变更行数据：'), (
+            '表头块排在了数据段后面 —— 它是这张表最上面的一段')
+        # 改动行照旧是「改前 / 改后」两行 + 单元格高亮（复用同一套行渲染）
+        assert 'excel-row-modified-old' in html and 'excel-row-modified-new' in html
+        assert '名称' in html and '名字' in html, '表头行的改前/改后取值没有渲染出来'
+        # 没改动的那一行也铺开（有改动时给出上下文），且标注是第几行
+        assert re.search(r'class="excel-row-number[^"]*">3<', html), '表头第 3 行没有渲染'
+
+    def test_a_clean_header_block_collapses_to_one_line(self):
+        """表头块没改动时只留一行说明：它每张表都常驻，铺开会把数据行挤下去。"""
+        sheet = _sheet_with_header_rows(HEADER_ROWS_CLEAN)
+        html = _run({'op': 'render', 'sheet': sheet})['html']
+
+        assert '表头 2 行（第 2–3 行） · 无改动' in html, (
+            f'没有改动时没有给出表头块的说明：{html[:400]}')
+        assert '表头行数据：' in html, '表头块的段标题不见了（看不到这个配置生效了）'
+        assert 'excel-row-unchanged' not in html, '没有改动却把表头行逐行铺开了'
+
+    def test_without_the_configuration_nothing_changes(self):
+        """没配「表头行数」的仓库（载荷里没有 header_rows）：渲染结果与改前逐字相同。"""
+        sheet = {
+            'headers': ['id', '名字'],
+            'rows': [{'row_number': 2, 'status': 'added', 'data': {'id': '1', '名字': 'A'}}],
+        }
+        html = _run({'op': 'render', 'sheet': sheet})['html']
+        assert '表头行数据' not in html and 'excel-row-note' not in html
+
+    def test_a_header_only_change_is_not_reported_as_no_changes(self):
+        """**只改表头**时 rows 是空的 —— 不能显示成「该工作表没有变更行」。"""
+        sheet = _sheet_with_header_rows(HEADER_ROWS_CHANGED, rows=[])
+        html = _run({'op': 'render', 'sheet': sheet})['html']
+
+        assert '该工作表没有变更行' not in html, (
+            '这次提交只改了表头，页面却说没有变更行 —— 评审者会直接放过')
+        assert '表头行数据：' in html
+        assert 'excel-row-modified-old' in html, '表头行的改动没有渲染出来'
+
+    def test_the_header_block_is_not_filtered_away(self):
+        """表头块是这张表的上下文（与 <thead> 同一性质），不受搜索筛选影响。
+
+        筛选词只命中一行数据（`B`），表头块的两行照旧全在 —— 包括不匹配的那一行
+        （第 3 行的 `ID`/`Name`）：它给的是「改动落在哪一行表头」的上下文。
+        """
+        sheet = _sheet_with_header_rows(HEADER_ROWS_CHANGED)
+        html = _run({'op': 'render', 'sheet': sheet, 'state': {'filter': 'B'}})['html']
+        assert '表头行数据：' in html, '筛掉数据行之后表头块也被筛掉了'
+        assert re.search(r'class="excel-row-number[^"]*">3<', html), (
+            '表头第 3 行（不匹配筛选词）不见了 —— 表头块不该跟着筛选走')
+
+    def test_a_filter_that_matches_nothing_still_says_so(self):
+        """反向：筛选到一行不剩时给的是「没有匹配的行」说明，而不是一张只剩表头的表。
+
+        （表头块此时一起让位 —— 用户显式筛掉了所有数据行，这时「一张像表格的东西」
+        比一句明确的说明更容易被误读成「有结果」。）
+        """
+        sheet = _sheet_with_header_rows(HEADER_ROWS_CHANGED)
+        html = _run({'op': 'render', 'sheet': sheet,
+                     'state': {'filter': 'zzz-nothing'}})['html']
+        assert '没有匹配「zzz-nothing」的行' in html
+        assert '表头行数据：' not in html
+
+    def test_a_column_that_only_the_header_block_fills_is_not_hidden(self):
+        """某一列只有表头里有内容时，它不能被「隐藏本页空列」藏掉 ——
+        那条表头变更正是这次提交唯一要看的东西。"""
+        sheet = _sheet_with_header_rows(
+            [{'row_number': 2, 'status': 'modified',
+              'data': {'id': '编号', '名字': '名称', '备注': 'notes'},
+              'cell_changes': [{'column': '备注', 'old_value': '', 'new_value': 'notes'}]}],
+            rows=[{'row_number': 5, 'status': 'modified', 'data': {'id': '1', '名字': 'B', '备注': ''},
+                   'cell_changes': [{'column': '名字', 'old_value': 'A', 'new_value': 'B'}]}],
+        )
+        result = _run({'op': 'filter', 'sheet': sheet, 'state': {'hideEmpty': True}})
+        assert '备注' in result['columnNames'], (
+            f'只有表头里有内容的列被当成空列隐藏了：{result["columnNames"]}')
+        assert 'notes' in result['html'], '表头那一列的新值没有渲染出来'
+
+    def test_the_batched_path_keeps_the_header_block_once(self):
+        """分批路径（提交页 >100 行）与一次性渲染的表体逐字节相同，表头块只出现一次。"""
+        sheet = _sheet_with_header_rows(HEADER_ROWS_CHANGED, rows=SHEET['rows'])
+        result = _run({'op': 'batchview', 'sheet': sheet})
+        assert result['batched'] == result['oneShot'], (
+            '分批渲染与一次性渲染不一致 —— 表头块可能被每一批都渲染了一遍')
+        assert result['oneShot'].count('表头行数据：') == 1, (
+            f'表头块的段标题出现了 {result["oneShot"].count("表头行数据：")} 次')
+        assert result['unitKinds'][0] == 'group', (
+            f'渲染计划的第一个单元不是表头块的段标题：{result["unitKinds"]}')
 
 
 # --------------------------------------------------------------------------

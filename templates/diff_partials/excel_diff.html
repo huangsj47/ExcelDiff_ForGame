@@ -45,22 +45,38 @@
 
             {# 列级变更：列名改了 / 加了列 / 删了列。
                列名取自表头行，所以「改列名」本身过去既不作为行变更呈现（第 1 行被当列名吃掉），
-               又会把列身份整体错位放大成整表逐行修改。载荷里的 header_changes 就是它。 #}
+               又会把列身份整体错位放大成整表逐行修改。载荷里的 header_changes 就是它。
+               一行摘要 + 可展开的明细（与前端 `headerChangesHtml` 同形态）：
+               一次提交动七八列是常事，全铺在正文上方会把真正的行变更挤出屏幕。 #}
             {% if sheet_data.header_changes %}
-            <div class="alert alert-info py-2 px-3">
-                <i class="bi bi-type me-2"></i><strong>列变更（{{ sheet_data.header_changes | length }}）：</strong>
-                {% for change in sheet_data.header_changes -%}
+            {% set header_changes = sheet_data.header_changes %}
+            <details class="alert alert-info py-2 px-3 excel-header-changes">
+                {% set counts = [] %}
+                {% set added_count = header_changes | selectattr('change', 'equalto', 'added') | list | length %}
+                {% set removed_count = header_changes | selectattr('change', 'equalto', 'removed') | list | length %}
+                {% if added_count %}{% set _ = counts.append('新增 ' ~ added_count) %}{% endif %}
+                {% if removed_count %}{% set _ = counts.append('删除 ' ~ removed_count) %}{% endif %}
+                {% if (header_changes | length) - added_count - removed_count %}{% set _ = counts.append('改名 ' ~ ((header_changes | length) - added_count - removed_count)) %}{% endif %}
+                <summary><i class="bi bi-type me-2"></i><strong>列变更（{{ header_changes | length }}）</strong><span class="excel-header-changes__counts">{{ counts | join(' · ') }}</span></summary>
+                <div class="excel-header-changes__list">
+                {%- for change in header_changes -%}
                     {%- if change.change == 'added' -%}新增列 {{ change.column }}
                     {%- elif change.change == 'removed' -%}删除列 {{ change.old_name }}
                     {%- else -%}列名 {{ change.old_name }} → {{ change.new_name }}
                     {%- endif -%}
                     {%- if not loop.last %}；{% endif %}
-                {%- endfor %}
-            </div>
+                {%- endfor -%}
+                </div>
+            </details>
             {% endif %}
             
             <div class="excel-table-container">
-            {% if sheet_data.rows %}
+            {# 表头块（物理第 2..N 行，见 services/diff_service.py 的 `_build_header_rows`）也要算
+               「有内容」：只改表头的一次提交里 rows 是空的，只判 rows 就会显示成
+               「工作表 X 没有数据或无变更」—— 那次改动一个字都看不到。 #}
+            {% set header_rows = sheet_data.header_rows or [] %}
+            {% set header_changed = header_rows | selectattr('status', 'in', ['added', 'removed', 'modified']) | list %}
+            {% if sheet_data.rows or header_rows %}
                 <div class="excel-table-wrapper">
                     <table class="excel-diff-table">
                     {% if sheet_data.headers %}
@@ -77,7 +93,27 @@
                     </thead>
                     {% endif %}
                     <tbody>
-                        {% for row in sheet_data.rows %}
+                        {# 表头块排在最前面（与前端模块 static/js/excel_diff_table.js 的
+                           `headerBlockUnits` 同一个位置与口径）：有改动就逐行铺开、
+                           绝不折叠；没有改动只留一行说明 —— 表头块在每张表上常驻，
+                           把没动过的表头行也铺开会把数据行挤下去。 #}
+                        {% if header_rows %}
+                        {% set column_span = (sheet_data.headers | length) + 1 %}
+                        <tr class="excel-row-group-header">
+                            <td class="excel-group-header" colspan="{{ column_span }}">表头行数据：<span class="excel-group-header__count">{{ header_rows | length }} 行</span></td>
+                        </tr>
+                        {% if not header_changed %}
+                        {% set numbers = header_rows | selectattr('row_number', 'defined') | map(attribute='row_number') | select('number') | list %}
+                        {% set where = '' %}
+                        {% if numbers %}
+                        {% set where = ('第 %d 行' | format(numbers | min)) if (numbers | min) == (numbers | max) else ('第 %d–%d 行' | format(numbers | min, numbers | max)) %}
+                        {% endif %}
+                        <tr class="excel-row-note">
+                            <td class="excel-note" colspan="{{ column_span }}">表头 {{ header_rows | length }} 行{% if where %}（{{ where }}）{% endif %} · 无改动</td>
+                        </tr>
+                        {% endif %}
+                        {% endif %}
+                        {% for row in (header_rows if header_changed else []) + sheet_data.rows %}
                         {# 行内单元格有两种数据形态，这里统一成 `cells` 再渲染：
                            * 形态一（services/git_service.py）：行自带 `cells`，
                              每格 {value, old_value, new_value, status}；
@@ -127,7 +163,16 @@
                              修改行和未变更行一视同仁地输出同一个类，任何按 class 统计变更行
                              的下游（归档 / 截图 / 外部评审）都会把「只有修改」的提交数成 0 行。 -->
                         <tr class="{% if row.status == 'modified' %}excel-row-modified{% else %}excel-row-normal{% endif %}">
-                            <td class="excel-row-number excel-bold-text">{{ row.row_number }}</td>
+                            {# 修改行的行号：这一份渲染把改前/改后放在**同一个格子**里（不是上下两行），
+                               所以两个行号也写在同一个格子里。插/删一行之后同一个逻辑行在两版里
+                               的行号会不同（实测 12 ↔ 11），只报一个数等于让评审者按错的行号回
+                               文件里核对；两者相同时只写一个。 #}
+                            <td class="excel-row-number excel-bold-text">
+                                {%- if row.previous_row_number and row.previous_row_number != row.row_number -%}
+                                <span class="excel-row-number-prev" title="上一版本第 {{ row.previous_row_number }} 行">{{ row.previous_row_number }}</span><span class="excel-row-number-arrow">→</span>
+                                {%- endif -%}
+                                {{ row.row_number }}
+                            </td>
                             {% for cell in cells %}
                             {% if cell.status == 'changed' %}
                             <td class="excel-cell excel-cell-modified">

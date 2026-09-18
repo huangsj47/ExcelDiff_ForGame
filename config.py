@@ -65,7 +65,12 @@ system("title SEOTool - diff-confirmation-platform")
 # 1.10.0：行过滤（_has_valid_data / _filter_nan_rows）与 _normalize_value 统一口径 ——
 #        整行都是 null/None/空白串的行不再被当成空行丢掉（这些行的改动原先全部漏报）；
 #        .tsv 按制表符读取，不再必然报「Excel file format cannot be determined」。
-DIFF_LOGIC_VERSION = "1.17.0"
+# 1.18.0：「表头行数」（Repository.header_rows）第一次真的生效 —— 引擎之前从没读过它，
+#        三行表头的表里第 2、3 行一直被当成数据行。现在每张表多出
+#        header_rows/header_stats：表头行照旧显示变更，但不再冒充数据行。
+#        同一版里还加了「名称行」（Repository.header_name_row）：列名取表头块里的第几行
+#        （配 2 用于「第 1 行是大标题、第 2 行才是字段名」的表）。同样不影响未配置的仓库。
+DIFF_LOGIC_VERSION = "1.18.0"
 
 # 日志级别配置
 LOG_LEVEL = {

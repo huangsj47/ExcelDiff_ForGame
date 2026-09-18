@@ -367,7 +367,10 @@ def get_deleted_file_diff_data(commit, previous_commit):
             )
             return None
 
-        diff_data = DiffService().process_deleted_file(commit.path, previous_content)
+        diff_data = DiffService().process_deleted_file(
+            commit.path, previous_content,
+            header_rows=getattr(repository, 'header_rows', None),
+            header_name_row=getattr(repository, 'header_name_row', None))
         if diff_data and diff_data.get('sheets'):
             excel_cache_service.save_cached_diff(
                 repository_id=repository.id,
@@ -514,9 +517,20 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
         # 关键列（Repository.key_columns，列号从 1 开始）决定「怎么认同一行」。
         # 帮助文档已经写明按它匹配新旧版本的同一行，但引擎历史上没读过这个配置，
         # 只按前 3 列相似度猜配对 —— 会把不同的行配成一条「修改」。
+        #
+        # 表头行数（Repository.header_rows）同理：帮助文档写着「系统根据此值区分表头
+        # 和数据行」，而引擎从初始提交起就没读过它，三行表头的表里第 2、3 行一直被
+        # 当成数据行报出来（见 DiffService._build_header_rows）。
+        #
+        # 名称行（Repository.header_name_row）决定**列名取表头块里的第几行**：
+        # 配 2 的表（第 1 行是大标题、第 2 行才是字段名）修前列头是
+        # `道具配置表 / Unnamed: 1 / …`，而只改标题会被报成「某列改名」
+        # （见 DiffService._plan_name_row）。
         diff_data = diff_service.process_diff(
             commit.path, current_content, previous_content,
-            key_columns=getattr(repository, 'key_columns', None))
+            key_columns=getattr(repository, 'key_columns', None),
+            header_rows=getattr(repository, 'header_rows', None),
+            header_name_row=getattr(repository, 'header_name_row', None))
         processing_time = time.time() - calc_start_time
         if diff_data:
             total_time = time.time() - start_time

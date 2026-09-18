@@ -108,9 +108,16 @@
     box-shadow: inset 3px 0 0 0 var(--color-danger-text, #b3261e);
 }
 
-/* 修改行只用一条中性的色条：行号格是两行共用的，给它红色或绿色都等于替整对行表态，
-   而这一对里旧值红、新值绿各占一半。红/绿留给单元格自己说。 */
-.excel-diff-table tr.excel-row-modified-old > td.excel-row-number {
+/* 修改行的行号：上下两半**各一格**（上=上一版本的行号，下=当前版本的行号）。
+   插/删一行之后同一个逻辑行在两版里的行号会不同（实测 12 ↔ 11），只报一个数
+   等于让评审者按错的行号回文件里核对。老载荷没有上一版行号时，退回「一个
+   rowspan=2 的格子」的旧形态（见 excel_diff_table.js 的 previousRowNumber）。
+
+   左侧色条：修改行用中性的警示色，整对行（两格）都画上，冻结列边缘才连成一条。
+   红/绿留给行号格的底色 —— 两格各表一半，不再有「替整对行表态」的问题
+   （那句话说的是只有一格时的情况）。 */
+.excel-diff-table tr.excel-row-modified-old > td.excel-row-number,
+.excel-diff-table tr.excel-row-modified-new > td.excel-row-number {
     box-shadow: inset 3px 0 0 0 var(--color-warning-text, #856404);
 }
 
@@ -137,9 +144,10 @@
     color: var(--color-danger-text, #b3261e);
 }
 
-/* 修改行的行号格是 rowspan=2 的**一个**格子（两行共用），它只能说明「这一对是改动」，
-   说成「上面那行是旧值」就错了 —— 实测写成「旧」时那个字贴在整个行对上。
-   上下哪一半是旧值由单元格自己表达：旧值那格文字带删除线、底色浅红。 */
+/* 修改行的行号格里那个「改」字：两格中只在**上面那一格**写。
+   它说明的是「这一对是改动」（不是一删一增），不表示上下哪一半是旧值 ——
+   实测写成「旧」时那个字会贴在整对行上。下面那格靠同一组 `::before` 规则
+   占着同样高的位置（无 content），两格的行号才对得齐。 */
 .excel-diff-table tr.excel-row-modified-old > td.excel-row-number::before {
     content: "改";
     color: var(--color-warning-text, #856404);
@@ -158,6 +166,78 @@
     text-align: left !important;
     letter-spacing: 0.02em;
     border-left: 3px solid var(--color-border-strong, #adb5bd);
+}
+
+/* 列变更提示（`headerChangesHtml` / 服务端 partial 同一个形态）：一行摘要 +
+   可展开的明细。摘要里只报数量与分类 —— 一次提交动七八列是常事，全铺在正文上方
+   会把真正的行变更挤出屏幕。 */
+.excel-header-changes > summary {
+    cursor: pointer;
+    list-style: none;              /* 默认那个三角在窄屏上会挤掉标题 */
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    margin: 0;
+}
+
+.excel-header-changes > summary::-webkit-details-marker {
+    display: none;
+}
+
+/* 自己画一个展开指示：默认三角在 flex 摘要里位置会飘，
+   且 `list-style: none` 之后 Safari 也不再画它。 */
+.excel-header-changes > summary::after {
+    content: "▾";
+    margin-left: auto;
+    color: var(--color-text-muted, #656d76);
+    font-size: 12px;
+    transition: transform 0.15s ease;
+}
+
+.excel-header-changes[open] > summary::after {
+    transform: rotate(180deg);
+}
+
+.excel-header-changes__counts {
+    color: var(--color-text-muted, #656d76);
+    font-weight: 600;
+    font-size: 12px;
+}
+
+.excel-header-changes__list {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--color-border, #dee2e6);
+    font-size: 12px;
+    line-height: 1.7;
+    overflow-wrap: anywhere;
+}
+
+/* 服务端那份渲染（templates/diff_partials/excel_diff.html）把改前/改后放在同一个
+   格子里的形态下，修改行的行号格写成「上一版行号 → 当前行号」。上一版那个数压淡一档，
+   一眼能分出哪个是当前文件的真实行号。 */
+.excel-diff-table .excel-row-number .excel-row-number-prev {
+    color: var(--color-text-muted, #656d76);
+    font-weight: 400;
+}
+
+.excel-diff-table .excel-row-number .excel-row-number-arrow {
+    color: var(--color-text-muted, #656d76);
+    font-weight: 400;
+    margin: 0 1px;
+}
+
+/* 表头块（物理第 2..N 行，见 static/js/excel_diff_table.js 的 headerBlockUnits）
+   在没有改动时的那一行说明。表头块是每张表都常驻的一段，没动过就不逐行铺开 ——
+   否则「表头行数」配了 3 的仓库，每张表都会平白多出两行把数据挤下去。 */
+.excel-diff-table tr.excel-row-note > td.excel-note {
+    padding: 4px 10px;
+    background: var(--color-surface-subtle, #f8f9fa);
+    color: var(--color-text-muted, #656d76);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
 }
 
 /* ---------------------------------------------------------------- 5. 单元格 */

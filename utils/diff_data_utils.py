@@ -18,6 +18,22 @@ def clean_json_data(data):
     return data
 
 
+def header_rows_have_changes(sheet_data):
+    """这张表的**表头块**里有没有改动。
+
+    表头块（`sheet_data["header_rows"]`）里含**未改动的行** —— 界面要拿它们说明
+    「表头共 3 行」并让评审者看到表头长什么样。所以判「有没有变」不能用「列表非空」：
+    那样一张完全没变的表也会被判成有内容（`validate_excel_diff_data` 与周版本合并的
+    `has_changes` 都踩这个）。
+    """
+    if not isinstance(sheet_data, dict):
+        return False
+    for row in sheet_data.get("header_rows") or []:
+        if isinstance(row, dict) and row.get("status") in ("added", "removed", "modified"):
+            return True
+    return False
+
+
 def validate_excel_diff_data(diff_data):
     """Validate basic Excel diff payload structure."""
     if not diff_data:
@@ -41,6 +57,7 @@ def validate_excel_diff_data(diff_data):
     valid_sheets_count = 0
     total_rows = 0
     header_changes = 0
+    header_rows = 0
     for _sheet_name, sheet_data in sheets.items():
         if not isinstance(sheet_data, dict):
             continue
@@ -54,11 +71,16 @@ def validate_excel_diff_data(diff_data):
         sheet_header_changes = sheet_data.get("header_changes")
         if isinstance(sheet_header_changes, list):
             header_changes += len(sheet_header_changes)
+        # 表头行的改动（第 2..N 行，见 DiffService._build_header_rows）同样是内容 ——
+        # 「这次提交只改了表头」必须算有差异，否则页面会说「没有差异」。
+        # 注意不能用「header_rows 非空」判：那块里含未改动的行。
+        if header_rows_have_changes(sheet_data):
+            header_rows += 1
 
-    if total_rows == 0 and header_changes == 0:
+    if total_rows == 0 and header_changes == 0 and header_rows == 0:
         return False, f"所有工作表都没有差异数据 (共{len(sheets)}个工作表)"
     if total_rows == 0:
-        return True, f"验证通过: {header_changes}处列变更, 0行差异"
+        return True, f"验证通过: {header_changes}处列变更, {header_rows}处表头变更, 0行差异"
     return True, f"验证通过: {valid_sheets_count}个有效工作表, 共{total_rows}行差异"
 
 

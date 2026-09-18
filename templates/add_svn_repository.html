@@ -146,6 +146,12 @@
                                 <div class="col-md-6">
                                     <label for="header_rows" class="form-label"><span class="text-danger">*</span> 表头行数</label>
                                     <input type="number" class="form-control" id="header_rows" name="header_rows" placeholder="如: 1" min="1" value="{% if is_edit %}{{ repository.header_rows or '' }}{% endif %}">
+                                    <small class="text-muted">表头占前几行（含第 1 行）</small>
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="header_name_row" class="form-label">名称行</label>
+                                    <input type="number" class="form-control" id="header_name_row" name="header_name_row" placeholder="留空=第 1 行" min="1" value="{% if is_edit %}{{ repository.header_name_row or '' }}{% endif %}">
+                                    <small class="text-muted">列名取表头块里的第几行（留空为第 1 行；「第 1 行是大标题、第 2 行才是字段名」的表填 2）</small>
                                 </div>
                                 <div class="col-md-6">
                                     <label for="key_columns" class="form-label">关键列</label>
@@ -234,6 +240,7 @@ function toggleTableConfig() {
         // 清空table相关字段
         headerRowsInput.value = '';
         document.getElementById('key_columns').value = '';
+        document.getElementById('header_name_row').value = '';
         document.getElementById('enable_id_confirmation').checked = false;
         document.getElementById('show_duplicate_id_warning').checked = false;
     }

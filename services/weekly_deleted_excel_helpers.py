@@ -180,7 +180,8 @@ def previous_version_url(
     return previous_url
 
 
-def build_deleted_excel_payload(*, file_path: str, previous_content: bytes | None, diff_service):
+def build_deleted_excel_payload(*, file_path: str, previous_content: bytes | None, diff_service,
+                                header_rows=None, header_name_row=None):
     """删除前那一版的字节 → 「整份删除」载荷（每张表、每一行都是删除行）。
 
     与提交页同一条路（`services/vcs_content_service.py::get_deleted_file_diff_data`）：
@@ -188,11 +189,19 @@ def build_deleted_excel_payload(*, file_path: str, previous_content: bytes | Non
     「当前内容为空」推断 —— 读文件失败同样是空内容，渲染成「全表删除」等于让评审者
     把一次读取失败当成一次真实的删除确认掉。所以这里只在真拿到基线字节时建载荷；
     拿不到（或建出来的载荷一张表都没有）就返回 None，由上层退回「已删除」提示。
+
+    header_rows 是仓库配的「表头行数」：删除态也要把表头行从「删除 N 行」里分出来，
+    否则一张三行表头的表被删掉时，计数里会多出两行表头。
+
+    header_name_row 是仓库配的「名称行」：删除态的表头块同样按它取列名，
+    否则同一张表在「改了一格」与「整份删除」两种提交里会显示两套列头。
     """
     if not previous_content:
         return None
     try:
-        payload = diff_service.process_deleted_file(file_path, previous_content)
+        payload = diff_service.process_deleted_file(
+            file_path, previous_content, header_rows=header_rows,
+            header_name_row=header_name_row)
     except Exception:
         return None
     if not isinstance(payload, dict) or not payload.get("sheets"):
@@ -314,7 +323,9 @@ def render_weekly_deleted_excel(
         log_print=log_print,
     )
     payload = build_deleted_excel_payload(
-        file_path=file_path, previous_content=previous_content, diff_service=diff_service
+        file_path=file_path, previous_content=previous_content, diff_service=diff_service,
+        header_rows=getattr(repository, "header_rows", None),
+        header_name_row=getattr(repository, "header_name_row", None),
     )
     if payload:
         if log_print:

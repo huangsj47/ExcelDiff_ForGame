@@ -4,6 +4,79 @@ from __future__ import annotations
 
 import json
 
+from utils.diff_data_utils import header_rows_have_changes
+
+# 合并后的表头块里，「有改动」的三种状态（`unchanged` 是常驻行，见 header_rows_have_changes）。
+_CHANGED_STATUSES = ("added", "removed", "modified")
+
+
+def _merge_header_block(merged_sheet, source_rows, segment_info):
+    """把某一段的表头块并进合并结果（**按行号去重**）。
+
+    表头块不像数据行那样按行区间切分：每个分段都是同一个文件的一次完整 diff，
+    各自带着**同一份**表头块。直接 append 会把表头行按分段数复制好几遍，
+    所以这里按行号归并，并且**有改动的那一段赢** —— 表头行的改动才是要看的东西，
+    而「第 2 段说没改」只是那一对提交之间没改。
+    """
+    block = merged_sheet.get("header_rows") or []
+    by_row = {
+        row["row_number"]: row
+        for row in block
+        if isinstance(row, dict) and "row_number" in row
+    }
+    for row in source_rows or []:
+        if not isinstance(row, dict) or "row_number" not in row:
+            continue
+        incoming = dict(row)
+        incoming.setdefault("segment_info", segment_info)
+        existing = by_row.get(row["row_number"])
+        if existing is None or (
+            existing.get("status") not in _CHANGED_STATUSES
+            and incoming.get("status") in _CHANGED_STATUSES
+        ):
+            by_row[row["row_number"]] = incoming
+    if by_row:
+        merged_sheet["header_rows"] = [by_row[key] for key in sorted(by_row)]
+
+
+def _merge_header_changes(merged_sheet, source_changes):
+    """列名变更是 `header_changes` 那份清单，同样按分段去重。
+
+    修前这里整份丢掉：合并后的周版本视图里，「列名变更」的提示永远是空的 ——
+    与「只改表头看不见」是同一类问题（`DiffService._build_header_rows` 的说明）。
+    """
+    seen = {
+        (item.get("change"), item.get("column_index"), item.get("column"),
+         item.get("old_name"), item.get("new_name"))
+        for item in merged_sheet.get("header_changes") or []
+        if isinstance(item, dict)
+    }
+    for item in source_changes or []:
+        if not isinstance(item, dict):
+            continue
+        key = (item.get("change"), item.get("column_index"), item.get("column"),
+               item.get("old_name"), item.get("new_name"))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged_sheet.setdefault("header_changes", []).append(item)
+
+
+def _finalize_header_block(merged_sheet):
+    """重算合并后的 `header_stats`，并按它决定这张表算不算有变更。"""
+    if not merged_sheet.get("header_rows"):
+        return
+    block = merged_sheet["header_rows"]
+    counts = {status: 0 for status in ("added", "removed", "modified")}
+    for row in block:
+        status = row.get("status") if isinstance(row, dict) else None
+        if status in counts:
+            counts[status] += 1
+    # 合并之后「前后各多少行表头」已经分不出来了（每段都是同一份表头），
+    # 两个总数都用块的行数，界面只用 added/removed/modified 三项。
+    merged_sheet["header_stats"] = dict(
+        counts, total_rows_current=len(block), total_rows_previous=len(block))
+
 
 def merge_segmented_excel_diff_payload(segment_payloads):
     """Merge segmented excel payload list into a single excel payload."""
@@ -62,7 +135,15 @@ def merge_segmented_excel_diff_payload(segment_payloads):
                 merged_sheet.get("has_changes", False)
                 or bool(sheet_data.get("has_changes"))
                 or bool(rows)
+                or header_rows_have_changes(sheet_data)
             )
+
+            _merge_header_block(
+                merged_sheet,
+                sheet_data.get("header_rows"),
+                {"segment_index": segment_index, "total_segments": total_segments},
+            )
+            _merge_header_changes(merged_sheet, sheet_data.get("header_changes"))
 
             source_stats = sheet_data.get("stats")
             if isinstance(source_stats, dict):
@@ -79,8 +160,12 @@ def merge_segmented_excel_diff_payload(segment_payloads):
                     if row_status in merged_sheet["stats"]:
                         merged_sheet["stats"][row_status] += 1
 
-            if merged_sheet["rows"]:
+            if merged_sheet["rows"] or merged_sheet.get("header_changes") \
+                    or header_rows_have_changes(merged_sheet):
                 merged_sheet["status"] = "modified"
+
+    for merged_sheet in merged_result["sheets"].values():
+        _finalize_header_block(merged_sheet)
 
     if not merged_result["sheets"]:
         return None

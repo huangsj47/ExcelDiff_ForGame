@@ -164,6 +164,12 @@ def _migrate_repository_columns(db, log_print):
         {
             "last_sync_error": "last_sync_error TEXT",
             "last_sync_error_time": "last_sync_error_time DATETIME",
+            # 比较口径的三项：`header_rows`（表头行数）/ `header_name_row`（名称行）/
+            # `key_columns`（关键列）。后两项一直没列在这里 —— 老库上读它们会直接抛
+            # `no such column`，而 `db.create_all()` 只建新表、不会给已存在的表补列。
+            "header_rows": "header_rows INTEGER",
+            "header_name_row": "header_name_row INTEGER",
+            "key_columns": "key_columns VARCHAR(200)",
         },
         log_print,
     )

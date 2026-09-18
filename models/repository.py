@@ -52,6 +52,10 @@ class Repository(db.Model):
     
     # Table配置字段
     header_rows = db.Column(db.Integer)
+    # 列名取表头块里的第几行（1 或空 = 第 1 行，与历史上一致）。配 2 用于
+    # 「第 1 行是大标题、第 2 行才是字段名」的表 —— 读取仍旧是 header=0，
+    # 引擎在比较之前把列名换成这一行的取值（见 DiffService._plan_name_row）。
+    header_name_row = db.Column(db.Integer)
     key_columns = db.Column(db.String(200))
     enable_id_confirmation = db.Column(db.Boolean, default=False)
     show_duplicate_id_warning = db.Column(db.Boolean, default=False)

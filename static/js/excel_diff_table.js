@@ -272,7 +272,91 @@
         if (unit && unit.row) {
             return changedRowHtml(unit.row, headers);
         }
+        if (unit && unit.note !== undefined) {
+            return noteRowHtml(unit.note, headers.length);
+        }
         return groupHeaderRowHtml(unit ? unit.label : '', headers.length, unit ? unit.count : '');
+    }
+
+    // ------------------------------------------------- 表头块（物理第 2..N 行）
+
+    // 一段说明占一行。目前只有表头块没有改动时用它（见 headerBlockUnits）。
+    function noteRowHtml(text, columnCount) {
+        return '<tr class="excel-row-note">' +
+               '<td class="excel-note" colspan="' + (columnCount + 1) + '">' +
+               escapeHtml(text) + '</td></tr>';
+    }
+
+    var HEADER_BLOCK_LABEL = '表头行数据';
+
+    // 状态属于「有改动」的三种。表头块里含未改动的行，判「有没有变」不能看列表非空 ——
+    // 与 `utils/diff_data_utils.header_rows_have_changes`（Python 侧同一判据）保持一致。
+    var CHANGED_ROW_STATUSES = ['added', 'removed', 'modified'];
+
+    function rowHasChange(row) {
+        return CHANGED_ROW_STATUSES.indexOf((row && row.status) || '') !== -1;
+    }
+
+    // 载荷里的表头块（`sheet_data.header_rows`）。没配「表头行数」时它不存在，
+    // 返回空数组 —— 没配置的仓库渲染结果与改前逐字相同。
+    //
+    // 表头块**不受搜索筛选影响**：它不是「命中筛选的数据行」，而是这张表的上下文
+    // （与 <thead> 同一性质）。所以筛选/开关变化时它照旧在最上面。
+    function resolveHeaderRows(sheetData) {
+        var rows = sheetData && sheetData.header_rows;
+        return Array.isArray(rows) ? rows : [];
+    }
+
+    // 表头块的说明文案：「表头 2 行（第 2–3 行）· 无改动」。
+    // 行号取自载荷里的真实行号（表头行数配得比实际多时，块里可能只有一两行）。
+    function headerBlockNote(rows) {
+        var numbers = [];
+        for (var i = 0; i < rows.length; i++) {
+            if (rows[i] && rows[i].row_number !== undefined && rows[i].row_number !== '') {
+                numbers.push(rows[i].row_number);
+            }
+        }
+        var where = '';
+        if (numbers.length) {
+            var first = Math.min.apply(null, numbers);
+            var last = Math.max.apply(null, numbers);
+            where = first === last ? '第 ' + first + ' 行' : '第 ' + first + '–' + last + ' 行';
+        }
+        return '表头 ' + rows.length + ' 行' + (where ? '（' + where + '）' : '') + ' · 无改动';
+    }
+
+    // 表头块的渲染单元：分组标题 + 它那几行，作为**最前面**的一段拼进渲染计划。
+    //
+    // 拼进 `buildView` 的 units（而不是塞进 <thead>）有三个好处：
+    //   * 列与下面的数据行天然对齐（用的是同一份 `visibleHeaders`）；
+    //   * 分批渲染按单元切，所以表头块只出现在第一批，且「一次性渲染」与「分批渲染」
+    //     逐字相同（tests/test_excel_diff_table_module.py 钉着这条等价性）；
+    //   * `<thead>` 保持单行 —— 表头的吸顶偏移（static/css/diff-table-ux.css 的
+    //     `top: 34px`）与表头高度是硬耦合的，多一行就要连带改 CSS。
+    //
+    // **有改动就逐行铺开、绝不折叠**（表头行的改动必须看得见）；没有改动时只留一行
+    // 说明 —— 表头块在每张表上常驻，把没动过的表头行也铺开会把数据行挤下去。
+    function headerBlockUnits(sheetData) {
+        var rows = resolveHeaderRows(sheetData);
+        if (!rows.length) {
+            return [];
+        }
+        var units = [{label: HEADER_BLOCK_LABEL, count: groupCountLabel(rows)}];
+        var anyChange = false;
+        for (var j = 0; j < rows.length; j++) {
+            if (rowHasChange(rows[j])) {
+                anyChange = true;
+                break;
+            }
+        }
+        if (!anyChange) {
+            units.push({note: headerBlockNote(rows)});
+            return units;
+        }
+        for (var i = 0; i < rows.length; i++) {
+            units.push({row: rows[i]});
+        }
+        return units;
     }
 
     // 表体：接受渲染计划（buildRowRenderPlan 的产物）或原始行数组。
@@ -315,9 +399,26 @@
     // Excel 里的真实行号去核对，编出来的序号比空白更误导。
     // 类名 `excel-row-number` 写死在这里：它是「第一列冻结」（CSS 的 sticky left:0）
     // 的落点，也是别的用例找行号格的锚点 —— 别改成拼出来的名字。
-    function rowNumberCell(row, extraClass) {
+    // `number` 是可选的行号覆盖值（修改行的「上一版行号」那一格用它）。
+    function rowNumberCell(row, extraClass, number) {
+        var text = (number === undefined || number === null || number === '')
+            ? (row.row_number || '')
+            : number;
         return '<td class="excel-row-number' + (extraClass ? ' ' + extraClass : '') + '">' +
-               escapeHtml(row.row_number || '') + '</td>';
+               escapeHtml(text) + '</td>';
+    }
+
+    // 这一行在**上一版本**里的行号（服务端 `_smart_row_diff` 给的 `previous_row_number`）。
+    //
+    // 没有这个字段时返回 null —— 老载荷（DIFF_LOGIC_VERSION 1.18.0 之前算出来的缓存、
+    // 以及旧引擎那条兜底路径）都没有它，界面要退化成「一个 rowspan=2 的行号格」的今天
+    // 形态，而不是渲染出一个空行号。
+    function previousRowNumber(row) {
+        var value = row && row.previous_row_number;
+        if (value === undefined || value === null || value === '') {
+            return null;
+        }
+        return value;
     }
 
     function createAddedRow(row, headers) {
@@ -340,13 +441,25 @@
         return html + '</tr>';
     }
 
-    // 创建修改行 - 双行结构：第一行旧值、第二行新值，行号格 rowspan="2"。
+    // 创建修改行 - 双行结构：第一行旧值、第二行新值。
     // 未变更的格子在这一对里只出现一次（rowspan="2"），否则同一格会被读两遍。
+    //
+    // **行号也是两格**（上=上一版本的行号，下=当前版本的行号）：插/删一行之后同一个
+    // 逻辑行在两版里的行号会不同（线上实测 12 ↔ 11），只报一个数就等于让评审者按错
+    // 的行号回文件里核对。老载荷没有 previous_row_number，那时退回「一个 rowspan=2 的
+    // 行号格」的形态（见 previousRowNumber）。
     function createModifiedRow(row, headers) {
         var map = modifiedCellsMap(row);
-        var html = '<tr class="excel-row-modified-old">' +
-                   '<td class="excel-row-number excel-modified" rowspan="2">' +
-                   escapeHtml(row.row_number || '') + '</td>';
+        var previousNumber = previousRowNumber(row);
+        var html = '<tr class="excel-row-modified-old">';
+        if (previousNumber === null) {
+            html += '<td class="excel-row-number excel-modified" rowspan="2">' +
+                    escapeHtml(row.row_number || '') + '</td>';
+        } else {
+            // 旧行号用行号列的「删除」底色、新行号用「新增」底色：颜色之外还有
+            // 行号格里的「改」字（CSS 的 ::before）说明这一对是修改而不是一删一增。
+            html += rowNumberCell(row, 'excel-removed', previousNumber);
+        }
 
         var i;
         for (i = 0; i < headers.length; i++) {
@@ -378,6 +491,9 @@
         html += '</tr>';
 
         html += '<tr class="excel-row-modified-new">';
+        if (previousNumber !== null) {
+            html += rowNumberCell(row, 'excel-added');
+        }
         for (i = 0; i < headers.length; i++) {
             var newHeader = headers[i];
             var newChange = map[newHeader];
@@ -808,8 +924,13 @@
     function buildView(sheetData, state, opts) {
         var headers = (sheetData && sheetData.headers) || [];
         var allRows = (sheetData && sheetData.rows) || [];
+        var headerRows = resolveHeaderRows(sheetData);
         var matched = filterRows(allRows, headers, state);
-        var columns = resolveVisibleColumns(sheetData, headers, matched, state);
+        // 「这一列有没有内容」要把**表头块**算进去：表头行永远渲染（不受筛选影响），
+        // 若某列只有表头里那几行有字，不算进来的话它会被「隐藏本页空列」藏掉 ——
+        // 而那条表头变更恰恰是这次提交唯一要看的东西。
+        var columns = resolveVisibleColumns(
+            sheetData, headers, matched.concat(headerRows), state);
         var visibleHeaders = [];
         var i;
         for (i = 0; i < columns.indexes.length; i++) {
@@ -820,7 +941,8 @@
             visibleIndexes: columns.indexes,
             hiddenCount: columns.hiddenCount,
             matched: matched,
-            units: buildRowRenderPlan(matched, visibleHeaders),
+            // 表头块作为最前面的一段，排在删除/新增/变更三段之前。
+            units: headerBlockUnits(sheetData).concat(buildRowRenderPlan(matched, visibleHeaders)),
             // 「一行都不剩」只在用户真的筛了什么的时候才算空结果：
             // 载荷本来就没有行是另一回事（那种情况由页面自己的提示拦在前面）。
             isEmptyResult: !!((state && state.filter) && !matched.length)
@@ -907,9 +1029,12 @@
         if (view.isEmptyResult) {
             return emptyNoteHtml('没有匹配「' + ((state && state.filter) || '') + '」的行');
         }
-        if (!view.matched.length) {
+        if (!view.units.length) {
             // 一行都没有：渲染一张只有表头的空表看起来就跟页面坏了一样
             // （线上「没有净变更」那次报障的形态），把事实说出来。
+            // 判据是 units 而不是 matched：表头块（第 2..N 行）也是要渲染的内容，
+            // 「这次提交只改了表头」时 matched 是空的 —— 按 matched 判会把表头块
+            // 一起吞掉，那次提交就显示成「该工作表没有变更行」。
             return emptyNoteHtml('该工作表没有变更行');
         }
         return '<table class="excel-diff-table">' +
@@ -1106,7 +1231,16 @@
         changedRowHtml: changedRowHtml,
         changedRowsGroupedHtml: changedRowsGroupedHtml,
         buildRowRenderPlan: buildRowRenderPlan,
+        // 表头块（第 2..N 行）
+        HEADER_BLOCK_LABEL: HEADER_BLOCK_LABEL,
+        rowHasChange: rowHasChange,
+        resolveHeaderRows: resolveHeaderRows,
+        headerBlockUnits: headerBlockUnits,
+        headerBlockNote: headerBlockNote,
+        noteRowHtml: noteRowHtml,
         // 行
+        rowNumberCell: rowNumberCell,
+        previousRowNumber: previousRowNumber,
         createAddedRow: createAddedRow,
         createRemovedRow: createRemovedRow,
         createModifiedRow: createModifiedRow,

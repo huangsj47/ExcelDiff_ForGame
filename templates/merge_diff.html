@@ -1539,21 +1539,35 @@ function headerChangesHtml(sheetData) {
     if (!changes || !changes.length) {
         return '';
     }
+    // 摘要只给数量与分类：一次提交动七八列是常事（线上 8 条：新增 2、删除 6），
+    // 全铺在正文上方会把真正的行变更挤出屏幕。明细收进 <details>，点开就能核对，
+    // 信息一个字都不丢 —— 「列变更（8）：新增列 室外总威胁值；…」那种长句子
+    // 既挤又难读。
     var items = [];
+    var counts = {added: 0, removed: 0, renamed: 0};
     for (var i = 0; i < changes.length; i++) {
         var change = changes[i];
         if (change.change === 'added') {
+            counts.added += 1;
             items.push('新增列 ' + change.column);
         } else if (change.change === 'removed') {
+            counts.removed += 1;
             items.push('删除列 ' + change.old_name);
         } else {
+            counts.renamed += 1;
             items.push('列名 ' + change.old_name + ' → ' + change.new_name);
         }
     }
-    return '<div class="alert alert-info py-2 px-3 mb-2 excel-header-changes">' +
-           '<i class="bi bi-type me-2"></i><strong>列变更（' + changes.length + '）：</strong>' +
-           escapeHtml(items.join('；')) +
-           '</div>';
+    var parts = [];
+    if (counts.added) parts.push('新增 ' + counts.added);
+    if (counts.removed) parts.push('删除 ' + counts.removed);
+    if (counts.renamed) parts.push('改名 ' + counts.renamed);
+    return '<details class="alert alert-info py-2 px-3 mb-2 excel-header-changes">' +
+           '<summary><i class="bi bi-type me-2"></i><strong>列变更（' + changes.length + '）</strong>' +
+           '<span class="excel-header-changes__counts">' + escapeHtml(parts.join(' · ')) + '</span>' +
+           '</summary>' +
+           '<div class="excel-header-changes__list">' + escapeHtml(items.join('；')) + '</div>' +
+           '</details>';
 }
 
 // 表级提示合在一处：工作表级新增/删除 + 列级变更。
@@ -1963,7 +1977,10 @@ function showExcelSheetInContainer(containerId, sheetName, diffData) {
                 row_number: row.row_number,
                 status: row.status || 'unchanged',
                 data: data,
-                cell_changes: row.cell_changes
+                cell_changes: row.cell_changes,
+                // 上一版本的行号（修改行才可能有）：漏掉它就是静默丢内容 ——
+                // 合并页的修改行会退回「一个 rowspan=2 的行号格」，看不到旧行号。
+                previous_row_number: row.previous_row_number
             };
         }
         return row;
@@ -1976,7 +1993,12 @@ function showExcelSheetInContainer(containerId, sheetName, diffData) {
         stats: sheetData.stats,
         operation: sheetData.operation,
         message: sheetData.message,
-        header_changes: sheetData.header_changes
+        header_changes: sheetData.header_changes,
+        // 表头块（第 2..N 行，见 services/diff_service.py 的 `_build_header_rows`）。
+        // 这是**刻意写出来的白名单**，漏一个字段就是静默丢内容：合并后的周版本视图里
+        // 表头行的改动会看不见（与 header_changes 原先在这里被丢掉是同一个坑）。
+        header_rows: (sheetData.header_rows || []).map(normalizeLegacyRow),
+        header_stats: sheetData.header_stats
     };
 
     window.ExcelDiffTable.mountSheetTable(tableContainer, normalized, {sheetName: sheetName});
