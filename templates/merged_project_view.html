@@ -2430,7 +2430,7 @@ function normalizeRiskLevel(level) {
     return raw;
 }
 
-function applyRiskLabel(el, level) {
+function applyRiskLabel(el, level, stale, staleNote) {
     if (!el) return;
     const normalized = normalizeRiskLevel(level);
     const config = RISK_LEVEL_MAP[normalized];
@@ -2438,15 +2438,25 @@ function applyRiskLabel(el, level) {
     if (!config) {
         el.textContent = '版本AI分析：未分析';
         el.classList.add('risk-unknown');
+        el.removeAttribute('title');
         return;
     }
     el.classList.remove('risk-unknown');
     el.classList.add(config.className);
-    el.textContent = `版本AI分析：${config.label}`;
+    // 「旧结论」必须写在标签上，不能只靠抽屉里的说明：这张卡片上的等级是给人一眼看的，
+    // 一个来自旧规则（或最近一次没跑完）的等级看起来与刚跑出来的一模一样。
+    // 完整原因放 title，标签本身只加三个字，免得撑坏卡片布局。
+    el.textContent = `版本AI分析：${config.label}${stale ? '（旧）' : ''}`;
+    if (stale && staleNote) {
+        el.setAttribute('title', staleNote);
+    } else {
+        el.removeAttribute('title');
+    }
 }
 
 function updateRiskLabelByConfig(configId, level) {
     document.querySelectorAll(`.version-risk-label[data-config-id="${configId}"]`).forEach(el => {
+        // 刚跑完的那次结果一定是当前规则下的：把「旧」的痕迹清掉。
         applyRiskLabel(el, level);
     });
 }
@@ -2498,7 +2508,8 @@ async function refreshRiskLabels(root = document) {
         if (!configId) return;
         const result = await getWeeklyAiResult(configId);
         const riskLevel = result && result.result ? result.result.risk_level : null;
-        applyRiskLabel(label, riskLevel);
+        // 旧结论照样显示等级，但要标出来（原因见 applyRiskLabel）。
+        applyRiskLabel(label, riskLevel, !!(result && result.stale), result && result.stale_note);
     }));
 }
 
@@ -2630,11 +2641,18 @@ async function refreshWeeklyAiLatest(configId) {
         const scope = result.scope || '-';
         if (meta) {
             meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`;
+            // 旧的结论（规则变了 / 最近一次没跑完）照样显示，但要说清它是旧的 ——
+            // 否则用户看到一句正常的「最近分析：<时间>」，会以为这就是当前结论。
+            // 文案由服务端给（`stale_note`），不在模板里各拼一份。
+            if (result.stale_note) {
+                meta.textContent += ` | ${result.stale_note}`;
+            }
         }
         setWeeklyAiReport(result.response_text);
         // 本次消耗（口径见 static/js/ai_usage_line.js）。
         renderAiUsageLine(result.usage, result.runId);
-        setWeeklyAiStatusBadge('已有结果', 'success');
+        setWeeklyAiStatusBadge(result.stale_note ? '旧结论' : '已有结果',
+                               result.stale_note ? 'warning' : 'success');
         updateRiskLabelByConfig(configId, risk);
         return true;
     }

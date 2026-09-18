@@ -678,12 +678,17 @@ function initCommitAiAnalysis() {
                     return false;
                 }
                 hasCached = true;
-                setAiStatusBadge('已有结果', 'success');
+                // 旧的结论（规则变了 / 最近一次没跑完）也要显示，但状态与 meta 行都要
+                // 说清它是旧的：一句正常的「最近分析：<时间>」会被当成当前结论。
+                // 文案由服务端给（`stale_note`），模板不各拼一份。
+                setAiStatusBadge(result.stale_note ? '旧结论' : '已有结果',
+                                 result.stale_note ? 'warning' : 'success');
                 if (meta) {
                     const risk = result.result?.risk_level || '-';
                     const createdAt = result.created_at_display || result.created_at || '-';
                     const scope = result.scope || '-';
-                    meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`;
+                    meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`
+                        + (result.stale_note ? ` | ${result.stale_note}` : '');
                 }
                 // 本次消耗（口径见 static/js/ai_usage_line.js）。run_id 取外层那条的，
                 // 明细要按运行记录取数；旧运行没有 usage 字段 → 显示「未采集」而不是 0。

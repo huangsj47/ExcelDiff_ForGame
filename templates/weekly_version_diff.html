@@ -1528,13 +1528,20 @@ async function loadWeeklyAiLatest(force = false) {
             if (meta) {
                 meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`
                     + (focusLabel ? ` | ${focusLabel}` : '');
+                // 这份结论是旧的（规则变了，或最近一次没跑完）也要显示出来，但必须说清：
+                // 一句看起来完全正常的「最近分析：<时间>」会让用户以为这就是当前结论。
+                // 文案由服务端算好（`stale_note`），三份抽屉模板不许各自拼。
+                if (result.stale_note) {
+                    meta.textContent += ` | ${result.stale_note}`;
+                }
             }
             if (result.response_text) {
                 setWeeklyAiReport(result.response_text);
             }
             // 本次消耗。run_id 取外层那条的，明细按运行记录取数（见 static/js/ai_usage_line.js）。
             renderAiUsageLine(result.result?.usage, data.run_id);
-            setWeeklyAiStatusBadge('已有结果', 'success');
+            setWeeklyAiStatusBadge(result.stale_note ? '旧结论' : '已有结果',
+                                   result.stale_note ? 'warning' : 'success');
             return true;
         }
     } catch (_err) {

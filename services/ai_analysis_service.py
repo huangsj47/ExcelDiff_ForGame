@@ -1711,63 +1711,165 @@ def _in_progress_result(run: AiAnalysisRun) -> dict:
     }
 
 
+def _conclusion_payload(run: AiAnalysisRun) -> dict:
+    """一条**有结论的** run 的读侧形态。"""
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "scope": run.scope,
+        "trigger_source": run.trigger_source,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "created_at_display": _created_at_display(run),
+        "response_text": run.response_text,
+        "result": _parse_response_payload(run.response_payload),
+    }
+
+
+def _last_attempt_failed_result(run: AiAnalysisRun) -> dict:
+    """「最近一次失败」的读侧形态：给得出失败原因，给不出结论。
+
+    这条路径以前根本走不到 —— 读侧只在「有新结论」时返回值，失败一律折叠成 None，
+    于是界面里那个 `status === 'failed'` 分支（「上次分析失败：<原因>」）是死的，
+    用户看到的是「暂无分析结果」。失败与「没分析过」是两件事，不能混。
+    """
+    return {
+        "run_id": run.id,
+        "status": "failed",
+        "in_progress": False,
+        "scope": run.scope,
+        "trigger_source": run.trigger_source,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "created_at_display": _created_at_display(run),
+        "error_message": run.error_message or "",
+        "response_text": "",
+        "result": None,
+    }
+
+
+# 「这份结论不是最新那一次」的两种成因。它们要分开说，因为用户该做的事不一样：
+# 前者要重新分析才有新规则下的结论，后者只要等/重跑上一次没跑完的那次。
+STALE_REASON_RULES_CHANGED = "rules_changed"
+STALE_REASON_INTERRUPTED = "interrupted"
+
+
+def _latest_concluded_run(conditions) -> Optional[AiAnalysisRun]:
+    """该目标最近一条**真的有结论**的成功记录。**刻意不看溯源。**
+
+    溯源自（提示词 / skill / 规则 / 模型的版本号）只该决定「这份结论能不能拿来跳过
+    重跑」—— 那是省一次调用的事；不该决定「这份结论还看不看得到」—— 那是用户以为
+    自己的分析白做了的事。两者混用一把尺子的后果已经出现过：改过 `prompt.py` 或
+    `SKILL.md` 之后，所有历史结论在界面上一起变成「未分析」，而结论一直躺在库里。
+    """
+    run = (
+        AiAnalysisRun.query.filter(*conditions)
+        .filter(AiAnalysisRun.status == "succeeded")
+        .order_by(AiAnalysisRun.created_at.desc())
+        .first()
+    )
+    if run is None or not (run.response_text or run.response_payload):
+        return None
+    ts = run.finished_at or run.created_at
+    if ts is None:
+        return None
+    if getattr(ts, "tzinfo", None) is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    if ts < _analysis_cache_cutoff():
+        return None
+    return run
+
+
+def _stale_note(reason: str, *, concluded: AiAnalysisRun, newest: AiAnalysisRun) -> str:
+    """把「这份结论为什么不是最新那一次」写成给人看的一句话。
+
+    在服务端写死一句话，而不是让三份抽屉模板各自拼：那三份是逐字复制的，让它们
+    各自拼文案就是三处会各自演化 —— 而这个仓库里「同一句话在多处各自演化」正是
+    反复出问题的地方（见 `static/js/ai_usage_line.js` 的存在理由）。
+    """
+    at = _created_at_display(concluded)
+    if reason == STALE_REASON_RULES_CHANGED:
+        return f"该结论由旧版评审规程产出（提示词/规则/模型已更新），以下是 {at} 的结论，仅供参考"
+    return (
+        f"最近一次分析未完成（{_created_at_display(newest)}，{newest.status}），"
+        f"以下是 {at} 的结论"
+    )
+
+
+def _read_latest_result(conditions, *, project_id: Optional[int] = None) -> Optional[dict]:
+    """读侧的统一口径：**库里只要有结论，就必须看得见。**
+
+    判定顺序（每一步都要能回答「用户接下来该做什么」）：
+
+    1. 最新那条可用（`_is_run_fresh`：成功 + 有内容 + 未过期 + 溯源一致）→ 直接给；
+    2. 最新那条正在跑（且不是僵尸）→ 如实报「进行中」，不能报成「没有结果」。
+       报成没有结果的后果不只是少显示一条：界面拿到「没有结果」会去自动开跑一次，
+       于是同一次分析在用户眼里变成两次、页面上永远挂着「进行中」——用户报过这个。
+       进程已死的幽灵记录由启动时的 `fail_orphaned_analysis_runs` 清掉，所以这里
+       剩下的 running 是真的在跑；
+    3. 否则**退回到最近一条真有结论的成功记录**，并带上 `stale` / `stale_reason` /
+       `stale_note` 如实说明它是旧的。这是用户报的那条：「我进行过 AI 分析，重启
+       服务后变成未分析」—— 结论还在，只是最新那次不是它（规则变了、或最新那次被
+       重启打断成 failed），而旧口径把「最新那条不可用」直接等同于「没有结论」；
+    4. 一条结论都没有时，才轮到「最近一次失败」这条形态（有原因、没结论）；
+       连失败都没有就返回 None —— 那才是真的没分析过。
+
+    `project_id` 只用于溯源现算（见 `_is_run_fresh` 的 `expected` 参数）。
+    """
+    run = (
+        AiAnalysisRun.query.filter(*conditions)
+        .order_by(AiAnalysisRun.created_at.desc())
+        .first()
+    )
+    if run is None:
+        return None
+    expected = _current_provenance(project_id) if project_id else None
+    if _is_run_fresh(run, expected=expected):
+        return _conclusion_payload(run)
+    if run.status == "running" and not run.is_stale_running:
+        return _in_progress_result(run)
+
+    concluded = _latest_concluded_run(conditions)
+    if concluded is None:
+        return _last_attempt_failed_result(run) if run.status == "failed" else None
+    if concluded.id == run.id:
+        # 唯一那条成功记录就是最新这条，却没过 `_is_run_fresh` —— 只可能是溯源变了
+        # （时间窗与 status 在 `_latest_concluded_run` 里已经判过一遍）。
+        reason = STALE_REASON_RULES_CHANGED
+    else:
+        reason = STALE_REASON_INTERRUPTED
+    payload = _conclusion_payload(concluded)
+    payload["stale"] = True
+    payload["stale_reason"] = reason
+    payload["stale_note"] = _stale_note(reason, concluded=concluded, newest=run)
+    # 最新那条的身份也带上：界面要能说清「挡住它的那一次是什么状态」。
+    payload["newest_run"] = {
+        "run_id": run.id,
+        "status": run.status,
+        "created_at_display": _created_at_display(run),
+    }
+    return payload
+
+
 def get_latest_weekly_result(config_id: int) -> Optional[dict]:
     config = WeeklyVersionConfig.query.get_or_404(config_id)
     group_key = build_weekly_group_key(config)
-    run = (
-        AiAnalysisRun.query.filter_by(target_type="weekly", target_key=group_key)
-        .order_by(AiAnalysisRun.created_at.desc())
-        .first()
+    payload = _read_latest_result(
+        (AiAnalysisRun.target_type == "weekly", AiAnalysisRun.target_key == group_key),
+        project_id=config.project_id,
     )
-    if not run:
-        return None
-    if not _is_run_fresh(run):
-        # 正在进行中的分析要**如实报出去**，不能报成「没有结果」。报成没有结果的
-        # 后果不只是少显示一条：界面拿到「没有结果」会去自动开跑一次，于是同一次
-        # 分析在用户眼里变成两次、页面上永远挂着「进行中」——用户报的就是这个。
-        # 进程已死的幽灵记录由启动时的 `fail_orphaned_analysis_runs` 清掉，
-        # 所以这里剩下的 running 是真的在跑。
-        if run.status == "running" and not run.is_stale_running:
-            return _in_progress_result(run)
-        return None
-    payload = _parse_response_payload(run.response_payload)
-    return {
-        "run_id": run.id,
-        "status": run.status,
-        "scope": run.scope,
-        "focus": _focus_from_run(run),
-        "trigger_source": run.trigger_source,
-        "created_at": run.created_at.isoformat() if run.created_at else None,
-            "created_at_display": _created_at_display(run),
-        "response_text": run.response_text,
-        "result": payload,
-    }
+    if payload and payload.get("run_id"):
+        # `focus` 只有周版本有（单提交不分范围），所以只在周版本这条路径上补。
+        run = db.session.get(AiAnalysisRun, payload["run_id"])
+        payload["focus"] = _focus_from_run(run) if run else {"key": FOCUS_ALL, "label": ""}
+    return payload
 
 
 def get_latest_commit_result(commit_id: int) -> Optional[dict]:
-    run = (
-        AiAnalysisRun.query.filter_by(target_type="commit", target_id=commit_id)
-        .order_by(AiAnalysisRun.created_at.desc())
-        .first()
+    commit = db.session.get(Commit, commit_id)
+    repo = db.session.get(Repository, commit.repository_id) if commit else None
+    return _read_latest_result(
+        (AiAnalysisRun.target_type == "commit", AiAnalysisRun.target_id == commit_id),
+        project_id=repo.project_id if repo else None,
     )
-    if not run:
-        return None
-    if not _is_run_fresh(run):
-        # 同 `get_latest_weekly_result`：正在进行中的要如实报出去。
-        if run.status == "running" and not run.is_stale_running:
-            return _in_progress_result(run)
-        return None
-    payload = _parse_response_payload(run.response_payload)
-    return {
-        "run_id": run.id,
-        "status": run.status,
-        "scope": run.scope,
-        "trigger_source": run.trigger_source,
-        "created_at": run.created_at.isoformat() if run.created_at else None,
-            "created_at_display": _created_at_display(run),
-        "response_text": run.response_text,
-        "result": payload,
-    }
 
 
 def select_primary_weekly_config(configs: List[WeeklyVersionConfig]) -> WeeklyVersionConfig:
