@@ -296,3 +296,138 @@ def test_read_reference_reports_a_missing_file_as_none(tmp_path):
     provider = PlatformContextProvider(loaded=loaded)
 
     assert provider.read_reference("gone.md") is None
+
+
+# ==========================================================================
+# 整表统计：判断「这个值合不合理」要有比较基准
+# ==========================================================================
+#
+# `value_sanity` 维度要求模型判断「这个值放在这个系统里合不合理」。配表动辄几千行，
+# **整表塞进提示词是不可能的**（`file_content` 单条上限 11,000 字符），而只给改动的那
+# 一个单元格就等于让模型拿孤零零一个数字猜。所以平台在读表格内容时附一段**整表统计**，
+# 让「1000000 是不是大得离谱」有东西可比 —— 这就是「不要根据单一数据判断」的落点。
+
+
+def _workbook_bytes(sheets) -> bytes:
+    """把 {表名: [[行], …]} 造成一个真的 xlsx（openpyxl 在内存里写）。"""
+    import io
+
+    from openpyxl import Workbook
+
+    book = Workbook()
+    book.remove(book.active)
+    for name, rows in sheets.items():
+        sheet = book.create_sheet(title=name)
+        for row in rows:
+            sheet.append(row)
+    buffer = io.BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
+
+
+def _stats_lines(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith("  - ")]
+
+
+def test_excel_content_states_the_whole_table_distribution():
+    """数值列要给 min / 中位 / P90 / max —— 量级异常靠这组数字才看得出来。"""
+    from services.ai.platform_provider import _read_excel_sheets
+
+    rows = [["id", "价值"]] + [[index, index] for index in range(1, 101)]
+    text = _read_excel_sheets(_workbook_bytes({"道具表": rows}), max_rows=5)
+
+    assert "整表统计" in text
+    assert "其余 100 行参与统计" in text, f"行数没说清（首行按列名）：{text[:400]}"
+    assert "第 2 列（首行「价值」）" in text
+    assert "最小 1｜" in text
+    assert "中位 50.5｜" in text
+    assert "P90 90.1｜" in text
+    assert "最大 100" in text
+
+
+def test_the_stats_cover_rows_that_the_body_did_not_show():
+    """**这条是整表统计存在的理由**：正文按行数裁剪，统计必须覆盖被裁掉的那些行。
+
+    否则「基准」只覆盖前几行 —— 而那几行恰恰是最正常的几行，异常值全在后面。
+    """
+    from services.ai.platform_provider import _read_excel_sheets
+
+    rows = [["id", "价值"]] + [[index, 100] for index in range(1, 301)]
+    rows.append([301, 1000000])  # 异常值排在最后，正文根本看不到
+    text = _read_excel_sheets(_workbook_bytes({"道具表": rows}), max_rows=3)
+
+    assert "其余 301 行参与统计" in text
+    assert "最大 1000000" in text, "被裁掉的行没有参与统计，基准是残缺的"
+    assert "正文只展示了前 3 行" in text, "正文被裁剪这件事没有如实说出来"
+
+
+def test_the_stats_come_before_the_body_so_truncation_cannot_eat_them():
+    """统计必须排在正文之前。
+
+    `file_content` 单条上限 11,000 字符，而截断是**只砍尾巴**的（`budget.truncate_text`）——
+    统计放在正文后面，大表一截断就先把基准砍掉了，而基准正是这条路径存在的意义。
+    """
+    from services.ai.platform_provider import _read_excel_sheets
+
+    rows = [["id", "价值"]] + [[index, index] for index in range(1, 51)]
+    text = _read_excel_sheets(_workbook_bytes({"道具表": rows}), max_rows=50)
+
+    assert text.index("整表统计") < text.index("- 1 ｜ 1"), (
+        f"整表统计被排到了正文后面，截断会先丢掉它：{text[:300]}"
+    )
+
+
+def test_text_columns_show_their_value_distribution():
+    """枚举列要能看到「有哪些取值、各占多少」——「不在允许集合里」靠它判断。"""
+    from services.ai.platform_provider import _read_excel_sheets
+
+    rows = [["id", "品质"]]
+    rows += [[index, "A"] for index in range(1, 51)]
+    rows += [[index, "B"] for index in range(51, 101)]
+    rows += [[101, "Z"]]
+    text = _read_excel_sheets(_workbook_bytes({"道具表": rows}), max_rows=2)
+
+    assert "不同取值 3" in text, f"枚举取值数没报出来：{text[:500]}"
+    assert "最多：A(50)、B(50)、Z(1)" in text
+
+
+def test_empty_rows_are_not_counted_as_data():
+    """整行为空的行不算数据行 —— 否则行数与中位数都会被空行稀释。"""
+    from services.ai.platform_provider import _read_excel_sheets
+
+    rows = [["id", "价值"], [1, 10], [None, None], [2, 20], ["", "  "]]
+    text = _read_excel_sheets(_workbook_bytes({"道具表": rows}), max_rows=10)
+
+    assert "其余 2 行参与统计" in text, f"空行被算成数据行了：{text[:400]}"
+    assert "中位 15" in text
+
+
+def test_a_wide_table_says_how_many_columns_were_not_summarised():
+    """列太多时不能无限下发统计（它要挤在 11,000 字符额度里），但要如实交代。"""
+    from services.ai.platform_provider import _read_excel_sheets
+
+    header = [f"c{index}" for index in range(30)]
+    rows = [header, list(range(30))]
+    text = _read_excel_sheets(_workbook_bytes({"宽表": rows}), max_rows=5)
+
+    assert "另有 6 列未做统计" in text, f"截掉的列数没交代：{_stats_lines(text)[-3:]}"
+
+
+def test_a_mixed_column_reports_both_shapes():
+    """数值占少数的列（例如「1」「2」「未开放」混在一起）也要给出取值分布。"""
+    from services.ai.platform_provider import _read_excel_sheets
+
+    rows = [["id", "类型"]] + [[index, "未开放"] for index in range(1, 10)] + [[10, 1], [11, 2]]
+    text = _read_excel_sheets(_workbook_bytes({"道具表": rows}), max_rows=3)
+
+    assert "不同取值 3" in text
+    assert "其中数值 2" in text, "少数数值没有被交代，模型会以为这一列完全没有数值"
+
+
+def test_a_sheet_with_only_empty_rows_gets_no_stats_block():
+    """整张空表不该冒出一段「按 0 行算出」的统计。"""
+    from services.ai.platform_provider import _read_excel_sheets
+
+    text = _read_excel_sheets(_workbook_bytes({"空表": [[None, None]]}), max_rows=5)
+
+    assert "整表统计" not in text

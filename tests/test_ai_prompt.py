@@ -277,16 +277,19 @@ def test_the_first_round_asks_for_the_value_sanity_dimension():
     这条与 `config_data` 那条是**两件事**，所以分开钉：上面那条管「这一行自不自洽」，
     这条管「这个数本身合不合理」（量级突变、经济闭环）。
 
-    这里钉三件事：维度 id 出现、第一轮就要看（而不是等报告阶段才想起来）、以及
-    **索取比较基准**这一步必须写进第一轮 —— 因为判断「合不合理」必须有对照物，
-    而模型只有在分诊时决定连带索取同表更多行，第二轮才拿得到基准。
+    钉四件事：维度 id 出现、第一轮就要看、**索取比较基准**这一步写进第一轮，以及
+    「疑似即可报、但缺基准要写明且置信度只能 high」—— 用户在这个维度上明确要的是
+    召回率（宁可多报一条待确认，也不能让数量级写错的配置悄悄放过去），而放宽门槛的
+    前提是**把「缺基准」这件事写在结论里**，否则它会退化成「这个值看起来很大」。
     """
     message = _message()
     assert "value_sanity" in message
     assert "几个数量级" in message
     assert "经济闭环" in message
-    assert "必须有比较基准" in message
+    assert "整表统计" in message, "没告诉它比较基准从哪来"
     assert "file_content" in message
+    assert "缺基准" in message
+    assert "very_high" in message
 
 
 def test_the_first_round_hint_steps_are_numbered_without_gaps():
