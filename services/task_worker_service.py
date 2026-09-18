@@ -55,6 +55,8 @@ from services.ai_analysis_service import (
 )
 from models.ai_analysis import AiWeeklyAnalysisState
 from services.ai.analysis_budget import budget_gate_reason
+# 「周版本同步还在跑就先别分析」的闸门（同步逐文件写缓存，跑到一半的清单会静默变小）
+from services.ai.weekly_sync_gate import weekly_sync_in_flight, weekly_sync_stuck_note
 # 周版本同步的显式结局 → 任务状态映射：process_weekly_version_sync 过去用 None
 # 同时表示「配置不存在/被禁用/窗口内无提交/正常跑完」四种结局，调用方只能无条件
 # 标 completed，于是真正的失败与「这周本来就没数据」在任务列表里长得一模一样。
@@ -1838,6 +1840,18 @@ def schedule_weekly_ai_analysis_tasks():
                 primary = select_primary_weekly_config(configs)
                 config_ids = [cfg.id for cfg in configs]
                 if not has_weekly_changes(config_ids, state.last_analyzed_at if state else None):
+                    continue
+
+                # **同步没写完就不要分析。** 变更清单来自周版本缓存行，而同步是逐文件
+                # 写它们的 —— 跑到一半时的快照只有已写好的那批文件，清单会静默变小
+                # （用户看到的是「代码改动均未取到 diff 正文」）。详见 weekly_sync_gate。
+                # 这里 `continue` 且**不推进 last_triggered_at**：下一个周期自然重试。
+                sync_note = weekly_sync_stuck_note(config_ids)
+                if sync_note:
+                    log_print(f"{sync_note} group_key={group_key}", "AI", force=True)
+                sync_reason = weekly_sync_in_flight(config_ids)
+                if sync_reason:
+                    log_print(f"⏸️ 周版本自动分析推迟（{sync_reason}）: group_key={group_key}", "AI", force=True)
                     continue
 
                 task_id = create_weekly_ai_analysis_task(primary.id, group_key=group_key)

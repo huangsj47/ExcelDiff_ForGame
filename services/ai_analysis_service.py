@@ -72,6 +72,7 @@ from services.ai.engine import (
 )
 from services.ai.llm_client import LLMError
 from services.ai.platform_provider import PlatformContextProvider
+from services.ai.weekly_sync_gate import group_config_ids, weekly_sync_in_flight
 from services.ai.pricing import (
     PriceTable,
     load_price_table,
@@ -1636,6 +1637,19 @@ def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None
                 force=True,
             )
             return {"status": "skipped", "reason": "over_budget", "message": budget_reason}
+
+        # 同步闸门（后台·周版本）。与上面两道同理放在这里：调度器那道拦的是「还没排队」，
+        # 这道拦的是「已经排好队了」—— 重启时 `load_pending_tasks` 会把上次残留的
+        # `processing` 任务改回 pending 再跑一次，那正好撞上启动期的同步。
+        # **跳过且不推进水位线**：`last_analyzed_at` 不变，下一个调度周期会重新排队。
+        sync_reason = weekly_sync_in_flight(group_config_ids(config))
+        if sync_reason:
+            log_print(
+                f"周版本自动分析推迟（{sync_reason}）: config_id={config_id}",
+                "AI",
+                force=True,
+            )
+            return {"status": "skipped", "reason": "sync_in_flight", "message": sync_reason}
 
     payload, state, skip_reason = build_weekly_payload(config_id)
     if skip_reason == "no_change":
