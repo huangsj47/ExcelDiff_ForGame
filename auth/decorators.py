@@ -45,6 +45,12 @@ def _is_api_request() -> bool:
     return _is_api()
 
 
+def _is_document_navigation() -> bool:
+    """当前请求是不是「打开一个页面」（判据与说明见 utils/request_security 里的同名函数）。"""
+    from utils.request_security import _is_document_navigation as _is_navigation
+    return _is_navigation()
+
+
 def _build_next_url() -> str:
     """构造登录后的跳转目标 URL。"""
     if request.method == "GET":
@@ -53,8 +59,15 @@ def _build_next_url() -> str:
 
 
 def _unauthorized_response(message: str = "请先登录"):
-    """构造未认证响应（API 返回 JSON，页面重定向到登录页）。"""
-    if _is_api_request():
+    """构造未认证响应（API 返回 JSON，页面重定向到登录页）。
+
+    「flash + 跳登录页」只对**页面导航**成立：页面脚本发的请求（轮询、异步加载）
+    走那条路会把 flash 写进 session cookie，而晚到的 cookie 会把用户在登录页刚
+    消费掉的提示又写回去 —— 登录成功后第一个页面顶上冒出「请先登录。」。
+    判据见 `utils.request_security._is_document_navigation`（没有 Fetch Metadata
+    头的请求按导航处理，与改前一致）。
+    """
+    if _is_api_request() or not _is_document_navigation():
         return jsonify({"success": False, "message": message}), 401
     next_url = _build_next_url()
     flash(message, "error")
@@ -62,8 +75,8 @@ def _unauthorized_response(message: str = "请先登录"):
 
 
 def _forbidden_response(message: str = "权限不足"):
-    """构造无权限响应。"""
-    if _is_api_request():
+    """构造无权限响应。与 `_unauthorized_response` 同一个道理：脚本发的请求不走 flash。"""
+    if _is_api_request() or not _is_document_navigation():
         return jsonify({"success": False, "message": message}), 403
     flash(message, "error")
     return redirect(request.referrer or url_for("index"))

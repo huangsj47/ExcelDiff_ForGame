@@ -12,7 +12,7 @@ import secrets
 from functools import wraps
 from urllib.parse import urlparse
 
-from flask import flash, jsonify, redirect, request, session, url_for
+from flask import flash, get_flashed_messages, jsonify, redirect, request, session, url_for
 from werkzeug.exceptions import Forbidden
 
 CSRF_SESSION_KEY = "_csrf_token"
@@ -66,6 +66,43 @@ def _is_api_request():
         or "application/json" in accept
         or request.headers.get("X-Requested-With") == "XMLHttpRequest"
     )
+
+
+def _is_document_navigation():
+    """这个请求是不是「打开/跳转一个页面」，而不是页面里的脚本发起的请求。
+
+    ## 为什么需要它
+
+    「未登录 → 塞一条 flash + 302 到登录页」只对**页面导航**成立。页面里的
+    `fetch()`/XHR（轮询任务状态、拉用量、异步加载 diff）落到同一条分支上时：
+
+      * 浏览器拿到的是 302 + 登录页 HTML，脚本多半只当成「请求失败了」；
+      * 更糟的是响应里带着一个**新的 session cookie**（里面有那条 flash）。
+        登录页渲染时已经把 flash 消费掉了，而这条**后到的** cookie 又把它写了回去，
+        于是用户登录成功、进到下一个页面，顶上冒出一句「请先登录。」—— 看起来
+        像刚登录就掉登录。
+
+    用 Fetch Metadata（Chrome 76+/Firefox 90+/Safari 16.4+ 都发）区分：
+    顶层导航是 `Sec-Fetch-Mode: navigate`，页面脚本发起的是 `cors` / `no-cors` /
+    `same-origin`。
+
+    **没有这个头的请求按「是导航」处理**（curl、老浏览器、测试客户端都不发它）——
+    这样行为与改前一致，不会把命令行/测试请求变成 401 JSON。
+    """
+    mode = (request.headers.get("Sec-Fetch-Mode") or "").strip().lower()
+    if not mode:
+        return True
+    return mode == "navigate"
+
+
+def discard_pending_flashes():
+    """丢掉会话里还没显示的 flash 提示（不需要返回值）。
+
+    用在「登录成功」这一步：进登录页之前留下的那句「请先登录。」如果还没被消费掉，
+    登录成功后的第一个页面顶上就会显示它 —— 用户会以为登录没生效（实测报障）。
+    走公开 API（`get_flashed_messages` 会清空会话里的那份），不直接动 `_flashes` 键。
+    """
+    get_flashed_messages()
 
 
 def _is_valid_admin_token():
@@ -423,7 +460,7 @@ def _unauthorized_admin_response():
     语义上也本就该分开：401/跳登录是「你是谁」的问题，重登能解决；
     这里的用户身份已经确定，只是权限不够，重登一万次也没用 —— 那是 403。
     """
-    if _is_api_request():
+    if _is_api_request() or not _is_document_navigation():
         if _is_logged_in():
             # 已登录 → 权限不足（403）。返回 401 会让客户端反复重试登录。
             return jsonify({"success": False, "message": "权限不足"}), 403
@@ -449,7 +486,10 @@ def _unauthorized_admin_response():
 
 def _unauthorized_login_response():
     """未登录时的通用响应（跳转到登录页面）。"""
-    if _is_api_request():
+    if _is_api_request() or not _is_document_navigation():
+        # 页面脚本发的请求（轮询 / 异步加载）不能走「flash + 跳登录页」那条路：
+        # 那条路会把 flash 写进 session cookie，晚到的 cookie 会把用户刚在登录页
+        # 消费掉的提示又写回去（见 `_is_document_navigation`）。
         return jsonify({"success": False, "message": "Authentication required"}), 401
     if request.method == "GET":
         next_url = request.url

@@ -27,6 +27,7 @@ from utils.request_security import (
     _is_logged_in,
     _is_safe_redirect,
     csrf_token,
+    discard_pending_flashes,
 )
 
 from . import get_auth_provider
@@ -88,6 +89,9 @@ def login():
 
     # 已登录则直接跳转
     if _is_logged_in():
+        # 顺手把残留的提示丢掉：否则上一次被要求登录时留下的「请先登录。」
+        # 会在下一个页面顶上显示出来，看起来像刚登录就掉登录了。
+        discard_pending_flashes()
         if _is_safe_redirect(next_url):
             return redirect(next_url)
         return redirect(url_for("index"))
@@ -109,6 +113,10 @@ def login():
 
         # 检查是否认证成功（数据库用户返回 user，环境变量管理员也设置了 session）
         if provider.is_logged_in():
+            # 「用户点了某个操作 → 被要求登录 → 登录成功」这条路上，登录页之前
+            # 留下的那句「请先登录。」如果还没被消费掉，登录成功后的第一个页面
+            # 顶上就会显示它（看起来像登录没生效）。这里是它最后的清理时机。
+            discard_pending_flashes()
             flash("登录成功。", "success")
             if not _is_safe_redirect(next_url):
                 next_url = url_for("index")
