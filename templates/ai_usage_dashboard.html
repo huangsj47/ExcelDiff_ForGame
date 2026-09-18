@@ -250,7 +250,10 @@
 
         {# 平台总预算：与项目档**叠加**的一档上限，管的是「全平台一个月烧了多少」——
            项目级上限管不住总量（30 个项目各设 100 元，账单一万）。
-           接口是平台管理员专属，所以普通用户看到的是这句只读说明，**不是错误态**。 #}
+           **「平台合计」只对平台管理员开放**：额度、已用量、全平台用量都是运营数字，
+           能从中反推出别的项目烧了多少。所以服务端对普通用户一个字都不下发
+           （`utils.request_security.platform_scope_visible`），这里贴一句只读说明 ——
+           这是**真的权限边界**，不是错误态，别把它渲染成「加载失败」。 #}
         <section class="aiu-card" id="aiuPlatformBudgetCard">
             <div class="aiu-card-head">
                 <h2>平台总预算</h2>
@@ -264,7 +267,7 @@
 
             <div class="aiu-readonly" id="aiuPlatformBudgetReadonly" hidden>
                 <i class="fas fa-lock" aria-hidden="true"></i>
-                <span id="aiuPlatformBudgetReadonlyText">平台总预算只有平台管理员能修改。</span>
+                <span id="aiuPlatformBudgetReadonlyText">平台总预算只有平台管理员能查看和修改。</span>
             </div>
 
             <div id="aiuPlatformBudgetLoading" class="aiu-loading" role="status" aria-live="polite" hidden>
@@ -940,15 +943,25 @@ function aiuFmtMoney(amount, currency) {
     return symbol + amount + (symbol ? '' : (currency ? ' ' + currency : ''));
 }
 
+/** 平台档被收掉时，代替它那两个数字的那句话。
+ *
+ *  单独抽成常量是为了让调用方能**认出**这一支（要换一种颜色/样式），而不是靠
+ *  「文本等于某个字符串」这种一改就断的约定。 */
+const AIU_SCOPE_HIDDEN_TEXT = '仅平台管理员可见';
+
 /** 一档预算（项目档或平台档）的「已用 / 上限」。
  *
- *  **三件事必须守住**：
+ *  **四件事必须守住**：
  *  * 没配上限（`limited` 为假 / `limits` 全为 `null`）返回 `null` —— 由调用方写
  *    「不限制」，**不是 0**；
  *  * 已用是 `null`（上游未上报 / 算不出费用）写「未上报」，**不是 0**；
- *  * 金额直接用接口回的字符串（见 `aiuFmtMoney`）。
+ *  * 金额直接用接口回的字符串（见 `aiuFmtMoney`）；
+ *  * **`hidden` 为真时写一句说明**（平台合计只对平台管理员下发）。这一支必须排在
+ *    `limited` 前面：被收掉的那一档 `limits` 全是 `null`，照后面的逻辑走会落进
+ *    「不限制」—— 而「不限制」与「你看不到」是**两句相反的话**。
  */
 function aiuBudgetScopeText(scope) {
+    if (scope && scope.hidden) return AIU_SCOPE_HIDDEN_TEXT;
     if (!scope || !scope.limited) return null;
     var limits = scope.limits || {};
     var used = scope.used || {};
@@ -1300,9 +1313,23 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         label.className = 'aiu-scope-line__name';
         label.textContent = name + ' ';
         line.appendChild(label);
+        if (scope && scope.hidden) {
+            // 平台合计对普通用户**一个字都不下发**，所以这一档没有数字可画。
+            // 写一句说明，而不是画 0 或「未设上限」—— 那两句都在断言一件我们并不知道
+            // 的事（0 会被读成「一点都没用」，「未设上限」会被读成「平台没配预算」）。
+            line.appendChild(document.createTextNode('仅平台管理员可见'));
+            line.classList.add('aiu-unknown');
+            td.appendChild(line);
+            return;
+        }
         var text = aiuBudgetScopeText(scope);
         if (text === null) {
             line.appendChild(document.createTextNode('未设上限'));
+            line.classList.add('aiu-unknown');
+        } else if (text === AIU_SCOPE_HIDDEN_TEXT) {
+            // 走的是与「未上报」「未设上限」同一套弱化样式：它同样是「这里没有数字」，
+            // **不是**一个数字。周期标签也不加 —— 那句话与周期无关。
+            line.appendChild(document.createTextNode(text));
             line.classList.add('aiu-unknown');
         } else {
             line.appendChild(document.createTextNode(
@@ -1674,18 +1701,17 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
     // -----------------------------------------------------------------------
     //  平台总预算卡片
     // -----------------------------------------------------------------------
-    // **读得到、但只有平台管理员能改。**
+    // **只有平台管理员能看，也只有平台管理员能改。**
     //
-    // 这里原来是「401/403 就整张卡片藏起来」，理由是「回的是全平台合计的消耗」。那个
-    // 理由站不住：`usage_overview`（这一页的主数据）本来就把同样的 `platform_budget` 与
-    // `platform_status` 下发给任何有项目权限的用户 —— 于是闸门一个字节都没挡住，只让非
-    // 管理员看到一张「你没有权限查看」的卡片，而数字就在他刚拿到的总览响应里。
+    // 这里一度改成「读得到、但只有平台管理员能改」（靠响应里的 `can_edit` 把编辑器切成
+    // 只读），理由是「数字反正已经在 `usage_overview` 里了，只堵这一个端点等于假装挡住」。
+    // 那个观察是对的，但结论反了：该做的是**把总览里的平台档也一起收掉**，而不是把
+    // 这一个端点也放开。平台合计是运营数字 —— 它把所有人的花费加起来，能反推出别的项目
+    // 烧了多少钱，所以只有平台管理员该看到（`utils.request_security.platform_scope_visible`，
+    // 服务端逐处过滤，见 `analysis_budget.redact_platform_scope`）。
     //
-    // 现在由响应自己的 `can_edit` 说是谁能改：
-    //   * 数字**照常渲染**（他本来就该看得到：超预算会挡住他自己的分析）；
-    //   * 只有编辑器按 `can_edit` 变成只读 + 一句「只有平台管理员能修改」；
-    //   * 401/403 那条分支留着兜底（认证链层面被拒时仍然不该显示成「加载失败」，
-    //     那会让人去重试一个永远不会成功的请求）。
+    // 于是这里回到 401/403 就显示只读说明。有一条纪律：**权限不足不是加载失败** ——
+    // 前者已经确定（重试一万次还是 403），后者要给人一个重试按钮。
     var AIU_PLATFORM_FIELD_MAP = {
         budget_period: 'aiuPlatformPeriodError',
         budget_token_limit: 'aiuPlatformTokenError',
@@ -1812,22 +1838,9 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         if (box) box.hidden = false;
     }
 
-    /** 把编辑器切成只读/可编辑，并给出那句说明。
-     *
-     * **只切编辑器，不动数字**：读得到这个数的人本来就该看到它（超预算会挡住他自己的
-     * 分析），看不到的只是「改」这件事。
-     */
-    function setPlatformBudgetEditable(canEdit) {
-        var readonly = $('aiuPlatformBudgetReadonly');
-        if (readonly) readonly.hidden = !!canEdit;
-        var form = $('aiuPlatformBudgetForm');
-        if (form) form.hidden = !canEdit;
-    }
-
-    function renderPlatformBudget(budget, status, canEdit) {
+    function renderPlatformBudget(budget, status) {
         var config = budget || {};
         var data = status || {};
-        setPlatformBudgetEditable(canEdit !== false);
         fillPeriodSelect($('aiuPlatformPeriodSelect'), config.period, data.period_label);
         var tokenInput = $('aiuPlatformTokenInput');
         if (tokenInput) {
@@ -1889,10 +1902,7 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
                 return;
             }
             if (body) body.hidden = false;
-            // `can_edit` 缺字段时按**可编辑**处理：老响应（或桩）没有这个键时不该让
-            // 管理员看到一个假的只读态。
-            var canEdit = result.body.can_edit !== false;
-            renderPlatformBudget(result.body.budget, result.body.status, canEdit);
+            renderPlatformBudget(result.body.budget, result.body.status);
         }).catch(function (err) {
             if (loading) loading.hidden = true;
             showPlatformBudgetError(err && err.message ? err.message : String(err));
@@ -1949,7 +1959,7 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             setPlatformFeedback(body.message || '已保存。', 'success');
             // 保存后服务端直接回一份新状态，界面不必再发一次 GET（那会把「保存成功」
             // 与「状态刷新」变成两次可能不一致的往返）。
-            if (body.budget && body.status) renderPlatformBudget(body.budget, body.status, true);
+            if (body.budget && body.status) renderPlatformBudget(body.budget, body.status);
             // 上面「各项目消耗」里每一行的平台档也要跟着变 —— 复用总览那条取数路径。
             loadOverview();
         }).catch(function (err) {
@@ -2119,7 +2129,10 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             renderKpis(body.totals || {}, body.over_budget_projects || 0);
             renderPricingNote((body.projects || [])[0] ? body.projects[0].pricing : null);
             renderBudgetLink(body.budget_link);
-            renderPlatformAlert(body.platform_status);
+            // 平台挡被收掉时（普通用户：服务端一个字都不下发）**不弹**，也不能改成
+            // 弹一句「平台没问题」—— 那是我们并不知道的事。这一档超了的话，用户在自己
+            // 项目那一行看得到「平台已超」，分析被拦时那句理由里也写着。
+            if (!body.platform_hidden) renderPlatformAlert(body.platform_status);
             renderProjects(body);
             // 单价表的项目下拉用**全量**项目清单（不受当前筛选影响）—— 拿筛选后的清单
             // 会让下拉里只剩一个项目，用户换不回别的。

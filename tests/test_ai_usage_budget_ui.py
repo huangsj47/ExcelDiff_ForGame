@@ -203,6 +203,17 @@ _NODE_CASES = {
          "limits": {"tokens": None, "cost": None, "currency": ""},
          "used": {"tokens": None, "cost": None, "currency": "", "runs": 0}},
         None,
+        # 5：平台档被收掉（普通用户）。**`limited` 仍然是真** —— 那就是服务端
+        #    `redact_platform_scope` 的形状：判定留着，数字抹掉。
+        {"hidden": True, "limited": True,
+         "period_label": "本月",
+         "limits": {"tokens": None, "cost": None, "currency": ""},
+         "used": {"tokens": None, "cost": None, "currency": "", "runs": 0}},
+        # 6：被收掉的那一档同时**已经超了**（界面还要给出「平台已超」那个标记）。
+        {"hidden": True, "limited": True, "over": True,
+         "period_label": "本月",
+         "limits": {"tokens": None, "cost": None, "currency": ""},
+         "used": {"tokens": None, "cost": None, "currency": "", "runs": 0}},
     ],
     "overScopesLabel": [["project"], ["platform"], ["project", "platform"], [], None],
     "meterPercent": [None, 0, 0.0042, 0.5, 1, 1.5, "abc", -1, 0.375],
@@ -335,6 +346,25 @@ class TestThePureFunctionsForReal:
         """没配上限返回 `null` —— 由调用方写「未设上限」，**不是 0 / 0**。"""
         assert js["budgetScopeText"][3] is None
         assert js["budgetScopeText"][4] is None
+
+    def test_a_hidden_platform_scope_says_so_instead_of_claiming_unlimited(self, js):
+        """**「你看不到」与「不限制」是两句相反的话。**
+
+        平台档被收掉时 `limits` 全是 `null`，照「没配上限」那条路走会渲染成
+        「未设上限」—— 那是在断言「平台没设上限」，而我们并不知道这件事。所以
+        `hidden` 那一支必须排在 `limited` 之前，输出也必须是**另一句话**。
+
+        反向自检：把那一支删掉，这两条会退化成 `null`（= 未设上限），与上面
+        `[3]` 的输出一模一样 —— 所以这里额外断言它与 `null` 那条**不相等**。
+        """
+        hidden = js["budgetScopeText"][5]
+        over_hidden = js["budgetScopeText"][6]
+
+        assert hidden == "仅平台管理员可见", hidden
+        assert over_hidden == hidden, "超没超都不该漏数字，两句必须一致"
+        assert hidden is not js["budgetScopeText"][3]
+        assert "不限制" not in hidden and "未设上限" not in hidden
+        assert "0" not in hidden
 
     def test_the_over_label_says_which_scope_overran(self, js):
         assert js["overScopesLabel"] == [
@@ -554,20 +584,19 @@ class TestThePlatformBudgetCard:
         # 那句说明自己也要在（`readonly` 这个变量名可以改，说明文字不能没）。
         assert "$('aiuPlatformBudgetReadonly')" in body
 
-    def test_the_readonly_note_says_who_can_change_it(self):
-        """**「能看」与「能改」是两件事**，那句话必须只说后者。
+    def test_the_readonly_note_says_who_can_see_it(self):
+        """说明必须把**看**和**改**都说了 —— 因为两件事都要平台管理员。
 
-        原来是「只有平台管理员能**查看**和修改」，配套的是「非管理员整张卡片藏起来」。
-        那个做法后来改了：`usage_overview`（这一页的主数据）本来就把同样的
-        `platform_budget` / `platform_status` 下发给任何有项目权限的用户，所以「查看」
-        上根本没挡住谁 —— 而卡片却显示「你没有权限查看」，那是**错的**，会让人以为
-        平台有 bug。现在数字照常渲染，只有编辑器按 `can_edit` 变只读。
+        中间有一版把这句话改成「只有平台管理员能修改」，配套的是「数字照常渲染、
+        只有编辑器变只读」。那个做法基于一个正确的观察（当时 `usage_overview` 确实把
+        平台档下发给所有人）却得出了反的结论 —— 现在服务端把总览里那一份也收掉了
+        （`show_platform=platform_scope_visible()`），所以「查看」这一半重新成立，
+        而且**必须**写出来：读接口现在真的回 403，用户得知道那不是页面坏了。
         """
         html = _read(DASHBOARD)
         marker = html.index('id="aiuPlatformBudgetReadonly"')
         chunk = html[marker: marker + 400]
-        assert "只有平台管理员能修改" in chunk
-        assert "查看" not in chunk.split(">")[1].split("<")[0], "那句说明不许说「不能查看」"
+        assert "只有平台管理员能查看和修改" in chunk
 
     def test_the_card_asks_for_json_so_a_denial_is_a_status_not_a_redirect(self):
         """不带 `Accept: application/json` 时，非管理员拿到的是一个 302 跳登录页，
@@ -581,24 +610,25 @@ class TestThePlatformBudgetCard:
         assert "body.hidden = true" in body, "加载开始时没有先把内容藏起来（会闪一下上一个项目的数据）"
         assert "readonly.hidden = true" in body
 
-    def test_the_editor_follows_can_edit_and_the_numbers_do_not(self):
-        """**只切编辑器，不动数字。**
+    def test_a_non_admin_gets_the_readonly_note_and_no_numbers(self):
+        """403 那一支只放说明，**绝不显示数字那一块**。
 
-        读得到这个数的人本来就该看到它（超预算会挡住他自己的分析），看不到的只是「改」。
-        所以 `setPlatformBudgetEditable` 只碰两样东西：那句说明与那个表单 ——
-        不许顺手把 `aiuPlatformBudgetBody`（数字与进度条）也藏起来。
+        这一条是「平台合计只对平台管理员可见」在界面上的落点。注意它不只是「数字取不到
+        所以画不出来」：`aiuPlatformBudgetBody`（已用 / 上限 / 进度条）必须保持在
+        `hidden` 状态，否则用户会看到一张**画着 0 或者上一轮残留数字**的卡片 ——
+        那两句都是在断言我们并不知道的事。
         """
         script = _dashboard_script()
-        body = _function_body(script, "setPlatformBudgetEditable")
-
-        assert "aiuPlatformBudgetReadonly" in body and "aiuPlatformBudgetForm" in body
-        assert "aiuPlatformBudgetBody" not in body, (
-            "把数字也藏起来了 —— 那又回到了「你没有权限查看」的说法，而它是错的"
+        body = _function_body(script, "loadPlatformBudget")
+        denied = body.index("result.status === 401 || result.status === 403")
+        branch = body[denied: body.index("if (!result.ok")]
+        assert "readonly.hidden = false" in branch, "权限不足时没有给出那句说明"
+        assert "body.hidden = false" not in branch, (
+            "403 那一支把数字那一块放出来了 —— 里面是空的 limits/used，会被画成 0"
         )
-        # 缺 `can_edit` 时按可编辑处理：老响应/桩没有这个键时不该让管理员看到假的只读态。
-        load = _function_body(script, "loadPlatformBudget")
-        assert "result.body.can_edit !== false" in load
-        assert "setPlatformBudgetEditable" in _function_body(script, "renderPlatformBudget")
+        assert "renderPlatformBudget(" not in branch, "403 那一支还去渲染了数字"
+        # 撤销掉的 `can_edit` 不许回来：读接口现在直接 403，没有「能看不能改」这一档。
+        assert "can_edit" not in script
 
     def test_the_empty_state_is_a_sentence_not_an_error(self):
         """`configured === false`（没配过）是**空态**，不是错误：卡片要引导用户去配，
@@ -619,9 +649,9 @@ class TestThePlatformBudgetCard:
         assert "'Content-Type': 'application/json'" in body
         assert "JSON.stringify(" in body
         # 保存后服务端直接回一份新状态：界面不必再发一次 GET（那会把「保存成功」
-        # 与「状态刷新」变成两次可能不一致的往返）。第三个参数 `true` 是「仍然可编辑」：
-        # 能走到保存这一步的人本来就是有权限的那个（写接口会在服务端再判一次）。
-        assert "renderPlatformBudget(body.budget, body.status, true)" in body
+        # 与「状态刷新」变成两次可能不一致的往返）。能走到保存这一步的人本来就是平台
+        # 管理员（写接口在服务端还会再判一次），所以这里直接把表单填回去。
+        assert "renderPlatformBudget(body.budget, body.status)" in body
         # 但上面「各项目消耗」里每一行的平台档也要跟着变。
         assert "loadOverview()" in body
 
@@ -651,6 +681,24 @@ class TestThePlatformBudgetCard:
             body = _function_body(script, name)
             assert "credentials: 'same-origin'" in body, f"{name} 没有带 cookie"
             assert "X-CSRF-Token" not in body, f"{name} 自己造了一套 CSRF 头"
+
+    def test_the_platform_alert_is_not_rendered_when_the_scope_is_hidden(self):
+        """平台档被收掉时**不弹那条横幅**，也不能改成弹一句「平台没问题」。
+
+        横幅的判据是「平台档 over 了」，而平台档对普通用户整个不在这份响应里
+        （`platform_status` 为空）—— 照旧调用会安安静静地不弹。这看着无害，但它是
+        **碰巧**对的：哪天有人给 `renderPlatformAlert` 加一个「没数据就显示正常」的
+        分支，普通用户就会看到一句「平台预算正常」，那是我们并不知道的事。
+        所以这里把「不许调用」变成一条**显式的**判据。
+        """
+        script = _dashboard_script()
+        load = _function_body(script, "loadOverview")
+        marker = load.index("renderPlatformAlert")
+        guard = load[:marker]
+        assert "platform_hidden" in guard, (
+            "调用 renderPlatformAlert 之前没有看 platform_hidden —— 服务端不下发"
+            "平台档时，这里只是碰巧什么都没画"
+        )
 
     def test_the_meters_are_hand_written_and_have_a_text_alternative(self):
         """仓库里没有图表库，也不引新的：条子手写，数值就在旁边那行文字里。"""

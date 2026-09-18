@@ -165,6 +165,39 @@ def _has_project_access(project_id):
         return False
 
 
+def platform_scope_visible() -> bool:
+    """当前这次调用能不能看到「平台合计」（平台总预算的额度与全平台用量）。
+
+    **这是运营数字**：它把所有人的花费加起来，能从中反推出别的项目烧了多少钱。所以只有
+    平台管理员能看 —— 面板上的平台档、`platform_status`、以及「平台总预算已超」那句话里
+    的额度数字，都按这个判定过滤（见 `analysis_budget.redact_platform_scope`）。
+
+    三种情形：
+
+    * 平台管理员 → `True`；
+    * 已登录的普通用户 → `False`；
+    * **没有请求上下文**（后台线程、定时任务、脚本）→ `True`。那些路径上的预算文案只会
+      进日志，没有「给谁看」的问题；反过来在这里返回 `False` 会把平台档的判定也一起
+      剥掉数字，而那是**内部逻辑**要用的（`over` / `blocks_analysis` 依赖它）。
+
+    注意它只回答「能不能看数字」，**不回答「能不能改」**（那是 `_has_admin_access`，
+    即写接口的闸门）。
+    """
+    if not ENABLE_ADMIN_SECURITY:
+        # 整条安全链关掉时（本地/内网部署）没有「权限」可言，跟着放行。
+        return True
+    try:
+        from flask import has_request_context
+    except ImportError:  # pragma: no cover —— Flask 是硬依赖，这里只是别让导入炸掉
+        return True
+    if not has_request_context():
+        return True
+    try:
+        return bool(_has_admin_access())
+    except Exception:  # noqa: BLE001 —— 判不出来时按**看不到**处理（保守方向）
+        return False
+
+
 def _normalize_identity_username(value):
     username = str(value or "").strip()
     if username.endswith("@corp.netease.com"):

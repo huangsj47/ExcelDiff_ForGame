@@ -46,6 +46,7 @@ from services.ai.analysis_budget import (
     budget_rows_for_overview,
     budget_status,
     platform_budget_status,
+    redact_platform_scope,
 )
 from services.ai.platform_budget import platform_budget_public
 from services.ai.pricing import money
@@ -347,6 +348,7 @@ def _budget_block(
     status: Mapping[str, Any] | None = None,
     *,
     range_key: str = DEFAULT_RANGE,
+    show_platform: bool = True,
 ) -> dict[str, Any]:
     """面板上的预算一格。
 
@@ -359,6 +361,10 @@ def _budget_block(
     出现两个『本月』」正是最容易读错的地方。
     """
     data = status if status is not None else budget_status(project_id)
+    if not show_platform:
+        # 平台合计只对平台管理员开放。**判定已经在上面算完了**，这里只抹数字：
+        # `over` / `blocks_analysis` / `over_scopes` 一个字不改 —— 拦不拦与谁在看无关。
+        data = redact_platform_scope(data)
     period = str(data.get("period") or "")
     platform = data.get("platform") or {}
     over_scopes = list(data.get("over_scopes") or ())
@@ -379,6 +385,9 @@ def _budget_block(
         "notes": list(data.get("notes") or ()),
         # 平台档：与项目档并列显示。没配平台总预算时 `limited=False`，界面据此不渲染。
         "platform": {
+            # 无权看平台合计时为真：数字全空，界面据此换成一句说明（**不能画成 0** ——
+            # 0 会被读成「一点都没用」，而事实是「你不知道」）。
+            "hidden": bool(platform.get("hidden")),
             "limited": bool(platform.get("limited")),
             "over": bool(platform.get("over")),
             "period": str(platform.get("period") or ""),
@@ -527,6 +536,8 @@ def _totals_cost(entries: Sequence[dict]) -> Optional[dict[str, Any]]:
 def usage_overview(
     accessible_project_ids: Optional[Iterable[int]] = None,
     filters: Optional[UsageFilters] = None,
+    *,
+    show_platform: bool = True,
 ) -> dict[str, Any]:
     """跨项目总览。`accessible_project_ids=None` 表示全部（平台管理员）。
 
@@ -563,12 +574,15 @@ def usage_overview(
             project.id: (project.name or project.code or f"项目 {project.id}")
             for project in Project.query.filter(Project.id.in_(list(grouped))).all()
         }
-        budgets = budget_rows_for_overview(list(grouped))
+        budgets = budget_rows_for_overview(list(grouped), show_platform=show_platform)
         for project_id, runs in grouped.items():
             table, errors = project_price_table(project_id)
             stats = aggregate_runs(runs, price_table=table)
             budget_block = _budget_block(
-                project_id, budgets.get(project_id), range_key=active.range_key
+                project_id,
+                budgets.get(project_id),
+                range_key=active.range_key,
+                show_platform=show_platform,
             )
             entries.append(
                 {
@@ -591,8 +605,10 @@ def usage_overview(
 
     entries.sort(key=lambda item: item["runs"], reverse=True)
 
-    platform_config = platform_budget_public()
-    platform_status = platform_budget_status()
+    # 无权看平台合计时**连查都不查**：查出来再丢，等于把「不小心又发出去」的机会留在
+    # 代码里（这一屏的数据全部由这个函数产出，少一次查询就少一处泄漏面）。
+    platform_config = platform_budget_public() if show_platform else {}
+    platform_status = platform_budget_status() if show_platform else {}
     # 联动只看**真的配了上限**的项目：一个没配预算的项目也有个默认周期（本月），
     # 把它算进来的话，界面会对一批根本没设预算的项目宣称「与预算周期一致」。
     linked_periods = [
@@ -605,7 +621,7 @@ def usage_overview(
         linked_periods,
         platform_period=(
             str(platform_config.get("period") or "")
-            if platform_config.get("configured")
+            if show_platform and platform_config.get("configured")
             else ""
         ),
     )
@@ -634,8 +650,14 @@ def usage_overview(
         "over_budget_projects": sum(1 for item in entries if item["budget"]["over"]),
         # 预算这一屏的两件事：平台总预算（配置 + 当前状态）与「筛选范围 vs 预算周期」的
         # 口径联动。两者都是**只读**的判定，写侧在 `/ai-analysis/usage/budget`。
-        "platform_budget": platform_config,
-        "platform_status": {
+        #
+        # **平台合计只对平台管理员开放**：它把所有人的花费加起来，能从中反推出别的项目
+        # 烧了多少钱。没权限时 `platform_budget` / `platform_status` 是 `null` ——
+        # 不是空对象：界面要能区分「没配预算」（说「还没有配置（当前不限制）」）与
+        # 「你看不到」（说「只有平台管理员可见」）。`platform_hidden` 就是干这个的。
+        "platform_hidden": not show_platform,
+        "platform_budget": platform_config if show_platform else None,
+        "platform_status": None if not show_platform else {
             "limited": bool(platform_status.get("limited")),
             "over": bool(platform_status.get("over")),
             "period": str(platform_status.get("period") or ""),
@@ -692,7 +714,10 @@ def filter_options() -> dict[str, Any]:
 
 
 def project_usage(
-    project_id: int, filters: Optional[UsageFilters] = None
+    project_id: int,
+    filters: Optional[UsageFilters] = None,
+    *,
+    show_platform: bool = True,
 ) -> dict[str, Any]:
     """单项目下钻：周版本维度 + 逐次运行 + 按工具类型。
 
@@ -705,7 +730,9 @@ def project_usage(
     """
     active = filters or UsageFilters()
     table, errors = project_price_table(project_id)
-    budget_block = _budget_block(project_id, range_key=active.range_key)
+    budget_block = _budget_block(
+        project_id, range_key=active.range_key, show_platform=show_platform
+    )
     all_runs = (
         AiAnalysisRun.query.filter_by(project_id=project_id)
         .order_by(AiAnalysisRun.created_at.desc())

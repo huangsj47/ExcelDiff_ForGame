@@ -45,6 +45,7 @@ from models.ai_analysis import AiAnalysisRun
 from services.ai.pricing import DEFAULT_CURRENCY, money
 from services.ai.usage import aggregate_runs, usage_from_run
 from utils.logger import log_print
+from utils.request_security import platform_scope_visible
 from utils.timezone_utils import BEIJING_TZ
 
 # 预算周期。改动这里要同步 `models/ai_analysis/project_config.BUDGET_PERIOD_CHOICES`
@@ -511,13 +512,13 @@ def _remedy_tail(over_scopes: Sequence[str]) -> str:
     """「超了之后该怎么办」的那句话。**按谁超了给不同的去处** —— 平台的上限不在项目配置里，
     让用户去项目的「AI 分析配置」找平台总预算，他会找不到，然后以为是个 bug。"""
     if list(over_scopes) == [SCOPE_PLATFORM]:
-        return "。已暂停 AI 分析，请在「AI 消耗」页面的「平台总预算」里调高上限，或等下个周期。"
+        return f"{_REMEDY_TAIL_MARK}，请在「AI 消耗」页面的「平台总预算」里调高上限，或等下个周期。"
     if SCOPE_PLATFORM in over_scopes:
         return (
-            "。已暂停 AI 分析，请调高平台总预算（「AI 消耗」页面）或项目预算"
+            f"{_REMEDY_TAIL_MARK}，请调高平台总预算（「AI 消耗」页面）或项目预算"
             "（项目的「AI 分析配置」），或等下个周期。"
         )
-    return "。已暂停 AI 分析，请在项目的「AI 分析配置」里调高预算或等下个周期。"
+    return f"{_REMEDY_TAIL_MARK}，请在项目的「AI 分析配置」里调高预算或等下个周期。"
 
 
 def with_live_usage(
@@ -688,15 +689,116 @@ def _first_reason(runs: Sequence[AiAnalysisRun], table) -> str:
     return ""
 
 
+# 「已暂停 AI 分析」那段去处的开头。单独抽成常量是因为 `redact_platform_scope` 要按它
+# 把这段从合并后的理由里摘掉再重拼（平台档的去处在脱敏后要换一种说法）。
+_REMEDY_TAIL_MARK = "。已暂停 AI 分析"
+
+
+def platform_scope_hidden_note() -> str:
+    """平台档被隐藏时，替代它那几句数字的说明。
+
+    只说「超了」与「去哪儿看」，不含任何额度数字 —— 平台合计是运营数字，只对平台管理员
+    开放（见 `utils.request_security.platform_scope_visible`）。
+    """
+    return "平台总预算已超出上限（具体额度由平台管理员查看）。"
+
+
+def visible_budget(status: Mapping[str, Any]) -> dict[str, Any]:
+    """把一份**已算好**的判定按「看的人是谁」过滤一遍，然后才能发给浏览器。
+
+    存在的理由只有一个：**别让每个路由自己记得调 `redact_platform_scope`**。漏掉一处
+    就是一处泄漏，而漏掉的那处从代码上看和别处长得一模一样。所以约定是：**凡是把
+    `budget_status` 的结果放进响应体的地方，都走这个函数**（`budget_gate_reason` 是例外，
+    它只取一句话，内部已按同一判定脱敏）。
+
+    判定与脱敏的**先后不能颠倒**：`over` / `blocks_analysis` 是内部逻辑（拦不拦）读的，
+    与谁在看无关，必须拿完整那份算完再抹。反过来先脱敏会把平台档的 `over` 抹成
+    「没超」，于是「跑中提示说没超、闸门说超了」——
+    这正是 `with_live_usage` 那句注释担心的那件事。
+    """
+    if platform_scope_visible():
+        return dict(status)
+    return redact_platform_scope(status)
+
+
+def redact_platform_scope(status: Mapping[str, Any]) -> dict[str, Any]:
+    """把平台档的**数字**抹掉，只留「它配了 / 它超了」这两件事。
+
+    ## 为什么不是「整个删掉」
+
+    平台档超了会挡住分析，而用户必须知道「为什么我的分析跑不了」。说一句笼统的「已超出
+    AI 分析预算」，用户会去调自己项目的预算 —— 调了也没用，然后来报 bug。所以**事实保留**
+    （`limited` / `over` / `over_scopes` / `blocks_analysis` 一个字不改），抹掉的只是额度
+    与已用量。
+
+    ## 只动显示，不动判定
+
+    `blocks_analysis` 绝不能受影响：拦不拦是平台策略，与谁在看无关。所以这里只重建
+    `reason` / `notes` 里提到平台档数字的那几句（平台档自己那一句 + 去处那一段），
+    其余原样带过去。调用点都在「把结果发给某个浏览器」的边界上，不在判定逻辑里。
+    """
+    redacted = copy.deepcopy(dict(status))
+    platform = redacted.get("platform")
+    if not isinstance(platform, dict):
+        return redacted
+
+    hidden_note = platform_scope_hidden_note()
+    platform_reason = str(platform.get("reason") or "")
+    platform_over = bool(platform.get("over"))
+    over_scopes = list(redacted.get("over_scopes") or ())
+
+    platform["limits"] = {"tokens": None, "cost": None, "currency": ""}
+    platform["used"] = {"tokens": None, "cost": None, "currency": "", "runs": 0}
+    platform["ratios"] = {"tokens": None, "cost": None}
+    platform["over_limits"] = []
+    platform["notes"] = [hidden_note] if platform.get("limited") else []
+    platform["reason"] = hidden_note if platform_over else ""
+    # 界面据此把「已用 / 上限」两行换成一句说明，而不是画两个 0 —— 0 会被读成
+    # 「一点都没用」，而事实是「你不知道」（与全仓「0 ≠ 未知」同一条口径）。
+    platform["hidden"] = True
+
+    # `notes` 里平台那几句带「平台总预算：」前缀（见 `_merge_scopes`），整句换掉。
+    notes = [
+        note
+        for note in redacted.get("notes", ())
+        if not str(note).startswith("平台总预算：")
+    ]
+    if platform.get("limited"):
+        notes.append(f"平台总预算：{hidden_note}")
+    redacted["notes"] = notes
+
+    if SCOPE_PLATFORM in over_scopes:
+        # 合并后的理由是「项目那一句；平台那一句 + 去处」。平台那一句与去处都要摘掉，
+        # 项目那一句留着（那是用户自己的数据）。两段都是本文件自己拼出来的，所以按
+        # 文本摘是**有界**的，不是通用解析。
+        keep = str(redacted.get("reason") or "")
+        if platform_reason:
+            keep = keep.replace(platform_reason, "")
+        tail_at = keep.find(_REMEDY_TAIL_MARK)
+        if tail_at >= 0:
+            keep = keep[:tail_at]
+        keep = keep.strip("；。 ")
+        redacted["reason"] = (
+            f"{keep}；{hidden_note}" if keep else hidden_note
+        ) + _remedy_tail(over_scopes)
+    return redacted
+
+
 def budget_gate_reason(project_id: int, *, entry: str = "") -> str | None:
     """超预算就返回一句拦下来的理由；否则返回 `None`。
 
     `entry` 只用于日志（`commit_manual` / `weekly_manual` / `weekly_background` /
     `weekly_schedule`），便于回答「这次到底是被哪条路径拦的」。
+
+    **理由要按看的人脱敏**：平台档超了而看的人不是平台管理员时，只说「平台总预算已超」
+    与去哪儿看，不给额度数字（见 `redact_platform_scope`）。判定本身不受影响 ——
+    拦不拦只取决于 `blocks_analysis`，与谁在看无关。
     """
     status = budget_status(project_id)
     if not status.get("blocks_analysis"):
         return None
+    if not platform_scope_visible():
+        status = redact_platform_scope(status)
     reason = str(status.get("reason") or "").strip()
     if not reason:
         reason = "已超出 AI 分析预算，已暂停分析。"
@@ -708,8 +810,14 @@ def budget_gate_reason(project_id: int, *, entry: str = "") -> str | None:
     return reason
 
 
-def budget_rows_for_overview(project_ids: Sequence[int]) -> dict[int, dict[str, Any]]:
+def budget_rows_for_overview(
+    project_ids: Sequence[int], *, show_platform: bool = True
+) -> dict[int, dict[str, Any]]:
     """给消耗面板用的批量判定：`{project_id: status}`。
+
+    `show_platform=False` 时每一行里的平台档数字会被抹掉（见 `redact_platform_scope`）——
+    判定一个字不改，只是不给看的人额度。**必须在 `budget_status` 之后做**：先脱敏就没法
+    判定了。
 
     面板上「已用 / 上限 / 百分比」必须与闸门**用同一份判定**，否则会出现
     「面板显示已超预算，但按钮还能点」（或反过来）。所以这里直接复用
@@ -723,7 +831,8 @@ def budget_rows_for_overview(project_ids: Sequence[int]) -> dict[int, dict[str, 
     result: dict[int, dict[str, Any]] = {}
     for project_id in project_ids:
         try:
-            result[project_id] = budget_status(project_id, platform=platform)
+            status = budget_status(project_id, platform=platform)
+            result[project_id] = status if show_platform else redact_platform_scope(status)
         except Exception as exc:  # noqa: BLE001 —— 面板不能因为一个项目算不出来就整页报错
             log_print(f"⚠️ AI 预算判定失败（面板）: project={project_id} {exc}", "AI", force=True)
             result[project_id] = _merge_scopes(

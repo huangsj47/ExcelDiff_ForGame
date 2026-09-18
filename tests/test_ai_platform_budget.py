@@ -15,7 +15,9 @@
 4. **「两个本月」必须能被说清。** 筛选的「本月」决定表里列出哪些运行，预算的「本月」
    永远按各项目自己的周期算（它必须与闸门判定逐字一致）。口径不一致时给出**一键对齐**
    的目标；各项目周期不一致时**没有**目标 —— 硬选一个会让界面看起来「已经对齐了」。
-5. **平台档的读写要平台管理员权限。** 它回的是全平台合计的消耗，能从中反推出别人的花费。
+5. **「平台合计」只有平台管理员能看、也只有平台管理员能改。** 它是运营数字：把所有人
+   的花费加起来，能反推出别的项目烧了多少钱。所以读与写同一个闸门，而且**总览里的那一份
+   也要一并收掉**（只堵一个端点等于假装挡住）；项目档自己的数照常下发。
 """
 from __future__ import annotations
 
@@ -653,115 +655,184 @@ def test_the_platform_period_participates_in_the_linkage():
 # ==========================================================================
 
 
-def test_only_the_write_side_requires_the_platform_admin(monkeypatch):
-    """**读侧不再挂管理员闸门，写侧仍然只有平台管理员能改。**
+def test_the_platform_budget_endpoints_require_the_platform_admin(monkeypatch):
+    """读与写都要平台管理员 —— **「平台合计」只有平台管理员能看**。
 
-    ## 这条用例的前身与为什么改
+    ## 这条用例中间被改反过一次，值得记下来
 
-    原来它断言 GET 与 POST **都**要管理员，理由是「这个接口能读全平台消耗」。那条理由
-    站不住：`usage_overview`（同一页面的主数据）本来就把 `platform_budget` 与
-    `platform_status`（含全平台 used/limits）下发给任何有项目权限的用户。于是那道闸门
-    一个字节都没挡住，只让非管理员看到一张「你没有权限查看」的卡片 —— 而同样的数字
-    就在他刚拿到的总览响应里。**假装挡住比不挡更糟**：用户会以为自己看错了，或者以为
-    平台有 bug。
+    有一版把它改成「读侧不挂闸门，写侧才要管理员」，理由是「`usage_overview` 本来就把
+    `platform_budget` 与 `platform_status`（含全平台 used/limits）下发给任何有项目权限的
+    用户，只堵这个端点等于假装挡住」。**那个观察是对的，结论却是反的**：该做的是把总览
+    里那一份也收掉（现在 `usage_overview(show_platform=platform_scope_visible())` 对
+    非管理员连查都不查），而不是把闸门一并拆掉。收窄信息面，不要收窄闸门。
 
-    所以现在：读侧与页面上其它端点同一档（登录 + 项目权限，由 before_request 的认证链
-    负责，这里不重复验），写侧保持 `@require_admin` —— 改全平台的上限仍然只有管理员能做。
-
-    如果日后确实要让「平台合计」只对管理员可见，正确的做法是**在服务端把 overview 里
-    那几个字段按 is_admin() 置空**（见 `ai_analysis_routes` 里那段说明），而不是只堵
-    这一个端点 —— 那正是这次改动的由来。
+    读侧的 403 现在说的是真话（他确实看不到这些数），所以界面显示那句只读说明是对的。
     """
     from utils import request_security
 
     monkeypatch.setattr(request_security, "ENABLE_ADMIN_SECURITY", True)
     monkeypatch.setattr(request_security, "_has_admin_access", lambda: False)
 
-    # 读：不因为「不是管理员」而被拒。
     get_view = flask_app.view_functions["ai_analysis_routes.ai_platform_budget"]
+    post_view = flask_app.view_functions["ai_analysis_routes.ai_platform_budget_update"]
     with flask_app.app_context():
         create_tables()
         _clear_platform_budget()
         db.session.commit()
-        with flask_app.test_request_context(
-            "/ai-analysis/platform-budget",
-            method="GET",
-            headers={"Accept": "application/json"},
+        for view, kwargs in (
+            (get_view, {}),
+            (post_view, {"json": {"budget_token_limit": 1}}),
         ):
-            allowed_get = get_view()
-    assert _status_of(allowed_get) == 200, (
-        f"非管理员的读请求被拒了（{allowed_get!r}）—— 这些数在总览响应里就有，"
-        f"堵这一个端点只会让界面显示一张假的「无权限」卡片"
-    )
+            with flask_app.test_request_context(
+                "/ai-analysis/platform-budget",
+                method="POST" if kwargs else "GET",
+                headers={"Accept": "application/json"},
+                **kwargs,
+            ):
+                denied = view()
+            assert _status_of(denied) in (401, 403), (
+                f"非平台管理员拿到了平台合计的读数：{view.__name__} 返回 {denied!r}"
+            )
 
-    # 写：仍然只有平台管理员能做。
-    post_view = flask_app.view_functions["ai_analysis_routes.ai_platform_budget_update"]
+    # 管理员两次都通（证明拒的是权限，不是这个端点本身坏了）。
+    monkeypatch.setattr(request_security, "_has_admin_access", lambda: True)
     with flask_app.test_request_context(
-        "/ai-analysis/platform-budget",
-        method="POST",
-        headers={"Accept": "application/json"},
-        json={"budget_token_limit": 1},
+        "/ai-analysis/platform-budget", method="GET", headers={"Accept": "application/json"}
     ):
-        denied_post = post_view()
-
-    assert _status_of(denied_post) in (401, 403), (
-        f"非平台管理员改到了全平台的上限，实际返回 {denied_post!r}"
-    )
-
-    # HTML 请求走的是「跳登录页」那条分支（`_unauthorized_admin_response` 按
-    # Accept 分流）：302 也算拒绝，但**绝不能是 200**。
-    with flask_app.test_request_context(
-        "/ai-analysis/platform-budget",
-        method="POST",
-        json={"budget_token_limit": 1},
-    ):
-        html_resp = post_view()
-    assert _status_of(html_resp) in (302, 401, 403), html_resp
+        allowed = get_view()
+    assert _status_of(allowed) == 200, allowed
 
 
-def test_the_read_response_says_whether_the_caller_may_edit(client, monkeypatch):
-    """读响应必须自己说明「你能不能改」，界面据此决定编辑器是否可用。
+def _overview_as(viewer_is_admin: bool, monkeypatch, project_id: int) -> dict:
+    """以「平台管理员 / 普通用户」的身份走一次真实路由，回响应体。
 
-    为什么不能靠 403 来判断：「能看不能改」的那批人拿到的仍然是 200（这些数在总览响应
-    里就有），所以权限信息只能在**响应体**里给。缺这个键时界面按「可编辑」处理 ——
-    宁可让写接口在服务端拒一次，也不要让管理员看到一个假的只读态。
+    **必须走路由**：脱敏发生在路由那一层（`platform_scope_visible()` 传给
+    `usage_overview`），直接调 service 只能验到「传了 `show_platform=False` 会怎样」，
+    验不到「路由到底传了没有」—— 而后者才是权限边界真正落地的地方。
     """
     from utils import request_security
-
-    with flask_app.app_context():
-        create_tables()
-        _clear_platform_budget()
-        db.session.commit()
 
     monkeypatch.setattr(request_security, "ENABLE_ADMIN_SECURITY", True)
-
-    monkeypatch.setattr(request_security, "_has_admin_access", lambda: True)
-    assert client.get("/ai-analysis/platform-budget").get_json()["can_edit"] is True
-
-    monkeypatch.setattr(request_security, "_has_admin_access", lambda: False)
-    body = client.get("/ai-analysis/platform-budget").get_json()
-    assert body["can_edit"] is False
-    # **数字照旧下发**：读得到是刻意的（见路由里那段说明），只读的是「改」。
-    assert "budget" in body and "status" in body
+    monkeypatch.setattr(request_security, "_has_admin_access", lambda: viewer_is_admin)
+    # 普通用户的「可访问项目」清单：这里直接给一个项目，模拟「他确实能看这个项目」。
+    monkeypatch.setattr(ai_routes, "_get_accessible_project_ids", lambda: [project_id])
+    with flask_app.test_request_context("/ai-analysis/usage/overview"):
+        resp = ai_routes.ai_usage_overview()
+    return (resp[0] if isinstance(resp, tuple) else resp).get_json()
 
 
-def test_the_edit_flag_follows_the_same_switch_as_the_write_side(client, monkeypatch):
-    """`ENABLE_ADMIN_SECURITY` 关掉时整条安全链是放行的，这里也要放行。
+def test_the_overview_does_not_ship_the_platform_scope_to_a_non_admin(monkeypatch):
+    """总览对非管理员**一个字都不下发**平台档 —— 不只是「界面上不画」。
 
-    两边不一致的后果很具体：内网部署下界面显示成只读（谁都改不了），而写接口其实是通的
-    —— 用户会以为功能坏了。
+    这条是上面那条闸门的配套：闸门只有配上「另一条路也拿不到」才是真的挡住了。所以这里
+    不验状态码，验的是**响应体里没有那些数**（`platform_budget` / `platform_status` 为空、
+    `platform_hidden` 为真），同时项目档自己的数照旧。
+
+    ## 一个测试上的坑
+
+    `platform_scope_visible()` 在**没有请求上下文**时一律返回 `True`（后台线程、定时任务
+    那条路径上没有「给谁看」的问题，不该被脱敏）。所以想模拟「一个普通用户在浏览」就必须
+    真的压一个 request context —— 只有 `app_context()` 是不够的，那样两边都会走
+    「没有请求上下文」这条分支，断言会「通过」但什么都没验到。
+    """
+    with flask_app.app_context():
+        create_tables()
+        _clear_platform_budget()
+        _clear_runs()
+        project_id = _project()
+        _run(project_id)
+        # 项目档也配上：这样「项目档自己的数照旧下发」才验得到东西（没配预算的项目
+        # 本来就回 `used.tokens = None`，两种「None」会混在一起分不清）。
+        _configure(project_id, {"budget_period": "monthly", "budget_token_limit": 10 ** 9})
+        _set_platform_budget(budget_period="monthly", budget_token_limit=10 ** 9)
+        db.session.commit()
+
+        hidden = _overview_as(False, monkeypatch, project_id)
+        shown = _overview_as(True, monkeypatch, project_id)
+
+    assert hidden["platform_hidden"] is True
+    assert shown["platform_hidden"] is False
+    assert not hidden["platform_budget"] and not hidden["platform_status"], (
+        "非管理员的响应里带着平台档：" + repr(hidden["platform_budget"])
+    )
+    assert shown["platform_status"], "管理员应当照旧拿到平台档状态"
+
+    row = hidden["projects"][0]
+    platform = row["budget"]["platform"]
+    assert platform["hidden"] is True
+    assert platform["limits"]["tokens"] is None
+    assert platform["used"]["tokens"] is None
+    assert platform["over"] is False and platform["limited"] is True, (
+        "平台档「配了上限」这件事本身要留着 —— 界面据此才能说「有一档你看不到」"
+    )
+    # 项目档自己的数照旧（那是用户自己的花费）。
+    assert row["budget"]["used"]["tokens"] == 1_200
+    assert row["budget"]["over"] is False
+    # 同一次运行里，管理员那个平台档带着真数字。
+    assert shown["projects"][0]["budget"]["platform"]["hidden"] is False
+
+
+def test_a_non_admin_overview_still_blocks_on_the_platform_scope(monkeypatch):
+    """平台档超了：非管理员那份响应里**数字没有，但「拦住了」在**。
+
+    脱敏的红线是「只动显示，不动判定」。这条用一个真的超了的平台档把红线钉住 ——
+    脱敏把 `blocks_analysis` 一起抹掉的话，界面会显示「一切正常」而分析其实跑不起来。
+    """
+    with flask_app.app_context():
+        create_tables()
+        _clear_platform_budget()
+        _clear_runs()
+        project_id = _project()
+        _run(project_id)
+        _configure(project_id, {"budget_period": "all_time", "budget_token_limit": 10 ** 9})
+        _set_platform_budget(budget_period="all_time", budget_token_limit=1)
+        db.session.commit()
+
+        body = _overview_as(False, monkeypatch, project_id)
+
+    budget = body["projects"][0]["budget"]
+    # **判定不动**：脱敏只抹数字，超没超、超的是哪一档一个字不改。这一格是这一整套的
+    # 红线 —— 抹掉 `over` 的话界面会显示「一切正常」，而分析其实跑不起来。
+    assert budget["over"] is True
+    assert budget["over_scopes"] == [SCOPE_PLATFORM]
+    assert "平台" in budget["reason"], budget["reason"]
+    # 额度那一栏是空的（不是 0），而且界面能看出「这里被收掉了」。
+    platform = budget["platform"]
+    assert platform["hidden"] is True and platform["over"] is True
+    assert platform["limits"]["tokens"] is None
+
+
+def test_a_non_admin_still_gets_the_platform_verdict_without_the_numbers(monkeypatch):
+    """拦下来的**理由**对非管理员也要说清是平台档，只是不给额度。
+
+    这是脱敏的边界：事实（哪一档超了、去哪儿改）必须保留，数字才抹。抹掉事实的后果很具体
+    ——用户会去调自己项目的预算，调了没用，然后来报 bug。
     """
     from utils import request_security
 
     with flask_app.app_context():
         create_tables()
         _clear_platform_budget()
+        _clear_runs()
+        project_id = _project()
+        _run(project_id)
+        _set_platform_budget(budget_period="all_time", budget_token_limit=1)
         db.session.commit()
 
-    monkeypatch.setattr(request_security, "ENABLE_ADMIN_SECURITY", False)
-    monkeypatch.setattr(request_security, "_has_admin_access", lambda: False)
+        monkeypatch.setattr(request_security, "ENABLE_ADMIN_SECURITY", True)
+        monkeypatch.setattr(request_security, "_has_admin_access", lambda: False)
+        with flask_app.test_request_context("/ai-analysis/commit/1/stream"):
+            reason = budget_gate_reason(project_id, entry="test")
 
-    assert client.get("/ai-analysis/platform-budget").get_json()["can_edit"] is True
+        monkeypatch.setattr(request_security, "_has_admin_access", lambda: True)
+        with flask_app.test_request_context("/ai-analysis/commit/1/stream"):
+            admin_reason = budget_gate_reason(project_id, entry="test")
+
+    assert reason, "平台档超了却没拦住"
+    assert "平台" in reason, f"理由里没说是平台档，用户会去调自己项目的预算：{reason}"
+    assert admin_reason != reason, (
+        "管理员与普通用户拿到的理由逐字相同 —— 说明脱敏根本没生效（额度数字还在）"
+    )
 
 
 def test_the_platform_budget_endpoint_reads_and_writes(client, monkeypatch):
