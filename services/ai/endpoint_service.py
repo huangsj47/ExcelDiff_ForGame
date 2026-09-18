@@ -42,6 +42,8 @@ from models.ai_analysis.project_config import (
     DEFAULT_MAX_TOOL_REQUESTS,
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MIN_SEVERITY,
+    DEFAULT_PROMPT_CACHE_FORMAT,
+    DEFAULT_PROMPT_CACHE_MODE,
     DEFAULT_PROMPT_CHAR_BUDGET,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_WEEKLY_INTERVAL_MINUTES,
@@ -49,6 +51,8 @@ from models.ai_analysis.project_config import (
     MAX_ANOMALIES_PER_RUN_RANGE,
     MAX_FILES_PER_RUN_RANGE,
     MAX_TOOL_REQUESTS_RANGE,
+    PROMPT_CACHE_FORMAT_CHOICES,
+    PROMPT_CACHE_MODE_CHOICES,
     PROMPT_CHAR_BUDGET_RANGE,
     REQUEST_TIMEOUT_RANGE,
     SEVERITY_CHOICES,
@@ -116,6 +120,16 @@ FIELD_RULES: Mapping[str, FieldRule] = {
     "max_tool_requests": FieldRule("上下文索取上限", "int", *MAX_TOOL_REQUESTS_RANGE),
     "prompt_char_budget": FieldRule("提示词字符预算", "int", *PROMPT_CHAR_BUDGET_RANGE),
     "request_timeout_seconds": FieldRule("单次请求超时（秒）", "int", *REQUEST_TIMEOUT_RANGE),
+    # 提示词缓存标记。这两栏**不猜端点**：`cache_control` 不是 OpenAI 协议的一部分，
+    # 一个私有域名既可能是 Anthropic 兼容层，也可能是完全不认这个字段的转发器，
+    # 而猜错的代价是一次 400。所以默认是「不发标记」（auto + none），要发的部署者
+    # 声明他**知道**的那件事。见 services/ai/prompt_cache.py。
+    "prompt_cache_mode": FieldRule(
+        "提示词缓存断点", "choice", choices=PROMPT_CACHE_MODE_CHOICES
+    ),
+    "prompt_cache_format": FieldRule(
+        "缓存标记约定", "choice", choices=PROMPT_CACHE_FORMAT_CHOICES
+    ),
     "min_severity": FieldRule("严重度门槛", "choice", choices=SEVERITY_CHOICES),
     "min_confidence": FieldRule("置信度门槛", "choice", choices=CONFIDENCE_CHOICES),
     "max_anomalies_per_run": FieldRule(
@@ -150,6 +164,8 @@ FIELD_DEFAULTS: Mapping[str, Any] = {
     "max_tool_requests": DEFAULT_MAX_TOOL_REQUESTS,
     "prompt_char_budget": DEFAULT_PROMPT_CHAR_BUDGET,
     "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    "prompt_cache_mode": DEFAULT_PROMPT_CACHE_MODE,
+    "prompt_cache_format": DEFAULT_PROMPT_CACHE_FORMAT,
     "min_severity": DEFAULT_MIN_SEVERITY,
     "min_confidence": DEFAULT_MIN_CONFIDENCE,
     "max_anomalies_per_run": DEFAULT_MAX_ANOMALIES_PER_RUN,
@@ -542,12 +558,23 @@ def build_probe_client(
     api_key: str,
     model: str,
     timeout_seconds: int = PROBE_TIMEOUT_SECONDS,
+    prompt_cache_mode: str = DEFAULT_PROMPT_CACHE_MODE,
+    prompt_cache_format: str = DEFAULT_PROMPT_CACHE_FORMAT,
     factory: Callable[..., LLMClient] = LLMClient,
 ) -> LLMClient:
-    """构造探测用的客户端。工厂可注入，单测因此不需要真网络。"""
+    """构造探测用的客户端。工厂可注入，单测因此不需要真网络。
+
+    `prompt_cache_mode` / `prompt_cache_format` 从这里一路传进 `LLMClient`。默认值是
+    「不发标记」，而**探测请求本来就不会带标记**：标记是挂在消息上的（见
+    `prompt_cache.mark_cache_breakpoint`），只有编排层知道断点该放哪，探测只发一两句
+    短消息。所以这两个参数defaulted 与否不影响探测的行为，留着是为了让「测试连接」
+    与「正式分析」走**同一段构造代码** —— 两条路径的差异只该在传入的值里。
+    """
     return factory(
         base_url=base_url,
         api_key=api_key,
         model=model,
         timeout_seconds=timeout_seconds,
+        prompt_cache_mode=prompt_cache_mode,
+        prompt_cache_format=prompt_cache_format,
     )

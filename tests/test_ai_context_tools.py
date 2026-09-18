@@ -168,14 +168,46 @@ def test_the_cache_does_not_outlive_one_analysis():
     assert len(provider.calls) == 2
 
 
-def test_a_cached_item_keeps_its_original_accounting():
-    """缓存命中回放的是同一条记账，不能重新渲染成「没截断」的样子。"""
+def test_a_repeated_request_gets_a_pointer_instead_of_the_body_again():
+    """**正文只进提示词一次。**
+
+    第二次索要同一个文件时，原样再 append 一遍的代价有两笔：那 11,000 字的 diff 会以
+    **新增内容**的身份第二次计价（它是本轮提示词尾部的新内容，前缀缓存覆盖不到它），
+    而且模型的注意力要落在两份一模一样的东西上。所以第二次给的是一条**指针**。
+
+    指针里的 `kind` / `label` 必须与首次那条**逐字一致** —— 那就是模型回查内容的地址，
+    与 `render_context_items` 渲染出的标题同形；指针还必须明说「不用再要一遍」，否则
+    模型会重新索取，而重复索取照样消耗额度（额度耗光了它还是没看到内容）。
+    """
     tools = ContextTools(FakeProvider(file_diff="x" * 50_000), limits={"file_diff": 500})
     first = tools.execute([_diff_request()]).items[0]
     second = tools.execute([_diff_request()]).items[0]
 
-    assert second.meta == first.meta
-    assert second.text == first.text
+    assert first.meta["truncated"] is True, "首次该截断还是要截断"
+    assert second.meta == {"repeat_pointer": True}
+    assert (second.kind, second.label) == (first.kind, first.label), "指针丢了回查地址"
+    assert f"### [{first.kind}] {first.label}" in second.text, "没告诉模型内容在哪一节"
+    assert "不要再次索取" in second.text, "没告诉模型不用再要一遍"
+    assert "x" * 100 not in second.text, "正文又原样来了一遍"
+
+
+def test_the_repeat_pointer_counts_toward_the_prompt_budget():
+    """指针也会占提示词的字符额度（虽然很小）。
+
+    记账口径必须与「真正进了提示词多少字」一致，否则预算算的是另一个数。
+    """
+    tools = ContextTools(FakeProvider(file_diff="差异" * 4000))
+    first = tools.execute([_diff_request()]).items[0]
+    second = tools.execute([_diff_request()]).items[0]
+
+    counters = tools.stats["file_diff"]
+    assert counters["produced_chars"] == len(first.text) + len(second.text)
+    # `source_chars` 的口径**没有变**：命中缓存时那些字符是上一轮取过的，仍然算这个
+    # 类型的产出（见 execute 里那段注释），所以它是两份原文长度之和。
+    assert counters["source_chars"] == 2 * len(first.text)
+    assert counters["cache_hits"] == 1 and counters["executions"] == 1
+    # 真正交给模型的字符数里，第二份只有指针那么长。
+    assert len(second.text) < len(first.text) / 10
 
 
 # ==========================================================================

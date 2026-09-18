@@ -31,6 +31,20 @@ diff 对不上，这是最难查的一类不一致。
 见 `budget`。这里额外做的选择是 Excel 结构化 diff 用**保留首尾**的截断（`truncate_text_middle`）：
 只砍尾巴会让排在后面的整张表完全不可见，而「配表 A 改了、配表 B 也要跟着改」正是
 这个平台最关心的风险。
+
+### 4. 同一份正文不重发第二遍，只给一个指针
+
+模型重复索要同一个文件是常态（见第 2 条）。命中内存缓存时**不再把正文原样 append 一遍**：
+那份 11,000 字的 diff 在提示词里出现两次，既多花 token（第二次出现时它是**新增内容**，
+按未命中价计），又把模型的注意力稀释到两份一模一样的东西上。所以第二次及以后只给一条
+**指针**：正文在哪（`### [file_diff] <label>` 那一节）、不要再要一遍。
+
+**指针必须说清「内容在哪里」，否则会起反作用**：模型看不到正文会以为没拿到，于是再要
+一次 —— 而重复索取照样消耗额度（第 2 条），结果是额度被耗光、上下文还是没看到。
+所以指针文本里带上了那一条的**原始 label**，与 `render_context_items` 渲染出的标题
+逐字一致，模型可以按标题回查。
+
+首次出现的正文**一字不动**：缓存是为了不再重发，不是为了改写第一次给了什么。
 """
 
 from __future__ import annotations
@@ -181,6 +195,40 @@ def _empty_text(request: ContextRequest) -> str:
     )
 
 
+def _repeat_text(item: ContextItem) -> str:
+    """第二次及以后索要同一份内容时，给模型的那段**指针**（正文不再重发）。
+
+    两个必须说清的事，少一个这段文本就白写：
+
+    1. **内容在哪** —— 用与 `prompt.render_context_items` 渲染出的标题**逐字一致**的
+       写法（`### [kind] label`）指过去。换句话说，模型可以按这个标题回查。
+    2. **不用再要** —— 不说这句，模型会以为「这一轮没给」而重新索取，而重复索取照样
+       消耗额度（见模块 docstring 第 2 条）：额度耗光了，它还是没看到那份内容。
+    """
+    return (
+        f"[已在上文给出] {item.label} 的正文在更早的轮次里已经完整给过你一次，"
+        f"见上文那一节 `### [{item.kind}] {item.label}`。这一轮不再重复附上。\n"
+        "**你已经拿到这份内容了**，请直接使用上文给出的那一份，不要因为最近一轮里没有"
+        "再出现它就当成没拿到。确实需要重看时，也以上文的内容为准；**不要再次索取同一个"
+        "文件或同一份内容** —— 重复索取不会带来新内容，只会占掉索取额度。"
+    )
+
+
+def _repeat_item(item: ContextItem) -> ContextItem:
+    """把一条命中缓存的上下文换成指针条目。
+
+    `kind` 与 `label` **原样保留**：标题就是模型回查内容的地址，改一个字它就找不到
+    那一节了。`meta` 里不记 `original_chars` / `truncated` —— 这一条没有「取回了多少字」
+    可言，凭空记一个数会让「这个类型很省」的结论多出一份重复的字符量。
+    """
+    return ContextItem(
+        kind=item.kind,
+        label=item.label,
+        text=_repeat_text(item),
+        meta={"repeat_pointer": True},
+    )
+
+
 @dataclass
 class ContextTools:
     """带缓存、预算与记账的工具执行器。
@@ -314,8 +362,12 @@ class ContextTools:
                 # 命中缓存时这些字符是**上一轮已经取过**的，仍然算这一类型的产出 ——
                 # 否则「这个类型很省」的结论会凭空少掉一半字符。
                 self._bump(request.type, "source_chars", _meta_chars(cached))
-                self._bump(request.type, "produced_chars", len(cached.text))
-                items.append(cached)
+                # 但**这一轮真正进提示词的**只有指针的长度（见模块 docstring 第 4 条）。
+                # `produced_chars` 的口径就是「实际交给模型的字符数」，所以这里记的是
+                # 指针那一小段，不是 11,000 字正文。
+                pointer = _repeat_item(cached)
+                self._bump(request.type, "produced_chars", len(pointer.text))
+                items.append(pointer)
                 continue
 
             try:

@@ -35,10 +35,14 @@ from models.ai_analysis.project_config import (
     DEFAULT_MAX_TOOL_REQUESTS,
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MIN_SEVERITY,
+    DEFAULT_PROMPT_CACHE_FORMAT,
+    DEFAULT_PROMPT_CACHE_MODE,
     DEFAULT_PROMPT_CHAR_BUDGET,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_WEEKLY_INTERVAL_MINUTES,
     NULLABLE_RESOLVED_KEYS,
+    PROMPT_CACHE_FORMAT_CHOICES,
+    PROMPT_CACHE_MODE_CHOICES,
 )
 
 # 迁移前就存在的表（只保留新列加入之前的样子）。
@@ -95,6 +99,10 @@ CONFIG_NEW_COLUMNS = (
     "max_tool_requests",
     "prompt_char_budget",
     "request_timeout_seconds",
+    # 提示词缓存标记（2026-09）。老行在这两列上是 NULL，`resolved()` 把 NULL 读成
+    # 「不发标记」那个保守默认值（见 `_cache_choice_or_default`），不需要回填。
+    "prompt_cache_mode",
+    "prompt_cache_format",
     "min_severity",
     "min_confidence",
     "max_anomalies_per_run",
@@ -512,6 +520,54 @@ def test_model_defaults_agree_with_the_budget_layer():
     from services.ai.budget import DEFAULT_TOTAL_CHARS
 
     assert DEFAULT_PROMPT_CHAR_BUDGET == DEFAULT_TOTAL_CHARS
+
+
+def test_the_prompt_cache_value_domains_do_not_drift():
+    """**防漂移**：缓存标记的值域在模型层与行为层各写了一份，必须一致。
+
+    模型层不 import 服务层（与其它默认值一样的处理方式），所以这两份是**故意**重复的。
+    不一致的后果是静默的：界面/校验允许填 `on`、而行为层只认 `explicit`，于是用户
+    打开了一个永远不生效的开关 —— 没有报错，也没有日志。
+    """
+    from services.ai import prompt_cache
+
+    assert set(PROMPT_CACHE_MODE_CHOICES) == set(prompt_cache.PROMPT_CACHE_MODES)
+    assert set(PROMPT_CACHE_FORMAT_CHOICES) == set(prompt_cache.PROMPT_CACHE_FORMATS)
+    assert DEFAULT_PROMPT_CACHE_MODE == prompt_cache.DEFAULT_PROMPT_CACHE_MODE
+    assert DEFAULT_PROMPT_CACHE_FORMAT == prompt_cache.DEFAULT_PROMPT_CACHE_FORMAT
+    # 默认值的组合必须是「不发标记」：`auto` + `none`（见 prompt_cache.resolve_cache_marker）。
+    assert prompt_cache.resolve_cache_marker(
+        DEFAULT_PROMPT_CACHE_MODE, DEFAULT_PROMPT_CACHE_FORMAT
+    ) is None
+
+
+def test_resolved_reads_an_unknown_prompt_cache_value_as_the_conservative_default():
+    """读不出来的值一律退回「不发标记」那一侧，而不是退成「发一个没人认识的标记」。
+
+    老库上的新列是 NULL、有人手工改过库、将来删掉一个选项 —— 这几种都会走到这里。
+    """
+    config = AiProjectAnalysisConfig(project_id=1)
+    config.prompt_cache_mode = "ON"  # 大小写与值域都不对
+    config.prompt_cache_format = "openai"
+
+    resolved = config.resolved()
+
+    assert resolved["prompt_cache_mode"] == DEFAULT_PROMPT_CACHE_MODE
+    assert resolved["prompt_cache_format"] == DEFAULT_PROMPT_CACHE_FORMAT
+    assert resolved["prompt_cache_mode"] == "auto" and resolved["prompt_cache_format"] == "none"
+
+
+def test_resolved_keeps_a_declared_prompt_cache_switch():
+    """反向自检：声明过的值不能被默认值吃掉 —— 那这个功能就永远打不开。"""
+    config = AiProjectAnalysisConfig(
+        project_id=1,
+        prompt_cache_mode="explicit",
+        prompt_cache_format=" ANTHROPIC ",
+    )
+    resolved = config.resolved()
+
+    assert resolved["prompt_cache_mode"] == "explicit"
+    assert resolved["prompt_cache_format"] == "anthropic"
 
 
 def test_disposition_labels_cover_exactly_the_dispositions():

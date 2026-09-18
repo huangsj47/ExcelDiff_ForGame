@@ -498,3 +498,134 @@ def test_from_weekly_payload_passes_the_real_total_into_the_prompt():
     assert "767" in summary, "真实文件数没有进提示词"
     assert "2 个" in summary, "清单里实际有几个也没写"
     assert "没有列出来" in summary, "没有告诉模型它看不到大部分文件"
+
+
+# ==========================================================================
+# 字节稳定性（prompt cache 的前提）
+# ==========================================================================
+
+
+def test_the_same_input_always_produces_the_same_bytes():
+    """**相同输入 → 逐字节相同的提示词。**
+
+    上游的 prompt cache 按**前缀逐字节匹配**。提示词里只要有一处不确定的东西 ——
+    一个时间戳、一个随机 id、一次按集合顺序遍历出来的输出 —— 跨运行命中就归零，
+    而**归零是静默的**：分析照样跑完，只是每一次都按未命中价计费、首 token 也慢一截，
+    没有任何报错会指向这里。所以这条用例守的不是「函数是纯的」这个事实，而是
+    「将来别往里面加一个时间戳」这个纪律。
+    """
+    kwargs = {
+        "project_knowledge": "本周只评审配表",
+        "project_instructions": "本项目只看配表",
+    }
+    assert build_system_prompt(_loaded(), **kwargs) == build_system_prompt(_loaded(), **kwargs)
+
+    items = (
+        ContextItem(
+            kind="file_diff",
+            label="file_diff abc123 config/x.xlsx",
+            text="+ 100012 攻击力 100",
+            meta={"original_chars": 50_000, "truncated": True, "limit": 14_000},
+        ),
+    )
+    baseline = "# 已报过的问题\n- [high] 旧问题\n"
+    first = _message(items=items, baseline_digest=baseline)
+    assert first == _message(items=items, baseline_digest=baseline)
+    # 第一轮与后续轮次都要稳（后续轮次带的是上下文条目，渲染路径不同）。
+    later = _message(round_index=2, items=items, budget_notes=["有 1 条被截断"])
+    assert later == _message(round_index=2, items=items, budget_notes=["有 1 条被截断"])
+    assert first.encode("utf-8") == _message(items=items, baseline_digest=baseline).encode("utf-8")
+
+
+def test_a_dict_key_order_never_leaks_into_the_prompt():
+    """**同一个 dict、不同的插入顺序 → 同样的提示词。**
+
+    记账字段（`ContextItem.meta`）是从各处拼出来的字典，插入顺序取决于调用方怎么写的。
+    一旦有人把某处改成 `json.dumps(meta)` 或者直接遍历 `meta` 输出，顺序就会漏进提示词：
+    同一个文件、同一份内容，两次运行的提示词不同 —— 缓存命中率会莫名其妙地掉一半，
+    而两边的提示词人眼看过去一模一样。
+    """
+    forward = {"original_chars": 50_000, "truncated": True, "limit": 14_000}
+    backward = {"limit": 14_000, "truncated": True, "original_chars": 50_000}
+
+    def _render(meta: dict) -> str:
+        return render_context_items(
+            [ContextItem(kind="file_diff", label="l", text="正文", meta=meta)]
+        )
+
+    assert _render(forward) == _render(backward)
+    assert _render(forward) == _render(dict(reversed(list(forward.items()))))
+
+
+# 提示词的输入必须是确定的：这几个模块里出现下面任何一种写法，跨运行的缓存命中就会归零。
+# `engine.py` 用 `time.monotonic()` 记耗时（那不进提示词），所以只禁 `time.time()`。
+_FORBIDDEN_IN_PROMPT_SOURCES = ("datetime.now", "datetime.utcnow", "time.time()", "random")
+_PROMPT_SOURCE_MODULES = ("prompt.py", "budget.py", "engine.py", "skill_loader.py", "baseline.py")
+
+
+def _code_without_comments_or_docstrings(source: str) -> str:
+    """剥掉注释与文档字符串，只留会执行的代码。
+
+    **必须先剥再断言**：本仓库的注释里会原样引用「要禁掉的写法」来讲解为什么禁它
+    （上面那段就是），不剥的话禁令会打在注释上 —— 假失败一次，就会有人把断言删掉。
+    文档字符串同理：它是给人看的文字，不是会执行的代码。
+
+    做法是**把那些行/片段清空**，而不是把 token 重新拼起来 —— 重新拼会改变空白与换行
+    （`time.time()` 会被拆到三行上），于是 `in` 永远匹配不到，守卫变成一条永远绿的假用例。
+    """
+    import ast
+    import io
+    import tokenize
+
+    lines = source.splitlines()
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        # `body` 不一定是个列表：`ast.Lambda` 与 `ast.IfExp` 也叫 body，但装的是表达式。
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not body:
+            continue
+        first = body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+            if isinstance(first.value.value, str):
+                for index in range(first.value.lineno - 1, first.value.end_lineno):
+                    lines[index] = ""
+
+    blanked = "\n".join(lines)
+    for token in tokenize.generate_tokens(io.StringIO(blanked).readline):
+        if token.type == tokenize.COMMENT:
+            row, column = token.start
+            lines[row - 1] = lines[row - 1][:column]
+    return "\n".join(lines)
+
+
+def test_the_prompt_sources_stay_deterministic():
+    """静态守卫：提示词组装链路上不许出现时间戳 / 随机数。
+
+    这条防的是「将来有人往提示词里加一个时间戳」—— 它的后果是缓存命中率静默归零，
+    而没有任何一处会报错（见上面那两条用例的说明）。
+    """
+    import services.ai.baseline as baseline_module
+    import services.ai.budget as budget_module
+    import services.ai.engine as engine_module
+    import services.ai.prompt as prompt_module
+    import services.ai.skill_loader as skill_loader_module
+
+    modules = (
+        prompt_module,
+        budget_module,
+        engine_module,
+        skill_loader_module,
+        baseline_module,
+    )
+    assert [Path(module.__file__).name for module in modules] == list(_PROMPT_SOURCE_MODULES)
+
+    for module in modules:
+        code = _code_without_comments_or_docstrings(
+            Path(module.__file__).read_text(encoding="utf-8")
+        )
+        for forbidden in _FORBIDDEN_IN_PROMPT_SOURCES:
+            assert forbidden not in code, (
+                f"{Path(module.__file__).name} 里出现了 `{forbidden}`。"
+                "提示词的输入必须是确定的：一次不确定的输入会让 prompt cache 的跨运行"
+                "命中静默归零（分析照跑，只是每次都比上一次贵）。"
+            )

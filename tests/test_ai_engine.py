@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from services.ai.engine import (
@@ -25,9 +26,15 @@ from services.ai.engine import (
     STATUS_FAILED,
     STATUS_SUCCEEDED,
     EngineLimits,
+    RoundProgress,
     run_analysis,
 )
 from services.ai.llm_client import ChatResult
+from services.ai.prompt_cache import (
+    CACHE_BREAKPOINT_KEY,
+    MAX_CACHE_BREAKPOINTS,
+    strip_cache_breakpoints,
+)
 from services.ai.rules import RuleThresholds
 from services.ai.scope import AnalysisScope
 from services.ai.skill_loader import LoadedSkills, SkillDocument
@@ -251,6 +258,261 @@ def test_the_baseline_is_carried_into_the_first_round():
     _run(client, baseline_digest=digest)
 
     assert "旧问题" in client.calls[0][-1]["content"]
+
+
+# ==========================================================================
+# 提示词缓存：请求必须是 append-extension，断点必须落在稳定前缀上
+# ==========================================================================
+
+
+def _sent(messages) -> list[dict]:
+    """**真正会发出去**的那份消息。
+
+    引擎在消息字典上留了内部断点标记（见 `prompt_cache.CACHE_BREAKPOINT_KEY`），而那个
+    标记会在轮次之间**挪位置**（第 3 轮时它从第 2 轮的 user 消息挪到第 3 轮的）。
+    标记不影响发出去的字节（客户端会摘掉），所以比较「请求是不是 append-extension」
+    必须比这份摘干净的版本 —— 直接比引擎手里的列表会被标记的挪动误判成「前缀变了」。
+    """
+    return strip_cache_breakpoints(messages)
+
+
+def test_every_request_is_an_append_extension_of_its_predecessor():
+    """**多轮命中 prompt cache 的全部前提**，也是本文件里最该被钉住的一条。
+
+    上游按**逐字节前缀**匹配缓存：只要第 N+1 轮的请求以第 N 轮的请求为前缀，第 N 轮
+    写过的那段缓存就能被读到。这不是「顺手写成这样」—— 重新排序、重建 system、
+    把上下文插回中间，任何一处都会让第 2 轮及以后的命中归零，而**归零是静默的**：
+    分析照样跑完，只是每一轮都按未命中价计费。
+
+    deepseek-harness 的 `request-reconstruction.spec.ts` 用同一条断言把这个纪律钉在
+    编排层（它那边叫 `expectPrefixExtension`）。
+    """
+    client = ScriptedClient(
+        _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
+        _requests({"type": "commit_detail", "commit": COMMIT}),
+        _final(_anomaly()),
+    )
+
+    _run(client)
+
+    assert len(client.calls) == 3
+    for previous, current in zip(client.calls, client.calls[1:]):
+        earlier, later = _sent(previous), _sent(current)
+        assert len(later) > len(earlier), "每一轮都要**追加**消息"
+        assert later[: len(earlier)] == earlier, (
+            "第 N+1 轮的请求不是第 N 轮的前缀 —— 缓存从这一刻起再也命中不了"
+        )
+
+
+def test_the_cache_breakpoints_sit_on_the_stable_prefixes():
+    """断点只落在**跨轮次不变**的那几段末尾。
+
+    三个断点：系统消息末尾（平台 skill + 项目知识，跨运行逐字节相同）、第一轮 user
+    消息末尾（变更清单 + 基线 + 首轮指引，一批变更里恒定）、当前这一轮 user 消息末尾
+    （让下一轮把整份历史当作已有前缀读命中）。
+
+    **总数必须 ≤ 4**：Anthropic 的硬上限是 4，超了直接 400 —— 而 400 会触发
+    「去掉标记重试」并把整个功能关掉（见 `llm_client.complete` 的兜底）。
+    """
+    client = ScriptedClient(
+        _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
+        _requests({"type": "file_diff", "commit": COMMIT, "path": LUA}),
+        _final(_anomaly()),
+    )
+
+    _run(client)
+
+    last = client.calls[-1]
+    marked = [index for index, item in enumerate(last) if item.get(CACHE_BREAKPOINT_KEY)]
+    assert marked == [0, 1, 5], (
+        f"断点位置变了：{marked}。应当是「系统消息」「第一轮 user」「最新一轮 user」"
+    )
+    assert len(marked) <= MAX_CACHE_BREAKPOINTS
+
+
+def test_the_moving_breakpoint_leaves_the_previous_round(monkeypatch):
+    """断点跟着最新一轮走：上一轮的 user 消息上不再留标记。
+
+    留着的代价是每轮重写一遍缓存（那一轮的内容之后不会再变，但断点在旧位置等于让上游
+    去缓存一段「已经缓存过」的前缀），而且会更快撞上 4 个断点的上限。
+    """
+    client = ScriptedClient(
+        _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
+        _requests({"type": "file_diff", "commit": COMMIT, "path": LUA}),
+        _final(_anomaly()),
+    )
+
+    _run(client)
+
+    # 第 3 轮的对话里：u2 是第 4 条（索引 3），它上面的断点应当已经挪到 u3（索引 5）上。
+    third = client.calls[-1]
+    assert not third[3].get(CACHE_BREAKPOINT_KEY), "断点没有从上一轮挪走"
+    assert third[5].get(CACHE_BREAKPOINT_KEY)
+
+
+def test_a_single_round_run_only_marks_the_two_stable_blocks():
+    """只跑一轮时不该凭空多出一个断点（那时「最新一轮」就是第一轮）。"""
+    client = ScriptedClient(_final(_anomaly()))
+
+    _run(client)
+
+    marked = [index for index, item in enumerate(client.calls[0]) if item.get(CACHE_BREAKPOINT_KEY)]
+    assert marked == [0, 1]
+
+
+def test_the_breakpoint_marks_never_change_the_message_content():
+    """挪断点不改内容：标记是**消息字典上的一个内部键**，不是内容的一部分。
+
+    内容一旦被断点改动（例如给消息加一段「缓存提示」），append-extension 就断了 ——
+    这条用例把那件事钉死。
+    """
+    client = ScriptedClient(_final(_anomaly()))
+
+    _run(client, on_round=None)
+
+    system = client.calls[0][0]
+    assert set(system) == {"role", "content", CACHE_BREAKPOINT_KEY}
+    assert system["content"].startswith("本协议由平台强制注入")
+
+
+# ==========================================================================
+# 逐轮进度回调（on_round）
+# ==========================================================================
+
+
+def test_the_progress_callback_fires_once_per_round_in_order():
+    client = ScriptedClient(
+        _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
+        _final(_anomaly()),
+    )
+    seen: list[RoundProgress] = []
+
+    outcome = _run(client, on_round=seen.append)
+
+    assert [item.index for item in seen] == [1, 2]
+    assert [item.status for item in seen] == ["requests", "final"]
+    assert all(item.max_rounds == EngineLimits().max_rounds for item in seen)
+    assert seen[0].requests_used == 1 and seen[0].requests_remaining == 19
+    assert seen[1].requests_used == 1
+    # token 是**本次运行的累计值**（RoundRecord 里的才是本轮值）。
+    assert [item.prompt_tokens for item in seen] == [10, 20]
+    assert [item.completion_tokens for item in seen] == [5, 10]
+    # 时间只增不减。
+    assert seen[0].elapsed_ms <= seen[1].elapsed_ms
+    assert outcome.rounds_used == 2
+
+
+def test_the_progress_callback_reports_the_context_that_went_into_the_prompt():
+    """`items_chars` 是**真正进了提示词**的字符数（不是工具取回的原始量）。"""
+    provider = FakeProvider({("file_diff", COMMIT, TABLE): "差异" * 500})
+    client = ScriptedClient(
+        _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
+        _final(_anomaly()),
+    )
+    seen: list[RoundProgress] = []
+
+    _run(client, provider=provider, on_round=seen.append)
+
+    assert seen[0].items_chars == 0, "第一轮还没有任何上下文"
+    assert seen[1].items_chars == len("差异" * 500)
+    assert "差异" * 10 in client.calls[1][-1]["content"]
+
+
+def test_the_progress_callback_also_fires_on_the_degraded_rounds():
+    """降级那几轮**最需要**进度：用户正等着「到底跑到哪了」。
+
+    漏报这几条的后果不是报错，而是界面上一直停在上一轮 —— 看起来像卡死了。
+    """
+    seen: list[RoundProgress] = []
+    outcome = _run(ScriptedClient(_markdown()), on_round=seen.append)
+
+    assert outcome.degradation == DEGRADE_MARKDOWN
+    assert [item.status for item in seen] == ["unparsable"]
+    assert seen[0].index == 1
+
+
+def test_a_broken_progress_callback_never_fails_the_analysis():
+    """回调抛异常只记一条日志。调用方用它发 SSE 事件、查预算 —— 那些动作失败不该让
+    一次已经跑了几分钟的分析白跑（与 `run_analysis` 不抛异常同一条理由）。
+    """
+    def explode(_progress):
+        raise RuntimeError("SSE 通道断了")
+
+    outcome = _run(ScriptedClient(_final(_anomaly())), on_round=explode)
+
+    assert outcome.status == STATUS_SUCCEEDED
+    assert [item.title for item in outcome.anomalies] == ["【道具】ID 被删除但生成文件仍在"]
+
+
+def test_the_cache_totals_are_none_until_every_round_reports_them():
+    """逐轮上报的缓存 token：**任一轮没上报，累计值就是 `None`**（不是 0）。
+
+    与 `EngineOutcome.cache_read_tokens` 同一条口径（见 `_sum_optional`）：拿「手里有的
+    那几轮」去加会得出一个偏高的命中率，而那个数字看起来完全正常、没人会去怀疑它。
+    """
+    class CacheReporting(ScriptedClient):
+        """只报某些轮：`reported_rounds` 之外的那几轮不带缓存字段。"""
+
+        def __init__(self, *replies, reported_rounds=(1, 2)):
+            super().__init__(*replies)
+            self._reported = set(reported_rounds)
+
+        def complete(self, messages, *, temperature=None):
+            result = super().complete(messages, temperature=temperature)
+            if len(self.calls) not in self._reported:
+                return result  # 上游这一轮没报缓存字段
+            return replace(
+                result, cache_read_tokens=900, cache_write_tokens=0, cache_source="x"
+            )
+
+    replies = (
+        _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
+        _final(_anomaly()),
+    )
+
+    partial: list[RoundProgress] = []
+    _run(CacheReporting(*replies, reported_rounds=(2,)), on_round=partial.append)
+
+    assert partial[0].cache_read_tokens is None
+    assert partial[1].cache_read_tokens is None, "有一轮没上报，累计值就不能给数字"
+
+    complete: list[RoundProgress] = []
+    _run(CacheReporting(*replies), on_round=complete.append)
+
+    assert complete[0].cache_read_tokens == 900
+    assert complete[1].cache_read_tokens == 1800
+    assert complete[1].cache_write_tokens == 0
+
+
+def test_the_round_records_carry_the_per_round_cache_usage():
+    """**逐轮**的账才是回答「缓存有没有用」的那个数（总量只有一个数字）。
+
+    这一条同时是「同一个 run 里第 2 轮及以后应当命中」这条验收的落点：真实端点上
+    `cache_read_tokens` 在第一次之后的每一次都必须 > 0（见
+    `test_ai_live_endpoint.py` 里那条对着真模型跑的用例）。
+    """
+    class CacheReporting(ScriptedClient):
+        def complete(self, messages, *, temperature=None):
+            result = super().complete(messages, temperature=temperature)
+            return replace(
+                result,
+                cache_read_tokens=100 * (len(self.calls) - 1),
+                cache_write_tokens=7,
+                cache_source="prompt_cache_hit_tokens",
+            )
+
+    client = CacheReporting(
+        _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
+        _final(_anomaly()),
+    )
+
+    outcome = _run(client)
+
+    assert [item.cache_read_tokens for item in outcome.rounds] == [0, 100]
+    assert outcome.cache_read_tokens == 100
+    assert outcome.cache_write_tokens == 14
+    assert outcome.cache_source == "prompt_cache_hit_tokens"
+    assert all(item.prompt_tokens == 10 for item in outcome.rounds), "逐轮记的是本轮值"
 
 
 # ==========================================================================

@@ -41,6 +41,29 @@ DEFAULT_MIN_SEVERITY = "high"
 DEFAULT_MIN_CONFIDENCE = "high"
 DEFAULT_MAX_ANOMALIES_PER_RUN = 10
 
+# --- 提示词缓存标记（行为在 services/ai/prompt_cache.py，这里只存值）---
+# 两栏合起来才决定「这次请求带不带缓存断点」，默认值是**不发**：
+#
+#     mode=auto + format=none       →  不发标记（默认）
+#     mode=auto + format=anthropic  →  发
+#     mode=explicit（任意 format）   →  发（用户明确声称端点接受）
+#     mode=off                      →  永不发
+#
+# 默认不发是刻意的：`cache_control` 不是 OpenAI 协议的一部分，按主机名/模型名猜
+# 「像不像 Anthropic」对**内网网关**天然失效，而猜错的代价是一次 400。要发的部署者
+# 只需要声明他**知道**的那件事：这个端点接受哪种约定。
+#
+# **不发标记 ≠ 关掉缓存**：DeepSeek / OpenAI 这类端点做的是自动前缀缓存，什么都不
+# 用声明，只要前缀稳定就命中（本机网关实测三轮 71.5% → 83.8%）。
+#
+# 值域在这里写死、在 `prompt_cache` 里再写一份，两边由
+# `test_ai_models_and_migration.py` 的两条防漂移用例钉住 —— 与本文件其它默认值
+# 一样的处理方式（模型层不 import 服务层，见文件顶部那段说明）。
+PROMPT_CACHE_MODE_CHOICES = ("off", "auto", "explicit")
+PROMPT_CACHE_FORMAT_CHOICES = ("none", "anthropic")
+DEFAULT_PROMPT_CACHE_MODE = "auto"
+DEFAULT_PROMPT_CACHE_FORMAT = "none"
+
 # 取值范围。前后端共用同一组边界：界面上的 min/max 与服务端的校验必须一致，否则会出现
 # 「前端允许填、后端悄悄改掉」这种用户看不懂的行为。
 MAX_ANALYSIS_ROUNDS_RANGE = (1, 30)
@@ -136,6 +159,17 @@ def _budget_period_or_default(value) -> str:
     return text if text in BUDGET_PERIOD_CHOICES else DEFAULT_BUDGET_PERIOD
 
 
+def _cache_choice_or_default(value, choices: tuple[str, ...], fallback: str) -> str:
+    """读一个缓存标记相关的取值：不在值域里就用默认。
+
+    **默认一律是「不发标记」那一侧的取值**（`auto` / `none`）。所以老库上的 NULL、
+    手工改库改出来的怪值、将来被删掉的一个选项，全都退化成「不发标记」——
+    而不会退化成「发一个谁也不认识的标记」。
+    """
+    text = str(value or "").strip().lower()
+    return text if text in choices else fallback
+
+
 class AiProjectAnalysisConfig(db.Model):
     __tablename__ = "ai_project_analysis_config"
 
@@ -158,6 +192,10 @@ class AiProjectAnalysisConfig(db.Model):
     max_tool_requests = db.Column(db.Integer, default=DEFAULT_MAX_TOOL_REQUESTS)
     prompt_char_budget = db.Column(db.Integer, default=DEFAULT_PROMPT_CHAR_BUDGET)
     request_timeout_seconds = db.Column(db.Integer, default=DEFAULT_REQUEST_TIMEOUT_SECONDS)
+    # 提示词缓存标记（2026-09）。加列迁移不带 DEFAULT 子句，老行上是 NULL ——
+    # 而 NULL 经 `resolved()` 读出来正好是「不发标记」那个保守默认值，不需要回填。
+    prompt_cache_mode = db.Column(db.String(20), default=DEFAULT_PROMPT_CACHE_MODE)
+    prompt_cache_format = db.Column(db.String(20), default=DEFAULT_PROMPT_CACHE_FORMAT)
 
     # --- 告警门槛（规则侧，改这里不用改提示词）---
     min_severity = db.Column(db.String(20), default=DEFAULT_MIN_SEVERITY)
@@ -223,6 +261,15 @@ class AiProjectAnalysisConfig(db.Model):
             "prompt_char_budget": _int_or(self.prompt_char_budget, DEFAULT_PROMPT_CHAR_BUDGET),
             "request_timeout_seconds": _int_or(
                 self.request_timeout_seconds, DEFAULT_REQUEST_TIMEOUT_SECONDS
+            ),
+            # 读不出来的值一律退回默认（保守＝不发标记），见 _cache_choice_or_default。
+            "prompt_cache_mode": _cache_choice_or_default(
+                self.prompt_cache_mode, PROMPT_CACHE_MODE_CHOICES, DEFAULT_PROMPT_CACHE_MODE
+            ),
+            "prompt_cache_format": _cache_choice_or_default(
+                self.prompt_cache_format,
+                PROMPT_CACHE_FORMAT_CHOICES,
+                DEFAULT_PROMPT_CACHE_FORMAT,
             ),
             "min_severity": (self.min_severity or DEFAULT_MIN_SEVERITY).strip().lower(),
             "min_confidence": (self.min_confidence or DEFAULT_MIN_CONFIDENCE).strip().lower(),

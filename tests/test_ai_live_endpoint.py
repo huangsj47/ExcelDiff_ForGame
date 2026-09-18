@@ -53,6 +53,7 @@ from pathlib import Path
 import pytest
 
 from services.ai.context_tools import ContextTools
+from services.ai.engine import EngineLimits, RoundProgress, run_analysis
 from services.ai.llm_client import LLMClient
 from services.ai.prompt import (
     CommitSummary,
@@ -603,3 +604,79 @@ def test_the_run_is_readable_as_a_scorecard(analysis):
     print("报告正文（前 1200 字）：")
     print((analysis.payload.report_markdown if analysis.payload else "")[:1200])
     print("=" * 72)
+
+
+# ==========================================================================
+# 4) 提示词缓存：第 2 轮及以后必须命中上行缓存
+# ==========================================================================
+
+
+def test_every_round_after_the_first_hits_the_provider_prefix_cache(client, skills):
+    """**对着真模型验收 prompt cache。**
+
+    多轮循环的全部意义建立在一条性质上：第 N+1 轮的请求是第 N 轮的 **append-extension**
+    （逐字节前缀相同）。上游按前缀匹配缓存，所以只要这条性质成立、且这个端点做前缀缓存，
+    第 2 轮及以后就必须报出**非零**的命中 token。
+
+    这条断言是 deepseek-harness 的 `request-cache.e2e.ts` 用的同一把尺子
+    （那边写的是「每一次请求 `cacheReadTokens > 0`」）。假 client 能证明「我们按设计
+    发了消息」，**证不了「上游真的命中了」** —— 上游的缓存粒度（DeepSeek 侧实测是
+    64 token 一块）、最小块数、TTL 都会影响结果，那些只能对着真端点看。
+
+    端点上没上报缓存字段时 skip（那说明这个网关不暴露缓存用量，而不是我们发错了）。
+    """
+    provider = ScriptedProvider(skills)
+    rounds: list[RoundProgress] = []
+    change_summary = render_change_summary(
+        [
+            CommitSummary(
+                commit=COMMIT,
+                message="暑期活动预热 —— 道具表调整 + 奖励发放重构",
+                author="qa",
+                commit_time="2026-09-16T10:00:00",
+                files=tuple(FileChange(path=path, operation="M") for path in CHANGED_PATHS),
+            )
+        ]
+    )
+
+    outcome = run_analysis(
+        client=client,
+        provider=provider,
+        loaded=skills,
+        scope=_scope(),
+        change_summary=change_summary,
+        # 真模型上轮次越少越好：这条用例要的是「两轮之间的前缀」，不是完整报告。
+        limits=EngineLimits(max_rounds=3, max_tool_requests=4),
+        on_round=rounds.append,
+    )
+
+    assert outcome.rounds_used >= 2, (
+        "只跑了一轮，没有「第二轮」可验：这条用例需要模型先索取一次上下文。"
+        f"报告开头：{(outcome.report_markdown or '')[:300]}"
+    )
+    reported = [item for item in outcome.rounds if item.cache_read_tokens is not None]
+    if not reported:
+        pytest.skip(
+            "该端点没有上报任何缓存字段（cache_read_tokens 全为 None），"
+            "无法验收缓存命中。这不代表我们发错了请求。"
+        )
+
+    first, *later = outcome.rounds
+    # 逐轮记账本身也要对得上（回调与 RoundRecord 是两份数据，别只信一个）。
+    assert [item.index for item in rounds] == [item.index for item in outcome.rounds]
+    for record in later:
+        assert record.cache_read_tokens is not None, (
+            f"第 {record.index} 轮上游没报缓存字段，而第 1 轮报了 —— "
+            "上游要么一致性有问题，要么我们中途换了请求形态"
+        )
+        assert record.cache_read_tokens > 0, (
+            f"第 {record.index} 轮一个缓存 token 都没命中：说明这一轮的请求不是上一轮的前缀。"
+            f"逐轮命中数：{[item.cache_read_tokens for item in outcome.rounds]}"
+        )
+    print(
+        "\n逐轮 prompt token / 命中："
+        + "；".join(
+            f"第 {item.index} 轮 {item.prompt_tokens} / {item.cache_read_tokens}"
+            for item in outcome.rounds
+        )
+    )

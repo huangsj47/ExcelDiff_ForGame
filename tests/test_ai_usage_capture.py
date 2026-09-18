@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 from flask import make_response
@@ -29,7 +30,7 @@ from app import app as flask_app
 from app import create_tables, db
 from models import Project
 from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace
-from services.ai.usage import usage_from_run
+from services.ai.usage import cache_hit_rate, usage_from_run
 from services.ai_usage_service import project_usage, run_usage, usage_overview
 
 PRICE_TABLE = json.dumps(
@@ -246,6 +247,43 @@ def test_the_hit_rate_is_none_when_the_cache_column_is_null():
 
         assert usage["cache"]["hit_rate"] is None
         assert usage["tokens"]["input"] == 1000
+
+
+def test_the_hit_rate_uses_the_same_denominator_as_the_cost_estimate():
+    """分母是**输入总数**（`prompt_tokens`），与 `pricing.estimate_cost` 认的那个一致。
+
+    两处口径不一致的后果是一句自相矛盾的展示：「命中率 90%，费用却按全价算」。
+    OpenAI / DeepSeek 的 `prompt_tokens` 已经含命中部分
+    （`prompt_cache_hit_tokens + prompt_cache_miss_tokens == prompt_tokens`，
+    在本机网关上实测过），所以两者本来就是一回事。
+    """
+    from services.ai.pricing import ModelPrice, PriceTable, estimate_cost
+
+    table = PriceTable(
+        models={"m": ModelPrice(input_per_million=Decimal("2"), output_per_million=Decimal("8"),
+                                cache_read_per_million=Decimal("0.2"))},
+        version="v1",
+    )
+    cost = estimate_cost("m", tokens_input=1000, tokens_output=100, cache_read=900, table=table)
+
+    assert cache_hit_rate(900, 1000) == pytest.approx(0.9)
+    # 费用那边把 1000 拆成「900 命中 + 100 未命中」：900 * 0.2/M + 100 * 2/M + ...
+    assert cost.lines[0].tokens == 100, "未命中那一档要减掉命中数（分母含命中）"
+    assert cost.lines[1].tokens == 900
+
+
+@pytest.mark.parametrize("hit,total", [(900, 100), (1, 0), (None, 100), (100, None), (-1, 100)])
+def test_an_impossible_hit_rate_is_reported_as_unreported(hit, total):
+    """**命中率不许超过 100%。**
+
+    超过 100% 只可能来自「上游给的两个字段不是同一口径」—— 已知的一种是 Anthropic 风格：
+    `usage.input_tokens` 不含命中部分，而 `prompt_tokens` 是按 OpenAI/DeepSeek 口径读的。
+    真拿它做比例会算出「命中率 900%」，那比「未上报」更容易误导：用户会以为是我们算错了。
+
+    （费用那一侧对同样的数据按「全部命中」处理并带一句说明 —— 金额可以挂一句「我做了
+    假设」，百分比没有地方挂那句话。）
+    """
+    assert cache_hit_rate(hit, total) is None
 
 
 # ==========================================================================

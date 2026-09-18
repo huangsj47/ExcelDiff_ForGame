@@ -299,6 +299,11 @@ def build_endpoint_client(
             timeout_seconds=(
                 timeout_seconds if timeout_seconds else PROBE_TIMEOUT_SECONDS
             ),
+            # 缓存标记的两个开关来自**项目配置**（读不出来时是「不发标记」的保守默认值，
+            # 见 models/ai_analysis/project_config.py）。探测路径（测试连接 / 拉模型列表）
+            # 不传这两个参数，于是也走默认值 —— 两条路径的差异只在这里，不在行为里。
+            prompt_cache_mode=str(config.get("prompt_cache_mode") or ""),
+            prompt_cache_format=str(config.get("prompt_cache_format") or ""),
         ),
         [],
     )

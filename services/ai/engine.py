@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from services.ai.baseline import DEFAULT_BASELINE_CHARS
 from services.ai.budget import (
@@ -52,6 +52,7 @@ from services.ai.context_tools import (
     describe_request,
 )
 from services.ai.prompt import build_system_prompt, build_user_message
+from services.ai.prompt_cache import CACHE_BREAKPOINT_KEY, mark_cache_breakpoint
 from services.ai.protocol import (
     AnalysisPayload,
     Anomaly,
@@ -66,6 +67,7 @@ from services.ai.protocol import (
 from services.ai.rules import RuleThresholds, normalize_anomalies
 from services.ai.scope import AnalysisScope
 from services.ai.skill_loader import LoadedSkills
+from utils.logger import log_print
 
 # 结果状态。`degraded` 是「有产出，但流程没走完」——必须与 `succeeded` 分开，
 # 否则用户分不出「模型看完说没问题」和「模型没答上来我们拿旧内容凑了一份」。
@@ -146,6 +148,35 @@ class RoundRecord:
     prompt_chars: int = 0
     context_chars: int = 0
     duration_ms: int = 0
+
+
+@dataclass(frozen=True)
+class RoundProgress:
+    """一轮跑完之后，**实时**往外报的那几个数（`run_analysis(on_round=...)`）。
+
+    与 `RoundRecord` 的区别是用途：`RoundRecord` 是落库的账（trace 里逐轮一行，
+    事后回答「钱花在第几轮」），这里是**跑的过程中**给调用方看的一眼 ——
+    界面要一边跑一边显示「第 2/8 轮，已用 45 秒」。
+
+    所以这里的 token 是**本次运行的累计值**（跨轮相加），而 `RoundRecord` 里的是本轮值；
+    `elapsed_ms` 同理，是整次运行已过去的毫秒数（本轮的耗时看 `RoundRecord.duration_ms`）。
+    """
+
+    index: int
+    max_rounds: int
+    status: str  # requests / final / unparsable
+    # 本次运行**累计**的用量，只含上游已上报的部分。
+    prompt_tokens: int
+    completion_tokens: int
+    # 同上，累计；**任一轮没上报就是 `None`**（与 `EngineOutcome` 同一口径，见 `_sum_optional`）。
+    cache_read_tokens: int | None
+    cache_write_tokens: int | None
+    requests_used: int
+    requests_remaining: int
+    # 本轮真正进了提示词的上下文字符数。
+    items_chars: int
+    # 本次运行从开始到现在已过去的毫秒数。
+    elapsed_ms: int
 
 
 @dataclass(frozen=True)
@@ -277,11 +308,24 @@ def run_analysis(
     project_knowledge: str = "",
     project_instructions: str = "",
     baseline_digest: str = "",
+    on_round: Callable[[RoundProgress], None] | None = None,
 ) -> EngineOutcome:
     """跑完一次分析。**不抛异常**：任何失败都变成 `status="failed"` 的结果。
 
     不抛的理由是调用方在后台线程/SSE 里跑，抛出去只会变成一个没人看的堆栈；而
     「这次为什么没出结论」是用户要看到的信息，必须结构化地带回去。
+
+    `on_round` 每轮调一次（在 `RoundRecord` 落进结果之后），用来把进度实时推给界面。
+    它抛异常**只会被记一条日志**，绝不作废这次分析 —— 调用方会用它发 SSE 事件、查预算，
+    那些动作失败不该让一次已经跑了几分钟的分析白跑。不传它时行为与以前完全一致。
+
+    ## 提示词缓存：请求是 append-extension 的
+
+    `messages` 从第一轮起就是 append-only 的：system 只构造一次，之后每轮只 append
+    一条 user 和一条 assistant。这**不是顺手写成这样**，而是跨轮次命中 prompt cache 的
+    全部前提 —— 上游按**逐字节前缀**匹配缓存，任何一处重建（重新排序、重写 system、
+    把上下文插回去）都会让第 2 轮及以后的缓存命中归零。`cache_control` 断点也挂在这条
+    性质上：断点只落在「跨轮次不变、跨运行也尽量不变」的那几段末尾。
     """
     limits = limits or EngineLimits()
     thresholds = thresholds or RuleThresholds()
@@ -292,7 +336,13 @@ def run_analysis(
         project_knowledge=project_knowledge,
         project_instructions=project_instructions,
     )
-    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    # 断点 ①：系统消息的末尾。它是整次请求里最稳的一段 —— 同一份平台 skill + 同一份
+    # 项目知识包，在同一项目上跨运行**逐字节相同**，所以它值得一个独立的缓存条目。
+    messages: list[dict[str, Any]] = [
+        mark_cache_breakpoint({"role": "system", "content": system_prompt})
+    ]
+    # 断点 ③（移动的那个）挂在哪条消息上。见循环里的说明。
+    movable_breakpoint: dict[str, Any] | None = None
 
     rounds: list[RoundRecord] = []
     dropped: list[DroppedItem] = []
@@ -328,6 +378,45 @@ def run_analysis(
             "duration_ms": int((time.monotonic() - started_at) * 1000),
         }
 
+    def _emit(record: RoundRecord) -> None:
+        """记一轮的账，并把它**实时**报给调用方。
+
+        **每一轮的 `RoundRecord` 都必须从这一个出口出去**（本轮共有 5 个构造点：
+        请求轮、final 轮、markdown 降级轮、纠正额度耗尽轮、以及要重问的那一轮）。
+        漏掉任何一个，那条路径上的进度就永远不会报出去 —— 而这几种恰恰都是用户最需要
+        看到进度的时刻（跑偏了、在重问、降级了）。
+
+        回调抛异常只记一条日志：调用方用它发 SSE 事件、查预算，那些动作失败不该让一次
+        已经跑了几分钟的分析白跑（与 `run_analysis` 不抛异常同一条理由）。
+        """
+        rounds.append(record)
+        if on_round is None:
+            return
+        try:
+            on_round(
+                RoundProgress(
+                    index=record.index,
+                    max_rounds=limits.max_rounds,
+                    status=record.status,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    # 整个列表一起看：**任一轮没上报就是 None**（口径见 _sum_optional）。
+                    cache_read_tokens=_sum_optional(cache_reads),
+                    cache_write_tokens=_sum_optional(cache_writes),
+                    requests_used=tools.requests_seen,
+                    requests_remaining=tools.requests_remaining,
+                    items_chars=record.context_chars,
+                    elapsed_ms=int((time.monotonic() - started_at) * 1000),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 —— 回调失败不作废分析，见 docstring
+            log_print(
+                f"⚠️ AI 分析：轮次进度回调失败（{type(exc).__name__}：{exc}），已忽略，"
+                "分析继续。",
+                "AI",
+                force=True,
+            )
+
     for round_index in range(1, limits.max_rounds + 1):
         exhausted = tools.requests_remaining <= 0
         items, item_notes = _fit_items(
@@ -353,7 +442,25 @@ def run_analysis(
             correction_hint=correction_hint,
             budget_exhausted=exhausted,
         )
-        messages.append({"role": "user", "content": user_message})
+        # 断点 ②：**第一轮** user 消息的末尾。变更清单（全量列出，顶到上限时约 87,000
+        # 字符）、历史结论基线、首轮指引这三段在一批变更里是恒定的，而且占了整份提示词的
+        # 大头 —— 跨运行复用缓存主要靠它。它**只挂第一轮**：后续轮次的 user 消息里有本轮
+        # 才取回的上下文（每轮都不同），挂上去等于每轮重写一遍缓存。
+        #
+        # 断点 ③：**当前这一轮** user 消息的末尾，且只保留最新的一条（下一轮开始时把上一条
+        # 上的断点摘掉，`movable_breakpoint` 就是记着「上一条是谁」的那个变量）。它换来的是
+        # 「下一轮的整份历史都是我这次请求的前缀」—— 第 N 轮的内容成了第 N+1 轮的前缀，
+        # 多轮的缓存命中正是从这里来的。
+        #
+        # 两个断点都只加在**消息字典上的内部标记**上，不改内容：摘掉/挪动断点不会让任何
+        # 一条消息的字节发生变化，所以「挪断点」与「append-extension」不冲突。
+        entry: dict[str, Any] = {"role": "user", "content": user_message}
+        if movable_breakpoint is not None:
+            movable_breakpoint.pop(CACHE_BREAKPOINT_KEY, None)
+        mark_cache_breakpoint(entry)
+        if round_index > 1:
+            movable_breakpoint = entry
+        messages.append(entry)
 
         round_started = time.monotonic()
         try:
@@ -400,19 +507,19 @@ def run_analysis(
             if looks_like_markdown_report(text):
                 # 模型给了一份像样的 markdown 报告。与其把它扔掉重问，不如留下来当降级产出：
                 # 内容通常是有用的，用户至少能读到。
-                rounds.append(RoundRecord(round_index, "unparsable", note="按 markdown 报告降级", **round_extra))
+                _emit(RoundRecord(round_index, "unparsable", note="按 markdown 报告降级", **round_extra))
                 payload = None
                 markdown_fallback = text.strip()
                 degradation = DEGRADE_MARKDOWN
                 break
             if limits.max_corrections <= 0:
-                rounds.append(RoundRecord(round_index, "unparsable", note=str(exc)[:200], **round_extra))
+                _emit(RoundRecord(round_index, "unparsable", note=str(exc)[:200], **round_extra))
                 degradation = DEGRADE_PROTOCOL
                 break
             # 重问也要占一轮：否则一个不肯说 JSON 的模型能把循环变成无限次重试。
             limits = replace(limits, max_corrections=limits.max_corrections - 1)
             correction_hint = build_correction_hint(exc)
-            rounds.append(RoundRecord(round_index, "unparsable", note=str(exc)[:200], **round_extra))
+            _emit(RoundRecord(round_index, "unparsable", note=str(exc)[:200], **round_extra))
             pending_items = ()
             budget_notes = []
             continue
@@ -420,9 +527,7 @@ def run_analysis(
         correction_hint = ""
         if parsed.is_final:
             payload = parsed
-            rounds.append(
-                RoundRecord(round_index, "final", item_count=len(items), **round_extra)
-            )
+            _emit(RoundRecord(round_index, "final", item_count=len(items), **round_extra))
             break
 
         # `sanitize_requests` 同时返回「通过白名单的」与「被丢掉的及原因」——两样都要：
@@ -434,7 +539,7 @@ def run_analysis(
         dropped.extend(batch.dropped)
         pending_items = batch.items
         budget_notes = _batch_notes(batch)
-        rounds.append(
+        _emit(
             RoundRecord(
                 round_index,
                 "requests",
@@ -583,6 +688,7 @@ __all__ = [
     "DEGRADE_ROUNDS",
     "EngineLimits",
     "EngineOutcome",
+    "RoundProgress",
     "RoundRecord",
     "STATUS_DEGRADED",
     "STATUS_FAILED",

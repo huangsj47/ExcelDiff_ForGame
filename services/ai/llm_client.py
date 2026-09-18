@@ -19,6 +19,15 @@
 错误信息会被写进日志、写进数据库的 `error_message`、再展示到页面上。上游返回体、
 URL、异常字符串都可能带上密钥（内网网关把 token 放在 query 里并不罕见），所以一律
 先过 `redact_secret`。
+
+## 提示词缓存标记：带了要能跑，带不了要能退
+
+多轮分析的每一轮都把「系统提示词 + 之前所有轮次」重发一遍，上游的 prompt cache 就是
+为这件事存在的。要不要显式挂缓存断点由 `services/ai/prompt_cache.py` 决定（能力是
+**声明**出来的，不是按主机名猜出来的），这里只负责一件事：**分析绝不能因为缓存标记
+而失败**。所以带标记的请求失败时，会自动去掉标记重试一次；重试成功说明这个端点不认
+这个字段，于是把它记进进程内的黑名单（后续请求不再带）并记一条日志 —— 用户看到的
+是一次正常的分析，而不是「HTTP 400 未知字段」。
 """
 
 from __future__ import annotations
@@ -27,11 +36,22 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import urlparse, urlunparse
 
 import requests
 
+from services.ai.prompt_cache import (
+    DEFAULT_PROMPT_CACHE_FORMAT,
+    DEFAULT_PROMPT_CACHE_MODE,
+    apply_cache_breakpoints,
+    cache_marker_rejection_reason,
+    mark_cache_marker_rejected,
+    normalize_cache_format,
+    normalize_cache_mode,
+    resolve_cache_marker,
+)
+from utils.logger import log_print
 from utils.security_utils import sanitize_text
 
 # 传输层重试上限。刻意不设成 4 层叠加 —— 见模块 docstring。
@@ -358,6 +378,8 @@ class LLMClient:
         model: str = "",
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
+        prompt_cache_mode: str = DEFAULT_PROMPT_CACHE_MODE,
+        prompt_cache_format: str = DEFAULT_PROMPT_CACHE_FORMAT,
     ) -> None:
         self.base_url = normalize_base_url(base_url)
         self._api_key = str(api_key or "").strip()
@@ -365,6 +387,10 @@ class LLMClient:
         self.timeout_seconds = max(1, int(timeout_seconds or DEFAULT_TIMEOUT_SECONDS))
         # 注入 sleep 让重试测试不必真的等待。
         self._sleep = sleep
+        # 缓存标记的两个开关。归一化放在构造时做一次：读配置的路径有三四条
+        # （探测 / 正式分析 / 测试连接），每条都归一化一遍必然有人漏。
+        self.prompt_cache_mode = normalize_cache_mode(prompt_cache_mode)
+        self.prompt_cache_format = normalize_cache_format(prompt_cache_format)
 
     # -- 内部 ---------------------------------------------------------------
 
@@ -531,16 +557,85 @@ class LLMClient:
                     break
         return contexts
 
+    def _cache_marker(self) -> Mapping[str, str] | None:
+        """这次请求要带的缓存标记；`None` = 不带。
+
+        三种情况都会走到 `None`：模式是 `off`、端点没声明约定（`auto` 的默认）、
+        以及**这个端点在本进程里拒过标记**（见 `complete` 的兜底）。
+        """
+        if cache_marker_rejection_reason(self.base_url, self.model) is not None:
+            return None
+        return resolve_cache_marker(self.prompt_cache_mode, self.prompt_cache_format)
+
+    def _request_body(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float | None,
+        marker: Mapping[str, str] | None,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        """请求体。**消息一律过一遍断点处理**：内部标记绝不能漏进 JSON。
+
+        `marker is None` 时发出去的东西与缓存功能上线前逐字节相同（见
+        `prompt_cache.strip_cache_breakpoints`）—— 「默认关掉」这条路径必须是真的关掉。
+        """
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": apply_cache_breakpoints(messages, marker),
+        }
+        if temperature is not None:
+            body["temperature"] = temperature
+        if stream:
+            body["stream"] = True
+        return body
+
     def complete(self, messages: list[dict[str, str]], *, temperature: float | None = None) -> ChatResult:
-        """一次非流式补全。"""
+        """一次非流式补全。**不因缓存标记失败**，见模块 docstring。"""
+        marker = self._cache_marker()
+        if marker is None:
+            return self._complete_once(messages, temperature=temperature, marker=None)
+
+        try:
+            return self._complete_once(messages, temperature=temperature, marker=marker)
+        except LLMError as exc:
+            # 安全阀。未知字段被 4xx 拒绝是最常见的失败形态，而它的后果是**整个分析
+            # 跑不起来** —— 用一个省钱的优化换掉一次分析，这笔账怎么算都是亏的。
+            #
+            # 只对 `LLMError` 兜底（本模块自己的异常树：配置 / 传输 / 响应），
+            # 不碰 KeyboardInterrupt 这类必须继续向上传播的东西。
+            reason = redact_secret(f"{type(exc).__name__}: {exc}", self._api_key)
+            try:
+                result = self._complete_once(messages, temperature=temperature, marker=None)
+            except LLMError:
+                # 去掉标记**仍然**失败 → 与标记无关（密钥、网络、网关故障）。
+                # 这时候不能把端点拉黑：拉黑等于把这个功能永久关掉，而它其实没问题。
+                # 抛出去的是「不带标记那一次」的错误 —— 那正是我们本来会发的请求。
+                raise
+            mark_cache_marker_rejected(self.base_url, self.model, reason)
+            log_print(
+                f"⚠️ AI 分析：{self.base_url} 不接受提示词缓存标记（{reason}），"
+                "已自动去掉标记重试成功，本次分析照常；本进程后续请求不再带标记。"
+                "若该端点确实支持，请核对项目配置里的 prompt_cache_mode / prompt_cache_format。",
+                "AI",
+                force=True,
+            )
+            return result
+
+    def _complete_once(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float | None,
+        marker: Mapping[str, str] | None,
+    ) -> ChatResult:
+        """发一次请求并把响应解析成 `ChatResult`。带不带标记由 `marker` 决定。"""
         if not self.model:
             raise LLMConfigError("未配置模型名")
         if not messages:
             raise LLMConfigError("消息为空")
 
-        body: dict[str, Any] = {"model": self.model, "messages": messages}
-        if temperature is not None:
-            body["temperature"] = temperature
+        body = self._request_body(messages, temperature=temperature, marker=marker)
 
         response = self._request(
             "POST",
@@ -587,15 +682,17 @@ class LLMClient:
         所以用量会全部丢掉。目前没有生产调用者 —— 分析走的是非流式的 `complete()`，
         界面上的「流式」是平台自己往前端推的进度流，不是这里。将来若要切到流式，必须
         先给这个方法一个能带出用量的返回形态，否则面板会静默变成空的。
+
+        **这条路径也不挂缓存标记**（`marker=None`）：它没有生产调用者，为一个跑不到的
+        分支加一层「带了标记失败要重试」的复杂度不划算；但消息仍然要过一遍断点处理，
+        否则引擎在消息上留的内部标记会漏进 JSON 体。
         """
         if not self.model:
             raise LLMConfigError("未配置模型名")
         if not messages:
             raise LLMConfigError("消息为空")
 
-        body: dict[str, Any] = {"model": self.model, "messages": messages, "stream": True}
-        if temperature is not None:
-            body["temperature"] = temperature
+        body = self._request_body(messages, temperature=temperature, marker=None, stream=True)
 
         response = self._request(
             "POST",

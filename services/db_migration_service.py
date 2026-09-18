@@ -255,6 +255,11 @@ def _migrate_ai_analysis_columns(db, log_print):
             "max_tool_requests": "max_tool_requests INTEGER",
             "prompt_char_budget": "prompt_char_budget INTEGER",
             "request_timeout_seconds": "request_timeout_seconds INTEGER",
+            # 提示词缓存标记（2026-09）：这个端点接不接受 `cache_control`、接受哪一种。
+            # 同样**没有 DEFAULT 子句**，老行是 NULL —— 而 NULL 经 `resolved()` 读出来
+            # 正是「不发标记」那个保守默认值，所以不需要回填。
+            "prompt_cache_mode": "prompt_cache_mode VARCHAR(20)",
+            "prompt_cache_format": "prompt_cache_format VARCHAR(20)",
             "min_severity": "min_severity VARCHAR(20)",
             "min_confidence": "min_confidence VARCHAR(20)",
             "max_anomalies_per_run": "max_anomalies_per_run INTEGER",

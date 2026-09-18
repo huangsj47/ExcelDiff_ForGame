@@ -14,7 +14,9 @@
    界面上不许都叫「缓存」。
 2. **`None` = 上游没报，`0` = 报了且确实是 0。** 命中率在三段里有 `None` 时返回
    `None`（界面显示「未上报」），**绝不返回 0** —— 「没上报」与「一次都没命中」对
-   用户的含义正好相反。
+   用户的含义正好相反。分子大于分母时也返回 `None`（见 `cache_hit_rate`）：那种数据
+   说明上游的两个字段**不是同一口径**，此时任何比例都是错的，而「命中率 900%」看起来
+   像我们算错了。
 3. **金额只由 `pricing.estimate_cost` 算**，算不出就是 `None` + 一句人话理由，
    绝不回落到 0。汇总时只要有**任何一次**运行算不出，合计就是「算不出」。
 
@@ -53,11 +55,28 @@ USAGE_KEYS = (
 def cache_hit_rate(hit: int | None, total: int | None) -> float | None:
     """命中缓存的输入 token 占输入总数的比例；任一为 `None`（未上报）返回 `None`。
 
+    分母是 `tokens_input`（`prompt_tokens`），也就是 **pricing.estimate_cost 认的那个
+    「输入总数」**（OpenAI / DeepSeek 的口径：`prompt_tokens` 已经含命中部分，
+    `prompt_cache_hit_tokens + prompt_cache_miss_tokens == prompt_tokens`）。
+    两处口径必须一致，否则「命中率 90%、费用却按全价算」这种自相矛盾的展示就会出现。
+
     输入为 0 时同样返回 `None`：0 做分母没有比例可言，返回 0 会被读成「一次都没命中」。
+
+    **分子大于分母时也返回 `None`。** 命中率超过 100% 是不可能的，出现它只说明上游给的
+    两个字段不是同一口径 —— 已知的一种是 Anthropic 风格：`usage.input_tokens` 不含命中
+    部分（命中数在 `cache_read_input_tokens` 里），而我们的 `prompt_tokens` 是按
+    OpenAI/DeepSeek 口径读的。**2026-09-18 在本机 DeepSeek 形态的网关上实测，
+    `prompt_tokens` 恒等于命中 + 未命中，所以这条路径在本平台当前端点上不会触发。**
+    但真触发时，拿它做比例会算出「命中率 900%」这种数字 —— 那比「未上报」更容易误导，
+    因为用户会以为是我们算错了（其实确实是数据对不上）。所以宁可说「未上报」。
+
+    顺带一提：同样的数据在费用那一侧被 `pricing.estimate_cost` 按「全部命中」处理并带了
+    一句说明。这里不给比例、那边给个偏保守的金额，是因为费用可以说明「我做了假设」，
+    而一个百分比没有地方挂那句话。
     """
     if hit is None or total is None or total <= 0:
         return None
-    if hit < 0:
+    if hit < 0 or hit > total:
         return None
     return hit / total
 
