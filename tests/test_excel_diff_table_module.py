@@ -321,6 +321,76 @@ class TestToolbar:
         # 只渲染新增行（备注也是空的）→ 连 `备注` 一起隐藏
         assert _filter({'hideEmpty': True, 'filter': '100', 'column': 'id'})['columnNames'] == ['id', '名字']
 
+    def test_a_deleted_column_is_never_hidden_as_empty(self):
+        """**整列被删除的列不许被「隐藏本页空列」去掉。**
+
+        线上实例（用户反馈）：`AA随机类型` / `AA随机类型.1` 两列在本版本被删掉，打开
+        「隐藏本页空列」后它们整列消失，于是**看不到这次改动**。
+
+        形态是这样的（见 services/diff_service.py 的 `_detailed_dataframe_comparison`）：
+        被删掉的列仍然留在表里（否则旧值没地方显示），但当前版本那一份被
+        `reindex(fill_value='')` 填成了空串 —— 于是 `row.data[列]` 全是空，
+        值只存在于 `cell_changes` 的 `old_value` 里。空列判据只看 `data` 的话，
+        这一列「看起来」就是空的。
+
+        口径：**改前、改后都没有内容**才算空列。一侧为空不是空。
+        """
+        sheet = {
+            'headers': ['id', '名字', 'AA随机类型'],
+            'rows': [
+                # 被删除的列：旧值在 cell_changes 里，data 那侧是空串
+                {'row_number': 2, 'status': 'modified', 'data': {'id': '1', '名字': '剑', 'AA随机类型': ''},
+                 'cell_changes': [{'column': 'AA随机类型', 'old_value': '类型甲', 'new_value': ''}]},
+                {'row_number': 3, 'status': 'modified', 'data': {'id': '2', '名字': '盾', 'AA随机类型': ''},
+                 'cell_changes': [{'column': 'AA随机类型', 'old_value': '类型乙', 'new_value': ''}]},
+                # 真正没内容的列：改前改后都空
+                {'row_number': 4, 'status': 'modified', 'data': {'id': '3', '名字': '弓', 'AA随机类型': ''},
+                 'cell_changes': [{'column': 'AA随机类型', 'old_value': '', 'new_value': ''}]},
+            ],
+        }
+        result = _run({'op': 'filter', 'sheet': sheet, 'state': {'hideEmpty': True}})
+        assert 'AA随机类型' in result['columnNames'], (
+            f'整列被删除的列被当成空列隐藏了：{result["columnNames"]}。'
+            f'它的旧值在 cell_changes.old_value 里，不在 row.data 里')
+        assert '类型甲' in result['html'], '被删除列的内容没有渲染出来'
+        # 反向自检：这次**没有**任何列该被隐藏（三列的改前/改后都有内容），
+        # 所以 hiddenCount 必须是 0 —— 否则说明还有别的列被误伤。
+        assert result['columns']['hiddenCount'] == 0, result['columns']
+
+    def test_a_column_cleared_by_the_change_is_kept(self):
+        """**修改后变空的列**同样要留着（没有列级变更那种信号可依赖）。
+
+        与「整列删除」不同，这一列两侧都存在（`header_changes` 里什么都不会有），
+        只是每一行的值都被清空了。老判据只看 `row.data`（= 改后）也会把它当空列去掉。
+        """
+        sheet = {
+            'headers': ['id', '旧备注'],
+            'rows': [
+                {'row_number': 2, 'status': 'modified', 'data': {'id': '1', '旧备注': ''},
+                 'cell_changes': [{'column': '旧备注', 'old_value': '待清理', 'new_value': ''}]},
+                {'row_number': 3, 'status': 'added', 'data': {'id': '2', '旧备注': ''}},
+            ],
+        }
+        result = _run({'op': 'filter', 'sheet': sheet, 'state': {'hideEmpty': True}})
+        assert '旧备注' in result['columnNames'], result['columnNames']
+        assert '待清理' in result['html'], '被清空那一列的原值没有渲染出来'
+
+    def test_a_truly_empty_column_is_still_hidden(self):
+        """反向自检：两侧都没内容的列**必须**仍然被隐藏 —— 这条规矩不能被放宽成
+        「隐藏空列不再隐藏任何东西」。"""
+        sheet = {
+            'headers': ['id', '全空'],
+            'rows': [
+                {'row_number': 2, 'status': 'modified', 'data': {'id': '1', '全空': ''},
+                 'cell_changes': [{'column': 'id', 'old_value': '0', 'new_value': '1'}]},
+                {'row_number': 3, 'status': 'modified', 'data': {'id': '2', '全空': ''},
+                 'cell_changes': [{'column': 'id', 'old_value': '1', 'new_value': '2'}]},
+            ],
+        }
+        result = _run({'op': 'filter', 'sheet': sheet, 'state': {'hideEmpty': True}})
+        assert result['columnNames'] == ['id'], result['columnNames']
+        assert result['columns']['hiddenCount'] == 1, result['columns']
+
     def test_a_literal_null_text_is_not_an_empty_cell(self):
         """文本 `null` 不是空 —— 与展示层同一条口径（见 test_excel_literal_fidelity.py）。"""
         sheet = {

@@ -729,13 +729,37 @@
         return false;
     }
 
+    // 这一列在**这一页要渲染的行**里有没有内容。
+    //
+    // **不能只看 `row.data`。** 修改行的显示值是分两行渲染的（改前 / 改后），值取自
+    // `cell_changes` 的 `old_value` / `new_value`；`row.data` 是**当前版本**那一份，
+    // 而整列删除的列在当前版本里全是空串。只查 `data` 的后果是：这类列被「隐藏本页空列」
+    // 当成空列去掉，而它恰恰是这一页最该看到的改动 —— 用户反馈的
+    // 「`AA随机类型` / `AA随机类型.1` 这两列被删掉了，打开隐藏空列就完全看不到」。
+    //
+    // 口径：**修改前、修改后都没有内容**才算空列。一侧为空不是空 —— 那正是
+    // 「整列被删」「整列新增」「整列被清空」三种改动的形态。
+    function columnHasContent(row, header) {
+        if (rowCellText(row, header) !== '') {
+            return true;
+        }
+        var change = cellChangeFor(row, header);
+        if (!change) {
+            return false;
+        }
+        if (cellText(change.old_value) !== '') {
+            return true;
+        }
+        return cellText(change.new_value) !== '';
+    }
+
     // 要渲染哪些列 → {indexes: [原始列下标], hiddenCount: 因「本页没有内容」被去掉的列数}
     //
     // 口径（两个开关的叠加顺序：先「只看变更列」，再「隐藏本页空列」）：
     //   * 只看变更列：留下 getModifiedColumns 的列 ∪ 整行新增/删除行里有内容的列。
     //     行号列不是数据列（它单独一格），永远保留。
-    //   * 隐藏本页空列：在**本次要渲染的这些行**里所有单元格都为空（formatCellValue
-    //     得到空串，也就是真正的 null/undefined/NaN）的列不渲染。
+    //   * 隐藏本页空列：在**本次要渲染的这些行**里，改前与改后都没有内容的列不渲染
+    //     （判据见 columnHasContent：单元格级变更里的 old_value / new_value 也算内容）。
     //     文本 'null' / 'nan' 不是空 —— 与展示层同一口径。
     function resolveVisibleColumns(sheetData, headers, rows, state) {
         var list = rows || [];
@@ -763,7 +787,7 @@
                 var header = headers[indexes[i]];
                 var hasContent = false;
                 for (var j = 0; j < list.length; j++) {
-                    if (rowCellText(list[j], header) !== '') {
+                    if (columnHasContent(list[j], header)) {
                         hasContent = true;
                         break;
                     }
