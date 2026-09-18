@@ -752,6 +752,21 @@
 
     /* ---------- 字段 ---------- */
     .ai-config-field { min-width: 0; }
+    /* 单价表的格式示例：JSON 里有换行与缩进，普通 span 会把空白压掉，
+       用户看到的就成了一整行 —— 照着填必然出错。 */
+    .ai-price-doc {
+        display: block;
+        margin-top: var(--space-1, 4px);
+        padding: var(--space-2, 8px);
+        background: var(--color-surface-subtle, #f8f9fa);
+        border: 1px solid var(--color-border, #dee2e6);
+        border-radius: var(--radius-md, 4px);
+        font-family: var(--font-mono, "Fira Code", ui-monospace, monospace);
+        font-size: var(--font-size-sm, 12px);
+        line-height: 1.5;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
     .ai-config-scope .ai-config-field .form-label {
         margin-bottom: var(--space-1, 4px);
         color: var(--ai-text);
@@ -1255,6 +1270,19 @@
   网络服务。</div>
                         </details>
                     </div>
+                    <div class="ai-config-field">
+                        <label class="form-label" for="aiPriceTableInput">模型单价表（JSON，可选）</label>
+                        <textarea class="form-control form-control-sm" id="aiPriceTableInput" rows="6"
+                                  aria-describedby="aiPriceTableInputHelp aiPriceTableInputError"></textarea>
+                        <div class="form-text" id="aiPriceTableInputHelp">
+                            只影响「AI 消耗」面板上的<strong>费用估算</strong>：接口只回 token 数、不回金额，
+                            金额是按这里的单价算的。留空 = 不显示费用（不是「免费」）。
+                            改单价时<strong>必须同时改 <code>version</code></strong> —— 每次运行会把当时的版本号记下来，
+                            用来解释历史费用是按哪版算的。
+                            <span id="aiPriceTableDoc" class="ai-price-doc"></span>
+                        </div>
+                        <div class="form-text text-danger d-none" id="aiPriceTableInputError"></div>
+                    </div>
                 </fieldset>
                     </div>
                 </div>
@@ -1636,6 +1664,36 @@
     </div>
 </aside>
 
+    <!-- AI 用量：本次消耗一行 + 明细弹层。
+         这一段在三份模板里**逐字相同**（commit_diff_new / weekly_version_diff /
+         merged_project_view），改动请三处一起改 —— tests/test_ai_usage_fragment_sync.py
+         会逐字比对。格式化与文案的逻辑在 static/js/ai_usage_line.js（只此一份，
+         免得三处各写一套口径）。
+         放在抽屉 <aside> **外面**：抽屉是固定定位 + 内部滚动，Bootstrap 的 modal 挂在
+         那种容器里会被裁掉。 -->
+    <div class="ai-usage-line" id="aiUsageLine" hidden>
+        <span class="ai-usage-text" id="aiUsageText"></span>
+        <button type="button" class="ai-usage-detail-btn" id="aiUsageDetailBtn" hidden>
+            <i class="fas fa-list-ul" aria-hidden="true"></i> 明细
+        </button>
+    </div>
+
+    <div class="modal fade" id="aiUsageModal" tabindex="-1" aria-labelledby="aiUsageModalTitle" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="aiUsageModalTitle">本次分析消耗</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                </div>
+                <div class="modal-body" id="aiUsageModalBody">
+                    <p class="ai-usage-meta">加载中...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/ai_usage_line.js') }}"></script>
+
 <script>
 // 非活跃版本数据
 const inactiveVersions = {{ inactive_versions_json | tojson }};
@@ -1684,7 +1742,8 @@ const AI_FIELD_DOM = {
     min_confidence: 'aiMinConfidenceSelect',
     max_anomalies_per_run: 'aiMaxAnomaliesInput',
     prompt_template: 'aiPromptInput',
-    project_knowledge: 'aiProjectKnowledgeInput'
+    project_knowledge: 'aiProjectKnowledgeInput',
+    model_price_table: 'aiPriceTableInput'
 };
 
 // 选项的中文名。后端只回 `high` / `critical` 这种值，这里负责翻译。
@@ -1848,6 +1907,13 @@ function fillAiConfigForm(data) {
     setValue('aiMinConfidenceSelect', data.min_confidence);
     setValue('aiPromptInput', data.prompt_template);
     setValue('aiProjectKnowledgeInput', data.project_knowledge);
+    setValue('aiPriceTableInput', data.model_price_table);
+    // 格式示例由后端下发（services/ai/pricing.py 的那一份），不在模板里再抄一遍 ——
+    // 抄一遍就会在改格式时漏改，而用户照着过期的示例填会存不进去。
+    const priceDoc = aiEl('aiPriceTableDoc');
+    if (priceDoc && data.price_table_doc) {
+        priceDoc.textContent = '格式示例：' + data.price_table_doc;
+    }
 
     const autoToggle = aiEl('aiWeeklyAutoToggle');
     if (autoToggle) autoToggle.checked = data.auto_weekly_enabled !== false;
@@ -2017,6 +2083,7 @@ function collectAiConfigPayload() {
     numberValue('aiMaxAnomaliesInput', 'max_anomalies_per_run');
     textValue('aiPromptInput', 'prompt_template');
     textValue('aiProjectKnowledgeInput', 'project_knowledge');
+    textValue('aiPriceTableInput', 'model_price_table');
 
     const severity = aiEl('aiMinSeveritySelect');
     if (severity) payload.min_severity = severity.value;
@@ -2250,6 +2317,7 @@ function fillOfficialAiUrl() {
     if (!url || !official) return;
     url.value = official;
     setAiFieldError('api_base_url', '');
+    setAiFieldError('model_price_table', '');
 }
 
 // 切到「自定义端点」时，如果框里还是刚才自动填进去的官方地址，就清掉 ——
@@ -2408,6 +2476,11 @@ async function getWeeklyAiResult(configId, force = false) {
         const resp = await fetch(`/ai-analysis/weekly/${configId}/latest`, { cache: 'no-store' });
         const data = await resp.json();
         const result = (data && data.result) ? data.result : null;
+        if (result) {
+            // 把外层的 run_id 挂到内层结果上：抽屉那一行「明细」要按运行记录取数，
+            // 而本函数只回内层 result（run_id 在外层 payload 上）。
+            result.runId = data.run_id;
+        }
         weeklyAiCache.set(configId, result);
         return result;
     } catch (_err) {
@@ -2532,6 +2605,7 @@ async function refreshWeeklyAiLatest(configId) {
         if (meta) {
             meta.textContent = `最近一次分析失败（${result.created_at_display || result.created_at || '-'}）`;
         }
+        renderAiUsageLine(null, null);
         return false;
     }
     // 正在进行中：如实说「进行中」，不要落进下面的「暂无分析结果。」——
@@ -2544,6 +2618,7 @@ async function refreshWeeklyAiLatest(configId) {
             meta.textContent =
                 `分析开始于 ${result.created_at_display || result.created_at || '-'}`;
         }
+        renderAiUsageLine(null, null);
         return false;
     }
     if (result && result.response_text) {
@@ -2555,6 +2630,8 @@ async function refreshWeeklyAiLatest(configId) {
             meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`;
         }
         setWeeklyAiReport(result.response_text);
+        // 本次消耗（口径见 static/js/ai_usage_line.js）。
+        renderAiUsageLine(result.usage, result.runId);
         setWeeklyAiStatusBadge('已有结果', 'success');
         updateRiskLabelByConfig(configId, risk);
         return true;
@@ -2591,6 +2668,7 @@ async function startWeeklyAiAnalysis(force = false) {
         try {
             payload = JSON.parse(event.data || '{}');
         } catch (_err) {}
+        renderAiUsageLine(payload.usage, payload.run_id);
         // 失败也走 `result` 事件，所以不能无条件打「完成」（见 refreshWeeklyAiLatest）。
         if (payload.status === 'failed') {
             appendWeeklyAiLine(`\n分析失败：${payload.error_message || '原因未知'}`);

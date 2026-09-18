@@ -71,9 +71,11 @@ from services.ai.engine import (
 )
 from services.ai.llm_client import LLMError
 from services.ai.platform_provider import PlatformContextProvider
+from services.ai.pricing import PriceTable, load_price_table, price_table_doc_shape
 from services.ai.prompt import prompt_version
 from services.ai.rules import RuleThresholds, anomaly_fingerprint, rules_version
 from services.ai.skill_loader import load_skills, skill_revision
+from services.ai.usage import encode_tools, usage_from_outcome
 from utils.dpapi_utils import DPAPI_PREFIX, decrypt_dpapi
 from utils.logger import log_print
 from utils.security_utils import decrypt_credential, encrypt_credential
@@ -181,6 +183,9 @@ def get_project_analysis_config(project_id: int) -> dict:
         "openai_base_url": OPENAI_BASE_URL,
         "api_key": key_state,
         "field_schema": describe_field_schema(),
+        # 单价表的格式示例。由这里下发而不是写死在模板里：格式只有 pricing 模块那一份，
+        # 抄进模板后改格式就会漏改，而用户照着过期示例填会存不进去。
+        "price_table_doc": price_table_doc_shape(),
         "endpoint_ready": not validate_endpoint_ready(values, has_key=bool(key_state.get("configured"))),
     }
 
@@ -370,6 +375,33 @@ def _is_run_fresh(run: Optional[AiAnalysisRun], *, expected: Optional[dict] = No
     if expected is None and run.project_id:
         expected = _current_provenance(run.project_id)
     return _provenance_matches(run, expected)
+
+
+def project_price_table(project_id: int) -> tuple[PriceTable | None, tuple[str, ...]]:
+    """这个项目该用哪张价格表：项目配置里填了就用它，没填用平台默认表。
+
+    端点侧（读取）与落库侧（记 `pricing_version`）都用这一个函数 —— 两边各读一份配置
+    会让「记录时的版本」与「算费用时的版本」不是同一份，而这两者必须能对上，
+    否则版本号这个字段就白记了。
+    """
+    config = get_project_analysis_config(project_id)
+    return _price_table_from_config(config)
+
+
+def _price_table_from_config(config: Optional[dict]) -> tuple[PriceTable | None, tuple[str, ...]]:
+    return load_price_table((config or {}).get("model_price_table") or "")
+
+
+def _price_version_for(config: Optional[dict]) -> str:
+    """落库用的价格表版本。**不为它单独查一次库**：调用方手上已经有配置了。
+
+    配置里的价格表解析不了（JSON 坏了）时返回空串并说一句 —— 空串在库里是 NULL，
+    读取侧按「当时没有可用价格表」解释，与事实一致。
+    """
+    table, errors = _price_table_from_config(config)
+    if errors and (config or {}).get("model_price_table"):
+        log_print("⚠️ AI 分析：项目价格表不可用（" + "；".join(errors) + "），本次运行不记价格版本", "AI")
+    return table.version if table else ""
 
 
 def _parse_response_payload(raw: Optional[str]) -> Optional[dict]:
@@ -1166,6 +1198,14 @@ def _result_payload(
         "suppressed_count": len(outcome.anomalies) - len(kept),
         "rounds_used": outcome.rounds_used,
         "requests_used": outcome.requests_used,
+        # 本次的用量。放在这里有两个原因：SSE 的 `result` 事件与 `/latest`（读的是落库的
+        # response_payload）**自动都有**，抽屉那一行「本次消耗 N tokens」不必为「正在
+        # 分析中」再拉一次接口；而且它随结论一起被缓存复用 —— 同一份结论回放两次，
+        # 显示的消耗也是当初那次的，不会变成 0。
+        #
+        # 口径见 services/ai/usage.py。费用**不在这里算**（这一层拿不到价格表），
+        # 由 `/ai-analysis/runs/<id>/usage` 在读取侧按当前价格表算。
+        "usage": usage_from_outcome(outcome),
         "dropped": [
             {"kind": item.kind, "reason": item.reason, "detail": item.detail}
             for item in outcome.dropped
@@ -1173,11 +1213,27 @@ def _result_payload(
     }
 
 
-def _persist_outcome(run: AiAnalysisRun, outcome: EngineOutcome, result: dict) -> None:
+def _persist_outcome(
+    run: AiAnalysisRun,
+    outcome: EngineOutcome,
+    result: dict,
+    *,
+    pricing_version: str = "",
+) -> None:
     """把引擎结果落库：run 上写状态与账目，逐轮写 trace，逐条写异常。
 
     `error_message` 这一列此前**从来没有被写入过**，于是失败的分析在界面上永远是
     「分析中」，用户无从判断。这是这次要修的一部分。
+
+    ## 为什么这里要把「账」写全
+
+    这批列（`tool_requests_used` / `context_chars` / `anomalies_found` / `dropped_count`
+    与新的用量列）此前**存在但从来没被写过**，一直是 NULL —— 于是「这次花了多少、
+    上下文塞了多少、丢了几条」在库里根本没有记录，面板再怎么做也没有数据可读。
+    写全它们才算把采集侧接上。
+
+    `pricing_version` 由调用方传（它在建引擎时已经读过项目配置，见 `_execute_analysis`），
+    这里不为了一个版本号再查一次库。
     """
     run.status = "failed" if outcome.status == STATUS_FAILED else "succeeded"
     run.finished_at = _utcnow()
@@ -1196,6 +1252,18 @@ def _persist_outcome(run: AiAnalysisRun, outcome: EngineOutcome, result: dict) -
     run.rounds_used = outcome.rounds_used
     run.tokens_input = outcome.prompt_tokens
     run.tokens_output = outcome.completion_tokens
+    # 用量：`None`（上游没报）原样落 NULL，**不许写成 0** —— 读取侧就是靠 NULL 与 0
+    # 的差别来区分「未上报」与「确实没命中」的（见 services/ai/usage.py）。
+    run.cache_read_tokens = outcome.cache_read_tokens
+    run.cache_write_tokens = outcome.cache_write_tokens
+    run.cache_source = outcome.cache_source or None
+    run.duration_ms = outcome.duration_ms
+    run.tool_requests_used = outcome.requests_used
+    run.context_chars = outcome.context_chars
+    run.tool_stats_json = encode_tools(outcome.tool_stats)
+    run.anomalies_found = len(result.get("anomalies") or [])
+    run.dropped_count = len(outcome.dropped)
+    run.pricing_version = pricing_version or None
     run.error_message = outcome.error_message or None
 
     for record in outcome.rounds:
@@ -1211,6 +1279,15 @@ def _persist_outcome(run: AiAnalysisRun, outcome: EngineOutcome, result: dict) -
                     {"refused_by_budget": record.refused_by_budget, "truncated": record.truncated}
                 ),
                 error=record.note or None,
+                # 逐轮用量。这几列同样一直是 NULL：没有它们，「钱花在第几轮」答不上来，
+                # 而提示词每轮都把上一轮的上下文重发一遍，后几轮才是贵的那些。
+                tokens_input=record.prompt_tokens,
+                tokens_output=record.completion_tokens,
+                cache_read_tokens=record.cache_read_tokens,
+                cache_write_tokens=record.cache_write_tokens,
+                request_chars=record.prompt_chars,
+                context_chars=record.context_chars,
+                duration_ms=record.duration_ms,
             )
         )
 
@@ -1324,14 +1401,20 @@ def _execute_analysis(
     if client is None:
         message = "接口配置不完整：" + "；".join(item["message"] for item in errors)
         result = _failed_result(summary, message)
-        _persist_outcome(run, engine_failed(message), result)
+        _persist_outcome(
+            run, engine_failed(message), result,
+            pricing_version=_price_version_for(project_config),
+        )
         return result
 
     loaded = _load_project_skills(project_id)
     if loaded is None:
         message = "分析协议（skill）加载失败，未发起分析。"
         result = _failed_result(summary, message)
-        _persist_outcome(run, engine_failed(message), result)
+        _persist_outcome(
+            run, engine_failed(message), result,
+            pricing_version=_price_version_for(project_config),
+        )
         return result
 
     readable = sorted(getattr(loaded, "readable", {}) or {})
@@ -1361,7 +1444,9 @@ def _execute_analysis(
     result = _result_payload(
         outcome, payload, suppressed=_suppressed(target_type, target_key, change)
     )
-    _persist_outcome(run, outcome, result)
+    _persist_outcome(
+        run, outcome, result, pricing_version=_price_version_for(project_config)
+    )
     return result
 
 
@@ -1411,7 +1496,10 @@ def stream_commit_analysis(commit_id: int, user_label: str = "") -> Iterable[str
     )
     for line in (result.get("report_markdown") or "").splitlines():
         yield _sse_event("chunk", {"text": line})
-    yield _sse_event("result", result)
+    # 带上 run_id：抽屉里那一行「本次消耗」的「明细」按钮要按**运行记录**取数
+    # （`/ai-analysis/runs/<id>/usage`），而 SSE 的 result 事件只带结论本身。
+    # 只加在事件上，不进 `response_payload` —— 那是落库的结论，不该混入运行身份。
+    yield _sse_event("result", {**result, "run_id": run.id})
 
 
 def stream_weekly_analysis(
@@ -1465,7 +1553,10 @@ def stream_weekly_analysis(
         yield _sse_event("chunk", {"text": line})
 
     _update_weekly_state(payload, run, state, engine_status=result.get("status"))
-    yield _sse_event("result", result)
+    # 带上 run_id：抽屉里那一行「本次消耗」的「明细」按钮要按**运行记录**取数
+    # （`/ai-analysis/runs/<id>/usage`），而 SSE 的 result 事件只带结论本身。
+    # 只加在事件上，不进 `response_payload` —— 那是落库的结论，不该混入运行身份。
+    yield _sse_event("result", {**result, "run_id": run.id})
 
 
 def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None) -> dict:

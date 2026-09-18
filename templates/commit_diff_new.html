@@ -3,6 +3,7 @@
 {% block title %}差异确认 - {{ commit.path }}{% endblock %}
 
 {% block head %}
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.2">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.0">
 <style>
@@ -435,6 +436,36 @@
         <button class="btn btn-primary btn-sm" id="aiAnalyzeBtn">重新分析</button>
     </div>
 </aside>
+
+    <!-- AI 用量：本次消耗一行 + 明细弹层。
+         这一段在三份模板里**逐字相同**（commit_diff_new / weekly_version_diff /
+         merged_project_view），改动请三处一起改 —— tests/test_ai_usage_fragment_sync.py
+         会逐字比对。格式化与文案的逻辑在 static/js/ai_usage_line.js（只此一份，
+         免得三处各写一套口径）。
+         放在抽屉 <aside> **外面**：抽屉是固定定位 + 内部滚动，Bootstrap 的 modal 挂在
+         那种容器里会被裁掉。 -->
+    <div class="ai-usage-line" id="aiUsageLine" hidden>
+        <span class="ai-usage-text" id="aiUsageText"></span>
+        <button type="button" class="ai-usage-detail-btn" id="aiUsageDetailBtn" hidden>
+            <i class="fas fa-list-ul" aria-hidden="true"></i> 明细
+        </button>
+    </div>
+
+    <div class="modal fade" id="aiUsageModal" tabindex="-1" aria-labelledby="aiUsageModalTitle" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="aiUsageModalTitle">本次分析消耗</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                </div>
+                <div class="modal-body" id="aiUsageModalBody">
+                    <p class="ai-usage-meta">加载中...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/ai_usage_line.js') }}"></script>
 {% endblock %}
 
 {% block scripts %}
@@ -628,6 +659,7 @@ function initCommitAiAnalysis() {
                     if (meta) {
                         meta.textContent = `最近一次分析失败（${result.created_at_display || result.created_at || '-'}）`;
                     }
+                    renderAiUsageLine(null, null);
                     return false;
                 }
                 // 正在进行中：如实说「进行中」，不要落进下面的「暂无分析结果。」——
@@ -640,6 +672,7 @@ function initCommitAiAnalysis() {
                         meta.textContent =
                             `分析开始于 ${result.created_at_display || result.created_at || '-'}`;
                     }
+                    renderAiUsageLine(null, null);
                     return false;
                 }
                 hasCached = true;
@@ -650,6 +683,9 @@ function initCommitAiAnalysis() {
                     const scope = result.scope || '-';
                     meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`;
                 }
+                // 本次消耗（口径见 static/js/ai_usage_line.js）。run_id 取外层那条的，
+                // 明细要按运行记录取数；旧运行没有 usage 字段 → 显示「未采集」而不是 0。
+                renderAiUsageLine(result.result?.usage, data.run_id);
                 if (result.response_text) {
                     setAiReport(result.response_text);
                 }
@@ -701,6 +737,7 @@ function initCommitAiAnalysis() {
                 payload = JSON.parse(event.data || '{}');
             } catch (_err) {
             }
+            renderAiUsageLine(payload.usage, payload.run_id);
             // 失败也走 `result` 事件，所以不能无条件打「完成」（见 loadLatestResult）。
             if (payload.status === 'failed') {
                 appendAiLine(`\n分析失败：${payload.error_message || '原因未知'}`);

@@ -47,6 +47,7 @@ from models.ai_analysis.project_config import (
     SEVERITY_CHOICES,
     WEEKLY_INTERVAL_RANGE,
 )
+from services.ai.pricing import parse_price_table
 from services.ai.llm_client import (
     LLMClient,
     LLMConfigError,
@@ -113,6 +114,9 @@ FIELD_RULES: Mapping[str, FieldRule] = {
     ),
     # 这两栏是长文本，长度只做一个防呆上限。
     "prompt_template": FieldRule("项目补充指令", "text", max_length=20_000),
+    # 单价表按 JSON 校验（kind="price_table"），见 `_coerce_price_table`：保存时就报错，
+    # 而不是等到算费用时才发现——那时用户只看到「费用算不出来」，原因在几步之外。
+    "model_price_table": FieldRule("模型单价表（JSON）", "price_table", max_length=20_000),
     "project_knowledge": FieldRule("项目补充知识", "text", max_length=20_000),
 }
 
@@ -132,6 +136,7 @@ FIELD_DEFAULTS: Mapping[str, Any] = {
     "max_anomalies_per_run": DEFAULT_MAX_ANOMALIES_PER_RUN,
     "prompt_template": "",
     "project_knowledge": "",
+    "model_price_table": "",
 }
 
 
@@ -204,6 +209,25 @@ def _coerce_text(field_name: str, rule: FieldRule, raw: Any) -> str:
     return text
 
 
+def _coerce_price_table(field_name: str, rule: FieldRule, raw: Any) -> str:
+    """单价表：空串表示「用平台默认表」，非空则必须是**能解析**的 JSON 表。
+
+    保存时就校验，而不是等到算费用时才发现。后者的症状是面板上「费用算不出来」，
+    而真正的原因（JSON 里少了个逗号、键名打错）在几步之外，且没有任何提示指向配置。
+    错误信息直接用解析器给的那几条 —— 它会指出**哪个键**有问题，比一句「格式不对」有用。
+
+    校验通过后**原样存用户输入的文本**（不做 JSON 重排）：界面上回显的就是他写的样子，
+    免得他以为自己填的东西被改过。
+    """
+    text = _coerce_text(field_name, rule, raw)
+    if not text:
+        return ""
+    table, errors = parse_price_table(text)
+    if table is None:
+        raise FieldError(field_name, rule.label, "；".join(errors))
+    return text
+
+
 def _coerce_url(field_name: str, rule: FieldRule, raw: Any) -> str:
     text = _coerce_text(field_name, rule, raw)
     if not text:
@@ -236,6 +260,8 @@ def validate_field(field_name: str, raw: Any) -> Any:
         return _coerce_url(field_name, rule, raw)
     if rule.kind == "choice":
         return _coerce_choice(field_name, rule, raw)
+    if rule.kind == "price_table":
+        return _coerce_price_table(field_name, rule, raw)
     return _coerce_text(field_name, rule, raw)
 
 

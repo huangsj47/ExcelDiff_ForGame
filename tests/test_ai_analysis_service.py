@@ -1,3 +1,4 @@
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -832,6 +833,42 @@ def test_a_real_run_calls_the_model_and_persists_the_findings(monkeypatch):
         assert rows[0].severity == "critical"
         assert rows[0].fingerprint, "没有指纹，下一轮就没法判重"
         assert AiAnalysisTrace.query.filter_by(run_id=run.id).count() == 1
+
+        # --- 用量也接上了（同一次真实运行）-------------------------------------
+        # 采集点在 `_persist_outcome` 这一个漏斗里，所以三个入口（SSE 流式 / 后台任务 /
+        # 定时）都会走到这里。这里钉的是「真的写进去了」，而不只是「字段存在」。
+        assert run.tokens_input == 120 and run.tokens_output == 80
+        assert run.rounds_used == 1
+        assert run.tool_requests_used is not None
+        assert run.context_chars is not None, "没有记账，面板上的「上下文塞了多少」永远是空"
+        assert run.duration_ms is not None, "没记耗时"
+        assert run.anomalies_found == 1
+        assert run.dropped_count is not None
+        # 这个假 client 不回缓存字段 → 必须是 NULL，**不是 0**（口径见 services/ai/usage.py）
+        assert run.cache_read_tokens is None
+        assert run.cache_source is None
+
+        trace = AiAnalysisTrace.query.filter_by(run_id=run.id).one()
+        assert trace.tokens_input == 120 and trace.tokens_output == 80
+        assert trace.request_chars, "逐轮的提示词字符数没写"
+
+        # 抽屉那一行读的就是它（`_result_payload` 里的 usage 子字典）
+        assert run.response_payload is not None
+        payload = json.loads(run.response_payload)
+        assert payload["usage"]["tokens"]["total"] == 200
+        assert payload["usage"]["collected"] is True
+        assert payload["usage"]["cache"]["hit_rate"] is None, (
+            "上游没报缓存却给出了命中率 —— 界面会显示一个用户会当真的 0%"
+        )
+
+        # 面板的读取路径：这一行在「AI 消耗」页面上的样子
+        from services.ai_usage_service import run_usage
+
+        detail = run_usage(run.id)
+        assert detail["run"]["usage"]["tokens"]["total"] == 200
+        assert detail["run"]["usage"]["cache"]["hit_rate"] is None
+        # 没配价格表 → 不给金额（**不是 0**）
+        assert detail["run"]["usage"]["cost"]["amount"] is None
 
 
 def test_a_finding_below_the_configured_bar_is_not_persisted(monkeypatch):

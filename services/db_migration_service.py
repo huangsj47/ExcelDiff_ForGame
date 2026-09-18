@@ -235,10 +235,15 @@ def _migrate_ai_analysis_columns(db, log_print):
     所以已部署库里的老行在新列上是 NULL。`AiProjectAnalysisConfig.resolved()` 负责把
     NULL 读成默认值 —— 不要假设数据库会替我们补上。
 
-    新表（`ai_analysis_anomaly` / `ai_analysis_trace`）不在这里出现：`db.create_all()`
+    新表（`ai_analysis_anomaly` / `ai_analysis_trace`）原本不在这里出现：`db.create_all()`
     在启动时会创建它们（它只建不存在的表，不会动已有的表）。只有**给已存在的表加列**
     才需要走这里。若将来给这两张新表补索引，则要同时加进 `REQUIRED_INDEXES`
     （老库里表已建好，`create_all` 不会再给它补索引）。
+
+    `ai_analysis_trace` 现在**必须**出现在这里：它已经不是「新表」了 —— 用量采集上线时
+    它已经是既有的表，而那次要给它的每轮记录补两列缓存 token。`create_all` 对已存在的
+    表什么都不做，所以漏了这一段，老库上就会是「代码写 `trace.cache_read_tokens`、
+    库里没这一列」的启动期报错。
     """
     _migrate_table_columns(
         db,
@@ -254,6 +259,8 @@ def _migrate_ai_analysis_columns(db, log_print):
             "min_confidence": "min_confidence VARCHAR(20)",
             "max_anomalies_per_run": "max_anomalies_per_run INTEGER",
             "project_knowledge": "project_knowledge TEXT",
+            # 费用估算用的单价表（JSON 文本）。平台出厂不带单价，见 services/ai/pricing.py。
+            "model_price_table": "model_price_table TEXT",
         },
         log_print,
     )
@@ -273,6 +280,26 @@ def _migrate_ai_analysis_columns(db, log_print):
             "anomalies_found": "anomalies_found INTEGER",
             "dropped_count": "dropped_count INTEGER",
             "context_chars": "context_chars INTEGER",
+            # 用量面板要读的列（2026-09-18）。老行在这几列上是 NULL —— 读取侧按
+            # 「未采集」处理，**不当成 0**（见 services/ai/usage.py）。
+            "cache_read_tokens": "cache_read_tokens INTEGER",
+            "cache_write_tokens": "cache_write_tokens INTEGER",
+            "cache_source": "cache_source VARCHAR(40)",
+            "duration_ms": "duration_ms INTEGER",
+            "tool_stats_json": "tool_stats_json TEXT",
+            "pricing_version": "pricing_version VARCHAR(40)",
+        },
+        log_print,
+    )
+    _migrate_table_columns(
+        db,
+        "ai_analysis_trace",
+        {
+            # 逐轮的缓存 token。这张表已经有 tokens_input / tokens_output /
+            # request_chars / context_chars / duration_ms（一直是 NULL，用量采集上线
+            # 后才开始写），所以这里只补两个真正缺的列。
+            "cache_read_tokens": "cache_read_tokens INTEGER",
+            "cache_write_tokens": "cache_write_tokens INTEGER",
         },
         log_print,
     )

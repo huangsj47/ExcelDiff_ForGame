@@ -601,3 +601,125 @@ def test_default_timeout_reads_the_env(monkeypatch):
 
     monkeypatch.delenv("AI_REQUEST_TIMEOUT_SECONDS", raising=False)
     assert llm.resolve_default_timeout_seconds() == DEFAULT_TIMEOUT_SECONDS
+
+
+# --------------------------------------------------------------------------
+# 用量：缓存命中字段（prompt cache）
+# --------------------------------------------------------------------------
+#
+# 这一组守的是一件事：**「上报了 0」与「没上报」必须能分开**。
+#
+# 面板上「缓存命中率 0%」与「未上报」是两个完全不同的结论 —— 前者说明这次跑确实一次
+# 都没命中（该去看提示词前缀为什么变了），后者说明这个网关压根不报这个字段（该去换
+# provider 或放弃这一列）。实现里任何一处用 `or 0`、`int(x or 0)`、`_positive_int`
+# 之类的写法，都会把两者悄悄合并，而且不会报错。
+
+
+def _complete_once(monkeypatch, usage: dict):
+    """复用本文件上面那个 `_completion_payload`（它本来就支持 `usage=`）。
+
+    第一版在这里又写了一份同名 helper，把它整个覆盖掉了，直接弄红三条既有用例 ——
+    加 helper 之前先搜一下有没有现成的。
+    """
+    _patch(monkeypatch, lambda *_: FakeResponse(payload=_completion_payload("x", usage=usage)))
+    return _client().complete([{"role": "user", "content": "hi"}])
+
+
+def test_deepseek_cache_fields_are_read(monkeypatch):
+    """DeepSeek 是本项目最可能命中的那一套（自动上下文缓存，无需在请求里声明）。"""
+    result = _complete_once(
+        monkeypatch,
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "prompt_cache_hit_tokens": 900,
+            "prompt_cache_miss_tokens": 100,
+        },
+    )
+    assert result.cache_read_tokens == 900
+    assert result.cache_source == "prompt_cache_hit_tokens"
+
+
+def test_openai_cached_tokens_are_read(monkeypatch):
+    result = _complete_once(
+        monkeypatch,
+        {"prompt_tokens": 1000, "completion_tokens": 50, "prompt_tokens_details": {"cached_tokens": 640}},
+    )
+    assert result.cache_read_tokens == 640
+    assert result.cache_source == "prompt_tokens_details.cached_tokens"
+
+
+def test_anthropic_style_cache_fields_are_read(monkeypatch):
+    result = _complete_once(
+        monkeypatch,
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "cache_read_input_tokens": 512,
+            "cache_creation_input_tokens": 128,
+        },
+    )
+    assert result.cache_read_tokens == 512
+    assert result.cache_write_tokens == 128
+
+
+def test_a_reported_zero_stays_zero_and_is_not_turned_into_unknown(monkeypatch):
+    """`cached_tokens: 0` 是「这次一次都没命中」这个**确定的结论**。"""
+    result = _complete_once(
+        monkeypatch,
+        {"prompt_tokens": 1000, "completion_tokens": 50, "prompt_tokens_details": {"cached_tokens": 0}},
+    )
+    assert result.cache_read_tokens == 0
+    assert result.cache_source != ""
+
+
+def test_absent_cache_fields_mean_unknown_and_not_zero(monkeypatch):
+    """没有缓存字段 = 未知。**反面**：这条一旦变成 `== 0`，面板就会把「未上报」说成 0%。"""
+    result = _complete_once(monkeypatch, {"prompt_tokens": 1000, "completion_tokens": 50})
+    assert result.cache_read_tokens is None
+    assert result.cache_write_tokens is None
+    assert result.cache_source == ""
+
+
+def test_a_contradictory_deepseek_pair_is_not_believed(monkeypatch):
+    """命中 + 未命中 ≠ 输入总数时一律不采信。
+
+    拆错的分子分母比没有更糟：它会算出一个看起来很合理、但错的命中率。
+    """
+    result = _complete_once(
+        monkeypatch,
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "prompt_cache_hit_tokens": 900,
+            "prompt_cache_miss_tokens": 900,
+        },
+    )
+    assert result.cache_read_tokens is None
+
+
+def test_a_numeric_string_cache_count_is_accepted(monkeypatch):
+    """有些网关把数字写成字符串。"""
+    result = _complete_once(
+        monkeypatch,
+        {"prompt_tokens": 1000, "completion_tokens": 50, "prompt_tokens_details": {"cached_tokens": "120"}},
+    )
+    assert result.cache_read_tokens == 120
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (0, 0),
+        ("7", 7),
+        (3.9, 3),
+        (None, None),
+        (-1, None),
+        (True, None),  # bool 不是数字：True 会被 int() 读成 1
+        ("x", None),
+        (float("nan"), None),
+    ],
+)
+def test_the_non_negative_reader_rejects_what_it_should(raw, expected):
+    """这个读取器允许 0、拒绝 bool/负数/垃圾 —— 与「0 当没给」的旧读取器正相反。"""
+    assert llm._non_negative_int(raw) == expected

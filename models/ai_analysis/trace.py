@@ -60,6 +60,11 @@ class AiAnalysisTrace(db.Model):
     context_chars = db.Column(db.Integer)
     tokens_input = db.Column(db.Integer)
     tokens_output = db.Column(db.Integer)
+    # 逐轮的 prompt cache 账目。`None` = 上游这一轮没报（**不是「没命中」**）。
+    # 逐轮记的理由：输入 token 是**累计值**（每轮把上一轮的上下文重发一遍），
+    # 所以「钱花在第几轮」只有逐轮列出来才看得出。
+    cache_read_tokens = db.Column(db.Integer)
+    cache_write_tokens = db.Column(db.Integer)
     duration_ms = db.Column(db.Integer)
 
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))

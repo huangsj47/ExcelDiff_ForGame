@@ -111,6 +111,30 @@ class ToolBatch:
         return any(item.meta.get("tool_failed") for item in self.items)
 
 
+# 每个工具类型记的账。键名就是消耗面板上按类型展开的那些列；新增一项要同步这里与前端表头。
+_STAT_COUNTERS = (
+    "calls",              # 计入索取额度的次数（被预算拒绝的不算 —— 它没消耗额度）
+    "executions",         # 真正执行取数的次数（不含命中本地缓存）
+    "cache_hits",         # 工具结果在**本次分析内**的内存缓存命中（不是 prompt cache）
+    "failed",             # 执行失败、内容不可用
+    "truncated",          # 交给模型前被截断
+    "refused_by_budget",  # 因超出索取上限而未执行
+    "source_chars",       # 工具取回的原始字符数
+    "produced_chars",     # 实际交给模型的字符数（截断后）
+)
+
+
+def _meta_chars(item: ContextItem) -> int:
+    """条目里记的「工具取回多少字符」。读不到返回 0。
+
+    0 在这里是「没记」，而不是「取到了 0 个字」—— 调用方只在成功分支调它（见 execute）。
+    """
+    try:
+        return max(0, int(item.meta.get("original_chars") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _cache_key(request: ContextRequest) -> tuple[str, str, str, str]:
     return (
         request.type,
@@ -176,6 +200,9 @@ class ContextTools:
     # 累计请求数。**必须是跨轮次的累计值**：预算按「一次分析总共能要几次」计，
     # 如果按每一轮的下标判断，第二轮又从 0 开始，预算永远不会触发（第一版就是这样）。
     _requests_seen: int = field(default=0, init=False, repr=False)
+    # 按工具类型的记账。与上面几个总数分开：总数是给预算逻辑用的，这份是给「这次分析把
+    # 索取额度花在哪了、取回了多少字」用的（消耗面板按类型展示）。
+    _stats: dict[str, dict[str, int]] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def executions(self) -> int:
@@ -188,6 +215,20 @@ class ContextTools:
     @property
     def requests_seen(self) -> int:
         return self._requests_seen
+
+    @property
+    def stats(self) -> dict[str, dict[str, int]]:
+        """按类型的记账，**深拷贝**——调用方改不坏内部状态。"""
+        return {kind: dict(counters) for kind, counters in self._stats.items()}
+
+    def _bump(self, kind: str, counter: str, amount: int = 1) -> None:
+        """给某个工具类型的某一项记账。
+
+        计数名写错会当场 KeyError（桶在第一次记账时就按 `_STAT_COUNTERS` 建全），
+        而不是悄悄多出一个没人读的键 —— 用量数据「记了但没人看」和「没记」一样糟。
+        """
+        bucket = self._stats.setdefault(kind, {name: 0 for name in _STAT_COUNTERS})
+        bucket[counter] += amount
 
     @property
     def requests_remaining(self) -> int:
@@ -249,6 +290,9 @@ class ContextTools:
         for index, request in enumerate(requests):
             if self._requests_seen >= self.max_tool_requests:
                 refused += 1
+                # 被拒的请求**不算 calls** —— 它没有消耗额度（额度由下面那行
+                # `self._requests_seen += 1` 记）。算进去会让「额度花在哪了」对不上总数。
+                self._bump(request.type, "refused_by_budget")
                 dropped.append(
                     DroppedItem(
                         "request",
@@ -265,6 +309,12 @@ class ContextTools:
             if cached is not None:
                 cache_hits += 1
                 self._cache_hits += 1
+                self._bump(request.type, "calls")
+                self._bump(request.type, "cache_hits")
+                # 命中缓存时这些字符是**上一轮已经取过**的，仍然算这一类型的产出 ——
+                # 否则「这个类型很省」的结论会凭空少掉一半字符。
+                self._bump(request.type, "source_chars", _meta_chars(cached))
+                self._bump(request.type, "produced_chars", len(cached.text))
                 items.append(cached)
                 continue
 
@@ -291,8 +341,18 @@ class ContextTools:
 
             executions += 1
             self._executions += 1
+            self._bump(request.type, "calls")
+            self._bump(request.type, "executions")
+            if item.meta.get("tool_failed"):
+                # 失败条目没有 original_chars。**不补 0**：让 failed 这个计数自己说明字符
+                # 数的缺口，而不是把「没取到」伪装成「取到了 0 个字符」。
+                self._bump(request.type, "failed")
+            else:
+                self._bump(request.type, "source_chars", _meta_chars(item))
+                self._bump(request.type, "produced_chars", len(item.text))
             if item.meta.get("truncated"):
                 truncated += 1
+                self._bump(request.type, "truncated")
             self._cache[key] = item
             items.append(item)
 

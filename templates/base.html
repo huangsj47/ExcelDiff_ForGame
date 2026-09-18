@@ -373,6 +373,11 @@
                     <a class="nav-link px-3" href="{{ url_for('excel_cache_management') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
                         <i class="fas fa-database me-1" style="font-size: 0.85rem;"></i>缓存管理
                     </a>
+                    {# AI 消耗：与「缓存管理」并列，不放在管理员区 —— 可见性与 AI 分析一致
+                       （有项目权限就能看），页面里的数据也按当前用户可访问的项目过滤。 #}
+                    <a class="nav-link px-3" href="{{ url_for('ai_usage_dashboard') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">
+                        <i class="fas fa-coins me-1" style="font-size: 0.85rem;"></i>AI 消耗
+                    </a>
                     {% endif %}
                     {% if is_admin() %}
                     <a class="nav-link px-3" href="{{ url_for('admin_performance_dashboard') }}" style="color: rgba(255,255,255,0.85); font-weight: 500; border-radius: 6px; transition: all 0.2s;">

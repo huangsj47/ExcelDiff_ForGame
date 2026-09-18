@@ -57,12 +57,36 @@ class AiAnalysisRun(db.Model):
     tokens_input = db.Column(db.Integer)
     tokens_output = db.Column(db.Integer)
 
+    # --- prompt cache 的账（「命中缓存能省多少」只有这里答得上来）---
+    # 这两列是**上游 provider 报的**命中/写入 token，与「工具结果在本次分析内的内存缓存
+    # 命中」（`EngineOutcome.cache_hits`）是两件完全不同的事，界面上不许都叫「缓存」。
+    #
+    # `None` = 上游没报这个字段，`0` = 报了且确实是 0。这个区分必须保住：把「没报」当成
+    # 「没命中」，界面就会显示一个用户会当真的 0%，而它其实只是未知。
+    cache_read_tokens = db.Column(db.Integer)
+    cache_write_tokens = db.Column(db.Integer)
+    # 这两个数是从哪种字段形态读来的（各家命名不一，见 llm_client._extract_cache_usage）。
+    # 留着它才能回答「为什么这个端点从来不上报缓存」——是端点不支持，还是形态没认出来。
+    cache_source = db.Column(db.String(40))
+
+    # 整次分析的墙钟耗时（毫秒）。逐轮的耗时刻在 trace 上。
+    duration_ms = db.Column(db.Integer)
+    # 按工具类型的记账（JSON 文本，键见 services/ai/context_tools.py::_STAT_COUNTERS）。
+    # 用 JSON 列而不是新表：它只在「看某一次运行」时被整体读出来，没有按类型查询的需求，
+    # 建表只多一次 join。
+    tool_stats_json = db.Column(db.Text)
+
     # --- 产出与裁剪记账 ---
     anomalies_found = db.Column(db.Integer)
     # 被丢弃 / 合并 / 因封顶砍掉的条数合计。**必须记账**：只报「发现 3 条」而不说
     # 「另外 5 条被门槛过滤了」，用户没法判断门槛是不是设得太严。
     dropped_count = db.Column(db.Integer)
     context_chars = db.Column(db.Integer)
+
+    # 这条费用是按哪一版价格表算的（services/ai/pricing.py 的 PRICE_TABLE_VERSION）。
+    # 价格会变，而库里存的是**金额**不是「当时的单价」——不记版本号，一年后就没人能
+    # 解释那一行数字是怎么来的。价格表为空（默认）时这一列保持 NULL。
+    pricing_version = db.Column(db.String(40))
 
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     started_at = db.Column(db.DateTime)
@@ -121,9 +145,15 @@ class AiAnalysisRun(db.Model):
             "tool_requests_used": self.tool_requests_used,
             "tokens_input": self.tokens_input,
             "tokens_output": self.tokens_output,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "cache_source": self.cache_source,
+            "duration_ms": self.duration_ms,
+            "tool_stats_json": self.tool_stats_json,
             "anomalies_found": self.anomalies_found,
             "dropped_count": self.dropped_count,
             "context_chars": self.context_chars,
+            "pricing_version": self.pricing_version,
             "error_message": self.error_message,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,

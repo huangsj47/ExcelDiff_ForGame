@@ -1316,6 +1316,36 @@
     </div>
 </aside>
 
+    <!-- AI 用量：本次消耗一行 + 明细弹层。
+         这一段在三份模板里**逐字相同**（commit_diff_new / weekly_version_diff /
+         merged_project_view），改动请三处一起改 —— tests/test_ai_usage_fragment_sync.py
+         会逐字比对。格式化与文案的逻辑在 static/js/ai_usage_line.js（只此一份，
+         免得三处各写一套口径）。
+         放在抽屉 <aside> **外面**：抽屉是固定定位 + 内部滚动，Bootstrap 的 modal 挂在
+         那种容器里会被裁掉。 -->
+    <div class="ai-usage-line" id="aiUsageLine" hidden>
+        <span class="ai-usage-text" id="aiUsageText"></span>
+        <button type="button" class="ai-usage-detail-btn" id="aiUsageDetailBtn" hidden>
+            <i class="fas fa-list-ul" aria-hidden="true"></i> 明细
+        </button>
+    </div>
+
+    <div class="modal fade" id="aiUsageModal" tabindex="-1" aria-labelledby="aiUsageModalTitle" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="aiUsageModalTitle">本次分析消耗</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                </div>
+                <div class="modal-body" id="aiUsageModalBody">
+                    <p class="ai-usage-meta">加载中...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/ai_usage_line.js') }}"></script>
+
 <script>
 let configId = {{ config.id }};
 let currentConfigId = {{ current_config_id }};
@@ -1472,6 +1502,7 @@ async function loadWeeklyAiLatest(force = false) {
                 if (meta) {
                     meta.textContent = `最近一次分析失败（${result.created_at_display || result.created_at || '-'}）`;
                 }
+                renderAiUsageLine(null, null);
                 return false;
             }
             // 正在进行中：如实说「进行中」，**不要**落进下面的「暂无分析结果。」
@@ -1484,6 +1515,7 @@ async function loadWeeklyAiLatest(force = false) {
                     meta.textContent =
                         `分析开始于 ${result.created_at_display || result.created_at || '-'}`;
                 }
+                renderAiUsageLine(null, null);
                 return false;
             }
             weeklyAiHasCached = true;
@@ -1500,6 +1532,8 @@ async function loadWeeklyAiLatest(force = false) {
             if (result.response_text) {
                 setWeeklyAiReport(result.response_text);
             }
+            // 本次消耗。run_id 取外层那条的，明细按运行记录取数（见 static/js/ai_usage_line.js）。
+            renderAiUsageLine(result.result?.usage, data.run_id);
             setWeeklyAiStatusBadge('已有结果', 'success');
             return true;
         }
@@ -1579,6 +1613,7 @@ function startWeeklyAiAnalysis(force = false) {
             payload = JSON.parse(event.data || '{}');
         } catch (_err) {
         }
+        renderAiUsageLine(payload.usage, payload.run_id);
         // 失败也是走 `result` 事件（引擎的契约是「失败变成一个结果对象，不抛异常」），
         // 所以这里不能无条件打「完成」—— 那正是「失败显示成已有结果」的来源。
         const failed = payload.status === 'failed';

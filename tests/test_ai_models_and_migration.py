@@ -39,7 +39,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_WEEKLY_INTERVAL_MINUTES,
 )
 
-# 迁移前就存在的那两张表（只保留新列加入之前的样子）。
+# 迁移前就存在的表（只保留新列加入之前的样子）。
 _OLD_CONFIG_DDL = """
 CREATE TABLE ai_project_analysis_config (
     id INTEGER PRIMARY KEY,
@@ -67,6 +67,25 @@ CREATE TABLE ai_analysis_run (
 )
 """
 
+# `ai_analysis_trace` 是后加进迁移的：它先作为「新表」由 create_all 建出来，用量采集
+# 上线时又给它补了两列缓存 token。这里的老 DDL 就是「加了那两列之前」的样子。
+_OLD_TRACE_DDL = """
+CREATE TABLE ai_analysis_trace (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL,
+    round_index INTEGER NOT NULL,
+    outcome VARCHAR(30),
+    parsed_ok BOOLEAN,
+    response_text TEXT,
+    request_chars INTEGER,
+    tokens_input INTEGER,
+    tokens_output INTEGER,
+    context_chars INTEGER,
+    duration_ms INTEGER,
+    created_at DATETIME
+)
+"""
+
 CONFIG_NEW_COLUMNS = (
     "api_base_url",
     "api_model",
@@ -78,6 +97,7 @@ CONFIG_NEW_COLUMNS = (
     "min_confidence",
     "max_anomalies_per_run",
     "project_knowledge",
+    "model_price_table",
 )
 
 RUN_NEW_COLUMNS = (
@@ -93,6 +113,20 @@ RUN_NEW_COLUMNS = (
     "anomalies_found",
     "dropped_count",
     "context_chars",
+    # 用量采集（2026-09-18）
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "cache_source",
+    "duration_ms",
+    "tool_stats_json",
+    "pricing_version",
+)
+
+# `ai_analysis_trace` 已有 tokens_input / tokens_output / request_chars / context_chars /
+# duration_ms（一直是 NULL，采集上线后才开始写），所以只补这两个。
+TRACE_NEW_COLUMNS = (
+    "cache_read_tokens",
+    "cache_write_tokens",
 )
 
 
@@ -116,6 +150,7 @@ def old_db(tmp_path):
     with engine.begin() as connection:
         connection.exec_driver_sql(_OLD_CONFIG_DDL)
         connection.exec_driver_sql(_OLD_RUN_DDL)
+        connection.exec_driver_sql(_OLD_TRACE_DDL)
     stub = _DbStub(engine)
     yield stub
     stub.session.close()
@@ -138,6 +173,7 @@ def test_migration_adds_every_new_column(old_db):
 
     assert set(CONFIG_NEW_COLUMNS).issubset(_columns(old_db, "ai_project_analysis_config"))
     assert set(RUN_NEW_COLUMNS).issubset(_columns(old_db, "ai_analysis_run"))
+    assert set(TRACE_NEW_COLUMNS).issubset(_columns(old_db, "ai_analysis_trace"))
 
 
 def test_migration_is_idempotent(old_db):
@@ -214,12 +250,14 @@ def test_migration_adds_only_the_missing_columns(tmp_path):
             "ALTER TABLE ai_project_analysis_config ADD COLUMN min_severity VARCHAR(20)"
         )
         connection.exec_driver_sql(_OLD_RUN_DDL)
+        connection.exec_driver_sql(_OLD_TRACE_DDL)
 
     stub = _DbStub(engine)
     try:
         _migrate_ai_analysis_columns(stub, lambda *a, **k: None)
         assert set(CONFIG_NEW_COLUMNS).issubset(_columns(stub, "ai_project_analysis_config"))
         assert set(RUN_NEW_COLUMNS).issubset(_columns(stub, "ai_analysis_run"))
+        assert set(TRACE_NEW_COLUMNS).issubset(_columns(stub, "ai_analysis_trace"))
     finally:
         stub.session.close()
         engine.dispose()
@@ -328,6 +366,7 @@ def test_resolved_fills_every_null_with_a_default():
     assert resolved["api_base_url"] == ""
     assert resolved["api_model"] == ""
     assert resolved["project_knowledge"] == ""
+    assert resolved["model_price_table"] == ""
 
 
 def test_resolved_never_returns_none_for_any_key():

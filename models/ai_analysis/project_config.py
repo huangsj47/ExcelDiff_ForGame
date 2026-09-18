@@ -97,6 +97,11 @@ class AiProjectAnalysisConfig(db.Model):
     # --- 项目补充知识（在项目知识包之外追加，只补充不覆盖）---
     project_knowledge = db.Column(db.Text)
 
+    # --- 模型单价表（算费用用，JSON 文本）---
+    # 留空 = 用平台的默认表（`services/ai/pricing.py::DEFAULT_PRICE_TABLE`，出厂是空的）。
+    # **单价必须由用户提供**：接口只回 token 数、不回金额，编一份单价出来会被当成真钱看。
+    model_price_table = db.Column(db.Text)
+
     updated_by = db.Column(db.String(100))
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(
@@ -141,6 +146,9 @@ class AiProjectAnalysisConfig(db.Model):
                 self.max_anomalies_per_run, DEFAULT_MAX_ANOMALIES_PER_RUN
             ),
             "project_knowledge": self.project_knowledge or "",
+            # 空串 = 没有项目单价表（用平台默认表）。**不是「免费」**，读取侧据此返回
+            # 「还没有配置价格表」而不是 0（见 services/ai/usage.py 的口径）。
+            "model_price_table": self.model_price_table or "",
         }
 
     def __repr__(self):

@@ -33,7 +33,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import time
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Protocol, Sequence
 
 from services.ai.baseline import DEFAULT_BASELINE_CHARS
@@ -133,6 +134,18 @@ class RoundRecord:
     refused_by_budget: int = 0
     truncated: int = 0
     note: str = ""
+    # 这一轮的用量。输入 token 是**累计值**：提示词每轮都把上一轮的上下文重发一遍，
+    # 所以轮次越靠后这一轮越贵 —— 逐轮列出来才看得出钱花在第几轮。
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    # `None` = 上游没报这个字段（见 context_tools 与 llm_client 里的同名口径）。
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    # 这一轮发出去的提示词字符数、这一轮模型调用的耗时、
+    # 以及这一轮**真正进了提示词**的上下文条目字符数（同上，不是取回的原始量）。
+    prompt_chars: int = 0
+    context_chars: int = 0
+    duration_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -153,6 +166,18 @@ class EngineOutcome:
     completion_tokens: int = 0
     degradation: str = DEGRADE_NONE
     error_message: str = ""
+    # prompt cache 的账目。`None` = 上游没报（**不是「没命中」**，见 `_sum_optional`）。
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    # 这两个数是从哪种字段形态读来的（各家命名不一，见 llm_client._extract_cache_usage）。
+    # 留着它才能回答「为什么这个端点从来不上报缓存」——是端点不支持，还是形态没认出来。
+    cache_source: str = ""
+    # 按工具类型的记账，键见 `context_tools._STAT_COUNTERS`。
+    tool_stats: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
+    # 取回并**真正放进提示词**的上下文字符数。与 tool_stats 里的 source_chars 不是一个
+    # 口径：那个是工具取回的原始量，可能被截断/被预算砍掉之后才进提示词。
+    context_chars: int = 0
+    duration_ms: int = 0
 
     @property
     def succeeded(self) -> bool:
@@ -182,6 +207,12 @@ class EngineOutcome:
             "cache_hits": self.cache_hits,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "cache_source": self.cache_source,
+            "context_chars": self.context_chars,
+            "duration_ms": self.duration_ms,
+            "tool_stats": {kind: dict(counters) for kind, counters in self.tool_stats.items()},
             "anomaly_count": len(self.anomalies),
             "dropped": [
                 {"kind": item.kind, "index": item.index, "reason": item.reason, "detail": item.detail}
@@ -196,6 +227,13 @@ class EngineOutcome:
                     "refused_by_budget": item.refused_by_budget,
                     "truncated": item.truncated,
                     "note": item.note,
+                    "prompt_tokens": item.prompt_tokens,
+                    "completion_tokens": item.completion_tokens,
+                    "cache_read_tokens": item.cache_read_tokens,
+                    "cache_write_tokens": item.cache_write_tokens,
+                    "prompt_chars": item.prompt_chars,
+                    "context_chars": item.context_chars,
+                    "duration_ms": item.duration_ms,
                 }
                 for item in self.rounds
             ],
@@ -205,6 +243,21 @@ class EngineOutcome:
 # 便于测试与调用方构造一个「什么都没跑」的结果。
 def failed(error_message: str) -> EngineOutcome:
     return EngineOutcome(status=STATUS_FAILED, error_message=str(error_message or "分析失败"))
+
+
+def _sum_optional(values: Sequence[int | None]) -> int | None:
+    """把各轮的值加起来；**只要有一轮没上报，整次就是 `None`**。
+
+    不能拿「手里有的那几轮」去算：一轮报了 900/1000、另一轮没报，只把报了的加起来会得出
+    一个偏高的命中率 —— 而那个数字看起来完全正常，没有人会去怀疑它。
+
+    空列表（一次模型调用都没成功）也是 `None`：没跑成与「花了 0」是两件事。
+    """
+    if not values:
+        return None
+    if any(value is None for value in values):
+        return None
+    return sum(int(value) for value in values if value is not None)
 
 
 # --------------------------------------------------------------------------
@@ -251,6 +304,29 @@ def run_analysis(
     markdown_fallback = ""
     prompt_tokens = 0
     completion_tokens = 0
+    # 用量记账：跨轮累计的缓存 token、真正进了提示词的字符数、起始时刻。
+    cache_reads: list[int | None] = []
+    cache_writes: list[int | None] = []
+    cache_sources: list[str] = []
+    context_chars = 0
+    started_at = time.monotonic()
+
+    def _usage_fields() -> dict:
+        """所有 `EngineOutcome` 构造点共用的用量字段。
+
+        这次要给每一个 return 各加 5 个字段，而本函数有 4 个构造点 —— 漏掉哪一个，那次
+        运行在面板上就是一行空白，且**不会报错**（字段有默认值）。集中一处 splat 就没法漏。
+        """
+        return {
+            "cache_read_tokens": _sum_optional(cache_reads),
+            "cache_write_tokens": _sum_optional(cache_writes),
+            # 第一次真的读到缓存字段的那一轮用的是哪种形态。`next(..., "")` 而不是取最后一轮：
+            # 上游偶尔只在某些轮上报，取不到的那轮不该把已经看出来的形态覆盖成空。
+            "cache_source": next((item for item in cache_sources if item), ""),
+            "tool_stats": tools.stats,
+            "context_chars": context_chars,
+            "duration_ms": int((time.monotonic() - started_at) * 1000),
+        }
 
     for round_index in range(1, limits.max_rounds + 1):
         exhausted = tools.requests_remaining <= 0
@@ -260,6 +336,11 @@ def run_analysis(
             change_summary=change_summary,
             limits=limits,
         )
+        # 真正进了提示词的字符数（不是工具取回的原始量，见 EngineOutcome.context_chars）。
+        # 逐轮也算一份：总账说明「这次分析塞了多少进去」，而逐轮才说明**是哪一轮塞的**
+        # —— 后几轮重发前几轮的全部上下文，钱正是花在那里。
+        round_context_chars = sum(len(item.text) for item in items)
+        context_chars += round_context_chars
 
         user_message = build_user_message(
             change_summary=change_summary,
@@ -274,6 +355,7 @@ def run_analysis(
         )
         messages.append({"role": "user", "content": user_message})
 
+        round_started = time.monotonic()
         try:
             result = client.complete(messages, temperature=limits.temperature)
         except Exception as exc:  # noqa: BLE001 —— 网络/鉴权/超时都归为「这次没跑成」
@@ -286,11 +368,30 @@ def run_analysis(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 error_message=f"调用模型失败（{type(exc).__name__}）：{exc}",
+                **_usage_fields(),
             )
 
         text = str(getattr(result, "text", "") or "")
-        prompt_tokens += int(getattr(result, "prompt_tokens", 0) or 0)
-        completion_tokens += int(getattr(result, "completion_tokens", 0) or 0)
+        round_prompt = int(getattr(result, "prompt_tokens", 0) or 0)
+        round_completion = int(getattr(result, "completion_tokens", 0) or 0)
+        prompt_tokens += round_prompt
+        completion_tokens += round_completion
+        round_cache_read = getattr(result, "cache_read_tokens", None)
+        round_cache_write = getattr(result, "cache_write_tokens", None)
+        cache_reads.append(round_cache_read)
+        cache_writes.append(round_cache_write)
+        cache_sources.append(str(getattr(result, "cache_source", "") or ""))
+        # 本轮用量挂到每一个 RoundRecord 上（下面有 5 个构造点）。同样用 splat：逐处复制
+        # 字段一定会漏，而漏掉的那一轮在 trace 里看着就像「这一轮没花钱」。
+        round_extra = {
+            "prompt_tokens": round_prompt,
+            "completion_tokens": round_completion,
+            "cache_read_tokens": round_cache_read,
+            "cache_write_tokens": round_cache_write,
+            "prompt_chars": len(user_message),
+            "context_chars": round_context_chars,
+            "duration_ms": int((time.monotonic() - round_started) * 1000),
+        }
         messages.append({"role": "assistant", "content": text})
 
         try:
@@ -299,19 +400,19 @@ def run_analysis(
             if looks_like_markdown_report(text):
                 # 模型给了一份像样的 markdown 报告。与其把它扔掉重问，不如留下来当降级产出：
                 # 内容通常是有用的，用户至少能读到。
-                rounds.append(RoundRecord(round_index, "unparsable", note="按 markdown 报告降级"))
+                rounds.append(RoundRecord(round_index, "unparsable", note="按 markdown 报告降级", **round_extra))
                 payload = None
                 markdown_fallback = text.strip()
                 degradation = DEGRADE_MARKDOWN
                 break
             if limits.max_corrections <= 0:
-                rounds.append(RoundRecord(round_index, "unparsable", note=str(exc)[:200]))
+                rounds.append(RoundRecord(round_index, "unparsable", note=str(exc)[:200], **round_extra))
                 degradation = DEGRADE_PROTOCOL
                 break
             # 重问也要占一轮：否则一个不肯说 JSON 的模型能把循环变成无限次重试。
             limits = replace(limits, max_corrections=limits.max_corrections - 1)
             correction_hint = build_correction_hint(exc)
-            rounds.append(RoundRecord(round_index, "unparsable", note=str(exc)[:200]))
+            rounds.append(RoundRecord(round_index, "unparsable", note=str(exc)[:200], **round_extra))
             pending_items = ()
             budget_notes = []
             continue
@@ -320,7 +421,7 @@ def run_analysis(
         if parsed.is_final:
             payload = parsed
             rounds.append(
-                RoundRecord(round_index, "final", item_count=len(items))
+                RoundRecord(round_index, "final", item_count=len(items), **round_extra)
             )
             break
 
@@ -341,6 +442,7 @@ def run_analysis(
                 item_count=len(batch.items),
                 refused_by_budget=batch.refused_by_budget,
                 truncated=batch.truncated,
+                **round_extra,
             )
         )
     else:
@@ -366,6 +468,7 @@ def run_analysis(
             error_message=(
                 f"没有拿到可用的结论：{DEGRADATION_LABELS.get(degradation, degradation)}"
             ),
+            **_usage_fields(),
         )
 
     if payload is None:
@@ -380,6 +483,7 @@ def run_analysis(
             completion_tokens=completion_tokens,
             degradation=degradation,
             error_message=DEGRADATION_LABELS.get(degradation, ""),
+            **_usage_fields(),
         )
 
     grounded = ground_payload(payload, scope)
@@ -403,6 +507,7 @@ def run_analysis(
         completion_tokens=completion_tokens,
         degradation=degradation,
         error_message=DEGRADATION_LABELS.get(degradation, ""),
+        **_usage_fields(),
     )
 
 

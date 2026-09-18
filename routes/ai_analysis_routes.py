@@ -4,9 +4,10 @@
 AI analysis routes.
 """
 
-from flask import Blueprint, Response, jsonify, request, stream_with_context
+from flask import Blueprint, Response, jsonify, render_template, request, stream_with_context
 
 from models import Commit, Repository, WeeklyVersionConfig, db
+from models.ai_analysis import AiAnalysisRun
 from services.ai.endpoint_service import probe_connection, probe_models
 from services.ai_analysis_service import (
     build_endpoint_client,
@@ -19,8 +20,10 @@ from services.ai_analysis_service import (
     stream_weekly_analysis,
     update_project_analysis_config,
 )
+from services.ai_usage_service import project_usage, run_usage, usage_overview
 from utils.json_body import read_json_object
 from utils.request_security import (
+    _get_accessible_project_ids,
     _get_current_user,
     _has_project_access,
     _has_project_admin_access,
@@ -198,3 +201,61 @@ def ai_commit_latest(commit_id):
     if not result:
         return jsonify({"success": True, "result": None})
     return jsonify({"success": True, "result": result})
+
+
+# ---------------------------------------------------------------------------
+#  AI 消耗面板
+# ---------------------------------------------------------------------------
+# 页面与数据分属两条路由：同一个路径不能既渲染页面又回 JSON。
+#   /ai-analysis/usage                 → 页面（导航入口指向它）
+#   /ai-analysis/usage/overview        → 跨项目总览数据
+#   /ai-analysis/usage/project/<id>    → 单项目下钻数据
+#   /ai-analysis/runs/<run_id>/usage   → 单次运行明细（抽屉里点开的那张表）
+#
+# 权限与 AI 分析一致：**有项目权限就能看**，不用 `@require_admin`
+# （费用是运营数据，但它与「谁能看这个项目的分析结论」是同一批人）。
+# 三个数据端点都是**只读库**，不触发任何会计费的分析调用。
+
+
+@ai_analysis_bp.route("/ai-analysis/usage", methods=["GET"])
+def ai_usage_dashboard():
+    """AI 消耗面板页面。
+
+    页面的登录闸门由全局 `enforce_admin_access` 统一把守（与缓存管理页一致），
+    这里不再挂第二个装饰器 —— 重复的鉴权只会让人以为两处规则不同。
+    页面本身不含数据，数据由下面的三个端点按**当前用户可访问的项目**回。
+    """
+    return render_template("ai_usage_dashboard.html")
+
+
+@ai_analysis_bp.route("/ai-analysis/usage/overview", methods=["GET"])
+def ai_usage_overview():
+    """跨项目总览：每个项目的运行次数、token、命中率、费用，外加一行平台合计。"""
+    payload = usage_overview(_get_accessible_project_ids())
+    return jsonify(payload), 200
+
+
+@ai_analysis_bp.route("/ai-analysis/usage/project/<int:project_id>", methods=["GET"])
+def ai_usage_project(project_id):
+    """单项目下钻：周版本维度 + 逐次运行 + 按工具类型。"""
+    if not _has_project_access(project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+    return jsonify(project_usage(project_id)), 200
+
+
+@ai_analysis_bp.route("/ai-analysis/runs/<int:run_id>/usage", methods=["GET"])
+def ai_run_usage(run_id):
+    """单次运行的用量明细。
+
+    权限按**这条运行自己的 project_id** 判，不接受调用方指定项目 —— 只信 URL 里的
+    项目号的话，换个号就能读到别人的运行明细。
+    """
+    run = db.session.get(AiAnalysisRun, run_id)
+    if run is None:
+        return jsonify({"success": False, "message": "Not found."}), 404
+    if not _has_project_access(run.project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+    payload = run_usage(run_id)
+    if payload is None:
+        return jsonify({"success": False, "message": "Not found."}), 404
+    return jsonify(payload), 200

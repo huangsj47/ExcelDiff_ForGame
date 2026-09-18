@@ -1802,3 +1802,71 @@ main:focus {
         animation: none !important;
     }
 }
+
+/* ===================================================================
+   AI 分析抽屉：本次消耗一行 + 明细弹层
+   -------------------------------------------------------------------
+   放在全局样式表里，**不放三份抽屉模板的同步块里**：那三份的 CSS 块是逐字比对的
+   （tests/test_ai_drawer_css_sync.py），把新样式塞进去等于三处同步，而且容易被
+   后来者只改一处。模板里那一小段 DOM 仍然逐字相同，由
+   tests/test_ai_usage_fragment_sync.py 守着。
+   =================================================================== */
+.ai-usage-line {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 8px 14px;
+    border-top: 1px solid var(--color-border, #dee2e6);
+    background: var(--color-surface-subtle, #f8f9fa);
+    color: var(--color-text-secondary, #495057);
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.ai-usage-text { line-height: 1.5; }
+
+.ai-usage-detail-btn {
+    min-height: 32px;
+    padding: 4px 10px;
+    border: 1px solid var(--color-border-strong, #d0d7de);
+    border-radius: 6px;
+    background: var(--color-surface, #ffffff);
+    color: var(--color-primary-text, #0056b3);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background-color 200ms ease, border-color 200ms ease;
+}
+
+.ai-usage-detail-btn:hover { background: #e7f1ff; }
+.ai-usage-detail-btn:focus-visible {
+    outline: 3px solid var(--color-focus, #0b5ed7);
+    outline-offset: 2px;
+}
+
+.ai-usage-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    margin-bottom: 12px;
+}
+
+.ai-usage-table th,
+.ai-usage-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--color-border, #dee2e6);
+    text-align: left;
+}
+
+.ai-usage-table thead th { color: var(--color-text-muted, #656d76); font-weight: 600; }
+.ai-usage-table th[scope="row"] { color: var(--color-text-secondary, #495057); font-weight: 500; }
+.ai-usage-num { text-align: right !important; font-variant-numeric: tabular-nums; }
+.ai-usage-unknown { color: var(--color-text-muted, #656d76); }
+.ai-usage-empty { text-align: center; color: var(--color-text-muted, #656d76); padding: 14px 8px; }
+.ai-usage-meta { color: var(--color-text-muted, #656d76); font-size: 0.8rem; }
+.ai-usage-subhead { font-size: 0.9rem; font-weight: 600; margin: 14px 0 6px 0; }
+
+@media (prefers-reduced-motion: reduce) {
+    .ai-usage-detail-btn { transition: none; }
+}

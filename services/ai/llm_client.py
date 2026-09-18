@@ -214,6 +214,12 @@ class ChatResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     finish_reason: str = ""
+    # prompt cache 的账目。`None` = 上游没报这个字段，与「报了 0」（全部未命中）是
+    # 两件事，不许用 0 代替 None —— 面板要能显示「未上报」而不是「命中率 0%」。
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    # 上面两个数是从哪个字段读到的；`""` = 没读到。换网关会换字段名，留着便于排查。
+    cache_source: str = ""
 
     @property
     def total_tokens(self) -> int:
@@ -270,6 +276,71 @@ def _extract_usage(payload: Any) -> tuple[int, int]:
             return 0
 
     return _as_int(usage.get("prompt_tokens")), _as_int(usage.get("completion_tokens"))
+
+
+def _non_negative_int(value: Any) -> int | None:
+    """把上游给的数读成非负整数。**0 是合法值**，`None` 才是「没给」。
+
+    与 `_as_int`（上面那个局部的）的区别就在这一点：那里把读不到的东西变成 0，用在
+    用量字段上会把「命中率 0%」和「上游根本没报缓存字段」显示成同一个样子 —— 而这两件事
+    在面板上必须能分开。bool 要单独挡掉（`True` 不是 1）。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _extract_cache_usage(payload: Any) -> tuple[int | None, int | None, str]:
+    """读「命中/写入缓存的输入 token」，返回 `(读、写、来源标记)`。
+
+    各家网关对 prompt cache 的命名不一样，按语义最明确的顺序探测：
+
+    1. `usage.prompt_tokens_details.cached_tokens` —— 把命中数放在嵌套对象里的那类；
+    2. `usage.prompt_cache_hit_tokens` —— 直接给 hit/miss 两个平铺字段的那类。这类缓存是
+       自动的、不必在请求里声明任何东西，**本项目最可能命中的就是它**；
+    3. `usage.cache_read_input_tokens` —— 用 read/write 区分缓存读写的那类（部分网关做
+       兼容层时会用）。
+
+    不写具体厂商名：这个文件有一条守卫（`tests/test_ai_budget_vs_model_window.py`）禁止
+    出现模型名，为的是拦住「凭模型名猜上下文窗口」那种会过期的对照表。这里只认字段名。
+
+    **读不到返回 `(None, None, "")`，不是 0。** 来源标记是为了回答「为什么这周突然没有
+    命中率了」——换个网关就可能换一套字段名。
+
+    第 2 类还会同时报 `prompt_cache_miss_tokens`，拿它做一次交叉校验：命中 + 未命中应当
+    等于 `prompt_tokens`。不等说明字段读错了对象，**一律不采信** —— 拆错的分子分母比
+    没有更糟，因为它会算出一个看起来很合理但错误的命中率。
+    """
+    if not isinstance(payload, dict):
+        return None, None, ""
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None, None, ""
+
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        cached = _non_negative_int(details.get("cached_tokens"))
+        if cached is not None:
+            return cached, _non_negative_int(details.get("cache_creation_tokens")), "prompt_tokens_details.cached_tokens"
+
+    hit = _non_negative_int(usage.get("prompt_cache_hit_tokens"))
+    if hit is not None:
+        miss = _non_negative_int(usage.get("prompt_cache_miss_tokens"))
+        prompt = _non_negative_int(usage.get("prompt_tokens"))
+        if miss is not None and prompt is not None and hit + miss != prompt:
+            return None, None, ""
+        return hit, None, "prompt_cache_hit_tokens"
+
+    read = _non_negative_int(usage.get("cache_read_input_tokens"))
+    if read is not None:
+        write = _non_negative_int(usage.get("cache_creation_input_tokens"))
+        return read, write, "cache_read_input_tokens"
+
+    return None, None, ""
 
 
 class LLMClient:
@@ -487,6 +558,7 @@ class LLMClient:
             response.close()
 
         prompt_tokens, completion_tokens = _extract_usage(payload)
+        cache_read, cache_write, cache_source = _extract_cache_usage(payload)
         finish_reason = ""
         choices = payload.get("choices") if isinstance(payload, dict) else None
         if isinstance(choices, list) and choices and isinstance(choices[0], dict):
@@ -498,6 +570,9 @@ class LLMClient:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             finish_reason=finish_reason,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
+            cache_source=cache_source,
         )
 
     def stream(
@@ -507,6 +582,11 @@ class LLMClient:
 
         用 `iter_lines` 而不是自己按字节切：SSE 的一帧以空行结束，`iter_lines` 已经
         帮我们分好行，剩下的只是按 `data:` 前缀取值。
+
+        **这条路径不读 `usage`**（它只产出正文增量，返回类型就是 `Iterator[str]`），
+        所以用量会全部丢掉。目前没有生产调用者 —— 分析走的是非流式的 `complete()`，
+        界面上的「流式」是平台自己往前端推的进度流，不是这里。将来若要切到流式，必须
+        先给这个方法一个能带出用量的返回形态，否则面板会静默变成空的。
         """
         if not self.model:
             raise LLMConfigError("未配置模型名")

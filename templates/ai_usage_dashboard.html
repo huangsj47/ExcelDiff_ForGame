@@ -1,0 +1,843 @@
+{% extends "base.html" %}
+
+{% block title %}AI 消耗 - Diff确认平台{% endblock %}
+
+{% block content %}
+<div class="aiu-page">
+    <div class="aiu-hero">
+        <div>
+            <h1>AI 消耗</h1>
+            <p>按项目、周版本与单次运行查看 token 用量、缓存命中与费用估算</p>
+        </div>
+        <div class="aiu-actions">
+            <button class="aiu-btn primary" id="aiuRefreshBtn" type="button">
+                <i class="fas fa-rotate" aria-hidden="true"></i> 刷新
+            </button>
+            <span class="aiu-meta" id="aiuGeneratedAt">更新时间 -</span>
+        </div>
+    </div>
+
+    {# 加载态用骨架：这页的数据是一次聚合查询，慢的时候要让用户看见「在加载」而不是空白 #}
+    <div id="aiuLoading" class="aiu-state" role="status" aria-live="polite">
+        <span class="aiu-skeleton-line"></span>
+        <span class="aiu-skeleton-line short"></span>
+        <span class="aiu-skeleton-line"></span>
+    </div>
+
+    <div id="aiuError" class="aiu-state aiu-error" role="alert" hidden>
+        <i class="fas fa-triangle-exclamation" aria-hidden="true"></i>
+        <span id="aiuErrorText">加载失败。</span>
+        <button class="aiu-btn secondary" id="aiuRetryBtn" type="button">重试</button>
+    </div>
+
+    <div id="aiuBody" hidden>
+        <!-- 顶部 KPI：先给「一共花了多少」，再给细节 -->
+        <div class="aiu-kpi-grid" id="aiuKpis"></div>
+
+        <section class="aiu-card">
+            <div class="aiu-card-head">
+                <h2>各项目消耗</h2>
+                <span class="aiu-meta">点一行看这个项目的周版本与逐次明细</span>
+            </div>
+            <div class="aiu-pricing-note" id="aiuPricingNote"></div>
+            <div class="aiu-bars" id="aiuProjectBars"></div>
+            <div class="aiu-table-wrap">
+                <table class="aiu-table">
+                    <caption class="aiu-caption">各项目的 AI 分析用量。表格与柱条是同一份数据，柱条只是帮助看相对量级。</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">项目</th>
+                            <th scope="col" class="num">运行次数</th>
+                            <th scope="col" class="num">输入 token</th>
+                            <th scope="col" class="num">其中命中缓存</th>
+                            <th scope="col" class="num">输出 token</th>
+                            <th scope="col" class="num">缓存命中率</th>
+                            <th scope="col" class="num">费用估算</th>
+                            <th scope="col">最近一次</th>
+                        </tr>
+                    </thead>
+                    <tbody id="aiuProjectRows"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="aiu-card" id="aiuDrillCard" hidden>
+            <div class="aiu-card-head">
+                <h2 id="aiuDrillTitle">项目明细</h2>
+                <button class="aiu-btn secondary" id="aiuDrillClose" type="button">
+                    <i class="fas fa-xmark" aria-hidden="true"></i> 收起
+                </button>
+            </div>
+
+            <h3 class="aiu-subhead">周版本</h3>
+            <p class="aiu-hint">
+                按周版本（分组键）聚合。「最近分析的」指本项目里最近一次分析所属的那个周版本 ——
+                平台无法从分析记录反推你心里那个「当前」。
+            </p>
+            <div class="aiu-table-wrap">
+                <table class="aiu-table">
+                    <caption class="aiu-caption">每个周版本的运行次数、token、缓存命中率与费用估算。</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">周版本</th>
+                            <th scope="col" class="num">运行次数</th>
+                            <th scope="col" class="num">输入 token</th>
+                            <th scope="col" class="num">其中命中缓存</th>
+                            <th scope="col" class="num">输出 token</th>
+                            <th scope="col" class="num">缓存命中率</th>
+                            <th scope="col" class="num">费用估算</th>
+                            <th scope="col">最近一次</th>
+                        </tr>
+                    </thead>
+                    <tbody id="aiuWeeklyRows"></tbody>
+                </table>
+            </div>
+
+            <h3 class="aiu-subhead">按工具类型</h3>
+            <p class="aiu-hint">
+                模型索要上下文的次数与取回量。「本地缓存命中」是工具结果**在一次分析内**的
+                内存缓存命中，与上面的 provider 缓存是两件事。
+            </p>
+            <div class="aiu-table-wrap">
+                <table class="aiu-table">
+                    <caption class="aiu-caption">按工具类型聚合的调用次数、取回字符与被拒绝/截断条数。</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">工具</th>
+                            <th scope="col" class="num">调用次数</th>
+                            <th scope="col" class="num">实际执行</th>
+                            <th scope="col" class="num">本地缓存命中</th>
+                            <th scope="col" class="num">被预算拒绝</th>
+                            <th scope="col" class="num">被截断</th>
+                            <th scope="col" class="num">取回字符</th>
+                            <th scope="col" class="num">送入提示词字符</th>
+                        </tr>
+                    </thead>
+                    <tbody id="aiuToolRows"></tbody>
+                </table>
+            </div>
+
+            <h3 class="aiu-subhead">逐次运行</h3>
+            <p class="aiu-hint">点一行看这一轮的逐轮明细。</p>
+            <div class="aiu-table-wrap">
+                <table class="aiu-table">
+                    <caption class="aiu-caption">本项目最近的 AI 分析运行。汇总数字按全部运行计算，列表只列最近的一部分。</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">时间</th>
+                            <th scope="col">目标</th>
+                            <th scope="col">状态</th>
+                            <th scope="col">来源</th>
+                            <th scope="col">模型</th>
+                            <th scope="col" class="num">输入 / 命中</th>
+                            <th scope="col" class="num">输出</th>
+                            <th scope="col" class="num">耗时</th>
+                            <th scope="col" class="num">费用估算</th>
+                            <th scope="col"></th>
+                        </tr>
+                    </thead>
+                    <tbody id="aiuRunRows"></tbody>
+                </table>
+            </div>
+            <p class="aiu-meta" id="aiuRunsTruncated" hidden></p>
+        </section>
+
+        <section class="aiu-card">
+            <div class="aiu-card-head">
+                <h2>口径说明</h2>
+            </div>
+            <ul class="aiu-notes">
+                <li><strong>「命中缓存」指上游 provider 报的 prompt cache 命中 token</strong>，不是平台自己的工具结果缓存。两者在表里分列显示，名字也分开。</li>
+                <li><strong>「未上报」与 0 是两件事。</strong>上游没回缓存字段时显示「未上报」，命中率一栏留空 —— 那表示未知，不是「一次都没命中」。</li>
+                <li><strong>费用是估算。</strong>接口只回 token 数、不回金额，金额按价格表算；没配价格表时这一列不显示数字。改价格表不会改历史金额的展示口径：金额一律按<strong>当前</strong>价格表重算，并在逐次明细里注明该次落库时的价格表版本。</li>
+                <li><strong>只统计新数据。</strong>这个功能上线前的运行没有采集过用量，明细里显示「本次用量未采集」，不显示 0。</li>
+                <li>「输入 token」是每轮提示词的累计值：每一轮都会把上一轮的上下文重发一遍，所以轮次越靠后越贵。逐轮明细里能看出钱花在第几轮。</li>
+            </ul>
+        </section>
+    </div>
+</div>
+
+<!-- 单次运行明细：与三个抽屉里的「明细」按钮共用同一个弹层结构 -->
+<div class="modal fade" id="aiuRunModal" tabindex="-1" aria-labelledby="aiuRunModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="aiuRunModalTitle">本次分析消耗</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body" id="aiuRunModalBody">
+                <p class="aiu-meta">加载中...</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+/* 页面级令牌。**上游一律 var(--color-*, 字面量)**：style.css 的兜底写法，见那里的说明。
+   组件里不写裸 hex —— 要新颜色就在这一层加一个令牌。 */
+:root {
+    --aiu-bg: var(--color-surface-subtle, #f8f9fa);
+    --aiu-card: var(--color-surface, #ffffff);
+    --aiu-text: var(--color-text, #212529);
+    --aiu-muted: var(--color-text-muted, #656d76);
+    --aiu-border: var(--color-border, #dee2e6);
+    --aiu-primary: var(--color-primary-strong, #0b5ed7);
+    --aiu-primary-soft: #e7f1ff;
+    /* 命中/未命中两个色都是仓库里已实测过对比度的语义色：
+       #157347 白底 5.87:1，#856404 白底 5.49:1 */
+    --aiu-hit: var(--color-success-text, #157347);
+    --aiu-miss: var(--color-warning-text, #856404);
+    --aiu-danger: var(--color-danger-text, #b3261e);
+    --aiu-bar-track: var(--color-surface-muted, #e9ecef);
+}
+
+.aiu-page { color: var(--aiu-text); padding-bottom: 32px; }
+.aiu-hero {
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;
+    flex-wrap: wrap;
+    background: linear-gradient(135deg, #f1f8ff 0%, #eef4fb 60%, #f7fbf7 100%);
+    border: 1px solid var(--aiu-border); border-radius: 14px; padding: 18px 20px; margin-bottom: 16px;
+}
+.aiu-hero h1 { font-size: 1.35rem; font-weight: 600; margin: 0 0 4px 0; }
+.aiu-hero p { margin: 0; color: var(--aiu-muted); font-size: 0.92rem; }
+.aiu-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.aiu-meta { color: var(--aiu-muted); font-size: 0.82rem; }
+
+.aiu-btn {
+    min-height: 40px; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--aiu-border); background: var(--aiu-card); color: var(--aiu-text);
+    font-size: 0.88rem; display: inline-flex; align-items: center; gap: 6px;
+    transition: background-color 180ms ease, border-color 180ms ease;
+}
+.aiu-btn.primary { background: var(--aiu-primary); border-color: var(--aiu-primary); color: #fff; }
+.aiu-btn:hover { background: var(--aiu-primary-soft); }
+.aiu-btn:focus-visible { outline: 3px solid var(--color-focus, #0b5ed7); outline-offset: 2px; }
+.aiu-btn.primary:hover { filter: brightness(1.05); }
+
+.aiu-state {
+    display: flex; flex-direction: column; gap: 10px;
+    background: var(--aiu-card); border: 1px solid var(--aiu-border); border-radius: 12px; padding: 20px;
+}
+.aiu-error { flex-direction: row; align-items: center; gap: 12px; color: var(--aiu-danger); }
+.aiu-skeleton-line {
+    display: block; height: 14px; border-radius: 6px;
+    background: linear-gradient(90deg, var(--aiu-bar-track) 25%, #f1f3f5 50%, var(--aiu-bar-track) 75%);
+    background-size: 200% 100%; animation: aiu-shimmer 1.4s ease-in-out infinite;
+}
+.aiu-skeleton-line.short { width: 45%; }
+@keyframes aiu-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+.aiu-kpi-grid {
+    display: grid; gap: 12px; margin-bottom: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+.aiu-kpi {
+    background: var(--aiu-card); border: 1px solid var(--aiu-border); border-radius: 12px;
+    padding: 14px 16px; display: flex; flex-direction: column; gap: 6px;
+}
+.aiu-kpi-label { color: var(--aiu-muted); font-size: 0.82rem; }
+.aiu-kpi-value {
+    font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums;
+    font-family: "Fira Code", ui-monospace, monospace;
+}
+.aiu-kpi-sub { color: var(--aiu-muted); font-size: 0.78rem; }
+.aiu-kpi-value.is-unknown { font-size: 1.05rem; color: var(--aiu-muted); font-weight: 500; }
+
+.aiu-card {
+    background: var(--aiu-card); border: 1px solid var(--aiu-border); border-radius: 12px;
+    padding: 16px; margin-bottom: 16px;
+}
+.aiu-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.aiu-card-head h2 { font-size: 1.02rem; font-weight: 600; margin: 0 0 4px 0; }
+.aiu-subhead { font-size: 0.95rem; font-weight: 600; margin: 18px 0 6px 0; }
+.aiu-hint { color: var(--aiu-muted); font-size: 0.82rem; margin: 0 0 10px 0; }
+.aiu-pricing-note { color: var(--aiu-muted); font-size: 0.82rem; margin: 6px 0 10px 0; }
+
+.aiu-table-wrap { overflow-x: auto; }
+.aiu-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+.aiu-table caption {
+    caption-side: top; text-align: left; color: var(--aiu-muted);
+    font-size: 0.78rem; padding-bottom: 6px;
+}
+.aiu-table th, .aiu-table td {
+    padding: 8px 10px; border-bottom: 1px solid var(--aiu-border); text-align: left; vertical-align: middle;
+}
+.aiu-table thead th { color: var(--aiu-muted); font-weight: 600; white-space: nowrap; }
+.aiu-table td.num, .aiu-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.aiu-table tbody tr.is-clickable { cursor: pointer; }
+.aiu-table tbody tr.is-clickable:hover { background: var(--aiu-primary-soft); }
+.aiu-table tbody tr.is-clickable:focus-visible { outline: 3px solid var(--color-focus, #0b5ed7); outline-offset: -3px; }
+.aiu-table .empty-row { text-align: center; color: var(--aiu-muted); padding: 18px 10px; }
+.aiu-name { display: block; font-weight: 500; }
+.aiu-name-sub { display: block; color: var(--aiu-muted); font-size: 0.76rem; }
+.aiu-unknown { color: var(--aiu-muted); }
+
+/* 柱条：只是相对量级的辅助，数值就在旁边那格，所以整块对读屏隐藏。
+   不用宽度动画（会触发 layout），只用一次性过渡。 */
+.aiu-bar { position: relative; height: 8px; border-radius: 4px; background: var(--aiu-bar-track); overflow: hidden; }
+.aiu-bar > span { display: block; height: 100%; background: var(--aiu-primary); }
+.aiu-bar > span.hit { background: var(--aiu-hit); }
+.aiu-bar > span.miss { background: var(--aiu-miss); }
+
+.aiu-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 0.76rem; border: 1px solid var(--aiu-border); background: var(--aiu-bg);
+}
+.aiu-badge.hit { color: var(--aiu-hit); border-color: var(--aiu-hit); }
+.aiu-badge.miss { color: var(--aiu-miss); border-color: var(--aiu-miss); }
+.aiu-badge.failed { color: var(--aiu-danger); border-color: var(--aiu-danger); }
+
+.aiu-notes { margin: 0; padding-left: 20px; color: var(--aiu-text); font-size: 0.86rem; line-height: 1.7; }
+.aiu-legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--aiu-muted); font-size: 0.78rem; margin-top: 8px; }
+.aiu-legend i { margin-right: 4px; }
+.aiu-bars { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.aiu-bar-row { display: grid; grid-template-columns: minmax(120px, 220px) 1fr auto; gap: 10px; align-items: center; }
+.aiu-bar-label { font-size: 0.82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aiu-bar-value { font-size: 0.82rem; font-variant-numeric: tabular-nums; color: var(--aiu-muted); min-width: 64px; text-align: right; }
+
+.aiu-back { background: none; border: none; color: var(--aiu-primary); cursor: pointer; padding: 0; font-size: 0.82rem; }
+.aiu-back:hover { text-decoration: underline; }
+
+@media (max-width: 767px) {
+    .aiu-kpi-value { font-size: 1.3rem; }
+    .aiu-hero { padding: 14px; }
+    .aiu-card { padding: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .aiu-skeleton-line { animation: none; }
+    .aiu-btn { transition: none; }
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ---------------------------------------------------------------------------
+//  格式化：**纯函数**，便于用 node 单独跑（见 tests/test_ai_usage_dashboard_frontend.py）
+//  三条口径与后端 services/ai/usage.py 完全一致，尤其是「未上报 ≠ 0」。
+// ---------------------------------------------------------------------------
+var AIU_UNKNOWN = '未上报';
+var AIU_NOT_COLLECTED = '本次用量未采集';
+
+function aiuFmtInt(value) {
+    if (value === null || value === undefined) return null;
+    var num = Number(value);
+    if (!isFinite(num)) return null;
+    return num.toLocaleString('zh-CN');
+}
+
+/** token 数：>= 1k 用 k、>= 1M 用 M；未上报返回 null（调用方决定显示什么）。 */
+function aiuFmtTokens(value) {
+    if (value === null || value === undefined) return null;
+    var num = Number(value);
+    if (!isFinite(num)) return null;
+    if (Math.abs(num) >= 1000000) return (num / 1000000).toFixed(num >= 10000000 ? 1 : 2) + 'M';
+    if (Math.abs(num) >= 1000) return (num / 1000).toFixed(1) + 'k';
+    return String(num);
+}
+
+/** 命中率：0.9 → "90.0%"。为 null 时返回 null —— **不返回 "0%"**。 */
+function aiuFmtRate(rate) {
+    if (rate === null || rate === undefined) return null;
+    var num = Number(rate);
+    if (!isFinite(num)) return null;
+    return (num * 100).toFixed(1) + '%';
+}
+
+/** 费用：后端给的是字符串（避免前端浮点），这里只加币种符号，不做算术。 */
+function aiuFmtCost(cost) {
+    if (!cost || cost.amount === null || cost.amount === undefined) return null;
+    var symbol = { CNY: '¥', USD: '$', EUR: '€' }[cost.currency] || '';
+    return symbol + cost.amount + (symbol ? '' : ' ' + (cost.currency || ''));
+}
+
+/** 「有值就显示，没有就说未上报」。0 会走「有值」这一支，这是刻意的。 */
+function aiuOrUnknown(text, placeholder) {
+    if (text === null || text === undefined || text === '') return placeholder || AIU_UNKNOWN;
+    return text;
+}
+
+function aiuFmtDuration(ms) {
+    if (ms === null || ms === undefined) return null;
+    var num = Number(ms);
+    if (!isFinite(num)) return null;
+    if (num >= 60000) return (num / 60000).toFixed(1) + ' min';
+    if (num >= 1000) return (num / 1000).toFixed(1) + ' s';
+    return num + ' ms';
+}
+
+function aiuFmtTime(iso) {
+    if (!iso) return '—';
+    var date = new Date(iso);
+    if (isNaN(date.getTime())) return '—';
+    var pad = function (n) { return n < 10 ? '0' + n : String(n); };
+    return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate())
+        + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes());
+}
+
+/** 工具类型的展示名。认不出来的直接用键名，**不猜**。 */
+var AIU_TOOL_LABELS = {
+    commit_detail: '提交详情',
+    file_diff: '文件 diff',
+    file_content: '文件内容',
+    read_reference: '参考文档'
+};
+function aiuToolLabel(kind) {
+    return AIU_TOOL_LABELS[kind] || kind;
+}
+
+// ---------------------------------------------------------------------------
+//  数据获取与渲染
+// ---------------------------------------------------------------------------
+(function () {
+    var state = { overview: null, drill: null, drillProjectId: null };
+
+    function $(id) { return document.getElementById(id); }
+
+    function setLoading(on) {
+        $('aiuLoading').hidden = !on;
+        $('aiuBody').hidden = on;
+    }
+
+    function showError(message) {
+        setLoading(false);
+        $('aiuError').hidden = false;
+        $('aiuErrorText').textContent = message || '加载失败。';
+    }
+
+    function clearError() { $('aiuError').hidden = true; }
+
+    function fetchJson(url) {
+        return fetch(url, { credentials: 'same-origin' }).then(function (response) {
+            return response.json().then(function (body) {
+                if (!response.ok || body.success === false) {
+                    throw new Error(body.message || ('HTTP ' + response.status));
+                }
+                return body;
+            });
+        });
+    }
+
+    function cell(text, className) {
+        var td = document.createElement('td');
+        if (className) td.className = className;
+        td.textContent = text;
+        return td;
+    }
+
+    /** 数值单元：null → 「未上报」并加弱化样式（**不是 0**）。 */
+    function numCell(text, className) {
+        var td = cell(text === null || text === undefined ? AIU_UNKNOWN : text, className || 'num');
+        if (text === null || text === undefined) td.classList.add('aiu-unknown');
+        return td;
+    }
+
+    function kpi(label, value, sub, unknown) {
+        var card = document.createElement('div');
+        card.className = 'aiu-kpi';
+        var l = document.createElement('span'); l.className = 'aiu-kpi-label'; l.textContent = label;
+        var v = document.createElement('span');
+        v.className = 'aiu-kpi-value' + (unknown ? ' is-unknown' : '');
+        v.textContent = value;
+        card.appendChild(l); card.appendChild(v);
+        if (sub) {
+            var s = document.createElement('span'); s.className = 'aiu-kpi-sub'; s.textContent = sub;
+            card.appendChild(s);
+        }
+        return card;
+    }
+
+    function renderKpis(totals) {
+        var host = $('aiuKpis');
+        host.textContent = '';
+        var tokens = totals.tokens || {};
+        var cache = totals.cache || {};
+        var input = tokens.input;
+        var hit = tokens.cache_read;
+        var miss = (input === null || input === undefined || hit === null || hit === undefined)
+            ? null : Math.max(0, input - hit);
+
+        host.appendChild(kpi('输入 token（合计）', aiuOrUnknown(aiuFmtTokens(input), AIU_UNKNOWN)));
+        host.appendChild(kpi(
+            '其中命中缓存', aiuOrUnknown(aiuFmtTokens(hit), AIU_UNKNOWN),
+            hit === null || hit === undefined ? '上游未上报缓存字段' : '按未命中价计费的输入：' + aiuOrUnknown(aiuFmtTokens(miss), AIU_UNKNOWN)
+        ));
+        host.appendChild(kpi('输出 token', aiuOrUnknown(aiuFmtTokens(tokens.output), AIU_UNKNOWN)));
+        host.appendChild(kpi(
+            '合计 token', aiuOrUnknown(aiuFmtTokens(tokens.total), AIU_UNKNOWN),
+            totals.collected_runs + ' / ' + totals.runs + ' 次运行采集到用量'
+        ));
+        var rate = aiuFmtRate(cache.hit_rate);
+        host.appendChild(kpi(
+            '缓存命中率', rate === null ? '未上报' : rate,
+            rate === null ? '部分或全部运行没有上报缓存字段' : '命中 token ÷ 输入 token',
+            rate === null
+        ));
+
+        // 费用：算不出就**不渲染这一块**（不是显示 0）。理由见页面上的口径说明。
+        var costText = aiuFmtCost(totals.cost);
+        if (costText !== null) {
+            host.appendChild(kpi('费用估算', costText, '按当前价格表估算：' + (totals.cost.price_version || '未标版本')));
+        }
+    }
+
+    function renderPricingNote(pricing) {
+        var host = $('aiuPricingNote');
+        host.textContent = '';
+        if (!pricing || !pricing.configured) {
+            var text = document.createElement('span');
+            text.innerHTML = '<i class="fas fa-circle-info" aria-hidden="true"></i> '
+                + '还没有配置价格表，因此不显示费用。要算费用请在项目的 AI 分析配置里填「模型单价表（JSON）」。';
+            host.appendChild(text);
+            return;
+        }
+        var span = document.createElement('span');
+        span.textContent = '价格表版本 ' + (pricing.version || '未标') + '（' + (pricing.source === 'project' ? '项目配置' : '平台默认') + '），金额按当前价格表估算。';
+        host.appendChild(span);
+    }
+
+    function renderProjects(overview) {
+        var tbody = $('aiuProjectRows');
+        tbody.textContent = '';
+        var projects = overview.projects || [];
+        if (!projects.length) {
+            var tr = document.createElement('tr');
+            var td = cell('还没有用量数据。这个功能上线之后跑过的分析才会出现在这里。', 'empty-row');
+            td.colSpan = 8;
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+            return;
+        }
+        var maxTokens = projects.reduce(function (acc, item) {
+            var total = (item.tokens || {}).total;
+            return Math.max(acc, total === null || total === undefined ? 0 : total);
+        }, 0);
+
+        projects.forEach(function (item) {
+            var tr = document.createElement('tr');
+            tr.className = 'is-clickable';
+            tr.tabIndex = 0;
+            tr.setAttribute('role', 'button');
+            tr.setAttribute('aria-label', '查看项目 ' + item.name + ' 的消耗明细');
+
+            var nameCell = document.createElement('td');
+            var name = document.createElement('span'); name.className = 'aiu-name'; name.textContent = item.name;
+            var sub = document.createElement('span');
+            sub.className = 'aiu-name-sub';
+            sub.textContent = item.runs + ' 次运行 · ' + (item.collected_runs || 0) + ' 次采集到用量';
+            nameCell.appendChild(name); nameCell.appendChild(sub);
+            tr.appendChild(nameCell);
+
+            tr.appendChild(cell(aiuFmtInt(item.runs) || '0', 'num'));
+            tr.appendChild(numCell(aiuFmtTokens((item.tokens || {}).input)));
+            tr.appendChild(numCell(aiuFmtTokens((item.tokens || {}).cache_read)));
+            tr.appendChild(numCell(aiuFmtTokens((item.tokens || {}).output)));
+            var rate = aiuFmtRate((item.cache || {}).hit_rate);
+            tr.appendChild(numCell(rate, 'num'));
+            tr.appendChild(numCell(aiuFmtCost(item.cost)));
+            tr.appendChild(cell(aiuFmtTime(item.last_run_at)));
+
+            var open = function () { loadDrill(item.project_id, item.name); };
+            tr.addEventListener('click', open);
+            tr.addEventListener('keydown', function (event) {
+                if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
+            });
+            tbody.appendChild(tr);
+        });
+
+        // 柱条单独一块放在表格下面：一格里塞「数字 + 条」会两头都不好读，
+        // 而且柱条对读屏是隐藏的（aria-hidden），数值始终在那张表里。
+        var bars = $('aiuProjectBars');
+        bars.textContent = '';
+        if (maxTokens <= 0) return;
+        var legend = document.createElement('div');
+        legend.className = 'aiu-legend';
+        var legendText = document.createElement('span');
+        legendText.innerHTML = '<i class="fas fa-chart-simple" aria-hidden="true"></i>输入 + 输出 token 的相对量级';
+        legend.appendChild(legendText);
+        bars.appendChild(legend);
+        projects.forEach(function (item) {
+            var row = document.createElement('div');
+            row.className = 'aiu-bar-row';
+            var label = document.createElement('span');
+            label.className = 'aiu-bar-label';
+            label.textContent = item.name;
+            var track = document.createElement('span');
+            track.className = 'aiu-bar';
+            track.setAttribute('aria-hidden', 'true');
+            var fill = document.createElement('span');
+            var total = (item.tokens || {}).total;
+            fill.style.width = (total && maxTokens > 0 ? Math.max(2, Math.round((total / maxTokens) * 100)) : 0) + '%';
+            track.appendChild(fill);
+            var value = document.createElement('span');
+            value.className = 'aiu-bar-value';
+            value.textContent = aiuOrUnknown(aiuFmtTokens(total), AIU_UNKNOWN);
+            row.appendChild(label); row.appendChild(track); row.appendChild(value);
+            bars.appendChild(row);
+        });
+    }
+
+    function renderWeekly(rows) {
+        var tbody = $('aiuWeeklyRows');
+        tbody.textContent = '';
+        if (!rows.length) {
+            var tr = document.createElement('tr');
+            var td = cell('这个项目还没有周版本维度的分析记录。', 'empty-row');
+            td.colSpan = 8;
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+            return;
+        }
+        rows.forEach(function (item) {
+            var tr = document.createElement('tr');
+            var labelCell = document.createElement('td');
+            var name = document.createElement('span');
+            name.className = 'aiu-name';
+            name.textContent = item.config_name || '周版本';
+            if (item.is_latest) {
+                var badge = document.createElement('span');
+                badge.className = 'aiu-badge hit';
+                badge.style.marginLeft = '6px';
+                badge.textContent = '最近分析';
+                name.appendChild(badge);
+            }
+            var sub = document.createElement('span');
+            sub.className = 'aiu-name-sub';
+            sub.textContent = item.group_key || '';
+            labelCell.appendChild(name); labelCell.appendChild(sub);
+            tr.appendChild(labelCell);
+
+            tr.appendChild(cell(aiuFmtInt(item.runs) || '0', 'num'));
+            tr.appendChild(numCell(aiuFmtTokens((item.tokens || {}).input)));
+            tr.appendChild(numCell(aiuFmtTokens((item.tokens || {}).cache_read)));
+            tr.appendChild(numCell(aiuFmtTokens((item.tokens || {}).output)));
+            tr.appendChild(numCell(aiuFmtRate((item.cache || {}).hit_rate), 'num'));
+            tr.appendChild(numCell(aiuFmtCost(item.cost)));
+            tr.appendChild(cell(aiuFmtTime(item.last_run_at)));
+            tbody.appendChild(tr);
+        });
+    }
+
+    function renderTools(tools) {
+        var tbody = $('aiuToolRows');
+        tbody.textContent = '';
+        var kinds = Object.keys(tools || {});
+        if (!kinds.length) {
+            var tr = document.createElement('tr');
+            var td = cell('这段区间里没有记录到工具调用（或这些运行没有采集到工具统计）。', 'empty-row');
+            td.colSpan = 8;
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+            return;
+        }
+        kinds.sort();
+        kinds.forEach(function (kind) {
+            var counters = tools[kind] || {};
+            var tr = document.createElement('tr');
+            tr.appendChild(cell(aiuToolLabel(kind)));
+            ['calls', 'executions', 'cache_hits', 'refused_by_budget', 'truncated', 'source_chars', 'produced_chars']
+                .forEach(function (name) {
+                    var value = counters[name];
+                    tr.appendChild(cell(aiuFmtInt(value === undefined ? 0 : value) || '0', 'num'));
+                });
+            tbody.appendChild(tr);
+        });
+    }
+
+    function renderRuns(payload) {
+        var tbody = $('aiuRunRows');
+        tbody.textContent = '';
+        var rows = payload.runs || [];
+        if (!rows.length) {
+            var tr = document.createElement('tr');
+            var td = cell('还没有分析运行记录。', 'empty-row');
+            td.colSpan = 10;
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+        }
+        rows.forEach(function (row) {
+            var usage = row.usage || {};
+            var tokens = usage.tokens || {};
+            var tr = document.createElement('tr');
+            tr.appendChild(cell(aiuFmtTime(row.created_at)));
+
+            var targetCell = document.createElement('td');
+            var target = row.target_type === 'weekly' ? '周版本' : '提交';
+            var main = document.createElement('span'); main.className = 'aiu-name';
+            main.textContent = target + ' ' + (row.target_id === null || row.target_id === undefined ? '' : row.target_id);
+            var sub = document.createElement('span'); sub.className = 'aiu-name-sub';
+            sub.textContent = row.target_key || (row.target_type === 'commit' ? '单提交分析' : '');
+            targetCell.appendChild(main); targetCell.appendChild(sub);
+            tr.appendChild(targetCell);
+
+            var statusCell = document.createElement('td');
+            var badge = document.createElement('span');
+            badge.className = 'aiu-badge' + (row.status === 'failed' ? ' failed' : '');
+            badge.textContent = row.status === 'succeeded' ? '成功' : (row.status === 'failed' ? '失败' : row.status);
+            statusCell.appendChild(badge);
+            tr.appendChild(statusCell);
+
+            tr.appendChild(cell(row.trigger_source === 'scheduled' ? '定时' : '手动'));
+            tr.appendChild(cell(row.model || '—'));
+            var pair = (tokens.input === null || tokens.input === undefined)
+                ? null
+                : (aiuFmtTokens(tokens.input) + ' / ' + aiuOrUnknown(aiuFmtTokens(tokens.cache_read), '未上报'));
+            tr.appendChild(numCell(pair));
+            tr.appendChild(numCell(aiuFmtTokens(tokens.output)));
+            tr.appendChild(numCell(aiuFmtDuration(usage.duration_ms)));
+            tr.appendChild(numCell(aiuFmtCost(usage.cost)));
+
+            var actionCell = document.createElement('td');
+            var button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'aiu-btn secondary';
+            button.innerHTML = '<i class="fas fa-list" aria-hidden="true"></i> 明细';
+            button.addEventListener('click', function (event) {
+                event.stopPropagation();
+                openRunModal(row.run_id, row.created_at);
+            });
+            actionCell.appendChild(button);
+            tr.appendChild(actionCell);
+            tbody.appendChild(tr);
+        });
+        $('aiuRunsTruncated').hidden = !payload.runs_truncated;
+        $('aiuRunsTruncated').textContent = payload.runs_truncated
+            ? '只列出最近的 ' + rows.length + ' 次运行；上面的合计按全部运行计算。' : '';
+    }
+
+    function loadOverview() {
+        clearError();
+        setLoading(true);
+        return fetchJson('/ai-analysis/usage/overview').then(function (body) {
+            state.overview = body;
+            renderKpis(body.totals || {});
+            renderPricingNote((body.projects || [])[0] ? body.projects[0].pricing : null);
+            renderProjects(body);
+            $('aiuGeneratedAt').textContent = '更新时间 ' + aiuFmtTime(body.generated_at);
+            setLoading(false);
+        }).catch(function (error) {
+            showError('加载失败：' + (error && error.message ? error.message : error));
+        });
+    }
+
+    function loadDrill(projectId, name) {
+        state.drillProjectId = projectId;
+        $('aiuDrillCard').hidden = false;
+        $('aiuDrillTitle').textContent = '项目明细 · ' + (name || projectId);
+        $('aiuWeeklyRows').innerHTML = '<tr><td colspan="8" class="empty-row">加载中...</td></tr>';
+        $('aiuToolRows').innerHTML = '<tr><td colspan="8" class="empty-row">加载中...</td></tr>';
+        $('aiuRunRows').innerHTML = '<tr><td colspan="10" class="empty-row">加载中...</td></tr>';
+        $('aiuDrillCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return fetchJson('/ai-analysis/usage/project/' + projectId).then(function (body) {
+            state.drill = body;
+            renderWeekly(body.weekly_versions || []);
+            renderTools((body.totals || {}).tools || {});
+            renderRuns(body);
+        }).catch(function (error) {
+            $('aiuWeeklyRows').innerHTML = '';
+            var tr = document.createElement('tr');
+            var td = document.createElement('td');
+            td.className = 'empty-row';
+            td.colSpan = 8;
+            td.textContent = '加载失败：' + (error && error.message ? error.message : error);
+            tr.appendChild(td);
+            $('aiuWeeklyRows').appendChild(tr);
+        });
+    }
+
+    // 单次运行明细弹层。与三个抽屉里的「明细」按钮是同一个接口、同一套口径。
+    var runModalInstance = null;
+    function openRunModal(runId, fallbackLabel) {
+        var body = $('aiuRunModalBody');
+        body.innerHTML = '<p class="aiu-meta">加载中...</p>';
+        if (runModalInstance === null) {
+            runModalInstance = new bootstrap.Modal($('aiuRunModal'));
+        }
+        runModalInstance.show();
+        fetchJson('/ai-analysis/runs/' + runId + '/usage').then(function (payload) {
+            body.textContent = '';
+            var run = payload.run || {};
+            var usage = run.usage || {};
+            if (!usage.collected) {
+                var note = document.createElement('p');
+                note.className = 'aiu-meta';
+                note.textContent = '本次用量未采集（这个功能上线前的运行没有记录用量）。';
+                body.appendChild(note);
+            }
+            var grid = document.createElement('div');
+            grid.className = 'aiu-kpi-grid';
+            grid.appendChild(kpi('输入 token', aiuOrUnknown(aiuFmtTokens((usage.tokens || {}).input), AIU_UNKNOWN)));
+            grid.appendChild(kpi('命中缓存', aiuOrUnknown(aiuFmtTokens((usage.tokens || {}).cache_read), AIU_UNKNOWN),
+                aiuFmtRate((usage.cache || {}).hit_rate) === null ? '未上报' : '命中率 ' + aiuFmtRate((usage.cache || {}).hit_rate)));
+            grid.appendChild(kpi('输出 token', aiuOrUnknown(aiuFmtTokens((usage.tokens || {}).output), AIU_UNKNOWN)));
+            grid.appendChild(kpi('合计 token', aiuOrUnknown(aiuFmtTokens((usage.tokens || {}).total), AIU_UNKNOWN),
+                (usage.rounds === null || usage.rounds === undefined ? '-' : usage.rounds) + ' 轮，耗时 '
+                + aiuOrUnknown(aiuFmtDuration(usage.duration_ms), '未采集')));
+            var costText = aiuFmtCost(usage.cost);
+            if (costText !== null) {
+                grid.appendChild(kpi('费用估算', costText,
+                    (usage.cost.notes || []).join('；') || ('按价格表版本 ' + (usage.cost.price_version || '未标') + ' 估算')));
+            }
+            body.appendChild(grid);
+
+            var head = document.createElement('h6');
+            head.textContent = '逐轮';
+            body.appendChild(head);
+            var wrap = document.createElement('div');
+            wrap.className = 'aiu-table-wrap';
+            var table = document.createElement('table');
+            table.className = 'aiu-table';
+            table.innerHTML = '<caption class="aiu-caption">每一轮的 token 与耗时。输入 token 是累计值：每轮都会把上一轮的上下文重发一遍。</caption>'
+                + '<thead><tr><th scope="col">轮次</th><th scope="col">结局</th>'
+                + '<th scope="col" class="num">输入 token</th><th scope="col" class="num">其中命中</th>'
+                + '<th scope="col" class="num">输出 token</th><th scope="col" class="num">提示词字符</th>'
+                + '<th scope="col" class="num">上下文字符</th><th scope="col" class="num">耗时</th><th scope="col">备注</th></tr></thead>';
+            var tbody = document.createElement('tbody');
+            (payload.rounds || []).forEach(function (round) {
+                var tr = document.createElement('tr');
+                tr.appendChild(cell(String(round.round_index), 'num'));
+                tr.appendChild(cell(round.outcome || '—'));
+                tr.appendChild(numCell(aiuFmtInt(round.tokens_input)));
+                tr.appendChild(numCell(aiuFmtTokens(round.cache_read_tokens)));
+                tr.appendChild(numCell(aiuFmtInt(round.tokens_output)));
+                tr.appendChild(numCell(aiuFmtInt(round.request_chars)));
+                tr.appendChild(numCell(aiuFmtInt(round.context_chars)));
+                tr.appendChild(numCell(aiuFmtDuration(round.duration_ms)));
+                tr.appendChild(cell(round.error || '—'));
+                tbody.appendChild(tr);
+            });
+            if (!(payload.rounds || []).length) {
+                var tr = document.createElement('tr');
+                var td = cell('这次运行没有逐轮记录。', 'empty-row');
+                td.colSpan = 9;
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+            }
+            table.appendChild(tbody);
+            wrap.appendChild(table);
+            body.appendChild(wrap);
+
+            var pricingNote = document.createElement('p');
+            pricingNote.className = 'aiu-meta';
+            var pricing = payload.pricing || {};
+            pricingNote.textContent = pricing.configured
+                ? '费用按当前价格表（版本 ' + (pricing.version || '未标') + '）估算，不是接口返回的金额。'
+                : '这个项目还没有配置价格表，因此没有费用数字。';
+            body.appendChild(pricingNote);
+            $('aiuRunModalTitle').textContent = '本次分析消耗 · ' + (fallbackLabel ? aiuFmtTime(fallbackLabel) : runId);
+        }).catch(function (error) {
+            body.textContent = '加载失败：' + (error && error.message ? error.message : error);
+        });
+    }
+
+    $('aiuRefreshBtn').addEventListener('click', function () { loadOverview(); });
+    $('aiuRetryBtn').addEventListener('click', function () { loadOverview(); });
+    $('aiuDrillClose').addEventListener('click', function () {
+        $('aiuDrillCard').hidden = true;
+        state.drillProjectId = null;
+    });
+
+    loadOverview();
+})();
+</script>
+{% endblock %}
