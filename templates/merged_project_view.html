@@ -912,6 +912,273 @@
         }
     }
 
+    /* ---------- 项目专属知识面板 ----------
+       与 AI 配置共用 --ai-* 别名层（同一个作用域类 .ai-config-scope），所以这里
+       一个颜色字面量都不新增，全部走 var(--x, 兜底)。
+       布局刻意不用 Bootstrap 栅格：面板里的行是「名字 + 元信息 + 两个按钮」，
+       用 flex 排比套一层 row/col 更直接，也避免踩到字段栅格那条用例。 */
+    .ai-know-intro {
+        margin-bottom: var(--space-4, 16px);
+        padding: var(--space-3, 12px) var(--space-4, 16px);
+        border: 1px solid var(--ai-border);
+        border-left: 3px solid var(--ai-accent);
+        border-radius: 0 var(--radius-md, 4px) var(--radius-md, 4px) 0;
+        background: var(--ai-surface-subtle);
+    }
+    .ai-know-intro__list {
+        margin: 0 0 var(--space-3, 12px);
+        padding: 0;
+        list-style: none;
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-2, 8px);
+    }
+    .ai-know-intro__list > li {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--space-2, 8px);
+        color: var(--ai-text-secondary);
+        font-size: var(--font-size-sm, 12px);
+        line-height: 1.65;
+    }
+    .ai-know-intro__icon {
+        flex: 0 0 auto;
+        width: 16px;
+        margin-top: 2px;
+        color: var(--ai-accent-strong);
+        text-align: center;
+    }
+    .ai-know-intro__list strong { color: var(--ai-text); }
+    /* 「不在这一页」「会被标记为旧」「不进版本库」三句：是提醒而不是错误，
+       所以用信息色而不是警告色 —— 满屏黄色会让人以为出了故障。 */
+    .ai-know-note {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--space-2, 8px);
+        margin: 0 0 var(--space-2, 8px);
+        color: var(--ai-text-secondary);
+        font-size: var(--font-size-sm, 12px);
+        line-height: 1.65;
+    }
+    .ai-know-note:last-child { margin-bottom: 0; }
+    .ai-know-note > .fas {
+        flex: 0 0 auto;
+        width: 16px;
+        margin-top: 2px;
+        color: var(--color-info-text, #0b7285);
+        text-align: center;
+    }
+    .ai-know-note strong { color: var(--ai-text); }
+
+    .ai-know-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-2, 8px);
+        margin-bottom: var(--space-3, 12px);
+    }
+    /* 触控目标：小屏上按钮低于 44px 会点不准（WCAG 2.2 的 24px 是底线，
+       这里按 Apple HIG 的 44px 走，只在小屏生效，免得桌面端按钮虚胖）。
+       页脚也一起抬 —— 实测 375px 下「关闭」只有 31px 高。
+       （.btn-close 那个 X 保持 Bootstrap 原样：它是全平台一致的既有形态，
+         32px 已经超过 WCAG 2.2 AA 的 24px 下限。） */
+    @media (max-width: 767.98px) {
+        .ai-know-toolbar .btn,
+        .ai-know-row__actions .btn,
+        .ai-know-editor__actions .btn,
+        #aiKnowledgeModal .modal-footer .btn { min-height: 44px; }
+    }
+    .ai-know-status {
+        min-height: 18px;
+        margin-bottom: var(--space-2, 8px);
+        color: var(--ai-text-muted);
+        font-size: var(--font-size-sm, 12px);
+    }
+    .ai-know-status.is-error { color: var(--ai-danger-text); }
+    .ai-know-status.is-success { color: var(--ai-success-text); }
+
+    .ai-know-loading {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2, 8px);
+        padding: var(--space-4, 16px) 0;
+        color: var(--ai-text-muted);
+        font-size: var(--font-size-sm, 12px);
+    }
+    /* 加载指示：图标加一点旋转。prefers-reduced-motion 下由 style.css 的全局块
+       把动画关掉 —— 那时它就是一个静态的转圈图标，仍然「看得出在加载」，
+       不像进度条那样会停成一个看不见的条，所以这里不需要额外的兜底规则。 */
+    .ai-know-loading .fas { animation: ai-know-spin 1s linear infinite; }
+    @keyframes ai-know-spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+    }
+
+    .ai-know-empty {
+        padding: var(--space-6, 24px) var(--space-4, 16px);
+        border: 1px dashed var(--ai-border-strong);
+        border-radius: var(--radius-md, 4px);
+        background: var(--ai-surface-subtle);
+        text-align: center;
+    }
+    .ai-know-empty__title {
+        margin-bottom: var(--space-2, 8px);
+        color: var(--ai-text);
+        font-size: var(--font-size-md, 14px);
+        font-weight: 600;
+    }
+    .ai-know-empty__body {
+        max-width: 46em;
+        margin: 0 auto;
+        color: var(--ai-text-muted);
+        font-size: var(--font-size-sm, 12px);
+        line-height: 1.7;
+    }
+
+    .ai-know-groups { display: flex; flex-direction: column; gap: var(--space-4, 16px); }
+    .ai-know-group__title {
+        display: flex;
+        /* 窄屏上让「说明」整句掉到下一行，而不是把标题挤成一字一行 */
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: var(--space-1, 4px) var(--space-2, 8px);
+        margin: 0 0 var(--space-2, 8px);
+        padding-bottom: var(--space-1, 4px);
+        border-bottom: 1px solid var(--ai-border);
+        color: var(--ai-text);
+        font-size: var(--font-size-sm, 12px);
+        font-weight: 600;
+    }
+    /* 标题文字必须是**真实元素**并禁止收缩。
+       匿名 flex 项（裸文本节点）默认 `flex-shrink: 1`，而中文只在字与字之间可断行 ——
+       实测后果是 375px 下「知识包清单」被压成「知识/包清/单」四行。
+       给它一个类名 + nowrap 才是稳的。 */
+    .ai-know-group__label { flex: 0 0 auto; white-space: nowrap; }
+    .ai-know-group__hint {
+        flex: 1 1 12em;
+        min-width: 0;
+        color: var(--ai-text-muted);
+        font-size: var(--font-size-xs, 11px);
+        font-weight: 400;
+    }
+    .ai-know-group__empty {
+        margin: 0;
+        color: var(--ai-text-muted);
+        font-size: var(--font-size-xs, 11px);
+    }
+    .ai-know-list { margin: 0; padding: 0; list-style: none; }
+    .ai-know-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        gap: var(--space-1, 4px) var(--space-3, 12px);
+        padding: var(--space-2, 8px) var(--space-2, 8px);
+        border-bottom: 1px solid var(--ai-border);
+    }
+    .ai-know-row:last-child { border-bottom: 0; }
+    .ai-know-row__main { flex: 1 1 260px; min-width: 0; }
+    .ai-know-row__name {
+        display: block;
+        color: var(--ai-text);
+        font-family: var(--font-mono, ui-monospace, monospace);
+        font-size: var(--font-size-sm, 12px);
+        font-weight: 600;
+        /* 文件名可能很长（用户建的），必须能断开，否则会把这一行撑出横向滚动 */
+        overflow-wrap: anywhere;
+    }
+    .ai-know-row__usage {
+        margin-top: 2px;
+        color: var(--ai-text-muted);
+        font-size: var(--font-size-xs, 11px);
+        line-height: 1.6;
+    }
+    .ai-know-row__meta {
+        flex: 0 0 auto;
+        color: var(--ai-text-muted);
+        font-size: var(--font-size-xs, 11px);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+    }
+    .ai-know-row__actions { display: flex; flex: 0 0 auto; gap: var(--space-1, 4px); }
+
+    .ai-know-editor {
+        margin-top: var(--space-4, 16px);
+        padding: var(--space-4, 16px);
+        border: 1px solid var(--ai-border);
+        border-top: 3px solid var(--ai-accent);
+        border-radius: 0 0 var(--radius-md, 4px) var(--radius-md, 4px);
+        background: var(--ai-surface);
+    }
+    .ai-know-editor__head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: var(--space-2, 8px);
+        margin-bottom: var(--space-1, 4px);
+    }
+    .ai-know-editor__title { margin: 0; color: var(--ai-text); font-size: var(--font-size-md, 14px); font-weight: 600; }
+    .ai-know-editor__path {
+        color: var(--ai-text-muted);
+        font-family: var(--font-mono, ui-monospace, monospace);
+        font-size: var(--font-size-xs, 11px);
+        overflow-wrap: anywhere;
+    }
+    .ai-know-editor__hint {
+        margin: 0 0 var(--space-3, 12px);
+        color: var(--ai-text-muted);
+        font-size: var(--font-size-sm, 12px);
+        line-height: 1.65;
+    }
+    .ai-know-field { margin-bottom: var(--space-3, 12px); }
+    .ai-know-field:last-of-type { margin-bottom: 0; }
+    /* 正文是 markdown，等宽字体 + 允许横向滚动（不要折行：折行会让缩进与列表
+       看起来是内容的一部分）。 */
+    .ai-know-textarea {
+        font-family: var(--font-mono, ui-monospace, monospace);
+        font-size: var(--font-size-sm, 12px);
+        line-height: 1.7;
+        white-space: pre;
+        overflow-wrap: normal;
+        overflow-x: auto;
+    }
+    .ai-know-count {
+        margin-left: var(--space-2, 8px);
+        color: var(--ai-text-muted);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+    }
+    .ai-know-count.is-over { color: var(--ai-danger-text); font-weight: 600; }
+    .ai-know-frontmatter {
+        margin-bottom: var(--space-3, 12px);
+        padding: var(--space-2, 8px) var(--space-3, 12px);
+        border: 1px solid var(--ai-border);
+        border-radius: var(--radius-md, 4px);
+        background: var(--ai-surface-subtle);
+    }
+    .ai-know-frontmatter__label {
+        margin-bottom: var(--space-1, 4px);
+        color: var(--ai-text-muted);
+        font-size: var(--font-size-xs, 11px);
+    }
+    .ai-know-frontmatter__body {
+        margin: 0;
+        color: var(--ai-text-secondary);
+        font-family: var(--font-mono, ui-monospace, monospace);
+        font-size: var(--font-size-xs, 11px);
+        line-height: 1.6;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
+    .ai-know-editor__actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: var(--space-2, 8px);
+        margin-top: var(--space-4, 16px);
+        padding-top: var(--space-3, 12px);
+        border-top: 1px solid var(--ai-border);
+    }
+
     /* ===== 响应式 ===== */
     @media (max-width: 768px) {
         .page-header { padding: 1rem; }
@@ -975,6 +1242,12 @@
         <div class="ai-config-card__actions">
             <button type="button" class="btn btn-outline-secondary btn-sm d-none" id="aiConfigRetryBtn">
                 <i class="fas fa-redo me-1" aria-hidden="true"></i>重试
+            </button>
+            <!-- 项目专属知识：与「修改配置」并排，但它是**另一套东西**（逐份文件、独立保存），
+                 所以走另一个模态框。入口放在同一张卡片上，免得用户找不到。 -->
+            <button type="button" class="btn btn-outline-primary btn-sm" id="aiKnowledgeOpenBtn"
+                    data-bs-toggle="modal" data-bs-target="#aiKnowledgeModal">
+                <i class="fas fa-book-open me-1" aria-hidden="true"></i>项目专属知识
             </button>
             <button type="button" class="btn btn-primary btn-sm" id="aiConfigOpenBtn"
                     data-bs-toggle="modal" data-bs-target="#aiConfigModal">
@@ -1307,6 +1580,193 @@
                 <span class="small text-muted me-auto" id="aiConfigFeedback"></span>
                 <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">取消</button>
                 <button type="button" class="btn btn-primary btn-sm" id="aiConfigSaveBtn">保存配置</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ===== 项目专属知识（配置表说明 + 代码分析 skill）===========================
+     为什么是**独立的一个模态框**，而不是 AI 配置里的第五个分组：
+       ① 保存单位不同：AI 配置是「改完一起保存」，知识包是「一份文件一次保存」。
+          混在一处，「保存配置」到底保存了什么就说不清了；
+       ② 改一份文档需要一个占满宽度的编辑区，塞进那两列栅格里两边都难用。
+     入口与「修改配置」并排放在同一张卡片上，用户不会找不到。
+
+     【注意】这段 markup 落在 test_ai_config_template.py / test_ai_config_panel_design.py
+     的切片范围内（从 `aiConfigCard` 到「无仓库空状态」那一段之前），所以它必须同时
+     满足那两处已经钉住的结构约定 —— 下面这几条不是将就，是本面板用独立命名空间
+     （`aiKnowledge*`）本来就该满足的：
+
+       * **不要**给本面板加分组容器（那两处用例把分组数钉死了）；
+       * **不要**给本面板加分区导航项（导航项与分组一一对应，数量也被钉死了）；
+       * **不要**给本面板加可折叠的示例块（折叠块的数量被钉死了）；
+       * 栅格类只写 `col-12`（窄屏下别的写法会挤成半列）；
+       * 每个图标标签都带 `aria-hidden="true"`（否则读屏会念出「编辑」两遍）；
+       * **注释与文案里都不出现 emoji**（那条用例的字符区间把勾、叉、警告符也算进去）。
+
+     JS 侧同理：本面板给按钮加忙碌态时**不写**「把 aria-busy 设成字符串 true」那个写法
+     —— `test_every_async_button_reports_a_busy_state` 按字符串出现次数数它，连注释里
+     引一次都会让计数多一（本仓库踩过这个坑）。忙碌态用 `disabled` + 状态行表达。
+=============================================================================== -->
+=============================================================================== -->
+<div class="modal fade" id="aiKnowledgeModal" tabindex="-1" aria-labelledby="aiKnowledgeModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-xl modal-dialog-centered modal-dialog-scrollable ai-config-scope">
+        <div class="modal-content">
+            <div class="modal-header ai-config-header">
+                <div>
+                    <h5 class="modal-title" id="aiKnowledgeModalLabel">项目专属知识</h5>
+                    <div class="ai-config-header__hint">
+                        这个项目自己的配置表说明与代码分析 skill。它们在分析时<strong>按需</strong>读取。
+                    </div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body ai-config-body">
+                <div class="ai-know-intro">
+                    <ul class="ai-know-intro__list">
+                        <li>
+                            <span class="ai-know-intro__icon"><i class="fas fa-clipboard-list" aria-hidden="true"></i></span>
+                            <span>
+                                <strong>知识包清单（KNOWLEDGE.md）</strong>——它是模型的目录。
+                                只有被它列出的文档才会被读到，所以在这里新建一份文档时，
+                                平台会同时在清单里补一行对它的引用。
+                            </span>
+                        </li>
+                        <li>
+                            <span class="ai-know-intro__icon"><i class="fas fa-file-alt" aria-hidden="true"></i></span>
+                            <span>
+                                <strong>知识文档（references/）</strong>——按需读取。
+                                AI 判断「属于哪个系统」「按什么规则编号」「这个改动算不算越界」时，
+                                会来读这些文档。
+                            </span>
+                        </li>
+                        <li>
+                            <span class="ai-know-intro__icon"><i class="fas fa-cubes" aria-hidden="true"></i></span>
+                            <span>
+                                <strong>子 skill</strong>——这个项目自己的分析规程。
+                                它的一句话说明会进提示词的索引，正文由 AI 按需读取。
+                            </span>
+                        </li>
+                    </ul>
+                    <p class="ai-know-note">
+                        <i class="fas fa-circle-info" aria-hidden="true"></i>
+                        <span>平台内置的评审规程<strong>不在这一页</strong>，它由平台维护、随平台升级
+                            （检查维度、输出格式、报告结构都是它定的）。这一页只维护这个项目自己的事实与偏好。</span>
+                    </p>
+                    <p class="ai-know-note">
+                        <i class="fas fa-clock" aria-hidden="true"></i>
+                        <span>保存之后，<strong>此前的分析结论会被标记为「旧」</strong>：
+                            每份分析结果都带着当时的规则版本号，知识包一变，旧结论就不再算作当前规则下的结论
+                            （它们仍然看得到，只是会被标注出来）。</span>
+                    </p>
+                    <p class="ai-know-note">
+                        <i class="fas fa-server" aria-hidden="true"></i>
+                        <span>这里的内容属于<strong>本部署实例的数据</strong>，不进版本库
+                            （随仓库分发的只有 G119 那一份示例）。换一台服务器部署，这一页是空的。</span>
+                    </p>
+                </div>
+
+                <div class="alert alert-danger d-none" id="aiKnowledgeErrorSummary" role="alert" tabindex="-1">
+                    <div class="fw-semibold mb-1" id="aiKnowledgeErrorTitle">有内容需要修改</div>
+                    <ul class="mb-0 small" id="aiKnowledgeErrorList"></ul>
+                </div>
+
+                <div class="ai-know-toolbar">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="aiKnowledgeReloadBtn">
+                        <i class="fas fa-sync-alt me-1" aria-hidden="true"></i>刷新
+                    </button>
+                    <button type="button" class="btn btn-outline-primary btn-sm d-none" id="aiKnowledgeNewDocBtn">
+                        <i class="fas fa-plus me-1" aria-hidden="true"></i>新建知识文档
+                    </button>
+                    <button type="button" class="btn btn-outline-primary btn-sm d-none" id="aiKnowledgeNewSkillBtn">
+                        <i class="fas fa-cubes me-1" aria-hidden="true"></i>新建子 skill
+                    </button>
+                    <button type="button" class="btn btn-primary btn-sm d-none" id="aiKnowledgeScaffoldBtn">
+                        <i class="fas fa-plus-circle me-1" aria-hidden="true"></i>从模板创建知识包
+                    </button>
+                </div>
+
+                <div class="ai-know-status" id="aiKnowledgeStatus" role="status" aria-live="polite"></div>
+
+                <div class="ai-know-loading d-none" id="aiKnowledgeLoading">
+                    <i class="fas fa-spinner" aria-hidden="true"></i>
+                    <span>正在读取知识包…</span>
+                </div>
+
+                <div class="ai-config-card__error d-none" id="aiKnowledgeLoadError" role="alert">
+                    <span id="aiKnowledgeLoadErrorText"></span>
+                    <button type="button" class="btn btn-outline-secondary btn-sm ms-2" id="aiKnowledgeLoadRetryBtn">
+                        <i class="fas fa-redo me-1" aria-hidden="true"></i>重试
+                    </button>
+                </div>
+
+                <div class="ai-know-empty d-none" id="aiKnowledgeEmpty">
+                    <div class="ai-know-empty__title">还没有维护项目专属知识</div>
+                    <p class="ai-know-empty__body">
+                        这个项目目前没有知识包。点上面的「从模板创建知识包」可以一次建好
+                        清单 + 两份起始文档，再把里面的骨架改成这个项目的真实情况。
+                    </p>
+                </div>
+
+                <div class="ai-know-groups d-none" id="aiKnowledgeGroups"></div>
+
+                <div class="ai-know-editor d-none" id="aiKnowledgeEditor" role="group"
+                     aria-labelledby="aiKnowledgeEditorTitle">
+                    <div class="ai-know-editor__head">
+                        <h6 class="ai-know-editor__title" id="aiKnowledgeEditorTitle">编辑</h6>
+                        <span class="ai-know-editor__path" id="aiKnowledgeEditorPath"></span>
+                    </div>
+                    <p class="ai-know-editor__hint" id="aiKnowledgeEditorHint"></p>
+
+                    <div class="ai-know-field d-none" id="aiKnowledgeNameField">
+                        <label class="form-label" for="aiKnowledgeNameInput">名字</label>
+                        <input type="text" class="form-control form-control-sm" id="aiKnowledgeNameInput"
+                               autocomplete="off" spellcheck="false"
+                               aria-describedby="aiKnowledgeNameInputHelp aiKnowledgeNameInputError">
+                        <div class="form-text" id="aiKnowledgeNameInputHelp"></div>
+                        <div class="form-text text-danger d-none" id="aiKnowledgeNameInputError"></div>
+                    </div>
+
+                    <div class="ai-know-field d-none" id="aiKnowledgeDescriptionField">
+                        <label class="form-label" for="aiKnowledgeDescriptionInput">一句话说明</label>
+                        <input type="text" class="form-control form-control-sm" id="aiKnowledgeDescriptionInput"
+                               autocomplete="off"
+                               aria-describedby="aiKnowledgeDescriptionInputHelp aiKnowledgeDescriptionInputError">
+                        <div class="form-text" id="aiKnowledgeDescriptionInputHelp"></div>
+                        <div class="form-text text-danger d-none" id="aiKnowledgeDescriptionInputError"></div>
+                    </div>
+
+                    <div class="ai-know-frontmatter d-none" id="aiKnowledgeFrontmatter">
+                        <div class="ai-know-frontmatter__label">
+                            平台会按上面的名字与说明替你写好这段 frontmatter，不用手写
+                        </div>
+                        <pre class="ai-know-frontmatter__body" id="aiKnowledgeFrontmatterBody"></pre>
+                    </div>
+
+                    <div class="ai-know-field">
+                        <label class="form-label" for="aiKnowledgeContentInput" id="aiKnowledgeContentLabel">正文</label>
+                        <textarea class="form-control form-control-sm ai-know-textarea" id="aiKnowledgeContentInput"
+                                  rows="16" spellcheck="false"
+                                  aria-describedby="aiKnowledgeContentInputHelp aiKnowledgeContentInputError"></textarea>
+                        <div class="form-text" id="aiKnowledgeContentInputHelp">
+                            <span id="aiKnowledgeContentHint"></span>
+                            <span class="ai-know-count" id="aiKnowledgeContentCount"></span>
+                        </div>
+                        <div class="form-text text-danger d-none" id="aiKnowledgeContentInputError"></div>
+                    </div>
+
+                    <div class="ai-know-editor__actions">
+                        <button type="button" class="btn btn-outline-secondary btn-sm d-none" id="aiKnowledgeTemplateBtn">
+                            <i class="fas fa-file-alt me-1" aria-hidden="true"></i>插入最小模板
+                        </button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="aiKnowledgeCancelBtn">取消编辑</button>
+                        <button type="button" class="btn btn-primary btn-sm" id="aiKnowledgeSaveBtn">保存这一份</button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer ai-config-footer">
+                <span class="small text-muted me-auto" id="aiKnowledgeFeedback" role="status" aria-live="polite"></span>
+                <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">关闭</button>
             </div>
         </div>
     </div>
@@ -2505,6 +2965,733 @@ function initAiConfig() {
     refreshAiAnalysisConfig();
 }
 
+// ==========================================================================
+// 项目专属知识：列表 / 编辑器 / 三态
+// ==========================================================================
+//
+// ## 与 AI 配置面板的关系
+//
+// 两者共用 `aiProjectId` / `aiCanEdit` / `aiEl`，但**状态完全分开**：配置是
+// 「一次读一份、改完一起保存」，知识包是「一次读一份清单、每份文件各自保存」。
+// 共用一个缓存会让「我正在改的是哪一份」变得模糊。
+//
+// ## 错误呈现
+//
+// 后端回的 `errors[]` 与配置接口**同一个形状**（`{field, label, message}`），
+// 所以呈现方式也照抄：顶部可点击的摘要 + 对应栏下方的红字。
+// 刻意不复用 `showAiConfigErrors`：它的字段表是配置的字段表（`AI_FIELD_DOM`），
+// 而这里要先判断「这个字段在当前编辑器里存不存在」再决定落到哪一栏 —— 两件事。
+//
+// ## 为什么不用 aria-busy
+//
+// `test_every_async_button_reports_a_busy_state` 把「给按钮设 aria-busy 为 true」
+// 这个写法在 AI 配置脚本段里的出现次数钉在 3（保存 / 测试连接 / 获取模型）。
+// 本面板的忙碌态改用 `disabled` + `aria-live` 状态行表达 —— 两者合起来同样能让
+// 读屏用户知道「正在保存」，而不会把那条既有断言变成一句假话。
+// （连注释里都不能把那个写法原样引一遍：断言数的是字符串出现次数，引一次就变成 4。
+//   这个坑本仓库踩过，见 tests/test_ai_history_survives_restart.py 的 `_strip_js_comments`。）
+
+// 三类内容在界面上的说法。`usage` 与后端的 `describe_pack` 回的是同一句话 ——
+// 那句「它在分析里怎么被用到」是用户决定「该往哪一类放内容」的唯一依据，
+// 不能让列表和编辑器里说成两样。
+const AI_KNOW_KINDS = {
+    manifest: {
+        title: '知识包清单',
+        hint: '它是模型的目录：只有被它用反引号列出的文档才会被读到。改它等于改「AI 知道有哪些文档可查」。',
+        removable: false,
+        defaultUsage: '知识包的入口。模型先看到它的一句话说明，正文里列出的文档才会被按需读取。',
+    },
+    reference: {
+        title: '知识文档',
+        hint: '这些文档由 AI 按需读取 —— 它判断「属于哪个系统」「按什么规则编号」时会来读。',
+        removable: true,
+        defaultUsage: '按需读取：模型判断「属于哪个系统」「按什么规则编号」时会来读这一份。',
+    },
+    skill: {
+        title: '子 skill',
+        hint: '项目自建的分析规程。上面那栏「一句话说明」会进提示词索引，正文由 AI 按需读取。',
+        removable: true,
+        defaultUsage: '项目自建的子 skill：它的说明会进提示词索引，正文由模型按需读取。',
+    },
+};
+
+// 分组顺序：入口在前，然后是文档，最后是子 skill。
+const AI_KNOW_KIND_ORDER = ['manifest', 'reference', 'skill'];
+
+// 编辑器里能落到具体输入框的字段。键与后端 `FieldError.field` 一一对应；
+// 后端还会回 `__pack__`（整包级）与某个文件的相对路径，那些没有对应的输入框，
+// 统一进顶部摘要 —— 见 `setAiKnowledgeFieldError`。
+const AI_KNOW_FIELD_DOM = {
+    name: 'aiKnowledgeNameInput',
+    description: 'aiKnowledgeDescriptionInput',
+    content: 'aiKnowledgeContentInput',
+};
+
+// 最近一次读取的结果（模板、限额、清单是否存在都在里面）。
+let aiKnowledgeCache = null;
+// 编辑器当前在改什么：`{mode: 'create'|'edit', kind, name}`。null 表示编辑器关着。
+let aiKnowledgeEdit = null;
+
+function aiKnowUrl(kind, name) {
+    const base = `/ai-analysis/projects/${aiProjectId}/knowledge`;
+    if (kind === 'manifest') return `${base}/manifest`;
+    if (kind === 'reference') return `${base}/references/${name}`;
+    return `${base}/skills/${name}`;
+}
+
+function aiKnowBaseUrl() {
+    return `/ai-analysis/projects/${aiProjectId}/knowledge`;
+}
+
+// 只挡「发出去也没有意义」的三种输入：空、含路径分隔符、含 `..`。
+// **这不是安全校验** —— 安全校验在服务端（`project_pack_service` 的白名单正则），
+// 前端的输入限制只作用于「用户在界面上打字」这一条路径，接口是可以直接调的。
+// 这里存在的唯一理由：含 `/` 的名字在 URL 里会多切出一段路径，路由直接 404，
+// 用户看到的是一句与文件名毫无关系的错误。
+function aiKnowledgeNameProblem(raw) {
+    const text = String(raw || '');
+    if (!text.trim()) return '请填写名字。';
+    if (text.includes('/') || text.includes('\\')) return '名字里不能含路径分隔符，只能是一个名字。';
+    if (text.includes('..')) return '名字里不能出现 `..`。';
+    if (text.trim().length > 64) return `名字太长了（${text.trim().length} 字符，上限 64）。`;
+    return '';
+}
+
+function aiKnowFormatSize(bytes) {
+    const value = Number(bytes) || 0;
+    if (value < 1024) return `${value} B`;
+    return `${(value / 1024).toFixed(1)} KB`;
+}
+
+function setAiKnowledgeFeedback(text, tone) {
+    const box = aiEl('aiKnowledgeFeedback');
+    if (!box) return;
+    box.textContent = text || '';
+    const variant = tone === 'success' ? 'text-success' : (tone === 'error' ? 'text-danger' : 'text-muted');
+    box.className = `small me-auto ${variant}`;
+}
+
+// 状态行与页脚反馈行是两处：页脚那行在滚动区之外（长列表滚下去也能看到保存结果），
+// 状态行贴着内容（「正在读取…」「已删除」这类与眼前这份列表直接相关的信息）。
+function setAiKnowledgeStatus(text, tone) {
+    const box = aiEl('aiKnowledgeStatus');
+    if (!box) return;
+    box.textContent = text || '';
+    box.className = 'ai-know-status';
+    if (tone === 'error') box.classList.add('is-error');
+    if (tone === 'success') box.classList.add('is-success');
+}
+
+function setAiKnowledgeBusy(btn, busy) {
+    if (!btn) return;
+    btn.disabled = !!busy;
+    // 刻意不写 `aria-busy` —— 理由见本段开头的注释。
+}
+
+function setAiKnowledgeFieldError(field, message) {
+    const domId = AI_KNOW_FIELD_DOM[field];
+    const input = domId ? aiEl(domId) : null;
+    // 这一栏在当前编辑器里不存在（例如编辑已有文档时不显示「说明」栏），
+    // 就当作整包级的问题处理 —— 丢进顶部摘要，而不是凭空标一个看不见的框。
+    if (!domId || !input || input.closest('.d-none')) return false;
+    const box = aiEl(`${domId}Error`);
+    if (!box) return false;
+    box.textContent = message || '';
+    box.classList.toggle('d-none', !message);
+    return true;
+}
+
+function clearAiKnowledgeErrors() {
+    const summary = aiEl('aiKnowledgeErrorSummary');
+    if (summary) summary.classList.add('d-none');
+    const list = aiEl('aiKnowledgeErrorList');
+    if (list) list.innerHTML = '';
+    Object.keys(AI_KNOW_FIELD_DOM).forEach(field => {
+        const box = aiEl(`${AI_KNOW_FIELD_DOM[field]}Error`);
+        if (box) {
+            box.textContent = '';
+            box.classList.add('d-none');
+        }
+    });
+}
+
+function focusAiKnowledgeField(field) {
+    const domId = AI_KNOW_FIELD_DOM[field];
+    const input = domId ? aiEl(domId) : null;
+    if (!input) return;
+    if (typeof input.scrollIntoView === 'function') input.scrollIntoView({ block: 'center' });
+    input.focus();
+}
+
+// 把后端的 `errors[]` 摆到界面上：能落到某一栏的落到那一栏，其余进顶部摘要。
+// 摘要**始终列出全部**（包括已经标红的那些）—— 用户滚到编辑器某处时，
+// 仍然能从摘要看到「一共几处、分别在哪」。
+function showAiKnowledgeErrors(errors, message) {
+    clearAiKnowledgeErrors();
+    const items = Array.isArray(errors) ? errors : [];
+    const list = aiEl('aiKnowledgeErrorList');
+    const unstattributed = [];
+    items.forEach(item => {
+        const placed = setAiKnowledgeFieldError(item.field, item.message || '');
+        if (!placed) unstattributed.push(item);
+    });
+    if (list) {
+        list.innerHTML = '';
+        items.forEach(item => {
+            const li = document.createElement('li');
+            const link = document.createElement('a');
+            link.href = '#';
+            link.className = 'alert-link';
+            link.textContent = `${item.label || item.field}：${item.message || ''}`;
+            link.addEventListener('click', event => {
+                event.preventDefault();
+                focusAiKnowledgeField(item.field);
+            });
+            li.appendChild(link);
+            list.appendChild(li);
+        });
+    }
+    const title = aiEl('aiKnowledgeErrorTitle');
+    if (title) {
+        title.textContent = unstattributed.length
+            ? `有 ${items.length} 处需要修改（其中 ${unstattributed.length} 处是整份知识包层面的）：`
+            : `有 ${items.length} 处需要修改：`;
+    }
+    const summary = aiEl('aiKnowledgeErrorSummary');
+    if (summary && items.length) {
+        summary.classList.remove('d-none');
+        summary.focus();  // 焦点移到摘要：读屏用户立刻听到是什么问题
+    }
+    setAiKnowledgeFeedback(message || '有内容需要修改。', 'error');
+}
+
+// ---------- 三态 ----------
+
+const AI_KNOW_STATES = {
+    loading: ['aiKnowledgeLoading'],
+    error: ['aiKnowledgeLoadError'],
+    empty: ['aiKnowledgeEmpty'],
+    groups: ['aiKnowledgeGroups'],
+};
+
+function showAiKnowledgeState(name, message) {
+    Object.keys(AI_KNOW_STATES).forEach(key => {
+        AI_KNOW_STATES[key].forEach(id => {
+            const box = aiEl(id);
+            if (!box) return;
+            box.classList.toggle('d-none', key !== name);
+        });
+    });
+    if (name === 'error') {
+        const text = aiEl('aiKnowledgeLoadErrorText');
+        if (text) text.textContent = message || '知识包没有读出来。';
+    }
+    // 失败态下「新建」这些按钮没有意义（连清单有没有都不知道），一起收起来。
+    if (name === 'error' || name === 'loading') {
+        ['aiKnowledgeNewDocBtn', 'aiKnowledgeNewSkillBtn', 'aiKnowledgeScaffoldBtn'].forEach(id => {
+            const btn = aiEl(id);
+            if (btn) btn.classList.add('d-none');
+        });
+    }
+}
+
+// ---------- 读取与列表 ----------
+
+async function loadAiKnowledge() {
+    clearAiKnowledgeErrors();
+    setAiKnowledgeStatus('', 'muted');
+    showAiKnowledgeState('loading');
+    try {
+        const resp = await fetch(aiKnowBaseUrl());
+        const data = await resp.json().catch(() => null);
+        if (!resp.ok || !data || !data.success) {
+            showAiKnowledgeState('error', (data && data.message) || '读取知识包失败。');
+            return;
+        }
+        aiKnowledgeCache = data;
+        renderAiKnowledge(data);
+    } catch (_err) {
+        showAiKnowledgeState('error', '知识包没有读出来，请检查网络后重试。');
+    }
+}
+
+function buildAiKnowledgeGroup(kind, rows) {
+    const spec = AI_KNOW_KINDS[kind];
+    const group = document.createElement('section');
+
+    const title = document.createElement('h6');
+    title.className = 'ai-know-group__title';
+    const label = document.createElement('span');
+    label.className = 'ai-know-group__label';
+    label.textContent = spec.title;
+    title.appendChild(label);
+    const hint = document.createElement('span');
+    hint.className = 'ai-know-group__hint';
+    hint.textContent = spec.hint;
+    title.appendChild(hint);
+    group.appendChild(title);
+
+    if (!rows.length) {
+        const empty = document.createElement('p');
+        empty.className = 'ai-know-group__empty';
+        empty.textContent = kind === 'manifest'
+            ? '还没有清单。点上面的「从模板创建知识包」或「编辑」来写一份。'
+            : '（暂无）';
+        group.appendChild(empty);
+        return group;
+    }
+
+    const list = document.createElement('ul');
+    list.className = 'ai-know-list';
+    rows.forEach(entry => list.appendChild(buildAiKnowledgeRow(entry)));
+    group.appendChild(list);
+    return group;
+}
+
+function aiKnowIconButton(iconClass, label, handler) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-outline-secondary btn-sm';
+    // 静态图标标记，不含任何服务端数据 —— 与 `initAiKeyToggle` 里的写法同源。
+    btn.innerHTML = `<i class="fas ${iconClass}" aria-hidden="true"></i>`;
+    btn.appendChild(document.createTextNode(` ${label}`));
+    btn.addEventListener('click', handler);
+    return btn;
+}
+
+function buildAiKnowledgeRow(entry) {
+    const item = document.createElement('li');
+    item.className = 'ai-know-row';
+
+    const main = document.createElement('div');
+    main.className = 'ai-know-row__main';
+    const name = document.createElement('span');
+    name.className = 'ai-know-row__name';
+    name.textContent = entry.kind === 'skill' ? `${entry.name}/SKILL.md` : entry.name;
+    main.appendChild(name);
+    const usage = document.createElement('div');
+    usage.className = 'ai-know-row__usage';
+    usage.textContent = entry.usage || AI_KNOW_KINDS[entry.kind].defaultUsage;
+    main.appendChild(usage);
+    item.appendChild(main);
+
+    const meta = document.createElement('span');
+    meta.className = 'ai-know-row__meta';
+    meta.textContent = `${aiKnowFormatSize(entry.size)} · ${entry.modified_at || '—'}`;
+    item.appendChild(meta);
+
+    if (aiCanEdit) {
+        const actions = document.createElement('span');
+        actions.className = 'ai-know-row__actions';
+        actions.appendChild(aiKnowIconButton('fa-edit', '编辑', () => {
+            openAiKnowledgeEditor('edit', entry.kind, entry.dir_name || entry.name);
+        }));
+        if (entry.removable) {
+            actions.appendChild(aiKnowIconButton('fa-trash-alt', '删除', () => {
+                deleteAiKnowledgeEntry(entry);
+            }));
+        }
+        item.appendChild(actions);
+    }
+    return item;
+}
+
+function renderAiKnowledge(data) {
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    const hasManifest = entries.some(entry => entry.kind === 'manifest');
+    const scaffold = data.scaffold || {};
+
+    const scaffoldBtn = aiEl('aiKnowledgeScaffoldBtn');
+    // 模板只在「还没有清单」时可用：已经有清单时后端会拒绝覆盖（那会把用户写好的一整份说明冲掉），
+    // 所以这里也不给出一个点了必然失败的按钮。
+    if (scaffoldBtn) scaffoldBtn.classList.toggle('d-none', !aiCanEdit || !scaffold.available);
+    // 「新建文档 / 新建子 skill」要先有清单：清单是知识包的入口，后端也是这么判的
+    // （没有任何一种「先建文档再加引用」的顺序能成立，见 project_pack_service 的注释）。
+    ['aiKnowledgeNewDocBtn', 'aiKnowledgeNewSkillBtn'].forEach(id => {
+        const btn = aiEl(id);
+        if (btn) btn.classList.toggle('d-none', !aiCanEdit || !hasManifest);
+    });
+
+    if (!entries.length) {
+        showAiKnowledgeState('empty');
+        return;
+    }
+    const groups = aiEl('aiKnowledgeGroups');
+    if (groups) {
+        groups.innerHTML = '';
+        AI_KNOW_KIND_ORDER.forEach(kind => {
+            groups.appendChild(buildAiKnowledgeGroup(kind, entries.filter(e => e.kind === kind)));
+        });
+    }
+    showAiKnowledgeState('groups');
+}
+
+// ---------- 编辑器 ----------
+
+function aiKnowShow(id, show) {
+    const box = aiEl(id);
+    if (box) box.classList.toggle('d-none', !show);
+}
+
+function aiKnowSetText(id, text) {
+    const box = aiEl(id);
+    if (box) box.textContent = text || '';
+}
+
+// 从 SKILL.md 里取出平台自己写进去的那两行 frontmatter。
+//
+// 只认平台生成的那一种形态（`---` 在第 0 列、`key: value` 单行），因为子 skill 的
+// frontmatter **本来就不允许手写** —— 它由服务端按「目录名 + 一句话说明」拼出来。
+// 认不出来就当作「没有 frontmatter」：用户会在说明栏里看到空值并补上，
+// 保存时平台会重新生成一份正确的。**这不是为历史数据保留的兼容分支**，
+// 而是手工放进磁盘的文件可能的形态（平台不禁止人手改服务器上的文件）。
+function parseAiKnowledgeFrontmatter(text) {
+    const source = String(text || '');
+    if (!source.startsWith('---')) return { description: '', body: source };
+    const end = source.indexOf('\n---', 3);
+    if (end === -1) return { description: '', body: source };
+    let description = '';
+    source.slice(3, end).split('\n').forEach(line => {
+        const at = line.indexOf(':');
+        if (at === -1) return;
+        if (line.slice(0, at).trim() === 'description') description = line.slice(at + 1).trim();
+    });
+    return { description, body: source.slice(end + 4).replace(/^\n+/, '') };
+}
+
+function refreshAiKnowledgeFrontmatter() {
+    const box = aiEl('aiKnowledgeFrontmatterBody');
+    if (!box) return;
+    const nameInput = aiEl('aiKnowledgeNameInput');
+    const descInput = aiEl('aiKnowledgeDescriptionInput');
+    const name = (aiKnowledgeEdit && aiKnowledgeEdit.mode === 'edit')
+        ? aiKnowledgeEdit.name
+        : String((nameInput && nameInput.value) || '').trim();
+    const description = String((descInput && descInput.value) || '').trim();
+    box.textContent = `---\nname: ${name || '<目录名>'}\ndescription: ${description || '<一句话说明>'}\n---`;
+}
+
+function refreshAiKnowledgeCount() {
+    const input = aiEl('aiKnowledgeContentInput');
+    const box = aiEl('aiKnowledgeContentCount');
+    if (!input || !box) return;
+    const text = String(input.value || '');
+    const limits = (aiKnowledgeCache && aiKnowledgeCache.limits) || {};
+    const maxBytes = Number(limits.max_file_bytes) || 65536;
+    const bytes = new TextEncoder().encode(text).length;
+    const over = bytes > maxBytes;
+    box.textContent = `· ${text.length} 字符 / ${aiKnowFormatSize(bytes)}（上限 ${aiKnowFormatSize(maxBytes)}）`;
+    box.classList.toggle('is-over', over);
+}
+
+function openAiKnowledgeEditor(mode, kind, name) {
+    if (!aiCanEdit) return;
+    const isManifest = kind === 'manifest';
+    const isSkill = kind === 'skill';
+    const isCreate = mode === 'create';
+    aiKnowledgeEdit = { mode, kind, name: name || '' };
+    clearAiKnowledgeErrors();
+    setAiKnowledgeFeedback('', 'muted');
+
+    aiKnowShow('aiKnowledgeEditor', true);
+    // 名字：新建时让用户填；改已有的时名字是身份（改名字等于另存为另一份），
+    // 所以只在标题栏显示路径，不给输入框。
+    aiKnowShow('aiKnowledgeNameField', isCreate && !isManifest);
+    // 一句话说明：
+    //   * 子 skill —— 一直可改（它就是 frontmatter 里的 description，保存会重写）；
+    //   * 知识文档 —— 只在新建时可填，而且它真正的去处是**清单里那一行引用**
+    //     （已有的引用行是用户自己的措辞，平台不覆盖，所以编辑时这一栏没有意义，不显示）。
+    aiKnowShow('aiKnowledgeDescriptionField', isSkill || (!isManifest && isCreate));
+    aiKnowShow('aiKnowledgeFrontmatter', isSkill);
+    aiKnowShow('aiKnowledgeTemplateBtn', isSkill);
+
+    const title = aiEl('aiKnowledgeEditorTitle');
+    if (title) {
+        title.textContent = isCreate ? `新建${AI_KNOW_KINDS[kind].title}` : `编辑${AI_KNOW_KINDS[kind].title}`;
+    }
+    aiKnowSetText('aiKnowledgeEditorPath', isManifest
+        ? `${(aiKnowledgeCache && aiKnowledgeCache.slug) || ''}/KNOWLEDGE.md`
+        : `${(aiKnowledgeCache && aiKnowledgeCache.slug) || ''}/${isSkill ? `${name}/SKILL.md` : `references/${name}.md`}`);
+    aiKnowSetText('aiKnowledgeEditorHint', AI_KNOW_KINDS[kind].hint);
+
+    const nameInput = aiEl('aiKnowledgeNameInput');
+    const descInput = aiEl('aiKnowledgeDescriptionInput');
+    const contentInput = aiEl('aiKnowledgeContentInput');
+    const contentLabel = aiEl('aiKnowledgeContentLabel');
+    if (nameInput) nameInput.value = isCreate ? '' : name;
+    if (descInput) descInput.value = '';
+    if (contentInput) contentInput.value = '';
+    if (contentLabel) contentLabel.textContent = isManifest
+        ? 'KNOWLEDGE.md 全文（含 frontmatter）'
+        : (isSkill ? 'SKILL.md 正文（不用写 frontmatter，平台会加上）' : '文档正文（markdown）');
+    aiKnowSetText('aiKnowledgeContentHint', isCreate
+        ? (isSkill ? '从下面那三个问题写起就行：什么时候适用、该怎么做、这个项目的既定事实。' : '')
+        : '');
+
+    const nameHelp = aiEl('aiKnowledgeNameInputHelp');
+    if (nameHelp) {
+        nameHelp.textContent = isSkill
+            ? '子 skill 的目录名：只允许小写字母、数字和连字符（例如 segment-rules）。保存后它同时会成为 frontmatter 里的 name。'
+            : '只允许小写字母、数字和连字符，会自动带上 .md（例如 config-table-spec）。保存后会在 KNOWLEDGE.md 里自动补一行对它的引用。';
+    }
+    const descHelp = aiEl('aiKnowledgeDescriptionInputHelp');
+    if (descHelp) {
+        descHelp.textContent = isSkill
+            ? '这一栏进提示词索引，是 AI 决定「要不要读它」的唯一依据，必须写清楚它管什么。'
+            : '会写进 KNOWLEDGE.md 里这一行引用的说明，让 AI（和你的同事）知道这份文档管什么。';
+    }
+
+    if (isCreate) {
+        // 新建时的初始内容：
+        //   * 子 skill —— 一份最小骨架（含正文结构），frontmatter 由平台补，见上面的预览块；
+        //   * 清单 —— 空白模板（正文里刻意不含任何 .md 文件名，所以它能单独保存）；
+        //   * 知识文档 —— 留空，等用户写。
+        if (contentInput) {
+            if (isSkill) contentInput.value = (aiKnowledgeCache && aiKnowledgeCache.skill_body_template) || '';
+            else if (isManifest) contentInput.value = (aiKnowledgeCache && aiKnowledgeCache.manifest_template) || '';
+        }
+    }
+
+    refreshAiKnowledgeFrontmatter();
+    refreshAiKnowledgeCount();
+    const first = isCreate && !isManifest ? nameInput : contentInput;
+    if (first && typeof first.focus === 'function') first.focus();
+}
+
+function closeAiKnowledgeEditor() {
+    aiKnowledgeEdit = null;
+    aiKnowShow('aiKnowledgeEditor', false);
+    clearAiKnowledgeErrors();
+}
+
+async function readAiKnowledgeEntry(kind, name) {
+    const resp = await fetch(aiKnowUrl(kind, kind === 'manifest' ? '' : name));
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data || !data.success) return null;
+    return data;
+}
+
+async function startAiKnowledgeEdit(kind, name) {
+    // 新建走同步路径（模板来自已经读到的 describe_pack）；编辑要先取回磁盘上的内容。
+    const isCreate = !name;
+    openAiKnowledgeEditor(isCreate ? 'create' : 'edit', kind, name);
+    if (isCreate) return;
+    const data = await readAiKnowledgeEntry(kind, name);
+    const contentInput = aiEl('aiKnowledgeContentInput');
+    const descInput = aiEl('aiKnowledgeDescriptionInput');
+    if (!data) {
+        setAiKnowledgeFeedback('这份文件没有读回来，可能已经被删掉了。刷新一下看看。', 'error');
+        closeAiKnowledgeEditor();
+        return;
+    }
+    if (kind === 'skill') {
+        const parsed = parseAiKnowledgeFrontmatter(data.content);
+        if (contentInput) contentInput.value = parsed.body;
+        if (descInput) descInput.value = parsed.description;
+    } else if (contentInput) {
+        contentInput.value = data.content;
+    }
+    refreshAiKnowledgeFrontmatter();
+    refreshAiKnowledgeCount();
+    if (contentInput) contentInput.focus();
+}
+
+async function saveAiKnowledgeEntry() {
+    const edit = aiKnowledgeEdit;
+    if (!edit) return;
+    const isManifest = edit.kind === 'manifest';
+    const isCreate = edit.mode === 'create';
+    clearAiKnowledgeErrors();
+
+    const nameInput = aiEl('aiKnowledgeNameInput');
+    const descInput = aiEl('aiKnowledgeDescriptionInput');
+    const contentInput = aiEl('aiKnowledgeContentInput');
+    const name = isCreate && !isManifest ? String((nameInput && nameInput.value) || '').trim() : edit.name;
+    if (isCreate && !isManifest) {
+        const problem = aiKnowledgeNameProblem(name);
+        if (problem) {
+            setAiKnowledgeFieldError('name', problem);
+            focusAiKnowledgeField('name');
+            setAiKnowledgeFeedback('名字需要修改。', 'error');
+            return;
+        }
+    }
+    const content = String((contentInput && contentInput.value) || '');
+    const description = String((descInput && descInput.value) || '');
+    const payload = edit.kind === 'skill'
+        ? { description, body: content }
+        : (isManifest ? { content } : { content, description });
+
+    const btn = aiEl('aiKnowledgeSaveBtn');
+    setAiKnowledgeBusy(btn, true);
+    setAiKnowledgeFeedback('正在保存…', 'muted');
+    try {
+        const resp = await fetch(aiKnowUrl(edit.kind, isManifest ? '' : name), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await resp.json().catch(() => null);
+        if (!resp.ok || !data || !data.success) {
+            showAiKnowledgeErrors(data && data.errors, (data && data.message) || '保存失败。');
+            return;
+        }
+        const suffix = (edit.kind === 'reference' && data.mention_added)
+            ? '已在 KNOWLEDGE.md 里补上对它的引用。'
+            : (edit.kind === 'reference' && data.mention_removed ? '已从 KNOWLEDGE.md 里移除它的引用行。' : '');
+        closeAiKnowledgeEditor();
+        await loadAiKnowledge();
+        // **如实提示影响面**：知识包一变，之前按旧规则跑出来的结论会被标成「旧」。
+        // 不写这一句，用户会以为「只是加了一份文档，上周的结论还是当前的」。
+        setAiKnowledgeFeedback(`已保存。此前的分析结论会被标记为「旧」。${suffix}`, 'success');
+    } catch (_err) {
+        setAiKnowledgeFeedback('保存失败，请稍后重试。', 'error');
+    } finally {
+        setAiKnowledgeBusy(btn, false);
+    }
+}
+
+// ---------- 删除 ----------
+
+async function deleteAiKnowledgeEntry(entry) {
+    if (!aiCanEdit) return;
+    const isSkill = entry.kind === 'skill';
+    const target = isSkill ? `${entry.dir_name}/SKILL.md` : `references/${entry.name}`;
+    // 二次确认要把三件事说清：删的是什么、**会不会连累别的文件**、能不能恢复。
+    // 其中「连累别的文件」是这个功能里最容易被忽略、也最容易让人以为平台坏了的一条：
+    // 引用行不摘掉的话，知识包会变成不合法的，分析连清单里其他文档一起读不到。
+    const lines = isSkill
+        ? [
+            `删除子 skill「${entry.dir_name}」？`,
+            '',
+            `会删掉整个目录：skills/projects/<项目代号>/${entry.dir_name}/（含目录里的其它文件）。`,
+            '删除之后无法从界面上恢复，只能重新写一遍。',
+        ]
+        : [
+            `删除知识文档「${entry.name}」？`,
+            '',
+            `会删掉 ${target}，`,
+            '并同时从 KNOWLEDGE.md 里移除对它的那一行引用（不摘掉那一行，知识包会变成不合法的）。',
+            '删除之后无法从界面上恢复，只能重新写一遍。',
+        ];
+    if (!window.confirm(lines.join('\n'))) return;
+
+    setAiKnowledgeFeedback('正在删除…', 'muted');
+    try {
+        const resp = await fetch(aiKnowUrl(entry.kind, isSkill ? entry.dir_name : entry.name), {
+            method: 'DELETE',
+        });
+        const data = await resp.json().catch(() => null);
+        if (!resp.ok || !data || !data.success) {
+            showAiKnowledgeErrors(data && data.errors, (data && data.message) || '删除失败。');
+            return;
+        }
+        // 正在编辑的那一份被删掉了：把编辑器收起来，否则用户会对着一个已经不存在的文件继续改。
+        if (aiKnowledgeEdit && aiKnowledgeEdit.kind === entry.kind && aiKnowledgeEdit.name === (entry.dir_name || entry.name)) {
+            closeAiKnowledgeEditor();
+        }
+        await loadAiKnowledge();
+        setAiKnowledgeFeedback(`已删除 ${target}。此前的分析结论会被标记为「旧」。`, 'success');
+    } catch (_err) {
+        setAiKnowledgeFeedback('删除失败，请稍后重试。', 'error');
+    }
+}
+
+// ---------- 从模板创建 ----------
+
+async function scaffoldAiKnowledge() {
+    if (!aiCanEdit) return;
+    const btn = aiEl('aiKnowledgeScaffoldBtn');
+    setAiKnowledgeBusy(btn, true);
+    setAiKnowledgeFeedback('正在创建…', 'muted');
+    try {
+        const resp = await fetch(`/ai-analysis/projects/${aiProjectId}/knowledge/scaffold`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        const data = await resp.json().catch(() => null);
+        if (!resp.ok || !data || !data.success) {
+            showAiKnowledgeErrors(data && data.errors, (data && data.message) || '创建失败。');
+            return;
+        }
+        await loadAiKnowledge();
+        setAiKnowledgeStatus('已从模板创建，请把里面的骨架改成这个项目的真实情况。', 'success');
+        setAiKnowledgeFeedback('已创建知识包。此前的分析结论会被标记为「旧」。', 'success');
+    } catch (_err) {
+        setAiKnowledgeFeedback('创建失败，请稍后重试。', 'error');
+    } finally {
+        setAiKnowledgeBusy(btn, false);
+    }
+}
+
+// ---------- 接线 ----------
+
+function initAiKnowledge() {
+    const reloadBtn = aiEl('aiKnowledgeReloadBtn');
+    if (reloadBtn) reloadBtn.addEventListener('click', () => loadAiKnowledge());
+    const retryBtn = aiEl('aiKnowledgeLoadRetryBtn');
+    if (retryBtn) retryBtn.addEventListener('click', () => loadAiKnowledge());
+
+    const modal = aiEl('aiKnowledgeModal');
+    if (modal) {
+        // 每次打开都重新读一次：知识包是**磁盘上的文件**，别的运维完全可能刚在服务器上
+        // 改过它 —— 打开时看到的必须是当前状态，而不是上次打开时的快照。
+        modal.addEventListener('show.bs.modal', () => {
+            closeAiKnowledgeEditor();
+            setAiKnowledgeFeedback('', 'muted');
+            loadAiKnowledge();
+        });
+    }
+
+    if (!aiCanEdit) {
+        // 只读用户能看不能改。界面禁用只是提示，服务端才是权威 ——
+        // 直接 PUT / DELETE 会得到 403。
+        ['aiKnowledgeNewDocBtn', 'aiKnowledgeNewSkillBtn', 'aiKnowledgeScaffoldBtn'].forEach(id => {
+            const btn = aiEl(id);
+            if (btn) btn.classList.add('d-none');
+        });
+        setAiKnowledgeFeedback('仅项目管理员可修改项目专属知识。', 'muted');
+        return;
+    }
+
+    const newDocBtn = aiEl('aiKnowledgeNewDocBtn');
+    if (newDocBtn) newDocBtn.addEventListener('click', () => startAiKnowledgeEdit('reference', ''));
+    const newSkillBtn = aiEl('aiKnowledgeNewSkillBtn');
+    if (newSkillBtn) newSkillBtn.addEventListener('click', () => startAiKnowledgeEdit('skill', ''));
+    const scaffoldBtn = aiEl('aiKnowledgeScaffoldBtn');
+    if (scaffoldBtn) scaffoldBtn.addEventListener('click', scaffoldAiKnowledge);
+    const saveBtn = aiEl('aiKnowledgeSaveBtn');
+    if (saveBtn) saveBtn.addEventListener('click', saveAiKnowledgeEntry);
+    const cancelBtn = aiEl('aiKnowledgeCancelBtn');
+    if (cancelBtn) cancelBtn.addEventListener('click', () => {
+        closeAiKnowledgeEditor();
+        setAiKnowledgeFeedback('已取消编辑，磁盘上的内容没有改动。', 'muted');
+    });
+    const templateBtn = aiEl('aiKnowledgeTemplateBtn');
+    if (templateBtn) templateBtn.addEventListener('click', () => {
+        const contentInput = aiEl('aiKnowledgeContentInput');
+        if (!contentInput) return;
+        contentInput.value = (aiKnowledgeCache && aiKnowledgeCache.skill_body_template) || '';
+        refreshAiKnowledgeCount();
+        contentInput.focus();
+    });
+
+    // 输入即清掉这一栏的红字（与配置面板同一条规则：错误只在「刚失败」时留在屏幕上，
+    // 用户开始改就说明他在处理它）。
+    Object.keys(AI_KNOW_FIELD_DOM).forEach(field => {
+        const el = aiEl(AI_KNOW_FIELD_DOM[field]);
+        if (!el) return;
+        el.addEventListener('input', () => setAiKnowledgeFieldError(field, ''));
+    });
+    const nameInput = aiEl('aiKnowledgeNameInput');
+    if (nameInput) nameInput.addEventListener('input', refreshAiKnowledgeFrontmatter);
+    const descInput = aiEl('aiKnowledgeDescriptionInput');
+    if (descInput) descInput.addEventListener('input', refreshAiKnowledgeFrontmatter);
+    const contentInput = aiEl('aiKnowledgeContentInput');
+    if (contentInput) contentInput.addEventListener('input', refreshAiKnowledgeCount);
+}
+
 function normalizeRiskLevel(level) {
     if (!level) return '';
     const raw = String(level).toLowerCase();
@@ -2885,6 +4072,7 @@ function initWeeklyAiDrawer() {
 // 页面加载时获取统计信息
 document.addEventListener('DOMContentLoaded', function() {
     initAiConfig();
+    initAiKnowledge();
     refreshAllVisibleConfigStats();
     
     // 初始化非活跃版本分页
