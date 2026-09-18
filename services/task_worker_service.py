@@ -96,6 +96,13 @@ _sync_semaphore = threading.Semaphore(5)
 # acquire，自己不会和自己抢；它是为 Agent/平台模式的并发派发留的。
 SYNC_SEMAPHORE_TIMEOUT_SECONDS = 120
 
+# 同步失败后的自动重试退避：仓库上一次同步失败后，这段时间内不再被定时调度。
+# `schedule_repository_sync_tasks` 每 2 分钟跑一次，而失败路径只在「手动重试策略 =
+# 重克隆」时才把 clone_status 置成 failed —— 地址写错 / 仓库被删 / 本地目录被清掉的
+# 仓库会每 2 分钟重试一次并刷一屏日志，永远刷下去。退避之后仍会自动重试（瞬时故障
+# 能自愈），手动「重试同步」不受影响（它不走这里）。
+SYNC_FAILURE_RETRY_BACKOFF_SECONDS = 30 * 60
+
 # Git 进程集合（由 configure_task_worker 注入）
 _active_git_processes = None
 
@@ -616,6 +623,13 @@ def _handle_excel_diff_task(task, priority):
 
 def _reset_repository_to_head(git_service, repository):
     """超时或失败后重置仓库到 HEAD 状态"""
+    local_path = getattr(git_service, "local_path", None)
+    if local_path and not os.path.isdir(local_path):
+        # 工作目录根本不存在（clone 从来没成功过、或被人删掉了）：下面三条 git 命令
+        # 都只会以「[WinError 267] 目录名称无效」失败，每条刷两行日志 —— 而这里
+        # 本来就没有任何东西可重置。线上报障就是这一串（`repos/<xxx>_4` 反复刷屏）。
+        log_print(f"ℹ️ [RESET] 跳过重置：工作目录不存在 {local_path}", 'SYNC')
+        return
     try:
         log_print(f"🔄 [RESET] 正在重置仓库 {repository.name} 到 HEAD 状态...", 'SYNC', force=True)
         cleanup_locks = getattr(git_service, "_cleanup_git_lock_files", None)
@@ -1849,6 +1863,38 @@ def schedule_weekly_ai_analysis_tasks():
         log_print(f"调度周版本AI分析任务失败: {e}", "AI", force=True)
 
 
+def _sync_failure_backoff_active(repository, now=None) -> bool:
+    """这个仓库上一次同步失败得**太近**，本轮定时调度先跳过它。
+
+    ## 为什么需要退避
+
+    `schedule_repository_sync_tasks` 每 2 分钟调度一次，而失败路径只在
+    「手动重试策略 = 重克隆」时才会把 `clone_status` 置成 failed（见
+    `_handle_auto_sync_task_inner` 的失败分支）—— 一个地址写错、仓库被删、或
+    本地目录被清掉的仓库会**每 2 分钟重试一次**，每次都刷一屏「Git命令执行失败 /
+    [RESET] … 失败 / 已记录仓库 X 的同步错误」，永远刷下去（线上报障）。
+
+    退避不等于放弃：窗口过后仍会自动重试（网络抖动这类瞬时故障能自愈），
+    手动「重试同步」（repository_admin_handlers 那条路）**不走这里**，随时可用。
+    """
+    if not getattr(repository, "last_sync_error", None):
+        return False
+    failed_at = getattr(repository, "last_sync_error_time", None)
+    if failed_at is None:
+        return False
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if failed_at.tzinfo is None:
+        # 历史数据里可能是 naive（SQLite 取回来的 DateTime 不带时区）：按 UTC 解释，
+        # 与写入时用的 datetime.now(timezone.utc) 同一口径。
+        failed_at = failed_at.replace(tzinfo=timezone.utc)
+    try:
+        elapsed = (now - failed_at).total_seconds()
+    except TypeError:
+        return False
+    return 0 <= elapsed < SYNC_FAILURE_RETRY_BACKOFF_SECONDS
+
+
 def schedule_repository_sync_tasks():
     """定时同步所有已克隆仓库的新提交记录"""
     try:
@@ -1857,8 +1903,12 @@ def schedule_repository_sync_tasks():
             if not repositories:
                 return
             synced_count = 0
+            backed_off = 0
             for repository in repositories:
                 try:
+                    if _sync_failure_backoff_active(repository):
+                        backed_off += 1
+                        continue
                     existing_task = _BackgroundTask.query.filter_by(
                         repository_id=repository.id,
                         task_type='auto_sync',
@@ -1874,6 +1924,12 @@ def schedule_repository_sync_tasks():
                     continue
             if synced_count > 0:
                 log_print(f"📋 已调度 {synced_count} 个仓库自动同步任务", 'SCHEDULER')
+            if backed_off > 0:
+                # 只说一次「有几个仓库在退避窗口里」，不再逐个刷失败日志
+                log_print(
+                    f"⏸️ 跳过 {backed_off} 个近期同步失败的仓库（{SYNC_FAILURE_RETRY_BACKOFF_SECONDS // 60} 分钟内不重试）",
+                    'SCHEDULER',
+                )
     except SQLAlchemyError as e:
         _db.session.rollback()
         log_print(f"❌ 定时仓库同步调度数据库失败: {e}", 'SCHEDULER', force=True)
