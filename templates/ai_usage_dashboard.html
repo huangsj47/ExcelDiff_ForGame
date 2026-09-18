@@ -79,7 +79,9 @@
             <p class="aiu-hint">
                 「清空条件」只取消项目 / 来源 / 状态这三项，<strong>保留你正在看的时间范围</strong>；
                 「重置为默认」把时间范围也回到「全部」，等于刚打开这一页的状态。
-                两者都不会删除任何用量记录 —— 这个页面上没有破坏性操作。
+                这两个按钮都<strong>只动筛选条件</strong>，不碰任何用量记录。
+                （页面上确实有会删数据的动作 —— 「全量重置」在下面的「统计口径」卡片里，
+                它是不可撤销的，所以不在这一排按钮里。）
                 条件写在地址栏里，刷新、分享、收藏都不会丢。
             </p>
 
@@ -110,6 +112,37 @@
         {# 平台档超预算的**第一落点**：它挡的不是一个项目，而是全平台所有项目的下一次分析。
            放在 KPI 与表格之间，是因为它比任何一个数字都更需要先被看到。 #}
         <div class="aiu-alert" id="aiuPlatformAlert" role="alert" hidden></div>
+
+        {# 统计口径：这一页的数字**从哪一刻开始算**。放在 KPI 与「各项目消耗」之间 ——
+           数字紧跟着它的来路。平台超预算那条警示仍然在它前面（那条比任何一个数字都更
+           需要先被看到），所以它不会因为这张卡片而被挤下去。 #}
+        <section class="aiu-card" id="aiuStatsCard">
+            <div class="aiu-card-head">
+                <h2>统计口径</h2>
+                <span class="aiu-meta" id="aiuStatsMeta">这一页的数字从哪一刻开始算</span>
+            </div>
+            <p class="aiu-stats-line" id="aiuStatsLine" role="status" aria-live="polite">正在读取…</p>
+            <p class="aiu-field-help" id="aiuStatsResetLine" hidden></p>
+            <p class="aiu-hint">
+                统计起点是<strong>平台级口径</strong>：对所有人、所有筛选都生效，与上面「时间范围」
+                那个临时筛选不是一回事。它<strong>只改这一页怎么算</strong>，一条记录都不删 ——
+                <strong>预算的「已用」不跟着它变</strong>，起点之前的运行照旧计入预算与拦截判定。
+                全量重置是另一件事：它<strong>真删</strong>掉运行记录（含 AI 报告正文），不可撤销。
+            </p>
+            <div class="aiu-readonly" id="aiuStatsReadonly" hidden>
+                <i class="fas fa-lock" aria-hidden="true"></i>
+                <span>统计口径由<strong>平台管理员</strong>维护；你看到的是当前生效的口径与数字。</span>
+            </div>
+            <div class="aiu-stats-actions" id="aiuStatsActions" hidden>
+                <button type="button" class="aiu-btn secondary" id="aiuStatsBaselineBtn">
+                    <i class="fas fa-calendar-day" aria-hidden="true"></i> 设置统计起点
+                </button>
+                <button type="button" class="aiu-btn danger" id="aiuStatsResetBtn">
+                    <i class="fas fa-trash-can" aria-hidden="true"></i> 全量重置
+                </button>
+            </div>
+            <p class="aiu-field-help" id="aiuStatsInFlight" hidden></p>
+        </section>
 
         <section class="aiu-card">
             <div class="aiu-card-head">
@@ -514,6 +547,98 @@
     </div>
 </div>
 
+{# 统计起点：**可逆**的那一个。数据一条不删，所以这里没有红线、没有确认词 ——
+   把它与「全量重置」做成两个入口、两种视觉重量，正是因为后果差得远。 #}
+<div class="modal fade" id="aiuStatsModal" tabindex="-1" aria-labelledby="aiuStatsModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="aiuStatsModalTitle">设置统计起点</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <p class="aiu-hint">
+                    只改这一页<strong>从哪一刻开始算</strong>：一条记录都不删，随时可以恢复成「全部历史」。
+                    起点之前的运行仍然计入<strong>预算</strong>的「已用」与拦截判定。
+                    它是平台级口径（对所有项目、所有人生效），不是你自己那份筛选。
+                </p>
+                <div class="aiu-budget-form">
+                    <div class="aiu-field">
+                        <label class="aiu-label" for="aiuStatsSinceInput">统计起点（北京时间）</label>
+                        <input type="datetime-local" class="aiu-input" id="aiuStatsSinceInput">
+                        <span class="aiu-field-help">
+                            只统计这个时刻（含）之后创建的运行。填未来的时间会被拒绝 ——
+                            那会把之后的分析也排除掉，这一页会永远是空的。
+                        </span>
+                        <span class="aiu-field-error" id="aiuStatsSinceError" hidden></span>
+                    </div>
+                </div>
+                <p class="aiu-price-error" id="aiuStatsModalError" role="alert" hidden></p>
+            </div>
+            <div class="modal-footer">
+                <span class="aiu-meta" id="aiuStatsModalFeedback" role="status" aria-live="polite"></span>
+                <button type="button" class="aiu-btn secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="aiu-btn secondary" id="aiuStatsClearBtn">
+                    <i class="fas fa-rotate-left" aria-hidden="true"></i> 恢复为全部历史
+                </button>
+                <button type="button" class="aiu-btn primary" id="aiuStatsSaveBtn">
+                    <i class="fas fa-check" aria-hidden="true"></i> 设为起点
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# 全量重置：**不可逆**的那一个。列清单、要确认词，都是因为它删的是分析历史本身。
+   文案里把「预算的已用也会归零」写出来 —— 那是连带后果，不写就是事后才发现的意外。 #}
+<div class="modal fade" id="aiuResetModal" tabindex="-1" aria-labelledby="aiuResetModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="aiuResetModalTitle">全量重置消耗统计</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body">
+                <div class="aiu-alert" role="alert">
+                    <i class="fas fa-triangle-exclamation" aria-hidden="true"></i>
+                    <span class="aiu-alert__body">
+                        这个动作<strong>不可撤销</strong>：删掉的是分析历史本身，不只是数字。
+                        <span class="aiu-alert__detail" id="aiuResetModalSummary"></span>
+                    </span>
+                </div>
+                <p class="aiu-hint">会被删掉的：</p>
+                <ul class="aiu-stats-consequences">
+                    <li>全部运行记录（<strong id="aiuResetRunCount">—</strong> 次），以及每次运行的 AI 报告正文；</li>
+                    <li>这些运行的异常清单与分轮轨迹（「明细」弹层里那份逐轮表）；</li>
+                    <li>这一页的合计、各项目消耗、费用估算全部归零；</li>
+                    <li><strong>预算的「已用」也会归零</strong> —— 记录没了，闸门那边就没有可算的数；</li>
+                    <li>下一次分析会退化成<strong>全量分析</strong>：「上次报过的问题」这个比对基线一并消失。</li>
+                </ul>
+                <p class="aiu-hint" id="aiuResetScopeNote"></p>
+                <p class="aiu-hint">
+                    只是想「从这里重新算」的话，用<strong>设置统计起点</strong>：它一条记录都不删，也随时能撤销。
+                </p>
+                <div class="aiu-field">
+                    <label class="aiu-label" for="aiuStatsConfirmInput">
+                        确认词：输入 <strong id="aiuStatsConfirmWord">重置</strong> 才能提交
+                    </label>
+                    <input type="text" class="aiu-input" id="aiuStatsConfirmInput"
+                           autocomplete="off" spellcheck="false">
+                    <span class="aiu-field-error" id="aiuStatsConfirmError" hidden></span>
+                </div>
+                <p class="aiu-price-error" id="aiuResetModalError" role="alert" hidden></p>
+            </div>
+            <div class="modal-footer">
+                <span class="aiu-meta" id="aiuResetModalFeedback" role="status" aria-live="polite"></span>
+                <button type="button" class="aiu-btn secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="aiu-btn danger" id="aiuResetConfirmBtn" disabled>
+                    <i class="fas fa-trash-can" aria-hidden="true"></i> 确认重置
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <style>
 /* 页面级令牌。**上游一律 var(--color-*, 字面量)**：style.css 的兜底写法，见那里的说明。
    组件里不写裸 hex —— 要新颜色就在这一层加一个令牌。 */
@@ -819,6 +944,37 @@
 }
 .aiu-name-btn:focus-visible { outline: 3px solid var(--color-focus, #0b5ed7); outline-offset: 2px; }
 
+/* ---------------------------------------------------------------------------
+   统计口径（设置起点 / 全量重置）
+   ---------------------------------------------------------------------------
+   两条纪律照上面：颜色一律 `var(--token, 字面量)`，字号只取 12/14/16/18/24 那五档。
+   `.aiu-btn.danger` 是这一页**唯一**的破坏性动作按钮，只给「全量重置」用 ——
+   一旦别处也拿它当强调色，红色就不再意味着「这一步要小心」了。 */
+
+.aiu-btn.danger { background: var(--aiu-danger); border-color: var(--aiu-danger); color: var(--color-surface, #ffffff); }
+/* 覆盖 `.aiu-btn:hover` 的浅蓝底（同权重，靠后写的赢）—— 否则鼠标一移上去，
+   破坏性按钮会变成一颗看起来无害的浅蓝按钮，正好在要点它的那一刻。 */
+.aiu-btn.danger:hover { background: var(--aiu-danger); filter: brightness(1.05); }
+/* 禁用时保持红底（`.aiu-btn[disabled]:hover` 会把它刷成卡片底色，白字就看不见了；
+   而「红着但点不动」正是要传达的状态：这个动作现在不可用，不是它不存在）。 */
+.aiu-btn.danger[disabled], .aiu-btn.danger[disabled]:hover {
+    background: var(--aiu-danger); border-color: var(--aiu-danger);
+}
+
+/* 口径那一行结论：比说明文字大一档，因为它就是这一页数字的来路。 */
+.aiu-stats-line {
+    margin: 0 0 8px; color: var(--aiu-text); font-size: 0.875rem; line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+.aiu-stats-line strong { font-weight: 600; }
+.aiu-stats-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+/* 后果清单。缩进用 px 而不是 em：中文列表项的行首对齐与字号无关。 */
+.aiu-stats-consequences {
+    margin: 0 0 10px; padding-left: 20px;
+    color: var(--aiu-text); font-size: 0.875rem; line-height: 1.7;
+}
+.aiu-stats-consequences li { margin-bottom: 4px; }
+
 @media (max-width: 767px) {
     .aiu-kpi-value { font-size: 1.125rem; }
     .aiu-hero { padding: 14px; }
@@ -1073,7 +1229,7 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
 //  数据获取与渲染
 // ---------------------------------------------------------------------------
 (function () {
-    var state = { overview: null, drill: null, drillProjectId: null };
+    var state = { overview: null, drill: null, drillProjectId: null, drillName: null };
 
     function $(id) { return document.getElementById(id); }
 
@@ -2224,6 +2380,404 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         });
     }
 
+    // -----------------------------------------------------------------------
+    //  统计口径：设置起点（可逆）与全量重置（不可逆）
+    // -----------------------------------------------------------------------
+    // 这两个动作都**不在前端做减法**：起点由服务端算（`filter_runs` 那一个插入点），
+    // 重置由服务端删。界面上只负责把口径说清、把后果说清、把不能点的时候挡住。
+    var statsModalInstance = null;
+    var resetModalInstance = null;
+    // 最近一次拿到的口径块。弹层的按钮状态（能不能「恢复为全部历史」、重置能不能点）
+    // 都按它决定 —— 界面上不另存一份，两份必然漂移。
+    var statsState = {};
+    // 确认词的事实源在服务端（`statistics_public.confirm_word`，路由校验的就是它）。
+    // 这里的字面量只是「还没拿到响应」时的回落。
+    var AIU_RESET_CONFIRM_FALLBACK = '重置';
+
+    function statsValue(value) {
+        return value === null || value === undefined ? '' : String(value).trim();
+    }
+
+    /** `2026-09-19T14:30:00` → `2026-09-19T14:30`（`datetime-local` 只认到分钟）。 */
+    function statsInputValue(localIso) {
+        var text = statsValue(localIso);
+        return text ? text.slice(0, 16) : '';
+    }
+
+    /** `2026-09-19T14:30:00` → `2026-09-19 14:30`（给人看的形状）。 */
+    function statsShown(localIso) {
+        return statsValue(localIso).slice(0, 16).replace('T', ' ');
+    }
+
+    /** **北京时间**的现在（`datetime-local` 的形状）。
+     *
+     *  刻意不碰浏览器的墙上时间：浏览器的时区可能不是北京，而这个框里的值会被服务端
+     *  当成北京墙钟解释（`beijing_wallclock_to_utc_naive`）。取时刻本身（与时区无关）
+     *  加 8 小时，`toISOString()` 读出来就是北京墙钟的数字。
+     *
+     *  **不要写成 `+ getTimezoneOffset()`**：那个值是「UTC − 本地」，加它等于减掉时差。
+     *  在北京的机器上（用户就在北京）它会退回 UTC 数字，于是预填与 `max` 都差 8 小时，
+     *  而界面上完全看不出来 —— 无头 Chrome 复核时量到的 `max=2026-09-18T17:05`
+     *  正是这个错的形状（当时的北京墙钟是 2026-09-19T01:05）。 */
+    function statsNowLocal() {
+        var beijing = new Date(Date.now() + (8 * 3600000));
+        return beijing.toISOString().slice(0, 16);
+    }
+
+    function statsLine(parts) {
+        var host = $('aiuStatsLine');
+        if (!host) return;
+        host.textContent = '';
+        parts.forEach(function (part) {
+            if (part && part.nodeType) { host.appendChild(part); return; }
+            host.appendChild(document.createTextNode(String(part)));
+        });
+    }
+
+    function statsStrong(text) {
+        var el = document.createElement('strong');
+        el.textContent = text;
+        return el;
+    }
+
+    function resetConfirmWord() {
+        return statsValue(statsState.confirm_word) || AIU_RESET_CONFIRM_FALLBACK;
+    }
+
+    function renderStatistics(stats) {
+        statsState = stats || {};
+        var since = statsValue(statsState.counted_since_local);
+        var excluded = Number(statsState.excluded_runs || 0);
+        var inFlight = Number(statsState.in_flight_runs || 0);
+        var canManage = statsState.can_manage === true;
+
+        if (!since) {
+            statsLine(['统计范围：', statsStrong('全部历史'),
+                       '（这一页能看到的运行全部计入）。']);
+        } else {
+            statsLine([
+                '统计起点：', statsStrong(statsShown(since) + '（北京时间）'),
+                excluded > 0
+                    ? '。当前这一屏还有 ' + excluded + ' 次运行在起点之前，未计入。'
+                    : '。当前这一屏没有更早的运行被排除。'
+            ]);
+        }
+
+        var resetLine = $('aiuStatsResetLine');
+        if (resetLine) {
+            var resetAt = statsValue(statsState.reset_at_local);
+            resetLine.textContent = resetAt
+                ? ('最近一次全量重置：' + statsShown(resetAt)
+                   + (statsValue(statsState.reset_by) ? '（' + statsState.reset_by + '）' : '')
+                   + ' —— 那一刻之前的运行记录已被删除。')
+                : '这个库还没有被全量重置过。';
+            resetLine.hidden = false;
+        }
+
+        var readonly = $('aiuStatsReadonly');
+        if (readonly) readonly.hidden = canManage;
+        var actions = $('aiuStatsActions');
+        if (actions) actions.hidden = !canManage;
+
+        // 「现在不能重置」要说在**点之前**：点完再读一句错误，用户已经以为删成功了。
+        // 服务端仍然会拒（那才是边界），这里只是把按钮提前变成可解释的状态。
+        var note = $('aiuStatsInFlight');
+        var resetBtn = $('aiuStatsResetBtn');
+        var blocked = canManage && inFlight > 0;
+        if (note) {
+            note.textContent = blocked
+                ? ('还有 ' + inFlight + ' 次分析没有结束（进行中或排队中），全量重置暂时不可用：'
+                   + '那条运行会往已经被删掉的行里回写结果。等它们跑完再重置'
+                   + '（卡死的那条会被调度器在超时后重置成失败，届时即可重置）。')
+                : '';
+            note.hidden = !blocked;
+        }
+        if (resetBtn) {
+            resetBtn.disabled = blocked;
+            resetBtn.title = blocked ? '还有分析没有结束，等它们跑完再重置' : '';
+        }
+    }
+
+    function setStatsFeedback(text, tone) {
+        var el = $('aiuStatsModalFeedback');
+        if (!el) return;
+        el.textContent = text || '';
+        el.style.color = tone === 'error' ? 'var(--aiu-danger)'
+                       : (tone === 'success' ? 'var(--aiu-hit)' : '');
+    }
+
+    function setResetFeedback(text, tone) {
+        var el = $('aiuResetModalFeedback');
+        if (!el) return;
+        el.textContent = text || '';
+        el.style.color = tone === 'error' ? 'var(--aiu-danger)'
+                       : (tone === 'success' ? 'var(--aiu-hit)' : '');
+    }
+
+    function setStatsBusy(on) {
+        var save = $('aiuStatsSaveBtn');
+        var clear = $('aiuStatsClearBtn');
+        if (save) save.disabled = on;
+        if (clear) clear.disabled = on || !statsValue(statsState.counted_since_local);
+    }
+
+    function setResetBusy(on) {
+        var btn = $('aiuResetConfirmBtn');
+        if (!btn) return;
+        // 忙的时候不能只按「输入对不对」决定：那样会出现「正在删，按钮却亮着」。
+        if (on) { btn.disabled = true; return; }
+        syncResetConfirm();
+    }
+
+    /** 确认词对上了才让点。**不是安全边界**（权限才是），防的是误触。 */
+    function syncResetConfirm() {
+        var input = $('aiuStatsConfirmInput');
+        var btn = $('aiuResetConfirmBtn');
+        if (!input || !btn) return;
+        var matched = input.value.trim() === resetConfirmWord();
+        btn.disabled = !matched;
+        if (matched) {
+            var error = $('aiuStatsConfirmError');
+            if (error) { error.textContent = ''; error.hidden = true; }
+        }
+    }
+
+    function openStatsModal() {
+        var input = $('aiuStatsSinceInput');
+        var now = statsNowLocal();
+        if (input) {
+            // 预填当前生效的起点（没有就填现在），并把 `max` 卡在现在 ——
+            // 未来时间服务端本来就会拒（那会把之后的分析也排除掉），这里先让浏览器拦住。
+            input.value = statsInputValue(statsState.counted_since_local) || now;
+            input.max = now;
+        }
+        var error = $('aiuStatsSinceError');
+        if (error) { error.textContent = ''; error.hidden = true; }
+        var box = $('aiuStatsModalError');
+        if (box) { box.textContent = ''; box.hidden = true; }
+        setStatsFeedback('', '');
+        setStatsBusy(false);
+        if (statsModalInstance === null) {
+            statsModalInstance = new bootstrap.Modal($('aiuStatsModal'));
+        }
+        statsModalInstance.show();
+    }
+
+    function openResetModal() {
+        // 会删掉多少条：**按真的会删多少来说**（`statistics.total_runs` = 整张表），
+        // 不是 `totals.runs`（那一份带着当前筛选，也可能被统计起点挡住）。
+        // 弹层里写「这一页看到 24 次」而实际删掉 300 条，是这个页面上最不能出现的
+        // 那种不一致 —— 用户是照着这个数字决定要不要按下去的。
+        var total = statsState.total_runs;
+        var onScreen = (state.overview && state.overview.totals) ? state.overview.totals.runs : null;
+        var summary = $('aiuResetModalSummary');
+        if (summary) {
+            summary.textContent = (total === null || total === undefined)
+                ? '库里所有的运行记录都会被删掉，不只是这一屏列出来的那些。'
+                : ('库里一共 ' + total + ' 次运行记录会被删掉，与上面的筛选无关。');
+        }
+        var countCell = $('aiuResetRunCount');
+        if (countCell) {
+            countCell.textContent = (total === null || total === undefined) ? '全部' : String(total);
+        }
+        var scopeNote = $('aiuResetScopeNote');
+        if (scopeNote) {
+            var known = total !== null && total !== undefined
+                && onScreen !== null && onScreen !== undefined;
+            scopeNote.textContent = !known
+                ? ''
+                : ('当前筛选下这一屏看到 ' + onScreen + ' 次，与统计起点无关；'
+                   + '重置删的是整张表，不看筛选。');
+        }
+        var word = $('aiuStatsConfirmWord');
+        if (word) word.textContent = resetConfirmWord();
+        var input = $('aiuStatsConfirmInput');
+        if (input) input.value = '';
+        var error = $('aiuStatsConfirmError');
+        if (error) { error.textContent = ''; error.hidden = true; }
+        var box = $('aiuResetModalError');
+        if (box) { box.textContent = ''; box.hidden = true; }
+        setResetFeedback('', '');
+        setResetBusy(false);
+        if (resetModalInstance === null) {
+            resetModalInstance = new bootstrap.Modal($('aiuResetModal'));
+        }
+        resetModalInstance.show();
+    }
+
+    /** 两个写接口的公共部分：**Accept 必须显式要 JSON**。
+     *
+     *  非管理员时服务端按 Accept 分流（`_prefers_json_error_response`）—— 不带这个头
+     *  会拿到一个 302 跳登录页，`fetch` 跟过去之后是一份 HTML，于是「没权限」会以
+     *  「JSON 解析失败」的形式出现。与平台预算那两处是同一条教训。 */
+    function postStatistics(url, payload) {
+        return fetch(url, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(payload)
+        }).then(function (response) {
+            return response.json().catch(function () { return {}; }).then(function (body) {
+                return { status: response.status, ok: response.ok, body: body || {} };
+            });
+        });
+    }
+
+    /** 口径变了之后要刷新的东西。
+     *
+     *  数字与列表都按新口径**重新取**，不在前端做减法 —— 前端的算术是第三个事实源，
+     *  它与服务端不一致时的表现是「合计少了 N 次，而列表里还列着它们」。
+     *  重置还连带改掉预算的「已用」（记录被删了），所以那一块也要重取。 */
+    function refreshAfterStatsChange(includeBudget) {
+        loadOverview();
+        if (includeBudget) loadPlatformBudget();
+        if (state.drillProjectId) {
+            loadDrill(state.drillProjectId, state.drillName, { keepScroll: true });
+        }
+    }
+
+    /** 权限在会话中途没了：与其它写接口同一条口径 —— 不是错误态，是权限说明。 */
+    function statsLostPermission() {
+        if (statsModalInstance) statsModalInstance.hide();
+        if (resetModalInstance) resetModalInstance.hide();
+        var actions = $('aiuStatsActions');
+        if (actions) actions.hidden = true;
+        var readonly = $('aiuStatsReadonly');
+        if (readonly) readonly.hidden = false;
+    }
+
+    function applyStatsErrors(body, fieldId) {
+        var errors = (body && body.errors) || [];
+        var mine = '';
+        errors.forEach(function (item) {
+            if (!mine) mine = statsValue(item && item.message) || statsValue(item && item.field);
+        });
+        var el = $(fieldId);
+        if (el && mine) { el.textContent = mine; el.hidden = false; }
+        return errors.length > 0;
+    }
+
+    function saveStatsBaseline() {
+        var input = $('aiuStatsSinceInput');
+        var value = input ? input.value : '';
+        var sinceError = $('aiuStatsSinceError');
+        var modalError = $('aiuStatsModalError');
+        if (sinceError) { sinceError.textContent = ''; sinceError.hidden = true; }
+        if (modalError) { modalError.textContent = ''; modalError.hidden = true; }
+        if (!value) {
+            // 空值不是「恢复全部历史」——那是下面那个按钮的语义。这里空着就是没说清
+            // 要从哪一刻起算，静默按「恢复」提交等于替用户做了一个他没做的选择。
+            if (sinceError) {
+                sinceError.textContent = '请先选一个时间；要恢复成「全部历史」请点「恢复为全部历史」。';
+                sinceError.hidden = false;
+            }
+            return;
+        }
+        setStatsFeedback('正在保存…', 'muted');
+        setStatsBusy(true);
+        return postStatistics('/ai-analysis/statistics/baseline', { since: value })
+            .then(function (result) {
+                var body = result.body || {};
+                if (result.status === 401 || result.status === 403) {
+                    statsLostPermission();
+                    return;
+                }
+                if (!result.ok || body.success === false) {
+                    applyStatsErrors(body, 'aiuStatsSinceError');
+                    if (modalError) {
+                        modalError.textContent = body.message || '保存失败。';
+                        modalError.hidden = false;
+                    }
+                    setStatsFeedback(body.message || '保存失败。', 'error');
+                    return;
+                }
+                // 保存后直接回新状态（与平台预算同一条），界面不必再发一次 GET。
+                if (body.statistics) renderStatistics(body.statistics);
+                setStatsFeedback(body.message || '已保存。', 'success');
+                if (statsModalInstance) statsModalInstance.hide();
+                refreshAfterStatsChange(false);
+            })
+            .catch(function (err) {
+                setStatsFeedback('保存失败：' + (err && err.message ? err.message : err), 'error');
+            })
+            .then(function () { setStatsBusy(false); });
+    }
+
+    function clearStatsBaseline() {
+        var modalError = $('aiuStatsModalError');
+        if (modalError) { modalError.textContent = ''; modalError.hidden = true; }
+        setStatsFeedback('正在保存…', 'muted');
+        setStatsBusy(true);
+        return postStatistics('/ai-analysis/statistics/baseline', { since: null })
+            .then(function (result) {
+                var body = result.body || {};
+                if (result.status === 401 || result.status === 403) {
+                    statsLostPermission();
+                    return;
+                }
+                if (!result.ok || body.success === false) {
+                    if (modalError) {
+                        modalError.textContent = body.message || '保存失败。';
+                        modalError.hidden = false;
+                    }
+                    setStatsFeedback(body.message || '保存失败。', 'error');
+                    return;
+                }
+                if (body.statistics) renderStatistics(body.statistics);
+                setStatsFeedback(body.message || '已恢复。', 'success');
+                if (statsModalInstance) statsModalInstance.hide();
+                refreshAfterStatsChange(false);
+            })
+            .catch(function (err) {
+                setStatsFeedback('保存失败：' + (err && err.message ? err.message : err), 'error');
+            })
+            .then(function () { setStatsBusy(false); });
+    }
+
+    function submitStatsReset() {
+        var input = $('aiuStatsConfirmInput');
+        var word = resetConfirmWord();
+        var confirmError = $('aiuStatsConfirmError');
+        var modalError = $('aiuResetModalError');
+        if (confirmError) { confirmError.textContent = ''; confirmError.hidden = true; }
+        if (modalError) { modalError.textContent = ''; modalError.hidden = true; }
+        if (!input || input.value.trim() !== word) {
+            // 前端这一层只是省一次往返；真正把关的是路由（确认词不对直接 400）。
+            if (confirmError) {
+                confirmError.textContent = '确认词要逐字输入「' + word + '」。';
+                confirmError.hidden = false;
+            }
+            return;
+        }
+        setResetFeedback('正在重置…', 'muted');
+        setResetBusy(true);
+        return postStatistics('/ai-analysis/statistics/reset', { confirm: input.value.trim() })
+            .then(function (result) {
+                var body = result.body || {};
+                if (result.status === 401 || result.status === 403) {
+                    statsLostPermission();
+                    return;
+                }
+                if (!result.ok || body.success === false) {
+                    // 在途运行、确认词不对等等都落到这里 —— 原话给出来，别改写成
+                    // 一句「重置失败」：那句话解释不了「为什么现在不能重置」。
+                    if (modalError) {
+                        modalError.textContent = body.message || '重置失败。';
+                        modalError.hidden = false;
+                    }
+                    setResetFeedback(body.message || '重置失败。', 'error');
+                    return;
+                }
+                if (body.statistics) renderStatistics(body.statistics);
+                if (resetModalInstance) resetModalInstance.hide();
+                refreshAfterStatsChange(true);
+            })
+            .catch(function (err) {
+                setResetFeedback('重置失败：' + (err && err.message ? err.message : err), 'error');
+            })
+            .then(function () { setResetBusy(false); });
+    }
+
     function loadOverview() {
         clearError();
         setLoading(true);
@@ -2241,6 +2795,9 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             applyFiltersToForm(body.filters);
             syncUrl(body.filters);
             renderKpis(body.totals || {}, body.over_budget_projects || 0);
+            // 口径一栏：这一页的数字是从哪一刻起算的。**对所有人都下发**（数字是怎么来的
+            // 必须看得见），能不能改由 `can_manage` 决定。
+            renderStatistics(body.statistics);
             renderPricingNote((body.projects || [])[0] ? body.projects[0].pricing : null);
             renderBudgetLink(body.budget_link);
             // 平台挡被收掉时（普通用户：服务端一个字都不下发）**不弹**，也不能改成
@@ -2258,14 +2815,22 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         });
     }
 
-    function loadDrill(projectId, name) {
+    function loadDrill(projectId, name, options) {
+        var opts = options || {};
         state.drillProjectId = projectId;
+        // 名字记下来：口径变了之后要重取这一屏，而重取时手里只有 id
+        // （`refreshAfterStatsChange`），不该因此把标题变成项目号。
+        state.drillName = name || state.drillName || String(projectId);
         $('aiuDrillCard').hidden = false;
         $('aiuDrillTitle').textContent = '项目明细 · ' + (name || projectId);
         $('aiuWeeklyRows').innerHTML = '<tr><td colspan="8" class="empty-row">加载中...</td></tr>';
         $('aiuToolRows').innerHTML = '<tr><td colspan="8" class="empty-row">加载中...</td></tr>';
         $('aiuRunRows').innerHTML = '<tr><td colspan="10" class="empty-row">加载中...</td></tr>';
-        $('aiuDrillCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // 口径变了之后的重取**不滚动**：用户刚点的是上面那张「统计口径」卡片，
+        // 把他弹到页面下方的明细表去，等于把「刚发生了什么」从眼前挪走。
+        if (!opts.keepScroll) {
+            $('aiuDrillCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
         // 下钻带上同一份筛选（项目那一项除外：它就是这条路径的一部分）。
         var params = currentParams();
         params.delete('project');
@@ -2388,6 +2953,7 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
     $('aiuDrillClose').addEventListener('click', function () {
         $('aiuDrillCard').hidden = true;
         state.drillProjectId = null;
+        state.drillName = null;
     });
 
     initFilters();
@@ -2401,6 +2967,22 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
     }
     var modalSave = $('aiuBudgetModalSaveBtn');
     if (modalSave) modalSave.addEventListener('click', saveBudgetModal);
+
+    // 统计口径那两个入口。按钮**不给非管理员渲染**（`renderStatistics` 按 `can_manage`
+    // 控制），加了 `if` 是因为这一页的结构里它们是常驻节点 —— 少了判断，普通用户点下去
+    // 会走一条注定 403 的请求，然后读到一个他自己也改不了的错误。
+    var baselineBtn = $('aiuStatsBaselineBtn');
+    if (baselineBtn) baselineBtn.addEventListener('click', openStatsModal);
+    var resetBtn = $('aiuStatsResetBtn');
+    if (resetBtn) resetBtn.addEventListener('click', openResetModal);
+    var statsSaveBtn = $('aiuStatsSaveBtn');
+    if (statsSaveBtn) statsSaveBtn.addEventListener('click', saveStatsBaseline);
+    var statsClearBtn = $('aiuStatsClearBtn');
+    if (statsClearBtn) statsClearBtn.addEventListener('click', clearStatsBaseline);
+    var confirmInput = $('aiuStatsConfirmInput');
+    if (confirmInput) confirmInput.addEventListener('input', syncResetConfirm);
+    var resetConfirmBtn = $('aiuResetConfirmBtn');
+    if (resetConfirmBtn) resetConfirmBtn.addEventListener('click', submitStatsReset);
 
     loadOverview();
     // 平台总预算单独一条请求：它挂在管理员专属端点上，与总览的权限口径不同 ——
@@ -2925,7 +3507,8 @@ function initAiUsagePriceEditor() {
     var resetBtn = aiuPriceEl('aiuPriceResetBtn');
     if (resetBtn) {
         // 「放弃改动」把编辑区退回**服务端已保存的那一份**，不动库里任何数据 ——
-        // 这个页面上不该有删除按钮，所以「重置」只能是这个意思。
+        // 与「统计口径」那张卡片里的「全量重置」是两回事：这个按钮只丢草稿。
+        // 名字撞了，所以在页面上它写的是「放弃改动」而不是「重置」。
         resetBtn.addEventListener('click', function () {
             var box = aiuPriceEl('aiuPriceJsonInput');
             if (box) box.value = aiuPriceSaved;

@@ -18,6 +18,13 @@ from services.ai.analysis_budget import (
 from services.ai.endpoint_service import ConfigValidationError, probe_connection, probe_models
 from services.ai.platform_budget import platform_budget_public, set_platform_budget
 from services.ai.pricing import estimate_cost
+from services.ai.usage_statistics import (
+    RESET_CONFIRM_WORD,
+    parse_baseline_input,
+    purge_usage_statistics,
+    set_usage_baseline,
+    statistics_public,
+)
 from services.ai_analysis_service import (
     build_endpoint_client,
     end_with_a_terminal_event,
@@ -410,6 +417,110 @@ def ai_platform_budget_update():
         # 让它再发一次 GET 会把「保存成功」与「状态刷新」变成两次可能不一致的往返。
         body["budget"] = platform_budget_public()
         body["status"] = platform_budget_status()
+    return jsonify(body), 200 if ok else 400
+
+
+# ---------------------------------------------------------------------------
+#  消耗统计的口径：起点 + 全量重置
+# ---------------------------------------------------------------------------
+# **为什么不在 `/ai-analysis/usage/` 下面**：那一族路径被一条测试钉着「只能是 GET、
+# 不能有 POST」（`test_the_three_endpoints_are_read_only`），守的是「别在一个只读页面上
+# 顺手放一个会真花钱的『重新分析』按钮」。平台预算当初就是从这条护栏前退到
+# `/ai-analysis/platform-budget` 的（见上面那段注释），这两个写接口照同一条口径放在
+# `/ai-analysis/statistics/` 下 —— 路径里没有 `/usage`，因此也不会被那条测试的扫描网住。
+#
+# 权限与平台预算**同一条**：`@require_admin`。起点是平台级口径（它同时改变所有项目在
+# 面板上的数字），全量重置删的是全平台的记录 —— 两者都不是项目管理员该碰的。
+#
+# 全量重置**另外进了 `SENSITIVE_ENDPOINTS`**（`services/app_security_bootstrap_service.py`）：
+# 那是第二道防线（万一将来有人漏了装饰器，before_request 仍然拦得住），理由与
+# 「delete_repository」那一类相同 —— 它是这个平台上唯一一个「一点就删一大片、且没有
+# 撤销」的动作。起点**不进**那张表：它一条记录都不删、随时可恢复，按破坏性动作去加固
+# 会让读代码的人以为它同样危险。
+
+
+@ai_analysis_bp.route("/ai-analysis/statistics/baseline", methods=["POST"])
+@require_admin
+def ai_statistics_baseline_update():
+    """设置（或清除）消耗统计的起点。**只改口径，不删任何数据。**
+
+    body：`{"since": "2026-09-19T14:30"}`（北京墙钟，浏览器 `datetime-local` 的形状）；
+    `{"since": null}` = 恢复成「统计全部历史」。
+
+    `since` **必须出现**（哪怕是 null）：键缺失时静默清除起点的话，一个拼错的字段名就会
+    让别人以为「只是没设成」，而起点其实已经被清掉了。
+    """
+    payload, error = read_json_object()
+    if error is not None:
+        return error
+    if "since" not in payload:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "message": "缺少 since 字段（要恢复「统计全部历史」请显式传 null）。",
+                    "errors": [{"field": "since", "message": "缺少该字段"}],
+                }
+            ),
+            400,
+        )
+
+    since, problem = parse_baseline_input(payload.get("since"))
+    if problem:
+        return (
+            jsonify({"success": False, "message": problem, "errors": [{"field": "since", "message": problem}]}),
+            400,
+        )
+
+    user = _get_current_user()
+    username = getattr(user, "username", "") if user else ""
+    ok, message, errors = set_usage_baseline(since, updated_by=username)
+    body = {"success": ok, "message": message}
+    if errors:
+        body["errors"] = errors
+    if ok:
+        # 与平台预算同一条：保存后直接回新状态，界面不必再发一次 GET
+        # （那会把「保存成功」与「状态刷新」变成两次可能不一致的往返）。
+        body["statistics"] = statistics_public(can_manage=True)
+    return jsonify(body), 200 if ok else 400
+
+
+@ai_analysis_bp.route("/ai-analysis/statistics/reset", methods=["POST"])
+@require_admin
+def ai_statistics_reset():
+    """**全量重置**：删掉全部 AI 运行记录（含报告正文、分轮轨迹、异常清单）。不可逆。
+
+    body：`{"confirm": "重置"}` —— 确认词不对就不执行。它不是安全边界（权限才是），
+    防的是误触：这个动作删掉的是分析历史，点错了没有撤销。
+
+    在途运行存在时直接拒绝（原因见 `services/ai/usage_statistics.purge_usage_statistics`）。
+    """
+    payload, error = read_json_object()
+    if error is not None:
+        return error
+    confirm = str(payload.get("confirm") or "").strip()
+    if confirm != RESET_CONFIRM_WORD:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "message": f"请先在确认框里输入「{RESET_CONFIRM_WORD}」两个字再提交。",
+                    "errors": [
+                        {"field": "confirm", "message": f"确认词必须是「{RESET_CONFIRM_WORD}」"}
+                    ],
+                }
+            ),
+            400,
+        )
+
+    user = _get_current_user()
+    username = getattr(user, "username", "") if user else ""
+    ok, message, deleted = purge_usage_statistics(updated_by=username)
+    body = {"success": ok, "message": message}
+    if deleted:
+        body["deleted"] = deleted
+    if ok:
+        body["statistics"] = statistics_public(can_manage=True)
     return jsonify(body), 200 if ok else 400
 
 

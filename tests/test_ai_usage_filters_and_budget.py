@@ -1035,6 +1035,10 @@ def _post_targets(script: str) -> list:
 
     只看 POST 的那几次调用：`'/ai-analysis/platform-budget'` 这个字面量在 GET 与 POST
     里各出现一次，按字面量计数会把 GET 也算进来，于是「条数对得上」变成一个假结论。
+
+    共用帮助函数（`postStatistics`）那一条取回来的是**变量名** `url`，不是一个字面量 ——
+    调用点要各自核对（见 `test_the_clear_and_reset_buttons_are_not_destructive`）。
+    这里不替调用方猜它指向哪，猜错的方向正好是「漏掉一个没人核对的写接口」。
     """
     targets = []
     for match in re.finditer(r"method: 'POST'", script):
@@ -1120,30 +1124,57 @@ class TestTheFrontendHoldsTheHouseRules:
         assert "usage/project/' + projectId + (query ? '?' + query : '')" in script
 
     def test_the_clear_and_reset_buttons_are_not_destructive(self):
-        """「清空 / 重置」只动筛选状态，这个页面上不该有删除用量记录的入口。
+        """「清空条件 / 重置为默认」只动筛选状态；这一页唯一的删除类动作必须打在
+        统计口径那个端点上，并且带确认词。
 
-        ## 2026-09 的期望值更新（原本是 `count("method: 'POST'") == 1`）
+        ## 两次期望值更新（原本是 `count("method: 'POST'") == 1`）
 
-        这一页新增了两个**配置**写接口：平台总预算（`/ai-analysis/platform-budget`）
-        与单个项目的预算（`/ai-analysis/projects/<id>/config`），所以 POST 从 1 条
-        变成 3 条。这条断言守的性质是「页面上没有破坏性写操作」，不是「只能有一个
-        POST」—— 所以改法不是把数字从 1 改成 3 就完事，而是换成**更强**的不变量：
-        每一个 POST 的**目标 URL** 都必须落在允许的那两个配置端点上。原来只数条数，
-        多一个打向别处的 POST 只要总数对得上就看不出来。
+        **2026-09 第一次**：这一页新增了两个**配置**写接口：平台总预算
+        （`/ai-analysis/platform-budget`）与单个项目的预算
+        （`/ai-analysis/projects/<id>/config`），所以 POST 从 1 条变成 3 条。
+
+        **2026-09 第二次**：又新增了统计口径的两个写接口（设置起点 / 全量重置），
+        它们共用 `postStatistics(url, …)` 这一个帮助函数 —— 脚本里只多出一条
+        `method: 'POST'`，目标是个**变量** `url`，所以按字面量核对的那一圈要单独处理它：
+        把它的**每一个调用点**传进去的 URL 白名单化（下面那段 `postStatistics(` 搜寻）。
+
+        这条断言守的性质始终是「页面上没有来路不明的写操作」，所以改法不是把数字从
+        3 改成 4 就完事，而是换成**更强**的不变量：每一个 POST 的**目标 URL** 都必须
+        落在允许的那几个端点上，并且**唯一的删除类动作**（全量重置）必须自带确认词。
+        原来只数条数，多一个打向别处的 POST 只要总数对得上就看不出来。
+
+        （同一份不变量在 `tests/test_ai_usage_budget_ui.py::TestTheWriteSurfaceGrewButStayedNarrow`
+        里也钉着一份 —— 那两处当初就是同一个数字，改的时候一起改。）
         """
         script = _read(DASHBOARD)
 
         assert "aiuFilterClearBtn" in script and "aiuFilterResetBtn" in script
         targets = _post_targets(script)
-        assert len(targets) == 3, f"写接口的数量变了，请逐个核对：{targets}"
+        assert len(targets) == 4, f"写接口的数量变了，请逐个核对：{targets}"
         for target in targets:
             assert (
                 target == "'/ai-analysis/platform-budget'"
+                # 共用帮助函数的那一条：它的调用点单独核对（紧跟着的这段）。
+                or target == "url"
                 or re.fullmatch(
                     r"'/ai-analysis/projects/' \+ projectId \+ '/config'", target
                 )
-            ), f"消耗面板上出现了一个不写配置的 POST：{target}"
-        # 删用量记录那类动作一个都不该有。
+            ), f"消耗面板上出现了一个来路不明的 POST：{target}"
+
+        # 走 `postStatistics` 的每一个调用点：URL 必须在白名单里，一个都不许多。
+        calls = set(re.findall(r"postStatistics\(\s*('[^']*')", script))
+        assert calls == {
+            "'/ai-analysis/statistics/baseline'",
+            "'/ai-analysis/statistics/reset'",
+        }, f"统计口径那两个写接口变了：{sorted(calls)}"
+
+        # 唯一的删除类动作：确认词那一步不能省（它不是安全边界，但误触没有撤销）。
+        reset_body = script[script.index("function submitStatsReset("):]
+        reset_body = reset_body[: reset_body.index("\n    function ")]
+        assert "'/ai-analysis/statistics/reset'" in reset_body
+        assert "resetConfirmWord()" in reset_body, "全量重置没有要求确认词"
+
+        # 删用量记录那类动作用的是 POST + 确认词，不是 HTTP 的破坏性方法。
         for banned in ("method: 'DELETE'", "method: 'PUT'", "method: 'PATCH'"):
             assert banned not in script, f"消耗面板上出现了破坏性写操作：{banned}"
 

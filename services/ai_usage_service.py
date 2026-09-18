@@ -52,6 +52,12 @@ from services.ai.analysis_budget import (
 from services.ai.platform_budget import platform_budget_public
 from services.ai.pricing import money
 from services.ai.usage import aggregate_runs, usage_from_run
+from services.ai.usage_statistics import (
+    count_runs_before,
+    is_counted,
+    statistics_public,
+    usage_baseline,
+)
 from services.ai_analysis_service import project_price_table
 from utils.timezone_utils import BEIJING_TZ
 
@@ -327,10 +333,23 @@ def filter_runs(
     filters: UsageFilters,
     *,
     now: Optional[datetime] = None,
+    baseline: Optional[datetime] = None,
 ) -> list[AiAnalysisRun]:
-    """按筛选条件过滤运行记录（保持传入顺序）。"""
+    """按筛选条件过滤运行记录（保持传入顺序）。
+
+    `baseline` 是**统计起点**（`services/ai/usage_statistics`）：起点之前的运行不进任何统计，
+    面板的合计、各项目行、逐次明细全都是这一批运行算出来的，所以「上面写 5 次、下面列 30 条」
+    这种对不上在这条路上不会出现。
+
+    **它只作用于这里** —— 这条读路径只服务消耗面板。预算闸门走的是另一条
+    （`analysis_budget.runs_in_window`），起点接不进去，也不许接（见 usage_statistics 的说明）。
+    """
     window = resolve_window(filters, now=now)
-    return [run for run in runs if run_matches(run, filters, window)]
+    return [
+        run
+        for run in runs
+        if run_matches(run, filters, window) and is_counted(run, baseline)
+    ]
 
 
 def _price_block(table, errors: Sequence[str]) -> dict[str, Any]:
@@ -552,6 +571,10 @@ def usage_overview(
     query = _runs_query(accessible_project_ids)
     entries: list[dict[str, Any]] = []
     all_runs: list[AiAnalysisRun] = []
+    # 统计起点（平台级口径，见 services/ai/usage_statistics）。**它只在这里生效**：
+    # 预算那一档的「已用」走 `platform_budget_status()`，与这个变量无关。
+    baseline = usage_baseline()
+    excluded_runs = 0
     allowed: Optional[set[int]] = (
         None if accessible_project_ids is None else set(accessible_project_ids)
     )
@@ -566,7 +589,11 @@ def usage_overview(
                 query = query.filter(AiAnalysisRun.project_id == active.project_id)
 
     if query is not None:
-        all_runs = filter_runs(query.order_by(AiAnalysisRun.created_at.desc()).all(), active)
+        # 先按筛选条件过一遍，再按起点过一遍 —— 两步分开只为一件事：让「这一屏被起点排除了
+        # 多少条」数得准。直接在筛选后的结果里数，筛选到上个月时那个数就与眼前这一屏无关了。
+        matched_runs = filter_runs(query.order_by(AiAnalysisRun.created_at.desc()).all(), active)
+        excluded_runs = count_runs_before(baseline, matched_runs)
+        all_runs = [run for run in matched_runs if is_counted(run, baseline)]
         grouped: dict[int, list[AiAnalysisRun]] = {}
         for run in all_runs:
             grouped.setdefault(run.project_id, []).append(run)
@@ -673,6 +700,12 @@ def usage_overview(
             "notes": list(platform_status.get("notes") or ()),
         },
         "budget_link": budget_link,
+        # 统计口径：起点是什么、「这一屏」被它排除了多少条、以及**能不能改**。
+        # 状态一栏对所有人下发（数字是怎么来的必须看得见），改的权限只看 `can_manage`
+        # —— 起点是平台级口径，所以只有平台管理员能动（见路由的 `@require_admin`）。
+        "statistics": statistics_public(
+            can_manage=show_platform, excluded_runs=excluded_runs
+        ),
         # 预算周期选项表**随接口下发**：事实源是服务端的 `PERIOD_CHOICES` / `PERIOD_LABELS`，
         # 界面照它渲染下拉即可。原先页面自带一份同内容的表（`AIU_PERIOD_LABELS`），
         # 靠一条测试钉住「两边逐字一致」—— 那等于把「服务端加一个周期」变成一次
@@ -747,7 +780,9 @@ def project_usage(
         .order_by(AiAnalysisRun.created_at.desc())
         .all()
     )
-    runs = filter_runs(all_runs, active)
+    # 与总览同一条口径：起点之前的运行在这个项目的下钻里也不出现（合计、周版本维度、
+    # 逐次明细三者用的是同一批运行，不会出现「合计少算、明细照列」）。
+    runs = filter_runs(all_runs, active, baseline=usage_baseline())
     stats = aggregate_runs(runs, price_table=table)
     pricing = _price_block(table, errors)
 

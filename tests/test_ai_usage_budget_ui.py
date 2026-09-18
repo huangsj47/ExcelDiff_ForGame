@@ -1190,26 +1190,57 @@ class TestTheInterfaceConsumesRealKeys:
 
 
 class TestTheWriteSurfaceGrewButStayedNarrow:
-    """本页新增了两个写接口，所以 `test_ai_usage_filters_and_budget.py` 里
-    「只有一个 POST」的计数必须更新。这里把那条不变量**加强**一份，写清楚为什么
-    这不是放宽：每一个 POST 的**目标 URL** 都必须落在允许的那两个配置端点上 ——
-    原来只数条数，多一个打向别处的 POST 只要总数对得上就看不出来。"""
+    """本页新增了写接口，所以 `test_ai_usage_filters_and_budget.py` 里「只有一个 POST」
+    的计数必须更新。这里把那条不变量**加强**一份，写清楚为什么这不是放宽：每一个 POST
+    的**目标 URL** 都必须落在允许的那几个端点上 —— 原来只数条数，多一个打向别处的
+    POST 只要总数对得上就看不出来。
+
+    两次变动一起记在这里：先加了平台总预算与项目预算两个配置端点（1 → 3），后来又加了
+    统计口径的两个写接口（设置起点 / 全量重置，3 → 4 —— 它们共用 `postStatistics`，
+    所以在脚本里只多出一条，目标是变量 `url`）。"""
 
     def test_every_post_targets_a_configuration_endpoint(self):
         targets = _post_targets(_dashboard_script())
-        assert len(targets) == 3, f"写接口的数量变了，请逐个核对：{targets}"
+        assert len(targets) == 4, f"写接口的数量变了，请逐个核对：{targets}"
         for target in targets:
             assert (
                 target == "'/ai-analysis/platform-budget'"
+                # 共用帮助函数（`postStatistics`）的那一条：调用点见下一条用例。
+                or target == "url"
                 or re.fullmatch(
                     r"'/ai-analysis/projects/' \+ projectId \+ '/config'", target
                 )
             ), f"有一个写请求打到了别处：{target}"
 
+    def test_every_post_statistics_call_site_is_a_statistics_endpoint(self):
+        """`postStatistics` 的**每一个调用点**传进去的 URL。
+
+        只核对函数体是不够的：URL 是参数，函数体里看不出它指向哪 —— 而这正是
+        「多一个打向别处的写请求」最容易藏身的地方。
+        """
+        script = _dashboard_script()
+        calls = set(re.findall(r"postStatistics\(\s*('[^']*')", script))
+
+        assert calls == {
+            "'/ai-analysis/statistics/baseline'",
+            "'/ai-analysis/statistics/reset'",
+        }, f"统计口径的写接口多了一个：{sorted(calls)}"
+
     def test_the_page_still_has_no_destructive_writes(self):
+        """破坏性方法一个都不许有。
+
+        「全量重置」确实会删数据，但它走的是 **POST + 确认词**（`/ai-analysis/statistics/reset`）。
+        这条断言守的从来不是「页面上没有删除动作」，而是「删除动作不许绕过那条有确认词、
+        有权限、有「在途运行就拒绝」的路径」—— 一个 DELETE 请求会把这三道一起绕开。
+        """
         script = _dashboard_script()
         for banned in ("method: 'DELETE'", "method: 'PUT'", "method: 'PATCH'"):
             assert banned not in script, f"消耗面板上出现了破坏性写操作：{banned}"
+        # 破坏性端点只有一个调用点（`submitStatsReset`），而且要求确认词。
+        assert script.count("'/ai-analysis/statistics/reset'") == 1
+        reset_body = script[script.index("function submitStatsReset("):]
+        reset_body = reset_body[: reset_body.index("\n    function ")]
+        assert "resetConfirmWord()" in reset_body
 
 
 def _post_targets(script: str) -> list:

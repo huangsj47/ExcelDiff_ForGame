@@ -66,6 +66,14 @@ SENSITIVE_ENDPOINTS = {
     "core_management_routes.update_repository_order",
     "commit_diff_routes.batch_update_commits_compat",
     "commit_diff_routes.update_commit_fields_route",
+    # **全量重置消耗统计**：删掉全部 `ai_analysis_run` / `_trace` / `_anomaly`
+    # （连同 AI 报告正文），是这个平台上唯一一个「一点就删一大片、且没有撤销」的动作。
+    # handler 自带 `@require_admin`，这里加的是**第二道**防线 —— 与上面「万一将来有人
+    # 漏加装饰器，这里仍然拦得住」同一条理由。
+    #
+    # 同一个卡片里那个「设置统计起点」**不进这张表**：它只改消耗面板的统计口径，
+    # 一条记录都不删（可逆、随时恢复），把它按破坏性动作那样加固会让人觉得它同样危险。
+    "ai_analysis_routes.ai_statistics_reset",
 }
 
 WRITE_PROTECTED_ENDPOINTS = {

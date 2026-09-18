@@ -46,6 +46,7 @@ from auth.services import register_user  # noqa: E402
 from models import AiAnalysisRun, Project, db  # noqa: E402
 from models.ai_analysis import AiProjectAnalysisConfig  # noqa: E402
 from services.ai.platform_budget import set_platform_budget  # noqa: E402
+from services.ai.usage_statistics import set_usage_baseline, usage_baseline  # noqa: E402
 
 PASSWORD = "pw-123456"
 STAMP = uuid.uuid4().hex[:6]
@@ -139,6 +140,13 @@ def _seed() -> dict:
             updated_by=admin_name,
         )
         assert ok, message
+
+        # 统计起点：设在 20 天前，于是每个项目都有一部分运行落在起点之前 ——
+        # 「起点之前的运行完全不显示」与「这一屏排除了 N 条」这两句话才都看得见。
+        # 顺带复核那条红线：平台档「已用」是**超了**的状态，它不该因为设了起点而变小。
+        baseline = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=20)
+        ok, message, _errors = set_usage_baseline(baseline, updated_by=admin_name)
+        assert ok, message
     return ids
 
 
@@ -175,7 +183,23 @@ def _capture(ids: dict) -> tuple:
         "/ai-analysis/projects/%d/config" % drill_id:
             client.get(f"/ai-analysis/projects/{drill_id}/config").get_json(),
     }
-    return html, responses, drill_id
+
+    # 「统计范围：全部历史」那一支也要有一份真响应：口径那一行有两句话，两句都得看过。
+    # 清掉起点取一份、再把它放回去，页面拿到的仍是同一个起点状态。
+    with flask_app.app_context():
+        baseline = usage_baseline()
+        assert baseline is not None, "种子数据没设上起点，「起点」那一支就截不到了"
+        set_usage_baseline(None, updated_by=ids["_admin"])
+        all_history = client.get("/ai-analysis/usage/overview").get_json()
+        set_usage_baseline(baseline, updated_by=ids["_admin"])
+    assert all_history["statistics"]["counted_since"] is None, "清掉起点后仍带着起点"
+    assert responses["/ai-analysis/usage/overview"]["statistics"]["counted_since"], (
+        "总览那份响应里没有起点 —— 页面会显示成「全部历史」，而库里有起点"
+    )
+    assert all_history["totals"]["runs"] > responses["/ai-analysis/usage/overview"]["totals"]["runs"], (
+        "两份响应的合计一样多 —— 那「起点之前的运行完全不显示」这句话就没被复核到"
+    )
+    return html, responses, drill_id, all_history
 
 
 # 量值的判据（都在 SKILL「Quick Reference」里）：正文 < 12px 是缺陷；页面横向滚动是
@@ -268,7 +292,7 @@ def _shot(out_prefix: str) -> int:
     from playwright.sync_api import sync_playwright
 
     ids = _seed()
-    html, responses, drill_id = _capture(ids)
+    html, responses, drill_id, all_history = _capture(ids)
 
     out_dir = ROOT / ".pytest_tmp"
     html_path = out_dir / f"{out_prefix}.html"
@@ -346,6 +370,50 @@ def _shot(out_prefix: str) -> int:
             shots.append(path)
         except Exception as exc:  # noqa: BLE001 —— 截图工具，点不开就算了
             print(f"（下钻卡没截到：{exc}）")
+
+        # 统计口径那两个弹层。它们在客户端合成（`openStatsModal` / `openResetModal`），
+        # 所以「点了有没有反应、确认词有没有真把按钮锁住」只能真点一次才知道。
+        print("口径行（有起点）：" + page.inner_text("#aiuStatsLine"))
+        try:
+            page.click("#aiuStatsBaselineBtn", timeout=4000)
+            page.wait_for_timeout(500)
+            path = out_dir / f"{out_prefix}_stats_modal.png"
+            page.screenshot(path=str(path))
+            shots.append(path)
+            print("起点弹层预填：" + page.input_value("#aiuStatsSinceInput")
+                  + "（上限 " + page.get_attribute("#aiuStatsSinceInput", "max") + "）")
+            page.click("#aiuStatsModal .btn-close")
+            page.wait_for_timeout(400)
+        except Exception as exc:  # noqa: BLE001
+            print(f"（起点弹层没截到：{exc}）")
+        try:
+            page.click("#aiuStatsResetBtn", timeout=4000)
+            page.wait_for_timeout(500)
+            locked = page.is_disabled("#aiuResetConfirmBtn")
+            page.screenshot(path=str(out_dir / f"{out_prefix}_reset_modal_locked.png"))
+            shots.append(out_dir / f"{out_prefix}_reset_modal_locked.png")
+            word = page.inner_text("#aiuStatsConfirmWord").strip()
+            page.fill("#aiuStatsConfirmInput", word)
+            page.wait_for_timeout(300)
+            unlocked = not page.is_disabled("#aiuResetConfirmBtn")
+            page.screenshot(path=str(out_dir / f"{out_prefix}_reset_modal_ready.png"))
+            shots.append(out_dir / f"{out_prefix}_reset_modal_ready.png")
+            print(f"确认词「{word}」：没输入时确认按钮 disabled={locked}，"
+                  f"输入之后 disabled={not unlocked}")
+            assert locked and unlocked, "确认词没有锁住 / 解锁确认按钮"
+            page.click("#aiuResetModal .btn-close")
+            page.wait_for_timeout(400)
+        except Exception as exc:  # noqa: BLE001
+            print(f"（重置弹层没截到：{exc}）")
+
+        # 「统计范围：全部历史」那一支：换一份真响应重载一次页面。
+        responses["/ai-analysis/usage/overview"] = all_history
+        page.goto(html_path.as_uri(), wait_until="networkidle")
+        page.wait_for_timeout(600)
+        print("口径行（无起点）：" + page.inner_text("#aiuStatsLine"))
+        page.screenshot(path=str(out_dir / f"{out_prefix}_all_history.png"), full_page=True)
+        shots.append(out_dir / f"{out_prefix}_all_history.png")
+        _measure(page, "all-history")
         browser.close()
 
     for path in shots:
