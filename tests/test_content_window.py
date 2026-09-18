@@ -112,9 +112,12 @@ class TestTruncation:
 
     def test_end_line_matches_what_was_actually_given(self):
         window = slice_lines(_text(1000), '1-400', max_chars=60)
-        assert window.end_line == window.start_line + len(window.content.split('\n')) - 1, (
-            f'抬头会写「第 {window.start_line}–{window.end_line} 行」，'
-            f'但正文只有 {len(window.content.split("\n"))} 行'
+        given = len(window.content.split('\n'))
+        assert window.end_line == window.start_line + given - 1, (
+            # 这个 `given` 不是为了少写一个变量：f-string 的**表达式里**放反斜杠是
+            # Python 3.12+ 才允许的写法（PEP 701），本仓库的 CI 跑 3.11，会直接 SyntaxError
+            # （`test_python311_syntax_compat.py` 就是钉这件事的）。
+            f'抬头会写「第 {window.start_line}–{window.end_line} 行」，但正文只有 {given} 行'
         )
         assert window.end_line < 400
 
