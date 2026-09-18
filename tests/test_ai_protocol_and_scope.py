@@ -540,9 +540,10 @@ def test_dimension_ids_used_in_tests_are_the_real_ones():
 
     这个数量断言是**有意的 tripwire**：加维度时它会红，逼你回来确认本文件的示例
     （`"id": "config_id"`、`category="..."`）是不是也该覆盖新维度。数字本身不是重点，
-    「停下来看一眼」才是。8 个维度是 2026-09-18 加入 `config_data` 之后的数
-    （此前 7 个是加入 `module_coupling` 之后的数）。
+    「停下来看一眼」才是。9 个维度是 2026-09-18 加入 `value_sanity` 之后的数
+    （此前 8 个是同日加入 `config_data`、7 个是加入 `module_coupling` 之后的数）。
     """
-    assert len(DIMENSION_IDS) == 8
+    assert len(DIMENSION_IDS) == 9
     assert "config_id" in DIMENSION_IDS
     assert "config_data" in DIMENSION_IDS
+    assert "value_sanity" in DIMENSION_IDS

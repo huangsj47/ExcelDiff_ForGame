@@ -271,6 +271,34 @@ def test_the_first_round_says_no_diff_is_included():
     assert "不要凭文件名猜测" in message
 
 
+def test_the_first_round_asks_for_the_value_sanity_dimension():
+    """数值改动要按「放在这个系统里合不合理」看（用户要求「高风险的值要报出来」）。
+
+    这条与 `config_data` 那条是**两件事**，所以分开钉：上面那条管「这一行自不自洽」，
+    这条管「这个数本身合不合理」（量级突变、经济闭环）。
+
+    这里钉三件事：维度 id 出现、第一轮就要看（而不是等报告阶段才想起来）、以及
+    **索取比较基准**这一步必须写进第一轮 —— 因为判断「合不合理」必须有对照物，
+    而模型只有在分诊时决定连带索取同表更多行，第二轮才拿得到基准。
+    """
+    message = _message()
+    assert "value_sanity" in message
+    assert "几个数量级" in message
+    assert "经济闭环" in message
+    assert "必须有比较基准" in message
+    assert "file_content" in message
+
+
+def test_the_first_round_hint_steps_are_numbered_without_gaps():
+    """步骤编号连续 —— 中间漏号会让人以为少了一步（真实缺陷形态：插了一步没顺延）。"""
+    import re
+
+    from services.ai.prompt import _FIRST_ROUND_HINT
+
+    numbers = [int(n) for n in re.findall(r"^(\d+)\. \*\*", _FIRST_ROUND_HINT, flags=re.M)]
+    assert numbers == list(range(1, len(numbers) + 1)), f"第一轮提示词的步骤编号不连续：{numbers}"
+
+
 def test_the_first_round_does_not_render_context_items():
     message = _message(items=[ContextItem(kind="file_diff", label="l", text="不该出现")])
     assert "不该出现" not in message

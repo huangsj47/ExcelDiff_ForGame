@@ -47,13 +47,14 @@ SKILL_MD_MAX_LINES = 500
 # 超过这个行数的 reference 必须带目录（skill-creator: ">300 lines, include a TOC"）。
 REFERENCE_TOC_THRESHOLD_LINES = 300
 
-# 八个检查维度。**这是运行期契约**：模型的 `dimensions[].id` 与异常的 `category`
+# 九个检查维度。**这是运行期契约**：模型的 `dimensions[].id` 与异常的 `category`
 # 都必须落在这个集合里，服务端按它校验。改这里就必须同步改 SKILL.md 里的枚举，
 # 而且**顺序也要一致** —— `test_category_enum_in_the_doc_equals_the_runtime_dimension_ids`
 # 是按元组比对的，文档里的枚举顺序与这里不同就会红。
 #
 # 排列是有意的：`config_id`（标识符）→ `config_value`（取值边界）→ `config_data`
-# （这一行/这一格自己是否说得通）是**同一张表由细到整**的三层；`module_coupling`
+# （这一行/这一格自己是否说得通）→ `value_sanity`（这个值放在这个系统里合不合理）
+# 是**同一张表由细到整**的四层，一层比一层往外；`module_coupling`
 # 放在 `config_linkage` 之后，因为两者是同一族问题的两个尺度 —— `config_linkage`
 # 看**一张表**改动的连锁，`module_coupling` 看**模块之间**的耦合。
 #
@@ -61,10 +62,17 @@ REFERENCE_TOC_THRESHOLD_LINES = 300
 # 里最常见的问题不在标识符也不在数值边界，而在**数据自己说不通** —— 只改了一列文案、
 # 描述与取值互相打架、必填列漏填、类型/格式不合法、复制粘贴出来的重复行。这些原先散在
 # `config_value` 的「数值」口径之外，没有归属。
+#
+# `value_sanity` 是同一天接着加的（用户要求「根据每种系统或玩法的配置，判断这个值是否
+# 合理，高风险的值要报出来」）：前三层都在问「这个值写得对不对」，这一层问的是
+# **这个值放在这个系统里合不合理** —— 量级突变（道具价值 1000 → 1000000）、
+# 经济闭环被打破（售价 100 的东西卖给商店能卖 10000）、单位量纲、与本系统其它档位的
+# 比例。它可以是格式完全正确、行内也自洽的一个数，而数量级错一位就是线上事故。
 DIMENSION_IDS = (
     "config_id",
     "config_value",
     "config_data",
+    "value_sanity",
     "config_linkage",
     "module_coupling",
     "code_logic",
