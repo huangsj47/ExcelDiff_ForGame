@@ -39,26 +39,25 @@ import pytest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 所有会拼出 `.excel-cell` 的地方：三张前端渲染页 + 一个服务端 partial +
-# `static/js/diff-handlers.js`。漏掉任何一个，那条路径上的单元格就没有宽度上限。
+# 所有会拼出 `.excel-cell` 的地方：**表体渲染的共享实现**（三个 diff 页面的表体都由它
+# 渲染）、服务端 partial 与 `static/js/diff-handlers.js`。漏掉任何一个，那条路径上的
+# 单元格就没有宽度上限。
 #
-# `diff-handlers.js` 一开始被漏掉了：它的 6 个拼单元格函数与模板里的长得很像，
-# 但早先的用例只扫模板。加上它之后能覆盖 `showExcelSheetInContainer` 那条路径
-# （合并页用它按表切换内容）。
-#
-# 注意一处**曾经写错**的判断，留在这里免得后人跟着错：`commit_diff_new.html:518`
-# 虽然调了 `initExcelDiff`，但 `generateExcelContent` 找的是 `#excel-content`
-# （`diff-handlers.js` 里 `getElementById('excel-content')`），而该页服务端 partial
-# 给的容器 id 是 **`#excel-content-area`** —— 取不到就提前 return，单元格不由 JS 渲染。
-# 全仓 `id="excel-content"` 只出现在 `merge_diff.html:754` 与
-# `services/diff_render_helpers.py`。所以「提交页首屏服务端渲染、之后 JS 重渲染同一张表」
-# 这件事在该页**并不发生**（被清空重建的只有工作表标签，不是表体）。
+# 2026 结构重构：三个模板（commit_diff / weekly_version_full_diff / merge_diff，含合并页
+# 按提交展开的容器路径）不再自己拼单元格，而是调 `static/js/excel_diff_table.js`；所以
+# 单元格的实现从三个模板换成了那一个文件 —— 断言的目标文件换了，但断言本身没变：
+# 「每个拼单元格的地方都要有且只有一个内层容器」。模板侧改由
+# `TEST_TEMPLATES_MUST_NOT_BUILD_CELLS` 反向兜住（谁在模板里又抄一份，这里就会红）。
 CELL_SOURCES = (
+    'static/js/excel_diff_table.js',
+    'templates/diff_partials/excel_diff.html',
+    'static/js/diff-handlers.js',
+)
+# 表体已经迁到共享实现的那几个模板：它们不该再出现 `<td class="excel-cell…">`
+TEST_TEMPLATES_MUST_NOT_BUILD_CELLS = (
     'templates/commit_diff.html',
     'templates/weekly_version_full_diff.html',
     'templates/merge_diff.html',
-    'templates/diff_partials/excel_diff.html',
-    'static/js/diff-handlers.js',
 )
 EXCEL_CSS = 'static/css/excel-diff-new.css'
 # 通配边框规则所在文件（最后加载，带 !important）
@@ -111,6 +110,23 @@ class TestEveryCellCarriesTheWrapper:
         assert cells == wrappers, (
             f'{source}：{cells} 个单元格，但只有 {wrappers} 个 {WRAPPER} 容器 —— '
             f'少掉的那些单元格没有宽度上限'
+        )
+
+    @pytest.mark.parametrize('source', TEST_TEMPLATES_MUST_NOT_BUILD_CELLS)
+    def test_the_delegating_templates_do_not_build_cells(self, source):
+        """已经改用共享实现的模板里不许再有 `.excel-cell` 单元格。
+
+        反向的那一条：上面只要求「出现单元格的地方都带内层容器」，
+        如果某个模板悄悄抄回一份没带内层容器的单元格，上面那条扫不到它 ——
+        它的文件已经不在 CELL_SOURCES 里了。这里按「谁在模板里拼单元格」兜住：
+        这种抄一份回来的写法会让那条路径重新失去宽度上限，而它与共享实现
+        会各自演化（这正是本次重构要消掉的形态）。
+        """
+        text = _read(source)
+        found = TD_RE.findall(text)
+        assert not found, (
+            f'{source} 又在自己拼单元格了：{found} —— 表体渲染只该有一份实现'
+            f'（static/js/excel_diff_table.js），它的单元格才带内层容器上限'
         )
 
 

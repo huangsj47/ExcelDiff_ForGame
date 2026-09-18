@@ -313,7 +313,13 @@ div.excel-diff-container,
     overflow: visible !important;
 }
 
-/* 超强优先级滚动条规则 - 覆盖所有可能的冲突 */
+/* 超强优先级滚动条规则 - 覆盖所有可能的冲突。
+
+   这里原先还有一条 `overflow-x/y: scroll !important`，注释写着「强制显示滚动条，
+   即使内容不够大」。后果是**两条滚动条常驻**：竖向本来就滚不动（实测
+   scrollHeight == clientHeight）却也画一条轨道，右边白占 15px，还与横向那条在
+   右下角拼成一个方块。滚动条该由内容决定要不要出现 —— 上面三条 auto 就是结论，
+   这里不再覆盖。 */
 .excel-table-wrapper,
 div.excel-table-wrapper,
 .excel-diff-wrapper .excel-table-wrapper,
@@ -326,16 +332,13 @@ div.excel-table-wrapper,
     max-width: 100% !important;
     display: block !important;
     position: relative !important;
-    /* 强制显示滚动条，即使内容不够大 */
-    overflow-x: scroll !important;
-    overflow-y: scroll !important;
 }
 
-/* 确保表格足够宽以触发水平滚动条 */
-.excel-table-wrapper .excel-diff-table {
-    min-width: 1200px !important;
-    /* 不设置 min-height，避免行数少时行高被拉伸 */
-}
+/* 表格的宽度下限交给 diff-table-ux.css 定（原先这里有一条 min-width: 1200px
+   !important，注释是「确保表格足够宽以触发水平滚动条」—— 那是上面那套「强制显示
+   滚动条」的一部分：三列表格也被撑到 1200px，窄窗口里凭空多出横向滚动。 */
+
+/* 不设置 min-height，避免行数少时行高被拉伸 */
 
 /* 强制显示滚动条 - 最高优先级 */
 .excel-table-wrapper::-webkit-scrollbar {

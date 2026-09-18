@@ -791,6 +791,8 @@ class TestClientDisplayLayerKeepsLiterals:
 # 合并页的单元格拼装函数。它比另外两页多一层「要不要显示文本块」的判断，
 # 而那层判断里**又抄了一遍** NA 黑名单 —— 见下面那条用例。
 MERGE_TEMPLATE = 'templates/merge_diff.html'
+# 表体渲染的唯一实现（合并页的「修改行」也由它渲染）
+SHARED_MODULE = 'static/js/excel_diff_table.js'
 
 
 def _node_visible(html):
@@ -803,31 +805,38 @@ def _node_visible(html):
 
 
 def _run_merge_modified_row(cases):
-    """跑 merge_diff.html 里**真的** `createModifiedRowForContainer`。"""
+    """跑**唯一那份**「修改行」渲染实现里的 `createModifiedRow`。
+
+    这条原先抠 `templates/merge_diff.html` 里合并页自己的 `createModifiedRowForContainer`。
+    2026 结构重构后合并页也改用共享实现（`static/js/excel_diff_table.js`），那份副本
+    已删除 —— 于是改成加载共享模块、调它的 `createModifiedRow`。断言本身没变：
+    「表里怎么写就怎么显示」，文本 `null` / `nan` / 纯空白都要原样出现在格子里。
+    """
     node = shutil.which('node')
     if not node:
         pytest.skip('node 不可用，跳过 JS 层验证')
-    path = os.path.join(PROJECT_ROOT, MERGE_TEMPLATE)
-    sources = [
-        _extract_function(path, r'function formatCellValue\s*\('),
-        _extract_function(path, r'function escapeHtml\s*\('),
-        _extract_function(path, r'function createModifiedRowForContainer\s*\('),
-    ]
+    with open(SHARED_MODULE, encoding='utf-8') as handle:
+        module_source = handle.read()
     script = (
-        'const document = { createElement() { const el = { textContent: "" };\n'
-        '  Object.defineProperty(el, "innerHTML", { get() { return el.textContent\n'
-        '    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); } });\n'
-        '  return el; } };\n'
-        + '\n\n'.join(sources) + '\n'
+        # 模块按浏览器方式挂 window；展示口径 formatCellValue 由调用方提供
+        # （模块自己不重新实现它，这是它与页面之间的契约）。
+        'const window = {};\n'
+        'window.formatCellValue = function (value) {\n'
+        '    if (value === null || value === undefined) return "";\n'
+        '    if (typeof value === "number" && isNaN(value)) return "";\n'
+        '    return String(value);\n'
+        '};\n'
+        + module_source + '\n'
+        + 'const T = window.ExcelDiffTable;\n'
         + 'const cases = %s;\n' % json.dumps(cases) +
         'process.stdout.write(JSON.stringify(cases.map((c) => '
-        'createModifiedRowForContainer({row_number: 5, cell_changes: '
-        '[{column: "c", old_value: c.old, new_value: c.new}]}, ["c"], 0))));\n'
+        'T.createModifiedRow({row_number: 5, cell_changes: '
+        '[{column: "c", old_value: c.old, new_value: c.new}]}, ["c"]))));\n'
     )
     proc = subprocess.run([node, '-'], input=script, capture_output=True,
                           text=True, encoding='utf-8', timeout=60)
     assert proc.returncode == 0, (
-        '跑合并页 createModifiedRowForContainer 时 Node 报错：\n'
+        '跑共享实现的 createModifiedRow 时 Node 报错：\n'
         f'STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}'
     )
     return json.loads(proc.stdout)

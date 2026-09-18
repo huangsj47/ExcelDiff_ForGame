@@ -238,6 +238,15 @@ def test_two_numbers_are_both_reported_when_they_disagree(rendered, page):
 # --------------------------------------------------------------------------
 
 
+# 每个页面「把表格渲染出去」的那一行。2026 结构重构后表体由共享模块渲染，
+# 所以锚点从各自拼 `tableHtml` 换成了对共享实现的调用 —— 换的是**锚点的写法**，
+# 不是断言本身：「拦截必须在渲染之前」这条要求照旧。
+TABLE_RENDER_ANCHORS = {
+    "templates/weekly_version_full_diff.html": "ExcelDiffTable.mountSheetTable",
+    "templates/merge_diff.html": "ExcelDiffTable.mountSheetTable",
+}
+
+
 @pytest.mark.parametrize("page", PAGES)
 def test_the_page_intercepts_before_rendering_the_table(page):
     """光有函数不算数 —— 它得在渲染表格**之前**被调用并 return。
@@ -248,8 +257,13 @@ def test_the_page_intercepts_before_rendering_the_table(page):
     source = _strip_js_comments(_read(page))
     caller = _extract_function(source, CALLERS[page])
 
+    anchor = TABLE_RENDER_ANCHORS[page]
+    assert anchor in caller, (
+        f"{page}：渲染入口里找不到「把表格渲染出去」的那一步（{anchor}）—— "
+        f"用例失去了参照点，先确认这一页还在渲染表格"
+    )
     guard_at = caller.index("noNetChangeHtml(sheetData)")
-    table_at = caller.index("tableHtml")
+    table_at = caller.index(anchor)
     assert guard_at < table_at, "拦截写在渲染表格后面，等于没拦"
 
     between = caller[guard_at:table_at]

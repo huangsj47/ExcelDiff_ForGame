@@ -7,6 +7,11 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='css/excel-diff-new.css') }}?v=2.1">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/excel-scroll-fix.css') }}?v=2.2">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.1">
+{# 表体表现层：必须最后加载，五个 diff 页面才是同一张表（见该文件顶部说明） #}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-table-ux.css') }}?v=1.0">
+{# 本页用了 `bi bi-*` 图标（工作表级提示等），而 base.html 只加载 FontAwesome，
+   不引这一行那些图标会不显示且不报错。 #}
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
 {% endblock %}
 
 {% block content %}
@@ -502,6 +507,8 @@
 }
 </style>
 
+{# 表体渲染的单一实现：必须在本页内联脚本**之前**加载（本页的入口函数调它） #}
+<script src="{{ url_for('static', filename='js/excel_diff_table.js') }}?v=1.0"></script>
 <script>
 let configId = {{ config.id }};
 let filePath = '{{ file_path }}';
@@ -1053,33 +1060,21 @@ window.showWeeklyExcelSheet = function(contentContainer, sheetName, sheetData) {
         return;
     }
 
-    // 使用与单文件diff完全相同的表格生成逻辑，添加滚动容器
-    var modifiedColumns = getModifiedColumns(sheetData);
-    let tableHtml = '<div class="excel-table-wrapper" style="overflow: auto !important; overflow-x: scroll !important; overflow-y: scroll !important; max-height: 70vh !important; max-width: 100% !important;"><table class="excel-diff-table">';
-
-    // 添加表头 - 包含修改列的黄色背景标识
-    if (sheetData.headers && sheetData.headers.length > 0) {
-        tableHtml += '<thead><tr>';
-        tableHtml += '<th scope="col" class="excel-row-header">行号</th>';
-
-        sheetData.headers.forEach(header => {
-            var isModified = modifiedColumns.indexOf(header) !== -1;
-            var headerClass = isModified ? 'excel-column-header excel-modified-column-header' : 'excel-column-header';
-            tableHtml += `<th scope="col" class="${headerClass}">${header}</th>`;
-        });
-        tableHtml += '</tr></thead>';
+    // 表体渲染收进了共享模块（static/js/excel_diff_table.js）：表头 / 行 / 分段标题 /
+    // 工具栏（按列筛选、只看变更列、隐藏本页空列）都只有那一份实现。
+    // 这里只负责「这一页该渲染哪张表、上面挂哪些提示」——注意仍然要在渲染表格**之前**
+    // 拦掉上面两种「没有内容」的载荷。
+    if (!window.ExcelDiffTable) {
+        // 共享模块没加载出来（脚本 404 / 顺序被改）：不要静默渲染一张空表，
+        // 直接把原因说出来 —— 否则表现就是「页面打开了但什么都没有」。
+        contentContainer.innerHTML = noticesHtml +
+            '<div class="alert alert-warning">表体渲染模块未加载（static/js/excel_diff_table.js）</div>';
+        return;
     }
-
-    // 添加表体：按「删除行数据 / 新增行数据 / 变更行数据」分段（段内按 Excel 行号升序）
-    tableHtml += '<tbody>';
-
-    if (sheetData.rows && sheetData.rows.length > 0) {
-        tableHtml += changedRowsGroupedHtml(sheetData.rows, sheetData.headers);
-    }
-
-    tableHtml += '</tbody></table></div>';
-
-    contentContainer.innerHTML = noticesHtml + tableHtml;
+    window.ExcelDiffTable.mountSheetTable(contentContainer, sheetData, {
+        sheetName: sheetName,
+        noticesHtml: noticesHtml
+    });
 };
 
 // 工作表级变更：整张表被新增 / 被删除。
@@ -1177,128 +1172,10 @@ function noNetChangeHtml(sheetData) {
            '</div>';
 }
 
-// 变更行的分组顺序与标题（与提交页 diff 完全同一形态，两处改要一起改）。
-//
-// 整行删除、整行新增各自成段，逐格修改排最后；段内按 Excel 行号升序；每段前插一条
-// 横跨「行号 + 全部列」的标题行。只改渲染顺序与分段标题，不动载荷。
-var DIFF_ROW_GROUPS = [
-    {status: 'removed', label: '删除行数据'},
-    {status: 'added', label: '新增行数据'},
-    {status: 'modified', label: '变更行数据'}
-];
 
-function groupChangedRows(rows) {
-    var list = rows || [];
-    var groups = [];
-    var grouped = {};
-
-    for (var i = 0; i < DIFF_ROW_GROUPS.length; i++) {
-        var spec = DIFF_ROW_GROUPS[i];
-        var members = [];
-        for (var j = 0; j < list.length; j++) {
-            if ((list[j].status || '') === spec.status) {
-                members.push(list[j]);
-            }
-        }
-        grouped[spec.status] = true;
-        if (!members.length) {
-            continue;
-        }
-        members.sort(function (a, b) {
-            return (a.row_number || 0) - (b.row_number || 0);
-        });
-        groups.push({label: spec.label, rows: members});
-    }
-
-    var rest = [];
-    for (var k = 0; k < list.length; k++) {
-        if (!grouped[list[k].status || '']) {
-            rest.push(list[k]);
-        }
-    }
-    if (rest.length) {
-        groups.push({label: null, rows: rest});
-    }
-    return groups;
-}
-
-function groupHeaderRowHtml(label, columnCount) {
-    return '<tr class="excel-row-group-header">' +
-           '<td class="excel-group-header" colspan="' + (columnCount + 1) + '">' +
-           escapeHtml(label) + '：</td></tr>';
-}
-
-function changedRowHtml(row, headers) {
-    if (row.status === 'added') {
-        return createAddedRow(row, headers);
-    }
-    if (row.status === 'removed') {
-        return createRemovedRow(row, headers);
-    }
-    if (row.status === 'modified') {
-        return createModifiedRow(row, headers);
-    }
-    return createUnchangedRow(row, headers);
-}
-
-function changedRowsGroupedHtml(rows, headers) {
-    var groups = groupChangedRows(rows);
-    var html = '';
-    for (var i = 0; i < groups.length; i++) {
-        if (groups[i].label) {
-            html += groupHeaderRowHtml(groups[i].label, headers.length);
-        }
-        for (var j = 0; j < groups[i].rows.length; j++) {
-            html += changedRowHtml(groups[i].rows[j], headers);
-        }
-    }
-    return html;
-}
-
-// 获取修改的列
-function getModifiedColumns(sheetData) {
-    var modifiedColumns = [];
-
-    if (sheetData && sheetData.rows) {
-        for (var i = 0; i < sheetData.rows.length; i++) {
-            var row = sheetData.rows[i];
-            if (row.status === 'modified' && row.cell_changes && Array.isArray(row.cell_changes)) {
-                for (var j = 0; j < row.cell_changes.length; j++) {
-                    var change = row.cell_changes[j];
-                    if (change.column && modifiedColumns.indexOf(change.column) === -1) {
-                        modifiedColumns.push(change.column);
-                    }
-                }
-            }
-        }
-    }
-
-    return modifiedColumns;
-}
-
-// 精确高亮差异函数 - 只高亮变更的参数
-function highlightDifferences(oldValue, newValue, type) {
-    if (!oldValue && !newValue) return '';
-    if (!oldValue) return `<span class="excel-text-bg-${type}">${escapeHtml(newValue)}</span>`;
-    if (!newValue) return `<span class="excel-text-bg-${type}">${escapeHtml(oldValue)}</span>`;
-
-    const oldStr = String(oldValue);
-    const newStr = String(newValue);
-
-    // 如果值完全相同，直接返回
-    if (oldStr === newStr) {
-        return escapeHtml(oldStr);
-    }
-
-    // 对于单个值的情况，直接高亮整个值
-    if (type === 'old') {
-        return `<span class="excel-text-bg-old">${escapeHtml(oldStr)}</span>`;
-    } else {
-        return `<span class="excel-text-bg-new">${escapeHtml(newStr)}</span>`;
-    }
-}
-
-// HTML转义函数
+// HTML转义函数。**表体渲染不再用它**（那一份在 static/js/excel_diff_table.js），
+// 但本页的提示行（表级增删 / 列级变更 / 没有净变更）还要它 —— 那些函数有测试
+// 要求逐字节一致，三份模板里的同名函数必须一样。
 function escapeHtml(text) {
     if (text === null || text === undefined) return '';
     return String(text)
@@ -1307,116 +1184,6 @@ function escapeHtml(text) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
-}
-
-// 创建修改行 - 使用双行显示
-function createModifiedRow(row, headers) {
-    var html = '';
-
-    // Convert cell_changes array to a map for easier lookup
-    var modifiedCellsMap = {};
-    if (row.cell_changes && Array.isArray(row.cell_changes)) {
-        row.cell_changes.forEach(function(change) {
-            modifiedCellsMap[change.column] = {
-                old_value: change.old_value,
-                new_value: change.new_value
-            };
-        });
-    }
-
-    // 第一行显示旧值（红色）
-    html += '<tr class="excel-row-modified-old">' +
-            '<td class="excel-row-number excel-modified" rowspan="2">' + (row.row_number || '') + '</td>';
-
-    for (var i = 0; i < headers.length; i++) {
-        var header = headers[i];
-        var cellChange = modifiedCellsMap[header];
-
-        if (cellChange) {
-            var oldValue = window.formatCellValue(cellChange.old_value);
-            if (oldValue === '') {
-                html += '<td class="excel-cell excel-modified-old modified-column"><span class="excel-cell-inner">' + escapeHtml(oldValue) + '</span></td>';
-            } else {
-                // 使用精确高亮函数处理参数级别的差异
-                var highlightedOldValue = highlightDifferences(oldValue, window.formatCellValue(cellChange.new_value), 'old');
-                html += '<td class="excel-cell excel-modified-old modified-column"><span class="excel-cell-inner">' + highlightedOldValue + '</span></td>';
-            }
-        } else {
-            var cellValue = window.formatCellValue(row.data && row.data[header]);
-            html += '<td class="excel-cell excel-unchanged" rowspan="2"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
-        }
-    }
-
-    html += '</tr>';
-
-    // 第二行显示新值（绿色）
-    html += '<tr class="excel-row-modified-new">';
-
-    for (var i = 0; i < headers.length; i++) {
-        var header = headers[i];
-        var cellChange = modifiedCellsMap[header];
-
-        if (cellChange) {
-            var newValue = window.formatCellValue(cellChange.new_value);
-            if (newValue === '') {
-                html += '<td class="excel-cell excel-modified-new modified-column"><span class="excel-cell-inner">' + escapeHtml(newValue) + '</span></td>';
-            } else {
-                // 使用精确高亮函数处理参数级别的差异
-                var highlightedNewValue = highlightDifferences(window.formatCellValue(cellChange.old_value), newValue, 'new');
-                html += '<td class="excel-cell excel-modified-new modified-column"><span class="excel-cell-inner">' + highlightedNewValue + '</span></td>';
-            }
-        }
-        // 未修改的单元格已经在上一行用rowspan=2处理了
-    }
-
-    html += '</tr>';
-
-    return html;
-}
-
-// 创建新增行
-function createAddedRow(row, headers) {
-    var html = '<tr class="excel-row-added">' +
-               '<td class="excel-row-number excel-added">' + (row.row_number || '') + '</td>';
-
-    for (var i = 0; i < headers.length; i++) {
-        var header = headers[i];
-        var cellValue = window.formatCellValue(row.data && row.data[header]);
-        html += '<td class="excel-cell excel-added"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
-    }
-
-    html += '</tr>';
-    return html;
-}
-
-// 创建删除行
-function createRemovedRow(row, headers) {
-    var html = '<tr class="excel-row-removed">' +
-               '<td class="excel-row-number excel-removed">' + (row.row_number || '') + '</td>';
-
-    for (var i = 0; i < headers.length; i++) {
-        var header = headers[i];
-        var cellValue = window.formatCellValue(row.data && row.data[header]);
-        html += '<td class="excel-cell excel-removed"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
-    }
-
-    html += '</tr>';
-    return html;
-}
-
-// 创建未修改行
-function createUnchangedRow(row, headers) {
-    var html = '<tr class="excel-row-unchanged">' +
-               '<td class="excel-row-number">' + (row.row_number || '') + '</td>';
-
-    for (var i = 0; i < headers.length; i++) {
-        var header = headers[i];
-        var cellValue = window.formatCellValue(row.data && row.data[header]);
-        html += '<td class="excel-cell"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
-    }
-
-    html += '</tr>';
-    return html;
 }
 
 // 单元格值 → 展示文本：与提交页/服务端同一契约 —— **表里怎么写就怎么显示**。

@@ -234,7 +234,20 @@ class TestRenderersCallTheSharedHelpers:
 
 
 # 端到端：把线上 5974/5975 的真实载荷喂给正文渲染入口，看它到底渲出了什么
+#
+# 表体渲染现在由共享模块（static/js/excel_diff_table.js）负责，两个入口页都调它。
+# 这里用一个返回 'TABLE' 的桩顶掉它：这些用例只关心「空表 / 没有净变更时页面说了
+# 什么」，桩把「表格」变成一个可判定的标记，`'TABLE' not in rendered` 就是
+# 「这条路径没有再去渲染表格」。
 FULL_HARNESS = '''
+const ExcelDiffTable = {
+    renderSheetTable: function () { return 'TABLE'; },
+    mountSheetTable: function (container) { container.innerHTML = 'TABLE'; },
+    toolbarHtml: function () { return ''; },
+    tableHeadHtml: function () { return ''; },
+    tableBodyHtml: function () { return ''; },
+    resolveView: function () { return {units: [], visibleHeaders: []}; }
+};
 function createExcelDiffTable(sheetName, sheetData) { return 'TABLE'; }
 function getModifiedColumns(sheetData) { return []; }
 function changedRowsGroupedHtml(rows, headers) { return ''; }
@@ -267,6 +280,123 @@ def _run_full(template, sheet, mode):
         return json.loads(proc.stdout)['html']
     finally:
         os.unlink(temp_path)
+
+
+# 端到端（真模块版）：把一张**有内容**的表喂进正文渲染入口，走真的共享实现。
+#
+# 上面那个 FULL_HARNESS 用桩顶掉表格（只关心「空表时页面说了什么」）；这里反过来 ——
+# 加载真的 static/js/excel_diff_table.js，断言三个模板的入口函数**确实**把数据交给了
+# 它：表头、分段标题、行都出得来。这一条专治「入口函数改了调用点却没人发现」
+# （模板里调错名字/传错参数不会有任何报错，只会渲染出空壳）。
+REAL_MODULE_HARNESS = '''
+window.formatCellValue = function (value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'number' && isNaN(value)) return '';
+    return String(value);
+};
+const request = JSON.parse(process.argv[2]);
+const container = {
+    innerHTML: '',
+    addEventListener: function () {},
+    querySelector: function () { return null; },
+    querySelectorAll: function () { return []; }
+};
+if (request.mode === 'weekly') {
+    window.showWeeklyExcelSheet(container, request.sheetName, request.sheet);
+} else if (request.mode === 'merge') {
+    showMergedExcelSheet(container, request.sheetName, request.sheet);
+} else {
+    container.innerHTML = sheetBodyHtml(request.sheetName, request.sheet);
+}
+process.stdout.write(JSON.stringify({html: container.innerHTML}));
+'''
+
+
+# 入口函数自己调用的、也在同一个模板里的下一层函数（提交页的入口只是把活转交给它）
+EXTRA_ENTRY_FUNCS = {
+    COMMIT_TEMPLATE: ('createExcelDiffTable',),
+}
+
+
+def _run_real_module(template, sheet, mode):
+    if NODE is None:
+        pytest.skip('本机没有 node')
+    with open(os.path.join(PROJECT_ROOT, 'static', 'js', 'excel_diff_table.js'),
+              encoding='utf-8') as handle:
+        module_source = handle.read()
+    marker = RENDERER_MARKERS[template]
+    # `window` 就用 node 的全局对象：浏览器里 `window.X = …` 会顺带建出一个全局 X，
+    # 模板里既有 `window.ExcelDiffTable.mountSheetTable(...)` 也有裸名调用
+    # （`ExcelDiffTable.renderSheetTable(...)`），用真全局两种写法才都能解析。
+    # 共享模块放在最前面：与浏览器的加载顺序一致（模块脚本先于页面内联脚本），
+    # 也避免它被粘到上一段的尾部（`window.f = function () {}` 后面紧跟 `(` 会被
+    # 当成函数调用，而不是新语句 —— ASI 不在这里插分号）。
+    script = '\n'.join(['var window = globalThis;', module_source, _extract(WEEKLY_TEMPLATE, ESCAPER)]
+                       + [_extract(template, name) for name in SHARED_FUNCS]
+                       + [_extract(template, name) for name in EXTRA_ENTRY_FUNCS.get(template, ())]
+                       + [_block_at(template, marker)]) + REAL_MODULE_HARNESS
+    with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False, encoding='utf-8') as handle:
+        handle.write(script)
+        temp_path = handle.name
+    try:
+        proc = subprocess.run([NODE, temp_path,
+                               json.dumps({'mode': mode, 'sheetName': 'Sheet1', 'sheet': sheet})],
+                              capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, f'node 跑失败：{proc.stderr[:600]}'
+        return json.loads(proc.stdout)['html']
+    finally:
+        os.unlink(temp_path)
+
+
+# 一张有变更的表：整行删除 / 整行新增 / 逐格修改各一条
+SHEET_WITH_CHANGES = {
+    'headers': ['id', '名字'],
+    'rows': [
+        {'row_number': 2, 'status': 'added', 'data': {'id': '9', '名字': '新'}},
+        {'row_number': 5, 'status': 'removed', 'data': {'id': '3', '名字': '删'}},
+        {'row_number': 7, 'status': 'modified', 'data': {'id': '4', '名字': '旧名'},
+         'cell_changes': [{'column': '名字', 'old_value': '旧名', 'new_value': '新名'}]},
+    ],
+}
+
+
+class TestTheRealSheetsRenderThroughTheSharedModule:
+    """三个模板的入口函数 + 真的共享模块：表头 / 分段 / 行都要出得来。"""
+
+    @pytest.mark.parametrize('template,mode', [
+        (COMMIT_TEMPLATE, 'commit'),
+        (WEEKLY_TEMPLATE, 'weekly'),
+        (MERGE_TEMPLATE, 'merge'),
+    ])
+    def test_a_sheet_with_changes_renders_a_real_table(self, template, mode):
+        html = _run_real_module(template, SHEET_WITH_CHANGES, mode)
+        name = os.path.basename(template)
+
+        assert '<table class="excel-diff-table">' in html, f'{name}：没有渲染出表格'
+        assert '<div class="excel-table-wrapper">' in html, f'{name}：表格没有包装容器'
+        assert 'excel-diff-toolbar' in html, f'{name}：没有工具栏（筛选/开关）'
+        # 单行表头：字段名在 excel-bold-text 里，列字母在 excel-column-id 里
+        assert '<div class="excel-bold-text">名字</div>' in html, f'{name}：表头里没有字段名'
+        assert '<div class="excel-column-id">A</div>' in html, f'{name}：表头里没有列字母'
+        # 分段与行
+        for label in ('删除行数据', '新增行数据', '变更行数据'):
+            assert f'{label}：' in html, f'{name}：没有「{label}」这一段'
+        assert '<tr class="excel-row-added">' in html, f'{name}：没有渲染新增行'
+        assert '<tr class="excel-row-removed">' in html, f'{name}：没有渲染删除行'
+        assert 'excel-row-modified-old' in html, f'{name}：没有渲染修改行的旧值行'
+
+    @pytest.mark.parametrize('template,mode', [
+        (COMMIT_TEMPLATE, 'commit'),
+        (WEEKLY_TEMPLATE, 'weekly'),
+        (MERGE_TEMPLATE, 'merge'),
+    ])
+    def test_the_sheet_notices_still_come_first(self, template, mode):
+        """表级提示仍然在表格之前 —— 整张表被新增/删除时它就是全部内容。"""
+        sheet = dict(SHEET_WITH_CHANGES, operation='deleted', message='工作表 "Sheet1" 已被删除')
+        html = _run_real_module(template, sheet, mode)
+        assert 'excel-sheet-operation' in html, f'{os.path.basename(template)}：表级提示没了'
+        assert html.index('excel-sheet-operation') < html.index('excel-table-wrapper'), (
+            f'{os.path.basename(template)}：表级提示跑到了表格后面')
 
 
 class TestTheRealEmptySheetPayloadsRenderSomething:

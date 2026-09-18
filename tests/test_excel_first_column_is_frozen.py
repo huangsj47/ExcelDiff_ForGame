@@ -217,16 +217,39 @@ def test_the_frozen_header_outranks_the_other_header_cells():
 
 
 def test_both_templates_keep_sticky_available_on_the_row_number():
-    """生成表格的三个模板都要把行号列渲染成 .excel-row-number。
+    """生成表格的三个模板都要经由**渲染行号列的那一份实现**出表。
 
-    这条拦的是「CSS 修好了，但某个页面换了类名/没这个类」——
-    那个页面的第一列会完全不冻结，而且不会有任何报错。
+    这条拦的是「CSS 修好了，但某个页面换了类名/没这个类」—— 那个页面的第一列会
+    完全不冻结，而且不会有任何报错。
+
+    2026 结构重构后，`excel-row-number` 不再写在三个模板里，而是写在表体渲染的
+    共享实现 `static/js/excel_diff_table.js` 里（三个页面的表体都由它渲染）。
+    所以断言换成同一条链的两端：**共享实现里必须真的产出 `.excel-row-number`**
+    （否则三个页面一起丢冻结），**且这三个模板都必须加载并调用它**（某个页面漏掉
+    脚本或改回自己拼表，那一页就又回到「第一列不冻结」）。牙齿没拔：
+    老断言管「每个模板都渲染行号列」，新断言管「每个模板都经由唯一那份渲染行号列的
+    实现」，中间被绕过的可能性反而更小了（类名只有一处可改）。
     """
+    with open(os.path.join(PROJECT_ROOT, 'static/js/excel_diff_table.js'), encoding='utf-8') as fh:
+        shared = fh.read()
+    assert 'excel-row-number' in shared, (
+        'static/js/excel_diff_table.js 不产出 excel-row-number —— '
+        '三个页面的第一列都会不冻结'
+    )
+    assert re.search(r'class="excel-row-number', shared), (
+        '共享实现里 excel-row-number 只出现在注释里，没有真的拼进行号格'
+    )
+
     for template in ('templates/commit_diff.html', 'templates/merge_diff.html',
                      'templates/weekly_version_full_diff.html'):
         path = os.path.join(PROJECT_ROOT, template)
         with open(path, encoding='utf-8') as fh:
             src = fh.read()
-        assert 'excel-row-number' in src, (
-            f'{template} 渲染的表格里没有 excel-row-number，该页第一列不会冻结'
+        assert "js/excel_diff_table.js" in src, (
+            f'{template} 没有加载表体渲染的共享实现 —— 它的表体要么渲染不出来，'
+            f'要么走的是另一份实现（那一份的行号列不一定冻结）'
+        )
+        assert re.search(r'ExcelDiffTable\.(renderSheetTable|mountSheetTable|tableHeadHtml)', src), (
+            f'{template} 加载了共享实现却没有调它 —— 该页的表格不由它渲染，'
+            f'所以「第一列冻结」在这页没有任何保证'
         )

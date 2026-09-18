@@ -1,0 +1,344 @@
+/* Excel diff 表体的表现层。
+
+   为什么单独一份、并且要求**在每份 diff 模板里最后加载**：
+   表体样式历史上散在四份文件里（diff-styles / excel-diff-new / excel-scroll-fix /
+   commit-colors-patch），同一组选择器互相用 !important 覆盖，而且**赢家随页面不同**
+   （提交页最后一层是 excel-scroll-fix，commit_diff_new 页是 diff-styles，周版本页还夹着
+   excel-diff-new）—— 同一张表在五个页面长得不一样，改一处又只影响一部分页面。
+   新规则集中放这里、最后加载，五个页面才是同一张表。
+   **不要再往那四份里加表体规则。**
+
+   颜色一律走 style.css 里的语义令牌（`--color-*`），本文件不引入裸 hex。
+   !important 在这里是必需的：要盖过前面那些已经带 !important 的老规则。 */
+
+/* ---------------------------------------------------------------- 1. 表格本体 */
+
+/* 列宽按内容分配，不再为了填满容器把每一列一起拉宽。
+   原先 `width: 100%` + 自动布局：内容宽度不足时浏览器把余量按比例摊给每一列，
+   于是「行号」这种只有两位数的列被拉到 105px —— 一整块米色比内容列还抢眼。
+   改成 max-content（按内容定列宽）+ min-width 100%（窄内容时仍填满容器）。
+   选择器写成两段是为了盖过 excel-scroll-fix.css 里那条同名的 1200px 下限。 */
+.excel-table-wrapper .excel-diff-table {
+    width: max-content !important;
+    min-width: 100% !important;
+    font-variant-numeric: tabular-nums;   /* 数字列左右对齐，扫读时不用逐位对 */
+    font-feature-settings: "tnum" 1;
+}
+
+/* ---------------------------------------------------------------- 2. 表头 */
+
+/* 吸顶（原本就有，这里显式写下并统一层级，免得被别处的 position 覆盖）；
+   层级从下到上：表体行号格 6 < 分段标题 11 < 表头 12 < 表头的行号格 13。 */
+/* 表头高度钉死：分段标题（下一节）要吸在「表头正下方」，那个偏移量得是个确定值。
+   高度一旦由内容决定，列名换行就会把段标题盖住。
+   box-sizing 必须显式写成 border-box：表格单元格默认是 content-box，
+   只写 height: 34px 会变成「内容区 34px」，加上内边距与边框实测 47px。 */
+.excel-diff-table thead th {
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 12 !important;
+    box-sizing: border-box;
+    height: 34px !important;
+    max-height: 34px !important;
+    vertical-align: middle;
+    padding: 4px 10px !important;
+    line-height: 1.2;
+    /* 单行 + 溢出省略：列名一旦能换行，这一行就不止 34px，分段标题的吸附偏移（34px）
+       会跟着失准。完整列名由模板给的 title 属性兜底。 */
+    white-space: nowrap;
+    background-color: var(--color-surface-subtle, #f8f9fa) !important;
+}
+
+/* 「这一列有变更」：原先只有一层黄底，表头黄色块和行号格的米色块容易看混。
+   再加一条底部色条 + 加粗，颜色不再是唯一线索。 */
+.excel-diff-table thead th.excel-modified-column-header {
+    box-shadow: inset 0 -3px 0 0 var(--color-warning-text, #856404);
+    font-weight: 700 !important;
+}
+
+/* 列字母（A/B/C…）排到列名**左边**，不另起一行。
+   另有实现是「字母一行、列名一行」，但那样表头至少 37px，而分段标题的吸附偏移钉在
+   34px（= 表头高度），会错开 3px、段标题被表头压住一条。字母是次要信息，行内小字足够，
+   也仍保留「这是 Excel 的第几列」这条线索（配表同学按字母找列）。
+   两个 div 的 display 由这里改写：它们是别的样式表里的 block。 */
+.excel-diff-table th .excel-column-id {
+    display: inline-block;
+    margin: 0 6px 0 0;
+    font-size: 10px;
+    line-height: 1;
+    color: var(--color-text-muted, #656d76);
+    vertical-align: 1px;
+}
+
+.excel-diff-table th .excel-bold-text {
+    display: inline;
+}
+
+/* ---------------------------------------------------------------- 3. 行号列 */
+
+/* 收窄 + 等宽数字 + 吸左（横向滚动时行号跟着走，否则滚到右边认不出是哪一行）。
+   宽度写成 width 而不只是 max-width：自动布局里 max-width 只是建议值，
+   表格被拉宽时会被忽略。 */
+.excel-diff-table .excel-row-number,
+.excel-diff-table th.excel-row-header {
+    width: 56px !important;
+    min-width: 56px !important;
+    max-width: 56px !important;
+    padding: 6px 4px !important;
+    text-align: center !important;
+    vertical-align: middle !important;
+    font-size: 12px !important;
+    font-variant-numeric: tabular-nums;
+    position: sticky !important;
+    left: 0 !important;
+    z-index: 6 !important;
+}
+
+/* 表头的行号格要盖住表头的其他格，否则横向滚动时会漏出后面的列名 */
+.excel-diff-table thead th.excel-row-header {
+    z-index: 13 !important;
+}
+
+/* 左侧色条 = 这一行的状态。行号格是它们的共同落点，扫一眼就知道自己在哪一段。 */
+.excel-diff-table tr.excel-row-added > td.excel-row-number {
+    box-shadow: inset 3px 0 0 0 var(--color-success-text, #157347);
+}
+
+.excel-diff-table tr.excel-row-removed > td.excel-row-number {
+    box-shadow: inset 3px 0 0 0 var(--color-danger-text, #b3261e);
+}
+
+/* 修改行只用一条中性的色条：行号格是两行共用的，给它红色或绿色都等于替整对行表态，
+   而这一对里旧值红、新值绿各占一半。红/绿留给单元格自己说。 */
+.excel-diff-table tr.excel-row-modified-old > td.excel-row-number {
+    box-shadow: inset 3px 0 0 0 var(--color-warning-text, #856404);
+}
+
+/* 非颜色线索。色彩在色盲、灰度打印、以及「浅底 + 深字」这套配色里都不够硬：
+   新增/删除原先只差一层底色，修改行的上下两半也只差底色。
+   行号格里补一个字符，颜色之外还有形状可认。 */
+.excel-diff-table tr.excel-row-added > td.excel-row-number::before,
+.excel-diff-table tr.excel-row-removed > td.excel-row-number::before,
+.excel-diff-table tr.excel-row-modified-old > td.excel-row-number::before,
+.excel-diff-table tr.excel-row-modified-new > td.excel-row-number::before {
+    display: block;
+    font-size: 10px;
+    line-height: 1.2;
+    font-weight: 700;
+}
+
+.excel-diff-table tr.excel-row-added > td.excel-row-number::before {
+    content: "＋";
+    color: var(--color-success-text, #157347);
+}
+
+.excel-diff-table tr.excel-row-removed > td.excel-row-number::before {
+    content: "－";
+    color: var(--color-danger-text, #b3261e);
+}
+
+/* 修改行的行号格是 rowspan=2 的**一个**格子（两行共用），它只能说明「这一对是改动」，
+   说成「上面那行是旧值」就错了 —— 实测写成「旧」时那个字贴在整个行对上。
+   上下哪一半是旧值由单元格自己表达：旧值那格文字带删除线、底色浅红。 */
+.excel-diff-table tr.excel-row-modified-old > td.excel-row-number::before {
+    content: "改";
+    color: var(--color-warning-text, #856404);
+}
+
+/* ---------------------------------------------------------------- 4. 分段标题 */
+
+/* 段标题吸在表头下面：长表滚到中段时，「这几行是删除行还是新增行」不该靠往回滚找。 */
+.excel-diff-table tr.excel-row-group-header > td.excel-group-header {
+    position: sticky !important;
+    top: 34px !important;          /* = 表头高度，见上面 thead th 的 height */
+    z-index: 11 !important;
+    padding: 5px 10px !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
+    text-align: left !important;
+    letter-spacing: 0.02em;
+    border-left: 3px solid var(--color-border-strong, #adb5bd);
+}
+
+/* ---------------------------------------------------------------- 5. 单元格 */
+
+/* 值域很长的列（Memo/描述）到了上限就换行，别把整张表撑到必须横向滚动；
+   同时允许任意位置断行，长 ID / URL 不会撑破列宽。 */
+.excel-diff-table .excel-cell .excel-cell-inner {
+    overflow-wrap: anywhere;
+}
+
+/* 分段标题里的计数。标签本身必须仍然以「变更行数据：」这种形式出现（有测试按
+   正则 `colspan="N"[^>]*>变更行数据：` 卡），所以计数只能是标签**后面**的一个
+   inline 元素，不能插在标签和冒号之间。 */
+.excel-diff-table .excel-group-header__count {
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--color-surface, #fff);
+    color: var(--color-text-muted, #656d76);
+    font-weight: 600;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- 6. 表格工具栏
+   旧面板是「每列一个常驻的『回车搜索』输入框」压在表头下面：一行输入框横跨全表，
+   把表头/筛选/数据三层挤在一起，还吃掉一整行高度。这里收成表格**上方**一条工具栏：
+   搜索框 + 限定列 + 两个视图开关，不占表格的列，也不与表头抢位置。 */
+
+.excel-diff-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 12px;
+    margin-bottom: 8px;
+    padding: 6px 10px;
+    border: 1px solid var(--color-border, #dee2e6);
+    border-radius: 6px;
+    background: var(--color-surface-subtle, #f8f9fa);
+}
+
+.excel-diff-toolbar__search,
+.excel-diff-toolbar__views {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+/* 搜索框前的图标。选 FontAwesome 而不是 Bootstrap Icons：前者由 base.html 每页加载，
+   后者只有个别页面自己引（用 bi 的那些图标在没引的页面上是空框，且不报错）。 */
+.excel-diff-toolbar__search > i {
+    color: var(--color-text-muted, #656d76);
+    font-size: 13px;
+}
+
+/* 桌面端 34px：这是密集的数据表格工具，44px 的触控目标会把工具栏撑成两排；
+   窄屏（≤768px）再抬到 44px，见文件末尾的媒体查询。 */
+.excel-diff-search-input,
+.excel-diff-search-column {
+    height: 34px;
+    padding: 0 8px;
+    border: 1px solid var(--color-border, #dee2e6);
+    border-radius: 4px;
+    background: var(--color-surface, #fff);
+    color: var(--color-text, #212529);
+    font-size: 13px;
+    line-height: 32px;
+}
+
+.excel-diff-search-input {
+    width: 200px;
+    max-width: 46vw;
+}
+
+.excel-diff-search-column {
+    max-width: 180px;
+}
+
+.excel-diff-search-input:focus-visible,
+.excel-diff-search-column:focus-visible,
+.excel-diff-search-clear:focus-visible,
+.excel-diff-toggle:focus-visible {
+    outline: 2px solid var(--color-focus, #0b5ed7);
+    outline-offset: 1px;
+}
+
+.excel-diff-search-clear {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid var(--color-border, #dee2e6);
+    border-radius: 4px;
+    background: var(--color-surface, #fff);
+    color: var(--color-text-muted, #656d76);
+    cursor: pointer;
+}
+
+.excel-diff-search-clear:hover {
+    color: var(--color-text, #212529);
+    background: var(--color-surface-subtle, #f8f9fa);
+}
+
+.excel-diff-match-count,
+.excel-diff-hidden-note {
+    color: var(--color-text-muted, #656d76);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* 视图开关。按下状态不只靠底色：`aria-pressed="true"` 时前面加一个对勾，
+   色盲与灰度打印下同样能读出「这个开关是开着的」。 */
+.excel-diff-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 34px;
+    padding: 0 10px;
+    border: 1px solid var(--color-border, #dee2e6);
+    border-radius: 4px;
+    background: var(--color-surface, #fff);
+    color: var(--color-muted-text, #495057);
+    font-size: 13px;
+    cursor: pointer;
+    transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.excel-diff-toggle:hover {
+    border-color: var(--color-primary, #0d6efd);
+    color: var(--color-primary-text, #0056b3);
+}
+
+.excel-diff-toggle[aria-pressed="true"] {
+    border-color: var(--color-primary, #0d6efd);
+    background: var(--color-info-bg, #e7f3ff);
+    color: var(--color-primary-text, #0056b3);
+    font-weight: 600;
+}
+
+.excel-diff-toggle[aria-pressed="true"]::before {
+    content: "✓";
+    font-weight: 700;
+}
+
+/* 筛选到一行不剩时的说明。放在表格容器里，与「没有净变更」那种空态同一位置。 */
+.excel-diff-empty-result {
+    padding: 16px 12px;
+    border: 1px dashed var(--color-border, #dee2e6);
+    border-radius: 6px;
+    color: var(--color-text-muted, #656d76);
+    font-size: 13px;
+    text-align: center;
+    background: var(--color-surface-subtle, #f8f9fa);
+}
+
+@media (max-width: 768px) {
+    /* 窄屏把触控目标抬到 44px，并把工具栏摊成两排 */
+    .excel-diff-search-input,
+    .excel-diff-search-column,
+    .excel-diff-search-clear,
+    .excel-diff-toggle {
+        height: 44px;
+    }
+
+    .excel-diff-search-input {
+        width: 100%;
+        max-width: none;
+    }
+
+    .excel-diff-toolbar__search,
+    .excel-diff-toolbar__views {
+        width: 100%;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .excel-diff-toggle {
+        transition: none;
+    }
+}

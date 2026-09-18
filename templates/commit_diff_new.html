@@ -6,6 +6,8 @@
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-styles.css') }}?v=2.2">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.0">
+{# 表体表现层：必须最后加载，五个 diff 页面才是同一张表（见该文件顶部说明） #}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-table-ux.css') }}?v=1.0">
 <style>
     .ai-analysis-trigger {
         display: inline-flex;

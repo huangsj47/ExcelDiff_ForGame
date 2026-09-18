@@ -7,6 +7,11 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='css/excel-diff-new.css') }}?v=2.1">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/excel-scroll-fix.css') }}?v=2.2">
 <link rel="stylesheet" href="{{ url_for('static', filename='css/diff-unified-theme.css') }}?v=1.0">
+{# 表体表现层：必须最后加载，五个 diff 页面才是同一张表（见该文件顶部说明） #}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/diff-table-ux.css') }}?v=1.0">
+{# 本页用了 7 个 `bi bi-*` 图标，而 base.html 只加载 FontAwesome（没有 Bootstrap Icons），
+   不引这一行那些图标会全部不显示，且不会报任何错。 #}
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
 <style>
 /* 加载状态样式 */
 .loading-container {
@@ -935,6 +940,8 @@ td.excel-row-number.excel-modified,
 </div>
 
 <script src="{{ url_for('static', filename='js/diff-handlers.js') }}"></script>
+{# 表体渲染的单一实现：必须在本页内联脚本**之前**加载（本页的入口函数调它） #}
+<script src="{{ url_for('static', filename='js/excel_diff_table.js') }}?v=1.0"></script>
 
 <!-- 将数据传递给JavaScript -->
 <script type="application/json" id="page-data">
@@ -1676,83 +1683,18 @@ function showMergedExcelSheet(contentContainer, sheetName, sheetData) {
         return;
     }
 
-    // 生成表格HTML
-    let tableHtml = '<table class="excel-diff-table">';
-    
-    // 添加表头
-    if (sheetData.headers && sheetData.headers.length > 0) {
-        tableHtml += '<thead><tr>';
-        tableHtml += '<th scope="col" class="excel-row-header">行号</th>';
-        sheetData.headers.forEach(header => {
-            // 表头来自 Excel 第一行（不可信）
-            tableHtml += `<th scope="col" class="excel-column-header">${escapeHtml(header)}</th>`;
-        });
-        tableHtml += '</tr></thead>';
+    // 表体渲染收进了共享模块（static/js/excel_diff_table.js）：这里是「合并页按
+    // 工作表切换」这条入口，与提交页/周版本页看到的分段、表头、工具栏必须是同一张表。
+    if (!window.ExcelDiffTable) {
+        // 模块没加载出来（脚本 404 / 顺序被改）：不要静默渲染一张空表
+        contentContainer.innerHTML = noticesHtml +
+            '<div class="alert alert-warning">表体渲染模块未加载（static/js/excel_diff_table.js）</div>';
+        return;
     }
-    
-    tableHtml += '<tbody>';
-    
-    sheetData.rows.forEach((row, rowIndex) => {
-        const hasRowChanges = row.status === 'added' || row.status === 'removed' || row.status === 'modified';
-        let rowClass = '';
-        
-        if (row.status === 'removed') {
-            rowClass = 'excel-row-removed';
-        } else if (row.status === 'added') {
-            rowClass = 'excel-row-added';
-        }
-        
-        tableHtml += `<tr class="${rowClass}">`;
-        
-        // 行号
-        const rowHeaderClass = hasRowChanges ? 'excel-row-header excel-row-header-modified' : 'excel-row-header';
-        tableHtml += `<td class="${rowHeaderClass}">${row.row_number || rowIndex + 1}</td>`;
-        
-        // 处理单元格数据
-        if (row.data && typeof row.data === 'object') {
-            const headers = sheetData.headers || Object.keys(row.data);
-            headers.forEach(header => {
-                const cellValue = row.data[header];
-                let cellClass = 'excel-cell';
-                let cellContent = formatCellValue(cellValue);
-                
-                // 检查单元格变更
-                let change = null;
-                if (row.cell_changes) {
-                    if (Array.isArray(row.cell_changes)) {
-                        change = row.cell_changes.find(c => c.column === header);
-                    } else if (typeof row.cell_changes === 'object') {
-                        change = row.cell_changes[header];
-                    }
-                }
-                
-                if (change) {
-                    if (change.status === 'removed') {
-                        cellClass += ' excel-removed';
-                        cellContent = `<div class="excel-diff-removed">${escapeHtml(formatCellValue(change.old_value))}</div>`;
-                    } else if (change.status === 'added') {
-                        cellClass += ' excel-added';
-                        cellContent = `<div class="excel-diff-added">${escapeHtml(formatCellValue(change.new_value || cellValue))}</div>`;
-                    } else if (change.status === 'modified') {
-                        cellClass += ' excel-modified-new';
-                        cellContent = `<div class="excel-diff-old">${escapeHtml(formatCellValue(change.old_value))}</div>` +
-                                    `<div class="excel-diff-new">${escapeHtml(formatCellValue(change.new_value || cellValue))}</div>`;
-                    }
-                }
-                
-                tableHtml += `<td class="${cellClass}">${cellContent}</td>`;
-            });
-        } else {
-            // 处理其他格式的行数据
-            tableHtml += '<td colspan="100%">未知格式的行数据</td>';
-        }
-        
-        tableHtml += '</tr>';
+    window.ExcelDiffTable.mountSheetTable(contentContainer, sheetData, {
+        sheetName: sheetName,
+        noticesHtml: noticesHtml
     });
-    
-    tableHtml += '</tbody></table>';
-    
-    contentContainer.innerHTML = noticesHtml + tableHtml;
 }
 
 // 更新提交状态
@@ -1970,78 +1912,6 @@ function generateExcelTabsForContainer(container, sheets) {
     });
 }
 
-// 创建修改行的双行结构 - 与单文件diff一致
-function createModifiedRowForContainer(row, headers, rowIndex) {
-    let html = '';
-
-    // 将cell_changes数组转换为映射，便于查找
-    const modifiedCellsMap = {};
-    if (row.cell_changes && Array.isArray(row.cell_changes)) {
-        row.cell_changes.forEach(function(change) {
-            modifiedCellsMap[change.column] = {
-                old_value: change.old_value,
-                new_value: change.new_value
-            };
-        });
-    }
-
-    // 第一行显示旧值（红色背景）
-    html += '<tr class="excel-row-modified-old">';
-    html += '<td class="excel-row-number excel-modified" rowspan="2">' + (row.row_number || rowIndex + 1) + '</td>';
-
-    headers.forEach(function(header) {
-        const cellChange = modifiedCellsMap[header];
-
-        if (cellChange) {
-            // 有变更的单元格 - 显示旧值
-            const oldValue = formatCellValue(cellChange.old_value);
-            html += '<td class="excel-cell excel-modified-old modified-column"><span class="excel-cell-inner">';
-            // 只有**真正的空**才不显示文本块 —— formatCellValue 已经把 null / undefined /
-            // NaN 数字归一成 ''，所以 `!== ''` 就是正确的判空。
-            //
-            // 这里原先还叠了一层 `oldValue.trim() !== '' && oldValue.toLowerCase() !== 'null'
-            // && !== 'nan'`。那是 formatCellValue 旧口径（会把文本 null/nan 折叠成空串）
-            // 的重复实现：旧口径下它永远是死代码，而 formatCellValue 改成「表里怎么写就
-            // 怎么显示」之后它就**变成了真的黑名单** —— 文本 `null` / `nan`、以及只由空白
-            // 组成的取值都会被渲染成空白，而比较层认为它们与空不等、会报变更，
-            // 于是审核者看到一行「空 → 空」，无法判断改了什么。
-            if (oldValue !== '') {
-                html += '<span class="excel-text-bg-old">' + escapeHtml(oldValue) + '</span>';
-            }
-            html += '</span></td>';
-        } else {
-            // 未变更的单元格 - 使用rowspan=2合并
-            const cellValue = formatCellValue(row.data && row.data[header]);
-            html += '<td class="excel-cell excel-unchanged" rowspan="2"><span class="excel-cell-inner">' + escapeHtml(cellValue) + '</span></td>';
-        }
-    });
-
-    html += '</tr>';
-
-    // 第二行显示新值（绿色背景）
-    html += '<tr class="excel-row-modified-new">';
-
-    headers.forEach(function(header) {
-        const cellChange = modifiedCellsMap[header];
-
-        if (cellChange) {
-            // 有变更的单元格 - 显示新值
-            const newValue = formatCellValue(cellChange.new_value);
-            html += '<td class="excel-cell excel-modified-new modified-column"><span class="excel-cell-inner">';
-            // 判空口径与上面旧值那一格相同：只有真正的空才不显示文本块。
-            if (newValue !== '') {
-                html += '<span class="excel-text-bg-new">' + escapeHtml(newValue) + '</span>';
-            }
-            html += '</span></td>';
-        }
-        // 未变更的单元格已经在上一行用rowspan=2处理了
-    });
-
-    html += '</tr>';
-
-    return html;
-}
-
 // 在特定容器中显示Excel工作表
 function showExcelSheetInContainer(containerId, sheetName, diffData) {
     const container = document.getElementById(containerId);
@@ -2064,132 +1934,52 @@ function showExcelSheetInContainer(containerId, sheetName, diffData) {
         return;
     }
     
-    // 生成表格HTML
-    let tableHtml = '<div class="excel-table-wrapper"><table class="excel-diff-table">';
+    // 表体交给唯一那份实现（static/js/excel_diff_table.js）：这一页原先自己拼表，
+    // 于是「分段标题 / 工具栏 / 单行表头 / 隐藏空列」这些改动都要在这里再抄一遍，
+    // 而且它与另两页已经漂移（这一页没有分段、表头也没有列字母）。
+    //
+    // 交出去之前只做一件事：把历史上出现过的三种行格式归一成 {data: {...}}。
+    // 归一化按**列位置**映射到表头（与原来按顺序铺单元格的行为一致）；
+    // 未知格式原样交出去，渲染成空行 —— 不静默丢掉这一行。
+    const headers = (sheetData.headers && sheetData.headers.length)
+        ? sheetData.headers
+        : Object.keys((sheetData.rows[0] && sheetData.rows[0].data) || {});
 
-    // 收集所有修改的列，用于标题高亮
-    const modifiedColumns = new Set();
-    sheetData.rows.forEach(function(row) {
-        if (row.cell_changes && Array.isArray(row.cell_changes)) {
-            row.cell_changes.forEach(function(change) {
-                modifiedColumns.add(change.column);
-            });
-        }
-    });
-
-    // 添加表头 - 高亮修改的列
-    if (sheetData.headers && sheetData.headers.length > 0) {
-        tableHtml += '<thead><tr>';
-        tableHtml += '<th scope="col" class="excel-row-header">行号</th>';
-        sheetData.headers.forEach(function(header) {
-            const isModified = modifiedColumns.has(header);
-            const headerClass = isModified ? 'excel-column-header excel-modified-column-header' : 'excel-column-header';
-            // 表头来自 Excel 第一行（不可信）
-            tableHtml += '<th scope="col" class="' + headerClass + '">' + escapeHtml(header) + '</th>';
-        });
-        tableHtml += '</tr></thead>';
-    } else if (sheetData.rows.length > 0 && sheetData.rows[0].data) {
-        // 如果没有明确的headers，从第一行数据中提取
-        const firstRowData = sheetData.rows[0].data;
-        const headers = Object.keys(firstRowData);
-        tableHtml += '<thead><tr>';
-        tableHtml += '<th scope="col" class="excel-row-header">行号</th>';
-        headers.forEach(function(header) {
-            const isModified = modifiedColumns.has(header);
-            const headerClass = isModified ? 'excel-column-header excel-modified-column-header' : 'excel-column-header';
-            // 表头来自 Excel 第一行（不可信）
-            tableHtml += '<th scope="col" class="' + headerClass + '">' + escapeHtml(header) + '</th>';
-        });
-        tableHtml += '</tr></thead>';
-    }
-    
-    tableHtml += '<tbody>';
-
-    sheetData.rows.forEach(function(row, rowIndex) {
-        // 检查行是否有变更
-        const isRowDeleted = row.status === 'removed';
-        const isRowAdded = row.status === 'added';
-        const isRowModified = row.status === 'modified' || (row.cell_changes && row.cell_changes.length > 0);
-
-        if (isRowDeleted) {
-            // 删除行 - 单行红色背景
-            tableHtml += '<tr class="excel-row-removed">';
-            tableHtml += '<td class="excel-row-number excel-removed">' + (row.row_number || rowIndex + 1) + '</td>';
-        } else if (isRowAdded) {
-            // 新增行 - 单行绿色背景
-            tableHtml += '<tr class="excel-row-added">';
-            tableHtml += '<td class="excel-row-number excel-added">' + (row.row_number || rowIndex + 1) + '</td>';
-        } else if (isRowModified) {
-            // 修改行 - 使用双行结构
-            const modifiedRowHtml = createModifiedRowForContainer(row, sheetData.headers || Object.keys(row.data || {}), rowIndex);
-            tableHtml += modifiedRowHtml;
-            return; // 跳过后续的单行处理逻辑
-        } else {
-            // 普通行 - 无变更
-            tableHtml += '<tr class="excel-row-unchanged">';
-            tableHtml += '<td class="excel-row-number">' + (row.row_number || rowIndex + 1) + '</td>';
-        }
-        
-
-        
+    function normalizeLegacyRow(row) {
         if (Array.isArray(row)) {
-            // 如果row是数组格式 - 根据行状态添加相应的CSS类
-            row.forEach(function(cell, colIndex) {
-                const cellValue = formatCellValue(cell && cell.value ? cell.value : (cell || ''));
-                let cellClass = 'excel-cell';
-
-                // 根据行状态添加相应的CSS类
-                if (isRowAdded) {
-                    cellClass += ' excel-added';
-                } else if (isRowDeleted) {
-                    cellClass += ' excel-removed';
-                }
-
-                tableHtml += '<td class="' + cellClass + '">' + escapeHtml(cellValue) + '</td>';
+            const data = {};
+            row.forEach(function (cell, index) {
+                data[headers[index]] = (cell && typeof cell === 'object' && 'value' in cell)
+                    ? cell.value : cell;
             });
-        } else if (row.cells && Array.isArray(row.cells)) {
-            // 如果row有cells属性 - 根据行状态添加相应的CSS类
-            row.cells.forEach(function(cell, colIndex) {
-                const cellValue = formatCellValue(cell && cell.value !== undefined ? cell.value : (cell || ''));
-                let cellClass = 'excel-cell';
-
-                // 根据行状态添加相应的CSS类
-                if (isRowAdded) {
-                    cellClass += ' excel-added';
-                } else if (isRowDeleted) {
-                    cellClass += ' excel-removed';
-                }
-
-                tableHtml += '<td class="' + cellClass + '">' + escapeHtml(cellValue) + '</td>';
-            });
-        } else if (row.data && typeof row.data === 'object') {
-            // 如果row有data属性 - 根据行状态添加相应的CSS类
-            const headers = sheetData.headers || Object.keys(row.data);
-            headers.forEach(function(header, colIndex) {
-                const cellValue = formatCellValue(row.data[header]);
-                let cellClass = 'excel-cell';
-
-                // 根据行状态添加相应的CSS类
-                if (isRowAdded) {
-                    cellClass += ' excel-added';
-                } else if (isRowDeleted) {
-                    cellClass += ' excel-removed';
-                }
-
-                tableHtml += '<td class="' + cellClass + '">' + escapeHtml(cellValue) + '</td>';
-            });
-        } else {
-            // 只报「走到了这个分支」，不要把整行对象打出来 —— row 里是被审核文件的
-            // 单元格内容，控制台不该成为查看它的旁路。
-            console.warn('⚠️ 未知的行格式');
-            tableHtml += '<td colspan="100%">未知格式的行数据</td>';
+            return {row_number: row.row_number, status: 'unchanged', data: data};
         }
-        tableHtml += '</tr>';
-    });
-    
-    tableHtml += '</tbody></table></div>';
+        if (row && Array.isArray(row.cells)) {
+            const data = {};
+            row.cells.forEach(function (cell, index) {
+                data[headers[index]] = (cell && cell.value !== undefined) ? cell.value : cell;
+            });
+            return {
+                row_number: row.row_number,
+                status: row.status || 'unchanged',
+                data: data,
+                cell_changes: row.cell_changes
+            };
+        }
+        return row;
+    }
 
-    tableContainer.innerHTML = tableHtml;
+    const normalized = {
+        name: (sheetData && sheetData.name) || sheetName,
+        headers: headers,
+        rows: (sheetData.rows || []).map(normalizeLegacyRow),
+        stats: sheetData.stats,
+        operation: sheetData.operation,
+        message: sheetData.message,
+        header_changes: sheetData.header_changes
+    };
+
+    window.ExcelDiffTable.mountSheetTable(tableContainer, normalized, {sheetName: sheetName});
 }
 
 // 切换容器中的Excel工作表
