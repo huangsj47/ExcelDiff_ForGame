@@ -11,10 +11,22 @@
    Jinja 的 HTML 自动转义会把 `'` 写成 `&#39;`，但**属性值是先被 HTML 解码、
    再交给 JS 引擎编译的** —— `&#39;` 解码回来就是一个真正的单引号，
    于是 `a');window.__qa=1;//` 直接闭合字符串，点击标签即执行任意脚本。
-2. `static/js/diff-handlers.js` 的 `generateExcelTabs()` /
-   `showExcelSheetInContainer()`：`onclick="switchExcelSheet('${sheet.name}')"`
+2. 客户端重建表体/标签的那条路：`onclick="switchExcelSheet('${sheet.name}')"`
    拼进字符串再 `innerHTML = ...`。innerHTML 里的 `onclick=` 会被编译成事件处理器，
    效果与 (1) 相同；`data-sheet="${sheet.name}"` 还允许用 `"` 直接逃出属性。
+   这一段原先落在 `static/js/diff-handlers.js` 的 `generateExcelTabs()` /
+   `showExcelSheetInContainer()` / `generateExcelContent()` 上，2026 全删了，
+   但**删的理由不同**：后两个属于整条跑不到的客户端表体渲染链（它找的容器
+   `#excel-content` 在唯一的入口页 `templates/commit_diff_new.html` 上不存在，
+   那页的容器是 partial 渲染的 `#excel-content-area`）；`generateExcelTabs` 那一组
+   则是**跑起来会坏事** —— 它把 partial 服务端渲染好的标签删掉重建，再按
+   `sheet-content-${name}` 找内容（partial 用的是 `sheet-${name}`），于是那一页
+   所有 `.excel-sheet-content` 的 `active` 被摘掉且没有加回来的，而它是
+   `display: none`：整块 Excel 表体不显示。两处都在
+   `static/js/diff-handlers.js` 的文件头写明了。
+   现在标签由 partial 服务端渲染、表体只有一份实现 `static/js/excel_diff_table.js`，
+   所以下面 A/B 两段跑 partial 的真实渲染结果 + 真实内联脚本，D/E/F 三段跑
+   **那个模块**的真入口 —— 断言一条没减，防的还是同一件事。
 
 ## 为什么断言"生成的 DOM 里没有 on* 属性"
 
@@ -26,8 +38,10 @@
 ## 两层各自防什么
 
 * Python 侧渲染真实的 Jinja 模板 —— 覆盖服务端渲染路径（commit_diff_new 首屏）。
-* Node 侧把 `static/js/diff-handlers.js` 的**真实源码**放进隔离 vm 跑
-  （只伪造最小的 DOM 骨架，不启浏览器、不联网）—— 覆盖 JS 重建标签的路径。
+* Node 侧把 `static/js/diff-handlers.js`、`static/js/excel_diff_table.js` 与
+  **partial 真实渲染出来的标签 HTML + 它自带的真实内联脚本**分别放进隔离 vm 跑
+  （只伪造最小的 DOM 骨架，不启浏览器、不联网）—— 覆盖「点击标签切换工作表」
+  与「JS 渲染表体」这两条只有跑起来才看得见的路径。
 """
 from __future__ import annotations
 
@@ -45,6 +59,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_DIR = PROJECT_ROOT / "templates"
 PARTIAL = "diff_partials/excel_diff.html"
 DIFF_HANDLERS = PROJECT_ROOT / "static" / "js" / "diff-handlers.js"
+# 表体渲染的唯一实现（表头 / 行 / 高亮 / 转义都在这里）
+EXCEL_TABLE_MODULE = PROJECT_ROOT / "static" / "js" / "excel_diff_table.js"
 
 # 报告复现用的标记（无害：只写一个变量，不触碰任何真实数据）
 INJECTION = "a');window.__qa=1;//"
@@ -419,13 +435,21 @@ function querySelectorAllByClass(cls) {
 
 // 极简 HTML 片段解析：只认识"开始标签 + 文本"。
 // 属性切开规则与浏览器一致：引号内的 `"` 才结束属性值。
+//
+// 骨架不建文本节点，但「表名作为**文本**渲染出来了」也是一条要断言的事
+// （表名只留在属性里、标签显示成空白，同样是坏的），所以每个元素额外记一份
+// `textAfter`：这个开始标签与下一个标签之间的文本（按浏览器规则解码后）。
 function parseHtmlFragment(html) {
   const nodes = [];
   const tagRe = /<([a-zA-Z][^\s/>]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
+  const matches = [];
   let match;
   while ((match = tagRe.exec(html)) !== null) {
-    const el = new Element(match[1]);
-    const attrBlob = match[2];
+    matches.push({ start: match.index, end: tagRe.lastIndex, tag: match[1], attrBlob: match[2] });
+  }
+  matches.forEach((found, index) => {
+    const el = new Element(found.tag);
+    const attrBlob = found.attrBlob;
     const attrRe = /([^\s=/>]+)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s>]*))?/g;
     let attr;
     while ((attr = attrRe.exec(attrBlob)) !== null) {
@@ -439,8 +463,10 @@ function parseHtmlFragment(html) {
         el._ownClasses = el.attributes[name].split(/\s+/).filter(Boolean);
       }
     }
+    const stop = index + 1 < matches.length ? matches[index + 1].start : html.length;
+    el.textAfter = decodeEntities(html.slice(found.end, stop));
     nodes.push(el);
-  }
+  });
   return nodes;
 }
 
@@ -479,36 +505,73 @@ sandbox.window = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: 'diff-handlers.js' });
 
+// ---------- 表体渲染的唯一实现 ----------
+// D/E/F 三段原先跑的是 diff-handlers.js 的 showExcelSheetInContainer /
+// generateExcelContent。那两个函数属于该文件里**整条跑不到**的客户端 Excel 表体
+// 渲染链（generateExcelContent 找的 `#excel-content` 在唯一的调用页
+// templates/commit_diff_new.html 上不存在，那页的容器是 partial 渲染的
+// `#excel-content-area`），2026 已删除。表体现在只有一份实现：
+// static/js/excel_diff_table.js。于是这三段改成加载那个模块、跑它的真入口 ——
+// 断言（没有 on* 属性、没有真标签被插进 DOM）一条没减，防的还是同一件事。
+const tableSource = fs.readFileSync(process.argv[3], 'utf8');
+const tableSandbox = {
+  document,
+  console: { log() {}, warn() {}, error() {} },
+  window: {},
+};
+tableSandbox.window = tableSandbox;
+// 展示口径由页面提供，模块自己不实现它（见该模块文件头的第 1 条契约）。
+tableSandbox.window.formatCellValue = function (value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number' && isNaN(value)) return '';
+  return String(value);
+};
+vm.createContext(tableSandbox);
+vm.runInContext(tableSource, tableSandbox, { filename: 'excel_diff_table.js' });
+const ExcelDiffTable = tableSandbox.window.ExcelDiffTable;
+
 // ---------- 被测数据的构造 ----------
 const INJECTION = "a');window.__qa=1;//";
 const TAG_INJECTION = '"><img src=x onerror="window.__qa=1">';
 
-function sheetWithChanges() {
-  return { headers: ['id'], rows: [{ row_number: 2, status: 'added', data: { id: '1' } }] };
-}
-function sheetWithoutChanges() {
-  return { headers: ['id'], rows: [{ row_number: 2, status: 'unchanged', data: { id: '1' } }] };
-}
+// partial（diff_partials/excel_diff.html）**真实渲染出来的** HTML 与它自带的
+// 那段内联脚本。两者都由 Python 侧渲染真实 Jinja 模板后传进来 —— 这一段跑的是
+// 页面上真正会跑的那份标签逻辑，不是复刻。
+const PARTIAL_HTML = __PARTIAL_HTML__;
+const PARTIAL_SCRIPT = __PARTIAL_SCRIPT__;
 
 function resetDom() {
   ALL_ELEMENTS.length = 0;
   Object.keys(byId).forEach((k) => delete byId[k]);
-  const tabs = document.createElement('div');
-  tabs.setAttribute('id', 'excel-sheet-tabs');
-  byId['excel-sheet-tabs'] = tabs;
-  return tabs;
 }
 
-function tabReport(tabsContainer) {
-  const tabs = ALL_ELEMENTS.filter((el) => el.classList.contains('excel-sheet-tab'));
-  return tabs.map((el) => ({
-    tag: el.tagName,
-    classes: el._classes(),
-    attrs: el.attributes,
-    text: el.textContent,
-    listenerCount: (el.listeners['click'] || []).length,
-    parentIsTabs: el.parentNode === tabsContainer,
-  }));
+// 从一棵（极简解析出来的）DOM 子树里收下所有元素。
+function collectDescendants(root) {
+  const out = [];
+  const walk = (nodes) => {
+    nodes.forEach((n) => {
+      out.push(n);
+      if (n.childNodes) walk(n.childNodes);
+    });
+  };
+  walk((root && root.childNodes) || []);
+  return out;
+}
+
+// 用 partial 的真实渲染结果建 DOM。innerHTML 的解析规则与浏览器一致
+// （引号内的 `"` 不结束属性值），属性值也按浏览器规则解码 —— 所以下面看到的
+// 就是浏览器会看到的东西。带 id 的元素要登记进 byId：骨架里的 getElementById
+// 只认那张表。
+function mountPartialHtml() {
+  resetDom();
+  const page = document.createElement('div');
+  page.innerHTML = PARTIAL_HTML;
+  byId['__page'] = page;
+  collectDescendants(page).concat([page]).forEach((el) => {
+    const id = el.getAttribute && el.getAttribute('id');
+    if (id) byId[id] = el;
+  });
+  return page;
 }
 
 function collectHandlerAttrs(elements) {
@@ -525,139 +588,129 @@ function collectHandlerAttrs(elements) {
 
 const report = {};
 
-// --- A. generateExcelTabs：恶意表名 ---
-{
-  const tabs = resetDom();
-  const sheets = {};
-  sheets[INJECTION] = sheetWithChanges();
-  sheets[TAG_INJECTION] = sheetWithoutChanges();
-  sheets['正常表'] = sheetWithChanges();
-  sandbox.generateExcelTabs(sheets);
-  const tabsInDom = ALL_ELEMENTS.filter((el) => el.classList.contains('excel-sheet-tab'));
-  report.generateTabs = {
-    tabs: tabReport(tabs),
-    handlerAttrs: collectHandlerAttrs(tabsInDom),
-    rawInnerHtml: tabs._innerHTML,
-    containerHtmlLeakedScript: /window\.__qa|<img/i.test(tabs._innerHTML),
-  };
-}
+// --- A. partial 渲染出的标签：没有 on* 属性 / 表名原样落地 ---
+// 这一段原先跑 diff-handlers.js 的 generateExcelTabs（那段把服务端渲染好的标签
+// **删掉再重建**的客户端逻辑）。那一组函数连同这个缺陷一起删除了（见
+// static/js/diff-handlers.js 文件头）：现在标签由 diff_partials/excel_diff.html
+// 服务端渲染，切换由它自带的内联脚本绑定。断言没减，落点换成唯一在渲染标签的这份。
+mountPartialHtml();
+const partialSandbox = {
+  document,
+  console: { log() {}, warn() {}, error() {} },
+  window: {},
+};
+partialSandbox.window = partialSandbox;
+vm.createContext(partialSandbox);
+vm.runInContext(PARTIAL_SCRIPT, partialSandbox, { filename: 'excel_diff_partial_inline.js' });
 
-// --- B. 行为保持：点击 → switchExcelSheet 用**原样的**表名 ---
-{
-  resetDom();
-  const sheets = {};
-  sheets['有变更'] = sheetWithChanges();
-  sheets['无变更'] = sheetWithoutChanges();
-  const content = document.createElement('div');
-  content.setAttribute('id', 'sheet-content-有变更');
-  byId['sheet-content-有变更'] = content;
-  const content2 = document.createElement('div');
-  content2.setAttribute('id', 'sheet-content-无变更');
-  byId['sheet-content-无变更'] = content2;
-  sandbox.generateExcelTabs(sheets);
-  const tabsInDom = ALL_ELEMENTS.filter((el) => el.classList.contains('excel-sheet-tab'));
-  const byName = {};
-  tabsInDom.forEach((el) => {
-    byName[el.getAttribute('data-sheet')] = el;
-  });
-  const changedTab = byName['有变更'];
-  const unchangedTab = byName['无变更'];
-  const dispatched = changedTab ? changedTab.dispatch('click') : -1;
-  report.behaviour = {
-    order: tabsInDom.map((el) => el.getAttribute('data-sheet')),
-    changedTabActiveAfterClick: changedTab ? changedTab.classList.contains('active') : null,
-    changedContentActive: content.classList.contains('active'),
-    unchangedTabActive: unchangedTab ? unchangedTab.classList.contains('active') : null,
-    unchangedHasDisabledClass: unchangedTab ? unchangedTab.classList.contains('excel-tab-disabled') : null,
-    unchangedHasNoHandler: unchangedTab ? (unchangedTab.listeners['click'] || []).length === 0 : null,
-    firstTabActiveOnRender: tabsInDom.length ? tabsInDom[0].classList.contains('active') : null,
-    dispatchCount: dispatched,
-    dataSheetRoundTrip: tabsInDom.map((el) => el.getAttribute('data-sheet')),
-  };
-}
+const partialTabs = ALL_ELEMENTS.filter((el) => el.classList.contains('excel-sheet-tab'));
+report.tabs = {
+  tabCount: partialTabs.length,
+  tags: partialTabs.map((el) => el.tagName),
+  names: partialTabs.map((el) => el.getAttribute('data-sheet')),
+  // 标签的可见文本 = 开始标签与它第一个子标签之间的那段（见 parseHtmlFragment）
+  texts: partialTabs.map((el) => el.textAfter || ''),
+  classes: partialTabs.map((el) => el._classes()),
+  listenerCounts: partialTabs.map((el) => (el.listeners['click'] || []).length),
+  handlerAttrs: collectHandlerAttrs(ALL_ELEMENTS),
+};
 
-// --- C. 表名里的引号不能让 switchExcelSheet 抛异常（选择器注入） ---
-{
-  resetDom();
-  const sheets = {};
-  sheets[INJECTION] = sheetWithChanges();
-  sandbox.generateExcelTabs(sheets);
+// --- B. 点击标签：用**原样的**表名切换，且表名里的引号不能把切换弄坏 ---
+// 覆盖两种不可信表名：带 `'` 的（内联处理器时代能闭合字符串）与带 `"` 的
+// （能逃出属性）。两者都必须能正确切换 —— 不能靠「把可疑名字删掉」通过。
+function clickReport(clickedName) {
+  const tabs = ALL_ELEMENTS.filter((el) => el.classList.contains('excel-sheet-tab'));
+  const target = tabs.filter((el) => el.getAttribute('data-sheet') === clickedName)[0];
   let threw = null;
-  let activated = null;
-  const content = document.createElement('div');
-  content.setAttribute('id', 'sheet-content-' + INJECTION);
-  byId['sheet-content-' + INJECTION] = content;
   try {
-    sandbox.switchExcelSheet(INJECTION);
-    const tabsInDom = ALL_ELEMENTS.filter((el) => el.classList.contains('excel-sheet-tab'));
-    activated = tabsInDom.length ? tabsInDom[0].classList.contains('active') : null;
+    if (target) target.dispatch('click');
   } catch (err) {
     threw = String(err && err.message ? err.message : err);
   }
-  report.quotedSwitch = { threw: threw, activated: activated };
+  const contents = ALL_ELEMENTS.filter((el) => el.classList.contains('excel-sheet-content'));
+  const activeContents = contents.filter((el) => el.classList.contains('active'));
+  return {
+    threw: threw,
+    targetFound: !!target,
+    expectedContentId: 'sheet-' + clickedName,
+    targetActive: target ? target.classList.contains('active') : null,
+    targetAriaCurrent: target ? target.getAttribute('aria-current') : null,
+    activeContentCount: activeContents.length,
+    activeContentId: activeContents.length ? activeContents[0].getAttribute('id') : null,
+    othersStillActive: tabs.filter((el) => el !== target && el.classList.contains('active')).length,
+  };
 }
 
-// --- D. showExcelSheetInContainer：同样的 onclick / innerHTML 拼接 ---
+mountPartialHtml();
+const clickSandbox = {
+  document,
+  console: { log() {}, warn() {}, error() {} },
+  window: {},
+};
+clickSandbox.window = clickSandbox;
+vm.createContext(clickSandbox);
+vm.runInContext(PARTIAL_SCRIPT, clickSandbox, { filename: 'excel_diff_partial_inline.js' });
+report.tabClick = {
+  quote: clickReport(INJECTION),
+  angle: clickReport(TAG_INJECTION),
+};
+
+// --- D. 容器路径：合并页 showExcelSheetInContainer 真正走的那一句 ---
+// 这一句在 templates/merge_diff.html 里（归一化行格式之后调共享实现），
+// 它是"同一处缺陷的第二个出口"，只是实现换成了共享模块。
 {
   resetDom();
   const container = document.createElement('div');
   container.setAttribute('id', 'excel-container-1');
   byId['excel-container-1'] = container;
-  const sheets = {};
-  sheets[INJECTION] = sheetWithChanges();
-  sheets[TAG_INJECTION] = sheetWithChanges();
-  sandbox.showExcelSheetInContainer({ sheets: sheets }, 'excel-container-1');
-  const parsed = container.childNodes || [];
-  const descendants = [];
-  const walk = (nodes) => {
-    nodes.forEach((n) => {
-      descendants.push(n);
-      if (n.childNodes) walk(n.childNodes);
-    });
-  };
-  walk(parsed);
+  ExcelDiffTable.mountSheetTable(container, {
+    name: INJECTION,
+    headers: ['id', TAG_INJECTION],
+    rows: [{
+      row_number: 2,
+      status: 'added',
+      data: { id: '1', [TAG_INJECTION]: TAG_INJECTION },
+    }],
+  }, { sheetName: INJECTION });
+  const descendants = collectDescendants(container);
   report.container = {
     handlerAttrs: collectHandlerAttrs(descendants),
     htmlLeakedScript: /<img/i.test(container._innerHTML),
     childCount: descendants.length,
+    // 非空转保险：表头行真的渲染出来了，上面两条断言才算数
+    headerRowRendered: container._innerHTML.indexOf('excel-column-header') !== -1,
   };
 }
 
 // --- E. 表头（同样来自 Excel 文件）进入 title= 与文本 ---
 {
   resetDom();
-  const content = document.createElement('div');
-  content.setAttribute('id', 'excel-content');
-  byId['excel-content'] = content;
-  const sheets = {};
-  sheets['S'] = {
+  const container = document.createElement('div');
+  container.setAttribute('id', 'excel-headers');
+  byId['excel-headers'] = container;
+  const sheetData = {
     headers: [TAG_INJECTION],
-    rows: [{ row_number: 2, status: 'added', data: {} }],
+    // 这一格必须有**内容**：默认开着「隐藏本页空列」，整列全空的话这一列根本不会
+    // 渲染出来，下面那两条断言就变成空转（不是「没漏」，是「没渲染」）。
+    rows: [{ row_number: 2, status: 'added', data: { [TAG_INJECTION]: TAG_INJECTION } }],
   };
-  sandbox.generateExcelContent(sheets);
-  const descendants = [];
-  const walk = (nodes) => {
-    nodes.forEach((n) => {
-      descendants.push(n);
-      if (n.childNodes) walk(n.childNodes);
-    });
-  };
-  walk(content.childNodes || []);
+  ExcelDiffTable.mountSheetTable(container, sheetData, {});
+  const descendants = collectDescendants(container);
   report.headers = {
     handlerAttrs: collectHandlerAttrs(descendants),
-    htmlLeakedTag: /<img/i.test(content._innerHTML),
+    htmlLeakedTag: /<img/i.test(container._innerHTML),
+    headerRowRendered: container._innerHTML.indexOf('excel-column-header') !== -1,
   };
 }
 
 // --- F. 单元格值（同样是 Excel 内容）里的 {key,value} 参数对 ---
 {
   resetDom();
-  const content = document.createElement('div');
-  content.setAttribute('id', 'excel-content');
-  byId['excel-content'] = content;
+  const container = document.createElement('div');
+  container.setAttribute('id', 'excel-cells');
+  byId['excel-cells'] = container;
   const CELL_INJECTION = '{key,<img src=x onerror="window.__qa=1">}';
-  const sheets = {};
-  sheets['S'] = {
+  const sheetData = {
     headers: ['id'],
     rows: [{
       row_number: 2,
@@ -668,18 +721,13 @@ const report = {};
       ],
     }],
   };
-  sandbox.generateExcelContent(sheets);
-  const descendants = [];
-  const walk = (nodes) => {
-    nodes.forEach((n) => {
-      descendants.push(n);
-      if (n.childNodes) walk(n.childNodes);
-    });
-  };
-  walk(content.childNodes || []);
+  ExcelDiffTable.mountSheetTable(container, sheetData, {});
+  const descendants = collectDescendants(container);
   report.cellValues = {
     handlerAttrs: collectHandlerAttrs(descendants),
-    htmlLeakedTag: /<img/i.test(content._innerHTML),
+    htmlLeakedTag: /<img/i.test(container._innerHTML),
+    // 同样是非空转保险：这一格真的进了表体（改前/改后两行都在）
+    modifiedCellsRendered: /excel-modified-(old|new)/.test(container._innerHTML),
   };
 }
 
@@ -694,11 +742,31 @@ def _node_binary() -> str:
     return node
 
 
+def _partial_script(html: str) -> str:
+    """抠出 partial 里那段内联 <script> 的内容。
+
+    标签的点击绑定就在那段脚本里（`bindExcelSheetTabs` 的 IIFE），跑它才是跑真实现。
+    """
+    blocks = re.findall(r"<script\b[^>]*>(.*?)</script>", html, re.S | re.I)
+    assert blocks, f"{PARTIAL} 里没有内联脚本 —— 标签的点击绑定去哪了？"
+    return "\n".join(blocks)
+
+
+# 喂给 harness 的多工作表载荷：两种不可信表名各一张，外加一张正常表
+# （正常表用来确认「不是只认得恶意名字」）。
+HARNESS_SHEET_NAMES = ("正常表", INJECTION, TAG_INJECTION)
+
+
 def _run_harness() -> dict:
-    """把真实 diff-handlers.js 放进隔离 vm 跑，拿回结构化结果。"""
+    """把真实 diff-handlers.js、真实 excel_diff_table.js 与 partial 的**真实渲染
+    结果 + 真实内联脚本**放进隔离 vm 跑，拿回结构化结果。"""
+    partial_html = _render_partial(_multi_sheet_payload(list(HARNESS_SHEET_NAMES)))
+    script = (_NODE_HARNESS
+              .replace("__PARTIAL_HTML__", json.dumps(partial_html))
+              .replace("__PARTIAL_SCRIPT__", json.dumps(_partial_script(partial_html))))
     proc = subprocess.run(
-        [_node_binary(), "-", str(DIFF_HANDLERS)],
-        input=_NODE_HARNESS,
+        [_node_binary(), "-", str(DIFF_HANDLERS), str(EXCEL_TABLE_MODULE)],
+        input=script,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -718,67 +786,122 @@ def js_report() -> dict:
 
 
 def test_js_tabs_have_no_inline_event_handler_attributes(js_report):
-    """生成的标签里不能有 on* 属性 —— innerHTML 会把它们编译成可执行处理器。"""
-    data = js_report["generateTabs"]
-    assert data["handlerAttrs"] == [], (
-        "generateExcelTabs 把表名拼进了内联事件处理器，点击标签即执行注入的脚本："
-        f"{data['handlerAttrs']}"
+    """渲染出来的标签里不能有 on* 属性 —— innerHTML 会把它们编译成可执行处理器。
+
+    落点原先是被测的那段 JS 建出来的标签；那段 JS（diff-handlers.js 的
+    `generateExcelTabs`）因「把服务端标签删掉重建、并让表体整块不显示」已删除，
+    现在标签由 `diff_partials/excel_diff.html` 服务端渲染，本断言改钉它。
+    """
+    data = js_report["tabs"]
+    assert data["tabCount"] > 0, (
+        f"partial 一个标签都没渲染出来，下面两条断言会空转：{data}"
     )
-    assert not data["containerHtmlLeakedScript"], (
-        f"生成的 HTML 里出现了注入载荷：{data['rawInnerHtml'][:400]}"
+    assert data["handlerAttrs"] == [], (
+        "标签被拼进了内联事件处理器，点击即执行注入的脚本："
+        f"{data['handlerAttrs']}"
     )
 
 
 def test_js_tabs_keep_the_sheet_name_verbatim(js_report):
-    """去掉内联处理器之后，表名必须原样落在 data-sheet / 文本上，切换才能工作。"""
-    data = js_report["generateTabs"]
-    names = [t["attrs"].get("data-sheet") for t in data["tabs"]]
-    assert INJECTION in names, f"data-sheet 丢了恶意表名（不能靠删数据通过）：{names}"
-    assert TAG_INJECTION in names, f"data-sheet 丢了带引号的表名：{names}"
-    texts = [t["text"] for t in data["tabs"]]
-    assert INJECTION in texts, f"标签文本丢了表名：{texts}"
-    assert TAG_INJECTION in texts, f"标签文本丢了带引号的表名：{texts}"
+    """表名必须原样落在 data-sheet / 文本上，切换才能工作（不能靠删数据通过）。
 
-
-def test_js_tabs_preserve_ordering_active_and_disabled_semantics(js_report):
-    """排序（有变更在前，同组按名称）、首个 active、无变更 disabled + 不可点击。"""
-    behaviour = js_report["behaviour"]
-    assert behaviour["order"] == ["有变更", "无变更"], (
-        f"排序逻辑被改动了：{behaviour['order']}"
+    文本这一半按**子串**判：标签的可见文本除了表名还可能有「变更」徽章的文字。
+    """
+    data = js_report["tabs"]
+    assert INJECTION in data["names"], (
+        f"data-sheet 丢了恶意表名（不能靠删数据通过）：{data['names']}"
     )
-    assert behaviour["firstTabActiveOnRender"] is True, "首个标签没有 active"
-    assert behaviour["unchangedHasDisabledClass"] is True, "无变更的标签没有 excel-tab-disabled"
-    assert behaviour["unchangedHasNoHandler"] is True, "无变更的标签仍绑定了点击处理器"
-    assert behaviour["dataSheetRoundTrip"] == ["有变更", "无变更"]
+    assert TAG_INJECTION in data["names"], f"data-sheet 丢了带引号的表名：{data['names']}"
+    texts = data["texts"]
+    assert any(INJECTION in t for t in texts), f"标签文本丢了表名：{texts}"
+    assert any(TAG_INJECTION in t for t in texts), f"标签文本丢了带引号的表名：{texts}"
 
 
-def test_js_clicking_a_tab_still_switches_sheets(js_report):
-    """交互保持：点击有变更的标签 → active 转移 + 对应内容显示。"""
-    behaviour = js_report["behaviour"]
-    assert behaviour["dispatchCount"] == 1, "有变更的标签没有可用的点击处理器"
-    assert behaviour["changedTabActiveAfterClick"] is True, "点击后标签没有变成 active"
-    assert behaviour["changedContentActive"] is True, "点击后对应的工作表内容没有显示"
+def test_js_tabs_all_carry_a_click_handler(js_report):
+    """标签是真 `<button>`、每个都绑了点击处理器，且不带 `excel-tab-disabled`。
+
+    这条原先钉的是「无变更的标签带 excel-tab-disabled、且不绑处理器」——
+    那套「按变更状态排序 + 禁用」的规则是已删除的客户端 `generateExcelTabs`
+    的产物，partial 的服务端渲染没有它（有没有变更是用「变更」徽章表达的，
+    标签一律可点）。于是断言换成这份实现的等价契约：**标签无一遗漏地可点**，
+    漏一个就有一张工作表点不开，而那正是原来那套规则的另一半要防的事。
+    顺带钉住 `<button>`：客户端重建标签的写法把服务端的 `<button>` 换成了 `<div>`，
+    键盘/读屏语义一起丢了 —— 这条拦住「再有人用 JS 重建一遍」。
+    """
+    data = js_report["tabs"]
+    assert data["classes"], f"没有标签，断言会空转：{data}"
+    for tag, classes, count in zip(data["tags"], data["classes"], data["listenerCounts"]):
+        assert tag == "BUTTON", (
+            f"标签不再是服务端渲染的 <button>，而是 <{tag}>（键盘/读屏语义会丢）：{classes}"
+        )
+        assert "excel-tab-disabled" not in classes, (
+            f"标签带上了 excel-tab-disabled（这一页的标签应当一律可点）：{classes}"
+        )
+        assert count == 1, (
+            f"标签的点击处理器数量是 {count}，应为 1 —— 少了就点不开：{classes}"
+        )
 
 
-def test_js_switch_with_a_quoted_name_does_not_break(js_report):
-    """表名里的引号不能把 querySelector 拼坏（原来会抛 SyntaxError，整段切换失效）。"""
-    data = js_report["quotedSwitch"]
-    assert data["threw"] is None, f"带引号的表名让切换抛异常：{data['threw']}"
-    assert data["activated"] is True, "带引号的表名没能激活对应标签"
+def test_js_clicking_a_tab_switches_sheets(js_report):
+    """交互保持：点击标签 → active 转移 + 对应的工作表内容显示出来。
+
+    两种不可信表名各点一次：带 `'` 的（内联处理器时代能闭合字符串）与带 `"`
+    的（能逃出属性）。两者都必须能正确切换出**它自己**那张表。
+    """
+    for label, data in (("单引号", js_report["tabClick"]["quote"]),
+                        ("双引号", js_report["tabClick"]["angle"])):
+        assert data["targetFound"], f"{label}表名的标签没渲染出来，这一段会空转：{data}"
+        assert data["threw"] is None, (
+            f"{label}表名让切换抛异常：{data['threw']}"
+        )
+        assert data["targetActive"] is True, (
+            f"{label}表名：点击后标签没有变成 active"
+        )
+        assert data["othersStillActive"] == 0, (
+            f"{label}表名：点击后其它标签仍然是 active：{data}"
+        )
+        assert data["activeContentCount"] == 1, (
+            f"{label}表名：点击后应当正好有一块工作表内容显示，实际 "
+            f"{data['activeContentCount']} 块（表体是 display:none，一块都没有 = 整块不显示）"
+        )
+        assert data["activeContentId"] == data["expectedContentId"], (
+            f"{label}表名：显示出来的不是它自己那张工作表 —— "
+            f"拿到的是 {data['activeContentId']!r}，应当是 {data['expectedContentId']!r}"
+        )
+        assert data["targetAriaCurrent"] == "true", (
+            f"{label}表名：aria-current 语义丢了：{data}"
+        )
 
 
 def test_js_container_tabs_have_no_inline_handler(js_report):
-    """showExcelSheetInContainer 是同一处缺陷的第二个出口（合并 diff / 周版本页）。"""
+    """容器路径是同一处缺陷的第二个出口（合并 diff / 周版本页）。
+
+    这一段原先跑 diff-handlers.js 的 `showExcelSheetInContainer`；那个函数随整条
+    跑不到的客户端表体渲染链删除了，现在跑的是合并页真正调的那一句
+    （`ExcelDiffTable.mountSheetTable`）。断言没变：**渲染出来的 DOM 里不许有 on*
+    属性、不许有注入标签**。
+    """
     data = js_report["container"]
+    assert data["childCount"] > 0 and data["headerRowRendered"], (
+        f"容器路径什么都没渲染出来，下面两条断言会变成空转：{data}"
+    )
     assert data["handlerAttrs"] == [], (
-        f"showExcelSheetInContainer 仍在拼内联 onclick：{data['handlerAttrs']}"
+        f"容器渲染把不可信文本拼成了内联处理器：{data['handlerAttrs']}"
     )
     assert not data["htmlLeakedScript"], "容器 HTML 里出现了注入标签"
 
 
 def test_js_table_headers_do_not_break_out_of_attributes(js_report):
-    """表头（Excel 第一行）同样不可信：不能逃出 title="..." 或插成新标签。"""
+    """表头（Excel 第一行）同样不可信：不能逃出 title="..." 或插成新标签。
+
+    这一段原先跑 diff-handlers.js 的 `generateExcelContent`（已随那条跑不到的渲染链
+    删除），现在跑表体渲染的唯一实现 `static/js/excel_diff_table.js`；
+    `title="` 那一处转义就在它的 `tableHeadRowHtml` 里。
+    """
     data = js_report["headers"]
+    assert data["headerRowRendered"], (
+        f"表头行没渲染出来（多半是被「隐藏本页空列」整列去掉了），断言会空转：{data}"
+    )
     assert data["handlerAttrs"] == [], (
         f"表头把 on* 顶成了新属性：{data['handlerAttrs']}"
     )
@@ -787,8 +910,14 @@ def test_js_table_headers_do_not_break_out_of_attributes(js_report):
 
 def test_js_cell_values_in_parameter_lists_are_escaped(js_report):
     """单元格值里的 `{key,<img onerror>}` 走的是"参数对高亮"分支 ——
-    该分支原先明确写着"不转义"，把键值直接拼进 innerHTML。"""
+    该分支原先明确写着"不转义"，把键值直接拼进 innerHTML。
+
+    落点同上换成了 `static/js/excel_diff_table.js`（高亮只有那一份实现）。
+    """
     data = js_report["cellValues"]
+    assert data["modifiedCellsRendered"], (
+        f"修改行的改前/改后两格没渲染出来，下面两条断言会空转：{data}"
+    )
     assert data["handlerAttrs"] == [], (
         f"单元格值把 on* 顶成了新属性：{data['handlerAttrs']}"
     )

@@ -39,30 +39,42 @@ import pytest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+EXCEL_CSS = 'static/css/excel-diff-new.css'
+# 通配边框规则所在文件（最后加载，带 !important）
+SCROLL_FIX_CSS = 'static/css/excel-scroll-fix.css'
+# 客户端 Excel 表体渲染的那份**已删除**的旧实现（现在只用来钉住「别抄回来」）
+DIFF_HANDLERS = 'static/js/diff-handlers.js'
+
 # 所有会拼出 `.excel-cell` 的地方：**表体渲染的共享实现**（三个 diff 页面的表体都由它
-# 渲染）、服务端 partial 与 `static/js/diff-handlers.js`。漏掉任何一个，那条路径上的
-# 单元格就没有宽度上限。
+# 渲染）与服务端 partial。漏掉任何一个，那条路径上的单元格就没有宽度上限。
 #
 # 2026 结构重构：三个模板（commit_diff / weekly_version_full_diff / merge_diff，含合并页
 # 按提交展开的容器路径）不再自己拼单元格，而是调 `static/js/excel_diff_table.js`；所以
 # 单元格的实现从三个模板换成了那一个文件 —— 断言的目标文件换了，但断言本身没变：
-# 「每个拼单元格的地方都要有且只有一个内层容器」。模板侧改由
-# `TEST_TEMPLATES_MUST_NOT_BUILD_CELLS` 反向兜住（谁在模板里又抄一份，这里就会红）。
+# 「每个拼单元格的地方都要有且只有一个内层容器」。自己不许再拼一份的那些文件改由
+# `SOURCES_MUST_NOT_BUILD_CELLS` 反向兜住（谁又抄一份回来，这里就会红）。
 CELL_SOURCES = (
     'static/js/excel_diff_table.js',
     'templates/diff_partials/excel_diff.html',
-    'static/js/diff-handlers.js',
 )
-# 表体已经迁到共享实现的那几个模板：它们不该再出现 `<td class="excel-cell…">`
-TEST_TEMPLATES_MUST_NOT_BUILD_CELLS = (
+# 表体已经迁到共享实现、自己不该再出现 `<td class="excel-cell…">` 的文件。
+#
+# `static/js/diff-handlers.js` 原先自带一整套客户端 Excel 表体渲染
+# （`generateExcelContent` → `generateExcelTable` → `createAddedRow` /
+# `createRemovedRow` / `createModifiedRow` / `createUnchangedRow`），2026 已删除：
+# 那条链整条跑不到 —— `generateExcelContent` 找的容器是 `#excel-content`，而唯一的
+# 调用页 `templates/commit_diff_new.html` 上的容器是 partial 渲染的
+# `#excel-content-area`，取不到就直接 return（详见该文件头部的说明）。
+#
+# 把它列在这里（而不是从名单里悄悄去掉）是为了保住这条断言的**反向**那一半：
+# 万一有人再往这个文件里抄一份单元格，那一份不会带内层容器（宽度上限失效），
+# 而它已不在 CELL_SOURCES 里，上面那条扫不到它。
+SOURCES_MUST_NOT_BUILD_CELLS = (
     'templates/commit_diff.html',
     'templates/weekly_version_full_diff.html',
     'templates/merge_diff.html',
+    DIFF_HANDLERS,
 )
-EXCEL_CSS = 'static/css/excel-diff-new.css'
-# 通配边框规则所在文件（最后加载，带 !important）
-SCROLL_FIX_CSS = 'static/css/excel-scroll-fix.css'
-DIFF_HANDLERS = 'static/js/diff-handlers.js'
 
 TD_RE = re.compile(r'<td class="excel-cell[^"]*"')
 WRAPPER = 'excel-cell-inner'
@@ -112,13 +124,13 @@ class TestEveryCellCarriesTheWrapper:
             f'少掉的那些单元格没有宽度上限'
         )
 
-    @pytest.mark.parametrize('source', TEST_TEMPLATES_MUST_NOT_BUILD_CELLS)
-    def test_the_delegating_templates_do_not_build_cells(self, source):
-        """已经改用共享实现的模板里不许再有 `.excel-cell` 单元格。
+    @pytest.mark.parametrize('source', SOURCES_MUST_NOT_BUILD_CELLS)
+    def test_the_delegating_sources_do_not_build_cells(self, source):
+        """已经改用共享实现的文件里不许再有 `.excel-cell` 单元格。
 
         反向的那一条：上面只要求「出现单元格的地方都带内层容器」，
-        如果某个模板悄悄抄回一份没带内层容器的单元格，上面那条扫不到它 ——
-        它的文件已经不在 CELL_SOURCES 里了。这里按「谁在模板里拼单元格」兜住：
+        如果某个文件悄悄抄回一份没带内层容器的单元格，上面那条扫不到它 ——
+        它的文件已经不在 CELL_SOURCES 里了。这里按「谁在自己拼单元格」兜住：
         这种抄一份回来的写法会让那条路径重新失去宽度上限，而它与共享实现
         会各自演化（这正是本次重构要消掉的形态）。
         """
@@ -220,9 +232,16 @@ class TestTheLineHeightLeavesRoomForTheHighlight:
 # 高亮不能改写单元格原文
 # ==========================================================================
 
-# 被测实现所在文件。`diff-handlers.js` 里的三个函数是**客户端渲染路径唯一的一份**
-# （合并页与周版本页的 `highlightDifferences` 在脚本顺序上都先加载，会被它覆盖；
-# 只有提交页 388 行那份自己的定义更靠前 —— 见文件末尾的说明）。
+# 被测实现所在文件。高亮只有**一份**实现：表体渲染的共享模块
+# `static/js/excel_diff_table.js`。
+#
+# `static/js/diff-handlers.js` 里原有一套同算法的实现（外加
+# `highlightDifferences` / `highlightCharacterDifferences`），2026 随那条跑不到的
+# 客户端表体渲染链一起删除了 —— 那里找的容器 `#excel-content` 在唯一的调用页上
+# 不存在，整条链一次都没执行过（见该文件头部的说明）。断言本身没变，只是落点
+# 从那一份换成了这一份：**显示用原样文本、比较也用原样文本**。
+HIGHLIGHT_SOURCE = 'static/js/excel_diff_table.js'
+
 _HIGHLIGHT_FUNCS = (
     'splitKeepingSeparators',
     'highlightParameterList',
@@ -231,22 +250,10 @@ _HIGHLIGHT_FUNCS = (
 )
 
 _NODE_PREAMBLE = r'''
-// escapeHtml 走的是 document.createElement('div').textContent → innerHTML，
-// 所以只需要一个「按浏览器规则转义文本」的最小 DOM 桩：转 `& < >`，**不转引号**。
-const document = {
-    createElement() {
-        const el = { textContent: '' };
-        Object.defineProperty(el, 'innerHTML', {
-            get() {
-                return el.textContent
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;');
-            },
-        });
-        return el;
-    },
-};
+// 共享模块的 escapeHtml 是纯字符串替换（不经过 DOM），所以这里**不需要**
+// document 桩：早先抠的那一份走的是 createElement('div').textContent → innerHTML，
+// 需要桩一个浏览器规则的转义器；模块这一份直接把 & < > " ' 换成实体，
+// 两种写法在文本上下文里逐字相同（模块那份多转引号，visibleText 会还原回来）。
 
 // 把高亮 HTML 还原成**肉眼看到的文本**：剥掉 span 标签、反转义。
 // 高亮只该决定「哪几个字带底色」，不该让看到的字变样。
@@ -286,17 +293,19 @@ process.stdout.write(JSON.stringify(out));
 
 
 def _extract_top_level(name):
-    """从 `diff-handlers.js` 里抠出一个**顶层** function 声明。
+    """从共享模块里抠出一个 **function 声明**（连同它所在的缩进层级）。
 
     这里不能用「数大括号」的常规办法：`highlightBracketParameterList` 里的
     正则字面量 `/{([^,}]+),([^}]+)}/g` 本身就带 `{` `}`，会把配对数算歪
     （`\\{` 被当成 +1、两个 `[^}]` 和一个 `\\}` 各被当成 -1，净差 -3）。
-    所以改按列 0 的 `function ` 行切片 —— 这个文件里的顶层函数都从行首开始。
+    所以改按**同一缩进**的 `function ` 行切片 —— 模块是一个 IIFE，
+    它的内部函数都缩进 4 格（`collectPairs` 这类嵌套的缩进更深，不会误当边界）。
     """
-    text = _read(DIFF_HANDLERS)
-    match = re.search(r'^function %s\s*\(' % re.escape(name), text, re.M)
-    assert match, f'{DIFF_HANDLERS}：找不到顶层函数 {name}'
-    following = re.search(r'^function ', text[match.end():], re.M)
+    text = _read(HIGHLIGHT_SOURCE)
+    match = re.search(r'^( *)function %s\s*\(' % re.escape(name), text, re.M)
+    assert match, f'{HIGHLIGHT_SOURCE}：找不到函数 {name}'
+    indent = match.group(1)
+    following = re.search(r'^%sfunction ' % indent, text[match.end():], re.M)
     end = match.end() + following.start() if following else len(text)
     return text[match.start():end].rstrip() + '\n'
 
@@ -391,8 +400,11 @@ class TestTheHighlightKeepsTheCellTextLiteral:
     ## 这里跑的是真函数
 
     把 `splitKeepingSeparators` / `highlightParameterList` /
-    `highlightBracketParameterList` / `escapeHtml` 从 `diff-handlers.js` 里抠出来，
-    放进 node 跑（只桩一个按浏览器规则转义文本的 `document`）。断言两件事：
+    `highlightBracketParameterList` / `escapeHtml` 从表体渲染的唯一实现
+    （`static/js/excel_diff_table.js`）里抠出来，放进 node 跑。
+    这组断言原先钉的是 `static/js/diff-handlers.js` 里那份同算法的副本 ——
+    那一份随它所属的客户端表体渲染链一起删除了（那条链跑不到，见该文件头部），
+    断言的落点因此换成现在唯一在跑的这一份，断言内容一字未改。断言两件事：
 
     * **字面量保真**：把输出剥掉 span、反转义之后，必须**逐字符等于**输入；
     * **该看得见的变化看得见**：原文不同的一对，渲染结果也必须不同，且该高亮的有高亮。

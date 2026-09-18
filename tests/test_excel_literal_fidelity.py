@@ -538,12 +538,12 @@ class TestNoMockDiffPayload:
 
 
 # ---------------------------------------------------------------------------
-# 六、客户端展示层：同一份契约，四份拷贝
+# 六、客户端展示层：同一份契约，各页面各一份拷贝
 # ---------------------------------------------------------------------------
 #
-# 上面第四节跑的是**服务端**展示层 `format_cell_value`。客户端还有四份
-# `formatCellValue`（提交页 / 合并页 / 周版本页 / diff-handlers.js），渲染的是
-# **同一批单元格**。历史上其中三份停留在旧口径：
+# 上面第四节跑的是**服务端**展示层 `format_cell_value`。客户端也有各自的
+# `formatCellValue`（提交页 / 合并页 / 周版本页），渲染的是**同一批单元格**。
+# 历史上它们停留在旧口径：
 #
 #     const strValue = String(value).trim();
 #     if (strValue.toLowerCase() === 'nan' || ... 'null' || ... 'undefined'
@@ -565,15 +565,21 @@ class TestNoMockDiffPayload:
 # 不同，且总有一边是错的。
 #
 # 所以这里钉两条：
-#   1. 四份拷贝对同一批值必须给出**逐字相同**的结果（防再次漂移）；
+#   1. 各份拷贝对同一批值必须给出**逐字相同**的结果（防再次漂移）；
 #   2. 展示层**只做展示** —— 不改写原文，也不做 HTML 转义（转义是调用方拼 HTML
 #      那一刻的事，做进函数里就必然与调用方重复或互相漏掉）。
+#
+# 原先还有第四份在 `static/js/diff-handlers.js` 里。那一份随它所属的客户端 Excel
+# 表体渲染链一起删除了：`generateExcelContent` 找的容器是 `#excel-content`，而唯一
+# 的调用页 `templates/commit_diff_new.html` 上的容器是 partial 渲染的
+# `#excel-content-area` —— 取不到就 return，整条链一次都没跑过（详见该文件头部）。
+# 剩下的三份是**真的会渲染单元格**的页面，这条断言对它们照旧生效。
 
-# 客户端四份拷贝：(相对路径, 抠出函数用的正则)。
+# 客户端各份拷贝：(相对路径, 抠出函数用的正则)。
 # 正则同时认两种写法 —— `function formatCellValue(…)` 声明，以及
 # `window.formatCellValue = function (…)` 赋值（周版本页历史上用的是后者）。
+# 第一项是下面断言里的**基准**：其余各份都必须与它逐字一致。
 CLIENT_FORMATTERS = (
-    ('static/js/diff-handlers.js', r'function formatCellValue\s*\('),
     ('templates/commit_diff.html', r'function formatCellValue\s*\('),
     ('templates/merge_diff.html', r'function formatCellValue\s*\('),
     ('templates/weekly_version_full_diff.html',
@@ -639,7 +645,7 @@ def _extract_function(path, pattern):
 
 
 def _run_client_formatters(probes):
-    """把四份真实现放进 node 跑（都是纯函数，不需要 DOM），返回 {路径: [结果…]}。"""
+    """把各份真实现放进 node 跑（都是纯函数，不需要 DOM），返回 {路径: [结果…]}。"""
     node = shutil.which('node')
     if not node:
         pytest.skip('node 不可用，跳过 JS 层验证')
@@ -678,10 +684,15 @@ def client_formatters():
 
 
 class TestClientDisplayLayerKeepsLiterals:
-    """客户端四份 `formatCellValue` 必须与比较层同一口径。"""
+    """客户端各份 `formatCellValue` 必须与比较层同一口径。"""
 
-    def test_all_four_copies_agree(self, client_formatters):
-        """四份拷贝对同一批值必须逐字一致 —— 否则同一个单元格在不同页面显示不同。"""
+    def test_all_client_copies_agree(self, client_formatters):
+        """各份拷贝对同一批值必须逐字一致 —— 否则同一个单元格在不同页面显示不同。
+
+        基准是 `CLIENT_FORMATTERS[0]`；少了 `static/js/diff-handlers.js` 那一份
+        （它随跑不到的客户端表体渲染链一起删了，见上面的说明），比对的仍是
+        **所有还在跑的**拷贝，断言本身没变。
+        """
         reference_name = CLIENT_FORMATTERS[0][0]
         reference = client_formatters[reference_name]
         problems = []
@@ -692,7 +703,7 @@ class TestClientDisplayLayerKeepsLiterals:
                     problems.append(
                         f'{probe!r}: {reference_name} 给 {expected!r}，{rel} 给 {actual!r}')
         assert not problems, (
-            '四份客户端 formatCellValue 口径已经漂移（同一份配表的同一个单元格'
+            '客户端各份 formatCellValue 口径已经漂移（同一份配表的同一个单元格'
             '在不同页面会显示成不同的东西）：\n  ' + '\n  '.join(problems)
         )
 

@@ -816,12 +816,17 @@ function initCommitAiAnalysis() {
 }
 
 // 初始化diff处理器
+// Excel 不在这一批里：这一页的 Excel 标签与表体由 diff_partials/excel_diff.html
+// 服务端渲染，点击切换也由那个 partial 自带的脚本绑定。原先这里调
+// `initExcelDiff(...)`，它会用 JS 把服务端渲染好的标签整个重建一遍，再按
+// `sheet-content-${name}` 找内容 —— 而 partial 用的是 `id="sheet-${name}"`，
+// 取不到，于是所有 `.excel-sheet-content` 的 `active` 都被摘掉且没有加回来的，
+// 而 `.excel-sheet-content` 是 `display: none`：整块 Excel 表体直接不显示。
+// 那一组函数已随这条缺陷一起从 static/js/diff-handlers.js 删除。
 document.addEventListener('DOMContentLoaded', function() {
     {% if diff_data %}
         {% if diff_data.type == 'text' %}
             initTextDiff({{ diff_data | tojson }});
-        {% elif diff_data.type == 'excel' %}
-            initExcelDiff({{ diff_data | tojson }});
         {% elif diff_data.type == 'image' %}
             initImageDiff({{ diff_data | tojson }});
         {% elif diff_data.type == 'binary' %}
