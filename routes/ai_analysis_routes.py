@@ -329,20 +329,62 @@ def ai_usage_dashboard():
 # 与其放宽那条护栏，不如把写接口放在它该在的地方：**配置**。
 # 这也与单价表一致（单价表的写侧走 `/ai-analysis/projects/<id>/config`，同样不在 /usage 下）。
 #
-# 权限是**平台管理员**：它回的是全平台合计的消耗，跨项目总览只回「你有权限的那几个项目」，
-# 而这个数把所有人的加起来，能从中反推出别人的花费。
+# ## 读：与这一页的其它端点同一档权限（登录 + 项目权限）；写：平台管理员
+#
+# 读侧原来也挂了 `@require_admin`，理由是「它回的是全平台合计的消耗，能反推别人的花费」。
+# **那个理由是错的**，而且错得有害：`usage_overview`（这一页的主数据）本来就把
+# `platform_budget` 与 `platform_status`（含全平台 used/limits）下发给任何有项目权限的
+# 用户 —— 于是这道闸门一个字节都没挡住，只让非管理员看到一张「你没有权限查看」的卡片，
+# 而同样的数字就在他刚拿到的总览响应里。**假装挡住比不挡更糟**：用户会以为自己看错了，
+# 或者以为平台有 bug。
+#
+# 所以读侧与页面上其它端点一致（登录即可，与 `usage_overview` 同一档）；写侧仍然只有
+# 平台管理员能动（`@require_admin` 在下面的 POST 上）。若日后确实要让「平台合计」只对
+# 管理员可见，正确的做法是**在服务端把 overview 里那几个字段按 is_admin() 置空**，
+# 而不是只堵这一个端点。
 
 @ai_analysis_bp.route("/ai-analysis/platform-budget", methods=["GET"])
-@require_admin
 def ai_platform_budget():
-    """平台总预算：配置 + 当前状态。"""
+    """平台总预算：配置 + 当前状态 + **谁能改**。
+
+    与 `usage_overview` 同权限（见上面的说明）：这个数已经在总览响应里了，单独给它加
+    管理员闸门只会让界面显示一张假的「无权限」卡片。
+
+    所以「非管理员只读」这件事必须由**响应自己说清**（`can_edit`），而不是靠一个 403：
+    读得到但改不了的人，看到的应该是「数字 + 一句‘只有平台管理员能改’」，而不是
+    「你没有权限查看」——后者是错的（他刚在总览里看到过这些数），而且会让他以为页面坏了。
+    """
     return jsonify(
         {
             "success": True,
             "budget": platform_budget_public(),
             "status": platform_budget_status(),
+            "can_edit": _can_edit_platform_budget(),
         }
     ), 200
+
+
+def _can_edit_platform_budget() -> bool:
+    """能不能改平台总预算。**与写接口用的是同一个判据**（`require_admin` 内部那一个）。
+
+    界面据此决定编辑器是否可用；判定本身仍由写接口再做一次 —— 前端禁用只是提示，
+    不是权限（那一条是这个仓库一贯的口径：权限判定永远在服务端）。
+
+    `ENABLE_ADMIN_SECURITY` 关掉时整条安全链都是放行的（见 `require_admin`），这里跟着
+    放行 —— 否则本地/内网部署下界面会显示成只读，而写接口其实是通的，两边自相矛盾。
+
+    **两个属性都在调用时从模块上取**（函数内 import + 属性访问），不是 `from ... import`：
+    这条链上的判定函数在本仓库的测试里是靠 monkeypatch 换掉的，导入时绑定就拿不到替换值
+    —— 这个坑在 `_has_project_access` 上已经踩过一次。
+    """
+    from utils import request_security
+
+    if not getattr(request_security, "ENABLE_ADMIN_SECURITY", True):
+        return True
+    try:
+        return bool(request_security._has_admin_access())
+    except Exception:  # noqa: BLE001 —— 查不出管理员身份时按「不能改」处理
+        return False
 
 
 @ai_analysis_bp.route("/ai-analysis/platform-budget", methods=["POST"])

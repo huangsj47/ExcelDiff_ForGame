@@ -653,23 +653,48 @@ def test_the_platform_period_participates_in_the_linkage():
 # ==========================================================================
 
 
-def test_the_platform_budget_endpoints_require_the_platform_admin(monkeypatch):
-    """平台档回的是**全平台合计**的消耗，能从中反推出别人的花费。
+def test_only_the_write_side_requires_the_platform_admin(monkeypatch):
+    """**读侧不再挂管理员闸门，写侧仍然只有平台管理员能改。**
 
-    直接调 view（绕过 before_request 的认证链），只验 `@require_admin` 这一层 ——
-    与 `tests/test_write_routes_are_not_get.py` 里那两条同一打法。
+    ## 这条用例的前身与为什么改
+
+    原来它断言 GET 与 POST **都**要管理员，理由是「这个接口能读全平台消耗」。那条理由
+    站不住：`usage_overview`（同一页面的主数据）本来就把 `platform_budget` 与
+    `platform_status`（含全平台 used/limits）下发给任何有项目权限的用户。于是那道闸门
+    一个字节都没挡住，只让非管理员看到一张「你没有权限查看」的卡片 —— 而同样的数字
+    就在他刚拿到的总览响应里。**假装挡住比不挡更糟**：用户会以为自己看错了，或者以为
+    平台有 bug。
+
+    所以现在：读侧与页面上其它端点同一档（登录 + 项目权限，由 before_request 的认证链
+    负责，这里不重复验），写侧保持 `@require_admin` —— 改全平台的上限仍然只有管理员能做。
+
+    如果日后确实要让「平台合计」只对管理员可见，正确的做法是**在服务端把 overview 里
+    那几个字段按 is_admin() 置空**（见 `ai_analysis_routes` 里那段说明），而不是只堵
+    这一个端点 —— 那正是这次改动的由来。
     """
     from utils import request_security
 
     monkeypatch.setattr(request_security, "ENABLE_ADMIN_SECURITY", True)
     monkeypatch.setattr(request_security, "_has_admin_access", lambda: False)
 
+    # 读：不因为「不是管理员」而被拒。
     get_view = flask_app.view_functions["ai_analysis_routes.ai_platform_budget"]
-    with flask_app.test_request_context(
-        "/ai-analysis/platform-budget", method="GET", headers={"Accept": "application/json"}
-    ):
-        denied_get = get_view()
+    with flask_app.app_context():
+        create_tables()
+        _clear_platform_budget()
+        db.session.commit()
+        with flask_app.test_request_context(
+            "/ai-analysis/platform-budget",
+            method="GET",
+            headers={"Accept": "application/json"},
+        ):
+            allowed_get = get_view()
+    assert _status_of(allowed_get) == 200, (
+        f"非管理员的读请求被拒了（{allowed_get!r}）—— 这些数在总览响应里就有，"
+        f"堵这一个端点只会让界面显示一张假的「无权限」卡片"
+    )
 
+    # 写：仍然只有平台管理员能做。
     post_view = flask_app.view_functions["ai_analysis_routes.ai_platform_budget_update"]
     with flask_app.test_request_context(
         "/ai-analysis/platform-budget",
@@ -679,17 +704,64 @@ def test_the_platform_budget_endpoints_require_the_platform_admin(monkeypatch):
     ):
         denied_post = post_view()
 
-    for resp in (denied_get, denied_post):
-        assert _status_of(resp) in (401, 403), (
-            f"非平台管理员应被拒绝，实际返回 {resp!r}。这个接口能读全平台消耗、"
-            f"也能改全平台的上限。"
-        )
+    assert _status_of(denied_post) in (401, 403), (
+        f"非平台管理员改到了全平台的上限，实际返回 {denied_post!r}"
+    )
 
     # HTML 请求走的是「跳登录页」那条分支（`_unauthorized_admin_response` 按
     # Accept 分流）：302 也算拒绝，但**绝不能是 200**。
-    with flask_app.test_request_context("/ai-analysis/platform-budget", method="GET"):
-        html_resp = get_view()
+    with flask_app.test_request_context(
+        "/ai-analysis/platform-budget",
+        method="POST",
+        json={"budget_token_limit": 1},
+    ):
+        html_resp = post_view()
     assert _status_of(html_resp) in (302, 401, 403), html_resp
+
+
+def test_the_read_response_says_whether_the_caller_may_edit(client, monkeypatch):
+    """读响应必须自己说明「你能不能改」，界面据此决定编辑器是否可用。
+
+    为什么不能靠 403 来判断：「能看不能改」的那批人拿到的仍然是 200（这些数在总览响应
+    里就有），所以权限信息只能在**响应体**里给。缺这个键时界面按「可编辑」处理 ——
+    宁可让写接口在服务端拒一次，也不要让管理员看到一个假的只读态。
+    """
+    from utils import request_security
+
+    with flask_app.app_context():
+        create_tables()
+        _clear_platform_budget()
+        db.session.commit()
+
+    monkeypatch.setattr(request_security, "ENABLE_ADMIN_SECURITY", True)
+
+    monkeypatch.setattr(request_security, "_has_admin_access", lambda: True)
+    assert client.get("/ai-analysis/platform-budget").get_json()["can_edit"] is True
+
+    monkeypatch.setattr(request_security, "_has_admin_access", lambda: False)
+    body = client.get("/ai-analysis/platform-budget").get_json()
+    assert body["can_edit"] is False
+    # **数字照旧下发**：读得到是刻意的（见路由里那段说明），只读的是「改」。
+    assert "budget" in body and "status" in body
+
+
+def test_the_edit_flag_follows_the_same_switch_as_the_write_side(client, monkeypatch):
+    """`ENABLE_ADMIN_SECURITY` 关掉时整条安全链是放行的，这里也要放行。
+
+    两边不一致的后果很具体：内网部署下界面显示成只读（谁都改不了），而写接口其实是通的
+    —— 用户会以为功能坏了。
+    """
+    from utils import request_security
+
+    with flask_app.app_context():
+        create_tables()
+        _clear_platform_budget()
+        db.session.commit()
+
+    monkeypatch.setattr(request_security, "ENABLE_ADMIN_SECURITY", False)
+    monkeypatch.setattr(request_security, "_has_admin_access", lambda: False)
+
+    assert client.get("/ai-analysis/platform-budget").get_json()["can_edit"] is True
 
 
 def test_the_platform_budget_endpoint_reads_and_writes(client, monkeypatch):

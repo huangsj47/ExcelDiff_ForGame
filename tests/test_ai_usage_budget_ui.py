@@ -554,11 +554,20 @@ class TestThePlatformBudgetCard:
         # 那句说明自己也要在（`readonly` 这个变量名可以改，说明文字不能没）。
         assert "$('aiuPlatformBudgetReadonly')" in body
 
-    def test_the_readonly_note_says_who_can_see_it(self):
+    def test_the_readonly_note_says_who_can_change_it(self):
+        """**「能看」与「能改」是两件事**，那句话必须只说后者。
+
+        原来是「只有平台管理员能**查看**和修改」，配套的是「非管理员整张卡片藏起来」。
+        那个做法后来改了：`usage_overview`（这一页的主数据）本来就把同样的
+        `platform_budget` / `platform_status` 下发给任何有项目权限的用户，所以「查看」
+        上根本没挡住谁 —— 而卡片却显示「你没有权限查看」，那是**错的**，会让人以为
+        平台有 bug。现在数字照常渲染，只有编辑器按 `can_edit` 变只读。
+        """
         html = _read(DASHBOARD)
         marker = html.index('id="aiuPlatformBudgetReadonly"')
         chunk = html[marker: marker + 400]
-        assert "只有平台管理员能查看和修改" in chunk
+        assert "只有平台管理员能修改" in chunk
+        assert "查看" not in chunk.split(">")[1].split("<")[0], "那句说明不许说「不能查看」"
 
     def test_the_card_asks_for_json_so_a_denial_is_a_status_not_a_redirect(self):
         """不带 `Accept: application/json` 时，非管理员拿到的是一个 302 跳登录页，
@@ -571,6 +580,25 @@ class TestThePlatformBudgetCard:
         body = _function_body(_dashboard_script(), "loadPlatformBudget")
         assert "body.hidden = true" in body, "加载开始时没有先把内容藏起来（会闪一下上一个项目的数据）"
         assert "readonly.hidden = true" in body
+
+    def test_the_editor_follows_can_edit_and_the_numbers_do_not(self):
+        """**只切编辑器，不动数字。**
+
+        读得到这个数的人本来就该看到它（超预算会挡住他自己的分析），看不到的只是「改」。
+        所以 `setPlatformBudgetEditable` 只碰两样东西：那句说明与那个表单 ——
+        不许顺手把 `aiuPlatformBudgetBody`（数字与进度条）也藏起来。
+        """
+        script = _dashboard_script()
+        body = _function_body(script, "setPlatformBudgetEditable")
+
+        assert "aiuPlatformBudgetReadonly" in body and "aiuPlatformBudgetForm" in body
+        assert "aiuPlatformBudgetBody" not in body, (
+            "把数字也藏起来了 —— 那又回到了「你没有权限查看」的说法，而它是错的"
+        )
+        # 缺 `can_edit` 时按可编辑处理：老响应/桩没有这个键时不该让管理员看到假的只读态。
+        load = _function_body(script, "loadPlatformBudget")
+        assert "result.body.can_edit !== false" in load
+        assert "setPlatformBudgetEditable" in _function_body(script, "renderPlatformBudget")
 
     def test_the_empty_state_is_a_sentence_not_an_error(self):
         """`configured === false`（没配过）是**空态**，不是错误：卡片要引导用户去配，
@@ -591,8 +619,9 @@ class TestThePlatformBudgetCard:
         assert "'Content-Type': 'application/json'" in body
         assert "JSON.stringify(" in body
         # 保存后服务端直接回一份新状态：界面不必再发一次 GET（那会把「保存成功」
-        # 与「状态刷新」变成两次可能不一致的往返）。
-        assert "renderPlatformBudget(body.budget, body.status)" in body
+        # 与「状态刷新」变成两次可能不一致的往返）。第三个参数 `true` 是「仍然可编辑」：
+        # 能走到保存这一步的人本来就是有权限的那个（写接口会在服务端再判一次）。
+        assert "renderPlatformBudget(body.budget, body.status, true)" in body
         # 但上面「各项目消耗」里每一行的平台档也要跟着变。
         assert "loadOverview()" in body
 

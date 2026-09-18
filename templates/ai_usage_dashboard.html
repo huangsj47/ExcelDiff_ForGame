@@ -264,7 +264,7 @@
 
             <div class="aiu-readonly" id="aiuPlatformBudgetReadonly" hidden>
                 <i class="fas fa-lock" aria-hidden="true"></i>
-                平台总预算只有平台管理员能查看和修改。
+                <span id="aiuPlatformBudgetReadonlyText">平台总预算只有平台管理员能修改。</span>
             </div>
 
             <div id="aiuPlatformBudgetLoading" class="aiu-loading" role="status" aria-live="polite" hidden>
@@ -1674,9 +1674,18 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
     // -----------------------------------------------------------------------
     //  平台总预算卡片
     // -----------------------------------------------------------------------
-    // 这两个端点是**平台管理员专属**（回的是全平台合计的消耗，能从中反推出别人的花费）。
-    // 所以 401/403 **不是错误态**：这一页对普通用户是合法的，只是这张卡片看不到 ——
-    // 换成错误态会让人以为页面坏了，然后去「重试」一个永远不会成功的请求。
+    // **读得到、但只有平台管理员能改。**
+    //
+    // 这里原来是「401/403 就整张卡片藏起来」，理由是「回的是全平台合计的消耗」。那个
+    // 理由站不住：`usage_overview`（这一页的主数据）本来就把同样的 `platform_budget` 与
+    // `platform_status` 下发给任何有项目权限的用户 —— 于是闸门一个字节都没挡住，只让非
+    // 管理员看到一张「你没有权限查看」的卡片，而数字就在他刚拿到的总览响应里。
+    //
+    // 现在由响应自己的 `can_edit` 说是谁能改：
+    //   * 数字**照常渲染**（他本来就该看得到：超预算会挡住他自己的分析）；
+    //   * 只有编辑器按 `can_edit` 变成只读 + 一句「只有平台管理员能修改」；
+    //   * 401/403 那条分支留着兜底（认证链层面被拒时仍然不该显示成「加载失败」，
+    //     那会让人去重试一个永远不会成功的请求）。
     var AIU_PLATFORM_FIELD_MAP = {
         budget_period: 'aiuPlatformPeriodError',
         budget_token_limit: 'aiuPlatformTokenError',
@@ -1803,9 +1812,22 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         if (box) box.hidden = false;
     }
 
-    function renderPlatformBudget(budget, status) {
+    /** 把编辑器切成只读/可编辑，并给出那句说明。
+     *
+     * **只切编辑器，不动数字**：读得到这个数的人本来就该看到它（超预算会挡住他自己的
+     * 分析），看不到的只是「改」这件事。
+     */
+    function setPlatformBudgetEditable(canEdit) {
+        var readonly = $('aiuPlatformBudgetReadonly');
+        if (readonly) readonly.hidden = !!canEdit;
+        var form = $('aiuPlatformBudgetForm');
+        if (form) form.hidden = !canEdit;
+    }
+
+    function renderPlatformBudget(budget, status, canEdit) {
         var config = budget || {};
         var data = status || {};
+        setPlatformBudgetEditable(canEdit !== false);
         fillPeriodSelect($('aiuPlatformPeriodSelect'), config.period, data.period_label);
         var tokenInput = $('aiuPlatformTokenInput');
         if (tokenInput) {
@@ -1857,7 +1879,8 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         }).then(function (result) {
             if (loading) loading.hidden = true;
             if (result.status === 401 || result.status === 403) {
-                // 权限不足**不是错误**：这一页对普通用户是合法的，只是这张卡片看不到。
+                // 认证链层面被拒**不是错误**（这一页对普通用户是合法的）：说清是权限
+                // 问题，别显示成「加载失败」让人去重试一个永远不会成功的请求。
                 if (readonly) readonly.hidden = false;
                 return;
             }
@@ -1866,7 +1889,10 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
                 return;
             }
             if (body) body.hidden = false;
-            renderPlatformBudget(result.body.budget, result.body.status);
+            // `can_edit` 缺字段时按**可编辑**处理：老响应（或桩）没有这个键时不该让
+            // 管理员看到一个假的只读态。
+            var canEdit = result.body.can_edit !== false;
+            renderPlatformBudget(result.body.budget, result.body.status, canEdit);
         }).catch(function (err) {
             if (loading) loading.hidden = true;
             showPlatformBudgetError(err && err.message ? err.message : String(err));
@@ -1923,7 +1949,7 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             setPlatformFeedback(body.message || '已保存。', 'success');
             // 保存后服务端直接回一份新状态，界面不必再发一次 GET（那会把「保存成功」
             // 与「状态刷新」变成两次可能不一致的往返）。
-            if (body.budget && body.status) renderPlatformBudget(body.budget, body.status);
+            if (body.budget && body.status) renderPlatformBudget(body.budget, body.status, true);
             // 上面「各项目消耗」里每一行的平台档也要跟着变 —— 复用总览那条取数路径。
             loadOverview();
         }).catch(function (err) {
