@@ -841,12 +841,15 @@
     .ai-example__body {
         /* 不设 max-width：这块要**占满**可用列宽。
            原先写的是 `max-width: 68ch` —— 在中文内容上这个单位是错的：`ch` 是数字
-           "0" 的宽度（约 0.5em ≈ 6px），68ch ≈ 408px ≈ **34 个汉字**/行；而示例原文
+           "0" 的宽度（约 0.5em ≈ 6px），68ch ≈ 408px ≈ **34 个汉字** 一行；而示例原文
            是按约 45 字手工折行的。两个宽度对不上，于是原文的硬换行被二次折行，
            右侧空出一大截、末尾还留下「索、返程撤离。」这种半行。
            去掉上限后容器 ≈ 列宽（modal-lg 去掉左栏与内边距约 550px ≈ 46 汉字），
            正好接住原文的手工折行，不再二次折行，右侧也不再空着。
-           ⚠️ 别再用 `ch` 给中文内容定宽度。 */
+           ⚠️ 别再用 `ch` 给中文内容定宽度。
+           ⚠️ 注释里也别把「星号紧挨斜杠」写出来：CSS 注释**不嵌套**，那两个字符一连写
+           就地把注释结束了，后面那几行散文会被当成声明整段丢弃 —— 实测这里曾因此让
+           紧接着的那条 `max-height` 失效（浏览器里算出 `max-height: none`）。 */
         max-height: 320px;
         margin-top: var(--space-2, 8px);
         padding: var(--space-3, 12px) var(--space-4, 16px);
@@ -1639,7 +1642,6 @@
      JS 侧同理：本面板给按钮加忙碌态时**不写**「把 aria-busy 设成字符串 true」那个写法
      —— `test_every_async_button_reports_a_busy_state` 按字符串出现次数数它，连注释里
      引一次都会让计数多一（本仓库踩过这个坑）。忙碌态用 `disabled` + 状态行表达。
-=============================================================================== -->
 =============================================================================== -->
 <div class="modal fade" id="aiKnowledgeModal" tabindex="-1" aria-labelledby="aiKnowledgeModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-xl modal-dialog-centered modal-dialog-scrollable ai-config-scope">
