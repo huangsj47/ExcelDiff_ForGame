@@ -26,6 +26,11 @@ test.py
 .pytest_cache/
 .pytest_tmp/
 tests/_pytest_tmp_run/
+
+# 工具（Claude Code）的工作树目录：并发 agent 在这里建临时 git worktree，
+# 属于本机工具状态、不是源码。不忽略的话 `git status` 会一直挂着一堆未跟踪目录，
+# 而且很容易被 `git add -A` 顺手带进提交。
+.claude/worktrees/
 .mypy_cache/
 .ruff_cache/
 
