@@ -511,6 +511,42 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
                 'message': f'不支持的仓库类型: {repository.type}'
             }
         read_time = time.time() - read_start
+        # 当前版本读不出来（None）时必须**当场说清楚**，不能让它进比较器。
+        #
+        # 读内容的失败与「文件没有内容」在这里是同一件事的两面：`get_file_content_from_git`
+        # 失败一律返回 None（本地工作副本不存在、platform/agent 模式禁止 clone、提交里没有
+        # 这个路径…），而文本侧的比较器把 None 当空串（`DiffService._decode_text(None) == ""`），
+        # 于是「读不到」算出来的载荷与「两版逐字节相同」**长得一模一样**：空补丁。
+        # 上层拿它没辙，只能在界面上写「取到了记录但没有补丁内容」——一句假话，模型读到的是
+        # 「这里没什么可看的」。
+        #
+        # 配表侧一直有这道闸门（`_read_excel_data(None)` 直接抛错 → error 载荷），只有文本
+        # 漏了；所以「代码仓库的 AI 分析看不到 diff」只发生在代码文件上。
+        #
+        # 「文件被删了」不走这条路：删除由提交的操作码显式声明（上面的
+        # `get_deleted_file_diff_data`，以及调用方对 operation == 'D' 的判断），
+        # 绝不靠 None 推断（理由见 DiffService.process_deleted_file 的说明）。
+        # 「文件是空的」也区分得开：那样读出来是 b''，不是 None。
+        #
+        # 顺带修掉一半：配表侧原先那条「读取失败」的载荷 `type` 还是 `'excel'`，
+        # 于是下面 `if is_excel and diff_data.get('type') == 'excel'` 会把这次失败
+        # **写进缓存**，同一个 (仓库, 提交, 文件) 之后每次读都拿到它；现在它不再满足
+        # 那个条件，失败的读取不会被冒充成一份算好的差异。
+        if current_content is None and getattr(commit, 'operation', None) != 'D':
+            log_print(
+                f"❌ 读不到当前版本内容，无法给出差异: {commit.path} @ {commit.commit_id[:8]}",
+                'DIFF', force=True,
+            )
+            return {
+                'type': 'error',
+                'file_path': commit.path,
+                'error': '无法读取当前版本的文件内容',
+                'message': (
+                    f'平台读不到 {commit.path} 在提交 {commit.commit_id[:8]} 的内容'
+                    '（本地工作副本不存在、或该提交里没有这个路径）。'
+                    '**这不等于「没有改动」**，要核对这个文件必须让取数成功。'
+                ),
+            }
         # 处理差异
         diff_service = DiffService()
         calc_start_time = time.time()

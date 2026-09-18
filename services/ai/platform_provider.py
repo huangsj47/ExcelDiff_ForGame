@@ -18,11 +18,20 @@
 
 渲染部分（`render_diff_payload`）是纯函数：输入平台返回的 dict，输出文本。所以它可以
 脱离数据库与仓库完整单测 —— 这也正是这一层里最容易出错、最值得测的部分。
+
+## 为什么 diff 要读「平台已经算好的那一份」
+
+取数还有第三种失败方式：**平台本地根本没有这份数据**。diff 原先一律现场重算（读本地
+工作副本），而 platform/agent 模式下平台被显式禁止 clone，代码文件又没有单文件 diff
+缓存 —— 于是代码仓库的 diff 永远取不到，而「取不到」被渲染成「取到了记录但没有补丁
+内容」。修法是读平台**已经算好并落库**的周版本合并 diff（周版本页面读的同一个
+payload），见 `_weekly_stored_diff`。
 """
 
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -36,6 +45,17 @@ DEFAULT_MAX_ROWS_PER_SHEET = 120
 _MAX_CELL_CHARS = 160
 
 _ROW_LABELS = {"added": "新增", "removed": "删除", "modified": "修改", "unchanged": "未变"}
+
+# 「有记录、但没有补丁正文」时给模型的那句话。
+#
+# **不能写成「没有改动」** —— 这是这一层存在的理由（见本模块文档）。平台已经把
+# 「读不到内容」与「两版一样」在取数那一步分开了（`get_unified_diff_data` 的闸门：
+# 当前版本读不出来时直接返回 error 载荷），但真走到渲染这一步就分不出来了，
+# 所以两个可能都留着，并明确否掉那个会把「读取失败」读成「这里没问题」的读法。
+_NO_PATCH = (
+    "取到了记录，但补丁正文是空的（两版内容相同，或者内容没读到）。"
+    "**这不等于「没有改动」。**"
+)
 
 # 表头块里「有改动」的三种状态（`unchanged` 是常驻行，见 `_render_header_block`）。
 # 与 `utils/diff_data_utils.header_rows_have_changes`、前端模块的 `CHANGED_ROW_STATUSES`
@@ -71,6 +91,10 @@ def render_diff_payload(
         return _render_code(diff_data, path=path)
     if kind == "text":
         return _render_text(diff_data, path=path)
+    if kind == "segmented_diff":
+        return _render_segmented(
+            diff_data, path=path, max_rows_per_sheet=max_rows_per_sheet
+        )
     if kind == "image":
         return _render_image(diff_data, path=path)
     if kind == "binary":
@@ -262,7 +286,7 @@ def _render_code(payload: Mapping[str, Any], *, path: str) -> str:
     where = path or str(payload.get("file_path") or "")
     patch = str(payload.get("patch") or "")
     if not patch.strip():
-        return f"[代码] {where}：取到了记录但没有补丁内容。"
+        return f"[代码] {where}：{_NO_PATCH}"
     return f"代码差异：{where}\n\n{patch}"
 
 
@@ -294,8 +318,52 @@ def _render_text(payload: Mapping[str, Any], *, path: str) -> str:
                     pieces.append(str(line["raw"]))
         patch = "\n".join(pieces)
     if not patch.strip():
-        return f"[文本] {where}：取到了记录但没有补丁内容。"
+        return f"[文本] {where}：{_NO_PATCH}"
     return f"文件差异：{where}\n\n{patch}"
+
+
+def _render_segmented(
+    payload: Mapping[str, Any], *, path: str, max_rows_per_sheet: int
+) -> Optional[str]:
+    """分段合并 diff：同一个文件被窗口里若干次**不相邻**的提交改过。
+
+    `merge_strategy == 'segmented'` 时平台交出来的是
+    `{'type': 'segmented_diff', 'segments': [<每段一份完整载荷>], 'total_segments': N}`，
+    每段自带 `segment_info`（这一段的 `current` / `previous` 与段号）。
+
+    渲染层原先不认识这个类型（没有 `sheets`、也没有 `patch`）→ 一路落到 `return None`
+    → 模型看到的是「取数失败」。而分段恰恰是**代码文件在周版本里最常见的形态之一**：
+    一个文件在一周里被不相邻的几次提交改过就会变成它。配表侧早就有
+    `extract_excel_diff_from_payload` 把分段合并起来，文本/代码侧没有对应的东西。
+
+    每段单独渲染、各自标出「哪两条提交之间」：段与段之间是**不同时间段**的改动，
+    拼成一整段连续补丁会让模型读成一次改动（`@@` 行号本来也不连续）。
+    """
+    segments = payload.get("segments")
+    if not isinstance(segments, Sequence) or isinstance(segments, (str, bytes)):
+        return None
+    total = len(segments)
+    pieces: list[str] = []
+    for index, segment in enumerate(segments, start=1):
+        if not isinstance(segment, Mapping):
+            continue
+        rendered = render_diff_payload(
+            segment, path=path, max_rows_per_sheet=max_rows_per_sheet
+        )
+        if not rendered:
+            continue
+        info = segment.get("segment_info")
+        between = ""
+        if isinstance(info, Mapping):
+            current = str(info.get("current") or "").strip()
+            previous = str(info.get("previous") or "").strip()
+            if current or previous:
+                between = f"（{previous or '初始版本'} → {current or '未知'}）"
+        pieces.append(f"--- 第 {index}/{total} 段{between} ---\n{rendered}")
+    if not pieces:
+        where = path or str(payload.get("file_path") or "")
+        return f"[分段差异] {where}：{total} 段里没有一段带得出正文。"
+    return "\n\n".join(pieces)
 
 
 def _render_image(payload: Mapping[str, Any], *, path: str) -> str:
@@ -551,6 +619,108 @@ def _read_excel_sheets(raw: bytes, *, max_rows: int) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------
+# 平台已经算好的 diff
+# --------------------------------------------------------------------------
+
+
+def _weekly_stored_diff(repository_id: Optional[int], path: str, commit: str):
+    """这个文件在这个提交上的、**平台已经算好并落库**的周版本合并 diff。
+
+    返回 `(载荷, 出处说明)`：载荷是渲染层能直接吃的
+    `{'type': 'code'|'text'|'excel'|'segmented_diff', …}`，没有就是 `(None, "")`；
+    出处说明是给模型看的一行「这是谁的 diff」，只在合并了多条提交时才有内容
+    （见下面的「不许张冠李戴」）。
+
+    ## 为什么 AI 要读这一份，而不是自己再算一遍
+
+    1. **它就是评审者在页面上看的那一份。** `WeeklyVersionDiffCache.merged_diff_data`
+       是周版本同步（`weekly_version_logic.generate_weekly_merged_diff`）算出来落库的，
+       周版本页面的取数（`weekly_version_file_diff_api` → `generate_weekly_git_diff_html`
+       / `generate_weekly_excel_merged_diff_html`）读的就是它。让模型读别的来源，
+       它给出的结论就没法与人看到的页面对账。
+
+    2. **自己算的那一份是「单提交 vs 前一提交」，在周版本里只是其中一段。**
+       把这一份给它，等于把一个文件一周里的改动只看最后一次。
+
+    3. **平台本地往往根本没有工作副本。** platform/agent 模式下平台被显式禁止 clone
+       （`get_file_content_from_git` 直接返回 None），而**代码文件的 diff 没有单文件缓存**
+       （`DiffCache` / `ExcelDiffCacheService` 都是配表专用的），于是实时路径必然读不到
+       任何内容 —— 那时旧渲染层给出的「取到了记录但没有补丁内容」是一句假话，
+       模型读到的是「这里没什么可看的」。配表之所以没这个问题，正是因为它的 diff 有缓存。
+
+    ## 为什么按 (仓库, 路径, latest_commit_id) 精确匹配
+
+    变更清单里给模型的每个文件都带着自己的 `latest_commit_id`（就是这一列），模型
+    索取时原样传回来 —— 于是「它问的那个提交」与「这条缓存行」是同一个东西，
+    不需要再猜「哪一次周版本」。
+
+    ## 不许张冠李戴
+
+    这条缓存覆盖的是**一个窗口**（可能好几条提交），而模型的索取长成
+    `file_diff(commit=X, path=p)` —— 一个问「提交 X 改了什么」的形状。窗口里不止一条
+    提交时，模型会把整段窗口的改动都算到 X 头上（而它没有任何办法发现）。所以合并了
+    多条提交时，出处说明会明写「这是覆盖 N 条提交的合并差异」。
+
+    `diff_version` **不在这里校验**：口径版本决定的是「周版本同步要不要重算」
+    （`needs_merged_diff_cache` → `is_merged_diff_cache_current`），读取侧
+    （含页面的 Excel 分支 `load_weekly_excel_diff_from_cache`）本来就不看它。
+    """
+    if not repository_id or not path or not commit:
+        return None, ""
+    from models.weekly_version import WeeklyVersionDiffCache
+
+    try:
+        row = (
+            WeeklyVersionDiffCache.query.filter_by(
+                repository_id=repository_id, file_path=path, latest_commit_id=commit
+            )
+            .order_by(WeeklyVersionDiffCache.id.desc())
+            .first()
+        )
+    except Exception as exc:  # noqa: BLE001 —— 取不到只是少一条来源，不该让整次索取失败
+        log_print(f"⚠️ AI 取数：查周版本合并 diff 失败 {path}: {type(exc).__name__}: {exc}")
+        return None, ""
+    if row is None or not row.merged_diff_data:
+        return None, ""
+    try:
+        envelope = json.loads(row.merged_diff_data)
+    except (TypeError, ValueError) as exc:
+        log_print(f"⚠️ AI 取数：周版本合并 diff 解析失败 {path}: {exc}")
+        return None, ""
+    if not isinstance(envelope, Mapping):
+        return None, ""
+    # 外壳是 `generate_merged_diff_data` 的元数据（commit_ids / authors / merge_strategy…），
+    # 真正的载荷在 `diff_data` 与 `merged_diff` 里（同一个对象，历史原因各留了一份）。
+    for key in ("diff_data", "merged_diff"):
+        candidate = envelope.get(key)
+        if isinstance(candidate, Mapping) and candidate:
+            return candidate, _batch_provenance(envelope)
+    return None, ""
+
+
+def _batch_provenance(envelope: Mapping[str, Any]) -> str:
+    """这份合并 diff 覆盖了哪些提交 —— 只在**不止一条**时给说明。
+
+    一条提交时它逐字等于「这条提交的差异」，说明只是噪音；两条以上时不说清楚，
+    模型会把整段窗口算到它问的那一条提交头上。
+    """
+    commit_ids = envelope.get("commit_ids")
+    ids = [str(item) for item in commit_ids if item] if isinstance(commit_ids, Sequence) \
+        and not isinstance(commit_ids, (str, bytes)) else []
+    count = len(ids) or int(envelope.get("commits_count") or 0)
+    if count <= 1:
+        return ""
+    if ids:
+        scope = f"（{ids[0][:8]} … {ids[-1][:8]}）"
+    else:
+        scope = ""
+    return (
+        f"（出处：平台已落库的**合并差异**，覆盖本批次的 {count} 条提交{scope} ——"
+        "它是这个文件在本批次里的全部改动，**不是单独某一条提交的改动**。）"
+    )
+
+
+# --------------------------------------------------------------------------
 # Provider
 # --------------------------------------------------------------------------
 
@@ -566,9 +736,19 @@ class PlatformContextProvider:
         *,
         loaded: LoadedSkills,
         max_rows_per_sheet: int = DEFAULT_MAX_ROWS_PER_SHEET,
+        use_stored_batch_diff: bool = True,
     ):
         self._loaded = loaded
         self._max_rows = max_rows_per_sheet
+        # 读平台已算好并落库的那一份（周版本合并 diff，页面同源），而不是现场重算。
+        #
+        # **默认开**：这条来源是「评审者看到的 diff」本身，而现场重算在
+        # platform/agent 模式下必然读不到（平台被禁止 clone）。默认关掉它，
+        # 就等于让「代码文件的 diff 取不到」这件事随时可以再发生一次。
+        #
+        # 关掉的只有一种场合：**单提交分析**。那时模型问的是「这一条提交改了什么」，
+        # 而缓存里那一份覆盖的是一个窗口（可能好几条提交）—— 见 `_batch_provenance`。
+        self._use_stored_batch_diff = bool(use_stored_batch_diff)
 
     # -- 文档 ---------------------------------------------------------------
 
@@ -610,10 +790,33 @@ class PlatformContextProvider:
         return "\n".join(lines) + "\n"
 
     def file_diff(self, commit: str, path: str) -> Optional[str]:
-        """某个文件在某个提交上的 diff（Excel 走结构化差异）。"""
+        """某个文件在某个提交上的 diff（Excel 走结构化差异）。
+
+        **先读平台已经算好并落库的那一份**（周版本合并 diff，就是周版本页面读的同一个
+        payload），读不到才退回实时计算。理由见 `_weekly_stored_diff`：实时计算需要
+        平台本地有该仓库的工作副本，而 platform/agent 模式下平台明确不 clone ——
+        那条路上「读不到内容」会退化成一句「取到了记录但没有补丁内容」，模型据此得出的
+        结论不是「我读不到」，而是「这里没什么可看的」。
+        """
         row = self._commit_row(commit, path)
         if row is None:
             return None
+
+        if self._use_stored_batch_diff:
+            stored, provenance = _weekly_stored_diff(
+                getattr(row, "repository_id", None), path, commit
+            )
+            if stored is not None:
+                rendered = render_diff_payload(
+                    stored, path=path, max_rows_per_sheet=self._max_rows
+                )
+                if rendered:
+                    # 出处说明只在这个窗口合并了多条提交时才有内容（见 `_batch_provenance`）
+                    # —— 模型拿到的索取形状是「提交 X 改了什么」，不说明它会张冠李戴。
+                    return f"{provenance}\n{rendered}" if provenance else rendered
+                # 落回实时计算：这份缓存载荷渲染不出来（例如旧口径的分段结构），
+                # 而实时那条路算出来的东西至少是能读的。
+                log_print(f"⚠️ AI 取数：已落库的 diff 渲染不出来，改用实时计算 {path}")
 
         try:
             from services.commit_diff_logic import resolve_previous_commit

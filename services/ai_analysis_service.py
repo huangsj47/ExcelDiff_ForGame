@@ -1415,7 +1415,13 @@ def _run_engine_and_persist(
         log_print(f"⚠️ AI 分析：{budget_note}", "AI", force=True)
     outcome = run_analysis(
         client=client,
-        provider=PlatformContextProvider(loaded=loaded),
+        # 周版本批次分析读平台**已算好并落库**的那一份合并 diff（就是周版本页面读的
+        # 同一个 payload），而不是现场用本地工作副本重算 —— 见
+        # `platform_provider._weekly_stored_diff`。单提交分析要关掉它：那时模型问的是
+        # 「这一条提交改了什么」，而缓存里那一份覆盖的是一个窗口（可能好几条提交）。
+        provider=PlatformContextProvider(
+            loaded=loaded, use_stored_batch_diff=(payload.get("mode") != "commit")
+        ),
         loaded=loaded,
         scope=change.scope,
         change_summary=change.summary,
