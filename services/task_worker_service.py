@@ -1197,6 +1197,16 @@ def execute_task_inline_for_agent(task_type, payload):
         _process_weekly_excel_cache(int(config_id), file_path)
         return {"message": "weekly_excel_cache completed"}
 
+    if normalized_type == 'file_content':
+        # 「把某个文件的正文取回来」——只在 Agent 节点上有意义（那里有工作副本）。
+        # 平台侧的调用方是 `services/agent_file_content_dispatch.py`，它读回的就是这里的
+        # 返回值（平台的结果处理对没有专属分支的任务类型原样落 `AgentTask.result_summary`）。
+        #
+        # 实现放在单独的模块里：本文件已经贴着 2000 行的硬上限
+        # （`scripts/check_file_length.py`），而那段逻辑自带一段要写清楚的取舍说明。
+        from services.agent_file_content_reader import read_file_content_for_agent
+        return read_file_content_for_agent(payload)
+
     if normalized_type == 'weekly_ai_analysis':
         config_id = payload.get('config_id') or payload.get('commit_id')
         if not config_id:

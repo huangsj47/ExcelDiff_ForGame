@@ -461,19 +461,30 @@ def test_a_stored_segmented_diff_reaches_the_model(tmp_path):
 
 
 # ==========================================================================
-#  四、还没修的另一半（写成测试，免得它悄悄变成「已经修好了」）
+#  四、文件正文：原来的「另一半」现在也通了（说明见下面两条）
 # ==========================================================================
 
 
-@pytest.mark.parametrize("path,expected", [(LUA, None)])
-def test_reading_a_code_file_body_still_needs_a_work_copy(tmp_path, path, expected):
-    """`file_content` 仍然读不到代码全文：它同样要平台本地的工作副本。
+def test_reading_a_code_file_body_says_why_when_there_is_no_source(tmp_path):
+    """平台本地读不到代码全文时：**给出可读的原因**，而不是 None/空串。
 
-    diff 修好之后模型能看到「改了什么」，但看不到「这个文件现在长什么样」。
-    这是**已知的、本次没修**的一半（平台的缓存里没有代码全文，只有 diff）。
-    哪天真去修它（例如从周版本载荷里的 `current_content` 取），这条测试会红 ——
-    那时把它改成正面断言即可。
+    这条原先断言的是 `file_content(...) is None`（「已知没修的另一半」）。现在它有了
+    第二条来源（platform/agent 模式下让 Agent 在自己的工作副本上读，见
+    `services/agent_file_content_dispatch.py`），所以这段测试改成正面的负面断言：
+
+    * 项目**没绑 Agent** 时取不到 —— 这仍是事实，不能假装拿到了；
+    * 但**必须说清楚为什么**（绑没绑、在不在线、是不是还在路上），并且**明确否掉**
+      「读不到 = 没有内容 / 没有改动」这个读法 —— 那句话正是本文件存在的理由。
+
+    深一层的行为（派发、有界等待、复用、失败重试）在
+    `tests/test_ai_file_content_from_agent.py`。
     """
     seeded = _seed()
     with app.app_context():
-        assert _provider(tmp_path).file_content(seeded.head_sha, path) is expected
+        text = _provider(tmp_path).file_content(seeded.head_sha, LUA)
+
+    assert text is not None and text != '', f'不能返回 None/空串（空串=「确实没有内容」）：{text!r}'
+    assert '没有绑定 Agent' in text, f'原因要说清楚：{text!r}'
+    assert '不等于「没有内容」' in text and '不等于「没有改动」' in text, text
+    assert '信息缺口' in text, '要让模型知道该把它写成信息缺口，而不是推断出一个结论'
+

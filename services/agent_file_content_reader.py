@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Agent 端：从**本机的工作副本**里读一个文件的正文，按窗口切成给模型看的那一段。
+
+与 `services/agent_file_content_dispatch.py` 是一对：那边是平台端「向 Agent 要」，
+这边是 Agent 端「读给它」。分开成两个文件还有个实际理由 —— 平台的
+`task_worker_service.py` 已经贴着 2000 行的硬上限（`scripts/check_file_length.py`），
+把这段读内容的逻辑塞进去会直接顶穿它。
+
+## 为什么是 git（而不是新引入一个取代码的服务）
+
+工作副本在同步（auto_sync）时就已经建好了，读历史版本用 `git show <commit>:<path>`
+即可 —— git 是开源工具、本来就在依赖里，不引入任何新服务、新端口、新凭证。
+平台侧的 `get_file_content_from_git` 走的是同一条路：**同一份实现，两端行为一致**。
+
+## 为什么按窗口切，而不是把整份文件传回去
+
+模型问正文是为了看**改动周围**长什么样（改动本身已经在 diff 里了）。一份几千行的
+lua 整个传回去，代价是三份：跨节点传输、库里留一份、以及最贵的 —— 提示词里塞进几千行
+与本次评审无关的代码。所以按请求里的 `lines`（如 `"1180-1260"`）切；没给窗口就从开头
+给到字符上限，并**如实写上整份文件有多少行、给的是哪一段**，让模型知道它手里的是片段。
+"""
+
+from __future__ import annotations
+
+from models import Repository, db
+from utils.content_window import CONTENT_MAX_CHARS, slice_lines
+
+
+def read_file_content_for_agent(payload: dict) -> dict:
+    """读一个文件的正文，返回会给模型看的那一段。
+
+    返回体（会被原样 JSON 落到 `AgentTask.result_summary`）：
+    `{file_path, commit_id, content, start_line, end_line, total_lines, truncated, message}`
+    """
+    repository_id = payload.get('repository_id')
+    commit_id = str(payload.get('commit_id') or '')
+    file_path = str(payload.get('file_path') or '')
+    if not repository_id or not commit_id or not file_path:
+        raise ValueError("file_content 任务缺少 repository_id/commit_id/file_path")
+
+    repository = db.session.get(Repository, int(repository_id))
+    if repository is None:
+        raise ValueError(f"file_content 任务的目标仓库不存在: {repository_id}")
+
+    from services.vcs_content_service import get_file_content_from_git
+
+    raw = get_file_content_from_git(repository, commit_id, file_path)
+    if raw is None:
+        # 取不到就**明说**：抛异常 → Agent 报 failed → 平台侧把原因写给模型。
+        # 不能返回空正文 —— 那与「这个文件是空的」分不开。
+        raise RuntimeError(f"读取文件内容失败（工作副本里没有 {commit_id[:8]} 的这个路径）")
+
+    if isinstance(raw, str):
+        text = raw
+    else:
+        try:
+            text = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            # 非 UTF-8（GBK 的 lua 是常见的）按平台的既有口径兜底解码，别把读得到的内容
+            # 说成读不了。`errors='replace'` 只影响极少数字节，行数与结构都还在。
+            text = raw.decode('utf-8', errors='replace')
+
+    # 行数与「切哪一段」都由 `utils/content_window.slice_lines` 决定 —— 那是窗口规则的
+    # 唯一实现，平台侧读得到正文时用的是同一个函数（两端各写一遍必然漂移，而漂移的表现
+    # 是同一份请求在不同部署下给出不同行号）。
+    window = slice_lines(
+        text, payload.get('lines'), max_chars=int(payload.get('max_chars') or 0) or CONTENT_MAX_CHARS
+    )
+
+    return {
+        "file_path": file_path,
+        "commit_id": commit_id,
+        "content": window.content,
+        "start_line": window.start_line,
+        "end_line": window.end_line,
+        "total_lines": window.total_lines,
+        "truncated": window.truncated,
+        "message": (
+            f"file_content completed "
+            f"({window.start_line}-{window.end_line}/{window.total_lines})"
+        ),
+    }

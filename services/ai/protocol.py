@@ -67,12 +67,20 @@ class ContextRequest:
     commit: str = ""
     path: str = ""
     name: str = ""
+    # `file_content` 的可选行窗口（`"1180-1260"`）。**空表示「你替我挑一段」**：
+    # 平台会给改动周围那一段（见 `ai/platform_provider._render_text_content`）。
+    #
+    # 为什么要有这个字段：代码文件的正文动辄几千行，整份给既超预算又没用（从中间截断的
+    # 正文等于没有上下文）。让它点名要哪一段，比让平台猜它想看哪里准得多，也省得多。
+    lines: str = ""
 
     def describe(self) -> str:
         if self.type == "read_reference":
             return f"read_reference {self.name}"
         if self.type == "commit_detail":
             return f"commit_detail {self.commit[:12]}"
+        if self.lines:
+            return f"{self.type} {self.commit[:12]} {self.path} lines={self.lines}"
         return f"{self.type} {self.commit[:12]} {self.path}"
 
 
@@ -204,6 +212,7 @@ def _coerce_requests(value: Any) -> tuple[ContextRequest, ...]:
                 commit=_as_str(entry.get("commit")),
                 path=_as_str(entry.get("path")),
                 name=_as_str(entry.get("name")),
+                lines=_as_str(entry.get("lines")),
             )
         )
     return tuple(requests)
@@ -471,13 +480,44 @@ def sanitize_requests(
         else:
             path = ""
 
-        key = (request_type, resolved, path, "")
+        # 行窗口（只有 `file_content` 认它）。**不合法一律清空**，而不是丢掉整条请求：
+        # 内容本身仍然有用，模型把窗口写坏的代价只能是「拿到的还是默认那一段」。
+        # 但**格式必须是规范形态**（`1180-1260`），这样它进得了去重键、也进得了日志 ——
+        # 否则同一个文件的两段窗口会被去重成一条，模型要第二段时拿回第一段。
+        lines = _normalize_line_window(request.lines) if request_type == "file_content" else ""
+
+        key = (request_type, resolved, path, lines)
         if key in seen:
             continue  # 同一轮内重复索要不重复执行
         seen.add(key)
-        allowed.append(ContextRequest(type=request_type, commit=resolved, path=path))
+        allowed.append(
+            ContextRequest(type=request_type, commit=resolved, path=path, lines=lines)
+        )
 
     return tuple(allowed), tuple(dropped)
+
+
+# 行窗口的规范形态：`1180-1260`（单行写成 `1180`）。上限只是防呆 —— 真正的夹紧在
+# `utils/content_window.slice_lines` 里按实际行数做。
+_LINE_WINDOW_RE = re.compile(r"(\d{1,7})\s*(?:[-~—到]\s*(\d{1,7}))?")
+
+
+def _normalize_line_window(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = _LINE_WINDOW_RE.fullmatch(text)
+    if match is None:
+        return ""
+    start = int(match.group(1))
+    if start < 1:
+        return ""
+    if match.group(2):
+        end = int(match.group(2))
+        if end < start:
+            return ""
+        return f"{start}-{end}"
+    return str(start)
 
 
 # --------------------------------------------------------------------------

@@ -163,29 +163,48 @@ class TestExcelBranchIsReachable:
 
 
 class TestNonWorkbookPathsGoToText:
-    """`.csv` / `.tsv` / 普通文本：必须原样按文本给模型，不能进表格分支。"""
+    """`.csv` / `.tsv` / 普通文本：必须**逐行原样**给模型，不能进表格分支。
+
+    「原样」的判定标准是**内容行一字不改地出现在返回里**（带行号，见
+    `platform_provider._render_text_content`），不是「返回与文件字节逐字相同」——
+    后者会把抬头与行号一起钉死，而那两样正是模型据以定位的证据。
+    """
+
+    def _assert_lines_are_intact(self, got, lines):
+        """每一行都必须以 `行号│原文` 的形态出现，且顺序不变。"""
+        assert isinstance(got, str) and got, f'不允许返回 None/空串：{got!r}'
+        for number, text in enumerate(lines, start=1):
+            assert f'{number}│{text}' in got, (
+                f'第 {number} 行没按「行号│原文」给出来：{text!r}\n完整返回：{got!r}'
+            )
 
     def test_csv_is_returned_as_text(self, provider, fetch):
-        content = 'id,name\n1,Alice\n'.encode('utf-8')
-        fetch(content)
+        fetch('id,name\n1,Alice\n'.encode('utf-8'))
         got = provider.file_content(COMMIT, 'config/道具表.csv')
-        assert got == 'id,name\n1,Alice\n', (
+        assert '无法解析' not in got, (
             f'CSV 被当成工作簿解析了（模型会收到「无法解析」而不是这张表）：{got!r}'
         )
+        self._assert_lines_are_intact(got, ['id,name', '1,Alice'])
 
     def test_tsv_is_returned_as_text(self, provider, fetch):
-        content = 'id\tname\n1\tAlice\n'.encode('utf-8')
-        fetch(content)
+        fetch('id\tname\n1\tAlice\n'.encode('utf-8'))
         got = provider.file_content(COMMIT, 'config/道具表.tsv')
-        assert got == 'id\tname\n1\tAlice\n', (
-            f'TSV 被当成工作簿解析了：{got!r}'
-        )
+        assert '无法解析' not in got, f'TSV 被当成工作簿解析了：{got!r}'
+        self._assert_lines_are_intact(got, ['id\tname', '1\tAlice'])
 
     def test_plain_python_file_is_returned_as_text(self, provider, fetch):
-        content = 'def f():\n    return 1\n'.encode('utf-8')
-        fetch(content)
+        fetch('def f():\n    return 1\n'.encode('utf-8'))
         got = provider.file_content(COMMIT, 'services/foo.py')
-        assert got == content.decode('utf-8'), got
+        self._assert_lines_are_intact(got, ['def f():', '    return 1'])
+
+    def test_the_window_says_which_lines_it_is_and_how_many_there_are(
+        self, provider, fetch
+    ):
+        """抬头是模型写结论时的坐标系（「第 1180 行」），行号必须从 1 起、总数要对。"""
+        fetch(''.join(f'line {i}\n' for i in range(1, 11)).encode('utf-8'))
+        got = provider.file_content(COMMIT, 'services/foo.py')
+        assert '共 10 行' in got, f'没告诉模型这个文件有多少行：{got!r}'
+        assert '第 1–10 行' in got, f'没告诉模型这是哪一段：{got!r}'
 
     def test_binary_junk_says_it_cannot_be_shown(self, provider, fetch):
         """非文本非配表：明说无法展示，且**不**说成「没有内容」。"""

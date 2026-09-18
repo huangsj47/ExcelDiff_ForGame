@@ -55,6 +55,7 @@ from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
 from services.ai.budget import ContextItem, truncate_text, truncate_text_middle
 from services.ai.protocol import ContextRequest, DroppedItem
 from services.ai.scope import normalize_path
+from utils.content_window import CONTENT_MAX_CHARS
 
 # 单条上下文的字符上限。Excel 的 diff 通常是最大的，但也不该无限大。
 #
@@ -68,7 +69,11 @@ from services.ai.scope import normalize_path
 DEFAULT_TOOL_LIMITS: Mapping[str, int] = {
     "commit_detail": 6_000,
     "file_diff": 11_000,
-    "file_content": 11_000,
+    # `file_content` 用的是 `utils.content_window.CONTENT_MAX_CHARS`：**正文在取数侧就按
+    # 这个上限切好**（切在行边界上，并把「给的是哪一段、共多少行」写进抬头）。这里若写一个
+    # 更大的数，取数侧会先把抬头写好、再由下面的预算层砍一刀尾巴 —— 抬头说的行数与正文
+    # 就对不上了，而那个行号正是模型写进结论里的坐标。
+    "file_content": CONTENT_MAX_CHARS,
     "read_reference": 11_000,
 }
 
@@ -100,7 +105,7 @@ class ContextProvider(Protocol):
 
     def file_diff(self, commit: str, path: str) -> str | None: ...
 
-    def file_content(self, commit: str, path: str) -> str | None: ...
+    def file_content(self, commit: str, path: str, lines: str = "") -> str | None: ...
 
     def read_reference(self, name: str) -> str | None: ...
 
@@ -435,7 +440,9 @@ class ContextTools:
         if request.type == "file_diff":
             return self.provider.file_diff(request.commit, normalize_path(request.path))
         if request.type == "file_content":
-            return self.provider.file_content(request.commit, normalize_path(request.path))
+            return self.provider.file_content(
+                request.commit, normalize_path(request.path), request.lines
+            )
         if request.type == "read_reference":
             return self.provider.read_reference(request.name)
         # 走到这里说明 `sanitize_requests` 漏了一种类型。宁可如实报失败，也不要

@@ -44,14 +44,23 @@ _AGENT_TASK_TYPE_ALLOWED = (
     "excel_diff",
     "weekly_sync",
     "weekly_excel_cache",
+    "file_content",
     "temp_cache_fetch",
 )
+# 「必做」集合：无论 `AGENT_LOCAL_TASK_TYPES` 里写了什么，这些都会补上。
+#
+# `file_content` 必须在这里。它是**平台侧唯一拿得到代码正文的途径**（platform/agent 模式下
+# 平台被禁止 clone，见 services/agent_file_content_dispatch.py），一旦 Agent 不做它，
+# 表现不是报错而是「AI 报告里永远有一条读不到正文的信息缺口」—— 静默降级，没人会去查。
+# 放进必做集合，已有部署不改任何环境变量就能生效；写进上面的允许集合，是为了让
+# `AGENT_LOCAL_TASK_TYPES=file_content` 这种写法不被 `_normalize_local_task_types` 过滤掉。
 _AGENT_TASK_TYPE_REQUIRED = (
     "auto_sync",
     "commit_diff",
     "excel_diff",
     "weekly_sync",
     "weekly_excel_cache",
+    "file_content",
     "temp_cache_fetch",
 )
 
@@ -169,7 +178,10 @@ def load_settings() -> AgentSettings:
     project_codes = _split_csv(os.environ.get("AGENT_PROJECT_CODES") or "")
     local_task_types = _normalize_local_task_types(
         os.environ.get("AGENT_LOCAL_TASK_TYPES")
-        or "auto_sync,commit_diff,excel_diff,weekly_sync,weekly_excel_cache,temp_cache_fetch"
+        # 默认与「必做集合」一致。`file_content` 也在必做集合里，所以**已有部署即使显式设了
+        # `AGENT_LOCAL_TASK_TYPES`、没写 file_content，也会被补上**（见上面 REQUIRED 的注释：
+        # 少了它的表现是 AI 报告里一直有「读不到文件正文」的信息缺口，而不是报错）。
+        or "auto_sync,commit_diff,excel_diff,weekly_sync,weekly_excel_cache,file_content,temp_cache_fetch"
     )
     # 工作副本根目录：这里就解析成**绝对路径**（锚定 agent 安装根；平台源码与
     # agent 同级时锚定平台仓库根），此后所有消费方取到的都是同一个与 CWD 无关的

@@ -32,10 +32,12 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 from services.ai.skill_loader import LoadedSkills
+from utils.content_window import CONTENT_MAX_CHARS, DEFAULT_WINDOW_LINES, slice_lines
 from utils.logger import log_print
 
 # 每个工作表最多渲染多少行。**不设上限会把一个几千行的表整个塞进上下文**，而单条上限
@@ -56,6 +58,14 @@ _NO_PATCH = (
     "取到了记录，但补丁正文是空的（两版内容相同，或者内容没读到）。"
     "**这不等于「没有改动」。**"
 )
+
+# 单次 `file_content` 的正文上限（字符）。**与预算层的单条上限是同一个数**
+# （`utils.content_window.CONTENT_MAX_CHARS`，`ContextTools` 也引用它）：
+#
+# 取值比它小没有好处（额度就在那里，不用就浪费了），比它大则是**净损失** ——
+# 取数侧按自己的上限切好、写好「第 a–b 行 / 共 N 行」的抬头之后，预算层还会再按
+# 自己的上限砍一次尾巴：砍在半行中间，抬头说的行数也就成了假的。
+DEFAULT_CONTENT_MAX_CHARS = CONTENT_MAX_CHARS
 
 # 表头块里「有改动」的三种状态（`unchanged` 是常驻行，见 `_render_header_block`）。
 # 与 `utils/diff_data_utils.header_rows_have_changes`、前端模块的 `CHANGED_ROW_STATUSES`
@@ -320,6 +330,97 @@ def _render_text(payload: Mapping[str, Any], *, path: str) -> str:
     if not patch.strip():
         return f"[文本] {where}：{_NO_PATCH}"
     return f"文件差异：{where}\n\n{patch}"
+
+
+def _render_text_content(text: str, *, path: str, lines: str = "", auto: bool = False) -> str:
+    """文本/代码正文：**带行号的一段窗口** + 「这是哪一段」的抬头。
+
+    为什么带行号：模型写进结论里的定位（「第 1180 行那个判断」）必须能被人复核，而补丁里的
+    `@@ -1180,7 +1180,9 @@` 也是行号 —— 两边用同一套坐标，模型才能把正文与改动对上。
+    行号只占 `数字│` 这几列（比「第 N 行：」省得多），几千行也只多几千字符。
+
+    `auto=True` 表示这一段是**平台按改动位置挑的**（模型没点名）。要说出来：一段从第 1700 行
+    开始的正文，不说来源就像随机截的，模型会以为这就是文件的开头。
+    """
+    window = slice_lines(text, lines, max_chars=DEFAULT_CONTENT_MAX_CHARS)
+    where = path or ""
+    if window.total_lines == 0:
+        return f"[{where}] 这个文件在当前版本里是空的（0 行）。"
+    head = f"文件正文：{where}（共 {window.total_lines} 行；下面是第 {window.start_line}–{window.end_line} 行"
+    if window.is_partial():
+        head += "，**不是全文**"
+    head += "）"
+    if auto:
+        head += "；这一段是按本次改动的位置自动选的（要看别处请指定 lines）"
+    numbered = [
+        f"{number}│{line}"
+        for number, line in enumerate(
+            window.content.split("\n"), start=window.start_line
+        )
+    ]
+    body = "\n".join(numbered)
+    if window.truncated:
+        body += f"\n（这段在第 {window.end_line} 行被截断；需要更多请指定 lines，例如 \"{window.end_line + 1}-{window.end_line + 120}\"）"
+    return f"{head}\n{body}"
+
+
+def _render_agent_file_content(
+    outcome: Mapping[str, Any], *, path: str, auto: bool = False
+) -> str:
+    """业务节点取回来的正文（它自带「哪一段 / 共多少行」，行号由这里补上）。"""
+    content = str(outcome.get("content") or "")
+    total = int(outcome.get("total_lines") or 0)
+    start = int(outcome.get("start_line") or 1)
+    end = int(outcome.get("end_line") or start)
+    where = path or str(outcome.get("file_path") or "")
+    if total == 0:
+        return f"[{where}] 这个文件在当前版本里是空的（0 行）。"
+    head = f"文件正文：{where}（共 {total} 行；下面是第 {start}–{end} 行"
+    if bool(outcome.get("truncated")) or start > 1 or end < total:
+        head += "，**不是全文**"
+    head += "；内容由业务节点（Agent）上的工作副本取出"
+    if auto:
+        head += "，这一段是按本次改动的位置自动选的（要看别处请指定 lines）"
+    head += "）"
+    numbered = [
+        f"{number}│{line}" for number, line in enumerate(content.split("\n"), start=start)
+    ]
+    body = "\n".join(numbered)
+    if bool(outcome.get("truncated")):
+        body += f"\n（这段在第 {end} 行被截断；需要更多请指定 lines，例如 \"{end + 1}-{end + 120}\"）"
+    return f"{head}\n{body}"
+
+
+# 补丁里的块头：`@@ -1180,7 +1180,9 @@`。取的是**新版本侧**的行号 —— `file_content`
+# 给的就是当前版本的内容，两边必须是同一套坐标才谈得上「改动附近」。
+_HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", re.M)
+
+
+def _changed_line_starts(diff_text: str) -> list:
+    """渲染好的 diff 里所有块头的新版本起始行号（没有则空列表）。"""
+    return [int(match.group(1)) for match in _HUNK_HEADER_RE.finditer(diff_text or "")]
+
+
+def _window_around_changes(hunk_starts: list, *, span: int) -> str:
+    """把默认窗口放在**改动附近**，而不是文件开头（返回 `"a-b"`，挑不出来就空串）。
+
+    为什么这比「开头 400 行」值：改动可能在第 2200 行，而开头那 400 行与它毫无关系 ——
+    模型拿到一段无关的代码，要么白花一次索取额度再问一次，要么据此得出错误结论。
+    一屏上下文里最值钱的位置就是改动周围。
+
+    改动比一个窗口还宽时只给第一段（抬头会写明「不是全文」），让模型自己决定要不要再要。
+    上界不在这里夹（`slice_lines` 会按文件实际行数夹），因为**到这里还不知道文件有多长** ——
+    正文是随后才读的，为了夹一个上界先把整份文件读进来是本末倒置。
+    """
+    if not hunk_starts:
+        return ""
+    first, last = min(hunk_starts), max(hunk_starts)
+    # 改动之前留四分之一屏：函数的签名、局部变量初始化通常就在那几行里。
+    start = max(1, first - span // 4)
+    end = max(last, start + span - 1)
+    if end - start + 1 > span:
+        end = start + span - 1
+    return f"{start}-{end}"
 
 
 def _render_segmented(
@@ -740,6 +841,13 @@ class PlatformContextProvider:
     ):
         self._loaded = loaded
         self._max_rows = max_rows_per_sheet
+        # 「向 Agent 取正文」的会话内记忆（见 `_content_from_agent`）：同一个进程里同一份
+        # 请求只等一次。放在实例上而不是模块级 —— 一次分析一个 provider，跨分析复用会把
+        # 上一份分析的结果喂给下一次。
+        self._agent_content_fetched: set = set()
+        self._agent_content_cached: dict = {}
+        self._agent_content_pending: dict = {}
+        self._content_max_chars = DEFAULT_CONTENT_MAX_CHARS
         # 读平台已算好并落库的那一份（周版本合并 diff，页面同源），而不是现场重算。
         #
         # **默认开**：这条来源是「评审者看到的 diff」本身，而现场重算在
@@ -830,8 +938,30 @@ class PlatformContextProvider:
 
         return render_diff_payload(payload, path=path, max_rows_per_sheet=self._max_rows)
 
-    def file_content(self, commit: str, path: str) -> Optional[str]:
-        """某个文件在某个提交上的完整内容。"""
+    def file_content(self, commit: str, path: str, lines: str = "") -> Optional[str]:
+        """某个文件在这个提交上的正文（默认只给**一段窗口**，见下）。
+
+        ## 正文从哪来：按部署模式两条来源
+
+        * **平台本地有工作副本**（单机模式）→ `get_file_content_from_git`（沿用既有路径）；
+        * **platform/agent 模式** → 平台被禁止 clone，正文只有业务节点上的 Agent 取得回来
+          （`services/agent_file_content_dispatch.py`）。**读得到就用，读不到就说清为什么**
+          （绑没绑 Agent、在不在线、是不是还在路上）。
+
+        ## 为什么按窗口给，而不是整份文件
+
+        模型问正文是为了看**改动周围**长什么样（改动本身在 `file_diff` 里）。整份几千行的
+        lua 塞进上下文，付的是三份代价：跨节点传输、库里留一份、以及最贵的 —— 提示词里挤进
+        几千行与本次判断无关的代码（单条上限 11,000 字符，而从中间截断的正文等于没有上下文）。
+
+        **没点名时窗口放在改动附近**（`_default_window`：从已渲染的补丁里读块头的新版本侧
+        行号），而不是文件开头那 400 行 —— 改动在第 2200 行时，开头那段与它毫无关系，模型
+        要么白花一次索取额度再问一次，要么据此得出错误结论。挑不到改动位置（补丁拿不到、
+        认不出块头）就退回文件开头，并在抬头里说明这一段是怎么来的：**不说来源等于给了一个
+        看不出对错的坐标**。
+
+        `lines` 只对文本/代码生效；配表走表格渲染（那是整表统计 + 前若干行，与窗口不是一回事）。
+        """
         row = self._commit_row(commit, path)
         if row is None:
             return None
@@ -839,18 +969,31 @@ class PlatformContextProvider:
         if repository is None:
             return None
 
+        # `auto` 只在**真的按改动位置挑到了窗口**时为真：挑不到就退回文件开头，那时不能说
+        # 「这一段是按改动位置选的」—— 抬头里的每句话模型都会当成事实用。
+        #
+        # 配表不进这里：它们的正文是整表统计 + 前若干行（本函数末尾那条路），与行窗口不是
+        # 一回事，为它多读一次 diff 是白读。
+        auto = False
+        if not str(lines or "").strip() and not _is_openpyxl_workbook(path):
+            lines = self._default_window(commit, path)
+            auto = bool(lines)
+
         try:
             from services.vcs_content_service import get_file_content_from_git
 
             raw = get_file_content_from_git(repository, commit, path)
         except Exception as exc:  # noqa: BLE001
             log_print(f"⚠️ AI 取数：内容失败 {commit[:12]} {path}: {type(exc).__name__}: {exc}")
-            return None
+            raw = None
 
         if raw is None:
-            return None
+            # 平台本地读不到 —— platform/agent 模式下这是**常态**（平台被禁止 clone），
+            # 所以不要就此放弃：正文在业务节点上，让 Agent 取回来。
+            return self._content_from_agent(repository, commit, path, lines, auto=auto)
+
         if isinstance(raw, str):
-            return raw
+            return _render_text_content(raw, path=path, lines=lines, auto=auto)
         if not raw:
             # 取到了、长度为零：这是「确实没有内容」，按契约返回空串。
             return ""
@@ -868,12 +1011,87 @@ class PlatformContextProvider:
                 )
             return rendered
         try:
-            return raw.decode("utf-8")
+            return _render_text_content(raw.decode("utf-8"), path=path, lines=lines, auto=auto)
         except UnicodeDecodeError:
             return (
                 f"[无法展示的内容] {path}：不是文本也不是配表，无法以文本形式核对。"
                 "**这不等于「没有内容」。**"
             )
+
+    def _default_window(self, commit: str, path: str) -> str:
+        """模型没点名时，把窗口放在这个文件**本次改动**的位置上（返回 `"a-b"`）。
+
+        行号取自这个文件在这个提交里的补丁块头 —— 走的是 `file_diff` 那条路，在周版本分析里
+        它就是平台已落库的那一份（一次库读），补丁里的 `+1180` 也正是**当前版本**的行号，
+        与 `file_content` 给的正文是同一套坐标。
+
+        拿不到补丁、或补丁里没有块头（新增/删除整个文件、二进制、认不出的载荷）就返回空串：
+        调用方会退回「文件开头那一段」，并在抬头里说明这一段是怎么来的 —— **不说来源，
+        模型就无法判断这个坐标对不对**。
+        """
+        try:
+            diff_text = self.file_diff(commit, path)
+        except Exception as exc:  # noqa: BLE001 —— 挑窗口失败不该影响取正文
+            log_print(
+                f"⚠️ AI 取数：定位改动位置失败 {commit[:12]} {path}: {type(exc).__name__}: {exc}"
+            )
+            return ""
+        return _window_around_changes(
+            _changed_line_starts(diff_text or ""), span=DEFAULT_WINDOW_LINES
+        )
+
+    def _content_from_agent(
+        self, repository, commit: str, path: str, lines: str, *, auto: bool = False
+    ) -> Optional[str]:
+        """向业务节点（Agent）要一份正文。**同一个进程里同一份请求只等一次。**
+
+        为什么要在实例上记「已经取过」：模型常对同一个文件问两次（后面那次是为了引用），
+        而等待是有代价的（`FILE_CONTENT_WAIT_SECONDS`）。记下来之后第二次直接命中；
+        已经派出去、这次没等到的也不再重复等 —— 答案还是同一句「还在路上」。
+        """
+        from services.agent_file_content_dispatch import request_file_content
+
+        key = (getattr(repository, "id", None), commit, path, lines)
+        if key in self._agent_content_fetched:
+            cached = self._agent_content_cached.get(key)
+            if cached is not None:
+                return cached
+            return self._agent_content_pending.get(key)
+        self._agent_content_fetched.add(key)
+
+        try:
+            outcome = request_file_content(
+                repository,
+                commit_id=commit,
+                file_path=path,
+                lines=lines,
+                max_chars=self._content_max_chars,
+            )
+        except Exception as exc:  # noqa: BLE001 —— 取一次正文失败只该让这一条降级
+            log_print(f"⚠️ AI 取数：向 Agent 取正文失败 {path}: {type(exc).__name__}: {exc}")
+            outcome = {"status": "unavailable", "message": f"向 Agent 取数异常：{exc}"}
+
+        status = str(outcome.get("status") or "")
+        if status == "ready":
+            rendered = _render_agent_file_content(outcome, path=path, auto=auto)
+            self._agent_content_cached[key] = rendered
+            return rendered
+
+        # `pending`（还在路上）与 `unavailable`（取不了）都要如实说，且都要**明确否掉**
+        # 「读不到 = 没有改动」这个读法（本模块存在的理由）。
+        reason = str(outcome.get("message") or "原因未知")
+        if status == "pending":
+            text = (
+                f"[{path}] 正文还没取回来：{reason}。**这不等于「没有内容」**；"
+                "这一轮请基于 diff 与其它证据判断。"
+            )
+        else:
+            text = (
+                f"[读不到正文] {path}：{reason}。**这不等于「没有内容」，也不等于「没有改动」**"
+                "—— 需要这个文件的正文时，请在报告里写成信息缺口。"
+            )
+        self._agent_content_pending[key] = text
+        return text
 
     # -- 内部 ---------------------------------------------------------------
 

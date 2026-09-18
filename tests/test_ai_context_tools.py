@@ -50,8 +50,8 @@ class FakeProvider:
     def file_diff(self, commit, path):
         return self._respond("file_diff", commit, path)
 
-    def file_content(self, commit, path):
-        return self._respond("file_content", commit, path)
+    def file_content(self, commit, path, lines=""):
+        return self._respond("file_content", commit, path, lines)
 
     def read_reference(self, name):
         return self._respond("read_reference", name)

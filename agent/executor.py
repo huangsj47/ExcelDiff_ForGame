@@ -96,7 +96,10 @@ def execute_task(task: dict, settings):
         if task_type == "commit_diff" and "commit_diff" in local_task_types:
             return execute_commit_diff(task, settings)
 
-        if task_type in {"excel_diff", "weekly_sync", "weekly_excel_cache"} and task_type in local_task_types:
+        # 「取一个文件的正文」：与 weekly_sync 同一条路 —— 在 Agent 自己的进程里用平台代码
+        # 读工作副本。平台侧在 platform/agent 模式下被禁止 clone，所以代码文件的正文只有
+        # 这里读得到（见 services/agent_file_content_dispatch.py）。
+        if task_type in {"file_content", "excel_diff", "weekly_sync", "weekly_excel_cache"} and task_type in local_task_types:
             return _execute_task_via_local_runtime(task_type, task)
     except Exception as exc:
         return (
