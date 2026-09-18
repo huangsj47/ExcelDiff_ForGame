@@ -276,6 +276,21 @@ def test_the_first_round_does_not_render_context_items():
     assert "不该出现" not in message
 
 
+def test_the_first_round_asks_for_the_config_data_dimension():
+    """配表类改动要按「数据本身是否说得通」看（用户要求「重点分析配置数据是否有问题」）。
+
+    这个维度**只在第一轮提示里点名是不够的**：`config_data` 的问题长得最像「只是改了句
+    文案」，而第一轮的实际动作是挑 4~8 个文件去要 diff —— 不在分诊这一步说出来，模型
+    就会按「改了哪个模块」挑文件，把只改了一列文案的那类改动整个放过去。所以这里钉的是
+    三件事：维度 id 出现、被要求在这一轮看、以及那个最容易被放过的具体形态被写出来。
+    """
+    message = _message()
+    assert "config_data" in message
+    assert "只改了一列文案" in message
+    assert "漏填必填列" in message
+    assert "复制粘贴" in message
+
+
 def test_later_rounds_render_the_fetched_context():
     message = _message(
         round_index=2,
