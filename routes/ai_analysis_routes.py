@@ -20,6 +20,7 @@ from services.ai.platform_budget import platform_budget_public, set_platform_bud
 from services.ai.pricing import estimate_cost
 from services.ai_analysis_service import (
     build_endpoint_client,
+    end_with_a_terminal_event,
     get_latest_commit_result,
     get_latest_weekly_result,
     get_project_analysis_config,
@@ -193,7 +194,12 @@ def ai_commit_stream(commit_id):
         return jsonify({"success": False, "message": "Access denied."}), 403
 
     def _generate():
-        yield from stream_commit_analysis(commit_id, user_label=username)
+        # 包一层「一定以 result / error 收尾」：生成器中途抛异常时，客户端只会看到
+        # 连接断掉 —— 那句话在界面上就是含糊的「AI 分析失败或连接中断」，原因只留在
+        # 服务端日志里（见 services/ai_analysis_service.py::end_with_a_terminal_event）。
+        yield from end_with_a_terminal_event(
+            stream_commit_analysis(commit_id, user_label=username)
+        )
 
     return Response(stream_with_context(_generate()), mimetype="text/event-stream")
 
@@ -209,7 +215,10 @@ def ai_weekly_stream(config_id):
         return jsonify({"success": False, "message": "Access denied."}), 403
 
     def _generate():
-        yield from stream_weekly_analysis(config_id, trigger_source=trigger_source, focus=focus)
+        # 与单提交那条同理：异常也要带着原因收尾，不能让界面只看到「连接中断」。
+        yield from end_with_a_terminal_event(
+            stream_weekly_analysis(config_id, trigger_source=trigger_source, focus=focus)
+        )
 
     return Response(stream_with_context(_generate()), mimetype="text/event-stream")
 

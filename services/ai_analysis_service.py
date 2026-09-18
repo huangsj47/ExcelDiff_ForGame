@@ -79,11 +79,15 @@ from services.ai.pricing import (
     price_table_doc_shape,
 )
 from services.ai.prompt import prompt_version
-from services.ai.rules import RuleThresholds, anomaly_fingerprint, rules_version
+from services.ai.result_payload import (
+    failed_result,
+    result_payload,
+)
+from services.ai.rules import RuleThresholds, rules_version
 from services.ai.run_progress import clear as clear_run_progress
 from services.ai.run_progress import publish as publish_run_progress
 from services.ai.skill_loader import load_skills, skill_revision
-from services.ai.usage import encode_tools, usage_from_outcome
+from services.ai.usage import encode_tools
 from utils.dpapi_utils import DPAPI_PREFIX, decrypt_dpapi
 from utils.logger import log_print
 from utils.security_utils import decrypt_credential, encrypt_credential
@@ -1005,21 +1009,6 @@ def build_weekly_payload(
     return payload, state, None
 
 
-def _determine_risk_level(summary: dict) -> str:
-    total_files = int(summary.get("total_files") or 0)
-    delta_files = int(summary.get("delta_files") or 0)
-    critical = bool(summary.get("critical_paths"))
-    if critical or total_files >= 120 or delta_files >= 60:
-        return "high"
-    if total_files >= 80 or delta_files >= 40:
-        return "mid_high"
-    if total_files >= 40 or delta_files >= 20:
-        return "medium"
-    if total_files >= 15 or delta_files >= 8:
-        return "mid_low"
-    return "low"
-
-
 def _load_project_skills(project_id: int):
     """加载平台 skill 与项目知识包。**加载失败不阻断分析**：skill 是提示词的一部分，
     提示词装不上不该让用户连一次分析都跑不了。"""
@@ -1147,107 +1136,6 @@ def _suppressed(target_type: str, target_key: Optional[str], change: ChangeSet) 
     return suppressed_fingerprints(classify(findings, changed_paths=change.paths))
 
 
-def _risk_level_from_outcome(outcome: EngineOutcome, summary: dict) -> Tuple[str, List[str]]:
-    """风险等级与依据。
-
-    **有结论时按结论定级；没有结论时按变更规模定级，并明说那不是模型结论。**
-    反过来做（没结论就报「低」）正是这套机制最该避免的事：用户分不出「模型看完说没问题」
-    和「模型压根没答上来」，而这两件事的处理方式完全相反。
-    """
-    if outcome.anomalies:
-        severities = {item.severity for item in outcome.anomalies}
-        level = "high" if "critical" in severities else "mid_high"
-        reasons = [f"模型报出 {len(outcome.anomalies)} 条达门槛的问题"]
-        if "critical" in severities:
-            reasons.append("其中含 critical")
-        if outcome.degradation:
-            reasons.append(outcome.degradation_label or outcome.degradation)
-        return level, reasons
-
-    level = _determine_risk_level(summary)
-    reasons = [
-        f"变更规模：{summary.get('total_files', 0)} 个文件"
-        f"（本次变化 {summary.get('delta_files', 0)} 个）"
-    ]
-    if summary.get("critical_paths"):
-        reasons.append("含关键路径")
-    if outcome.succeeded:
-        reasons.append("模型未报出达门槛的问题")
-    else:
-        reasons.append(
-            f"⚠️ 本次未取得完整结论（{outcome.degradation_label or outcome.degradation or '原因未知'}），"
-            "该等级仅按变更规模估算，**不是**模型评估结果"
-        )
-    return level, reasons
-
-
-def _result_payload(
-    outcome: EngineOutcome,
-    payload: dict,
-    *,
-    suppressed: frozenset = frozenset(),
-    context_budget_note: str = "",
-) -> dict:
-    """给前端与后续读取用的结果。
-
-    保留既有的 `risk_level`（界面在读它），其余键是真实产出。被人工忽略的结论不进
-    `anomalies` —— 尊重分诊结果，而不是每轮再问一次。
-
-    `context_budget_note` 是「这次分析的提示词预算被窗口压过」的说明（`_apply_model_window`）。
-    以前它只写进日志 —— 于是「这次分析浅了」在界面上完全看不出原因，而它正是最需要
-    被看见的一类降级。
-    """
-    summary = payload.get("summary") or {}
-    risk_level, risk_reasons = _risk_level_from_outcome(outcome, summary)
-    kept = [item for item in outcome.anomalies if anomaly_fingerprint(item) not in suppressed]
-
-    return {
-        "risk_level": risk_level,
-        "risk_reasons": risk_reasons,
-        "report_markdown": outcome.report_markdown,
-        "status": outcome.status,
-        "degradation": outcome.degradation,
-        "degradation_label": outcome.degradation_label,
-        "error_message": outcome.error_message,
-        # 上下文预算与压缩的账。放在这里（而不是只写日志）的理由与 usage 一样：
-        # SSE 的 result 事件与 /latest 自动都有，界面不必再拉一次接口。
-        "context": {
-            "budget_note": str(context_budget_note or ""),
-            "compaction": outcome.compaction.to_dict(),
-        },
-        "anomalies": [
-            {
-                "fingerprint": anomaly_fingerprint(item),
-                "title": item.title,
-                "category": item.category,
-                "severity": item.severity,
-                "confidence": item.confidence,
-                "evidence": list(item.evidence),
-                "commit_ref": item.commit or "",
-                "file_path": item.file_path or "",
-                "impact": item.impact or "",
-                "suggestion": item.suggestion or "",
-            }
-            for item in kept
-        ],
-        "suppressed_count": len(outcome.anomalies) - len(kept),
-        "rounds_used": outcome.rounds_used,
-        "requests_used": outcome.requests_used,
-        # 本次的用量。放在这里有两个原因：SSE 的 `result` 事件与 `/latest`（读的是落库的
-        # response_payload）**自动都有**，抽屉那一行「本次消耗 N tokens」不必为「正在
-        # 分析中」再拉一次接口；而且它随结论一起被缓存复用 —— 同一份结论回放两次，
-        # 显示的消耗也是当初那次的，不会变成 0。
-        #
-        # 口径见 services/ai/usage.py。费用**不在这里算**（这一层拿不到价格表），
-        # 由 `/ai-analysis/runs/<id>/usage` 在读取侧按当前价格表算。
-        "usage": usage_from_outcome(outcome),
-        "dropped": [
-            {"kind": item.kind, "reason": item.reason, "detail": item.detail}
-            for item in outcome.dropped
-        ],
-    }
-
-
 def _persist_outcome(
     run: AiAnalysisRun,
     outcome: EngineOutcome,
@@ -1276,7 +1164,7 @@ def _persist_outcome(
         # 失败**不写结论字段**。以前这里照样写 response_payload / response_text，
         # 于是库里那条失败记录长得和成功记录一样：有「结论」、有风险等级、有范围，
         # 前端只判「有没有结果」就把徽章显示成「已有结果」并附上「风险等级 high」。
-        # 而那个 high 根本不是模型给的 —— 是 _determine_risk_level 按变更规模
+        # 而那个 high 根本不是模型给的 —— 是 services/ai/result_payload.py 的 determine_risk_level 按变更规模
         # （total_files >= 120）估出来的兜底值，模型压根没答上来。
         # 失败应当只留错误，让「有没有成功结论」这件事在数据层就无歧义。
         run.response_payload = None
@@ -1347,23 +1235,6 @@ def _persist_outcome(
     db.session.commit()
 
 
-def _failed_result(summary: dict, message: str) -> dict:
-    """没发起分析时的结果。**等级按规模估算并写明原因** —— 不伪装成模型结论。"""
-    return {
-        "risk_level": _determine_risk_level(summary),
-        "risk_reasons": [message, "该等级仅按变更规模估算，**不是**模型评估结果"],
-        "report_markdown": "",
-        "status": "failed",
-        "degradation": "not_started",
-        "degradation_label": message,
-        "error_message": message,
-        "anomalies": [],
-        "suppressed_count": 0,
-        "rounds_used": 0,
-        "requests_used": 0,
-        "dropped": [],
-    }
-
 
 def _create_run(
     *,
@@ -1428,6 +1299,18 @@ def _execute_analysis(
     这层是**薄壳**：真正的活在 `_run_engine_and_persist` 里，这里只负责「跑完之后一定
     要把进度快照清掉」。清不掉的后果是界面一直显示「正在跑」—— 那条进程内的表没有
     别的清理时机（`run_progress` 的过期时限只是兜底）。
+
+    ## 「不抛异常」这句承诺是**这一层**的责任，`_run_engine_and_persist` 不保证它
+
+    上面那句承诺此前只有 `try/finally` 兜着，一个 `except` 都没有 —— 也就是
+    「不抛异常」靠的是「下游一处都不会抛」这个假设。而下游做的事包括：读配置、
+    解 JSON、连模型、写库。任何一处没想到的异常都会**带着「运行号早就发给界面了」**
+    穿出生成器：SSE 在浏览器那头表现为连接静默断开，界面只剩一句
+    「AI 分析失败或连接中断」，而真正的原因只留在服务端的日志里，
+    库里那条 run 还停在 `running`（一小时后才被 `effective_status` 翻成失败）。
+
+    用户报的正是这一幕。所以凡是**已经有运行号**的失败，都必须变成带原因的结论：
+    在这里兜住，把原因写进 `error_message` 落库，界面就能照常渲染出「失败 + 原因」。
     """
     try:
         return _run_engine_and_persist(
@@ -1438,8 +1321,50 @@ def _execute_analysis(
             target_type=target_type,
             target_key=target_key,
         )
+    except Exception as exc:  # noqa: BLE001 —— 见 docstring：这一层的承诺就是这一句
+        return _record_unexpected_failure(run, payload, project_config, exc)
     finally:
         clear_run_progress(run.id)
+
+
+def _record_unexpected_failure(
+    run: AiAnalysisRun, payload: dict, project_config: dict, exc: Exception
+) -> dict:
+    """把「跑的过程中冒出来的异常」写成一条失败结论（并落库）。
+
+    **它自己也不许抛**：调用它的时候现场已经出过一次事故了，再抛一次就是
+    「连失败都报不出来」。所以落库那一步单独兜一层，失败只写日志。
+    """
+    message = f"分析中断：{type(exc).__name__}: {exc}"
+    log_print(f"❌ AI 分析异常中断 {message}（run={run.id}）", "AI", force=True)
+
+    try:
+        summary = payload.get("summary") or {}
+    except Exception:  # noqa: BLE001 —— payload 形态异常时别把收尾也弄挂
+        summary = {}
+
+    try:
+        # 异常很可能来自一次失败的写库（列超长、连接断了…），会话此时是脏的，
+        # 不回滚的话下面这句 `_persist_outcome` 会直接 PendingRollbackError ——
+        # 那就成了「失败的原因报不出来，只报得出回滚失败」。
+        db.session.rollback()
+    except Exception as rollback_exc:  # noqa: BLE001
+        log_print(f"⚠️ AI 分析：回滚会话失败（{rollback_exc}），继续尝试落库失败结论", "AI")
+
+    result = failed_result(summary, message)
+    try:
+        _persist_outcome(
+            run, engine_failed(message), result,
+            pricing_version=_price_version_for(project_config),
+        )
+    except Exception as persist_exc:  # noqa: BLE001
+        log_print(
+            f"❌ AI 分析：失败结论也没能落库（run={run.id} {type(persist_exc).__name__}: "
+            f"{persist_exc}），库里这条运行会停在 running",
+            "AI",
+            force=True,
+        )
+    return result
 
 
 def _run_engine_and_persist(
@@ -1461,7 +1386,7 @@ def _run_engine_and_persist(
     )
     if client is None:
         message = "接口配置不完整：" + "；".join(item["message"] for item in errors)
-        result = _failed_result(summary, message)
+        result = failed_result(summary, message)
         _persist_outcome(
             run, engine_failed(message), result,
             pricing_version=_price_version_for(project_config),
@@ -1471,7 +1396,7 @@ def _run_engine_and_persist(
     loaded = _load_project_skills(project_id)
     if loaded is None:
         message = "分析协议（skill）加载失败，未发起分析。"
-        result = _failed_result(summary, message)
+        result = failed_result(summary, message)
         _persist_outcome(
             run, engine_failed(message), result,
             pricing_version=_price_version_for(project_config),
@@ -1505,7 +1430,7 @@ def _run_engine_and_persist(
         on_round=lambda progress: publish_run_progress(run.id, project_id, progress),
     )
 
-    result = _result_payload(
+    result = result_payload(
         outcome,
         payload,
         suppressed=_suppressed(target_type, target_key, change),
@@ -1519,6 +1444,34 @@ def _run_engine_and_persist(
 
 def _sse_event(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {_json_dumps(payload)}\n\n"
+
+
+def end_with_a_terminal_event(events: Iterable[str]) -> Iterable[str]:
+    """把一串 SSE 事件包成「**一定以 `result` 或 `error` 收尾**」的一串。
+
+    ## 为什么需要这一层（它拦的是哪一段）
+
+    `_execute_analysis` 已经承诺不抛异常，但一次流式分析里**不止**那一件事会抛：
+    建运行记录之前的 payload 构造、跑完之后推进周版本水位线、甚至把结论转成 JSON。
+    任何一处抛出去，生成器就结束了（WSGI 只是把连接关掉）—— 浏览器那头是
+    `EventSource` 收到一个**没有 `data` 的 `error` 事件**，而界面上没有 `data` 的
+    `error` 只能说出那句含糊的「AI 分析失败或连接中断」，原因一个字都不在里面。
+    用户报了这句话，这就是它的来源之一。
+
+    所以这里把「兜底收尾」放在**流的最外层**：还活着就把原因发出去。它不需要知道
+    运行号 —— 走到这里时运行记录要么还没建（那就没有任何要修正的库状态），
+    要么结论早已落库（`_persist_outcome` 在 `result` 之前就写完了）。
+
+    顺带钉住一件更容易被忽略的事：**正常跑完的流不许被这层改动**。它只在异常路径上
+    追加事件，成功路径逐字透传（`return` 之后不能再 yield —— 那会给已经收尾的流
+    补一个 `error`，把一次成功的分析显示成失败）。
+    """
+    try:
+        yield from events
+    except Exception as exc:  # noqa: BLE001 —— 这一层的存在意义就是兜住任何异常
+        message = f"分析中断：{type(exc).__name__}: {exc}"
+        log_print(f"❌ AI 分析的 SSE 流异常中断（{message}），已把原因发给界面", "AI", force=True)
+        yield _sse_event("error", {"message": message})
 
 
 def stream_commit_analysis(commit_id: int, user_label: str = "") -> Iterable[str]:
