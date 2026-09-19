@@ -231,8 +231,11 @@ class ChatResult:
 
     text: str
     model: str = ""
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    # 输入 / 输出 token。**`None` = 上游没报这个字段**，与「报了 0」是两件事 ——
+    # 拿 0 代替 None，界面上就会出现一个确定的 `¥0.00`，而实际是「不知道花了多少」。
+    # 与下面两个缓存字段同一条口径（见 `_extract_usage`）。
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
     finish_reason: str = ""
     # prompt cache 的账目。`None` = 上游没报这个字段，与「报了 0」（全部未命中）是
     # 两件事，不许用 0 代替 None —— 面板要能显示「未上报」而不是「命中率 0%」。
@@ -242,7 +245,11 @@ class ChatResult:
     cache_source: str = ""
 
     @property
-    def total_tokens(self) -> int:
+    def total_tokens(self) -> int | None:
+        """输入 + 输出。**任何一个没上报就是 `None`** —— 拿报了的那个当总数会得出一个
+        偏小却看起来完全正常的数字（与 `engine._sum_optional` 同一条口径）。"""
+        if self.prompt_tokens is None or self.completion_tokens is None:
+            return None
         return self.prompt_tokens + self.completion_tokens
 
 
@@ -282,28 +289,37 @@ def _extract_message_text(payload: Any) -> str:
     raise LLMResponseError("响应体里找不到可用的正文（message.content / text 均为空）")
 
 
-def _extract_usage(payload: Any) -> tuple[int, int]:
+def _extract_usage(payload: Any) -> tuple[int | None, int | None]:
+    """读上游报的输入 / 输出 token。**没报就是 `None`，不是 0。**
+
+    这里以前对「缺字段」和「确实是 0」返回同一个 0，而同一个文件里的
+    `non_negative_int`（就在下面）恰恰是为区分这两件事写的。代价很具体：
+
+    * `run.tokens_input` 落库成 0 而不是 NULL —— 而模型那一列明写「`None` = 上游没报，
+      `0` = 报了且确实是 0，这个区分必须保住」；
+    * `pricing.estimate_cost` 里那句 `if tokens_input is None: 上游没有返回 token 数，
+      无法估算` **永远触发不到**，于是算出一个确定的 `¥0.00` 摆在界面上；
+    * `analysis_budget` 的「有 N 处 token 数上游未上报，已用量是下界」也就不会出现，
+      用户读到的 0 与「确实没花」分不开。
+
+    换句话说：平台在**钱照付**的同时，把「没花钱」摆给用户看。
+    """
     if not isinstance(payload, dict):
-        return 0, 0
+        return None, None
     usage = payload.get("usage")
     if not isinstance(usage, dict):
-        return 0, 0
-
-    def _as_int(value: Any) -> int:
-        try:
-            return max(0, int(value))
-        except (TypeError, ValueError):
-            return 0
-
-    return _as_int(usage.get("prompt_tokens")), _as_int(usage.get("completion_tokens"))
+        return None, None
+    return non_negative_int(usage.get("prompt_tokens")), non_negative_int(
+        usage.get("completion_tokens")
+    )
 
 
-def _non_negative_int(value: Any) -> int | None:
+def non_negative_int(value: Any) -> int | None:
     """把上游给的数读成非负整数。**0 是合法值**，`None` 才是「没给」。
 
-    与 `_as_int`（上面那个局部的）的区别就在这一点：那里把读不到的东西变成 0，用在
-    用量字段上会把「命中率 0%」和「上游根本没报缓存字段」显示成同一个样子 —— 而这两件事
-    在面板上必须能分开。bool 要单独挡掉（`True` 不是 1）。
+    用量字段（输入 / 输出 / 缓存读写）**全部**走这一条：把读不到的东西变成 0，
+    会把「命中率 0%」与「上游根本没报缓存字段」、「这次没花钱」与「不知道花了多少」
+    显示成同一个样子 —— 而这几种在面板上必须能分开。bool 要单独挡掉（`True` 不是 1）。
     """
     if value is None or isinstance(value, bool):
         return None
@@ -343,21 +359,21 @@ def _extract_cache_usage(payload: Any) -> tuple[int | None, int | None, str]:
 
     details = usage.get("prompt_tokens_details")
     if isinstance(details, dict):
-        cached = _non_negative_int(details.get("cached_tokens"))
+        cached = non_negative_int(details.get("cached_tokens"))
         if cached is not None:
-            return cached, _non_negative_int(details.get("cache_creation_tokens")), "prompt_tokens_details.cached_tokens"
+            return cached, non_negative_int(details.get("cache_creation_tokens")), "prompt_tokens_details.cached_tokens"
 
-    hit = _non_negative_int(usage.get("prompt_cache_hit_tokens"))
+    hit = non_negative_int(usage.get("prompt_cache_hit_tokens"))
     if hit is not None:
-        miss = _non_negative_int(usage.get("prompt_cache_miss_tokens"))
-        prompt = _non_negative_int(usage.get("prompt_tokens"))
+        miss = non_negative_int(usage.get("prompt_cache_miss_tokens"))
+        prompt = non_negative_int(usage.get("prompt_tokens"))
         if miss is not None and prompt is not None and hit + miss != prompt:
             return None, None, ""
         return hit, None, "prompt_cache_hit_tokens"
 
-    read = _non_negative_int(usage.get("cache_read_input_tokens"))
+    read = non_negative_int(usage.get("cache_read_input_tokens"))
     if read is not None:
-        write = _non_negative_int(usage.get("cache_creation_input_tokens"))
+        write = non_negative_int(usage.get("cache_creation_input_tokens"))
         return read, write, "cache_read_input_tokens"
 
     return None, None, ""

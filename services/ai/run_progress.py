@@ -59,8 +59,9 @@ class ProgressSnapshot:
     index: int
     max_rounds: int
     status: str
-    prompt_tokens: int
-    completion_tokens: int
+    # 上游没报就是 `None`（**不是 0**）。见 `live_tokens`。
+    prompt_tokens: Optional[int]
+    completion_tokens: Optional[int]
     cache_read_tokens: Optional[int]
     cache_write_tokens: Optional[int]
     requests_used: int
@@ -83,13 +84,20 @@ class ProgressSnapshot:
     rounds_truncated: bool = False
 
     @property
-    def live_tokens(self) -> int:
-        """本次运行**已消耗**的 token（输入 + 输出）。
+    def live_tokens(self) -> Optional[int]:
+        """本次运行**已消耗**的 token（输入 + 输出）。**读不到就是 `None`。**
 
         它是**下界**（只含上游已上报的部分），与预算那一档的口径一致 —— 拿它去和上限比
         时，「下界已经超了」是确定的结论，「下界没超」不能反过来说没超。文案里必须写清。
+
+        `None` 要**原样交出去**，不许 `or 0` 兜成 0：`ai_stream_status.progressText` 里
+        「用量没上报就只说轮次，不补一个 0」那句守卫就是等这个 `None` 的 —— 兜成 0 之后
+        它永远不会触发，界面上于是出现「分析中：第 1/8 轮 · 本次已用 0 tokens」，
+        把「不知道花了多少」说成了「一个都没花」。
         """
-        return int(self.prompt_tokens or 0) + int(self.completion_tokens or 0)
+        if self.prompt_tokens is None or self.completion_tokens is None:
+            return None
+        return int(self.prompt_tokens) + int(self.completion_tokens)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -211,8 +219,8 @@ def publish(run_id: int, project_id: int, progress: Any) -> None:
             index=int(getattr(progress, "index", 0) or 0),
             max_rounds=int(getattr(progress, "max_rounds", 0) or 0),
             status=str(getattr(progress, "status", "") or ""),
-            prompt_tokens=int(getattr(progress, "prompt_tokens", 0) or 0),
-            completion_tokens=int(getattr(progress, "completion_tokens", 0) or 0),
+            prompt_tokens=getattr(progress, "prompt_tokens", None),
+            completion_tokens=getattr(progress, "completion_tokens", None),
             cache_read_tokens=getattr(progress, "cache_read_tokens", None),
             cache_write_tokens=getattr(progress, "cache_write_tokens", None),
             requests_used=int(getattr(progress, "requests_used", 0) or 0),

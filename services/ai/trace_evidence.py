@@ -240,6 +240,20 @@ def failed_labels(executed: Sequence[dict] | Iterable[dict]) -> list[str]:
     return out
 
 
+def _optional_int(value) -> int | None:
+    """上游给的用量数：读得出来就是非负整数，读不出来（含 `None`）就是 `None`。
+
+    **不把「没上报」写成 0** —— 与 `cache_read_tokens` 那两个字段同一条口径。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
 def live_round_entry(record: Any) -> dict:
     """一轮的记账 → **正在跑的界面上**那一条（思考过程标签页用）。
 
@@ -280,9 +294,12 @@ def live_round_entry(record: Any) -> dict:
         "agent_round": int(getattr(record, "agent_round", 0) or 0),
         "outcome": _clip(getattr(record, "status", ""), 40),
         "parsed_ok": str(getattr(record, "status", "")) != "unparsable",
-        "tokens_input": int(getattr(record, "prompt_tokens", 0) or 0),
-        "tokens_output": int(getattr(record, "completion_tokens", 0) or 0),
         # `None` 是「上游没上报」，一路原样带出去 —— 渲染成 0 就是把「不知道」说成「没有」。
+        # 这一条对**四个**用量字段是同一句话：输入 / 输出 / 缓存读 / 缓存写。
+        # 以前只有缓存那两个字段守住了，输入输出被 `or 0` 兜成 0，于是「这一轮调用失败、
+        # 上游什么都没报」在面板上写成「输入 0 tokens」—— 一次没跑成的调用被说成没花钱。
+        "tokens_input": _optional_int(getattr(record, "prompt_tokens", None)),
+        "tokens_output": _optional_int(getattr(record, "completion_tokens", None)),
         "cache_read_tokens": getattr(record, "cache_read_tokens", None),
         "cache_write_tokens": getattr(record, "cache_write_tokens", None),
         "request_chars": int(getattr(record, "prompt_chars", 0) or 0),

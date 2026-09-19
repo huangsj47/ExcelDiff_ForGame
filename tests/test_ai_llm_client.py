@@ -722,4 +722,48 @@ def test_a_numeric_string_cache_count_is_accepted(monkeypatch):
 )
 def test_the_non_negative_reader_rejects_what_it_should(raw, expected):
     """这个读取器允许 0、拒绝 bool/负数/垃圾 —— 与「0 当没给」的旧读取器正相反。"""
-    assert llm._non_negative_int(raw) == expected
+    assert llm.non_negative_int(raw) == expected
+
+
+def test_a_response_without_usage_reports_unknown_not_zero(monkeypatch):
+    """**上游没报 usage 就是「不知道」，不是「没花钱」。**
+
+    这条以前返回 `(0, 0)` —— 与「报了且确实是 0」撞成同一个值。代价一路往下传：
+
+    * `run.tokens_input` 落库成 0（而模型那一列明写「`None` = 上游没报」）；
+    * `pricing.estimate_cost` 里那句「上游没有返回 token 数，无法估算」**永远触发不到**
+      （它只判 `is None`），于是算出一个确定的 `¥0.00` 摆在界面上；
+    * `analysis_budget` 的「有 N 处 token 数上游未上报，已用量是下界」也不会出现。
+
+    合起来：平台**钱照付**，而账面把「没花钱」摆给用户看。
+    """
+    cases = {
+        "整个响应体里没有 usage": {"choices": [{"message": {"content": "x"}}]},
+        "usage 是空对象": {"choices": [{"message": {"content": "x"}}], "usage": {}},
+        "只有 completion_tokens": {
+            "choices": [{"message": {"content": "x"}}],
+            "usage": {"completion_tokens": 900},
+        },
+    }
+    for label, payload in cases.items():
+        _patch(monkeypatch, lambda *_: FakeResponse(payload=payload))
+        result = _client().complete([{"role": "user", "content": "hi"}])
+        if label == "只有 completion_tokens":
+            assert result.prompt_tokens is None, label
+            assert result.completion_tokens == 900, label
+            assert result.total_tokens is None, (
+                f"{label}：只报了一半就给出总数 —— 那个数偏小却看起来完全正常"
+            )
+        else:
+            assert (result.prompt_tokens, result.completion_tokens) == (None, None), (
+                f"{label}：读不到 token 被判成了 0"
+            )
+            assert result.total_tokens is None, label
+
+
+def test_a_response_that_really_reports_zero_is_zero(monkeypatch):
+    """**前提**：确实报了 0 的那一次仍然是 0，不能被一起改成「不知道」。"""
+    payload = _completion_payload("x", usage={"prompt_tokens": 0, "completion_tokens": 0})
+    _patch(monkeypatch, lambda *_: FakeResponse(payload=payload))
+    result = _client().complete([{"role": "user", "content": "hi"}])
+    assert (result.prompt_tokens, result.completion_tokens, result.total_tokens) == (0, 0, 0)

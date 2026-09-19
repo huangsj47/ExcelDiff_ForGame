@@ -35,6 +35,7 @@ from services.ai.trace_evidence import (
     decode_evidence,
     encode_evidence,
     failure_notice,
+    live_round_entry,
     summarize_dropped,
     summarize_executed,
     summarize_requests,
@@ -282,3 +283,48 @@ class TestEncodeDecodeRoundTrip:
             "requests": [], "executed": [], "dropped": [],
             "response_text": "", "budget_notes": "", "correction_hint": "",
         }
+
+
+class TestTheTokenCountsStayUnknown:
+    """实时那一条里的用量：**「不知道」必须一路原样带出去，不许在中途被写成 0。**
+
+    面板上的「第 3/8 轮 · 本次已用 N tokens」读的就是这几个键。它们以前在这条路上被
+    `int(... or 0)` 兜成整数，于是「这一轮调用失败、上游什么都没报」显示成「输入 0 tokens」——
+    一次没跑成的调用被说成没花钱。四个用量字段是同一句话，缓存那两个一直是对的，
+    输入输出曾经不是。
+    """
+
+    def test_a_round_that_did_not_report_stays_none(self):
+        entry = live_round_entry(_record(prompt_tokens=None, completion_tokens=None))
+
+        assert entry["tokens_input"] is None
+        assert entry["tokens_output"] is None
+
+    def test_a_round_that_really_reported_zero_is_zero(self):
+        """反方向：确实报了 0 的不能被一起改成「不知道」—— 那会把真省下的钱说成没记账。"""
+        entry = live_round_entry(_record(prompt_tokens=0, completion_tokens=0))
+
+        assert entry["tokens_input"] == 0
+        assert entry["tokens_output"] == 0
+
+    def test_half_a_report_is_half_unknown(self):
+        """只报一半时，报了的那个照实给（它不是错的），另一个如实说不知道。"""
+        entry = live_round_entry(_record(prompt_tokens=1200, completion_tokens=None))
+
+        assert entry["tokens_input"] == 1200
+        assert entry["tokens_output"] is None
+
+    @pytest.mark.parametrize("junk", ["x", -1, True, [1]])
+    def test_junk_is_unknown_not_a_number(self, junk):
+        """上游给的东西不一定是数字（网关会写字符串、也会写负数）。"""
+        entry = live_round_entry(_record(prompt_tokens=junk, completion_tokens=junk))
+
+        assert entry["tokens_input"] is None, junk
+        assert entry["tokens_output"] is None, junk
+
+    def test_a_round_object_without_the_fields_at_all_is_unknown(self):
+        """`_record()` 的默认里根本没有 token 字段 —— 鸭子类型读不到就该是「不知道」。"""
+        entry = live_round_entry(_record())
+
+        assert entry["tokens_input"] is None
+        assert entry["tokens_output"] is None

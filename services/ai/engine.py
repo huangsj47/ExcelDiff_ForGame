@@ -58,6 +58,7 @@ from services.ai.context_tools import (
     ContextTools,
     describe_request,
 )
+from services.ai.llm_client import non_negative_int
 from services.ai.prompt import build_system_prompt, build_user_message, change_block
 from services.ai.prompt_cache import CACHE_BREAKPOINT_KEY, mark_cache_breakpoint
 from services.ai.protocol import (
@@ -196,8 +197,11 @@ class RoundRecord:
     note: str = ""
     # 这一轮的用量。输入 token 是**累计值**：提示词每轮都把上一轮的上下文重发一遍，
     # 所以轮次越靠后这一轮越贵 —— 逐轮列出来才看得出钱花在第几轮。
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    #
+    # `None` = 这一轮上游没报（见 llm_client 的同名口径）。**不许用 0 代替**：
+    # 界面上「输入 0 tokens」会把一次调用失败说成「这一轮没花钱」。
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
     # `None` = 上游没报这个字段（见 context_tools 与 llm_client 里的同名口径）。
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
@@ -240,9 +244,11 @@ class RoundProgress:
     index: int
     max_rounds: int
     status: str  # requests / final / unparsable
-    # 本次运行**累计**的用量，只含上游已上报的部分。
-    prompt_tokens: int
-    completion_tokens: int
+    # 本次运行**累计**的用量，只含上游已上报的部分；**任一轮没上报就是 `None`**
+    # （与 `EngineOutcome` 同一口径，见 `_sum_optional`）。界面据此决定要不要显示
+    # 「本次已用 N tokens」——`None` 时只说轮次，不补一个 0。
+    prompt_tokens: int | None
+    completion_tokens: int | None
     # 同上，累计；**任一轮没上报就是 `None`**（与 `EngineOutcome` 同一口径，见 `_sum_optional`）。
     cache_read_tokens: int | None
     cache_write_tokens: int | None
@@ -311,8 +317,11 @@ class EngineOutcome:
     rounds: tuple[RoundRecord, ...] = ()
     requests_used: int = 0
     cache_hits: int = 0
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    # **逐轮累计、任一轮没上报就是 `None`**（见 `_sum_optional` 与 `_totals`）。
+    # `None` 会一路走到 `run.tokens_input`（可空列）与费用估算那里 —— 那正是它该去的地方：
+    # 费用会如实说「上游没有返回 token 数，无法估算」，而不是算出一个确定的 ¥0.00。
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
     degradation: str = DEGRADE_NONE
     error_message: str = ""
     # prompt cache 的账目。`None` = 上游没报（**不是「没命中」**，见 `_sum_optional`）。
@@ -515,8 +524,12 @@ def run_analysis(
     degradation = DEGRADE_NONE
     payload: AnalysisPayload | None = None
     markdown_fallback = ""
-    prompt_tokens = 0
-    completion_tokens = 0
+    # 跨轮累计的输入 / 输出 token，与下面两个缓存字段**同一套口径**：逐轮记下来，
+    # 出口处用 `_sum_optional` 合成 —— **只要有一轮没上报，整次就是 `None`**。
+    # 以前这里是 `prompt_tokens = 0` 然后在循环里 `+=`，读不到的那一轮直接按 0 加进去，
+    # 于是「上游没报」与「确实没花钱」变成同一个数（见 `_sum_optional` 的 docstring）。
+    prompt_reads: list[int | None] = []
+    completion_reads: list[int | None] = []
     # 用量记账：跨轮累计的缓存 token、真正进了提示词的字符数、起始时刻。
     cache_reads: list[int | None] = []
     cache_writes: list[int | None] = []
@@ -543,6 +556,18 @@ def run_analysis(
             dropped_chars=compaction_chars,
             overflow_recovered=overflow_recovered,
         )
+
+    def _totals() -> dict:
+        """跨轮累计的输入 / 输出 token。
+
+        与 `_usage_fields` 里那两个缓存字段**同一套口径**（都在出口处过 `_sum_optional`）：
+        只要有一轮没上报，整次就是 `None`。以前这里是 `+= 0`，把「上游没报」记成了
+        「确实没花」，而费用那一栏会据此算出一个确定的 `¥0.00`。
+        """
+        return {
+            "prompt_tokens": _sum_optional(prompt_reads),
+            "completion_tokens": _sum_optional(completion_reads),
+        }
 
     def _usage_fields() -> dict:
         """所有 `EngineOutcome` 构造点共用的用量字段。
@@ -582,8 +607,7 @@ def run_analysis(
                     index=record.index,
                     max_rounds=limits.max_rounds,
                     status=record.status,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
+                    **_totals(),
                     # 整个列表一起看：**任一轮没上报就是 None**（口径见 _sum_optional）。
                     cache_read_tokens=_sum_optional(cache_reads),
                     cache_write_tokens=_sum_optional(cache_writes),
@@ -700,8 +724,7 @@ def run_analysis(
                     dropped=tuple(dropped),
                     requests_used=tools.requests_seen,
                     cache_hits=tools.cache_hits,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
+                    **_totals(),
                     error_message=f"调用模型失败（{type(exc).__name__}）：{exc}",
                     **_usage_fields(),
                 )
@@ -752,8 +775,7 @@ def run_analysis(
                     dropped=tuple(dropped),
                     requests_used=tools.requests_seen,
                     cache_hits=tools.cache_hits,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
+                    **_totals(),
                     error_message=(
                         "模型上下文不足：收尾请求也被拒绝"
                         f"（{type(final_exc).__name__}: {final_exc}）。"
@@ -765,8 +787,11 @@ def run_analysis(
 
         usage = _usage_of(result)
         text = usage["text"]
-        prompt_tokens += usage["prompt_tokens"]
-        completion_tokens += usage["completion_tokens"]
+        # 逐轮记下来，出口处再由 `_totals()` 合成（与下面两个缓存字段同一条口径）。
+        # 这里**不能**写 `+= usage[...]`：读不到的那一轮会被按 0 加进去，
+        # 「上游没报」就变成了「确实没花」。
+        prompt_reads.append(usage["prompt_tokens"])
+        completion_reads.append(usage["completion_tokens"])
         cache_reads.append(usage["cache_read_tokens"])
         cache_writes.append(usage["cache_write_tokens"])
         cache_sources.append(usage["cache_source"])
@@ -898,8 +923,7 @@ def run_analysis(
             dropped=tuple(dropped),
             requests_used=tools.requests_seen,
             cache_hits=tools.cache_hits,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
+            **_totals(),
             degradation=degradation,
             error_message=(
                 f"没有拿到可用的结论：{DEGRADATION_LABELS.get(degradation, degradation)}"
@@ -915,8 +939,7 @@ def run_analysis(
             dropped=tuple(dropped),
             requests_used=tools.requests_seen,
             cache_hits=tools.cache_hits,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
+            **_totals(),
             degradation=degradation,
             error_message=DEGRADATION_LABELS.get(degradation, ""),
             **_usage_fields(),
@@ -939,8 +962,7 @@ def run_analysis(
         rounds=tuple(rounds),
         requests_used=tools.requests_seen,
         cache_hits=tools.cache_hits,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
+        **_totals(),
         degradation=degradation,
         error_message=DEGRADATION_LABELS.get(degradation, ""),
         **_usage_fields(),
@@ -1047,8 +1069,9 @@ def _usage_of(result: Any) -> dict[str, Any]:
     """
     return {
         "text": str(getattr(result, "text", "") or ""),
-        "prompt_tokens": int(getattr(result, "prompt_tokens", 0) or 0),
-        "completion_tokens": int(getattr(result, "completion_tokens", 0) or 0),
+        # 上游没报就是 `None`（不是 0）—— 口径与缓存那两个字段一致，见 `_sum_optional`。
+        "prompt_tokens": non_negative_int(getattr(result, "prompt_tokens", None)),
+        "completion_tokens": non_negative_int(getattr(result, "completion_tokens", None)),
         "cache_read_tokens": getattr(result, "cache_read_tokens", None),
         "cache_write_tokens": getattr(result, "cache_write_tokens", None),
         "cache_source": str(getattr(result, "cache_source", "") or ""),

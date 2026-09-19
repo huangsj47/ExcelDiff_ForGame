@@ -740,10 +740,15 @@ TABLE_PATH = "config/[30]道具表_CfgItem.xlsx"
 
 
 class _FakeClient:
-    """只回答一次 final。记录它收到的消息，用来断言上下文真的组装过。"""
+    """只回答一次 final。记录它收到的消息，用来断言上下文真的组装过。
 
-    def __init__(self):
+    `report_usage=False` 用来模拟**上游压根不回 `usage`** 的网关（真实存在：某些中转
+    网关、某些被限流时的响应）。这时 token 必须落成 NULL，不是 0。
+    """
+
+    def __init__(self, *, report_usage: bool = True):
         self.calls = []
+        self.report_usage = report_usage
 
     def complete(self, messages, *, temperature=None):
         from services.ai.llm_client import ChatResult
@@ -774,8 +779,8 @@ class _FakeClient:
                 ensure_ascii=False,
             ),
             model="fake",
-            prompt_tokens=120,
-            completion_tokens=80,
+            prompt_tokens=120 if self.report_usage else None,
+            completion_tokens=80 if self.report_usage else None,
         )
 
 
@@ -876,6 +881,75 @@ def test_a_real_run_calls_the_model_and_persists_the_findings(monkeypatch):
         assert detail["run"]["usage"]["tokens"]["total"] == 200
         assert detail["run"]["usage"]["cache"]["hit_rate"] is None
         # 没配价格表 → 不给金额（**不是 0**）
+        assert detail["run"]["usage"]["cost"]["amount"] is None
+
+
+def test_a_gateway_that_does_not_report_usage_persists_unknown_not_zero(monkeypatch):
+    """**上游不回 `usage` 时，库里必须是 NULL。**
+
+    这条以前写成 0，一路上有三个后果，每一个都发生在**用户看得见的地方**：
+
+    * 消耗面板把这次运行算进「输入 0 tokens」的总和里，账面比实际花的少；
+    * `pricing.estimate_cost` 只为 `None` 留了「无法估算」这条路，拿到 0 就算出一个
+      确定的 `¥0.00` 摆在界面上；
+    * `analysis_budget` 那句「有 N 处 token 数上游未上报，已用量是下界」永远不会出现 ——
+      也就是**没有人会被告知**这个数字是缺失的。
+
+    平台的钱照付，而账面把「没花钱」摆给用户看。落库这一层是这条链的源头，所以在这里钉。
+
+    与它成对的是 `_FakeClient(report_usage=True)` 那条：每一轮都报的时候，落库的仍是那个
+    真实的数（口径没被改成「一律 NULL」）。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo = _create_repo(project.id, _uid("table"), "svn", "table")
+        cfg = _create_weekly_config(
+            project.id, repo, "W1", datetime(2026, 3, 1), datetime(2026, 3, 8)
+        )
+        _seed_diff_cache(
+            cfg, repo, TABLE_PATH, datetime.now(timezone.utc), commit_id=COMMIT_SHA
+        )
+        db.session.commit()
+
+        ai_service.set_project_api_key(project.id, "k")
+        ai_service.update_project_analysis_config(
+            project.id,
+            {
+                "api_base_url": "http://127.0.0.1:15721/v1",
+                "api_model": "m",
+                "subagent_enabled": False,
+            },
+        )
+        db.session.commit()
+
+        client = _FakeClient(report_usage=False)
+        monkeypatch.setattr(ai_service, "build_endpoint_client", lambda *a, **k: (client, []))
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+
+        assert outcome["status"] == "succeeded", outcome
+        run = db.session.get(AiAnalysisRun, outcome["run_id"])
+        assert run.tokens_input is None, "上游没报 usage，库里却有个数（0 就是把「不知道」说成「没花」）"
+        assert run.tokens_output is None
+
+        from models.ai_analysis import AiAnalysisTrace
+
+        trace = AiAnalysisTrace.query.filter_by(run_id=run.id).one()
+        assert trace.tokens_input is None, "逐轮那一份也要如实：这一轮没有用量可记"
+        assert trace.tokens_output is None
+
+        # 抽屉与面板读的那两份都不许把「未上报」渲染成 0。
+        from services.ai_usage_service import run_usage
+
+        payload = json.loads(run.response_payload)
+        assert payload["usage"]["tokens"]["input"] is None
+        assert payload["usage"]["tokens"]["total"] is None, (
+            "两个分量都不知道，总数却给了个 0 —— 它看起来完全正常"
+        )
+        detail = run_usage(run.id)
+        assert detail["run"]["usage"]["tokens"]["total"] is None
+        # 费用那一档：算不出就不能给数字（**尤其不能给 ¥0.00**）
         assert detail["run"]["usage"]["cost"]["amount"] is None
 
 

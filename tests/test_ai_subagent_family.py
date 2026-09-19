@@ -148,6 +148,31 @@ class TestTheFamilyProducesOneResult:
 
         assert result.cache_read_tokens is None, "有一家没上报却算出了一个命中数"
 
+    def test_a_member_that_never_reports_tokens_poisons_the_total_too(self):
+        """输入 / 输出与缓存那两个字段是**同一句话**：任一成员没上报，整家就是 `None`。
+
+        这里以前是 `sum(step.outcome.prompt_tokens ...)` —— `None` 会被当成 0 加进去。
+        子代理模式下一次分析有 n+1 次模型调用，少算一次就让「这次花了多少」偏小；
+        而偏小的数看起来完全正常，没有人会去怀疑它（费用那一栏会据此算出一个确定的金额）。
+        """
+        steps = (
+            MemberOutcome(
+                plan=_plan(2).members[0],
+                outcome=EngineOutcome(status=STATUS_SUCCEEDED, prompt_tokens=900, completion_tokens=100),
+            ),
+            MemberOutcome(
+                plan=_plan(2).members[1],
+                outcome=EngineOutcome(status=STATUS_SUCCEEDED, prompt_tokens=None, completion_tokens=None),
+            ),
+        )
+
+        result = aggregate_outcomes(
+            synthesis=EngineOutcome(status=STATUS_SUCCEEDED), steps=steps
+        )
+
+        assert result.prompt_tokens is None, "有一个成员没上报，总账却给了个数"
+        assert result.completion_tokens is None
+
     def test_the_tool_stats_are_summed_per_kind(self):
         steps = (
             MemberOutcome(

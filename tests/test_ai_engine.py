@@ -1015,3 +1015,49 @@ def test_anomaly_thresholds_are_a_separate_knob_from_the_engine_limits():
         "门槛不该出现在 EngineLimits 里：那会让「调大额度」顺带改变上榜标准"
     )
     assert thresholds.max_anomalies > 0
+
+
+class HalfReporting(ScriptedClient):
+    """前几轮报 usage，之后不再报（真实网关会这样：某些轮次就是不带 usage）。"""
+
+    def __init__(self, *replies, report_rounds: int = 1):
+        super().__init__(*replies)
+        self._report_rounds = report_rounds
+
+    def complete(self, messages, *, temperature=None):
+        result = super().complete(messages, temperature=temperature)
+        if len(self.calls) > self._report_rounds:
+            return replace(result, prompt_tokens=None, completion_tokens=None)
+        return result
+
+
+def test_one_round_that_does_not_report_makes_the_whole_total_unknown():
+    """**只要有一轮没上报，整次就是 `None`** —— 不许只把报了的那几轮加起来。
+
+    这条以前是 `prompt_tokens += usage[...]`，读不到的那一轮直接按 0 加进去，
+    于是「上游没报」变成「确实没花」。而那个偏小的数看起来完全正常，没有人会去怀疑它 ——
+    代价是费用那一栏算出一个确定的 `¥0.00`（见 `pricing.estimate_cost`：它只为 `None`
+    留了「无法估算」这条路）。
+    """
+    client = HalfReporting(_requests(), _final(_anomaly()), report_rounds=1)
+
+    outcome = _run(client)
+
+    assert len(outcome.rounds) >= 2, "前提：这次跑了不止一轮，才有「有一轮没报」可言"
+    assert [item.prompt_tokens for item in outcome.rounds][0] == 10, "第一轮报了"
+    assert [item.prompt_tokens for item in outcome.rounds][1] is None, "第二轮没报"
+    assert outcome.prompt_tokens is None, (
+        "有一轮没上报，总账却给了一个数 —— 那个数偏小却看起来正常"
+    )
+    assert outcome.completion_tokens is None
+
+
+def test_all_rounds_reporting_still_adds_up():
+    """**前提**：每一轮都报的时候，总账照样是相加的结果（别把口径改成一律 None）。"""
+    client = ScriptedClient(_requests(), _final(_anomaly()))
+
+    outcome = _run(client)
+
+    assert len(outcome.rounds) == 2
+    assert outcome.prompt_tokens == 20, "两轮各 10，总账必须是 20"
+    assert outcome.completion_tokens == 10

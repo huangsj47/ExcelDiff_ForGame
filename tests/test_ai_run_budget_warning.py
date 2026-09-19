@@ -223,7 +223,31 @@ def test_publishing_junk_does_not_break_the_analysis():
     run_progress.publish(7, 3, object())  # 什么都没有的对象
 
     snap = run_progress.snapshot(7)
-    assert snap is not None and snap.live_tokens == 0
+    assert snap is not None
+    assert snap.live_tokens is None, (
+        "一个连 token 字段都没有的对象被算成了「已用 0 tokens」—— "
+        "与「读不到进度不是 0」是同一条口径（见本文件第 4 条性质）"
+    )
+
+
+def test_live_tokens_stays_unknown_when_a_round_did_not_report():
+    """**读不到用量就是 `None`，不许 `or 0`。**
+
+    `live_tokens` 以前是 `int(prompt_tokens or 0) + int(completion_tokens or 0)`，
+    于是它**永远是整数**，而 `static/js/ai_stream_status.js` 里那句
+    「用量没上报就只说轮次，不补一个 0」的守卫（判 `null`/`undefined`/`''`）
+    一个条件都不成立 —— 抽屉上于是出现「分析中：第 1/8 轮 · 本次已用 0 tokens」，
+    把「不知道花了多少」说成「一个都没花」。
+    """
+    run_progress.publish(8, 1, _Progress(prompt_tokens=None, completion_tokens=None))
+    assert run_progress.snapshot(8).live_tokens is None
+
+    # 只报了一半也是「不知道」：拿报了的那个当总数会得出一个偏小却看着正常的数。
+    run_progress.publish(9, 1, _Progress(prompt_tokens=100, completion_tokens=None))
+    assert run_progress.snapshot(9).live_tokens is None
+
+    run_progress.publish(10, 1, _Progress(prompt_tokens=0, completion_tokens=0))
+    assert run_progress.snapshot(10).live_tokens == 0, "确实报了 0 的仍然是 0"
 
 
 def test_the_registry_does_not_grow_without_bound(monkeypatch):
