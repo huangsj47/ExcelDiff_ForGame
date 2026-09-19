@@ -340,6 +340,63 @@ class TestTheCandidatesAndTheReconciliation:
 
         assert text == "" and dropped == ()
 
+    def test_a_two_digit_neighbour_does_not_make_a_one_digit_id_look_adopted(self):
+        """**编号必须整段匹配，不能当子串。**
+
+        同一个分片的候选编号到 `S1-30`（`CANDIDATE_MAX_ITEMS_PER_MEMBER`），所以
+        `"S1-2" in report` 会被报告里的 `[S1-25]` 命中 —— 一条**真的没被汇总进去**的
+        候选就此不报。方向恰好是最危险的那个：`reconcile_candidates` 存在的唯一理由
+        就是「报告看起来完全正常，只是少了一条，而没有任何人会去数」。
+        """
+        one_digit = self._candidate(index=2, title="【角色属性表】id=7007 被删除后复用")
+        two_digit = self._candidate(index=25, title="【刷怪】权重列被移出但入口还在")
+        synthesis = EngineOutcome(
+            status=STATUS_SUCCEEDED,
+            report_markdown="# 风险评估\n\n[S1-25] 确认存在。\n",
+        )
+
+        text, dropped = reconcile_candidates((one_digit, two_digit), synthesis)
+
+        assert [item.index for item in dropped] == [2], (
+            f"采纳了 S1-25 却把 S1-2 也算成采纳了：{[item.detail for item in dropped]}"
+        )
+        assert "[S1-2]" in text and "[S1-25]" not in text.split("S1-25")[0][-200:]
+
+    def test_the_id_matches_with_or_without_brackets(self):
+        """模型写成裸编号（不带方括号）时也算引用到了 —— 否则会凭空多出一堆假缺口。"""
+        candidate = self._candidate()
+        synthesis = EngineOutcome(
+            status=STATUS_SUCCEEDED,
+            report_markdown="# 风险评估\n\nS1-1 这条确认存在。\n",
+        )
+
+        text, dropped = reconcile_candidates((candidate,), synthesis)
+
+        assert text == "" and dropped == ()
+
+    def test_the_same_file_written_differently_still_counts_as_adopted(self):
+        """**路径要比对归一化后的形态，不能逐字相等。**
+
+        候选的文件名来自分片模型、最终报告的文件名来自汇总模型，两边写法常常不同
+        （`./` 前缀、反斜杠、首尾引号）。逐字相等会让**已经采纳**的候选被报成
+        「找不到去向」—— 假缺口不是无害的：它把一条已经进了报告的结论说成没被汇总，
+        读的人只能再去核一遍，而且这个数字会虚高。
+        """
+        candidate = self._candidate(file_path="config/60_skill/角色属性表.xlsx")
+        synthesis = EngineOutcome(
+            status=STATUS_SUCCEEDED,
+            report_markdown="# 风险评估\n\n复述了那条。\n",
+            anomalies=(
+                _anomaly_obj(title="另一个说法", file_path="./config\\60_skill\\角色属性表.xlsx"),
+            ),
+        )
+
+        text, dropped = reconcile_candidates((candidate,), synthesis)
+
+        assert text == "" and dropped == (), (
+            f"同一个文件的不同写法被当成了两个文件：{[item.detail for item in dropped]}"
+        )
+
     def test_the_wording_only_claims_what_was_checked(self):
         """不能写成「模型把它丢了」—— 平台查的是「报告里有没有它」。"""
         candidate = self._candidate()

@@ -42,6 +42,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, MutableMapping, Sequence
 
@@ -69,7 +70,7 @@ from services.ai.prompt import build_system_prompt, build_user_message
 from services.ai.prompt_cache import mark_cache_breakpoint
 from services.ai.protocol import Anomaly, DroppedItem
 from services.ai.rules import RuleThresholds, rank_anomalies
-from services.ai.scope import AnalysisScope
+from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_contract import DIMENSION_IDS
 from services.ai.skill_loader import LoadedSkills
 
@@ -1419,19 +1420,33 @@ def reconcile_candidates(
 
     两样都不成立才算没进 —— 而写进报告的那句话会**如实说明查的是什么**
     （「既没有引用编号，也没有同文件的条目」），不是断言「模型丢了它」。
+
+    ## 两手都必须比「同一个东西」，而不是比字符串
+
+    这两手各自都有一个**看起来很省事但会判错**的写法，而且两边判错的方向相反：
+
+    * **编号不能当子串找**。`candidate.id` 形如 `S1-2`，而同一分片的编号可以到
+      `S1-30`（`CANDIDATE_MAX_ITEMS_PER_MEMBER`）—— `"S1-2" in 报告` 会被报告里的
+      `[S1-25]` 命中。这是一个**漏报**：一条真的没被汇总进去的候选从此不出现，
+      而这正是本函数存在的唯一理由（见上面「为什么这件事不能交给模型」）。
+    * **路径要比归一化后的形态**。逐字相等时，`./config/a.xlsx` 与
+      `config\\a.xlsx` 是两个文件。这是一个**误报**：已经进了报告的候选被说成
+      「找不到去向」，读的人只好再去核一遍，而那个计数会虚高。
+
+    前者静默、后者吵闹，所以前者更要紧；但两者都不该发生。
     """
     adopted = _report_text(synthesis)
     final_paths = {
-        str(item.file_path).strip()
+        normalize_path(item.file_path)
         for item in synthesis.anomalies
-        if str(item.file_path).strip()
+        if normalize_path(item.file_path)
     }
     lines: list[str] = []
     dropped: list[DroppedItem] = []
     for candidate in candidates:
-        if candidate.id in adopted:
+        if _candidate_id_mentioned(candidate.id, adopted):
             continue
-        path = str(candidate.anomaly.file_path).strip()
+        path = normalize_path(candidate.anomaly.file_path)
         if path and path in final_paths:
             continue
         dropped.append(
@@ -1478,6 +1493,20 @@ def reconcile_candidates(
         "以上是平台**按记录核对**出来的，不是模型的自我说明。"
     )
     return "\n\n".join(blocks), tuple(dropped)
+
+
+def _candidate_id_mentioned(candidate_id: str, text: str) -> bool:
+    """最终报告里有没有引用这个候选编号。**整段匹配，不当子串。**
+
+    `candidate.id` 形如 `S1-2`（`Candidate.id`），而同一分片的编号可以到 `S1-30`
+    （`CANDIDATE_MAX_ITEMS_PER_MEMBER`）—— `"S1-2" in 报告` 会被报告里的 `[S1-25]`
+    命中，于是**一条真的没被汇总进去的候选不报了**。方向刚好是最坏的那个：漏报是
+    静默的（报告读起来完全正常，只是少一条），而本函数存在的唯一理由就是数这一条。
+
+    两边都卡边界：左边不能接字母数字（`[S1-2]` 与裸写的 `S1-2` 都算引用到了 ——
+    模型不一定带方括号，那不该被当成没引用），右边不能接数字（挡住 `S1-25`）。
+    """
+    return re.search(rf"(?<![0-9A-Za-z]){re.escape(str(candidate_id))}(?![0-9])", text) is not None
 
 
 def _report_text(synthesis: EngineOutcome) -> str:
