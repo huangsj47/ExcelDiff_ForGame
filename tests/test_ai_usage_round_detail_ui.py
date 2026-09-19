@@ -244,7 +244,9 @@ class TestTheRoundTableGrewAColumn:
         script = _dashboard_script()
 
         assert script.count('<th scope="col">明细</th>') == 1, "明细列的表头"
-        assert "var roundColumns = 10" in script, (
+        # 列数只有一个来源（`roundColumns`），而它现在**随「这次分没分片」变**：
+        # 分片那一列只在真的分了片时才加（见 `TestTheSliceColumn`）。
+        assert "var roundColumns = hasSlices ? 11 : 10" in script, (
             "列数要有一个名字 —— 空态那一行的 colSpan 与它必须是一致的"
         )
 
@@ -271,10 +273,15 @@ class TestTheRoundTableGrewAColumn:
     def test_the_caption_says_what_the_detail_column_is(self):
         script = _dashboard_script()
 
-        caption = re.search(r"id=\"aiuRoundTableCaption\">([^<]*)<", script)
-        assert caption, "逐轮表的 caption 没了（它同时是那个滚动区域的区域名）"
-        assert "明细" in caption.group(1), (
-            f"新列要说清它是什么，否则读的人只会看到一列表头写着「明细」：{caption.group(1)}"
+        # caption 现在是拼出来的（分片那一列可加可不加），所以按它的**拼接片段**断言。
+        start = script.index("var caption = '每一轮")
+        block = script[start:script.index("id=\"aiuRoundTableCaption\">' + caption", start)]
+        assert "明细" in block, (
+            f"新列要说清它是什么，否则读的人只会看到一列表头写着「明细」：{block}"
+        )
+        # 那块区域的名字仍然指向一个真的存在的 id。
+        assert "id=\"aiuRoundTableCaption\">' + caption + '<" in script, (
+            "aria-labelledby 指的那个 caption 不存在"
         )
 
 
@@ -327,3 +334,61 @@ class TestTheStylingFollowsTheHouseRules:
         # 没有自带一档（那一条会红在那边，但先把「哪里来的」指出来）。
         assert set(re.findall(r"font-size:\s*([^;}]+)", css)) <= {"0.75rem", "1em"}, css
         assert not re.search(r"[\U0001F300-\U0001FAFF]", html), "页面里不许出现 emoji"
+
+
+class TestTheSliceColumn:
+    """子代理模式（services/ai/subagent.py）：这一次运行分了几片、哪一片没跑成。
+
+    这一列的读数与轮次不同：`round_index` 在分片之间是**连着**的（一家子只落一条运行，
+    见 `models/ai_analysis/trace.py`），所以「S1 的第 2 轮」只能靠 `agent` + `agent_round`
+    说清楚。而分片表里**没跑成的分片也必须有一行** —— 少一行就等于把「这块没人看过」藏起来。
+    """
+
+    def test_the_column_only_exists_when_the_run_was_split(self):
+        script = _dashboard_script()
+
+        assert "var hasSlices = slices.length > 0" in script
+        assert "(hasSlices ? '<th scope=\"col\">分片</th>' : '')" in script, (
+            "分片列应当只在真的分了片时出现 —— 否则绝大多数运行会多一列全是「—」的列"
+        )
+
+    def test_the_round_row_names_the_slice_and_its_own_round(self):
+        script = _dashboard_script()
+
+        assert "(round.agent || '汇总')" in script, (
+            "主代理自己那几轮的 `agent` 是空的，要写「汇总」而不是留一个空格"
+        )
+        assert "' · 第 ' + round.agent_round + ' 轮'" in script
+
+    def test_the_slice_section_skips_nothing(self):
+        script = _dashboard_script()
+        body = _function_body(script, "runSubagentSection")
+
+        # 状态与原因两列都要有：跳过（没花钱）与失败（花了没成）是两件事。
+        assert "aiuSubagentStatus(item)" in body
+        assert "item.skipped_reason || item.error" in body, (
+            "没跑成的原因要显示出来（否则「未运行」旁边什么都没有）"
+        )
+
+    def test_a_not_run_slice_is_visually_marked(self):
+        script = _dashboard_script()
+        body = _function_body(script, "runSubagentSection")
+
+        assert "status.className = 'aiu-round-failed'" in body, (
+            "非成功的分片要一眼看得出来（它意味着那一块没人看过）"
+        )
+
+    def test_the_section_is_not_rendered_without_slices(self):
+        script = _dashboard_script()
+
+        assert "if (hasSlices) {" in script and "runSubagentSection(slices)" in script, (
+            "没有分片数据时不该渲染一张空表（会让人以为分了片却一片都没跑）"
+        )
+
+    def test_the_caption_says_where_the_tokens_come_from(self):
+        script = _dashboard_script()
+        body = _function_body(script, "runSubagentSection")
+
+        assert "加起来等于这次运行的合计" in body, (
+            "分片的 token 与整次运行的关系要写清楚（否则两处数字看起来对不上就是 bug）"
+        )

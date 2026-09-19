@@ -626,3 +626,53 @@ def test_the_examples_do_not_leak_internal_tool_names():
     html = _modal_html()
     for banned in ("luna", "gaia", "jelly", "阿拉丁", "unisdk", "刘彦钟"):
         assert banned not in html, f"示例里出现了内部名称：{banned}"
+
+
+class TestTheSubagentFields:
+    """子代理模式那两个控件（**默认关**，只对周版本生效）。
+
+    这一组的理由与它上面那些一样：配置界面是「这个功能会不会被误用」的最后一道闸门。
+    这里钉三件事 —— 代价写出来了没有、默认值是不是关、开与关的读写有没有接上。
+    """
+
+    def test_the_toggle_exists_and_says_what_it_costs(self):
+        html = _modal_html()
+
+        assert 'id="aiSubagentToggle"' in html
+        # **代价必须写在用户眼前**：打开它会让模型调用次数变成 (n+1) 倍。
+        # 一个不写代价的开关，用户只会从账单上发现。
+        assert "分片数 + 1" in html or "分片数+1" in html, (
+            "开关旁边没有写清代价（模型调用次数变成分片数 + 1 倍）"
+        )
+        assert "仅周版本" in html, "没写清它只对周版本生效（单提交分析不受影响）"
+
+    def test_the_count_field_is_wired_to_dom_and_errors(self):
+        dom = _field_dom_map()
+
+        assert dom["subagent_count"] == "aiSubagentCountInput"
+        html = _modal_html()
+        assert 'id="aiSubagentCountInput"' in html
+        assert 'id="aiSubagentCountInputHelp"' in html
+        assert 'id="aiSubagentCountInputError"' in html
+        assert "aria-describedby=\"aiSubagentCountInputHelp aiSubagentCountInputError\"" in html
+
+    def test_both_fields_are_saved(self):
+        script = _ai_script()
+
+        assert "numberValue('aiSubagentCountInput', 'subagent_count')" in script
+        assert "payload.subagent_enabled = !!subagentToggle.checked" in script, (
+            "开关的勾选状态没有被提交 —— 打开之后什么都不会变"
+        )
+
+    def test_the_toggle_is_only_checked_on_an_explicit_true(self):
+        """老库上这一列是 NULL。**只有明确的 true 才勾上** —— 它是这个功能的唯一安全默认值。"""
+        script = _ai_script()
+
+        assert "data.subagent_enabled === true" in script, (
+            "用了 `!== false` 之类的写法：NULL（老行）会被勾成「已启用」"
+        )
+
+    def test_the_count_is_loaded_from_the_config(self):
+        script = _ai_script()
+
+        assert "setValue('aiSubagentCountInput', data.subagent_count)" in script

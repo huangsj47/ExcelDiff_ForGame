@@ -3011,6 +3011,64 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
     }
 
     /** 这次运行**按工具类型**的取数账（`failed` 一列在这里，页面级那张表没有它）。 */
+    /**
+     * 这一次运行**按分片**的账（子代理模式，见 services/ai/subagent.py）。
+     *
+     * 为什么要有这一块：开了子代理之后，整次运行的 token 是「一家子的合计」（约为单代理的
+     * n+1 倍），而「钱花在哪一片、哪一片没跑成」只有逐片列出来才答得上。**没跑成的分片也
+     * 要有一行**（状态写「未运行」并带上原因）—— 少一行就等于把「这块没人看过」藏起来。
+     *
+     * 没有分片数据时**整块不渲染**（老运行、没开子代理）：凭空画一张空表会让人以为
+     * 这次分了几片却一片都没跑。
+     */
+    function runSubagentSection(rows) {
+        var head = document.createElement('h6');
+        head.textContent = '分片代理';
+        var wrap = document.createElement('div');
+        wrap.className = 'aiu-table-wrap';
+        wrap.setAttribute('role', 'region');
+        wrap.setAttribute('tabindex', '0');
+        wrap.setAttribute('aria-labelledby', 'aiuSubagentTableCaption');
+        var table = document.createElement('table');
+        table.className = 'aiu-table';
+        table.innerHTML = '<caption class="aiu-caption" id="aiuSubagentTableCaption">这次分析由平台拆给各分片代理深挖，最后由主代理（汇总）合成报告。token 是各分片自己的用量，加起来等于这次运行的合计；「报出」是它报出的候选结论条数（汇总之后可能更少 —— 被去重、被门槛滤掉、或者没进最终报告）。</caption>'
+            + '<thead><tr><th scope="col">分片</th><th scope="col">负责的维度</th>'
+            + '<th scope="col">状态</th><th scope="col" class="num">轮次</th>'
+            + '<th scope="col" class="num">索取</th><th scope="col" class="num">输入 token</th>'
+            + '<th scope="col" class="num">其中命中</th><th scope="col" class="num">输出 token</th>'
+            + '<th scope="col" class="num">报出</th><th scope="col">说明</th></tr></thead>';
+        var tbody = document.createElement('tbody');
+        rows.forEach(function (item) {
+            var tr = document.createElement('tr');
+            tr.appendChild(cell(item.label || '—'));
+            tr.appendChild(cell((item.dimensions || []).join('、') || '—'));
+            var status = cell(aiuSubagentStatus(item));
+            if (item.status !== 'succeeded') status.className = 'aiu-round-failed';
+            tr.appendChild(status);
+            tr.appendChild(numCell(aiuFmtInt(item.rounds)));
+            tr.appendChild(numCell(aiuFmtInt(item.requests)));
+            tr.appendChild(numCell(aiuFmtInt(item.tokens_input)));
+            tr.appendChild(numCell(aiuFmtTokens(item.cache_read_tokens)));
+            tr.appendChild(numCell(aiuFmtInt(item.tokens_output)));
+            tr.appendChild(numCell(aiuFmtInt(item.anomalies)));
+            tr.appendChild(cell(item.skipped_reason || item.error || '—'));
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+        var section = document.createElement('div');
+        section.appendChild(head);
+        section.appendChild(wrap);
+        return section;
+    }
+
+    /** 分片的状态文案。**「未运行」与「失败」要分开说**：一个是没花钱，一个是花了没成。 */
+    function aiuSubagentStatus(item) {
+        if (item.skipped_reason && item.status === 'skipped') return '未运行';
+        return { succeeded: '完成', degraded: '降级完成', failed: '失败' }[item.status]
+            || item.status || '—';
+    }
+
     function runToolSection(tools, kinds) {
         var head = document.createElement('h6');
         head.textContent = '取数（按工具类型）';
@@ -3094,16 +3152,36 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             wrap.setAttribute('aria-labelledby', 'aiuRoundTableCaption');
             var table = document.createElement('table');
             table.className = 'aiu-table';
-            table.innerHTML = '<caption class="aiu-caption" id="aiuRoundTableCaption">每一轮的 token 与耗时。输入 token 是累计值：每轮都会把上一轮的上下文重发一遍。「明细」里是这一轮要了什么、拿到的那一份到底是内容还是一句「取不到」、丢了什么。</caption>'
-                + '<thead><tr><th scope="col">轮次</th><th scope="col">结局</th>'
+            // 分片那一列**只在这次真的分了片时才有**：没开子代理的运行占绝大多数，
+            // 给它们加一列全是「—」的列只会把表挤宽。
+            var slices = payload.subagents || [];
+            var hasSlices = slices.length > 0;
+            var caption = '每一轮的 token 与耗时。输入 token 是累计值：每轮都会把上一轮的上下文重发一遍。'
+                + '「明细」里是这一轮要了什么、拿到的那一份到底是内容还是一句「取不到」、丢了什么。'
+                + (hasSlices
+                    ? '「分片」是这一轮由哪个分片代理跑的 —— 轮次号在分片之间是连着的，只看它分不出「S1 的第 2 轮」与「S2 的第 2 轮」。'
+                    : '');
+            table.innerHTML = '<caption class="aiu-caption" id="aiuRoundTableCaption">' + caption + '</caption>'
+                + '<thead><tr>'
+                + (hasSlices ? '<th scope="col">分片</th>' : '')
+                + '<th scope="col">轮次</th><th scope="col">结局</th>'
                 + '<th scope="col" class="num">输入 token</th><th scope="col" class="num">其中命中</th>'
                 + '<th scope="col" class="num">输出 token</th><th scope="col" class="num">提示词字符</th>'
                 + '<th scope="col" class="num">上下文字符</th><th scope="col" class="num">耗时</th>'
                 + '<th scope="col">备注</th><th scope="col">明细</th></tr></thead>';
             var tbody = document.createElement('tbody');
-            var roundColumns = 10;
+            // 列数有一个名字：空态那一行的 `colSpan` 必须与它一致（多一列就多一个 11）。
+            var roundColumns = hasSlices ? 11 : 10;
             (payload.rounds || []).forEach(function (round) {
                 var tr = document.createElement('tr');
+                if (hasSlices) {
+                    // `agent_round` 是这一轮在那个分片内部的序号；主代理自己那几轮
+                    // `agent` 是空的，写「汇总」而不是留一个空格。
+                    tr.appendChild(cell(
+                        (round.agent || '汇总')
+                        + (round.agent_round ? ' · 第 ' + round.agent_round + ' 轮' : '')
+                    ));
+                }
                 tr.appendChild(cell(String(round.round_index), 'num'));
                 tr.appendChild(cell(round.outcome || '—'));
                 tr.appendChild(numCell(aiuFmtInt(round.tokens_input)));
@@ -3132,6 +3210,9 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
 
             var tools = usage.tools || {};
             var kinds = Object.keys(tools).sort();
+            if (hasSlices) {
+                body.appendChild(runSubagentSection(slices));
+            }
             if (kinds.length) {
                 body.appendChild(runToolSection(tools, kinds));
             }

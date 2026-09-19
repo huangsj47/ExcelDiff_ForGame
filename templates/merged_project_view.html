@@ -1451,6 +1451,36 @@
                             <div class="form-text" id="aiMaxToolRequestsInputHelp">整次分析允许索取上下文的总次数（跨轮次累计，重复索要同一个文件也计入）。</div>
                             <div class="form-text text-danger d-none" id="aiMaxToolRequestsInputError"></div>
                         </div>
+                        <!-- 子代理模式（services/ai/subagent.py）。默认关，且**只对周版本生效**。
+                             这一栏的代价必须写清楚：它会让模型调用次数变成 (n+1) 倍 ——
+                             一个不写代价的开关，用户打开之后只会从账单上发现。 -->
+                        <div class="col-12 col-lg-6 ai-config-field">
+                            <label class="form-label" for="aiSubagentToggle">子代理模式（仅周版本）</label>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="aiSubagentToggle"
+                                       aria-describedby="aiSubagentToggleHelp">
+                                <label class="form-check-label" for="aiSubagentToggle">启用</label>
+                            </div>
+                            <div class="form-text" id="aiSubagentToggleHelp">
+                                <strong>默认关。</strong>打开后，周版本分析会把九个检查维度拆给几个分片代理
+                                分头深挖、再由主代理汇总：几个大版本（几百个文件）里能少漏细节。
+                                <strong>代价是模型调用次数变成「分片数 + 1」倍</strong>
+                                （变更清单那一段从第二个分片起命中缓存、按缓存价计费）；
+                                「上下文索取上限」按分片数分摊，整次分析的总索取次数不变。
+                                单个提交的分析**不受影响**。
+                            </div>
+                        </div>
+                        <div class="col-12 col-lg-6 ai-config-field">
+                            <label class="form-label" for="aiSubagentCountInput">子代理数量</label>
+                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiSubagentCountInput"
+                                   aria-describedby="aiSubagentCountInputHelp aiSubagentCountInputError">
+                            <div class="form-text" id="aiSubagentCountInputHelp">
+                                默认 3，最多 6；填 1（或不启用上面的开关）就是原来的单代理。
+                                维度按固定方式分组：3 个时是「ID/取值/单表连锁」「配置数据/数值合理性」
+                                「模块耦合/代码逻辑/版本分支/流程」。
+                            </div>
+                            <div class="form-text text-danger d-none" id="aiSubagentCountInputError"></div>
+                        </div>
                         <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiPromptCharBudgetInput">提示词字符预算</label>
                             <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiPromptCharBudgetInput"
@@ -2259,6 +2289,7 @@ const AI_FIELD_DOM = {
     max_files_per_run: 'aiMaxFilesInput',
     max_analysis_rounds: 'aiMaxRoundsInput',
     max_tool_requests: 'aiMaxToolRequestsInput',
+    subagent_count: 'aiSubagentCountInput',
     prompt_char_budget: 'aiPromptCharBudgetInput',
     request_timeout_seconds: 'aiRequestTimeoutInput',
     min_severity: 'aiMinSeveritySelect',
@@ -2458,6 +2489,7 @@ function fillAiConfigForm(data) {
     setValue('aiMaxFilesInput', data.max_files_per_run);
     setValue('aiMaxRoundsInput', data.max_analysis_rounds);
     setValue('aiMaxToolRequestsInput', data.max_tool_requests);
+    setValue('aiSubagentCountInput', data.subagent_count);
     setValue('aiPromptCharBudgetInput', data.prompt_char_budget);
     setValue('aiRequestTimeoutInput', data.request_timeout_seconds);
     setValue('aiMaxAnomaliesInput', data.max_anomalies_per_run);
@@ -2483,6 +2515,10 @@ function fillAiConfigForm(data) {
     setOptionalValue('aiBudgetCostInput', data.budget_cost_limit);
     const autoToggle = aiEl('aiWeeklyAutoToggle');
     if (autoToggle) autoToggle.checked = data.auto_weekly_enabled !== false;
+    // 子代理模式：服务端回 `false` / `null`（老行）都读成「关」—— 它是这个功能的
+    // 唯一安全默认值，所以只有明确的 `true` 才勾上。
+    const subagentToggle = aiEl('aiSubagentToggle');
+    if (subagentToggle) subagentToggle.checked = data.subagent_enabled === true;
 
     const sourceInput = aiEl(data.source === 'custom' ? 'aiSourceCustom' : 'aiSourceOpenai');
     if (sourceInput) sourceInput.checked = true;
@@ -2695,6 +2731,7 @@ function collectAiConfigPayload() {
     numberValue('aiMaxFilesInput', 'max_files_per_run');
     numberValue('aiMaxRoundsInput', 'max_analysis_rounds');
     numberValue('aiMaxToolRequestsInput', 'max_tool_requests');
+    numberValue('aiSubagentCountInput', 'subagent_count');
     numberValue('aiPromptCharBudgetInput', 'prompt_char_budget');
     numberValue('aiRequestTimeoutInput', 'request_timeout_seconds');
     numberValue('aiMaxAnomaliesInput', 'max_anomalies_per_run');
@@ -2718,6 +2755,8 @@ function collectAiConfigPayload() {
 
     const autoToggle = aiEl('aiWeeklyAutoToggle');
     if (autoToggle) payload.auto_weekly_enabled = !!autoToggle.checked;
+    const subagentToggle = aiEl('aiSubagentToggle');
+    if (subagentToggle) payload.subagent_enabled = !!subagentToggle.checked;
 
     return payload;
 }

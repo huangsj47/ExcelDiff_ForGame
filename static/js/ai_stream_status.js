@@ -71,6 +71,28 @@
     }
 
     /**
+     * 子代理模式下**这一段是谁在跑**。没开子代理时返回空串（那一行就与以前一字不差）。
+     *
+     * 口径与 `services/ai/subagent.py` 一致：`agent` 是 `S1`/`S2`…（分片），
+     * 汇总那一次的 `agent` 为空、靠 `agent_index === agent_total` 认出来。
+     * 两个都要写「第几个/共几个」，因为**只看轮次会误读**：「第 1 轮」跑了两分钟，
+     * 究竟是第一个分片刚起步，还是已经在汇总了，完全看不出来。
+     */
+    function agentText(progress) {
+        if (!progress) return '';
+        var total = Number(progress.agent_total);
+        var index = Number(progress.agent_index);
+        if (!isFinite(total) || total <= 1 || !isFinite(index) || index <= 0) return '';
+        var name = typeof progress.agent === 'string' ? progress.agent : '';
+        if (!name) {
+            // `agent` 空 = 主代理自己那几轮。**只有确实是最后那一段才叫它「汇总」**：
+            // `agent_index < total` 且没有名字，是数据自相矛盾，这时宁可只报位次。
+            name = index >= total ? '汇总' : '主代理';
+        }
+        return '分片 ' + name + ' (' + index + '/' + total + ')';
+    }
+
+    /**
      * 轮询到的一帧 → meta 那一行。`null` 表示**这次什么都别写**。
      *
      * 到了终态就返回 `null`：那一行接下来由「落库的结论」接管（调用方去
@@ -80,12 +102,14 @@
         if (isTerminal(status)) return null;
         var round = roundText(progress);
         if (!round) return NO_PROGRESS;
+        var agent = agentText(progress);
+        var where = agent ? agent + ' · ' + round : round;
         var tokens = progress.live_tokens;
         if (tokens === null || tokens === undefined || tokens === '') {
             // 用量没上报：只说轮次，**不补一个 0**（口径 1、2）。
-            return '分析中：' + round;
+            return '分析中：' + where;
         }
-        return '分析中：' + round + ' · 本次已用 ' + tokens + ' tokens' + LIVE_SUFFIX;
+        return '分析中：' + where + ' · 本次已用 ' + tokens + ' tokens' + LIVE_SUFFIX;
     }
 
     /**
@@ -289,6 +313,7 @@
         progressText: progressText,
         resultOutcome: resultOutcome,
         roundText: roundText,
+        agentText: agentText,
         watchRun: watchRun
     };
 })(typeof window !== 'undefined' ? window : globalThis);

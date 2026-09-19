@@ -358,6 +358,14 @@ _CASES = {
         [{"round": 2, "max_rounds": 8, "live_tokens": None}, "running"],
         # 快照在、轮次读不出来（脏数据）：不可用，不编一个「第 0 轮」
         [{"round": 0, "max_rounds": 8, "live_tokens": 100}, "running"],
+        # 子代理模式：这一轮是哪个分片在跑（见 `services/ai/subagent.py`）
+        [{"round": 2, "max_rounds": 4, "live_tokens": 5000,
+          "agent": "S1", "agent_index": 1, "agent_total": 3}, "running"],
+        [{"round": 1, "max_rounds": 4, "live_tokens": None,
+          "agent": "", "agent_index": 4, "agent_total": 4}, "running"],
+        # 没有分片信息（老运行 / 没开子代理 / 快照里没有这三个键）：那一行与以前一字不差
+        [{"round": 3, "max_rounds": 8, "live_tokens": 100,
+          "agent": "", "agent_index": 0, "agent_total": 0}, "running"],
     ],
     "resultOutcome": [
         {"status": "failed", "error_message": "分析中断：ConnectionError: 上游断了"},
@@ -981,3 +989,32 @@ def test_the_failure_path_does_not_throw_itself(monkeypatch):
 
         assert result["status"] == "failed", result
         assert "引擎炸了" in result["error_message"], result
+
+
+class TestTheSubagentProgressLine:
+    """子代理模式下那一行要说出「现在是哪一片在跑」。
+
+    只看轮次会误读：「第 1 轮」跑了两分钟，究竟是第一个分片刚起步、还是已经在汇总了，
+    从字面上完全看不出来 —— 而这两种情况下用户该做的事不一样（等 vs 快好了）。
+    """
+
+    def test_a_member_is_named_with_its_position(self):
+        text = _run_node()["progressText"][9]
+
+        assert "分片 S1 (1/3)" in text, text
+        assert "第 2/4 轮" in text, text
+        # token 数原样带出（这个模块不做千分位；那是服务端下发的形状）
+        assert "5000 tokens" in text, text
+
+    def test_the_synthesis_is_called_what_it_is(self):
+        text = _run_node()["progressText"][10]
+
+        assert "分片 汇总 (4/4)" in text, text
+        assert "tokens" not in text, "用量没上报时不许补一个 0"
+
+    def test_without_slices_the_line_is_unchanged(self):
+        """没开子代理时那一行与以前**一字不差**（这是回归的护栏）。"""
+        text = _run_node()["progressText"][11]
+
+        assert text.startswith("分析中：第 3/8 轮"), text
+        assert "分片" not in text, text

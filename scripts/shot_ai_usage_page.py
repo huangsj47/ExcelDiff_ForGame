@@ -151,10 +151,17 @@ def _seed() -> dict:
         # 运行」挂的，而列表按时间倒序，于是点出来的那一笔根本没有逐轮记录）。
         newest = AiAnalysisRun.query.order_by(AiAnalysisRun.created_at.desc()).first()
         assert newest is not None, "一笔运行都没造出来"
+        # 那一笔同时也是「子代理模式跑出来的」：分片表、逐轮表的分片列都靠它才有东西可看
+        # （`_round_records` 的轮次带着 agent/agent_round）。**分片里故意留一个「未运行」**
+        # —— 那一行的红字是这一块最要紧的读数，没有它截图就看不出效果。
+        newest.subagent_mode = "subagents"
+        newest.subagent_count = 3
         for record in _round_records():
             db.session.add(AiAnalysisTrace(
                 run_id=newest.id, round_index=record.index, outcome=record.status,
                 parsed_ok=record.status != "unparsable",
+                # 分片那两列（NULL = 主代理自己那几轮，也是所有老行的情形）。
+                agent=record.agent or None, agent_round=record.agent_round or None,
                 tokens_input=record.prompt_tokens,
                 tokens_output=record.completion_tokens,
                 request_chars=record.prompt_chars,
@@ -162,6 +169,39 @@ def _seed() -> dict:
                 duration_ms=record.duration_ms,
                 **encode_evidence(record),
             ))
+        newest.response_payload = json.dumps(
+            {
+                "subagents": [
+                    {"label": "S1", "role": "subagent", "index": 1,
+                     "dimensions": ["config_id", "config_value", "config_linkage"],
+                     "status": "succeeded", "rounds": 2, "requests": 5,
+                     "tokens_input": 385_000, "tokens_output": 22_200,
+                     "cache_read_tokens": 240_000, "cache_write_tokens": 40_000,
+                     "anomalies": 3, "report_chars": 1_820, "skipped_reason": "", "error": ""},
+                    {"label": "S2", "role": "subagent", "index": 2,
+                     "dimensions": ["config_data", "value_sanity"],
+                     "status": "succeeded", "rounds": 1, "requests": 4,
+                     "tokens_input": 190_000, "tokens_output": 11_400,
+                     "cache_read_tokens": 178_000, "cache_write_tokens": 0,
+                     "anomalies": 2, "report_chars": 940, "skipped_reason": "", "error": ""},
+                    {"label": "S3", "role": "subagent", "index": 3,
+                     "dimensions": ["module_coupling", "code_logic", "version_branch", "process"],
+                     "status": "skipped", "rounds": 0, "requests": 0,
+                     "tokens_input": 0, "tokens_output": 0,
+                     "cache_read_tokens": None, "cache_write_tokens": None,
+                     "anomalies": 0, "report_chars": 0,
+                     "skipped_reason": "剩余预算不足（本月已用 2,880,000 / 3,000,000 tokens）",
+                     "error": ""},
+                    {"label": "汇总", "role": "synthesis", "index": 4,
+                     "dimensions": [], "status": "succeeded", "rounds": 1, "requests": 2,
+                     "tokens_input": 210_000, "tokens_output": 14_600,
+                     "cache_read_tokens": 196_000, "cache_write_tokens": 0,
+                     "anomalies": 4, "report_chars": 3_400, "skipped_reason": "", "error": ""},
+                ],
+                "subagent_skipped": ["S3：剩余预算不足"],
+            },
+            ensure_ascii=False,
+        )
         db.session.commit()
 
         # 平台档：故意配成一个**已经超了**的小额度，好让顶部横幅与卡片内提示都出现
@@ -211,12 +251,14 @@ def _round_records() -> list:
             response_text='{"status": "need_more_context", "reason": "先看战斗逻辑与道具表"}',
             prompt_tokens=180_000, completion_tokens=9_400,
             prompt_chars=210_000, context_chars=25_000, duration_ms=18_400,
+            agent="S1", agent_round=1,
         ),
         RoundRecord(
             index=2, status="final",
             response_text="# 变更理解\n\n改了战斗无敌帧的判定顺序。\n\n# 影响面分析\n\n只影响战斗系统。\n",
             prompt_tokens=205_000, completion_tokens=12_800,
             prompt_chars=232_000, context_chars=25_000, duration_ms=21_300,
+            agent="S1", agent_round=2,
         ),
     ]
 
