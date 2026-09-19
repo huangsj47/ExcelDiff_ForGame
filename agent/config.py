@@ -46,16 +46,17 @@ _AGENT_TASK_TYPE_ALLOWED = (
     "weekly_excel_cache",
     "file_content",
     "file_diff",
+    "find_references",
     "temp_cache_fetch",
 )
 # 「必做」集合：无论 `AGENT_LOCAL_TASK_TYPES` 里写了什么，这些都会补上。
 #
-# `file_content` 与 `file_diff` 必须在这里。它们是**平台侧唯一拿得到代码正文与单条提交
-# diff 的途径**（platform/agent 模式下平台被禁止 clone，见
-# services/agent_file_content_dispatch.py），一旦 Agent 不做它们，
-# 表现不是报错而是「AI 报告里永远有一条读不到正文/读不到 diff 的信息缺口」——
+# `file_content` / `file_diff` / `find_references` 必须在这里。它们是**平台侧唯一拿得到
+# 代码正文、单条提交 diff，以及「这个标识符还有谁在用」的途径**（platform/agent 模式下
+# 平台被禁止 clone，见 services/agent_file_content_dispatch.py），一旦 Agent 不做它们，
+# 表现不是报错而是「AI 报告里永远有一条读不到正文/读不到 diff/检索不到的信息缺口」——
 # 静默降级，没人会去查。（周版本分析的 diff 走平台已落库的合并 diff，不受影响；
-# 受影响的是模型点名要「某一条提交改了什么」的时候。）
+# 受影响的是模型点名要「某一条提交改了什么」，以及耦合排查时的关键词检索。）
 # 放进必做集合，已有部署不改任何环境变量就能生效；写进上面的允许集合，是为了让
 # `AGENT_LOCAL_TASK_TYPES=file_content` 这种写法不被 `_normalize_local_task_types` 过滤掉。
 _AGENT_TASK_TYPE_REQUIRED = (
@@ -66,9 +67,10 @@ _AGENT_TASK_TYPE_REQUIRED = (
     "weekly_excel_cache",
     "file_content",
     "file_diff",
+    "find_references",
     "temp_cache_fetch",
 )
-
+# 「必做」集合
 
 def _safe_eval_int_expression(raw: str, default: int) -> int:
     """Safely evaluate simple integer expressions like `1*1024_1024`."""
@@ -187,7 +189,8 @@ def load_settings() -> AgentSettings:
         # 即使显式设了 `AGENT_LOCAL_TASK_TYPES`、没写它们，也会被补上**（见上面 REQUIRED
         # 的注释：少了它们的表现是 AI 报告里一直有「读不到文件正文/读不到 diff」的信息
         # 缺口，而不是报错）。
-        or "auto_sync,commit_diff,excel_diff,weekly_sync,weekly_excel_cache,file_content,file_diff,temp_cache_fetch"
+        or "auto_sync,commit_diff,excel_diff,weekly_sync,weekly_excel_cache,"
+        "file_content,file_diff,find_references,temp_cache_fetch"
     )
     # 工作副本根目录：这里就解析成**绝对路径**（锚定 agent 安装根；平台源码与
     # agent 同级时锚定平台仓库根），此后所有消费方取到的都是同一个与 CWD 无关的

@@ -90,6 +90,46 @@ class AnalysisScope:
         name = str(raw_name or "").strip()
         return bool(name) and name in self.readable_references
 
+    # -- 批次级的查询（给「一次要看很多文件」的工具用） ----------------------
+
+    def batch_paths(self) -> tuple[str, ...]:
+        """本批次改动过的**全部**路径，去重且保持提交顺序（确定性）。
+
+        `find_references` 用它当搜索范围。顺序是确定的：同一批次两次搜索得到同一份列表，
+        于是「扫了前 N 个」这句话可复现 —— 随机顺序会让「为什么没搜到那个文件」变得没法解释。
+        """
+        seen: list[str] = []
+        for commit in self.commits:
+            for path in sorted(self.paths_by_commit.get(commit, ())):
+                if path not in seen:
+                    seen.append(path)
+        return tuple(seen)
+
+    def commit_of_path(self, raw_path: str) -> str | None:
+        """这个路径在**本批次里最后一次**被改的那条提交。
+
+        取最后一次：搜索要看的是这个文件当前的样子的最近一次改动之后的样子，而周版本里
+        同一个文件被多条提交改过是常态（合并 diff 就是为这件事存在的）。
+        """
+        path = normalize_path(raw_path)
+        found: str | None = None
+        for commit in self.commits:
+            if path in self.paths_by_commit.get(commit, ()):
+                found = commit
+        return found
+
+    def prefix_allowed(self, raw_prefix: str) -> bool:
+        """这个前缀（目录或文件）**至少匹配到本批次的一个改动文件**。
+
+        与 `path_allowed` 是同一个纪律的两个形态：那个管「能不能读这一个文件」，
+        这个管「能不能把搜索范围缩到这一片」。允许一个匹配不到任何东西的前缀没有意义
+        （结果必然是「没命中」，而模型会把它读成「那里没有引用」），所以直接丢掉并说明。
+        """
+        prefix = normalize_path(raw_prefix)
+        if not prefix:
+            return False
+        return any(path == prefix or path.startswith(prefix) for path in self.batch_paths())
+
     @classmethod
     def from_iterables(
         cls,

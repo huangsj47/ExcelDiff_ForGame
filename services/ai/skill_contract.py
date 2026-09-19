@@ -95,7 +95,13 @@ REPORT_SECTIONS = (
 # 模型可以索要的上下文类型。**必须与 SKILL.md 里给模型看的清单逐字一致**：
 # 文档里写了而运行期不认的类型，模型会一直请求、一直被丢弃，看起来像「模型不听话」，
 # 实际是两边没对齐。
-REQUEST_TYPES = ("commit_detail", "file_diff", "file_content", "read_reference")
+REQUEST_TYPES = (
+    "commit_detail",
+    "file_diff",
+    "file_content",
+    "read_reference",
+    "find_references",
+)
 
 # 异常条目只接受这两档严重度与置信度。更低的置信度按契约只能写进报告正文，
 # 不该出现在给人工跟进的清单里。

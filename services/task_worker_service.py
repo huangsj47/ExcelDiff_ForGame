@@ -1197,14 +1197,17 @@ def execute_task_inline_for_agent(task_type, payload):
         _process_weekly_excel_cache(int(config_id), file_path)
         return {"message": "weekly_excel_cache completed"}
 
-    if normalized_type in ('file_content', 'file_diff'):
-        # 在 Agent 自己的工作副本上读一个文件：正文 / 某一条提交改了这个文件的什么。平台侧
-        # 的调用方是 `services/agent_file_content_dispatch.py`，它读回的就是这里的返回值。
-        # 实现在单独的模块里（本文件贴着 2000 行的硬上限，见 `scripts/check_file_length.py`）。
+    if normalized_type in ('file_content', 'file_diff', 'find_references'):
+        # 在 Agent 自己的工作副本上读文件：正文 / 某一条提交改了这个文件的什么 / 一个关键词
+        # 出现在哪些文件的哪几行。平台侧的调用方是 `services/agent_file_content_dispatch.py`，
+        # 它读回的就是这里的返回值。实现在单独的模块里（本文件贴着 2000 行的硬上限，
+        # 见 `scripts/check_file_length.py`）。
         if normalized_type == 'file_content':
             from services.agent_file_content_reader import read_file_content_for_agent as reader
-        else:
+        elif normalized_type == 'file_diff':
             from services.agent_file_diff_reader import read_file_diff_for_agent as reader
+        else:
+            from services.agent_reference_search import search_references_for_agent as reader
         return reader(payload)
 
     if normalized_type == 'weekly_ai_analysis':

@@ -36,6 +36,15 @@ import re
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
+from services.ai.reference_search import (
+    MAX_SCAN_FILES,
+    SearchBudget,
+    entries_for,
+    normalize_query,
+    render_result,
+    search_files,
+)
+from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_loader import LoadedSkills
 from services.deployment_mode import is_agent_dispatch_mode
 from utils.content_window import CONTENT_MAX_CHARS, DEFAULT_WINDOW_LINES, slice_lines
@@ -892,9 +901,18 @@ class PlatformContextProvider:
         loaded: LoadedSkills,
         max_rows_per_sheet: int = DEFAULT_MAX_ROWS_PER_SHEET,
         use_stored_batch_diff: bool = True,
+        scope: AnalysisScope | None = None,
     ):
         self._loaded = loaded
         self._max_rows = max_rows_per_sheet
+        # 本批次的范围（哪些提交、各改了哪些文件）。只有 `find_references` 用它 —— 那个
+        # 工具的问题是「这个标识符本批次里还有谁在用」，而「本批次」正是 scope 知道、
+        # 别处都不知道的事（见 `ai/scope.py::batch_paths`）。不传时为 None：那几处
+        # 调用方（测试、探测）本来也不会用到这个工具。
+        self._scope = scope
+        # 「检索扫过多少文件」的额度（见 `reference_search.SearchBudget`）。挂在实例上，
+        # 所以子代理模式下 N 个成员**共用一份**（它们共用一个 provider）。
+        self._search_budget = SearchBudget()
         # 「向 Agent 取正文」的会话内记忆（见 `_content_from_agent`）：同一个进程里同一份
         # 请求只等一次。放在实例上而不是模块级 —— 一次分析一个 provider，跨分析复用会把
         # 上一份分析的结果喂给下一次。
@@ -906,6 +924,9 @@ class PlatformContextProvider:
         self._agent_diff_fetched: set = set()
         self._agent_diff_cached: dict = {}
         self._agent_diff_pending: dict = {}
+        # 「一次检索只做一次」的记忆（见 `_search_local`）：240 个文件是真读的，
+        # 模型对同一个词问两遍不该让节点把同一件事做两遍。
+        self._search_cache: dict = {}
         self._content_max_chars = DEFAULT_CONTENT_MAX_CHARS
         # 读平台已算好并落库的那一份（周版本合并 diff，页面同源），而不是现场重算。
         #
@@ -1236,6 +1257,142 @@ class PlatformContextProvider:
         return text
 
     # -- 内部 ---------------------------------------------------------------
+
+    # -- 检索 ---------------------------------------------------------------
+
+    def find_references(self, query: str, path: str = "") -> Optional[str]:
+        """在本批次改动的文件里找这个标识符的其它出现位置（`ai/reference_search.py`）。
+
+        与 `file_content` / `file_diff` 同一条路数：**平台本地能读就本地读，读不了就问
+        Agent**。区别在于它一次要读很多文件，所以两条来源都加了额度与上限，并且**读了
+        几个、跳过了几个、有没有被上限截断**都要写进给模型的文本里 ——
+
+        「没搜到」与「没搜完」在模型那里必须分得开：前者可以写进结论，后者只能写成
+        信息缺口。少了这几个数，它会用一句「没有其它引用」把一次只扫了 240 个文件的
+        搜索说成结论，而线上一个周版本有 767 个文件。
+        """
+        search = normalize_query(query)
+        if not search:
+            return None
+        if self._scope is None:
+            return (
+                "[检索不可用] 这次分析没有把「本批次改动了哪些文件」传给取数层，"
+                "读不到范围。请在报告里把这条写成信息缺口，不要据此下结论。"
+            )
+
+        prefix = normalize_path(path)
+        pairs = entries_for(
+            [item for item in self._scope.batch_paths() if not prefix or item.startswith(prefix)],
+            self._scope.commit_of_path,
+        )
+        allowance = min(MAX_SCAN_FILES, self._search_budget.remaining)
+        if allowance <= 0:
+            return (
+                "[检索额度用尽] 本次分析里 `find_references` 能扫的文件数已经用完，"
+                "这一次没有搜。请改用已知的路径直接索取 diff 或正文。"
+            )
+
+        local = self._search_local(pairs, search, prefix=prefix, allowance=allowance)
+        if local is not None:
+            return local
+        return self._search_from_agent(pairs, search, prefix=prefix, allowance=allowance)
+
+    def _search_local(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        query: str,
+        *,
+        prefix: str,
+        allowance: int,
+    ) -> Optional[str]:
+        """平台本地的工作副本。**单机模式**走这条；多节点模式返回 `None`（改问 Agent）。
+
+        与 `_content_from_agent` 同一套记忆：同一个进程里同一份检索只做一次
+        （模型可能对同一个词问两遍，而 240 个文件是要真读的）。
+        """
+        from services.vcs_content_service import get_file_content_from_git
+
+        key = (query, prefix)
+        if key in self._search_cache:
+            return self._search_cache[key]
+        # 一次就够的判断：没有本地工作副本时 `get_file_content_from_git` 会返回 None，
+        # 于是每个文件都算「读不到」——那会把 240 个文件白读一遍，还给出一句
+        # 「240 个都读不到」的假话（真相是平台本地根本没有这个仓库）。
+        repository = self._repository_of(pairs)
+        if repository is None:
+            return None
+        if is_agent_dispatch_mode():
+            # 多节点模式下平台被禁止 clone：本地读不到是**确定**的，别去读 240 次。
+            return None
+
+        def reader(path: str, commit: str):
+            return get_file_content_from_git(repository, commit, path)
+
+        result = search_files(
+            pairs, query, reader=reader, max_files=allowance, prefix=prefix
+        )
+        self._search_budget.consume(result.scanned + result.binary + result.missing)
+        text = render_result(result)
+        self._search_cache[key] = text
+        return text
+
+    def _search_from_agent(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        query: str,
+        *,
+        prefix: str,
+        allowance: int,
+    ) -> Optional[str]:
+        """业务节点上的 Agent 拿它自己的工作副本搜（platform/agent 模式的唯一取数点）。"""
+        from services.agent_file_content_dispatch import request_references
+
+        repository = self._repository_of(pairs)
+        if repository is None:
+            return (
+                "[检索不到] 本批次的改动文件里找不到对应的仓库，无法确定去哪个节点上搜。"
+            )
+        try:
+            outcome = request_references(
+                repository,
+                query=query,
+                entries=pairs[:allowance],
+                prefix=prefix,
+            )
+        except Exception as exc:  # noqa: BLE001 —— 取一次检索失败只该让这一条降级
+            log_print(f"⚠️ AI 取数：向 Agent 检索失败 {query}: {type(exc).__name__}: {exc}")
+            return f"[检索不到] `{query}`：向 Agent 检索时出错（{exc}）。"
+
+        status = str(outcome.get("status") or "")
+        if status == "ready":
+            rendered = str(outcome.get("text") or "")
+            if rendered:
+                self._search_budget.consume(int(outcome.get("scanned") or 0))
+                return rendered
+        reason = str(outcome.get("message") or "原因未知")
+        # 两句的尾巴逐字相同 —— 用常量而不是抄两遍：`trace_evidence` 按**开头**认这几句，
+        # 而两条分支各写一份尾巴的那天起，「还没回来」与「读不到」的原因就会开始漂移。
+        tail = (
+            "。**这不等于「没有其它引用」。**"
+            "这一轮请只依据已取得的证据判断，并在报告里把它写成信息缺口。"
+        )
+        if status == "pending":
+            return f"[检索还没回来] `{query}`：{reason}" + tail
+        return f"[检索不到] `{query}`：{reason}" + tail
+
+    def _repository_of(self, pairs: Sequence[tuple[str, str]]):
+        """这批路径属于哪个仓库。取第一条能查出提交行的路径的仓库。
+
+        跨仓库的批次（一个周版本关联多个仓库）只有第一个仓库会被检索 —— 这是**已知的
+        局限**，写在这里而不是装作没有：结果文本里的「范围内共 N 个文件」是按这个仓库
+        算的，不会把别的仓库的文件算进去。<!-- 后续可按仓库分组各派一次任务 -->
+        """
+        for path, commit in pairs:
+            row = self._commit_row(commit, path)
+            repository = getattr(row, "repository", None)
+            if repository is not None:
+                return repository
+        return None
 
     def _commit_row(self, commit: str, path: str):
         from models import Commit, db

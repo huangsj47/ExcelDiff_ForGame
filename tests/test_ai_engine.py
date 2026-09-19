@@ -111,6 +111,11 @@ class FakeProvider:
     def read_reference(self, name):
         return self._lookup(("read_reference", name), f"{name} 的正文")
 
+    def find_references(self, query, path=""):
+        # 协议里的第五个门（`find_references`）。桩忽略范围，但**形参不能少**：少了就是
+        # TypeError，而取数失败是被接住的 —— 表现不是报错，是「这一轮什么都没拿到」。
+        return self._lookup(("find_references", query), f"{query} 命中 1 处：a.lua:12")
+
 
 def _loaded() -> LoadedSkills:
     def doc(name: str, text: str, description: str = "说明") -> SkillDocument:

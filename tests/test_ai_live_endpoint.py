@@ -262,6 +262,10 @@ class ScriptedProvider:
         self.requests.append(("file_content", commit, path))
         return FAKE_DIFFS.get(path, f"（{path} 的完整内容略）")
 
+    def find_references(self, query, path=""):
+        self.requests.append(("find_references", query))
+        return f"{query} 命中 1 处：a.lua:12"
+
     def read_reference(self, name):
         self.requests.append(("read_reference", name))
         for document in (

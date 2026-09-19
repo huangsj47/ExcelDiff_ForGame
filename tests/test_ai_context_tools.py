@@ -56,6 +56,9 @@ class FakeProvider:
     def read_reference(self, name):
         return self._respond("read_reference", name)
 
+    def find_references(self, query, path=""):
+        return self._respond("find_references", query, path)
+
 
 def _diff_request(path=PATH_A, commit=COMMIT_A) -> ContextRequest:
     return ContextRequest(type="file_diff", commit=commit, path=path)

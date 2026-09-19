@@ -1435,7 +1435,10 @@ def _run_engine_and_persist(
         # 子代理模式下**所有成员共用一个 provider**：它的记忆（agent 取回的正文与差异）
         # 因此也共享，N 个成员不会把同一份内容取 N 遍。
         "provider": PlatformContextProvider(
-            loaded=loaded, use_stored_batch_diff=(payload.get("mode") != "commit")
+            # `scope` 只有 `find_references` 用：那个工具要知道「本批次改了哪些文件」，
+            # 而这正是 scope 才知道的事（工具本身不带 commit，见 ai/reference_search.py）。
+            loaded=loaded, scope=change.scope,
+            use_stored_batch_diff=(payload.get("mode") != "commit"),
         ),
         "loaded": loaded,
         "scope": change.scope,

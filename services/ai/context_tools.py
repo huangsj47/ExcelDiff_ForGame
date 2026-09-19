@@ -73,6 +73,7 @@ from typing import Any, Iterable, Mapping, MutableMapping, Protocol, runtime_che
 from services.ai.budget import ContextItem, truncate_text, truncate_text_middle
 from services.ai.protocol import ContextRequest, DroppedItem
 from services.ai.scope import normalize_path
+from services.ai.windowed_view import render_window, windowed_kinds
 from utils.content_window import CONTENT_MAX_CHARS
 
 # 单条上下文的字符上限。Excel 的 diff 通常是最大的，但也不该无限大。
@@ -93,6 +94,9 @@ DEFAULT_TOOL_LIMITS: Mapping[str, int] = {
     # 就对不上了，而那个行号正是模型写进结论里的坐标。
     "file_content": CONTENT_MAX_CHARS,
     "read_reference": 11_000,
+    # 检索给的是**位置**（`路径:行号: 那一行`），不是正文，所以单条可以给很多：
+    # 8,000 字够列几十条命中，而「这个字段还有谁在用」的答案本来就不需要正文。
+    "find_references": 8_000,
 }
 
 # 工具请求的总预算（按「次数」计，不是按条数）。
@@ -108,10 +112,17 @@ DEFAULT_MAX_TOOL_REQUESTS = 20
 # 结构化内容（按行块排列）用保留首尾的截断；纯文本用普通截断。
 _STRUCTURED_KINDS = frozenset({"file_diff"})
 
+# 这三样超长时走「分段 + 点名」（`services/ai/windowed_view.py`），不走上面的截断：
+# 它们的共同点是**内容有结构**（改动块 / 小节 / 文件清单），于是「第几段」是一个模型
+# 说得清、也对得上的坐标。`file_content` 不在里面 —— 它本来就按行窗口取，那个坐标
+# 比段号更准。`find_references` 也不在：它的结果是**命中清单**，超长时该收窄关键词，
+# 而不是一段段翻（翻出来的是同一批命中的不同片段，没有价值）。
+_WINDOWED_KINDS = frozenset(windowed_kinds())
+
 
 @runtime_checkable
 class ContextProvider(Protocol):
-    """真实取数的四个入口。返回值语义：
+    """真实取数的五个入口。返回值语义：
 
     * 返回字符串 → 成功。空字符串表示「确实没有内容」（例如该文件在此提交里是新增，
       没有可对比的旧版本），调用方会原样告诉模型。
@@ -126,6 +137,8 @@ class ContextProvider(Protocol):
     def file_content(self, commit: str, path: str, lines: str = "") -> str | None: ...
 
     def read_reference(self, name: str) -> str | None: ...
+
+    def find_references(self, query: str, path: str = "") -> str | None: ...
 
 
 @dataclass(frozen=True)
@@ -197,12 +210,24 @@ def describe_request(request: ContextRequest) -> str:
     同一个文件的两段窗口若共用一行标签，正文里就会出现两个标题一样的 `###` 节，
     而缓存指针说的「见上文那一节」于是指向一个不唯一的位置。
     """
+    if request.lines:
+        head = (
+            f"read_reference {request.name}"
+            if request.type == "read_reference"
+            else (
+                f"{request.type} {(request.commit or '')[:12]} "
+                f"{normalize_path(request.path)}"
+            ).strip()
+        )
+        return f"{head} lines={request.lines}"
     if request.type == "read_reference":
         return f"read_reference {request.name}"
     if request.type == "commit_detail":
         return f"commit_detail {request.commit[:12]}"
-    base = f"{request.type} {(request.commit or '')[:12]} {normalize_path(request.path)}"
-    return f"{base} {request.lines}" if request.lines else base
+    if request.type == "find_references":
+        scope = normalize_path(request.path)
+        return f"find_references {request.query}" + (f"（范围 {scope}）" if scope else "")
+    return f"{request.type} {(request.commit or '')[:12]} {normalize_path(request.path)}"
 
 
 def _failure_text(request: ContextRequest, reason: str) -> str:
@@ -341,8 +366,8 @@ class ContextTools:
                 meta={"tool_failed": True, "reason": "provider 返回空值"},
             )
 
-        text = str(raw)
-        if not text.strip():
+        body = str(raw)
+        if not body.strip():
             return ContextItem(
                 kind=request.type,
                 label=label,
@@ -351,12 +376,23 @@ class ContextTools:
             )
 
         limit = self._limit_for(request.type)
-        if request.type in _STRUCTURED_KINDS:
-            text, truncated = truncate_text_middle(text, limit)
-        else:
-            text, truncated = truncate_text(text, limit)
+        meta: dict[str, Any] = {"original_chars": len(body)}
+        if request.type in _WINDOWED_KINDS:
+            # 超长时**分段 + 让模型点名**，而不是从中间砍一刀（见 windowed_view）：
+            # 抬头的「共 K 段 / 这是第几段 / 怎么要别的段」三件事，缺一件这份内容就有
+            # 一部分是**永远拿不到**的，而模型不会知道自己少看了什么。
+            text, window_meta = render_window(
+                kind=request.type, label=label, text=body, window=request.lines, limit=limit
+            )
+            meta.update(window_meta)
+            if meta.get("truncated"):
+                meta["limit"] = limit
+            return ContextItem(kind=request.type, label=label, text=text, meta=meta)
 
-        meta: dict[str, Any] = {"original_chars": len(str(raw))}
+        if request.type in _STRUCTURED_KINDS:
+            text, truncated = truncate_text_middle(body, limit)
+        else:
+            text, truncated = truncate_text(body, limit)
         if truncated:
             meta["truncated"] = True
             meta["limit"] = limit
@@ -518,6 +554,11 @@ class ContextTools:
             )
         if request.type == "read_reference":
             return self.provider.read_reference(request.name)
+        if request.type == "find_references":
+            # 这个工具**没有 commit**：它搜整个批次（每份文件用各自最后那次提交的内容）。
+            # `path` 在这里是**范围前缀**而不是某一条提交改过的某个文件 —— 见
+            # `protocol.sanitize_requests` 里那一支的校验。
+            return self.provider.find_references(request.query, request.path)
         # 走到这里说明 `sanitize_requests` 漏了一种类型。宁可如实报失败，也不要
         # 静默返回空——那会让模型以为拿到了内容。
         return None

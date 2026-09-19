@@ -29,6 +29,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from services.ai.reference_search import MIN_QUERY_CHARS, normalize_query
 from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_contract import (
     CONFIDENCES,
@@ -46,6 +47,10 @@ STATUSES = (STATUS_NEED_MORE_CONTEXT, STATUS_FINAL)
 # 契约的一部分（必须与 SKILL.md 里给模型看的枚举逐字一致），由校验器自动守住。
 REQUEST_TYPES_NEEDING_COMMIT = ("commit_detail", "file_diff", "file_content")
 REQUEST_TYPES_NEEDING_PATH = ("file_diff", "file_content")
+
+# 认「窗口」(`lines`) 的工具：返回长内容的四个。单位各不相同（见 `ContextRequest.lines`），
+# 但语法与规范化是同一条 —— 于是「哪一段」这件事在协议层只需要一处解析。
+_WINDOW_TYPES = ("file_content", "file_diff", "read_reference", "commit_detail")
 
 # 报告健康检查需要命中多少个章节标题才认为「这像一份报告」。
 REPORT_HEALTH_MIN_SECTIONS = 2
@@ -67,20 +72,35 @@ class ContextRequest:
     commit: str = ""
     path: str = ""
     name: str = ""
-    # `file_content` 的可选行窗口（`"1180-1260"`）。**空表示「你替我挑一段」**：
-    # 平台会给改动周围那一段（见 `ai/platform_provider._render_text_content`）。
+    # 要**哪一段**。空表示「你替我挑一段」：
+    # `file_content` 会给改动附近那一段（见 `ai/platform_provider._render_text_content`），
+    # 其余三个从第一段开始、按字符上限装到装不下为止。
     #
     # 为什么要有这个字段：代码文件的正文动辄几千行，整份给既超预算又没用（从中间截断的
     # 正文等于没有上下文）。让它点名要哪一段，比让平台猜它想看哪里准得多，也省得多。
+    #
+    # **单位随工具变**（四个认它的工具各自在返回文本的抬头里写明），这正是这个字段
+    # 不再只叫「行窗口」的原因：`file_content` 是行号 `"1180-1260"`、`file_diff` 是第几个
+    # 改动块、`read_reference` 是第几小节、`commit_detail` 是第几个改动文件。
     lines: str = ""
+    # `find_references` 的搜索词（一个标识符：字段名、协议名、函数名、配置 ID）。
+    # 只有这一个类型用它；其余类型的请求里它一律被清空（见 `sanitize_requests`）。
+    query: str = ""
 
     def describe(self) -> str:
+        if self.lines:
+            # 标签是回查内容的地址，所以「要了哪一段」必须写进去（同一个文件的两段
+            # 若共用一行标签，正文里就会出现两个标题一样的 `###` 节）。
+            head = (
+                f"read_reference {self.name}"
+                if self.type == "read_reference"
+                else f"{self.type} {self.commit[:12]} {self.path}".strip()
+            )
+            return f"{head} lines={self.lines}"
         if self.type == "read_reference":
             return f"read_reference {self.name}"
         if self.type == "commit_detail":
             return f"commit_detail {self.commit[:12]}"
-        if self.lines:
-            return f"{self.type} {self.commit[:12]} {self.path} lines={self.lines}"
         return f"{self.type} {self.commit[:12]} {self.path}"
 
 
@@ -465,6 +485,42 @@ def sanitize_requests(
             allowed.append(ContextRequest(type=request_type, name=request.name))
             continue
 
+        if request_type == "find_references":
+            # 这个工具**不带 commit**：它搜的是整个批次改动的文件（每份用各自最后那次
+            # 提交的内容），所以它没有「某一条提交」可以校验，取而代之的是两件事 ——
+            # 关键词得写得够具体（"id" 这种词会把整批都搜出来），以及可选的 `path`
+            # 前缀必须真的匹配到本批次的改动文件。
+            query = normalize_query(request.query)
+            if len(query) < MIN_QUERY_CHARS:
+                dropped.append(
+                    DroppedItem(
+                        "request",
+                        index,
+                        f"搜索词太短（至少 {MIN_QUERY_CHARS} 个字），换个具体一点的标识符",
+                        query,
+                    )
+                )
+                continue
+            prefix = normalize_path(request.path)
+            if prefix and not scope.prefix_allowed(prefix):
+                dropped.append(
+                    DroppedItem(
+                        "request",
+                        index,
+                        "path 前缀匹配不到本批次改动过的任何文件",
+                        prefix,
+                    )
+                )
+                continue
+            key = (request_type, "", prefix, query)
+            if key in seen:
+                continue
+            seen.add(key)
+            allowed.append(
+                ContextRequest(type=request_type, path=prefix, query=query)
+            )
+            continue
+
         resolved = scope.resolve_commit(request.commit)
         if resolved is None:
             dropped.append(
@@ -482,11 +538,16 @@ def sanitize_requests(
         else:
             path = ""
 
-        # 行窗口（只有 `file_content` 认它）。**不合法一律清空**，而不是丢掉整条请求：
-        # 内容本身仍然有用，模型把窗口写坏的代价只能是「拿到的还是默认那一段」。
-        # 但**格式必须是规范形态**（`1180-1260`），这样它进得了去重键、也进得了日志 ——
-        # 否则同一个文件的两段窗口会被去重成一条，模型要第二段时拿回第一段。
-        lines = _normalize_line_window(request.lines) if request_type == "file_content" else ""
+        # 窗口（`lines`）：**不是只有 `file_content` 认它**。四个会返回长内容的工具都用这一套
+        # 语法点名「要哪一段」，只是单位不同 —— `file_content` 是行号（`1180-1260`）、
+        # `file_diff` 是改动块、`read_reference` 是文档小节、`commit_detail` 是第几个文件。
+        # 工具会在返回文本的抬头里写明「共几段 / 这是第几段 / 怎么要别的段」。
+        #
+        # **不合法一律清空**，而不是丢掉整条请求：内容本身仍然有用，模型把窗口写坏的代价
+        # 只能是「拿到的还是默认那一段」。但格式必须是规范形态（`1180-1260`），这样它进得了
+        # 去重键、也进得了日志 —— 否则同一个文件的两段窗口会被去重成一条，模型要第二段时
+        # 拿回第一段。
+        lines = _normalize_line_window(request.lines) if request_type in _WINDOW_TYPES else ""
 
         key = (request_type, resolved, path, lines)
         if key in seen:

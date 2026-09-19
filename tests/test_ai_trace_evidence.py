@@ -27,6 +27,7 @@ import pytest
 
 from services.ai.budget import TRUNCATION_SUFFIX, ContextItem
 from services.ai.protocol import ContextRequest, DroppedItem
+from services.ai.scope import AnalysisScope
 from services.ai.trace_evidence import (
     FAILURE_NOTICE_PREFIXES,
     TRACE_LIST_MAX_ITEMS,
@@ -153,6 +154,47 @@ class TestFailureVersusEmpty:
         detail = summarize_executed((item,))[0]
 
         assert detail["failed"] is True and detail["reason"] == "provider 返回空值"
+
+    def test_the_search_failure_lines_are_recognized_too(self, monkeypatch):
+        """`find_references` 的四句也要认得出来。
+
+        认不出来的后果比别的工具更绕：面板上那一次的「失败」列是 0，而报告里那句
+        「检索不到」看着像一条**结论**（「本批次没有别处引用」）—— 一次没搜成的检索
+        被读成了「查过了，没有」。
+        """
+        import services.agent_file_content_dispatch as dispatch
+        from services.ai import platform_provider as pp
+        from tests.test_ai_engine import _loaded as loaded_skills
+
+        scope = AnalysisScope.from_iterables(
+            commits=(COMMIT,),
+            paths_by_commit={COMMIT: [LUA]},
+            readable_references=[],
+        )
+        provider = pp.PlatformContextProvider(
+            loaded=loaded_skills(), scope=scope
+        )
+        monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=1))
+
+        monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: True)
+        monkeypatch.setattr(
+            dispatch,
+            "request_references",
+            lambda repository, *, query, entries, prefix="": {
+                "status": "pending",
+                "message": "Agent 当前离线",
+            },
+        )
+        samples = [
+            provider.find_references("target_id"),               # [检索还没回来]
+            pp.PlatformContextProvider(loaded=loaded_skills()).find_references("x"),  # [检索不可用]
+        ]
+
+        for text in samples:
+            notice = failure_notice(text)
+            assert notice, f"认不出这句失败说明：{text!r}"
+            item = ContextItem("find_references", "find_references target_id", text)
+            assert summarize_executed((item,))[0]["failed"] is True, text
 
     def test_the_prefixes_are_the_ones_the_provider_emits(self):
         """前缀清单不许与两个发出方脱节：它们发的那几句必须都在清单里。

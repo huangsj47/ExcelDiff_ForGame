@@ -54,7 +54,7 @@ import json
 import os
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Sequence
 
 from models import AgentNode, AgentProjectBinding, AgentTask, db
 from services.agent_management_handlers import enqueue_agent_task
@@ -63,6 +63,9 @@ from utils.content_window import CONTENT_MAX_CHARS
 FILE_CONTENT_TASK_TYPE = "file_content"
 # 让 Agent 算**某一条提交**改了这个文件的什么（实时那条路的 Agent 版）。
 FILE_DIFF_TASK_TYPE = "file_diff"
+# 关键词检索（`find_references`）。与上面两个在 Agent 端走同一条本地执行链路，
+# 但**一次要读很多个文件**，所以它有自己的额度与等待时长（见 `request_references`）。
+REFERENCES_TASK_TYPE = "find_references"
 
 # 一次取回的正文上限（字符）。**这是省 token 的第一道闸**：模型要的是「改动周围长什么样」，
 # 不是整份文件。超过就按窗口切，并把「还有多少行没给」如实写进结果。
@@ -85,6 +88,10 @@ AGENT_FETCH_POLL_SECONDS = 0.5
 # 为什么也不是「每次都重派」：真的取不到时（这个提交里确实没有这个路径），
 # 每次分析都要白等一轮上限（15 秒）才拿到同一句失败原因。
 AGENT_FETCH_MAX_ATTEMPTS = 3
+
+# 检索比正文/diff 慢一个量级（一次读几十上百个文件），所以它单独一个等待上限：
+# 用 15 秒的话几乎必然等不到，而等不到时模型这一轮的额度就白花了（下一轮还要再要一次）。
+REFERENCES_WAIT_SECONDS = 40.0
 
 # 旧名字：正文那一路的既有引用（`tests/test_content_window.py` 等）继续可用。
 FILE_CONTENT_WAIT_SECONDS = AGENT_FETCH_WAIT_SECONDS
@@ -418,6 +425,49 @@ def request_file_content(
         extra_payload={"lines": str(lines or ""), "max_chars": int(max_chars), "max_rows": int(max_rows)},
         request_key=f"file_content:{getattr(repository, 'id', '')}:{commit_id}:{file_path}:{lines}",
         wait_seconds=wait_seconds,
+        sleep_func=sleep_func,
+    )
+
+
+def request_references(
+    repository,
+    *,
+    query: str,
+    entries: Sequence[Sequence[str]],
+    prefix: str = "",
+    wait_seconds: Optional[float] = None,
+    sleep_func=time.sleep,
+) -> dict:
+    """让 Agent 在它的工作副本里搜一个关键词出现在哪些文件的哪几行。
+
+    `entries` 是 `[(路径, 提交), …]` —— 平台侧已经按**本批次改动过的文件**筛过一遍
+    （白名单纪律：这个工具能触达的内容不超过模型本来就能逐个索取的那些文件）。
+
+    ## 两个与正文/diff 请求不同的地方
+
+    * **等待更久**（`REFERENCES_WAIT_SECONDS`）：一次要读几十上百个文件，15 秒几乎必然
+      等不到，而等不到时模型这一轮就白要了一次（额度照扣）。多等一会儿换来的是这一轮
+      真的拿到结果。
+    * **`lines` 承载的是这次检索的签名**，不是行窗口：`_matches` 靠 payload 里的
+      `commit_id` / `file_path` / `lines` 认「这是不是同一份请求」，而检索既没有提交也没有
+      单个文件 —— 签名里含关键词、范围与文件数，所以**查同一个词但范围不同的两次检索
+      不会被当成同一份请求复用**（那会让模型拿到另一个范围的结果，而且完全看不出来）。
+    """
+    signature = f"{query}|{prefix}|{len(entries)}"
+    return _request_from_agent(
+        task_type=REFERENCES_TASK_TYPE,
+        noun="检索",
+        repository=repository,
+        commit_id="",
+        file_path="",
+        lines=signature,
+        extra_payload={
+            "query": str(query or ""),
+            "prefix": str(prefix or ""),
+            "entries": [[str(path), str(commit)] for path, commit in entries],
+        },
+        request_key=f"find_references:{getattr(repository, 'id', '')}:{signature}",
+        wait_seconds=REFERENCES_WAIT_SECONDS if wait_seconds is None else wait_seconds,
         sleep_func=sleep_func,
     )
 
