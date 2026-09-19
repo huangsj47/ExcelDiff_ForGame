@@ -150,6 +150,53 @@ def test_a_deleted_worksheet_is_called_out():
     assert "该工作表已被删除" in text
 
 
+def test_a_deleted_worksheet_still_shows_what_was_deleted():
+    """**「删掉了什么」才是这条差异的全部内容，不能只回一句「已被删除」。**
+
+    平台两边都把行留着：`diff_service` 的删除工作表分支带着 `rows`（每行 `removed`、
+    每格 `removed`）与 `stats`，`git_service._deleted_sheet_diff` 的注释更是写明
+    「这是评审者唯一能看到『到底删掉了什么』的地方，不能为了省体积只留一个计数」。
+    页面上确实看得到 —— 只有 AI 这条路把它丢了。
+
+    线上真实的一次（2026-09-20 的报告）：`d1a0fa9` 的「奖励模式」工作表被整表删除，
+    AI 只读到「整表删除」四个字，于是「这 5 行里有没有已经放出的编号」只能写成信息
+    缺口 —— 而它正是判断「删除会不会把线上已发放的奖励打空」的唯一依据。
+    """
+    text = render_diff_payload({
+        "type": "excel",
+        "file_path": TABLE,
+        "sheets": {
+            "奖励模式": {
+                "operation": "deleted",
+                "message": '工作表 "奖励模式" 已被删除',
+                "headers": ["id", "名称", "数量"],
+                "stats": {"added": 0, "removed": 2, "modified": 0},
+                "rows": [
+                    {"row_number": 2, "status": "removed",
+                     "data": {"id": 1, "名称": "每日奖励", "数量": 100}},
+                    {"row_number": 3, "status": "removed",
+                     "data": {"id": 100001, "名称": "活动奖励", "数量": 2}},
+                ],
+            }
+        },
+    })
+
+    assert "该工作表已被删除" in text
+    assert "100001" in text, f"被删掉的那几行没给出来：{text}"
+    assert "每日奖励" in text, f"被删掉的那几行没给出来：{text}"
+    assert "删除 2" in text, f"删除行的条数没有交代：{text}"
+
+
+def test_a_deleted_worksheet_without_rows_still_says_it_was_deleted():
+    """平台只给了「删了这张表」而没有行时，那句话照旧 —— 不能因为拿不到行就变成空块。"""
+    text = render_diff_payload({
+        "type": "excel", "file_path": TABLE,
+        "sheets": {"S": {"operation": "deleted", "rows": []}},
+    })
+
+    assert "该工作表已被删除" in text
+
+
 def test_a_new_worksheet_is_called_out():
     text = render_diff_payload(
         {"type": "excel", "file_path": TABLE, "sheets": {"S": {"operation": "added", "rows": []}}}
@@ -175,6 +222,75 @@ def test_an_excel_file_that_was_deleted_is_called_out():
 
     assert "已被删除" in text
     assert "存档" in text, "删除整张表的风险点是老存档仍引用，要点出来"
+
+
+def test_a_deleted_excel_file_still_shows_its_sheets():
+    """**整份配表被删除时，父提交的内容就在手边 —— 不列出来等于说「有东西没了，没了什么不知道」。**
+
+    `git_excel_parser_helpers` 专门为此去读 `commit.parents[0]` 把每张表渲染成删除行，
+    注释写着「读一次就能给出来」。页面读到了，AI 这条路上被 `operation == "deleted"`
+    那一句短路掉了。
+    """
+    text = render_diff_payload({
+        "type": "excel",
+        "file_path": TABLE,
+        "operation": "deleted",
+        "message": "该Excel文件已被删除",
+        "sheets": {
+            "奖励模式": {
+                "status": "deleted",
+                "headers": ["id", "数量"],
+                "rows": [
+                    {"row_number": 2, "status": "removed",
+                     "cells": [{"value": 100001, "status": "removed"},
+                               {"value": 2, "status": "removed"}]},
+                ],
+            }
+        },
+    })
+
+    assert "该Excel文件已被删除" in text
+    assert "奖励模式" in text, f"整份表被删时没有列出它原来有哪几张工作表：{text}"
+    assert "100001" in text, f"被删掉的那几行没给出来：{text}"
+
+
+def test_cells_that_carry_a_value_and_a_status_render_as_values():
+    """`cells` 有两种形状，其中带 `status` 的那种是 `git_service` 三个产出点共用的。
+
+    它原先被当成裸值 `str()` 出去，于是模型读到的是 `{'value': 100001, 'status':
+    'removed'}` —— 一个字典，而不是那个格子里的一千零一。新增工作表与修改行同样走这一支，
+    所以这不只是删除工作表的问题。
+    """
+    text = render_diff_payload({
+        "type": "excel", "file_path": TABLE,
+        "sheets": {
+            "新增表": {
+                "status": "new",
+                "headers": ["id", "数量"],
+                "rows": [
+                    {"row_number": 2, "status": "added",
+                     "cells": [{"value": 7007, "status": "added"},
+                               {"value": 30, "status": "added"}]},
+                ],
+            },
+            "改动表": {
+                "status": "modified",
+                "headers": ["id", "数量"],
+                "rows": [
+                    {"row_number": 5, "status": "modified",
+                     "cells": [{"value": 9, "status": "unchanged"},
+                               {"value": 30, "old_value": 10, "new_value": 30,
+                                "status": "changed"}]},
+                ],
+            },
+        },
+    })
+
+    assert "'value':" not in text and '"value":' not in text, (
+        f"单元格被渲染成了 Python 字典字面量：{text}"
+    )
+    assert "[新增] 第 2 行：7007 ｜ 30" in text, text
+    assert "10 → 30" in text, f"改动的旧值→新值没有给出来：{text}"
 
 
 # ==========================================================================

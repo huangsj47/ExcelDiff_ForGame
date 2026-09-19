@@ -201,7 +201,18 @@ def _meta_chars(item: ContextItem) -> int:
 # `lines` 必须在键里。第一版漏了它，后果是「模型先要第 100–200 行、再要第
 # 300–400 行，第二次拿到的是一句『你已经拿到这份内容了，见上文』」—— 而它上文里
 # 只有第一段。这条错会静默地把「看另一段」变成「以为看过另一段」。
-CacheKey = tuple[str, str, str, str, str]
+#
+# `query` 也必须在一起，理由一模一样，而**后果更大**：`find_references` 没有 commit、
+# 也没有单个文件（`path` 是可选的**范围前缀**，多数请求根本不带），所以那五项对它的每
+# 一次检索都是同一串值 —— 漏掉 `query` 就等于「整次分析里第二次起的每一次检索都命中
+# 第一次那条」。线上真实的一次：模型请求 `find_references(CfgRewardMode)`，拿回来的那
+# 一节标着 `find_references _calcSegmentedBonus`，于是那一整块「引用扫描未执行」，
+# `config_id` 与 `module_coupling` 只能写成信息缺口。子代理模式下还会跨成员扩散
+# （`body_cache` 是共享的）。
+#
+# 键里的每一项都必须是**决定返回内容**的字段。加字段时的判据就是这一条：
+# `protocol.ContextRequest` 上除了「模型自己看的说明」之外，没有一项可以漏。
+CacheKey = tuple[str, str, str, str, str, str]
 
 
 def _cache_key(request: ContextRequest) -> CacheKey:
@@ -211,6 +222,7 @@ def _cache_key(request: ContextRequest) -> CacheKey:
         normalize_path(request.path),
         request.name or "",
         request.lines or "",
+        request.query or "",
     )
 
 

@@ -235,10 +235,57 @@ def test_a_different_line_window_is_a_different_cache_entry():
     assert "100-200" in first.label and "300-400" in second.label
 
 
+def test_a_different_search_keyword_is_a_different_cache_entry():
+    """**换一个关键词就是换一份内容 —— 与 `lines` 那条是同一个错，后果更严重。**
+
+    `find_references` 没有 commit、也没有单个文件（`path` 是**可选的**范围前缀，多数
+    请求根本不带），所以 `(type, commit, path, name, lines)` 这五项对它的每一次检索都是
+    **同一串值**。缓存键里漏掉 `query` 的后果：整次分析里**第二次起的每一次检索**都会
+    命中第一次那条，模型拿到的是一句「你已经拿到这份内容了，见上文」，而那一节标的是
+    **另一个关键词**。
+
+    线上真实的一次（2026-09-20 的报告）：模型请求 `find_references(CfgRewardMode)`，
+    它拿回来的那一节写的是 `find_references _calcSegmentedBonus`（命中 0）——
+    于是「引用扫描未执行」，`config_id` 与 `module_coupling` 两个维度只能写成信息缺口。
+    子代理模式下更糟：`body_cache` 是**跨成员**共享的，一个成员的检索会砸掉另一个成员
+    的关键词。
+    """
+    provider = FakeProvider(find_references="a.lua:12: target_id = 1")
+    tools = ContextTools(provider)
+
+    first = tools.execute(
+        [ContextRequest(type="find_references", query="CfgRewardMode")]
+    ).items[0]
+    second = tools.execute(
+        [ContextRequest(type="find_references", query="_calcSegmentedBonus")]
+    ).items[0]
+
+    assert len(provider.calls) == 2, "换了个关键词就该真的去搜"
+    assert second.meta.get("repeat_pointer") is None, (
+        f"第二个关键词被当成重复索取、给成了指针（指向的是「{first.label}」那一节）"
+    )
+    assert "CfgRewardMode" in first.label and "_calcSegmentedBonus" in second.label
+
+
+def test_a_shared_cache_does_not_hand_one_members_search_to_another():
+    """共享缓存那一份是**跨成员**的，所以关键词漏进键里的后果会跨成员扩散。"""
+    shared: dict = {}
+    provider = FakeProvider(find_references="a.lua:12: target_id = 1")
+
+    ContextTools(provider, body_cache=shared).execute(
+        [ContextRequest(type="find_references", query="CfgRewardMode")]
+    )
+    other = ContextTools(provider, body_cache=shared).execute(
+        [ContextRequest(type="find_references", query="_calcSegmentedBonus")]
+    ).items[0]
+
+    assert len(provider.calls) == 2, "另一个成员的另一个关键词不该命中共享缓存"
+    assert "_calcSegmentedBonus" in other.label, other.label
+
+
 # ==========================================================================
 # 跨成员共享的正文缓存（子代理模式）
 # ==========================================================================
-
 
 def test_a_shared_hit_gives_the_full_body_not_a_pointer():
     """**这是共享缓存存在的意义，也是最容易做错的一处。**

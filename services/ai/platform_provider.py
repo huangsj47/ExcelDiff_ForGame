@@ -140,14 +140,25 @@ def render_diff_payload(
 def _render_excel(payload: Mapping[str, Any], *, path: str, max_rows: int) -> str:
     where = path or str(payload.get("file_path") or "")
 
-    # 解析失败 / 文件被删除，都要**明说**，不能渲染成一张空表。
+    # 解析失败**明说**，不能渲染成一张空表。
     if payload.get("error"):
         message = str(payload.get("message") or payload.get("error") or "未知原因")
         return f"[配表差异解析失败] {where}：{message}。**这不等于「没有改动」。**"
-    if str(payload.get("operation") or "") == "deleted":
-        return f"[配表] {where}：该表已被删除。删除整张表要确认是否有代码或存档仍在引用。"
 
     sheets = payload.get("sheets") or {}
+    deleted_file = str(payload.get("operation") or "") == "deleted"
+
+    # **整份表被删除时也要把工作表列出来。** 原先这里只回一句「该表已被删除」，
+    # 而调用方（`git_excel_parser_helpers`）为了这一句之外还能给出「原来有哪几张表、
+    # 每张表里是什么」，特地去读了一遍 `commit.parents[0]` —— 注释写着「读一次就能
+    # 给出来」。页面读到了，只有 AI 这条路被这句话短路掉，于是它只能把「删掉的 5 行里
+    # 有没有已经放出的编号」写成信息缺口。没带 sheets 时才退回那句话。
+    if deleted_file and (not isinstance(sheets, Mapping) or not sheets):
+        return (
+            f"[配表] {where}：该表已被删除。"
+            "删除整张表要确认是否有代码或存档仍在引用。"
+        )
+
     if not isinstance(sheets, Mapping) or not sheets:
         return f"[配表] {where}：本次没有可展示的差异。"
 
@@ -155,6 +166,14 @@ def _render_excel(payload: Mapping[str, Any], *, path: str, max_rows: int) -> st
     lines: list[str] = []
     if where:
         lines.append(f"配表差异：{where}")
+    if deleted_file:
+        # 与工作表级那句同一个口径（见 `_render_sheet`）：**删掉了什么才是内容**。
+        # 平台自己给的那句话照旧带着（它是「整份文件」范围的，与工作表级那句不重复）。
+        message = str(payload.get("message") or "该Excel文件已被删除").strip()
+        lines.append(
+            f"**{message}**；下面是它被删除前的内容（每一行都是删除行）。"
+            "删除整份配表要确认是否有代码或存档仍在引用。"
+        )
     if summary:
         lines.append(
             f"整体：新增 {summary.get('added', 0)} 行、删除 {summary.get('removed', 0)} 行、"
@@ -175,21 +194,36 @@ def _render_sheet(name: str, sheet: Any, *, max_rows: int) -> list[str]:
 
     head = [f"### 工作表「{name}」"]
     operation = str(sheet.get("operation") or "").strip()
-    if operation == "deleted":
-        return head + ["- 该工作表已被删除。"]
-    if operation == "added":
+    # `status: deleted` 是 `git_service._deleted_sheet_diff` 的写法（它**带着 rows**），
+    # `operation: deleted` 是 `diff_service` 的写法（也带着 rows）——两种都要认。
+    deleted = operation == "deleted" or _row_status(sheet) == "deleted"
+    if deleted:
+        # **不能在这里就 return。** 删除工作表时「删掉了什么」是这条差异的全部内容：
+        # 平台两边都把行留着（`_deleted_sheet_diff` 的注释：「这是评审者唯一能看到
+        # 『到底删掉了什么』的地方，不能为了省体积只留一个计数」），页面上看得到，
+        # 只有 AI 这条路原先把它丢了。下面按普通分支把 rows / stats 渲染出来。
+        head.append("- **该工作表已被删除**。")
+    elif operation == "added":
         head.append("- 该工作表是新增的。")
     if sheet.get("error"):
-        return head + [f"- 解析失败：{sheet.get('message') or sheet.get('error')}"]
+        return [head[0], f"- 解析失败：{sheet.get('message') or sheet.get('error')}"]
 
     rows = sheet.get("rows") or []
     header_lines = _render_header_block(sheet)
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or not rows:
+        if deleted:
+            # 平台只说了「删了这张表」而没有行 —— 那句话本身照旧是全部信息。
+            return head
         if header_lines:
             # 「只改了表头」的提交：rows 是空的，但表头行真的变了 ——
             # 这里说「没有差异行」等于让 AI 告诉评审者这次提交什么都没改。
             return head + header_lines
         return head + ["- 没有差异行。"]
+    if deleted:
+        head[-1] = (
+            f"- **该工作表已被删除**，下面是它被删除前的内容"
+            f"（{len(rows)} 行，每一行都是删除行）。"
+        )
 
     # 优先展示有变化的行：整表几千行时，未变的行是纯噪音。
     changed = [row for row in rows if _row_status(row) not in ("", "unchanged")]
@@ -275,9 +309,29 @@ def _render_row(row: Any) -> str:
 
     cells = row.get("cells")
     if isinstance(cells, Sequence) and not isinstance(cells, (str, bytes)):
-        return prefix + " ｜ ".join(_cell(cell) for cell in cells)
+        return prefix + " ｜ ".join(_cell_entry(cell) for cell in cells)
 
     return prefix + "（该行有变更，但没有可展示的字段明细）"
+
+
+def _cell_entry(cell: Any) -> str:
+    """`cells` 数组里的一项。**这一列有两种形状，都是平台真实产出的。**
+
+    * **裸值**：早期写法，也还有分支在用；
+    * `{'value', 'status'}` / `{'value', 'old_value', 'new_value', 'status'}`：
+      `services/git_service.py` 里三个产出点（新增工作表、**删除工作表**、修改行）
+      用的都是这个形状，它的 docstring 也写明「模板与前端读的就是这个形状」。
+
+    第二种原先落到 `_cell()` 上、被 `str()` 成一段 Python 字典字面量
+    （`{'value': 100001, 'status': 'removed'}`）—— 模型读到的是「一个字典」，
+    而不是那个格子里的一千零一。删除工作表那条路上，这几行是**判断「删掉的编号
+    有没有已经放出去」的唯一依据**，读成字典字面量就等于没读到。
+    """
+    if not isinstance(cell, Mapping):
+        return _cell(cell)
+    if "old_value" in cell or "new_value" in cell:
+        return f"{_cell(cell.get('old_value'))} → {_cell(cell.get('new_value'))}"
+    return _cell(cell.get("value"))
 
 
 def _cell(value: Any) -> str:
