@@ -771,10 +771,7 @@ def refresh_merge_diff():
         else:
             cache_clear_time = time.time() - cache_clear_start
             log_print(f"ℹ️ 没有找到需要清除的Excel文件缓存", 'INFO')
-        # 恢复后台缓存任务处理
-        log_print("🔄 恢复后台缓存任务处理...", 'INFO')
-        from services.background_task_service import resume_background_tasks
-        resume_background_tasks()
+        # 恢复后台缓存任务处理：**放在 finally 里**，理由见函数末尾。
         return json_success(
             jsonify=jsonify,
             message=f'已清除 {cleared_count} 个文件的缓存，缓存清理耗时 {cache_clear_time:.2f} 秒，请刷新页面查看重新计算的结果',
@@ -807,6 +804,19 @@ def refresh_merge_diff():
             error_type="unexpected_error",
             http_status=500,
         )
+    finally:
+        # 「恢复后台任务」必须挂在 finally 上，不能只在成功那条路上调。
+        #
+        # 上面四段 `except` 各自 `return`，原先的恢复语句在 try 的最后一句 ——
+        # 任何一条失败路径（数据库异常 / 运行时异常 / 意外异常）都会**跳过它**，
+        # 于是 `_task_paused` 永远留在 True、后台工作线程从此再也不领任务：
+        # 一次「重新计算」失败 = 整个平台的缓存同步静默停摆，而日志里只有
+        # 「重新计算失败」，没有任何地方说后台已经停了。
+        #
+        # 没暂停过的时候调它只是把标志写成 False（幂等），所以不必判断「我暂停了吗」。
+        log_print("🔄 恢复后台缓存任务处理...", 'INFO')
+        from services.background_task_service import resume_background_tasks
+        resume_background_tasks()
 
 def merge_diff():
     """合并选中条目的diff显示页面"""

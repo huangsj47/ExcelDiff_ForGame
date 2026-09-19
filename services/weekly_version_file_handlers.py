@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from flask import abort, jsonify, redirect, render_template, request, url_for
 from werkzeug.exceptions import HTTPException
 
+from services.commit_lookup_service import find_commit_by_commit_id
 from services.deployment_mode import is_agent_dispatch_mode
 from services.model_loader import get_runtime_models
 from services.weekly_file_status import WEEKLY_FILE_STATUSES, is_valid_weekly_file_status
@@ -82,15 +83,15 @@ def weekly_version_file_previous_version(config_id):
             lower_path = file_path.lower()
             is_excel_file = lower_path.endswith((".xlsx", ".xls", ".xlsm", ".xlsb"))
             if is_excel_file:
-                # Excel 删除场景优先跳转到提交Diff页面，避免文本预览接口无法解码二进制内容
-                commit_query = Commit.query.filter(
-                    Commit.repository_id == config.repository_id,
-                    Commit.path == file_path,
+                # Excel 删除场景优先跳转到提交Diff页面，避免文本预览接口无法解码二进制内容。
+                # 按 commit_id 找回那条提交 —— 口径（短 SHA 才是前缀、SVN 修订号只精确
+                # 匹配）在 services/commit_lookup_service.py 里，两处共用。
+                previous_commit = find_commit_by_commit_id(
+                    Commit,
+                    repository_id=config.repository_id,
+                    file_path=file_path,
+                    commit_id=commit_id,
                 )
-                if len(commit_id) >= 40:
-                    previous_commit = commit_query.filter(Commit.commit_id == commit_id).first()
-                else:
-                    previous_commit = commit_query.filter(Commit.commit_id.like(f"{commit_id}%")).first()
 
                 if previous_commit:
                     try:

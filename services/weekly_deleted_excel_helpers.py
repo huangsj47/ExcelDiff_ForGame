@@ -7,6 +7,8 @@ from html import escape
 from typing import Any
 from urllib.parse import quote
 
+from services.commit_lookup_service import find_commit_by_commit_id
+
 
 def is_deleted_operation(operation: Any) -> bool:
     op = str(operation or "").strip().upper()
@@ -139,23 +141,15 @@ def previous_version_url(
     if not previous_commit_str:
         return None
     previous_url = None
-    commit_query = commit_model.query.filter(
-        commit_model.repository_id == config.repository_id,
-        commit_model.path == file_path,
+    # 按 commit_id 找回那条提交 —— 口径（短 SHA 才是前缀、SVN 修订号只精确匹配）
+    # 在 services/commit_lookup_service.py 里，两处共用。原先这里自己写了一套
+    # 「长度 >= 40 就精确、否则 like」，SVN 的 `r1` 会前缀匹配上 `r19`。
+    previous_commit = find_commit_by_commit_id(
+        commit_model,
+        repository_id=config.repository_id,
+        file_path=file_path,
+        commit_id=previous_commit_str,
     )
-    if len(previous_commit_str) >= 40:
-        previous_commit = commit_query.filter(commit_model.commit_id == previous_commit_str).first()
-    else:
-        previous_commit = None
-        try:
-            if hasattr(commit_model.commit_id, "like"):
-                previous_commit = commit_query.filter(
-                    commit_model.commit_id.like(f"{previous_commit_str}%")
-                ).first()
-        except Exception:
-            previous_commit = None
-        if previous_commit is None:
-            previous_commit = commit_query.filter(commit_model.commit_id == previous_commit_str).first()
 
     if previous_commit:
         try:

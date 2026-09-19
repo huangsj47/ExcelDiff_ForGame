@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 后台任务工作服务 - 从 app.py 拆分
@@ -23,6 +23,8 @@ from utils.logger import log_print, log_structured_event
 from utils.db_retry import db_retry
 from utils.timezone_utils import now_beijing
 from services.deployment_mode import get_deployment_mode, is_agent_dispatch_mode
+from services.background_task_service import is_tasks_paused
+from services.repo_worktree_cleanup import force_remove_repo_worktree
 from services.branch_refresh_service import (
     NON_CRITICAL_BRANCH_REFRESH_ERRORS,
     queue_missing_git_branch_refresh as queue_missing_git_branch_refresh_service,
@@ -176,38 +178,6 @@ def _deployment_mode():
 
 def _use_agent_dispatch():
     return is_agent_dispatch_mode()
-
-
-def _force_remove_repo_worktree(local_path: str):
-    target = os.path.abspath(str(local_path or "").strip())
-    if not target:
-        return True
-    if not os.path.exists(target):
-        return True
-
-    try:
-        shutil.rmtree(target, ignore_errors=False)
-    except (OSError, PermissionError) as exc:
-        log_print(f"⚠️ 删除仓库目录失败，尝试命令行兜底: {target} | {exc}", "SYNC", force=True)
-
-    if os.path.exists(target):
-        try:
-            if os.name == "nt":
-                subprocess.run(
-                    ["cmd", "/c", "rmdir", "/s", "/q", target],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-            else:
-                shutil.rmtree(target, ignore_errors=True)
-        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-            log_print(f"⚠️ 目录删除兜底失败: {target} | {exc}", "SYNC", force=True)
-
-    if os.path.exists(target):
-        log_print(f"❌ 无法删除仓库目录: {target}", "SYNC", force=True)
-        return False
-    return True
 
 
 def _enqueue_agent_task_from_background_task(db_task, extra_payload=None):
@@ -493,6 +463,17 @@ def background_task_worker():
     log_print("后台任务工作线程启动", 'APP')
     log_print(f"初始队列大小: {background_task_queue.qsize()}", 'APP')
     while background_task_running:
+        # 「临时暂停」要真的停 —— 这个标志由 `refresh_merge_diff` 在删缓存前后设/清，
+        # 目的是别让后台线程把它刚删掉的那批缓存在同一瞬间算完写回去
+        # （那正是「点了重新计算、刷新后没变化」的成因）。见
+        # `services/background_task_service.py` 的模块 docstring。
+        #
+        # 这里是**跳过这一轮**而不是阻塞等待：领到任务之后阻塞会把心跳与租约续期
+        # 一起停掉（超时会让节点被判离线、任务被别的节点领走）。没领任务时等，
+        # 才是安全的等法。
+        if is_tasks_paused():
+            time.sleep(0.2)
+            continue
         task_processed = False
         try:
             task_wrapper = background_task_queue.get(timeout=1)
@@ -760,7 +741,7 @@ def _handle_auto_sync_task_inner(task):
                             "SYNC",
                             force=True,
                         )
-                        if not _force_remove_repo_worktree(git_service.local_path):
+                        if not force_remove_repo_worktree(git_service.local_path):
                             error_msg = f"重试失败：无法清理本地目录 {git_service.local_path}"
                             repository.clone_status = "failed"
                             repository.clone_error = error_msg
@@ -954,7 +935,7 @@ def _handle_auto_sync_task_inner(task):
                             "SYNC",
                             force=True,
                         )
-                        if not _force_remove_repo_worktree(svn_service.local_path):
+                        if not force_remove_repo_worktree(svn_service.local_path):
                             error_msg = f"重试失败：无法清理SVN目录 {svn_service.local_path}"
                             repository.clone_status = "failed"
                             repository.clone_error = error_msg

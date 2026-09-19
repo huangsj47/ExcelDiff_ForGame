@@ -120,6 +120,62 @@ AUTH_EXEMPT_PATHS = (
     "/healthz",
 )
 
+# ---------------------------------------------------------------------------
+# CSRF：按 **endpoint 白名单** 放行 Agent 的写接口，不按路径前缀。
+#
+# 这些接口由 **Agent 进程**调用：它是一台机器上的后台进程，手里没有浏览器会话，
+# 也就拿不到 CSRF token（`session[csrf_session_key]` 必然是空的）—— 所以它们
+# 必须走 CSRF 放行，否则 Agent 一个请求都发不出去。它们各自的鉴身方式是
+# `services/agent_management_handlers._validate_agent_shared_secret()`
+# （`X-Agent-Secret` 请求头 + 定长时间比较），那才是这一层的守门人。
+#
+# 【为什么不写成 `request.path.startswith("/api/agents/")`】
+# 前缀会把这个前缀底下**所有**写接口一起放行，包括两个**管理员在网页上点的按钮**：
+#
+#   * `ignore_agent_incident`       —— 「忽略这条告警」
+#   * `rollback_agent_release`      —— 「把 Agent 回滚到某个版本」
+#
+# 它们只要求 `@require_admin`、**不校验 agent secret**，于是前缀豁免让 CSRF 这一层
+# 完全不看：管理员登录着的时候访问一个恶意页面（或同一可注册域下的任意页面），
+# 那个页面 POST 过来，浏览器带上 session cookie、`@require_admin` 通过 ——
+# 「忽略所有告警」「回滚 Agent 版本」就这样被点掉了。实测：不带 token、带
+# `Origin: http://evil.example` 的 POST 直接进到了 handler（同会话对照组的
+# `/api/excel-html-cache/clear` 正常回 400 CSRF 拒绝）。
+#
+# 【为什么是白名单而不是「带了合法 secret 就放行」】
+# 「带了合法 secret」看起来更简洁，但它是**失败开放**的：以后新增一个
+# `/api/agents/` 底下的接口、忘了让它校验 secret，它默认就是免 CSRF 的。
+# 按 endpoint 列白名单则是失败关闭的 —— 新接口忘了列进来，表现是
+# 「Agent 调不通，日志里写着 CSRF 校验失败」，一眼能看见；而不是静默少一道防护。
+#
+# 名单里的名字是 **url_map 里的 endpoint**。同一个 handler 在本仓注册了两份
+# （一份带蓝图前缀 `agent_management_routes.xxx`、一份是短名别名，见 app.py 的
+# 「Registered N endpoint short-name aliases」），实际命中哪一份取决于 Werkzeug 的
+# 排序，所以比对时把前缀去掉再比 —— 只认一种写法会在某次路由调整后静默失效。
+# ---------------------------------------------------------------------------
+AGENT_SECRET_ENDPOINTS = frozenset(
+    {
+        "register_agent_node",
+        "agent_heartbeat",
+        "agent_report_incident",
+        "agent_upsert_temp_cache",
+        "agent_get_latest_release",
+        "agent_download_release_package",
+        "agent_claim_task",
+        "agent_report_task_result",
+    }
+)
+
+
+def _is_agent_secret_endpoint() -> bool:
+    """当前请求命中的是不是「由 `X-Agent-Secret` 自证身份」的 Agent 写接口。"""
+    endpoint = str(getattr(request, "endpoint", "") or "")
+    if not endpoint:
+        return False
+    if endpoint in AGENT_SECRET_ENDPOINTS:
+        return True
+    return endpoint.rsplit(".", 1)[-1] in AGENT_SECRET_ENDPOINTS
+
 APP_SECURITY_AUTH_BACKEND_IMPORT_ERRORS = (ImportError, RuntimeError, AttributeError)
 APP_SECURITY_PUBLIC_LOGIN_DISCOVERY_ERRORS = (RuntimeError, AttributeError, TypeError)
 APP_SECURITY_PUBLIC_LOGIN_BUILD_ERRORS = (BuildError, RuntimeError, AttributeError, TypeError)
@@ -225,7 +281,23 @@ def configure_app_security_bootstrap(
             return None
         if request.endpoint in {"static"}:
             return None
-        if request.path.startswith("/api/agents/"):
+        # **没有命中任何路由时不校验 CSRF**：`request.url_rule is None` 意味着这个请求
+        # 会变成 404（路径不存在）或 405（方法不对），**没有任何 handler 会执行** ——
+        # 而 CSRF 拦的正是「跨站页面驱动一个真实的 handler」，这里没有可驱动的东西。
+        #
+        # 不加这一条会有一个很别扭的回归：`/api/agents/tasks/<id>/execute-proxy`
+        # 这种**已经下线**的路径，原先靠 `/api/agents/` 前缀豁免一路走到 404，
+        # 改成按 endpoint 白名单之后 `request.endpoint` 是 None → 落进 CSRF 校验 →
+        # 调不通的 Agent 收到的是「CSRF token invalid or missing」而不是「404 没有这个
+        # 接口」。排查方向会被彻底带偏（他会去查 token，而真正的问题是路径写错了）。
+        #
+        # 这不构成新的信息泄露：GET 请求本来就一律免 CSRF，攻击者早就能用 GET
+        # 区分「路径存在」与「不存在」。
+        if request.url_rule is None:
+            return None
+        # Agent 的写接口（见 AGENT_SECRET_ENDPOINTS 那段）：机器进程，没有 session，
+        # 也就没有 CSRF token 可带。它们自己用 X-Agent-Secret 验身。
+        if _is_agent_secret_endpoint():
             return None
         if is_valid_admin_token():
             return None

@@ -415,7 +415,21 @@ class SVNService:
 
             # 使用缓存的认证信息，避免SQLAlchemy会话问题
             username = self.repository_username
-            token = self.repository_token
+            # **SVN 的密码在 `password` 字段，不在 `token`。**
+            #
+            # 本文件的其它四处（_build_auth_args、get_commits、
+            # _get_file_binary_content、以及 services/vcs_content_service.py 取内容的
+            # 那两处）用的都是 `repository_password`；只有这里和 `get_commit_info`
+            # 拿 `token` 当密码。而 SVN 仓库的表单只写 `password`
+            # （`services/repository_update_form_service.py`，写 `token` 的是 Git），
+            # 于是对一台要认证的 SVN 服务器，这条命令**只发 `--username`、不发
+            # `--password`** ⇒ `svn log` 认证失败 ⇒ 返回空列表 ⇒
+            # `_resolve_previous_commit_from_vcs` 的回退拿不到前一条提交 ⇒ 基线是
+            # `None` ⇒ 整份 Excel 被渲染成「全部新增」。
+            #
+            # 保留 `token` 作为回退：万一有部署把凭据填在了 `token` 里，
+            # 那也比一个都不发好。
+            token = self.repository_password or self.repository_token
 
             # 如果有认证信息，添加认证参数
             if username:
@@ -713,7 +727,8 @@ class SVNService:
             # 使用缓存的仓库信息，避免SQLAlchemy会话问题
             repository_url = self.repository_url
             repository_username = self.repository_username
-            repository_token = self.repository_token
+            # 同上：SVN 的密码是 `password`，`token` 只是回退。
+            repository_token = self.repository_password or self.repository_token
 
             # 构建SVN log命令获取特定版本信息
             cmd = [

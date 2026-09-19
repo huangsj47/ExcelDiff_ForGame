@@ -957,6 +957,13 @@ def register_agent_node():
             or payload.get("project_code_list")
         )
 
+        # 注册请求方**自报**的身份凭据。Agent 侧（agent/runner.py / runner_runtime.py）
+        # 在手里还有 token 的时候会把它带上；丢了 token 就是空（那正是 401 →
+        # 重新注册那条恢复路径的起点）。
+        presented_token = str(
+            payload.get("agent_token") or request.headers.get("X-Agent-Token") or ""
+        ).strip()
+
         agent = AgentNode.query.filter_by(agent_code=agent_code).first()
         if not agent:
             agent = AgentNode(
@@ -966,8 +973,49 @@ def register_agent_node():
             )
             db.session.add(agent)
             db.session.flush()
+            token_rotated = True
         else:
             agent.agent_name = agent_name or agent.agent_name or agent_code
+            # ---------------------------------------------------------------
+            # **认得出来就把原 token 还给它，认不出来就换一把，绝不把旧的交出去。**
+            #
+            # 原先这里只有 `agent.agent_name = ...`：不认人，然后**无条件**把
+            # `agent.agent_token` 放在响应里返回。而这一层的门禁是
+            # `X-Agent-Secret` —— 一把**所有 Agent 共用**的对称密钥（还常常是
+            # `.env.simple` 模板里那个占位值，agent/runner_runtime.py 的注释专门
+            # 为此拒绝启动）。于是任何一个拿得到这把密钥的人（任何一个 Agent 节点、
+            # 任何一个看过部署脚本的人），只要 POST 一次 `/api/agents/register`
+            # 并填上别人的 `agent_code`，就能**领到那个节点的身份凭据**。
+            #
+            # 而 `agent_token` 是平台唯一的**按节点**凭据：`_get_agent_by_identity`
+            # 用它把心跳、领任务、回传结果绑定到具体节点上。它一旦可被任意读取，
+            # 「按节点隔离」这层就只剩一个名字：甲节点可以领乙节点的任务
+            # （而任务的 payload 里带着该仓库的明文口令，见
+            # `_enqueue_agent_task_from_background_task`）、伪造乙的结果回传，
+            # 全程无声。
+            #
+            # 所以改成「自证或轮换」：
+            #   * 带对了原 token → 它证明了自己就是这台节点，原样奉还（幂等，
+            #     同一台机器跑两个实例也不会互相踢掉）；
+            #   * 带错 / 没带 → **换一把新的**。合法的 Agent 在 401 之后正是这条
+            #     路（先清空 token 再重新注册，拿到新 token 继续跑，见
+            #     agent/runner.py 的 `agent_token = ""` 分支），所以恢复路径不受影响；
+            #     而攻击者拿到的是一个「把正主踢下线、正主立刻注册回来」的窗口 ——
+            #     它换不到一把**长期、静默**的凭据，而且这一下在日志里留痕。
+            if presented_token and agent.agent_token and hmac.compare_digest(
+                presented_token, str(agent.agent_token)
+            ):
+                token_rotated = False
+            else:
+                agent.agent_token = secrets.token_hex(24)
+                token_rotated = True
+                if presented_token:
+                    log_print(
+                        f"⚠️ Agent 身份凭据不匹配，已轮换: {agent_code} "
+                        f"（请求方未持有该节点当前的 agent_token）",
+                        "AGENT",
+                        force=True,
+                    )
 
         _apply_agent_runtime_fields(
             agent,
@@ -1084,7 +1132,13 @@ def register_agent_node():
             {
                 "success": True,
                 "agent_code": agent.agent_code,
+                # `agent_token` 永远是**当前**那把（`agent` 就是刚写库的那一行）。
+                # 轮换过的、或新建的节点，这里给的是新令牌 —— 那正是调用方需要的东西；
+                # 而「请求方自报了旧 token 且对得上」这条路上，返回的就是它自己刚发过来的
+                # 那一串，等于什么都没多给它。**没有一条路径会把一个调用方本来不知道的
+                # 旧令牌交出去** —— 这是这个字段能留在响应里的全部理由。
                 "agent_token": agent.agent_token,
+                "agent_token_rotated": token_rotated,
                 "project_binding_count": len(project_specs),
                 "created_project_codes": created_projects,
                 "idempotent_project_codes": idempotent_projects,

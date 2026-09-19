@@ -13,6 +13,7 @@ from collections import defaultdict
 from types import SimpleNamespace
 
 from models import db, Commit, Repository, DiffCache, ExcelHtmlCache
+from services.commit_lookup_service import is_svn_revision
 from services.deployment_mode import is_agent_dispatch_mode
 from services.diff_service import DiffService
 from utils.diff_data_utils import clean_json_data
@@ -100,11 +101,27 @@ def _commit_time_to_iso(commit_time):
 
 
 def _commit_id_matches(candidate_commit_id, target_commit_id):
+    """两个 `commit_id` 是不是同一个提交。
+
+    前缀匹配是**给 Git 短 SHA 用的**（`a1b2c3` 是 `a1b2c3d4…` 的缩写）。
+    **SVN 的修订号不是缩写**：`r100` 是一个完整的版本号，而 `r1000` 是另一个
+    完整的版本号 —— 按前缀比会把后者认成前者。这个函数今天只在 SVN 那条回退里被调用
+    （`_resolve_previous_commit_from_vcs`），也就是「数据库里缺前一条记录，去 VCS 里
+    找」那条路：认错的下场不是找不到（那还能退化成 `None`），而是**安静地拿另一个
+    版本当基线**，diff 看起来完全正常、内容是错的。
+
+    判据用 `services/commit_lookup_service.is_svn_revision`：`r` 不是十六进制数字，
+    所以「`r` + 数字」与 Git 的 SHA 形状不相交，不需要再读仓库类型。
+    """
     candidate = str(candidate_commit_id or "").strip().lower()
     target = str(target_commit_id or "").strip().lower()
     if not candidate or not target:
         return False
-    return candidate == target or candidate.startswith(target) or target.startswith(candidate)
+    if candidate == target:
+        return True
+    if is_svn_revision(candidate) or is_svn_revision(target):
+        return False
+    return candidate.startswith(target) or target.startswith(candidate)
 
 
 def _build_virtual_previous_commit(commit, previous_data):
@@ -736,7 +753,27 @@ def get_diff_data(commit, previous_commit=_PREVIOUS_COMMIT_SENTINEL):
         elif repository.type == 'svn':
             service = _get_svn_service(repository)
             if commit.path and (commit.path.endswith('.xlsx') or commit.path.endswith('.xls')):
-                return _get_unified_diff_data(commit, None)
+                # **基线要用解析出来的那一条，不能写死 `None`。**
+                #
+                # 这里原先传的是字面量 `None`（Git 分支传的是同一个变量
+                # `previous_commit`，它就是上面解析出来、还打了日志的那一条）。
+                # `get_unified_diff_data(commit, None)` 里
+                # `_has_previous_commit(None)` 为假，于是**读、写两侧的基线都变成 None**、
+                # 连「取上一版内容」那一步都不执行（`services/vcs_content_service.py`
+                # 的 `if has_previous:`），比较器拿到 `previous_data = {}`，
+                # 每张表都走「新增工作表」分支 ——
+                #
+                #    SVN 仓库里一条只改了几格的 Excel 提交，页面把整份文件渲染成
+                #    **全部新增**（删掉的行、改过的格子一个都看不到）。
+                #
+                # 更糟的是这份假载荷会被落库，键里的基线是 `None`（=「这个文件在这里是
+                # 全新的」那一种键），而下次读缓存带的基线同样是 `None`，于是**正好命中
+                # 自己写的那一行**：不报错、不重算，永远返回「全部新增」。
+                #
+                # 这不是设计，是遗漏：同一份文件里 `get_commit_pair_diff_internal`
+                # 的 SVN Excel 分支（传的是 `previous_commit`）和这里的 Git 分支
+                # 都老老实实传了基线。
+                return _get_unified_diff_data(commit, previous_commit)
             else:
                 diff_data = service.get_file_diff(commit.version, commit.path)
                 if _is_renderable_code_diff(diff_data):
@@ -832,7 +869,28 @@ def get_real_diff_data_for_merge(commit):
             service = _get_svn_service(repository)
             if is_excel:
                 log_print(f"- 处理SVN Excel文件，使用统一diff处理逻辑", 'INFO')
-                excel_diff = _get_unified_diff_data(commit, None)
+                # **与上面 Git 分支同一条口径**：先读缓存，未命中才算、并排一个缓存任务。
+                # 缓存键是 `(repository_id, commit_id, file_path)`，与仓库类型无关 ——
+                # 于是「提交页看到的」与「合并视图看到的」必然是同一份载荷。
+                #
+                # 这里原先直接传 `None`：既绕开缓存（合并视图会自己算一份可能与缓存
+                # 不同的结果），又把基线写死 —— 后果与 `get_diff_data` 的 SVN 分支
+                # 逐字相同：整份表渲染成「全部新增」。
+                excel_diff = None
+                cached_diff = _excel_cache_service.get_cached_diff(
+                    repository.id, commit.commit_id, commit.path
+                )
+                if cached_diff:
+                    try:
+                        excel_diff = json.loads(cached_diff.diff_data)
+                        log_print("- 从缓存获取SVN Excel差异数据", 'INFO')
+                    except (TypeError, ValueError):
+                        excel_diff = None
+                if not excel_diff or not excel_diff.get('sheets'):
+                    excel_diff = _get_unified_diff_data(
+                        commit, resolve_previous_commit(commit)
+                    )
+                _add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=1)
                 if excel_diff:
                     try:
                         excel_diff = clean_json_data(excel_diff)
