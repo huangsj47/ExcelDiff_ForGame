@@ -210,7 +210,11 @@ def ai_commit_stream(commit_id):
     commit = Commit.query.get_or_404(commit_id)
     repo = db.session.get(Repository, commit.repository_id)
     project_id = repo.project_id if repo else None
-    if project_id and not _has_project_access(project_id):
+    # **取不到 project_id 也拒绝**（原来这里是 `if project_id and not ...`，取不到就放行）。
+    # `commit.repository_id` / `repository.project_id` 都是 nullable=False，删仓库又连带删
+    # commit，所以今天构造不出「仓库丢了但 commit 还在」的请求 —— 但这条链上少一个
+    # `project_id` 就等于**跳过权限判定**，而权限判定不该有一条 fail-open 的支路。
+    if not project_id or not _has_project_access(project_id):
         return jsonify({"success": False, "message": "Access denied."}), 403
 
     def _generate():
@@ -263,7 +267,11 @@ def ai_commit_latest(commit_id):
     commit = Commit.query.get_or_404(commit_id)
     repo = db.session.get(Repository, commit.repository_id)
     project_id = repo.project_id if repo else None
-    if project_id and not _has_project_access(project_id):
+    # **取不到 project_id 也拒绝**（原来这里是 `if project_id and not ...`，取不到就放行）。
+    # `commit.repository_id` / `repository.project_id` 都是 nullable=False，删仓库又连带删
+    # commit，所以今天构造不出「仓库丢了但 commit 还在」的请求 —— 但这条链上少一个
+    # `project_id` 就等于**跳过权限判定**，而权限判定不该有一条 fail-open 的支路。
+    if not project_id or not _has_project_access(project_id):
         return jsonify({"success": False, "message": "Access denied."}), 403
     result = get_latest_commit_result(commit_id)
     if not result:
@@ -640,7 +648,7 @@ def _no_report_reason(run) -> str:
 
     「跑完了但没有正文」与「压根没跑成」要分开说：前者要重新分析，后者要看失败原因。
     """
-    status = str(run.status or "")
+    status = str(run.effective_status or "")
     if status == "running":
         return "这次分析还在跑，跑完之后才能导出。"
     if status == "pending":
@@ -666,9 +674,11 @@ def ai_run_report_md(run_id):
         return jsonify({"success": False, "message": "Not found."}), 404
     if not _has_project_access(run.project_id):
         return jsonify({"success": False, "message": "Access denied."}), 403
-    if not report_document.is_exportable(
-        status=run.status, report_text=run.response_text
-    ):
+    # **用 `effective_status`**（僵尸 running 显示为 failed），与 `/latest`、`/history`
+    # 同一条口径：进程被杀留下的那条 running 永远不会跑完，这里若按 `run.status` 判，
+    # 用户会一直看到「这次分析还在跑，跑完之后才能导出」——一句话的等待，等不到头。
+    status = run.effective_status
+    if not report_document.is_exportable(status=status, report_text=run.response_text):
         return jsonify({"success": False, "message": _no_report_reason(run)}), 409
 
     project = db.session.get(Project, run.project_id)
@@ -728,7 +738,11 @@ def ai_commit_history(commit_id):
     commit = Commit.query.get_or_404(commit_id)
     repo = db.session.get(Repository, commit.repository_id)
     project_id = repo.project_id if repo else None
-    if project_id and not _has_project_access(project_id):
+    # **取不到 project_id 也拒绝**（原来这里是 `if project_id and not ...`，取不到就放行）。
+    # `commit.repository_id` / `repository.project_id` 都是 nullable=False，删仓库又连带删
+    # commit，所以今天构造不出「仓库丢了但 commit 还在」的请求 —— 但这条链上少一个
+    # `project_id` 就等于**跳过权限判定**，而权限判定不该有一条 fail-open 的支路。
+    if not project_id or not _has_project_access(project_id):
         return jsonify({"success": False, "message": "Access denied."}), 403
     payload = report_history_service.list_target_runs(
         kind="commit", target_id=commit_id, limit=_history_limit()

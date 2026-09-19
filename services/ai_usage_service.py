@@ -51,7 +51,7 @@ from services.ai.analysis_budget import (
     redact_platform_scope,
 )
 from services.ai.platform_budget import platform_budget_public
-from services.ai.pricing import money
+from services.ai.pricing import amount_exact, amount_of, money
 from services.ai.trace_evidence import decode_evidence
 from services.ai.usage import aggregate_runs, usage_from_run
 from services.ai.usage_statistics import (
@@ -540,14 +540,17 @@ def _totals_cost(entries: Sequence[dict]) -> Optional[dict[str, Any]]:
     相加，得到的都是一个看起来正常、实际错的金额 —— 这比「算不出」危险得多。
     """
     costs = [entry.get("cost") for entry in entries]
-    if not costs or any(not item or item.get("amount") is None for item in costs):
+    if not costs or any(amount_of(item) is None for item in costs):
         return None
     currencies = {str(item.get("currency") or "") for item in costs}
     if len(currencies) != 1:
         return None
-    total = sum((Decimal(str(item["amount"])) for item in costs), Decimal(0))
+    # 读**精确**金额而不是展示串：`amount` 在不足一分时写的是 `<0.01`，解析会抛
+    # `InvalidOperation`（把整个总览打成 500），而拿已量化到分的值相加还会少算。
+    total = sum((amount_of(item) for item in costs), Decimal(0))
     return {
         "amount": money(total),
+        "amount_exact": amount_exact(total),
         "currency": currencies.pop(),
         "reason": "",
         "notes": ["按各项目自己的价格表估算后相加"],
@@ -859,6 +862,16 @@ def project_usage(
     }
 
 
+def _int_or_zero(value: Any) -> int:
+    """脏值读成 0（**绝不抛**）。`int("很多")` 会让整页 500，而这里只是几个计数。"""
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _subagent_rows(run: AiAnalysisRun) -> list[dict[str, Any]]:
     """这次运行里各分片代理的账（`response_payload["subagents"]`）。
 
@@ -882,15 +895,19 @@ def _subagent_rows(run: AiAnalysisRun) -> list[dict[str, Any]]:
                 if isinstance(dimensions, list)
                 else [],
                 "status": str(item.get("status") or ""),
-                "rounds": int(item.get("rounds") or 0),
-                "requests": int(item.get("requests") or 0),
+                # `int(...)` 要兜住非数值串：payload 是模型/引擎写进去的 JSON，
+                # 一行 `"rounds": "很多"` 就能让 `/runs/<id>/usage` 抛 ValueError —— 而那个
+                # 路由没有 try，整页 500。脏值读成 0 而不是「未上报」是刻意的：这里数的是
+                # 「跑了几轮」，读不出来就是没跑成，与 token 那种「上游没报」不是一回事。
+                "rounds": _int_or_zero(item.get("rounds")),
+                "requests": _int_or_zero(item.get("requests")),
                 # `None` 原样带出去（上游没上报），**不是 0** —— 与整页的口径一致。
                 "tokens_input": item.get("tokens_input"),
                 "tokens_output": item.get("tokens_output"),
                 "cache_read_tokens": item.get("cache_read_tokens"),
                 "cache_write_tokens": item.get("cache_write_tokens"),
-                "anomalies": int(item.get("anomalies") or 0),
-                "report_chars": int(item.get("report_chars") or 0),
+                "anomalies": _int_or_zero(item.get("anomalies")),
+                "report_chars": _int_or_zero(item.get("report_chars")),
                 "skipped_reason": str(item.get("skipped_reason") or ""),
                 "error": str(item.get("error") or ""),
             }

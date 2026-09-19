@@ -1047,3 +1047,93 @@ def test_weekly_full_diff_tabs_bind_listeners_instead_of_inline_onclick():
     )
     # 无变更的标签仍不可点击
     assert "excel-tab-disabled" in source
+
+
+# ==========================================================================
+# 4. 同类模式全仓扫描：表名不得裸拼进 innerHTML
+# ==========================================================================
+
+# 上面那条只扫「内联事件处理器」。**同一个名字还有第二个出口**：拼进 innerHTML 的
+# 文本位置。它不能执行脚本，但 `<img src=x onerror=...>` 是**合法的工作表名**
+# （Excel 只禁 `: \ / ? * [ ]`），拼进去就是真标签、真 onerror。
+#   * `templates/commit_diff.html` 的「切换到工作表: <表名>」与「工作表 "<表名>" 数据不完整」
+#     原来是裸拼的，而同文件 1282/1289 行对同一个变量用的是 escapeHtml ——
+#     **一处转一处不转**正是这类洞的来源。
+# 判据：从 `.innerHTML =` / `.innerHTML +=` 到该语句的 `;`（跨行拼接要整段看），
+# 把 `escapeXxx(...)` 摘掉之后，语句里**与 `+` 相邻或落在 `${}` 里**的表名标识符就是裸拼。
+#
+# 为什么只认这两种形态：`sheetBodyHtml(sheetName, …)` 这种把表名**当参数传下去**的写法
+# 不算命中 —— 转义在不在被调函数里，这条静态扫描看不见（那是另一场审查）。误报会让
+# 这条护栏被绕过或被关掉，比漏报更糟。
+_INNERHTML_ASSIGN_RE = re.compile(r"\.innerHTML\s*\+?=")
+_ESCAPE_CALL_RE = re.compile(r"escape\w*\(\s*[^()]*?\s*\)")
+_SHEET_IDENT_SRC = r"(?:sheet\.name|sheetName|sheet_name)"
+_SHEET_IDENT_RE = re.compile(r"\b" + _SHEET_IDENT_SRC + r"\b")
+
+
+def _innerhtml_statements(text: str):
+    """切出每个 `.innerHTML = …;` 赋值语句（含起止行号）。"""
+    out = []
+    for match in _INNERHTML_ASSIGN_RE.finditer(text):
+        end = text.find(";", match.end())
+        stop = end + 1 if end != -1 else len(text)
+        line_no = text.count("\n", 0, match.start()) + 1
+        out.append((line_no, text[match.start():stop]))
+    return out
+
+
+def _is_raw_embedding(statement: str, start: int, end: int) -> bool:
+    """这一处表名是不是**直接拼进字符串**（而不是当参数传给某个函数）。"""
+    before = statement[:start].rstrip()
+    after = statement[end:].lstrip()
+    return (before[-1:] in ("+", "{") or after[:1] == "+")
+
+
+def _unescaped_sheet_name_in_innerhtml(text: str):
+    hits = []
+    for line_no, statement in _innerhtml_statements(text):
+        bare = _ESCAPE_CALL_RE.sub("", statement)
+        for match in _SHEET_IDENT_RE.finditer(bare):
+            if _is_raw_embedding(bare, match.start(), match.end()):
+                hits.append((line_no, statement.strip()[:130]))
+                break
+    return hits
+
+
+def test_the_innerhtml_scanner_can_actually_fail():
+    """扫描器要能在旧写法上报出来 —— 否则下面那条是「什么都没测的绿」。"""
+    old_style = [
+        "contentContainer.innerHTML = '<p>工作表 \"' + sheetName + '\" 数据不完整</p>';",
+        "area.innerHTML = `<p>切换到工作表: ${sheet.name}</p>`;",
+        "el.innerHTML += '<td>' + sheet_name + '</td>';",
+        "el.innerHTML = '<p>' + escapeHtml(a) + sheetName + '</p>';",
+    ]
+    for sample in old_style:
+        assert _unescaped_sheet_name_in_innerhtml(sample), f"扫描器漏掉了：{sample}"
+
+    # 反向：转义过的、只进 data-* 的、当参数传下去的，都不该被误报
+    fine = [
+        "area.innerHTML = '<p>切换到 ' + escapeHtml(sheetName) + '</p>';",
+        "el.innerHTML = `<p>切换到 ${escapeHtml(sheet.name)}</p>`;",
+        "el.innerHTML = tabHtml;  // 表名在 tabHtml 里已经过 escapeHtml",
+        "el.setAttribute('data-sheet', sheetName);",
+        "el.innerHTML = sheetBodyHtml(sheetName, sheetData, area);",
+    ]
+    for sample in fine:
+        assert _unescaped_sheet_name_in_innerhtml(sample) == [], f"误报：{sample}"
+
+
+def test_no_source_puts_a_sheet_name_into_innerhtml_unescaped():
+    """全仓（templates/ + static/js/）不得再把表名裸拼进 innerHTML。
+
+    这是「同一个不可信值、两条不同的路」里更隐蔽的那条：它不执行内联脚本，
+    所以上面那个按 `onclick=` 扫描的规则看不见它，而 `<img onerror>` 同样是脚本执行。
+    """
+    hits = []
+    for path in _scanned_sources():
+        text = path.read_text(encoding="utf-8", errors="replace")
+        rel = path.relative_to(PROJECT_ROOT)
+        for line_no, snippet in _unescaped_sheet_name_in_innerhtml(text):
+            hits.append(f"{rel}:{line_no}: {snippet}")
+
+    assert hits == [], "仍有文件把表名裸拼进 innerHTML：\n" + "\n".join(hits)

@@ -269,7 +269,11 @@
         body.textContent = '';
         var payload = state.payload;
         if (!payload || !(payload.runs || []).length) {
-            renderNote(NOTE.empty);
+            // **走 `listNote` 而不是写死 `NOTE.empty`**：空列表有**两种**处境
+            // （一次都没跑过 / 正在跑但还没跑完第一次），说哪一句由 `listNote` 决定。
+            // 这里写死的话，`in_progress` 那句话就只活在本文件的常量表里 —— 一条
+            // 看着在、实际永远不会出现在屏幕上的文案（单测还会因为它绿）。
+            renderNote(listNote(payload));
             return;
         }
         renderNote(listNote(payload));

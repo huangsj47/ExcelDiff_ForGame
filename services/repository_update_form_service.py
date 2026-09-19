@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from services.repository_diff_cache_reset import (
     diff_settings_changed,
     parse_header_name_row,
+    parse_header_rows,
     reset_repository_diff_caches,
 )
 
@@ -229,11 +230,17 @@ def handle_update_repository_form(
         changed_diff_settings = diff_settings_changed(repository, request.form)
         header_rows = request.form.get("header_rows")
         # 名称行的校验要在**写入之前**：越界（> 表头行数）时整份表单退回，不留半份改动。
+        # 表头行数也在这里解析（同一个值、同一处口径），非数字同样整份退回 ——
+        # 原先的裸 `int()` 遇到「三」是 500，用户看不到该改哪个字段。
+        header_rows_value, header_rows_error = parse_header_rows(header_rows)
+        if header_rows_error:
+            flash(header_rows_error, "error")
+            return redirect(url_for("edit_repository", repository_id=repository_id))
         header_name_row, name_row_error = parse_header_name_row(request.form, header_rows)
         if name_row_error:
             flash(name_row_error, "error")
             return redirect(url_for("edit_repository", repository_id=repository_id))
-        repository.header_rows = int(header_rows) if header_rows else None
+        repository.header_rows = header_rows_value
         repository.header_name_row = header_name_row
         repository.key_columns = request.form.get("key_columns")
         repository.enable_id_confirmation = bool(request.form.get("enable_id_confirmation"))

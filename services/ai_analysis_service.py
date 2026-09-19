@@ -1900,7 +1900,7 @@ def _stale_note(reason: str, *, concluded: AiAnalysisRun, newest: AiAnalysisRun)
     if reason == STALE_REASON_RULES_CHANGED:
         return f"该结论由旧版评审规程产出（提示词/规则/模型已更新），以下是 {at} 的结论，仅供参考"
     return (
-        f"最近一次分析未完成（{_created_at_display(newest)}，{newest.status}），"
+        f"最近一次分析未完成（{_created_at_display(newest)}，{newest.effective_status}），"
         f"以下是 {at} 的结论"
     )
 
@@ -1920,8 +1920,8 @@ def _read_latest_result(conditions, *, project_id: Optional[int] = None) -> Opti
        `stale_note` 如实说明它是旧的。这是用户报的那条：「我进行过 AI 分析，重启
        服务后变成未分析」—— 结论还在，只是最新那次不是它（规则变了、或最新那次被
        重启打断成 failed），而旧口径把「最新那条不可用」直接等同于「没有结论」；
-    4. 一条结论都没有时，才轮到「最近一次失败」这条形态（有原因、没结论）；
-       连失败都没有就返回 None —— 那才是真的没分析过。
+    4. 一条结论都没有时，才轮到「最近一次失败」这条形态（有原因、没结论）；连失败都没有就返回
+       None —— 那才是真的没分析过。**僵尸 running 也走这一档**（下面按 `effective_status` 判）。
 
     `project_id` 只用于溯源现算（见 `_is_run_fresh` 的 `expected` 参数）。
     """
@@ -1940,7 +1940,7 @@ def _read_latest_result(conditions, *, project_id: Optional[int] = None) -> Opti
 
     concluded = _latest_concluded_run(conditions)
     if concluded is None:
-        return _last_attempt_failed_result(run) if run.status == "failed" else None
+        return _last_attempt_failed_result(run) if run.effective_status == "failed" else None
     if concluded.id == run.id:
         # 唯一那条成功记录就是最新这条，却没过 `_is_run_fresh` —— 只可能是溯源变了
         # （时间窗与 status 在 `_latest_concluded_run` 里已经判过一遍）。
@@ -1954,7 +1954,7 @@ def _read_latest_result(conditions, *, project_id: Optional[int] = None) -> Opti
     # 最新那条的身份也带上：界面要能说清「挡住它的那一次是什么状态」。
     payload["newest_run"] = {
         "run_id": run.id,
-        "status": run.status,
+        "status": run.effective_status,
         "created_at_display": _created_at_display(run),
     }
     return payload

@@ -138,11 +138,14 @@ var results = cases.map(function (item) {
 
 // 懒加载：切到「思考过程」时按运行号去取落库的逐轮（只取一次；看着跑的期间不取）。
 //
-// 四个场景**顺序跑**（每个场景重新加载一遍模块、重新造一遍 DOM）：它们都是异步的，
+// 几个场景**顺序跑**（每个场景重新加载一遍模块、重新造一遍 DOM）：它们都是异步的，
 // 并行跑会共用同一份 `els` 与同一个模块单例，一个场景的回调会写进另一个场景的面板里
 // ——那是测试自己的串扰，不是被测代码的问题。
 function reload() {
     seed();
+    // 场景里给沙箱塞过 `fetch`（模拟真页面的 `window.fetch`），场景之间要清干净
+    // —— 留着的话别的场景会去发一个它以为自己没发的请求。
+    sandbox.fetch = undefined;
     vm.runInContext(fs.readFileSync(__SCRIPT__, 'utf8'), sandbox);
     api = sandbox.AiThinkLog;
 }
@@ -206,6 +209,57 @@ async function lazy() {
     out.failure = {
         mode: api.state().mode, note: els[NOTE_ID].textContent, calls: failed.slice()
     };
+
+    // 5) **最后一帧读不到进度、然后跑完**：取数必须由 `unwatch` 自己发起。
+    //
+    // 不发起的话面板会停在那句承诺上（「跑完之后这里会显示落库的逐轮记录」）永远不动
+    // —— `ensureLoaded` 挂在「切到思考过程」这个动作上，而用户一直停在这个标签页
+    // （他手动点过标签，跑完不会被自动切走）就永远等不到。
+    reload();
+    lastUrl = [];
+    api.watch(7);
+    api.applyProgress(null);
+    out.stuckBefore = { mode: api.state().mode, note: els[NOTE_ID].textContent };
+    sandbox.fetch = okFetch;   // 真页面里这就是 window.fetch
+    api.unwatch();
+    // `ensureLoaded` 是**同步**进到「正在读取」的（取数本身是异步的），所以这一刻的
+    // `mode` 就是「`unwatch` 自己发起了取数」的证据。
+    out.stuckAfter = { mode: api.state().mode, note: els[NOTE_ID].textContent };
+    await tick();
+    out.stuckLoaded = {
+        mode: api.state().mode,
+        note: els[NOTE_ID].textContent,
+        calls: lastUrl.slice(),
+        rounds: els[LOG_ID].children.length
+    };
+    sandbox.fetch = undefined;
+
+    // 6) 取的过程中换了运行号（跑完 → 用户立刻又点了「重新分析」）：**那份响应要丢掉**
+    //    —— 画上去就是「这一次的运行里显示着上一次的逐轮过程」。
+    reload();
+    var pending = null;
+    api.setRun(7);
+    api.ensureLoaded(function () {
+        return new Promise(function (resolve) {
+            pending = function () {
+                resolve({
+                    ok: true, status: 200,
+                    json: function () {
+                        return Promise.resolve({ success: true, rounds: ROUNDS.stored });
+                    }
+                });
+            };
+        });
+    });
+    api.setRun(8);
+    pending();
+    await tick();
+    out.staleResponse = {
+        runId: api.state().runId,
+        mode: api.state().mode,
+        rounds: els[LOG_ID].children.length,
+        note: els[NOTE_ID].textContent
+    };
     return out;
 }
 
@@ -217,6 +271,10 @@ lazy().then(function (out) {
         beforeLoad: out.beforeLoad,
         afterLoad: out.afterLoad,
         failure: out.failure,
+        stuckBefore: out.stuckBefore,
+        stuckAfter: out.stuckAfter,
+        stuckLoaded: out.stuckLoaded,
+        staleResponse: out.staleResponse,
         notes: api.NOTE
     }));
 });
@@ -552,7 +610,7 @@ def test_the_three_notes_are_all_distinct(run):
 
 
 # --------------------------------------------------------------------------
-# 懒加载：切过去才取，取一次就够
+# 懒加载：切过去才取、跑完那一刻要兑现承诺、取一次就够
 # --------------------------------------------------------------------------
 
 
@@ -584,3 +642,41 @@ def test_a_failed_fetch_is_said_out_loud(run):
     assert run["failure"]["mode"] == "unavailable"
     assert "读不到" in run["failure"]["note"]
     assert "Not found." in run["failure"]["note"], "原因要带上，别只说「失败」"
+
+
+def test_the_promise_of_stored_rounds_is_kept_when_the_run_ends(run):
+    """**一句承诺就要有人兑现。**
+
+    最后一帧读不到进度时，面板上写着「跑完之后这里会显示落库的逐轮记录」。跑完这一刻
+    正是它说的那个时刻 —— 而取数只挂在「切到思考过程」这个动作上，用户若一直停在这个
+    标签页（他手动点过标签，跑完不会被自动切走），那句承诺就永远挂在那儿，
+    列表一直是空的。
+    """
+    assert run["stuckBefore"]["mode"] == "unavailable"
+    assert "跑完之后这里会显示落库的逐轮记录" in run["stuckBefore"]["note"], (
+        "前提：读不到那一帧留下的是一句承诺"
+    )
+
+    assert run["stuckAfter"]["mode"] == "loading", (
+        "跑完那一刻 `unwatch` 必须自己发起取数（`mode` 同步变成「正在读取」就是证据）"
+    )
+    assert run["stuckLoaded"]["calls"] == ["/ai-analysis/runs/7/usage"], (
+        "取的是这次运行那一份"
+    )
+    assert run["stuckLoaded"]["mode"] == "settled"
+    assert run["stuckLoaded"]["rounds"] == 2, "取到了就要画出来"
+    assert "分析已结束" in run["stuckLoaded"]["note"]
+    assert run["stuckLoaded"]["note"] != run["stuckAfter"]["note"] != "", "那句话必须被换掉"
+
+
+def test_a_response_for_the_previous_run_is_thrown_away(run):
+    """取的过程中换了运行号：旧的那份**不许画上去**。
+
+    画上去就是「这一次的运行里显示着上一次的逐轮过程」，而且 `mode` 会被写成
+    「分析已结束」—— 分析正跑着，界面上挂着「已结束」。
+    """
+    stale = run["staleResponse"]
+
+    assert stale["runId"] == 8, "前提：号已经换到 8 了"
+    assert stale["rounds"] == 0, "7 的那几轮不许出现在 8 的面板上"
+    assert stale["mode"] == "settled"

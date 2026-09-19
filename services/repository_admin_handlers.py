@@ -146,6 +146,7 @@ def delete_repository(repository_id):
         MergedDiffCache,
         WeeklyVersionDiffCache,
         WeeklyVersionExcelCache,
+        WeeklyVersionConfig,
         Commit,
         log_print,
     ) = _runtime(
@@ -157,6 +158,7 @@ def delete_repository(repository_id):
         "MergedDiffCache",
         "WeeklyVersionDiffCache",
         "WeeklyVersionExcelCache",
+        "WeeklyVersionConfig",
         "Commit",
         "log_print",
     )
@@ -224,6 +226,34 @@ def delete_repository(repository_id):
 
         commit_deleted = Commit.query.filter_by(repository_id=repository_id).delete()
         log_print(f"删除了 {commit_deleted} 个Commit记录", "DELETE")
+
+        # **周版本配置必须一起删掉。** `WeeklyVersionConfig.repository_id` 是
+        # `nullable=False`，而 ORM 删父行时默认是把子行的外键置 NULL → IntegrityError →
+        # 整个事务回滚。表现是：**只要这个仓库被任何一个周版本配置引用着，它就永远删不掉**，
+        # 而界面上只 flash 一句「删除仓库失败: NOT NULL constraint failed:
+        # weekly_version_config.repository_id」（`delete_project` 是显式删了这一张表的）。
+        weekly_config_ids = [
+            row[0]
+            for row in db.session.query(WeeklyVersionConfig.id).filter(
+                WeeklyVersionConfig.repository_id == repository_id
+            ).all()
+        ]
+        if weekly_config_ids:
+            # 两张缓存表按 `repository_id` **或** `config_id` 匹配 —— 与
+            # `services/repository_diff_cache_reset.py` 的口径一致（老数据里可能有
+            # 只带 config_id 的行）。上面按 repository_id 删过一遍了，这里补的是
+            # 「config 属于这个仓库、但缓存行上的 repository_id 记的是别人」那种。
+            for cache_model in (WeeklyVersionDiffCache, WeeklyVersionExcelCache):
+                cache_model.query.filter(
+                    or_(
+                        cache_model.repository_id == repository_id,
+                        cache_model.config_id.in_(weekly_config_ids),
+                    )
+                ).delete(synchronize_session=False)
+        weekly_configs_deleted = WeeklyVersionConfig.query.filter_by(
+            repository_id=repository_id
+        ).delete(synchronize_session=False)
+        log_print(f"删除了 {weekly_configs_deleted} 个WeeklyVersionConfig记录", "DELETE")
 
         repository.last_sync_commit_id = None
         repository.last_sync_time = None

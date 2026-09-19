@@ -233,6 +233,11 @@ def _coerce_requests(value: Any) -> tuple[ContextRequest, ...]:
                 path=_as_str(entry.get("path")),
                 name=_as_str(entry.get("name")),
                 lines=_as_str(entry.get("lines")),
+                # `find_references` 的搜索词。**漏掉这一个字段的后果不是「差一点」**：
+                # `sanitize_requests` 会按「搜索词太短（至少 3 个字）」把每一条
+                # `find_references` 都丢掉，于是这个工具端到端**从来没有执行过**，
+                # 而丢掉的理由还把责任推给了模型（它明明按 SKILL.md 写了 query）。
+                query=_as_str(entry.get("query")),
             )
         )
     return tuple(requests)

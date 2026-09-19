@@ -904,6 +904,9 @@ function initCommitAiAnalysis() {
             setAiOutput('获取最近分析失败。', false, 'error');
             setAiStatusBadge('失败', 'danger');
             hasCached = false;
+            // 屏幕上已经不是那份结论了 → 「导出 md」也没有可导出的对象（不收的话它指着
+            // 上一次加载成功的那条运行，而用户看不见那份报告）。
+            AiReportExport.track({ runId: null });
             return false;
         }
         hasCached = false;

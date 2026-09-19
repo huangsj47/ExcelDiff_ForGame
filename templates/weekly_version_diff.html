@@ -1597,8 +1597,12 @@ function startAiBudgetWatch(runId, metaEl) {
             const btn = document.getElementById('weeklyAiStartBtn');
             if (btn) btn.disabled = false;
             // 跑完了 → 不再看进度快照（`loadWeeklyAiLatest` 会去取落库的结果）。
+            // **要传 true**：轮询自己发现跑完时，这次 `/latest` 一旦失败（网络、403），
+            // 不传 force 就会落进函数末尾那句「暂无分析结果。」—— 于是一次**跑成功了的**
+            // 分析被说成「还没有分析过」，还会把已经画出来的逐轮记录一起清掉。
+            // 另外两份抽屉（commit / merged）走的都是这条路。
             AiThinkLog.unwatch();
-            if (!weeklyAiStreamSettled) loadWeeklyAiLatest();
+            if (!weeklyAiStreamSettled) loadWeeklyAiLatest(true);
         }
     });
 }
@@ -2022,6 +2026,31 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 
+// 换仓库 = **换目标**：抽屉里每一样「跟着目标走」的东西要在这一处一起换掉。
+//
+// 这个抽屉与合并视图那个不同（那个是同一个抽屉换版本，标题会写明版本名），但「屏幕上的
+// 东西跟着换人」这条一样成立：`loadWeeklyAiLatest()` 是异步的，它把新仓库的结论换上来
+// 之前，正文、meta、用量行、徽章挂着的都是**上一个仓库**的结论；而它一旦失败
+// （网络、403），那条路上正文就永远停在旧仓库那份上。历史地址更要命：它按**分组键**
+// （含基名）取数，换仓库就是换目标，不换地址的话弹层里列的是别的仓库的运行，
+// 那个「导出这一份 md」也就把别人的结论交出去了。
+//
+// 说「正在读取」而不是留空：空白会被读成「这个仓库没有结论」，而那是此刻还不知道的事
+// （`loadWeeklyAiLatest` 无论成败都会立刻把它换掉）。
+function switchWeeklyAiTarget() {
+    AiReportHistory.track({ historyUrl: AiReportHistory.historyUrlFor('weekly', configId) });
+    setWeeklyAiOutput('正在读取这个仓库的最近一次分析…', false, 'busy');
+    setWeeklyAiStatusBadge('检测中', 'secondary');
+    setWeeklyAiMeta('');
+    renderAiUsageLine(null, null);
+    AiThinkLog.setRun(null);
+    AiReportExport.track({ runId: null });
+    AiDrawerTabs.reset();
+    // 上一个仓库「有没有结论」不是这个仓库的答案：留着它，「开始分析」会照着旧仓库的
+    // 状况决定要不要弹「已有分析结果，确定重新分析吗？」。
+    weeklyAiHasCached = false;
+}
+
 // 仓库切换函数
 function switchRepository(newConfigId) {
     if (newConfigId === currentConfigId) {
@@ -2032,6 +2061,7 @@ function switchRepository(newConfigId) {
     configId = newConfigId;
     currentConfigId = newConfigId;
     closeWeeklyAiStream();
+    switchWeeklyAiTarget();
     loadWeeklyAiLatest();
 
     // 清空当前数据
@@ -2067,7 +2097,12 @@ function switchRepositoryInternal(newConfigId) {
     configId = newConfigId;
     currentConfigId = newConfigId;
     closeWeeklyAiStream();
-    refreshWeeklyAiLatest();
+    // 与上面 `switchRepository` 走同一条路（那边是 2035 行那句）。这里原来写的是
+    // `refreshWeeklyAiLatest()` —— **本文件里没有这个函数**（它是合并视图那一页的），
+    // 于是浏览器前进/后退切仓库时这一行抛 ReferenceError，它后面的清数据、复位筛选、
+    // `updateTabState`、`loadFileList`、`pushState` **全部不执行** —— 页面半途而废。
+    switchWeeklyAiTarget();
+    loadWeeklyAiLatest();
 
     // 清空当前数据
     allFiles = [];

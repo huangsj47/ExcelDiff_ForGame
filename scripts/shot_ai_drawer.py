@@ -375,6 +375,33 @@ def _check_the_hidden_rule(page) -> None:
         "没有可导出的结论时用户会看到一个点下去换来 409 的按钮"
     )
     assert link["shownDisplay"] != "none", "有结论时它得看得见"
+    # 同一个坑的第三处：「完整结论」标签上那个未读点。它只有 6×6 像素，写漏了的表现
+    # 不是「两个面板同时显示」这种一眼可见的坏，而是**那个点从页面打开起就常亮** ——
+    # 看着像个装饰性小圆点，于是「结论更新了」这个提示等于没有。
+    dot = page.evaluate(_DOT_HIDDEN_PROBE_JS)
+    print("\n=== 未读点的 `[hidden]`（同一个坑的第三处）===")
+    print(f"  hidden → display={dot['hiddenDisplay']}")
+    print(f"  显示   → display={dot['shownDisplay']}")
+    assert dot["hiddenDisplay"] == "none", (
+        "未读点在 hidden 时仍然占位 —— `.ai-drawer-tab-dot[hidden]` 那条没生效，"
+        "它会一直亮着，用户以为结论每次都刚更新过"
+    )
+    assert dot["shownDisplay"] == "inline-block", "该显示时它要显示出来"
+
+
+_DOT_HIDDEN_PROBE_JS = r"""
+() => {
+    const el = document.getElementById('aiDrawerTabReportDot');
+    if (!el) return {hiddenDisplay: 'missing', shownDisplay: 'missing'};
+    const before = el.hidden;
+    el.hidden = true;
+    const hiddenDisplay = getComputedStyle(el).display;
+    el.hidden = false;
+    const shownDisplay = getComputedStyle(el).display;
+    el.hidden = before;
+    return {hiddenDisplay: hiddenDisplay, shownDisplay: shownDisplay};
+}
+"""
 
 
 _EXPORT_HIDDEN_PROBE_JS = r"""

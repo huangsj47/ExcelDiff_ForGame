@@ -153,6 +153,23 @@ def _infer_resource_label_from_path(path: str) -> str:
     return "页面"
 
 
+def public_register_enabled_by_env() -> bool:
+    """`AUTH_ENABLE_REGISTER` 的判定。**视图与模板共用这一份。**
+
+    为什么要单独抽出来：这个开关原来只挂进 Jinja globals（`configure_app_security_bootstrap`
+    里那一条），作用是「不渲染注册入口按钮」—— 而 `POST /auth/register` 的视图**不查它**，
+    于是 `AUTH_ENABLE_REGISTER=false` 时直接 POST 照样注册成功。运维把它当「关掉注册」用，
+    实际只是把入口藏起来了（配上 `AUTH_DEBUG_MODE=true` 那条自助当管理员的路，后果更重）。
+    判定只此一份，两边都读它。
+    """
+    auth_backend = str(os.environ.get("AUTH_BACKEND", "local") or "local").strip().lower()
+    default_enabled = auth_backend != "qkit"
+    raw = str(os.environ.get("AUTH_ENABLE_REGISTER", "") or "").strip().lower()
+    if not raw:
+        return default_enabled
+    return raw in {"1", "true", "yes", "on"}
+
+
 def configure_app_security_bootstrap(
     *,
     app,
@@ -300,9 +317,7 @@ def configure_app_security_bootstrap(
         return raw in {"1", "true", "yes", "on"}
 
     def public_register_enabled() -> bool:
-        auth_backend = str(os.environ.get("AUTH_BACKEND", "local") or "local").strip().lower()
-        default_enabled = auth_backend != "qkit"
-        return _read_bool_env("AUTH_ENABLE_REGISTER", default_enabled)
+        return public_register_enabled_by_env()
 
     def public_register_url():
         try:

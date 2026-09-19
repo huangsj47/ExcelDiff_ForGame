@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from typing import Any, Mapping
 
 # 默认表的版本号。**改 DEFAULT_PRICE_TABLE 必须同步改这里** —— 它会随每次运行落进
@@ -115,6 +115,8 @@ class CostLine:
             "tokens": self.tokens,
             "unit_price": money(self.unit_price),
             "amount": money(self.amount),
+            # 聚合要拿它相加（`amount` 是给人看的：不足一分写 `<0.01`，解析不了）。
+            "amount_exact": amount_exact(self.amount),
             "note": self.note,
         }
 
@@ -143,6 +145,8 @@ class CostEstimate:
     def to_dict(self) -> dict[str, Any]:
         return {
             "amount": money(self.amount),
+            # 同上：跨运行/跨项目相加读这个，`amount` 只用于展示。
+            "amount_exact": amount_exact(self.amount),
             "currency": self.currency,
             "reason": self.reason,
             "price_version": self.price_version,
@@ -199,6 +203,65 @@ def money(value: Decimal | None) -> str | None:
     return format(rounded, "f")
 
 
+def amount_exact(value: Decimal | None) -> str | None:
+    """金额 → **未舍入**的十进制文本（`None` 进 `None` 出）。
+
+    它与 `money()` 是**成对**的两个出口，用途不同：
+
+    * `money()` 给人看（2 位小数、不足一分写 `<0.01`）；
+    * `amount_exact` 给程序回读（`format(..., "f")`，不量化）。
+
+    为什么必须有第二个出口：聚合（把几次运行的费用相加）原本是拿 `money()` 的产物
+    `Decimal(...)` 回去当数字用的，而 `Decimal("<0.01")` 会抛 `InvalidOperation`
+    —— 一处展示格式把一个只读面板和一个预算闸门一起打成 500
+    （`analysis_budget` 的 docstring 明写「这个函数不抛异常」）。
+    而拿**已量化到分**的值相加还会悄悄少算：两次真实的 0.014 元相加应得 0.03，
+    用展示值相加得到 0.02。
+
+    与 `_exact_text` 的区别：那个是「单价表签名」用的（量化到 6 位再规整），
+    这个是金额本身的原样文本。两个都叫「exact」，所以名字分开写清楚。
+    """
+    if value is None:
+        return None
+    amount = value if isinstance(value, Decimal) else Decimal(str(value))
+    if not amount.is_finite():
+        return None
+    return format(amount, "f")
+
+
+def amount_from_text(text: Any) -> Decimal | None:
+    """金额文本 → `Decimal`，**取不回就是 `None`**（绝不抛异常）。
+
+    `<0.01` 这种展示串取不回精确值 —— 它说的只是「小于一分」。这里返回 `None`
+    （=算不出），而不是把它当成 0：把它当 0 是「这次没花钱」这个确定的结论，
+    而那是本模块从头到尾在守的「0 与算不出是两件事」。
+    """
+    if text is None:
+        return None
+    raw = str(text).strip()
+    if not raw:
+        return None
+    try:
+        value = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        return None
+    return value if value.is_finite() else None
+
+
+def amount_of(cost: Mapping[str, Any] | None) -> Decimal | None:
+    """从一份 `CostEstimate.to_dict()` 的产物里取回**精确**金额（取不回是 `None`）。
+
+    先读 `amount_exact`（新格式）；没有就退回解析 `amount`（只有展示串的手拼 dict）。
+    两条路都取不回 → `None`，由调用方按自己那条口径处理（聚合那里是「整份算不出」）。
+    """
+    if not cost:
+        return None
+    raw = cost.get("amount_exact")
+    if raw is None or not str(raw).strip():
+        raw = cost.get("amount")
+    return amount_from_text(raw)
+
+
 def _exact_text(value: Decimal | None) -> str | None:
     """**不做展示舍入**的金额文本，只给「两个单价表是不是同一份」这类判等用。
 
@@ -211,7 +274,18 @@ def _exact_text(value: Decimal | None) -> str | None:
         return None
     if not value.is_finite():
         return None
-    text = format(value.quantize(Decimal("0.000001")), "f")
+    # `quantize` 在结果超过当前上下文精度时抛 `InvalidOperation`（例如 `1e22`：
+    # 量化到 6 位小数要 28 位有效数字，而默认精度是 28）。这个函数被
+    # `price_change_requires_version_bump → _model_signature` 调用，而那条调用在
+    # `update_project_analysis_config` 里**没有 try** —— 一个超大单价值会让「再保存一次
+    # 同一个字段」变成 500。签名判等本来只需要一个稳定的文本，所以放大精度即可，
+    # 不值得为此把保存路径挂掉。
+    try:
+        with localcontext() as ctx:
+            ctx.prec = max(60, len(value.as_tuple().digits) + 10)
+            text = format(value.quantize(Decimal("0.000001")), "f")
+    except (InvalidOperation, ValueError):
+        return format(value, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text or "0"

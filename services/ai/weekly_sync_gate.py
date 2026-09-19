@@ -77,7 +77,12 @@ def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] =
                 BackgroundTask.commit_id.in_(ids),
                 BackgroundTask.status.in_(("pending", "processing")),
             )
-            .order_by(BackgroundTask.created_at.asc())
+            # **降序**（=上面 docstring 说的「最新的那一条」）。原来是 `asc` 取 `rows[0]`
+            # —— 那拿到的是**最旧**的一条：一批里同时有一条卡死 40 分钟的同步与一条刚起跑
+            # 10 秒的同步时，闸门按旧那条算 age 已经超过 `SYNC_IN_FLIGHT_MAX_SECONDS`，
+            # 于是**直接放行**，而另一个同步正在往缓存里写 —— 变更清单缺文件，正是这个
+            # 模块存在的理由。改回降序之后，「只剩一条卡死的」仍然照旧放行（上限语义不变）。
+            .order_by(BackgroundTask.created_at.desc())
             .all()
         )
     except Exception:  # noqa: BLE001 —— 查不动只是少一道闸，不该把分析卡死
@@ -86,12 +91,13 @@ def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] =
         return None, 0.0
 
     current = _as_naive_utc(now) or datetime.now(timezone.utc).replace(tzinfo=None)
-    oldest = rows[0]
+    # 最新的那一条（查询已按 created_at 降序）。
+    newest = rows[0]
     # 用 created_at 而不是 started_at：排队等着开跑同样是「还没写完」，
     # 而 started_at 在 pending 阶段是空的。
-    created = _as_naive_utc(oldest.created_at)
+    created = _as_naive_utc(newest.created_at)
     age = (current - created).total_seconds() if created else 0.0
-    return oldest, max(age, 0.0)
+    return newest, max(age, 0.0)
 
 
 def weekly_sync_in_flight(config_ids: Iterable[int], *, now: Optional[datetime] = None) -> str:

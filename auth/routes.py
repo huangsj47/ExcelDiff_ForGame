@@ -135,6 +135,16 @@ def login():
 @auth_bp.route("/register", methods=["GET", "POST"])
 def register():
     """注册页面"""
+    # **开关要在视图里也生效。** `AUTH_ENABLE_REGISTER` 原来只挂进 Jinja globals
+    # （不渲染注册入口按钮），而这里不查它 —— 于是 `AUTH_ENABLE_REGISTER=false` 的部署
+    # 直接 POST 照样能把账号建出来，运维以为注册关了，其实只是把入口藏了起来
+    # （配上 `AUTH_DEBUG_MODE=true` 那条自助当管理员的路，后果更重）。
+    from services.app_security_bootstrap_service import public_register_enabled_by_env
+
+    if not public_register_enabled_by_env():
+        flash("本站已关闭自助注册，请联系平台管理员开通账号。", "error")
+        return redirect(url_for("auth_bp.login"))
+
     if request.method == "POST":
         username = (request.form.get("username") or "").strip()
         password = (request.form.get("password") or "").strip()

@@ -39,6 +39,30 @@ from models import (
 DIFF_SETTING_FIELDS = ("header_rows", "header_name_row", "key_columns")
 
 
+def parse_header_rows(value) -> tuple:
+    """表单里的「表头行数」→ `(库值, 错误信息)`。
+
+    空等价于「不配置」，存 `None`；别的必须是正整数。
+
+    **这里必须自己给提示，不能让它抛。** 三个表单入口原先写的是
+    `int(header_rows) if header_rows else None` —— 裸转换。`resource_type == "table"`
+    那条「表头行数为必填项」的校验只挡**空**（非空字符串一律 truthy），填了「三」
+    或者被脚本改成 `1e9`/`abc` 时一路走到 `int()` 才炸，用户看到的是 500 而不是
+    「表头行数必须是数字」。这也是为什么它和 `parse_header_name_row` 放在一起：
+    两者用的是同一个值，本来就该由同一处解析。
+    """
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return None, ""
+    try:
+        count = int(text)
+    except (TypeError, ValueError):
+        return None, f"表头行数「{text}」不是数字"
+    if count < 1:
+        return None, f"表头行数（{count}）必须大于 0"
+    return count, ""
+
+
 def parse_header_name_row(submitted, header_rows) -> tuple:
     """表单里的「名称行」→ `(库值, 错误信息)`。
 
@@ -63,12 +87,14 @@ def parse_header_name_row(submitted, header_rows) -> tuple:
         return None, f"名称行「{text}」不是数字"
     if value <= 1:
         return None, ""
-    try:
-        count = int(str(header_rows).strip())
-    except (TypeError, ValueError):
-        count = 1
-    if value > count:
-        return None, f"名称行（{value}）不能超过表头行数（{count}）"
+    # 表头行数走同一处解析：填了「三」的时候，先说「表头行数不是数字」，
+    # 而不是拿 `count = 1` 兜底后回一句「名称行（2）不能超过表头行数（1）」——
+    # 那是在用一个猜出来的数字教用户改另一个字段。
+    count, rows_error = parse_header_rows(header_rows)
+    if rows_error:
+        return None, rows_error
+    if value > (count or 1):
+        return None, f"名称行（{value}）不能超过表头行数（{count or 1}）"
     return value, ""
 
 

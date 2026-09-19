@@ -181,6 +181,19 @@ def _to_int_or_none(value, min_value=None, max_value=None):
     return iv
 
 
+def _paged_limit(default: int = 50, max_value: int = 200) -> int:
+    """`?limit=` 的取值：脏值回落默认，再夹到上下限。
+
+    原先两处写的是 `max(1, min(200, int(request.args.get("limit") or 50)))` —— 裸转换。
+    `?limit=abc` 直接 `ValueError` → 500：翻页参数本该由用户随便填，填错也只是回到默认
+    条数，不该让整个列表页报错。
+    """
+    parsed = _to_int_or_none(request.args.get("limit"))
+    if parsed is None or parsed < 1:
+        return default
+    return min(parsed, max_value)
+
+
 def _to_float_or_none(value, min_value=None, max_value=None):
     try:
         fv = float(value)
@@ -1790,7 +1803,7 @@ def get_agent_abnormal_summary():
 def list_agent_incidents(agent_code: str):
     """查看指定 Agent 的异常事件。"""
     AgentNode, AgentIncident = get_runtime_models("AgentNode", "AgentIncident")
-    limit = max(1, min(200, int(request.args.get("limit") or 50)))
+    limit = _paged_limit()
 
     agent = AgentNode.query.filter_by(agent_code=str(agent_code or "").strip()).first()
     if not agent:
@@ -1877,7 +1890,7 @@ def list_agent_tasks():
     """查看 Agent 任务状态（管理员）。"""
     AgentTask = get_runtime_models("AgentTask")[0]
     status_filter = str(request.args.get("status") or "").strip().lower()
-    limit = max(1, min(200, int(request.args.get("limit") or 50)))
+    limit = _paged_limit()
 
     query = AgentTask.query
     if status_filter in {"pending", "processing", "completed", "failed"}:

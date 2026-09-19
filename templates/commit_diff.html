@@ -1540,7 +1540,7 @@ function renderSheetsProgressively(diffData, reorderedSheets, currentIndex) {
             // 数据不完整
             if (contentContainer) {
                 contentContainer.innerHTML = '<div class="p-4 text-center text-muted">' +
-                                           '<p>工作表 "' + sheetName + '" 数据不完整</p>' +
+                                           '<p>工作表 "' + escapeHtml(sheetName) + '" 数据不完整</p>' +
                                            '</div>';
             }
             renderSheetsProgressively(diffData, reorderedSheets, currentIndex + 1);
@@ -1746,7 +1746,7 @@ function showTabSwitchLoading(sheetName) {
         '<span class="visually-hidden">Loading...</span>' +
         '</div>' +
         '<h6 class="mb-2">正在渲染Excel差异数据...</h6>' +
-        '<p class="text-muted mb-0">切换到工作表: ' + sheetName + '</p>' +
+        '<p class="text-muted mb-0">切换到工作表: ' + escapeHtml(sheetName) + '</p>' +
         '</div>';
     
     // 添加到Excel内容区域

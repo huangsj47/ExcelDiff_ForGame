@@ -11,7 +11,7 @@ from models import GlobalRepositoryCounter, Repository, db
 from services.deployment_mode import is_agent_dispatch_mode
 from services.enhanced_git_service import EnhancedGitService
 from services.model_loader import get_runtime_model
-from services.repository_diff_cache_reset import parse_header_name_row
+from services.repository_diff_cache_reset import parse_header_name_row, parse_header_rows
 from utils.request_security import require_admin
 from utils.security_utils import (
     REPOSITORY_NAME_ERROR_MESSAGE,
@@ -161,6 +161,13 @@ def create_git_repository():
         flash("必填字段不能为空", "error")
         return redirect(url_for("add_git_repository", project_id=project_id))
 
+    # 表头行数只在这里解析一次，下面建对象时直接用解析结果 —— 原先那份
+    # `int(header_rows) if header_rows else None` 是裸转换，填了「三」就是 500。
+    header_rows_value, header_rows_error = parse_header_rows(header_rows)
+    if header_rows_error:
+        flash(header_rows_error, "error")
+        return redirect(url_for("add_git_repository", project_id=project_id))
+
     header_name_row, name_row_error = parse_header_name_row(request.form, header_rows)
     if name_row_error:
         flash(name_row_error, "error")
@@ -187,7 +194,7 @@ def create_git_repository():
         unconfirmed_history=unconfirmed_history,
         delete_table_alert=delete_table_alert,
         weekly_version_setting=weekly_version_setting,
-        header_rows=int(header_rows) if header_rows else None,
+        header_rows=header_rows_value,
         header_name_row=header_name_row,
         key_columns=key_columns,
         enable_id_confirmation=enable_id_confirmation,
@@ -426,6 +433,12 @@ def create_svn_repository():
         flash("必填字段不能为空", "error")
         return redirect(url_for("add_svn_repository", project_id=project_id))
 
+    # 同 git 那条路：表头行数只解析一次（原先的裸 `int()` 遇到非数字是 500）。
+    header_rows_value, header_rows_error = parse_header_rows(header_rows)
+    if header_rows_error:
+        flash(header_rows_error, "error")
+        return redirect(url_for("add_svn_repository", project_id=project_id))
+
     header_name_row, name_row_error = parse_header_name_row(request.form, header_rows)
     if name_row_error:
         flash(name_row_error, "error")
@@ -454,7 +467,7 @@ def create_svn_repository():
         delete_table_alert=delete_table_alert,
         weekly_version_setting=weekly_version_setting,
         clone_status="pending",
-        header_rows=int(header_rows) if header_rows else None,
+        header_rows=header_rows_value,
         header_name_row=header_name_row,
         key_columns=key_columns,
         enable_id_confirmation=enable_id_confirmation,

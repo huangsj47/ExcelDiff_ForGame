@@ -154,6 +154,10 @@ def _merge_rounds(
     引擎的 `_emit` 是每轮的唯一出口，但一次重试/重问可能让同一个 `round_index` 出现两次
     （例如协议纠错那一轮）。按 `round_index` 去重更接近「一轮一行」的读法，也让重放同一帧
     幂等（界面每 3 秒拿到的是同一份列表，不该越滚越长）。
+
+    **但判重必须带上 `agent`**：子代理模式下每个分片的引擎都从第 1 轮开始编号，
+    只按 `round_index` 判重会把「第二个分片的第一轮」当成「第一个分片最后一轮的重报」
+    而替换掉它（见下面那段注释）。
     """
     if not isinstance(entry, dict) or not entry:
         # 拿不到这一轮的明细（老调用方、测试替身）：保留已有的那几轮，别把它清掉。
@@ -172,7 +176,18 @@ def _merge_rounds(
     # 等于把「已经跑了 12 轮」说成「只跑了 8 轮」。
     seen = previous.rounds_seen if previous is not None else 0
     index = item.get("round_index")
-    if existing and index is not None and existing[-1].get("round_index") == index:
+    # **判重要连 `agent` 一起看。** 子代理模式下每个分片的引擎都从第 1 轮开始编号
+    # （`engine.py` 的成员引擎各自独立），只按 `round_index` 判重的话，第二个分片的第一轮
+    # 会被当成「第一个分片最后一轮的重报」而**替换掉它** —— 于是实时面板上少一轮，
+    # 而落库那份（重编号成家族全局序号）两轮都在，两个来源画出来的东西不一样。
+    # `agent` 是上面才补上的，所以判重必须在补完之后做（这里正是）。
+    same_round_of_the_same_shard = (
+        existing
+        and index is not None
+        and existing[-1].get("round_index") == index
+        and str(existing[-1].get("agent") or "") == str(item.get("agent") or "")
+    )
+    if same_round_of_the_same_shard:
         existing[-1] = item
     else:
         existing.append(item)

@@ -170,12 +170,19 @@ def test_a_long_commit_subject_is_folded_and_truncated():
 def test_the_weekly_label_carries_the_version_window():
     """同名周版本靠时间窗分得开 —— 少了它，两份报告的标签是一样的。
 
-    库里存的是 naive-UTC 墙钟，标签按北京时间显示（与界面上别处同源）。
+    **这里的两个值是北京墙钟，标签原样显示、不做换算。** `WeeklyVersionConfig.
+    start_time/end_time` 是用户在 `<input type="datetime-local">` 里填的、原样入库的
+    北京墙钟（见 `utils/timezone_utils` 那两套墙钟的说明），页面上显示它的地方也都是
+    直接 `strftime`（`weekly_version_logic.py:207`、`weekly_version_file_handlers.py:199`）。
+
+    这条原来写的是 `2026-09-08 08:00 ~ 2026-09-15 07:59` —— 那是把它当成 naive-UTC
+    又转了一次北京时间，**整整多加了 8 小时**，于是导出文档（与文件名）里的时间窗
+    和周版本页面上显示的对不上。错的期望把错的实现钉成了绿的。
     """
     label = doc.weekly_target_label(
         "第42周版本", datetime(2026, 9, 8), datetime(2026, 9, 14, 23, 59)
     )
-    assert label == "周版本 第42周版本（2026-09-08 08:00 ~ 2026-09-15 07:59）"
+    assert label == "周版本 第42周版本（2026-09-08 00:00 ~ 2026-09-14 23:59）"
 
 
 def test_the_weekly_label_without_a_window_is_just_the_name():

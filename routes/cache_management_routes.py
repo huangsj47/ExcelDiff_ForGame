@@ -220,6 +220,11 @@ def get_cache_strategy_info():
         return jsonify({"success": False, "message": f"获取策略信息失败: {str(exc)}"}), 500
 
 
+@require_admin
+# **本文件里的写接口早就都收紧了，唯独这三个只读接口挂在 `/api/` 下没有 `@require_admin`**
+# （`/admin/*` 有路径前缀兜底，它们没有）：任意已登录用户都能读到**全平台**的缓存统计
+# 与操作日志，而日志正文里带着别的项目的仓库文件名与项目编号。缓存统计是运维视角的
+# 数据，不该按「登录了就能看」处理 —— 与同文件其余 8 个接口同一档。
 @cache_management_bp.route("/api/excel-cache/logs")
 def get_excel_cache_logs():
     """获取Excel缓存操作日志"""
@@ -430,6 +435,11 @@ def excel_diff_status(cache_key):
         return jsonify({"status": "error", "error": str(exc)}), 500
 
 
+@require_admin
+# **本文件里的写接口早就都收紧了，唯独这三个只读接口挂在 `/api/` 下没有 `@require_admin`**
+# （`/admin/*` 有路径前缀兜底，它们没有）：任意已登录用户都能读到**全平台**的缓存统计
+# 与操作日志，而日志正文里带着别的项目的仓库文件名与项目编号。缓存统计是运维视角的
+# 数据，不该按「登录了就能看」处理 —— 与同文件其余 8 个接口同一档。
 @cache_management_bp.route("/api/excel-html-cache/stats", methods=["GET"])
 def get_excel_html_cache_stats():
     """获取Excel HTML缓存统计信息"""
@@ -499,6 +509,11 @@ def get_excel_html_cache_stats():
         return jsonify({"success": False, "message": f"获取统计失败: {str(exc)}"}), 500
 
 
+@require_admin
+# **本文件里的写接口早就都收紧了，唯独这三个只读接口挂在 `/api/` 下没有 `@require_admin`**
+# （`/admin/*` 有路径前缀兜底，它们没有）：任意已登录用户都能读到**全平台**的缓存统计
+# 与操作日志，而日志正文里带着别的项目的仓库文件名与项目编号。缓存统计是运维视角的
+# 数据，不该按「登录了就能看」处理 —— 与同文件其余 8 个接口同一档。
 @cache_management_bp.route("/api/excel-cache/stats-by-project", methods=["GET"])
 def get_excel_cache_stats_by_project():
     """获取按项目分组的Excel缓存统计信息"""

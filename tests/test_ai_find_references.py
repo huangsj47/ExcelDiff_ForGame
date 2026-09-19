@@ -21,7 +21,7 @@ import json
 from types import SimpleNamespace
 
 from services.ai import reference_search as rs
-from services.ai.protocol import ContextRequest, sanitize_requests
+from services.ai.protocol import ContextRequest, parse_payload, sanitize_requests
 from services.ai.reference_search import (
     SearchBudget,
     is_binary,
@@ -216,6 +216,28 @@ def test_a_search_needs_no_commit_and_is_allowed():
 
     assert dropped == ()
     assert allowed == (ContextRequest(type="find_references", path="", query="target_id"),)
+
+
+def test_the_query_survives_the_real_parse_path():
+    """**这个工具曾经端到端从未执行过**：模型按 SKILL.md 发
+    `{"type": "find_references", "query": "target_id"}`，而 `_coerce_requests` 构造
+    `ContextRequest` 时漏了 `query=` —— 解析出来永远是空串，于是 `sanitize_requests`
+    把每一条都按「搜索词太短」丢掉，丢掉的理由还把责任推给模型。
+
+    上面那几条用例都直接构造 `ContextRequest`，正好绕过这一层，所以谁也没发现。
+    这条从**真解析入口**进去，钉住「模型发什么，拿到的就是什么」。
+    """
+    payload = parse_payload(json.dumps({
+        "status": "need_more_context",
+        "reason": "先看看这个字段还有谁在用",
+        "requests": [{"type": "find_references", "query": "target_id", "path": "scripts/"}],
+    }, ensure_ascii=False))
+
+    request = payload.requests[0]
+    assert request.query == "target_id", "解析层把 query 丢了 —— 这个工具就永远跑不起来"
+    allowed, dropped = _sanitize(request)
+    assert dropped == (), f"一条格式正确的搜索请求被丢掉了：{dropped}"
+    assert [r.query for r in allowed] == ["target_id"]
 
 
 def test_a_too_short_query_is_dropped_with_a_reason():

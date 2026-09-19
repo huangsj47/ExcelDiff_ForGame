@@ -33,7 +33,14 @@ import json
 from decimal import Decimal
 from typing import Any, Iterable, Mapping, Sequence
 
-from services.ai.pricing import CostEstimate, PriceTable, estimate_cost, money
+from services.ai.pricing import (
+    CostEstimate,
+    PriceTable,
+    amount_exact,
+    amount_of,
+    estimate_cost,
+    money,
+)
 
 # 逐次运行的顶格键。前端按这些键读，改这里等于改接口。
 USAGE_KEYS = (
@@ -360,7 +367,16 @@ def _cost_ok(cost: Mapping[str, Any] | None) -> bool:
 def _sum_costs(
     costs: Sequence[Mapping[str, Any] | None], table: PriceTable | None
 ) -> dict[str, Any] | None:
-    """把逐次运行的费用按档相加（金额是字符串，用 Decimal 加，见 pricing 模块）。"""
+    """把逐次运行的费用按档相加（金额用 Decimal 加，见 pricing 模块）。
+
+    **读 `amount_exact` 而不是 `amount`**：后者是给人看的展示串，不足一分时写的是
+    `<0.01` —— 拿它 `Decimal(...)` 会抛 `InvalidOperation`，把只读的消耗面板与预算闸门
+    一起打成 500（而预算那条链的 docstring 明写「这个函数不抛异常」）；就算能解析，
+    拿**已量化到分**的值相加也会少算（两次真实的 0.014 元应得 0.03，用展示值相加得 0.02）。
+
+    取不回精确金额时返回 `None`（=「算不出」，界面有一句现成的话），**不跳过那一条**：
+    少算一条得到的金额看起来完全正常，正是这个模块最想避免的那种错。
+    """
     if not costs:
         return None
     lines: dict[str, dict[str, Any]] = {}
@@ -369,15 +385,19 @@ def _sum_costs(
     versions: set[str] = set()
     patterns: set[str] = set()
     for item in costs:
-        if not item:
+        amount = amount_of(item)
+        if not item or amount is None:
             return None
         currency = currency or str(item.get("currency") or "")
         if item.get("price_version"):
             versions.add(str(item["price_version"]))
         if item.get("matched_pattern"):
             patterns.add(str(item["matched_pattern"]))
-        total += Decimal(str(item["amount"]))
+        total += amount
         for line in item.get("lines") or []:
+            line_amount = amount_of(line)
+            if line_amount is None:
+                return None
             bucket = lines.setdefault(
                 str(line["label"]),
                 {
@@ -389,13 +409,14 @@ def _sum_costs(
                 },
             )
             bucket["tokens"] += int(line.get("tokens") or 0)
-            bucket["amount"] += Decimal(str(line["amount"]))
+            bucket["amount"] += line_amount
 
     notes: list[str] = []
     if len(versions) > 1:
         notes.append("这几次运行用的不是同一版单价表：" + "、".join(sorted(versions)))
     return {
         "amount": money(total),
+        "amount_exact": amount_exact(total),
         "currency": currency,
         "reason": "",
         "price_version": "、".join(sorted(versions)),
@@ -407,6 +428,7 @@ def _sum_costs(
                 "tokens": bucket["tokens"],
                 "unit_price": bucket["unit_price"],
                 "amount": money(bucket["amount"]),
+                "amount_exact": amount_exact(bucket["amount"]),
                 "note": bucket["note"],
             }
             for bucket in lines.values()

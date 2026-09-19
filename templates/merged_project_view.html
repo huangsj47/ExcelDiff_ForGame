@@ -4190,6 +4190,26 @@ function openWeeklyAiDrawer(configId, versionName) {
     // 那段时间是能看见的）。
     AiDrawerTabs.reset();
     AiThinkLog.setRun(null);
+    // 「导出 md」也要跟着收起来：换目标 = 屏幕上那份结论换了人。不撤的话，看着版本 B 的
+    // 抽屉、点导出，拿到的文件里装的是**版本 A** 的结论（文件名是 A 的，内容也是 A 的）——
+    // 这正是 ai_report_export.js 开头声称要防的那种「看着像成功」的错。
+    AiReportExport.track({ runId: null });
+    // **正文、meta、用量行、徽章同样要跟着换人。** 这个抽屉是同一个抽屉换目标，而新目标的
+    // 结论要等 `refreshWeeklyAiLatest` 那两三个往返回来才到；在那之前屏幕上挂着的就是
+    // 上一个版本的结论 —— 标题写着「AI分析 - 版本 B」，正文与「最近分析：<时间>」却全是
+    // 版本 A 的。而就绪闸门有三条**提前 return**（读不到配置 / 配置不全 / 超预算），
+    // 那三条路上它**永远不会**回来纠正。（`AiThinkLog.setRun(null)` 与上面那句
+    // `AiReportExport.track` 本来就是同一个道理，只是当时只想到了这两处。）
+    //
+    // 说「正在读取」而不是留空：空白会被读成「这个版本没有结论」，而那是我们此刻
+    // 还不知道的事。三条提前 return 与 `refreshWeeklyAiLatest` 都会立刻把它换掉。
+    setWeeklyAiOutput('正在读取这个版本的最近一次分析…', false, 'busy');
+    setWeeklyAiStatusBadge('检测中', 'secondary');
+    setWeeklyAiMeta('');
+    renderAiUsageLine(null, null);
+    // 上一个版本「有没有结论」不是这个版本的答案：留着它，「开始分析」会照着版本 A
+    // 的状况决定要不要弹「已有分析结果，确定重新分析吗？」。
+    weeklyAiHasCached = false;
 }
 
 function closeWeeklyAiDrawer() {
@@ -4988,29 +5008,41 @@ function getTodayDateLabel() {
 }
 
 function createInactiveVersionHtml(version) {
+    // 这五处拼进 innerHTML 的值**全都不可信**：`version.name`（周版本名）与
+    // `config.branch` 由项目成员在周版本配置页自由填写，`config.repository.name`
+    // 是仓库名 —— 本文件对同一个 `version.name` 在 5121 行用的是
+    // `escapeHtmlAttribute`，注释里写的就是「版本名等用户输入」。这里原来有五处裸拼，
+    // 于是「建一个时间窗在过去的版本」就能让**任何人打开这个项目页时**执行脚本
+    // （含管理员）。同一个字段一处转一处不转，是这类洞最典型的来源。
+    //
+    // 用属性专用那个（它多转义 `'`，是文本上下文的超集）：本文件里那个不带引号的
+    // `escapeHtml` 定义在另一个函数的作用域里（见 4707 行），这里拿不到。
+    const safeName = escapeHtmlAttribute(version.name);
     const startTime = new Date(version.start_time).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
     const endTime = new Date(version.end_time).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
     const todayText = getTodayDateLabel();
-    
+
     let configsHtml = '';
     let statsHtml = '';
     let configIds = [];
-    
+
     version.configs.forEach(config => {
         configIds.push(config.id);
+        const repoName = escapeHtmlAttribute(config.repository.name);
+        const branch = escapeHtmlAttribute(config.branch || '-');
         configsHtml += `
             <span class="badge bg-${config.repository.type === 'git' ? 'success' : 'primary'} px-3 py-2 me-2">
                 <i class="fas fa-${config.repository.type === 'git' ? 'git-alt' : 'database'} me-1"></i>
-                ${config.repository.name}
+                ${repoName}
             </span>
         `;
         statsHtml += `
             <div class="repository-stat-item d-flex justify-content-between align-items-center">
                 <div class="repository-name">
                     <i class="fas fa-${config.repository.type === 'git' ? 'git-alt' : 'database'} me-2 text-muted"></i>
-                    <strong>${config.repository.name}</strong>
+                    <strong>${repoName}</strong>
                     <span class="branch-tag ${getBranchTagClass(config.branch)}">
-                        <i class="fas fa-code-branch"></i>${config.branch || '-'}
+                        <i class="fas fa-code-branch"></i>${branch}
                     </span>
                     <span class="pass-rate-pill" id="passRate-${config.id}">通过率：--</span>
                 </div>
@@ -5043,12 +5075,12 @@ function createInactiveVersionHtml(version) {
             <div class="card-header bg-light">
                 <div class="d-flex justify-content-between align-items-center">
                     <h5 class="mb-0 text-secondary">
-                        <i class="fas fa-archive me-2"></i>${version.name}
+                        <i class="fas fa-archive me-2"></i>${safeName}
                     </h5>
                     <div class="d-flex align-items-center gap-2">
                         <span class="version-risk-label risk-unknown"
                               data-config-id="${version.configs[0].id}"
-                              data-version-name="${version.name}">
+                              data-version-name="${safeName}">
                             版本AI分析：未分析
                         </span>
                         <span class="badge bg-secondary">

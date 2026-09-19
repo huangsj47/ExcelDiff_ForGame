@@ -49,11 +49,13 @@ def test_the_list_is_newest_first_and_only_carries_conclusions():
         now = datetime.now(timezone.utc)
         older = _weekly_run(project.id, cfg, created_at=now - timedelta(days=2))
         newer = _weekly_run(project.id, cfg, created_at=now - timedelta(days=1))
-        # 中间态不进这个列表
+        # 中间态不进这个列表。**时间要「新」**：库里的 running 超过
+        # `STALE_RUNNING_SECONDS` 就是僵尸，按 `effective_status` 是失败、要进列表
+        # （那条规则由下面 `test_a_zombie_running_run_shows_up_as_a_failure` 单独钉住）。
         _weekly_run(project.id, cfg, status="running", response_text="",
-                    created_at=now - timedelta(hours=3))
+                    created_at=now - timedelta(minutes=5))
         _weekly_run(project.id, cfg, status="pending", response_text="",
-                    created_at=now - timedelta(hours=2))
+                    created_at=now - timedelta(minutes=2))
         # 别的目标也不进
         _run(project_id=project.id, target_type="commit", target_id=999999)
 
@@ -62,6 +64,35 @@ def test_the_list_is_newest_first_and_only_carries_conclusions():
         assert [row["run_id"] for row in payload["runs"]] == [newer.id, older.id]
         assert payload["total"] == 2
         assert payload["truncated"] is False
+
+
+def test_a_zombie_running_run_shows_up_as_a_failure_not_as_in_progress():
+    """进程被杀留下的 running 记录：**三个入口必须说同一句话。**
+
+    `/progress` 与 `/runs/<id>/report` 按 `effective_status` 报「失败」，`/latest`
+    也按它（`_read_latest_result` 第 4 步）。列表这边若按库里那个原值判，同一个目标
+    就出现：弹层永远说「正在分析、还没有结论可翻」，抽屉说「上次分析失败」，
+    而 `/progress` 说失败 —— 用户面对三个互相矛盾的界面，不知道该信哪个。
+    """
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        now = datetime.now(timezone.utc)
+        zombie = _weekly_run(
+            project.id, cfg, status="running", response_text="",
+            created_at=now - timedelta(hours=3),
+        )
+
+        payload = history.list_target_runs(kind="weekly", target_key=_weekly_key(cfg))
+
+        assert [row["run_id"] for row in payload["runs"]] == [zombie.id], (
+            "僵尸 running 要能在「为什么失败」那一档里翻到"
+        )
+        assert payload["runs"][0]["status"] == "failed"
+        assert payload["runs"][0]["status_label"] == "分析失败"
+        assert payload["in_progress"] is False, (
+            "它已经不是「正在跑」了 —— 说「正在分析」会让用户一直等下去"
+        )
+        assert "进程中断" in payload["runs"][0]["summary"]
 
 
 def test_a_run_outside_the_window_is_not_listed():
@@ -162,6 +193,44 @@ def test_a_target_with_nothing_at_all_is_not_reported_as_running():
 
         assert payload["runs"] == []
         assert payload["in_progress"] is False
+
+
+def test_the_failure_latest_would_show_is_in_the_list_even_outside_the_window():
+    """`/latest` 的最后一步是「退回最近一次失败」，而它不看窗口。
+
+    列表被窗口挡在外面的话，同一个目标就出现两种说法：抽屉说「上次分析失败」，
+    弹层说「这个目标还没有跑过分析」——同一份数据，两个入口，两句相反的话。
+    """
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        key = _weekly_key(cfg)
+        old_failure = _weekly_run(
+            project.id, cfg, status="failed", response_text="", error_message="额度用完了",
+            created_at=datetime.now(timezone.utc) - timedelta(days=history.ANALYSIS_CACHE_DAYS + 10),
+        )
+
+        payload = history.list_target_runs(kind="weekly", target_key=key)
+        latest = ai_service.get_latest_weekly_result(cfg.id)
+
+        assert latest is not None and latest["status"] == "failed", "前提：/latest 会拿它出来"
+        assert [row["run_id"] for row in payload["runs"]] == [old_failure.id]
+        assert payload["runs"][0]["summary"].startswith("失败：")
+
+
+def test_a_very_old_success_is_not_dragged_back_in():
+    """窗口对**成功**的结论照旧生效：`/latest` 那边也不给（`_latest_concluded_run` 同样过窗口），
+    所以两个入口都不说 —— 一致地「看不到」，而不是一个说有一个说没有。"""
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        key = _weekly_key(cfg)
+        _weekly_run(project.id, cfg,
+                    created_at=datetime.now(timezone.utc) - timedelta(
+                        days=history.ANALYSIS_CACHE_DAYS + 10))
+
+        payload = history.list_target_runs(kind="weekly", target_key=key)
+
+        assert payload["runs"] == []
+        assert ai_service.get_latest_weekly_result(cfg.id) is None
 
 
 # ---------------------------------------------------------------------------

@@ -1965,6 +1965,12 @@ main:focus {
     vertical-align: middle;
 }
 
+/* 与下面 `.ai-drawer-panel[hidden]` 同一条纪律：上面那句 `display: inline-block` 是
+   作者来源，会盖掉浏览器默认的 `[hidden]{display:none}`，所以这里必须显式压掉 ——
+   否则这个「未读」点**从页面打开起就常亮**（它只有 6×6 像素，看着像个装饰性的小圆点，
+   于是 markUnread/clearUnread 视觉上全是空操作，而用户永远不知道结论更新了）。 */
+.ai-drawer-tab-dot[hidden] { display: none; }
+
 /* 标签面板。**`[hidden]` 那条必须显式写**：作者样式里的 display:flex 会盖掉浏览器
    默认的 [hidden]{display:none}（作者来源胜过浏览器来源，与谁更具体无关），不写就是
    两个面板同时显示 —— 标签看起来是坏的。 */

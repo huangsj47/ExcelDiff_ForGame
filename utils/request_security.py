@@ -544,6 +544,13 @@ def _is_same_origin_request():
 def _is_safe_redirect(target):
     if not target:
         return False
+    # **反斜杠要先挡掉。** `urlparse('/\\evil.example.com')` 的 netloc 是空串（于是被判
+    # 成站内跳转），而浏览器按 WHATWG 规则把 `\` 归一成 `/` —— 那个串等价于
+    # `//evil.example.com`，于是 `?next=/\evil.example.com` 是一次开放重定向（登录页
+    # 常被用来做钓鱼的第一跳）。制表符/换行同理：它们会被浏览器剥掉，剥完可能露出
+    # `//`，所以一并拒绝，而不是让 urlparse 猜。
+    if any(char in target for char in ("\\", "\t", "\n", "\r")):
+        return False
     parsed = urlparse(target)
     if parsed.scheme and parsed.scheme not in ("http", "https"):
         return False

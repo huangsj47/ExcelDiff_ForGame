@@ -380,6 +380,44 @@ def test_cost_appears_only_when_a_price_table_is_configured():
         assert "输入（命中缓存）" in labels, "命中那一档被合进了未命中价"
 
 
+def test_a_sub_cent_amount_does_not_break_the_aggregation():
+    """**不足一分钱曾经把只读面板与预算闸门一起打成 500。**
+
+    `pricing.money()` 对「非零但不足一分」给的是展示串 `<0.01`（那是刻意的：显示
+    `0.00` 会被读成「这次没花钱」），而聚合（`usage._sum_costs`）原本是拿它
+    `Decimal(...)` 回去当数字加的 —— 那会抛 `InvalidOperation`。预算闸门那条链也走这个
+    聚合，而 `analysis_budget` 的 docstring 明写「**这个函数不抛异常**」。
+
+    这里同时钉住另一半：合计读的是**未舍入**的值。两次真实的 0.014 元相加是 0.028；
+    拿已经量化到分的展示值相加会得到 0.02（少算一分钱，而且看不出来）。
+    """
+    with flask_app.app_context():
+        create_tables()
+        project_id = _project()
+        _set_price_table(project_id, PRICE_TABLE)
+        # 默认的那组数是 1000/200/900 → 每次 0.00198 元，正是「不足一分」那一档。
+        _run(project_id)
+        _run(project_id)
+
+        from services.ai.analysis_budget import budget_status
+        from services.ai.usage import aggregate_runs
+        from services.ai_analysis_service import project_price_table
+
+        table, errors = project_price_table(project_id)
+        assert table is not None, errors
+        runs = AiAnalysisRun.query.filter_by(project_id=project_id).all()
+        stats = aggregate_runs(runs, price_table=table)
+
+        cost = stats["cost"]
+        assert cost is not None, "取不回金额只能说「算不出」，不许抛异常"
+        assert cost["amount"] == "<0.01", "两次不足一分的运行合计仍不足一分"
+        assert cost["amount_exact"] == "0.00396", (
+            "合计要读未舍入的值：0.00198 × 2 = 0.00396（拿展示值相加会丢精度）"
+        )
+        # 闸门那条链：配了费用上限也不许抛（它是「算不出就不拦」，不是「算不出就炸」）。
+        assert isinstance(budget_status(project_id), dict)
+
+
 def test_an_unmatched_model_gives_no_amount_and_a_reason():
     with flask_app.app_context():
         create_tables()

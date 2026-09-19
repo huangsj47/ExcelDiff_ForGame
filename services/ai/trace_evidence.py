@@ -263,9 +263,17 @@ def live_round_entry(record: Any) -> dict:
     照实录 `record` 上的值，**不猜**：实时那一路由 `run_progress.publish` 用进度对象上的
     `agent` 补齐，落库那一路本来就是对的。
     """
-    executed = summarize_executed(
-        getattr(record, "executed", ()), limit=LIVE_LIST_MAX_ITEMS
-    )
+    # **先筛再截**：`summarize_executed` 内部是按前 N 条截的（默认 8），而一轮执行 9~20 条
+    # 是常态 —— 先截再筛的话，「取不到」的条目只要排在第 9 位之后就一条都不显示，
+    # 而落库那份是全量、渲染出来是有的。同一个过程两个来源画出两样东西，正是这个模块
+    # 一开始就要避免的那件事（模块 docstring 与 ai_think_log.js 都明写「两边显示一致」）。
+    executed = [
+        item
+        for item in summarize_executed(
+            getattr(record, "executed", ()), limit=TRACE_LIST_MAX_ITEMS
+        )
+        if item.get("failed") or item.get("empty")
+    ][:LIVE_LIST_MAX_ITEMS]
     return {
         "round_index": int(getattr(record, "index", 0) or 0),
         "agent": _clip(getattr(record, "agent", ""), 40),
@@ -284,7 +292,8 @@ def live_round_entry(record: Any) -> dict:
         "requests": summarize_requests(
             getattr(record, "requests", ()), limit=LIVE_LIST_MAX_ITEMS
         ),
-        "executed": [item for item in executed if item.get("failed") or item.get("empty")],
+        # 上面已经筛过、也截过了（顺序见那段注释：**先筛再截**）。
+        "executed": executed,
         "dropped": summarize_dropped(
             getattr(record, "dropped", ()), limit=LIVE_LIST_MAX_ITEMS
         ),

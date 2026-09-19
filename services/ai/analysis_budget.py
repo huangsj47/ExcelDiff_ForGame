@@ -42,7 +42,13 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from models.ai_analysis import AiAnalysisRun
-from services.ai.pricing import DEFAULT_CURRENCY, money
+from services.ai.pricing import (
+    DEFAULT_CURRENCY,
+    amount_exact,
+    amount_from_text,
+    amount_of,
+    money,
+)
 from services.ai.usage import aggregate_runs, usage_from_run
 from utils.logger import log_print
 from utils.request_security import platform_scope_visible
@@ -244,17 +250,17 @@ def _cost_totals(groups: Sequence[tuple[Sequence[AiAnalysisRun], Any]]) -> tuple
     for runs, table in groups:
         stats = aggregate_runs(runs, price_table=table)
         cost = (stats.get("cost") or {}) if stats else {}
-        amount = cost.get("amount")
+        # **读精确金额**：`amount` 是展示串（不足一分写 `<0.01`），解析它会把「这个周期
+        # 只花了不到一分钱」判成「算不出来」—— 一句假话，而这条分支正是靠「算不出」
+        # 决定不拦人的。
+        amount = amount_of(cost)
         if amount is None:
             return None, "", str(cost.get("reason") or "价格表或 token 数不可用")
         this_currency = str(cost.get("currency") or "")
         if currency and this_currency and this_currency != currency:
             return None, "", f"周期内混用了多种币种（{currency} / {this_currency}），无法相加"
         currency = currency or this_currency
-        try:
-            total += Decimal(str(amount))
-        except (InvalidOperation, ValueError):
-            return None, "", f"费用合计（{amount}）读不成数字"
+        total += amount
     return total, currency, ""
 
 
@@ -342,6 +348,9 @@ def _evaluate_scope(
             )
         else:
             base["used"]["cost"] = money(total)
+            # 精确值一并给出去：`with_live_usage` 要把「本次运行尚未落库的费用」加上去，
+            # 而拿展示串相加既解析不了（不足一分是 `<0.01`）又会少算（已量化到分）。
+            base["used"]["cost_exact"] = amount_exact(total)
             base["used"]["currency"] = currency or base["limits"]["currency"]
             base["ratios"]["cost"] = float(total / cost_limit) if cost_limit else None
             if total > cost_limit:
@@ -596,18 +605,21 @@ def with_live_usage(
                 )
 
         if live_cost is not None and limits.get("cost") is not None:
-            try:
-                limit_cost = Decimal(str(limits.get("cost")))
-            except (InvalidOperation, ValueError):
-                limit_cost = None
+            limit_cost = amount_from_text(limits.get("cost"))
             if limit_cost is not None:
-                base_cost = used.get("cost")
-                try:
-                    total_cost = (Decimal(str(base_cost)) if base_cost is not None else Decimal(0)) + live_cost
-                except (InvalidOperation, ValueError):
-                    total_cost = None
+                base_cost = used.get("cost_exact")
+                if base_cost is None:
+                    # 老的一层判定没有这个字段时退回展示串（取不回就是 None）。
+                    base_cost = used.get("cost")
+                # **别拿展示串去解析**：`used["cost"]` 是 `money()` 的产物，不足一分时是
+                # `<0.01`，`Decimal("<0.01")` 会抛 InvalidOperation。原来这里 try 一下直接
+                # 把整段费用分支跳过 —— 跑动中那块「已用费用（含本次）」就静默消失了，
+                # 连一句说明都没有。取不回精确值时不加，但要**说出来**（见下面的 note）。
+                base_amount = amount_from_text(base_cost)
+                total_cost = None if base_amount is None else base_amount + live_cost
                 if total_cost is not None:
                     used["cost"] = money(total_cost)
+                    used["cost_exact"] = amount_exact(total_cost)
                     used["currency"] = used.get("currency") or currency or limits.get("currency") or ""
                     node["ratios"] = {**(node.get("ratios") or {})}
                     node["ratios"]["cost"] = float(total_cost / limit_cost) if limit_cost else None
@@ -618,6 +630,14 @@ def with_live_usage(
                             f"{_fmt_money(total_cost, used['currency'])}（含本次运行），"
                             f"超过上限 {_fmt_money(limit_cost, used['currency'])}"
                         )
+                elif base_cost is not None:
+                    # 说一句，别让那一行**静默消失**（原来 try 一下就把整段跳过，
+                    # 界面上「已用费用（含本次）」直接不见了，没有任何解释）。
+                    node["notes"] = [
+                        *(node.get("notes") or ()),
+                        "已落库那一档的费用没有精确值（不足一分时存的是 `<0.01`），"
+                        "本次运行的费用未并入这一档。",
+                    ]
                     node["used"] = used
 
         node["used"] = used

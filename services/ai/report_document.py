@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from utils.timezone_utils import format_beijing_time
@@ -242,6 +243,17 @@ def commit_target_label(commit_id: Any, message: Any = "", *, short_chars: int =
     return f"{head}（{subject}）"
 
 
+def _wallclock_text(value: Any) -> str:
+    """北京墙钟（naive datetime）→ `2026-09-08 00:00`。**不做时区换算**（见
+    `weekly_target_label`：这两个值本来就是北京时间）。读不出来就是空串。"""
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    text = _WHITESPACE.sub(" ", str(value)).strip()
+    return text
+
+
 def weekly_target_label(
     name: Any,
     start: Any = None,
@@ -254,11 +266,20 @@ def weekly_target_label(
     时间窗是**这个周版本的边界**（`WeeklyVersionConfig.start_time/end_time`），不是
     「什么时候跑的分析」—— 后者在元信息表里另有一行。少了它，两个名字很像的周版本
     靠文件名分不开。
+
+    **这两个值已经是北京墙钟，不要再换算。** `start_time` / `end_time` 是用户在
+    `<input type="datetime-local">` 里填的、原样入库的北京墙钟（见
+    `utils/timezone_utils` 那两套墙钟的说明），页面上显示它们的地方（
+    `weekly_version_logic.py:207`、`weekly_version_file_handlers.py:199`）都是直接
+    `strftime`。原来是走 `format_beijing_time`（那个是给 naive-UTC 列用的）——
+    等于**又加了一次 8 小时**：配置 `2026-03-02 00:00 ~ 2026-03-08 23:59` 在导出文档里
+    写成 `2026-03-02 08:00 ~ 2026-03-09 07:59`，文件名里也是这个错时间，
+    而同一份配置在周版本页面上显示的是正确的那一对。
     """
     base = _WHITESPACE.sub(" ", str(name or "")).strip()
     head = f"周版本 {base}" if base else "周版本"
-    starts = format_beijing_time(start, "%Y-%m-%d %H:%M") if start is not None else ""
-    ends = format_beijing_time(end, "%Y-%m-%d %H:%M") if end is not None else ""
+    starts = _wallclock_text(start)
+    ends = _wallclock_text(end)
     if not starts and not ends:
         return head
     return f"{head}（{starts}{separator}{ends}）"
@@ -334,9 +355,12 @@ def anomaly_rows(anomalies: Iterable[Mapping[str, Any]]) -> list[dict[str, str]]
             evidence = [evidence]
         rows.append(
             {
-                "severity": severity_label(item.get("severity")),
-                "confidence": confidence_label(item.get("confidence")),
-                "dimension": dimension_label(item.get("category")),
+                # **三格都要过 `_cell`**：`*_label` 认不出来的值原样回落，而那个值来自
+                # 模型输出 —— 一个带换行与竖线的值能把附录表切成两行，凭空多出一行假数据
+                # （这份文件是要发出去的）。
+                "severity": _cell(severity_label(item.get("severity"))),
+                "confidence": _cell(confidence_label(item.get("confidence"))),
+                "dimension": _cell(dimension_label(item.get("category"))),
                 "title": _cell(item.get("title")),
                 "file_path": _cell(item.get("file_path")),
                 "impact": _cell(item.get("impact")),

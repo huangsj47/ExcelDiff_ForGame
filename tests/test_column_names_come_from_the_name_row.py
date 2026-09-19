@@ -56,6 +56,7 @@ from services.repository_diff_cache_reset import (  # noqa: E402
     DIFF_SETTING_FIELDS,
     diff_settings_changed,
     parse_header_name_row,
+    parse_header_rows,
 )
 from utils.diff_data_utils import (  # noqa: E402
     header_rows_have_changes,
@@ -509,6 +510,68 @@ class TestTheNameRowNumberParsing:
 
     def test_a_non_mapping_submission_is_not_a_crash(self):
         assert parse_header_name_row(None, '3') == (None, '')
+
+
+class TestTheHeaderRowsNumberParsing:
+    """「表头行数」自己也要能挡下脏值。
+
+    ## 缺陷形态
+
+    三个表单入口（git 创建 / svn 创建 / 编辑）原先写的是
+    `header_rows=int(header_rows) if header_rows else None` —— 裸转换。
+    `resource_type == "table"` 那条「表头行数为必填项」的校验只挡**空**
+    （非空字符串一律 truthy），于是 `header_rows=三` 或 `1e9` 一路走到 `int()` 才炸，
+    用户看到的是一张 500 的页面，而不是「表头行数必须是数字」。
+    """
+
+    @pytest.mark.parametrize('raw', [None, '', '   '])
+    def test_blank_means_unconfigured(self, raw):
+        assert parse_header_rows(raw) == (None, '')
+
+    @pytest.mark.parametrize('raw,expected', [('3', 3), (' 1 ', 1), (3, 3), ('1', 1)])
+    def test_a_number_is_stored_as_an_integer(self, raw, expected):
+        assert parse_header_rows(raw) == (expected, '')
+
+    @pytest.mark.parametrize('raw', ['abc', '三', '2.5', '1e9', '-'])
+    def test_a_non_number_is_refused_with_a_readable_message(self, raw):
+        value, error = parse_header_rows(raw)
+        assert value is None and '不是数字' in error, error
+
+    @pytest.mark.parametrize('raw', ['0', '-1'])
+    def test_zero_and_negatives_are_refused(self, raw):
+        """0 行表头没有意义（连列名行都没有），而负值会让引擎往回读。"""
+        value, error = parse_header_rows(raw)
+        assert value is None and '必须大于 0' in error, error
+
+    def test_a_bad_header_rows_is_reported_by_its_own_name(self):
+        """表头行数坏掉时，说的必须是**表头行数**。
+
+        老实现是 `count = 1` 兜底，于是同一个提交回的是「名称行（2）不能超过表头行数
+        （1）」—— 拿一个猜出来的数字，教用户去改**另一个**字段。真正填错的那个
+        一个字都没提。
+        """
+        value, error = parse_header_name_row({'header_name_row': '2'}, '三')
+        assert value is None
+        assert '表头行数' in error and '不是数字' in error, error
+
+    def test_the_three_form_entries_do_not_convert_it_raw(self):
+        """三个入口都不许再出现裸 `int(header_rows)`。"""
+        for path in (
+            "services/repository_creation_handlers.py",
+            "services/repository_update_form_service.py",
+        ):
+            source = _strip_comments(_read(path))
+            assert "int(header_rows) if header_rows else None" not in source, path
+            assert "parse_header_rows(" in source, path
+
+    def test_the_parsed_value_is_what_gets_written(self):
+        """解析结果要直接拿去写库，不能解析一遍、写入时再 `int()` 一遍。"""
+        # 两个创建入口走构造参数，编辑入口走属性赋值。
+        source = _strip_comments(_read("services/repository_creation_handlers.py"))
+        assert source.count("header_rows=header_rows_value") == 2
+
+        source = _strip_comments(_read("services/repository_update_form_service.py"))
+        assert "repository.header_rows = header_rows_value" in source
 
 
 class TestTheFormCarriesTheField:

@@ -133,3 +133,57 @@ def test_manual_add_clears_project_removed_import_block(monkeypatch):
             block_type=QkitImportBlockType.REMOVED.value,
         ).count()
         assert block_count_after == 0
+
+
+def test_a_project_admin_cannot_edit_a_user_outside_their_projects(monkeypatch):
+    """**项目管理员不许改自己项目之外的用户 —— 哪怕请求里带上了自己项目的 id。**
+
+    越界判定原来写的是 `if in_scope is None and not project_ids:`，于是攻击者只要在同一个
+    请求里捎上一个自己项目的 id（`project_ids.issubset(allowed)` 轻松通过），那个分支就
+    永不触发 —— 他能改**任何**用户（含平台管理员）的 `username`。而 qkit 的登录身份映射
+    就是「用户名 → 行」（`_get_user_by_username`），把某个身份那一行的用户名改成自己的
+    SSO 名，等于**把那个身份让给自己**；后面的成员同步还会顺带清掉受害者的项目成员关系
+    （它只保留请求里那 `project_ids`）。
+
+    所以这条钉的是：`in_scope` 是必要条件，与 `project_ids` 无关。
+    """
+    with app.app_context():
+        create_tables()
+        mine = Project(code=_uid("P"), name=_uid("Mine"), department="QA")
+        other = Project(code=_uid("P"), name=_uid("Other"), department="QA")
+        db.session.add_all([mine, other])
+        db.session.flush()
+        db.session.commit()
+
+        attacker = _create_qkit_user(_uid("attacker"))
+        victim = _create_qkit_user(_uid("victim"))
+        add_user_to_project(attacker.id, mine.id, "admin")
+        # 受害者**只**在另一个项目里 —— 攻击者对那个项目没有任何权限。
+        add_user_to_project(victim.id, other.id, "member")
+
+        monkeypatch.setattr(
+            qroutes,
+            "_resolve_user_mgmt_scope",
+            lambda: (False, [mine.id], [mine]),
+        )
+        original_username = victim.username
+        with app.test_request_context(
+            f"/auth/api/users/{victim.id}/profile",
+            method="POST",
+            json={
+                "username": "attacker_takes_over",
+                "display_name": victim.display_name,
+                "email": victim.email,
+                "project_ids": [mine.id],      # 这一个是攻击者自己的项目 —— 它不再是通行证
+                "member_role": "member",
+            },
+        ):
+            session["auth_user_id"] = attacker.id
+            response = qroutes.api_update_user_profile(victim.id)
+
+        # 视图直接调用时拿回来的是 `(body, status)` 元组（`jsonify(...), 403`），
+        # 交给 Flask 路由才变成 Response —— 两种都认，免得断言写成「有没有 status_code」。
+        status = response[1] if isinstance(response, tuple) else response.status_code
+        assert status == 403, response
+        db.session.refresh(victim)
+        assert victim.username == original_username, "别人那一行的用户名被改掉了 = 身份被顶掉"

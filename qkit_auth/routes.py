@@ -714,7 +714,14 @@ def api_update_user_profile(user_id):
         in_scope = QkitAuthUserProject.query.filter_by(user_id=user_id).filter(
             QkitAuthUserProject.project_id.in_(scope_project_ids)
         ).first()
-        if in_scope is None and not project_ids:
+        # **`in_scope` 是必要条件，与 `project_ids` 无关。**
+        # 原来写的是 `if in_scope is None and not project_ids:` —— 于是攻击者只要在
+        # 同一个请求里带上**一个自己项目的 id**（`issubset(allowed)` 轻松通过），
+        # 这个分支就永不触发，他就能改**任何**用户（含平台管理员）的 `username`。
+        # 而 qkit 的登录身份映射就是「用户名 → 行」（`_get_user_by_username`），
+        # 把某个身份那一行的用户名改成自己的 SSO 名，等于**把那个身份让给自己**；
+        # 下面的成员同步还会把受害者的项目成员关系一起清掉（它只保留 `project_ids`）。
+        if in_scope is None:
             return jsonify({"success": False, "message": "目标用户不在您可管理项目范围内"}), 403
 
     username_conflict = QkitAuthUser.query.filter(

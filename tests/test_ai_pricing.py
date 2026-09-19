@@ -330,3 +330,55 @@ def test_the_price_change_signature_keeps_full_precision():
     assert pricing._model_signature(_table()) != pricing._model_signature(_table(bumped))
     reason = pricing.price_change_requires_version_bump(VALID_TABLE, bumped)
     assert reason, "改了单价却没改 version，必须被拦下"
+
+
+# ---------------------------------------------------------------------------
+# 展示串与精确值是两个出口（聚合读后者）
+# ---------------------------------------------------------------------------
+def test_the_exact_amount_is_a_second_door_next_to_money():
+    """`money()` 给人看，`amount_exact()` 给程序回读 —— 两者必须在同一个 dict 里成对出现。
+
+    只给展示串的后果不是「难看」，而是**两处真实的故障**：
+
+    * 聚合时 `Decimal("<0.01")` 抛 `InvalidOperation` → 消耗面板与预算闸门 500
+      （`analysis_budget` 的 docstring 明写「这个函数不抛异常」）；
+    * 就算能解析，拿**已量化到分**的值相加会少算：两次真实的 0.014 元应得 0.03，
+      用展示值相加得到 0.02。
+
+    所以这个字段是接口的一部分，不是实现细节。
+    """
+    cost = pricing.CostEstimate(
+        amount=Decimal("0.00198"),
+        currency="CNY",
+        lines=(pricing.CostLine(
+            label="缓存命中", tokens=20, unit_price=Decimal("0.2"),
+            amount=Decimal("0.0004")),),
+    ).to_dict()
+
+    assert cost["amount"] == pricing.MONEY_BELOW_ONE_CENT, "给人看的还是「不足一分」"
+    assert cost["amount_exact"] == "0.00198", "给程序回读的必须是未舍入的原值"
+    assert cost["lines"][0]["amount"] == pricing.MONEY_BELOW_ONE_CENT
+    assert cost["lines"][0]["amount_exact"] == "0.0004"
+    # 精确值不是「另一套数」：它读回去与原始 Decimal 相等。
+    assert pricing.amount_of(cost) == Decimal("0.00198")
+    assert pricing.amount_of(cost["lines"][0]) == Decimal("0.0004")
+
+
+def test_reading_an_amount_back_never_raises_and_never_invents_zero():
+    """`<0.01` **取不回精确值** —— 那就不给数（`None`），不给 0。
+
+    把它当 0 是「这次没花钱」这个确定的结论，而「小于一分」说的是它确实花了钱。
+    """
+    assert pricing.amount_from_text(pricing.MONEY_BELOW_ONE_CENT) is None
+    assert pricing.amount_from_text("不是数") is None
+    assert pricing.amount_from_text(None) is None
+    assert pricing.amount_from_text("") is None
+    assert pricing.amount_from_text("NaN") is None
+    assert pricing.amount_from_text("0") == Decimal("0"), "真的是 0 就照实给 0"
+
+    # 只有展示串的手拼 dict（老形态）走同一条路：取不回就是 None，**不抛异常**。
+    assert pricing.amount_of({"amount": "<0.01"}) is None
+    assert pricing.amount_of({}) is None
+    assert pricing.amount_of(None) is None
+    assert pricing.amount_of({"amount": "0.014"}) == Decimal("0.014"), "老格式仍要能读"
+    assert pricing.amount_of({"amount": "<0.01", "amount_exact": "0.004"}) == Decimal("0.004")

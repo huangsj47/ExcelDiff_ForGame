@@ -35,10 +35,13 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional, Sequence
+
+from sqlalchemy import and_, func, or_
 
 from models import db
-from models.ai_analysis import AiAnalysisRun
+from models.ai_analysis import STALE_RUNNING_SECONDS, AiAnalysisRun
 from services.ai import report_document
 from services.ai_analysis_service import (
     ANALYSIS_CACHE_DAYS,
@@ -97,8 +100,12 @@ def _summary(run: AiAnalysisRun, payload: Optional[Dict[str, Any]]) -> str:
     失败时给原因（那是用户点进来要看的），成功时给报告的第一句，降级时把它写在最前面
     —— 降级是「这份结论的可信度」的一部分，混在一句话后面会被漏读。
     """
-    if str(run.status or "") == "failed":
+    if str(run.effective_status or "") == "failed":
         reason = str(run.error_message or "").strip()
+        if not reason and run.status == "running":
+            # 僵尸 running：它不是「失败了但没留原因」，是**没跑完**。这两句话用户
+            # 能做的事不一样（前者看原因、后者重跑），所以分开说。
+            return "失败：这次运行没有跑完（进程中断），平台上没有留下原因"
         return f"失败：{reason}" if reason else "失败：平台上没有留下原因"
 
     label = str((payload or {}).get("degradation_label") or "").strip()
@@ -109,7 +116,13 @@ def _summary(run: AiAnalysisRun, payload: Optional[Dict[str, Any]]) -> str:
 
 
 def _row(run: AiAnalysisRun) -> Dict[str, Any]:
-    payload = _parse_response_payload(run.response_payload) or {}
+    # `_parse_response_payload` 只挡「JSON 坏了」，不挡「是合法 JSON 但不是对象」
+    # （`[1, 2]` / `"x"` 都能解析成功）。那种行上 `.get()` 会 AttributeError，
+    # **一条坏行让整个列表 500** —— 而同一个提交里路由的 `_payload_of` 与
+    # `report_document.anomaly_rows` 都判了类型，这里漏了。
+    payload = _parse_response_payload(run.response_payload)
+    if not isinstance(payload, dict):
+        payload = {}
     status = run.effective_status
     risk_level = payload.get("risk_level") if status != "failed" else None
     focus_label = ""
@@ -152,6 +165,22 @@ def _conditions(*, kind: str, target_id: Optional[int], target_key: Optional[str
             AiAnalysisRun.target_id == target_id)
 
 
+def _zombie_clause(now: datetime):
+    """僵尸 running（进程被杀留下的）在 SQL 里的判据 —— 与 `AiAnalysisRun.is_stale_running` 同一把尺子。
+
+    **为什么要在 SQL 里重写一遍**：`effective_status` 是 Python 属性，`filter()` 用不上。
+    而三处读路径必须一致：`/progress` 与 `/runs/<id>/report` 按 `effective_status` 把它
+    报成失败，`/latest` 也按它（`_read_latest_result` 第 4 步）。列表这边若还按原值
+    `status == "running"` 判，同一个目标就会出现：弹层说「正在分析、还没有结论可翻」
+    （永远），抽屉说「上次分析失败」，`/progress` 说失败 —— 同一条记录，三个入口三句话。
+
+    不改库里的值（那个进程可能只是慢）：只是不给用户看一个永远停在「分析中」的界面。
+    """
+    reference = func.coalesce(AiAnalysisRun.started_at, AiAnalysisRun.created_at)
+    cutoff = now.replace(tzinfo=None) - timedelta(seconds=STALE_RUNNING_SECONDS)
+    return and_(AiAnalysisRun.status == "running", reference < cutoff)
+
+
 def list_target_runs(
     *,
     kind: str,
@@ -170,12 +199,17 @@ def list_target_runs(
         raise ValueError(f"不认识的类型：{kind}")
     size = max(1, min(int(limit or DEFAULT_HISTORY_LIMIT), MAX_HISTORY_LIMIT))
     cutoff = _analysis_cache_cutoff()
+    zombie = _zombie_clause(datetime.now(timezone.utc))
 
     base = AiAnalysisRun.query.filter(
         *_conditions(kind=kind, target_id=target_id, target_key=target_key),
         AiAnalysisRun.created_at >= cutoff,
-        # 中间态不进这个列表（见模块 docstring 第 3 条）。
-        AiAnalysisRun.status.in_(("succeeded", "failed")),
+        # 中间态不进这个列表（见模块 docstring 第 3 条）——**僵尸 running 例外**：
+        # 它按 `effective_status` 就是一次失败，用户要能在「为什么失败」那一档里翻到它。
+        or_(
+            AiAnalysisRun.status.in_(("succeeded", "failed")),
+            zombie,
+        ),
     )
     total = base.count()
     runs = (
@@ -183,14 +217,26 @@ def list_target_runs(
         .limit(size)
         .all()
     )
+    orphan = _latest_failure_outside_the_window(
+        kind=kind, target_id=target_id, target_key=target_key, listed=runs
+    )
+    if orphan is not None:
+        runs = [orphan] + runs
+        total += 1
     # 中间态不进列表（见模块 docstring 第 3 条），但**要说一声它存在**：这个弹层最常被
     # 打开的时刻正是「正在跑、想看看上一次」——那时列表可能是空的，界面若只说
     # 「这个目标还没有跑过分析」，就是一句假话。
+    #
+    # **僵尸 running 不算「正在跑」**：它在界面上是失败（`effective_status`），
+    # 让它留在这一档会让弹层永远说「正在分析」（见 `_zombie_clause`）。
     in_progress = (
         AiAnalysisRun.query.filter(
             *_conditions(kind=kind, target_id=target_id, target_key=target_key),
             AiAnalysisRun.created_at >= cutoff,
-            AiAnalysisRun.status.in_(("running", "pending")),
+            or_(
+                AiAnalysisRun.status == "pending",
+                and_(AiAnalysisRun.status == "running", ~zombie),
+            ),
         ).count()
         > 0
     )
@@ -205,6 +251,38 @@ def list_target_runs(
         # 窗口天数如实给出来：读的人要知道「更早的看不到」是保留策略，不是平台没跑过。
         "window_days": ANALYSIS_CACHE_DAYS,
     }
+
+
+def _latest_failure_outside_the_window(
+    *,
+    kind: str,
+    target_id: Optional[int],
+    target_key: Optional[str],
+    listed: Sequence[AiAnalysisRun],
+) -> Optional[AiAnalysisRun]:
+    """窗口外那条「/latest 仍会拿出来」的失败记录（没有就返回 None）。
+
+    **为什么单独补这一条**：`_read_latest_result` 的最后一步是「一条结论都没有时，
+    退回最近一次失败」—— 而它**不看窗口**（它要说的是「最近一次没跑成」，与结论能不能
+    复用是两件事）。列表这边被窗口挡在外面，于是同一个目标出现两种说法：
+    抽屉里写着「上次分析失败：<原因>」，弹层里写着「这个目标还没有跑过分析」。
+
+    只补这一种情形，不把整张列表的窗口放开：窗口的作用是「更早的别翻了」，
+    而 `/latest` 只承诺「最近一次失败看得见」。
+    """
+    newest = (
+        AiAnalysisRun.query.filter(
+            *_conditions(kind=kind, target_id=target_id, target_key=target_key)
+        )
+        .order_by(AiAnalysisRun.created_at.desc(), AiAnalysisRun.id.desc())
+        .first()
+    )
+    if newest is None or newest.effective_status != "failed":
+        return None
+    if any(row.id == newest.id for row in listed):
+        # 已经在列表里（窗口内）—— 那本来就是它。
+        return None
+    return newest
 
 
 def get_run_report(run_id: int) -> Optional[Dict[str, Any]]:

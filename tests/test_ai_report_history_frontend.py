@@ -154,6 +154,7 @@ function tableFor(item) {
     var table = JSON.parse(JSON.stringify(__FETCH__));
     table[HISTORY_URL].body.runs = item.rows;
     table[HISTORY_URL].body.total = item.rows.length;
+    table[HISTORY_URL].body.in_progress = !!item.in_progress;
     return table;
 }
 
@@ -317,6 +318,11 @@ def run() -> dict:
              "ops": ["track:/ai-analysis/commit/7/history", "open"]},
             # 6. 页面忘了 track（入口少了一次调用）→ 如实说，且**不发请求**。
             {"name": "没有目标地址", "currentRunId": None, "ops": ["open"]},
+            # 7. 正在跑、还没有任何结论：**这条走的是真渲染路径**。只断纯函数
+            #    `listNote()` 是不够的 —— `render()` 里曾经写死过 `NOTE.empty`，
+            #    于是那句正确的话只活在常量表里，单测照样全绿。
+            {"name": "正跑着且名单为空", "currentRunId": None, "rows": [], "in_progress": True,
+             "ops": ["track:/ai-analysis/commit/7/history", "open"]},
         ],
         [
             {"name": "提交的历史地址", "kind": "commit", "id": 7, "runId": 42},
@@ -467,6 +473,18 @@ def test_a_target_that_never_ran_says_that_instead(run):
     assert "还没有跑过分析" in last["body"]
 
 
+def test_a_running_target_with_an_empty_list_says_it_is_running_on_screen(run):
+    """**断言的是屏幕上那句话**，不是纯函数。
+
+    `listNote()` 说得对但 `render()` 里写死了另一句，是这一批里最典型的一种错：
+    单测绿、屏幕上永远看不到那句话。
+    """
+    last = _by_name(run)["正跑着且名单为空"]["snaps"][-1]
+
+    assert "正在分析" in last["body"], last["body"]
+    assert "还没有跑过分析" not in last["body"], "正在跑却说他没跑过 —— 那是一句假话"
+
+
 def test_without_a_target_url_it_says_so_and_fires_no_request(run):
     """入口忘了 `track` 时：不许去请求一个叫 `null` 的地址（那是一条谁也解释不了的日志）。"""
     last = _by_name(run)["没有目标地址"]["snaps"][-1]
@@ -516,6 +534,23 @@ def test_the_history_button_is_never_disabled():
 def test_every_drawer_loads_the_history_module():
     for name in TEMPLATES:
         assert "js/ai_report_history.js" in _template(name), f"{name} 没有引历次结论那个模块"
+
+
+def test_the_merged_view_resets_the_export_link_when_the_target_changes():
+    """合并视图是**同一个抽屉换目标**：换目标那一刻屏幕上那份结论就换人了。
+
+    不重设的话，看着版本 B 的抽屉点导出，拿到的是**版本 A** 的结论（文件名与内容都是 A）。
+    只数 `track(` 的个数拦不住这件事 —— 少了这一处，个数照样够。
+    """
+    source = _template("templates/merged_project_view.html")
+    start = source.index("function openWeeklyAiDrawer(")
+    end = source.index("\n}", start)
+    body = source[start:end]
+
+    assert "AiReportExport.track({ runId: null })" in body, (
+        "换目标时没有把「导出 md」收起来"
+    )
+    assert "AiThinkLog.setRun(null)" in body, "同一处的逐轮明细也要清（既有行为）"
 
 
 def test_every_drawer_tracks_its_targets_history_url():

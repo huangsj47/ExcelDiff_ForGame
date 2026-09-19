@@ -292,15 +292,25 @@ def test_an_orphan_stale_running_run_is_not_reported_as_in_progress():
 
     读取侧这条口径是 `effective_status` 的兜底：启动清理管不到「进程活着但那次分析
     真卡死了」的情况，而界面不能因此永远显示「进行中」。
+
+    **报成 `failed`，不是报成 `None`。** 原来这条断言写的是 `is None` —— 那等于说
+    「这个目标从来没跑过分析」，而 `/progress` 与 `/runs/<id>/report` 对同一条记录
+    说的是「失败」。同一条记录三个入口三句话，用户不知道该信哪个（而且 `None` 会让
+    界面把「上次跑失败了」显示成「暂无分析结果」）。
     """
     with app.app_context():
         create_tables()
         project, _repo, cfg = _setup_config()
         _add_run(project.id, cfg, status="running", age_seconds=7200)
 
-        assert ai_service.get_latest_weekly_result(cfg.id) is None, (
+        result = ai_service.get_latest_weekly_result(cfg.id)
+
+        assert result is not None, "报成 None = 说「从来没跑过」，而它是跑过、中断了"
+        assert result["in_progress"] is False, (
             "僵尸 running 仍被当成「进行中」，界面会永远转圈"
         )
+        assert result["status"] == "failed", "按 effective_status 它就是一次失败"
+        assert result["result"] is None, "失败没有结论"
 
 
 # ==========================================================================

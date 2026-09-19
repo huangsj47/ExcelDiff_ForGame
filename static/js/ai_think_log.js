@@ -289,6 +289,17 @@
         watching = false;
         if (mode === 'live') mode = 'settled';
         paint();
+        // 手上一条都没画出来，而且还没问过落库那份 → **在这里发起取数**。
+        //
+        // 这句话是承诺性质的：`unavailable` 那句写着「跑完之后这里会显示落库的逐轮记录」，
+        // 而跑完这一刻正是它说的那个时刻。不在这里发起的话，面板会**永远停在那句承诺上**：
+        // 唯一会取数的 `ensureLoaded` 挂在「切到思考过程」这个动作上，而用户一直停在这个
+        // 标签页里（他手动点过标签，跑完就不会被自动切走）就永远等不到。
+        //
+        // 已经画出几轮时不取：那些轮次是真的，而"再看一眼落库那份"要等用户切标签
+        // （懒加载那条口径见 `ensureLoaded`）；跑动中也不取（下一句 `applyProgress`
+        // 会把 `watching` 认回来）。
+        if (!blocks.length && !loaded && runId !== null) ensureLoaded();
     }
 
     /** 跑动中的一帧（`progress.rounds`）。**整份替换**，不做增量 —— 每帧本来就是全量。 */
@@ -383,10 +394,15 @@
         if (loaded || loading || watching || runId === null) return;
         var doFetch = fetchImpl || global.fetch;
         if (!doFetch) return;
+        // 记下**为哪个运行号取的**：取的过程中可能已经换了运行（跑完 → 用户立刻又点了
+        // 「重新分析」，或者上一句 `applyRun` 把号换了）。旧的那份画上去就是
+        // 「这一次的运行里显示着上一次的逐轮过程」，而且 `mode` 还会被写成「分析已结束」
+        // —— 分析正跑着，界面上挂着「已结束」。
+        var askedFor = runId;
         loading = true;
         mode = 'loading';
         paint();
-        doFetch('/ai-analysis/runs/' + runId + '/usage', { cache: 'no-store' })
+        doFetch('/ai-analysis/runs/' + askedFor + '/usage', { cache: 'no-store' })
             .then(function (response) {
                 return response.json().then(function (payload) {
                     if (!response.ok || payload.success === false) {
@@ -396,9 +412,13 @@
                 });
             })
             .then(function (payload) {
+                // 换了运行号 / 又看着它跑了 → 丢掉这份响应。**`loading` 不用在这里收**：
+                // 把它设成 false 的那两处（`applyRun` / `watch`）都已经跑过了。
+                if (runId !== askedFor || watching) return;
                 applyRounds(payload.rounds, {});
             })
             .catch(function (error) {
+                if (runId !== askedFor) return;
                 loading = false;
                 mode = 'unavailable';
                 blocks = [];

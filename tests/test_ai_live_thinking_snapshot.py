@@ -269,6 +269,25 @@ class TestTheSnapshotAccumulates:
         assert snap.rounds[0]["outcome"] == "final"
         assert snap.rounds_seen == 1, "同一轮报两次不该让「一共几轮」变成 2"
 
+    def test_the_next_shard_starting_over_at_round_one_does_not_eat_the_previous_one(self):
+        """**子代理模式下少了这一条，实时面板会少一轮。**
+
+        每个分片的引擎都从第 1 轮开始编号（引擎不知道自己在第几个分片里），所以
+        「S1 的第 2 轮」之后紧跟的是「S2 的第 1 轮」。判重若只看 `round_index`，
+        这一条会被当成「上一轮的重报」而**替换掉 S1 的最后一轮** —— 面板上那轮就没了，
+        而落库那份（重编号成家族全局序号）两轮都在：同一个过程，两个来源画出两样东西。
+        """
+        run_progress.publish(7, 1, self._progress(1, agent="S1", agent_index=1, agent_total=2))
+        run_progress.publish(7, 1, self._progress(2, agent="S1", agent_index=1, agent_total=2))
+        run_progress.publish(7, 1, self._progress(1, agent="S2", agent_index=2, agent_total=2))
+
+        snap = run_progress.snapshot(7)
+
+        assert [(item["agent"], item["round_index"]) for item in snap.rounds] == [
+            ("S1", 1), ("S1", 2), ("S2", 1),
+        ], "换分片了：新分片的第 1 轮不能顶掉上一个分片的最后一轮"
+        assert snap.rounds_seen == 3
+
     def test_a_long_run_keeps_the_last_rounds_and_says_it_truncated(self):
         for index in range(1, 21):
             run_progress.publish(7, 1, self._progress(index))
