@@ -21,21 +21,32 @@ DEFAULT_AUTO_WEEKLY_ENABLED = True
 DEFAULT_WEEKLY_INTERVAL_MINUTES = 60
 DEFAULT_MAX_FILES_PER_RUN = 200
 DEFAULT_MAX_ANALYSIS_ROUNDS = 8
-DEFAULT_MAX_TOOL_REQUESTS = 20
+DEFAULT_MAX_TOOL_REQUESTS = 40
 # 与「索取次数 × 单条上限」互相自洽的预算值。
 #
 # 变更清单现在是**全量列出**的（只有超过 `ai_analysis_service.MAX_LIST_CHARS` 才退化成
 # 取样），所以摘要本身的量级从「150 个提交 600 个文件约 39,000 字符」变成了「顶到清单
 # 上限、240 个提交时实测 87,055 字符」。加上平台 skill 与项目知识包（约 12,000）与历史
-# 结论基线（6,000），再给 20 次 × 11,000 的上下文留足额度：
+# 结论基线（6,000），再给 40 次 × 11,000 的上下文留足额度：
 #
-#     12,000 + 87,055 + 6,000 + 20 × 11,000 = 325,055  ≤  360,000
+#     12,000 + 87,055 + 6,000 + 40 × 11,000 = 545,055  ≤  560,000
+#
+# ## 为什么是 560,000 而不是更高（这条边界很要紧）
+#
+# 端点的窗口问不到时按 1M token 算，水位是它的 60% = **600,000 字**；`effective_prompt_budget`
+# 只在「配置的预算 **大于** 水位」时才压历史。所以默认值必须**留在 600,000 以下** ——
+# 否则「没调过预算的项目」会突然开始压历史，而那是另一件事（见
+# `tests/test_ai_budget_vs_model_window.py`：默认预算在默认窗口下不触发水位）。
+# 留 40,000 的余量而不是贴着 600,000 取，是因为水位还取决于端点**声明**的窗口，
+# 贴着边界取会让「刚好不触发」变成一件需要每次都重新验算的事。
 #
 # 旧的 200,000 配 20 次索取装不下（差 125,000），后果是模型索要 20 个文件、其中一半被
-# 截断，而它分不清是预算不够还是文件就这么大。**改这个值必须同时看
-# `DEFAULT_MAX_TOOL_REQUESTS` 与 `services/ai/context_tools.DEFAULT_TOOL_LIMITS`**，
-# `test_the_prompt_budget_can_honor_the_request_budget` 会拦住只顾一个的改法。
-DEFAULT_PROMPT_CHAR_BUDGET = 360_000
+# 截断，而它分不清是预算不够还是文件就这么大。**改这几个值必须一起看**：
+# `DEFAULT_MAX_TOOL_REQUESTS`（这里）、`services/ai/budget.DEFAULT_MAX_ITEMS`（条数上限
+# 不许小于索取次数）、`services/ai/context_tools.DEFAULT_TOOL_LIMITS`（单条上限）。
+# `test_the_prompt_budget_can_honor_the_request_budget` 与
+# `test_the_context_item_cap_never_wastes_a_paid_request` 会拦住只顾一个的改法。
+DEFAULT_PROMPT_CHAR_BUDGET = 560_000
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 300
 DEFAULT_MIN_SEVERITY = "high"
 DEFAULT_MIN_CONFIDENCE = "high"

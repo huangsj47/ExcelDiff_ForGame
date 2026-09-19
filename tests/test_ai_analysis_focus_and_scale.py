@@ -265,20 +265,23 @@ def test_an_unfiltered_run_says_nothing_about_a_range(two_repos):
 def test_a_configured_request_cap_raises_the_item_cap_with_it():
     """索取次数调大时，条数上限必须跟着走。
 
-    `enforce_budget` 按 `max_items` 裁掉多余的条目。两个默认值（20 / 20）本来是齐的，
-    但索取次数**用户可配**（取值上限 100）：用户在界面上把它调到 40 的那一刻，条数上限
-    还是 20，于是「付了 40 次索取、只带走 20 条」—— 取回来的东西被静默丢掉，而报告里
-    看不出少了什么。这个下限必须跟着配置走，不能只在默认值上成立。
+    `enforce_budget` 按 `max_items` 裁掉多余的条目。两个默认值本来是齐的，但索取次数
+    **用户可配**（取值上限 100）：用户在界面上把它调到超过默认值的那一刻，条数上限还停在
+    默认值，于是「付了 N 次索取、只带走默认值那么多条」—— 取回来的东西被静默丢掉，
+    而报告里看不出少了什么。这个下限必须跟着配置走，不能只在默认值上成立。
     """
+    from services.ai.budget import DEFAULT_MAX_ITEMS
     from services.ai_analysis_service import _engine_limits
 
-    limits = _engine_limits({"max_tool_requests": 40})
-    assert limits.max_tool_requests == 40
-    assert limits.max_items >= 40, f"条数上限没跟上：{limits.max_items}"
+    over = DEFAULT_MAX_ITEMS + 20
+    limits = _engine_limits({"max_tool_requests": over})
+    assert limits.max_tool_requests == over
+    assert limits.max_items >= over, f"条数上限没跟上：{limits.max_items}"
 
-    # 调小时不反向跟着缩：默认的 20 条上限是有意的余量，不该被一个更小的索取次数削掉
+    # 调小时不反向跟着缩：默认的条数上限是有意的余量，不该被一个更小的索取次数削掉 ——
+    # 模型一轮里可能一次要点好几份内容，条数上限管的是「一轮带得走多少」。
     smaller = _engine_limits({"max_tool_requests": 5})
-    assert smaller.max_items == 20
+    assert smaller.max_items == DEFAULT_MAX_ITEMS
     assert smaller.max_tool_requests == 5
 
 

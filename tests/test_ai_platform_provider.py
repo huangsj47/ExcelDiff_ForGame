@@ -377,6 +377,59 @@ def test_the_stats_come_before_the_body_so_truncation_cannot_eat_them():
     )
 
 
+def test_every_sheet_keeps_its_stats_when_the_whole_thing_is_truncated():
+    """**多工作簿里，每一张表的统计都要活过截断 —— 不只是第一张。**
+
+    原先的排版是「表1 统计 → 表1 正文 → 表2 统计 → …」，而正文每张表最多给 `max_rows`
+    行。表 1 一多，后面每张表的统计就全在截断线之外了 —— 那条「统计不会被砍掉」的保证
+    只对第一张表成立，而配表恰恰常是「主表 + 若干扩展表」。
+
+    线上真实的一次（2026-09-19）：`0_常规属性` 3,053 行、整份渲染 25,261 字，截到 11,000
+    之后「2_M scs属性」的统计一个字都没到，而「属性叠加方式=4 是否合理」正需要拿它的
+    统计当基准 —— 那一整个维度只能写成信息缺口，用户看到的是「平台没取到」。
+
+    判据按**截断之后**的文本算：这是唯一有意义的口径（没截断时怎样都对）。
+    """
+    import io
+
+    from openpyxl import Workbook
+
+    from services.ai.budget import truncate_text
+    from services.ai.platform_provider import _read_excel_sheets
+    from utils.content_window import CONTENT_MAX_CHARS
+
+    def fill(book, title, prefix):
+        sheet = book.create_sheet(title)
+        sheet.append(["id", "属性名", "属性描述", "叠加方式", "生效范围", "备注"])
+        for index in range(1, 900):
+            sheet.append([
+                index, f"{prefix}_{index}",
+                "这一列是很长的中文描述文本，用来模拟真实配表里那些说明性的字段内容" * 2,
+                4, "全局生效", f"由策划维护的备注 {index}",
+            ])
+
+    book = Workbook()
+    book.remove(book.active)
+    fill(book, "0_常规属性", "attr")
+    fill(book, "2_M scs属性", "scs")
+    buffer = io.BytesIO()
+    book.save(buffer)
+
+    full = _read_excel_sheets(buffer.getvalue(), max_rows=120)
+    cut, was = truncate_text(full, CONTENT_MAX_CHARS)
+
+    assert was, f"前提：这份渲染必须真的超长才会被截断（实际 {len(full)} 字）"
+    for name in ("0_常规属性", "2_M scs属性"):
+        block = f"#### 工作表「{name}」"
+        assert block in cut, (
+            f"截断之后「{name}」的整表统计没了 —— 拿不到基准，那一维只能写成信息缺口。"
+            f"截断后剩下的标题：{[ln for ln in cut.splitlines() if ln.startswith('#')]}"
+        )
+        # 不只是标题在，统计的数字也要在（标题在而内容被砍是同一件事的另一种形态）
+        start = cut.index(block)
+        assert "整表统计" in cut[start:start + 1200], f"「{name}」的统计块是空的"
+
+
 def test_text_columns_show_their_value_distribution():
     """枚举列要能看到「有哪些取值、各占多少」——「不在允许集合里」靠它判断。"""
     from services.ai.platform_provider import _read_excel_sheets

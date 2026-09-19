@@ -424,7 +424,11 @@ def test_the_progress_callback_fires_once_per_round_in_order():
     assert [item.index for item in seen] == [1, 2]
     assert [item.status for item in seen] == ["requests", "final"]
     assert all(item.max_rounds == EngineLimits().max_rounds for item in seen)
-    assert seen[0].requests_used == 1 and seen[0].requests_remaining == 19
+    # 用**默认额度**算剩余，不写死数字：额度是个会被调整的配置（见
+    # `models.ai_analysis.project_config.DEFAULT_MAX_TOOL_REQUESTS` 的注释），
+    # 写死之后每调一次默认值都要来改一次这个与额度无关的用例。
+    assert seen[0].requests_used == 1
+    assert seen[0].requests_remaining == EngineLimits().max_tool_requests - 1
     assert seen[1].requests_used == 1
     # token 是**本次运行的累计值**（RoundRecord 里的才是本轮值）。
     assert [item.prompt_tokens for item in seen] == [10, 20]

@@ -102,12 +102,21 @@ DEFAULT_TOOL_LIMITS: Mapping[str, int] = {
 # 工具请求的总预算（按「次数」计，不是按条数）。
 #
 # 12 → 20：线上那一轮 767 个文件里，模型只能看 12 个 diff，而它连一份 767 行的清单
-# 都消化不了 —— 决定结论质量的是「看了多少内容」，不是「知道有多少名字」。20 次之后，
-# 一个 767 文件的版本能覆盖到约 60,000 字符的真实 diff。
+# 都消化不了 —— 决定结论质量的是「看了多少内容」，不是「知道有多少名字」。
 #
-# 这个数字与 `budget.DEFAULT_MAX_ITEMS` **必须不小于**：小于就会出现「付了 12 次索取、
-# 只带走 8 条」的浪费（`enforce_budget` 按 `max_items` 裁掉多余的），有测试钉住。
-DEFAULT_MAX_TOOL_REQUESTS = 20
+# 20 → 40（2026-09-19）：**子代理模式把这份额度按成员再分一次**
+# （`subagent.plan_family`：`max(2, 总上限 ÷ (成员数 + 1))`）。于是「20 次」在默认的
+# 3 个分片下等于**每个分片 5 次** —— 而线上真实的一次周版本分析里，一个分片跑完 3 次
+# 就报「本轮上下文额度已用尽」，取不到导出配置与消费侧代码，`config_id` 那一整个维度
+# 只能写成信息缺口。这个数字是按「**单个 agent 够用**」定的，不是按全家的总和。
+# 40 配 3 个分片 = 每人 10 次；不开子代理的单提交分析则是单人 40 次。
+#
+# 它与另外三个数字**必须一起动**（`test_the_prompt_budget_can_honor_the_request_budget`
+# 与 `test_the_context_item_cap_never_wastes_a_paid_request` 各盯一半）：
+# `budget.DEFAULT_MAX_ITEMS`（条数上限不许小于索取次数，否则「付了 N 次、只带走 M 条」）、
+# `models.ai_analysis.project_config.DEFAULT_PROMPT_CHAR_BUDGET`（要装得下 N × 单条上限）、
+# `DEFAULT_TOOL_LIMITS`（单条上限）。
+DEFAULT_MAX_TOOL_REQUESTS = 40
 
 # 结构化内容（按行块排列）用保留首尾的截断；纯文本用普通截断。
 _STRUCTURED_KINDS = frozenset({"file_diff"})

@@ -710,6 +710,39 @@ def test_the_context_item_cap_never_wastes_a_paid_request():
     )
 
 
+def test_the_default_budget_gives_each_shard_a_workable_allowance():
+    """**分片拿到几次是「算」出来的，所以默认值必须按分片之后再验一遍。**
+
+    `max_tool_requests` 是**整次分析的总数**，而子代理模式下它会被 `subagent.plan_family`
+    按 `max(2, 总数 ÷ (分片数 + 1))` 分给每个成员。于是「默认 20 次」在默认的 3 个分片下
+    等于**每片 5 次** —— 线上真实的一次周版本分析里，一个分片跑完 3 次就报「本轮上下文
+    额度已用尽」，取不到导出配置与消费侧代码，`config_id` 那一整个维度只能写成信息缺口。
+
+    这不是「配置填错了」，是**两个默认值乘出来的结果**：改上限、改分片数、改分摊公式，
+    三处任何一处动了都会让它变小，而三处分别在三个文件里。所以这里把「默认配置下每个
+    分片够不够用」算出来直接断言 —— 它挡的是下一次「只调了一个数」的改动。
+
+    10 这个下限来自那次线上数据：一个分片要覆盖它那几组维度（含跨模块引用），
+    3~5 次会在跑到第二个维度时就断粮。
+    """
+    from models.ai_analysis.project_config import (
+        DEFAULT_MAX_TOOL_REQUESTS,
+        DEFAULT_SUBAGENT_COUNT,
+        DEFAULT_SUBAGENT_ENABLED,
+    )
+
+    assert DEFAULT_SUBAGENT_ENABLED, (
+        "前提：默认开着子代理。关掉的话下面这条断言就没有意义了（每人拿到全部额度），"
+        "那种情况下这条用例该跟着一起改，而不是继续在这里空转"
+    )
+    per_shard = DEFAULT_MAX_TOOL_REQUESTS // (DEFAULT_SUBAGENT_COUNT + 1)
+    assert per_shard >= 10, (
+        f"默认配置下每个分片只有 {per_shard} 次上下文索取（总上限 {DEFAULT_MAX_TOOL_REQUESTS}"
+        f" ÷ ({DEFAULT_SUBAGENT_COUNT} + 1)）—— 线上 3 次就会在报告里写「本轮上下文额度"
+        "已用尽」，那一整个维度只能写成信息缺口。调大上限或调小分片数，两处一起看"
+    )
+
+
 def test_the_prompt_budget_can_honor_the_request_budget():
     """**五个数字必须互相自洽，不能各看各的。**
 
@@ -754,9 +787,14 @@ def test_the_prompt_budget_can_honor_the_request_budget():
     )
     assert DEFAULT_TOTAL_CHARS == DEFAULT_PROMPT_CHAR_BUDGET, "预算两处不一致"
 
-    # 预算也不该离谱地大：模型窗口有限，超了会让请求直接失败而不是降级。
-    assert DEFAULT_PROMPT_CHAR_BUDGET <= 400_000, (
-        "预算超过 40 万字符后，小窗口模型（端点里最小的声明 200,000 tokens）会直接报错"
+    # 上界 = **默认窗口的水位**（1M token × 60%）。理由见下面这条：它不再是「超了会报错」
+    # （那个口子已经由 `effective_prompt_budget` 的水位压掉了），而是「再大也没有意义」。
+    from services.ai.budget import DEFAULT_CONTEXT_TOKENS, context_watermark_chars
+
+    assert DEFAULT_PROMPT_CHAR_BUDGET <= context_watermark_chars(DEFAULT_CONTEXT_TOKENS), (
+        f"预算 {DEFAULT_PROMPT_CHAR_BUDGET:,} 超过了默认窗口的水位 —— 窗口问不到时"
+        "（`DEFAULT_CONTEXT_TOKENS` = 1M）它本来就会被压回水位，写更大的数只是让人以为"
+        "自己配得下。要真的更大，先确认端点声明的窗口确实够大。"
     )
 
 

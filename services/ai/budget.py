@@ -46,11 +46,14 @@ SHRINK_LEVEL_LIMITS = (4000, 1200)
 # 到这一级时整个内容被替换成说明文字，只保留「这里原本有什么」。
 MAX_SHRINK_LEVEL = len(SHRINK_LEVEL_LIMITS) + 1
 
-DEFAULT_MAX_ITEMS = 20
+# 条数上限。**必须不小于 `context_tools.DEFAULT_MAX_TOOL_REQUESTS`**，否则会出现
+# 「付了 N 次索取、只带走 max_items 条」的浪费（`test_the_context_item_cap_never_wastes_a_paid_request`）。
+DEFAULT_MAX_ITEMS = 40
 # 必须与 `models.ai_analysis.project_config.DEFAULT_PROMPT_CHAR_BUDGET` 相等
 # （`test_model_defaults_agree_with_the_budget_layer` 会拦住漂移）。取值依据见那边的注释：
-# 它要装得下「系统提示词 + 变更清单（现在是全量列出的，上限 MAX_LIST_CHARS）+ 索取次数 × 单条上限」。
-DEFAULT_TOTAL_CHARS = 360_000
+# 它要装得下「系统提示词 + 变更清单（现在是全量列出的，上限 MAX_LIST_CHARS）+ 索取次数 × 单条上限」，
+# 同时**留在默认窗口的水位（600,000 字）以下**。
+DEFAULT_TOTAL_CHARS = 560_000
 
 
 @dataclass(frozen=True)
@@ -342,7 +345,7 @@ def estimate_chars(messages: Iterable[dict[str, str]]) -> int:
 # 窗口未知时的默认值。**这是一个口径，不是猜某个具体模型**：问不到端点声明的窗口时
 # 按 1M token 处理，而不是不设防（见 `effective_prompt_budget`）。
 #
-# 取 1M 还有一层刻意：当前默认预算是 360,000 字，小于 1M 的 60%（600,000 字），
+# 取 1M 还有一层刻意：当前默认预算是 560,000 字，小于 1M 的 60%（600,000 字），
 # 所以「默认窗口」不会悄悄改变已有项目的行为 —— 只有把预算配到 600,000 字以上的
 # 项目才会吃到这层水位。
 DEFAULT_CONTEXT_TOKENS = 1_000_000

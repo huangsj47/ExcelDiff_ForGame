@@ -708,9 +708,22 @@ def _read_excel_sheets(raw: bytes, *, max_rows: int) -> Optional[str]:
 
     Excel 的「完整内容」本质就是一张表；按二进制拒绝它会让模型完全看不到这张表长什么样。
 
-    每个工作表先给一段**整表统计**，再给前 `max_rows` 行正文。顺序是有意的：截断只砍
-    尾巴（`budget.truncate_text`），统计放前面才不会被砍掉 —— 而它恰恰是「值合不合理」
-    这类判断唯一拿得到的比较基准。
+    ## 排版：**所有工作表的统计先发，所有正文后发**
+
+    截断只砍尾巴（`budget.truncate_text`，上限 11,000 字符），所以「先统计后正文」是这个
+    函数的立意 —— 统计是「值合不合理」这类判断唯一拿得到的比较基准，被砍掉就等于这条
+    路径白跑了。
+
+    但这件事故**不能按工作表各排各的**。原先的排版是「表1 统计 → 表1 正文（最多
+    `max_rows` 行）→ 表2 统计 → 表2 正文 → …」：表 1 的正文一多，后面每张表的统计就全在
+    截断线之外了。线上真实的一本书就是这样 —— 0_常规属性 有 3,053 行，整份渲染 25,261 字，
+    截到 11,000 之后**「2_M scs属性」的统计一个字都没到**，而「属性叠加方式=4 是否合理」
+    正需要拿它的统计当基准，那一整个维度只能写成信息缺口。
+
+    也就是说：那条「统计不会被砍掉」的保证原先只对**第一张表**成立，而配表恰恰常是多
+    工作簿（主表 + 若干扩展表）。改成两段式之后，保证对每一张表都成立 —— 代价是正文
+    更有可能是被砍的那一半，而正文可以点名索取（`file_content` 带 `lines` 窗口），
+    基准不能。
     """
     try:
         from openpyxl import load_workbook
@@ -723,11 +736,11 @@ def _read_excel_sheets(raw: bytes, *, max_rows: int) -> Optional[str]:
         log_print(f"⚠️ AI 取数：Excel 内容解析失败 {type(exc).__name__}: {exc}")
         return None
 
-    lines: list[str] = []
+    # 逐表收集，最后统一排版。`(表名, 统计行, 正文行, 正文是否被裁)`
+    collected: list[tuple[str, list[str], list[str], bool]] = []
     try:
         for name in book.sheetnames:
             sheet = book[name]
-            lines.append(f"### 工作表「{name}」")
             stats = _SheetStats()
             labels: list[str] = []
             body: list[str] = []
@@ -751,21 +764,40 @@ def _read_excel_sheets(raw: bytes, *, max_rows: int) -> Optional[str]:
                     continue
                 body.append("- " + " ｜ ".join(_cell(value) for value in row))
                 count += 1
-            # **统计在正文之前**：`file_content` 单条上限 11,000 字符，而截断只砍尾巴
-            # （`budget.truncate_text`）—— 放在正文后面，大表一截断就先丢基准，
-            # 而基准正是这条路径存在的理由。
-            lines.extend(stats.render(labels))
-            lines.extend(body)
-            if truncated_rows:
-                lines.append(
-                    f"- （正文只展示了前 {max_rows} 行；上面的整表统计覆盖整表。）"
-                )
-            lines.append("")
+            collected.append((str(name), stats.render(labels), body, truncated_rows))
     finally:
         try:
             book.close()
         except Exception:  # noqa: BLE001
             pass
+
+    stats_lines: list[str] = []
+    body_lines: list[str] = []
+    for name, stats, body, truncated_rows in collected:
+        # 空表（一行数据都没有）`render` 返回空列表 —— 不冒出一段「按 0 行算出」的统计，
+        # 也不在统计段里给它一个没有内容的标题。
+        if stats:
+            stats_lines.append(f"#### 工作表「{name}」")
+            stats_lines.extend(stats)
+        # 正文段的标题**照旧每张表都给**（含空表）：「这本书里有这几张表」本身是信息，
+        # 少了一个标题，模型会以为那张表不存在。
+        body_lines.append(f"### 工作表「{name}」")
+        body_lines.extend(body)
+        if truncated_rows:
+            body_lines.append(f"- （正文只展示了前 {max_rows} 行；上面的整表统计覆盖整表。）")
+        body_lines.append("")
+
+    lines: list[str] = []
+    if stats_lines:
+        lines.append(
+            f"### 整表统计（覆盖每一张工作表的**全部**行；下面的正文每张表最多只给 "
+            f"{max_rows} 行。内容超长时截断只砍尾巴，所以统计全部排在最前面）"
+        )
+        lines.extend(stats_lines)
+        lines.append("")
+    if body_lines:
+        lines.append(f"### 工作表正文（每张表最多展示前 {max_rows} 行）")
+        lines.extend(body_lines)
     return "\n".join(lines).rstrip() + "\n"
 
 

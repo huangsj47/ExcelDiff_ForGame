@@ -1451,9 +1451,11 @@
                             <div class="form-text" id="aiMaxToolRequestsInputHelp">整次分析允许索取上下文的总次数（跨轮次累计，重复索要同一个文件也计入）。</div>
                             <div class="form-text text-danger d-none" id="aiMaxToolRequestsInputError"></div>
                         </div>
-                        <!-- 子代理模式（services/ai/subagent.py）。默认关，且**只对周版本生效**。
+                        <!-- 子代理模式（services/ai/subagent.py）。**默认开**，且只对周版本生效。
                              这一栏的代价必须写清楚：它会让模型调用次数变成 (n+1) 倍 ——
-                             一个不写代价的开关，用户打开之后只会从账单上发现。 -->
+                             一个不写代价的开关，用户打开之后只会从账单上发现。
+                             2026-09-19：默认值由「关」改成「开」，这段说明跟着改；
+                             改之前它写着「默认关」，而实际默认是开的。 -->
                         <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiSubagentToggle">子代理模式（仅周版本）</label>
                             <div class="form-check form-switch">
@@ -1462,11 +1464,14 @@
                                 <label class="form-check-label" for="aiSubagentToggle">启用</label>
                             </div>
                             <div class="form-text" id="aiSubagentToggleHelp">
-                                <strong>默认关。</strong>打开后，周版本分析会把九个检查维度拆给几个分片代理
+                                <strong>默认开。</strong>打开后，周版本分析会把九个检查维度拆给几个分片代理
                                 分头深挖、再由主代理汇总：几个大版本（几百个文件）里能少漏细节。
                                 <strong>代价是模型调用次数变成「分片数 + 1」倍</strong>
-                                （变更清单那一段从第二个分片起命中缓存、按缓存价计费）；
-                                「上下文索取上限」按分片数分摊，整次分析的总索取次数不变。
+                                （变更清单那一段从第二个分片起命中缓存、按缓存价计费）。
+                                <strong>「上下文索取上限」按分片数分摊，整次分析的总索取次数不变</strong>——
+                                所以「上限 ÷ (分片数 + 1)」才是**每个分片**真正拿到的次数，
+                                分片越多每个分片越少。额度不够时报告里会写「本轮上下文额度已用尽」，
+                                这时要么调大上限、要么调小分片数。
                                 单个提交的分析**不受影响**。
                             </div>
                         </div>
