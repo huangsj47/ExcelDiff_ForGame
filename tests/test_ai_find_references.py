@@ -552,6 +552,56 @@ def test_two_searches_are_not_the_same_request(monkeypatch):
     assert captured["extra_payload"]["entries"] == [["a.lua", COMMIT_A]]
 
 
+def test_two_batches_with_the_same_query_are_not_the_same_request(monkeypatch):
+    """**同一个词、同一个范围、同样多的文件，只要不是同一批文件，就不是同一份请求。**
+
+    这条以前是漏的：签名只有 `关键词|范围|条数`，而 `_find_task` 是在**这个项目+仓库**的
+    最近 80 条任务里找（`_recent_tasks`），**完全不看批次也不看时间**。而 `entries` 会被
+    `pairs[:allowance]` 截到上限 —— 所以「两个不同周版本 + 改动文件都超过上限 + 问同一个
+    词」这三个条件凑齐时，两边的条数都是那个上限，签名一模一样：
+
+        本周的检索 → 直接命中上周那条已完成的任务 → 返回**上周的命中清单**
+        （路径、行号、那一行的原文），而本周新出现的引用一个都搜不到。
+        额度也不扣（根本没派发），从界面上完全看不出来。
+
+    这就是「静默给出过期证据」：模型会把上周的行号和原文写进本周的报告，而报告里那句
+    「本次搜索覆盖了…」照样成立。
+
+    判据两条：不同批次必须算出不同的签名；**同一批**文件的同一份检索必须还能复用
+    （否则每次分析都要为同一个词多等一轮 40 秒）。
+    """
+    import services.agent_file_content_dispatch as dispatch  # noqa: PLC0415
+    from services.agent_file_content_dispatch import request_references  # noqa: PLC0415
+
+    signatures: list = []
+
+    def fake_request_from_agent(**kwargs):
+        signatures.append(kwargs["lines"])
+        return {"status": "unavailable", "message": "（这条用例只关心请求长什么样）"}
+
+    monkeypatch.setattr(dispatch, "_request_from_agent", fake_request_from_agent)
+    repository = SimpleNamespace(id=3, project_id=9)
+
+    # 两周各自都是 240 条（都被 `pairs[:allowance]` 截到上限），文件名不同。
+    week1 = [[f"scripts/w1_{index}.lua", COMMIT_A] for index in range(240)]
+    week2 = [[f"scripts/w2_{index}.lua", COMMIT_B] for index in range(240)]
+
+    request_references(repository, query="target_id", entries=week1, prefix="scripts/")
+    request_references(repository, query="target_id", entries=week2, prefix="scripts/")
+
+    assert len(signatures) == 2
+    assert signatures[0] != signatures[1], (
+        "两周的检索签名一模一样（都只有「关键词|范围|条数」）—— "
+        "本周会命中上周那条已完成的任务，把上周的命中清单当成本周的结果交出去"
+    )
+
+    request_references(repository, query="target_id", entries=week1, prefix="scripts/")
+    assert signatures[2] == signatures[0], (
+        "同一批文件的同一份检索算出了不同的签名 —— 复用失效，"
+        "模型对同一个词问两次就要多等一轮 40 秒"
+    )
+
+
 # ==========================================================================
 # 九、测试桩的守卫（与 `file_content` 那条同一条纪律）
 # ==========================================================================

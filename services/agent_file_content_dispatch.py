@@ -50,6 +50,7 @@ platform/agent 模式下平台没有，那条路必然「取数失败」，报�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -278,6 +279,17 @@ def cached_file_diff(
     )
 
 
+def _entries_fingerprint(entries: Sequence[Sequence[str]]) -> str:
+    """这一批文件的指纹（路径 + 提交），进检索签名。
+
+    用摘要而不是把清单塞进签名：清单可能上千条，而 `lines` 这个字段还要落库、还要参与
+    `_matches` 的逐字比较。摘要只要「同批次相同、不同批次几乎必然不同」就够了 ——
+    这里要的不是密码学强度，是**别把上周的结果当成本周的**。
+    """
+    material = "\n".join(f"{path}|{commit}" for path, commit in entries)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
 def _request_from_agent(
     *,
     task_type: str,
@@ -478,10 +490,18 @@ def request_references(
       真的拿到结果。
     * **`lines` 承载的是这次检索的签名**，不是行窗口：`_matches` 靠 payload 里的
       `commit_id` / `file_path` / `lines` 认「这是不是同一份请求」，而检索既没有提交也没有
-      单个文件 —— 签名里含关键词、范围与文件数，所以**查同一个词但范围不同的两次检索
-      不会被当成同一份请求复用**（那会让模型拿到另一个范围的结果，而且完全看不出来）。
+      单个文件 —— 签名里含关键词、范围、文件数**与文件清单本身**，所以两次检索只有在
+      「同一个词、同一个范围、同一批文件」时才会被当成同一份请求复用。
+
+      **文件清单那一项不能省成「条数」**：`_find_task` 是在**这个项目+仓库**的最近 80 条
+      任务里找，完全不看批次也不看时间（`_recent_tasks`）。而 `entries` 会被
+      `pairs[:allowance]` 截到上限，所以**两个不同周版本、只要改动文件都超过上限、
+      问的是同一个词**，条数就都是那个上限 —— 签名一模一样，本周的检索会直接命中
+      **上周那条已完成的任务**，把上周的命中清单（路径、行号、那一行的原文）当成本周的
+      结果交出去。症状是「模型拿着过期的证据写进本版本报告，而本周新出现的引用一个都搜不到」，
+      界面上完全看不出来（额度也不扣，因为根本没派发）。
     """
-    signature = f"{query}|{prefix}|{len(entries)}"
+    signature = f"{query}|{prefix}|{len(entries)}|{_entries_fingerprint(entries)}"
     return _request_from_agent(
         task_type=REFERENCES_TASK_TYPE,
         noun="检索",
