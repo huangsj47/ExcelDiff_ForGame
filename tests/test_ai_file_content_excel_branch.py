@@ -350,7 +350,9 @@ class TestPlatformSideRendersTheAgentWorkbook:
 
         text = _render_agent_file_content(
             {'kind': 'excel', 'file_path': 'config/道具表.xlsx',
-             'content': '工作表「道具表」：共 2 行\n1│ID\t攻击\n2│1001\t30\n'},
+             'content': '配表正文：config/道具表.xlsx（共 1 张工作表）；本次给了第 1 张的正文\n'
+                        '### 工作表正文（每张表最多展示前 120 行）\n'
+                        '### 工作表「道具表」（数据第 1–2 行，共 2 行）\n- 1001 ｜ 30\n'},
             path='config/道具表.xlsx',
         )
 
@@ -358,6 +360,11 @@ class TestPlatformSideRendersTheAgentWorkbook:
         assert '工作表「道具表」' in text, text
         assert '1│1│' not in text, f'套了两层行号：{text}'
         assert '共 3000 行' not in text, text
+        # **抬头只有一个**：它由渲染函数自己写（只有渲染函数说得清「共几张表 / 给了哪几张 /
+        # 别的怎么要」），平台侧再补一个就成了两行出处、两个口径。
+        assert text.count('配表正文：') == 1, text
+        # 出处仍然要在 —— 这一句是模型判断「这份正文是谁读的」的唯一依据。
+        assert '业务节点（Agent）' in text, text
 
     def test_an_empty_workbook_answer_is_not_read_as_no_content(self):
         from services.ai.platform_provider import _render_agent_file_content

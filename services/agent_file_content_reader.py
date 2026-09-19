@@ -70,8 +70,15 @@ def read_file_content_for_agent(payload: dict) -> dict:
         )
 
         if _is_openpyxl_workbook(file_path):
+            # `lines` 在配表上是「第几张工作表」（见 `platform_provider.parse_sheet_window`），
+            # 与平台本地那条路同一套坐标 —— 两端必须一致，否则同一次索取在单机与多节点下
+            # 给出不同的文本。
             rendered = _read_excel_sheets(
-                raw, max_rows=int(payload.get('max_rows') or DEFAULT_MAX_ROWS_PER_SHEET)
+                raw,
+                max_rows=int(payload.get('max_rows') or DEFAULT_MAX_ROWS_PER_SHEET),
+                path=file_path,
+                window=str(payload.get('lines') or ''),
+                char_budget=int(payload.get('max_chars') or 0) or CONTENT_MAX_CHARS,
             )
             if rendered is None:
                 raise RuntimeError(

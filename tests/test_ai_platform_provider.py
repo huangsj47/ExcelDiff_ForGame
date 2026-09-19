@@ -377,8 +377,30 @@ def test_the_stats_come_before_the_body_so_truncation_cannot_eat_them():
     )
 
 
-def test_every_sheet_keeps_its_stats_when_the_whole_thing_is_truncated():
-    """**多工作簿里，每一张表的统计都要活过截断 —— 不只是第一张。**
+def _two_sheet_book(prefixes=("0_常规属性", "2_M scs属性"), rows=900):
+    """造一份「主表 + 扩展表」的真工作簿，大到单条上限装不下（线上那一本的形状）。"""
+    import io
+
+    from openpyxl import Workbook
+
+    book = Workbook()
+    book.remove(book.active)
+    for title in prefixes:
+        sheet = book.create_sheet(title)
+        sheet.append(["id", "属性名", "属性描述", "叠加方式", "生效范围", "备注"])
+        for index in range(1, rows):
+            sheet.append([
+                index, f"{title[:1]}_{index}",
+                "这一列是很长的中文描述文本，用来模拟真实配表里那些说明性的字段内容" * 2,
+                4, "全局生效", f"由策划维护的备注 {index}",
+            ])
+    buffer = io.BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
+
+
+def test_every_sheet_keeps_its_stats_when_the_render_is_bounded():
+    """**多工作簿里，每一张表的统计都要活下来 —— 不只是第一张。**
 
     原先的排版是「表1 统计 → 表1 正文 → 表2 统计 → …」，而正文每张表最多给 `max_rows`
     行。表 1 一多，后面每张表的统计就全在截断线之外了 —— 那条「统计不会被砍掉」的保证
@@ -388,46 +410,128 @@ def test_every_sheet_keeps_its_stats_when_the_whole_thing_is_truncated():
     之后「2_M scs属性」的统计一个字都没到，而「属性叠加方式=4 是否合理」正需要拿它的
     统计当基准 —— 那一整个维度只能写成信息缺口，用户看到的是「平台没取到」。
 
-    判据按**截断之后**的文本算：这是唯一有意义的口径（没截断时怎样都对）。
+    判据按**生产路径**算（带 `char_budget`，即 `file_content` 真正会用的那次调用）：
+    渲染出来的文本必须**本来就不超上限** —— 而不是「超了之后被预算层砍一刀还侥幸剩点东西」。
     """
-    import io
-
-    from openpyxl import Workbook
-
-    from services.ai.budget import truncate_text
+    from services.ai.budget import TRUNCATION_SUFFIX
     from services.ai.platform_provider import _read_excel_sheets
     from utils.content_window import CONTENT_MAX_CHARS
 
-    def fill(book, title, prefix):
-        sheet = book.create_sheet(title)
-        sheet.append(["id", "属性名", "属性描述", "叠加方式", "生效范围", "备注"])
-        for index in range(1, 900):
-            sheet.append([
-                index, f"{prefix}_{index}",
-                "这一列是很长的中文描述文本，用来模拟真实配表里那些说明性的字段内容" * 2,
-                4, "全局生效", f"由策划维护的备注 {index}",
-            ])
+    raw = _two_sheet_book()
+    text = _read_excel_sheets(
+        raw, max_rows=120, path="config/属性表.xlsx", char_budget=CONTENT_MAX_CHARS
+    )
 
-    book = Workbook()
-    book.remove(book.active)
-    fill(book, "0_常规属性", "attr")
-    fill(book, "2_M scs属性", "scs")
-    buffer = io.BytesIO()
-    book.save(buffer)
-
-    full = _read_excel_sheets(buffer.getvalue(), max_rows=120)
-    cut, was = truncate_text(full, CONTENT_MAX_CHARS)
-
-    assert was, f"前提：这份渲染必须真的超长才会被截断（实际 {len(full)} 字）"
+    assert len(text) <= CONTENT_MAX_CHARS, (
+        f"渲染自己没收住（{len(text)} > {CONTENT_MAX_CHARS}）—— 超出的部分会被预算层砍掉，"
+        "而配表被砍之后**没有补救路径**。"
+    )
+    assert TRUNCATION_SUFFIX.strip() not in text, (
+        f"渲染交给了预算层一份超长文本（末尾出现了截断标记）：{text[-200:]!r}"
+    )
     for name in ("0_常规属性", "2_M scs属性"):
         block = f"#### 工作表「{name}」"
-        assert block in cut, (
-            f"截断之后「{name}」的整表统计没了 —— 拿不到基准，那一维只能写成信息缺口。"
-            f"截断后剩下的标题：{[ln for ln in cut.splitlines() if ln.startswith('#')]}"
+        assert block in text, (
+            f"「{name}」的整表统计没了 —— 拿不到基准，那一维只能写成信息缺口。"
+            f"剩下的标题：{[ln for ln in text.splitlines() if ln.startswith('#')]}"
         )
-        # 不只是标题在，统计的数字也要在（标题在而内容被砍是同一件事的另一种形态）
-        start = cut.index(block)
-        assert "整表统计" in cut[start:start + 1200], f"「{name}」的统计块是空的"
+        # 不只是标题在，统计的**数字**也要在（标题在而内容被砍是同一件事的另一种形态）。
+        # 判据用「首行按列名」—— 只有 `_SheetStats.render` 会写这句话，所以它出现就说明
+        # 这块真的是统计内容，而不是别处偶合的几个字。
+        start = text.index(block)
+        assert "首行按列名" in text[start:start + 2000], (
+            f"「{name}」的统计块是空的：{text[start:start + 400]!r}"
+        )
+
+
+def test_a_sheet_that_did_not_fit_is_named_and_the_way_back_is_spelled_out():
+    """**这条是「配表不再是死路」的落点。**
+
+    配表的正文原先完全忽略 `lines`，所以「一次装不下」的结局是：模型收到一句「有 1 条
+    上下文因长度上限被截断」，然后**什么都做不了** —— 同轮里另外三个会返回长内容的工具
+    （`file_diff` / `read_reference` / `commit_detail`）都有「分段 + 点名」，只有配表没有。
+
+    现在渲染自己收敛，并在抬头里逐张点名「哪些表的正文没给、怎么写才能要到」。
+    """
+    from services.ai.platform_provider import _read_excel_sheets
+    from utils.content_window import CONTENT_MAX_CHARS
+
+    raw = _two_sheet_book()
+    text = _read_excel_sheets(
+        raw, max_rows=120, path="config/属性表.xlsx", char_budget=CONTENT_MAX_CHARS
+    )
+
+    head = text.split("\n\n")[0]
+    assert "共 2 张工作表" in head, f"抬头没说这份工作簿有几张表：{head!r}"
+    assert '要看别的表' in text, f"没给「怎么要剩下的表」的办法：{head!r}"
+    assert '"lines"' in text, f"没写明用哪个字段点名：{head!r}"
+    assert "另有 1 张表的正文没给" in text, f"没逐张点名缺了谁：{head!r}"
+    assert "本次给了第 1 张的正文" in head, f"抬头与正文对不上：{head!r}"
+
+
+def test_asking_for_a_sheet_by_number_gives_that_sheet():
+    """点名第 2 张时：正文换成第 2 张，统计照旧覆盖全部（统计不跟着窗口走）。"""
+    from services.ai.platform_provider import _read_excel_sheets
+    from utils.content_window import CONTENT_MAX_CHARS
+
+    raw = _two_sheet_book()
+    text = _read_excel_sheets(
+        raw, max_rows=120, path="config/属性表.xlsx", window="2", char_budget=CONTENT_MAX_CHARS
+    )
+
+    assert "本次给了第 2 张的正文" in text, text[:400]
+    body = text.index("### 工作表正文")
+    assert "### 工作表「2_M scs属性」" in text[body:], (
+        f"点名要第 2 张，正文里却不是它：{text[body:body + 300]!r}"
+    )
+    assert "### 工作表「0_常规属性」" not in text[body:], "点名要第 2 张，却把第 1 张也塞了进来"
+    # 两张表的统计都还要在：统计是基准，与「这次看哪张表的正文」无关。
+    assert "#### 工作表「0_常规属性」" in text and "#### 工作表「2_M scs属性」" in text
+    assert "另有 1 张表的正文没给" in text, "第 1 张没给，就该照样点名"
+
+
+def test_a_window_written_in_the_wrong_unit_falls_back_to_the_first_sheet():
+    """认不出的窗口 = 没给窗口（与 `utils.content_window.parse_line_window` 同一条口径）。
+
+    窗口写坏的代价只能是「拿到的还是默认那一段」，不能是「丢掉整条请求」——
+    这是平台在 `lines` 上的一贯纪律。
+    """
+    from services.ai.platform_provider import _read_excel_sheets
+
+    raw = _two_sheet_book()
+    for junk in ("abc", "0", "3-2", "1180-1260x", "第2张"):
+        text = _read_excel_sheets(
+            raw, max_rows=120, path="config/属性表.xlsx", window=junk, char_budget=6_000
+        )
+        assert "本次给了第 1 张的正文" in text, (
+            f"{junk!r} 应该被当成「没给窗口」，结果不是从第 1 张开始：{text[:300]!r}"
+        )
+
+
+def test_asking_for_a_sheet_that_does_not_exist_says_so_instead_of_going_blank():
+    """点名第 99 张而只有 2 张时：明说它不存在，并把「实际有哪几张」列出来。"""
+    from services.ai.platform_provider import _read_excel_sheets
+    from utils.content_window import CONTENT_MAX_CHARS
+
+    raw = _two_sheet_book(rows=30)
+    text = _read_excel_sheets(
+        raw, max_rows=120, path="config/属性表.xlsx", window="99", char_budget=CONTENT_MAX_CHARS
+    )
+
+    assert "第 99-99 张不存在" in text, text[:400]
+    assert "一共只有 2 张" in text, text[:400]
+    assert "另有 2 张表的正文没给" in text, "没告诉模型实际有哪几张表"
+
+
+def test_parse_sheet_window_accepts_only_sheet_numbers():
+    """`lines` 在配表上是「第几张表」。合法形态只有 `N` 与 `N-M`（协议层已经规整过）。"""
+    from services.ai.platform_provider import parse_sheet_window
+
+    assert parse_sheet_window("2") == (2, 2)
+    assert parse_sheet_window("2-3") == (2, 3)
+    assert parse_sheet_window(" 4 ") == (4, 4)
+    for junk in ("", "  ", "abc", "0", "3-2", "-1", "1-", "第2张", "1180-1260x", None):
+        assert parse_sheet_window(junk) is None, f"{junk!r} 被当成了合法的工作表窗口"
 
 
 def test_text_columns_show_their_value_distribution():

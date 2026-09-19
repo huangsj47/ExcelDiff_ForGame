@@ -76,14 +76,15 @@ skill 的维度去判断风险。
 `read_reference` 用来读本 skill 的 `references/` 文档，可用的文件名见文末索引。
 
 **`lines`（可选，四个工具都用）**：长内容不整份给，平台按**结构**切段并在抬头写明「共 K 段 /
-这是第几段 / 怎么要别的段」。单位随工具变：`file_content` 是行号（`"lines": "1180-1260"`，
-不给就默认给改动附近那一段，正文每行带行号 `1180│ if x then`）、`file_diff` 是第几个改动块、
-`read_reference` 是第几小节、`commit_detail` 是第几个文件。
+这是第几段 / 怎么要别的段」。单位随工具变：`file_content` 对代码是行号（`"1180-1260"`）、
+**对配表是第几张工作表**（`"2"`），`file_diff` 是改动块、`read_reference` 是小节、
+`commit_detail` 是文件。
 
 - **行号与 `file_diff` 里 `@@ -1180,7 +1180,9 @@` 是同一套坐标** —— 你在结论里引用的
   行号必须来自这两处，不要自己数；
 - **给的是片段，不是全文**：抬头写了段数，就别把「这一段里没看到」当成「文件里没有」，
-  要核别处按抬头的写法再要一段（拿不到的那部分在 `evidence` 里写成信息缺口）；
+  按抬头点名再要一段（拿不到的在 `evidence` 里写成信息缺口）。**配表按张给**：没给的写
+  `"lines": "3"` 就能单独拿到（别一次没给全就写「未取得」）；统计覆盖整表且排在正文之前；
 - 额度按**次数**计，不按字数：一次把该看的段要齐，比反复要整份更划算。
 
 **`find_references`**：给一个标识符（至少 3 个字），平台在**本批次改动的文件**里搜它出现在
@@ -105,11 +106,9 @@ skill 的维度去判断风险。
     {
       "title": "【系统或模块】对象或条件下的可观察异常",
       "category": "config_id | config_value | config_data | value_sanity | config_linkage | module_coupling | code_logic | version_branch | process",
-      "severity": "critical | high",
-      "confidence": "high | very_high",
+      "severity": "critical | high", "confidence": "high | very_high",
       "evidence": ["具体到文件、字段、ID、行或提交的依据", "至少一条，且不得是空泛表述"],
-      "commit": "该异常所在的 commit id",
-      "file_path": "该异常所在的文件路径",
+      "commit": "该异常所在的 commit id", "file_path": "该异常所在的文件路径",
       "impact": "一旦成立会造成什么后果",
       "suggestion": "建议的验证或修复动作"
     }
