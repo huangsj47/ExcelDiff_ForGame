@@ -148,7 +148,7 @@ def safe_join(root: Path, *segments: str) -> Path:
     return candidate
 
 
-def _read_document(path: Path, *, require_frontmatter: bool) -> SkillDocument:
+def _read_document(path: Path, *, require_frontmatter: bool, name: str | None = None) -> SkillDocument:
     text = path.read_text(encoding="utf-8")
     description = ""
     if require_frontmatter:
@@ -158,7 +158,7 @@ def _read_document(path: Path, *, require_frontmatter: bool) -> SkillDocument:
             raise SkillLoadError(f"{path} 的 frontmatter 不合法：{exc}") from exc
         description = fields.get("description", "")
     return SkillDocument(
-        name=path.name,
+        name=name or path.name,
         description=description,
         path=path,
         text=text,
@@ -188,15 +188,36 @@ def _collect_references(directory: Path) -> tuple[SkillDocument, ...]:
 
 
 def _collect_project_sub_skills(pack_dir: Path) -> tuple[SkillDocument, ...]:
-    """项目目录下用户新建/上传的子 skill（每个是一个含 SKILL.md 的文件夹）。"""
+    """项目目录下用户新建/上传的子 skill（每个是一个含 SKILL.md 的文件夹）。
+
+    **文档名取目录名，不取文件名。** 子 skill 的正文文件被契约钉死就叫 `SKILL.md`
+    （`project_pack_service.SKILL_MD_NAME`，界面上的增删改都按这个名找），所以拿文件名
+    当文档名的话，同一个包里放两个子 skill 就会在 `build_readable_index` 里撞成
+    「可读文档重名」—— 那一步是**硬错**，后果不是少读一份文档，而是**这个项目的每一次
+    分析都加载失败**；更糟的是报错里那句「请改名」在这条路径上做不到（文件名改不了）。
+
+    目录名才是子 skill 的身份：界面的增删按它寻址，frontmatter 里的 `name:` 也等于它。
+    """
     documents: list[SkillDocument] = []
     for child in sorted(path for path in pack_dir.glob("*") if path.is_dir()):
         if child.name == "references":
             continue
         skill_md = child / "SKILL.md"
         if skill_md.is_file():
-            documents.append(_read_document(skill_md, require_frontmatter=True))
+            documents.append(_read_document(skill_md, require_frontmatter=True, name=child.name))
     return tuple(documents)
+
+
+def describe_load_error(exc: Exception, repo_root: Path) -> str:
+    """把加载失败的原因写成用户能照着处理的一句话（**路径相对化**）。
+
+    `SkillLoadError` 的正文里带的是绝对路径（`C:\\...\\skills\\projects\\g119\\beta\\SKILL.md`）
+    —— 摆给策划既读不下去，也把部署目录结构漏了出去；相对仓库根的那一段才是他真正要改的
+    东西。截 300 字：这句话会落进 run 的 `error_message` 并在抽屉里显示，异常正文可能很长。
+    """
+    text = str(exc).strip() or exc.__class__.__name__
+    root = str(repo_root)
+    return text.replace(root + os.sep, "").replace(root + "/", "")[:300]
 
 
 def build_readable_index(

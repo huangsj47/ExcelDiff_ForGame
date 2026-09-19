@@ -283,9 +283,22 @@
         paint();
     }
 
-    /** 本页不再看着它跑（跑完了 / 连接关了）。已经画出来的那几轮**不动**：它们是这次运行的
-     *  过程，跑完之后仍然该看得到（用户明确要的）—— 换掉的只是顶上那句说明。 */
-    function unwatch() {
+    /**
+     * 本页不再看着它跑。已经画出来的那几轮**不动**：它们是这次运行的过程，跑完之后仍然
+     * 该看得到（用户明确要的）—— 换掉的只是顶上那句说明。
+     *
+     * `options.settled` = **这次运行真的结束了**（轮询读到终态 / SSE 收到终态事件）。
+     * 它只影响一件事：要不要顺手去取一次落库的逐轮。
+     *
+     * **这个参数是必须的**，因为「跑完了」与「用户不想看了」是两件事，而它们以前共用
+     * 这一个函数。逐轮是**跑完之后才落库**的（服务端 `_persist_outcome`），所以跑动中
+     * 取回的那一份必然是空表 —— 把它当终态收下（`loaded = true`）之后，这份记录就**再也
+     * 刷不出来了**：跑完再打开抽屉时 `setRun` 会因为运行号没变而早退，`ensureLoaded` 又被
+     * `loaded` 挡在门外。表现是「思考过程」对这次运行**永远**说「这次运行没有留下逐轮记录」，
+     * 而明细一直在库里。触发序列很日常：跑起来 → 关抽屉 → 等它跑完 → 再打开抽屉。
+     */
+    function unwatch(options) {
+        var opts = options || {};
         watching = false;
         if (mode === 'live') mode = 'settled';
         paint();
@@ -299,7 +312,7 @@
         // 已经画出几轮时不取：那些轮次是真的，而"再看一眼落库那份"要等用户切标签
         // （懒加载那条口径见 `ensureLoaded`）；跑动中也不取（下一句 `applyProgress`
         // 会把 `watching` 认回来）。
-        if (!blocks.length && !loaded && runId !== null) ensureLoaded();
+        if (opts.settled && !blocks.length && !loaded && runId !== null) ensureLoaded();
     }
 
     /** 跑动中的一帧（`progress.rounds`）。**整份替换**，不做增量 —— 每帧本来就是全量。 */

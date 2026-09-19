@@ -28,6 +28,7 @@ CSS 里的分隔注释就是给人看的锚点：
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 
@@ -46,6 +47,12 @@ END_MARK = '    /* ===== AI 抽屉样式 结束 ===== */\n'
 
 def _read(name):
     path = os.path.join(TEMPLATES_DIR, name)
+    with open(path, encoding='utf-8') as handle:
+        return handle.read()
+
+
+def _read_style_css():
+    path = os.path.join(PROJECT_ROOT, 'static', 'css', 'style.css')
     with open(path, encoding='utf-8') as handle:
         return handle.read()
 
@@ -91,3 +98,73 @@ def test_drawer_width_stays_relative():
         '而不是固定 px —— 固定 px 在窄屏上会把整屏横着占满，在宽屏上又定死了每行字数。'
     )
     assert 'width: 460px' not in block, '460px 是加宽前的旧宽度，正文只剩约 380px、一行 27 个汉字。'
+
+
+# --------------------------------------------------------------------------
+# `hidden` 压不压得住作者样式的 display
+# --------------------------------------------------------------------------
+
+_DISPLAY_RULE = re.compile(r"([^{}\n]+)\{([^}]*)\}", re.M)
+_CLASS_ATTR = re.compile(r'class="([^"]+)"')
+
+
+def _classes_with_author_display(css):
+    """样式表里**自己设了 display**（且不是 none）的那些类选择器。
+
+    `[hidden]{display:none}` 来自浏览器默认样式表，任何作者来源的 `display` 都会盖掉它
+    （与谁更具体无关）。所以一个类只要自己设了 display，`hidden` 就对它失效。
+    """
+    found = set()
+    for selector, body in _DISPLAY_RULE.findall(css):
+        if re.search(r"(?m)^\s*display\s*:\s*(?!none)", body):
+            for token in selector.split(','):
+                token = token.strip()
+                if token.startswith('.') and ' ' not in token and '[' not in token:
+                    found.add(token[1:])
+    return found
+
+
+def _hidden_classes(name):
+    """模板里**同时带 `hidden` 属性**的元素用到的类名。
+
+    HTML 写法有两种（`class="x" hidden` 与 `hidden class="x"`），两种都要认。
+    """
+    text = _read(name)
+    found = set()
+    for match in _CLASS_ATTR.finditer(text):
+        start, end = match.span()
+        around = text[max(0, start - 40): min(len(text), end + 40)]
+        if re.search(r'\bhidden\b', around):
+            found.update(match.group(1).split())
+    return found
+
+
+def test_a_hidden_element_that_sets_its_own_display_is_actually_hidden():
+    """**带 `hidden` 的元素，样式表必须有一条 `[hidden]` 规则把它压回去。**
+
+    这个坑在本仓库踩过五次：`.ai-drawer-tab-dot`、`.ai-drawer-panel`、
+    `.ai-analysis-output`、`.ai-drawer-footer .btn`、`.ai-drawer-footer a.btn`，
+    外加后补的 `.ai-budget-banner` 与 `.ai-usage-line`。最后这两条漏了好几版，
+    表现是**抽屉一打开就挂着一个 26px 的空红框、底部还有一条 17px 的空灰条**
+    （不超预算、没有用量明细时也占着位置），看起来像内容没加载出来。
+
+    判据：凡是「模板里带 `hidden` 属性、而样式表又给它设了 display」的类，
+    必须有对应的 `[hidden]` 规则。静态断言只能钉住「规则在不在」——
+    「浏览器算出来到底是不是 none」由 `scripts/shot_ai_drawer.py` 真渲染复核。
+    """
+    css = _read_style_css()
+    risky = _classes_with_author_display(css)
+
+    missing = []
+    for name in TARGETS:
+        for cls in sorted(_hidden_classes(name) & risky):
+            if f'.{cls}[hidden]' not in css:
+                missing.append(f'{name}: .{cls}')
+
+    assert not missing, (
+        '这些元素带 `hidden`、样式表却给它设了 display 而没有 `[hidden]` 覆盖，'
+        '于是 `hidden` 完全不生效（作者来源的 display 盖掉浏览器默认的 `[hidden]`）：\n  '
+        + '\n  '.join(sorted(set(missing)))
+        + '\n改法：紧跟着那条规则补一句 `.<类名>[hidden] { display: none; }`，'
+        '并写清它为什么必须显式写（参见隔壁几条的注释）。'
+    )

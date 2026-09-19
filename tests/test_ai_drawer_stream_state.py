@@ -1125,3 +1125,84 @@ def test_the_polling_exit_also_settles_the_drawer(name):
     assert body.index(settle, then_at) > then_at, (
         f"{name} 的停表没有等到结论取回来才做（不在取结论的 `.then` 里）：{body[-400:]}"
     )
+
+
+# 「回读最近结论失败」那一段：三份模板的写法各不相同，但**都必须在那句错误文案之后收工**。
+_RELOAD_FAILURE_TEXT = "获取最近分析失败。"
+_NO_RESULT_TAIL = "暂无分析结果。"
+
+
+@pytest.mark.parametrize("name", TEMPLATES)
+def test_a_failed_reread_does_not_become_no_result_at_all(name):
+    """**取不到最近结论 ≠ 这个目标没跑过分析。**
+
+    跑完那一刻 `onFinished` 会回读一次 `/latest`（用户点「刷新结果」也是同一条路）。
+    这一次请求一旦失败（网络抖动、403、500），函数里那段「没有结论」的收尾就会接管：
+    界面上是「暂无分析结果。」+ 徽章「待分析」，`AiThinkLog.markEmpty()` 还会把刚画出来
+    的逐轮记录一起清掉 —— 用户看着报告一行行推完，界面却告诉他「这个目标还没有跑过分析」。
+    更荒唐的是周版本页那句注释写着「要传 true……否则会落进函数末尾那句『暂无分析结果。』」，
+    而传了 `true` 之后那段 catch 里**没有 `return`**，照样落下去。
+
+    判据是**顺序**：把函数从「没有结论」那句收尾处切开，错误文案必须出现在**最后一个
+    `return` 之前** —— 也就是「说完失败就收工」。只在 catch 里写一句错误文案、然后让控制流
+    继续往下走，这条会红。
+    """
+    script = _template_script(name)
+    body = _function_body(script, _LATEST_LOADER[name])
+
+    assert _NO_RESULT_TAIL in body, f"前提变了：{name} 里找不到「没有结论」那段收尾"
+    assert _RELOAD_FAILURE_TEXT in body, (
+        f"{name} 的 {_LATEST_LOADER[name]} 里没有「回读失败」这句说明 —— "
+        "读不到结论时它会说成「暂无分析结果。」，把跑成功的一次说成没跑过"
+    )
+    prefix = body[: body.index(_NO_RESULT_TAIL)]
+    tail_return = prefix.rindex("return")
+    assert tail_return > prefix.index(_RELOAD_FAILURE_TEXT), (
+        f"{name} 的「回读失败」分支说完那句错误文案就**继续往下走了** —— "
+        "它会被函数末尾那段「没有结论」的收尾盖掉（「暂无分析结果。」+「待分析」），"
+        "刚画出来的逐轮记录也会被 `markEmpty()` 清掉。取不到与确实没有是两件事，"
+        "说完失败必须 `return`。"
+    )
+
+
+def test_the_merged_page_tells_a_failed_fetch_from_an_empty_one():
+    """合并页连那句错误文案都没有：取数函数把「失败」和「没有结论」都吞成 `null`。
+
+    于是它无法区分这两件事，`refreshWeeklyAiLatest` 也就只能一律说「暂无分析结果。」。
+    失败要用 `undefined`（并**不写缓存** —— 把「没取到」缓存下来，之后所有非 force 的读
+    都会跟着说「没有分析」，而它其实一直在库里）。
+    """
+    script = _template_script("templates/merged_project_view.html")
+    body = _function_body(script, "getWeeklyAiResult")
+
+    assert "return undefined;" in body, (
+        "取数失败仍然回 `null` —— 与「这个目标没有结论」撞成同一个值，"
+        "调用方没法分开说，只能一律报「暂无分析结果。」"
+    )
+    catch_at = body.index("catch")
+    assert "weeklyAiCache.set" not in body[catch_at:], (
+        "把「没取到」写进了缓存 —— 之后所有非 force 的读都会跟着说「没有分析」"
+    )
+    assert "undefined" in _function_body(script, _LATEST_LOADER[
+        "templates/merged_project_view.html"
+    ]), "调用方没有处理「没取到」这一支"
+
+
+@pytest.mark.parametrize("name", TEMPLATES)
+def test_the_run_ended_exit_tells_the_think_log_that_it_ended(name):
+    """跑完那个出口必须说清「这次运行结束了」（`unwatch({settled: true})`）。
+
+    不带的后果：`unwatch()` 分不清「跑完了」与「用户不想看了」，于是两条路都会去取一次
+    落库的逐轮。而逐轮是**跑完之后才落库**的，跑动中关抽屉取回的空表会被当成终态收下，
+    把「这次运行没有留下逐轮记录」写死 —— 跑完再打开抽屉就再也刷不出来（细节见
+    `tests/test_ai_think_log_frontend.py::test_closing_the_drawer_mid_run_does_not_freeze_
+    the_trace_as_missing`）。这条只钉住三份模板确实把那个参数传下去了。
+    """
+    script = _template_script(name)
+    body = _on_finished_body(script)
+
+    assert "AiThinkLog.unwatch(" in body
+    assert "settled: true" in body, (
+        f"{name} 的 `onFinished` 调 `AiThinkLog.unwatch()` 时没说「这次运行结束了」—— "
+        "它会顺手去取一次落库的逐轮，而那一刻逐轮还没落库"
+    )

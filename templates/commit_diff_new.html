@@ -755,7 +755,9 @@ function initCommitAiAnalysis() {
                 // 时禁掉的（分析已经结束还禁着，用户只会以为页面卡住了）。
                 if (startBtn) startBtn.disabled = false;
                 // 跑完了 → 不再看进度快照（`loadLatestResult` 会去取落库的结果）。
-                AiThinkLog.unwatch();
+                // `settled: true` = 这次运行真的结束了 —— 只有这种时候才该去兑现
+                // 「跑完之后这里会显示落库的逐轮记录」那句承诺（见 `AiThinkLog.unwatch`）。
+                AiThinkLog.unwatch({ settled: true });
                 if (streamSettled) return;
                 // **这条出口以前绕过了 `stopBudgetWatch()`** —— 那个函数的注释写着「所有
                 // 出口都走它…在每处各写一遍必然漏一处」，这里就是漏掉的那一处。漏掉的

@@ -72,7 +72,6 @@ from services.ai.engine import (
 )
 from services.ai.llm_client import LLMError
 from services.ai.platform_provider import PlatformContextProvider
-from services.ai.weekly_sync_gate import group_config_ids, weekly_sync_in_flight
 from services.ai.pricing import (
     PriceTable,
     load_price_table,
@@ -87,10 +86,11 @@ from services.ai.result_payload import (
 from services.ai.rules import RuleThresholds, rules_version
 from services.ai.run_progress import clear as clear_run_progress
 from services.ai.run_progress import publish as publish_run_progress
-from services.ai.skill_loader import load_skills, skill_revision
+from services.ai.skill_loader import describe_load_error, load_skills, skill_revision
 from services.ai.subagent import plan_family, run_family_with_seed, subagent_mode_of
 from services.ai.trace_evidence import encode_evidence
 from services.ai.usage import encode_tools
+from services.ai.weekly_sync_gate import group_config_ids, weekly_sync_in_flight
 from utils.dpapi_utils import DPAPI_PREFIX, decrypt_dpapi
 from utils.logger import log_print
 from utils.security_utils import decrypt_credential, encrypt_credential
@@ -1012,16 +1012,16 @@ def build_weekly_payload(
     return payload, state, None
 
 
-def _load_project_skills(project_id: int):
-    """加载平台 skill 与项目知识包。**加载失败不阻断分析**：skill 是提示词的一部分，
-    提示词装不上不该让用户连一次分析都跑不了。"""
+def _load_project_skills(project_id: int) -> Tuple[object, str]:
+    """加载平台 skill 与项目知识包。返回 `(loaded, 失败原因)`，成功时原因是空串。
+    **加载失败不阻断分析**，但原因要交出去：成因都在用户自己能改的地方，只写日志等于让他猜。"""
     project = db.session.get(Project, project_id)
     code = getattr(project, "code", None) if project else None
     try:
-        return load_skills(_REPO_ROOT, project_code=code)
+        return load_skills(_REPO_ROOT, project_code=code), ""
     except Exception as exc:  # noqa: BLE001
         log_print(f"⚠️ AI 分析：skill 加载失败（project={project_id}）: {exc}")
-        return None
+        return None, describe_load_error(exc, _REPO_ROOT)
 
 
 def _apply_model_window(
@@ -1404,9 +1404,9 @@ def _run_engine_and_persist(
         )
         return result
 
-    loaded = _load_project_skills(project_id)
+    loaded, skill_failure = _load_project_skills(project_id)
     if loaded is None:
-        message = "分析协议（skill）加载失败，未发起分析。"
+        message = skill_failure or "分析协议（skill）加载失败，未发起分析。"
         result = failed_result(summary, message)
         _persist_outcome(
             run, engine_failed(message), result,

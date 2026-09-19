@@ -152,6 +152,15 @@ function reload() {
 
 function tick() { return new Promise(function (resolve) { setTimeout(resolve, 0); }); }
 
+// 跑动中的真实答案：逐轮是**跑完才落库**的（服务端 `_persist_outcome`），所以这一刻
+// `/usage` 必然回空表。
+function emptyFetch(url) {
+    return Promise.resolve({
+        ok: true, status: 200,
+        json: function () { return Promise.resolve({ success: true, rounds: [] }); }
+    }).then(function (response) { lastUrl.push(url); return response; });
+}
+
 function okFetch(url) {
     return Promise.resolve({
         ok: true, status: 200,
@@ -181,7 +190,7 @@ async function lazy() {
     reload();
     lastUrl = [];
     api.watch(7);
-    api.unwatch();
+    api.unwatch({ settled: true });
     api.ensureLoaded(okFetch);
     out.beforeLoad = { calls: lastUrl.slice(), note: els[NOTE_ID].textContent };
     await tick();
@@ -221,7 +230,7 @@ async function lazy() {
     api.applyProgress(null);
     out.stuckBefore = { mode: api.state().mode, note: els[NOTE_ID].textContent };
     sandbox.fetch = okFetch;   // 真页面里这就是 window.fetch
-    api.unwatch();
+    api.unwatch({ settled: true });
     // `ensureLoaded` 是**同步**进到「正在读取」的（取数本身是异步的），所以这一刻的
     // `mode` 就是「`unwatch` 自己发起了取数」的证据。
     out.stuckAfter = { mode: api.state().mode, note: els[NOTE_ID].textContent };
@@ -291,12 +300,39 @@ async function lazy() {
     // 发起取数，取得回来才算数。
     lastUrl = [];
     sandbox.fetch = okFetch;
-    api.unwatch();
+    api.unwatch({ settled: true });
     await tick();
     out.failureWhileWatching.afterUnwatch = {
         calls: lastUrl.slice(),
         mode: api.state().mode,
         rounds: els[LOG_ID].children.length
+    };
+    sandbox.fetch = undefined;
+
+    // 8) **跑动中关抽屉，等它跑完再打开**（这条以前会把「没有留下逐轮记录」写死）。
+    //
+    // 逐轮是跑完之后才落库的，跑动中取回的那一份必然是空表。把它当终态收下
+    // （`loaded = true`）之后，这份记录就**再也刷不出来了**：跑完再打开抽屉时
+    // `setRun` 会因为运行号没变而早退，`ensureLoaded` 又被 `loaded` 挡在门外 ——
+    // 「思考过程」对这次运行永远说「这次运行没有留下逐轮记录」，而明细一直在库里。
+    // 所以「跑完了」与「用户不想看了」必须分开：只有前者才去兑现那句承诺。
+    reload();
+    lastUrl = [];
+    api.watch(7);
+    sandbox.fetch = emptyFetch;      // 跑动中那一刻库里还没有逐轮
+    api.unwatch();                   // ① 关抽屉：不带 settled → 不该去取
+    await tick();
+    out.closedMidRun = {
+        calls: lastUrl.slice(), note: els[NOTE_ID].textContent
+    };
+    sandbox.fetch = okFetch;         // ② 跑完了：这一次才是该兑现承诺的时刻
+    api.unwatch({ settled: true });
+    await tick();
+    out.closedThenFinished = {
+        calls: lastUrl.slice(),
+        mode: api.state().mode,
+        rounds: els[LOG_ID].children.length,
+        note: els[NOTE_ID].textContent
     };
     sandbox.fetch = undefined;
     return out;
@@ -315,6 +351,8 @@ lazy().then(function (out) {
         stuckLoaded: out.stuckLoaded,
         staleResponse: out.staleResponse,
         failureWhileWatching: out.failureWhileWatching,
+        closedMidRun: out.closedMidRun,
+        closedThenFinished: out.closedThenFinished,
         notes: api.NOTE
     }));
 });
@@ -750,3 +788,33 @@ def test_a_failed_fetch_does_not_overwrite_a_run_we_are_watching(run):
     )
     assert after["rounds"] == 2, "取到了就要画出来"
     assert after["mode"] == "settled"
+
+
+def test_closing_the_drawer_mid_run_does_not_freeze_the_trace_as_missing(run):
+    """**跑动中关抽屉，不能把「这次运行没有留下逐轮记录」写死。**
+
+    逐轮是**跑完之后**才落库的（服务端 `_persist_outcome` 是全仓唯一写 `AiAnalysisTrace`
+    的地方），所以跑动中取回的那一份必然是空表。把空表当终态收下（`loaded = true`）之后，
+    这份记录就**再也刷不出来了**：跑完再打开抽屉时 `setRun` 会因为运行号没变而早退，
+    `ensureLoaded` 又被 `loaded` 挡在门外。表现是「思考过程」对这次运行**永远**说
+    「这次运行没有留下逐轮记录」，而明细一直在库里 —— 只有刷新页面才能恢复。
+
+    触发序列很日常：跑起来 → 关抽屉 → 等它跑完 → 再打开抽屉。
+
+    根因是 `unwatch()` 把「跑完了」与「用户不想看了」这两种语义混在一个函数里，而两者
+    都会走到那句「没画出来就去取落库那份」。修法是让**只有知道运行结束的那一方**带
+    `settled: true` —— 跑完之后这一次才是「这里会显示落库的逐轮记录」说的那个时刻。
+    """
+    mid = run["closedMidRun"]
+    assert mid["calls"] == [], (
+        "跑动中关抽屉就去取了落库的逐轮 —— 那一刻逐轮还没落库，取回的空表会被当成"
+        "终态收下（`loaded = true`），跑完再打开时这条路就再也刷不出来了"
+    )
+
+    after = run["closedThenFinished"]
+    assert after["calls"] == ["/ai-analysis/runs/7/usage"], (
+        "跑完了却不再去取落库的逐轮 —— 面板会停在那句承诺上"
+    )
+    assert after["rounds"] == 2, "跑完之后那次取数没把逐轮画出来"
+    assert after["mode"] == "settled"
+    assert after["note"] == "分析已结束，下面是这次运行的逐轮记录。"

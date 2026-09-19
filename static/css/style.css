@@ -1825,6 +1825,12 @@ main:focus {
     font-variant-numeric: tabular-nums;
 }
 
+/* 与 `.ai-drawer-panel[hidden]` 同一条纪律：上面那句 `display: flex` 是作者来源，会盖掉
+   浏览器默认的 `[hidden]{display:none}`，所以必须显式压掉。漏掉的后果不是报错，是
+   **抽屉底部常驻一条空的灰条**（没有用量明细时也占 17px），而那个位置是「本次消耗」那一行
+   ——看起来像内容没加载出来。 */
+.ai-usage-line[hidden] { display: none; }
+
 .ai-usage-text { line-height: 1.5; }
 
 .ai-usage-detail-btn {
@@ -1889,6 +1895,12 @@ main:focus {
     font-size: var(--font-size-md, 14px);
     line-height: 1.6;
 }
+
+/* 同一个坑的第五处（前四处见 `.ai-drawer-tab-dot[hidden]` 那几条）：上面那句
+   `display: block` 是作者来源，`hidden` 压不住它。不写这一条的后果是**抽屉一打开就在
+   meta 行上方挂着一个 26px 高的空框**（浅红底 + 4px 左红边，里面一个字都没有），
+   于是「超预算」这个本该刺眼的信号被一个常亮的空框稀释掉了。 */
+.ai-budget-banner[hidden] { display: none; }
 
 .ai-budget-banner__title {
     display: block;

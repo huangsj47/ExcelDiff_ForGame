@@ -116,9 +116,35 @@ def test_project_sub_skills_are_discovered(tmp_path):
     root = _make_repo(tmp_path, project_refs=("a.md",), sub_skills=("my-extra-skill",))
     loaded = load_skills(root, project_code="g119")
 
-    assert [document.name for document in loaded.project_skills] == ["SKILL.md"]
+    assert [document.name for document in loaded.project_skills] == ["my-extra-skill"]
     assert "my-extra-skill" in str(loaded.project_skills[0].path)
-    assert "SKILL.md" in loaded.readable
+    assert "my-extra-skill" in loaded.readable
+
+
+def test_two_sub_skills_do_not_collide(tmp_path):
+    """**放两个子 skill 不能把整个项目的分析弄挂。**
+
+    子 skill 的正文文件被契约钉死就叫 `SKILL.md`，所以文档名一旦取文件名，两个子 skill
+    必然在 `build_readable_index` 里撞成「可读文档重名」—— 那是**硬错**，`load_skills`
+    抛出去之后 `_load_project_skills` 返回 None，**这个项目的每一次分析都失败**，
+    而用户看到的只有一句「分析协议（skill）加载失败，未发起分析。」，真正的原因只在
+    服务端日志里。更荒唐的是报错里那句「请改名」在这条路径上做不到 —— 文件名改不了。
+
+    文档名取目录名（子 skill 的身份：界面的增删按它寻址、frontmatter 的 `name:` 也等于
+    它）之后，同名的就只有正文文件，不再有歧义。
+    """
+    root = _make_repo(
+        tmp_path, project_refs=("a.md",), sub_skills=("alpha", "beta", "gamma")
+    )
+    loaded = load_skills(root, project_code="g119")
+
+    assert [document.name for document in loaded.project_skills] == ["alpha", "beta", "gamma"]
+    assert {"alpha", "beta", "gamma"} <= set(loaded.readable)
+    assert "SKILL.md" not in loaded.readable, (
+        "文档名又回到文件名了 —— 两个子 skill 会立刻撞成重名，整个项目的分析全挂"
+    )
+    for name in ("alpha", "beta", "gamma"):
+        assert loaded.readable[name].read_text(encoding="utf-8").startswith("---")
 
 
 # --------------------------------------------------------------------------
@@ -345,3 +371,45 @@ def test_the_id_segment_tables_in_the_knowledge_pack_agree():
             f"{segment[0]}–{segment[1]} 段在两处说法不一致："
             f"号段表说「{type_name}」，表划分表说「{system_name}」"
         )
+
+
+# --------------------------------------------------------------------------
+# 加载失败要能被人照着处理
+# --------------------------------------------------------------------------
+
+
+def test_the_reason_for_a_broken_pack_names_the_file_and_hides_the_deploy_path(tmp_path):
+    """**失败原因必须交到用户手上，而且要是他能改的那个东西。**
+
+    这条以前只写服务端日志：用户拿到的是一句「分析协议（skill）加载失败，未发起分析。」，
+    而它的成因（知识包里两份文档重名、frontmatter 不合法、平台 skill 被删）**全都在用户
+    自己能改的地方**，界面上一个字都不给，等于让他猜。
+
+    同时**路径要相对化**：绝对路径摆给策划既读不下去、也把部署目录结构漏了出去。
+    """
+    from services.ai.skill_loader import describe_load_error
+
+    root = _make_repo(tmp_path, project_refs=("a.md",))
+    # 平台 skill 缺失 —— 最典型的「用户能改」的成因。
+    (root / "skills" / "version-diff-review" / "SKILL.md").unlink()
+
+    with pytest.raises(SkillLoadError) as caught:
+        load_skills(root, project_code="g119")
+    reason = describe_load_error(caught.value, root)
+
+    assert reason, "失败原因是空的 —— 用户还是什么都看不到"
+    assert str(root) not in reason, (
+        f"原因里带着部署的绝对路径（{root}），应该相对化：{reason!r}"
+    )
+    assert "version-diff-review" in reason, (
+        f"原因没指出是哪个文件/目录出的问题，用户无从下手：{reason!r}"
+    )
+    assert len(reason) <= 300, "这条会落进 error_message 并在界面上显示，要截断"
+
+
+def test_the_reason_is_capped_so_it_cannot_flood_the_drawer():
+    """异常正文可能很长（重名那条会把两个完整路径都列出来），要有上限。"""
+    from services.ai.skill_loader import describe_load_error
+
+    reason = describe_load_error(SkillLoadError("很长的一句话。" * 200), Path("/repo"))
+    assert len(reason) == 300

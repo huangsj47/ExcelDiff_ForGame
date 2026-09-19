@@ -1601,7 +1601,9 @@ function startAiBudgetWatch(runId, metaEl) {
             // 不传 force 就会落进函数末尾那句「暂无分析结果。」—— 于是一次**跑成功了的**
             // 分析被说成「还没有分析过」，还会把已经画出来的逐轮记录一起清掉。
             // 另外两份抽屉（commit / merged）走的都是这条路。
-            AiThinkLog.unwatch();
+            // `settled: true` = 这次运行真的结束了 —— 只有这种时候才该去兑现
+            // 「跑完之后这里会显示落库的逐轮记录」那句承诺（见 `AiThinkLog.unwatch`）。
+            AiThinkLog.unwatch({ settled: true });
             if (weeklyAiStreamSettled) return;
             // **这条出口以前绕过了 `stopAiBudgetWatch()`** —— 那个函数的注释写着「所有
             // 出口都走它…在每处各写一遍必然漏一处」，这里就是漏掉的那一处。漏掉的后果：
@@ -1786,6 +1788,16 @@ async function loadWeeklyAiLatest(force = false) {
         if (force) {
             setWeeklyAiOutput('获取最近分析失败。', false, 'error');
             setWeeklyAiStatusBadge('失败', 'danger');
+            weeklyAiHasCached = false;
+            // 屏幕上已经不是那份结论了 → 「导出 md」也没有可导出的对象（不收的话它指着
+            // 上一次加载成功的那条运行，而用户看不见那份报告）。
+            AiReportExport.track({ runId: null });
+            // **必须在这里收工。** 漏掉这一句的后果：上面那句错误文案会被下面那段
+            // 「没有结论」的收尾**立刻盖掉**（同一个微任务里），于是这次**跑成功了**的
+            // 分析在界面上变成「暂无分析结果。」+「待分析」，`AiThinkLog.markEmpty()`
+            // 还会把刚画出来的逐轮记录一起清掉 —— 用户看着报告一行行推完，界面却说
+            // 「这个目标还没有跑过分析」。取数失败与确实没有结论是两件事。
+            return false;
         }
     }
     weeklyAiHasCached = false;

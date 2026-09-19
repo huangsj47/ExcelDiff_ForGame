@@ -749,7 +749,7 @@ def test_a_new_skill_gets_server_composed_frontmatter(client, project_id, projec
 
     with flask_app.app_context():
         loaded = load_skills(REPO_ROOT, project_code=code)
-    assert {document.name for document in loaded.project_skills} == {"SKILL.md"}
+    assert {document.name for document in loaded.project_skills} == {"segment-rules"}
 
 
 def test_deleting_a_skill_removes_its_whole_directory(client, project_id, projects_root, monkeypatch):
