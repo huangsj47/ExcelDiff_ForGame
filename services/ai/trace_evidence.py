@@ -38,6 +38,16 @@ TRACE_DETAIL_MAX_CHARS = 300
 # 每轮最多记多少条明细。索取一次最多几十条，正常分析远低于这个数。
 TRACE_LIST_MAX_ITEMS = 40
 
+# ---------------------------------------------------------------------------
+# 「正在跑的那一轮」的实时条目：**比落库那份小得多**，因为它每 3 秒随轮询整体重发一次
+# （`static/js/ai_stream_status.js` 的 POLL_INTERVAL_MS），一次 30 轮的分析若按落库上限
+# 带出去就是每帧上百 KB。上限在这里由**载荷**决定，与省空间无关。
+# ---------------------------------------------------------------------------
+# 一轮的模型原文：落库上限 4000，实时只带 800 —— 思考过程那一栏要的是「这轮它说了什么」
+# 的轮廓，完整原文跑完之后在 `/runs/<id>/usage` 上照样看得到。
+LIVE_RESPONSE_MAX_CHARS = 800
+LIVE_LIST_MAX_ITEMS = 8
+
 # provider **取不到**时给出的那几句话的开头（`services/ai/platform_provider.py` 与
 # `services/ai/context_tools.py` 是仅有的两个发出方）。它们长得像内容，所以只能按开头认。
 #
@@ -81,16 +91,16 @@ def _clip(value: Any, limit: int = TRACE_DETAIL_MAX_CHARS) -> str:
     return str(value or "")[:limit]
 
 
-def _head(items: Any) -> list:
+def _head(items: Any, limit: int = TRACE_LIST_MAX_ITEMS) -> list:
     if not isinstance(items, (list, tuple)):
         return []
-    return list(items)[:TRACE_LIST_MAX_ITEMS]
+    return list(items)[:limit]
 
 
-def summarize_requests(requests: Any) -> list[dict]:
+def summarize_requests(requests: Any, *, limit: int = TRACE_LIST_MAX_ITEMS) -> list[dict]:
     """模型这一轮点名要了什么（它自己写的请求，越权的那些不在这里 —— 那些在 dropped）。"""
     out = []
-    for request in _head(requests):
+    for request in _head(requests, limit):
         describe = getattr(request, "describe", None)
         out.append({
             "type": _clip(getattr(request, "type", ""), 40),
@@ -104,7 +114,7 @@ def summarize_requests(requests: Any) -> list[dict]:
     return out
 
 
-def summarize_executed(items: Any) -> list[dict]:
+def summarize_executed(items: Any, *, limit: int = TRACE_LIST_MAX_ITEMS) -> list[dict]:
     """这一轮**真正进了提示词**的东西：多少字、是不是一句失败说明。
 
     `failed` 与 `empty` 必须分开：前者是「取不到」（有原因可说），后者是工具明确回了一句
@@ -112,7 +122,7 @@ def summarize_executed(items: Any) -> list[dict]:
     这一段要防的事。
     """
     out = []
-    for item in _head(items):
+    for item in _head(items, limit):
         meta = dict(getattr(item, "meta", None) or {})
         text = str(getattr(item, "text", "") or "")
         notice = failure_notice(text)
@@ -128,13 +138,13 @@ def summarize_executed(items: Any) -> list[dict]:
     return out
 
 
-def summarize_dropped(dropped: Any) -> list[dict]:
+def summarize_dropped(dropped: Any, *, limit: int = TRACE_LIST_MAX_ITEMS) -> list[dict]:
     """这一轮被丢掉的东西**与原因**（越权、超预算、取数异常…）。
 
     只记条数的话，「这次少看了一个文件」永远查不出是哪一步丢的。
     """
     out = []
-    for item in _head(dropped):
+    for item in _head(dropped, limit):
         out.append({
             "kind": _clip(getattr(item, "kind", ""), 40),
             "reason": _clip(getattr(item, "reason", "")),
@@ -228,3 +238,69 @@ def failed_labels(executed: Sequence[dict] | Iterable[dict]) -> list[str]:
         if isinstance(item, dict) and item.get("failed"):
             out.append(str(item.get("label") or item.get("kind") or ""))
     return out
+
+
+def live_round_entry(record: Any) -> dict:
+    """一轮的记账 → **正在跑的界面上**那一条（思考过程标签页用）。
+
+    ## 为什么它的键必须与 `ai_usage_service.run_usage()["rounds"][i]` 一样
+
+    同一个界面有两条来路：跑的过程中读进程内的进度快照（本函数），跑完之后读
+    `/ai-analysis/runs/<id>/usage`（那一份由 `decode_evidence` + trace 的列拼出来）。
+    两处若各有一套键名，同一个面板就会同时存在两种真相 —— 而它们描述的是同一件事。
+    所以这里逐字对齐那一份的键，只有取值上限更紧（见 `LIVE_*` 常量）。
+
+    ## 截断更紧，但**不换说法**
+
+    `executed` 在实时这一份里**只留 `failed` 或 `empty` 的条目**（思考过程那一栏要看的正是
+    「这一轮哪条没拿到」），并且截到 `LIVE_LIST_MAX_ITEMS`。读侧那一份是全量的 ——
+    渲染器只画 `failed`/`empty` 的那些，两边显示出来就一致。
+
+    ## 它不碰分片标签
+
+    `agent` / `agent_round` 在引擎这一层是空的（引擎每次只跑一个成员，标签由
+    `subagent._call_engine` 在回调外层贴上去，见 `services/ai/subagent.py`）。所以这里
+    照实录 `record` 上的值，**不猜**：实时那一路由 `run_progress.publish` 用进度对象上的
+    `agent` 补齐，落库那一路本来就是对的。
+    """
+    executed = summarize_executed(
+        getattr(record, "executed", ()), limit=LIVE_LIST_MAX_ITEMS
+    )
+    return {
+        "round_index": int(getattr(record, "index", 0) or 0),
+        "agent": _clip(getattr(record, "agent", ""), 40),
+        "agent_round": int(getattr(record, "agent_round", 0) or 0),
+        "outcome": _clip(getattr(record, "status", ""), 40),
+        "parsed_ok": str(getattr(record, "status", "")) != "unparsable",
+        "tokens_input": int(getattr(record, "prompt_tokens", 0) or 0),
+        "tokens_output": int(getattr(record, "completion_tokens", 0) or 0),
+        # `None` 是「上游没上报」，一路原样带出去 —— 渲染成 0 就是把「不知道」说成「没有」。
+        "cache_read_tokens": getattr(record, "cache_read_tokens", None),
+        "cache_write_tokens": getattr(record, "cache_write_tokens", None),
+        "request_chars": int(getattr(record, "prompt_chars", 0) or 0),
+        "context_chars": int(getattr(record, "context_chars", 0) or 0),
+        "duration_ms": int(getattr(record, "duration_ms", 0) or 0),
+        "error": _clip(getattr(record, "note", "")),
+        "requests": summarize_requests(
+            getattr(record, "requests", ()), limit=LIVE_LIST_MAX_ITEMS
+        ),
+        "executed": [item for item in executed if item.get("failed") or item.get("empty")],
+        "dropped": summarize_dropped(
+            getattr(record, "dropped", ()), limit=LIVE_LIST_MAX_ITEMS
+        ),
+        "response_text": _clip_live_response(getattr(record, "response_text", "")),
+        "budget_notes": "\n".join(
+            str(note) for note in (getattr(record, "budget_notes", ()) or ()) if str(note).strip()
+        )[:LIVE_RESPONSE_MAX_CHARS],
+        "correction_hint": _clip(getattr(record, "correction_hint", "")),
+    }
+
+
+def _clip_live_response(text: Any) -> str:
+    content = str(text or "")
+    if not content:
+        return ""
+    try:
+        return truncate_text(content, LIVE_RESPONSE_MAX_CHARS)[0]
+    except ValueError:  # pragma: no cover —— 同上，常量必然为正
+        return content[:LIVE_RESPONSE_MAX_CHARS]

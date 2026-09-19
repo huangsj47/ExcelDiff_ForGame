@@ -37,6 +37,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, MutableMapping, Protocol, Sequence
 
+from services.ai import trace_evidence
 from services.ai.baseline import DEFAULT_BASELINE_CHARS
 from services.ai.budget import (
     DEFAULT_MAX_ITEMS,
@@ -122,6 +123,25 @@ _MIN_ITEM_BUDGET = 4_000
 # 收尾提示词里保留多少变更清单（字符）。只要够模型认出「这次改的是哪一片」即可：
 # 收尾请求的前提就是「装不下」，所以它必须小到任何窗口都装得下。
 _SALVAGE_SUMMARY_CHARS = 1_500
+
+
+def _live_round_entry(record: RoundRecord) -> dict | None:
+    """这一轮的「思考过程」条目。**算不出来就不给**，绝不让它影响分析。
+
+    它进的是每轮都往外报的那条进度（`run_progress.publish`），而那条进度的读者是界面。
+    所以这里与 `_emit` 里那句「回调失败不作废分析」同一条纪律：为显示服务的东西坏了，
+    代价只能是**这一次没有过程可看**，不能是一次跑了几分钟的分析白跑。
+    """
+    try:
+        return trace_evidence.live_round_entry(record)
+    except Exception as exc:  # noqa: BLE001 —— 见 docstring，显示层不许弄挂分析
+        log_print(
+            f"⚠️ AI 分析：整理本轮明细失败（{type(exc).__name__}：{exc}），"
+            "本轮不进「思考过程」，分析继续。",
+            "AI",
+            force=True,
+        )
+        return None
 
 
 class _ChatClient(Protocol):
@@ -240,6 +260,12 @@ class RoundProgress:
     agent: str = ""
     agent_index: int = 0
     agent_total: int = 0
+    # 这一轮**发生了什么**：要了什么、拿到了什么、哪条取不到、模型原样返回了什么。
+    # 形状与 `ai_usage_service.run_usage()["rounds"][i]` 逐字相同（由
+    # `trace_evidence.live_round_entry` 产出），所以「思考过程」那一栏跑的时候与跑完之后
+    # 是同一个渲染器 —— 两套键名就是两种真相。
+    # 默认 `None`：不传它的调用方（老代码、测试替身）行为与这一层之前完全一样。
+    round_entry: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -565,6 +591,10 @@ def run_analysis(
                     requests_remaining=tools.requests_remaining,
                     items_chars=record.context_chars,
                     elapsed_ms=int((time.monotonic() - started_at) * 1000),
+                    # 逐轮明细（思考过程标签页）。放在**这个唯一出口**里算，5 条轮次路径
+                    # 自动全覆盖；算它不许影响分析 —— 所以整段包在 try 里，失败了就只是
+                    # 这一次没有过程可看（下面那条 except 已经在兜回调本身）。
+                    round_entry=_live_round_entry(record),
                 )
             )
         except Exception as exc:  # noqa: BLE001 —— 回调失败不作废分析，见 docstring

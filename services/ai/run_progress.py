@@ -44,6 +44,11 @@ MAX_AGE_SECONDS = 900
 # 这个上限只是防呆：万一清理路径出问题，也不该无限增长。
 MAX_ENTRIES = 200
 
+# 「思考过程」标签页一次带走多少轮。**上限由载荷决定、不由省空间决定**：整个快照每
+# 3 秒（`static/js/ai_stream_status.js` 的 POLL_INTERVAL_MS）重发一次，30 轮全带上就是
+# 每帧上百 KB，而界面本来就滚不到那么上面去。超出时如实标 `rounds_truncated`。
+MAX_LIVE_ROUNDS = 8
+
 
 @dataclass(frozen=True)
 class ProgressSnapshot:
@@ -70,6 +75,12 @@ class ProgressSnapshot:
     agent: str = ""
     agent_index: int = 0
     agent_total: int = 0
+    # 逐轮的「思考过程」：每条的形状与 `ai_usage_service.run_usage()["rounds"][i]` 相同
+    # （由 `trace_evidence.live_round_entry` 产出），**累积**最近 `MAX_LIVE_ROUNDS` 轮。
+    # 累积是必要的：界面可能在第 5 轮才打开抽屉，看不到前面几轮等于没有过程可看。
+    rounds: tuple[Any, ...] = ()
+    rounds_seen: int = 0
+    rounds_truncated: bool = False
 
     @property
     def live_tokens(self) -> int:
@@ -100,6 +111,11 @@ class ProgressSnapshot:
             "agent_total": self.agent_total,
             "live_tokens": self.live_tokens,
             "age_seconds": max(0, int(time.monotonic() - self.updated_at)),
+            # 逐轮过程（思考过程标签页）。`rounds_seen` 是**一共跑过几轮**：截断时界面要说
+            # 「只列出最近 N 轮」，没有这个数就只能沉默地少给几轮。
+            "rounds": [dict(item) for item in self.rounds],
+            "rounds_seen": self.rounds_seen,
+            "rounds_truncated": self.rounds_truncated,
         }
 
 
@@ -122,9 +138,58 @@ def _prune_locked(now: float) -> None:
             _snapshots.pop(run_id, None)
 
 
+def _merge_rounds(
+    previous: Optional[ProgressSnapshot], entry: Any, agent: str
+) -> tuple[tuple[Any, ...], int, bool]:
+    """把这一轮接在**已有的那几轮**后面。返回 `(rounds, rounds_seen, truncated)`。
+
+    ## 为什么要在锁内读上一条快照
+
+    同一个 run 的快照是**整条覆盖写**的（`_snapshots[run_id] = snapshot`），所以每一轮
+    都必须把前面几轮带上，否则界面上永远只剩最后一轮。放在锁内读是为了不与并发的另一轮
+    互相盖掉（子代理模式是顺序跑的，但同一进程里可能同时跑着别的项目）。
+
+    ## 同一轮被报两次时**替换**，不追加
+
+    引擎的 `_emit` 是每轮的唯一出口，但一次重试/重问可能让同一个 `round_index` 出现两次
+    （例如协议纠错那一轮）。按 `round_index` 去重更接近「一轮一行」的读法，也让重放同一帧
+    幂等（界面每 3 秒拿到的是同一份列表，不该越滚越长）。
+    """
+    if not isinstance(entry, dict) or not entry:
+        # 拿不到这一轮的明细（老调用方、测试替身）：保留已有的那几轮，别把它清掉。
+        if previous is None:
+            return (), 0, False
+        return previous.rounds, previous.rounds_seen, previous.rounds_truncated
+
+    item = dict(entry)
+    if agent:
+        # 引擎不知道自己在哪个分片里（标签由 subagent 在回调外层贴），而进度对象知道。
+        # 这里补一次，让实时那一份与落库那份的 `agent` 含义一致。
+        item["agent"] = str(item.get("agent") or agent)
+
+    existing = list(previous.rounds) if previous is not None else []
+    # 「一共跑过几轮」用上一条记的那个数继续累加：截断之后列表会变短，拿列表长度当总数
+    # 等于把「已经跑了 12 轮」说成「只跑了 8 轮」。
+    seen = previous.rounds_seen if previous is not None else 0
+    index = item.get("round_index")
+    if existing and index is not None and existing[-1].get("round_index") == index:
+        existing[-1] = item
+    else:
+        existing.append(item)
+        seen += 1
+    seen = max(seen, len(existing))
+    return tuple(existing[-MAX_LIVE_ROUNDS:]), seen, seen > MAX_LIVE_ROUNDS
+
+
 def publish(run_id: int, project_id: int, progress: Any) -> None:
     """把一轮的进度写进快照。**任何异常都吞掉**（见模块 docstring 第 3 条）。"""
     try:
+        agent = str(getattr(progress, "agent", "") or "")
+        with _lock:
+            previous = _snapshots.get(int(run_id))
+            rounds, rounds_seen, rounds_truncated = _merge_rounds(
+                previous, getattr(progress, "round_entry", None), agent
+            )
         snapshot = ProgressSnapshot(
             run_id=int(run_id),
             project_id=int(project_id),
@@ -144,6 +209,9 @@ def publish(run_id: int, project_id: int, progress: Any) -> None:
             agent=str(getattr(progress, "agent", "") or ""),
             agent_index=int(getattr(progress, "agent_index", 0) or 0),
             agent_total=int(getattr(progress, "agent_total", 0) or 0),
+            rounds=rounds,
+            rounds_seen=rounds_seen,
+            rounds_truncated=rounds_truncated,
             updated_at=time.monotonic(),
         )
         now = time.monotonic()
