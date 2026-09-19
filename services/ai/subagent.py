@@ -99,6 +99,27 @@ VERIFY_LABEL = "V1"
 MIN_MEMBER_TOOL_REQUESTS = 2
 MIN_MEMBER_ROUNDS = 2
 
+# 每个成员能拿到的额度 = 配置值的百分之多少（向上取整）。
+#
+# **不是「把总额平分下去」。** 用户配的是「一个分析 agent 能看多少内容」，所以每个成员的
+# 额度必须以它为基准，而不是以「总额 ÷ 成员数」为基准 —— 后者会让分片数越多、每个分片
+# 看得越少，与「多开几个分片来看得更全」正好相反（见 `plan_family` 的说明）。
+#
+# 取 70 而不是 100：满额会让「开子代理」把总索取上限直接乘上成员数，而留三成的余地足够
+# 覆盖「成员之间互相补位」那部分重复索取（同一个文件两个成员都要，命中缓存但照样计入额度）。
+MEMBER_BUDGET_PERCENT = 70
+
+
+def _percent_of(total: int, percent: int) -> int:
+    """`total` 的 `percent`%，**向上取整**。
+
+    向上取整是这里的口径：这条规则是「每个成员**至少**有设置值的 N%」，取整取小了就
+    违背了它（40 的 70% = 28 正好，25 的 70% = 17.5 取 17 就少给了）。用整数算，
+    不引 float —— 额度是要写进提示词、也要与数据库里的整数比对的量。
+    """
+    total = max(0, int(total))
+    return -(-total * int(percent) // 100)
+
 # 任务书里列「别的成员负责什么」与候选结论时的字符上限。它们都进了提示词，而提示词的
 # 每一段都要与上下文条目抢同一份额度。
 CANDIDATE_BLOCK_MAX_CHARS = 24_000
@@ -303,21 +324,36 @@ def plan_family(
     交叉核对。这一点写在这里而不是让配置界面去解释：`subagent_verify` 在
     `subagent_enabled` 关掉时不生效，界面上的说明文案也是这么写的。
 
-    ## 为什么额度取「家族常量」而不是按成员摊
+    ## 为什么额度取「家族常量」而不是按成员各算一份
 
     每个成员的额度都要写进**共享消息**（「本次分析总共可索取 N 次」），而共享消息必须在
-    所有成员之间逐字节相同。所以这里先把总额度除以 `count + 1`（n 个成员 + 1 次汇总），
-    得到一个**大家一样**的数字，再拿它去拼共享消息。副作用是「调大索取上限」会同时抬高
-    每个成员的那一份 —— 这是对的：上限本来就是整次分析的额度。对账轮不额外分一份：
-    它核对的是已经拿到的证据，用剩下的额度就够（详见 `build_verify_task`）。
+    所有成员之间逐字节相同。所以这里算出**一个大家一样的数字**，再拿它去拼共享消息。
+    对账轮不额外分一份：它核对的是已经拿到的证据，用剩下的额度就够（详见
+    `build_verify_task`）。
+
+    ## 为什么每个成员拿 `MEMBER_BUDGET_PERCENT`% 而不是「总额 ÷ 成员数」
+
+    原先取的是 `总额 // (count + 1)`（3 个分片 + 1 次汇总 = 每人 **25%**）。那等于把
+    「设置的那个额度」当成**全家共享的一锅**去分，而用户配它时的意思不是这个 —— 他填的是
+    「**一个**分析 agent 能看多少内容」，不是「四个 agent 加起来能看多少」。线上的表现
+    很直白：配置 20 次 → 每个分片 5 次，一个分片跑 3 次就报「本轮上下文额度已用尽」，
+    `references/test-scope-and-regression.md` 这类该读的文档一个都读不到，报告里只好写成
+    「因额度耗尽未读」。而**分片数越多，每个分片反而看得越少**（4 个分片时每人 20%），
+    与「多开几个分片来看得更全」的直觉正好相反。
+
+    现在每个成员拿 `MEMBER_BUDGET_PERCENT`%（默认 70%，向上取整）——「至少七成」是一条
+    **下限**，不是从总额里划走的配额。代价如实说：开启子代理后，整次分析的**总**索取次数
+    上限最高会到 `成员数 × 70% + 汇总那一份`（3 个分片 = 2.1 倍），这是这条功能本来就有的
+    量级（模型调用次数已经是 `分片数 + 1` 倍），而且**只有真的用掉才花钱**：额度是上限，
+    不是预扣。
 
     ## 但那个「下限 2」不许把「配成 0」顶回去
 
-    `MIN_MEMBER_TOOL_REQUESTS` 是给「上限调得很小」兜底的（否则分摊会把成员饿成 0 次，
-    子代理模式就白开了）。可它**不能**把配置里的 0 顶成 2：上限配 0 是一个明确的意思
-    ——「这次分析一次上下文都不给」，用户按这个意思配的，报告里也按这个意思说
-    （见 `prompt._budget_line`）。所以拿总额再夹一次：成员额度**永远不超过**配置的总额度。
-"""
+    `MIN_MEMBER_TOOL_REQUESTS` 是给「上限调得很小」兜底的（否则会把成员饿成 0 次，子代理
+    模式就白开了）。可它**不能**把配置里的 0 顶成 2：上限配 0 是一个明确的意思 ——「这次
+    分析一次上下文都不给」，用户按这个意思配的，报告里也按这个意思说（见
+    `prompt._budget_line`）。所以最后拿总额再夹一次：成员额度**永远不超过**配置的总额度。
+    """
     if mode != WEEKLY_MODE or not enabled:
         return None
     size = int(count or 0)
@@ -325,11 +361,16 @@ def plan_family(
         return None
     size = min(size, MAX_SUBAGENTS)
 
+    total_requests = int(limits.max_tool_requests)
+    total_rounds = int(limits.max_rounds)
     member_requests = min(
-        int(limits.max_tool_requests),
-        max(MIN_MEMBER_TOOL_REQUESTS, int(limits.max_tool_requests) // (size + 1)),
+        total_requests,
+        max(MIN_MEMBER_TOOL_REQUESTS, _percent_of(total_requests, MEMBER_BUDGET_PERCENT)),
     )
-    member_rounds = max(MIN_MEMBER_ROUNDS, int(limits.max_rounds) // 2)
+    member_rounds = min(
+        total_rounds,
+        max(MIN_MEMBER_ROUNDS, _percent_of(total_rounds, MEMBER_BUDGET_PERCENT)),
+    )
     family_limits = replace(
         limits, max_rounds=member_rounds, max_tool_requests=member_requests
     )

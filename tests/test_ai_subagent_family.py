@@ -510,6 +510,86 @@ class TestDepthIsOne:
         assert len(_plan(99).members) <= 6
 
 
+class TestEachMemberKeepsMostOfTheConfiguredBudget:
+    """**「设置的额度」是一个 agent 的额度，不是全家共享的一锅。**
+
+    原先每个成员拿 `总额 // (成员数 + 1)`：20 次配 3 个分片 = 每人 5 次，而线上表现就是
+    一个分片跑 3 次报「本轮上下文额度已用尽」、`references/test-scope-and-regression.md`
+    读不到，报告里写成「因额度耗尽未读」。更别扭的是**分片数越多，每个分片反而看得越少**。
+
+    现在每个成员拿配置值的 `MEMBER_BUDGET_PERCENT`%（默认 70%，向上取整）——「至少七成」
+    是一条**下限**，与成员数无关。
+    """
+
+    def _limits(self, requests: int, rounds: int = 8):
+        from services.ai.engine import EngineLimits
+
+        return EngineLimits(max_rounds=rounds, max_tool_requests=requests)
+
+    def _plan_with(self, requests: int, size: int, rounds: int = 8):
+        plan = plan_family(
+            mode="weekly", enabled=True, count=size, limits=self._limits(requests, rounds)
+        )
+        assert plan is not None
+        return plan
+
+    @pytest.mark.parametrize("size", [2, 3, 4, 6])
+    def test_every_member_gets_at_least_seventy_percent_regardless_of_the_size(self, size):
+        plan = self._plan_with(40, size)
+        assert plan.limits.max_tool_requests >= 28, (
+            f"{size} 个分片时每个成员只拿到 {plan.limits.max_tool_requests} 次 —— "
+            "少于配置值 40 的 70%"
+        )
+
+    def test_the_allowance_does_not_shrink_as_members_are_added(self):
+        """**这条就是原规则的病**：分片越多，每个分片看得越少。"""
+        small = self._plan_with(40, 2).limits.max_tool_requests
+        large = self._plan_with(40, 6).limits.max_tool_requests
+        assert large == small, (
+            f"2 个分片时每人 {small} 次、6 个分片时每人 {large} 次 —— 加人反而看得更少"
+        )
+
+    def test_it_rounds_up_so_the_floor_is_never_broken(self):
+        """25 的 70% 是 17.5：取 17 就低于「至少七成」了，所以向上取整。"""
+        assert self._plan_with(25, 3).limits.max_tool_requests == 18
+
+    def test_a_tiny_allowance_is_never_rounded_down_to_zero(self):
+        """配 1 次就还是 1 次：向上取整保证「七成」不会把小额度抹成 0。
+
+        （`MIN_MEMBER_TOOL_REQUESTS` 那道兜底在 70% 这条规则下几乎不会触发 —— 它留着是
+        给「以后把百分比调小」用的，不是这里的判据。）
+        """
+        assert self._plan_with(1, 3).limits.max_tool_requests == 1
+
+    def test_the_round_budget_gets_the_same_floor(self):
+        """轮次也是「设置的额度」，不能一边给七成才够的索取、一边把轮次砍成一半。"""
+        plan = self._plan_with(40, 3, rounds=10)
+        assert plan.limits.max_rounds == 7, plan.limits.max_rounds
+
+    def test_a_configured_zero_is_never_pushed_back_up(self):
+        """上限配 0 是一个明确的意思：这次分析一次上下文都不给。
+
+        `MIN_MEMBER_TOOL_REQUESTS` 不许把它顶成 2 —— 报告里会按「配置就是 0」说
+        （见 `prompt._budget_line`），顶上去会让那句话变成假话。
+        """
+        assert self._plan_with(0, 3).limits.max_tool_requests == 0
+
+    def test_a_member_never_exceeds_the_configured_total(self):
+        for requests in (0, 1, 2, 5, 40, 100):
+            for size in (2, 3, 6):
+                got = self._plan_with(requests, size).limits.max_tool_requests
+                assert 0 <= got <= requests, (requests, size, got)
+
+    def test_the_percent_helper_rounds_up_and_never_goes_negative(self):
+        from services.ai.subagent import _percent_of
+
+        assert _percent_of(40, 70) == 28
+        assert _percent_of(25, 70) == 18  # 17.5 → 18
+        assert _percent_of(1, 70) == 1
+        assert _percent_of(0, 70) == 0
+        assert _percent_of(-5, 70) == 0
+
+
 class TestTheOutcomeBlocks:
     def test_every_step_gets_a_row_even_when_it_did_not_run(self):
         plan = _plan(2)

@@ -144,10 +144,11 @@ class TestTheSharedPrefixIsByteIdentical:
         assert _sent(single.calls[0][:2]) == _sent(family.calls[0][:2])
 
     def test_the_quota_number_is_a_family_constant(self):
-        """额度那一句在共享消息里，所以分摊后每个成员看到的数字必须一样。
+        """额度那一句在共享消息里，所以每个成员看到的数字必须一样。
 
-        它同时也是「自己该花多少」的唯一依据 —— 分摊后的数字比整次分析的额度小，
-        所以成员不会以为自己能花掉全部额度。
+        它同时也是「自己该花多少」的唯一依据 —— 额度是按 `MEMBER_BUDGET_PERCENT`% 从
+        配置值算出来的家族常量（与成员数无关，见 `subagent.plan_family`），所以成员
+        不该自己去猜一份。
         """
         plan = _plan(3)
         call = QueueClient(_final())

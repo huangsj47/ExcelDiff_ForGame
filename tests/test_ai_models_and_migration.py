@@ -713,32 +713,44 @@ def test_the_context_item_cap_never_wastes_a_paid_request():
 def test_the_default_budget_gives_each_shard_a_workable_allowance():
     """**分片拿到几次是「算」出来的，所以默认值必须按分片之后再验一遍。**
 
-    `max_tool_requests` 是**整次分析的总数**，而子代理模式下它会被 `subagent.plan_family`
-    按 `max(2, 总数 ÷ (分片数 + 1))` 分给每个成员。于是「默认 20 次」在默认的 3 个分片下
-    等于**每片 5 次** —— 线上真实的一次周版本分析里，一个分片跑完 3 次就报「本轮上下文
-    额度已用尽」，取不到导出配置与消费侧代码，`config_id` 那一整个维度只能写成信息缺口。
+    子代理模式下每个成员的额度由 `subagent.plan_family` 从配置值算出来
+    （`配置值 × MEMBER_BUDGET_PERCENT%`，向上取整、且不超过配置值），而**默认配置**下
+    算出来的那个数才是用户真正会遇到的东西。
 
-    这不是「配置填错了」，是**两个默认值乘出来的结果**：改上限、改分片数、改分摊公式，
-    三处任何一处动了都会让它变小，而三处分别在三个文件里。所以这里把「默认配置下每个
-    分片够不够用」算出来直接断言 —— 它挡的是下一次「只调了一个数」的改动。
+    这不是「配置填错了」，是**几个默认值乘出来的结果**：改上限、改分片数、改那个百分比，
+    三处任何一处动了都会让它变小，而三处分别在三个文件里。所以这里把默认配置交给
+    `plan_family` 真算一遍再断言 —— 它挡的是下一次「只调了一个数」的改动。
 
-    10 这个下限来自那次线上数据：一个分片要覆盖它那几组维度（含跨模块引用），
-    3~5 次会在跑到第二个维度时就断粮。
+    10 这个下限来自线上数据：一个分片要覆盖它那几组维度（含跨模块引用），3~5 次会在
+    跑到第二个维度时就断粮，报告里只能写「本轮上下文额度已用尽」。
     """
     from models.ai_analysis.project_config import (
+        DEFAULT_MAX_ANALYSIS_ROUNDS,
         DEFAULT_MAX_TOOL_REQUESTS,
         DEFAULT_SUBAGENT_COUNT,
         DEFAULT_SUBAGENT_ENABLED,
     )
+    from services.ai.engine import EngineLimits
+    from services.ai.subagent import plan_family
 
     assert DEFAULT_SUBAGENT_ENABLED, (
         "前提：默认开着子代理。关掉的话下面这条断言就没有意义了（每人拿到全部额度），"
         "那种情况下这条用例该跟着一起改，而不是继续在这里空转"
     )
-    per_shard = DEFAULT_MAX_TOOL_REQUESTS // (DEFAULT_SUBAGENT_COUNT + 1)
+    plan = plan_family(
+        mode="weekly",
+        enabled=True,
+        count=DEFAULT_SUBAGENT_COUNT,
+        limits=EngineLimits(
+            max_rounds=DEFAULT_MAX_ANALYSIS_ROUNDS,
+            max_tool_requests=DEFAULT_MAX_TOOL_REQUESTS,
+        ),
+    )
+    assert plan is not None, "前提：默认配置要真的会开子代理"
+    per_shard = plan.limits.max_tool_requests
     assert per_shard >= 10, (
         f"默认配置下每个分片只有 {per_shard} 次上下文索取（总上限 {DEFAULT_MAX_TOOL_REQUESTS}"
-        f" ÷ ({DEFAULT_SUBAGENT_COUNT} + 1)）—— 线上 3 次就会在报告里写「本轮上下文额度"
+        f"、{DEFAULT_SUBAGENT_COUNT} 个分片）—— 线上 3 次就会在报告里写「本轮上下文额度"
         "已用尽」，那一整个维度只能写成信息缺口。调大上限或调小分片数，两处一起看"
     )
 

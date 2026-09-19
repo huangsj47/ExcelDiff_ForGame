@@ -22,8 +22,10 @@ from services.ai.skill_contract import DIMENSION_IDS
 from services.ai.subagent import (
     GROUPINGS,
     MAX_SUBAGENTS,
+    MEMBER_BUDGET_PERCENT,
     ROLE_SYNTHESIS,
     MemberOutcome,
+    _percent_of,
     build_member_task,
     build_synthesis_task,
     group_dimensions,
@@ -102,11 +104,22 @@ class TestTheLimitsAreFamilyConstants:
     def test_every_member_shares_one_number(self):
         plan = _plan(3)
 
-        # `plan.limits` 是**所有**成员（含汇总）用的那一份；这里断言它确实比整次分析的
-        # 额度小（否则 n 个成员会把额度花成 n 倍），且不小于一个成员该有的下限。
-        assert plan.limits.max_tool_requests < LIMITS.max_tool_requests
-        assert plan.limits.max_tool_requests == LIMITS.max_tool_requests // 4
-        assert plan.limits.max_rounds == LIMITS.max_rounds // 2
+        # `plan.limits` 是**所有**成员（含汇总）用的那一份，所以它必须是**算出来的常量**、
+        # 与成员数无关：每个成员拿配置值的 `MEMBER_BUDGET_PERCENT`%（默认 70%，向上取整）。
+        assert plan.limits.max_tool_requests == _percent_of(20, MEMBER_BUDGET_PERCENT)
+        assert plan.limits.max_rounds == _percent_of(8, MEMBER_BUDGET_PERCENT)
+
+    def test_the_allowance_does_not_depend_on_the_member_count(self):
+        """**「设置的额度」是一个 agent 的额度，不是全家共享的一锅。**
+
+        原先按 `总额 ÷ (成员数 + 1)` 摊，于是分片开得越多、每个分片看得越少 ——
+        与「多开几个分片来看得更全」正好相反。
+        """
+        allowances = {
+            count: _plan(count).limits.max_tool_requests for count in (2, 3, 4, 6)
+        }
+        assert len(set(allowances.values())) == 1, allowances
+        assert set(allowances.values()) == {_percent_of(20, MEMBER_BUDGET_PERCENT)}
 
     def test_a_tiny_quota_still_gives_each_member_something(self):
         plan = plan_family(
@@ -115,8 +128,8 @@ class TestTheLimitsAreFamilyConstants:
         )
 
         assert plan is not None
-        assert plan.limits.max_tool_requests >= 2, "分摊后不能变成 0 次索取"
-        assert plan.limits.max_rounds >= 2
+        assert plan.limits.max_tool_requests >= 1, "不能变成 0 次索取"
+        assert plan.limits.max_rounds >= 1
 
     def test_the_floor_never_overrides_an_explicit_zero(self):
         """上限配成 0 = 「这次一次上下文都不给」，那个「下限 2」不许把它顶回去。
@@ -134,7 +147,7 @@ class TestTheLimitsAreFamilyConstants:
         assert plan.limits.max_tool_requests == 0
 
     def test_a_member_never_gets_more_than_the_whole_run(self):
-        """成员额度是「总额度 ÷ (n+1)」，再小的总额也只是**不变**，不许被抬高。"""
+        """成员额度以配置值为基准，但**永远不超过**它（再小的配置也只是「不变」）。"""
         plan = plan_family(
             mode="weekly", enabled=True, count=6,
             limits=EngineLimits(max_rounds=8, max_tool_requests=1),
