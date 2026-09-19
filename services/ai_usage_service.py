@@ -51,6 +51,7 @@ from services.ai.analysis_budget import (
 )
 from services.ai.platform_budget import platform_budget_public
 from services.ai.pricing import money
+from services.ai.trace_evidence import decode_evidence
 from services.ai.usage import aggregate_runs, usage_from_run
 from services.ai.usage_statistics import (
     count_runs_before,
@@ -905,6 +906,8 @@ def run_usage(run_id: int) -> Optional[dict[str, Any]]:
             "rules_version": run.rules_version or "",
         },
         # 逐轮：为什么后几轮更贵（提示词每轮重发上一轮的上下文），只有逐轮列出来才看得出。
+        # `evidence` 那一块回答的是另一个问题：**这一轮到底看没看到东西** —— 计数分不出
+        # 「取数失败」与「真的读了一份 diff」（见 `services/ai/trace_evidence.py`）。
         "rounds": [
             {
                 "round_index": row.round_index,
@@ -918,6 +921,7 @@ def run_usage(run_id: int) -> Optional[dict[str, Any]]:
                 "context_chars": row.context_chars,
                 "duration_ms": row.duration_ms,
                 "error": row.error or "",
+                **decode_evidence(row),
             }
             for row in rounds
         ],

@@ -44,8 +44,10 @@ from app import app as flask_app  # noqa: E402
 from app import create_tables  # noqa: E402
 from auth.services import register_user  # noqa: E402
 from models import AiAnalysisRun, Project, db  # noqa: E402
-from models.ai_analysis import AiProjectAnalysisConfig  # noqa: E402
+from models.ai_analysis import AiAnalysisTrace, AiProjectAnalysisConfig  # noqa: E402
 from services.ai.platform_budget import set_platform_budget  # noqa: E402
+from services.ai.trace_evidence import encode_evidence  # noqa: E402
+from services.ai.usage import encode_tools  # noqa: E402
 from services.ai.usage_statistics import set_usage_baseline, usage_baseline  # noqa: E402
 
 PASSWORD = "pw-123456"
@@ -60,6 +62,16 @@ PROJECTS = (
 )
 
 MODEL = "claude-sonnet-5"
+
+# 按工具类型的取数账（单次运行弹层里那一块要用真数据渲染，含「失败」那一列）。
+TOOL_STATS = {
+    "file_diff": {"calls": 6, "executions": 6, "cache_hits": 1, "failed": 2,
+                  "refused_by_budget": 1, "truncated": 0,
+                  "source_chars": 41_200, "produced_chars": 38_600},
+    "file_content": {"calls": 3, "executions": 3, "cache_hits": 0, "failed": 1,
+                     "refused_by_budget": 0, "truncated": 1,
+                     "source_chars": 33_000, "produced_chars": 11_000},
+}
 
 PRICE_TABLE = json.dumps({
     "version": "2026-09-01",
@@ -107,7 +119,7 @@ def _seed() -> dict:
                 # 每 3 条里留一条「缓存未上报」（cache_read = None）——
                 # 那与「命中 0」是两句话，界面上必须能分辨（本页最要紧的一条口径）。
                 cache_read = None if index % 3 == 2 else 12_000 + index * 3_100
-                db.session.add(AiAnalysisRun(
+                run = AiAnalysisRun(
                     project_id=project.id,
                     target_type="commit",
                     target_id=1000 + index,
@@ -129,7 +141,27 @@ def _seed() -> dict:
                     created_at=created,
                     started_at=created,
                     finished_at=created + timedelta(seconds=45),
-                ))
+                    tool_stats_json=encode_tools(TOOL_STATS),
+                )
+                db.session.add(run)
+        db.session.commit()
+
+        # 逐轮明细（含「取不到」的那一条）挂在**逐次运行列表的第一行**那一笔上：
+        # 弹层是从那一行点开的，挂在别的运行上等于截不到（第一版就是按「第一条创建的
+        # 运行」挂的，而列表按时间倒序，于是点出来的那一笔根本没有逐轮记录）。
+        newest = AiAnalysisRun.query.order_by(AiAnalysisRun.created_at.desc()).first()
+        assert newest is not None, "一笔运行都没造出来"
+        for record in _round_records():
+            db.session.add(AiAnalysisTrace(
+                run_id=newest.id, round_index=record.index, outcome=record.status,
+                parsed_ok=record.status != "unparsable",
+                tokens_input=record.prompt_tokens,
+                tokens_output=record.completion_tokens,
+                request_chars=record.prompt_chars,
+                context_chars=record.context_chars,
+                duration_ms=record.duration_ms,
+                **encode_evidence(record),
+            ))
         db.session.commit()
 
         # 平台档：故意配成一个**已经超了**的小额度，好让顶部横幅与卡片内提示都出现
@@ -147,7 +179,46 @@ def _seed() -> dict:
         baseline = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=20)
         ok, message, _errors = set_usage_baseline(baseline, updated_by=admin_name)
         assert ok, message
+        ids["_first_run"] = newest.id
     return ids
+
+
+def _round_records() -> list:
+    """造几条有代表性的逐轮记录（含一条**取不到**、一条老行）。走的是生产同一套编码。"""
+    from services.ai.budget import ContextItem
+    from services.ai.engine import RoundRecord
+    from services.ai.protocol import ContextRequest, DroppedItem
+
+    return [
+        RoundRecord(
+            index=1, status="requests", request_count=2, item_count=2,
+            requests=(
+                ContextRequest("file_diff", "a1b2c3d4" * 5, "code/qz_pub/battle/BattleMgr.lua"),
+                ContextRequest("file_content", "a1b2c3d4" * 5, "code/qz_pub/battle/BattleMgr.lua",
+                               lines="1180-1260"),
+            ),
+            executed=(
+                ContextItem("file_diff", "file_diff code/qz_pub/battle/BattleMgr.lua",
+                            "代码差异：code/qz_pub/battle/BattleMgr.lua\n@@ -118,7 +118,9 @@\n+    if target.invincible then\n"),
+                ContextItem("file_content", "file_content code/qz_pub/item/ItemMgr.lua",
+                            "[取数失败] code/qz_pub/item/ItemMgr.lua：项目没有绑定 Agent 节点，"
+                            "platform/agent 模式下平台本地也没有这个仓库的工作副本，读不到文件正文。"
+                            "**这不等于「没有内容」，也不等于「没有改动」**。"),
+            ),
+            dropped=(DroppedItem("request", 2, "超出本次工具请求总预算（20 次），未执行",
+                                 "file_diff code/qz_pub/shop/ShopMgr.lua"),),
+            budget_notes=("有 1 个上下文请求因超出本次索取额度而未执行。",),
+            response_text='{"status": "need_more_context", "reason": "先看战斗逻辑与道具表"}',
+            prompt_tokens=180_000, completion_tokens=9_400,
+            prompt_chars=210_000, context_chars=25_000, duration_ms=18_400,
+        ),
+        RoundRecord(
+            index=2, status="final",
+            response_text="# 变更理解\n\n改了战斗无敌帧的判定顺序。\n\n# 影响面分析\n\n只影响战斗系统。\n",
+            prompt_tokens=205_000, completion_tokens=12_800,
+            prompt_chars=232_000, context_chars=25_000, duration_ms=21_300,
+        ),
+    ]
 
 
 def _csrf(client) -> str:
@@ -182,6 +253,10 @@ def _capture(ids: dict) -> tuple:
             client.get(f"/ai-analysis/projects/{drill_id}/budget").get_json(),
         "/ai-analysis/projects/%d/config" % drill_id:
             client.get(f"/ai-analysis/projects/{drill_id}/config").get_json(),
+        # 单次运行弹层（含逐轮明细）：**这一份也要走真路由**，否则「取不到」那一行
+        # 是我手写进响应里的，页面上显示得再对也不说明后端给的就是它。
+        "/ai-analysis/runs/%d/usage" % ids["_first_run"]:
+            client.get(f"/ai-analysis/runs/{ids['_first_run']}/usage").get_json(),
     }
 
     # 「统计范围：全部历史」那一支也要有一份真响应：口径那一行有两句话，两句都得看过。
@@ -405,6 +480,28 @@ def _shot(out_prefix: str) -> int:
             page.wait_for_timeout(400)
         except Exception as exc:  # noqa: BLE001
             print(f"（重置弹层没截到：{exc}）")
+
+        # 单次运行弹层 + 逐轮明细：这一块是 2026-09-19 新加的，而「取不到的那一条在
+        # 界面上分不分得出来」只有真渲染才看得见（它红不红、原因有没有显示出来）。
+        try:
+            page.click("#aiuRunRows .aiu-btn.secondary", timeout=4000)
+            page.wait_for_timeout(700)
+            page.screenshot(path=str(out_dir / f"{out_prefix}_run_modal.png"))
+            shots.append(out_dir / f"{out_prefix}_run_modal.png")
+            # 逐轮表最后一列的「明细」按钮：点第一轮，展开它下面的证据块。
+            page.click("#aiuRunModalBody .aiu-round-actions .aiu-btn", timeout=4000)
+            page.wait_for_timeout(500)
+            page.screenshot(path=str(out_dir / f"{out_prefix}_round_detail.png"), full_page=False)
+            shots.append(out_dir / f"{out_prefix}_round_detail.png")
+            print("逐轮明细里「取不到」的行数："
+                  + str(page.locator("#aiuRunModalBody .aiu-round-failed").count()))
+            print("工具表的失败列合计："
+                  + page.inner_text("#aiuRunModalBody .aiu-table tbody tr:last-child"))
+            _measure(page, "run-modal")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
+        except Exception as exc:  # noqa: BLE001 —— 截图工具，点不开就算了
+            print(f"（单次运行弹层没截到：{exc}）")
 
         # 「统计范围：全部历史」那一支：换一份真响应重载一次页面。
         responses["/ai-analysis/usage/overview"] = all_history

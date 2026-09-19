@@ -162,6 +162,23 @@ class RoundRecord:
     prompt_chars: int = 0
     context_chars: int = 0
     duration_ms: int = 0
+    # 下面是「证据」——回答「它为什么没读到 X」必需的东西。原先 trace 只记计数，
+    # 而「模型没要」「取数失败」「被预算拒了」三件事在计数上长得一模一样（见
+    # `services/ai/trace_evidence.py` 的模块文档）。
+    #
+    # 这一轮模型**原样返回的内容**（落库时按 `TRACE_RESPONSE_MAX_CHARS` 截断）：
+    # 协议解释不了它、结论写得浅、只报了一条，都要靠它。
+    response_text: str = ""
+    # 索取的 / 取到的 / 被丢掉的，各自一条摘要（由 `trace_evidence` 编码成 JSON）。
+    requests: tuple = ()
+    executed: tuple = ()
+    dropped: tuple = ()
+    # 预算层给出的说明（压了几级、省了多少、哪几条取数失败）——与 `note`（引擎自己写的
+    # 那些「上游拒了、改用收尾提示词」）分开记，两者的读者不是同一批：前者是模型看的，
+    # 后者是复核的人看的。
+    budget_notes: tuple = ()
+    # 协议不合规时给模型的纠正提示：那一轮为什么被重问。
+    correction_hint: str = ""
 
 
 @dataclass(frozen=True)
@@ -557,6 +574,12 @@ def run_analysis(
         except Exception as exc:  # noqa: BLE001 —— 网络/鉴权/超时都归为「这次没跑成」
             error_text = f"{type(exc).__name__}: {exc}"
             if not looks_like_context_overflow(error_text):
+                # 这一轮**没跑成**也要留一行：不留的话，trace 里最后一行是上一轮，
+                # 「这次分析为什么失败」在面板上看起来就是「跑了两轮、什么都没说」。
+                _emit(RoundRecord(
+                    round_index, "transport_error",
+                    note=f"调用模型失败（{type(exc).__name__}）：{exc}"[:400],
+                ))
                 return EngineOutcome(
                     status=STATUS_FAILED,
                     rounds=tuple(rounds),
@@ -600,6 +623,15 @@ def run_analysis(
             try:
                 result = client.complete([*messages, entry], temperature=limits.temperature)
             except Exception as final_exc:  # noqa: BLE001
+                # 同上面那条：这一轮连着两次都没发出去，也要留痕（`transport_error`），
+                # 否则「上游到底拒了什么」在 trace 上无从查起。
+                _emit(RoundRecord(
+                    round_index, "transport_error",
+                    note=(
+                        f"上游以「上下文超长」拒绝（{error_text[:200]}），收尾请求也被拒绝"
+                        f"（{type(final_exc).__name__}: {final_exc}）"
+                    )[:400],
+                ))
                 return EngineOutcome(
                     status=STATUS_FAILED,
                     rounds=tuple(rounds),
@@ -642,6 +674,9 @@ def run_analysis(
             "prompt_chars": len(user_message),
             "context_chars": round_context_chars,
             "duration_ms": int((time.monotonic() - round_started) * 1000),
+            # 模型这一轮的原文也挂在**每一个**构造点上（同一条 splat 的理由）：解析失败
+            # 的那几轮恰恰是最需要原文的（它到底返回了什么，才没被认成 JSON）。
+            "response_text": text,
         }
         messages.append(entry)
         messages.append({"role": "assistant", "content": text})
@@ -672,6 +707,9 @@ def run_analysis(
             correction_hint = build_correction_hint(exc)
             _emit(RoundRecord(
                 round_index, "unparsable",
+                # 那一轮为什么被重问：`note` 里是协议错误本身（给人看），
+                # `correction_hint` 是随后发给模型的那段纠正提示（原样记下来）。
+                correction_hint=correction_hint,
                 note=_combine_notes(round_notes, str(exc)[:200]), **round_extra,
             ))
             pending_items = ()
@@ -694,6 +732,7 @@ def run_analysis(
 
         # `sanitize_requests` 同时返回「通过白名单的」与「被丢掉的及原因」——两样都要：
         # 前者去执行，后者进 trace（否则「为什么这次少看了一个文件」无从追溯）。
+        dropped_before = len(dropped)
         requests, request_dropped = sanitize_requests(parsed.requests, scope)
         dropped.extend(parsed.dropped)
         dropped.extend(request_dropped)
@@ -713,6 +752,13 @@ def run_analysis(
                 item_count=len(batch.items),
                 refused_by_budget=batch.refused_by_budget,
                 truncated=batch.truncated,
+                # 这一轮的三份明细（要了什么、拿到的是内容还是「取不到」、丢了什么及原因）。
+                # `dropped` 是跨轮累计的，所以按本轮的起点切片 —— 记成全部的话，第 8 轮会
+                # 把第 1 轮丢的东西也列一遍，读的人以为这一轮丢了 20 条。
+                requests=tuple(requests),
+                executed=tuple(batch.items),
+                dropped=tuple(dropped[dropped_before:]),
+                budget_notes=tuple(budget_notes),
                 note=_combine_notes(round_notes),
                 **round_extra,
             )

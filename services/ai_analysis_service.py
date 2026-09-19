@@ -88,6 +88,7 @@ from services.ai.rules import RuleThresholds, rules_version
 from services.ai.run_progress import clear as clear_run_progress
 from services.ai.run_progress import publish as publish_run_progress
 from services.ai.skill_loader import load_skills, skill_revision
+from services.ai.trace_evidence import encode_evidence
 from services.ai.usage import encode_tools
 from utils.dpapi_utils import DPAPI_PREFIX, decrypt_dpapi
 from utils.logger import log_print
@@ -1197,11 +1198,10 @@ def _persist_outcome(
                 round_index=record.index,
                 outcome=record.status,
                 parsed_ok=record.status != "unparsable",
-                requests_json=_json_dumps({"count": record.request_count}),
-                executed_json=_json_dumps({"items": record.item_count}),
-                dropped_json=_json_dumps(
-                    {"refused_by_budget": record.refused_by_budget, "truncated": record.truncated}
-                ),
+                # 这一轮要了什么、拿到了什么、丢了什么、模型原样返回了什么 —— 编码只在
+                # `trace_evidence` 一处（写库侧与读库侧共用），这里不拼 JSON：
+                # 原先只写计数，于是「取数失败」与「真的读了一份 diff」在面板上长得一样。
+                **encode_evidence(record),
                 error=record.note or None,
                 # 逐轮用量。这几列同样一直是 NULL：没有它们，「钱花在第几轮」答不上来，
                 # 而提示词每轮都把上一轮的上下文重发一遍，后几轮才是贵的那些。

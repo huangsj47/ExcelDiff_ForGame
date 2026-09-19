@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""一轮的「证据」：模型说了什么、要了什么、拿到的是内容还是**一句取不到**。
+
+## 为什么要有这一层（2026-09-19）
+
+一次周版本分析的报告里写着「未读到任何代码 diff」，而面板上那一轮看起来**一切正常**：
+`ai_analysis_trace` 只记了计数（索取 6 次、执行 6 条、丢弃 0 条），取数回来的正文一个字
+都没落库。于是「这次为什么没读到」只能靠猜 —— 是模型没要？是取数失败了？是被预算拒了？
+三种可能在三列计数上长得一模一样。
+
+更要紧的是：**工具「成功返回」与「取到了内容」不是一回事**。取不到时 provider 给的是一句
+完整的话（`[取数失败] xxx：平台读不到…**这不等于「没有改动」**`），它看着像内容、字数也不
+为 0，所以在「条数 + 字符数」的口径下，一次失败的索取与一次真的读了一份 diff **完全无法
+区分**。这一层把那个区分显式记下来（`failed` / `reason`）。
+
+## 为什么是纯函数 + 鸭子类型
+
+输入只有引擎的 `RoundRecord` 与协议里的那几个 dataclass，输出是 JSON。不碰数据库、不碰
+Flask，也不 import `protocol` / `budget`（只按属性名读）—— 这样它可以被完整单测，而
+「写库侧」与「读库侧」共用同一份编码/解码，不会一边改了字段名一边没改。
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any, Iterable, Optional, Sequence
+
+from services.ai.budget import truncate_text
+from utils.logger import log_print
+
+# 单轮模型原文的入库上限。**不是省空间，是省得看不出重点**：一轮的原文通常只有几百字
+# （一个 JSON），但结论那一轮可能是一整份报告（几万字）—— 面板上展开几十份报告没有意义，
+# 报告正文本来就在 `ai_analysis_run.response_text` 里。
+TRACE_RESPONSE_MAX_CHARS = 4000
+# 每条明细里那个自由文本字段（丢弃原因等）的上限。
+TRACE_DETAIL_MAX_CHARS = 300
+# 每轮最多记多少条明细。索取一次最多几十条，正常分析远低于这个数。
+TRACE_LIST_MAX_ITEMS = 40
+
+# provider **取不到**时给出的那几句话的开头（`services/ai/platform_provider.py` 与
+# `services/ai/context_tools.py` 是仅有的两个发出方）。它们长得像内容，所以只能按开头认。
+#
+# 这不是「猜文案」：这几句就是那一层对外的失败契约（`ContextProvider` 返回 `None` 与
+# 返回一句话的区别）。改文案就要改这里 —— `tests/test_ai_trace_evidence.py` 会拿
+# provider 的真输出喂进来，并扫这两个模块的源码，改漏了会红。
+#
+# 同一批括号里还有几条**不是**失败说明，别顺手加进来：`[配表]`（该表已被删除，
+# 是一份真结论）、`[文本]`/`[代码]`/`[图片]`/`[分段差异]`（正常内容的抬头）。
+FAILURE_NOTICE_PREFIXES = (
+    "[取数失败]",
+    "[读不到差异]",
+    "[读不到正文]",
+    "[配表差异解析失败]",
+    "[无法展示的内容]",
+    "[无法展示的改动]",
+)
+
+
+def failure_notice(text: Any) -> str:
+    """这段内容是不是「取不到」的说明（是则返回那句话，否则空串）。
+
+    返回**整句**而不是布尔：报告与面板要的是「为什么取不到」，而原因就在这句话里
+    （平台读不到 / 已向 Agent 索取但超时 / 项目没绑 Agent 节点）。
+    """
+    content = str(text or "").lstrip()
+    for prefix in FAILURE_NOTICE_PREFIXES:
+        if content.startswith(prefix):
+            return content.splitlines()[0][:TRACE_DETAIL_MAX_CHARS]
+    return ""
+
+
+def _clip(value: Any, limit: int = TRACE_DETAIL_MAX_CHARS) -> str:
+    return str(value or "")[:limit]
+
+
+def _head(items: Any) -> list:
+    if not isinstance(items, (list, tuple)):
+        return []
+    return list(items)[:TRACE_LIST_MAX_ITEMS]
+
+
+def summarize_requests(requests: Any) -> list[dict]:
+    """模型这一轮点名要了什么（它自己写的请求，越权的那些不在这里 —— 那些在 dropped）。"""
+    out = []
+    for request in _head(requests):
+        describe = getattr(request, "describe", None)
+        out.append({
+            "type": _clip(getattr(request, "type", ""), 40),
+            "commit": _clip(getattr(request, "commit", ""), 64),
+            "path": _clip(getattr(request, "path", "")),
+            "name": _clip(getattr(request, "name", "")),
+            "lines": _clip(getattr(request, "lines", ""), 40),
+            # 人读的那一行（面板直接显示它）。`describe()` 是协议自带的写法，不在这里另写一套。
+            "text": _clip(describe() if callable(describe) else "", 200),
+        })
+    return out
+
+
+def summarize_executed(items: Any) -> list[dict]:
+    """这一轮**真正进了提示词**的东西：多少字、是不是一句失败说明。
+
+    `failed` 与 `empty` 必须分开：前者是「取不到」（有原因可说），后者是工具明确回了一句
+    「确实没有内容」。把两者合并，等于把「没有证据」写成「这里没问题」—— 那正是本模块
+    这一段要防的事。
+    """
+    out = []
+    for item in _head(items):
+        meta = dict(getattr(item, "meta", None) or {})
+        text = str(getattr(item, "text", "") or "")
+        notice = failure_notice(text)
+        out.append({
+            "kind": _clip(getattr(item, "kind", ""), 40),
+            "label": _clip(getattr(item, "label", ""), 200),
+            "chars": len(text),
+            "failed": bool(notice or meta.get("tool_failed")),
+            "empty": bool(meta.get("tool_empty")),
+            "reason": notice or _clip(meta.get("reason", "")),
+            "truncated": bool(meta.get("truncated")),
+        })
+    return out
+
+
+def summarize_dropped(dropped: Any) -> list[dict]:
+    """这一轮被丢掉的东西**与原因**（越权、超预算、取数异常…）。
+
+    只记条数的话，「这次少看了一个文件」永远查不出是哪一步丢的。
+    """
+    out = []
+    for item in _head(dropped):
+        out.append({
+            "kind": _clip(getattr(item, "kind", ""), 40),
+            "reason": _clip(getattr(item, "reason", "")),
+            "detail": _clip(getattr(item, "detail", "")),
+        })
+    return out
+
+
+def _dump(payload: dict) -> Optional[str]:
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return text if text != "{}" else None
+
+
+def encode_evidence(record: Any) -> dict:
+    """一轮的记账 → `AiAnalysisTrace` 的那几列（**写库侧唯一入口**）。
+
+    三个 `*_json` 里**既保留原来的计数、也带上明细**：计数是既有的读法（面板上的
+    「索取 N 次」），明细是新加的。少一个，某一侧的读法就会看到 0。
+
+    这一层存在的直接理由见本模块文档：计数分不出「读到了」与「取不到」。
+    """
+    return {
+        "requests_json": _dump({
+            "count": int(getattr(record, "request_count", 0) or 0),
+            "items": summarize_requests(getattr(record, "requests", ())),
+        }),
+        "executed_json": _dump({
+            "items": int(getattr(record, "item_count", 0) or 0),
+            "details": summarize_executed(getattr(record, "executed", ())),
+        }),
+        "dropped_json": _dump({
+            "refused_by_budget": int(getattr(record, "refused_by_budget", 0) or 0),
+            "truncated": int(getattr(record, "truncated", 0) or 0),
+            "details": summarize_dropped(getattr(record, "dropped", ())),
+        }),
+        "response_text": _clip_response(getattr(record, "response_text", "")),
+        "budget_notes": "\n".join(
+            str(note) for note in (getattr(record, "budget_notes", ()) or ()) if str(note).strip()
+        ) or None,
+        "correction_hint": _clip(getattr(record, "correction_hint", "")) or None,
+    }
+
+
+def _clip_response(text: Any) -> Optional[str]:
+    content = str(text or "")
+    if not content:
+        return None
+    try:
+        return truncate_text(content, TRACE_RESPONSE_MAX_CHARS)[0]
+    except ValueError:  # pragma: no cover —— 常量必然为正，留着只是不让它炸
+        log_print(f"⚠️ AI trace：单轮原文截断失败，改为不记（{TRACE_RESPONSE_MAX_CHARS}）", "AI")
+        return None
+
+
+def _load(raw: Any) -> dict:
+    try:
+        payload = json.loads(raw or "null")
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _list_field(payload: dict, key: str) -> list:
+    value = payload.get(key)
+    return list(value) if isinstance(value, list) else []
+
+
+def decode_evidence(row: Any) -> dict:
+    """`AiAnalysisTrace` 的几列 → 给界面读的明细（**读库侧唯一入口**）。
+
+    老行（这一层之前写下的）只有计数没有明细：那时 `items`/`details` 不存在，
+    这里如实给空列表 —— 界面上是「没有明细」，不是「没有索取」。
+    """
+    requests = _load(getattr(row, "requests_json", None))
+    executed = _load(getattr(row, "executed_json", None))
+    dropped = _load(getattr(row, "dropped_json", None))
+    return {
+        "requests": _list_field(requests, "items"),
+        "executed": _list_field(executed, "details"),
+        "dropped": _list_field(dropped, "details"),
+        "response_text": str(getattr(row, "response_text", None) or ""),
+        "budget_notes": str(getattr(row, "budget_notes", None) or ""),
+        "correction_hint": str(getattr(row, "correction_hint", None) or ""),
+    }
+
+
+def failed_labels(executed: Sequence[dict] | Iterable[dict]) -> list[str]:
+    """这一轮里「取不到」的那些条目的标签（给一句话摘要用）。"""
+    out = []
+    for item in executed or ():
+        if isinstance(item, dict) and item.get("failed"):
+            out.append(str(item.get("label") or item.get("kind") or ""))
+    return out

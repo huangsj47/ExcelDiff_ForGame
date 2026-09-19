@@ -275,42 +275,11 @@ def _function_source(script: str, name: str) -> str:
     return head + _function_body(script, name)
 
 
-def _run_node(script: str, cases: dict, probe_source: str = "") -> dict:
-    if not shutil.which("node"):
-        pytest.skip("环境里没有 Node，跳过真实运行的纯函数断言")
-    driver = _DOM_STUB + """
-const fs = require('fs');
-const vm = require('vm');
-const source = fs.readFileSync(process.argv[2], 'utf8');
-const cache = {};
-const sandbox = {
-    console: console, URLSearchParams: URLSearchParams, setTimeout: setTimeout,
-    fetch: function () { return Promise.reject(new Error('offline')); },
-    document: {
-        getElementById(id) { return cache[id] || (cache[id] = makeElement('div')); },
-        createElement(tag) { return makeElement(tag); },
-        querySelector() { return null; },
-        querySelectorAll() { return []; },
-        addEventListener() {},
-        readyState: 'complete'
-    },
-    window: {
-        location: { search: '', pathname: '/ai-analysis/usage', hash: '' },
-        history: { replaceState() {} },
-        addEventListener() {}
-    },
-    bootstrap: { Modal: function () { return { show() {}, hide() {} }; } }
-};
-sandbox.window.document = sandbox.document;
-vm.createContext(sandbox);
-vm.runInContext(source, sandbox, { filename: 'ai_usage_dashboard.js' });
-// 探针：把 IIFE 里的函数（模板里逐字那段源码）放进**同一个**上下文求值，
-// 于是它照样能看见 `AIU_PERIOD_ORDER` 这些全局量，还能用上面那个 DOM stub。
-const PROBE = __PROBE__;
-if (PROBE) vm.runInContext(PROBE, sandbox, { filename: 'probe.js' });
-
-const A = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
-const out = {
+# 默认的那一组探针（预算）：在 node 里被当成 `(A, sandbox, makeElement) => 结果` 调用。
+# 从驱动字符串里搬出来，是为了让别的探针也能复用同一个驱动 —— 驱动本身（DOM stub、
+# `vm` 上下文、探针注入）与「要取回什么」是两件事。
+_BUDGET_OUT = """function (A, sandbox, makeElement) {
+    return {
     typeofs: {
         aiuBudgetScopeText: typeof sandbox.aiuBudgetScopeText,
         aiuOverScopesLabel: typeof sandbox.aiuOverScopesLabel,
@@ -345,12 +314,64 @@ const out = {
                 })
             };
         })
+    };
+}"""
+
+
+def _run_node(script: str, cases: dict, probe_source: str = "",
+              probe_name: str = "__probeFillPeriodSelect", out_source: str | None = None) -> dict:
+    """把模板里那段脚本读进 node 跑起来，按 `out_source` 把要断言的东西取回来。
+
+    `out_source` 是一段 `function (A, sandbox, makeElement) { … }` 的源码（模板里逐字
+    那段函数用 `_function_source` 取），默认是下面那一组预算探针 —— 新的探针不必再抄
+    一份 DOM stub 与驱动（`tests/test_ai_usage_round_detail_ui.py` 就是这么用的）。
+
+    `probe_source` **原样注入**（不自动加名字）：要挂多个函数时自己写清楚
+    （`probe_name=""` + 末尾一句 `__probeX = x;`），否则拼出来的那句赋值会指错函数。
+    """
+    if not shutil.which("node"):
+        pytest.skip("环境里没有 Node，跳过真实运行的纯函数断言")
+    driver = _DOM_STUB + """
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const cache = {};
+const sandbox = {
+    console: console, URLSearchParams: URLSearchParams, setTimeout: setTimeout,
+    fetch: function () { return Promise.reject(new Error('offline')); },
+    document: {
+        getElementById(id) { return cache[id] || (cache[id] = makeElement('div')); },
+        createElement(tag) { return makeElement(tag); },
+        querySelector() { return null; },
+        querySelectorAll() { return []; },
+        addEventListener() {},
+        readyState: 'complete'
+    },
+    window: {
+        location: { search: '', pathname: '/ai-analysis/usage', hash: '' },
+        history: { replaceState() {} },
+        addEventListener() {}
+    },
+    bootstrap: { Modal: function () { return { show() {}, hide() {} }; } }
 };
+sandbox.window.document = sandbox.document;
+vm.createContext(sandbox);
+vm.runInContext(source, sandbox, { filename: 'ai_usage_dashboard.js' });
+// 探针：把 IIFE 里的函数（模板里逐字那段源码）放进**同一个**上下文求值，
+// 于是它照样能看见 `AIU_PERIOD_ORDER` 这些全局量，还能用上面那个 DOM stub。
+const PROBE = __PROBE__;
+if (PROBE) vm.runInContext(PROBE, sandbox, { filename: 'probe.js' });
+
+const A = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+const out = (__OUT__)(A, sandbox, makeElement);
 process.stdout.write(JSON.stringify(out));
 """
-    driver = driver.replace("__PROBE__",
-                            json.dumps(probe_source and
-                                       "__probeFillPeriodSelect = " + probe_source))
+    if probe_source and probe_name:
+        probe_js = f"{probe_name} = " + probe_source
+    else:
+        probe_js = probe_source
+    driver = driver.replace("__PROBE__", json.dumps(probe_js))
+    driver = driver.replace("__OUT__", out_source or _BUDGET_OUT)
     with tempfile.TemporaryDirectory() as tmp:
         script_path = Path(tmp) / "ai_usage_dashboard.js"
         script_path.write_text(script, encoding="utf-8")

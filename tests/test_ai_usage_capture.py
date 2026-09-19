@@ -178,6 +178,65 @@ def test_persist_keeps_unreported_cache_tokens_as_null():
         )
 
 
+def test_persist_writes_the_round_evidence_and_the_detail_shows_it(client, monkeypatch):
+    """逐轮的**证据**要落库，并且从「本次消耗」那个接口读得回来（2026-09-19 补）。
+
+    原先只落计数，于是「这次为什么没读到 X」在面板上无从查起：模型没要、取数失败、
+    被预算拒了，三种可能在三列计数上长得一模一样。这一条从引擎的 `RoundRecord` 一路
+    走到接口响应，中间任何一环漏写都会红。
+    """
+    from services.ai.budget import ContextItem
+    from services.ai.engine import EngineOutcome, RoundRecord
+    from services.ai.protocol import ContextRequest, DroppedItem
+    from services.ai_analysis_service import _persist_outcome
+
+    with flask_app.app_context():
+        create_tables()
+        project_id = _project()
+        run = _run(project_id, cache_read=None, tokens_input=500, tokens_output=100)
+        outcome = EngineOutcome(
+            status="succeeded",
+            report_markdown="报告",
+            rounds=(
+                RoundRecord(
+                    index=1, status="requests", request_count=2, item_count=1,
+                    requests=(ContextRequest("file_diff", "a" * 40, "code/a.lua"),),
+                    # 取不到时 provider 给的是一句完整的话：看着像内容，字数也不为 0
+                    executed=(ContextItem(
+                        "file_diff", "file_diff code/a.lua",
+                        "[取数失败] code/a.lua：项目没有绑定 Agent 节点。",
+                    ),),
+                    dropped=(DroppedItem("request", 1, "超出本次工具请求总预算（20 次），未执行"),),
+                    response_text='{"status": "need_more_context"}',
+                    budget_notes=("有 1 个上下文请求因超出本次索取额度而未执行。",),
+                ),
+                RoundRecord(index=2, status="final", response_text='{"status": "final"}'),
+            ),
+            prompt_tokens=500, completion_tokens=100,
+        )
+        _persist_outcome(run, outcome, {"anomalies": [], "risk_level": "low"})
+        db.session.commit()
+        run_id = run.id
+
+        first = AiAnalysisTrace.query.filter_by(run_id=run.id, round_index=1).one()
+        assert "need_more_context" in (first.response_text or "")
+        assert "超出本次索取额度" in (first.budget_notes or "")
+        assert "未执行" in (first.dropped_json or "")
+
+    monkeypatch.setattr(ai_routes, "_has_project_access", lambda _pid: True)
+    body = client.get(f"/ai-analysis/runs/{run_id}/usage").get_json()
+
+    rounds = {row["round_index"]: row for row in body["rounds"]}
+    assert rounds[1]["requests"][0]["path"] == "code/a.lua"
+    executed = rounds[1]["executed"][0]
+    assert executed["failed"] is True, "取数失败在接口上又变回「读到了内容」了"
+    assert "没有绑定 Agent" in executed["reason"], executed
+    assert rounds[1]["dropped"][0]["reason"].endswith("未执行")
+    assert "need_more_context" in rounds[1]["response_text"]
+    # 老读法（计数）不受影响
+    assert rounds[1]["outcome"] == "requests" and rounds[2]["outcome"] == "final"
+
+
 def test_persist_keeps_a_reported_zero_as_zero():
     """反向自检：上游报了 0 就必须存 0，不能被当成「没报」抹成 NULL。"""
     from services.ai.engine import EngineOutcome

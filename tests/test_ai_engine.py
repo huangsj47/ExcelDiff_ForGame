@@ -542,6 +542,49 @@ def test_the_round_records_carry_the_per_round_cache_usage():
     assert all(item.prompt_tokens == 10 for item in outcome.rounds), "逐轮记的是本轮值"
 
 
+def test_the_round_records_carry_the_evidence_not_just_the_counts():
+    """逐轮要留下**证据**：模型说了什么、要了什么、拿到的是内容还是「取不到」。
+
+    只记计数的话，「这次为什么没读到 X」在面板上无从查起 —— 模型没要、取数失败、
+    被预算拒了，三种可能在三列计数上长得一模一样（见 `services/ai/trace_evidence.py`）。
+    """
+    provider = FakeProvider(contents={("file_diff", COMMIT, LUA): None})
+    client = ScriptedClient(
+        _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
+        _final(_anomaly()),
+    )
+
+    outcome = _run(client, provider=provider)
+
+    first = outcome.rounds[0]
+    assert first.status == "requests"
+    # 它点了名
+    assert [getattr(req, "path", "") for req in first.requests] == [TABLE]
+    # 它拿到了什么 —— 以及拿到的那一份是不是内容
+    assert len(first.executed) == 1
+    assert first.executed[0].text, "取到的正文必须挂在这一轮上"
+    # 模型原样返回了什么（协议解释不了时要靠它）
+    assert "need_more_context" in first.response_text
+    # 结论那一轮也不例外
+    assert "final" in outcome.rounds[1].response_text
+    assert outcome.rounds[1].executed == (), "结论轮没有再取数"
+
+
+def test_a_round_that_never_reached_the_model_is_still_recorded():
+    """这一轮**没跑成**（上游拒绝）也要留一行。
+
+    不留的话，trace 里最后一行是上一轮，面板上「这次分析为什么失败」看起来就是
+    「跑了两轮、什么都没说」—— 而上游拒了什么只有一个地方写着（`error_message`）。
+    """
+    client = ScriptedClient(raise_on=RuntimeError("connection reset"))
+
+    outcome = _run(client)
+
+    assert outcome.status == STATUS_FAILED
+    assert [item.status for item in outcome.rounds] == ["transport_error"], outcome.rounds
+    assert "connection reset" in outcome.rounds[0].note
+
+
 # ==========================================================================
 # 请求白名单
 # ==========================================================================

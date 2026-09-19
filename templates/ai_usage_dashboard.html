@@ -850,6 +850,35 @@
 .aiu-btn.primary[disabled]:hover { background: var(--aiu-primary); }
 
 /* ---------------------------------------------------------------------------
+   逐轮明细（本轮新增）：这一轮到底看没看到东西
+   ---------------------------------------------------------------------------
+   颜色一律走令牌；字号只取 12/14/16/18/24 那五档（这里只用 0.75rem = 12px 一档，
+   与表格正文同一层 —— 明细是数据，不是说明）。 */
+.aiu-round-actions { text-align: right; white-space: nowrap; }
+.aiu-round-detail > td { background: var(--aiu-bg); }
+.aiu-round-block { margin: 0 0 12px; }
+.aiu-round-block:last-child { margin-bottom: 0; }
+.aiu-round-title {
+    display: block; margin: 0 0 4px; color: var(--aiu-text);
+    font-size: 0.75rem; font-weight: 600;
+}
+.aiu-round-list {
+    margin: 0; padding-left: 18px; color: var(--aiu-text);
+    font-size: 0.75rem; line-height: 1.7; overflow-wrap: anywhere;
+}
+.aiu-round-list code { font-family: var(--aiu-mono); font-size: 1em; }
+.aiu-round-failed { color: var(--aiu-danger); }
+.aiu-round-note { margin: 0; color: var(--aiu-muted); font-size: 0.75rem; line-height: 1.7; }
+/* 模型原文：等宽、保留换行、超长时自己滚（可滚动就必须拿得到焦点，见表格容器那条）。 */
+.aiu-round-raw {
+    margin: 0; padding: 8px; border-radius: 6px; border: 1px solid var(--aiu-border);
+    background: var(--aiu-card); color: var(--aiu-text);
+    font-family: var(--aiu-mono); font-size: 0.75rem; line-height: 1.5;
+    white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto;
+}
+.aiu-round-raw:focus-visible { outline: 3px solid var(--color-focus, #0b5ed7); outline-offset: 1px; }
+
+/* ---------------------------------------------------------------------------
    平台总预算 + 口径联动 + 项目预算调整
    ---------------------------------------------------------------------------
    同样是「组件里不写裸 hex」：这一段的颜色全部走 `var(--token, 字面量)`，
@@ -2855,6 +2884,171 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
 
     // 单次运行明细弹层。与三个抽屉里的「明细」按钮是同一个接口、同一套口径。
     var runModalInstance = null;
+
+    /** 一个小标题 + 若干行（`items` 里的每一项要么是字符串，要么是 `{text, failed}`）。 */
+    function roundBlock(title, items) {
+        var block = document.createElement('div');
+        block.className = 'aiu-round-block';
+        var head = document.createElement('span');
+        head.className = 'aiu-round-title';
+        head.textContent = title;
+        block.appendChild(head);
+        var list = document.createElement('ul');
+        list.className = 'aiu-round-list';
+        items.forEach(function (item) {
+            var failed = item && typeof item === 'object' && item.failed;
+            var li = document.createElement('li');
+            li.textContent = item && typeof item === 'object' ? item.text : String(item);
+            if (failed) li.className = 'aiu-round-failed';
+            list.appendChild(li);
+        });
+        block.appendChild(list);
+        return block;
+    }
+
+    /** 一段说明。`tone='danger'` 用于「取不到」这类要一眼看见的（不用于普通说明）。 */
+    function roundNote(text, tone) {
+        var note = document.createElement('p');
+        note.className = 'aiu-round-note' + (tone === 'danger' ? ' aiu-round-failed' : '');
+        note.textContent = text;
+        return note;
+    }
+
+    /**
+     * 一轮的明细：**要了什么、拿到的是内容还是「取不到」、丢了什么、模型原样返回了什么**。
+     *
+     * 为什么要单独一块：逐轮表上的计数分不出这几种情况 —— 一次失败的索取（provider 给的
+     * 是一句「平台读不到 X」）与一次真的读了一份 diff，在「条数 + 字符数」上长得一模一样
+     * （见 services/ai/trace_evidence.py）。
+     */
+    function renderRoundDetail(host, round) {
+        host.textContent = '';
+        var requests = round.requests || [];
+        var executed = round.executed || [];
+        var dropped = round.dropped || [];
+        var raw = round.response_text || '';
+        var notes = round.budget_notes || '';
+        var hint = round.correction_hint || '';
+        // 老行（这一层之前写下的）只有计数：如实说没采集，而不是显示成「什么都没要」。
+        if (!requests.length && !executed.length && !dropped.length && !raw && !notes && !hint) {
+            host.appendChild(roundNote('这一轮的明细未采集（该功能上线前的运行没有记录）。'));
+            return;
+        }
+        if (requests.length) {
+            host.appendChild(roundBlock('模型点名索取（' + requests.length + ' 条）', requests.map(function (item) {
+                return item.text || item.type || '（未记录）';
+            })));
+        }
+        if (executed.length) {
+            var failedCount = executed.filter(function (item) { return item.failed; }).length;
+            host.appendChild(roundBlock(
+                '实际拿到（' + executed.length + ' 条' + (failedCount ? '，其中 ' + failedCount + ' 条取不到' : '') + '）',
+                executed.map(function (item) {
+                    var head = (item.label || item.kind || '（未记录）') + '　' + aiuFmtInt(item.chars) + ' 字'
+                        + (item.truncated ? '（已截断）' : '');
+                    if (item.failed) {
+                        return {text: head + ' —— 取不到：' + (item.reason || '原因未记录'), failed: true};
+                    }
+                    if (item.empty) return head + ' —— 工具明确回了「确实没有内容」';
+                    return head;
+                })
+            ));
+        }
+        if (dropped.length) {
+            host.appendChild(roundBlock('被丢掉（' + dropped.length + ' 条）', dropped.map(function (item) {
+                var where = item.detail ? item.detail + '：' : '';
+                return where + (item.reason || '原因未记录');
+            })));
+        }
+        if (notes.trim()) host.appendChild(roundBlock('预算说明（这几句也发给了模型）', notes.split('\n')));
+        if (hint.trim()) host.appendChild(roundBlock('上一轮不符合协议时给模型的纠正提示', [hint.trim()]));
+        if (raw.trim()) {
+            var block = document.createElement('div');
+            block.className = 'aiu-round-block';
+            var head2 = document.createElement('span');
+            head2.className = 'aiu-round-title';
+            head2.textContent = '模型原样返回的内容' + (raw.length >= 4000 ? '（已按 4000 字截断）' : '');
+            block.appendChild(head2);
+            var pre = document.createElement('pre');
+            pre.className = 'aiu-round-raw';
+            // 可滚动容器要拿得到焦点，否则键盘用户读不到下半段（与表格容器同一条要求）。
+            pre.setAttribute('tabindex', '0');
+            pre.textContent = raw;
+            block.appendChild(pre);
+            host.appendChild(block);
+        }
+    }
+
+    /** 逐轮表的最后一格：一个「明细」按钮 + 它下面那一整行的容器（按需渲染）。 */
+    function roundDetailCell(round, columns) {
+        var td = document.createElement('td');
+        td.className = 'aiu-round-actions';
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'aiu-btn';
+        button.textContent = '明细';
+        button.setAttribute('aria-expanded', 'false');
+        td.appendChild(button);
+
+        var detailRow = document.createElement('tr');
+        detailRow.className = 'aiu-round-detail';
+        detailRow.hidden = true;
+        var detailCell = document.createElement('td');
+        detailCell.colSpan = columns;
+        detailRow.appendChild(detailCell);
+
+        button.addEventListener('click', function () {
+            detailRow.hidden = !detailRow.hidden;
+            button.setAttribute('aria-expanded', detailRow.hidden ? 'false' : 'true');
+            // 第一次展开时才渲染：几十轮全渲染出来会让这个弹层又长又慢。
+            if (!detailRow.hidden && !detailCell.childNodes.length) {
+                renderRoundDetail(detailCell, round);
+            }
+        });
+        // 明细行紧跟在这一轮后面 —— 在 `td` 上挂一个引用，调用方 append 完 `tr` 再 append 它。
+        td.aiuDetailRow = detailRow;
+        return td;
+    }
+
+    /** 这次运行**按工具类型**的取数账（`failed` 一列在这里，页面级那张表没有它）。 */
+    function runToolSection(tools, kinds) {
+        var head = document.createElement('h6');
+        head.textContent = '取数（按工具类型）';
+        var wrap = document.createElement('div');
+        wrap.className = 'aiu-table-wrap';
+        wrap.setAttribute('role', 'region');
+        wrap.setAttribute('tabindex', '0');
+        wrap.setAttribute('aria-labelledby', 'aiuRunToolTableCaption');
+        var table = document.createElement('table');
+        table.className = 'aiu-table';
+        table.innerHTML = '<caption class="aiu-caption" id="aiuRunToolTableCaption">这次分析按工具类型统计的取数次数与失败次数。「取不到」记在「失败」列里 —— 它不算成功取回。</caption>'
+            + '<thead><tr><th scope="col">工具</th><th scope="col" class="num">索取</th>'
+            + '<th scope="col" class="num">执行</th><th scope="col" class="num">缓存命中</th>'
+            + '<th scope="col" class="num">失败</th><th scope="col" class="num">超预算</th>'
+            + '<th scope="col" class="num">截断</th><th scope="col" class="num">取回字符</th>'
+            + '<th scope="col" class="num">交给模型</th></tr></thead>';
+        var tbody = document.createElement('tbody');
+        kinds.forEach(function (kind) {
+            var counters = tools[kind] || {};
+            var tr = document.createElement('tr');
+            tr.appendChild(cell(aiuToolLabel(kind)));
+            ['calls', 'executions', 'cache_hits', 'failed', 'refused_by_budget', 'truncated', 'source_chars', 'produced_chars']
+                .forEach(function (name) {
+                    var value = counters[name];
+                    var cellNode = cell(aiuFmtInt(value === undefined ? 0 : value) || '0', 'num');
+                    if (name === 'failed' && value) cellNode.className = 'num aiu-round-failed';
+                    tr.appendChild(cellNode);
+                });
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+        var section = document.createElement('div');
+        section.appendChild(head);
+        section.appendChild(wrap);
+        return section;
+    }
+
     function openRunModal(runId, fallbackLabel) {
         var body = $('aiuRunModalBody');
         body.innerHTML = '<p class="aiu-meta">加载中...</p>';
@@ -2900,12 +3094,14 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             wrap.setAttribute('aria-labelledby', 'aiuRoundTableCaption');
             var table = document.createElement('table');
             table.className = 'aiu-table';
-            table.innerHTML = '<caption class="aiu-caption" id="aiuRoundTableCaption">每一轮的 token 与耗时。输入 token 是累计值：每轮都会把上一轮的上下文重发一遍。</caption>'
+            table.innerHTML = '<caption class="aiu-caption" id="aiuRoundTableCaption">每一轮的 token 与耗时。输入 token 是累计值：每轮都会把上一轮的上下文重发一遍。「明细」里是这一轮要了什么、拿到的那一份到底是内容还是一句「取不到」、丢了什么。</caption>'
                 + '<thead><tr><th scope="col">轮次</th><th scope="col">结局</th>'
                 + '<th scope="col" class="num">输入 token</th><th scope="col" class="num">其中命中</th>'
                 + '<th scope="col" class="num">输出 token</th><th scope="col" class="num">提示词字符</th>'
-                + '<th scope="col" class="num">上下文字符</th><th scope="col" class="num">耗时</th><th scope="col">备注</th></tr></thead>';
+                + '<th scope="col" class="num">上下文字符</th><th scope="col" class="num">耗时</th>'
+                + '<th scope="col">备注</th><th scope="col">明细</th></tr></thead>';
             var tbody = document.createElement('tbody');
+            var roundColumns = 10;
             (payload.rounds || []).forEach(function (round) {
                 var tr = document.createElement('tr');
                 tr.appendChild(cell(String(round.round_index), 'num'));
@@ -2917,18 +3113,28 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
                 tr.appendChild(numCell(aiuFmtInt(round.context_chars)));
                 tr.appendChild(numCell(aiuFmtDuration(round.duration_ms)));
                 tr.appendChild(cell(round.error || '—'));
+                var actionCell = roundDetailCell(round, roundColumns);
+                tr.appendChild(actionCell);
                 tbody.appendChild(tr);
+                // 明细行紧跟在这一轮后面（占满整行），默认收起。
+                tbody.appendChild(actionCell.aiuDetailRow);
             });
             if (!(payload.rounds || []).length) {
                 var tr = document.createElement('tr');
                 var td = cell('这次运行没有逐轮记录。', 'empty-row');
-                td.colSpan = 9;
+                td.colSpan = roundColumns;
                 tr.appendChild(td);
                 tbody.appendChild(tr);
             }
             table.appendChild(tbody);
             wrap.appendChild(table);
             body.appendChild(wrap);
+
+            var tools = usage.tools || {};
+            var kinds = Object.keys(tools).sort();
+            if (kinds.length) {
+                body.appendChild(runToolSection(tools, kinds));
+            }
 
             var pricingNote = document.createElement('p');
             pricingNote.className = 'aiu-meta';
