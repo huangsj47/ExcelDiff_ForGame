@@ -21,14 +21,39 @@ from app import app as flask_app
 from app import create_tables, db
 from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace
 from services import ai_analysis_service as ai_service
+from models.ai_analysis import AiProjectAnalysisConfig
+from models.ai_analysis.project_config import SUBAGENT_COUNT_RANGE
 from services.ai_analysis_service import build_weekly_group_key
 from tests.test_ai_analysis_service import COMMIT_SHA, TABLE_PATH, _FakeClient
 from tests.test_ai_run_budget_warning import _prepare_weekly_run
 
 
 def _enable_subagents(project_id: int, *, count: int) -> None:
+    """打开子代理模式。
+
+    `count` 不在合法范围（1~6）时**再直接改一次列**：接口会把整个 payload 一起拒掉
+    （一个字段都不落库），而在库里留一个脏值正是 `test_a_count_below_two_...`
+    要测的东西 —— 不补这一下，那条用例测的其实是「payload 被拒了」。
+    """
     ai_service.update_project_analysis_config(
         project_id, {"subagent_enabled": True, "subagent_count": count}
+    )
+    db.session.commit()
+    if count < SUBAGENT_COUNT_RANGE[0]:
+        row = AiProjectAnalysisConfig.query.filter_by(project_id=project_id).first()
+        row.subagent_count = count
+        db.session.commit()
+
+
+def _disable_subagents(project_id: int) -> None:
+    """**显式关掉**子代理模式。
+
+    默认值现在是「开」（`DEFAULT_SUBAGENT_ENABLED`），所以「没开子代理时怎样怎样」
+    这类用例必须自己关掉它 —— 靠默认值等于把用例绑在默认值上，改一次默认值就红一片，
+    而它要测的行为（关掉之后逐字节回到单代理）一点没变。
+    """
+    ai_service.update_project_analysis_config(
+        project_id, {"subagent_enabled": False}
     )
     db.session.commit()
 
@@ -85,11 +110,16 @@ def test_the_family_runs_and_persists_as_one_run(monkeypatch):
 
 
 def test_the_same_batch_stays_a_single_agent_when_the_flag_is_off(monkeypatch):
-    """**默认关**：没开的时候，请求与这个功能上线之前完全一样（只有一次模型调用）。"""
+    """**关掉之后**，请求与这个功能上线之前完全一样（只有一次模型调用）。
+
+    显式关掉而不是「不配置」：默认值已经改成「开」了，靠默认值来测「关」的行为，
+    改一次默认值这条用例就红 —— 而它守的东西（关掉 = 单代理）没有变。
+    """
     client = _FakeClient()
     with flask_app.app_context():
         create_tables()
         ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
+        _disable_subagents(project.id)
         _run(monkeypatch, client=client)
 
         outcome = ai_service.run_weekly_analysis_background(cfg.id)
@@ -228,6 +258,7 @@ def test_the_verify_flag_does_nothing_on_its_own(monkeypatch):
     with flask_app.app_context():
         create_tables()
         ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
+        _disable_subagents(project.id)          # 前提：子代理模式是关的
         _enable_verify(project.id, enabled=True)
         _run(monkeypatch, client=client)
 

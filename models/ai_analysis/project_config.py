@@ -70,9 +70,15 @@ MAX_ANALYSIS_ROUNDS_RANGE = (1, 30)
 MAX_TOOL_REQUESTS_RANGE = (0, 100)
 
 # --- 子代理模式（2026-09，见 services/ai/subagent.py）---
-# **默认关**。这是一条会让模型调用次数变成 (n+1) 倍的功能，必须由人主动打开；
-# 而且它只对**周版本**分析生效（单提交的规模本来就不需要分工）。
-DEFAULT_SUBAGENT_ENABLED = False
+# **默认开**（2026-09-19 由「默认关」改过来）：周版本分析的改动量大到一个模型读不完，
+# 分成几个分片分头深挖再由主代理汇总，质量上的收益大于成本。
+#
+# 两件要知道的事：
+#   * 它让**一次周版本分析**的模型调用次数变成 (n+1) 倍（默认 3 个分片 = 4 次调用）。
+#     觉得贵就在「AI 分析配置」里关掉（关掉之后 `resolved()` 照旧读回 False，只是
+#     老行的 NULL 现在读成开）；
+#   * 只对**周版本**分析生效，单个提交的分析不受影响（它的规模本来就不需要分工）。
+DEFAULT_SUBAGENT_ENABLED = True
 # 打开之后的默认成员数。1 = 退化成原来的单代理（那时不该走子代理这条路），所以
 # 有效范围是 2~6；存 1 也允许（界面上的「关掉」有两处，这里不额外制造一种非法状态）。
 DEFAULT_SUBAGENT_COUNT = 3
@@ -302,8 +308,10 @@ class AiProjectAnalysisConfig(db.Model):
                 PROMPT_CACHE_FORMAT_CHOICES,
                 DEFAULT_PROMPT_CACHE_FORMAT,
             ),
-            # 子代理模式：NULL（老行）读成「关闭」与 3。**关闭是唯一安全的默认值** ——
-            # 打开它会让一次分析的模型调用次数变成 n+1 倍。
+            # 子代理模式：NULL（老行）读成 `DEFAULT_SUBAGENT_ENABLED` 与 3。
+            # **老行跟着新默认走**：这一列加出来的时候默认是关，所以历史行几乎都是 NULL，
+            # 而「NULL = 关」会让「改成默认开」对已有项目完全不生效（界面上那个勾还是空的）——
+            # 一个改了默认值却只有新项目享受到的功能。
             "subagent_enabled": (
                 DEFAULT_SUBAGENT_ENABLED
                 if self.subagent_enabled is None

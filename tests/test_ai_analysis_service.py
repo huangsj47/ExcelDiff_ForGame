@@ -787,6 +787,10 @@ def test_a_real_run_calls_the_model_and_persists_the_findings(monkeypatch):
 
     这里用一个假 client 替掉真实 HTTP，断言完整的链路：配置 → 变更集 → 提示词 →
     引擎 → 接地校验 → 门槛过滤 → run / trace / anomaly 三张表。
+
+    **子代理模式显式关掉**：它现在默认开，而这条用例量的是**单代理那条链**（一次调用、
+    一条 trace）。开着它跑的是「3 个分片 + 1 次汇总」，那是
+    `tests/test_ai_subagent_wiring.py` 的事。
     """
     from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisTrace
 
@@ -805,7 +809,11 @@ def test_a_real_run_calls_the_model_and_persists_the_findings(monkeypatch):
         ai_service.set_project_api_key(project.id, "k")
         ai_service.update_project_analysis_config(
             project.id,
-            {"api_base_url": "http://127.0.0.1:15721/v1", "api_model": "deepseek-v4-flash"},
+            {
+                "api_base_url": "http://127.0.0.1:15721/v1",
+                "api_model": "deepseek-v4-flash",
+                "subagent_enabled": False,
+            },
         )
         db.session.commit()
 
@@ -937,7 +945,10 @@ def test_the_second_run_carries_the_first_runs_findings_as_a_baseline(monkeypatc
         ai_service.set_project_api_key(project.id, "k")
         ai_service.update_project_analysis_config(
             project.id,
-            {"api_base_url": "http://127.0.0.1:15721/v1", "api_model": "m"},
+            # 同上：显式关掉子代理模式，这条用例量的是「上一次的结论有没有进这一次的
+            # 提示词」，而分片之后的提示词是各分片自己那一份（基线在别处）。
+            {"api_base_url": "http://127.0.0.1:15721/v1", "api_model": "m",
+             "subagent_enabled": False},
         )
         db.session.commit()
 
