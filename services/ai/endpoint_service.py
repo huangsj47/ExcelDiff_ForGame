@@ -46,6 +46,8 @@ from models.ai_analysis.project_config import (
     DEFAULT_PROMPT_CACHE_MODE,
     DEFAULT_PROMPT_CHAR_BUDGET,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_SUBAGENT_COUNT,
+    DEFAULT_SUBAGENT_ENABLED,
     DEFAULT_WEEKLY_INTERVAL_MINUTES,
     MAX_ANALYSIS_ROUNDS_RANGE,
     MAX_ANOMALIES_PER_RUN_RANGE,
@@ -56,6 +58,7 @@ from models.ai_analysis.project_config import (
     PROMPT_CHAR_BUDGET_RANGE,
     REQUEST_TIMEOUT_RANGE,
     SEVERITY_CHOICES,
+    SUBAGENT_COUNT_RANGE,
     WEEKLY_INTERVAL_RANGE,
 )
 from services.ai.pricing import parse_price_table
@@ -130,6 +133,10 @@ FIELD_RULES: Mapping[str, FieldRule] = {
     "prompt_cache_format": FieldRule(
         "缓存标记约定", "choice", choices=PROMPT_CACHE_FORMAT_CHOICES
     ),
+    # 子代理模式（2026-09，见 services/ai/subagent.py）。**默认关**：打开它会让一次分析
+    # 的模型调用次数变成 (n+1) 倍，必须由人主动打开。只对**周版本**分析生效。
+    "subagent_enabled": FieldRule("子代理模式（仅周版本）", "bool"),
+    "subagent_count": FieldRule("子代理数量", "int", *SUBAGENT_COUNT_RANGE),
     "min_severity": FieldRule("严重度门槛", "choice", choices=SEVERITY_CHOICES),
     "min_confidence": FieldRule("置信度门槛", "choice", choices=CONFIDENCE_CHOICES),
     "max_anomalies_per_run": FieldRule(
@@ -169,6 +176,8 @@ FIELD_DEFAULTS: Mapping[str, Any] = {
     "min_severity": DEFAULT_MIN_SEVERITY,
     "min_confidence": DEFAULT_MIN_CONFIDENCE,
     "max_anomalies_per_run": DEFAULT_MAX_ANOMALIES_PER_RUN,
+    "subagent_enabled": DEFAULT_SUBAGENT_ENABLED,
+    "subagent_count": DEFAULT_SUBAGENT_COUNT,
     "prompt_template": "",
     "project_knowledge": "",
     "model_price_table": "",

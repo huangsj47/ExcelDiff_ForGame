@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -858,6 +859,56 @@ def project_usage(
     }
 
 
+def _subagent_rows(run: AiAnalysisRun) -> list[dict[str, Any]]:
+    """这次运行里各分片代理的账（`response_payload["subagents"]`）。
+
+    **读不出来就给空列表，绝不编造一条**：面板据此区分「这次不是分片跑的」与「跑了但
+    没记」—— 两者都不是「一个成员都没跑」。老运行（这个功能之前）走的就是空列表这条。
+    """
+    payload = _json_object(getattr(run, "response_payload", None))
+    rows = payload.get("subagents")
+    if not isinstance(rows, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        dimensions = item.get("dimensions")
+        result.append(
+            {
+                "label": str(item.get("label") or ""),
+                "role": str(item.get("role") or ""),
+                "dimensions": [str(name) for name in dimensions]
+                if isinstance(dimensions, list)
+                else [],
+                "status": str(item.get("status") or ""),
+                "rounds": int(item.get("rounds") or 0),
+                "requests": int(item.get("requests") or 0),
+                # `None` 原样带出去（上游没上报），**不是 0** —— 与整页的口径一致。
+                "tokens_input": item.get("tokens_input"),
+                "tokens_output": item.get("tokens_output"),
+                "cache_read_tokens": item.get("cache_read_tokens"),
+                "cache_write_tokens": item.get("cache_write_tokens"),
+                "anomalies": int(item.get("anomalies") or 0),
+                "report_chars": int(item.get("report_chars") or 0),
+                "skipped_reason": str(item.get("skipped_reason") or ""),
+                "error": str(item.get("error") or ""),
+            }
+        )
+    return result
+
+
+def _json_object(raw: Any) -> dict[str, Any]:
+    """把库里那列 JSON 文本读成 dict。读不出来给 `{}`（老行/坏行不该让整页炸掉）。"""
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def _run_row(run: AiAnalysisRun, table) -> dict[str, Any]:
     usage = usage_from_run(run, price_table=table)
     return {
@@ -911,6 +962,11 @@ def run_usage(run_id: int) -> Optional[dict[str, Any]]:
         "rounds": [
             {
                 "round_index": row.round_index,
+                # 子代理模式：这一轮是哪个分片跑的（空 = 主代理自己那几轮），以及它在那个
+                # 成员内部是第几轮。全局 `round_index` 在两个成员之间是连着的，所以
+                # 「S1 的第 2 轮」只能靠这一对列说清楚（见 models/ai_analysis/trace.py）。
+                "agent": row.agent or "",
+                "agent_round": row.agent_round,
                 "outcome": row.outcome or "",
                 "parsed_ok": bool(row.parsed_ok),
                 "tokens_input": row.tokens_input,
@@ -926,5 +982,9 @@ def run_usage(run_id: int) -> Optional[dict[str, Any]]:
             for row in rounds
         ],
         "rounds_truncated": len(rounds) >= MAX_ROUNDS,
+        # 子代理模式下**每个成员**的账（谁跑成了、谁没跑成、各花了多少）。
+        # 没有这一块时给空列表 —— **不编造一条**：面板据此判断「这次不是分片跑的」，
+        # 而编一条假的会让人以为分片跑过。
+        "subagents": _subagent_rows(run),
         "pricing": _price_block(table, errors),
     }

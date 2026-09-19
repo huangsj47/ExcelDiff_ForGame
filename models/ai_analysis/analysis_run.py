@@ -88,6 +88,16 @@ class AiAnalysisRun(db.Model):
     # 解释那一行数字是怎么来的。价格表为空（默认）时这一列保持 NULL。
     pricing_version = db.Column(db.String(40))
 
+    # --- 子代理模式（services/ai/subagent.py）---
+    # `subagent_mode` 为 NULL = 这次没开子代理（也是所有老行的情形）；开了写 `subagents`。
+    #
+    # 一家子（n 个分片 + 1 次汇总）只落**这一条**运行行：它的 tokens / 轮次 / 耗时是
+    # **一家子的合计**（约为单代理的 n+1 倍），逐成员的账在 trace 的 `agent` 列与
+    # `response_payload["subagents"]` 里。所以预算闸门读到的「已用」天然是诚实的，
+    # 运行条数也不会被灌水 —— 这两件事是「不建子运行行」的主要理由。
+    subagent_mode = db.Column(db.String(20))
+    subagent_count = db.Column(db.Integer)
+
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     started_at = db.Column(db.DateTime)
     finished_at = db.Column(db.DateTime)
@@ -154,6 +164,8 @@ class AiAnalysisRun(db.Model):
             "dropped_count": self.dropped_count,
             "context_chars": self.context_chars,
             "pricing_version": self.pricing_version,
+            "subagent_mode": self.subagent_mode,
+            "subagent_count": self.subagent_count,
             "error_message": self.error_message,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,

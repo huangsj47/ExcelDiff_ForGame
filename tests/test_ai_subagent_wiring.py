@@ -1,0 +1,169 @@
+# -*- coding: utf-8 -*-
+"""子代理模式的**端到端接线**：配置打开之后，那一次周版本分析真的走了分片。
+
+## 为什么要有这一组（而不是只测 `subagent.py`）
+
+`subagent.py` 的测试都直接调它，所以「服务层有没有把它接上」在那些测试里是看不见的 ——
+而这里最容易出的错恰恰是接线：`_run_engine_and_persist` 把同一份参数字典喂给两条路
+（单代理 / 子代理），只要有一个键名对不上就是 `TypeError`，而它发生在**一次真跑里**。
+
+所以这组测试走的是真实的那条链：`run_weekly_analysis_background` → `_execute_analysis`
+→ `_run_engine_and_persist` → 引擎 / 编排 → 落库，只有 HTTP 是假的
+（`build_endpoint_client` 换成假 client，与 `tests/test_ai_run_budget_warning.py` 同一套手法）。
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from app import app as flask_app
+from app import create_tables, db
+from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace
+from services import ai_analysis_service as ai_service
+from services.ai_analysis_service import build_weekly_group_key
+from tests.test_ai_analysis_service import COMMIT_SHA, TABLE_PATH, _FakeClient
+from tests.test_ai_run_budget_warning import _prepare_weekly_run
+
+
+def _enable_subagents(project_id: int, *, count: int) -> None:
+    ai_service.update_project_analysis_config(
+        project_id, {"subagent_enabled": True, "subagent_count": count}
+    )
+    db.session.commit()
+
+
+def _run(monkeypatch, *, client=None):
+    monkeypatch.setattr(
+        ai_service, "build_endpoint_client", lambda *a, **k: (client or _FakeClient(), [])
+    )
+    return client or None
+
+
+def test_the_family_runs_and_persists_as_one_run(monkeypatch):
+    """配置打开 → 一家子（2 个分片 + 1 次汇总）跑完，落库是**一条**运行。"""
+    client = _FakeClient()
+    with flask_app.app_context():
+        create_tables()
+        ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
+        _enable_subagents(project.id, count=2)
+        _run(monkeypatch, client=client)
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+
+        assert outcome["status"] == "succeeded", outcome
+
+        # 假 client 每次都答 final → 2 个成员 + 1 次汇总 = 3 次模型调用。
+        assert len(client.calls) == 3, (
+            f"分片没有真的跑起来（只调了 {len(client.calls)} 次模型）"
+        )
+        # 每个成员的第 1 轮请求前两条消息必须完全相同（省钱的依据）。
+        shared = {json.dumps(call[:2], ensure_ascii=False) for call in client.calls}
+        assert len(shared) == 1, "共享前缀在真实链路里不一致 —— 缓存会全部 miss"
+
+        run = (
+            AiAnalysisRun.query.filter_by(
+                target_type="weekly", target_key=build_weekly_group_key(cfg)
+            )
+            .order_by(AiAnalysisRun.id.desc())
+            .first()
+        )
+        assert run is not None
+        assert run.subagent_mode == "subagents"
+        assert run.subagent_count == 2
+
+        traces = (
+            AiAnalysisTrace.query.filter_by(run_id=run.id)
+            .order_by(AiAnalysisTrace.round_index.asc())
+            .all()
+        )
+        assert [row.agent for row in traces] == ["S1", "S2", None]
+        assert [row.round_index for row in traces] == [1, 2, 3]
+
+        payload = json.loads(run.response_payload)
+        assert [item["label"] for item in payload["subagents"]] == ["S1", "S2", "汇总"]
+
+
+def test_the_same_batch_stays_a_single_agent_when_the_flag_is_off(monkeypatch):
+    """**默认关**：没开的时候，请求与这个功能上线之前完全一样（只有一次模型调用）。"""
+    client = _FakeClient()
+    with flask_app.app_context():
+        create_tables()
+        ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
+        _run(monkeypatch, client=client)
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+
+        assert outcome["status"] == "succeeded", outcome
+        assert len(client.calls) == 1, "没开子代理却跑了多次 —— 默认行为被改动了"
+
+        run = (
+            AiAnalysisRun.query.filter_by(
+                target_type="weekly", target_key=build_weekly_group_key(cfg)
+            )
+            .order_by(AiAnalysisRun.id.desc())
+            .first()
+        )
+        assert run is not None
+        assert run.subagent_mode is None and run.subagent_count is None
+
+
+def test_a_commit_analysis_never_splits_even_when_enabled(monkeypatch):
+    """**只对周版本生效**：单个提交的分析不拆（那一次的规模本来就不需要分工）。
+
+    直接驱动执行器并给它一个 `mode=commit` 的载荷 —— 这正是服务层读的那个字段，
+    所以它同时钉住了「服务层把模式传对了」。
+    """
+    client = _FakeClient()
+    with flask_app.app_context():
+        create_tables()
+        ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
+        _enable_subagents(project.id, count=3)
+        _run(monkeypatch, client=client)
+
+        run = AiAnalysisRun(
+            project_id=project.id,
+            target_type="commit",
+            target_id=1,
+            target_key=None,
+            status="running",
+        )
+        db.session.add(run)
+        db.session.commit()
+
+        result = ai_service._execute_analysis(
+            run,
+            project_id=project.id,
+            payload={
+                "mode": "commit",
+                "commit": {
+                    "commit_id": COMMIT_SHA,
+                    "path": TABLE_PATH,
+                    "message": "改了道具表",
+                    "operation": "M",
+                },
+            },
+            project_config=ai_service.get_project_analysis_config(project.id),
+            target_type="commit",
+            target_key=None,
+        )
+
+        assert result["status"] == "succeeded", result
+        assert len(client.calls) == 1, "单提交分析被拆片了 —— 它只该有一条路径"
+        assert run.subagent_mode is None
+
+
+@pytest.mark.parametrize("count", [1, 0])
+def test_a_count_below_two_degrades_to_one_agent(monkeypatch, count):
+    """1（或 0）= 退化成单代理：白白多跑一次汇总没有意义。"""
+    client = _FakeClient()
+    with flask_app.app_context():
+        create_tables()
+        ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
+        _enable_subagents(project.id, count=count)
+        _run(monkeypatch, client=client)
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+
+        assert outcome["status"] == "succeeded", outcome
+        assert len(client.calls) == 1

@@ -68,6 +68,15 @@ DEFAULT_PROMPT_CACHE_FORMAT = "none"
 # 「前端允许填、后端悄悄改掉」这种用户看不懂的行为。
 MAX_ANALYSIS_ROUNDS_RANGE = (1, 30)
 MAX_TOOL_REQUESTS_RANGE = (0, 100)
+
+# --- 子代理模式（2026-09，见 services/ai/subagent.py）---
+# **默认关**。这是一条会让模型调用次数变成 (n+1) 倍的功能，必须由人主动打开；
+# 而且它只对**周版本**分析生效（单提交的规模本来就不需要分工）。
+DEFAULT_SUBAGENT_ENABLED = False
+# 打开之后的默认成员数。1 = 退化成原来的单代理（那时不该走子代理这条路），所以
+# 有效范围是 2~6；存 1 也允许（界面上的「关掉」有两处，这里不额外制造一种非法状态）。
+DEFAULT_SUBAGENT_COUNT = 3
+SUBAGENT_COUNT_RANGE = (1, 6)
 PROMPT_CHAR_BUDGET_RANGE = (10_000, 2_000_000)
 REQUEST_TIMEOUT_RANGE = (10, 3600)
 MAX_FILES_PER_RUN_RANGE = (1, 5_000)
@@ -112,6 +121,17 @@ def _int_or(value, fallback: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _clamp_int(value, fallback: int, bounds: tuple[int, int]) -> int:
+    """读一个**有范围**的整数：NULL / 读不动 → 默认值；超出范围 → 钳到边界。
+
+    与 `_int_or` 分开：那个是「没有范围」的（`max_files_per_run` 这类），这个的上下界
+    是功能语义的一部分（子代理数超过 6 就没意义），所以钳而不是照收。
+    """
+    number = _int_or(value, fallback)
+    low, high = bounds
+    return max(int(low), min(int(high), number))
 
 
 def _optional_int(value) -> int | None:
@@ -196,6 +216,11 @@ class AiProjectAnalysisConfig(db.Model):
     # 而 NULL 经 `resolved()` 读出来正好是「不发标记」那个保守默认值，不需要回填。
     prompt_cache_mode = db.Column(db.String(20), default=DEFAULT_PROMPT_CACHE_MODE)
     prompt_cache_format = db.Column(db.String(20), default=DEFAULT_PROMPT_CACHE_FORMAT)
+    # 子代理模式（2026-09）。`subagent_enabled` 上 NULL 是**老行**（这一列之前没有），
+    # 经 `resolved()` 读出来正是「关闭」那个默认值，所以不需要回填。
+    # `subagent_count` 同理：NULL → 3。
+    subagent_enabled = db.Column(db.Boolean, default=DEFAULT_SUBAGENT_ENABLED)
+    subagent_count = db.Column(db.Integer, default=DEFAULT_SUBAGENT_COUNT)
 
     # --- 告警门槛（规则侧，改这里不用改提示词）---
     min_severity = db.Column(db.String(20), default=DEFAULT_MIN_SEVERITY)
@@ -270,6 +295,16 @@ class AiProjectAnalysisConfig(db.Model):
                 self.prompt_cache_format,
                 PROMPT_CACHE_FORMAT_CHOICES,
                 DEFAULT_PROMPT_CACHE_FORMAT,
+            ),
+            # 子代理模式：NULL（老行）读成「关闭」与 3。**关闭是唯一安全的默认值** ——
+            # 打开它会让一次分析的模型调用次数变成 n+1 倍。
+            "subagent_enabled": (
+                DEFAULT_SUBAGENT_ENABLED
+                if self.subagent_enabled is None
+                else bool(self.subagent_enabled)
+            ),
+            "subagent_count": _clamp_int(
+                self.subagent_count, DEFAULT_SUBAGENT_COUNT, SUBAGENT_COUNT_RANGE
             ),
             "min_severity": (self.min_severity or DEFAULT_MIN_SEVERITY).strip().lower(),
             "min_confidence": (self.min_confidence or DEFAULT_MIN_CONFIDENCE).strip().lower(),

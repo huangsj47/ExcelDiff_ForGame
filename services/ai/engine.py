@@ -90,6 +90,11 @@ DEGRADE_PROTOCOL = "protocol_corrections_exhausted"
 # 上游以「上下文超长」拒绝了请求，平台收缩提示词后把结论收回来了。**它是一次退化**：
 # 模型是在一份被压过的提示词上作答的，与正常跑完不是一回事，必须说出来。
 DEGRADE_CONTEXT = "context_overflow"
+# 子代理模式（`services/ai/subagent.py`）下「有成员没跑成」或「它报出的结论没有进入最终
+# 报告」。**它比上面几条都重**：那几条说的是「这块看过了但看得不够」，这一条说的是
+# 「这块**没有人看过**」—— 而它最容易被读成「这里没问题」。所以它必须出现在
+# `degradation` 上（抽屉会显示 ⚠️ 与这段话），不能只写在报告正文里。
+DEGRADE_SUBAGENT = "subagent_gap"
 
 DEGRADATION_LABELS = {
     DEGRADE_ROUNDS: "轮次用尽，基于已有证据出结论",
@@ -97,6 +102,10 @@ DEGRADATION_LABELS = {
     DEGRADE_MARKDOWN: "模型没有按协议输出 JSON，已按 markdown 报告降级保存",
     DEGRADE_PROTOCOL: "连续多轮无法解析出协议要求的 JSON",
     DEGRADE_CONTEXT: "提示词超出模型上下文窗口，已压掉历史后收尾出结论",
+    DEGRADE_SUBAGENT: (
+        "子代理模式：有分片没有跑成、或它报出的结论没有进入最终报告"
+        "（见报告末尾的「信息缺口（平台补充）」）"
+    ),
 }
 
 # 给上下文条目留的最小额度。低于这个值就没什么可给的了，与其压到 0 不如如实记账。
@@ -145,6 +154,13 @@ class RoundRecord:
 
     index: int
     status: str  # requests / final / unparsable
+    # 这一轮是**谁**跑的。空串 = 常规的单代理运行；子代理模式下是 `S1`/`S2`…
+    # （`services/ai/subagent.py`）。`index` 是**整个家族内全局递增**的轮次号，
+    # 而 `agent_round` 是这一轮在**那个成员内部**的序号 —— 界面要显示「S1 · 第 2/4 轮」，
+    # 而两个成员各自都有「第 1 轮」。全局序号是为了让 `uq_ai_trace_run_round`
+    # （run_id + round_index）一个字节都不用改。
+    agent: str = ""
+    agent_round: int = 0
     request_count: int = 0
     item_count: int = 0
     refused_by_budget: int = 0
@@ -208,6 +224,14 @@ class RoundProgress:
     items_chars: int
     # 本次运行从开始到现在已过去的毫秒数。
     elapsed_ms: int
+    # 子代理模式下这一轮属于哪个成员（`S1`/`S2`…；汇总那一次是空串，表示主代理自己）。
+    # 三个都有默认值：单代理运行（今天唯一的路径）不传它们，行为逐字节不变。
+    # 界面显示的是「分片 S1 (1/3) · 第 2 轮」：`agent_index`/`agent_total` 是成员在家族里
+    # 的位次，`index` 仍是**这个成员内部**的轮次（与 `RoundRecord.index` 的全局序号不同，
+    # 后者是为了 trace 的唯一约束）。
+    agent: str = ""
+    agent_index: int = 0
+    agent_total: int = 0
 
 
 @dataclass(frozen=True)
@@ -271,6 +295,16 @@ class EngineOutcome:
     duration_ms: int = 0
     # 上下文压缩的记账（见 CompactionReport）。
     compaction: CompactionReport = field(default_factory=CompactionReport)
+    # 子代理模式（`services/ai/subagent.py`）下**每个成员**的账。空元组 = 没开子代理。
+    #
+    # 它必须落在结果里，理由与 `CompactionReport` 一样：一个成员跑失败了、或者因为预算
+    # 不足被跳过，**绝不能表现为「那个维度没问题」**。落库的账是人能查的，所以要能回答
+    # 「这次是谁跑的、谁没跑成、为什么」。里面是纯数据（dict / str），`to_dict` 保持 JSON 安全。
+    subagents: tuple[Mapping[str, Any], ...] = ()
+    # 被子代理模式**跳过**的成员（预算不足时）与它们的去向说明。与 `subagents` 分开：
+    # 前者是「跑了但没跑成」，这里是「压根没跑」——两件事在报告里都要写成信息缺口，
+    # 但读的人需要分得清。
+    subagent_skipped: tuple[str, ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -308,6 +342,8 @@ class EngineOutcome:
             "compaction": self.compaction.to_dict(),
             "tool_stats": {kind: dict(counters) for kind, counters in self.tool_stats.items()},
             "anomaly_count": len(self.anomalies),
+            "subagents": [dict(item) for item in self.subagents],
+            "subagent_skipped": list(self.subagent_skipped),
             "dropped": [
                 {"kind": item.kind, "index": item.index, "reason": item.reason, "detail": item.detail}
                 for item in self.dropped
@@ -372,6 +408,8 @@ def run_analysis(
     project_instructions: str = "",
     baseline_digest: str = "",
     on_round: Callable[[RoundProgress], None] | None = None,
+    seed_messages: Sequence[Mapping[str, Any]] = (),
+    task_message: str = "",
 ) -> EngineOutcome:
     """跑完一次分析。**不抛异常**：任何失败都变成 `status="failed"` 的结果。
 
@@ -381,6 +419,21 @@ def run_analysis(
     `on_round` 每轮调一次（在 `RoundRecord` 落进结果之后），用来把进度实时推给界面。
     它抛异常**只会被记一条日志**，绝不作废这次分析 —— 调用方会用它发 SSE 事件、查预算，
     那些动作失败不该让一次已经跑了几分钟的分析白跑。不传它时行为与以前完全一致。
+
+    ## 子代理模式：`seed_messages` + `task_message`
+
+    这两个参数是**唯一**为子代理开的门（编排在 `services/ai/subagent.py`），不传时本函数
+    的行为与它们不存在时**逐字节相同**（有一条回归测试钉着这件事）：
+
+    * `seed_messages` —— 已经拼好的**共享前缀**（system + 含整份变更清单的第一条 user 消息，
+      断点①②都挂好了）。传了它就**不重建** system，也不重发变更清单；
+    * `task_message` —— 第 1 轮的 user 消息**原文**（「你负责哪几个维度」）。
+
+    于是子代理的请求长成 `[system, 共享消息, 任务书, assistant, …]`：前两条在**同一批的
+    所有成员之间逐字节相同**，所以第一个成员写下的 prompt cache，后面每个成员（含汇总那
+    一次）都能命中；成员私有的差异**全部**排在共享前缀之后。这条性质是子代理模式省钱的
+    全部依据，改动这里之前先看 `subagent.build_seed_messages` 的说明与
+    `tests/test_ai_subagent_cache.py`。
 
     ## 提示词缓存：请求是 append-extension 的
 
@@ -394,18 +447,24 @@ def run_analysis(
     thresholds = thresholds or RuleThresholds()
 
     tools = ContextTools(provider=provider, max_tool_requests=limits.max_tool_requests)
-    system_prompt = build_system_prompt(
-        loaded,
-        project_knowledge=project_knowledge,
-        project_instructions=project_instructions,
-    )
-    # 断点 ①：系统消息的末尾。它是整次请求里最稳的一段 —— 同一份平台 skill + 同一份
-    # 项目知识包，在同一项目上跨运行**逐字节相同**，所以它值得一个独立的缓存条目。
-    messages: list[dict[str, Any]] = [
-        mark_cache_breakpoint({"role": "system", "content": system_prompt})
-    ]
+    if seed_messages:
+        # 共享前缀整段照用（**拷贝**，别让下面的断点挪动改到调用方那份 —— 它正要被
+        # 同一批的其它成员再用一次）。断点①②已经在里面了，system 也**不再重建**：
+        # 重建出来的字符串即使内容一样，也要赌它逐字节相同，而赌输的代价是缓存全不命中。
+        messages: list[dict[str, Any]] = [dict(item) for item in seed_messages]
+    else:
+        system_prompt = build_system_prompt(
+            loaded,
+            project_knowledge=project_knowledge,
+            project_instructions=project_instructions,
+        )
+        # 断点 ①：系统消息的末尾。它是整次请求里最稳的一段 —— 同一份平台 skill + 同一份
+        # 项目知识包，在同一项目上跨运行**逐字节相同**，所以它值得一个独立的缓存条目。
+        messages = [mark_cache_breakpoint({"role": "system", "content": system_prompt})]
     # 断点 ③（移动的那个）挂在哪条消息上。见循环里的说明。
     movable_breakpoint: dict[str, Any] | None = None
+    # 子代理模式下任务书是 `messages[2]`，压历史必须把它一起钉住（见 `compact_history`）。
+    protect_head = 3 if seed_messages else 2
 
     rounds: list[RoundRecord] = []
     dropped: list[DroppedItem] = []
@@ -518,6 +577,7 @@ def run_analysis(
             recap=recap_text,
             requests_remaining=tools.requests_remaining,
             limits=limits,
+            task_message=task_message,
         )
         items, user_message = _prepare_round(brief, messages)
 
@@ -537,6 +597,9 @@ def run_analysis(
                 target_chars=max(0, limits.prompt_char_budget - len(user_message)),
                 keep_recent_turns=MIN_KEEP_TURNS,
                 memos=round_memos,
+                # 子代理的**任务书**在第 3 条，必须一起钉住：被压掉之后它会忘了自己的分工
+                # 而开始自由发挥，且不报任何错（见 `compact_history` 的说明）。
+                protect_head=protect_head,
             )
             if compacted.compacted:
                 messages[:] = list(compacted.messages)
@@ -563,8 +626,13 @@ def run_analysis(
         #
         # 两个断点都只加在**消息字典上的内部标记**上，不改内容：摘掉/挪动断点不会让任何
         # 一条消息的字节发生变化，所以「挪断点」与「append-extension」不冲突。
+        #
+        # 子代理模式（`seed_messages`）下**第 1 轮也要记下来**：那时任务书上已经有一个断点，
+        # 不记的话它会一直挂着，第 2 轮变成 4 个、第 3 轮起第 5 个被 `MAX_CACHE_BREAKPOINTS`
+        # **静默丢掉** —— 丢的恰好是当前轮那条最有价值的。单代理路径第 1 轮不记（那时
+        # 断点②就挂在第 1 轮的消息上，它本来就不该被挪走），行为与以前逐字节相同。
         entry = _mark_current({"role": "user", "content": user_message}, movable_breakpoint)
-        if round_index > 1:
+        if round_index > 1 or seed_messages:
             movable_breakpoint = entry
 
         round_started = time.monotonic()
@@ -863,6 +931,8 @@ class _RoundBrief:
     recap: str
     requests_remaining: int
     limits: EngineLimits
+    # 子代理模式下的**任务书**（第 1 轮的 user 消息原文，见 `run_analysis`）。空串 = 常规路径。
+    task_message: str = ""
 
 
 def _prepare_round(
@@ -872,7 +942,14 @@ def _prepare_round(
 
     **预算与消息必须用同一份变更清单文本**（`prompt.change_block`）：按清单全文算预算、
     消息里只放指针，会让平台白白少用几十万字符的额度；反过来的组合则是超预算。
+
+    子代理模式的第 1 轮走上面那条 `task_message` 分支：变更清单已经在**共享消息**里
+    （`seed_messages`）且已经按 `estimate_chars(messages)` 计入预算，这里再拼一遍会把它
+    算两次 —— 于是平台会白白少给自己的成员几万字符的上下文额度。
     """
+    if brief.round_index <= 1 and brief.task_message.strip():
+        # 第 1 轮没有待发条目（`pending_items` 要等第一次索取之后才有），所以不必过 `_fit_items`。
+        return (), brief.task_message
     block = change_block(brief.change_summary, round_index=brief.round_index)
     items, item_notes = _fit_items(
         brief.pending_items,

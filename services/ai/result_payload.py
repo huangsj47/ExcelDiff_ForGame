@@ -136,6 +136,13 @@ def result_payload(
             {"kind": item.kind, "reason": item.reason, "detail": item.detail}
             for item in outcome.dropped
         ],
+        # 子代理模式（services/ai/subagent.py）：这次分了几片、每一片跑了什么、谁没跑成。
+        #
+        # 放在这里是因为**面板与抽屉读的都是这一份**（落库的 response_payload）：不写进来，
+        # 「谁没跑成」就只存在于报告正文的一段文字里，而那段文字是最容易被跳过的部分。
+        # 没开子代理时是空列表 —— 读取侧据此区分「没开」与「一个成员都没跑」。
+        "subagents": [dict(item) for item in outcome.subagents],
+        "subagent_skipped": list(outcome.subagent_skipped),
     }
 
 

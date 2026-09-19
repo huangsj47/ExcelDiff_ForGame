@@ -40,6 +40,14 @@ class AiAnalysisTrace(db.Model):
         db.Integer, db.ForeignKey("ai_analysis_run.id"), nullable=False, index=True
     )
     round_index = db.Column(db.Integer, nullable=False)
+    # 这一轮是**谁**跑的。NULL/空 = 常规的单代理运行（也是子代理模式里主代理自己那几轮）；
+    # `S1`/`S2`… = 第几个分片代理（见 `services/ai/subagent.py`）。
+    agent = db.Column(db.String(20))
+    # 这一轮在**那个成员内部**的序号（`S1` 的第 2 轮就是 2）。`round_index` 是**整个家族
+    # 内全局递增**的序号 —— 一家子只落一条 `ai_analysis_run`，两个成员的「第 1 轮」必须
+    # 在库里区分得开，否则会撞上 `uq_ai_trace_run_round`。界面显示「S1 · 第 2/4 轮」用的
+    # 是这个列，不是 `round_index`。
+    agent_round = db.Column(db.Integer)
 
     outcome = db.Column(db.String(30))
     parsed_ok = db.Column(db.Boolean, default=False)
@@ -74,6 +82,10 @@ class AiAnalysisTrace(db.Model):
     # 一轮一行。这个唯一约束是安全的：轮次在一次分析内顺序递增，引擎每轮只写一次。
     # 它挡住的是「重试逻辑不小心把同一轮写了两遍」这种 bug —— 那种情况下 trace 会出现
     # 两条自相矛盾的记录（一条说解析失败、一条说成功），比直接报错难查得多。
+    #
+    # **子代理模式没有为它做任何迁移**：一家子只落一条运行，成员各自的轮次在
+    # `aggregate_outcomes` 里被重编成家族内全局递增的序号（顺序执行 → 确定），
+    # 所以「run_id + round_index」在这里依然是唯一的那一对。
     __table_args__ = (
         db.UniqueConstraint("run_id", "round_index", name="uq_ai_trace_run_round"),
     )

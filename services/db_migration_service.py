@@ -278,6 +278,11 @@ def _migrate_ai_analysis_columns(db, log_print):
             "budget_period": "budget_period VARCHAR(20)",
             "budget_token_limit": "budget_token_limit BIGINT",
             "budget_cost_limit": "budget_cost_limit VARCHAR(40)",
+            # 子代理模式（2026-09，见 services/ai/subagent.py）。同样没有 DEFAULT：
+            # 老行是 NULL，而 NULL 经 `resolved()` 读出来正是「关闭 + 3 个成员」——
+            # 「关闭」是唯一安全的默认值（打开它会让模型调用次数变成 n+1 倍）。
+            "subagent_enabled": "subagent_enabled BOOLEAN",
+            "subagent_count": "subagent_count INTEGER",
         },
         log_print,
     )
@@ -305,6 +310,11 @@ def _migrate_ai_analysis_columns(db, log_print):
             "duration_ms": "duration_ms INTEGER",
             "tool_stats_json": "tool_stats_json TEXT",
             "pricing_version": "pricing_version VARCHAR(40)",
+            # 子代理模式（2026-09）。一家子（n 个分片 + 1 次汇总）只落**这一条**运行，
+            # 所以这两列记的是「这次是按子代理模式跑的、几个分片」。NULL = 没开
+            # （也是所有老行的情形），读取侧据此显示成常规运行。
+            "subagent_mode": "subagent_mode VARCHAR(20)",
+            "subagent_count": "subagent_count INTEGER",
         },
         log_print,
     )
@@ -317,6 +327,12 @@ def _migrate_ai_analysis_columns(db, log_print):
             # 后才开始写），所以这里只补两个真正缺的列。
             "cache_read_tokens": "cache_read_tokens INTEGER",
             "cache_write_tokens": "cache_write_tokens INTEGER",
+            # 子代理模式（2026-09）：这一轮是哪个分片代理跑的、它在那个成员内部是第几轮。
+            # `round_index` 是**家族内全局递增**的序号（一家子只落一条运行，两个成员的
+            # 「第 1 轮」必须在库里分得开，否则撞 `uq_ai_trace_run_round`）。
+            # NULL/空 = 主代理自己的轮次，也是所有老行的情形 —— 不需要回填。
+            "agent": "agent VARCHAR(20)",
+            "agent_round": "agent_round INTEGER",
         },
         log_print,
     )

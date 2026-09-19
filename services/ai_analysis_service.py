@@ -88,6 +88,7 @@ from services.ai.rules import RuleThresholds, rules_version
 from services.ai.run_progress import clear as clear_run_progress
 from services.ai.run_progress import publish as publish_run_progress
 from services.ai.skill_loader import load_skills, skill_revision
+from services.ai.subagent import plan_family, run_family_with_seed, subagent_mode_of
 from services.ai.trace_evidence import encode_evidence
 from services.ai.usage import encode_tools
 from utils.dpapi_utils import DPAPI_PREFIX, decrypt_dpapi
@@ -1190,12 +1191,21 @@ def _persist_outcome(
     run.dropped_count = len(outcome.dropped)
     run.pricing_version = pricing_version or None
     run.error_message = outcome.error_message or None
+    # 子代理模式：这次是按分片跑的，就如实记下来（没开时两列是 NULL = 老行为）。
+    # 落在这里而不是 `result` 里：它是**这一次运行怎么跑的**，与「结论是什么」无关。
+    mode = subagent_mode_of(outcome)
+    run.subagent_mode = mode[0] if mode else None
+    run.subagent_count = mode[1] if mode else None
 
     for record in outcome.rounds:
         db.session.add(
             AiAnalysisTrace(
                 run_id=run.id,
                 round_index=record.index,
+                # 这一轮是哪个分片代理跑的（NULL = 主代理自己那几轮，也是所有老行的情形）。
+                # `round_index` 是家族内全局序号，成员内部的轮次另存在 `agent_round` 里。
+                agent=record.agent or None,
+                agent_round=record.agent_round or None,
                 outcome=record.status,
                 parsed_ok=record.status != "unparsable",
                 # 这一轮要了什么、拿到了什么、丢了什么、模型原样返回了什么 —— 编码只在
@@ -1414,27 +1424,44 @@ def _run_engine_and_persist(
     limits, budget_note = _apply_model_window(client, project_config, _engine_limits(project_config))
     if budget_note:
         log_print(f"⚠️ AI 分析：{budget_note}", "AI", force=True)
-    outcome = run_analysis(
-        client=client,
+    # 这一份参数**两条路共用**（单代理 / 子代理），键名就是 `engine.run_analysis` 的形参名。
+    # 分成两处各写一遍的话，14 个参数里总会有一处漏掉，而漏掉的那个是静默的。
+    engine_args = {
+        "client": client,
         # 周版本批次分析读平台**已算好并落库**的那一份合并 diff（就是周版本页面读的
         # 同一个 payload），而不是现场用本地工作副本重算 —— 见
         # `platform_provider._weekly_stored_diff`。单提交分析要关掉它：那时模型问的是
         # 「这一条提交改了什么」，而缓存里那一份覆盖的是一个窗口（可能好几条提交）。
-        provider=PlatformContextProvider(
+        # 子代理模式下**所有成员共用一个 provider**：它的记忆（agent 取回的正文与差异）
+        # 因此也共享，N 个成员不会把同一份内容取 N 遍。
+        "provider": PlatformContextProvider(
             loaded=loaded, use_stored_batch_diff=(payload.get("mode") != "commit")
         ),
-        loaded=loaded,
-        scope=change.scope,
-        change_summary=change.summary,
-        limits=limits,
-        thresholds=RuleThresholds.from_config(project_config),
-        project_knowledge=project_config.get("project_knowledge") or "",
-        project_instructions=project_config.get("prompt_template") or "",
-        baseline_digest=_baseline_digest(target_type, target_key, change),
+        "loaded": loaded,
+        "scope": change.scope,
+        "change_summary": change.summary,
+        "limits": limits,
+        "thresholds": RuleThresholds.from_config(project_config),
+        "project_knowledge": project_config.get("project_knowledge") or "",
+        "project_instructions": project_config.get("prompt_template") or "",
+        "baseline_digest": _baseline_digest(target_type, target_key, change),
         # 每跑完一轮把累计用量写进进程内的进度快照：界面一边跑一边轮询它
         # （见 services/ai/run_progress.py）。**它是给界面看的一眼，不是账** ——
-        # 落库的账仍在 _persist_outcome 那一处。
-        on_round=lambda progress: publish_run_progress(run.id, project_id, progress),
+        # 落库的账仍在 `_persist_outcome` 那一处。
+        "on_round": lambda progress: publish_run_progress(run.id, project_id, progress),
+    }
+    # 子代理模式（services/ai/subagent.py）：默认关，只对周版本生效，不适用时返回 None
+    # 走原来的单代理路径 —— 那条路径的参数、行为与这个功能上线之前逐字节相同。
+    plan = plan_family(
+        mode=payload.get("mode") or "",
+        enabled=bool(project_config.get("subagent_enabled")),
+        count=project_config.get("subagent_count") or 0,
+        limits=limits,
+    )
+    outcome = (
+        run_analysis(**engine_args)
+        if plan is None
+        else run_family_with_seed(plan=plan, **engine_args)
     )
 
     result = result_payload(

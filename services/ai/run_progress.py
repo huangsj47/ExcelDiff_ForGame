@@ -63,6 +63,13 @@ class ProgressSnapshot:
     items_chars: int
     elapsed_ms: int
     updated_at: float
+    # 子代理模式（services/ai/subagent.py）：这一轮是哪个分片在跑、它是第几个/共几个。
+    # `agent` 为空且 `agent_index > 0` = 那是**汇总**那一次（它就是这个分析的主代理）。
+    # 三个都排在最后且带默认值：没开子代理时，构造一个快照与这一层之前**完全一样**
+    # （`updated_at` 保持必填 —— 给它一个默认值等于埋一个「忘了传就是永远过期」的坑）。
+    agent: str = ""
+    agent_index: int = 0
+    agent_total: int = 0
 
     @property
     def live_tokens(self) -> int:
@@ -88,6 +95,9 @@ class ProgressSnapshot:
             "requests_remaining": self.requests_remaining,
             "items_chars": self.items_chars,
             "elapsed_ms": self.elapsed_ms,
+            "agent": self.agent,
+            "agent_index": self.agent_index,
+            "agent_total": self.agent_total,
             "live_tokens": self.live_tokens,
             "age_seconds": max(0, int(time.monotonic() - self.updated_at)),
         }
@@ -129,6 +139,11 @@ def publish(run_id: int, project_id: int, progress: Any) -> None:
             requests_remaining=int(getattr(progress, "requests_remaining", 0) or 0),
             items_chars=int(getattr(progress, "items_chars", 0) or 0),
             elapsed_ms=int(getattr(progress, "elapsed_ms", 0) or 0),
+            # 与其它字段同样用 `getattr`：这一层要能容忍任何「长得像进度」的对象
+            # （老调用方、测试里的替身），缺字段就是没有分片信息，不是错误。
+            agent=str(getattr(progress, "agent", "") or ""),
+            agent_index=int(getattr(progress, "agent_index", 0) or 0),
+            agent_total=int(getattr(progress, "agent_total", 0) or 0),
             updated_at=time.monotonic(),
         )
         now = time.monotonic()

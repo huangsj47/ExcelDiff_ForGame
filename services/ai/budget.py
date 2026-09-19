@@ -523,6 +523,7 @@ def compact_history(
     target_chars: int,
     keep_recent_turns: int = MIN_KEEP_TURNS,
     memos: Sequence[TurnMemo] = (),
+    protect_head: int = 2,
 ) -> CompactionResult:
     """把**中间那些轮次**压成一段摘要：只留 system、第一轮、以及最近几轮原文。
 
@@ -535,6 +536,17 @@ def compact_history(
     能压的只有「要过什么、拿到过什么」的那几轮，而它们恰好最占体积、信息密度最低：
     每一轮都把整份上下文重发一遍。压掉它们换来的是「分析能跑到底」，而不是「少花点钱」。
 
+    ## `protect_head`：子代理模式下必须多钉一条
+
+    子代理（见 `services/ai/subagent.py`）的第一轮消息形状是
+    `[system, 共享消息, **任务书**]` —— 任务书排在**第 3 条**。它写的是「你负责哪几个
+    维度」，被压掉之后子代理会跑到一半忘记自己的分工，然后开始自由发挥；而这件事**不会
+    报错**，只表现为一份浅一点的报告。所以那条调用要传 `protect_head=3`。
+
+    默认值 2 就是这条改动之前的行为（钉住 system 与第一轮），不传时逐字节不变。
+    「前 k 条」是按**位置**数，不是按轮次：调用方必须在「上一轮的 assistant 已经进了
+    messages、本轮的 user 还没进」这个时刻调用它，位置才对得上。
+
     ## 压的是重复，不是信息
 
     被丢掉的轮次不会消失：`recap` 里有一行一行的记录（第几轮、索取了什么），并且会带上
@@ -542,14 +554,14 @@ def compact_history(
 
     ## `memos` 与轮次是按位置一一对应的
 
-    第 i 个 memo 描述 tail 里的第 i 轮。调用方必须在「上一轮的 assistant 已经进了 messages、
-    本轮的 user 还没进」这个时刻调用它，此时两者恰好对齐（引擎里的调用点就是这里）。
+    第 i 个 memo 描述 tail 里的第 i 轮。
     """
     ordered = [dict(message) for message in messages]
-    if len(ordered) <= 2:
+    head_size = max(1, int(protect_head))
+    if len(ordered) <= head_size:
         return CompactionResult(messages=tuple(ordered))
 
-    head, tail = ordered[:2], ordered[2:]
+    head, tail = ordered[:head_size], ordered[head_size:]
     turns = _group_turns(tail)
     keep = max(0, int(keep_recent_turns))
 
