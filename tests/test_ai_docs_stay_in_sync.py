@@ -22,6 +22,8 @@ import re
 
 from models.ai_analysis.project_config import (
     DEFAULT_MAX_ANALYSIS_ROUNDS,
+    DEFAULT_SUBAGENT_ENABLED,
+    DEFAULT_SUBAGENT_VERIFY,
     DEFAULT_MAX_ANOMALIES_PER_RUN,
     DEFAULT_SUBAGENT_COUNT,
     DEFAULT_MAX_FILES_PER_RUN,
@@ -109,6 +111,29 @@ _DOCUMENTED_DEFAULTS = {
     # 但「数量」这一行必须有 —— 它同时钉住默认值 3 与范围 1~6。
     "子代理数量": (DEFAULT_SUBAGENT_COUNT, SUBAGENT_COUNT_RANGE),
 }
+
+
+# 开关类的配置项：文档那一行的默认值是「开 / 关」，代码里是 `True` / `False`。
+# 不放进上面那张数字表（那张表按 \`1~6\` 这样的范围列拼行），但**同样要钉**：
+# 文档说「默认关」而代码是 `True`，读文档的人会以为这个功能不上线就生效。
+_DOCUMENTED_SWITCHES = {
+    "子代理模式（仅周版本）": DEFAULT_SUBAGENT_ENABLED,
+    "对账轮（找反证，仅周版本）": DEFAULT_SUBAGENT_VERIFY,
+}
+
+
+def test_the_documented_switches_match_the_code():
+    """开关的默认值：文档写「关」而代码是 `True` 是最危险的一种漂移。
+
+    它不会报错，只会让用户在一次「我什么都没开」的分析里发现账单翻了几倍 ——
+    或者反过来，以为某个功能默认就有。
+    """
+    doc = _read(AI_DOC)
+
+    for label, default in _DOCUMENTED_SWITCHES.items():
+        word = "开" if default else "关"
+        row = f"| {label} | {word} | 开/关 |"
+        assert row in doc, f"说明文档里的配置表与代码不一致，期望这一行：{row}"
 
 
 def test_the_documented_defaults_and_ranges_match_the_code():

@@ -1481,6 +1481,26 @@
                             </div>
                             <div class="form-text text-danger d-none" id="aiSubagentCountInputError"></div>
                         </div>
+                        <!-- 对账轮（阶段 3）。**默认关**，且它是「子代理模式」之上的可选一道复核：
+                             汇总之后再跑一次独立请求，要它去找反证。不写清「它买的是什么」，
+                             用户会以为开了子代理就已经有复核了。 -->
+                        <div class="col-12 col-lg-6 ai-config-field">
+                            <label class="form-label" for="aiSubagentVerifyToggle">对账轮（找反证，仅周版本）</label>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="aiSubagentVerifyToggle"
+                                       aria-describedby="aiSubagentVerifyToggleHelp">
+                                <label class="form-check-label" for="aiSubagentVerifyToggle">启用</label>
+                            </div>
+                            <div class="form-text" id="aiSubagentVerifyToggleHelp">
+                                <strong>默认关。</strong>打开后，汇总报告里<strong>最严重的那几条</strong>
+                                会再交给一次独立请求去<strong>找反证</strong>（要求指出具体文件与行），
+                                结论写在报告末尾的「对账结果（找反证）」：要么「反证成立」，
+                                要么「未找到反证（查了哪里）」。
+                                代价是多一次模型调用（同样命中变更清单的缓存）；对账轮没跑成时，
+                                结果会如实标成降级 —— 报告里的结论**没有经过这道复核**。
+                                需要先打开上面的「子代理模式」。
+                            </div>
+                        </div>
                         <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiPromptCharBudgetInput">提示词字符预算</label>
                             <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiPromptCharBudgetInput"
@@ -2332,7 +2352,12 @@ const AI_RANGE_KINDS = ['int', 'optional_int', 'optional_money'];
 const AI_OPTIONAL_KINDS = ['optional_int', 'optional_money'];
 
 // 只读用户不该动的东西（radio 与开关不在 AI_FIELD_DOM 里，单独列）。
-const AI_READONLY_EXTRA = ['aiWeeklyAutoToggle', 'aiSourceOpenai', 'aiSourceCustom', 'aiKeyToggleBtn'];
+// 开关注定不在 `AI_FIELD_DOM` 里（那张表是给字段级报错用的），所以它们**必须**在这里
+// 逐个列出 —— 漏一个是「只读用户还能改配置」，而页面上看不出任何异常。
+const AI_READONLY_EXTRA = [
+    'aiWeeklyAutoToggle', 'aiSourceOpenai', 'aiSourceCustom', 'aiKeyToggleBtn',
+    'aiSubagentToggle', 'aiSubagentVerifyToggle',
+];
 
 // 最近一次读到的配置。范围提示与本地校验都从它取 field_schema，
 // **不在模板里写死范围**，否则会出现「界面写 1~30、后端按别的范围校验」。
@@ -2519,6 +2544,9 @@ function fillAiConfigForm(data) {
     // 唯一安全默认值，所以只有明确的 `true` 才勾上。
     const subagentToggle = aiEl('aiSubagentToggle');
     if (subagentToggle) subagentToggle.checked = data.subagent_enabled === true;
+    // 对账轮同一条口径：只有明确的 `true` 才勾上（默认关，老行的 NULL 读成关）。
+    const verifyToggle = aiEl('aiSubagentVerifyToggle');
+    if (verifyToggle) verifyToggle.checked = data.subagent_verify === true;
 
     const sourceInput = aiEl(data.source === 'custom' ? 'aiSourceCustom' : 'aiSourceOpenai');
     if (sourceInput) sourceInput.checked = true;
@@ -2757,6 +2785,8 @@ function collectAiConfigPayload() {
     if (autoToggle) payload.auto_weekly_enabled = !!autoToggle.checked;
     const subagentToggle = aiEl('aiSubagentToggle');
     if (subagentToggle) payload.subagent_enabled = !!subagentToggle.checked;
+    const verifyToggle = aiEl('aiSubagentVerifyToggle');
+    if (verifyToggle) payload.subagent_verify = !!verifyToggle.checked;
 
     return payload;
 }

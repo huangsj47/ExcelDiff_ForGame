@@ -167,3 +167,83 @@ def test_a_count_below_two_degrades_to_one_agent(monkeypatch, count):
 
         assert outcome["status"] == "succeeded", outcome
         assert len(client.calls) == 1
+
+
+def _enable_verify(project_id: int, *, enabled: bool) -> None:
+    ai_service.update_project_analysis_config(project_id, {"subagent_verify": enabled})
+    db.session.commit()
+
+
+def test_the_verify_round_runs_and_lands_on_the_same_run(monkeypatch):
+    """开了对账轮：多跑**一次**模型调用（标签 V1），报告里多出「对账结果」那一节。
+
+    这里量的是接线：配置项从库里读出来、传进 `plan_family`、编排跑完、再落进同一条运行
+    （`uq_ai_trace_run_round` 靠家族内全局递增的 `round_index` 撑住 —— 对账轮是第 4 轮）。
+    """
+    client = _FakeClient()
+    with flask_app.app_context():
+        create_tables()
+        ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
+        _enable_subagents(project.id, count=2)
+        _enable_verify(project.id, enabled=True)
+        _run(monkeypatch, client=client)
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+
+        assert outcome["status"] == "succeeded", outcome
+        # 2 个分片 + 1 次汇总 + 1 次对账
+        assert len(client.calls) == 4, f"对账轮没有跑起来（只调了 {len(client.calls)} 次）"
+        # 对账轮同样吃共享前缀（省钱的机制对它一样成立）。
+        shared = {json.dumps(call[:2], ensure_ascii=False) for call in client.calls}
+        assert len(shared) == 1, "对账轮没有用共享前缀 —— 缓存会 miss"
+
+        run = (
+            AiAnalysisRun.query.filter_by(
+                target_type="weekly", target_key=build_weekly_group_key(cfg)
+            )
+            .order_by(AiAnalysisRun.id.desc())
+            .first()
+        )
+        traces = (
+            AiAnalysisTrace.query.filter_by(run_id=run.id)
+            .order_by(AiAnalysisTrace.round_index.asc())
+            .all()
+        )
+        assert [row.agent for row in traces] == ["S1", "S2", None, "V1"]
+        assert [row.round_index for row in traces] == [1, 2, 3, 4]
+
+        payload = json.loads(run.response_payload)
+        assert [item["label"] for item in payload["subagents"]] == ["S1", "S2", "汇总", "V1"]
+        assert payload["subagents"][-1]["role"] == "verify"
+        assert "## 对账结果（找反证）" in run.response_text
+
+
+def test_the_verify_flag_does_nothing_on_its_own(monkeypatch):
+    """**对账轮依附在子代理模式上**：没开子代理时它一个字都不生效。
+
+    否则「开了对账轮但没开子代理」会变成一次**没有任何分片**的独立复核 —— 那既不是
+    用户想要的，也没有可核对的「几个分片各自的结论」。
+    """
+    client = _FakeClient()
+    with flask_app.app_context():
+        create_tables()
+        ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
+        _enable_verify(project.id, enabled=True)
+        _run(monkeypatch, client=client)
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+
+        assert outcome["status"] == "succeeded", outcome
+        assert len(client.calls) == 1, "没开子代理却多跑了对账轮"
+        assert "对账结果" not in (outcome.get("report_markdown") or "")
+
+
+def test_the_verify_default_is_off(monkeypatch):
+    """老库上这一列是 NULL → 读成「关」。**它是唯一安全的默认值**（一次额外调用）。"""
+    with flask_app.app_context():
+        create_tables()
+        _ai_service, project, _cfg = _prepare_weekly_run(monkeypatch)
+
+        cfg_data = ai_service.get_project_analysis_config(project.id)
+
+        assert cfg_data["subagent_verify"] is False

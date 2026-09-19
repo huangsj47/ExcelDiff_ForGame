@@ -1448,17 +1448,17 @@ def _run_engine_and_persist(
         "project_knowledge": project_config.get("project_knowledge") or "",
         "project_instructions": project_config.get("prompt_template") or "",
         "baseline_digest": _baseline_digest(target_type, target_key, change),
-        # 每跑完一轮把累计用量写进进程内的进度快照：界面一边跑一边轮询它
-        # （见 services/ai/run_progress.py）。**它是给界面看的一眼，不是账** ——
-        # 落库的账仍在 `_persist_outcome` 那一处。
+        # 每跑完一轮把累计用量写进进程内的进度快照（services/ai/run_progress.py，界面
+        # 一边跑一边轮询它）。**它是给界面看的一眼，不是账** —— 账在 `_persist_outcome`。
         "on_round": lambda progress: publish_run_progress(run.id, project_id, progress),
     }
-    # 子代理模式（services/ai/subagent.py）：默认关，只对周版本生效，不适用时返回 None
-    # 走原来的单代理路径 —— 那条路径的参数、行为与这个功能上线之前逐字节相同。
+    # 子代理模式（services/ai/subagent.py）：默认关、只对周版本生效，不适用时返回 None
+    # 走原来的单代理路径。`verify` 是对账轮，它依附在子代理上 —— 没开子代理时不生效。
     plan = plan_family(
         mode=payload.get("mode") or "",
         enabled=bool(project_config.get("subagent_enabled")),
         count=project_config.get("subagent_count") or 0,
+        verify=bool(project_config.get("subagent_verify")),
         limits=limits,
     )
     outcome = (
@@ -1466,9 +1466,9 @@ def _run_engine_and_persist(
         if plan is None
         else run_family_with_seed(
             plan=plan,
-            # 每片开跑前看一眼预算（含本次运行已消耗的那部分）。判据与起跑闸门同一个
-            # `budget_status`，只是多算了这一家子已经花掉的 token —— 否则前面几片的
-            # 花费还没落库，每一片都看到「还没超」。被跳过的分片会进报告的信息缺口。
+            # 每片开跑前看一眼预算（含本次已消耗的）：判据与起跑闸门同一个 `budget_status`，
+            # 只是多算了这一家子已花掉的 token —— 否则前面几片的花费还没落库，每一片都
+            # 看到「还没超」。被跳过的分片会进报告的信息缺口。
             should_skip=early_stop_guard(project_id, entry="subagent"),
             **engine_args,
         )

@@ -55,6 +55,7 @@ from services.ai.engine import (
     DEGRADE_REQUESTS,
     DEGRADE_ROUNDS,
     DEGRADE_SUBAGENT,
+    DEGRADE_VERIFY,
     STATUS_DEGRADED,
     STATUS_FAILED,
     STATUS_SUCCEEDED,
@@ -67,13 +68,15 @@ from services.ai.engine import (
 from services.ai.prompt import build_system_prompt, build_user_message
 from services.ai.prompt_cache import mark_cache_breakpoint
 from services.ai.protocol import Anomaly, DroppedItem
-from services.ai.rules import RuleThresholds
+from services.ai.rules import RuleThresholds, rank_anomalies
 from services.ai.scope import AnalysisScope
 from services.ai.skill_contract import DIMENSION_IDS
 from services.ai.skill_loader import LoadedSkills
 
 ROLE_SUBAGENT = "subagent"
 ROLE_SYNTHESIS = "synthesis"
+# 对账轮（找反证）。它**不是分片**：它读的是汇总之后的报告，要干的事是反驳。
+ROLE_VERIFY = "verify"
 
 # 子代理模式下**只对周版本**生效。单提交分析不拆：那一次改动的规模本来就不需要分工，
 # 拆了只会让「这一次提交改了什么」多绕一圈。
@@ -83,6 +86,13 @@ WEEKLY_MODE = "weekly"
 # `plan_family` 也可能被别的调用方按数字直接调（测试就是）。
 MAX_SUBAGENTS = 6
 DEFAULT_SUBAGENT_COUNT = 3
+
+# 对账轮一次核对几条。**只核对最严重的几条**：对账要的是深度（去找反证、指出证据够不够），
+# 而不是把整份报告重读一遍 —— 后者正是汇总那一次已经做过的事。
+DEFAULT_VERIFY_ITEMS = 3
+MAX_VERIFY_ITEMS = 5
+# 对账轮在 trace 与面板上的标签（与 `S1..S6` 同一套编号法）。
+VERIFY_LABEL = "V1"
 
 # 一个成员至少要有的索取额度与轮次。低于它就别拆了：一个只有 2 次索取的成员既看不深，
 # 又要多花一次整份提示词的钱，得不偿失。
@@ -161,6 +171,9 @@ class FamilyPlan:
     `limits` 里的两个数字**必须对所有成员（含汇总那一次）相同**：它们被写进了共享消息的
     正文（「本次分析总共可索取 N 次」），一个一个地调就会让共享消息不再逐字节相同，
     于是 prompt cache 全部失效 —— 而那**不会报错**，只会悄悄贵好几倍。
+
+    `verify` 打开时会在汇总之后再跑一次「找反证」（`build_verify_task`），它同样用这份
+    共享前缀（所以也吃缓存），日志与面板上的标签是 `V1`。
     """
 
     count: int
@@ -168,6 +181,8 @@ class FamilyPlan:
     synthesis: MemberPlan
     limits: EngineLimits
     seed_messages: tuple[Mapping[str, Any], ...] = ()
+    verify: bool = False
+    verify_items: int = DEFAULT_VERIFY_ITEMS
 
     @property
     def all_steps(self) -> tuple[MemberPlan, ...]:
@@ -273,6 +288,8 @@ def plan_family(
     enabled: bool,
     count: int,
     limits: EngineLimits,
+    verify: bool = False,
+    verify_items: int = 0,
 ) -> FamilyPlan | None:
     """要不要开子代理、怎么分。**不适用时返回 `None`**，调用方走原来的单代理路径。
 
@@ -281,12 +298,18 @@ def plan_family(
     * 配置里没开（默认就是关的：这是一条会让消耗成倍上升的功能，必须由人主动打开）；
     * `count < 2`（一个成员就是原来的单代理，白白多花一次汇总的钱）。
 
+    `verify` 是对账轮（找反证）。它依附在子代理模式上：**没开子代理就没有对账轮** ——
+    单代理那条路的报告本来就没有「几个分片各自的结论」需要核对，而这条功能的价值正是
+    交叉核对。这一点写在这里而不是让配置界面去解释：`subagent_verify` 在
+    `subagent_enabled` 关掉时不生效，界面上的说明文案也是这么写的。
+
     ## 为什么额度取「家族常量」而不是按成员摊
 
     每个成员的额度都要写进**共享消息**（「本次分析总共可索取 N 次」），而共享消息必须在
     所有成员之间逐字节相同。所以这里先把总额度除以 `count + 1`（n 个成员 + 1 次汇总），
     得到一个**大家一样**的数字，再拿它去拼共享消息。副作用是「调大索取上限」会同时抬高
-    每个成员的那一份 —— 这是对的：上限本来就是整次分析的额度。
+    每个成员的那一份 —— 这是对的：上限本来就是整次分析的额度。对账轮不额外分一份：
+    它核对的是已经拿到的证据，用剩下的额度就够（详见 `build_verify_task`）。
     """
     if mode != WEEKLY_MODE or not enabled:
         return None
@@ -315,8 +338,23 @@ def plan_family(
         dimensions=tuple(DIMENSION_IDS),
     )
     return FamilyPlan(
-        count=len(members), members=members, synthesis=synthesis, limits=family_limits
+        count=len(members),
+        members=members,
+        synthesis=synthesis,
+        limits=family_limits,
+        verify=bool(verify),
+        verify_items=_clamp_verify_items(verify_items),
     )
+
+
+def _clamp_verify_items(value: Any) -> int:
+    try:
+        size = int(value or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size <= 0:
+        return DEFAULT_VERIFY_ITEMS
+    return max(1, min(size, MAX_VERIFY_ITEMS))
 
 
 def build_seed_messages(
@@ -513,8 +551,85 @@ def build_synthesis_task(plan: FamilyPlan, steps: Sequence[MemberOutcome]) -> st
     return "\n\n".join(blocks).rstrip() + "\n"
 
 
+def build_verify_task(plan: FamilyPlan, synthesis: EngineOutcome) -> str:
+    """对账轮的任务书：把最严重的几条交出去，**要求它去找反证**。
+
+    ## 为什么是「找反证」，而不是「再评审一遍」
+
+    汇总那一次已经在评审了，再问一遍「你觉得对不对」得到的只会是同一批理由的复述 ——
+    而且模型对自己刚写下的结论天然是**确认偏误**的一方。所以这一轮的指令是反过来的：
+    你的任务是**推翻它们**，每条都要给出「能证明它不成立的具体文件与行」，找不到就明说
+    「未找到反证」。这两种答复都必须是**有代价的**：说「未找到」也要写明你去哪里找过。
+
+    ## 只核对最严重的几条
+
+    对账要的是深度（证据够不够、有没有误报），不是覆盖面 —— 覆盖是汇总那一次的事。
+    所以按严重度取前 `plan.verify_items` 条（默认 3）。这一轮不额外分索取额度：
+    核对几条结论用剩下的额度足够，而多分一份就会让每个分片的额度少一点。
+
+    ## 它用同一份共享前缀
+
+    对账轮的请求形状与分片一致（system + 共享变更清单 + 本任务书），所以**它也吃缓存** ——
+    这是一次额外的模型调用里最贵的那一段。
+    """
+    # 排序复用 `rules.rank_anomalies`（严重度 → 置信度，同档保持模型给的顺序）——
+    # 对账要挑的「最严重的几条」必须与封顶时挑的是同一个口径，两套排序迟早会不一致。
+    ranked = [
+        anomaly
+        for _index, anomaly in rank_anomalies(list(enumerate(synthesis.anomalies)))[
+            : plan.verify_items
+        ]
+    ]
+    blocks = [
+        "# 分工：你是对账轮（找反证）",
+        (
+            f"本次周版本分析由 {plan.count} 个分片代理分头深挖、主代理汇总成了报告，"
+            "已经交给评审者。**你的任务不是再评审一遍，而是去找它们的反证。**"
+        ),
+        (
+            "## 纪律（四条）\n\n"
+            "1. **对下面每一条，明确回答「反证成立」还是「未找到反证」**，两种都要给依据。\n"
+            "2. **反证必须落到具体位置**：哪个文件、哪几行、哪个配置行 —— 指不出来就不算反证，"
+            "只能写成「未找到反证（我查了哪里、没查到）」。\n"
+            "3. **不要重复确认它是**：原文里的理由不是新证据；你要找的是**能推翻它的东西**"
+            "（这段代码根本不会走到、这个字段在这次改动里没变、这个判定在服务端另有一道校验、"
+            "这是阶段性屏蔽…）。\n"
+            "4. **确实推翻不了就如实说**。「未找到反证」是一个完全合格的答复，"
+            "编一条反证比说没找到糟得多。"
+        ),
+    ]
+    if not ranked:
+        blocks.append(
+            "## 待核对结论\n\n主代理这次没有报出任何达到门槛的结论。"
+            "你要做的是判断这件事本身是否站得住：本批次里有没有被整份报告漏掉的改动"
+            "（尤其是 `value_sanity` 与 `module_coupling` 这两类），"
+            "有就在 `anomalies` 里报出来，没有就写「未找到反证」。"
+        )
+    else:
+        lines = []
+        for index, anomaly in enumerate(ranked, start=1):
+            lines.append(f"### {index}. {anomaly.title}")
+            lines.append(f"- 维度：{anomaly.category} · 严重度 {anomaly.severity}")
+            if anomaly.file_path:
+                lines.append(f"- 位置：{anomaly.file_path}")
+            if anomaly.impact:
+                lines.append(f"- 它说会造成：{truncate_text(anomaly.impact, CANDIDATE_TEXT_MAX_CHARS)[0]}")
+            for evidence in anomaly.evidence[:3]:
+                lines.append(f"- 它的证据：{truncate_text(str(evidence), CANDIDATE_TEXT_MAX_CHARS)[0]}")
+        blocks.append("## 待核对结论（逐条回答）\n\n" + "\n".join(lines))
+    blocks.append(
+        "## 输出\n\n"
+        "走同一套 JSON 协议（`status` / `report_markdown` / `anomalies` 都一样）。"
+        "对账结论写在 `report_markdown` 里，**一条一段**，形如 "
+        "「第 1 条 ××：反证成立 —— <哪个文件哪一行说明了什么>」或 "
+        "「第 1 条 ××：未找到反证（查了 <文件/行>）」；"
+        "`anomalies` 只放**你在找反证的过程中新发现的**问题，没有就给空数组。"
+    )
+    return "\n\n".join(blocks).rstrip() + "\n"
+
+
 def _render_candidates(plan: FamilyPlan, steps: Sequence[MemberOutcome]) -> str:
-    """把各成员报出的候选结论渲染成任务书里的一段。"""
+    """把各成员报出的候选结论渲染成任务书里的一段（含「还有几条没列出来」）。"""
     lines: list[str] = []
     total = 0
     for step in steps:
@@ -562,10 +677,22 @@ def _markdown_excerpt(outcome: EngineOutcome) -> str:
 
 
 def _gap_lines(steps: Sequence[MemberOutcome]) -> tuple[str, ...]:
-    """哪个成员没跑成、为什么。**报告与面板共用这一份措辞**（两处各写一遍必然对不上）。"""
+    """哪个成员没跑成、为什么。**报告与面板共用这一份措辞**（两处各写一遍必然对不上）。
+
+    分片与对账轮**分成两组**（见下面两个函数）：它们没跑成的后果不是一回事，写在一起
+    会让「有一块维度没人看过」与「结论没经过复核」混成同一句话 —— 而前者要按缺口处理，
+    后者只是少了一道复核。
+    """
+    return (*_shard_gap_lines(steps), *_verify_gap_lines(steps))
+
+
+def _shard_gap_lines(steps: Sequence[MemberOutcome]) -> tuple[str, ...]:
+    """分片（含汇总）没跑成 —— 它负责的维度这一次**没有人看过**。"""
     lines: list[str] = []
     for step in steps:
         dimensions = "、".join(step.plan.dimensions)
+        if step.plan.role == ROLE_VERIFY:
+            continue
         if step.skipped_reason:
             lines.append(
                 f"- {step.plan.label} **未运行**：{step.skipped_reason}；"
@@ -580,6 +707,42 @@ def _gap_lines(steps: Sequence[MemberOutcome]) -> tuple[str, ...]:
                 f"它负责的维度（{dimensions}）本次**没有人看过**。"
             )
     return tuple(lines)
+
+
+def _verify_gap_lines(steps: Sequence[MemberOutcome]) -> tuple[str, ...]:
+    """对账轮没跑成 —— 它**没有负责的维度**，没跑成的后果是「结论没经过复核」。
+
+    所以这里绝不能套上面那句「它负责的维度（空）没有人看过」：那是一句**错的**话
+    （会读成「有一块维度没人看过」），而这两件事该被怎么处置完全不同。
+    """
+    lines: list[str] = []
+    for step in steps:
+        if step.plan.role != ROLE_VERIFY:
+            continue
+        if not (step.skipped_reason or step.failed):
+            continue
+        reason = step.skipped_reason or step.error or (
+            step.outcome.error_message if step.outcome else ""
+        ) or "没有给出可用结论"
+        lines.append(
+            f"- {step.plan.label}：{reason}；报告的结论"
+            "**没有经过「找反证」这一道**，读的时候按原样看。"
+        )
+    return tuple(lines)
+
+
+def verify_section(step: MemberOutcome) -> str:
+    """对账轮跑成之后追加到报告末尾的那一节（含抬头，模型写的那段原样在下面）。"""
+    body = (step.outcome.report_markdown or "").strip() if step.outcome else ""
+    if not body:
+        return ""
+    return (
+        "## 对账结果（找反证）\n\n"
+        "以下是**对照着去推翻**前面那几条结论的结果：平台在汇总之后又跑了一次独立核对，"
+        "要它去找反证（能证明某条结论不成立的具体文件与行）。两种答复都算结论 ——"
+        "「反证成立」意味着那一条**不该按原样采信**；「未找到反证」意味着有人去找过、没找到。\n\n"
+        + body
+    )
 
 
 # --------------------------------------------------------------------------
@@ -681,6 +844,42 @@ def run_family(
         error="" if synthesis_outcome.status != STATUS_FAILED else synthesis_outcome.error_message,
     )
     steps.append(synthesis_step)
+
+    # 对账轮**在汇总之后**：它核对的正是汇总出来的那份报告（最高严重度那几条），放在
+    # 汇总之前没有东西可核。它用的也是共享前缀，所以那一轮同样吃缓存。
+    #
+    # 汇总没跑成时**不跑它**：它核对的对象就是那份报告，而报告不存在 —— 跑下去要么是空转
+    # （任务书里只剩「主代理没报出任何结论」那一支），要么是让模型对着一份失败的运行凭空
+    # 产出「对账结论」。这一条与预算无关，所以不走 `should_skip`。
+    if plan.verify and synthesis_outcome.status != STATUS_FAILED:
+        # 预算早停同样管它：这时再花一整份提示词去买一道**复核**，而复核的对象（报告）
+        # 已经产出了 —— 跳过它并在报告里点名（`DEGRADE_VERIFY`）比挤掉下一个版本更划算。
+        verify_member = MemberPlan(
+            index=plan.count + 2, label=VERIFY_LABEL, role=ROLE_VERIFY, dimensions=()
+        )
+        reason = should_skip(verify_member, spent_tokens) if should_skip is not None else ""
+        if reason:
+            steps.append(MemberOutcome(plan=verify_member, skipped_reason=reason))
+        else:
+            steps.append(
+                _run_verify(
+                    plan=plan,
+                    member=verify_member,
+                    synthesis=synthesis_outcome,
+                    client=client,
+                    provider=provider,
+                    loaded=loaded,
+                    scope=scope,
+                    change_summary=change_summary,
+                    thresholds=thresholds,
+                    project_knowledge=project_knowledge,
+                    project_instructions=project_instructions,
+                    baseline_digest=baseline_digest,
+                    on_round=on_round,
+                    body_cache=body_cache,
+                    run_analysis_fn=run_analysis_fn,
+                )
+            )
 
     candidates = tuple(
         candidate for step in steps for candidate in step.candidates
@@ -791,6 +990,60 @@ def _candidates_of(member: MemberPlan, outcome: EngineOutcome) -> tuple[Candidat
     return items[:CANDIDATE_MAX_ITEMS_PER_MEMBER]
 
 
+def _run_verify(
+    *,
+    plan: FamilyPlan,
+    member: MemberPlan,
+    synthesis: EngineOutcome,
+    client: Any,
+    provider: Any,
+    loaded: LoadedSkills,
+    scope: AnalysisScope,
+    change_summary: str,
+    thresholds: RuleThresholds | None,
+    project_knowledge: str,
+    project_instructions: str,
+    baseline_digest: str,
+    on_round: Callable[[RoundProgress], None] | None,
+    body_cache: MutableMapping[Any, ContextItem],
+    run_analysis_fn: Callable[..., EngineOutcome],
+) -> MemberOutcome:
+    """跑对账轮。它**不是分片**：维度是空的，`role` 是 `verify`，面板上标签是 `V1`。
+
+    `member` 由 `run_family` 建好传进来（那里要用它先问一次预算），所以这里不再自己造一个 ——
+    两处各造一个的下场是 `index` / `label` 迟早对不上，而标签正是面板上的那一列。
+    """
+    outcome = _call_engine(
+        client=client,
+        provider=provider,
+        loaded=loaded,
+        scope=scope,
+        change_summary=change_summary,
+        limits=plan.limits,
+        thresholds=thresholds,
+        project_knowledge=project_knowledge,
+        project_instructions=project_instructions,
+        baseline_digest=baseline_digest,
+        plan=plan,
+        member=member,
+        task_message=build_verify_task(plan, synthesis),
+        on_round=on_round,
+        body_cache=body_cache,
+        run_analysis_fn=run_analysis_fn,
+    )
+    return MemberOutcome(
+        plan=member,
+        outcome=outcome,
+        error="" if outcome.status != STATUS_FAILED else outcome.error_message,
+        # **对账轮不进候选池**：候选池的用途是「主代理有没有漏掉某个分片报的东西」
+        # （`reconcile_candidates`），而对账轮跑在汇总**之后** —— 汇总不可能采纳一份
+        # 还没产生的结论，把它塞进候选池只会给每次运行都记上几条「找不到去向」的假账。
+        # 它新发现的问题写在报告末尾那一节里，读报告的人一定看得到。
+        candidates=(),
+        candidate_total=_raw_candidate_count(outcome),
+    )
+
+
 def _run_synthesis(
     *,
     plan: FamilyPlan,
@@ -861,7 +1114,9 @@ def _call_engine(
                 progress,
                 agent=member.label,
                 agent_index=member.index,
-                agent_total=plan.count + 1,
+                # 对账轮开着时它是第 n+2 步 —— 分母要跟着变，否则抽屉上会出现
+                # 「(4/4)」之后又冒出第 5 个的怪事。
+                agent_total=plan.count + 1 + (1 if plan.verify else 0),
             )
         )
 
@@ -897,12 +1152,27 @@ _DEGRADE_RANK: Mapping[str, int] = {
     DEGRADE_MARKDOWN: 3,
     DEGRADE_PROTOCOL: 3,
     DEGRADE_CONTEXT: 4,
-    DEGRADE_SUBAGENT: 5,
+    # 对账轮没跑成排在「缺一个分片」**之前**：缺分片是「有一块维度没人看过」，
+    # 而对账轮是可选的一道复核 —— 结论仍然完整，只是少了「找反证」这一步。
+    DEGRADE_VERIFY: 5,
+    DEGRADE_SUBAGENT: 6,
 }
 
 
 def _worst(codes: Sequence[str]) -> str:
     return max(codes, key=lambda code: _DEGRADE_RANK.get(code, 0), default=DEGRADE_NONE)
+
+
+def _verify_missed(steps: Sequence[MemberOutcome]) -> bool:
+    """对账轮**开了但是没跑成**。
+
+    没开的时候 `steps` 里压根没有这一条（`run_family` 只在 `plan.verify` 时才追加），
+    所以这里不判「配置开没开」—— 「没开」与「开了没跑成」是两件事，只有后者要报。
+    """
+    return any(
+        step.plan.role == ROLE_VERIFY and (step.skipped_reason or step.failed)
+        for step in steps
+    )
 
 
 def aggregate_outcomes(
@@ -926,6 +1196,13 @@ def aggregate_outcomes(
     个加起来会得出一个偏高、且看起来完全正常的命中率。
     """
     report = synthesis.report_markdown or ""
+    # 对账轮那一节排在「信息缺口」**之前**：它是对报告本身的补充（结论该不该采信），
+    # 而信息缺口是「哪些东西没看到」—— 后者永远在最后，读的人一眼能看到缺口在哪。
+    verify_text = "".join(
+        verify_section(step) for step in steps if step.plan.role == ROLE_VERIFY
+    )
+    if verify_text and synthesis.status != STATUS_FAILED:
+        report = (report.rstrip() + "\n\n" + verify_text).strip() + "\n"
     gaps_text, gap_dropped = reconcile_candidates(candidates, synthesis, steps=steps)
     # 汇总没跑成时**没有报告**：那段缺口说明写进 `error_message`（见下面那个分支）。
     # 往一份空报告后面追加一段「信息缺口」等于凭空造出一份看得见的报告，而这次其实
@@ -937,10 +1214,11 @@ def aggregate_outcomes(
     dropped = tuple(item for step in steps if step.outcome for item in step.outcome.dropped)
     dropped = (*dropped, *gap_dropped)
 
-    has_gap = bool(_gap_lines(steps)) or bool(gap_dropped)
+    has_gap = bool(_shard_gap_lines(steps)) or bool(gap_dropped)
     degradation = _worst(
         [
             *(step.outcome.degradation for step in steps if step.outcome),
+            DEGRADE_VERIFY if _verify_missed(steps) else DEGRADE_NONE,
             DEGRADE_SUBAGENT if has_gap else DEGRADE_NONE,
         ]
     )
@@ -1048,7 +1326,9 @@ def _member_block(step: MemberOutcome) -> dict[str, Any]:
         "tokens_output": outcome.completion_tokens if outcome is not None else 0,
         "cache_read_tokens": outcome.cache_read_tokens if outcome is not None else None,
         "cache_write_tokens": outcome.cache_write_tokens if outcome is not None else None,
-        "anomalies": len(step.candidates),
+        # 报出的条数按**原始**条数记（`candidate_total`）：`candidates` 是给汇总用的、
+        # 已经按 30 条封过顶，拿它当「报出几条」会让面板少报。
+        "anomalies": step.candidate_total or len(step.candidates),
         "report_chars": len(outcome.report_markdown or "") if outcome is not None else 0,
         "skipped_reason": step.skipped_reason,
         "error": step.error,
@@ -1108,15 +1388,23 @@ def reconcile_candidates(
             + "）：上面的报告里既没有引用这个编号，也没有同一个文件的条目。"
         )
 
-    gaps = _gap_lines(steps)
-    if not lines and not gaps:
+    shard_gaps = _shard_gap_lines(steps)
+    verify_gaps = _verify_gap_lines(steps)
+    if not lines and not shard_gaps and not verify_gaps:
         return "", ()
 
     blocks: list[str] = ["## 信息缺口（平台补充）"]
-    if gaps:
+    if shard_gaps:
         blocks.append(
             "本次分析启用了分片代理，以下是**没有跑成的分片** —— "
-            "它们负责的维度这一次没有任何人看过：\n\n" + "\n".join(gaps)
+            "它们负责的维度这一次没有任何人看过：\n\n" + "\n".join(shard_gaps)
+        )
+    if verify_gaps:
+        # 与上面那段分开写：对账轮没有负责的维度，把它挂在「没有跑成的分片」下面会读成
+        # 「有一块维度没人看过」，而它真正的后果是「结论没经过复核」。
+        blocks.append(
+            "另外，本次开着**「对账轮（找反证）」**，而它没有跑成：\n\n"
+            + "\n".join(verify_gaps)
         )
     if lines:
         blocks.append(

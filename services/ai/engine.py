@@ -95,6 +95,11 @@ DEGRADE_CONTEXT = "context_overflow"
 # 「这块**没有人看过**」—— 而它最容易被读成「这里没问题」。所以它必须出现在
 # `degradation` 上（抽屉会显示 ⚠️ 与这段话），不能只写在报告正文里。
 DEGRADE_SUBAGENT = "subagent_gap"
+# 对账轮（`subagent_verify`）没跑成。它与上面那条的分别要读清楚：那条是「有一块维度
+# 没人看过」，这条是**「结论没经过复核」**—— 报告本身是完整的，只是少了「找反证」这一步。
+# 所以它比 `DEGRADE_SUBAGENT` 轻一档（见 subagent.py 的 `_DEGRADE_RANK`），但**仍然要说**：
+# 用户打开对账轮，图的正是那一步，静默没了等于他以为自己买到了没买到的东西。
+DEGRADE_VERIFY = "subagent_verify"
 
 DEGRADATION_LABELS = {
     DEGRADE_ROUNDS: "轮次用尽，基于已有证据出结论",
@@ -105,6 +110,9 @@ DEGRADATION_LABELS = {
     DEGRADE_SUBAGENT: (
         "子代理模式：有分片没有跑成、或它报出的结论没有进入最终报告"
         "（见报告末尾的「信息缺口（平台补充）」）"
+    ),
+    DEGRADE_VERIFY: (
+        "子代理模式：对账轮（找反证）没有跑成，报告里的结论**没有经过这道复核**"
     ),
 }
 

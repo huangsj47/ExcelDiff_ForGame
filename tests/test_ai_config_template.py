@@ -676,3 +676,40 @@ class TestTheSubagentFields:
         script = _ai_script()
 
         assert "setValue('aiSubagentCountInput', data.subagent_count)" in script
+
+
+class TestTheVerifyField:
+    """对账轮那一个开关（阶段 3）。与上面那一组同一条理由：**默认关**的功能，
+    配置界面就是它会不会被误用的最后一道闸门 —— 而这里要额外钉住「它依附在子代理上」。"""
+
+    def test_the_toggle_exists_and_says_what_it_buys(self):
+        html = _modal_html()
+
+        assert 'id="aiSubagentVerifyToggle"' in html
+        assert "找反证" in html, "开关旁边没有说清它买的是什么（一道独立复核）"
+        # 它是一次**额外**的模型调用 —— 不写代价，用户只会从账单上发现。
+        assert "多一次模型调用" in html, "没有写出它的代价（多一次模型调用）"
+        assert "要先打开" in html, (
+            "没有说清它依附在「子代理模式」上 —— 没开子代理时它一个字都不生效"
+        )
+
+    def test_the_toggle_is_wired_to_load_and_save(self):
+        script = _ai_script()
+
+        assert "payload.subagent_verify = !!verifyToggle.checked" in script, (
+            "勾选状态没有被提交 —— 打开之后什么都不会变"
+        )
+        assert "data.subagent_verify === true" in script, (
+            "用了 `!== false` 之类的写法：NULL（老行）会被勾成「已启用」"
+        )
+
+    def test_the_read_only_lock_covers_both_subagent_switches(self):
+        """开关不在字段表里（那张表是给字段级报错用的），所以**必须**逐个列进只读清单。
+
+        漏一个的后果是「只读用户还能改一部分配置」—— 而页面上看不出任何异常。
+        """
+        script = _ai_script()
+        block = re.search(r"const AI_READONLY_EXTRA = \[(.*?)\];", script, re.S)
+        assert block, "找不到只读额外清单"
+        for element_id in ("aiSubagentToggle", "aiSubagentVerifyToggle"):
+            assert element_id in block.group(1), f"{element_id} 没有被只读态覆盖"

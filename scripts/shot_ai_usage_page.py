@@ -197,6 +197,13 @@ def _seed() -> dict:
                      "tokens_input": 210_000, "tokens_output": 14_600,
                      "cache_read_tokens": 196_000, "cache_write_tokens": 0,
                      "anomalies": 4, "report_chars": 3_400, "skipped_reason": "", "error": ""},
+                    # 对账轮（`subagent_verify`）：**没有负责的维度** —— 面板上那一格
+                    # 要显示成「（对账轮：找反证）」而不是空着的「—」，靠这一行复核。
+                    {"label": "V1", "role": "verify", "index": 5,
+                     "dimensions": [], "status": "succeeded", "rounds": 1, "requests": 3,
+                     "tokens_input": 168_000, "tokens_output": 6_200,
+                     "cache_read_tokens": 160_000, "cache_write_tokens": 0,
+                     "anomalies": 1, "report_chars": 780, "skipped_reason": "", "error": ""},
                 ],
                 "subagent_skipped": ["S3：剩余预算不足"],
             },
@@ -539,6 +546,19 @@ def _shot(out_prefix: str) -> int:
                   + str(page.locator("#aiuRunModalBody .aiu-round-failed").count()))
             print("工具表的失败列合计："
                   + page.inner_text("#aiuRunModalBody .aiu-table tbody tr:last-child"))
+            # 「分片代理」那张表单独截一次并把每行念一遍：它排在弹层靠下的位置，整屏截图
+            # 截不全，而**对账轮那一格显示成什么**（它没有负责的维度）正是这个功能加进来
+            # 之后唯一需要眼睛确认的地方 —— 看不了就等于没复核。
+            table = page.locator("#aiuRunModalBody table:has(#aiuSubagentTableCaption)")
+            if table.count():
+                table.scroll_into_view_if_needed()
+                page.wait_for_timeout(200)
+                table.screenshot(path=str(out_dir / f"{out_prefix}_subagent_table.png"))
+                shots.append(out_dir / f"{out_prefix}_subagent_table.png")
+                for row in table.locator("tbody tr").all():
+                    print("分片行：" + " | ".join(row.locator("td").all_inner_texts()))
+            else:
+                print("（没找到「分片代理」表：这一份数据里没有 subagents 块）")
             _measure(page, "run-modal")
             page.keyboard.press("Escape")
             page.wait_for_timeout(500)

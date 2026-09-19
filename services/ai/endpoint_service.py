@@ -48,6 +48,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_SUBAGENT_COUNT,
     DEFAULT_SUBAGENT_ENABLED,
+    DEFAULT_SUBAGENT_VERIFY,
     DEFAULT_WEEKLY_INTERVAL_MINUTES,
     MAX_ANALYSIS_ROUNDS_RANGE,
     MAX_ANOMALIES_PER_RUN_RANGE,
@@ -137,6 +138,8 @@ FIELD_RULES: Mapping[str, FieldRule] = {
     # 的模型调用次数变成 (n+1) 倍，必须由人主动打开。只对**周版本**分析生效。
     "subagent_enabled": FieldRule("子代理模式（仅周版本）", "bool"),
     "subagent_count": FieldRule("子代理数量", "int", *SUBAGENT_COUNT_RANGE),
+    # 对账轮：汇总之后再跑一次「找反证」。同样是**默认关**的额外一轮模型调用。
+    "subagent_verify": FieldRule("对账轮（找反证，仅周版本）", "bool"),
     "min_severity": FieldRule("严重度门槛", "choice", choices=SEVERITY_CHOICES),
     "min_confidence": FieldRule("置信度门槛", "choice", choices=CONFIDENCE_CHOICES),
     "max_anomalies_per_run": FieldRule(
@@ -178,6 +181,7 @@ FIELD_DEFAULTS: Mapping[str, Any] = {
     "max_anomalies_per_run": DEFAULT_MAX_ANOMALIES_PER_RUN,
     "subagent_enabled": DEFAULT_SUBAGENT_ENABLED,
     "subagent_count": DEFAULT_SUBAGENT_COUNT,
+    "subagent_verify": DEFAULT_SUBAGENT_VERIFY,
     "prompt_template": "",
     "project_knowledge": "",
     "model_price_table": "",

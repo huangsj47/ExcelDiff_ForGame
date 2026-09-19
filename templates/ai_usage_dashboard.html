@@ -3032,7 +3032,7 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         wrap.setAttribute('aria-labelledby', 'aiuSubagentTableCaption');
         var table = document.createElement('table');
         table.className = 'aiu-table';
-        table.innerHTML = '<caption class="aiu-caption" id="aiuSubagentTableCaption">这次分析由平台拆给各分片代理深挖，最后由主代理（汇总）合成报告。token 是各分片自己的用量，加起来等于这次运行的合计；「报出」是它报出的候选结论条数（汇总之后可能更少 —— 被去重、被门槛滤掉、或者没进最终报告）。</caption>'
+        table.innerHTML = '<caption class="aiu-caption" id="aiuSubagentTableCaption">这次分析由平台拆给各分片代理深挖，最后由主代理（汇总）合成报告；开了「对账轮」时末尾还有一行 V1（找反证的复核）。token 是各行自己的用量，加起来等于这次运行的合计；「报出」是它报出的候选结论条数（汇总之后可能更少 —— 被去重、被门槛滤掉、或者没进最终报告）。</caption>'
             + '<thead><tr><th scope="col">分片</th><th scope="col">负责的维度</th>'
             + '<th scope="col">状态</th><th scope="col" class="num">轮次</th>'
             + '<th scope="col" class="num">索取</th><th scope="col" class="num">输入 token</th>'
@@ -3042,7 +3042,10 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         rows.forEach(function (item) {
             var tr = document.createElement('tr');
             tr.appendChild(cell(item.label || '—'));
-            tr.appendChild(cell((item.dimensions || []).join('、') || '—'));
+            // 对账轮（V1）**没有负责的维度**，它的工作是核对报告 —— 这一格空着会被读成
+            // 「分到的维度是空的」。所以按角色给一句它到底在干什么。
+            tr.appendChild(cell((item.dimensions || []).join('、')
+                || (item.role === 'verify' ? '（对账轮：找反证）' : '—')));
             var status = cell(aiuSubagentStatus(item));
             if (item.status !== 'succeeded') status.className = 'aiu-round-failed';
             tr.appendChild(status);

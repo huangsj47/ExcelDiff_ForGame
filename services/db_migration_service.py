@@ -283,6 +283,7 @@ def _migrate_ai_analysis_columns(db, log_print):
             # 「关闭」是唯一安全的默认值（打开它会让模型调用次数变成 n+1 倍）。
             "subagent_enabled": "subagent_enabled BOOLEAN",
             "subagent_count": "subagent_count INTEGER",
+            "subagent_verify": "subagent_verify BOOLEAN",
         },
         log_print,
     )

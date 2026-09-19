@@ -77,6 +77,10 @@ DEFAULT_SUBAGENT_ENABLED = False
 # 有效范围是 2~6；存 1 也允许（界面上的「关掉」有两处，这里不额外制造一种非法状态）。
 DEFAULT_SUBAGENT_COUNT = 3
 SUBAGENT_COUNT_RANGE = (1, 6)
+# **对账轮**（找反证，见 `services/ai/subagent.py::build_verify_task`）：汇总出报告之后，
+# 再把最高严重度的几条交给一次独立的核对请求，要求它去找反证。同样**默认关** ——
+# 它是又一轮模型调用，而它带来的价值取决于读报告的人会不会去核那几条。
+DEFAULT_SUBAGENT_VERIFY = False
 PROMPT_CHAR_BUDGET_RANGE = (10_000, 2_000_000)
 REQUEST_TIMEOUT_RANGE = (10, 3600)
 MAX_FILES_PER_RUN_RANGE = (1, 5_000)
@@ -221,6 +225,8 @@ class AiProjectAnalysisConfig(db.Model):
     # `subagent_count` 同理：NULL → 3。
     subagent_enabled = db.Column(db.Boolean, default=DEFAULT_SUBAGENT_ENABLED)
     subagent_count = db.Column(db.Integer, default=DEFAULT_SUBAGENT_COUNT)
+    # 对账轮（2026-09）。NULL 同样是老行 → `resolved()` 读成「关闭」。
+    subagent_verify = db.Column(db.Boolean, default=DEFAULT_SUBAGENT_VERIFY)
 
     # --- 告警门槛（规则侧，改这里不用改提示词）---
     min_severity = db.Column(db.String(20), default=DEFAULT_MIN_SEVERITY)
@@ -305,6 +311,11 @@ class AiProjectAnalysisConfig(db.Model):
             ),
             "subagent_count": _clamp_int(
                 self.subagent_count, DEFAULT_SUBAGENT_COUNT, SUBAGENT_COUNT_RANGE
+            ),
+            "subagent_verify": (
+                DEFAULT_SUBAGENT_VERIFY
+                if self.subagent_verify is None
+                else bool(self.subagent_verify)
             ),
             "min_severity": (self.min_severity or DEFAULT_MIN_SEVERITY).strip().lower(),
             "min_confidence": (self.min_confidence or DEFAULT_MIN_CONFIDENCE).strip().lower(),
