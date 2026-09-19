@@ -2,9 +2,36 @@
 
 from __future__ import annotations
 
-from werkzeug.routing import Rule
+from werkzeug.routing import IntegerConverter, Rule, ValidationError
 
 from utils.diff_data_utils import format_cell_value, get_excel_column_letter
+
+# SQLite 的 INTEGER 是 64 位有符号数。**Werkzeug 的 `<int:…>` 转换器没有上界**：
+# `/\d+/` + 裸 `int()`，所以 `/ai-analysis/runs/99999999999999999999/usage` 会正常匹配、
+# handler 拿到一个 10^20 的整数，第一句 `db.session.get(Model, id)` 就在 pysqlite 里抛
+# `OverflowError: Python int too large to convert to SQLite INTEGER` —— 那不是
+# `SQLAlchemyError`，仓库里也没有兜它的错误处理器，于是任何登录用户都能拿一条 URL 打出 500。
+#
+# 在这条路上拦掉：超出这个范围的 id **不可能存在**，让它当作路由不匹配（→ 404），
+# 比在几十个 handler 里各写一遍边界判断可靠得多。
+MAX_INTEGER_ID = 2**63 - 1
+
+
+class BoundedIntegerConverter(IntegerConverter):
+    """给内置的 `<int:…>` 加上界。超出上界的值按「不匹配」处理（最终是 404）。"""
+
+    def to_python(self, value: str) -> int:
+        number = super().to_python(value)
+        if number > MAX_INTEGER_ID:
+            # `ValidationError` 在 werkzeug 的路由匹配里表示「这条规则不匹配」，
+            # 于是请求落到 404，而不是带着一个查不出来的 id 进 handler。
+            raise ValidationError()
+        return number
+
+
+def bound_integer_url_converter(app) -> None:
+    """覆盖内置的 `int` 转换器（对所有 `<int:…>` 路由生效）。"""
+    app.url_map.converters["int"] = BoundedIntegerConverter
 
 
 DEFAULT_BLUEPRINT_PREFIXES = (

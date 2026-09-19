@@ -61,6 +61,7 @@ from services.ai.usage_statistics import (
     usage_baseline,
 )
 from services.ai_analysis_service import project_price_table
+from services.app_routing_bootstrap_service import MAX_INTEGER_ID
 from utils.timezone_utils import BEIJING_TZ
 
 # 单次运行明细里最多回多少轮。轮次上限由配置决定（默认 8，最大 30），这个数字只是
@@ -178,13 +179,21 @@ def _first_arg(args: Mapping[str, Any], *names: str) -> str:
 
 
 def _parse_int(raw: str) -> Optional[int]:
+    """把查询参数里的整数读出来。**任何非法值都回落 `None`（= 不筛），绝不抛异常。**
+
+    上界不是洁癖：工具把值直接绑给 pysqlite 时，超过 64 位有符号数的整数会抛
+    `OverflowError: Python int too large to convert to SQLite INTEGER`，而那不是
+    `SQLAlchemyError`、仓库里也没有兜它的处理器 —— 管理员把地址栏里的项目号改错一位
+    就白屏。超出这个范围的 id 不可能存在，按「不筛」处理与按「筛不到」处理在这里等价，
+    都能给出一个正常页面。
+    """
     if not raw or raw.lower() in {"all", "none", "0"}:
         return None
     try:
         value = int(raw)
     except (TypeError, ValueError):
         return None
-    return value if value > 0 else None
+    return value if 0 < value <= MAX_INTEGER_ID else None
 
 
 def _parse_date(raw: str) -> Optional[date]:
