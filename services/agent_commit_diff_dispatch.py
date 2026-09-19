@@ -14,10 +14,11 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-from models import AgentNode, AgentProjectBinding, AgentTask, AgentTempCache, db
 from sqlalchemy.exc import SQLAlchemyError
+
+from models import AgentNode, AgentProjectBinding, AgentTask, AgentTempCache, db
+from services.agent_task_enqueue_service import enqueue_agent_task_once
 from services.deployment_mode import is_agent_dispatch_mode
-from services.agent_management_handlers import enqueue_agent_task
 from utils.logger import log_print
 
 _PENDING_STATUSES = {"pending", "processing"}
@@ -135,11 +136,21 @@ def _count_failed_commit_diff_tasks(project_id: int, repository_id: int, commit_
     return failed_count
 
 
-def _ensure_commit_diff_task(commit, project_id: int, repository_id: int, priority: int = 3):
-    existing_task, _ = _find_latest_commit_diff_task(project_id, repository_id, commit.id)
+def _active_commit_diff_task(project_id: int, repository_id: int, commit_record_id):
+    """这个 commit 上**还没跑完**的 commit_diff 任务（没有就返回 `None`）。"""
+    existing_task, _ = _find_latest_commit_diff_task(project_id, repository_id, commit_record_id)
     if existing_task and str(existing_task.status or "").lower() in _PENDING_STATUSES:
-        return existing_task, False
+        return existing_task
+    return None
 
+
+def _ensure_commit_diff_task(commit, project_id: int, repository_id: int, priority: int = 3):
+    """确保这个 commit 上有一条 commit_diff 任务 —— **同一时刻只许有一条**。
+
+    原来是「查 → 插」，两步之间没有约束，两个并发请求会各插一条（实测：
+    `[(1,'pending'), (2,'pending')] -> 2`）。去重交给
+    `services/agent_task_enqueue_service.py`，那里同时解释了为什么用锁而不是唯一索引。
+    """
     payload = {
         "commit_record_id": int(commit.id),
         "repository_id": int(repository_id),
@@ -149,7 +160,8 @@ def _ensure_commit_diff_task(commit, project_id: int, repository_id: int, priori
         "operation": str(commit.operation or "M"),
         "request_key": f"commit_diff:{int(commit.id)}",
     }
-    task = enqueue_agent_task(
+    return enqueue_agent_task_once(
+        find_existing=lambda: _active_commit_diff_task(project_id, repository_id, commit.id),
         task_type="commit_diff",
         project_id=project_id,
         repository_id=repository_id,
@@ -157,16 +169,10 @@ def _ensure_commit_diff_task(commit, project_id: int, repository_id: int, priori
         priority=priority,
         payload=payload,
     )
-    db.session.flush()
-    return task, True
 
 
-def _ensure_temp_cache_fetch_task(project_id: int, repository_id: int | None, cache_key: str, expected_hash: str | None):
-    key = str(cache_key or "").strip()
-    if not key:
-        return None, False
-
-    expected_hash = str(expected_hash or "").strip() or None
+def _active_temp_cache_fetch_task(project_id: int, cache_key: str):
+    """这把 cache_key 上**还没跑完**的取数任务（没有就返回 `None`）。"""
     existing_tasks = (
         AgentTask.query.filter(
             AgentTask.task_type == "temp_cache_fetch",
@@ -179,16 +185,26 @@ def _ensure_temp_cache_fetch_task(project_id: int, repository_id: int | None, ca
     )
     for task in existing_tasks:
         payload = _extract_task_payload(task)
-        if str(payload.get("cache_key") or "").strip() == key:
-            return task, False
+        if str(payload.get("cache_key") or "").strip() == cache_key:
+            return task
+    return None
+
+
+def _ensure_temp_cache_fetch_task(project_id: int, repository_id: int | None, cache_key: str, expected_hash: str | None):
+    key = str(cache_key or "").strip()
+    if not key:
+        return None, False
 
     task_payload = {
         "cache_key": key,
-        "expected_hash": expected_hash,
+        "expected_hash": str(expected_hash or "").strip() or None,
         "project_id": project_id,
         "repository_id": repository_id,
+        # 与 commit_diff 同一个 request_key 口径：同一份缓存只排一次。
+        "request_key": f"temp_cache_fetch:{key}",
     }
-    task = enqueue_agent_task(
+    return enqueue_agent_task_once(
+        find_existing=lambda: _active_temp_cache_fetch_task(project_id, key),
         task_type="temp_cache_fetch",
         project_id=project_id,
         repository_id=repository_id,
@@ -196,8 +212,6 @@ def _ensure_temp_cache_fetch_task(project_id: int, repository_id: int | None, ca
         priority=2,
         payload=task_payload,
     )
-    db.session.flush()
-    return task, True
 
 
 def _load_platform_cache_payload(cache_key: str, expected_hash: str | None = None):

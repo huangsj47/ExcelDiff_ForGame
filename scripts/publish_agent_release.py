@@ -43,7 +43,16 @@ def _git_is_dirty(repo_root: str) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="Publish an agent release package and update latest manifest.")
-    parser.add_argument("--version", default="", help="release version (default: utc timestamp + commit short hash)")
+    parser.add_argument(
+        "--version",
+        default="",
+        help=(
+            "release version (default: utc timestamp + commit short hash). "
+            "Must be a single path segment: letters/digits first, then letters, digits, dot, dash, "
+            "underscore (max 64). '.' and '..' are refused — the version becomes a directory name "
+            "under the releases root."
+        ),
+    )
     parser.add_argument("--notes", default="", help="release notes")
     parser.add_argument("--source-dir", default="", help="agent source directory (default: <repo>/agent)")
     parser.add_argument("--force", action="store_true", help="overwrite an existing version")

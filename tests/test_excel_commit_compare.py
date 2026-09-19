@@ -146,7 +146,10 @@ def graph():
 
 
 def _load(commit_id):
-    return Commit.query.get(commit_id)
+    # 走 SQLAlchemy 2 的 `Session.get`，不要 `Commit.query.get` ——
+    # 那条老 API 在 2.0 里是 legacy，而且 `tests/test_sqlalchemy2_no_query_get_repo.py`
+    # 现在会**连同 tests/ 一起扫**（AST 口径，注释与字符串都不算）。
+    return db.session.get(Commit, commit_id)
 
 
 def _stub_access(commit):

@@ -298,7 +298,22 @@ def dispatch(monkeypatch):
         counts['enqueue'] += 1
         return store.add(status='pending', **kwargs)
 
-    monkeypatch.setattr(module, 'enqueue_agent_task', _enqueue)
+    def _enqueue_once(**kwargs):
+        """`enqueue_agent_task_once` 的替身：先去重判定，再落一条。
+
+        真入口（`services/agent_task_enqueue_service.py`）的契约是「判定 + 插入 + 提交
+        在锁里一气做完」，返回 `(task, created)`。这里只需要**同样的可观察行为**：
+        判定为「已有活跃任务」时复用那一条。锁与提交由那条入口自己的用例
+        （`tests/test_agent_task_enqueue_dedup.py`）盯着，不在这一组的范围里。
+        """
+        counts['enqueue'] += 1
+        find_existing = kwargs.pop('find_existing', None)
+        existing = find_existing() if callable(find_existing) else None
+        if existing is not None:
+            return existing, False
+        return store.add(status='pending', **kwargs), True
+
+    monkeypatch.setattr(module, 'enqueue_agent_task_once', _enqueue_once)
 
     def _sleep(seconds):
         counts['sleep'] += 1
@@ -421,7 +436,7 @@ class TestPlatformSideDispatch:
         def _boom(**_kwargs):
             raise RuntimeError('数据库写不进去')
 
-        monkeypatch.setattr(dispatch.module, 'enqueue_agent_task', _boom)
+        monkeypatch.setattr(dispatch.module, 'enqueue_agent_task_once', _boom)
         got = self._request(dispatch)
         assert got['status'] == 'unavailable'
         assert '数据库写不进去' in got['message'], '派发失败的原因要能被看见'
@@ -474,10 +489,11 @@ class TestPlatformSideDispatch:
         captured = {}
 
         def _enqueue(**kwargs):
+            kwargs.pop('find_existing', None)
             captured.update(kwargs)
-            return dispatch.store.add(status='pending', **kwargs)
+            return dispatch.store.add(status='pending', **kwargs), True
 
-        monkeypatch.setattr(dispatch.module, 'enqueue_agent_task', _enqueue)
+        monkeypatch.setattr(dispatch.module, 'enqueue_agent_task_once', _enqueue)
         dispatch.agent.status = 'offline'
         self._request(dispatch, lines='1180-1260', max_chars=1234)
         payload = captured['payload']

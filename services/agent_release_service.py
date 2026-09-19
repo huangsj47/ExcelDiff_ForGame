@@ -15,8 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from utils.logger import log_print
 
-_VERSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _JSON_PARSE_ERRORS = (json.JSONDecodeError, OSError, ValueError)
 _SUBPROCESS_DETECT_ERRORS = (OSError, ValueError, subprocess.SubprocessError)
 
@@ -44,12 +45,44 @@ def _latest_manifest_path() -> str:
     return os.path.join(get_agent_releases_root(), "latest.json")
 
 
+def _safe_join_within(base_dir: str, *parts: str) -> str:
+    """在 `base_dir` **之内**安全拼接路径，越界（含「就是 base 本身」）即抛 `ValueError`。
+
+    用 realpath + commonpath 判定**最终落点**，而不是「黑名单里有没有 `..`」——
+    黑名单漏判的形式太多（`....//`、URL 编码、Windows 盘符、UNC、软链接）。
+
+    判据比版本号正则更靠得住，所以它同时兜住两件事：版本号将来被放宽、
+    以及**清单文件里的 `package_file` 字段**（那是从磁盘读进来的数据，
+    换过一份清单就可能带出 `../` 之类的东西）。
+
+    【为什么连 base 本身也拒】Agent 侧那个同名 helper 是允许 `candidate == base` 的
+    （它靠版本号正则挡「`.`」）。这里**更严一档**：本函数的每个调用方都至少传一个
+    part，落到 base 本身只可能是 `"."` / 空串这类退化输入 —— 而 `_release_dir`
+    返回 `releases/` 本身意味着 `rmtree` 会删掉**所有**已发布的版本。
+    严的方向是安全的，不依赖上游那一层是否记得挡。
+    """
+    base_abs = os.path.realpath(os.path.abspath(str(base_dir)))
+    candidate = os.path.realpath(os.path.join(base_abs, *[str(part) for part in parts]))
+    if candidate == base_abs:
+        raise ValueError(f"path resolves to the base directory itself: {candidate!r}")
+    try:
+        common = os.path.commonpath([base_abs, candidate])
+    except ValueError:
+        # 不同盘符 / 不同驱动器（Windows）—— 一定越界。
+        raise ValueError(
+            f"path escapes base directory: {candidate!r} not under {base_abs!r}"
+        )
+    if common != base_abs:
+        raise ValueError(f"path escapes base directory: {candidate!r} not under {base_abs!r}")
+    return candidate
+
+
 def _release_dir(version: str) -> str:
-    return os.path.join(_releases_dir(), version)
+    return _safe_join_within(_releases_dir(), version)
 
 
 def _release_manifest_path(version: str) -> str:
-    return os.path.join(_release_dir(version), "manifest.json")
+    return _safe_join_within(_release_dir(version), "manifest.json")
 
 
 def _release_package_name(version: str) -> str:
@@ -57,7 +90,7 @@ def _release_package_name(version: str) -> str:
 
 
 def _release_package_path(version: str) -> str:
-    return os.path.join(_release_dir(version), _release_package_name(version))
+    return _safe_join_within(_release_dir(version), _release_package_name(version))
 
 
 def _utc_now_iso() -> str:
@@ -65,8 +98,27 @@ def _utc_now_iso() -> str:
 
 
 def _safe_version(version: str) -> str:
+    """版本号 = **单一安全路径段**。
+
+    这里是平台侧的最后一道口子：版本号会直接进 `os.path.join(releases, version)`，
+    而 `publish_agent_release` 里紧跟着就是 `os.makedirs(...)` 与
+    `shutil.rmtree(_release_dir(version))`（`force=True` 时）。
+
+    原先是 `^[A-Za-z0-9._-]{1,64}$` —— 这个类**放行 `.` 与 `..`**（它们的字符全在
+    类里），于是 `publish_agent_release(version="..")` 把 `manifest.json` /
+    `latest.json` / 那个 zip 写到 `releases/` **之外**；带 `force=True` 时更狠：
+    `rmtree(releases/..)` 删的是这个发布根目录的**父目录**。
+
+    口径与 Agent 侧 `agent/self_update.py::_is_safe_release_version` **对齐**
+    （那边一直是「首字符必须是字母数字」+ 显式挡 `.`/`..`）。平台是这套协议的服务端，
+    判据不该比自己的客户端还松。
+    """
     text = str(version or "").strip()
     if not text or not _VERSION_RE.match(text):
+        raise ValueError(f"invalid release version: {version}")
+    # 正则已经排除了 `.` / `..`（首字符必须是字母数字），这里再挡一次：
+    # 与 Agent 侧同一句注释、同一个理由 —— 防的是**将来有人把正则放宽**。
+    if text in {".", ".."}:
         raise ValueError(f"invalid release version: {version}")
     return text
 
@@ -258,9 +310,14 @@ def load_latest_release_manifest() -> dict | None:
 def load_release_manifest(version: str) -> dict | None:
     try:
         resolved = _safe_version(version)
+        # `_release_manifest_path` 里还有一层包含性校验（`_safe_join_within`）。
+        # 它对**合法版本号**不会触发，但 `list_release_manifests` 是拿
+        # `os.listdir(releases/)` 的目录名逐个来调的 —— 那个目录里如果有一个
+        # **软链接**指向外部，realpath 之后就越界了。这时应当「这个版本读不了」，
+        # 而不是让整张发布列表 500。
+        path = _release_manifest_path(resolved)
     except ValueError:
         return None
-    path = _release_manifest_path(resolved)
     if not os.path.exists(path):
         return None
     try:
@@ -276,6 +333,13 @@ def load_release_manifest(version: str) -> dict | None:
 
 
 def get_release_package_path(version: str) -> str | None:
+    """某个版本的 zip 包落在哪 —— 返回值一定是该版本目录**之内**的一个文件。
+
+    `package_file` 是**从清单文件读进来的数据**，不是这里算出来的：清单与 zip 一起
+    躺在磁盘上，换过一份清单就可能带出 `../../x.zip` 或绝对路径。所以拼完之后必须
+    再走一次包含性校验（`_safe_join_within`），越界就当这个版本没有包 ——
+    这里的调用方（`send_file`）拿到什么就会发什么，不能只靠版本号那一层。
+    """
     manifest = load_release_manifest(version)
     if not manifest:
         return None
@@ -286,7 +350,15 @@ def get_release_package_path(version: str) -> str | None:
         resolved_version = _safe_version(version)
     except ValueError:
         return None
-    package_path = os.path.join(_release_dir(resolved_version), package_name)
+    try:
+        package_path = _safe_join_within(_release_dir(resolved_version), package_name)
+    except ValueError:
+        log_print(
+            f"⚠️ 发布清单里的 package_file 越界，忽略该版本: {version} | {package_name!r}",
+            "AGENT",
+            force=True,
+        )
+        return None
     if not os.path.exists(package_path):
         return None
     return package_path

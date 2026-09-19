@@ -190,12 +190,36 @@ class TestTheMemberTask:
             "取不到的内容不许写成「没问题」—— 这条纪律分片后更要紧"
         )
 
-    def test_the_task_does_not_understate_the_quota(self):
-        plan = _plan(3)
+    def test_the_member_task_carries_no_quota_number_of_its_own(self):
+        """成员任务书里**没有**它自己的额度数字 —— 这是有意的，不是漏写。
 
+        原先这里写的是
+
+            assert str(plan.limits.max_tool_requests) in task or "额度" in task
+
+        析取的后半截把前半截废掉了：`"额度"` 确实在任务书里，但它出现在
+        「但不要为了它们专门花索取额度」这句与额度数字无关的话里，而
+        `str(plan.limits.max_tool_requests) in task` 实测为 False。所以整条断言的
+        实际内容只有 `"额度" in task` —— 一份**假保证**，比没有断言更坏：
+        下一个改额度的人会以为这里有网，而把成员额度低报成五分之一也照样绿。
+
+        真实契约是反过来的：额度走**共享消息**那一句（「本次分析总共可索取 N 次」，
+        必须逐字节相同，见 `tests/test_ai_subagent_cache.py`），成员任务书只列
+        职责 / 权限 / 分工 / 输出协议。真正告诉模型「你能花多少」的那句话在
+        **汇总**任务书里，由
+        `TestTheSynthesisTask::test_it_states_the_family_quota_with_its_unit` 钉住。
+
+        这里断**方向**：不写可以，写了就必须不小于真实限值 —— 哪天真要写进来，
+        这条会红，写的人得来说明写的是哪个数、为什么。
+        """
+        plan = _plan(3)
         task = build_member_task(plan.members[0], plan)
 
-        assert str(plan.limits.max_tool_requests) in task or "额度" in task, task
+        for limit in (plan.limits.max_tool_requests, plan.limits.max_rounds):
+            assert f"{limit} 次" not in task and f"{limit} 轮" not in task, (
+                f"任务书里出现了额度数字 {limit} —— 如果这是有意加的，"
+                "请把这条用例改成「断言它不小于 plan.limits」并写明理由"
+            )
 
 
 class TestTheSynthesisTask:
@@ -214,6 +238,31 @@ class TestTheSynthesisTask:
 
         assert "S1" in task and "S2" in task, task
         assert "主代理" in task
+
+    def test_it_states_the_family_quota_with_its_unit(self):
+        """额度必须**写全**：「各 N 次索取、最多 M 轮」—— 数字与单位一起断言。
+
+        原先这条挂在 `TestTheMemberTask` 上，写的是
+
+            assert str(plan.limits.max_tool_requests) in task or "额度" in task
+
+        析取的后半截把前半截废掉了：那个 `"额度"` 出现在成员任务书的
+        「但不要为了它们专门花索取额度」这句**与额度数字无关**的话里，
+        实测 `str(20) in task` 为 False —— 整条断言的实际内容只有 `"额度" in task`，
+        把成员额度低报成 5 也照样通过。而且它断错了对象：**成员任务书里
+        刻意不写成员自己的数字**（额度由引擎按家族统一执行，任务书里列的是
+        职责 / 权限 / 分工 / 输出协议），这句明确告诉模型「你能花多少」的话
+        在**汇总**的任务书里。
+
+        低报的后果是具体的：模型据此决定「一次要完还是逐步逼近」，
+        报小了它会过早收手。所以判据要落在**那一句话**上，而不是落在
+        「文本里出现过这个数」或「文本里出现过额度二字」。
+        """
+        plan = _plan(3)
+        task = build_synthesis_task(plan, self._steps(plan))
+
+        assert f"各 {plan.limits.max_tool_requests} 次索取" in task, task
+        assert f"最多 {plan.limits.max_rounds} 轮" in task, task
 
     def test_it_demands_a_destination_for_every_candidate(self):
         plan = _plan(3)

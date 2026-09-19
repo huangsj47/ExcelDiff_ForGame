@@ -57,7 +57,10 @@ from datetime import datetime, timezone
 from typing import Optional, Sequence
 
 from models import AgentNode, AgentProjectBinding, AgentTask, db
-from services.agent_management_handlers import enqueue_agent_task
+from services.agent_task_enqueue_service import (
+    AGENT_TASK_ACTIVE_STATUSES,
+    enqueue_agent_task_once,
+)
 from utils.content_window import CONTENT_MAX_CHARS
 
 FILE_CONTENT_TASK_TYPE = "file_content"
@@ -207,6 +210,23 @@ def _find_task(
     return None
 
 
+def _active_task(
+    *, task_type: str, project_id: int, repository_id: int, commit_id: str, file_path: str, lines: str
+):
+    """同参数且**还没跑完**的取数任务（没有就返回 `None`）。
+
+    与 `_find_task` 的区别是它只看 `pending`/`processing`：`_find_task` 要连失败的
+    一起看（那是「还要不要再试」的依据），而判重要的是「还在路上」。
+    """
+    task = _find_task(
+        task_type=task_type, project_id=project_id, repository_id=repository_id,
+        commit_id=commit_id, file_path=file_path, lines=lines,
+    )
+    if task is not None and str(task.status or "").lower() in AGENT_TASK_ACTIVE_STATUSES:
+        return task
+    return None
+
+
 def _count_failed_attempts(
     *, task_type: str, project_id: int, repository_id: int, commit_id: str, file_path: str, lines: str
 ) -> int:
@@ -336,8 +356,17 @@ def _request_from_agent(
         task = None
 
     if task is None:
+        # 去重入队：两个并发的分析请求问同一个文件时，原来会各派一条取数任务
+        # （「查 → 插」之间没有约束，见 `services/agent_task_enqueue_service.py`）。
+        # 上面的 `_find_task` 已经把「同参数且未失败」的任务挑出来了，所以这里的
+        # `find_existing` 只需要再看一眼「有没有一条**还没跑完**的同参数任务」——
+        # 那正是「另一路并发请求刚插进去」的那一条。
         try:
-            task = enqueue_agent_task(
+            task, _created = enqueue_agent_task_once(
+                find_existing=lambda: _active_task(
+                    task_type=task_type, project_id=project_id, repository_id=repository_id,
+                    commit_id=commit_id, file_path=file_path, lines=lines,
+                ),
                 task_type=task_type,
                 project_id=project_id,
                 repository_id=repository_id,
@@ -352,7 +381,6 @@ def _request_from_agent(
                     "request_key": request_key,
                 },
             )
-            db.session.commit()
         except Exception as exc:  # noqa: BLE001
             db.session.rollback()
             return {"status": "unavailable", "message": f"派发取数任务失败：{type(exc).__name__}: {exc}"}

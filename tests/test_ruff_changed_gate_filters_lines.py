@@ -132,22 +132,118 @@ class TestChangedLineFiltering:
         assert len(ignored) == 1
 
 
+def _strip_yaml_comments(source):
+    """把 YAML 的 `#` 注释去掉（保留引号内的 `#`）。
+
+    **不剥注释的静态断言在这份文件上全是假的**：`quality-gate.yml` 里有好几段
+    讲解性注释，其中就写着 `pytest.ini`。于是
+
+        assert "pytest" in source
+
+    在 **`Run tests` 那个 step 被整个删掉之后依然成立** —— 而「CI 真的会跑测试」
+    正是这条用例唯一要说的事。删掉的是门禁，留下的是解释它为什么存在的注释，
+    断言却看不出来。（同一类陷阱在本仓库已经踩过，见
+    `tests/test_sqlalchemy2_no_query_get_repo.py` 那几个兄弟。）
+
+    这里自己扫字符而不是拉 `yaml` 进来：pyyaml 目前只是 pre-commit 的**传递**依赖，
+    没写在任何 requirements 里，让测试门禁依赖它，等于把「pre-commit 哪天被换掉」
+    变成「测试套件 import 失败」。
+    """
+    out = []
+    for line in source.splitlines():
+        quote = ""
+        cut = len(line)
+        for index, ch in enumerate(line):
+            if quote:
+                if ch == quote:
+                    quote = ""
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+                continue
+            if ch == "#" and (index == 0 or line[index - 1].isspace()):
+                cut = index
+                break
+        out.append(line[:cut].rstrip())
+    return "\n".join(out)
+
+
+def _workflow_source():
+    path = os.path.join(PROJECT_ROOT, ".github", "workflows", "quality-gate.yml")
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _requirement_lines():
+    """requirements-dev.txt 里**真正会被安装**的那些行（去掉注释与空行）。"""
+    path = os.path.join(PROJECT_ROOT, "requirements-dev.txt")
+    with open(path, encoding="utf-8") as fh:
+        raw = fh.read()
+    lines = []
+    for line in raw.splitlines():
+        text = line.split("#", 1)[0].strip()
+        if text:
+            lines.append(text)
+    return lines
+
+
 class TestWorkflowRunsPytest:
-    """CI 必须真的跑测试 —— 否则 800+ 条用例只是装饰。"""
+    """CI 必须真的跑测试 —— 否则 800+ 条用例只是装饰。
+
+    这一组先前是三条 `assert "…" in source`，全部只看**原始文本**：
+    `quality-gate.yml` 的注释里出现过 `pytest.ini`、`requirements-dev.txt` 的注释里
+    出现过一整段讲 pytest 的话，所以把真正的 step / 依赖行删掉，它们照样绿。
+    现在一律先剥注释，再断**那一行命令**。
+    """
+
+    def test_the_stripper_actually_strips(self):
+        """自检：剥注释这个动作必须真的发生了，否则下面几条又是裸文本断言。"""
+        raw = _workflow_source()
+        stripped = _strip_yaml_comments(raw)
+
+        assert stripped != raw, "一个注释都没剥掉 —— 剥注释那步失效了"
+        assert "整仓库 800+ 条用例" in raw, "前提变了：先在原文里找到一句已知的注释"
+        assert "整仓库 800+ 条用例" not in stripped, "注释没被剥掉"
+        # 引号里的 `#` 不许被误伤（本文件今天没有，但要防将来有人写进 run: 里）
+        assert _strip_yaml_comments('- run: echo "#not-a-comment"').strip() == (
+            '- run: echo "#not-a-comment"'
+        )
 
     def test_quality_gate_invokes_pytest(self):
-        path = os.path.join(PROJECT_ROOT, ".github", "workflows", "quality-gate.yml")
-        with open(path, encoding="utf-8") as fh:
-            source = fh.read()
-        assert "pytest" in source, (
-            "quality-gate.yml 里没有任何 pytest 步骤 —— 测试套件不是门禁的一部分。"
+        stripped = _strip_yaml_comments(_workflow_source())
+
+        assert "python -m pytest" in stripped, (
+            "quality-gate.yml 里没有 `python -m pytest` 这一步（注释里提到不算）—— "
+            "测试套件不是门禁的一部分。"
+        )
+        assert "- name: Run tests" in stripped, (
+            "跑测试的那一步没有名字，CI 页面上看不出失败的是门禁还是测试"
+        )
+
+    def test_the_file_length_guard_is_wired_into_ci(self):
+        """`File length guard` 这一步此前**一条用例都没盯着**。
+
+        它是这个仓库最硬的一条约束（2000 行 ERROR），`scripts/check_file_length.py
+        --strict` 的退出码就是门禁本身；脚本本地有人测，但「CI 到底有没有跑它」
+        没人看 —— 删掉这一步，脚本再对也没用。
+        """
+        stripped = _strip_yaml_comments(_workflow_source())
+
+        assert "python scripts/check_file_length.py --strict" in stripped, (
+            "quality-gate.yml 没有以 --strict 跑文件长度门禁 —— "
+            "不加 --strict 只 WARN，超限的文件不会挡住任何人。"
         )
 
     def test_pytest_is_declared_in_dev_requirements(self):
-        path = os.path.join(PROJECT_ROOT, "requirements-dev.txt")
-        with open(path, encoding="utf-8") as fh:
-            source = fh.read()
-        assert "pytest" in source, (
-            "requirements-dev.txt 里没有 pytest —— CI 装完依赖后无 pytest 可跑，"
-            "新人照它装也跑不了测试。"
+        lines = _requirement_lines()
+        installed = {
+            line.split("==")[0].split(">=")[0].strip().lower() for line in lines
+        }
+
+        assert "pytest" in installed, (
+            "requirements-dev.txt 里没有 pytest 这一条依赖（注释里提到不算）—— "
+            f"CI 装完依赖后无 pytest 可跑。实际会被安装的是：{sorted(installed)}"
+        )
+        assert "-r requirements.txt" in lines, (
+            "requirements-dev.txt 没有继承运行期依赖 —— CI 里 import 就会缺包"
         )

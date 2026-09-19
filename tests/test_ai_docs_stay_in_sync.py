@@ -22,22 +22,22 @@ import re
 
 from models.ai_analysis.project_config import (
     DEFAULT_MAX_ANALYSIS_ROUNDS,
-    DEFAULT_SUBAGENT_ENABLED,
-    DEFAULT_SUBAGENT_VERIFY,
     DEFAULT_MAX_ANOMALIES_PER_RUN,
-    DEFAULT_SUBAGENT_COUNT,
     DEFAULT_MAX_FILES_PER_RUN,
     DEFAULT_MAX_TOOL_REQUESTS,
     DEFAULT_PROMPT_CHAR_BUDGET,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_SUBAGENT_COUNT,
+    DEFAULT_SUBAGENT_ENABLED,
+    DEFAULT_SUBAGENT_VERIFY,
     DEFAULT_WEEKLY_INTERVAL_MINUTES,
     MAX_ANALYSIS_ROUNDS_RANGE,
     MAX_ANOMALIES_PER_RUN_RANGE,
-    SUBAGENT_COUNT_RANGE,
     MAX_FILES_PER_RUN_RANGE,
     MAX_TOOL_REQUESTS_RANGE,
     PROMPT_CHAR_BUDGET_RANGE,
     REQUEST_TIMEOUT_RANGE,
+    SUBAGENT_COUNT_RANGE,
     WEEKLY_INTERVAL_RANGE,
 )
 from services.ai.skill_contract import DIMENSION_IDS, REPORT_SECTIONS
@@ -237,8 +237,20 @@ def test_the_docs_describe_the_history_entry_the_code_serves():
     for label, text in (("说明文档", doc_text), ("帮助页", help_html)):
         assert "历次结论" in text, f"{label}没有写「历次结论」"
     assert "正在分析时也能点" in doc_text or "正在分析时也能点" in help_html
-    # 窗口与保留策略同源：文档里写的那天数必须是代码里那个数
-    assert str(ANALYSIS_CACHE_DAYS) in doc_text, "说明文档里的窗口天数与代码不一致"
+    # 窗口与保留策略同源：文档里写的那天数必须是代码里那个数。
+    #
+    # **不能只断 `str(ANALYSIS_CACHE_DAYS) in doc_text`**：那份文档里 `90` 还出现在
+    # 「P90」（整表统计那一节）与「从 800 涨到 900」（历史对照那一节）里，所以把保留
+    # 窗口从 90 天改成 30 天时，只要文档里还剩任何一个 `90`，这条断言照样绿 ——
+    # 而「天数与代码同源」恰恰是这条用例存在的**唯一理由**。带上单位才是对着
+    # **那一句话**断；文档里同一句还写着它与保留策略同源，一并钉住。
+    window_sentence = f"默认 {ANALYSIS_CACHE_DAYS} 天"
+    assert window_sentence in doc_text, (
+        f"说明文档里的窗口天数与代码不一致：找不到「{window_sentence}」"
+    )
+    assert "与平台保留策略同一天数" in doc_text, (
+        "文档没写明这个窗口与平台保留策略是同一个数 —— 两个数各写各的就会各自漂移"
+    )
     assert DEFAULT_HISTORY_LIMIT <= MAX_HISTORY_LIMIT
 
 

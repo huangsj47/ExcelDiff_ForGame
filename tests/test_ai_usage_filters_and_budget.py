@@ -755,22 +755,124 @@ def test_the_background_weekly_run_is_skipped_and_says_why():
         ), "跳过了却还是留下了一条 run 记录"
 
 
-def test_the_scheduler_also_checks_the_budget_before_queueing():
+def _blanked_scheduler_body(zone: str = "schedule_weekly_ai_analysis_tasks") -> str:
+    """调度器那一段**剥掉注释与文档字符串**之后的源码（行号位置不变）。
+
+    必须先剥：`budget_gate_reason` 上面那七行注释就在讲解这个闸门为什么放在间隔判定
+    之后，「位置关系」这类断言打在注释上就会假绿/假红（见
+    `tests/test_ai_prompt.py::_code_without_comments_or_docstrings`）。这里直接用
+    那个已有的 helper，不再养第三份实现。
+
+    切片按**下一个 `def` 开头**切，也就是只看这个函数自己的代码 ——
+    不切的话，文件里别处的 `budget_gate_reason` / `weekly_interval_minutes`
+    也会被算进来，「谁在谁前面」这种断言就不再是在说这个函数。
+    """
+    from tests.test_ai_prompt import _code_without_comments_or_docstrings
+
+    source = (PROJECT_ROOT / "services" / "task_worker_service.py").read_text(
+        encoding="utf-8-sig"   # 这个文件带 UTF-8 BOM，按 utf-8 读会让 ast.parse 直接报错
+    )
+    code_only = _code_without_comments_or_docstrings(source)
+    body = code_only[code_only.index(f"def {zone}("):]
+    return body[: body.index("\ndef ", 1)]
+
+
+def _over_budget_if_source() -> str:
+    """`if over_budget_reason:` 那个分支**本身**的源码（含分支内所有语句）。
+
+    不用字符串切片取这一段：切片的右端无论怎么定都容易伸过界 ——
+    第一版伸到函数末尾，把建任务、水位线、异常兜底那几处 `log_print` 都圈了进来；
+    收紧到 `create_weekly_ai_analysis_task(` 仍然不够，因为闸门与建任务之间还隔着
+    一段清理陈旧任务的代码，那里也有日志。**「跳过时写了日志」这件事只在
+    这个分支里有意义**，那就直接用 AST 把这个分支取出来。
+    """
+    import ast
+
+    source = (PROJECT_ROOT / "services" / "task_worker_service.py").read_text(
+        encoding="utf-8-sig"
+    )
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "over_budget_reason"
+        ):
+            return ast.unparse(node)
+    raise AssertionError("调度器里找不到 `if over_budget_reason:` —— 预算闸门被删了？")
+
+
+class TestTheSchedulerAlsoGatesOnBudget:
     """调度器排队前也查一次 —— 否则任务列表里会堆一堆注定被跳过的记录。
 
     这里用**结构断言**而不是跑一遍调度器：`schedule_weekly_ai_analysis_tasks` 要的
-    上下文（app、活跃配置、分组、水位线、后台任务表）与这条性质无关，构造出来的
+    上下文（app、活跃配置、分组、水位线、后台任务表）与这几条性质无关，构造出来的
     测试只会验证构造本身。真正的拦截行为由上面那条后台入口的用例钉着。
     """
-    source = (PROJECT_ROOT / "services" / "task_worker_service.py").read_text(encoding="utf-8")
-    body = source[source.index("def schedule_weekly_ai_analysis_tasks"):]
-    body = body[: body.index("def schedule_repository_sync_tasks")]
 
-    assert "budget_gate_reason" in body, "调度器没有查预算"
-    assert body.index("budget_gate_reason") < body.index("create_weekly_ai_analysis_task("), (
-        "预算判定排在建任务之后 —— 那还是会产生一个注定被跳过的后台任务"
-    )
-    assert "log_print" in body[body.index("budget_gate_reason"):], "跳过时没有写日志"
+    def test_it_checks_the_budget_before_queueing(self):
+        body = _blanked_scheduler_body()
+
+        assert "budget_gate_reason" in body, "调度器没有查预算"
+        assert body.index("budget_gate_reason") < body.index(
+            "create_weekly_ai_analysis_task("
+        ), "预算判定排在建任务之后 —— 那还是会产生一个注定被跳过的后台任务"
+
+    def test_it_logs_the_skip_right_at_the_gate(self):
+        """跳过时必须**在这个分支里**写日志。
+
+        这条原来写的是 `assert "log_print" in body[body.index("budget_gate_reason"):]`
+        —— 切片的右端一直伸到函数末尾，而函数后面还有好几处 `log_print`；
+        实测把闸门里那句日志整个删掉，它**照样绿**（收紧到建任务那一行也不够，
+        中间那段清理陈旧任务的代码里也有日志）。现在按 AST 只取这个 `if` 分支。
+        """
+        block = _over_budget_if_source()
+
+        assert "log_print" in block, (
+            "跳过时没有写日志 —— 用户只会看到「自动分析没跑」，查不出是预算到的"
+        )
+
+    def test_the_gate_sits_behind_the_interval_throttle(self):
+        """预算判定必须排在**间隔判定之后**。
+
+        反过来的话，每个调度周期（1 分钟）都会算一次预算并写一条日志 ——
+        超预算的项目会每分钟刷一行，而「多久分析一次」的配置形同虚设。
+        所以两条判定的**先后顺序**本身就是要钉的性质，不只是「都写了」。
+        """
+        body = _blanked_scheduler_body()
+
+        assert "weekly_interval_minutes" in body, "调度器没读分析间隔"
+        assert body.index("weekly_interval_minutes") < body.index("budget_gate_reason"), (
+            "预算判定跑在间隔判定前面 —— 超预算的组会每轮都写日志，绕过了间隔节流"
+        )
+
+    def test_a_skipped_group_advances_its_waterline(self):
+        """跳过时要推进 `last_triggered_at`，否则下一轮又立刻判定一次。
+
+        水位线不推进，间隔判定就永远拦不住这个组 —— 预算闸门于是退回成「每分钟一次
+        日志」，正是上一版想避免的形态。同样按 AST 只看这个分支。
+        """
+        block = _over_budget_if_source()
+
+        assert "last_triggered_at" in block, (
+            "超预算跳过时没有推进触发水位线 —— 下一次调度会立刻重新判定"
+        )
+
+    def test_the_scheduler_is_actually_wired_to_the_timer(self):
+        """**这条闸门有没有被挂上定时器** —— 之前没有任何用例看它。
+
+        `schedule_weekly_ai_analysis_tasks` 写得再对，只要 `setup_schedule` 里
+        没有 `.do(...)` 那一行，整条链路就一次都不会跑，而且**不会有任何报错**：
+        没有日志、没有任务、面板上什么都不显示。
+        """
+        setup = _blanked_scheduler_body("setup_schedule")
+
+        assert "schedule_weekly_ai_analysis_tasks" in setup, (
+            "setup_schedule 没有注册周版本分析的调度 —— 预算闸门与自动分析都不会跑"
+        )
+        assert ".every(1).minutes.do(schedule_weekly_ai_analysis_tasks)" in setup, (
+            "周版本分析的调度周期不是 1 分钟：间隔节流（默认 60 分钟）依赖调度器"
+            "**比间隔更勤**地来问一次，周期改大就等于把间隔配置的最小粒度改大了"
+        )
 
 
 # ==========================================================================
@@ -853,16 +955,47 @@ class TestThePriceVersionRule:
             assert ai_service.get_project_analysis_config(project_id)["model_price_table"] == ""
 
     def test_an_invalid_json_is_reported_by_the_parser_not_the_version_rule(self):
+        """坏 JSON 要由**解析器**报出来，不能被版本规矩抢先。
+
+        这个用例原来写的是：
+
+            assert "JSON" in errors[0]["message"] or "JSON" in errors[0]["message"] or errors[0]["message"]
+
+        两个析取项是同一句（复制粘贴），第三项 `errors[0]["message"]` 对任何非空字符串
+        都真 —— 整条断言恒成立。于是「解析器和版本规矩的执行顺序被调换」这个**正是用例
+        标题所说的**失败形态，它一个字都拦不住。
+
+        真实契约有三层，缺一层用户就会看到一句误导的话：
+        1. 落成 `model_price_table` 的**字段级**错误（界面能定位到那个输入框）；
+        2. 消息里带**解析器自己给的位置**（`line 1 column 3`）—— 只说「不是合法 JSON」
+           用户不知道该改哪一处；
+        3. **不能**是版本规矩那句。它排在后面（`update_project_analysis_config` 里
+           `validate_payload` 先于 `price_change_requires_version_bump`）：顺序一反，
+           用户拿到的提示是「改单价必须同时改 version」，而他真正的问题是他那串 JSON 坏了。
+        """
         with flask_app.app_context():
             create_tables()
             project_id = _project()
             _configure(project_id, {"model_price_table": _table("v1")})
 
-            ok, _message, errors = update_project_analysis_config(
+            ok, message, errors = update_project_analysis_config(
                 project_id, {"model_price_table": "{ not json"}, updated_by="tester"
             )
             assert ok is False
-            assert "JSON" in errors[0]["message"] or "JSON" in errors[0]["message"] or errors[0]["message"]
+            assert errors, "解析失败必须是字段级错误，不能只给一句全局提示"
+            assert errors[0]["field"] == "model_price_table", errors[0]
+
+            detail = errors[0]["message"]
+            assert detail.startswith("不是合法 JSON"), detail
+            assert "line 1 column" in detail, (
+                f"要把解析器自己的位置信息带出来，否则用户不知道该改哪：{detail}"
+            )
+            assert "改单价必须同时改 version" not in detail, (
+                f"版本规矩抢在解析器前面报错了 —— 用户会去改 version，而坏的其实是 JSON：{detail}"
+            )
+            # 页面上那句提示语是顶层 message（不是字段级那条），同样不许是版本规矩。
+            assert "不是合法 JSON" in message, message
+            assert "改单价必须同时改 version" not in message, message
 
 
 # ==========================================================================
