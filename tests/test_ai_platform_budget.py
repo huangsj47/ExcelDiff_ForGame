@@ -972,3 +972,67 @@ def test_every_budget_field_maps_to_a_real_column():
     # 但它们不能指向同一个东西这点必须靠代码而不是靠记性 —— 写错一个立刻炸。
     with pytest.raises(KeyError):
         module._column_for("budget_not_a_field")
+
+
+# ==========================================================================
+# 「有几个项目被停了」—— 一个会随筛选变化的数字比没有这个数字更糟
+# ==========================================================================
+
+
+def test_the_over_budget_count_does_not_shrink_when_the_filter_excludes_the_project():
+    """**被停掉的项目恰恰不再产生运行记录，所以最容易被筛掉。**
+
+    卡片的口气是全局事实（「这些项目的 AI 分析已被暂停（手动与定时都停）」），而原先
+    这个数是从**筛选之后**的 `entries` 里数出来的。项目 A 本月超了预算 → 闸门停掉它的
+    手动与定时分析 → 它不再产生运行记录 → 用户把范围改成「本周」时 A 不在这一屏里，
+    KPI 显示 0 个，而 A 此刻确实是停着的。
+
+    判据按「换个窗口数字不变」来断：这是唯一有意义的口径。
+    """
+    with flask_app.app_context():
+        create_tables()
+        _clear_platform_budget()
+        _clear_runs()
+        stopped = _project()
+        # `all_time` 的项目档：判据只看这个项目自己的全部运行，与面板选哪个窗口无关。
+        _configure(stopped, {"budget_period": "all_time", "budget_token_limit": 500})
+        # 10 天前跑过一次、用掉 1200 token → 项目档早就超了，而它此后不会再有运行记录
+        _run(stopped, tokens_input=1200, tokens_output=0,
+             created_at=datetime.now(timezone.utc) - timedelta(days=10))
+
+        all_time = usage_overview([stopped], filters=UsageFilters(range_key=RANGE_ALL))
+        this_week = usage_overview([stopped], filters=UsageFilters(range_key=RANGE_THIS_WEEK))
+
+        assert all_time["over_budget_projects"] == 1, all_time["over_budget_projects"]
+        assert this_week["projects"] == [], "前提：本周这一屏确实没有它的运行记录"
+        assert this_week["over_budget_projects"] == 1, (
+            "把范围收成「本周」之后被停掉的项目就数不出来了 —— 而它正是最该被提起的那个"
+        )
+
+
+def test_a_platform_level_overage_does_not_count_every_project_as_over():
+    """平台总预算超了会让**每一行**都标红，但那是「平台档超了」，不是「这个项目被停了」。
+
+    `over` 是项目档与平台档的**或**（`analysis_budget.budget_status`），所以按 `over`
+    数出来的其实是「这一屏有几个项目」—— 与卡片的措辞不是一回事。
+    """
+    with flask_app.app_context():
+        create_tables()
+        _clear_platform_budget()
+        _clear_runs()
+        first, second = _project(), _project()
+        for project_id in (first, second):
+            _configure(project_id, {"budget_period": "monthly", "budget_token_limit": 10 ** 9})
+            _run(project_id, tokens_input=1000, tokens_output=0)
+        # 平台档卡在 500：两个项目都没超自己的，但平台档超了
+        _set_platform_budget(budget_period="monthly", budget_token_limit=500)
+
+        body = usage_overview([first, second], filters=UsageFilters(range_key="this_month"))
+
+        rows = {item["project_id"]: item for item in body["projects"]}
+        assert all(row["budget"]["over"] for row in rows.values()), (
+            "前提：平台档超了，每一行的 `over` 都为真"
+        )
+        assert body["over_budget_projects"] == 0, (
+            "平台档超了被数成了「N 个项目已超预算」—— 卡片说的是「这些项目的分析已被暂停」"
+        )

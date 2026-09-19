@@ -79,6 +79,7 @@ from services.ai.pricing import (
     price_table_doc_shape,
 )
 from services.ai.provenance import current_provenance, provenance_matches
+from services.ai.weekly_state import get_or_create_weekly_state
 from services.ai.result_payload import (
     failed_result,
     result_payload,
@@ -1724,14 +1725,15 @@ def _update_weekly_state(
     if not group:
         return
     if not state:
-        state = AiWeeklyAnalysisState(
+        # 并发首跑时「先查后插」必有一个输家（见 `get_or_create_weekly_state`）——
+        # 这里原本就是那个写法，而它撞约束的代价是**结论落库了却交付不出去**。
+        state = get_or_create_weekly_state(
             project_id=group.get("project_id"),
-            group_key=group.get("key"),
-            base_name=group.get("base_name"),
+            group_key=str(group.get("key") or ""),
+            base_name=str(group.get("base_name") or ""),
             start_time=_parse_iso_datetime(group.get("start_time")),
             end_time=_parse_iso_datetime(group.get("end_time")),
         )
-        db.session.add(state)
 
     state.last_analyzed_at = _utcnow()
     state.last_analysis_run_id = run.id

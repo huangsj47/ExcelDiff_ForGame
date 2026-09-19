@@ -44,6 +44,7 @@ from services.ai.analysis_budget import (
     PERIOD_LABELS,
     PERIOD_MONTHLY,
     PERIOD_WEEKLY,
+    SCOPE_PROJECT,
     as_utc,
     budget_rows_for_overview,
     budget_status,
@@ -567,6 +568,46 @@ def _totals_cost(entries: Sequence[dict]) -> Optional[dict[str, Any]]:
     }
 
 
+def _over_budget_project_count(
+    accessible_project_ids: Optional[Iterable[int]], *, show_platform: bool
+) -> int:
+    """**项目档**已超预算、分析已被暂停的项目数。与当前筛选无关。
+
+    卡片的口气是全局事实（「这些项目的 AI 分析已被暂停（手动与定时都停）」），而原先
+    这个数是从 `entries` 里数出来的 —— `entries` 是**这一屏筛选之后**的结果（时间范围 /
+    项目 / 来源 / 状态，再叠一道统计起点）。两个方向都会错：
+
+    * 项目 A 本月超了预算 → 闸门停掉它的手动与定时分析 → 它**不再产生运行记录** →
+      用户把范围改成「本周」时 A 根本不在这一屏里，KPI 显示 0 个，而 A 此刻确实是停着的
+      —— 这条信息只能靠**特意去筛**才看得见，正好和它该起的作用相反；
+    * 平台总预算一超，`over` 对**每一行**都为真（`over_scopes` 里是 `platform`），
+      于是卡片报的其实是「这一屏有几个项目」，与「哪个项目被停了」不是一回事。
+
+    所以这里按**权限范围内的全部项目**独立算一遍（`accessible_project_ids=None` =
+    不限制，即能看全部），并且只数 `over_scopes` 里含 `project` 的那些 —— 后者才是
+    「这个项目自己被停了」的判据。
+
+    口径仍然与闸门同源：判定走 `budget_rows_for_overview` → `budget_status`，
+    不另写一套算法（面板与闸门互相矛盾是最坏的一种不一致）。`show_platform=False` 时
+    每一行的平台档数字被抹掉，而 `over_scopes` 一个字不改 —— 判定不受权限影响。
+
+    代价是逐项目一次运行查询（项目数量级）。一个会随筛选变化的「有几个项目被停了」
+    比没有这个数字更糟，所以这笔开销值得付。
+    """
+    if accessible_project_ids is None:
+        project_ids = [row.id for row in Project.query.with_entities(Project.id).all()]
+    else:
+        project_ids = sorted({int(item) for item in accessible_project_ids})
+    if not project_ids:
+        return 0
+    rows = budget_rows_for_overview(project_ids, show_platform=show_platform)
+    return sum(
+        1
+        for status in rows.values()
+        if SCOPE_PROJECT in (status.get("over_scopes") or ())
+    )
+
+
 def usage_overview(
     accessible_project_ids: Optional[Iterable[int]] = None,
     filters: Optional[UsageFilters] = None,
@@ -689,7 +730,9 @@ def usage_overview(
         "filters": active.to_dict(),
         "filter_options": filter_options(),
         "project_options": _project_options(accessible_project_ids),
-        "over_budget_projects": sum(1 for item in entries if item["budget"]["over"]),
+        "over_budget_projects": _over_budget_project_count(
+            accessible_project_ids, show_platform=show_platform
+        ),
         # 预算这一屏的两件事：平台总预算（配置 + 当前状态）与「筛选范围 vs 预算周期」的
         # 口径联动。两者都是**只读**的判定，写侧在 `/ai-analysis/usage/budget`。
         #

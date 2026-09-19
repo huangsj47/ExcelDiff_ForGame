@@ -57,6 +57,7 @@ from services.ai_analysis_service import (
 )
 from models.ai_analysis import AiWeeklyAnalysisState
 from services.ai.analysis_budget import budget_gate_reason
+from services.ai.weekly_state import get_or_create_weekly_state
 # 「周版本同步还在跑就先别分析」的闸门（同步逐文件写缓存，跑到一半的清单会静默变小）
 from services.ai.weekly_sync_gate import weekly_sync_in_flight, weekly_sync_stuck_note
 # 周版本同步的显式结局 → 任务状态映射：process_weekly_version_sync 过去用 None
@@ -1851,14 +1852,18 @@ def schedule_weekly_ai_analysis_tasks():
                 task_id = create_weekly_ai_analysis_task(primary.id, group_key=group_key)
                 if task_id:
                     if not state:
-                        state = AiWeeklyAnalysisState(
+                        # 与 `_update_weekly_state` 共用同一个 get-or-create：
+                        # 「先查后插」在这里同样会撞唯一约束 —— 首次手动分析正在进行中时
+                        # 调度器又 tick 到同一分组（此时没有 state，间隔节流判据失效），
+                        # 两条路各自建行，后提交的那个抛 IntegrityError，而它把这一 tick
+                        # **剩下的分组全部放弃**（`except SQLAlchemyError` 在循环之外）。
+                        state = get_or_create_weekly_state(
                             project_id=project_id,
                             group_key=group_key,
                             base_name=primary.name,
                             start_time=primary.start_time,
                             end_time=primary.end_time,
                         )
-                        _db.session.add(state)
                     state.last_triggered_at = now_utc
                     _db.session.commit()
             log_print(f"调度了 {len(grouped)} 组周版本AI分析任务", "AI")

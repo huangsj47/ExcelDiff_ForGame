@@ -1218,6 +1218,97 @@ def test_the_watermark_judgement_cannot_silently_fall_back_to_run_status():
     )
 
 
+def test_concurrent_first_runs_do_not_collide_on_the_state_row(monkeypatch):
+    """并发首跑撞唯一约束时，输的一方拿到赢家那一行，而不是把整个 tick 放弃。
+
+    `group_key` 上有唯一约束，而状态行在分析**开跑前**读、写入在分析**结束**时，
+    中间隔着整轮 LLM 调用（几十秒）—— 两个标签页同时手动分析同一个分组，或者
+    调度器那一 tick 又轮到它，两个调用方都会查到 `None` 并各自 `add`。
+
+    **这条用「让 commit 抛一次 IntegrityError」来复刻那一刻**：真实的并发顺序是
+    「A 查 → B 查 → A 插 → B 插炸」，从 B 的角度看就是「查的时候没有、提交的时候
+    已经有了」，与这里造的一模一样。不用真起线程：那会引入 `threading` 的时序抖动，
+    而这里要卡住的判据只有一条 —— 撞约束后**回滚重查**，而不是把异常咽掉或抛出去。
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from services.ai.weekly_state import get_or_create_weekly_state
+
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        # 必须真提交：下面那一支会 rollback 掉本 session 的待写内容，
+        # 只 flush 的话 project 行会被一起撤回，赢家那次插入撞的是外键。
+        db.session.commit()
+        group_key = _uid("W-concurrent")
+
+        real_commit = db.session.commit
+        calls = {"n": 0}
+
+        def commit_that_loses_the_race():
+            calls["n"] += 1
+            if calls["n"] > 1:
+                return real_commit()
+            # 赢家（另一个线程 / 另一个请求）在这一刻把同一行提交了进去。
+            # 用独立连接写，模拟「不是本 session 干的」。
+            db.session.rollback()
+            with db.engine.begin() as conn:
+                conn.execute(
+                    AiWeeklyAnalysisState.__table__.insert().values(
+                        project_id=project.id,
+                        group_key=group_key,
+                        base_name="W-race-winner",
+                    )
+                )
+            raise IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed"))
+
+        monkeypatch.setattr(db.session, "commit", commit_that_loses_the_race)
+
+        state = get_or_create_weekly_state(
+            project_id=project.id, group_key=group_key, base_name="W-race-loser"
+        )
+
+        assert calls["n"] == 1, "没走到「撞约束」那一步，这条用例没验到重查分支"
+        assert state is not None, "撞约束后没重查到赢家那一行 —— 异常被咽掉了"
+        assert state.base_name == "W-race-winner", "拿回来的不是赢家那一行"
+        assert AiWeeklyAnalysisState.query.filter_by(group_key=group_key).count() == 1, (
+            "重查分支没生效，库里落了两行同名分组"
+        )
+
+
+def test_a_non_concurrency_integrity_error_is_not_swallowed(monkeypatch):
+    """回滚后重查仍然没有那一行 —— 说明不是并发首跑，必须照旧抛出去。
+
+    把 `except IntegrityError` 写成「一律吞掉、返回 None」的话，调用方拿到 `None`
+    会在下一行解引用炸掉，报出来的是一个与真实原因（外键 / NOT NULL 约束）毫无
+    关系的 `AttributeError`。
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from services.ai.weekly_state import get_or_create_weekly_state
+
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+
+        def commit_that_fails_for_another_reason():
+            db.session.rollback()
+            raise IntegrityError("INSERT", {}, Exception("FOREIGN KEY constraint failed"))
+
+        monkeypatch.setattr(db.session, "commit", commit_that_fails_for_another_reason)
+
+        try:
+            get_or_create_weekly_state(
+                project_id=project.id,
+                group_key=_uid("W-broken"),
+                base_name="W-broken",
+            )
+        except IntegrityError:
+            pass
+        else:
+            raise AssertionError("非并发的完整性错误被咽掉了，调用方会拿到 None")
+
+
 def test_a_small_repository_still_reaches_the_payload_when_truncated(monkeypatch):
     """端到端：取样必须真的作用在 payload 构建上。
 
