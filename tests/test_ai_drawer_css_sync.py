@@ -168,3 +168,84 @@ def test_a_hidden_element_that_sets_its_own_display_is_actually_hidden():
         + '\n改法：紧跟着那条规则补一句 `.<类名>[hidden] { display: none; }`，'
         '并写清它为什么必须显式写（参见隔壁几条的注释）。'
     )
+
+
+# --------------------------------------------------------------------------
+# 弹层与遮罩的层级：**必须成对抬**
+# --------------------------------------------------------------------------
+
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+_Z_INDEX_RULE = re.compile(r"([^{}]+)\{([^{}]*)\}")
+
+
+_VAR_FALLBACK = re.compile(r"var\(\s*--[\w-]+\s*,\s*(-?\d+)\s*\)")
+
+
+def _z_index_of(css, selector):
+    """样式表里某个选择器的 `z-index`（**先剥注释**）。
+
+    这个文件里「注释提到 z-index」不是假设而是事实：下面那条规则上面的注释就写着
+    「抽屉是 position: fixed + z-index: 1210」。不剥注释的话，一条只为说明而写的
+    `z-index: 1210` 会被当成真规则 —— 本仓库在静态断言上踩过这个坑。
+
+    取值有两种写法：裸数字、以及 `var(--z-drawer, 1210)`。后者按**兜底值**算 ——
+    抽屉的变量只在部分模板里声明，兜底值才是这三张页面上真正生效的那个。
+    """
+    body = _CSS_COMMENT.sub(" ", css)
+    for sel, block in _Z_INDEX_RULE.findall(body):
+        if sel.strip() != selector:
+            continue
+        found = re.search(r"z-index\s*:\s*([^;]+)", block)
+        if not found:
+            return None
+        raw = found.group(1).strip()
+        if re.fullmatch(r"-?\d+", raw):
+            return int(raw)
+        fallback = _VAR_FALLBACK.search(raw)
+        return int(fallback.group(1)) if fallback else None
+    return None
+
+
+def test_the_modal_stays_above_its_own_backdrop():
+    """**Bootstrap 的遮罩必须始终在弹层下面。**
+
+    Bootstrap 5.1 把这一对写死成遮罩 1050 / 弹层 1055（差 10），而抽屉是 1210 ——
+    所以抽屉页上弹层要抬，遮罩也得跟着抬。原来的写法只抬了 `#aiUsageModal` /
+    `#aiReportHistoryModal` 两个 id，遮罩却是**全局**抬到 1290，于是：
+
+    * 同一张页面上**别的**弹层（合并视图的 AI 配置 / 知识库、周版本的 diffModal）
+      变成遮罩 1290 压住弹层 1055；
+    * `style.css` 是全站加载的，**没有抽屉的 AI 消耗面板**也拿到了 1290 的遮罩 ——
+      点「全量重置」弹出来的确认框整个被罩住，确认词都输不进去。
+
+    真浏览器复核（无头 Chrome + 系统 Chrome，`elementFromPoint` 命中的是
+    `.modal-backdrop`、Playwright 报 `backdrop intercepts pointer events`）之后定下口径：
+    **成对抬**。这条用例钉的就是「成对」这两个字。
+
+    判据是**相对关系**而不是具体数值：谁把遮罩抬到弹层之上，无论抬到多少都算错。
+    """
+    css = _read_style_css()
+    modal = _z_index_of(css, ".modal")
+    backdrop = _z_index_of(css, "body > .modal-backdrop")
+
+    assert modal is not None, "找不到 `.modal` 的 z-index 规则（Bootstrap 自己是 1055）"
+    assert backdrop is not None, "找不到 `body > .modal-backdrop` 的 z-index 规则"
+    assert backdrop < modal, (
+        f"遮罩（{backdrop}）不低于弹层（{modal}）—— 整页只剩一层灰，"
+        "弹层看不见也点不动（AI 消耗页的「全量重置」就是这么坏的）"
+    )
+
+
+def test_the_modal_pair_is_above_the_drawer():
+    """反方向：在**有抽屉**的页面上，这一对必须都高于抽屉。
+
+    只满足「遮罩 < 弹层」是不够的：把两个都设成 Bootstrap 原样的 1050/1055，
+    抽屉（1210）就会压住弹层右半边 —— 那正是这条规则当初存在的原因
+    （历次结论里「导出这一份 md」贴着右边缘，被抽屉盖住）。
+    """
+    css = _read_style_css()
+    drawer = _z_index_of(_read("weekly_version_diff.html"), ".ai-drawer")
+    assert drawer is not None, "周版本页里找不到 `.ai-drawer` 的 z-index"
+
+    assert _z_index_of(css, "body > .modal-backdrop") > drawer, "遮罩没高过抽屉"
+    assert _z_index_of(css, ".modal") > drawer, "弹层没高过抽屉"
