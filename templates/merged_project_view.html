@@ -4326,7 +4326,7 @@ async function refreshWeeklyAiLatest(configId) {
                 meta.textContent += ` | ${result.stale_note}`;
             }
         }
-        setWeeklyAiReport(result.response_text);
+        setWeeklyAiReport(AiContextNotice.withContextNotice(result.response_text, result.result));
         // 本次消耗（口径见 static/js/ai_usage_line.js）。`usage` 在**内层** payload 上
         // （`result.result.usage`），而 `runId` 是 `getWeeklyAiResult` 挂到内层的 ——
         // 写成 `result.usage` 会让这一整行永远不显示（本函数是初次打开与「刷新结果」
@@ -4408,8 +4408,10 @@ async function startWeeklyAiAnalysis(force = false) {
                 updateRiskLabelByConfig(weeklyAiCurrentConfigId, payload.risk_level);
             }
             // 降级 / 压过上下文时补一行说明。文案在 static/js/ai_context_notice.js。
+            // `loadWeeklyAiLatest(true)` 紧随其后、用落库正文整体重渲染 —— 那一条走的是
+            // 同一个模块的 `withContextNotice`。两处都要有，文案只有一份。
             const contextNotice = AiContextNotice.contextNotice(payload);
-            if (contextNotice) { appendWeeklyAiLine(contextNotice); }
+            if (contextNotice) { appendWeeklyAiLine('\n' + contextNotice); }
         }
         setWeeklyAiStatusBadge(outcome.badge, outcome.tone);
         if (startBtn) startBtn.disabled = false;

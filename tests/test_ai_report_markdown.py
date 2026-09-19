@@ -267,13 +267,30 @@ def test_unsupported_markdown_degrades_to_visible_text(rendered):
 # 三个模板的接线
 # --------------------------------------------------------------------------
 
+# 落库正文进 `set*Report` 的两种写法：
+#   setAiReport(result.response_text)
+#   setAiReport(AiContextNotice.withContextNotice(result.response_text, result.result))
+# 后一种是 2026-09-19 之后的正解：降级 / 压过上下文的提示必须**跟着正文一起**渲染，
+# 否则拉一次 `/latest` 就把那几行整体替换没了（见 `static/js/ai_context_notice.js`）。
+# 这条守卫要管的是「有没有交给渲染器」，不是「参数长什么样」—— 所以按调用形态匹配，
+# 而不是钉死一整行字面量（钉死的话，正当的包装会被判成「没走 Markdown」）。
+_REPORT_CALL_RE = re.compile(
+    r"set(?:Weekly)?AiReport\(\s*(?:AiContextNotice\.withContextNotice\(\s*)?result\.response_text"
+)
+
+
+def _code(src: str) -> str:
+    """先剥注释再断言：本仓库会把要禁掉的写法原样写进注释里（踩过坑）。"""
+    src = re.sub(r"/\*.*?\*/", " ", src, flags=re.S)
+    return re.sub(r"//[^\n]*", " ", src)
+
+
 @pytest.mark.parametrize("template", TEMPLATES)
 def test_the_success_report_goes_through_the_markdown_renderer(template):
     """成功报告必须交给渲染器；这条拦的是「渲染器写好了但没接上」。"""
     src = (PROJECT_ROOT / template).read_text(encoding="utf-8")
     assert "AiReportMarkdown.render(" in src, f"{template} 没有调用渲染器"
-    assert "setWeeklyAiReport(result.response_text)" in src or \
-           "setAiReport(result.response_text)" in src, (
+    assert _REPORT_CALL_RE.search(_code(src)), (
         f"{template} 的整体报告没有走 Markdown 路径（仍在用纯文本 set*Output）"
     )
 

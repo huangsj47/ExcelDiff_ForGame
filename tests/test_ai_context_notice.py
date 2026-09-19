@@ -141,6 +141,43 @@ def test_a_compaction_reports_the_numbers(results):
     assert "2 轮" in notice and "11,824" in notice, notice
 
 
+def test_each_warning_is_its_own_paragraph():
+    """**这几句要分成三段，不能连成一句。**
+
+    报告渲染器把段落内的单换行当软换行、用空格接起来（`ai-report-markdown.js` 的
+    `flushPara`）—— 用单换行的话，「轮次用尽」+「压掉了 2 轮历史」+「窗口是按默认值算的」
+    会连成一大句，而这是**互不相干的三件事**。一整块读起来像免责声明，用户一眼就跳过 ——
+    而这一块的全部意义就是别被跳过。
+
+    判据：两段之间恰好一个空行，不多不少（多一个空行渲染出来是双倍行距）。
+    """
+    blank = chr(10) * 2
+    mixed = _run([{"name": "降级 + 压缩 + 默认窗口", "payload": {
+        "status": "degraded", "degradation": "rounds_exhausted",
+        "degradation_label": "轮次用尽，基于已有证据出结论",
+        "context": {
+            "budget_note": "上下文窗口 1,000,000 token（端点未声明窗口，按默认值）。",
+            "compaction": {
+                "events": 1, "dropped_turns": 2, "dropped_chars": 11824,
+                "overflow_recovered": False,
+            },
+        },
+    }}])[0]["notice"]
+
+    assert mixed.count(blank) == 2, f"三段之间各要一个空行：{mixed!r}"
+    assert blank * 2 not in mixed, "别多给空行（渲染出来是双倍行距）"
+    assert mixed.count(chr(10)) == 4, f"只有两处空行，没有多余换行：{mixed!r}"
+
+    # 反向：只有一句的时候不该出现空行（一个孤零零的段落分隔看着像漏了内容）。
+    single = _run([{"name": "只降级", "payload": {
+        "status": "degraded", "degradation": "rounds_exhausted",
+        "degradation_label": "轮次用尽，基于已有证据出结论",
+        "context": {},
+    }}])[0]["notice"]
+
+    assert blank not in single, f"只有一句也插了空行：{single!r}"
+
+
 def test_zero_compaction_never_prints_a_zero(results):
     """**反向自检**：没压过的时候不许出现「压掉 0 轮」「省下 0 字」。
 
@@ -184,6 +221,128 @@ def test_the_notice_text_has_a_single_source(path):
 
     assert "未完整跑完" not in source, f"{path} 里写死了降级的文案"
     assert "已压成摘要" not in source, f"{path} 里写死了压缩的文案"
+
+
+# ==========================================================================
+# 三、提示必须跟着**报告**走，不能只活在流式缓冲区里
+# ==========================================================================
+
+
+def _compose(cases: list) -> list:
+    """真跑 `withContextNotice`：它决定「正文 + 提示」怎么拼。"""
+    if not shutil.which("node"):
+        pytest.skip("环境里没有 Node，跳过真实运行的拼接断言")
+    driver = f"""
+const fs = require('fs');
+const vm = require('vm');
+const sandbox = {{ window: {{}} }};
+sandbox.window = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync({json.dumps(str(SCRIPT))}, 'utf8'), sandbox);
+const api = sandbox.AiContextNotice;
+const cases = {json.dumps(cases, ensure_ascii=False)};
+process.stdout.write(JSON.stringify(cases.map(function (item) {{
+    return {{ name: item.name, text: api.withContextNotice(item.text, item.payload) }};
+}})));
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "driver.js"
+        path.write_text(driver, encoding="utf-8")
+        proc = subprocess.run(["node", str(path)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, "Node 执行失败：" + proc.stdout + proc.stderr
+    return {item["name"]: item["text"] for item in json.loads(proc.stdout)}
+
+
+DEGRADED = {
+    "status": "degraded",
+    "degradation": "rounds_exhausted",
+    "degradation_label": "轮次用尽，基于已有证据出结论",
+    "context": {},
+}
+CLEAN = {
+    "status": "succeeded", "degradation": "", "degradation_label": "",
+    "context": {"budget_note": "", "compaction": {
+        "events": 0, "dropped_turns": 0, "dropped_chars": 0, "overflow_recovered": False,
+    }},
+}
+
+
+@pytest.fixture(scope="module")
+def composed() -> dict:
+    return _compose(
+        [
+            {"name": "降级 + 正文", "text": "## 变更理解\n\n道具表删了一行。", "payload": DEGRADED},
+            {"name": "降级 + 空正文", "text": "", "payload": DEGRADED},
+            {"name": "正常 + 正文", "text": "## 变更理解", "payload": CLEAN},
+            {"name": "正常 + 空正文", "text": "", "payload": CLEAN},
+            {"name": "正文不是字符串", "text": None, "payload": DEGRADED},
+        ]
+    )
+
+
+def test_the_report_body_is_kept_and_the_notice_follows_it(composed):
+    """这一条是 `/latest` 重渲染那条路要的东西：**正文一个字不少，提示跟在后面**。
+
+    以前提示只存在于 SSE 的流式缓冲区里，而同一个事件紧接着会拉一次 `/latest`、
+    用落库正文**整体替换**缓冲区 —— 那几行刚画上去就没了；打开页面/刷新时更是
+    一个字都不出现。而它说的正是「这份报告该不该当真」。
+    """
+    text = composed["降级 + 正文"]
+
+    assert text.startswith("## 变更理解"), "正文必须在前、且一字不改"
+    assert "道具表删了一行。" in text
+    assert "未完整跑完" in text
+    assert text.index("道具表删了一行。") < text.index("未完整跑完"), "提示要跟在正文后面"
+
+
+def test_a_clean_run_composes_to_the_body_itself(composed):
+    """正常跑完的那一次：拼出来的东西与落库正文**逐字相同**（不许多一个换行）。
+
+    多一个尾部换行不算错，但「拼一次变一点」意味着这个函数不能用在「正文没变就不重渲染」
+    的判断上 —— 那种地方一旦误判就会反复重画。
+    """
+    assert composed["正常 + 正文"] == "## 变更理解"
+    assert composed["正常 + 空正文"] == ""
+
+
+def test_an_empty_body_still_carries_the_notice(composed):
+    """降级的那次可能没有正文（模型没吐 JSON，服务端也没留下东西）——
+
+    这时提示**更不能丢**：屏幕上只有那句「暂无分析结果」，而真相是「这次没跑成」。
+    """
+    assert composed["降级 + 空正文"].strip().startswith("⚠️")
+
+
+def test_a_non_string_body_does_not_leak_null(composed):
+    """`response_text` 可能是 `null`（失败的那次），不能拼出 "null
+⚠️ …"。"""
+    assert "null" not in composed["正文不是字符串"]
+    assert "未完整跑完" in composed["正文不是字符串"]
+
+
+@pytest.mark.parametrize("path", TEMPLATES)
+def test_every_drawer_renders_the_notice_along_with_the_persisted_report(path):
+    """**每个「把落库正文画到屏幕上」的地方都要走这个拼接。**
+
+    以前只有 SSE 那条路接了提示，而三份抽屉在同一个事件里都会再去拉一次 `/latest`、
+    用 `response_text` 整体重渲染 —— 于是提示的存活时间就是从 `result` 事件到那次
+    fetch 回来之间。断言写成「出现过 `contextNotice(payload)`」是挡不住的（它一直都在），
+    所以要**正面要求**这个合并调用，并**反面禁止**裸渲染。
+    """
+    import re
+
+    source = _read(path)
+    body = re.sub(r"/\*.*?\*/", " ", source, flags=re.S)
+    body = re.sub(r"//[^\n]*", " ", body)
+
+    assert "AiContextNotice.withContextNotice(result.response_text" in body, (
+        f"{path} 直接渲染了落库正文，没带上降级/压缩提示 —— "
+        "刷新页面后那次分析是「降级跑完的」这件事就消失了"
+    )
+    for setter in ("setAiReport", "setWeeklyAiReport"):
+        assert f"{setter}(result.response_text)" not in body, (
+            f"{path} 里还有一处裸渲染 {setter}(result.response_text)"
+        )
 
 
 def test_the_single_source_still_knows_every_degradation_reason():

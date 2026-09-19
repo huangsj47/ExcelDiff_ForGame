@@ -58,7 +58,7 @@
         var reason = str(payload.degradation);
 
         if (label) {
-            lines.push('\n⚠️ 本次分析未完整跑完：' + label + (MEANING[reason] || ''));
+            lines.push('⚠️ 本次分析未完整跑完：' + label + (MEANING[reason] || ''));
         }
 
         var context = payload.context || {};
@@ -80,11 +80,48 @@
         if (budgetNote) {
             lines.push(budgetNote);
         }
-        return lines.join('\n');
+        // **空行分隔，不是单换行**：这几句是**互不相干的三件事**（降级 / 压过历史 /
+        // 窗口是按默认值算的），而报告渲染器把段落内的单换行当软换行、用空格接起来
+        // （见 `ai-report-markdown.js` 的 `flushPara`）—— 用单换行的话它们会连成一大句，
+        // 用户一眼扫过去就跳过了。而这一块的全部意义就是**别被跳过**。
+        return lines.join('\n\n');
+    }
+
+    /**
+     * 把提示行贴到一份**已经落库的报告正文**后面（没有可说的就原样返回正文）。
+     *
+     * ## 为什么必须单独有这一条（2026-09-19）
+     *
+     * 上面那个 `contextNotice` 原先只有一个调用点：SSE 的 `result` 事件里，追加到**流式
+     * 缓冲区**上。而三份抽屉在同一个事件里紧接着会去拉一次 `/latest`（`loadLatestResult`
+     * / `loadWeeklyAiLatest` / `refreshWeeklyAiLatest`），那一条路调的是
+     * `setAiReport(result.response_text)` —— 它**整体替换**缓冲区。于是：
+     *
+     * * 跑完的那一次：⚠️ 那几行刚画上去就被替换掉，用户根本来不及看见；
+     * * 打开页面 / 刷新：正文是从 `response_text` 渲染的，提示行一个字都不出现。
+     *
+     * 而它不是可有可无的装饰：`degradation` 说的是「**这块可能没人看过**」，
+     * `context.budget_note` 说的是「**这次是在被压过的提示词上作答的**」—— 少了它，
+     * 「模型看完说没问题」与「模型压根没答上来」在界面上长得一模一样，而这两件事的
+     * 处理方式完全相反（见本模块开头的 docstring）。
+     *
+     * 拼接用**空行**：报告渲染器把段落内的单换行当软换行接起来，单换行会让「正文的最后
+     * 一句」与「⚠️ 第一句」粘成一段。
+     *
+     * 所以口径改成：**提示是「这一次运行」的属性，不是某一条传输通道的属性** ——
+     * 凡是把一份报告正文画到屏幕上的地方，都从这里取「正文 + 提示」的合体。
+     * 服务端导出的那份 `.md` 早已自带（`services/ai/report_document.py`），这里补的是屏幕。
+     */
+    function withContextNotice(responseText, payload) {
+        var body = str(responseText);
+        var notice = contextNotice(payload);
+        if (!notice) { return body; }
+        return body ? body + '\n\n' + notice : notice;
     }
 
     global.AiContextNotice = {
         contextNotice: contextNotice,
+        withContextNotice: withContextNotice,
         MEANING: MEANING
     };
 })(window);

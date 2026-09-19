@@ -1771,7 +1771,7 @@ async function loadWeeklyAiLatest(force = false) {
                 }
             }
             if (result.response_text) {
-                setWeeklyAiReport(result.response_text);
+                setWeeklyAiReport(AiContextNotice.withContextNotice(result.response_text, result.result));
             }
             // 本次消耗。run_id 取外层那条的，明细按运行记录取数（见 static/js/ai_usage_line.js）。
             renderAiUsageLine(result.result?.usage, data.run_id);
@@ -1907,8 +1907,10 @@ function startWeeklyAiAnalysis(force = false) {
                 appendWeeklyAiLine(`\n风险等级：${payload.risk_level}`);
             }
             // 降级 / 压过上下文时补一行说明。文案在 static/js/ai_context_notice.js。
+            // `loadWeeklyAiLatest(true)` 紧随其后、用落库正文整体重渲染 —— 那一条走的是
+            // 同一个模块的 `withContextNotice`。两处都要有，文案只有一份。
             const contextNotice = AiContextNotice.contextNotice(payload);
-            if (contextNotice) { appendWeeklyAiLine(contextNotice); }
+            if (contextNotice) { appendWeeklyAiLine('\n' + contextNotice); }
         }
         setWeeklyAiStatusBadge(outcome.badge, outcome.tone);
         if (startBtn) startBtn.disabled = false;
