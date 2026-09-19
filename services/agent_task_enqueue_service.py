@@ -73,6 +73,7 @@ def enqueue_agent_task_once(
     source_task_id=None,
     priority=10,
     payload=None,
+    commit=True,
 ):
     """去重入队，返回 `(task, created)`。
 
@@ -83,6 +84,22 @@ def enqueue_agent_task_once(
 
     `payload` 里的 `request_key` 只用于日志与排查 —— 判重靠的是 `find_existing`，
     不是这个字段（它躺在 JSON 里，库管不到）。
+
+    ## `commit=False`：调用方自己握着事务的时候
+
+    默认 `commit=True`（上面那套理由只在提交也在锁里时成立）。**唯一**该传
+    `False` 的情形是：调用方正处在**一段必须整体成功或整体回滚**的事务中间，
+    这次入队只是其中一个副作用。硬提交会把那段事务劈成两半 ——
+    `agent_task_result_service` 就是这种调用方：它先用一个条件 UPDATE 抢占回传
+    处理权，再写结果摘要 / 缓存 / 源任务状态，中途任何一步抛错都靠一条
+    `db.session.rollback()` 把整段撤掉、回 500 让 Agent 重报。在那里提交，
+    「已 completed」就先落了库，Agent 重报时会被判成 duplicate 而**丢掉真正的结果**。
+
+    代价要写清楚：锁只护住「查 + 插」，**提交跑到锁外面**了。所以 `commit=False`
+    时的去重只对**已经提交过**的任务成立，挡不住两个真正同时在飞、都还没提交的
+    调用方。这是明知故犯的取舍 —— 重复派发一条取数任务是幂等的
+    （`_upsert_agent_temp_cache_entry`），白花一次算力；而劈开上面那段事务丢的是
+    Agent 的回传结果。后者重得多。
     """
     from models import db  # 延迟导入：与其它服务一致，避免循环 import
 
@@ -101,5 +118,7 @@ def enqueue_agent_task_once(
         )
         # 提交也在锁内：锁外的提交会让另一个线程的「查」跑在本次提交之前，
         # 去重就白做了（见模块 docstring 的「锁必须一直持有到 commit」）。
-        db.session.commit()
+        # `commit=False` 时只 `add`，主键要等调用方 flush / commit 之后才有。
+        if commit:
+            db.session.commit()
         return task, True

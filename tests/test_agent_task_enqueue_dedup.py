@@ -192,6 +192,123 @@ class TestTheTempCacheFetchIsDedupedToo:
             db.session.commit()
 
 
+class TestTheLocalCacheFetchDispatchIsDedupedToo:
+    """`_dispatch_agent_local_cache_fetch` 也走同一条去重。
+
+    这条路径原来是**裸的** `enqueue_agent_task`（只 `add`，不去重），于是同一把
+    `cache_key` 上能堆出多条取数任务：缓存页轮询一次派一条、两个标签页各派一条、
+    同一个 commit 被重新 diff 后再派一条。每一份都由 Agent 取一遍、传一遍，
+    白花算力，任务面板上同一件事出现两行。
+    """
+
+    def test_two_dispatches_for_the_same_cache_key_share_one_task(self, commit_row):
+        from services import agent_management_handlers as handlers
+
+        project_id, repository_id, _commit_id = commit_row
+
+        with flask_app.app_context():
+            first_id = handlers._dispatch_agent_local_cache_fetch(
+                db=db, cache_key="local-cache-dedup", expected_hash="h1",
+                project_id=project_id, repository_id=repository_id,
+            )
+            db.session.commit()
+            second_id = handlers._dispatch_agent_local_cache_fetch(
+                db=db, cache_key="local-cache-dedup", expected_hash="h1",
+                project_id=project_id, repository_id=repository_id,
+            )
+            db.session.commit()
+
+            assert first_id is not None
+            assert second_id == first_id, "同一把 cache_key 又建了一条取数任务"
+            assert (
+                AgentTask.query.filter_by(
+                    task_type="temp_cache_fetch", project_id=project_id
+                ).count()
+                == 1
+            )
+
+    def test_it_shares_the_finder_with_the_commit_diff_dispatcher(self, commit_row):
+        """两条派发路径的判重口径必须是同一份。
+
+        `agent_commit_diff_dispatch._ensure_temp_cache_fetch_task` 先建了一条，
+        随后 `_dispatch_agent_local_cache_fetch` 拿同一把 key 来 —— 必须复用那一条。
+        各写一套判重就会出现「一边认为还在跑、另一边认为已经结束」。
+        """
+        from services import agent_management_handlers as handlers
+
+        project_id, repository_id, _commit_id = commit_row
+
+        with flask_app.app_context():
+            created, was_created = dispatch_module._ensure_temp_cache_fetch_task(
+                project_id, repository_id, "shared-finder-key", "h1"
+            )
+            assert was_created is True
+
+            reused_id = handlers._dispatch_agent_local_cache_fetch(
+                db=db, cache_key="shared-finder-key", expected_hash="h1",
+                project_id=project_id, repository_id=repository_id,
+            )
+
+            assert reused_id == created.id, "两条派发路径各建了一条任务"
+            assert (
+                AgentTask.query.filter_by(
+                    task_type="temp_cache_fetch", project_id=project_id
+                ).count()
+                == 1
+            )
+
+    def test_it_does_not_commit_the_callers_transaction(self, commit_row, monkeypatch):
+        """**回归闸门**：这个函数不许提交调用方的事务。
+
+        换成去重入队时，最顺手的写法是用 `enqueue_agent_task_once` 的默认行为 ——
+        它自己 commit（因为锁必须持有到提交，见那个模块的 docstring）。但本函数的
+        调用方之一 `agent_task_result_service` 正处在**一段整体回滚**的事务中间：
+        条件 UPDATE 抢占回传处理权 → 结果摘要 → 缓存 → 源任务状态，中途任何一步
+        抛错都靠一条 `db.session.rollback()` 把整段撤掉、回 500 让 Agent 重报。
+        在那里硬提交，「任务已 completed」就先落了库，Agent 重报时被判成 duplicate，
+        **真正的结果被静默丢掉** —— 比多派一条幂等的取数任务重得多。
+
+        所以这里直接盯「有没有人调 commit」，而不是事后看数据库：后者要另开连接才
+        分得出提交与否，而这条判据本身就是「调用方的事务有没有被劈开」。
+        """
+        from services import agent_management_handlers as handlers
+
+        project_id, repository_id, _commit_id = commit_row
+
+        with flask_app.app_context():
+            commits = []
+            real_commit = db.session.commit
+            monkeypatch.setattr(
+                db.session, "commit", lambda: (commits.append(1), real_commit())[1]
+            )
+
+            handlers._dispatch_agent_local_cache_fetch(
+                db=db, cache_key="must-not-commit", expected_hash="h1",
+                project_id=project_id, repository_id=repository_id,
+            )
+
+            assert commits == [], (
+                "取数派发提交了调用方的事务 —— 回传结果那段整体回滚被劈开了"
+            )
+            db.session.rollback()
+
+    def test_a_blank_cache_key_dispatches_nothing(self, commit_row):
+        """没有 cache_key 就取不到东西，别建一条注定被 Agent 拒掉的任务。"""
+        from services import agent_management_handlers as handlers
+
+        project_id, repository_id, _commit_id = commit_row
+
+        with flask_app.app_context():
+            before = AgentTask.query.filter_by(project_id=project_id).count()
+            for blank in ("", "   ", None):
+                assert handlers._dispatch_agent_local_cache_fetch(
+                    db=db, cache_key=blank, expected_hash="h1",
+                    project_id=project_id, repository_id=repository_id,
+                ) is None
+            db.session.commit()
+            assert AgentTask.query.filter_by(project_id=project_id).count() == before
+
+
 class TestTheLockCoversTheWholeStep:
     """结构断言：判定、插入、提交必须**整段**在锁里。
 

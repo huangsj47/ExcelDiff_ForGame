@@ -741,19 +741,47 @@ def _upsert_agent_temp_cache_entry(*, db, agent, payload: dict):
 
 
 def _dispatch_agent_local_cache_fetch(*, db, cache_key: str, expected_hash: str, project_id: int, repository_id: int | None):
+    """让 Agent 把这份缓存回传到平台（**去重**，见 `enqueue_agent_task_once`）。
+
+    原来是裸的 `enqueue_agent_task`，同一把 `cache_key` 上能堆出多条取数任务
+    （缓存页轮询、多个标签页、同一个 commit 重新 diff 后再派），每一条都由 Agent
+    取一遍传一遍。判重口径**复用** `_active_temp_cache_fetch_task`，不另写一套 ——
+    那套已覆盖 commit_diff 派发的同名任务，口径漂移就会出现「一边认为还在跑、
+    另一边认为已经结束」。
+
+    `commit=False` 是必须的：调用方 `agent_task_result_service` 正处在一段整体
+    回滚的事务中间（抢占回传处理权 + 结果摘要 + 缓存 + 源任务状态），在这里硬提交
+    会把那段劈开 —— 详见 `enqueue_agent_task_once` 的 docstring。另一个调用方
+    `resolve_agent_temp_cache` 紧接着自己提交。
+
+    函数内 import：`agent_task_enqueue_service` 在模块层 import 了本模块的
+    `enqueue_agent_task`，反向在模块层 import 会成环。
+    """
+    from services.agent_commit_diff_dispatch import _active_temp_cache_fetch_task
+    from services.agent_task_enqueue_service import enqueue_agent_task_once
+
+    key = str(cache_key or "").strip()
+    if not key:
+        # 没有 key 的取数是取不到的 —— 建出来也只会被 Agent 拒掉。
+        return None
+
     task_payload = {
-        "cache_key": cache_key,
+        "cache_key": key,
         "expected_hash": expected_hash or None,
         "project_id": project_id,
         "repository_id": repository_id,
+        # 与 `_ensure_temp_cache_fetch_task` 同一个 request_key 口径。
+        "request_key": f"temp_cache_fetch:{key}",
     }
-    task = enqueue_agent_task(
+    task, _created = enqueue_agent_task_once(
+        find_existing=lambda: _active_temp_cache_fetch_task(project_id, key),
         task_type="temp_cache_fetch",
         project_id=project_id,
         repository_id=repository_id,
         source_task_id=None,
         priority=2,
         payload=task_payload,
+        commit=False,
     )
     db.session.flush()
     return task.id if task else None
