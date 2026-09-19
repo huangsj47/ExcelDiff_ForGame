@@ -102,7 +102,11 @@ class TestFailureVersusEmpty:
         改文案时这条会红 —— 那正是它该做的事：认不出来就等于「取数失败」在面板上
         又变回了「读到了内容」。
         """
-        from services.ai.platform_provider import _render_agent_file_diff, render_diff_payload
+        from services.ai.platform_provider import (
+            _render_agent_file_content,
+            _render_agent_file_diff,
+            render_diff_payload,
+        )
 
         samples = [
             # Agent 说取不到（离线/超时/没绑节点），平台给模型的那一句
@@ -114,8 +118,12 @@ class TestFailureVersusEmpty:
                 {"type": "error", "file_path": LUA, "message": "平台读不到 X 的内容"},
                 path=LUA,
             ),
-            # 配表解析失败
+            # 配表**差异**解析失败
             render_diff_payload({"type": "excel", "file_path": LUA, "error": "坏文件"}, path=LUA),
+            # 配表**正文**解析失败（`file_content` 读到一张读不了的表）
+            _render_agent_file_content(
+                {"kind": "excel", "file_path": LUA, "content": ""}, path=LUA
+            ),
         ]
 
         for text in samples:
@@ -124,6 +132,27 @@ class TestFailureVersusEmpty:
             item = ContextItem("file_diff", f"file_diff {LUA}", text)
             assert summarize_executed((item,))[0]["failed"] is True, text
             assert summarize_executed((item,))[0]["reason"], text
+
+    def test_a_deleted_worksheet_is_a_conclusion_not_a_failure(self):
+        """**`[配表]` 前缀不许进失败清单** —— 它被真结论共用。
+
+        「该工作表已被删除」「本次没有可展示的差异」都是**内容**（模型据此写结论），
+        不是「我们没读到」。按前缀识别区分不了这两类，所以配表正文解析失败换了专属前缀
+        `[配表解析失败]`，而 `[配表]` 留在这里当真结论。
+        """
+        from services.ai.platform_provider import render_diff_payload
+
+        deleted = render_diff_payload(
+            {"type": "excel", "file_path": LUA, "sheets": {"S": {"operation": "deleted"}}},
+            path=LUA,
+        )
+        assert deleted.startswith("配表差异"), deleted
+
+        item = ContextItem("file_diff", f"file_diff {LUA}", deleted)
+        assert summarize_executed((item,))[0]["failed"] is False, (
+            f"「该表已被删除」被当成了取数失败：{deleted!r}"
+        )
+        assert failure_notice("[配表] config/a.xlsx：本次没有可展示的差异。") == ""
 
     def test_a_real_diff_is_not_marked_as_failed(self):
         text = f"代码差异：{LUA}\n@@ -1 +1 @@\n-旧\n+新\n"

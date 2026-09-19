@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import routes.ai_analysis_routes as ai_routes
+import services.ai.provenance as provenance
 import services.ai_analysis_service as ai_service
 from app import app, create_tables, db
 from models import Commit, Project, Repository, WeeklyVersionConfig
@@ -59,11 +60,11 @@ def _run(
     created_at: datetime | None = None,
 ) -> AiAnalysisRun:
     now = created_at or datetime.now(timezone.utc)
-    # `_current_provenance` 里本来就带 model（它是缓存判等的一部分），所以模型名要**并进
+    # `current_provenance` 里本来就带 model（它是缓存判等的一部分），所以模型名要**并进
     # 那一份**，不能再作为独立关键字传一次。
-    provenance = ai_service._current_provenance(project_id)
+    fingerprint = provenance.current_provenance(project_id)
     if model:
-        provenance["model"] = model
+        fingerprint["model"] = model
     run = AiAnalysisRun(
         project_id=project_id,
         target_type=target_type,
@@ -82,7 +83,7 @@ def _run(
         ),
         request_payload=request_payload,
         error_message=error_message,
-        **provenance,
+        **fingerprint,
     )
     db.session.add(run)
     db.session.commit()

@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import services.ai.provenance as provenance
 import services.ai_analysis_service as ai_service
 from app import app, create_tables, db
 from models import Project, Repository, WeeklyVersionConfig
@@ -54,7 +55,7 @@ def _login(client):
 
 def _weekly_run(project_id: int, cfg) -> AiAnalysisRun:
     now = datetime.now(timezone.utc)
-    provenance = ai_service._current_provenance(project_id)
+    fingerprint = provenance.current_provenance(project_id)
     run = AiAnalysisRun(
         project_id=project_id,
         target_type="weekly",
@@ -68,7 +69,7 @@ def _weekly_run(project_id: int, cfg) -> AiAnalysisRun:
         created_at=now,
         response_text=REPORT_TEXT,
         response_payload='{"risk_level": "high"}',
-        **provenance,
+        **fingerprint,
     )
     db.session.add(run)
     db.session.commit()
@@ -77,7 +78,7 @@ def _weekly_run(project_id: int, cfg) -> AiAnalysisRun:
 
 def _commit_run(project_id: int, commit_id: int) -> AiAnalysisRun:
     now = datetime.now(timezone.utc)
-    provenance = ai_service._current_provenance(project_id)
+    fingerprint = provenance.current_provenance(project_id)
     run = AiAnalysisRun(
         project_id=project_id,
         target_type="commit",
@@ -90,7 +91,7 @@ def _commit_run(project_id: int, commit_id: int) -> AiAnalysisRun:
         created_at=now,
         response_text=REPORT_TEXT,
         response_payload='{"risk_level": "high"}',
-        **provenance,
+        **fingerprint,
     )
     db.session.add(run)
     db.session.commit()

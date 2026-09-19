@@ -420,6 +420,55 @@ def test_an_empty_result_is_distinguishable_from_a_failure():
     assert "没有风险" in item.text, "空内容不能被当成「没问题」"
 
 
+def test_a_failure_returned_as_a_sentence_is_counted_as_a_failure():
+    """**provider 的「拿不到」有两副面孔：`None`，以及一句说明。**
+
+    后者是刻意的（那一层要把「为什么拿不到」带给模型），但它是一个**非空字符串** ——
+    只看 `meta.tool_failed` 就会把它记成「成功取回 N 个字符」。于是用量页按工具类型的
+    「失败」列是 0，而同时 trace 面板上「N 条取不到」是真的 —— 两处口径不同，而
+    「失败 0 次」会被读成「这次取数都很顺」。
+
+    判据与 `trace_evidence.summarize_executed` 用同一个 `failure_notice`，不另写一份。
+    """
+    from services.ai.platform_provider import _render_agent_file_content
+
+    # 配表正文解析失败（`file_content` 读到一张读不了的表）—— 这是线上真实会出现的那句
+    sentence = _render_agent_file_content(
+        {"kind": "excel", "file_path": "config/道具表.xlsx", "content": ""},
+        path="config/道具表.xlsx",
+    )
+    assert sentence, "前提：这句失败说明不为空"
+
+    tools = ContextTools(FakeProvider(file_content=sentence))
+    tools.execute([ContextRequest(type="file_content", commit=COMMIT_A, path=PATH_B)])
+
+    counters = tools.stats["file_content"]
+    assert counters["failed"] == 1, (
+        f"「内容无法解析成文本表格」被记成了成功取回：{counters}"
+    )
+    assert counters["source_chars"] == 0 and counters["produced_chars"] == 0, (
+        "失败条目的字符数不该被算进取回量（那会把「没取到」伪装成「取到了几十个字」）"
+    )
+
+
+def test_a_real_conclusion_that_starts_with_a_bracket_is_not_a_failure():
+    """反面：`[配表]` 那两句是**内容**（该表已被删除 / 没有可展示的差异），不是失败。
+
+    按前缀识别区分不了这两类，所以配表正文的解析失败换了专属前缀
+    （`[配表解析失败]`），而 `[配表]` 留作真结论 —— 把它算成失败会让「这次有一张表
+    被删了」变成「这次取数失败了一次」。
+    """
+    tools = ContextTools(
+        FakeProvider(file_diff="[配表] config/a.xlsx：本次没有可展示的差异。")
+    )
+    batch = tools.execute([_diff_request()])
+
+    counters = tools.stats["file_diff"]
+    assert counters["failed"] == 0, counters
+    assert counters["produced_chars"] > 0, "真结论的字符数要照常算进取回量"
+    assert not batch.has_failures
+
+
 def test_one_failure_does_not_discard_the_other_results():
     provider = FakeProvider(file_diff=None, file_content="全文")
     batch = ContextTools(provider).execute(

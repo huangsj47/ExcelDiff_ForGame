@@ -122,6 +122,20 @@ def result_payload(
             for item in kept
         ],
         "suppressed_count": len(outcome.anomalies) - len(kept),
+        # 九个维度**逐一**的交代（`DimensionReview`：命中与否 + 未命中的理由）。
+        #
+        # 这一份原先在落库时被丢掉了：解析（`protocol._coerce_dimensions`，final 必须非空）
+        # 与引擎持有（`EngineOutcome.payload`）两段都在，只有这里不产出这个键 ——
+        # 于是「九个维度都过了一遍」这句保证**只活在提示词里**，报告读完之后谁也核不了。
+        # 剩下的唯一线索是异常的 `category`（它落在同一集合里），而**未命中维度的理由
+        # 全部消失** —— 那正是「这一块为什么不需要看」的唯一出处。
+        #
+        # 放在这里与 `subagents` 同一个理由：SSE 的 `result` 事件、`/latest`、
+        # 结论回放读的都是这同一份字典。
+        "dimensions": [
+            {"id": item.id, "hit": bool(item.hit), "note": item.note or ""}
+            for item in (outcome.payload.dimensions if outcome.payload else ())
+        ],
         "rounds_used": outcome.rounds_used,
         "requests_used": outcome.requests_used,
         # 本次的用量。放在这里有两个原因：SSE 的 `result` 事件与 `/latest`（读的是落库的
@@ -157,6 +171,10 @@ def failed_result(summary: dict, message: str) -> dict:
         "degradation_label": message,
         "error_message": message,
         "anomalies": [],
+        # 形状与 `result_payload` 保持一致：读取侧只写一处 `payload.get("dimensions")`，
+        # 不必为「没跑起来的那次」多加一个分支（少一个键与空列表在界面上的区别是
+        # 「九个维度一个都没交代」与「这次根本没跑」，而后者已经由 status 说了）。
+        "dimensions": [],
         "suppressed_count": 0,
         "rounds_used": 0,
         "requests_used": 0,

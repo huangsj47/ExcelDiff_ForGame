@@ -527,7 +527,7 @@ def _render_agent_file_content(
     if str(outcome.get("kind") or "") == "excel":
         content = str(outcome.get("content") or "")
         if not content:
-            return f"[配表] {where}：内容无法解析成文本表格。**这不等于「没有内容」**。"
+            return f"[配表解析失败] {where}：内容无法解析成文本表格。**这不等于「没有内容」**。"
         return f"（配表正文由业务节点（Agent）上的工作副本取出）\n{content}"
 
     raw = str(outcome.get("content") or "")
@@ -1521,7 +1521,7 @@ class PlatformContextProvider:
             )
             if rendered is None:
                 return (
-                    f"[配表] {path}：内容无法解析成文本表格。"
+                    f"[配表解析失败] {path}：内容无法解析成文本表格。"
                     "**这不等于「没有内容」**，需要核对时请说明该表无法读取。"
                 )
             return rendered

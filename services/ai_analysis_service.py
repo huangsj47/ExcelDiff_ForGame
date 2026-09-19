@@ -78,15 +78,15 @@ from services.ai.pricing import (
     price_change_requires_version_bump,
     price_table_doc_shape,
 )
-from services.ai.prompt import prompt_version
+from services.ai.provenance import current_provenance, provenance_matches
 from services.ai.result_payload import (
     failed_result,
     result_payload,
 )
-from services.ai.rules import RuleThresholds, rules_version
+from services.ai.rules import RuleThresholds
 from services.ai.run_progress import clear as clear_run_progress
 from services.ai.run_progress import publish as publish_run_progress
-from services.ai.skill_loader import describe_load_error, load_skills, skill_revision
+from services.ai.skill_loader import describe_load_error, load_skills
 from services.ai.subagent import plan_family, run_family_with_seed, subagent_mode_of
 from services.ai.trace_evidence import encode_evidence
 from services.ai.usage import encode_tools
@@ -340,50 +340,11 @@ def build_weekly_group_key(config: WeeklyVersionConfig) -> str:
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _current_provenance(project_id: int) -> dict:
-    """这批结论是由「哪套提示词 / skill / 规则 / 模型」产生的。
-
-    **必须落库，也必须参与缓存判等**，理由有两条：
-
-    1. 不记录就没法说明一份结论是怎么来的。改了 skill 之后重看同一份结论，无法判断
-       它是新规则跑出来的还是旧的。
-    2. 缓存目前只按「目标 + 时间」命中。于是改了 skill、提示词、规则或换了模型之后，
-       90 天内重看老提交拿到的仍然是**旧结论** —— 从用户角度看就是「我的改动没生效」。
-       三个版本号都是源码内容哈希，改了文件就变，缓存自然失效。
-    """
-    project = db.session.get(Project, project_id)
-    project_code = getattr(project, "code", None) if project else None
-    row = _get_project_config_row(project_id)
-    model = ""
-    if row is not None:
-        model = str(row.resolved().get("api_model") or "")
-    return {
-        "prompt_version": prompt_version(),
-        "skill_version": skill_revision(_REPO_ROOT, project_code=project_code),
-        "rules_version": rules_version(),
-        "model": model.strip(),
-    }
-
-
-def _provenance_matches(run: AiAnalysisRun, expected: Optional[dict]) -> bool:
-    """run 的溯源字段是否与「现在这套」一致。
-
-    老库上的行这些列是 NULL —— 一律判为**不一致**（即不可复用）。代价是老提交会被
-    重新分析一次，换来的是「绝不会把旧规则下的结论当成新规则下的结论」。
-    """
-    if not expected:
-        return True
-    for key, value in expected.items():
-        if str(getattr(run, key, None) or "") != str(value or ""):
-            return False
-    return True
-
-
 def _is_run_fresh(run: Optional[AiAnalysisRun], *, expected: Optional[dict] = None) -> bool:
     """这份历史结论现在还能不能直接复用。
 
     除了时间窗，还要求产生它的那套 prompt/skill/rules/model 与现在一致（见
-    `_current_provenance`）。不传 `expected` 时按 run 自己的项目现算。
+    `provenance.current_provenance`）。不传 `expected` 时按 run 自己的项目现算。
 
     **失败的 run 一律不可复用。** 这一条以前漏了，后果比「显示错了」更严重：
     失败的 run 也写了 `response_text`（内容是错误文本）与 `finished_at`，溯源也在
@@ -406,8 +367,8 @@ def _is_run_fresh(run: Optional[AiAnalysisRun], *, expected: Optional[dict] = No
     if ts < _analysis_cache_cutoff():
         return False
     if expected is None and run.project_id:
-        expected = _current_provenance(run.project_id)
-    return _provenance_matches(run, expected)
+        expected = current_provenance(run.project_id)
+    return provenance_matches(run, expected)
 
 
 def project_price_table(project_id: int) -> tuple[PriceTable | None, tuple[str, ...]]:
@@ -1277,7 +1238,7 @@ def _create_run(
         scope=scope,
         trigger_source=trigger_source,
         trace_id=f"{target_type}-{target_id}-{int(_utcnow().timestamp())}",
-        **_current_provenance(project_id),
+        **current_provenance(project_id),
         request_payload=_json_dumps(payload),
         delta_summary=_json_dumps(
             {
@@ -1932,7 +1893,7 @@ def _read_latest_result(conditions, *, project_id: Optional[int] = None) -> Opti
     )
     if run is None:
         return None
-    expected = _current_provenance(project_id) if project_id else None
+    expected = current_provenance(project_id) if project_id else None
     if _is_run_fresh(run, expected=expected):
         return _conclusion_payload(run)
     if run.status == "running" and not run.is_stale_running:

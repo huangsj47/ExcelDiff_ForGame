@@ -43,6 +43,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import services.ai.provenance as provenance
 import services.ai_analysis_service as ai_service
 from app import app, create_tables, db
 from models import Project, Repository, WeeklyVersionConfig
@@ -108,7 +109,7 @@ def _add_run(
     `prompt_version` 不传就用**当前**的哈希（= 溯源一致），传别的值就模拟「规则变了」。
     """
     ts = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
-    provenance = ai_service._current_provenance(project_id)
+    fingerprint = provenance.current_provenance(project_id)
     run = AiAnalysisRun(
         project_id=project_id,
         target_type="weekly",
@@ -123,10 +124,13 @@ def _add_run(
         response_text=REPORT_TEXT if concluded else "",
         response_payload=REPORT_PAYLOAD if concluded else None,
         error_message=error_message,
-        prompt_version=prompt_version if prompt_version is not None else provenance["prompt_version"],
-        skill_version=provenance["skill_version"],
-        rules_version=provenance["rules_version"],
-        model=provenance["model"],
+        prompt_version=prompt_version if prompt_version is not None else fingerprint["prompt_version"],
+        skill_version=fingerprint["skill_version"],
+        rules_version=fingerprint["rules_version"],
+        # 门槛指纹也是溯源的一部分（见 `services/ai/provenance.py`）：不写它就等于
+        # 造了一条「老库上的行」（那一列是 NULL），而 NULL 一律判为不一致。
+        analysis_revision=fingerprint["analysis_revision"],
+        model=fingerprint["model"],
     )
     db.session.add(run)
     db.session.commit()

@@ -73,6 +73,7 @@ from typing import Any, Iterable, Mapping, MutableMapping, Protocol, runtime_che
 from services.ai.budget import ContextItem, truncate_text, truncate_text_middle
 from services.ai.protocol import ContextRequest, DroppedItem
 from services.ai.scope import normalize_path
+from services.ai.trace_evidence import failure_notice
 from services.ai.windowed_view import render_window, windowed_kinds
 from utils.content_window import CONTENT_MAX_CHARS
 
@@ -516,7 +517,20 @@ class ContextTools:
             self._executions += 1
             self._bump(request.type, "calls")
             self._bump(request.type, "executions")
-            if item.meta.get("tool_failed"):
+            # 「失败」的判据是**这两条之一**，缺一不可：
+            #
+            # * `meta.tool_failed`：provider 返回 `None` 或抛异常 —— 取数层自己知道它没拿到；
+            # * `failure_notice(text)`：provider **返回了一句话**，而那句话是失败说明
+            #   （`[配表解析失败]`、`[读不到差异]`、`[检索不到]`…）。
+            #
+            # 只看前者会漏掉整整一类：`ContextProvider` 的契约里「拿不到」可以是 `None`、
+            # 也可以是一句说明（那一层刻意用后者把「为什么拿不到」带给模型）。这类返回
+            # 在 trace 里被记成失败（`trace_evidence` 走的就是 `failure_notice`），
+            # 而用量页按工具类型的「失败」列读的是这里的计数 —— 两处口径不同，于是
+            # 面板上「N 条取不到」与「失败 0 次」同时出现，而后者被当成「取数都很顺」。
+            #
+            # 判据是两个来源共用的那一个函数，不在这里另写一份前缀表。
+            if item.meta.get("tool_failed") or failure_notice(item.text):
                 # 失败条目没有 original_chars。**不补 0**：让 failed 这个计数自己说明字符
                 # 数的缺口，而不是把「没取到」伪装成「取到了 0 个字符」。
                 self._bump(request.type, "failed")

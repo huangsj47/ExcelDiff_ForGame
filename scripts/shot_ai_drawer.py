@@ -55,8 +55,8 @@ from app import create_tables  # noqa: E402
 from auth.services import register_user  # noqa: E402
 from models import AiAnalysisRun, Commit, Project, Repository, db  # noqa: E402
 from models.ai_analysis import AiProjectAnalysisConfig  # noqa: E402
+from services.ai.provenance import current_provenance  # noqa: E402
 from services.ai.trace_evidence import encode_evidence, live_round_entry  # noqa: E402
-from services.ai_analysis_service import _current_provenance  # noqa: E402
 
 PASSWORD = "pw-123456"
 STAMP = uuid.uuid4().hex[:6]
@@ -150,7 +150,7 @@ def _seed() -> dict:
 
         # 溯源三件套照**当前源码**写：不写的话这份结论会被判成「旧版规程产出」，
         # 抽屉上挂一条「旧结论」徽章 —— 那是另一条路径的观感，会干扰这一刀要看的东西。
-        provenance = _current_provenance(project.id)
+        provenance = current_provenance(project.id)
         run = AiAnalysisRun(
             project_id=project.id, target_type="commit", target_id=commit.id,
             status="succeeded", scope="full", trigger_source="manual",

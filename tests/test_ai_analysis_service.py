@@ -2,6 +2,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import services.ai.provenance as provenance
 import services.ai_analysis_service as ai_service
 from app import app, create_tables, db
 from models import Project, Repository, WeeklyVersionConfig, WeeklyVersionDiffCache
@@ -396,12 +397,12 @@ def test_the_provenance_names_the_prompt_skill_rules_and_model():
         ai_service.update_project_analysis_config(project.id, {"api_model": "m-1"})
         db.session.commit()
 
-        provenance = ai_service._current_provenance(project.id)
+        fingerprint = provenance.current_provenance(project.id)
 
-        assert provenance["prompt_version"].startswith("prompt-")
-        assert provenance["rules_version"], "规则版本为空，改了规则也不会让缓存失效"
-        assert provenance["skill_version"], "skill 版本为空，改了 skill 也不会让缓存失效"
-        assert provenance["model"] == "m-1"
+        assert fingerprint["prompt_version"].startswith("prompt-")
+        assert fingerprint["rules_version"], "规则版本为空，改了规则也不会让缓存失效"
+        assert fingerprint["skill_version"], "skill 版本为空，改了 skill 也不会让缓存失效"
+        assert fingerprint["model"] == "m-1"
 
 
 def test_a_weekly_run_records_its_provenance():
@@ -513,7 +514,7 @@ def test_a_failed_run_is_never_reused_as_a_cached_result():
     上次的失败，而不是重新跑。
 
     这条用例刻意构造一条**除 status 外完全可复用**的 run：内容非空、时间在窗口内、
-    溯源与当前配置逐字一致（`**ai_service._current_provenance(...)`）。否则它会因为
+    溯源与当前配置逐字一致（`**provenance.current_provenance(...)`）。否则它会因为
     「溯源对不上」而被拒，测试就变成「无论有没有 status 判断都通过」—— 什么也没证明。
     （第一版就踩了这个坑：mutation 掉 status 判断后它照样过。）
     """
@@ -531,7 +532,7 @@ def test_a_failed_run_is_never_reused_as_a_cached_result():
             status="failed",
             response_text="调用模型失败（LLMTransportError）：Read timed out.",
             finished_at=datetime.now(timezone.utc),
-            **ai_service._current_provenance(project.id),
+            **provenance.current_provenance(project.id),
         )
         db.session.add(failed)
         db.session.commit()
@@ -686,7 +687,7 @@ def test_changing_the_skill_prompt_or_model_invalidates_the_cache():
             status="succeeded",
             response_text="结论",
             finished_at=datetime.now(timezone.utc),
-            **ai_service._current_provenance(project.id),
+            **provenance.current_provenance(project.id),
         )
         db.session.add(fresh)
         db.session.commit()
@@ -697,6 +698,7 @@ def test_changing_the_skill_prompt_or_model_invalidates_the_cache():
             ("prompt_version", "prompt-outdated"),
             ("skill_version", "skill-outdated"),
             ("rules_version", "rules-outdated"),
+            ("analysis_revision", "sev=critical;conf=very_high"),
             ("model", "another-model"),
         ):
             original = getattr(fresh, field)
@@ -705,6 +707,86 @@ def test_changing_the_skill_prompt_or_model_invalidates_the_cache():
             setattr(fresh, field, original)
 
         assert ai_service._is_run_fresh(fresh) is True, "改回去之后应当恢复可复用"
+
+
+def test_changing_the_severity_threshold_invalidates_the_cached_conclusion():
+    """**改门槛必须逼出一次重跑。**
+
+    三个版本号都是**源码内容哈希**，而 `rules_version()` 只哈希 `rules.py` 一个文件
+    （`RULE_SOURCE_FILES`）—— 用户改 `min_severity` / `min_confidence` /
+    `max_anomalies_per_run` 时它逐字不变。而那几项直接决定「哪些结论会被报出来」：
+    把门槛从 `high` 收到 `critical` 之后重看老提交，拿到的会是旧门槛下归一化的结论，
+    连「规则变了」那句提示都不出现 —— 从用户角度看就是「我的改动没生效」。
+
+    规则层早就写清楚了这件事（`RuleThresholds.revision_component` 的 docstring：
+    「门槛变了就是另一个问题，**必须**重跑」），那个方法也一直在，只是**没有任何生产
+    调用点** —— `AiAnalysisRun.analysis_revision` 这一列从建出来起就没被写过。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        db.session.commit()
+        ai_service.update_project_analysis_config(project.id, {"min_severity": "high"})
+        db.session.commit()
+
+        run = AiAnalysisRun(
+            project_id=project.id,
+            target_type="commit",
+            target_id=1,
+            status="succeeded",
+            response_text="结论",
+            finished_at=datetime.now(timezone.utc),
+            **provenance.current_provenance(project.id),
+        )
+        db.session.add(run)
+        db.session.commit()
+
+        assert run.analysis_revision, "门槛指纹没有被写进溯源列"
+        assert ai_service._is_run_fresh(run) is True
+
+        ai_service.update_project_analysis_config(project.id, {"min_severity": "critical"})
+        db.session.commit()
+
+        assert ai_service._is_run_fresh(run) is False, (
+            "门槛从 high 收到 critical 了，老结论仍被当成现成的 —— "
+            "用户会以为新门槛没生效"
+        )
+        # `rules_version` 是源码哈希，改配置**不该**动它 —— 这正是非要有这一位的理由
+        assert provenance.current_provenance(project.id)["rules_version"] == run.rules_version
+
+
+def test_a_broken_threshold_config_does_not_break_the_freshness_check():
+    """库里的门槛被手工改坏时：`from_config` 抛错，而读侧不能因此 500。
+
+    给一个独有的取值即可 —— 非法配置与任何历史结论都不相等，照样逼出一次重跑，
+    而重跑时会以正常路径把配置错误报出来。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        db.session.commit()
+        from models.ai_analysis import AiProjectAnalysisConfig
+
+        ai_service.update_project_analysis_config(project.id, {"min_severity": "high"})
+        db.session.commit()
+        config = AiProjectAnalysisConfig.query.filter_by(project_id=project.id).first()
+        config.min_severity = "不是个门槛"
+        db.session.commit()
+
+        fingerprint = provenance.current_provenance(project.id)
+
+        assert fingerprint["analysis_revision"] == "invalid-config"
+        run = AiAnalysisRun(
+            project_id=project.id, target_type="commit", target_id=1, status="succeeded",
+            response_text="结论", finished_at=datetime.now(timezone.utc), **fingerprint,
+        )
+        db.session.add(run)
+        db.session.commit()
+        assert ai_service._is_run_fresh(run) is True, "自己写进去的溯源应当与现算的一致"
+
+        config.min_severity = "high"
+        db.session.commit()
+        assert ai_service._is_run_fresh(run) is False, "修好配置之后应当重跑一次"
 
 
 def test_the_freshness_check_still_honours_the_time_window():
@@ -722,7 +804,7 @@ def test_the_freshness_check_still_honours_the_time_window():
             response_text="结论",
             finished_at=datetime.now(timezone.utc)
             - timedelta(days=ai_service.ANALYSIS_CACHE_DAYS + 1),
-            **ai_service._current_provenance(project.id),
+            **provenance.current_provenance(project.id),
         )
         db.session.add(ancient)
         db.session.commit()
