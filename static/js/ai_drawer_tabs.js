@@ -147,6 +147,117 @@
         if (node && node.focus) node.focus();
     }
 
+    /* ----------------------------------------------------------------------
+     * 抽屉的开合：Esc 关闭 + 焦点保存/恢复
+     * ----------------------------------------------------------------------
+     * 这段本来只有周版本页有（模板里手写的一段 `document.keydown`），另外两页的抽屉
+     * **没有 Esc**：抽屉占掉半屏、背后还压着一层 overlay，键盘用户按遍所有键也出不去
+     * （WCAG 2.1.2 无键盘陷阱）。三份模板各写一遍必然分叉 —— 已经分叉过了，所以放进
+     * 这里，由 `bindDrawer()` 一处实现。
+     *
+     * 焦点同样：抽屉打开时焦点该进去、关掉时该回到**打开它的那个元素**上，否则关完
+     * 抽屉焦点掉回 `<body>`，键盘用户要从头 Tab 一遍。模块拿不到各页 open 函数的时点
+     * （它们在模板里），所以两件事都不靠调用方配合：
+     *
+     *   * 记住触发元素靠 `focusin` —— 抽屉关着的时候焦点落在谁身上就一直记着；
+     *   * 进出抽屉靠 `MutationObserver` 盯 `class` 上的 `open`。
+     *
+     * **不做焦点陷阱（Tab 环绕）**：那需要额外一套「抽屉内可聚焦元素」的判定，而这
+     * 三页的抽屉里面板是活的（结论正文里有链接、按钮、`details`）。已声明
+     * `aria-modal="true"` 却没有陷阱，严格说仍不完整 —— 记在这里，别当成已经做完了。
+     */
+    var boundDrawers = {};
+
+    function bindDrawer(options) {
+        var opts = options || {};
+        var drawerId = opts.drawer;
+        if (!drawerId || typeof opts.onClose !== 'function') return api;
+        if (boundDrawers[drawerId]) return api;
+        if (!global.document) return api;
+        // 裸沙箱（`tests/` 里几个把模板脚本抠进假 DOM 的用例）没有 `addEventListener`。
+        // 真浏览器一定有 —— 这里只是让「架子不全」的沙箱安静地退化成不绑定，而不是
+        // 在加载模板脚本时抛一个与它无关的 TypeError。
+        if (typeof global.document.addEventListener !== 'function') return api;
+        boundDrawers[drawerId] = true;
+
+        var lastTrigger = null;
+        var wasOpen = false;
+
+        function drawerNode() {
+            return el(drawerId);
+        }
+
+        function isOpen() {
+            var node = drawerNode();
+            return !!(node && node.classList && node.classList.contains('open'));
+        }
+
+        function focusIntoDrawer() {
+            var node = drawerNode();
+            if (node && node.focus) node.focus();
+        }
+
+        function restoreFocus() {
+            var target = lastTrigger;
+            lastTrigger = null;
+            if (!target || typeof target.focus !== 'function') return;
+            var body = global.document.body;
+            // 触发它的那个元素可能已经不在了（列表重画 / 行被换掉）—— 别硬 focus 一个
+            // 已经脱离文档的节点，那会让焦点落在 `<body>` 上，等于没恢复。
+            if (body && typeof body.contains === 'function' && !body.contains(target)) return;
+            target.focus();
+        }
+
+        /** 比对「现在开着没」，在**变化的那一刻**做进出焦点的动作。幂等。 */
+        function sync() {
+            var nowOpen = isOpen();
+            if (nowOpen === wasOpen) return;
+            wasOpen = nowOpen;
+            if (nowOpen) {
+                focusIntoDrawer();
+            } else {
+                restoreFocus();
+            }
+        }
+
+        // 关着的时候，焦点落在谁身上就一直记着 —— 那就是「打开它的那个元素」。
+        // 抽屉**里面**的焦点不算（否则会把抽屉内的元素记成触发点，关掉后焦点又跳回去）。
+        global.document.addEventListener('focusin', function (event) {
+            if (isOpen()) return;
+            if (event && event.target) lastTrigger = event.target;
+        });
+
+        global.document.addEventListener('keydown', function (event) {
+            var key = event.key;
+            if (key !== 'Escape' && key !== 'Esc') return;
+            if (!isOpen()) return;
+            if (event.preventDefault) event.preventDefault();
+            opts.onClose();
+            // 各页的 close 函数会摘掉 `open`；但 MutationObserver 不可用时没有人回调，
+            // 所以这里再显式比一次（`sync()` 幂等，重复调用不会重复恢复焦点）。
+            sync();
+        });
+
+        function startWatching() {
+            var node = drawerNode();
+            if (!node) return false;
+            if (typeof global.MutationObserver === 'function') {
+                new global.MutationObserver(sync).observe(node, {
+                    attributes: true,
+                    attributeFilter: ['class']
+                });
+            }
+            wasOpen = isOpen();
+            return true;
+        }
+
+        // 抽屉的 DOM 在页面里，但脚本不保证已经跑到它后面 —— 拿不到就等 DOM 就绪。
+        if (!startWatching() && global.document.addEventListener) {
+            global.document.addEventListener('DOMContentLoaded', startWatching);
+        }
+        return api;
+    }
+
     function onKeydown(event) {
         var key = event.key;
         if (key === 'ArrowRight' || key === 'ArrowLeft') {
@@ -200,6 +311,7 @@
         defaultTab: defaultTab,
         shouldMarkUnread: shouldMarkUnread,
         init: init,
+        bindDrawer: bindDrawer,
         select: select,
         markRunning: markRunning,
         markSettled: markSettled,

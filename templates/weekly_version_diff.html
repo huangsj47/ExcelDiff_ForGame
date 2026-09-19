@@ -1268,7 +1268,7 @@
 </style>
 
 <div class="ai-drawer-overlay" id="weeklyAiDrawerOverlay"></div>
-<aside class="ai-drawer" id="weeklyAiDrawer" role="dialog" aria-modal="true" aria-label="AI 分析">
+<aside class="ai-drawer" id="weeklyAiDrawer" role="dialog" aria-modal="true" aria-label="AI 分析" tabindex="-1">
     <div class="ai-drawer-header">
         <div class="d-flex align-items-center gap-2">
             <span class="ai-drawer-title">AI分析</span>
@@ -2001,6 +2001,10 @@ function initWeeklyAiAnalysis() {
         reportPanel: 'weeklyAiOutput',
         onShowThink: function () { AiThinkLog.ensureLoaded(); }
     });
+    // Esc 关闭 + 焦点进出抽屉。这一段本来是本页手写的（`document.addEventListener
+    // ('keydown', ...)`），只此一页有；另外两页的抽屉没有 Esc。实现搬进共享模块，
+    // 三份模板只留这一次调用 —— 免得再分叉一次。
+    AiDrawerTabs.bindDrawer({ drawer: 'weeklyAiDrawer', onClose: closeWeeklyAiDrawer });
 
     if (openBtn) {
         openBtn.addEventListener('click', async function() {
@@ -2018,14 +2022,8 @@ function initWeeklyAiAnalysis() {
     }
     if (closeBtn) closeBtn.addEventListener('click', closeWeeklyAiDrawer);
     if (overlay) overlay.addEventListener('click', closeWeeklyAiDrawer);
-    // Esc 关闭：抽屉占掉半屏，键盘用户需要一个不依赖鼠标的退出方式（WCAG 2.1.2）
-    document.addEventListener('keydown', function(event) {
-        if (event.key !== 'Escape') return;
-        const drawer = document.getElementById('weeklyAiDrawer');
-        if (drawer && drawer.classList.contains('open')) {
-            closeWeeklyAiDrawer();
-        }
-    });
+    // Esc 关闭与焦点进出都在共享模块里（`AiDrawerTabs.bindDrawer`，见上面 init 之后
+    // 那一次调用）—— 三份模板同一份实现。
     if (startBtn) {
         startBtn.addEventListener('click', function() {
             if (weeklyAiHasCached && !confirm('已有分析结果，确定重新分析吗？')) {

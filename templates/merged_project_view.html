@@ -1960,6 +1960,7 @@
                                     </h5>
                                     <div class="d-flex align-items-center gap-2">
                                         <span class="version-risk-label risk-unknown"
+                                              role="button" tabindex="0"
                                               data-config-id="{{ version.configs[0].id }}"
                                               data-version-name="{{ version.name }}">
                                             版本AI分析：未分析
@@ -2204,7 +2205,7 @@
 </div>
 
 <div class="ai-drawer-overlay" id="weeklyAiDrawerOverlay"></div>
-<aside class="ai-drawer" id="weeklyAiDrawer" role="dialog" aria-modal="true" aria-label="AI 分析">
+<aside class="ai-drawer" id="weeklyAiDrawer" role="dialog" aria-modal="true" aria-label="AI 分析" tabindex="-1">
     <div class="ai-drawer-header">
         <div class="d-flex align-items-center gap-2">
             <span class="ai-drawer-title" id="weeklyAiDrawerTitle">AI分析</span>
@@ -4498,6 +4499,9 @@ function initWeeklyAiDrawer() {
         reportPanel: 'weeklyAiOutput',
         onShowThink: function () { AiThinkLog.ensureLoaded(); }
     });
+    // Esc 关闭 + 焦点进出抽屉。这一页的抽屉是「同一个抽屉换目标」，`onClose` 必须给
+    // 本页自己的那个函数（它还要停流、清掉 `weeklyAiCurrentConfigId`）。
+    AiDrawerTabs.bindDrawer({ drawer: 'weeklyAiDrawer', onClose: closeWeeklyAiDrawer });
 
     // 「导出 md」：链接本身在 footer 里，状态（导哪一次 / 有没有得导）全在
     // static/js/ai_report_export.js。**每个「结论变了」的分支都要 track 一次**
@@ -4529,9 +4533,11 @@ function initWeeklyAiDrawer() {
         });
     }
 
-    document.addEventListener('click', function(event) {
-        const label = event.target.closest('.version-risk-label');
-        if (!label) return;
+    // 风险标签是这一页**唯一**的抽屉入口，而它原先是个没有 `role`/`tabindex` 的
+    // `<span>` —— 键盘用户既 Tab 不到、也敲不开。加上 `role="button" tabindex="0"`
+    // （模板里两个渲染点都加了）之后它长得像按钮、读屏也念成按钮，那就得按按钮的
+    // 规矩能用键盘敲开：否则「看起来能用、Tab 不到」比明摆着不能用更糟。
+    function openAiDrawerFromRiskLabel(label) {
         const configId = label.dataset.configId;
         const versionName = label.dataset.versionName || '';
         if (!configId) return;
@@ -4580,6 +4586,25 @@ function initWeeklyAiDrawer() {
             // 后台调度，管不到这里）。要跑就按抽屉里的「开始分析」。
             refreshWeeklyAiLatest(configId);
         });
+    }
+
+    document.addEventListener('click', function(event) {
+        const label = event.target.closest('.version-risk-label');
+        if (!label) return;
+        openAiDrawerFromRiskLabel(label);
+    });
+
+    document.addEventListener('keydown', function(event) {
+        if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return;
+        // 按住不放会连开 —— 按钮的默认行为是只在按下时触发一次。
+        if (event.repeat) return;
+        const label = event.target && event.target.closest
+            ? event.target.closest('.version-risk-label')
+            : null;
+        if (!label) return;
+        // 空格在浏览器里的默认动作是滚动页面；既然当按钮用，就按按钮的规矩吃掉它。
+        event.preventDefault();
+        openAiDrawerFromRiskLabel(label);
     });
 }
 
@@ -5133,6 +5158,7 @@ function createInactiveVersionHtml(version) {
                     </h5>
                     <div class="d-flex align-items-center gap-2">
                         <span class="version-risk-label risk-unknown"
+                              role="button" tabindex="0"
                               data-config-id="${version.configs[0].id}"
                               data-version-name="${safeName}">
                             版本AI分析：未分析

@@ -416,7 +416,7 @@
 </div>
 
 <div class="ai-drawer-overlay" id="aiDrawerOverlay"></div>
-<aside class="ai-drawer" id="aiDrawer" role="dialog" aria-modal="true" aria-label="AI 分析">
+<aside class="ai-drawer" id="aiDrawer" role="dialog" aria-modal="true" aria-label="AI 分析" tabindex="-1">
     <div class="ai-drawer-header">
         <div class="d-flex align-items-center gap-2">
             <span class="ai-drawer-title">AI分析</span>
@@ -1100,6 +1100,9 @@ function initCommitAiAnalysis() {
         reportPanel: 'aiAnalysisOutput',
         onShowThink: function () { AiThinkLog.ensureLoaded(); }
     });
+    // Esc 关闭 + 焦点进出抽屉。这段逻辑以前只有周版本页有（手写的那一段），另外两页
+    // 的抽屉没有 Esc —— 三份模板各写一遍已经分叉过了，所以实现放在共享模块里。
+    AiDrawerTabs.bindDrawer({ drawer: 'aiDrawer', onClose: closeDrawer });
 
     // 「导出 md」：链接本身在 footer 里，状态（导哪一次 / 有没有得导）全在
     // static/js/ai_report_export.js。**每个「结论变了」的分支都要 track 一次**
