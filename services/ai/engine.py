@@ -1173,8 +1173,9 @@ def _batch_notes(batch: Any) -> list[str]:
         notes.append(
             f"有 {batch.refused_by_budget} 个上下文请求因超出本次索取额度而未执行。"
         )
-    if batch.truncated:
-        notes.append(f"有 {batch.truncated} 条上下文因长度上限被截断。")
+    cut = [item for item in batch.items if item.meta.get("truncated")]
+    if cut:
+        notes.append(_truncation_note(cut))
     failed = [item for item in batch.items if item.meta.get("tool_failed")]
     if failed:
         notes.append(
@@ -1182,6 +1183,35 @@ def _batch_notes(batch: Any) -> list[str]:
             "**取不到不等于没有风险**，不要据此下结论。"
         )
     return notes
+
+
+def _truncation_note(cut: Sequence[ContextItem]) -> str:
+    """截断那句话必须**点名是哪一条**，并说清**怎么把剩下的拿回来**。
+
+    线上的一次真实核对逼出了这两件事：面板上写着「有 1 条上下文因长度上限被截断」，
+    而那一轮要了两样东西（一份规格文档 + 一张配表）—— 模型（和人）都不知道是哪一条被砍的，
+    更不知道下一步该做什么。
+
+    旁边那两条说明都是既点名又给动作的：取数失败那条列出条目并说「取不到不等于没有风险」，
+    预算省略那条（`budget._omission_note`）说「如果结论依赖被省略的部分，请重新索取」。
+    只有这一条两个都没有，而它说的事情（**你看的内容少了一截**）比那两条更需要行动。
+
+    ## 为什么两句话都给，而不判断是哪一种
+
+    因为「怎么拿回来」按内容形态分两种，而这个函数**看不到形态** —— 它拿到的只是一段
+    渲染好的文本（配表的渲染与代码的渲染在这里长得一样）。按文本抬头去猜形态是可行的，
+    但猜错的方向很坏：把一份规格文档说成「配表，拿不回来」，模型就不再去要了，
+    而它本来只要带个 `lines` 就能拿到。所以两种都给 —— 模型自己知道它刚才要的是什么。
+    """
+    labels = "、".join(describe_item(item) for item in cut[:3])
+    more = f"等 {len(cut)} 条" if len(cut) > 3 else ""
+    return (
+        f"有 {len(cut)} 条上下文因**单条长度上限**被截断（{labels}{more}），"
+        "**只砍了尾巴**，后面的内容你没看到。要拿回来："
+        "文本 / 代码类重新索取时点名行窗口（`lines=\"1200-1600\"`）、"
+        "文档与差异类点名段（`lines=\"4-6\"`）；"
+        "**配表的正文拿不回来**（它按行渲染、没有行窗口），要核对具体改动请用 `file_diff`。"
+    )
 
 
 def describe_item(item: ContextItem) -> str:

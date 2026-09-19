@@ -412,6 +412,39 @@ def test_the_breakpoint_marks_never_change_the_message_content():
 # ==========================================================================
 
 
+def test_a_truncated_item_is_named_and_the_way_back_is_spelled_out():
+    """「有 1 条被截断」**必须点名是哪一条，并说清怎么把剩下的拿回来**。
+
+    线上的一次真实核对逼出来的：面板上写着「有 1 条上下文因长度上限被截断」，而那一轮
+    要了两样东西（一份规格文档 + 一张配表）—— 模型和人**都不知道是哪一条被砍了**，
+    也不知道下一步做什么。旁边那两条说明（取数失败 / 预算省略）都是既点名又给动作的，
+    只有这一条两个都没有，而它说的事情（你看的内容少了一截）比那两条更需要行动。
+
+    两句话都要在：**文本 / 代码可以点名行窗口拿回来，配表拿不回来**（它按行渲染、
+    没有行窗口）。这段文本看不到内容形态（配表与代码在引擎这一层长得一样），所以
+    两种都给 —— 猜错的方向很坏：把一份规格文档说成「配表，拿不回来」，模型就不再要了，
+    而它本来带个 `lines` 就能拿到。
+    """
+    long_text = "行" * 20_000  # 超过单条上限（11,000 字）
+    provider = FakeProvider({("file_content", COMMIT, TABLE): long_text})
+    client = ScriptedClient(
+        _requests({"type": "file_content", "commit": COMMIT, "path": TABLE}),
+        _final(_anomaly()),
+    )
+
+    outcome = _run(client, provider=provider)
+
+    notes = [note for record in outcome.rounds for note in record.budget_notes]
+    note = next((item for item in notes if "被截断" in item), "")
+    assert note, f"被截断了却没有说明：{notes}"
+    assert TABLE in note, f"没有点名是哪一条被截断：{note}"
+    assert "重新索取" in note or "点名" in note, f"没有说怎么拿回来：{note}"
+    assert "配表" in note and "拿不回来" in note, (
+        f"没有说清配表那一条补不回来（而它正是会诱使模型白白再要一次的那条）：{note}"
+    )
+    assert "11,000" in note or "上限" in note, f"没有说明是哪道上限：{note}"
+
+
 def test_the_progress_callback_fires_once_per_round_in_order():
     client = ScriptedClient(
         _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
