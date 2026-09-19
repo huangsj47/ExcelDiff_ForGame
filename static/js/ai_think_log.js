@@ -420,6 +420,16 @@
             .catch(function (error) {
                 if (runId !== askedFor) return;
                 loading = false;
+                // **与上面 `.then` 里同一道闸**：取数途中本页又看着这次运行了
+                // （新一轮开跑、或轮询重新接上）—— 这份**失败**的响应同样不许写面板。
+                // 写上去就是一句「读不到这次运行的逐轮记录：…」挂在一次正跑着的运行上，
+                // 而上面那条路早就想明白了这件事（那里的 `watching` 就是为它写的）。
+                //
+                // `loading` 上面那行**必须先收**：认回 `watching` 的是 `applyProgress`，
+                // 它不碰 `loading` —— 不收的话这个残留的标志位会把 `ensureLoaded` 永久
+                // 挡在门外，面板就停在「跑完之后这里会显示落库的逐轮记录」那句承诺上，
+                // 而那句话正是 `unwatch` 自己发起取数要兑现的。
+                if (watching) return;
                 mode = 'unavailable';
                 blocks = [];
                 paint();

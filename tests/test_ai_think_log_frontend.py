@@ -260,6 +260,45 @@ async function lazy() {
         rounds: els[LOG_ID].children.length,
         note: els[NOTE_ID].textContent
     };
+
+    // 7) 取的过程中本页**又看着这次运行跑了**（实时那一帧把 `watching` 认回来），而且
+    //    **取数失败**了：这份失败响应同样不许写面板。上面 `.then` 那条路早就有这道闸
+    //    （第 6 条验的是它），`.catch` 里以前没有 —— 同一个理由，写上去就是把「读不到
+    //    这次运行的逐轮记录：…」挂在一次**正跑着**的运行上，用户会以为过程丢了。
+    //
+    //    认回 `watching` 的是 `applyProgress`（不是 `watch`）**这一点是有意的**：它只认
+    //    `watching`，不碰 `loading` —— 见下面那半段。
+    reload();
+    var boom = null;
+    api.setRun(7);
+    api.ensureLoaded(function () {
+        return new Promise(function (_resolve, reject) {
+            boom = function () { reject(new Error('boom')); };
+        });
+    });
+    // 实时那一帧：跑起来了、还没跑完第一轮（`rounds` 为空，所以面板上一条轮次都没有）。
+    api.applyProgress(PROGRESS.empty);
+    boom();
+    await tick();
+    out.failureWhileWatching = {
+        mode: api.state().mode,
+        watching: api.state().watching,
+        note: els[NOTE_ID].textContent
+    };
+    // 而且 `loading` 必须跟着收掉：早退时若不收，这个残留的标志位会把 `ensureLoaded`
+    // 永久挡在门外 —— 跑完那一刻「这里会显示落库的逐轮记录」那句承诺就再也没人兑现
+    // （第 5 条验的正是那句承诺，这是同一条纪律的另一面）。跑完这一刻 `unwatch` 自己
+    // 发起取数，取得回来才算数。
+    lastUrl = [];
+    sandbox.fetch = okFetch;
+    api.unwatch();
+    await tick();
+    out.failureWhileWatching.afterUnwatch = {
+        calls: lastUrl.slice(),
+        mode: api.state().mode,
+        rounds: els[LOG_ID].children.length
+    };
+    sandbox.fetch = undefined;
     return out;
 }
 
@@ -275,6 +314,7 @@ lazy().then(function (out) {
         stuckAfter: out.stuckAfter,
         stuckLoaded: out.stuckLoaded,
         staleResponse: out.staleResponse,
+        failureWhileWatching: out.failureWhileWatching,
         notes: api.NOTE
     }));
 });
@@ -680,3 +720,33 @@ def test_a_response_for_the_previous_run_is_thrown_away(run):
     assert stale["runId"] == 8, "前提：号已经换到 8 了"
     assert stale["rounds"] == 0, "7 的那几轮不许出现在 8 的面板上"
     assert stale["mode"] == "settled"
+
+
+def test_a_failed_fetch_does_not_overwrite_a_run_we_are_watching(run):
+    """取数的**失败**响应与成功响应受**同一道闸**：本页又在看着它跑，就不许写面板。
+
+    `.then` 里有 `watching` 那道闸（上一条验的是它），`.catch` 里以前没有。后果不是
+    报错，是**面板在说谎**：把「读不到这次运行的逐轮记录：…」挂到一次正跑着的运行上，
+    而同一块面板的实时那一半马上又要画第 N 轮 —— 两句话不能同时为真。
+
+    第二条断言盯着 `loading`：这道闸**不能只是早退**。`watching` 被认回来是
+    `applyProgress` 干的，它不碰 `loading` —— 早退时若不把 `loading` 收掉，这个残留的
+    标志位会把 `ensureLoaded` 永久挡在门外，跑完那一刻「这里会显示落库的逐轮记录」
+    那句承诺就再也没人兑现（`test_the_promise_of_stored_rounds_is_kept_when_the_run_ends`
+    验的就是它，两者是同一条纪律的两面）。
+    """
+    case = run["failureWhileWatching"]
+
+    assert case["watching"] is True, "前提：本页确实又看着它跑了"
+    assert case["mode"] == "live", (
+        "取数失败把一次正跑着的运行打成了「读不到」—— 面板会说「读不到这次运行的逐轮"
+        f"记录：boom」，而它其实正在看着这次运行。实际说明句：{case['note']!r}"
+    )
+    assert "读不到" not in case["note"], case["note"]
+
+    after = case["afterUnwatch"]
+    assert after["calls"] == ["/ai-analysis/runs/7/usage"], (
+        "`loading` 没收掉 —— 跑完之后 `unwatch` 发起的取数被残留的标志位挡在了门外"
+    )
+    assert after["rounds"] == 2, "取到了就要画出来"
+    assert after["mode"] == "settled"
