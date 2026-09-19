@@ -4155,7 +4155,24 @@ function startAiBudgetWatch(runId, metaEl) {
             if (btn) btn.disabled = false;
             // 跑完了 → 不再看进度快照（`refreshWeeklyAiLatest` 会去取落库的结果）。
             AiThinkLog.unwatch();
-            if (!weeklyAiStreamSettled) refreshWeeklyAiLatest(weeklyAiCurrentConfigId);
+            if (weeklyAiStreamSettled) return;
+            // **这条出口以前绕过了 `stopAiBudgetWatch()`** —— 那个函数的注释写着「所有
+            // 出口都走它…在每处各写一遍必然漏一处」，这里就是漏掉的那一处。漏掉的后果：
+            // 抽屉不会被收回到「完整结论」、用户手动停在「思考过程」时也拿不到未读点，
+            // 于是跑完了却看不出「结论已经好了」。
+            //
+            // 顺序是**先取结论再收摊**：反过来的话，「完整结论」那一页会先露一下上次
+            // 留下的「AI 分析进行中...」，而这次明明已经结束了。
+            //
+            // `refreshWeeklyAiLatest` 这一步**不可能**重新起一个轮询：`/progress` 判终态
+            // 读的是 `run.effective_status`，`/latest` 读的是同一行 —— 两边不会打架。
+            // 那个身份比较是给「将来有人把这两条路的数据源改得不一致」留的保险：
+            // 一旦 `aiBudgetWatch` 已经是新起的那个，停表会把刚起来的轮询掐掉，
+            // 页面又变回「不收敛」。
+            const mine = aiBudgetWatch;
+            Promise.resolve(refreshWeeklyAiLatest(weeklyAiCurrentConfigId)).then(function () {
+                if (aiBudgetWatch === mine) stopAiBudgetWatch();
+            });
         }
     });
 }
@@ -4258,6 +4275,18 @@ async function refreshWeeklyAiLatest(configId) {
         // 这一次在跑，但**进度快照不在我们手上**（跑在别的进程里，或者页面是刚打开的）
         // —— 如实说读不到，不假装「还没跑完第一轮」。
         AiThinkLog.setRun(result.runId);
+        // **「读不到」不是终点。** 只说这一句就收工的话，这次运行跑完之后页面上没有任何
+        // 东西会再去读一次：结论区的徽章与正文就此永远停在「分析中」。而「思考过程」是
+        // **点开那个标签时**才去取落库明细的（`AiThinkLog.ensureLoaded`），它取到的是最新
+        // 状态 —— 于是两个标签互相矛盾（线上报障：思考过程说「分析已结束」，结论还写着
+        // 「分析中」）。
+        //
+        // 接着看它：轮询读到终态会走 `onFinished`，那里会去取落库的结论、把徽章换成
+        // 完成/失败，页面自己收敛。已经看着这一次时不重启 —— 重启会清掉已经画出来的
+        // 那几轮（`AiThinkLog.watch` 会清空 `blocks`）。
+        if (weeklyAiRunId !== result.runId || !aiBudgetWatch) {
+            startAiBudgetWatch(result.runId, meta);
+        }
         AiThinkLog.markExternalRun();
         // 还在跑 = 结论还没出来，没有可导出的东西。
         AiReportExport.track({ runId: result.runId, status: 'running' });

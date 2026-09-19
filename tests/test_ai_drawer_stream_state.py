@@ -785,6 +785,57 @@ def test_the_reported_page_sets_its_meta_after_every_terminal_exit():
     )
 
 
+# 「打开页面时这次运行已经在跑」那一支：三份模板的取数函数名与轮询入口各不相同。
+_LATEST_LOADER = {
+    "templates/merged_project_view.html": "refreshWeeklyAiLatest",
+    "templates/weekly_version_diff.html": "loadWeeklyAiLatest",
+    "templates/commit_diff_new.html": "loadLatestResult",
+}
+_WATCH_CALL = {
+    "templates/merged_project_view.html": "startAiBudgetWatch(result.runId, meta)",
+    "templates/weekly_version_diff.html": "startAiBudgetWatch(result.run_id, meta)",
+    "templates/commit_diff_new.html": "startBudgetWatch(result.run_id)",
+}
+
+
+@pytest.mark.parametrize("name", TEMPLATES)
+def test_a_run_that_is_already_going_is_watched_not_just_declared_unreadable(name):
+    """**报障的那一幕**：思考过程说「分析已结束」，结论标签还写着「分析中」。
+
+    机制是两条读数据的路各自为政：
+
+    * **结论区**只在这几个时刻读一次 `/latest`：打开抽屉、点「刷新结果」、SSE 结束时。
+      页面打开时这次运行正在跑，于是徽章被写成「分析中」——然后**没有任何东西会再读
+      第二次**。服务端跑完了，这页不知道；
+    * **思考过程**是**点开那个标签时**才去取落库明细的（`AiThinkLog.ensureLoaded`），
+      取到的是最新状态，于是它显示「分析已结束，下面是这次运行的逐轮记录。」
+
+    两个标签就此互相矛盾，而且都不会自己好 —— 只有手动刷新页面或点「刷新结果」才行。
+
+    修法就是让那个「进行中」的分支**接着看它**：轮询读到终态会走 `onFinished`，
+    那里会去取落库的结论、把徽章换成完成/失败。判据是「那一支里调起了本页的轮询入口，
+    而且看的是这一次运行」——只看形状不看行为，是因为这一支要 DOM，node 跑不起来
+    （同一节里另外几条静态守卫也是这个理由）。
+    """
+    script = _template_script(name)
+    body = _function_body(script, _LATEST_LOADER[name])
+
+    assert "in_progress" in body, f"{name} 的 {_LATEST_LOADER[name]} 里找不到「进行中」那一支"
+    branch = body[body.index("in_progress"):]
+    branch = branch[: branch.index("return false;")]
+
+    # 前提：这一支仍然如实说「读不到进度」（别为了收敛把这句删掉）
+    assert "AiThinkLog.markExternalRun()" in branch, (
+        f"{name} 的「进行中」那一支不再如实说「读不到进度」了：{branch[:300]}"
+    )
+    assert _WATCH_CALL[name] in branch, (
+        f"{name} 的「进行中」那一支**只说了一句「读不到」就收工**了 —— "
+        "这次运行跑完后页面上没有任何东西会再去读一次，结论区会永远停在「分析中」，"
+        "而「思考过程」点开时取的是最新状态，两个标签就此矛盾（线上报障）。"
+        f"期望这一句：{_WATCH_CALL[name]}"
+    )
+
+
 # ==========================================================================
 #  五、服务端：一定以终态事件收尾
 # ==========================================================================
@@ -1018,3 +1069,59 @@ class TestTheSubagentProgressLine:
 
         assert text.startswith("分析中：第 3/8 轮"), text
         assert "分片" not in text, text
+
+
+def _on_finished_body(script: str) -> str:
+    """`onFinished: function () { … }` 的回调体（按花括号配平）。
+
+    它不是 `function onFinished(...)` 那种声明，而是**对象字面量里的一个属性**
+    （`AiStreamStatus.watchRun(id, { onFinished: function () {…} })`），
+    所以 `_function_body` 找不到它。
+    """
+    marker = "onFinished: function"
+    start = script.index(marker)
+    brace = script.index("{", start)
+    depth, index = 0, brace
+    while index < len(script):
+        if script[index] == "{":
+            depth += 1
+        elif script[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return script[brace: index + 1]
+        index += 1
+    raise AssertionError("找不到 onFinished 的回调体")
+
+
+@pytest.mark.parametrize("name", TEMPLATES)
+def test_the_polling_exit_also_settles_the_drawer(name):
+    """轮询自己发现跑完时，抽屉也要**收摊**（切回结论 / 打未读点）。
+
+    `stopAiBudgetWatch()` 的注释写着「停轮询必须走它…所有出口都走 `stopAiBudgetWatch`，
+    在每处各写一遍必然漏一处」—— 而 `onFinished` 就是漏掉的那一处：它只调了
+    `AiThinkLog.unwatch()`。后果不是报错，是**跑完了用户看不出来**：抽屉停在被手动点过
+    的「思考过程」上，结论那一页也不会收到未读点。
+
+    判据三条：这个出口要走到停表；停表要**等结论取回来之后**再做（先切标签再取结论的话，
+    「完整结论」那一页会先露一下上次留下的「AI 分析进行中...」，而这次明明已经结束了）；
+    而且那次停表必须挂在取结论的 `.then` 里 —— 顺序断言只看得见「谁写在前面」，
+    真正保证「等到了」的是这个回调。
+    """
+    script = _template_script(name)
+    body = _on_finished_body(script)
+
+    settle = "stopAiBudgetWatch()" if "stopAiBudgetWatch" in script else "stopBudgetWatch()"
+    loader = _LATEST_LOADER[name]
+
+    assert settle in body, (
+        f"{name} 的 `onFinished` 没有让抽屉收摊 —— 用户手动停在「思考过程」时，"
+        f"这次运行跑完了既不会被切回结论、也拿不到未读点。期望一次 {settle}"
+    )
+    assert body.index(loader) < body.index(settle), (
+        f"{name} 的 `onFinished` 把停表写在了取结论前面 —— 「完整结论」那一页会先露一下"
+        "上次留下的「AI 分析进行中...」，而这次已经结束了"
+    )
+    then_at = body.index(".then(")
+    assert body.index(settle, then_at) > then_at, (
+        f"{name} 的停表没有等到结论取回来才做（不在取结论的 `.then` 里）：{body[-400:]}"
+    )
