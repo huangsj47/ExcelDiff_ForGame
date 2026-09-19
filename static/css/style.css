@@ -1910,3 +1910,157 @@ main:focus {
         transition: background-color var(--motion-base, 0.25s) var(--ease-out, ease);
     }
 }
+
+/* ===================================================================
+   AI 抽屉：两个标签（思考过程 / 完整结论）
+   -------------------------------------------------------------------
+   同样放在全局样式表里，理由与上一段一样：三份模板的 CSS 块逐字比对
+   （tests/test_ai_drawer_css_sync.py），新样式进去就是三处同步。
+   =================================================================== */
+.ai-drawer-tabs {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    border-bottom: 1px solid var(--color-border, #e2e8f0);
+}
+
+.ai-drawer-tab {
+    position: relative;
+    appearance: none;
+    border: 0;
+    background: transparent;
+    padding: 8px 12px 9px;
+    margin-bottom: -1px;              /* 压住标签条那条线，选中态的下划线才是「连着的」 */
+    font-size: var(--font-size-md, 14px);
+    line-height: 1.4;
+    color: var(--color-text-muted, #656d76);
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+}
+
+.ai-drawer-tab:hover { color: var(--color-text, #1e293b); }
+
+.ai-drawer-tab[aria-selected="true"] {
+    color: var(--color-primary, #0d6efd);
+    border-bottom-color: var(--color-primary, #0d6efd);
+    font-weight: 600;
+}
+
+.ai-drawer-tab:focus-visible {
+    outline: 2px solid var(--color-primary, #0d6efd);
+    outline-offset: -2px;
+    border-radius: var(--radius-md, 4px);
+}
+
+/* 「完整结论」有新内容、但用户正停在「思考过程」上时的未读点。
+   不用红点：红色在这个界面里是「失败」。 */
+.ai-drawer-tab-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-left: 5px;
+    border-radius: 50%;
+    background: var(--color-primary, #0d6efd);
+    vertical-align: middle;
+}
+
+/* 标签面板。**`[hidden]` 那条必须显式写**：作者样式里的 display:flex 会盖掉浏览器
+   默认的 [hidden]{display:none}（作者来源胜过浏览器来源，与谁更具体无关），不写就是
+   两个面板同时显示 —— 标签看起来是坏的。 */
+.ai-drawer-panel {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3, 12px);
+}
+
+.ai-drawer-panel[hidden] { display: none; }
+
+/* 「完整结论」那个面板就是各页原有的正文框（`.ai-analysis-output`），它自己带一条
+   `display:flex`（空态/进行中那一档，在模板的内联 style 里），所以同样要显式压掉。
+   **这里必须是 `.ai-drawer-body` 前缀**：`.ai-analysis-output.is-empty` 是 (0,2,0)，
+   而模板那段内联样式在 style.css 之后加载 —— 只写 `.ai-analysis-output[hidden]`
+   （同为 0,2,0）会输在源序上，两个面板又同时显示了。 */
+.ai-drawer-body .ai-analysis-output[hidden] { display: none; }
+
+/* ===================================================================
+   「思考过程」面板：逐轮记录
+   -------------------------------------------------------------------
+   这一栏是**过程**不是结论：每一轮一张卡，卡片头一行说明这一轮是谁的第几轮、
+   结局与花销；下面按「点名要了什么 / 取不到什么 / 模型这一轮说了什么」分行。
+   =================================================================== */
+.ai-think-note {
+    flex: none;
+    margin: 0;
+    font-size: var(--font-size-sm, 12px);
+    line-height: 1.6;
+    color: var(--color-text-muted, #656d76);
+}
+
+.ai-think-log {
+    flex: 1;
+    min-height: 96px;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3, 12px);
+}
+
+.ai-think-round {
+    background: var(--color-surface, #fff);
+    border: 1px solid var(--color-border, #e2e8f0);
+    border-radius: var(--radius-xl, 8px);
+    padding: var(--space-4, 16px);
+    font-size: var(--font-size-md, 14px);
+    line-height: 1.7;
+    color: var(--color-text, #1f2937);
+    overflow-wrap: anywhere;
+}
+
+.ai-think-round-head {
+    font-weight: 600;
+    color: var(--color-text, #1e293b);
+    /* 这一行是「第 3/8 轮 · 索取上下文 · 输入 12.3k tokens · 18.4 s」这种数字串，
+       等宽数字让它几轮之间对齐，扫一眼就能比出哪一轮慢。 */
+    font-variant-numeric: tabular-nums;
+}
+
+.ai-think-label {
+    margin: var(--space-3, 12px) 0 var(--space-1, 4px);
+    font-size: var(--font-size-sm, 12px);
+    color: var(--color-text-muted, #656d76);
+}
+
+.ai-think-list {
+    margin: 0;
+    padding-left: 1.2em;
+    color: var(--color-text, #1f2937);
+}
+
+/* 「取不到」（有原因）与「确实没有内容」用不同的颜色，因为它们是两件事：
+   前者是平台没读到，后者是读了、确实没有。合并成一种颜色等于把
+   「没有证据」显示成「这里没问题」。 */
+.ai-think-missing { margin: var(--space-1, 4px) 0 0; color: #b3261e; }
+.ai-think-empty { margin: var(--space-1, 4px) 0 0; color: #856404; }
+.ai-think-dropped { margin: var(--space-1, 4px) 0 0; color: var(--color-text-muted, #656d76); }
+.ai-think-note-line { margin: var(--space-1, 4px) 0 0; color: var(--color-text-muted, #656d76); }
+
+.ai-think-model { margin-top: var(--space-3, 12px); }
+
+.ai-think-model > summary {
+    cursor: pointer;
+    font-size: var(--font-size-sm, 12px);
+    color: var(--color-text-muted, #656d76);
+}
+
+.ai-think-model-body {
+    margin-top: var(--space-2, 8px);
+    padding: var(--space-3, 12px);
+    background: var(--color-surface-subtle, #f8fafc);
+    border-radius: var(--radius-lg, 6px);
+}
+
+.ai-think-model-body > :first-child { margin-top: 0; }
+.ai-think-model-body > :last-child { margin-bottom: 0; }

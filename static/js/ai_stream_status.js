@@ -246,6 +246,10 @@
      * `options`：
      *   * `metaEl`：写那一行的元素（可以没有）；
      *   * `onBudget(budget)`：每一帧的预算判定（超没超是实时变的，见 analysis_budget.py）；
+     *   * `onProgress(data)`：每一帧的整条状态（**包括终态那一帧**）。「思考过程」标签
+     *     用它把这一轮的明细画出来（`data.progress.rounds`，见 static/js/ai_think_log.js）。
+     *     拿不到进度时也会调（`data.progress` 为 null）—— 由调用方决定说什么，
+     *     这一层不替它判断「读不到」该显示成什么；
      *   * `onFinished(status)`：轮询**自己发现**这次运行已经结束了（连接断了之后
      *     分析其实跑完了，走的就是这条路）；
      *   * `fetchImpl` / `setInterval` / `clearInterval`：注入用（测试里真跑）。
@@ -277,6 +281,9 @@
                 .then(function (data) {
                     if (stopped || !data || !data.success) return data || null;
                     if (opts.onBudget) opts.onBudget(data.budget);
+                    // 明细先给出去，再判终态：终态那一帧里往往带着最后一轮的记录，
+                    // 顺序反了它会成为**唯一漏掉**的那一轮。
+                    if (opts.onProgress) opts.onProgress(data);
                     if (isTerminal(data.status)) {
                         // 这次运行结束了（结论或失败都已经落库）。停表，再交给调用方
                         // 去取那条落库的结果 —— 顺序不能反：先停表才能保证那行字

@@ -2218,9 +2218,39 @@
              static/js/ai_budget_notice.js 生成（三份模板逐字复制，逻辑只写一份）。 -->
         <div class="ai-budget-banner" id="aiBudgetBanner" role="alert" hidden></div>
         <div class="ai-drawer-meta" id="weeklyAiMeta">自动分析每 1 小时触发，可手动补跑。</div>
+        <!-- AI 抽屉的两个标签：思考过程 / 完整结论。
+             这一段在三份模板里**逐字相同**（commit_diff_new / weekly_version_diff /
+             merged_project_view），改动请三处一起改 —— tests/test_ai_drawer_tabs_markup.py
+             会逐字比对。落在哪个标签、跑完要不要自动切、未读点怎么打，全在
+             static/js/ai_drawer_tabs.js 里（只此一份，免得三处各写一套规则）；
+             每一轮怎么画在 static/js/ai_think_log.js 里。
+             **这里不写 aria-controls**：右边那个面板就是各页原有的正文框，它的 id 三份
+             不同（aiAnalysisOutput / weeklyAiOutput），写死一个会指错 —— 面板那一侧用
+             aria-labelledby 反向声明（见下面正文框上的属性）。 -->
+        <div class="ai-drawer-tabs" role="tablist" aria-label="AI 分析内容">
+            <button type="button" class="ai-drawer-tab" id="aiDrawerTabThink" role="tab"
+                    aria-selected="false" tabindex="-1">
+                <i class="fas fa-list-ol" aria-hidden="true"></i> 思考过程
+            </button>
+            <button type="button" class="ai-drawer-tab" id="aiDrawerTabReport" role="tab"
+                    aria-selected="true" tabindex="0">
+                <i class="fas fa-file-lines" aria-hidden="true"></i> 完整结论<span
+                    class="ai-drawer-tab-dot" id="aiDrawerTabReportDot" hidden></span>
+            </button>
+        </div>
+        <!-- 「思考过程」：跑的时候每跑完一轮多一条 —— **不是逐字输出**（平台的模型调用是
+             非流的，一次请求跑完才拿到回复）。顶上那句说明与每一轮的卡片都由
+             static/js/ai_think_log.js 生成，模板不自拼一个字。 -->
+        <div class="ai-drawer-panel" id="aiDrawerPanelThink" role="tabpanel"
+             aria-labelledby="aiDrawerTabThink" tabindex="0" hidden>
+            <p class="ai-think-note" id="aiThinkNote"></p>
+            <div class="ai-think-log" id="aiThinkLog"></div>
+        </div>
+        <!-- AI 抽屉的两个标签 结束（以上这一段三份模板逐字相同）。 -->
         <!-- 正文渲染成 HTML（Markdown 子集），所以是 div 而不是 pre：
              pre 的 white-space:pre-wrap 会和块级元素打架 -->
-        <div class="ai-analysis-output is-empty" id="weeklyAiOutput">暂无分析结果。</div>
+        <div class="ai-analysis-output is-empty" id="weeklyAiOutput" role="tabpanel"
+             aria-labelledby="aiDrawerTabReport">暂无分析结果。</div>
     </div>
     <div class="ai-drawer-footer">
         <button type="button" class="btn btn-sm btn-outline-secondary" id="weeklyAiRefreshBtn">刷新结果</button>
@@ -2266,6 +2296,12 @@
    **停止轮询一定要顺手把那行字收掉**，否则页面上会同时挂着「失败」与
    「分析中：第 2/8 轮」（线上反馈的就是这个）。 #}
 <script src="{{ url_for('static', filename='js/ai_stream_status.js') }}"></script>
+{# 「思考过程 / 完整结论」两个标签的状态机：默认落在哪个标签、跑完要不要自动切回结论、
+   用户自己选过之后不再抢他的阅读位置。三份模板的抽屉 DOM 逐字相同、逻辑只此一份。 #}
+<script src="{{ url_for('static', filename='js/ai_drawer_tabs.js') }}"></script>
+{# 逐轮过程怎么画（两种来源同一种形状）：跑的时候读进度快照，跑完之后读落库的明细。
+   面板顶上那句「按轮取数、不是逐字输出」也在这个文件里 —— 模板不自拼一个字。 #}
+<script src="{{ url_for('static', filename='js/ai_think_log.js') }}"></script>
 
 <script>
 // 非活跃版本数据
@@ -4032,6 +4068,14 @@ function stopAiBudgetWatch() {
         aiBudgetWatch.stop();
         aiBudgetWatch = null;
     }
+    // 本页不再看着这次运行了（跑完 / 连接关了 / 关了抽屉）。**已经画出来的那几轮
+    // 不动**：它们是这次运行的过程，跑完之后仍然该看得到（这是用户明确要的）。
+    AiThinkLog.unwatch();
+    // 停表 = 这次运行到此为止 → 抽屉该回到「完整结论」那一页（用户自己选过标签的
+    // 除外，那种情况只给结论打个未读点，见 static/js/ai_drawer_tabs.js）。
+    // 放在这里而不是各个出口：所有出口都走 `stopAiBudgetWatch`（下面那段注释说的
+    // 就是这条纪律），在每处各写一遍必然漏一处。
+    AiDrawerTabs.markSettled();
 }
 
 // 进度那一行与文案的**全部口径**都在 static/js/ai_stream_status.js 里（三份模板共用）：
@@ -4043,9 +4087,21 @@ function stopAiBudgetWatch() {
 function startAiBudgetWatch(runId, metaEl) {
     stopAiBudgetWatch();
     weeklyAiRunId = runId;
+    // `stopAiBudgetWatch()` 刚把标签收回到「完整结论」，但这次运行还在跑 ——
+    // 立刻切回「思考过程」（用户自己选过标签则不动）。
+    AiDrawerTabs.markRunning();
+    // 「思考过程」面板的两种来源在这里分工：看着跑的期间读进度快照（每帧一给），
+    // 跑完之后才允许去取落库的逐轮明细（`AiThinkLog.ensureLoaded`）。
+    AiThinkLog.setRun(runId);
+    AiThinkLog.watch(runId);
     aiBudgetWatch = AiStreamStatus.watchRun(runId, {
         metaEl: metaEl,
         onBudget: renderAiBudget,
+        // 每一轮的明细（`progress.rounds`）。这一层不判断「读不到」该显示成什么 ——
+        // `data.progress` 为 null 时照样交给 AiThinkLog，由它按自己的五态说一句话。
+        onProgress: function (data) {
+            AiThinkLog.applyProgress(data ? data.progress : null);
+        },
         // 轮询**自己发现**这次运行已经结束（连接断了之后分析其实跑完了，走的就是这条）。
         // 正常路径下 result 事件马上就到，去取一次反而会与流式的正文抢渲染。
         onFinished: function () {
@@ -4053,6 +4109,8 @@ function startAiBudgetWatch(runId, metaEl) {
             // 禁掉的（分析已经结束还禁着，用户只会以为页面卡住了）。
             const btn = document.getElementById('weeklyAiStartBtn');
             if (btn) btn.disabled = false;
+            // 跑完了 → 不再看进度快照（`refreshWeeklyAiLatest` 会去取落库的结果）。
+            AiThinkLog.unwatch();
             if (!weeklyAiStreamSettled) refreshWeeklyAiLatest(weeklyAiCurrentConfigId);
         }
     });
@@ -4081,6 +4139,11 @@ function openWeeklyAiDrawer(configId, versionName) {
     if (overlay) overlay.classList.add('open');
     if (drawer) drawer.classList.add('open');
     document.body.classList.add('ai-drawer-open');
+    // 这一页的抽屉是**同一个抽屉换目标**：不清的话，上一个版本的逐轮过程会留在
+    // 「思考过程」里，被当成这个版本的（跑起来之后 `setRun` 才会换，而打开到跑之间
+    // 那段时间是能看见的）。
+    AiDrawerTabs.reset();
+    AiThinkLog.setRun(null);
 }
 
 function closeWeeklyAiDrawer() {
@@ -4090,6 +4153,9 @@ function closeWeeklyAiDrawer() {
     if (drawer) drawer.classList.remove('open');
     document.body.classList.remove('ai-drawer-open');
     closeWeeklyAiStream();
+    // 关抽屉 = 这一次的阅读结束了：清掉「用户在这次运行里自己选过标签」这件事，
+    // 下次打开按规矩走（正在跑 → 思考过程；否则 → 完整结论）。
+    AiDrawerTabs.reset();
 }
 
 async function refreshWeeklyAiLatest(configId) {
@@ -4105,6 +4171,9 @@ async function refreshWeeklyAiLatest(configId) {
             meta.textContent = `最近一次分析失败（${result.created_at_display || result.created_at || '-'}）`;
         }
         renderAiUsageLine(null, null);
+        // 失败的那次也有逐轮过程，而且那正是「为什么失败」的答案 —— 记住运行号，
+        // 用户点「思考过程」时才去取（跑完了，不会再走实时那一路）。
+        AiThinkLog.setRun(result.runId);
         return false;
     }
     // 正在进行中：如实说「进行中」，不要落进下面的「暂无分析结果。」——
@@ -4118,6 +4187,10 @@ async function refreshWeeklyAiLatest(configId) {
                 `分析开始于 ${result.created_at_display || result.created_at || '-'}`;
         }
         renderAiUsageLine(null, null);
+        // 这一次在跑，但**进度快照不在我们手上**（跑在别的进程里，或者页面是刚打开的）
+        // —— 如实说读不到，不假装「还没跑完第一轮」。
+        AiThinkLog.setRun(result.runId);
+        AiThinkLog.markExternalRun();
         return false;
     }
     if (result && result.response_text) {
@@ -4135,8 +4208,13 @@ async function refreshWeeklyAiLatest(configId) {
             }
         }
         setWeeklyAiReport(result.response_text);
-        // 本次消耗（口径见 static/js/ai_usage_line.js）。
-        renderAiUsageLine(result.usage, result.runId);
+        // 本次消耗（口径见 static/js/ai_usage_line.js）。`usage` 在**内层** payload 上
+        // （`result.result.usage`），而 `runId` 是 `getWeeklyAiResult` 挂到内层的 ——
+        // 写成 `result.usage` 会让这一整行永远不显示（本函数是初次打开与「刷新结果」
+        // 唯一的一条路，所以那一行在合并视图里从来没出现过）。
+        renderAiUsageLine(result.result?.usage, result.runId);
+        // 「思考过程」看的是**这次运行**的逐轮（`setRun` 换了运行号就把上一次的清掉）。
+        AiThinkLog.setRun(result.runId);
         setWeeklyAiStatusBadge(result.stale_note ? '旧结论' : '已有结果',
                                result.stale_note ? 'warning' : 'success');
         updateRiskLabelByConfig(configId, risk);
@@ -4145,6 +4223,8 @@ async function refreshWeeklyAiLatest(configId) {
     weeklyAiHasCached = false;
     setWeeklyAiOutput('暂无分析结果。', true);
     setWeeklyAiStatusBadge('待分析', 'secondary');
+    // 这个目标没有跑过分析 → 「思考过程」如实说没有，而不是留一片空白。
+    AiThinkLog.markEmpty();
     return false;
 }
 
@@ -4156,6 +4236,10 @@ async function startWeeklyAiAnalysis(force = false) {
     closeWeeklyAiStream();
     weeklyAiRunId = null;
     weeklyAiStreamSettled = false;
+    // 开跑了：抽屉切到「思考过程」（那时候唯一有内容的标签就是它），面板进入
+    // 「看着它跑」的状态（运行号还没来，`run` 事件到了再补上）。
+    AiDrawerTabs.markRunning();
+    AiThinkLog.watch(null);
     setWeeklyAiStatusBadge('分析中', 'primary');
     setWeeklyAiOutput('AI 分析进行中...', false, 'busy');
     const startBtn = document.getElementById('weeklyAiStartBtn');
@@ -4266,6 +4350,14 @@ function initWeeklyAiDrawer() {
     const closeBtn = document.getElementById('weeklyAiDrawerCloseBtn');
     const startBtn = document.getElementById('weeklyAiStartBtn');
     const refreshBtn = document.getElementById('weeklyAiRefreshBtn');
+
+    // 「思考过程 / 完整结论」两个标签：DOM 在三份模板里逐字相同，规则与状态在
+    // static/js/ai_drawer_tabs.js 里。**切到「思考过程」时才去取落库的逐轮明细**
+    // （懒加载：没打开过这个标签的人不该为它多付一次请求）。
+    AiDrawerTabs.init({
+        reportPanel: 'weeklyAiOutput',
+        onShowThink: function () { AiThinkLog.ensureLoaded(); }
+    });
 
     if (overlay) overlay.addEventListener('click', closeWeeklyAiDrawer);
     if (closeBtn) closeBtn.addEventListener('click', closeWeeklyAiDrawer);

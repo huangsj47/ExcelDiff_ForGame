@@ -238,7 +238,11 @@ def ai_weekly_latest(config_id):
     result = get_latest_weekly_result(config_id)
     if not result:
         return jsonify({"success": True, "result": None})
-    return jsonify({"success": True, "result": result})
+    # 顶层 `run_id` 与 SSE 的 `result` 事件同义：抽屉里那一行「本次消耗」的「明细」按钮
+    # 要按**运行记录**取数（`/ai-analysis/runs/<id>/usage`）。原先只有 `result` 里那个
+    # 嵌套的 `run_id`，而三份模板读的都是 `data.run_id` —— 于是「刷新页面看得见消耗、
+    # 点明细没反应」，因为按钮在拿不到运行号时是隐藏的（那不是「没采集」，是按钮没了）。
+    return jsonify({"success": True, "result": result, "run_id": result.get("run_id")})
 
 
 @ai_analysis_bp.route("/ai-analysis/commit/<int:commit_id>/latest", methods=["GET"])
@@ -251,7 +255,8 @@ def ai_commit_latest(commit_id):
     result = get_latest_commit_result(commit_id)
     if not result:
         return jsonify({"success": True, "result": None})
-    return jsonify({"success": True, "result": result})
+    # 同 `ai_weekly_latest`：顶层 `run_id` 是给抽屉那行「明细」按钮用的。
+    return jsonify({"success": True, "result": result, "run_id": result.get("run_id")})
 
 
 @ai_analysis_bp.route("/ai-analysis/runs/<int:run_id>/progress", methods=["GET"])
