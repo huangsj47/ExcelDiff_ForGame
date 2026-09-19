@@ -1346,7 +1346,20 @@
     </div>
     <div class="ai-drawer-footer">
         <button type="button" class="btn btn-sm btn-outline-secondary" id="weeklyAiRefreshBtn">刷新结果</button>
+        <!-- 「历次结论」：**在跑动中也照样能点** —— 那正是它存在的理由（用户报的
+             「重新分析时看不到旧结论」）。列表与报告渲染全在 static/js/ai_report_history.js。 -->
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="weeklyAiHistoryBtn">
+            <i class="fas fa-clock-rotate-left" aria-hidden="true"></i> 历次结论
+        </button>
         <button type="button" class="btn btn-sm btn-primary" id="weeklyAiStartBtn">重新分析</button>
+        <!-- 「导出 md」：把这一次的结论（报告原文 + 异常清单附录）交给浏览器下载。
+             **刻意不写 `download` 属性** —— 空值会让浏览器按 URL 末段命名（report.md），
+             把服务端拼好的中文文件名盖掉（响应带 Content-Disposition，见
+             routes/ai_analysis_routes.py 的 ai_run_report_md）。
+             没有可导出的结论时由 static/js/ai_report_export.js 隐藏它。 -->
+        <a class="btn btn-sm btn-outline-secondary" id="weeklyAiExportMdLink" hidden>
+            <i class="fas fa-file-arrow-down" aria-hidden="true"></i> 导出 md
+        </a>
     </div>
 </aside>
 
@@ -1378,6 +1391,31 @@
         </div>
     </div>
 
+
+    <!-- 历次结论：这个目标跑过的每一次，翻看其中任意一次（旧的结论在平台上一份都没丢，
+         缺的只是入口 —— 用户报的「重新分析时无法预览旧结论」）。
+         这一段在三份模板里**逐字相同**（commit_diff_new / weekly_version_diff /
+         merged_project_view），改动请三处一起改 —— tests/test_ai_drawer_fragments.py
+         会逐字比对。列表怎么排、选中哪一份、报告怎么渲染，全在
+         static/js/ai_report_history.js 里（只此一份）。
+         与用量明细弹层同一个理由放在抽屉 <aside> **外面**：抽屉是固定定位 + 内部滚动，
+         Bootstrap 的 modal 挂进去会被裁掉。 -->
+    <div class="modal fade" id="aiReportHistoryModal" tabindex="-1"
+         aria-labelledby="aiReportHistoryTitle" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="aiReportHistoryTitle">历次结论</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                </div>
+                <div class="modal-body" id="aiReportHistoryBody">
+                    <p class="ai-history-meta">加载中...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- 历次结论 结束（以上这一段三份模板逐字相同）。 -->
+
     <script src="{{ url_for('static', filename='js/ai_usage_line.js') }}"></script>
 {# 预算提示的判定与文案：三份抽屉模板逐字复制这段 JS 的代价是漏改一份，
    所以逻辑集中在 static/js/ai_budget_notice.js（与 ai_usage_line.js 同一打法）。 #}
@@ -1394,6 +1432,12 @@
 {# 逐轮过程怎么画（两种来源同一种形状）：跑的时候读进度快照，跑完之后读落库的明细。
    面板顶上那句「按轮取数、不是逐字输出」也在这个文件里 —— 模板不自拼一个字。 #}
 <script src="{{ url_for('static', filename='js/ai_think_log.js') }}"></script>
+{# 「导出 md」那个链接的状态：这一次展示的结论能不能导出、导的是哪一次。
+   没有可导出的结论时链接是隐藏的（不显示一个点了没反应的按钮）。 #}
+<script src="{{ url_for('static', filename='js/ai_report_export.js') }}"></script>
+{# 「历次结论」：列表、选中、报告渲染与「导出这一份」。三份模板的弹层 DOM 逐字相同，
+   逻辑只此一份（弹层里那份报告用的是与抽屉同一套 Markdown 渲染）。 #}
+<script src="{{ url_for('static', filename='js/ai_report_history.js') }}"></script>
 
 <script>
 let configId = {{ config.id }};
@@ -1651,6 +1695,8 @@ async function loadWeeklyAiLatest(force = false) {
                 // 失败的那次也有逐轮过程，而且那正是「为什么失败」的答案 —— 记住运行号，
                 // 用户点「思考过程」时才去取（跑完了，不会再走实时那一路）。
                 AiThinkLog.setRun(result.run_id);
+                // 失败没有可导出的结论（也就没有报告正文）—— 链接收起来。
+                AiReportExport.track({ runId: result.run_id, status: 'failed' });
                 return false;
             }
             // 正在进行中：如实说「进行中」，**不要**落进下面的「暂无分析结果。」
@@ -1668,6 +1714,8 @@ async function loadWeeklyAiLatest(force = false) {
                 // 刚打开的）—— 如实说读不到，不假装「还没跑完第一轮」。
                 AiThinkLog.setRun(result.run_id);
                 AiThinkLog.markExternalRun();
+                // 还在跑 = 结论还没出来，没有可导出的东西。
+                AiReportExport.track({ runId: result.run_id, status: 'running' });
                 return false;
             }
             weeklyAiHasCached = true;
@@ -1694,6 +1742,9 @@ async function loadWeeklyAiLatest(force = false) {
             renderAiUsageLine(result.result?.usage, data.run_id);
             // 「思考过程」看的是**这次运行**的逐轮（`setRun` 换了运行号就把上一次的清掉）。
             AiThinkLog.setRun(data.run_id);
+            // 「导出 md」导的也是**这一次**的结论（旧结论照样能导 —— 它是一份有结论的
+            // 运行，只是规则变了）。
+            AiReportExport.track({ runId: data.run_id, status: result.status });
             setWeeklyAiStatusBadge(result.stale_note ? '旧结论' : '已有结果',
                                    result.stale_note ? 'warning' : 'success');
             return true;
@@ -1709,6 +1760,8 @@ async function loadWeeklyAiLatest(force = false) {
     setWeeklyAiStatusBadge('待分析', 'secondary');
     // 这个目标没有跑过分析 → 「思考过程」如实说没有，而不是留一片空白。
     AiThinkLog.markEmpty();
+    // 没有结论就没有可导出的东西。
+    AiReportExport.track({ runId: null });
     return false;
 }
 
@@ -1762,6 +1815,9 @@ function startWeeklyAiAnalysis(force = false) {
     // 「看着它跑」的状态（运行号还没来，`run` 事件到了再补上）。
     AiDrawerTabs.markRunning();
     AiThinkLog.watch(null);
+    // 屏幕上的结论刚被「分析进行中」换掉 —— 「导出 md」也就没有可导出的东西了
+    // （不撤的话，它导的还是上一次的那份，而页面上已经看不到它了）。
+    AiReportExport.track({ runId: null });
     setWeeklyAiStatusBadge('分析中', 'primary');
     setWeeklyAiOutput('AI 分析进行中...', false, 'busy');
     const startBtn = document.getElementById('weeklyAiStartBtn');
@@ -1877,6 +1933,19 @@ function initWeeklyAiAnalysis() {
     const overlay = document.getElementById('weeklyAiDrawerOverlay');
     const startBtn = document.getElementById('weeklyAiStartBtn');
     const refreshBtn = document.getElementById('weeklyAiRefreshBtn');
+
+    // 「导出 md」：链接本身在 footer 里，状态（导哪一次 / 有没有得导）全在
+    // static/js/ai_report_export.js。**每个「结论变了」的分支都要 track 一次**
+    // —— 漏掉一处，那一处的链接就会指着上一次的结论（看着像成功的那种错）。
+    AiReportExport.init({ linkId: 'weeklyAiExportMdLink' });
+
+    // 「历次结论」：这个周版本跑过的每一次（地址按**目标**定，与哪一次运行无关）。
+    // 队列取的是分组键，不是 config id —— 与抽屉里那份结论同一把尺子。
+    const historyBtn = document.getElementById('weeklyAiHistoryBtn');
+    AiReportHistory.track({ historyUrl: AiReportHistory.historyUrlFor('weekly', configId) });
+    if (historyBtn) {
+        historyBtn.addEventListener('click', function() { AiReportHistory.open(); });
+    }
 
     // 「思考过程 / 完整结论」两个标签：DOM 在三份模板里逐字相同，规则与状态在
     // static/js/ai_drawer_tabs.js 里。**切到「思考过程」时才去取落库的逐轮明细**

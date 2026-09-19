@@ -179,6 +179,69 @@ def test_the_help_page_says_the_disposition_ui_does_not_exist_yet():
         assert label in help_html, f"帮助页没有提到处置状态「{label}」"
 
 
+def test_the_docs_describe_the_exported_document_the_code_actually_builds():
+    """「导出 md」这件事**两边都要说，而且说的是同一份东西**。
+
+    这是最容易被读错的一处：拿到文件的人会把它当成「模型发现的所有问题」的清单，
+    而它其实只是**达到门槛的那部分**（没达到门槛的只写在报告正文里）。文档写了、
+    附录开头也得写；附录开头写了、代码里那句常量就得在。
+    """
+    from services.ai import report_document
+
+    doc_text = _read(AI_DOC)
+    help_html = _read(HELP_PAGE)
+
+    for label, text in (("说明文档", doc_text), ("帮助页", help_html)):
+        assert "导出 md" in text, f"{label}没有写「导出 md」这个入口"
+    assert "报告原文" in doc_text and "异常清单" in doc_text
+    assert "元信息表" in help_html and "报告原文" in help_html
+
+    # 三段式的顺序与代码一致（元信息 → 原文 → 附录）
+    sample = report_document.build_report_markdown(
+        project_label="项目", target_label="提交 abc", report_text="# 变更理解\n正文",
+        anomalies=[{"title": "一条"}],
+    )
+    assert sample.index("| 项目 |") < sample.index("# 变更理解") < sample.index(
+        report_document.APPENDIX_TITLE
+    )
+    assert report_document.APPENDIX_INTRO in sample, "附录开头那句「不是全部」没了"
+
+    # 「附录里没有处置列」这件事：文档与代码必须同时成立。
+    # 那一列今天必然是「待确认」（处置状态从来没有写入路径），印在要发出去的
+    # 文件里就是一行假信息 —— 哪天后端补上了写路径，这里会先红。
+    assert "没有「处置」这一列" in doc_text
+    assert "处置" not in sample
+
+
+def test_the_readme_mentions_the_export_and_the_two_tabs():
+    """README 的功能清单是门面：抽屉里有什么，它得说到。"""
+    readme = _read(README)
+    features = readme.split("## 核心功能（重点）")[1].split("## ")[0]
+    assert "两个标签" in features
+    assert "导出" in features, "README 没提导出"
+    assert "历次结论" in features, "README 没提「翻历次结论」"
+
+
+def test_the_docs_describe_the_history_entry_the_code_serves():
+    """「历次结论」是用户报的那个问题的解法（重新分析后看不到旧结论），
+    三处说明都要有它，而且说的必须是**同一个窗口**（与保留策略同一天数）。"""
+    from services.ai_analysis_service import ANALYSIS_CACHE_DAYS
+    from services.ai_report_history_service import (
+        DEFAULT_HISTORY_LIMIT,
+        MAX_HISTORY_LIMIT,
+    )
+
+    doc_text = _read(AI_DOC)
+    help_html = _read(HELP_PAGE)
+
+    for label, text in (("说明文档", doc_text), ("帮助页", help_html)):
+        assert "历次结论" in text, f"{label}没有写「历次结论」"
+    assert "正在分析时也能点" in doc_text or "正在分析时也能点" in help_html
+    # 窗口与保留策略同源：文档里写的那天数必须是代码里那个数
+    assert str(ANALYSIS_CACHE_DAYS) in doc_text, "说明文档里的窗口天数与代码不一致"
+    assert DEFAULT_HISTORY_LIMIT <= MAX_HISTORY_LIMIT
+
+
 # ==========================================================================
 # 四、帮助页自身的结构
 # ==========================================================================

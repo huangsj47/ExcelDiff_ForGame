@@ -341,7 +341,7 @@
                     <div class="step-item">
                         <div class="step-badge">2</div>
                         <div class="step-content">
-                            <h4>抽屉里的两个标签与两个按钮</h4>
+                            <h4>抽屉里的两个标签与四个按钮</h4>
                             <ul class="info-list">
                                 <li><strong>「完整结论」</strong>：那份 7 章报告。没在跑的时候默认显示它
                                     —— 打开抽屉、跑完自动切回来，都是它</li>
@@ -350,6 +350,16 @@
                                     这一轮的结局与花销。正在跑的时候默认显示它</li>
                                 <li><strong>「刷新结果」</strong>：只读已保存的结果，不重跑</li>
                                 <li><strong>「重新分析」</strong>：重跑一次（已有结果时会先确认）</li>
+                                <li><strong>「导出 md」</strong>：把<strong>这一次</strong>的结论存成一份
+                                    markdown 文件 —— 交给策划/QA 或贴进工单。文件里是
+                                    <strong>元信息表 + 报告原文（逐字）+ 异常清单附录</strong>；
+                                    <strong>只读，不重跑、不花钱</strong>。没有可导出的结论时它不出现</li>
+                                <li><strong>「历次结论」</strong>：这个目标跑过的<strong>每一次</strong>都列出来
+                                    （时间 / 状态 / 风险 / 那一次说了什么），点「看这一份」就能读那一份报告，
+                                    上方会写明<strong>「这是 &lt;时间&gt; 的结论（历史）」</strong>。
+                                    <strong>正在分析时也能点</strong> —— 重新分析之后屏幕上那份旧报告会被
+                                    「进行中」换掉，旧结论就要从这里翻。失败的那次也列出来（那是失败原因），
+                                    但它没有正文、也没有导出按钮</li>
                             </ul>
                             <p><strong>打开抽屉不会自动开跑</strong>，想跑就按「重新分析」。</p>
                             <p><strong>「思考过程」是按轮更新的，不是逐字输出</strong>：平台一次请求跑完

@@ -36,7 +36,7 @@ import re
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -184,9 +184,25 @@ def _seed() -> dict:
                 duration_ms=record.duration_ms,
                 **encode_evidence(record),
             ))
+        db.session.flush()
+
+        # 上一次「失败」的运行：历次结论那个列表要有**不止一条**才看得出「翻看历史」
+        # 是什么样子（一条是「只有一次结论」的空态，两条才有对比）。
+        older = AiAnalysisRun(
+            project_id=project.id, target_type="commit", target_id=commit.id,
+            status="failed", scope="full", trigger_source="scheduled",
+            response_text="", error_message="额度用完了：本月项目预算已超上限",
+            model=provenance["model"] or MODEL,
+            prompt_version=provenance["prompt_version"],
+            skill_version=provenance["skill_version"],
+            rules_version=provenance["rules_version"],
+            created_at=datetime.now(timezone.utc) - timedelta(days=3),
+            finished_at=datetime.now(timezone.utc) - timedelta(days=3),
+        )
+        db.session.add(older)
         db.session.commit()
         return {"_admin": admin_name, "commit_id": commit.id,
-                "project_id": project.id, "run_id": run.id}
+                "project_id": project.id, "run_id": run.id, "older_run_id": older.id}
 
 
 def _csrf(client) -> str:
@@ -209,17 +225,51 @@ def _capture(ids: dict) -> tuple:
     assert page.status_code == 200, page.status_code
     html = page.get_data(as_text=True)
     assert "aiDrawerTabThink" in html, "页面里没有标签那一段 DOM"
+    assert "aiExportMdLink" in html, "页面里没有「导出 md」那个链接"
 
     responses = {
         f"/ai-analysis/commit/{ids['commit_id']}/latest":
             client.get(f"/ai-analysis/commit/{ids['commit_id']}/latest").get_json(),
         f"/ai-analysis/runs/{ids['run_id']}/usage":
             client.get(f"/ai-analysis/runs/{ids['run_id']}/usage").get_json(),
+        # 历次结论：列表与其中每一条的报告，都从真路由取（键名与后端不会漂移）。
+        f"/ai-analysis/commit/{ids['commit_id']}/history":
+            client.get(f"/ai-analysis/commit/{ids['commit_id']}/history").get_json(),
     }
+    for key in ("run_id", "older_run_id"):
+        run_id = ids[key]
+        responses[f"/ai-analysis/runs/{run_id}/report"] = client.get(
+            f"/ai-analysis/runs/{run_id}/report"
+        ).get_json()
+    assert len(responses[f"/ai-analysis/commit/{ids['commit_id']}/history"]["runs"]) >= 2, (
+        "历次结论只有一条，「翻历史」的样子就复核不到"
+    )
     assert responses[f"/ai-analysis/runs/{ids['run_id']}/usage"]["rounds"], (
         "逐轮明细是空的，「跑完之后看得到本次逐轮过程」就复核不到"
     )
+    _check_the_export(client, ids)
     return html, responses
+
+
+def _check_the_export(client, ids: dict) -> None:
+    """**导出这条路的端到端读一遍**：真路由、真响应头、真文件开头几行。
+
+    浏览器里只能验到「链接指向哪一次、显示不显示」；「点下去拿到的是什么」只有真发一次
+    请求才看得见 —— 尤其是那个中文文件名（它由 Werkzeug 按 RFC 5987 编码，
+    写错的表现是文件名变成一串 `%E2%80%A6`）。
+    """
+    response = client.get(f"/ai-analysis/runs/{ids['run_id']}/report.md")
+    print("\n=== 导出 md（真路由、真响应头）===")
+    print(f"  HTTP {response.status_code}  {response.headers.get('Content-Type')}")
+    print(f"  Content-Disposition: {response.headers.get('Content-Disposition')}")
+    assert response.status_code == 200, response.get_data(as_text=True)[:200]
+    assert response.mimetype == "text/markdown"
+    assert "attachment" in response.headers.get("Content-Disposition", "")
+    text = response.get_data(as_text=True)
+    for line in text.splitlines()[:8]:
+        print(f"  | {line}")
+    print(f"  …（共 {len(text)} 字符）")
+    assert REPORT.splitlines()[0] in text, "下载下来的文件里没有报告原文"
 
 
 def _live_progress(ids: dict) -> dict:
@@ -261,6 +311,7 @@ _MEASURE_JS = r"""
         lines: el.querySelectorAll('p, li').length,
         height: Math.round(el.getBoundingClientRect().height)
     }));
+    const exportLink = document.getElementById('aiExportMdLink');
     return {
         think: pick('aiDrawerPanelThink'),
         report: pick('aiAnalysisOutput'),
@@ -269,6 +320,13 @@ _MEASURE_JS = r"""
         note: (document.getElementById('aiThinkNote') || {}).textContent || '',
         meta: (document.getElementById('aiAnalysisMeta') || {}).textContent || '',
         cards: cards,
+        // 「导出 md」：链接在不在、指哪儿（`href` 的末段就是运行号）。
+        exportLink: exportLink ? {
+            hidden: !!exportLink.hidden,
+            display: getComputedStyle(exportLink).display,
+            href: exportLink.getAttribute('href'),
+            text: (exportLink.textContent || '').trim()
+        } : null,
         // 正文框里到底画了没有（报告渲染的唯一出口是 render*）
         reportHtmlChars: (document.getElementById('aiAnalysisOutput') || {}).innerHTML.length || 0
     };
@@ -305,6 +363,58 @@ def _check_the_hidden_rule(page) -> None:
         "[hidden]` 那条没生效，用户会看到两个面板同时显示"
     )
     assert data["shownDisplay"] == "flex", "空态那一支本来就该是居中的 flex 列"
+    # 「导出 md」那个 `<a class="btn">` 是同一个坑的第二处：Bootstrap 的 `.btn` 是
+    # `display:inline-block`，而 `.ai-drawer-footer a.btn` 自己那条 `inline-flex` 更具体
+    # —— 两条都盖得掉浏览器默认的 `[hidden]{display:none}`。
+    link = page.evaluate(_EXPORT_HIDDEN_PROBE_JS)
+    print("\n=== 「导出 md」那个链接的 `[hidden]`（同一个坑的第二处）===")
+    print(f"  hidden → display={link['hiddenDisplay']}")
+    print(f"  显示   → display={link['shownDisplay']}")
+    assert link["hiddenDisplay"] == "none", (
+        "「导出 md」在 hidden 时仍然显示 —— `.ai-drawer-footer a.btn[hidden]` 那条没生效，"
+        "没有可导出的结论时用户会看到一个点下去换来 409 的按钮"
+    )
+    assert link["shownDisplay"] != "none", "有结论时它得看得见"
+
+
+_EXPORT_HIDDEN_PROBE_JS = r"""
+() => {
+    const el = document.getElementById('aiExportMdLink');
+    const before = el.hidden;
+    el.hidden = true;
+    const hiddenDisplay = getComputedStyle(el).display;
+    el.hidden = false;
+    const shownDisplay = getComputedStyle(el).display;
+    el.hidden = before;
+    return {hiddenDisplay: hiddenDisplay, shownDisplay: shownDisplay};
+}
+"""
+
+
+# 历次结论弹层的读数（真 DOM）。
+_HISTORY_PROBE_JS = r"""
+() => {
+    const modal = document.getElementById('aiReportHistoryModal');
+    const body = document.getElementById('aiReportHistoryBody');
+    const rows = document.querySelectorAll('.ai-history-list tbody tr');
+    const findExport = (node) => {
+        const link = node.querySelector('#aiHistoryExportMdLink');
+        return link ? link.getAttribute('href') : null;
+    };
+    return {
+        visible: !!modal && modal.classList.contains('show'),
+        rows: rows.length,
+        rows_text: Array.from(rows).map((tr) => (tr.textContent || '').trim().slice(0, 80)),
+        times: Array.from(document.querySelectorAll('.ai-history-when')).map(
+            (td) => td.textContent),
+        note: (document.querySelector('.ai-history-meta') || {}).textContent || '',
+        mark: (document.querySelector('.ai-history-mark') || {}).textContent || '',
+        report: (document.getElementById('aiHistoryReportBody') || {}).textContent || '',
+        exportHref: findExport(body),
+        currentRows: document.querySelectorAll('.ai-history-row.is-current').length
+    };
+}
+"""
 
 
 def _report(label: str, data: dict) -> None:
@@ -320,6 +430,10 @@ def _report(label: str, data: dict) -> None:
     print(f"  说明: {data['note']}")
     print(f"  状态行: {data['meta']}")
     print(f"  正文框 HTML: {data['reportHtmlChars']} 字符")
+    link = data.get("exportLink")
+    if link:
+        print(f"  导出 md: hidden={link['hidden']} display={link['display']} "
+              f"href={link['href']} 文字={link['text']!r}")
     for card in data["cards"]:
         print(f"  轮次卡: {card['head'][:60]} ({card['lines']} 行, {card['height']}px)")
 
@@ -372,8 +486,19 @@ def _main(out_prefix: str) -> int:
         page.wait_for_timeout(900)
         shooter = lambda name: page.locator("#aiDrawer").screenshot(  # noqa: E731
             path=str(out_dir / f"{out_prefix}_{name}.png"))
+        settled = page.evaluate(_MEASURE_JS)
+        _report("跑完之后：默认落在完整结论", settled)
+        # 有结论 → 「导出 md」可见，且指向**这一次**的运行。
+        assert settled["exportLink"] and settled["exportLink"]["hidden"] is False, (
+            "有结论时「导出 md」仍然藏着 —— 用户没法把结论交出去"
+        )
+        assert settled["exportLink"]["href"].endswith(
+            f"/ai-analysis/runs/{ids['run_id']}/report.md"
+        ), settled["exportLink"]["href"]
         shooter("settled_report")
-        _report("跑完之后：默认落在完整结论", page.evaluate(_MEASURE_JS))
+        # footer 单独一张：三个动作的排布（刷新 / 重新分析 / 导出 md）。
+        page.locator("#aiDrawer .ai-drawer-footer").screenshot(
+            path=str(out_dir / f"{out_prefix}_footer.png"))
 
         # 用户去看这一次的逐轮过程：切过去时**懒加载**落库的明细（`/usage`）。
         page.click("#aiDrawerTabThink")
@@ -388,14 +513,58 @@ def _main(out_prefix: str) -> int:
                 AiDrawerTabs.markRunning();
                 AiThinkLog.watch(payload.progress.run_id);
                 AiThinkLog.applyProgress(payload.progress);
+                // 与 startAnalysis 里那一次一致：屏幕上的结论刚被换掉，导出也就没有对象了。
+                AiReportExport.track({ runId: null });
                 const meta = document.getElementById('aiAnalysisMeta');
                 if (meta) meta.textContent = AiStreamStatus.progressText(payload.progress, 'running');
             }""",
             {"progress": live},
         )
         page.wait_for_timeout(400)
+        running = page.evaluate(_MEASURE_JS)
+        _report("跑动中：实时思考过程（一帧两轮）", running)
+        assert running["exportLink"]["hidden"] is True, (
+            "跑动中「导出 md」还看得见 —— 那时候屏幕上没有结论可导"
+        )
         shooter("running_think")
-        _report("跑动中：实时思考过程（一帧两轮）", page.evaluate(_MEASURE_JS))
+
+        # 历次结论：**跑动中也照样能点**，这里在跑动那一帧之后打开它。
+        page.click("#aiHistoryBtn")
+        page.wait_for_timeout(900)
+        history = page.evaluate(_HISTORY_PROBE_JS)
+        print("\n=== 历次结论（真弹层、真列表、真报告）===")
+        print(f"  弹层可见: {history['visible']}  行数: {history['rows']}")
+        print(f"  说明: {history['note']}")
+        for row in history["rows_text"]:
+            print(f"  | {row}")
+        print(f"  标记: {history['mark']}")
+        print(f"  弹层里的导出链接: {history['exportHref']}")
+        print(f"  列表里的时间: {history['times']}")
+        assert history["visible"], "历次结论弹层没打开（按钮点了没反应）"
+        assert history["rows"] >= 2, "列表少于两条，「翻历史」就复核不到"
+        assert "当前显示的结论" in (history["mark"] or ""), "没有标出「你看的是哪一份」"
+        assert (history["exportHref"] or "").endswith(
+            f"/ai-analysis/runs/{ids['run_id']}/report.md"
+        ), history["exportHref"]
+        page.locator("#aiReportHistoryModal .modal-content").screenshot(
+            path=str(out_dir / f"{out_prefix}_history.png"))
+        # 翻到上一次（失败的那次）：标记变「历史」，失败那条没有正文也没有导出。
+        page.evaluate(
+            "() => { const rows = document.querySelectorAll('.ai-history-list tbody tr');"
+            " rows[rows.length - 1].querySelector('button').click(); }"
+        )
+        page.wait_for_timeout(700)
+        older = page.evaluate(_HISTORY_PROBE_JS)
+        print("\n=== 翻到上一次（失败的那一次）===")
+        print(f"  标记: {older['mark']}")
+        print(f"  报告区: {(older['report'] or '')[:60]}")
+        print(f"  弹层里的导出链接: {older['exportHref']}")
+        assert "（历史）" in (older["mark"] or ""), older["mark"]
+        assert older["exportHref"] is None, "失败的那一次没有正文，不该给一个导出链接"
+        page.locator("#aiReportHistoryModal .modal-content").screenshot(
+            path=str(out_dir / f"{out_prefix}_history_older.png"))
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
 
         # 只有两个标签，方向键也要能换（键盘用户不看标签条也得能过去）。
         page.keyboard.press("ArrowRight")

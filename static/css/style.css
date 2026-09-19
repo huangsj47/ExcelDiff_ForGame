@@ -2064,3 +2064,128 @@ main:focus {
 
 .ai-think-model-body > :first-child { margin-top: 0; }
 .ai-think-model-body > :last-child { margin-bottom: 0; }
+
+/* ===================================================================
+   抽屉 footer 里的「导出 md」
+   -------------------------------------------------------------------
+   它是一个 `<a class="btn">`：下载交给浏览器（不占内存、服务端拼好的中文文件名不会被
+   前端盖掉），图标是 aria-hidden 的，文字标签负责被读出来。
+
+   **`[hidden]` 那两条必须显式写**：`[hidden]{display:none}` 来自浏览器默认样式表，
+   任何作者来源的 display 都会盖掉它（与谁更具体无关，见 `.ai-drawer-panel[hidden]`）。
+   这里有两处作者 display：Bootstrap 的 `.btn { display: inline-block }`，以及下面
+   `a.btn` 自己那条 `inline-flex` —— 后者更具体，所以要有一条同样带 `a` 的选择器
+   把它压回去，否则「没有可导出的结论」时那个链接照样显示，点下去换来一个 409 的 JSON
+   （用户看到的是「下载下来一个报错」）。
+   =================================================================== */
+.ai-drawer-footer .btn[hidden] { display: none; }
+
+.ai-drawer-footer a.btn {
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.ai-drawer-footer a.btn[hidden] { display: none; }
+
+/* ===================================================================
+   「历次结论」弹层
+   -------------------------------------------------------------------
+   为什么在弹层里而不是抽屉里：抽屉是「这一次」的阅读面（标签 + 正文），
+   历次结论是**换一个目标看**——两件事挤在一个抽屉里，用户会分不清屏幕上这份是哪一次。
+   弹层与用量明细同一个做法（挂在抽屉 <aside> 外面，否则被固定定位 + 内部滚动裁掉）。
+   =================================================================== */
+.ai-history-meta {
+    margin: 0 0 var(--space-3, 12px);
+    font-size: var(--font-size-sm, 12px);
+    line-height: 1.6;
+    color: var(--color-text-muted, #656d76);
+}
+
+.ai-history-list {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--font-size-md, 14px);
+}
+
+.ai-history-list th {
+    text-align: left;
+    font-weight: 600;
+    font-size: var(--font-size-sm, 12px);
+    color: var(--color-text-muted, #656d76);
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--color-border, #e2e8f0);
+    white-space: nowrap;
+}
+
+.ai-history-list td {
+    padding: 8px;
+    border-bottom: 1px solid var(--color-border-subtle, #f1f5f9);
+    vertical-align: top;
+}
+
+/* 当前显示的那一份：左侧一条色条 + 底色。**必须与「选中」区分开** ——
+   选中是「我正在看它的报告」，「当前」是「抽屉里那份结论就是它」。 */
+.ai-history-row.is-current td:first-child { box-shadow: inset 3px 0 0 var(--color-primary, #0d6efd); }
+.ai-history-row.is-selected td { background: var(--color-surface-subtle, #f8fafc); }
+
+.ai-history-when { white-space: nowrap; color: var(--color-text-muted, #656d76); }
+
+.ai-history-summary { max-width: 520px; }
+.ai-history-row-meta {
+    display: block;
+    margin-top: 2px;
+    font-size: var(--font-size-sm, 12px);
+    color: var(--color-text-muted, #656d76);
+}
+
+.ai-history-actions { white-space: nowrap; }
+
+.ai-history-report {
+    margin-top: var(--space-5, 20px);
+    padding-top: var(--space-4, 16px);
+    border-top: 1px solid var(--color-border, #e2e8f0);
+}
+
+.ai-history-report-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3, 12px);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-3, 12px);
+}
+
+.ai-history-mark {
+    font-size: var(--font-size-md, 14px);
+    font-weight: 600;
+    color: var(--color-text, #1e293b);
+}
+
+/* 报告正文复用 `.ai-analysis-output` 的排版（同一份报告，两处读法必须一致），
+   只把那几条「抽屉面板」专属的样式压回去：它在弹层里不是撑满剩余高度的阅读面，
+   而是这一段的正文。 */
+.ai-history-report .ai-analysis-output {
+    flex: none;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+
+/* -------------------------------------------------------------------
+   AI 抽屉与 Bootstrap 弹层的层级
+   -------------------------------------------------------------------
+   抽屉是 `position: fixed` + `z-index: 1210`，而 Bootstrap 5.1 的弹层是**写死**的
+   1055 / backdrop 1050 —— 于是抽屉会压住弹层的右半边。这两个弹层（本次消耗的「明细」、
+   历次结论）**都是从抽屉里点开的**，压住的正好是右边：历次结论里那个「导出这一份 md」
+   贴着右边缘，直接被抽屉盖住（真渲染截图里看出来的，静态断言看不见）。
+
+   抬到抽屉之上。backdrop 挂不到那两个弹层的选择器上（它是 body 的直接子元素），所以
+   全局抬 —— 页面上同时有抽屉又有弹层的只有这三张 AI 抽屉的页面，别处没有可观察差别。
+   ------------------------------------------------------------------- */
+#aiReportHistoryModal,
+#aiUsageModal { z-index: 1300; }
+
+body > .modal-backdrop { z-index: 1290; }

@@ -4,11 +4,23 @@
 AI analysis routes.
 """
 
-from flask import Blueprint, Response, jsonify, render_template, request, stream_with_context
+import json
+from io import BytesIO
+
+from flask import (
+    Blueprint,
+    Response,
+    jsonify,
+    render_template,
+    request,
+    send_file,
+    stream_with_context,
+)
 
 from models import Commit, Project, Repository, WeeklyVersionConfig, db
 from models.ai_analysis import AiAnalysisRun
-from services.ai import project_pack_service, run_progress
+from services import ai_report_history_service as report_history_service
+from services.ai import project_pack_service, report_document, run_progress
 from services.ai.analysis_budget import (
     budget_status,
     platform_budget_status,
@@ -27,6 +39,7 @@ from services.ai.usage_statistics import (
 )
 from services.ai_analysis_service import (
     build_endpoint_client,
+    build_weekly_group_key,
     end_with_a_terminal_event,
     get_latest_commit_result,
     get_latest_weekly_result,
@@ -570,6 +583,201 @@ def ai_run_usage(run_id):
     if payload is None:
         return jsonify({"success": False, "message": "Not found."}), 404
     return jsonify(payload), 200
+
+
+# ---------------------------------------------------------------------------
+#  导出这次运行的结论（markdown）
+# ---------------------------------------------------------------------------
+# 路径里**刻意不含 `usage`**：`tests/test_ai_usage_capture.py` 会扫所有带 `/usage`
+# 的路由并断言它们是「只回 JSON 的只读端点」，而这个端点回的是文件。
+#
+# 权限与 `/runs/<id>/usage` **同一条口径**（按这条运行自己的 project_id 判），不接受
+# 调用方指定项目：导出的正文是模型看过的变更细节，换个号就能拿到别人的报告是不行的。
+# 目标名与项目名只从库里取，**不接受调用方传参拼文件名**（那是一条自己给自己开的注入面）。
+
+
+def _payload_of(raw):
+    """`request_payload` / `response_payload` 这类 JSON 文本列 → dict（坏数据当没有）。"""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _focus_label_of(run) -> str:
+    """这次分析用户选的「分析范围」名。空串 = 没选（全量）。
+
+    标签原文由发起分析那条路径写在 `request_payload.focus.label` 里（
+    `_filter_delta_files_by_focus` 算出来的「仅配表仓库」这类字），**这里只取不拼** ——
+    再算一遍就等于多一份会漂移的实现。
+    """
+    focus = _payload_of(run.request_payload).get("focus")
+    if isinstance(focus, dict):
+        return str(focus.get("label") or "")
+    return ""
+
+
+def _report_target_label(run) -> str:
+    """这次运行的目标名（给人看的）。目标行被删掉时退化成 id，不编一个名字。"""
+    if run.target_type == "weekly":
+        config = db.session.get(WeeklyVersionConfig, run.target_id) if run.target_id else None
+        if config is None:
+            return "周版本"
+        return report_document.weekly_target_label(
+            config.name, config.start_time, config.end_time
+        )
+    commit = db.session.get(Commit, run.target_id) if run.target_id else None
+    if commit is None:
+        return f"提交 #{run.target_id}" if run.target_id else "提交"
+    return report_document.commit_target_label(commit.commit_id, commit.message)
+
+
+def _no_report_reason(run) -> str:
+    """没有可导出的结论时，如实说**为什么**（不给一个空文件）。
+
+    「跑完了但没有正文」与「压根没跑成」要分开说：前者要重新分析，后者要看失败原因。
+    """
+    status = str(run.status or "")
+    if status == "running":
+        return "这次分析还在跑，跑完之后才能导出。"
+    if status == "pending":
+        return "这次分析还在排队，跑完之后才能导出。"
+    if status == "failed":
+        reason = str(run.error_message or "").strip()
+        return f"这次分析没有结论（分析失败{f'：{reason}' if reason else ''}），无法导出。"
+    return "这次运行没有可导出的报告正文。"
+
+
+@ai_analysis_bp.route("/ai-analysis/runs/<int:run_id>/report.md", methods=["GET"])
+def ai_run_report_md(run_id):
+    """把**这一次运行**的结论导出成一份 markdown：元信息 → 报告原文 → 异常清单附录。
+
+    拼文档的是 `services/ai/report_document.py`（纯函数、不碰库），这里只做三件事：
+    判权、从库里取那几项元信息、把结果当附件发出去。
+
+    **失败一律回 JSON，不回半个文件**：一个「下载成功但内容是空的」文件比一句
+    「这次没有结论」危险得多 —— 前者会被当成一份分析过、没有问题的报告存档。
+    """
+    run = db.session.get(AiAnalysisRun, run_id)
+    if run is None:
+        return jsonify({"success": False, "message": "Not found."}), 404
+    if not _has_project_access(run.project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+    if not report_document.is_exportable(
+        status=run.status, report_text=run.response_text
+    ):
+        return jsonify({"success": False, "message": _no_report_reason(run)}), 409
+
+    project = db.session.get(Project, run.project_id)
+    payload = _payload_of(run.response_payload)
+    target_label = _report_target_label(run)
+    markdown = report_document.build_report_markdown(
+        project_label=str(getattr(project, "name", "") or ""),
+        target_label=target_label,
+        run_id=run.id,
+        created_at_display=report_document.beijing_display(run.created_at),
+        risk_level=payload.get("risk_level"),
+        # 定级依据**原文带上**：那句「该等级仅按变更规模估算，不是模型评估结果」就在里面，
+        # 在这里另写一份警示语必然与它漂移（见 report_document 的 docstring）。
+        risk_reasons=payload.get("risk_reasons") or [],
+        scope=run.scope,
+        trigger_source=run.trigger_source,
+        model=str(run.model or ""),
+        degradation_label=str(payload.get("degradation_label") or ""),
+        focus_label=_focus_label_of(run),
+        report_text=run.response_text,
+        anomalies=payload.get("anomalies") or [],
+        suppressed_count=int(payload.get("suppressed_count") or 0),
+    )
+    filename = report_document.report_filename(
+        project_name=getattr(project, "name", "") or "",
+        target_label=target_label,
+        when=run.created_at,
+    )
+    # `as_attachment` + `download_name`：文件名里的中文由 Werkzeug 按 RFC 5987 编码，
+    # 浏览器拿到的就是那一份带项目名与目标名的中文文件名（前端**不要**再加 `download`
+    # 属性 —— 空值会让浏览器按 URL 末段命名，把中文名盖掉）。
+    return send_file(
+        BytesIO(markdown.encode("utf-8")),
+        mimetype="text/markdown; charset=utf-8",
+        as_attachment=True,
+        download_name=filename,
+    )
+
+
+# ---------------------------------------------------------------------------
+#  历次结论（这个目标跑过的每一次）
+# ---------------------------------------------------------------------------
+# 用户报的是「AI 重新分析时无法预览旧的结论」：点「重新分析」之后屏幕上那句
+# 「AI 分析进行中...」就把旧报告换掉了，而库里那条结论一直都在。
+#
+# 三条路径的分工：
+#   /commit/<id>/history  → 这个提交跑过的每一次（一行一条）
+#   /weekly/<id>/history  → 这个周版本跑过的每一次（按**分组键**取，见服务层说明）
+#   /runs/<id>/report     → 其中**某一次**的结论，形状与 `/latest` 逐字相同
+#
+# 判权都按**目标自己所属的项目**（与 `/latest` 同一条口径）：历次结论里含有报告正文，
+# 换个号就能读到别人的是不行的。
+
+
+@ai_analysis_bp.route("/ai-analysis/commit/<int:commit_id>/history", methods=["GET"])
+def ai_commit_history(commit_id):
+    commit = Commit.query.get_or_404(commit_id)
+    repo = db.session.get(Repository, commit.repository_id)
+    project_id = repo.project_id if repo else None
+    if project_id and not _has_project_access(project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+    payload = report_history_service.list_target_runs(
+        kind="commit", target_id=commit_id, limit=_history_limit()
+    )
+    return jsonify(payload), 200
+
+
+@ai_analysis_bp.route("/ai-analysis/weekly/<int:config_id>/history", methods=["GET"])
+def ai_weekly_history(config_id):
+    config = WeeklyVersionConfig.query.get_or_404(config_id)
+    if not _has_project_access(config.project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+    # **按分组键取，不是按 config id**：读侧（`get_latest_weekly_result`）就是按
+    # `build_weekly_group_key` 查的。按 config id 查会与抽屉上那份结论对不上。
+    payload = report_history_service.list_target_runs(
+        kind="weekly",
+        target_key=build_weekly_group_key(config),
+        limit=_history_limit(),
+    )
+    return jsonify(payload), 200
+
+
+def _history_limit() -> int:
+    """`?limit=` 的取值：脏值回落默认（列表不是分页，给个上限就够）。"""
+    try:
+        value = int(request.args.get("limit") or 0)
+    except (TypeError, ValueError):
+        return report_history_service.DEFAULT_HISTORY_LIMIT
+    if value <= 0:
+        return report_history_service.DEFAULT_HISTORY_LIMIT
+    return min(value, report_history_service.MAX_HISTORY_LIMIT)
+
+
+@ai_analysis_bp.route("/ai-analysis/runs/<int:run_id>/report", methods=["GET"])
+def ai_run_report(run_id):
+    """**某一次**运行的结论，形状与 `/latest` 逐字相同（前端一个渲染器通吃）。
+
+    与 `/runs/<id>/report.md` 是两件事：那条回**文件**（给人下载/存档），这条回 JSON
+    （给界面渲染）。路径相近是刻意的 —— 它们说的是同一份东西的两种出场方式。
+    """
+    run = db.session.get(AiAnalysisRun, run_id)
+    if run is None:
+        return jsonify({"success": False, "message": "Not found."}), 404
+    if not _has_project_access(run.project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+    payload = report_history_service.get_run_report(run_id)
+    if payload is None:
+        return jsonify({"success": False, "message": "Not found."}), 404
+    return jsonify({"success": True, "result": payload, "run_id": payload.get("run_id")}), 200
 
 
 # ---------------------------------------------------------------------------
