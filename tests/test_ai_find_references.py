@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from services.agent_reference_search import apply_batch_total
 from services.ai import reference_search as rs
 from services.ai.protocol import ContextRequest, parse_payload, sanitize_requests
 from services.ai.reference_search import (
@@ -400,8 +401,10 @@ def test_the_platform_asks_the_agent_when_it_cannot_read_locally(monkeypatch):
 
     calls: list[dict] = []
 
-    def fake(repository, *, query, entries, prefix=""):
-        calls.append({"query": query, "entries": entries, "prefix": prefix})
+    def fake(repository, *, query, entries, prefix="", total_files=0):
+        calls.append(
+            {"query": query, "entries": entries, "prefix": prefix, "total_files": total_files}
+        )
         return {"status": "ready", "text": "a.lua:1: hit", "scanned": 3}
 
     monkeypatch.setattr(dispatch, "request_references", fake)
@@ -417,6 +420,76 @@ def test_the_platform_asks_the_agent_when_it_cannot_read_locally(monkeypatch):
     assert calls[0]["prefix"] == "scripts/"
     assert all(path.startswith("scripts/") for path, _ in calls[0]["entries"])
     assert calls[0]["entries"][0][1] == COMMIT_B, "每条路径配它自己最后那次提交"
+    # 范围前缀 `scripts/` 下本批次有 2 个文件（`config/goods.xlsx` 不在范围内）。
+    # 带过去的分母是**这个数**（本批次的总数），不是 `entries` 的长度 —— 截断那一半见
+    # `test_the_agent_is_told_the_real_batch_size_not_the_truncated_one`。
+    assert calls[0]["total_files"] == 2
+
+
+def test_the_agent_is_told_the_real_batch_size_not_the_truncated_one(monkeypatch):
+    """**Agent 那条路的覆盖率分母必须是「本批次一共改了多少个文件」。**
+
+    平台把 `entries` 截到额度上限（`MAX_SCAN_FILES`）才发出去，所以 Agent 手里
+    `len(entries)` 恒等于上限。让它拿这个数当分母，抬头就会写成
+    「本次搜索覆盖了本批次的 240/240 个文件」—— 读起来是**全覆盖**，而真相是
+    线上那个周版本的 767 个文件里只看了 240 个。
+
+    这不是文字问题：模型正是拿「扫完了没有」决定能不能把「没有其它引用」写进结论
+    （`render_result` 的 docstring 明写这两种「没有」必须分得开）。而平台本地那条路把
+    **完整**列表交给 `search_files`、由 `max_files` 在里面截，分母是 767 —— 同一个
+    周版本的两条路会给出互相矛盾的两个覆盖率，取决于平台有没有工作副本。
+    """
+    import services.agent_file_content_dispatch as dispatch
+    from services.ai import platform_provider as pp
+    from services.ai.reference_search import MAX_SCAN_FILES, SearchResult
+
+    batch = [f"scripts/f{index:04d}.lua" for index in range(MAX_SCAN_FILES + 40)]
+    scope = AnalysisScope.from_iterables(
+        commits=(COMMIT_A,), paths_by_commit={COMMIT_A: batch}, readable_references=[]
+    )
+    sent = {}
+
+    def fake(repository, *, query, entries, prefix="", total_files=0):
+        sent["entries"] = entries
+        sent["total_files"] = total_files
+        # 用**真的**那一段渲染：一个文件都读不到（读不到会记进 missing，被如实说出去）
+        result = search_files(entries, query, reader=lambda path, commit: None)
+        result = apply_batch_total(result, total_files)
+        return {"status": "ready", "scanned": result.scanned, "text": render_result(result)}
+
+    monkeypatch.setattr(dispatch, "request_references", fake)
+    monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: True)
+    provider = _provider(scope)
+    monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=7))
+
+    text = provider.find_references("target_id")
+
+    assert sent["total_files"] == len(batch), "分母被截成了 Agent 收到的那一批"
+    assert len(sent["entries"]) == MAX_SCAN_FILES, "前提：这一批发出去时确实被截了"
+    assert f"0/{len(batch)}" in text, f"分母必须是 {len(batch)}（本批次总数）：{text}"
+    assert "文件数到了上限就停了" in text, "没搜完就必须说出来"
+    assert "不代表整批里没有" in text, "「没搜到」与「没搜完」要分开"
+
+
+def test_the_batch_total_only_moves_the_denominator_up():
+    """纯函数那一半：平台给的总数**小于**这里数出来的时不生效。
+
+    真的会小：平台算总数时按前缀筛过，而 `entries` 是同一个列表切出来的，两者本该相等；
+    但 Agent 端还有一道 `entries[:MAX_SCAN_FILES]` 的兜底，历史任务的 payload 也可能没有
+    这个键（`total_files` 缺失 → 0）。这时必须保持原样 —— 把一个更小的数写进分母，
+    会得出「扫了 300 个文件里的 240 个」这种不可能的数。
+    """
+    from services.agent_reference_search import apply_batch_total
+    from services.ai.reference_search import SearchResult
+
+    result = SearchResult(query="q", files_total=5, scanned=5)
+
+    assert apply_batch_total(result, 40).files_total == 40
+    assert apply_batch_total(result, 40).truncated_files is True
+    assert apply_batch_total(result, 5) is result, "一样大就不动它"
+    assert apply_batch_total(result, 3).files_total == 5, "更小的数不许写进分母"
+    assert apply_batch_total(result, None).files_total == 5, "老 payload 没有这个键"
+    assert apply_batch_total(result, "x").files_total == 5, "读不出来就当没给"
 
 
 def test_a_pending_agent_answer_is_not_a_conclusion(monkeypatch):
@@ -426,7 +499,7 @@ def test_a_pending_agent_answer_is_not_a_conclusion(monkeypatch):
     monkeypatch.setattr(
         dispatch,
         "request_references",
-        lambda repository, *, query, entries, prefix="": {
+        lambda repository, *, query, entries, prefix="", total_files=0: {
             "status": "pending",
             "message": "Agent 当前离线，取数任务已排队",
         },
@@ -548,8 +621,15 @@ def test_two_searches_are_not_the_same_request(monkeypatch):
     assert same is True
     assert other_query is False, "换了关键词必须是另一份请求"
     assert other_scope is False, "换了范围必须是另一份请求"
+    # 本批次的文件总数也在签名里：它不影响命中清单，只影响抬头那句覆盖率 ——
+    # 少了它，「上周 767 个文件里扫了 240 个」的那份结果会被本周的检索复用。
+    other_total = _matches(
+        task, commit_id="", file_path="", lines=captured["lines"].replace("|0|", "|767|", 1)
+    )
+    assert other_total is False, "换了本批次的总数必须是另一份请求"
     assert captured["extra_payload"]["query"] == "target_id"
     assert captured["extra_payload"]["entries"] == [["a.lua", COMMIT_A]]
+    assert captured["extra_payload"]["total_files"] == 0, "没传就是 0（这条用例没传）"
 
 
 def test_two_batches_with_the_same_query_are_not_the_same_request(monkeypatch):
@@ -599,6 +679,20 @@ def test_two_batches_with_the_same_query_are_not_the_same_request(monkeypatch):
     assert signatures[2] == signatures[0], (
         "同一批文件的同一份检索算出了不同的签名 —— 复用失效，"
         "模型对同一个词问两次就要多等一轮 40 秒"
+    )
+
+    # 同一批**截完的**文件、同一个词，只有本批次总数不一样：这仍然不是同一份请求。
+    # 命中清单确实会一样（搜的是同样那 240 个文件），但抬头那句覆盖率不一样 ——
+    # 「上周一共有 767 个文件」的那份结果被本周（一共 300 个）复用，本周的报告里就会写着
+    # 240/767，而模型正是拿这个数决定能不能说「本批次的文件里没有别处引用」。
+    request_references(
+        repository, query="target_id", entries=week1, prefix="scripts/", total_files=767
+    )
+    request_references(
+        repository, query="target_id", entries=week1, prefix="scripts/", total_files=300
+    )
+    assert signatures[3] != signatures[4], (
+        "只换了本批次总数，签名却一样 —— 覆盖率会被从上一批带过来"
     )
 
 

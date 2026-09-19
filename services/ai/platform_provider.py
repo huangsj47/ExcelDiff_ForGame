@@ -1358,6 +1358,11 @@ class PlatformContextProvider:
                 query=query,
                 entries=pairs[:allowance],
                 prefix=prefix,
+                # **本批次的总数，不是 `entries` 的长度**：`entries` 已经截到额度上限，
+                # 而覆盖率的分母必须是「这次一共改了多少个文件」。带错了它就会在报告里
+                # 写「240/240 全覆盖」，把「没搜到」当成结论 —— 与本地那条路（分母是完整
+                # 列表）会给出互相矛盾的两个覆盖率。
+                total_files=len(pairs),
             )
         except Exception as exc:  # noqa: BLE001 —— 取一次检索失败只该让这一条降级
             log_print(f"⚠️ AI 取数：向 Agent 检索失败 {query}: {type(exc).__name__}: {exc}")

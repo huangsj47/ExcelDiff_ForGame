@@ -475,6 +475,7 @@ def request_references(
     query: str,
     entries: Sequence[Sequence[str]],
     prefix: str = "",
+    total_files: int = 0,
     wait_seconds: Optional[float] = None,
     sleep_func=time.sleep,
 ) -> dict:
@@ -482,6 +483,17 @@ def request_references(
 
     `entries` 是 `[(路径, 提交), …]` —— 平台侧已经按**本批次改动过的文件**筛过一遍
     （白名单纪律：这个工具能触达的内容不超过模型本来就能逐个索取的那些文件）。
+
+    ## 为什么还要带 `total_files`
+
+    `entries` 是**截过的**（`pairs[:allowance]`，上限是 `services.ai.reference_search.MAX_SCAN_FILES`）。
+    Agent 拿到手只看得见截完的这一批，于是它算出的「本次搜索覆盖了 N/N 个文件」里的
+    分母就是**它收到的那一批**，而不是本批次真正改了多少文件 —— 界面与报告上于是出现
+    一句「240/240，全覆盖了」，而真相是 767 个文件里只看了 240 个。
+
+    这与平台本地那条路（`_search_local` 把**完整**列表交给 `search_files`，由 `max_files`
+    在里面截断）会得出**互相矛盾**的两个覆盖率，而模型正是拿这个数决定「能不能说
+    『没有其它引用』」。所以本批次的文件总数必须显式带过去，由平台而不是 Agent 说了算。
 
     ## 两个与正文/diff 请求不同的地方
 
@@ -500,8 +512,15 @@ def request_references(
       **上周那条已完成的任务**，把上周的命中清单（路径、行号、那一行的原文）当成本周的
       结果交出去。症状是「模型拿着过期的证据写进本版本报告，而本周新出现的引用一个都搜不到」，
       界面上完全看不出来（额度也不扣，因为根本没派发）。
+
+      `total_files` 也一样要进签名，理由更细一点：它**不影响命中清单**（截完的那 240 个
+      文件是一样的），只影响抬头那句覆盖率。少了它，「上周 767 个文件里扫了 240 个」
+      的那份结果会被本周「一共 300 个文件」的检索复用，抬头写成 `240/767` —— 本周的
+      覆盖率被写成了上周的，而模型正是拿这个数决定能不能说「本批次的文件里没有别处引用」。
     """
-    signature = f"{query}|{prefix}|{len(entries)}|{_entries_fingerprint(entries)}"
+    signature = (
+        f"{query}|{prefix}|{len(entries)}|{int(total_files or 0)}|{_entries_fingerprint(entries)}"
+    )
     return _request_from_agent(
         task_type=REFERENCES_TASK_TYPE,
         noun="检索",
@@ -512,6 +531,8 @@ def request_references(
         extra_payload={
             "query": str(query or ""),
             "prefix": str(prefix or ""),
+            # 本批次改动过的文件总数（**含没进 `entries` 的那些**）。Agent 用它算覆盖率。
+            "total_files": int(total_files or 0),
             "entries": [[str(path), str(commit)] for path, commit in entries],
         },
         request_key=f"find_references:{getattr(repository, 'id', '')}:{signature}",

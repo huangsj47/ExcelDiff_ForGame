@@ -18,12 +18,39 @@ GIT_DIR 的解析各不一样），而 `get_file_content_from_git` 是**平台�
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from models import Repository, db
 from services.ai.reference_search import (
     MAX_SCAN_FILES,
+    SearchResult,
     render_result,
     search_files,
 )
+
+
+def apply_batch_total(result: SearchResult, total_files) -> SearchResult:
+    """把「本批次一共改了多少个文件」这一个数换成平台给的那个。
+
+    它比这里数出来的大时，说明发过来的 `entries` 已经被平台截过（额度上限），也就是
+    **这一批压根没搜完** —— 分母换成真实的总数，并把 `truncated_files` 标上。模型靠
+    `scanned` 与 `files_total` 是否相等区分「没搜到」与「没搜完」，写错了它会把一次只扫了
+    240 个文件的搜索当成结论（`render_result` 的 docstring 明写这两种「没有」必须分得开）。
+
+    单独提出来是因为它是这一段里**唯一**会算错的判断，而它只依赖两个输入 —— 拆开之后
+    可以直接喂数进来验，不必起数据库、不必造 Agent 任务。
+
+    `total_files` 是从 JSON payload 里读出来的，所以它可能是任何东西（老任务没有这个键、
+    手写的任务带了字符串）。读不出来就按「平台没说」处理，**不许抛**：这是给模型看的
+    覆盖率，算不出来只该退回到保守的那一边（分母小一点、但仍然是这里真实数出来的）。
+    """
+    try:
+        total = int(total_files or 0)
+    except (TypeError, ValueError):
+        total = 0
+    if total > result.files_total:
+        return replace(result, files_total=total, truncated_files=True)
+    return result
 
 
 def search_references_for_agent(payload: dict) -> dict:
@@ -33,6 +60,13 @@ def search_references_for_agent(payload: dict) -> dict:
     —— `text` 就是给模型看的那一整段（抬头 + 命中清单），其余几个数是**账**：
     平台侧按 `scanned` 扣检索额度，而模型能不能对「没搜到」下结论，取决于
     `scanned` 与 `files_total` 是否相等。
+
+    ## `files_total` 的分母是平台给的，不是这里数出来的
+
+    `entries` 已经被平台截到额度上限了，所以 `len(entries)` **不是**本批次改了多少个文件
+    —— 拿它当分母会得出「240/240，全覆盖了」，而真相是 767 个里只看了 240 个。平台把
+    真实总数放在 `total_files` 里带过来（见 `agent_file_content_dispatch.request_references`
+    的 docstring），这里只负责如实用它，并在两数不等时把 `truncated_files` 标上。
     """
     repository_id = payload.get('repository_id')
     query = str(payload.get('query') or '').strip()
@@ -57,6 +91,7 @@ def search_references_for_agent(payload: dict) -> dict:
         return get_file_content_from_git(repository, commit, path)
 
     result = search_files(pairs, query, reader=reader, prefix=str(payload.get('prefix') or ''))
+    result = apply_batch_total(result, payload.get('total_files'))
     text = render_result(result)
     return {
         'text': text,
