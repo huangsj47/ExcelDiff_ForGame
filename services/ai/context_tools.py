@@ -45,12 +45,30 @@ diff 对不上，这是最难查的一类不一致。
 逐字一致，模型可以按标题回查。
 
 首次出现的正文**一字不动**：缓存是为了不再重发，不是为了改写第一次给了什么。
+
+### 5. 跨成员共享的正文缓存要给**全文**，不能给指针
+
+子代理模式（`services/ai/subagent.py`）下，N 个成员各跑一条独立的对话，但共用一份
+`body_cache`（由 `run_family` 建、随 `body_cache=` 传进引擎）。触发它的场景很实际：
+S1 为了查耦合读了表 A 的 diff，S2 也要读同一份 —— 有了它，第二家不必再取一次
+（Excel 结构化差异是秒级操作），也照样拿到全文。
+
+**共享命中与「同一成员内重复索取」是两件事，给的文本必须不同**：
+
+* 同一成员内重复 → 给**指针**（第 4 条）。那句话是「见上文那一节」，在那个成员的对话里
+  为真；
+* 跨成员命中 → 必须给**完整正文**。「见上文」在**另一个成员的对话里是假话** ——
+  它的上文里根本没有那一节，模型会去找一个不存在的东西，然后要么当自己看过了、
+  要么再要一次。
+
+所以共享命中时给的是 `ContextItem` 原件（它是 frozen 的，N 个成员共用一份没有风险），
+同时把这一条**也写进本成员的本地缓存** —— 于是同一个成员再要第二次时，才退化成指针。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
+from typing import Any, Iterable, Mapping, MutableMapping, Protocol, runtime_checkable
 
 from services.ai.budget import ContextItem, truncate_text, truncate_text_middle
 from services.ai.protocol import ContextRequest, DroppedItem
@@ -154,22 +172,37 @@ def _meta_chars(item: ContextItem) -> int:
         return 0
 
 
-def _cache_key(request: ContextRequest) -> tuple[str, str, str, str]:
+# 缓存键：同一份**内容**才叫命中。
+#
+# `lines` 必须在键里。第一版漏了它，后果是「模型先要第 100–200 行、再要第
+# 300–400 行，第二次拿到的是一句『你已经拿到这份内容了，见上文』」—— 而它上文里
+# 只有第一段。这条错会静默地把「看另一段」变成「以为看过另一段」。
+CacheKey = tuple[str, str, str, str, str]
+
+
+def _cache_key(request: ContextRequest) -> CacheKey:
     return (
         request.type,
         request.commit or "",
         normalize_path(request.path),
         request.name or "",
+        request.lines or "",
     )
 
 
 def describe_request(request: ContextRequest) -> str:
-    """给模型看的一行标签。也用于续跑摘要（`budget.build_continuation_summary`）。"""
+    """给模型看的一行标签。也用于续跑摘要（`budget.build_continuation_summary`）。
+
+    **这一段是模型回查内容的地址**（`### [kind] label`），所以「要了哪一段」必须写进去：
+    同一个文件的两段窗口若共用一行标签，正文里就会出现两个标题一样的 `###` 节，
+    而缓存指针说的「见上文那一节」于是指向一个不唯一的位置。
+    """
     if request.type == "read_reference":
         return f"read_reference {request.name}"
     if request.type == "commit_detail":
         return f"commit_detail {request.commit[:12]}"
-    return f"{request.type} {(request.commit or '')[:12]} {normalize_path(request.path)}"
+    base = f"{request.type} {(request.commit or '')[:12]} {normalize_path(request.path)}"
+    return f"{base} {request.lines}" if request.lines else base
 
 
 def _failure_text(request: ContextRequest, reason: str) -> str:
@@ -239,13 +272,20 @@ class ContextTools:
     """带缓存、预算与记账的工具执行器。
 
     一次分析创建一个实例（缓存随之只活一次，见模块注释）。
+
+    `body_cache` 是**跨成员**共享的那一份（子代理模式，见模块 docstring 第 5 条）：
+    由 `subagent.run_family` 建一次、每个成员各自 new 一个 `ContextTools` 时传进来。
+    **不要**把整个 `ContextTools` 共享给 N 个成员 —— 那会把每成员的索取额度并成一份
+    （`_requests_seen` 在实例上），而「每个成员各有一份额度」正是分工的代价被摊平的方式。
     """
 
     provider: ContextProvider
     max_tool_requests: int = DEFAULT_MAX_TOOL_REQUESTS
     limits: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_TOOL_LIMITS))
+    # 跨成员共享的正文缓存。`None` = 单代理（今天的全部行为不变）。
+    body_cache: MutableMapping[CacheKey, ContextItem] | None = None
 
-    _cache: dict[tuple[str, str, str, str], ContextItem] = field(
+    _cache: dict[CacheKey, ContextItem] = field(
         default_factory=dict, init=False, repr=False
     )
     _executions: int = field(default=0, init=False, repr=False)
@@ -375,6 +415,23 @@ class ContextTools:
                 items.append(pointer)
                 continue
 
+            shared = self._shared_get(key)
+            if shared is not None:
+                # 别的成员已经取过这一份。**给全文，不给指针** —— 见模块 docstring 第 5 条。
+                # 记账口径与本地命中一致（省下的是取数，不是模型的索取额度），只有
+                # `produced_chars` 不同：这次真的把正文交给了模型，所以算全文的长度。
+                cache_hits += 1
+                self._cache_hits += 1
+                self._bump(request.type, "calls")
+                self._bump(request.type, "cache_hits")
+                self._bump(request.type, "source_chars", _meta_chars(shared))
+                self._bump(request.type, "produced_chars", len(shared.text))
+                # 也存进本地：同一个成员再要第三次时，它的上文里确实已经有这一节了，
+                # 那时才轮到指针。
+                self._cache[key] = shared
+                items.append(shared)
+                continue
+
             try:
                 item = self._render(request, self._fetch(request))
             except Exception as exc:  # noqa: BLE001 —— 工具失败不能作废整轮
@@ -411,6 +468,7 @@ class ContextTools:
                 truncated += 1
                 self._bump(request.type, "truncated")
             self._cache[key] = item
+            self._shared_put(key, item)
             items.append(item)
 
         if refused:
@@ -433,6 +491,21 @@ class ContextTools:
             refused_by_budget=refused,
             truncated=truncated,
         )
+
+    def _shared_get(self, key: CacheKey) -> ContextItem | None:
+        """跨成员缓存里有没有这一份。**失败的条目也算命中**。
+
+        「这个文件这次取不到」在同一个进程里几秒之内不会变（Agent 离线、这个提交里确实
+        没有这个路径），让 N 个成员各等一遍 15 秒的上限只会拖长整次分析。给出去的是同一句
+        带着原因的失败说明 —— 它本来就要求模型写成信息缺口，不会长成「没问题」。
+        """
+        if self.body_cache is None:
+            return None
+        return self.body_cache.get(key)
+
+    def _shared_put(self, key: CacheKey, item: ContextItem) -> None:
+        if self.body_cache is not None:
+            self.body_cache[key] = item
 
     def _fetch(self, request: ContextRequest) -> str | None:
         if request.type == "commit_detail":

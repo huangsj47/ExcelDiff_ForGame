@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, MutableMapping, Protocol, Sequence
 
 from services.ai.baseline import DEFAULT_BASELINE_CHARS
 from services.ai.budget import (
@@ -410,6 +410,7 @@ def run_analysis(
     on_round: Callable[[RoundProgress], None] | None = None,
     seed_messages: Sequence[Mapping[str, Any]] = (),
     task_message: str = "",
+    body_cache: MutableMapping[Any, ContextItem] | None = None,
 ) -> EngineOutcome:
     """跑完一次分析。**不抛异常**：任何失败都变成 `status="failed"` 的结果。
 
@@ -420,14 +421,16 @@ def run_analysis(
     它抛异常**只会被记一条日志**，绝不作废这次分析 —— 调用方会用它发 SSE 事件、查预算，
     那些动作失败不该让一次已经跑了几分钟的分析白跑。不传它时行为与以前完全一致。
 
-    ## 子代理模式：`seed_messages` + `task_message`
+    ## 子代理模式：`seed_messages` + `task_message` + `body_cache`
 
-    这两个参数是**唯一**为子代理开的门（编排在 `services/ai/subagent.py`），不传时本函数
+    这三个参数是**唯一**为子代理开的门（编排在 `services/ai/subagent.py`），不传时本函数
     的行为与它们不存在时**逐字节相同**（有一条回归测试钉着这件事）：
 
     * `seed_messages` —— 已经拼好的**共享前缀**（system + 含整份变更清单的第一条 user 消息，
       断点①②都挂好了）。传了它就**不重建** system，也不重发变更清单；
-    * `task_message` —— 第 1 轮的 user 消息**原文**（「你负责哪几个维度」）。
+    * `task_message` —— 第 1 轮的 user 消息**原文**（「你负责哪几个维度」）；
+    * `body_cache` —— N 个成员共享的正文缓存。**它只影响取数，不影响提示词的形状**：
+      别的成员取过的同一份内容直接给全文，不再取第二次（见 `context_tools` 第 5 条）。
 
     于是子代理的请求长成 `[system, 共享消息, 任务书, assistant, …]`：前两条在**同一批的
     所有成员之间逐字节相同**，所以第一个成员写下的 prompt cache，后面每个成员（含汇总那
@@ -446,7 +449,11 @@ def run_analysis(
     limits = limits or EngineLimits()
     thresholds = thresholds or RuleThresholds()
 
-    tools = ContextTools(provider=provider, max_tool_requests=limits.max_tool_requests)
+    tools = ContextTools(
+        provider=provider,
+        max_tool_requests=limits.max_tool_requests,
+        body_cache=body_cache,
+    )
     if seed_messages:
         # 共享前缀整段照用（**拷贝**，别让下面的断点挪动改到调用方那份 —— 它正要被
         # 同一批的其它成员再用一次）。断点①②已经在里面了，system 也**不再重建**：

@@ -37,7 +37,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     REQUEST_TIMEOUT_RANGE,
 )
-from services.ai.analysis_budget import budget_gate_reason
+from services.ai.analysis_budget import budget_gate_reason, early_stop_guard
 from services.ai.baseline import (
     DISPOSITION_PENDING,
     BaselineFinding,
@@ -1461,7 +1461,14 @@ def _run_engine_and_persist(
     outcome = (
         run_analysis(**engine_args)
         if plan is None
-        else run_family_with_seed(plan=plan, **engine_args)
+        else run_family_with_seed(
+            plan=plan,
+            # 每片开跑前看一眼预算（含本次运行已消耗的那部分）。判据与起跑闸门同一个
+            # `budget_status`，只是多算了这一家子已经花掉的 token —— 否则前面几片的
+            # 花费还没落库，每一片都看到「还没超」。被跳过的分片会进报告的信息缺口。
+            should_skip=early_stop_guard(project_id, entry="subagent"),
+            **engine_args,
+        )
     )
 
     result = result_payload(

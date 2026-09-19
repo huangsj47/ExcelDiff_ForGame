@@ -39,7 +39,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from models.ai_analysis import AiAnalysisRun
 from services.ai.pricing import DEFAULT_CURRENCY, money
@@ -821,6 +821,62 @@ def budget_gate_reason(project_id: int, *, entry: str = "") -> str | None:
         force=True,
     )
     return reason
+
+
+def early_stop_guard(project_id: int, *, entry: str = "") -> Callable[[Any, int], str]:
+    """给**子代理模式**用的「跑一片之前先看一眼预算」的判据（`subagent.run_family` 的
+    `should_skip`）。超了就返回一句可以直接写进报告的理由；没超返回空串。
+
+    ## 为什么它必须接受「本次运行已消耗的 token」
+
+    闸门（`budget_gate_reason`）判的是**起跑前**：那时这次运行一行都还没落库，
+    「已用」是干净的。可是子代理一家子要跑 n+1 次模型调用，跑到第 4 片时前面三片的钱
+    **还没写进库** —— 只看 `budget_status` 的话，每一片都看到「还没超」，于是没有哪一片
+    会被拦下，一路把预算超穿。所以调用方把**已消耗的 token 数**（上游已上报部分的下界）
+    传进来，这里用 `with_live_usage` 把它加进判定 —— 判据与闸门逐字一致，只是多算了本次。
+
+    ## 为什么只判 token、不判费用
+
+    跑中算费用需要「单价表能解析 + 模型名能匹配 + 上游报了 token」三件同时成立，任何一件
+    不成立就**算不出钱**，而本模块的口径是「**算不出就不判**」（宁可放过一次，也不给一个
+    偏小的假超支）。只有费用上限的项目因此不会在这里被拦，它仍然会在下一次分析的起跑闸门
+    上被拦住 —— 这个缺口是**已知且写在这里的**，不是漏掉的一行。
+
+    ## 判不出来时不拦
+
+    查库失败（`budget_status` 抛异常）只记一条日志、返回空串：一个读不到账的瞬间
+    不该变成「剩下的分片全被跳过」—— 那样的报告会说「那几块维度没人看过」，
+    而真相是我们算不出账。宁可多花一片的钱，也不给一句把人引到错方向的结论。
+
+    返回的文本会进**报告正文**（信息缺口里那一行），所以与闸门一样要**按看的人脱敏**：
+    平台档超了而看的人不是平台管理员时不给额度数字。
+    """
+    def guard(member: Any, tokens: int) -> str:
+        try:
+            status = with_live_usage(budget_status(project_id), tokens=max(0, int(tokens or 0)))
+        except Exception as exc:  # noqa: BLE001 —— 判不出来不拦（理由见 docstring）
+            log_print(
+                f"⚠️ AI 预算早停判定失败[{entry or 'subagent'}] project={project_id}: "
+                f"{type(exc).__name__}: {exc}",
+                "AI",
+                force=True,
+            )
+            return ""
+        if not status.get("blocks_analysis"):
+            return ""
+        if not platform_scope_visible():
+            status = redact_platform_scope(status)
+        reason = str(status.get("reason") or "").strip() or "已超出 AI 分析预算"
+        label = str(getattr(member, "label", "") or "分片")
+        log_print(
+            f"⏸️ AI 分析子代理提前收工[{entry or 'subagent'}] "
+            f"project={project_id} {label}: {reason}",
+            "AI",
+            force=True,
+        )
+        return f"预算不足，提前收工（{reason}）"
+
+    return guard
 
 
 def budget_rows_for_overview(

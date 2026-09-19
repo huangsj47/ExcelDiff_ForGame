@@ -234,7 +234,8 @@ class TestASkippedMemberIsAGap:
     def test_the_skip_reason_reaches_the_report_and_the_block(self):
         plan = _plan(3)
 
-        def should_skip(member):
+        def should_skip(member, tokens):
+            assert tokens >= 0, "判据要拿到「本次已消耗」才判得准"
             return "剩余预算不足（还有 1200 tokens）" if member.index == 3 else ""
 
         result = run_family(
@@ -261,7 +262,7 @@ class TestASkippedMemberIsAGap:
             client=client,
             provider=FakeProvider(),
             plan=plan,
-            should_skip=lambda member: "预算不足" if member.index == 3 else "",
+            should_skip=lambda member, tokens: "预算不足" if member.index == 3 else "",
             **_args(),
         )
 
@@ -491,7 +492,7 @@ class TestTheOutcomeBlocks:
             client=FlakyClient(_final()),
             provider=FakeProvider(),
             plan=plan,
-            should_skip=lambda member: "预算不足" if member.index == 2 else "",
+            should_skip=lambda member, tokens: "预算不足" if member.index == 2 else "",
             **_args(),
         )
 

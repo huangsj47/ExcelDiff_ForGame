@@ -26,6 +26,12 @@
 跳过，**绝不许表现为「那个维度没问题」**；主代理漏掉一条候选，平台侧要自己查出来
 （`reconcile_candidates`），**保证不建立在模型听话上**。
 
+**四、成员之间共享的是缓存与额度来源，不是实例。** 一家子共用一份正文缓存
+（`run_family` 里建、`context_tools` 第 5 条）—— 同一个文件被两个成员各要一次时只取一次，
+两边都拿到**全文**；但索取额度是**每个成员各自一份**（`plan.limits`），谁也别想替别人花。
+预算一侧同理：每片开跑前读一次**含本次运行已消耗**的判定（`should_skip` 的第二个参数），
+不够就跳过并点名 —— 判据与起跑前的闸门是同一个 `budget_status`。
+
 ## 与引擎的分工
 
 本模块不碰数据库、不碰 Flask，也不自己拼提示词：共享消息用引擎自己的
@@ -37,9 +43,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, MutableMapping, Sequence
 
-from services.ai.budget import truncate_text
+from services.ai.budget import ContextItem, truncate_text
 from services.ai.engine import (
     DEGRADATION_LABELS,
     DEGRADE_CONTEXT,
@@ -594,7 +600,7 @@ def run_family(
     project_instructions: str = "",
     baseline_digest: str = "",
     on_round: Callable[[RoundProgress], None] | None = None,
-    should_skip: Callable[[MemberPlan], str] | None = None,
+    should_skip: Callable[[MemberPlan, int], str] | None = None,
     run_analysis_fn: Callable[..., EngineOutcome] = run_analysis,
 ) -> FamilyResult:
     """顺序跑 N 个成员 + 1 次汇总，返回一家子的结果。
@@ -605,39 +611,53 @@ def run_family(
     一个都省不下。而且顺序执行让 `db.session` 保持在一条线程上（落库在调用方，
     它本来就不是线程安全的）。
 
+    ## 一家子共享一份正文缓存
+
+    `body_cache` 在这里建、传给每个成员（见 `context_tools` 第 5 条）。**共享的是缓存，
+    不是 `ContextTools` 实例** —— 每个成员的索取额度是各自的一份（`plan.limits`），
+    合成一个实例会把它们并成一份，分工的代价也就跟着变成「总额度被 N 个人抢」。
+
     ## `should_skip`：预算不足时的早停
 
-    每跑一个成员之前问一次「还跑得了吗」。回答非空就**跳过**它，并把那句话原样写进
-    成员的去向（它会进报告的信息缺口）。这是本模块**唯一**允许少跑一个成员的理由，
+    每跑一个成员之前问一次「还跑得了吗」，第二个参数是**这家子到目前为止已消耗的
+    token 数**（没有它，判定只能看已落库的量，而这次运行的花费还没落库 —— 结果就是
+    每一片都以为「还没超」，一路跑到把预算超穿）。回答非空就**跳过**它，并把那句话原样
+    写进成员的去向（它会进报告的信息缺口）。这是本模块**唯一**允许少跑一个成员的理由，
     而少跑的那一个必须被点名 —— 静默跳过等于把「没人看过」写成「没问题」。
+
+    **汇总那一次不查预算**：它是唯一产出最终报告的一步，跳过它等于这一家子白跑 ——
+    真的付不起就不该起跑（那是起跑前的闸门管的，见 `analysis_budget.budget_gate_reason`）。
 
     ## `run_analysis_fn`
 
     默认就是引擎的 `run_analysis`；测试用它注入假实现（本模块因此不必碰网络）。
     """
     steps: list[MemberOutcome] = []
+    body_cache: dict[Any, ContextItem] = {}
+    spent_tokens = 0
     for member in plan.members:
-        reason = should_skip(member) if should_skip is not None else ""
+        reason = should_skip(member, spent_tokens) if should_skip is not None else ""
         if reason:
             steps.append(MemberOutcome(plan=member, skipped_reason=reason))
             continue
-        steps.append(
-            _run_one(
-                member,
-                plan=plan,
-                client=client,
-                provider=provider,
-                loaded=loaded,
-                scope=scope,
-                change_summary=change_summary,
-                thresholds=thresholds,
-                project_knowledge=project_knowledge,
-                project_instructions=project_instructions,
-                baseline_digest=baseline_digest,
-                on_round=on_round,
-                run_analysis_fn=run_analysis_fn,
-            )
+        step = _run_one(
+            member,
+            plan=plan,
+            client=client,
+            provider=provider,
+            loaded=loaded,
+            scope=scope,
+            change_summary=change_summary,
+            thresholds=thresholds,
+            project_knowledge=project_knowledge,
+            project_instructions=project_instructions,
+            baseline_digest=baseline_digest,
+            on_round=on_round,
+            body_cache=body_cache,
+            run_analysis_fn=run_analysis_fn,
         )
+        steps.append(step)
+        spent_tokens += _tokens_of(step.outcome)
 
     synthesis_outcome = _run_synthesis(
         plan=plan,
@@ -652,6 +672,7 @@ def run_family(
         project_instructions=project_instructions,
         baseline_digest=baseline_digest,
         on_round=on_round,
+        body_cache=body_cache,
         run_analysis_fn=run_analysis_fn,
     )
     synthesis_step = MemberOutcome(
@@ -692,6 +713,13 @@ def run_family_with_seed(*, plan: FamilyPlan, limits: EngineLimits | None = None
     return run_family(plan=prepared, **engine_args).outcome
 
 
+def _tokens_of(outcome: EngineOutcome | None) -> int:
+    """一个成员烧掉多少 token。没跑成的算 0（`None` 也是）。"""
+    if outcome is None:
+        return 0
+    return max(0, int(outcome.prompt_tokens or 0)) + max(0, int(outcome.completion_tokens or 0))
+
+
 def _run_one(
     member: MemberPlan,
     *,
@@ -706,6 +734,7 @@ def _run_one(
     project_instructions: str,
     baseline_digest: str,
     on_round: Callable[[RoundProgress], None] | None,
+    body_cache: MutableMapping[Any, ContextItem],
     run_analysis_fn: Callable[..., EngineOutcome],
 ) -> MemberOutcome:
     """跑一个成员（子代理或汇总），把它报出的候选结论抽出来。
@@ -731,6 +760,7 @@ def _run_one(
         member=member,
         task_message=build_member_task(member, plan),
         on_round=on_round,
+        body_cache=body_cache,
         run_analysis_fn=run_analysis_fn,
     )
     candidates = _candidates_of(member, outcome)
@@ -775,6 +805,7 @@ def _run_synthesis(
     project_instructions: str,
     baseline_digest: str,
     on_round: Callable[[RoundProgress], None] | None,
+    body_cache: MutableMapping[Any, ContextItem],
     run_analysis_fn: Callable[..., EngineOutcome],
 ) -> EngineOutcome:
     return _call_engine(
@@ -792,6 +823,7 @@ def _run_synthesis(
         member=plan.synthesis,
         task_message=build_synthesis_task(plan, steps),
         on_round=on_round,
+        body_cache=body_cache,
         run_analysis_fn=run_analysis_fn,
     )
 
@@ -812,6 +844,7 @@ def _call_engine(
     member: MemberPlan,
     task_message: str,
     on_round: Callable[[RoundProgress], None] | None,
+    body_cache: MutableMapping[Any, ContextItem],
     run_analysis_fn: Callable[..., EngineOutcome],
 ) -> EngineOutcome:
     """调一次引擎，把「我是谁」贴到进度上。
@@ -846,6 +879,7 @@ def _call_engine(
         on_round=report if on_round is not None else None,
         seed_messages=plan.seed_messages,
         task_message=task_message,
+        body_cache=body_cache,
     )
 
 

@@ -210,6 +210,116 @@ def test_the_repeat_pointer_counts_toward_the_prompt_budget():
     assert len(second.text) < len(first.text) / 10
 
 
+def test_a_different_line_window_is_a_different_cache_entry():
+    """同一个文件的两段窗口**不是同一份内容**。
+
+    缓存键里漏掉 `lines` 的后果不是多花一次取数，而是「模型要第二段，拿回来的是一句
+    『你已经拿到这份内容了，见上文』」—— 而它上文里只有第一段。于是它以为看过了。
+    """
+    provider = FakeProvider(file_content="正文")
+    tools = ContextTools(provider)
+
+    first = tools.execute(
+        [ContextRequest(type="file_content", commit=COMMIT_A, path=PATH_B, lines="100-200")]
+    ).items[0]
+    second = tools.execute(
+        [ContextRequest(type="file_content", commit=COMMIT_A, path=PATH_B, lines="300-400")]
+    ).items[0]
+
+    assert len(provider.calls) == 2, "换了一段窗口就该真的去取"
+    assert second.meta.get("repeat_pointer") is None, "第二段被当成重复索取，给成了指针"
+    assert first.label != second.label, "两段的标签相同 → 指针指向一个不唯一的位置"
+    assert "100-200" in first.label and "300-400" in second.label
+
+
+# ==========================================================================
+# 跨成员共享的正文缓存（子代理模式）
+# ==========================================================================
+
+
+def test_a_shared_hit_gives_the_full_body_not_a_pointer():
+    """**这是共享缓存存在的意义，也是最容易做错的一处。**
+
+    「见上文那一节」在**另一个成员**的对话里是假话 —— 它的上文里根本没有那一节。
+    给指针的话，模型要么去找一个不存在的东西，要么再要一次（照样占额度）。
+    """
+    shared: dict = {}
+    provider = FakeProvider(file_diff="差异" * 100)
+    first = ContextTools(provider, body_cache=shared).execute([_diff_request()]).items[0]
+    second = ContextTools(provider, body_cache=shared).execute([_diff_request()]).items[0]
+
+    assert len(provider.calls) == 1, "第二个成员不该再取一次"
+    assert second.text == first.text, "共享命中给的是全文"
+    assert second.meta.get("repeat_pointer") is None
+    assert "[已在上文给出]" not in second.text
+
+
+def test_a_shared_hit_still_lets_the_same_member_get_a_pointer():
+    """共享命中之后，**同一个成员**再要一次时才是指针（它的上文里确实有了）。
+
+    两个成员各自的**第一次**都拿全文（跨成员那次不能给指针），第二次才退化 ——
+    这正是「共享缓存」与「同一成员内重复索取」两件事的分界。
+    """
+    shared: dict = {}
+    provider = FakeProvider(file_diff="差异" * 100)
+    tools = ContextTools(provider, body_cache=shared)
+    mine_first = tools.execute([_diff_request()]).items[0]
+    mine_second = tools.execute([_diff_request()]).items[0]
+    other = ContextTools(provider, body_cache=shared)
+    theirs_first = other.execute([_diff_request()]).items[0]
+    theirs_second = other.execute([_diff_request()]).items[0]
+
+    assert len(provider.calls) == 1, "两个成员加起来只该取一次"
+    assert mine_first.meta.get("repeat_pointer") is None
+    assert theirs_first.meta.get("repeat_pointer") is None, "跨成员那次要给全文"
+    assert theirs_first.text == mine_first.text, "拿到的必须是同一份正文"
+    assert mine_second.meta.get("repeat_pointer") is True
+    assert theirs_second.meta.get("repeat_pointer") is True, "同一成员的第二次才给指针"
+
+
+def test_the_shared_cache_counts_as_a_hit_not_an_execution():
+    """记账口径：省下的是取数，**不是模型的索取额度**（那条在 `calls` 里照记）。
+
+    `produced_chars` 与本地命中不同：跨成员那一次真的把正文交给了模型，所以算全文长度。
+    """
+    shared: dict = {}
+    provider = FakeProvider(file_diff="差异" * 100)
+    ContextTools(provider, body_cache=shared).execute([_diff_request()])
+    second_tools = ContextTools(provider, body_cache=shared)
+    item = second_tools.execute([_diff_request()]).items[0]
+
+    counters = second_tools.stats["file_diff"]
+    assert counters["calls"] == 1 and counters["cache_hits"] == 1
+    assert counters["executions"] == 0, "没有真的去取数"
+    assert counters["produced_chars"] == len(item.text)
+    assert counters["source_chars"] == len(item.text)
+
+
+def test_without_a_shared_cache_nothing_is_shared():
+    """单代理那条路（`body_cache=None`）行为与服务端不传它时**完全一致**。"""
+    provider = FakeProvider(file_diff="差异")
+    ContextTools(provider).execute([_diff_request()])
+    ContextTools(provider).execute([_diff_request()])
+
+    assert len(provider.calls) == 2, "不传共享缓存时，两个实例互不相关"
+
+
+def test_a_shared_failure_is_not_refetched():
+    """取不到的条目也共享。
+
+    同一个进程里几秒之内「Agent 离线」不会变，让 N 个成员各等一遍 15 秒的上限只会拖长
+    整次分析。给出去的仍是那句带着原因的失败说明（它本来就要求写成信息缺口）。
+    """
+    shared: dict = {}
+    provider = FakeProvider(file_diff=None)
+    ContextTools(provider, body_cache=shared).execute([_diff_request()])
+    item = ContextTools(provider, body_cache=shared).execute([_diff_request()]).items[0]
+
+    assert len(provider.calls) == 1
+    assert item.meta.get("tool_failed") is True
+    assert "信息缺口" in item.text
+
+
 # ==========================================================================
 # 失败与空内容
 # ==========================================================================
