@@ -29,13 +29,27 @@
     var UNKNOWN = '未上报';
     var NOT_COLLECTED = '本次用量未采集';
 
-    /** token 数 → 12.3k / 1.25M；未上报返回 null。 */
+    /**
+     * token 数 → 12.3k / 1.25M；未上报返回 null。
+     *
+     * **与 `services/ai/analysis_budget._fmt_tokens`（事实源）和
+     * `templates/ai_usage_dashboard.html::aiuFmtTokens` 逐字同一套口径**，
+     * `tests/test_ai_token_format_agreement.py` 拿同一张值表把三份钉在一起。
+     *
+     * 两个要点（改动前这里与后端分叉过）：
+     * 1. 单位按**取整之后**的量级选 —— 阈值压在进位点前一点（999950 / 9995000），
+     *    否则 999999 会印成 "1000.0k"、9999999 会印成 "10.00M"；
+     * 2. **1M~10M 是两位小数**。原先这里 `toFixed(2)`、后端 `:.1f`，同一个数字在抽屉
+     *    横幅与用量页上印得不一样。
+     */
     function fmtTokens(value) {
         if (value === null || value === undefined) return null;
         var num = Number(value);
         if (!isFinite(num)) return null;
-        if (Math.abs(num) >= 1000000) return (num / 1000000).toFixed(num >= 10000000 ? 1 : 2) + 'M';
-        if (Math.abs(num) >= 1000) return (num / 1000).toFixed(1) + 'k';
+        var abs = Math.abs(num);
+        if (abs >= 9995000) return (num / 1000000).toFixed(1) + 'M';
+        if (abs >= 999950) return (num / 1000000).toFixed(2) + 'M';
+        if (abs >= 1000) return (num / 1000).toFixed(1) + 'k';
         return String(num);
     }
 

@@ -16,6 +16,7 @@ Agent 读工作副本时也切（`agent_file_content_reader.read_file_content_fo
 4. **认不出来的窗口一律回落**，绝不因为模型写错参数就让整次取数失败。
 """
 import os
+import re
 import sys
 
 import pytest
@@ -170,3 +171,95 @@ class TestTheCapIsOneNumber:
     def test_the_cap_is_a_real_cap_but_not_a_tiny_one(self):
         """太小会让模型一次看不完一个函数，太大就是把预算全花在一个文件上。"""
         assert 4_000 <= CONTENT_MAX_CHARS <= 20_000
+
+
+class TestTheHeaderAndTheBodyAlwaysAgree:
+    """**「四个常量相等」不是这条的防线，这条才是。**
+
+    `TestTheCapIsOneNumber` 只钉住「四个数逐字相等」。常量相等对「整串 ≤ 上限」既不充分
+    也不必要 —— 抬头、每行的 `数字│` 前缀、末尾那句补救指路**都算在这份额度里**，
+    而它们是任何常量都对齐不了的开销。
+
+    实测（修之前）：300 行 × 35 字的文件，正文 10,799 字、整串 11,939 字。取数侧量的是
+    正文，预算层量的是整串，于是必然再砍一刀尾巴；而抬头里的「第 1–300 行」是取数侧
+    写死的、不跟着改，连「不是全文」都没标。同屏唯一的截断信号是末尾那句英文
+    `... [truncated by local tool]` —— 模型完全有理由按抬头引用第 290 行，而它从没拿到过。
+
+    所以这里断言的是**两件事**，缺一件都不够：
+    1. 整串不超上限（超了就会被预算层砍，而抬头不会跟着改）；
+    2. 抬头声明的区间末尾 == 正文里最后一个 `数字│` 的行号。
+    """
+
+    # (行数, 每行字符数)：前两组是实测出来会触发两次截断的形态，第三组是宽行。
+    SHAPES = ((300, 35), (500, 35), (400, 200), (5_000, 40))
+
+    @staticmethod
+    def _assert_agrees(rendered: str, where: str) -> None:
+        assert len(rendered) <= CONTENT_MAX_CHARS, (
+            f"{where}：整串 {len(rendered)} 字，超了上限 {CONTENT_MAX_CHARS} —— "
+            "预算层会再砍一刀尾巴，而抬头里的行号不会跟着改"
+        )
+        head = rendered.split("\n")[0]
+        claimed = re.search(r"第 (\d+)–(\d+) 行", head)
+        assert claimed is not None, f"{where}：抬头里没有行号区间：{head!r}"
+        numbers = [int(m.group(1)) for m in re.finditer(r"(?m)^(\d+)│", rendered)]
+        assert numbers, f"{where}：正文一行都没给"
+        assert numbers[-1] == int(claimed.group(2)), (
+            f"{where}：抬头说给到第 {claimed.group(2)} 行，正文实际只到第 {numbers[-1]} 行"
+        )
+        assert numbers[0] == int(claimed.group(1)), (
+            f"{where}：抬头说从第 {claimed.group(1)} 行起，正文第一行是第 {numbers[0]} 行"
+        )
+
+    @pytest.mark.parametrize("rows,width", SHAPES)
+    def test_the_platform_local_path_agrees(self, rows, width):
+        from services.ai.platform_provider import _render_text_content
+
+        text = "\n".join("x" * width for _ in range(rows))
+        self._assert_agrees(_render_text_content(text, path="code/a.lua"), f"本地 {rows}×{width}")
+
+    @pytest.mark.parametrize("rows,width", SHAPES)
+    def test_the_agent_path_agrees(self, rows, width):
+        """Agent 那条路把**同一个开销**加在 Agent 切好的正文上，所以同样会超。"""
+        from services.ai.platform_provider import _render_agent_file_content
+
+        text = "\n".join("x" * width for _ in range(rows))
+        rendered = _render_agent_file_content(
+            {
+                "file_path": "code/a.lua",
+                "content": text,
+                "start_line": 1,
+                "end_line": rows,
+                "total_lines": rows,
+                "truncated": False,
+            },
+            path="code/a.lua",
+        )
+        self._assert_agrees(rendered, f"Agent {rows}×{width}")
+
+    @pytest.mark.parametrize("rows,width", SHAPES)
+    def test_the_way_back_survives_the_fitting(self, rows, width):
+        """末尾那句「需要更多请指定 lines」**必须活下来**。
+
+        它是这条路上唯一的重来路径：抬头写「不是全文」而正文末尾没有那一句时，模型知道
+        自己没看全，却不知道能再要一次（配表那边先前就是这么变成死路的）。
+        """
+        from services.ai.platform_provider import _render_text_content
+
+        text = "\n".join("x" * width for _ in range(rows))
+        rendered = _render_text_content(text, path="code/a.lua")
+
+        assert "不是全文" in rendered, "抬头没有标出这是片段"
+        assert "指定 lines" in rendered, f"{rows}×{width}：末端的补救指路被裁掉了"
+
+    def test_a_named_window_is_not_shrunk_when_it_already_fits(self):
+        """点名的窗口本来就装得下时，一个字都不该少 —— 别为了「保险」把模型要的段裁掉。"""
+        from services.ai.platform_provider import _render_text_content
+
+        text = "\n".join(f"line {index}" for index in range(1, 201))
+        rendered = _render_text_content(text, path="code/a.lua", lines="50-60")
+
+        assert rendered.count("\n") == 11, f"窗口被多裁了：{rendered!r}"  # 抬头 + 11 行正文
+        assert "第 50–60 行" in rendered
+        assert "不是全文" in rendered, "点了中间一段，抬头要说这不是全文"
+

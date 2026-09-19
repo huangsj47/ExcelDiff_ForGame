@@ -34,7 +34,7 @@ import io
 import json
 import re
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from services.ai.budget import truncate_text
 from services.ai.reference_search import (
@@ -48,7 +48,12 @@ from services.ai.reference_search import (
 from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_loader import LoadedSkills
 from services.deployment_mode import is_agent_dispatch_mode
-from utils.content_window import CONTENT_MAX_CHARS, DEFAULT_WINDOW_LINES, slice_lines
+from utils.content_window import (
+    CONTENT_MAX_CHARS,
+    DEFAULT_WINDOW_LINES,
+    ContentWindow,
+    slice_lines,
+)
 from utils.logger import log_print
 
 # 每个工作表最多渲染多少行。**不设上限会把一个几千行的表整个塞进上下文**，而单条上限
@@ -397,6 +402,65 @@ def _render_text(payload: Mapping[str, Any], *, path: str) -> str:
     return f"文件差异：{where}\n\n{patch}"
 
 
+def _fit_numbered_content(
+    *,
+    limit: int,
+    window_of: Callable[[int], ContentWindow],
+    build: Callable[[ContentWindow], str],
+) -> str:
+    """渲染「抬头 + 带行号的正文」，并保证**整串**不超 `limit`。
+
+    ## 为什么不能只切正文、剩下的交给预算层
+
+    `limit` 是**整条上下文**的额度，而抬头、每行的 `数字│` 前缀、末尾那句补救指路
+    都在这份额度里。取数侧按 `limit` 切正文之后，整串必然比 `limit` 长（实测：
+    300 行 × 35 字 → 正文 10,799 字、整串 11,939 字），于是预算层再砍一刀尾巴 ——
+    而抬头里的「第 1–300 行」是取数侧写死的、不会跟着改，末尾那句补救指路也一起没了。
+
+    线上能看到的形态（`utils/content_window` 的模块注释里那段「必须与预算层同一个数」
+    的推理只覆盖了一半）：抬头是一句格式完整的中文权威句「共 300 行；下面是第 1–300 行」
+    —— 连「不是全文」都没有 —— 而正文只到第 276 行，同屏唯一的截断信号是末尾那句英文
+    `... [truncated by local tool]`。模型完全有理由按抬头引用第 290 行，而它从没拿到过。
+
+    ## 收敛：两轮足够，剩下的用「从尾部按行裁」兜底
+
+    第一轮量出真实开销（抬头 + 行号 + 指路），第二轮按 `limit - 开销` 重切；行只可能
+    变少、开销随之变小，所以第二轮一定装得下。第三轮留给「行号位数跨过 10 的幂」把
+    开销推大的边界。最后那道 while 是**保证**：抬头本身很大时上面几轮可能仍差几十字，
+    这时**从尾部整行地裁正文**（不裁整串 —— 那会砍掉末尾那句补救指路，而它是唯一的
+    重来路径），抬头与正文永远由同一个 `window` 生成，两者始终自洽。
+    """
+    window = window_of(0)
+    if limit <= 0:
+        return build(window)
+
+    rendered = build(window)
+    for _ in range(4):
+        if len(rendered) <= limit:
+            return rendered
+        # 至少留 1 个字符给正文：抬头自己就顶满额度时已经没有任何正文可给，
+        # 继续算下去只会得到负数。
+        budget = max(1, limit - (len(rendered) - len(window.content)))
+        nxt = window_of(budget)
+        if nxt.content == window.content:
+            break  # 切不动了（限制来自行窗口本身，不是字符数）
+        window = nxt
+        rendered = build(window)
+
+    while len(rendered) > limit and window.content:
+        cut = window.content.rfind("\n")
+        content = window.content[:cut] if cut > 0 else ""
+        window = ContentWindow(
+            content=content,
+            start_line=window.start_line,
+            end_line=max(window.start_line, window.start_line + content.count("\n")),
+            total_lines=window.total_lines,
+            truncated=True,
+        )
+        rendered = build(window)
+    return rendered
+
+
 def _render_text_content(text: str, *, path: str, lines: str = "", auto: bool = False) -> str:
     """文本/代码正文：**带行号的一段窗口** + 「这是哪一段」的抬头。
 
@@ -406,27 +470,43 @@ def _render_text_content(text: str, *, path: str, lines: str = "", auto: bool = 
 
     `auto=True` 表示这一段是**平台按改动位置挑的**（模型没点名）。要说出来：一段从第 1700 行
     开始的正文，不说来源就像随机截的，模型会以为这就是文件的开头。
+
+    额度的口径见 `_fit_numbered_content`：**抬头与行号前缀算在这 11,000 里**，不是切完
+    正文再让预算层砍一刀 —— 那样抬头说的行号与正文实际给到的行对不上。
     """
-    window = slice_lines(text, lines, max_chars=DEFAULT_CONTENT_MAX_CHARS)
     where = path or ""
-    if window.total_lines == 0:
-        return f"[{where}] 这个文件在当前版本里是空的（0 行）。"
-    head = f"文件正文：{where}（共 {window.total_lines} 行；下面是第 {window.start_line}–{window.end_line} 行"
-    if window.is_partial():
-        head += "，**不是全文**"
-    head += "）"
-    if auto:
-        head += "；这一段是按本次改动的位置自动选的（要看别处请指定 lines）"
-    numbered = [
-        f"{number}│{line}"
-        for number, line in enumerate(
-            window.content.split("\n"), start=window.start_line
+
+    def _build(window: ContentWindow) -> str:
+        if window.total_lines == 0:
+            return f"[{where}] 这个文件在当前版本里是空的（0 行）。"
+        head = (
+            f"文件正文：{where}（共 {window.total_lines} 行；"
+            f"下面是第 {window.start_line}–{window.end_line} 行"
         )
-    ]
-    body = "\n".join(numbered)
-    if window.truncated:
-        body += f"\n（这段在第 {window.end_line} 行被截断；需要更多请指定 lines，例如 \"{window.end_line + 1}-{window.end_line + 120}\"）"
-    return f"{head}\n{body}"
+        if window.is_partial():
+            head += "，**不是全文**"
+        head += "）"
+        if auto:
+            head += "；这一段是按本次改动的位置自动选的（要看别处请指定 lines）"
+        numbered = [
+            f"{number}│{line}"
+            for number, line in enumerate(
+                window.content.split("\n"), start=window.start_line
+            )
+        ]
+        body = "\n".join(numbered)
+        if window.truncated:
+            body += (
+                f"\n（这段在第 {window.end_line} 行被截断；需要更多请指定 lines，"
+                f'例如 "{window.end_line + 1}-{window.end_line + 120}"）'
+            )
+        return f"{head}\n{body}"
+
+    return _fit_numbered_content(
+        limit=DEFAULT_CONTENT_MAX_CHARS,
+        window_of=lambda budget: slice_lines(text, lines, max_chars=budget),
+        build=_build,
+    )
 
 
 def _render_agent_file_content(
@@ -450,26 +530,61 @@ def _render_agent_file_content(
             return f"[配表] {where}：内容无法解析成文本表格。**这不等于「没有内容」**。"
         return f"（配表正文由业务节点（Agent）上的工作副本取出）\n{content}"
 
-    content = str(outcome.get("content") or "")
+    raw = str(outcome.get("content") or "")
     total = int(outcome.get("total_lines") or 0)
     start = int(outcome.get("start_line") or 1)
-    end = int(outcome.get("end_line") or start)
     if total == 0:
         return f"[{where}] 这个文件在当前版本里是空的（0 行）。"
-    head = f"文件正文：{where}（共 {total} 行；下面是第 {start}–{end} 行"
-    if bool(outcome.get("truncated")) or start > 1 or end < total:
-        head += "，**不是全文**"
-    head += "；内容由业务节点（Agent）上的工作副本取出"
-    if auto:
-        head += "，这一段是按本次改动的位置自动选的（要看别处请指定 lines）"
-    head += "）"
-    numbered = [
-        f"{number}│{line}" for number, line in enumerate(content.split("\n"), start=start)
-    ]
-    body = "\n".join(numbered)
-    if bool(outcome.get("truncated")):
-        body += f"\n（这段在第 {end} 行被截断；需要更多请指定 lines，例如 \"{end + 1}-{end + 120}\"）"
-    return f"{head}\n{body}"
+    # Agent 侧已经按 `CONTENT_MAX_CHARS` 切过一次，但那量的是**正文**；抬头与每行的
+    # `数字│` 前缀由这里加，所以整串仍可能超上限（见 `_fit_numbered_content`）。
+    # Agent 回来的正文就是它切好的那一段，这里只能**从尾部整行地让**。
+    from_agent_truncated = bool(outcome.get("truncated"))
+
+    def _build(window: ContentWindow) -> str:
+        head = (
+            f"文件正文：{where}（共 {total} 行；"
+            f"下面是第 {window.start_line}–{window.end_line} 行"
+        )
+        if window.is_partial():
+            head += "，**不是全文**"
+        head += "；内容由业务节点（Agent）上的工作副本取出"
+        if auto:
+            head += "，这一段是按本次改动的位置自动选的（要看别处请指定 lines）"
+        head += "）"
+        numbered = [
+            f"{number}│{line}"
+            for number, line in enumerate(
+                window.content.split("\n"), start=window.start_line
+            )
+        ]
+        body = "\n".join(numbered)
+        if window.truncated:
+            body += (
+                f"\n（这段在第 {window.end_line} 行被截断；需要更多请指定 lines，"
+                f'例如 "{window.end_line + 1}-{window.end_line + 120}"）'
+            )
+        return f"{head}\n{body}"
+
+    def _window_of(budget: int) -> ContentWindow:
+        """把 Agent 回来的正文从尾部整行地收到 `budget` 之内。"""
+        content = raw
+        truncated = from_agent_truncated
+        if budget > 0 and len(content) > budget:
+            head = content[:budget]
+            cut = head.rfind("\n")
+            content = head[:cut] if cut > 0 else head
+            truncated = True
+        return ContentWindow(
+            content=content,
+            start_line=start,
+            end_line=start + (content.count("\n") if content else 0),
+            total_lines=total,
+            truncated=truncated,
+        )
+
+    return _fit_numbered_content(
+        limit=DEFAULT_CONTENT_MAX_CHARS, window_of=_window_of, build=_build
+    )
 
 
 def _render_agent_file_diff(

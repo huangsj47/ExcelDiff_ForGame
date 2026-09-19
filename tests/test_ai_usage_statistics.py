@@ -831,6 +831,29 @@ def test_the_reset_scope_number_is_the_whole_table_not_the_current_screen():
         assert "total_runs" not in statistics_public(can_manage=False)
 
 
+def test_the_in_flight_count_is_gated_by_the_same_permission():
+    """**「全平台正在跑几条」与 `total_runs` 是同一类数字，不能只扣一个。**
+
+    `in_flight_runs()` 不按项目过滤（`AiAnalysisRun.query.filter(status.in_(…))`），
+    而 `/ai-analysis/usage/overview` 是**登录即可访问**的（不是 /admin/ 下的路径，
+    见路由注释）—— 所以任何登录用户都能读到「全平台正在跑几条」。`total_runs` 正是
+    为这一点被扣住的，两个数属于同一类。
+
+    界面也从不在非管理员那里读它（`renderStatistics`：`blocked = canManage &&
+    inFlight > 0`），发出去是**发而不用**的数据。
+    """
+    with flask_app.app_context():
+        create_tables()
+        _clear_runs()
+        _clear_statistics()
+        _run(_project())
+
+        assert statistics_public(can_manage=True)["in_flight_runs"] >= 0
+        assert "in_flight_runs" not in statistics_public(can_manage=False), (
+            "全平台在跑的条数发给了非管理员 —— 它与 total_runs 是同一类口径"
+        )
+
+
 # ==========================================================================
 # 六、界面（静态断言）
 # ==========================================================================

@@ -179,12 +179,38 @@ def _int_or_none(value: Any) -> int | None:
 
 
 def _fmt_tokens(value: int | None) -> str:
-    """token 数 → 12.3k / 1.25M。与前端 `aiuFmtTokens` 同一套口径。"""
+    """token 数 → 12.3k / 1.25M。**与前端那两份实现同一套口径。**
+
+    这份是**唯一的事实源**：`static/js/ai_usage_line.js::fmtTokens` 与
+    `templates/ai_usage_dashboard.html::aiuFmtTokens` 是它的两个副本，
+    `tests/test_ai_token_format_agreement.py` 拿同一张值表把三份钉在一起。
+
+    ## 单位按**取整之后**的量级选，不按原值
+
+    原先三份都是「先看原值落在哪一档、再取整」，于是出现两个越界产物：
+
+        999_999   → "1000.0k"     （k 档取整后已经是一千 k 了）
+        9_999_999 → "10.0M" / "10.00M"  （M 档取整后已经是一千万了）
+
+    两者都不是「错」，但都难读，而且 9_999_999 与 10_000_000 会印成两个不同的串。
+    所以阈值定在**进位点前一点**（`999_950` / `9_995_000`，即取整后会越界的那一小段），
+    越界的那一小段改用上一档的写法。
+
+    ## 1M~10M 是两位小数
+
+    这一段原先与前端分叉：JS 是 `toFixed(2)`、这里是 `:.1f`，于是同一个数字在抽屉横幅
+    与用量页上印得不一样，而这里的 docstring 还写着「同一套口径」。**1M~10M 是真实
+    量级** —— 仓库自己的用例就把上限配成 1_200_000。现在统一两位，`1.25M` 这种写法
+    也才真的出得来（原先 1_250_000 印成 `1.2M`）。
+    """
     if value is None:
         return "未上报"
-    if abs(value) >= 1_000_000:
+    number = abs(value)
+    if number >= 9_995_000:
         return f"{value / 1_000_000:.1f}M"
-    if abs(value) >= 1_000:
+    if number >= 999_950:
+        return f"{value / 1_000_000:.2f}M"
+    if number >= 1_000:
         return f"{value / 1_000:.1f}k"
     return str(value)
 

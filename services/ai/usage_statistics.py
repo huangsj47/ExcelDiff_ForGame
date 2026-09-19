@@ -267,11 +267,20 @@ def statistics_public(*, can_manage: bool, excluded_runs: int = 0) -> dict[str, 
     """
     payload = get_usage_statistics()
     payload["excluded_runs"] = int(excluded_runs or 0)
-    payload["in_flight_runs"] = in_flight_runs()
     payload["can_manage"] = bool(can_manage)
     payload["confirm_word"] = RESET_CONFIRM_WORD
-    # 「全量重置会删掉多少条」只有能点那个按钮的人需要知道（`total_runs` 是全平台的
-    # **总条数**，与这一屏的权限无关），所以只给管理员。
+    # 这两项都是**全平台**口径、也只有能按「全量重置」的人用得上，所以只给管理员：
+    #
+    # * `total_runs` 是「这一按会删掉多少条」；
+    # * `in_flight_runs` 是「现在有几条还在跑（按下去会往已删的行里回写）」——
+    #   界面只在 `canManage` 为真时才读它（`ai_usage_dashboard.renderStatistics`：
+    #   `blocked = canManage && inFlight > 0`），发给非管理员是**发而不用**的数据。
+    #
+    # `in_flight_runs` 原先漏在闸门外面。它同样是全平台计数（`in_flight_runs()` 不按
+    # 项目过滤），而 `/ai-analysis/usage/overview` 是**登录即可访问**的（不是 /admin/
+    # 下的路径，见路由注释），所以任何登录用户都能读到「全平台正在跑几条」——隔壁
+    # `total_runs` 正是为这一点被扣住的，两个数属于同一类，不能只扣一个。
     if can_manage:
+        payload["in_flight_runs"] = in_flight_runs()
         payload["total_runs"] = total_runs()
     return payload
