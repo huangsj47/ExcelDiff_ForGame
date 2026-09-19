@@ -19,6 +19,7 @@ import pytest
 from services.ai.budget import ContextItem
 from services.ai.prompt import (
     PROMPT_SOURCE_FILES,
+    _budget_line,
     CommitSummary,
     FileChange,
     build_system_prompt,
@@ -402,10 +403,75 @@ def test_the_remaining_budget_is_stated():
     assert "12 次" in _message(requests_remaining=12)
 
 
+class TestTheBudgetSentenceTellsTheTruthOnEveryRound:
+    """`_budget_line` 的三句话。
+
+    ## 线上真实发生过的那一次
+
+    这里曾经只有一句「本次分析**总共**可索取 {remaining} 次上下文」，而 `remaining` 是
+    剩余。第 2 轮起，一个用光额度的分片读到的是「本次分析总共可索取 **0 次**上下文」，
+    它把这句原样抄进了报告的「信息缺口」（连「（跨轮次累计…）」那半句都抄了）。用户
+    拿着这句话来问「平台这次为什么只给了 0 次额度」—— 查不到，因为额度本来是够的。
+
+    **这段文字会被模型原样转述给用户**，所以它必须自己站得住：三个数（总额 / 已用 /
+    还剩）缺一个就会长出一个查不出来的故障。
+    """
+
+    def test_it_never_reports_the_remaining_count_as_the_total(self):
+        message = _message(requests_total=20, requests_remaining=0)
+
+        assert "总共可索取 20 次" in message, "总额是 20，不许被写成 0"
+        assert "已经用掉 20 次" in message
+        assert "还能再索取 0 次" in message
+        assert "总共可索取 0 次" not in message, "这就是线上那句话"
+
+    def test_it_counts_what_was_used_from_the_two_numbers(self):
+        message = _message(requests_total=8, requests_remaining=3)
+
+        assert "总共可索取 8 次" in message
+        assert "已经用掉 5 次" in message
+        assert "还能再索取 3 次" in message
+
+    def test_the_first_round_sentence_is_byte_identical(self):
+        """用掉 0 次时**逐字保持原样**：子代理模式的共享消息必须与「同额度的单代理」
+        逐字节相同，改一个字就让 prompt cache 全部失效（症状是悄悄贵好几倍）。"""
+        assert _budget_line(requests_total=8, requests_remaining=8) == (
+            "本次分析总共可索取 8 次上下文（跨轮次累计，"
+            "重复索要同一个文件也计入）。额度用完就只能基于已有证据出报告，"
+            "所以请优先要最关键的。"
+        )
+
+    def test_a_zero_budget_says_it_is_the_config_not_an_exhausted_budget(self):
+        """上限配成 0 是**配置**，不是「用完了」—— 两件事对用户意味着不同的下一步。"""
+        message = _message(requests_total=0, requests_remaining=0)
+
+        assert "不允许索取上下文" in message
+        assert "上限是 0 次" in message
+        assert "用完" not in message, "「用完」会让人去查额度怎么被花掉的"
+
+    def test_an_unknown_total_only_reports_what_is_left(self):
+        """调用方不知道总额时（测试替身、探针）不许编一个总额出来。"""
+        message = _message(requests_remaining=5)
+
+        assert "还能再索取 5 次" in message
+        assert "总共" not in message
+
+
 def test_budget_exhaustion_forces_convergence():
     message = _message(budget_exhausted=True)
     assert "耗尽" in message
     assert "final" in message
+
+
+def test_a_zero_budget_exhaustion_hint_says_there_was_never_a_budget():
+    """收敛指令里那句「预算已耗尽」，在额度是 0 时也要换成「没有配置额度」。
+
+    与上面那条同一个根因：模型会把这句话写进报告，说法错了用户就查错方向。
+    """
+    message = _message(requests_total=0, requests_remaining=0, budget_exhausted=True)
+
+    assert "没有配置上下文索取额度" in message
+    assert "预算已耗尽" not in message
 
 
 def test_a_correction_hint_is_appended_as_the_last_block():

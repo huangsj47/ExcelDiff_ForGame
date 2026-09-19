@@ -613,13 +613,29 @@ def build_correction_hint(error: Exception) -> str:
     )
 
 
-def build_budget_exhausted_hint() -> str:
+def build_budget_exhausted_hint(*, requests_total: int | None = None) -> str:
     """预算耗尽时注入的收敛指令。
 
     **不报错退出**——模型手上已有的证据通常够写一份报告了，强制它收敛比作废整轮好。
+
+    ## `requests_total == 0` 要换一句话
+
+    「**用完**了」与「**从来没有**」在模型那里会长成同一句话，而模型会把这句话原样转述
+    进报告的信息缺口。项目把上限配成 0 时，它写出来的是「额度用完」，用户据此去查额度
+    怎么会被用完 —— 查不到，因为那是配置。所以 0 这一支明说「没有配置额度」。
     """
+    if requests_total == 0:
+        opening = (
+            "本次分析**没有配置上下文索取额度**（上限 0 次），读不到任何文件内容、"
+            "也做不了跨文件检索。请基于当前已有的证据直接输出 final，禁止请求上下文。"
+        )
+    else:
+        opening = (
+            "补充上下文的预算已耗尽。请基于当前已有的证据直接输出 final，"
+            "禁止继续请求上下文。"
+        )
     return (
-        "补充上下文的预算已耗尽。请基于当前已有的证据直接输出 final，"
-        "禁止继续请求上下文。对于证据不足的维度，在 dimensions 里写 hit 为 false "
+        opening
+        + "对于证据不足的维度，在 dimensions 里写 hit 为 false "
         "并在 note 里说明「信息不足」，同时在报告里标注信息缺口。"
     )

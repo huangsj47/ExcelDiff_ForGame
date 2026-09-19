@@ -621,6 +621,7 @@ def run_analysis(
             pending_items=tuple(pending_items),
             recap=recap_text,
             requests_remaining=tools.requests_remaining,
+            requests_total=limits.max_tool_requests,
             limits=limits,
             task_message=task_message,
         )
@@ -975,6 +976,10 @@ class _RoundBrief:
     pending_items: tuple[ContextItem, ...]
     recap: str
     requests_remaining: int
+    # 本次运行的总额度（`limits.max_tool_requests`）。**必须与 `requests_remaining` 一起
+    # 给模型**：只报剩余数时，第 2 轮起那句「总共可索取 N 次」会把剩余说成总额 ——
+    # 模型会把它原样抄进报告的信息缺口（见 `prompt._budget_line` 的 docstring）。
+    requests_total: int
     limits: EngineLimits
     # 子代理模式下的**任务书**（第 1 轮的 user 消息原文，见 `run_analysis`）。空串 = 常规路径。
     task_message: str = ""
@@ -1010,6 +1015,7 @@ def _prepare_round(
         baseline_digest=brief.baseline_digest,
         budget_notes=[*brief.budget_notes, *item_notes],
         requests_remaining=brief.requests_remaining,
+        requests_total=brief.requests_total,
         correction_hint=brief.correction_hint,
         budget_exhausted=brief.budget_exhausted,
         history_recap=brief.recap,

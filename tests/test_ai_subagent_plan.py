@@ -118,6 +118,31 @@ class TestTheLimitsAreFamilyConstants:
         assert plan.limits.max_tool_requests >= 2, "分摊后不能变成 0 次索取"
         assert plan.limits.max_rounds >= 2
 
+    def test_the_floor_never_overrides_an_explicit_zero(self):
+        """上限配成 0 = 「这次一次上下文都不给」，那个「下限 2」不许把它顶回去。
+
+        顶回去的后果是配置说话不算数：项目里写着 0，周版本分析却每个分片各拿 2 次，
+        而提示词还把 2 说成「本次分析总共可索取 2 次」—— 配置、提示词、用户的理解
+        三样对不上。
+        """
+        plan = plan_family(
+            mode="weekly", enabled=True, count=3,
+            limits=EngineLimits(max_rounds=8, max_tool_requests=0),
+        )
+
+        assert plan is not None
+        assert plan.limits.max_tool_requests == 0
+
+    def test_a_member_never_gets_more_than_the_whole_run(self):
+        """成员额度是「总额度 ÷ (n+1)」，再小的总额也只是**不变**，不许被抬高。"""
+        plan = plan_family(
+            mode="weekly", enabled=True, count=6,
+            limits=EngineLimits(max_rounds=8, max_tool_requests=1),
+        )
+
+        assert plan is not None
+        assert plan.limits.max_tool_requests == 1
+
     def test_the_synthesis_is_covered_by_the_same_numbers(self):
         plan = _plan(3)
 

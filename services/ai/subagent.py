@@ -310,7 +310,14 @@ def plan_family(
     得到一个**大家一样**的数字，再拿它去拼共享消息。副作用是「调大索取上限」会同时抬高
     每个成员的那一份 —— 这是对的：上限本来就是整次分析的额度。对账轮不额外分一份：
     它核对的是已经拿到的证据，用剩下的额度就够（详见 `build_verify_task`）。
-    """
+
+    ## 但那个「下限 2」不许把「配成 0」顶回去
+
+    `MIN_MEMBER_TOOL_REQUESTS` 是给「上限调得很小」兜底的（否则分摊会把成员饿成 0 次，
+    子代理模式就白开了）。可它**不能**把配置里的 0 顶成 2：上限配 0 是一个明确的意思
+    ——「这次分析一次上下文都不给」，用户按这个意思配的，报告里也按这个意思说
+    （见 `prompt._budget_line`）。所以拿总额再夹一次：成员额度**永远不超过**配置的总额度。
+"""
     if mode != WEEKLY_MODE or not enabled:
         return None
     size = int(count or 0)
@@ -318,8 +325,9 @@ def plan_family(
         return None
     size = min(size, MAX_SUBAGENTS)
 
-    member_requests = max(
-        MIN_MEMBER_TOOL_REQUESTS, int(limits.max_tool_requests) // (size + 1)
+    member_requests = min(
+        int(limits.max_tool_requests),
+        max(MIN_MEMBER_TOOL_REQUESTS, int(limits.max_tool_requests) // (size + 1)),
     )
     member_rounds = max(MIN_MEMBER_ROUNDS, int(limits.max_rounds) // 2)
     family_limits = replace(
@@ -400,6 +408,7 @@ def build_seed_messages(
         max_rounds=limits.max_rounds,
         baseline_digest=baseline_digest,
         requests_remaining=limits.max_tool_requests,
+        requests_total=limits.max_tool_requests,
     )
     return (
         mark_cache_breakpoint({"role": "system", "content": system_prompt}),

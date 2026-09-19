@@ -380,6 +380,7 @@ def _run_analysis_loop(client: LLMClient, skills, *, max_rounds: int = 4) -> Loo
                     items=context_items,
                     budget_notes=escalation_notes,
                     requests_remaining=max(0, 12 - len(context_items)),
+                    requests_total=12,
                     correction_hint=correction_hint,
                 ),
             }

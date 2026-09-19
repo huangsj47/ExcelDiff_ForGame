@@ -716,6 +716,45 @@ def test_the_last_round_is_told_the_budget_is_gone():
     assert "禁止继续请求上下文" in last_user
 
 
+def test_the_used_up_round_is_not_told_the_whole_run_had_zero_requests():
+    """**线上真实发生过**：额度用光的那一轮读到的是「本次分析**总共**可索取 0 次
+    上下文」，模型把这句原样抄进了报告的「信息缺口」，用户拿着它来问「平台为什么只给了
+    0 次额度」—— 而那次运行的额度本来是够的，只是被这个分片花完了。
+
+    所以每一轮的额度那句话必须给出**三个数**：总额 / 已用 / 还剩。只给剩余，等于把
+    剩余说成总额。
+    """
+    client = ScriptedClient(
+        _requests({"type": "commit_detail", "commit": COMMIT}),
+        _final(),
+    )
+
+    _run(client, limits=EngineLimits(max_tool_requests=1))
+
+    first_user = client.calls[0][-1]["content"]
+    last_user = client.calls[1][-1]["content"]
+    # 第 1 轮：还没花，那句话与从前逐字相同（子代理模式的共享前缀靠它保持缓存命中）。
+    assert "本次分析总共可索取 1 次上下文" in first_user
+    # 第 2 轮：花掉了，必须说清「总共 1 次、已经用掉 1 次、还能再索取 0 次」。
+    assert "总共可索取 1 次" in last_user
+    assert "已经用掉 1 次" in last_user
+    assert "还能再索取 0 次" in last_user
+    assert "总共可索取 0 次" not in last_user, "这就是模型抄进报告的那句话"
+
+
+def test_a_project_configured_with_no_request_budget_says_so_instead_of_claiming_exhaustion():
+    """上限配成 0 是**配置**，不是「用完了」：报告里要能看出该去改配置，而不是去查
+    额度怎么被花掉的（那是查不出来的）。"""
+    client = ScriptedClient(_final())
+
+    _run(client, limits=EngineLimits(max_tool_requests=0))
+
+    first_user = client.calls[0][-1]["content"]
+    assert "不允许索取上下文" in first_user
+    assert "上限是 0 次" in first_user
+    assert "预算已耗尽" not in first_user, "0 次额度不是「耗尽」，它从来没被给过"
+
+
 def test_a_markdown_report_is_kept_instead_of_thrown_away():
     """模型没按协议包 JSON、直接给了报告正文时，那份正文通常是有用的。
 

@@ -332,6 +332,57 @@ def build_system_prompt(
     return "\n\n".join(sections).rstrip() + "\n"
 
 
+def _budget_line(*, requests_total: int | None, requests_remaining: int) -> str:
+    """告诉模型「这次还能要几次上下文」。
+
+    ## 三句话，三个事实
+
+    * `requests_total is None`：调用方不知道总额（测试替身、探针脚本），**只说还剩几次**；
+    * `requests_total == 0`：这次压根没有额度 —— 那是**配置**决定的，不是「用完了」；
+    * 有额度且已经用掉一些：总额、已用、还剩，三个数都要写出来。
+
+    ## 为什么必须分开（线上真实发生过）
+
+    这里曾经只有一句 `本次分析总共可索取 {remaining} 次上下文`，而 `remaining` 是
+    **剩余**。于是从第 2 轮起，一个用光了额度的分片读到的是「本次分析**总共**可索取
+    0 次上下文（跨轮次累计…）」—— 它把这句原样写进了报告的「信息缺口」：
+
+        为什么：工具原话「本次分析总共可索取 0 次上下文（跨轮次累计，重复索要同一个
+        文件也计入）。额度用完就只能基于已有证据出报告」
+
+    用户看到的是「平台这次只给了 0 次额度」，一个查不出来的平台故障；而真实情况是那个
+    分片在它的 2 次额度里已经用掉了 2 次。**同一句话既要能读对、也要能被原样转述**——
+    模型会把这段文字抄进报告，所以它必须自己站得住。
+    """
+    if requests_total is None:
+        return (
+            f"本次分析还能再索取 {requests_remaining} 次上下文（跨轮次累计，"
+            "重复索要同一个文件也计入）。额度用完就只能基于已有证据出报告，"
+            "所以请优先要最关键的。"
+        )
+    if requests_total <= 0:
+        return (
+            "本次分析**不允许索取上下文**（配置里的上下文索取上限是 0 次）：所有结论"
+            "只能基于上面给出的变更清单，读不到任何文件内容、也做不了跨文件检索。"
+            "凡是因为这一点而无法判断的，请在报告里如实写成信息缺口。"
+        )
+    used = max(0, requests_total - max(0, requests_remaining))
+    if used == 0:
+        # **这一支是本文件的既有文案，逐字不动**：子代理模式要求「按同一份额度跑的
+        # 单代理」与「家庭成员」的第 1 条消息逐字节相同（见 subagent.py 的
+        # `_build_seed_messages`），改一个字都会让 prompt cache 全部失效。
+        return (
+            f"本次分析总共可索取 {requests_total} 次上下文（跨轮次累计，"
+            "重复索要同一个文件也计入）。额度用完就只能基于已有证据出报告，"
+            "所以请优先要最关键的。"
+        )
+    return (
+        f"本次分析总共可索取 {requests_total} 次上下文，已经用掉 {used} 次，"
+        f"还能再索取 {max(0, requests_remaining)} 次（跨轮次累计，重复索要同一个文件也"
+        "计入）。额度用完就只能基于已有证据出报告，所以请优先要最关键的。"
+    )
+
+
 def build_user_message(
     *,
     change_summary: str,
@@ -341,6 +392,7 @@ def build_user_message(
     baseline_digest: str = "",
     budget_notes: Iterable[str] = (),
     requests_remaining: int = 0,
+    requests_total: int | None = None,
     correction_hint: str = "",
     budget_exhausted: bool = False,
     history_recap: str = "",
@@ -387,18 +439,17 @@ def build_user_message(
 
     # 第一轮也要说额度：模型是在第一轮决定整体策略的（要一次要完还是逐步逼近），
     # 不知道额度就没法做这个决定。
-    blocks.append(
-        f"本次分析总共可索取 {requests_remaining} 次上下文（跨轮次累计，"
-        "重复索要同一个文件也计入）。额度用完就只能基于已有证据出报告，"
-        "所以请优先要最关键的。"
-    )
+    blocks.append(_budget_line(requests_total=requests_total, requests_remaining=requests_remaining))
 
     if budget_exhausted:
         # 这段文案**只有一份**（在 `protocol` 里，与纠正提示放在一起）。以前这里另写了
         # 一段同义的，两句话不一样：这里只说「请立刻输出 final」，没有明说「禁止继续
         # 请求上下文」—— 而那句正是要模型别把最后一轮浪费在又一次索取上。两份文案的
         # 后果是改一处漏一处，所以合到一处。
-        blocks.append(build_budget_exhausted_hint())
+        #
+        # `requests_total` 一起传进去：额度是**用完的**还是**从来就没有**，是两件事
+        # （见 `_budget_line` 的 docstring）。
+        blocks.append(build_budget_exhausted_hint(requests_total=requests_total))
 
     if correction_hint.strip():
         blocks.append("## 上一轮的问题\n\n" + correction_hint.strip())
