@@ -244,12 +244,29 @@ def test_final_without_a_report_is_a_protocol_error():
 
 
 def test_final_without_dimensions_is_a_protocol_error():
-    """dimensions 是「六个维度都过了一遍」的证据。
+    """dimensions 是「每个维度都过了一遍」的证据。
 
     允许它为空等于允许模型只挑好说的说 —— 而这正是这个字段要防的事。
     """
     with pytest.raises(ProtocolError):
         parse_payload('{"status":"final","report_markdown":"# 变更理解\nx"}')
+
+
+def test_the_correction_hint_never_disagrees_with_the_dimension_list():
+    """纠正提示里那句「N 个维度都要写」必须与 `DIMENSION_IDS` 是同一个数。
+
+    它写死过「六个」（SKILL 与运行期契约都是九个），而且**不会有人发现**：服务端照样
+    接受九个，只是模型被提示「写六个就算齐了」——少写的那三个维度在报告里永远没有留痕，
+    而所有用例都是绿的。所以这句话不许再出现字面数字。
+    """
+    from services.ai.protocol import DIMENSION_IDS, build_correction_hint
+
+    hint = build_correction_hint(ProtocolError("dimensions 缺了"))
+
+    assert f"{len(DIMENSION_IDS)} 个维度" in hint, hint
+    assert "六个维度" not in hint and "九个维度" not in hint, (
+        f"维度条数又写死了 —— 改成从 DIMENSION_IDS 取：{hint}"
+    )
 
 
 def test_structural_errors_on_a_list_field_are_protocol_errors():

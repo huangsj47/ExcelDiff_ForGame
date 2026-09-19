@@ -1,11 +1,46 @@
-import os
-import mimetypes
 import base64
-from typing import Dict, Any, Optional, Tuple
+import codecs
 import difflib
+import mimetypes
+import os
 import re
+from typing import Any, Dict, Optional
+
 import pandas as pd
-import numpy as np
+
+# ---------------------------------------------------------------------------
+#  「扩展名不认识时，看内容判类型」——只在这一处实现
+# ---------------------------------------------------------------------------
+# 判据：**没有 NUL 字节，且能按 UTF-8 或 GBK 严格解码**。
+#   * NUL 是二进制最可靠的信号（`.png`/`.zip`/`.woff2`/`.bin` 全都命中），
+#     用它而不是「能不能解码」：`latin-1` 能解码任意字节，拿它当判据等于没有判据。
+#   * 中文项目里 GBK 的源码/配置很常见（与 `_decode_text` 的编码清单同源）。
+#   * 只嗅前若干字节：判断「是不是文本」不需要读完整个文件，而大文件读全文只是浪费。
+_TEXT_SNIFF_BYTES = 8192
+_TEXT_SNIFF_ENCODINGS = ('utf-8', 'gbk')
+
+
+def looks_like_text(content: Optional[bytes]) -> bool:
+    """扩展名认不出来时，靠内容判断这是不是一个文本文件。
+
+    **尾部被截断的多字节字符不算失败**：样本正好切在一个汉字中间时，严格解码会抛
+    `UnicodeDecodeError`，于是「明明是文本却判成二进制」。所以用增量解码器
+    （`final=False`）—— 它容忍结尾不完整，只对真正非法的字节报错。
+    """
+    if not content:
+        return False
+    sample = bytes(content[:_TEXT_SNIFF_BYTES])
+    if b'\x00' in sample:
+        return False
+    for encoding in _TEXT_SNIFF_ENCODINGS:
+        decoder = codecs.getincrementaldecoder(encoding)()
+        try:
+            decoder.decode(sample, False)
+        except UnicodeDecodeError:
+            continue
+        return True
+    return False
+
 
 class DiffService:
     """统一的文件差异服务，支持4种文件类型的diff处理"""
@@ -59,10 +94,26 @@ class DiffService:
             'binary_diff_time': 0
         }
     
-    def get_file_type(self, file_path: str) -> str:
-        """根据文件扩展名判断文件类型"""
+    def get_file_type(self, file_path: str, content: bytes = None) -> str:
+        """判断文件类型：**先看扩展名，扩展名不认识时再看内容**。
+
+        ## 为什么要有第二眼（2026-09-19）
+
+        只有扩展名清单时，任何不在清单里的纯文本文件都会被判成 `binary`，而
+        `_process_binary_diff` 给出的载荷是「二进制文件无法显示差异内容」——
+        于是**协议定义文件（`.proto`）在页面上与 AI 眼里都是「看不见的二进制」**：
+        报告里那句「未读到任何协议 diff」就是这么来的（AI 读的是同一份载荷）。
+
+        判据用**内容**而不是继续往清单里加扩展名：清单是有限枚举，下一次出现新的
+        文本类型（`.toml`、`.ts`……）会再犯一次；而「是不是文本」看字节就知道。
+
+        `content` 是可选的：拿得到字节的调用点（`process_diff`）传进来，只拿得到路径的
+        调用点（页面元数据）行为一个字不变 —— 认不出来的扩展名照旧 `binary`，
+        免得一个恰好能解码的 `.bin` 被当作文本。（既有断言：
+        `test_business_chain_integration.py` 钉着 `.bin`/`.zip` 是 binary。）
+        """
         ext = os.path.splitext(file_path.lower())[1]
-        
+
         if ext in self.EXCEL_EXTENSIONS:
             return 'excel'
         elif ext in self.CSV_EXTENSIONS:
@@ -71,6 +122,8 @@ class DiffService:
             return 'text'
         elif ext in self.IMAGE_EXTENSIONS:
             return 'image'
+        elif looks_like_text(content):
+            return 'text'
         else:
             return 'binary'
     
@@ -97,7 +150,9 @@ class DiffService:
         改名之后仍按 `header=0` 的读法进行（见 `_plan_name_row`），所以行号口径
         （物理行 `idx + 2`）一个字都没变。
         """
-        file_type = self.get_file_type(file_path)
+        # 带上字节：扩展名不认识的文件（`.proto` 这类纯文本）要靠内容才能判对类型，
+        # 见 `get_file_type` 与 `looks_like_text`。
+        file_type = self.get_file_type(file_path, current_content)
 
         try:
             if file_type == 'text':
@@ -404,10 +459,10 @@ class DiffService:
     
     def _read_excel_data(self, content: bytes, file_path: str) -> Dict[str, Any]:
         """读取Excel文件数据"""
-        import pandas as pd
         import io
         import warnings
-        
+        import pandas as pd
+
         try:
             # 根据文件扩展名选择读取方式
             ext = os.path.splitext(file_path.lower())[1]
@@ -1885,9 +1940,9 @@ class DiffService:
         """获取图片基本信息"""
         try:
             # 尝试使用PIL获取图片信息
-            from PIL import Image
             import io
-            
+            from PIL import Image
+
             img = Image.open(io.BytesIO(content))
             return {
                 'width': img.width,

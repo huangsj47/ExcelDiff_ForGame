@@ -706,7 +706,11 @@ class TestDefaultWindowFollowsTheChange:
                 vcs, 'get_file_content_from_git', lambda *a, **k: None if platform_mode else content
             )
             monkeypatch.setattr(
-                PlatformContextProvider, 'file_diff', lambda self, commit, path: patch_text
+                PlatformContextProvider,
+                'file_diff',
+                # `**kwargs`：挑窗口那条路会带 `ask_agent=False`（它不该为了挑坐标去等
+                # 业务节点，见 `_default_window`）。
+                lambda self, commit, path, **kwargs: patch_text,
             )
             return provider
 

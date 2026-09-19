@@ -143,6 +143,30 @@ def test_the_shipped_skill_requires_coupling_analysis_and_test_risks():
     assert "只能读到**本批次改动过的文件**" in body, "没有讲清建模能读到什么，耦合会被凭空断言"
 
 
+def test_the_skill_requires_a_checkable_information_gap():
+    """「信息缺口」必须写成能核对的一条：缺哪个文件的什么、为什么取不到、挡住了哪个维度。
+
+    **为什么这条值得钉**（2026-09-19，一次真实报告逼出来的）：报告里写着
+
+        信息缺口（谨慎使用）：本报告未读到任何代码 diff 与协议 diff，code_logic、
+        version_branch 两个维度无法判断。
+
+    ——没有文件、没有失败原因。复核的人拿到它，既不知道是哪个文件没读到，也不知道该去
+    查什么（Agent 离线？同步没跑完？还是这个提交里确实没有这个路径？三件事的处理方式
+    完全不同）。而工具**已经把原因写在返回内容里了**（「平台读不到 X」/「已向 Agent
+    索取，15 秒内没等到」/「项目没有绑定 Agent 节点」），照抄即可。
+
+    另外「取不到」与「确实没有内容」在这个协议里是两件事（`None` 与 `""`），合并写会
+    把「没有证据」读成「这里没问题」——那正是这个 skill 存在的理由。
+    """
+    body = _platform_body()
+
+    assert "写成能被人拿去核对的一条" in body, "没有要求把信息缺口写成可核对的一条"
+    assert "缺的是哪个文件的什么" in body, "没有要求在缺口里点名文件与索取类型"
+    assert "原话" in body, "没有要求照抄工具给的失败原因（改写成「未取到」就丢了线索）"
+    assert "不许合并写" in body, "没有把「取不到」与「确实没有内容」分开"
+
+
 def test_every_dimension_id_has_a_section_explaining_it():
     """枚举里列的每个维度，正文都要有一节讲「这个维度要查什么」。
 

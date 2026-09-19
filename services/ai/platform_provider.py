@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 from services.ai.skill_loader import LoadedSkills
+from services.deployment_mode import is_agent_dispatch_mode
 from utils.content_window import CONTENT_MAX_CHARS, DEFAULT_WINDOW_LINES, slice_lines
 from utils.logger import log_print
 
@@ -367,12 +368,27 @@ def _render_text_content(text: str, *, path: str, lines: str = "", auto: bool = 
 def _render_agent_file_content(
     outcome: Mapping[str, Any], *, path: str, auto: bool = False
 ) -> str:
-    """业务节点取回来的正文（它自带「哪一段 / 共多少行」，行号由这里补上）。"""
+    """业务节点取回来的正文（它自带「哪一段 / 共多少行」，行号由这里补上）。
+
+    **配表例外**：`kind == "excel"` 时 Agent 回的已经是渲染好的工作表文本（整表统计 +
+    前若干行），与平台本地那条路是**同一个渲染函数**。那条路不按行切、也没有「第 a–b 行」
+    这个概念，所以这里必须原样返回 —— 再包一层行号会变成「行号套行号」，模型会把每一行
+    的工作表正文当成文件的行号去引用。
+    """
+    where = path or str(outcome.get("file_path") or "")
+    if str(outcome.get("kind") or "") == "excel":
+        content = str(outcome.get("content") or "")
+        if not content:
+            return f"[配表] {where}：内容无法解析成文本表格。**这不等于「没有内容」**。"
+        return (
+            f"配表正文：{where}（整表统计 + 前若干行；内容由业务节点（Agent）上的"
+            f"工作副本取出）\n{content}"
+        )
+
     content = str(outcome.get("content") or "")
     total = int(outcome.get("total_lines") or 0)
     start = int(outcome.get("start_line") or 1)
     end = int(outcome.get("end_line") or start)
-    where = path or str(outcome.get("file_path") or "")
     if total == 0:
         return f"[{where}] 这个文件在当前版本里是空的（0 行）。"
     head = f"文件正文：{where}（共 {total} 行；下面是第 {start}–{end} 行"
@@ -391,10 +407,35 @@ def _render_agent_file_content(
     return f"{head}\n{body}"
 
 
+def _render_agent_file_diff(
+    outcome: Mapping[str, Any], *, path: str, commit: str
+) -> str:
+    """业务节点算回来的「**这一条提交**改了这个文件的什么」。
+
+    正文不用再加工：Agent 侧算完就地渲染（`render_diff_payload` 的同一份实现），这里
+    只补一行出处。**出处必须说**——模型的索取形状是「提交 X 改了什么」，而这条路上给它的
+    只是那一条提交与前一次提交之间的差异：周版本分析平时拿的是**整个窗口的合并差异**
+    （`_weekly_stored_diff`），不说清它会以为这就是本窗口该文件的全部改动。
+
+    截断由 Agent 侧做（`FILE_DIFF_MAX_CHARS`，末尾带截断标记），这里不重复。
+    """
+    where = path or str(outcome.get("file_path") or "")
+    content = str(outcome.get("content") or "")
+    if not content:
+        return (
+            f"[读不到差异] {where}：业务节点回传的差异是空的。"
+            "**这不等于「没有改动」**，需要这个文件的差异时请写成信息缺口。"
+        )
+    provenance = (
+        f"（出处：业务节点（Agent）在它的工作副本上按**提交 {str(commit or '')[:8]} 与"
+        "前一次提交**现算的差异 —— 只含这一条提交对这个文件的改动。）"
+    )
+    return f"{provenance}\n{content}"
+
+
 # 补丁里的块头：`@@ -1180,7 +1180,9 @@`。取的是**新版本侧**的行号 —— `file_content`
 # 给的就是当前版本的内容，两边必须是同一套坐标才谈得上「改动附近」。
 _HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", re.M)
-
 
 def _changed_line_starts(diff_text: str) -> list:
     """渲染好的 diff 里所有块头的新版本起始行号（没有则空列表）。"""
@@ -799,6 +840,19 @@ def _weekly_stored_diff(repository_id: Optional[int], path: str, commit: str):
     return None, ""
 
 
+def _is_failed_payload(payload: Any) -> bool:
+    """这份载荷是「取不到」还是「真的差异」。
+
+    `type == 'error'`（`get_unified_diff_data` 读不到内容时给的）与带 `error` 键的载荷
+    （配表侧的读取失败）都是**失败说明**，渲染出来是一句完整的话 —— 它长得像内容，
+    所以调用方必须能分辨它：否则「本地算不出来」会悄悄变成「给模型一句取数失败」就结束了，
+    而真正能算出来的那台机器（业务节点的 Agent）根本没被问过。
+    """
+    if not isinstance(payload, Mapping):
+        return True
+    return bool(str(payload.get("type") or "").strip() == "error" or payload.get("error"))
+
+
 def _batch_provenance(envelope: Mapping[str, Any]) -> str:
     """这份合并 diff 覆盖了哪些提交 —— 只在**不止一条**时给说明。
 
@@ -847,6 +901,11 @@ class PlatformContextProvider:
         self._agent_content_fetched: set = set()
         self._agent_content_cached: dict = {}
         self._agent_content_pending: dict = {}
+        # 「向 Agent 要 diff」的同一套记忆（见 `_diff_from_agent`）：一条分析里同一个文件的
+        # diff 常常被问两次（正文挑窗口时一次、模型自己再要一次），等待不该付两遍。
+        self._agent_diff_fetched: set = set()
+        self._agent_diff_cached: dict = {}
+        self._agent_diff_pending: dict = {}
         self._content_max_chars = DEFAULT_CONTENT_MAX_CHARS
         # 读平台已算好并落库的那一份（周版本合并 diff，页面同源），而不是现场重算。
         #
@@ -897,34 +956,68 @@ class PlatformContextProvider:
             lines.append(f"  - [{row.operation or 'M'}] {row.path}")
         return "\n".join(lines) + "\n"
 
-    def file_diff(self, commit: str, path: str) -> Optional[str]:
+    def file_diff(self, commit: str, path: str, *, ask_agent: bool = True) -> Optional[str]:
         """某个文件在某个提交上的 diff（Excel 走结构化差异）。
 
-        **先读平台已经算好并落库的那一份**（周版本合并 diff，就是周版本页面读的同一个
-        payload），读不到才退回实时计算。理由见 `_weekly_stored_diff`：实时计算需要
-        平台本地有该仓库的工作副本，而 platform/agent 模式下平台明确不 clone ——
-        那条路上「读不到内容」会退化成一句「取到了记录但没有补丁内容」，模型据此得出的
-        结论不是「我读不到」，而是「这里没什么可看的」。
+        来源按顺序三条，前一条给不出**真差异**才走后面一条：
+
+        1. **平台已经算好并落库的那一份**（周版本合并 diff，就是周版本页面读的同一个
+           payload，见 `_weekly_stored_diff`）；单提交分析刻意关掉它（`use_stored_batch_diff=False`）
+           —— 那时模型问的是「这一条提交改了什么」，窗口合并的那份会张冠李戴；
+        2. **现场重算**（`resolve_previous_commit` + `get_unified_diff_data`）—— 需要平台本地
+           有这个仓库的工作副本；
+        3. **业务节点上的 Agent 现算**（`_diff_from_agent`，platform/agent 模式）。
+
+        第 3 条是 2026-09-19 补上的：前两条在 platform/agent 模式下**都不可能**（平台被禁止
+        clone、代码文件又没有单文件缓存），于是 `file_diff` 交出去的是一句「取数失败」——
+        模型据此写「未读到任何代码 diff」，而真正算得出来的那台机器根本没被问过。
+        前两条都不成立时**不再把失败说明当成答案**，去问 Agent；问到就问到了，问不到才
+        带着原因如实回报（同 `file_content` 那条路）。
+
+        `ask_agent=False` 只给「顺手看一眼本地那份补丁」的调用方用（`_default_window` 挑
+        窗口位置）：它不要那句十几秒的等待，也不该为了挑个坐标派一个取数任务出去。
         """
         row = self._commit_row(commit, path)
         if row is None:
             return None
 
+        text, failed = self._local_file_diff(row, commit, path)
+        if not failed or not ask_agent:
+            return text
+
+        # 本地这一份是失败说明。只有多节点部署才去问 Agent：单机模式下本地就是**唯一**
+        # 的取数点，那里算不出来的原因（这个提交里没有这个路径、仓库类型不支持…）
+        # 换台机器算也一样。
+        repository = getattr(row, "repository", None)
+        if repository is None or not is_agent_dispatch_mode():
+            return text
+        return self._diff_from_agent(repository, commit, path, fallback=text or "")
+
+    def _local_file_diff(self, row, commit: str, path: str):
+        """本地两条来源给出的文本，以及**它是不是失败说明**（返回 `(文本, 失败)`）。
+
+        为什么要有那个布尔值：失败说明是一句完整的话（`[取数失败] … 这不等于「没有改动」`），
+        与真差异在调用方眼里长得一样 —— 没有它，「本地算不出来」就只能是终点。
+        """
         if self._use_stored_batch_diff:
             stored, provenance = _weekly_stored_diff(
                 getattr(row, "repository_id", None), path, commit
             )
-            if stored is not None:
+            if stored is not None and not _is_failed_payload(stored):
                 rendered = render_diff_payload(
                     stored, path=path, max_rows_per_sheet=self._max_rows
                 )
                 if rendered:
                     # 出处说明只在这个窗口合并了多条提交时才有内容（见 `_batch_provenance`）
                     # —— 模型拿到的索取形状是「提交 X 改了什么」，不说明它会张冠李戴。
-                    return f"{provenance}\n{rendered}" if provenance else rendered
+                    return (f"{provenance}\n{rendered}" if provenance else rendered), False
                 # 落回实时计算：这份缓存载荷渲染不出来（例如旧口径的分段结构），
                 # 而实时那条路算出来的东西至少是能读的。
                 log_print(f"⚠️ AI 取数：已落库的 diff 渲染不出来，改用实时计算 {path}")
+            elif stored is not None:
+                # 落库的那一份本身就是失败（同步时就没算出来）。它渲染出来是一句
+                # 「取数失败」，当成答案交给模型等于告诉它「这里没什么可看的」。
+                log_print(f"⚠️ AI 取数：已落库的 diff 是失败载荷，改用实时计算 {path}")
 
         try:
             from services.commit_diff_logic import resolve_previous_commit
@@ -934,9 +1027,12 @@ class PlatformContextProvider:
             payload = get_unified_diff_data(row, previous)
         except Exception as exc:  # noqa: BLE001 —— 取数失败只该让这一条降级
             log_print(f"⚠️ AI 取数：diff 失败 {commit[:12]} {path}: {type(exc).__name__}: {exc}")
-            return None
+            return None, True
 
-        return render_diff_payload(payload, path=path, max_rows_per_sheet=self._max_rows)
+        rendered = render_diff_payload(payload, path=path, max_rows_per_sheet=self._max_rows)
+        # 渲染不出来（认不出的结构）与失败载荷（读不到内容）都算「没拿到真差异」——
+        # 两者都要让调用方去问 Agent，而`rendered` 仍然返回：问不到时它就是如实的原因。
+        return rendered, rendered is None or _is_failed_payload(payload)
 
     def file_content(self, commit: str, path: str, lines: str = "") -> Optional[str]:
         """某个文件在这个提交上的正文（默认只给**一段窗口**，见下）。
@@ -1028,9 +1124,13 @@ class PlatformContextProvider:
         拿不到补丁、或补丁里没有块头（新增/删除整个文件、二进制、认不出的载荷）就返回空串：
         调用方会退回「文件开头那一段」，并在抬头里说明这一段是怎么来的 —— **不说来源，
         模型就无法判断这个坐标对不对**。
+
+        **这条路上不向 Agent 要 diff**（`ask_agent=False`）：这只是挑一个窗口位置，而向业务
+        节点要一次要等十几秒（`AGENT_FETCH_WAIT_SECONDS`）—— 为一次启发式多等一轮往返，
+        代价远大于它买到的准确度。挑不到就退回文件开头，抬头会写明这一段是怎么来的。
         """
         try:
-            diff_text = self.file_diff(commit, path)
+            diff_text = self.file_diff(commit, path, ask_agent=False)
         except Exception as exc:  # noqa: BLE001 —— 挑窗口失败不该影响取正文
             log_print(
                 f"⚠️ AI 取数：定位改动位置失败 {commit[:12]} {path}: {type(exc).__name__}: {exc}"
@@ -1091,6 +1191,48 @@ class PlatformContextProvider:
                 "—— 需要这个文件的正文时，请在报告里写成信息缺口。"
             )
         self._agent_content_pending[key] = text
+        return text
+
+    def _diff_from_agent(self, repository, commit: str, path: str, *, fallback: str) -> str:
+        """向业务节点（Agent）要「**这一条提交**改了这个文件的什么」。
+
+        与 `_content_from_agent` 同一套路数（会话内同一份请求只等一次、`pending` 与
+        `unavailable` 都要如实说），两处措辞不同是因为**模型接下来该做什么不一样**：
+        正文取不到时它还能靠 diff 判断；差异取不到时它手里就只剩提交清单了 —— 那正是
+        那句「未读到任何代码 diff」的来处，所以这句话必须明确指向「写成信息缺口」。
+
+        `fallback` 是本地两条来源给出的失败说明（平台读不到内容、这个提交里没有这个路径…）：
+        问不到 Agent 时原样带着它回给模型 —— **两个原因都要在**，只留一个会把另一半
+        藏起来（例如「平台读不到」会让人去查工作副本，而真正该做的是给项目绑一个 Agent）。
+        """
+        from services.agent_file_content_dispatch import request_file_diff
+
+        key = (getattr(repository, "id", None), commit, path)
+        if key in self._agent_diff_fetched:
+            cached = self._agent_diff_cached.get(key)
+            return cached if cached is not None else self._agent_diff_pending.get(key, fallback)
+        self._agent_diff_fetched.add(key)
+
+        try:
+            outcome = request_file_diff(repository, commit_id=commit, file_path=path)
+        except Exception as exc:  # noqa: BLE001 —— 取一次差异失败只该让这一条降级
+            log_print(f"⚠️ AI 取数：向 Agent 取差异失败 {path}: {type(exc).__name__}: {exc}")
+            outcome = {"status": "unavailable", "message": f"向 Agent 取数异常：{exc}"}
+
+        status = str(outcome.get("status") or "")
+        if status == "ready":
+            rendered = _render_agent_file_diff(outcome, path=path, commit=commit)
+            self._agent_diff_cached[key] = rendered
+            return rendered
+
+        reason = str(outcome.get("message") or "原因未知")
+        what = "差异还没取回来" if status == "pending" else "读不到差异"
+        note = (
+            f"[{what}] {path}：{reason}。**这不等于「没有改动」。**"
+            "这一轮请只依据提交清单与其它证据判断，并在报告里把它写成信息缺口。"
+        )
+        text = f"{fallback}\n{note}" if fallback else note
+        self._agent_diff_pending[key] = text
         return text
 
     # -- 内部 ---------------------------------------------------------------

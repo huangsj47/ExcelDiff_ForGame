@@ -54,6 +54,40 @@ def read_file_content_for_agent(payload: dict) -> dict:
     if isinstance(raw, str):
         text = raw
     else:
+        # **配表要先分流**（2026-09-19）。xlsx 是 ZIP，按 UTF-8 解码（哪怕 errors='replace'）
+        # 得到的是二进制乱码，而抬头还会写「共 N 行；下面是第 a–b 行」—— 模型据此写出的
+        # 结论全是错的，比「读不到」更糟（它不知道自己拿到的不是内容）。
+        #
+        # 渲染函数直接复用平台本地那条路的 `_read_excel_sheets`（模块级纯函数，不碰
+        # Flask/DB）：两端必须是**同一份实现**，否则同一次索取在单机与多节点下会给出
+        # 不同的文本 —— 那正是 `utils/content_window` 那条纪律要防的事。
+        # 从别的模块 import 一个下划线开头的 helper 在本仓库有先例
+        # （`services/task_worker_service.py` 就是这么引 `_attach_author_display` 的）。
+        from services.ai.platform_provider import (
+            DEFAULT_MAX_ROWS_PER_SHEET,
+            _is_openpyxl_workbook,
+            _read_excel_sheets,
+        )
+
+        if _is_openpyxl_workbook(file_path):
+            rendered = _read_excel_sheets(
+                raw, max_rows=int(payload.get('max_rows') or DEFAULT_MAX_ROWS_PER_SHEET)
+            )
+            if rendered is None:
+                raise RuntimeError(
+                    f"配表内容无法解析成文本表格（{file_path} 不是可读的 OOXML 工作簿，"
+                    "或文件已损坏）"
+                )
+            return {
+                "file_path": file_path,
+                "commit_id": commit_id,
+                # `kind` 是给平台侧的分流标记：见到它就直接用 `content`，**不要再按行号
+                # 包一层**（配表的正文没有「第 a–b 行」这个概念）。
+                "kind": "excel",
+                "content": rendered,
+                "message": f"file_content completed (excel, {len(rendered)} chars)",
+            }
+
         try:
             text = raw.decode('utf-8')
         except UnicodeDecodeError:

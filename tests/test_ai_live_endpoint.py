@@ -507,7 +507,7 @@ def test_the_model_asked_for_a_specific_file_before_concluding(analysis):
 
 
 def test_every_dimension_is_reviewed(analysis):
-    """`dimensions` 是「六个维度都过了一遍」的证据，空着等于允许只挑好说的说。"""
+    """`dimensions` 是「每个维度都过了一遍」的证据，空着等于允许只挑好说的说。"""
     from services.ai.skill_contract import DIMENSION_IDS
 
     reviewed = {item.id for item in analysis.payload.dimensions}

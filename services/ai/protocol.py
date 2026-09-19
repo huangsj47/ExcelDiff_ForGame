@@ -351,8 +351,10 @@ def parse_payload(text: str) -> AnalysisPayload:
         if not report_markdown:
             raise ProtocolError("status 为 final 时必须给出非空的 report_markdown")
         if not dimensions:
-            # dimensions 是「六个维度都过了一遍」的证据。允许为空等于允许模型只挑
-            # 好说的说，这正是它要防的事。
+            # dimensions 是「每个维度都过了一遍」的证据（清单 = `DIMENSION_IDS`，也就是
+            # SKILL.md 的「九个检查维度」）。允许为空等于允许模型只挑好说的说，这正是它
+            # 要防的事。条数不写死在这里 —— 写死的那一版曾经写着「六个」，而过了一年没人
+            # 发现（`tests/test_ai_dimension_count_stays_in_sync.py` 现在钉住这一条）。
             raise ProtocolError("status 为 final 时必须给出非空的 dimensions（未命中的也要写）")
 
     return AnalysisPayload(
@@ -544,8 +546,8 @@ def build_correction_hint(error: Exception) -> str:
         "1. 只返回一个可被 json.loads 解析的 JSON 对象；\n"
         "2. 不要输出 <think> 块、不要用代码围栏包住 JSON、不要写 JSON 之外的说明文字；\n"
         "3. status 只能是 need_more_context 或 final；\n"
-        "4. final 必须同时给出非空的 report_markdown 和 dimensions（六个维度都要写，"
-        "未命中的写 hit 为 false 并说明理由）；\n"
+        "4. final 必须同时给出非空的 report_markdown 和 dimensions"
+        f"（{len(DIMENSION_IDS)} 个维度都要写，未命中的写 hit 为 false 并说明理由）；\n"
         "5. 所有自然语言内容使用中文。"
     )
 

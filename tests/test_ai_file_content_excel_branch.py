@@ -122,6 +122,33 @@ def fetch(monkeypatch):
     return _install
 
 
+@pytest.fixture(scope='module')
+def repository_id():
+    """Agent 侧那条路要按 id 查真实的仓库行（`read_file_content_for_agent` 会查库）。
+
+    作用域是 module：`create_tables()` 每次都会把整张表清单打进日志；项目 code 带 uuid
+    后缀，所以不会撞会话级共用测试库里的唯一约束。
+    """
+    import uuid
+
+    from app import app, create_tables, db
+    from models import Project, Repository
+
+    token = uuid.uuid4().hex[:10]
+    with app.app_context():
+        create_tables()
+        project = Project(code=f'XB{token}', name=f'agent-excel-branch-{token}')
+        db.session.add(project)
+        db.session.flush()
+        repository = Repository(
+            project_id=project.id, name=f'repo-xb-{token}', type='git',
+            url='https://example.invalid/game.git', branch='main', clone_status='completed',
+        )
+        db.session.add(repository)
+        db.session.commit()
+        return repository.id
+
+
 def _xlsx_bytes(rows, sheet_name='道具表'):
     from openpyxl import Workbook
 
@@ -224,3 +251,132 @@ class TestContentEmptyContract:
     def test_missing_commit_row_is_none(self, provider, monkeypatch):
         monkeypatch.setattr(PlatformContextProvider, '_commit_row', lambda self, c, p: None)
         assert provider.file_content(COMMIT, 'config/道具表.xlsx') is None
+
+
+# ---------------------------------------------------------------------------
+# Agent 侧的同一条分支（2026-09-19 补）
+# ---------------------------------------------------------------------------
+#
+# platform/agent 模式下代码文件与配表的正文都只有业务节点读得到，而
+# `services/agent_file_content_reader.py` 原先**一律按 UTF-8 解码**（`errors='replace'`）——
+# xlsx 是 ZIP，解码出来是一段二进制乱码，而抬头还写着「共 N 行；下面是第 a–b 行」。
+# 模型据此写的结论全是错的，**比「读不到」更糟**：它不认为自己拿到的不是内容。
+#
+# 所以两端必须是同一个渲染函数（这里是 `_read_excel_sheets`），渲染出来的文本也必须是
+# 同一种形态（工作表名 + 整表统计 + 前若干行）—— 否则同一次索取在单机与多节点下会给出
+# 不同的内容，而「同一份规则只有一份实现」正是 `utils/content_window` 那条纪律。
+
+
+class TestAgentSideWorkbookBranch:
+    """`services/agent_file_content_reader.read_file_content_for_agent` 的配表分支。"""
+
+    def _read(self, monkeypatch, repository_id, path, content, payload=None):
+        from app import app
+
+        with app.app_context():
+            from services.agent_file_content_reader import read_file_content_for_agent
+
+            monkeypatch.setattr(
+                'services.vcs_content_service.get_file_content_from_git',
+                lambda repository, commit_id, file_path: content,
+            )
+            return read_file_content_for_agent({
+                'repository_id': repository_id, 'commit_id': COMMIT, 'file_path': path,
+                **(payload or {}),
+            })
+
+    def test_a_workbook_is_rendered_as_a_table_not_decoded_as_bytes(self, monkeypatch, repository_id):
+        """**这一条就是「模型拿到二进制乱码却以为是内容」的回归。**"""
+        got = self._read(monkeypatch, repository_id, 'config/道具表.xlsx',
+                         _xlsx_bytes([['ID', '攻击'], ['1001', '30']]))
+
+        assert got['kind'] == 'excel', f'平台侧要靠它决定不套行号：{got}'
+        assert '道具表' in got['content'] and '1001' in got['content'], got
+        assert '整表统计' in got['content'], '形态必须与平台本地那条路一致'
+        # 反面：按 UTF-8 解码出来的乱码里必然有替换字符或 PK 头。
+        assert '�' not in got['content'], '拿到的还是二进制乱码'
+        assert 'PK' not in got['content'][:64], got['content'][:64]
+
+    def test_the_row_limit_is_honoured_and_defaults_to_the_platform_value(self, monkeypatch, repository_id):
+        """`max_rows` 由平台传（与平台本地同一个默认值），传了就按它渲染。"""
+        rows = [['ID', '价值']] + [[str(i), str(i)] for i in range(1, 60)]
+
+        default_rows = self._read(monkeypatch, repository_id, 'config/道具表.xlsx', _xlsx_bytes(rows))
+        small = self._read(monkeypatch, repository_id, 'config/道具表.xlsx',
+                           _xlsx_bytes(rows), {'max_rows': 3})
+
+        # 判据是**渲染出来的行数**：限 3 行那一份必须明显更短（不是「某个字符串在不在」）。
+        assert len(small['content'].split('\n')) < len(default_rows['content'].split('\n')), (
+            f'行数上限没生效：{small["content"]!r}'
+        )
+        assert 'ID' in small['content'], small  # 表头那几行仍要在（它决定这张表是什么）
+
+    def test_a_broken_workbook_raises_instead_of_returning_junk(self, monkeypatch, repository_id):
+        """扩展名像工作簿但内容坏了：抛（→ 平台把原因写给模型），**不能**返回乱码。"""
+        with pytest.raises(Exception) as excinfo:
+            self._read(monkeypatch, repository_id, 'config/道具表.xlsx', b'not a workbook at all')
+        assert '无法解析' in str(excinfo.value), str(excinfo.value)
+
+    def test_a_csv_is_still_text(self, monkeypatch, repository_id):
+        """`.csv`/`.tsv` 不进表格分支（openpyxl 打不开它们，而文本分支能原样给出内容）。"""
+        got = self._read(monkeypatch, repository_id, 'config/道具表.csv',
+                         'id,name\n1,Alice\n'.encode('utf-8'))
+
+        assert got.get('kind') != 'excel', got
+        assert got['content'].split('\n') == ['id,name', '1,Alice'], got
+        assert got['total_lines'] == 2, got
+
+    def test_a_binary_file_is_not_pretended_to_be_a_workbook(self, monkeypatch, repository_id):
+        """非工作簿的二进制（`.bin`）仍走解码那条路（与平台本地行为一致）。
+
+        它给出来的确实是一段替换过字符的文本 —— 这不是本分支要解决的题：本分支只保证
+        **配表**不被当成乱码喂给模型（配表是本平台的主战场，且平台本地那条路早有渲染）。
+        """
+        got = self._read(monkeypatch, repository_id, 'assets/blob.bin', b'\x00\x01\x02\x03\xff')
+        assert got.get('kind') != 'excel', got
+        assert got['total_lines'] >= 1, got
+
+
+class TestPlatformSideRendersTheAgentWorkbook:
+    """平台侧收到 `kind == "excel"` 时：直接用，**不能再按行号包一层**。
+
+    Agent 回的正文已经是「整表统计 + 前若干行」的形态（与平台本地同一个渲染函数），
+    没有「第 a–b 行」这个概念。这里再套一层行号会变成「行号套行号」，模型会把每一行的
+    工作表正文当成文件行号去引用 —— 一个它自己发现不了的坐标错误。
+    """
+
+    def test_the_excel_kind_is_passed_through_with_its_own_header(self):
+        from services.ai.platform_provider import _render_agent_file_content
+
+        text = _render_agent_file_content(
+            {'kind': 'excel', 'file_path': 'config/道具表.xlsx',
+             'content': '工作表「道具表」：共 2 行\n1│ID\t攻击\n2│1001\t30\n'},
+            path='config/道具表.xlsx',
+        )
+
+        assert '配表正文' in text, text
+        assert '工作表「道具表」' in text, text
+        assert '1│1│' not in text, f'套了两层行号：{text}'
+        assert '共 3000 行' not in text, text
+
+    def test_an_empty_workbook_answer_is_not_read_as_no_content(self):
+        from services.ai.platform_provider import _render_agent_file_content
+
+        text = _render_agent_file_content(
+            {'kind': 'excel', 'file_path': 'config/道具表.xlsx', 'content': ''},
+            path='config/道具表.xlsx',
+        )
+
+        assert '无法解析' in text, text
+        assert '不等于「没有内容」' in text, text
+
+    def test_a_plain_text_answer_keeps_the_line_numbering(self):
+        """反面：`kind` 不是 excel 时，行号那一套照旧（不能把两条路混起来）。"""
+        from services.ai.platform_provider import _render_agent_file_content
+
+        text = _render_agent_file_content(
+            {'content': 'line 1\nline 2', 'start_line': 1, 'end_line': 2, 'total_lines': 2},
+            path='src/fight.lua',
+        )
+
+        assert '1│line 1' in text and '2│line 2' in text, text
