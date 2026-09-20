@@ -105,13 +105,25 @@ def reset_stale_weekly_sync_tasks(
     log_print,
     timeout_seconds=300,
 ):
-    """把卡死的 weekly_sync `pending` 行置 failed。
+    """把**真的不会有人再执行**的 weekly_sync `pending` 行置 failed。
 
     **这是清理动作，与「这个配置现在活不活跃」无关，对查询到的每个配置都要做。**
     版本窗口一结束，`schedule_weekly_sync_tasks` 会把配置置 `completed` 然后 `continue`，
     此后每次调度都跳过这个配置；而原先重置整段都圈在 `if config.status == 'active':`
     里面 —— 于是窗口结束后残留的 pending 既不会被执行（内存队列早已随进程重启清空），
     也永远没人重置，永久停在 pending（线上「周版本同步任务永久排队中」的成因之一）。
+
+    ## 「还在队列里」不算卡死（只看年龄会把队列排不上的当成卡死）
+
+    队列只有一个 worker，前面排着每 2 分钟一轮的 `auto_sync`（所有仓库）与大仓库的
+    周版本同步（800+ 文件、分钟级），所以一个刚创建几分钟的 pending **排不到头是常态**。
+    判据若只看「创建至今超过 `timeout_seconds`」，调度器就会每 tick 把它置 failed，
+    紧接着 `create_weekly_sync_task` 又建一条新的：实测一轮 30 分钟里重置 12 次、
+    重建 12 次，队列剩余稳定在 31~33 不下降。判据因此加上**内存队列账本**
+    （`is_weekly_sync_task_enqueued`）：在账本里 = 只是还没轮到，维持现状。
+
+    进程重启丢掉的那种才是真卡死 —— 那时账本里没有它，照旧按年龄重置（这正是本函数
+    当初要修的病），所以账本判据不会把它漏掉。
 
     时刻口径：`created_at` 是 **naive-UTC**（ORM 默认 `datetime.now(timezone.utc)` 写入、
     SQLite 丢掉 tzinfo），所以 `now_utc_naive` 必须是同口径的 naive-UTC。传
@@ -124,6 +136,8 @@ def reset_stale_weekly_sync_tasks(
         status='pending',
     ).all()
     for stale in stale_tasks:
+        if is_weekly_sync_task_enqueued(getattr(stale, 'id', None)):
+            continue
         stale_created = stale.created_at
         if stale_created and stale_created.tzinfo:
             stale_created = stale_created.replace(tzinfo=None)

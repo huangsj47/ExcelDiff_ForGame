@@ -41,14 +41,62 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from utils.logger import log_print
 
 # (repository_id, commit_id) -> 平局组内的拓扑序（0 是最早的）
 _SAME_INSTANT_RANK: Dict[Tuple[Any, str], int] = {}
 # 缓存上限：超过就整体丢弃重建。一次同步涉及的提交是千级，这个上限只在长期不重启的
 # 进程里才会碰到，而重建的代价只是下一次同步多问一次 git。
 _SAME_INSTANT_RANK_LIMIT = 20000
+
+
+def order_commits_by_topology(git_service, commit_ids, timeout=180):
+    """把一组提交按 git 拓扑排成「祖先在前」；排不出来就保持传入顺序。
+
+    留在本模块而不是 `GitService` 类里：这是**定序判据**的一半，与
+    `commit_merge_sort_key` 是同一件事的两端（一个有 I/O、一个纯函数），分开写迟早
+    会被改成两套口径。`GitService.order_commits_by_topology` 只是它的三行委托。
+
+    ## 为什么用一次 rev-list，而不是逐对 merge-base
+
+    逐对 `--is-ancestor` 判完 k 个提交要 k(k-1)/2 次进程（实测单次 60ms，17 个提交
+    就是 136 次）；`git rev-list --topo-order --reverse <ids>` 一次走完给出这些提交
+    及其祖先的拓扑序，`--reverse` 保证父提交排在子提交之前，取每个 id 的位置即可
+    （实测 17 个提交 82ms）。
+
+    **只返回输入里有的 id**，不丢不重（输入即返回的一个排列）。拿不到位置的 id
+    （对象缺失、克隆不全、根本不是 git 仓库）排在最后并保持传入顺序 —— 这里只负责
+    让次序更接近真相，不负责报错：定序失败不该让一次周版本同步中断。
+
+    `git_service` 只需要有 `local_path` 与 `_run_git_command`（跨模块取它的私有执行器，
+    与本仓库 `weekly_file_sync` 取 `weekly_version_logic._get_git_service` 同一手法）。
+    """
+    incoming = list(commit_ids or [])
+    if len(incoming) < 2:
+        return incoming
+    try:
+        if not os.path.exists(getattr(git_service, "local_path", "")):
+            return incoming
+        result = git_service._run_git_command(
+            ["git", "rev-list", "--topo-order", "--reverse", *[str(c) for c in incoming]],
+            timeout=timeout,
+        )
+        if not result or result.returncode != 0 or not result.stdout:
+            return incoming
+        position: Dict[str, int] = {}
+        for index, line in enumerate(str(result.stdout).splitlines()):
+            position.setdefault(line.strip(), index)
+        known = [c for c in incoming if str(c) in position]
+        unknown = [c for c in incoming if str(c) not in position]
+        known.sort(key=lambda c: position[str(c)])
+        return known + unknown
+    except Exception as exc:
+        log_print(f"⚠️ 按拓扑排序提交失败（沿用传入次序）: {exc}", "GIT")
+        return incoming
 
 
 def _commit_key(commit) -> Optional[Tuple[Any, str]]:

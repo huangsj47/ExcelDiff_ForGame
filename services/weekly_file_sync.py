@@ -12,7 +12,10 @@
   * `WeeklyFileSyncResult` / `describe_weekly_file_totals`：纯数据 + 纯格式化，
     没有任何外部依赖；
   * `get_real_base_commit_from_vcs`：一次独立的 VCS 回查 —— 文件里唯一一处
-    「翻历史、必要时补一条 Commit」的逻辑。
+    「翻历史、必要时补一条 Commit」的逻辑；
+  * `weekly_cache_is_unchanged` / `annotate_same_instant_order`：同样是**逐文件**这一步
+    才有的两件事 —— 「这次算出来的东西和库里那行一样吗」与「同刻提交谁在前」。
+    两者都在「读缓存行 / 问 git」的边上，与路由和缓存编排无关。
 
 ## 调用方向
 
@@ -76,6 +79,65 @@ def describe_weekly_file_totals(totals: dict, file_count: int) -> str:
     if not parts:
         return f"{file_count} 个文件，无需更新"
     return f"{file_count} 个文件（{'、'.join(parts)}）"
+
+
+def weekly_cache_is_unchanged(
+    existing_cache, payload_json, base_commit, latest_commit, commits, diff_version
+):
+    """这一行缓存与本次同步算出来的内容**逐字相同**吗（用于跳过无谓的写入）。
+
+    比的是「重算一遍会不会得到同样的东西」，所以除了 payload 本身，还要比输入：
+    base / latest / 口径版本 / 提交条数。任何一项对不上都返回 False（照旧写库）——
+    这个判据只用来**跳过没必要的写**，判错的方向必须落在「多写一次」上。
+
+    为什么要跳过：本表逐文件写一次，`updated_at`（`onupdate`）就被顶高一次，而 AI
+    分析的变更判据读的正是它（`services/ai/scope_sampling._summarize_weekly_files`
+    筛 `updated_at > last_analyzed_at`）。同步每 2~3 分钟跑一遍，于是平台**永远**认为
+    「有新变化」：既不停调度新的自动分析，手动触发也总是真跑而不是回放上次结论。
+    跳过写入之后，那一列恢复它字面上的语义 ——「内容最后变化的时刻」。
+
+    `diff_version` 由调用方传入（不在这里 import）：它是比较口径的版本号，来源是
+    `weekly_version_logic._current_diff_logic_version`，而那边要从本模块取
+    `WeeklyFileSyncResult`，反向再 import 就成环了。
+    """
+    if existing_cache.cache_status != 'completed':
+        return False
+    if existing_cache.diff_version != diff_version:
+        return False
+    if (existing_cache.base_commit_id or None) != (base_commit.commit_id if base_commit else None):
+        return False
+    if existing_cache.latest_commit_id != latest_commit.commit_id:
+        return False
+    if (existing_cache.commit_count or 0) != len(commits):
+        return False
+    return (existing_cache.merged_diff_data or '') == payload_json
+
+
+def annotate_same_instant_order(repository, commits):
+    """给「同一 commit_time 的多个提交」按 git 拓扑定序（写进 commit_ordering 的缓存）。
+
+    没有平局时一次 git 都不调（见 `commit_ordering.has_same_instant_commits`），所以逐文件
+    的读侧回退路径也能安全地带上它。**任何失败都不抛**：定序失败沿用数据库次序，
+    与改动前一致 —— 这条路只用来更接近真相，不用来报错。
+
+    为什么需要它：机器人提交会把 committer date 打成同一时刻，平局时原先落回数据库行序，
+    而那是**入库顺序**，实测就出现「父提交被当成 latest_commit_id」。判据与实测记录见
+    `services/commit_ordering.py`。
+    """
+    # `_get_git_service` 是 weekly_version_logic 那边 `configure_weekly_version_logic`
+    # 注入的运行时依赖，在函数体里导入是为了断开环（那边要从本模块取 WeeklyFileSyncResult）。
+    # 延迟到调用时读，拿到的也是注入后的最新值 —— 与 `get_real_base_commit_from_vcs`
+    # 取 `_get_svn_service` 是同一个理由。
+    from services.commit_ordering import annotate_same_instant_order as _annotate
+    from services.weekly_version_logic import _get_git_service
+
+    try:
+        if getattr(repository, 'type', None) != 'git' or _get_git_service is None:
+            return 0
+        return _annotate(_get_git_service(repository), commits)
+    except Exception as exc:
+        log_print(f"⚠️ 同刻提交定序失败（沿用数据库次序）: {exc}", 'WEEKLY', force=True)
+        return 0
 
 
 def get_real_base_commit_from_vcs(config, file_path):

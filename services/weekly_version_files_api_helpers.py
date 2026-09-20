@@ -44,6 +44,30 @@ def is_stale_sync_task(task, now_value, *, pending_timeout_seconds=300, processi
     return False
 
 
+def should_treat_sync_task_as_stale(task, now_value, *, is_enqueued=None, **timeouts):
+    """这个同步任务该按「陈旧」处理吗（页面解锁 / 重建任务）。
+
+    **还在内存队列里的 `pending` 不算陈旧**：队列只有一个 worker，前面排着每 2 分钟
+    一轮的 `auto_sync`（所有仓库）与大仓库的周版本同步（800+ 文件、分钟级），所以一个
+    刚建几分钟的 pending 排不到头是常态。原先只看年龄（300 秒），页面每轮询一次就把它
+    置 failed、紧接着调度器又建一条新的 —— 实测一轮 30 分钟里重置 12 次、重建 12 次，
+    队列剩余稳定在 31~33 不下降。
+
+    **只对 `pending` 生效**：`processing` 的任务 worker 正拿在手里、账本里也还挂着
+    （注销发生在处理完之后），拿账本挡会让真正卡死的那条永远不解锁页面 ——
+    已经开始跑的任务仍旧按「跑了多久」判定。
+
+    `is_enqueued` 由调用方传入（本模块不 import task_worker 那边的账本，避免反向依赖）。
+    """
+    if task is None:
+        return False
+    status_value = str(getattr(task, "status", "") or "").lower()
+    if status_value == "pending" and is_enqueued is not None:
+        if is_enqueued(getattr(task, "id", None)):
+            return False
+    return is_stale_sync_task(task, now_value, **timeouts)
+
+
 def parse_json_list(raw_value):
     if raw_value is None:
         return []

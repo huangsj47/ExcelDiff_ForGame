@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import services.weekly_file_sync as weekly_file_sync
 import services.weekly_version_logic as weekly_logic
 from app import app, create_tables, db
 from models import Commit, Project, Repository, WeeklyVersionConfig, WeeklyVersionDiffCache
@@ -301,7 +302,7 @@ def test_仓库不是git或服务缺失时不去问拓扑序(monkeypatch):
 
     rows = [_Commit(db_id=1, commit_id=_sha("svn1")), _Commit(db_id=2, commit_id=_sha("svn2"))]
     monkeypatch.setattr(weekly_logic, "_get_git_service", None)
-    assert weekly_logic._annotate_same_instant_order(_Repo(), rows) == 0
+    assert weekly_file_sync.annotate_same_instant_order(_Repo(), rows) == 0
 
 
 def test_取git服务本身出错也不打断同步(monkeypatch):
@@ -314,4 +315,4 @@ def test_取git服务本身出错也不打断同步(monkeypatch):
         type = "git"
 
     rows = [_Commit(db_id=1, commit_id=_sha("boom1")), _Commit(db_id=2, commit_id=_sha("boom2"))]
-    assert weekly_logic._annotate_same_instant_order(_GitRepo(), rows) == 0
+    assert weekly_file_sync.annotate_same_instant_order(_GitRepo(), rows) == 0

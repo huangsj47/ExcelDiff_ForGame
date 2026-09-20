@@ -896,3 +896,96 @@ def test_a_failed_task_still_records_its_reason():
         assert stored.error_message == '配置已被禁用'
         db.session.delete(stored)
         db.session.commit()
+
+
+def test_a_queued_pending_task_is_not_reset_as_stale():
+    """**排队中**的 pending 不算卡死：判据要看内存队列账本，不能只看年龄。
+
+    真实成因（2026-09-20 本机实测）：队列只有一个 worker，前面排着每 2 分钟一轮的
+    `auto_sync`（所有仓库）与大仓库的周版本同步（800+ 文件、分钟级），所以一个刚建
+    几分钟的 pending 排不到头是**常态**。只看「创建至今超过 300 秒」的判据每 tick 就
+    把它置 failed，紧接着 `create_weekly_sync_task` 又建一条新的 —— 一轮 30 分钟里
+    重置 12 次、重建 12 次，队列剩余稳定在 31~33 不下降。
+
+    变红意味着：又把「还没轮到」当成「卡死了」，重置→重建的循环回来了。
+    """
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    import app as app_module
+    from models import BackgroundTask, db
+    from services.task_worker_weekly_handlers import (
+        register_enqueued_weekly_sync_task,
+        reset_stale_weekly_sync_tasks,
+    )
+
+    with app_module.app.app_context():
+        task = BackgroundTask(
+            task_type='weekly_sync',
+            commit_id='900101',
+            status='pending',
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
+        )
+        db.session.add(task)
+        db.session.commit()
+        task_id = task.id
+
+        register_enqueued_weekly_sync_task(task_id)
+        reset_stale_weekly_sync_tasks(
+            SimpleNamespace(id=900101),
+            datetime.now(timezone.utc).replace(tzinfo=None),
+            db=db,
+            background_task_model=BackgroundTask,
+            log_print=lambda *_a, **_k: None,
+        )
+
+        db.session.expire_all()
+        stored = db.session.get(BackgroundTask, task_id)
+        assert stored.status == 'pending', '还在队列里的任务被当成卡死重置了'
+        db.session.delete(stored)
+        db.session.commit()
+
+
+def test_a_task_lost_with_the_memory_queue_is_still_reset():
+    """**反自检**：账本里没有它（进程重启丢的那一类）必须照旧按年龄重置。
+
+    少了这一条，一个「永远不重置」的实现能让上面那条全绿 —— 而那正是本函数当初要修的
+    那个病：内存队列被进程重启清空、数据库那行却还是 pending，于是永久停在
+    「同步任务排队中」。
+    """
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    import app as app_module
+    from models import BackgroundTask, db
+    from services.task_worker_weekly_handlers import (
+        forget_enqueued_weekly_sync_task,
+        reset_stale_weekly_sync_tasks,
+    )
+
+    with app_module.app.app_context():
+        task = BackgroundTask(
+            task_type='weekly_sync',
+            commit_id='900102',
+            status='pending',
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=3600),
+        )
+        db.session.add(task)
+        db.session.commit()
+        task_id = task.id
+        forget_enqueued_weekly_sync_task(task_id)
+
+        reset_stale_weekly_sync_tasks(
+            SimpleNamespace(id=900102),
+            datetime.now(timezone.utc).replace(tzinfo=None),
+            db=db,
+            background_task_model=BackgroundTask,
+            log_print=lambda *_a, **_k: None,
+        )
+
+        db.session.expire_all()
+        stored = db.session.get(BackgroundTask, task_id)
+        assert stored.status == 'failed'
+        assert stored.error_message == '任务超时，已被调度器重置'
+        db.session.delete(stored)
+        db.session.commit()

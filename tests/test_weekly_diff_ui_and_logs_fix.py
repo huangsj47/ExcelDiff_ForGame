@@ -410,3 +410,68 @@ def test_merge_diff_template_uses_text_diff_classes_and_lines_renderer():
     assert "text-diff-container" in content
     assert "renderTextDiffFromLines" in content
     assert "Array.isArray(diffData.lines)" in content
+
+
+# ---------------------------------------------------------------------------
+#  「同步任务陈旧吗」的判据：排队中 ≠ 卡死
+# ---------------------------------------------------------------------------
+
+def _sync_task(status, age_seconds):
+    from datetime import timedelta
+
+    return SimpleNamespace(
+        id=4242,
+        status=status,
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=age_seconds),
+        started_at=None,
+    )
+
+
+def test_a_queued_pending_sync_task_is_not_stale():
+    """排队中的 pending 不许按年龄判成陈旧 —— 队列排不上是常态，不是卡死。
+
+    真实成因（2026-09-20 本机实测）：单 worker 队列前面排着每 2 分钟一轮的 auto_sync
+    与大仓库的周版本同步，一个刚建几分钟的 pending 排不到头很正常。只看年龄的判据让
+    页面每轮询一次就把它置 failed、调度器紧接着又建一条新的 —— 一轮 30 分钟里重置
+    12 次、重建 12 次，队列剩余稳定在 31~33 不下降。
+    """
+    from services.weekly_version_files_api_helpers import should_treat_sync_task_as_stale
+
+    task = _sync_task('pending', age_seconds=3600)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    assert should_treat_sync_task_as_stale(task, now, is_enqueued=lambda _tid: True) is False
+
+
+def test_a_pending_sync_task_lost_with_the_queue_is_still_stale():
+    """**反自检**：账本里没有它（进程重启丢的那一类）必须照旧判陈旧。
+
+    少了这一条，一个永远返回 False 的实现能让上面那条全绿 —— 而那会把「永久排队中」
+    那个病种回来。
+    """
+    from services.weekly_version_files_api_helpers import should_treat_sync_task_as_stale
+
+    task = _sync_task('pending', age_seconds=3600)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    assert should_treat_sync_task_as_stale(task, now, is_enqueued=lambda _tid: False) is True
+
+
+def test_a_running_sync_task_is_judged_by_age_even_if_still_ledgered():
+    """processing 不受账本保护：worker 正拿在手里、账本里也还挂着（注销在处理完之后），
+    拿账本挡会让真正卡死的那条永远不解锁页面。"""
+    from services.weekly_version_files_api_helpers import should_treat_sync_task_as_stale
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    stalled = _sync_task('processing', age_seconds=4000)
+    fresh = _sync_task('processing', age_seconds=60)
+
+    assert should_treat_sync_task_as_stale(stalled, now, is_enqueued=lambda _tid: True) is True
+    assert should_treat_sync_task_as_stale(fresh, now, is_enqueued=lambda _tid: True) is False
+
+
+def test_no_task_is_never_stale():
+    from services.weekly_version_files_api_helpers import should_treat_sync_task_as_stale
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    assert should_treat_sync_task_as_stale(None, now, is_enqueued=lambda _tid: True) is False

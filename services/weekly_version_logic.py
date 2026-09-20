@@ -21,13 +21,14 @@ from models import (
     WeeklyVersionExcelCache,
     db,
 )
-from services.commit_ordering import annotate_same_instant_order, commit_merge_sort_key
+from services.commit_ordering import commit_merge_sort_key
 from services.deployment_mode import is_agent_dispatch_mode
 from services.diff_render_helpers import render_excel_diff_html, render_git_diff_content, render_new_file_content
 from services.diff_service import DiffService
 from services.performance_metrics_service import get_perf_metrics_service
 from services.repository_ordering import weekly_config_order_key
 from services.task_worker_service import TaskWrapper, background_task_queue
+from services.task_worker_weekly_handlers import is_weekly_sync_task_enqueued
 from services.weekly_deleted_excel_helpers import render_weekly_deleted_excel as _render_weekly_deleted_excel_helper
 from services.weekly_deleted_excel_helpers import (
     render_weekly_deleted_excel_notice as _render_weekly_deleted_excel_notice_helper,
@@ -47,17 +48,19 @@ from services.weekly_excel_merge_helpers import (
 )
 from services.weekly_file_sync import (
     WeeklyFileSyncResult,
+    annotate_same_instant_order,
     describe_weekly_file_totals,
     get_real_base_commit_from_vcs,
+    weekly_cache_is_unchanged,
 )
 from services.weekly_version_files_api_helpers import (
     extract_author_lookup_keys,
-    is_stale_sync_task,
     normalize_naive_datetime,
     parse_confirm_usernames,
     parse_json_list,
     parse_json_obj,
     resolve_author_display,
+    should_treat_sync_task_as_stale,
 )
 
 # 显式结局与「初始缓存遮罩」判定：为什么需要它，见该模块的模块级 docstring。
@@ -158,20 +161,6 @@ def _commit_sort_key_for_merge(commit):
     """合并用排序键 —— 判据本体在 `services.commit_ordering`（同刻提交必须两个模块同一个答案）。"""
     return commit_merge_sort_key(commit)
 
-
-def _annotate_same_instant_order(repository, commits):
-    """给「同一 commit_time 的多个提交」按 git 拓扑定序（写进 commit_ordering 的缓存）。
-
-    没有平局时一次 git 都不调（见 `has_same_instant_commits`），所以逐文件的读侧回退
-    路径也能安全地带上它。**任何失败都不抛**：定序失败沿用数据库次序，与改动前一致。
-    """
-    try:
-        if getattr(repository, 'type', None) != 'git' or _get_git_service is None:
-            return 0
-        return annotate_same_instant_order(_get_git_service(repository), commits)
-    except Exception as exc:
-        log_print(f"⚠️ 同刻提交定序失败（沿用数据库次序）: {exc}", 'WEEKLY', force=True)
-        return 0
 
 def _get_app_func(name):
     """延迟从 app 模块获取函数引用，避免循环导入。"""
@@ -787,7 +776,12 @@ def weekly_version_files_api(config_id):
             BackgroundTask.commit_id == str(config_id),
             BackgroundTask.status.in_(['pending', 'processing']),
         ).order_by(BackgroundTask.id.desc()).first()
-        if existing_sync_task and is_stale_sync_task(existing_sync_task, now_local):
+        # **还在内存队列里的 pending 不算陈旧**，理由与边界（只对 pending 生效）见
+        # `should_treat_sync_task_as_stale`。页面每轮询一次就把排着队的任务置 failed、
+        # 调度器紧接着又建一条新的，是「重置→重建」那个循环的一半。
+        if should_treat_sync_task_as_stale(
+            existing_sync_task, now_local, is_enqueued=is_weekly_sync_task_enqueued
+        ):
             stale_task_id = getattr(existing_sync_task, 'id', None)
             stale_task_status = getattr(existing_sync_task, 'status', None)
             log_print(
@@ -1295,7 +1289,7 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
             # 同刻提交同样要按 git 拓扑定序：这条回退路径自己取 `commits[-1]` 当 latest，
             # 次序错了这里**展示的**收尾内容就是前一个提交的状态（写入侧的理由见
             # services/commit_ordering.py）。无平局时不调 git。
-            _annotate_same_instant_order(repository, commits)
+            annotate_same_instant_order(repository, commits)
             commits = sorted(commits, key=commit_merge_sort_key)
             log_print(f"回退模式找到 {len(commits)} 个相关提交", 'WEEKLY')
             base_commit = None
@@ -1406,7 +1400,7 @@ def process_weekly_version_sync(config_id):
         # 之前的定序 —— `generate_weekly_merged_diff` 里的 `commits[-1]` 与
         # `_generate_merged_diff_data` 内部的排序必须给出同一个次序，否则列里写的
         # latest 与 payload 收尾的内容会指向两个不同的提交。
-        annotated = _annotate_same_instant_order(repository, commits_in_range)
+        annotated = annotate_same_instant_order(repository, commits_in_range)
         if annotated:
             log_print(f"按 git 拓扑定序的同刻提交: {annotated} 个", 'WEEKLY')
         commits_in_range = sorted(commits_in_range, key=commit_merge_sort_key)
@@ -1495,10 +1489,27 @@ def generate_weekly_merged_diff(config, file_path, commits) -> Optional[WeeklyFi
         merged_diff_data = _generate_merged_diff_data(
             repository, file_path, base_commit, latest_commit, commits
         )
-        if existing_cache:
+        payload_json = json.dumps(merged_diff_data)
+        unchanged = bool(existing_cache) and weekly_cache_is_unchanged(
+            existing_cache, payload_json, base_commit, latest_commit, commits,
+            _current_diff_logic_version(),
+        )
+        if unchanged:
+            # **内容与上次逐字相同就一个字节都不写。** 本表逐文件写一次，`updated_at`
+            # （onupdate）就被顶高一次，而 AI 分析的变更判据读的正是它
+            # （`_summarize_weekly_files` 筛 `updated_at > last_analyzed_at`）：同步每
+            # 2~3 分钟跑一遍，于是平台**永远**认为「有新变化」，`no_change` 几乎不触发、
+            # 手动触发也总是真跑（白花一次 token）。跳过写入让那一列恢复它字面上的语义
+            # ——「内容最后变化的时刻」。
+            #
+            # 不写 `last_sync_time` 也不影响就绪判定：那个判据只问它**是不是空**
+            # （`initial_cache_readiness`），本行既然已经是一行 completed 的缓存，它早就非空。
+            log_print(f"内容未变，跳过写库: {file_path}", 'DETAIL')
+            created, updated = False, False
+        elif existing_cache:
             # 更新现有缓存
             previous_latest_commit_id = existing_cache.latest_commit_id
-            existing_cache.merged_diff_data = json.dumps(merged_diff_data)
+            existing_cache.merged_diff_data = payload_json
             existing_cache.base_commit_id = base_commit.commit_id if base_commit else None
             existing_cache.latest_commit_id = latest_commit.commit_id
             existing_cache.commit_authors = json.dumps(commit_authors)
