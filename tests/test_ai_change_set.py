@@ -358,3 +358,71 @@ def test_a_reference_that_was_not_offered_cannot_be_requested():
     )
 
     assert allowed == ()
+
+
+# ==========================================================================
+# 给模型的那份总数必须是「这一批」，不是「这个版本」
+#
+# 2026-09 复核出来的：`summary.total_files` 是**窗口总数**（这个周版本一共有过多少
+# 改动文件），而 `scope=incremental` 时输入里只有水位线之后变化的那一部分 —— 实测
+# 847 vs 19。原先这里直接拿窗口总数当「本次变更的文件共 N 个」，于是那段「还有 M 个
+# 的名字没列出来，**而且你可以读到它们的 diff**」宣称了 828 个白名单里根本没有的文件
+# 读得到。模型照着自己去点名索取，请求被按白名单静默丢掉、不给任何回执，于是它把
+# 一个**不存在**的取数缺口写进报告。
+# ==========================================================================
+
+
+def _sized_weekly_payload(window: int, batch: int, listed: int, **overrides) -> dict:
+    """窗口里 `window` 个文件，这次装进输入 `batch` 个，清单里列出 `listed` 个。"""
+    def files(count: int) -> list:
+        return [{"file_path": f"src/f{index}.lua", "latest_commit_id": "c1"} for index in range(count)]
+
+    payload = _weekly_payload(files=files(batch), list_files=files(listed))
+    payload["summary"] = {"total_files": window, "batch_files": batch, "window_files": window}
+    payload.update(overrides)
+    return payload
+
+
+def test_the_listed_total_is_the_batch_not_the_whole_version_window():
+    """19 个装进输入的一批，不许被写成「本次变更的文件共 847 个」。"""
+    change = from_weekly_payload(_sized_weekly_payload(window=847, batch=19, listed=19))
+
+    assert "本次变更共 1 个提交、19 个文件" in change.summary
+    assert "847 个文件" in change.summary, "窗口总数要如实出现在「覆盖了多少」那句里"
+    assert "你可以读到它们的 diff" not in change.summary, (
+        "19 个就是全部白名单，没有任何「名字没列出来但读得到」的文件"
+    )
+
+
+def test_the_readability_claim_only_appears_when_the_whitelist_really_has_them():
+    """反向自检：**取样**没列出来的那些确实在白名单里，那句「你可以读到」要照写。"""
+    change = from_weekly_payload(_sized_weekly_payload(window=847, batch=847, listed=200))
+
+    assert "本次变更的文件共 847 个，下面列出其中的 200 个" in change.summary
+    assert "还有 647 个文件的名字没有列出来" in change.summary
+    assert "你可以读到它们的 diff" in change.summary
+
+
+def test_a_partial_batch_says_how_much_of_the_version_it_covers():
+    """范围判定回 `full` ≠ 输入装了整个版本 —— 判定只改标签，不会再查一次全量。
+
+    不说清这一点，模型读到「本次分析范围：全量」就会对「本版本没问题」下结论，
+    而窗口里另外 347 个文件它一个都没看过。
+    """
+    change = from_weekly_payload(
+        _sized_weekly_payload(window=847, batch=500, listed=500, scope="full")
+    )
+
+    assert "本次分析范围：全量" in change.summary
+    assert "不等于「输入装了整个版本」" in change.summary
+    assert "本版本改动过的 847 个文件里的 500 个" in change.summary
+
+
+def test_a_first_run_does_not_get_the_coverage_sentence():
+    """反向自检：首跑时窗口总数 == 本批，别凭空多出一句「只覆盖了一部分」。"""
+    change = from_weekly_payload(
+        _sized_weekly_payload(window=847, batch=847, listed=847, scope="full")
+    )
+
+    assert "本次分析范围：全量。" in change.summary
+    assert "这次输入覆盖的是" not in change.summary

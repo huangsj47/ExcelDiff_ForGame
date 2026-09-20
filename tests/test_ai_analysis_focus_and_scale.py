@@ -285,6 +285,58 @@ def test_a_configured_request_cap_raises_the_item_cap_with_it():
     assert smaller.max_tool_requests == 5
 
 
+def test_a_repo_without_a_resource_type_counts_as_code():
+    """「只看代码仓库」必须与界面那一栏判的是同一件事。
+
+    `models/repository.py` 写明 `resource_type` 取值是 `'table' / 'res' / 'code'`，
+    而这一列**可空**（写入侧还有一条裸赋值会写进 NULL）。模板里的选项是
+    `(cfg.repository.resource_type or 'code') == 'table'` —— **NULL 与 `'res'` 都算代码**。
+    后端原先拿 `== "code"` 去比，`"" != "code"`，于是用户选「只看代码仓库」时那些
+    `resource_type` 为空的仓库的改动**一条都不会进输入**，而报告上写着「仅代码仓库」，
+    模型据此把一个缺口说成覆盖完整。
+    """
+    from types import SimpleNamespace
+
+    from services.ai_analysis_service import _filter_delta_files_by_focus
+
+    configs = [
+        SimpleNamespace(repository_id=1, repository=SimpleNamespace(resource_type="code")),
+        SimpleNamespace(repository_id=2, repository=SimpleNamespace(resource_type=None)),
+        SimpleNamespace(repository_id=3, repository=SimpleNamespace(resource_type="res")),
+        SimpleNamespace(repository_id=4, repository=SimpleNamespace(resource_type="table")),
+    ]
+    files = [{"file_path": f"f{i}.lua", "repository_id": i} for i in (1, 2, 3, 4)]
+
+    code_kept, code_label = _filter_delta_files_by_focus(files, "code", configs)
+    table_kept, table_label = _filter_delta_files_by_focus(files, "table", configs)
+
+    assert [item["repository_id"] for item in code_kept] == [1, 2, 3], (
+        "resource_type 为空 / 'res' 的仓库在界面上算代码仓库，后端也必须算"
+    )
+    assert [item["repository_id"] for item in table_kept] == [4]
+    assert code_label == "仅代码仓库" and table_label == "仅配表仓库"
+
+
+def test_a_zero_request_cap_stays_zero():
+    """「上下文索取上限 = 0」是一条**明确的配置**，不是「没填」。
+
+    取值范围就是 `0..100`，而 0 有专门的含义：平台为它写了两句话
+    （`prompt._budget_line` 的「本次分析不允许索取上下文」与
+    `protocol.build_budget_exhausted_hint` 的 0 分支）。这里原先写的是
+    `int(project_config.get(...) or defaults)`，`0 or 40` 求值成 40 —— 那两句因此
+    在生产路径上**永远执行不到**，模型照常点名读 40 份 diff 并计费。
+
+    空与 0 要分开，两个方向都是：`None`（懒创建的行没填过）与空串回落到默认值，
+    `0` 原样带上。
+    """
+    from services.ai_analysis_service import _engine_limits
+
+    assert _engine_limits({"max_tool_requests": 0}).max_tool_requests == 0
+    for missing in (None, "", "   "):
+        assert _engine_limits({"max_tool_requests": missing}).max_tool_requests == 40
+    assert _engine_limits({}).max_tool_requests == 40
+
+
 def test_the_default_request_and_item_caps_agree():
     """两个默认值必须**相等**（不是「差不多」）。
 

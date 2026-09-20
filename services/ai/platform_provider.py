@@ -46,6 +46,10 @@ from services.ai.reference_search import (
     search_files,
 )
 from services.ai.scope import AnalysisScope, normalize_path
+
+# 配表整表统计（列上限 / 分位数 / 去重取值 / 空值率）。它是纯函数，与「向模型交付
+# 什么」的其余部分没有耦合 —— 单独一层（见模块 docstring），也好被完整单测。
+from services.ai.sheet_stats import _SheetStats
 from services.ai.skill_loader import LoadedSkills
 from services.deployment_mode import is_agent_dispatch_mode
 from utils.content_window import (
@@ -785,156 +789,6 @@ _WORKBOOK_EXTENSIONS = ('.xlsx', '.xlsm', '.xltx', '.xltm')
 def _is_openpyxl_workbook(path: str) -> bool:
     """这个路径该按工作簿解析吗（= openpyxl 读得动吗）。"""
     return Path(str(path or '')).suffix.lower() in _WORKBOOK_EXTENSIONS
-
-
-# 整表统计的规模上限。这些数字决定「统计块」的字符数上界 —— 它要挤在
-# `file_content` 的 11,000 字符额度里，而且必须排在正文**之前**（正文按「只砍尾巴」
-# 截断，放在后面就会被砍掉）。
-_STATS_COLUMNS_LIMIT = 24
-_STATS_TOP_VALUES = 3
-_STATS_MAX_SAMPLES = 20_000
-
-
-def _number_text(value: float) -> str:
-    """数值的紧凑写法：整数不带 `.0`，浮点不留 `0.30000000000000004` 这种尾巴。"""
-    if isinstance(value, bool):  # bool 是 int 的子类，配表里少见但要挡住
-        return str(value)
-    if float(value).is_integer() and abs(value) < 1e15:
-        return str(int(value))
-    return f"{value:.6g}"
-
-
-class _SheetStats:
-    """一个工作表的整表统计。
-
-    存在的理由：`value_sanity` 维度要求「判断这个值合不合理」，而判断必须有比较基准。
-    配表动辄几千行、上百列，**整表塞进提示词是不可能的**（`file_content` 单条上限
-    11,000 字符）；只给改动的那一个单元格又等于让模型拿孤零零一个数字猜 ——
-    「这个值看起来很大」正是这个平台反复要挡掉的那种「证据」。
-
-    于是这里做一件平台**做得到而模型做不到**的事：把整表读一遍，只把分布交出去。
-    **统计是按截断之前的全部行算的**，所以哪怕正文只剩前 200 行，基准依然是完整的全表。
-    """
-
-    def __init__(self) -> None:
-        self.rows = 0
-        self.width = 0
-        self._numbers: list[list[float]] = []
-        self._texts: list[dict[str, int]] = []
-        self._nonempty: list[int] = []
-        self._numeric_capped: list[bool] = []
-
-    def _slot(self, index: int) -> int:
-        while len(self._numbers) <= index:
-            self._numbers.append([])
-            self._texts.append({})
-            self._nonempty.append(0)
-            self._numeric_capped.append(False)
-        return index
-
-    def add_row(self, row) -> None:
-        """把一行计入统计。**首行由调用方按列名处理，不进这里** —— 表头本身不是数据：
-
-        把 `品质` 这一列表头文字 `品质` 当成一个取值，会让每个文本列都多出一个
-        「只出现一次的取值」，模型据此判断「这个值不在允许集合里」时会先撞上它。
-        """
-        values = list(row)
-        if not any(value is not None and str(value).strip() for value in values):
-            return  # 整行为空：与正文渲染一致，不计入
-        self.rows += 1
-        self.width = max(self.width, len(values))
-        for index, value in enumerate(values):
-            if index >= _STATS_COLUMNS_LIMIT:
-                break
-            if value is None or not str(value).strip():
-                continue
-            slot = self._slot(index)
-            self._nonempty[slot] += 1
-            text = str(value).strip()
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                if len(self._numbers[slot]) < _STATS_MAX_SAMPLES:
-                    self._numbers[slot].append(float(value))
-                else:
-                    self._numeric_capped[slot] = True
-            if len(self._texts[slot]) < 5_000:
-                self._texts[slot][text[:40]] = self._texts[slot].get(text[:40], 0) + 1
-            elif text in self._texts[slot]:
-                self._texts[slot][text[:40]] += 1
-
-    def render(self, column_labels: Sequence[str], *, header_count: int = 1,
-               name_row: int = 1) -> list[str]:
-        """渲染成给模型看的几行。`column_labels` 是列名行的值（配表通常就是列名）。
-
-        `header_count` / `name_row` 只在仓库配了表头坐标时才有意义
-        （见 `_read_excel_sheets`）：那时抬头必须**如实说清**列名取自第几行、有几行被
-        当作表头没进统计 —— 否则「表头 3 行」的表在这里看起来就是「凭空少了两行」。
-        未配置（默认值）时这句话与今天**逐字相同**（既有断言按「首行按列名」认统计块）。
-        """
-        if self.rows == 0:
-            return []
-        # 仓库配了表头坐标（表头块 > 1 行，或列名不在第 1 行）时，抬头必须说清列名取自
-        # 第几行、有几行没进统计；否则「列名取自第 2 行」的表在这里看起来就是「凭空少一行」。
-        configured = header_count > 1 or name_row > 1
-        if configured:
-            head = [
-                f"- 整表统计（列名取自第 {name_row} 行，表头共 {header_count} 行不计入统计与"
-                f"正文；其余 {self.rows} 行参与统计；与下面只展示前若干行无关。"
-                "判断某个值是否合理时用它做比较基准）："
-            ]
-        else:
-            head = [
-                f"- 整表统计（首行按列名，其余 {self.rows} 行参与统计；与下面只展示前若干行无关。"
-                "判断某个值是否合理时用它做比较基准）："
-            ]
-        lines: list[str] = []
-        shown = min(self.width, _STATS_COLUMNS_LIMIT)
-        # 列名取自哪一行决定这一句怎么写：没配表头坐标时它就是首行（今天的文案，逐字不变）；
-        # 配了名称行之后写「首行」是错的（列名来自第 2 行），而模型正是靠这句话把统计里的
-        # 「第 N 列」与表里的字段对上。
-        label_word = "列名" if configured else "首行"
-        for index in range(shown):
-            label = column_labels[index] if index < len(column_labels) else ""
-            label = str(label or "").strip()[:20]
-            name = f"第 {index + 1} 列" + (f"（{label_word}「{label}」）" if label else "")
-            non_empty = self._nonempty[index] if index < len(self._nonempty) else 0
-            if non_empty == 0:
-                continue
-            numbers = self._numbers[index] if index < len(self._numbers) else []
-            # 半数以上是数值就按数值列报分布；否则按取值分布报（品质、类型、状态这类
-            # 枚举列要看到「有哪些取值、各占多少」，那正是「不在允许集合里」的依据）。
-            if numbers and len(numbers) * 2 >= non_empty:
-                ordered = sorted(numbers)
-                cap = "（抽样上限 20000）" if self._numeric_capped[index] else ""
-                lines.append(
-                    f"  - {name}：非空 {non_empty}｜数值 {len(numbers)}{cap}｜"
-                    f"最小 {_number_text(ordered[0])}｜中位 {_number_text(_percentile(ordered, 0.5))}｜"
-                    f"P90 {_number_text(_percentile(ordered, 0.9))}｜最大 {_number_text(ordered[-1])}"
-                )
-            else:
-                buckets = self._texts[index] if index < len(self._texts) else {}
-                top = sorted(buckets.items(), key=lambda item: (-item[1], item[0]))
-                top_text = "、".join(f"{value}({count})" for value, count in top[:_STATS_TOP_VALUES])
-                lines.append(
-                    f"  - {name}：非空 {non_empty}｜不同取值 {len(buckets)}｜"
-                    + (f"最多：{top_text}" if top_text else "（无文本取值）")
-                    + (f"｜其中数值 {len(numbers)}" if numbers and len(numbers) * 2 < non_empty else "")
-                )
-        if self.width > shown:
-            lines.append(f"  - （另有 {self.width - shown} 列未做统计。）")
-        return head + lines if lines else []
-
-
-def _percentile(ordered: Sequence[float], ratio: float) -> float:
-    """已排序列表的分位数（线性插值）。"""
-    if not ordered:
-        return 0.0
-    if len(ordered) == 1:
-        return ordered[0]
-    position = ratio * (len(ordered) - 1)
-    low = int(position)
-    high = min(low + 1, len(ordered) - 1)
-    weight = position - low
-    return ordered[low] * (1 - weight) + ordered[high] * weight
 
 
 def parse_sheet_window(window: str) -> Optional[tuple]:
@@ -1954,7 +1808,18 @@ class PlatformContextProvider:
         if status == "ready":
             rendered = str(outcome.get("text") or "")
             if rendered:
-                self._search_budget.consume(int(outcome.get("scanned") or 0))
+                # **与本地那条路同一口径**：额度按「动过的文件」扣，不是「读成的文件」。
+                # 本地那行是 `scanned + binary + missing`，而这里原先只取 `scanned` ——
+                # 于是同一次周版本分析，单机与多节点两条部署算出来的 `remaining` 不同，
+                # 而 `allowance = min(MAX_SCAN_FILES, remaining)` 直接决定第 2、3 次检索
+                # 允许搜多少文件、覆盖率的分母与命中数是多少，甚至一边回「[检索额度用尽]
+                # 这一次没有搜」而另一边正常搜。返回体里 `missing` / `binary` 是现成的
+                # （`agent_reference_search.read_reference` 原样回传），不读它就没有理由。
+                self._search_budget.consume(
+                    int(outcome.get("scanned") or 0)
+                    + int(outcome.get("binary") or 0)
+                    + int(outcome.get("missing") or 0)
+                )
                 return rendered
         reason = str(outcome.get("message") or "原因未知")
         # 两句的尾巴逐字相同 —— 用常量而不是抄两遍：`trace_evidence` 按**开头**认这几句，

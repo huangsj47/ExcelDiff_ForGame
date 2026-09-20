@@ -46,6 +46,16 @@ from services.ai.baseline import (
 )
 from services.ai.budget import effective_prompt_budget
 from services.ai.change_set import ChangeSet, from_commit_payload, from_weekly_payload
+
+# 读侧形态（进行中 / 有结论 / 最近一次失败）：只依赖 run 行与两个标签函数，
+# 与「怎么跑一次分析」没有耦合，单独一层也好单测。
+from services.ai.conclusion_view import (  # noqa: F401 —— 本文件的读侧路由仍在用
+    _conclusion_payload,
+    _created_at_display,
+    _in_progress_result,
+    _last_attempt_failed_result,
+    _parse_response_payload,
+)
 from services.ai.endpoint_service import (
     FIELD_DEFAULTS,
     OPENAI_BASE_URL,
@@ -77,14 +87,13 @@ from services.ai.pricing import (
     price_change_requires_version_bump,
     price_table_doc_shape,
 )
-from services.ai.provenance import current_provenance, provenance_matches
 from services.ai.project_facts import (
     critical_path_facts,
     declared_important_tables_by_repo,
     generated_prefixes,
     scan_critical_paths,
 )
-from services.ai.weekly_state import get_or_create_weekly_state
+from services.ai.provenance import current_provenance, provenance_matches
 from services.ai.result_payload import (
     failed_result,
     result_payload,
@@ -96,11 +105,11 @@ from services.ai.skill_loader import describe_load_error, load_skills
 from services.ai.subagent import plan_family, run_family_with_seed, subagent_mode_of
 from services.ai.trace_evidence import encode_evidence
 from services.ai.usage import encode_tools
+from services.ai.weekly_state import get_or_create_weekly_state
 from services.ai.weekly_sync_gate import group_config_ids, weekly_sync_in_flight
 from utils.dpapi_utils import DPAPI_PREFIX, decrypt_dpapi
 from utils.logger import log_print
 from utils.security_utils import decrypt_credential, encrypt_credential
-from utils.timezone_utils import format_beijing_time
 
 MAX_FILES_DEFAULT = DEFAULT_MAX_FILES_PER_RUN
 
@@ -393,32 +402,6 @@ def _price_version_for(config: Optional[dict]) -> str:
     if errors and (config or {}).get("model_price_table"):
         log_print("⚠️ AI 分析：项目价格表不可用（" + "；".join(errors) + "），本次运行不记价格版本", "AI")
     return table.version if table else ""
-
-
-def _parse_response_payload(raw: Optional[str]) -> Optional[dict]:
-    if not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-
-
-# 界面上的「最近分析」时间一律走北京时间（UTC+8）。
-#
-# 库里存的是 naive-UTC 墙钟（SQLite 会丢掉 tzinfo，口径见 utils/timezone_utils），
-# 而 created_at 直接 isoformat() 出来是「带时间、不带偏移、还带微秒」的串，界面上
-# 就长成 2026-09-17T12:53:28.872891 —— 既不是北京时间，也不是人看的格式。
-#
-# 为什么在**服务端**格式化而不是交给前端：ES 规范里「带时间但不带偏移」的 ISO 串
-# 按**浏览器本地时区**解析，非 UTC+8 的机器上再转换一次就又多错 8 小时。在服务端
-# 算好、前端只负责显示，这类错就没有发生的余地。
-def _created_at_display(run: AiAnalysisRun) -> Optional[str]:
-    created_at = getattr(run, "created_at", None)
-    if created_at is None:
-        return None
-    # format_beijing_time 把 naive 入参当 UTC 解释，与库里的 naive-UTC 口径一致
-    return format_beijing_time(created_at, "%Y-%m-%d %H:%M:%S")
 
 
 def _stream_cached_run(run: AiAnalysisRun) -> Iterable[str]:
@@ -780,8 +763,20 @@ def _summarize_weekly_files(
         log_print(scan.log_line(), "AI", force=True)
 
     summary = {
+        # `total_files` = **窗口总数**（这个周版本一共有过多少改动文件），`delta_files` =
+        # 其中这一次装进输入的。`scope=incremental` 时两者差很多（实测 847 vs 19），
+        # 所以给模型的「本次变更共 N 个」必须单独一个键（见 `batch_files`）。
         "total_files": total_files,
         "delta_files": delta_count,
+        # **给模型的那一份总数**：本批次（这次装进输入）的文件数。喂错它，提示词那句
+        # 「还有 M 个的名字没列出来，但你可以读到它们的 diff」就会宣称一批白名单里根本
+        # 没有的文件「读得到」，模型点名索取时请求被 `protocol` 静默丢掉（只进 trace，
+        # 没有任何回执），于是它把一个不存在的取数缺口写成免责声明。
+        "batch_files": delta_count,
+        # 窗口总数**另存一份**：`focus` 会把 `total_files` 改写成筛后的条数，之后就没有
+        # 任何一处还记着「这个版本一共改了多少」—— 而「这次输入覆盖了多少分之多少」
+        # 正是靠它（见 `change_set._scope_note`）。
+        "window_files": total_files,
         "critical_paths": scan.hit,
         # 命中的前几条（含理由）与模式来源：`_decide_scope` 只回一个原因串，具体是哪条
         # 路径、依据是谁声明的，只有这里才有。来源那一条哪怕没命中也要记 —— 否则
@@ -854,7 +849,20 @@ def build_commit_payload(commit_id: int) -> dict:
 
 
 def _resource_type_of(repo) -> str:
-    return str(getattr(repo, "resource_type", "") or "").lower()
+    """仓库的资源类型，**空值按「代码」算**。
+
+    `models/repository.py` 写明取值是 `'table' / 'res' / 'code'`，而这一列**可空**
+    （写入侧还有一条裸赋值会写进 NULL）。界面上那一栏的选项是这么分的：
+
+        {% if (cfg.repository.resource_type or 'code') == 'table' %}…配表…{% else %}…代码…
+
+    也就是 **NULL 与 `'res'` 都算代码仓库**。这里原先回的是空串，而调用方拿它去比
+    `== "code"` —— `"" != "code"`，于是用户选「只看代码仓库」时，那些 `resource_type`
+    为空的仓库的改动**一条都不会进输入**，而报告上写着「仅代码仓库」，模型据此把
+    一个缺口说成覆盖完整。两侧必须同一套判据。
+    """
+    kind = str(getattr(repo, "resource_type", "") or "").strip().lower()
+    return kind or "code"
 
 
 def _filter_delta_files_by_focus(
@@ -878,11 +886,16 @@ def _filter_delta_files_by_focus(
     repo_by_id = {cfg.repository_id: cfg.repository for cfg in configs}
 
     if text in ("table", "code"):
+        # **只有 `'table'` 算配表**，其余（含 `'res'` 与空值）都算代码 —— 与模板里
+        # 「`resource_type or 'code'` 是否等于 `'table'`」那三行是同一套判据。
+        # 判据分叉的后果见 `_resource_type_of`：选「只看代码仓库」会静默吞掉老仓库。
+        want_table = text == "table"
         kept = [
             item for item in delta_files
-            if _resource_type_of(repo_by_id.get(item.get("repository_id"))) == text
+            if (_resource_type_of(repo_by_id.get(item.get("repository_id"))) == "table")
+            is want_table
         ]
-        label = "仅配表仓库" if text == "table" else "仅代码仓库"
+        label = "仅配表仓库" if want_table else "仅代码仓库"
         return kept, label
 
     try:
@@ -934,12 +947,13 @@ def build_weekly_payload(
         delta_files, focus_label = _filter_delta_files_by_focus(delta_files, focus, configs)
         if not delta_files:
             return None, state, "focus_empty"
-        # **计数要跟着筛选走。** 不跟着改的话，提示词会告诉模型「本次变更共 767 个文件」
-        # 而它只看得到 19 个 —— 那正是「把清单当全量」的镜像错误：这次是把全量说大了。
+        # **计数要跟着筛选走**（三个都跟）：不跟的话提示词会告诉模型「本次变更共 767 个
+        # 文件」而它只看得到 19 个 —— 「把清单当全量」的镜像错误，这次是把全量说大了。
         summary = {
             **summary,
             "total_files": len(delta_files),
             "delta_files": len(delta_files),
+            "batch_files": len(delta_files),
         }
     list_files, list_truncated = _select_listed_files(delta_files, max_files)
 
@@ -1026,16 +1040,32 @@ def _apply_model_window(
     return replace(limits, prompt_char_budget=budget), note
 
 
-def _engine_limits(project_config: dict) -> EngineLimits:
-    """项目配置 → 引擎额度。
+def _configured_int(value: object, default: int) -> int:
+    """项目配置里的一项 → 整数。**只有「没填过」才回落到默认值。**
 
-    用 `or` 而不是 `dict.get(key, 默认)`：配置行是懒创建的，没填过的列读出来是 `None`，
-    而 `None` 会让 `range(1, None + 1)` 在半夜的自动轮询里炸掉。
+    没填过读出来是 `None`（配置行是懒创建的），也可能是一串空白 —— 这两种回落到默认值。
+    **但 `0` 是用户填的值**：`max_tool_requests` 的范围就是 `0..100`，而平台为 0 专门写了
+    两句话（`prompt._budget_line` 与 `protocol.build_budget_exhausted_hint`）。这里原先三处
+    都写 `or`，`0 or 40` 求值成 40 —— 那两句因此永远执行不到，模型照常读 40 份 diff 并计费。
+    与 `endpoint_service` 的「刻意不把空串当成 0」是同一条纪律的两个方向。
     """
+    if value is None:
+        return default
+    if isinstance(value, str) and not value.strip():
+        return default
+    return int(value)
+
+
+def _engine_limits(project_config: dict) -> EngineLimits:
+    """项目配置 → 引擎额度。"""
     defaults = EngineLimits()
-    requests = int(project_config.get("max_tool_requests") or defaults.max_tool_requests)
+    requests = _configured_int(
+        project_config.get("max_tool_requests"), defaults.max_tool_requests
+    )
     return EngineLimits(
-        max_rounds=int(project_config.get("max_analysis_rounds") or defaults.max_rounds),
+        max_rounds=_configured_int(
+            project_config.get("max_analysis_rounds"), defaults.max_rounds
+        ),
         max_tool_requests=requests,
         # 条数上限**不得小于**索取次数：小于就会出现「付了 N 次索取、只带走 max_items 条」
         # —— 取回来的上下文被 `enforce_budget` 按条数静默裁掉，白花额度（见
@@ -1043,8 +1073,8 @@ def _engine_limits(project_config: dict) -> EngineLimits:
         # （取值上限 100），所以这个下限必须跟着**配置**走，只在两个默认值上成立是不够的：
         # 用户把索取上限调到 40 的那一刻，20 条的条数上限就会开始丢他的东西。
         max_items=max(defaults.max_items, requests),
-        prompt_char_budget=int(
-            project_config.get("prompt_char_budget") or defaults.prompt_char_budget
+        prompt_char_budget=_configured_int(
+            project_config.get("prompt_char_budget"), defaults.prompt_char_budget
         ),
     )
 
@@ -1214,7 +1244,6 @@ def _persist_outcome(
         )
 
     db.session.commit()
-
 
 
 def _create_run(
@@ -1787,56 +1816,6 @@ def _focus_from_run(run: AiAnalysisRun) -> dict:
             "label": str(focus.get("label") or ""),
         }
     return {"key": FOCUS_ALL, "label": ""}
-
-
-def _in_progress_result(run: AiAnalysisRun) -> dict:
-    """「正在进行中」的读侧形态：给得出身份，给不出结论。"""
-    return {
-        "run_id": run.id,
-        "status": "running",
-        "in_progress": True,
-        "scope": run.scope,
-        "trigger_source": run.trigger_source,
-        "created_at": run.created_at.isoformat() if run.created_at else None,
-        "created_at_display": _created_at_display(run),
-        "response_text": "",
-        "result": None,
-    }
-
-
-def _conclusion_payload(run: AiAnalysisRun) -> dict:
-    """一条**有结论的** run 的读侧形态。"""
-    return {
-        "run_id": run.id,
-        "status": run.status,
-        "scope": run.scope,
-        "trigger_source": run.trigger_source,
-        "created_at": run.created_at.isoformat() if run.created_at else None,
-        "created_at_display": _created_at_display(run),
-        "response_text": run.response_text,
-        "result": _parse_response_payload(run.response_payload),
-    }
-
-
-def _last_attempt_failed_result(run: AiAnalysisRun) -> dict:
-    """「最近一次失败」的读侧形态：给得出失败原因，给不出结论。
-
-    这条路径以前根本走不到 —— 读侧只在「有新结论」时返回值，失败一律折叠成 None，
-    于是界面里那个 `status === 'failed'` 分支（「上次分析失败：<原因>」）是死的，
-    用户看到的是「暂无分析结果」。失败与「没分析过」是两件事，不能混。
-    """
-    return {
-        "run_id": run.id,
-        "status": "failed",
-        "in_progress": False,
-        "scope": run.scope,
-        "trigger_source": run.trigger_source,
-        "created_at": run.created_at.isoformat() if run.created_at else None,
-        "created_at_display": _created_at_display(run),
-        "error_message": run.error_message or "",
-        "response_text": "",
-        "result": None,
-    }
 
 
 # 「这份结论不是最新那一次」的两种成因。它们要分开说，因为用户该做的事不一样：

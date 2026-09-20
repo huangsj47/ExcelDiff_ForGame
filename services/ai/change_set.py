@@ -152,16 +152,24 @@ def from_weekly_payload(
     # 截断说明由 `render_change_summary` 统一写（它会说清「没列出来但可以索取」），
     # 这里不再重复一句同义的话 —— 两处各写一半的后果是改一处漏一处。
     #
-    # 真实总数：`summary.total_files`（平台算好的）优先；缺值时用**白名单的条数** ——
-    # `delta_files` 现在是本批次全部改动文件，所以它的条数就是真实总数。
-    # **不能在缺值时退回「清单长度」**：那正是「把清单当全量」的老毛病，而截断说明
+    # 真实总数：**`summary.batch_files`**（这次装进输入的那一批）优先，缺值时退
+    # `summary.total_files`，再缺值用**白名单的条数**（`delta_files` 就是本批次全部
+    # 改动文件，所以它的条数也是本批总数）。
+    #
+    # 为什么不能用 `total_files`：它是**窗口总数**（这个周版本一共改了多少文件），
+    # 而 `scope=incremental` 时输入里只有水位线之后变化的那一部分 —— 实测 847 vs 19。
+    # 拿窗口总数当「本次变更的文件共 N 个」，下面那句「还有 M 个的名字没列出来，但
+    # 你可以读到它们的 diff」就变成了假话：那 M 个根本不在白名单里，模型照它去点名
+    # 索取时请求被 `protocol` 静默丢掉（只进 trace，不给模型任何回执），于是它把一个
+    # **不存在**的取数缺口写进报告。
+    #
+    # **也不能在缺值时退回「清单长度」**：那正是「把清单当全量」的老毛病，而截断说明
     # 要不要写、写多少，全看这个数。
     whitelist_total = sum(len(paths) for paths in whitelist.values())
     summary = payload.get("summary") or {}
-    try:
-        declared_total = int(summary.get("total_files"))
-    except (TypeError, ValueError):
-        declared_total = None
+    declared_total = _positive_int(summary.get("batch_files"))
+    if declared_total is None:
+        declared_total = _positive_int(summary.get("total_files"))
     total_files = declared_total if declared_total is not None else (whitelist_total or None)
 
     return build(
@@ -295,18 +303,47 @@ def _operation(value: object) -> str:
     return text if text in ("A", "M", "D") else "M"
 
 
+def _positive_int(value: object) -> Optional[int]:
+    """转成正整数；转不出来或 <= 0 时返回 `None`（0 与缺值同义：这条数没得用）。"""
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
 def _scope_note(payload: Mapping[str, object]) -> str:
     scope = str(payload.get("scope") or "")
     label = _SCOPE_LABELS.get(scope)
     note = f"本次分析范围：{label}。" if label else ""
 
+    # **范围判定（full / incremental）说的是分析口径，不是「输入覆盖了整个版本」。**
+    # `_decide_scope` 在「命中关键路径」「本批占比大」这几种情形下也回 `full`，而那几
+    # 种情形下输入**仍然是水位线之后的那一部分**（判定只改标签，不会再查一次全量）。
+    # 不写清这一点，模型读到「本次分析范围：全量」就会对「本版本没问题」下结论 ——
+    # 而窗口里另外那些文件它一个都没看过。
+    summary = payload.get("summary") or {}
+    window = _positive_int(summary.get("window_files"))
+    batch = _positive_int(summary.get("batch_files"))
+    if window and batch and batch < window:
+        if label:
+            note = f"本次分析范围：{label}（**这是分析口径，不等于「输入装了整个版本」**）。"
+        note += (
+            f"**这次输入覆盖的是本版本改动过的 {window} 个文件里的 {batch} 个**"
+            f"（其余 {window - batch} 个在上次分析时就已在窗口里，这次没有重新给）。"
+            "报告里不要把它说成「本版本整体没问题」。"
+        )
+    return note + _focus_note(payload)
+
+
+def _focus_note(payload: Mapping[str, object]) -> str:
     # 用户选的分析范围（只看配表仓库 / 只看某个仓库…）。**必须写进提示词**：不写的话
     # 模型以为自己看到的就是整个版本，会把「这个范围内没发现问题」说成「本版本没问题」。
     focus = payload.get("focus")
     focus_label = str((focus or {}).get("label") or "") if isinstance(focus, Mapping) else ""
-    if focus_label:
-        note += (
-            f"**本次只分析了{focus_label}**，其它仓库的改动不在这次输入里 —— "
-            "报告里要写明这一点，不要把结论说成覆盖了整个版本。"
-        )
-    return note
+    if not focus_label:
+        return ""
+    return (
+        f"**本次只分析了{focus_label}**，其它仓库的改动不在这次输入里 —— "
+        "报告里要写明这一点，不要把结论说成覆盖了整个版本。"
+    )

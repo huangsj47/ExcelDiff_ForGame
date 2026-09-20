@@ -462,6 +462,41 @@ def test_the_platform_asks_the_agent_when_it_cannot_read_locally(monkeypatch):
     assert calls[0]["total_files"] == 2
 
 
+def test_both_search_paths_charge_the_budget_by_the_same_rule(monkeypatch):
+    """**同一次检索，本地与 Agent 两条路扣的额度必须一样。**
+
+    额度按「**动过**的文件」扣（`scanned + binary + missing`），不是「读成的文件」——
+    `allowance = min(MAX_SCAN_FILES, remaining)` 直接决定第 2、3 次检索允许搜多少文件、
+    覆盖率的分母与命中数是多少。两条路口径不同的话，同一个周版本在单机与多节点部署下
+    会给出不同的覆盖率，甚至一边回「[检索额度用尽] 这一次没有搜」而另一边正常搜 ——
+    而这两句话都会进提示词，模型据此写的「有没有其它引用」是相反的结论。
+    """
+    import services.agent_file_content_dispatch as dispatch
+    from services.ai import platform_provider as pp
+
+    def fake(repository, *, query, entries, prefix="", total_files=0):
+        # 一次「3 个动过、其中 2 个读不到、1 个是二进制」的检索：三个数都要计入额度。
+        return {
+            "status": "ready",
+            "text": "a.lua:1: hit",
+            "scanned": 3,
+            "binary": 1,
+            "missing": 2,
+        }
+
+    monkeypatch.setattr(dispatch, "request_references", fake)
+    monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: True)
+    provider = _provider(_scope())
+    monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=7))
+    before = provider._search_budget.remaining
+
+    provider.find_references("target_id", "scripts/")
+
+    assert provider._search_budget.remaining == before - 6, (
+        "Agent 那条路只扣了读成的文件数 —— 与本地那条 `scanned + binary + missing` 分叉了"
+    )
+
+
 def test_the_agent_is_told_the_real_batch_size_not_the_truncated_one(monkeypatch):
     """**Agent 那条路的覆盖率分母必须是「本批次一共改了多少个文件」。**
 
