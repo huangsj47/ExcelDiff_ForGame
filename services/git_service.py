@@ -977,6 +977,54 @@ class GitService:
         except Exception as e:
             return None
 
+    def order_commits_by_topology(self, commit_ids, timeout=180):
+        """把一组提交按 git 拓扑排成「祖先在前」；排不出来就保持传入顺序。
+
+        ## 为什么需要它
+
+        本仓库的机器人提交会把 committer date 打成同一个固定时刻：实测
+        `226470e6c290` 与 `91bcc3439cf5` 的提交时间逐字相同
+        （2026-09-17 17:00:47+08:00），而 `226470e6c290` 是 `91bcc3439cf5` 的
+        **父提交**。周版本快照按 `commit_time` 排序后取最后一个当 latest，平局时
+        落回数据库行序 —— 行序是**入库顺序**（逐条 `git log` 新建），在这里恰好
+        把父提交排在子提交后面，于是 `latest_commit_id` 指向前一个提交，模型据此
+        判出一条并不存在的悬空引用。判据的使用方见 `services/commit_ordering.py`。
+
+        ## 为什么用一次 rev-list，而不是逐对 merge-base
+
+        逐对 `--is-ancestor` 判完 k 个提交要 k(k-1)/2 次进程（实测单次 60ms，
+        17 个提交就是 136 次）；`git rev-list --topo-order --reverse <ids>` 一次
+        走完给出这些提交及其祖先的拓扑序，`--reverse` 保证父提交排在子提交之前，
+        取每个 id 的位置即可（实测 17 个提交 82ms）。
+
+        **只返回输入里有的 id**，且不丢不重（输入即返回的排列）。拿不到位置的
+        id（对象缺失、克隆不全、根本不是 git）排在最后并保持传入顺序 ——
+        这个方法只负责让次序更接近真相，不负责报错。
+        """
+        incoming = list(commit_ids or [])
+        if len(incoming) < 2:
+            return incoming
+        try:
+            if not os.path.exists(self.local_path):
+                return incoming
+            result = self._run_git_command(
+                ['git', 'rev-list', '--topo-order', '--reverse', *[str(c) for c in incoming]],
+                timeout=timeout,
+            )
+            if not result or result.returncode != 0 or not result.stdout:
+                return incoming
+            position = {}
+            for index, line in enumerate(str(result.stdout).splitlines()):
+                position.setdefault(line.strip(), index)
+            known = [c for c in incoming if str(c) in position]
+            unknown = [c for c in incoming if str(c) not in position]
+            known.sort(key=lambda c: position[str(c)])
+            return known + unknown
+        except Exception as e:
+            from utils.safe_print import log_print
+            log_print(f"⚠️ 按拓扑排序提交失败（沿用传入次序）: {sanitize_text(str(e))}", 'GIT')
+            return incoming
+
     @staticmethod
     def _commit_id_matches(candidate_commit_id, target_commit_id):
         """判断两个 commit id 是否匹配（支持长短 SHA 前缀匹配）。"""

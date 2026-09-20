@@ -21,6 +21,7 @@ from models import (
     WeeklyVersionExcelCache,
     db,
 )
+from services.commit_ordering import annotate_same_instant_order, commit_merge_sort_key
 from services.deployment_mode import is_agent_dispatch_mode
 from services.diff_render_helpers import render_excel_diff_html, render_git_diff_content, render_new_file_content
 from services.diff_service import DiffService
@@ -154,18 +155,23 @@ def _current_diff_logic_version():
 # ---------------------------------------------------------------------------
 
 def _commit_sort_key_for_merge(commit):
-    """Stable sort key for commit merge ordering."""
-    commit_time = getattr(commit, 'commit_time', None)
-    commit_ts = float('-inf')
-    if isinstance(commit_time, datetime):
-        try:
-            if commit_time.tzinfo is None:
-                commit_time = commit_time.replace(tzinfo=timezone.utc)
-            commit_ts = commit_time.timestamp()
-        except (OverflowError, OSError, ValueError):
-            commit_ts = float('-inf')
-    commit_db_id = getattr(commit, 'id', 0) or 0
-    return commit_ts, commit_db_id
+    """合并用排序键 —— 判据本体在 `services.commit_ordering`（同刻提交必须两个模块同一个答案）。"""
+    return commit_merge_sort_key(commit)
+
+
+def _annotate_same_instant_order(repository, commits):
+    """给「同一 commit_time 的多个提交」按 git 拓扑定序（写进 commit_ordering 的缓存）。
+
+    没有平局时一次 git 都不调（见 `has_same_instant_commits`），所以逐文件的读侧回退
+    路径也能安全地带上它。**任何失败都不抛**：定序失败沿用数据库次序，与改动前一致。
+    """
+    try:
+        if getattr(repository, 'type', None) != 'git' or _get_git_service is None:
+            return 0
+        return annotate_same_instant_order(_get_git_service(repository), commits)
+    except Exception as exc:
+        log_print(f"⚠️ 同刻提交定序失败（沿用数据库次序）: {exc}", 'WEEKLY', force=True)
+        return 0
 
 def _get_app_func(name):
     """延迟从 app 模块获取函数引用，避免循环导入。"""
@@ -1286,6 +1292,11 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
             if not commits:
                 return "<div class='alert alert-warning'>未找到相关的Excel提交记录</div>"
 
+            # 同刻提交同样要按 git 拓扑定序：这条回退路径自己取 `commits[-1]` 当 latest，
+            # 次序错了这里**展示的**收尾内容就是前一个提交的状态（写入侧的理由见
+            # services/commit_ordering.py）。无平局时不调 git。
+            _annotate_same_instant_order(repository, commits)
+            commits = sorted(commits, key=commit_merge_sort_key)
             log_print(f"回退模式找到 {len(commits)} 个相关提交", 'WEEKLY')
             base_commit = None
             if diff_cache.base_commit_id:
@@ -1383,6 +1394,22 @@ def process_weekly_version_sync(config_id):
             log_print(f"周版本同步跳过（无数据）: {config.name} - {outcome.describe()}", 'WEEKLY')
             _weekly_excel_cache_service.log_cache_operation(f"⏭️ 周版本同步跳过（窗口内无提交）: {config.name}", 'info', repository_id=config.repository_id, config_id=config.id)
             return outcome
+
+        # **同刻提交必须按 git 拓扑定序**，否则每个文件列表的最后一个（`commits[-1]`，
+        # 即写进 `latest_commit_id` 的那个）可能不是真正的最后一个提交。机器人提交会把
+        # committer date 打成同一时刻，平局时原先落回数据库行序、而那是入库顺序 ——
+        # 实测就出现「父提交被当成 latest」。判据与实测记录见 services/commit_ordering.py。
+        # 没有平局时这里不调 git；仓库不是 git / 克隆不在本地时同样原样返回。
+        #
+        # 排序必须在**分组之前**：分组出来的每个列表是同一个次序的切片，事后排
+        # `commits_in_range` 动不了已经建好的列表。而这次排序也是排序键的唯一一次使用点
+        # 之前的定序 —— `generate_weekly_merged_diff` 里的 `commits[-1]` 与
+        # `_generate_merged_diff_data` 内部的排序必须给出同一个次序，否则列里写的
+        # latest 与 payload 收尾的内容会指向两个不同的提交。
+        annotated = _annotate_same_instant_order(repository, commits_in_range)
+        if annotated:
+            log_print(f"按 git 拓扑定序的同刻提交: {annotated} 个", 'WEEKLY')
+        commits_in_range = sorted(commits_in_range, key=commit_merge_sort_key)
 
         # 按文件路径分组提交
         files_commits = {}

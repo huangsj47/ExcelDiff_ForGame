@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 from models import db, Commit, Repository, DiffCache, ExcelHtmlCache
 from services.commit_lookup_service import is_svn_revision
+from services.commit_ordering import commit_merge_sort_key
 from services.deployment_mode import is_agent_dispatch_mode
 from services.diff_service import DiffService
 from utils.diff_data_utils import clean_json_data
@@ -80,18 +81,8 @@ def _normalize_commit_operation(operation):
 
 
 def _commit_sort_key_for_merge(commit):
-    """Stable sort key for commit merge ordering."""
-    commit_time = getattr(commit, 'commit_time', None)
-    commit_ts = float('-inf')
-    if isinstance(commit_time, datetime):
-        try:
-            if commit_time.tzinfo is None:
-                commit_time = commit_time.replace(tzinfo=timezone.utc)
-            commit_ts = commit_time.timestamp()
-        except Exception:
-            commit_ts = float('-inf')
-    commit_db_id = getattr(commit, 'id', 0) or 0
-    return commit_ts, commit_db_id
+    """合并用排序键 —— 判据本体在 `services.commit_ordering`（同刻提交必须两个模块同一个答案）。"""
+    return commit_merge_sort_key(commit)
 
 
 def _commit_time_to_iso(commit_time):
