@@ -193,11 +193,25 @@ def render_result(result: SearchResult, *, scope_note: str = "") -> str:
       这句话要写在抬头里）；
     * 「扫了一部分」→ 只是「没扫到」，不是「不存在」。所以只要 `scanned < files_total`
       或有跳过，抬头就把这三个数摆出来。
+
+    ## 覆盖率那句必须排在**最前面**
+
+    它原先排在最后一行，而这条结果的单条上限是 8,000 字、`MAX_HITS = 80` 条命中各带
+    最多 200 字的正文 —— 实测一份打满命中的结果渲染出来是 10,850 字，**覆盖率那一整句
+    会被整段砍掉**（砍点还落在一行路径中间）。而被砍掉的恰恰是区分「没搜到」与「没搜完」
+    的那一句：「文件数到了上限就停了，剩下的没搜」「所以『没搜到』只代表搜过的这些里没有」
+    —— 模型正是拿它决定能不能写下「没有其它引用」。等于**每次命中多的时候，它都会把
+    「没搜完」读成「不存在」**，而这正是本模块存在的理由。
+
+    尾截断砍不到第一行，所以它排在抬头之后、命中清单之前。命中的位置清单因此落在后面，
+    被砍时少几条**位置**（模型可以再点名索取），而不是少掉「这次搜索覆盖了多少」这个
+    结论所需的数。
     """
     where = f"（范围：{result.prefix}）" if result.prefix else ""
     lines = [
         f"[find_references] 关键词 `{result.query}`{where}："
-        f"命中 {len(result.hits)} 处，分布在 {len(result.hit_files)} 个文件里。"
+        f"命中 {len(result.hits)} 处，分布在 {len(result.hit_files)} 个文件里。",
+        _coverage_note(result, scope_note),
     ]
     if result.hits:
         lines.extend(hit.render() for hit in result.hits)
@@ -207,7 +221,6 @@ def render_result(result: SearchResult, *, scope_note: str = "") -> str:
         )
     else:
         lines.append("本批次改动的文件里没有出现这个关键词。")
-    lines.append(_coverage_note(result, scope_note))
     return "\n".join(lines)
 
 

@@ -190,6 +190,42 @@ def test_the_scope_is_stated():
     assert "仅限" in text and "本批次改动过的文件" in text
 
 
+def test_the_coverage_note_survives_a_cut_that_eats_the_whole_hit_list():
+    """**覆盖率那句必须活过截断。**
+
+    它原先排在最后一行，而这个结果的单条上限是 8,000 字、`MAX_HITS = 80` 条命中各带最多
+    200 字正文 —— 实测一份打满命中的结果是 10,850 字，覆盖率那一整句会被**整段砍掉**
+    （砍点还落在一行路径中间）。而被砍掉的恰恰是区分「没搜到」与「没搜完」的那一句，
+    模型正是拿它决定能不能写下「没有其它引用」：等于**命中一多，它就会把「没搜完」读成
+    「不存在」**。
+
+    所以这里断言的是「在**被砍之后**的文本里，那两句话仍然在」。只断言 `render_result`
+    的原始输出里有它是不够的 —— 那正是修改前的行为（原文里有、交给模型的那份没有）。
+    """
+    from services.ai.budget import truncate_text
+    from services.ai.context_tools import DEFAULT_TOOL_LIMITS
+
+    limit = DEFAULT_TOOL_LIMITS["find_references"]
+    full = render_result(_result(
+        hits=tuple(
+            rs.Hit(path=f"scripts/optional/module_{i}.lua", line=100 + i,
+                   text="local 配置项 = " + "很长的中文内容" * 12)
+            for i in range(80)
+        ),
+        files_total=300, scanned=240, missing=12, binary=8,
+        truncated_files=True, truncated_hits=True,
+    ))
+
+    assert len(full) > limit, f"fixture 没有触发截断（{len(full)} ≤ {limit}），这条就白测了"
+    cut, was_cut = truncate_text(full, limit)
+
+    assert was_cut is True
+    assert "文件数到了上限就停了" in cut, f"「没搜完」这句被砍掉了：{cut[-200:]!r}"
+    assert "不代表整批里没有" in cut, f"「没搜到不等于不存在」这句被砍掉了：{cut[-200:]!r}"
+    # 抬头那行也要在（它是「这次搜了多少」的另一半）。
+    assert "240/300" in cut, cut[:200]
+
+
 # ==========================================================================
 # 四、白名单：搜索词与范围
 # ==========================================================================
