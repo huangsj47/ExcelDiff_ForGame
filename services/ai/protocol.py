@@ -738,6 +738,67 @@ def looks_like_markdown_report(text: str) -> bool:
     return hits >= REPORT_HEALTH_MIN_SECTIONS
 
 
+# `report_markdown` 是 JSON 字符串；这个正则只吃到「闭合引号或文本结束」为止 ——
+# **被截断的那一半照样抢得出来**，这正是它的用途（见 `salvage_report_markdown`）。
+_REPORT_MARKDOWN_RE = re.compile(r'"report_markdown"\s*:\s*"(?P<body>(?:[^"\\]|\\.)*)"?')
+
+# 输出被截断时发给模型的纠正提示。与 `build_correction_hint` 分开写：那个说的是
+# 「你没按协议」，这个说的是「你写太长了」——**模型的应对完全相反**
+# （前者要它改格式，后者要它砍内容）。
+TRUNCATED_OUTPUT_HINT = (
+    "上一轮的回答**被截断了**（单次输出有长度上限，JSON 没有收尾，因此无法解析）。"
+    "请**压缩篇幅后完整重发**：正文按后果排序、同类条目合并成一条写，只保留能改变"
+    "结论的内容；`dimensions` 与 `anomalies` 必须完整，整份 JSON 必须能解析。"
+)
+
+
+def salvage_report_markdown(text: str) -> str | None:
+    """从**被截断的**响应里把 `report_markdown` 的正文抢出来；抢不到返回 None。
+
+    ## 为什么需要它
+
+    汇总那一步的正文常常两万多 token（实测 run 5/6/7 分别是 25.9k / 20.6k / 28.2k），
+    撞上网关的单次输出上限就断在半截，`json.loads` 必然失败。而整份响应里最值钱的就是
+    这段正文：不抢的话，用户拿到的是一坨 **JSON 源码**。
+
+    最糟的一点是它**还会被误判成「像一份报告」**——`looks_like_markdown_report` 是在
+    整段文本里数章节标题，而 JSON 字符串里那些 `\\n# 变更理解` 照样能数到，于是走了
+    markdown 降级那条路，把 JSON 原文当正文存了下来（2026-09-21 run 7 实测：55k 字的
+    报告被包在 `{"status": "final", "report_markdown": "…"` 里面，界面与导出都是这样）。
+
+    ## 只抢正文，不抢 `anomalies`
+
+    截断点通常落在正文之后（它是最后、最大的一个字段），此时 `anomalies` 数组要么没
+    开始、要么断在半截。**按半个数组解析出来的结论比没有更危险**：条目不全却看起来是
+    一份完整清单。所以这里只抢正文，结构化结论该没有还是没有，降级标签照旧。
+    """
+    content = _THINK_BLOCK_RE.sub("", str(text or ""))
+    match = _REPORT_MARKDOWN_RE.search(content)
+    if match is None:
+        return None
+    body = match.group("body")
+    if not body.strip():
+        return None
+    # 不处理「末尾剩一个光秃秃的反斜杠」：那个字符落不进 `body`（正则里 `\\.` 要么配成
+    # 一对、要么整段到此为止），写了也是走不到的死分支。
+    try:
+        return json.loads(f'"{body}"')
+    except ValueError:
+        # 转义序列本身被截断（例如末尾是 `\u12`）——救不回来，交给调用方按原文降级。
+        return None
+
+
+def looks_like_truncated_json(text: str) -> bool:
+    """回答「这段文本是不是一份没收尾的 JSON 对象」。
+
+    判据刻意只有一个：去掉思考块后以 `{` 开头、且**不以 `}` 结尾**。配合
+    `salvage_report_markdown` 使用 —— 只有真被截断时才该给模型发「你写太长了」这条提示，
+    一份完整但协议不合规的 JSON 要走的仍是原来的纠正路径。
+    """
+    content = _THINK_BLOCK_RE.sub("", str(text or "")).strip()
+    return content.startswith("{") and not content.endswith("}")
+
+
 def build_correction_hint(
     error: Exception, *, dimension_ids: Iterable[str] = DIMENSION_IDS
 ) -> str:

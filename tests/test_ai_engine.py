@@ -166,6 +166,21 @@ def _markdown(body: str = "改了道具表。") -> str:
     return f"# 变更理解\n\n{body}\n\n# 影响面分析\n\n只影响道具系统。\n"
 
 
+TRUNCATED_REPORT = "# 变更理解\n\n改了道具表。\n\n# 影响面分析\n\n只影响道具系统。\n"
+
+
+def _truncated_json(report: str = TRUNCATED_REPORT) -> str:
+    """一份**被截断的** JSON：写到 `report_markdown` 中途就断了。
+
+    形状与实测一致（单次输出撞上网关上限）：开头是完整的
+    `{"status": "final", "report_markdown": "…`，正文里的换行是 JSON 转义，末尾既没有
+    闭合引号也没有 `}`。截到 120 字是刻意的：正文里那两个 `\\n# …` 标题都还在，这样
+    它同时满足「像一份报告」，用来钉住「抢正文必须排在数标题之前」。
+    """
+    escaped = json.dumps(report, ensure_ascii=False)
+    return '{"status": "final", "report_markdown": ' + escaped[:120]
+
+
 def _final(*anomalies, report="# 变更理解\n\n改了道具表。\n") -> str:
     payload = {
         "status": "final",
@@ -874,6 +889,43 @@ def test_an_immediate_markdown_answer_does_not_burn_another_call():
     _run(client)
 
     assert len(client.calls) == 1
+
+
+def test_a_truncated_json_is_asked_to_shorten_instead_of_being_dropped():
+    """单次输出撞上限时，第一次要**要求压短重发**，而不是就地降级。
+
+    降级只留下正文，结构化结论（人工跟进清单）会整份丢掉 —— 而那份清单正是人工要用的
+    东西。所以撞上限要花一轮重问，并把原因说清楚：它以为的「格式错」和真实原因
+    「你写太长了」应对方式完全相反，不说清下一轮它还会写这么长。
+    """
+    client = ScriptedClient(_truncated_json(), _final())
+
+    outcome = _run(client)
+
+    assert outcome.status == STATUS_SUCCEEDED
+    assert outcome.degradation == DEGRADE_NONE
+    sent = [msg["content"] for call in client.calls[1:] for msg in call]
+    assert any("被截断" in text and "压缩篇幅" in text for text in sent), (
+        "重问那一轮必须把「被截断」与「压短」都说给模型"
+    )
+
+
+def test_a_truncated_json_without_corrections_left_keeps_the_report_not_the_json():
+    """纠正额度用完时，留下的是**正文**，不是那坨 JSON 源码。
+
+    实测过（2026-09-21 run 7）：JSON 字符串里的 `\\n# 变更理解` 同样能数到章节标题，
+    于是走了「像一份报告」那条路，把 `{"status": "final", …` 原样当成了报告 —— 界面与
+    导出拿到的都是 JSON 源码，55k 字的正文全被包在里面。
+    """
+    client = ScriptedClient(_truncated_json())
+
+    outcome = _run(client, limits=EngineLimits(max_corrections=0))
+
+    assert outcome.status == STATUS_DEGRADED
+    assert outcome.degradation == DEGRADE_MARKDOWN
+    assert outcome.report_markdown.startswith("# 变更理解"), outcome.report_markdown[:80]
+    assert '"status"' not in outcome.report_markdown
+    assert outcome.anomalies == (), "截断的 JSON 里那半个数组不许当结论"
 
 
 def test_a_report_shaped_last_round_is_salvaged_after_the_rounds_run_out():

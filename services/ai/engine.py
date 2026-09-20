@@ -66,10 +66,13 @@ from services.ai.protocol import (
     Anomaly,
     DroppedItem,
     ProtocolError,
+    TRUNCATED_OUTPUT_HINT,
     build_correction_hint,
     ground_payload,
     looks_like_markdown_report,
+    looks_like_truncated_json,
     parse_payload,
+    salvage_report_markdown,
     sanitize_requests,
 )
 from services.ai.rules import RuleThresholds, normalize_anomalies
@@ -907,6 +910,38 @@ def run_analysis(
         try:
             parsed = parse_payload(text, dimension_ids=dimension_ids)
         except ProtocolError as exc:
+            # 先看是不是**被截断的 JSON**（单次输出有上限，汇总那一步最容易撞上）。
+            # 这个判断必须排在 `looks_like_markdown_report` **之前**：JSON 字符串里的
+            # `\n# 变更理解` 同样能数到章节标题，晚一步就会把 JSON 原文当成正文存下来
+            # （实测 run 7：55k 字的报告被包在 `{"status": "final", …` 里面）。
+            salvaged_report = salvage_report_markdown(text)
+            truncated = salvaged_report is not None and looks_like_truncated_json(text)
+            if truncated and limits.max_corrections > 0:
+                # 它不是「不肯说 JSON」，是**写太长了**。重问一次并要求压短，比直接降级
+                # 强：降级只留下正文，结构化结论（人工跟进清单）会整份丢掉。
+                limits = replace(limits, max_corrections=limits.max_corrections - 1)
+                correction_hint = TRUNCATED_OUTPUT_HINT
+                markdown_fallback = salvaged_report
+                _emit(RoundRecord(
+                    round_index, "unparsable",
+                    correction_hint=correction_hint,
+                    note=_combine_notes(round_notes, "输出被截断，已要求压短后重发"),
+                    **round_extra,
+                ))
+                pending_items = ()
+                budget_notes = []
+                round_memos.append(TurnMemo(index=round_index, status="unparsable"))
+                continue
+            if truncated:
+                # 纠正额度也用完了：正文抢得出来，结构化那一半确实没了 —— 留下正文。
+                _emit(RoundRecord(
+                    round_index, "unparsable",
+                    note=_combine_notes(round_notes, "输出被截断，已抢出正文降级"), **round_extra,
+                ))
+                payload = None
+                markdown_fallback = salvaged_report
+                degradation = DEGRADE_MARKDOWN
+                break
             if looks_like_markdown_report(text):
                 # 模型给了一份像样的 markdown 报告。与其把它扔掉重问，不如留下来当降级产出：
                 # 内容通常是有用的，用户至少能读到。

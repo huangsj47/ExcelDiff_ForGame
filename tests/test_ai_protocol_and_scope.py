@@ -25,8 +25,10 @@ from services.ai.protocol import (
     build_correction_hint,
     ground_payload,
     looks_like_markdown_report,
+    looks_like_truncated_json,
     parse_json_candidates,
     parse_payload,
+    salvage_report_markdown,
     sanitize_requests,
 )
 from services.ai.scope import AnalysisScope, normalize_path
@@ -614,6 +616,49 @@ def test_correction_hint_restates_the_protocol():
     assert "json.loads" in hint
     assert "<think>" in hint
     assert "dimensions" in hint
+
+
+def test_salvage_pulls_the_report_out_of_a_truncated_json():
+    """被截断的 JSON 里，正文是抢得出来的 —— 它就是个没闭合的 JSON 字符串。"""
+    text = (
+        '{"status": "final", "report_markdown": '
+        '"# 变更理解\\n\\n改了道具表。\\n\\n# 风险评估\\n\\n只影响道具系统'
+    )
+
+    assert salvage_report_markdown(text) == (
+        "# 变更理解\n\n改了道具表。\n\n# 风险评估\n\n只影响道具系统"
+    )
+
+
+def test_salvage_returns_none_when_there_is_no_report_to_pull():
+    """没有 `report_markdown` 就不是这条路径能救的东西，交给调用方按原文降级。"""
+    assert salvage_report_markdown("我觉得这个改动还行。") is None
+    assert salvage_report_markdown('{"status": "need_more_context", "requests": []}') is None
+    assert salvage_report_markdown('{"report_markdown": ""}') is None
+
+
+def test_salvage_gives_up_on_a_half_written_unicode_escape():
+    """`\\u12` 这种救不回来：宁可返回 None，也不要吐出一段带反斜杠的假正文。"""
+    assert salvage_report_markdown('{"report_markdown": "abc\\u12') is None
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ('{"status": "final", "report_markdown": "x', True),
+        ('\n  {"status": "final", "report_markdown": "x', True),
+        ('{"status": "final"}', False),
+        ("# 变更理解\nx\n# 风险评估\ny\n", False),
+        ("", False),
+    ],
+)
+def test_looks_like_truncated_json_only_for_an_unclosed_object(text, expected):
+    """判据只有两条：以 `{` 开头、不以 `}` 结尾。
+
+    一份**完整**但协议不合规的 JSON 必须落到原来的纠正路径上 —— 给它的提示应该是
+    「你没按协议」，而不是「你写太长了」，两者要模型做的事正好相反。
+    """
+    assert looks_like_truncated_json(text) is expected
 
 
 def test_budget_hint_forces_convergence_without_failing():
