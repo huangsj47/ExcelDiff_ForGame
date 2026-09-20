@@ -113,6 +113,20 @@
     // 场景（跑完那一刻）能重画，而不必重新算一遍或把列表留在旧状态。
     var blocks = [];
 
+    // 哪几轮的「模型这一轮返回的内容」是展开的（轮次的 key → true）。
+    //
+    // **必须由模块自己记，不能指望 DOM 留着。** 那一块是个 `<details>`，`open` 是
+    // **DOM 属性**；而跑动中每来一帧进度（几秒一次）`applyProgress` 就会
+    // `buildRoundBlocks` + `paint()` 重建整棵子树 —— 新节点回到默认的收起态。
+    // 用户看到的现象正是「点开、过几秒自己收起来」，根本读不了。
+    //
+    // 值**在重画前从 DOM 上现读**（`captureExpanded`），不靠 `toggle` 事件 —— 理由写在
+    // 那个函数上：`toggle` 是异步派发的，点开之后紧接着的那一帧根本等不到它。
+    //
+    // 换一次运行要清空（见 `applyRun`）：键是「轮次号 + 分片」，两次运行里会重名，
+    // 留着它就成了「这一次的运行号 + 上一次的展开状态」。
+    var expandedModelRounds = {};
+
     // 运行「还没结束」的那些状态（服务端 `AiAnalysisRun.status` 的取值）。只有它们才谈得上
     // 「才刚发起、第一帧还没出来」；终态（成功 / 失败 / 中断）不该再等等看 —— 都跑完了
     // 还读不到，就是读不到。
@@ -253,8 +267,7 @@
         return blocks;
     }
 
-    function noteFor(current, count) {
-        if (current === 'live') return count ? NOTE.live : NOTE.running_no_rounds;
+    function noteFor(current, count) {        if (current === 'live') return count ? NOTE.live : NOTE.running_no_rounds;
         if (current === 'starting') return NOTE.starting;
         if (current === 'loading') return NOTE.loading;
         if (current === 'settled') return count ? NOTE.settled : NOTE.no_trace;
@@ -270,6 +283,50 @@
         parent.appendChild(node);
     }
 
+    /** 在一棵子树里按 class 找第一个节点。走 `.children`，真 DOM 与假 DOM 都有这个。 */
+    function findIn(node, cls) {
+        var kids = node.children || [];
+        for (var i = 0; i < kids.length; i++) {
+            var child = kids[i];
+            if (!child) continue;
+            if (child.className === cls) return child;
+            var hit = findIn(child, cls);
+            if (hit) return hit;
+        }
+        return null;
+    }
+
+    /**
+     * 现在 DOM 上哪几轮的「模型这一轮返回的内容」是展开的（轮次 key → true）。
+     *
+     * ## 为什么是**现读 DOM**，而不是监听 `toggle`
+     *
+     * 第一版监听的是 `details` 的 `toggle` 事件，靠它维护一份状态。**在真浏览器里不工作**：
+     * Chrome 把 `<details>` 的 `toggle` 派发成一个**异步任务**（排队等当前任务跑完），
+     * 而重画是同步发生的 —— 用户点开之后紧接着来的那一帧进度里，这个事件还没跑，
+     * 读到的状态是空的，于是新画出来的还是收起的。更糟的是那个事件随后会在**已经被摘掉的
+     * 旧节点**上跑，把过期的值写回状态里。
+     *
+     * 而 DOM 上的 `open` 是**同步**更新的：点开的那一刻就已经是 true。重画前现读一遍，
+     * 拿到的永远是最新的那一个。
+     *
+     * 这个差别假 DOM 测不出来（stub 里的 `toggle` 是我自己同步抛的），是真浏览器复核
+     * 才暴露的 —— 所以这一条也有真渲染的复核脚本，见提交说明。
+     */
+    function captureExpanded(log) {
+        var open = {};
+        var cards = log.children || [];
+        for (var i = 0; i < cards.length; i++) {
+            var card = cards[i];
+            if (!card || typeof card.getAttribute !== 'function') continue;
+            var key = card.getAttribute('data-round-key');
+            if (!key) continue;
+            var box = findIn(card, 'ai-think-model');
+            if (box && box.open) open[key] = true;
+        }
+        return open;
+    }
+
     function paint() {
         var log = el('aiThinkLog');
         var note = el('aiThinkNote');
@@ -277,6 +334,9 @@
         // 「分析进行中」换掉，否则列表已经六轮了、那句话还挂着，两句话不能同时为真。
         if (note) note.textContent = noteFor(mode, blocks.length);
         if (!log) return;
+        // 清空之前先把「哪几轮是展开的」记下来（见 `captureExpanded`：必须现读 DOM，
+        // `toggle` 事件是异步的，等不到）。下一帧重画时按这份状态恢复。
+        expandedModelRounds = captureExpanded(log);
         log.textContent = '';
         if (!blocks.length) return;
         var doc = global.document;
@@ -336,6 +396,10 @@
             if (block.modelText) {
                 var details = doc.createElement('details');
                 details.className = 'ai-think-model';
+                // 按上一帧末尾读下来的状态恢复展开态。**不挂 `toggle` 监听**：那个事件
+                // 是异步派发的（见 `captureExpanded`），既赶不上这一帧，又会在节点被摘掉
+                // 之后把过期的值写回来。用户之后的开合由下一次重画前的现读负责。
+                details.open = !!expandedModelRounds[block.key];
                 var summary = doc.createElement('summary');
                 summary.textContent = '模型这一轮返回的内容';
                 details.appendChild(summary);
@@ -496,6 +560,9 @@
         // 换了运行，「见过快照」与「看着它开跑的时刻」都属于上一次 —— 留着它们会让
         // 新的一次运行继承上一次的处境（`starting` 那句说明的期限就是从这里算的）。
         sawSnapshot = false;
+        // 展开状态同理：键是「轮次号 + 分片」，两次运行里必然重名，留着就是拿上一次的
+        // 展开状态去开这一次的某一轮。
+        expandedModelRounds = {};
         watchingSince = null;
         paint();
     }

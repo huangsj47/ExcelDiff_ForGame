@@ -59,7 +59,13 @@ function makeEl(id) {
         return node._attrs[k] === undefined ? null : node._attrs[k];
     };
     node.appendChild = function (child) { node.children.push(child); return child; };
-    node.addEventListener = function () {};
+    // 监听器**要记下来**：面板靠 `toggle` 记住「用户展开了哪一轮」，而 `toggle` 是浏览器
+    // 在用户点 `<details>` 时抛的。假 DOM 不实现它，所以由用例显式抛（见 `fire`），
+    // 否则「展开后重画仍展开」这条根本没法验。
+    node._listeners = {};
+    node.addEventListener = function (type, fn) {
+        (node._listeners[type] = node._listeners[type] || []).push(fn);
+    };
     node.classList = { add: function () {}, remove: function () {}, contains: function () { return false; } };
     return node;
 }
@@ -104,8 +110,21 @@ function dumpNode(node) {
         text: node.getAttribute('data-round-key') === null
             ? node.textContent : node.textContent,
         key: node.getAttribute('data-round-key'),
+        // `open` 只在「模型这一轮返回的内容」那个 `<details>` 上有意义，其余节点恒为
+        // false。断言看的就是它。
+        open: node.open === true,
         children: node.children.map(dumpNode)
     };
+}
+
+/** 在当前这棵树里按 class 找第一个节点（假 DOM 没有 querySelector，自己走一遍）。 */
+function findByClass(node, cls) {
+    if (node.className === cls) return node;
+    for (var i = 0; i < node.children.length; i++) {
+        var hit = findByClass(node.children[i], cls);
+        if (hit) return hit;
+    }
+    return null;
 }
 
 function snap() {
@@ -142,7 +161,21 @@ var OP = {
     runLong: function () { advance(3600000); },
     roundsStored: function () { api.applyRounds(ROUNDS.stored, {}); },
     roundsSame: function () { api.applyRounds(ROUNDS.sameAsLive, {}); },
-    roundsEmpty: function () { api.applyRounds([], {}); }
+    roundsEmpty: function () { api.applyRounds([], {}); },
+    // 用户点开「模型这一轮返回的内容」。
+    //
+    // 浏览器点一下 summary 做两件事：**同步**把 `open` 翻成 true，另**异步**派发一个
+    // `toggle` 事件。被测代码只认前者（见 `captureExpanded`：靠 `toggle` 会在真浏览器里
+    // 失效，因为重画等不到那个异步事件），所以这里也只做前者 —— 把 `toggle` 也抛出来
+    // 反而是**替被测代码假设了一个它其实用不上的机制**，会掩盖「它其实依赖了异步事件」
+    // 这类错误。
+    openModel: function () {
+        findByClass(els[LOG_ID], 'ai-think-model').open = true;
+    },
+    // 用户又把它收起来。收起之后重画**不该**再自动展开（否则就是跟用户对着干）。
+    closeModel: function () {
+        findByClass(els[LOG_ID], 'ai-think-model').open = false;
+    }
 };
 
 var cases = __CASES__;
@@ -551,6 +584,26 @@ def run() -> dict:
         {
             "name": "刷新时已在跑",
             "ops": ["setRun", "markExternalRun", "progressMissingRunning"],
+        },
+        # 13a. **展开「模型这一轮返回的内容」之后，下一帧重画必须还是展开的。**
+        # 跑动中每来一帧进度就重建一次子树，而 `open` 是 DOM 属性 —— 不记状态的话
+        # 新节点回到默认收起态，用户看到的就是「点开、过几秒自己收起来」，读不了。
+        {
+            "name": "展开模型输出后重画仍展开",
+            "ops": ["watchWithRun", "progressTwoRunning", "openModel",
+                    "progressTwoRunning"],
+        },
+        # 13b. 反方向：用户收起来之后，重画**不许**又替他展开。
+        {
+            "name": "收起模型输出后重画不自动展开",
+            "ops": ["watchWithRun", "progressTwoRunning", "openModel",
+                    "progressTwoRunning", "closeModel", "progressTwoRunning"],
+        },
+        # 13c. 换一次运行不许继承上一次的展开状态：键是「轮次号 + 分片」，两次运行里重名。
+        {
+            "name": "换运行不继承展开状态",
+            "ops": ["watchWithRun", "progressTwoRunning", "openModel",
+                    "clearRun", "setRun", "progressTwoRunning"],
         },
     ]
     return _drive(cases, rounds, same)
@@ -1113,3 +1166,73 @@ def test_closing_the_drawer_mid_run_does_not_freeze_the_trace_as_missing(run):
     assert after["rounds"] == 2, "跑完之后那次取数没把逐轮画出来"
     assert after["mode"] == "settled"
     assert after["note"] == "分析已结束，下面是这次运行的逐轮记录。"
+
+
+# --------------------------------------------------------------------------
+# 「模型这一轮返回的内容」：展开之后不能被下一帧重画收起来
+# --------------------------------------------------------------------------
+
+
+def _model_box(snap: dict):
+    """这一帧里「模型这一轮返回的内容」那个 `<details>` 的状态。取不到返回 None。"""
+    def walk(node):
+        if node.get("cls") == "ai-think-model":
+            return node
+        for child in node.get("children", []):
+            hit = walk(child)
+            if hit is not None:
+                return hit
+        return None
+
+    for card in snap["rounds"]:
+        hit = walk(card)
+        if hit is not None:
+            return hit
+    return None
+
+
+def test_an_expanded_model_output_survives_the_next_frame(run):
+    """**用户点开「模型这一轮返回的内容」，下一帧重画之后必须还是展开的。**
+
+    跑动中每来一帧进度（几秒一次）`applyProgress` 就重建整棵子树，而 `open` 是
+    **DOM 属性** —— 新节点回到默认收起态。用户看到的现象就是「点开、过几秒自己收起来」，
+    内容根本读不了（这个面板的正文通常有几百上千字，几秒读不完）。
+
+    这里连看两帧：第 3 帧是用户刚点开的（`openModel`），第 4 帧是紧接着的一次重画。
+    """
+    snaps = _by_name(run)["展开模型输出后重画仍展开"]["snaps"]
+
+    opened = _model_box(snaps[2])
+    assert opened is not None and opened["open"] is True, (
+        f"用户点开之后那一帧就该是展开的，实际 {opened and opened['open']}"
+    )
+
+    after = _model_box(snaps[3])
+    assert after is not None, "重画之后那一块不见了"
+    assert after["open"] is True, (
+        "重画之后又收起来了 —— 用户点开的内容过几秒就自己合上，读不了。"
+        "展开状态必须由模块记着（`expandedModelRounds`），不能指望 DOM 留着。"
+    )
+
+
+def test_a_collapsed_model_output_is_not_reopened_behind_the_users_back(run):
+    """反方向：用户收起来之后重画不许又替他展开（那是跟用户对着干）。"""
+    snaps = _by_name(run)["收起模型输出后重画不自动展开"]["snaps"]
+
+    assert _model_box(snaps[3])["open"] is True, "点开那一帧应当是展开的"
+    assert _model_box(snaps[4])["open"] is False, "用户收起之后那一帧应当是收起的"
+    assert _model_box(snaps[5])["open"] is False, "重画又把它展开了"
+
+
+def test_changing_the_run_does_not_inherit_the_expanded_state(run):
+    """换一次运行不许继承上一次的展开状态。
+
+    记的键是「轮次号 + 分片」，两次运行里必然重名 —— 不清空的话，新一次的某一轮会
+    莫名其妙是展开的，而用户从没点过它。
+    """
+    snaps = _by_name(run)["换运行不继承展开状态"]["snaps"]
+
+    assert _model_box(snaps[2])["open"] is True, "点开那一帧应当是展开的"
+    assert _model_box(snaps[5])["open"] is False, (
+        "换了运行之后仍然是展开的 —— 展开状态跨运行漏了过来（键在两个运行里重名）"
+    )
