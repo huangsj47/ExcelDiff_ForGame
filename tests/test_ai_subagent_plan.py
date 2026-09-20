@@ -396,7 +396,10 @@ class TestTheSynthesisTask:
 
         assert "S3" in task and "未运行" in task, task
         assert "剩余预算不足" in task, "跳过它的原因要原样带出来"
-        assert "没有任何人看过" in task, task
+        # 「没有人看过」只有**压根没跑**的那种才写得起：跑完但结论没交回的分片看过了，
+        # 只是没交回来（见 `_shard_gap_lines` 的第三条分支）。所以这一句判在**分片自己那行**上，
+        # 而任务书的收尾语只统一要求「如实写明是哪种」（下面那条）。
+        assert "本次**没有人看过**" in task, task
         assert "绝不能因为没人报出问题就当成「没问题」" in task, task
 
 

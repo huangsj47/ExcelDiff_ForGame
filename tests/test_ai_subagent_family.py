@@ -20,6 +20,7 @@ import pytest
 
 from services.ai.engine import (
     DEGRADE_CONTEXT,
+    DEGRADE_MARKDOWN,
     DEGRADE_ROUNDS,
     DEGRADE_SUBAGENT,
     STATUS_DEGRADED,
@@ -55,6 +56,7 @@ from tests.test_ai_engine import (
     _anomaly,
     _final,
     _loaded,
+    _markdown,
     _requests,
     _scope,
 )
@@ -278,7 +280,7 @@ class TestAFailedMemberIsAGap:
 
         task = build_synthesis_task(plan, steps)
 
-        assert "没有跑成的分片" in task and "S2" in task
+        assert "没能交回结论的分片" in task and "S2" in task
         assert "上游 502" in task
 
     def test_a_failed_synthesis_makes_the_family_fail(self):
@@ -290,6 +292,54 @@ class TestAFailedMemberIsAGap:
 
         assert result.outcome.status == STATUS_FAILED
         assert result.outcome.report_markdown == ""
+
+
+class TestAMemberThatRanButDidNotHandBackConclusions:
+    """**跑完了、结论没交回来**也是一种缺口 —— 而且是最容易被读成「没问题」的那种。
+
+    实测（2026-09-20 那次）：S3 跑满 5 轮、最后一轮给的是 markdown 正文而不是协议 JSON，
+    平台按 markdown 降级保存 —— 它那一路的**结构化结论是 0 条**，而报告末尾一个字的缺口
+    都没有。它负责的三个维度（`code_logic`/`version_branch`/`process`）在清单里看起来是
+    「看过、没问题」，实际是「结论没回来」。
+    """
+
+    def _run_with_a_broken_member(self):
+        client = FlakyClient(
+            _final(_anomaly()),                      # S1 正常
+            _markdown("改了道具表，风险中等。"),        # S2 没按协议出 JSON
+            _final(_anomaly()),                      # 汇总
+            _final(_anomaly()),                      # 对账轮
+        )
+        return run_family(client=client, provider=FakeProvider(), plan=_plan(2), **_args())
+
+    def _gap_section(self) -> str:
+        report = self._run_with_a_broken_member().outcome.report_markdown
+        return report.split("信息缺口（平台补充）")[-1]
+
+    def test_it_names_the_member_and_its_dimensions(self):
+        tail = self._gap_section()
+
+        assert "S2" in tail, tail
+        assert "结论没有按协议交回" in tail, tail
+        assert "没有结构化结论进入清单" in tail, tail
+
+    def test_it_does_not_claim_nobody_looked(self):
+        """它**看过了**，只是结论没交回来 —— 写「没有人看过」是错的。
+
+        两种缺口的处置不一样：这个要人去翻它降级保存的正文，那个要人重新安排一次分析。
+        """
+        tail = self._gap_section()
+
+        assert "没有人看过" not in tail, tail
+        assert "不要当成「没有问题」" in tail, tail
+
+    def test_the_run_keeps_the_specific_reason(self):
+        """降级理由要留住「模型没按协议出 JSON」这条能对症的，别被笼统的「有分片没跑成」盖掉。
+
+        `subagent_gap` 的措辞是「有分片没有跑成、或它报出的结论没有进入最终报告」——
+        套上去之后，「模型没按协议出 JSON」这个可以直接对症的原因就看不见了。
+        """
+        assert self._run_with_a_broken_member().outcome.degradation == DEGRADE_MARKDOWN
 
 
 class TestASkippedMemberIsAGap:
