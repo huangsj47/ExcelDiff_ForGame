@@ -34,6 +34,13 @@ EXCLUDED_DIRS = {
     "__pycache__",
     ".git",
     "instance",
+    # `repos/` 是业务节点的工作副本目录，在 `.gitignore` 里（第一行就是 `/repos`）。
+    # 不排掉它，本地跑 `--strict` 会被**别人仓库**的长文件判红——实测本机就报出
+    # `repos/P_af594fc5ed_qz_luaworkspace_2/...` 两个（4216 行、2574 行）。
+    # 而 CI 是全新 clone，根本没有这个目录，于是同一条命令在本地红、在 CI 绿 ——
+    # 本地红得没有理由，跑几次之后就没人再看它的输出了，闸门也就白设了。
+    "repos",
+    ".pytest_tmp",
 }
 
 # 排除的具体文件（相对于项目根目录）

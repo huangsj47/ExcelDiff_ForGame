@@ -30,6 +30,10 @@ from typing import Sequence
 _STATS_COLUMNS_LIMIT = 24
 _STATS_TOP_VALUES = 3
 _STATS_MAX_SAMPLES = 20_000
+# 每列最多记多少个**不同取值**。超了就不再收新取值（计数也不再加），见 `add_row`。
+# 这个数必须与 `_STATS_MAX_SAMPLES` 一样**如实报出去**：统计说「不同取值 5000」时，
+# 真实值可能远大于 5000，而模型会拿这个数当「允许集合有多大」的依据（见模块抬头）。
+_STATS_MAX_DISTINCT_TEXTS = 5_000
 
 
 def _number_text(value: float) -> str:
@@ -59,14 +63,20 @@ class _SheetStats:
         self._numbers: list[list[float]] = []
         self._texts: list[dict[str, int]] = []
         self._nonempty: list[int] = []
+        # 数值型取值的**总个数**，不受 `_STATS_MAX_SAMPLES` 影响。判断「这一列是不是数值列」
+        # 必须用它，不能用 `len(self._numbers)` —— 后者是**采样后**的长度（见 `render`）。
+        self._numeric_seen: list[int] = []
         self._numeric_capped: list[bool] = []
+        self._text_capped: list[bool] = []
 
     def _slot(self, index: int) -> int:
         while len(self._numbers) <= index:
             self._numbers.append([])
             self._texts.append({})
             self._nonempty.append(0)
+            self._numeric_seen.append(0)
             self._numeric_capped.append(False)
+            self._text_capped.append(False)
         return index
 
     def add_row(self, row) -> None:
@@ -89,14 +99,20 @@ class _SheetStats:
             self._nonempty[slot] += 1
             text = str(value).strip()
             if isinstance(value, (int, float)) and not isinstance(value, bool):
+                self._numeric_seen[slot] += 1
                 if len(self._numbers[slot]) < _STATS_MAX_SAMPLES:
                     self._numbers[slot].append(float(value))
                 else:
                     self._numeric_capped[slot] = True
-            if len(self._texts[slot]) < 5_000:
+            if len(self._texts[slot]) < _STATS_MAX_DISTINCT_TEXTS:
                 self._texts[slot][text[:40]] = self._texts[slot].get(text[:40], 0) + 1
             elif text in self._texts[slot]:
                 self._texts[slot][text[:40]] += 1
+            else:
+                # 已经在取值上限上，又是一个**没见过**的取值：它进不了统计。记下来
+                # 只为在渲染时如实说一句「这一列的不同取值不止这些」——不声不响地丢掉，
+                # 模型会把「不同取值 5000」读成真实取值个数。
+                self._text_capped[slot] = True
 
     def render(self, column_labels: Sequence[str], *, header_count: int = 1,
                name_row: int = 1) -> list[str]:
@@ -137,11 +153,21 @@ class _SheetStats:
             if non_empty == 0:
                 continue
             numbers = self._numbers[index] if index < len(self._numbers) else []
+            # 「是不是数值列」按**数值型取值的总个数**判，不按采样后的 `len(numbers)`。
+            # 后者有上限：一列四万多行时采样停在上限，`len(numbers) * 2 >= non_empty` 就不成立，
+            # 于是**整列改走文本分支** —— 报出来的是「不同取值 5000」，最小/中位/P90/最大
+            # 一个都不给。而这一支给出的分布正是 value_sanity 维度要的比较基准，丢了就等于
+            # 让模型拿孤零零一个数字去猜（模块抬头说要避免的正是这件事）。实测 40,001 行即触发。
+            numeric_seen = self._numeric_seen[index] if index < len(self._numeric_seen) else 0
             # 半数以上是数值就按数值列报分布；否则按取值分布报（品质、类型、状态这类
             # 枚举列要看到「有哪些取值、各占多少」，那正是「不在允许集合里」的依据）。
-            if numbers and len(numbers) * 2 >= non_empty:
+            if numeric_seen and numeric_seen * 2 >= non_empty:
                 ordered = sorted(numbers)
-                cap = "（抽样上限 20000）" if self._numeric_capped[index] else ""
+                cap = (
+                    f"（抽样上限 {_STATS_MAX_SAMPLES}）"
+                    if self._numeric_capped[index]
+                    else ""
+                )
                 lines.append(
                     f"  - {name}：非空 {non_empty}｜数值 {len(numbers)}{cap}｜"
                     f"最小 {_number_text(ordered[0])}｜中位 {_number_text(_percentile(ordered, 0.5))}｜"
@@ -151,10 +177,20 @@ class _SheetStats:
                 buckets = self._texts[index] if index < len(self._texts) else {}
                 top = sorted(buckets.items(), key=lambda item: (-item[1], item[0]))
                 top_text = "、".join(f"{value}({count})" for value, count in top[:_STATS_TOP_VALUES])
+                # 与数值那一支同一条口径：撞了上限就**如实说**，并且说清这不是真实取值数。
+                capped = self._text_capped[index] if index < len(self._text_capped) else False
+                cap = (
+                    f"（取值上限 {_STATS_MAX_DISTINCT_TEXTS}，实际不止这些）"
+                    if capped
+                    else ""
+                )
                 lines.append(
-                    f"  - {name}：非空 {non_empty}｜不同取值 {len(buckets)}｜"
+                    f"  - {name}：非空 {non_empty}｜不同取值 {len(buckets)}{cap}｜"
                     + (f"最多：{top_text}" if top_text else "（无文本取值）")
-                    + (f"｜其中数值 {len(numbers)}" if numbers and len(numbers) * 2 < non_empty else "")
+                    # 这里同样报**总个数**：`len(numbers)` 是采样后的，一列四万多行时会少报。
+                    # 走到这一支就意味着数值不到半数（`numeric_seen == 0` 或 `*2 < non_empty`），
+                    # 所以只要 `numeric_seen` 非零就该说一句。
+                    + (f"｜其中数值 {numeric_seen}" if numeric_seen else "")
                 )
         if self.width > shown:
             lines.append(f"  - （另有 {self.width - shown} 列未做统计。）")
