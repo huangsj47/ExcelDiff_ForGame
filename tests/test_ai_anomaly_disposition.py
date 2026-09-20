@@ -591,3 +591,50 @@ class TestTheBatchRoute:
 
         assert response.status_code == 400
         assert "ids" in body["message"]
+
+
+def test_the_read_shape_carries_chinese_labels_and_a_rendered_time():
+    """中文名与时间**在服务端算好**，界面不自己映射、也不自己做时区换算。
+
+    两处各写一份映射表，改一处必然漏另一处 —— 而漏掉的那一处显示的是英文码值，
+    它看起来像正经标识符，不会有人发现。时间更硬：`disposition_at` 是库里的
+    naive-UTC，界面自己 `new Date()` 会按浏览器时区渲染（本机 UTC+8 时与旁边
+    `created_at_display` 的北京时间差 8 小时），而仓库另有测试明令禁止前端做时区换算。
+    """
+    with app.app_context():
+        project, cfg = _project()
+        run = _run(project.id, _uid("k"))
+        row = _anomaly(run, severity="critical", title="甲")
+        set_disposition(
+            row, disposition="confirmed", note="已核对", username="张三",
+            now=datetime(2026, 9, 20, 9, 34, 12, tzinfo=timezone.utc),
+        )
+        db.session.commit()
+        anomaly_id = row.id
+
+        with app.test_client() as client:
+            _login(client)
+            body = client.get(f"/ai-analysis/runs/{run.id}/anomalies").get_json()
+
+        one = [item for item in body["anomalies"] if item["id"] == anomaly_id][0]
+        assert one["severity"] == "critical" and one["severity_label"] == "严重"
+        assert one["confidence_label"] == "高"
+        assert one["disposition_at_display"] == "2026-09-20 17:34:12", (
+            f"时间没有按北京时间渲染：{one['disposition_at_display']!r}"
+        )
+
+
+def test_the_labels_survive_an_unknown_code():
+    """认不出的码值**原样返回**，不猜也不显示成空。
+
+    模型偶尔会写出允许集合之外的 severity（协议层会把它挡掉，但库里若有历史行，
+    读侧不该因此显示一空白格 —— 那与「这一条没有严重度」长得一样）。
+    """
+    with app.app_context():
+        project, cfg = _project()
+        run = _run(project.id, _uid("k"))
+        row = _anomaly(run, title="甲")
+        row.severity = "weird"
+        db.session.commit()
+
+        assert row.to_dict()["severity_label"] == "weird"

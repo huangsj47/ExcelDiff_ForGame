@@ -29,6 +29,10 @@
  * 4. **列表只有一次结论时说实话**（「还没有可对比的历史」），不摆一张只有一行的表；
  *    一条都没有时说「还没跑过分析」。
  * 5. 报告正文走 `AiReportMarkdown.render`（先整体转义再套白名单），**不在这里拼 HTML**。
+ * 6. 报告下面还挂着**结构化结论 + 处置**（`static/js/ai_anomaly_disposition.js`）：
+ *    处置是「读某一次的报告」时做的事，而这个面板已经知道看的是哪一次。这里只负责
+ *    建容器 `#aiAnomalyPanel` 并把运行号交给它 —— 清单怎么画、状态名怎么取，全在那个
+ *    模块里（只此一份）。
  */
 (function (global) {
     'use strict';
@@ -251,7 +255,24 @@
             report.textContent = NOTE.no_body;
         }
         wrap.appendChild(report);
+
+        // 结构化结论 + 处置：这一份报告里那些结论的**可操作形态**（逐条确认 / 忽略 /
+        // 撤销）。挂在报告**下面**而不是上面 —— 报告是叙事，先读后处置，也不动用户
+        // 既有的阅读位置。清单本身不在这里画：容器建好之后交给
+        // `static/js/ai_anomaly_disposition.js`（它按 `#aiAnomalyPanel` 认这个容器）。
+        var anomalies = doc.createElement('div');
+        anomalies.className = 'ai-anomaly-panel';
+        anomalies.id = 'aiAnomalyPanel';
+        wrap.appendChild(anomalies);
         body.appendChild(wrap);
+
+        // **先 `appendChild` 再调 `load`**：那边是按 id 找容器的，而
+        // `getElementById` 只认**已经在文档里**的节点 —— wrap 还没挂上去时它返回 null，
+        // 于是这一块永远空着，而且不报错（假 DOM 与真浏览器在这条上一致，都找不到）。
+        // 模块没加载时（这个页面没引那个脚本）什么都不做：缺的是脚本，不是数据。
+        if (global.AiAnomalyDisposition && global.AiAnomalyDisposition.load) {
+            global.AiAnomalyDisposition.load(row.run_id);
+        }
     }
 
     function currentRow() {

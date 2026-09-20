@@ -54,7 +54,7 @@ from app import app as flask_app  # noqa: E402
 from app import create_tables  # noqa: E402
 from auth.services import register_user  # noqa: E402
 from models import AiAnalysisRun, Commit, Project, Repository, db  # noqa: E402
-from models.ai_analysis import AiProjectAnalysisConfig  # noqa: E402
+from models.ai_analysis import AiAnalysisAnomaly, AiProjectAnalysisConfig  # noqa: E402
 from services.ai.provenance import current_provenance  # noqa: E402
 from services.ai.trace_evidence import encode_evidence, live_round_entry  # noqa: E402
 
@@ -200,6 +200,31 @@ def _seed() -> dict:
             finished_at=datetime.now(timezone.utc) - timedelta(days=3),
         )
         db.session.add(older)
+        db.session.flush()
+
+        # 报告下面那块「结构化结论 + 处置」要有真行才复核得到：一条还没处置、一条已经
+        # 被处置过（处置人/时间/备注都得显示出来）。**失败的运行一条都不建** ——
+        # 翻到那一次时看到的正是「这一次没有落库的结构化结论条目」那个空态。
+        db.session.add(AiAnalysisAnomaly(
+            run_id=run.id, project_id=project.id, fingerprint="a1b2c3d4",
+            title="【道具】ID 被删除但生成文件仍在", category="config_id",
+            severity="critical", confidence="very_high",
+            evidence=json.dumps(
+                ["config/道具表.xlsx 删除了 ID 1001", "build/lua/CfgItem.lua 里 1001 还在"],
+                ensure_ascii=False),
+            commit_ref="c" * 40, file_path="config/道具表.xlsx",
+            impact="老存档引用的道具失效", suggestion="确认是否有意下线",
+        ))
+        db.session.add(AiAnalysisAnomaly(
+            run_id=run.id, project_id=project.id, fingerprint="d4e5f6a7",
+            title="提交信息与改动不符", category="commit_msg",
+            severity="high", confidence="high",
+            evidence=json.dumps(["提交说「修数值」，实际改的是技能表"], ensure_ascii=False),
+            commit_ref="c" * 40, file_path="config/技能表.xlsx",
+            disposition="ignored", disposition_by="zhangsan",
+            disposition_at=datetime.now(timezone.utc),
+            disposition_note="误报，已核对",
+        ))
         db.session.commit()
         return {"_admin": admin_name, "commit_id": commit.id,
                 "project_id": project.id, "run_id": run.id, "older_run_id": older.id}
@@ -241,8 +266,16 @@ def _capture(ids: dict) -> tuple:
         responses[f"/ai-analysis/runs/{run_id}/report"] = client.get(
             f"/ai-analysis/runs/{run_id}/report"
         ).get_json()
+        # 报告下面那块「结构化结论 + 处置」自己会去取这一次的结论行；不预置这条，
+        # 请求会落到真网络上（页面不是从真服务起的）→ 面板上挂一条「读不到结构化结论」。
+        responses[f"/ai-analysis/runs/{run_id}/anomalies"] = client.get(
+            f"/ai-analysis/runs/{run_id}/anomalies"
+        ).get_json()
     assert len(responses[f"/ai-analysis/commit/{ids['commit_id']}/history"]["runs"]) >= 2, (
         "历次结论只有一条，「翻历史」的样子就复核不到"
+    )
+    assert responses[f"/ai-analysis/runs/{ids['run_id']}/anomalies"]["total"] >= 2, (
+        "结论行是空的，报告下面那块处置面板就复核不到"
     )
     assert responses[f"/ai-analysis/runs/{ids['run_id']}/usage"]["rounds"], (
         "逐轮明细是空的，「跑完之后看得到本次逐轮过程」就复核不到"
@@ -438,7 +471,34 @@ _HISTORY_PROBE_JS = r"""
         mark: (document.querySelector('.ai-history-mark') || {}).textContent || '',
         report: (document.getElementById('aiHistoryReportBody') || {}).textContent || '',
         exportHref: findExport(body),
-        currentRows: document.querySelectorAll('.ai-history-row.is-current').length
+        currentRows: document.querySelectorAll('.ai-history-row.is-current').length,
+        // 报告下面那块「结构化结论 + 处置」：清单、每条三个动作、批量按钮的可否。
+        // 逐条读（不是 `querySelector` 取第一个）—— 「哪一条的处置人显示出来了」
+        // 只有逐条看才知道：第一个匹配到 `.ai-anomaly-item-by` 的节点未必是第一条。
+        panelItems: Array.from(
+            document.querySelectorAll('#aiAnomalyPanel .ai-anomaly-item')
+        ).map((item) => ({
+            title: (item.querySelector('.ai-anomaly-item-title') || {}).textContent || '',
+            state: (item.querySelector('.ai-anomaly-item-state') || {}).textContent || '',
+            by: (item.querySelector('.ai-anomaly-item-by') || {}).textContent || '',
+            when: (item.querySelector('.ai-anomaly-item-at') || {}).textContent || '',
+            note: (item.querySelector('.ai-anomaly-item-note') || {}).textContent || '',
+            severity: (item.querySelector('.ai-anomaly-item-severity') || {}).textContent || '',
+            evidence: item.querySelectorAll('.ai-anomaly-evidence li').length,
+            actions: Array.from(item.querySelectorAll('.ai-anomaly-act')).map(
+                (b) => b.textContent),
+        })),
+        panelCounts: (document.querySelector('#aiAnomalyPanel .ai-anomaly-counts')
+                      || {}).textContent || '',
+        panelPicked: (document.querySelector('#aiAnomalyPanel .ai-anomaly-picked')
+                      || {}).textContent || '',
+        panelBatchDisabled: Array.from(
+            document.querySelectorAll('#aiAnomalyPanel .ai-anomaly-batch')
+        ).map((b) => b.disabled),
+        panelError: (document.querySelector('#aiAnomalyPanel .ai-anomaly-error')
+                     || {}).textContent || '',
+        panelMeta: (document.querySelector('#aiAnomalyPanel .ai-anomaly-meta')
+                    || {}).textContent || ''
     };
 }
 """
@@ -573,8 +633,51 @@ def _main(out_prefix: str) -> int:
         assert (history["exportHref"] or "").endswith(
             f"/ai-analysis/runs/{ids['run_id']}/report.md"
         ), history["exportHref"]
+        # 报告下面那块：清单得有内容、每条三个动作、没勾选时批量按钮不可用。
+        print("\n=== 结构化结论 + 处置（报告下面那块）===")
+        print(f"  计数行: {history['panelCounts']}  勾选: {history['panelPicked']}")
+        for row in history["panelItems"]:
+            print(f"  | [{row['severity']}] {row['title']} —— {row['state']}"
+                  f" / {row['by']} / {row['when']} / {row['note']}"
+                  f" / 证据 {row['evidence']} 条 / 动作 {row['actions']}")
+        print(f"  批量按钮 disabled={history['panelBatchDisabled']}"
+              f"  错误条: {history['panelError']!r}")
+        assert history["panelError"] == "", (
+            f"处置面板挂着一条错误：{history['panelError']}"
+        )
+        assert len(history["panelItems"]) >= 2, "结论清单一条都没画出来"
+        for row in history["panelItems"]:
+            assert row["actions"] == ["已确认", "已忽略", "撤销"], row["actions"]
+            assert row["evidence"] >= 1, f"这条结论一条证据都没显示：{row['title']}"
+            # 严重度印的是**服务端算好的中文名**（真路由 → 真字段 → 真 DOM 走一遍）。
+            assert row["severity"] in ("严重", "高"), (
+                f"严重度显示的不是中文名：{row['severity']!r}"
+            )
+        disposed = [row for row in history["panelItems"] if row["state"] == "已忽略"]
+        assert len(disposed) == 1, history["panelItems"]
+        assert "误报，已核对" in disposed[0]["note"], disposed[0]
+        assert "zhangsan" in disposed[0]["by"], disposed[0]
+        # 时间用服务端那个北京时间的显示串，**不是**库里那个裸 ISO（带 T、带微秒）。
+        assert disposed[0]["when"].startswith("时间：2026-"), disposed[0]["when"]
+        assert "T" not in disposed[0]["when"], (
+            f"时间印的是裸 ISO（UTC），不是服务端算好的北京时间：{disposed[0]['when']!r}"
+        )
+        # 还没处置的那一条不该凭空多出处置人/备注（假的「已经有人看过了」）。
+        fresh = [row for row in history["panelItems"] if row["state"] == "待确认"]
+        assert fresh and not fresh[0]["by"] and not fresh[0]["note"], fresh
+        assert all(history["panelBatchDisabled"]), (
+            "一条都没勾时批量按钮却是可用的 —— 点下去只会换来一句 400"
+        )
         page.locator("#aiReportHistoryModal .modal-content").screenshot(
             path=str(out_dir / f"{out_prefix}_history.png"))
+        # 面板在报告**下面**：滚到底单独拍一张，看清清单与处置动作长什么样。
+        page.evaluate(
+            "() => { const el = document.getElementById('aiAnomalyPanel');"
+            " el.scrollIntoView({block: 'end'}); }"
+        )
+        page.wait_for_timeout(300)
+        page.locator("#aiAnomalyPanel").screenshot(
+            path=str(out_dir / f"{out_prefix}_disposition.png"))
         # 翻到上一次（失败的那次）：标记变「历史」，失败那条没有正文也没有导出。
         page.evaluate(
             "() => { const rows = document.querySelectorAll('.ai-history-list tbody tr');"
@@ -588,6 +691,12 @@ def _main(out_prefix: str) -> int:
         print(f"  弹层里的导出链接: {older['exportHref']}")
         assert "（历史）" in (older["mark"] or ""), older["mark"]
         assert older["exportHref"] is None, "失败的那一次没有正文，不该给一个导出链接"
+        # 失败的那一次一条结论行都没有：面板要说实话，不是留一片空白。
+        print(f"  处置面板: 条数={len(older['panelItems'])}  说明={older['panelMeta']!r}")
+        assert not older["panelItems"], "失败的那一次不该有结论行"
+        assert "没有落库的结构化结论" in (older["panelMeta"] or ""), (
+            f"没有结论行时面板什么都没说：{older['panelMeta']!r}"
+        )
         page.locator("#aiReportHistoryModal .modal-content").screenshot(
             path=str(out_dir / f"{out_prefix}_history_older.png"))
         page.keyboard.press("Escape")

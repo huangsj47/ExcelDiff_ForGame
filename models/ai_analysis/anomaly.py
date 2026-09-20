@@ -85,6 +85,18 @@ class AiAnalysisAnomaly(db.Model):
 
         解析失败回空数组而不是抛：这是读路径，一条证据存坏了不该让整次读取 500
         —— 那一行其余的字段（标题、严重度、文件）都还是好的，而它们才是用户要的。
+
+        ## 为什么中文名与时间显示在这里算（而不是界面自己映射）
+
+        与本仓库既有的口径一致（见 `conclusion_view` 的 `scope_label` / `risk_label`）：
+        **中文口径在服务端算，界面不自己映射**。两处各写一份映射表，改一处必然漏另一处，
+        而漏掉的那一处显示的是英文码值 —— 它看起来像正经标识符，不会有人发现。
+
+        时间同理，而且更硬：`disposition_at` 是**库里的 naive-UTC**，
+        界面自己 `new Date()` 会按浏览器时区渲染（本机 UTC+8 时与旁边那张
+        `created_at_display` 的北京时间差 8 小时），而仓库另有测试明令禁止前端做时区换算
+        （见 `tests/test_ai_analysis_time_display.py`）。所以给一个算好的
+        `disposition_at_display`，界面直接印。
         """
         try:
             evidence = json.loads(self.evidence) if self.evidence else []
@@ -92,6 +104,12 @@ class AiAnalysisAnomaly(db.Model):
             evidence = []
         if not isinstance(evidence, list):
             evidence = []
+        from services.ai.report_document import (
+            beijing_display,
+            confidence_label,
+            severity_label,
+        )
+
         return {
             "id": self.id,
             "run_id": self.run_id,
@@ -99,7 +117,11 @@ class AiAnalysisAnomaly(db.Model):
             "title": self.title,
             "category": self.category,
             "severity": self.severity,
+            # 中文名（`严重` / `高`）。认不出的码值原样返回 —— 与
+            # `report_document._label` 同一条兜底：不猜、也不显示成空。
+            "severity_label": severity_label(self.severity),
             "confidence": self.confidence,
+            "confidence_label": confidence_label(self.confidence),
             "evidence": evidence,
             "commit_ref": self.commit_ref,
             "file_path": self.file_path,
@@ -108,6 +130,7 @@ class AiAnalysisAnomaly(db.Model):
             "disposition": self.disposition,
             "disposition_by": self.disposition_by,
             "disposition_at": self.disposition_at.isoformat() if self.disposition_at else None,
+            "disposition_at_display": beijing_display(self.disposition_at),
             "disposition_note": self.disposition_note,
         }
 

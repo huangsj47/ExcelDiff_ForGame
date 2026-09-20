@@ -2192,6 +2192,117 @@ main:focus {
     background: transparent;
 }
 
+/* ===================================================================
+   结构化结论 + 处置（在「历次结论」弹层里，报告正文下面）
+   -------------------------------------------------------------------
+   与报告区同一条分隔线的关系：报告在上、处置在下，两者是同一次运行的两面
+   （叙事 / 可操作形态）。清单本身画在 `static/js/ai_anomaly_disposition.js`，
+   这里只管样子。
+   =================================================================== */
+.ai-anomaly-panel {
+    margin-top: var(--space-5, 20px);
+    padding-top: var(--space-4, 16px);
+    border-top: 1px solid var(--color-border, #dee2e6);
+}
+
+.ai-anomaly-header {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-3, 12px);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-2, 8px);
+}
+
+.ai-anomaly-header-title { margin: 0; font-weight: 600; }
+
+.ai-anomaly-header-hint,
+.ai-anomaly-meta {
+    font-size: var(--font-size-sm, 12px);
+    color: var(--color-text-muted, #656d76);
+}
+
+/* 工具条**吸在弹层顶部**：清单可能有十几条，滚到中间想批量处置时，
+   按钮不该已经滚出视野（那就只剩逐条点这一条路）。 */
+.ai-anomaly-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2, 8px);
+    flex-wrap: wrap;
+    padding: var(--space-2, 8px) 0;
+    margin-bottom: var(--space-2, 8px);
+    background: var(--color-surface, #ffffff);
+    border-bottom: 1px solid var(--color-border-subtle, #f1f5f9);
+}
+
+.ai-anomaly-counts { font-size: var(--font-size-md, 14px); font-weight: 600; }
+
+.ai-anomaly-picked {
+    font-size: var(--font-size-sm, 12px);
+    color: var(--color-text-muted, #656d76);
+}
+
+.ai-anomaly-toolbar .ai-anomaly-batch-note { width: 200px; }
+
+.ai-anomaly-item {
+    padding: var(--space-3, 12px) 0;
+    border-bottom: 1px solid var(--color-border-subtle, #f1f5f9);
+}
+
+.ai-anomaly-item-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2, 8px);
+    flex-wrap: wrap;
+}
+
+.ai-anomaly-item-title { font-weight: 600; }
+
+.ai-anomaly-item-meta {
+    display: flex;
+    gap: var(--space-3, 12px);
+    flex-wrap: wrap;
+    margin-top: 2px;
+    font-size: var(--font-size-sm, 12px);
+    color: var(--color-text-muted, #656d76);
+}
+
+.ai-anomaly-evidence {
+    margin: var(--space-2, 8px) 0 0 var(--space-4, 16px);
+    padding: 0;
+    font-size: var(--font-size-sm, 12px);
+    line-height: 1.6;
+}
+
+.ai-anomaly-item-impact,
+.ai-anomaly-item-suggestion {
+    margin-top: 2px;
+    font-size: var(--font-size-sm, 12px);
+    color: var(--color-text-muted, #656d76);
+}
+
+.ai-anomaly-item-disposition {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3, 12px);
+    flex-wrap: wrap;
+    margin-top: var(--space-2, 8px);
+    font-size: var(--font-size-sm, 12px);
+    color: var(--color-text-muted, #656d76);
+}
+
+.ai-anomaly-item-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2, 8px);
+    flex-wrap: wrap;
+    margin-top: var(--space-2, 8px);
+}
+
+.ai-anomaly-item-actions .ai-anomaly-note { width: 260px; }
+
 /* -------------------------------------------------------------------
    AI 抽屉与 Bootstrap 弹层的层级
    -------------------------------------------------------------------

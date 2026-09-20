@@ -561,6 +561,9 @@
 {# 「历次结论」：列表、选中、报告渲染与「导出这一份」。三份模板的弹层 DOM 逐字相同，
    逻辑只此一份（弹层里那份报告用的是与抽屉同一套 Markdown 渲染）。 #}
 <script src="{{ url_for('static', filename='js/ai_report_history.js') }}"></script>
+{# 结构化结论 + 处置（确认 / 忽略 / 撤销）：挂在「历次结论」弹层里那份报告下面。
+   清单怎么画、状态名怎么取全在模块里 —— 模板一个字都不拼。 #}
+<script src="{{ url_for('static', filename='js/ai_anomaly_disposition.js') }}"></script>
 {% endblock %}
 
 {% block scripts %}
