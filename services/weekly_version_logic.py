@@ -5,8 +5,8 @@
 import json
 import math
 import time
-import traceback
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from flask import abort, jsonify, render_template, request, url_for
 from werkzeug.exceptions import HTTPException
@@ -43,6 +43,11 @@ from services.weekly_excel_merge_helpers import (
 )
 from services.weekly_excel_merge_helpers import (
     merge_segmented_excel_diff_payload as _merge_segmented_excel_diff_payload_helper,
+)
+from services.weekly_file_sync import (
+    WeeklyFileSyncResult,
+    describe_weekly_file_totals,
+    get_real_base_commit_from_vcs,
 )
 from services.weekly_version_files_api_helpers import (
     extract_author_lookup_keys,
@@ -1381,33 +1386,50 @@ def process_weekly_version_sync(config_id):
         log_print(f"涉及 {len(files_commits)} 个文件", 'WEEKLY')
         # 单文件失败必须累计上报：过去 continue 掉之后照样打「同步完成」并标 completed。
         failed_details = []
+        # 逐文件的结果**只累计、不逐条打**（见 `describe_weekly_file_totals`）：
+        # 条数与文件数成正比，1 个项目 2 个仓库就已经在刷屏。
+        totals = {"created": 0, "updated": 0, "excel": 0, "excel_failed": 0, "vcs": 0}
         for file_path, file_commits in files_commits.items():
             try:
-                generate_weekly_merged_diff(config, file_path, file_commits)
+                result = generate_weekly_merged_diff(config, file_path, file_commits)
+                if result is not None:
+                    totals["created"] += 1 if result.created else 0
+                    totals["updated"] += 1 if result.updated else 0
+                    totals["excel"] += 1 if result.excel == 'created' else 0
+                    totals["excel_failed"] += 1 if result.excel == 'failed' else 0
+                    totals["vcs"] += 1 if result.vcs_base_lookup else 0
             except Exception as e:
                 failed_details.append((file_path, str(e)))
                 log_print(f"生成文件 {file_path} 的合并diff失败（第 {len(failed_details)} 个失败）: {e}", 'WEEKLY', force=True)
 
+        summary = describe_weekly_file_totals(totals, len(files_commits))
         if failed_details:
             outcome = build_partial_failure_outcome(len(files_commits), failed_details)
-            log_print(f"❌ 周版本同步部分失败: {config.name} - {outcome.describe()}", 'WEEKLY', force=True)
+            log_print(f"❌ 周版本同步部分失败: {config.name} - {summary} - {outcome.describe()}", 'WEEKLY', force=True)
             _weekly_excel_cache_service.log_cache_operation(f"❌ 周版本同步部分失败: {config.name} - {outcome.describe()}", 'error', repository_id=config.repository_id, config_id=config.id)
             return outcome
 
-        log_print(f"周版本同步完成: {config.name}", 'WEEKLY')
+        log_print(f"周版本同步完成: {config.name} - {summary}", 'WEEKLY')
         _weekly_excel_cache_service.log_cache_operation(f"✅ 周版本同步完成: {config.name} - 处理了 {len(files_commits)} 个文件", 'success', repository_id=config.repository_id, config_id=config.id)
         return completed_outcome(config, len(files_commits))
     except Exception as e:
         db.session.rollback()  # 错误路径必须回滚，避免脏事务残留（rule 4.2）
         log_print(f"周版本同步处理失败: {e}", 'WEEKLY', force=True)
         raise e
-def generate_weekly_merged_diff(config, file_path, commits):
-    """为单个文件生成周版本合并diff"""
+
+
+def generate_weekly_merged_diff(config, file_path, commits) -> Optional[WeeklyFileSyncResult]:
+    """为单个文件生成周版本合并diff。
+
+    **返回它干了什么**（`WeeklyFileSyncResult`），由调用方聚合成一行日志。本函数自己
+    只打两类：错误（`force=True`，必须看见）与 `DETAIL` 明细（默认关）。
+    """
     try:
         if not commits:
-            return
+            return None
 
         repository = config.repository
+        vcs_base_lookup = False
         # 基准版本（窗口起始前的最后一个提交；窗口须换算，否则基准会被选晚 8 小时）
         _win_start_utc, _ = weekly_window_in_utc(config)
         base_commit = Commit.query.filter(
@@ -1417,12 +1439,15 @@ def generate_weekly_merged_diff(config, file_path, commits):
         ).order_by(Commit.commit_time.desc()).first()
         # 优化策略：如果数据库中没有找到基准版本，直接查询Git/SVN获取真实的提交历史
         if not base_commit:
-            log_print(f"🔍 数据库中未找到基准版本，查询Git/SVN获取 {file_path} 的完整提交历史", 'WEEKLY', force=True)
+            vcs_base_lookup = True
+            # 逐条明细（默认关）。**不能再用 `force=True`** —— 它在逐文件的路上，
+            # 而 force 会短路整个日志开关，等于这一类行永远关不掉。次数由调用方汇总。
+            log_print(f"🔍 数据库中未找到基准版本，查询Git/SVN获取 {file_path} 的完整提交历史", 'DETAIL')
             base_commit = get_real_base_commit_from_vcs(config, file_path)
             if base_commit:
-                log_print(f"✅ 从Git/SVN获取到真实基准版本: {base_commit.commit_id[:8]} ({base_commit.commit_time})", 'WEEKLY', force=True)
+                log_print(f"✅ 从Git/SVN获取到真实基准版本: {base_commit.commit_id[:8]} ({base_commit.commit_time})", 'DETAIL')
             else:
-                log_print("ℹ️ Git/SVN中也未找到更早的提交，确认为新文件", 'WEEKLY', force=True)
+                log_print("ℹ️ Git/SVN中也未找到更早的提交，确认为新文件", 'DETAIL')
         # 获取最新版本（时间范围内的最后一个提交）
         latest_commit = commits[-1]
         # 检查是否已存在缓存
@@ -1459,7 +1484,8 @@ def generate_weekly_merged_diff(config, file_path, commits):
                 existing_cache.confirmation_status = json.dumps({"dev": "pending"})
                 existing_cache.overall_status = 'pending'
                 existing_cache.status_changed_by = None
-            log_print(f"更新周版本diff缓存: {file_path}", 'WEEKLY')
+            log_print(f"更新周版本diff缓存: {file_path}", 'DETAIL')
+            created, updated = False, True
         else:
             # 创建新缓存
             new_cache = WeeklyVersionDiffCache(
@@ -1480,7 +1506,8 @@ def generate_weekly_merged_diff(config, file_path, commits):
                 last_sync_time=datetime.now(timezone.utc)
             )
             db.session.add(new_cache)
-            log_print(f"创建周版本diff缓存: {file_path}", 'WEEKLY')
+            log_print(f"创建周版本diff缓存: {file_path}", 'DETAIL')
+            created, updated = True, False
             # 这里原先有一段「基准版本优化」：base 为空时再查一次 VCS，把查到的提交写进
             # base_commit_id。它是**取不到的** —— 走到这里意味着上面那次
             # get_real_base_commit_from_vcs 已经返回 None（库里与 VCS 都确认没有更早的
@@ -1491,20 +1518,30 @@ def generate_weekly_merged_diff(config, file_path, commits):
             # 已删除：base 为空时该列保持 NULL，与 payload 里的 'base_commit': None 一致。
         db.session.commit()
         # 检查是否需要生成Excel合并diff缓存
+        excel = 'skipped'
         if _weekly_excel_cache_service.needs_merged_diff_cache(config.id, file_path):
-            log_print(f"触发Excel合并diff缓存生成: {file_path}", 'WEEKLY')
+            log_print(f"触发Excel合并diff缓存生成: {file_path}", 'DETAIL')
+            excel = 'created'
             try:
                 # 异步生成Excel HTML缓存
                 create_weekly_excel_cache_task(config.id, file_path)
-                log_print(f"✅ Excel缓存任务创建成功: {file_path}", 'WEEKLY')
+                log_print(f"✅ Excel缓存任务创建成功: {file_path}", 'DETAIL')
             except Exception as cache_e:
                 log_print(f"创建Excel缓存任务失败: {cache_e}", 'WEEKLY', force=True)
-        else:
-            log_print(f"跳过Excel缓存生成: {file_path} (不是Excel文件或不需要缓存)", 'WEEKLY')
+                excel = 'failed'
+        # 走到这里说明这个文件的缓存处理是**成功**的（失败在上面 raise 掉了）。
+        # 「跳过 Excel 缓存」不在此处记日志：它是**刻意的非动作**，而对代码仓库来说
+        # 几乎是每个文件的命运 —— 一行一个文件，833 个文件就是 833 行在说「我没干什么」，
+        # 且与「更新缓存」那行数量恒等。计入返回值，由调用方聚合成一行。
+        return WeeklyFileSyncResult(
+            created=created, updated=updated, excel=excel, vcs_base_lookup=vcs_base_lookup
+        )
     except Exception as e:
         db.session.rollback()
         log_print(f"生成周版本合并diff失败: {file_path}, 错误: {e}", 'WEEKLY', force=True)
         raise e
+
+
 def process_weekly_excel_cache(config_id, file_path):
     """处理周版本Excel缓存生成"""
     perf_metrics_service = get_perf_metrics_service()
@@ -1709,90 +1746,3 @@ def create_weekly_excel_cache_task(config_id, file_path):
         log_print(f"错误详情: {type(e).__name__}: {str(e)}", 'WEEKLY', force=True)
         db.session.rollback()
         raise e
-
-def get_real_base_commit_from_vcs(config, file_path):
-    """从Git/SVN获取文件的真实基准版本提交"""
-    try:
-        repository = config.repository
-        # 根据仓库类型选择相应的服务
-        if repository.type == 'git':
-            from services.threaded_git_service import ThreadedGitService
-            vcs_service = ThreadedGitService(
-                repository.url,
-                repository.root_directory,
-                repository.username,
-                repository.token,
-                repository
-            )
-        elif repository.type == 'svn':
-            vcs_service = _get_svn_service(repository)
-        else:
-            log_print(f"不支持的仓库类型: {repository.type}", 'WEEKLY', force=True)
-            return None
-
-        # 获取文件的完整提交历史
-        log_print(f"🔍 从{repository.type.upper()}获取文件提交历史: {file_path}", 'WEEKLY')
-        if repository.type == 'git':
-            # Git: 获取文件的提交历史
-            commits_data = vcs_service.get_file_commit_history(file_path, limit=100)
-        else:
-            # SVN: 获取文件的提交历史
-            commits_data = vcs_service.get_file_history(file_path, limit=100)
-        if not commits_data:
-            log_print(f"📭 {repository.type.upper()}中未找到文件 {file_path} 的提交历史", 'WEEKLY')
-            return None
-
-        # 查找周版本开始时间之前的最后一个提交
-        from datetime import timezone
-        base_commit_data = None
-        for commit_data in commits_data:
-            commit_time = commit_data.get('commit_time')
-            if commit_time:
-                if commit_time.tzinfo is None:
-                    commit_time = commit_time.replace(tzinfo=timezone.utc)
-                # config.start_time 是北京墙钟，不能按 UTC 解释（原注释「假设为UTC」正是窗口
-                # 偏移 8 小时的根源）。这里只取起点，故走 weekly_window_in_utc 解包 —— 直接调
-                # beijing_window_to_utc_naive 会因少传 end_time 抛 TypeError 而被末尾 except 吞掉。
-                config_start_time, _ = weekly_window_in_utc(config)
-                if config_start_time is None:
-                    continue
-                config_start_time = config_start_time.replace(tzinfo=timezone.utc)
-                if commit_time < config_start_time:
-                    base_commit_data = commit_data
-                    break
-
-        if not base_commit_data:
-            log_print(f"📭 {repository.type.upper()}中未找到周版本开始前的提交", 'WEEKLY')
-            return None
-
-        # 检查数据库中是否已存在这个提交记录
-        existing_commit = Commit.query.filter_by(
-            repository_id=repository.id,
-            commit_id=base_commit_data['commit_id'],
-            path=file_path
-        ).first()
-        if existing_commit:
-            log_print(f"✅ 数据库中已存在基准提交: {existing_commit.commit_id[:8]}", 'WEEKLY')
-            return existing_commit
-
-        # 如果数据库中不存在，创建新的提交记录
-        log_print(f"📝 创建新的基准提交记录: {base_commit_data['commit_id'][:8]}", 'WEEKLY')
-        new_commit = Commit(
-            repository_id=repository.id,
-            commit_id=base_commit_data['commit_id'],
-            path=file_path,
-            author=base_commit_data.get('author', 'Unknown'),
-            commit_time=base_commit_data['commit_time'],
-            message=base_commit_data.get('message', ''),
-            operation=base_commit_data.get('operation', 'M')
-        )
-        db.session.add(new_commit)
-        db.session.commit()
-        log_print(f"✅ 成功创建基准提交记录: {new_commit.commit_id[:8]} ({new_commit.commit_time})", 'WEEKLY')
-        return new_commit
-
-    except Exception as e:
-        log_print(f"❌ 从{repository.type.upper()}获取基准版本失败: {e}", 'WEEKLY', force=True)
-        traceback.print_exc()
-        return None
-

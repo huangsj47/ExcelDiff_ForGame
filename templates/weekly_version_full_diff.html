@@ -509,6 +509,9 @@
 
 {# 表体渲染的单一实现：必须在本页内联脚本**之前**加载（本页的入口函数调它） #}
 <script src="{{ url_for('static', filename='js/excel_diff_table.js') }}?v=1.0"></script>
+{# 工作表标签的顺序与默认选中：也是单一实现（同一份给提交页与合并页用），
+   同样必须在内联脚本之前加载。 #}
+<script src="{{ url_for('static', filename='js/excel_sheet_order.js') }}?v=1.0"></script>
 <script>
 let configId = {{ config.id }};
 let filePath = '{{ file_path }}';
@@ -947,19 +950,12 @@ window.generateWeeklyExcelTabs = function(tabsContainer, sheets) {
     const sheetNames = Object.keys(sheets);
     let tabsHtml = '';
 
-    // 分析工作表变更状态
-    const sheetAnalysis = sheetNames.map(name => {
-        const sheet = sheets[name];
-        const hasChanges = sheetHasChanges(sheet);
-        return { name, hasChanges };
-    });
-
-    // 排序：有变更的在前
-    const sortedSheets = sheetAnalysis.sort((a, b) => {
-        if (a.hasChanges && !b.hasChanges) return -1;
-        if (!a.hasChanges && b.hasChanges) return 1;
-        return a.name.localeCompare(b.name);
-    });
+    // 排序：有变更的在前，**组内保持工作簿原始顺序**（口径见
+    // static/js/excel_sheet_order.js）。这里原先组内是按表名字母序排的 ——
+    // 表名不是 `Sheet1` 的项目会被重排，而 AI 说的「第 N 张表」用的是工作簿顺序。
+    const sortedSheets = ExcelSheetOrder.orderSheets(
+        ExcelSheetOrder.analyzeSheets(sheetNames, sheets, sheetHasChanges)
+    );
 
     // 选中要展示的工作表（口径见 pickActiveSheet）
     const urlSheet = getSheetFromUrl();

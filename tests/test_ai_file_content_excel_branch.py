@@ -326,15 +326,22 @@ class TestAgentSideWorkbookBranch:
         assert got['content'].split('\n') == ['id,name', '1,Alice'], got
         assert got['total_lines'] == 2, got
 
-    def test_a_binary_file_is_not_pretended_to_be_a_workbook(self, monkeypatch, repository_id):
-        """非工作簿的二进制（`.bin`）仍走解码那条路（与平台本地行为一致）。
+    def test_a_binary_file_gets_the_same_notice_as_the_platform_path(self, monkeypatch, repository_id):
+        """非工作簿的二进制（`.bin`）：**与平台本地那条路给出同一句话**。
 
-        它给出来的确实是一段替换过字符的文本 —— 这不是本分支要解决的题：本分支只保证
-        **配表**不被当成乱码喂给模型（配表是本平台的主战场，且平台本地那条路早有渲染）。
+        修前这里与平台本地是两份不同的文本：平台侧严格 `utf-8` 解码失败 → 回一句
+        「[无法展示的内容] …不是文本…」，Agent 侧 `errors='replace'` → 回一段带替换符的
+        乱码（本用例原先断的就是这个：`total_lines >= 1`）。同一次索取在单机与多节点下
+        于是给出两份不同的文本，而模型据此写出的结论也会不同。
+
+        现在两端都走 `utils.text_decoding`：真正的二进制（魔数 / NUL）给同一句话
+        （`binary_content_notice`），并且用 `kind: "binary"` 告诉平台侧不要再按行号包一层。
         """
         got = self._read(monkeypatch, repository_id, 'assets/blob.bin', b'\x00\x01\x02\x03\xff')
-        assert got.get('kind') != 'excel', got
-        assert got['total_lines'] >= 1, got
+
+        assert got.get('kind') == 'binary', got
+        assert '无法展示' in got['content'] and '没有内容' in got['content'], got
+        assert 'total_lines' not in got, got
 
 
 class TestPlatformSideRendersTheAgentWorkbook:

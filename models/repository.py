@@ -38,6 +38,17 @@ class Repository(db.Model):
     log_regex = db.Column(db.Text)
     log_filter_regex = db.Column(db.Text)
     commit_filter = db.Column(db.Text)
+    # 界面上那一栏「重点表名」：管理员声明的**本项目重点表**，逗号分隔（中英文逗号、
+    # 分号、换行都收，见 `services.ai.project_facts.declared_important_tables`）。
+    #
+    # 语义与读法：命中改动路径的**表名/文件名**即算「关键路径」，会把本次周版本分析从
+    # 增量升级为全量（`ai_analysis_service._decide_scope` 的 `critical_path_detected`）。
+    # 匹配忽略大小写，按 basename、去扩展名的 stem、整条路径三种写法比，另允许
+    # 「声明名出现在文件名里且落在名字分量的起点」（于是填「道具表」能命中
+    # `[30]道具表_CfgItem.xlsx`）。判据与理由见 `project_facts.important_table_hit`。
+    #
+    # **这一栏以前只写不读**：界面上让管理员填，全仓没有一处读它，于是「我明明填了
+    # 重点表，分析还是按增量跑」这件事既没有效果也没有解释。
     important_tables = db.Column(db.Text)
     unconfirmed_history = db.Column(db.Boolean, default=False)
     delete_table_alert = db.Column(db.Boolean, default=False)

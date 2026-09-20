@@ -2,22 +2,33 @@
 
 ## 为什么要合
 
-配表驱动的项目里，**一张表与它的生成物是同一次改动**：改了 `[30]道具表_CfgItem.xlsx`，
-产物 `CfgItem.lua` 跟着变。把它们当成两个独立的 diff 看，有两个代价：
+配表驱动的项目里，一张表与它的生成物通常由**同一次导表**产生：改了
+`[30]道具表_CfgItem.xlsx`，产物 `CfgItem.lua` 跟着变。把它们当成两个独立的 diff 看，
+有两个代价：
 
 1. **丢掉最关键的关联。** 「表里加了 ID，生成的代码里有没有对应项」「表删了条目，生成的
    代码还留着旧逻辑」这类问题，只有在两边一起看的时候才看得见；分开看，每一侧都正常。
 2. **浪费索取次数。** 模型要为同一个逻辑改动花两次 `file_diff`，而次数是与「能看多少个
    文件」直接挂钩的稀缺资源（见 `context_tools.DEFAULT_MAX_TOOL_REQUESTS`）。
 
+**但「表与生成物必须一起看」是项目事实，不是平台事实。** 平台手里只有文件名，它
+**不知道**两个文件之间到底是什么关系（见下面「识别规则」）。所以平台在这一层只做一件事：
+把「这几个文件里出现了同一个记号」这个**可观测的事实**说出来，并明确标成「待确认」；
+那句领域规则由项目知识包自己写（G119 写在 `references/config-table-spec.md`）。
+
 ## 识别规则（与项目无关）
 
 按「生成物模块名」这个**共同记号**配对：两个路径的**文件名**里出现同一个
-`<前缀><名字>` 记号（默认前缀 `Cfg`，例：`CfgItem`、`CfgModuleSub`），它们就属于同一个
-变更单元。表名里的 `[30]道具表_` 前缀、目录、扩展名都不参与匹配。
+`<前缀><名字>` 记号（默认前缀 `Cfg`，例：`CfgItem`、`CfgModuleSub`），它们就被放进
+同一个单元。表名里的 `[30]道具表_` 前缀、目录、扩展名都不参与匹配。
 
-项目用什么前缀由项目知识包决定（默认前缀只是「配表项目的常见约定」）；识别不出记号的
-路径各自成为一个单元 —— **不猜，也不硬凑**。
+前缀**由项目自己声明**：`services/ai/project_facts.py` 从项目知识包的
+`references/project-facts.md` 读 `generated_prefixes`（不声明时用平台默认值；声明成
+`none` 表示「本项目没有可配对的产物前缀」）。`build_bundles` 的 `generated_prefixes`
+形参就是这条通道的接口 —— 在这之前它是个**没有任何生产调用方传过**的形参，
+于是不叫 `CfgXxx` 的项目里配对恒为 0 组，而且不报错、不留痕。
+
+识别不出记号的路径各自成为一个单元 —— **不猜，也不硬凑**。
 
 ## 两个条件，都来自线上真实数据
 
@@ -39,7 +50,9 @@
 产物里的模块名是英文。名字配对在这里做不到，**也不该硬做**（靠猜「RoleAttr 就是
 角色属性」配出来的对，猜错了没人会发现）。所以这个项目里 bundle 会长期是 0 组 ——
 这是**如实**的结果，不是没生效：宁可什么都不说，也不说一句「这几个文件是一件事」
-而其实不是。
+而其实不是。**「0 组」这件事现在会被记一笔**（见 `change_set.build` 里的
+`PrefixDeclaration.describe`），这样「这个项目本来就没得配」与「我们根本不会配」
+才分得开。
 
 ## 边界
 
@@ -57,11 +70,15 @@ from typing import Iterable, Mapping, Sequence, Tuple
 
 from services.ai.scope import normalize_path
 
-# 生成物模块名的前缀。项目知识里写的产物是 `CfgXxx.lua`、表名形如 `[30]道具表_CfgItem.xlsx`，
-# 默认值就是照这个约定取的；实际改动里也会出现 `<模块名>CfgMod.lua` 这种（见模块文档）。
+# 生成物模块名的前缀。G119 的知识里写的产物是 `CfgXxx.lua`、表名形如 `[30]道具表_CfgItem.xlsx`，
+# 这个默认值就是照那个项目的约定取的 —— 它**只是默认值**：项目可以在知识包里声明自己的
+# 前缀（见 `project_facts.generated_prefixes`），声明了就以声明为准。
 DEFAULT_GENERATED_PREFIXES = ("Cfg",)
 
 # 单元类型，用于在提示词里说明「这一组为什么在一起」。
+# `KIND_GENERATED_PAIR` 这个名字是历史叫法（取值 `generated_pair` 也照旧）—— 它现在的
+# 含义是「同记号跨了表与产物两侧」，**不是**「平台确认了这是表与其生成物」：平台判这一组
+# 的唯一依据是文件名（见 `_spans_table_and_code`），它没有任何办法核实两者的真实关系。
 KIND_GENERATED_PAIR = "generated_pair"
 KIND_SINGLE = "single"
 
@@ -95,9 +112,19 @@ class Bundle:
 
     @property
     def label(self) -> str:
-        """给人看的一句话说明。"""
+        """给人看的一句话说明。
+
+        **只写平台能观测到的事实**：平台看到的是「这几个文件名里有同一个记号」，
+        它没有核实过这些文件之间是什么关系。所以这里不写「表与其生成物」这种断言 ——
+        在别的项目里 `Item.csv` 与同名脚本 `Item.py` 也会凑成一对，那时「必须一起看」
+        就是一句平台自己都不知道真假的话。领域规则（表与产物为什么该一起看）属于
+        项目知识包，见模块文档。
+        """
         if self.kind == KIND_GENERATED_PAIR:
-            return f"配表改动 {self.key}（表与其生成物，必须一起看）"
+            return (
+                f"同一记号「{self.key}」的 {len(self.members)} 个文件"
+                "（疑似同一次改动，待确认）"
+            )
         return self.members[0] if self.members else self.key
 
     def with_member_first(self, path: str) -> "Bundle":
@@ -215,9 +242,10 @@ def companions_of(
 
 
 def describe_bundles(bundles: Iterable[Bundle], *, limit: int = 0) -> list[str]:
-    """把多成员单元渲染成几行说明，用于在变更清单里点出「这几件事是一件事」。
+    """把多成员单元渲染成几行说明，用于在变更清单里点出「这几个文件名有关联」。
 
     只列多成员单元：单文件单元没有需要说明的关联，列出来只是噪音。
+    说明的措辞一律是**平台可观测的事实 + 待确认**（见 `Bundle.label`），不下断言。
     """
     multi = [bundle for bundle in bundles if bundle.is_multi]
     lines: list[str] = []

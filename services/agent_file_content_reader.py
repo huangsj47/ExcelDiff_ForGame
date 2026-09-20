@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from models import Repository, db
 from utils.content_window import CONTENT_MAX_CHARS, slice_lines
+from utils.text_decoding import binary_content_notice, text_or_notice
 
 
 def read_file_content_for_agent(payload: dict) -> dict:
@@ -73,12 +74,20 @@ def read_file_content_for_agent(payload: dict) -> dict:
             # `lines` 在配表上是「第几张工作表」（见 `platform_provider.parse_sheet_window`），
             # 与平台本地那条路同一套坐标 —— 两端必须一致，否则同一次索取在单机与多节点下
             # 给出不同的文本。
+            #
+            # 表头坐标（`Repository.header_rows` / `header_name_row`）从**这个仓库行**上读：
+            # Agent 本来就要按 `repository_id` 把仓库查出来（上面那几行），所以这两个值
+            # 与平台本地那条路拿到的是同一行记录上的同一对字段。**不放进 payload** 是有意的：
+            # 放进 payload 就多一份可能过期的副本，而 `_matches` 的请求指纹里也不含它们 ——
+            # 配置改了之后旧任务会被当成同一份请求复用，正文却按新配置渲染。
             rendered = _read_excel_sheets(
                 raw,
                 max_rows=int(payload.get('max_rows') or DEFAULT_MAX_ROWS_PER_SHEET),
                 path=file_path,
                 window=str(payload.get('lines') or ''),
                 char_budget=int(payload.get('max_chars') or 0) or CONTENT_MAX_CHARS,
+                header_rows=getattr(repository, 'header_rows', None),
+                header_name_row=getattr(repository, 'header_name_row', None),
             )
             if rendered is None:
                 raise RuntimeError(
@@ -95,12 +104,27 @@ def read_file_content_for_agent(payload: dict) -> dict:
                 "message": f"file_content completed (excel, {len(rendered)} chars)",
             }
 
-        try:
-            text = raw.decode('utf-8')
-        except UnicodeDecodeError:
-            # 非 UTF-8（GBK 的 lua 是常见的）按平台的既有口径兜底解码，别把读得到的内容
-            # 说成读不了。`errors='replace'` 只影响极少数字节，行数与结构都还在。
-            text = raw.decode('utf-8', errors='replace')
+        # 解码走 `utils.text_decoding`（**两端唯一一份实现**）。
+        #
+        # 修前这里是自己写的 `raw.decode('utf-8')` + `errors='replace'` 兜底，而平台本地
+        # 那条路是严格 `raw.decode("utf-8")`、失败回一句「[无法展示的内容] …不是文本…」。
+        # 同一串字节于是有两份不同的文本：GBK 的 lua（本仓库最常见的形态之一）在 Agent 侧
+        # 是一堆带替换符的乱码、在平台侧干脆被判成「读不到」—— 而模型的结论正是从这段正文
+        # 里写出来的，行号与取值都会跟着错。
+        text = text_or_notice(raw)
+        if text is None:
+            # 真正的二进制（魔数 / NUL）：回**同一句话**，并用 `kind: "binary"` 告诉平台侧
+            # 「不要再按行号包一层」（见 `platform_provider._render_agent_file_content`）。
+            # 那句话的模板在 `utils.text_decoding` 里 —— 两端逐字相同是有意的：同一次索取
+            # 在单机与多节点下必须给出同一份文本，否则「哪句话是真结论」就取决于部署方式。
+            notice = binary_content_notice(file_path)
+            return {
+                "file_path": file_path,
+                "commit_id": commit_id,
+                "kind": "binary",
+                "content": notice,
+                "message": "file_content completed (binary, 无法以文本形式核对)",
+            }
 
     # 行数与「切哪一段」都由 `utils/content_window.slice_lines` 决定 —— 那是窗口规则的
     # 唯一实现，平台侧读得到正文时用的是同一个函数（两端各写一遍必然漂移，而漂移的表现

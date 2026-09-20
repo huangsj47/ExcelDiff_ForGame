@@ -906,7 +906,7 @@ def get_real_diff_data_for_merge(commit):
 
         # 这里以前返回写死的假 diff（见文件上方说明）。取不到真实差异就必须显式报错 ——
         # 宁可让审核者看到「无法获取差异」，也不能让他对一份不存在的变更签字。
-        log_print(f"⚠️ 无法获取真实diff数据（该提交/文件可能已不在仓库中）", force=True)
+        log_print("⚠️ 无法获取真实diff数据（该提交/文件可能已不在仓库中）", 'DETAIL')
         return _build_diff_error_data(commit, "无法获取差异数据，请稍后重试或联系管理员")
     except Exception as e:
         log_print(f"获取合并diff数据失败: {str(e)}", force=True)
@@ -955,7 +955,7 @@ def handle_different_files_merge(file_groups):
     log_print("处理多文件的合并diff...", 'INFO')
     diff_sections = []
     for file_path, file_commits in file_groups.items():
-        log_print(f"处理文件: {file_path} ({len(file_commits)}个提交)", force=True)
+        log_print(f"处理文件: {file_path} ({len(file_commits)}个提交)", 'DETAIL')
         try:
             file_commits.sort(key=lambda x: x.commit_time)
             if len(file_commits) == 1:
@@ -972,14 +972,14 @@ def handle_different_files_merge(file_groups):
                     # 缓存 —— 页头写的是「对比版本 X」，正文却是凭空的新增）。
                     previous_commit = resolve_previous_commit(file_commits[0])
                     diff_data = _get_unified_diff_data(file_commits[0], previous_commit)
-                    log_print(f"  - 函数调用完成，返回值类型: {type(diff_data)}", force=True)
+                    log_print(f"  - 函数调用完成，返回值类型: {type(diff_data)}", 'DETAIL')
                 except Exception as get_error:
-                    log_print(f"  - ❌ 获取diff_data时出错: {str(get_error)}", force=True)
+                    log_print(f"  - ❌ 获取diff_data时出错: {str(get_error)}", 'DETAIL')
                     import traceback; traceback.print_exc()
                     diff_data = None
                     continue
                 if diff_data:
-                    log_print(f"  - diff_data类型: {diff_data.get('type', 'unknown')}", force=True)
+                    log_print(f"  - diff_data类型: {diff_data.get('type', 'unknown')}", 'DETAIL')
                     if diff_data.get('type') == 'excel':
                         sheets = diff_data.get('sheets', {})
                         if not sheets:
@@ -1002,7 +1002,7 @@ def handle_different_files_merge(file_groups):
                         })
                         log_print(f"  - ✅ 成功添加diff段: {file_path}", 'APP')
                     except Exception as append_error:
-                        log_print(f"  - ❌ 添加diff段时出错: {file_path} - {str(append_error)}", force=True)
+                        log_print(f"  - ❌ 添加diff段时出错: {file_path} - {str(append_error)}", 'DETAIL')
                         import traceback; traceback.print_exc()
                 else:
                     log_print(f"  - ❌ 未获取到diff数据: {file_path}", 'APP')
@@ -1020,7 +1020,7 @@ def handle_different_files_merge(file_groups):
                         })
                         log_print(f"  - ✅ 成功添加连续合并diff段: {file_path}", 'APP')
                 else:
-                    log_print(f"  - 非连续提交分段处理: {len(file_commits)}个提交", force=True)
+                    log_print(f"  - 非连续提交分段处理: {len(file_commits)}个提交", 'DETAIL')
                     diff_data = handle_non_consecutive_commits_merge_internal(file_commits)
                     if diff_data:
                         diff_data = clean_json_data(diff_data)
@@ -1035,7 +1035,7 @@ def handle_different_files_merge(file_groups):
             log_print(f"  - ❌ 处理文件时出错: {file_path} - {str(e)}", force=True)
             import traceback; traceback.print_exc()
 
-    log_print(f"生成了 {len(diff_sections)} 个diff段", force=True)
+    log_print(f"生成了 {len(diff_sections)} 个diff段", 'DETAIL')
     return {
         'type': 'multiple_files', 'sections': diff_sections,
         'total_files': len(file_groups), 'total_sections': len(diff_sections)
@@ -1044,11 +1044,12 @@ def handle_different_files_merge(file_groups):
 
 def handle_consecutive_commits_merge_internal(file_commits):
     """情况2: 处理相同文件连续commit的合并diff"""
-    log_print("处理连续提交的合并diff...", 'INFO')
     earliest_commit = file_commits[0]
     latest_commit = file_commits[-1]
-    log_print(f"最早提交: {earliest_commit.commit_id[:8]}", 'INFO')
-    log_print(f"最新提交: {latest_commit.commit_id[:8]}", 'INFO')
+    # 这里原先按「进入函数 / 最早提交 / 最新提交」刷三行，而本函数**每个文件调用一次**，
+    # 条数与仓库文件数成正比。合并成一行只留定位所需的文件与提交范围，并降级到 DETAIL：
+    # 关掉明细不丢结果 —— 本次合并干了什么由调用方的汇总行交代。
+    log_print(f"连续提交合并diff: {earliest_commit.path} {earliest_commit.commit_id[:8]}..{latest_commit.commit_id[:8]}", 'DETAIL')
     repository = earliest_commit.repository
     try:
         if repository.type == 'git':

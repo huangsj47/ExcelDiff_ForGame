@@ -635,6 +635,29 @@ def test_the_manifest_template_is_savable_as_is(client, project_id, projects_roo
     assert (pack / PROJECT_PACK_MANIFEST).is_file()
 
 
+def test_the_scaffold_template_carries_shapes_not_one_projects_facts():
+    """建包范本**只给形状，不给具体值**。
+
+    危害不是「平台自动错」，而是「**人会照抄**」：范本里曾写着
+    `配表在 qz_config 下` / `导表产物是 CfgXxx.lua` —— `qz_config` 是平台第一个项目
+    的**真实仓库名**、`CfgXxx.lua` 是它的**真实产物约定**。管理员新建项目时改掉了
+    技术栈却留着这一行，它就作为「项目事实」进了系统提示词，而 skill 明确告诉模型
+    「事实以项目知识包为准」—— 于是模型去找一个不存在的目录，或者把别的目录当成
+    配表目录。位置错了：范本位置只给形状。
+    """
+    for name, template in (
+        ("建包范本", project_pack_service.SCAFFOLD_MANIFEST_TEMPLATE),
+        ("空白范本", project_pack_service.MANIFEST_TEMPLATE),
+    ):
+        for banned in ("qz_config", "CfgXxx"):
+            assert banned not in template, f"{name}里又出现了某个项目的具体值：{banned}"
+
+    scaffold = project_pack_service.SCAFFOLD_MANIFEST_TEMPLATE
+    # 形状占位必须还在：清空了用户就不知道该填什么（后面那条断言是防「删成空节」）
+    assert "配表在哪个仓库或目录下" in scaffold, "技术栈那一栏的形状提示不见了"
+    assert "产物文件名形如什么" in scaffold, "产物形态那一栏的形状提示不见了"
+
+
 def test_the_empty_state_can_be_filled_from_the_template(client, project_id, projects_root, monkeypatch):
     """空态 → 「从模板创建」→ 建出来的包**立刻就是合法的**。
 

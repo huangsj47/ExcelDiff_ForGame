@@ -48,7 +48,26 @@ _LOG_CATEGORIES = [
     'PERF',      # 性能计数日志
     'DELETE',    # 删除操作日志
     'TEST',      # 测试相关日志
+    # ---- 逐条明细（**默认关**，见 _build_log_level） ----
+    'DETAIL',    # 逐文件 / 逐提交的执行明细
 ]
+
+# **默认关闭**的类别。与 ERROR（默认开启、且 LOG_ALL 关不掉）正好相反。
+#
+# 为什么需要这么一个类别：周版本同步是**按文件逐个**跑的（一个文件一行缓存、一次
+# 提交），所以「逐文件明细」这类日志的条数与**仓库里的文件数成正比**。实测一次
+# 833 个文件的同步产生约 4,165 行（每个文件 5 行），而其中大量是在记录**刻意的
+# 非动作**（「跳过Excel缓存生成…（不是Excel文件或不需要缓存）」对代码仓库几乎是
+# 每个文件的命运）。线上只有 1 个项目 2 个仓库时就已经在刷屏，仓库多了只会更糟。
+#
+# 把这些行降级到 WEEKLY/INFO 里不够用：那两类里还压着「同步完成」「❌ 部分失败」
+# 这些**必须看见**的结果，想静音就得连它们一起关掉。所以单开一类、默认关，
+# 需要排查时 `LOG_DETAIL=true` 打开。
+#
+# 结果本身不靠它传达：调用方把那几条**聚合成一行**（见
+# `weekly_version_logic.process_weekly_version_sync` 的收尾），所以关掉明细
+# 不会丢掉「这次同步干了什么」。
+_DEFAULT_OFF_CATEGORIES = ('DETAIL',)
 
 
 def _build_log_level() -> dict:
@@ -56,6 +75,7 @@ def _build_log_level() -> dict:
     - 默认所有日志类型开启 (True)
     - 在 .env 中设置 LOG_GIT=false 即可关闭 GIT 类型日志
     - LOG_ALL=false 可一次性关闭全部普通日志（ERROR 除外）
+    - `_DEFAULT_OFF_CATEGORIES` 里的类别反过来：默认关，显式设 true 才开
     """
     result = {}
     # 全局开关
@@ -67,8 +87,13 @@ def _build_log_level() -> dict:
         elif env_val == 'true':
             result[f'{cat}_VERBOSE'] = True
         else:
-            # 未显式配置时取决于全局开关；ERROR 始终开启
-            result[f'{cat}_VERBOSE'] = True if cat == 'ERROR' else log_all
+            # 未显式配置时：ERROR 始终开启；逐条明细默认关；其余取决于全局开关。
+            if cat == 'ERROR':
+                result[f'{cat}_VERBOSE'] = True
+            elif cat in _DEFAULT_OFF_CATEGORIES:
+                result[f'{cat}_VERBOSE'] = False
+            else:
+                result[f'{cat}_VERBOSE'] = log_all
     return result
 
 

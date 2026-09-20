@@ -29,6 +29,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Iterable, Sequence
 
+from utils.text_decoding import decode_text_bytes, looks_binary
+
 # 一次搜索最多扫多少个文件、最多给多少条命中、每条命中留多长。
 #
 # 这三个数是**上限而不是目标**：文件数上限是为了让一次搜索不至于把整次分析卡住
@@ -41,9 +43,6 @@ MAX_LINE_CHARS = 200
 MIN_QUERY_CHARS = 3
 # 单条命中给模型看的形态：`路径:行号: 内容`
 _HIT_SEPARATOR = ": "
-
-# 二进制（含 xlsx／zip）的两种门槛：读回来是 bytes 且解码不了，或开头就是 ZIP/PK 魔数。
-_BINARY_MAGIC = (b"PK\x03\x04", b"\x89PNG", b"\xd0\xcf\x11\xe0", b"\x1f\x8b")
 
 
 @dataclass(frozen=True)
@@ -85,20 +84,15 @@ def normalize_query(raw: str) -> str:
 
 
 def is_binary(content) -> bool:
-    """读回来的东西能不能当文本搜。**宁可把配表算成二进制**，也不要在一堆乱码里搜。"""
-    if content is None:
-        return True
-    if isinstance(content, bytes):
-        if any(content.startswith(magic) for magic in _BINARY_MAGIC):
-            return True
-        try:
-            content.decode("utf-8")
-        except UnicodeDecodeError:
-            return True
-        return False
-    if isinstance(content, str):
-        return "\x00" in content
-    return True
+    """读回来的东西能不能当文本搜。
+
+    判据是**真正的二进制**（魔数 / NUL，`utils.text_decoding.looks_binary`），不是
+    「能不能按 utf-8 解码」—— 后者会把 GBK 的 lua、gb2312 的配置判成二进制并跳过，
+    于是模型搜不到任何词，而抬头把原因写成「N 个不是文本（配表等二进制，没搜）」：
+    **「编码不兼容」被记成了「它是二进制」**。命中的行文本也由同一个模块的
+    `decode_text_bytes` 解码，所以「判成文本的内容」与「解码用的编码清单」永远一致。
+    """
+    return looks_binary(content)
 
 
 def search_text(text: str, query: str, *, path: str, limit: int) -> list[Hit]:
@@ -155,7 +149,10 @@ def search_files(
             binary += 1
             continue
         if isinstance(content, bytes):
-            content = content.decode("utf-8", errors="replace")
+            # 解码走 `utils.text_decoding`（**两端唯一一份实现**）：GBK 的 lua 与搜索词
+            # 都要能被解出来，否则「这个词在这份文件里出现过吗」这个问题根本没法回答
+            # （按 utf-8 + replace 解出来的乱码里，中文标识符一个都匹配不上）。
+            content = decode_text_bytes(content)
         scanned += 1
         remaining = max_hits - len(hits)
         if remaining <= 0:

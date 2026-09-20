@@ -604,14 +604,77 @@ def test_the_prompt_and_knowledge_fields_carry_a_fill_in_example():
     assert html.count("<details") == 2
 
 
-def test_the_examples_use_the_g119_project_vocabulary():
-    """示例要用本项目的真实词汇，否则用户不知道该怎么往里填。
+# ==========================================================================
+# 11b. 示例区的**位置**：范本位置只给形状，具体值只能当实例
+# ==========================================================================
+#
+# 判别标准是「**换一个项目还成立吗**」：`qz_config`、`CfgXxx.lua`、六位制号段、
+# 吸灵器交互链都是 G119 这个项目的真实事实 —— 它们对那个项目有价值，所以留着；
+# 但**不能单独占据范本位置**。占了的后果不是平台自动出错，而是**人会照抄**：
+# 管理员给新项目填补充指令时改掉了技术栈却留着 `配表在 qz_config 下` 这一行，
+# 它就作为「项目事实」进了系统提示词，而 skill 明确告诉模型「事实以项目知识包
+# 为准」—— 于是模型去找一个不存在的目录，或者把别的目录当成配表目录。
+#
+# 所以每份示例都是「先给通用形状（尖括号占位），再给一份 G119 实例」，
+# 实例明确标注为「示例之一（来自 G119）」。
 
-    这里只钉住几个「写错了会误导人」的事实点：号段规则、四个阶段、吸灵器交互链。
+# 正文里两块的分界。形状在前、实例在后 —— 顺序本身也是口径的一部分。
+NEUTRAL_MARKER = "通用形状"
+INSTANCE_MARKER = "示例之一（来自 G119）"
+# 换一个项目就不成立的词。**通用形状那块里一个都不许出现**。
+PROJECT_ONLY_WORDS = (
+    "qz_config", "CfgXxx", "G119", "Unity", "吸灵器", "地宫", "撤离", "Loot",
+    "召唤物", "测试配置", "6 位", "类型段",
+)
+
+
+def _example_bodies() -> list:
+    """两份填写示例的正文（`<div class="ai-example__body">` 里的内容）。"""
+    bodies = re.findall(
+        r'<div class="ai-example__body">(.*?)</div>\s*</details>', _modal_html(), re.S
+    )
+    assert len(bodies) == 2, f"填写示例应该是 2 份，实际 {len(bodies)} 份"
+    return bodies
+
+
+def _neutral_parts() -> list:
+    """每份示例里**通用形状**那一段（实例那一段之前的部分）。"""
+    parts = []
+    for body in _example_bodies():
+        head, separator, _tail = body.partition(INSTANCE_MARKER)
+        assert separator, f"示例正文里没有「{INSTANCE_MARKER}」这个分界"
+        parts.append(head)
+    return parts
+
+
+def test_every_example_opens_with_a_project_neutral_shape():
+    """两份示例都要先把**形状**给出来（尖括号占位），且形状里不含任何项目专有事实。
+
+    「换一个项目就不成立的内容不该单独占据范本位置」—— 这条用例就是那句话的机器版：
+    从头切到实例分界之前的那一段，一个项目专有词都不许有。
+    """
+    for index, neutral in enumerate(_neutral_parts()):
+        assert NEUTRAL_MARKER in neutral, f"第 {index + 1} 份示例没有「{NEUTRAL_MARKER}」这一段"
+        assert len(neutral.strip()) > 80, (
+            f"第 {index + 1} 份示例的通用形状只有 {len(neutral.strip())} 个字符 —— 像是被清空了"
+        )
+        found = [word for word in PROJECT_ONLY_WORDS if word in neutral]
+        assert not found, (
+            f"第 {index + 1} 份示例的通用形状里出现了项目专有内容 {found} —— "
+            "范本位置只给形状；具体值放进下面那段「示例之一（来自 G119）」里"
+        )
+
+
+def test_the_g119_instance_is_kept_and_labelled_as_one_instance():
+    """G119 那份实例**保留**（对那个项目有价值），但必须明确标注成「示例之一」。
+
+    标注不是客套：没有它，用户看到的就是一份**看起来像平台范本**的项目事实。
     """
     html = _modal_html()
+    assert html.count(INSTANCE_MARKER) == 2, "两份示例都要把 G119 那份标注成「示例之一」"
+    # 标注之后那份实例的内容不该被顺手删掉
     for phrase in ("qz_config", "CfgXxx.lua", "6 位", "类型段", "吸灵器", "返程撤离", "Loot"):
-        assert phrase in html, f"示例里缺了 {phrase}"
+        assert phrase in html, f"G119 实例里缺了 {phrase} —— 那份实例被删空了吗"
 
 
 def test_the_examples_are_collapsed_by_default():

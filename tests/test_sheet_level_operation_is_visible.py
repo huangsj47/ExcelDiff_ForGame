@@ -534,17 +534,23 @@ class TestSheetOperationCounts:
         assert got is expected, f'{sheet!r} 的「有变更」判定为 {got}，应为 {expected}'
 
     def test_the_tab_builder_uses_the_shared_has_changes_rule(self):
-        """标签生成必须调用 weeklySheetHasChanges —— 别再内联一份只看内容行的判断。
+        """标签生成必须把变更判定交给 `sheetHasChanges` —— 别再内联一份只看内容行的判断。
 
         （这个坑线上踩过两次：`generateWeeklyExcelTabs` 里一份、它调用方
         `initWeeklyExcelDiff` 里又一份，两份口径不一致时页面就会出现
         「标签选中 A、正文却是 B」或整片空白。）
+
+        **判定从「调用它」改成了「把它交给共享模块」**：排序与默认选中现在收在
+        `static/js/excel_sheet_order.js` 里，页面传进去的是 `sheetHasChanges`
+        这个**判定函数本身**（`analyzeSheets(表名, 表数据, sheetHasChanges)`）。
+        所以断言写成完整那一次调用的字面形式 —— 写成 `'sheetHasChanges' in body`
+        的话，注释里提一句就能过，这条用例就变成了假绿。
         """
         with open(WEEKLY_TEMPLATE, encoding='utf-8') as handle:
             text = handle.read()
         body = text[text.index('window.generateWeeklyExcelTabs = function'):]
         body = body[:body.index('// 显示激活的sheet内容')]
-        assert 'sheetHasChanges(' in body, (
+        assert 'ExcelSheetOrder.analyzeSheets(sheetNames, sheets, sheetHasChanges)' in body, (
             '标签/默认表的选择没有走 sheetHasChanges —— 工作表级增删会被当成'
             '「没有变更」，周版本正文区又会退回一片空白'
         )

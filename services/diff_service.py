@@ -8,6 +8,35 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
+from utils.text_decoding import decode_text_bytes
+
+# ---------------------------------------------------------------------------
+#  行号口径：**整个平台只有这一处实现**
+# ---------------------------------------------------------------------------
+
+
+def physical_row_number(index0_based: int, *, rows_before: int = 0) -> int:
+    """序列里第 `index0_based` 个元素（0 起）在 Excel 文件里的**物理行号**。
+
+    平台有两条 Excel 比较实现，**两边喂进来的序列起点不同**：
+
+    * 主引擎 `pandas.read_excel(header=0)`：物理第 1 行被当成列名吃掉，帧里第 0 条数据
+      是**物理第 2 行**（`rows_before=1`）；
+    * 旧引擎 `openpyxl` 逐行读原始行（`git_excel_parser_helpers.extract_excel_data` 从
+      `range(1, max_row + 1)` 起）：第 0 个元素**就是物理第 1 行**（`rows_before=0`）。
+
+    于是同一行在两边算行号的**算式**不同（`idx + 2` 与 `i + 1`），**结果必须相同**：
+    「第 N 行」是评审者回文件里核对的唯一坐标，两条路径给出不同的数就等于「同一次改动，
+    页面说第 12 行、AI 说第 11 行」，而没有任何地方会报错。`rows_before` 是「这个序列前面
+    已经被吃掉了几个物理行」，**不是可以随手填的数**：改了它，两条路径中的一条整体错一行。
+
+    历史：主引擎原先写 `idx + 1`（页面行号比文件里小 1，线上 8 个分片复核 20/20 一致），
+    改成 `idx + 2` 之后与旧引擎对齐 —— 旧引擎那几处一直是对的。收敛到这里之后，「不同算式」
+    变成同一个函数的两个参数，再也不会有人只改一边。
+    """
+    return int(index0_based) + int(rows_before) + 1
+
+
 # ---------------------------------------------------------------------------
 #  「扩展名不认识时，看内容判类型」——只在这一处实现
 # ---------------------------------------------------------------------------
@@ -386,21 +415,14 @@ class DiffService:
             }
     
     def _decode_text(self, content: bytes) -> str:
-        """尝试解码文本内容"""
-        if not content:
-            return ""
-        
-        # 尝试多种编码
-        encodings = ['utf-8', 'gbk', 'gb2312', 'latin-1', 'cp1252']
-        
-        for encoding in encodings:
-            try:
-                return content.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-        
-        # 如果所有编码都失败，使用utf-8并忽略错误
-        return content.decode('utf-8', errors='replace')
+        """尝试解码文本内容。
+
+        编码清单**不在这里**：`utils/text_decoding.decode_text_bytes` 是全平台唯一一份
+        （AI 取数层原先各写一份，于是同一串字节在「diff 引擎」与「AI 取到的正文」里
+        是两种文本）。这里保留方法名是因为调用方与测试都在用它；语义一个字没改：
+        依次试 utf-8 → gbk → gb2312 → latin-1 → cp1252，最后以 `errors='replace'` 兜底。
+        """
+        return decode_text_bytes(content)
     
     def _parse_unified_diff_lines(self, diff_lines: list) -> list:
         """解析unified diff格式为结构化数据"""
@@ -961,14 +983,17 @@ class DiffService:
     def _dataframe_rows_with_index(self, df):
         """高效转换 DataFrame 为带原始行号的记录列表。
 
-        行号是**Excel 行号**：`header=0` 读入时第 1 行已经被当作列名吃掉，
-        所以第 0 条数据的物理行号是 2。修前这里是 `idx + 1`，页面上显示的行号
-        比文件里真实行号小 1（线上 8 个分片独立复核 20/20 一致，例：平台 74 ↔
-        Excel 75），而 `templates/help.html` 又把行号写成「方便快速定位」——
-        评审者按它回文件里核对会整体错一行。
+        行号是**Excel 物理行号**：`header=0` 读入时第 1 行已经当作列名吃掉，所以第 0 条
+        数据的物理行号是 2 —— 算式与理由见 `physical_row_number`（口径的唯一实现）。
+        修前这里是 `idx + 1`，页面上的行号比文件里真实行号小 1（线上 8 个分片独立复核
+        20/20 一致，例：平台 74 ↔ Excel 75），而 `templates/help.html` 又把行号写成
+        「方便快速定位」——评审者按它回文件里核对会整体错一行。
         """
         records = df.to_dict(orient='records')
-        return [(idx + 2, row_data) for idx, row_data in enumerate(records)]
+        return [
+            (physical_row_number(idx, rows_before=1), row_data)
+            for idx, row_data in enumerate(records)
+        ]
     
     def _resolve_key_columns(self, raw_value, columns):
         """把仓库配置的「关键列」解析成本次比较可用的列标签。

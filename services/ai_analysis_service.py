@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -79,6 +78,13 @@ from services.ai.pricing import (
     price_table_doc_shape,
 )
 from services.ai.provenance import current_provenance, provenance_matches
+from services.ai.project_facts import (
+    DEFAULT_CRITICAL_PATH_FACTS,
+    critical_path_facts,
+    declared_important_tables_by_repo,
+    generated_prefixes,
+    scan_critical_paths,
+)
 from services.ai.weekly_state import get_or_create_weekly_state
 from services.ai.result_payload import (
     failed_result,
@@ -121,27 +127,18 @@ DEFAULT_PROMPT_TEMPLATE = """以下内容用于补充平台内置的分析协议
 「信息缺口」标出来，而编造出来的事实会被当成真的。
 
 1. 技术栈与工程结构
-   （例：Unity + C# + Lua；配表放在 config/ 下，生成物是 CfgXxx.lua）
+   （例：Unity + C# + Lua；配表放在 <哪个仓库或目录> 下，生成物形如 <产物文件名>）
 2. 配表规范要点
-   （例：ID 为六位制、前两位表示类型段；能分表则分表）
+   （例：ID 的编号规则与号段划分：共几位、哪几位表示什么；能分表则分表）
 3. 重点模块（这些模块的改动需要压测或完整回归）
    （例：登录、充值、匹配、战斗、邮件、排行榜、全服推送）
 4. 本项目的红线与历史高频事故
 5. 输出偏好
    （例：风险点请附复现步骤与影响范围；报告控制在 800 字内）
 """
-CRITICAL_PATH_PATTERNS = (
-    r"/config/",
-    r"/configs/",
-    r"/sql/",
-    r"/schema/",
-    r"/migrations/",
-    r"/auth/",
-    r"/permission/",
-    r"/payment/",
-    r"/billing/",
-    r"\.sql$",
-)
+# 关键路径的模式与「重点表名」都不再是这里的模块常量：前者是平台默认值（可被项目覆盖），
+# 后者是项目自己声明的事实。两者都搬去了 `services/ai/project_facts.py` —— 留在这里
+# 就等于留了第二份事实源，而它当年正是「写错了也没人知道」的那一份。
 
 
 def _utcnow() -> datetime:
@@ -551,14 +548,15 @@ def _repo_priority(repo: Repository) -> int:
     return 2 if resource_type == "code" else 1
 
 
-def _is_critical_path(path: str) -> bool:
-    if not path:
-        return False
-    normalized = path.replace("\\", "/").lower()
-    for pattern in CRITICAL_PATH_PATTERNS:
-        if re.search(pattern, normalized):
-            return True
-    return False
+def _is_critical_path(path: str, declared_tables: Sequence[str] = ()) -> bool:
+    """单条路径的关键路径判据（**平台默认模式** + 该仓库声明的重点表，命中任一即算）。
+
+    口径只在这里和 `project_facts` 各有一份**引用**，实现只有 `project_facts` 那一份：
+    老写法（`/config/` 要求前导斜杠）在 git 的相对路径上一条都命中不了，于是
+    「命中关键路径就升级为全量分析」这条通道从来没触发过，而且不报错、不留痕。
+    周版本那一批走的是 `scan_critical_paths`（一次扫完并留理由），这里留给单条调用方。
+    """
+    return bool(DEFAULT_CRITICAL_PATH_FACTS.why(path, declared_tables))
 
 
 def set_project_api_key(project_id: int, api_key: str, updated_by: str = "") -> Tuple[bool, str]:
@@ -736,15 +734,20 @@ def _summarize_weekly_files(
     repo_summaries: Dict[int, dict] = {}
     delta_files: List[dict] = []
     total_files_by_repo: Dict[int, int] = {}
-    critical_hit = False
+
+    # 关键路径的事实源有两处（语义不重合，命中任一）：项目知识包里的**路径模式**
+    # （取不到＝平台默认），与**每个仓库自己声明的「重点表名」**（界面上那一栏）。
+    project = db.session.get(Project, configs[0].project_id) if configs else None
+    facts = critical_path_facts(getattr(project, "code", None))
+    if facts.warning:
+        log_print(f"⚠️ AI 分析：关键路径声明有问题 —— {facts.warning}", "AI", force=True)
+    tables_by_repo = declared_important_tables_by_repo(repo_lookup)
 
     for entry in delta_entries:
         repo = repo_lookup.get(entry.repository_id)
         repo_name = repo.name if repo else f"repo-{entry.repository_id}"
         repo_priority = _repo_priority(repo) if repo else 1
         total_files_by_repo[entry.repository_id] = total_files_by_repo.get(entry.repository_id, 0) + 1
-        if _is_critical_path(entry.file_path):
-            critical_hit = True
 
         delta_files.append(
             {
@@ -776,10 +779,27 @@ def _summarize_weekly_files(
         reverse=True,
     )
 
+    # 扫一遍关键路径。这一行日志是这次要补的「留痕」本身：在这之前，升级为全量的理由
+    # （甚至「一条都没命中」这件事）在任何地方都看不到。
+    scan = scan_critical_paths(
+        (
+            (entry.file_path, tables_by_repo.get(entry.repository_id, ()))
+            for entry in delta_entries
+        ),
+        facts=facts,
+    )
+    if scan.hit:
+        log_print(scan.log_line(), "AI", force=True)
+
     summary = {
         "total_files": total_files,
         "delta_files": delta_count,
-        "critical_paths": critical_hit,
+        "critical_paths": scan.hit,
+        # 命中的前几条（含理由）与模式来源：`_decide_scope` 只回一个原因串，具体是哪条
+        # 路径、依据是谁声明的，只有这里才有。来源那一条哪怕没命中也要记 —— 否则
+        # 「项目声明了『没有路径模式』」与「项目什么都没声明」在结果里分不开。
+        "critical_path_hits": list(scan.reasons),
+        "critical_path_source": scan.source,
     }
     return summary, {
         "repos": list(repo_summaries.values()),
@@ -1377,10 +1397,16 @@ def _run_engine_and_persist(
         return result
 
     readable = sorted(getattr(loaded, "readable", {}) or {})
+    # 生成物前缀是**项目事实**：由项目知识包的声明决定，没有声明时用平台默认值。
+    # 从 `loaded.project_slug` 取而不是再查一次项目：slug 就是加载器刚刚用的那一个，
+    # 两处各算一遍迟早会在「项目代号里有怪字符」这种边界上分叉。
+    prefixes = generated_prefixes(getattr(loaded, "project_slug", None))
+    if prefixes.warning:
+        log_print(f"⚠️ AI 分析：生成物前缀声明有问题 —— {prefixes.warning}", "AI", force=True)
     change = (
-        from_commit_payload(payload, readable_references=readable)
+        from_commit_payload(payload, readable_references=readable, prefixes=prefixes)
         if payload.get("mode") == "commit"
-        else from_weekly_payload(payload, readable_references=readable)
+        else from_weekly_payload(payload, readable_references=readable, prefixes=prefixes)
     )
 
     limits, budget_note = _apply_model_window(client, project_config, _engine_limits(project_config))

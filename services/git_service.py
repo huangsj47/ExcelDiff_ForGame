@@ -9,6 +9,7 @@ import time
 import urllib.parse
 from urllib.parse import urlparse
 import git
+from services.diff_service import physical_row_number
 from services.git_diff_helpers import (
     generate_basic_diff,
     generate_initial_commit_diff,
@@ -24,6 +25,7 @@ from services.git_excel_parser_helpers import (
 )
 from utils.path_security import build_repository_local_path
 from utils.security_utils import sanitize_text, sanitize_url
+from utils.text_decoding import decode_text_bytes
 
 # 延迟导入pandas以避免版本冲突
 try:
@@ -871,45 +873,42 @@ class GitService:
             print(f"找到提交: {commit.hexsha[:8]} - {commit.message.strip()}")
             
             # 获取当前提交的文件内容
+            #
+            # 解码走 `utils.text_decoding`（**全平台唯一一份编码清单**）：原先这里是
+            # `decode('utf-8')` + `UnicodeDecodeError` 时 `errors='replace'` 兜底，
+            # 于是 GBK 的 lua（中文项目里很常见）在这一条路上得到的是乱码，而主引擎
+            # （`diff_service._decode_text`）给出的是正常中文 —— 同一个文件两份正文。
             try:
                 current_blob = commit.tree[file_path]
-                current_content = current_blob.data_stream.read().decode('utf-8')
+                current_content = decode_text_bytes(current_blob.data_stream.read())
             except KeyError:
                 print(f"文件在当前提交中不存在: {file_path}")
                 current_content = ""
-            except UnicodeDecodeError:
-                print(f"文件编码问题，使用替换模式: {file_path}")
-                current_blob = commit.tree[file_path]
-                current_content = current_blob.data_stream.read().decode('utf-8', errors='replace')
-            
+
             # 获取文件的diff
             if commit.parents:
                 parent_commit = commit.parents[0]
                 print(f"父提交: {parent_commit.hexsha[:8]}")
-                
-                # 获取父提交的文件内容
+
+                # 获取父提交的文件内容（解码同上）
                 try:
                     parent_blob = parent_commit.tree[file_path]
-                    previous_content = parent_blob.data_stream.read().decode('utf-8')
+                    previous_content = decode_text_bytes(parent_blob.data_stream.read())
                 except KeyError:
                     print(f"文件在父提交中不存在，视为新增文件: {file_path}")
                     previous_content = ""
-                except UnicodeDecodeError:
-                    print(f"父提交文件编码问题，使用替换模式: {file_path}")
-                    parent_blob = parent_commit.tree[file_path]
-                    previous_content = parent_blob.data_stream.read().decode('utf-8', errors='replace')
-                
+
                 # 使用GitPython生成diff
                 try:
                     diffs = parent_commit.diff(commit, paths=[file_path], create_patch=True)
                     print(f"找到 {len(diffs)} 个diff")
-                    
+
                     if diffs:
                         diff = diffs[0]
-                        
+
                         # 获取patch内容
                         if hasattr(diff, 'diff') and diff.diff:
-                            patch_text = diff.diff.decode('utf-8') if isinstance(diff.diff, bytes) else str(diff.diff)
+                            patch_text = decode_text_bytes(diff.diff)
                         else:
                             # 备用方案：使用subprocess生成diff
                             try:
@@ -1156,9 +1155,10 @@ class GitService:
                 if diffs:
                     diff = diffs[0]
                     
-                    # 获取patch内容
+                    # 获取patch内容（解码走 `utils.text_decoding`：与上面两处、以及主引擎
+                    # 的 `_decode_text` 同一份编码清单）
                     if hasattr(diff, 'diff') and diff.diff:
-                        diff_output = diff.diff.decode('utf-8') if isinstance(diff.diff, bytes) else str(diff.diff)
+                        diff_output = decode_text_bytes(diff.diff)
                     else:
                         # 使用repo.git.diff作为备用
                         diff_output = repo.git.diff(from_commit, to_commit, file_path, unified=3)
@@ -1306,6 +1306,12 @@ class GitService:
         `status` 取 'deleted'：模板与前端都用它来显示「工作表已被删除」的提示；
         每一行取 'removed'，逐格标 'removed' —— 这是评审者唯一能看到
         「到底删掉了什么」的地方，不能为了省体积只留一个计数。
+
+        行号走 `physical_row_number`（**全平台唯一一份口径**）：这一路的 `previous_sheet`
+        由 `git_excel_parser_helpers.extract_excel_data` 逐物理行读出来（`range(1, max_row+1)`），
+        所以第 0 个元素就是物理第 1 行 ⇒ `rows_before=0`。与主引擎
+        （`header=0`，第 0 条数据是物理第 2 行）**算式不同、结果相同** —— 见那个函数的
+        docstring：两条路径报的行号必须能互相核对，否则评审者回文件里会整体错一行。
         """
         if not previous_sheet or not isinstance(previous_sheet[0], dict):
             return {'status': 'deleted', 'headers': [], 'rows': [], 'has_changes': False}
@@ -1314,7 +1320,13 @@ class GitService:
         rows = []
         for index, row in enumerate(previous_sheet):
             cells = [{'value': row.get(header, ''), 'status': 'removed'} for header in headers]
-            rows.append({'row_number': index + 1, 'status': 'removed', 'cells': cells})
+            rows.append(
+                {
+                    'row_number': physical_row_number(index),
+                    'status': 'removed',
+                    'cells': cells,
+                }
+            )
 
         return {'status': 'deleted', 'headers': headers, 'rows': rows, 'has_changes': True}
 
@@ -1457,6 +1469,9 @@ class GitService:
                 headers = []
             
             # 转换为前端期望的格式，包含cells字段
+            # 行号：`current_sheet` 是从物理第 1 行起逐行读来的（见 `_deleted_sheet_diff`），
+            # 所以 `rows_before=0` —— 与主引擎同一套物理行号（口径的唯一实现在
+            # `services.diff_service.physical_row_number`）。
             formatted_rows = []
             for i, row in enumerate(current_sheet):
                 cells = []
@@ -1467,9 +1482,9 @@ class GitService:
                             'value': cell_value,
                             'status': 'added'
                         })
-                
+
                 formatted_rows.append({
-                    'row_number': i + 1,
+                    'row_number': physical_row_number(i),
                     'status': 'added',
                     'cells': cells
                 })
@@ -1539,7 +1554,15 @@ class GitService:
         return val_str
 
     def _fast_compare_rows(self, current_sheet, previous_sheet):
-        """快速行比较 - 生成前端兼容的数据格式"""
+        """快速行比较 - 生成前端兼容的数据格式
+
+        行号是**物理 Excel 行号**（`physical_row_number(i)`，`rows_before=0`）：
+        `current_sheet` 由 `git_excel_parser_helpers.extract_excel_data` 从物理第 1 行
+        起逐行读来，第 0 个元素就是物理第 1 行（这一路**不**把首行当表头吃掉 —— 它拿列字母
+        `A`/`B`… 当列名，首行本身是一行普通数据）。主引擎 `DiffService` 走的是
+        `header=0`，同一条数据行在那边是 `idx + 2` —— 两个算式不同、**结果必须相同**，
+        所以两边都调 `services.diff_service.physical_row_number`。
+        """
         # 检测数据格式并获取合并后的表头（处理列删除/新增）
         current_headers = []
         previous_headers = []
@@ -1624,20 +1647,20 @@ class GitService:
                 
                 # 只有当行真正有变化时才添加
                 if row_has_changes:
-                    
+
                     diff_rows.append({
-                        'row_number': i + 1,
+                        'row_number': physical_row_number(i),
                         'status': 'modified',
                         'row_data': current_row,
                         'previous_data': previous_row,
                         'cell_changes': cell_changes
                     })
                     has_changes = True
-                    
+
             elif i < len(current_sheet):
                 # 新增行
                 diff_rows.append({
-                    'row_number': i + 1,
+                    'row_number': physical_row_number(i),
                     'status': 'added',
                     'row_data': current_sheet[i],
                     'previous_data': {},
@@ -1647,7 +1670,7 @@ class GitService:
             else:
                 # 删除行
                 diff_rows.append({
-                    'row_number': i + 1,
+                    'row_number': physical_row_number(i),
                     'status': 'removed',
                     'row_data': {},
                     'previous_data': previous_sheet[i],

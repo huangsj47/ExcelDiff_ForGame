@@ -304,11 +304,12 @@ class TestModalStructure:
         )
 
     def test_the_example_panels_are_height_capped_and_scroll(self):
-        """两段 20 行的填写示例必须有高度上限并内部滚动。
+        """两段填写示例必须有高度上限并内部滚动。
 
         **这是本轮要修的观感问题之一**：原文是 `white-space: pre-wrap` 的纯文本墙，
-        一展开就把模态框撑长，页脚被推下去。文本内容要一个字不改（测试钉着 G119 词汇表），
-        改的是容器。
+        一展开就把模态框撑长，页脚被推下去。示例正文现在每份都是「通用形状 + G119 实例」
+        两段（见 test_ai_config_template.py 里那一组位置用例），更长 —— 容器上的
+        `max-height` / `overflow-y` / `pre-wrap` 就更是硬要求了。
         """
         rule = re.search(r'\.ai-example__body\s*\{([^}]*)\}', _panel_css())
         assert rule, '.ai-example__body 没有样式定义'

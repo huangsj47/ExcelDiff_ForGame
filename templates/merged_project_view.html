@@ -863,6 +863,19 @@
         line-height: 1.75;
         white-space: pre-wrap;
     }
+    /* 示例正文里的小标题：一份示例里现在有两块 —— 先给**通用形状**（换任何项目都
+       按它填），再给一份项目实例。没有小标题就看不出哪一段是照抄的范本、哪一段
+       只是行文参考，而「把某个项目的具体值当成范本照抄」正是要防的那件事。
+       注：本块在 `white-space: pre-wrap` 的正文里，`display: block` 才会真的独占一行。 */
+    .ai-example__section {
+        display: block;
+        margin-top: var(--space-3, 12px);
+        padding-top: var(--space-2, 8px);
+        border-top: 1px dashed var(--ai-border);
+        color: var(--ai-text-secondary);
+        font-weight: 600;
+    }
+    .ai-example__section:first-child { margin-top: 0; padding-top: 0; border-top: none; }
 
     /* 摘要卡片上的「已超预算」：颜色不是唯一线索（前面有「预算」这个标签、文案里
        写着「已超」），这里只是加强语气。 */
@@ -1610,8 +1623,21 @@
                         <div class="form-text" id="aiPromptInputHelp">分析协议（检查维度、输出格式、证据与置信度门槛、反误报条款）由平台内置 skill 强制提供，这里只写本项目特有的事实与偏好。<strong>留空也能正常分析。</strong></div>
                         <div class="form-text text-danger d-none" id="aiPromptInputError"></div>
                         <details class="ai-example">
-                            <summary class="ai-example__toggle">看一个填写示例（G119）<i class="fas fa-chevron-right" aria-hidden="true"></i></summary>
-                            <div class="ai-example__body">1. 技术栈与工程结构
+                            <summary class="ai-example__toggle">看一个填写示例（通用形状 + G119 实例）<i class="fas fa-chevron-right" aria-hidden="true"></i></summary>
+                            <div class="ai-example__body"><span class="ai-example__section">通用形状：换任何项目都按这五栏填，尖括号里写你自己的真实情况</span>
+1. 技术栈与工程结构
+   <语言 / 引擎；配表在哪个仓库或目录下>
+2. 配表规范要点
+   <产物的文件名形如什么、要不要提交进版本库；ID 的编号规则与号段划分：
+   共几位、哪几位表示什么；命名与分表原则>
+3. 重点模块（这些模块的改动需要压测或完整回归）
+   <模块名，越具体越好；模型拿它决定分析范围>
+4. 本项目的红线与历史高频事故
+   <踩过的坑、出过事故的改动类型>
+5. 输出偏好
+   <风险点要写清什么；报告篇幅>
+<span class="ai-example__section">示例之一（来自 G119）：只作行文参考，事实以你这个项目的知识包为准</span>
+1. 技术栈与工程结构
    Unity + C# + Lua。配表在 qz_config 下，导表产物是 CfgXxx.lua，且生成物要提交进版本库
    （否则无法 diff、无法追溯）。表名形如 [30]道具表_CfgItem.xlsx，[NN] 就是 ID 段位。
 
@@ -1641,8 +1667,17 @@
                         <div class="form-text" id="aiProjectKnowledgeInputHelp">在项目知识包之外追加的补充说明。与内置规则冲突时，以内置规则为准。</div>
                         <div class="form-text text-danger d-none" id="aiProjectKnowledgeInputError"></div>
                         <details class="ai-example">
-                            <summary class="ai-example__toggle">看一个填写示例（G119）<i class="fas fa-chevron-right" aria-hidden="true"></i></summary>
-                            <div class="ai-example__body">- 一局流程分四个阶段，而且「固定集结等待」「步行入场」「传送入场」是**不同阶段**。
+                            <summary class="ai-example__toggle">看一个填写示例（通用形状 + G119 实例）<i class="fas fa-chevron-right" aria-hidden="true"></i></summary>
+                            <div class="ai-example__body"><span class="ai-example__section">通用形状：换任何项目都按这四类写，每条都要能落到具体模块或交互链上</span>
+- <这条补充纠正的是哪种常见误判：模型最容易把 A 当成 B 的地方>
+
+- <两三个看起来一样、实际走不同流程的东西：分别叫什么、各自归哪一层>
+
+- <跨系统的路由：看到某类关键词的改动，应该去找哪个模块>
+
+- <同一份数据要在哪两处对齐着看，只看一处会漏掉什么>
+<span class="ai-example__section">示例之一（来自 G119）：只作行文参考，事实以你这个项目的知识包为准</span>
+- 一局流程分四个阶段，而且「固定集结等待」「步行入场」「传送入场」是**不同阶段**。
   所以看到「首次交互慢」「进入地宫后无响应」这类描述，要先确认发生在哪个阶段，
   不能直接归因到吸灵器或地宫逻辑上。
 

@@ -847,6 +847,9 @@
 <script src="{{ url_for('static', filename='js/diff-handlers.js') }}?v=2.2"></script>
 {# 表体渲染的单一实现：必须在本页内联脚本**之前**加载（本页的入口函数调它） #}
 <script src="{{ url_for('static', filename='js/excel_diff_table.js') }}?v=1.0"></script>
+{# 工作表标签的顺序与默认选中：也是单一实现（同一份给合并页与周版本页用），
+   同样必须在内联脚本之前加载。 #}
+<script src="{{ url_for('static', filename='js/excel_sheet_order.js') }}?v=1.0"></script>
 <script>
     
     // 自动解析代码diff内容
@@ -1201,58 +1204,28 @@ function displayExcelDiff(diffData) {
                '<div class="excel-sheet-tabs-container">' +
                '<div class="excel-sheet-tabs">';
         
-        // 分析每个sheet的变更状态
-        var sheetAnalysis = [];
-        
-        for (var i = 0; i < originalSheetNames.length; i++) {
-            var sheetName = originalSheetNames[i];
-            var sheetData = diffData.sheets[sheetName];
-
-            // 检查是否有变更内容（口径见 sheetHasChanges，与周版本页同一份实现）
-            var hasChanges = sheetHasChanges(sheetData);
-
-            sheetAnalysis.push({
-                name: sheetName,
-                originalIndex: i,
-                hasChanges: hasChanges
-            });
-        }
-        
-        // 重新排序：有变更的sheet在前，无变更的在后，各自保持原顺序
-        var changedSheets = sheetAnalysis.filter(function(sheet) { return sheet.hasChanges; });
-        var unchangedSheets = sheetAnalysis.filter(function(sheet) { return !sheet.hasChanges; });
-        
-        // 对有变更的sheet按名称排序，确保Sheet1在前
-        changedSheets.sort(function(a, b) {
-            // Sheet1 优先级最高
-            if (a.name === 'Sheet1') return -1;
-            if (b.name === 'Sheet1') return 1;
-            // 其他按字母顺序排序
-            return a.name.localeCompare(b.name);
-        });
-        
-        var reorderedSheets = changedSheets.concat(unchangedSheets);
-
-        var defaultActiveSheetName;
-        var treasureSheet;
-        
-        if (treasureSheet && treasureSheet.hasChanges) {
-            defaultActiveSheetName = treasureSheet.name;
-        } else if (changedSheets.length > 0) {
-            // 选择第一个有变更且不是测试配置的sheet
-            var selectableChangedSheets = changedSheets.filter(function(sheet) {
-                return !sheet.name.includes('测试配置');
-            });
-            
-            if (selectableChangedSheets.length > 0) {
-                defaultActiveSheetName = selectableChangedSheets[0].name;
-                console.log('Default active sheet: first selectable changed sheet', defaultActiveSheetName);
-            } 
-        } else {
-            // 最后选择第一个sheet
-            defaultActiveSheetName = reorderedSheets[0].name;
-            console.log('Default active sheet: first sheet', defaultActiveSheetName);
-        }
+        // 顺序与默认选中**只有一份实现**（static/js/excel_sheet_order.js，四张页面共用）：
+        // 有变更的表在前、组内保持工作簿原始顺序，默认打开第一张有变更的表。
+        //
+        // 这里原先自己排了一次（`a.name === 'Sheet1' ? -1 : … localeCompare`）：
+        // 表名恰好叫 Sheet1 的工作簿看着是对的，别的项目就退化成按表名字母序重排，
+        // 工作簿原序被打乱 —— 而 AI 说的「第 N 张表」用的是工作簿顺序，两边于是对不上。
+        //
+        // 默认选中的筛选去掉了：那句 `!sheet.name.includes('测试配置')` 只影响**默认
+        // 打开哪一张**（一个便利启发式），换项目这个中文子串不出现，过滤会变成恒为空
+        // 操作；删掉之后严格更可预测，不会让人得出错误结论。
+        // 注意**别把「不给点」也一起删**：那条改变的是用户能做什么，是产品约束，
+        // 由下面的 isSheetNotClickable 传进去（见那个函数的说明）。
+        //
+        // 旧的死代码（`var treasureSheet;` 声明后从未赋值，紧跟的
+        // `if (treasureSheet && treasureSheet.hasChanges)` 永远进不去）也在这里删掉了。
+        var reorderedSheets = ExcelSheetOrder.orderSheets(
+            ExcelSheetOrder.analyzeSheets(
+                originalSheetNames, diffData.sheets, sheetHasChanges, isSheetNotClickable
+            )
+        );
+        var defaultActiveSheetName = ExcelSheetOrder.defaultSheetName(reorderedSheets);
+        console.log('Default active sheet:', defaultActiveSheetName);
         
         for (var i = 0; i < reorderedSheets.length; i++) {
             var sheet = reorderedSheets[i];
@@ -1264,12 +1237,11 @@ function displayExcelDiff(diffData) {
             if (isActive) tabClass += ' active';
             
             // 无变更的sheet和"召唤物"sheet不可点击
-            var isSummonSheet = sheetName.includes('召唤物');
-            var isClickable = hasChanges && !isSummonSheet;
+            var isClickable = hasChanges && !sheet.notClickable;
             var disabledClass = isClickable ? '' : ' excel-tab-disabled';
 
             // 如果是召唤物sheet，添加特殊标识
-            if (isSummonSheet) {
+            if (sheet.notClickable) {
                 disabledClass += ' excel-tab-summon-disabled';
                 console.log('召唤物 sheet detected and disabled:', sheetName);
             }
@@ -1407,6 +1379,26 @@ function headerChangesHtml(sheetData) {
            '</summary>' +
            '<div class="excel-header-changes__list">' + escapeHtml(items.join('；')) + '</div>' +
            '</details>';
+}
+
+// 某张表**不给点**（就算它有变更）。
+//
+// ⚠️ 这个判定是**某个项目特有**的：那个项目的「召唤物」表体量很大且不是评审对象，
+// 所以产品上要求它的标签不给点、并单独打一个 `excel-tab-summon-disabled` 标记
+// （CSS 里那条规则见 static/css/excel-diff-new.css）。
+//
+// 它和「默认选中哪一张」是两件事，**不能一起抽象掉**：
+//   * 「默认选中哪一张」只影响便利性，删掉严格更可预测；
+//   * 这条限制的是**用户能做什么**，删掉会让原本打不开的表变成可点 —— 那是产品行为
+//     变更，不该在「抽象化」的口号下顺手做掉。
+//
+// 现在的形态是折中：「排序 / 可点击性」的机制只有一份（static/js/excel_sheet_order.js），
+// 判定作为参数传进去；但**那个中文子串仍然硬编码在两处调用点**（本页与
+// merge_diff.html 各一份，两份逐字相同、有测试钉着）。换项目时要么删掉这两处判定，
+// 要么 —— 正确的做法 —— 改成按项目/仓库配置传入（本次不做：平台尚无这个配置位，
+// 不新造一套配置体系）。**合并页那份改动时请同步这一份。**
+function isSheetNotClickable(sheetName) {
+    return String(sheetName || '').indexOf('召唤物') !== -1;
 }
 
 function countHeaderChanges(diffData) {

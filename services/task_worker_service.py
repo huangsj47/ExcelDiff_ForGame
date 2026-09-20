@@ -30,8 +30,13 @@ from services.branch_refresh_service import (
     queue_missing_git_branch_refresh as queue_missing_git_branch_refresh_service,
 )
 from services.task_worker_weekly_handlers import (
+    enqueue_weekly_sync_task,
+    forget_weekly_sync_task_of_payload,
     handle_weekly_excel_cache_task as handle_weekly_excel_cache_task_service,
     handle_weekly_sync_task as handle_weekly_sync_task_service,
+    is_weekly_sync_task_enqueued,
+    parse_config_id_from_commit_id,
+    reset_stale_weekly_sync_tasks,
 )
 from services.repository_sync_status import clear_sync_error as clear_repository_sync_error
 from services.repository_sync_status import record_sync_error as record_repository_sync_error
@@ -548,6 +553,10 @@ def background_task_worker():
             traceback.print_exc()
         finally:
             if task_processed:
+                # 出队就注销「已入队」账本（见 weekly_handlers 里集合的注释）。放 finally：
+                # 中途抛异常也得注销，否则 create_weekly_sync_task 会以为它还在队列里。
+                # 取 task_data 用 getattr：这一句在 finally 里，一旦抛出去会把工作线程打死。
+                forget_weekly_sync_task_of_payload(getattr(task_wrapper, 'task_data', None))
                 try:
                     background_task_queue.task_done()
                 except ValueError:
@@ -901,7 +910,10 @@ def _handle_auto_sync_task_inner(task):
                         )
                         new_commit_objects.append(new_commit)
                         file_path = commit_data.get('path', '')
-                        if file_path.lower().endswith(('.xlsx', '.xls')):
+                        # 别在这里手写扩展名：口径统一到 is_excel_file()（平台配表清单
+                        # .xlsx/.xls/.xlsm/.xlsb/.csv，本文件标记 is_excel 的那处也认它们）。
+                        # 原先只写 ('.xlsx', '.xls')，.xlsm/.xlsb/.csv 的提交不会排进队列。
+                        if _excel_cache_service.is_excel_file(file_path):
                             excel_task_list.append({
                                 'type': 'excel_diff',
                                 'repository_id': repository.id,
@@ -1311,6 +1323,16 @@ def load_pending_tasks():
             _BackgroundTask.priority.asc(), _BackgroundTask.created_at.asc()
         ).all()
         for db_task in pending_tasks:
+            if db_task.task_type == 'weekly_sync':
+                # 载荷必须带 config_id（周版本任务把它存在 commit_id 列里，见
+                # create_weekly_sync_task）。原先没有这条分支 → 落进下面的通用分支、
+                # 载荷里没有 config_id → 处理器第一句 KeyError，被 worker 循环的
+                # NON_CRITICAL_WORKER_LOOP_ERRORS 吞掉，写终态那句在 try 里执行不到
+                # → 库里那行永久 pending（线上「永久排队中」的成因）。
+                # 走 enqueue_weekly_sync_task 而不是下面那个 put：它同时登记「已入队」账本。
+                enqueue_weekly_sync_task(background_task_queue, TaskWrapper, db_task.id,
+                                         parse_config_id_from_commit_id(db_task.commit_id))
+                continue
             if db_task.task_type == 'weekly_excel_cache':
                 task_data = {
                     'id': db_task.id,
@@ -1321,10 +1343,7 @@ def load_pending_tasks():
                     }
                 }
             elif db_task.task_type == 'weekly_ai_analysis':
-                try:
-                    config_id = int(db_task.commit_id)
-                except (TypeError, ValueError):
-                    config_id = None
+                config_id = parse_config_id_from_commit_id(db_task.commit_id)
                 task_data = {
                     'type': 'weekly_ai_analysis',
                     'config_id': config_id,
@@ -1614,6 +1633,12 @@ def create_weekly_sync_task(config_id, auto_commit=True):
                 )
                 if auto_commit:
                     _db.session.commit()
+            elif not is_weekly_sync_task_enqueued(existing_task.id):
+                # 单机模式下「库里是 pending」**不等于**「在内存队列里」：进程重启会清空
+                # 内存队列、那行却还是 pending，于是每次调度都命中这条去重分支直接返回 ——
+                # 任务永远不跑（线上「永久排队中」）。账本里没有它 = 队列已经丢了，补一次；
+                # 有它 = 还在队列里，绝不能重入队（会跑两遍）。
+                enqueue_weekly_sync_task(background_task_queue, TaskWrapper, existing_task.id, config_id)
             log_print(f"周版本配置 {config_id} 已存在待处理的同步任务", 'SYNC')
             return existing_task.id
 
@@ -1633,14 +1658,7 @@ def create_weekly_sync_task(config_id, auto_commit=True):
         if auto_commit:
             _db.session.commit()
         if not _use_agent_dispatch():
-            task_data = {
-                'type': 'weekly_sync',
-                'config_id': config_id,
-                'task_id': new_task.id
-            }
-            task_counter = int(time.time() * 1000000)
-            tw = TaskWrapper(3, task_counter, task_data)
-            background_task_queue.put(tw)
+            enqueue_weekly_sync_task(background_task_queue, TaskWrapper, new_task.id, config_id)
         log_print(f"创建周版本同步任务: config_id={config_id}, task_id={new_task.id}", 'SYNC')
         return new_task.id
     except SQLAlchemyError as e:
@@ -1740,24 +1758,18 @@ def schedule_weekly_sync_tasks():
                 now_beijing_naive = now_beijing().replace(tzinfo=None)
                 now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
                 config_end = config.end_time.replace(tzinfo=None) if config.end_time.tzinfo else config.end_time
+                # 重置卡死的 pending 是**清理动作，对查到的每个配置都要做**，与「这个配置
+                # 是否活跃」无关。所以必须放在下面那条「窗口结束 → 置 completed →
+                # continue」之前：原先重置整段圈在 `status == 'active'` 里，窗口一结束
+                # 就再也没人重置它了（详见 reset_stale_weekly_sync_tasks 的注释）。
+                reset_stale_weekly_sync_tasks(config, now_utc_naive, db=_db,
+                                              background_task_model=_BackgroundTask, log_print=log_print)
                 if now_beijing_naive > config_end and config.status == 'active':
                     config.status = 'completed'
                     _db.session.commit()
                     log_print(f"周版本配置已完成: {config.name}", 'WEEKLY')
                     continue
                 if config.status == 'active':
-                    stale_tasks = _BackgroundTask.query.filter_by(
-                        task_type='weekly_sync',
-                        commit_id=str(config.id),
-                        status='pending'
-                    ).all()
-                    for stale in stale_tasks:
-                        stale_created = stale.created_at.replace(tzinfo=None) if stale.created_at and stale.created_at.tzinfo else stale.created_at
-                        if stale_created and (now_utc_naive - stale_created).total_seconds() > 300:
-                            stale.status = 'failed'
-                            stale.error_message = '任务超时，已被调度器重置'
-                            _db.session.commit()
-                            log_print(f"重置卡死的周版本同步任务: task_id={stale.id}, config_id={config.id}", 'WEEKLY', force=True)
                     create_weekly_sync_task(config.id)
             log_print(f"检查了 {len(active_configs)} 个周版本配置", 'WEEKLY')
     except SQLAlchemyError as e:

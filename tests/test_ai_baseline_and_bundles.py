@@ -397,7 +397,10 @@ def test_describe_lists_only_multi_member_units():
     lines = describe_bundles(bundles)
     assert len(lines) == 1
     assert "CfgItem" in lines[0]
-    assert "必须一起看" in lines[0]
+    # 只写平台核实过的那个事实（名字里有同一个记号）+ 明确的待确认，**不下断言**：
+    # 平台没有核实过这两个文件之间是什么关系。
+    assert "疑似同一次改动，待确认" in lines[0]
+    assert "生成物" not in lines[0]
 
 
 def test_describe_reports_how_many_groups_it_left_out():

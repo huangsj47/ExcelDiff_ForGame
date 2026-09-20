@@ -55,6 +55,7 @@ from utils.content_window import (
     slice_lines,
 )
 from utils.logger import log_print
+from utils.text_decoding import binary_content_notice, text_or_notice
 
 # 每个工作表最多渲染多少行。**不设上限会把一个几千行的表整个塞进上下文**，而单条上限
 # 会从中间截断，模型看到的是一张中间缺一块的表。这里按行裁剪并如实记账。
@@ -522,9 +523,22 @@ def _render_agent_file_content(
 
     代价（照旧）：Agent 端取回时的 `max_chars` 与平台本地的 `_content_max_chars` 必须相等
     （都是 `CONTENT_MAX_CHARS`），否则同一次索取在单机与多节点下会给出不同的文本。
+
+    **二进制例外**（`kind == "binary"`）：Agent 读到的是真正的二进制（魔数 / NUL，
+    见 `utils.text_decoding.looks_binary`），它回的就是那句话本身
+    （`utils.text_decoding.binary_content_notice`，与平台本地同一个模板）。
+    这里**原样返回、不加出处、也不套行号**：那句话说的是「这份东西没法用文本核对」，
+    不是一个文件的正文 —— 加一行「（内容由业务节点取出）」会让同一次索取在单机与
+    多节点下给出两段不同的文本，而这一层的整个理由是两端逐字一致。
     """
     where = path or str(outcome.get("file_path") or "")
-    if str(outcome.get("kind") or "") == "excel":
+    kind = str(outcome.get("kind") or "")
+    if kind == "binary":
+        content = str(outcome.get("content") or "")
+        # Agent 没给那句话时自己补一句（同模板）—— 不能回空串：空串在这个契约里是
+        # 「确实没有内容」，那是另一件事。
+        return content or binary_content_notice(where)
+    if kind == "excel":
         content = str(outcome.get("content") or "")
         if not content:
             return f"[配表解析失败] {where}：内容无法解析成文本表格。**这不等于「没有内容」**。"
@@ -819,20 +833,41 @@ class _SheetStats:
             elif text in self._texts[slot]:
                 self._texts[slot][text[:40]] += 1
 
-    def render(self, column_labels: Sequence[str]) -> list[str]:
-        """渲染成给模型看的几行。`column_labels` 是首行的值（配表通常就是列名）。"""
+    def render(self, column_labels: Sequence[str], *, header_count: int = 1,
+               name_row: int = 1) -> list[str]:
+        """渲染成给模型看的几行。`column_labels` 是列名行的值（配表通常就是列名）。
+
+        `header_count` / `name_row` 只在仓库配了表头坐标时才有意义
+        （见 `_read_excel_sheets`）：那时抬头必须**如实说清**列名取自第几行、有几行被
+        当作表头没进统计 —— 否则「表头 3 行」的表在这里看起来就是「凭空少了两行」。
+        未配置（默认值）时这句话与今天**逐字相同**（既有断言按「首行按列名」认统计块）。
+        """
         if self.rows == 0:
             return []
-        head = [
-            f"- 整表统计（首行按列名，其余 {self.rows} 行参与统计；与下面只展示前若干行无关。"
-            "判断某个值是否合理时用它做比较基准）："
-        ]
+        # 仓库配了表头坐标（表头块 > 1 行，或列名不在第 1 行）时，抬头必须说清列名取自
+        # 第几行、有几行没进统计；否则「列名取自第 2 行」的表在这里看起来就是「凭空少一行」。
+        configured = header_count > 1 or name_row > 1
+        if configured:
+            head = [
+                f"- 整表统计（列名取自第 {name_row} 行，表头共 {header_count} 行不计入统计与"
+                f"正文；其余 {self.rows} 行参与统计；与下面只展示前若干行无关。"
+                "判断某个值是否合理时用它做比较基准）："
+            ]
+        else:
+            head = [
+                f"- 整表统计（首行按列名，其余 {self.rows} 行参与统计；与下面只展示前若干行无关。"
+                "判断某个值是否合理时用它做比较基准）："
+            ]
         lines: list[str] = []
         shown = min(self.width, _STATS_COLUMNS_LIMIT)
+        # 列名取自哪一行决定这一句怎么写：没配表头坐标时它就是首行（今天的文案，逐字不变）；
+        # 配了名称行之后写「首行」是错的（列名来自第 2 行），而模型正是靠这句话把统计里的
+        # 「第 N 列」与表里的字段对上。
+        label_word = "列名" if configured else "首行"
         for index in range(shown):
             label = column_labels[index] if index < len(column_labels) else ""
             label = str(label or "").strip()[:20]
-            name = f"第 {index + 1} 列" + (f"（首行「{label}」）" if label else "")
+            name = f"第 {index + 1} 列" + (f"（{label_word}「{label}」）" if label else "")
             non_empty = self._nonempty[index] if index < len(self._nonempty) else 0
             if non_empty == 0:
                 continue
@@ -903,6 +938,15 @@ def parse_sheet_window(window: str) -> Optional[tuple]:
     return start, end
 
 
+def _row_has_content(cells: Sequence[str]) -> bool:
+    """这一行有没有内容（全部是空串 / 空白串就是没有）。
+
+    判据与 `_SheetStats.add_row` 里那句「整行为空」逐字一致：**空白串不算内容**
+    （`'   '` 在配表里是占位，不是字段名），免得一个空行被当成列名行。
+    """
+    return any(str(value or "").strip() for value in cells)
+
+
 def _read_excel_sheets(
     raw: bytes,
     *,
@@ -910,6 +954,8 @@ def _read_excel_sheets(
     path: str = "",
     window: str = "",
     char_budget: int = 0,
+    header_rows=None,
+    header_name_row=None,
 ) -> Optional[str]:
     """把 xlsx 的字节渲染成文本表格。**自报家门、自我收敛、按工作表可点名。**
 
@@ -942,11 +988,38 @@ def _read_excel_sheets(
     * `path`：写进抬头（与 `_render_text_content` 同一个约定）。
     * `window`：`""` = 从第 1 张开始、尽量多给；`"2"` / `"2-3"` = 点名要第几张。
     * `char_budget`：0 = 不限（小工具与既有单测用）；生产路径传单条上限。
+    * `header_rows` / `header_name_row`：仓库上的「表头行数」与「名称行」
+      （`Repository.header_rows` / `Repository.header_name_row`）。**不传就是今天的行为**
+      （列名取第一个非空行，其余行全算数据），所以既有调用方与单测一个字都不用改。
+
+    ## 表头坐标为什么必须由仓库配置说了算（2026-09-20）
+
+    这一层原先**完全不认识**这两个配置：列名一律取「第一个非空行」。而 diff 引擎的列名
+    由 `header_name_row` 决定（`services/diff_service.py::_plan_name_row`），表头块由
+    `header_rows` 决定。于是「第 1 行是大标题、第 2 行才是字段名」（`header_name_row=2`
+    存在的唯一理由）的表上：
+
+    * diff 侧列名取第 2 行，AI 侧却把第 1 行当列名；
+    * 第 2 行（真正的字段名行）在 AI 侧被当成**数据第一行**统计进去 —— 每个文本列于是
+      多出一个假的「只出现一次的取值」，而模型正是拿这些取值分布判断「这个值合不合理」。
+
+    两端都读同一份仓库配置之后，列名与数据行的坐标就一致了。配了 `header_rows=3` 的表，
+    物理行 2、3 也不再进统计与正文（diff 引擎早就是这样）。
+
+    取法与原函数一样只动**坐标**，不改编排：`header_rows` 的那几行既不进统计、也不进
+    正文，只在工作表抬头里如实写一句「表头共 N 行不计入」，免得模型以为这几行凭空消失。
     """
     try:
         from openpyxl import load_workbook
     except ImportError:  # pragma: no cover —— openpyxl 是平台的既有依赖
         return None
+
+    # 规范化只走 diff 引擎那两份实现（`_header_row_count` / `_header_name_row`）：
+    # 同一件事不能有第二套「几算合法、越界怎么办」的判断 —— 那正是本次要收敛的东西。
+    from services.diff_service import DiffService
+
+    header_count = DiffService._header_row_count(header_rows)
+    name_row = DiffService._header_name_row(header_name_row, header_count)
 
     try:
         book = load_workbook(io.BytesIO(raw), data_only=True, read_only=True)
@@ -963,14 +1036,26 @@ def _read_excel_sheets(
             sheet = book[name]
             stats = _SheetStats()
             labels: list[str] = []
+            first_row: list[str] = []
             body: list[str] = []
-            for row in sheet.iter_rows(values_only=True):
-                if not labels and row is not None and any(
-                    value is not None and str(value).strip() for value in row
-                ):
-                    # 首个非空行按**列名**处理：它只当标签，不进统计（表头文字当成取值会
-                    # 让每个文本列都多出一个「只出现一次」的值）。
-                    labels = ["" if value is None else str(value) for value in row]
+            for physical, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                cells = ["" if value is None else str(value) for value in (row or ())]
+                if physical == 1:
+                    first_row = cells
+                if name_row > 1 and physical == name_row:
+                    # 配置了名称行：列名**就是这一行**（与 diff 引擎的 `_plan_name_row` 同口径）。
+                    labels = cells
+                    continue
+                if name_row == 1 and not labels and _row_has_content(cells):
+                    # 未配置名称行（或配置为 1）＝今天的行为：第一个非空行按列名处理。
+                    # 它只当标签，不进统计（表头文字当成取值会让每个文本列都多出一个
+                    # 「只出现一次」的值）。
+                    labels = cells
+                    continue
+                if physical <= header_count:
+                    # 表头块（物理行 1..header_count）里剩下的行：既不是数据，也不是列名。
+                    # 不进统计、不进正文 —— 与 diff 引擎「只有物理行 > header_rows 才算
+                    # 数据行」同一口径。
                     continue
                 stats.add_row(row)
                 if len(body) >= max_rows:
@@ -979,7 +1064,18 @@ def _read_excel_sheets(
                 if row is None or all(value is None for value in row):
                     continue
                 body.append("- " + " ｜ ".join(_cell(value) for value in row))
-            collected.append((str(name), stats.render(labels), body, stats.rows))
+            if not labels and name_row > 1 and _row_has_content(first_row):
+                # 配置了名称行、但这张表短到没有那一行：与 diff 引擎同一口径 ——
+                # `_plan_name_row` 取不到名称行时「不改名」，列名仍是 `header=0` 读到的第 1 行。
+                labels = first_row
+            collected.append(
+                (
+                    str(name),
+                    stats.render(labels, header_count=header_count, name_row=name_row),
+                    body,
+                    stats.rows,
+                )
+            )
     finally:
         try:
             book.close()
@@ -1518,6 +1614,11 @@ class PlatformContextProvider:
                 path=path,
                 window=lines,
                 char_budget=self._content_max_chars,
+                # 表头坐标从**仓库配置**来（与 diff 引擎同一套口径）：
+                # 列名取哪一行、表头块占几行，决定了正文里哪些行算数据。
+                # 取不到 repository 时按未配置处理（见 `_read_excel_sheets` 的默认口径）。
+                header_rows=getattr(repository, "header_rows", None),
+                header_name_row=getattr(repository, "header_name_row", None),
             )
             if rendered is None:
                 return (
@@ -1525,13 +1626,21 @@ class PlatformContextProvider:
                     "**这不等于「没有内容」**，需要核对时请说明该表无法读取。"
                 )
             return rendered
-        try:
-            return _render_text_content(raw.decode("utf-8"), path=path, lines=lines, auto=auto)
-        except UnicodeDecodeError:
-            return (
-                f"[无法展示的内容] {path}：不是文本也不是配表，无法以文本形式核对。"
-                "**这不等于「没有内容」。**"
-            )
+        # 文本/代码：解码走 `utils.text_decoding`（**两端唯一一份实现**）。
+        #
+        # 原先这里是 `raw.decode("utf-8")` 严格解码、失败就回「[无法展示的内容] …不是文本…」
+        # —— 那是一条**假的信息缺口**：GBK 的 lua（本仓库最常见的形态之一）读得到，
+        # 模型却被告知读不到，于是把「读得到但没解码」写成「这里没有内容」。
+        # 而 Agent 侧同一串字节走的是 utf-8 + `errors='replace'`（乱码），
+        # 于是同一次索取在单机与多节点下给出**两份不同的文本**。
+        #
+        # 现在两端都调 `text_or_notice`：能解出文本就给文本（五级编码兜底），
+        # 只有**真正的二进制**（魔数 / NUL，见 `looks_binary`）才发那句话 ——
+        # 那句话的模板也在 `utils.text_decoding`，两端的措辞逐字相同。
+        text = text_or_notice(raw)
+        if text is None:
+            return binary_content_notice(path)
+        return _render_text_content(text, path=path, lines=lines, auto=auto)
 
     def _default_window(self, commit: str, path: str) -> str:
         """模型没点名时，把窗口放在这个文件**本次改动**的位置上（返回 `"a-b"`）。

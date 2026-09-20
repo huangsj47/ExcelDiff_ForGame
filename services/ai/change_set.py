@@ -15,8 +15,15 @@
 
 ## 表与生成物
 
-`bundles` 的说明行会被拼进变更清单：同一张表与它的生成物是**一次改动**，分开看每一侧
-都正常，「表改了、产物没跟上」只有一起看才看得见。识别规则与项目无关，见 `bundles.py`。
+`bundles` 的说明行会被拼进变更清单。但**平台只写它核实过的东西**：这一组之所以在一起，
+唯一依据是「文件名里出现了同一个记号」。所以清单里那一段的小标题与措辞都是
+「疑似、待确认」，不是「表与其生成物是同一次改动」—— 后者是**项目事实**，由项目
+知识包自己写（G119 写在 `references/config-table-spec.md`）。识别规则与项目无关，
+前缀由项目声明（见 `bundles.py` 与 `project_facts.py`）。
+
+同时这里会把**本轮的配对结果**记一笔（`ChangeSet.bundle_note` 与一行日志）：
+「0 组」既可能是「这个项目本来就没得配」，也可能是「我们根本不会配」，两者在
+日志里必须分得开。
 """
 
 from __future__ import annotations
@@ -26,10 +33,12 @@ from typing import Iterable, Mapping, Optional, Sequence
 
 from services.ai.bundles import build_bundles, describe_bundles
 from services.ai.prompt import CommitSummary, FileChange, render_change_summary
+from services.ai.project_facts import DEFAULT_PREFIX_DECLARATION, PrefixDeclaration
 from services.ai.scope import AnalysisScope, normalize_path
+from utils.logger import log_print
 
-# 变更清单里最多列几组「表 ↔ 生成物」的关联。列太多会把清单本身挤长，而它每一轮都在
-# 提示词里；剩下多少组由 `describe_bundles` 自己说明。
+# 变更清单里最多列几组「同记号关联」（疑似同一次改动的那些）。列太多会把清单本身挤长，
+# 而它每一轮都在提示词里；剩下多少组由 `describe_bundles` 自己说明。
 DEFAULT_BUNDLE_LIMIT = 12
 
 _SCOPE_LABELS = {
@@ -48,8 +57,12 @@ class ChangeSet:
     # 本次涉及的全部路径，规范化且去重，保持原有顺序。用于配对「表 ↔ 生成物」。
     paths: tuple[str, ...] = ()
     commits: tuple[CommitSummary, ...] = ()
-    # 表与生成物配成一组时的说明行（单文件单元不会出现）。
+    # 「文件名里有同一个记号」的那几组说明行（单文件单元不会出现）。
     bundle_lines: tuple[str, ...] = ()
+    # 「本轮配对了几组、用的是哪个前缀、前缀是谁声明的」那一句话。
+    # **它是一个结论字段，不是装饰**：没有它，「这个项目本来就没得配」与
+    # 「平台根本不会配」在界面上、日志里都长得一模一样。
+    bundle_note: str = ""
 
     @property
     def is_empty(self) -> bool:
@@ -61,6 +74,7 @@ def from_commit_payload(
     *,
     readable_references: Iterable[str] = (),
     bundle_limit: int = DEFAULT_BUNDLE_LIMIT,
+    prefixes: Optional[PrefixDeclaration] = None,
 ) -> ChangeSet:
     """单提交模式：一个提交、一个文件。"""
     commit = dict(payload.get("commit") or {})
@@ -86,6 +100,7 @@ def from_commit_payload(
         readable_references=readable_references,
         scope_note=_scope_note(payload),
         bundle_limit=bundle_limit,
+        prefixes=prefixes,
     )
 
 
@@ -94,6 +109,7 @@ def from_weekly_payload(
     *,
     readable_references: Iterable[str] = (),
     bundle_limit: int = DEFAULT_BUNDLE_LIMIT,
+    prefixes: Optional[PrefixDeclaration] = None,
 ) -> ChangeSet:
     """周版本模式：一列 delta 文件，按 `latest_commit_id` 归到各自的提交下。
 
@@ -155,6 +171,7 @@ def from_weekly_payload(
         bundle_limit=bundle_limit,
         total_files=total_files,
         whitelist=whitelist or None,
+        prefixes=prefixes,
     )
 
 
@@ -166,12 +183,16 @@ def build(
     bundle_limit: int = DEFAULT_BUNDLE_LIMIT,
     total_files: Optional[int] = None,
     whitelist: Optional[Mapping[str, Iterable[str]]] = None,
+    prefixes: Optional[PrefixDeclaration] = None,
 ) -> ChangeSet:
     """渲染清单并算出白名单范围。两种模式共用。
 
     `whitelist` 给白名单一个**独立于清单**的来源（提交号 → 该提交改动过的全部路径）。
     不传时白名单就是清单里那些文件（单提交模式的正常情形）。两者分开是必须的：
     清单可以为了省字符而只列一部分，而白名单少一个路径，模型就**彻底读不到**那个文件。
+
+    `prefixes` 是**项目声明的生成物前缀**（不传时用平台默认值）。配对规则本身与项目
+    无关，但「产物叫什么前缀」是项目事实，见 `project_facts.py`。
     """
     ordered = tuple(commits)
     rendered_paths = _collect_paths(ordered)
@@ -190,18 +211,29 @@ def build(
     # 拆开（表改了、产物没跟上，正是要靠配对才看得见）。
     paths = _collect_whitelist_paths(resolved_whitelist) or rendered_paths
 
-    bundles = build_bundles(paths)
+    declaration = prefixes or DEFAULT_PREFIX_DECLARATION
+    bundles = build_bundles(paths, generated_prefixes=declaration.prefixes)
     bundle_lines = tuple(describe_bundles(bundles, limit=bundle_limit))
+    pair_count = sum(1 for bundle in bundles if bundle.is_multi)
+    # 每个项目都记一笔（一次分析一行，不是每轮一行）：这一行是「0 组是因为项目本来
+    # 就没得配，还是因为平台不会配」的唯一出口。声明坏掉时一并见光。
+    bundle_note = declaration.describe(pair_count)
+    log_print(bundle_note + (f"；{declaration.warning}" if declaration.warning else ""), "AI")
 
     body = render_change_summary(ordered, total_files=total_files)
     if scope_note:
         body = f"{scope_note}\n\n{body}"
     if bundle_lines:
+        # 小标题与措辞**只写平台核实过的事实**：平台看到的是「文件名里有同一个记号」，
+        # 它没有核实这些文件之间是什么关系（在别的项目里 `Item.csv` 与脚本 `Item.py`
+        # 也会凑成一对）。所以这里是「疑似、请确认」，不是「这是一件事」。
         body += (
-            "\n## 这些改动是一件事，请一起看\n\n"
+            "\n## 文件名疑似相关的改动（平台按名字推断，未经核实）\n\n"
             + "\n".join(bundle_lines)
-            + "\n\n配表项目里，**表与它的生成物是同一次改动**：只看表或只看生成物，"
-            "「表里加了 ID、生成的代码里有没有对应项」这类问题都看不出来。\n"
+            + "\n\n上面这些关联的唯一依据是**文件名里出现了同一个记号**（例如都含 "
+            "`CfgItem`）。平台**没有核实**它们之间是什么关系，也没有核实它们是否真的"
+            "属于同一次改动。请把它们当成「值得一起看一眼」的线索：**先确认**，"
+            "再据此推理。确认不了就按本批次实际改了什么如实写，不要把它当成前提。\n"
         )
 
     return ChangeSet(
@@ -220,6 +252,7 @@ def build(
         paths=paths or rendered_paths,
         commits=ordered,
         bundle_lines=bundle_lines,
+        bundle_note=bundle_note,
     )
 
 

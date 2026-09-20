@@ -221,20 +221,25 @@ def test_a_weekly_entry_missing_its_commit_is_skipped():
 
 def test_a_table_and_its_generated_file_are_called_out():
     """**这是 bundling 的接线处。** 分开看每一侧都正常，「表改了、产物没跟上」只有
-    一起看才看得见，所以要在清单里点明这两件事是一件事。"""
+    一起看才看得见，所以要在清单里点出「这几个文件名有关联」并标成**待确认**。"""
     change = from_weekly_payload(_weekly_payload())
 
     assert change.bundle_lines, "表与生成物没有被配成一组"
     assert "CfgItem" in change.bundle_lines[0]
-    assert "这些改动是一件事" in change.summary
-    assert "表与其生成物" in change.summary
+    assert "疑似同一次改动，待确认" in change.summary
+    # 平台**没有**核实过它们之间的关系，所以不能把「表与其生成物」当成事实写进提示词。
+    assert "表与其生成物" not in change.summary
+    assert "这些改动是一件事" not in change.summary
 
 
 def test_no_bundle_section_when_nothing_pairs():
     change = from_weekly_payload(_weekly_payload(files=[{"file_path": OTHER, "latest_commit_id": "c1"}]))
 
     assert change.bundle_lines == ()
-    assert "这些改动是一件事" not in change.summary
+    assert "疑似同一次改动" not in change.summary
+    # 「0 组」必须留下记录，且要说清是**谁**的前缀：`bundle_note` 就是那一行。
+    assert "0 组" in change.bundle_note
+    assert "Cfg" in change.bundle_note
 
 
 def test_similarly_named_modules_stay_separate():
