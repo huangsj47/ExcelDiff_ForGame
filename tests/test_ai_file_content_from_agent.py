@@ -353,6 +353,38 @@ class TestPlatformSideDispatch:
         assert '没有绑定 Agent' in got['message']
         assert dispatch.counts['enqueue'] == 0
 
+    def test_the_no_agent_message_does_not_invent_a_reason_for_the_local_miss(
+        self, dispatch, monkeypatch
+    ):
+        """**这条消息不许替本地那次失败编一个原因。**
+
+        它原先写死成「platform/agent 模式下平台本地也没有这个仓库的工作副本」，而
+        `get_file_content_from_git` 返回 `None` 至少有四种原因：agent 模式禁 clone、
+        clone 失败、commit 解析不了、**这个路径在该提交里根本不存在**。
+
+        单机部署下前半句是假的，而它会把排查的人送去查节点绑定 —— 真正的原因
+        （模型点名了一个不存在的路径）反而没人看。所以只说两件确定的事：本地没取到、
+        没有节点能兜底；本地为什么没取到，由那条路自己记进服务端日志。
+
+        线上的一次真实核对里模型正是拿到了这句话（「读不到正文 …平台本地也没有这个
+        仓库的工作副本」），而那一轮它要的路径本来就未必存在。
+        """
+        monkeypatch.setattr(
+            dispatch.module, 'AgentProjectBinding',
+            SimpleNamespace(query=SimpleNamespace(filter_by=lambda **k: SimpleNamespace(first=lambda: None))),
+        )
+        got = self._request(dispatch)
+        message = got['message']
+
+        assert '没有绑定 Agent 节点' in message, message
+        assert 'platform/agent 模式下' not in message, (
+            f'这句话在单机部署下是假的，而且会把人送去查节点绑定：{message}'
+        )
+        assert '工作副本' not in message, (
+            f'「本地为什么没取到」不是这条消息知道的事（四种原因它一个都分辨不了）：{message}'
+        )
+        assert '服务端日志' in message, f'要把排查的人指向真原因所在的地方：{message}'
+
     def test_an_offline_agent_queues_without_waiting(self, dispatch):
         dispatch.agent.status = 'offline'
         got = self._request(dispatch)

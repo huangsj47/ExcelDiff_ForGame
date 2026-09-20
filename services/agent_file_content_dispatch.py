@@ -407,11 +407,19 @@ def _request_from_agent(
 
     agent = agent_for_project(project_id)
     if agent is None:
+        # 只说**确定的两件事**：平台本地没取到，且没有 Agent 节点可以兜底。
+        #
+        # **不猜本地为什么没取到。** 这条消息原先写死成「platform/agent 模式下平台本地
+        # 也没有这个仓库的工作副本」，而 `get_file_content_from_git` 返回 `None` 至少有
+        # 四种原因（agent 模式禁 clone、clone 失败、commit 解析不了、**这个路径在该提交里
+        # 根本不存在**）。单机部署下前半句是假的，而它会把排查的人送去查节点绑定 ——
+        # 真正的原因（模型点名了一个不存在的路径）反而没人看。真实原因由那条路自己记进
+        # 服务端日志（`log_print(..., force=True)`），这里不替它转述。
         return {
             "status": "unavailable",
             "message": (
-                "项目没有绑定 Agent 节点，platform/agent 模式下平台本地也没有这个仓库的"
-                f"工作副本，读不到文件{noun}"
+                f"平台本地没取到这个文件的{noun}（原因在服务端日志里），"
+                "项目没有绑定 Agent 节点，也没有别的节点能读它"
             ),
         }
 
