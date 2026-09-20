@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import services.ai.provenance as provenance
 import services.ai_analysis_service as ai_service
+from services.ai import project_config_source
 from app import app, create_tables, db
 from models import Project, Repository, WeeklyVersionConfig, WeeklyVersionDiffCache
 from models.ai_analysis import AiAnalysisRun, AiProjectApiKey, AiWeeklyAnalysisState
@@ -625,8 +626,14 @@ def test_the_analysis_client_uses_the_configured_timeout():
         )
         db.session.commit()
 
-        monkeypatch_target = ai_service.build_probe_client
-        ai_service.build_probe_client = _fake_build_probe_client
+        # **补丁要打在实际执行的那个模块上**：`build_endpoint_client` 已搬到
+        # `services/ai/project_config_source.py`，函数读的是**那个模块**全局里的
+        # `build_probe_client`。打 `ai_service.build_probe_client` 只是改了一个回导的
+        # 别名，函数照样调真的探测客户端 —— 补丁静默失效，而用例仍然「通过」的条件
+        # 恰好也满足不了，于是它以「超时没传下去」的形式红。调用点仍走 `ai_service`
+        # （同一个函数对象），要打的是它的主权模块。
+        monkeypatch_target = project_config_source.build_probe_client
+        project_config_source.build_probe_client = _fake_build_probe_client
         try:
             ai_service.build_endpoint_client(project.id, {}, timeout_seconds=300)
             assert captured["timeout_seconds"] == 300, (
@@ -637,7 +644,7 @@ def test_the_analysis_client_uses_the_configured_timeout():
             ai_service.build_endpoint_client(project.id, {})
             assert captured["timeout_seconds"] == PROBE_TIMEOUT_SECONDS
         finally:
-            ai_service.build_probe_client = monkeypatch_target
+            project_config_source.build_probe_client = monkeypatch_target
 
 
 def test_the_configured_timeout_is_clamped_and_never_falls_back_to_probe():

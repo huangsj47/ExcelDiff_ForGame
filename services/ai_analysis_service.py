@@ -6,58 +6,55 @@ AI analysis service（真实执行器）。
 
 from __future__ import annotations
 
-import json
-import os
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple
-
-from sqlalchemy.exc import SQLAlchemyError
+from typing import Iterable, List, Optional, Tuple
 
 from models import (
     Commit,
     Project,
     Repository,
     WeeklyVersionConfig,
-    WeeklyVersionDiffCache,
     db,
 )
 from models.ai_analysis import (
+    # 测试按 `ai_service.AiProjectAnalysisConfig` 直接建行 / 数列（属性访问，不是 import），
+    # 所以这个「本文件不直接用」的模型类必须留着 —— ruff 的 F401 会想删它。
+    AiProjectAnalysisConfig,  # noqa: F401 —— 测试按属性取
     AiAnalysisAnomaly,
     AiAnalysisRun,
     AiAnalysisTrace,
-    AiProjectAnalysisConfig,
-    AiProjectApiKey,
     AiWeeklyAnalysisState,
 )
 from models.ai_analysis.project_config import (
     DEFAULT_MAX_FILES_PER_RUN,
-    DEFAULT_REQUEST_TIMEOUT_SECONDS,
-    REQUEST_TIMEOUT_RANGE,
 )
 from services.ai.analysis_budget import budget_gate_reason, early_stop_guard
-from services.ai.baseline import (
-    DISPOSITION_PENDING,
-    BaselineFinding,
-    build_baseline_digest,
-    classify,
-    suppressed_fingerprints,
-)
-from services.ai.budget import effective_prompt_budget
 
 # 基线的读侧：从库里取「上一次为止的结论」，做成提示词里那段「已经报过的问题」与
 # 本轮该抹掉的指纹。**保留这里的同名引用**（下面两处调用点与既有测试都按这几个名字 import）。
 # 为什么单独一层见 `services/ai/baseline_source.py` 的模块抬头：纯函数留在 `baseline.py`，
 # 碰库的那一半搬出去，顺带让本文件回到 2000 行硬上限之内。
-from services.ai.baseline_source import (  # noqa: F401 —— 调用点与测试仍在用
-    baseline_digest as _baseline_digest,
-    baseline_findings as _baseline_findings,
-    previous_run as _previous_run,
-    skipped_unstructured_runs as _skipped_unstructured_runs,
+#
+# **`# noqa: F401` 必须写在每个别名那一行**，不能只写在 `from … import (` 那一行：
+# ruff 的 F401 是按「具体哪个名字没用」报的，诊断落在别名行上，写在开头那一行盖不住它 ——
+# `ruff check --select F401 --fix` 会把这些**故意留着的回导**当垃圾删掉（真发生过一次：
+# 删掉 `_baseline_findings` 之后 `tests/test_ai_baseline_needs_structured_conclusion.py`
+# 在收集阶段就 ImportError）。
+from services.ai.baseline_source import (
+    baseline_digest as _baseline_digest,  # noqa: F401 —— 测试按这个名字 import
+    baseline_findings as _baseline_findings,  # noqa: F401 —— 测试按这个名字 import
+    previous_run as _previous_run,  # noqa: F401 —— 测试按这个名字 import
+    skipped_unstructured_runs as _skipped_unstructured_runs,  # noqa: F401 —— 测试按这个名字 import
     suppressed as _suppressed,
 )
-from services.ai.change_set import ChangeSet, from_commit_payload, from_weekly_payload
+from services.ai.budget import effective_prompt_budget
+from services.ai.change_set import from_commit_payload, from_weekly_payload
+
+# 同上面那个模型类：本文件不直接调它，但测试用 `monkeypatch` 打的是
+# `ai_service.build_probe_client` 这个名字（属性访问），删掉就等于让补丁落空。
+from services.ai.endpoint_service import build_probe_client  # noqa: F401 —— 测试按属性打补丁
 
 # 读侧形态（进行中 / 有结论 / 最近一次失败）：只依赖 run 行与两个标签函数，
 # 与「怎么跑一次分析」没有耦合，单独一层也好单测。
@@ -67,19 +64,6 @@ from services.ai.conclusion_view import (  # noqa: F401 —— 本文件的读�
     _in_progress_result,
     _last_attempt_failed_result,
     _parse_response_payload,
-)
-from services.ai.endpoint_service import (
-    FIELD_DEFAULTS,
-    OPENAI_BASE_URL,
-    PROBE_TIMEOUT_SECONDS,
-    ConfigValidationError,
-    FieldError,
-    build_probe_client,
-    describe_field_schema,
-    source_of,
-    validate_endpoint_ready,
-    validate_field,
-    validate_payload,
 )
 from services.ai.engine import (
     STATUS_FAILED,
@@ -93,35 +77,58 @@ from services.ai.engine import (
 )
 from services.ai.llm_client import LLMError
 from services.ai.platform_provider import PlatformContextProvider
-from services.ai.pricing import (
-    PriceTable,
-    load_price_table,
-    price_change_requires_version_bump,
-    price_table_doc_shape,
+from services.ai.project_config_source import (  # noqa: F401 —— 调用点与测试仍在用
+    _coerce_timeout,
+    _get_project_api_key,
+    _get_project_config_row,
+    _price_table_from_config,
+    _price_version_for,
+    _resolve_base_name,
+    _utcnow,
+    build_endpoint_client,
+    build_weekly_group_key,
+    get_project_analysis_config,
+    get_project_api_key_status,
+    project_price_table,
+    set_project_api_key,
+    update_project_analysis_config,
 )
 from services.ai.project_facts import (
-    critical_path_facts,
-    declared_important_tables_by_repo,
     generated_prefixes,
-    scan_critical_paths,
 )
-from services.ai.provenance import current_provenance, provenance_matches
+from services.ai.provenance import current_provenance
 from services.ai.result_payload import (
     failed_result,
     result_payload,
 )
 from services.ai.rules import RuleThresholds
+from services.ai.run_cache_source import (  # noqa: F401 —— 启动清理与流式入口仍在用
+    ANALYSIS_CACHE_DAYS,
+    _analysis_cache_cutoff,
+    _is_run_fresh,
+    _json_dumps,
+    _sse_event,
+    _stream_cached_run,
+    cleanup_expired_analysis_runs,
+    fail_orphaned_analysis_runs,
+)
 from services.ai.run_progress import clear as clear_run_progress
 from services.ai.run_progress import publish as publish_run_progress
+from services.ai.scope_sampling import (  # noqa: F401 —— 任务服务与测试仍在用
+    _decide_scope,
+    _limit_items,
+    _repo_priority,
+    _sample_with_repo_fairness,
+    _summarize_weekly_files,
+    has_weekly_changes,
+)
 from services.ai.skill_loader import describe_load_error, load_skills
 from services.ai.subagent import plan_family, run_family_with_seed, subagent_mode_of
 from services.ai.trace_evidence import encode_evidence
 from services.ai.usage import encode_tools
 from services.ai.weekly_state import get_or_create_weekly_state
 from services.ai.weekly_sync_gate import group_config_ids, weekly_sync_in_flight
-from utils.dpapi_utils import DPAPI_PREFIX, decrypt_dpapi
 from utils.logger import log_print
-from utils.security_utils import decrypt_credential, encrypt_credential
 
 MAX_FILES_DEFAULT = DEFAULT_MAX_FILES_PER_RUN
 
@@ -134,10 +141,13 @@ MAX_LIST_CHARS = 60_000
 # 「分析范围」的取值之一：不筛。其余取值见 `_filter_delta_files_by_focus`。
 FOCUS_ALL = "all"
 
-FULL_ANALYSIS_FILE_THRESHOLD = 50
-FULL_ANALYSIS_RATIO_THRESHOLD = 0.30
 EXECUTION_VERSION = "latest"
-ANALYSIS_CACHE_DAYS = int(os.environ.get("AI_ANALYSIS_CACHE_DAYS", "90"))
+
+# 仓库根目录。**这个常量不能搬到 `services/ai/` 下面去**：它是按 `__file__` 的层数算出来的
+# （`services/xxx.py` → `parents[1]`，而 `services/ai/xxx.py` 要用 `parents[2]`），
+# 原样搬过去会静默指到 `services/` —— 表现是「平台内置 skill 缺失」，而不是路径写错。
+# 它只被本文件的 `_load_project_skills` 用，所以留在原地。
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROMPT_TEMPLATE = """以下内容用于补充平台内置的分析协议。
 
 内置协议（检查维度、输出格式、证据与置信度门槛、反误报条款）由平台强制提供，
@@ -159,464 +169,6 @@ DEFAULT_PROMPT_TEMPLATE = """以下内容用于补充平台内置的分析协议
 # 关键路径的模式与「重点表名」都不再是这里的模块常量：前者是平台默认值（可被项目覆盖），
 # 后者是项目自己声明的事实。两者都搬去了 `services/ai/project_facts.py` —— 留在这里
 # 就等于留了第二份事实源，而它当年正是「写错了也没人知道」的那一份。
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-def _analysis_cache_cutoff() -> datetime:
-    return _utcnow() - timedelta(days=ANALYSIS_CACHE_DAYS)
-
-
-def _get_project_config_row(project_id: int) -> Optional[AiProjectAnalysisConfig]:
-    return AiProjectAnalysisConfig.query.filter_by(project_id=project_id).first()
-
-
-def _coerce_timeout(value) -> int:
-    """把配置里的单次请求超时收成合法整数秒。
-
-    配置是从表单来的，可能是字符串、可能是脏值、也可能是 None。这里按
-    `REQUEST_TIMEOUT_RANGE`（同一份给界面渲染范围的事实源）夹紧并回落默认值 ——
-    超时值直接决定「分析能不能跑完」，不能因为一个脏值就退回到 30 秒那种必然超时的值。
-    """
-    low, high = REQUEST_TIMEOUT_RANGE
-    try:
-        seconds = int(value)
-    except (TypeError, ValueError):
-        seconds = DEFAULT_REQUEST_TIMEOUT_SECONDS
-    return max(low, min(high, seconds))
-
-
-def get_project_analysis_config(project_id: int) -> dict:
-    """读项目维度的 AI 配置。
-
-    返回体里额外带上 `field_schema` / `field_defaults`，让界面**从同一个事实源**渲染
-    标签、范围与默认值。范围写死在模板里就会出现「界面写着 1~30、后端按别的范围校验」
-    这类前后端不一致，而那正是这次要修掉的东西之一。
-
-    **API Key 只回状态，绝不回显**（连掩码都不给）：掩码会让用户误以为能对出来。
-    """
-    row = _get_project_config_row(project_id)
-    if row is None:
-        values = dict(FIELD_DEFAULTS)
-        meta = {"configured": False, "updated_by": None, "updated_at": None}
-    else:
-        values = row.resolved()
-        meta = {
-            "configured": True,
-            "updated_by": row.updated_by,
-            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-        }
-
-    key_state = get_project_api_key_status(project_id)
-    return {
-        **meta,
-        **values,
-        "source": source_of(values.get("api_base_url", "")),
-        "openai_base_url": OPENAI_BASE_URL,
-        "api_key": key_state,
-        "field_schema": describe_field_schema(),
-        # 单价表的格式示例。由这里下发而不是写死在模板里：格式只有 pricing 模块那一份，
-        # 抄进模板后改格式就会漏改，而用户照着过期示例填会存不进去。
-        "price_table_doc": price_table_doc_shape(),
-        "endpoint_ready": not validate_endpoint_ready(values, has_key=bool(key_state.get("configured"))),
-    }
-
-
-def update_project_analysis_config(
-    project_id: int, payload: dict, updated_by: str = ""
-) -> Tuple[bool, str, list]:
-    """保存项目配置。返回 `(成功, 提示语, 字段级错误列表)`。
-
-    **校验失败不改库、不回填、不夹取。** 旧实现用 `_clamp_int` 把越界值悄悄改成边界值：
-    用户填 5000、界面回填 1000，中间没有任何提示，他以为存进去的是 5000。现在的做法是
-    把「范围是多少、你填的是多少」原样告诉他，让他自己改。
-
-    非 dict 的 payload（例如请求体根节点是 `[1]`）由 `validate_payload` 转成
-    字段级错误 —— 在这里 `dict()` 会直接抛 TypeError，那是 500 而不是 400。
-    """
-    row = _get_project_config_row(project_id)
-    if row is None:
-        row = AiProjectAnalysisConfig(project_id=project_id)
-        db.session.add(row)
-
-    try:
-        normalized = validate_payload(payload)
-    except ConfigValidationError as exc:
-        db.session.rollback()
-        return False, str(exc), [item.as_dict() for item in exc.errors]
-
-    # 改单价必须同时改 version（见 pricing.price_change_requires_version_bump）。
-    # 判定要拿**库里现在这一份**去比，不能用界面加载时那一份 —— 两个人同时开着配置
-    # 界面时，后者手上的旧快照会让这条规矩形同虚设。放在 setattr 之前：
-    # 校验失败就一个字段都不落库。
-    if "model_price_table" in normalized:
-        version_error = price_change_requires_version_bump(
-            row.model_price_table, normalized.get("model_price_table")
-        )
-        if version_error:
-            db.session.rollback()
-            errors = [FieldError("model_price_table", "模型单价表（JSON）", version_error)]
-            return False, version_error, [item.as_dict() for item in errors]
-
-    for field_name, value in normalized.items():
-        setattr(row, field_name, value)
-    if normalized:
-        row.updated_by = (updated_by or "").strip()
-        row.updated_at = _utcnow()
-    db.session.commit()
-    return True, "AI 分析配置已保存。", []
-
-
-def build_endpoint_client(
-    project_id: int, override: Optional[dict] = None, *, timeout_seconds: Optional[int] = None
-) -> Tuple[Optional[object], list]:
-    """按「请求体优先、已保存配置回退」构造客户端。
-
-    `timeout_seconds` 要按用途区分：探测（测试连接 / 拉模型列表）用默认的
-    `PROBE_TIMEOUT_SECONDS`，**正式分析必须传配置里的 `request_timeout_seconds`**。
-    这里曾把两者混为一谈，于是正式分析也拿到 30 秒 —— 而它是**非流式**请求
-    （`LLMClient._request(..., stream=False)`），requests 的 timeout 对非流式响应
-    等价于「整个响应体要在 30 秒内到齐」。网关得先吃下几百 KB 的 prompt 再生成完整
-    JSON 报告，30 秒根本不够；症状就是「测试连接 1.4 秒成功、正式分析必然 Read
-    timed out」——用户会以为配置有问题，其实是超时值用错了。
-
-    返回 `(client, errors)`；errors 是字段级列表，**格式与保存配置时的 400 一致** ——
-    前端因此可以复用同一套「哪一栏错了」的渲染，不必为测试连接再写一份。
-
-    「未保存也能测」是刻意的：用户填完地址/Token/模型名之后，第一件想做的事就是
-    确认这组配置能不能用。要求他先保存一个可能错的配置再测，是很别扭的顺序。
-    输入框留空表示「沿用已保存的值」，而不是「清空」。
-
-    `override` 不是 dict（例如请求体根节点是 `[1]`）时返回**字段级错误**而不是抛
-    TypeError：这一层也会被后台任务直接调用，且路由靠 `client is None` 回 400。
-    """
-    if override is not None and not isinstance(override, Mapping):
-        return None, [FieldError("__body__", "请求体", "必须是 JSON 对象").as_dict()]
-
-    config = get_project_analysis_config(project_id)
-    payload = dict(override or {})
-
-    base_url = str(payload.get("api_base_url") or config.get("api_base_url") or "").strip()
-    model = str(payload.get("api_model") or config.get("api_model") or "").strip()
-    typed_key = str(payload.get("api_key") or "").strip()
-    api_key = typed_key or (_get_project_api_key(project_id) or "")
-
-    problems: list = []
-    if not base_url:
-        problems.append(FieldError("api_base_url", "接口地址", "请先填写接口地址"))
-    else:
-        try:
-            base_url = validate_field("api_base_url", base_url)
-        except FieldError as exc:
-            problems.append(exc)
-    if not model:
-        problems.append(FieldError("api_model", "模型名字", "请先填写模型名字"))
-    if not api_key:
-        problems.append(FieldError("api_key", "API Token", "请先填写 API Token"))
-
-    if problems:
-        return None, [item.as_dict() for item in problems]
-
-    return (
-        build_probe_client(
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            timeout_seconds=(
-                timeout_seconds if timeout_seconds else PROBE_TIMEOUT_SECONDS
-            ),
-            # 缓存标记的两个开关来自**项目配置**（读不出来时是「不发标记」的保守默认值，
-            # 见 models/ai_analysis/project_config.py）。探测路径（测试连接 / 拉模型列表）
-            # 不传这两个参数，于是也走默认值 —— 两条路径的差异只在这里，不在行为里。
-            prompt_cache_mode=str(config.get("prompt_cache_mode") or ""),
-            prompt_cache_format=str(config.get("prompt_cache_format") or ""),
-        ),
-        [],
-    )
-
-
-def _json_dumps(payload: dict) -> str:
-    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-
-
-def _resolve_base_name(config: WeeklyVersionConfig) -> str:
-    name = str(config.name or "").strip()
-    if " - " in name:
-        return name.split(" - ", 1)[0]
-    return name
-
-
-def build_weekly_group_key(config: WeeklyVersionConfig) -> str:
-    base_name = _resolve_base_name(config)
-    start_key = config.start_time.strftime("%Y%m%d%H%M") if config.start_time else "unknown"
-    end_key = config.end_time.strftime("%Y%m%d%H%M") if config.end_time else "unknown"
-    safe_base = base_name.replace("|", "_")
-    return f"{config.project_id}|{start_key}|{end_key}|{safe_base}"
-
-
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _is_run_fresh(run: Optional[AiAnalysisRun], *, expected: Optional[dict] = None) -> bool:
-    """这份历史结论现在还能不能直接复用。
-
-    除了时间窗，还要求产生它的那套 prompt/skill/rules/model 与现在一致（见
-    `provenance.current_provenance`）。不传 `expected` 时按 run 自己的项目现算。
-
-    **失败的 run 一律不可复用。** 这一条以前漏了，后果比「显示错了」更严重：
-    失败的 run 也写了 `response_text`（内容是错误文本）与 `finished_at`，溯源也在
-    建 run 时就写全了，于是 `_is_run_fresh` 判它可用 → 失败记录被当成「已有结果」，
-    还会被 `stream_*` 当缓存**直接回放**：用户再点一次分析，拿到的是上次的失败，
-    而不是重新跑。读侧必须自己判 status，不能指望写入侧不写。
-    （`_previous_run()` 一直只取 `status == "succeeded"`，说明这是本来的设计意图。）
-    """
-    if not run:
-        return False
-    if run.status != "succeeded":
-        return False
-    if not (run.response_text or run.response_payload):
-        return False
-    ts = run.finished_at or run.created_at
-    if not ts:
-        return False
-    if getattr(ts, "tzinfo", None) is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    if ts < _analysis_cache_cutoff():
-        return False
-    if expected is None and run.project_id:
-        expected = current_provenance(run.project_id)
-    return provenance_matches(run, expected)
-
-
-def project_price_table(project_id: int) -> tuple[PriceTable | None, tuple[str, ...]]:
-    """这个项目该用哪张价格表：项目配置里填了就用它，没填用平台默认表。
-
-    端点侧（读取）与落库侧（记 `pricing_version`）都用这一个函数 —— 两边各读一份配置
-    会让「记录时的版本」与「算费用时的版本」不是同一份，而这两者必须能对上，
-    否则版本号这个字段就白记了。
-    """
-    config = get_project_analysis_config(project_id)
-    return _price_table_from_config(config)
-
-
-def _price_table_from_config(config: Optional[dict]) -> tuple[PriceTable | None, tuple[str, ...]]:
-    return load_price_table((config or {}).get("model_price_table") or "")
-
-
-def _price_version_for(config: Optional[dict]) -> str:
-    """落库用的价格表版本。**不为它单独查一次库**：调用方手上已经有配置了。
-
-    配置里的价格表解析不了（JSON 坏了）时返回空串并说一句 —— 空串在库里是 NULL，
-    读取侧按「当时没有可用价格表」解释，与事实一致。
-    """
-    table, errors = _price_table_from_config(config)
-    if errors and (config or {}).get("model_price_table"):
-        log_print("⚠️ AI 分析：项目价格表不可用（" + "；".join(errors) + "），本次运行不记价格版本", "AI")
-    return table.version if table else ""
-
-
-def _stream_cached_run(run: AiAnalysisRun) -> Iterable[str]:
-    yield _sse_event(
-        "cached",
-        {
-            "run_id": run.id,
-            "created_at": run.created_at.isoformat() if run.created_at else None,
-            "created_at_display": _created_at_display(run),
-            "scope": run.scope,
-        },
-    )
-    if run.response_text:
-        for line in run.response_text.splitlines():
-            yield _sse_event("chunk", {"text": line})
-    payload = _parse_response_payload(run.response_payload)
-    if payload:
-        yield _sse_event("result", payload)
-
-
-def cleanup_expired_analysis_runs(retention_days: int = ANALYSIS_CACHE_DAYS):
-    """清理过期的 AI 分析记录。
-
-    返回清理条数（int，按 **run** 计）；**失败返回 None**。
-    失败不返回 0：0 表示「本来就没东西可清」，两者在调用方的日志/界面上无法区分
-    （同 services/excel_diff_cache_service.py::cleanup_old_cache 的说明）。
-
-    ## 为什么必须显式删子表（这条保留策略此前等于没跑）
-
-    `AiAnalysisTrace` / `AiAnalysisAnomaly` 的 `run_id` 外键**没有** `ON DELETE CASCADE`
-    （全仓 models/ 里没有一处 ondelete），而 SQLite 的 `PRAGMA foreign_keys=ON` 在
-    `utils/sqlite_config.py` 里是真的开着的（app.py:251 导入那个监听器）。于是删父行
-    会直接抛 `FOREIGN KEY constraint failed`：整条 DELETE 回滚，**一条都删不掉** ——
-    不是「留下孤儿行」，而是「保留策略整体失效」，run/trace 表只涨不减。
-
-    实测（给一条过期 run 挂一行 trace）：`cleanup_expired_analysis_runs()` 返回 None
-    并打印「清理AI分析缓存失败: (sqlite3.IntegrityError) FOREIGN KEY constraint failed」，
-    过期 run / trace / anomaly 一行都没少。
-
-    **先子后父**，同一个事务里做完。两张子表都要删：trace 是逐轮明细，anomaly 是异常
-    条目（含人工处置状态）—— 它们都只挂在 run 上，run 一删就再也读不到
-    （`AiAnalysisAnomaly.queue` 只按 run_id 查），留着就是谁都取不到的死行。
-    """
-    cutoff = _utcnow() - timedelta(days=retention_days)
-    try:
-        expired_run_ids = AiAnalysisRun.query.with_entities(AiAnalysisRun.id).filter(
-            AiAnalysisRun.created_at.isnot(None)
-        ).filter(AiAnalysisRun.created_at < cutoff)
-
-        children = (
-            AiAnalysisTrace.query.filter(
-                AiAnalysisTrace.run_id.in_(expired_run_ids)
-            ).delete(synchronize_session=False),
-            AiAnalysisAnomaly.query.filter(
-                AiAnalysisAnomaly.run_id.in_(expired_run_ids)
-            ).delete(synchronize_session=False),
-        )
-        deleted = (
-            AiAnalysisRun.query.filter(AiAnalysisRun.created_at.isnot(None))
-            .filter(AiAnalysisRun.created_at < cutoff)
-            .delete(synchronize_session=False)
-        )
-        db.session.commit()
-        if any(children):
-            log_print(
-                f"🧹 随过期分析记录一并清理: {children[0] or 0} 条轮次明细，"
-                f"{children[1] or 0} 条异常",
-                "AI",
-            )
-        return int(deleted or 0)
-    except Exception as exc:
-        db.session.rollback()
-        log_print(f"清理AI分析缓存失败: {exc}", "AI", force=True)
-        return None
-
-
-def fail_orphaned_analysis_runs() -> int:
-    """把平台重启后遗留的 `running` 记录判为失败，返回处理条数。
-
-    **重启是「这些 run 已经死了」的确定性证据**：持有它们的进程已经不在了，它们永远
-    不会再被写完成。留在库里就是一条两头骗人的幽灵记录：
-
-    * 读侧 `_is_run_fresh` 要求 `status == "succeeded"`，所以 `/latest` 看不见它 ——
-      界面以为「这个版本从没分析过」，或者悄悄退回更早的那次成功记录；
-    * 界面拿到「没有结果」就会去自动开跑一次，于是用户每次重启后点一下「AI分析」
-      都会莫名跑起一次分析，而且页面上一直是「进行中」。
-
-    为什么不等 `AiAnalysisRun.effective_status` 那 1 小时超时：那 1 小时里界面会一直
-    误判，而重启已经把答案给出来了。`effective_status` 那条兜底留给另一种情况 ——
-    进程活着、但某次分析真的卡死了。
-    """
-    try:
-        orphans = AiAnalysisRun.query.filter_by(status="running").all()
-        if not orphans:
-            return 0
-        now = _utcnow()
-        for run in orphans:
-            run.status = "failed"
-            run.finished_at = now
-            # 与 `_persist_outcome` 的失败语义一致：失败的 run 不留结论字段。
-            # running 记录本来也没有结论，这里是防御性的。
-            run.response_payload = None
-            run.response_text = ""
-            run.error_message = "平台重启，本次分析被中断（未跑完，可以重新分析）。"
-        db.session.commit()
-        log_print(f"重置被重启中断的 AI 分析记录: {len(orphans)} 条", "AI", force=True)
-        return len(orphans)
-    except Exception as exc:
-        db.session.rollback()
-        log_print(f"重置中断的 AI 分析记录失败: {exc}", "AI", force=True)
-        return 0
-
-
-def _repo_priority(repo: Repository) -> int:
-    """取样时仓库的先手顺序：代码仓库优先于配表仓库。
-
-    **判据只能是 `resource_type`，不能加上 `type == "git"`。** 线上两个仓库的
-    `type` 都是 `git`，那一句会让「代码仓库」和「配表仓库」一起返回 2 —— 优先级
-    形同虚设，`policy.sample_strategy` 写着 `priority_then_commit_count` 而实际
-    只按 `commit_count` 排。
-
-    注意这个值**只用于取样的发牌顺序**，不再被 `select_primary_weekly_config`
-    复用（那里关心的是分组身份，不是取样偏好）。
-    """
-    resource_type = str(getattr(repo, "resource_type", "") or "").lower()
-    return 2 if resource_type == "code" else 1
-
-
-def set_project_api_key(project_id: int, api_key: str, updated_by: str = "") -> Tuple[bool, str]:
-    if not api_key or not str(api_key).strip():
-        return False, "API key is empty."
-    encrypted = encrypt_credential(api_key)
-    if not encrypted:
-        return False, "API key encryption failed."
-    record = AiProjectApiKey.query.filter_by(project_id=project_id).first()
-    if record:
-        record.encrypted_key = encrypted
-        record.updated_by = (updated_by or "").strip()
-        record.updated_at = _utcnow()
-    else:
-        record = AiProjectApiKey(
-            project_id=project_id,
-            encrypted_key=encrypted,
-            updated_by=(updated_by or "").strip(),
-        )
-        db.session.add(record)
-    db.session.commit()
-    return True, "API key updated."
-
-
-def get_project_api_key_status(project_id: int) -> Dict[str, Optional[str]]:
-    record = AiProjectApiKey.query.filter_by(project_id=project_id).first()
-    if not record:
-        return {"configured": False, "updated_at": None, "format": None}
-    return {
-        "configured": True,
-        "updated_at": record.updated_at.isoformat() if record.updated_at else None,
-        # 让界面能区分「已配置」与「已配置但需要重新保存一次」（旧密文在当前平台解不开）。
-        "format": "dpapi" if str(record.encrypted_key or "").startswith(DPAPI_PREFIX) else "fernet",
-    }
-
-
-def _get_project_api_key(project_id: int) -> Optional[str]:
-    """取明文 Token。
-
-    兼容读旧的 `dpapi::` 密文 —— 否则已经配过密钥的项目会突然全部失效。读到旧格式时：
-    Windows 上解密成功就**顺手以新格式重写一遍**（懒迁移，以后再换平台就不用解 DPAPI）；
-    非 Windows 上解不开，返回 None 让调用方给出可读指引，而不是抛一个
-    `RuntimeError: DPAPI is only available on Windows.` 让用户完全摸不着头脑。
-    """
-    record = AiProjectApiKey.query.filter_by(project_id=project_id).first()
-    if not record:
-        return None
-
-    stored = record.encrypted_key or ""
-    if not stored.startswith(DPAPI_PREFIX):
-        return decrypt_credential(stored)
-
-    legacy = decrypt_dpapi(stored)
-    if not legacy:
-        log_print(
-            "该项目保存的 API Key 是 Windows DPAPI 加密的，当前平台无法解密。"
-            "请到本项目的 AI 配置里重新保存一次 Token。",
-            "AI",
-            force=True,
-        )
-        return None
-
-    try:
-        migrated = encrypt_credential(legacy)
-        if migrated:
-            record.encrypted_key = migrated
-            db.session.commit()
-    except SQLAlchemyError:
-        # 懒迁移失败不该影响本次分析 —— 明文已经拿到了。
-        db.session.rollback()
-    return legacy
-
-
-def _limit_items(items: List[dict], max_items: int) -> List[dict]:
-    if max_items <= 0:
-        return items
-    return items[:max_items]
 
 
 def _select_listed_files(
@@ -641,192 +193,6 @@ def _select_listed_files(
         return list(delta_files), False
     sampled = _sample_with_repo_fairness(delta_files, max_files)
     return sampled, len(sampled) < len(delta_files)
-
-
-def _sample_with_repo_fairness(
-    items: List[dict], max_items: int, *, repo_key: str = "repository_id"
-) -> List[dict]:
-    """按「各仓库轮流发牌」取样，保证没有仓库会被整个挤出清单。
-
-    **不能只按全局排序截断。** 线上一次周版本有 767 个文件：748 个 lua（代码仓库）
-    加 19 个配表，取前 200 时配表**一个都进不去** —— 而配表改的正是数值、ID、奖励
-    这些评审最关心的东西。（当时的实际排序按 `commit_count` 降序，19 张配表因为
-    改动次数少而排在后面。）
-
-    做法是轮转发牌：按各仓库**优先级最高的那条**决定发牌顺序，然后每轮给每个仓库
-    各发一条，直到取满或全部发完。文件少的仓库很快发完，剩下的名额自然全归文件多的
-    仓库 —— 上例里配表 19 条全进，代码仓库拿走其余 181 条。
-
-    `items` 必须**已按全局优先级降序排好**：桶内顺序、以及返回值的展示顺序都依赖它。
-    """
-    if max_items <= 0 or len(items) <= max_items:
-        return list(items)
-
-    buckets: Dict[object, List[int]] = {}
-    for position, item in enumerate(items):
-        buckets.setdefault(item.get(repo_key), []).append(position)
-
-    # 每个仓库的第一条就是它优先级最高的那条（items 已全局排序），
-    # 用它代表这个仓库的先手顺序。sorted 是稳定的，同优先级时保持首次出现的顺序。
-    deal_order = sorted(
-        buckets.values(),
-        key=lambda positions: -int(items[positions[0]].get("priority") or 0),
-    )
-
-    chosen: List[int] = []
-    round_index = 0
-    while len(chosen) < max_items:
-        dealt = False
-        for positions in deal_order:
-            if round_index >= len(positions):
-                continue
-            chosen.append(positions[round_index])
-            dealt = True
-            if len(chosen) >= max_items:
-                break
-        if not dealt:      # 所有仓库都发完了
-            break
-        round_index += 1
-
-    chosen.sort()          # 回到全局优先级顺序，展示口径与改动前一致
-    return [items[position] for position in chosen]
-
-
-def _summarize_weekly_files(
-    configs: List[WeeklyVersionConfig],
-    last_analyzed_at: Optional[datetime],
-) -> Tuple[dict, dict, Optional[str]]:
-    config_ids = [cfg.id for cfg in configs]
-    total_query = WeeklyVersionDiffCache.query.filter(
-        WeeklyVersionDiffCache.config_id.in_(config_ids)
-    )
-    total_files = total_query.count()
-
-    if last_analyzed_at:
-        delta_query = total_query.filter(WeeklyVersionDiffCache.updated_at > last_analyzed_at)
-    else:
-        delta_query = total_query
-
-    delta_entries = delta_query.all()
-    delta_count = len(delta_entries)
-
-    if last_analyzed_at and delta_count == 0:
-        return {}, {}, "no_change"
-
-    repo_lookup = {cfg.repository_id: cfg.repository for cfg in configs}
-    repo_summaries: Dict[int, dict] = {}
-    delta_files: List[dict] = []
-    total_files_by_repo: Dict[int, int] = {}
-
-    # 关键路径的事实源有两处（语义不重合，命中任一）：项目知识包里的**路径模式**
-    # （取不到＝平台默认），与**每个仓库自己声明的「重点表名」**（界面上那一栏）。
-    project = db.session.get(Project, configs[0].project_id) if configs else None
-    facts = critical_path_facts(getattr(project, "code", None))
-    if facts.warning:
-        log_print(f"⚠️ AI 分析：关键路径声明有问题 —— {facts.warning}", "AI", force=True)
-    tables_by_repo = declared_important_tables_by_repo(repo_lookup)
-
-    for entry in delta_entries:
-        repo = repo_lookup.get(entry.repository_id)
-        repo_name = repo.name if repo else f"repo-{entry.repository_id}"
-        repo_priority = _repo_priority(repo) if repo else 1
-        total_files_by_repo[entry.repository_id] = total_files_by_repo.get(entry.repository_id, 0) + 1
-
-        delta_files.append(
-            {
-                "repository_id": entry.repository_id,
-                "repository_name": repo_name,
-                "priority": repo_priority,
-                "file_path": entry.file_path,
-                "file_type": entry.file_type,
-                "latest_commit_id": entry.latest_commit_id,
-                "commit_count": entry.commit_count,
-                "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
-            }
-        )
-
-    for cfg in configs:
-        repo = cfg.repository
-        total_count = WeeklyVersionDiffCache.query.filter_by(config_id=cfg.id).count()
-        repo_summaries[cfg.repository_id] = {
-            "repository_id": cfg.repository_id,
-            "repository_name": repo.name,
-            "resource_type": getattr(repo, "resource_type", None),
-            "priority": _repo_priority(repo),
-            "total_files": total_count,
-            "delta_files": total_files_by_repo.get(cfg.repository_id, 0),
-        }
-
-    delta_files.sort(
-        key=lambda item: (item.get("priority", 1), item.get("commit_count", 0), item.get("file_path", "")),
-        reverse=True,
-    )
-
-    # 扫一遍关键路径。这一行日志是这次要补的「留痕」本身：在这之前，升级为全量的理由
-    # （甚至「一条都没命中」这件事）在任何地方都看不到。
-    scan = scan_critical_paths(
-        (
-            (entry.file_path, tables_by_repo.get(entry.repository_id, ()))
-            for entry in delta_entries
-        ),
-        facts=facts,
-    )
-    if scan.hit:
-        log_print(scan.log_line(), "AI", force=True)
-
-    summary = {
-        # `total_files` = **窗口总数**（这个周版本一共有过多少改动文件），`delta_files` =
-        # 其中这一次装进输入的。`scope=incremental` 时两者差很多（实测 847 vs 19），
-        # 所以给模型的「本次变更共 N 个」必须单独一个键（见 `batch_files`）。
-        "total_files": total_files,
-        "delta_files": delta_count,
-        # **给模型的那一份总数**：本批次（这次装进输入）的文件数。喂错它，提示词那句
-        # 「还有 M 个的名字没列出来，但你可以读到它们的 diff」就会宣称一批白名单里根本
-        # 没有的文件「读得到」，模型点名索取时请求被 `protocol` 静默丢掉（只进 trace，
-        # 没有任何回执），于是它把一个不存在的取数缺口写成免责声明。
-        "batch_files": delta_count,
-        # 窗口总数**另存一份**：`focus` 会把 `total_files` 改写成筛后的条数，之后就没有
-        # 任何一处还记着「这个版本一共改了多少」—— 而「这次输入覆盖了多少分之多少」
-        # 正是靠它（见 `change_set._scope_note`）。
-        "window_files": total_files,
-        "critical_paths": scan.hit,
-        # 命中的前几条（含理由）与模式来源：`_decide_scope` 只回一个原因串，具体是哪条
-        # 路径、依据是谁声明的，只有这里才有。来源那一条哪怕没命中也要记 —— 否则
-        # 「项目声明了『没有路径模式』」与「项目什么都没声明」在结果里分不开。
-        "critical_path_hits": list(scan.reasons),
-        "critical_path_source": scan.source,
-    }
-    return summary, {
-        "repos": list(repo_summaries.values()),
-        "delta_files": delta_files,
-    }, None
-
-
-def has_weekly_changes(config_ids: List[int], last_analyzed_at: Optional[datetime]) -> bool:
-    if not config_ids:
-        return False
-    query = WeeklyVersionDiffCache.query.filter(WeeklyVersionDiffCache.config_id.in_(config_ids))
-    if last_analyzed_at:
-        query = query.filter(WeeklyVersionDiffCache.updated_at > last_analyzed_at)
-    return query.first() is not None
-
-
-def _decide_scope(summary: dict, last_analyzed_at: Optional[datetime]) -> Tuple[str, str]:
-    if not last_analyzed_at:
-        return "full", "first_run"
-    delta_count = int(summary.get("delta_files") or 0)
-    total_count = int(summary.get("total_files") or 0)
-    if total_count <= 0:
-        return "full", "empty_total"
-    ratio = delta_count / max(total_count, 1)
-    critical_hit = bool(summary.get("critical_paths"))
-    if delta_count >= FULL_ANALYSIS_FILE_THRESHOLD:
-        return "full", "delta_count_high"
-    if ratio >= FULL_ANALYSIS_RATIO_THRESHOLD:
-        return "full", "delta_ratio_high"
-    if critical_hit:
-        return "full", "critical_path_detected"
-    return "incremental", "delta_small"
 
 
 def build_commit_payload(commit_id: int) -> dict:
@@ -1458,10 +824,6 @@ def _run_engine_and_persist(
         run, outcome, result, pricing_version=_price_version_for(project_config)
     )
     return result
-
-
-def _sse_event(event: str, payload: dict) -> str:
-    return f"event: {event}\ndata: {_json_dumps(payload)}\n\n"
 
 
 def end_with_a_terminal_event(events: Iterable[str]) -> Iterable[str]:

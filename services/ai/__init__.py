@@ -37,6 +37,9 @@
 - `stored_diff_source`—— 平台**已经算好并落库**的那份 diff（唯一读库的一段）
 - `sheet_stats`       —— 配表整表统计（列上限 / 分位数 / 去重取值 / 空值率）
 - `baseline_source`   —— 上一轮结论的取数来源（增量分析的基线）
+- `project_config_source` —— 项目级 AI 配置与接口凭据的读写（含端点客户端构造）
+- `run_cache_source`  —— 分析记录的保留期与复用（缓存判定 / 回放 / 过期清理）
+- `scope_sampling`    —— 这一轮按什么范围跑（变更清单取样、全量还是增量）
 - `change_set`        —— 本批次变更集合的组装
 - `project_facts`     —— 项目声明的检查维度与仓库事实
 - `weekly_sync_gate`  —— 「同步还没跑完就别分析」的闸门

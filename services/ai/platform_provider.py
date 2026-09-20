@@ -43,7 +43,6 @@ from services.ai.reference_search import (
     search_files,
 )
 from services.ai.scope import AnalysisScope, normalize_path
-
 from services.ai.skill_loader import LoadedSkills
 from services.deployment_mode import is_agent_dispatch_mode
 from utils.content_window import (
@@ -209,8 +208,6 @@ from services.ai.excel_view import (  # noqa: F401 —— `_render_excel` 与测
     _render_row,
     _render_sheet,
 )
-
-
 
 # --------------------------------------------------------------------------
 # 代码 / 二进制 / 出错
@@ -610,9 +607,6 @@ from services.ai.stored_diff_source import (  # noqa: F401 —— 类方法与�
     _is_failed_payload,
     _weekly_stored_diff,
 )
-
-
-
 
 # --------------------------------------------------------------------------
 # Provider
