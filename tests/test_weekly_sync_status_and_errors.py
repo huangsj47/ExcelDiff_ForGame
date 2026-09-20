@@ -299,7 +299,7 @@ def test_inactive_config_reports_chinese_reason(monkeypatch):
 # ---------------------------------------------------------------------------
 # 一之三、界面：配置卡片必须显示「为什么这个周版本没有数据」
 # ---------------------------------------------------------------------------
-def _render_config_page(monkeypatch, *, task, config_id=901):
+def _render_config_page(monkeypatch, *, task, config_id=901, finished=False):
     from flask import render_template
 
     import app as app_module
@@ -331,6 +331,7 @@ def _render_config_page(monkeypatch, *, task, config_id=901):
                 repositories=[], configs=[], grouped_versions=[group],
                 active_versions=[group], future_versions=[], ended_versions=[],
                 sync_task_by_config={str(config_id): task} if task else {},
+                sync_finished_by_config={str(config_id)} if finished else set(),
                 pagination={'page': 1, 'per_page': 20, 'total': 1, 'total_pages': 1,
                             'has_prev': False, 'has_next': False,
                             'prev_num': None, 'next_num': None},
@@ -777,3 +778,121 @@ def test_window_start_plus_30min_commit_is_in_scope(seeded_window):
         assert 'config/tz.xlsx' in target_paths, (
             f'窗口起点 + 30 分钟的提交没被算进同步范围，实际目标文件={target_paths}'
         )
+
+
+# ---------------------------------------------------------------------------
+# 一之四、周期性同步不许把用户按在「请稍候」上（2026-09-20）
+#
+# 同步是周期性的：每几分钟派一轮，一轮要跑好几分钟。所以「最新一条任务是 pending」
+# 在稳态下几乎恒真 —— 实测两条配置都显示「同步任务排队中，请稍候」，而它们的
+# 27 个文件在上一轮就同步完了。用户看到那句话就一直等一个根本不用等的东西。
+# ---------------------------------------------------------------------------
+def test_a_queued_periodic_sync_does_not_tell_the_user_to_wait(monkeypatch):
+    """已经出过一轮结论之后再排队的同步：**不许**说「请稍候」。
+
+    变红意味着：数据早就绪，页面却一直劝用户等（这正是这次报上来的现象）。
+    """
+    task = SimpleNamespace(commit_id='901', status='pending', error_message=None)
+
+    html = _render_config_page(monkeypatch, task=task, finished=True)
+
+    assert '请稍候' not in html, '已经同步过的配置又被劝着等'
+    assert '同步正常' in html
+
+
+def test_the_first_sync_still_tells_the_user_to_wait(monkeypatch):
+    """**反自检**：首轮同步（还没有任何一轮出过结论）时那句话必须原样在。
+
+    少了这一条，一个「把排队提示整个删掉」的实现能让上面那条全绿 ——
+    而首轮同步确实没有数据可看，那时不提示就是让人对着一张空表发呆。
+    """
+    task = SimpleNamespace(commit_id='901', status='pending', error_message=None)
+
+    html = _render_config_page(monkeypatch, task=task, finished=False)
+
+    assert '同步任务排队中，请稍候。' in html
+
+
+def test_the_queued_round_is_still_mentioned(monkeypatch):
+    """也不能反过来把排队这件事藏掉：用户得知道「你看到的可能是上一轮的数据」。"""
+    task = SimpleNamespace(commit_id='901', status='processing', error_message=None)
+
+    html = _render_config_page(monkeypatch, task=task, finished=True)
+
+    assert '新一轮同步进行中' in html
+
+
+def test_configs_with_finished_sync_works_against_the_real_model():
+    """用真实 BackgroundTask 模型跑一遍，确认这条查询链可用（查不动会退回「请稍候」）。"""
+    import app as app_module
+    from models import BackgroundTask
+    from services.weekly_version_sync_status import configs_with_finished_sync
+
+    with app_module.app.app_context():
+        result = configs_with_finished_sync(BackgroundTask, [SimpleNamespace(id=99999992)])
+
+    assert result == set()
+
+
+def test_a_completed_task_does_not_keep_a_stale_failure_reason():
+    """跑成功的任务不许留着上一轮的失败原因。
+
+    真实成因（2026-09-20 本机实测）：调度器先把卡住的 pending 标成 failed 并写下
+    「任务超时，已被调度器重置」，随后 worker 真的把它跑完了、状态改回 completed ——
+    而那句失败原因留在列上。配置页的模板**优先显示 error_message**，于是一次成功的同步
+    在界面上报着一次不存在的失败（库里 5 条 completed 任务带着这句话），
+    用户照着它去查一个没发生的问题。
+
+    变红意味着：`completed` 那条分支不再清理 error_message。
+    """
+    import app as app_module
+    from models import BackgroundTask, db
+    from services.task_worker_service import update_task_status_with_retry
+
+    with app_module.app.app_context():
+        task = BackgroundTask(
+            task_type='weekly_sync', commit_id='900001', status='pending',
+            error_message='任务超时，已被调度器重置',
+        )
+        db.session.add(task)
+        db.session.commit()
+        task_id = task.id
+
+        update_task_status_with_retry(task_id, 'completed')
+
+        db.session.expire_all()
+        stored = db.session.get(BackgroundTask, task_id)
+        assert stored.status == 'completed'
+        assert stored.error_message is None, (
+            f'跑成功的任务还挂着上一轮的失败原因：{stored.error_message!r}'
+        )
+        db.session.delete(stored)
+        db.session.commit()
+
+
+def test_a_failed_task_still_records_its_reason():
+    """**反自检**：清 error_message 只对 completed 成立，failed 必须照样写。
+
+    少了这一条，一个「无条件清空 error_message」的实现能让上面那条全绿 ——
+    而那正是把「为什么这个周版本没数据」重新变回不可见。
+    """
+    import app as app_module
+    from models import BackgroundTask, db
+    from services.task_worker_service import update_task_status_with_retry
+
+    with app_module.app.app_context():
+        task = BackgroundTask(
+            task_type='weekly_sync', commit_id='900002', status='pending',
+        )
+        db.session.add(task)
+        db.session.commit()
+        task_id = task.id
+
+        update_task_status_with_retry(task_id, 'failed', '配置已被禁用')
+
+        db.session.expire_all()
+        stored = db.session.get(BackgroundTask, task_id)
+        assert stored.status == 'failed'
+        assert stored.error_message == '配置已被禁用'
+        db.session.delete(stored)
+        db.session.commit()

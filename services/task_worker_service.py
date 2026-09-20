@@ -402,7 +402,6 @@ def cleanup_git_processes():
                 _active_git_processes.discard(proc)
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as kill_error:
                 log_print(f"强制终止Git进程失败: {kill_error}", 'GIT', force=True)
-                pass
 
 
 def signal_handler(signum, frame):
@@ -443,6 +442,10 @@ def update_task_status_with_retry(task_id, status, error_message=None):
                     db_task.error_message = error_message
                     if status == TASK_STATUS_FAILED:
                         db_task.retry_count += 1
+                else:
+                    # `completed` 没有原因可写，所以要把上一轮留下的清掉（调度器把卡住的
+                    # pending 标成 failed 时写过「任务超时」，那句话会被当成失败原因显示）。
+                    db_task.error_message = None
             _db.session.commit()
             log_print(f"✅ 任务状态更新成功: {task_id} -> {status}", 'TASK')
             log_structured_event(

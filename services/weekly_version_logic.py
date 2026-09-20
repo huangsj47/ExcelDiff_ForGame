@@ -68,6 +68,7 @@ from services.weekly_version_sync_status import (
     completed_outcome,
     config_inactive_outcome,
     config_missing_outcome,
+    configs_with_finished_sync,
     initial_cache_readiness,
     latest_weekly_sync_tasks,
     no_commits_outcome,
@@ -299,6 +300,10 @@ def weekly_version_config(project_id):
                          ended_versions=ended_versions,
                          # 每个 config 最近一次 weekly_sync 任务：模板据此显示「为什么没有数据」
                          sync_task_by_config=latest_weekly_sync_tasks(BackgroundTask, all_configs),
+                         # 「这个 config 有没有过一轮已经出结论的同步」——模板据此区分
+                         # 「首轮还没好，请稍候」与「数据是上一轮的，新一轮在排队」。
+                         # 少了它，周期性同步会让页面永远显示「排队中，请稍候」。
+                         sync_finished_by_config=configs_with_finished_sync(BackgroundTask, all_configs),
                          pagination=pagination)
 def weekly_version_config_api(project_id):
     """周版本配置API"""

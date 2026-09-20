@@ -247,6 +247,53 @@ def latest_weekly_sync_tasks(background_task_model, configs):
     return latest
 
 
+def configs_with_finished_sync(background_task_model, configs) -> set:
+    """已经有**一轮同步出过结论**的配置 id（字符串集合）。
+
+    ## 为什么界面需要它
+
+    同步是周期性的：每隔几分钟派一轮，而一轮要跑好几分钟（实测那个仓库一轮 27 个文件、
+    约 5 分钟）。所以「最新一条 weekly_sync 任务是 pending」在稳态下**几乎恒真** ——
+    只按它渲染「同步任务排队中，请稍候」，用户会在数据早就就绪时被一直劝着等：
+    实测两条配置都显示这句话，而它们的 27 个文件在上一轮就同步完了。
+
+    「排队中，请稍候」只在**首轮同步**成立（那时确实还没有数据可看）。判据就是这里：
+    这个配置有没有过一轮已经出结论的同步。
+
+    `partial_failed` 也算「出过结论」：那一轮跑了，只是有文件失败 —— 用户手上有数据，
+    而「哪些文件失败了」由同一张卡片上的 error_message 说。把它排除会让部分失败的配置
+    永远显示「请稍候」。
+    """
+    config_ids = [str(getattr(config, 'id', '') or '') for config in (configs or [])]
+    config_ids = [cid for cid in config_ids if cid]
+    if not config_ids:
+        return set()
+    try:
+        rows = (
+            background_task_model.query
+            .filter(
+                background_task_model.task_type == 'weekly_sync',
+                background_task_model.commit_id.in_(config_ids),
+                background_task_model.status.in_(TERMINAL_TASK_STATUSES),
+            )
+            .with_entities(background_task_model.commit_id)
+            .all()
+        )
+    except Exception:
+        # 与 `latest_weekly_sync_tasks` 同一条纪律：这块只是提示信息，
+        # 查不动就当作「还没有结论」（退回原来的「请稍候」），绝不把配置页拖成 500。
+        return set()
+    finished = set()
+    for row in rows:
+        value = getattr(row, 'commit_id', None)
+        if value is None and isinstance(row, (tuple, list)) and row:
+            value = row[0]
+        text = str(value or '')
+        if text:
+            finished.add(text)
+    return finished
+
+
 # ---------------------------------------------------------------------------
 # 三、初始缓存遮罩：全部目标文件都成功才放行
 # ---------------------------------------------------------------------------

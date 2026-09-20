@@ -379,32 +379,46 @@
   「配置被禁用」（failed）、「部分文件失败」（partial_failed）在界面上完全不可见，
   用户只看到「暂无数据」。
 
+  ## 为什么还要 `sync_finished_by_config`（2026-09-20）
+
+  同步是**周期性**的（每几分钟一轮，一轮要跑好几分钟），所以「最新一条任务是 pending」
+  在稳态下几乎恒真。原先只看最新那条，于是**数据明明已经就绪，页面还一直在说
+  「同步任务排队中，请稍候」**，用户就一直等（实测：两条配置都显示这句话，而 27 个文件
+  早已同步完成）。
+
+  「排队中，请稍候」只在**首轮同步**才有意义 —— 那时确实还没有数据可看。已经有结论之后
+  再来的一轮，说的是「你看到的可能是上一轮的数据」，而不是「请等」。
+
   只做自动转义输出、不用 |safe：error_message 里含文件路径、异常文本等外部输入，
   |safe 会把它变成存储型 XSS。
 #}
-{% macro weekly_sync_notice(config, sync_task_by_config) %}
+{% macro weekly_sync_notice(config, sync_task_by_config, sync_finished_by_config=None) %}
     {% set sync_task = (sync_task_by_config or {}).get(config.id|string) %}
     {% if sync_task %}
         {% set sync_status = sync_task.status %}
-        {% if sync_status in ('failed', 'partial_failed') %}
-            {% set notice_class = 'text-danger' %}
-            {% set notice_icon = 'fa-circle-exclamation' %}
-        {% elif sync_status == 'skipped' %}
-            {% set notice_class = 'text-muted' %}
-            {% set notice_icon = 'fa-circle-info' %}
-        {% elif sync_status in ('pending', 'processing') %}
+        {% set queued = sync_status in ('pending', 'processing') %}
+        {# 「还没有任何一轮出过结论」= 首轮。只有它才该说「请稍候」。 #}
+        {% set first_sync = queued and (config.id|string) not in (sync_finished_by_config or {}) %}
+        {% if sync_task.error_message %}
+            {% set notice_class = 'text-danger' if sync_status in ('failed', 'partial_failed') else 'text-muted' %}
+            {% set notice_icon = 'fa-circle-exclamation' if sync_status in ('failed', 'partial_failed') else 'fa-circle-info' %}
+        {% elif first_sync %}
             {% set notice_class = 'text-primary' %}
             {% set notice_icon = 'fa-spinner' %}
         {% else %}
-            {% set notice_class = 'text-success' %}
+            {# 数据可用（或已完成）时一律是「正常」的样子：一轮周期性同步在排队，
+               不影响你现在看到的东西。挂个转圈图标会让人以为还要等。 #}
+            {% set notice_class = 'text-success' if not queued else 'text-muted' %}
             {% set notice_icon = 'fa-circle-check' %}
         {% endif %}
         <div class="small mt-1 {{ notice_class }}" title="最近一次周版本同步：{{ sync_status }}">
             <i class="fas {{ notice_icon }} me-1"></i>
             {% if sync_task.error_message %}
                 {{ sync_task.error_message }}
-            {% elif sync_status in ('pending', 'processing') %}
+            {% elif first_sync %}
                 同步任务{{ '排队中' if sync_status == 'pending' else '处理中' }}，请稍候。
+            {% elif queued %}
+                同步正常（当前显示的是上一轮同步的数据；新一轮同步{{ '已排队' if sync_status == 'pending' else '进行中' }}）。
             {% else %}
                 同步正常。
             {% endif %}
@@ -485,7 +499,7 @@
                                             <div class="small text-muted mb-2">
                                                 <div><i class="fas fa-code-branch me-1"></i>{{ config.branch }}</div>
                                             </div>
-                                            {{ weekly_sync_notice(config, sync_task_by_config) }}
+                                            {{ weekly_sync_notice(config, sync_task_by_config, sync_finished_by_config) }}
                                             <!-- 异步加载统计信息 -->
                                             <div class="stats-container mb-2" data-config-id="{{ config.id }}">
                                                 <div class="d-flex justify-content-between small">
@@ -567,7 +581,7 @@
                                             <div class="small text-muted mb-2">
                                                 <div><i class="fas fa-code-branch me-1"></i>{{ config.branch }}</div>
                                             </div>
-                                            {{ weekly_sync_notice(config, sync_task_by_config) }}
+                                            {{ weekly_sync_notice(config, sync_task_by_config, sync_finished_by_config) }}
                                             <!-- 异步加载统计信息 -->
                                             <div class="stats-container mb-2" data-config-id="{{ config.id }}">
                                                 <div class="d-flex justify-content-between small">
@@ -649,7 +663,7 @@
                                             <div class="small text-muted mb-2">
                                                 <div><i class="fas fa-code-branch me-1"></i>{{ config.branch }}</div>
                                             </div>
-                                            {{ weekly_sync_notice(config, sync_task_by_config) }}
+                                            {{ weekly_sync_notice(config, sync_task_by_config, sync_finished_by_config) }}
                                             <!-- 异步加载统计信息 -->
                                             <div class="stats-container mb-2" data-config-id="{{ config.id }}">
                                                 <div class="d-flex justify-content-between small">
