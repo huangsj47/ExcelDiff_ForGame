@@ -84,6 +84,19 @@ _NO_PATCH = (
 # 自己的上限砍一次尾巴：砍在半行中间，抬头说的行数也就成了假的。
 DEFAULT_CONTENT_MAX_CHARS = CONTENT_MAX_CHARS
 
+# Agent 取回**配表**正文时，平台会在正文**前面**补的那一行出处（见
+# `_render_agent_file_content` 的 `kind == "excel"` 那一支）。
+#
+# **这一行也占单条上限的位置。** `_read_excel_sheets` 是按 `char_budget` 精确收敛的
+# （见它的 docstring「它交给上层的文本永远不会超预算」，实测能恰好落在 11,000 整），
+# 于是「正文顶满额度 + 平台再补 27 字」必然超上限，`ContextTools` 再砍一刀 ——
+# 表现是同一份配表**单机部署不报「被截断」、多节点部署报**，而且真砍掉 27 个字
+# （末尾那行「正文只展示了前 N 行」与渲染器自己的截断标记正是被砍的那个）。
+#
+# 所以配表的正文额度**两边都留出这一行的位置**：两端渲染出来的**正文逐字节相同**，
+# 补上出处之后也仍然不超上限。
+_AGENT_EXCEL_NOTE = "（配表正文由业务节点（Agent）上的工作副本取出）\n"
+
 # 表头块里「有改动」的三种状态（`unchanged` 是常驻行，见 `_render_header_block`）。
 # 与 `utils/diff_data_utils.header_rows_have_changes`、前端模块的 `CHANGED_ROW_STATUSES`
 # 是同一个判据的三个副本（三种语言各一份，改动时一起改）。
@@ -542,7 +555,7 @@ def _render_agent_file_content(
         content = str(outcome.get("content") or "")
         if not content:
             return f"[配表解析失败] {where}：内容无法解析成文本表格。**这不等于「没有内容」**。"
-        return f"（配表正文由业务节点（Agent）上的工作副本取出）\n{content}"
+        return _AGENT_EXCEL_NOTE + content
 
     raw = str(outcome.get("content") or "")
     total = int(outcome.get("total_lines") or 0)
@@ -981,6 +994,22 @@ def _read_excel_sheets(
     所以这个函数**自己按 `char_budget` 收敛**，并把「一共有几张表 / 这次给了哪张 /
     别的怎么要」写在最前面。它交给上层的文本**永远不会超预算** —— 于是配表不再出现
     「因长度上限被截断」，取而代之的是一句模型能照做的指路：要看第 2 张，写 `"lines": "2"`。
+
+    ## 「交出去的文本不超预算」有一个前提：额度里要留出平台自己会补的那一行
+
+    这个函数收敛到的是**它自己**那份文本的长度。单机部署下它就是最终文本，没问题；
+    但多节点部署下平台还会在它前面补一行出处（`_render_agent_file_content`）——
+    而那行**不在**这个函数的额度内。原先配表是按满额度渲染的，于是
+    「顶满 11,000 + 补 27 字」必然超上限，上层的 `ContextTools` 再砍一刀：
+    同一份配表在单机下不报「被截断」、在多节点下报，被砍掉的正是末尾那行
+    「正文只展示了前 N 行」与这个函数自己的截断标记。
+
+    修法在 `file_content`：配表那条路**两端都按扣掉那一行之后的额度**渲染
+    （见 `_AGENT_EXCEL_NOTE`）—— 两端正文逐字节相同，补上出处之后仍不超上限。
+
+    单张工作表自身超额度时仍会落到下面那句 `truncate_text`（只砍尾巴，重问同一张表
+    得到逐字节相同的结果）——那一段是**真的拿不回来**，所以 `engine._truncation_note`
+    必须把这件事说给模型听（但只能说「表内被砍掉的行」，不能说成整类配表）。
 
     ## 参数
 
@@ -1584,6 +1613,15 @@ class PlatformContextProvider:
             lines = self._default_window(commit, path)
             auto = bool(lines)
 
+        # 配表的正文额度要**先扣掉平台自己会补的那一行出处**（见 `_AGENT_EXCEL_NOTE`）。
+        # 单机与多节点用同一个值，两端渲染出来的正文才逐字节相同；而多节点那边补上
+        # 出处之后仍然不超上限，`ContextTools` 就不会再砍一刀、也不会误报「被截断」。
+        # 非配表路径不扣：那条路给 Agent 的 `max_chars` 量的是**正文**，抬头与每行的
+        # `数字│` 前缀由平台这边加，而那边已经有 `_fit_numbered_content` 按整串重算。
+        content_budget = self._content_max_chars
+        if _is_openpyxl_workbook(path):
+            content_budget = max(1, content_budget - len(_AGENT_EXCEL_NOTE))
+
         try:
             from services.vcs_content_service import get_file_content_from_git
 
@@ -1595,7 +1633,9 @@ class PlatformContextProvider:
         if raw is None:
             # 平台本地读不到 —— platform/agent 模式下这是**常态**（平台被禁止 clone），
             # 所以不要就此放弃：正文在业务节点上，让 Agent 取回来。
-            return self._content_from_agent(repository, commit, path, lines, auto=auto)
+            return self._content_from_agent(
+                repository, commit, path, lines, auto=auto, max_chars=content_budget
+            )
 
         if isinstance(raw, str):
             return _render_text_content(raw, path=path, lines=lines, auto=auto)
@@ -1613,7 +1653,9 @@ class PlatformContextProvider:
                 max_rows=self._max_rows,
                 path=path,
                 window=lines,
-                char_budget=self._content_max_chars,
+                # 与发给 Agent 的是**同一个值**（见上面 `content_budget` 那段）：
+                # 两端渲染出来的正文必须逐字节相同。
+                char_budget=content_budget,
                 # 表头坐标从**仓库配置**来（与 diff 引擎同一套口径）：
                 # 列名取哪一行、表头块占几行，决定了正文里哪些行算数据。
                 # 取不到 repository 时按未配置处理（见 `_read_excel_sheets` 的默认口径）。
@@ -1669,7 +1711,14 @@ class PlatformContextProvider:
         )
 
     def _content_from_agent(
-        self, repository, commit: str, path: str, lines: str, *, auto: bool = False
+        self,
+        repository,
+        commit: str,
+        path: str,
+        lines: str,
+        *,
+        auto: bool = False,
+        max_chars: Optional[int] = None,
     ) -> Optional[str]:
         """向业务节点（Agent）要一份正文。**同一个进程里同一份请求只等一次。**
 
@@ -1704,7 +1753,7 @@ class PlatformContextProvider:
                 commit_id=commit,
                 file_path=path,
                 lines=lines,
-                max_chars=self._content_max_chars,
+                max_chars=self._content_max_chars if max_chars is None else max_chars,
             )
         except Exception as exc:  # noqa: BLE001 —— 取一次正文失败只该让这一条降级
             log_print(f"⚠️ AI 取数：向 Agent 取正文失败 {path}: {type(exc).__name__}: {exc}")

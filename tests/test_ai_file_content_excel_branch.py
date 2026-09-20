@@ -51,9 +51,11 @@ if PROJECT_ROOT not in sys.path:
 
 from services.ai.platform_provider import (  # noqa: E402
     PlatformContextProvider,
+    _AGENT_EXCEL_NOTE,
     _is_openpyxl_workbook,
 )
 from services.ai.skill_loader import LoadedSkills, SkillDocument  # noqa: E402
+from utils.content_window import CONTENT_MAX_CHARS  # noqa: E402
 
 COMMIT = 'a' * 40
 
@@ -394,3 +396,132 @@ class TestPlatformSideRendersTheAgentWorkbook:
         )
 
         assert '1│line 1' in text and '2│line 2' in text, text
+
+
+def _overflowing_xlsx_bytes():
+    """一份**渲染出来必然顶到单条上限**的工作簿（60 列 × 4000 行，实测正好落在 11,000）。
+
+    窄表（几列几十行）怎么也到不了上限，而这条回归只在「顶到上限」时才成立 ——
+    所以要宽到渲染器把正文降到地板（`_EXCEL_MIN_BODY_ROWS` = 20 行）之后仍然装不下，
+    落到它自己那句兜底的 `truncate_text`。
+    """
+    from openpyxl import Workbook
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = '0_常规属性'
+    sheet.append([f'列{c}' for c in range(60)])
+    for r in range(4000):
+        sheet.append([f'值{r}_{c}' for c in range(60)])
+
+    buf = io.BytesIO()
+    book.save(buf)
+    return buf.getvalue()
+
+
+class TestTheAgentNoteIsInsideTheBudget:
+    """**平台自己补的那行出处也占单条上限的位置。**
+
+    `_read_excel_sheets` 是按 `char_budget` 精确收敛的（它交给上层的文本正好等于额度，
+    已经顶到上限时就是**一字不差**的 11,000），而 Agent 那条路会在正文**前面**再补一行
+    「（配表正文由业务节点（Agent）上的工作副本取出）」。原先配表按**满额度**渲染，
+    于是「顶满额度 + 27 字」必然超上限，上层的 `ContextTools` 再砍一刀：
+
+    * 同一份配表在**单机**部署不报「被截断」、在**多节点**部署报 —— 同一次索取在两种
+      部署下给出不同文本，而 `file_content` 的 docstring 正把这件事列为不许发生；
+    * 真砍掉 27 个字（末尾那行「正文只展示了前 N 行」与渲染器自己的截断标记）；
+    * 模型每轮拿到一句「有 N 条上下文因长度上限被截断」，而那一轮的内容其实是**取全了**的。
+
+    修法是**两端都用扣掉那一行之后的额度**：正文逐字节相同，补上出处之后也不超上限。
+    """
+
+    def test_the_budget_handed_to_the_agent_reserves_the_note(self, provider, monkeypatch):
+        seen = {}
+
+        def _spy(repository, *, commit_id, file_path, lines, max_chars):
+            seen['max_chars'] = max_chars
+            return {'status': 'unavailable', 'message': '本轮不看它'}
+
+        monkeypatch.setattr(
+            PlatformContextProvider, '_commit_row',
+            lambda self, commit, path: SimpleNamespace(
+                commit_id=commit, path=path, repository=SimpleNamespace(id=1)
+            ),
+        )
+        import services.agent_file_content_dispatch as dispatch
+
+        monkeypatch.setattr(dispatch, 'request_file_content', _spy)
+        import services.vcs_content_service as vcs
+
+        monkeypatch.setattr(vcs, 'get_file_content_from_git', lambda *a: None, raising=False)
+
+        provider.file_content(COMMIT, 'config/道具表.xlsx')
+
+        assert seen.get('max_chars') == CONTENT_MAX_CHARS - len(_AGENT_EXCEL_NOTE), (
+            f'发给 Agent 的额度没有扣掉平台要补的那行出处：{seen}'
+        )
+
+    def test_a_wide_table_still_fits_after_the_note_is_added(self, provider, fetch):
+        """**这条是回归本体**：顶到上限的配表 + 平台出处行，整串仍然不超上限。
+
+        单机这条路不加出处，所以正文本身就要留出那一行的位置 —— 多节点那条路读到的
+        是同一份正文（见下一条），补上出处之后正好落在上限之内。
+        """
+        from services.ai.budget import truncate_text
+
+        fetch(_overflowing_xlsx_bytes())
+        text = provider.file_content(COMMIT, 'config/常量表.xlsx')
+
+        assert text.endswith('[truncated by local tool]'), (
+            f'这一条要的就是「渲染器自己顶到了上限」那个形状，fixture 没做到：{text[-80:]!r}'
+        )
+        assert len(text) + len(_AGENT_EXCEL_NOTE) <= CONTENT_MAX_CHARS, (
+            f'正文没有为平台那行出处留位置（{len(text)} + {len(_AGENT_EXCEL_NOTE)} > '
+            f'{CONTENT_MAX_CHARS}）：多节点那条路会在上层被再砍一刀，'
+            '同一份配表于是在两种部署下给出不同文本'
+        )
+        _, was_cut = truncate_text(_AGENT_EXCEL_NOTE + text, CONTENT_MAX_CHARS)
+        assert was_cut is False, '整串仍然会被上层截断 —— 修法没有生效'
+
+    def test_both_deployments_render_the_same_content(self, provider, fetch, monkeypatch):
+        """单机与多节点读到的**正文逐字节相同**（多节点只多那行出处）。"""
+        from services.ai import platform_provider
+        from services.ai.platform_provider import _AGENT_EXCEL_NOTE
+
+        raw = _overflowing_xlsx_bytes()
+
+        # ① 单机：本地工作副本读得到，平台不加出处。
+        fetch(raw)
+        local = provider.file_content(COMMIT, 'config/常量表.xlsx')
+
+        # ② 多节点：本地读不到 → 让 Agent 按**平台给的额度**渲染出同一份正文。
+        monkeypatch.setattr(
+            platform_provider, '_is_openpyxl_workbook', lambda path: True
+        )
+        import services.agent_file_content_dispatch as dispatch
+
+        def _agent(repository, *, commit_id, file_path, lines, max_chars):
+            from services.ai.platform_provider import _read_excel_sheets
+
+            rendered = _read_excel_sheets(
+                raw, max_rows=120, path=file_path, window=lines, char_budget=max_chars
+            )
+            return {'status': 'ready', 'kind': 'excel', 'file_path': file_path,
+                    'content': rendered}
+
+        monkeypatch.setattr(dispatch, 'request_file_content', _agent)
+        monkeypatch.setattr(
+            PlatformContextProvider, '_commit_row',
+            lambda self, commit, path: SimpleNamespace(
+                commit_id=commit, path=path, repository=SimpleNamespace(id=1)
+            ),
+        )
+        import services.vcs_content_service as vcs
+
+        monkeypatch.setattr(vcs, 'get_file_content_from_git', lambda *a: None, raising=False)
+
+        remote = provider.file_content(COMMIT, 'config/常量表.xlsx')
+
+        assert remote == _AGENT_EXCEL_NOTE + local, (
+            '同一次索取在两种部署下给出了不同的正文 —— 这正是这条修法要消掉的东西'
+        )

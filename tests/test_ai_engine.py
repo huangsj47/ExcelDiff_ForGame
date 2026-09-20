@@ -420,10 +420,18 @@ def test_a_truncated_item_is_named_and_the_way_back_is_spelled_out():
     也不知道下一步做什么。旁边那两条说明（取数失败 / 预算省略）都是既点名又给动作的，
     只有这一条两个都没有，而它说的事情（你看的内容少了一截）比那两条更需要行动。
 
-    两句话都要在：**文本 / 代码可以点名行窗口拿回来，配表拿不回来**（它按行渲染、
-    没有行窗口）。这段文本看不到内容形态（配表与代码在引擎这一层长得一样），所以
-    两种都给 —— 猜错的方向很坏：把一份规格文档说成「配表，拿不回来」，模型就不再要了，
-    而它本来带个 `lines` 就能拿到。
+    ## 为什么断言「配表可以点名工作表」，而不是「配表拿不回来」
+
+    这句话原先写的是「**配表的正文拿不回来**」，那是**半错的**，而且半错的那一半正好把
+    模型劝退：配表在**工作表**这一级本来就拿得回来 —— `platform_provider.parse_sheet_window`
+    把 `lines` 解释成「第几张工作表」，渲染的抬头自己就写着 `"lines": "<第几张表>"`
+    （`tests/test_ai_platform_provider.py` 里那条测试正钉这件事）。而这句话却告诉模型
+    「整类配表都没救」，它就不再去要那几张本来点个名就能拿到的表了。
+
+    真正不可续的只是**同一张工作表内部被砍掉的行**（配表没有行坐标，`_read_excel_sheets`
+    的 `window` 形参是「第几张表」而不是行区间），所以它必须**降格**说成表内行这一级的
+    结论 —— 但**不能删**：不说，模型就会对着一张被砍过的表下结论。三种坐标（行窗口 /
+    段号 / 工作表序号）都要在，且各自说清是给哪类内容用的。
     """
     long_text = "行" * 20_000  # 超过单条上限（11,000 字）
     provider = FakeProvider({("file_content", COMMIT, TABLE): long_text})
@@ -439,9 +447,25 @@ def test_a_truncated_item_is_named_and_the_way_back_is_spelled_out():
     assert note, f"被截断了却没有说明：{notes}"
     assert TABLE in note, f"没有点名是哪一条被截断：{note}"
     assert "重新索取" in note or "点名" in note, f"没有说怎么拿回来：{note}"
-    assert "配表" in note and "拿不回来" in note, (
-        f"没有说清配表那一条补不回来（而它正是会诱使模型白白再要一次的那条）：{note}"
+    # 三种坐标各说各的适用对象：文本 / 代码的行窗口、文档与差异的段号、配表的工作表序号。
+    # 这里断言的是 `lines="2"` 而不是 `"lines"`：配表那条给的是**取值**（第几张表），
+    # 抬头里那种 `"lines": "<第几张表>"` 的字段写法在引擎这句话里并不出现。
+    assert 'lines="2"' in note and "工作表" in note, (
+        f"没有说清配表可以按工作表点名（工作表这一级本来拿得回来，"
+        f"不说模型就不去要了）：{note}"
     )
+    assert 'lines="1200-1600"' in note or "行窗口" in note, f"没有给行窗口那条路：{note}"
+    assert 'lines="4-6"' in note or "点名段" in note, f"没有给段号那条路：{note}"
+    # 「配表整类拿不回来」这句半错的话会把模型劝退，不许再出现。
+    assert "配表的正文拿不回来" not in note, (
+        f"又把整类配表判死了（工作表这一级本来点个名就能拿到）：{note}"
+    )
+    # 但表内被砍的行确实不可续 —— 这件事必须留着说给模型听。
+    assert "被砍掉的行" in note and "file_diff" in note, (
+        f"没有说清表内被砍掉的行没有坐标、要核对得走 file_diff：{note}"
+    )
+    # 「只砍了尾巴 / 后面的内容你没看到」是事实，且提醒模型它没看全。
+    assert "只砍了尾巴" in note and "没看到" in note, f"没有说清砍的是哪一截：{note}"
     assert "11,000" in note or "上限" in note, f"没有说明是哪道上限：{note}"
 
 
