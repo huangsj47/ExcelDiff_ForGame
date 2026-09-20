@@ -214,6 +214,46 @@ def test_the_recomputed_diff_says_it_is_only_this_commit(tmp_path, monkeypatch):
     assert seeded.head_sha[:8] in text, "说明里要带上问的是哪一条提交"
 
 
+def test_a_diff_cut_on_the_business_node_says_so(tmp_path, monkeypatch):
+    """**Agent 那一刀必须如实转述。**
+
+    `agent_file_diff_reader` 是按 `FILE_DIFF_MAX_CHARS` 先把渲染好的差异砍到上限的，而
+    平台随后拿到的段号是在**砍过之后**的文本上数出来的（`context_tools` 的
+    `render_window`）—— 抬头会写「共 3 段」而原文本该是 8 段，模型读到一份**看起来完整**
+    的段清单，被砍掉的那几段没有任何坐标能点回来。
+
+    Agent 侧本来就如实填了 `truncated` 与 `original_chars`，而这里原先只取 `content`，
+    两个键直接丢掉 —— 模型与面板都无从知道这份差异是被截过的。
+    """
+    seeded = _seed()
+    _stub_agent(monkeypatch, {
+        "status": "ready", "kind": "diff", "file_path": LUA,
+        "content": f"代码差异：{LUA}\n{PATCH}\n\n... [truncated by local tool]",
+        "original_chars": 41234, "truncated": True,
+    })
+    with app.app_context():
+        text = PlatformContextProvider(
+            loaded=_loaded(tmp_path), use_stored_batch_diff=False
+        ).file_diff(seeded.head_sha, LUA)
+
+    assert "被截掉" in text, f"没转述 Agent 那一刀：{text}"
+    assert "41,234" in text, f"要说清原文有多大（模型据此判断缺了多少）：{text}"
+    assert "只覆盖收到的那部分" in text, f"段号只覆盖收到的部分，这句话必须说：{text}"
+    assert "信息缺口" in text, f"要让模型把它当缺口，而不是下「只改了这些」的结论：{text}"
+
+
+def test_a_diff_that_was_not_cut_says_nothing_about_truncation(tmp_path, monkeypatch):
+    """反面：没被截的差异不许挂一句「被截掉」—— 那是无中生有。"""
+    seeded = _seed()
+    _stub_agent(monkeypatch)
+    with app.app_context():
+        text = PlatformContextProvider(
+            loaded=_loaded(tmp_path), use_stored_batch_diff=False
+        ).file_diff(seeded.head_sha, LUA)
+
+    assert "被截掉" not in text, text
+
+
 def test_a_stored_window_diff_still_wins_and_costs_no_round_trip(tmp_path, monkeypatch):
     """周版本分析里已落库的那一份仍是首选：业务节点一次都不该被叫醒。
 

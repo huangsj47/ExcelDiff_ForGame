@@ -637,6 +637,21 @@ def _render_agent_file_diff(
         f"（出处：业务节点（Agent）在它的工作副本上按**提交 {str(commit or '')[:8]} 与"
         "前一次提交**现算的差异 —— 只含这一条提交对这个文件的改动。）"
     )
+    # **Agent 那一刀要如实转述。** `agent_file_diff_reader` 是按 `FILE_DIFF_MAX_CHARS`
+    # 先把渲染好的差异砍到上限的，而平台随后拿到的段号是在**砍过之后**的文本上数出来的
+    # （`context_tools` 的 `render_window`）—— 于是抬头会写「共 3 段」而原文本该是 8 段，
+    # 模型读到一份**看起来完整**的段清单，被砍掉的那几段没有任何坐标能点回来。
+    #
+    # `outcome` 里本来就带着 `truncated` 与 `original_chars`（Agent 侧如实填的），原先这里
+    # 只取 `content`，两个键直接丢掉 —— 模型与面板都无从知道这份差异是被截过的。
+    if outcome.get("truncated"):
+        original = int(outcome.get("original_chars") or 0)
+        provenance += (
+            f"\n**这份差异在业务节点上就被截掉了**（原文约 {original:,} 字，只回传了 "
+            f"{len(content):,} 字）—— 下面的段号**只覆盖收到的那部分**，"
+            "没收到的那几段没有任何坐标能点回来。请把它当成信息缺口，"
+            "**不要据此下「这个文件只改了这些」的结论**。"
+        )
     return f"{provenance}\n{content}"
 
 
