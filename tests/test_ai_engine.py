@@ -910,6 +910,25 @@ def test_a_truncated_json_is_asked_to_shorten_instead_of_being_dropped():
     )
 
 
+def test_a_truncated_answer_without_a_report_still_gets_the_shorten_hint():
+    """要上下文的半截回答里没有 `report_markdown`，但它同样是「写太长了」。
+
+    判据如果挂在「抢得到正文」上，这种回答就会被当成「没按协议」，模型收到的是
+    「你格式不对」—— 于是它下一轮照样写这么长，再被切一次。实测 run 8 有一轮正是如此。
+    """
+    client = ScriptedClient(
+        '{"status": "need_more_context", "reason": "本轮我在核对 ProtoCGas 的注册顺序',
+        _final(),
+    )
+
+    outcome = _run(client)
+
+    assert outcome.status == STATUS_SUCCEEDED
+    sent = [msg["content"] for call in client.calls[1:] for msg in call]
+    assert any("被截断" in text for text in sent), "要按「截断」纠正，而不是按「协议不对」纠正"
+    assert not any("不符合协议" in text for text in sent)
+
+
 def test_a_truncated_json_without_corrections_left_keeps_the_report_not_the_json():
     """纠正额度用完时，留下的是**正文**，不是那坨 JSON 源码。
 

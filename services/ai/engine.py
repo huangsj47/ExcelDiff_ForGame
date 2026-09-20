@@ -915,13 +915,18 @@ def run_analysis(
             # `\n# 变更理解` 同样能数到章节标题，晚一步就会把 JSON 原文当成正文存下来
             # （实测 run 7：55k 字的报告被包在 `{"status": "final", …` 里面）。
             salvaged_report = salvage_report_markdown(text)
-            truncated = salvaged_report is not None and looks_like_truncated_json(text)
+            # **只看形状**（括号配平），不要求抢得到正文：run 8 有一轮是在**要上下文的
+            # 半截**被切掉的，那种回答里没有 `report_markdown`，但它同样是「写太长了」，
+            # 给的提示也该是压短，而不是改格式。
+            truncated = looks_like_truncated_json(text)
             if truncated and limits.max_corrections > 0:
                 # 它不是「不肯说 JSON」，是**写太长了**。重问一次并要求压短，比直接降级
                 # 强：降级只留下正文，结构化结论（人工跟进清单）会整份丢掉。
                 limits = replace(limits, max_corrections=limits.max_corrections - 1)
                 correction_hint = TRUNCATED_OUTPUT_HINT
-                markdown_fallback = salvaged_report
+                if salvaged_report is not None:
+                    # 抢到了正文就留着当兜底：重问再失败时至少还有一份正文，而不是 JSON 源码。
+                    markdown_fallback = salvaged_report
                 _emit(RoundRecord(
                     round_index, "unparsable",
                     correction_hint=correction_hint,
@@ -932,7 +937,7 @@ def run_analysis(
                 budget_notes = []
                 round_memos.append(TurnMemo(index=round_index, status="unparsable"))
                 continue
-            if truncated:
+            if truncated and salvaged_report is not None:
                 # 纠正额度也用完了：正文抢得出来，结构化那一半确实没了 —— 留下正文。
                 _emit(RoundRecord(
                     round_index, "unparsable",

@@ -683,16 +683,21 @@ def test_salvage_gives_up_on_a_half_written_unicode_escape():
     [
         ('{"status": "final", "report_markdown": "x', True),
         ('\n  {"status": "final", "report_markdown": "x', True),
+        # 要上下文的半截回答里没有 `report_markdown` —— 它照样是「被截断」，判据不能挂在
+        # 「抢得到正文」上（run 8 有一轮就是这么断的）。
+        ('{"status": "need_more_context", "reason": "本轮我在核对 ProtoCGas 的注册顺序', True),
         ('{"status": "final"}', False),
+        # 写完 JSON 又补一句说明：**完整**，只是不合协议 —— 该给「改格式」而不是「压短」。
+        ('{"status": "final", "report_markdown": "x"}\n以上。', False),
         ("# 变更理解\nx\n# 风险评估\ny\n", False),
         ("", False),
     ],
 )
 def test_looks_like_truncated_json_only_for_an_unclosed_object(text, expected):
-    """判据只有两条：以 `{` 开头、不以 `}` 结尾。
+    """判据是**括号没配平**（跳过字符串内部），不是「结尾不是 `}`」。
 
-    一份**完整**但协议不合规的 JSON 必须落到原来的纠正路径上 —— 给它的提示应该是
-    「你没按协议」，而不是「你写太长了」，两者要模型做的事正好相反。
+    后者会把「JSON 写完再补一句说明」误判成截断，于是给模型的提示从「你没按协议」变成
+    「你写太长了」—— 两者要模型做的事正好相反。
     """
     assert looks_like_truncated_json(text) is expected
 

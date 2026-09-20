@@ -848,12 +848,37 @@ def salvage_report_markdown(text: str) -> str | None:
 def looks_like_truncated_json(text: str) -> bool:
     """回答「这段文本是不是一份没收尾的 JSON 对象」。
 
-    判据刻意只有一个：去掉思考块后以 `{` 开头、且**不以 `}` 结尾**。配合
-    `salvage_report_markdown` 使用 —— 只有真被截断时才该给模型发「你写太长了」这条提示，
-    一份完整但协议不合规的 JSON 要走的仍是原来的纠正路径。
+    判据是**括号没配平**（跳过字符串内部）：以 `{` 开头、扫到文本结束深度仍大于 0。
+    为什么不只看「结尾不是 `}`」：模型常把 JSON 写完后再补一句说明（`{…}\\n以上。`），
+    那种回答是**完整**的、只是不合协议，该给的提示是「你没按协议」，而不是「你写太长了」
+    —— 两者要模型做的事正好相反。
+
+    这段文本是**被截断**还是**不完整**，配合 `salvage_report_markdown` 一起用：抢得到
+    `report_markdown` 说明断点在正文之后，抢不到（例如它在要上下文的半截被切断）也照样
+    是截断 —— 那时同样该叫它压短，而不是叫它改格式。
     """
     content = _THINK_BLOCK_RE.sub("", str(text or "")).strip()
-    return content.startswith("{") and not content.endswith("}")
+    if not content.startswith("{"):
+        return False
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in content:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+    return depth > 0
 
 
 def build_correction_hint(
