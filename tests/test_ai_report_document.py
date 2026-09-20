@@ -418,3 +418,28 @@ def test_the_report_body_keeps_its_own_trailing_boundary():
     分隔线会变成标题的下划线）。"""
     text = _build(report_text="第一行\n\n\n")
     assert re.search(r"\n---\n\n第一行\n\n---\n", text)
+
+
+def test_demote_headings_shifts_levels_but_never_touches_code_fences():
+    """`demote_headings`：贴进来的整份报告要降一级，**代码块里的 `#` 不能动**。
+
+    用途见 `services/ai/subagent.py::verify_section` —— 对账轮交回的是完整报告，
+    原样贴进来会让整份文档出现两套一级标题（实测那次 15 个一级标题）。
+    """
+    source = (
+        "# 一级\n"
+        "正文\n"
+        "## 二级\n"
+        "```\n"
+        "# 代码里的井号不是标题\n"
+        "```\n"
+        "###### 六级\n"
+        "####### 不是标题（七级不成立）\n"
+    )
+    out = doc.demote_headings(source)
+
+    assert "## 一级" in out
+    assert "### 二级" in out
+    assert "# 代码里的井号不是标题" in out, "代码块里的 # 被降级了，示例被改坏"
+    assert "###### 六级" in out, "六级再降就是七级，CommonMark 里不成立"
+    assert "####### 不是标题（七级不成立）" in out, "七级本来就不是标题，不该动它"

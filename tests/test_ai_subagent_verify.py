@@ -176,6 +176,29 @@ class TestTheReportGetsTheSection:
         # 抬头在前、正文在后（读者先知道这是什么，再读结论）。
         assert report.index("## 对账结果（找反证）") < report.index("未找到反证")
 
+    def test_the_appended_section_adds_no_top_level_heading(self):
+        """对账轮那段**要降一级再贴**：报告的一级标题不许因为它变多或重名。
+
+        实测那次：对账轮交回的是**一整份报告**（7 个一级标题一个不少），原样贴进
+        `## 对账结果（找反证）` 之后，整份文档有 **15 个一级标题**（7 个各出现两次）。
+        而契约是「固定 7 个一级标题、顺序固定」（`skill_contract.REPORT_SECTIONS`，
+        `docs/AI分析使用说明.md` 也是这么写给测试同学看的）；读的人会以为收到两份报告，
+        按 `^# ` 切的解析拿到的段数也不对。
+
+        这条不数「是不是 7」（主报告的模板由 fixture 决定），只钉**不变量**：
+        追加这一节不许让一级标题变多、也不许重名。
+        """
+        client = FlakyClient(
+            _final(_anomaly()), _final(_anomaly()), _final(_anomaly()), VERIFY_REPLY
+        )
+        result = run_family(client=client, provider=FakeProvider(), plan=_plan(2), **_args())
+
+        report = result.outcome.report_markdown
+        h1 = [line for line in report.split("\n") if line.startswith("# ")]
+        assert "# 对账" not in h1, "对账轮那段没降级，报告多了一套一级标题"
+        assert "## 对账" in report, "降级过头了：它应当挂在二级标题下"
+        assert len(h1) == len(set(h1)), f"一级标题重名：{h1}"
+
     def test_it_sits_before_the_gap_section(self):
         """信息缺口永远在最后：读的人一眼就能看到「哪些东西没看到」。"""
         client = FlakyClient(

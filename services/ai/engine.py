@@ -968,6 +968,19 @@ def run_analysis(
         # 上游拒了」之后 —— 那时按「发出去的」记就是空的，模型会以为自己什么都没看过。
         seen_items.extend(batch.items)
         budget_notes = _batch_notes(batch)
+        # **被拒的索取必须把原因交回给模型。**
+        #
+        # 不给原因，模型那一轮只看到一句「（本轮没有附带任何上下文。）」—— 于是它把
+        # 「我把 (commit, path) 配错了」写成「平台取数失败」，还郑重写进报告的信息缺口，
+        # 读者据此去找一个**不存在的平台故障**。实测那一轮：28 条索取被拒（占索取总数
+        # 23%），报告里因此多了一条错误的信息缺口，而模型自述是「两次点名取证均未拿到内容」。
+        #
+        # 原因早就算好了（`sanitize_requests` 的返回值），只是一直只进 trace 给人看。
+        # 这里把**被拒的**交回去；额度类说明（refused_by_budget 等）已经由
+        # `_batch_notes` 说过一遍，不要重复。
+        rejected = (*parsed.dropped, *request_dropped)
+        if rejected:
+            budget_notes.append(_rejected_note(rejected))
         _emit(
             RoundRecord(
                 round_index,
@@ -1278,6 +1291,27 @@ def _fit_items(
     result = enforce_budget(items, max_items=limits.max_items, total_chars=residual)
     notes.extend(result.notes)
     return result.items, notes
+
+
+def _rejected_note(rejected: Any) -> str:
+    """把「你上一轮这些索取没有被执行、原因是这些」说给模型（一句话，见调用处注释）。
+
+    **最后那句不是客套**：实测里模型把「被拒」读成了「平台取数失败」，并据此写进报告的
+    信息缺口。所以这里要显式说清「这不等于那里没有内容」，并告诉它下一步该做什么。
+    """
+    items = list(rejected)
+    shown = items[:4]
+    parts = []
+    for item in shown:
+        subject = str(getattr(item, "detail", "") or "").strip()
+        reason = str(getattr(item, "reason", "") or "").strip()
+        parts.append(f"{subject}（{reason}）" if subject else reason)
+    more = f"，另有 {len(items) - len(shown)} 条同类未逐条列出" if len(items) > len(shown) else ""
+    return (
+        f"你上一轮有 {len(items)} 条上下文索取**没有被执行**：{'；'.join(parts)}{more}。"
+        "**这不等于「那里没有内容」**，也不是平台取数失败 —— 按上面的原因改对之后重新索取即可；"
+        "照原样再要一次不会被执行。"
+    )
 
 
 def _batch_notes(batch: Any) -> list[str]:

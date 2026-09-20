@@ -397,6 +397,39 @@ def _meta_rows(
     return rows
 
 
+def demote_headings(markdown: str) -> str:
+    """把一段 markdown 的标题整体降一级（`#` → `##`，最多降到六级）。
+
+    ## 为什么需要它
+
+    报告末尾的「对账结果（找反证）」那一节，贴进来的是**对账轮交回的完整报告** ——
+    7 个一级标题一个不少。原样嵌进去，整份文档就有了**两套一级标题**（实测那次：
+    15 个一级标题，7 个各出现两次），而报告的契约是「固定 7 个一级标题、顺序固定」
+    （`skill_contract.REPORT_SECTIONS`，`docs/AI分析使用说明.md` 也是这么写给测试同学看的）。
+    读的人会以为收到两份报告；按 `^# ` 切的解析拿到的段数也不对。降一级之后，
+    它整体挂在那一个 `##` 下面。
+
+    ## 围栏里的 `#` 不动
+
+    代码块里的 `# 注释` 是代码不是标题。逐行跟踪围栏状态。
+    局限说清楚：只认 ```` ``` ```` / `~~~` 开头的行，**缩进四格的代码块不认** ——
+    模型交回来的报告里没有这种写法，真出现时降的是里面的 `#`，不影响正文结论。
+    """
+    out: list[str] = []
+    in_fence = False
+    for line in markdown.split("\n"):
+        if re.match(r"^\s*(```|~~~)", line):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        # 只处理 1~5 级：`######` 再降就是七级，CommonMark 里不成立
+        if not in_fence and re.match(r"^#{1,5}\s", line):
+            out.append("#" + line)
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def is_unclassified(category: Any, labels: Mapping[str, str] | None = None) -> bool:
     """这个 category 是不是「不在本次生效的清单里」（含干脆没给 category）。
 

@@ -634,9 +634,43 @@ def sanitize_requests(
             continue
 
         if request_type in REQUEST_TYPES_NEEDING_PATH:
-            if not scope.path_allowed(resolved, request.path):
+            if not normalize_path(request.path):
+                # 没给 path、或给的 path 归一化之后是空的：这是**请求格式**的问题，
+                # 不是「提交配错了」。两种理由必须分开说 —— 混成同一句会让模型跑去换提交，
+                # 而它该做的是把 path 补上（下一轮照原样再要一次也不会被执行）。
                 dropped.append(
-                    DroppedItem("request", index, "path 不属于该 commit 改动的文件", request.path)
+                    DroppedItem(
+                        "request",
+                        index,
+                        f"{request_type} 必须带 path（这次没给，或给了归一化后为空的路径）",
+                        repr(request.path),
+                    )
+                )
+                continue
+            if not scope.path_allowed(resolved, request.path):
+                # **原因里必须带上是哪条提交，能换的又是哪条。**
+                #
+                # 这条记录有两个读者，两边都因为「只说『不属于』」吃过亏：
+                # * **模型**：它只收到「本轮没有附带任何上下文」，于是把「我把
+                #   (commit, path) 配错了」写成「平台取数失败」，还写进报告的信息缺口 ——
+                #   读者会去找一个不存在的平台故障。实测那一轮 28 条被拒（占索取数 23%）。
+                # * **人**：`detail` 原先只记 path、不记 commit，事后根本判不出是谁配错了。
+                #
+                # 本批次里改过这个文件的是哪条提交，平台是知道的（`commit_of_path`，
+                # `find_references` 用的也是它）—— 说出来，模型下一轮就能问对。
+                suggested = scope.commit_of_path(request.path)
+                if suggested:
+                    reason = (
+                        f"这个文件不在 commit {resolved[:12]} 的改动清单里；"
+                        f"本批次里改过它的是 {suggested[:12]}，换那条提交再问"
+                    )
+                else:
+                    reason = (
+                        f"这个文件不在 commit {resolved[:12]} 的改动清单里，"
+                        "也不在本批次改动过的任何文件里"
+                    )
+                dropped.append(
+                    DroppedItem("request", index, reason, f"{request.path}（配的是 {resolved[:12]}）")
                 )
                 continue
             path = normalize_path(request.path)

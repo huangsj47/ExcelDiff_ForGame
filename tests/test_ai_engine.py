@@ -248,6 +248,42 @@ def test_the_model_can_ask_for_context_and_gets_it_back():
     assert "已经在第 1 轮" in client.calls[1][-1]["content"], "也没有告诉模型清单在哪"
 
 
+def test_a_rejected_request_is_explained_to_the_model():
+    """**被拒的索取必须把原因交回给模型**，不能只留给自己人看。
+
+    ## 这条是实测里最贵的那个坑
+
+    模型在 178 个提交的批次里反复把 `(commit, path)` 配错，平台把请求丢掉，而模型那一轮
+    只收到一句「（本轮没有附带任何上下文。）」（`prompt.render_context_items` 在没有条目
+    时的那句话）。于是它把「我配错了」写成**「平台取数失败」**，还郑重写进报告的
+    **信息缺口**——读者据此去找一个不存在的平台故障。实测那一轮：28 条索取被拒、
+    占索取总数的 23%，报告里因此多了一条错误的信息缺口。
+
+    原因一直是算好了的（`sanitize_requests` 的返回值），只是一直只进 trace 给人看。
+    """
+    other = "b" * 40
+    # `commits` 与 `paths` 都要给：`commit_of_path` 只在 `commits` 里找「改过这个文件的
+    # 那条提交」——只给 paths 的话它找不到，理由就退化成「不在本批次的任何文件里」，
+    # 而模型需要的正是那条可换的提交。
+    scope = _scope(
+        commits=(COMMIT, other), paths={COMMIT: frozenset({TABLE}), other: frozenset({LUA})}
+    )
+    client = ScriptedClient(
+        _requests({"type": "file_diff", "commit": COMMIT, "path": LUA}),
+        _final(_anomaly()),
+    )
+
+    _run(client, scope=scope)
+
+    second = client.calls[1][-1]["content"]
+    assert "没有被执行" in second, "被拒的索取没有告诉模型，它会当成平台取数失败"
+    assert other[:12] in second, "没告诉它该换哪条提交 —— 下一轮还会照原样再要一次"
+    assert "不等于「那里没有内容」" in second, (
+        "没有说清「被拒 ≠ 那里没有内容」；实测里模型正是据此写出一条错误的信息缺口"
+    )
+    assert "diff of" not in second, "被拒的请求居然被执行了"
+
+
 def test_the_change_summary_is_sent_once_and_still_in_context_afterwards():
     """变更清单**只发一次**，但它一直在模型的上下文里，并且后续轮次必须被提醒回去看它。
 

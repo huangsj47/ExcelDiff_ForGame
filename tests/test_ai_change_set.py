@@ -161,6 +161,40 @@ def test_a_full_file_list_carries_no_truncation_note():
     assert "本次变更共 2 个提交、3 个文件" in change.summary
 
 
+def test_a_wrong_commit_pairing_says_which_commit_to_use():
+    """**路径对、提交配错**时，拒绝的理由必须说出「该换哪条提交」。
+
+    这是实测里最贵的一条：模型在 178 个提交的批次里反复把 (commit, path) 配错，
+    平台把请求丢掉、只回一句「本轮没有附带任何上下文」（`prompt.render_context_items`
+    在没有条目时的那句话），于是模型把「我配错了」写成「平台取数失败」，
+    还郑重写进报告的**信息缺口** —— 读者会去找一个不存在的平台故障。那一轮 28 条被拒、
+    占索取总数的 23%，报告里因此多了一条错误的信息缺口。
+
+    平台本来就知道该用哪条提交（`commit_of_path`，`find_references` 用的也是它），
+    没有理由不说。`detail` 里也要留下配错的那条 —— 否则事后无从判断是谁配错了。
+    """
+    change = from_weekly_payload(
+        _weekly_payload(
+            files=[
+                {"file_path": TABLE, "latest_commit_id": "c1"},
+                {"file_path": LUA, "latest_commit_id": "c2"},
+            ],
+            list_files=[],
+            delta_truncated=True,
+        )
+    )
+    allowed, dropped = sanitize_requests(
+        [ContextRequest(type="file_diff", commit="c1", path=LUA)], change.scope
+    )
+
+    assert allowed == (), "配错的 (commit, path) 不该放行"
+    assert len(dropped) == 1
+    reason, detail = dropped[0].reason, dropped[0].detail
+    assert "c2" in reason, f"没告诉模型该换哪条提交：{reason}"
+    assert "c1" in reason, f"没说清它配的是哪条：{reason}"
+    assert LUA in detail and "c1" in detail, f"detail 里没有可追溯的配对：{detail}"
+
+
 def test_the_whitelist_covers_files_that_are_not_listed():
     """**核心不变量**：名字没列出来，不等于读不到。
 

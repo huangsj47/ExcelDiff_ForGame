@@ -69,6 +69,7 @@ from services.ai.engine import (
 from services.ai.prompt import build_system_prompt, build_user_message
 from services.ai.prompt_cache import mark_cache_breakpoint
 from services.ai.protocol import Anomaly, DroppedItem, unclassified_anomalies
+from services.ai.report_document import demote_headings
 from services.ai.rules import KIND_ANOMALY_CAP, RuleThresholds, rank_anomalies
 from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_contract import (
@@ -999,7 +1000,13 @@ def _cap_limit_of(item: DroppedItem) -> str:
 
 
 def verify_section(step: MemberOutcome) -> str:
-    """对账轮跑成之后追加到报告末尾的那一节（含抬头，模型写的那段原样在下面）。"""
+    """对账轮跑成之后追加到报告末尾的那一节（含抬头，模型写的那段原文在下面）。
+
+    **模型写的那段要降一级标题再贴**：它本身就是一份完整报告（7 个一级标题一个不少），
+    原样贴进来整份文档就有两套一级标题。理由与实现见
+    `report_document.demote_headings`（放在那边是因为本文件已经 1800+ 行，而它是纯
+    markdown 工具，与文档结构那件事同一处）。
+    """
     body = (step.outcome.report_markdown or "").strip() if step.outcome else ""
     if not body:
         return ""
@@ -1008,7 +1015,7 @@ def verify_section(step: MemberOutcome) -> str:
         "以下是**对照着去推翻**前面那几条结论的结果：平台在汇总之后又跑了一次独立核对，"
         "要它去找反证（能证明某条结论不成立的具体文件与行）。两种答复都算结论 ——"
         "「反证成立」意味着那一条**不该按原样采信**；「未找到反证」意味着有人去找过、没找到。\n\n"
-        + body
+        + demote_headings(body)
     )
 
 

@@ -507,12 +507,18 @@ def test_sanitize_rejects_an_unknown_type():
 
 
 def test_sanitize_rejects_a_path_outside_the_commit():
-    """这是「模型不能诱导服务端读任意文件」的那一步。"""
+    """这是「模型不能诱导服务端读任意文件」的那一步。
+
+    理由要**指向路径**（而不是「提交不在批次里」那一条），并且带上它是配给哪条提交的 ——
+    模型要据此知道换哪条提交再问，人也要据此判断是谁配错了。
+    """
     allowed, dropped = sanitize_requests(
         [ContextRequest(type="file_content", commit=COMMIT_A, path="../../.env")], _scope()
     )
     assert allowed == ()
-    assert "path" in dropped[0].reason
+    assert "不在 commit" in dropped[0].reason
+    assert COMMIT_A[:12] in dropped[0].reason
+    assert "../../.env" in dropped[0].detail
 
 
 def test_sanitize_rejects_a_commit_outside_the_batch():
