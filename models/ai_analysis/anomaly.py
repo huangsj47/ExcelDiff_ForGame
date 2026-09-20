@@ -15,6 +15,7 @@ ASCII 码值在任何后端、任何编码设置下都不会出问题，中文�
 （`DISPOSITION_LABELS`）。
 """
 
+import json
 from datetime import datetime, timezone
 
 from .. import db
@@ -75,6 +76,22 @@ class AiAnalysisAnomaly(db.Model):
     __table_args__ = (db.Index("idx_ai_anomaly_run_disposition", "run_id", "disposition"),)
 
     def to_dict(self):
+        """这一行的对外形态（读接口直接回它）。
+
+        `evidence` 出成**数组**而不是库里那个 JSON 文本：它在库里是 `_json_dumps`
+        存下的字符串，原样给界面，界面就得自己 `JSON.parse` —— 而解析失败时它只能
+        要么丢掉证据（静默），要么显示一段带转义符的原文。归一到这一层，
+        两处读法就只有一份口径。
+
+        解析失败回空数组而不是抛：这是读路径，一条证据存坏了不该让整次读取 500
+        —— 那一行其余的字段（标题、严重度、文件）都还是好的，而它们才是用户要的。
+        """
+        try:
+            evidence = json.loads(self.evidence) if self.evidence else []
+        except (TypeError, ValueError):
+            evidence = []
+        if not isinstance(evidence, list):
+            evidence = []
         return {
             "id": self.id,
             "run_id": self.run_id,
@@ -83,7 +100,7 @@ class AiAnalysisAnomaly(db.Model):
             "category": self.category,
             "severity": self.severity,
             "confidence": self.confidence,
-            "evidence": self.evidence,
+            "evidence": evidence,
             "commit_ref": self.commit_ref,
             "file_path": self.file_path,
             "impact": self.impact,

@@ -18,7 +18,8 @@ from flask import (
 )
 
 from models import Commit, Project, Repository, WeeklyVersionConfig, db
-from models.ai_analysis import AiAnalysisRun
+from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
+from models.ai_analysis.anomaly import DEFAULT_DISPOSITION, DISPOSITION_LABELS, DISPOSITIONS
 from services import ai_report_history_service as report_history_service
 from services.ai import project_pack_service, report_document, run_progress
 from services.ai.analysis_budget import (
@@ -26,6 +27,15 @@ from services.ai.analysis_budget import (
     platform_budget_status,
     visible_budget,
     with_live_usage,
+)
+from services.ai.anomaly_disposition import (
+    MAX_BATCH_ITEMS,
+    DispositionError,
+    anomalies_of_run,
+    normalize_disposition,
+    note_was_truncated,
+    set_disposition,
+    set_many,
 )
 from services.ai.endpoint_service import ConfigValidationError, probe_connection, probe_models
 from services.ai.platform_budget import platform_budget_public, set_platform_budget
@@ -63,6 +73,7 @@ from utils.request_security import (
     _get_current_user,
     _has_project_access,
     _has_project_admin_access,
+    _resolve_current_username,
     platform_scope_visible,
     require_admin,
 )
@@ -798,6 +809,176 @@ def ai_run_report(run_id):
     if payload is None:
         return jsonify({"success": False, "message": "Not found."}), 404
     return jsonify({"success": True, "result": payload, "run_id": payload.get("run_id")}), 200
+
+
+# ---------------------------------------------------------------------------
+#  结论的人工处置（确认 / 忽略 / 撤销）
+# ---------------------------------------------------------------------------
+# `AiAnalysisAnomaly.disposition` 这一列原先**整棵树都没有写路径**：读侧是通的
+# （`baseline_source.baseline_findings` → `baseline.classify` → `suppressed` →
+# `result_payload` 把「已忽略且文件没再变」的结论从下一轮清单里剔掉），但没有入口
+# 能把它设成非默认值，于是那条链路一次都没生效过 —— 用户在界面上找不到地方说
+# 「这条我确认过」，模型下一轮照样把同一条原样再报一遍。
+#
+# 权限取 `_has_project_access`（项目成员即可），**不是管理员**：处置是「看过这份报告的
+# 人去分诊」，正是项目成员每天在做的事；把它抬到管理员，等于让这一步没人做。
+# 谁做的会记在 `disposition_by` 上。
+#
+# 路径形状：单条按 `anomaly_id`，批量按 `run_id`。**不做「按指纹处置」**：指纹是
+# 给「跨轮次继承」用的内部身份，暴露成写入口会让调用方以为处置能跨运行传播 ——
+# 实际传播靠的是下一轮读上一轮的行，不是这一次的写入。
+
+
+def _anomaly_payload(rows):
+    """一次运行的全部结论行 + 处置口径。中文标签在服务端给，界面不自己映射。"""
+    counts = {item: 0 for item in DISPOSITIONS}
+    for row in rows:
+        key = row.disposition or DEFAULT_DISPOSITION
+        counts[key] = counts.get(key, 0) + 1
+    return {
+        "anomalies": [row.to_dict() for row in rows],
+        "counts": counts,
+        "total": len(rows),
+        "dispositions": [{"value": item, "label": DISPOSITION_LABELS[item]} for item in DISPOSITIONS],
+    }
+
+
+def _read_disposition_filter():
+    """`?disposition=` 的取值。认不出来就报错，**不悄悄当成「全部」**。
+
+    静默退回「全部」的后果是：用户点了「只看已忽略」，界面把全部条目列出来，
+    而他不会发现自己看的是另一份清单 —— 于是他会以为「我忽略的那几条不见了」。
+    """
+    raw = (request.args.get("disposition") or "").strip()
+    if not raw:
+        return None, None
+    try:
+        return normalize_disposition(raw), None
+    except DispositionError as exc:
+        return None, (jsonify({"success": False, "message": str(exc)}), 400)
+
+
+@ai_analysis_bp.route("/ai-analysis/runs/<int:run_id>/anomalies", methods=["GET"])
+def ai_run_anomalies(run_id):
+    """某一次运行的**结构化结论清单**（含每一条的处置状态）。
+
+    与 `/runs/<id>/report` 是两件事：那条回的是模型写的那份 markdown（`response_text`），
+    这条回的是落库的**行**。处置状态只在行上 —— 报告正文里没有它，模型也写不出它。
+    """
+    run = db.session.get(AiAnalysisRun, run_id)
+    if run is None:
+        return jsonify({"success": False, "message": "Not found."}), 404
+    if not _has_project_access(run.project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+    wanted, error = _read_disposition_filter()
+    if error is not None:
+        return error
+    rows = anomalies_of_run(run_id, disposition=wanted)
+    return jsonify({"success": True, "run_id": run_id, **_anomaly_payload(rows)}), 200
+
+
+@ai_analysis_bp.route("/ai-analysis/anomalies/<int:anomaly_id>/disposition", methods=["POST"])
+def ai_anomaly_disposition(anomaly_id):
+    """改**一条**结论的处置状态。"""
+    row = db.session.get(AiAnalysisAnomaly, anomaly_id)
+    if row is None:
+        return jsonify({"success": False, "message": "Not found."}), 404
+    if not _has_project_access(row.project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+    payload, error = read_json_object()
+    if error is not None:
+        return error
+    try:
+        set_disposition(
+            row,
+            disposition=payload.get("disposition"),
+            note=payload.get("note", ""),
+            username=_actor_name(),
+        )
+    except DispositionError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    db.session.commit()
+    return jsonify(
+        {
+            "success": True,
+            "changed": 1,
+            "note_truncated": note_was_truncated(payload.get("note", "")),
+            "anomaly": row.to_dict(),
+        }
+    ), 200
+
+
+@ai_analysis_bp.route(
+    "/ai-analysis/runs/<int:run_id>/anomalies/disposition", methods=["POST"]
+)
+def ai_run_anomalies_disposition(run_id):
+    """**批量**处置：`{"ids": [...], "disposition": "...", "note": "..."}`。
+
+    `ids` 必填且非空。不给「不传 ids = 全部」这种默认：一次误点把整份报告的结论
+    全标成「已忽略」，代价是下一轮这些条目集体消失，而用户没有任何地方能看出
+    「它们是被我误标掉的」。
+    """
+    run = db.session.get(AiAnalysisRun, run_id)
+    if run is None:
+        return jsonify({"success": False, "message": "Not found."}), 404
+    if not _has_project_access(run.project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+    payload, error = read_json_object()
+    if error is not None:
+        return error
+    raw_ids = payload.get("ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return jsonify({"success": False, "message": "ids 必须是非空数组。"}), 400
+    if len(raw_ids) > MAX_BATCH_ITEMS:
+        return jsonify(
+            {"success": False, "message": f"一次最多处置 {MAX_BATCH_ITEMS} 条，收到 {len(raw_ids)} 条。"}
+        ), 400
+    ids = []
+    for value in raw_ids:
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": f"ids 里出现了非整数：{value!r}"}), 400
+    # **按 run_id 过滤**：跨运行传 id 会让「某一次运行的处置」改到另一次运行的行上，
+    # 而返回的计数看起来完全正常。多一条 where 就挡住了这件事。
+    rows = AiAnalysisAnomaly.query.filter(
+        AiAnalysisAnomaly.run_id == run_id, AiAnalysisAnomaly.id.in_(ids)
+    ).all()
+    if len(rows) != len(set(ids)):
+        found = {row.id for row in rows}
+        missing = sorted(set(ids) - found)
+        return jsonify(
+            {"success": False, "message": f"这些结论不属于本次运行：{missing}"}
+        ), 400
+    try:
+        changed = set_many(
+            rows,
+            disposition=payload.get("disposition"),
+            note=payload.get("note", ""),
+            username=_actor_name(),
+        )
+    except DispositionError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+    return jsonify(
+        {
+            "success": True,
+            "changed": changed,
+            "note_truncated": note_was_truncated(payload.get("note", "")),
+            **_anomaly_payload(anomalies_of_run(run_id)),
+        }
+    ), 200
+
+
+def _actor_name() -> str:
+    """当前操作人的用户名。
+
+    **用 `_resolve_current_username`，不自己 `getattr(user, "username", "")`**：
+    平台管理员（环境变量那种）没有数据库用户对象，`_get_current_user()` 直接返回
+    None —— 自己取的话，「谁把这条标成已忽略的」在管理员操作时永远是空的，
+    而那正是最需要留名的一种操作。那个 helper 会把会话里的 `auth_username` /
+    `admin_user` 一起算进来，并做掉邮箱后缀归一化（本仓库的单一口径）。
+    """
+    return _resolve_current_username()
 
 
 # ---------------------------------------------------------------------------
