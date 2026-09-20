@@ -182,17 +182,57 @@ def truncate_text_middle(text: str, limit: int) -> tuple[str, bool]:
     return result, True
 
 
+def true_original_chars(item: ContextItem) -> int:
+    """这条内容**未经任何压缩**时有多少字。
+
+    取数那一刻 `context_tools` 会把真实长度记进 `meta["original_chars"]`，而
+    `item.char_count` 是**当前**（可能已经压过一两轮）的长度。压缩是逐级递进的
+    （`enforce_budget` 每一轮拿的都是上一级的产物），所以到第 3 级时 `char_count`
+    只剩 1,200 —— 拿它当「原本多少字」会说小一个数量级，实测 10,999 字的内容被
+    写成「原本 1200 字」。模型据此判断「这份东西本来就不长，看不看无所谓」，
+    于是不再索取；而它丢掉的是唯一如实记着取数侧字数的那个字段。
+
+    `max` 是防 `meta` 里那个值比当前正文还小（老路径没记 / 记的是别的口径）——
+    宁可说大一点也不要说小：说小了模型会放弃，说大了它只是白读一眼。
+    """
+    try:
+        recorded = int(item.meta.get("original_chars") or 0)
+    except (TypeError, ValueError):
+        recorded = 0
+    return max(recorded, item.char_count)
+
+
 def _summary_item(item: ContextItem, level: int) -> ContextItem:
     """把整条内容换成一句说明，只保留「这里原本有什么」。"""
+    original = true_original_chars(item)
     summary = (
         f"[{item.kind}] {item.label} 的内容因预算控制被省略"
-        f"（原本 {item.char_count} 字）。如果结论仍然需要它，请重新索取。"
+        f"（原本 {original} 字）。如果结论仍然需要它，请重新索取。"
     )
     meta = dict(item.meta)
     meta["omitted_for_budget"] = True
-    meta["original_chars"] = item.char_count
+    # 这里原来写的是 `item.char_count`，等于**把真值覆盖成上一级的产物长度** ——
+    # 从此再没有一处记着原始长度（见 `true_original_chars`）。
+    meta["original_chars"] = original
     meta["shrink_level"] = level
     return replace(item, text=summary, meta=meta)
+
+
+# 被预算压缩砍过的**分段内容**（`windowed_view.render_window` 渲染的那种）：抬头那句
+# 「这里是第 N 段」在压缩**之前**是真的，压缩之后就不成立了。而它印在正文第一行 ——
+# 恰好是尾截断唯一砍不到的位置 —— 于是模型照着它认为「第 1-N 段都到手了」，只去要
+# 第 N+1 段，被砍掉的那几段永远拿不到。这与 `render_window` 的 overflow 分支防的是
+# 同一件事（那份 40 段的差异写着「这里是第 1-16 段」而第 16 段被砍在半路），只是砍的
+# 位置从取数侧换到了预算侧。
+#
+# **不重算段号**：原文已经不在手上了（压缩拿到的就是渲染好的文本），数不出还剩几段。
+# 编一个看起来精确的段号正是这条要修的毛病，所以只撤回那句声明、并说清怎么拿回来。
+_SHRINK_RETRACTION = (
+    "**这一条在进入提示词之前被预算又砍了一次**：上面那句「这里是第 N 段」说的是"
+    "**砍之前**的那一份，对下面的正文**不成立** —— 正文只到最后一个块头（`@@`／"
+    "`### 工作表`／`--- 第 k/N 段`）为止。被砍掉的那几段请按索取办法点名，"
+    "**不要**把没出现的段读成「那几段没什么内容」。"
+)
 
 
 def shrink_item(item: ContextItem, level: int) -> ContextItem:
@@ -207,12 +247,30 @@ def shrink_item(item: ContextItem, level: int) -> ContextItem:
         return _summary_item(item, level)
 
     limit = SHRINK_LEVEL_LIMITS[level - 1]
-    text, truncated = truncate_text(item.text, limit)
+    windowed = int(item.meta.get("segments") or 0) > 1
+    # 撤回声明本身也占额度，先把它扣掉 —— 否则拼出来会超过调用方给的上限。
+    room = max(1, limit - len(_SHRINK_RETRACTION) - 1) if windowed else limit
+    text, truncated = truncate_text(item.text, room)
     if not truncated:
         return item
+    if windowed:
+        first, _, rest = text.replace("\r\n", "\n").partition("\n")
+        text = f"{first}\n{_SHRINK_RETRACTION}\n{rest}"
     meta = dict(item.meta)
-    meta["truncated_from"] = item.char_count
+    # **真值要一路带下去。** 压缩是逐级递进的（`enforce_budget` 每一轮拿的是上一级的
+    # 产物），所以每一级都必须把「未经压缩时多少字」原样传给下一级 —— 漏传一级，
+    # 第 3 级那句「原本 N 字」就会拿第 2 级的产物长度当原文（实测 10,999 字写成
+    # 1,200）。这里同时补上 `context_tools` 没走过的那条路（例如直接构造的条目）。
+    original = true_original_chars(item)
+    meta["original_chars"] = original
+    meta["truncated_from"] = original
     meta["shrink_level"] = level
+    # **这一刀也是截断**，必须置位：`engine._batch_notes` 与消耗面板的「截断」列读的
+    # 就是它。原先只有 `truncated_from` / `shrink_level`，那两个键没有任何消费方 ——
+    # 于是「这一条被砍了」在提示词与面板上都不存在（`truncated` 还停在取数那一刻的
+    # False），而它恰恰是这一整层要消灭的那种静默。
+    meta["truncated"] = True
+    meta["limit"] = room
     return replace(item, text=text, meta=meta)
 
 

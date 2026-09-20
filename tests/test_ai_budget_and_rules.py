@@ -32,6 +32,7 @@ from services.ai.budget import (
     truncate_text,
 )
 from services.ai.protocol import Anomaly
+from services.ai.windowed_view import render_window
 from services.ai.rules import (
     DEFAULT_MAX_ANOMALIES,
     MIN_SIMILARITY_TOKENS,
@@ -863,3 +864,87 @@ def test_a_modified_threshold_object_is_detected_by_revision_component():
     assert base.revision_component() != replace(
         base, similarity_threshold=0.5
     ).revision_component()
+
+
+# ==========================================================================
+# budget：压缩层的「不许静默 + 不许说小」
+#
+# 这三条都是 2026-09 复核出来的：它们不在取数侧（`context_tools` / `windowed_view`），
+# 而在**压缩侧** —— 内容已经渲染好了，`enforce_budget` 再按预算砍第二刀。同一批毛病
+# 在取数侧修过（见 60493bf），压缩侧原样重演了一遍。
+# ==========================================================================
+
+
+def _windowed_item(*, hunks: int, lines_per_hunk: int, label: str = "dummy") -> ContextItem:
+    """一条真的走 `render_window` 渲染过的条目（带抬头、带 `meta["segments"]`）。"""
+    body = "\n".join(
+        f"@@ -{index * lines_per_hunk},{lines_per_hunk} +{index * lines_per_hunk},{lines_per_hunk} @@\n"
+        + "\n".join(f"+ line {row}" for row in range(lines_per_hunk))
+        for index in range(hunks)
+    )
+    text, meta = render_window(
+        kind="file_diff", label=label, text=body, window="", limit=11_000
+    )
+    return ContextItem(kind="file_diff", label=label, text=text, meta=dict(meta))
+
+
+def test_the_omitted_note_quotes_the_original_size_not_the_previous_tier():
+    """第 3 级那句「原本 N 字」必须量的是**原文**，不是上一级的产物。
+
+    压缩是逐级递进的，第 3 级拿到的是第 2 级压完的 1,200 字。原先这里直接写
+    `item.char_count`，实测一份 10,999 字的差异被写成「原本 1200 字」—— 模型据此
+    判断「这份东西本来就不长，看不看无所谓」，于是不再索取。
+    """
+    item = _windowed_item(hunks=40, lines_per_hunk=40)
+    real_size = item.char_count
+    assert real_size > SHRINK_LEVEL_LIMITS[0]
+
+    summary = shrink_item(shrink_item(item, 1), MAX_SHRINK_LEVEL)
+    assert f"原本 {real_size} 字" in summary.text
+    assert summary.meta["original_chars"] == real_size
+
+
+def test_the_shrink_layer_marks_what_it_cut_as_truncated():
+    """压缩砍掉的也要算「截断」。
+
+    `engine._batch_notes` 与消耗面板的「截断」列读的都是 `meta["truncated"]`，而这一层
+    原先只写 `truncated_from` / `shrink_level` —— 那两个键**没有任何消费方**，于是
+    「这一条被砍了」在提示词和面板上都不存在（`truncated` 还停在取数那一刻的 False）。
+    """
+    item = _windowed_item(hunks=40, lines_per_hunk=12)
+    assert item.meta["truncated"] is False, "前提：取数侧自己没截断，这一条是被压缩砍的"
+
+    shrunk = shrink_item(item, 1)
+    assert shrunk.char_count < item.char_count
+    assert shrunk.meta["truncated"] is True
+
+
+def test_a_shrunk_windowed_item_retracts_the_segment_claim_in_its_header():
+    """抬头那句「这里是第 N 段」被压缩砍过之后不再成立，必须在正文里撤回。
+
+    它印在正文第一行 —— 恰好是尾截断唯一砍不到的位置 —— 模型会照着它认为第 1-N 段
+    都到手了，只去要第 N+1 段，被砍掉的几段永远拿不到。这与 `windowed_view` 的
+    overflow 分支防的是同一件事，只是砍的位置换到了预算侧。
+    """
+    item = _windowed_item(hunks=40, lines_per_hunk=12)
+    shrunk = shrink_item(item, 1)
+    lines = shrunk.text.splitlines()
+
+    assert lines[0].startswith("[file_diff]"), "抬头仍在第一行（撤回句不能把它挤走）"
+    assert "被预算又砍了一次" in lines[1], "撤回句要排在抬头之后、正文之前"
+    assert "不成立" in lines[1]
+
+
+def test_the_retraction_note_is_not_added_to_content_that_has_no_segments():
+    """反向自检：切不出段的普通内容没有段号可撤，不许凭空多出一句话。
+
+    也不能因为这句话把本来装得下的内容挤出去 —— 它占的额度必须从上限里先扣掉。
+    """
+    plain = ContextItem(kind="file_content", label="a.py", text="x" * 9_000, meta={})
+    shrunk = shrink_item(plain, 1)
+
+    assert "被预算又砍了一次" not in shrunk.text
+    assert shrunk.char_count <= SHRINK_LEVEL_LIMITS[0]
+
+    windowed = shrink_item(_windowed_item(hunks=40, lines_per_hunk=40), 1)
+    assert windowed.char_count <= SHRINK_LEVEL_LIMITS[0], "加了撤回句也不能超过这一级的上限"
