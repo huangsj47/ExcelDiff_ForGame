@@ -35,6 +35,7 @@ from services.ai.protocol import Anomaly
 from services.ai.windowed_view import render_window
 from services.ai.rules import (
     DEFAULT_MAX_ANOMALIES,
+    KIND_ANOMALY_CAP,
     MIN_SIMILARITY_TOKENS,
     RULE_SOURCE_FILES,
     RulesConfigError,
@@ -770,9 +771,13 @@ def test_capped_items_are_recorded_one_by_one():
     ]
     result = normalize_anomalies(anomalies, RuleThresholds(max_anomalies=2))
 
-    cap_records = [item for item in result.dropped if "上限" in item.reason]
+    # 按 `kind` 挑，**不按 reason 的措辞挑**：措辞是给人读的，会改；而「哪几条是被上限
+    # 截掉的」这件事要能被读取侧稳定地问出来（`KIND_ANOMALY_CAP`，与协议层那个
+    # `"anomaly"` 分开）。
+    cap_records = [item for item in result.dropped if item.kind == KIND_ANOMALY_CAP]
     assert len(cap_records) == 3
     assert len({item.index for item in cap_records}) == 3
+    assert all("上限" in item.reason for item in cap_records)
 
 
 def test_output_order_is_rank_order_even_without_capping():

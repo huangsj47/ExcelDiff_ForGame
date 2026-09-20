@@ -69,7 +69,7 @@ from services.ai.engine import (
 from services.ai.prompt import build_system_prompt, build_user_message
 from services.ai.prompt_cache import mark_cache_breakpoint
 from services.ai.protocol import Anomaly, DroppedItem, unclassified_anomalies
-from services.ai.rules import RuleThresholds, rank_anomalies
+from services.ai.rules import KIND_ANOMALY_CAP, RuleThresholds, rank_anomalies
 from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_contract import (
     DIMENSION_IDS,
@@ -928,6 +928,60 @@ def build_unclassified_section(
     return "\n".join(lines).rstrip() + "\n"
 
 
+CAP_TITLE = "## 结论条数上限（平台补充）"
+
+
+def build_cap_section(dropped: Sequence[DroppedItem]) -> str:
+    """把**被上限截掉的那几条**单独列成报告里的一节。
+
+    ## 为什么要有这一节
+
+    条数上限（`RuleThresholds.max_anomalies`，默认 10）生效时，清单是**静默变短**的：
+    截断发生在归一化那一层，报告正文读起来完全正常，少的几条没有任何痕迹。
+    「这次只报了 10 条」与「这次恰好有 10 条」在界面上长得一模一样 —— 而前者意味着
+    还有几条**按严重度排在后面、这次没列出来**的结论，用户只要多问一次就能拿到。
+
+    记账本身一直有（`cap_anomalies` 逐条记进 `dropped`），但那份记账只有 trace 读，
+    报告里没有。所以这一节补的就是「读报告的人能不能知道」。
+
+    ## 与「信息缺口」的区别（两节不能合成一节）
+
+    信息缺口说的是「**没看到**」（分片没跑成、候选没进报告）；这一节说的是
+    「**看到了、也成立、但没位置**」。合成一节，读的人会把「被截掉」理解成「没查到」，
+    于是要么去补一次根本没缺的分析，要么以为这几条已经被否掉了。
+
+    `dropped` 传整个列表进来（不是只传这一种），按 `kind` 自己挑 —— 调用点手里只有
+    那一份 outcome 的记账，让它先过滤一遍等于把 `KIND_ANOMALY_CAP` 这个约定复制出去。
+    """
+    items = [item for item in dropped if getattr(item, "kind", "") == KIND_ANOMALY_CAP]
+    if not items:
+        return ""
+    limit = _cap_limit_of(items[0])
+    lines = [
+        CAP_TITLE,
+        "",
+        f"上面的结论清单**没有列全**：本次条数上限是 {limit} 条，另有 {len(items)} 条"
+        "**被截掉了**。它们不是「没查到」，也不是「不成立」—— 是**这次没有位置**"
+        "（保留与截断都按严重度从高到低，被截掉的都排在保留的那些之后）。"
+        "要多拿到这几条，把上限调大之后重跑一次即可；下面是它们的线索：",
+        "",
+    ]
+    for index, item in enumerate(items, start=1):
+        lines.append(f"{index}. {item.detail or '（平台没有记下标题）'}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _cap_limit_of(item: DroppedItem) -> str:
+    """从记账的措辞里取回上限值，取不到就说「未记录」。
+
+    **不从 `thresholds` 再读一次**：这一节渲染的是**当时那次运行**的事实，而
+    `thresholds` 是调用方此刻手里的值 —— 两者在「用户改了配置、翻看旧报告」时不是
+    同一个数。记账里带着当时的值，就只从记账里取。
+    """
+    matched = re.search(r"上限（(\d+) 条）", item.reason or "")
+    return matched.group(1) if matched else "未记录"
+
+
 def verify_section(step: MemberOutcome) -> str:
     """对账轮跑成之后追加到报告末尾的那一节（含抬头，模型写的那段原样在下面）。"""
     body = (step.outcome.report_markdown or "").strip() if step.outcome else ""
@@ -1447,6 +1501,12 @@ def aggregate_outcomes(
     unclassified_text = build_unclassified_section(synthesis.anomalies, dimensions)
     if unclassified_text and synthesis.status != STATUS_FAILED:
         report = (report.rstrip() + "\n\n" + unclassified_text).strip() + "\n"
+    # 「结论条数上限」排在「未归类」之后：两节都是**对上面那份结论清单本身的补充**
+    # （一节说「有几条不属于任何维度」，一节说「有几条根本没列进来」），而信息缺口
+    # 说的是「没看到」，永远收尾。
+    cap_text = build_cap_section(synthesis.dropped)
+    if cap_text and synthesis.status != STATUS_FAILED:
+        report = (report.rstrip() + "\n\n" + cap_text).strip() + "\n"
     gaps_text, gap_dropped = reconcile_candidates(candidates, synthesis, steps=steps)
     # 汇总没跑成时**没有报告**：那段缺口说明写进 `error_message`（见下面那个分支）。
     # 往一份空报告后面追加一段「信息缺口」等于凭空造出一份看得见的报告，而这次其实
@@ -1611,17 +1671,27 @@ def reconcile_candidates(
 
     ## 怎么算「进了最终报告」
 
-    两手里有一手成立就算采纳：
+    **三手**，任一手成立就算采纳：
 
     1. 候选编号（`[S1-2]`，平台发出去、要求模型采纳时带回）出现在最终报告或异常清单里；
-    2. 最终异常清单里有**同一个文件**的条目（模型经常复述内容而不带编号）。
+    2. 最终异常清单里有**同一个文件**的条目（模型经常复述内容而不带编号）；
+    3. 最终异常清单里**某一条的标题/证据/影响面里点了这个文件的名** —— 也就是
+       「同一个文件」那一手的放宽版：一条结论只带**一个** `file_path` 字段，而它讨论的
+       往往不止一个文件。
 
-    两样都不成立才算没进 —— 而写进报告的那句话会**如实说明查的是什么**
-    （「既没有引用编号，也没有同文件的条目」），不是断言「模型丢了它」。
+    第 3 手是 2026-09-20 加上的，起因是一次真实的**误报**（线上跑出来的那次周版本分析）：
+    分片 S1 报的候选是「`config/奖励模式_CfgRewardMode.xlsx` 新建表内仅含一条测试数据、
+    与两份同域表并存」，而汇总把它并成了一条 `file_path = config/奖励模式表_CfgRewardMode.xlsx`
+    的结论 —— **它自己的证据第三条逐字写着 `config/奖励模式_CfgRewardMode.xlsx`**。
+    候选明明被采纳了，前两手却都看不见：编号没带回、`file_path` 又不是同一个。
+    于是平台在报告末尾告诉用户「1 条找不到去向，需要人工看一眼」，而那条就在报告里。
 
-    ## 两手都必须比「同一个东西」，而不是比字符串
+    三手都不成立才算没进 —— 而写进报告的那句话会**如实说明查的是什么**，
+    不是断言「模型丢了它」。
 
-    这两手各自都有一个**看起来很省事但会判错**的写法，而且两边判错的方向相反：
+    ## 每一手都必须比「同一个东西」，而不是比字符串
+
+    这三手各自都有一个**看起来很省事但会判错**的写法：
 
     * **编号不能当子串找**。`candidate.id` 形如 `S1-2`，而同一分片的编号可以到
       `S1-30`（`CANDIDATE_MAX_ITEMS_PER_MEMBER`）—— `"S1-2" in 报告` 会被报告里的
@@ -1630,10 +1700,22 @@ def reconcile_candidates(
     * **路径要比归一化后的形态**。逐字相等时，`./config/a.xlsx` 与
       `config\\a.xlsx` 是两个文件。这是一个**误报**：已经进了报告的候选被说成
       「找不到去向」，读的人只好再去核一遍，而那个计数会虚高。
+    * **第 3 手的路径不能不管边界**。`a/b.xlsx` 是 `x/a/b.xlsx` 的后半段，
+      裸子串匹配会让后者替前者「认领」这条候选。所以两侧都挡住路径的续接字符
+      （与 `_candidate_id_mentioned` 挡住 `S1-25` 是同一件事）。
+
+    ## 第 3 手为什么**只看结论**、不看报告正文
+
+    `_report_text` 里还有报告正文，正文里出现一个文件名看起来也能算「提到了」。不采纳
+    这条路：报告正文正是模型写「这一块我没查到」的地方（那次真实运行里，
+    `奖励模式_CfgRewardMode.xlsx` 就出现在模型自己那节「信息缺口（需人工核对）」里）。
+    拿「正文提到过」当采纳证据，会把**真的缺口**说成「已有去向」—— 而这个方向是静默的，
+    正是本函数最不该出的那种错。
 
     前者静默、后者吵闹，所以前者更要紧；但两者都不该发生。
     """
     adopted = _report_text(synthesis)
+    findings_text = _findings_text(synthesis)
     final_paths = {
         normalize_path(item.file_path)
         for item in synthesis.anomalies
@@ -1647,6 +1729,8 @@ def reconcile_candidates(
         path = normalize_path(candidate.anomaly.file_path)
         if path and path in final_paths:
             continue
+        if path and _path_named_in_findings(path, findings_text):
+            continue
         dropped.append(
             DroppedItem(
                 kind="subagent",
@@ -1659,7 +1743,7 @@ def reconcile_candidates(
             f"- `[{candidate.id}]` {candidate.anomaly.title}"
             f"（{candidate.anomaly.category}·{candidate.anomaly.severity}"
             + (f"，{candidate.anomaly.file_path}" if candidate.anomaly.file_path else "")
-            + "）：上面的报告里既没有引用这个编号，也没有同一个文件的条目。"
+            + "）：上面的报告里既没有引用这个编号，也没有任何一条结论提到这个文件。"
         )
 
     shard_gaps = _shard_gap_lines(steps)
@@ -1707,14 +1791,39 @@ def _candidate_id_mentioned(candidate_id: str, text: str) -> bool:
     return re.search(rf"(?<![0-9A-Za-z]){re.escape(str(candidate_id))}(?![0-9])", text) is not None
 
 
-def _report_text(synthesis: EngineOutcome) -> str:
-    """最终报告 + 异常清单拼成的可检索文本（判断候选编号在不在里面）。"""
-    parts = [synthesis.report_markdown or ""]
-    parts.extend(
+def _findings_text(synthesis: EngineOutcome) -> str:
+    """**只有异常清单**的散文（标题 + 证据 + 影响面），不含报告正文。
+
+    第 3 手匹配用的就是这一份，理由见 `reconcile_candidates` 那段「为什么只看结论」：
+    报告正文里有模型自己写的「这一块我没查到」，拿它当采纳证据会把真缺口说成有去向。
+    """
+    return "\n".join(
         f"{item.title} {' '.join(str(text) for text in item.evidence)} {item.impact}"
         for item in synthesis.anomalies
     )
-    return "\n".join(parts)
+
+
+def _report_text(synthesis: EngineOutcome) -> str:
+    """最终报告 + 异常清单拼成的可检索文本（判断候选编号在不在里面）。"""
+    return "\n".join([synthesis.report_markdown or "", _findings_text(synthesis)])
+
+
+def _path_named_in_findings(path: str, findings_text: str) -> bool:
+    """结论清单里**点了这个文件的名**没有。
+
+    两侧都挡住路径的续接字符：不加边界的话，候选的 `a/b.xlsx` 会被结论里的
+    `x/a/b.xlsx` 认领 —— 一条真的没进报告的候选从此不报（静默的漏报，本函数最不该
+    出的那种错）。与 `_candidate_id_mentioned` 挡 `S1-25` 是同一件事。
+
+    尾部挡的是「更长的路径以它开头」：`a/b.xlsx.bak` 不该被当成点名了 `a/b.xlsx`，
+    所以 `.` 也要挡。**代价是句号收尾的英文句子会漏掉一次匹配**（`见 a/b.xlsx.`）——
+    这个方向（宁可说「找不到去向」）比反过来（把没进报告的候选说成进了）轻，取它。
+    而不挡中文标点：中文写作里路径后面常常直接跟 `」`、`、`、`）`。
+    """
+    if not path:
+        return False
+    pattern = rf"(?<![A-Za-z0-9_\-./]){re.escape(path)}(?![A-Za-z0-9_\-/.])"
+    return re.search(pattern, findings_text) is not None
 
 
 # --------------------------------------------------------------------------

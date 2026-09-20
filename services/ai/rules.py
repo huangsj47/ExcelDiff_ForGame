@@ -257,6 +257,15 @@ class RuleThresholds:
 # --------------------------------------------------------------------------
 
 
+# 「超出本次上限、按严重度截掉」这一种丢弃的 `kind`。
+#
+# **不能复用 `"anomaly"`**：那个 kind 已经被协议层占着（`protocol._coerce_anomalies`
+# 用它记「severity 不在允许集合内」「evidence 为空」这类**模型自己写坏了**的条目）。
+# 两者混在一个 kind 里，读取侧就只能靠 reason 的措辞去分辨 —— 而措辞是会改的，
+# 「哪几条是被上限截掉的」是要写进报告正文让用户回看的东西，不能靠一句话认。
+KIND_ANOMALY_CAP = "anomaly_cap"
+
+
 @dataclass(frozen=True)
 class NormalizeResult:
     anomalies: tuple[Anomaly, ...]
@@ -379,13 +388,19 @@ def normalize_anomalies(
         max_items = max(0, thresholds.max_anomalies)
         # 逐条记账而不是记一条汇总：被砍掉的是哪几条要能查，否则用户看到「少报 3 条」
         # 也没法判断被砍的是不是关键那条。
+        #
+        # `detail` 里带上文件路径：这条记账不只是给 trace 看的，报告末尾那节
+        # 「结论条数上限（平台补充）」用的就是它 —— 只给一个标题，用户没法回看是哪份表。
         for index, anomaly in rank_anomalies(unique)[max_items:]:
+            detail = f"{anomaly.severity} {anomaly.title}"
+            if anomaly.file_path:
+                detail = f"{detail}（{anomaly.file_path}）"
             dropped.append(
                 DroppedItem(
-                    "anomaly",
+                    KIND_ANOMALY_CAP,
                     index,
                     f"超出本次上限（{max_items} 条），已按严重度优先保留",
-                    f"{anomaly.severity} {anomaly.title}",
+                    detail,
                 )
             )
 

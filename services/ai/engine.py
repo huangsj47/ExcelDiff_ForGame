@@ -1050,11 +1050,16 @@ def run_analysis(
         #
         # 渲染函数从 `subagent` **函数内导入**：它在模块级 import 本模块（要用
         # `run_analysis` 跑每个成员），顶层互相导入会成环。
-        from services.ai.subagent import build_unclassified_section
+        from services.ai.subagent import build_cap_section, build_unclassified_section
 
         section = build_unclassified_section(normalized.anomalies, dimension_ids)
         if section:
             report_markdown = (report_markdown.rstrip() + "\n\n" + section).strip() + "\n"
+        # 「结论条数上限」那一节：**同一条理由、同一个位置**。上限生效时清单是静默变短的，
+        # 报告正文读起来完全正常 —— 用户看到「这次报了 10 条」，看不出还有几条被截掉了。
+        cap_section = build_cap_section(normalized.dropped)
+        if cap_section:
+            report_markdown = (report_markdown.rstrip() + "\n\n" + cap_section).strip() + "\n"
 
     return EngineOutcome(
         status=STATUS_DEGRADED if degradation else STATUS_SUCCEEDED,

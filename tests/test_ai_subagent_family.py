@@ -37,6 +37,7 @@ from services.ai.subagent import (
     ROLE_SYNTHESIS,
     Candidate,
     MemberOutcome,
+    _path_named_in_findings,
     aggregate_outcomes,
     attach_seed,
     build_synthesis_task,
@@ -373,6 +374,96 @@ class TestTheCandidatesAndTheReconciliation:
 
         assert text == "" and dropped == ()
 
+    def test_a_file_named_inside_a_findings_evidence_counts_as_adopted(self):
+        """第三手：结论**自己的证据里点了这个文件的名**。
+
+        这是一次**真实误报**（2026-09-20 线上周版本分析，报告末尾原文）：
+        分片 S1 报的是 `config/奖励模式_CfgRewardMode.xlsx`「新建表内仅含一条测试数据、
+        与两份同域表并存」，汇总把它并成了一条结论 —— 而那条结论
+        **`file_path` 指向另一张同域表**（`config/奖励模式表_CfgRewardMode.xlsx`），
+        证据第三条里才逐字写着前者的路径。
+
+        编号没带回、`file_path` 又不是同一个，前两手都看不见它，于是平台在报告末尾
+        告诉用户「1 条在最终报告里找不到去向，需要人工看一眼」—— 而那条就在报告里。
+        用户照着去核一遍，只会得出「平台数错了」。
+        """
+        candidate = self._candidate(
+            title="【奖励模式_CfgRewardMode】新建表内仅含一条测试数据，且与两份同域表并存",
+            file_path="config/奖励模式_CfgRewardMode.xlsx",
+        )
+        synthesis = EngineOutcome(
+            status=STATUS_SUCCEEDED,
+            report_markdown="# 变更理解\n\n奖励模式出现三表并存。\n",
+            anomalies=(
+                _anomaly_obj(
+                    title="【奖励模式】新建两份同名域表、删除一份现存表的工作表，三表并存",
+                    file_path="config/奖励模式表_CfgRewardMode.xlsx",
+                    evidence=[
+                        "提交 d1a0fa97：config/奖励模式表_CfgRewardMode.xlsx 整表删除",
+                        "提交 f0724d7d：config/奖励模式_CfgRewardMode.xlsx 新增工作表",
+                    ],
+                ),
+            ),
+        )
+
+        text, dropped = reconcile_candidates((candidate,), synthesis)
+
+        assert (text, dropped) == ("", ()), (
+            "候选的文件被结论的证据点了名，却仍被报成「找不到去向」："
+            f"{[item.detail for item in dropped]}"
+        )
+
+    def test_the_report_body_naming_the_file_is_not_enough(self):
+        """**第三手只看结论，不看报告正文** —— 这条钉的就是这个取舍。
+
+        正文里模型也会写「这一块我没查到」（那次真实运行里，
+        `奖励模式_CfgRewardMode.xlsx` 就出现在模型自己那节「信息缺口（需人工核对）」）。
+        把「正文提到过」也算成采纳，会把**真的缺口**说成「已有去向」—— 那个方向是
+        静默的（报告读起来完全正常，只是少了那条警告），正是本函数最不该出的错。
+        """
+        candidate = self._candidate(title="【道具】ID 被删除但生成文件仍在")
+        synthesis = EngineOutcome(
+            status=STATUS_SUCCEEDED,
+            report_markdown=f"# 信息缺口（需人工核对）\n\n{TABLE} 这一份没查到，需人工确认。\n",
+        )
+
+        text, dropped = reconcile_candidates((candidate,), synthesis)
+
+        assert dropped, "正文里点到文件名就被算成已采纳了 —— 那会把真缺口说成有去向"
+
+    def test_a_longer_path_does_not_claim_a_shorter_candidates_file(self):
+        """边界：**不能拿路径当裸子串找**。
+
+        `x/a/b.xlsx` 的后半段就是 `a/b.xlsx`。不管边界的话，一条真的没进报告的候选会被
+        另一个文件「认领」掉 —— 静默的漏报，与 `S1-2` 被 `S1-25` 认领是同一件事。
+        """
+        candidate = self._candidate(title="【道具】ID 被删除", file_path="a/b.xlsx")
+        synthesis = EngineOutcome(
+            status=STATUS_SUCCEEDED,
+            report_markdown="# 风险评估\n\n改了别的。\n",
+            anomalies=(
+                _anomaly_obj(
+                    title="另一个说法",
+                    file_path="x/a/b.xlsx",
+                    evidence=["x/a/b.xlsx 里删了一行"],
+                ),
+            ),
+        )
+
+        text, dropped = reconcile_candidates((candidate,), synthesis)
+
+        assert dropped, "更长的路径替候选认领了采纳状态（静默漏报）"
+
+    def test_the_path_matcher_holds_its_boundaries(self):
+        """把匹配器的边界单独钉一遍（`x/a/b.xlsx` / `a/b.xlsx.bak` 两种冒充）。"""
+        assert _path_named_in_findings("a/b.xlsx", "见 a/b.xlsx 处")
+        assert _path_named_in_findings("a/b.xlsx", "见「a/b.xlsx」")
+        assert _path_named_in_findings("a/b.xlsx", "改了 a/b.xlsx、还有别的")
+        assert not _path_named_in_findings("a/b.xlsx", "x/a/b.xlsx 被改了")
+        assert not _path_named_in_findings("a/b.xlsx", "a/b.xlsx.bak 被改了")
+        assert not _path_named_in_findings("b.xlsx", "a/b.xlsx 被改了")
+        assert not _path_named_in_findings("", "a/b.xlsx 被改了")
+
     def test_a_two_digit_neighbour_does_not_make_a_one_digit_id_look_adopted(self):
         """**编号必须整段匹配，不能当子串。**
 
@@ -431,13 +522,18 @@ class TestTheCandidatesAndTheReconciliation:
         )
 
     def test_the_wording_only_claims_what_was_checked(self):
-        """不能写成「模型把它丢了」—— 平台查的是「报告里有没有它」。"""
+        """不能写成「模型把它丢了」—— 平台查的是「报告里有没有它」。
+
+        平台现在查三手（编号 / 同一个文件 / 结论的证据里点到这个文件的路径），
+        所以这句话也只能声称这三手。**多写一手就变成平台没做过的保证**；少写一手，
+        读的人会以为某类采纳方式平台看不见，又跑去人工核一遍已经核过的条目。
+        """
         candidate = self._candidate()
         text, _ = reconcile_candidates(
             (candidate,), EngineOutcome(status=STATUS_SUCCEEDED, report_markdown="")
         )
 
-        assert "既没有引用这个编号，也没有同一个文件的条目" in text
+        assert "既没有引用这个编号，也没有任何一条结论提到这个文件" in text
         assert "没有被汇总进去" in text
 
     def test_the_gap_text_says_it_is_the_platforms_own_check(self):
