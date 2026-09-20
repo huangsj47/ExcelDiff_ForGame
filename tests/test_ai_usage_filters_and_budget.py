@@ -1053,7 +1053,10 @@ def test_the_panel_route_only_sends_the_price_table(client, monkeypatch):
         _configure(project_id, {"max_analysis_rounds": 7, "budget_token_limit": 555})
 
     monkeypatch.setattr(ai_routes, "_has_project_admin_access", lambda _pid: True)
-    monkeypatch.setattr(ai_routes, "_get_current_user", lambda: None)
+    # 「没有用户对象」这一档仍然是留着要测的（环境变量管理员就是这种会话），只是取人名的
+    # 入口从 `_get_current_user` 换成了 `_actor_name` —— 本用例要验的是「只提交单价表时
+    # 别的字段不动」，人名取到什么值与它无关。
+    monkeypatch.setattr(ai_routes, "_actor_name", lambda: "")
 
     endpoint = flask_app.view_functions["ai_analysis_routes.ai_project_config_update"]
     with flask_app.test_request_context(

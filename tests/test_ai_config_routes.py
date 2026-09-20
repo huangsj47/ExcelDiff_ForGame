@@ -256,6 +256,103 @@ def test_an_invalid_update_writes_nothing(client, project_id, monkeypatch):
     assert config["api_model"] == "good-model", "失败的那次不该动已存的配置"
 
 
+def _logged_in_client(username: str = "cfg-actor"):
+    """一个**带会话**的 test_client。
+
+    这里不能用上面的 `_ViewClient` —— 它在 `test_request_context` 里调 view，会话是空的，
+    而本组要验的恰恰是「会话里的人名有没有被记下来」。空会话正是出问题的那个输入，
+    拿它当夹具等于把要测的东西当成前提。
+    """
+    client = flask_app.test_client()
+    with client.session_transaction() as session:
+        session["is_admin"] = True
+        session["admin_user"] = username
+        session["_csrf_token"] = _uid("csrf")
+    with client.session_transaction() as session:
+        token = session["_csrf_token"]
+    return client, token
+
+
+def _config_actor(project_id):
+    return ai_service.get_project_analysis_config(project_id)["updated_by"]
+
+
+def _api_key_actor(project_id):
+    """密钥那一栏的「谁改的」在**密钥行**上，不在项目配置行上（两者是两张表）。"""
+    from models.ai_analysis import AiProjectApiKey
+
+    row = AiProjectApiKey.query.filter_by(project_id=project_id).first()
+    return None if row is None else row.updated_by
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "read_actor"),
+    [
+        (
+            lambda pid: f"/ai-analysis/projects/{pid}/config",
+            {"max_analysis_rounds": 5},
+            _config_actor,
+        ),
+        (
+            lambda pid: f"/ai-analysis/projects/{pid}/api-key",
+            {"api_key": "sk-test-123456"},
+            _api_key_actor,
+        ),
+    ],
+)
+def test_a_write_records_who_did_it(project_id, monkeypatch, path, body, read_actor):
+    """**「最后更新人」不许写成空串。**
+
+    平台管理员（环境变量那种，本机就是）没有数据库用户对象，`_get_current_user()` 返回
+    `None`；照 `getattr(user, "username", "")` 取，管理员做的每一次改动都会记成匿名 ——
+    而配置页与用量页都要显示这一栏（「最后更新：· admin」这种半截话就是这么来的）。
+
+    断言的是**库里的值**，不是响应体：响应体里没有这一栏，写空了照样 200。
+    """
+    _allow(monkeypatch)
+    client, token = _logged_in_client()
+
+    resp = client.post(
+        path(project_id),
+        json={**body, "_csrf_token": token},
+        headers={"X-CSRF-Token": token},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+
+    with flask_app.app_context():
+        actor = read_actor(project_id)
+    assert actor == "cfg-actor", (
+        f"改动被记成了匿名（updated_by={actor!r}）—— "
+        "多半又用 getattr(user, 'username', '') 取人名了，见 routes/ai_analysis_routes._actor_name"
+    )
+
+
+def test_the_actor_name_is_never_derived_inline():
+    """静态兜底：本模块里不许再出现自己取人名的写法。
+
+    行为用例只覆盖了走一遍的那两条路由，而这个模块里有七处要记「谁改的」。一处漏改就是
+    一栏永远为空的记录，且**不报错**。扫源码能覆盖全部，但必须先剥掉注释与字符串 ——
+    `_actor_name` 自己的文档就在讲「不许这么写」，不剥的话这条会被那句说明喂饱。
+    """
+    import io
+    import tokenize
+
+    from routes import ai_analysis_routes as module
+
+    with open(module.__file__, "r", encoding="utf-8") as handle:
+        tokens = [
+            tok.string
+            for tok in tokenize.generate_tokens(io.StringIO(handle.read()).readline)
+            if tok.type not in (tokenize.COMMENT, tokenize.STRING)
+        ]
+    code = " ".join(tokens)
+
+    assert "getattr ( user , 'username'" not in code.replace('"', "'"), (
+        "routes/ai_analysis_routes.py 里又出现了自己取人名的写法 —— 改用 _actor_name()"
+    )
+    assert "_actor_name ( )" in code, "取人名的唯一入口不见了？"
+
+
 # ==========================================================================
 # 模型列表
 # ==========================================================================

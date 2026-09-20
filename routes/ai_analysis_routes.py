@@ -70,7 +70,6 @@ from services.ai_usage_service import (
 from utils.json_body import read_json_object
 from utils.request_security import (
     _get_accessible_project_ids,
-    _get_current_user,
     _has_project_access,
     _has_project_admin_access,
     _resolve_current_username,
@@ -101,8 +100,7 @@ def ai_project_key_update(project_id):
         # Token 只有字符串这一种合法形态。**不 str() 兜底**：那会把 123 静默存成
         # "123"、把 [1,2] 存成 "[1, 2]"，用户以为配上的东西根本不是他填的。
         return jsonify({"success": False, "message": "API Token 必须是字符串。"}), 400
-    user = _get_current_user()
-    username = getattr(user, "username", "") if user else ""
+    username = _actor_name()
     ok, message = set_project_api_key(project_id, api_key, updated_by=username)
     status_code = 200 if ok else 400
     return jsonify({"success": ok, "message": message}), status_code
@@ -141,8 +139,7 @@ def ai_project_config_update(project_id):
     payload, error = read_json_object()
     if error is not None:
         return error
-    user = _get_current_user()
-    username = getattr(user, "username", "") if user else ""
+    username = _actor_name()
     ok, message, errors = update_project_analysis_config(
         project_id, payload, updated_by=username
     )
@@ -216,8 +213,7 @@ def ai_project_test_connection(project_id):
 
 @ai_analysis_bp.route("/ai-analysis/commit/<int:commit_id>/stream", methods=["GET"])
 def ai_commit_stream(commit_id):
-    user = _get_current_user()
-    username = getattr(user, "username", "") if user else ""
+    username = _actor_name()
     commit = Commit.query.get_or_404(commit_id)
     repo = db.session.get(Repository, commit.repository_id)
     project_id = repo.project_id if repo else None
@@ -443,8 +439,7 @@ def ai_platform_budget_update():
     payload, error = read_json_object()
     if error is not None:
         return error
-    user = _get_current_user()
-    username = getattr(user, "username", "") if user else ""
+    username = _actor_name()
     ok, message, errors = set_platform_budget(payload, updated_by=username)
     body = {"success": ok, "message": message}
     if errors:
@@ -509,8 +504,7 @@ def ai_statistics_baseline_update():
             400,
         )
 
-    user = _get_current_user()
-    username = getattr(user, "username", "") if user else ""
+    username = _actor_name()
     ok, message, errors = set_usage_baseline(since, updated_by=username)
     body = {"success": ok, "message": message}
     if errors:
@@ -550,8 +544,7 @@ def ai_statistics_reset():
             400,
         )
 
-    user = _get_current_user()
-    username = getattr(user, "username", "") if user else ""
+    username = _actor_name()
     ok, message, deleted = purge_usage_statistics(updated_by=username)
     body = {"success": ok, "message": message}
     if deleted:
