@@ -27,7 +27,7 @@ import services.ai.provenance as provenance
 import services.ai_analysis_service as ai_service
 from app import app, create_tables, db
 from models import Commit, Project, Repository, WeeklyVersionConfig
-from models.ai_analysis import AiAnalysisRun
+from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
 from services.ai import report_document as doc
 from services.ai.skill_loader import SKILL_PROJECTS_ROOT_ENV, project_pack_slug
 from tests.test_ai_history_survives_restart import REPORT_TEXT, _setup_config
@@ -186,9 +186,89 @@ def test_the_anomalies_from_the_payload_reach_the_appendix():
             response = client.get(f"/ai-analysis/runs/{run.id}/report.md")
 
         body = response.get_data(as_text=True)
-        assert "| 严重 | 很高 | 配置 ID | 7007 悬空 | config/a.xlsx | 引用不到 |" in body
+        # 这一条 payload 里没有指纹、库里也没有对应的行 → 处置列写 `-`，
+        # **不是**「待确认」：没找到记录不等于「还没人处理过」。
+        assert "| 严重 | 很高 | 配置 ID | - | 7007 悬空 | config/a.xlsx | 引用不到 |" in body
         assert "另有 2 条此前已被人工标记忽略，不在此列。" in body
-        assert "处置" not in body
+        assert "待确认" not in body
+
+
+def _anomaly_row(run, *, fingerprint: str, disposition: str = "pending") -> AiAnalysisAnomaly:
+    return AiAnalysisAnomaly(
+        run_id=run.id,
+        project_id=run.project_id,
+        fingerprint=fingerprint,
+        title="7007 悬空",
+        category="config_id",
+        severity="critical",
+        confidence="very_high",
+        evidence=json.dumps(["a.xlsx 第 3 行"], ensure_ascii=False),
+        commit_ref="",
+        file_path="config/a.xlsx",
+        impact="引用不到",
+        suggestion="补一条",
+        disposition=disposition,
+    )
+
+
+def test_the_disposition_column_is_read_from_the_database_at_export_time():
+    """附录的「处置」列取的是**导出这一刻库里的行**，不是 payload 快照。
+
+    这根线很容易接错：`response_payload.anomalies` 是分析当时的快照（每个条目只有
+    `fingerprint`，**没有**处置状态），照它渲染就永远只有一种值。所以路由必须按这一次
+    运行现查 `AiAnalysisAnomaly`，并按指纹对上。这条端到端把它钉住：写进库、再导，
+    导出来的就是那个状态；改了状态再导，这一列跟着变（而报告正文逐字不变）。
+    """
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        run = _run(
+            project_id=project.id,
+            target_type="weekly",
+            target_id=cfg.id,
+            target_key=ai_service.build_weekly_group_key(cfg),
+            payload={
+                "risk_level": "high",
+                "risk_reasons": ["模型报出 1 条达门槛的问题"],
+                "anomalies": [
+                    {
+                        "severity": "critical",
+                        "confidence": "very_high",
+                        "category": "config_id",
+                        "title": "7007 悬空",
+                        "file_path": "config/a.xlsx",
+                        "impact": "引用不到",
+                        "evidence": ["a.xlsx 第 3 行"],
+                        "suggestion": "补一条",
+                        "fingerprint": "fp-matched",
+                    }
+                ],
+                "suppressed_count": 0,
+            },
+        )
+        db.session.add(_anomaly_row(run, fingerprint="fp-matched", disposition="confirmed"))
+        # 指纹对不上的一行**不许贴到这条上**（同名不同条是常事）
+        db.session.add(_anomaly_row(run, fingerprint="fp-other", disposition="ignored"))
+        db.session.commit()
+
+        with app.test_client() as client:
+            _login(client)
+            before = client.get(f"/ai-analysis/runs/{run.id}/report.md").get_data(as_text=True)
+
+        assert "| 严重 | 很高 | 配置 ID | 已确认 | 7007 悬空 | config/a.xlsx | 引用不到 |" in before
+        # 只查那一格：附录开头那句说明里本来就有「已忽略」这个词
+        assert "| 配置 ID | 已忽略 |" not in before, "指纹没对上，却把别人的处置贴了上来"
+
+        row = AiAnalysisAnomaly.query.filter_by(run_id=run.id, fingerprint="fp-matched").first()
+        row.disposition = "ignored"
+        db.session.commit()
+
+        with app.test_client() as client:
+            _login(client)
+            after = client.get(f"/ai-analysis/runs/{run.id}/report.md").get_data(as_text=True)
+
+        assert "| 严重 | 很高 | 配置 ID | 已忽略 | 7007 悬空 | config/a.xlsx | 引用不到 |" in after
+        # 报告原文逐字不变 —— 变的是人工处置的进度，不是模型说过的话
+        assert REPORT_TEXT in after
 
 
 def test_the_focus_label_comes_from_the_stored_request_payload():

@@ -693,6 +693,15 @@ def ai_run_report_md(run_id):
     # **不许现查项目当前声明**：项目改了声明之后，历史结论会被按新清单重新贴标签
     # （当时合法的维度会变成「未归类」），那是篡改历史而不是「显示得不准」。
     dimension_labels = report_document.dimension_labels_from_payload(payload)
+    # 「处置」列按**导出这一刻**现查这一次运行的行 —— 不能用 `payload["anomalies"]`：
+    # 那是分析当时的快照，里面只有 `fingerprint`，没有处置状态（它每轮都在被人改）。
+    # 翻中文名的映射表只有 `models/ai_analysis/anomaly.py::DISPOSITION_LABELS` 那一份，
+    # 这里不抄第二份。查不到的条目在文档里写 `-`，不回落成「待确认」。
+    dispositions = {
+        str(row.fingerprint): DISPOSITION_LABELS.get(row.disposition or "", "")
+        for row in anomalies_of_run(run.id)
+        if row.fingerprint
+    }
     markdown = report_document.build_report_markdown(
         project_label=str(getattr(project, "name", "") or ""),
         target_label=target_label,
@@ -711,6 +720,7 @@ def ai_run_report_md(run_id):
         anomalies=payload.get("anomalies") or [],
         suppressed_count=int(payload.get("suppressed_count") or 0),
         dimension_labels=dimension_labels,
+        dispositions=dispositions,
     )
     filename = report_document.report_filename(
         project_name=getattr(project, "name", "") or "",

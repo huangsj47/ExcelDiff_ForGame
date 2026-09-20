@@ -19,10 +19,16 @@
 * **报告原文逐字带上，不改写、不重排、不改标题层级。** 这份文档是拿出去给人看的
   （交给策划/QA、贴进工单），它必须和模型说过的**一模一样**；平台加的元信息与附录都在
   正文之外，且用 `---` 与正文隔开。想「润色一下」的念头到此为止。
-* **异常清单不写「处置」列。** 处置状态（待确认/已确认/已忽略）在库里**从来没有写入
-  路径**（见 `models/ai_analysis/anomaly.py`，`services/ai_analysis_service.py` 那条
-  INSERT 不碰它），整列必然是「待确认」—— 那是在一份要发出去的文档里印一行假信息。
-  等写路径做出来了再加（README 的「后续优化方向」里记着这件事）。
+* **异常清单的「处置」列是导出那一刻的状态快照，不是模型结论的一部分。** 模型从来不写这一列
+  （它压根不知道人处理到哪一步）；平台在导出时按 `fingerprint` 现查这一次运行的
+  `AiAnalysisAnomaly` 行，把「待确认 / 已确认 / 已忽略」贴上去。所以**同一份报告隔天再导，
+  这一列可能不一样** —— 那是预期：报告原文逐字不变，变的是人工处置的进度。查不到记录的
+  那一格写 `-`，**不回落成「待确认」**（那等于替用户断言「还没人处理过」）。
+
+  > 这一条原先写的是「处置状态在库里**从来没有写入路径**，整列必然是待确认，印出来就是
+  > 假信息」。那个**前提已经不成立**了：写入路径（`services/ai/anomaly_disposition.py`
+  > 与三个接口）和界面（`static/js/ai_anomaly_disposition.js`）都已交付。
+  > 留着旧说法比没有更糟 —— 它会让后来的人以为这一列不可做。
 * **没有达门槛的异常时，说一句「本次没有达到门槛的异常条目」，不画空表。** 一张只有表头的
   表会被读成「这一项还没填」。
 
@@ -403,15 +409,22 @@ def is_unclassified(category: Any, labels: Mapping[str, str] | None = None) -> b
 
 
 def anomaly_rows(
-    anomalies: Iterable[Mapping[str, Any]], labels: Mapping[str, str] | None = None
+    anomalies: Iterable[Mapping[str, Any]],
+    labels: Mapping[str, str] | None = None,
+    dispositions: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """异常清单 → 表格行（**已经翻成给人看的字**，纯函数，可单测）。
 
     只读取渲染需要的这几个键：`severity` / `confidence` / `category` / `title` /
-    `file_path` / `impact` / `evidence` / `suggestion`。缺的键按空处理 —— 老记录的
-    payload 里没有 `evidence` 这个键（它是后加的）。
+    `file_path` / `impact` / `evidence` / `suggestion` / `fingerprint`。缺的键按空处理 ——
+    老记录的 payload 里没有 `evidence` 这个键（它是后加的）。
 
     `labels` 是**本次分析当时生效的**维度清单（见 `dimension_label`）。
+
+    `dispositions` 是 `fingerprint → 人工处置的中文名`，由调用方（路由）在**导出这一刻**
+    按这一次运行现查 `AiAnalysisAnomaly` 行翻好传进来。这里只做查表，不认识处置状态本身 ——
+    中文名的单一来源是 `models/ai_analysis/anomaly.py::DISPOSITION_LABELS`，
+    在这里再抄一份映射表就是同一个事实的第二份抄本。
 
     `unclassified` 是**平台自己算的**（不是模型给的字段）：它标记「这一条的 category
     不在本次生效的清单里」，`build_report_markdown` 据此决定要不要加那句说明。
@@ -431,6 +444,13 @@ def anomaly_rows(
                 "severity": _cell(severity_label(item.get("severity"))),
                 "confidence": _cell(confidence_label(item.get("confidence"))),
                 "dimension": _cell(dimension_label(item.get("category"), labels)),
+                # 查不到就写 `-`，**不许回落成「待确认」**：那等于替用户断言「这一条还没人
+                # 处理过」，而我们其实只是没找到它的记录 —— 与这份文件反复在防的那种
+                # 「印一行假信息」是同一件事。
+                "disposition": _cell(
+                    (dispositions or {}).get(str(item.get("fingerprint") or ""))
+                    or DISPOSITION_UNKNOWN
+                ),
                 "unclassified": is_unclassified(item.get("category"), labels),
                 "title": _cell(item.get("title")),
                 "file_path": _cell(item.get("file_path")),
@@ -444,11 +464,20 @@ def anomaly_rows(
 
 APPENDIX_TITLE = "异常清单（平台按门槛过滤后）"
 
+# 附录里查不到处置记录时那一格写什么。见 `anomaly_rows` 里那段注释：不回落成「待确认」。
+DISPOSITION_UNKNOWN = "-"
+
 # 附录开头那句。**它必须说明「这份清单不是全部」**：达到门槛才进来，没达到的只写在正文里。
 # 不写这一句，读者会把附录当成「模型发现的所有问题」——那正是平台一直在避免的那种误读。
+#
+# 「处置」列那两句也必须在这里说，因为它有一个**反直觉的地方**：这一列是导出那一刻现查的，
+# 不是分析时的快照 —— 同一份报告隔天再导，「已确认」的条数可能变多。不写明的话，
+# 两次导出拿到不同结果的人会以为平台在改历史。
 APPENDIX_INTRO = (
     "平台只列达到门槛（严重度 / 置信度 / 条数）的条目；"
     "未达到门槛的问题只写在正文里，不在这里。"
+    "「处置」列是**导出这一刻**平台上的人工处置状态（`-` 表示平台上没有这一条的记录）；"
+    "已被标成「已忽略」的条目本来就不在这张表里。"
 )
 
 EMPTY_APPENDIX = "本次没有达到门槛的异常条目。"
@@ -485,6 +514,9 @@ def build_report_markdown(
     # 见 `DIMENSION_LABELS` 上面那段（现查项目当前声明是篡改历史）。不传 / 传空
     # 就是平台出厂那一份。
     dimension_labels: Mapping[str, str] | None = None,
+    # `fingerprint → 人工处置的中文名`，**导出这一刻**现查（见 `anomaly_rows`）。
+    # 不传就是整列 `-`：宁可写「不知道」，也不替用户断言「这一条还没人处理过」。
+    dispositions: Mapping[str, str] | None = None,
     title: str = "AI 变更风险分析报告",
 ) -> str:
     """拼出整份文档。**报告原文逐字出现在中间**，前后各一条 `---` 把它隔开。
@@ -495,6 +527,9 @@ def build_report_markdown(
 
     维度那一列同理：中文名来自 `dimension_labels`（本次分析**当时**生效的清单），
     而不是在导出时现查项目声明 —— 理由见 `DIMENSION_LABELS` 上面那段。
+
+    「处置」那一列**反过来**：它要的就是导出这一刻的现状（见模块抬头第 2 条口径），
+    所以由调用方现查、翻好中文名传进来。
     """
     lines: list[str] = [f"# {title}", ""]
     lines.append("| 项 | 内容 |")
@@ -533,7 +568,7 @@ def build_report_markdown(
     lines.append(APPENDIX_INTRO)
     lines.append("")
 
-    rows = anomaly_rows(anomalies, dimension_labels)
+    rows = anomaly_rows(anomalies, dimension_labels, dispositions)
     if not rows:
         lines.append(EMPTY_APPENDIX)
     else:
@@ -542,14 +577,16 @@ def build_report_markdown(
         if any(row["unclassified"] for row in rows):
             lines.append(UNCLASSIFIED_NOTE)
             lines.append("")
-        lines.append("| 严重度 | 置信度 | 维度 | 标题 | 文件 | 影响 |")
-        lines.append("| --- | --- | --- | --- | --- | --- |")
+        lines.append("| 严重度 | 置信度 | 维度 | 处置 | 标题 | 文件 | 影响 |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
         for row in rows:
             lines.append(
-                "| {severity} | {confidence} | {dimension} | {title} | {file} | {impact} |".format(
+                "| {severity} | {confidence} | {dimension} | {disposition} | {title} | "
+                "{file} | {impact} |".format(
                     severity=row["severity"],
                     confidence=row["confidence"],
                     dimension=row["dimension"],
+                    disposition=row["disposition"],
                     title=row["title"] or "-",
                     file=row["file_path"] or "-",
                     impact=row["impact"] or "-",

@@ -228,11 +228,14 @@ def test_the_docs_describe_the_exported_document_the_code_actually_builds():
     )
     assert report_document.APPENDIX_INTRO in sample, "附录开头那句「不是全部」没了"
 
-    # 「附录里没有处置列」这件事：文档与代码必须同时成立。
-    # 那一列今天必然是「待确认」（处置状态从来没有写入路径），印在要发出去的
-    # 文件里就是一行假信息 —— 哪天后端补上了写路径，这里会先红。
-    assert "没有「处置」这一列" in doc_text
-    assert "处置" not in sample
+    # 「附录里有处置列」这件事：文档与代码必须同时成立。这一列是**导出那一刻**现查的
+    # 人工处置状态（不是模型结论的一部分），所以同一份报告隔天再导可能不一样 ——
+    # 文档必须说清这一点，否则两次导出拿到不同结果的人会以为平台在改历史。
+    assert "「处置」这一列" in doc_text
+    assert "导出那一刻" in doc_text
+    assert "| 维度 | 处置 |" in sample
+    assert report_document.APPENDIX_INTRO in sample, "附录开头那句「不是全部」没了"
+    assert "导出这一刻" in report_document.APPENDIX_INTRO
 
 
 def test_the_readme_mentions_the_export_and_the_two_tabs():

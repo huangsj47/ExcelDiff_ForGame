@@ -272,28 +272,43 @@ def test_no_anomalies_means_a_sentence_not_an_empty_table():
     assert "| 严重度 |" not in text
 
 
-def test_the_appendix_has_six_columns_and_no_disposition_column():
-    """**处置列不许出现**：库里的处置状态从来没有写入路径（`models/ai_analysis/anomaly.py`
-    定义了它、没有任何地方写它），整列必然是「待确认」—— 那是在要发出去的文档里印假信息。
+def test_the_appendix_has_a_disposition_column_that_never_invents_a_state():
+    """附录有「处置」列，而且**查不到记录时写 `-`，绝不回落成「待确认」**。
+
+    ## 这条此前是反的
+
+    上一版这里断言的是「处置列不许出现」，理由是「库里的处置状态从来没有写入路径，
+    整列必然是待确认」。那个前提**早就不成立了**（写入路径与界面都做完了），
+    于是这条测试从「防止印假信息」变成了「防止印真信息」。
+
+    现在钉住的是**真正的风险**：这一列是导出那一刻现查的，查不到就说明平台上没有
+    这一条的记录 —— 那时写「待确认」等于替用户断言「还没人处理过」，仍是假信息。
     """
-    text = _build(
-        anomalies=[
-            {
-                "severity": "critical",
-                "confidence": "very_high",
-                "category": "config_id",
-                "title": "7007 悬空",
-                "file_path": "config/a.xlsx",
-                "impact": "引用不到",
-                "suggestion": "补上",
-                "evidence": ["a.xlsx 第 3 行"],
-            }
-        ]
-    )
-    assert "| 严重度 | 置信度 | 维度 | 标题 | 文件 | 影响 |" in text
-    assert "| 严重 | 很高 | 配置 ID | 7007 悬空 | config/a.xlsx | 引用不到 |" in text
-    assert "处置" not in text
+    anomaly = {
+        "severity": "critical",
+        "confidence": "very_high",
+        "category": "config_id",
+        "title": "7007 悬空",
+        "file_path": "config/a.xlsx",
+        "impact": "引用不到",
+        "suggestion": "补上",
+        "evidence": ["a.xlsx 第 3 行"],
+        "fingerprint": "fp-1",
+    }
+    text = _build(anomalies=[anomaly])
+    assert "| 严重度 | 置信度 | 维度 | 处置 | 标题 | 文件 | 影响 |" in text
+    # 没传 dispositions → 整列 `-`（而不是「待确认」）
+    assert "| 严重 | 很高 | 配置 ID | - | 7007 悬空 | config/a.xlsx | 引用不到 |" in text
     assert "待确认" not in text
+
+    # 传了才显示，而且是调用方翻好的中文名（这里只查表，不认识处置状态本身）
+    named = _build(anomalies=[anomaly], dispositions={"fp-1": "已确认"})
+    assert "| 严重 | 很高 | 配置 ID | 已确认 | 7007 悬空 | config/a.xlsx | 引用不到 |" in named
+
+    # **按指纹对，不按标题**：换一个指纹就是另一条记录，不能把别人的处置贴上来
+    other = _build(anomalies=[anomaly], dispositions={"fp-2": "已确认"})
+    assert "| 严重 | 很高 | 配置 ID | - | 7007 悬空 | config/a.xlsx | 引用不到 |" in other
+
     # 证据与建议在表下的明细块里（长文本塞进单元格会把表撑得没法读）
     assert "- 证据：a.xlsx 第 3 行" in text
     assert "- 建议：补上" in text
@@ -305,9 +320,9 @@ def test_a_pipe_in_a_title_does_not_break_the_table():
     )
     row = [line for line in text.splitlines() if line.startswith("| ") and "a \\| b" in line]
     assert len(row) == 1
-    # 按「没被转义的竖线」切，仍然是 6 个单元格 —— 转义的那个不参与切列
+    # 按「没被转义的竖线」切，仍然是 7 个单元格 —— 转义的那个不参与切列
     cells = re.split(r"(?<!\\)\|", row[0])[1:-1]
-    assert len(cells) == 6, cells
+    assert len(cells) == 7, cells
     # 建议是多行长文本，塞进单元格会把表撑坏：折成一行放在表下
     assert "- 建议：x y" in text
 
