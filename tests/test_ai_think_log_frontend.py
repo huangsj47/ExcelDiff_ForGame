@@ -11,6 +11,8 @@
   （用户明确要的：跑完之后仍然看得到本次的逐轮过程）；
 * 读不到进度（别的进程在跑 / 快照过期）→ 说读不到，**不显示 0、也不假装「还没跑完
   第一轮」**；
+* 刚发起、第一帧进度还没出来 → 说「正在准备」，**不许诊断成「跑在别的进程」**
+  （载荷里 `progress` 为 null 的两种处境形状一样、含义相反，见下面的「刚发起」一节）；
 * 这个目标压根没跑过 → 说没跑过（与「读不到」是两件事）。
 
 这些都是「同一个面板的五种处境」各自一句不同的话，而错误的样子是**沉默地说错**
@@ -72,6 +74,14 @@ var sandbox = {
         addEventListener: function () {}
     }
 };
+// 时钟：`starting` 那句说明**有期限**（"才刚发起"只在一段时间内成立），所以要能把它
+// 推过去。只替 `Date.now`（模块读的就是它），其余时间能力保持真的。
+var CLOCK = 1700000000000;
+var HostDate = Date;
+function SandboxDate() { return new HostDate(CLOCK); }
+SandboxDate.now = function () { return CLOCK; };
+sandbox.Date = SandboxDate;
+function advance(ms) { CLOCK += ms; }
 sandbox.window = sandbox;
 vm.createContext(sandbox);
 // 真加载「数字口径」那个模块：token 的 k / M 写法只有它一处实现，替身会掩盖分叉。
@@ -122,6 +132,14 @@ var OP = {
     progressTwo: function () { api.applyProgress(PROGRESS.two); },
     progressEmpty: function () { api.applyProgress(PROGRESS.empty); },
     progressMissing: function () { api.applyProgress(null); },
+    // 同一帧（没有进度）带上不同的运行状态 —— 「才刚发起」与「读不到」就是靠它分辨的。
+    progressMissingRunning: function () { api.applyProgress(null, 'running'); },
+    progressMissingPending: function () { api.applyProgress(null, 'pending'); },
+    progressMissingDone: function () { api.applyProgress(null, 'succeeded'); },
+    progressTwoRunning: function () { api.applyProgress(PROGRESS.two, 'running'); },
+    // 把时钟推过 `STARTING_WINDOW_MS`。**故意推得远远超过任何合理的期限**：
+    // 这条只验「过了期限就改口」，不验期限具体是多少。
+    runLong: function () { advance(3600000); },
     roundsStored: function () { api.applyRounds(ROUNDS.stored, {}); },
     roundsSame: function () { api.applyRounds(ROUNDS.sameAsLive, {}); },
     roundsEmpty: function () { api.applyRounds([], {}); }
@@ -129,6 +147,7 @@ var OP = {
 
 var cases = __CASES__;
 var results = cases.map(function (item) {
+    CLOCK = 1700000000000;   // 每个用例都从同一个时刻开始（上一条推过时钟）
     seed();
     vm.runInContext(fs.readFileSync(__SCRIPT__, 'utf8'), sandbox);
     api = sandbox.AiThinkLog;
@@ -438,6 +457,38 @@ def run() -> dict:
         },
         # 11. 关抽屉：不再看着它跑，但已经画出来的留着。
         {"name": "关抽屉不清列表", "ops": ["watchWithRun", "progressTwo", "reset"]},
+        # 12. **刚发起、第一帧进度还没出来**：引擎跑完第一轮才第一次 publish，中间这段
+        #     载荷里 `progress` 为 null —— 与「跑在别的进程」逐字相同。用户点完
+        #     「重新分析」立刻看到「读不到（跑在别的进程）」，那句诊断是凭空来的。
+        {"name": "刚发起还没第一帧", "ops": ["watchWithRun", "progressMissingRunning"]},
+        # 12b. 连着两帧都没有进度：还在那一段里，**不许第二帧就改口**
+        #      （第一帧会把 `watching` 打掉，只看它的话这里就变成「读不到」了）。
+        {
+            "name": "刚发起连两帧",
+            "ops": ["watchWithRun", "progressMissingRunning", "progressMissingRunning"],
+        },
+        {"name": "刚发起是排队中", "ops": ["watchWithRun", "progressMissingPending"]},
+        # 12c. 期限过了就改口：跑在别的进程时**永远**不会有快照，一直说「正在准备」
+        #      等于把一件不会发生的事说成马上要发生。
+        {
+            "name": "发起太久改口",
+            "ops": ["watchWithRun", "runLong", "progressMissingRunning"],
+        },
+        # 12d. 终态不该再等等看：都跑完了还读不到，就是读不到。
+        {"name": "跑完还读不到", "ops": ["watchWithRun", "progressMissingDone"]},
+        # 12e. 见过快照之后又丢了 = 「读不到最新的」，不是「还没出来」。
+        {
+            "name": "见过快照后丢失",
+            "ops": ["watchWithRun", "progressTwoRunning", "progressMissingRunning"],
+        },
+        # 12f. 调用方没带运行状态 → 一律按「读不到」。拿不到状态就不能断言它还在跑。
+        {"name": "没给运行状态", "ops": ["watchWithRun", "progressMissingRunning",
+                                     "progressMissing"]},
+        # 12g. 本页没看着它开跑（刷新时它已经在跑）→ 没有资格说「才刚发起」。
+        {
+            "name": "刷新时已在跑",
+            "ops": ["setRun", "markExternalRun", "progressMissingRunning"],
+        },
     ]
     return _drive(cases, rounds, same)
 
@@ -574,6 +625,107 @@ def test_watching_beats_the_elsewhere_marker(run):
     last = _by_name(run)["在跑时别处状态不改"]["snaps"][-1]
 
     assert last["mode"] == "live"
+
+
+# --------------------------------------------------------------------------
+# 刚发起那一段：不许诊断成「跑在别的进程」
+# --------------------------------------------------------------------------
+
+
+def test_a_just_started_run_is_not_diagnosed_as_running_elsewhere(run):
+    """**用户报的就是这一条。**
+
+    引擎跑完第一轮才第一次 `run_progress.publish`，所以从点下「重新分析」到第一轮跑完
+    之间，载荷里 `progress` 为 null —— 与「跑在别的进程」逐字相同。原先这个处境说的是
+    「读不到这次运行的逐轮进度（跑在别的进程，或快照已过期）」，而那一刻运行**就在
+    眼前**刚发起来：诊断是凭空来的。
+
+    所以这一段要单独一句话，而且**不带任何诊断**（「第一帧还没出来」是事实，
+    「跑在别的进程」是猜测）。
+    """
+    last = _by_name(run)["刚发起还没第一帧"]["snaps"][-1]
+
+    assert last["mode"] == "starting"
+    assert last["note"] == run["notes"]["starting"]
+    assert "跑在别的进程" not in last["note"], "这一刻没有任何依据说它跑在哪儿"
+
+
+def test_the_just_started_note_survives_more_frames_without_progress(run):
+    """连着两帧都没有进度时**不许改口**。
+
+    第一帧读不到会把 `watching` 打掉，若判据只看它，第二帧就变成「读不到」——
+    面板会在「正在准备」与「读不到」之间来回跳，而它其实一直在同一个处境里。
+    """
+    snaps = _by_name(run)["刚发起连两帧"]["snaps"]
+
+    assert [item["mode"] for item in snaps[1:]] == ["starting", "starting"]
+
+
+def test_the_just_started_note_is_used_when_the_run_is_only_queued(run):
+    """排队中（还没被 worker 捡走）同样属于这一段。"""
+    last = _by_name(run)["刚发起是排队中"]["snaps"][-1]
+
+    assert last["mode"] == "starting"
+
+
+def test_the_just_started_note_expires(run):
+    """**这句话有期限。**
+
+    多节点部署里分析派给 Agent 节点执行，本进程**永远**不会有快照 —— 一直说
+    「正在准备」等于把一件不会发生的事说成马上就要发生。过了期限就改口说读不到。
+    """
+    last = _by_name(run)["发起太久改口"]["snaps"][-1]
+
+    assert last["mode"] == "unavailable"
+    assert "第一帧" not in last["note"]
+
+
+def test_a_finished_run_is_never_called_just_started(run):
+    """终态不该再等等看：都跑完了还读不到，那就是读不到。"""
+    last = _by_name(run)["跑完还读不到"]["snaps"][-1]
+
+    assert last["mode"] == "unavailable"
+
+
+def test_a_snapshot_we_saw_and_lost_is_not_just_started(run):
+    """见过快照又丢了 = 「读不到最新的」，不是「还没出来」——手上那几轮照样是真的。"""
+    last = _by_name(run)["见过快照后丢失"]["snaps"][-1]
+
+    assert last["mode"] == "unavailable"
+    assert last["note"] == run["notes"]["unavailable_stale"]
+    assert len(last["rounds"]) == 2, "已经拿到的轮次不能被抹掉"
+
+
+def test_without_a_run_status_it_falls_back_to_unreadable(run):
+    """调用方没带运行状态 → 一律按「读不到」。
+
+    模块拿不到状态就不能断言这次运行还在跑，宁可说一个更弱的说法。这也让
+    `applyProgress(progress)` 的旧调用行为**逐字不变**（少给一个参数不会让它变乐观）。
+    """
+    last = _by_name(run)["没给运行状态"]["snaps"][-1]
+
+    assert last["mode"] == "unavailable"
+    assert last["note"] == run["notes"]["unavailable"]
+
+
+def test_a_page_that_did_not_watch_it_start_never_claims_it_just_did(run):
+    """刷新页面时它已经在跑：本页不知道它刚发起还是已经跑了十分钟，没有资格说这句话。"""
+    last = _by_name(run)["刷新时已在跑"]["snaps"][-1]
+
+    assert last["mode"] == "unavailable"
+
+
+def test_the_unreadable_note_does_not_assert_where_it_runs(run):
+    """「读不到」那句也不许把猜测写成事实。
+
+    它说的是「**可能**跑在别的进程，或快照已过期」—— 这是个可能，不是诊断；并且要
+    回答用户真正的担心（这算不算出问题了），所以得说清它不影响分析本身。
+    """
+    note = run["notes"]["unavailable"]
+
+    assert "可能" in note
+    assert "不影响分析本身" in note
+    assert "跑完之后这里会显示落库的逐轮记录" in note, "那句承诺是 ensureLoaded 的兑现目标"
 
 
 # --------------------------------------------------------------------------

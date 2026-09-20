@@ -742,9 +742,11 @@ function initCommitAiAnalysis() {
         AiThinkLog.watch(id);
         budgetWatch = AiStreamStatus.watchRun(id, {
             // 每一轮的明细（`progress.rounds`）。这一层不判断「读不到」该显示成什么 ——
-            // `data.progress` 为 null 时照样交给 AiThinkLog，由它按自己的五态说一句话。
+            // `data.progress` 为 null 时照样交给 AiThinkLog，由它按自己的处境说一句话。
+            // `data.status` 要一起给：同样是「这一帧没有进度」，「才刚发起」与「读不到」
+            // 是两件事，只有运行状态能分辨（见 static/js/ai_think_log.js 的 startingNow）。
             onProgress: function (data) {
-                AiThinkLog.applyProgress(data ? data.progress : null);
+                AiThinkLog.applyProgress(data ? data.progress : null, data ? data.status : null);
             },
             metaEl: meta,
             onBudget: renderBudget,

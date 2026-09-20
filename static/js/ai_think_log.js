@@ -29,6 +29,7 @@
  *
  *   live              本页正看着它跑（轮询接着）→ 「每跑完一轮多一条」；
  *                     `rounds` 为空时另说一句「还没有跑完第一轮」；
+ *   starting          **才刚发起、第一帧进度还没出来**（见下面那段）；
  *   loading           正去取落库的逐轮 → 「正在读取…」（取之前那一瞬间）；
  *   settled           跑完了，看的是落库的明细 → 「分析已结束，下面是逐轮记录」；
  *   unavailable       看不到它的进度：跑在别的进程 / 刷新页面时它已经在跑 / 取明细失败。
@@ -36,6 +37,23 @@
  *                     已经看到的轮次是真的，不该被一次读不到抹掉，也不该说成「没有」；
  *                     `blocks` 为空才用那句「读不到进度」；
  *   empty             这个目标还没有跑过分析。
+ *
+ * ---------------------------------------------------------------------------
+ * 为什么「刚开始跑」要单独一句话
+ * ---------------------------------------------------------------------------
+ * 引擎**跑完第一轮**才第一次 `run_progress.publish`，而 `on_start` 那一帧要等它真正
+ * 开始执行（见 services/ai_analysis_service.py 的 on_round / on_start）。中间这段
+ * （周版本分析里可以是几十秒：装项目包、取变更集）快照是空的，载荷里 `progress` 为
+ * `null` —— 与「跑在别的进程」逐字相同。
+ *
+ * 两件事的形状一样、含义相反，而原先它们共用一句话：用户点完「重新分析」，界面上
+ * 立刻写着「读不到这次运行的逐轮进度（**跑在别的进程**，或快照已过期）」—— 运行明明
+ * 就在眼前刚发起来，这句的**诊断是凭空来的**。所以刚发起那一段单独说一句，且**不带
+ * 任何诊断**（"第一帧还没出来"是事实，"跑在别的进程"是猜测）。
+ *
+ * 这段说法**有期限**（`STARTING_WINDOW_MS`）：多节点部署里分析派给 Agent 节点执行，
+ * 本进程**永远**不会有快照 —— 一直说「正在准备」等于把它说成一件马上会发生的事，
+ * 而在那个部署下它一次都不会发生。过了期限就改口说读不到（那才是实话）。
  *
  * 这几句话只在本文件里出现（模板一个字都不许自己拼 ——「同一句话在多处各自演化」是
  * 这个仓库反复出问题的地方）。
@@ -49,11 +67,15 @@
         loading: '正在读取这次运行的逐轮记录…',
         settled: '分析已结束，下面是这次运行的逐轮记录。',
         no_trace: '这次运行没有留下逐轮记录（这个功能上线前的分析没有记逐轮明细）。',
-        unavailable: '读不到这次运行的逐轮进度（跑在别的进程，或快照已过期）。'
-            + '跑完之后这里会显示落库的逐轮记录。',
+        // 才刚发起、第一帧进度还没出来。**不带诊断**：这一刻能确定的事只有「还没报出
+        // 第一帧」，说它跑在哪儿都是猜（见文件头那段）。
+        starting: '分析已发起，还在准备：第一帧逐轮进度还没出来。'
+            + '平台把第一轮派下去之后，这里每跑完一轮会多一条。',
+        unavailable: '这次运行的逐轮进度读不到（它可能跑在别的进程，或快照已过期）。'
+            + '这不影响分析本身；跑完之后这里会显示落库的逐轮记录。',
         // 已经画出几轮、又读不到最新进度时用这一句：**手上那几轮照样是真的**（它们是
         // 这一次运行的过程），不能说成「没有」，也不能说成「正在跑、马上会多」。
-        unavailable_stale: '读不到这次运行的最新进度（跑在别的进程，或快照已过期）。'
+        unavailable_stale: '读不到这次运行的最新进度（它可能跑在别的进程，或快照已过期）。'
             + '下面是已经拿到的逐轮记录。',
         empty: '这个目标还没有跑过分析。'
     };
@@ -72,9 +94,46 @@
     var watching = false;
     var loaded = false;
     var loading = false;
+    // 本页**看着它开跑**的那一刻（`watch()` 记的），以及有没有见过快照。这两个合起来
+    // 才是 `starting` 的判据（见 `startingNow`）——单看 `watching` 不行：读不到的那一帧
+    // 会把 `watching` 打掉，于是第二帧就改口了，而它其实还在「刚发起」那一段里。
+    var watchingSince = null;
+    var sawSnapshot = false;
     // 当前画着的那几块（`buildRoundBlocks` 的产物）。留住它是为了让「只改一句说明」的
     // 场景（跑完那一刻）能重画，而不必重新算一遍或把列表留在旧状态。
     var blocks = [];
+
+    // 运行「还没结束」的那些状态（服务端 `AiAnalysisRun.status` 的取值）。只有它们才谈得上
+    // 「才刚发起、第一帧还没出来」；终态（成功 / 失败 / 中断）不该再等等看 —— 都跑完了
+    // 还读不到，就是读不到。
+    var LIVE_STATUS = {pending: true, running: true};
+
+    // 「才刚发起」这个说法**只在一段时间内成立**。过了就改口：分析派给别的进程执行时
+    // （多节点部署），本进程永远不会有快照 —— 一直说「正在准备」是把一件不会发生的事
+    // 说成马上就要发生。两分钟足够覆盖单机部署里装项目包、取变更集那一段。
+    var STARTING_WINDOW_MS = 120000;
+
+    function now() {
+        return global.Date && global.Date.now ? global.Date.now() : 0;
+    }
+
+    /**
+     * 现在能不能说「才刚发起，第一帧还没出来」。三个条件缺一不可：
+     *
+     *   * **本页看着它开跑**（`watchingSince` 有值）—— 刷新页面时它已经在跑的话，
+     *     本页不知道它刚发起还是已经跑了十分钟，那就没有资格说这句话；
+     *   * **从没见过快照** —— 见过又丢了是「读不到最新的」，不是「还没出来」；
+     *   * **状态还是活的、且没过期限** —— 见 `STARTING_WINDOW_MS`。
+     *
+     * `status` 由调用方从同一帧的载荷里带进来（`data.status`）。**缺了它一律不算
+     * starting**：拿不到状态就不能断言它还在跑，宁可说读不到（那是个更弱的说法）。
+     */
+    function startingNow(status) {
+        if (sawSnapshot) return false;
+        if (watchingSince === null) return false;
+        if (!LIVE_STATUS[status]) return false;
+        return now() - watchingSince < STARTING_WINDOW_MS;
+    }
 
     function el(id) {
         return global.document ? global.document.getElementById(id) : null;
@@ -185,6 +244,7 @@
 
     function noteFor(current, count) {
         if (current === 'live') return count ? NOTE.live : NOTE.running_no_rounds;
+        if (current === 'starting') return NOTE.starting;
         if (current === 'loading') return NOTE.loading;
         if (current === 'settled') return count ? NOTE.settled : NOTE.no_trace;
         if (current === 'unavailable') return count ? NOTE.unavailable_stale : NOTE.unavailable;
@@ -280,6 +340,8 @@
         loading = false;
         mode = 'live';
         blocks = [];
+        // 记下「本页看着它开跑」的时刻 —— `starting` 那句说明的期限从这一刻起算。
+        watchingSince = now();
         paint();
     }
 
@@ -315,17 +377,28 @@
         if (opts.settled && !blocks.length && !loaded && runId !== null) ensureLoaded();
     }
 
-    /** 跑动中的一帧（`progress.rounds`）。**整份替换**，不做增量 —— 每帧本来就是全量。 */
-    function applyProgress(progress) {
+    /**
+     * 跑动中的一帧（`progress.rounds`）。**整份替换**，不做增量 —— 每帧本来就是全量。
+     *
+     * `status` 是**同一次运行**的状态（`data.status`，取值 pending / running / 终态）。
+     * 它只用来分辨一个处境：载荷里没有进度时，是「才刚发起、第一帧还没出来」还是
+     * 「读不到」（见 `startingNow` 与文件头那段）。**调用方必须把它带进来** ——
+     * 缺了它一律按「读不到」处理，行为与从前逐字一致。
+     */
+    function applyProgress(progress, status) {
         if (!progress) {
-            // 这一帧的载荷里没有进度（别的进程在跑、或快照已过期）。**这是「读不到」，
-            // 不是「还没跑到第一轮」** —— 后者是 `progress` 在、`rounds` 为空。
+            // 这一帧的载荷里没有进度。三个处境，**各自的实话不同**：
+            //
+            //  * 才刚发起（运行是活的、本页看着它开跑、还没见过快照）→ 「正在准备」，
+            //    不带任何诊断；
+            //  * 手上已经画着几轮 → 「读不到最新的」；
+            //  * 其余（跑在别的进程、快照过期、刷新页面时它已经在跑）→ 「读不到」。
             //
             // **已经画出来的那几轮不清**：它们是这一次运行真实跑过的轮次（`setRun` 换了
             // 运行号才会清），一次读不到就抹掉等于把看到的证据收回去；而下一帧往往就
             // 恢复正常了。清掉的话用户看到的是过程**闪一下没了**。
             watching = false;
-            mode = 'unavailable';
+            mode = startingNow(status) ? 'starting' : 'unavailable';
             paint();
             return;
         }
@@ -335,6 +408,7 @@
         // 面板就会在「读不到」与「在跑」之间来回跳，且 `ensureLoaded` 会在跑动中去取
         // 落库的明细，把实时的过程换成一份「分析已结束」。
         watching = true;
+        sawSnapshot = true;
         mode = 'live';
         blocks = buildRoundBlocks(progress.rounds, { max_rounds: progress.max_rounds });
         paint();
@@ -362,6 +436,10 @@
         loading = false;
         mode = value === null ? 'empty' : (watching ? 'live' : 'settled');
         blocks = [];
+        // 换了运行，「见过快照」与「看着它开跑的时刻」都属于上一次 —— 留着它们会让
+        // 新的一次运行继承上一次的处境（`starting` 那句说明的期限就是从这里算的）。
+        sawSnapshot = false;
+        watchingSince = null;
         paint();
     }
 
@@ -458,8 +536,10 @@
     function reset() {
         watching = false;
         loading = false;
-        // 不再看着它跑，就不能再说「分析进行中」——那两句话不能同时为真。
+        // 不再看着它跑，就不能再说「分析进行中」——那两句话不能同时为真。同理，
+        // 「才刚发起」也是「本页看着它开跑」才成立的说法。
         if (mode === 'live') mode = 'settled';
+        watchingSince = null;
         paint();
     }
 

@@ -1585,9 +1585,11 @@ function startAiBudgetWatch(runId, metaEl) {
         metaEl: metaEl,
         onBudget: renderAiBudget,
         // 每一轮的明细（`progress.rounds`）。这一层不判断「读不到」该显示成什么 ——
-        // `data.progress` 为 null 时照样交给 AiThinkLog，由它按自己的五态说一句话。
+        // `data.progress` 为 null 时照样交给 AiThinkLog，由它按自己的处境说一句话。
+        // `data.status` 要一起给：同样是「这一帧没有进度」，「才刚发起」与「读不到」
+        // 是两件事，只有运行状态能分辨（见 static/js/ai_think_log.js 的 startingNow）。
         onProgress: function (data) {
-            AiThinkLog.applyProgress(data ? data.progress : null);
+            AiThinkLog.applyProgress(data ? data.progress : null, data ? data.status : null);
         },
         // 轮询**自己发现**这次运行已经结束（连接断了之后分析其实跑完了，走的就是这条）。
         // 正常路径下 result 事件马上就到，去取一次反而会与流式的正文抢渲染。
