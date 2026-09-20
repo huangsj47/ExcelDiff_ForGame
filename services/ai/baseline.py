@@ -150,6 +150,7 @@ def build_baseline_digest(
     findings: Iterable[BaselineFinding],
     *,
     max_chars: int = DEFAULT_BASELINE_CHARS,
+    note: str = "",
 ) -> str:
     """渲染给模型看的基线摘要。**入参必须是 `classify()` 的输出。**
 
@@ -167,6 +168,10 @@ def build_baseline_digest(
 
     超长时按组从后往前丢（先丢已忽略，再丢待处理），并在开头写明省略了多少 ——
     静默截断会让模型以为自己看到了全部历史结论。
+
+    `note` 是调用方要额外交代的一句话（目前只有一种：这份清单**不是**最近那次分析留下的，
+    因为最近那次一条结构化结论都没给出）。放在抬头之后、条目之前 —— 它修饰的是整份清单，
+    读到第一条结论时就已经该知道。本函数不认识它的内容，只负责把它排在正确的位置。
     """
     classified = tuple(findings)
     groups = {
@@ -174,11 +179,14 @@ def build_baseline_digest(
     }
 
     header = _render_header(classified, groups)
+    tail = f"\n{note.strip()}\n" if note.strip() else ""
     if not any(groups.values()):
-        return header + "\n（暂无历史结论：这是这个版本的第一次分析。）\n"
+        return header + "\n（暂无历史结论：这是这个版本的第一次分析。）\n" + tail
 
     kept, omitted = _fit_groups(groups, max_chars - len(header))
     lines = [header]
+    if tail:
+        lines.append(tail.strip())
     if omitted:
         lines.append(
             f"（为控制长度，{omitted} 条较早的结论没有列出。"

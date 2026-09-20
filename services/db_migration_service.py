@@ -316,6 +316,11 @@ def _migrate_ai_analysis_columns(db, log_print):
             # （也是所有老行的情形），读取侧据此显示成常规运行。
             "subagent_mode": "subagent_mode VARCHAR(20)",
             "subagent_count": "subagent_count INTEGER",
+            # 结论形态（2026-09-20）：模型按协议给了结构化结论 → 1；只留下一份 markdown
+            # 报告 → 0。**没有 DEFAULT 子句，老行是 NULL**，而 NULL 的语义正好是保守的
+            # 那一边：`_previous_run` 用 `is_(True)` 筛，NULL 一律不当基线。
+            # 为什么必须有这一列，见 `models/ai_analysis/analysis_run.py` 上那段说明。
+            "conclusion_structured": "conclusion_structured BOOLEAN",
         },
         log_print,
     )

@@ -45,6 +45,18 @@ from services.ai.baseline import (
     suppressed_fingerprints,
 )
 from services.ai.budget import effective_prompt_budget
+
+# 基线的读侧：从库里取「上一次为止的结论」，做成提示词里那段「已经报过的问题」与
+# 本轮该抹掉的指纹。**保留这里的同名引用**（下面两处调用点与既有测试都按这几个名字 import）。
+# 为什么单独一层见 `services/ai/baseline_source.py` 的模块抬头：纯函数留在 `baseline.py`，
+# 碰库的那一半搬出去，顺带让本文件回到 2000 行硬上限之内。
+from services.ai.baseline_source import (  # noqa: F401 —— 调用点与测试仍在用
+    baseline_digest as _baseline_digest,
+    baseline_findings as _baseline_findings,
+    previous_run as _previous_run,
+    skipped_unstructured_runs as _skipped_unstructured_runs,
+    suppressed as _suppressed,
+)
 from services.ai.change_set import ChangeSet, from_commit_payload, from_weekly_payload
 
 # 读侧形态（进行中 / 有结论 / 最近一次失败）：只依赖 run 行与两个标签函数，
@@ -1079,64 +1091,10 @@ def _engine_limits(project_config: dict) -> EngineLimits:
     )
 
 
-def _previous_run(target_type: str, target_key: Optional[str]) -> Optional[AiAnalysisRun]:
-    if not target_key:
-        return None
-    return (
-        AiAnalysisRun.query.filter_by(target_type=target_type, target_key=target_key)
-        .filter(AiAnalysisRun.status == "succeeded")
-        .order_by(AiAnalysisRun.created_at.desc())
-        .first()
-    )
-
-
-def _baseline_findings(target_type: str, target_key: Optional[str]) -> List[BaselineFinding]:
-    """上一次成功运行报出的那批结论。
-
-    **取「上一次运行的那批」而不是把历次运行并起来**：每次运行产出的本来就是「这个版本
-    当前仍成立的问题全集」（skill 里定死了这个语义），所以上一次那批就是当前基线。
-    并起来反而会把已经修好的旧条目重新翻出来。
-    """
-    previous = _previous_run(target_type, target_key)
-    if previous is None:
-        return []
-    return [
-        BaselineFinding(
-            fingerprint=row.fingerprint or "",
-            title=row.title or "",
-            severity=row.severity or "high",
-            category=row.category or "",
-            file_path=row.file_path or "",
-            commit_ref=row.commit_ref or "",
-            disposition=row.disposition or DISPOSITION_PENDING,
-        )
-        for row in AiAnalysisAnomaly.query.filter_by(run_id=previous.id).all()
-        if row.fingerprint
-    ]
-
-
-def _baseline_digest(target_type: str, target_key: Optional[str], change: ChangeSet) -> str:
-    """给模型看的「已经报过的问题」。
-
-    `changed_paths` 传「上次报过、这次又变了」的文件：那类结论的证据已经过期，要重新
-    确认 —— 包括人工标过「已忽略」的。这是「忽略」不会变成「永远看不见」的保证。
-
-    **先 `classify` 再渲染，两件事必须分开做**：`build_baseline_digest` 刻意不收
-    `changed_paths`，因为它再判一遍状态会把刚判成「需要重新确认」的结论判回「已忽略」
-    并从摘要里抹掉 —— 而且是静默的（报告里只是少一条）。
-    """
-    findings = _baseline_findings(target_type, target_key)
-    if not findings:
-        return ""
-    return build_baseline_digest(classify(findings, changed_paths=change.paths))
-
-
-def _suppressed(target_type: str, target_key: Optional[str], change: ChangeSet) -> frozenset:
-    """人工已忽略、且相关文件没有再变的指纹。这些不再进清单。"""
-    findings = _baseline_findings(target_type, target_key)
-    if not findings:
-        return frozenset()
-    return suppressed_fingerprints(classify(findings, changed_paths=change.paths))
+# 基线的读侧（`previous_run` / `baseline_findings` / `baseline_digest` / `suppressed`）
+# 搬去了 `services/ai/baseline_source.py`：它们只依赖 run / anomaly 两张表与纯函数那一层
+# `baseline.py`，与「怎么跑一次分析」没有耦合，而这个文件贴着 2000 行的硬上限。
+# 这里保留同名引用，下面两处调用点与既有测试的 import 都不用改。
 
 
 def _persist_outcome(
@@ -1163,6 +1121,12 @@ def _persist_outcome(
     """
     run.status = "failed" if outcome.status == STATUS_FAILED else "succeeded"
     run.finished_at = _utcnow()
+    # 结论形态：模型按协议给了结构化结论 → True；只有一份 markdown 报告 → False；
+    # 失败 → None（下面那支会把结论字段清空，本来就没有结论）。
+    # 判据是 `outcome.payload` 而不是 `outcome.status`：降级分两种，有 payload 的那种
+    # （轮次/额度/上下文用尽）结论仍然是结构化的，只是浅；没有 payload 的那种
+    # （`DEGRADE_MARKDOWN`）一条结构化结论都没有。**只有后者不能当基线**。
+    run.conclusion_structured = bool(outcome.payload is not None) if run.status == "succeeded" else None
     if run.status == "failed":
         # 失败**不写结论字段**。以前这里照样写 response_payload / response_text，
         # 于是库里那条失败记录长得和成功记录一样：有「结论」、有风险等级、有范围，

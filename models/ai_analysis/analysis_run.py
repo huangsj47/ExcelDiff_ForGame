@@ -35,6 +35,21 @@ class AiAnalysisRun(db.Model):
     scope = db.Column(db.String(20), default="full")  # full / incremental
     trigger_source = db.Column(db.String(20), default="manual")  # manual / scheduled
 
+    # 这次运行的**结论形态**：模型按协议给了结构化结论（True），还是只留下一份 markdown
+    # 报告、一条结构化结论都没有（False）。失败/未完成没有结论，是 NULL。
+    #
+    # 为什么必须单独记一列，而不是从 `status` 或 `degradation` 推：
+    # * `status` 只回答「跑完了没有」——降级也是跑完了，两种形态都是 "succeeded"；
+    # * `degradation` 在子代理模式下会被 `_worst()` 取最重的那一档，而
+    #   `DEGRADE_MARKDOWN`（rank 3）会被 `DEGRADE_SUBAGENT`（rank 6）**盖掉** ——
+    #   于是「汇总那一份只有 markdown」这件事在 degradation 上看不出来，而它正是
+    #   决定「这次能不能当基线」的那件事。
+    #
+    # 谁在读它：`ai_analysis_service._previous_run`（基线只能建立在结构化结论上）。
+    # **读侧（`_latest_concluded_run`）刻意不读它** —— 只有 markdown 的那次照样有报告
+    # 给用户看，把「能不能当基线」和「能不能看」混成一把尺子的后果，那两处注释里都写过。
+    conclusion_structured = db.Column(db.Boolean, default=None)
+
     trace_id = db.Column(db.String(80))
     request_payload = db.Column(BigText)
     delta_summary = db.Column(BigText)

@@ -135,6 +135,8 @@ RUN_NEW_COLUMNS = (
     "duration_ms",
     "tool_stats_json",
     "pricing_version",
+    # 结论形态（2026-09-20）：只留下一份 markdown 报告的那次不能当基线。
+    "conclusion_structured",
 )
 
 # `ai_analysis_trace` 已有 tokens_input / tokens_output / request_chars / context_chars /
