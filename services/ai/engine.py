@@ -317,6 +317,14 @@ class EngineOutcome:
     rounds: tuple[RoundRecord, ...] = ()
     requests_used: int = 0
     cache_hits: int = 0
+    # 因「上下文索取上限」用尽而**没有执行**的那些请求（`describe_request` 的一行标签，
+    # 跨轮累计）。与 `requests_used` 是同一个账本的两侧：模型这次一共索取
+    # `requests_used + len(refused_requests)` 次，其中后者一次都没轮到。
+    #
+    # 它必须落到结果里：光有一句「额度用尽，还有文件没看」，读的人既不知道**缺的是哪几块**
+    # （于是无法判断这次的结论能不能用），也不知道**该调哪个参数**。抽屉据此把
+    # 「还有文件没看」展开成「没轮到的是这几个」。
+    refused_requests: tuple[str, ...] = ()
     # **逐轮累计、任一轮没上报就是 `None`**（见 `_sum_optional` 与 `_totals`）。
     # `None` 会一路走到 `run.tokens_input`（可空列）与费用估算那里 —— 那正是它该去的地方：
     # 费用会如实说「上游没有返回 token 数，无法估算」，而不是算出一个确定的 ¥0.00。
@@ -451,6 +459,7 @@ def run_analysis(
     project_instructions: str = "",
     baseline_digest: str = "",
     on_round: Callable[[RoundProgress], None] | None = None,
+    on_start: Callable[[RoundProgress], None] | None = None,
     seed_messages: Sequence[Mapping[str, Any]] = (),
     task_message: str = "",
     body_cache: MutableMapping[Any, ContextItem] | None = None,
@@ -463,6 +472,18 @@ def run_analysis(
     `on_round` 每轮调一次（在 `RoundRecord` 落进结果之后），用来把进度实时推给界面。
     它抛异常**只会被记一条日志**，绝不作废这次分析 —— 调用方会用它发 SSE 事件、查预算，
     那些动作失败不该让一次已经跑了几分钟的分析白跑。不传它时行为与以前完全一致。
+
+    `on_start` 在**第一次模型调用之前**调一次（`index=0`，还没有任何一轮跑完）。
+    它存在的理由很具体：`on_round` 只在 `client.complete` **返回之后**才发，所以从
+    「开始跑」到「第一轮跑完」之间（读配置、装 skill、拼上下文，再叠上整整一次模型
+    调用 —— 可以是几分钟）界面上一帧进度都没有。那段时间里抽屉写着「分析中：进度
+    不可用」，结论面板一直挂着「AI 分析进行中...」—— 看起来像卡住了，实际它正在干活。
+    有了这一帧，界面才分得清「读不到进度」与「正在跑第一轮」这两件**含义相反**的事
+    （前者是我们看不见，后者是它在正常干活）。
+
+    子代理模式下它同时解决第二个问题：汇总（主代理）开始跑时，快照里还留着**上一个
+    分片**的归属，界面于是写着「分片 S3 · 第 2 轮」，而实际上主代理已经在跑了。
+    归属由调用方贴（见 `subagent._call_engine` 的 `report`），引擎这一层只知道「开始了」。
 
     ## 子代理模式：`seed_messages` + `task_message` + `body_cache`
 
@@ -518,6 +539,9 @@ def run_analysis(
 
     rounds: list[RoundRecord] = []
     dropped: list[DroppedItem] = []
+    # 因额度用尽而没执行的请求**分别是哪几个**（跨轮累计）。只有计数说明不了「缺的是
+    # 哪几块」，而用户看到「额度用尽，还有文件没看」时第二个问题一定是「哪些」。
+    refused_items: list[str] = []
     pending_items: tuple[ContextItem, ...] = ()
     budget_notes: list[str] = []
     correction_hint = ""
@@ -585,6 +609,11 @@ def run_analysis(
             "context_chars": context_chars,
             "duration_ms": int((time.monotonic() - started_at) * 1000),
             "compaction": _compaction_report(),
+            # 与 `_usage_fields` 同一个理由：本函数有 5 个 `EngineOutcome` 构造点，
+            # 逐个加字段一定会漏，而漏掉的那条路径恰好是「失败 / 降级」——
+            # 也就是最需要说清「缺了哪几块」的那几条。读出时取当前值（闭包），
+            # 所以在循环里就构造的那两个出口拿到的也是这一轮为止的累计。
+            "refused_requests": tuple(refused_items),
         }
 
     def _emit(record: RoundRecord) -> None:
@@ -624,6 +653,39 @@ def run_analysis(
         except Exception as exc:  # noqa: BLE001 —— 回调失败不作废分析，见 docstring
             log_print(
                 f"⚠️ AI 分析：轮次进度回调失败（{type(exc).__name__}：{exc}），已忽略，"
+                "分析继续。",
+                "AI",
+                force=True,
+            )
+
+    # **开始跑了**：在第一次 `client.complete` 之前报一帧（见 docstring 的 `on_start`）。
+    # 报的是「还没有任何一轮跑完」这个事实本身 —— 它的价值全在于**及时**：晚一帧就等于
+    # 让界面在整整一次模型调用的时间里显示「进度不可用」。
+    #
+    # 与 `on_round` 同一条纪律：回调抛异常只记一条日志，绝不作废这次分析。
+    if on_start is not None:
+        try:
+            on_start(
+                RoundProgress(
+                    index=0,
+                    max_rounds=limits.max_rounds,
+                    status="starting",
+                    # token 是 `None` 而不是 0：**一次调用都还没发生**，报 0 会把它
+                    # 说成「这一轮没花钱」（同 `live_tokens` 的口径）。
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    cache_read_tokens=None,
+                    cache_write_tokens=None,
+                    requests_used=tools.requests_seen,
+                    requests_remaining=tools.requests_remaining,
+                    items_chars=0,
+                    elapsed_ms=int((time.monotonic() - started_at) * 1000),
+                    round_entry=None,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 —— 回调失败不作废分析，见 docstring
+            log_print(
+                f"⚠️ AI 分析：开始进度回调失败（{type(exc).__name__}：{exc}），已忽略，"
                 "分析继续。",
                 "AI",
                 force=True,
@@ -877,6 +939,7 @@ def run_analysis(
         dropped.extend(request_dropped)
         batch = tools.execute(requests)
         dropped.extend(batch.dropped)
+        refused_items.extend(batch.refused_items)
         pending_items = batch.items
         # **取到什么就记什么**，而不是「发出什么才记什么」：收尾提示词要用这份目录回答
         # 「你已经取到过哪些内容」，而它恰恰可能发生在「这一轮取到了、但这一轮的消息被

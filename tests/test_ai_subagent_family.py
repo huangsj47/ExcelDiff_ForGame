@@ -173,6 +173,39 @@ class TestTheFamilyProducesOneResult:
         assert result.prompt_tokens is None, "有一个成员没上报，总账却给了个数"
         assert result.completion_tokens is None
 
+    def test_the_refused_requests_are_merged_across_members(self):
+        """「额度用尽没轮到的那几块」要**跨成员合起来**。
+
+        这一家子有几个成员，缺的那几块可能分别来自不同成员 —— 只看汇总那一个的账，
+        报告末尾就只会说「有 N 个请求没执行」，说不出是哪几个。
+        """
+        steps = (
+            MemberOutcome(
+                plan=_plan(2).members[0],
+                outcome=EngineOutcome(
+                    status=STATUS_DEGRADED,
+                    refused_requests=("config/道具表.xlsx",),
+                ),
+            ),
+            MemberOutcome(
+                plan=_plan(2).members[1],
+                outcome=EngineOutcome(
+                    status=STATUS_DEGRADED,
+                    refused_requests=("引用扫描 CfgRewardMode", "config/奖励表.xlsx"),
+                ),
+            ),
+        )
+
+        result = aggregate_outcomes(
+            synthesis=EngineOutcome(status=STATUS_SUCCEEDED), steps=steps
+        )
+
+        assert result.refused_requests == (
+            "config/道具表.xlsx",
+            "引用扫描 CfgRewardMode",
+            "config/奖励表.xlsx",
+        )
+
     def test_the_tool_stats_are_summed_per_kind(self):
         steps = (
             MemberOutcome(

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -115,3 +116,54 @@ def test_the_keys_the_ui_reads_are_all_present():
         "usage", "dropped", "subagents", "subagent_skipped", "context",
     ):
         assert key in payload, f"`{key}` 不在结果里了"
+
+
+# ==========================================================================
+# 「上下文索取额度用尽」那本账
+# ==========================================================================
+
+
+def test_the_refused_requests_reach_the_payload():
+    """**这条就是那个缺口**：额度用尽时，光有一句「还有文件没看」是不够的。
+
+    用户读完那句仍然不知道三件事：缺的是哪几块（于是判不了这份结论能不能用）、
+    占多少、该动哪个设置。前两件的原料是 `EngineOutcome.refused_requests` ——
+    引擎侧算了、`result_payload` 不产出，就等于没算过（本文件开头那段话）。
+    """
+    outcome = _outcome()
+    outcome = replace(
+        outcome,
+        requests_used=180,
+        refused_requests=("config/道具表.xlsx", "引用扫描 CfgRewardMode"),
+    )
+
+    budget = result_payload(outcome, {}, suppressed=frozenset())["context"]["request_budget"]
+
+    assert budget["used"] == 180
+    assert budget["refused"] == 2
+    assert budget["refused_items"] == ["config/道具表.xlsx", "引用扫描 CfgRewardMode"]
+
+
+def test_the_count_survives_the_list_cap():
+    """列表封顶，**计数不封顶**。
+
+    拿截断后的列表长度当计数，会把「缺了 40 块」说成「缺了 20 块」—— 而「缺多少」
+    正是用户判断这份结论能不能用的依据。
+    """
+    outcome = replace(
+        _outcome(),
+        requests_used=10,
+        refused_requests=tuple(f"config/file_{index}.xlsx" for index in range(40)),
+    )
+
+    budget = result_payload(outcome, {}, suppressed=frozenset())["context"]["request_budget"]
+
+    assert budget["refused"] == 40, "计数被列表上限截掉了"
+    assert len(budget["refused_items"]) < 40, "列表没有被封顶（落库的那份会白白撑大）"
+
+
+def test_a_run_that_never_hit_the_budget_reports_zeros():
+    """没超预算时是干净的空账，不是缺键 —— 界面据此区分「没超」与「这份结果太老」。"""
+    budget = result_payload(_outcome(), {}, suppressed=frozenset())["context"]["request_budget"]
+
+    assert budget == {"used": 0, "refused": 0, "refused_items": []}

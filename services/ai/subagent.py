@@ -814,6 +814,7 @@ def run_family(
     project_instructions: str = "",
     baseline_digest: str = "",
     on_round: Callable[[RoundProgress], None] | None = None,
+    on_start: Callable[[RoundProgress], None] | None = None,
     should_skip: Callable[[MemberPlan, int], str] | None = None,
     run_analysis_fn: Callable[..., EngineOutcome] = run_analysis,
 ) -> FamilyResult:
@@ -867,6 +868,7 @@ def run_family(
             project_instructions=project_instructions,
             baseline_digest=baseline_digest,
             on_round=on_round,
+            on_start=on_start,
             body_cache=body_cache,
             run_analysis_fn=run_analysis_fn,
         )
@@ -886,6 +888,7 @@ def run_family(
         project_instructions=project_instructions,
         baseline_digest=baseline_digest,
         on_round=on_round,
+        on_start=on_start,
         body_cache=body_cache,
         run_analysis_fn=run_analysis_fn,
     )
@@ -927,6 +930,7 @@ def run_family(
                     project_instructions=project_instructions,
                     baseline_digest=baseline_digest,
                     on_round=on_round,
+                    on_start=on_start,
                     body_cache=body_cache,
                     run_analysis_fn=run_analysis_fn,
                 )
@@ -990,6 +994,7 @@ def _run_one(
     project_instructions: str,
     baseline_digest: str,
     on_round: Callable[[RoundProgress], None] | None,
+    on_start: Callable[[RoundProgress], None] | None,
     body_cache: MutableMapping[Any, ContextItem],
     run_analysis_fn: Callable[..., EngineOutcome],
 ) -> MemberOutcome:
@@ -1016,6 +1021,7 @@ def _run_one(
         member=member,
         task_message=build_member_task(member, plan),
         on_round=on_round,
+        on_start=on_start,
         body_cache=body_cache,
         run_analysis_fn=run_analysis_fn,
     )
@@ -1062,6 +1068,7 @@ def _run_verify(
     project_instructions: str,
     baseline_digest: str,
     on_round: Callable[[RoundProgress], None] | None,
+    on_start: Callable[[RoundProgress], None] | None,
     body_cache: MutableMapping[Any, ContextItem],
     run_analysis_fn: Callable[..., EngineOutcome],
 ) -> MemberOutcome:
@@ -1085,6 +1092,7 @@ def _run_verify(
         member=member,
         task_message=build_verify_task(plan, synthesis),
         on_round=on_round,
+        on_start=on_start,
         body_cache=body_cache,
         run_analysis_fn=run_analysis_fn,
     )
@@ -1115,6 +1123,7 @@ def _run_synthesis(
     project_instructions: str,
     baseline_digest: str,
     on_round: Callable[[RoundProgress], None] | None,
+    on_start: Callable[[RoundProgress], None] | None,
     body_cache: MutableMapping[Any, ContextItem],
     run_analysis_fn: Callable[..., EngineOutcome],
 ) -> EngineOutcome:
@@ -1133,6 +1142,7 @@ def _run_synthesis(
         member=plan.synthesis,
         task_message=build_synthesis_task(plan, steps),
         on_round=on_round,
+        on_start=on_start,
         body_cache=body_cache,
         run_analysis_fn=run_analysis_fn,
     )
@@ -1154,6 +1164,7 @@ def _call_engine(
     member: MemberPlan,
     task_message: str,
     on_round: Callable[[RoundProgress], None] | None,
+    on_start: Callable[[RoundProgress], None] | None,
     body_cache: MutableMapping[Any, ContextItem],
     run_analysis_fn: Callable[..., EngineOutcome],
 ) -> EngineOutcome:
@@ -1162,6 +1173,11 @@ def _call_engine(
     `RoundProgress` 里的 `agent` / `agent_index` / `agent_total` 是**给界面看的**：
     抽屉要显示「分片 S1 (1/3) · 第 2 轮」。汇总那一次的 `agent` 是空串（它就是这个
     分析的主代理），靠 `agent_index == agent_total` 认出是汇总。
+
+    同一个 `report` 也接 `on_start`：那一帧（引擎在第一次模型调用之前发）**同样要贴归属**，
+    否则从上一个分片跑完到汇总第一轮跑完之间，快照里留的还是上一个分片的名字 ——
+    界面会写着「分片 S3 · 第 2 轮」，而主代理其实已经在跑了。这一帧是**唯一**能让
+    「谁在跑」在那一整段里正确的机会（下一次回调要等那一轮跑完，可能是几分钟之后）。
     """
     def report(progress: RoundProgress) -> None:
         if on_round is None:
@@ -1189,6 +1205,7 @@ def _call_engine(
         project_instructions=project_instructions,
         baseline_digest=baseline_digest,
         on_round=report if on_round is not None else None,
+        on_start=report if on_round is not None else None,
         seed_messages=plan.seed_messages,
         task_message=task_message,
         body_cache=body_cache,
@@ -1270,6 +1287,12 @@ def aggregate_outcomes(
     rounds = _merge_rounds(steps)
     dropped = tuple(item for step in steps if step.outcome for item in step.outcome.dropped)
     dropped = (*dropped, *gap_dropped)
+    # 「额度用尽没轮到的那几块」同样要跨成员合起来。只留计数的话，报告末尾只能说
+    # 「有 N 个请求没执行」，说不出是哪几个 —— 而这一家子有几个成员，缺的那几块可能
+    # 分别来自不同成员。
+    refused_requests = tuple(
+        label for step in steps if step.outcome for label in step.outcome.refused_requests
+    )
 
     has_gap = bool(_shard_gap_lines(steps)) or bool(gap_dropped)
     degradation = _worst(
@@ -1300,6 +1323,7 @@ def aggregate_outcomes(
         payload=synthesis.payload,
         anomalies=synthesis.anomalies,
         dropped=dropped,
+        refused_requests=refused_requests,
         report_markdown=report,
         rounds=rounds,
         requests_used=sum(step.outcome.requests_used for step in steps if step.outcome),

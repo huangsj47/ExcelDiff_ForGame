@@ -22,6 +22,11 @@ from services.ai.engine import EngineOutcome
 from services.ai.rules import anomaly_fingerprint
 from services.ai.usage import usage_from_outcome
 
+# 「额度用尽没轮到的」最多往结果里放几条。界面只展示前几条、其余归到「等 N 条」，
+# 所以多放没有用；而额度用尽那一轮模型可能一口气要几十个请求，整份列表会白白撑大
+# 落库的 response_payload。**计数不受它影响**（见 `request_budget.refused`）。
+_REFUSED_ITEMS_MAX = 20
+
 
 def determine_risk_level(summary: dict) -> str:
     total_files = int(summary.get("total_files") or 0)
@@ -105,6 +110,26 @@ def result_payload(
         "context": {
             "budget_note": str(context_budget_note or ""),
             "compaction": outcome.compaction.to_dict(),
+            # 「上下文索取额度」这本账。原先只有一句 `degradation_label`
+            # （「上下文索取额度用尽，基于已有证据出结论」），用户看完只知道**出事了**，
+            # 不知道三件该知道的事：缺的是哪几块、占多少、该调什么。
+            #
+            # * `used` / `refused` 是同一个账本的两侧：模型这次一共索取
+            #   `used + refused` 次，其中 `refused` 一次都没轮到；
+            # * `refused_items` 是那几块的标签（点名到文件 / 查询），界面据此把
+            #   「还有文件没看」展开成具体清单。
+            #
+            # `used` 在**子代理模式下是全家合计**（见 `subagent._final_outcome`），
+            # 所以界面不能拿它跟配置里的上限直接比 —— 那个上限是**每个成员**的
+            # （而且是配置值的七成）。文案里因此只说比例，不说「已用 N/M」。
+            "request_budget": {
+                "used": int(outcome.requests_used or 0),
+                "refused": len(outcome.refused_requests),
+                # 列表**封顶**（界面只展示前几条，剩下的是「等 N 条」），但 `refused`
+                # 那个计数始终是全额 —— 拿截断后的列表长度当计数，会把「缺了 40 块」
+                # 说成「缺了 20 块」。
+                "refused_items": list(outcome.refused_requests[:_REFUSED_ITEMS_MAX]),
+            },
         },
         "anomalies": [
             {

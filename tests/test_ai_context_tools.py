@@ -695,3 +695,46 @@ def test_elision_marker_states_the_count():
 
 def test_context_item_char_count_tracks_text():
     assert ContextItem(kind="k", label="l", text="abc").char_count == 3
+
+
+def test_the_refused_requests_are_named_not_just_counted():
+    """被拒的请求要**点名**，不能只给一个计数。
+
+    用户看到「上下文索取额度用尽，还有文件没看」时的第二个问题一定是「哪些」——
+    缺一个文件与缺十四个文件，这份结论的可信度完全不同。
+
+    标签用 `_human_request_label` 而不是 `describe_request`：后者是模型回查内容的
+    **地址**（`file_content 9e315a3abcde config/x.xlsx`），直接拼进给用户看的那句话里
+    读不出「缺的是哪个文件」。
+    """
+    tools = ContextTools(FakeProvider(file_diff="差异"), max_tool_requests=1)
+    batch = tools.execute(
+        [
+            _diff_request(path="config/道具表.xlsx"),
+            _diff_request(path="config/奖励表.xlsx"),
+            ContextRequest(type="find_references", query="CfgRewardMode"),
+        ]
+    )
+
+    assert batch.refused_by_budget == 2
+    assert batch.refused_items == ("config/奖励表.xlsx", "引用扫描 CfgRewardMode")
+
+
+def test_a_refused_window_says_which_lines():
+    """带窗口的请求要连「哪几行」一起说 —— 同一个文件的两段是两个请求。"""
+    tools = ContextTools(FakeProvider(file_content="正文"), max_tool_requests=0)
+    batch = tools.execute(
+        [ContextRequest(type="file_content", commit=COMMIT_A, path=PATH_A, lines="100-300")]
+    )
+
+    assert batch.refused_items == (f"{PATH_A}（100-300 行）",)
+
+
+def test_nothing_is_named_when_nothing_was_refused():
+    """没超预算时是空的 —— 界面据此决定要不要展开那一段。"""
+    batch = ContextTools(FakeProvider(file_diff="差异"), max_tool_requests=5).execute(
+        [_diff_request()]
+    )
+
+    assert batch.refused_by_budget == 0
+    assert batch.refused_items == ()

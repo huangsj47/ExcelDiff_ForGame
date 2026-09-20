@@ -40,6 +40,57 @@
         return typeof value === 'string' ? value : '';
     }
 
+    /** 最多列出几条「没轮到的」。再多就归到「等 N 条」—— 一屏列二十行没人看。 */
+    var REFUSED_SHOWN = 5;
+
+    /**
+     * 「上下文索取额度用尽」那一段的**细节**：缺的是哪几块、占多少、该调什么。
+     *
+     * 只写「还有文件没看」是不够的：用户看完仍然不知道三件该知道的事 —— 缺的是哪几块
+     * （于是判不了这份结论能不能用）、占多少（是漏了一个还是漏了一半）、该动哪个设置。
+     * 这三件事服务端都已经给了（`context.request_budget`），在这里拼成人话。
+     *
+     * **比例的分母是「模型一共索取了多少次」，不是配置里的上限。** 子代理模式下
+     * `used` 是全家合计，而配置里的上限是**每个成员**的（还是配置值的七成）——
+     * 拿它做分母会算出一个大于 100% 的数。
+     */
+    function budgetDetail(budget) {
+        if (!budget || typeof budget !== 'object') { return ''; }
+        var refused = Number(budget.refused);
+        if (!isFinite(refused) || refused <= 0) { return ''; }
+        var used = Number(budget.used);
+        if (!isFinite(used) || used < 0) { used = 0; }
+
+        var total = used + refused;
+        var share = total > 0 ? Math.round((refused * 100) / total) : 0;
+        var parts = [
+            '模型这次一共索取 ' + num(total) + ' 次上下文，其中 ' + num(refused)
+                + ' 次（' + share + '%）因为额度用尽没有执行。'
+        ];
+
+        var items = budget.refused_items;
+        if (Object.prototype.toString.call(items) === '[object Array]' && items.length) {
+            var shown = items.slice(0, REFUSED_SHOWN).filter(function (item) {
+                return str(item).trim() !== '';
+            });
+            if (shown.length) {
+                parts.push(
+                    '没轮到的包括：' + shown.map(function (item) { return str(item); }).join('、')
+                    + (refused > shown.length ? ' 等 ' + num(refused) + ' 条' : '')
+                    + '。'
+                );
+            }
+        }
+
+        // **调哪个参数要写出来。** 这一句是整段话里唯一可操作的部分，而它原先完全缺席：
+        // 用户读完只知道「平台额度不够」，不知道去哪调。
+        parts.push(
+            '额度由项目的「AI 分析配置 → 上下文索取上限」决定，调大它就能多要一些；'
+            + '开启子代理时每个成员按它的 70% 分配，所以那一档会更早用完。'
+        );
+        return parts.join('');
+    }
+
     /** 数字 → 「12,345」。与页面上的 token 数字用同一套千分位。 */
     function num(value) {
         var n = Number(value);
@@ -62,6 +113,12 @@
         }
 
         var context = payload.context || {};
+        // 「额度用尽」那一句展开成「缺哪几块 / 占多少 / 调哪个参数」。**跟在降级那句
+        // 后面单独成段**（下面用空行 join）：它是同一件事的细节，不该挤进同一段。
+        if (reason === 'requests_exhausted') {
+            var detail = budgetDetail(context.request_budget);
+            if (detail) { lines.push(detail); }
+        }
         var compaction = context.compaction || {};
         if (compaction.overflow_recovered) {
             lines.push(

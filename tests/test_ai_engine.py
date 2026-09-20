@@ -1098,3 +1098,119 @@ def test_all_rounds_reporting_still_adds_up():
     assert len(outcome.rounds) == 2
     assert outcome.prompt_tokens == 20, "两轮各 10，总账必须是 20"
     assert outcome.completion_tokens == 10
+
+
+def test_the_requests_that_never_got_a_turn_are_named():
+    """额度用尽时，**没轮到的那几个请求要能被点出来**。
+
+    原先只留了一个计数（`refused_by_budget`），而它只说明「有几条没轮到」，
+    说明不了「缺的是哪几块」—— 用户看到「还有文件没看」时的第二个问题一定是「哪些」。
+    这个清单一路走到结果里（`context.request_budget.refused_items`），抽屉据此展开。
+
+    这里要的是**引擎侧的累计**：被拒的请求发生在哪一轮，就要从哪一轮记上，
+    且不能把「执行成功的」也算进来。
+    """
+    client = ScriptedClient(
+        _requests(
+            {"type": "file_content", "commit": COMMIT, "path": TABLE},
+            {"type": "file_content", "commit": COMMIT, "path": LUA},
+            {"type": "find_references", "query": "CfgRewardMode"},
+        ),
+        _final(_anomaly()),
+    )
+
+    outcome = _run(client, limits=EngineLimits(max_tool_requests=1))
+
+    assert outcome.degradation == DEGRADE_REQUESTS
+    assert outcome.refused_requests == (LUA, "引用扫描 CfgRewardMode"), (
+        "没轮到的请求没被点名，或者把执行成功的那一个也算进来了"
+    )
+
+
+def test_a_run_inside_its_budget_names_nothing():
+    """没超预算时是空元组 —— 抽屉据此决定要不要展开那段「没轮到的包括…」。"""
+    client = ScriptedClient(
+        _requests({"type": "file_content", "commit": COMMIT, "path": TABLE}),
+        _final(_anomaly()),
+    )
+
+    outcome = _run(client, limits=EngineLimits(max_tool_requests=8))
+
+    assert outcome.refused_requests == ()
+
+
+def test_the_start_callback_fires_before_the_first_model_call():
+    """**「开始了」这一帧必须在第一次模型调用之前发出去。**
+
+    `on_round` 只在 `client.complete` 返回之后才发，所以从开跑到第一轮跑完之间
+    （读配置、拼上下文，再叠上整整一次模型调用 —— 可以是几分钟）界面一帧进度都收不到，
+    只能显示「分析中：进度不可用」，看起来像卡住了。这一帧就是给那段空白用的。
+
+    「在最前面」这件事**只能这样验**：让回调在被调用时去读 client 的调用记录 —— 那时
+    必须还是 0 次。只看「回调被调过」的写法对它是不是第一件事毫无约束。
+    """
+    client = ScriptedClient(
+        _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
+        _final(_anomaly()),
+    )
+    calls_when_started: list[int] = []
+
+    _run(client, on_start=lambda _progress: calls_when_started.append(len(client.calls)))
+
+    assert calls_when_started == [0], (
+        f"开始那一帧不是在第一次模型调用之前发的（当时已有 {calls_when_started} 次调用）"
+    )
+
+
+def test_the_start_frame_does_not_invent_a_round_or_a_zero():
+    """开始那一帧说的是「还没有任何一轮跑完」，不是「第 0 轮、花了 0 个 token」。
+
+    0 是一个结论（一次都没跑、一个 token 都没花），而这里的事实是**还不知道** ——
+    同 `live_tokens` 的口径（`None` 而不是 0）。
+    """
+    seen: list[RoundProgress] = []
+
+    _run(ScriptedClient(_final(_anomaly())), on_start=seen.append)
+
+    assert len(seen) == 1
+    start = seen[0]
+    assert start.index == 0, "开始帧不该占用轮次编号（轮次从 1 开始数）"
+    assert start.prompt_tokens is None and start.completion_tokens is None, (
+        "还没调用过模型却报了一个 token 数"
+    )
+    assert start.requests_used == 0
+    assert start.requests_remaining == EngineLimits().max_tool_requests
+    assert start.round_entry is None, "开始帧不该带一条逐轮明细（那一轮还没发生）"
+
+
+def test_the_start_frame_is_not_a_round():
+    """它**不是一轮**：不许进 `outcome.rounds`，也不许把 `requests_used` 算进去。
+
+    进 rounds 的后果不是报错，而是 trace 里凭空多出一轮「什么都没干」的记录 ——
+    读 trace 的人会以为模型跑了一轮却没要任何上下文。
+    """
+    seen: list[RoundProgress] = []
+
+    outcome = _run(
+        ScriptedClient(
+            _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
+            _final(_anomaly()),
+        ),
+        on_start=seen.append,
+    )
+
+    assert len(seen) == 1, "开始帧被当成一轮重复报了"
+    assert [item.index for item in outcome.rounds] == [1, 2], (
+        "开始帧混进了逐轮记录里"
+    )
+
+
+def test_a_failing_start_callback_does_not_kill_the_analysis():
+    """与 `on_round` 同一条纪律：**给界面看的东西坏了，不能作废一次要花钱的分析。**"""
+    def explode(_progress):
+        raise RuntimeError("SSE 通道断了")
+
+    outcome = _run(ScriptedClient(_final(_anomaly())), on_start=explode)
+
+    assert outcome.status == STATUS_SUCCEEDED
+    assert outcome.usable

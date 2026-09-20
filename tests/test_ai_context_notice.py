@@ -356,3 +356,119 @@ def test_the_single_source_still_knows_every_degradation_reason():
     source = _read("static/js/ai_context_notice.js")
     for reason in DEGRADATION_LABELS:
         assert f"{reason}:" in source, f"共享模块没有解释 {reason!r}"
+
+
+# ==========================================================================
+# 二、「额度用尽」那一句必须展开成可操作的三件事
+# ==========================================================================
+
+# 一次真实的额度用尽：模型要了 180 次，最后 12 次没轮到。
+EXHAUSTED = {
+    "status": "degraded",
+    "degradation": "requests_exhausted",
+    "degradation_label": "上下文索取额度用尽，基于已有证据出结论",
+    "context": {
+        "budget_note": "",
+        "compaction": {"events": 0, "dropped_turns": 0, "dropped_chars": 0,
+                       "overflow_recovered": False},
+        "request_budget": {
+            "used": 180,
+            "refused": 12,
+            "refused_items": [
+                "config/道具表.xlsx", "config/奖励表.xlsx", "引用扫描 CfgRewardMode",
+                "参考文档 references/test-scope-and-regression.md",
+                "config/技能表.xlsx", "config/怪物表.xlsx", "config/商店表.xlsx",
+            ],
+        },
+    },
+}
+
+
+@pytest.fixture(scope="module")
+def exhausted() -> str:
+    return _compose([{"name": "额度用尽", "text": "## 变更理解\n\n看了几个表。",
+                      "payload": EXHAUSTED}])["额度用尽"]
+
+
+def test_the_exhausted_notice_says_which_ones_were_skipped(exhausted):
+    """**缺的是哪几块** —— 用户据此判断这份结论还能不能用。
+
+    原先只说「还有文件没看」。缺一个文件与缺十四个文件，结论的可信度完全不同，
+    而界面上长得一模一样。
+    """
+    assert "没轮到的包括" in exhausted
+    assert "config/道具表.xlsx" in exhausted, "没点名具体文件"
+    assert "引用扫描 CfgRewardMode" in exhausted, "非文件类的索取（引用扫描）也要点名"
+
+
+def test_the_exhausted_notice_says_how_much_was_skipped(exhausted):
+    """**占多少** —— 分母是模型一共索取的次数，不是配置里的上限。
+
+    子代理模式下 `used` 是全家合计，而配置里的上限是**每个成员**的（还是配置值的
+    七成）；拿上限做分母会算出大于 100% 的数。这里 12 / (180+12) ≈ 6%。
+    """
+    assert "6%" in exhausted, f"没有给出占比，或占比算错了：{exhausted}"
+    assert "100%" not in exhausted, "把上限当分母了（额度用尽时必然算出 100%）"
+
+
+def test_the_exhausted_notice_lists_at_most_a_few(exhausted):
+    """列五条就够，其余归到「等 N 条」—— 一屏列十几行没人看。
+
+    但**计数要是全量**：`refused` 是 12，列表里有 7 条，所以「等」后面必须是 12。
+    """
+    assert exhausted.count("config/") + exhausted.count("引用扫描") + exhausted.count("参考文档") <= 5
+    assert "等 12 条" in exhausted, f"「等 N 条」的 N 不是全量计数：{exhausted}"
+
+
+def test_the_exhausted_notice_names_the_setting_to_change(exhausted):
+    """**该调什么** —— 这一句是整段里唯一可操作的部分，原先完全缺席。
+
+    「平台额度不够」不是用户能行动的信息；「去 AI 分析配置里调大上下文索取上限」
+    才是。子代理那 70% 也要说 —— 那是「为什么这次更早用完」的答案。
+    """
+    assert "上下文索取上限" in exhausted, "没说该调哪个设置"
+    assert "AI 分析配置" in exhausted, "没说去哪调"
+    assert "70%" in exhausted, "开了子代理会更早用完这件事没说"
+
+
+def test_a_non_exhausted_run_gets_no_budget_detail():
+    """**只有这一种降级才展开**：其余降级没有这本账，凭空展开会说出没依据的话。"""
+    rounds = dict(DEGRADED, context=EXHAUSTED["context"])
+    out = _compose([{"name": "轮次用尽", "text": "正文", "payload": rounds}])["轮次用尽"]
+
+    assert "轮次用尽" in out
+    assert "没轮到的包括" not in out, "轮次用尽那次也说起了「没轮到的」"
+
+
+def test_a_missing_budget_block_degrades_quietly():
+    """老结果（落库时还没有这本账）不能因此报错或说出空话。
+
+    `refused` 缺失 / 为 0 时**什么都不加** —— 与「正常跑完不加一句一切正常」同一条纪律。
+    """
+    for context in ({}, {"request_budget": {}}, {"request_budget": {"used": 5, "refused": 0}}):
+        out = _compose([{"name": "缺账本", "text": "正文",
+                         "payload": dict(EXHAUSTED, context=context)}])["缺账本"]
+        assert "没轮到的包括" not in out
+        assert "模型这次一共索取" not in out
+
+
+def test_the_detail_survives_a_capped_server_list():
+    """服务端把列表封了顶，界面上的「等 N 条」必须用**服务端给的计数**。
+
+    用列表长度算，「缺了 40 块」会被说成「缺了 20 块」—— 而「缺多少」正是用户
+    判断这份结论能不能用的依据。
+    """
+    capped = dict(
+        EXHAUSTED,
+        context=dict(
+            EXHAUSTED["context"],
+            request_budget={
+                "used": 10,
+                "refused": 40,
+                "refused_items": [f"config/file_{index}.xlsx" for index in range(20)],
+            },
+        ),
+    )
+    from_node = _compose([{"name": "封顶", "text": "正文", "payload": capped}])["封顶"]
+
+    assert "等 40 条" in from_node, f"用了列表长度当计数：{from_node}"

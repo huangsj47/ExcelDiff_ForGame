@@ -165,6 +165,13 @@ class ToolBatch:
     cache_hits: int = 0
     # 因为超出预算而没执行的请求数。
     refused_by_budget: int = 0
+    # 那些请求**分别是哪几个**（`_human_request_label` 的一行，点名到文件 / 查询）。
+    #
+    # 原先只有上面那个计数。计数能说明「有几条没轮到」，说明不了**缺的是哪几块** ——
+    # 而用户看到「额度用尽，还有文件没看」时，第二个问题一定是「哪些」。
+    # 这一条是从 `execute` 的拒绝分支里直接记下来的，不靠回头去 `dropped` 里按文案
+    # 匹配（那种判据改一个字就静默失效）。
+    refused_items: tuple[str, ...] = ()
     # 截断过的条数。
     truncated: int = 0
 
@@ -184,6 +191,29 @@ _STAT_COUNTERS = (
     "source_chars",       # 工具取回的原始字符数
     "produced_chars",     # 实际交给模型的字符数（截断后）
 )
+
+
+def _human_request_label(request: ContextRequest) -> str:
+    """给**用户**看的一行：这次没轮到的到底是哪一块。
+
+    与 `describe_request` 分开：那一条是模型回查内容的**地址**（`### [kind] label`），
+    所以带类型前缀与 12 位 commit —— 拿它直接拼进「没轮到的包括：」那段话，用户看到的
+    是 `file_content 9e315a3abcde config/x.xlsx`，读不出「缺的是哪个文件」。
+
+    这里只留「要的是哪一块」，且**不猜**：拿不到路径就说不出路径，不编一个文件名。
+    """
+    if request.type == "read_reference":
+        return f"参考文档 {request.name}"
+    if request.type == "find_references":
+        return f"引用扫描 {request.query}" if request.query else "引用扫描"
+    if request.type == "commit_detail":
+        commit = (request.commit or "")[:8]
+        return f"提交 {commit} 的改动详情" if commit else "提交详情"
+    path = normalize_path(request.path)
+    if not path:
+        return request.type
+    # 窗口是地址的一部分（同一文件的两段是两个请求），说「哪几行」用户才知道缺哪段。
+    return f"{path}（{request.lines} 行）" if request.lines else path
 
 
 def _meta_chars(item: ContextItem) -> int:
@@ -438,6 +468,7 @@ class ContextTools:
         executions = 0
         cache_hits = 0
         refused = 0
+        refused_labels: list[str] = []
         truncated = 0
 
         for index, request in enumerate(requests):
@@ -446,6 +477,7 @@ class ContextTools:
                 # 被拒的请求**不算 calls** —— 它没有消耗额度（额度由下面那行
                 # `self._requests_seen += 1` 记）。算进去会让「额度花在哪了」对不上总数。
                 self._bump(request.type, "refused_by_budget")
+                refused_labels.append(_human_request_label(request))
                 dropped.append(
                     DroppedItem(
                         "request",
@@ -562,6 +594,7 @@ class ContextTools:
             executions=executions,
             cache_hits=cache_hits,
             refused_by_budget=refused,
+            refused_items=tuple(refused_labels),
             truncated=truncated,
         )
 
