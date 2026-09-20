@@ -99,6 +99,16 @@
     // 会把 `watching` 打掉，于是第二帧就改口了，而它其实还在「刚发起」那一段里。
     var watchingSince = null;
     var sawSnapshot = false;
+    // 最近一次知道的**这次运行的状态**（`applyProgress` 的 `status`）。它只服务一件事：
+    // 分辨「取回落库的逐轮是空的」是因为**还没跑完**（逐轮是跑完才落库的，
+    // 见服务端 `_persist_outcome`），还是因为这次运行真的没留下记录。
+    // 少了它，「跑动中点一次思考过程」就会把空表当成终态收下（`loaded = true`），
+    // 明细此后再也刷不出来。
+    var lastRunStatus = null;
+    // 这次运行**已经确认结束**了（SSE 收到终态、或轮询读到终态）。与 `lastRunStatus`
+    // 是两件事：`status` 是「最近一次知道的状态」，而这个是「有人明确说过它完了」。
+    // 逐轮是跑完才落库的，所以「取回来是空的」要按它分辨（见 `applyRounds`）。
+    var runSettled = false;
     // 当前画着的那几块（`buildRoundBlocks` 的产物）。留住它是为了让「只改一句说明」的
     // 场景（跑完那一刻）能重画，而不必重新算一遍或把列表留在旧状态。
     var blocks = [];
@@ -224,6 +234,7 @@
                 empty: empty,
                 dropped: (entry.dropped || []).map(function (item) {
                     return {
+                        kind: (item && item.kind) || '',
                         detail: (item && (item.detail || item.kind)) || '',
                         reason: (item && item.reason) || ''
                     };
@@ -302,6 +313,19 @@
                 addLine(card, 'ai-think-empty', '确实没有内容：' + item.label);
             });
             block.dropped.forEach(function (item) {
+                // **「未执行」是这句话里唯一有信息量的部分，而它对 `unclassified` 是错的。**
+                // 平台把「模型给了不在本次维度清单里的 category」的条目**保留下来**并归进
+                // 「未归类」（`protocol._coerce_anomalies`），它的记账是
+                // 「未丢弃，已归入「未归类」」—— 前缀写成「未执行」之后，那一行读作
+                // 「未执行：performance（未丢弃，已归入「未归类」）」，一句自相矛盾的话：
+                // 用户想查「为什么这次只报了两条」时，看到的是「请求没跑」。
+                // 这一条的 `reason` 本来就自带否定，所以按 `kind` 分开说。
+                if (item.kind === 'unclassified') {
+                    addLine(card, 'ai-think-note-line',
+                             '未归类（内容保留，只是没归到维度上）：'
+                             + item.detail + (item.reason ? '（' + item.reason + '）' : ''));
+                    return;
+                }
                 addLine(card, 'ai-think-dropped',
                          '未执行：' + item.detail + (item.reason ? '（' + item.reason + '）' : ''));
             });
@@ -342,6 +366,10 @@
         blocks = [];
         // 记下「本页看着它开跑」的时刻 —— `starting` 那句说明的期限从这一刻起算。
         watchingSince = now();
+        // **这一次是新的一次运行**：上一条命的「已结束」不许留着，否则跑动中取回的
+        // 空明细会被当成「确实没有记录」（见 `applyRounds`）。
+        runSettled = false;
+        lastRunStatus = null;
         paint();
     }
 
@@ -362,7 +390,19 @@
     function unwatch(options) {
         var opts = options || {};
         watching = false;
-        if (mode === 'live') mode = 'settled';
+        if (opts.settled) runSettled = true;
+        if (mode === 'live') {
+            mode = 'settled';
+        } else if (mode === 'starting') {
+            // **一句有时限的话不许挂在这儿过期。** 「才刚发起」的判据里第一条就是
+            // 「本页看着它开跑」（`startingNow`），而这一句之后本页不再看着它了 ——
+            // 那句话从此不再成立，可它印在面板上、且此后**没有任何东西会重画**
+            // （120 秒的期限只在 `paint()` 里判），于是它会一直挂着：徽章已经写「完成」、
+            // 报告已经在「完整结论」里，同一个抽屉的「思考过程」还写着「还在准备，
+            // 每跑完一轮这里会多一条」。降级成 `unavailable`——那是同一处境的**更弱**
+            // 说法，也是这一刻唯一还成立的那句。
+            mode = 'unavailable';
+        }
         paint();
         // 手上一条都没画出来，而且还没问过落库那份 → **在这里发起取数**。
         //
@@ -386,6 +426,9 @@
      * 缺了它一律按「读不到」处理，行为与从前逐字一致。
      */
     function applyProgress(progress, status) {
+        // **状态先记下来**（不论这一帧有没有进度）：`applyRounds` 要用它分辨
+        // 「取回来是空的」是「还没落库」还是「确实没有记录」。
+        if (status) lastRunStatus = status;
         if (!progress) {
             // 这一帧的载荷里没有进度。三个处境，**各自的实话不同**：
             //
@@ -416,10 +459,24 @@
 
     /** 落库的逐轮（`/runs/<id>/usage` 的 `rounds`）。 */
     function applyRounds(rounds, meta) {
-        loaded = true;
+        var list = rounds || [];
+        // 逐轮是**跑完之后**才落库的（服务端 `_persist_outcome`）。所以「取回来是空的」
+        // 有两种意思，必须分开：
+        //
+        //   * **这次运行还在跑** → 只是还没落库，不是「没有留下记录」。这时既不能说
+        //     「分析已结束」，也不能把 `loaded` 认下来 —— 认下来这份记录就**再也刷不
+        //     出来**：跑完那一刻的 `unwatch({settled: true})` 被 `!loaded` 挡在门外，
+        //     用户再点「思考过程」又被同一个标志挡住，`/latest` 那句 `setRun` 还会
+        //     因为运行号没变而早退。面板于是**永远**写着「这次运行没有留下逐轮记录」，
+        //     而明细一直在库里。触发序列很日常：跑起来 → 点一次「思考过程」→ 等它跑完
+        //     → 再看。这正是 `unwatch` 的 docstring 要防的那件事，只是那一扇门
+        //     （`onShowThink`）当时没关。
+        //   * **已经结束** → 那才是真话：这次运行没留下记录（功能上线前的分析）。
+        var pending = !list.length && !runSettled && !!LIVE_STATUS[lastRunStatus];
+        loaded = !pending;
         loading = false;
-        mode = 'settled';
-        blocks = buildRoundBlocks(rounds, meta || {});
+        mode = pending ? 'live' : 'settled';
+        blocks = buildRoundBlocks(list, meta || {});
         paint();
     }
 
@@ -456,6 +513,16 @@
      * 进程里）。如实说读不到 —— 不假装「还没有跑完第一轮」。
      */
     function markExternalRun() {
+        // **先说「本页没有看着它开跑」。** 调用方是在「刷新页面 / 点刷新结果时发现它
+        // 已经在跑」的处境下来的（模板 `loadWeeklyAiLatest` 的「进行中」那一支），而那一支
+        // 紧跟的 `startAiBudgetWatch` 会调 `watch()` 把 `watchingSince` 记成**现在** ——
+        // 于是 `startingNow` 的三个条件全被满足，一个已经跑了十分钟的分析被说成
+        // 「分析已发起，还在准备：第一帧逐轮进度还没出来」，用户会以为自己的点击没生效
+        // 或分析刚重启，很可能再点一次「重新分析」（多花一次钱）。
+        //
+        // 撤掉那个时刻，「才刚发起」就再也说不出口（它三个条件里第一条就是
+        // 「本页看着它开跑」）。**这不影响「本页正连着它」**：`watching` 不动。
+        watchingSince = null;
         // 本页正看着它跑（或以轮询的帧为准）→ 别把 live 打成读不到。
         if (watching) return;
         // 已经画着这一次的逐轮 = 本页其实看得到它。再清一次等于**把已经显示出来的过程

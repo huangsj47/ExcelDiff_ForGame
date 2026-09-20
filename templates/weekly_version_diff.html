@@ -1749,16 +1749,21 @@ async function loadWeeklyAiLatest(force = false) {
                 // （`AiThinkLog.watch` 会清空 `blocks`）。
                 if (weeklyAiRunId !== result.run_id || !aiBudgetWatch) {
                     startAiBudgetWatch(result.run_id, meta);
+                    // **只在「本页不是它的发起方」时才说这一句。** 上面那个条件为真 =
+                    // 这次运行不是本页看着开跑的（刷新页面、或点「刷新结果」时发现它已经
+                    // 在跑），所以「才刚发起、第一帧还没出来」这句话本页没有资格说 ——
+                    // 它可能已经跑了十分钟。已经看着这一次时不调：那种情况下本页**确实**
+                    // 看着它开跑，撤掉那句话会把一句真话改掉（见 `markExternalRun`）。
+                    AiThinkLog.markExternalRun();
                 }
-                AiThinkLog.markExternalRun();
                 // 还在跑 = 结论还没出来，没有可导出的东西。
                 AiReportExport.track({ runId: result.run_id, status: 'running' });
                 return false;
             }
             weeklyAiHasCached = true;
-            const risk = result.result?.risk_level || '-';
+            const risk = result.risk_label || result.result?.risk_level || '-';
             const createdAt = result.created_at_display || result.created_at || '-';
-            const scope = result.scope || '-';
+            const scope = result.scope_label || result.scope || '-';
             // 这份结果覆盖哪一半要写出来：它是按「分析范围」筛过的，
             // 不说清就会被当成对全版本的结论（与「把清单当全量」是同一类错误）。
             const focusLabel = (result.focus && result.focus.label) || '';

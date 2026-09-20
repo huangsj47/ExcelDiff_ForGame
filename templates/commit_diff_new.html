@@ -899,8 +899,13 @@ function initCommitAiAnalysis() {
                     // 的那几轮（`AiThinkLog.watch` 会清空 `blocks`）。
                     if (runId !== result.run_id || !budgetWatch) {
                         startBudgetWatch(result.run_id);
+                        // **只在「本页不是它的发起方」时才说这一句**：上面那个条件为真 =
+                        // 这次运行不是本页看着开跑的（刷新页面、或点「刷新结果」时发现它
+                        // 已经在跑），所以「才刚发起、第一帧还没出来」本页没有资格说 ——
+                        // 它可能已经跑了十分钟。已经看着这一次时不调：那时本页**确实**
+                        // 看着它开跑，撤掉这句话会把一句真话改掉（见 `markExternalRun`）。
+                        AiThinkLog.markExternalRun();
                     }
-                    AiThinkLog.markExternalRun();
                     // 还在跑 = 结论还没出来，没有可导出的东西。
                     AiReportExport.track({ runId: result.run_id, status: 'running' });
                     return false;
@@ -912,9 +917,9 @@ function initCommitAiAnalysis() {
                 setAiStatusBadge(result.stale_note ? '旧结论' : '已有结果',
                                  result.stale_note ? 'warning' : 'success');
                 if (meta) {
-                    const risk = result.result?.risk_level || '-';
+                    const risk = result.risk_label || result.result?.risk_level || '-';
                     const createdAt = result.created_at_display || result.created_at || '-';
-                    const scope = result.scope || '-';
+                    const scope = result.scope_label || result.scope || '-';
                     meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`
                         + (result.stale_note ? ` | ${result.stale_note}` : '');
                 }

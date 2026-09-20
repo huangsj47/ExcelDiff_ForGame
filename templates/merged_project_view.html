@@ -4351,17 +4351,22 @@ async function refreshWeeklyAiLatest(configId) {
         // 那几轮（`AiThinkLog.watch` 会清空 `blocks`）。
         if (weeklyAiRunId !== result.runId || !aiBudgetWatch) {
             startAiBudgetWatch(result.runId, meta);
+            // **只在「本页不是它的发起方」时才说这一句**：上面那个条件为真 = 这次运行
+            // 不是本页看着开跑的（刷新页面、或点「刷新结果」时发现它已经在跑），所以
+            // 「才刚发起、第一帧还没出来」本页没有资格说 —— 它可能已经跑了十分钟。
+            // 已经看着这一次时不调：那时本页**确实**看着它开跑，撤掉这句话会把一句
+            // 真话改掉（见 `markExternalRun`）。
+            AiThinkLog.markExternalRun();
         }
-        AiThinkLog.markExternalRun();
         // 还在跑 = 结论还没出来，没有可导出的东西。
         AiReportExport.track({ runId: result.runId, status: 'running' });
         return false;
     }
     if (result && result.response_text) {
         weeklyAiHasCached = true;
-        const risk = result.result?.risk_level || '-';
+        const risk = result.risk_label || result.result?.risk_level || '-';
         const createdAt = result.created_at_display || result.created_at || '-';
-        const scope = result.scope || '-';
+        const scope = result.scope_label || result.scope || '-';
         if (meta) {
             meta.textContent = `最近分析：${createdAt} | 风险等级 ${risk} | 范围 ${scope}`;
             // 旧的结论（规则变了 / 最近一次没跑完）照样显示，但要说清它是旧的 ——

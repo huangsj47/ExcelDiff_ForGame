@@ -353,7 +353,39 @@ async function lazy() {
         rounds: els[LOG_ID].children.length,
         note: els[NOTE_ID].textContent
     };
+
+    // 8) **跑动中点一次「思考过程」**：这一刻 `/usage` 必然回空表（逐轮跑完才落库），
+    //    而这份空表**不许被当成终态收下**。收下的后果：跑完那一刻的
+    //    `unwatch({settled: true})` 被 `!loaded` 挡在门外、用户再点标签又被同一个标志
+    //    挡住、`/latest` 那句 `setRun` 还会因为运行号没变而早退 —— 面板于是**永远**
+    //    写着「这次运行没有留下逐轮记录」，而明细一直在库里。
+    //    （`unwatch` 的 docstring 已经为另一扇门（关抽屉）想明白了这件事，
+    //     `onShowThink` 这一扇当时没关。）
+    reload();
+    lastUrl = [];
+    api.watch(7);
+    // 多节点部署里每一帧的 `progress` 都是 null —— 正是这一帧把 `watching` 打掉，
+    // `ensureLoaded` 才会真的去取（`watching` 为真时它按纪律早退）。
+    api.applyProgress(null, 'running');
+    api.ensureLoaded(emptyFetch);
+    await tick();
+    out.emptyWhileRunning = {
+        mode: api.state().mode,
+        note: els[NOTE_ID].textContent,
+        rounds: els[LOG_ID].children.length
+    };
+    // 跑完了 → 同一扇门再走一次，这次取回来的就是真的（上面那次不许把它挡在门外）。
+    lastUrl = [];
+    sandbox.fetch = okFetch;
+    api.unwatch({ settled: true });
+    await tick();
+    out.emptyWhileRunning.afterFinish = {
+        calls: lastUrl.slice(),
+        mode: api.state().mode,
+        rounds: els[LOG_ID].children.length
+    };
     sandbox.fetch = undefined;
+
     return out;
 }
 
@@ -370,6 +402,7 @@ lazy().then(function (out) {
         stuckLoaded: out.stuckLoaded,
         staleResponse: out.staleResponse,
         failureWhileWatching: out.failureWhileWatching,
+        emptyWhileRunning: out.emptyWhileRunning,
         closedMidRun: out.closedMidRun,
         closedThenFinished: out.closedThenFinished,
         notes: api.NOTE
@@ -401,8 +434,16 @@ def _rounds() -> dict:
                      "chars": 0, "failed": False, "empty": True, "reason": "",
                      "truncated": False},
                 ],
-                "dropped": [{"kind": "request", "reason": "超出本次工具请求总预算（20 次），未执行",
-                             "detail": "file_diff x"}],
+                "dropped": [
+                    {"kind": "request", "reason": "超出本次工具请求总预算（20 次），未执行",
+                     "detail": "file_diff x"},
+                    # 「未归类」：模型写了不在本次维度清单里的 category。平台把它**保留**
+                    # 下来归进「未归类」（`protocol._coerce_anomalies`），记账原文是
+                    # 「未丢弃，已归入「未归类」」—— 面板不能把它说成「未执行」。
+                    {"kind": "unclassified",
+                     "reason": "category 不在本次生效的维度清单内（未丢弃，已归入「未归类」）",
+                     "detail": "performance"},
+                ],
                 "response_text": '{"status": "need_more_context", "reason": "先看战斗逻辑"}',
                 "budget_notes": "有 1 个上下文请求因超出本次索取额度而未执行。",
                 "correction_hint": "",
@@ -457,6 +498,28 @@ def run() -> dict:
         },
         # 11. 关抽屉：不再看着它跑，但已经画出来的留着。
         {"name": "关抽屉不清列表", "ops": ["watchWithRun", "progressTwo", "reset"]},
+        # 10c. **刷新页面 / 点「刷新结果」时发现它已经在跑**：模板那条路是
+        #      `startAiBudgetWatch()`（内部调 `watch()`）紧跟一句 `markExternalRun()`。
+        #      `watch()` 把「本页看着它开跑」的时刻记成**现在**，于是「才刚发起」的三个
+        #      条件全被满足 —— 一个已经跑了十分钟的分析被说成「第一帧还没出来」。
+        #      真实调用序列（模板 `loadWeeklyAiLatest` 的「进行中」那一支）。
+        {
+            "name": "刷新时它已经在跑",
+            "ops": ["watchWithRun", "markExternalRun", "progressMissingRunning"],
+        },
+        # 10d. 反过来：**本页确实是发起方**（SSE 的 run 事件那条路，只调 watch，不调
+        #      markExternalRun）—— 这句话是真话，不许被改掉。
+        {"name": "本页看着它开跑", "ops": ["watchWithRun", "progressMissingRunning"]},
+        # 11b. **SSE 收到终态**（result / error 事件）走的是 `stopAiBudgetWatch()` →
+        #      `unwatch()`（**不带** settled）。这一刻本页不再看着它跑了，那句「还在准备：
+        #      第一帧还没出来…每跑完一轮这里会多一条」从此不成立 —— 而它之后没有任何
+        #      东西会重画（120 秒的期限只在 `paint()` 里判），会一直挂着：徽章已经写
+        #      「完成」、报告已经在「完整结论」里，同一个抽屉的「思考过程」还在说「还在
+        #      准备」。必须降级成同一处境里**更弱**的那句。
+        {
+            "name": "跑完时停在还没第一帧",
+            "ops": ["watchWithRun", "progressMissingRunning", "unwatch"],
+        },
         # 12. **刚发起、第一帧进度还没出来**：引擎跑完第一轮才第一次 publish，中间这段
         #     载荷里 `progress` 为 null —— 与「跑在别的进程」逐字相同。用户点完
         #     「重新分析」立刻看到「读不到（跑在别的进程）」，那句诊断是凭空来的。
@@ -625,6 +688,86 @@ def test_watching_beats_the_elsewhere_marker(run):
     last = _by_name(run)["在跑时别处状态不改"]["snaps"][-1]
 
     assert last["mode"] == "live"
+
+
+def test_refreshing_into_a_running_analysis_is_not_a_just_started_run(run):
+    """**刷新页面时它已经在跑** —— 本页没有资格说「才刚发起，第一帧还没出来」。
+
+    模板那条路是 `startAiBudgetWatch()`（内部调 `AiThinkLog.watch()`）紧跟一句
+    `markExternalRun()`。`watch()` 会把「本页看着它开跑」的时刻记成**现在**，于是
+    `startingNow` 的三个条件全被满足 —— 一个已经跑了十分钟的分析被说成「第一帧逐轮
+    进度还没出来」，用户会以为自己的点击没生效或分析刚重启，很可能再点一次
+    「重新分析」（多花一次钱）。这正是 a14d157 那句「刷新页面时它已经在跑的话，本页
+    不知道它刚发起还是已经跑了十分钟，那就没有资格说这句话」要防的。
+    """
+    last = _by_name(run)["刷新时它已经在跑"]["snaps"][-1]
+
+    assert last["mode"] == "unavailable"
+    assert "跑在别的进程" in last["note"]
+
+
+def test_a_run_this_page_started_keeps_the_just_started_note(run):
+    """反向自检：**本页确实是发起方**时（SSE 的 run 事件那条路只调 `watch`），
+    那句话是真话 —— 撤掉它就是把一句真话改坏。"""
+    last = _by_name(run)["本页看着它开跑"]["snaps"][-1]
+
+    assert last["mode"] == "starting"
+    assert last["note"] == run["notes"]["starting"]
+
+
+def test_an_unclassified_item_is_not_reported_as_not_executed(run):
+    """「未归类」被**保留**着，不是「没执行」。
+
+    平台把「模型给了不在本次维度清单里的 category」的条目留下来、归进「未归类」
+    （`protocol._coerce_anomalies`），记账原文是「未丢弃，已归入「未归类」」。前缀写成
+    「未执行」之后，那一行读作「未执行：performance（未丢弃，已归入「未归类」）」——
+    一句自相矛盾的话。而用户翻「思考过程」正是为了查「为什么这次只报了两条」，
+    「未执行」会让他以为请求没跑。
+    """
+    lines = _flat(_by_name(run)["落库的逐轮"]["snaps"][-1])
+
+    unclassified = [line for line in lines if "未归类" in line]
+    assert unclassified, "归进「未归类」的那一条在面板上一个字都没有"
+    assert not any(line.startswith("未执行：performance") for line in lines), (
+        "「未归类」是保留下来的内容，不是「没执行」"
+    )
+    assert any(line.startswith("未执行：file_diff x") for line in lines), (
+        "反向自检：真正没执行的那一条仍然要说「未执行」"
+    )
+
+
+def test_an_empty_fetch_mid_run_is_not_a_final_answer(run):
+    """**跑动中点一次「思考过程」不该把明细永久写死。**
+
+    这一刻 `/usage` 回空表是**必然**的（逐轮跑完才落库，服务端 `_persist_outcome`）。
+    把它当终态收下（`loaded = true`）之后，跑完那一刻的 `unwatch({settled: true})` 被
+    `!loaded` 挡在门外、用户再点标签又被同一个标志挡住、`/latest` 的 `setRun` 还会因为
+    运行号没变而早退 —— 面板于是**永远**写着「这次运行没有留下逐轮记录」，而明细一直
+    在库里。用户会把「本页读不到实时快照」读成「平台没留记录」。
+    """
+    mid = run["emptyWhileRunning"]
+
+    assert mid["mode"] == "live", "还没落库 ≠ 已结束"
+    assert "还没有跑完第一轮" in mid["note"]
+    assert mid["rounds"] == 0
+    # 跑完之后同一扇门再走一次 —— 这次必须取得到（上面那次没把它挡在门外）。
+    after = mid["afterFinish"]
+    assert after["calls"], "跑完之后本页再没有去取过落库的逐轮"
+    assert after["mode"] == "settled"
+    assert after["rounds"] > 0
+
+
+def test_stopping_the_watch_retires_the_just_started_note(run):
+    """SSE 收到终态走的是 `unwatch()`（**不带** settled）—— 那句「还在准备」从此不成立。
+
+    它之后**没有任何东西会重画**（120 秒的期限只在 `paint()` 里判），于是会一直挂着：
+    徽章已经写「完成」、报告已经在「完整结论」里，同一个抽屉的「思考过程」还在说
+    「每跑完一轮这里会多一条」—— 两句话不能同时为真。
+    """
+    last = _by_name(run)["跑完时停在还没第一帧"]["snaps"][-1]
+
+    assert last["mode"] == "unavailable"
+    assert last["note"] == run["notes"]["unavailable"]
 
 
 # --------------------------------------------------------------------------
