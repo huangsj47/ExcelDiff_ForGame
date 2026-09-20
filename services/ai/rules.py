@@ -43,11 +43,13 @@ DEFAULT_MIN_CONFIDENCE = "high"
 # 单次分析最多留下多少条结论。**必须与
 # `models.ai_analysis.project_config.DEFAULT_MAX_ANOMALIES_PER_RUN` 一致** ——
 # 这里是不带项目配置时的兜底，那里是配置表读不出值时的兜底，两把闸门卡在同一次分析上，
-# 取不同的数就会出现「配置说要留 15 条，规则层在第 10 条就截了」。
+# 取不同的数就会出现「配置说要留 20 条，规则层在第 15 条就截了」。
 #
-# 10 → 15（2026-09-20，与模型层同一次改动，理由见那边的注释）：这是事后闸门，
-# 不花任何 token。
-DEFAULT_MAX_ANOMALIES = 15
+# 10 → 15（2026-09-20）→ 20（2026-09-21）：这是**事后闸门**，不花任何 token，
+# 封顶发生在模型答完之后。上一次抬到 15 之后，实测仍有一条**复核确认为真**的
+# high 结论（`PsSkSpcMod`）被截在清单外 —— 而它已经写进报告正文的维度统计里，
+# 于是「报告说有 N 条、清单只列得出 15 条」这种对不上的观感又回来了。
+DEFAULT_MAX_ANOMALIES = 20
 DEFAULT_MAX_EVIDENCE = 3
 # 近似去重的门槛。语义见 `title_containment`。
 DEFAULT_SIMILARITY_THRESHOLD = 0.75
