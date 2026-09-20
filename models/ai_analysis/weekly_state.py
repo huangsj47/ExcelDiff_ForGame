@@ -6,6 +6,7 @@ Weekly analysis state tracking for incremental runs.
 
 from datetime import datetime, timezone
 from .. import db
+from ..big_text import BigText
 
 
 class AiWeeklyAnalysisState(db.Model):
@@ -22,7 +23,7 @@ class AiWeeklyAnalysisState(db.Model):
     last_analyzed_at = db.Column(db.DateTime)
     last_analysis_run_id = db.Column(db.Integer)
     last_scope = db.Column(db.String(20))
-    last_summary = db.Column(db.Text)
+    last_summary = db.Column(BigText)
     last_triggered_at = db.Column(db.DateTime)
 
     updated_at = db.Column(

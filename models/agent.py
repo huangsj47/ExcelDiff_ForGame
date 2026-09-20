@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import Index, UniqueConstraint
 
 from . import db
+from .big_text import BigText
 
 
 class AgentNode(db.Model):
@@ -23,11 +24,11 @@ class AgentNode(db.Model):
     port = db.Column(db.Integer)
     default_admin_username = db.Column(db.String(100))
     agent_token = db.Column(db.String(128), nullable=False)
-    capabilities = db.Column(db.Text)
+    capabilities = db.Column(BigText)
 
     status = db.Column(db.String(20), default="offline")  # online/offline
     last_heartbeat = db.Column(db.DateTime)
-    last_error = db.Column(db.Text)
+    last_error = db.Column(BigText)
     cpu_cores = db.Column(db.Integer)
     cpu_usage_percent = db.Column(db.Float)
     agent_cpu_usage_percent = db.Column(db.Float)
@@ -128,16 +129,16 @@ class AgentTask(db.Model):
     repository_id = db.Column(db.Integer, db.ForeignKey("repository.id"), nullable=True)
     source_task_id = db.Column(db.Integer, db.ForeignKey("background_tasks.id"), nullable=True)
 
-    payload = db.Column(db.Text)  # JSON
+    payload = db.Column(BigText)  # JSON
     status = db.Column(db.String(20), default="pending")  # pending/processing/completed/failed
     retry_count = db.Column(db.Integer, default=0)
-    error_message = db.Column(db.Text)
+    error_message = db.Column(BigText)
 
     assigned_agent_id = db.Column(db.Integer, db.ForeignKey("agent_nodes.id"), nullable=True)
     lease_expires_at = db.Column(db.DateTime, nullable=True)
     started_at = db.Column(db.DateTime, nullable=True)
     completed_at = db.Column(db.DateTime, nullable=True)
-    result_summary = db.Column(db.Text)
+    result_summary = db.Column(BigText)
 
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(
@@ -167,9 +168,9 @@ class AgentIncident(db.Model):
     agent_id = db.Column(db.Integer, db.ForeignKey("agent_nodes.id"), nullable=False, index=True)
     incident_type = db.Column(db.String(40), nullable=False, default="runtime_error")
     title = db.Column(db.String(255), nullable=False)
-    message = db.Column(db.Text)
-    error_detail = db.Column(db.Text)
-    log_excerpt = db.Column(db.Text)
+    message = db.Column(BigText)
+    error_detail = db.Column(BigText)
+    log_excerpt = db.Column(BigText)
     is_ignored = db.Column(db.Boolean, nullable=False, default=False)
     ignored_by = db.Column(db.String(100))
     ignored_at = db.Column(db.DateTime)

@@ -7,6 +7,7 @@
 from datetime import datetime, timezone
 from sqlalchemy import Index
 from . import db
+from .big_text import BigText
 
 
 class OperationLog(db.Model):
@@ -15,7 +16,7 @@ class OperationLog(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     log_type = db.Column(db.String(20), nullable=False)  # 'info', 'success', 'error', 'warning'
-    message = db.Column(db.Text, nullable=False)  # 日志消息
+    message = db.Column(BigText, nullable=False)  # 日志消息
     source = db.Column(db.String(50), nullable=False)  # 'excel_cache', 'weekly_excel_cache'
     repository_id = db.Column(db.Integer, db.ForeignKey('repository.id'), nullable=True)
     config_id = db.Column(db.Integer, nullable=True)

@@ -18,6 +18,7 @@ ASCII 码值在任何后端、任何编码设置下都不会出问题，中文�
 from datetime import datetime, timezone
 
 from .. import db
+from ..big_text import BigText
 
 # 处置状态。**改这里就要同步改 `DISPOSITION_LABELS`**（有一条测试盯着这件事）。
 DISPOSITIONS = ("pending", "confirmed", "ignored")
@@ -47,16 +48,16 @@ class AiAnalysisAnomaly(db.Model):
     severity = db.Column(db.String(20))
     confidence = db.Column(db.String(20))
     # 证据留存为 JSON 数组文本（与 AiAnalysisRun.request_payload 等保持一致的存法）。
-    evidence = db.Column(db.Text)
+    evidence = db.Column(BigText)
     commit_ref = db.Column(db.String(100))
     file_path = db.Column(db.String(500))
-    impact = db.Column(db.Text)
-    suggestion = db.Column(db.Text)
+    impact = db.Column(BigText)
+    suggestion = db.Column(BigText)
 
     disposition = db.Column(db.String(20), default=DEFAULT_DISPOSITION, index=True)
     disposition_by = db.Column(db.String(100))
     disposition_at = db.Column(db.DateTime)
-    disposition_note = db.Column(db.Text)
+    disposition_note = db.Column(BigText)
 
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(

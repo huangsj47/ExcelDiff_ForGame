@@ -19,6 +19,7 @@
 from datetime import datetime, timezone
 
 from .. import db
+from ..big_text import BigText
 
 # 一轮的结束方式。与 protocol.STATUSES 不同 —— 这里描述的是**我们观察到的结果**，
 # 包含「没走到解析」的几种情形。
@@ -55,15 +56,15 @@ class AiAnalysisTrace(db.Model):
     # 提示词与回答。`request_chars` 只记长度，完整提示词不入库（体积不划算，
     # 而且提示词里含变更数据，与 AiAnalysisRun.request_payload 重复）。
     request_chars = db.Column(db.Integer)
-    response_text = db.Column(db.Text)
-    error = db.Column(db.Text)
-    correction_hint = db.Column(db.Text)
+    response_text = db.Column(BigText)
+    error = db.Column(BigText)
+    correction_hint = db.Column(BigText)
 
     # 模型索要的 / 实际执行的 / 被丢弃的，各自存 JSON 文本。
-    requests_json = db.Column(db.Text)
-    executed_json = db.Column(db.Text)
-    dropped_json = db.Column(db.Text)
-    budget_notes = db.Column(db.Text)
+    requests_json = db.Column(BigText)
+    executed_json = db.Column(BigText)
+    dropped_json = db.Column(BigText)
+    budget_notes = db.Column(BigText)
 
     context_chars = db.Column(db.Integer)
     tokens_input = db.Column(db.Integer)

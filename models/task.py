@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import Index
 
 from . import db
+from .big_text import BigText
 
 
 class BackgroundTask(db.Model):
@@ -19,13 +20,13 @@ class BackgroundTask(db.Model):
     task_type = db.Column(db.String(50), nullable=False)  # 'excel_diff', 'cleanup_cache', etc.
     repository_id = db.Column(db.Integer, nullable=True)
     commit_id = db.Column(db.String(100), nullable=True)
-    file_path = db.Column(db.Text, nullable=True)
+    file_path = db.Column(BigText, nullable=True)
     priority = db.Column(db.Integer, default=10)  # 优先级，数字越小优先级越高
     status = db.Column(db.String(20), default='pending')  # 'pending', 'processing', 'completed', 'failed'
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     started_at = db.Column(db.DateTime, nullable=True)
     completed_at = db.Column(db.DateTime, nullable=True)
-    error_message = db.Column(db.Text, nullable=True)
+    error_message = db.Column(BigText, nullable=True)
     retry_count = db.Column(db.Integer, default=0)
 
     # 只补两个被真实高频查询反复使用的组合索引（对照 models/agent.py 的

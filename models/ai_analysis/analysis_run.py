@@ -7,6 +7,7 @@ AI analysis run records.
 from datetime import datetime, timedelta, timezone
 
 from .. import db
+from ..big_text import BigText
 
 # 运行状态。原实现只有 pending/running/succeeded 三种，**没有 failed**，于是
 # 「进程中断」「模型返回不可用」这类情况只能留下一条永远 running 的僵尸记录，
@@ -35,11 +36,11 @@ class AiAnalysisRun(db.Model):
     trigger_source = db.Column(db.String(20), default="manual")  # manual / scheduled
 
     trace_id = db.Column(db.String(80))
-    request_payload = db.Column(db.Text)
-    delta_summary = db.Column(db.Text)
-    response_payload = db.Column(db.Text)
-    response_text = db.Column(db.Text)
-    error_message = db.Column(db.Text)
+    request_payload = db.Column(BigText)
+    delta_summary = db.Column(BigText)
+    response_payload = db.Column(BigText)
+    response_text = db.Column(BigText)
+    error_message = db.Column(BigText)
 
     # --- 幂等与可复现标识 ---
     # 输入内容哈希 + 版本标识合成，决定「这次能不能复用上一次的结果」。
@@ -74,7 +75,7 @@ class AiAnalysisRun(db.Model):
     # 按工具类型的记账（JSON 文本，键见 services/ai/context_tools.py::_STAT_COUNTERS）。
     # 用 JSON 列而不是新表：它只在「看某一次运行」时被整体读出来，没有按类型查询的需求，
     # 建表只多一次 join。
-    tool_stats_json = db.Column(db.Text)
+    tool_stats_json = db.Column(BigText)
 
     # --- 产出与裁剪记账 ---
     anomalies_found = db.Column(db.Integer)

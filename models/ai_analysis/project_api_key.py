@@ -6,6 +6,7 @@ Project-bound API key storage for AI analysis.
 
 from datetime import datetime, timezone
 from .. import db
+from ..big_text import BigText
 
 
 class AiProjectApiKey(db.Model):
@@ -13,7 +14,7 @@ class AiProjectApiKey(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     project_id = db.Column(db.Integer, db.ForeignKey("project.id"), nullable=False, unique=True)
-    encrypted_key = db.Column(db.Text, nullable=False)
+    encrypted_key = db.Column(BigText, nullable=False)
     updated_by = db.Column(db.String(100))
 
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))

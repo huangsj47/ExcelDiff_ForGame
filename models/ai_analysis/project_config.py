@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from .. import db
+from ..big_text import BigText
 
 # ---------------------------------------------------------------------------
 # 默认值的**唯一事实源**
@@ -222,7 +223,7 @@ class AiProjectAnalysisConfig(db.Model):
     max_files_per_run = db.Column(db.Integer, default=DEFAULT_MAX_FILES_PER_RUN)
     # 语义已调整为「项目级补充指令」：整个提示词由平台内置 skill 承载，这一栏只做补充。
     # 历史项目里存过的自定义提示词照旧生效（降级为补充指令），不会丢配置。
-    prompt_template = db.Column(db.Text)
+    prompt_template = db.Column(BigText)
 
     # --- 连接配置（OpenAI 兼容端点）---
     api_base_url = db.Column(db.String(500))
@@ -251,7 +252,7 @@ class AiProjectAnalysisConfig(db.Model):
     max_anomalies_per_run = db.Column(db.Integer, default=DEFAULT_MAX_ANOMALIES_PER_RUN)
 
     # --- 项目补充知识（在项目知识包之外追加，只补充不覆盖）---
-    project_knowledge = db.Column(db.Text)
+    project_knowledge = db.Column(BigText)
 
     # --- 模型单价表（算费用用，JSON 文本）---
     # 留空 = 用平台的默认表（`services/ai/pricing.py::DEFAULT_PRICE_TABLE`，出厂是空的）。
@@ -263,7 +264,7 @@ class AiProjectAnalysisConfig(db.Model):
     # 读写仍然走同一个项目配置接口（`/ai-analysis/projects/<id>/config`），校验也仍然是
     # `endpoint_service.FIELD_RULES["model_price_table"]` 那一条，所以「一份事实源」这件事
     # 没有因为换入口而改变，也没有任何「读不到就回落到旧字段」的分支。
-    model_price_table = db.Column(db.Text)
+    model_price_table = db.Column(BigText)
 
     # --- 预算闸门（超了就禁用 AI 分析，见 services/ai/analysis_budget.py）---
     # 这两列**可为 NULL**，NULL 的语义是「不限制」。加列迁移不带 DEFAULT 子句，

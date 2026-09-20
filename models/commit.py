@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import Index
 
 from . import db
+from .big_text import BigText
 
 
 class Commit(db.Model):
@@ -23,7 +24,7 @@ class Commit(db.Model):
     operation = db.Column(db.String(10))  # 'A', 'M', 'D'
     author = db.Column(db.String(100))
     commit_time = db.Column(db.DateTime)
-    message = db.Column(db.Text)
+    message = db.Column(BigText)
     status = db.Column(db.String(20), default='pending')  # 'pending', 'confirmed', 'rejected'
     status_changed_by = db.Column(db.String(100))  # 确认/拒绝操作者用户名
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))

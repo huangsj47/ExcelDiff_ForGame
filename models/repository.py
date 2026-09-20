@@ -6,6 +6,7 @@
 
 from datetime import datetime, timezone
 from . import db
+from .big_text import BigText
 from utils.security_utils import decrypt_credential, encrypt_credential
 
 
@@ -34,10 +35,10 @@ class Repository(db.Model):
     branch = db.Column(db.String(100))
     resource_type = db.Column(db.String(20))  # 'table', 'res', 'code'
     current_version = db.Column(db.String(50))
-    path_regex = db.Column(db.Text)
-    log_regex = db.Column(db.Text)
-    log_filter_regex = db.Column(db.Text)
-    commit_filter = db.Column(db.Text)
+    path_regex = db.Column(BigText)
+    log_regex = db.Column(BigText)
+    log_filter_regex = db.Column(BigText)
+    commit_filter = db.Column(BigText)
     # 界面上那一栏「重点表名」：管理员声明的**本项目重点表**，逗号分隔（中英文逗号、
     # 分号、换行都收，见 `services.ai.project_facts.declared_important_tables`）。
     #
@@ -49,12 +50,12 @@ class Repository(db.Model):
     #
     # **这一栏以前只写不读**：界面上让管理员填，全仓没有一处读它，于是「我明明填了
     # 重点表，分析还是按增量跑」这件事既没有效果也没有解释。
-    important_tables = db.Column(db.Text)
+    important_tables = db.Column(BigText)
     unconfirmed_history = db.Column(db.Boolean, default=False)
     delete_table_alert = db.Column(db.Boolean, default=False)
     weekly_version_setting = db.Column(db.String(100))
     clone_status = db.Column(db.String(20), default='pending')
-    clone_error = db.Column(db.Text)
+    clone_error = db.Column(BigText)
     display_order = db.Column(db.Integer, default=0)
     last_sync_commit_id = db.Column(db.String(100))
     last_sync_time = db.Column(db.DateTime)
@@ -76,7 +77,7 @@ class Repository(db.Model):
     start_date = db.Column(db.DateTime)
 
     # 同步状态字段
-    last_sync_error = db.Column(db.Text)        # 最近一次同步失败的错误信息（成功后清空）
+    last_sync_error = db.Column(BigText)        # 最近一次同步失败的错误信息（成功后清空）
     last_sync_error_time = db.Column(db.DateTime)  # 最近一次同步失败的时间
     
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))

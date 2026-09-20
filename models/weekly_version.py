@@ -7,6 +7,7 @@
 from datetime import datetime, timezone
 from sqlalchemy import Index
 from . import db
+from .big_text import BigText
 
 
 class WeeklyVersionConfig(db.Model):
@@ -19,7 +20,7 @@ class WeeklyVersionConfig(db.Model):
 
     # 配置基本信息
     name = db.Column(db.String(100), nullable=False)  # 配置名称，如"第42周版本"
-    description = db.Column(db.Text)  # 配置描述
+    description = db.Column(BigText)  # 配置描述
     branch = db.Column(db.String(100), nullable=False)  # 分支名称
 
     # 时间配置
@@ -55,18 +56,18 @@ class WeeklyVersionDiffCache(db.Model):
     file_type = db.Column(db.String(50))  # 文件类型：'code', 'table', 'res', etc.
 
     # 差异数据
-    merged_diff_data = db.Column(db.Text)  # JSON格式的合并diff数据
+    merged_diff_data = db.Column(BigText)  # JSON格式的合并diff数据
     base_commit_id = db.Column(db.String(100))  # 基准版本的commit_id
     latest_commit_id = db.Column(db.String(100))  # 最新版本的commit_id
 
     # 提交信息
-    commit_authors = db.Column(db.Text)  # JSON格式的提交者列表
-    commit_messages = db.Column(db.Text)  # JSON格式的提交消息列表
-    commit_times = db.Column(db.Text)    # JSON格式的提交时间列表
+    commit_authors = db.Column(BigText)  # JSON格式的提交者列表
+    commit_messages = db.Column(BigText)  # JSON格式的提交消息列表
+    commit_times = db.Column(BigText)    # JSON格式的提交时间列表
     commit_count = db.Column(db.Integer, default=0)  # 涉及的提交数量
 
     # 确认状态 - 支持多角色确认
-    confirmation_status = db.Column(db.Text)  # JSON格式：{"dev": "pending", "qa": "confirmed", "pm": "pending"}
+    confirmation_status = db.Column(BigText)  # JSON格式：{"dev": "pending", "qa": "confirmed", "pm": "pending"}
     overall_status = db.Column(db.String(20), default='pending')  # 'pending', 'confirmed', 'rejected'
     status_changed_by = db.Column(db.String(100))  # 确认/拒绝操作者用户名
 
@@ -125,10 +126,10 @@ class WeeklyVersionExcelCache(db.Model):
     commit_count = db.Column(db.Integer, default=0)  # 提交数量
 
     # HTML内容和样式
-    html_content = db.Column(db.Text)  # 渲染好的HTML内容
-    css_content = db.Column(db.Text)   # CSS样式
-    js_content = db.Column(db.Text)    # JavaScript代码
-    cache_metadata = db.Column(db.Text)  # JSON格式的元数据
+    html_content = db.Column(BigText)  # 渲染好的HTML内容
+    css_content = db.Column(BigText)   # CSS样式
+    js_content = db.Column(BigText)    # JavaScript代码
+    cache_metadata = db.Column(BigText)  # JSON格式的元数据
 
     # 缓存状态
     cache_status = db.Column(db.String(20), default='pending')

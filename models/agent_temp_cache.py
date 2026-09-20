@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from sqlalchemy import Index
 
 from . import db
+from .big_text import BigText
 
 
 class AgentTempCache(db.Model):
@@ -22,7 +23,7 @@ class AgentTempCache(db.Model):
     commit_id = db.Column(db.String(255), nullable=True)
     file_path = db.Column(db.String(500), nullable=True)
 
-    payload_json = db.Column(db.Text, nullable=True)
+    payload_json = db.Column(BigText, nullable=True)
     payload_hash = db.Column(db.String(128), nullable=True)
     payload_size = db.Column(db.Integer, default=0)
 

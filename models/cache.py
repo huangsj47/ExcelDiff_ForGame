@@ -7,6 +7,7 @@
 from datetime import datetime, timezone
 from sqlalchemy import Index
 from . import db
+from .big_text import BigText
 
 
 def default_diff_logic_version():
@@ -43,11 +44,11 @@ class DiffCache(db.Model):
     file_path = db.Column(db.String(500), nullable=False)
     previous_commit_id = db.Column(db.String(255))
 
-    diff_data = db.Column(db.Text)
+    diff_data = db.Column(BigText)
     file_size = db.Column(db.Integer, default=0)
     processing_time = db.Column(db.Float, default=0.0)
     cache_status = db.Column(db.String(50), default='pending')  # pending, completed, failed
-    error_message = db.Column(db.Text)
+    error_message = db.Column(BigText)
     diff_version = db.Column(db.String(20), default=default_diff_logic_version)
     commit_time = db.Column(db.DateTime)
     is_long_processing = db.Column(db.Boolean, default=False)
@@ -78,10 +79,10 @@ class ExcelHtmlCache(db.Model):
     file_path = db.Column(db.String(500), nullable=False)
     cache_key = db.Column(db.String(255), nullable=False, unique=True)
 
-    html_content = db.Column(db.Text)
-    css_content = db.Column(db.Text)
-    js_content = db.Column(db.Text)
-    cache_metadata = db.Column(db.Text)
+    html_content = db.Column(BigText)
+    css_content = db.Column(BigText)
+    js_content = db.Column(BigText)
+    cache_metadata = db.Column(BigText)
 
     cache_status = db.Column(db.String(50), default='pending')
     diff_version = db.Column(db.String(20), default=default_diff_logic_version)
@@ -111,10 +112,10 @@ class MergedDiffCache(db.Model):
 
     base_commit_id = db.Column(db.String(100))
     target_commit_id = db.Column(db.String(100))
-    commit_id_list = db.Column(db.Text)
+    commit_id_list = db.Column(BigText)
 
-    merged_diff_data = db.Column(db.Text)
-    diff_summary = db.Column(db.Text)
+    merged_diff_data = db.Column(BigText)
+    diff_summary = db.Column(BigText)
 
     total_commits = db.Column(db.Integer, default=0)
     added_lines = db.Column(db.Integer, default=0)

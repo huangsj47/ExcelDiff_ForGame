@@ -16,9 +16,9 @@
 ## 为什么在 Agent 侧就渲染成文本，而不是把结构传回去
 
 * 一份 Excel 表的结构化差异可以有几千行（逐行 + 逐单元格的旧值新值），而
-  `AgentTask.result_summary` 是一个 TEXT 列 —— 把几 MB 的结构塞进去，**每一次取数都要
-  跨节点传一遍、库里再留一份**。超大载荷本平台另有 `AgentTempCache` 那套（提交页的
-  `commit_diff` 用的就是它），但那对「按需取一条差异」是过度设计。
+  `AgentTask.result_summary` 这一列**每次轮询都会被整条读出来** —— 把几 MB 的结构塞进去，
+  每一次取数都要跨节点传一遍、库里再留一份。超大载荷本平台另有 `AgentTempCache` 那套
+  （提交页的 `commit_diff` 用的就是它），但那对「按需取一条差异」是过度设计。
 * 渲染函数 `render_diff_payload` 是**纯函数**（模块级、不碰 DB 与 Flask），Agent 侧
   直接 import 同一份实现即可 —— 两端渲染出来的文本逐字一致，这正是 `content_window`
   那条「同一份规则只有一份实现」的同一条纪律。
@@ -49,15 +49,23 @@ from services.ai.platform_provider import (
 # 那是平台层的事（`DEFAULT_TOOL_LIMITS["file_diff"]` 一个字没动，模型每次仍然只拿到
 # 11,000 字）—— 它只该按**回传通道的物理上限**来定。
 #
-# ## 48,000 这个数是算出来的
+# ## 48,000 这个数是怎么来的，以及它现在还算不算数
 #
-# `AgentTask.result_summary` 是 `db.Column(db.Text)`，MySQL 下 TEXT 是 65,535 **字节**，
-# 而落库的是**整个 JSON**（还有 file_path / commit_id / original_chars / message 等字段，
-# 另加 JSON 里每个换行转义成 `\n` 的两字节开销）。取 48,000 给信封与转义留出余量 ——
-# 实测最坏形态（顶满额度的中文短行 / ASCII 补丁）落库 JSON 约 50 KB，**余量约 15 KB**。
-# 这个值在 SQLite（TEXT 无实际上限）与 MySQL（65,535 字节）**两边都安全**，所以不必先去
-# 确认生产用哪种库。超过那一列的后果不是「少看一段」而是**整条回传失败**（strict 模式下
-# commit 抛 DataError → 任务停在 processing 等租约重跑）。
+# 它本来是**算出来**的：`AgentTask.result_summary` 当时是 `db.Column(db.Text)`，MySQL 下
+# TEXT 是 65,535 **字节**，而落库的是**整个 JSON**（还有 file_path / commit_id /
+# original_chars / message 等字段，另加 JSON 里每个换行转义成 `\n` 的两字节开销）。取
+# 48,000 给信封与转义留出余量 —— 实测最坏形态（顶满额度的中文短行 / ASCII 补丁）落库
+# JSON 约 50 KB，**余量约 15 KB**。当时超过那一列的后果不是「少看一段」而是**整条回传
+# 失败**（strict 模式下 commit 抛 DataError → 任务停在 processing 等租约重跑）。
+#
+# **2026-09 那一列已换成 `BigText`（MySQL 上 LONGTEXT），65,535 字节不再是墙。** 数值保持
+# 不动，因为它本来就不该由「库能装多大」来定：
+#   * 这一列**每次轮询都会被整条读出来**（见上「为什么在 Agent 侧渲染成文本」）——
+#     库能装 4 GiB，不等于该往一条任务里塞 4 GiB；
+#   * 48,000 字节已经够让**全部改动块的坐标完整**（这才是这把刀存在的目的），而
+#     `file_diff` 工具给模型的仍然只有 11,000 字 —— 再往上加，模型一行也不会多看到。
+# 所以它现在是**回传预算**，不是**回传上限**。将来要调，按上面两条判，不要再回去对着
+# 某个列长度做除法。
 #
 # 相比原先的 11,000 **字符**：中文内容约 1.45 倍，ASCII 为主的代码补丁约 4.4 倍 —— 后者正是
 # 「AI 看不到代码 diff」的主战场。
