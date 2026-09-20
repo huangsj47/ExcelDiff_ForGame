@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pytest
 
+from services.ai.budget import TRUNCATION_SUFFIX
 from services.ai.windowed_view import parse_window, render_window, split_segments
 
 DIFF = """代码差异：scripts/x.lua
@@ -301,3 +302,84 @@ def test_content_that_cannot_be_split_keeps_the_old_truncation():
     assert meta == {"segments": 1, "split": meta["split"], "truncated": True}
     assert text.startswith("开头-") and text.endswith("-结尾"), "保留首尾"
     assert "共 1 段" not in text and "这里是第" not in text
+
+
+def _many_hunks(hunks: int = 40, lines_per_hunk: int = 30) -> str:
+    """段数多到「抬头自己就把正文挤没了」的一份 diff。
+
+    抬头要逐段列出没给出的那些段（`_OUTLINE_MAX_CHARS` = 1,200 字），段一多，
+    `_HEADER_RESERVE`（260 字）那点预留就不够，正文会被**回砍** —— 这正是「抬头声称给了
+    第 N 段、而第 N 段只剩半截」的触发条件。实测 30 段的 `BIG` 还不够（抬头只有十来行），
+    40 段 × 30 行才稳定触发。
+    """
+    parts = ["代码差异：scripts/many.lua\n"]
+    for index in range(hunks):
+        parts.append(f"@@ -{index * 10},1 +{index * 10},2 @@ function fn_{index}()\n")
+        parts.extend(f"+    local_{index}_{k} = {k}\n" for k in range(lines_per_hunk))
+    return "".join(parts)
+
+
+def test_the_header_does_not_claim_a_segment_it_only_half_gave():
+    """**回砍之后，抬头不能再说「这里是第 1-N 段」而不加解释。**
+
+    抬头拼好之后才知道它有多长；超了就把正文尾巴收掉，而 `shown` 是**收之前**按 `chosen`
+    算的。实测一份 40 段的差异：抬头写「这里是第 1-16 段」，而正文里第 16 段被砍在
+    `@@ -150,1 +150,2 @` 中间（连块头都没给完）—— 模型于是以为第 16 段拿全了，只去要
+    第 17 段，那半截**永远拿不到**。这正是本模块 docstring 要防的那类失真。
+    """
+    text, meta = _render("file_diff", _many_hunks())
+    head, body = text.split("\n\n", 1)
+
+    assert TRUNCATION_SUFFIX.strip() in body, (
+        f"fixture 没有触发回砍（正文尾部没有截断标记），这条就白测了：{body[-80:]!r}"
+    )
+    assert "正文被额度截断了" in head, f"正文被回砍了，抬头却一个字没说：{head[:300]}"
+    # 而且要给出「怎么拿全那一段」的动作 —— 只说「被截断了」等于把问题丢回给模型。
+    last = str(meta["shown"]).split("-")[-1]
+    assert f'"lines": "{last}"' in head, f"没给出拿全第 {last} 段的动作：{head[:400]}"
+    # 整串仍然不许超上限（抬头长了，正文就要跟着让）。
+    assert len(text) <= 11_000, len(text)
+
+
+def test_a_render_that_was_not_re_cut_says_nothing_about_being_cut():
+    """反面：没回砍就不许挂这句 —— 无中生有同样是失真。"""
+    text, meta = _render("file_diff", BIG)
+    head, body = text.split("\n\n", 1)
+
+    assert TRUNCATION_SUFFIX.strip() not in body, "这一份本来就不该被回砍"
+    assert "正文被额度截断了" not in head, head[:300]
+    assert meta["truncated"] is True, "（它仍然是「没装下全部段」，那是另一回事）"
+
+
+def test_naming_a_segment_that_does_not_exist_says_so():
+    """点名了一段**不存在**的段号时要说出来。
+
+    原先 `parse_window` 越界返回 `None`、调用方按「没点名」处理，于是模型在被砍过的文本上
+    点名 `"lines": "5"`（那份只切得出 4 段）拿回的是与上一轮**逐字相同**的第 1-3 段，
+    抬头照样写「这里是第 1-3 段」—— 它没有任何线索知道自己的点名被无声换掉了。
+    配表那条路是有这句话的（`你要的第 a-b 张不存在`），这里对齐。
+    """
+    text, _ = _render("file_diff", BIG, window="99")
+    head = text.split("\n\n", 1)[0]
+
+    assert "你要的第 99 段不存在" in head, f"点名被无声换掉了：{head[:300]}"
+    total = _render("file_diff", BIG)[1]["segments"]
+    assert f"一共只有 {total} 段" in head, f"说了不存在，但没说一共有多少：{head[:300]}"
+
+
+def test_an_in_range_window_does_not_get_the_missing_segment_sentence():
+    """反面：在范围内的窗口不许出现这句（否则每次索取都挂一句假话）。"""
+    for window in ("1-2", "30", "1-30", ""):
+        text, _ = _render("file_diff", BIG, window=window)
+        assert "不存在" not in text, f'window={window!r} 被误报成「段号不存在」：{text[:200]}'
+
+
+def test_an_unparsable_window_still_falls_back_without_a_word():
+    """写法坏掉（`"abc"`）仍然静默回落到第 1 段 —— 这是有意的。
+
+    与「段号不存在」是两件事：前者是模型的写法坏了，能拿到默认那一段就是它该得到的；
+    后者是它**问了一件不存在的事**，不说就等于默认它拿到了。这条把两者的边界钉住。
+    """
+    text, _ = _render("file_diff", BIG, window="abc")
+    assert "不存在" not in text, text[:200]
+    assert "这里是第 1-" in text, f"写法坏掉时应当回落到第 1 段：{text[:200]}"

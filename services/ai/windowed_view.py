@@ -181,6 +181,32 @@ def commit_preamble(text: str) -> str:
     return "".join(head)
 
 
+def _requested_missing(window: str, total: int, unit: str) -> str:
+    """点名了一段**不存在**的段号时，抬头要说一句。
+
+    `parse_window` 在「越界」与「认不出」两种情况下都返回 `None`，调用方一律按「没点名」
+    处理（从第 1 段开始装）。**这个回落本身是有意的** —— 窗口写坏的代价只能是拿到默认
+    那一段，不能是丢掉整条请求。但「越界」那一支必须**说出来**：实测模型在被砍过的文本上
+    点名 `"lines": "5"`（而那份只切得出 4 段），拿回的是与上一轮**逐字相同**的第 1-3 段，
+    而抬头照样写着「这里是第 1-3 段」—— 它没有任何线索知道自己的点名被无声地换掉了，
+    只会以为「第 5 段就是这些内容」。
+
+    配表那条路是有这句话的（`你要的第 a-b 张不存在`），这里对齐；「认不出」仍然不吭声
+    （那是写法坏了，不是段号不存在）。
+    """
+    text = str(window or "").strip()
+    if not text or total <= 0:
+        return ""
+    match = _WINDOW_RE.fullmatch(text)
+    if match is None:
+        return ""
+    start = int(match.group(1))
+    if start <= total:
+        # 在范围内：`"2-99"` 这种尾部越界由 `parse_window` 夹到 total，不算「不存在」。
+        return ""
+    return f"**你要的第 {start} {unit}不存在**：这份内容一共只有 {total} {unit}。"
+
+
 def render_window(
     *,
     kind: str,
@@ -216,13 +242,35 @@ def render_window(
     head_room = max(1_000, limit - len(preamble) - _HEADER_RESERVE)
     body, chosen, clipped = _fill(segments, window, total, head_room)
     span = parse_window(window, total)
-    head = _header(kind, label, total, unit, how, ordinal, noun, chosen, segments) + preamble
-    # 抬头拼出来才知道它有多长（段号多一位、丢掉的那几段多一行都会变）。超出预留就按
-    # **实际**剩余额度把正文尾巴收掉 —— 抬头必须完整，它是「这是第几段」的唯一出处。
+    missing_note = _requested_missing(window, total, unit)
+    head = _header(
+        kind, label, total, unit, how, ordinal, noun, chosen, segments, extra=missing_note
+    ) + preamble
     overflow = len(head) + 2 + len(body) - limit
     if overflow > 0:
-        body, also_clipped = truncate_text(body, max(200, len(body) - overflow))
+        # 正文装不下，尾巴要收掉 —— 而**「这里是第 N 段」这句话从此不再成立**：
+        # `shown` 是按 `chosen` 算的，回砍之后最后那一段只剩半截。实测一份 40 段的差异：
+        # 抬头写「这里是第 1-16 段」，而正文里第 16 段被砍在 `@@ -150,1 +150,2 @` 中间
+        # （连块头都没给完）—— 模型于是以为第 16 段拿全了，只去要第 17 段，那半截永远拿不到。
+        # 这正是本模块 docstring 要防的那类失真。
+        #
+        # 那句话本身也占额度，所以先拼一次把它的长度量出来，再用**实际剩余**的额度收正文
+        # （一次算准，不用迭代：`room` 的定义就是「抬头拼好之后还剩多少」）。
+        last = chosen[-1] + 1
+        head_cut = _header(
+            kind, label, total, unit, how, ordinal, noun, chosen, segments,
+            extra=missing_note,
+            # 说话要留余地：回砍的落点在这这一段**之中的某个位置**，也可能是把它整段砍掉
+            # （实测 40 段的例子里，第 16 段的 `@@` 块头都没了）。说「只给到第 N-1 段」
+            # 会少报，说「第 N 段完整」会多报 —— 而多报正是这条要修的毛病。所以只说
+            # 「它可能只有前半截」，并给出**一定会拿全**的动作。
+            partial=(f"**正文被额度截断了**：第 {last} {ordinal}可能只有前半截，"
+                     f'要确保拿到它请直接点名 `"lines": "{last}"`。'),
+        ) + preamble
+        room = max(200, limit - len(head_cut) - 2)
+        body, also_clipped = truncate_text(body, room)
         clipped = clipped or also_clipped
+        head = head_cut
     shown = _shown_text(chosen)
     # 什么时候算「被截断」：**平台自己收掉了内容**。模型点名要第 3-4 段、我们如实给了
     # 3-4 段，那不叫截断（否则消耗面板上会出现一堆「截断」，而真相是模型按段读的）；
@@ -282,15 +330,30 @@ def _header(
     noun: str,
     chosen: Sequence[int],
     segments: Sequence[str],
+    *,
+    extra: str = "",
+    partial: str = "",
 ) -> str:
     """抬头：共几段 / 这是第几段 / **其余几段分别是什么** / 怎么要。
 
     第三样（`_outline`）不是装饰：只说「还有 3 段」的话，模型不知道那 3 段里有没有它要的
     东西，只能一段段试 —— 而额度是按次数计的。把每段的第一行（改动块的 `@@` 头、文档的
     小标题、文件名）列出来，它就能一次要对。
+
+    `extra` 与 `partial` 是两句**只在特定处境下才出现**的话，必须排在段号那句之后：
+    `extra` 说「你点名的那一段不存在」（见 `_requested_missing`），`partial` 说
+    「最后那一段只有前半截」（见 `render_window` 的 overflow 分支）。两句都是**对模型
+    这一次点名的直接回应**，排在「其余几段是」那份清单之前，免得被清单挤到看不见。
     """
     shown = _shown_text(chosen) or "1"
     lines = [f"[{kind}] {label} 共 {total} {unit}（{how}）。这里是第 {shown} {ordinal}。"]
+    # **先答模型问的那件事**：它点名了一段，那就先说那段在不在（`extra`），再说正文被
+    # 额度截到哪儿（`partial`）。两句都排在「其余几段是」那份清单之前 —— 清单能长到
+    # 1,200 字，排在它后面的话这两句会被挤到看不见的地方。
+    if extra:
+        lines.append(extra)
+    if partial:
+        lines.append(partial)
     missing = [index for index in range(total) if index not in set(chosen)]
     if missing:
         example = _example_window(chosen[-1] + 1, total) if chosen else "1"

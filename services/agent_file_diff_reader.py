@@ -22,24 +22,46 @@
 * 渲染函数 `render_diff_payload` 是**纯函数**（模块级、不碰 DB 与 Flask），Agent 侧
   直接 import 同一份实现即可 —— 两端渲染出来的文本逐字一致，这正是 `content_window`
   那条「同一份规则只有一份实现」的同一条纪律。
-* 传文本还有一个好处：大小可控（下面按 `FILE_DIFF_MAX_CHARS` 截断并**如实写明截断了**），
+* 传文本还有一个好处：大小可控（下面按 `FILE_DIFF_MAX_BYTES` 截断并**如实写明截断了**），
   而结构的大小取决于表有多大。
 """
 
 from __future__ import annotations
 
 from models import Commit, Repository, db
-from services.ai.budget import truncate_text
+from services.ai.budget import truncate_bytes
 from services.ai.platform_provider import (
     DEFAULT_MAX_ROWS_PER_SHEET,
     render_diff_payload,
 )
-from utils.content_window import CONTENT_MAX_CHARS
 
-# 交回给模型的差异文本上限。**与 `ContextTools` 给 `file_diff` 的单条上限是同一个数**
-# （`DEFAULT_TOOL_LIMITS["file_diff"]` = 11,000）：取数侧先切、预算层后切的话，后一刀会
-# 砍在半行中间，而模型据此写进结论里的定位就成了假的。
-FILE_DIFF_MAX_CHARS = CONTENT_MAX_CHARS
+# 回传给平台的差异文本上限（**字节**，不是字符）。
+#
+# ## 为什么这里砍一刀就会失真（原先的 11,000 字符为什么是错的）
+#
+# 平台拿到这段文本之后还要**按改动块分段**（`context_tools` → `windowed_view.render_window`），
+# 抬头会写「共 N 段 / 这里是第几段 / 要看别的写 `lines`」—— 而 N 是在**砍过的文本上**数出来的。
+# 实测同一份 8 段的差异：整份交给平台是「共 8 段」，先经 Agent 砍到 11,000 再交给平台是
+# 「共 4 段」，被砍掉的 5–8 段**没有任何坐标能点回来**（平台从没收到它们），而模型读到的是
+# 一份**看起来完整**的段清单 —— 比直接说「被截断了」更危险。
+#
+# 段的坐标要成立，前提就是**平台拿到整份**。所以这把刀不该按「模型的单条预算」来定，
+# 那是平台层的事（`DEFAULT_TOOL_LIMITS["file_diff"]` 一个字没动，模型每次仍然只拿到
+# 11,000 字）—— 它只该按**回传通道的物理上限**来定。
+#
+# ## 48,000 这个数是算出来的
+#
+# `AgentTask.result_summary` 是 `db.Column(db.Text)`，MySQL 下 TEXT 是 65,535 **字节**，
+# 而落库的是**整个 JSON**（还有 file_path / commit_id / original_chars / message 等字段，
+# 另加 JSON 里每个换行转义成 `\n` 的两字节开销）。取 48,000 给信封与转义留出余量 ——
+# 实测最坏形态（顶满额度的中文短行 / ASCII 补丁）落库 JSON 约 50 KB，**余量约 15 KB**。
+# 这个值在 SQLite（TEXT 无实际上限）与 MySQL（65,535 字节）**两边都安全**，所以不必先去
+# 确认生产用哪种库。超过那一列的后果不是「少看一段」而是**整条回传失败**（strict 模式下
+# commit 抛 DataError → 任务停在 processing 等租约重跑）。
+#
+# 相比原先的 11,000 **字符**：中文内容约 1.45 倍，ASCII 为主的代码补丁约 4.4 倍 —— 后者正是
+# 「AI 看不到代码 diff」的主战场。
+FILE_DIFF_MAX_BYTES = 48_000
 
 
 def read_file_diff_for_agent(payload: dict) -> dict:
@@ -93,13 +115,18 @@ def read_file_diff_for_agent(payload: dict) -> dict:
             kind = type(diff_data).__name__
         raise RuntimeError(f"差异结构无法渲染（type={kind or '未知'}），请人工核对该提交")
 
-    content, truncated = truncate_text(rendered, FILE_DIFF_MAX_CHARS)
+    content, truncated = truncate_bytes(rendered, FILE_DIFF_MAX_BYTES)
     return {
         "file_path": file_path,
         "commit_id": commit_id,
         "kind": "diff",
         "content": content,
+        # 字符数（不是字节数）：平台拿它写给模型看的那句「原文约 N 字」。平台只看这个数，
+        # 所以两端的单位必须是「字」。
         "original_chars": len(rendered),
         "truncated": truncated,
-        "message": f"file_diff completed ({len(content)}/{len(rendered)} chars)",
+        "message": (
+            f"file_diff completed ({len(content)}/{len(rendered)} chars, "
+            f"{len(content.encode('utf-8'))} bytes)"
+        ),
     }

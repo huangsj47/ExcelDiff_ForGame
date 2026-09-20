@@ -28,9 +28,10 @@ diff 对不上，这是最难查的一类不一致。
 
 ### 3. 每一次截断都带省略量
 
-见 `budget`。这里额外做的选择是 Excel 结构化 diff 用**保留首尾**的截断（`truncate_text_middle`）：
-只砍尾巴会让排在后面的整张表完全不可见，而「配表 A 改了、配表 B 也要跟着改」正是
-这个平台最关心的风险。
+见 `budget`。**保留首尾**那种截断（`truncate_text_middle`）**不在这一层**：只砍尾巴会让
+排在后面的整张表完全不可见，而「配表 A 改了、配表 B 也要跟着改」正是这个平台最关心的
+风险 —— 所以它落在 `windowed_view.render_window` 里「切不开的 diff」那一支
+（`total <= 1`）。这一层对剩下的纯文本一律只砍尾巴。
 
 ### 4. 同一份正文不重发第二遍，只给一个指针
 
@@ -70,7 +71,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, MutableMapping, Protocol, runtime_checkable
 
-from services.ai.budget import ContextItem, truncate_text, truncate_text_middle
+from services.ai.budget import ContextItem, truncate_text
 from services.ai.protocol import ContextRequest, DroppedItem
 from services.ai.scope import normalize_path
 from services.ai.trace_evidence import failure_notice
@@ -121,10 +122,7 @@ DEFAULT_TOOL_LIMITS: Mapping[str, int] = {
 # `DEFAULT_TOOL_LIMITS`（单条上限）。
 DEFAULT_MAX_TOOL_REQUESTS = 40
 
-# 结构化内容（按行块排列）用保留首尾的截断；纯文本用普通截断。
-_STRUCTURED_KINDS = frozenset({"file_diff"})
-
-# 这三样超长时走「分段 + 点名」（`services/ai/windowed_view.py`），不走上面的截断：
+# 这三样超长时走「分段 + 点名」（`services/ai/windowed_view.py`），不走下面的截断：
 # 它们的共同点是**内容有结构**（改动块 / 小节 / 文件清单），于是「第几段」是一个模型
 # 说得清、也对得上的坐标。`file_content` 不在里面 —— 它本来就按行窗口取，那个坐标
 # 比段号更准。`find_references` 也不在：它的结果是**命中清单**，超长时该收窄关键词，
@@ -443,10 +441,12 @@ class ContextTools:
                 meta["limit"] = limit
             return ContextItem(kind=request.type, label=label, text=text, meta=meta)
 
-        if request.type in _STRUCTURED_KINDS:
-            text, truncated = truncate_text_middle(body, limit)
-        else:
-            text, truncated = truncate_text(body, limit)
+        # 剩下的全是**纯文本**：只砍尾巴（保留首尾的中间省略是 `file_diff` 的待遇，而它
+        # 已经在上面那条分支里返回了 —— 这里原先还挂着一个 `_STRUCTURED_KINDS` 的判据，
+        # 它只含 `file_diff`、是 `_WINDOWED_KINDS` 的子集，所以那个分支**永远执行不到**；
+        # 已删。`truncate_text_middle` 本身**没有死**：切不开的 diff 仍然走它，调用点是
+        # `windowed_view.render_window` 里 `total <= 1` 那一支）。
+        text, truncated = truncate_text(body, limit)
         if truncated:
             meta["truncated"] = True
             meta["limit"] = limit

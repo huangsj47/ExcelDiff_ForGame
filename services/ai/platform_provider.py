@@ -624,7 +624,7 @@ def _render_agent_file_diff(
     只是那一条提交与前一次提交之间的差异：周版本分析平时拿的是**整个窗口的合并差异**
     （`_weekly_stored_diff`），不说清它会以为这就是本窗口该文件的全部改动。
 
-    截断由 Agent 侧做（`FILE_DIFF_MAX_CHARS`，末尾带截断标记），这里不重复。
+    截断由 Agent 侧做（`FILE_DIFF_MAX_BYTES`，末尾带截断标记），这里不重复。
     """
     where = path or str(outcome.get("file_path") or "")
     content = str(outcome.get("content") or "")
@@ -637,7 +637,7 @@ def _render_agent_file_diff(
         f"（出处：业务节点（Agent）在它的工作副本上按**提交 {str(commit or '')[:8]} 与"
         "前一次提交**现算的差异 —— 只含这一条提交对这个文件的改动。）"
     )
-    # **Agent 那一刀要如实转述。** `agent_file_diff_reader` 是按 `FILE_DIFF_MAX_CHARS`
+    # **Agent 那一刀要如实转述。** `agent_file_diff_reader` 是按 `FILE_DIFF_MAX_BYTES`
     # 先把渲染好的差异砍到上限的，而平台随后拿到的段号是在**砍过之后**的文本上数出来的
     # （`context_tools` 的 `render_window`）—— 于是抬头会写「共 3 段」而原文本该是 8 段，
     # 模型读到一份**看起来完整**的段清单，被砍掉的那几段没有任何坐标能点回来。

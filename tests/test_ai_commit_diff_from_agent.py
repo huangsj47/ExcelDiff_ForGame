@@ -217,7 +217,7 @@ def test_the_recomputed_diff_says_it_is_only_this_commit(tmp_path, monkeypatch):
 def test_a_diff_cut_on_the_business_node_says_so(tmp_path, monkeypatch):
     """**Agent 那一刀必须如实转述。**
 
-    `agent_file_diff_reader` 是按 `FILE_DIFF_MAX_CHARS` 先把渲染好的差异砍到上限的，而
+    `agent_file_diff_reader` 是按 `FILE_DIFF_MAX_BYTES` 先把渲染好的差异砍到上限的，而
     平台随后拿到的段号是在**砍过之后**的文本上数出来的（`context_tools` 的
     `render_window`）—— 抬头会写「共 3 段」而原文本该是 8 段，模型读到一份**看起来完整**
     的段清单，被砍掉的那几段没有任何坐标能点回来。
@@ -478,19 +478,33 @@ class TestAgentSideReader:
         assert got["truncated"] is False
         assert got["message"].startswith("file_diff completed")
 
-    def test_a_huge_diff_is_truncated_at_the_tool_limit(self, monkeypatch, repository_id, head_sha):
-        """截断在**取数侧**做，且上限与预算层给 `file_diff` 的那一条相同。
+    def test_a_huge_diff_is_truncated_at_the_transport_limit(self, monkeypatch, repository_id, head_sha):
+        """截断按**回传通道的物理上限**（字节）做，**不是**按模型的单条预算。
 
-        取数侧不切、留给预算层切的话，后一刀会砍在半行中间，而模型据此写进结论里的
-        定位就成了假的。
+        这条原先断言「取数侧上限 == 预算层上限 == CONTENT_MAX_CHARS（11,000 字符）」，
+        理由是「取数侧不切、留给预算层切的话，后一刀会砍在半行中间」。那个理由本身对，
+        但把它落成「取数侧就砍到模型预算」是**错的**：平台拿到这段文本之后还要按改动块
+        分段，而段数是在**砍过的文本上**数出来的 —— 实测同一份 8 段的差异，整份交给平台
+        是「共 8 段」，先经 Agent 砍到 11,000 再交给平台只有「共 4 段」，被砍掉的 5–8 段
+        没有任何坐标能点回来，而模型读到的是一份**看起来完整**的段清单。
+
+        所以两把刀的分工是：**取数侧只保证传得回来**（按 `AgentTask.result_summary` 那一列
+        的字节上限收敛），**分段与模型预算由平台层做**（`DEFAULT_TOOL_LIMITS["file_diff"]`
+        一个字没动，模型每次仍然只拿到 11,000 字）。取数侧的上限必须**严格更大**，否则
+        平台永远看不到完整的段清单。
         """
-        from services.agent_file_diff_reader import FILE_DIFF_MAX_CHARS
+        from services.agent_file_diff_reader import FILE_DIFF_MAX_BYTES
         from services.ai.budget import TRUNCATION_SUFFIX
         from services.ai.context_tools import DEFAULT_TOOL_LIMITS
-        from utils.content_window import CONTENT_MAX_CHARS
 
-        assert FILE_DIFF_MAX_CHARS == CONTENT_MAX_CHARS == DEFAULT_TOOL_LIMITS["file_diff"], (
-            "三处上限必须是一个数（取数侧、内容窗口、预算层）"
+        assert FILE_DIFF_MAX_BYTES > DEFAULT_TOOL_LIMITS["file_diff"], (
+            "取数侧的上限不能小于模型的单条预算，否则平台分不出完整的段清单"
+        )
+        # MySQL 下 `AgentTask.result_summary` 是 TEXT = 65,535 **字节**，而落库的是整个
+        # JSON。超过它不是「少看一段」，是整条回传失败（strict 模式下 commit 抛 DataError，
+        # 任务停在 processing 等租约重跑）。
+        assert FILE_DIFF_MAX_BYTES <= 60_000, (
+            f"{FILE_DIFF_MAX_BYTES} 字节离 65,535 太近，JSON 信封与换行转义会顶穿那一列"
         )
 
         huge = {
@@ -500,9 +514,36 @@ class TestAgentSideReader:
         got = self._read(monkeypatch, repository_id, head_sha, {}, diff_data=huge)
 
         assert got["truncated"] is True
-        assert len(got["content"]) == FILE_DIFF_MAX_CHARS, len(got["content"])
         assert got["content"].endswith(TRUNCATION_SUFFIX), "截断要说出来"
-        assert got["original_chars"] > FILE_DIFF_MAX_CHARS
+        assert len(got["content"].encode("utf-8")) <= FILE_DIFF_MAX_BYTES, (
+            f"超了字节上限：{len(got['content'].encode('utf-8'))}"
+        )
+        assert got["original_chars"] > len(got["content"])
+
+    def test_a_chinese_diff_is_not_cut_at_half_the_byte_budget(self, monkeypatch, repository_id, head_sha):
+        """中文内容**不该**只因为「字数到了」就被砍 —— 按字符量的刀会浪费一半额度。
+
+        同样 11,000 字：中文是 33,000 字节（MySQL TEXT 的 65,535 只用了**一半**），
+        ASCII 补丁只有 11,000 字节（另一半同样空着）。改成字节口径之后，中文能多拿约
+        1.45 倍、代码补丁约 4.4 倍。
+        """
+        from services.agent_file_diff_reader import FILE_DIFF_MAX_BYTES
+
+        chinese = {
+            "type": "code", "file_path": LUA,
+            "patch": "\n".join(f"+    配置项名称 = 数值{i}" for i in range(4000)), "hunks": [],
+        }
+        got = self._read(monkeypatch, repository_id, head_sha, {}, diff_data=chinese)
+
+        assert got["truncated"] is True, "这份内容本来就应该超上限"
+        content_bytes = len(got["content"].encode("utf-8"))
+        assert content_bytes > 30_000, (
+            f"中文内容只拿到 {content_bytes} 字节 —— 额度还是按字符算的，白白空着一半"
+        )
+        assert len(got["content"]) > 11_000, (
+            f"字符数仍然卡在 11,000（{len(got['content'])}）—— 没有真正放宽"
+        )
+        assert content_bytes <= FILE_DIFF_MAX_BYTES
 
     def test_an_unrenderable_structure_raises_instead_of_returning_empty(self, monkeypatch, repository_id, head_sha):
         """算不出可渲染的结构必须抛 —— 返回空串在这个契约里等于「确实没有差异」。"""

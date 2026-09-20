@@ -118,6 +118,35 @@ def elision_marker(omitted: int) -> str:
     return f"\n\n... [中间省略 {omitted} 字，内容未完整展示] ...\n\n"
 
 
+def truncate_bytes(text: str, max_bytes: int, *, encoding: str = "utf-8") -> tuple[str, bool]:
+    """按**字节**上限截断，返回 (结果, 是否真的截断了)。
+
+    ## 为什么还需要一把按字节量的刀
+
+    `truncate_text` 量的是**字符数**，而跨节点回传那条路上的天花板是**字节数**：
+    `AgentTask.result_summary` 是 `db.Column(db.Text)`，MySQL 下 `TEXT` 是 65,535 **字节**。
+    字符数是个会随内容语言漂移的代理指标 —— 同样 11,000 字，一段中文配表差异是 33,000
+    字节（**一半额度没用上就停了**），而一段 ASCII 代码补丁只有 11,000 字节（另一半同样
+    空着）。而「代码 diff 看不到」正是最需要这个额度的地方，所以该按字节收敛。
+
+    ## 不切在字符中间
+
+    按字节数硬切会把一个多字节字符劈成两半，`decode` 出来是个替换符（U+FFFD）—— 模型读到
+    一串乱码，而且**它不会知道那是切坏的**（看起来就是原文里有怪字符）。所以从头切下来的
+    字节串按 `errors="ignore"` 解码：丢掉被劈开的那个残字节，剩下的仍是干净文本。
+
+    标记本身也算在预算里（与 `truncate_text` 同一条口径），否则结果会超出调用方给的上限。
+    """
+    if max_bytes <= 0:
+        raise ValueError("max_bytes 必须为正数")
+    content = str(text or "")
+    if len(content.encode(encoding)) <= max_bytes:
+        return content, False
+    room = max(0, max_bytes - len(TRUNCATION_SUFFIX.encode(encoding)))
+    head = content.encode(encoding)[:room].decode(encoding, errors="ignore")
+    return head + TRUNCATION_SUFFIX, True
+
+
 def truncate_text_middle(text: str, limit: int) -> tuple[str, bool]:
     """保留**开头和结尾**、省略中间。
 
