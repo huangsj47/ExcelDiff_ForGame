@@ -404,8 +404,8 @@ def test_the_exhausted_notice_says_which_ones_were_skipped(exhausted):
 def test_the_exhausted_notice_says_how_much_was_skipped(exhausted):
     """**占多少** —— 分母是模型一共索取的次数，不是配置里的上限。
 
-    子代理模式下 `used` 是全家合计，而配置里的上限是**每个成员**的（还是配置值的
-    七成）；拿上限做分母会算出大于 100% 的数。这里 12 / (180+12) ≈ 6%。
+    子代理模式下 `used` 是全家合计，而配置里的上限是**每个成员**的；拿上限做分母
+    会算出大于 100% 的数。这里 12 / (180+12) ≈ 6%。
     """
     assert "6%" in exhausted, f"没有给出占比，或占比算错了：{exhausted}"
     assert "100%" not in exhausted, "把上限当分母了（额度用尽时必然算出 100%）"
@@ -424,11 +424,19 @@ def test_the_exhausted_notice_names_the_setting_to_change(exhausted):
     """**该调什么** —— 这一句是整段里唯一可操作的部分，原先完全缺席。
 
     「平台额度不够」不是用户能行动的信息；「去 AI 分析配置里调大上下文索取上限」
-    才是。子代理那 70% 也要说 —— 那是「为什么这次更早用完」的答案。
+    才是。子代理那一档也要说 —— 那是「为什么这次更早用完」的答案。
+
+    **断言的是「说了子代理这件事」，不是某个百分比。** 这里原先钉死 `"70%"`，
+    于是把 `MEMBER_BUDGET_PERCENT` 从 70 调到 100 时，这句用户可见的话变成假话而
+    测试照样绿 —— 它保护的是那个数字，而不是「把额度口径讲清楚」这件事。
     """
     assert "上下文索取上限" in exhausted, "没说该调哪个设置"
     assert "AI 分析配置" in exhausted, "没说去哪调"
-    assert "70%" in exhausted, "开了子代理会更早用完这件事没说"
+    assert "子代理" in exhausted, "开了子代理会更早用完这件事没说"
+    assert "每个分片" in exhausted, "没说清那个上限是给谁的（不写就会读成全家共享）"
+    assert "70%" not in exhausted and "七成" not in exhausted, (
+        "还在说按比例分配 —— 成员现在拿的是足额"
+    )
 
 
 def test_a_non_exhausted_run_gets_no_budget_detail():

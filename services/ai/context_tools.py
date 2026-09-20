@@ -112,8 +112,9 @@ DEFAULT_TOOL_LIMITS: Mapping[str, int] = {
 # 这个数字是按「**单个 agent 够用**」定的：40 次给一个分析 agent。
 #
 # 后来平分那条规则本身也改了（2026-09-20，`subagent.plan_family`）：每个成员拿配置值的
-# `MEMBER_BUDGET_PERCENT`%（默认 70%）而不是「总额 ÷ 成员数」——用户填的是「一个 agent
-# 能看多少」，不是「全家加起来能看多少」。所以 40 在 3 个分片下是**每人 28 次**。
+# `MEMBER_BUDGET_PERCENT`%（默认 100%）而不是「总额 ÷ 成员数」——用户填的是「一个 agent
+# 能看多少」，不是「全家加起来能看多少」。所以 40 在 3 个分片下是**每人 40 次**（原先
+# 平分时是 10 次、后来七成时是 28 次）：一个成员的上限从此就等于这个配置值本身。
 #
 # 它与另外三个数字**必须一起动**（`test_the_prompt_budget_can_honor_the_request_budget`
 # 与 `test_the_context_item_cap_never_wastes_a_paid_request` 各盯一半）：

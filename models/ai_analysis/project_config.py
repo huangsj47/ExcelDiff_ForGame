@@ -51,7 +51,14 @@ DEFAULT_PROMPT_CHAR_BUDGET = 560_000
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 300
 DEFAULT_MIN_SEVERITY = "high"
 DEFAULT_MIN_CONFIDENCE = "high"
-DEFAULT_MAX_ANOMALIES_PER_RUN = 10
+# 单次分析最多留下多少条结论。**这是一道事后闸门**，不是给模型的指令 ——
+# 提示词里没有「最多报 N 条」（全树 grep 不到），所以模型报多少完全看它自己。
+#
+# 10 → 15（2026-09-20）：这条闸门原先**触发时完全不声不响**（截断只记进
+# `response_payload.dropped`，而那个键在读取侧一个消费者都没有）。现在报告正文会多一节
+# 「结论条数上限（平台补充）」逐条点名被截掉的是哪几条，所以抬高一档的代价只是报告可能
+# 长一点。**它不花任何 token**：封顶发生在模型已经答完之后，改它不影响任何一次调用。
+DEFAULT_MAX_ANOMALIES_PER_RUN = 15
 
 # --- 提示词缓存标记（行为在 services/ai/prompt_cache.py，这里只存值）---
 # 两栏合起来才决定「这次请求带不带缓存断点」，默认值是**不发**：

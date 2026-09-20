@@ -121,7 +121,8 @@ def result_payload(
             #
             # `used` 在**子代理模式下是全家合计**（见 `subagent._final_outcome`），
             # 所以界面不能拿它跟配置里的上限直接比 —— 那个上限是**每个成员**的
-            # （而且是配置值的七成）。文案里因此只说比例，不说「已用 N/M」。
+            # （每个成员各拿一整份，见 `subagent.MEMBER_BUDGET_PERCENT`）。
+            # 文案里因此只说比例，不说「已用 N/M」。
             "request_budget": {
                 "used": int(outcome.requests_used or 0),
                 "refused": len(outcome.refused_requests),

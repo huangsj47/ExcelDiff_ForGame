@@ -33,11 +33,13 @@ from services.ai.llm_client import ChatResult
 from services.ai.protocol import Anomaly, DroppedItem
 from services.ai.subagent import (
     CANDIDATE_MAX_ITEMS_PER_MEMBER,
+    MEMBER_BUDGET_PERCENT,
     ROLE_SUBAGENT,
     ROLE_SYNTHESIS,
     Candidate,
     MemberOutcome,
     _path_named_in_findings,
+    _percent_of,
     aggregate_outcomes,
     attach_seed,
     build_synthesis_task,
@@ -703,8 +705,13 @@ class TestEachMemberKeepsMostOfTheConfiguredBudget:
     一个分片跑 3 次报「本轮上下文额度已用尽」、`references/test-scope-and-regression.md`
     读不到，报告里写成「因额度耗尽未读」。更别扭的是**分片数越多，每个分片反而看得越少**。
 
-    现在每个成员拿配置值的 `MEMBER_BUDGET_PERCENT`%（默认 70%，向上取整）——「至少七成」
-    是一条**下限**，与成员数无关。
+    现在每个成员拿配置值的 `MEMBER_BUDGET_PERCENT`%（向上取整）——它是一条**下限**，
+    与成员数无关。
+
+    **这里的期望值一律从 `MEMBER_BUDGET_PERCENT` 算出来，不写死某个百分比。** 原先有两条
+    把 70 的算术结果（28 / 18 / 7）直接写进断言，改百分比时它们会红 —— 但红的原因是
+    「数字变了」，而不是「规则坏了」；照着新数字改一遍，测试就重新变绿，什么也没保住。
+    真正要钉住的是「按配置值算、与成员数无关」，那是下面几条在管的事。
     """
 
     def _limits(self, requests: int, rounds: int = 8):
@@ -720,11 +727,12 @@ class TestEachMemberKeepsMostOfTheConfiguredBudget:
         return plan
 
     @pytest.mark.parametrize("size", [2, 3, 4, 6])
-    def test_every_member_gets_at_least_seventy_percent_regardless_of_the_size(self, size):
+    def test_every_member_gets_the_configured_share_regardless_of_the_size(self, size):
+        expected = _percent_of(40, MEMBER_BUDGET_PERCENT)
         plan = self._plan_with(40, size)
-        assert plan.limits.max_tool_requests >= 28, (
-            f"{size} 个分片时每个成员只拿到 {plan.limits.max_tool_requests} 次 —— "
-            "少于配置值 40 的 70%"
+        assert plan.limits.max_tool_requests == expected, (
+            f"{size} 个分片时每个成员拿到 {plan.limits.max_tool_requests} 次 —— "
+            f"配置值 40 的 {MEMBER_BUDGET_PERCENT}% 是 {expected} 次"
         )
 
     def test_the_allowance_does_not_shrink_as_members_are_added(self):
@@ -735,22 +743,38 @@ class TestEachMemberKeepsMostOfTheConfiguredBudget:
             f"2 个分片时每人 {small} 次、6 个分片时每人 {large} 次 —— 加人反而看得更少"
         )
 
-    def test_it_rounds_up_so_the_floor_is_never_broken(self):
-        """25 的 70% 是 17.5：取 17 就低于「至少七成」了，所以向上取整。"""
-        assert self._plan_with(25, 3).limits.max_tool_requests == 18
+    def test_the_allowance_is_a_share_of_the_setting_not_a_division_of_it(self):
+        """额度是「配置值 × 比例」，**不是**「配置值 ÷ 成员数」。
+
+        这条与上面那条不重复：上面证明「不随成员数变」，这条证明「变的是配置值本身」——
+        一个把额度写成常量（比如永远给 8 次）的实现能过上面那条，过不了这条。
+
+        顺带钉住取整方向：25 的 70% 是 17.5，取 17 就低于「至少 N%」了，所以向上取整。
+        （`_percent_of` 自身的取整行为另有一条纯函数用例。）
+        """
+        expected = _percent_of(25, MEMBER_BUDGET_PERCENT)
+        assert self._plan_with(25, 3).limits.max_tool_requests == expected
+        assert self._plan_with(80, 3).limits.max_tool_requests == _percent_of(
+            80, MEMBER_BUDGET_PERCENT
+        )
+        if MEMBER_BUDGET_PERCENT < 100:
+            # 比例小于 100 时，「略小于配置值」与「被成员数除过」必须能分辨出来。
+            assert expected > 25 // 4, "额度看起来像是又按成员数平分了一次"
 
     def test_a_tiny_allowance_is_never_rounded_down_to_zero(self):
-        """配 1 次就还是 1 次：向上取整保证「七成」不会把小额度抹成 0。
+        """配 1 次就还是 1 次：向上取整保证「N%」不会把小额度抹成 0。
 
-        （`MIN_MEMBER_TOOL_REQUESTS` 那道兜底在 70% 这条规则下几乎不会触发 —— 它留着是
+        （`MIN_MEMBER_TOOL_REQUESTS` 那道兜底在这条规则下几乎不会触发 —— 它留着是
         给「以后把百分比调小」用的，不是这里的判据。）
         """
         assert self._plan_with(1, 3).limits.max_tool_requests == 1
 
     def test_the_round_budget_gets_the_same_floor(self):
-        """轮次也是「设置的额度」，不能一边给七成才够的索取、一边把轮次砍成一半。"""
+        """轮次也是「设置的额度」，不能一边给足索取次数、一边把轮次砍成一半。"""
         plan = self._plan_with(40, 3, rounds=10)
-        assert plan.limits.max_rounds == 7, plan.limits.max_rounds
+        assert plan.limits.max_rounds == _percent_of(10, MEMBER_BUDGET_PERCENT), (
+            plan.limits.max_rounds
+        )
 
     def test_a_configured_zero_is_never_pushed_back_up(self):
         """上限配 0 是一个明确的意思：这次分析一次上下文都不给。
