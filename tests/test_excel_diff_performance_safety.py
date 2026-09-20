@@ -62,10 +62,15 @@ def test_background_excel_previous_commit_uses_the_shared_resolver():
 
 
 def test_diff_service_uses_dataframe_bulk_conversion_path():
-    content = _read("services/diff_service.py")
+    # **路径跟着实现走**：`_smart_row_diff` 搬到了 `services/diff_excel_compare.py`、
+    # `_dataframe_rows_with_index` 搬到了 `services/diff_excel_reader.py`
+    # （`services/diff_service.py` 那个 1917 行的类顶在 2000 行闸门上，已拆成三个 mixin）。
+    # 断言**一字未改**，只是从各自的新家读源码。
+    reader = _read("services/diff_excel_reader.py")
+    compare = _read("services/diff_excel_compare.py")
 
-    assert "def _dataframe_rows_with_index(" in content
-    smart_body = _function_body(content, "_smart_row_diff")
+    assert "def _dataframe_rows_with_index(" in reader
+    smart_body = _function_body(compare, "_smart_row_diff")
     assert "self._dataframe_rows_with_index(current_df)" in smart_body
     assert "self._dataframe_rows_with_index(previous_df)" in smart_body
     assert "rows_equal = False" in smart_body
@@ -74,7 +79,8 @@ def test_diff_service_uses_dataframe_bulk_conversion_path():
 
 
 def test_position_matcher_removes_dead_offset_code():
-    content = _read("services/diff_service.py")
+    # 同上：`_find_position_based_matches` 现在住在 `services/diff_row_alignment.py`。
+    content = _read("services/diff_row_alignment.py")
     body = _function_body(content, "_find_position_based_matches")
 
     assert "offset_sum = 0" not in body

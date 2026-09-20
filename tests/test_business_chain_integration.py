@@ -858,8 +858,14 @@ class TestDiffAccuracyLargeDataset:
         )
 
     def test_adaptive_search_range(self):
-        """验证搜索范围自适应数据集大小（#29 改进）"""
-        content = _read_source("services/diff_service.py")
+        """验证搜索范围自适应数据集大小（#29 改进）
+
+        **路径跟着实现走**：位置匹配（`_find_position_based_matches`）已从
+        `services/diff_service.py` 搬到 `services/diff_row_alignment.py`
+        （那个文件顶在 2000 行闸门上）。断言的**意图一字未改**：要自适应范围、
+        不要固定值 3。
+        """
+        content = _read_source("services/diff_row_alignment.py")
         # 应使用自适应范围而非固定值3
         assert "max(10," in content or "search_range = max(" in content
         assert "search_range = 3" not in content
