@@ -33,11 +33,33 @@ def _enforce_json_object_body():
     （见下面的 route 定义），蓝图级 `before_request` 对蓝图内每个请求都生效 ——
     比逐个 wrapper 加守卫更难漏。
 
-    只对**带 JSON body 的请求**生效：`request.is_json` 为假时（无 body 的 GET/DELETE、
-    表单提交）直接放行。`silent=False` 与 handler 原先的 `request.get_json()` 一致，
-    Content-Type 是 JSON 但 body 不是合法 JSON 时照旧 400，不顺手改掉这个语义。
+    只对**真的带了 body 的 JSON 请求**生效。`silent=False` 与 handler 原先的
+    `request.get_json()` 一致，Content-Type 是 JSON 但 body 不是合法 JSON 时照旧 400，
+    不顺手改掉这个语义。
+
+    ## 为什么不能只看 `request.is_json`
+
+    这一条原先写的是「`request.is_json` 为假时（无 body 的 GET/DELETE、表单提交）
+    直接放行」—— **那个前提是错的**：`is_json` 只看 `Content-Type`，**说明不了有没有
+    body**。于是「带着 `Content-Type: application/json` 发一个没有 body 的请求」会被
+    判成「body 不是合法 JSON」，得到 400。
+
+    这不是理论边界，本项目的页面就是这么发的：`weekly_version_config.html` 的
+    `editConfig`（GET 详情）与 `deleteConfig`（DELETE）都写着
+    `headers: {'Content-Type': 'application/json'}` 而没有 body。现象是**编辑按钮点了
+    报「获取配置信息失败，请重试」**、删除与重命名一起失效 —— 而且返回的是 Flask 默认的
+    **HTML** 400，前端 `response.json()` 先抛异常，连服务端的 message 都读不到，
+    排查方向会被带到「接口 500 了」上去。
+
+    所以判据换成「有没有 body」：没有 body 就没有形状可校验，无论什么方法。
+
+    顺带一提，无 body 的请求本来也不会出这条守卫要防的那个错：
+    handler 里的 `request.get_json(silent=True) or {}` 对空 body 得到的就是 `{}`，
+    不会像根节点是数组那样崩在 `.get()` 上。所以放行它不降低任何保护。
     """
     if not request.is_json:
+        return None
+    if not request.get_data():
         return None
     _payload, error = read_json_object(silent=False)
     return error

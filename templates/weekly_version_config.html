@@ -1258,11 +1258,14 @@ function editAdjustStartTimeFromEnd() {
 // 编辑配置
 function editConfig(configId) {
     // 获取配置详情
+    //
+    // **GET 不带 `Content-Type`**：它描述的是「我发出去的 body 是什么格式」，
+    // 而这里根本没有 body。原先带着它，服务端蓝图的 `before_request` 会按
+    // 「声明了 JSON 却没有 body」判成 400（返回的还是 HTML），前端读不到 message，
+    // 只看到「获取配置信息失败，请重试」。服务端已经改成「没有 body 就不校验形状」，
+    // 这里也把那句没有意义的声明去掉 —— 两头都不该留着这个坑。
     fetch(`{{ url_for('weekly_version_config_api', project_id=project.id) }}/${configId}`, {
         method: 'GET',
-        headers: {
-            'Content-Type': 'application/json',
-        }
     })
     .then(response => response.json())
     .then(data => {
@@ -1310,9 +1313,6 @@ function deleteConfig(configId) {
     if (confirm('确定要删除这个配置吗？删除后相关的diff缓存也会被清除。')) {
         fetch(`{{ url_for('weekly_version_config_api', project_id=project.id) }}/${configId}`, {
             method: 'DELETE',
-            headers: {
-                'Content-Type': 'application/json',
-            }
         })
         .then(response => response.json())
         .then(data => {

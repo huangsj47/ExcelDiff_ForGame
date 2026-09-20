@@ -244,3 +244,67 @@ def test_a_json_object_body_still_reaches_the_view(admin_client):
 
     assert resp.status_code == 400
     assert resp.get_json()["message"] == "缺少必要参数"
+
+
+# ==========================================================================
+# 没有 body 的请求：**不能**按「body 不是合法 JSON」判
+# ==========================================================================
+
+
+def test_a_body_less_request_is_not_treated_as_a_malformed_body(admin_client):
+    """**回归**：带着 `Content-Type: application/json` 发一个没有 body 的 GET。
+
+    周版本配置页面的 `editConfig` 就是这么发的，而蓝图的 `before_request` 原先写的是
+    「`request.is_json` 为假时放行」—— `is_json` **只看 Content-Type**，说明不了有没有
+    body，于是这条正常的读请求被判成 400，且响应是 Flask 默认的 **HTML**：
+    前端 `response.json()` 先抛异常，只落到 `.catch`，用户看到的是
+    「获取配置信息失败，请重试」，服务端的 message 一个字都读不到。
+    同一页面上 `deleteConfig`（DELETE）是一模一样的写法，所以删除也一起失效。
+
+    修法是把判据换成「有没有 body」：没有 body 就没有形状可校验。
+    """
+    url = f"/projects/{admin_client.project_id}/weekly-version-config/api/{admin_client.config_id}"
+
+    resp = admin_client.get(url, headers={"Content-Type": "application/json"})
+
+    assert resp.status_code == 200, (
+        f"没有 body 的 GET 被判成了 {resp.status_code}：{resp.get_data(as_text=True)[:120]!r}"
+    )
+    assert resp.get_json()["success"] is True
+
+
+def test_a_body_less_delete_is_not_judged_by_its_body(admin_client):
+    """同一个坑的另一半：`deleteConfig` 也是「声明了 JSON、没有 body」的 DELETE。
+
+    这里用一个**不存在的 config id** 去打：断言的是「**不是**因为 body 形状被拒」，
+    所以期望 404（`first_or_404`），不是 400。用真的 id 会把配置删掉，
+    后面同一用例里的对照就跑不起来了。
+    """
+    url = f"/projects/{admin_client.project_id}/weekly-version-config/api/99999999"
+
+    # **要带 CSRF**：DELETE 不是安全方法，`enforce_csrf` 会先跑。不带的话 400 来自
+    # CSRF，这条用例就变成了在测另一件事（第一版就是这么写的，看到 400 还以为守卫没修好）。
+    resp = admin_client.delete(
+        url,
+        headers={
+            "Content-Type": "application/json",
+            "X-CSRFToken": "test-csrf-token",
+        },
+    )
+
+    assert resp.status_code == 404, (
+        f"没有 body 的 DELETE 走到 404 之前就被拦成了 {resp.status_code}"
+    )
+
+
+def test_a_non_object_body_is_still_rejected_by_the_same_blueprint(admin_client):
+    """**反自检**：放宽「没有 body」不能顺手把「有 body 但根节点不是对象」也放了。
+
+    少了这一条，一个「直接删掉整个 before_request」的实现能让上面两条全绿。
+    """
+    url = f"/projects/{admin_client.project_id}/weekly-version-config/api/{admin_client.config_id}"
+
+    resp = _call_raw(admin_client, "PUT", url, "[1]", agent=False)
+
+    assert resp.status_code == 400
+    assert "JSON 对象" in resp.get_json()["message"]
