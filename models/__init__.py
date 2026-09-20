@@ -44,7 +44,9 @@ from .operation_log import OperationLog
 from .agent import AgentNode, AgentProjectBinding, AgentTask, AgentDefaultAdmin, AgentIncident
 from .agent_temp_cache import AgentTempCache
 from .ai_analysis import (  # noqa: E402 —— 本文件刻意先定义 `db` 再导入模型（见上）
+    AiAnalysisAnomaly,
     AiAnalysisRun,
+    AiAnalysisTrace,
     AiPlatformBudget,
     AiProjectAnalysisConfig,
     AiProjectApiKey,
@@ -106,6 +108,8 @@ __all__ = [
     'AgentTempCache',
     'AiProjectApiKey',
     'AiAnalysisRun',
+    'AiAnalysisTrace',
+    'AiAnalysisAnomaly',
     'AiWeeklyAnalysisState',
     'AiProjectAnalysisConfig',
     'AiPlatformBudget',

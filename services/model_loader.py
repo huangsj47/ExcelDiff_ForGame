@@ -60,6 +60,8 @@ _MODEL_OBJECT_NAMES = frozenset(
         "AgentTempCache",
         "AiProjectApiKey",
         "AiAnalysisRun",
+        "AiAnalysisTrace",
+        "AiAnalysisAnomaly",
         "AiWeeklyAnalysisState",
         "AiProjectAnalysisConfig",
         "AuthUser",

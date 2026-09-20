@@ -454,6 +454,15 @@ def delete_project(project_id):
     QkitAuthProjectPreAssignment = _optional_runtime("QkitAuthProjectPreAssignment")
     QkitAuthProjectImportConfig = _optional_runtime("QkitAuthProjectImportConfig")
     QkitAuthImportBlock = _optional_runtime("QkitAuthImportBlock")
+    AuthProjectConfirmPermission = _optional_runtime("AuthProjectConfirmPermission")
+    QkitProjectConfirmPermission = _optional_runtime("QkitProjectConfirmPermission")
+    AiAnalysisRun = _optional_runtime("AiAnalysisRun")
+    AiAnalysisTrace = _optional_runtime("AiAnalysisTrace")
+    AiAnalysisAnomaly = _optional_runtime("AiAnalysisAnomaly")
+    AiProjectAnalysisConfig = _optional_runtime("AiProjectAnalysisConfig")
+    AiProjectApiKey = _optional_runtime("AiProjectApiKey")
+    AiWeeklyAnalysisState = _optional_runtime("AiWeeklyAnalysisState")
+    AgentTempCache = _optional_runtime("AgentTempCache")
 
     def _safe_delete(query, label):
         try:
@@ -526,6 +535,88 @@ def delete_project(project_id):
                 "QkitAuthImportBlock",
             )
         _safe_nullify_created_project(QkitAuthProjectCreateRequest, "QkitAuthProjectCreateRequest")
+        # 确认权限规则：两张表都是 `project_id` NOT NULL，漏一张就整个删除失败。
+        if AuthProjectConfirmPermission is not None:
+            _safe_delete(
+                AuthProjectConfirmPermission.query.filter(
+                    AuthProjectConfirmPermission.project_id == project_id
+                ),
+                "AuthProjectConfirmPermission",
+            )
+        if QkitProjectConfirmPermission is not None:
+            _safe_delete(
+                QkitProjectConfirmPermission.query.filter(
+                    QkitProjectConfirmPermission.project_id == project_id
+                ),
+                "QkitProjectConfirmPermission",
+            )
+
+        # ---- AI 分析那一族（ai_*）与 Agent 临时缓存 ----
+        #
+        # 整族都不在「仓库 / 周版本」那条链上，所以它们的外键此前**一条都没被显式删过**。
+        # 后果不是「留了点垃圾数据」，而是**项目永远删不掉**：`db.session.delete(project)`
+        # 时 ORM 会先把所有子行的 `project_id` 置 NULL（默认 cascade 里没有 delete），
+        # 而这些列全是 NOT NULL，于是抛
+        # `NOT NULL constraint failed: ai_project_analysis_config.project_id` ——
+        # 报错信息里只有**第一张**撞上的表，剩下的几张要删一次、看一次日志才能试出来。
+        #
+        # 顺序：`ai_analysis_trace` / `ai_analysis_anomaly` 的 `run_id` 是 NOT NULL 外键，
+        # 必须**先于** `ai_analysis_run` 删，否则删 run 的那一步同样会撞 NOT NULL。
+        ai_run_ids: list[int] = []
+        if AiAnalysisRun is not None:
+            ai_run_ids = [
+                row[0]
+                for row in db.session.query(AiAnalysisRun.id)
+                .filter(AiAnalysisRun.project_id == project_id)
+                .all()
+            ]
+        if AiAnalysisTrace is not None and ai_run_ids:
+            _safe_delete(
+                AiAnalysisTrace.query.filter(AiAnalysisTrace.run_id.in_(ai_run_ids)),
+                "AiAnalysisTrace",
+            )
+        if AiAnalysisAnomaly is not None:
+            # 两个条件都要：`run_id` 那条覆盖「挂在本项目运行上的异常」，`project_id`
+            # 那条覆盖「运行记录已经被清理、异常还在」的孤儿行（异常是可以单独处置的，
+            # 用户处置过的那条不该因为运行记录没了就留下）。
+            anomaly_filters = [AiAnalysisAnomaly.project_id == project_id]
+            if ai_run_ids:
+                anomaly_filters.append(AiAnalysisAnomaly.run_id.in_(ai_run_ids))
+            _safe_delete(
+                AiAnalysisAnomaly.query.filter(or_(*anomaly_filters)),
+                "AiAnalysisAnomaly",
+            )
+        if AiAnalysisRun is not None:
+            _safe_delete(
+                AiAnalysisRun.query.filter(AiAnalysisRun.project_id == project_id),
+                "AiAnalysisRun",
+            )
+        if AiProjectAnalysisConfig is not None:
+            _safe_delete(
+                AiProjectAnalysisConfig.query.filter(
+                    AiProjectAnalysisConfig.project_id == project_id
+                ),
+                "AiProjectAnalysisConfig",
+            )
+        if AiProjectApiKey is not None:
+            _safe_delete(
+                AiProjectApiKey.query.filter(AiProjectApiKey.project_id == project_id),
+                "AiProjectApiKey",
+            )
+        if AiWeeklyAnalysisState is not None:
+            _safe_delete(
+                AiWeeklyAnalysisState.query.filter(
+                    AiWeeklyAnalysisState.project_id == project_id
+                ),
+                "AiWeeklyAnalysisState",
+            )
+        if AgentTempCache is not None:
+            # 这张表**没有外键**（`project_id` 只是个可空列），所以它既不会让删除失败，
+            # 也不会在删完之后显现出来 —— 只能显式清。
+            temp_filters = [AgentTempCache.project_id == project_id]
+            if repo_ids:
+                temp_filters.append(AgentTempCache.repository_id.in_(repo_ids))
+            _safe_delete(AgentTempCache.query.filter(or_(*temp_filters)), "AgentTempCache")
 
         # 删除 Agent 相关引用
         background_task_ids = []
