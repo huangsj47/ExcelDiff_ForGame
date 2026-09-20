@@ -1,277 +1,139 @@
-﻿# 配表代码版本 Diff 平台
+# 配表代码版本 Diff 平台
 
-面向配置/代码仓库的变更确认平台，支持 Git/SVN 提交采集、差异展示、确认流转、周版本聚合，以及平台 + Agent 分布式执行。
+🎯 面向**配置 / 代码仓库**的变更确认平台：Git/SVN 提交采集 → 差异展示 → 逐级确认 → 周版本聚合，
+并支持**平台 + Agent** 分布式执行与 **AI 变更风险分析**。
 
-## 这是什么
+给谁用：想知道「这周改了什么、要不要回归、该测哪儿」的**策划 / QA / 版本管理员**，
+以及需要把这条链路接进自己项目流程的**部署与运维同学**。
 
-这个平台解决的是“项目 -> 仓库 -> 提交 -> 差异 -> 确认”的完整链路，目标是：
-- 让变更可视、可追踪、可确认
-- 让 Excel/文本等高频差异场景可落地
-- 让单机与分布式（平台 + 多 Agent）都能稳定运行
+## 🧩 这是什么
+
+平台把「项目 → 仓库 → 提交 → 差异 → 确认」这条链路收在一个界面里：
+
+- 👀 **变更可视**：Excel / CSV 逐单元格对比、文本按行对比，改动一眼定位
+- 🧾 **确认可追踪**：提交与文件两级确认流转 —— 谁确认的、什么时候、什么结论，全部落库
+- 🏠 **单机与分布式都能跑**：一台机器可以跑，多节点集群也可以跑（平台编排 + Agent 执行）
+- 🤖 **AI 先看一眼**：产出一份面向回归的风险说明与测试建议，减少人工翻 diff 的时间
 
 ## 核心功能（重点）
 
-1. 仓库接入与同步
-- 支持 Git / SVN 仓库接入与同步
-- 提供仓库管理、连接测试、手动同步、状态追踪
+🚀 **六项基础能力 + 一项 Beta 能力：**
 
-2. 提交与差异确认
-- 提交列表查询、状态流转（待确认/已确认/已拒绝）
-- 支持批量确认/拒绝
-- 支持文件维度差异查看与追溯
+1. 🗂️ **仓库接入与同步**
+   - Git / SVN 仓库接入与同步、连接测试、手动同步、状态追踪
 
-3. Excel 差异与缓存体系
-- Excel 差异渲染与缓存（Diff 缓存 + HTML 缓存）
-- 大结果缓存与回传优化，降低重复计算
+2. ✅ **提交与差异确认**
+   - 提交列表查询、状态流转（待确认 / 已确认 / 已拒绝）、批量确认与拒绝
+   - 文件维度的差异查看与追溯
 
-4. 周版本管理
-- 周版本配置、自动同步、文件级确认
-- 周版本统计与状态联动
+3. 📊 **Excel 差异与缓存体系**
+   - Excel 逐单元格渲染与对比（「表里怎么写就怎么比」的口径见
+     [代码架构说明.md](./docs/代码架构说明.md) 第 3.4 节）
+   - Diff 缓存 + HTML 缓存、大结果回传优化，避免重复计算
 
-5. 平台 + Agent 分布式执行
-- 平台负责任务编排与落库
-- Agent 负责仓库拉取、任务执行与结果回传
-- 支持 Agent 节点监控、任务调度、故障重试
+4. 🗓️ **周版本管理**
+   - 周版本配置、自动同步、文件级确认、统计与状态联动
 
-6. Agent 自更新能力
-- 支持 release 包发布与 Agent 自动更新
-- 支持一键回滚到上一 release 或指定版本
+5. 🛰️ **平台 + Agent 分布式执行**
+   - 平台负责任务编排与落库；Agent 负责仓库拉取、任务执行与结果回传
+   - Agent 节点监控、任务调度、故障重试
 
-7. AI 变更风险分析（Beta）
-- 对**周版本**或**单次提交**产出一份面向回归的风险说明：影响面分析、**测试建议**、
-  **回归建议**、上线与回滚关注点
-- 模型**初始只拿到变更清单**（提交信息 + 文件路径），**diff 正文要它自己点名索取**：
-  五个只读工具（`commit_detail` / `file_diff` / `file_content` / `read_reference` /
-  `find_references`）每轮只点名 4~8 个最可疑的文件 —— 周版本一次可能改几百个文件，
-  全塞进提示词等于把预算花在无关的文件上。内容超长时按结构分段、让模型点名要后面的段；
-  `find_references` 在本批次改动的文件里搜一个标识符出现在哪几行（找「耦合的另一端」用）。
-  拿到的证据再按门槛（严重度 / 置信度 / 条数）过滤后落库
-- 增量累积：第二次起带上「上次报过的问题」并要求标注「仍成立 / 已修复 / 已被推翻」
-- 子代理模式（**默认开**，仅周版本；会让这一次分析的模型调用次数变成 (n+1) 倍）：把九个检查维度分组交给几个分片代理分头深挖
-  （默认 3 个、最多 6 个），再由主代理汇总。所有分片的请求共享同一段**逐字节相同的前缀**
-  （系统提示词 + 整份变更清单），所以第一个分片写下的缓存后面每个都能命中；
-  哪个分片没跑成会在报告里点名写成「信息缺口」，不会长成「没问题」；再打开**对账轮**
-  （同样默认关）会把报告里最严重的那几条交给一次独立请求去**找反证**，结论写在报告末尾的
-  「对账结果（找反证）」里 —— 对账轮自己没跑成也会如实降级，不会静默地「当作核过了」
-- 消耗可查（顶部导航 →「AI 消耗」）：按项目 / 周版本 / 单次运行看 token、缓存命中率与
-  工具调用；费用需在项目配置里填「模型单价表」后估算（接口只回 token 数、不回金额）
-- 抽屉里有**两个标签**：**「完整结论」**（那份 7 章报告，没在跑时默认显示）与
-  **「思考过程」**（这一次的**逐轮**记录：每轮点名要了什么、哪条取不到、哪些请求没执行；
-  正在跑时默认显示）。平台没有逐字输出 —— 一轮跑完才多一条，文案如实这么写；
-  跑完之后它仍然在，换成落库的逐轮明细（比实时那份更全）
-- 抽屉里能**导出 md**：把这一次的结论存成一份文档（**元信息表 + 报告原文逐字 +
-  异常清单附录**），交给策划/QA 或贴进工单。附录只列**达到门槛**的条目（没达到的
-  只写在正文里），且**不写「处置」列**（那一列在平台上还没有写入路径）；
-  导出是只读的，不重跑、不花钱
-- 抽屉里能**翻历次结论**：这个目标跑过的每一次都列出来（时间 / 状态 / 风险 / 摘要），
-  点开就能读那一份报告并单独导出。**正在分析时也能翻** —— 点「重新分析」之后屏幕上那句
-  「分析进行中」会把旧报告换掉，旧结论从这里拿（用户报的就是这个）。
-  列表与 `/latest` 用同一把窗口尺子，只列有结论的和失败的；失败的那次也列（那是失败原因）
-- 面向测试同学的完整说明（含它**看不到什么**）：[`AI分析使用说明.md`](./docs/AI分析使用说明.md)
+6. 🔄 **Agent 自更新能力**
+   - release 包发布与 Agent 自动更新，一键回滚到上一 release 或指定版本
 
-## Excel/CSV 单元格的比较口径（`DIFF_LOGIC_VERSION` 1.10.0）
+7. 🤖 **AI 变更风险分析（Beta）**
+   - 对**周版本**或**单次提交**产出一份面向回归的风险说明：影响面分析、**测试建议**、
+     **回归建议**、上线与回滚关注点。模型**初始只拿到变更清单**（提交信息 + 文件路径），
+     diff 正文要它自己点名索取（五个只读工具，每轮最多点名 4~8 个文件，
+     找「耦合的另一端」用 `find_references`），拿到的证据按门槛过滤后落库
+   - 结论抽屉里有**两个标签**：「**完整结论**」（那份 7 章报告）与「**思考过程**」
+     （这一次的逐轮记录：每轮点名要了什么、哪条取不到、哪些请求没执行）
+   - 抽屉里能**导出 md**（元信息表 + 报告原文逐字 + 异常清单附录，交给策划 / QA 或贴进工单），
+     也能**翻历次结论**（这个目标跑过的每一次都列出来，**正在分析时也能翻**）
+   - 增量累积：第二次起带上「上次报过的问题」，要求标注仍成立 / 已修复 / 已被推翻
+   - 消耗可查：顶部导航 →「**AI 消耗**」，按项目 / 周版本 / 单次运行看 token、缓存命中率、
+     工具调用与费用估算
+   - 📖 面向测试同学的完整说明（含它**看不到什么**）：
+     [AI分析使用说明.md](./docs/AI分析使用说明.md)
 
-**表里怎么写就怎么比。** Excel/CSV 一律**按文本原样读取**
-（`dtype=str` + `keep_default_na=False`），不做类型推断、不做 NA 转换；
-比较与展示都不 `strip`、不把看起来像空值的文本当空。
+## ⚡ 快速开始
 
-这意味着下面这些「屏幕上看着差不多、字面量其实不同」的改动**会被报成变更**：
+**1. 📦 安装依赖**
 
-| 表里怎么写 | 报不报变更 |
-|---|---|
-| `00123` → `123` | ✅ 报（前导零变了） |
-| `1.10` → `1.1` | ✅ 报（尾零变了） |
-| `TRUE` → `true` | ✅ 报（大小写变了） |
-| `NULL` / `null` / `None`（文本） → 空 | ✅ 报 |
-| `null` → `None` | ✅ 报（两个不同取值） |
-| `'  x  '` → `'x'` | ✅ 报（首尾空格变了） |
-| 清空一个单元格 | ✅ 报 |
-| `123` → `123` | ❌ 不报 |
-
-**1.10.0 补充**：上表在「一行的每个格子都是 `null`/`None`/空白串」时原先**不成立**——
-行过滤（`_has_valid_data`）自带一份与比较层相反的黑名单，会把这类行整个丢掉，
-于是行内任何改动都不报。现在行过滤与 `_normalize_value` 共用同一口径，
-只有真正的空行（`None`/`NaN`/空字符串）才被过滤。另外 `.tsv` 现在按制表符读取，
-与 `.csv` 同一口径（此前会落到 `pd.ExcelFile` 上必然报「无法确定 Excel 格式」）。
-
-
-## 账号与权限
-
-支持两套后端：
-- `AUTH_BACKEND=local`：本地账号密码体系
-- `AUTH_BACKEND=qkit`：Qkit 登录体系
-
-统一采用 RBAC 思路（平台管理员 / 项目管理员 / 普通用户）与项目级权限隔离。
-
-## 部署模式
-
-通过 `DEPLOYMENT_MODE` 控制：
-- `single`：单机一体模式（默认）
-- `platform`：平台控制面模式（推荐生产）
-- `agent`：进程以 Agent 循环运行（多用于调试）
-
-## 快速开始
-
-1. 安装依赖
 ```bash
 pip install -r requirements.txt
 ```
 
-2. 准备配置
+**2. ⚙️ 准备配置**
+
 ```bash
-cp .env.simple .env
-```
-Windows:
-```bat
-copy .env.simple .env
+cp .env.simple .env          # Windows: copy .env.simple .env
 ```
 
 > ⚠️ **`.env.simple` 是模板，复制后必须替换两个密钥，否则平台不会启动。**
 >
-> 模板里 `FLASK_SECRET_KEY` 与 `AGENT_SHARED_SECRET` 的值是占位串
-> （形如 `__REPLACE_ME_WITH_A_RANDOM_...__`），不是可用密钥。校验有两道，覆盖面不同：
+> `FLASK_SECRET_KEY` 与 `AGENT_SHARED_SECRET` 在模板里是占位串
+> （形如 `__REPLACE_ME_WITH_A_RANDOM_...__`），不是可用密钥。生成随机密钥
+> （两个键各生成一次，不要复用同一个值）：
 >
-> 1. 启动脚本 `start.bat` / `start.sh` → `python -m utils.env_bootstrap`
->    （退出码 2 即中止）；
-> 2. 进程入口 `bootstrap/runtime_entry.py::_enforce_env_secrets_or_exit`
->    —— Web 模式与 `DEPLOYMENT_MODE=agent` 都走这里，所以**直接 `python app.py`
->    也绕不过去**。
->
-> 判定标准：这两个键仍是占位值，或长度不足（`FLASK_SECRET_KEY` < 32 字符、
-> `AGENT_SHARED_SECRET` < 16 字符）→ **拒绝启动**并打印中文修复指引。
->
-> 生成随机密钥（两个键各生成一次，不要复用同一个值）：
 > ```bash
 > python -c "import secrets;print(secrets.token_urlsafe(48))"
 > ```
-> 填入 `.env` 的 `FLASK_SECRET_KEY` 与 `AGENT_SHARED_SECRET`；Agent 节点机的
-> `AGENT_SHARED_SECRET` 必须与平台侧完全一致。
 >
-> Agent 节点机通常直接跑 `agent/start_agent.py`（既不过启动脚本，也不过
-> `runtime_entry`），所以 Agent 侧自带一份同等校验
-> （`agent/runner_runtime.py::_assert_agent_secret_is_usable`，独立实现 ——
-> Agent 是单独打包部署的，平台 `utils` 在节点机上未必存在）。
+> 填入 `.env`；Agent 节点机的 `AGENT_SHARED_SECRET` 必须与平台侧完全一致。
 >
-> 本地调试临时放行（**切勿用于生产**）：`set TESTING=1`（Windows cmd）或
-> `export TESTING=1`（Linux/macOS）。pytest 环境（`tests/conftest.py` 已设
-> `TESTING=1`）不受此校验影响。
->
-> 该密钥为空（未配置）时不拒绝启动，只保留既有降级行为（运行期随机
-> `FLASK_SECRET_KEY`，Agent 接口返回 503）—— 只有「看起来配好了、实际是公开常量」
-> 才是必须拦下的情形。
+> 校验有**两道门**（启动脚本 + 进程入口）、各自的判定标准、以及本地调试的临时放行办法，
+> 见 [平台配置说明.md](./docs/平台配置说明.md) 第 1.2 节。
 
-3. 启动平台
-Linux/macOS:
+**3. ▶️ 启动平台**
+
 ```bash
-bash start.sh
-```
-Windows:
-```bat
-start.bat
+bash start.sh                # Windows: start.bat
 ```
 
-4. 访问平台
-- `http://127.0.0.1:8002`
+**4. 🌐 访问平台** —— `http://127.0.0.1:8002`
 
-## 平台 + Agent 最小落地路径（推荐）
+## 🧭 你该读哪份文档
 
-1. 平台机：
-- `.env` 设置 `DEPLOYMENT_MODE=platform`
-- 配置统一 `AGENT_SHARED_SECRET`
+| 文档 | 面向谁 | 里面有什么 |
+|---|---|---|
+| [AI分析使用说明.md](./docs/AI分析使用说明.md) | 🧪 测试同学 / 策划 | AI 分析怎么用、报告怎么读、**它看不到什么** |
+| [平台配置说明.md](./docs/平台配置说明.md) | 🛠️ 部署与运维 | `.env` 每个键、账号与权限、运行模式、发布与回滚、接口调用方式 |
+| [代码架构说明.md](./docs/代码架构说明.md) | 💻 二次开发 | 架构图、调用链路、目录与模块、数据层、CI 门禁、技术债 |
+| [agent/README.md](./agent/README.md) | 🛰️ Agent 节点 | Agent 的单独部署与运行 |
 
-2. Agent 节点机：
-- 部署 `agent/` 目录
-- 配置 `agent/.env` 中 `PLATFORM_BASE_URL`、`AGENT_SHARED_SECRET`、`AGENT_NAME`
-- 启动 `start_agent.sh` 或 `start_agent.bat`
+## 🔧 你需要优先关注的配置项
 
-3. 平台侧确认节点在线：
-- 管理页 `/admin/agents`
+- **平台**：`AUTH_BACKEND` / `DEPLOYMENT_MODE` / `AGENT_SHARED_SECRET` / `FLASK_SECRET_KEY`
+- **Agent**：`PLATFORM_BASE_URL` / `AGENT_SHARED_SECRET` / `AGENT_NAME`
 
-## Agent 发布与回滚（常用命令）
+> 两个密钥必须替换掉 `.env.simple` 里的占位串，否则启动脚本拒绝启动（见上面「⚡ 快速开始」）。
+> 账号体系（`local` / `qkit`）与三种运行模式的差异，见
+> [平台配置说明.md](./docs/平台配置说明.md) 第 2 / 3 节。
 
-发布新版：
+## 🤝 平台 + Agent 最小落地路径（推荐）
+
+1. 🖥️ **平台机**：`.env` 设 `DEPLOYMENT_MODE=platform`，配置统一的 `AGENT_SHARED_SECRET`
+2. 🛰️ **Agent 节点机**：部署 `agent/` 目录，在 `agent/.env` 配 `PLATFORM_BASE_URL` /
+   `AGENT_SHARED_SECRET` / `AGENT_NAME`，启动 `start_agent.sh`（Windows 用 `start_agent.bat`）
+3. ✅ **平台侧确认节点在线**：管理页 `/admin/agents`
+
+### 📦 发布与回滚（常用命令）
+
 ```bash
-python scripts/publish_agent_release.py
-```
-
-回滚到上一版：
-```bash
-python scripts/publish_agent_release.py --rollback --rollback-steps 1
-```
-
-回滚到指定版：
-```bash
+python scripts/publish_agent_release.py                                 # 发布新版
+python scripts/publish_agent_release.py --rollback --rollback-steps 1   # 回滚到上一版
 python scripts/publish_agent_release.py --rollback --rollback-target-version <版本号>
+python scripts/rollback_agent_release.py --steps 1                      # 独立回滚脚本
 ```
 
-独立回滚脚本：
-```bash
-python scripts/rollback_agent_release.py --steps 1
-```
+> 🔒 Agent 自更新带**三条 fail-closed 安全规则**：`version` 必须是单一安全路径段、
+> 下载地址必须与 `PLATFORM_BASE_URL` 同源、`package_sha256` 必填且校验；
+> 发布清单不满足即**拒绝安装**。细节见
+> [平台配置说明.md](./docs/平台配置说明.md) 第 8 节。
 
-### 自更新安全约束（Agent 侧强校验）
+## 🗺️ 后续优化方向
 
-Agent 执行自更新时（`agent/self_update.py`）现在有三条 fail-closed 规则，
-发布清单不满足即**拒绝安装**，原因会写进返回平台的消息与 Agent 日志：
-
-1. **`version` 必须是单一安全路径段**（只允许字母数字与 `.` `_` `-`，且首字符为字母数字）。
-   该值会参与临时目录拼接，历史实现直接 `shutil.rmtree(os.path.join(root, ".agent_update_tmp", version))`，
-   `version="../../.."`、绝对路径、Windows 盘符都能删掉任意目录。现在改为
-   `realpath` + `commonpath` 的包含性校验，落点必须仍在 Agent 目录内。
-2. **下载地址必须与 `PLATFORM_BASE_URL` 同源**（scheme + host + port 全等）。
-   下载请求携带 `X-Agent-Token` 与共享凭据，`download_path` 若允许绝对 URL，
-   等于把机群凭据发给任意主机。
-3. **`package_sha256` 变为必填**，且必须是 64 位十六进制串；缺失、格式非法或
-   摘要不匹配一律拒绝安装。历史实现写作 `if expect_sha256:` —— 清单里不写摘要
-   就完全不校验，篡改发布清单者只要删掉该字段即可投递任意包。
-
-> 平台侧 `scripts/publish_agent_release.py` 生成的清单已始终包含 `package_sha256`，
-> 正常发布流程不受影响。
-
-## 文档导航
-
-- AI 变更风险分析（**面向测试同学**）：[`AI分析使用说明.md`](./docs/AI分析使用说明.md)
-- 平台配置与部署总说明：[`平台配置说明.md`](./docs/平台配置说明.md)
-- 代码架构与模块实现说明：[`代码架构说明.md`](./docs/代码架构说明.md)
-- Agent 独立运行说明：[`agent/README.md`](./agent/README.md)
-
-## 你需要优先关注的配置项
-
-- 平台：`AUTH_BACKEND` / `DEPLOYMENT_MODE` / `AGENT_SHARED_SECRET` / `FLASK_SECRET_KEY`
-- Agent：`PLATFORM_BASE_URL` / `AGENT_SHARED_SECRET` / `AGENT_NAME`
-
-> `AGENT_SHARED_SECRET` 与 `FLASK_SECRET_KEY` 必须替换掉 `.env.simple` 里的占位串，
-> 否则启动脚本会拒绝启动（见「快速开始 → 2. 准备配置」）。
-
-## 代码质量工具（新增）
-
-1. 安装开发依赖
-```bash
-pip install -r requirements-dev.txt
-```
-
-2. 运行增量 Ruff（仅检查改动文件）
-```bash
-python scripts/run_ruff_changed.py
-```
-
-3. 运行文件长度守卫
-```bash
-python scripts/check_file_length.py --strict
-```
-
-4. 启用 pre-commit
-```bash
-pre-commit install
-pre-commit run --all-files
-```
-
-## 说明
-
-当前 README 为“重点版”，用于快速理解与落地。详细参数、模式差异、发布回滚细节以 [`平台配置说明.md`](./docs/平台配置说明.md) 为准。
-
-## 后续优化方向
-
-- AI 分析：人工处置（待确认/已确认/已忽略）的界面入口与异常清单的结构化渲染 ——
-  两者的数据层都已具备（见 [`AI分析使用说明.md`](./docs/AI分析使用说明.md) 第 4 节）。
-- AI 框架拓展：参考 https://github.com/alibaba/open-code-review.git 。
+- 🤖 **AI 分析**：异常清单的结构化渲染（数据层已具备，见
+  [AI分析使用说明.md](./docs/AI分析使用说明.md) 第 4 节）。
+- 🧩 **AI 框架拓展**：参考 <https://github.com/alibaba/open-code-review.git> 。

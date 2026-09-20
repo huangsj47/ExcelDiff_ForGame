@@ -46,6 +46,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HELP_PAGE = os.path.join(PROJECT_ROOT, "templates", "help.html")
 AI_DOC = os.path.join(PROJECT_ROOT, "docs", "AI分析使用说明.md")
 README = os.path.join(PROJECT_ROOT, "README.md")
+# 人工处置面板。帮助页里写的那句「去哪儿点」必须指着它，所以两条一起断言。
+ANOMALY_PANEL_JS = os.path.join(PROJECT_ROOT, "static", "js", "ai_anomaly_disposition.js")
 
 
 def _read(path: str) -> str:
@@ -167,14 +169,34 @@ def test_the_help_page_keeps_the_honest_limits_section():
     assert "报告是辅助" in help_html, "没有写清报告不是验收结论"
 
 
-def test_the_help_page_says_the_disposition_ui_does_not_exist_yet():
-    """人工处置（待确认/已确认/已忽略）**界面上没有入口**，这一点必须写明。
+def test_the_help_page_points_at_the_disposition_entry_that_really_exists():
+    """人工处置的入口：**界面里真的有**，帮助页指的就是它。
 
-    数据层与设计语义都已具备（含「文件再变会重新出现」），但界面没做。
-    不写清楚，用户会在页面上反复找一个不存在的按钮。
+    ## 这条此前是反的，值得记一笔
+
+    上一版这里断言的是「帮助页必须写着『界面还没有入口』」—— 而那是个**假事实**：
+    写入路径（`services/ai/anomaly_disposition.py` + 三个接口）与界面
+    （`static/js/ai_anomaly_disposition.js`，挂在「历次结论」弹层里）都已经做完了。
+    它一直没有红，因为它断言的是**那句话本身**，而不是那句话依赖的前提。
+
+    这类守卫比没有更糟：它把一句过期的话钉得比事实还牢 —— 删掉那句话，
+    红的是守卫而不是现实。所以现在**两边一起断言**：界面侧那个入口得真的在，
+    帮助页写的得是它。
     """
     help_html = _read(HELP_PAGE)
-    assert "界面还没有入口" in help_html
+    panel_js = _read(ANOMALY_PANEL_JS)
+
+    # 界面侧：挂载点与三个动作都还在（它是「历次结论」弹层里那份结构化结论清单）。
+    assert "aiAnomalyPanel" in panel_js, "处置面板的挂载点没了"
+    for action in ("确认", "忽略", "撤销"):
+        assert action in panel_js, f"处置面板里没有「{action}」这个动作"
+
+    # 帮助页侧：写的是「去哪儿点」，不是「没有入口」。
+    assert "界面还没有入口" not in help_html, (
+        "帮助页还在说人工处置「界面还没有入口」—— 这已经不成立了，"
+        "入口在「历次结论」弹层、报告正文下方那份结构化结论清单上"
+    )
+    assert "历次结论" in help_html, "帮助页没有把用户指到真实入口"
     for label in ("待确认", "已确认", "已忽略"):
         assert label in help_html, f"帮助页没有提到处置状态「{label}」"
 
