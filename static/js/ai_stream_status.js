@@ -45,6 +45,15 @@
     // 读不到进度快照时说的话。**不写 0、不写「第 0 轮」**（口径 1）。
     var NO_PROGRESS = '分析中：进度不可用（看不到第几轮，不影响分析）';
 
+    // 快照在、但**一轮都还没跑完**时说的话（引擎的 `on_start` 报的那一帧）。
+    //
+    // 它与上面那句必须分开：两句的含义**正相反**。「进度不可用」是「我们看不见它」，
+    // 而这一句是「它正在正常干活，只是第一轮还没跑完」。原先两句共用一句 —— 于是
+    // 一次正常分析刚起步时，界面显示的是「看不到第几轮」，用户以为卡住了。
+    //
+    // 说「正在调用模型」而不是「第 0 轮」：轮次是从 1 开始数的，0 不是进度。
+    var FIRST_ROUND = '正在调用模型（第一轮还没跑完）';
+
     var POLL_INTERVAL_MS = 3000;
 
     // 「这次运行已经结束了」的两种状态。`effective_status` 只会给这四个值里的一个
@@ -101,7 +110,12 @@
     function progressText(progress, status) {
         if (isTerminal(status)) return null;
         var round = roundText(progress);
-        if (!round) return NO_PROGRESS;
+        if (!round) {
+            // **快照读不到**与**一轮还没跑完**是两件事（见 FIRST_ROUND 那段）。
+            if (!progress) return NO_PROGRESS;
+            var early = agentText(progress);
+            return '分析中：' + (early ? early + ' · ' : '') + FIRST_ROUND;
+        }
         var agent = agentText(progress);
         var where = agent ? agent + ' · ' + round : round;
         var tokens = progress.live_tokens;

@@ -366,6 +366,13 @@ _CASES = {
         # 没有分片信息（老运行 / 没开子代理 / 快照里没有这三个键）：那一行与以前一字不差
         [{"round": 3, "max_rounds": 8, "live_tokens": 100,
           "agent": "", "agent_index": 0, "agent_total": 0}, "running"],
+        # **引擎开始时那一帧**（`on_start`，`round=0`）：一轮还没跑完，但这一帧存在的
+        # 全部意义就是把「谁在跑」报出去 —— 汇总那一次开始跑时，快照里留的还是上一个
+        # 分片，界面会一直挂着那个名字（见 subagent._call_engine 的 report）。
+        [{"round": 0, "max_rounds": 4, "live_tokens": None,
+          "agent": "", "agent_index": 4, "agent_total": 4}, "running"],
+        [{"round": 0, "max_rounds": 4, "live_tokens": None,
+          "agent": "S2", "agent_index": 2, "agent_total": 3}, "running"],
     ],
     "resultOutcome": [
         {"status": "failed", "error_message": "分析中断：ConnectionError: 上游断了"},
@@ -477,8 +484,26 @@ def test_an_unreadable_snapshot_says_unavailable_not_zero():
         assert line is not None, f"用例 {index}：读不到进度却什么都不说"
         assert "进度不可用" in line, line
         assert "0 tokens" not in line and "第 0 轮" not in line, line
-    # 脏快照（有 round 但读不出轮次）走同一条：不编数字。
-    assert "进度不可用" in lines[8], lines[8]
+
+
+def test_a_snapshot_without_a_finished_round_says_it_is_still_calling():
+    """快照在、但**一轮都还没跑完** —— 这**不是**「进度不可用」。
+
+    这两件事原先共用一句话，而它们的含义**正相反**：「进度不可用」是「我们看不见它」
+    （多进程 / 别的 worker），这一句是「它正在正常干活，只是第一轮还没跑完」。后者
+    是一次正常分析的**起步阶段**，而且它可能是几分钟（整整一次模型调用）。
+
+    引擎现在会在第一次模型调用之前报一帧（`on_start`，`index=0`），界面这才分得清。
+    在这之前用户看到的是「看不到第几轮」，于是以为卡住了。
+
+    「不编数字」这条纪律不变：仍然不许出现「第 0 轮」——轮次从 1 开始数，0 不是进度。
+    """
+    lines = _run_node()["progressText"]
+    for index in (8,):
+        line = lines[index]
+        assert "进度不可用" not in line, f"用例 {index}：把「正在跑第一轮」说成了「看不见」"
+        assert "第一轮还没跑完" in line, line
+        assert "第 0 轮" not in line and "0 tokens" not in line, line
 
 
 def test_a_finished_run_never_gets_a_running_line():
@@ -1206,3 +1231,16 @@ def test_the_run_ended_exit_tells_the_think_log_that_it_ended(name):
         f"{name} 的 `onFinished` 调 `AiThinkLog.unwatch()` 时没说「这次运行结束了」—— "
         "它会顺手去取一次落库的逐轮，而那一刻逐轮还没落库"
     )
+
+
+def test_the_start_frame_still_names_who_is_running():
+    """开始那一帧要说得出**是谁在跑**，不能只报「正在调用模型」。
+
+    子代理模式下这一帧正是「主代理开始分析了」的唯一播报机会：下一次回调要等汇总
+    那一轮跑完，可能是几分钟之后。这段时间里如果那一行不写「汇总」，用户看到的就是
+    上一个分片的名字 —— 也就是「思考过程不动了，状态还停在分片」那个现象。
+    """
+    lines = _run_node()["progressText"]
+
+    assert lines[12] == "分析中：分片 汇总 (4/4) · 正在调用模型（第一轮还没跑完）", lines[12]
+    assert lines[13] == "分析中：分片 S2 (2/3) · 正在调用模型（第一轮还没跑完）", lines[13]

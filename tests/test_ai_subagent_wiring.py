@@ -278,3 +278,53 @@ def test_the_verify_default_is_off(monkeypatch):
         cfg_data = ai_service.get_project_analysis_config(project.id)
 
         assert cfg_data["subagent_verify"] is False
+
+
+def test_the_main_agent_announces_itself_before_it_starts(monkeypatch):
+    """**「主代理在分析了」这件事必须报出去，而不是继续挂着上一个分片的名字。**
+
+    `on_round` 只在每一轮**跑完**之后才发，所以汇总那一次开始跑时，快照里留的还是
+    最后一个分片 —— 界面写着「分片 S2 (2/3) · 第 1 轮」，而主代理其实已经在跑了，
+    这一跑可能是几分钟。用户看到的现象就是「思考过程不动了，状态还停在分片」。
+
+    修法是让每一次 `run_analysis` 在第一次模型调用之前报一帧（引擎的 `on_start`），
+    归属由 `_call_engine` 的那个 `report` 贴上去 —— 汇总那一次的 `agent` 是空串、
+    `agent_index == agent_total`，界面据此念「汇总」。
+
+    判据用「帧的序列」而不是「某一帧存在」：只断言存在的话，把这些帧排错顺序
+    （比如汇总的开始帧发在它自己那一轮之后）照样能绿。
+    """
+    published: list = []
+    client = _FakeClient()
+    with flask_app.app_context():
+        create_tables()
+        ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
+        _enable_subagents(project.id, count=2)
+        _run(monkeypatch, client=client)
+        monkeypatch.setattr(
+            ai_service, "publish_run_progress",
+            lambda _run_id, _project_id, progress: published.append(progress),
+        )
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+
+        assert outcome["status"] == "succeeded", outcome
+
+    # 每个成员：一帧「开始」+ 一帧「第 1 轮」。2 个分片 + 1 次汇总 = 6 帧。
+    starts = [p for p in published if p.index == 0]
+    assert len(starts) == 3, (
+        f"开始帧的数量不对（{[(p.agent, p.agent_index) for p in starts]}）—— "
+        "少了就等于某个成员在跑的时候界面还挂着上一个的名字"
+    )
+
+    # 汇总那一次的开始帧：`agent` 空、位次等于总数 —— 与 subagent/ai_stream_status
+    # 两处共同的判定口径一致（界面据此念「汇总」）。
+    synthesis_start = starts[-1]
+    assert synthesis_start.agent == "", f"汇总的开始帧带了分片名：{synthesis_start.agent}"
+    assert synthesis_start.agent_index == synthesis_start.agent_total == 3
+
+    # 而且它必须在**汇总那一次的第一个模型调用之前**发 —— 排在分片的帧后面。
+    labels = [(p.agent, p.index) for p in published]
+    assert labels.index(("", 0)) > labels.index(("S2", 1)), (
+        f"汇总的开始帧没有排在最后一个分片之后：{labels}"
+    )

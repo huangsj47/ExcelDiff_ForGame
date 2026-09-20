@@ -1413,6 +1413,11 @@ def _run_engine_and_persist(
         # 每跑完一轮把累计用量写进进程内的进度快照（services/ai/run_progress.py，界面
         # 一边跑一边轮询它）。**它是给界面看的一眼，不是账** —— 账在 `_persist_outcome`。
         "on_round": lambda progress: publish_run_progress(run.id, project_id, progress),
+        # 第一次模型调用**之前**也报一帧。没有它，从开跑到第一轮跑完之间（可以是几分钟）
+        # 快照是空的，界面显示「分析中：进度不可用」，而结论面板一直挂着
+        # 「AI 分析进行中...」—— 看起来像卡住了，实际它正在干活。子代理模式下它还负责
+        # 把归属从上一个分片换成汇总/主代理（见 subagent._call_engine 的 report）。
+        "on_start": lambda progress: publish_run_progress(run.id, project_id, progress),
     }
     # 子代理模式（services/ai/subagent.py）：默认关、只对周版本生效，不适用时返回 None
     # 走原来的单代理路径。`verify` 是对账轮，它依附在子代理上 —— 没开子代理时不生效。

@@ -319,7 +319,15 @@ def test_the_funnel_publishes_each_round_and_clears_when_done(monkeypatch):
 
         assert outcome["status"] == "succeeded", outcome
         assert published, "跑了整整一轮都没有报进度 —— 界面永远看不到「跑到第几轮」"
-        run_id, project_id, progress = published[0]
+
+        # **第一帧是「开始了」**（引擎的 `on_start`，`index=0`）：它在第一次模型调用之前
+        # 就发出去，好让界面在整整一次模型调用（可以是几分钟）里不至于显示
+        # 「进度不可用」。真正的轮次帧从 1 开始，所以下面按 `index >= 1` 取。
+        start = published[0][2]
+        assert start.index == 0, f"第一帧不是「开始了」那一帧：{start}"
+        assert start.prompt_tokens is None, "还没调用模型就报了一个 token 数"
+
+        run_id, project_id, progress = next(item for item in published if item[2].index >= 1)
         assert project_id == project.id
         assert progress.index == 1
         assert progress.max_rounds >= 1
