@@ -31,6 +31,7 @@ from services.ai.engine import (
 from services.ai.engine import failed as engine_failed
 from services.ai.llm_client import ChatResult
 from services.ai.protocol import Anomaly, DroppedItem
+from services.ai.rules import KIND_ANOMALY_CAP
 from services.ai.subagent import (
     CANDIDATE_MAX_ITEMS_PER_MEMBER,
     MEMBER_BUDGET_PERCENT,
@@ -529,14 +530,113 @@ class TestTheCandidatesAndTheReconciliation:
         平台现在查三手（编号 / 同一个文件 / 结论的证据里点到这个文件的路径），
         所以这句话也只能声称这三手。**多写一手就变成平台没做过的保证**；少写一手，
         读的人会以为某类采纳方式平台看不见，又跑去人工核一遍已经核过的条目。
+
+        ## 这句话在 2026-09-20 改过一次（原来的写法是假的）
+
+        原来写的是「上面的报告里既没有引用这个编号，**也没有任何一条结论提到这个文件**」。
+        后半句读起来是「整份报告里都没有这个文件」，可平台核对的只是**结论清单**
+        （`_findings_text`）—— 那天实测报出的三条「找不到去向」，文件全都在模型自己写的
+        正文里出现过（一条还被写进了「待取证假设」）。读的人随手一搜就能推翻这句话，
+        于是整节核对结论都不再可信。现在只说核对过的落点：正文与结论清单。
         """
         candidate = self._candidate()
         text, _ = reconcile_candidates(
             (candidate,), EngineOutcome(status=STATUS_SUCCEEDED, report_markdown="")
         )
 
-        assert "既没有引用这个编号，也没有任何一条结论提到这个文件" in text
-        assert "没有被汇总进去" in text
+        assert "报告里既没有引用这个编号，正文与结论清单里也都没有提到这个文件" in text
+        assert "正文里提到过不算采纳" in text, "核对口径要写出来，否则读者不知道正文不算"
+        assert "没有任何一条结论提到这个文件" not in text
+
+    def _capped_synthesis(self, **overrides) -> EngineOutcome:
+        """一份汇总：没提任何候选，但账上有一条「被条数上限截掉」的记录。"""
+        kwargs = dict(
+            status=STATUS_SUCCEEDED,
+            report_markdown="# 变更理解\n\n只写了别的。\n",
+            anomalies=(),
+            # 截断记账的 `detail` 就是报告里那节的取材（`rules.cap_anomalies` 写的）。
+            dropped=(
+                DroppedItem(
+                    kind=KIND_ANOMALY_CAP,
+                    index=16,
+                    reason="超出本次上限（15 条），已按严重度优先保留",
+                    detail=(
+                        "high 【掉落拾取】新增事务序号硬校验"
+                        "（code/qz_server/src/gas/module/drop/GasDropPickTxnMod.lua）"
+                    ),
+                ),
+            ),
+        )
+        kwargs.update(overrides)
+        return EngineOutcome(**kwargs)
+
+    def _capped_candidate(self) -> Candidate:
+        return self._candidate(
+            label="S1",
+            index=4,
+            title="【SCS↔GAS 掉落拾取】新增事务序号硬校验",
+            file_path="code/qz_server/src/gas/module/drop/GasDropPickTxnMod.lua",
+        )
+
+    def test_a_candidate_cut_by_the_cap_is_not_reported_as_missing(self):
+        """**被条数上限截掉的候选有明确去向**，不能再报一次「没有进入结论清单」。
+
+        报告里另有一节「结论条数上限（平台补充）」逐条列着它们（`build_cap_section`），
+        两节的语义是相反的：那一节是「看到了、只是没位置」，这一节是「没看到」。
+        同一个东西在两节里各出现一次，读的人只会觉得平台的账自相矛盾 —— 而且那几条
+        本来也不该算进「分片报的东西没进报告」这个降级理由里。
+        """
+        candidate = self._capped_candidate()
+        other = self._candidate(label="S2", index=6, title="【协议】中部删除导致 id 前移",
+                                file_path="code/qz_pub/protocols/ProtoCScs.lua")
+
+        text, dropped = reconcile_candidates((candidate, other), self._capped_synthesis())
+
+        assert [d.index for d in dropped] == [6], (
+            f"被上限截掉的候选仍被记成「没有去向」：{[d.detail for d in dropped]}"
+        )
+        assert "[S1-4]" not in text
+        assert "已经解释过了" in text and "1 条" in text, (
+            "不报它，但要把「少报了一条」说清楚 —— 否则「账上 2 条、只列 1 条」对不上"
+        )
+        assert "结论条数上限" in text, "要说清去向在哪一节，读者才知道去哪儿看"
+
+    def test_a_run_whose_only_missing_candidates_were_capped_has_no_gap_section(self):
+        """全是被上限截掉的 → **这一节根本不出现**：那一节已经把账记全了。
+
+        （这一条与上一条是一对：不出现是对的，出现了才是重复报。）
+        """
+        text, dropped = reconcile_candidates((self._capped_candidate(),), self._capped_synthesis())
+
+        assert (text, dropped) == ("", ())
+
+    def test_a_candidate_the_body_mentions_says_so_instead_of_claiming_otherwise(self):
+        """正文里出现过，就照实说 —— 但**不因此算它已采纳**。
+
+        「有意写成待取证 / 待确认」与「一声不响地丢了」对读的人是两件事：前者要人去补
+        证据，后者要人去追汇总。所以仍记账、仍降级（宁可吵闹），只是那一行不再声称
+        「报告里没有提到这个文件」。
+        """
+        candidate = self._candidate(
+            index=5,
+            title="【掉落 AOI 快照】备份不再深拷贝",
+            file_path="code/qz_pub/core/scene/aoi/pack/PackDropObjSnapshotMod.lua",
+        )
+        synthesis = EngineOutcome(
+            status=STATUS_SUCCEEDED,
+            report_markdown=(
+                "# 风险评估\n\n看别的去了。\n\n## 待取证假设（未定级）\n\n"
+                "- **假设 B**：`PackDropObjSnapshotMod.lua` 备份与源对象共享道具列表，"
+                "缺少序列化时机的证据。\n"
+            ),
+        )
+
+        text, dropped = reconcile_candidates((candidate,), synthesis)
+
+        assert [d.kind for d in dropped] == ["subagent"], "正文提到过不算采纳，仍要记账"
+        assert "报告正文里出现过这个文件" in text
+        assert "待取证 / 待确认" in text, "要给出这两种可能，让读者自己去分辨"
+        assert "没有任何一条结论提到这个文件" not in text
 
     def test_the_gap_text_says_it_is_the_platforms_own_check(self):
         candidate = self._candidate()

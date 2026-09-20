@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Mapping, MutableMapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 from services.ai.budget import ContextItem, truncate_text
 from services.ai.engine import (
@@ -1736,9 +1736,25 @@ def reconcile_candidates(
     正是本函数最不该出的那种错。
 
     前者静默、后者吵闹，所以前者更要紧；但两者都不该发生。
+
+    ## 去向已经写明的候选，不进这份名单（2026-09-20 加）
+
+    那天的实测里三条候选被报成「找不到去向」，而**三条的去向其实都写着**：
+
+    * 两条**被条数上限截掉了** —— 它们进了结论清单、只是没有位置，而报告里另有一节
+      （`build_cap_section`）逐条列着它们。同一个东西在两节里各出现一次，而这两节的语义
+      是相反的（那一节是「看到了、没位置」，这一节是「没看到」）—— 读的人只会觉得平台的
+      账自相矛盾。现在按文件名认出它们（`_cap_details`）并单独计数。
+    * 一条被模型**有意写成了「待取证假设」**（逐字给了那次 diff、也写了缺什么证据）。
+      这一条仍然记账 —— 正文不是采纳证据 —— 但 `_gap_line` 会照实说「正文里出现过这个
+      文件，请确认是有意降级还是被漏掉」。读的人据此知道该去补证据还是该去追汇总。
     """
     adopted = _report_text(synthesis)
     findings_text = _findings_text(synthesis)
+    # 正文**只用来给条目加一句说明**（「正文里出现过这个文件」），不当采纳证据 ——
+    # 理由见上面「第 3 手为什么只看结论、不看报告正文」。
+    body_text = synthesis.report_markdown or ""
+    cap_texts = _cap_details(synthesis.dropped)
     final_paths = {
         normalize_path(item.file_path)
         for item in synthesis.anomalies
@@ -1746,6 +1762,7 @@ def reconcile_candidates(
     }
     lines: list[str] = []
     dropped: list[DroppedItem] = []
+    capped_explained = 0
     for candidate in candidates:
         if _candidate_id_mentioned(candidate.id, adopted):
             continue
@@ -1754,6 +1771,14 @@ def reconcile_candidates(
             continue
         if path and _path_named_in_findings(path, findings_text):
             continue
+        if path and any(_path_named_in_findings(path, text) for text in cap_texts):
+            # 去向已知：**被条数上限截掉了**，报告里另有一节逐条列着它。不记进这一节 ——
+            # 同一批条目在两节里各出现一次，读的人会以为是两回事：那一节说的是「看到了、
+            # 只是没位置」，这一节说的是「没看到」。这正是 `build_cap_section` 的
+            # docstring 里写明「两节不能合成一节」的那个区别，反过来也不能重复报。
+            capped_explained += 1
+            continue
+        in_body = bool(path) and _basename_named_in_text(path, body_text)
         dropped.append(
             DroppedItem(
                 kind="subagent",
@@ -1762,12 +1787,7 @@ def reconcile_candidates(
                 detail=f"[{candidate.id}] {candidate.anomaly.title}"[:300],
             )
         )
-        lines.append(
-            f"- `[{candidate.id}]` {candidate.anomaly.title}"
-            f"（{candidate.anomaly.category}·{candidate.anomaly.severity}"
-            + (f"，{candidate.anomaly.file_path}" if candidate.anomaly.file_path else "")
-            + "）：上面的报告里既没有引用这个编号，也没有任何一条结论提到这个文件。"
-        )
+        lines.append(_gap_line(candidate, in_body=in_body))
 
     shard_gaps = _shard_gap_lines(steps)
     verify_gaps = _verify_gap_lines(steps)
@@ -1790,14 +1810,70 @@ def reconcile_candidates(
     if lines:
         blocks.append(
             f"平台的账上共有 {len(candidates)} 条来自分片代理的候选结论，"
-            f"其中 {len(lines)} 条**在最终报告里找不到去向**（平台按编号与文件名核对，"
-            "不是模型的判断）。它们不因此就不成立 —— 只是**没有被汇总进去**，"
-            "需要人工看一眼：\n\n" + "\n".join(lines)
+            f"其中 {len(lines)} 条**没有进入最终结论清单**。平台只核对两处落点："
+            "候选编号、以及结论清单里的文件与结论 —— **正文里提到过不算采纳**"
+            "（正文正是模型写「这里我没查到」的地方）。它们不因此就不成立，"
+            "只是需要人工看一眼：\n\n" + "\n".join(lines)
+        )
+    if capped_explained:
+        blocks.append(
+            f"另有 {capped_explained} 条候选的缺席**已经解释过了**：它们被本次的条数上限"
+            "截掉（进了结论清单、只是**没有位置**），逐条列在上面那节「结论条数上限"
+            "（平台补充）」里，不重复计入这一份名单。"
         )
     blocks.append(
         "以上是平台**按记录核对**出来的，不是模型的自我说明。"
     )
     return "\n\n".join(blocks), tuple(dropped)
+
+
+def _cap_details(dropped: Iterable[DroppedItem]) -> tuple[str, ...]:
+    """条数上限截掉的那几条的记账文本（`detail` 里带着那条结论的文件名）。
+
+    用来把「被上限截掉的候选」与「汇总真的漏掉的候选」分开：前者的去向在报告里
+    已经逐条写着（`build_cap_section` 那一节），再报一次「找不到去向」会让同一批条目
+    在两节里各出现一次，而这两节的语义是相反的。
+
+    **按文件名匹配、不解析那串文本**：`detail` 是给人看的（`severity 标题（路径）`），
+    标题里自己就带括号（`【物品表（14外观）】`），从两头切括号必然切错。这里复用
+    `_path_named_in_findings` 的边界规则 —— 与它挡 `x/a/b.xlsx` 冒充 `a/b.xlsx` 同一件事。
+    """
+    return tuple(
+        str(getattr(item, "detail", "") or "")
+        for item in dropped
+        if getattr(item, "kind", "") == KIND_ANOMALY_CAP
+    )
+
+
+def _gap_line(candidate: Candidate, *, in_body: bool) -> str:
+    """「这条候选没有进入结论清单」那一行 —— **只说平台真的核对过的那两处落点**。
+
+    ## 为什么不能写「也没有任何一条结论提到这个文件」
+
+    那句话读起来是「整份报告里都没有这个文件」，而平台核对的只是**结论清单**
+    （`_findings_text`：标题 + 证据 + 影响面）。2026-09-20 那次实测里，三条被报
+    「找不到去向」的候选，文件**都在模型自己写的正文里出现过**（其中一条被写进了
+    「待取证假设」）—— 读的人随手一搜就能推翻这句话，于是整节核对结论都不再可信。
+
+    ## 正文里出现过，要单独说，而且不能当成「已采纳」
+
+    它仍然不是采纳证据（理由见 `reconcile_candidates`）。但「有意写成待取证 / 待确认」
+    与「一声不响地丢了」对读的人是两件事：前者要人去补证据，后者要人去追汇总。
+    所以这里只**照实说一句在哪出现过**，把判断留给读的人。
+    """
+    head = (
+        f"- `[{candidate.id}]` {candidate.anomaly.title}"
+        f"（{candidate.anomaly.category}·{candidate.anomaly.severity}"
+        + (f"，{candidate.anomaly.file_path}" if candidate.anomaly.file_path else "")
+        + "）："
+    )
+    if in_body:
+        return (
+            head
+            + "结论清单里没有它，但**报告正文里出现过这个文件** —— 请确认它是被有意写成了"
+            "「待取证 / 待确认」，还是被漏掉了。"
+        )
+    return head + "报告里既没有引用这个编号，正文与结论清单里也都没有提到这个文件。"
 
 
 def _candidate_id_mentioned(candidate_id: str, text: str) -> bool:
@@ -1847,6 +1923,34 @@ def _path_named_in_findings(path: str, findings_text: str) -> bool:
         return False
     pattern = rf"(?<![A-Za-z0-9_\-./]){re.escape(path)}(?![A-Za-z0-9_\-/.])"
     return re.search(pattern, findings_text) is not None
+
+
+def _basename_named_in_text(path: str, text: str) -> bool:
+    """正文里点到这个**文件名**没有（只看文件名，不看目录）。
+
+    ## 为什么不能拿全路径去比
+
+    模型在正文里习惯只写文件名（`PackDropObjSnapshotMod.lua`），写全路径的时候少。
+    2026-09-20 那次实测就是这个情形：报告正文里明明写着它，平台却照旧说「正文里也
+    没有提到这个文件」—— 而那句话读的人随手一搜就能推翻。
+
+    ## 边界
+
+    左边挡字母数字与点（`MyX.lua`、`x.X.lua` 都是别的文件），**放过 `/`** ——
+    正文写全路径 `a/b/X.lua` 也要算点到名。右边挡得更严（含 `.` 与 `-`），
+    否则 `X.lua.bak` 会替 `X.lua` 认领。
+
+    **只给「这一行该怎么措辞」用，不参与采纳判定。** 代价是「另一个目录下的同名文件」
+    会被认成它：这一处认错只是让人多看一眼，而漏认的代价是一句可以被随手证伪的话。
+
+    采纳判定（三手）用 `_path_named_in_findings` 的全路径比对，那里的取舍相反 ——
+    见 `reconcile_candidates` 的「每一手都必须比「同一个东西」」。
+    """
+    name = path.rsplit("/", 1)[-1]
+    if not name:
+        return False
+    pattern = rf"(?<![A-Za-z0-9_.]){re.escape(name)}(?![A-Za-z0-9_\-/.])"
+    return re.search(pattern, text) is not None
 
 
 # --------------------------------------------------------------------------
