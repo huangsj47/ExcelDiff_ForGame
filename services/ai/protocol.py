@@ -738,9 +738,15 @@ def looks_like_markdown_report(text: str) -> bool:
     return hits >= REPORT_HEALTH_MIN_SECTIONS
 
 
-# `report_markdown` 是 JSON 字符串；这个正则只吃到「闭合引号或文本结束」为止 ——
-# **被截断的那一半照样抢得出来**，这正是它的用途（见 `salvage_report_markdown`）。
-_REPORT_MARKDOWN_RE = re.compile(r'"report_markdown"\s*:\s*"(?P<body>(?:[^"\\]|\\.)*)"?')
+# 抢正文用：`report_markdown` 的键与开引号。**不能**用一个吃掉整个字符串值的正则 ——
+# 实测模型会把长字符串切成好几段（`"第一段","第二段"`），吃整段的写法只能抢到第一段
+# （run 7：957 字 / 全长 55k）。所以只匹配到开引号，之后按字符扫（见 `_read_json_string`）。
+_REPORT_MARKDOWN_OPENING_RE = re.compile(r'"report_markdown"\s*:\s*"')
+# 续写块：逗号 + 引号。
+_CONTINUATION_RE = re.compile(r'\s*,\s*"')
+# 续写块的最小长度。JSON 的键名（`"anomalies"`、`"dimensions"`）永远比它短 ——
+# 没有这道闸，正常收尾的 `"report_markdown": "…", "anomalies": [` 会把键名吃进正文。
+_CONTINUATION_CHUNK_MIN = 40
 
 # 输出被截断时发给模型的纠正提示。与 `build_correction_hint` 分开写：那个说的是
 # 「你没按协议」，这个说的是「你写太长了」——**模型的应对完全相反**
@@ -750,6 +756,38 @@ TRUNCATED_OUTPUT_HINT = (
     "请**压缩篇幅后完整重发**：正文按后果排序、同类条目合并成一条写，只保留能改变"
     "结论的内容；`dimensions` 与 `anomalies` 必须完整，整份 JSON 必须能解析。"
 )
+
+
+def _decode_json_string_body(body: str) -> str | None:
+    """把一段 JSON 字符串的**内容**（不含首尾引号）解码成真文本；解不开返回 None。"""
+    try:
+        return json.loads(f'"{body}"')
+    except ValueError:
+        # 转义序列本身被截断（例如末尾是 `\u12`）——这一段救不回来。
+        return None
+
+
+def _read_json_string(content: str, start: int) -> tuple[str | None, int]:
+    """从 `start`（开引号**之后**的那一位）读一个 JSON 字符串。
+
+    返回 `(值, 下一个位置)`。**没有闭合引号时读到文本末尾为止** —— 被截断的那种情况
+    本来就没有闭合引号，按「就到这里」处理正是我们要的。
+    """
+    chars: list[str] = []
+    index = start
+    while index < len(content):
+        char = content[index]
+        if char == "\\":
+            if index + 1 >= len(content):
+                break
+            chars.append(content[index:index + 2])
+            index += 2
+            continue
+        if char == '"':
+            return _decode_json_string_body("".join(chars)), index + 1
+        chars.append(char)
+        index += 1
+    return _decode_json_string_body("".join(chars)), len(content)
 
 
 def salvage_report_markdown(text: str) -> str | None:
@@ -766,6 +804,17 @@ def salvage_report_markdown(text: str) -> str | None:
     markdown 降级那条路，把 JSON 原文当正文存了下来（2026-09-21 run 7 实测：55k 字的
     报告被包在 `{"status": "final", "report_markdown": "…"` 里面，界面与导出都是这样）。
 
+    ## 还要接着吃「续写块」
+
+    拿 run 7 的原文试过：**只读第一个字符串只能抢到 957 字（全长 55k）**。因为模型写
+    长字符串时是这么断的 —— `"第一段","第二段","第三段…`：每一段都是合法字符串，但
+    段与段之间只有逗号、没有键名，整份 JSON 因此不合法。这不是截断，是模型自己的切分
+    习惯，两种形态都会走到这里，所以续写块也要接上。
+
+    接的条件有两条，缺一不可：**必须是「逗号 + 引号」**的续写形状，且这一段**够长**
+    （`_CONTINUATION_CHUNK_MIN`）。后者是防 `"report_markdown": "…", "anomalies": […]`
+    这种正常收尾 —— 那里逗号后面也是一个字符串（键名），但键名永远很短。
+
     ## 只抢正文，不抢 `anomalies`
 
     截断点通常落在正文之后（它是最后、最大的一个字段），此时 `anomalies` 数组要么没
@@ -773,19 +822,27 @@ def salvage_report_markdown(text: str) -> str | None:
     一份完整清单。所以这里只抢正文，结构化结论该没有还是没有，降级标签照旧。
     """
     content = _THINK_BLOCK_RE.sub("", str(text or ""))
-    match = _REPORT_MARKDOWN_RE.search(content)
-    if match is None:
+    opening = _REPORT_MARKDOWN_OPENING_RE.search(content)
+    if opening is None:
         return None
-    body = match.group("body")
-    if not body.strip():
+    value, position = _read_json_string(content, opening.end())
+    if value is None or not value.strip():
         return None
-    # 不处理「末尾剩一个光秃秃的反斜杠」：那个字符落不进 `body`（正则里 `\\.` 要么配成
-    # 一对、要么整段到此为止），写了也是走不到的死分支。
-    try:
-        return json.loads(f'"{body}"')
-    except ValueError:
-        # 转义序列本身被截断（例如末尾是 `\u12`）——救不回来，交给调用方按原文降级。
-        return None
+    parts = [value]
+    while True:
+        separator = _CONTINUATION_RE.match(content, position)
+        if separator is None:
+            break
+        chunk, next_position = _read_json_string(content, separator.end())
+        if chunk is None or len(chunk) < _CONTINUATION_CHUNK_MIN:
+            break
+        # 切点落在哪都是可能的，但**标题必须留在行首**：下游按 `^# ` 切章节，把
+        # `# 变更内容摘要` 粘在上一段的句尾会让那一节整个丢掉。
+        if chunk.startswith("#") and not parts[-1].endswith("\n"):
+            parts.append("\n\n")
+        parts.append(chunk)
+        position = next_position
+    return "".join(parts)
 
 
 def looks_like_truncated_json(text: str) -> bool:

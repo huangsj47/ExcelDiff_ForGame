@@ -630,6 +630,42 @@ def test_salvage_pulls_the_report_out_of_a_truncated_json():
     )
 
 
+def test_salvage_stitches_back_a_report_the_model_split_into_chunks():
+    """模型把长字符串切成几段时，续写块要接上。
+
+    实测（2026-09-21 run 7）：只读第一个字符串只能抢到 **957 字**（全长 55k）—— 因为
+    模型在正文中途把字符串断开重开，段与段之间只有逗号、没有键名：`"第一段","第二段"`。
+    切点落在哪都有可能，但**章节标题必须留在行首**：下游按 `^# ` 切段，把
+    `# 风险评估` 粘在上一段的句尾会让那一节整个丢掉。
+    """
+    text = (
+        '{"status": "final", "report_markdown":'
+        '"# 变更理解\\n\\n本次改的是道具表的回收价，回收价从 100 提到 10000，'
+        '等于商店卖出价，经济闭环被打破。"'
+        ',"# 风险评估\\n\\n第一条：回收价与售价相等，玩家可以无限刷钱，'
+        '后果是经济系统通胀，证据是同一行的两列取值相等。"'
+    )
+
+    report = salvage_report_markdown(text)
+
+    assert report == (
+        "# 变更理解\n\n本次改的是道具表的回收价，回收价从 100 提到 10000，"
+        "等于商店卖出价，经济闭环被打破。\n\n"
+        "# 风险评估\n\n第一条：回收价与售价相等，玩家可以无限刷钱，"
+        "后果是经济系统通胀，证据是同一行的两列取值相等。"
+    )
+
+
+def test_salvage_does_not_swallow_the_next_key():
+    """正常收尾时逗号后面也是字符串（一个键名），别把键名吃进正文。
+
+    判据是长度：键名永远短（`_CONTINUATION_CHUNK_MIN`），真正文的续写块永远长。
+    """
+    text = '{"report_markdown": "正文一二三四五六七八九十", "anomalies": [], "dimensions": []}'
+
+    assert salvage_report_markdown(text) == "正文一二三四五六七八九十"
+
+
 def test_salvage_returns_none_when_there_is_no_report_to_pull():
     """没有 `report_markdown` 就不是这条路径能救的东西，交给调用方按原文降级。"""
     assert salvage_report_markdown("我觉得这个改动还行。") is None
