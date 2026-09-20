@@ -504,6 +504,154 @@ class TestPlatformSideDispatch:
         assert captured['task_type'] == 'file_content'
         assert captured['repository_id'] == 11
 
+    # -----------------------------------------------------------------------
+    # 表头坐标（`header_rows` / `header_name_row`）：必须随 payload 走，
+    # 而且必须进「同一份请求」的判据（2026-09-20）
+    # -----------------------------------------------------------------------
+
+    def _enqueue_capture(self, dispatch, monkeypatch):
+        """抓住真正入队的 payload（agent 置离线，不等）。"""
+        captured = {}
+
+        def _enqueue(**kwargs):
+            kwargs.pop('find_existing', None)
+            captured.update(kwargs)
+            return dispatch.store.add(status='pending', **kwargs), True
+
+        monkeypatch.setattr(dispatch.module, 'enqueue_agent_task_once', _enqueue)
+        dispatch.agent.status = 'offline'
+        return captured
+
+    def test_the_payload_carries_the_repository_header_config(self, dispatch, monkeypatch):
+        """请求方那一行仓库的表头坐标必须进 payload。
+
+        不进去的话，Agent 只能按**它自己库里**那一行渲染，而两个节点的库不一定是同一份
+        （节点用了旧数据库、配置改了还没同步）—— 症状不是报错，是两端给出两套列名与两套
+        数据行坐标，模型据此写出的结论全错，且从界面上完全看不出来。
+        """
+        captured = self._enqueue_capture(dispatch, monkeypatch)
+        self._request(
+            dispatch, file_path='config/道具表.xlsx',
+            repository=SimpleNamespace(id=11, project_id=3, header_rows=3, header_name_row=2),
+        )
+
+        payload = captured['payload']
+        assert payload['header_rows'] == 3, f'payload 没带表头行数：{payload}'
+        assert payload['header_name_row'] == 2, f'payload 没带名称行：{payload}'
+        # 与既有的几项并列（调用方看 payload 时它们是一组）
+        assert payload['lines'] == '' and 'max_chars' in payload and 'max_rows' in payload
+        assert '3|2' in captured['payload']['request_key'], (
+            f'request_key 里也要能看出表头坐标（排查时靠它分辨两份请求）：'
+            f"{captured['payload']['request_key']}"
+        )
+
+    def test_a_different_header_config_is_not_reused(self, dispatch):
+        """**同一份文件、两种表头配置，不许互相复用。**
+
+        表头坐标决定列名取哪一行、哪几行算数据，所以配置不同的两份正文不是同一份东西。
+        复用上了的表现是「Agent 拿按旧配置渲染的结果回答按新配置的请求」：列名与数据行
+        坐标都是旧的，模型据此写出的「这个取值不在允许集合里」全是错的 ——
+        而界面上完全看不出来（不派发、不等待、也没有任何痕迹）。
+
+        这一条就是「修了个寂寞」的回归：`_delete` 掉这个判据，本用例立刻变红。
+        """
+        dispatch.store.add(
+            task_type='file_content', project_id=3, repository_id=11, status='completed',
+            payload={
+                'commit_id': COMMIT, 'file_path': 'config/道具表.xlsx', 'lines': '',
+                'header_rows': None, 'header_name_row': None,
+            },
+            result_summary={'kind': 'excel', 'content': '按未配置渲染的那一份'},
+        )
+        dispatch.store.on_refresh = lambda task: setattr(task, 'status', 'completed') or setattr(
+            task, 'result_summary', '{"kind": "excel", "content": "按 2|2 渲染的那一份"}'
+        )
+        got = self._request(
+            dispatch, file_path='config/道具表.xlsx',
+            repository=SimpleNamespace(id=11, project_id=3, header_rows=2, header_name_row=2),
+        )
+
+        assert got['content'] == '按 2|2 渲染的那一份', (
+            f'改了配置之后命中了旧配置那份缓存 —— Agent 会拿旧坐标的正文回答新请求：{got}'
+        )
+        assert dispatch.counts['enqueue'] == 1, '表头坐标不同的索取必须重新派发'
+
+    def test_the_same_header_config_is_still_reused(self, dispatch):
+        """反面：配置相同就照常复用 —— 别把缓存整个打穿（每次都是一轮上限的等待）。"""
+        dispatch.store.add(
+            task_type='file_content', project_id=3, repository_id=11, status='completed',
+            payload={
+                'commit_id': COMMIT, 'file_path': 'config/道具表.xlsx', 'lines': '',
+                'header_rows': 2, 'header_name_row': 2,
+            },
+            result_summary={'kind': 'excel', 'content': '已经取回来过的那一份'},
+        )
+        got = self._request(
+            dispatch, file_path='config/道具表.xlsx',
+            repository=SimpleNamespace(id=11, project_id=3, header_rows=2, header_name_row=2),
+        )
+
+        assert got['content'] == '已经取回来过的那一份'
+        assert dispatch.counts['enqueue'] == 0, '同一份配置的同一个文件不该再派一次'
+        assert dispatch.counts['sleep'] == 0
+
+    def test_an_equivalent_header_config_is_reused_too(self, dispatch):
+        """「同一个意思的两种写法」不算改了配置（否则每次都要白等一轮上限）。
+
+        `header_name_row` = `1` 与 `None` 是同一件事（都是「名称行就是第 1 行」），
+        规范化之后指纹相同 —— 判据用的是指纹，不是原值。
+        """
+        dispatch.store.add(
+            task_type='file_content', project_id=3, repository_id=11, status='completed',
+            payload={
+                'commit_id': COMMIT, 'file_path': 'config/道具表.xlsx', 'lines': '',
+                'header_rows': 2, 'header_name_row': 1,
+            },
+            result_summary={'kind': 'excel', 'content': '同一份配置'},
+        )
+        got = self._request(
+            dispatch, file_path='config/道具表.xlsx',
+            repository=SimpleNamespace(id=11, project_id=3, header_rows=2, header_name_row=None),
+        )
+
+        assert got['content'] == '同一份配置', got
+        assert dispatch.counts['enqueue'] == 0, '名称行填 1 与留空是同一份配置，不该重派'
+
+
+class TestHeaderConfigFingerprint:
+    """`header_config_fingerprint`：表头坐标的**规范化**指纹（判据与 key 都用它）。
+
+    规范化只走 diff 引擎那两份实现（`DiffService._header_row_count` /
+    `_header_name_row`），而渲染函数 `_read_excel_sheets` 用的是同两份 ——
+    所以「指纹相同」等价于「渲染出来的正文逐字相同」，这正是判据需要的等价类。
+    """
+
+    def _fingerprint(self):
+        from services.agent_file_content_dispatch import header_config_fingerprint
+
+        return header_config_fingerprint
+
+    def test_the_unconfigured_spellings_are_the_same_request(self):
+        fingerprint = self._fingerprint()
+        for rows, name_row in [(None, None), (0, 0), (1, 1), (1, None), (None, 1)]:
+            assert fingerprint(rows, name_row) == '1|1', (
+                f'({rows}, {name_row}) 被算成了另一个坐标 —— 那会让每次索取都重派一次'
+            )
+
+    def test_a_name_row_outside_the_header_block_is_clamped(self):
+        """表头块只有 1 行时，名称行只能落在第 1 行（与渲染函数的夹取同一口径）。"""
+        fingerprint = self._fingerprint()
+
+        assert fingerprint(1, 2) == fingerprint(None, None)
+        assert fingerprint(2, 9) == fingerprint(2, 2), '名称行越界要夹到表头块最后一行'
+
+    def test_a_real_change_is_a_different_fingerprint(self):
+        fingerprint = self._fingerprint()
+
+        assert fingerprint(2, 2) != fingerprint(None, None)
+        assert fingerprint(3, 2) != fingerprint(2, 2)
+        assert fingerprint(2, 2) != fingerprint(2, 1), '名称行 2→1 换的是另一套列名'
+
 
 # ---------------------------------------------------------------------------
 # Provider：两条来源的优先级与「读不到」的说法
@@ -641,6 +789,44 @@ class TestProviderLayering:
         assert seen['lines'] == '1180-1260'
         assert seen['commit_id'] == COMMIT and seen['file_path'] == 'src/fight.lua'
         assert seen['repository'].project_id == 3, '要按项目找绑定的 Agent 节点'
+
+    def test_a_changed_header_config_is_not_served_from_the_instance_cache(
+        self, provider, platform_mode, monkeypatch
+    ):
+        """一次分析中途改了仓库的表头配置：第二次索取**不能**吃第一次的结果。
+
+        provider 上那份「同一个进程里同一份请求只等一次」的缓存也得以坐标为准：
+        少了这一项，第二次会直接返回按旧坐标渲染的正文（连派发都没有），而报告里
+        看不出任何异样 —— 与派发层 `_matches` 漏掉这一项是同一个毛病。
+        """
+        import services.agent_file_content_dispatch as dispatch_module
+
+        # 请求方那一行**可变**：模拟分析进行中有人改了仓库配置（`_commit_row` 每次重新查库）。
+        repository = SimpleNamespace(id=11, project_id=3, header_rows=None, header_name_row=None)
+        monkeypatch.setattr(
+            PlatformContextProvider, '_commit_row',
+            lambda self, commit, path: SimpleNamespace(
+                commit_id=commit, path=path, repository=repository
+            ),
+        )
+        calls = []
+
+        def _fetch(_repository, **kwargs):
+            calls.append(kwargs)
+            return {
+                'status': 'ready', 'kind': 'excel',
+                'content': f'按 header_rows={_repository.header_rows} 渲染的那一份',
+            }
+
+        monkeypatch.setattr(dispatch_module, 'request_file_content', _fetch)
+
+        first = provider.file_content(COMMIT, 'config/道具表.xlsx')
+        repository.header_rows = 2
+        repository.header_name_row = 2
+        second = provider.file_content(COMMIT, 'config/道具表.xlsx')
+
+        assert len(calls) == 2, f'改了表头坐标却命中了实例内缓存：{calls}'
+        assert first != second and '按 header_rows=2 渲染' in second, (first, second)
 
 
 # ---------------------------------------------------------------------------

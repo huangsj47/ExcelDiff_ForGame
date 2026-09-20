@@ -11,6 +11,14 @@
 | 项目子 skill 正文 | 同上 `<子目录>/SKILL.md` | 否，按需 |
 | **索引**（上面的 name + description + 可读文件名） | —— | **是**，体积极小 |
 
+## 检查维度清单也在这里定
+
+平台 SKILL.md 正文里逐条展开的是**出厂默认的九个维度**（它是随平台发版的，与项目无关）。
+项目可以在知识包 `references/project-facts.md` 里声明自己的一套（id + 中文名，顺序有意义），
+那时生效的是声明的那一套：`LoadedSkills.dimensions` 带着它，并且**同一份清单**会被拼进
+进提示词的那份正文（`render_dimension_section`）—— 提示词与运行期读的是同一个对象，
+不存在「校验按 A、提示词按 B」。没声明时**逐字节不变**。
+
 ## 为什么项目侧只注入索引
 
 「自动加载项目 skills」不能理解成「把项目下所有 skill 正文都塞进提示词」——用户
@@ -41,13 +49,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from utils.logger import log_print
+
 from services.ai.skill_contract import (
+    DEFAULT_DIMENSION_SPECS,
     PLATFORM_SKILL_RELATIVE_PATH,
     PROJECT_PACK_MANIFEST,
     PROJECT_PACKS_RELATIVE_PATH,
+    DimensionSpec,
     SkillContractError,
+    is_platform_default_dimensions,
     parse_frontmatter,
+    render_dimension_section,
 )
+
+# 声明坏掉时的那一行日志的前缀。与 `project_facts` 的其余两组事实同一条纪律：
+# 坏掉的声明不能悄悄退化成默认值（那与「本项目没声明」在行为上一模一样）。
+_DIMENSION_WARNING_PREFIX = "⚠️ AI 分析：项目声明的检查维度清单不可用，本次按平台默认值处理："
 
 # 项目 skill 根目录。可用环境变量改，便于换部署形态或让测试指向临时目录。
 SKILL_PROJECTS_ROOT_ENV = "SKILL_PROJECTS_ROOT"
@@ -93,6 +111,16 @@ class LoadedSkills:
     project_slug: str | None = None
     # 全部参与内容的哈希合成，用作分析结果的版本标识。
     revision: str = ""
+    # **本次分析生效的检查维度清单**（id + 报告里的中文名）。
+    #
+    # 默认是平台出厂的那九个；项目在自己的知识包里声明了 `dimensions` 就以声明为准
+    # （`project_facts.dimensions`）。**平台里只此一份**：提示词（模型看到的那份清单）、
+    # 子代理的分工与任务书、报告的分组与中文名，读的都是它 —— 三处各留一份常量正是
+    # 「校验按 A、提示词按 B」的来源。
+    dimensions: tuple[DimensionSpec, ...] = DEFAULT_DIMENSION_SPECS
+    # 声明坏掉时的原因（空串 = 没坏）。与 `project_facts` 的其余两组事实同一条纪律：
+    # 坏掉的声明会退化成一个「项目从没声明过」，不交出去就等于没发生。
+    dimension_warning: str = ""
 
     @property
     def project_documents(self) -> tuple[SkillDocument, ...]:
@@ -208,6 +236,22 @@ def _collect_project_sub_skills(pack_dir: Path) -> tuple[SkillDocument, ...]:
     return tuple(documents)
 
 
+def _project_dimensions(project_code: str, repo_root: Path):
+    """读项目声明的检查维度清单（失败时回落到平台默认那一份）。
+
+    **函数内导入**：`project_facts` 在模块级 import 了本模块（`project_pack_slug`、
+    `resolve_projects_root`、`safe_join`——它要按同一套规则定位知识包），顶层互相导入
+    会成环。方向是单向的：本模块只在「读声明」这一件事上依赖它，而这件事的读取入口
+    必须只有一份（`project_facts.read_declarations`），不能在这里再解析一遍文件。
+
+    `repo_root` 走的是 `resolve_projects_root` 那条既有通道（含 `SKILL_PROJECTS_ROOT`
+    环境变量），所以测试用临时目录当项目根时读到的也是那一份。
+    """
+    from services.ai import project_facts
+
+    return project_facts.dimensions(project_code, repo_root=repo_root)
+
+
 def describe_load_error(exc: Exception, repo_root: Path) -> str:
     """把加载失败的原因写成用户能照着处理的一句话（**路径相对化**）。
 
@@ -251,6 +295,9 @@ def load_skills(
 
     `project_code` 为空时只加载平台 skill —— 这是「项目还没配 skill」的正常情形，
     不是错误。
+
+    检查维度清单（`LoadedSkills.dimensions`）来自项目声明；项目没声明时是平台出厂的那
+    九个，且**提示词里一个字节都不多**（见 `is_platform_default_dimensions`）。
     """
     platform_dir = repo_root / PLATFORM_SKILL_RELATIVE_PATH
     platform_md = platform_dir / "SKILL.md"
@@ -267,6 +314,8 @@ def load_skills(
     project_references: tuple[SkillDocument, ...] = ()
     project_skills: tuple[SkillDocument, ...] = ()
     slug: str | None = None
+    dimensions: tuple[DimensionSpec, ...] = DEFAULT_DIMENSION_SPECS
+    dimension_warning = ""
 
     if project_code:
         slug = project_pack_slug(project_code)
@@ -280,6 +329,35 @@ def load_skills(
                 project_references = _collect_references(pack_dir / "references")
                 project_skills = _collect_project_sub_skills(pack_dir)
             # 目录不存在不是错误：项目可能还没维护过自己的 skill。
+        declaration = _project_dimensions(project_code, repo_root)
+        dimensions = declaration.dimensions
+        dimension_warning = declaration.warning
+        if dimension_warning:
+            log_print(f"{_DIMENSION_WARNING_PREFIX}{dimension_warning}")
+
+    # 项目声明了自己的维度清单时，把「本项目适用的维度清单」接到**进提示词的那一份正文**
+    # 后面。位置是刻意的：紧跟在 SKILL.md 那九个维度的逐条展开之后，所以模型读到的顺序是
+    # 「出厂默认 → 本项目以这一份为准」，而不是先看到项目清单再被正文里的九个覆盖（`prompt`
+    # 把项目知识排在正文之后，且明说冲突以内置协议为准，所以接在项目块里是反的）。
+    #
+    # 追加只发生在**清单与出厂默认不同**时：相同时追加只是白花提示词预算。于是「项目没声明」
+    # 与「声明了同一份」两条路都不改变任何字节 —— 这是「默认行为逐字不变」的落点。
+    if not is_platform_default_dimensions(dimensions):
+        body = (
+            platform_skill.text.rstrip()
+            + "\n\n"
+            + render_dimension_section(dimensions)
+            + "\n"
+        )
+        platform_skill = SkillDocument(
+            name=platform_skill.name,
+            description=platform_skill.description,
+            path=platform_skill.path,
+            text=body,
+            # 正文变了 → 哈希跟着变 → `revision` 变 → 「换了维度清单，旧结论作废」是自动的
+            # （与「改了 SKILL.md 就重跑」同一条机制，不依赖谁记得手工改版本号）。
+            content_hash=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        )
 
     documents = (
         ((manifest,) if manifest else ())
@@ -302,6 +380,8 @@ def load_skills(
         readable=readable,
         project_slug=slug,
         revision=hasher.hexdigest()[:12],
+        dimensions=dimensions,
+        dimension_warning=dimension_warning,
     )
 
 

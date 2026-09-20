@@ -1477,7 +1477,7 @@
                                 <label class="form-check-label" for="aiSubagentToggle">启用</label>
                             </div>
                             <div class="form-text" id="aiSubagentToggleHelp">
-                                <strong>默认开。</strong>打开后，周版本分析会把九个检查维度拆给几个分片代理
+                                <strong>默认开。</strong>打开后，周版本分析会把检查维度清单拆给几个分片代理
                                 分头深挖、再由主代理汇总：几个大版本（几百个文件）里能少漏细节。
                                 <strong>代价是模型调用次数变成「分片数 + 1」倍</strong>
                                 （变更清单那一段从第二个分片起命中缓存、按缓存价计费）。
@@ -1492,8 +1492,11 @@
                                    aria-describedby="aiSubagentCountInputHelp aiSubagentCountInputError">
                             <div class="form-text" id="aiSubagentCountInputHelp">
                                 默认 3，最多 6；填 1（或不启用上面的开关）就是原来的单代理。
-                                维度按固定方式分组：3 个时是「ID/取值/单表连锁」「配置数据/数值合理性」
-                                「模块耦合/代码逻辑/版本分支/流程」。
+                                维度按清单里的<strong>相邻顺序</strong>均分（相邻即相关）：3 个分片时是
+                                「配置 ID / 取值 / 配置数据」「数值合理性 / 单表连锁 / 模块耦合」
+                                「代码逻辑 / 版本分支 / 流程」。项目在知识包里声明了自己的维度清单
+                                （<code>references/project-facts.md</code> 的 <code>dimensions</code>）时
+                                按那一份分，维度比这个数少时实际分片数按维度数走。
                             </div>
                             <div class="form-text text-danger d-none" id="aiSubagentCountInputError"></div>
                         </div>

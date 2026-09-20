@@ -684,6 +684,11 @@ def ai_run_report_md(run_id):
     project = db.session.get(Project, run.project_id)
     payload = _payload_of(run.response_payload)
     target_label = _report_target_label(run)
+    # 维度那一列按**这次分析当时生效的清单**翻中文名 —— 清单随结果落库
+    # （`response_payload.dimension_specs`，见 `result_payload`），这里只读不算。
+    # **不许现查项目当前声明**：项目改了声明之后，历史结论会被按新清单重新贴标签
+    # （当时合法的维度会变成「未归类」），那是篡改历史而不是「显示得不准」。
+    dimension_labels = report_document.dimension_labels_from_payload(payload)
     markdown = report_document.build_report_markdown(
         project_label=str(getattr(project, "name", "") or ""),
         target_label=target_label,
@@ -701,6 +706,7 @@ def ai_run_report_md(run_id):
         report_text=run.response_text,
         anomalies=payload.get("anomalies") or [],
         suppressed_count=int(payload.get("suppressed_count") or 0),
+        dimension_labels=dimension_labels,
     )
     filename = report_document.report_filename(
         project_name=getattr(project, "name", "") or "",

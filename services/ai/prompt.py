@@ -34,6 +34,7 @@ from typing import Iterable, Mapping, Optional, Sequence
 
 from services.ai.budget import ContextItem
 from services.ai.protocol import build_budget_exhausted_hint
+from services.ai.skill_contract import DIMENSION_IDS
 from services.ai.skill_loader import LoadedSkills
 
 # 参与提示词版本哈希的源文件。
@@ -48,21 +49,43 @@ PROMPT_SOURCE_FILES = ("prompt.py",)
 #
 # 4~8 这个量级也是算过的：单条上限 11,000 字符，8 条约 88,000，远在单次预算之内；
 # 而一次只要 1~3 个会把那几十次额度摊到很多轮里，每轮都要重发一遍上下文（多轮的成本）。
-_FIRST_ROUND_HINT = (
+# ## 中间两步是**有条件的**：只写本次生效的清单里有的维度
+#
+# 「配表类改动按数据本身看」（`config_data`）与「数值改动按放在这个系统里合不合理看」
+# （`value_sanity`）原先无条件出现在第一轮里。可它们是**某个项目碰巧有的两个维度**：
+# 一个声明了 `performance` / `protocol` / `resource` 的项目（非配表项目 —— 项目声明
+# 自己的维度清单是平台支持的能力，见 `skill_contract.DEFAULT_DIMENSION_SPECS` 上面那段）
+# 读到第 2、3 步时，会以为自己被要求去看「配表数值」，而它这一轮的额度与注意力是有限的。
+#
+# 所以这两步按**本次生效的清单**（`LoadedSkills.dimensions`，由 `build_user_message`
+# 的 `dimension_ids` 传进来）决定要不要出现，编号随之顺延。清单与平台出厂那份一致时
+# 输出**逐字节不变**（`_FIRST_ROUND_HINT` 就是那一份）：那九个维度里本来就有这两个。
+_FIRST_ROUND_OPENING = (
     "现在只给了你这次变更的**元数据与文件清单**，没有任何 diff 内容。不要凭文件名猜测"
-    "改动内容。第一轮按这个顺序走：\n"
-    "\n"
-    "1. **先分诊**：把这次变更按「最可能出事」排序，说出依据（改了哪些业务行为、涉及"
+    "改动内容。第一轮按这个顺序走："
+)
+
+_FIRST_ROUND_TRIAGE_STEP = (
+    "**先分诊**：把这次变更按「最可能出事」排序，说出依据（改了哪些业务行为、涉及"
     "哪条业务链、清单里哪些文件互相关联）。**同时标出这次改动跨了哪几个模块，以及"
     "有没有本该成对出现、却只看到一边的改动**（配表与它的生成物、客户端与服务端、"
     "协议定义与打包解包）——只改一半的改动是最值钱的信号，优先索取它们另一端的 diff。"
-    "这段判断写进 `reason`。\n"
-    "2. **配表类改动按「数据本身是否说得通」看**（`config_data` 维度）：改了描述/备注的，"
+    "这段判断写进 `reason`。"
+)
+
+# 只有本次清单里有 `config_data` 时才出现。**文案与出厂那一版逐字相同**（它本来
+# 就是照出厂清单写的），变的只是「什么时候出现」。
+_FIRST_ROUND_CONFIG_DATA_STEP = (
+    "**配表类改动按「数据本身是否说得通」看**（`config_data` 维度）：改了描述/备注的，"
     "同行里被它描述的列有没有跟着改；新增或改动的行有没有漏填必填列；类型、枚举、日期"
     "格式是否与同表其它行一致；有没有复制粘贴出来只改了一半的重复行。**只改了一列文案、"
     "它描述的字段没动**是这类改动里最常见的问题，而它看起来最像「只是改了句文案」，"
-    "最容易被放过去。\n"
-    "3. **数值改动按「放在这个系统里合不合理」看**（`value_sanity` 维度）：先认数量和"
+    "最容易被放过去。"
+)
+
+# 只有本次清单里有 `value_sanity` 时才出现（理由同上）。
+_FIRST_ROUND_VALUE_SANITY_STEP = (
+    "**数值改动按「放在这个系统里合不合理」看**（`value_sanity` 维度）：先认数量和"
     "量级 —— 一个数值改了几个数量级（道具价值 1000 → 1000000、奖励 10 → 100000、"
     "价格 100 → 1）是本轮最值得索取上下文的信号之一；再认**经济闭环**：同一件东西的"
     "买入价与卖出/回收价关系反了（售价 100 卖给商店能卖 10000）、合成或分解的产出大于"
@@ -71,13 +94,44 @@ _FIRST_ROUND_HINT = (
     "取值分布，按整表算、不受截断影响），那才是「这个值合不合理」的比较基准；"
     "本批次里若有这张表的更早提交，也可以读它做历史对照（比**分布**，不要只比一个值）。"
     "**疑似就要报**，但报的时候必须写明基准来自哪里；确实拿不到基准的也要报，"
-    "并在证据里显式写「缺基准：<原因>」、置信度只给 `high`（不许 `very_high`）。\n"
-    "4. **再点名**：按这个顺序一次索取 4~8 个最关键的 `file_diff`，在 `reason` 里说清"
-    "为什么是它们。拿到之后先对照第 1 步的假设，再决定要不要继续。\n"
-    "5. **说清边界**：`reason` 里写明这一轮决定先看什么、暂时没看什么。\n"
-    "\n"
+    "并在证据里显式写「缺基准：<原因>」、置信度只给 `high`（不许 `very_high`）。"
+)
+
+_FIRST_ROUND_POINT_AT_FILES_STEP = (
+    "**再点名**：按这个顺序一次索取 4~8 个最关键的 `file_diff`，在 `reason` 里说清"
+    "为什么是它们。拿到之后先对照第 1 步的假设，再决定要不要继续。"
+)
+
+_FIRST_ROUND_BOUNDARY_STEP = (
+    "**说清边界**：`reason` 里写明这一轮决定先看什么、暂时没看什么。"
+)
+
+_FIRST_ROUND_CLOSING = (
     "额度是按**次数**计的，分散在多轮里不会变多 —— 一次能要完最关键的几个，就一次要完。"
 )
+
+
+def _first_round_hint(dimension_ids: Iterable[str] = DIMENSION_IDS) -> str:
+    """第一轮的开场指令。**步骤编号按实际出现的步骤顺延**（见上面那段说明）。
+
+    清单里没有 `config_data` / `value_sanity` 时，对应那一步不出现 —— 那两句是给
+    **有这两个维度的项目**看的，对别的项目是噪音，而第一轮的注意力最贵。
+    """
+    declared = {str(item).strip() for item in dimension_ids if str(item or "").strip()}
+    steps = [_FIRST_ROUND_TRIAGE_STEP]
+    if "config_data" in declared:
+        steps.append(_FIRST_ROUND_CONFIG_DATA_STEP)
+    if "value_sanity" in declared:
+        steps.append(_FIRST_ROUND_VALUE_SANITY_STEP)
+    steps.append(_FIRST_ROUND_POINT_AT_FILES_STEP)
+    steps.append(_FIRST_ROUND_BOUNDARY_STEP)
+    numbered = "\n".join(f"{index}. {text}" for index, text in enumerate(steps, start=1))
+    return f"{_FIRST_ROUND_OPENING}\n\n{numbered}\n\n{_FIRST_ROUND_CLOSING}"
+
+
+# 出厂清单那一份（＝项目没声明维度时进提示词的那一份）。**刻意保留成模块常量**：
+# `tests/test_ai_prompt.py` 按它检查步骤编号连续，而动态拼出来的那份也要有人守。
+_FIRST_ROUND_HINT = _first_round_hint()
 
 _LATER_ROUND_HINT = (
     "以下是你在上一轮索要的上下文。判断证据是否已经足够：够了就直接输出 `final`，"
@@ -396,6 +450,7 @@ def build_user_message(
     correction_hint: str = "",
     budget_exhausted: bool = False,
     history_recap: str = "",
+    dimension_ids: Iterable[str] = DIMENSION_IDS,
 ) -> str:
     """组装某一轮的 user 消息。
 
@@ -413,6 +468,11 @@ def build_user_message(
     `history_recap` 是「中间几轮被压掉了」时补的那段记录（`budget.compact_history` 的
     产出）。它必须紧挨着本轮上下文之前：那一句「需要就重新索取」要贴着模型的下一步动作，
     写在最前面会被后面几段冲淡。
+
+    `dimension_ids` 是**本次生效的**维度清单（`LoadedSkills.dimensions` 的 id 那一份），
+    只用于第一轮那段开场指令：清单里没有 `config_data` / `value_sanity` 的项目不该读到
+    「按配表数值看」那两步（见 `_first_round_hint`）。不传就是平台出厂那一份，输出与
+    以前逐字节相同。
     """
     is_first_round = round_index <= 1
     blocks: list[str] = []
@@ -424,7 +484,7 @@ def build_user_message(
         if baseline_digest.strip():
             # 放在变更清单之后：先看「改了什么」，再看「其中哪些已经有人看过了」。
             blocks.append(baseline_digest.strip())
-        blocks.append(_FIRST_ROUND_HINT)
+        blocks.append(_first_round_hint(dimension_ids))
     else:
         blocks.append(_LATER_ROUND_HINT)
         if baseline_digest.strip():

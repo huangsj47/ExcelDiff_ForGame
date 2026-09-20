@@ -8,9 +8,9 @@
 
 ## 三件本模块刻意做成这样的事
 
-**一、分工由平台决定，不由模型决定。** 维度按固定顺序分组（`GROUPINGS`），同一份配置
-永远得到同一套分工。让模型自己分工的代价是「这次 3 个、下次 2 个、覆盖还不一样」，
-而报告要能解释自己是怎么来的。
+**一、分工由平台决定，不由模型决定。** 维度按**清单里的相邻顺序**均分给各成员
+（`group_dimensions`），同一份配置永远得到同一套分工。让模型自己分工的代价是
+「这次 3 个、下次 2 个、覆盖还不一样」，而报告要能解释自己是怎么来的。
 
 **二、省钱的依据是「共享前缀」，不是「并发」。** 所有成员的请求前两条消息**逐字节相同**
 （system + 含整份变更清单的第一条 user 消息），成员私有的差异**全部**排在共享前缀之后
@@ -68,11 +68,16 @@ from services.ai.engine import (
 )
 from services.ai.prompt import build_system_prompt, build_user_message
 from services.ai.prompt_cache import mark_cache_breakpoint
-from services.ai.protocol import Anomaly, DroppedItem
+from services.ai.protocol import Anomaly, DroppedItem, unclassified_anomalies
 from services.ai.rules import RuleThresholds, rank_anomalies
 from services.ai.scope import AnalysisScope, normalize_path
-from services.ai.skill_contract import DIMENSION_IDS
+from services.ai.skill_contract import (
+    DIMENSION_IDS,
+    UNCLASSIFIED_LABEL,
+    dimension_ids_of,
+)
 from services.ai.skill_loader import LoadedSkills
+from utils.logger import log_print
 
 ROLE_SUBAGENT = "subagent"
 ROLE_SYNTHESIS = "synthesis"
@@ -132,44 +137,20 @@ CANDIDATE_TEXT_MAX_CHARS = 400
 # 平台侧对账用的编号前缀。模型被要求在采纳某条候选时把编号带进它的 `evidence`。
 CANDIDATE_ID_PREFIX = "S"
 
-# 九个维度怎么分给 n 个成员。**写死的固定表**，不是算出来的：
-# 顺序上让彼此相关的维度落在同一个成员身上 —— `config_data + value_sanity` 是「配置
-# 本身说不说得通」，`module_coupling + version_branch` 是「两端是不是一起改了」，
-# `config_id + config_value + config_linkage` 是「单表连锁」。这样每个成员的任务书
-# 都是一段自洽的检查范围，而不是一份随机切片。
-GROUPINGS: Mapping[int, tuple[tuple[str, ...], ...]] = {
-    2: (
-        ("config_id", "config_value", "config_linkage"),
-        ("config_data", "value_sanity", "module_coupling", "code_logic",
-         "version_branch", "process"),
-    ),
-    3: (
-        ("config_id", "config_value", "config_linkage"),
-        ("config_data", "value_sanity"),
-        ("module_coupling", "code_logic", "version_branch", "process"),
-    ),
-    4: (
-        ("config_id", "config_value", "config_linkage"),
-        ("config_data", "value_sanity"),
-        ("module_coupling", "code_logic"),
-        ("version_branch", "process"),
-    ),
-    5: (
-        ("config_id", "config_value"),
-        ("config_data", "value_sanity"),
-        ("config_linkage",),
-        ("module_coupling", "code_logic"),
-        ("version_branch", "process"),
-    ),
-    6: (
-        ("config_id", "config_value"),
-        ("config_data", "value_sanity"),
-        ("config_linkage",),
-        ("module_coupling", "code_logic"),
-        ("version_branch",),
-        ("process",),
-    ),
-}
+# 维度怎么分给 n 个成员：**按清单里的相邻顺序均分**，不是一张写死的表。
+#
+# 原先这里是一张手工表（2~6 组各写一行），它有两个问题，都在「维度集合一旦项目化」时
+# 同时发作：
+#
+# 1. **表必然作废。** 它是照着平台出厂那九个维度写的；项目声明了自己的清单
+#    （`LoadedSkills.dimensions`）之后，表里的 id 一个都对不上。
+# 2. **查不到就静默退化。** 原实现在表里查不到档位时返回「一个成员全看完」——用户开了
+#    6 个分片、花了 7 倍的钱，拿到的是单代理的效果，而没有任何提示。
+#
+# 现在按**顺序相邻**切（`skill_contract` 里写明了这个顺序是有意义的：相邻即相关），
+# 于是任何一份清单都能分，且分法是确定的：`ceil/floor` 的余数摊给**前面**几组
+# （9 个维度切 4 组 → 3,2,2,2）。三条性质都有测试钉着：每组非空、每组是一段连续的
+# 维度、全部维度恰好出现一次。
 
 
 @dataclass(frozen=True)
@@ -205,6 +186,10 @@ class FamilyPlan:
     seed_messages: tuple[Mapping[str, Any], ...] = ()
     verify: bool = False
     verify_items: int = DEFAULT_VERIFY_ITEMS
+    # 「成员数为什么与配置的不一样」的一句话（空 = 一样）。项目声明的维度清单比配置的
+    # 分片数短时成员会少几个 —— 少开成员是**显式**的：这句话会写进汇总任务书，
+    # 而不是让用户自己对着面板数为什么 6 变成了 3。
+    count_note: str = ""
 
     @property
     def all_steps(self) -> tuple[MemberPlan, ...]:
@@ -290,18 +275,40 @@ class FamilyResult:
 # --------------------------------------------------------------------------
 
 
-def group_dimensions(count: int) -> tuple[tuple[str, ...], ...]:
-    """把九个维度分成 `count` 组。**确定性的**：同一份 `count` 永远得到同一套分组。
+def group_dimensions(
+    count: int, dimensions: Sequence[str] = DIMENSION_IDS
+) -> tuple[tuple[str, ...], ...]:
+    """把 `dimensions` 按**相邻顺序**均分成最多 `count` 组。**确定性的**。
 
-    `count` 超出表里的档位（或小于 2）时按 `MIN/MAX` 钳住 —— 但调用方本该先用
-    `plan_family` 判一次「要不要开子代理」，走到这里只是个兜底。
+    三条性质（都有用例钉着，见 `tests/test_ai_subagent_plan.py`）：
+
+    * 每组**非空** —— 一个没分到维度的成员只会白花一次整份提示词的钱；
+    * 每组是清单里**连续的一段** —— 顺序即相关性（`skill_contract` 里写明了这个顺序
+      是有意的），所以相邻的维度落在同一个成员身上；
+    * 全部维度**恰好出现一次** —— 漏一个 = 那个维度没人看，重复 = 两边各看一半。
+
+    `count` 的钳制方向与旧实现一致（下限 2、上限 `MAX_SUBAGENTS`），但**多了一条**：
+    不超过清单长度。清单短于 `count` 时少开几个成员是唯一正确的做法 —— 旧实现在这种情况
+    下**没得选**，只能要么开出空成员、要么退化成「一个成员全看完」，而后者是用户花了
+    (n+1) 倍的钱拿到单代理效果且无人提示。
+
+    **刻意没有「查不到就退化」的分支**：任何 `count`、任何非空清单都能分出来。清单为空
+    是调用方的契约违反（`plan_family` 要求维度清单非空），所以这里直接抛错而不是猜一个
+    分组 —— 猜出来的分工会让报告的「本次由 S1/S2 分工」立不住。
     """
-    wanted = max(2, min(int(count), MAX_SUBAGENTS))
-    grouping = GROUPINGS.get(wanted)
-    if grouping is None:  # pragma: no cover —— 表的键覆盖 2..MAX_SUBAGENTS，正常走不到
-        # 退化成「一个成员一口气看完」：宁可少一个成员，也不要凭空漏掉几个维度。
-        return (tuple(DIMENSION_IDS),)
-    return grouping
+    items = tuple(str(item).strip() for item in dimensions if str(item or "").strip())
+    if not items:
+        raise ValueError("维度清单为空，无法分工（调用方应先确认清单非空）")
+    wanted = min(max(2, int(count)), MAX_SUBAGENTS, len(items))
+
+    base, extra = divmod(len(items), wanted)
+    groups: list[tuple[str, ...]] = []
+    start = 0
+    for position in range(wanted):
+        size = base + (1 if position < extra else 0)
+        groups.append(items[start : start + size])
+        start += size
+    return tuple(groups)
 
 
 def plan_family(
@@ -312,6 +319,7 @@ def plan_family(
     limits: EngineLimits,
     verify: bool = False,
     verify_items: int = 0,
+    dimensions: Sequence[str] = DIMENSION_IDS,
 ) -> FamilyPlan | None:
     """要不要开子代理、怎么分。**不适用时返回 `None`**，调用方走原来的单代理路径。
 
@@ -320,10 +328,25 @@ def plan_family(
     * 配置里没开（默认就是关的：这是一条会让消耗成倍上升的功能，必须由人主动打开）；
     * `count < 2`（一个成员就是原来的单代理，白白多花一次汇总的钱）。
 
-    `verify` 是对账轮（找反证）。它依附在子代理模式上：**没开子代理就没有对账轮** ——
-    单代理那条路的报告本来就没有「几个分片各自的结论」需要核对，而这条功能的价值正是
-    交叉核对。这一点写在这里而不是让配置界面去解释：`subagent_verify` 在
-    `subagent_enabled` 关掉时不生效，界面上的说明文案也是这么写的。
+    ## `dimensions`：本项目生效的维度清单
+
+    默认是平台出厂那九个。项目声明了自己的清单时，`run_family_with_seed` 会在开跑前用
+    **加载出来的那一份**重算分工（`apply_dimensions`）—— 生产路径不会用到这里的默认值，
+    它是给「直接调 `plan_family` 的调用方（测试、探针）」的确定行为。
+
+    ## `verify` 依附在子代理模式上
+
+    `verify` 是对账轮（找反证）。**没开子代理就没有对账轮** —— 单代理那条路的报告本来
+    就没有「几个分片各自的结论」需要核对，而这条功能的价值正是交叉核对。这一点写在这里
+    而不是让配置界面去解释：`subagent_verify` 在 `subagent_enabled` 关掉时不生效，
+    界面上的说明文案也是这么写的。
+
+    ## 清单太短时不硬拆（但要说清）
+
+    清单只有 1 个维度时**没有任何拆法**：`group_dimensions` 会给出 1 组，那就是原来的
+    单代理，只会白白多花一次汇总的钱 —— 与「`count < 2`」是同一条理由，所以这里也返回
+    `None`。它与上面三种情形不同：那三种是调用方自己的配置，这一种取决于**项目声明**，
+    所以额外写一行日志 —— 用户按「开了 6 个分片」的预期看报告，得能查到为什么没跑。
 
     ## 为什么额度取「家族常量」而不是按成员各算一份
 
@@ -362,6 +385,15 @@ def plan_family(
         return None
     size = min(size, MAX_SUBAGENTS)
 
+    dimension_ids = tuple(str(item).strip() for item in dimensions if str(item or "").strip())
+    if len(dimension_ids) < 2:
+        # 见 docstring「清单太短时不硬拆」：这是一次**明确的**不拆，写日志交出去。
+        log_print(
+            "⚠️ AI 分析：项目声明的检查维度只有 "
+            f"{len(dimension_ids)} 个，无法分工，本次按单代理路径跑（不额外花分片的钱）"
+        )
+        return None
+
     total_requests = int(limits.max_tool_requests)
     total_rounds = int(limits.max_rounds)
     member_requests = min(
@@ -376,16 +408,37 @@ def plan_family(
         limits, max_rounds=member_rounds, max_tool_requests=member_requests
     )
 
+    groups = group_dimensions(size, dimension_ids)
+    # 清单比配置的分片数短时**少开几个成员**（而不是开出空成员）。旧实现没有这一档，
+    # 它只有「按表分」与「一个成员全看完」两条路，后者是静默的。这里的差别是显式的：
+    # 成员数少一个都写在 `plan.count` 上（面板的「分片代理」表按它列），而且任务书里
+    # 会说明为什么。
+    count_note = ""
+    if len(groups) < size:
+        count_note = (
+            f"（本项目生效的维度清单共 {len(dimension_ids)} 个，"
+            f"按相邻顺序最多只能分成 {len(groups)} 组，所以本次开了 {len(groups)} 个分片，"
+            f"而不是配置里的 {size} 个。）"
+        )
+        # 这句话同时写进汇总任务书与日志：任务书让**模型**知道分工是什么样，日志让
+        # **配了那个数字的人**查得到「为什么 6 变成了 3」——只写在提示词里的话，
+        # 用户面对面板上少了的几行只能猜。
+        log_print(
+            "ℹ️ AI 分析：本次分片数按项目声明的维度清单收敛："
+            f"维度 {len(dimension_ids)} 个 → 分片 {len(groups)} 个（配置里是 {size} 个）"
+        )
+
     members = tuple(
         MemberPlan(index=position, label=f"S{position}", role=ROLE_SUBAGENT, dimensions=group)
-        for position, group in enumerate(group_dimensions(size), start=1)
+        for position, group in enumerate(groups, start=1)
     )
     synthesis = MemberPlan(
-        index=size + 1,
+        index=len(members) + 1,
         label="",
         role=ROLE_SYNTHESIS,
-        # 汇总那一次的「维度」是全部：它要保证九个维度都有人答过，而不是只管自己那几组。
-        dimensions=tuple(DIMENSION_IDS),
+        # 汇总那一次的「维度」是全部：它要保证清单上的每个维度都有人答过，而不是只管自己
+        # 那几组。
+        dimensions=dimension_ids,
     )
     return FamilyPlan(
         count=len(members),
@@ -394,6 +447,40 @@ def plan_family(
         limits=family_limits,
         verify=bool(verify),
         verify_items=_clamp_verify_items(verify_items),
+        count_note=count_note,
+    )
+
+
+def apply_dimensions(plan: FamilyPlan, dimensions: Sequence[str]) -> FamilyPlan:
+    """按**本次加载出来的**维度清单重算分工。
+
+    ## 为什么要有这一步，而不是让 `plan_family` 自己拿清单
+
+    `plan_family` 的调用方（`services/ai_analysis_service.py`）手里没有 `LoadedSkills`
+    —— 它把 skill 装进 `engine_args` 传给引擎。而 `run_family_with_seed` 从 `engine_args`
+    里拿得到它。所以清单在这一层合流：**平台里只有一处知道「本次生效的清单是什么」，
+    就是 `LoadedSkills.dimensions`**，分工从它派生，提示词也从它派生（`skill_loader`
+    把同一份清单拼进正文）—— 两边不可能是两份。
+
+    清单与计划里的一致时原样返回（不制造无意义的差异）。
+    """
+    dimension_ids = tuple(str(item).strip() for item in dimensions if str(item or "").strip())
+    if not dimension_ids:
+        return plan
+    if tuple(plan.synthesis.dimensions) == dimension_ids and all(
+        member.dimensions for member in plan.members
+    ):
+        return plan
+    groups = group_dimensions(len(plan.members), dimension_ids)
+    members = tuple(
+        replace(member, dimensions=group)
+        for member, group in zip(plan.members, groups)
+    )
+    return replace(
+        plan,
+        count=len(members),
+        members=members,
+        synthesis=replace(plan.synthesis, index=len(members) + 1, dimensions=dimension_ids),
     )
 
 
@@ -451,6 +538,10 @@ def build_seed_messages(
         baseline_digest=baseline_digest,
         requests_remaining=limits.max_tool_requests,
         requests_total=limits.max_tool_requests,
+        # 本次生效的维度清单。**必须与引擎第 1 轮传的是同一份**（`run_analysis` 里那
+        # 一处取的是 `loaded.dimensions`），否则「按同一份额度跑的单代理」与家庭成员
+        # 的第 1 条消息不再逐字节相同 —— 而那是这套机制省钱的**全部**依据。
+        dimension_ids=dimension_ids_of(loaded.dimensions),
     )
     return (
         mark_cache_breakpoint({"role": "system", "content": system_prompt}),
@@ -529,8 +620,9 @@ def build_member_task(member: MemberPlan, plan: FamilyPlan) -> str:
                 "与常规分析**完全一样**：走同一套 JSON 协议、同样的精度要求。"
                 "唯一的差别是 `report_markdown` 只写**你这几个维度的发现与依据**"
                 "（不必写整版报告，主代理会把它们汇总成最终报告）。"
-                "`dimensions` 里**九个维度都要留痕**：你负责的那几个写 `hit` 与理由，"
-                "其余六个写 `hit: false` 并注明「由 S? 负责」即可。"
+                "`dimensions` 里**系统提示词那份「本项目适用的维度清单」上的每一个维度"
+                f"都要留痕（本次共 {len(plan.synthesis.dimensions)} 个）**：你负责的那几个"
+                "写 `hit` 与理由，其余写 `hit: false` 并注明「由 S? 负责」即可。"
             ),
             (
                 "**不许因为分了工就降低标准**：每一条结论都要有具体证据（文件、字段、"
@@ -564,19 +656,21 @@ def build_synthesis_task(plan: FamilyPlan, steps: Sequence[MemberOutcome]) -> st
             "1. **每一条候选都要有去向**：要么进你的 `anomalies`（采纳，并在证据里保留它的"
             "编号，例如 `[S1-2]`），要么在报告正文与 `dimensions` 里说明为什么不采纳"
             "（重复、证据不足、与其它条目冲突）。**不许一声不响地丢掉**。\n"
-            "2. **各分片负责的维度必须都有交代**：九个维度一个都不能空着；"
+            f"2. **各分片负责的维度必须都有交代**：系统提示词那份「本项目适用的维度清单」"
+            f"上的 {len(plan.synthesis.dimensions)} 个维度一个都不能空着；"
             "某个维度没人报出问题，也要写 `hit: false` 与理由。\n"
             "3. **报告是最终报告**：七个章节写全，长度不受分片影响。"
             "你还可以用工具去核对候选里可疑的地方（文件、行号、提交），"
             "也可以补充分片漏掉的发现。"
         ),
-        # 分工表**无论有没有候选都要给**：纪律第 2 条要求「九个维度都有交代」，而主代理
+        # 分工表**无论有没有候选都要给**：纪律第 2 条要求「维度都有交代」，而主代理
         # 只有知道每个成员负责哪几个维度，才知道该有哪些维度的交代 —— 一个成员没报出
         # 任何东西时，这一行就是它唯一的存在证明。
         "## 各分片的分工\n\n"
         + "\n".join(
             f"- {item.label}：{'、'.join(item.dimensions)}" for item in plan.members
-        ),
+        )
+        + (f"\n\n{plan.count_note}" if plan.count_note else ""),
     ]
 
     candidates_block = _render_candidates(plan, steps)
@@ -653,7 +747,8 @@ def build_verify_task(plan: FamilyPlan, synthesis: EngineOutcome) -> str:
         blocks.append(
             "## 待核对结论\n\n主代理这次没有报出任何达到门槛的结论。"
             "你要做的是判断这件事本身是否站得住：本批次里有没有被整份报告漏掉的改动"
-            "（尤其是 `value_sanity` 与 `module_coupling` 这两类），"
+            "（**对照系统提示词那份「本项目适用的维度清单」逐条看一遍**，"
+            "尤其是最容易被放过去的取值合理性与跨模块耦合两类），"
             "有就在 `anomalies` 里报出来，没有就写「未找到反证」。"
         )
     else:
@@ -780,6 +875,57 @@ def _verify_gap_lines(steps: Sequence[MemberOutcome]) -> tuple[str, ...]:
             "**没有经过「找反证」这一道**，读的时候按原样看。"
         )
     return tuple(lines)
+
+
+UNCLASSIFIED_TITLE = f"## {UNCLASSIFIED_LABEL}（不在本次维度清单内的条目）"
+
+UNCLASSIFIED_INTRO = (
+    "下面这几条的 `category` 不在本次生效的维度清单里。**平台把它们原样保留了下来"
+    "（一条都没有丢弃）**，但它们不属于清单上的任何一个维度，所以单独列在这里。"
+    "请人工判断该归到哪里；如果它其实属于本项目该有的一个维度，"
+    "就把它加进知识包 `references/project-facts.md` 的 `dimensions` 声明里。"
+)
+
+
+def build_unclassified_section(
+    anomalies: Sequence[Anomaly], dimension_ids: Sequence[str]
+) -> str:
+    """把**落不进本次维度清单**的条目单独列成报告里的一节。
+
+    ## 为什么要有这一节（而且必须在报告里，不只是 trace）
+
+    换成非配表项目之后，真实的发现（性能回归、协议不兼容、资源引用丢失…）很容易落不进
+    清单里的任何一个 id。若那些条目只是被「保留在异常清单里」，读报告的人看到的是
+    一份**看起来完全正常**的报告 —— 少的那一条没有任何人会发现。所以平台在这里显式地
+    说：这几条不属于任何维度，你们要人工过一眼。
+
+    「保留」这件事发生在解析层（`protocol._coerce_anomalies` 不再按集合丢弃），
+    「点名」发生在这一层 —— 因为只有这一层手里有**本次生效的清单**
+    （`plan.synthesis.dimensions`，来自 `LoadedSkills.dimensions`）。
+    """
+    ids = tuple(str(item).strip() for item in dimension_ids if str(item or "").strip())
+    items = unclassified_anomalies(anomalies, ids)
+    if not items:
+        return ""
+    lines: list[str] = [
+        UNCLASSIFIED_TITLE,
+        "",
+        UNCLASSIFIED_INTRO,
+        "",
+        f"本次生效的维度清单（{len(ids)} 个）：" + "、".join(f"`{item}`" for item in ids),
+        "",
+    ]
+    for index, item in enumerate(items, start=1):
+        category = item.category or "（未标注）"
+        lines.append(
+            f"{index}. **{item.title}**（category = `{category}` · "
+            f"严重度 {item.severity} · 置信度 {item.confidence}）"
+        )
+        if item.file_path:
+            lines.append(f"   - 文件：`{item.file_path}`")
+        for evidence in item.evidence[:3]:
+            lines.append(f"   - 证据：{truncate_text(str(evidence), CANDIDATE_TEXT_MAX_CHARS)[0]}")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def verify_section(step: MemberOutcome) -> str:
@@ -940,7 +1086,11 @@ def run_family(
         candidate for step in steps for candidate in step.candidates
     )
     outcome = aggregate_outcomes(
-        synthesis=synthesis_outcome, steps=steps, candidates=candidates
+        synthesis=synthesis_outcome,
+        steps=steps,
+        candidates=candidates,
+        # 本次生效的维度清单（汇总那一份就是全部维度）。「未归类」那一节按它算。
+        dimensions=plan.synthesis.dimensions,
     )
     return FamilyResult(outcome=outcome, steps=tuple(steps), candidates=candidates)
 
@@ -955,6 +1105,12 @@ def run_family_with_seed(*, plan: FamilyPlan, limits: EngineLimits | None = None
     子代理这条路每个成员用的是 `plan.limits`（家族常量，见 `plan_family`），所以这里把
     `limits` **收下但不使用** —— 收下是为了让调用方**同一个 dict 能喂给两条路**，
     否则那 14 个参数就要在两处各写一遍，而「两处不一致」正是最难查的一类 bug。
+
+    ## 维度清单在这里合流
+
+    调用方手里没有 `LoadedSkills`（它在 `engine_args` 里），所以「本次生效的维度清单」
+    在这里才拿得到：分工按它重算（`apply_dimensions`），而提示词里的那份清单由
+    `skill_loader.load_skills` 拼进正文 —— 同一份 `loaded.dimensions`，不存在两份。
     """
     prepared = attach_seed(
         plan,
@@ -964,6 +1120,7 @@ def run_family_with_seed(*, plan: FamilyPlan, limits: EngineLimits | None = None
         project_knowledge=engine_args.get("project_knowledge", ""),
         project_instructions=engine_args.get("project_instructions", ""),
     )
+    prepared = apply_dimensions(prepared, dimension_ids_of(engine_args["loaded"].dimensions))
     return run_family(plan=prepared, **engine_args).outcome
 
 
@@ -1254,8 +1411,16 @@ def aggregate_outcomes(
     synthesis: EngineOutcome,
     steps: Sequence[MemberOutcome],
     candidates: Sequence[Candidate] = (),
+    dimensions: Sequence[str] = DIMENSION_IDS,
 ) -> EngineOutcome:
     """把一家子的账合成**一个** `EngineOutcome`（落库那一层只认一个）。
+
+    ## `dimensions` 是**本次生效的维度清单**
+
+    `run_family` 传的是 `plan.synthesis.dimensions`（来自 `LoadedSkills.dimensions`）。
+    它只用于一件事：把落不进清单的条目单独列成「未归类」那一节（`build_unclassified_section`）
+    —— 那一节是「一条发现都不许消失」的最后一道保证。默认值是平台出厂那九个，
+    供直接调用本函数的调用方（测试）使用。
 
     ## 轮次为什么要重编号
 
@@ -1277,6 +1442,11 @@ def aggregate_outcomes(
     )
     if verify_text and synthesis.status != STATUS_FAILED:
         report = (report.rstrip() + "\n\n" + verify_text).strip() + "\n"
+    # 「未归类」也排在信息缺口之前、对账轮之后：它对读者同样是**结论的一部分**
+    # （有几条发现不属于任何维度），而信息缺口永远收尾。
+    unclassified_text = build_unclassified_section(synthesis.anomalies, dimensions)
+    if unclassified_text and synthesis.status != STATUS_FAILED:
+        report = (report.rstrip() + "\n\n" + unclassified_text).strip() + "\n"
     gaps_text, gap_dropped = reconcile_candidates(candidates, synthesis, steps=steps)
     # 汇总没跑成时**没有报告**：那段缺口说明写进 `error_message`（见下面那个分支）。
     # 往一份空报告后面追加一段「信息缺口」等于凭空造出一份看得见的报告，而这次其实
@@ -1326,6 +1496,10 @@ def aggregate_outcomes(
         refused_requests=refused_requests,
         report_markdown=report,
         rounds=rounds,
+        # 本次生效的维度清单跟着汇总那一次带出来（它来自 `LoadedSkills.dimensions`，
+        # 见 `run_analysis`）。落库那一份（`result_payload`）据此把 category 翻成中文名，
+        # 导出文档才不会把项目自己声明的维度显示成「未归类」。
+        dimension_specs=synthesis.dimension_specs,
         requests_used=sum(step.outcome.requests_used for step in steps if step.outcome),
         cache_hits=sum(step.outcome.cache_hits for step in steps if step.outcome),
         # 与缓存那两个字段同一口径：**只要有一个成员没上报，整次就是 `None`**。

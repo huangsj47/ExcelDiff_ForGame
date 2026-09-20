@@ -21,8 +21,9 @@ skill 的 `SKILL.md` 同时被三方读取：**平台运行期**（注入提示�
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 # 平台内置 skill 的位置（仓库根相对）。
 PLATFORM_SKILL_RELATIVE_PATH = "skills/version-diff-review"
@@ -47,16 +48,20 @@ SKILL_MD_MAX_LINES = 500
 # 超过这个行数的 reference 必须带目录（skill-creator: ">300 lines, include a TOC"）。
 REFERENCE_TOC_THRESHOLD_LINES = 300
 
-# 九个检查维度。**这是运行期契约**：模型的 `dimensions[].id` 与异常的 `category`
-# 都必须落在这个集合里，服务端按它校验。改这里就必须同步改 SKILL.md 里的枚举，
-# 而且**顺序也要一致** —— `test_category_enum_in_the_doc_equals_the_runtime_dimension_ids`
-# 是按元组比对的，文档里的枚举顺序与这里不同就会红。
+# 平台出厂默认的检查维度：id + 报告里显示的中文名。
+#
+# **「id」与「中文名」必须成对放在一起。** 它们原先分居两处（id 在本模块、中文名在
+# `report_document.DIMENSION_LABELS`），加一个维度要改两处、漏一处就出现「报告里那一格
+# 显示的是英文 id」——而英文 id 看起来完全正常（它就是个正经标识符），不会有人发现。
+# 现在这里是唯一一份，`report_document` 与项目声明都从它派生。
 #
 # 排列是有意的：`config_id`（标识符）→ `config_value`（取值边界）→ `config_data`
 # （这一行/这一格自己是否说得通）→ `value_sanity`（这个值放在这个系统里合不合理）
 # 是**同一张表由细到整**的四层，一层比一层往外；`module_coupling`
 # 放在 `config_linkage` 之后，因为两者是同一族问题的两个尺度 —— `config_linkage`
 # 看**一张表**改动的连锁，`module_coupling` 看**模块之间**的耦合。
+# **顺序还有第二个用途**：子代理模式按这个顺序把维度**相邻地**切给各成员
+# （`subagent.group_dimensions`）—— 相邻即相关，所以改这个顺序会改变分工。
 #
 # `config_data` 是 2026-09-18 加的（用户要求「重点分析配置数据是否有问题」）：配表 diff
 # 里最常见的问题不在标识符也不在数值边界，而在**数据自己说不通** —— 只改了一列文案、
@@ -68,17 +73,162 @@ REFERENCE_TOC_THRESHOLD_LINES = 300
 # **这个值放在这个系统里合不合理** —— 量级突变（道具价值 1000 → 1000000）、
 # 经济闭环被打破（售价 100 的东西卖给商店能卖 10000）、单位量纲、与本系统其它档位的
 # 比例。它可以是格式完全正确、行内也自洽的一个数，而数量级错一位就是线上事故。
-DIMENSION_IDS = (
-    "config_id",
-    "config_value",
-    "config_data",
-    "value_sanity",
-    "config_linkage",
-    "module_coupling",
-    "code_logic",
-    "version_branch",
-    "process",
+@dataclass(frozen=True)
+class DimensionSpec:
+    """一个检查维度：运行期用的 `id` + 给人看的中文名 `label`。"""
+
+    id: str
+    label: str
+
+
+DEFAULT_DIMENSION_SPECS: tuple[DimensionSpec, ...] = (
+    DimensionSpec("config_id", "配置 ID"),
+    DimensionSpec("config_value", "配置取值"),
+    DimensionSpec("config_data", "配置数据本身"),
+    DimensionSpec("value_sanity", "数值是否合理"),
+    DimensionSpec("config_linkage", "单表连锁"),
+    DimensionSpec("module_coupling", "模块耦合"),
+    DimensionSpec("code_logic", "代码逻辑"),
+    DimensionSpec("version_branch", "版本分支"),
+    DimensionSpec("process", "流程"),
 )
+
+# 平台出厂默认的 id 序列。**这是「项目没声明时」的那一份**，也是 SKILL.md 正文里枚举的
+# 那一份（`_check_body_contract` 按它校验文档）。项目可以在自己的知识包里声明自己的
+# 维度清单，那时本次生效的清单来自声明，而不是这里 —— 见 `LoadedSkills.dimensions`。
+#
+# 保留这个元组（而不是把常量拆到各处）是刻意的：文档校验、默认值、以及「声明与自己
+# 相同」的判断都需要一份确定的出厂值。
+DIMENSION_IDS = tuple(spec.id for spec in DEFAULT_DIMENSION_SPECS)
+
+# id → 中文名的出厂映射。`report_document` 的导出文档用它把 category 翻成人话。
+DIMENSION_LABELS: dict[str, str] = {spec.id: spec.label for spec in DEFAULT_DIMENSION_SPECS}
+
+# 「不在本次生效的维度清单内」这一组的名字。**它是一个显式的分组，而不是「显示不出来」**：
+# 平台对落不进清单的条目一律**保留**（见 `protocol._coerce_anomalies`），再用这个名字
+# 把它们单独列出来 —— 少了一条发现，读报告的人必须看得出来。
+UNCLASSIFIED_LABEL = "未归类"
+
+# 声明里的 id 形状：小写字母开头，只含小写字母、数字、下划线。**比 `Config_ID` 这种写法
+# 直接判非法**而不是悄悄折成小写：折了之后声明里的 `Config_ID` 与模型写的 `config_id`
+# 看起来是同一个，而报告里显示的又是声明原样，三方对不上时没人查得出来。
+DECLARED_DIMENSION_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+# 声明里一项的形状：`id=中文名`。用**第一个** `=` 切分，所以中文名里可以带 `=`。
+DECLARED_DIMENSION_SEPARATOR = "="
+# 中文名上限。它是给人看的一格表格文字，超长会把报告的维度列撑坏。
+DECLARED_DIMENSION_LABEL_MAX_CHARS = 24
+# 一份声明最多几个维度。每个维度都会出现在提示词、成员任务书、报告与导出文档里，
+# 声明一份几十项的清单是误用（而且每个维度都是一份要花钱看的职责）。
+MAX_DECLARED_DIMENSIONS = 24
+
+
+def build_dimensions(items: Sequence[str]) -> tuple[tuple[DimensionSpec, ...], str]:
+    """把一串 `id=中文名` 声明项校验成维度清单。
+
+    返回 `(清单, 问题)`：问题非空时清单是**空元组**，调用方据此回落到平台默认值，
+    并**必须**把问题交出去（见 `project_facts.dimensions` 的 warning）—— 一份坏掉的声明
+    悄悄退化成默认值，跟「项目本来就没声明」在行为上一模一样。
+
+    **顺序按声明原样保留**，因为它是有意义的：子代理模式按这个顺序把维度相邻地切给
+    各成员，所以顺序就是「哪些维度该被同一个人看」。
+    """
+    specs: list[DimensionSpec] = []
+    problems: list[str] = []
+    seen: set[str] = set()
+
+    for raw in items:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        identifier, separator, label = text.partition(DECLARED_DIMENSION_SEPARATOR)
+        identifier, label = identifier.strip(), label.strip()
+        if not separator or not identifier or not label:
+            problems.append(f"`{text}` 不是 `id=中文名` 的形状")
+            continue
+        if not DECLARED_DIMENSION_ID_RE.match(identifier):
+            problems.append(
+                f"`{identifier}` 不是合法的维度 id（要求小写字母开头，"
+                "只含小写字母、数字、下划线，且不超过 40 字符）"
+            )
+            continue
+        if len(label) > DECLARED_DIMENSION_LABEL_MAX_CHARS:
+            problems.append(
+                f"`{identifier}` 的中文名超过 {DECLARED_DIMENSION_LABEL_MAX_CHARS} 字"
+            )
+            continue
+        if identifier in seen:
+            # 重复的 id 会让同一个维度被切给两个成员（顺序里有两条同名项），
+            # 于是两边各看一半、报告里出现两行同名维度。
+            problems.append(f"`{identifier}` 重复出现")
+            continue
+        seen.add(identifier)
+        specs.append(DimensionSpec(id=identifier, label=label))
+
+    if len(specs) > MAX_DECLARED_DIMENSIONS:
+        problems.append(f"维度数量超过上限（{MAX_DECLARED_DIMENSIONS} 个）")
+    if problems:
+        return (), "；".join(problems)
+    if not specs:
+        return (), "没有解析出任何维度"
+    return tuple(specs), ""
+
+
+def dimension_ids_of(specs: Iterable[DimensionSpec]) -> tuple[str, ...]:
+    return tuple(spec.id for spec in specs)
+
+
+def dimension_labels_of(specs: Iterable[DimensionSpec]) -> dict[str, str]:
+    return {spec.id: spec.label for spec in specs}
+
+
+def is_platform_default_dimensions(specs: Sequence[DimensionSpec]) -> bool:
+    """这份清单是否与平台出厂默认**逐字相同**（id 与顺序都一样）。
+
+    它的用途是「要不要往提示词里追加一段项目清单」：与出厂默认相同时追加只是白花
+    提示词预算（模型看到的清单没变），而不同时必须追加，否则模型会按正文里那九个写。
+    """
+    return dimension_ids_of(specs) == DIMENSION_IDS
+
+
+def render_dimension_section(specs: Sequence[DimensionSpec]) -> str:
+    """把「本项目适用的维度清单」渲染成一段给模型看的正文。
+
+    ## 为什么需要它（以及为什么它必须与校验用同一份）
+
+    平台 SKILL.md 正文里逐条展开的是**出厂默认的九个维度**，而 `skill_contract` 要求
+    正文枚举与运行期常量一致 —— 那一份是平台出厂值，换项目不变。项目在自己的知识包里
+    声明了自己的维度清单时，**只有这一段能告诉模型换成哪些**。
+
+    所以它由 `skill_loader.load_skills` 在读声明之后拼进**进提示词的那一份正文**里
+    （紧跟在 SKILL.md 正文之后），与 `LoadedSkills.dimensions` 是同一个来源、同一份
+    对象 —— 校验、分工、任务书、报告分组读的都是它，不存在「校验按 A、提示词按 B」。
+    """
+    lines = [
+        "## 本项目适用的维度清单（**以本节为准**）",
+        "",
+        "上面正文里逐条展开的那九个维度是**平台出厂默认**。本项目在自己的知识包"
+        "（`references/project-facts.md`）里声明了自己的维度清单，**本次分析生效的是下面"
+        "这一份**，不是上面那一份。",
+        "",
+    ]
+    for index, spec in enumerate(specs, start=1):
+        lines.append(f"{index}. `{spec.id}` —— {spec.label}")
+    lines.extend(
+        [
+            "",
+            "三条纪律：",
+            "",
+            "- `anomalies[].category` 与 `dimensions[].id` **只能**写上面这几个 id。"
+            "写别的 id 平台**不会丢弃**那条发现，但会把它归到「未归类」里单独列出来 ——"
+            "那等于这条发现没有人认领，所以别这么写。",
+            "- `final` 里的 `dimensions` 必须把上面这几个维度**逐一**留痕（没命中的写 "
+            "`hit: false` 并说明理由），一个都不能空着。",
+            "- **顺序是有意的**：顺序相邻的维度在语义上相关，平台按这个顺序把维度分给"
+            "分片代理（相邻的几个会落在同一个分片身上）。",
+        ]
+    )
+    return "\n".join(lines)
+
 
 # 报告结构。**这也是运行期契约**：「轮次耗尽但回答像报告」的降级判定会数这些标题，
 # 命中足够多才认为这份回答可当报告用。改这里就必须同步改 SKILL.md。
@@ -323,6 +473,16 @@ def _check_body_contract(body: str) -> list[str]:
     这四组枚举不同步的后果都是**静默**的：模型输出服务端不认的值 → 那一条被丢弃，
     而报告里看不出少了东西；反过来文档里少写了一项 → 模型永远不会用那种类型请求，
     该读的上下文读不到。
+
+    ## `category` 这一项比的是**平台出厂默认**，这是对的
+
+    `DIMENSION_IDS` 是出厂值，而 SKILL.md 就是出厂的那份 skill（它随平台发版，
+    与任何项目无关）。项目声明了自己的维度清单时，生效清单来自声明 —— 那一段由
+    `skill_loader` 追加进**进提示词的正文**，不落盘，所以不影响这里。
+
+    这里**不能**改成「文档必须等于某个项目的清单」：文档是平台级的，它没有项目。
+    也**不能**因为「落不进清单的条目现在不丢了」就删掉这条校验 —— 它防的是
+    「文档与服务端对不上」，而那个方向（模型按文档写、平台按别的口径理解）依然存在。
     """
     problems: list[str] = []
 

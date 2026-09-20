@@ -29,6 +29,7 @@ from app import app, create_tables, db
 from models import Commit, Project, Repository, WeeklyVersionConfig
 from models.ai_analysis import AiAnalysisRun
 from services.ai import report_document as doc
+from services.ai.skill_loader import SKILL_PROJECTS_ROOT_ENV, project_pack_slug
 from tests.test_ai_history_survives_restart import REPORT_TEXT, _setup_config
 
 
@@ -472,3 +473,109 @@ def test_the_downloaded_file_has_a_readable_chinese_name():
             when=run.created_at,
         )
         assert urllib.parse.quote(name, safe="") in response.headers["Content-Disposition"]
+
+
+# ---------------------------------------------------------------------------
+#  维度那一列：按**结果里存的那份清单**翻中文名
+# ---------------------------------------------------------------------------
+def _declare_dimensions(projects_root, project_code: str, declaration: str) -> None:
+    """给项目写一份 `references/project-facts.md`（**项目当前的声明**）。"""
+    pack = projects_root / project_pack_slug(project_code) / "references"
+    pack.mkdir(parents=True, exist_ok=True)
+    (pack / "project-facts.md").write_text(
+        "---\n"
+        f"name: {project_pack_slug(project_code)}\n"
+        f"description: {project_code} 的项目事实\n"
+        f"dimensions: {declaration}\n"
+        "---\n\n正文。\n",
+        encoding="utf-8",
+    )
+
+
+def test_the_dimension_column_uses_the_list_stored_with_the_result(tmp_path, monkeypatch):
+    """导出按**结果里存的那份清单**渲染，不是按项目今天的声明。
+
+    这条用例的两个关键点缺一不可：
+
+    * 结果里存的是 A（`performance` = 性能与耗时）；
+    * 项目**今天**的声明是 B（同一个 id、另一个中文名）。
+
+    一个「导出时现查项目当前声明」的实现会把 B 打进去 —— 那不是「显示得不准」，而是
+    按新清单**改写历史**：项目改了声明之后，历史结论会被重新贴标签（当时合法的维度
+    变成「未归类」，或者同一个 id 换了个名字），而报告读起来完全正常。
+    """
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        projects_root = tmp_path / "projects"
+        monkeypatch.setenv(SKILL_PROJECTS_ROOT_ENV, str(projects_root))
+        _declare_dimensions(projects_root, project.code, "performance=今天的叫法")
+
+        run = _run(
+            project_id=project.id,
+            target_type="weekly",
+            target_id=cfg.id,
+            payload={
+                "risk_level": "high",
+                "risk_reasons": ["模型报出 1 条"],
+                # 这次分析**当时**生效的清单：平台自己留存的那一份。
+                "dimension_specs": [{"id": "performance", "label": "性能与耗时"}],
+                "anomalies": [
+                    {
+                        "title": "性能回归",
+                        "category": "performance",
+                        "severity": "high",
+                        "confidence": "high",
+                        "evidence": ["耗时从 12ms 涨到 400ms"],
+                    }
+                ],
+            },
+        )
+        with app.test_client() as client:
+            _login(client)
+            response = client.get(f"/ai-analysis/runs/{run.id}/report.md")
+
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert "性能与耗时" in body, "必须按结果里存的那份清单翻中文名"
+        assert "今天的叫法" not in body, (
+            "导出时现查了项目当前声明 —— 那是按新清单改写历史结论"
+        )
+        assert "未归类（performance）" not in body, (
+            "项目自己声明的维度被显示成了「未归类」"
+        )
+        assert "平台没有丢弃它们" not in body, "没有未归类条目时不该多那句说明"
+
+
+def test_the_dimension_column_falls_back_when_the_result_has_no_list(tmp_path, monkeypatch):
+    """结果里**没有**这份清单时回落到平台出厂清单（字段缺失的兜底，不是兼容旧数据）。
+
+    认不出的 category 仍然要**响亮**：显示成「未归类（<原始 id>）」并加一句说明，
+    而不是把原始 id 当做一个正常的维度名。
+    """
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        run = _run(
+            project_id=project.id,
+            target_type="weekly",
+            target_id=cfg.id,
+            payload={
+                "risk_level": "high",
+                "risk_reasons": ["模型报出 1 条"],
+                "anomalies": [
+                    {
+                        "title": "性能回归",
+                        "category": "performance",
+                        "severity": "high",
+                        "confidence": "high",
+                        "evidence": ["e"],
+                    }
+                ],
+            },
+        )
+        with app.test_client() as client:
+            _login(client)
+            response = client.get(f"/ai-analysis/runs/{run.id}/report.md")
+
+        body = response.get_data(as_text=True)
+        assert "未归类（performance）" in body
+        assert "平台没有丢弃它们" in body

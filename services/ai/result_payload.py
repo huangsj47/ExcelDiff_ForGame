@@ -161,6 +161,20 @@ def result_payload(
             {"id": item.id, "hit": bool(item.hit), "note": item.note or ""}
             for item in (outcome.payload.dimensions if outcome.payload else ())
         ],
+        # **本次分析当时生效的**检查维度清单（id + 中文名），来自
+        # `LoadedSkills.dimensions`（见 `engine.run_analysis`）。
+        #
+        # 它与上面那个 `dimensions` **不是一回事**：上面是模型逐维度的交代（命中与否 +
+        # 理由），这里是平台当时用的那份清单本身。它必须随结果落库，因为导出文档要把
+        # 异常的 `category` 翻成中文名（`report_document.dimension_label`），而导出发生在
+        # **很久之后**：那时项目可能已经改过声明（`references/project-facts.md`）。
+        #
+        # 现查项目当前声明是**篡改历史**：一条当时归在 `performance` 下的发现，会在新
+        # 清单里被显示成「未归类（performance）」——报告读起来完全正常，只是把结论按
+        # 今天的口径重新贴了标签。所以清单在分析当时就存进来，导出只读这一份。
+        "dimension_specs": [
+            {"id": spec.id, "label": spec.label} for spec in outcome.dimension_specs
+        ],
         "rounds_used": outcome.rounds_used,
         "requests_used": outcome.requests_used,
         # 本次的用量。放在这里有两个原因：SSE 的 `result` 事件与 `/latest`（读的是落库的
@@ -200,6 +214,10 @@ def failed_result(summary: dict, message: str) -> dict:
         # 不必为「没跑起来的那次」多加一个分支（少一个键与空列表在界面上的区别是
         # 「九个维度一个都没交代」与「这次根本没跑」，而后者已经由 status 说了）。
         "dimensions": [],
+        # 同上面那条：形状一致，读取侧只写一处 `payload.get("dimension_specs")`。
+        # 空列表 = 「这次没有清单可查」，导出按平台出厂清单回落（这是缺字段的兜底，
+        # 不是为旧数据写的兼容分支）。
+        "dimension_specs": [],
         "suppressed_count": 0,
         "rounds_used": 0,
         "requests_used": 0,

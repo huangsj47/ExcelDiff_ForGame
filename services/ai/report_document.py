@@ -40,6 +40,9 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from utils.timezone_utils import format_beijing_time
 
+from services.ai import skill_contract
+from services.ai.skill_contract import DEFAULT_DIMENSION_SPECS, dimension_labels_of
+
 # ---------------------------------------------------------------------------
 #  给人看的字
 # ---------------------------------------------------------------------------
@@ -49,7 +52,9 @@ from utils.timezone_utils import format_beijing_time
 #   * 触发方式 —— `templates/ai_usage_dashboard.html` 的「定时 / 手动」；
 #   * 严重度与置信度 —— `services/ai/skill_contract.py` 的 SEVERITIES / CONFIDENCES，
 #     这两档是**契约**（更低的置信度按契约只能写进正文，不该出现在给人工跟进的清单里）；
-#   * 维度 —— `docs/AI分析使用说明.md` §「九个维度都要留痕」里那份中文名。
+#   * 维度 —— **这次分析当时生效的那份清单**（结果里存的 `dimension_specs`，见
+#     `dimension_labels_from_payload`）；只有那份缺失时才回落到
+#     `services/ai/skill_contract.DEFAULT_DIMENSION_SPECS` 里的中文名。
 RISK_LABELS = {
     "high": "高",
     "mid_high": "中高",
@@ -85,23 +90,57 @@ CONFIDENCE_LABELS = {
     "very_high": "很高",
 }
 
-# 九个检查维度的中文名。**顺序与 `skill_contract.DIMENSION_IDS` 一致**（那张表是运行期
-# 契约），这里只是把 id 翻成人话；映射里查不到的 id 原样显示 —— 编一个中文名比显示
-# `foo_bar` 更糟（后者一眼能看出是没见过的值，前者看起来像个正经维度）。
-DIMENSION_LABELS = {
-    "config_id": "配置 ID",
-    "config_value": "配置取值",
-    "config_data": "配置数据本身",
-    "value_sanity": "数值是否合理",
-    "config_linkage": "单表连锁",
-    "module_coupling": "模块耦合",
-    "code_logic": "代码逻辑",
-    "version_branch": "版本分支",
-    "process": "流程",
-}
+# 检查维度的中文名映射。**从 `skill_contract` 的出厂清单派生**，不再手抄一份 ——
+# 中文名与 id 分居两处时，加一个维度漏改一边的后果是报告里那一格显示英文 id，
+# 而英文 id 看起来完全正常（它就是个正经标识符），不会有人发现。
+#
+# ## 这一份是**兜底**，不是权威
+#
+# 上面那份是平台出厂清单。项目可以在知识包里声明自己的维度清单
+# （`LoadedSkills.dimensions`），那时导出该用的是**这一次分析当时生效的那一份** ——
+# 它随结果一起落库（`result_payload` 的 `dimension_specs`），由
+# `dimension_labels_from_payload` 读出来交给 `build_report_markdown`。
+#
+# **不许在导出时现查项目当前声明**：导出发生在很久之后，那时项目可能已经改过声明。
+# 按今天的声明去翻译当时的结论，会把一条当时合法的发现显示成「未归类（performance）」
+# ——那不是「显示得不准」，是按新口径**改写历史**，而报告读起来完全正常。
+#
+# 结果里没有这份清单时（`dimension_specs` 缺失 / 为空）回落到这一份：不是「兼容旧
+# 数据」，只是「字段缺失时别崩」——那一格仍然会响亮地显示成「未归类（<原始 id>）」，
+# 而不是把原始 id 当成一个正常维度名。
+DIMENSION_LABELS: dict[str, str] = dimension_labels_of(DEFAULT_DIMENSION_SPECS)
+
+# 没有归属的那一组怎么显示：`未归类（<原始 category>）`。
+UNCLASSIFIED_LABEL = skill_contract.UNCLASSIFIED_LABEL
+# category 都没给（模型漏写了）时的显示。
+UNCLASSIFIED_UNKNOWN = f"{UNCLASSIFIED_LABEL}（未标注）"
 
 # 「这次没有可导出的结论」的判定只此一份：跑完了、而且真的落了报告正文。
 EXPORTABLE_STATUSES = ("succeeded",)
+
+
+def dimension_labels_from_payload(payload: Any) -> dict[str, str]:
+    """从**这一次结果自己存下来的**清单里取 id → 中文名（`result_payload` 的
+    `dimension_specs`）。
+
+    这是导出侧拿到「本次分析当时生效的清单」的**唯一**入口，也是它唯一该用的入口：
+    在导出时现查项目当前声明会按新清单重新贴标签（见 `DIMENSION_LABELS` 上面那段）。
+
+    读不出来（键缺失、值不是列表、条目形状不对）就回落到平台出厂那一份 —— 那一份是
+    **兜底**，不是权威：它照样会把认不出的 category 显示成「未归类（<原始 id>）」。
+    一条坏数据不该让整份导出失败，也不该让那一格悄悄变成一个看似正常的维度名。
+    """
+    raw = payload.get("dimension_specs") if isinstance(payload, Mapping) else None
+    labels: dict[str, str] = {}
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            if not isinstance(item, Mapping):
+                continue
+            identifier = str(item.get("id") or "").strip()
+            label = str(item.get("label") or "").strip()
+            if identifier and label:
+                labels[identifier] = label
+    return labels or DIMENSION_LABELS
 
 
 def _label(table: Mapping[str, str], value: Any, default: str = "-") -> str:
@@ -135,8 +174,21 @@ def confidence_label(confidence: Any) -> str:
     return _label(CONFIDENCE_LABELS, confidence)
 
 
-def dimension_label(category: Any) -> str:
-    return _label(DIMENSION_LABELS, category)
+def dimension_label(category: Any, labels: Mapping[str, str] | None = None) -> str:
+    """category → 报告里那一格的字。
+
+    `labels` 是**本次分析当时生效的**清单（`dimension_labels_from_payload`）；不传就是
+    平台出厂那一份。
+
+    认不出来的值显示成 `未归类（<原始 category>）`：**原始 id 原样保留**（读的人要能拿它
+    去对照项目声明/模型输出），但明确写出「平台不认识它」——只显示原始 id 会被读成一个
+    正常的维度名。空值显示成 `未归类（未标注）`。
+    """
+    text = str(category or "").strip()
+    if not text:
+        return UNCLASSIFIED_UNKNOWN
+    table = labels or DIMENSION_LABELS
+    return table.get(text, f"{UNCLASSIFIED_LABEL}（{text}）")
 
 
 def is_exportable(*, status: Any, report_text: Any) -> bool:
@@ -339,14 +391,32 @@ def _meta_rows(
     return rows
 
 
-def anomaly_rows(anomalies: Iterable[Mapping[str, Any]]) -> list[dict[str, str]]:
+def is_unclassified(category: Any, labels: Mapping[str, str] | None = None) -> bool:
+    """这个 category 是不是「不在本次生效的清单里」（含干脆没给 category）。
+
+    只用于「附录要不要多写一句说明」，所以判据跟着 `dimension_label` 走 —— 两边用同一份
+    清单（`labels`），否则会出现「表里显示的是未归类、说明那句话却不出现」这种自相矛盾的
+    附录。
+    """
+    text = str(category or "").strip()
+    return not text or text not in (labels or DIMENSION_LABELS)
+
+
+def anomaly_rows(
+    anomalies: Iterable[Mapping[str, Any]], labels: Mapping[str, str] | None = None
+) -> list[dict[str, Any]]:
     """异常清单 → 表格行（**已经翻成给人看的字**，纯函数，可单测）。
 
     只读取渲染需要的这几个键：`severity` / `confidence` / `category` / `title` /
     `file_path` / `impact` / `evidence` / `suggestion`。缺的键按空处理 —— 老记录的
     payload 里没有 `evidence` 这个键（它是后加的）。
+
+    `labels` 是**本次分析当时生效的**维度清单（见 `dimension_label`）。
+
+    `unclassified` 是**平台自己算的**（不是模型给的字段）：它标记「这一条的 category
+    不在本次生效的清单里」，`build_report_markdown` 据此决定要不要加那句说明。
     """
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, Any]] = []
     for item in anomalies or ():
         if not isinstance(item, Mapping):
             continue
@@ -360,7 +430,8 @@ def anomaly_rows(anomalies: Iterable[Mapping[str, Any]]) -> list[dict[str, str]]
                 # （这份文件是要发出去的）。
                 "severity": _cell(severity_label(item.get("severity"))),
                 "confidence": _cell(confidence_label(item.get("confidence"))),
-                "dimension": _cell(dimension_label(item.get("category"))),
+                "dimension": _cell(dimension_label(item.get("category"), labels)),
+                "unclassified": is_unclassified(item.get("category"), labels),
                 "title": _cell(item.get("title")),
                 "file_path": _cell(item.get("file_path")),
                 "impact": _cell(item.get("impact")),
@@ -382,6 +453,16 @@ APPENDIX_INTRO = (
 
 EMPTY_APPENDIX = "本次没有达到门槛的异常条目。"
 
+# 附录里有「未归类」条目时补的那一句。**这一句不能省**：一份发出去的报告里出现
+# 「未归类」，读的人必须知道那是什么意思、以及该拿什么去对照 —— 否则它会被读成
+# 「平台算不出来」，而真实含义是「这条发现不属于本次生效的任何维度，但没有被丢掉」。
+UNCLASSIFIED_NOTE = (
+    "维度列写着「未归类」的条目，是模型给的 `category` 不在本次生效的维度清单里。"
+    "**平台没有丢弃它们**（按原样列在上面），但它们不属于清单上的任何一个维度 —— "
+    "需要人工判断该归到哪里。若本项目在知识包 `references/project-facts.md` 里声明了"
+    "自己的维度清单，请先对照那份清单确认它是否属于某个自有维度。"
+)
+
 
 def build_report_markdown(
     *,
@@ -399,6 +480,11 @@ def build_report_markdown(
     report_text: str = "",
     anomalies: Iterable[Mapping[str, Any]] = (),
     suppressed_count: int = 0,
+    # **本次分析当时生效的**维度清单（id → 中文名）。路由从这条运行自己的
+    # `response_payload.dimension_specs` 读出来（`dimension_labels_from_payload`）——
+    # 见 `DIMENSION_LABELS` 上面那段（现查项目当前声明是篡改历史）。不传 / 传空
+    # 就是平台出厂那一份。
+    dimension_labels: Mapping[str, str] | None = None,
     title: str = "AI 变更风险分析报告",
 ) -> str:
     """拼出整份文档。**报告原文逐字出现在中间**，前后各一条 `---` 把它隔开。
@@ -406,6 +492,9 @@ def build_report_markdown(
     元信息里那句「该等级仅按变更规模估算，不是模型评估结果」不是这里写的 —— 它随
     `risk_reasons` 一起从 `result_payload` 来（原文带上）。**警示语的单一来源是产生它的
     那一层**：在这里另写一句，两处迟早会说得不一样。
+
+    维度那一列同理：中文名来自 `dimension_labels`（本次分析**当时**生效的清单），
+    而不是在导出时现查项目声明 —— 理由见 `DIMENSION_LABELS` 上面那段。
     """
     lines: list[str] = [f"# {title}", ""]
     lines.append("| 项 | 内容 |")
@@ -444,10 +533,15 @@ def build_report_markdown(
     lines.append(APPENDIX_INTRO)
     lines.append("")
 
-    rows = anomaly_rows(anomalies)
+    rows = anomaly_rows(anomalies, dimension_labels)
     if not rows:
         lines.append(EMPTY_APPENDIX)
     else:
+        # 「未归类」那一句紧跟在附录开头那句说明之后、表格之前：读的人在看到表里那些
+        # 「未归类（xxx）」之前先知道它是什么意思。
+        if any(row["unclassified"] for row in rows):
+            lines.append(UNCLASSIFIED_NOTE)
+            lines.append("")
         lines.append("| 严重度 | 置信度 | 维度 | 标题 | 文件 | 影响 |")
         lines.append("| --- | --- | --- | --- | --- | --- |")
         for row in rows:

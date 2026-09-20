@@ -167,18 +167,70 @@ def _task_result(task) -> Optional[dict]:
     return summary if isinstance(summary, dict) else None
 
 
-def _matches(task, *, commit_id: str, file_path: str, lines: str) -> bool:
+def header_config_fingerprint(header_rows, header_name_row) -> str:
+    """表头坐标的**规范化指纹**（`"表头行数|名称行"`，如 `"2|2"`）。
+
+    这两个值（`Repository.header_rows` / `header_name_row`）决定配表的列名取哪一行、
+    物理行几以上才算数据行 —— 也就是说，**它们变一点，渲染出来的正文就换一份**。
+
+    ## 为什么要指纹，而不是把原值直接塞进判据
+
+    原值里「同一个意思」有好几种写法：没配是 `None`，有人填 `0`、有人填 `1`，
+    而 `header_name_row` 超出表头块时会被**夹到表头块最后一行**。用原值比较的话，
+    `None` 与 `1`、`(header_rows=2, header_name_row=1)` 与 `(2, None)` 都会被判成
+    「不同的请求」→ 同一个文件被反复派发、反复等一轮上限（15 秒），而拿回来的
+    正文逐字相同。指纹取的是**规范化之后**的值，等价类与渲染函数完全一致。
+
+    ## 规范化只走 diff 引擎那两份实现
+
+    `_read_excel_sheets` 自己也是调 `DiffService._header_row_count` /
+    `_header_name_row` 规范化的（同一件事不能有第二套「几算合法、越界怎么办」），
+    所以「指纹相同」精确地等价于「渲染结果相同」。
+
+    延迟 import：`services.diff_service` 会拉起 pandas，而本模块在平台侧被
+    `platform_provider` 在取数那一刻才 import —— 没必要为一个 int 比较把 pandas
+    的导入挂到模块加载上（`_read_excel_sheets` 里同样是一段延迟 import）。
+    """
+    from services.diff_service import DiffService
+
+    count = DiffService._header_row_count(header_rows)
+    name_row = DiffService._header_name_row(header_name_row, count)
+    return f"{count}|{name_row}"
+
+
+def _matches(
+    task, *, commit_id: str, file_path: str, lines: str,
+    header_rows=None, header_name_row=None,
+) -> bool:
     """这个任务是不是同一份请求。
 
     `lines` 对 diff 请求恒为空串，而 diff 的 payload 里根本不写 `lines` ——
     `str(payload.get("lines") or "") == ""` 成立，所以两种请求都能用同一条判据
     （不需要一个「diff 用的 _matches」）。
+
+    ## 表头坐标也要比（2026-09-20）
+
+    正文是按仓库的表头坐标渲染出来的（列名取哪一行、表头块占几行），**坐标不同
+    就是另一份正文**。少了这一项，改了配置之后再索取同一个文件会命中上一次的
+    结果：Agent 把按旧配置渲染的正文交出来，而平台这次问的是新配置 —— 列名与
+    数据行的坐标都是旧的，模型据此写出的结论全错，且界面上完全看不出来
+    （不派发、不等待、也不留任何痕迹）。
+
+    比的是规范化后的指纹（见 `header_config_fingerprint`）：没配（`None`）与
+    隐藏的默认值（`1`）是同一份请求，而 `1|1` 与 `2|2` 不是。
+
+    diff / 检索两种请求的 payload 里不含这两个键（它们没有表头坐标），
+    `payload.get(...)` 取到 `None`，指纹是 `"1|1"` —— 与默认参数算出来的相同，
+    所以它们照旧只按各自的字段判重。
     """
     payload = _task_payload(task)
     return (
         str(payload.get("commit_id") or "") == str(commit_id or "")
         and str(payload.get("file_path") or "") == str(file_path or "")
         and str(payload.get("lines") or "") == str(lines or "")
+        and header_config_fingerprint(
+            payload.get("header_rows"), payload.get("header_name_row")
+        ) == header_config_fingerprint(header_rows, header_name_row)
     )
 
 
@@ -200,19 +252,24 @@ def _recent_tasks(*, task_type: str, project_id: int, repository_id: int) -> lis
 
 
 def _find_task(
-    *, task_type: str, project_id: int, repository_id: int, commit_id: str, file_path: str, lines: str
+    *, task_type: str, project_id: int, repository_id: int, commit_id: str, file_path: str,
+    lines: str, header_rows=None, header_name_row=None,
 ):
     """最近一次同参数的取数任务（无论成败）。"""
     for task in _recent_tasks(
         task_type=task_type, project_id=project_id, repository_id=repository_id
     ):
-        if _matches(task, commit_id=commit_id, file_path=file_path, lines=lines):
+        if _matches(
+            task, commit_id=commit_id, file_path=file_path, lines=lines,
+            header_rows=header_rows, header_name_row=header_name_row,
+        ):
             return task
     return None
 
 
 def _active_task(
-    *, task_type: str, project_id: int, repository_id: int, commit_id: str, file_path: str, lines: str
+    *, task_type: str, project_id: int, repository_id: int, commit_id: str, file_path: str,
+    lines: str, header_rows=None, header_name_row=None,
 ):
     """同参数且**还没跑完**的取数任务（没有就返回 `None`）。
 
@@ -222,6 +279,7 @@ def _active_task(
     task = _find_task(
         task_type=task_type, project_id=project_id, repository_id=repository_id,
         commit_id=commit_id, file_path=file_path, lines=lines,
+        header_rows=header_rows, header_name_row=header_name_row,
     )
     if task is not None and str(task.status or "").lower() in AGENT_TASK_ACTIVE_STATUSES:
         return task
@@ -229,7 +287,8 @@ def _active_task(
 
 
 def _count_failed_attempts(
-    *, task_type: str, project_id: int, repository_id: int, commit_id: str, file_path: str, lines: str
+    *, task_type: str, project_id: int, repository_id: int, commit_id: str, file_path: str,
+    lines: str, header_rows=None, header_name_row=None,
 ) -> int:
     """同一份请求已经失败过几次（用来决定还要不要再试）。"""
     return sum(
@@ -237,13 +296,17 @@ def _count_failed_attempts(
         for task in _recent_tasks(
             task_type=task_type, project_id=project_id, repository_id=repository_id
         )
-        if _matches(task, commit_id=commit_id, file_path=file_path, lines=lines)
+        if _matches(
+            task, commit_id=commit_id, file_path=file_path, lines=lines,
+            header_rows=header_rows, header_name_row=header_name_row,
+        )
         and str(task.status or "").lower() == "failed"
     )
 
 
 def _cached_result(
-    *, task_type: str, project_id: int, repository_id: int, commit_id: str, file_path: str, lines: str = ""
+    *, task_type: str, project_id: int, repository_id: int, commit_id: str, file_path: str,
+    lines: str = "", header_rows=None, header_name_row=None,
 ) -> Optional[dict]:
     """已经取回来过的那一份（**纯读**，不派发、不等待）。
 
@@ -253,6 +316,7 @@ def _cached_result(
     task = _find_task(
         task_type=task_type, project_id=project_id, repository_id=repository_id,
         commit_id=commit_id, file_path=file_path, lines=lines,
+        header_rows=header_rows, header_name_row=header_name_row,
     )
     if task is None or str(task.status or "").lower() != "completed":
         return None
@@ -260,12 +324,14 @@ def _cached_result(
 
 
 def cached_file_content(
-    *, project_id: int, repository_id: int, commit_id: str, file_path: str, lines: str = ""
+    *, project_id: int, repository_id: int, commit_id: str, file_path: str, lines: str = "",
+    header_rows=None, header_name_row=None,
 ) -> Optional[dict]:
     """正文：已经取回来过的那一份（纯读）。"""
     return _cached_result(
         task_type=FILE_CONTENT_TASK_TYPE, project_id=project_id,
         repository_id=repository_id, commit_id=commit_id, file_path=file_path, lines=lines,
+        header_rows=header_rows, header_name_row=header_name_row,
     )
 
 
@@ -300,6 +366,8 @@ def _request_from_agent(
     lines: str = "",
     extra_payload: Optional[dict] = None,
     request_key: str = "",
+    header_rows=None,
+    header_name_row=None,
     wait_seconds: Optional[float] = None,
     sleep_func=time.sleep,
 ) -> dict:
@@ -319,6 +387,10 @@ def _request_from_agent(
 
     `noun` 只用于给模型看的措辞（「正文」/「差异」）：正文取不到与 diff 取不到，用户能做的
     事不一样（前者换个文件、后者可能是同步没跑完），所以那句话必须说对是哪一样。
+
+    `header_rows` / `header_name_row` 是**正文**请求独有的：它们进「同一份请求」的判据
+    （见 `_matches`）。diff 与检索不带表头坐标，用默认值即可 —— 默认算出来的指纹与
+    「payload 里没有这两个键」一致。
     """
     project_id = getattr(repository, "project_id", None)
     repository_id = getattr(repository, "id", None)
@@ -328,6 +400,7 @@ def _request_from_agent(
     cached = _cached_result(
         task_type=task_type, project_id=project_id, repository_id=repository_id,
         commit_id=commit_id, file_path=file_path, lines=lines,
+        header_rows=header_rows, header_name_row=header_name_row,
     )
     if cached is not None:
         return {"status": "ready", **cached}
@@ -346,6 +419,7 @@ def _request_from_agent(
     task = _find_task(
         task_type=task_type, project_id=project_id, repository_id=repository_id,
         commit_id=commit_id, file_path=file_path, lines=lines,
+        header_rows=header_rows, header_name_row=header_name_row,
     )
     if task is not None and str(task.status or "").lower() == "failed":
         # 最近一次同参数的取数**失败了**。失败常常是配置问题（工作副本还没建好、节点用错了
@@ -355,6 +429,7 @@ def _request_from_agent(
         attempts = _count_failed_attempts(
             task_type=task_type, project_id=project_id, repository_id=repository_id,
             commit_id=commit_id, file_path=file_path, lines=lines,
+            header_rows=header_rows, header_name_row=header_name_row,
         )
         if attempts >= AGENT_FETCH_MAX_ATTEMPTS:
             detail = str(task.error_message or "").strip()
@@ -378,6 +453,7 @@ def _request_from_agent(
                 find_existing=lambda: _active_task(
                     task_type=task_type, project_id=project_id, repository_id=repository_id,
                     commit_id=commit_id, file_path=file_path, lines=lines,
+                    header_rows=header_rows, header_name_row=header_name_row,
                 ),
                 task_type=task_type,
                 project_id=project_id,
@@ -454,7 +530,29 @@ def request_file_content(
 
     `max_rows` 只在目标是配表时有意义（Agent 侧按它渲染工作表正文，与平台本地同一个
     渲染函数、同一个默认值）；平台传 0 表示「按默认」，与 Agent 侧的默认一致。
+
+    ## 表头坐标（`header_rows` / `header_name_row`）为什么必须随 payload 走
+
+    配表的列名取哪一行、物理行几以上才算数据行，由**仓库**的这两个字段决定
+    （`services/diff_service.py` 是权威口径）。平台本地那条路用的是请求方这一行
+    `Repository`，所以它必须同样送到 Agent 那边去 —— 否则 Agent 只能按**它自己库里**
+    那一行渲染，而两个节点的库不一定是同一份（节点用了旧数据库、配置改了还没同步）。
+    症状不是报错，是两端给出**两套列名与两套数据行坐标**：模型据此写出的
+    「这个取值不在允许集合里」全是错的，且从界面上完全看不出来。
+
+    「同一次索取在单机与 Agent 两种部署下必须给出同一份文本」是平台自己立的纪律
+    （见 `utils/content_window` 与 `platform_provider._render_agent_file_content`），
+    这两个值进 payload 就是这条纪律在配表上的具体落点。
+
+    ## 它们也是「同一份请求」的一部分
+
+    坐标变了，渲染出来的正文就换了一份，所以它们同时进 `_matches` 的判据与
+    `request_key`（见 `header_config_fingerprint`）：不这么做的话，改了配置之后再索取
+    同一个文件会命中按旧配置渲染的那一份缓存 —— 等于没改。
     """
+    header_rows = getattr(repository, "header_rows", None)
+    header_name_row = getattr(repository, "header_name_row", None)
+    header_config = header_config_fingerprint(header_rows, header_name_row)
     return _request_from_agent(
         task_type=FILE_CONTENT_TASK_TYPE,
         noun="正文",
@@ -462,8 +560,21 @@ def request_file_content(
         commit_id=commit_id,
         file_path=file_path,
         lines=lines,
-        extra_payload={"lines": str(lines or ""), "max_chars": int(max_chars), "max_rows": int(max_rows)},
-        request_key=f"file_content:{getattr(repository, 'id', '')}:{commit_id}:{file_path}:{lines}",
+        header_rows=header_rows,
+        header_name_row=header_name_row,
+        extra_payload={
+            "lines": str(lines or ""),
+            "max_chars": int(max_chars),
+            "max_rows": int(max_rows),
+            # 请求方那一行仓库上的表头坐标：Agent 侧以它为准（payload 说了算），
+            # 没带才回落到节点本地的仓库行，并留痕（见 `agent_file_content_reader`）。
+            "header_rows": header_rows,
+            "header_name_row": header_name_row,
+        },
+        request_key=(
+            f"file_content:{getattr(repository, 'id', '')}:{commit_id}:{file_path}"
+            f":{lines}:{header_config}"
+        ),
         wait_seconds=wait_seconds,
         sleep_func=sleep_func,
     )

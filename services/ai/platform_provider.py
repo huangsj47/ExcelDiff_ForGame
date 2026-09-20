@@ -1677,9 +1677,20 @@ class PlatformContextProvider:
         而等待是有代价的（`FILE_CONTENT_WAIT_SECONDS`）。记下来之后第二次直接命中；
         已经派出去、这次没等到的也不再重复等 —— 答案还是同一句「还在路上」。
         """
-        from services.agent_file_content_dispatch import request_file_content
+        from services.agent_file_content_dispatch import (
+            header_config_fingerprint,
+            request_file_content,
+        )
 
-        key = (getattr(repository, "id", None), commit, path, lines)
+        # 表头坐标也进这把 key：它决定配表的列名取哪一行，坐标变了就是另一份正文
+        # （与派发层 `_matches` 的判据同一口径，见 `header_config_fingerprint`）。
+        # 不带上它的话，一次分析中途改了仓库配置，第二次索取会拿到按旧坐标渲染的正文 ——
+        # 而报告里看不出任何异样。非配表路径这两个值恒为未配置，指纹也就是个常数。
+        header_config = header_config_fingerprint(
+            getattr(repository, "header_rows", None),
+            getattr(repository, "header_name_row", None),
+        )
+        key = (getattr(repository, "id", None), commit, path, lines, header_config)
         if key in self._agent_content_fetched:
             cached = self._agent_content_cached.get(key)
             if cached is not None:

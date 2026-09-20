@@ -37,6 +37,7 @@ from services.ai.project_facts import (
     declared_important_tables,
     generated_prefixes,
     important_table_hit,
+    scan_critical_paths,
 )
 from services.ai.skill_loader import SKILL_PROJECTS_ROOT_ENV
 
@@ -45,6 +46,18 @@ def _uid(prefix: str) -> str:
     import uuid
 
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+
+def _critical_path_hit(path: str, declared_tables=()) -> bool:
+    """「这条路径算不算关键路径」在本文件里的唯一入口 —— 走**生产入口**。
+
+    生产路径（周版本汇总）调的就是 `project_facts.scan_critical_paths`：一次扫完
+    并留下命中的理由。这里刻意不引入任何平台侧的包装函数：`ai_analysis_service`
+    曾经有一个 `_is_critical_path(path, declared_tables=())`，生产早就改走
+    `scan_critical_paths` 了，它只剩测试在调 —— 那种「入口」等于让测试去守一份
+    没人用的实现，而它自己错了、或者哪天被删掉，都只有测试发现得了。
+    """
+    return scan_critical_paths([(path, declared_tables)]).hit
 
 
 # ==========================================================================
@@ -58,9 +71,9 @@ def test_a_relative_config_path_is_a_critical_path():
     git 的 `Commit.path` 是**不带前导斜杠**的相对路径。老写法 `/config/` 对
     `config/x.xlsx` 一次都命中不了，于是「关键路径 → 全量分析」这条通道形同虚设。
     """
-    assert ai_service._is_critical_path("config/x.xlsx")
-    assert ai_service._is_critical_path("config/60_skill/角色属性表.xlsx")
-    assert ai_service._is_critical_path("config/[30]道具表_CfgItem.xlsx")
+    assert _critical_path_hit("config/x.xlsx")
+    assert _critical_path_hit("config/60_skill/角色属性表.xlsx")
+    assert _critical_path_hit("config/[30]道具表_CfgItem.xlsx")
 
 
 def test_a_directory_that_merely_ends_with_config_is_not_a_critical_path():
@@ -68,17 +81,31 @@ def test_a_directory_that_merely_ends_with_config_is_not_a_critical_path():
 
     这就是「路径分量起点」写法（`(?:^|/)config/`）与「只要包含 config/」的区别。
     """
-    assert not ai_service._is_critical_path("myconfig/x")
-    assert not ai_service._is_critical_path("deconfig/x")
-    assert not ai_service._is_critical_path("src/notconfig/a.py")
+    assert not _critical_path_hit("myconfig/x")
+    assert not _critical_path_hit("deconfig/x")
+    assert not _critical_path_hit("src/notconfig/a.py")
 
 
 def test_svn_style_absolute_paths_still_match():
     """修 bug 不能把原来就命中的写法弄丢：SVN 风格带前导斜杠的路径照旧命中。"""
-    assert ai_service._is_critical_path("/config/demo.xlsx")
-    assert ai_service._is_critical_path("db/migrations/001.sql")
-    assert ai_service._is_critical_path("a.sql")
-    assert not ai_service._is_critical_path("code/qz_pub/cfg/a.lua")
+    assert _critical_path_hit("/config/demo.xlsx")
+    assert _critical_path_hit("db/migrations/001.sql")
+    assert _critical_path_hit("a.sql")
+    assert not _critical_path_hit("code/qz_pub/cfg/a.lua")
+
+
+def test_the_removed_single_path_wrapper_stays_removed():
+    """`ai_analysis_service._is_critical_path` 删掉之后不许再回来。
+
+    它是「生产已经不走、只有测试在调」的那类入口：周版本走 `scan_critical_paths`，
+    单条调用方一个都没有。留着的唯一效果是让测试去守一份没人用的实现 —— 它错了
+    不会有任何生产后果（测试红一次，改测试就行），它被删了也只是测试红。
+    真正该守的是 `project_facts` 那个入口，见本文件上面几条用例。
+    """
+    assert not hasattr(ai_service, "_is_critical_path"), (
+        "单条路径的关键路径包装又回到了平台模块里 —— 生产路径走的是 "
+        "project_facts.scan_critical_paths，这个包装只会被测试调到"
+    )
 
 
 def test_every_default_pattern_is_anchored_at_a_component_start():

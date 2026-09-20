@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from services.ai.protocol import (
@@ -253,20 +255,23 @@ def test_final_without_dimensions_is_a_protocol_error():
 
 
 def test_the_correction_hint_never_disagrees_with_the_dimension_list():
-    """纠正提示里那句「N 个维度都要写」必须与 `DIMENSION_IDS` 是同一个数。
+    """纠正提示那句「维度都要写」**不许出现任何字面条数**。
 
     它写死过「六个」（SKILL 与运行期契约都是九个），而且**不会有人发现**：服务端照样
     接受九个，只是模型被提示「写六个就算齐了」——少写的那三个维度在报告里永远没有留痕，
-    而所有用例都是绿的。所以这句话不许再出现字面数字。
-    """
-    from services.ai.protocol import DIMENSION_IDS, build_correction_hint
+    而所有用例都是绿的。
 
+    后来它改成 `len(DIMENSION_IDS)`（平台**出厂**的维度数），仍然会在项目声明了自己的
+    清单时对不上：模型从提示词里读到 12 个维度，纠正提示却说「9 个维度都要写」——
+    **校验按 A、提示词按 B**，同样不会报错。所以现在这句话**指回模型手里那份清单**
+    （系统提示词里的那两节），一个数字都不写。
+    """
     hint = build_correction_hint(ProtocolError("dimensions 缺了"))
 
-    assert f"{len(DIMENSION_IDS)} 个维度" in hint, hint
-    assert "六个维度" not in hint and "九个维度" not in hint, (
-        f"维度条数又写死了 —— 改成从 DIMENSION_IDS 取：{hint}"
-    )
+    assert "维度清单" in hint, hint
+    for number in ("六个维度", "九个维度", "9 个维度", "12 个维度"):
+        assert number not in hint, f"维度条数又写死了：{hint}"
+    assert not re.search(r"\d+\s*个维度", hint), f"纠正提示里出现了字面条数：{hint}"
 
 
 def test_structural_errors_on_a_list_field_are_protocol_errors():
@@ -289,7 +294,6 @@ def _single_anomaly_payload(anomaly: dict) -> AnalysisPayload:
     ("label", "override"),
     [
         ("缺标题", {"title": ""}),
-        ("category 不认识", {"category": "something_else"}),
         ("severity 不在两档内", {"severity": "medium"}),
         ("confidence 未达门槛", {"confidence": "low"}),
         ("evidence 为空列表", {"evidence": []}),
@@ -301,6 +305,10 @@ def test_items_that_fail_the_schema_are_dropped_not_fatal(label, override):
 
     这些是最容易被写成「抛异常」的地方，而那样做的代价是：一条缺证据的条目会让
     整轮 10 条结论一起作废，还要多花一轮重问。
+
+    **`category 不认识` 刻意不在这个参数表里**：它已经不属于「该丢的那几条」了 ——
+    见下面 `test_an_unknown_category_is_kept_not_dropped`。它曾经在这里，而那正是
+    「换一个项目、真实的发现被静默丢掉」的入口。
     """
     payload = _single_anomaly_payload(_anomaly(**override))
 
@@ -326,7 +334,14 @@ def test_evidence_accepts_both_string_and_list():
     assert as_string.anomalies[0].evidence == ("只有一条",)
 
 
-def test_dimension_with_unknown_id_is_dropped():
+def test_dimension_with_unknown_id_is_kept_not_dropped():
+    """`dimensions[]` 里认不出来的 id **不丢** —— 项目声明了自己的清单时那是它该写的 id。
+
+    原先这里断言的是「丢掉 made_up」。那在「维度是平台写死的九个」时看着无害，
+    可维度清单是项目可声明的（`LoadedSkills.dimensions`）：一个声明了 `performance` 的
+    项目，模型按提示词写了 `performance`，而这一层按平台出厂值把它丢掉 ——
+    提示词要求它交代的维度，在「逐一交代」表里反而看不到，报告读起来完全正常。
+    """
     import json
 
     payload = parse_payload(
@@ -340,14 +355,64 @@ def test_dimension_with_unknown_id_is_dropped():
             ensure_ascii=False,
         )
     )
-    assert [item.id for item in payload.dimensions] == ["config_id"]
+    assert [item.id for item in payload.dimensions] == ["config_id", "made_up"]
+    assert payload.dropped == ()
+
+
+def test_a_dimension_entry_without_an_id_is_still_dropped():
+    """空 id 不是「归错组」，而是这一条根本没说它是什么维度（结构问题）—— 丢掉并记账。"""
+    import json
+
+    payload = parse_payload(
+        json.dumps(
+            _final_payload(dimensions=[{"id": "", "hit": True}, {"id": "process", "hit": False}]),
+            ensure_ascii=False,
+        )
+    )
+    assert [item.id for item in payload.dimensions] == ["process"]
     assert any(item.kind == "dimension" for item in payload.dropped)
 
 
+def test_an_unknown_category_is_kept_not_dropped():
+    """**任何情况下都不许静默丢掉一条发现。**
+
+    模型给了一个落不进本次生效清单的 category（换项目、换维度时必然发生）时，
+    原先那一条异常**从报告里彻底消失**：报告看起来完全正常，只是少了一条，
+    异常清单、报告正文里都没有它，只剩 trace 里一条谁都看不到的记录。
+
+    现在的口径：category 只决定它归到哪一组，不决定它留不留下 —— 按原样保留
+    （原始 category 一个字不改），由知道清单的那一层归到「未归类」并单独列出来。
+    """
+    payload = _single_anomaly_payload(_anomaly(category="performance"))
+
+    assert len(payload.anomalies) == 1
+    assert payload.anomalies[0].category == "performance", "原始 category 必须原样保留"
+    assert payload.anomalies[0].evidence, "它自己的证据也要留着（没有证据的发现无法跟进）"
+
+
+def test_an_anomaly_without_a_category_is_kept_and_recorded():
+    """连 category 都没写也不丢：没有归属的**发现**仍然是发现。
+
+    账里要留下一条记录（说明它在报告里会显示成「未归类」），否则「这一条为什么不属于
+    任何维度」无从解释。
+    """
+    payload = _single_anomaly_payload(_anomaly(category=""))
+
+    assert len(payload.anomalies) == 1
+    assert payload.anomalies[0].category == ""
+    assert any(item.kind == "unclassified" for item in payload.dropped)
+
+
 def test_dropped_records_carry_the_offending_value():
-    """记下被丢弃的值，才能回答「模型到底写了什么」。"""
+    """记下被丢弃的值，才能回答「模型到底写了什么」。
+
+    category 那一格**不再是被丢弃的值**（它现在留在异常自己身上），所以这里断的是
+    「被保留的那一条仍然带着模型写的原始值」—— 与上面那条一致性判据同一件事：
+    读报告的人要能看出模型写了什么，而不是看到一个被平台改写过的值。
+    """
     payload = _single_anomaly_payload(_anomaly(category="bogus"))
-    assert any(item.detail == "bogus" for item in payload.dropped)
+
+    assert payload.anomalies[0].category == "bogus"
 
 
 # --------------------------------------------------------------------------

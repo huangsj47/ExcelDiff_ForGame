@@ -11,7 +11,7 @@ import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -79,7 +79,6 @@ from services.ai.pricing import (
 )
 from services.ai.provenance import current_provenance, provenance_matches
 from services.ai.project_facts import (
-    DEFAULT_CRITICAL_PATH_FACTS,
     critical_path_facts,
     declared_important_tables_by_repo,
     generated_prefixes,
@@ -546,17 +545,6 @@ def _repo_priority(repo: Repository) -> int:
     """
     resource_type = str(getattr(repo, "resource_type", "") or "").lower()
     return 2 if resource_type == "code" else 1
-
-
-def _is_critical_path(path: str, declared_tables: Sequence[str] = ()) -> bool:
-    """单条路径的关键路径判据（**平台默认模式** + 该仓库声明的重点表，命中任一即算）。
-
-    口径只在这里和 `project_facts` 各有一份**引用**，实现只有 `project_facts` 那一份：
-    老写法（`/config/` 要求前导斜杠）在 git 的相对路径上一条都命中不了，于是
-    「命中关键路径就升级为全量分析」这条通道从来没触发过，而且不报错、不留痕。
-    周版本那一批走的是 `scan_critical_paths`（一次扫完并留理由），这里留给单条调用方。
-    """
-    return bool(DEFAULT_CRITICAL_PATH_FACTS.why(path, declared_tables))
 
 
 def set_project_api_key(project_id: int, api_key: str, updated_by: str = "") -> Tuple[bool, str]:

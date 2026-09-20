@@ -41,14 +41,36 @@
     skills/projects/<slug>/references/project-facts.md
 
 frontmatter 是机器读的声明，沿用知识包既有的 `key: value` 约定（`skill_contract.
-parse_frontmatter`，刻意不引入 PyYAML），正文写给人看。两个键都可选：
+parse_frontmatter`，刻意不引入 PyYAML），正文写给人看。三个键都可选：
 
     generated_prefixes: Cfg, CfgMod
     critical_path_patterns: /cfg/, \\.sql$
+    dimensions: performance=性能与耗时, protocol=协议兼容性, resource=资源引用
 
 值写 `none`（也接受 `无` / `-` / `null`）表示**项目明确声明「没有」**：那时前缀是空
 元组、模式是空元组，**不回落平台默认**。「本项目没有可配对的产物」与「平台不知道这个
 项目该怎么配」是两件不同的事，只有前者才该被记成「0 组」。
+
+## `dimensions` 的写法（为什么是 `id=中文名`）
+
+它是本项目**生效的检查维度清单**，取自「一份要好写、又要能被严格校验」这两条：
+
+* **好写**：一行 `id=中文名`，多个用逗号分隔（与上面两个键同一套分隔符）。
+  `id` 是模型要写进 `category` 的那个标识符，中文名只进报告与导出文档 —— 两样都要，
+  因为平台不允许出现「报告里那一格显示英文 id」这种半成品。
+  **中文名里不要写逗号**（含中文逗号）：它就是分隔符，写了会被切开并判非法
+  （判非法而不是猜着切，是因为猜错的代价是一份谁都没发现的、少了几个维度的清单）。
+* **可严格校验**：`id` 的形状有正则钉着（小写字母开头、只含小写字母数字下划线），
+  重复、缺中文名、形状不对都**判非法**而不是猜。声明坏掉时**回落平台默认并带 warning**，
+  与上面两个键同一条纪律：坏掉的声明不能悄悄退化成「项目没声明」。
+* **顺序有意义**：子代理模式按这个顺序把维度**相邻地**切给各分片（相邻即相关），
+  所以声明里的顺序就是「哪些维度该被同一个人看」。
+* **`none` 对这一个键是非法值**：声明成「没有维度」的意思是「本次分析没有任何检查
+  维度」，而那时模型报出的每一条异常都只能进「未归类」——一个自相矛盾的配置。
+  写 `none` 会被告警并按「未声明」处理。
+
+没声明时**与今天逐字一致**：生效清单就是平台出厂的那九个（含中文名与顺序），提示词里
+也不会多出任何一段。
 
 ## 读不到时怎么办
 
@@ -68,13 +90,19 @@ parse_frontmatter`，刻意不引入 PyYAML），正文写给人看。两个键�
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Mapping, Optional, Sequence
 
 from services.ai.bundles import DEFAULT_GENERATED_PREFIXES
 from services.ai.scope import normalize_path
-from services.ai.skill_contract import SkillContractError, parse_frontmatter
+from services.ai.skill_contract import (
+    DEFAULT_DIMENSION_SPECS,
+    DimensionSpec,
+    SkillContractError,
+    build_dimensions,
+    parse_frontmatter,
+)
 from services.ai.skill_loader import (
     SkillLoadError,
     project_pack_slug,
@@ -92,6 +120,10 @@ DECLARATIONS_RELATIVE_PATH = f"{DECLARATIONS_DIRNAME}/{DECLARATIONS_FILENAME}"
 
 KEY_GENERATED_PREFIXES = "generated_prefixes"
 KEY_CRITICAL_PATH_PATTERNS = "critical_path_patterns"
+# 本次分析生效的检查维度清单。**默认是平台出厂的那九个**（`DEFAULT_DIMENSION_SPECS`），
+# 项目声明了就按声明走 —— 没有配表相关维度的项目不必每轮为五个不存在的维度编理由，
+# 非配表项目（性能、协议、资源引用…）也不必把真实发现写进一个不属于自己的类别。
+KEY_DIMENSIONS = "dimensions"
 
 # 平台默认的关键路径模式。
 #
@@ -475,6 +507,108 @@ DEFAULT_PREFIX_DECLARATION = PrefixDeclaration(
     source=SOURCE_DEFAULT,
     detail="项目未声明生成物前缀，用平台默认值",
 )
+
+
+# ---------------------------------------------------------------------------
+# 检查维度清单
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DimensionsDeclaration:
+    """本次分析生效的检查维度清单，以及「它从哪来」。
+
+    `source` 与另外两组事实同一套取值（`SOURCE_DEFAULT` / `SOURCE_PROJECT`）：
+    「项目没声明、用平台默认」与「项目声明了」必须分得开 —— 只回一份清单而不回来源，
+    等于把这次要消灭的「一声不响」换个地方重演（第一版不知道某条结论是按哪份清单得出的）。
+    """
+
+    dimensions: tuple[DimensionSpec, ...]
+    source: str
+    detail: str
+    warning: str = ""
+
+    @property
+    def ids(self) -> tuple[str, ...]:
+        return tuple(spec.id for spec in self.dimensions)
+
+    @property
+    def labels(self) -> dict[str, str]:
+        return {spec.id: spec.label for spec in self.dimensions}
+
+
+DEFAULT_DIMENSIONS_DECLARATION = DimensionsDeclaration(
+    dimensions=DEFAULT_DIMENSION_SPECS,
+    source=SOURCE_DEFAULT,
+    detail="项目未声明检查维度清单，用平台默认值",
+)
+
+
+def dimensions_of(declarations: Declarations) -> DimensionsDeclaration:
+    """把一份（已经读出来的）声明解析成生效的维度清单。
+
+    抽成独立函数是为了让两个入口共用同一套解析：生产走 `dimensions(project_code)`，
+    而已经自己定位到知识包的调用方（`skill_loader.load_skills` 手里就有 `pack_dir`）
+    可以只读一次文件、再调这里，不必为了拿维度再解析一遍路径。
+    """
+    raw = declarations.fields.get(KEY_DIMENSIONS)
+    if raw is None:
+        return replace(DEFAULT_DIMENSIONS_DECLARATION, warning=declarations.warning)
+
+    where = declarations.path_label or "项目声明"
+    items, warning = _list_value(raw, what=KEY_DIMENSIONS, where=where)
+    warnings = "；".join(item for item in (declarations.warning, warning) if item)
+    if items is None:
+        # 值是空的（`dimensions:` 后面什么都没有）——读不出任何一项，按「未声明」处理。
+        return replace(
+            DEFAULT_DIMENSIONS_DECLARATION,
+            detail="项目声明的检查维度读不出来，用平台默认值",
+            warning=warnings,
+        )
+    if not items:
+        # `none` 对这一项是非法值：见模块 docstring。**不能**照 `generated_prefixes`
+        # 那一支写成「空清单」——一个空的维度清单会让每一条异常都进「未归类」。
+        return replace(
+            DEFAULT_DIMENSIONS_DECLARATION,
+            detail="项目把 dimensions 声明成了「没有」，用平台默认值",
+            warning="；".join(
+                item
+                for item in (
+                    warnings,
+                    f"{where} 的 {KEY_DIMENSIONS} 写成了「没有」；平台不接受一个空的检查维度"
+                    "清单（那样每条异常都只能进「未归类」），已按「未声明」处理",
+                )
+                if item
+            ),
+        )
+
+    specs, problem = build_dimensions(items)
+    if problem:
+        return replace(
+            DEFAULT_DIMENSIONS_DECLARATION,
+            detail="项目声明的检查维度不合法，用平台默认值",
+            warning="；".join(
+                item
+                for item in (
+                    warnings,
+                    f"{where} 的 {KEY_DIMENSIONS} 不合法，已按「未声明」处理：{problem}",
+                )
+                if item
+            ),
+        )
+    return DimensionsDeclaration(
+        dimensions=specs,
+        source=SOURCE_PROJECT,
+        detail=f"检查维度来自{declarations.detail}",
+        warning=warnings,
+    )
+
+
+def dimensions(
+    project_code: Optional[str], *, repo_root: Path = _REPO_ROOT
+) -> DimensionsDeclaration:
+    """读一个项目声明的检查维度清单。取不到就用平台默认（出厂那九个）。"""
+    return dimensions_of(read_declarations(project_code, repo_root=repo_root))
 
 
 def generated_prefixes(

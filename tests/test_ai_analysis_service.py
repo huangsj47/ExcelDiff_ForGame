@@ -984,6 +984,80 @@ def test_a_real_run_calls_the_model_and_persists_the_findings(monkeypatch):
         assert detail["run"]["usage"]["cost"]["amount"] is None
 
 
+def test_the_effective_dimension_list_lands_in_the_report_and_the_result(
+    monkeypatch, tmp_path
+):
+    """**周版本不开子代理**（＝单代理路径）走完整链路时，两件事都要成立。
+
+    * 模型报了一条落在**本项目声明的清单**外的发现（假 client 给的是 `config_id`），
+      报告正文里必须有「未归类」那一节 —— 它原先只出现在子代理路径上，于是单代理那次
+      的报告读起来完全正常，少的那一条没有任何人会发现；
+    * 这次分析**当时生效的清单**随结果落库（`response_payload.dimension_specs`）——
+      导出文档据此把 category 翻成中文名，而**不能**在导出时现查项目当前声明（那会在
+      项目改过声明之后按新清单重新贴标签，等于篡改历史）。
+
+    与上面那条端到端用例同一个形态（假 client 替掉真实 HTTP），所以量到的仍然是完整链路：
+    配置 → 变更集 → 提示词 → 引擎 → 接地校验 → 落库那一份结果。
+    """
+    from services.ai.skill_loader import SKILL_PROJECTS_ROOT_ENV, project_pack_slug
+
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo = _create_repo(project.id, _uid("table"), "svn", "table")
+        cfg = _create_weekly_config(
+            project.id, repo, "W1", datetime(2026, 3, 1), datetime(2026, 3, 8)
+        )
+        _seed_diff_cache(
+            cfg, repo, TABLE_PATH, datetime.now(timezone.utc), commit_id=COMMIT_SHA
+        )
+        db.session.commit()
+
+        # 项目的知识包里声明自己的一套维度（走的正是生产入口 `load_skills`）。
+        pack = tmp_path / "projects" / project_pack_slug(project.code) / "references"
+        pack.mkdir(parents=True, exist_ok=True)
+        (pack / "project-facts.md").write_text(
+            "---\n"
+            f"name: {project_pack_slug(project.code)}\n"
+            "description: 项目事实\n"
+            "dimensions: performance=性能与耗时, protocol=协议兼容性, resource=资源引用丢失\n"
+            "---\n\n正文。\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv(SKILL_PROJECTS_ROOT_ENV, str(tmp_path / "projects"))
+
+        ai_service.set_project_api_key(project.id, "k")
+        ai_service.update_project_analysis_config(
+            project.id,
+            {
+                "api_base_url": "http://127.0.0.1:15721/v1",
+                "api_model": "m",
+                # **单代理路径**：周版本没开子代理时走的就是它。
+                "subagent_enabled": False,
+            },
+        )
+        db.session.commit()
+
+        client = _FakeClient()
+        monkeypatch.setattr(ai_service, "build_endpoint_client", lambda *a, **k: (client, []))
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+
+        assert outcome["status"] == "succeeded", outcome
+        run = db.session.get(AiAnalysisRun, outcome["run_id"])
+
+        # 一、报告正文里那一节（`config_id` 不在本项目声明的清单里）
+        assert "## 未归类" in run.response_text, run.response_text
+        assert "【道具】删除了已放出的 ID" in run.response_text, "发现本身不许少"
+        # 二、落库的那一份清单：导出读它，不查项目当前声明
+        payload = json.loads(run.response_payload)
+        assert payload["dimension_specs"] == [
+            {"id": "performance", "label": "性能与耗时"},
+            {"id": "protocol", "label": "协议兼容性"},
+            {"id": "resource", "label": "资源引用丢失"},
+        ]
+
+
 def test_a_gateway_that_does_not_report_usage_persists_unknown_not_zero(monkeypatch):
     """**上游不回 `usage` 时，库里必须是 NULL。**
 

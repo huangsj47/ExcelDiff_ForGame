@@ -14,6 +14,23 @@
     模型编造 commit、或者引用一个该提交根本没改过的文件，都是常见的。不校验的话，
     前端会渲染出点不开的链接，跟进的人查不到东西。
 
+## 但有一条**永远不许**被丢弃：`category` 不是「可不可信」的问题
+
+「这条结论可不可信」可以逐条判，因为判据（commit 与路径是否真实）是平台手里的事实；
+「这条结论属于哪个维度」不是 —— 维度清单是**项目可声明**的
+（`LoadedSkills.dimensions`，见 `skill_contract.render_dimension_section`），这一层没有
+它自己的来源。若按平台出厂值判一次，就正好成了「校验按 A、提示词按 B」：声明了自己清单的
+项目里，模型按提示词写下的真实发现会被静默丢掉，而报告看起来完全正常（只是少了一条）。
+
+所以这里的口径是：**category 只决定它归到哪一组，不决定它留不留下**。落不进清单的条目
+按原样保留（原始 category 一个字不改），由知道清单的那一层归到「未归类」并单独列出来
+（`unclassified_anomalies`、`subagent.build_unclassified_section`、
+`report_document.dimension_label`）。少一条发现是静默的，多一个「未归类」是响亮的。
+
+清单可以由调用方**传进来**（`parse_payload(dimension_ids=…)`，引擎把
+`LoadedSkills.dimensions` 的 id 传下来），但传进来也只用于**记账**（说明这一条为什么
+会显示成「未归类」），不参与任何一条发现的取舍 —— 传与不传，`anomalies` 都是同一份。
+
 ## 「像不像一份报告」这个判定为什么重要
 
 多轮预算耗尽时，模型可能已经输出了完整的 Markdown 报告、只是没按 JSON 协议收尾。
@@ -126,7 +143,14 @@ class DimensionReview:
 
 @dataclass(frozen=True)
 class DroppedItem:
-    """被丢弃的条目及原因。会进 trace，便于解释「为什么少了几条」。"""
+    """条目级记账：**被丢弃**的条目及原因，以及**被归到「未归类」**的条目。
+
+    `kind` 的取值为 `anomaly` / `dimension` / `request` / `subagent` / `unclassified`。
+    `unclassified` 那一条与其他几种**不是一回事**：那条发现**没有被丢掉**（它在
+    `payload.anomalies` 里，报告里也列着），这里只是把「为什么它的维度显示成未归类」
+    记下来。它借用这一个结构是因为 trace 是平台里唯一一条按条目把记录带到面板上的
+    通道（`result_payload` 的 `dropped` → `trace_evidence.summarize_dropped`）。
+    """
 
     kind: str
     index: int
@@ -243,12 +267,43 @@ def _coerce_requests(value: Any) -> tuple[ContextRequest, ...]:
     return tuple(requests)
 
 
-def _coerce_anomalies(value: Any) -> tuple[tuple[Anomaly, ...], tuple[DroppedItem, ...]]:
+def _coerce_anomalies(
+    value: Any, dimension_ids: Iterable[str] = DIMENSION_IDS
+) -> tuple[tuple[Anomaly, ...], tuple[DroppedItem, ...]]:
+    """把 `anomalies` 逐条读成 `Anomaly`。**category 不在清单内的条目不丢。**
+
+    ## 为什么 category 不再被丢弃
+
+    这里原先写的是 `if category not in DIMENSION_IDS: 丢弃`。于是模型给出一个不在
+    清单里的 category（换一个项目、换一套维度时这是必然会发生的）时，那一条异常**从
+    报告里彻底消失**：报告看起来完全正常，只是少了一条，而没有任何人会去数。异常清单
+    里没有它、报告正文里没有它，只剩 trace 里一条谁都看不到的记录 —— 这正是这套结构
+    最该避免的失真形态。
+
+    现在的口径：**category 只决定它归到哪一组，不决定它留不留下。** 落不进「本次生效的
+    维度清单」的条目按原样保留（原始 category 一个字不改），由知道清单的那一层归到
+    「未归类」并单独列出来（`unclassified_anomalies` / `subagent` 的报告段 /
+    `report_document` 的维度列）。
+
+    ## `dimension_ids` 只用来**记账**，不参与任何取舍
+
+    清单由调用方给（引擎手里那份 `LoadedSkills.dimensions`）。它在这里只有一个用途：
+    给「category 不在清单内」的条目留一条 `unclassified` 记录 —— 否则界面/报告上明明
+    写着「未归类（performance）」，而没有任何地方说明**为什么**它没被认领。
+
+    判据仍然是「结构问题才丢」：缺标题、severity/confidence 不在两档内、证据为空。
+    那些不是「归错组」，而是这一条根本立不住（没有证据的断言无法跟进），且都记账。
+
+    **记账刻意排在全部结构校验之后**：那两条记录写的是「未丢弃，已归入未归类」，
+    而一条随后因为缺证据被丢掉的条目会让这句话变成假的（trace 里同时出现「已归入
+    未归类」与「evidence 为空」）。
+    """
     if value is None:
         return (), ()
     if not isinstance(value, list):
         raise ProtocolError("anomalies 必须是数组")
 
+    allowed = {str(item).strip() for item in dimension_ids if str(item or "").strip()}
     kept: list[Anomaly] = []
     dropped: list[DroppedItem] = []
     for index, entry in enumerate(value):
@@ -261,12 +316,10 @@ def _coerce_anomalies(value: Any) -> tuple[tuple[Anomaly, ...], tuple[DroppedIte
             dropped.append(DroppedItem("anomaly", index, "缺少标题"))
             continue
 
+        # category 缺失也保留：没有归属的**发现**仍然是发现（下面的 reason 记着这件事），
+        # 中文名那一格会显示成「未归类（未标注）」。丢掉它等于平台替模型做了一个
+        # 「这条不重要」的判断，而平台没有这个依据。
         category = _as_str(entry.get("category"))
-        if category not in DIMENSION_IDS:
-            dropped.append(
-                DroppedItem("anomaly", index, "category 不在允许集合内", category)
-            )
-            continue
 
         severity = _as_str(entry.get("severity")).lower()
         if severity not in SEVERITIES:
@@ -287,6 +340,22 @@ def _coerce_anomalies(value: Any) -> tuple[tuple[Anomaly, ...], tuple[DroppedIte
             dropped.append(DroppedItem("anomaly", index, "evidence 为空"))
             continue
 
+        # 这一条**留下来了**，只是没有归属（或归属不在清单内）—— 记账在这里写，
+        # 上面那个「未丢弃」的说法才不会是假的。
+        if not category:
+            dropped.append(
+                DroppedItem("unclassified", index, "缺 category（未丢弃，已归入「未归类」）", "")
+            )
+        elif category not in allowed:
+            dropped.append(
+                DroppedItem(
+                    "unclassified",
+                    index,
+                    "category 不在本次生效的维度清单内（未丢弃，已归入「未归类」）",
+                    category,
+                )
+            )
+
         kept.append(
             Anomaly(
                 title=title,
@@ -303,7 +372,29 @@ def _coerce_anomalies(value: Any) -> tuple[tuple[Anomaly, ...], tuple[DroppedIte
     return tuple(kept), tuple(dropped)
 
 
+def unclassified_anomalies(
+    anomalies: Iterable[Anomaly], dimension_ids: Iterable[str]
+) -> tuple[Anomaly, ...]:
+    """落在**本次生效的维度清单**之外的那些条目（要归到「未归类」里）。
+
+    这是「不丢掉发现」的最后一步：解析层保留它们、这一层把它们点名出来，所以报告里
+    一定有一处写着「这条不属于本次清单里的任何维度」。`dimension_ids` 由调用方给
+    （`LoadedSkills.dimensions` 的那一份，或多成员计划里汇总那一份）—— **平台里只有
+    一个地方能回答「本次清单是什么」，就是它**。
+
+    category 为空的条目也算在内：它同样没有被认领。
+    """
+    allowed = set(dimension_ids)
+    return tuple(item for item in anomalies if item.category not in allowed)
+
+
 def _coerce_dimensions(value: Any) -> tuple[tuple[DimensionReview, ...], tuple[DroppedItem, ...]]:
+    """把 `dimensions` 逐条读成 `DimensionReview`。**id 不在清单内的条目不丢。**
+
+    与 `_coerce_anomalies` 同一条口径（那里的注释解释了为什么这一层不判集合）：模型
+    按**项目声明的清单**写了 `performance`，而这里若按平台出厂值判，那条留痕会消失 ——
+    提示词要求它写的维度，在「逐一交代」表里反而看不到，报告读起来完全正常。
+    """
     if value is None:
         return (), ()
     if not isinstance(value, list):
@@ -316,8 +407,9 @@ def _coerce_dimensions(value: Any) -> tuple[tuple[DimensionReview, ...], tuple[D
             dropped.append(DroppedItem("dimension", index, "条目不是对象"))
             continue
         identifier = _as_str(entry.get("id"))
-        if identifier not in DIMENSION_IDS:
-            dropped.append(DroppedItem("dimension", index, "id 不在允许集合内", identifier))
+        if not identifier:
+            # 空 id 是结构问题：既分不了组、也没法显示（这一条本来就没说它是什么维度）。
+            dropped.append(DroppedItem("dimension", index, "缺少 id"))
             continue
         kept.append(
             DimensionReview(
@@ -348,10 +440,16 @@ def _select_payload_object(parsed: Iterable[Any]) -> dict:
     raise ProtocolError("回答里找不到可解析的 JSON 对象")
 
 
-def parse_payload(text: str) -> AnalysisPayload:
+def parse_payload(
+    text: str, *, dimension_ids: Iterable[str] = DIMENSION_IDS
+) -> AnalysisPayload:
     """把模型回答解析成 `AnalysisPayload`。
 
     结构性错误抛 `ProtocolError`（编排层据此重问），条目级问题只丢弃并记账。
+
+    `dimension_ids` 是**本次生效的**维度清单（`LoadedSkills.dimensions` 的 id 那一份），
+    由引擎传进来；不传就是平台出厂那一份。它**只影响记账**（见 `_coerce_anomalies`），
+    不影响任何一条发现的去留 —— 落不进清单的条目照样按原样保留。
     """
     parsed = parse_json_candidates(text)
     if not parsed:
@@ -369,7 +467,9 @@ def parse_payload(text: str) -> AnalysisPayload:
         raise ProtocolError("status 为 need_more_context 时必须给出非空的 requests")
 
     report_markdown = _as_str(raw.get("report_markdown")) or _as_str(raw.get("report"))
-    anomalies, dropped_anomalies = _coerce_anomalies(raw.get("anomalies"))
+    anomalies, dropped_anomalies = _coerce_anomalies(
+        raw.get("anomalies"), dimension_ids=dimension_ids
+    )
     dimensions, dropped_dimensions = _coerce_dimensions(raw.get("dimensions"))
 
     if status == STATUS_FINAL:
@@ -604,8 +704,35 @@ def looks_like_markdown_report(text: str) -> bool:
     return hits >= REPORT_HEALTH_MIN_SECTIONS
 
 
-def build_correction_hint(error: Exception) -> str:
-    """把协议错误转成下一轮要说给模型听的话。"""
+def build_correction_hint(
+    error: Exception, *, dimension_ids: Iterable[str] = DIMENSION_IDS
+) -> str:
+    """把协议错误转成下一轮要说给模型听的话。
+
+    ## 为什么这句里不再有「N 个维度」
+
+    这里写过 `len(DIMENSION_IDS)`，也就是**平台出厂**的维度数。可维度清单是项目可声明的
+    （`LoadedSkills.dimensions`，见 `skill_contract.render_dimension_section`），而这一层
+    拿不到它 —— 一个声明了 12 个维度的项目，模型从提示词里读到 12 个，纠正提示却说
+    「9 个维度都要写」：**校验按 A、提示词按 B**，而它既不会报错、也没人会去数。
+
+    所以这句话改成**指回模型手里的那份清单**（系统提示词里那一节），不写任何数字。
+    模型看不到清单时（例如清单就是出厂默认那九个，正文里逐条展开了）它照样知道要写几个。
+
+    ## `dimension_ids`：清单与出厂默认不同时，把 id 逐个列出来
+
+    与出厂默认相同时**一个字节都不加** —— 那九个 id 已经在 SKILL.md 正文里逐条展开过，
+    再抄一遍只是白花提示词预算（而默认行为逐字不变是这个仓库的硬要求）。
+
+    与出厂默认不同时，模型手里那份清单在正文末尾的追加节里，而这一轮它是**被纠正**的
+    一轮 —— 把 id 逐个点名写进这句话，它就不必回去翻那一节才知道自己该写哪几个
+    （`report` 里已经出现过「模型按别的清单写」的真实故障形态）。**仍然只列 id、不写
+    条数**：条数一旦写死就会与清单漂移，而漂移不会报错（见上面那段）。
+    """
+    ids = tuple(str(item).strip() for item in dimension_ids if str(item or "").strip())
+    declared = ""
+    if ids and ids != DIMENSION_IDS:
+        declared = "\n本次生效的维度清单是：" + "、".join(f"`{item}`" for item in ids) + "。"
     return (
         f"你上一轮的返回不符合协议：{error}。\n"
         "请严格修正后重新返回：\n"
@@ -613,8 +740,10 @@ def build_correction_hint(error: Exception) -> str:
         "2. 不要输出 <think> 块、不要用代码围栏包住 JSON、不要写 JSON 之外的说明文字；\n"
         "3. status 只能是 need_more_context 或 final；\n"
         "4. final 必须同时给出非空的 report_markdown 和 dimensions"
-        f"（{len(DIMENSION_IDS)} 个维度都要写，未命中的写 hit 为 false 并说明理由）；\n"
+        "（系统提示词里那份**本项目适用的维度清单**上的每一个维度都要写，"
+        "未命中的写 hit 为 false 并说明理由）；\n"
         "5. 所有自然语言内容使用中文。"
+        f"{declared}"
     )
 
 

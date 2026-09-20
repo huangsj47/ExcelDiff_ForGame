@@ -74,6 +74,7 @@ from services.ai.protocol import (
 )
 from services.ai.rules import RuleThresholds, normalize_anomalies
 from services.ai.scope import AnalysisScope
+from services.ai.skill_contract import DIMENSION_IDS, DimensionSpec, dimension_ids_of
 from services.ai.skill_loader import LoadedSkills
 from utils.logger import log_print
 
@@ -356,6 +357,15 @@ class EngineOutcome:
     # 前者是「跑了但没跑成」，这里是「压根没跑」——两件事在报告里都要写成信息缺口，
     # 但读的人需要分得清。
     subagent_skipped: tuple[str, ...] = ()
+    # **本次分析生效的检查维度清单**（id + 报告里给人看的中文名），来自
+    # `LoadedSkills.dimensions`。它随结果一起落库（`result_payload`），理由只有一条：
+    # 导出文档要把异常的 `category` 翻成中文名，而那时的运行记录里**必须**留着
+    # 「这次分析当时生效的是哪一份」。
+    #
+    # **不许在导出时现查项目当前声明**：项目改了声明之后，历史结论会被按新清单重新贴
+    # 标签（一条当时合法、归在 `performance` 下的发现，会在新清单里变成「未归类」）——
+    # 那是篡改历史，而它看起来完全正常。
+    dimension_specs: tuple[DimensionSpec, ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -513,6 +523,12 @@ def run_analysis(
     limits = limits or EngineLimits()
     thresholds = thresholds or RuleThresholds()
 
+    # 本次分析生效的维度清单（id 那一份）。**来源只有一个**：`LoadedSkills.dimensions`。
+    # 解析层的记账（`parse_payload(dimension_ids=…)`）、纠正提示、第一轮开场指令、
+    # 以及报告末尾「未归类」那一节读的都是它 —— 四处各取一次平台出厂值，正好就是
+    # 「校验按 A、提示词按 B」的来源，而那种错不会报错。
+    dimension_ids = dimension_ids_of(loaded.dimensions)
+
     tools = ContextTools(
         provider=provider,
         max_tool_requests=limits.max_tool_requests,
@@ -594,10 +610,14 @@ def run_analysis(
         }
 
     def _usage_fields() -> dict:
-        """所有 `EngineOutcome` 构造点共用的用量字段。
+        """所有 `EngineOutcome` 构造点共用的字段。
 
         这次要给每一个 return 各加 5 个字段，而本函数有 4 个构造点 —— 漏掉哪一个，那次
         运行在面板上就是一行空白，且**不会报错**（字段有默认值）。集中一处 splat 就没法漏。
+
+        它**不只有用量**：凡是「每个构造点都必须带上、漏了会静默出错」的字段都放这里。
+        `dimension_specs` 就是这样一个 —— 它落进结果、导出文档按它把 category 翻成中文名，
+        而漏掉的那条路径（失败 / 降级）恰好是最需要解释清「这一条为什么是未归类」的。
         """
         return {
             "cache_read_tokens": _sum_optional(cache_reads),
@@ -614,6 +634,7 @@ def run_analysis(
             # 也就是最需要说清「缺了哪几块」的那几条。读出时取当前值（闭包），
             # 所以在循环里就构造的那两个出口拿到的也是这一轮为止的累计。
             "refused_requests": tuple(refused_items),
+            "dimension_specs": loaded.dimensions,
         }
 
     def _emit(record: RoundRecord) -> None:
@@ -710,6 +731,7 @@ def run_analysis(
             requests_total=limits.max_tool_requests,
             limits=limits,
             task_message=task_message,
+            dimension_ids=dimension_ids,
         )
         items, user_message = _prepare_round(brief, messages)
 
@@ -883,7 +905,7 @@ def run_analysis(
         messages.append({"role": "assistant", "content": text})
 
         try:
-            parsed = parse_payload(text)
+            parsed = parse_payload(text, dimension_ids=dimension_ids)
         except ProtocolError as exc:
             if looks_like_markdown_report(text):
                 # 模型给了一份像样的 markdown 报告。与其把它扔掉重问，不如留下来当降级产出：
@@ -905,7 +927,7 @@ def run_analysis(
                 break
             # 重问也要占一轮：否则一个不肯说 JSON 的模型能把循环变成无限次重试。
             limits = replace(limits, max_corrections=limits.max_corrections - 1)
-            correction_hint = build_correction_hint(exc)
+            correction_hint = build_correction_hint(exc, dimension_ids=dimension_ids)
             _emit(RoundRecord(
                 round_index, "unparsable",
                 # 那一轮为什么被重问：`note` 里是协议错误本身（给人看），
@@ -1016,12 +1038,30 @@ def run_analysis(
     if tools.requests_remaining <= 0 and degradation == DEGRADE_NONE:
         degradation = DEGRADE_REQUESTS
 
+    report_markdown = grounded.report_markdown
+    if not seed_messages:
+        # 「未归类」那一节：**单代理路径的报告正文里也必须有它**（与子代理路径同一份
+        # 渲染函数 —— 两份实现迟早会长出两种措辞，而这里说的是一件很要紧的事）。
+        #
+        # 子代理路径由 `subagent.aggregate_outcomes` 在汇总之后追加，所以这里只在
+        # **这一份报告就是最终报告**时追加。`seed_messages` 非空就是「我在替一家子里的
+        # 某个成员跑」：那一份是分片交上去的素材，最终报告由汇总那一次产出 —— 在这里
+        # 也追加一遍，最终报告里就会出现两节「未归类」。
+        #
+        # 渲染函数从 `subagent` **函数内导入**：它在模块级 import 本模块（要用
+        # `run_analysis` 跑每个成员），顶层互相导入会成环。
+        from services.ai.subagent import build_unclassified_section
+
+        section = build_unclassified_section(normalized.anomalies, dimension_ids)
+        if section:
+            report_markdown = (report_markdown.rstrip() + "\n\n" + section).strip() + "\n"
+
     return EngineOutcome(
         status=STATUS_DEGRADED if degradation else STATUS_SUCCEEDED,
         payload=grounded,
         anomalies=normalized.anomalies,
         dropped=tuple(dropped),
-        report_markdown=grounded.report_markdown,
+        report_markdown=report_markdown,
         rounds=tuple(rounds),
         requests_used=tools.requests_seen,
         cache_hits=tools.cache_hits,
@@ -1068,6 +1108,11 @@ class _RoundBrief:
     limits: EngineLimits
     # 子代理模式下的**任务书**（第 1 轮的 user 消息原文，见 `run_analysis`）。空串 = 常规路径。
     task_message: str = ""
+    # 本次生效的维度清单（id 那一份）。只给第一轮的开场指令用：清单里没有
+    # `config_data` / `value_sanity` 的项目不该读到「按配表数值看」那两步
+    # （见 `prompt._first_round_hint`）。默认是平台出厂那一份 —— 与这段改动之前
+    # 逐字相同（`run_analysis` 每次都会按 `loaded.dimensions` 传真的那份进来）。
+    dimension_ids: tuple[str, ...] = DIMENSION_IDS
 
 
 def _prepare_round(
@@ -1104,6 +1149,7 @@ def _prepare_round(
         correction_hint=brief.correction_hint,
         budget_exhausted=brief.budget_exhausted,
         history_recap=brief.recap,
+        dimension_ids=brief.dimension_ids,
     )
     return items, message
 

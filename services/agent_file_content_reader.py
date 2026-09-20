@@ -25,7 +25,55 @@ from __future__ import annotations
 
 from models import Repository, db
 from utils.content_window import CONTENT_MAX_CHARS, slice_lines
+from utils.logger import log_print
 from utils.text_decoding import binary_content_notice, text_or_notice
+
+# payload 里承载表头坐标的两个键。**正常路径上它们一定在**：平台侧那唯一的调用方
+# （`agent_file_content_dispatch.request_file_content`）会把请求方那一行 `Repository`
+# 上的这两个字段写进 payload。
+_HEADER_CONFIG_KEYS = ('header_rows', 'header_name_row')
+
+
+def _header_config(payload: dict, repository) -> tuple:
+    """表头坐标（列名取第几行 / 表头块占几行）从哪来：**payload 优先**，缺了才回落查库。
+
+    返回 `(header_rows, header_name_row, source)`，`source` 是 `'payload'` 或 `'repository'`。
+
+    ## 为什么 payload 说了算
+
+    这两个值决定列名取哪一行、物理行几以上才算数据行，而平台本地那条路用的是
+    **请求方**那一行 `Repository`（`platform_provider.file_content` 的
+    `header_rows=getattr(repository, ...)`）。payload 带来的正是同一个坐标 ——
+    于是同一次索取在单机与多节点下渲染出**同一份文本**。
+
+    ## 为什么不能静默回落
+
+    回落读的是**本节点自己那一行仓库记录**。两端的库不是同一份时（节点用了旧数据库、
+    或配置刚改过还没同步），回落值会让两端给出两套列名与两套数据行坐标 —— 模型据此
+    写出的「这个取值不在允许集合里」全是错的，而界面上完全看不出来。所以回落必须
+    留痕：一条日志，外加返回值里的 `header_config_source`（调用方与排查的人据此知道
+    这份正文的表头坐标不是请求方给的那一份）。
+
+    ## 「payload 给没给」看的是键在不在，不是值真不真
+
+    仓库没配表头坐标时（绝大多数仓库）payload 里就是一对 `None`。「请求方说没配」与
+    「请求方没说」是两件事：前者必须按未配置渲染，绝不能回落到本节点的值上 —— 那正是
+    「两端各按各的库渲染」这个毛病本身。所以判据是 `in payload`，不是取值的真假。
+    """
+    if any(key in payload for key in _HEADER_CONFIG_KEYS):
+        return payload.get('header_rows'), payload.get('header_name_row'), 'payload'
+
+    header_rows = getattr(repository, 'header_rows', None)
+    header_name_row = getattr(repository, 'header_name_row', None)
+    log_print(
+        '⚠️ Agent 取数：file_content 的 payload 没带表头坐标'
+        '（header_rows/header_name_row），已回落到本节点仓库行 '
+        f'{getattr(repository, "id", "?")} 的值：header_rows={header_rows}、'
+        f'header_name_row={header_name_row}。两端不是同一份库时，这份正文的列名会与'
+        '平台侧不同 —— 请调用方在 payload 里补齐这两个键。',
+        'AGENT',
+    )
+    return header_rows, header_name_row, 'repository'
 
 
 def read_file_content_for_agent(payload: dict) -> dict:
@@ -75,19 +123,20 @@ def read_file_content_for_agent(payload: dict) -> dict:
             # 与平台本地那条路同一套坐标 —— 两端必须一致，否则同一次索取在单机与多节点下
             # 给出不同的文本。
             #
-            # 表头坐标（`Repository.header_rows` / `header_name_row`）从**这个仓库行**上读：
-            # Agent 本来就要按 `repository_id` 把仓库查出来（上面那几行），所以这两个值
-            # 与平台本地那条路拿到的是同一行记录上的同一对字段。**不放进 payload** 是有意的：
-            # 放进 payload 就多一份可能过期的副本，而 `_matches` 的请求指纹里也不含它们 ——
-            # 配置改了之后旧任务会被当成同一份请求复用，正文却按新配置渲染。
+            # 表头坐标（`Repository.header_rows` / `header_name_row`）**以 payload 为准**：
+            # 平台侧把请求方那一行仓库记录上的这两个字段写进了 payload，用它才能与平台本地
+            # 那条路（同一个 `_read_excel_sheets`）渲染出同一份文本。payload 没带才回落到
+            # 本节点的仓库行，并且留痕（见 `_header_config`）—— 静默回落正是「两端列名
+            # 不一致」这个毛病能被藏起来的原因。
+            header_rows, header_name_row, header_source = _header_config(payload, repository)
             rendered = _read_excel_sheets(
                 raw,
                 max_rows=int(payload.get('max_rows') or DEFAULT_MAX_ROWS_PER_SHEET),
                 path=file_path,
                 window=str(payload.get('lines') or ''),
                 char_budget=int(payload.get('max_chars') or 0) or CONTENT_MAX_CHARS,
-                header_rows=getattr(repository, 'header_rows', None),
-                header_name_row=getattr(repository, 'header_name_row', None),
+                header_rows=header_rows,
+                header_name_row=header_name_row,
             )
             if rendered is None:
                 raise RuntimeError(
@@ -101,7 +150,14 @@ def read_file_content_for_agent(payload: dict) -> dict:
                 # 包一层**（配表的正文没有「第 a–b 行」这个概念）。
                 "kind": "excel",
                 "content": rendered,
-                "message": f"file_content completed (excel, {len(rendered)} chars)",
+                # 表头坐标的出处：`payload` = 请求方给的（正常路径），`repository` = 回落。
+                # 回落值会让这份正文的列名与平台侧不同，所以它必须能被看见，不能只在日志里。
+                "header_config_source": header_source,
+                "message": (
+                    f"file_content completed (excel, {len(rendered)} chars"
+                    + ("" if header_source == "payload" else ", 表头坐标取自节点本地的仓库行")
+                    + ")"
+                ),
             }
 
         # 解码走 `utils.text_decoding`（**两端唯一一份实现**）。
