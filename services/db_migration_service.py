@@ -229,6 +229,11 @@ def _migrate_ai_weekly_analysis_state_columns(db, log_print):
         "ai_weekly_analysis_state",
         {
             "last_triggered_at": "last_triggered_at DATETIME",
+            # 「上一次分析的是哪一份快照」的内容指纹（见 services/ai/scope_sampling.py）。
+            # 调度器用它拦掉「输入一字未变却还要再分析一遍」—— 时间水位线
+            # （`last_analyzed_at`）做不到这件事：降级跑完的 run 按设计**不推进**水位线，
+            # 于是同一份输入每小时都会被重新分析一次，白花钱。
+            "last_snapshot_digest": "last_snapshot_digest VARCHAR(64)",
         },
         log_print,
     )

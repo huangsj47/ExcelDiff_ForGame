@@ -85,6 +85,7 @@ from services.ai_analysis_service import (
 )
 from models.ai_analysis import AiWeeklyAnalysisState
 from services.ai.analysis_budget import budget_gate_reason
+from services.ai.scope_sampling import snapshot_already_analyzed
 from services.ai.weekly_state import get_or_create_weekly_state
 # 「周版本同步还在跑就先别分析」的闸门（同步逐文件写缓存，跑到一半的清单会静默变小）
 from services.ai.weekly_sync_gate import weekly_sync_in_flight, weekly_sync_stuck_note
@@ -1250,6 +1251,25 @@ def schedule_weekly_ai_analysis_tasks():
                 primary = select_primary_weekly_config(configs)
                 config_ids = [cfg.id for cfg in configs]
                 if not has_weekly_changes(config_ids, state.last_analyzed_at if state else None):
+                    continue
+                # **输入一字未变就别再分析一遍**（内容判据，与上面那条时间判据互补）。
+                # 时间水位线只在跑完整了时推进（降级不推进是有意的：模型没真读到的变更
+                # 不许被标成「已看过」），于是「降级跑完 → 水位线不动 → 下个周期又判有
+                # 新变化」会一直转，每小时烧一次全量分析。指纹相同 = 同一份输入，
+                # 再跑一遍只会得到同样的结果 —— 尤其上一轮正是「额度用尽、基于已有证据
+                # 出结论」时。手动触发不受这条限制（用户的明确动作照跑）。
+                if snapshot_already_analyzed(state, config_ids):
+                    log_print(
+                        f"⏭️ 周版本自动分析跳过（输入与上次分析逐字相同）: group_key={group_key}",
+                        "AI",
+                    )
+                    # 与上面的预算闸门同样处理：**推进触发水位线**让这条判定也被间隔节流。
+                    # 这个条件会持续存在（输入没变可能一整天），而本函数是
+                    # `every(1).minutes` —— 不推进就是每分钟一条同样的日志 + 每分钟算一次
+                    # 指纹。下一个间隔自然会重新判一次，那时输入变了就照常分析。
+                    if state is not None:
+                        state.last_triggered_at = now_utc
+                        _db.session.commit()
                     continue
 
                 # **同步没写完就不要分析。** 变更清单来自周版本缓存行，而同步是逐文件

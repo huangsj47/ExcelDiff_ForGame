@@ -121,6 +121,7 @@ from services.ai.scope_sampling import (  # noqa: F401 —— 任务服务与测
     _sample_with_repo_fairness,
     _summarize_weekly_files,
     has_weekly_changes,
+    weekly_snapshot_digest,
 )
 from services.ai.skill_loader import describe_load_error, load_skills
 from services.ai.subagent import plan_family, run_family_with_seed, subagent_mode_of
@@ -357,6 +358,11 @@ def build_weekly_payload(
             "key": group_key,
             "base_name": base_name,
             "project_id": config.project_id,
+            # 这一组都有哪些配置。**不是给模型看的**：它是「这份快照由哪些配置的缓存行
+            # 组成」的账，`_update_weekly_state` 用它算快照指纹
+            # （`scope_sampling.weekly_snapshot_digest`），调度器据此拦掉「输入一字未变
+            # 却还要再分析一遍」。也顺便让落库的 request_payload 自己说清楚覆盖了谁。
+            "config_ids": [item.id for item in configs],
             "start_time": config.start_time.isoformat() if config.start_time else None,
             "end_time": config.end_time.isoformat() if config.end_time else None,
         },
@@ -1093,6 +1099,9 @@ def _update_weekly_state(
     而不是悄悄退回一个分不出 degraded 的判据。
     """
     if engine_status != STATUS_SUCCEEDED:
+        # **降级的 run 不推进时间水位线，但要留下内容指纹**（理由见
+        # `_remember_snapshot_digest`）：否则同一份输入会被一遍遍重新分析。
+        _remember_snapshot_digest(payload, state)
         return
     group = payload.get("group") or {}
     summary = payload.get("summary") or {}
@@ -1109,6 +1118,7 @@ def _update_weekly_state(
             end_time=_parse_iso_datetime(group.get("end_time")),
         )
 
+    state.last_snapshot_digest = _snapshot_digest_for(payload) or state.last_snapshot_digest
     state.last_analyzed_at = _utcnow()
     state.last_analysis_run_id = run.id
     state.last_scope = run.scope
@@ -1116,6 +1126,48 @@ def _update_weekly_state(
     state.last_triggered_at = run.started_at or _utcnow()
     state.updated_at = _utcnow()
     db.session.commit()
+
+
+def _snapshot_digest_for(payload: dict) -> str:
+    """这次分析对应的快照指纹；算不出来返回空串（调用方保留原值）。"""
+    group = payload.get("group") or {}
+    if not group:
+        return ""
+    try:
+        return weekly_snapshot_digest(list(group.get("config_ids") or []))
+    except Exception:  # pragma: no cover - 指纹算不出来不该影响交付
+        return ""
+
+
+def _remember_snapshot_digest(payload: dict, state) -> None:
+    """**降级路径**记下「这次分析的是哪一份快照」（成功路径在上面一起写）。
+
+    为什么降级也要记：`last_analyzed_at` 只在跑完整了时推进是有意的（否则模型没真读到
+    的变更会被标成「已看过」，线上真出过 767 个文件里 748 个没读到却被标成已分析），
+    可这样一来「降级跑完 → 水位线不动 → 下个周期又判有新变化 → 同一份输入再分析一遍」
+    就会一直转，每小时烧一次全量分析，而输入一字未变。
+
+    指纹只写失败的日志、不抛：它只影响**下一次**要不要跳过，不影响这次的交付。
+    """
+    try:
+        digest = _snapshot_digest_for(payload)
+        if not digest:
+            return
+        group = payload.get("group") or {}
+        if not state:
+            state = get_or_create_weekly_state(
+                project_id=group.get("project_id"),
+                group_key=str(group.get("key") or ""),
+                base_name=str(group.get("base_name") or ""),
+                start_time=_parse_iso_datetime(group.get("start_time")),
+                end_time=_parse_iso_datetime(group.get("end_time")),
+            )
+        state.last_snapshot_digest = digest
+        state.updated_at = _utcnow()
+        db.session.commit()
+    except Exception as exc:  # pragma: no cover - 只影响下次是否跳过
+        db.session.rollback()
+        log_print(f"⚠️ AI 分析：记快照指纹失败（不影响本次交付）: {exc}", "AI", force=True)
 
 
 def _parse_iso_datetime(raw: Optional[str]) -> Optional[datetime]:

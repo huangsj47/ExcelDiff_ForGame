@@ -217,6 +217,73 @@ def has_weekly_changes(config_ids: List[int], last_analyzed_at: Optional[datetim
         query = query.filter(WeeklyVersionDiffCache.updated_at > last_analyzed_at)
     return query.first() is not None
 
+
+def weekly_snapshot_digest(config_ids: List[int]) -> str:
+    """这一批配置**当前这一份快照**的内容指纹（「分析的是什么」的纯函数）。
+
+    ## 它解决的是时间水位线解决不了的一件事
+
+    `has_weekly_changes(config_ids, last_analyzed_at)` 用的是时间：缓存行的
+    `updated_at` 晚于上次分析就算「有新变化」。而 `last_analyzed_at` **只在跑完整了
+    的 run 上推进**（见 `_update_weekly_state`：降级的 run 不推进，否则模型没真读到的
+    变更会被标成「已看过」，线上真出过 767 个文件里 748 个没读到却被标成已分析）。
+    于是「降级跑完 → 水位线不动 → 下一个周期又判有新变化 → 同一份输入再分析一遍」
+    这条循环会一直转，每小时烧一次全量分析，而输入一字未变。
+
+    指纹取自同一条查询的**内容身份**：每个文件的 `(base_commit_id, latest_commit_id,
+    diff_version)` 排序后取 sha1。这三者决定合并 diff 的输入，也就决定了这一轮分析
+    能看到的全部内容；它们没变，再跑一遍只会得到同一份结果。只哈希**这个三元组**，
+    不哈希 `updated_at`：后者是「什么时候写的」，不是「写了什么」。
+
+    用途见 `services/task_worker_service.schedule_weekly_ai_analysis_tasks`：指纹与
+    `AiWeeklyAnalysisState.last_snapshot_digest` 相同就跳过这一轮自动分析。
+    **只拦自动路径** —— 手动触发是用户的明确动作，照跑。
+    """
+    import hashlib
+
+    if not config_ids:
+        return ""
+    rows = (
+        WeeklyVersionDiffCache.query
+        .filter(WeeklyVersionDiffCache.config_id.in_(list(config_ids)))
+        .with_entities(
+            WeeklyVersionDiffCache.file_path,
+            WeeklyVersionDiffCache.base_commit_id,
+            WeeklyVersionDiffCache.latest_commit_id,
+            WeeklyVersionDiffCache.diff_version,
+        )
+        .all()
+    )
+    if not rows:
+        return ""
+    parts = sorted(
+        "%s|%s|%s|%s" % (path or "", base or "", latest or "", version or "")
+        for path, base, latest, version in rows
+    )
+    return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()
+
+def snapshot_already_analyzed(state, config_ids: List[int]) -> bool:
+    """这一份快照**就是**上次分析过的那一份吗（自动分析据此跳过）。
+
+    调用方是调度器（`services/task_worker_service.schedule_weekly_ai_analysis_tasks`）
+    与它的测试。三条都要成立才算「分析过了」：
+
+    * 有状态行、且指纹非空 —— 老库里的行没有这一列（读出来是 NULL），
+      此时**判不了**，必须按「没分析过」走，否则会把该跑的分析全跳过；
+    * 指纹相同 —— 输入逐字未变；
+    * 不涉及「上次跑得怎么样」—— 降级也算分析过了（同一份输入重跑一遍不会有不同结果，
+      这一条正是为了让「降级 → 水位线不动 → 每小时重跑」那条循环停下来）。
+
+    **手动触发不经过这里**：那是用户的明确动作，照跑。
+    """
+    if state is None:
+        return False
+    stored = str(getattr(state, "last_snapshot_digest", "") or "").strip()
+    if not stored:
+        return False
+    return stored == weekly_snapshot_digest(config_ids)
+
+
 def _decide_scope(summary: dict, last_analyzed_at: Optional[datetime]) -> Tuple[str, str]:
     if not last_analyzed_at:
         return "full", "first_run"
