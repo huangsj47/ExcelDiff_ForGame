@@ -31,16 +31,38 @@
  * 1. **读不到进度不是 0。** 多进程部署、跑在别的 worker 里时快照是 `null`，界面说
  *    「进度不可用」，**不显示「第 0 轮 / 已用 0 tokens」** —— 0 是一个结论（一次都没
  *    跑、一个 token 都没花），说反了比不说更糟。
- * 2. **`live_tokens` 是下界**（只含上游已上报的部分），所以那一行必须带上
+ * 2. **用量是下界**（只含上游已上报的部分），所以那一行必须带上
  *    「尚未落库，只含上游已上报的部分」，不能写成一个像账本一样的数。
  * 3. **没跑完就不许说「完成」**：只有 `result` 事件（结论已落库）才换徽章，
  *    连接断了、状态读不到，都只能说「不知道」。
+ *
+ * ---------------------------------------------------------------------------
+ * 那个数是**哪一个**量：job 级累计，不是当前分片的局部量
+ * ---------------------------------------------------------------------------
+ * 子代理模式下一家子有几个成员，**每个成员一个引擎实例**，各自从 0 开始报累计
+ * （见 `services/ai/subagent.py`）。所以快照里有三个含义不同的量，谁也不许顶替谁：
+ *
+ *   * `jobTokens(progress)` —— **跨成员**的本次分析累计，单调不减（缺成员的按 0
+ *     入账，是**已知下界**）。**顶部那一行读的是它**：左边已经写着当前是哪个分片
+ *     （`agentText`），读数却只算那一个分片的话，换个成员就会从 493,531 掉回
+ *     34,960 —— 那是报障的那一幕。
+ *   * `memberTokens(progress)` —— **当前成员**的局部量（`live_tokens`）。它有用，
+ *     但不能当总数用，所以那一行只把它放在「其中本分片 …」里。
+ *   * 落库那一份（用量面板的「已完成历史聚合」）不在这里，也不该在这里。
  */
 (function (global) {
     'use strict';
 
     // 进度那一行的后缀。**不许省**：它是「这个数不是账」的唯一说明（口径 2）。
     var LIVE_SUFFIX = '（尚未落库，只含上游已上报的部分）';
+
+    // 同上，用在 **job 级**那一份后面：它还**不含正在跑的那次调用**（引擎是跑完一轮
+    // 才报的）。这一层能说清「为什么这个数比真实花费小」的只有这一句。
+    var JOB_PENDING_SUFFIX = '（尚未落库，只含上游已上报的部分；不含正在跑的这次调用）';
+
+    // job 级那个数是**已知下界**时的说明：有成员整块没上报（上游一次都没给这个成员的
+    // token 数）。**不含这半句会被读成「已经花完了这么多」** —— 缺口是「不知道」。
+    var PARTIAL_NOTE = '（有分片没上报用量，这是已知下界）';
 
     // 读不到进度快照时说的话。**不写 0、不写「第 0 轮」**（口径 1）。
     var NO_PROGRESS = '分析中：进度不可用（看不到第几轮，不影响分析）';
@@ -56,10 +78,16 @@
 
     var POLL_INTERVAL_MS = 3000;
 
-    // 「这次运行已经结束了」的两种状态。`effective_status` 只会给这四个值里的一个
+    // 「这次运行已经结束了」的三种状态。`effective_status` 只会给这四个值里的一个
     // （models/ai_analysis/analysis_run.py）：僵尸 running 会被它翻成 failed，
     // 所以「跑了一小时还没动静」在这里会自己收尾，不会永远转下去。
-    var TERMINAL = ['succeeded', 'failed'];
+    //
+    // **`degraded` 必须在里面。** 它回答的是「这次交付是什么形态」，而不是「模型读全了
+    // 没有」：`degraded` = 有结论但浅（有报告正文、有结构化结论），与 `succeeded` 同等
+    // 对待 —— 跑完了。漏掉它的后果是这一层**最严重的一种错**：`watchRun` 读不到终态，
+    // 于是抽屉对降级运行**永远转圈**、`onFinished` 永不触发（落库的结论再也取不回来）。
+    // 实测库里 13 条完成运行里 **12 条**是 degraded，也就是绝大多数运行都停在这一幕上。
+    var TERMINAL = ['succeeded', 'degraded', 'failed'];
     var RUNNING = ['running', 'pending'];
 
     function isTerminal(status) {
@@ -68,6 +96,36 @@
 
     function isRunning(status) {
         return RUNNING.indexOf(String(status || '')) >= 0;
+    }
+
+    /**
+     * 取一个「数」：`null` / `undefined` / 空串 / 不是数的东西一律**返回 `null`**。
+     *
+     * 一律 `null`（**不是 0**）是口径 1、2 的落点：调用方拿到 `null` 就什么都不说。
+     */
+    function _amount(value) {
+        if (value === null || value === undefined || value === '') return null;
+        var num = Number(value);
+        return isFinite(num) ? num : null;
+    }
+
+    /** **当前成员**（这一份运行）已消耗的 token。读不到就是 `null`。 */
+    function memberTokens(progress) {
+        if (!progress) return null;
+        return _amount(progress.live_tokens);
+    }
+
+    /**
+     * **job 级**累计 token：跨成员、单调不减（`run_progress._JobLedger` 算的）。
+     *
+     * 快照里没有 `job_tokens` 这个键时退回成员局部量 —— 那是**老调用方 / 测试替身**
+     * 的快照（这个键总是随 `to_dict()` 发出来，哪怕是 `null`），这时二者逐字同义，
+     * 那一行也就与以前一字不差。
+     */
+    function jobTokens(progress) {
+        if (!progress) return null;
+        if (progress.job_tokens !== undefined) return _amount(progress.job_tokens);
+        return memberTokens(progress);
     }
 
     /** 第几轮。快照在、但轮次读不出来（脏数据）时返回 `null` —— 由调用方说「不可用」。 */
@@ -118,12 +176,27 @@
         }
         var agent = agentText(progress);
         var where = agent ? agent + ' · ' + round : round;
-        var tokens = progress.live_tokens;
-        if (tokens === null || tokens === undefined || tokens === '') {
+        // **数字取 job 级那一份**（跨成员、单调不减），不是当前这个分片的局部量：
+        // 左边已经写着「分片 S3 (3/4)」，右边再只算这一个分片的话，换个成员就回退。
+        var tokens = jobTokens(progress);
+        if (tokens === null) {
             // 用量没上报：只说轮次，**不补一个 0**（口径 1、2）。
             return '分析中：' + where;
         }
-        return '分析中：' + where + ' · 本次已用 ' + tokens + ' tokens' + LIVE_SUFFIX;
+        if (progress.job_tokens === undefined) {
+            // 老调用方 / 测试替身的快照里没有 job 那个键：这时它只有一个「本次运行」的
+            // 局部量，文案与以前一字不差（那时这两个量本来就是一回事）。
+            return '分析中：' + where + ' · 本次已用 ' + tokens + ' tokens' + LIVE_SUFFIX;
+        }
+        // 新的一路：说清这是**整次分析**的数（不是左边那个分片的），再把另外两个
+        // 含义不同的量分开说 —— 当前分片的局部量、以及「这是个已知下界」。
+        var member = memberTokens(progress);
+        var extra = member !== null && member !== tokens ? '（其中本分片 ' + member + '）' : '';
+        if (progress.job_tokens_partial === true) extra += PARTIAL_NOTE;
+        return (
+            '分析中：' + where + ' · 本次分析已用 ' + tokens + ' tokens' + extra
+            + (progress.job_tokens_pending_call === true ? JOB_PENDING_SUFFIX : LIVE_SUFFIX)
+        );
     }
 
     /**
@@ -217,6 +290,8 @@
             };
         }
         if (isTerminal(status)) {
+            // `degraded` 也走这一支（它跑完了、结论已落库），**不许**落到下面那句
+            // 「读不到这次运行的状态」上 —— 那会让界面一直等一个已经结束的运行。
             return {
                 badge: '中断',
                 tone: 'warning',
@@ -324,17 +399,21 @@
 
     global.AiStreamStatus = {
         LIVE_SUFFIX: LIVE_SUFFIX,
+        JOB_PENDING_SUFFIX: JOB_PENDING_SUFFIX,
         NO_PROGRESS: NO_PROGRESS,
+        PARTIAL_NOTE: PARTIAL_NOTE,
         POLL_INTERVAL_MS: POLL_INTERVAL_MS,
+        agentText: agentText,
         errorOutcome: errorOutcome,
         fetchRunStatus: fetchRunStatus,
         interruptOutcome: interruptOutcome,
         isRunning: isRunning,
         isTerminal: isTerminal,
+        jobTokens: jobTokens,
+        memberTokens: memberTokens,
         progressText: progressText,
         resultOutcome: resultOutcome,
         roundText: roundText,
-        agentText: agentText,
         watchRun: watchRun
     };
 })(typeof window !== 'undefined' ? window : globalThis);

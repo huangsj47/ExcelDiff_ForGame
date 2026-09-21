@@ -106,6 +106,11 @@
             </div>
         </section>
 
+        {# 活动任务提示：**在 KPI 上方**。下面那些数字只算已经结束的运行，所以必须有一句话
+           说清「现在还有几次没算进去、这屏的数字截至哪一次」—— 放在页面底部等于让人先读到
+           一个偏小的数字，再去别处找原因。没有在途任务时整条不渲染（见 `renderActiveNote`）。 #}
+        <p class="aiu-active-note" id="aiuActiveNote" role="status" aria-live="polite" hidden></p>
+
         <!-- 顶部 KPI：先给「一共花了多少」，再给细节 -->
         <div class="aiu-kpi-grid" id="aiuKpis"></div>
 
@@ -389,6 +394,7 @@
             </div>
 
             <h3 class="aiu-subhead">周版本</h3>
+            <p class="aiu-active-note" id="aiuDrillActiveNote" role="status" aria-live="polite" hidden></p>
             <p class="aiu-hint">
                 按周版本（分组键）聚合。「最近分析的」指本项目里最近一次分析所属的那个周版本 ——
                 平台无法从分析记录反推你心里那个「当前」。
@@ -440,7 +446,7 @@
             <p class="aiu-hint">点一行看这一轮的逐轮明细。</p>
             <div class="aiu-table-wrap" role="region" tabindex="0" aria-labelledby="aiuRunTableCaption">
                 <table class="aiu-table">
-                    <caption class="aiu-caption" id="aiuRunTableCaption">本项目最近的 AI 分析运行。汇总数字按全部运行计算，列表只列最近的一部分。</caption>
+                    <caption class="aiu-caption" id="aiuRunTableCaption">本项目最近的 AI 分析运行。汇总数字按全部<strong>已完成</strong>的运行计算，列表只列最近的一部分。</caption>
                     <thead>
                         <tr>
                             <th scope="col">时间</th>
@@ -470,6 +476,7 @@
                 <li><strong>「未上报」与 0 是两件事。</strong>上游没回缓存字段时显示「未上报」，命中率一栏留空 —— 那表示未知，不是「一次都没命中」。</li>
                 <li><strong>费用是估算。</strong>接口只回 token 数、不回金额，金额按价格表算；没配价格表时这一列不显示数字。改价格表不会改历史金额的展示口径：金额一律按<strong>当前</strong>价格表重算，并在逐次明细里注明该次落库时的价格表版本。</li>
                 <li><strong>只统计新数据。</strong>这个功能上线前的运行没有采集过用量，明细里显示「本次用量未采集」，不显示 0。</li>
+                <li><strong>「进行中」的那几次不计入这一页的任何数字。</strong>它们的用量还没上报（token 三列是空的），混进合计会把命中率与费用一起判成「未上报」。还在跑的任务单独在 KPI 上方说明，运行列表里那一条照旧显示「未上报」——任务结束后它自动并回统计。</li>
                 <li>「输入 token」是每轮提示词的累计值：每一轮都会把上一轮的上下文重发一遍，所以轮次越靠后越贵。逐轮明细里能看出钱花在第几轮。</li>
             </ul>
         </section>
@@ -909,6 +916,17 @@
 .aiu-alert__body { min-width: 0; overflow-wrap: anywhere; }
 .aiu-alert__detail { display: block; margin-top: 4px; font-weight: 400; }
 
+/* 活动任务提示：**KPI 上方**那一句「当前筛选范围内有 N 个新任务运行中，实时用量尚未计入……」。
+   观感是「说明」而不是红色警示 —— 它解释的是下面那些数字**为什么还没含这次运行**，
+   而不是一件需要立刻处理的事（超预算才是）。放成警示色会让每一次分析都看起来像出错。 */
+.aiu-active-note {
+    margin: 0 0 16px; padding: 10px 14px; border-radius: 10px;
+    border: 1px solid var(--aiu-border); border-left: 3px solid var(--aiu-primary);
+    background: var(--aiu-card); color: var(--aiu-text);
+    font-size: 0.875rem; line-height: 1.6; overflow-wrap: anywhere;
+}
+.aiu-active-note[hidden] { display: none; }
+
 .aiu-readonly {
     display: flex; align-items: flex-start; gap: 8px;
     padding: 10px 12px; border-radius: 8px; margin-top: 8px;
@@ -1062,6 +1080,19 @@
 var AIU_UNKNOWN = '未上报';
 var AIU_NOT_COLLECTED = '本次用量未采集';
 
+/**
+ * 有任务在跑时，页面多久**自己再取一次**（毫秒）。
+ *
+ * 为什么必须有这个：KPI 上方那句话承诺了「任务完成后自动更新」，而这一页原先**不会**
+ * 自己刷新 —— 那句话就成了一个做不到的承诺（用户盯着一个不含刚跑完那次的数字，还以为
+ * 页面卡了）。取 15 秒：一次分析要跑几分钟，这个间隔足够让「跑完了」在几秒内出现在屏幕上，
+ * 又不会把聚合查询压得太密（这一页的合计是全量聚合，不是一次按主键的取数）。
+ *
+ * 只在**有在途任务**时才有下一次（见 `scheduleActiveRefresh`）：没有任务在跑时这一页
+ * 一个定时器都不留。
+ */
+var AIU_ACTIVE_REFRESH_MS = 15000;
+
 function aiuFmtInt(value) {
     if (value === null || value === undefined) return null;
     var num = Number(value);
@@ -1118,6 +1149,38 @@ function aiuJoinMoney(amount, currency) {
 /** 「有值就显示，没有就说未上报」。0 会走「有值」这一支，这是刻意的。 */
 function aiuOrUnknown(text, placeholder) {
     if (text === null || text === undefined || text === '') return placeholder || AIU_UNKNOWN;
+    return text;
+}
+
+/**
+ * 活动任务那一句提示（KPI 上方）。没有活动任务时返回 **null**（= 不渲染）。
+ *
+ * 后端把「完成统计」与「活动任务」分成两个口径下发（`completed_totals` / `active_runs`），
+ * 这一句就是把它们说在一起：下面的数字**只算已经结束的运行**，以及它截至哪一次为止。
+ * 「截至运行 #X」的 X 是**最新一条已完成的运行**编号（不是那条还在跑的）—— 它回答的是
+ * 「这一屏算到了哪一条」，用户拿它和 `active_runs.latest_run_id` 一对就知道差的是哪次。
+ *
+ * 临时值（`active.live`）**另起一句**，并且明写「不计入上面的统计」：它是进度快照里的
+ * 下界（只含上游已上报的部分），把它和完成统计混在一句话里读，很容易被当成已经结账。
+ *
+ * 句子开头写「当前筛选范围内」不是啰嗦：「统计口径」卡片里那个 `in_flight_runs` 是
+ * **全平台**的计数（它管的是「全量重置能不能点」），两者在同一屏上可能不是同一个数。
+ * 不写清范围，读的人会以为其中一个是错的。
+ */
+function aiuActiveNoteText(active, completed) {
+    var count = active && active.count ? active.count : 0;
+    if (!count) return null;
+    var upto = completed ? completed.latest_run_id : null;
+    var text = '当前筛选范围内有 ' + count + ' 个新任务运行中，实时用量尚未计入；以下统计截至'
+        + (upto === null || upto === undefined ? '还没有已完成的运行' : '运行 #' + upto)
+        + '，任务完成后自动更新。';
+    var live = (active && active.live) || {};
+    if (live.tokens !== null && live.tokens !== undefined) {
+        text += '当前运行临时值 ' + aiuOrUnknown(aiuFmtTokens(live.tokens), AIU_UNKNOWN)
+            + ' token（只含已上报的部分，未结束、不计入上面的统计）。';
+    } else {
+        text += '这次运行还没有上报任何用量。';
+    }
     return text;
 }
 
@@ -1285,6 +1348,60 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
     }
 
     function clearError() { $('aiuError').hidden = true; }
+
+    // -----------------------------------------------------------------------
+    //  有任务在跑时自己跟新
+    // -----------------------------------------------------------------------
+    // 四条纪律（每一条都是踩过的那类坑）：
+    //
+    // 1. **链式 `setTimeout`，不用 `setInterval`。** 一次只可能有一个请求在飞，慢网络下
+    //    不会越堆越多（`setInterval` 在请求比间隔慢时会并发堆积）。
+    // 2. **只在有在途任务时排下一拍**（`count` 为 0 会把那一拍清掉）：没有任务在跑时
+    //    这一页不留任何定时器。
+    // 3. **取失败就停**，不重试：静默重试会把一次短暂的后端故障变成一个持续打点的循环，
+    //    而用户下一次点筛选/刷新会照常报错。
+    // 4. **后台标签页不取**（`document.hidden`），但**继续盯着** —— 回来时下一拍就取，
+    //    用户不会看到一屏过期数字。
+    //
+    // 「总览」与「下钻」**各排各的**（两个槽位，不是一个）：两者的筛选范围本来就可能
+    // 不同（下钻去掉了 `project` 那一项、并且只算一个项目），所以它们的在途条数不是
+    // 同一个数。共用一个槽位的话，总览取回「0 个在跑」会把下钻刚排上的那一拍清掉，
+    // 而下钻明明还挂着一句「有 1 个运行中」。
+    var activeRefresh = { overview: null, overviewCount: 0, drill: null, drillCount: 0 };
+
+    function scheduleActiveRefresh(surface, count) {
+        activeRefresh[surface + 'Count'] = Number(count) || 0;
+        if (activeRefresh[surface]) {
+            clearTimeout(activeRefresh[surface]);
+            activeRefresh[surface] = null;
+        }
+        armActiveRefresh(surface);
+    }
+
+    function armActiveRefresh(surface) {
+        if (!activeRefresh[surface + 'Count'] || activeRefresh[surface]) return;
+        activeRefresh[surface] = setTimeout(function () {
+            runActiveRefresh(surface);
+        }, AIU_ACTIVE_REFRESH_MS);
+    }
+
+    function runActiveRefresh(surface) {
+        activeRefresh[surface] = null;
+        if (document.hidden) {
+            // 后台不取（一次聚合查询不值当），但继续盯着 —— 回来时下一拍就取。
+            armActiveRefresh(surface);
+            return;
+        }
+        if (surface === 'drill') {
+            // 下钻已经收起来时什么都不做（`state.drillProjectId` 是 null）—— 那一拍到此
+            // 为止，不会把用户刚收起来的卡片重新弹开。
+            if (state.drillProjectId) {
+                loadDrill(state.drillProjectId, state.drillName, { quiet: true, keepScroll: true });
+            }
+            return;
+        }
+        loadOverview(true);
+    }
 
     function fetchJson(url) {
         return fetch(url, { credentials: 'same-origin' }).then(function (response) {
@@ -1493,7 +1610,20 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         return card;
     }
 
-    function renderKpis(totals, overBudget) {
+    /** 把活动任务那一句写进提示条里（整句来自纯函数 `aiuActiveNoteText`）。
+     *
+     *  没有在途任务时 `text` 是 null → 整条**不渲染**：「现在没有任务在跑」不是一条需要
+     *  常驻的信息，摆一句恒为真的话只会让它和真正有事时的提示一样被忽略。 */
+    function renderActiveNote(hostId, active, completed) {
+        var host = $(hostId);
+        if (!host) return;
+        var text = aiuActiveNoteText(active, completed);
+        // 先写文本再设 `hidden`：反过来的话读屏可能在「显示」那一瞬间先播一次旧内容。
+        host.textContent = text || '';
+        host.hidden = !text;
+    }
+
+    function renderKpis(totals, overBudget, activeCount) {
         var host = $('aiuKpis');
         host.textContent = '';
         var tokens = totals.tokens || {};
@@ -1509,9 +1639,12 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             hit === null || hit === undefined ? '上游未上报缓存字段' : '按未命中价计费的输入：' + aiuOrUnknown(aiuFmtTokens(miss), AIU_UNKNOWN)
         ));
         host.appendChild(kpi('输出 token', aiuOrUnknown(aiuFmtTokens(tokens.output), AIU_UNKNOWN)));
+        // 副标题里的两个数都是**已完成**的运行。在途那几次单独说一句 —— 否则「3 / 4 次运行」
+        // 会被读成「一共跑了 4 次，其中 3 次采集到了」，而事实是「还有 1 次没结束」。
         host.appendChild(kpi(
             '合计 token', aiuOrUnknown(aiuFmtTokens(tokens.total), AIU_UNKNOWN),
-            totals.collected_runs + ' / ' + totals.runs + ' 次运行采集到用量'
+            totals.collected_runs + ' / ' + totals.runs + ' 次已完成运行采集到用量'
+            + (activeCount ? '（另有 ' + activeCount + ' 次运行中，未计入）' : '')
         ));
         var rate = aiuFmtRate(cache.hit_rate);
         host.appendChild(kpi(
@@ -1667,7 +1800,10 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             var name = document.createElement('span'); name.className = 'aiu-name'; name.textContent = item.name;
             var sub = document.createElement('span');
             sub.className = 'aiu-name-sub';
-            sub.textContent = item.runs + ' 次运行 · ' + (item.collected_runs || 0) + ' 次采集到用量';
+            // 「N 次运行」数的是**已完成**的（这一行的数字也是），在途那几次单独跟在后面 ——
+            // 两者的和才是「这个项目跑过几次」，不说清就会出现「这行写 3 次、点开列了 4 条」。
+            sub.textContent = item.runs + ' 次运行 · ' + (item.collected_runs || 0) + ' 次采集到用量'
+                + (item.running_runs ? ' · ' + item.running_runs + ' 次运行中（未计入）' : '');
             nameBtn.appendChild(name); nameBtn.appendChild(sub);
             nameCell.appendChild(nameBtn);
             tr.appendChild(nameCell);
@@ -1762,7 +1898,8 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             }
             var sub = document.createElement('span');
             sub.className = 'aiu-name-sub';
-            sub.textContent = item.group_key || '';
+            sub.textContent = (item.group_key || '')
+                + (item.running_runs ? ' · ' + item.running_runs + ' 次运行中（未计入）' : '');
             labelCell.appendChild(name); labelCell.appendChild(sub);
             tr.appendChild(labelCell);
 
@@ -1803,6 +1940,17 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         });
     }
 
+    /** 一条运行的状态文案。**不许把英文码露在表格里** —— 那一格是给人看的。
+     *
+     * `degraded` 与 `succeeded` 都属于「跑完了」（有结论，只是浅），但在这一格上必须
+     * **分得开**：面板上有「这一周降级了多少次」这个问题要回答，两者合成一个「完成」
+     * 就等于把降级率抹平了 —— 而它正是最该被看见的那一档。
+     */
+    function aiuRunStatusText(status) {
+        return { succeeded: '成功', degraded: '降级完成', failed: '失败' }[status]
+            || status || '—';
+    }
+
     function renderRuns(payload) {
         var tbody = $('aiuRunRows');
         tbody.textContent = '';
@@ -1832,7 +1980,7 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             var statusCell = document.createElement('td');
             var badge = document.createElement('span');
             badge.className = 'aiu-badge' + (row.status === 'failed' ? ' failed' : '');
-            badge.textContent = row.status === 'succeeded' ? '成功' : (row.status === 'failed' ? '失败' : row.status);
+            badge.textContent = aiuRunStatusText(row.status);
             statusCell.appendChild(badge);
             tr.appendChild(statusCell);
 
@@ -1861,7 +2009,7 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         });
         $('aiuRunsTruncated').hidden = !payload.runs_truncated;
         $('aiuRunsTruncated').textContent = payload.runs_truncated
-            ? '只列出最近的 ' + rows.length + ' 次运行；上面的合计按全部运行计算。' : '';
+            ? '只列出最近的 ' + rows.length + ' 次运行；上面的合计按全部已完成的运行计算。' : '';
     }
 
     // -----------------------------------------------------------------------
@@ -2818,9 +2966,21 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             .then(function () { setResetBusy(false); });
     }
 
-    function loadOverview() {
-        clearError();
-        setLoading(true);
+    /** 总览。`quiet=true` 是**后台跟新**那一拍用的（见 `scheduleActiveRefresh`）。
+     *
+     *  安静的那一拍只重画**数字**（提示条、KPI、统计口径、项目表），不碰筛选表单与地址栏：
+     *  `setLoading(true)` 会把整页藏进骨架屏（每 15 秒闪一次白，比不更新更糟），而
+     *  重置筛选表单会在用户正打字时把他填了一半的条件冲掉 —— 那两件事都只在
+     *  「用户自己发起」时才该做。
+     *
+     *  失败时安静那一拍**什么都不做**：眼前这一屏还是上一次取回来的数，比换成一页错误强，
+     *  也避免一次短暂的后端故障变成持续打点的循环。
+     */
+    function loadOverview(quiet) {
+        if (!quiet) {
+            clearError();
+            setLoading(true);
+        }
         var params = currentParams();
         var query = params.toString();
         return fetchJson('/ai-analysis/usage/overview' + (query ? '?' + query : '')).then(function (body) {
@@ -2829,32 +2989,54 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             // 记下来给两处下拉用（平台卡片 + 项目预算弹层）。拿不到就保持 null，
             // `fillPeriodSelect` 会退回本页自带的那份。
             AIU_PERIOD_CHOICES = Array.isArray(body.periods) ? body.periods : null;
-            fillFilterOptions(body);
-            // 表单与地址栏都按**服务端实际生效的**那份筛选来回填：传来的条件非法时
-            // 后端会回落默认，界面得跟着回落到同一处，并把它写明白（filters.notes）。
-            applyFiltersToForm(body.filters);
-            syncUrl(body.filters);
-            renderKpis(body.totals || {}, body.over_budget_projects || 0);
+            if (!quiet) {
+                fillFilterOptions(body);
+                // 表单与地址栏都按**服务端实际生效的**那份筛选来回填：传来的条件非法时
+                // 后端会回落默认，界面得跟着回落到同一处，并把它写明白（filters.notes）。
+                applyFiltersToForm(body.filters);
+                syncUrl(body.filters);
+            }
+            // KPI 读的是**完成统计**（`completed_totals`）：在途那几次的 token 还没上报，
+            // 混进去会把命中率、费用与合计 token 一起变成「未上报」。老响应里没有这个
+            // 字段时回落到 `totals`（两者逐字等价，见服务端）。
+            var completed = body.completed_totals || body.totals || {};
+            var activeRuns = body.active_runs || {};
+            renderActiveNote('aiuActiveNote', activeRuns, completed);
+            renderKpis(completed, body.over_budget_projects || 0, activeRuns.count || 0);
             // 口径一栏：这一页的数字是从哪一刻起算的。**对所有人都下发**（数字是怎么来的
-            // 必须看得见），能不能改由 `can_manage` 决定。
+            // 必须看得见），能不能改由 `can_manage` 决定。后台那一拍也要重画它：
+            // 在途条数变了，「全量重置」能不能点就跟着变。
             renderStatistics(body.statistics);
-            renderPricingNote((body.projects || [])[0] ? body.projects[0].pricing : null);
-            renderBudgetLink(body.budget_link);
+            if (!quiet) {
+                renderPricingNote((body.projects || [])[0] ? body.projects[0].pricing : null);
+                renderBudgetLink(body.budget_link);
+            }
             // 平台挡被收掉时（普通用户：服务端一个字都不下发）**不弹**，也不能改成
             // 弹一句「平台没问题」—— 那是我们并不知道的事。这一档超了的话，用户在自己
             // 项目那一行看得到「平台已超」，分析被拦时那句理由里也写着。
             if (!body.platform_hidden) renderPlatformAlert(body.platform_status);
             renderProjects(body);
-            // 单价表的项目下拉用**全量**项目清单（不受当前筛选影响）—— 拿筛选后的清单
-            // 会让下拉里只剩一个项目，用户换不回别的。
-            aiuPriceSetProjects(body.project_options || []);
+            if (!quiet) {
+                // 单价表的项目下拉用**全量**项目清单（不受当前筛选影响）—— 拿筛选后的清单
+                // 会让下拉里只剩一个项目，用户换不回别的。后台那一拍不重建它：
+                // 用户可能正开着那个下拉在编辑单价表。
+                aiuPriceSetProjects(body.project_options || []);
+            }
             $('aiuGeneratedAt').textContent = '更新时间 ' + aiuFmtTime(body.generated_at);
-            setLoading(false);
+            if (!quiet) setLoading(false);
+            // 下一拍要不要排，取决于**这一拍取回来的**在途条数：跑完了就自然停下。
+            scheduleActiveRefresh('overview', activeRuns.count || 0);
         }).catch(function (error) {
+            if (quiet) return;
             showError('加载失败：' + (error && error.message ? error.message : error));
         });
     }
 
+    /** 单项目下钻。`options.quiet` 是**后台跟新**那一拍用的（同 `loadOverview` 的 quiet）。
+     *
+     *  安静那一拍不写「加载中...」也不滚动：那三行占位会把**已经在眼前的表格**抹掉一瞬，
+     *  每 15 秒闪一次表格比不更新更糟；滚动更不行 —— 用户可能正在读下面的逐次明细。
+     */
     function loadDrill(projectId, name, options) {
         var opts = options || {};
         state.drillProjectId = projectId;
@@ -2863,12 +3045,14 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         state.drillName = name || state.drillName || String(projectId);
         $('aiuDrillCard').hidden = false;
         $('aiuDrillTitle').textContent = '项目明细 · ' + (name || projectId);
-        $('aiuWeeklyRows').innerHTML = '<tr><td colspan="8" class="empty-row">加载中...</td></tr>';
-        $('aiuToolRows').innerHTML = '<tr><td colspan="8" class="empty-row">加载中...</td></tr>';
-        $('aiuRunRows').innerHTML = '<tr><td colspan="10" class="empty-row">加载中...</td></tr>';
+        if (!opts.quiet) {
+            $('aiuWeeklyRows').innerHTML = '<tr><td colspan="8" class="empty-row">加载中...</td></tr>';
+            $('aiuToolRows').innerHTML = '<tr><td colspan="8" class="empty-row">加载中...</td></tr>';
+            $('aiuRunRows').innerHTML = '<tr><td colspan="10" class="empty-row">加载中...</td></tr>';
+        }
         // 口径变了之后的重取**不滚动**：用户刚点的是上面那张「统计口径」卡片，
         // 把他弹到页面下方的明细表去，等于把「刚发生了什么」从眼前挪走。
-        if (!opts.keepScroll) {
+        if (!opts.keepScroll && !opts.quiet) {
             $('aiuDrillCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
         // 下钻带上同一份筛选（项目那一项除外：它就是这条路径的一部分）。
@@ -2878,11 +3062,23 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         return fetchJson('/ai-analysis/usage/project/' + projectId + (query ? '?' + query : ''))
             .then(function (body) {
             state.drill = body;
+            // 与总览同一句话、同一口径：下钻的合计也只算已完成的运行。
+            renderActiveNote('aiuDrillActiveNote', body.active_runs || {},
+                body.completed_totals || body.totals || {});
             renderWeekly(body.weekly_versions || []);
-            renderTools((body.totals || {}).tools || {});
+            renderTools((body.completed_totals || body.totals || {}).tools || {});
             renderRuns(body);
+            // 下钻这一屏也有在途任务时，同样排下一拍（合计里那条还没算进去）。
+            scheduleActiveRefresh('drill', (body.active_runs || {}).count || 0);
         }).catch(function (error) {
+            // 后台那一拍取失败：**保留眼前这一屏**，一个字都不改（连下面那句收尾都不做）——
+            // 把表格换成一行「加载失败」是用户最不需要的打扰。
+            if (opts.quiet) return;
             $('aiuWeeklyRows').innerHTML = '';
+            // 这一屏没取回来 → 上一条提示（可能是**上一个项目**的）必须一起收掉：
+            // 卡片里已经换成错误行了，再挂着一句「当前筛选范围内有 1 个新任务运行中」
+            // 就是在指一件与眼前这一屏无关的事。
+            renderActiveNote('aiuDrillActiveNote', {}, {});
             var tr = document.createElement('tr');
             var td = document.createElement('td');
             td.className = 'empty-row';

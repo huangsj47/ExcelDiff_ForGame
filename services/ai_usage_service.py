@@ -26,6 +26,18 @@
 筛选里的「本月」决定**表里显示哪些运行**；预算那一列永远按项目自己配置的预算周期
 （默认本月）算。两者刻意分开：预算数字必须与 `services/ai/analysis_budget.py` 的
 闸门判定**逐字一致**，否则会出现「面板说已超预算，按钮却还能点」这种自相矛盾的界面。
+
+## 「完成统计」与「活动任务」是两个口径
+
+这一页上的数字回答的是**已经花了多少**，而正在跑的那几次还没有结账：`_create_run`
+建行时 token 三列全是 NULL（上游还没报），所以那条行混进聚合的后果是整屏的命中率、
+费用与合计 token 一起变成「未上报」—— 一条刚点下去的任务就能让这一页看起来像坏了。
+聚合器的口径（`services/ai/usage.py`：任一缺失不给比例、任一条算不出不给合计）是**对的**，
+错的是把「还没结账」的运行混进了「已完成统计」。
+
+所以读路径把两者分开：`completed_totals` 只统计**已经结束**的运行（口径与筛选范围一致），
+`active_runs` 如实给出在途那些的条数、编号与（有的话）**临时**用量。判据只有一处
+（`is_active_run`），页面上那句「当前筛选范围内有 N 个新任务运行中……」就是拿这两个口径拼出来的。
 """
 from __future__ import annotations
 
@@ -38,6 +50,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from models import Project, WeeklyVersionConfig
 from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace
+from services.ai import run_progress
 from services.ai.analysis_budget import (
     PERIOD_ALL_TIME,
     PERIOD_CHOICES,
@@ -56,6 +69,7 @@ from services.ai.pricing import amount_exact, amount_of, money
 from services.ai.trace_evidence import decode_evidence
 from services.ai.usage import aggregate_runs, usage_from_run
 from services.ai.usage_statistics import (
+    IN_FLIGHT_STATUSES,
     count_runs_before,
     is_counted,
     statistics_public,
@@ -69,8 +83,9 @@ from utils.timezone_utils import BEIJING_TZ
 # 「别再多了」的兜底，避免一条异常数据把界面撑爆。
 MAX_ROUNDS = 60
 
-# 下钻页每次最多列多少条运行记录。汇总数字仍然按**全部**运行算 —— 只截断列表，
-# 不截断统计，否则页面上的合计会随着「看多少行」变化。
+# 下钻页每次最多列多少条运行记录。汇总数字仍然按**全部已完成**运行算（在途那几条
+# 不进合计，见下面「完成统计 vs 活动任务」）—— 只截断列表，不截断统计，否则页面上的
+# 合计会随着「看多少行」变化。
 MAX_RUNS = 200
 
 # ---------------------------------------------------------------------------
@@ -104,10 +119,17 @@ SOURCE_CHOICES = (SOURCE_ALL, SOURCE_MANUAL, SOURCE_SCHEDULED)
 SOURCE_LABELS = {SOURCE_ALL: "全部来源", SOURCE_MANUAL: "手动", SOURCE_SCHEDULED: "定时"}
 
 STATUS_ALL = "all"
-STATUS_CHOICES = (STATUS_ALL, "succeeded", "failed", "running")
+# 筛选项与 `models/ai_analysis/analysis_run.py::RUN_STATUSES` 同一套词：少一档的后果是
+# 那一类运行**只能混在「全部状态」里看**，而 panel 上「这一周降级了多少次」是个要按
+# 状态分组计数的问题（实测库里 13 条完成运行里 12 条是降级 —— 少了这一档，
+# 「怎么几乎全是降级」这件事在界面上根本筛不出来）。
+STATUS_CHOICES = (STATUS_ALL, "succeeded", "degraded", "failed", "running")
 STATUS_LABELS = {
     STATUS_ALL: "全部状态",
     "succeeded": "成功",
+    # 措辞比「历次结论」那边（`report_document.STATUS_LABELS` 的「降级完成」）短：
+    # 这里是一个**筛选项**，那边是**一条结论的状态** —— 同义不同场景，不是两套说法。
+    "degraded": "降级",
     "failed": "失败",
     "running": "进行中",
 }
@@ -364,6 +386,125 @@ def filter_runs(
     ]
 
 
+# ---------------------------------------------------------------------------
+#  完成统计 vs 活动任务
+# ---------------------------------------------------------------------------
+# 「还在跑」的判据。**直接引用 `usage_statistics.IN_FLIGHT_STATUSES`，不在这里再写一份
+# 字面量**：那边拿它挡「全量重置」，这边拿它把活动任务从完成统计里摘出去 —— 两处判据
+# 不一致的表现是「面板说它还在跑、重置按钮却说可以重置」这类自相矛盾的界面。
+ACTIVE_STATUSES = IN_FLIGHT_STATUSES
+
+# `active_runs.runs` 最多列几条明细。**只截断列表，不截断计数**：页面上那句
+# 「当前筛选范围内有 N 个新任务运行中」的 N 永远是全量，截断的那部分由 `truncated` 说明。
+MAX_ACTIVE_RUNS = 50
+
+# 排序时的兜底时刻（没有 `created_at` 的行排在最早）。带 tzinfo：与 `as_utc()` 的
+# 返回值同口径，混着比不会抛 `TypeError`。
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def is_active_run(run: AiAnalysisRun) -> bool:
+    """这条运行是不是**还没结账**的活动任务。
+
+    只看库里的原值（`status`），**不看 `effective_status`** —— 后者会把超时的 running
+    显示成 failed（那是给界面看的一眼，见 `models/ai_analysis/analysis_run.py`），而
+    「这条记录会不会再被回写」的答案不受它影响：超时只是「看起来死了」，进程可能只是慢。
+    这与 `usage_statistics.in_flight_runs()` 是同一条判据（那里挡的是全量重置）。
+
+    代价是「僵尸 running」也会被算成活动任务、从而不进完成统计。这是刻意选的：
+    另一条路（按 `effective_status` 把僵尸判成已完成）会让一条**永远不会有 token** 的行
+    重新把整屏的费用判成「算不出」—— 正是这次要修的那个症状。
+    """
+    return str(getattr(run, "status", "") or "") in ACTIVE_STATUSES
+
+
+def split_active_runs(
+    runs: Iterable[AiAnalysisRun],
+) -> tuple[list[AiAnalysisRun], list[AiAnalysisRun]]:
+    """把一批运行分成 `(活动任务, 已完成的)`，**两边都保持传入顺序**。
+
+    调用方拿到的两个列表拼起来就是原来那一批（没有一条被丢掉）—— 「分组」与「过滤」
+    是两件事：在途的运行照样要在运行列表里如实出现（显示「未上报」），只是不进合计。
+    """
+    active: list[AiAnalysisRun] = []
+    completed: list[AiAnalysisRun] = []
+    for run in runs:
+        (active if is_active_run(run) else completed).append(run)
+    return active, completed
+
+
+def _live_tokens(active_runs: Sequence[AiAnalysisRun]) -> dict[str, Any]:
+    """活动任务**此刻**的临时用量（来自进程内的进度快照，见 `services/ai/run_progress`）。
+
+    三条纪律照抄那个模块的：读不到就是 `None`（**不是 0**）、它只是**下界**（只含上游
+    已经上报的部分）、它**永远**带 `partial=True`。这份数字只给界面显示「现在大概到哪了」，
+    **一个 token 都不许混进完成统计** —— 混进去等于把一个随刷新变化的半截数字说成
+    「已经花了多少」，而它还会在运行结束时以最终值再计一遍（重复计数）。
+    """
+    total = 0
+    reported = 0
+    for run in active_runs:
+        snapshot = run_progress.snapshot(int(getattr(run, "id", 0) or 0))
+        value = getattr(snapshot, "live_tokens", None) if snapshot is not None else None
+        if value is None:
+            continue
+        reported += 1
+        total += int(value)
+    return {
+        "partial": True,
+        # 一条都没上报 → `None`（界面显示「还没有上报」），不补 0。
+        "tokens": total if reported else None,
+        "reported_runs": reported,
+        "unreported_runs": max(0, len(active_runs) - reported),
+    }
+
+
+def active_block(
+    active_runs: Sequence[AiAnalysisRun],
+    names: Mapping[int, str] | None = None,
+) -> dict[str, Any]:
+    """这一屏里的**活动任务**（在途运行）那一块。
+
+    它与 `completed_totals` 是**并列的两个口径**：一个答「已经花了多少」，一个答
+    「现在还有什么在跑」。页面上那句「当前筛选范围内有 N 个新任务运行中，实时用量尚未
+    计入；以下统计截至运行 #X」就是拿这两块拼出来的 —— 少了任何一块，那句话都说不圆。
+
+    `latest_run_id` 是**最新一条在途运行**的编号（页面上用来核对是哪一次还没算进去）。
+    """
+    ordered = sorted(
+        active_runs,
+        key=lambda run: (
+            # 两边都过 `as_utc`：同一个 session 里刚写进去的对象可能还带着 aware 的
+            # tzinfo，与库里读出来的 naive 值直接比会抛 `TypeError`（同 `is_counted`）。
+            as_utc(getattr(run, "created_at", None)) or _EPOCH,
+            int(run.id or 0),
+        ),
+    )
+    shown = ordered[-MAX_ACTIVE_RUNS:]
+    name_map = names or {}
+    latest_run_id = ordered[-1].id if ordered else None
+    return {
+        "count": len(ordered),
+        "latest_run_id": int(latest_run_id) if latest_run_id is not None else None,
+        "truncated": len(ordered) > len(shown),
+        "runs": [
+            {
+                "run_id": run.id,
+                "project_id": run.project_id,
+                "project_name": name_map.get(run.project_id, f"项目 {run.project_id}"),
+                "status": str(getattr(run, "status", "") or ""),
+                "target_type": run.target_type,
+                "target_id": run.target_id,
+                "target_key": run.target_key or "",
+                "created_at": _iso(getattr(run, "created_at", None)),
+            }
+            for run in shown
+        ],
+        # **临时值**：只给显示，永远标着「不完整」，绝不混进完成统计。
+        "live": _live_tokens(ordered),
+    }
+
+
 def _price_block(table, errors: Sequence[str]) -> dict[str, Any]:
     """这一层用的价格表状态。界面据此决定「显示费用」还是「提示去配置」。"""
     return {
@@ -548,8 +689,14 @@ def _totals_cost(entries: Sequence[dict]) -> Optional[dict[str, Any]]:
 
     **只有每个项目都算得出、且币种一致时才给数字。** 少算一个项目、或把两种币种直接
     相加，得到的都是一个看起来正常、实际错的金额 —— 这比「算不出」危险得多。
+
+    一次**已完成**运行都没有的项目**不参与**：它没有金额可算，也没有「算不出」这回事
+    （`aggregate_runs([])` 的 `cost` 是 `None`）。把它当成「算不出」的话，一个刚建出来、
+    第一次分析还在跑的项目会让**整个平台**的费用合计变成「算不出」—— 那正是这次要修的
+    那个症状换个位置再犯一遍。
     """
-    costs = [entry.get("cost") for entry in entries]
+    relevant = [entry for entry in entries if _int_or_zero(entry.get("runs")) > 0]
+    costs = [entry.get("cost") for entry in relevant]
     if not costs or any(amount_of(item) is None for item in costs):
         return None
     currencies = {str(item.get("currency") or "") for item in costs}
@@ -621,11 +768,21 @@ def usage_overview(
 
     `filters` 里的项目筛选**只能收窄**权限范围，不能扩大：它先与可访问清单求交，
     求不到就是空结果，不会因为 URL 里写了个别人的项目号而读到别人的数。
+
+    ## 两个口径（见模块 docstring 末节）
+
+    `completed_totals` / `projects[*]` 只统计**已经结束**的运行，`active_runs` 是这一刻
+    还在跑的那些。分组只影响这一页怎么算、怎么摆；**预算那一档一个字都不改**
+    （`_budget_block` 走的是闸门自己的判定，与这里的分组无关）。
     """
     active = filters or UsageFilters()
     query = _runs_query(accessible_project_ids)
     entries: list[dict[str, Any]] = []
     all_runs: list[AiAnalysisRun] = []
+    active_runs: list[AiAnalysisRun] = []
+    completed_runs: list[AiAnalysisRun] = []
+    # 项目号 → 项目名。活动任务那一块也用它（界面上要说清「哪个项目的哪一次」）。
+    names: dict[int, str] = {}
     # 统计起点（平台级口径，见 services/ai/usage_statistics）。**它只在这里生效**：
     # 预算那一档的「已用」走 `platform_budget_status()`，与这个变量无关。
     baseline = usage_baseline()
@@ -649,6 +806,9 @@ def usage_overview(
         matched_runs = filter_runs(query.order_by(AiAnalysisRun.created_at.desc()).all(), active)
         excluded_runs = count_runs_before(baseline, matched_runs)
         all_runs = [run for run in matched_runs if is_counted(run, baseline)]
+        # **分组在统计之前**：在途的运行不进合计（它的 token 三列还是 NULL，混进去会把
+        # 命中率与费用判成「算不出」），但它在下面照样占一个项目行、照样进活动任务那一块。
+        active_runs, completed_runs = split_active_runs(all_runs)
         grouped: dict[int, list[AiAnalysisRun]] = {}
         for run in all_runs:
             grouped.setdefault(run.project_id, []).append(run)
@@ -660,7 +820,10 @@ def usage_overview(
         budgets = budget_rows_for_overview(list(grouped), show_platform=show_platform)
         for project_id, runs in grouped.items():
             table, errors = project_price_table(project_id)
-            stats = aggregate_runs(runs, price_table=table)
+            # 这一行的数字只算**已完成的**那些；在途的条数单独报出去（`running_runs`），
+            # 否则界面会出现「这一行写 3 次、点开却列了 4 条」这种对不上的读法。
+            project_completed = [run for run in runs if not is_active_run(run)]
+            stats = aggregate_runs(project_completed, price_table=table)
             budget_block = _budget_block(
                 project_id,
                 budgets.get(project_id),
@@ -672,6 +835,7 @@ def usage_overview(
                     "project_id": project_id,
                     "name": names.get(project_id, f"项目 {project_id}"),
                     "runs": stats["runs"],
+                    "running_runs": len(runs) - len(project_completed),
                     "collected_runs": stats["collected_runs"],
                     "tokens": stats["tokens"],
                     "cache": stats["cache"],
@@ -680,6 +844,8 @@ def usage_overview(
                     "cost": stats["cost"],
                     "pricing": _price_block(table, errors),
                     "budget": budget_block,
+                    # 「最近一次」看的是这一行的**全部**运行（含在途那条）：它回答的是
+                    # 「这个项目最近什么时候动过」，不是「最近什么时候结过账」。
                     "last_run_at": _iso(
                         max((run.created_at for run in runs if run.created_at), default=None)
                     ),
@@ -709,24 +875,33 @@ def usage_overview(
         ),
     )
 
-    totals = {"runs": 0, "tokens": {}, "cache": {}, "tools": {}, "cost": None}
-    if all_runs:
-        # 合计不带价格表算（各项目的表不同），费用另算 —— 见 _totals_cost。
-        stats = aggregate_runs(all_runs, price_table=None)
-        totals = {
-            "runs": stats["runs"],
-            "collected_runs": stats["collected_runs"],
-            "tokens": stats["tokens"],
-            "cache": stats["cache"],
-            "tools": stats["tools"],
-            "missing_runs": stats["missing_runs"],
-            "cost": _totals_cost(entries),
-        }
+    # 合计**只算已完成的运行**（`completed_runs`）：不带价格表算（各项目的表不同），
+    # 费用另算 —— 见 `_totals_cost`。一条都没完成时它照样给出完整的形状（全 `None`），
+    # 界面按「还没有数字」渲染，而不是消失。
+    stats = aggregate_runs(completed_runs, price_table=None)
+    totals = {
+        "runs": stats["runs"],
+        # 这一批里**最新一条已完成**的编号：页面那句「以下统计截至运行 #X」就是它 ——
+        # 用户拿它对照活动任务那个编号，就知道差的是哪一次。
+        "latest_run_id": max((int(run.id) for run in completed_runs), default=None),
+        "collected_runs": stats["collected_runs"],
+        "tokens": stats["tokens"],
+        "cache": stats["cache"],
+        "tools": stats["tools"],
+        "missing_runs": stats["missing_runs"],
+        "cost": _totals_cost(entries),
+    }
 
     return {
         "success": True,
         "projects": entries,
+        # `completed_totals` 是这一屏的**完成统计**（口径与筛选范围一致）；
+        # `totals` 是它的历史字段名，逐字等价 —— 老页面/老调用方读它照旧。
         "totals": totals,
+        "completed_totals": totals,
+        # 活动任务：还在跑的那些（不进上面的统计，但也不藏起来）。`names` 传进去让
+        # 界面能直接说「哪个项目的哪一次」，不必自己再查一遍项目名。
+        "active_runs": active_block(active_runs, names),
         "filters": active.to_dict(),
         "filter_options": filter_options(),
         "project_options": _project_options(accessible_project_ids),
@@ -794,6 +969,14 @@ def _project_options(accessible_project_ids: Optional[Iterable[int]]) -> list[di
     ]
 
 
+def _project_name(project_id: int) -> str:
+    """项目名（读不到就给「项目 N」）。活动任务那一块要能说清是哪个项目。"""
+    project = Project.query.filter_by(id=project_id).first()
+    if project is None:
+        return f"项目 {project_id}"
+    return project.name or project.code or f"项目 {project_id}"
+
+
 def filter_options() -> dict[str, Any]:
     """筛选下拉的选项。由服务端下发而不是写死在模板里 —— 选项与解析规则必须同源，
     否则会出现「界面上有个选项、后端认不出来（回落默认）」，用户选了却没生效。"""
@@ -826,6 +1009,11 @@ def project_usage(
 
     筛选同样在服务端做：`totals`、`weekly_versions` 与 `runs` 三者用的是**同一批**
     过滤后的运行，不会出现「合计按全部算、明细按筛选列」这种对不上的情形。
+
+    **但「同一批」是把活动任务算在外面说的**（见模块 docstring 末节）：合计、周版本
+    维度的数字只算**已经结束**的运行，`active_runs` 单独给出还在跑的那几次 —— 否则
+    一条刚建出来的 running 行（token 三列还是 NULL）会让这一页的命中率与费用一起变成
+    「未上报」。运行列表那一份**照列全部**（含在途那条，它显示「未上报」是事实）。
     """
     active = filters or UsageFilters()
     table, errors = project_price_table(project_id)
@@ -840,9 +1028,13 @@ def project_usage(
     # 与总览同一条口径：起点之前的运行在这个项目的下钻里也不出现（合计、周版本维度、
     # 逐次明细三者用的是同一批运行，不会出现「合计少算、明细照列」）。
     runs = filter_runs(all_runs, active, baseline=usage_baseline())
-    stats = aggregate_runs(runs, price_table=table)
+    active_runs, completed_runs = split_active_runs(runs)
+    stats = aggregate_runs(completed_runs, price_table=table)
     pricing = _price_block(table, errors)
+    names = {project_id: _project_name(project_id)}
 
+    # 分组按**全部**运行建（含在途那条）：只在跑的周版本不能因此从表里消失 ——
+    # 那一行会显示「0 次运行 · 1 次运行中」，而不是不见了。
     weekly_groups: dict[str, list[AiAnalysisRun]] = {}
     for run in runs:
         if run.target_type == "weekly" and run.target_key:
@@ -862,7 +1054,8 @@ def project_usage(
 
     weekly_versions = []
     for group_key, group in weekly_groups.items():
-        group_stats = aggregate_runs(group, price_table=table)
+        group_completed = [run for run in group if not is_active_run(run)]
+        group_stats = aggregate_runs(group_completed, price_table=table)
         config_id = group[0].target_id
         weekly_versions.append(
             {
@@ -870,6 +1063,7 @@ def project_usage(
                 "config_id": config_id,
                 "config_name": config_names.get(config_id, "") if config_id else "",
                 "runs": group_stats["runs"],
+                "running_runs": len(group) - len(group_completed),
                 "collected_runs": group_stats["collected_runs"],
                 "tokens": group_stats["tokens"],
                 "cache": group_stats["cache"],
@@ -887,19 +1081,29 @@ def project_usage(
     for index, item in enumerate(weekly_versions):
         item["is_latest"] = index == 0
 
+    totals = {
+        "runs": stats["runs"],
+        # 这一批里**最新一条已完成**的编号（页面那句「以下统计截至运行 #X」）。
+        "latest_run_id": max((int(run.id) for run in completed_runs), default=None),
+        "collected_runs": stats["collected_runs"],
+        "tokens": stats["tokens"],
+        "cache": stats["cache"],
+        "tools": stats["tools"],
+        "missing_runs": stats["missing_runs"],
+        "cost": stats["cost"],
+    }
     return {
         "success": True,
         "project_id": project_id,
-        "totals": {
-            "runs": stats["runs"],
-            "collected_runs": stats["collected_runs"],
-            "tokens": stats["tokens"],
-            "cache": stats["cache"],
-            "tools": stats["tools"],
-            "missing_runs": stats["missing_runs"],
-            "cost": stats["cost"],
-        },
+        # 与总览同一对字段：`completed_totals` 是显式口径名，`totals` 是历史字段名，
+        # 逐字等价 —— 老页面/老调用方读它照旧。
+        "totals": totals,
+        "completed_totals": totals,
+        # 还在跑的那几次：不进上面的合计，但如实露出来。
+        "active_runs": active_block(active_runs, names),
         "weekly_versions": weekly_versions,
+        # 运行列表**列全部**（含在途那条）：它在列表里显示「未上报」是事实，
+        # 藏起来才会变成「这次分析没跑过」。
         "runs": [_run_row(run, table) for run in runs[:MAX_RUNS]],
         "runs_truncated": len(runs) > MAX_RUNS,
         "pricing": pricing,

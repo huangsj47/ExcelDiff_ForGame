@@ -11,6 +11,20 @@ Flask 上下文与数据库会话的跨线程问题，代价远大于收益。
 所以选的是**轮询**：引擎每跑完一轮把累计用量写进这里的快照（`on_round` 回调，
 见 `services/ai/engine.py` 的 `RoundProgress`），界面每隔几秒读一次。
 
+## 两个用量口径：job 级累计 与 当前成员局部量
+
+引擎报的累计 token 是**一个引擎实例**的累计，而一个引擎实例 = **一个成员**
+（子代理模式下每个分片各起一个，见 `services/ai/subagent.py`）。回调那一层只把
+「我是谁」贴到帧上（`report`），token 一个字节都不动；而快照是整条覆盖写的 ——
+只报局部量的话，换成员那一瞬间抽屉顶部那个数会**当场回退**（实测 run 13：
+S3 收尾约 493,531 → 汇总第一轮 34,960）。
+
+所以这里多记一本账（`_JobLedger`，就在 `publish` 里做，它是每一帧的唯一写入口）：
+
+* `job_tokens`：**跨成员**的本次分析累计，**单调不减**（缺成员的按 0 入账）；
+* `live_tokens`：**当前成员**的局部量（它的本意，换成员就从 0 重新开始）；
+* `run.tokens_input` / `tokens_output`：落库的账（权威口径，跑完才有 —— 不在这里）。
+
 ## 三条纪律
 
 1. **这是显示用的缓存，不是账。** 落库的账在 `ai_analysis_run` / `ai_analysis_trace`，
@@ -82,13 +96,42 @@ class ProgressSnapshot:
     rounds: tuple[Any, ...] = ()
     rounds_seen: int = 0
     rounds_truncated: bool = False
+    # **job 级**累计 token（跨成员，**单调不减**）。见 `_JobLedger` 与模块 docstring。
+    # 与 `live_tokens` 是两个量，不许互相顶替：那个是**当前成员**的局部量。
+    # 读不到（一次都没上报）就是 `None` —— 同样不许兜成 0。
+    # 绕开 `publish` 手搓出来的快照（截图脚本、测试替身）见 `__post_init__`。
+    job_tokens: Optional[int] = None
+    # 有成员**没上报用量**（上游一次都没给这个成员的 token 数）：上面那个数是
+    # **已知下界**，界面必须说出来。它**不影响单调性** —— 没上报的按 0 入账，
+    # 后面的数只会更大，所以「不知道缺多少」不能变成「数字回退」的理由。
+    job_tokens_partial: bool = False
+    # 上面那个数**不含正在跑的那次调用**（引擎是跑完一轮才报的）。`status == "final"`
+    # 那一帧之后这个成员不再发请求，所以它是 `False` —— 这是「比真实花费小」的唯一说明。
+    job_tokens_pending_call: bool = False
+
+    def __post_init__(self) -> None:
+        """**直接构造**的快照（截图脚本、测试替身）没有账本，job 那一份就等于局部量。
+
+        `publish` 那条路一定会显式传 `job_tokens`（哪怕是 `None`），所以这一段只对
+        「绕开 publish 手搓出来的帧」生效 —— 那种帧描述的是一个成员的第几轮，两个量本来
+        就是同一个数。不让它兜住的后果是：这类帧在界面上忽然一个数都不显示
+        （截图里那一行少了「本次已用 N tokens」），而**与真帧同源同形**正是它们的用途。
+        """
+        if self.job_tokens is None:
+            live = self.live_tokens
+            if live is not None:
+                object.__setattr__(self, "job_tokens", live)
 
     @property
     def live_tokens(self) -> Optional[int]:
-        """本次运行**已消耗**的 token（输入 + 输出）。**读不到就是 `None`。**
+        """**当前成员**这一份运行已消耗的 token（输入 + 输出）。**读不到就是 `None`。**
 
         它是**下界**（只含上游已上报的部分），与预算那一档的口径一致 —— 拿它去和上限比
         时，「下界已经超了」是确定的结论，「下界没超」不能反过来说没超。文案里必须写清。
+
+        **它是「当前成员」的量，不是整次分析的量**：子代理模式下一个成员一个引擎实例，
+        换成员就从 0 重新开始。跨成员那一份看 `job_tokens`（界面顶部读的是它）——
+        两个量混用一个字段正是「换个分片数字就掉回三万」的成因。
 
         `None` 要**原样交出去**，不许 `or 0` 兜成 0：`ai_stream_status.progressText` 里
         「用量没上报就只说轮次，不补一个 0」那句守卫就是等这个 `None` 的 —— 兜成 0 之后
@@ -118,6 +161,12 @@ class ProgressSnapshot:
             "agent_index": self.agent_index,
             "agent_total": self.agent_total,
             "live_tokens": self.live_tokens,
+            # job 级那一份（跨成员、单调不减）与它的两条标注 —— 界面顶部读的是**它**。
+            # 三个键与 `live_tokens` 一起发出去是有意的：谁用哪个量由界面自己决定，
+            # 而**同一个字段不许有两个含义**（那正是这次要修的缺陷的形态）。
+            "job_tokens": self.job_tokens,
+            "job_tokens_partial": self.job_tokens_partial,
+            "job_tokens_pending_call": self.job_tokens_pending_call,
             "age_seconds": max(0, int(time.monotonic() - self.updated_at)),
             # 逐轮过程（思考过程标签页）。`rounds_seen` 是**一共跑过几轮**：截断时界面要说
             # 「只列出最近 N 轮」，没有这个数就只能沉默地少给几轮。
@@ -129,6 +178,131 @@ class ProgressSnapshot:
 
 _lock = threading.Lock()
 _snapshots: dict[int, ProgressSnapshot] = {}
+# 每条运行一本 job 级 token 的账（见 `_JobLedger`）。`publish` 里建、`clear` 里丢；
+# 另外按**它自己的**时间戳兜一层过期（不是「快照不在就丢」——快照被挤掉只说明界面看不到
+# 那一帧，不等于这次运行结束了）。留着不放的唯一效果：同一个 run_id 的下一次会带着
+# 上一次的入账继续加，而那个数看起来完全正常。
+_ledgers: dict[int, "_JobLedger"] = {}
+
+
+def _local_tokens(progress: Any) -> Optional[int]:
+    """这一帧上报的「当前成员局部累计」token（输入 + 输出）。**读不到就是 `None`。**
+
+    与 `ProgressSnapshot.live_tokens` 同一条口径（任一个没上报就是 `None`，不许兜成 0）。
+    单列一个函数是为了「长得像进度的任何对象」都不会把写快照弄挂：脏值只是这一个数
+    读不到，不是这一帧丢了。
+    """
+    prompt = getattr(progress, "prompt_tokens", None)
+    completion = getattr(progress, "completion_tokens", None)
+    if prompt is None or completion is None:
+        return None
+    try:
+        return int(prompt) + int(completion)
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass
+class _JobLedger:
+    """一次分析（一个 run）的 **job 级 token** 记账。**调用方必须已持 `_lock`。**
+
+    ## 为什么需要它
+
+    引擎报的累计值是**一个引擎实例**的累计，而一个引擎实例 = **一个成员**
+    （`services/ai/subagent.py` 每个分片各起一个引擎，各报各的）。换成员那一帧上，
+    `prompt_tokens` 从上一个成员的收尾值变成新成员从 0 开始的值 —— 快照是整条覆盖写的，
+    于是抽屉顶部那个数当场回退（实测 493,531 → 34,960）。
+
+    不能在回调那一层（`subagent._call_engine` 的 `report`）累加：那里只贴「我是谁」。
+    而**帧只有这一个写入口**，所以在这里看得出来「换成员了」——判据就是 `agent_index`
+    （连同 `agent` 标签）变了。
+
+    ## 三条口径
+
+    1. **单调不减。** 已经交出去的数永远不会变小：换成员时把上一个成员的**峰值**入账，
+       新成员从 0 开始时把它加回去。成员自己的局部量也取各帧的**最大值** —— 某一轮上游
+       没报 token 时，引擎的累计值会整份变成 `None`（`_sum_optional` 的口径），取最后
+       一个已知值会让数字来回跳。
+    2. **有成员没上报 = 已知下界。** 没上报的那一块按 0 入账，并记下这件事
+       （`partial`，界面要说出来）。**它同样不回退**：缺了一块不知道有多大，
+       不是数字变小的理由。两条路都要记：**跑完一轮却没带用量**（`missing_seen`）、
+       以及**被换下去时整块没上报**（`banked_partial`）—— 只记后者的话，
+       **最后一个成员**（汇总 / 对账）没上报就没人记账了，而那正是最该说清的一处。
+    3. **不含还没返回的那次调用。** 引擎是跑完一轮才报的，所以任何一帧里的数都不含正在
+       飞的那一次请求；`status == "final"` 那一帧之后这个成员不再发请求，标注才收掉。
+    """
+
+    # 上一个成员是谁。`seen` 用来区分「这是第一帧」与「真的换过成员」—— 没有它，
+    # 第一帧（S1 刚起步）会被当成一次换成员，凭空记下一次「有人没上报」。
+    seen: bool = False
+    agent: str = ""
+    agent_index: int = 0
+    status: str = ""
+    # 已经换下去的那些成员之和：`banked` 是**已知的那部分**，`banked_known` 记「有没有
+    # 人报过数」（一个都没报时不许拿 0 冒充一个数），`banked_partial` 记「有没有人整块
+    # 没报」。三个分开是必要的：「0 已知」与「不知道」在界面上是两句不同的话。
+    banked: int = 0
+    banked_known: bool = False
+    banked_partial: bool = False
+    # 见过「跑完了一轮、却没带用量」的帧（`_sum_optional` 的口径：任一轮没上报，
+    # 这个成员的累计值整份就是 `None`）。它同样让 job 那个数变成下界。
+    missing_seen: bool = False
+    # 当前成员已报过的局部量（各帧最大值）。
+    member_peak: Optional[int] = None
+    # 最后一帧的时间（`time.monotonic()`）。**过期只按它判，不按快照在不在**：
+    # 快照过期或被挤掉只说明界面看不到那一帧，不代表这条运行结束了 —— 跟着快照一起
+    # 丢掉账，下一次报进来的数就会从当前成员重新数，也就是又回退一次。
+    last_seen: float = 0.0
+
+    def advance(
+        self,
+        *,
+        agent: str,
+        agent_index: int,
+        index: int,
+        local: Optional[int],
+        status: str,
+    ) -> None:
+        """记一帧。`index` 是**这个成员内部**的轮次（0 = 引擎的 `on_start` 那一帧）。"""
+        if self.seen and (agent, agent_index) != (self.agent, self.agent_index):
+            # **换成员**：把上一个成员的峰值入账，新成员从 0 开始 —— 「加回去」就是修复本身。
+            self.banked += self.member_peak or 0
+            self.banked_known = self.banked_known or self.member_peak is not None
+            self.banked_partial = self.banked_partial or self.member_peak is None
+            self.member_peak = None
+        self.seen = True
+        self.agent = agent
+        self.agent_index = agent_index
+        self.status = status
+        if local is None:
+            # `index >= 1` = 这一轮真的跑完了。跑完却没带用量，这个成员的账就永远读不到
+            # 了（不是「还没轮到」，那是 `on_start` 那一帧的事）。
+            if index >= 1:
+                self.missing_seen = True
+            return
+        # 峰值而不是最后一个值：见口径 1。
+        self.member_peak = local if self.member_peak is None else max(self.member_peak, local)
+
+    @property
+    def job_tokens(self) -> Optional[int]:
+        """跨成员的累计（已知下界）。**一次都没上报过就是 `None`**（不是 0）。
+
+        `banked_known` 那一项不能省：一个成员都没报过数时，`banked + member_peak or 0`
+        会算出 0 —— 而 0 是一个结论（一个 token 都没花），与「不知道」是两件事。
+        """
+        if not (self.banked_known or self.member_peak is not None):
+            return None
+        return self.banked + (self.member_peak or 0)
+
+    @property
+    def partial(self) -> bool:
+        """上面那个数是不是**已知下界**（有成员没上报用量）。"""
+        return self.banked_partial or self.missing_seen
+
+    @property
+    def pending_call(self) -> bool:
+        """上面那个数是不是**不含还没返回的那次调用**。"""
+        return self.status != "final"
 
 
 def _prune_locked(now: float) -> None:
@@ -144,6 +318,13 @@ def _prune_locked(now: float) -> None:
         ordered = sorted(_snapshots.items(), key=lambda pair: pair[1].updated_at)
         for run_id, _item in ordered[: len(_snapshots) - MAX_ENTRIES]:
             _snapshots.pop(run_id, None)
+    # 账本按**自己的**时间戳过期（不是「快照不在就丢」）：快照被挤掉只说明界面看不到
+    # 那一帧，不代表这条运行结束了 —— 跟着快照一起丢，下一次报进来的数就会从当前成员
+    # 重新数，也就是又回退一次。跑完那一次由 `clear()` 显式清掉（模块纪律第 2 条）。
+    for run_id in [
+        key for key, item in _ledgers.items() if now - item.last_seen > MAX_AGE_SECONDS
+    ]:
+        _ledgers.pop(run_id, None)
 
 
 def _merge_rounds(
@@ -208,11 +389,30 @@ def publish(run_id: int, project_id: int, progress: Any) -> None:
     """把一轮的进度写进快照。**任何异常都吞掉**（见模块 docstring 第 3 条）。"""
     try:
         agent = str(getattr(progress, "agent", "") or "")
+        run_key = int(run_id)
         with _lock:
-            previous = _snapshots.get(int(run_id))
+            previous = _snapshots.get(run_key)
             rounds, rounds_seen, rounds_truncated = _merge_rounds(
                 previous, getattr(progress, "round_entry", None), agent
             )
+            # job 级那一笔账**与快照在同一把锁里**：它是一份跨帧的状态（上一个成员的峰值、
+            # 已经入账多少），分开算的话同时跑着的另一条分析会插进来（子代理是顺序跑的，
+            # 但同一进程里可以同时跑着别的项目）。
+            ledger = _ledgers.get(run_key)
+            if ledger is None:
+                ledger = _JobLedger()
+                _ledgers[run_key] = ledger
+            ledger.advance(
+                agent=agent,
+                agent_index=int(getattr(progress, "agent_index", 0) or 0),
+                index=int(getattr(progress, "index", 0) or 0),
+                local=_local_tokens(progress),
+                status=str(getattr(progress, "status", "") or ""),
+            )
+            ledger.last_seen = time.monotonic()
+            job_tokens = ledger.job_tokens
+            job_partial = ledger.partial
+            job_pending = ledger.pending_call
         snapshot = ProgressSnapshot(
             run_id=int(run_id),
             project_id=int(project_id),
@@ -235,6 +435,11 @@ def publish(run_id: int, project_id: int, progress: Any) -> None:
             rounds=rounds,
             rounds_seen=rounds_seen,
             rounds_truncated=rounds_truncated,
+            # job 级那一份是**算出来**的（跨帧的账，见 `_JobLedger`），不是从这一帧读的：
+            # 帧上只有「当前成员」的局部量。
+            job_tokens=job_tokens,
+            job_tokens_partial=job_partial,
+            job_tokens_pending_call=job_pending,
             updated_at=time.monotonic(),
         )
         now = time.monotonic()
@@ -267,6 +472,9 @@ def clear(run_id: int) -> None:
     try:
         with _lock:
             _snapshots.pop(int(run_id), None)
+            # **账本一起清**（模块纪律第 2 条：快照的存在时间不该超过一次分析）。
+            # 留着它，同一个 run_id 的下一次会带着这一次的入账继续加。
+            _ledgers.pop(int(run_id), None)
     except Exception as exc:  # noqa: BLE001
         log_print(f"⚠️ 清分析进度快照失败（不影响分析）: run={run_id} {exc}", "AI", force=True)
 
@@ -275,3 +483,4 @@ def reset_for_tests() -> None:
     """测试用：清空整张表（测试库是会话级共用的，跨用例的残影会让断言飘）。"""
     with _lock:
         _snapshots.clear()
+        _ledgers.clear()
