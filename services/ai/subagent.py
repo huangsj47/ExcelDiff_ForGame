@@ -107,8 +107,10 @@ from services.ai.skill_contract import (
 )
 from services.ai.skill_loader import LoadedSkills
 from services.ai.verdict import (
+    EvidenceGaps,
     Reduction,
     assign_findings,
+    evidence_gaps_of,
     parse_verdicts,
     reduce_findings,
     render_ruling,
@@ -1440,19 +1442,39 @@ def _reduce_with_verify(
     一条结论都不改（`reduce_findings` 的空输入就是恒等），并在报告里写明「本次复核对结论
     一条都没生效」。**不拿一个不存在的复核去动真实结论** —— 与「没有结论时按规模定级、
     并明说不是模型结论」是同一条口径。
+
+    ## 正文编号与证据缺口
+
+    * `body_text` 传的是**汇总写的那份正文**（`synthesis.report_markdown`）：`F#` 要映射到
+      的正文编号只存在于它里面（`verdict.assign_body_labels`）；
+    * `gaps` 是本次运行**已知的证据缺口**（`verdict.evidence_gaps_of`），它让「引用的文件
+      被截断过 / 额度用尽导致它需要的那块没轮到」的结论不得维持 `very_high`。**只在复核
+      真的跑出了东西时才传**：那一节是这些降级唯一会被说明的地方，复核没跑成时报告里
+      没有那一节，压了置信度就是**静默改动** —— 而静默正是这一批缺陷的共同形态
+      （降了不写、撤了不留痕）。所以宁可在这条路上不压。
     """
     step = next((item for item in steps if item.plan.role == ROLE_VERIFY), None)
     outcome = step.outcome if step is not None and not step.failed else None
+    limit = _anomaly_limit(synthesis.dropped, threshold_limit)
+    gaps = (
+        evidence_gaps_of(item.outcome for item in steps)
+        if _verify_ran(steps)
+        else EvidenceGaps()
+    )
     if outcome is None:
         return reduce_findings(
             synthesis.anomalies,
-            limit=_anomaly_limit(synthesis.dropped, threshold_limit),
+            limit=limit,
+            body_text=synthesis.report_markdown,
+            gaps=gaps,
         )
     return reduce_findings(
         synthesis.anomalies,
         new=outcome.anomalies,
         verdicts=parse_verdicts(outcome.report_markdown),
-        limit=_anomaly_limit(synthesis.dropped, threshold_limit),
+        limit=limit,
+        body_text=synthesis.report_markdown,
+        gaps=gaps,
     )
 
 
@@ -1519,7 +1541,13 @@ def aggregate_outcomes(
     cap_text = build_cap_section(synthesis.dropped)
     if cap_text and synthesis.status != STATUS_FAILED:
         report = (report.rstrip() + "\n\n" + cap_text).strip() + "\n"
-    gaps_text, gap_dropped = reconcile_candidates(candidates, synthesis, steps=steps)
+    # 复核裁决**传进去**（`reduction=`）：被裁决撤销的候选，去向是「已撤销」而不是
+    # 「找不到去向」—— 不传的话，同一条候选会在正文的「已推翻」与这一节的「需要人工看一眼」
+    # 里各说一遍，而两遍互相矛盾。**传上面算好的那一个对象，不在这里重算**（见 `:1519`）：
+    # 两处各算一次迟早会出现「对账说撤销、落库说还在」。
+    gaps_text, gap_dropped = reconcile_candidates(
+        candidates, synthesis, steps=steps, reduction=reduction
+    )
     # 汇总没跑成时**没有报告**：那段缺口说明写进 `error_message`（见下面那个分支）。
     # 往一份空报告后面追加一段「信息缺口」等于凭空造出一份看得见的报告，而这次其实
     # 什么都没得到 —— 两份东西都不能给。
