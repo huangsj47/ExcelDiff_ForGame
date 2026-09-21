@@ -34,6 +34,8 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
+from services.ai.docx_view import is_docx, render_docx_text
+
 from services.ai.reference_search import (
     MAX_SCAN_FILES,
     SearchBudget,
@@ -821,7 +823,7 @@ class PlatformContextProvider:
         # 配表不进这里：它们的「窗口」是**第几张工作表**，与行号不是一回事，为它多读一次
         # diff 去挑行号是白读（挑出来的行号对配表没有落点）。
         auto = False
-        if not str(lines or "").strip() and not _is_openpyxl_workbook(path):
+        if not str(lines or "").strip() and not _is_openpyxl_workbook(path) and not is_docx(path):
             lines = self._default_window(commit, path)
             auto = bool(lines)
 
@@ -880,6 +882,18 @@ class PlatformContextProvider:
                     "**这不等于「没有内容」**，需要核对时请说明该表无法读取。"
                 )
             return rendered
+        # `.docx`：与配表同理先分流（它是 ZIP，下面那句 `text_or_notice` 会把它判成二进制）。
+        # 渲染成文本行之后走**同一条**文本路径（`_render_text_content`）—— 窗口、行号、
+        # 截断提示与其他文本文件一模一样，模型不必学第二套坐标。
+        if is_docx(path):
+            rendered = render_docx_text(raw, path=path)
+            if rendered is None:
+                return (
+                    f"[文档解析失败] {path}：内容无法解析成文本（不是可读的 OOXML 文档，"
+                    "或文件已损坏）。**这不等于「没有内容」**。"
+                )
+            return _render_text_content(rendered, path=path, lines=lines, auto=auto)
+
         # 文本/代码：解码走 `utils.text_decoding`（**两端唯一一份实现**）。
         #
         # 原先这里是 `raw.decode("utf-8")` 严格解码、失败就回「[无法展示的内容] …不是文本…」

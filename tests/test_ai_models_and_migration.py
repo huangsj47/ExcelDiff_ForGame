@@ -686,8 +686,11 @@ def test_run_to_dict_is_json_safe():
 # 原来「600 个文件、取样 200 个」的 39,283。
 _LARGE_VERSION_SUMMARY_CHARS = 87_055
 
-# 平台内置 SKILL.md（约 9,600 字符）加项目知识包，按 12,000 算常驻开销。
-# references 是按需索取的，索取时占用的是上下文那部分预算，所以不重复计入这里。
+# 平台内置提示词（`skills/version-diff-review/SKILL.md` 正文 + 强制声明）的字符数。
+# **它不进下面那条算式**：配置里那一栏是给用户内容的额度，内置那一段由平台加在上面
+# （`prompt.platform_prompt_chars` + `ai_analysis_service._engine_limits`）。这个常量
+# 只用来验「总长仍然在默认窗口的水位以内」。
+# 项目知识包与补充指令**要算**进用户额度：它们在系统提示词里，但仍然从用户那份里扣。
 _SYSTEM_PROMPT_CHARS = 12_000
 
 
@@ -782,9 +785,11 @@ def test_the_prompt_budget_can_honor_the_request_budget():
     from services.ai.context_tools import DEFAULT_TOOL_LIMITS
 
     per_item = max(DEFAULT_TOOL_LIMITS.values())
+    # **用户那部分**的开销：变更清单 + 历史结论基线 + 索取次数 × 单条上限。
+    # 系统提示词里的内置那一段不算（平台出）；项目知识包与补充指令算（用户出）——
+    # 出厂默认没有知识包，所以这里没有那一项，但它是这个算式的一部分。
     needed = (
-        _SYSTEM_PROMPT_CHARS
-        + _LARGE_VERSION_SUMMARY_CHARS
+        _LARGE_VERSION_SUMMARY_CHARS
         + DEFAULT_BASELINE_CHARS
         + DEFAULT_MAX_TOOL_REQUESTS * per_item
     )
@@ -793,9 +798,8 @@ def test_the_prompt_budget_can_honor_the_request_budget():
         "基线只是历史结论的索引，不该比本轮的变更摘要还大 —— 那会让模型盯着旧结论看"
     )
     assert DEFAULT_PROMPT_CHAR_BUDGET >= needed, (
-        f"提示词预算 {DEFAULT_PROMPT_CHAR_BUDGET:,} 装不下：系统提示词 "
-        f"{_SYSTEM_PROMPT_CHARS:,} + 变更摘要 {_LARGE_VERSION_SUMMARY_CHARS:,} + "
-        f"历史结论基线 {DEFAULT_BASELINE_CHARS:,} + "
+        f"用户预算 {DEFAULT_PROMPT_CHAR_BUDGET:,} 装不下：变更摘要 "
+        f"{_LARGE_VERSION_SUMMARY_CHARS:,} + 历史结论基线 {DEFAULT_BASELINE_CHARS:,} + "
         f"{DEFAULT_MAX_TOOL_REQUESTS} 次 × {per_item:,} = {needed:,}。"
         "要么调大预算，要么调小单条上限或索取次数"
     )
@@ -805,8 +809,12 @@ def test_the_prompt_budget_can_honor_the_request_budget():
     # （那个口子已经由 `effective_prompt_budget` 的水位压掉了），而是「再大也没有意义」。
     from services.ai.budget import DEFAULT_CONTEXT_TOKENS, context_watermark_chars
 
-    assert DEFAULT_PROMPT_CHAR_BUDGET <= context_watermark_chars(DEFAULT_CONTEXT_TOKENS), (
-        f"预算 {DEFAULT_PROMPT_CHAR_BUDGET:,} 超过了默认窗口的水位 —— 窗口问不到时"
+    # 水位压的是**整份提示词**（内置 + 用户），所以这里验的是两者之和。
+    assert (
+        DEFAULT_PROMPT_CHAR_BUDGET + _SYSTEM_PROMPT_CHARS
+        <= context_watermark_chars(DEFAULT_CONTEXT_TOKENS)
+    ), (
+        f"整份提示词 {DEFAULT_PROMPT_CHAR_BUDGET + _SYSTEM_PROMPT_CHARS:,} 超过了默认窗口的水位 —— 窗口问不到时"
         "（`DEFAULT_CONTEXT_TOKENS` = 1M）它本来就会被压回水位，写更大的数只是让人以为"
         "自己配得下。要真的更大，先确认端点声明的窗口确实够大。"
     )

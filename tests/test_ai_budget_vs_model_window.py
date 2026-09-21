@@ -302,7 +302,10 @@ def test_the_clamped_limits_are_what_actually_runs():
     """
     code = re.sub(r"#[^\n]*", "", _read("services/ai_analysis_service.py"))
 
-    assert "_apply_model_window(client, project_config" in code, "分析路径没有调用窗口压缩"
+    assert "_apply_model_window(" in code, "分析路径没有调用窗口压缩"
+    assert "client, project_config, _engine_limits(project_config" in code, (
+        "窗口压缩没有接在额度构造上（它必须压的就是那份要交给引擎的额度）"
+    )
     assert "limits=limits," in code, "压缩后的额度没有传给 run_analysis"
     assert "limits=_engine_limits(project_config)," not in code, (
         "仍然把未压缩的额度传给了引擎"
@@ -335,3 +338,59 @@ def test_no_model_name_appears_in_the_budget_layer(name):
     source = _read(name)
     for model in ("gpt-4", "claude-", "deepseek", "qwen", "glm-"):
         assert model not in source.lower(), f"{name} 里出现了模型名 {model!r}"
+
+
+# ==========================================================================
+# 配置里那一栏「提示词字符预算」算谁的内容
+# ==========================================================================
+
+
+def test_the_builtin_prompt_does_not_eat_the_users_budget():
+    """**内置提示词由平台出，加在用户额度之上。**
+
+    不这样切的话，用户改的是一个数、影响的是另一个数：他配 100k，实际能用的只有
+    100k 减去内置提示词那十几 k —— 而内置提示词的字数随平台版本变化，他在配置页上
+    完全看不出这件事。这一条锁的是「加回去」这个动作（`_engine_limits` 的
+    `platform_chars`）。
+    """
+    from services.ai_analysis_service import _engine_limits
+
+    plain = _engine_limits({"prompt_char_budget": 100_000})
+    with_builtin = _engine_limits({"prompt_char_budget": 100_000}, platform_chars=16_000)
+
+    assert plain.prompt_char_budget == 100_000
+    assert with_builtin.prompt_char_budget == 116_000
+    # 其余几项不受影响（这个参数只管预算那一栏）。
+    assert plain.max_rounds == with_builtin.max_rounds
+    assert plain.max_tool_requests == with_builtin.max_tool_requests
+
+
+def test_the_platform_chars_cover_the_builtin_sections_only():
+    """内置那一段**只**含平台自己的部分：项目知识包、补充指令、子 skill 索引都不算。
+
+    它们仍然从用户额度里扣 —— 那是用户自己要带的内容。混进去的后果是「项目知识包写得
+    越多，用户以为还剩的额度越少」，而真正吃额度的其实是系统提示词里那一段（组装侧照旧
+    把它算进 overhead），两处口径一对不上，用户就会以为平台算错了。
+    """
+    from services.ai.prompt import build_system_prompt, platform_prompt_chars
+    from tests.test_ai_prompt import _loaded
+
+    loaded = _loaded()
+    with_project = platform_prompt_chars(loaded)
+    without_project = platform_prompt_chars(_loaded(with_project=False))
+
+    assert with_project == without_project, "内置那一段的字数不该随项目知识包变化"
+    assert 0 < with_project < len(build_system_prompt(loaded)), (
+        "内置那一段应当是系统提示词的一部分（不是全部，也不是 0）"
+    )
+
+
+def test_a_missing_skill_loader_result_is_zero_not_an_exception():
+    """skill 加载失败时 `loaded` 是 `None` —— 那里取字数要回 0，不能抛。
+
+    加载失败本身不阻断分析（见 `_load_project_skills`），而算预算是每一条路径都会走的
+    一步：在这里抛异常等于把「知识包缺失」升级成「分析跑不起来」。
+    """
+    from services.ai.prompt import platform_prompt_chars
+
+    assert platform_prompt_chars(None) == 0

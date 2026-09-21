@@ -333,6 +333,34 @@ def render_context_items(items: Iterable[ContextItem]) -> str:
 # --------------------------------------------------------------------------
 
 
+def _platform_sections(loaded: LoadedSkills) -> list[str]:
+    """系统提示词里**平台内置**的那几段（与项目无关）。
+
+    ## 为什么要单独切出来
+
+    配置里那一栏「提示词字符预算」是给**用户内容**的：变更清单、取回的上下文、历史结论
+    基线、项目自己的知识包与补充指令。内置那一段由平台出，加在用户额度之上
+    （`ai_analysis_service._engine_limits`）。不切出来的话，一个只想给 100k 的项目会连带
+    被内置提示词（随版本变化的十几 k）吃掉一块上下文额度，而用户在配置页上完全看不出
+    这件事 —— 他改的是一个数、影响的是另一个数。
+
+    **项目那几段（知识包、补充指令、子 skill 索引）不在这里**：它们仍然从用户额度里扣，
+    那是用户自己要带的内容。
+    """
+    return [_PRIMACY_NOTICE, "# 角色与方法（强制）", loaded.platform_skill.text]
+
+
+def platform_prompt_chars(loaded: LoadedSkills) -> int:
+    """内置那几段一共多少字。
+
+    与 `build_system_prompt` 用**同一个** `_platform_sections`，所以两处不会分叉；
+    对没有载荷的调用（`loaded is None`）返回 0。
+    """
+    if loaded is None:
+        return 0
+    return len("\n\n".join(_platform_sections(loaded)))
+
+
 def build_system_prompt(
     loaded: LoadedSkills,
     *,
@@ -344,7 +372,7 @@ def build_system_prompt(
     `project_knowledge` 是随项目知识包分发的正文（`KNOWLEDGE.md` 的补充说明，可由
     配置追加）；`project_instructions` 是项目配置里那一栏补充指令。
     """
-    sections: list[str] = [_PRIMACY_NOTICE, "# 角色与方法（强制）", loaded.platform_skill.text]
+    sections: list[str] = _platform_sections(loaded)
 
     project_blocks: list[str] = []
     if loaded.project_manifest is not None:

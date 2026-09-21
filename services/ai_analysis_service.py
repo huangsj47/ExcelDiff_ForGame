@@ -123,6 +123,7 @@ from services.ai.scope_sampling import (  # noqa: F401 —— 任务服务与测
     has_weekly_changes,
     weekly_snapshot_digest,
 )
+from services.ai.prompt import platform_prompt_chars
 from services.ai.skill_loader import describe_load_error, load_skills
 from services.ai.subagent import plan_family, run_family_with_seed, subagent_mode_of
 from services.ai.trace_evidence import encode_evidence
@@ -393,7 +394,7 @@ def _load_project_skills(project_id: int) -> Tuple[object, str]:
 
 
 def _apply_model_window(
-    client: object, project_config: dict, limits: EngineLimits
+    client: object, project_config: dict, limits: EngineLimits, *, platform_chars: int = 0
 ) -> Tuple[EngineLimits, str]:
     """按模型窗口的水位压提示词预算。返回 `(额度, 说明)`。
 
@@ -405,7 +406,13 @@ def _apply_model_window(
     「只在按 1:1 算也超窗时才压」，而窗口问不到时它什么都不做 —— 于是一个把预算配到
     2M 字的项目会拿一份 2M 字符的提示词去撞模型，必然被拒，整次分析连结论一起作废。
 
-    说明为空表示没压（默认 560,000 字的预算低于「窗口问不到」时的水位 600,000 字）。
+    ## 水位是压**整份提示词**的，所以 `platform_chars` 要参与
+
+    进到 `limits.prompt_char_budget` 的那个数已经是「配置值 + 平台内置提示词」
+    （见调用处）。窗口管的是整份提示词的总长，所以先把总数压到水位，再把内置那一段
+    减掉、还给用户的部分 —— 否则内置提示词会被算两次：一次在水位里、一次在加法里。
+
+    说明为空表示没压（默认预算加内置那段之后仍低于「窗口问不到」时的水位）。
     """
     model = str(project_config.get("api_model") or "").strip()
     window: object = None
@@ -421,7 +428,10 @@ def _apply_model_window(
     budget, note = effective_prompt_budget(limits.prompt_char_budget, window)
     if not note:
         return limits, ""
-    return replace(limits, prompt_char_budget=budget), note
+    # 压完再减去内置那一段：**用户的额度不能被平台自己的提示词吃掉**。窗口小到连
+    # 内置提示词都装不下时落到 0 —— 那时组装侧还有条目下限兜着，而这一轮的说明已经
+    # 把「窗口太小」讲清楚了。
+    return replace(limits, prompt_char_budget=max(0, budget - platform_chars)), note
 
 
 def _configured_int(value: object, default: int) -> int:
@@ -440,8 +450,17 @@ def _configured_int(value: object, default: int) -> int:
     return int(value)
 
 
-def _engine_limits(project_config: dict) -> EngineLimits:
-    """项目配置 → 引擎额度。"""
+def _engine_limits(project_config: dict, *, platform_chars: int = 0) -> EngineLimits:
+    """项目配置 → 引擎额度。
+
+    `platform_chars` 是**平台内置提示词**的字符数（`prompt.platform_prompt_chars`）。
+    配置里那一栏是给**用户内容**的额度 —— 变更清单、取回的上下文、历史结论基线、以及
+    项目自己的知识包与补充指令；内置那一段由平台出，加在上面。少于这个数，一个只想
+    给 100k 的项目会连带被内置提示词吃掉十几 k 的上下文额度（而它并不知情）。
+
+    **项目自定义的 skill（知识包、补充指令）不走这个加法**：它们在系统提示词里，仍然
+    从用户额度里扣 —— 那是用户自己要带的内容。
+    """
     defaults = EngineLimits()
     requests = _configured_int(
         project_config.get("max_tool_requests"), defaults.max_tool_requests
@@ -457,7 +476,8 @@ def _engine_limits(project_config: dict) -> EngineLimits:
         # （取值上限 100），所以这个下限必须跟着**配置**走，只在两个默认值上成立是不够的：
         # 用户把索取上限调到 40 的那一刻，20 条的条数上限就会开始丢他的东西。
         max_items=max(defaults.max_items, requests),
-        prompt_char_budget=_configured_int(
+        prompt_char_budget=max(0, platform_chars)
+        + _configured_int(
             project_config.get("prompt_char_budget"), defaults.prompt_char_budget
         ),
     )
@@ -762,7 +782,15 @@ def _run_engine_and_persist(
         else from_weekly_payload(payload, readable_references=readable, prefixes=prefixes)
     )
 
-    limits, budget_note = _apply_model_window(client, project_config, _engine_limits(project_config))
+    # 配置里那个「提示词字符预算」是**用户内容**的额度，不含平台内置提示词（见
+    # `prompt.platform_prompt_chars` 的说明）。这里把内置那一段加回去，让引擎按
+    # 「整份提示词」去组装与压缩；项目知识包、补充指令不在这个加法里 —— 它们在系统
+    # 提示词里，仍然从用户的额度里扣。
+    platform_chars = platform_prompt_chars(loaded)
+    limits, budget_note = _apply_model_window(
+        client, project_config, _engine_limits(project_config, platform_chars=platform_chars),
+        platform_chars=platform_chars,
+    )
     if budget_note:
         log_print(f"⚠️ AI 分析：{budget_note}", "AI", force=True)
     # 这一份参数**两条路共用**（单代理 / 子代理），键名就是 `engine.run_analysis` 的形参名。

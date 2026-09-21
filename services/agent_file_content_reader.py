@@ -160,14 +160,28 @@ def read_file_content_for_agent(payload: dict) -> dict:
                 ),
             }
 
-        # 解码走 `utils.text_decoding`（**两端唯一一份实现**）。
-        #
-        # 修前这里是自己写的 `raw.decode('utf-8')` + `errors='replace'` 兜底，而平台本地
-        # 那条路是严格 `raw.decode("utf-8")`、失败回一句「[无法展示的内容] …不是文本…」。
-        # 同一串字节于是有两份不同的文本：GBK 的 lua（本仓库最常见的形态之一）在 Agent 侧
-        # 是一堆带替换符的乱码、在平台侧干脆被判成「读不到」—— 而模型的结论正是从这段正文
-        # 里写出来的，行号与取值都会跟着错。
-        text = text_or_notice(raw)
+        # `.docx` 也要分流（2026-09-21）。它是 ZIP，`text_or_notice` 会判成二进制 → 回一句
+        # 「[无法展示的内容]」——而访谈记录、需求文档这类东西正是 docx，模型看得到文件名、
+        # 看不到一个字。渲染函数与平台本地那条路**同一份实现**（`services/ai/docx_view`），
+        # 输出走下面共用的 `slice_lines`，所以两端给出的行号与抬头也一致。
+        from services.ai.docx_view import is_docx, render_docx_text
+
+        if is_docx(file_path):
+            rendered = render_docx_text(raw, path=file_path)
+            if rendered is None:
+                raise RuntimeError(
+                    f"文档内容无法解析（{file_path} 不是可读的 OOXML 文档，或文件已损坏）"
+                )
+            text = rendered
+        else:
+            # 解码走 `utils.text_decoding`（**两端唯一一份实现**）。
+            #
+            # 修前这里是自己写的 `raw.decode('utf-8')` + `errors='replace'` 兜底，而平台本地
+            # 那条路是严格 `raw.decode("utf-8")`、失败回一句「[无法展示的内容] …不是文本…」。
+            # 同一串字节于是有两份不同的文本：GBK 的 lua（本仓库最常见的形态之一）在 Agent 侧
+            # 是一堆带替换符的乱码、在平台侧干脆被判成「读不到」—— 而模型的结论正是从这段正文
+            # 里写出来的，行号与取值都会跟着错。
+            text = text_or_notice(raw)
         if text is None:
             # 真正的二进制（魔数 / NUL）：回**同一句话**，并用 `kind: "binary"` 告诉平台侧
             # 「不要再按行号包一层」（见 `platform_provider._render_agent_file_content`）。

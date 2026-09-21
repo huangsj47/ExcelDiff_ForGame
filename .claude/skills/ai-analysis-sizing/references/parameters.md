@@ -31,14 +31,22 @@
 
 ## 四条耦合
 
-### 1. 预算 ≥ 系统 + 基线 + 清单 + 索取次数 × 单条上限
+### 1. 用户预算 ≥ 基线 + 清单 + 知识包 + 索取次数 × 单条上限
 
 ```
-prompt_char_budget ≥ 12,000 + 6,000 + 变更清单字数 + max_tool_requests × 11,000
+配置值 ≥ 6,000（历史结论基线）+ 变更清单字数
+       + 项目知识包 + 项目补充指令
+       + max_tool_requests × 11,000
 ```
 
-守它的测试：`tests/test_ai_models_and_migration.py::test_the_prompt_budget_can_honor_the_request_budget`。
-它同时断言「基线不得大于变更清单」与「预算不得超过默认窗口的水位」—— **五个数字是一组**。
+**平台内置提示词不在右边**：它由平台加在左边之上
+（`services/ai/prompt.py: platform_prompt_chars` → `ai_analysis_service._engine_limits`
+的 `platform_chars` 参数）。**项目知识包与补充指令在右边**：它们在系统提示词里，但仍然是
+用户自己要带的内容。
+
+守它的测试：`tests/test_ai_models_and_migration.py::test_the_prompt_budget_can_honor_the_request_budget`
+（还断言「内置 + 用户预算 ≤ 默认窗口的水位」）与
+`tests/test_ai_budget_vs_model_window.py::test_the_builtin_prompt_does_not_eat_the_users_budget`。
 
 ### 2. **上下文**条数上限跟着索取次数走（别与结论条数混了）
 
@@ -56,8 +64,10 @@ prompt_char_budget ≥ 12,000 + 6,000 + 变更清单字数 + max_tool_requests �
 端点声明了窗口就用真的，问不到就按 1M token 的 60% = 600,000 字这个**口径值**处理，
 并在说明里写明「按默认值处理」。
 
-**推论：预算填得比窗口水位大，是无效配置。** 默认的 560,000 字刚好低于 600,000，
-所以「问不到窗口」的项目行为不变。
+**水位压的是「平台内置 + 配置值」这个和**，压完再把内置那段还给平台、剩下的才是用户的
+（`_apply_model_window` 的 `platform_chars`）。所以**配置值填得比窗口水位大是无效配置**：
+窗口 200k 时用户那部分最终只有约 104,000 字。默认 560,000 + 内置 16,000 = 576,000 仍低于
+600,000，所以「问不到窗口」的项目行为不变。
 
 ### 4. 分片额度不按分片平分
 
