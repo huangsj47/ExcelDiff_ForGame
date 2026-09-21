@@ -260,7 +260,19 @@ def execute_task_inline_for_agent(task_type, payload):
         config_id = payload.get('config_id') or payload.get('commit_id')
         if not config_id:
             raise ValueError("weekly_ai_analysis 任务缺少 config_id")
-        result = worker.run_weekly_analysis_background(int(config_id))
+        result = worker.run_weekly_analysis_background(
+            int(config_id),
+            # 与本地 handler（`task_worker_task_handlers` 的 weekly_ai_analysis 分支）
+            # 同一口径：载荷里带 `trigger_source` 就照传，没带就是调度器排的。
+            # 键确实能到这一行：`create_weekly_ai_analysis_task` 把它放进
+            # `payload_extra`（`task_worker_queue_service.py`），随 AgentTask 下发，
+            # Agent 原样回传（`agent/executor.py` 调本函数时用的就是那份载荷）。
+            #
+            # 不传的后果是**账会撒谎**：「等同步跑完就自动开始」转交出来的那一次是
+            # **用户点出来的**（manual），漏传就被记成 `scheduled`，用量面板显示
+            # 「定时」—— 用户明明点过，面板上却写着系统自己跑的。
+            trigger_source=payload.get("trigger_source") or "scheduled",
+        )
         return {"message": "weekly_ai_analysis completed", "result": result}
 
     raise ValueError(f"不支持的任务类型: {normalized_type}")
