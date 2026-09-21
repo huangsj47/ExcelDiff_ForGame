@@ -117,11 +117,31 @@
                          : ('这是 ' + when + ' 的结论（历史）');
     }
 
-    /** 状态徽章的颜色档：成功绿、失败红、其余中性。 */
+    /** 状态徽章的颜色档：成功绿、失败红、**降级黄**、其余中性。
+     *
+     * `degraded` 要单独一档：它不是成功（流程没走完），也不是失败（报告是真的）。
+     * 与成功同色会让「这一份是降级出来的」在列表里看不出来 —— 而用户重看历史时最需要
+     * 知道的就是这件事。
+     */
     function statusTone(status) {
         if (status === 'succeeded') return 'success';
+        if (status === 'degraded') return 'warning';
         if (status === 'failed') return 'danger';
         return 'secondary';
+    }
+
+    /**
+     * 这一次运行**有没有结论**。与 `services/ai/run_cache_source.py::CONCLUDED_STATUSES`
+     * 同一份口径：`degraded` 是「有结论但浅」（那份报告正文是真的），与 `succeeded`
+     * 一样要渲染出来；`failed` / `running` / `pending` 才是没有结论。
+     *
+     * **不能写成「不是 succeeded 就算没有结论」**：`DEGRADE_MARKDOWN` 那种降级
+     * （模型没按协议给 JSON）的 `result` 就是 `null`，而它的 `response_text` 是一份
+     * 完整的 markdown 报告 —— 按旧判据会被显示成「这一次还没有结论。」，与列表里
+     * 那一行摘要（正是从 `response_text` 里取的）自相矛盾。
+     */
+    function hasConclusion(status) {
+        return status === 'succeeded' || status === 'degraded';
     }
 
     /** 一行运行的「次要信息」：范围 / 触发 / 焦点 / 异常条数 —— 空的不摆。 */
@@ -240,16 +260,23 @@
         report.className = 'ai-analysis-output';
         report.id = 'aiHistoryReportBody';
         var payload = state.selectedReport;
-        if (payload && payload.result === null && payload.status !== 'succeeded') {
+        if (payload && payload.result === null && !hasConclusion(payload.status)) {
             // 失败 / 进行中：如实说，不留一片空白（也不假装它是一份报告）。
             report.textContent = payload.status === 'failed'
                 ? (NOTE.failed_mark + (payload.error_message ? '原因：' + payload.error_message : ''))
                 : '这一次还没有结论。';
         } else if (payload && payload.response_text) {
+            // 正文 + 覆盖段（平台补充）+ 降级提示：与三份抽屉走**同一个**渲染入口，
+            // 否则「刚跑完看到的」与「历次结论里点开的」会各有一套字。
+            // 变量名**不能叫 body** —— 这个函数上面已经把 `body` 用作面板元素了。
+            var reportBody = payload.response_text;
+            if (global.AiContextNotice && global.AiContextNotice.withContextNotice) {
+                reportBody = global.AiContextNotice.withContextNotice(reportBody, payload.result);
+            }
             if (global.AiReportMarkdown && global.AiReportMarkdown.render) {
-                report.innerHTML = global.AiReportMarkdown.render(payload.response_text);
+                report.innerHTML = global.AiReportMarkdown.render(reportBody);
             } else {
-                report.textContent = payload.response_text;
+                report.textContent = reportBody;
             }
         } else {
             report.textContent = NOTE.no_body;
@@ -432,6 +459,7 @@
         listNote: listNote,
         markText: markText,
         statusTone: statusTone,
+        hasConclusion: hasConclusion,
         rowMeta: rowMeta,
         track: track,
         open: open,

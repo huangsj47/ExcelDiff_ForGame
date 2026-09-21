@@ -36,6 +36,21 @@ def _json_dumps(payload: dict) -> str:
 
 ANALYSIS_CACHE_DAYS = int(os.environ.get("AI_ANALYSIS_CACHE_DAYS", "90"))
 
+# 「这次**交付**是有结论的」那两种形态 —— 读侧共用的唯一一份口径。
+#
+# 为什么单独一个常量：`succeeded` 与 `degraded` 必须在**每一条**读路径上同进同出
+# （`/latest`、缓存回放、基线、历次结论、导出、用量面板），而这六处的判据分别写在五个
+# 文件里。每个地方各写一遍 `("succeeded", "degraded")`，就是「同一句话在多处各自演化」
+# —— 加第四种状态时必然漏掉一处，而漏掉的症状各不相同（转圈 / 不再回放 / 假 stale /
+# 基线清空 / 历史消失 / 导出倒退），没有一条会自己报错。
+#
+# 它**不回答**「模型读全了没有」：那件事看引擎状态（`outcome.status` /
+# `result["status"]`），`run.status` 只回答交付形态。降级归降级，能不能看是另一回事。
+#
+# 放在这里（而不是 `models/`）：本模块是「这份结论还能不能复用」的判据所在，也就是
+# 「有结论」这件事被问得最严格的地方 —— 这个常量正是从那句判据里长出来的。
+CONCLUDED_STATUSES = ("succeeded", "degraded")
+
 def _analysis_cache_cutoff() -> datetime:
     return _utcnow() - timedelta(days=ANALYSIS_CACHE_DAYS)
 
@@ -51,10 +66,22 @@ def _is_run_fresh(run: Optional[AiAnalysisRun], *, expected: Optional[dict] = No
     还会被 `stream_*` 当缓存**直接回放**：用户再点一次分析，拿到的是上次的失败，
     而不是重新跑。读侧必须自己判 status，不能指望写入侧不写。
     （`_previous_run()` 一直只取 `status == "succeeded"`，说明这是本来的设计意图。）
+
+    ## `degraded` 也算「现成的结论」（这里原来只认 succeeded）
+
+    `run.status` 回答的是「这次**交付**是什么形态」：`degraded` = **有结论但浅**
+    （有报告正文、有结构化结论形态），**与 succeeded 同等对待**；`failed` 才是「没有
+    结论」。写入侧已经原生区分了这三态，而这里原先是 `run.status != "succeeded"` ——
+    于是「这份结论还能不能直接复用」对降级运行一律为假：`/latest` 第 1 步失效、
+    `stream_*` 不再回放，**用户再点一次分析就重新花一次钱**。
+
+    「模型读全了没有」在这里判不出来，也不该在这里判 —— 那要看引擎状态
+    （`outcome.status` / `result["status"]`）。降级归降级，复用归复用。
     """
     if not run:
         return False
-    if run.status != "succeeded":
+    # 有结论的两种交付形态。`running` / `pending` / `failed` 一律不是「现成的结论」。
+    if run.status not in CONCLUDED_STATUSES:
         return False
     if not (run.response_text or run.response_payload):
         return False

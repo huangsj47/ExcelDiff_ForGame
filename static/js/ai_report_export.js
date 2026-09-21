@@ -13,7 +13,8 @@
  * ---------------------------------------------------------------------------
  * 1. **没有可导出的结论时把链接藏起来**，不显示一个点了没反应的按钮（与「明细」按钮
  *    同一条口径：拿不到运行号时它是隐藏的，那不是「没采集」，是按钮没了）。
- *    「可导出」= 这一次跑成了**而且**有报告正文 —— 判定与
+ *    「可导出」= 这一次**跑完了、有结论**（succeeded 或 degraded —— 降级是「有结论但
+ *    浅」）**而且**有报告正文 —— 判定与
  *    `services/ai/report_document.py::is_exportable` 一致（那边是最终裁决，这边只管
  *    界面别给一个必然 409 的链接）。
  * 2. **不给 `<a>` 加 `download` 属性。** 响应带 `Content-Disposition: attachment` 与
@@ -27,7 +28,12 @@
     'use strict';
 
     // 与 `services/ai/report_document.py::EXPORTABLE_STATUSES` 对应。
-    var EXPORTABLE = {succeeded: true};
+    //
+    // `degraded` 也是「跑完了、有结论」（见 `services/ai/run_cache_source.py` 的
+    // `CONCLUDED_STATUSES`）：它有报告正文，服务端那一侧就放行。这里漏掉它的后果是
+    // **倒退** —— 这些运行在 `status` 能原生表示 degraded 之前存的是 succeeded，
+    // 本来就给得出这个链接，改完反而没了。
+    var EXPORTABLE = {succeeded: true, degraded: true};
 
     var linkId = null;
     // 当前可导出的运行号；null = 没有可导出的结论（链接隐藏）。

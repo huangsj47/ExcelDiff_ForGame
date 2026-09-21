@@ -21,6 +21,8 @@
    一个叫「历次结论」的列表里，用户会点开一条看不了的东西。但**要说一声它存在**
    （`in_progress`）—— 这个弹层最常被打开的时刻就是「正在跑、想看看上一次」，那时列表
    可能是空的，界面只说「还没跑过分析」就是一句假话。
+   「有结论」是 `run_cache_source.CONCLUDED_STATUSES`（succeeded **与 degraded**）：
+   降级那次的报告正文是真的，而且它在地化为原生 `degraded` 之前就一直在列表里。
 
 ## 与 `services/ai_analysis_service.py` 的关系
 
@@ -43,6 +45,7 @@ from sqlalchemy import and_, func, or_
 from models import db
 from models.ai_analysis import STALE_RUNNING_SECONDS, AiAnalysisRun
 from services.ai import report_document
+from services.ai.run_cache_source import CONCLUDED_STATUSES
 from services.ai_analysis_service import (
     ANALYSIS_CACHE_DAYS,
     _analysis_cache_cutoff,
@@ -206,8 +209,12 @@ def list_target_runs(
         AiAnalysisRun.created_at >= cutoff,
         # 中间态不进这个列表（见模块 docstring 第 3 条）——**僵尸 running 例外**：
         # 它按 `effective_status` 就是一次失败，用户要能在「为什么失败」那一档里翻到它。
+        #
+        # `degraded` 与 `succeeded` 一样是**有结论**（见 `run_cache_source.CONCLUDED_STATUSES`）：
+        # 它有报告正文，用户要能在「历次结论」里翻到它 —— 漏掉它这条运行就从列表上整条
+        # 消失，而它在地化之前是存成 succeeded 的，也就是**本来就在列表里**。
         or_(
-            AiAnalysisRun.status.in_(("succeeded", "failed")),
+            AiAnalysisRun.status.in_(CONCLUDED_STATUSES + ("failed",)),
             zombie,
         ),
     )

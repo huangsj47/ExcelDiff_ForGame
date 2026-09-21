@@ -33,6 +33,7 @@ from services.ai.baseline import (
     suppressed_fingerprints,
 )
 from services.ai.change_set import ChangeSet
+from services.ai.run_cache_source import CONCLUDED_STATUSES
 
 
 def previous_run(target_type: str, target_key: Optional[str]) -> Optional[AiAnalysisRun]:
@@ -50,13 +51,25 @@ def previous_run(target_type: str, target_key: Optional[str]) -> Optional[AiAnal
     解释了为什么不能并）：被跳过的那些运行什么结论都没留下，退到上一条完整的
     「问题全集」正是本来该用的那份。
 
+    ## status 那一半：`degraded` **也是**「跑完了、有结论」
+
+    这一条原来写的是 `.filter(status == "succeeded")`。写入侧把 `status` 改成原生区分
+    succeeded / degraded / failed 之后，它把**所有降级运行**挡在基线之外 —— 而
+    `conclusion_structured` 那一半正好相反：有结构化 payload 的降级被写入侧判成「有
+    结论」（见 `tests/test_ai_baseline_needs_structured_conclusion.py` 的 docstring：
+    「有 payload 的降级**应当**能当基线」）。两边自相矛盾的后果是上一批已知问题全部
+    被当新发现重报，而基线看上去只是「上上次那批」——完全看不出发生过什么。
+
+    「跑完了、有结论」= `CONCLUDED_STATUSES`（succeeded / degraded），与读侧其余五处
+    同一份口径；「这次是不是浅的」由 `conclusion_structured` 单独判，两把尺子分开。
+
     跳过了就更要说 —— 那句说明由 `baseline_digest` 加在摘要里。
     """
     if not target_key:
         return None
     return (
         AiAnalysisRun.query.filter_by(target_type=target_type, target_key=target_key)
-        .filter(AiAnalysisRun.status == "succeeded")
+        .filter(AiAnalysisRun.status.in_(CONCLUDED_STATUSES))
         # NULL（失败/未完成，以及加列之前的历史行）一律不算：拿不准就不当基线。
         .filter(AiAnalysisRun.conclusion_structured.is_(True))
         .order_by(AiAnalysisRun.created_at.desc())
@@ -72,13 +85,17 @@ def skipped_unstructured_runs(
     只用于在基线上如实说一句「中间有一次分析没给出可比对的结论」。没有它的话，
     那次降级在这条链路上是完全静默的：基线看上去就是「上上次那批」，用户不知道
     中间那次白跑了。
+
+    （status 这一半与 `previous_run` 同一份口径：**有结论的两种形态**都要数进来，
+    否则「只有 markdown 的那次降级」被跳过时这句话永远不出现 —— 而那正是最需要
+    说一句的情形：它是降级里唯一一种真的没给出结论的。）
     """
     if not target_key or baseline is None:
         return 0
     since = baseline.finished_at or baseline.created_at
     query = (
         AiAnalysisRun.query.filter_by(target_type=target_type, target_key=target_key)
-        .filter(AiAnalysisRun.status == "succeeded")
+        .filter(AiAnalysisRun.status.in_(CONCLUDED_STATUSES))
         .filter(AiAnalysisRun.conclusion_structured.is_(False))
     )
     if since is not None:

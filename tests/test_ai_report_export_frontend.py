@@ -85,6 +85,7 @@ var OP = {
     initCommit: function () { api.init({ linkId: COMMIT_LINK }); },
     initWeekly: function () { api.init({ linkId: WEEKLY_LINK }); },
     settled: function (id) { api.track({ runId: id, status: 'succeeded' }); },
+    degraded: function (id) { api.track({ runId: id, status: 'degraded' }); },
     failed: function (id) { api.track({ runId: id, status: 'failed' }); },
     running: function (id) { api.track({ runId: id, status: 'running' }); },
     none: function () { api.track({ runId: null }); },
@@ -169,6 +170,10 @@ def run() -> dict:
             {"name": "没有状态", "ops": ["initCommit", "noStatus:41"]},
             # 10. 失败之后再跑成 → 又能导了。
             {"name": "失败后重跑成", "ops": ["initCommit", "failed:42", "settled:43"]},
+            # 11. 降级那次跑完 → 链接**照常给**（它有报告正文，服务端也放行）。
+            {"name": "降级", "ops": ["initCommit", "degraded:41"]},
+            # 12. 降级之后再失败 → 链接收起（降级能导不等于什么都能导）。
+            {"name": "降级后失败", "ops": ["initCommit", "degraded:41", "failed:42"]},
         ],
         [
             {"name": "成功", "status": "succeeded", "runId": 9},
@@ -248,6 +253,23 @@ def test_it_comes_back_after_a_later_run_succeeds(run):
     assert last["href"].endswith("/runs/43/report.md")
 
 
+def test_a_degraded_run_still_gets_the_link(run):
+    """降级是「有结论但浅」—— 报告正文是真的，链接照给，而且指向**那一次**。"""
+    last = _by_name(run)["降级"]["snaps"][-1]
+
+    assert last["hidden"] is False
+    assert last["href"] == "/ai-analysis/runs/41/report.md"
+    assert last["runId"] == 41
+
+
+def test_a_degraded_run_followed_by_a_failure_hides_the_link(run):
+    """反向对照：降级能导，不等于**失败**也能导。"""
+    last = _by_name(run)["降级后失败"]["snaps"][-1]
+
+    assert last["hidden"] is True
+    assert last["href"] is None
+
+
 # --------------------------------------------------------------------------
 #  两份模板的那个 id
 # --------------------------------------------------------------------------
@@ -265,14 +287,22 @@ def test_the_weekly_link_works_the_same_way(run):
 # --------------------------------------------------------------------------
 #  纯函数：谁算「有结论」
 # --------------------------------------------------------------------------
-def test_only_a_succeeded_run_is_exportable(run):
+def test_a_degraded_run_is_exportable_but_a_failed_one_is_not(run):
     """**这是界面这一层的判定**，最终裁决在服务端（`report_document.is_exportable`）——
     它还要看有没有报告正文，而那是界面拿不到的信息（只有 `/latest` 里的 `status`）。
-    两边只要有一边说不，就不会给一个 409 的链接。"""
+    两边只要有一边说不，就不会给一个 409 的链接。
+
+    **降级是可导出的**：它跑完了、有报告正文，只是浅。这些运行在 `run.status` 能原生
+    表示 `degraded` 之前存的就是 `succeeded`，本来就给得出这个链接 —— 排除它们不是
+    「更严格」，是把一份真的报告藏起来（服务端那一侧也已经放行）。
+    没有结论的那些（失败 / 进行中 / 排队中 / 状态缺失 / 空）照旧不给。
+    """
     pure = {item["name"]: item for item in run["pure"]}
 
     assert pure["成功"]["canExport"] is True
-    for name in ("失败", "进行中", "排队中", "降级", "空", "缺"):
+    assert pure["降级"]["canExport"] is True, "降级那次的报告有正文，服务端也放行"
+    # 反向对照：**失败**没有结论，绝不许给一个点下去必然 409 的链接。
+    for name in ("失败", "进行中", "排队中", "空", "缺"):
         assert pure[name]["canExport"] is False, f"{name} 不该被当成可导出"
 
 
