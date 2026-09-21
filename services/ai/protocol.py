@@ -558,6 +558,32 @@ def ground_payload(payload: AnalysisPayload, scope: AnalysisScope) -> AnalysisPa
     )
 
 
+# 控制字符（`\n`、`\r`、`\t` 等 0x00-0x1f，以及 DEL）。**不含空格**：空格是正常路径里
+# 会出现的字符，把它算进去会让「文件名里有空格」的请求整批被拒。
+_CONTROL_CHARS = frozenset(chr(code) for code in range(0x20)) | {"\x7f"}
+
+# 回显给模型/日志的字段长度上限。字段来自模型，可以任意长 —— 不做上限的话，一条畸形的
+# 超长路径会把「上一轮被拒」那句话本身撑爆（那句话要进提示词）。
+_ECHO_MAX_CHARS = 200
+
+
+def _has_control_chars(value) -> bool:
+    """字段里是否出现控制字符（含换行）。"""
+    return any(char in _CONTROL_CHARS for char in str(value or ""))
+
+
+def _safe_repr(value) -> str:
+    """把可能有害的字段转义成**只含可见字符**的一段文本，用于记账与回显。
+
+    用 `repr` 而不是原值：换行会变成两个可见字符 `\\n`，于是它进了提示词也只是「路径里
+    有个奇怪的转义」，而不是一行新的指令。
+    """
+    text = repr(str(value or ""))
+    if len(text) <= _ECHO_MAX_CHARS:
+        return text
+    return text[: _ECHO_MAX_CHARS - 1] + "…"
+
+
 def sanitize_requests(
     requests: Iterable[ContextRequest], scope: AnalysisScope
 ) -> tuple[tuple[ContextRequest, ...], tuple[DroppedItem, ...]]:
@@ -566,6 +592,16 @@ def sanitize_requests(
     这是「模型不能诱导服务端读任意文件」的落点。四重校验：类型在集合内、需要的字段
     齐全、commit 能解析到本批次、path 属于该 commit 改动过的文件。任一不满足就丢弃
     （不报错——模型偶尔写错一个字段不该作废整轮），并记账。
+
+    ## 另加一道：字段里带控制字符的请求按畸形丢掉
+
+    请求字段（`commit` / `path` / `name` / `query`）会被**原样拼进下一轮的提示词**：平台
+    用它们写一句「你上一轮这些索取没有被执行：<detail>（<reason>）」（`engine._rejected_note`），
+    那句话是**平台自己写的话**，不在任何数据封套里（封套见 `prompt._wrap_untrusted`）。
+    一个带换行的路径因此能在提示词里伪造出一行新指令，而且不经过数据封套那条路。
+
+    正常的请求用不到控制字符（`normalize_path` 本来就会 strip 掉首尾空白），所以判据取
+    「出现即畸形」，理由用 `repr` 转义后记账 —— 不把原样的控制字符回显出去。
     """
     allowed: list[ContextRequest] = []
     dropped: list[DroppedItem] = []
@@ -575,6 +611,25 @@ def sanitize_requests(
         request_type = str(request.type or "").strip()
         if request_type not in REQUEST_TYPES:
             dropped.append(DroppedItem("request", index, "type 不在白名单内", request_type))
+            continue
+
+        unsafe = next(
+            (
+                value
+                for value in (request.commit, request.path, request.name, request.query)
+                if _has_control_chars(value)
+            ),
+            "",
+        )
+        if unsafe:
+            dropped.append(
+                DroppedItem(
+                    "request",
+                    index,
+                    "字段里含控制字符（换行等），按畸形请求丢弃",
+                    _safe_repr(unsafe),
+                )
+            )
             continue
 
         if request_type == "read_reference":
