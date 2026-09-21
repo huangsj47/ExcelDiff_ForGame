@@ -126,6 +126,20 @@ def summarize_executed(items: Any, *, limit: int = TRACE_LIST_MAX_ITEMS) -> list
     `failed` 与 `empty` 必须分开：前者是「取不到」（有原因可说），后者是工具明确回了一句
     「确实没有内容」。把两者合并，等于把「没有证据」写成「这里没问题」—— 那正是本模块
     这一段要防的事。
+
+    ## `truncated` 的口径是**交付**，与汇总计数是同一个（不是两种算法）
+
+    这里写的是 `item.meta["truncated"]`：**这**一条交给模型时是不是截断的正文。跨成员共享
+    缓存命中的条目给出去的就是那份截断过的原件（`context_tools` 模块 docstring 第 6 条），
+    所以它也在这里算一条 —— 那正是该条分支记账侧原先漏掉的一笔，症状是
+    `Σ details[].truncated`（25）比 `dropped_json.truncated`（18）多。
+
+    两边现在读的是同一份事实，等式（各自求和后）必须成立：
+
+        Σ_轮 dropped_json.truncated == Σ_轮 Σ_details details[].truncated
+
+    这条等式是 `tests/test_ai_truncation_ledger.py` 逐字锁住的。**不要把这里的 `truncated`
+    去掉去凑相等** —— 那会把「这一家看到的内容是残缺的」从账上抹掉。
     """
     out = []
     for item in _head(items, limit):
@@ -183,6 +197,8 @@ def encode_evidence(record: Any) -> dict:
         }),
         "dropped_json": _dump({
             "refused_by_budget": int(getattr(record, "refused_by_budget", 0) or 0),
+            # 与 `executed_json.details[].truncated` **是同一份口径**（交付，含跨成员复用
+            # 同一条被截断的正文）：两个数各自求和后必须相等，见 `summarize_executed`。
             "truncated": int(getattr(record, "truncated", 0) or 0),
             "details": summarize_dropped(getattr(record, "dropped", ())),
         }),

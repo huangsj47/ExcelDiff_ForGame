@@ -64,6 +64,33 @@ S1 为了查耦合读了表 A 的 diff，S2 也要读同一份 —— 有了它�
 
 所以共享命中时给的是 `ContextItem` 原件（它是 frozen 的，N 个成员共用一份没有风险），
 同时把这一条**也写进本成员的本地缓存** —— 于是同一个成员再要第二次时，才退化成指针。
+
+### 6. 截断账的唯一口径是「交付」：谁拿到的是截断正文，就算谁一条
+
+第 5 条那条分支给出去的是**已经截断过**的正文（原件上的 `truncated` 是真值），所以它
+**也要记一笔截断** —— 记的是「这一家拿到的内容是残缺的」，与 `produced_chars` 在那条
+分支上记全文长度是同一个道理（那一条早就承认「这次真的把正文交给了模型」）。
+
+这一笔原先漏了（记账只在真正执行的那条路上做），后果是**两本账对不上**：同一份被截断的
+正文交给 N 个成员时，逐条明细里出现 N 次（`trace_evidence.summarize_executed` 读的就是
+条目上的 `truncated`），而汇总计数只记 1 次。线上实测 run 13：逐 trace 的
+`dropped_json.truncated` 求和 18、明细求和 25（run 12 是 18 : 26，run 11 是 17 : 23）。
+
+口径选定「交付」而不是「本次执行」：**这份账是给用户看「哪些取证被截断了」的** —— B 拿到
+的正文确实是截断的，它据此写下的结论同样有覆盖缺口，少记就等于把 B 那一份缺口藏起来。
+「把明细里的 truncated 抹掉」也能让两数相等，但那是拿掉真信息去凑数，不做。于是三本账
+（`ToolBatch.truncated`、`stats[kind]["truncated"]`、逐条明细）按同一份求和后必须相等：
+
+    Σ_轮 batch.truncated
+      == Σ_kind tool_stats[kind].truncated
+      == Σ_轮 Σ_details details[].truncated   （一轮条数 ≤ TRACE_LIST_MAX_ITEMS 时）
+      == Σ_轮 len([i for i in batch.items if i.meta.get("truncated")])
+
+**读这份账的人要知道**：同一条正文被 k 个成员各拿到一次就记 k 条。所以这个数说的是
+「有多少次交付拿到的是残缺内容」（＝明细的行数），不是「有几份不同的取证被截断了」。
+
+判据落在 `meta["truncated"]` 上，**不是**「命中了共享缓存」上：共享缓存里也有失败条目
+（`_shared_get` 的 docstring），它给出去的是「取不到」的说明，与截断是两件事。
 """
 
 from __future__ import annotations
@@ -171,7 +198,9 @@ class ToolBatch:
     # 这一条是从 `execute` 的拒绝分支里直接记下来的，不靠回头去 `dropped` 里按文案
     # 匹配（那种判据改一个字就静默失效）。
     refused_items: tuple[str, ...] = ()
-    # 截断过的条数。
+    # 截断过的条数。口径是**交付**：谁拿到的是截断正文就算谁一条（含跨成员复用同一条，
+    # 见模块 docstring 第 6 条）—— 它必须恒等于 `batch.items` 里带 `truncated` 的条数，
+    # 也就是 `trace_evidence.summarize_executed` 写进 `executed_json.details` 的那个数。
     truncated: int = 0
 
     @property
@@ -185,7 +214,7 @@ _STAT_COUNTERS = (
     "executions",         # 真正执行取数的次数（不含命中本地缓存）
     "cache_hits",         # 工具结果在**本次分析内**的内存缓存命中（不是 prompt cache）
     "failed",             # 执行失败、内容不可用
-    "truncated",          # 交给模型前被截断
+    "truncated",          # 交给模型时是截断正文的条数（含跨成员复用同一条，见模块 docstring 第 6 条）
     "refused_by_budget",  # 因超出索取上限而未执行
     "source_chars",       # 工具取回的原始字符数
     "produced_chars",     # 实际交给模型的字符数（截断后）
@@ -519,6 +548,14 @@ class ContextTools:
                 self._bump(request.type, "cache_hits")
                 self._bump(request.type, "source_chars", _meta_chars(shared))
                 self._bump(request.type, "produced_chars", len(shared.text))
+                # 复用的若是**一条已经截断过的正文**，这一笔截断也要记（模块 docstring
+                # 第 6 条）：明细侧本来就这么记，计数侧原先只在真正执行的那条路上记 ——
+                # 于是同一条正文在明细里出现 N 次、在计数里只记 1 次，两本账对不上
+                # （线上实测 25 : 18）。判据落在 `truncated` 上而不是「命中了共享缓存」上：
+                # 共享缓存里也有**失败**条目，它给出去的是「取不到」的说明，不是截断正文。
+                if shared.meta.get("truncated"):
+                    truncated += 1
+                    self._bump(request.type, "truncated")
                 # 也存进本地：同一个成员再要第三次时，它的上文里确实已经有这一节了，
                 # 那时才轮到指针。
                 self._cache[key] = shared
