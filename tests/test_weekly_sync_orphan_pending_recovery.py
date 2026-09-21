@@ -291,6 +291,12 @@ class _DedupQuery:
 
     这样「先新建、再调度一次」这一串才是真的走完了：第二次调用命中的是**第一次创建
     的那一行**（库里的 pending），而不是凭空又造一条。
+
+    `filter` / `order_by` 是**照单全收的透传**：真实查询是
+    `filter(task_type == …, commit_id == …, status.in_([...])).order_by(id.desc()).first()`，
+    而这个桩不解释判据 —— 「status 判据到底选没选中该选的那一行」由真库用例
+    （`tests/test_weekly_sync_dedup_blocks_starvation.py`）负责，这里的职责只有一个：
+    命中之后**补不补入队 / 补几次**。
     """
 
     def __init__(self, holder):
@@ -299,13 +305,40 @@ class _DedupQuery:
     def filter_by(self, **_kwargs):
         return self
 
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def order_by(self, *_args, **_kwargs):
+        return self
+
     def first(self):
         return self._holder[0]
+
+
+class _AnyColumn:
+    """查询判据里用到的模型列（`task_type == …` / `status.in_([...])`）的占位。
+
+    桩不解释 SQL，所以 `==` 与 `in_()` 都返回真 —— 判据本身由真库用例
+    （`tests/test_weekly_sync_dedup_blocks_starvation.py`）负责。
+    """
+
+    def __eq__(self, _other):
+        return True
+
+    def in_(self, _values):
+        return True
+
+    def desc(self):
+        return self
 
 
 def _install_create_stubs(monkeypatch, holder, enqueued):
     class _FakeTask:
         query = _DedupQuery(holder)
+        task_type = _AnyColumn()
+        commit_id = _AnyColumn()
+        status = _AnyColumn()
+        id = _AnyColumn()
 
         def __init__(self, **kwargs):
             self.id = 555
@@ -330,7 +363,7 @@ def test_dedup_hit_reenqueues_when_the_memory_queue_lost_the_task(monkeypatch):
     也什么都不做 —— 任务永远不跑也永远不结束（线上「永久排队中」）。
     """
     enqueued = []
-    holder = [SimpleNamespace(id=31)]
+    holder = [SimpleNamespace(id=31, status='pending')]
     _install_create_stubs(monkeypatch, holder, enqueued)
 
     task_id = worker.create_weekly_sync_task(66)
@@ -345,7 +378,7 @@ def test_dedup_hit_reenqueues_when_the_memory_queue_lost_the_task(monkeypatch):
 def test_dedup_hit_does_not_enqueue_twice_when_it_is_already_in_the_queue(monkeypatch):
     """**不能无条件重入队**：还在队列里就必须维持现状，否则同一条任务跑两遍。"""
     enqueued = []
-    holder = [SimpleNamespace(id=32)]
+    holder = [SimpleNamespace(id=32, status='pending')]
     _install_create_stubs(monkeypatch, holder, enqueued)
     handlers.register_enqueued_weekly_sync_task(32)          # 模拟「已经在队列里」
 

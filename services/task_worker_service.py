@@ -60,6 +60,7 @@ from services.task_worker_weekly_handlers import (
     parse_config_id_from_commit_id,
     reset_stale_weekly_sync_tasks,
 )
+from services.weekly_version_files_api_helpers import is_stale_sync_task
 from services.repository_sync_status import clear_sync_error as clear_repository_sync_error
 from services.repository_sync_status import record_sync_error as record_repository_sync_error
 # 同步连续失败的退避（判据 + 那句汇总日志都在那个模块里，见其 docstring）。
@@ -1016,14 +1017,76 @@ def add_excel_diff_tasks_batch(repository_id, excel_commits, priority=10):
 # ---------------------------------------------------------------------------
 
 
+# 「卡在 processing 多久就不再算它在跑」。页面那条判据（`is_stale_sync_task`）用的是
+# 1800 秒，这里取它的两倍：正常的同步是分钟级（实测大仓库 4.7 分钟），两倍余量能把
+# 「真的很慢」与「已经没人管了」分开 —— 误判成卡死会多起一个同步任务和正在跑的那个
+# 抢着写同一份缓存，代价比多等半小时大。
+WEDGED_SYNC_PROCESSING_SECONDS = 3600
+
+
+def _is_wedged_processing_sync_task(task):
+    """这条 `processing` 是不是已经没人管了（进程还活着，但没人会再写它的终态）。
+
+    去重把 `processing` 一起算进来之后，多了一种**静默冻结**的可能：任务被 worker 拿走
+    之后中途以非 `NON_CRITICAL_*` 的异常死掉（或写终态连续失败），那一行会一直停在
+    `processing`；而 `load_pending_tasks()`（启动时把 processing 收回 pending 的那条路）
+    只在进程启动时跑一次。此时去重会一直命中它 —— 同步永不重建、也不报错。
+    所以超过阈值就按「没人管了」处理，置 failed 并照常重建。
+
+    阈值口径：`started_at`（worker 拿到任务时写）是 naive-UTC，与 `is_stale_sync_task`
+    内部取时刻的方式一致；没有 `started_at` 时它会回落到 `created_at`。
+    """
+    if str(getattr(task, 'status', '') or '').lower() != 'processing':
+        return False
+    return is_stale_sync_task(
+        task,
+        datetime.now(timezone.utc).replace(tzinfo=None),
+        processing_timeout_seconds=WEDGED_SYNC_PROCESSING_SECONDS,
+    )
+
+
 def create_weekly_sync_task(config_id, auto_commit=True):
-    """为周版本配置创建同步任务"""
+    """为周版本配置创建同步任务。
+
+    ## 去重为什么要连 `processing` 一起看（这一条是**队列饿死**的根因）
+
+    队列只有一个 worker，而调度器每 2 分钟就 tick 一次、每 tick 都为活跃配置建一条
+    `weekly_sync`。**只看 `pending` 时**：正在跑的那条是 `processing`，于是每次 tick 都
+    能再建一条新的排进队列 —— 而一条大仓库的同步要跑 4~5 分钟（820 个文件），tick 却
+    每 2 分钟就来一次，队列里于是**永远有一条优先级 3 的同步在等**。worker 每次都先取
+    优先级最小的那条，结果优先级 ≥5 的任务**永远轮不到**：
+
+    * `auto_sync`（优先级 5）—— 实测自 06:08 起 12 小时一次都没跑过，也就是
+      **仓库再也没被 fetch 过**，平台看到的提交停在那之前；
+    * `weekly_excel_cache`（优先级 5）—— 27 条挂了 12 小时没跑，周版本 Excel 的
+      HTML 缓存从来没被生成过，每次打开都实时重算；
+    * `weekly_ai_analysis`（优先级 6）—— 库里的定时分析**一条都没真正跑过**
+      （唯一那条被当成超时重置了）。手动分析走请求线程，不受影响，所以这个病一直
+      没在界面上暴露出来。
+
+    把 `processing` 一起纳入去重之后，同步就不会在自己跑的时候再给自己排一条：一条跑完
+    到下一个 tick 之间队列里没有优先级 3，低优先级的任务自然轮得到。代价是同步不再
+    「背靠背连跑」，间隔变成「上一轮跑完 + 最多一个 tick」，这类后台预热本来就该如此。
+    """
     try:
-        existing_task = _BackgroundTask.query.filter_by(
-            task_type='weekly_sync',
-            commit_id=str(config_id),
-            status='pending'
-        ).first()
+        existing_task = _BackgroundTask.query.filter(
+            _BackgroundTask.task_type == 'weekly_sync',
+            _BackgroundTask.commit_id == str(config_id),
+            _BackgroundTask.status.in_(['pending', 'processing']),
+        ).order_by(_BackgroundTask.id.desc()).first()
+        if existing_task is not None and _is_wedged_processing_sync_task(existing_task):
+            wedged_id = existing_task.id
+            existing_task.status = 'failed'
+            existing_task.error_message = '任务长时间停留在处理中，已被下一次调度重置'
+            if auto_commit:
+                _db.session.commit()
+            log_print(
+                f"⚠️ 周版本同步任务 {wedged_id} 卡在处理中超过 "
+                f"{WEDGED_SYNC_PROCESSING_SECONDS} 秒，已置 failed 并重建",
+                'WEEKLY',
+                force=True,
+            )
+            existing_task = None
         if existing_task:
             if _use_agent_dispatch():
                 _ensure_agent_dispatch_for_background_task(
@@ -1032,11 +1095,14 @@ def create_weekly_sync_task(config_id, auto_commit=True):
                 )
                 if auto_commit:
                     _db.session.commit()
-            elif not is_weekly_sync_task_enqueued(existing_task.id):
+            elif existing_task.status == 'pending' and not is_weekly_sync_task_enqueued(existing_task.id):
                 # 单机模式下「库里是 pending」**不等于**「在内存队列里」：进程重启会清空
                 # 内存队列、那行却还是 pending，于是每次调度都命中这条去重分支直接返回 ——
                 # 任务永远不跑（线上「永久排队中」）。账本里没有它 = 队列已经丢了，补一次；
                 # 有它 = 还在队列里，绝不能重入队（会跑两遍）。
+                #
+                # 只对 `pending` 补入队：`processing` 的那条 worker 正拿在手里，
+                # 补一份就是同一个同步跑两遍。
                 enqueue_weekly_sync_task(background_task_queue, TaskWrapper, existing_task.id, config_id)
             log_print(f"周版本配置 {config_id} 已存在待处理的同步任务", 'SYNC')
             return existing_task.id
