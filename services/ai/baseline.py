@@ -32,6 +32,7 @@ from dataclasses import dataclass, replace
 from typing import Iterable, Mapping, Sequence, Tuple
 
 from services.ai.scope import normalize_path
+from services.ai.skill_contract import SEVERITIES
 
 # 与 `models.ai_analysis.anomaly.DISPOSITIONS` 必须一致。
 # 这里**刻意不 import 模型层**：本模块要能在没有 app 上下文的情况下被完整单测，
@@ -222,7 +223,45 @@ def _render_header(
 def _render_entry(item: BaselineFinding) -> str:
     where = f" ({item.file_path})" if item.file_path else ""
     commit = f" @{item.commit_ref[:12]}" if item.commit_ref else ""
-    return f"- [{item.severity}] {item.title}{where}{commit} #{item.fingerprint}"
+    return f"- [{_prompt_severity(item.severity)}] {item.title}{where}{commit} #{item.fingerprint}"
+
+
+# 平台赋值的等级 → 写进**提示词**的那个等级。
+#
+# 这两个键来自 `verdict.SEVERITY_STEP_DOWN` 的**像集减去模型的闭集**（口径①：「证据不足」
+# 降一档，`critical` → `high` → `medium` → `low`）。有测试钉着这个覆盖关系（
+# `tests/test_ai_verdict_rules_evidence.py`），加一档就要在这里补一行。
+#
+# **刻意不 import `verdict`**：本模块是「累积基线」这一层，`verdict` 是裁决那一层，
+# 两者没有调用关系，为两个字符串拉一条依赖不划算。反过来，`SEVERITIES`（模型的闭集）
+# 是**真的**要按它判，所以 import 它 —— 那是纪律本身，不是这一层的私有知识。
+_PROMPT_SEVERITY_FOLD = {"medium": "high", "low": "high"}
+
+
+def _prompt_severity(severity: str) -> str:
+    """写进**下一轮提示词**的等级：平台赋值的等级折回模型能写的那个闭集。
+
+    ## 为什么必须折
+
+    这一份渲染的是「这个版本截至上次分析已经报过的问题」，模型会**照抄它看到的等级**。
+    口径①让「证据不足」的结论降一档（`critical` → `high` → `medium`），而 `medium` / `low`
+    是**平台赋值**的等级 —— 模型自己不许写它们（`skill_contract.SEVERITIES` 只给
+    `critical` / `high`，那是给模型的闭集，`protocol` 会按「severity 不在允许集合内」
+    把越界的条目**丢掉**）。真把 `[medium]` 写进去，下一轮就有一条结论静默消失。
+
+    ## 折的只是**这一个字段**，不是掩盖降档
+
+    裁决节（给人看的）、`final_findings`、异常表、导出读的仍然是平台降出来的**真实等级**
+    （`medium`）。两个读者、两处口径：**给模型看的**要落在它能写的集合里，**给人看的**
+    要如实说降到了哪一档。所以这里不写「medium 其实还是 high」这类话，也不改上游的值。
+
+    不在折回表里的（空串、以及将来可能出现的别的值）**原样返回**：这一层不认识它，
+    就不许替它编一个等级（编出来的等级在提示词里看不出任何异常）。
+    """
+    text = str(severity or "").strip().lower()
+    if text in SEVERITIES:
+        return text
+    return _PROMPT_SEVERITY_FOLD.get(text, text)
 
 
 def _fit_groups(

@@ -95,6 +95,11 @@ STATUS_LABELS = {
 SEVERITY_LABELS = {
     "critical": "严重",
     "high": "高",
+    # 平台赋值的等级（口径①「证据不足降一档」：`high` → `medium`）。模型写不出它
+    # （`skill_contract.SEVERITIES` 只给 `critical` / `high`），但裁决与落库的值**就是**
+    # 它，导出要如实显示降到了哪一档 —— 缺这一行的下场是按 `_label` 回落成原文
+    # `medium`，在一份中文报告里显示一个英文码值。
+    "medium": "中",
 }
 
 CONFIDENCE_LABELS = {

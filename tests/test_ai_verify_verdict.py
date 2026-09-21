@@ -188,7 +188,11 @@ class TestTheReducerAppliesVerdicts:
         assert row.verdict == VERDICT_DOWNGRADED
 
     def test_a_downgrade_without_a_lower_level_is_not_taken_as_is(self):
-        """**这条缺陷最阴的一支**：模型说「降级」，清单里却仍是 critical。"""
+        """**这条缺陷最阴的一支**：模型说「降级」，清单里却仍是 critical。
+
+        降格之后走的是「证据不足」那条处置，所以等级**按口径①降一档**（`critical` →
+        `high`，2026-09-21 起）：说降级却给不出新等级，结论至少不许还挂着最高档。
+        """
         from services.ai.verdict import VerifyVerdict
 
         reduction = reduce_findings(
@@ -202,8 +206,9 @@ class TestTheReducerAppliesVerdicts:
 
         row = reduction.active[0]
         assert row.verdict == VERDICT_NEEDS_MORE_EVIDENCE
-        assert row.anomaly.severity == "critical", "等级没依据可改，不能凭空改"
-        assert row.anomaly.confidence == "high", "但**不得再维持 very_high**"
+        assert row.anomaly.severity == "high", "按「证据不足」降一档，不是维持原等级"
+        assert row.origin.severity == "critical", "原等级留着（报告要写从哪一级降下来）"
+        assert row.anomaly.confidence == "high", "**不得再维持 very_high**"
         assert "没有给出比" in row.note
 
     def test_a_retraction_without_reason_or_evidence_is_not_believed(self):
@@ -235,8 +240,53 @@ class TestTheReducerAppliesVerdicts:
         )
 
         row = reduction.active[0]
-        assert row.anomaly.confidence == "high"
-        assert not row.level_changed or row.anomaly.severity == "critical"
+        assert row.anomaly.confidence == "high", "置信度不许维持 very_high"
+        assert row.anomaly.severity == "high", "等级也不许维持 critical（口径①：一律降一档）"
+        assert row.level_changed is True
+        assert "证据不足降一档" in render_ruling(reduction, review_ran=True), (
+            "降了档就要写明是从哪一档降到哪一档、以及这一档的出处"
+        )
+
+    def test_only_the_evidence_shortfall_path_may_change_the_severity(self):
+        """**等级只能被这一条路径改**（口径①的边界）。
+
+        其余三种裁决都不许碰等级：`confirmed` 是「维持」、`retracted` 是「移出清单」，
+        `downgraded` 要改也必须用**复核自己写的那个等级**（不是平台那架梯子）。少了这一条，
+        「平台顺手把等级调了」这种改动就没人守着了。
+        """
+        from services.ai.verdict import VerifyVerdict
+
+        confirmed = reduce_findings(
+            [_obj()],
+            verdicts=(VerifyVerdict(finding_id="F1", verdict=VERDICT_CONFIRMED, reason="没找到反证"),),
+        ).active[0]
+        retracted = reduce_findings(
+            [_obj()],
+            verdicts=(
+                VerifyVerdict(
+                    finding_id="F1",
+                    verdict=VERDICT_RETRACTED,
+                    reason="生成物已删",
+                    evidence_refs=("build/lua/CfgItem.lua:1",),
+                ),
+            ),
+        ).retracted[0]
+        downgraded = reduce_findings(
+            [_obj()],
+            verdicts=(
+                VerifyVerdict(
+                    finding_id="F1",
+                    verdict=VERDICT_DOWNGRADED,
+                    final_severity="high",
+                    reason="服务端另有一道校验",
+                ),
+            ),
+        ).active[0]
+
+        assert confirmed.anomaly.severity == "critical", "「维持」就是维持"
+        assert retracted.anomaly.severity == "critical", "撤销改的是去留，不是等级"
+        assert downgraded.anomaly.severity == "high", "用的是复核写的等级"
+        assert downgraded.origin.severity == "critical"
 
     def test_a_confirmed_finding_is_kept_with_its_evidence(self):
         from services.ai.verdict import VerifyVerdict

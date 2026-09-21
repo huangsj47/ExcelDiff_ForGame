@@ -57,7 +57,10 @@
     };
 
     // 只映射**颜色**档，不映射状态名/严重度名（见文件头口径 1）。
-    var SEVERITY_TONE = {critical: 'danger', high: 'warning'};
+    // `medium` 是平台赋值的等级（口径①「证据不足降一档」：`high` → `medium`），模型写不出
+    // 它，但落库的值就是它 —— 缺这一档时 `severityTone` 回落到 `secondary`（灰），
+    // 一条被降过档的结论看起来与「平台不认识这个值」一模一样。
+    var SEVERITY_TONE = {critical: 'danger', high: 'warning', medium: 'info'};
     var ACTION_TONE = {
         pending: 'btn-outline-secondary',
         confirmed: 'btn-outline-success',

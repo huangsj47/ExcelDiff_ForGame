@@ -80,6 +80,11 @@ def _anomaly_entry(item, row: dict | None) -> dict:
     裁决字段**按指纹从裁决块里对回来**（不按下标：撤销之后清单已经短了，按下标会整体
     错位，而错位的后果是「这条的裁决跑到另一条上」）。取不到裁决时给空值：界面据此显示
     「未复核」，而不是把「没复核」显示成「没问题」。
+
+    2026-09-21 补的四个键（`body_label` / `verify_note` / `verify_evidence_unlocatable` /
+    `evidence_capped`）都是**同一条口径**：裁决对这条结论做了什么，读侧不必回去解析报告
+    正文就能看到。少了它们，界面只能显示「裁决是 X」而显示不出「平台为什么还压了它的
+    置信度」—— 后者是「降了不写」那一类缺陷的落点。
     """
     return {
         "fingerprint": anomaly_fingerprint(item),
@@ -93,10 +98,20 @@ def _anomaly_entry(item, row: dict | None) -> dict:
         "impact": item.impact or "",
         "suggestion": item.suggestion or "",
         "finding_id": str((row or {}).get("finding_id") or ""),
+        # 模型在报告正文里自己编的那个编号（`R3`）；空 = 正文里没有能对上的那一条。
+        "body_label": str((row or {}).get("body_label") or ""),
         "verify_verdict": str((row or {}).get("verdict") or ""),
         "verify_verdict_label": str((row or {}).get("verdict_label") or ""),
         "verify_reason": str((row or {}).get("reason") or ""),
+        "verify_note": str((row or {}).get("note") or ""),
         "verify_evidence": [str(text) for text in (row or {}).get("evidence_refs") or []],
+        # 不成形（照它定位不到东西）的那几条依据。原字符串在 `verify_evidence` 里一字不少，
+        # 这里单列出来是让读侧知道**哪几条不能当证据用**。
+        "verify_evidence_unlocatable": [
+            str(text) for text in (row or {}).get("unlocatable_refs") or []
+        ],
+        # 这条的置信度是不是被平台按证据缺口压下来的（口径 ③④）。
+        "evidence_capped": bool((row or {}).get("evidence_capped")),
         "original_severity": str((row or {}).get("original_severity") or ""),
         "original_confidence": str((row or {}).get("original_confidence") or ""),
     }
@@ -137,7 +152,10 @@ def _final_findings_of(ruling: dict | None, kept: list, suppressed: frozenset) -
             "active": True,
             "reason": "",
             "evidence_refs": [],
+            "unlocatable_refs": [],
+            "evidence_capped": False,
             "note": "",
+            "body_label": "",
             "fingerprint": anomaly_fingerprint(item),
             "title": item.title,
             "category": item.category,

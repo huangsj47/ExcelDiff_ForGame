@@ -47,11 +47,18 @@ def test_the_scope_and_trigger_words_match_the_places_that_already_say_them():
 
 
 def test_the_dimension_labels_cover_every_dimension_the_contract_allows():
-    """契约说什么维度，文档里就要有对应的中文名 —— 少一个就会漏出英文 id。"""
+    """契约说什么维度，文档里就要有对应的中文名 —— 少一个就会漏出英文 id。
+
+    严重度这一格是**包含**而不是相等（2026-09-21）：口径①「证据不足降一档」会产出
+    `medium`，它是**平台赋值**的等级（模型写不出它，见 `skill_contract.SEVERITIES`），
+    而裁决与落库的值就是它 —— 表格里必须有它的中文名，否则导出按 `_label` 回落成英文码值。
+    所以这里守的是「契约里的每一个都有中文名」，允许多出平台自己赋值的那几档。
+    """
     from services.ai.skill_contract import CONFIDENCES, DIMENSION_IDS, SEVERITIES
 
     assert set(doc.DIMENSION_LABELS) == set(DIMENSION_IDS)
-    assert set(doc.SEVERITY_LABELS) == set(SEVERITIES)
+    assert set(SEVERITIES) <= set(doc.SEVERITY_LABELS)
+    assert doc.severity_label("medium") == "中", "平台赋值的等级要有中文名，不许漏出码值"
     assert set(doc.CONFIDENCE_LABELS) == set(CONFIDENCES)
 
 

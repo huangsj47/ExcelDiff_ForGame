@@ -49,6 +49,50 @@ reducer 的产出另外写回一个**机器可读块**（报告末尾的一行 H
 `result_payload` 从那里把它取回来放进结论载荷 —— 于是 **markdown、落库的值、读侧、导出
 全部从 `final_findings` 渲染**，模型写的正文不再是独立真相源（它仍然留在报告里，但被那一节
 明确降级为「原文附在后面」）。
+
+## 四条落到结论上的口径（2026-09-21，全部来自 run 15 的实测）
+
+1. **「证据不足」降一档等级**（`severity_step_down`）。原先只降置信度、等级一动不动，清单里
+   于是出现「critical + 证据不足」这种自相矛盾的组合：`F3` 的裁决逐字写着「原 critical /
+   very_high → 证据不足（待人工核验）」，而落库那行的 `severity` / `original_severity` 仍是
+   `critical`。降级理由**沿用复核给的理由**，平台只补一句「降到了哪一档、为什么」。
+   **阶梯比模型的严重度闭集宽一档**（`critical` → `high` → `medium` → `low`），而
+   `skill_contract.SEVERITIES` 只有 `critical` / `high` —— 这个不一致是**刻意保留**的，
+   见下面「为什么不去扩 `SEVERITIES`」。
+2. **正文编号与平台编号的映射**（`assign_body_labels`）。模型在正文里自己编 `R1`…`R13`，
+   平台发的是 `F1`…`F17`（实测 13 ≠ 17），读者没法把「裁决」落回「正文那一条」。映射只按
+   **可复现的判据**（同一个 `file_path` / 标题词集相似度）建立；一个正文号被两条结论认领、
+   或者一条结论对上两个正文号时**都不写** —— 写错比不写糟得多（写错会把裁决的账记到别的
+   发现头上）。
+3. **依据的形状校验**（`is_locatable_ref`）。实测 `F3` 的第二条依据是
+   `…TmsTeamMgrMod.lua:diff@@ -61,66 +66,26 @@` —— 那是 diff 的 hunk 头，照它定位不到任何
+   东西，而审计的完成标准是「所有 high/critical 结论具有可定位快照证据」。拦的是**伪装成
+   证据的散文**（hunk 头、`x.xlsx:第 3 个 sheet`、`见 a.lua 第 61 行`）；裸文件路径
+   （`build/lua/CfgItem.lua`）**算可定位** —— 它是能去查的快照坐标。不成形的**照原样留着
+   并标成「不可定位」**（模型说了什么不许篡改），但一条都定位不到时**不得维持 `very_high`**。
+4. **证据缺口压置信度**（`EvidenceGaps`）。`F1` 是 `critical`/`very_high` 且裁决「反证不成立
+   （维持）」，而**同一份报告的信息缺口里**写着它引用的 `ProtoCScs.lua` 的 diff 被长度上限
+   截断过（「第 11/24 段之后的改动块未看到」）；`F3` 转人工的直接原因是「`find_references`
+   额度耗尽，无法枚举调用点」，而这次运行整体就是 `requests_exhausted` 降级。两类信号都可
+   判定，所以规则是确定性的：**结论引用的文件被截断过、或者这次运行因索取额度用尽而降级且
+   它需要的那一块没轮到 → 不得维持 `very_high`**，并在裁决与落库的文案里写明理由。
+   为什么不做成「一律降」见 `EvidenceGaps` 的说明。
+
+## 为什么不去扩 `SEVERITIES`
+
+`medium` / `low` 是**平台赋值**的等级（只在「证据不足」这条处置上出现），不是模型能选的
+等级：`skill_contract.SEVERITIES = ("critical", "high")` 是**给模型的闭集**，那是一道纪律 ——
+一旦模型可以自己选 `medium`，它会拿「这不算太严重」把本该报上来的东西降着报，而阈值与
+「哪些必须人工跟进」的口径都建立在这个闭集上。
+
+代价是**同一件事在两个地方有两种写法**，各自都有明确的归属：
+
+* **给模型看的**（下一轮提示词里的已报问题清单）：折回闭集 ——
+  `baseline._prompt_severity`，否则模型会照抄一个它自己不许写的等级，那一轮报出来的条目
+  会被 `protocol` 按「severity 不在允许集合内」丢掉；
+* **给人看的与落库的**（裁决节、`final_findings`、异常表、导出）：平台降出来的**真实等级**
+  （`medium`）。折回只发生在注入侧那一个字段上，**不是**在掩盖降档 —— 这一点在
+  `baseline._prompt_severity` 的注释里也写了一遍（两处读者不同，两处口径都写着出处）。
 """
 
 from __future__ import annotations
@@ -62,10 +106,14 @@ from services.ai.budget import truncate_text
 from services.ai.protocol import Anomaly, DroppedItem, parse_json_candidates
 from services.ai.rules import (
     DEFAULT_MAX_ANOMALIES,
+    DEFAULT_SIMILARITY_THRESHOLD,
+    MIN_SIMILARITY_TOKENS,
     SEVERITY_RANK,
     anomaly_fingerprint,
+    containment,
     is_probable_duplicate,
     rank_anomalies,
+    tokenize,
 )
 
 # --------------------------------------------------------------------------
@@ -130,6 +178,73 @@ RULING_BLOCK_MARKER = "ai-verify-ruling"
 _REASON_MAX_CHARS = 400
 _REFS_MAX_ITEMS = 5
 
+# 「证据不足」时等级降一档的阶梯（口径 ①）。
+#
+# **为什么必须动等级**：实测 run 15 的 `F3` 裁决逐字写着「原 critical / very_high →
+# 证据不足（待人工核验）」，而落库那行的 `severity` / `original_severity` 都还是 `critical`
+# —— 清单里于是同时存在「critical」与「证据不足」，自相矛盾；而且这条会作为下一轮的基线
+# （「上一次为止仍然成立的问题全集」）继续传下去。
+#
+# 阶梯比平台的严重度枚举**宽一档**：`skill_contract.SEVERITIES` 只有 `critical` / `high`，
+# 所以 `high → medium` 是**平台赋值**的等级（模型报不出它，它只在「证据不足」这个处置上
+# 出现）。`low` 是阶梯底，保持不动 —— 再降就成了「没有等级」。
+SEVERITY_STEP_DOWN = {
+    "critical": "high",
+    "high": "medium",
+    "medium": "low",
+    "low": "low",
+}
+
+# 证据有已知缺口（口径 ③④）时置信度的上限。**不许维持 `very_high`**。
+CONFIDENCE_CEILING_WITH_GAP = "high"
+
+# 正文里模型自己编的编号（口径 ②）：`R1`…`R13`。
+#
+# 三条边界都是必需的：前面不能是字母/数字/下划线（`RF1`、`SV1` 不是它），后面不能紧跟数字
+# （`R13` 不许被读成 `R1`），长度最多 3 位（正文编号不可能上千）。
+_BODY_LABEL_RE = re.compile(r"(?<![A-Za-z0-9_])R(\d{1,3})(?![0-9])")
+# 一个正文编号的上下文窗口 = 它所在的那一行 + 紧跟的一行（列表项常把「位置」写在下
+# 一行），再按字符数封顶。**不做「整段」或「整篇」**：窗口一大，每条结论都能在里面找到
+# 自己的文件路径，映射就从「判据」退化成「猜」。
+_BODY_WINDOW_CHARS = 400
+_BODY_WINDOW_LINES = 2
+
+# 「索取额度用尽」这个降级码的取值。**必须与 `engine.DEGRADE_REQUESTS` 逐字一致**
+# （有测试钉着；`subagent` 侧用的是那个常量，这里是读 `outcome.degradation` 时的比对值）。
+# 不 import 它：本模块是纯函数层，engine 是执行层，反向依赖会把执行栈拖进来。
+QUOTA_EXHAUSTED_CODE = "requests_exhausted"
+
+# 可定位依据的四种形态（口径 ③）。**逐条判据都在 `is_locatable_ref` 里**，这里只放形状：
+#
+# * 行号 / 行范围：`12`、`12-15`、`12 ~ 15`；
+# * sheet 名：`Sheet1`（不许含空白、`!`、`:`、`@`）；
+# * 单元格 / 区间：`Sheet1!A1`、`Sheet1!A1:C5`。
+_REF_LINE_RE = re.compile(r"^\d{1,7}(?:\s*[-~]\s*\d{1,7})?$")
+_REF_SHEET_RE = re.compile(r"^[^\s!:@]{1,64}$")
+_REF_CELL_RE = re.compile(r"^[^\s!:@]{1,64}![A-Za-z]{1,3}\d{1,7}(?::[A-Za-z]{1,3}\d{1,7})?$")
+# 配表类扩展名。sheet / 单元格这两种定位符**只对它们成立**：`.lua` 文件没有 sheet，
+# 认下来就等于把一句自由文本当成坐标。
+_SHEET_SUFFIXES = (".xlsx", ".xlsm", ".xlsb", ".xls", ".csv")
+
+# 依据/缺口两份文本比对时的**最短可比对长度**。低于它的词（`ID`、`a.lua`）在任何一份证据
+# 里都出现得太多，拿它当「这条结论引用了那个文件」的判据必然误报 —— 宁可不匹配。
+_MIN_MATCH_CHARS = 4
+
+# 被截断的文件路径从**交付条目的标签**里读（`context_tools.describe_request` 的形态：
+# `file_diff <commit12> <path>`）。只认这两种类型：`read_reference` 的标签是参考文档名、
+# `commit_detail` 只有一个提交号，它们都不是仓库里的文件路径。
+_FILE_LABEL_KINDS = ("file_diff", "file_content")
+
+
+def severity_step_down(severity: str) -> str:
+    """等级降一档（`critical` → `high` → `medium` → `low`）。
+
+    **不认识的等级原样返回**：凭空编一个更低的等级，比「没降」更糟 —— 后者在报告里看得
+    出来（写着证据不足、等级却没动），前者是一条查不出出处的假事实。
+    """
+    text = str(severity or "").strip().lower()
+    return SEVERITY_STEP_DOWN.get(text, text)
+
 
 # --------------------------------------------------------------------------
 # 数据
@@ -169,9 +284,19 @@ class FindingRow:
     verdict: str = UNREVIEWED
     reason: str = ""
     evidence_refs: tuple[str, ...] = ()
-    # 平台自己写的一句（裁决不完整、被降格处理等原因）。与 `reason`（模型写的理由）分开：
-    # 两者的作者不同，读的人需要分得清哪一句是模型说的。
+    # 平台自己写的一句（裁决不完整、证据有缺口等原因）。与 `reason`（模型写的理由）分开：
+    # 两者的作者不同，读的人需要分得清哪一句是模型说的。**多个原因用「；」连起来**放在
+    # 这一个字段里 —— 报告里它就是一行「平台说明：…」，分成几个字段只会让读者自己拼。
     note: str = ""
+    # 正文里模型自己编的那个编号（`R3`）。空串 = 正文里找不到能对上的那一条，报告里如实写
+    # 「正文未编号」（见 `assign_body_labels`：对不上时宁可不写）。
+    body_label: str = ""
+    # `evidence_refs` 里**不成形**的那些（`is_locatable_ref` 不认）。原样留着（模型说了什么
+    # 不许篡改），但在报告里标成「不可定位」——它们不构成「可定位快照证据」。
+    unlocatable_refs: tuple[str, ...] = ()
+    # 这条的置信度是不是被平台**按证据缺口**压下来的（口径 ③④）。报告据此单列一节说明
+    # 理由：降置信度而不说为什么，与缺陷本身是同一类问题。
+    evidence_capped: bool = False
 
     @property
     def active(self) -> bool:
@@ -202,7 +327,10 @@ class FindingRow:
             "active": self.active,
             "reason": self.reason,
             "evidence_refs": list(self.evidence_refs),
+            "unlocatable_refs": list(self.unlocatable_refs),
+            "evidence_capped": bool(self.evidence_capped),
             "note": self.note,
+            "body_label": self.body_label,
             "fingerprint": self.fingerprint,
             "title": self.origin.title,
             "category": self.origin.category,
@@ -225,6 +353,10 @@ class Reduction:
     rejected: tuple[DroppedItem, ...] = ()
     # 收到几条结构化裁决。0 表示这一轮**没有可逐条应用的东西**（报告里要明说）。
     verdicts_seen: int = 0
+    # 有**几条结论的置信度是被平台按证据缺口压下来的**（口径 ③④）。它必须计进 `changed`：
+    # 一次「复核没给裁决、但平台按截断/额度缺口压了两条」的运行同样要渲染那一节 ——
+    # 降了置信度却不解释，与这条缺陷本身是同一类问题。
+    evidence_capped: int = 0
 
     @property
     def active(self) -> tuple[FindingRow, ...]:
@@ -249,8 +381,16 @@ class Reduction:
 
         决定要不要往报告里加那一节：**没有影响时一个字都不加**（默认行为逐字不变），
         有影响时那一节就是「报告为什么与模型正文不一致」的出处。
+
+        `evidence_capped` 也算影响：把置信度从 `very_high` 压到 `high` 是落到结论上的
+        改动，报告必须解释它（否则读侧只看到「库里是 high、正文写着 very_high」）。
         """
-        return bool(self.verdicts_seen or self.new_findings or self.rejected)
+        return bool(
+            self.verdicts_seen
+            or self.new_findings
+            or self.rejected
+            or self.evidence_capped
+        )
 
     def active_anomalies(self) -> tuple[Anomaly, ...]:
         """落库与界面要用的那一份（`outcome.anomalies` 就取它）。"""
@@ -262,6 +402,7 @@ class Reduction:
     def as_dict(self) -> dict:
         return {
             "verdicts_seen": int(self.verdicts_seen),
+            "evidence_capped": int(self.evidence_capped),
             "rows": [row.as_dict() for row in self.rows],
             "rejected": [
                 {"reason": item.reason, "detail": item.detail} for item in self.rejected
@@ -290,6 +431,375 @@ def assign_findings(anomalies: Sequence[Anomaly]) -> tuple[Finding, ...]:
 
 def _new_finding_id(index: int) -> str:
     return f"{NEW_FINDING_PREFIX}-{index}"
+
+
+# --------------------------------------------------------------------------
+# ② 正文编号 → 平台编号
+# --------------------------------------------------------------------------
+
+
+def assign_body_labels(report: str, findings: Sequence[Finding]) -> dict[str, str]:
+    """`{F编号: 正文编号}`：把平台发的编号对回**模型在正文里自己编的那个 `R#`**。
+
+    ## 为什么要有这一步
+
+    两套编号是各编各的：模型在「风险评估 / 结论清单」里写 `R1`…`R13`，reducer 另发
+    `F1`…`F17`（实测 run 15 是 13 对 17，条数也不等）。读者拿着裁决节里的 `[F3]`，
+    落不回正文的任何一条 —— 裁决是给**人**看的，对不上就等于没写。
+
+    ## 判据（可复现，且宁可不写）
+
+    每个 `R#` 取它**所在那一行 + 紧跟一行**（列表项常把「位置」写在下一行）作为窗口，
+    一条结论与它对应当且仅当下面**之一**成立：
+
+    * 这条结论的 `file_path` 出现在窗口里（路径是位置，最强的判据）；或
+    * 这条结论的标题词集被窗口覆盖到 `rules.DEFAULT_SIMILARITY_THRESHOLD` 以上
+      （与近似去重同一套 `tokenize` / `containment`，不是这里另写一套相似度）。
+
+    然后两道**唯一性**闸门，任一不满足就整条不写：
+
+    * 一条结论对上了**两个不同的** `R#` —— 分不清它对应哪一条；
+    * 一个 `R#` 被**两条结论**认领 —— 至少有一条会指错。
+
+    对不上（或没对上的）一律在报告里如实写「正文未编号」。**这不是缺失，是事实**：
+    正文本来就只有 13 条，而平台发得出 17 个编号。
+    """
+    entries = _body_label_entries(report)
+    if not entries:
+        return {}
+    claims: dict[str, list[str]] = {}
+    for finding in findings:
+        matched = sorted(
+            {
+                label
+                for label, window in entries
+                if _same_finding_as_window(finding.anomaly, window)
+            }
+        )
+        if len(matched) != 1:
+            continue
+        claims.setdefault(matched[0], []).append(finding.finding_id)
+    return {
+        finding_id: label
+        for label, finding_ids in claims.items()
+        if len(finding_ids) == 1
+        for finding_id in finding_ids
+    }
+
+
+def _body_label_entries(report: str) -> list[tuple[str, str]]:
+    """正文里每个 `R#` 与它的上下文窗口：`[("R3", "R3. …\\n位置：…")]`。"""
+    text = str(report or "")
+    lines = text.splitlines()
+    # 每个字符落在哪一行。窗口要按**行**取，所以先把行首偏移量算出来（一次 O(n)），
+    # 匹配时二分查找 —— 直接在每行上跑正则会漏掉跨行重复编号的去重。
+    starts: list[int] = []
+    offset = 0
+    for line in lines:
+        starts.append(offset)
+        offset += len(line) + 1
+    entries: list[tuple[str, str]] = []
+    for matched in _BODY_LABEL_RE.finditer(text):
+        line_index = _line_index_of(starts, matched.start())
+        window = "\n".join(lines[line_index : line_index + _BODY_WINDOW_LINES])
+        entries.append((f"R{int(matched.group(1))}", window[:_BODY_WINDOW_CHARS]))
+    return entries
+
+
+def _line_index_of(starts: Sequence[int], position: int) -> int:
+    """`position` 落在第几行（`starts` 是各行首的偏移量，递增）。"""
+    low, high = 0, len(starts) - 1
+    while low < high:
+        middle = (low + high + 1) // 2
+        if starts[middle] <= position:
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
+def _same_finding_as_window(anomaly: Anomaly, window: str) -> bool:
+    """这条结论与这段正文窗口讲的是不是同一条（判据见 `assign_body_labels`）。"""
+    path = _norm_text(anomaly.file_path)
+    if len(path) >= _MIN_MATCH_CHARS and path in _norm_text(window):
+        return True
+    title_tokens = tokenize(anomaly.title)
+    window_tokens = tokenize(window)
+    if not title_tokens or not window_tokens:
+        return False
+    if min(len(title_tokens), len(window_tokens)) < MIN_SIMILARITY_TOKENS:
+        return False
+    return containment(title_tokens, window_tokens) >= DEFAULT_SIMILARITY_THRESHOLD
+
+
+# --------------------------------------------------------------------------
+# ③ 依据的形状校验
+# --------------------------------------------------------------------------
+
+
+def is_locatable_ref(ref: str) -> bool:
+    """这条依据能不能**照着它定位到东西**（口径 ③）。
+
+    认可两种形态，其余一律不成形：
+
+    * **裸路径**（`build/lua/CfgItem.lua`）：**能去查**的快照坐标 —— 平台自己的 diff
+      载荷就是这么标的（`file_diff <commit> <path>`），按提交取一份快照就能核。判据复用
+      `_looks_like_path`：无空白 / 控制字符、无 `@@`，且**最后一段带扩展名**。
+      刻意**没有**放宽到「有分隔符就算」（`code/qz_server/src/tms/module` 这种只有目录、
+      没有文件名的写法）：本仓库里可定位的东西都带扩展名（`config/*.xlsx`、
+      `code/**/*.lua`），一个到目录为止的写法更可能是被截断的路径或一句概述，
+      而不是一个坐标；而这一侧的错法比另一侧贵（见下面「宁严勿宽」）；
+    * **路径 + 定位符**，定位符只认下表四种（`文件:行` / `文件:行范围` / `文件:sheet` /
+      `文件:sheet!单元格`）：
+
+      | 定位符 | 形态 | 例 |
+      |---|---|---|
+      | 行 / 行范围 | `^\\d{1,7}([-~]\\d{1,7})?$` | `61`、`61-66` |
+      | sheet | 无空白 / `!` / `:` / `@` 的名字 | `Sheet1` |
+      | 单元格 / 区间 | `sheet!A1` / `sheet!A1:C5` | `Sheet1!B2` |
+
+      后三种**只对配表类扩展名成立**：`.lua` 没有 sheet，`Sheet1` 挂在它后面是自由文本，
+      不是坐标。
+
+    实测的反面例子（`F3` 的第二条依据）：
+
+        code/qz_server/src/tms/module/TmsTeamMgrMod.lua:diff@@ -61,66 +66,26 @@
+
+    `:` 后面那一段是 **diff 的 hunk 头**，既不是行号也不是 sheet —— 照它去文件里找，
+    找不到任何东西。**拦的正是这种「伪装成证据的散文」**（还有 `x.xlsx:第 3 个 sheet`、
+    `见 a.lua 第 61 行`、`详见上文`）：它们看着像坐标，实际给不出任何可核的位置。
+
+    ## 两处宁严勿宽的取舍
+
+    两侧的错法不对称：**判成不可定位**只影响「能否维持 `very_high`」（结论留着、报告里
+    写明理由）；**判成可定位**却会把一句散文当成证据，而那正是这一条要拦下的东西。所以：
+
+    * 定位符里带空白一律不成形。真实的工作表名极少带空格，而带空格的那些写法里绝大多数
+      是散文（`x.xlsx:第 3 个 sheet`）；
+    * 路径里带空白同样不成形（`见 a.lua 第 61 行` 是一句话，不是一个坐标）。
+
+    反过来说，**只有「有个定位符、但定位符不成形」才判死**：`path` 后面什么都没有
+    （裸路径）是合法形态，不是残缺形态 —— 把它一起判死会让一批正常结论无故压档，而压档
+    是本层唯一会改结论的副作用。
+    """
+    text = _ref_body(ref)
+    path, locator = _split_ref(text)
+    if not locator:
+        # 裸路径（或整个字符串里就没有 `:`）。判据与切分那一侧同一个函数，不另写一份。
+        return _looks_like_path(text)
+    if not path:
+        return False
+    if "," in locator or "@" in locator:
+        return False
+    if locator.isdigit() or _REF_LINE_RE.match(locator):
+        return True
+    if path.lower().endswith(_SHEET_SUFFIXES):
+        return bool(_REF_SHEET_RE.match(locator) or _REF_CELL_RE.match(locator))
+    return False
+
+
+def _ref_body(value: Any) -> str:
+    """依据的裸文本：剥掉空白与模型常加的那几对包裹符号（反引号、引号、括号）。"""
+    return str(value or "").strip().strip("`'\"“”‘’（）()[]<>").strip()
+
+
+def _split_ref(ref: str) -> tuple[str, str]:
+    """把一条依据拆成 `(路径, 定位符)`（拆不出就是两个空串）。
+
+    切点**从左往右**找第一个「左边像个路径」的 `:`，而不是从右边切：
+
+    * `C:/work/a.lua:61` —— 盘符那个 `:` 的左边是 `C`，最后一段没有点，跳过；
+    * `config/x.xlsx:Sheet1!A1:C5` —— 单元格区间**自带一个 `:`**，从右边切会把路径切成
+      `config/x.xlsx:Sheet1!A1`（一个不存在的文件），反过来切才对；
+    * `…TmsTeamMgrMod.lua:diff@@ -61,66 +66,26 @@` —— 左边是路径、右边不是定位符，
+      两样都留在返回值里，由 `is_locatable_ref` 判它不成形。
+
+    路径里含空白（模型写了一句「见 xxx.lua 第 61 行」）或含 `@@` 一律判不成形：那是散文，
+    不是坐标。
+    """
+    text = _ref_body(ref)
+    for position, char in enumerate(text):
+        if char != ":":
+            continue
+        path, locator = text[:position].strip(), text[position + 1 :].strip()
+        if _looks_like_path(path) and locator:
+            return path, locator
+    return "", ""
+
+
+def _looks_like_path(value: str) -> bool:
+    """这一段像不像一个**文件路径**（不是「有斜杠」就行，见 `_split_ref`）。"""
+    if not value or any(char.isspace() for char in value) or "@@" in value:
+        return False
+    return "." in value.rsplit("/", 1)[-1]
+
+
+# --------------------------------------------------------------------------
+# ④ 证据缺口
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EvidenceGaps:
+    """本次运行**已知的、可判定的**证据缺口。
+
+    ## 两类信号，都只看账本、不看措辞
+
+    * `truncated_files`：**交付**时被长度上限截断过的文件（`RoundRecord.executed` 里
+      `meta["truncated"]` 为真的那几条，路径从它自己的标签里读）。`tool_stats` 里也有
+      `truncated` 计数，但那是**按工具类型**记的合计、点不出文件名 —— 拿它当判据只能
+      「这次有截断 → 所有结论一律降」，正是下面说的那种一刀切，所以不用它。
+    * `quota_refusals` + `requests_exhausted`：这次运行整体因**索取额度用尽**而降级，且
+      被拒掉的那几次索取点名到了某个文件 / 某个检索词。两者必须同时成立。
+
+    ## 为什么不做成「一律降」
+
+    `requests_exhausted` 是**全运行级**的信号（任何一片额度用尽，整家都标这个降级码）。
+    直接拿它把所有结论的置信度打下去，等于用「某一片少看了两个文件」去否定一条与那些
+    文件毫无关系的结论 —— 那是拿一个与本案无关的事实去动真实结论，与「不能拿一个不存在
+    的复核去动真实结论」是同一条口径。
+
+    所以范围收在**这一条结论自己受影响的证据**上：它引用的文件被截断过，或者它需要的
+    那一块（点名到它的文件 / 它的检索词）一次都没轮到。代价如实说：被拒的请求**没有点名**
+    到这条结论时（模型要的是别的东西），这条不降 —— 那时平台的账本里确实没有任何证据
+    说明它受了影响，宁可不降，也不编一个理由。
+    """
+
+    truncated_files: tuple[str, ...] = ()
+    quota_refusals: tuple[str, ...] = ()
+    requests_exhausted: bool = False
+
+    @property
+    def known(self) -> bool:
+        """有没有**可能**影响某条结论的缺口（只看账本，不针对具体某条）。"""
+        return bool(self.truncated_files or (self.requests_exhausted and self.quota_refusals))
+
+
+def evidence_gaps_of(outcomes: Iterable[Any]) -> EvidenceGaps:
+    """从各成员的 `EngineOutcome` 里读出本次运行的证据缺口（鸭子类型，纯函数）。
+
+    `outcomes` 里可以有 `None`（没跑成的成员）—— 跳过，而不是当成「它没截断任何东西」：
+    跳过只是不贡献信号，把它当成一条反证会凭空减少缺口。
+    """
+    truncated: list[str] = []
+    refusals: list[str] = []
+    exhausted = False
+    for outcome in outcomes:
+        if outcome is None:
+            continue
+        if str(getattr(outcome, "degradation", "") or "") == QUOTA_EXHAUSTED_CODE:
+            exhausted = True
+        refusals.extend(
+            str(label) for label in (getattr(outcome, "refused_requests", ()) or ()) if label
+        )
+        for record in getattr(outcome, "rounds", ()) or ():
+            for item in getattr(record, "executed", ()) or ():
+                meta = getattr(item, "meta", None) or {}
+                if not meta.get("truncated"):
+                    continue
+                path = _label_file(getattr(item, "label", ""))
+                if path:
+                    truncated.append(path)
+    # `dict.fromkeys` 去重且**保序**：报告里那几句话的顺序每次都要一样（同一个输入
+    # 两次运行得出不同的措辞，读的人会以为是两件事）。
+    return EvidenceGaps(
+        truncated_files=tuple(dict.fromkeys(truncated)),
+        quota_refusals=tuple(dict.fromkeys(refusals)),
+        requests_exhausted=exhausted,
+    )
+
+
+def _label_file(label: Any) -> str:
+    """交付条目的标签 → 它读的是哪个文件（认不出来就是空串）。
+
+    标签形态由 `context_tools.describe_request` 定：`file_diff <commit12> <path>`，窗口
+    请求再加一段 `lines=…`。`=` 那一段先摘掉（不然 `parts[-1]` 拿到的是窗口而不是路径），
+    提交号可能是空串（于是只剩两段），所以从**末尾**取路径而不是按下标取。
+    """
+    parts = [part for part in str(label or "").strip().split() if "=" not in part]
+    if len(parts) < 2 or parts[0] not in _FILE_LABEL_KINDS:
+        return ""
+    return _norm_path(parts[-1])
+
+
+def _label_token(label: Any) -> str:
+    """被拒的索取标签 → 它点名的那一块（文件 / 检索词 / 提交号）。
+
+    标签形态由 `context_tools._human_request_label` 定：`引用扫描 <query>`、
+    `config/x.xlsx（12-15 行）`、`提交 abcd1234 的改动详情`、`参考文档 xxx`。
+    这里只做「把前缀和括号摘掉」这一件事，**不猜**：摘不出东西就返回空串，
+    调用方据此不匹配。
+    """
+    text = str(label or "").strip()
+    for prefix in ("引用扫描", "参考文档", "提交"):
+        if text.startswith(prefix):
+            text = text[len(prefix) :].strip()
+            break
+    text = text.split("（")[0].strip()
+    if text.endswith("的改动详情"):
+        text = text[: -len("的改动详情")].strip()
+    return text
+
+
+def _norm_path(value: Any) -> str:
+    """路径的显示形态：反斜杠转正斜杠、去掉开头的 `./`。**大小写原样保留** ——
+    报告里那一句要点名到真实存在的文件，`protocscs.lua` 是个不存在的路径。"""
+    text = str(value or "").replace("\\", "/").strip()
+    while text.startswith("./"):
+        text = text[2:]
+    return text
+
+
+def _norm_text(value: Any) -> str:
+    """比对用的归一化：在 `_norm_path` 之上再折叠大小写。"""
+    return _norm_path(value).lower()
+
+
+def _refers_to(text: str, needle: str) -> bool:
+    """`needle` 有没有出现在这段文本里（口径 ④ 的比对，两侧都归一化）。
+
+    长度低于 `_MIN_MATCH_CHARS` 的比对对象直接判否：`ID`、`a.lua` 这类词在任何一段证据里
+    都能找到，用它当「这条结论引用了它」的判据必然误报。
+    """
+    token = _norm_text(needle)
+    return len(token) >= _MIN_MATCH_CHARS and token in _norm_text(text)
+
+
+def _cited_text(anomaly: Anomaly) -> str:
+    """一条结论**自己引用过的东西**（缺口比对只在这份文本上做）。
+
+    取标题 / 文件路径 / 提交 / 证据四项。**不含 `impact` / `suggestion`**：那两段是建议
+    （「建议回归 xx 模块」），把它们算进来会让一条只是*提到*某个文件的结论也被判成受缺口
+    影响 —— 缺口判据要的是「这条结论的证据依赖它」，不是「这段话里出现过它」。
+    """
+    return "\n".join(
+        [anomaly.title or "", anomaly.file_path or "", anomaly.commit or "", *anomaly.evidence]
+    )
+
+
+def gap_reasons_of(anomaly: Anomaly, gaps: EvidenceGaps) -> list[str]:
+    """这条结论身上**已知**的证据缺口（一条一句人话；没有就是空列表）。
+
+    只读账本里的可判定信号（文件被截断 / 额度用尽且它需要的那块没轮到），不看报告里的
+    自由文本 —— 「模型在信息缺口那一节里提过它」这种判据改一个字就静默失效。
+    """
+    if not gaps.known:
+        return []
+    cited = _cited_text(anomaly)
+    reasons: list[str] = []
+    for path in gaps.truncated_files:
+        if _refers_to(cited, path):
+            reasons.append(
+                f"它引用的 `{path}` 在这次运行里被长度上限**截断**过（后面的改动块没看到），"
+                "证据是残缺的"
+            )
+    if gaps.requests_exhausted:
+        for label in gaps.quota_refusals:
+            if _refers_to(cited, _label_token(label)):
+                reasons.append(
+                    f"这次运行的**索取额度用尽**，它需要的「{label}」一次都没轮到"
+                )
+    return reasons
 
 
 # --------------------------------------------------------------------------
@@ -442,14 +952,28 @@ def reduce_findings(
     verdicts: Sequence[VerifyVerdict] = (),
     limit: int = DEFAULT_MAX_ANOMALIES,
     source_label: str = NEW_FINDING_PREFIX,
+    body_text: str = "",
+    gaps: EvidenceGaps = EvidenceGaps(),
 ) -> Reduction:
     """把「主结论 + 对账轮新发现 + 结构化裁决」压成唯一的一份结果。**确定性**。
 
     参数 `base` 是主结论清单（`synthesis.anomalies`），`new` 是对账轮自己报出来的
     （`outcome.anomalies`）。两者都已经过引擎那一侧的门槛与去重，这里再做的是**跨来源**
     的那几件事：重复、条数上限、以及按裁决决定去留。
+
+    另外两个参数是 2026-09-21 加的，都不改上面那条主路：
+
+    * `body_text`：模型写的正文（`synthesis.report_markdown`），用来把 `F#` 对回正文里
+      它自己编的 `R#`（`assign_body_labels`）。空串 = 没有正文可对，报告里如实写「正文未编号」。
+    * `gaps`：本次运行**已知的证据缺口**（`EvidenceGaps`）。**默认空 = 这一步什么都不做**
+      —— 单代理路径、测试里的直接调用都走这个默认值，行为逐字不变。
     """
-    rows = [_row_of(finding, verdicts) for finding in assign_findings(base)]
+    findings = assign_findings(base)
+    labels = assign_body_labels(body_text, findings)
+    rows = [
+        replace(_row_of(finding, verdicts), body_label=labels.get(finding.finding_id, ""))
+        for finding in findings
+    ]
     rejected: list[DroppedItem] = []
     matched_ids: set[str] = set()
     known = {row.finding_id for row in rows}
@@ -519,10 +1043,14 @@ def reduce_findings(
             )
         ]
 
+    # 证据缺口（口径 ③④）压在**封顶之后**：它只改「留在清单里」的那些条，而次序由严重度
+    # 主导、置信度只影响同档内的先后 —— 放在封顶之后，这一步就不可能改变谁被截掉。
+    kept = _with_evidence_gaps(_apply_limit(rows, limit=limit, rejected=rejected), gaps)
     return Reduction(
-        rows=_apply_limit(rows, limit=limit, rejected=rejected),
+        rows=kept,
         rejected=tuple(rejected),
         verdicts_seen=len(matched_ids),
+        evidence_capped=sum(1 for row in kept if row.evidence_capped),
     )
 
 
@@ -542,7 +1070,16 @@ def _apply_verdict(finding_id: str, origin: Anomaly, verdict: VerifyVerdict) -> 
 
     降格而不是「按原样采信」：后者正是这条缺陷的复现路径（模型说了降级/撤销，清单里
     仍是 `critical`）。降格之后平台至少不再按 `very_high` 采信它，并在报告里写明原因。
+
+    出口统一过一道 `_with_ref_shapes`（口径 ③）：`evidence_refs` 是模型写的自由文本，
+    形状校验与「有没有收到裁决」无关 —— 每条路径都得出这一道。
     """
+    return _with_ref_shapes(_apply_verdict_inner(finding_id, origin, verdict))
+
+
+def _apply_verdict_inner(
+    finding_id: str, origin: Anomaly, verdict: VerifyVerdict
+) -> FindingRow:
     reason = verdict.reason
     refs = verdict.evidence_refs
     if verdict.verdict == VERDICT_CONFIRMED:
@@ -598,8 +1135,9 @@ def _apply_verdict(finding_id: str, origin: Anomaly, verdict: VerifyVerdict) -> 
             ),
         )
 
-    # `needs_more_evidence`：保留在清单里，但**不得维持 very_high**（置信度是它进清单的
-    # 门槛之一，维持 very_high 等于这条裁决在数据上不留任何痕迹），并注明待人工核验。
+    # `needs_more_evidence`：保留在清单里，但**等级降一档、且不得维持 very_high**
+    # （置信度是它进清单的门槛之一，维持 very_high 等于这条裁决在数据上不留任何痕迹），
+    # 并注明待人工核验。
     return _needs_more(finding_id, origin, reason, refs, note="")
 
 
@@ -611,16 +1149,92 @@ def _needs_more(
     *,
     note: str,
 ) -> FindingRow:
-    capped = "high" if origin.confidence == "very_high" else origin.confidence
+    """「证据不足」的处置：**等级降一档 + 置信度不再维持 `very_high`**（口径 ①）。
+
+    两样都动，是因为它们答的是两个问题：等级是「这条问题现在算多严重」，置信度是「我们对
+    它有多确定」。实测那次只动了后者，清单里于是同时出现 `critical` 与「证据不足」——
+    自相矛盾的那个组合说的正是等级这一侧。
+    """
+    capped = CONFIDENCE_CEILING_WITH_GAP if origin.confidence == "very_high" else origin.confidence
     return FindingRow(
         finding_id=finding_id,
-        anomaly=replace(origin, confidence=capped),
+        anomaly=replace(
+            origin, severity=severity_step_down(origin.severity), confidence=capped
+        ),
         origin=origin,
         verdict=VERDICT_NEEDS_MORE_EVIDENCE,
         reason=reason,
         evidence_refs=refs,
         note=note,
     )
+
+
+def _with_ref_shapes(row: FindingRow) -> FindingRow:
+    """口径 ③：给 `evidence_refs` 做形状校验，不成形的标出来。
+
+    两件事，分开做：
+
+    * **标注**：不成形的那些进 `unlocatable_refs`，报告里在依据后面写「（不可定位）」。
+      原字符串**不进改动** —— 模型说了什么是一个事实，平台可以标注它、不能改写它。
+    * **据此不维持 `very_high`**：一条依据都定位不到时（`evidence_refs` 非空、可定位的
+      一条都没有），这条结论手里其实没有可定位快照证据，而审计要求 high/critical 必须有。
+      此时把置信度压到 `high`（`_cap_very_high`），理由写进 `note`。
+
+    只要还有**一条**能定位的依据，就不压：那时 `very_high` 是那条依据在撑着，不成形的那条
+    只是多余的话 —— 把多余的话当成缺陷去动真实结论，比留着它更糟。
+    """
+    bad = tuple(ref for ref in row.evidence_refs if not is_locatable_ref(ref))
+    if not bad:
+        return row
+    row = replace(row, unlocatable_refs=bad)
+    if len(bad) < len(row.evidence_refs):
+        return row
+    return _cap_very_high(
+        row,
+        f"复核给的 {len(bad)} 条依据**没有一条能定位**到「文件:行 / 文件:sheet/单元格」"
+        "（例如 diff 的 hunk 头），够不上「可定位快照证据」",
+    )
+
+
+def _cap_very_high(row: FindingRow, reason: str) -> FindingRow:
+    """把一条结论的置信度从 `very_high` 压到 `high`，并把理由写进平台说明。
+
+    **只在真的是 `very_high` 时才是「一次降级」**：置信度已经在 `high` 或更低时原样返回
+    （理由仍然成立，但那条已经被别的原因压过了 —— 再记一遍只会让报告里同一句话出现两次，
+    而报告那一节是按「平台真做了什么」列的）。
+    """
+    if row.anomaly.confidence != "very_high":
+        return row
+    return replace(
+        row,
+        anomaly=replace(row.anomaly, confidence=CONFIDENCE_CEILING_WITH_GAP),
+        evidence_capped=True,
+        note=_join_notes(
+            row.note,
+            f"证据有**已知缺口**，不得维持 `very_high`（平台压到 `{CONFIDENCE_CEILING_WITH_GAP}`）：{reason}",
+        ),
+    )
+
+
+def _join_notes(*parts: str) -> str:
+    """把几句平台说明连成一句（`；` 分隔，空的丢掉）。"""
+    return "；".join(part.strip() for part in parts if str(part or "").strip())
+
+
+def _with_evidence_gaps(
+    rows: tuple[FindingRow, ...], gaps: EvidenceGaps
+) -> tuple[FindingRow, ...]:
+    """口径 ④：本次运行有证据缺口时，受影响的那些条不得维持 `very_high`。
+
+    只处理**活动的**行：被撤销的那些已经移出清单，给它们压置信度没有任何读者。
+    """
+    if not gaps.known:
+        return rows
+    out: list[FindingRow] = []
+    for row in rows:
+        reasons = gap_reasons_of(row.origin, gaps) if row.active else []
+        out.append(_cap_very_high(row, "；".join(reasons)) if reasons else row)
+    return tuple(out)
 
 
 def _duplicate_of(anomaly: Anomaly, rows: Sequence[FindingRow]) -> FindingRow | None:
@@ -711,10 +1325,20 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
         # 有影响但**一条裁决都没读到**：可能是它只报了新发现、也可能是它把裁决写成了
         # 正文里的一段话（那不是裁决）。这两种情况下「结论为什么没动」都得说明白，
         # 否则读的人会以为复核不生效是平台坏了。
-        lines.append(
+        # 措辞是「**去留**按原样」而不是「按原样采信」：证据缺口那一步（口径 ③④）与
+        # 复核有没有给裁决无关，它照样会压置信度 —— 说「一律按原样」就把平台自己刚做的
+        # 事说成了没发生。
+        notice = (
             "**注意**：本次复核**没有回结构化裁决**（正文里的话不构成裁决，平台只认那个 "
-            "json 块），所以下面的结论一律按原样采信；只有它新报出来的条目被合入了清单。"
+            "json 块），所以下面的结论**去留**一律按原样采信；只有它新报出来的条目被合入了"
+            "清单。"
         )
+        if reduction.evidence_capped:
+            notice += (
+                f"另外，平台按本次运行的**证据缺口**压了 {reduction.evidence_capped} 条的"
+                "置信度（见下面「证据缺口」那一节）—— 那不是复核的裁决，是平台自己的动作。"
+            )
+        lines.append(notice)
         lines.append("")
 
     retracted = reduction.retracted
@@ -745,8 +1369,10 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
         lines.append(f"### 待人工核验 {len(pending)} 条（证据不足）")
         lines.append("")
         lines.append(
-            "这几条**仍在清单里**，但置信度不再按 `very_high` 采信 —— 请人工看一遍再决定"
-            "处置。"
+            "这几条**仍在清单里**，但平台按口径把它们**降了一档等级**（`critical` → `high`、"
+            "`high` → `medium`），置信度也不再按 `very_high` 采信 —— 请人工看一遍再决定处置。"
+            "为什么降：裁决给的是「证据不足」，而一条自己都说证据不足的结论不该同时挂着"
+            "最高等级与最高置信度。"
         )
         lines.append("")
         for row in pending:
@@ -776,6 +1402,13 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
             lines.append(_row_line(row))
         lines.append("")
 
+    # 上面各节已经逐条列过的那些（下面那一节不重复列，理由见 `_gap_section`）。
+    shown = {
+        row.finding_id
+        for row in (*retracted, *downgraded, *pending, *confirmed, *new_findings)
+    }
+    lines.extend(_gap_section(reduction, shown=shown))
+
     if reduction.rejected:
         lines.append(f"### 平台记账：{len(reduction.rejected)} 条没有进入清单")
         lines.append("")
@@ -787,10 +1420,50 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _gap_section(reduction: Reduction, *, shown: set[str]) -> list[str]:
+    """证据缺口那一节（口径 ③④）。**按平台的动作分组，与上面按裁决分组是两把尺子。**
+
+    没被压过的运行（`evidence_capped == 0`）一个字都不渲染。已经被上面某一节列过的行
+    **不在这里重复** —— 它的「平台说明」就写在上面那一行里（两边逐字一致），而同一件事
+    在报告里出现两遍正是本节开头那句「以本节为准」要收的口子。
+    """
+    capped = tuple(row for row in reduction.rows if row.evidence_capped)
+    if not capped:
+        return []
+    lines = [
+        f"### 证据缺口 {len(capped)} 条（平台压到 `{CONFIDENCE_CEILING_WITH_GAP}`）",
+        "",
+        "本次运行的证据里**有已知的缺口**（某个文件被长度上限截断、或者索取额度用尽导致"
+        "某一块一次都没轮到）。受影响的这几条**不得维持 `very_high`** —— 证据不完整时还挂着"
+        "最高置信度，等于把「没看到」写成了「看过了」。压的是**置信度，不是结论**：它们仍在"
+        "清单里，理由写在各条的「平台说明」里。",
+        "",
+    ]
+    lines.extend(_row_line(row) for row in capped if row.finding_id not in shown)
+    if all(row.finding_id in shown for row in capped):
+        # 一个都不剩：这几条在上面某一节里已经逐条列过（同一行的「平台说明」就是理由）。
+        # 不写这一句的话，这一节看起来像「说有 N 条、一条都没列出来」—— 而那正是这一批
+        # 缺陷要防的那种「说了没做」。
+        lines.append(
+            "这几条已经在上面「已降级 / 待人工核验 / 反证不成立」的那一节里逐条列过，"
+            "降级理由写在同一行的「平台说明」里；这里不再重复一遍。"
+        )
+    lines.append("")
+    return lines
+
+
 def _row_line(row: FindingRow) -> str:
     """一行的措辞。**原等级、裁决、处置三样都写出来** —— 只写裁决，读的人不知道
-    「降级」是从哪一级降下来的。"""
-    head = f"- **[{row.finding_id}] {row.origin.title}**："
+    「降级」是从哪一级降下来的。
+
+    三个 2026-09-21 补上的东西，都是为了让人能**把这一行落回原处**：
+
+    * 头部带上正文里那个编号（口径 ②，`[F3]（正文 R3）`）—— 没有就如实写「正文未编号」；
+    * 等级/置信度**只要动过就写出来**（口径 ①），包括「证据不足」那一档，措辞里带上
+      「平台按证据不足降一档」这句出处；
+    * 不成形的依据就地标成「（不可定位）」（口径 ③）—— 它照原样留着，但不构成证据。
+    """
+    head = f"- **[{row.finding_id}]{_body_label_text(row)} {row.origin.title}**："
     original = f"原 `{row.origin.severity}` / `{row.origin.confidence}`"
     if row.verdict == VERDICT_RETRACTED:
         action = "**反证成立（撤销）**，已从当前结论清单移除"
@@ -798,22 +1471,79 @@ def _row_line(row: FindingRow) -> str:
         action = (
             f"**反证部分成立（降级）**：`{row.origin.severity}` → `{row.anomaly.severity}`"
         )
+        # 等级写在动作里了（`severity=False`），但**置信度**若另被证据缺口压过，
+        # 还要单独说 —— 否则这一行会写着降了级、却看不出置信度也动了。
+        if row.evidence_capped:
+            action += _level_change_text(
+                row, cause="平台按「证据有缺口」处理", severity=False
+            )
     elif row.verdict == VERDICT_NEEDS_MORE_EVIDENCE:
         action = "**证据不足（待人工核验）**"
-        if row.level_changed:
-            action += f"，置信度 `{row.origin.confidence}` → `{row.anomaly.confidence}`"
+        action += _level_change_text(row, cause="平台按「证据不足降一档」处理")
     else:
         action = f"**{row.verdict_label}**"
+        if row.evidence_capped:
+            action += _level_change_text(row, cause="平台按「证据有缺口」处理")
     if row.source == SOURCE_VERIFY:
         action += "（对账轮新发现）"
     detail = [f"{original} → {action}"]
     if row.reason:
         detail.append(f"理由：{truncate_text(row.reason, _REASON_MAX_CHARS)[0]}")
     if row.evidence_refs:
-        detail.append("依据：" + "、".join(row.evidence_refs))
+        detail.append("依据：" + "、".join(_ref_text(row)))
     if row.note:
         detail.append(f"平台说明：{row.note}")
     return head + "；".join(detail)
+
+
+def _body_label_text(row: FindingRow) -> str:
+    """头部那一小段「（正文 R3）」。
+
+    对账轮新发现的条目**不写**：它们本来就不在模型写的那份正文里（`source` 那一栏已经
+    说了它从哪来），给它写一句「正文未编号」是拿一句真话去填一个不存在的问题。
+    """
+    if row.source == SOURCE_VERIFY:
+        return ""
+    return f"（正文 {row.body_label}）" if row.body_label else "（正文未编号）"
+
+
+def _level_change_text(row: FindingRow, *, cause: str, severity: bool = True) -> str:
+    """等级 / 置信度动过的话，把两处变化写出来并注明出处（口径 ① 要求的「降到了哪一档」）。
+
+    `severity=False` 给「降级」那一支用：那里的等级变化已经写在动作里了，再写一遍就是
+    同一件事在同一行里出现两次。
+    """
+    parts: list[str] = []
+    if severity and row.anomaly.severity != row.origin.severity:
+        parts.append(f"等级 `{row.origin.severity}` → `{row.anomaly.severity}`")
+    if row.anomaly.confidence != row.origin.confidence:
+        parts.append(f"置信度 `{row.origin.confidence}` → `{row.anomaly.confidence}`")
+    if not parts:
+        return ""
+    return f"，{'、'.join(parts)}（{cause}）"
+
+
+def _ref_text(row: FindingRow) -> tuple[str, ...]:
+    """依据那一行：不成形的那些就地标成「（不可定位）」。
+
+    **不改写原字符串**（模型说了什么是一个事实），只在它后面加这三个字 —— 读的人据此
+    知道哪几条能照着去核，哪几条核不了。判据与 `is_locatable_ref` 是同一个函数，
+    不在这里另写一份（两处各判一次迟早会不一致）。
+    """
+    bad = set(row.unlocatable_refs)
+    return tuple(
+        f"{ref}（不可定位）" if ref in bad else ref for ref in row.evidence_refs
+    )
+
+
+# `-->` 在 HTML 注释里会**提前闭合**，而这个块整个是一条注释（见 `ruling_block`）。
+# 替换成 JSON 对 `>` 的转义：注释不再被打断，而 `json.loads` 解回来仍是原来的 `-->`。
+#
+# **必须是模块级常量，不许内联回下面那个 f-string 的表达式里。** 表达式部分出现反斜杠
+# 是 PEP 701（3.12+）才允许的写法，CI 的 3.11 会当场 `SyntaxError`
+# （`tests/test_python311_syntax_compat.py::test_no_fstring_expression_contains_a_backslash`
+# 钉着这条，本文件曾因此红过一次）。
+_JSON_GT_ESCAPE = "--\\u003e"
 
 
 def ruling_block(reduction: Reduction) -> str:
@@ -829,7 +1559,7 @@ def ruling_block(reduction: Reduction) -> str:
     if not reduction.changed:
         return ""
     payload = json.dumps(reduction.as_dict(), ensure_ascii=False, sort_keys=True)
-    return f"<!-- {RULING_BLOCK_MARKER}: {payload.replace('-->', '--\\u003e')} -->"
+    return f"<!-- {RULING_BLOCK_MARKER}: {payload.replace('-->', _JSON_GT_ESCAPE)} -->"
 
 
 _RULING_BLOCK_RE = re.compile(
@@ -924,7 +1654,9 @@ def verdict_instructions() -> str:
         "* `retracted`：反证成立，这一条**从结论清单里撤掉**（不进异常表、不进下一轮基线）"
         "—— 必须给 `reason` 或 `evidence_refs`，两者都没有平台**不采信**"
         "（会按「证据不足」转人工核验）；\n"
-        "* `needs_more_evidence`：证据不足，转「待人工核验」（平台不再按 `very_high` 采信）。\n\n"
+        "* `needs_more_evidence`：证据不足，转「待人工核验」。**这一档有代价**：平台会把这条"
+        "的等级**降一档**（`critical` → `high`、`high` → `medium`），置信度也不再按 "
+        "`very_high` 采信 —— 所以只在真的缺证据时才用它。\n\n"
         "**这一块是平台唯一的依据**：正文写得再明确，没有这一块，你这一轮复核对结论"
         "**一条都不生效**（平台不替你猜）。反过来，写了这一块它就会**直接改结论** ——"
         "所以只在反证真的成立时才写 `retracted` / `downgraded`。\n"
