@@ -264,6 +264,87 @@ class TestWakingTheIntent:
 
 
 # ==========================================================================
+#  二·补、唤醒钩子**必须自带应用上下文**（真机回归）
+#
+#  真机日志原文（修复前）：
+#      ⚠️ 唤醒等待同步的分析意图失败（不影响这次同步）: Working outside of application context.
+#
+#  `_handle_weekly_sync_task` 的 `finally` 里调 `wake_waiting_analysis_intents_safely()`，
+#  而那个位置已经在 `handle_weekly_sync_task_service` 内部的 `app_context()` **之外** ——
+#  worker 线程裸调、第一次读库就抛，被宽 `except` 咽掉：**主路径静默失效**，每轮同步还往
+#  日志里丢一行警告（功能上只剩 `:1412` 每分钟兜底在续命，最多等一个周期）。
+#
+#  之前的用例为什么没抓住：它们自己带着 `with app.app_context():`（或 flask fixture），
+#  真机不带。所以这两条**必须在没有 ambient app context 的情况下**调用，并且两条断言
+#  缺一不可 —— 只断言「没打警告」会让「函数被改成空实现」也绿；只断言「转交了」在没上下文
+#  时是抛异常，红得指不出真原因。合起来才钉得住「在裸线程里也真的干成了活、且不吵」。
+# ==========================================================================
+
+
+class TestTheWakeHookBringsItsOwnAppContext:
+    def _seed_with_intent(self):
+        seeded = _seed(with_sync_task=True, sync_status="completed")
+        with flask_app.app_context():
+            from services.task_worker_queue_service import register_waiting_analysis_intent
+
+            register_waiting_analysis_intent(seeded["config_id"], seeded["group_key"])
+        return seeded
+
+    def _assert_no_wake_failure_logged(self, lines):
+        literal = [line for line in lines if "唤醒等待同步的分析意图失败" in line]
+        assert not literal, (
+            "唤醒意图又被宽 except 咽掉了（真机那条 Working outside of application context. "
+            f"回来了）：{literal}"
+        )
+        # 换个说法也照样抓住：这条路径**任何**「唤醒 + 失败」的日志都是同一个故障。
+        loose = [line for line in lines if "唤醒" in line and "失败" in line]
+        assert not loose, f"唤醒路径报错了（换了措辞但故障相同）：{loose}"
+
+    def test_it_works_in_a_bare_thread_with_no_ambient_app_context(self, monkeypatch):
+        """真机形态：**没有** app context 时调用 —— 既不许吵，也必须真的转交。"""
+        from flask import has_app_context
+
+        import services.task_worker_service as worker
+
+        lines: list = []
+        monkeypatch.setattr(worker, "log_print", lambda msg, *a, **k: lines.append(str(msg)))
+        seeded = self._seed_with_intent()
+
+        # **前提断言**：本用例的价值全在「没有 ambient app context」上。将来谁加了一个
+        # autouse 的 app-context fixture，这条会先红 —— 否则它会静默退化成「复现不了」。
+        assert not has_app_context(), (
+            "本用例要求裸调用（真机上 worker 线程就是裸的）；当前有 ambient app context，"
+            "那样即使把修复撤掉也照样是绿的"
+        )
+
+        worker.wake_waiting_analysis_intents_safely()
+
+        handed = _analysis_tasks(seeded["group_key"])
+        assert handed, "同步已经跑完，意图却没有被转交 —— 唤醒主路径静默失效了"
+        # 正向信号也钉在日志上：转交成功那行必须有（意图行此时**故意**还留 pending，
+        # 由「同组已有分析任务」与「被已建的运行覆盖」两条判据收尾，见 `_wake_one_waiting_intent`）。
+        assert any("同步已结束，等待的分析自动开始" in line for line in lines), (
+            f"转交发生了却没有留下那行日志：{lines}"
+        )
+        self._assert_no_wake_failure_logged(lines)
+
+    def test_it_is_safe_to_call_from_inside_an_existing_app_context(self, monkeypatch):
+        """那个每分钟兜底（`schedule_weekly_ai_analysis_tasks`）是在 `with _app.app_context():`
+        **里面**调的 —— 嵌套 push 必须同样安全，且同样不许吵。"""
+        import services.task_worker_service as worker
+
+        lines: list = []
+        monkeypatch.setattr(worker, "log_print", lambda msg, *a, **k: lines.append(str(msg)))
+        seeded = self._seed_with_intent()
+
+        with flask_app.app_context():
+            worker.wake_waiting_analysis_intents_safely()
+
+        assert _analysis_tasks(seeded["group_key"]), "已经在上下文里时反而不转交了"
+        self._assert_no_wake_failure_logged(lines)
+
+
+# ==========================================================================
 #  三、用户已经手工跑成了 → 意图自动作废
 # ==========================================================================
 

@@ -829,7 +829,16 @@ def wake_waiting_analysis_intents_safely():
     调度周期还会再试），不值得拿工作线程去赌。
     """
     try:
-        wake_waiting_analysis_intents()
+        # **必须自带应用上下文。** 本函数在 `_handle_weekly_sync_task` 的 `finally` 里调用，
+        # 而那个位置已经在 `handle_weekly_sync_task_service` 内部的 `app_context()` **之外**
+        # —— worker 线程裸调时，第一次读库就抛 `Working outside of application context.`，
+        # 被下面那个宽 `except` 咽掉，于是这条「同步一收尾就自动开始」的**主路径静默失效**：
+        # 日志里只剩一行「不影响这次同步」的警告，用户还得等下一个调度周期才被兜住。
+        # 真机实测就是这么现形的（修复前日志原文）：
+        #     ⚠️ 唤醒等待同步的分析意图失败（不影响这次同步）: Working outside of application context.
+        # 嵌套 push 是安全的（Flask 允许），所以这里不必先判断「是不是已经在上下文里」。
+        with _app.app_context():
+            wake_waiting_analysis_intents()
     except Exception as wake_error:  # noqa: BLE001 —— 见 docstring
         log_print(f"⚠️ 唤醒等待同步的分析意图失败（不影响这次同步）: {wake_error}", 'AI', force=True)
 
