@@ -66,21 +66,6 @@ from services.ai.engine import (
     RoundRecord,
     run_analysis,
 )
-from services.ai.prompt import build_system_prompt, build_user_message
-from services.ai.prompt_cache import mark_cache_breakpoint
-from services.ai.protocol import Anomaly, DroppedItem, unclassified_anomalies
-from services.ai.report_document import demote_headings
-from services.ai.rules import KIND_ANOMALY_CAP, RuleThresholds, rank_anomalies
-from services.ai.scope import AnalysisScope
-from services.ai.skill_contract import (
-    DIMENSION_IDS,
-    UNCLASSIFIED_LABEL,
-    dimension_ids_of,
-)
-from services.ai.skill_loader import LoadedSkills
-from utils.logger import log_print
-
-
 
 # 数据模型（`MemberPlan`/`MemberOutcome`/`Candidate`/`FamilyResult`）与「平台侧对账 +
 # 谁没交回结论」的文字搬到 `services/ai/family_ledger.py`（那个文件的 docstring 写了
@@ -90,14 +75,14 @@ from services.ai.family_ledger import (  # noqa: F401 —— 本模块与测试�
     CANDIDATE_BLOCK_MAX_CHARS,
     CANDIDATE_MAX_ITEMS_PER_MEMBER,
     CANDIDATE_TEXT_MAX_CHARS,
-    Candidate,
-    FamilyResult,
-    MemberOutcome,
-    MemberPlan,
     ROLE_SUBAGENT,
     ROLE_SYNTHESIS,
     ROLE_VERIFY,
     VERIFY_LABEL,
+    Candidate,
+    FamilyResult,
+    MemberOutcome,
+    MemberPlan,
     _findings_text,
     _gap_lines,
     _markdown_excerpt,
@@ -105,6 +90,33 @@ from services.ai.family_ledger import (  # noqa: F401 —— 本模块与测试�
     _shard_never_ran,
     reconcile_candidates,
 )
+from services.ai.prompt import build_system_prompt, build_user_message
+from services.ai.prompt_cache import mark_cache_breakpoint
+from services.ai.protocol import Anomaly, DroppedItem, unclassified_anomalies
+from services.ai.report_document import demote_headings
+from services.ai.rules import (
+    DEFAULT_MAX_ANOMALIES,
+    KIND_ANOMALY_CAP,
+    RuleThresholds,
+)
+from services.ai.scope import AnalysisScope
+from services.ai.skill_contract import (
+    DIMENSION_IDS,
+    UNCLASSIFIED_LABEL,
+    dimension_ids_of,
+)
+from services.ai.skill_loader import LoadedSkills
+from services.ai.verdict import (
+    Reduction,
+    assign_findings,
+    parse_verdicts,
+    reduce_findings,
+    render_ruling,
+    ruling_block,
+    strip_verdict_block,
+    verdict_instructions,
+)
+from utils.logger import log_print
 
 # 子代理模式下**只对周版本**生效。单提交分析不拆：那一次改动的规模本来就不需要分工，
 # 拆了只会让「这一次提交改了什么」多绕一圈。
@@ -634,7 +646,7 @@ def build_synthesis_task(plan: FamilyPlan, steps: Sequence[MemberOutcome]) -> st
 
 
 def build_verify_task(plan: FamilyPlan, synthesis: EngineOutcome) -> str:
-    """对账轮的任务书：把最严重的几条交出去，**要求它去找反证**。
+    """对账轮的任务书：把最严重的几条交出去，**要求它去找反证 + 给出结构化裁决**。
 
     ## 为什么是「找反证」，而不是「再评审一遍」
 
@@ -642,6 +654,19 @@ def build_verify_task(plan: FamilyPlan, synthesis: EngineOutcome) -> str:
     而且模型对自己刚写下的结论天然是**确认偏误**的一方。所以这一轮的指令是反过来的：
     你的任务是**推翻它们**，每条都要给出「能证明它不成立的具体文件与行」，找不到就明说
     「未找到反证」。这两种答复都必须是**有代价的**：说「未找到」也要写明你去哪里找过。
+
+    ## 每条发现带一个平台发的编号（`F1`…）
+
+    对账轮的正文写「第 1 条建议降级」这种话，平台**没法可靠地把它对上任何一条结论**
+    （模型的编号、措辞、顺序都可能与清单不同）。所以编号由平台发出去：清单里每条发现
+    在任务书里带 `[F1]`，裁决按这个编号回。编号与清单的次序都由
+    `verdict.assign_findings` 定（与封顶同一套严重度排序），三处必然一致。
+
+    ## 结构化裁决（`verdict.verdict_instructions`）
+
+    这一块就是 AI-P0-02 的入口：以前对账轮写的「建议撤掉 / 建议降级」只能停在一段文字里，
+    平台的结论清单一个字都不改（实测那次：报告正文写「反证成立…建议撤掉」，异常表里
+    仍是 `critical`/`very_high`）。现在它按 `verdicts` 数组回，平台按编号逐条应用。
 
     ## 只核对最严重的几条
 
@@ -654,14 +679,10 @@ def build_verify_task(plan: FamilyPlan, synthesis: EngineOutcome) -> str:
     对账轮的请求形状与分片一致（system + 共享变更清单 + 本任务书），所以**它也吃缓存** ——
     这是一次额外的模型调用里最贵的那一段。
     """
-    # 排序复用 `rules.rank_anomalies`（严重度 → 置信度，同档保持模型给的顺序）——
-    # 对账要挑的「最严重的几条」必须与封顶时挑的是同一个口径，两套排序迟早会不一致。
-    ranked = [
-        anomaly
-        for _index, anomaly in rank_anomalies(list(enumerate(synthesis.anomalies)))[
-            : plan.verify_items
-        ]
-    ]
+    # 排序复用 `verdict.assign_findings`（内部就是 `rules.rank_anomalies`：严重度 → 置信度，
+    # 同档保持模型给的顺序）—— 对账要挑的「最严重的几条」必须与封顶时挑的是同一个口径，
+    # 两套排序迟早会不一致；而编号也由它发，两处各排一次会让**裁决打到另一条结论上**。
+    ranked = assign_findings(synthesis.anomalies)[: plan.verify_items]
     blocks = [
         "# 分工：你是对账轮（找反证）",
         (
@@ -693,8 +714,9 @@ def build_verify_task(plan: FamilyPlan, synthesis: EngineOutcome) -> str:
         )
     else:
         lines = []
-        for index, anomaly in enumerate(ranked, start=1):
-            lines.append(f"### {index}. {anomaly.title}")
+        for index, finding in enumerate(ranked, start=1):
+            anomaly = finding.anomaly
+            lines.append(f"### {index}. [{finding.finding_id}] {anomaly.title}")
             lines.append(f"- 维度：{anomaly.category} · 严重度 {anomaly.severity}")
             if anomaly.file_path:
                 lines.append(f"- 位置：{anomaly.file_path}")
@@ -703,13 +725,15 @@ def build_verify_task(plan: FamilyPlan, synthesis: EngineOutcome) -> str:
             for evidence in anomaly.evidence[:3]:
                 lines.append(f"- 它的证据：{truncate_text(str(evidence), CANDIDATE_TEXT_MAX_CHARS)[0]}")
         blocks.append("## 待核对结论（逐条回答）\n\n" + "\n".join(lines))
+        blocks.append(verdict_instructions())
     blocks.append(
         "## 输出\n\n"
         "走同一套 JSON 协议（`status` / `report_markdown` / `anomalies` 都一样）。"
         "对账结论写在 `report_markdown` 里，**一条一段**，形如 "
         "「第 1 条 ××：反证成立 —— <哪个文件哪一行说明了什么>」或 "
         "「第 1 条 ××：未找到反证（查了 <文件/行>）」；"
-        "`anomalies` 只放**你在找反证的过程中新发现的**问题，没有就给空数组。"
+        "`anomalies` 只放**你在找反证的过程中新发现的**问题，没有就给空数组"
+        "（这些新发现平台会照收 —— 与主结论同一道校验之后合入清单）。"
     )
     return "\n\n".join(blocks).rstrip() + "\n"
 
@@ -876,6 +900,10 @@ def verify_section(step: MemberOutcome) -> str:
     原样贴进来整份文档就有两套一级标题。理由与实现见
     `report_document.demote_headings`（放在那边是因为本文件已经 1800+ 行，而它是纯
     markdown 工具，与文档结构那件事同一处）。
+
+    **它回的那个结构化裁决块要摘掉**（`verdict.strip_verdict_block`）：那一份已经由平台
+    按裁决**结果**渲染成「复核裁决（平台）」一节，原样留着只会让同一件事在报告里出现
+    两遍，其中一遍还是未加工的 json。摘掉的是**字节区间**，正文一个字不动。
     """
     body = (step.outcome.report_markdown or "").strip() if step.outcome else ""
     if not body:
@@ -885,7 +913,7 @@ def verify_section(step: MemberOutcome) -> str:
         "以下是**对照着去推翻**前面那几条结论的结果：平台在汇总之后又跑了一次独立核对，"
         "要它去找反证（能证明某条结论不成立的具体文件与行）。两种答复都算结论 ——"
         "「反证成立」意味着那一条**不该按原样采信**；「未找到反证」意味着有人去找过、没找到。\n\n"
-        + demote_headings(body)
+        + demote_headings(strip_verdict_block(body))
     )
 
 
@@ -1038,6 +1066,8 @@ def run_family(
         candidates=candidates,
         # 本次生效的维度清单（汇总那一份就是全部维度）。「未归类」那一节按它算。
         dimensions=plan.synthesis.dimensions,
+        # 本次配置的条数上限：合入对账轮新发现时不许把它顶穿（见 `aggregate_outcomes`）。
+        anomaly_limit=int(thresholds.max_anomalies) if thresholds is not None else None,
     )
     return FamilyResult(outcome=outcome, steps=tuple(steps), candidates=candidates)
 
@@ -1353,12 +1383,86 @@ def _verify_missed(steps: Sequence[MemberOutcome]) -> bool:
     )
 
 
+def _verify_ran(steps: Sequence[MemberOutcome]) -> bool:
+    """对账轮**真的给出了东西**（跑成了，不是被跳过 / 失败 / 压根没开）。
+
+    与 `_verify_missed` 不是一回事：那个判「报了缺口没有」，这个判「有没有可读的裁决」。
+    报告里那一节要不要出现，取决于后者 —— 一次没能跑成的复核没有任何裁决可渲染
+    （它由信息缺口那一节如实点名）。
+    """
+    return any(
+        step.plan.role == ROLE_VERIFY
+        and step.outcome is not None
+        and step.outcome.status != STATUS_FAILED
+        for step in steps
+    )
+
+
+def _anomaly_limit(dropped: Sequence[DroppedItem], fallback: int | None = None) -> int:
+    """本次生效的**条数上限**。
+
+    取值次序：**记账里那次运行的上限** → 调用方给的本次配置上限（`thresholds.max_anomalies`）
+    → 平台默认值（`rules.DEFAULT_MAX_ANOMALIES`）。
+
+    记账优先，因为这一份渲染的是**当时那次运行**的事实，而配置是调用方此刻手里的值 ——
+    「用户改了配置、翻看旧报告」时两者不是同一个数（与 `_cap_limit_of` 同一条理由，
+    那里连上限的原文都是按当时那次记的）。记账里没有（这一次没触发封顶，所以没记）时
+    才用配置值：**合入对账轮的新发现不许把用户配的上限顶穿**。
+    """
+    for item in dropped:
+        if getattr(item, "kind", "") != KIND_ANOMALY_CAP:
+            continue
+        parsed = _cap_limit_of(item)
+        if parsed.isdigit():
+            return int(parsed)
+    if fallback is not None and int(fallback) >= 0:
+        return int(fallback)
+    return DEFAULT_MAX_ANOMALIES
+
+
+def _reduce_with_verify(
+    synthesis: EngineOutcome,
+    steps: Sequence[MemberOutcome],
+    *,
+    threshold_limit: int | None = None,
+) -> Reduction:
+    """把对账轮的结果**应用**到主结论上（`verdict.reduce_findings`）。
+
+    ## 三个输入各是什么
+
+    * **主结论**：`synthesis.anomalies`（已过门槛、已去重、已按严重度封顶）；
+    * **对账轮的裁决**：它 `report_markdown` 里那个 json 块（`verdict.parse_verdicts`）；
+    * **对账轮的新发现**：`outcome.anomalies` —— 这一份以前被整条丢掉（连「未归类」
+      那一节都进不去），现在经同一道校验（结构、重复、条数上限）合入清单。
+
+    ## 对账轮没跑成 / 没给裁决时
+
+    一条结论都不改（`reduce_findings` 的空输入就是恒等），并在报告里写明「本次复核对结论
+    一条都没生效」。**不拿一个不存在的复核去动真实结论** —— 与「没有结论时按规模定级、
+    并明说不是模型结论」是同一条口径。
+    """
+    step = next((item for item in steps if item.plan.role == ROLE_VERIFY), None)
+    outcome = step.outcome if step is not None and not step.failed else None
+    if outcome is None:
+        return reduce_findings(
+            synthesis.anomalies,
+            limit=_anomaly_limit(synthesis.dropped, threshold_limit),
+        )
+    return reduce_findings(
+        synthesis.anomalies,
+        new=outcome.anomalies,
+        verdicts=parse_verdicts(outcome.report_markdown),
+        limit=_anomaly_limit(synthesis.dropped, threshold_limit),
+    )
+
+
 def aggregate_outcomes(
     *,
     synthesis: EngineOutcome,
     steps: Sequence[MemberOutcome],
     candidates: Sequence[Candidate] = (),
     dimensions: Sequence[str] = DIMENSION_IDS,
+    anomaly_limit: int | None = None,
 ) -> EngineOutcome:
     """把一家子的账合成**一个** `EngineOutcome`（落库那一层只认一个）。
 
@@ -1368,6 +1472,12 @@ def aggregate_outcomes(
     它只用于一件事：把落不进清单的条目单独列成「未归类」那一节（`build_unclassified_section`）
     —— 那一节是「一条发现都不许消失」的最后一道保证。默认值是平台出厂那九个，
     供直接调用本函数的调用方（测试）使用。
+
+    ## `anomaly_limit` 是本次配置的条数上限
+
+    `run_family` 从 `thresholds.max_anomalies` 传进来。它只在**合入对账轮新发现**时用得上
+    （那是唯一可能让清单超过上限的地方），而记账里没有上限原文时（这一次没触发封顶）
+    就取它 —— **平台自己不许把用户配的上限顶穿**。
 
     ## 轮次为什么要重编号
 
@@ -1382,6 +1492,15 @@ def aggregate_outcomes(
     个加起来会得出一个偏高、且看起来完全正常的命中率。
     """
     report = synthesis.report_markdown or ""
+    # **复核裁决先算**：后面那几节（对账轮原文、未归类、条数上限）都要与它对齐，
+    # 而且 `anomalies` 最终取的就是它算出来的活动清单（见文件末尾的 `anomalies=`）。
+    reduction = _reduce_with_verify(synthesis, steps, threshold_limit=anomaly_limit)
+    # 「复核裁决」排在对账轮原文**之前**：它是平台按裁决渲染的**最终口径**，而模型写的那份
+    # 正文是裁决**之前**的稿子（它可能整段写着「（critical，仍成立）」）。先给结论、
+    # 再附原文，读的人不会把那份稿子当成独立真相源。
+    ruling_text = render_ruling(reduction, review_ran=_verify_ran(steps))
+    if ruling_text and synthesis.status != STATUS_FAILED:
+        report = (report.rstrip() + "\n\n" + ruling_text).strip() + "\n"
     # 对账轮那一节排在「信息缺口」**之前**：它是对报告本身的补充（结论该不该采信），
     # 而信息缺口是「哪些东西没看到」—— 后者永远在最后，读的人一眼能看到缺口在哪。
     verify_text = "".join(
@@ -1406,10 +1525,19 @@ def aggregate_outcomes(
     # 什么都没得到 —— 两份东西都不能给。
     if gaps_text and synthesis.status != STATUS_FAILED:
         report = (report.rstrip() + "\n\n" + gaps_text).strip() + "\n"
+    # 机器可读的裁决块**收尾**（一行 HTML 注释，markdown 渲染看不见）。放最后是因为
+    # 上面每一节的取舍都依赖前面几节的状态（汇总失败时一个字都不追加），而这一块要么
+    # 与报告同在、要么不在 —— 它承载的是「`final_findings` 是怎么来的」，`result_payload`
+    # 靠它把同一份裁决放进结论载荷（读侧与导出据此渲染）。
+    machine = ruling_block(reduction)
+    if machine and synthesis.status != STATUS_FAILED:
+        report = (report.rstrip() + "\n\n" + machine).strip() + "\n"
 
     rounds = _merge_rounds(steps)
     dropped = tuple(item for step in steps if step.outcome for item in step.outcome.dropped)
-    dropped = (*dropped, *gap_dropped)
+    # 被复核裁掉/被平台校验拒收的条目**也在这本账上**（`verdict.KIND_VERIFY`）：它们不是
+    # 「模型没报」，而是「报了但去向是撤销或被拒」——不记的话，那几条就是静默消失。
+    dropped = (*dropped, *gap_dropped, *reduction.rejected)
     # 「额度用尽没轮到的那几块」同样要跨成员合起来。只留计数的话，报告末尾只能说
     # 「有 N 个请求没执行」，说不出是哪几个 —— 而这一家子有几个成员，缺的那几块可能
     # 分别来自不同成员。
@@ -1444,7 +1572,11 @@ def aggregate_outcomes(
     return EngineOutcome(
         status=status,
         payload=synthesis.payload,
-        anomalies=synthesis.anomalies,
+        # **只有 `final_findings` 里的那些进这里**：被复核撤销的条目不在其中，于是
+        # 异常表、下一轮基线（读的是异常表的行）、以及面板上那份活动清单都不会再把它
+        # 当成「仍然成立的问题」。**这是这条链路上唯一的取舍点** —— 落库、读侧、导出
+        # 读的都是这一个字段或它的投影。
+        anomalies=reduction.active_anomalies(),
         dropped=dropped,
         refused_requests=refused_requests,
         report_markdown=report,

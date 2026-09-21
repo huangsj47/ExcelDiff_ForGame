@@ -21,11 +21,135 @@ from typing import List, Tuple
 from services.ai.engine import EngineOutcome
 from services.ai.rules import anomaly_fingerprint
 from services.ai.usage import usage_from_outcome
+from services.ai.verdict import read_ruling, retracted_fingerprints, ruling_rows
 
 # 「额度用尽没轮到的」最多往结果里放几条。界面只展示前几条、其余归到「等 N 条」，
 # 所以多放没有用；而额度用尽那一轮模型可能一口气要几十个请求，整份列表会白白撑大
 # 落库的 response_payload。**计数不受它影响**（见 `request_budget.refused`）。
 _REFUSED_ITEMS_MAX = 20
+
+
+def coverage_notice_text(coverage) -> str:
+    """覆盖账本 → **抽屉里那一段**「本次覆盖与缺口」（markdown 片段；没得说就空串）。
+
+    ## 为什么是「一段文本进 payload」，而不是「塞进报告正文」
+
+    审计要求（AI-P1-03）是「报告必须显示证据覆盖与缺口」，而**抽屉才是用户第一眼看到
+    的地方**：导出那份 `.md` 早就有了（`routes/ai_analysis_routes.ai_run_report_md` 传了
+    账本），可抽屉读的是落库的 `response_payload.report_markdown` —— 真机验证时那份里
+    「本次覆盖与缺口」「覆盖（版本清单）」「覆盖（取到证据）」这些关键词**一个都没有**。
+
+    写进 `report_markdown` 有两条具体的风险，所以这里刻意不那样做：
+
+    * `services/ai/family_ledger.reconcile_candidates` 拿报告文本做**字符串判据**
+      （候选编号有没有被带回、候选的 `file_path` 有没有被点名），而覆盖段里恰好会列出
+      **取数失败的文件路径**（例如 `config/奖励模式表_CfgRewardMode.xlsx`）。它有一条
+      明文取舍 ——「正文里提到过**不算**采纳」，把平台自己列的缺口路径混进那段文本，
+      就是往这个判据里塞平台自己的字；
+    * 报告正文还会被别的环节读回去（下一轮的基线摘要、裁决块 `verdict.read_ruling`），
+      平台追加的段落会跟着一起进去。
+
+    放进 payload 里当**独立一个键**（`coverage_notice`），报告正文因此**逐字不变** ——
+    上面两条判据连碰都碰不到它。屏幕侧由 `static/js/ai_context_notice.js` 贴到结论后面
+    （与「平台补充」那类提示同一个位置、同一条路径）。
+
+    ## 措辞从哪来
+
+    行与缺口都取自 `coverage_ledger`（`report_document.coverage_table_rows` /
+    `coverage_gap_lines` 是导出文档用的同一对读法）：同一份数据在两处显示时**必须逐字
+    一致**，各写一份迟早会说不到一起（这一行按文件去重、那一行按提交去重）。
+    """
+    if not isinstance(coverage, dict) or not coverage:
+        return ""
+    from services.ai import report_document
+
+    rows = report_document.coverage_table_rows(coverage)
+    gaps = report_document.coverage_gap_lines(coverage)
+    if not rows and not gaps:
+        return ""
+    lines = [f"**{report_document.COVERAGE_TITLE}（平台补充）**", ""]
+    # 行在前、缺口在后：与导出文档同一个顺序（先「看了多少」，再「没看的是哪些、为什么」）。
+    lines.extend(f"- {name}：{value}" for name, value in rows)
+    lines.extend(f"- {one}" for one in gaps)
+    return "\n".join(lines)
+
+
+def _anomaly_entry(item, row: dict | None) -> dict:
+    """一条异常的落库/下发形态（与原先逐字一致），外加它收到的那条复核裁决。
+
+    裁决字段**按指纹从裁决块里对回来**（不按下标：撤销之后清单已经短了，按下标会整体
+    错位，而错位的后果是「这条的裁决跑到另一条上」）。取不到裁决时给空值：界面据此显示
+    「未复核」，而不是把「没复核」显示成「没问题」。
+    """
+    return {
+        "fingerprint": anomaly_fingerprint(item),
+        "title": item.title,
+        "category": item.category,
+        "severity": item.severity,
+        "confidence": item.confidence,
+        "evidence": list(item.evidence),
+        "commit_ref": item.commit or "",
+        "file_path": item.file_path or "",
+        "impact": item.impact or "",
+        "suggestion": item.suggestion or "",
+        "finding_id": str((row or {}).get("finding_id") or ""),
+        "verify_verdict": str((row or {}).get("verdict") or ""),
+        "verify_verdict_label": str((row or {}).get("verdict_label") or ""),
+        "verify_reason": str((row or {}).get("reason") or ""),
+        "verify_evidence": [str(text) for text in (row or {}).get("evidence_refs") or []],
+        "original_severity": str((row or {}).get("original_severity") or ""),
+        "original_confidence": str((row or {}).get("original_confidence") or ""),
+    }
+
+
+def _final_findings_of(ruling: dict | None, kept: list, suppressed: frozenset) -> List[dict]:
+    """**唯一的 `final_findings`**：活动清单（`kept`）+ 被复核撤销的那些（`active: False`）。
+
+    有复核时活动部分**按 `kept` 逐条取**、裁决按指纹附上 —— `kept` 已经把人工忽略
+    （`suppressed`）与复核撤销都滤掉了，于是 `final_findings` 与 `anomalies` 同源、同序、
+    同长度，两份不会各说各话。审计轨迹（被撤销的那些）同样滤掉人工已忽略的条目：
+    **分诊过的东西不许从另一个键里冒回来**（那正是「已忽略」这个处置会失效的路径）。
+
+    没有复核时把结论投影成同一形状：键一个不少，值是空 —— 读侧不必为「这次没开复核」
+    另写一个分支。
+    """
+    rows = ruling_rows(ruling)
+    if rows:
+        by_fingerprint = {str(row.get("fingerprint") or ""): row for row in rows}
+        active = [
+            dict(by_fingerprint[anomaly_fingerprint(item)])
+            for item in kept
+            if anomaly_fingerprint(item) in by_fingerprint
+        ]
+        trail = [
+            dict(row)
+            for row in rows
+            if not row.get("active")
+            and str(row.get("fingerprint") or "") not in suppressed
+        ]
+        return active + trail
+    return [
+        {
+            "finding_id": "",
+            "source": "synthesis",
+            "verdict": "",
+            "verdict_label": "",
+            "active": True,
+            "reason": "",
+            "evidence_refs": [],
+            "note": "",
+            "fingerprint": anomaly_fingerprint(item),
+            "title": item.title,
+            "category": item.category,
+            "file_path": item.file_path or "",
+            "commit_ref": item.commit or "",
+            "severity": item.severity,
+            "confidence": item.confidence,
+            "original_severity": item.severity,
+            "original_confidence": item.confidence,
+        }
+        for item in kept
+    ]
 
 
 def determine_risk_level(summary: dict) -> str:
@@ -87,7 +211,9 @@ def result_payload(
     """给前端与后续读取用的结果。
 
     保留既有的 `risk_level`（界面在读它），其余键是真实产出。被人工忽略的结论不进
-    `anomalies` —— 尊重分诊结果，而不是每轮再问一次。
+    `anomalies` —— 尊重分诊结果，而不是每轮再问一次。**被复核撤销的结论同样不进**：
+    它已经不在 `outcome.anomalies` 里了（`subagent.aggregate_outcomes` 按 `final_findings`
+    取的活动清单），这里再按裁决块里的指纹滤一道 —— 那是一条约定，而这里是一道闸门。
 
     `context_budget_note` 是「这次分析的提示词预算被窗口压过」的说明（`_apply_model_window`）。
     以前它只写进日志 —— 于是「这次分析浅了」在界面上完全看不出原因，而它正是最需要
@@ -95,7 +221,19 @@ def result_payload(
     """
     summary = payload.get("summary") or {}
     risk_level, risk_reasons = risk_level_from_outcome(outcome, summary)
-    kept = [item for item in outcome.anomalies if anomaly_fingerprint(item) not in suppressed]
+    # 复核裁决（`verdict.read_ruling`）：报告里那一行机器可读的块。取不到 = 这次没有复核
+    # （单代理路径 / 没开对账轮 / 复核对结论没有产生任何影响），下面两个额外条件都退化成
+    # 「什么都不做」—— 单代理那条路逐字不变。
+    ruling = read_ruling(outcome.report_markdown)
+    retracted = retracted_fingerprints(ruling)
+    kept = [
+        item
+        for item in outcome.anomalies
+        if anomaly_fingerprint(item) not in suppressed
+        and anomaly_fingerprint(item) not in retracted
+    ]
+    # 逐条裁决按**指纹**与结论对起来（不按下标：撤销之后的清单已经短了，按下标会整体错位）。
+    rows = {str(row.get("fingerprint") or ""): row for row in ruling_rows(ruling)}
 
     return {
         "risk_level": risk_level,
@@ -132,20 +270,23 @@ def result_payload(
                 "refused_items": list(outcome.refused_requests[:_REFUSED_ITEMS_MAX]),
             },
         },
-        "anomalies": [
-            {
-                "fingerprint": anomaly_fingerprint(item),
-                "title": item.title,
-                "category": item.category,
-                "severity": item.severity,
-                "confidence": item.confidence,
-                "evidence": list(item.evidence),
-                "commit_ref": item.commit or "",
-                "file_path": item.file_path or "",
-                "impact": item.impact or "",
-                "suggestion": item.suggestion or "",
-            }
-            for item in kept
+        "anomalies": [_anomaly_entry(item, rows.get(anomaly_fingerprint(item))) for item in kept],
+        # **复核裁决的最终形态**（`services/ai/verdict.py`）。三件事在这一份里同时成立：
+        #
+        # * `anomalies` 是它的**活动投影**（落库、面板、导出读的都是那一列）—— 被撤销的
+        #   条目不在其中，于是异常表、下一轮基线都不再把它当成「仍然成立的问题」；
+        # * 被撤销的条目连同**原等级与撤销理由**留在审计轨迹里（`retracted_findings`），
+        #   报告正文里也有那一节 —— 撤销本身也是结论，不能没有痕迹；
+        # * 每条都带 `finding_id` / `verify_verdict` / `verify_reason` / `verify_evidence`，
+        #   读侧不必回去解析报告正文（**不再让模型写的那段文字当独立真相源**）。
+        #
+        # 没有复核时（单代理、没开对账轮、或复核没给出裁决）这里退化成「活动清单的原样投影」，
+        # 形状不变 —— 读侧只写一处，不必为「没复核」多一个分支。
+        "final_findings": _final_findings_of(ruling, kept, suppressed),
+        "retracted_findings": [
+            dict(row)
+            for row in ruling_rows(ruling, active=False)
+            if str(row.get("fingerprint") or "") not in suppressed
         ],
         "suppressed_count": len(outcome.anomalies) - len(kept),
         # 九个维度**逐一**的交代（`DimensionReview`：命中与否 + 未命中的理由）。
@@ -211,6 +352,11 @@ def failed_result(summary: dict, message: str) -> dict:
         "degradation_label": message,
         "error_message": message,
         "anomalies": [],
+        # 形状与 `result_payload` 一致（读侧只写一处 `payload.get("final_findings")`）：
+        # 没发起分析当然没有任何结论，但**键必须在** —— 少一个键与空列表在界面上的区别是
+        # 「这一块永远空着、也没有任何报错」与「这次没有结论」。
+        "final_findings": [],
+        "retracted_findings": [],
         # 形状与 `result_payload` 保持一致：读取侧只写一处 `payload.get("dimensions")`，
         # 不必为「没跑起来的那次」多加一个分支（少一个键与空列表在界面上的区别是
         # 「九个维度一个都没交代」与「这次根本没跑」，而后者已经由 status 说了）。
