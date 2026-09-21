@@ -66,8 +66,17 @@ from services.ai.analysis_budget import (
 )
 from services.ai.platform_budget import platform_budget_public
 from services.ai.pricing import amount_exact, amount_of, money
+from services.ai.project_config_source import get_project_analysis_config
 from services.ai.trace_evidence import decode_evidence
-from services.ai.usage import aggregate_runs, usage_from_run
+from services.ai.usage import (
+    ESTIMATE_SAMPLE_LIMIT,
+    MODE_FULL,
+    MODE_INCREMENTAL,
+    aggregate_runs,
+    estimate_analysis,
+    estimation_sample,
+    usage_from_run,
+)
 from services.ai.usage_statistics import (
     IN_FLIGHT_STATUSES,
     count_runs_before,
@@ -715,6 +724,58 @@ def _totals_cost(entries: Sequence[dict]) -> Optional[dict[str, Any]]:
     }
 
 
+def _totals_cost_sample(entries: Sequence[dict]) -> dict[str, Any]:
+    """跨项目的**已上报样本费用**（与 `_totals_cost` 并列的那一份）。
+
+    `_totals_cost` 的口径是「有一个项目算不出，整个平台合计就是算不出」—— 它同样的
+    理由同样成立，所以一个字都没改。但那条口径的后果是**一个项目的一条坏数据会让整个
+    平台的费用消失**，所以这里再给一份「每个算得出的项目各自合计，然后相加」，
+    并带上**覆盖度**（算得出的运行次数 / 总运行次数）：
+
+    * 次数来自各项目自己的 `reported_samples.cost`（那是**按运行**数的），这里只是相加；
+    * 金额按 `amount_exact` 相加（**不用展示串**：`<0.01` 解析不了，量化到分再相加会少算）；
+    * 币种仍然必须一致 —— 混着两种币种加出来的数字比没有数字更糟（与 `_totals_cost` 同一条）。
+    """
+    total_runs = sum(_int_or_zero(entry.get("runs")) for entry in entries)
+    reported_runs = 0
+    unknown_runs = 0
+    known_values: list[Mapping[str, Any]] = []
+    for entry in entries:
+        sample = (entry.get("reported_samples") or {}).get("cost") or {}
+        reported_runs += _int_or_zero(sample.get("reported_runs"))
+        unknown_runs += _int_or_zero(sample.get("unknown_runs"))
+        value = sample.get("known_value")
+        if value:
+            known_values.append(value)
+
+    known: Optional[dict[str, Any]] = None
+    if known_values:
+        currencies = {str(item.get("currency") or "") for item in known_values}
+        amounts = [amount_of(item) for item in known_values]
+        if len(currencies) == 1 and all(amount is not None for amount in amounts):
+            total = sum((amount for amount in amounts if amount is not None), Decimal(0))
+            notes = ["按各项目自己的价格表估算后相加（只含已上报样本）"]
+            if unknown_runs:
+                notes.append(
+                    f"另有 {unknown_runs} 次运行没有上报可计算的费用，"
+                    "这里是**已知最低费用**，不是总额"
+                )
+            known = {
+                "amount": money(total),
+                "amount_exact": amount_exact(total),
+                "currency": currencies.pop(),
+                "reason": "",
+                "notes": notes,
+                "lines": [],
+            }
+    return {
+        "total_runs": total_runs,
+        "reported_runs": reported_runs,
+        "unknown_runs": unknown_runs,
+        "known_value": known,
+    }
+
+
 def _over_budget_project_count(
     accessible_project_ids: Optional[Iterable[int]], *, show_platform: bool
 ) -> int:
@@ -841,6 +902,9 @@ def usage_overview(
                     "cache": stats["cache"],
                     "tools": stats["tools"],
                     "missing_runs": stats["missing_runs"],
+                    # 已上报样本 + 覆盖度（见 `services/ai/usage.py` 模块 docstring 末节）：
+                    # 项目行那一格据此显示「已知费用 / 已知命中率」而不是整格「未上报」。
+                    "reported_samples": stats["reported_samples"],
                     "cost": stats["cost"],
                     "pricing": _price_block(table, errors),
                     "budget": budget_block,
@@ -879,6 +943,12 @@ def usage_overview(
     # 费用另算 —— 见 `_totals_cost`。一条都没完成时它照样给出完整的形状（全 `None`），
     # 界面按「还没有数字」渲染，而不是消失。
     stats = aggregate_runs(completed_runs, price_table=None)
+    # 跨项目的费用**只能在这里算**（各项目的价格表不同，聚合器那一层拿不到同一张表）。
+    # 于是「已上报样本」那一块要换掉 `cost` 这一档：token 与命中率逐项目相加就等于全局
+    # （同一个函数、同一套判据），费用不行。换成全局那一份之后，覆盖率仍然是**按运行**数的，
+    # 与界面那句「N / M 次」同口径。
+    samples = stats["reported_samples"]
+    samples = {**samples, "cost": _totals_cost_sample(entries)}
     totals = {
         "runs": stats["runs"],
         # 这一批里**最新一条已完成**的编号：页面那句「以下统计截至运行 #X」就是它 ——
@@ -889,6 +959,7 @@ def usage_overview(
         "cache": stats["cache"],
         "tools": stats["tools"],
         "missing_runs": stats["missing_runs"],
+        "reported_samples": samples,
         "cost": _totals_cost(entries),
     }
 
@@ -995,6 +1066,115 @@ def filter_options() -> dict[str, Any]:
     }
 
 
+def parse_estimate_args(args: Mapping[str, Any]) -> tuple[Optional[int], dict[str, Any]]:
+    """URL query → 估算参数 `(project_id, {mode, planned_files, baseline_reusable, notes})`。
+
+    与 `parse_usage_filters` 同一条口径：**任何非法值都回落，绝不抛**。这些参数从地址栏
+    来，让它们变成 500 的话，页面直接白屏而用户没有任何办法回到正常状态。
+
+    `project_id` 是唯一一个「回落不了」的：估算必须知道是哪个项目（历史运行、价格表、
+    分片数都是按项目取的），所以它缺失时返回 `None`，由路由回 400 —— 那不是一次非法
+    访问，是一个缺少必填参数的请求。
+    """
+    notes: list[str] = []
+    raw_project = _first_arg(args, "project", "project_id")
+    project_id = _parse_int(raw_project)
+    if raw_project and project_id is None:
+        notes.append("项目编号不是有效数字。")
+
+    raw_mode = _first_arg(args, "mode").lower()
+    mode = raw_mode if raw_mode in (MODE_FULL, MODE_INCREMENTAL) else MODE_FULL
+    if raw_mode and raw_mode not in (MODE_FULL, MODE_INCREMENTAL):
+        notes.append(f"模式「{raw_mode}」认不出来，已按全量估算。")
+
+    raw_files = _first_arg(args, "files", "planned_files")
+    planned_files = _parse_int(raw_files)
+    if raw_files and planned_files is None:
+        notes.append(f"目标文件数「{raw_files}」不是有效数字，已按「不知道」处理。")
+
+    raw_baseline = _first_arg(args, "baseline", "reusable").lower()
+    baseline: Optional[bool] = None
+    if raw_baseline:
+        baseline = raw_baseline not in ("0", "false", "no", "off")
+
+    return project_id, {
+        "mode": mode,
+        "planned_files": planned_files,
+        "baseline_reusable": baseline,
+        "notes": notes,
+    }
+
+
+def analysis_estimate(
+    project_id: int,
+    *,
+    mode: str = MODE_FULL,
+    planned_files: Optional[int] = None,
+    baseline_reusable: Optional[bool] = None,
+    target_type: str = "weekly",
+    sample_limit: int = ESTIMATE_SAMPLE_LIMIT,
+) -> dict[str, Any]:
+    """**执行前**的代价区间（AI-P1-03）：取数在这里，算术在 `services/ai/usage.py`。
+
+    取数与算术分开不是分层洁癖：估算要能在**建 job 的那一刻**算出来（第二波的
+    `planned_tokens_low/high`），那时不能有一条会读配置、会查时钟的链路横在里面。
+    这里做的是「查最近同类运行 + 读配置里的分片数/轮次上限 + 解析价格表」，
+    然后原样交给纯函数。
+
+    ## 只把**有数**的运行当样本
+
+    `failed` 且三列全 NULL 的运行（实测里 20 条里有 5 条）参与缩放只会把区间拉偏 ——
+    它们没有 token 数，除了拖低「最近一次」什么也贡献不了。所以样本只取
+    `usage_from_run(...)["collected"]` 为真的那些，并在 `notes` 里写明排除了多少次
+    （不写的话，「最近一次实际值」看起来像是库里最新的那一次，可能对不上号）。
+
+    ## 同类的判据
+
+    `target_type`（默认 weekly）+ 运行模式（`scope`）。模式那一道由纯函数做：同模式的
+    样本一个都没有时它回落全部样本，并把这件事写进 `notes` —— 增量没有历史是常态。
+    """
+    table, errors = project_price_table(project_id)
+    config = get_project_analysis_config(project_id) or {}
+    model = str(config.get("api_model") or "")
+    query = AiAnalysisRun.query.filter_by(project_id=project_id)
+    if target_type:
+        query = query.filter(AiAnalysisRun.target_type == target_type)
+    rows = query.order_by(AiAnalysisRun.created_at.desc()).limit(sample_limit).all()
+
+    samples = [
+        estimation_sample(run, price_table=table)
+        for run in rows
+        if usage_from_run(run, price_table=table)["collected"]
+    ]
+    estimate = estimate_analysis(
+        planned_files=planned_files,
+        mode=mode,
+        baseline_reusable=baseline_reusable,
+        recent_runs=samples,
+        shard_count=_int_or_zero(config.get("subagent_count")) or None,
+        max_rounds=_int_or_zero(config.get("max_analysis_rounds")) or None,
+        max_tool_requests=(
+            _int_or_zero(config.get("max_tool_requests"))
+            if config.get("max_tool_requests") is not None
+            else None
+        ),
+        price_table=table,
+        model=model,
+    )
+    excluded = len(rows) - len(samples)
+    if excluded:
+        estimate["notes"] = [
+            *estimate["notes"],
+            f"最近 {len(rows)} 次运行里有 {excluded} 次没有上报用量（失败在半路），"
+            "它们不参与估算，「最近一次实际值」指的也是最近一次**有上报**的那次。",
+        ]
+    # 价格表的状态也一并带出去：界面据此决定「显示费用」还是「提示去配置」
+    # （`DEFAULT_PRICE_TABLE` 是空表，这是常态，不是异常）。
+    estimate["pricing"] = _price_block(table, errors)
+    estimate["generated_at"] = _iso(datetime.now(timezone.utc))
+    return estimate
+
+
 def project_usage(
     project_id: int,
     filters: Optional[UsageFilters] = None,
@@ -1069,6 +1249,7 @@ def project_usage(
                 "cache": group_stats["cache"],
                 "tools": group_stats["tools"],
                 "missing_runs": group_stats["missing_runs"],
+                "reported_samples": group_stats["reported_samples"],
                 "cost": group_stats["cost"],
                 "last_run_at": _iso(
                     max((run.created_at for run in group if run.created_at), default=None)
@@ -1090,6 +1271,7 @@ def project_usage(
         "cache": stats["cache"],
         "tools": stats["tools"],
         "missing_runs": stats["missing_runs"],
+        "reported_samples": stats["reported_samples"],
         "cost": stats["cost"],
     }
     return {

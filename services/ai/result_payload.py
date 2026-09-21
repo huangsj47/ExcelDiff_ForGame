@@ -21,7 +21,7 @@ from typing import List, Tuple
 from services.ai.engine import EngineOutcome
 from services.ai.rules import anomaly_fingerprint
 from services.ai.usage import usage_from_outcome
-from services.ai.verdict import read_ruling, retracted_fingerprints, ruling_rows
+from services.ai.verdict import retracted_fingerprints, ruling_rows
 
 # 「额度用尽没轮到的」最多往结果里放几条。界面只展示前几条、其余归到「等 N 条」，
 # 所以多放没有用；而额度用尽那一轮模型可能一口气要几十个请求，整份列表会白白撑大
@@ -46,8 +46,19 @@ def coverage_notice_text(coverage) -> str:
       **取数失败的文件路径**（例如 `config/奖励模式表_CfgRewardMode.xlsx`）。它有一条
       明文取舍 ——「正文里提到过**不算**采纳」，把平台自己列的缺口路径混进那段文本，
       就是往这个判据里塞平台自己的字；
-    * 报告正文还会被别的环节读回去（下一轮的基线摘要、裁决块 `verdict.read_ruling`），
+    * 报告正文还会被别的环节读回去（下一轮的基线摘要、**当初那个**把裁决从正文里解析
+      回来的 `verdict.read_ruling` —— 它已随 AI-P0-05 删除，见下面的追记），
       平台追加的段落会跟着一起进去。
+
+    **2026-09-21 追记**：第二条里的裁决块已经没了（AI-P0-05：裁决走
+    `EngineOutcome.verdict`，不再从正文反向解析），第一条里的字符串判据也整套删了
+    （AI-P0-06：对账只按 `source_candidate_ids` 的 ID 集合，不比文件路径、不比标题）。
+    也就是说，**当初这两条理由现在都不成立了**。
+
+    但结论不变，而且现在多了一条更硬的理由：**报告正文只能有一份给人看的规范结论**
+    （AI-P1-01）。覆盖段是「这一次看全了没有」的账，它是**平台补充**，与结论本身并列
+    显示（`static/js/ai_context_notice.js` 贴在结论后面），而不是结论正文的一部分。
+    混进正文会让「正文」这个字段同时承担两种语义，导出、抽屉、下一轮基线都读它。
 
     放进 payload 里当**独立一个键**（`coverage_notice`），报告正文因此**逐字不变** ——
     上面两条判据连碰都碰不到它。屏幕侧由 `static/js/ai_context_notice.js` 贴到结论后面
@@ -85,6 +96,11 @@ def _anomaly_entry(item, row: dict | None) -> dict:
     `evidence_capped`）都是**同一条口径**：裁决对这条结论做了什么，读侧不必回去解析报告
     正文就能看到。少了它们，界面只能显示「裁决是 X」而显示不出「平台为什么还压了它的
     置信度」—— 后者是「降了不写」那一类缺陷的落点。
+
+    `source_candidate_ids`（同日补）是同一件事的另一半：这条结论**来源于哪几条分片候选**。
+    它必须落库 —— 候选对账（`family_ledger.reconcile_candidates`）在**落库之后**还要按它
+    复核「这条候选的去向」，而下一轮的基线、冻结结论的重放也都读这一份。不存的话，血缘
+    只活在这一次运行的内存里，任何一次回看都只能再去猜。
     """
     return {
         "fingerprint": anomaly_fingerprint(item),
@@ -98,6 +114,8 @@ def _anomaly_entry(item, row: dict | None) -> dict:
         "impact": item.impact or "",
         "suggestion": item.suggestion or "",
         "finding_id": str((row or {}).get("finding_id") or ""),
+        # 这条结论来源于哪几条分片候选（`S1-3` 这样的平台编号）。单代理路径为空。
+        "source_candidate_ids": [str(text) for text in item.source_candidate_ids or ()],
         # 模型在报告正文里自己编的那个编号（`R3`）；空 = 正文里没有能对上的那一条。
         "body_label": str((row or {}).get("body_label") or ""),
         "verify_verdict": str((row or {}).get("verdict") or ""),
@@ -156,6 +174,7 @@ def _final_findings_of(ruling: dict | None, kept: list, suppressed: frozenset) -
             "evidence_capped": False,
             "note": "",
             "body_label": "",
+            "source_candidate_ids": list(item.source_candidate_ids or ()),
             "fingerprint": anomaly_fingerprint(item),
             "title": item.title,
             "category": item.category,
@@ -239,10 +258,16 @@ def result_payload(
     """
     summary = payload.get("summary") or {}
     risk_level, risk_reasons = risk_level_from_outcome(outcome, summary)
-    # 复核裁决（`verdict.read_ruling`）：报告里那一行机器可读的块。取不到 = 这次没有复核
-    # （单代理路径 / 没开对账轮 / 复核对结论没有产生任何影响），下面两个额外条件都退化成
-    # 「什么都不做」—— 单代理那条路逐字不变。
-    ruling = read_ruling(outcome.report_markdown)
+    # 复核裁决：`EngineOutcome.verdict` 那一份**结构化**的结果（`verdict.Reduction.as_dict()`）。
+    #
+    # 2026-09-21 之前这一行是 `read_ruling(outcome.report_markdown)` —— 平台把机器状态
+    # 序列化成报告正文末尾的一行 HTML 注释，再从 markdown 里反向解析回来。两头都错：
+    # 写进去的那一段在安全 Markdown 渲染器下会变成可见的乱码（实测占 run 20 正文的
+    # 35.3%），而「从给人看的文本里恢复机器状态」本来就不该是一条契约。
+    #
+    # 取不到 = 这次没有复核（单代理路径 / 没开对账轮），或者复核对结论没有产生任何影响
+    # —— 下面两个额外条件都退化成「什么都不做」，单代理那条路逐字不变。
+    ruling = outcome.verdict if isinstance(outcome.verdict, dict) and outcome.verdict else None
     retracted = retracted_fingerprints(ruling)
     kept = [
         item
@@ -256,7 +281,21 @@ def result_payload(
     return {
         "risk_level": risk_level,
         "risk_reasons": risk_reasons,
+        # **给人看的那一份报告正文**（= `ai_analysis_run.response_text`）。
+        # 里面对外只有一个规范结论：平台那几节（复核裁决 / 未归类 / 条数上限 / 信息缺口），
+        # 子代理模式下模型自己写的那份汇总草稿与对账轮原文**都不在这里**（见下面
+        # `draft_markdown` / `verify_report_markdown`）。
+        #
+        # **一个字节的机器 JSON 都不许有**：裁决走 `outcome.verdict`，正文只给人读
+        # （AI-P0-05）。从前这里还会带一行 `<!-- ai-verify-ruling: {...} -->`。
         "report_markdown": outcome.report_markdown,
+        # **模型自己写的那份汇总草稿**：只在它被移出正文时有值（没开对账轮的那些运行里，
+        # 它就是上面那份正文，再存一份等于同一段字节在载荷里出现两次）。它是**存档**，
+        # 默认不渲染 —— 屏幕与导出读的都是上面那份规范正文（AI-P1-01）。
+        "draft_markdown": outcome.draft_markdown,
+        # 对账轮的整份原文（同样只作为存档；它的结论已经由平台按裁决**结果**渲染进了
+        # 正文的「复核裁决（平台）」那一节，原文里那个 json 块也已被摘掉）。
+        "verify_report_markdown": outcome.verify_report_markdown,
         "status": outcome.status,
         "degradation": outcome.degradation,
         "degradation_label": outcome.degradation_label,
@@ -365,6 +404,11 @@ def failed_result(summary: dict, message: str) -> dict:
         "risk_level": determine_risk_level(summary),
         "risk_reasons": [message, "该等级仅按变更规模估算，**不是**模型评估结果"],
         "report_markdown": "",
+        # 形状与 `result_payload` 一致（读侧只写一处 `payload.get("report_markdown")`）。
+        # 没发起分析当然没有草稿与对账轮原文，但**键必须在** —— 少一个键与空串在界面上
+        # 的区别是「这一块永远空着」与「这次没有这两份存档」。
+        "draft_markdown": "",
+        "verify_report_markdown": "",
         "status": "failed",
         "degradation": "not_started",
         "degradation_label": message,

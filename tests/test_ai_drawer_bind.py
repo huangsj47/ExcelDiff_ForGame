@@ -43,6 +43,18 @@ DRAWER_IDS = {
     "templates/merged_project_view.html": "weeklyAiDrawer",
 }
 
+# 整行都是注释的行：静态断言前要剥掉。注释里会**原样引用**要禁掉的写法
+# （本仓库的习惯就是把符号写进解释性注释），不剥就会「注释一写、测试就红」。
+_COMMENT_LINE_PREFIXES = ("//", "*", "/*")
+
+
+def _code_lines(source: str) -> list:
+    """只留代码行（整行注释丢掉）。行内注释保留 —— 粗剥比不剥安全。"""
+    return [
+        line for line in source.splitlines()
+        if not line.lstrip().startswith(_COMMENT_LINE_PREFIXES)
+    ]
+
 DRIVER = r"""
 const fs = require('fs');
 const vm = require('vm');
@@ -265,13 +277,39 @@ class TestEveryTemplateWiresItUp:
         assert 'tabindex="-1"' in line, f"{name} 的抽屉容器没有 tabindex=-1，焦点进不去"
 
     def test_no_template_hand_rolls_its_own_escape_handler(self):
-        """Esc 的实现只许有一份（在共享模块里）。
+        """抽屉的 Esc 只许有一份（在共享模块里）；模板自己的**模态框**可以有自己的。
 
-        周版本页原先手写了一段；留着它，两处判定就会各自演化 —— 而这正是这一组
-        用例存在的理由（「三份模板各写一遍必然分叉」，已经分叉过）。
+        ## 这条为什么从「一律禁止」改成「必须拦住冒泡」
+
+        原先这条是 `assert "event.key !== 'Escape'" not in source` —— 一律禁止。
+        本轮 `weekly_version_diff.html` 加了一个**自定义确认框**（`weekly-ai-dialog`，
+        「取消这次全量」用它），它自己 `addEventListener('keydown', onKey, true)`
+        捕获阶段处理 Esc，并且**显式 `stopPropagation()`**：
+
+            // Esc 只关这个框：抽屉自己也认 Esc（`AiDrawerTabs.bindDrawer`），
+            // 不拦住的话「取消这次全量」会顺手把抽屉也关掉。
+
+        那是一个**与抽屉无关**的 Esc 处理器，一律禁止就是**假失败**，会逼着后来者
+        要么把这条测试删掉、要么把模态框写坏。所以判据收窄到它真正保护的不变量：
+
+        * 模板里若出现手写的 Esc 判定，它**必须**拦冒泡 —— 因为一个不拦冒泡的模板级
+          Esc 处理器会与抽屉那一份互相干扰（这正是当初那个 bug 的形态：周版本页手写了
+          一段，两处判定各自演化）；
+        * 抽屉那一份仍然由 `test_the_template_calls_bind_drawer` 钉住（每个模板都必须
+          调 `AiDrawerTabs.bindDrawer` 并传自己的抽屉 id）。
+
+        **这条仍然拦不住的**：一个既拦冒泡、又去关抽屉的手写处理器。那种写法现在没有，
+        而它比原来的 bug 更刻意 —— 真出现时靠 code review，不靠这条。
         """
         for name in TEMPLATES:
-            source = (PROJECT_ROOT / name).read_text(encoding="utf-8")
-            assert "event.key !== 'Escape'" not in source, (
-                f"{name} 里又出现了手写的 Esc 判定 —— 请用 AiDrawerTabs.bindDrawer"
-            )
+            lines = _code_lines((PROJECT_ROOT / name).read_text(encoding="utf-8"))
+            for index, line in enumerate(lines):
+                if "event.key !== 'Escape'" not in line:
+                    continue
+                # 手写的 Esc 处理器很短（判定 + 拦冒泡 + 关闭），看后面几行够了。
+                window = "\n".join(lines[index:index + 8])
+                assert "stopPropagation" in window, (
+                    f"{name}:{index + 1} 有一段手写的 Esc 判定却**没有拦住冒泡** —— "
+                    "它会和抽屉那一份互相干扰。抽屉的 Esc 请用 AiDrawerTabs.bindDrawer；"
+                    "模板自己的模态框要在处理器里 event.stopPropagation()。"
+                )

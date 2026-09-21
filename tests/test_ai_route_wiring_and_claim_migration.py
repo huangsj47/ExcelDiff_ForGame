@@ -23,6 +23,7 @@ import json
 import textwrap
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, inspect
@@ -187,10 +188,11 @@ def test_the_exported_report_carries_the_coverage_ledger():
 
 
 def test_the_exported_report_drops_the_machine_readable_ruling_block():
-    """导出的是**给人读的** markdown，那一行引擎注释不许出现在下载的文件里。
+    """**历史数据**那一行引擎注释不许出现在下载的文件里（AI-P0-05）。
 
-    它是给平台读回去的（`result_payload.read_ruling`），网页渲染看不见，但用户下载的
-    文件里就是一行 `<!-- ai-verify-ruling: {...} -->`。正文一个字都不许因此少掉。
+    新运行不再写这个块（裁决走 `EngineOutcome.verdict`），但库里已有的那几条会一直被
+    读到 —— 导出这条路径仍然要摘掉它（`verdict.strip_ruling_block`，与清理脚本同一份
+    正则）。正文一个字都不许因此少掉。
     """
     raw = "第一行结论。\n\n<!-- ai-verify-ruling: {\"changed\": 1, \"rows\": []} -->"
     assert verdict.RULING_BLOCK_MARKER in raw, "构造的正文里没有那个块，这条用例什么都没测"
@@ -469,3 +471,144 @@ def test_apply_schema_migrations_builds_the_claim_column_and_unique_index(tmp_pa
     finally:
         stub.session.close()
         engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+#  四、一次性数据清理：把历史行里那段机器 json 擦掉（AI-P0-05）
+# ---------------------------------------------------------------------------
+# 库里已经落下的那几行（实测 run 15 / run 20）会一直被读到 —— 抽屉、历史列表、导出。
+# 新代码不再写它，但**已经写进去的**得有人擦。脚本本身很简单，容易出错的是它周边的
+# 三条约束：默认不写库、幂等、只动那两列。三条都在这里钉住。
+
+SCRIPT_PATH = (
+    Path(__file__).resolve().parents[1] / "scripts" / "clean_ruling_block_from_runs.py"
+)
+BLOCK = (
+    '<!-- ai-verify-ruling: {"verdicts_seen": 1, "rows": [{"finding_id": "F1"}]} -->'
+)
+
+
+def _load_cleanup_script():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("clean_ruling_block", SCRIPT_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _temp_run_db(tmp_path) -> str:
+    """一个只带 `ai_analysis_run` 那三列的小库（不碰 instance/ 那个真库）。"""
+    import sqlite3
+
+    path = tmp_path / "runs.db"
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE ai_analysis_run (id INTEGER PRIMARY KEY, response_text TEXT,"
+        " response_payload TEXT)"
+    )
+    payload = json.dumps(
+        {
+            "risk_level": "high",
+            "report_markdown": f"# 报告\n\n第一行结论。\n\n{BLOCK}",
+            "final_findings": [{"finding_id": "F1", "active": False}],
+        },
+        ensure_ascii=False,
+    )
+    conn.execute(
+        "INSERT INTO ai_analysis_run (id, response_text, response_payload) VALUES (?, ?, ?)",
+        (1, f"# 报告\n\n第一行结论。\n\n{BLOCK}", payload),
+    )
+    # 一条干净的运行：脚本不许碰它（幂等的另一半）。
+    clean_payload = json.dumps(
+        {"risk_level": "low", "report_markdown": "# 报告\n\n没问题。\n"}, ensure_ascii=False
+    )
+    conn.execute(
+        "INSERT INTO ai_analysis_run (id, response_text, response_payload) VALUES (?, ?, ?)",
+        (2, "# 报告\n\n没问题。\n", clean_payload),
+    )
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+def _read_rows(db_path: str) -> dict:
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        return {
+            row[0]: (row[1], row[2])
+            for row in conn.execute(
+                "SELECT id, response_text, response_payload FROM ai_analysis_run"
+            )
+        }
+    finally:
+        conn.close()
+
+
+def test_the_cleanup_script_does_not_touch_the_db_without_apply(tmp_path):
+    """**默认只打印。** 生产库上可能正跑着真实分析 —— 「跑一下看看」不能改别人的数据。
+
+    这里断言的是**库没变**而不是打了什么字：本项目 `pytest.ini` 配了 `-s`（capture
+    关着），stdout 断言在别的运行方式下会变成永远为真的空检查。要读「还剩几条」就调
+    脚本自己的查询函数（`_rows_needing_cleanup`）——那是它真正的判据。
+    """
+    module = _load_cleanup_script()
+    db_path = _temp_run_db(tmp_path)
+    before = _read_rows(db_path)
+
+    assert module.main(["--db", db_path]) == 0
+
+    assert _read_rows(db_path) == before, "没加 --apply 却写库了"
+    assert len(_rows_with_block(module, db_path)) == 1, "预览模式该识别出这一条要清"
+
+
+def test_the_cleanup_script_strips_both_columns_and_is_idempotent(tmp_path):
+    module = _load_cleanup_script()
+    db_path = _temp_run_db(tmp_path)
+
+    assert module.main(["--db", db_path, "--apply"]) == 0
+    text, payload = _read_rows(db_path)[1]
+    assert "ai-verify-ruling" not in text
+    assert "第一行结论。" in text, "摘块把正文一起摘掉了"
+    assert "ai-verify-ruling" not in payload
+    # 摘块顺带把正文末尾的空白去掉（`strip_ruling_block` 的既有行为，导出也用它）。
+    assert json.loads(payload)["report_markdown"] == "# 报告\n\n第一行结论。"
+    # **结论本体一个字节都不许动**：清的是副本，不是数据。
+    assert json.loads(payload)["final_findings"] == [{"finding_id": "F1", "active": False}]
+    # 干净的那一行原样不动。
+    assert _read_rows(db_path)[2] == (
+        "# 报告\n\n没问题。\n",
+        json.dumps(
+            {"risk_level": "low", "report_markdown": "# 报告\n\n没问题。\n"},
+            ensure_ascii=False,
+        ),
+    )
+
+    # 幂等：第二次跑之后「需要清理的行」还是 0 条，而不是越跑越少。
+    after_first = _read_rows(db_path)
+    assert module.main(["--db", db_path, "--apply"]) == 0
+    assert _rows_with_block(module, db_path) == []
+    assert _read_rows(db_path) == after_first, "第二次跑动了不该动的行"
+
+
+def test_the_cleanup_script_refuses_a_missing_database(tmp_path):
+    """库文件不存在时报错退出 —— `sqlite3.connect` 会顺手建一个空库，那比什么都不做更糟。"""
+    module = _load_cleanup_script()
+    missing = tmp_path / "nope.db"
+
+    assert module.main(["--db", str(missing)]) == 2
+    assert not missing.exists(), "脚本把一个不存在的库「建」了出来"
+
+
+def _rows_with_block(module, db_path: str) -> list:
+    """脚本自己的「还有哪些行要清」查询（用它判幂等，不解析 stdout）。"""
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        return module._rows_needing_cleanup(conn.cursor())
+    finally:
+        conn.close()

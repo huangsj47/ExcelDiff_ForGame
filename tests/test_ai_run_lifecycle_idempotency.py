@@ -31,11 +31,19 @@ from pathlib import Path
 import pytest
 from sqlalchemy import text as sa_text
 
+import services.ai.job_service as job_service
 import services.ai_analysis_service as ai_service
+import services.task_worker_service as worker
 from app import app as flask_app
 from app import create_tables, db
-from models import Project, Repository, WeeklyVersionConfig
-from models.ai_analysis import AiAnalysisRun
+from models import BackgroundTask, Project, Repository, WeeklyVersionConfig
+from models.ai_analysis import (
+    MODE_INCREMENTAL,
+    STATE_CANCELLED,
+    AiAnalysisJob,
+    AiAnalysisRun,
+    AiWeeklyAnalysisState,
+)
 from models.ai_analysis.analysis_run import STALE_RUNNING_SECONDS
 from models.weekly_version import WeeklyVersionDiffCache
 from services.ai_analysis_service import ActiveAnalysisConflict
@@ -324,32 +332,67 @@ def _events(text: str) -> list:
     return events
 
 
-def test_the_manual_stream_attaches_to_the_running_analysis(monkeypatch):
-    """手工路径撞上「同一输入已经在跑」：**不重复发起**，而是附着到那一次上。
+def test_the_manual_entry_does_not_start_a_second_run_for_the_same_input(monkeypatch):
+    """手工路径撞上「同一输入已经在跑」：**不重复发起**，也**不许把 job 留成非终态**。
 
-    附着的意思是把运行号交出去：界面据此继续轮询那一次的进度、等它的结论 ——
-    用户看到的是「它还在跑」，而不是「我又按了一次，界面什么都没发生」。
+    P0-01 之后手工入口是 `POST /jobs` → 任务 → `run_weekly_analysis_background`：
+    那一次执行会撞上 `_create_run` 的 UNIQUE 约束（同一份输入的认领握在别人手里），
+    于是按 `skipped/already_running` 结束 —— **一个模型请求都不发**。
+
+    这里同时钉住第二件事（第二波收尾补上的那一跳）：这条 job **没有建出 run**，
+    所以它必须由 `settle_without_run` 收口。不收口的后果是 `active_key` 永远占着
+    唯一索引 —— 同一个 target 此后**再也建不出 job**（用户点按钮只会附着到它上面）。
     """
     seeded = _seed()
     calls: list = []
     with flask_app.app_context():
         holder = _create(seeded)
         _stub(monkeypatch, seeded, calls)
-        events = _events(
-            "".join(ai_service.stream_weekly_analysis(seeded["config_id"]))
-        )
-        names = [name for name, _ in events]
 
-        assert "run" not in names, f"重复发起了一次分析：{events}"
-        assert calls == [], "重复发起了一次会花钱的模型调用"
-        waiting = [payload for name, payload in events if name == "waiting"]
-        assert waiting, f"没有告诉界面「已经有一次在跑」：{events}"
-        assert waiting[0]["reason"] == "already_running", waiting[0]
-        assert waiting[0]["run_id"] == holder.id, waiting[0]
-        assert AiAnalysisRun.query.filter_by(
-            target_type="weekly", target_key=seeded["group_key"]
-        ).count() == 1
-        _cleanup([holder.id])
+        config = db.session.get(WeeklyVersionConfig, seeded["config_id"])
+        created = job_service.create_or_attach_job(
+            config=config, requested_mode=MODE_INCREMENTAL, trigger_source="manual"
+        )
+        db.session.commit()
+        job_id = created.job.id
+        task_id = created.job.task_id
+        try:
+            assert task_id, "job 没有排出去任务，这一跳跑不起来"
+            worker._handle_weekly_ai_analysis_task(
+                {"type": "weekly_ai_analysis", "config_id": seeded["config_id"],
+                 "task_id": task_id}
+            )
+            db.session.commit()
+
+            assert calls == [], "重复发起了一次会花钱的模型调用"
+            assert AiAnalysisRun.query.filter_by(
+                target_type="weekly", target_key=seeded["group_key"]
+            ).count() == 1, "又建了一条运行（= 同一份输入付两次费）"
+
+            job = db.session.get(AiAnalysisJob, job_id)
+            assert job.state == STATE_CANCELLED, (
+                f"没有 run 的结局没有把 job 收口，它停在 {job.state} —— "
+                "active_key 会永远占着唯一索引，同一个 target 再也建不出 job"
+            )
+            assert job.active_key is None
+        finally:
+            _drop_job_and_state(job_id, seeded["group_key"], [holder.id])
+
+
+def _drop_job_and_state(job_id, group_key, run_ids) -> None:
+    """收掉本用例建出来的 job 行（`active_key` 非空会占着唯一索引）。"""
+    row = db.session.get(AiAnalysisJob, job_id)
+    if row is not None:
+        if row.active_key is not None:
+            row.active_key = None
+            db.session.commit()
+        db.session.delete(row)
+        db.session.commit()
+    AiWeeklyAnalysisState.query.filter_by(group_key=group_key).delete()
+    BackgroundTask.query.filter(
+        BackgroundTask.file_path == group_key
+    ).delete(synchronize_session=False)
+    _cleanup(run_ids)
 
 
 def test_the_background_entry_skips_when_a_manual_run_holds_the_claim(monkeypatch):

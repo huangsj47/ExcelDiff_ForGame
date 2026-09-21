@@ -661,3 +661,230 @@ def test_the_dimension_column_falls_back_when_the_result_has_no_list(tmp_path, m
         body = response.get_data(as_text=True)
         assert "未归类（performance）" in body
         assert "平台没有丢弃它们" in body
+
+
+# ===========================================================================
+# 四条读路径读的是**同一份**正文，而且里面没有机器 JSON（AI-P0-05 / AI-P1-01）
+# ===========================================================================
+# 抽屉（`/runs/<id>/report`）、历史（`/weekly/<id>/history`）、导出（`report.md`）、
+# SSE（`result` 事件的 payload）此前在这一点上并不一致：导出会摘掉那行机器注释，
+# 抽屉、历史、SSE 原样回。于是同一份结论在四个地方长得不一样 —— 而**用户看到的那三个
+# 地方**恰好是带着机器 json 的（实测 run 20 的正文里 35.3% 是它）。
+#
+# 现在机器裁决走结构化字段（`EngineOutcome.verdict`），正文里只有给人看的内容，
+# 四条路径因此天然一致；这四条用例钉住「以后也一致」。
+
+def _canonical_report() -> str:
+    """一份**平台视角**的规范正文：裁决节 + 条数上限的一节，没有一行机器 JSON。"""
+    return (
+        "## 复核裁决（平台）\n\n"
+        "本节是平台按对账轮（找反证）的结构化裁决渲染的**最终口径**……\n\n"
+        "### 已撤销 1 条（移出当前结论清单）\n\n"
+        "- **[F1]（正文 R1）【道具】ID 被删除但生成文件仍在**："
+        "原 `critical` / `very_high` → **反证成立（撤销）**，已从当前结论清单移除；"
+        "理由：同一提交里生成文件已经删掉了。\n"
+    )
+
+
+def _conclusion_payload(report_text: str) -> dict:
+    """落库的那一份结论载荷（形状与 `result_payload` 一致，只留这几条读路径要用的键）。"""
+    return {
+        "risk_level": "high",
+        "risk_reasons": ["模型报出 1 条"],
+        "report_markdown": report_text,
+        "draft_markdown": "# 变更理解\n\n汇总草稿（存档，默认不渲染）。\n",
+        "verify_report_markdown": "## 对账结果（找反证）\n\n未找到反证。\n",
+        "anomalies": [],
+        "final_findings": [],
+        "retracted_findings": [
+            {"finding_id": "F1", "title": "【道具】ID 被删除但生成文件仍在", "active": False}
+        ],
+    }
+
+
+def test_the_drawer_and_the_export_read_the_same_canonical_report():
+    """导出与抽屉**逐字一致**：同一份 `response_text`，同一份结论载荷。
+
+    两处各拼一份（一边 strip、一边不 strip）正是「同一件事在报告里出现两遍、而且两遍
+    说法不同」的温床 —— 用户在屏幕上看到的与下载下来的必须是同一份正文。
+    """
+    report_text = _canonical_report()
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        run = _run(
+            project_id=project.id,
+            target_type="weekly",
+            target_id=cfg.id,
+            response_text=report_text,
+            payload=_conclusion_payload(report_text),
+        )
+        with app.test_client() as client:
+            _login(client)
+            drawer = client.get(f"/ai-analysis/runs/{run.id}/report")
+            export = client.get(f"/ai-analysis/runs/{run.id}/report.md")
+
+    assert drawer.status_code == 200 and export.status_code == 200
+    drawn = drawer.get_json()["result"]
+    body = export.get_data(as_text=True)
+    assert drawn["response_text"] == report_text, "抽屉读的不是落库的那份正文"
+    assert drawn["result"]["report_markdown"] == report_text, (
+        "结论载荷里的正文与落库那一列不一致（同一份东西两个值）"
+    )
+    assert report_text in body, "导出没有用同一份正文（读者该看到的那几节不见了）"
+
+
+@pytest.mark.parametrize("path", ["drawer", "export", "history"])
+def test_no_read_path_shows_the_machine_json(path):
+    """机器 JSON 不许出现在**任何**一条读路径上（包括历史列表那一行摘要）。"""
+    report_text = _canonical_report()
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        run = _run(
+            project_id=project.id,
+            target_type="weekly",
+            target_id=cfg.id,
+            target_key=ai_service.build_weekly_group_key(cfg),
+            response_text=report_text,
+            payload=_conclusion_payload(report_text),
+        )
+        with app.test_client() as client:
+            _login(client)
+            if path == "drawer":
+                response = client.get(f"/ai-analysis/runs/{run.id}/report")
+            elif path == "export":
+                response = client.get(f"/ai-analysis/runs/{run.id}/report.md")
+            else:
+                response = client.get(f"/ai-analysis/weekly/{cfg.id}/history")
+
+    body = response.get_data(as_text=True)
+    assert verdict.RULING_BLOCK_MARKER not in body, f"{path} 这条路上又出现了机器 json"
+    assert "<!--" not in body, f"{path} 这条路上出现了 HTML 注释（渲染器会把它显示出来）"
+    if path == "history":
+        assert "未找到反证" not in body, "历史列表把对账轮的原文也带出来了（那是存档）"
+
+
+def test_the_sse_result_event_carries_the_same_canonical_payload(monkeypatch):
+    """SSE 的 `result` 事件 = 落库的那一份结论载荷（**同一个 dict**），不含机器 json。
+
+    P0-01 之后周版本那条流的入口是 `GET /ai-analysis/jobs/<id>/events`（**只订阅**）；
+    它的终结帧由 `job_service.result_payload(job)` 拼出来 —— 也就是「落库的
+    `response_payload` + `run_id` + `status`」。界面渲染的就是那一份正文。
+
+    这条用例走**真路由 + 真登录**：主题（正文里有没有机器 json、给人看的那一节在不在）
+    没变，变的只是承载它的那一层。
+    """
+    import services.ai.job_service as job_service
+    import services.ai_analysis_service as ai_service_module
+    from models.ai_analysis import MODE_INCREMENTAL, AiAnalysisJob
+    from services.ai.result_payload import result_payload
+    from tests import test_ai_verify_verdict as vv
+
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        ai_service_module.set_project_api_key(project.id, "sk-test", updated_by="tester")
+        # 一次**真实的**子代理运行（含对账轮与撤销裁决），走真实的 reducer 与载荷构造。
+        outcome = vv._run(
+            vv._critical_round(
+                vv._verdict_reply(
+                    {
+                        "finding_id": "F1",
+                        "verdict": "retracted",
+                        "reason": "同一提交里生成文件已经删掉了",
+                        "evidence_refs": ["config/[30]道具表_CfgItem.xlsx 第 12 行"],
+                    }
+                )
+            )
+        ).outcome
+        result = result_payload(outcome, {"summary": {}}, suppressed=frozenset())
+        assert result["report_markdown"], "构造没生效：这次运行没有正文"
+        assert verdict.RULING_BLOCK_MARKER not in result["report_markdown"], "构造没生效"
+
+        # 一条终态 job + 它那条 run（`response_payload` 就是落库的那一份结论）。
+        job = AiAnalysisJob(
+            project_id=project.id,
+            target_type="weekly",
+            target_id=cfg.id,
+            target_key=ai_service.build_weekly_group_key(cfg),
+            requested_mode=MODE_INCREMENTAL,
+            state="queued",
+            trigger_source="manual",
+            focus="all",
+        )
+        db.session.add(job)
+        db.session.commit()
+        job_id = job.id
+        run = _run(
+            project_id=project.id,
+            target_type="weekly",
+            target_id=cfg.id,
+            target_key=ai_service.build_weekly_group_key(cfg),
+            request_payload=json.dumps(_stream_payload(project.id, cfg)),
+        )
+        run.response_payload = json.dumps(result, ensure_ascii=False)
+        run.response_text = result["report_markdown"]
+        run.active_key = None
+        db.session.commit()
+        try:
+            job_service.mark_running(job_id, run_id=run.id)
+            job_service.settle_from_run(run)
+            db.session.commit()
+
+            with app.test_client() as client:
+                _login(client)
+                text = client.get(
+                    f"/ai-analysis/jobs/{job_id}/events"
+                ).get_data(as_text=True)
+        finally:
+            row = db.session.get(AiAnalysisJob, job_id)
+            if row is not None:
+                db.session.delete(row)
+                db.session.commit()
+
+    events = _events(text)
+    kinds = [name for name, _ in events]
+    assert "result" in kinds, f"这条流没有以 result 收尾：{kinds}"
+    data = dict(events)["result"]
+    assert data["report_markdown"] == result["report_markdown"], (
+        "SSE 那份正文与落库那份不是同一个值"
+    )
+    dumped = json.dumps(data, ensure_ascii=False)
+    assert verdict.RULING_BLOCK_MARKER not in dumped, (
+        "交出去的结论载荷里又出现了机器 json"
+    )
+    assert "## 复核裁决（平台）" in data["report_markdown"], (
+        "给人看的那一节没发出去"
+    )
+
+
+def _stream_payload(project_id: int, cfg) -> dict:
+    """`build_weekly_payload` 的形状（只留 `_create_run` 与流式那几道闸门要读的键）。"""
+    return {
+        "mode": "weekly",
+        "scope": "full",
+        "focus": {"key": "all", "label": ""},
+        "group": {
+            "key": ai_service.build_weekly_group_key(cfg),
+            "base_name": cfg.name,
+            "project_id": project_id,
+            "config_ids": [cfg.id],
+            "start_time": None,
+            "end_time": None,
+        },
+        "summary": {"total_files": 3, "delta_files": 3},
+    }
+
+
+def _events(text: str) -> list:
+    """把 SSE 的一整段响应拆成 `(事件名, payload)`（与前端解析同一套口径）。"""
+    events = []
+    for block in text.split("\n\n"):
+        if not block.strip():
+            continue
+        name, payload = None, None
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                name = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                payload = json.loads(line[len("data:"):].strip())
+        events.append((name, payload))
+    return events

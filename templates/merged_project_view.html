@@ -537,6 +537,82 @@
         .ai-analysis-output.is-busy::before { animation: none !important; }
     }
     /* ===== AI 抽屉样式 结束 ===== */
+    /* ===== AI-P0-03：双入口的确认框（三份模板同一套） =====
+       画在 `<body>` 下、抽屉之外：抽屉是固定定位 + 内部滚动，弹层挂在里面会被裁掉
+       （与「历次结论」弹层同一个理由）。颜色只用既有主题令牌，深浅色都不另配一套。 */
+    .weekly-ai-dialog-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 2000;
+        background: rgba(15, 23, 42, 0.45);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: var(--space-4, 16px);
+    }
+    .weekly-ai-dialog {
+        width: min(560px, 92vw);
+        max-height: 86vh;
+        overflow: auto;
+        padding: var(--space-5, 20px);
+        border-radius: var(--radius-xl, 8px);
+        background: var(--color-surface, var(--ai-surface, #fff));
+        color: var(--color-text, var(--ai-text, #1e293b));
+        box-shadow: 0 18px 48px rgba(15, 23, 42, 0.28);
+    }
+    .weekly-ai-dialog__title {
+        margin: 0 0 var(--space-2, 8px);
+        font-size: var(--font-size-lg, 16px);
+        font-weight: 600;
+        line-height: 1.4;
+    }
+    .weekly-ai-dialog__intro {
+        margin: 0 0 var(--space-3, 12px);
+        font-size: var(--font-size-sm, 13px);
+        line-height: 1.7;
+    }
+    /* 事实那一栏用 dt/dd 两个词：一行一件事，读屏也念得出「预计 token：1,200 ~ 3,400」，
+       比一串「键=值」的等宽文本可读。 */
+    .weekly-ai-dialog__facts {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 4px var(--space-4, 16px);
+        margin: 0 0 var(--space-3, 12px);
+        font-size: var(--font-size-sm, 13px);
+        line-height: 1.7;
+    }
+    .weekly-ai-dialog__facts dt {
+        color: var(--color-text-muted, var(--ai-text-muted, #656d76));
+    }
+    .weekly-ai-dialog__facts dd {
+        margin: 0;
+        /* 数字用等宽：区间上下两行的位数对得上，扫一眼就能比 */
+        font-variant-numeric: tabular-nums;
+    }
+    .weekly-ai-dialog__note {
+        margin: 0 0 var(--space-4, 16px);
+        font-size: var(--font-size-sm, 12px);
+        line-height: 1.7;
+        color: var(--color-text-muted, var(--ai-text-muted, #656d76));
+    }
+    .weekly-ai-dialog__actions {
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: var(--space-2, 8px);
+    }
+    /* 两个动作按钮给到 32px 高，与抽屉 footer 的按钮同高（同一条视觉语言） */
+    .weekly-ai-dialog__actions .btn {
+        min-height: 32px;
+    }
+    @media (max-width: 575.98px) {
+        .weekly-ai-dialog { width: 96vw; padding: var(--space-4, 16px); }
+        .weekly-ai-dialog__facts { grid-template-columns: 1fr; gap: 0; }
+        .weekly-ai-dialog__facts dd { margin-bottom: var(--space-2, 8px); }
+        .weekly-ai-dialog__actions { justify-content: stretch; }
+        .weekly-ai-dialog__actions .btn { flex: 1 1 100%; }
+    }
 
     /* ===================================================================
        AI 分析配置面板（摘要卡片 + 配置模态框）
@@ -2302,7 +2378,13 @@
         <button type="button" class="btn btn-sm btn-outline-secondary" id="weeklyAiHistoryBtn">
             <i class="fas fa-clock-rotate-left" aria-hidden="true"></i> 历次结论
         </button>
-        <button type="button" class="btn btn-sm btn-primary" id="weeklyAiStartBtn">重新分析</button>
+        <!-- AI-P0-03 两个入口：**默认是增量**（绿），全量是红色危险语义 —— 它忽略基线、
+             更贵，所以由 JS 先摆出预计代价再问一次。三份模板同一套语法与文案
+             （`commit_diff_new.html` 只有一次「重新分析」：单提交没有增量基线）。 -->
+        <button type="button" class="btn btn-sm btn-success" id="weeklyAiStartBtn"
+                title="只分析上次结论之后变化的部分（默认）">增量分析</button>
+        <button type="button" class="btn btn-sm btn-danger" id="weeklyAiFullBtn"
+                title="忽略增量基线，对整个窗口重新做一次完整评审（更贵，会先给预计代价）">全量重新分析</button>
         <!-- 「导出 md」：把这一次的结论（报告原文 + 异常清单附录）交给浏览器下载。
              **刻意不写 `download` 属性** —— 空值会让浏览器按 URL 末段命名（report.md），
              把服务端拼好的中文文件名盖掉（响应带 Content-Disposition，见
@@ -4216,6 +4298,26 @@ function stopWeeklyAiWaitingPoll() {
     }
 }
 
+// 问服务端「这次点击登记成什么了」。读不到就返回 `null` —— **不许把读不到当成
+// 「没登记」**：那会把「不知道」说成「没这回事」，而这两件事的处置完全不同
+// （一个是继续等，一个是让用户重点一次、再花一次钱）。
+//
+// 只读端点，不建 run、不排队、不发模型请求（见 routes/ai_analysis_routes.ai_weekly_waiting）。
+// **用当前配置号**（不是 `waitingConfigId`）：调用它的是「连接断了」那条路，
+// 与某一次具体登记无关，问的是「这个分组现在有没有登记」。
+async function fetchWeeklyAiWaitingState() {
+    try {
+        const resp = await fetch(
+            `/ai-analysis/weekly/${weeklyAiCurrentConfigId}/waiting`, { cache: 'no-store' }
+        );
+        const data = await resp.json();
+        if (!data || !data.success) return null;
+        return data;
+    } catch (_err) {
+        return null;
+    }
+}
+
 function startWeeklyAiWaitingPoll() {
     stopWeeklyAiWaitingPoll();
     weeklyAiWaitingPolls = 0;
@@ -4375,6 +4477,15 @@ function openWeeklyAiDrawer(configId, versionName) {
     // 上一个版本「有没有结论」不是这个版本的答案：留着它，「开始分析」会照着版本 A
     // 的状况决定要不要弹「已有分析结果，确定重新分析吗？」。
     weeklyAiHasCached = false;
+    // **换目标 = 换身份**：上一个版本那次点击的 job 与幂等键都不再属于这里。
+    // 留着它们的后果是：在新版本上点一下会附着到**旧版本**那条 job 上
+    // （同一个幂等键 → 服务端按「同一次动作」处理）—— 用户在这个版本上什么都没发生。
+    if (weeklyAiJobConfigId && weeklyAiJobConfigId !== configId) {
+        rememberWeeklyAiJobId(null);
+        weeklyAiActionKey = null;
+        weeklyAiRunActive = false;
+        stopWeeklyAiJobPoll();
+    }
 }
 
 function closeWeeklyAiDrawer() {
@@ -4506,21 +4617,517 @@ async function refreshWeeklyAiLatest(configId) {
     return false;
 }
 
-async function startWeeklyAiAnalysis(force = false) {
+// ---------------------------------------------------------------------------
+//  这一次点击的 job（AI-P0-01：**创建与订阅是两件事**）
+//
+//  发起 = `POST /ai-analysis/weekly/<config_id>/jobs`：只建**身份**，不跑分析、不发
+//         任何模型请求 —— 所以「点两次」不该变成两次付费。
+//  订阅 = `GET /ai-analysis/jobs/<job_id>/events`：**只读**，重连不会创建任何东西。
+//
+//  为什么必须拆开：`EventSource` 默认会**自动重连**，而重连一条「GET 即创建任务」的流
+//  就是重复创建、重复付费；而同步没跑完时那次点击连可恢复的凭据都没有，页面只能报
+//  「没有运行号所以无法确认」—— 而库里那一次点击明明登记着。
+let weeklyAiJobId = null;
+// 这次点击属于哪个 config（换仓库时 `configId` 会变，身份要跟着一起换）。
+let weeklyAiJobConfigId = null;
+// **这一次动作的客户端幂等键**：同一次动作的所有重试（网络抖了、连按两下）复用同一个
+// 键，服务端据此判定「这还是一次动作」。它一直活到这次动作**跑完**为止 ——
+// 「关掉抽屉再打开又点一下」因此附着到同一条 job 上（不会变成第二次付费调用）；
+// 而刷新页面 = 一次新的动作（新键），那是对的。
+let weeklyAiActionKey = null;
+// 「等同步 / 排队」期间按 job_id 轮询（SSE 被中间设备掐断时的第二条路）。
+let weeklyAiJobPollTimer = null;
+let weeklyAiJobPolls = 0;
+// 用户在 provenance 提示里选了「仍然只做增量」：这次结论与基线**不可比**，报告顶部要写明。
+// 它只活在页面内存里（服务端那一列见 `AiAnalysisJob.baseline_provenance_mismatch`，
+// 但今天没有任何生产代码写它 —— `create_or_attach_job` 也没有接这个意图）。
+let weeklyAiMismatchAccepted = false;
+// 最近一次看到的「平台把增量升成了全量」那句话（POST 的响应 / `/jobs/<id>` 两条路都会写它）。
+let weeklyAiUpgradeNoticeText = '';
+
+// 这次分析要的模式。**默认是增量**（AI-P0-03 之后的默认动作），只有用户明确点了
+// 「全量重新分析」才会送 `full`。平台在没有可复用结论基线时仍会**自己把增量升成全量**，
+// 并把原因（`upgrade_reason=first_run`）落库可查 —— 那句话由 `weeklyAiUpgradeNotice`
+// 说给用户听，不静默。
+function weeklyAiModeValue() {
+    const select = document.getElementById('weeklyAiMode');
+    return select && select.value ? select.value : 'incremental';
+}
+
+function newWeeklyAiActionKey() {
+    return 'weekly-' + weeklyAiCurrentConfigId + '-' + Date.now().toString(36) + '-'
+        + Math.random().toString(36).slice(2, 10);
+}
+
+// 把这次点击的身份写进地址栏（`?ai_job=<id>`）：**刷新之后还认得它**。
+// 用 `replaceState` 而不是 `pushState`：它不是一次导航，不该往历史里塞一条
+// （塞了的话用户点「后退」会退回同一个页面，看着像按钮坏了）。
+function rememberWeeklyAiJobId(jobId) {
+    weeklyAiJobId = jobId ? String(jobId) : null;
+    weeklyAiJobConfigId = weeklyAiJobId ? weeklyAiCurrentConfigId : null;
+    try {
+        const url = new URL(window.location.href);
+        if (weeklyAiJobId) {
+            url.searchParams.set('ai_job', weeklyAiJobId);
+        } else {
+            url.searchParams.delete('ai_job');
+        }
+        window.history.replaceState(window.history.state, '', url.toString());
+    } catch (_err) {
+        // 写不进地址栏（老浏览器 / 沙箱）也**不影响这次分析**：内存里那份还在，
+        // 只是刷新之后认不出来。
+    }
+}
+
+function weeklyAiJobIdFromUrl() {
+    try {
+        return new URL(window.location.href).searchParams.get('ai_job') || null;
+    } catch (_err) {
+        return null;
+    }
+}
+
+// 读一条 job 的状态。**读不到返回 `null`** —— 调用方下一帧再试，不许当成「没这回事」：
+// 「不知道」与「没登记」的处置完全相反（一个是继续等，一个是让用户重点一次、再花钱）。
+async function fetchWeeklyAiJob(jobId) {
+    try {
+        const resp = await fetch(`/ai-analysis/jobs/${jobId}`, { cache: 'no-store' });
+        const data = await resp.json();
+        if (!data || !data.success) return null;
+        return data.job || null;
+    } catch (_err) {
+        return null;
+    }
+}
+
+// 一帧 SSE 的载荷。解析不出来就是 `{}` —— 调用方按「这一帧没有信息」处理，
+// **不抛异常**（抛出去会让整条监听器链在那一帧上停住，后面的事件再也收不到）。
+function parseWeeklyAiEvent(event) {
+    try {
+        return JSON.parse((event && event.data) || '{}');
+    } catch (_err) {
+        return {};
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  AI-P0-03：两个明确的入口 + 事前代价 + provenance 决策
+//
+//  **两个按钮说的是两件不同的事**（三份模板同一套语法）：
+//    * `#weeklyAiStartBtn` 绿 —— **增量分析**（默认）：只分析上次结论之后变化的部分；
+//    * `#weeklyAiFullBtn` 红 —— **全量重新分析**：忽略基线、整个窗口重跑一遍。它更贵，
+//      所以点下去先把代价与「这次能不能复用基线」摆出来再问。
+//
+//  两件必须说给用户听的事，不许静默：
+//    1. **平台把增量升成了全量**（`effective_mode=full` + `upgrade_reason`）—— 用户点的
+//       是增量、跑的是全量，这是平台替用户做的决定，理由必须在页面上看得见；
+//    2. **这次增量与基线不可比**（规则/提示词/模型变了）—— 结论本身仍然有效，但拿它
+//       与基线做对比是错的，报告上要写明。
+//
+//  「平台在执行中把增量升级为全量，事前让用户选」这一条**做不到**（升级决策发生在
+//  worker 里、快照冻结之后，见 `scope_sampling._decide_scope` 的唯一调用点
+//  `build_weekly_payload`），所以这里只做**事前能看见的那个原因**（没有可复用基线
+//  → `first_run`）与**事后把原因说清**，不假装有一个事前确认点。
+// ---------------------------------------------------------------------------
+
+// 「忙」是**两个按钮一起**的状态：只禁用其中一个的话另一个还亮着，用户点下去就会在
+// 同一个目标上再发起一次 —— 服务端会附着/升级（`active_key` 保证不会重复付费），
+// 但页面会变成「我明明在等同步，怎么又开了一次」，那正是 P0-01 修掉的那类困惑。
+//
+// `typeof document` 守卫是给测试里的 node 探针留的：它把个别函数抽出去在 vm 里跑，
+// 那个上下文里没有 `document`（与 `resumeFromWeeklyAiJob` 的 `typeof` 同一手法）。
+function weeklyAiActionButtons() {
+    if (typeof document === 'undefined') return [];
+    return ['weeklyAiStartBtn', 'weeklyAiFullBtn']
+        .map(function (id) { return document.getElementById(id); })
+        .filter(Boolean);
+}
+
+function weeklyAiSetBusy(busy) {
+    weeklyAiActionButtons().forEach(function (btn) { btn.disabled = !!busy; });
+}
+
+// 这次分析属于哪个项目。两份周版本模板给这个值的变量名不一样
+// （`weeklyAiProjectId` / `aiProjectId`），块内其余代码只认这一个取值口。
+function weeklyAiProjectIdOf() {
+    if (typeof weeklyAiProjectId !== 'undefined' && weeklyAiProjectId) return weeklyAiProjectId;
+    if (typeof aiProjectId !== 'undefined' && aiProjectId) return aiProjectId;
+    return null;
+}
+
+// 平台把增量升级为全量的**原因码 → 人话**。取值与
+// `services/ai/scope_sampling._decide_scope` 的第二返回值同一套词；认不出来时如实写出
+// 那个码，而不是编一句解释（编出来的解释会让人以为平台说了它没说过的话）。
+const WEEKLY_AI_UPGRADE_REASONS = {
+    first_run: '这个分组还没有可复用的结论基线，首次分析按全量跑',
+    delta_count_high: '本次变化的文件数超过了全量阈值',
+    delta_ratio_high: '本次变化的文件占比超过了全量阈值',
+    critical_path_detected: '变更命中了关键路径',
+    empty_total: '这一批没有可比对的文件，做不了增量差集'
+};
+
+/** 平台把这次增量改成了全量时该说的那句话。**没升级就返回空串**（不许无话找话）。 */
+function weeklyAiUpgradeNotice(job) {
+    if (!job) return '';
+    if (job.requested_mode !== 'incremental' || job.effective_mode !== 'full') return '';
+    const reason = WEEKLY_AI_UPGRADE_REASONS[job.upgrade_reason]
+        || (job.upgrade_reason ? ('原因码 ' + job.upgrade_reason) : '');
+    return '平台把这次增量升级成了全量' + (reason ? '：' + reason : '')
+        + '，本次按全量执行（预计消耗按全量算）。';
+}
+
+function weeklyAiFormatInt(value) {
+    const number = Number(value);
+    if (!isFinite(number) || number <= 0) return '';
+    return Math.round(number).toLocaleString('en-US');
+}
+
+function weeklyAiFormatDuration(ms) {
+    const number = Number(ms);
+    if (!isFinite(number) || number <= 0) return '';
+    const minutes = number / 60000;
+    if (minutes < 1) return Math.max(1, Math.round(number / 1000)) + ' 秒';
+    if (minutes < 10) return minutes.toFixed(1) + ' 分钟';
+    return Math.round(minutes) + ' 分钟';
+}
+
+function weeklyAiTokensText(estimate) {
+    const tokens = (estimate && estimate.tokens) || {};
+    const low = weeklyAiFormatInt(tokens.low);
+    const high = weeklyAiFormatInt(tokens.high);
+    if (!low && !high) return '没有可参照的历史运行，估不出 token 区间';
+    if (!high || low === high) return (low || high) + ' token';
+    return low + ' ~ ' + high + ' token';
+}
+
+function weeklyAiDurationText(estimate) {
+    const span = (estimate && estimate.duration_ms) || {};
+    const low = weeklyAiFormatDuration(span.low);
+    const high = weeklyAiFormatDuration(span.high);
+    if (!low && !high) return '没有可参照的历史运行，估不出耗时';
+    if (!high || low === high) return low || high;
+    return low + ' ~ ' + high;
+}
+
+function weeklyAiBaselineText(estimate) {
+    const baseline = (estimate && estimate.baseline) || {};
+    if (baseline.reusable === true) return '命中可复用基线（这次不需要新建付费运行）';
+    if (baseline.reusable === false) return '没有命中可复用基线，这次会真的跑一遍模型';
+    return '还没判定（取决于快照与依赖有没有变化）';
+}
+
+/**
+ * 确认框里的那几行事实。**数字全部来自 `GET /ai-analysis/usage/estimate`**
+ * （服务端算的），前端只负责摆出来 —— 自己乘一个系数就是编。
+ *
+ * 价格没配置时（`cost.computable` 为假）**只给 token 与时间**，并把服务端给的理由
+ * 原样写出来：估不出费用是常态（`DEFAULT_PRICE_TABLE` 是空表），编一个金额才是最坏的。
+ */
+function weeklyAiEstimateLines(estimate) {
+    const lines = [];
+    const last = (estimate && estimate.last_actual) || null;
+    if (estimate && estimate.planned_files) {
+        lines.push(['预计文件数', weeklyAiFormatInt(estimate.planned_files) + ' 个']);
+    } else if (last && last.files) {
+        lines.push(['预计文件数', '按最近一次实测的 ' + weeklyAiFormatInt(last.files) + ' 个文件估']);
+    } else {
+        lines.push(['预计文件数', '还不知道（没有可参照的历史运行）']);
+    }
+    lines.push(['预计 token', weeklyAiTokensText(estimate)]);
+    lines.push(['预计耗时', weeklyAiDurationText(estimate)]);
+    if (last) {
+        const bits = [];
+        if (last.files) bits.push(weeklyAiFormatInt(last.files) + ' 个文件');
+        if (last.tokens) bits.push(weeklyAiFormatInt(last.tokens) + ' token');
+        const duration = weeklyAiFormatDuration(last.duration_ms);
+        if (duration) bits.push(duration);
+        lines.push([
+            '最近一次实际耗时',
+            duration ? duration : '最近一次没有上报耗时',
+        ]);
+        if (bits.length) lines.push(['最近一次实测', bits.join(' · ')]);
+    } else {
+        lines.push(['最近一次实际耗时', '还没有可参照的历史运行']);
+    }
+    const cost = (estimate && estimate.cost) || {};
+    if (cost.computable && cost.low !== undefined) {
+        const low = cost.low;
+        const high = cost.high === undefined || cost.high === null ? low : cost.high;
+        const unit = cost.currency || cost.unit || '';
+        lines.push(['预计费用', low === high ? (low + ' ' + unit) : (low + ' ~ ' + high + ' ' + unit)]);
+    } else {
+        // **不许伪造费用。** 服务端给的 `reason` 是这句话的依据。
+        lines.push(['预计费用', '未配置模型单价，只能给 token 与时间']);
+    }
+    lines.push(['可复用基线', weeklyAiBaselineText(estimate)]);
+    return lines;
+}
+
+function weeklyAiEstimateNote(estimate) {
+    const notes = ((estimate && estimate.notes) || []).slice(0, 2);
+    // 服务端的 `notes` 里带 markdown 的星号（`**全量没有实测样本**` 这种），而确认框是
+    // 纯文本（`textContent`）—— 原样落上去就是把星号印给用户看。与用量面板同一个口径。
+    const price = '区间来自历史运行的实测值（执行前估算端点 /ai-analysis/usage/estimate），'
+        + '不是精确值；没有配置模型单价时只给 token 与时间，不给金额。';
+    return notes.length ? (notes.join(' ') + ' ' + price).replace(/\*\*/g, '') : price;
+}
+
+async function fetchWeeklyAiEstimate(mode) {
+    const project = weeklyAiProjectIdOf();
+    if (!project) return null;
+    const params = new URLSearchParams();
+    params.set('project', String(project));
+    params.set('mode', mode === 'full' ? 'full' : 'incremental');
+    try {
+        const resp = await fetch('/ai-analysis/usage/estimate?' + params.toString(),
+            { cache: 'no-store' });
+        const data = await resp.json();
+        return data && data.success ? data : null;
+    } catch (_err) {
+        // 估算读不到**不阻断**这次分析：它只是确认框里那几行数字。页面照常问用户
+        // 「要不要全量」，只是数字那一栏如实写「估不出来」。
+        return null;
+    }
+}
+
+/**
+ * 自己画的确认框（Promise 版）：返回被点的那个选项的 `value`；取消 / 遮罩 / Esc → `null`。
+ *
+ * **不放进抽屉里**：抽屉是固定定位 + 内部滚动，弹层挂在里面会被裁掉（与「历次结论」
+ * 弹层同一个理由，见 `static/js/ai_report_history.js`）。
+ */
+function weeklyAiChoiceDialog(options) {
+    const spec = options || {};
+    return new Promise(function (resolve) {
+        if (typeof document === 'undefined' || !document.body) {
+            // 没有 DOM（node 探针）：**不假装用户点了确认**，一律当作取消。
+            resolve(null);
+            return;
+        }
+        const overlay = document.createElement('div');
+        overlay.className = 'weekly-ai-dialog-overlay';
+        overlay.id = 'weeklyAiDialog';
+        const box = document.createElement('div');
+        box.className = 'weekly-ai-dialog';
+        box.setAttribute('role', 'dialog');
+        box.setAttribute('aria-modal', 'true');
+        if (spec.title) {
+            const title = document.createElement('h6');
+            title.className = 'weekly-ai-dialog__title';
+            title.textContent = spec.title;
+            box.appendChild(title);
+        }
+        if (spec.intro) {
+            const intro = document.createElement('p');
+            intro.className = 'weekly-ai-dialog__intro';
+            intro.textContent = spec.intro;
+            box.appendChild(intro);
+        }
+        const lines = spec.lines || [];
+        if (lines.length) {
+            const list = document.createElement('dl');
+            list.className = 'weekly-ai-dialog__facts';
+            lines.forEach(function (line) {
+                const term = document.createElement('dt');
+                term.textContent = line[0];
+                const value = document.createElement('dd');
+                value.textContent = line[1];
+                list.appendChild(term);
+                list.appendChild(value);
+            });
+            box.appendChild(list);
+        }
+        if (spec.note) {
+            const note = document.createElement('p');
+            note.className = 'weekly-ai-dialog__note';
+            note.textContent = spec.note;
+            box.appendChild(note);
+        }
+        const actions = document.createElement('div');
+        actions.className = 'weekly-ai-dialog__actions';
+        function close(value) {
+            document.removeEventListener('keydown', onKey, true);
+            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+            resolve(value);
+        }
+        function onKey(event) {
+            if (event.key !== 'Escape') return;
+            // Esc 只关这个框：抽屉自己也认 Esc（`AiDrawerTabs.bindDrawer`），
+            // 不拦住的话「取消这次全量」会顺手把抽屉也关掉。
+            event.stopPropagation();
+            event.preventDefault();
+            close(null);
+        }
+        const choices = spec.choices && spec.choices.length
+            ? spec.choices
+            : [
+                { value: 'cancel', label: spec.cancelText || '取消', className: 'btn-outline-secondary' },
+                { value: 'ok', label: spec.okText || '确定', className: spec.okClass || 'btn-primary' }
+            ];
+        choices.forEach(function (choice) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'btn btn-sm ' + (choice.className || 'btn-outline-secondary');
+            btn.textContent = choice.label;
+            btn.setAttribute('data-weekly-ai-choice', choice.value);
+            btn.addEventListener('click', function () { close(choice.value); });
+            actions.appendChild(btn);
+        });
+        box.appendChild(actions);
+        overlay.appendChild(box);
+        overlay.addEventListener('click', function (event) {
+            // 点遮罩 = 取消（框里的点击不会冒到这里，因为 event.target 是框内的元素）。
+            if (event.target === overlay) close(null);
+        });
+        document.addEventListener('keydown', onKey, true);
+        document.body.appendChild(overlay);
+        const primary = actions.querySelector('[data-weekly-ai-choice="ok"]')
+            || actions.querySelector('[data-weekly-ai-choice="full"]')
+            || actions.lastChild;
+        if (primary && primary.focus) primary.focus();
+    });
+}
+
+/**
+ * 基线那一边现在是什么状况。**问服务端**（`/latest` 的 `stale*` 字段），不自己猜：
+ *
+ * * `mismatch` —— 结论还在，但它是**旧规则/旧提示词/旧模型**产出的
+ *   （`stale_reason === 'rules_changed'`，服务端拿 `current_provenance` 比出来的）。
+ *   服务端只给一句话、不给逐字段明细，所以这里**只转述那句话**，不编一串变化项；
+ * * `noBaseline` —— 这个窗口里还没有任何可用结论 → 平台会把这次增量**升级为全量**
+ *   （`first_run`）。这是唯一一个能在**调用模型之前**看见的升级原因。
+ */
+async function fetchWeeklyAiBaselineState() {
+    try {
+        const resp = await fetch(`/ai-analysis/weekly/${configId}/latest`, { cache: 'no-store' });
+        const data = await resp.json();
+        const result = (data && data.result) || null;
+        return {
+            hasResult: !!result,
+            mismatch: !!(result && result.stale && result.stale_reason === 'rules_changed'),
+            note: (result && result.stale_note) || '',
+            runId: (data && data.run_id) || null,
+            createdAt: (result && (result.created_at_display || result.created_at)) || ''
+        };
+    } catch (_err) {
+        // 读不到基线状态：**不弹窗、也不当成「变了」**。当成变了会在每次网络抖动时
+        // 给用户一个假警告，而假警告会让人学会不看警告。
+        return null;
+    }
+}
+
+/** 「这次增量与基线不可比」那句话。没有这回事时返回空串。 */
+function weeklyAiComparabilityLine() {
+    if (!weeklyAiMismatchAccepted) return '';
+    return '【这次增量与基线不可比】基线结论是旧版评审规程（提示词/规则/模型）产出的，'
+        + '这次的增量结论不能与它逐条对比 —— 要看完整评审请点「全量重新分析」。';
+}
+
+function weeklyAiNoteMismatchAccepted() {
+    weeklyAiMismatchAccepted = true;
+}
+
+/** 把一行限制写在报告**顶部**（用文本节点插入，不拼 HTML —— 正文是模型给的）。 */
+function prependWeeklyAiLine(text) {
+    if (!text) return;
+    const output = document.getElementById('weeklyAiOutput');
+    if (!output) return;
+    output.insertAdjacentText('afterbegin', text + '\n');
+}
+
+/**
+ * 点下去之后到底跑哪个模式 —— **两个按钮共用的那一段决策**，返回 `'full'` /
+ * `'incremental'`，用户取消时返回 `null`（调用方据此**什么也不做**）。
+ *
+ * 它单独一个函数（而不是把 `startWeeklyAiAnalysis` 塞进这里面）有一个硬理由：
+ * `tests/test_weekly_ai_auto_trigger_gate.py` 要求**每一处开跑调用都落在点击回调里**
+ * （否则「看一眼结果」这类动作可能自己把分析跑起来）。开跑调用留在点击回调里，
+ * 决策（可能弹窗、要 await）放在这里，两边各得其所。
+ *
+ * @param {'incremental'|'full'} requested 用户点的是哪个按钮
+ */
+async function weeklyAiChooseMode(requested) {
+    if (requested === 'full') {
+        // 全量：**先把代价与基线状况摆出来**（预计文件数 / token 区间 / 最近一次耗时 /
+        // 能不能复用基线），用户点了才发起。
+        const estimate = await fetchWeeklyAiEstimate('full');
+        const choice = await weeklyAiChoiceDialog({
+            title: '全量重新分析',
+            intro: '这次会忽略增量基线，对整个窗口重新做一遍完整评审 —— 比增量贵，也慢。'
+                + '下面是按历史实测给出的区间。',
+            lines: weeklyAiEstimateLines(estimate),
+            note: weeklyAiEstimateNote(estimate),
+            okText: '开始全量分析',
+            okClass: 'btn-danger'
+        });
+        return choice === 'ok' ? 'full' : null;
+    }
+    const baseline = await fetchWeeklyAiBaselineState();
+    if (baseline && baseline.mismatch) {
+        // 基线是旧规则产出的 → 增量结论与它不可比。推荐全量，但允许继续增量。
+        const choice = await weeklyAiChoiceDialog({
+            title: '基线结论不是现在这套规则产出的',
+            intro: '增量是拿这份基线做差的：规则/提示词/模型变了之后，新结论与它不可比。',
+            lines: [
+                ['服务端说明', baseline.note || '该结论由旧版评审规程产出（提示词/规则/模型已更新）'],
+                ['基线结论时间', baseline.createdAt || '——'],
+                ['这次增量会怎样', '照常只分析变化部分；「与基线不可比」会写在报告顶部']
+            ],
+            note: '服务端目前只给「溯源不一致」这一个结论，不给逐字段的差异明细'
+                + '（`provenance_matches` 只回真/假），所以这里不列字段名 —— 列了就是编。',
+            choices: [
+                { value: 'full', label: '按新规则全量重新分析（推荐）', className: 'btn-danger' },
+                { value: 'incremental', label: '仍然只做增量（结论与基线不可比）', className: 'btn-outline-secondary' }
+            ]
+        });
+        if (choice === null) return null;
+        if (choice === 'full') return 'full';
+        weeklyAiNoteMismatchAccepted();
+        return 'incremental';
+    }
+    if (baseline && !baseline.hasResult) {
+        // 还没有可复用的结论基线 → 平台会把这次增量**升级为全量**（`upgrade_reason=first_run`）。
+        // 这是唯一一个**在调用模型之前**看得见的升级原因，所以先把代价摆出来再问。
+        const estimate = await fetchWeeklyAiEstimate('full');
+        const choice = await weeklyAiChoiceDialog({
+            title: '这次会被升级为全量',
+            intro: '这个分组还没有可复用的结论基线，平台对增量的口径是「没有基线就按全量跑」'
+                + '（`upgrade_reason=first_run`）。全量的预计代价如下：',
+            lines: weeklyAiEstimateLines(estimate),
+            note: weeklyAiEstimateNote(estimate),
+            okText: '继续（按全量）',
+            okClass: 'btn-danger'
+        });
+        return choice === 'ok' ? 'incremental' : null;
+    }
+    // provenance 没变、基线也在 → **一个字都不弹**，直接按增量走（验收第 4 条）。
+    return 'incremental';
+}
+
+async function startWeeklyAiAnalysis(mode = 'incremental') {
     if (!weeklyAiCurrentConfigId) return;
-    if (!force && weeklyAiHasCached) {
+    if (!weeklyAiEndpointReady) {
+        setWeeklyAiOutput('请在项目概览页的「AI 分析配置」里填好接口地址、模型名字与 Token。', false);
         return;
     }
+
+    // `mode` 由两个入口给：`'incremental'`（绿，默认）/ `'full'`（红，先给代价）。
+    // **`weeklyAiHasCached` 原来会拦下这次点击**，现在不拦了：增量本来就是「在上次结论
+    // 之后接着看」，有旧结论正是它的常态；而「没有新变化」由平台自己复用结论、不建付费
+    // 运行（P0-02 的验收口径）。全量那一条已经由确认框（带预计代价）问过一次，再叠一个
+    // 「已有分析结果，确定重新分析吗？」只会训练用户闭眼点确定。
+    const requestedMode = mode === 'full' ? 'full' : weeklyAiModeValue();
     closeWeeklyAiStream();
+    stopWeeklyAiJobPoll();
     // 用户自己又发起了一次 → 上一次那条「等同步」的登记不再由本页看着（服务端那条意图
     // 还在，但它要么被这次分析覆盖、要么在同步收尾时自行了结）。
     stopWeeklyAiWaitingPoll();
     weeklyAiRunId = null;
     weeklyAiStreamSettled = false;
-    // 这次分析从现在起算「在跑」—— 直到某一条出口把它清掉（见上面那几处）。
+    // 这次分析从现在起算「在跑」—— 直到某一条出口把它清掉（见下面那几处）。
     weeklyAiRunActive = true;
     // 开跑了：抽屉切到「思考过程」（那时候唯一有内容的标签就是它），面板进入
-    // 「看着它跑」的状态（运行号还没来，`run` 事件到了再补上）。
+    // 「看着它跑」的状态（运行号还没来，`state` 事件到了再补上）。
     AiDrawerTabs.markRunning();
     AiThinkLog.watch(null);
     // 屏幕上的结论刚被「分析进行中」换掉 —— 「导出 md」也就没有可导出的东西了
@@ -4528,36 +5135,107 @@ async function startWeeklyAiAnalysis(force = false) {
     AiReportExport.track({ runId: null });
     setWeeklyAiStatusBadge('分析中', 'primary');
     setWeeklyAiOutput('AI 分析进行中...', false, 'busy');
+    weeklyAiSetBusy(true);
+
+    // **先建身份**（POST，不跑分析）。这一步失败 = 这次分析根本没发起，
+    // 所以绝不许接着往下装作在跑（那正是「钱没花、页面说在跑」的形态）。
+    if (!weeklyAiActionKey) {
+        weeklyAiActionKey = newWeeklyAiActionKey();
+    }
+    const focus = 'all';
+    let created = null;
+    try {
+        const resp = await fetch(`/ai-analysis/weekly/${weeklyAiCurrentConfigId}/jobs`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': '{{ csrf_token() }}'
+            },
+            body: JSON.stringify({
+                analysis_mode: requestedMode,
+                focus: focus,
+                source: 'manual',
+                idempotency_key: weeklyAiActionKey
+            })
+        });
+        created = await resp.json();
+    } catch (_err) {
+        created = null;
+    }
+    if (!created || !created.success || !created.job_id) {
+        weeklyAiRunActive = false;
+        // 这一次动作没成立 → 下次点击是**新的一次**动作（键不能留着，否则服务端会
+        // 把下一次点击认成同一件事而附着到一条根本没建出来的 job 上）。
+        weeklyAiActionKey = null;
+        weeklyAiSetBusy(false);
+        stopAiBudgetWatch();
+        setWeeklyAiStatusBadge('失败', 'danger');
+        setWeeklyAiOutput(
+            (created && created.message)
+                || '发起分析失败：没能拿到这次分析的身份（网络或服务端问题）。',
+            false,
+            'error'
+        );
+        setWeeklyAiMeta('这次分析没有发起，也没有产生任何消耗。');
+        return;
+    }
+
+    rememberWeeklyAiJobId(created.job_id);
+    // **平台把这次增量升级成了全量时必须说出来**（验收第 5 条）：用户点的是增量、
+    // 跑的是全量，理由（`upgrade_reason`）不许静默。文本只有一处（`weeklyAiUpgradeNotice`）。
+    weeklyAiUpgradeNoticeText = weeklyAiUpgradeNotice(created.job || created);
+    if (weeklyAiUpgradeNoticeText) {
+        setWeeklyAiMeta(weeklyAiUpgradeNoticeText);
+    }
+    // 附着到「已经有一次在跑」的那次上时，服务端会把运行号一起给回来。
+    if (created.run_id) {
+        startAiBudgetWatch(created.run_id, document.getElementById('weeklyAiMeta'));
+    }
+    if (created.state === 'waiting_snapshot') {
+        // **这次点击已经收下了**（job 已落库）：页面说「等待同步」并订阅它的状态 ——
+        // 不再是「没有运行号所以无法确认」那一档。
+        setWeeklyAiStatusBadge('等待同步', 'warning');
+        setWeeklyAiOutput(created.message || '正在等周版本同步写完缓存…', false, 'busy');
+        setWeeklyAiMeta(created.message || '');
+        startWeeklyAiJobPoll(created.job_id);
+    } else {
+        setWeeklyAiStatusBadge('分析中', 'primary');
+    }
+    subscribeWeeklyAiJob(created.job_id);
+}
+
+// 订阅一条 job 的事件流。**只订阅**：这条路一个任务、一条运行都不会建出来。
+function subscribeWeeklyAiJob(jobId) {
     const startBtn = document.getElementById('weeklyAiStartBtn');
-    if (startBtn) startBtn.disabled = true;
-    weeklyAiSource = new EventSource(`/ai-analysis/weekly/${weeklyAiCurrentConfigId}/stream?source=manual`);
-    // 开跑之前服务端先把运行号发过来，界面据此轮询「跑到第几轮、现在超了没」。
+    closeWeeklyAiStream();
+    weeklyAiStreamSettled = false;
+    weeklyAiSource = new EventSource(`/ai-analysis/jobs/${jobId}/events`);
+    // `state` 与 `heartbeat` 是**同一份载荷**（心跳就是「我还活着，状态还是这样」），
+    // 所以走同一个处理器：页面因此能在「等同步 → 排队 → 在跑」之间自动接上运行号。
+    // 运行号到手 → 接上既有的进度轮询（「跑到第几轮、已经花了多少」那行字）。
+    // 与老流式入口那个 `run` 事件同名同义，所以三份抽屉里这一条接线一字未改。
     weeklyAiSource.addEventListener('run', function(event) {
-        let payload = {};
-        try {
-            payload = JSON.parse(event.data || '{}');
-        } catch (_err) {
+        const payload = parseWeeklyAiEvent(event);
+        if (payload.run_id && weeklyAiRunId !== payload.run_id) {
+            startAiBudgetWatch(payload.run_id, document.getElementById('weeklyAiMeta'));
         }
-        if (payload.run_id) startAiBudgetWatch(payload.run_id, document.getElementById('weeklyAiMeta'));
     });
-    weeklyAiSource.addEventListener('chunk', function(event) {
-        try {
-            const payload = JSON.parse(event.data || '{}');
-            if (payload.text) {
-                appendWeeklyAiLine(payload.text);
-            }
-        } catch (_err) {
-            appendWeeklyAiLine('解析 AI 输出失败');
+    weeklyAiSource.addEventListener('state', applyWeeklyAiJobState);
+    weeklyAiSource.addEventListener('heartbeat', applyWeeklyAiJobState);
+    // 服务端给的进度那一帧（形状与 `/ai-analysis/runs/<id>/progress` 同源）。
+    // 读不到就是 `null` —— 交给 `AiThinkLog` 按自己的处境说一句话，**不显示 0**。
+    weeklyAiSource.addEventListener('progress', function(event) {
+        const payload = parseWeeklyAiEvent(event);
+        if (payload.progress) {
+            AiThinkLog.applyProgress(payload.progress, 'running');
         }
     });
     weeklyAiSource.addEventListener('result', function(event) {
-        let payload = {};
-        try {
-            payload = JSON.parse(event.data || '{}');
-        } catch (_err) {}
+        const payload = parseWeeklyAiEvent(event);
         renderAiUsageLine(payload.usage, payload.run_id);
         weeklyAiRunActive = false;
-        // 失败也走 `result` 事件，所以不能无条件打「完成」（见 refreshWeeklyAiLatest）。
+        // 失败也走 `result` 事件（引擎的契约是「失败变成一个结果对象，不抛异常」），
+        // 所以这里不能无条件打「完成」—— 那正是「失败显示成已有结果」的来源。
         // 徽章与状态行那行字的说法都在 static/js/ai_stream_status.js 里（三份模板共用）。
         const outcome = AiStreamStatus.resultOutcome(payload);
         if (outcome.failed) {
@@ -4567,36 +5245,40 @@ async function startWeeklyAiAnalysis(force = false) {
                 appendWeeklyAiLine(`\n风险等级：${payload.risk_level}`);
                 updateRiskLabelByConfig(weeklyAiCurrentConfigId, payload.risk_level);
             }
-            // 「本次覆盖与缺口」（这次看了多少、缺什么）同理：它在 payload 的
-            // `coverage_notice` 里，**不在报告正文里**（见 static/js/ai_context_notice.js）。
+            // 「本次覆盖与缺口」与「降级 / 上下文被压过」两句说明都在 payload 里
+            // （**不在报告正文里**，见 static/js/ai_context_notice.js）。`refreshWeeklyAiLatest`
+            // 随后会用落库正文整体重渲染（走同一个模块的 `withContextNotice`），这里先写
+            // 一次是为了**取结论那一步失败时这两句还在**。
             const coverageNotice = AiContextNotice.coverageNotice(payload);
             if (coverageNotice) { appendWeeklyAiLine('\n' + coverageNotice); }
-            // 降级 / 压过上下文时补一行说明。文案在 static/js/ai_context_notice.js。
-            // `loadWeeklyAiLatest(true)` 紧随其后、用落库正文整体重渲染 —— 那一条走的是
-            // 同一个模块的 `withContextNotice`。两处都要有，文案只有一份。
             const contextNotice = AiContextNotice.contextNotice(payload);
             if (contextNotice) { appendWeeklyAiLine('\n' + contextNotice); }
         }
         setWeeklyAiStatusBadge(outcome.badge, outcome.tone);
-        if (startBtn) startBtn.disabled = false;
+        weeklyAiSetBusy(false);
+        weeklyAiHasCached = !outcome.failed;
         weeklyAiCache.delete(weeklyAiCurrentConfigId);
         weeklyAiStreamSettled = true;
-        // 「导出 md」：**三份模板里只有这一份要在这里接线** —— 另外两份在 `result` 之后会
-        // 再拉一次 `/latest`（那一次里的 `track` 才是权威的），而这一份跑完之后直接以流
-        // 出来的正文为准、不再回读（见上面的 `weeklyAiCache.delete`）。
-        // 「跑成了」= 有正文可导（降级也算：库里记的就是 succeeded，正文是那份按已有证据
-        // 出的报告）；`outcome.failed` 那一路没有正文，链接保持收起。
-        if (!outcome.failed) {
-            AiReportExport.track({ runId: payload.run_id, status: 'succeeded' });
-        }
-        // 顺序要紧：先关流（它会擦掉「分析中：第 N 轮」那行），再写上这次的收尾说法。
+        // 这次动作**结束了**：身份与幂等键都收起来（下一次点击是一次新的动作，
+        // 而不是附着到这条已经跑完的 job 上）。
+        rememberWeeklyAiJobId(null);
+        weeklyAiActionKey = null;
+        stopWeeklyAiJobPoll();
+        // 顺序要紧：先关流（它会擦掉「分析中：第 N 轮」那行），`loadWeeklyAiLatest`
+        // 再去写这次运行的收尾说法 —— 反过来的话那行字会在中间露出来一下。
+        // 顺序要紧：先写收尾说法（关流会擦掉「分析中：第 N 轮」那行），再去取落库的结论。
+        // 那句 `setWeeklyAiMeta` **不能省**：取结论那一步是异步的，一旦它失败
+        // （网络 / 403），那行字就永远停在上一次留下的进度文本上。
         closeWeeklyAiStream();
         setWeeklyAiMeta(outcome.meta);
+        // 「这次增量与基线不可比」是**这次结论的属性**，不是一句可以随便丢的提示：
+        // 取结论是异步的，写早了会被它整段重渲染盖掉，所以接在它后面。
+        Promise.resolve(refreshWeeklyAiLatest(weeklyAiCurrentConfigId)).then(function () {
+            const limit = weeklyAiComparabilityLine();
+            if (limit) prependWeeklyAiLine(limit);
+        });
     });
-    weeklyAiSource.addEventListener('cached', function() {
-        setWeeklyAiStatusBadge('已有结果', 'success');
-    });
-    // **这一次没有发起分析**（不是失败，也不是连接断了）。服务端有三种情形会发它：
+    // **这一次没有发起分析**（不是失败，也不是连接断了）。服务端三种情形会发它：
     //   * `reason=sync_in_flight` —— 周版本同步还没写完缓存。这时分析只能看到半份
     //     变更清单（静默漏文件），所以闸门拦下，而且**一个请求都没发出去**。
     //     说法必须是「等待同步」而不是「失败」，而且服务端已经把这次分析**登记**了
@@ -4604,16 +5286,10 @@ async function startWeeklyAiAnalysis(force = false) {
     //   * `reason=waiting_snapshot` —— 上一次登记还生效（同步刚结束、那次还没跑起来），
     //     这次点击**只认领那条登记**，不再新建一条会重复付费的运行。
     //   * `reason=already_running` —— 同一目标 + 同一份输入已经有一次分析在跑
-    //     （数据库的活动运行唯一约束拦下的）。这一次不重复发起，页面**附着**到
+    //     （那条登记已经转交出去、运行已经起来了）。这一次不重复发起，页面**附着**到
     //     那一次上：接着看它的进度，跑完自动显示它的结论。
     weeklyAiSource.addEventListener('waiting', function(event) {
-        let payload = {};
-        try {
-            payload = JSON.parse(event.data || '{}');
-        } catch (_err) {
-        }
-        weeklyAiStreamSettled = true;
-        closeWeeklyAiStream();
+        const payload = parseWeeklyAiEvent(event);
         setWeeklyAiOutput(payload.message || '这次分析没有发起。', false, 'busy');
         // 判据用**服务端给的原因**，不是「有没有 run_id」：`already_running` 一定带运行号
         // （要附着到它上面），`sync_in_flight` 一定没有（那次分析根本没建起来）。
@@ -4623,9 +5299,10 @@ async function startWeeklyAiAnalysis(force = false) {
             // 「可以再按一次」，而那正是这次要修的那个坑（关抽屉再打开就能重按）。
             weeklyAiRunActive = true;
             setWeeklyAiStatusBadge('分析中', 'primary');
-            weeklyAiCache.delete(weeklyAiCurrentConfigId);
+            weeklyAiHasCached = false;
             AiReportExport.track({ runId: payload.run_id, status: 'running' });
             startAiBudgetWatch(payload.run_id, document.getElementById('weeklyAiMeta'));
+            stopWeeklyAiJobPoll();
             return;
         }
         // `sync_in_flight`：**这次一个请求都没发出去**。而且服务端已经把这次分析
@@ -4636,25 +5313,34 @@ async function startWeeklyAiAnalysis(force = false) {
             weeklyAiRunActive = true;
             weeklyAiHasCached = false;
             setWeeklyAiStatusBadge('等待同步', 'warning');
-            if (startBtn) startBtn.disabled = true;
+            weeklyAiSetBusy(true);
             AiReportExport.track({ runId: null });
             setWeeklyAiMeta(payload.message || '');
-            startWeeklyAiWaitingPoll();
+            startWeeklyAiJobPoll(payload.job_id || weeklyAiJobId);
             return;
         }
-        // 登记失败（极少数：库写不进去）→ 只能照旧让用户自己再点一次，如实说。
+        // 登记没成立（意图被作废 / 库写不进去）→ 只能照旧让用户自己再点一次，如实说。
         weeklyAiRunActive = false;
         setWeeklyAiStatusBadge('等待同步', 'warning');
-        if (startBtn) startBtn.disabled = false;
+        weeklyAiSetBusy(false);
         setWeeklyAiMeta(payload.message || '');
     });
     weeklyAiSource.addEventListener('error', function(event) {
+        // **收到过终结事件之后再冒出来的 `error` 是收尾噪声，一律丢掉。**
+        //
+        // 这是真实浏览器里复现过的那一幕（复测文档 AI-P0-01）：终结事件处理完之后，
+        // 浏览器**仍可能补派一个没有 `data` 的连接层 `error`** —— 于是会把刚刚写好的
+        // 「等待同步」覆盖成「连接中断」，而数据库里那条登记好端端地 pending 着。
+        // 用户看到的页面状态与真实状态相反。
+        //
+        // 放在事件处理器的**最开头**（而不是只挡住无 `data` 那一支）：终结事件之后
+        // 这条流已经关掉了，任何后续 `error` 都不再有新信息，早退是唯一正确的处置。
+        if (weeklyAiStreamSettled) return;
         // `error` 这个事件名底下压着**两件完全不同的事**，只能靠有没有 `data` 区分：
         //   * 有 data —— 服务端主动发的 error 事件（闸门拦下 / 跑挂了），原因就在里面；
         //   * 没有 data —— **连接层断了**（代理把长时间没有字节流动的 SSE 掐了、
         //     网络断了、服务端进程没了）。这时**不能判失败**：分析跑在服务端的
-        //     生成器里，浏览器这头断线不会让它停下来，结论照样落库 ——
-        //     原来那句「AI 分析失败或连接中断」正是这两件事的合称。
+        //     生成器 / worker 里，浏览器这头断线不会让它停下来，结论照样落库。
         let payload = null;
         if (event && event.data) {
             try { payload = JSON.parse(event.data); } catch (_err) { payload = null; }
@@ -4664,7 +5350,11 @@ async function startWeeklyAiAnalysis(force = false) {
             setWeeklyAiOutput(outcome.output, false, 'error');
             setWeeklyAiStatusBadge(outcome.badge, outcome.tone);
             weeklyAiRunActive = false;
-            if (startBtn) startBtn.disabled = false;
+            const btn = startBtn;
+            if (btn) btn.disabled = false;
+            // 全量那个按钮也要放回可点。`typeof` 守卫是给 node 探针留的：它只把这一个
+            // 回调抽出去在 vm 里跑，那里既没有 `document` 也没有这个函数。
+            if (typeof weeklyAiSetBusy === 'function') weeklyAiSetBusy(false);
             weeklyAiStreamSettled = true;
             closeWeeklyAiStream();
             setWeeklyAiMeta(outcome.meta);
@@ -4674,15 +5364,216 @@ async function startWeeklyAiAnalysis(force = false) {
     });
 }
 
-// 连接断了：**先问服务端这次运行到底是什么状态**，再决定说什么（自己猜就是撒谎）。
-// 拿到的状态是「还在跑」就继续轮询（那是另一个端点，不受这条连接影响），跑完了由
-// 轮询把落库的结论取回来 —— 用户不必重新发起一次会花钱的分析。
+// 一条 state / heartbeat 帧：这次点击现在到哪一步了。**只读**，一帧都不写库。
+function applyWeeklyAiJobState(event) {
+    const payload = parseWeeklyAiEvent(event);
+    if (!payload || !payload.job_id) return;
+    if (weeklyAiJobId && String(payload.job_id) !== String(weeklyAiJobId)) return;
+    if (payload.terminal) return;   // 终态由 `result` 那一帧收尾
+    // 运行号出现了 → 接上既有那条进度轮询（它负责「第几轮 / 花了多少」那行字）。
+    if (payload.run_id && weeklyAiRunId !== payload.run_id) {
+        startAiBudgetWatch(payload.run_id, document.getElementById('weeklyAiMeta'));
+        stopWeeklyAiJobPoll();
+    }
+    if (payload.state === 'waiting_snapshot') {
+        weeklyAiRunActive = true;
+        weeklyAiSetBusy(true);
+        setWeeklyAiStatusBadge('等待同步', 'warning');
+        if (payload.stream_timeout) {
+            // 订阅流自己到点了（30 分钟一节）。**这不是失败**：换轮询接着问，
+            // 让用户看到的状态与库里那条 job 一致。
+            startWeeklyAiJobPoll(payload.job_id);
+        }
+        return;
+    }
+    setWeeklyAiStatusBadge('分析中', 'primary');
+}
+
+function stopWeeklyAiJobPoll() {
+    if (weeklyAiJobPollTimer !== null) {
+        clearInterval(weeklyAiJobPollTimer);
+        weeklyAiJobPollTimer = null;
+    }
+}
+
+// 按 **job_id** 轮询这次点击的状态。这是订阅之外的第二条路：SSE 被中间设备掐断、
+// 或者页面刚打开还没接上流时，它保证「这次点击到哪一步了」始终有答案。
+function startWeeklyAiJobPoll(jobId) {
+    stopWeeklyAiJobPoll();
+    if (!jobId) return;
+    weeklyAiJobPolls = 0;
+    const watchedConfigId = weeklyAiCurrentConfigId;
+    weeklyAiJobPollTimer = setInterval(async function () {
+        weeklyAiJobPolls += 1;
+        const btn = document.getElementById('weeklyAiStartBtn');
+        if (weeklyAiJobPolls > WEEKLY_AI_WAITING_MAX_POLLS) {
+            stopWeeklyAiJobPoll();
+            weeklyAiRunActive = false;
+            if (btn) btn.disabled = false;
+            setWeeklyAiStatusBadge('等待同步', 'warning');
+            setWeeklyAiMeta('等了太久还没等到同步结束：可以再点一次「重新分析」。');
+            return;
+        }
+        const job = await fetchWeeklyAiJob(jobId);
+        // 网络抖一下**不算**结束：下一帧再试（说成「没了」会让用户白点一次）。
+        if (!job) return;
+        // 抽屉已经换到别的仓库了就别往上写（那是另一个目标的结论）。
+        if (watchedConfigId !== weeklyAiCurrentConfigId) {
+            stopWeeklyAiJobPoll();
+            return;
+        }
+        if (job.terminal) {
+            stopWeeklyAiJobPoll();
+            rememberWeeklyAiJobId(null);
+            weeklyAiActionKey = null;
+            weeklyAiRunActive = false;
+            if (btn) btn.disabled = false;
+            await refreshWeeklyAiLatest(weeklyAiCurrentConfigId);
+            return;
+        }
+        if (job.run_id && weeklyAiRunId !== job.run_id) {
+            startAiBudgetWatch(job.run_id, document.getElementById('weeklyAiMeta'));
+        }
+    }, WEEKLY_AI_WAITING_POLL_MS);
+}
+
+// 刷新页面 / 关掉抽屉再打开 / 断线重连之后，用**已有的 job_id** 把自己接回去。
+//
+// 这一条是「可恢复的身份」的落点：只要 job 还在活动，页面就接上它的订阅与状态，
+// **绝不重新发起**（重发一次就是第二次付费调用）。返回 `true` = 接上了。
+async function resumeWeeklyAiJob() {
+    const jobId = weeklyAiJobId || weeklyAiJobIdFromUrl();
+    if (!jobId) return false;
+    const job = await fetchWeeklyAiJob(jobId);
+    if (!job) {
+        // 读不到（网络 / 403 / 那条被删了）：**不装作接上了**，让调用方走老路
+        // （`/latest` + `/waiting`），那两条路各自会对自己的处境说真话。
+        return false;
+    }
+    if (job.terminal) {
+        // 已经跑完了：身份与幂等键收起来，页面的结论由 `/latest` 给。
+        rememberWeeklyAiJobId(null);
+        weeklyAiActionKey = null;
+        return false;
+    }
+    weeklyAiJobId = String(jobId);
+    weeklyAiJobConfigId = weeklyAiCurrentConfigId;
+    weeklyAiRunActive = true;
+    weeklyAiSetBusy(true);
+    if (job.run_id) {
+        startAiBudgetWatch(job.run_id, document.getElementById('weeklyAiMeta'));
+    }
+    weeklyAiUpgradeNoticeText = weeklyAiUpgradeNotice(job) || weeklyAiUpgradeNoticeText;
+    if (job.state === 'waiting_snapshot') {
+        setWeeklyAiStatusBadge('等待同步', 'warning');
+        setWeeklyAiOutput('正在等周版本同步写完缓存…', false, 'busy');
+        setWeeklyAiMeta(weeklyAiUpgradeNoticeText
+            || ('这次分析已经收下（job #' + job.job_id + '）：同步一跑完会自动开始。'));
+    } else {
+        setWeeklyAiStatusBadge('分析中', 'primary');
+        setWeeklyAiOutput('AI 分析进行中...', false, 'busy');
+    }
+    subscribeWeeklyAiJob(job.job_id);
+    if (job.state === 'waiting_snapshot') {
+        startWeeklyAiJobPoll(job.job_id);
+    }
+    return true;
+}
+
+// 按 **job_id** 把这次点击的状态问回来（「连接断了怎么办」那条路的主路径）。
+//
+// 返回 `true` = 已经按身份说清楚了（页面上的状态与库里那条 job 一致）；
+// `false` = 没有身份可问（连 job 都没建出来），交给调用方走老路。
+async function resumeFromWeeklyAiJob(startBtn) {
+    const jobId = weeklyAiJobId || weeklyAiJobIdFromUrl();
+    if (!jobId) return false;
+    const job = await fetchWeeklyAiJob(jobId);
+    if (!job) {
+        // 读不到那条 job（网络 / 403）：**不许说成「没了」** —— 那会把用户推去再点一次
+        // （再花一次钱）。按身份继续轮询问下去，每一帧都会重问。
+        weeklyAiRunActive = true;
+        if (startBtn) startBtn.disabled = true;
+        setWeeklyAiMeta('与服务器的连接断开了，正在按这次分析的身份重新确认它的状态…');
+        startWeeklyAiJobPoll(jobId);
+        return true;
+    }
+    if (job.terminal) {
+        // 已经跑完了：身份与幂等键收起来，结论由 `/latest` 给（那是它唯一的权威来源）。
+        rememberWeeklyAiJobId(null);
+        weeklyAiActionKey = null;
+        weeklyAiRunActive = false;
+        if (startBtn) startBtn.disabled = false;
+        await refreshWeeklyAiLatest(weeklyAiCurrentConfigId)(true);
+        return true;
+    }
+    weeklyAiJobId = String(jobId);
+    weeklyAiRunActive = true;
+    if (startBtn) startBtn.disabled = true;
+    if (job.run_id) {
+        startAiBudgetWatch(job.run_id, document.getElementById('weeklyAiMeta'));
+    }
+    if (job.state === 'waiting_snapshot') {
+        setWeeklyAiStatusBadge('等待同步', 'warning');
+        setWeeklyAiOutput('正在等周版本同步写完缓存…', false, 'busy');
+        setWeeklyAiMeta('连接断开了，但这次分析还在等同步 —— 页面会继续按它的身份确认状态。');
+        startWeeklyAiJobPoll(job.job_id);
+    } else {
+        setWeeklyAiStatusBadge('分析中', 'primary');
+        setWeeklyAiMeta('连接断开了，但这次分析还在跑 —— 页面会继续按它的身份确认状态。');
+    }
+    return true;
+}
+
+// 连接断了：**先问服务端这次点击到底是什么状态**，再决定说什么（自己猜就是撒谎）。
+// 拿到的状态是「还在等同步 / 还在跑」就接着订阅 / 轮询（那是另外几条路，不受这条
+// 连接影响），跑完了由它们把落库的结论取回来 —— 用户不必重新发起一次会花钱的分析。
 async function handleWeeklyAiStreamDrop(startBtn) {
     // 先关掉连接：EventSource 默认会**自动重连**，而重连一条 SSE 等于让服务端
     // 再跑一次分析（那是要花钱的），绝不能让它自己接上去。
     if (weeklyAiSource) {
         weeklyAiSource.close();
         weeklyAiSource = null;
+    }
+    // **有身份时先按身份问**（P0-01 的主路径）：这次点击可能还在等同步 / 排队 / 在跑，
+    // 而那条路只认 `job_id`（P0-01 之后「这次点击」是一个持久身份，不再靠猜）。
+    // 它单独一个函数是有意的：**没有身份**时（这次点击连 job 都没建出来）必须原样走
+    // 下面那条老路 —— 那条路问的是「登记」与「运行状态」，两件事各有各的真相来源。
+    if (typeof resumeFromWeeklyAiJob === 'function' && await resumeFromWeeklyAiJob(startBtn)) {
+        return;
+    }
+    // **没有 job_id 时不许直接说「无法确认」。**
+    //
+    // 真实浏览器实测（2026-09-21，两臂对照 + Flask 同款流式形状）：正常路径下
+    // `waiting` 事件会到达处理器。但**一旦那条事件没到**（代理截断、标签页挂起、
+    // 连接被中间设备抢先掐断），而这次点击连身份都没拿到，执行流就落到这里。
+    //
+    // 真相不在浏览器手里，在服务端：这次点击可能已经登记成「等同步」的意图，
+    // 而那条登记有自己的只读端点（`describe_waiting_analysis`）。**先问它，再说话。**
+    // **没有 job_id 时不许直接说「无法确认」。**
+    //
+    // 真实浏览器实测（2026-09-21，两臂对照 + Flask 同款流式形状）：正常路径下
+    // `waiting` 事件会到达处理器。但**一旦那条事件没到**（代理截断、标签页挂起、
+    // 连接被中间设备抢先掐断），而这次点击连身份都没拿到，执行流就落到这里。
+    //
+    // 真相不在浏览器手里，在服务端：这次点击可能已经登记成「等同步」的意图，
+    // 而那条登记有自己的只读端点（`describe_waiting_analysis`）。**先问它，再说话。**
+    if (!weeklyAiRunId && typeof fetchWeeklyAiWaitingState === 'function') {
+        const waiting = await fetchWeeklyAiWaitingState();
+        if (waiting && waiting.run_id) {
+            // 登记已经转交给某一次运行：附着上去，别让用户再点一次（会再花一次钱）。
+            weeklyAiRunActive = true;
+            await refreshWeeklyAiLatest(weeklyAiCurrentConfigId);
+            return;
+        }
+        if (waiting && waiting.waiting) {
+            weeklyAiRunActive = true;
+            if (startBtn) startBtn.disabled = true;
+            setWeeklyAiStatusBadge('等待同步', 'warning');
+            setWeeklyAiOutput(waiting.message || '', false, 'busy');
+            setWeeklyAiMeta(waiting.message || '');
+            startWeeklyAiWaitingPoll();
+            return;
+        }
     }
     const status = weeklyAiRunId ? await AiStreamStatus.fetchRunStatus(weeklyAiRunId) : null;
     const outcome = AiStreamStatus.interruptOutcome(status, !!weeklyAiRunId);
@@ -4731,12 +5622,26 @@ function initWeeklyAiDrawer() {
 
     if (overlay) overlay.addEventListener('click', closeWeeklyAiDrawer);
     if (closeBtn) closeBtn.addEventListener('click', closeWeeklyAiDrawer);
+    // **两个入口，两条流程**（AI-P0-03）：绿的那个**默认不弹窗**（provenance 没变、
+    // 基线可复用就一路直接发起），只在「基线的规则变了」或「还没有基线（会被升级为全量）」
+    // 时才把话说出来；红的那个先把预计代价摆出来再问。
+    //
+    // 开跑调用**留在点击回调里**（`weeklyAiChooseMode` 只负责决策）：
+    // `tests/test_weekly_ai_auto_trigger_gate.py` 从另一个方向兜底「只有点击能开跑」，
+    // 把调用挪进决策函数会让那条断言失去参照。
     if (startBtn) {
-        startBtn.addEventListener('click', function() {
-            if (weeklyAiHasCached && !confirm('已有分析结果，确定重新分析吗？')) {
-                return;
-            }
-            startWeeklyAiAnalysis(true);
+        startBtn.addEventListener('click', async function() {
+            const mode = await weeklyAiChooseMode('incremental');
+            if (!mode) return;
+            startWeeklyAiAnalysis(mode);
+        });
+    }
+    const fullBtn = document.getElementById('weeklyAiFullBtn');
+    if (fullBtn) {
+        fullBtn.addEventListener('click', async function() {
+            const mode = await weeklyAiChooseMode('full');
+            if (!mode) return;
+            startWeeklyAiAnalysis(mode);
         });
     }
     if (refreshBtn) {
@@ -4758,7 +5663,14 @@ function initWeeklyAiDrawer() {
         openWeeklyAiDrawer(configId, versionName);
         const drawerStartBtn = document.getElementById('weeklyAiStartBtn');
         if (drawerStartBtn) drawerStartBtn.disabled = true;
-        fetchWeeklyAiReadiness().then(status => {
+        fetchWeeklyAiReadiness().then(async function (status) {
+            // **先按 job_id 把自己接回去**：刷新页面 / 关掉抽屉再打开时，这个版本的
+            // 那次点击可能还在（等同步 / 排队 / 在跑），身份在地址栏那个 `?ai_job=` 里。
+            // 接上了就不走「读最近一次结论」那条路 —— 它会把「分析进行中」换成上一次的
+            // 结论，而用户要看的是**这一次**。接不上时它无副作用，照原样往下走。
+            if (await resumeWeeklyAiJob()) {
+                return;
+            }
             if (!status || !status.success) {
                 setWeeklyAiStatusBadge('无法读取', 'warning');
                 setWeeklyAiOutput('无法读取 AI 配置（可能没有该项目的访问权限）。', false);

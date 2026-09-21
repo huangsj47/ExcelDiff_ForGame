@@ -21,12 +21,13 @@
    重置删的是全平台的记录 —— 两者都不是项目管理员该碰的。读侧的状态行对所有人下发，
    「谁能改」是 `statistics.can_manage`，两件事分开写。
 
-**测试库是会话级共用的**（没有逐用例重置），所以：起点是单行表 → 每个用例前后各清一遍
-（`_isolate_statistics`，理由同 `tests/test_ai_platform_budget.py` 里的平台预算）；
+**测试库是会话级共用的**（没有逐用例重置），所以：起点与平台预算**都是全局单行表** →
+每个用例前后各清一遍（`_isolate_globals`，理由同 `tests/test_ai_platform_budget.py`）；
 重置会清空整张运行表 → 断言计数前先 `_clear_runs()` 让自己独占这张表。
 """
 from __future__ import annotations
 
+import inspect
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +43,7 @@ from models.ai_analysis import (
     AiAnalysisAnomaly,
     AiAnalysisRun,
     AiAnalysisTrace,
+    AiPlatformBudget,
     AiUsageStatistics,
     AiWeeklyAnalysisState,
 )
@@ -160,19 +162,44 @@ def _clear_statistics() -> None:
     db.session.commit()
 
 
-@pytest.fixture(autouse=True)
-def _isolate_statistics():
-    """每个用例前后都清一遍统计口径行。
+def _clear_platform_budget() -> None:
+    """把平台档清空。
 
-    它是**全局单行表**：留一个起点下来，其它文件里所有 `usage_overview` 的合计都会
-    无端变小，而失败信息看起来与被测代码毫无关系（平台预算那张表当初就是这么坑的）。
-    先 `create_tables()`：会话级共用的测试库在第一个用例之前可能还没有这张表。
+    **平台预算也是全局单例**（`ai_platform_budget` 一行，没有项目过滤），所以它和统计
+    起点一样是本文件对外部世界的副作用 —— 不清就会污染后续用例。同
+    `tests/test_ai_platform_budget.py::_clear_platform_budget`。
+    """
+    for row in AiPlatformBudget.query.all():
+        db.session.delete(row)
+    db.session.commit()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_globals():
+    """每个用例前后都清一遍**两张全局单行表**：统计口径 + 平台预算。
+
+    两个都是全局单例，留一个下来，其它文件里所有 `budget_status` / `usage_overview`
+    的判定都会跟着变，而失败信息看起来与被测代码毫无关系：
+
+    * **统计起点** → 其它文件里所有 `usage_overview` 的合计无端变小；
+    * **平台预算** → 其它文件里所有「没配预算 = 不限制」的用例突然变成「超预算」。
+      实测症状：本文件单跑全绿，而
+      `python -m pytest tests/test_ai_usage_statistics.py tests/test_ai_usage_filters_and_budget.py`
+      会有 6 条与本轮改动无关的用例报 `assert True is False`
+      （`budget_status(...)["limited"] is True`）。
+      `TestTheIsolationItself::test_a_platform_budget_does_not_leak_into_the_next_case`
+      就是钉住这一次修复的回归。
+
+    先 `create_tables()`：会话级共用的测试库在第一个用例之前可能还没有这两张表，
+    而直接查它们会抛 `no such table`。
     """
     with flask_app.app_context():
         create_tables()
         _clear_statistics()
+        _clear_platform_budget()
         yield
         _clear_statistics()
+        _clear_platform_budget()
 
 
 def _status_of(resp):
@@ -468,6 +495,88 @@ class TestTheBudgetDoesNotFollowTheBaseline:
 
             assert _overview(project_id)["totals"]["runs"] == 0
             assert budget_status(project_id)["over"] is True
+
+
+# ==========================================================================
+# 二·五、隔离本身也要有回归：平台预算是**全局单例**
+# ==========================================================================
+# 这个类钉的不是被测代码，而是**测试自己的隔离**。理由：上面那个类往平台档写了一个
+# token 上限（它必须写 —— 那正是「起点不碰闸门」的用例），而平台预算是全局单例。
+# 清理漏掉的后果不是本文件变红（它自己不看那个数字），而是**别的文件**变红：
+# `tests/test_ai_usage_filters_and_budget.py` 里 6 条与本轮改动毫无关系的用例会报
+# `assert True is False`（它们期望「没配预算 = 不限制」，结果读到「超预算」）。
+#
+# 症状最阴的地方是它只在**两个文件一起跑**时出现：任何一个文件单跑都是全绿。
+# 所以这里让「污染」本身有一次可执行的回归 —— 先真的写一个平台预算，再断言
+# **下一个用例**的判据不受影响。改了 fixture 的人会让这两条用例中至少一条变红。
+
+
+class TestTheIsolationItself:
+    def test_a_platform_budget_does_not_leak_into_the_next_case(self):
+        """先写一个平台预算（本用例的副作用），它绝不许活到下一个用例。
+
+        断言分两半：写进去之后**确实生效**（否则这条用例是空转，什么也没测到），
+        以及下一个用例读到的是「干净」的。后半句由
+        `test_the_next_case_starts_from_a_clean_slate` 承接 —— 两条用例的**执行顺序**
+        就是被测对象本身。
+        """
+        with flask_app.app_context():
+            create_tables()
+            _clear_runs()
+            project_id = _project()
+            _run(project_id, tokens_input=10 ** 9, tokens_output=0)
+
+            set_platform_budget({"budget_token_limit": 1}, updated_by="tester")
+            db.session.commit()
+
+            # 写进去就要生效：这个项目**没有**自己的预算，却被平台档拦住了 ——
+            # 这正是泄漏到下个用例时其它文件看到的那个形状。
+            status = budget_status(project_id)
+            assert status["limited"] is True, "平台预算没生效，这条用例其实什么都没测到"
+            assert status["over"] is True
+            assert "platform" in (status["over_scopes"] or ()), status["over_scopes"]
+
+    def test_the_fixture_clears_the_platform_budget_on_both_sides(self):
+        """fixture 必须**前后各清一遍**，只清 `yield` 之前不算修好。
+
+        只清前面也能让本文件全绿（每个用例开头都是干净的），它挡不住的是最坏的那种：
+        **本文件最后一个用例**留下一个平台预算，而后面接着跑的文件再也没有机会被清 ——
+        污染只是被挪到了文件末尾，症状一模一样（下一个文件的用例集体报「超预算」）。
+        `tests/test_ai_platform_budget.py::_isolate_platform_budget` 也是前后各清一遍，
+        两边同一条口径。
+
+        这条断言是**结构**断言（读 fixture 的源码），因为「最后一个用例」这个位置本身
+        不该由测试定义顺序来保证 —— 那是一条会被下一个加用例的人无意破坏的隐含前提。
+        """
+        source = inspect.getsource(_isolate_globals)
+        before, _, after = source.partition("yield")
+
+        assert "_clear_platform_budget()" in before
+        assert "_clear_platform_budget()" in after, (
+            "yield 之后没清平台预算：本文件最后一个用例留下的上限会漏给下一个文件"
+        )
+        assert "_clear_statistics()" in before and "_clear_statistics()" in after
+
+    def test_the_next_case_starts_from_a_clean_slate(self):
+        """上一个用例留下的平台预算必须已经被 fixture 清掉。
+
+        **它必须紧跟在 `test_a_platform_budget_does_not_leak_into_the_next_case` 之后**
+        （pytest 按定义顺序跑同一个类里的用例），否则这条断言就没有意义。
+        """
+        with flask_app.app_context():
+            create_tables()
+            assert AiPlatformBudget.query.count() == 0, (
+                "上一个用例的平台预算活到了这一条 —— 别的文件会以「超预算」的样子红掉"
+            )
+            project_id = _project()
+            _run(project_id, tokens_input=10 ** 9, tokens_output=0)
+
+            status = budget_status(project_id)
+
+            assert status["limited"] is False
+            assert status["over"] is False
+            assert status["blocks_analysis"] is False
+            assert platform_budget_status()["used"]["runs"] == 0
 
 
 # ==========================================================================

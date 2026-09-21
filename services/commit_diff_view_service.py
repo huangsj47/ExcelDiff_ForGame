@@ -7,6 +7,8 @@ import traceback
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from services.task_worker_priority import EXCEL_DIFF_PAGE
+
 COMMIT_DIFF_VIEW_AUTHOR_MAP_ERRORS = (RuntimeError, ValueError, TypeError, AttributeError)
 COMMIT_DIFF_VIEW_CACHE_PROCESS_ERRORS = (RuntimeError, ValueError, TypeError, AttributeError, KeyError)
 COMMIT_DIFF_VIEW_EXCEL_PIPELINE_ERRORS = (
@@ -192,7 +194,7 @@ def handle_commit_diff_view(
                         log_print(f"✅ Excel差异缓存成功: {commit.path}", "EXCEL")
                     else:
                         log_print(f"❌ Excel差异缓存失败: {commit.path}", "EXCEL", force=True)
-                        add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=1)
+                        add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=EXCEL_DIFF_PAGE)
                         log_print(f"已添加Excel差异缓存任务到后台队列 (高优先级): {commit.path}", "EXCEL")
                 else:
                     log_print("❌ 缓存条件不满足，跳过缓存", "CACHE", force=True)

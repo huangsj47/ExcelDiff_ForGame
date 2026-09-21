@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from sqlalchemy.exc import SQLAlchemyError
+from services.task_worker_priority import EXCEL_DIFF_DEFAULT, MAINTENANCE_REBUILD
 
 
 REPOSITORY_MAINTENANCE_CACHE_REBUILD_ERRORS = (
@@ -53,7 +54,7 @@ def handle_regenerate_cache(
             db.session.commit()
             log_print(f"已清理仓库 {repository_id} 的所有缓存数据", "INFO")
             for commit in recent_commits:
-                add_excel_diff_task(repository_id, commit.commit_id, commit.path, priority=15)
+                add_excel_diff_task(repository_id, commit.commit_id, commit.path, priority=MAINTENANCE_REBUILD)
             message = f"已将 {task_count} 个Excel文件差异放入缓存队列，正在后台处理中..."
             excel_cache_service.log_cache_operation(
                 f"🔄 重新生成缓存: 仓库 {repository.name}, 任务数量 {task_count}",
@@ -298,7 +299,7 @@ def handle_sync_repository(
                             repository_id,
                             commit_data["commit_id"],
                             commit_data.get("path", ""),
-                            priority=10,
+                            priority=EXCEL_DIFF_DEFAULT,
                             auto_commit=False,
                         )
                         excel_tasks_added += 1

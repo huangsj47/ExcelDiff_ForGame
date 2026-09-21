@@ -321,7 +321,30 @@ class EngineOutcome:
     anomalies: tuple[Anomaly, ...] = ()
     # 被丢弃的条目与原因，跨轮次累计。
     dropped: tuple[DroppedItem, ...] = ()
+    # **报告正文** —— 给人看的那一份。单代理路径下它就是模型写的报告；子代理路径下它是
+    # 平台那几节规范结论（裁决 / 未归类 / 条数上限 / 信息缺口），模型那份汇总草稿另存
+    # 在 `draft_markdown` 里（AI-P1-01）。
+    #
+    # 它同时是 `ai_analysis_run.response_text`（落库）与结论载荷的 `report_markdown`，
+    # **一个字节都不许有机器 JSON**（AI-P0-05，见 `verdict` 那段说明）。
     report_markdown: str = ""
+    # 复核裁决的**结构化**那一份（`verdict.Reduction.as_dict()` 的产物，见
+    # `services/ai/verdict.py`）。承载它的不再是报告正文末尾那行 HTML 注释 ——
+    # 那个做法在安全 Markdown 渲染器下会变成一段可见的乱码（实测 run 20 的
+    # `response_text` 里 35.3% 是那段 json，见 AI-P0-05），而且「从 Markdown 反向解析
+    # 机器状态」本身就是个坏契约。`result_payload` 只认这一个字段。
+    #
+    # `None` = 这次没有复核（单代理路径、没开对账轮），或者复核对结论没有产生任何影响
+    # —— 两种情形在读取侧是同一件事：按「没有裁决」处理，什么都不改。
+    verdict: Mapping[str, Any] | None = None
+    # **模型自己写的那份汇总草稿**，以及**对账轮的整份原文**。两者都是「存档」：
+    # 报告正文（`report_markdown`）里只留平台那几节规范结论，这两份留在这里供调试与
+    # 追溯（AI-P1-01：同一件事在报告里出现三遍，读的人还得自己辨认哪一句已经失效）。
+    #
+    # 草稿**只在它被移出正文时才有值** —— 它同时是正文的情况下（没开对账轮时）再存一份
+    # 就是同一段字节在载荷里出现两次，而「同一份东西重复持久化」正是这一批缺陷的形态。
+    draft_markdown: str = ""
+    verify_report_markdown: str = ""
     rounds: tuple[RoundRecord, ...] = ()
     requests_used: int = 0
     cache_hits: int = 0

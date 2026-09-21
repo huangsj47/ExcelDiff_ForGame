@@ -132,6 +132,47 @@ class Anomaly:
     file_path: str = ""
     impact: str = ""
     suggestion: str = ""
+    # 这条结论**来源于哪几条分片候选**（`family_ledger.Candidate.id`，形如 `S1-3`）。
+    #
+    # 汇总那一次的任务书要求每条结论把来源编号原样带回来（一对多、多对一都允许）。
+    # 平台据此对账：**编号对不上才是真缺口**。在这之前，平台是从标题、文件路径、
+    # 证据文本里**反推**血缘的（`family_ledger` 那三手），而在真机上它产生的全是假缺口
+    # ——run 20 的 `S3-3` 与最终结论 `F5` 讨论的是同一个问题（同名协议拆在两个文件里），
+    # 三条启发式一条都没对上，于是被报成「找不到去向」，而那 4 条假缺口又是
+    # `subagent_gap` 降级的唯一触发源。显式血缘把这一整类误判整个删掉。
+    #
+    # 单代理路径永远是空的：没有分片，也就没有候选编号可言。
+    source_candidate_ids: tuple[str, ...] = ()
+
+
+# 候选编号两侧可能附带的装饰符（模型爱写 `[S1-2]`、`S1-2、`、`（S1-2）`）。剥掉它们
+# 是**规范写法**，不是宽容：编号是平台发出去的固定字面量，两侧的括号与标点从来不是它
+# 的一部分。剥的代价为零，不剥的代价是「模型写对了格式、平台却说没交回血缘」。
+_CANDIDATE_ID_STRIP = "[]【】{}()（）<>「」 \t\r\n\"'`，,、。;；:："
+
+
+def _as_candidate_ids(value: Any) -> tuple[str, ...]:
+    """把 `source_candidate_ids` 读成一组编号。**去空、去重、保序。**
+
+    接受数组，也接受**裸写的一个字符串**（模型把一对一的条目直接写成
+    `"source_candidate_ids": "S1-2"` 是最常见的一种偏差）。认不出来的形状给空元组：
+    这一栏缺失的后果是「这条候选没有血缘」，而那已经被 `family_ledger` 单独处理
+    （一条都没交回时只如实说一句，不逐条报假缺口）。
+    """
+    if isinstance(value, str):
+        raw: Iterable[Any] = (value,)
+    elif isinstance(value, (list, tuple)):
+        raw = value
+    else:
+        return ()
+    out: list[str] = []
+    for item in raw:
+        if isinstance(item, (dict, list, tuple)):
+            continue
+        text = str(item or "").strip().strip(_CANDIDATE_ID_STRIP).strip().upper()
+        if text and text not in out:
+            out.append(text)
+    return tuple(out)
 
 
 @dataclass(frozen=True)
@@ -367,6 +408,10 @@ def _coerce_anomalies(
                 file_path=normalize_path(_as_str(entry.get("file_path"))),
                 impact=_as_str(entry.get("impact")),
                 suggestion=_as_str(entry.get("suggestion")),
+                # 候选血缘（AI-P0-06）：汇总按任务书把来源编号带回来，平台按它核对
+                # 「这条候选有没有去向」。解析不做任何合法性判断（编号集合是
+                # `family_ledger` 那边的事），只负责把形状读成一组字符串。
+                source_candidate_ids=_as_candidate_ids(entry.get("source_candidate_ids")),
             )
         )
     return tuple(kept), tuple(dropped)
@@ -544,6 +589,9 @@ def ground_payload(payload: AnalysisPayload, scope: AnalysisScope) -> AnalysisPa
                 file_path=file_path,
                 impact=anomaly.impact,
                 suggestion=anomaly.suggestion,
+                # 血缘原样带过去：这一层校验的是 commit / file_path 是否真实，
+                # 与「这条结论来源于哪几条候选」无关（漏传等于把血缘静默丢掉）。
+                source_candidate_ids=anomaly.source_candidate_ids,
             )
         )
 

@@ -35,14 +35,31 @@ from services.task_worker_agent_tasks import (
     execute_task_inline_for_agent,  # noqa: F401 —— 外部调用方与测试仍按 worker.execute_task_inline_for_agent 取
 )
 from services.task_worker_queue_service import (
+    TASK_LEASE_SECONDS,
     check_and_create_auto_sync_tasks,  # noqa: F401 —— 外部调用方与测试仍按 worker.check_and_create_auto_sync_tasks 取
+    claim_task_row_for_execution,
+    clear_task_lease,
     create_auto_sync_task,
     create_weekly_ai_analysis_task,
     dispatch_auto_sync_task_when_agent_mode,  # noqa: F401 —— 外部调用方与测试仍按 worker.dispatch_auto_sync_task_when_agent_mode 取
+    forget_inflight_task,
+    lease_is_expired,
     load_pending_tasks,
+    reclaim_expired_task_leases_safely,
     regenerate_repository_cache,
+    register_inflight_task,
     schedule_cleanup_task,
+    stamp_task_lease,
+    start_lease_renewer,
+    stop_lease_renewer,
     wake_waiting_analysis_intents,
+)
+# 优先级的**单一来源**。本文件里凡是需要写优先级的字面量都从这里取；唯一的例外见
+# `create_weekly_sync_task` 的注释（有一处非本文件的用例按源码文本断言了字面量）。
+from services.task_worker_priority import (
+    EXCEL_DIFF_DEFAULT as _PRIORITY_EXCEL_DIFF_DEFAULT,
+    reweigh_queue,
+    retune_queued_task,  # noqa: F401 —— 队列服务按 worker.retune_queued_task 现取
 )
 from services.task_worker_task_handlers import (
     _abandon_timed_out_auto_sync_task,
@@ -53,15 +70,16 @@ from services.task_worker_task_handlers import (
     _reset_repository_to_head,
 )
 from services.task_worker_weekly_handlers import (
+    WEEKLY_AI_TASK_STALE_SECONDS as weekly_ai_task_stale_seconds,
     enqueue_weekly_sync_task,
-    forget_weekly_sync_task_of_payload,
+    forget_weekly_task_of_payload,
     handle_weekly_excel_cache_task as handle_weekly_excel_cache_task_service,
     handle_weekly_sync_task as handle_weekly_sync_task_service,
     is_weekly_sync_task_enqueued,
     parse_config_id_from_commit_id,
+    reset_stale_weekly_analysis_tasks,
     reset_stale_weekly_sync_tasks,
 )
-from services.weekly_version_files_api_helpers import is_stale_sync_task
 from services.repository_sync_status import clear_sync_error as clear_repository_sync_error
 from services.repository_sync_status import record_sync_error as record_repository_sync_error
 # 同步连续失败的退避（判据 + 那句汇总日志都在那个模块里，见其 docstring）。
@@ -86,6 +104,9 @@ from services.ai_analysis_service import (
 )
 from models.ai_analysis import AiWeeklyAnalysisState
 from services.ai.analysis_budget import budget_gate_reason
+# 启动恢复扫描：把卡在非终态、且确定不会再有下文的 job 结清（`start_background_task_worker`
+# 里紧跟 `fail_orphaned_analysis_runs()` 的那一步）。写侧只有一份，实现在 `job_service`。
+from services.ai.job_service import recover_stale_jobs
 from services.ai.scope_sampling import snapshot_already_analyzed
 from services.ai.weekly_state import get_or_create_weekly_state
 # 「周版本同步还在跑就先别分析」的闸门（同步逐文件写缓存，跑到一半的清单会静默变小）
@@ -158,7 +179,10 @@ EXCEL_TASK_ENQUEUE_COOLDOWN_SECONDS = max(
     5, int(os.environ.get("EXCEL_TASK_ENQUEUE_COOLDOWN_SECONDS", "45") or 45)
 )
 EXCEL_TASK_ENQUEUE_COOLDOWN_MAX_KEYS = 5000
-WEEKLY_AI_TASK_STALE_SECONDS = max(600, int(os.environ.get("WEEKLY_AI_TASK_STALE_SECONDS", "7200") or 7200))
+# 「一条 pending 的 AI 分析等了多久算真卡死」。判据与阈值都在
+# `task_worker_weekly_handlers`（清理逻辑所在模块），这里只做名字转发 ——
+# 原先两边各写一个 7200，改一处另一处不会跟着动。
+WEEKLY_AI_TASK_STALE_SECONDS = weekly_ai_task_stale_seconds
 
 NON_CRITICAL_TASK_STATUS_ERRORS = (
     SQLAlchemyError,
@@ -283,10 +307,20 @@ def configure_task_worker(*, app, db, excel_cache_service,
 #  TaskWrapper
 # ---------------------------------------------------------------------------
 class TaskWrapper:
+    """队列里的一项任务。
+
+    `priority` 是**现在**用来排队的那一个数（会被 aging 改写）；
+    `base_priority` 是它入队时的原始优先级（aging 每次都从它算起，避免反复叠加）；
+    `enqueued_at` 是入队时刻（从库里恢复的老任务会被 `backdate_wrapper` 往前拨，
+    否则它按「刚入队」参与 aging，等了几十分钟等于白等）。
+    """
+
     def __init__(self, priority, counter, task_data):
+        self.base_priority = priority
         self.priority = priority
         self.counter = counter
         self.task_data = task_data
+        self.enqueued_at = time.time()
 
     def __lt__(self, other):
         if self.priority != other.priority:
@@ -349,8 +383,30 @@ def update_task_status_with_retry(task_id, status, error_message=None):
             db_task.status = status
             if status == 'processing':
                 db_task.started_at = datetime.now(timezone.utc)
+                # **被取走 = 起租。** 平台侧原先没有租约：`started_at` 只证明「被取走过」，
+                # 判不出「它的执行者还在不在」，于是定时清理只能靠各管一摊的年龄阈值，
+                # 启动恢复更是一刀切（把所有 processing 无条件收回 pending）。
+                # 租约给这两处一个共同判据（见 task_worker_queue_service 的
+                # `reclaim_expired_task_leases` 与 `load_pending_tasks`）。
+                lease_value = stamp_task_lease(db_task)
+                # **谁开始执行它，谁就负责续租。** 登记与起租放在同一个地方，是因为
+                # 「被执行」这件事有两个入口：单机模式的 worker 主循环（`claim_task_row_for_execution`
+                # 里也登记一次，用的就是这个值）与 **agent 侧**（另一个进程调到这里
+                # `execute_task_inline_for_agent` → 状态写 processing）。只挂主循环那一条，
+                # agent 侧的长分析就没有人续租 —— 平台侧的扫描会在 3600 秒后把它的行判死、
+                # 重新派发一遍，同一份输入付两次费。续租线程是幂等的（`start_lease_renewer`），
+                # agent 进程没有 worker 线程时也要有它。
+                register_inflight_task(task_id, lease_value)
+                start_lease_renewer()
             elif status in TERMINAL_TASK_STATUSES:
                 db_task.completed_at = datetime.now(timezone.utc)
+                # 跑完（不论成败）都要**退租**：留着一个到期的租约，会让下一次清理
+                # 把这条已经结束的行再捞一次（状态已经不是 processing 了，但
+                # 「谁在跑它」这个事实必须跟着终态一起消失）。
+                clear_task_lease(db_task)
+                # 退租与撤出续租名单必须同时发生（两处都写，是因为终态还有别的入口，
+                # 而名字挂在名单里而租约已经没了 = 一条永远被续的空行）。
+                forget_inflight_task(task_id)
                 # failed / skipped / partial_failed 都要把原因落库：error_message 是
                 # 任务上唯一的文本字段，周版本模板靠它回答「为什么这个周版本没数据」。
                 # 只有 failed 才累加 retry_count —— 跳过是正常结局，不该被算成一次重试。
@@ -401,10 +457,28 @@ def background_task_worker():
             continue
         task_processed = False
         try:
+            # **取任务之前先按等待时长重算优先级。** 只在入队那一刻算 aging 等于没算
+            # （那时等待时长为 0），而饿死的形态恰恰是「任务在队列里躺着不动」：
+            # 同步每 15 分钟补一条、一条要跑 4~5 分钟，低优先级任务于是无限「排队中」。
+            # 在**外面**做：队里那条本该被提上来的任务还在堆底，不重算就永远取不到它。
+            # 读不动（假队列）时它自己返回 0，不影响主循环。
+            reweigh_queue(background_task_queue)
             task_wrapper = background_task_queue.get(timeout=1)
             task_processed = True
             priority = task_wrapper.priority
             task = task_wrapper.task_data
+            # **先把库里那一行占下来**（条件 UPDATE + rowcount，见
+            # `claim_task_row_for_execution`）：双 worker 竞争时只有一个能抢到，
+            # 否则同一条同步会被两个进程同时写缓存、同一份输入付两次费。
+            # 抢不到就跳过这一条（`task_processed` 已经是 True，finally 里照常注销账本）。
+            if not claim_task_row_for_execution(task.get('task_id') if isinstance(task, dict) else None):
+                log_print(
+                    f"⏭️ 任务已被别的 worker 取走，本进程跳过: {task.get('type')} "
+                    f"(task_id={task.get('task_id')})",
+                    'TASK',
+                    force=True,
+                )
+                continue
             log_print(f"🔧 后台任务开始处理: {task['type']} (优先级: {priority}) | 队列剩余: {background_task_queue.qsize()}", 'EXCEL')
 
             if task['type'] == 'excel_diff':
@@ -475,7 +549,13 @@ def background_task_worker():
                 # 出队就注销「已入队」账本（见 weekly_handlers 里集合的注释）。放 finally：
                 # 中途抛异常也得注销，否则 create_weekly_sync_task 会以为它还在队列里。
                 # 取 task_data 用 getattr：这一句在 finally 里，一旦抛出去会把工作线程打死。
-                forget_weekly_sync_task_of_payload(getattr(task_wrapper, 'task_data', None))
+                _finished_payload = getattr(task_wrapper, 'task_data', None)
+                forget_weekly_task_of_payload(_finished_payload)
+                # **撤出租约续期名单也必须放 finally**：漏掉一条就是「执行者早走了、
+                # 租约却一直被续」（值班线程还在替它刷新），那样它永远收不回来。
+                # 抢占成功的登记在 `claim_task_row_for_execution` 里，两边用同一个 task_id。
+                if isinstance(_finished_payload, dict):
+                    forget_inflight_task(_finished_payload.get('task_id'))
                 try:
                     background_task_queue.task_done()
                 except ValueError:
@@ -873,7 +953,22 @@ def start_background_task_worker():
         # 必须在 `load_pending_tasks()`（会把上次残留的 processing 任务改回 pending
         # 重新入队）之前做，否则新一轮分析会与幽灵记录混在一起。
         fail_orphaned_analysis_runs()
+        # **然后是 job**（第二波 P0-01 的恢复扫描，`job_service.recover_stale_jobs`）。
+        # 顺序是**必须的**：上面那一步刚把重启前留下的幽灵 run 判成 `failed`，而持有
+        # 它们的那些 job 还停在 `running` —— 判据 ①（关联的 run 已是终态）正好在这一刻
+        # 成立，于是 job 与它那条 run 落进同一个终态，不给用户留一条「看起来还在跑、
+        # 但永远不会动」的身份（那会让同一个 target 再也建不出 job：`active_key` 占着
+        # 唯一索引）。它同时兜住另外两种**没有任何在途代码会去收口**的形态：
+        # job 建好了但排程那一步炸了、任务行被人手工改成终态。
+        #
+        # 与上面那一步是同一套手法：一次独立的、幂等的启动扫描，自己提交、自己记日志，
+        # 失败只留一行告警（不许把整个 worker 拖死）。**不另起入口** —— 就是这里。
+        recover_stale_jobs()
         load_pending_tasks()
+        # 租约续期线程：**必须在 worker 线程之外**（worker 跑任务那段时间正阻塞在任务里，
+        # 轮不到它自己续租）。没有它，租约时长就等价于「任务最长能跑多久」，一次合法的
+        # 长跑会在中途被判死 → 重投 → 跑两遍（AI 分析是同一份输入付两次费）。
+        start_lease_renewer()
         background_task_thread = threading.Thread(target=background_task_worker, daemon=True)
         background_task_thread.start()
         # single 模式下需要本地执行任务，顺带启用清理任务调度。
@@ -898,10 +993,13 @@ def stop_background_task_worker():
                 log_print(f"停止后台任务线程时出现错误: {e}", 'APP', force=True)
         else:
             log_print("后台任务工作线程已停止", 'APP')
+        # 收工就不该再有人续租：此刻还挂在名单里的任务，本进程不会把它们跑完了。
+        stop_lease_renewer()
         stop_scheduler()
 
 
-def add_excel_diff_task(repository_id, commit_id, file_path, priority=10, auto_commit=True):
+def add_excel_diff_task(repository_id, commit_id, file_path, priority=_PRIORITY_EXCEL_DIFF_DEFAULT,
+                        auto_commit=True):
     """添加Excel差异处理任务到优先级队列"""
     task_key = _make_excel_task_key(repository_id, commit_id, file_path)
     bypass_cooldown = priority <= 3
@@ -967,7 +1065,7 @@ def add_excel_diff_task(repository_id, commit_id, file_path, priority=10, auto_c
     return task.id
 
 
-def add_excel_diff_tasks_batch(repository_id, excel_commits, priority=10):
+def add_excel_diff_tasks_batch(repository_id, excel_commits, priority=_PRIORITY_EXCEL_DIFF_DEFAULT):
     """批量添加Excel差异处理任务到优先级队列"""
     if not excel_commits:
         return
@@ -1054,11 +1152,20 @@ def add_excel_diff_tasks_batch(repository_id, excel_commits, priority=10):
 # ---------------------------------------------------------------------------
 
 
-# 「卡在 processing 多久就不再算它在跑」。页面那条判据（`is_stale_sync_task`）用的是
-# 1800 秒，这里取它的两倍：正常的同步是分钟级（实测大仓库 4.7 分钟），两倍余量能把
-# 「真的很慢」与「已经没人管了」分开 —— 误判成卡死会多起一个同步任务和正在跑的那个
-# 抢着写同一份缓存，代价比多等半小时大。
-WEDGED_SYNC_PROCESSING_SECONDS = 3600
+# 「卡在 processing 多久就不再算它在跑」。
+#
+# 这一条**与租约同一个界**，因为问的是同一个问题：「这行还有人在管它吗」。原先这里是
+# 3600 秒的字面量（页面那条判据 `is_stale_sync_task` 的 1800 秒的两倍：正常同步是
+# 分钟级，实测大仓库 4.7 分钟，两倍余量能把「真的很慢」与「已经没人管了」分开；
+# 误判成卡死会多起一个同步任务、与正在跑的那个抢着写同一份缓存，代价比多等半小时大）。
+#
+# 合并的理由：同一条 `processing` 行如果同时被两套判据看着，两套就会给出两个答案 ——
+# 去重这边按「跑了 3600 秒」判死、租约那边按「租约还没到期」说它还活着，于是
+# 去重会重建一条同步，而原执行者（租约续期还在替它刷着）**还在写同一份缓存**。
+# 现在只有一个实现：`lease_is_expired`（有租约看租约、没租约退回年龄判据，
+# 见 `task_worker_queue_service`）。租约在合法运行期间会被续，所以这一条对
+# 「真的还在跑的长同步」也不会误判 —— 误判的代价前面说过，是两头都出事。
+WEDGED_SYNC_PROCESSING_SECONDS = TASK_LEASE_SECONDS
 
 
 def _is_wedged_processing_sync_task(task):
@@ -1070,15 +1177,17 @@ def _is_wedged_processing_sync_task(task):
     只在进程启动时跑一次。此时去重会一直命中它 —— 同步永不重建、也不报错。
     所以超过阈值就按「没人管了」处理，置 failed 并照常重建。
 
-    阈值口径：`started_at`（worker 拿到任务时写）是 naive-UTC，与 `is_stale_sync_task`
-    内部取时刻的方式一致；没有 `started_at` 时它会回落到 `created_at`。
+    **判据只有一份**：这里只是把「还是不是 processing」与 `lease_is_expired` 串起来，
+    判据本身的实现（租约 → `started_at` → `created_at`）在
+    `task_worker_queue_service.lease_is_expired`。返回值的含义与合并前逐字一致：
+    这条行还有人在管 → False，没人管了 → True。
     """
     if str(getattr(task, 'status', '') or '').lower() != 'processing':
         return False
-    return is_stale_sync_task(
+    return lease_is_expired(
         task,
-        datetime.now(timezone.utc).replace(tzinfo=None),
-        processing_timeout_seconds=WEDGED_SYNC_PROCESSING_SECONDS,
+        now=datetime.now(timezone.utc).replace(tzinfo=None),
+        timeout_seconds=WEDGED_SYNC_PROCESSING_SECONDS,
     )
 
 
@@ -1151,6 +1260,11 @@ def create_weekly_sync_task(config_id, auto_commit=True):
             task_type='weekly_sync',
             repository_id=None,
             commit_id=str(config_id),
+            # 这一处**有意保留字面量**：`tests/test_business_flow_comprehensive.py`
+            # 按源码文本断言了 `"priority=3" in create_weekly_sync_task 的函数体`，
+            # 而那个文件不在本次施工的文件主权清单里。单一来源仍是
+            # `services/task_worker_priority.WEEKLY_SYNC`（= 3），
+            # `tests/test_task_lease_and_source.py` 里有一条漂移守卫钉着两者一致。
             priority=3,
             status='pending'
         )
@@ -1458,22 +1572,21 @@ def schedule_weekly_ai_analysis_tasks():
                     _note_weekly_ai_skip(counts, "over_budget")
                     continue
 
-                stale_tasks = _BackgroundTask.query.filter(
-                    _BackgroundTask.task_type == 'weekly_ai_analysis',
-                    _BackgroundTask.file_path == group_key,
-                    _BackgroundTask.status == 'pending',
-                ).all()
-                for stale in stale_tasks:
-                    stale_created = stale.created_at.replace(tzinfo=None) if stale.created_at and stale.created_at.tzinfo else stale.created_at
-                    # 用 naive-UTC 的「现在」与 created_at 同口径。
-                    # 原本用 datetime.now()（宿主机本地时间）：UTC+8 开发机上任务年龄恒多算
-                    # 28800 秒，会让**刚创建**的 pending 任务立刻被判定超时并置 failed。
-                    _now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
-                    if stale_created and (_now_utc_naive - stale_created).total_seconds() > WEEKLY_AI_TASK_STALE_SECONDS:
-                        stale.status = 'failed'
-                        stale.error_message = 'AI分析任务超时，已被调度器重置'
-                        _db.session.commit()
-                        log_print(f"重置卡死的周版本AI分析任务: task_id={stale.id}, group_key={group_key}", "AI", force=True)
+                # 用 naive-UTC 的「现在」与 created_at 同口径。
+                # 原本用 datetime.now()（宿主机本地时间）：UTC+8 开发机上任务年龄恒多算
+                # 28800 秒，会让**刚创建**的 pending 任务立刻被判定超时并置 failed。
+                #
+                # 判据与同步任务**同一把尺子**（先看内存账本、不在账本里才按年龄判超时），
+                # 实现在 `task_worker_weekly_handlers.reset_stale_weekly_analysis_tasks`
+                # 里 —— 原先这里只有年龄判据，于是「排在队列里没轮到」与「进程重启把它丢了」
+                # 在 AI 这边长得一模一样，而同一条任务在同步那边算「只是没排到」。
+                reset_stale_weekly_analysis_tasks(
+                    group_key,
+                    datetime.now(timezone.utc).replace(tzinfo=None),
+                    db=_db,
+                    background_task_model=_BackgroundTask,
+                    log_print=log_print,
+                )
 
                 primary = select_primary_weekly_config(configs)
                 config_ids = [cfg.id for cfg in configs]
@@ -1615,6 +1728,12 @@ def setup_schedule(include_cleanup=True):
     sched_module.every(15).minutes.do(schedule_weekly_sync_tasks)
     sched_module.every(1).minutes.do(schedule_weekly_ai_analysis_tasks)
     sched_module.every(2).minutes.do(schedule_repository_sync_tasks)
+    # **租约到期的回收**：一条任务被 worker 取走后如果那个进程死了（或它自己卡住永远
+    # 不写终态），租约到期就把它放回 pending 重投。判据与阈值见
+    # `task_worker_queue_service` 的「平台侧租约」一节 —— 它是启动恢复（`load_pending_tasks`）
+    # 那条租约判据的**运行期**对应物：只靠启动恢复的话，进程一直活着时没人收。
+    # 5 分钟一轮：租约本身是 3600 秒，扫描频率只影响「死掉的任务多久被重新捡起来」。
+    sched_module.every(5).minutes.do(reclaim_expired_task_leases_safely)
     _schedule_initialized = True
 
 

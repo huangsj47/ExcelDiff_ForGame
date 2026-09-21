@@ -37,6 +37,7 @@ import json
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -46,6 +47,7 @@ from models import Project
 from models.ai_analysis import AiAnalysisRun, AiUsageStatistics
 from services.ai import run_progress
 from services.ai.analysis_budget import budget_status
+from services.ai.pricing import estimate_cost, parse_price_table
 from services.ai.run_progress import ProgressSnapshot
 from services.ai_analysis_service import update_project_analysis_config
 from services.ai_usage_service import (
@@ -408,11 +410,26 @@ class TestWhenTheTaskEnds:
             assert _entry(overview)["running_runs"] == 0
 
     def test_a_finished_but_unreported_run_still_makes_the_cost_uncomputable(self):
-        """**刻意保留**：已经结束、却一次都没上报用量的运行照样让合计费用「算不出」。
+        """**刻意保留，但语义收窄了**（2026-09-21，AI-P1-02）：旧口径只管「全体合计」那一栏。
 
-        它不是活动任务（不会被回写），所以它进完成统计；而聚合器的口径是「任一条算不出
-        就不给合计」。放宽它等于让一个漏掉几次运行的金额看起来完全正常 —— 那才是这个
-        模块最想避免的错。这条断言是**防止**下一个人把它当成同一个 bug 一起放宽。
+        已经结束、却一次都没上报用量的运行，**照样**让 `totals.cost` / `totals.tokens.total` /
+        `totals.cache.hit_rate` 变成「算不出」。这三条断言一个字没改，理由也没变：把一条算不出
+        的运行从合计里**跳过**，得到的金额看起来完全正常、实际漏掉了几次真花掉的钱 —— 那是
+        这个模块最想避免的错。
+
+        ## 那为什么现在可以放宽「其余 15 次一起显示」这件事
+
+        因为放宽的不是**同一个**数字，而是**另外一组**数字：`totals.reported_samples.*`
+        明确叫「已上报样本」，带 `reported_runs` / `unknown_runs` 覆盖度，并在
+        `known_value.notes` 里写明「另有 N 次没有上报，这里是已知的最低值」。它与
+        `totals.cost` **并列存在、互不覆盖**，所以：
+
+        * 「拿未知当 0」= 把没上报的那几次按 0 元计入合计，得到一个冒充总额的数字 ——
+          **仍然禁止**（`totals.cost` 保持 None 就是这条）；
+        * 「已知最低费用 + 覆盖度」= 一个说得出自己缺了哪几次的**下界** —— 允许，因为
+          它不会冒充总额，而且用户终于能看见另外那些有效数据了。
+
+        这条断言是**防止**下一个人把上面两件事混成一件、顺手把 `totals.cost` 也放宽。
         """
         with flask_app.app_context():
             create_tables()
@@ -431,6 +448,15 @@ class TestWhenTheTaskEnds:
             assert overview["totals"]["cost"] is None, "算不出的那一条被悄悄跳过了"
             # 但命中率**不**因此变成 0：缺一条就返回 None（未上报），不是 0%。
             assert overview["totals"]["cache"]["hit_rate"] is None
+            # **并列**的那一组：已上报样本的合计 + 覆盖度。它不冒充总额 —— 少算的那一条
+            # 在 `unknown_runs` 里明明白白写着，金额也标着「已知最低费用」。
+            sample = overview["totals"]["reported_samples"]
+            assert sample["tokens"]["known_value"] == 1200
+            assert sample["tokens"]["unknown_runs"] == 1
+            assert sample["cache"]["known_value"] == pytest.approx(0.4)
+            assert (
+                Decimal(sample["cost"]["known_value"]["amount_exact"]) == _run_cost()
+            ), "已上报样本的费用必须仍然算得出 —— 否则这条就退化成「一起放宽」了"
 
 
 # ==========================================================================
@@ -715,3 +741,199 @@ class TestTheActiveBlockShape:
                 "runs": [],
                 "live": {"partial": True, "tokens": None, "reported_runs": 0, "unreported_runs": 0},
             }
+
+
+# ==========================================================================
+# 十一、已上报样本 + 覆盖度（AI-P1-02）
+# ==========================================================================
+# 「一个历史缺失值永久抹掉其余有效统计」是这次要修的症状：库里的 20 次已完成运行里
+# 有 5 次（失败在半路）token 三列全 NULL，于是 `tokens.total` / `cache.hit_rate` /
+# `cost` **三者同时**变成 None，页面整屏「未上报」—— 而另外 15 次的数据一直好好的。
+#
+# 修法不是放宽旧口径（那会让「漏算几次的合计」看起来完全正常），而是**并列**给出一组
+# 「已上报样本」的数字与它的覆盖度。旧的三个字段一个字都不改：它们仍然是「全体齐全时
+# 的精确值」，页面改成优先显示样本值并把覆盖率写在副标题里。
+
+
+def _unreported_run(project_id: int) -> AiAnalysisRun:
+    """一条**已经结束、却一次都没上报用量**的运行（失败在半路）。
+
+    它不是活动任务（不会被回写），所以它进完成统计 —— 与 `_run(status="running")`
+    那条「还没结账」的在途运行是**两回事**，两者进的是不同的口径。
+    """
+    return _run(
+        project_id, status="failed", tokens_input=None, tokens_output=None, cache_read=None
+    )
+
+
+def _run_cost():
+    """一条 `_run()` 默认参数下的准确费用（按 PRICE_TABLE 算）。
+
+    在测试里算而不是写死 `"0.00288"`：写死的话，改 `_run()` 的默认 token 数会得到一个
+    「测试红了但看不出为什么」的结果，而这里会跟着一起变。
+    """
+    return estimate_cost(
+        "fake-model", tokens_input=1000, tokens_output=200, cache_read=400,
+        table=parse_price_table(PRICE_TABLE)[0],
+    ).amount
+
+
+class TestReportedSamplesSurviveAMissingHistoryRow:
+    def test_a_history_row_that_reported_nothing_does_not_erase_the_others(self):
+        """20 次已完成运行里 5 次没上报 → 样本口径仍然给出 15 次的值与覆盖率。
+
+        旧字段（`tokens.total` 等）**刻意保持 None**：那一份是「全体齐全时的精确值」，
+        放宽它等于让一个漏掉 5 次运行的合计看起来完全正常。两者是并列关系。
+        """
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+            _price_the_project(project_id)
+            for _ in range(15):
+                _run(project_id)
+            for _ in range(5):
+                _unreported_run(project_id)
+
+            totals = _overview(project_id)["totals"]
+            sample = totals["reported_samples"]
+
+            assert totals["runs"] == 20
+            # 旧口径一个字没改：任一条缺输入或输出，全体合计就不给值。
+            assert totals["tokens"]["total"] is None
+            assert totals["cache"]["hit_rate"] is None
+            assert totals["cost"] is None
+            # 新口径：已上报样本的合计 + 覆盖度。
+            assert sample["total_runs"] == 20
+            assert sample["tokens"]["reported_runs"] == 15
+            assert sample["tokens"]["unknown_runs"] == 5
+            assert sample["tokens"]["known_value"] == 15 * 1200
+            assert sample["tokens"]["known_input"] == 15 * 1000
+            assert sample["tokens"]["known_output"] == 15 * 200
+
+    def test_the_known_cache_hit_rate_is_an_aggregate_over_the_sample_only(self):
+        """已知命中率是**已上报样本的**命中合计 ÷ 输入合计，不是「按全部运行算」的假比例。
+
+        分子分母必须来自**同一批**运行：只把 15 次的命中数除以 20 次的输入总数，
+        会得到一个偏低的数字 —— 那正是「部分缺失」最容易算错、又最看不出来的地方。
+        """
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+            _price_the_project(project_id)
+            for _ in range(3):
+                _run(project_id)
+            _unreported_run(project_id)
+
+            totals = _overview(project_id)["totals"]
+            cache = totals["reported_samples"]["cache"]
+
+            assert totals["cache"]["hit_rate"] is None
+            assert cache["reported_runs"] == 3
+            assert cache["unknown_runs"] == 1
+            assert cache["known_value"] == pytest.approx(0.4)
+            assert cache["known_input"] == 3000
+            assert cache["known_cache_read"] == 1200
+
+    def test_the_known_cost_sums_the_reported_samples_only(self):
+        """已知费用 = 已上报样本的合计，**并明说这是已知的部分**（不是「拿未知当 0」）。
+
+        差额那 5 次是真花了钱的（失败在半路也一样烧 token），所以这一格给的是
+        「已知最低费用」：比总额小，但每一个数字都是算得出来的。
+        """
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+            _price_the_project(project_id)
+            for _ in range(3):
+                _run(project_id)
+            _unreported_run(project_id)
+
+            totals = _overview(project_id)["totals"]
+            cost = totals["reported_samples"]["cost"]
+
+            assert totals["cost"] is None, "旧口径（任一条算不出就不给合计）被放宽了"
+            assert cost["reported_runs"] == 3
+            assert cost["unknown_runs"] == 1
+            assert cost["known_value"] is not None
+            assert Decimal(cost["known_value"]["amount_exact"]) == _run_cost() * 3
+            # 这一句是给界面用的：为什么这里的金额比「一共花了多少」小。
+            notes = cost["known_value"]["notes"] or []
+            assert any("已知最低费用" in note for note in notes), notes
+            assert any("1 次运行没有上报" in note for note in notes), notes
+
+    def test_a_project_row_keeps_its_known_cost_and_rate(self):
+        """项目行那一格也必须给出已知值 —— 否则用户点进来才发现「其实有数」。"""
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+            _price_the_project(project_id)
+            for _ in range(3):
+                _run(project_id)
+            _unreported_run(project_id)
+
+            row = _entry(_overview(project_id))
+
+            assert row["cost"] is None
+            assert Decimal(row["reported_samples"]["cost"]["known_value"]["amount_exact"]) == (
+                _run_cost() * 3
+            )
+            assert row["reported_samples"]["cache"]["known_value"] == pytest.approx(0.4)
+
+    def test_everything_reported_means_the_two_views_agree(self):
+        """全体都上报时，样本值必须与旧的精确值**逐字相同**（否则两套数字会互相矛盾）。"""
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+            _price_the_project(project_id)
+            _three_completed(project_id)
+
+            totals = _overview(project_id)["totals"]
+            sample = totals["reported_samples"]
+
+            assert sample["tokens"]["unknown_runs"] == 0
+            assert sample["tokens"]["reported_runs"] == sample["tokens"]["total_runs"] == 3
+            assert sample["tokens"]["known_value"] == totals["tokens"]["total"]
+            assert sample["cache"]["known_value"] == pytest.approx(totals["cache"]["hit_rate"])
+            assert (
+                sample["cost"]["known_value"]["amount_exact"]
+                == totals["cost"]["amount_exact"]
+            )
+
+    def test_no_completed_run_gives_a_complete_shape_not_a_missing_one(self):
+        """一次都没完成时这一块**仍然在**（`known_value` 是 None）—— 界面不用写 `|| {}` 兜底。
+
+        与旧的三个字段同一个理由：少一个键会让「页面照着老响应渲染」变成常态。
+        """
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+            _price_the_project(project_id)
+            _run(project_id, status="running", tokens_input=None,
+                 tokens_output=None, cache_read=None)
+
+            totals = _overview(project_id)["totals"]
+            sample = totals["reported_samples"]
+
+            assert totals["runs"] == 0
+            assert sample["total_runs"] == 0
+            for key in ("tokens", "cache", "cost"):
+                assert sample[key]["reported_runs"] == 0, key
+                assert sample[key]["unknown_runs"] == 0, key
+                assert sample[key]["known_value"] is None, key
+
+    def test_the_weekly_drill_row_carries_the_same_sample_block(self):
+        """下钻的合计与周版本行读的是同一份聚合结果，形状不许分叉。"""
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+            _price_the_project(project_id)
+            for _ in range(3):
+                _run(project_id)
+            _unreported_run(project_id)
+
+            drill = project_usage(project_id, UsageFilters())
+            week = drill["weekly_versions"][0]
+
+            assert drill["totals"]["reported_samples"]["tokens"]["reported_runs"] == 3
+            assert week["reported_samples"]["tokens"]["unknown_runs"] == 1
+            assert week["reported_samples"]["tokens"]["known_value"] == 3 * 1200

@@ -50,6 +50,12 @@ _LOG_CATEGORIES = [
     'TEST',      # 测试相关日志
     # ---- 逐条明细（**默认关**，见 _build_log_level） ----
     'DETAIL',    # 逐文件 / 逐提交的执行明细
+    # ---- 热路径采样汇总（**默认开**，见 services/log_sampling.py） ----
+    # 热路径（逐文件、逐 git 命令）的日志被采样成「首条 + 末条 + 一行汇总」，
+    # 汇总行走这一类目：它是「这次扫了多少文件、多少不存在」的唯一答案，
+    # 所以默认要看得见（与 DETAIL 的默认关正好相反）。`LOG_HOT=false` 可关，
+    # 但关掉之前请想清楚：关掉的是计数，不是噪音。
+    'HOT',
 ]
 
 # **默认关闭**的类别。与 ERROR（默认开启、且 LOG_ALL 关不掉）正好相反。
@@ -335,6 +341,31 @@ def _rotate_log_backups(log_file: str, max_backups: int = 10) -> None:
                 pass
 
 
+def describe_runtime_log_config() -> str:
+    """一行说清**当前生效**的日志配置。
+
+    为什么要这一行：日志配置是「出问题时才想起来问」的东西 —— 事后翻日志的人
+    只能看到日志里有什么、看不到**没写进来的是什么**。少一类日志、热路径被采样
+    成计数，这些都是「本来该有却没有」的事实，不在启动时说一句，只能靠猜。
+    实测踩过的坑：`LOG_GIT=false` 之后有人找了半天「为什么没有 git 日志」。
+
+    用的是模块级的 `LOG_LEVEL`（真正生效的那份），不是重新解析环境变量 ——
+    报「我应该是什么」而不是「实际是什么」，那这行就没有意义了。
+    """
+    off = sorted(
+        cat for cat in _LOG_CATEGORIES if not LOG_LEVEL.get(f'{cat}_VERBOSE', True)
+    )
+    # 采样模式：默认聚合。这里不 import services.log_sampling（utils 不该依赖
+    # services），只读同一个环境变量，保持两边口径一致。
+    sample_mode = (os.environ.get('LOG_SAMPLE_MODE', '') or '').strip().lower() or 'aggregate'
+    parts = [
+        f"目录={_get_log_dir()}",
+        f"关闭的类目={('、'.join(off)) if off else '无'}",
+        f"热路径采样={sample_mode}",
+    ]
+    return "📋 日志配置: " + " | ".join(parts)
+
+
 def clear_log_file():
     """启动时轮转运行日志，并保留最多10个历史备份。"""
     try:
@@ -345,7 +376,13 @@ def clear_log_file():
         _rotate_log_backups(log_file, max_backups=10)
         with open(log_file, 'w', encoding='utf-8'):
             pass
-        _original_print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]日志文件已轮转并初始化: {log_file}")
+        _original_print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]日志文件已轮转并初始化: {log_file}"
+        )
+        # 与上面同一行：把「哪些日志被关掉了 / 热路径被采样成什么样」一起交代清楚。
+        # 注意**写在轮转之后**（用 _original_print，不落文件）：`runlog.log` 必须
+        # 从空开始，这是启动契约。
+        _original_print(describe_runtime_log_config())
     except Exception as e:
         _original_print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]轮转日志文件失败: {e}")
 

@@ -17,6 +17,7 @@ from services.commit_lookup_service import is_svn_revision
 from services.commit_ordering import commit_merge_sort_key
 from services.deployment_mode import is_agent_dispatch_mode
 from services.diff_service import DiffService
+from services.task_worker_priority import EXCEL_DIFF_PAGE
 from utils.diff_data_utils import clean_json_data
 from utils.logger import log_print
 
@@ -814,12 +815,12 @@ def get_real_diff_data_for_merge(commit):
                         log_print(f"  - 工作表 '{first_sheet_name}': {first_sheet_data.get('status', 'unknown')}, 行数: {len(first_sheet_data.get('rows', []))}")
                     else:
                         log_print(f"- ❌ 解析后的Excel diff数据无工作表", 'INFO')
-                    _add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=1)
+                    _add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=EXCEL_DIFF_PAGE)
                     log_print(f"✅ 合并diff添加高优先级缓存任务: {commit.path}", 'CACHE')
                 else:
                     log_print(f"- 缓存未命中，调用Git Excel diff解析", 'INFO')
                     excel_diff = service.parse_excel_diff(commit.commit_id, commit.path)
-                    _add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=1)
+                    _add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=EXCEL_DIFF_PAGE)
                     log_print(f"✅ 合并diff缓存未命中，添加高优先级缓存任务: {commit.path}", 'CACHE')
                     log_print(f"- Excel工作表列表: {list(excel_diff.get('sheets', {}).keys())}")
                     if excel_diff.get('sheets'):
@@ -881,7 +882,7 @@ def get_real_diff_data_for_merge(commit):
                     excel_diff = _get_unified_diff_data(
                         commit, resolve_previous_commit(commit)
                     )
-                _add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=1)
+                _add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=EXCEL_DIFF_PAGE)
                 if excel_diff:
                     try:
                         excel_diff = clean_json_data(excel_diff)
@@ -1054,10 +1055,26 @@ def handle_consecutive_commits_merge_internal(file_commits):
                 if parent_commit_id:
                     log_print(f"🎯 计算Excel范围diff: {parent_commit_id[:8]}..{latest_commit.commit_id[:8]}", 'APP')
                     try:
-                        virtual_previous_commit = Commit()
-                        virtual_previous_commit.commit_id = parent_commit_id
-                        virtual_previous_commit.repository = repository
-                        virtual_previous_commit.path = earliest_commit.path
+                        # 假基线：`commit_id` 是下游**唯一**读的字段（`get_unified_diff_data`
+                        # 与 `get_deleted_file_diff_data` 都只读它，见
+                        # `tests/test_commit_diff_virtual_baseline.py` 里钉住属性集的那条）。
+                        #
+                        # 原先这里造的是一个 transient 的 `Commit()` 再挂 `.repository`：
+                        # 反向引用会把它塞进 `repository.commits`，而它不在 session 里 ——
+                        # 下一次 flush（任何一次查询的 autoflush 都算）时 save-update 级联
+                        # 试图注册它，SQLAlchemy 打一句
+                        #   `Object of type <Commit> not in session, add operation along
+                        #    'Repository.commits' will not proceed`
+                        # 就**跳过**。实测确认不会插入幽灵行（写入是被跳过、不是被推迟），
+                        # 但那句 warning 会出现在运行日志里，且「关联写入被静默跳过」这件事
+                        # 本身没有任何别的痕迹。
+                        #
+                        # 用不属于 ORM 的载体就没有关系可级联 —— 这段代码要的本来就只是
+                        # 一个「有 commit_id 的东西」（本模块第 13 行已经在用 SimpleNamespace）。
+                        virtual_previous_commit = SimpleNamespace(
+                            commit_id=parent_commit_id,
+                            path=earliest_commit.path,
+                        )
                         diff_data = _get_unified_diff_data(latest_commit, virtual_previous_commit)
                         if diff_data:
                             diff_data['commit_range'] = f"{earliest_commit.commit_id[:8]}..{latest_commit.commit_id[:8]}"

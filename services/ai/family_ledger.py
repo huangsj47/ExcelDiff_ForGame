@@ -36,9 +36,8 @@ MOVE 里，所以是同一个文件内部的调用，不构成往返依赖。
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Sequence
 
 from services.ai.budget import truncate_text
 from services.ai.engine import (
@@ -49,8 +48,6 @@ from services.ai.engine import (
     EngineOutcome,
 )
 from services.ai.protocol import Anomaly, DroppedItem
-from services.ai.rules import KIND_ANOMALY_CAP, is_probable_duplicate
-from services.ai.scope import normalize_path
 from services.ai.verdict import (
     VERDICT_DOWNGRADED,
     VERDICT_NEEDS_MORE_EVIDENCE,
@@ -301,111 +298,53 @@ def reconcile_candidates(
     完全正常，只是少了一条，而没有任何人会去数。所以平台自己查，并把它写进报告末尾的
     「信息缺口（平台补充）」——**这条保证不建立在模型听话上**。
 
-    ## 怎么算「进了最终报告」
+    ## 判据只有一条：**候选编号**（AI-P0-06，2026-09-21 换的）
 
-    **三手**，任一手成立就算采纳：
+    每个候选有平台发出去的不可变编号（`Candidate.id`，形如 `S1-3`），而汇总那一次的任务书
+    要求每条结论把它的来源编号写进 `source_candidate_ids`（一对多、多对一都允许，
+    见 `build_synthesis_task`）。平台做的是**两个集合的比对**：
 
-    1. 候选编号（`[S1-2]`，平台发出去、要求模型采纳时带回）出现在最终报告或异常清单里；
-    2. 最终异常清单里有**同一个文件**的条目（模型经常复述内容而不带编号）；
-    3. 最终异常清单里**某一条的标题/证据/影响面里点了这个文件的名** —— 也就是
-       「同一个文件」那一手的放宽版：一条结论只带**一个** `file_path` 字段，而它讨论的
-       往往不止一个文件。
+    * 编号落在**最终清单**（活动的那些结论）上 → 已采纳；
+    * 编号落在**本次复核裁决**改变过的那几条上 → 去向是「已撤销 / 已降级 / 转人工核验」；
+    * 编号在汇总交回的那一组里、但没有落到最终清单上（被条数上限截掉、未达门槛、与已有
+      条目判为同一问题）→ 去向在平台自己那几本账里，本节不重复计入；
+    * 编号**一条都没出现在汇总交回的结论里** → 真缺口，逐条报，并记进 `dropped`
+      （它会触发 `subagent_gap` 降级）。
 
-    第 3 手是 2026-09-20 加上的，起因是一次真实的**误报**（线上跑出来的那次周版本分析）：
-    分片 S1 报的候选是「`config/奖励模式_CfgRewardMode.xlsx` 新建表内仅含一条测试数据、
-    与两份同域表并存」，而汇总把它并成了一条 `file_path = config/奖励模式表_CfgRewardMode.xlsx`
-    的结论 —— **它自己的证据第三条逐字写着 `config/奖励模式_CfgRewardMode.xlsx`**。
-    候选明明被采纳了，前两手却都看不见：编号没带回、`file_path` 又不是同一个。
-    于是平台在报告末尾告诉用户「1 条找不到去向，需要人工看一眼」，而那条就在报告里。
+    ## 换掉的那三手（以及它们为什么必须走）
 
-    三手都不成立才算没进 —— 而写进报告的那句话会**如实说明查的是什么**，
-    不是断言「模型丢了它」。
+    原先这里从自然语言反推血缘，三手任一手成立就算采纳：候选编号出现在报告正文里 /
+    最终清单里有一条同文件的结论 / 结论的标题·证据·影响面里点了候选的路径名。三手在
+    真机上产生的全是**假缺口**：run 20 的 `S3-3`（`ProtoScsGas.lua`）与最终结论 `F5`
+    （`ProtoCGas.lua`，**同名协议拆在两个文件里**）讨论的是同一个问题，标题措辞也不同，
+    `F5` 的 `evidence_refs` 还是空的 —— 三手一条都没挂上，于是 4 条候选被报成「找不到
+    去向」，而那 4 条假缺口又是那一次 `subagent_gap` 降级的**唯一**触发源。
 
-    ## 每一手都必须比「同一个东西」，而不是比字符串
+    反推的另一面同样致命：它会把**真的缺口**说成「已有去向」（同文件即算采纳），
+    而那个方向是静默的。显式血缘两头都堵上。
 
-    这三手各自都有一个**看起来很省事但会判错**的写法：
+    ## 一条编号都没交回时：说一次，不报 N 条
 
-    * **编号不能当子串找**。`candidate.id` 形如 `S1-2`，而同一分片的编号可以到
-      `S1-30`（`CANDIDATE_MAX_ITEMS_PER_MEMBER`）—— `"S1-2" in 报告` 会被报告里的
-      `[S1-25]` 命中。这是一个**漏报**：一条真的没被汇总进去的候选从此不出现，
-      而这正是本函数存在的唯一理由（见上面「为什么这件事不能交给模型」）。
-    * **路径要比归一化后的形态**。逐字相等时，`./config/a.xlsx` 与
-      `config\\a.xlsx` 是两个文件。这是一个**误报**：已经进了报告的候选被说成
-      「找不到去向」，读的人只好再去核一遍，而那个计数会虚高。
-    * **第 3 手的路径不能不管边界**。`a/b.xlsx` 是 `x/a/b.xlsx` 的后半段，
-      裸子串匹配会让后者替前者「认领」这条候选。所以两侧都挡住路径的续接字符
-      （与 `_candidate_id_mentioned` 挡住 `S1-25` 是同一件事）。
+    模型没按 schema 交回 `source_candidate_ids` 时，**不逐条报假缺口**（run 20 的成因），
+    而是如实说一句「本次汇总没有交回候选血缘，无法按编号对账」——**一次**，并且不产生
+    `dropped` 记录（否则整次运行仍会被判成 `subagent_gap` 降级）。
 
-    ## 第 3 手为什么**只看结论**、不看报告正文
+    ## 去向已经写明的候选，不进这份名单
 
-    `_report_text` 里还有报告正文，正文里出现一个文件名看起来也能算「提到了」。不采纳
-    这条路：报告正文正是模型写「这一块我没查到」的地方（那次真实运行里，
-    `奖励模式_CfgRewardMode.xlsx` 就出现在模型自己那节「信息缺口（需人工核对）」里）。
-    拿「正文提到过」当采纳证据，会把**真的缺口**说成「已有去向」—— 而这个方向是静默的，
-    正是本函数最不该出的那种错。
-
-    前者静默、后者吵闹，所以前者更要紧；但两者都不该发生。
-
-    ## 去向已经写明的候选，不进这份名单（2026-09-20 加）
-
-    那天的实测里三条候选被报成「找不到去向」，而**三条的去向其实都写着**：
-
-    * 两条**被条数上限截掉了** —— 它们进了结论清单、只是没有位置，而报告里另有一节
-      （`build_cap_section`）逐条列着它们。同一个东西在两节里各出现一次，而这两节的语义
-      是相反的（那一节是「看到了、没位置」，这一节是「没看到」）—— 读的人只会觉得平台的
-      账自相矛盾。现在按文件名认出它们（`_cap_details`）并单独计数。
-    * 一条被模型**有意写成了「待取证假设」**（逐字给了那次 diff、也写了缺什么证据）。
-      这一条仍然记账 —— 正文不是采纳证据 —— 但 `_gap_line` 会照实说「正文里出现过这个
-      文件，请确认是有意降级还是被漏掉」。读的人据此知道该去补证据还是该去追汇总。
-
-    ## 复核裁决**先看**：撤销 / 降级 / 转人工核验都不是「遗漏」（2026-09-21 加）
-
-    真机 run 13 的报告里，同一件事被写了两遍，而两遍互相矛盾：正文「历史结论状态」写
-    「**已推翻（1 条）**：ProtoCTms joinTeamByRecruit 参数由 roleId 改为 recruitId……
-    客户端已同步，**该缺口关闭**」，而这一节写「`[S1-9]` ……报告里既没有引用这个编号，
-    正文与结论清单里也都没有提到这个文件 → 需要人工看一眼」。
-
-    机制：上面那三手查的是**裁决之前**那份清单与正文，**完全不看规范结论的状态**。而一条
-    被复核撤销的结论已经不在清单里了（`Reduction.retracted`；落库那一侧读的是活动的那些），
-    于是那条候选被算成「没有进入最终结论清单」—— 它真正的去向是「已撤销」。
-
-    现在先按 `reduction` 判去向，四种各说各的：
-
-    * `retracted`（撤销）：**不是遗漏** —— 它的缺席已经由复核解释过了，如实说「已撤销」；
-    * `downgraded`（降级）：**还在清单里**，只是等级按复核之后的算；
-    * `needs_more_evidence`（待人工核验）：**还在清单里**，置信度不再按 `very_high` 采信。
-      「转人工核验」与「没有进入最终结论清单」本来就是同一件事，措辞与裁决一致、
-      **不说两遍**；
-    * 对不上任何裁决的，照旧按缺口报（见下一节）。
-
-    **裁决排在那三手之前**是刻意的：裁决之前的那份清单里被撤销的结论还在，顺序反过来
-    时三手会先把候选认成「已采纳」，于是「已撤销」这个更准的说法永远说不出口。
-
-    ## 不许放宽成「凡候选都能找到落点」
-
-    `_ruling_fate` 只认**同一条**（`_same_finding` 那三手：同一个文件 / `rules` 里那套
-    近似判重 / 结论的标题证据影响面里点了这个文件名），而且只在**这次真的收到了裁决**
-    时才生效（`reduction=None` 时逐字保持原行为 —— 调用方还没接上时不许静默改变结论）。
-    对不上的候选照旧按「找不到去向」报出来：**真正的缺口必须吵闹**，而「已撤销」这种
-    说法一旦认错就是静默的（用户不会再去追那条候选了，它就此消失）。
+    被复核撤销 / 降级 / 转人工核验的那几条由 `_ruling_line` 各成一段如实说（措辞与
+    「复核裁决（平台）」那一节逐字一致）；被平台自己截掉或合并的那几条另有一句汇总
+    （它们的记账在「结论条数上限（平台补充）」那一节与运行轨迹里）。同一件事在报告里
+    出现两遍、而两遍说法不同，正是这一批缺陷的形态。
 
     `reduction` 由调用方（`subagent.aggregate_outcomes`，它已经算过这一份）传进来 ——
     **同一个对象，不在这里重算一遍**：两处各算一次，迟早会出现「对账说撤销、落库说还在」。
     """
-    adopted = _report_text(synthesis)
-    findings_text = _findings_text(synthesis)
-    # 正文**只用来给条目加一句说明**（「正文里出现过这个文件」），不当采纳证据 ——
-    # 理由见上面「第 3 手为什么只看结论、不看报告正文」。
-    body_text = synthesis.report_markdown or ""
-    cap_texts = _cap_details(synthesis.dropped)
-    final_paths = {
-        normalize_path(item.file_path)
-        for item in synthesis.anomalies
-        if normalize_path(item.file_path)
-    }
+    # 汇总交回了哪些编号、其中哪些落到了最终清单上。
+    submitted = _submitted_candidate_ids(synthesis, reduction)
+    landed = _landed_candidate_ids(synthesis, reduction)
     lines: list[str] = []
     dropped: list[DroppedItem] = []
-    capped_explained = 0
+    settled = 0
     # 复核裁决那三种去向各攒一段（`_ruling_blocks`）。撤销与降级**分开攒**：前者是移出
     # 清单、后者是还在清单里，读的人对这两件事的处置不一样。
     ruling_lines: dict[str, list[str]] = {verdict: [] for verdict in RULING_FATES}
@@ -415,40 +354,46 @@ def reconcile_candidates(
             verdict, row = fate
             ruling_lines[verdict].append(_ruling_line(candidate, verdict, row))
             continue
-        if _candidate_id_mentioned(candidate.id, adopted):
+        if candidate.id in landed:
             continue
-        path = normalize_path(candidate.anomaly.file_path)
-        if path and path in final_paths:
+        if candidate.id in submitted:
+            # 汇总交过这个编号，但它没有留在最终清单里 —— 平台在这一侧把它处置掉了
+            # （超出条数上限 / 未达门槛 / 与已有条目判为同一问题）。那几本账各自逐条记着，
+            # 这里只汇总一句，不重复计入这份名单。
+            settled += 1
             continue
-        if path and _path_named_in_findings(path, findings_text):
-            continue
-        if path and any(_path_named_in_findings(path, text) for text in cap_texts):
-            # 去向已知：**被条数上限截掉了**，报告里另有一节逐条列着它。不记进这一节 ——
-            # 同一批条目在两节里各出现一次，读的人会以为是两回事：那一节说的是「看到了、
-            # 只是没位置」，这一节说的是「没看到」。这正是 `build_cap_section` 的
-            # docstring 里写明「两节不能合成一节」的那个区别，反过来也不能重复报。
-            capped_explained += 1
-            continue
-        in_body = bool(path) and _basename_named_in_text(path, body_text)
         dropped.append(
             DroppedItem(
                 kind="subagent",
                 index=candidate.index,
-                reason="汇总报告里找不到这条候选的去向",
+                reason="汇总交回的结论里没有一条声明来源于这条候选",
                 detail=f"[{candidate.id}] {candidate.anomaly.title}"[:300],
             )
         )
-        lines.append(_gap_line(candidate, in_body=in_body))
+        lines.append(_gap_line(candidate))
 
+    # 一条编号都没交回：**说一次，不报 N 条**（见 docstring 最后那两节）。
+    no_lineage = bool(candidates) and not submitted
     shard_gaps = _shard_gap_lines(steps)
     verify_gaps = _verify_gap_lines(steps)
     explained = tuple(
         (verdict, tuple(items)) for verdict, items in ruling_lines.items() if items
     )
+    if no_lineage:
+        lines = []
+        dropped = []
     # 有真缺口、有分片/对账轮的缺口、或者有**去向我们得说一句**的候选时才出这一节。
-    # 「被条数上限截掉」那一种不在此列（既有行为，有测试钉着）：它们的去向在报告里
-    # 另有一节逐条列着，`build_cap_section` 已经把账记全了。
-    if not lines and not shard_gaps and not verify_gaps and not explained:
+    # 「被平台自己截掉/合并」那一种不单独成段（汇总结算的那一句已经说了）：它们的去向在
+    # 报告里另有记账（`build_cap_section` 与运行轨迹），重复报会让同一批条目在两节里
+    # 各出现一次、而两节的说法还不一样。
+    if (
+        not lines
+        and not no_lineage
+        and not shard_gaps
+        and not verify_gaps
+        and not explained
+        and not settled
+    ):
         return "", ()
 
     blocks: list[str] = ["## 信息缺口（平台补充）"]
@@ -465,22 +410,29 @@ def reconcile_candidates(
             "另外，本次开着**「对账轮（找反证）」**，而它没有跑成：\n\n"
             + "\n".join(verify_gaps)
         )
+    if no_lineage:
+        blocks.append(
+            f"平台的账上共有 {len(candidates)} 条来自分片代理的候选结论，而**本次汇总"
+            "没有交回候选血缘**（每条结论都该在 `source_candidate_ids` 里写上它来源于"
+            "哪几条候选）。没有这一组编号，平台**无法按编号对账** —— 所以这里既不报"
+            "「找不到去向」，也不把它们算成遗漏：**请人工对照各分片的候选清单过一遍**。"
+        )
     if lines:
         blocks.append(
             f"平台的账上共有 {len(candidates)} 条来自分片代理的候选结论，"
-            f"其中 {len(lines)} 条**没有进入最终结论清单**。平台的核对落在候选编号、"
-            "结论清单里的文件与结论、条数上限的记账、以及本次复核的裁决这几处 —— "
-            "**正文里提到过不算采纳**"
-            "（正文正是模型写「这里我没查到」的地方）。它们不因此就不成立，"
+            f"其中 {len(lines)} 条**没有进入最终结论清单**。平台的核对**只按候选编号**："
+            "汇总交回的每条结论都带着它的来源编号（`source_candidate_ids`），平台拿候选"
+            "清单去比这一组编号 —— 对不上的就是下面这几条。它们不因此就不成立，"
             "只是需要人工看一眼：\n\n" + "\n".join(lines)
         )
     for verdict, items in explained:
         blocks.append(_ruling_block(verdict, items))
-    if capped_explained:
+    if settled:
         blocks.append(
-            f"另有 {capped_explained} 条候选的缺席**已经解释过了**：它们被本次的条数上限"
-            "截掉（进了结论清单、只是**没有位置**），逐条列在上面那节「结论条数上限"
-            "（平台补充）」里，不重复计入这一份名单。"
+            f"另有 {settled} 条候选的编号**汇总交回过、但没有留在最终清单里** ——"
+            "平台在这一侧把它们处置掉了（超出本次条数上限 / 未达告警门槛 / 与已有条目"
+            "判为同一问题）。这几条的记账在「结论条数上限（平台补充）」那一节与本次"
+            "运行轨迹里，不重复计入这一份名单。"
         )
     blocks.append(
         "以上是平台**按记录核对**出来的，不是模型的自我说明。"
@@ -488,37 +440,57 @@ def reconcile_candidates(
     return "\n\n".join(blocks), tuple(dropped)
 
 
-def _same_finding(candidate: Candidate, row: FindingRow) -> bool:
-    """这条候选与这条复核结论是不是**同一个东西**。
+def _submitted_candidate_ids(
+    synthesis: EngineOutcome, reduction: Reduction | None
+) -> frozenset[str]:
+    """汇总**交回了哪些候选编号**（它自己写下的那份血缘）。
 
-    三手，与采纳判定用的是同一套手（见 `reconcile_candidates` 的「怎么算进了最终报告」）
-    —— 只是查的清单从「最终结论」换成「本次复核裁决过的这几条」。同一个东西在两处用两套
-    判据，迟早会出现「按这一手是它、按那一手不是它」。
+    两批都要看：
 
-    * 归一化后的 `file_path` 相等（采纳第 2 手：同一个文件即同一个东西）；
-    * `rules.is_probable_duplicate` —— 平台自己的「同一条被换了个说法又报了一遍」判据。
-      分片的候选与汇总之后的结论是两条模型分别写的文字，逐字比对认不出它们，而这条判据
-      本来就是为这件事写的（同一套它在 `verdict._duplicate_of` 那里也用来把对账轮的新发现
-      认到已有结论上）。它的门槛**宁紧勿松**是刻意的（同 commit + 同文件或有一侧没写文件
-      + 标题足够相似），这里直接沿用，不另放松 —— 认错的代价是静默的：一条真的被漏掉的
-      候选会被宣布成「已撤销」，而用户不会再去追它；
-    * 结论的标题/证据/影响面里点了候选的路径名（采纳第 3 手，边界规则见
-      `_path_named_in_findings`）。
+    * `synthesis.payload.anomalies` 是模型原始那一批（`_run_one` 也是从这里抽候选的，
+      见那里的「抽的是过门槛之前的」）；
+    * `synthesis.anomalies` 是过了门槛/去重/封顶之后的那一批。
 
-    任一侧没有 `file_path` 时，第 1、3 两手下不去，只剩第 2 手兜着。
+    只看后者的话，**被条数上限截掉**的那几条会被误报成「找不到去向」（它们的编号在
+    前者里，而结论对象已经被平台丢掉了 —— 上限记账只有一行文字，没有编号）。
+    `reduction.rows` 也要并进来：裁决之后的活动清单与原始那批不一定逐条对应。
     """
-    path = normalize_path(candidate.anomaly.file_path)
-    if path and path == normalize_path(row.origin.file_path):
-        return True
-    if is_probable_duplicate(row.origin, candidate.anomaly):
-        return True
-    return bool(path) and _path_named_in_findings(path, _anomaly_text(row.origin))
+    ids: set[str] = set()
+    for item in synthesis.anomalies:
+        ids.update(item.source_candidate_ids)
+    if synthesis.payload is not None:
+        for item in synthesis.payload.anomalies:
+            ids.update(item.source_candidate_ids)
+    if reduction is not None:
+        ids.update(reduction.claimed_candidate_ids)
+    return frozenset(ids)
+
+
+def _landed_candidate_ids(
+    synthesis: EngineOutcome, reduction: Reduction | None
+) -> frozenset[str]:
+    """**进了最终结论清单**（活动的那些结论）的候选编号。
+
+    有 `reduction` 时以它为准 —— 那才是落库与界面读的清单（撤销的条目已经被移出）。
+    没有 `reduction` 时退化成汇总那一份清单，逐字保持调用方没接上时的行为。
+    """
+    if reduction is not None and reduction.rows:
+        return reduction.landed_candidate_ids
+    return frozenset(
+        candidate_id
+        for item in synthesis.anomalies
+        for candidate_id in item.source_candidate_ids
+    )
 
 
 def _ruling_fate(
     candidate: Candidate, reduction: Reduction | None
 ) -> tuple[str, FindingRow] | None:
     """这条候选在**本次复核裁决**里的去向（对不上任何一条就是 `None`）。
+
+    判据是**编号**（`FindingRow.source_candidate_ids` 里有没有这条候选的 ID）—— 不是
+    标题、不是文件、不是证据文本：那三手正是 AI-P0-06 换掉的东西，它们的误判会让一条
+    真的被漏掉的候选被宣布成「已撤销」（静默），也会让一条真的有去向的候选被报成缺口。
 
     优先级写成 `RULING_FATES` 的次序（撤销 → 降级 → 待人工核验）：一条候选同时沾上两条
     裁决时（少见，但可能），取**处置更重**的那一条 —— 撤销是「移出清单」，说成降级会让读的
@@ -528,7 +500,7 @@ def _ruling_fate(
         return None
     for verdict in RULING_FATES:
         for row in reduction.rows:
-            if row.verdict == verdict and _same_finding(candidate, row):
+            if row.verdict == verdict and candidate.id in row.source_candidate_ids:
                 return verdict, row
     return None
 
@@ -578,24 +550,6 @@ def _ruling_line(candidate: Candidate, verdict: str, row: FindingRow) -> str:
     return f"{_candidate_head(candidate)}{detail}。"
 
 
-def _cap_details(dropped: Iterable[DroppedItem]) -> tuple[str, ...]:
-    """条数上限截掉的那几条的记账文本（`detail` 里带着那条结论的文件名）。
-
-    用来把「被上限截掉的候选」与「汇总真的漏掉的候选」分开：前者的去向在报告里
-    已经逐条写着（`build_cap_section` 那一节），再报一次「找不到去向」会让同一批条目
-    在两节里各出现一次，而这两节的语义是相反的。
-
-    **按文件名匹配、不解析那串文本**：`detail` 是给人看的（`severity 标题（路径）`），
-    标题里自己就带括号（`【物品表（14外观）】`），从两头切括号必然切错。这里复用
-    `_path_named_in_findings` 的边界规则 —— 与它挡 `x/a/b.xlsx` 冒充 `a/b.xlsx` 同一件事。
-    """
-    return tuple(
-        str(getattr(item, "detail", "") or "")
-        for item in dropped
-        if getattr(item, "kind", "") == KIND_ANOMALY_CAP
-    )
-
-
 def _candidate_head(candidate: Candidate) -> str:
     """一条候选在名单里的开头（编号、标题、维度/严重度、文件）。
 
@@ -610,112 +564,29 @@ def _candidate_head(candidate: Candidate) -> str:
     )
 
 
-def _gap_line(candidate: Candidate, *, in_body: bool) -> str:
+def _gap_line(candidate: Candidate) -> str:
     """「这条候选没有进入结论清单」那一行 —— **只说这一条候选自己的去向**。
 
-    ## 为什么不能写「也没有任何一条结论提到这个文件」
+    ## 它只声称平台真正做过的那一件事
 
-    那句话读起来是「整份报告里都没有这个文件」，而平台核对的只是**结论清单**
-    （`_findings_text`：标题 + 证据 + 影响面）。2026-09-20 那次实测里，三条被报
-    「找不到去向」的候选，文件**都在模型自己写的正文里出现过**（其中一条被写进了
-    「待取证假设」）—— 读的人随手一搜就能推翻这句话，于是整节核对结论都不再可信。
+    平台核对的唯一判据是**候选编号**（`source_candidate_ids`，见 `reconcile_candidates`）。
+    所以这一行只能说「汇总交回的结论里没有一条声明来源于这个编号」。
 
-    ## 正文里出现过，要单独说，而且不能当成「已采纳」
-
-    它仍然不是采纳证据（理由见 `reconcile_candidates`）。但「有意写成待取证 / 待确认」
-    与「一声不响地丢了」对读的人是两件事：前者要人去补证据，后者要人去追汇总。
-    所以这里只**照实说一句在哪出现过**，把判断留给读的人。
-
-    **只给「对不上任何去向」的候选写这一行**：去向由复核裁决写着的那些（撤销 / 降级 /
-    待人工核验）走 `_ruling_line`，不套这里的措辞 —— 它们在结论清单里的处境与「没有进入
-    清单」根本不是一回事。
-    """
-    head = _candidate_head(candidate)
-    if in_body:
-        return (
-            head
-            + "结论清单里没有它，但**报告正文里出现过这个文件** —— 请确认它是被有意写成了"
-            "「待取证 / 待确认」，还是被漏掉了。"
-        )
-    return head + "报告里既没有引用这个编号，正文与结论清单里也都没有提到这个文件。"
-
-
-def _candidate_id_mentioned(candidate_id: str, text: str) -> bool:
-    """最终报告里有没有引用这个候选编号。**整段匹配，不当子串。**
-
-    `candidate.id` 形如 `S1-2`（`Candidate.id`），而同一分片的编号可以到 `S1-30`
-    （`CANDIDATE_MAX_ITEMS_PER_MEMBER`）—— `"S1-2" in 报告` 会被报告里的 `[S1-25]`
-    命中，于是**一条真的没被汇总进去的候选不报了**。方向刚好是最坏的那个：漏报是
-    静默的（报告读起来完全正常，只是少一条），而本函数存在的唯一理由就是数这一条。
-
-    两边都卡边界：左边不能接字母数字（`[S1-2]` 与裸写的 `S1-2` 都算引用到了 ——
-    模型不一定带方括号，那不该被当成没引用），右边不能接数字（挡住 `S1-25`）。
-    """
-    return re.search(rf"(?<![0-9A-Za-z]){re.escape(str(candidate_id))}(?![0-9])", text) is not None
-
-
-def _anomaly_text(anomaly: Anomaly) -> str:
-    """一条结论的散文（标题 + 证据 + 影响面）。**不含报告正文。**
-
-    第 3 手匹配用的就是这一份，理由见 `reconcile_candidates` 那段「为什么只看结论」：
-    报告正文里有模型自己写的「这一块我没查到」，拿它当采纳证据会把真缺口说成有去向。
+    在这之前它写的是「报告里既没有引用这个编号，正文与结论清单里也都没有提到这个文件」
+    —— 那句话声称的是**文件名的匹配**，而那条判据（连同同文件、同标题那几手）正是
+    AI-P0-06 删掉的东西。一并删掉的还有一句更早的话：「也没有任何一条结论提到这个文件」
+    （读起来像「整份报告里都没有这个文件」，而平台核对的只是结论清单；2026-09-20 那次
+    实测报出的三条「找不到去向」，文件全都在模型自己写的正文里出现过，读的人随手一搜
+    就能推翻这句话）。**多写一手就是平台没做过的保证。**
     """
     return (
-        f"{anomaly.title} {' '.join(str(text) for text in anomaly.evidence)} {anomaly.impact}"
+        _candidate_head(candidate)
+        + "汇总交回的结论里**没有任何一条声明来源于这个编号**"
+        "（`source_candidate_ids`）—— 是真的没被采纳，还是采纳了却忘了带编号，"
+        "需要人工看一眼。"
     )
 
 
-def _findings_text(synthesis: EngineOutcome) -> str:
-    """**只有异常清单**的散文 —— 整份清单拼成的可检索文本。"""
-    return "\n".join(_anomaly_text(item) for item in synthesis.anomalies)
-
-
-def _report_text(synthesis: EngineOutcome) -> str:
-    """最终报告 + 异常清单拼成的可检索文本（判断候选编号在不在里面）。"""
-    return "\n".join([synthesis.report_markdown or "", _findings_text(synthesis)])
-
-
-def _path_named_in_findings(path: str, findings_text: str) -> bool:
-    """结论清单里**点了这个文件的名**没有。
-
-    两侧都挡住路径的续接字符：不加边界的话，候选的 `a/b.xlsx` 会被结论里的
-    `x/a/b.xlsx` 认领 —— 一条真的没进报告的候选从此不报（静默的漏报，本函数最不该
-    出的那种错）。与 `_candidate_id_mentioned` 挡 `S1-25` 是同一件事。
-
-    尾部挡的是「更长的路径以它开头」：`a/b.xlsx.bak` 不该被当成点名了 `a/b.xlsx`，
-    所以 `.` 也要挡。**代价是句号收尾的英文句子会漏掉一次匹配**（`见 a/b.xlsx.`）——
-    这个方向（宁可说「找不到去向」）比反过来（把没进报告的候选说成进了）轻，取它。
-    而不挡中文标点：中文写作里路径后面常常直接跟 `」`、`、`、`）`。
-    """
-    if not path:
-        return False
-    pattern = rf"(?<![A-Za-z0-9_\-./]){re.escape(path)}(?![A-Za-z0-9_\-/.])"
-    return re.search(pattern, findings_text) is not None
-
-
-def _basename_named_in_text(path: str, text: str) -> bool:
-    """正文里点到这个**文件名**没有（只看文件名，不看目录）。
-
-    ## 为什么不能拿全路径去比
-
-    模型在正文里习惯只写文件名（`PackDropObjSnapshotMod.lua`），写全路径的时候少。
-    2026-09-20 那次实测就是这个情形：报告正文里明明写着它，平台却照旧说「正文里也
-    没有提到这个文件」—— 而那句话读的人随手一搜就能推翻。
-
-    ## 边界
-
-    左边挡字母数字与点（`MyX.lua`、`x.X.lua` 都是别的文件），**放过 `/`** ——
-    正文写全路径 `a/b/X.lua` 也要算点到名。右边挡得更严（含 `.` 与 `-`），
-    否则 `X.lua.bak` 会替 `X.lua` 认领。
-
-    **只给「这一行该怎么措辞」用，不参与采纳判定。** 代价是「另一个目录下的同名文件」
-    会被认成它：这一处认错只是让人多看一眼，而漏认的代价是一句可以被随手证伪的话。
-
-    采纳判定（三手）用 `_path_named_in_findings` 的全路径比对，那里的取舍相反 ——
-    见 `reconcile_candidates` 的「每一手都必须比「同一个东西」」。
-    """
-    name = path.rsplit("/", 1)[-1]
-    if not name:
-        return False
-    pattern = rf"(?<![A-Za-z0-9_.]){re.escape(name)}(?![A-Za-z0-9_\-/.])"
-    return re.search(pattern, text) is not None
+# 注：`_anomaly_text`（把一条结论拍成散文、供字符串比对用）与它服务的那几手启发式
+# （`_same_finding` / `_path_named_in_findings` / `_basename_named_in_text`）一并删掉了
+# （AI-P0-06）：对账改按编号之后没有任何调用方。

@@ -62,14 +62,21 @@ PROJECT_ROOT = THIS_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import services.ai.job_service as job_service  # noqa: E402
 import services.ai_analysis_service as ai_service  # noqa: E402
+import services.task_worker_service as worker  # noqa: E402
 from app import app as flask_app  # noqa: E402
 from app import create_tables, db  # noqa: E402
 from models import Project, Repository, WeeklyVersionConfig  # noqa: E402
-from models.ai_analysis import AiAnalysisRun  # noqa: E402
+from models.ai_analysis import (  # noqa: E402
+    MODE_INCREMENTAL,
+    STATE_SUCCEEDED,
+    AiAnalysisJob,
+    AiAnalysisRun,  # noqa: E402
+)
+from models.task import BackgroundTask  # noqa: E402
 from services.ai_analysis_service import (  # noqa: E402
     end_with_a_terminal_event,
-    stream_weekly_analysis,
 )
 
 MODULE = "static/js/ai_stream_status.js"
@@ -265,8 +272,26 @@ async function runWatch(spec) {
 }
 
 // 连接断掉之后那段处理**从模板里取出来真跑**（页面全局的那些名字按同样形状给桩）。
+// 按 URL 分流的假 fetch：`/waiting` 与 `/progress` 是**两个不同的端点**，
+// 用一条队列喂它们会让「问了哪一个」这件事消失在测试里。
+function fakeFetchByUrl(routes) {
+    return function (url) {
+        const key = String(url).indexOf('/waiting') >= 0 ? 'waiting' : 'status';
+        const frame = routes[key];
+        if (frame === undefined || frame === null) return Promise.reject(new Error('offline'));
+        return Promise.resolve({ json: function () { return Promise.resolve(frame); } });
+    };
+}
+
 async function runDrop(spec) {
-    sandbox.fetch = fakeFetch([spec.runStatus === null ? null : { success: true, status: spec.runStatus }]);
+    if ('waitingState' in spec) {
+        sandbox.fetch = fakeFetchByUrl({
+            waiting: spec.waitingState,
+            status: spec.runStatus === null ? null : { success: true, status: spec.runStatus }
+        });
+    } else {
+        sandbox.fetch = fakeFetch([spec.runStatus === null ? null : { success: true, status: spec.runStatus }]);
+    }
     const probe = A.probe.replace(/__RUN_ID__/g, spec.runId === null ? 'null' : String(spec.runId));
     vm.runInContext(probe, sandbox, { filename: 'probe.js' });
     await sandbox.__probeDrop(null);
@@ -306,6 +331,9 @@ def _probe_source() -> str:
     """把报障那一页里真正在跑的那段「连接断了怎么办」取出来，配一份页面全局桩。
 
     取的是模板里**逐字的那一份**：抄一份进测试就失去意义了（改了模板测试还是绿的）。
+
+    `fetchWeeklyAiWaitingState` 也一起取：没有运行号时那段代码会**先问服务端**
+    「这次点击登记成什么了」，抄一份桩进去就等于把要验的那一步跳过。
     """
     script = _template_script(REPORTED)
     return (
@@ -322,7 +350,10 @@ function setWeeklyAiOutput(text, isEmpty, variant) {
 }
 function stopAiBudgetWatch() { probeCalls.push(['stopWatch']); }
 function refreshWeeklyAiLatest(id) { probeCalls.push(['refresh', id]); }
+function startWeeklyAiWaitingPoll() { probeCalls.push(['waitingPoll']); }
 """
+        + _function_source(script, "fetchWeeklyAiWaitingState")
+        + "\n"
         + _function_source(script, "handleWeeklyAiStreamDrop")
         + """
 // 探针挂在 vm 上下文的全局对象上（它就是 driver 里的那个 sandbox）。
@@ -421,6 +452,20 @@ _CASES = {
         {"runId": 7, "runStatus": "failed"},
         {"runId": 7, "runStatus": None},
         {"runId": None, "runStatus": None},
+        # 5：**没有运行号，但服务端说这次点击正登记着等待同步。**
+        #    修复前这里会打「连接中断：没有收到运行号。」—— 与数据库里那条
+        #    pending 意图相反（线上实测那一幕）。真相在服务端，问它。
+        {"runId": None, "runStatus": None,
+         "waitingState": {"success": True, "waiting": True, "run_id": None,
+                          "message": "等待 Diff 同步完成后再分析。"}},
+        # 6：登记已经转交给某一次运行 → 附着上去，不许让用户再点一次（会再花一次钱）。
+        {"runId": None, "runStatus": None,
+         "waitingState": {"success": True, "waiting": False, "run_id": 42,
+                          "message": ""}},
+        # 7：登记已经结束（同步一直没结束 / 被别的分析覆盖）→ 如实说不确定。
+        {"runId": None, "runStatus": None,
+         "waitingState": {"success": True, "waiting": False, "run_id": None,
+                          "message": "这次登记已经结束。"}},
     ],
     "probe": "",
 }
@@ -958,20 +1003,90 @@ def _stub_payload(project_id: int) -> None:
     return None
 
 
-def test_the_weekly_stream_ends_with_a_result_when_the_engine_explodes(monkeypatch):
+def _login(client) -> None:
+    """给 test_client 一个管理员会话（`/jobs/<id>/events` 按 job.project_id 判权）。"""
+    with client.session_transaction() as session:
+        session["is_admin"] = True
+        session["admin_user"] = "drawer-stream-tester"
+
+
+def _weekly_payload_stub(project_id: int, config_id: int) -> dict:
+    return {
+        "mode": "weekly",
+        "scope": "full",
+        "focus": {"key": "all", "label": ""},
+        "group": {
+            "project_id": project_id,
+            "key": f"g-{config_id}",
+            "config_ids": [config_id],
+        },
+        "summary": {},
+    }
+
+
+def _open_a_job(config_id: int):
+    """建一条手工 job（P0-01 之后手工入口就是它），返回那条 job。"""
+    config = db.session.get(WeeklyVersionConfig, config_id)
+    created = job_service.create_or_attach_job(
+        config=config, requested_mode=MODE_INCREMENTAL, trigger_source="manual"
+    )
+    db.session.commit()
+    return created.job
+
+
+def _drop_job(job_id) -> None:
+    """收掉这条 job（`active_key` 非空会占着唯一索引，让别的用例建不出 job）。
+
+    ## 必须**连它名下的任务行一起**收掉，否则会造出「幽灵任务」
+
+    只删 job 的话，那行 `BackgroundTask`（`job_id` 指着已删的 job、状态还停在
+    `pending`/`processing`）会留在库里。job 行一删，它的 id 就被 SQLite 复用 ——
+    于是那行幽灵任务会挂到**一条全新的、与它毫无关系的 job** 上。
+
+    而 `job_service._live_task_of_job(job)` 是**按裸 `BackgroundTask.job_id == job.id`
+    匹配**的（它必须这样：等待意图转交出去的那条任务，`job.task_id` 上根本没有它），
+    所以一条无关的新 job 会被恢复扫描判成「还有活在跑」，判据 ③ 返回「不动它」。
+
+    实测形态 —— **单独跑绿、合跑红**：
+
+        pytest tests/test_ai_drawer_stream_state.py \\
+               tests/test_ai_job_settlement_and_scope.py::test_the_scan_settles_an_abandoned_job_with_no_task_and_no_run
+
+        E  AssertionError: {'checked': 1, 'settled': 0, 'by_reason': {}}
+        E  assert 0 >= 1
+
+    （`checked: 1` 就是「整个库里只剩那一条新 job」，而它被幽灵任务挡住了。）
+    隔离复现见 `.pytest_tmp/probe_task_leak.py` 记下的机制：老 job id=1 → 删 job →
+    新 job 拿到 id=1 → `_live_task_of_job` 命中那行老任务。
+    """
+    row = db.session.get(AiAnalysisJob, job_id)
+    if row is None:
+        return
+    if row.active_key is not None:
+        row.active_key = None
+        db.session.commit()
+    # 先子后父：任务行`job_id` 指着这条 job。
+    for task in BackgroundTask.query.filter_by(job_id=job_id).all():
+        db.session.delete(task)
+    db.session.delete(row)
+    db.session.commit()
+
+
+def test_a_failed_weekly_run_delivers_a_result_with_the_reason(monkeypatch):
     """**用户报的那条**：分析中途炸了，界面收到的必须是一个**带原因的结论**。
 
     以前这里什么都没有：异常穿出生成器 → 连接静默断掉 → 界面只剩那句合称，
     库里那条 run 还停在 `running`。
+
+    P0-01 之后周版本那条流的入口是 `GET /ai-analysis/jobs/<id>/events`（**只订阅**），
+    终结帧由 `job_service.result_payload(job)` 给 —— 所以这一条现在同时钉住
+    「失败要落库」与「终态 job 的订阅流把那份失败交出去」。
     """
     with flask_app.app_context():
         project_id, config_id = _fixture()
         monkeypatch.setattr(
             ai_service, "build_weekly_payload",
-            lambda *a, **k: (
-                {"group": {"project_id": project_id, "key": "k"}, "summary": {}, "scope": "full"},
-                None, None,
-            ),
+            lambda *a, **k: (_weekly_payload_stub(project_id, config_id), None, None),
         )
 
         def _explode(*_args, **_kwargs):
@@ -979,62 +1094,88 @@ def test_the_weekly_stream_ends_with_a_result_when_the_engine_explodes(monkeypat
 
         monkeypatch.setattr(ai_service, "_run_engine_and_persist", _explode)
 
-        text = "".join(end_with_a_terminal_event(stream_weekly_analysis(config_id)))
-        events = _sse_events(text)
+        job = _open_a_job(config_id)
+        job_id = job.id
+        try:
+            assert job.task_id, "job 没有排出去任务，这一跳跑不起来"
+            worker._handle_weekly_ai_analysis_task(
+                {"type": "weekly_ai_analysis", "config_id": config_id,
+                 "task_id": job.task_id}
+            )
+            db.session.commit()
 
-        assert events[-1][0] == "result", (
-            f"流没有以 result 收尾（界面只能看到「连接中断」）：{events}"
-        )
-        payload = events[-1][1]
-        assert payload["status"] == "failed", payload
-        assert "ConnectionError" in payload["error_message"], payload
-        assert "上游把连接掐了" in payload["error_message"], payload
+            with flask_app.test_client() as client:
+                _login(client)
+                text = client.get(
+                    f"/ai-analysis/jobs/{job_id}/events"
+                ).get_data(as_text=True)
 
-        run_id = [p["run_id"] for name, p in events if name == "run"][0]
-        run = db.session.get(AiAnalysisRun, run_id)
-        db.session.refresh(run)
-        assert run.status == "failed", "异常之后库里那条 run 还停在 running"
-        assert "ConnectionError" in (run.error_message or ""), run.error_message
+            events = _sse_events(text)
+            assert events[-1][0] == "result", (
+                f"流没有以 result 收尾（界面只能看到「连接中断」）：{events}"
+            )
+            payload = events[-1][1]
+            assert payload["status"] == "failed", payload
+            assert "ConnectionError" in payload["error_message"], payload
+            assert "上游把连接掐了" in payload["error_message"], payload
+
+            run = db.session.get(AiAnalysisRun, payload["run_id"])
+            db.session.refresh(run)
+            assert run.status == "failed", "异常之后库里那条 run 还停在 running"
+            assert "ConnectionError" in (run.error_message or ""), run.error_message
+        finally:
+            _drop_job(job_id)
 
 
-def test_the_weekly_stream_ends_with_an_error_when_the_tail_explodes(monkeypatch):
-    """跑完之后那一段（推进周版本水位线）炸了：**兜底的一层要说话**。
+def test_the_job_events_stream_ends_with_an_error_when_the_stream_explodes(monkeypatch):
+    """流自己炸了：**兜底的一层要说话**。
 
-    这一段在 `_execute_analysis` 之外，没有它就只能静默断流。
+    没有它，客户端只会看到连接断掉，而那句话在界面上就是含糊的「与服务器的连接中断了」
+    —— 真实原因要跟着最后一条事件发出去。生产上包住这条流的是路由里的
+    `end_with_a_terminal_event`（`_job_events_response`），所以这里走**真路由**。
     """
     with flask_app.app_context():
-        project_id, config_id = _fixture()
-        monkeypatch.setattr(
-            ai_service, "build_weekly_payload",
-            lambda *a, **k: (
-                {"group": {"project_id": project_id, "key": "k"}, "summary": {}, "scope": "full"},
-                None, None,
-            ),
-        )
-        monkeypatch.setattr(
-            ai_service, "_execute_analysis",
-            lambda *a, **k: {"status": "succeeded", "report_markdown": "结论", "error_message": None},
-        )
+        _project_id, config_id = _fixture()
+        job = _open_a_job(config_id)
+        job_id = job.id
+        try:
+            # 摆成终态：终态才会去取 `result` 载荷，那一步正是要炸的地方。
+            row = db.session.get(AiAnalysisJob, job_id)
+            row.state = STATE_SUCCEEDED
+            db.session.commit()
 
-        def _explode(*_args, **_kwargs):
-            raise RuntimeError("水位线写不进去")
+            def _explode(_job):
+                raise RuntimeError("载荷取不出来")
 
-        monkeypatch.setattr(ai_service, "_update_weekly_state", _explode)
+            monkeypatch.setattr(job_service, "result_payload", _explode)
 
-        text = "".join(end_with_a_terminal_event(stream_weekly_analysis(config_id)))
-        events = _sse_events(text)
+            with flask_app.test_client() as client:
+                _login(client)
+                text = client.get(
+                    f"/ai-analysis/jobs/{job_id}/events"
+                ).get_data(as_text=True)
 
-        assert events[-1][0] == "error", events
-        assert "水位线写不进去" in events[-1][1]["message"], events[-1]
+            events = _sse_events(text)
+            assert events[-1][0] == "error", events
+            assert "载荷取不出来" in events[-1][1]["message"], events[-1]
+            assert "RuntimeError" in events[-1][1]["message"], events[-1]
+        finally:
+            _drop_job(job_id)
 
 
 def test_the_routes_wrap_both_streams():
-    """两个 SSE 入口都要包上兜底 —— 只在服务层包容易漏掉新加的入口。"""
+    """两个 SSE 入口都要包上兜底 —— 只在服务层包容易漏掉新加的入口。
+
+    **P0-01 之后这两个入口换了**：单提交那条流式分析，与**只订阅**的 job 事件流
+    （`/ai-analysis/jobs/<id>/events`）。周版本那条老流式入口不再创建任何东西
+    （创建在 `POST /ai-analysis/weekly/<id>/jobs`，订阅在 `/jobs/<id>/events`），
+    所以它已经不在这两个入口里了 —— 那一条见 `tests/test_ai_job_protocol.py`。
+    """
     source = (PROJECT_ROOT / "routes" / "ai_analysis_routes.py").read_text(encoding="utf-8")
     assert source.count("end_with_a_terminal_event(") == 2, (
         "两个 SSE 入口各要包一次（这是调用次数，import 那一行不算）"
     )
-    for call in ("stream_commit_analysis(commit_id", "stream_weekly_analysis(config_id"):
+    for call in ("stream_commit_analysis(commit_id", "job_event_frames("):
         assert call in source, f"入口不见了：{call}"
 
 
@@ -1244,3 +1385,268 @@ def test_the_start_frame_still_names_who_is_running():
 
     assert lines[12] == "分析中：分片 汇总 (4/4) · 正在调用模型（第一轮还没跑完）", lines[12]
     assert lines[13] == "分析中：分片 S2 (2/3) · 正在调用模型（第一轮还没跑完）", lines[13]
+
+
+# ==========================================================================
+#  五、`waiting` 之后 close 又补一个 error：不许把「等待同步」覆盖成「中断」
+#
+#  这是复测文档 AI-P0-01 里那一幕：点击「重新分析」→ 服务端登记等待意图并发
+#  `waiting` → 处理器置真 settled 标志并 `close()` → **浏览器仍可能补派一个没有
+#  `data` 的连接层 `error`** → 执行流落到「连接断了」那条路 → 页面显示
+#  「连接中断：没有收到运行号。」，而数据库里那条意图好端端地 pending 着。
+#
+#  下面两组测试合起来才算数：静态那组保证守卫**写在**处理器的开头，行为那组保证
+#  它在 node 里真的挡住了、而且**没有把整条错误路一起废掉**（反向守卫那两个场景）。
+# ==========================================================================
+
+# 三份模板里那几个页面全局的名字各不相同（两份是 weekly 系列，一份是 commit 系列）。
+_RACE_NAMES = {
+    "templates/merged_project_view.html": {
+        "settled": "weeklyAiStreamSettled",
+        "run_id": "weeklyAiRunId",
+        "source": "weeklyAiSource",
+        "drop": "handleWeeklyAiStreamDrop",
+        "close_stream": "closeWeeklyAiStream",
+        "output": "setWeeklyAiOutput",
+        "badge": "setWeeklyAiStatusBadge",
+        "meta": "setWeeklyAiMeta",
+    },
+    "templates/weekly_version_diff.html": {
+        "settled": "weeklyAiStreamSettled",
+        "run_id": "weeklyAiRunId",
+        "source": "weeklyAiSource",
+        "drop": "handleWeeklyAiStreamDrop",
+        "close_stream": "closeWeeklyAiStream",
+        "output": "setWeeklyAiOutput",
+        "badge": "setWeeklyAiStatusBadge",
+        "meta": "setWeeklyAiMeta",
+    },
+    "templates/commit_diff_new.html": {
+        "settled": "streamSettled",
+        "run_id": "runId",
+        "source": "eventSource",
+        "drop": "handleStreamDrop",
+        "close_stream": "cleanupStream",
+        "output": "setAiOutput",
+        "badge": "setAiStatusBadge",
+        "meta": "setMeta",
+    },
+}
+
+_RACE_SETTLED_PLACEHOLDER = "__SETTLED__"
+
+
+def _race_probe_source(name: str) -> str:
+    """把该模板里**逐字那一份** `error` 回调取出来，配一份页面全局桩。
+
+    与 `_probe_source()` 同一个理由：抄一份进测试就失去意义了 —— 模板里把守卫删掉，
+    抄来的那份还是绿的。
+    """
+    names = _RACE_NAMES[name]
+    script = _template_script(name)
+    stub = "\n".join([
+        "var raceCalls = [];",
+        f"var {names['settled']} = {_RACE_SETTLED_PLACEHOLDER};",
+        f"var {names['run_id']} = null;",
+        "var startBtn = { disabled: false };",
+        f"var {names['source']} = {{ close: function () {{ raceCalls.push(['source.close']); }} }};",
+        f"var {names['output']} = function (text) {{ raceCalls.push(['output', text]); }};",
+        f"var {names['badge']} = function (text) {{ raceCalls.push(['badge', text]); }};",
+        f"var {names['meta']} = function (text) {{ raceCalls.push(['meta', text]); }};",
+        f"var {names['close_stream']} = function () {{ raceCalls.push(['closeStream']); }};",
+        f"var {names['drop']} = function () {{ raceCalls.push(['drop']); }};",
+    ])
+    return "\n".join([
+        stub,
+        f"function __raceError(event) {_handler_body(script, 'error')}",
+        "globalThis.__raceState = function () { return raceCalls; };",
+    ])
+
+
+_RACE_DRIVER = r"""
+const fs = require('fs');
+const vm = require('vm');
+
+const source = fs.readFileSync(process.argv[2], 'utf8');
+const sandbox = { console: console };
+sandbox.window = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(source, sandbox, { filename: 'ai_stream_status.js' });
+
+const A = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+const out = [];
+for (const spec of A.races) {
+    const src = A.probes[spec.template].split('__SETTLED__')
+        .join(spec.settled ? 'true' : 'false');
+    vm.runInContext(src, sandbox, { filename: 'race_probe.js' });
+    // 连接层那个 `error`：**没有 `data`**（有 data 的是服务端主动发的 error 事件）。
+    sandbox.__raceError(spec.data === null ? {} : { data: spec.data });
+    out.push({ template: spec.template, settled: spec.settled, data: spec.data,
+               calls: sandbox.__raceState() });
+}
+process.stdout.write(JSON.stringify({ races: out }));
+"""
+
+_RACE_RESULTS: dict = {}
+
+
+def _race_cases() -> list:
+    """三个场景 × 三份模板：已 settled 的迟到 error / 未 settled 的断线 / 服务端 error。"""
+    return (
+        [{"template": name, "settled": True, "data": None} for name in TEMPLATES]
+        + [{"template": name, "settled": False, "data": None} for name in TEMPLATES]
+        + [{"template": name, "settled": False, "data": '{"message": "已超出预算"}'}
+           for name in TEMPLATES]
+    )
+
+
+def _run_race_node() -> list:
+    if not shutil.which("node"):
+        pytest.skip("环境里没有 Node，跳过真实运行的断言")
+    if _RACE_RESULTS:
+        return _RACE_RESULTS["races"]
+    workdir = Path(PROJECT_ROOT) / ".pytest_tmp"
+    workdir.mkdir(exist_ok=True)
+    driver = workdir / "ai_settled_race_driver.js"
+    payload = workdir / "ai_settled_race_cases.json"
+    driver.write_text(_RACE_DRIVER, encoding="utf-8")
+    payload.write_text(
+        json.dumps({"probes": dict((n, _race_probe_source(n)) for n in TEMPLATES),
+                    "races": _race_cases()}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["node", str(driver), str(PROJECT_ROOT / MODULE), str(payload)],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    assert result.returncode == 0, (
+        f"模板里的 error 回调在 node 里跑不起来：\n{result.stdout}\n{result.stderr}"
+    )
+    _RACE_RESULTS.update(json.loads(result.stdout))
+    return _RACE_RESULTS["races"]
+
+
+def _race_of(scene: int, name: str) -> dict:
+    return _run_race_node()[scene * len(TEMPLATES) + TEMPLATES.index(name)]
+
+
+@pytest.mark.parametrize("name", TEMPLATES)
+def test_the_error_handler_bails_out_once_the_stream_is_settled(name):
+    """守卫必须在处理器的**最开头**，而且要挡在「连接断了」那条路之前。
+
+    只挡住「有 `data`」那一支是不够的：要修的那一幕里 `event.data` 是空的。
+    """
+    script = _template_script(name)
+    settled = _RACE_NAMES[name]["settled"]
+    drop = _RACE_NAMES[name]["drop"]
+    body = _handler_body(script, "error")
+
+    guard = re.search(rf"if \({settled}\)\s*return;", body)
+    assert guard, (
+        f"{name} 的 error 处理器没有 settled 守卫 —— `waiting` 里 close 之后浏览器补的"
+        f"那个无 data 的 error 会把「等待同步」覆盖成「连接中断：没有收到运行号」"
+    )
+    fallthrough = re.search(rf"\b{drop}\(", body)
+    assert fallthrough, f"{name} 的 error 处理器没有落到 {drop}"
+    assert guard.start() < fallthrough.start(), (
+        f"{name} 的 settled 守卫排在 {drop} 之后，挡不住那一幕"
+    )
+
+
+@pytest.mark.parametrize("name", TEMPLATES)
+def test_a_late_connection_error_writes_nothing_after_a_terminal_event(name):
+    """**报障那一幕真跑一遍**：settled 之后再来的连接层 error 不许写任何东西。
+
+    判据是「什么都没调」—— 包括不许去问运行状态（`fetchRunStatus` 会被
+    `interruptOutcome` 变成那句「没有收到运行号」）。
+    """
+    race = _race_of(0, name)
+    assert race["settled"] is True and race["data"] is None, race
+    assert race["calls"] == [], (
+        f"{name}：收到终结事件之后又被那个连接层 error 写了一遍 —— {race['calls']}"
+    )
+
+
+@pytest.mark.parametrize("name", TEMPLATES)
+def test_a_connection_error_without_a_terminal_event_still_asks_the_server(name):
+    """反过来那一条：**没 settled** 的断线照旧要处理（守卫不是把整条路废掉）。"""
+    race = _race_of(1, name)
+    assert race["settled"] is False and race["data"] is None, race
+    kinds = [call[0] for call in race["calls"]]
+    assert "drop" in kinds, (
+        f"{name}：没 settled 的断线被吞掉了（分析还在跑，界面却什么都不说）—— {race['calls']}"
+    )
+
+
+@pytest.mark.parametrize("name", TEMPLATES)
+def test_a_server_side_error_still_goes_through_the_shared_wording(name):
+    """带 `data` 的服务端 `error` 走共享口径，**不落到断线那条路**。"""
+    race = _race_of(2, name)
+    kinds = [call[0] for call in race["calls"]]
+    assert "drop" not in kinds, (
+        f"{name}：服务端发的 error 被当成断线处理了 —— {race['calls']}"
+    )
+    assert "badge" in kinds and "meta" in kinds, (
+        f"{name}：服务端发的 error 没有写出失败口径 —— {race['calls']}"
+    )
+
+
+# ==========================================================================
+#  六、没有运行号时**先问服务端**，别猜（复测文档那一幕的真正失效模式）
+#
+#  真浏览器实测（三份探针，见报告）：正常路径下 `waiting` 事件会到达处理器、
+#  而 `waiting` 处理器里同步调用 `close()` 之后浏览器**不再**补发 `error` ——
+#  也就是说，只要那条事件到了，页面就不会被覆盖。
+#
+#  反过来说，**那条事件没到**的时候（代理截断、标签页挂起、连接被中间设备抢先掐断），
+#  `weeklyAiRunId` 是 null，页面只能猜，而猜出来的那句
+#  「连接中断：没有收到运行号」与真相相反：库里那次点击正 pending 着等同步。
+#
+#  真相在服务端（`describe_waiting_analysis`）。下面三条就钉「先问再说话」。
+# ==========================================================================
+
+
+def test_a_drop_without_a_run_id_asks_the_server_about_the_waiting_intent():
+    """**报障那一幕**：没有运行号 + 服务端说「正登记着等同步」→ 显示等待，不许说中断。
+
+    修复前这条会红：`interruptOutcome(null, false)` 打出
+    「连接中断：没有收到运行号。」，把一次已经成功登记的点击说成中断。
+    """
+    drop = _run_node()["drops"][5]
+    calls = dict((call[0], call) for call in drop["calls"] if call[0] != "meta")
+    assert "badge" in calls, drop["calls"]
+    assert calls["badge"][1] == "等待同步", (
+        f"服务端说这次点击正等着同步，页面却说成别的：{drop['calls']}"
+    )
+    metas = [call[1] for call in drop["calls"] if call[0] == "meta"]
+    assert any("等待" in (text or "") for text in metas), drop["calls"]
+    assert not any("连接中断" in (text or "") for text in metas), (
+        f"页面把「等同步」说成了「连接中断」—— 正是要修的那一幕：{drop['calls']}"
+    )
+    # 登记还在等 → 必须接着轮询登记状态（否则它转交的那一刻没人接得上）。
+    assert "waitingPoll" in [call[0] for call in drop["calls"]], drop["calls"]
+
+
+def test_a_drop_without_a_run_id_attaches_when_the_intent_was_handed_off():
+    """登记已经转交给某一次运行 → **附着上去**，不是让用户再点一次（会再花一次钱）。"""
+    drop = _run_node()["drops"][6]
+    kinds = [call[0] for call in drop["calls"]]
+    assert "refresh" in kinds, (
+        f"服务端说登记已经转交给运行 42 了，页面却什么都没做（用户会再点一次）：{drop['calls']}"
+    )
+    refresh = [call for call in drop["calls"] if call[0] == "refresh"][0]
+    assert refresh[1] == 42 or refresh[1] is None, refresh
+    assert not any(
+        "连接中断" in (call[1] or "") for call in drop["calls"] if call[0] == "meta"
+    ), drop["calls"]
+
+
+def test_a_drop_without_a_run_id_stays_honest_when_the_intent_ended():
+    """登记确实结束了（不是等待、也没转交）→ 照旧如实说不确定，**不许编一个结论**。"""
+    drop = _run_node()["drops"][7]
+    metas = [call[1] for call in drop["calls"] if call[0] == "meta"]
+    assert metas, drop["calls"]
+    # 「不知道」仍然要说成不知道（那句「没有收到运行号」在这里是**对的**）。
+    assert any("运行号" in (text or "") or "中断" in (text or "") for text in metas), (
+        f"登记已结束，页面却没说清这次到底有没有跑起来：{drop['calls']}"
+    )

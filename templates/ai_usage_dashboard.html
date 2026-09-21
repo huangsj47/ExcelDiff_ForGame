@@ -114,6 +114,48 @@
         <!-- 顶部 KPI：先给「一共花了多少」，再给细节 -->
         <div class="aiu-kpi-grid" id="aiuKpis"></div>
 
+        {# 执行**前**的预估（AI-P1-03）：上面回答「已经花了多少」，这一格回答「下一次大概
+           要花多少」。它必须能在**点下按钮之前**看到 —— 确认框那一层在三个 AI 抽屉模板里
+           （不归这一页），这里先把同一份后端能力摆出来，两边读的是同一个端点。
+           区间两端都取自实测运行，价格表没配时**只给 token 与时间**，不伪造费用。 #}
+        <section class="aiu-card" id="aiuEstimateCard">
+            <div class="aiu-card-head">
+                <h2>下一次的预计代价</h2>
+                <span class="aiu-meta" id="aiuEstimateMeta" role="status" aria-live="polite">按最近同类运行估算</span>
+            </div>
+            <p class="aiu-hint">
+                这是<strong>区间</strong>，不是承诺：两端都取自<strong>最近同类运行的实测值</strong>
+                （按目标文件数折算），中间差多少取决于模型索取了几次上下文、缓存命中了多少。
+                <strong>没有配置价格表时这里只给 token 与时间</strong>，费用那一格写清为什么算不出 ——
+                不显示 0，也不显示「未上报」。
+            </p>
+            <form class="aiu-filters" id="aiuEstimateForm" aria-label="估算下一次分析的代价">
+                <div class="aiu-field">
+                    <label class="aiu-label" for="aiuEstimateProject">项目</label>
+                    <select class="aiu-select" id="aiuEstimateProject"></select>
+                </div>
+                <div class="aiu-field">
+                    <label class="aiu-label" for="aiuEstimateMode">范围</label>
+                    <select class="aiu-select" id="aiuEstimateMode">
+                        <option value="full">全量</option>
+                        <option value="incremental">增量</option>
+                    </select>
+                </div>
+                <div class="aiu-field">
+                    <label class="aiu-label" for="aiuEstimateFiles">目标文件数</label>
+                    <input type="number" min="0" step="1" class="aiu-input" id="aiuEstimateFiles"
+                           placeholder="留空 = 不按文件数缩放">
+                </div>
+                <div class="aiu-filter-actions">
+                    <button type="submit" class="aiu-btn primary" id="aiuEstimateBtn">
+                        <i class="fas fa-calculator" aria-hidden="true"></i> 估算
+                    </button>
+                </div>
+            </form>
+            <div class="aiu-kpi-grid" id="aiuEstimateBody"></div>
+            <p class="aiu-field-help" id="aiuEstimateNotes" hidden></p>
+        </section>
+
         {# 平台档超预算的**第一落点**：它挡的不是一个项目，而是全平台所有项目的下一次分析。
            放在 KPI 与表格之间，是因为它比任何一个数字都更需要先被看到。 #}
         <div class="aiu-alert" id="aiuPlatformAlert" role="alert" hidden></div>
@@ -1193,6 +1235,257 @@ function aiuFmtDuration(ms) {
     return num + ' ms';
 }
 
+// ---------------------------------------------------------------------------
+//  顶部 KPI 卡片的**内容**：纯函数（理由同 `aiuActiveNoteText`）
+// ---------------------------------------------------------------------------
+// 一屏「已经花了多少」由三组数字组成，服务端把其中两组**并列**下发（见
+// `services/ai/usage.py` 模块 docstring 末节）：
+//
+//   * `tokens.total` / `cache.hit_rate` / `cost` —— 「**全体齐全时**的精确值」，
+//     任一条历史运行没上报就是 `null`；
+//   * `reported_samples.*.known_value` —— 「**已上报的那几次**合计」，带覆盖率。
+//
+// 页面必须读第二组：只读第一组的话，20 次运行里有 5 次缺 token 就会让整屏三张卡片
+// 一起写「未上报」——**一个历史缺失值永久抹掉其余 15 次有效数据**，而这正是本次要修的
+// 症状。第二组永远不是「拿未知当 0」：它带着 `reported_runs / total_runs`，费用那一格
+// 明写「已知最低费用」。
+
+/** 覆盖率那一句（副标题用）。`unknown` 是**缺这个字段**的运行条数。 */
+function aiuCoverageText(total, unknown, what) {
+    var runs = Number(total) || 0;
+    var missing = Number(unknown) || 0;
+    if (!runs) return '还没有已完成的运行';
+    if (!missing) return '全部 ' + runs + ' 次已完成运行都已上报';
+    return '已上报样本 ' + (runs - missing) + ' / ' + runs + ' 次已完成运行，另有 ' + missing
+        + ' 次未上报' + (what || '');
+}
+
+/**
+ * 顶部 KPI 卡片的清单：`[{label, value, sub, unknown}]`。
+ *
+ * 渲染（`renderKpis`）只是把它摆出来 —— 分开是为了能用 node 真跑一遍这个函数，
+ * 静态断言只看得到字符串，看不见「到底显示了哪一个数」。
+ *
+ * `activeCount` 是有多少条在途运行（它们的实时用量**没有**计入这里的任何数字，
+ * 见 `aiuActiveNoteText`）。
+ */
+function aiuKpiCards(totals, overBudget, activeCount) {
+    var data = totals || {};
+    var tokens = data.tokens || {};
+    var cache = data.cache || {};
+    var missing = data.missing_runs || {};
+    var sample = data.reported_samples || {};
+    var tokenSample = sample.tokens || {};
+    var cacheSample = sample.cache || {};
+    var costSample = sample.cost || {};
+    var runs = Number(data.runs) || 0;
+    var active = Number(activeCount) || 0;
+    var activeNote = active ? '（另有 ' + active + ' 次运行中，未计入）' : '';
+    var cards = [];
+
+    var input = tokens.input;
+    var hit = tokens.cache_read;
+    var miss = (input === null || input === undefined || hit === null || hit === undefined)
+        ? null : Math.max(0, input - hit);
+
+    cards.push({
+        label: '输入 token（合计）',
+        value: aiuOrUnknown(aiuFmtTokens(input), AIU_UNKNOWN),
+        sub: aiuCoverageText(runs, missing.input, '输入 token'),
+        unknown: aiuFmtTokens(input) === null
+    });
+    cards.push({
+        label: '其中命中缓存',
+        value: aiuOrUnknown(aiuFmtTokens(hit), AIU_UNKNOWN),
+        sub: (hit === null || hit === undefined)
+            ? aiuCoverageText(runs, missing.cache_read, '缓存字段')
+            : '按未命中价计费的输入：' + aiuOrUnknown(aiuFmtTokens(miss), AIU_UNKNOWN),
+        unknown: aiuFmtTokens(hit) === null
+    });
+    cards.push({
+        label: '输出 token',
+        value: aiuOrUnknown(aiuFmtTokens(tokens.output), AIU_UNKNOWN),
+        sub: aiuCoverageText(runs, missing.output, '输出 token'),
+        unknown: aiuFmtTokens(tokens.output) === null
+    });
+
+    // 合计 token：**先读已上报样本**。`tokens.total` 仍然是「全体齐全时的精确值」，
+    // 但它为 null 时页面不许整格写「未上报」（那会抹掉已上报的那十几次）。
+    var totalText = aiuFmtTokens(tokenSample.known_value);
+    var totalIsExact = totalText !== null && tokens.total !== null && tokens.total !== undefined;
+    cards.push({
+        label: '合计 token' + (totalIsExact ? '' : '（已上报样本）'),
+        value: aiuOrUnknown(totalText === null ? aiuFmtTokens(tokens.total) : totalText, AIU_UNKNOWN),
+        sub: aiuCoverageText(
+            tokenSample.total_runs === undefined ? runs : tokenSample.total_runs,
+            tokenSample.unknown_runs,
+            '输入或输出 token'
+        ) + (totalIsExact ? '' : '；这里是已知值，不是总额') + activeNote,
+        unknown: totalText === null && (tokens.total === null || tokens.total === undefined)
+    });
+
+    // 缓存命中率：同样是先读样本。比例**只在已经上报的那几次之间算**（分子分母同一批），
+    // 拿 15 次的命中数除以 20 次的输入总数会得到一个偏低的假比例。
+    var rate = aiuFmtRate(cacheSample.known_value);
+    var rateIsExact = rate !== null && cache.hit_rate !== null && cache.hit_rate !== undefined;
+    var cacheCoverage = aiuCoverageText(
+        cacheSample.total_runs === undefined ? runs : cacheSample.total_runs,
+        cacheSample.unknown_runs,
+        '缓存字段'
+    );
+    var bothUnknown = rate === null && aiuFmtRate(cache.hit_rate) === null;
+    cards.push({
+        label: '缓存命中率' + (rateIsExact ? '' : '（已上报样本）'),
+        value: aiuOrUnknown(rate === null ? aiuFmtRate(cache.hit_rate) : rate, AIU_UNKNOWN),
+        // 覆盖度**只在真有缺失时**才写进副标题：全体齐全时那句「全部 N 次都已上报」
+        // 只是把「命中 token ÷ 输入 token」挤掉，读的人再也看不到这一格是怎么算的。
+        sub: bothUnknown
+            ? cacheCoverage
+            : '命中 token ÷ 输入 token'
+                + (Number(cacheSample.unknown_runs) ? '（' + cacheCoverage + '）' : ''),
+        unknown: bothUnknown
+    });
+
+    // 费用：算得出就给金额，把「这是已知最低费用」写在副标题里；算不出时给**理由**
+    // （「还没有配置价格表」与「上游没有返回 token 数」对用户的下一步动作完全不同），
+    // **不写「未上报」** —— 那是 token 的口径，不是费用的。
+    var costSource = (costSample.known_value !== null && costSample.known_value !== undefined)
+        ? costSample.known_value : data.cost;
+    var costText = aiuFmtCost(costSource);
+    var costUnknownRuns = Number(costSample.unknown_runs) || 0;
+    if (costText !== null) {
+        cards.push({
+            label: '费用估算',
+            value: costText,
+            sub: (costUnknownRuns
+                ? '已知最低费用（' + aiuCoverageText(costSample.total_runs, costUnknownRuns, '可计算的费用')
+                    + '）'
+                : '按当前价格表估算：' + ((costSource || {}).price_version || '未标版本'))
+                + activeNote,
+            unknown: costUnknownRuns > 0
+        });
+    } else if (costSample.reason) {
+        cards.push({
+            label: '费用估算',
+            value: String(costSample.reason),
+            sub: '价格表算不出费用时这里不给数字，也不写 0',
+            unknown: true
+        });
+    }
+
+    // 超预算项目数：**只在这上面有事的时候出现**。0 个项目超预算不是一条信息，
+    // 摆一个恒为 0 的卡片只会让人以为哪里没配好。
+    if (overBudget > 0) {
+        cards.push({
+            label: '已超预算的项目',
+            value: String(overBudget) + ' 个',
+            sub: '这些项目的 AI 分析已被暂停（手动与定时都停），见下表的「本期预算」列',
+            unknown: false
+        });
+    }
+    return cards;
+}
+
+/**
+ * 「下一次的预计代价」那一格的卡片清单（纯函数，理由同上）。
+ *
+ * 三条口径：
+ *
+ * 1. **区间，不是承诺。** 服务端给的是 `{low, high}`，两个端都来自实测运行；
+ *    两端相同（历史只有一次运行）时写一个数，不写成 `2.0M ~ 2.0M`。
+ * 2. **价格表没配时只给 token 与时间**，费用那一格写服务端给的理由。
+ *    `DEFAULT_PRICE_TABLE` 是空的，这是常态而不是异常（见 `services/ai/pricing.py`）。
+ * 3. **「是否命中可复用基线」单独一张卡**：命中基线的后果是**不用新建这次付费运行**，
+ *    它不是一个折扣 —— 混进金额里会让区间凭空变小。
+ *
+ * 还有一条**不是可选**的：**借来的区间必须说自己是借来的**。增量没有实测样本时，
+ * 服务端给的是**全量运行**的区间（`basis.mode_samples_missing`）—— 那就照实标成
+ * 「增量：参照全量」，**不许**写成「预计增量代价」。理由与这一页其它地方同源：
+ * 一个偏保守、但自称准确的数字，比一句「这个模式没有实测样本」更容易被当真、
+ * 更容易被拿去做决策。前提（`notes`）也留在页面上可见（`renderEstimate`）。
+ */
+function aiuEstimateCards(data) {
+    var payload = data || {};
+    var cards = [];
+    var tokens = payload.tokens || {};
+    var span = payload.duration_ms || {};
+    var cost = payload.cost || {};
+    var basis = payload.basis || {};
+    var last = payload.last_actual || {};
+    if (payload.success === false) return cards;
+
+    // 这个区间是不是「借」来的：本模式没有实测样本，用别的模式的运行折算的。
+    var borrowed = basis.mode_samples_missing === true;
+    var borrowedLabel = borrowed ? '（增量：参照全量）' : '';
+
+    var tokenLow = aiuFmtTokens(tokens.low);
+    var tokenHigh = aiuFmtTokens(tokens.high);
+    cards.push({
+        label: '预计 token' + borrowedLabel,
+        value: (tokenLow === null && tokenHigh === null)
+            ? AIU_UNKNOWN
+            : (tokenLow === tokenHigh || tokenHigh === null ? tokenLow : tokenLow + ' ~ ' + tokenHigh),
+        sub: borrowed
+            ? '增量没有实测样本，这里参照的是全量运行的区间，不是增量的实测值'
+            : (basis.source === 'files'
+                ? '按最近 ' + basis.runs + ' 次同类运行的单文件用量折算'
+                : (basis.source === 'totals'
+                    ? '按最近 ' + basis.runs + ' 次同类运行的实测总量（没有文件数可比）'
+                    : '还没有可参照的历史运行，先跑一次才有区间')),
+        unknown: tokenLow === null && tokenHigh === null
+    });
+
+    var timeLow = aiuFmtDuration(span.low);
+    var timeHigh = aiuFmtDuration(span.high);
+    cards.push({
+        label: '预计时间' + borrowedLabel,
+        value: (timeLow === null && timeHigh === null)
+            ? AIU_UNKNOWN
+            : (timeLow === timeHigh || timeHigh === null ? timeLow : timeLow + ' ~ ' + timeHigh),
+        sub: (payload.shard_count ? '按 ' + payload.shard_count + ' 个分片' : '分片数未配置')
+            + '估算；分片是串行的，墙钟随之增长',
+        unknown: timeLow === null && timeHigh === null
+    });
+
+    var lastTokens = aiuFmtTokens(last.tokens);
+    cards.push({
+        label: '最近一次实际值',
+        value: lastTokens === null ? AIU_UNKNOWN : lastTokens + ' token',
+        sub: (last.run_id ? '运行 #' + last.run_id : '没有可参照的运行')
+            + (last.files ? ' · ' + last.files + ' 个文件' : '')
+            + (last.duration_ms ? ' · ' + aiuOrUnknown(aiuFmtDuration(last.duration_ms), AIU_UNKNOWN) : ''),
+        unknown: lastTokens === null
+    });
+
+    var baseline = payload.baseline || {};
+    cards.push({
+        label: '可复用基线',
+        value: baseline.reusable === true ? '命中' : (baseline.reusable === false ? '没有命中' : '未判定'),
+        sub: baseline.note || '',
+        unknown: baseline.reusable === null || baseline.reusable === undefined
+    });
+
+    if (cost.computable) {
+        var low = aiuFmtCost(cost.low);
+        var high = aiuFmtCost(cost.high);
+        cards.push({
+            label: '预计费用',
+            value: (low === high || high === null ? low : low + ' ~ ' + high),
+            sub: '按当前价格表估算（' + ((cost.low || {}).price_version || '未标版本') + '）',
+            unknown: false
+        });
+    } else {
+        // **不伪造费用**：价格表没配时不显示金额，只说明为什么没有。
+        cards.push({
+            label: '预计费用',
+            value: '算不出',
+            sub: (cost.reason || '价格表不可用') + ' —— 上面两项（token 与时间）照常有效',
+            unknown: true
+        });
+    }
+    return cards;
+}
+
 function aiuFmtTime(iso) {
     if (!iso) return '—';
     var date = new Date(iso);
@@ -1332,7 +1625,13 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
 //  数据获取与渲染
 // ---------------------------------------------------------------------------
 (function () {
-    var state = { overview: null, drill: null, drillProjectId: null, drillName: null };
+    // `estimateLoaded`：预估算过一次之后就不再自动重算 —— 它是**一次性**的问答
+    // （「下一次大概花多少」），而总览那一拍每 15 秒跟新一次。跟着刷新会让用户在
+    // 输入文件数的过程中被反复覆盖。
+    var state = {
+        overview: null, drill: null, drillProjectId: null, drillName: null,
+        estimateLoaded: false
+    };
 
     function $(id) { return document.getElementById(id); }
 
@@ -1623,47 +1922,14 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         host.hidden = !text;
     }
 
+    /** 把 KPI 卡片摆出来。**内容全部来自纯函数 `aiuKpiCards`** —— 渲染这一层不做任何
+     *  口径判断（哪一组数该读、缺字段时说什么，都在那个函数里，也都在 node 里跑过）。 */
     function renderKpis(totals, overBudget, activeCount) {
         var host = $('aiuKpis');
         host.textContent = '';
-        var tokens = totals.tokens || {};
-        var cache = totals.cache || {};
-        var input = tokens.input;
-        var hit = tokens.cache_read;
-        var miss = (input === null || input === undefined || hit === null || hit === undefined)
-            ? null : Math.max(0, input - hit);
-
-        host.appendChild(kpi('输入 token（合计）', aiuOrUnknown(aiuFmtTokens(input), AIU_UNKNOWN)));
-        host.appendChild(kpi(
-            '其中命中缓存', aiuOrUnknown(aiuFmtTokens(hit), AIU_UNKNOWN),
-            hit === null || hit === undefined ? '上游未上报缓存字段' : '按未命中价计费的输入：' + aiuOrUnknown(aiuFmtTokens(miss), AIU_UNKNOWN)
-        ));
-        host.appendChild(kpi('输出 token', aiuOrUnknown(aiuFmtTokens(tokens.output), AIU_UNKNOWN)));
-        // 副标题里的两个数都是**已完成**的运行。在途那几次单独说一句 —— 否则「3 / 4 次运行」
-        // 会被读成「一共跑了 4 次，其中 3 次采集到了」，而事实是「还有 1 次没结束」。
-        host.appendChild(kpi(
-            '合计 token', aiuOrUnknown(aiuFmtTokens(tokens.total), AIU_UNKNOWN),
-            totals.collected_runs + ' / ' + totals.runs + ' 次已完成运行采集到用量'
-            + (activeCount ? '（另有 ' + activeCount + ' 次运行中，未计入）' : '')
-        ));
-        var rate = aiuFmtRate(cache.hit_rate);
-        host.appendChild(kpi(
-            '缓存命中率', rate === null ? '未上报' : rate,
-            rate === null ? '部分或全部运行没有上报缓存字段' : '命中 token ÷ 输入 token',
-            rate === null
-        ));
-
-        // 费用：算不出就**不渲染这一块**（不是显示 0）。理由见页面上的口径说明。
-        var costText = aiuFmtCost(totals.cost);
-        if (costText !== null) {
-            host.appendChild(kpi('费用估算', costText, '按当前价格表估算：' + (totals.cost.price_version || '未标版本')));
-        }
-        // 超预算项目数：**只在这上面有事的时候出现**。0 个项目超预算不是一条信息，
-        // 摆一个恒为 0 的卡片只会让人以为哪里没配好。
-        if (overBudget > 0) {
-            host.appendChild(kpi('已超预算的项目', String(overBudget) + ' 个',
-                '这些项目的 AI 分析已被暂停（手动与定时都停），见下表的「本期预算」列'));
-        }
+        aiuKpiCards(totals, overBudget, activeCount).forEach(function (card) {
+            host.appendChild(kpi(card.label, card.value, card.sub, card.unknown));
+        });
     }
 
     function renderPricingNote(pricing) {
@@ -1679,6 +1945,101 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         var span = document.createElement('span');
         span.textContent = '价格表版本 ' + (pricing.version || '未标') + '（' + (pricing.source === 'project' ? '项目配置' : '平台默认') + '），金额按当前价格表估算。';
         host.appendChild(span);
+    }
+
+    // -----------------------------------------------------------------------
+    //  执行前的预估（AI-P1-03）
+    // -----------------------------------------------------------------------
+    // 数字全部来自 `/ai-analysis/usage/estimate`（只读、不产生任何模型消耗），本页只负责
+    // 取数与摆卡片 —— 口径在 `aiuEstimateCards`（纯函数），确认框那一层（三个抽屉模板）
+    // 第二波直接读同一个端点即可。
+
+    /** 项目下拉：与「模型单价表」那一格同一条口径 —— 用**全量**项目清单（不受当前筛选
+     *  影响），否则筛过之后下拉里只剩一个项目，用户换不回别的。 */
+    function fillEstimateProjects(options) {
+        var select = $('aiuEstimateProject');
+        if (!select) return;
+        var current = select.value;
+        replaceOptions(select, (options || []).map(function (item) {
+            return { value: item.project_id, label: item.name };
+        }), '选择项目');
+        if (current && select.querySelector('option[value="' + current + '"]')) select.value = current;
+        else if (!current) {
+            // 首次：默认选**当前筛选里的项目**；没有筛选就把地址栏那个带过来（它可能因为
+            // 权限被判成了空），否则保持「选择项目」让用户自己挑。
+            var filtered = $('aiuFilterProject') ? $('aiuFilterProject').value : '';
+            if (filtered && select.querySelector('option[value="' + filtered + '"]')) {
+                select.value = filtered;
+            }
+        }
+    }
+
+    function renderEstimate(payload) {
+        var body = $('aiuEstimateBody');
+        body.textContent = '';
+        if (!payload || !payload.basis) {
+            // 没有估算结果（还没选项目 / 取数失败）：**不摆一排「未上报」**——那不是
+            // 「这次算不出」，而是「还没问」。两种情况在界面上必须分得开。
+            $('aiuEstimateNotes').hidden = true;
+            return;
+        }
+        aiuEstimateCards(payload).forEach(function (card) {
+            body.appendChild(kpi(card.label, card.value, card.sub, card.unknown));
+        });
+        var notes = $('aiuEstimateNotes');
+        var lines = (payload && payload.notes) || [];
+        notes.textContent = lines.length ? lines.join(' ') : '';
+        notes.hidden = !lines.length;
+        // **前提必须在页面上可见**，不能只躺在接口字段里：`notes` 里写着「分片数变了按
+        // 比例折算」「目标文件数超出样本区间属于外推」「增量参照的是全量区间」这些前提 ——
+        // 区间一旦离开前提读起来就是一个承诺。文案里那两个星号是 markdown 味，这里
+        // **不能**原样落到用户眼前（`textContent` 不认 markdown），所以抹掉。
+        notes.textContent = notes.textContent.replace(/\*\*/g, '');
+        var meta = $('aiuEstimateMeta');
+        if (meta) {
+            if (payload && payload.success === false) {
+                meta.textContent = payload.message || '估算失败。';
+            } else {
+                meta.textContent = '估算时间 ' + aiuFmtTime(payload.generated_at)
+                    + '；样本 ' + (((payload.basis || {}).runs) || 0) + ' 次运行';
+            }
+        }
+    }
+
+    function loadEstimate() {
+        var project = $('aiuEstimateProject').value;
+        if (!project) {
+            renderEstimate({});
+            $('aiuEstimateMeta').textContent = '先选一个项目。';
+            return Promise.resolve();
+        }
+        var params = new URLSearchParams();
+        params.set('project', project);
+        params.set('mode', $('aiuEstimateMode').value || 'full');
+        var files = $('aiuEstimateFiles').value;
+        if (files !== '' && Number(files) > 0) params.set('files', files);
+        var meta = $('aiuEstimateMeta');
+        meta.textContent = '正在估算…';
+        return fetchJson('/ai-analysis/usage/estimate?' + params.toString()).then(function (body) {
+            renderEstimate(body);
+        }).catch(function (error) {
+            // 估算失败**不覆盖上面那些已经取回来的数字**（那是这一页的正文），只在这一格
+            // 说一句 —— 一次估算失败不该把整页打成错误页。
+            renderEstimate({});
+            $('aiuEstimateMeta').textContent =
+                '估算失败：' + (error && error.message ? error.message : error);
+        });
+    }
+
+    function initEstimate() {
+        var form = $('aiuEstimateForm');
+        if (!form) return;
+        form.addEventListener('submit', function (event) {
+            event.preventDefault();
+            loadEstimate();
+        });
+        $('aiuEstimateProject').addEventListener('change', loadEstimate);
+        $('aiuEstimateMode').addEventListener('change', loadEstimate);
     }
 
     /** 预算单元里的一档（项目档 / 平台档）。
@@ -1812,9 +2173,21 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             tr.appendChild(numCell(aiuFmtTokens((item.tokens || {}).input)));
             tr.appendChild(numCell(aiuFmtTokens((item.tokens || {}).cache_read)));
             tr.appendChild(numCell(aiuFmtTokens((item.tokens || {}).output)));
-            var rate = aiuFmtRate((item.cache || {}).hit_rate);
-            tr.appendChild(numCell(rate, 'num'));
-            tr.appendChild(numCell(aiuFmtCost(item.cost)));
+            // 命中率与费用：**先读已上报样本**（`reported_samples`），那一份在部分历史缺
+            // 字段时仍然有值，并把覆盖率写在项目名下面那行 —— 只读 `cache.hit_rate` /
+            // `cost` 的话，一条缺 token 的老运行就会让这一格整格「未上报」，
+            // 而下面写着「20 次运行 · 15 次采集到用量」。
+            var rowSample = item.reported_samples || {};
+            tr.appendChild(numCell(aiuFmtRate(
+                ((rowSample.cache || {}).known_value !== null
+                    && (rowSample.cache || {}).known_value !== undefined)
+                    ? rowSample.cache.known_value : (item.cache || {}).hit_rate
+            ), 'num'));
+            tr.appendChild(numCell(aiuFmtCost(
+                (((rowSample.cost || {}).known_value !== null
+                    && (rowSample.cost || {}).known_value !== undefined)
+                    ? rowSample.cost.known_value : item.cost)
+            )));
             tr.appendChild(budgetCell(item.budget));
             tr.appendChild(cell(aiuFmtTime(item.last_run_at)));
 
@@ -1899,6 +2272,11 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             var sub = document.createElement('span');
             sub.className = 'aiu-name-sub';
             sub.textContent = (item.group_key || '')
+                // 覆盖率写在行上：这一行的命中率与费用是**已上报样本**的值，
+                // 不说清「20 次里有 15 次报了」的话，读的人会把它当成全量。
+                + (item.runs
+                    ? ' · ' + (item.collected_runs || 0) + ' / ' + item.runs + ' 次采集到用量'
+                    : '')
                 + (item.running_runs ? ' · ' + item.running_runs + ' 次运行中（未计入）' : '');
             labelCell.appendChild(name); labelCell.appendChild(sub);
             tr.appendChild(labelCell);
@@ -1907,8 +2285,18 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             tr.appendChild(numCell(aiuFmtTokens((item.tokens || {}).input)));
             tr.appendChild(numCell(aiuFmtTokens((item.tokens || {}).cache_read)));
             tr.appendChild(numCell(aiuFmtTokens((item.tokens || {}).output)));
-            tr.appendChild(numCell(aiuFmtRate((item.cache || {}).hit_rate), 'num'));
-            tr.appendChild(numCell(aiuFmtCost(item.cost)));
+            // 与项目行同一套：命中率与费用先读已上报样本（那一份在部分历史缺字段时仍有值）。
+            var weekSample = item.reported_samples || {};
+            tr.appendChild(numCell(aiuFmtRate(
+                ((weekSample.cache || {}).known_value !== null
+                    && (weekSample.cache || {}).known_value !== undefined)
+                    ? weekSample.cache.known_value : (item.cache || {}).hit_rate
+            ), 'num'));
+            tr.appendChild(numCell(aiuFmtCost(
+                (((weekSample.cost || {}).known_value !== null
+                    && (weekSample.cost || {}).known_value !== undefined)
+                    ? weekSample.cost.known_value : item.cost)
+            )));
             tr.appendChild(cell(aiuFmtTime(item.last_run_at)));
             tbody.appendChild(tr);
         });
@@ -3021,6 +3409,12 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
                 // 会让下拉里只剩一个项目，用户换不回别的。后台那一拍不重建它：
                 // 用户可能正开着那个下拉在编辑单价表。
                 aiuPriceSetProjects(body.project_options || []);
+                // 预估那一格也用它，并在**首次**自动算一次（用户不必先点一下才看到区间）。
+                fillEstimateProjects(body.project_options || []);
+                if (!state.estimateLoaded && $('aiuEstimateProject').value) {
+                    state.estimateLoaded = true;
+                    loadEstimate();
+                }
             }
             $('aiuGeneratedAt').textContent = '更新时间 ' + aiuFmtTime(body.generated_at);
             if (!quiet) setLoading(false);
@@ -3455,6 +3849,7 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
 
     initFilters();
     initBudgetLink();
+    initEstimate();
 
     var platformForm = $('aiuPlatformBudgetForm');
     if (platformForm) platformForm.addEventListener('submit', savePlatformBudget);

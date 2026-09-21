@@ -27,6 +27,11 @@ import traceback
 from dataclasses import dataclass
 
 from models import Commit, db
+from services.log_sampling import (
+    OUTCOME_MISS,
+    flush_log_sampling,
+    log_sampled,
+)
 from utils.logger import log_print
 
 
@@ -62,6 +67,12 @@ def describe_weekly_file_totals(totals: dict, file_count: int) -> str:
 
     零值的项不出现：`（新建 0 / 更新 833）` 里的「新建 0」没有信息量，而这一行会被
     每次同步打一遍。全部为零时说明这轮什么都没做，直接说清楚。
+
+    **它同时是这一轮采样的收口点。** 本模块里那几条逐文件的日志（`weekly.vcs_*`）
+    只是累计，没有作用域就不会自己冒出来；本函数每次同步**恰好被调用一次**（在逐文件
+    循环之后、同一个线程里），所以在这里 `flush_log_sampling()` 就能把「这轮扫了多少、
+    命中多少」结清一次，而不必去动 task_worker 那边的入口。
+    返回值不受影响 —— 这是写日志，不是算结果。
     """
     parts = []
     if totals.get('created'):
@@ -76,6 +87,8 @@ def describe_weekly_file_totals(totals: dict, file_count: int) -> str:
     # 库里查不到基准版本意味着历史被截断或这是个新文件。
     if totals.get('vcs'):
         parts.append(f"回查 VCS 基准 {totals['vcs']}")
+    # 收口这一轮被采样掉的逐文件日志（见 docstring）：计数不结清就等于把日志删了。
+    flush_log_sampling()
     if not parts:
         return f"{file_count} 个文件，无需更新"
     return f"{file_count} 个文件（{'、'.join(parts)}）"
@@ -168,7 +181,20 @@ def get_real_base_commit_from_vcs(config, file_path):
             return None
 
         # 获取文件的完整提交历史
-        log_print(f"🔍 从{repository.type.upper()}获取文件提交历史: {file_path}", 'WEEKLY')
+        #
+        # 这一行是**按文件**打的（本函数按文件调用），实测一次同步 272 行；下面两条
+        # 「未找到」同理。三条一起采样之后，本轮扫了多少、命中多少由三行汇总回答：
+        #   获取文件提交历史: 处理 N 次
+        #   未找到文件提交历史: 处理 A 次，其中 A 次未命中
+        #   未找到周版本开始前的提交: 处理 B 次，其中 B 次未命中
+        # 于是「回查到了基准」= N − A − B（命中那一次另有 `📝 创建新的基准提交记录`
+        # 明细，不必从这三个数里推）。计数点在这个同步**末尾**由
+        # `describe_weekly_file_totals` 收口，见那里的说明。
+        log_sampled(
+            'weekly.vcs_history', f'{repository.type.upper()}获取文件提交历史',
+            f"🔍 从{repository.type.upper()}获取文件提交历史: {file_path}",
+            log_type='WEEKLY',
+        )
         if repository.type == 'git':
             # Git: 获取文件的提交历史
             commits_data = vcs_service.get_file_commit_history(file_path, limit=100)
@@ -176,7 +202,11 @@ def get_real_base_commit_from_vcs(config, file_path):
             # SVN: 获取文件的提交历史
             commits_data = vcs_service.get_file_history(file_path, limit=100)
         if not commits_data:
-            log_print(f"📭 {repository.type.upper()}中未找到文件 {file_path} 的提交历史", 'WEEKLY')
+            log_sampled(
+                'weekly.vcs_no_history', '未找到文件提交历史',
+                f"📭 {repository.type.upper()}中未找到文件 {file_path} 的提交历史",
+                outcome=OUTCOME_MISS, log_type='WEEKLY',
+            )
             return None
 
         # 查找周版本开始时间之前的最后一个提交
@@ -199,7 +229,11 @@ def get_real_base_commit_from_vcs(config, file_path):
                     break
 
         if not base_commit_data:
-            log_print(f"📭 {repository.type.upper()}中未找到周版本开始前的提交", 'WEEKLY')
+            log_sampled(
+                'weekly.vcs_no_window_base', '未找到周版本开始前的提交',
+                f"📭 {repository.type.upper()}中未找到周版本开始前的提交",
+                outcome=OUTCOME_MISS, log_type='WEEKLY',
+            )
             return None
 
         # 检查数据库中是否已存在这个提交记录

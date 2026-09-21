@@ -19,6 +19,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from models import AgentNode, AgentProjectBinding, AgentTask, AgentTempCache, db
 from services.agent_task_enqueue_service import enqueue_agent_task_once
 from services.deployment_mode import is_agent_dispatch_mode
+from services.task_worker_priority import AGENT_COMMIT_DIFF, COMMIT_DIFF
 from utils.logger import log_print
 
 _PENDING_STATUSES = {"pending", "processing"}
@@ -209,7 +210,7 @@ def _ensure_temp_cache_fetch_task(project_id: int, repository_id: int | None, ca
         project_id=project_id,
         repository_id=repository_id,
         source_task_id=None,
-        priority=2,
+        priority=AGENT_COMMIT_DIFF,
         payload=task_payload,
     )
 
@@ -413,7 +414,7 @@ def dispatch_or_get_commit_diff(commit, *, force_retry: bool = False):
                     "failed_count": failed_count,
                 }
             # 失败后自动补派（受上限保护）
-            new_task, _created = _ensure_commit_diff_task(commit, project.id, repository.id, priority=2)
+            new_task, _created = _ensure_commit_diff_task(commit, project.id, repository.id, priority=AGENT_COMMIT_DIFF)
             db.session.commit()
             log_print(
                 (
@@ -445,7 +446,7 @@ def dispatch_or_get_commit_diff(commit, *, force_retry: bool = False):
         }
 
     try:
-        new_task, _created = _ensure_commit_diff_task(commit, project.id, repository.id, priority=2 if force_retry else 3)
+        new_task, _created = _ensure_commit_diff_task(commit, project.id, repository.id, priority=AGENT_COMMIT_DIFF if force_retry else COMMIT_DIFF)
         db.session.commit()
         return {
             "status": "pending",

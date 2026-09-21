@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import uuid
@@ -36,7 +37,7 @@ from sqlalchemy import func
 from app import app as flask_app
 from app import create_tables, db
 from models import BackgroundTask, Project, Repository
-from models.ai_analysis import AiAnalysisRun
+from models.ai_analysis import AiAnalysisJob, AiAnalysisRun
 from models.weekly_version import WeeklyVersionConfig
 from services.ai_analysis_service import build_weekly_group_key
 
@@ -188,12 +189,14 @@ class TestWakingTheIntent:
         seeded = _seed(with_sync_task=True, sync_status="processing")
         with flask_app.app_context():
             register_waiting_analysis_intent(seeded["config_id"], seeded["group_key"])
-            # **不判全局计数**：测试库是会话级共用的，唤醒会扫到别的用例留下的意图。
-            # 要判的是**这一组**的处置（与本文件其它用例同一口径）。
+            # **不判全局计数**：测试库是会话级共用的，唤醒会扫到别的用例留下的意图
+            # （`outcome["checked"]` 是全表数）。要判的是**这一组**的处置 ——
+            # 这条意图还在、而且没有为它排分析任务。
             outcome = wake_waiting_analysis_intents()
 
-            assert outcome.get("checked", 0) >= 1, outcome
-            assert len(_pending_intents(seeded["group_key"])) == 1, "意图被提前消费掉了"
+            assert len(_pending_intents(seeded["group_key"])) == 1, (
+                f"意图被提前消费掉了：{outcome}"
+            )
             assert _analysis_tasks(seeded["group_key"]) == [], "同步还在跑却排了分析任务"
 
     def test_it_hands_off_once_the_sync_is_done(self):
@@ -617,56 +620,115 @@ class TestTheWiring:
 
 
 class TestTheManualEntryRegistersTheIntent:
-    def test_the_blocked_stream_registers_the_intent_and_says_so(self):
-        """闸门拦下 → 登记意图 → SSE 里**如实说**「已登记、同步结束会自动开始」。
+    """手工入口（P0-01 之后 = `POST /jobs` → `job_service.create_or_attach_job`）。
 
-        这是审计文档那一句「不应静默失败」的落点：用户必须知道接下来会发生什么
-        （会自动开始），而不是「等着，再点一次试试」。
-        """
-        from services.ai_analysis_service import set_project_api_key, stream_weekly_analysis
+    被闸门拦下时必须**登记意图**并如实说「已登记、同步结束会自动开始」—— 这是审计文档
+    那一句「不应静默失败」的落点：用户必须知道接下来会发生什么，而不是「等着，再点一次
+    试试」。判据从 SSE 文本换成 **job 的状态 + 那条意图行**（入口换了，事实没变）。
+    """
+
+    def test_the_blocked_entry_registers_the_intent_and_says_so(self):
+        import services.ai.job_service as job_service
+        from models.ai_analysis import STATE_WAITING_SNAPSHOT
 
         seeded = _seed(with_sync_task=True, sync_status="processing")
         with flask_app.app_context():
-            set_project_api_key(seeded["project_id"], "test-key")
-            events = list(stream_weekly_analysis(seeded["config_id"], trigger_source="manual"))
-
-            waiting = [line for line in events if line.startswith("event: waiting")]
-            assert waiting, f"闸门没有发 waiting 事件：{events}"
-            payload = json.loads(waiting[0].split("data: ", 1)[1])
-            assert payload["reason"] == "sync_in_flight", payload
-            assert payload.get("intent_registered") is True, (
-                f"被拦下了却没有登记意图，用户只能自己再点一次：{payload}"
+            config = db.session.get(WeeklyVersionConfig, seeded["config_id"])
+            created = job_service.create_or_attach_job(
+                config=config, requested_mode="incremental", trigger_source="manual"
             )
-            assert "自动" in payload["message"], payload["message"]
+            db.session.commit()
+            job = created.job
+            try:
+                assert job.state == STATE_WAITING_SNAPSHOT, job.state
 
-            assert len(_pending_intents(seeded["group_key"])) == 1, "SSE 说登记了，库里没有"
-            assert _analysis_tasks(seeded["group_key"]) == [], "被拦下时不该排分析任务"
-            assert (
-                AiAnalysisRun.query.filter_by(target_key=seeded["group_key"]).count() == 0
-            ), "被拦下却建了一条 run"
+                # **服务端给的那句话**：说了「会自动开始」，也说了「没有消耗」。
+                notice = job_service.notice_for_waiting(job)
+                assert notice["waiting"] is True, notice
+                assert "自动" in (notice.get("message") or ""), notice
+
+                intents = _pending_intents(seeded["group_key"])
+                assert len(intents) == 1, "job 说在等同步，库里没有意图行"
+                assert intents[0].job_id == job.id, (
+                    "意图行没有指回它服务的 job —— 同步收尾转交出去的那次分析与这次点击对不上"
+                )
+                assert _analysis_tasks(seeded["group_key"]) == [], "被拦下时不该排分析任务"
+                assert (
+                    AiAnalysisRun.query.filter_by(target_key=seeded["group_key"]).count() == 0
+                ), "被拦下却建了一条 run"
+            finally:
+                _drop_job(job.id)
 
     def test_a_second_click_while_the_handoff_is_pending_does_not_start_a_run(self):
-        """同步已结束、但那一次还没跑起来时再点一次：**只附着，不新建 run**。
+        """已经登记过一次之后再点：**只附着，不新建 run**。
 
-        新建的后果是双份付费：排队的那条稍后执行时，手工那条已经跑完、认领也放开了，
+        新建的后果是双份付费：排队的那条稍后执行时，这一次已经跑完、认领也放开了，
         `_create_run` 于是照常建一条新的 —— 同一份输入跑两遍。
         """
-        from services.ai_analysis_service import set_project_api_key, stream_weekly_analysis
+        import services.ai.job_service as job_service
+        from models.ai_analysis import STATE_QUEUED, STATE_WAITING_SNAPSHOT
         from services.task_worker_queue_service import register_waiting_analysis_intent
 
         seeded = _seed(with_sync_task=True, sync_status="completed")
         with flask_app.app_context():
-            set_project_api_key(seeded["project_id"], "test-key")
             register_waiting_analysis_intent(seeded["config_id"], seeded["group_key"])
-            events = list(stream_weekly_analysis(seeded["config_id"], trigger_source="manual"))
+            config = db.session.get(WeeklyVersionConfig, seeded["config_id"])
+            first = job_service.create_or_attach_job(
+                config=config, requested_mode="incremental", trigger_source="manual"
+            )
+            db.session.commit()
+            second = job_service.create_or_attach_job(
+                config=config, requested_mode="incremental", trigger_source="manual"
+            )
+            db.session.commit()
+            job = first.job
+            try:
+                assert first.job.state in (STATE_QUEUED, STATE_WAITING_SNAPSHOT), first.job.state
+                assert second.attached is True, "第二次点击又新建了一条 job"
+                assert second.job_id == first.job_id
+                assert (
+                    AiAnalysisRun.query.filter_by(target_key=seeded["group_key"]).count() == 0
+                ), "只是登记/排队，却建了一条 run（= 提前付费）"
+                # 同一份输入只排一条分析任务（队列那一层按分组去重）。
+                assert len(_analysis_tasks(seeded["group_key"])) <= 1, (
+                    "同一份输入排出了两条分析任务 —— 两次付费"
+                )
+            finally:
+                _drop_job(job.id)
 
-            waiting = [line for line in events if line.startswith("event: waiting")]
-            assert waiting, f"已登记的意图没有被认出来，手工路径新建了一次运行：{events}"
-            payload = json.loads(waiting[0].split("data: ", 1)[1])
-            assert payload.get("intent_registered") is True, payload
-            assert (
-                AiAnalysisRun.query.filter_by(target_key=seeded["group_key"]).count() == 0
-            ), "已经登记过一次分析，却又建了一条 run（= 第二次付费）"
+
+def _drop_job(job_id) -> None:
+    """收掉本文件建出来的 job 行（测试库是会话级共用的）。
+
+    `active_key` 非空的那条会占着唯一索引，让**别的**用例在同一个 target 上建不出 job。
+
+    ## 必须**连它名下的任务行一起**收掉，否则会造出「幽灵任务」
+
+    只删 job 的话，那行 `BackgroundTask`（`job_id` 指着已删的 job、状态还停在
+    `pending`）会留在库里；job 行一删，它的 id 就被 SQLite 复用 —— 那行幽灵任务于是
+    挂到**一条全新的、与它毫无关系的 job** 上。而
+    `job_service._live_task_of_job(job)` 是**按裸 `BackgroundTask.job_id == job.id`
+    匹配**的（它必须这样：等待意图转交出去的那条任务，`job.task_id` 上根本没有它），
+    于是一条无关的新 job 会被恢复扫描判成「还有活在跑」—— 形态是**单独跑绿、合跑红**
+    （`test_ai_job_settlement_and_scope.py::test_the_scan_settles_an_abandoned_job_...`）。
+    同一个坑在 `tests/test_ai_drawer_stream_state.py::_drop_job` 那一边也踩过。
+    """
+    if job_id is None:
+        return
+    with flask_app.app_context():
+        row = db.session.get(AiAnalysisJob, job_id)
+        if row is not None and row.active_key is not None:
+            row.active_key = None
+            db.session.commit()
+        # **先收任务行**：`job_id` 那一列会被 id 复用，留着就是幽灵。
+        # 判据就是 `job_id` —— 「这条任务服务于哪个 job」是那一列的冻结语义，
+        # `create_or_attach_job` 排出去的每一行都带着它。
+        BackgroundTask.query.filter(BackgroundTask.job_id == job_id).delete(
+            synchronize_session=False
+        )
+        if row is not None:
+            db.session.delete(row)
+        db.session.commit()
 
 
 # ==========================================================================
@@ -706,6 +768,10 @@ class TestThePageFollowsTheIntent:
         判据用**服务端给的字段**（`payload.intent_registered`）而不是「reason 是不是
         sync_in_flight」—— 后者在「同步已结束、那次还没跑起来」时也是同一个 reason，
         而那时页面该做的是同一件事（继续等），只是不能自己再建一次运行。
+
+        **判据盯行为、不盯函数名**：轮询那个函数的名字会随第二波（P0-01 job 协议，把
+        「等待那次登记」的轮询换成按 `job_id` 轮询）而变，所以这里只要求「认了已登记
+        之后必须有一个 `startWeeklyAi*Poll(`」—— 名字变了不该让判据失效，行为没了才该。
         """
         root = Path(__file__).resolve().parents[1]
         for rel in WEEKLY_TEMPLATES:
@@ -715,15 +781,19 @@ class TestThePageFollowsTheIntent:
                 f"{rel} 的 waiting 分支不看服务端给的「已登记」事实 —— "
                 "用户还是只能自己盯着按钮再点一次"
             )
-            assert "startWeeklyAiWaitingPoll()" in handler, f"{rel} 没有开始轮询那次登记"
-            assert "startWeeklyAiWaitingPoll" in source and "stopWeeklyAiWaitingPoll" in source
+            registered_branch = handler[handler.index("payload.intent_registered"):]
+            assert re.search(r"startWeeklyAi\w*Poll\(", registered_branch), (
+                f"{rel} 认了「已登记」却没有开始轮询那次登记"
+            )
+            assert re.search(r"startWeeklyAi\w*Poll", source), f"{rel} 没有开始轮询的实现"
+            assert re.search(r"stopWeeklyAi\w*Poll", source), f"{rel} 没有停轮询的实现"
             assert "/waiting`" in source or "/waiting'" in source, (
                 f"{rel} 没有问服务端「那次登记到哪一步了」"
             )
             # 轮询必须在「用户自己又发起一次」时停掉：不停的话它会一直轮询下去，
             # 而且会把一次手工发起的分析说成「等同步」。
             start_body = source[source.index("function startWeeklyAiAnalysis"):]
-            assert "stopWeeklyAiWaitingPoll()" in start_body[:2000], (
+            assert re.search(r"stopWeeklyAi\w*Poll\(", start_body[:2000]), (
                 f"{rel} 重新发起分析时没有停掉等待轮询"
             )
 
@@ -1095,4 +1165,469 @@ class TestTheWokenRunIsRecordedAsManual:
 
         assert seen.get("trigger_source") == "manual", (
             f"handler 把标记丢了（{seen}）—— 落库的那次运行还是「定时」"
+        )
+
+
+# ==========================================================================
+#  十一、第二波（P0-01 job 协议）：意图 / 任务 / job 三者的关联
+# ==========================================================================
+
+_JOB_IDS: list = []
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_jobs_created_here():
+    """本文件造出来的 job 行自己收掉（测试库是会话级共用的）。
+
+    ## 必须**先收引用它们的任务行**，否则会造出「幽灵任务」
+
+    `_add_analysis_task_row` 造出来的那行 `weekly_ai_analysis` 带着 `job_id`。只删 job
+    的话它会留下来，而 job 行一删、它的 id 就被 SQLite 复用 —— 那行幽灵任务于是挂到
+    **一条全新的、与它毫无关系的 job** 上（状态还停在 `pending`）。
+
+    而 `job_service._live_task_of_job(job)` 是**按裸 `BackgroundTask.job_id == job.id`
+    匹配**的（它必须这样：等待意图转交出去的那条任务，`job.task_id` 上根本没有它），
+    于是一条无关的新 job 会被恢复扫描判成「还有活在跑」—— 形态是**单独跑绿、合跑红**：
+
+        pytest tests/test_sync_wait_intent.py \\
+               tests/test_ai_job_settlement_and_scope.py::test_the_scan_settles_an_abandoned_job_with_no_task_and_no_run
+
+    同一个坑在 `tests/test_ai_drawer_stream_state.py::_drop_job` 与
+    `tests/test_ai_job_settlement_and_scope.py` 的收尾里也各踩过一次。
+    """
+    yield
+    with flask_app.app_context():
+        if _JOB_IDS:
+            BackgroundTask.query.filter(
+                BackgroundTask.job_id.in_(list(_JOB_IDS))
+            ).delete(synchronize_session=False)
+            AiAnalysisJob.query.filter(AiAnalysisJob.id.in_(list(_JOB_IDS))).delete(
+                synchronize_session=False
+            )
+            _JOB_IDS.clear()
+            db.session.commit()
+
+
+def _add_job(project_id, target_key, *, state="queued", active_key=None):
+    """造一行 job（只填这一组用例要看的列）。"""
+    with flask_app.app_context():
+        job = AiAnalysisJob(
+            project_id=project_id,
+            target_type="weekly",
+            target_key=target_key,
+            requested_mode="incremental",
+            state=state,
+            trigger_source="manual",
+            active_key=active_key,
+        )
+        db.session.add(job)
+        db.session.commit()
+        _JOB_IDS.append(job.id)
+        return job.id
+
+
+def _add_analysis_task_row(seeded, job_ref):
+    """造一行 `weekly_ai_analysis` 任务，引用（`job_id` 列）由调用方给。"""
+    with flask_app.app_context():
+        row = BackgroundTask(
+            task_type="weekly_ai_analysis",
+            commit_id=str(seeded["config_id"]),
+            file_path=seeded["group_key"],
+            priority=2,
+            status="pending",
+            job_id=job_ref,
+        )
+        db.session.add(row)
+        db.session.commit()
+        return row.id
+
+
+class TestTheIntentCarriesTheJob:
+    """意图行上的 `job_id` = 「这条意图服务于哪个 job」（冻结语义）。
+
+    第二波之前它是「转交给了哪条任务」；两个含义挤在一列上，读错一次就会把一条还在
+    排队的任务判成「已经没了」→ 意图被提前作废 → 第二道付费闸门当场打开。
+    """
+
+    def test_registering_stores_the_job_on_the_intent_row(self):
+        from services.task_worker_queue_service import register_waiting_analysis_intent
+
+        seeded = _seed()
+        job_id = _add_job(seeded["project_id"], seeded["group_key"])
+        with flask_app.app_context():
+            intent_id = register_waiting_analysis_intent(
+                seeded["config_id"], seeded["group_key"], job_id=job_id
+            )
+            row = db.session.get(BackgroundTask, intent_id)
+            assert row.job_id == job_id, (
+                f"意图行没有带上它服务的 job（{row.job_id}）—— 页面按自己的 job_id 查不到"
+            )
+
+    def test_a_second_registration_with_another_job_repoints_the_same_row(self):
+        """连点两次落在同一个分组上：**改那一行**，不新建（新建会让唤醒各转交一次）。"""
+        from services.task_worker_queue_service import register_waiting_analysis_intent
+
+        seeded = _seed()
+        first_job = _add_job(seeded["project_id"], seeded["group_key"])
+        second_job = _add_job(seeded["project_id"], seeded["group_key"])
+        with flask_app.app_context():
+            first = register_waiting_analysis_intent(
+                seeded["config_id"], seeded["group_key"], job_id=first_job
+            )
+            second = register_waiting_analysis_intent(
+                seeded["config_id"], seeded["group_key"], job_id=second_job
+            )
+            assert first == second, f"同一分组攒出了两条意图：{first} / {second}"
+            assert len(_pending_intents(seeded["group_key"])) == 1
+            assert db.session.get(BackgroundTask, first).job_id == second_job, (
+                "命中了已有意图却没有改指新的 job —— 页面拿自己的 job_id 什么都查不到"
+            )
+
+    def test_the_handoff_writes_the_job_onto_the_task_row_and_stays_findable(self):
+        """转交：任务行上写的是 **job id**（不是意图 id），而且反着查得到它。"""
+        from services.task_worker_queue_service import (
+            _handed_off_task_of_intent,
+            register_waiting_analysis_intent,
+            wake_waiting_analysis_intents,
+        )
+
+        seeded = _seed()
+        with flask_app.app_context():
+            # **让 job 的号比任何 background_tasks 的号都大。** 两个自增序列互不相干、
+            # 在共用测试库里经常撞号，而**旧实现**正是拿 job 号去 background_tasks 里
+            # `get()` —— 撞上时它会「碰巧」查回同一条任务，这条用例就什么都测不出来了
+            # （变异验证实测：撤销修复之后它照样绿）。把号拉开，判据才有分辨能力。
+            task_max = db.session.query(func.max(BackgroundTask.id)).scalar() or 0
+            job_max = db.session.query(func.max(AiAnalysisJob.id)).scalar() or 0
+            for _ in range(max(0, task_max + 5 - job_max)):
+                _add_job(seeded["project_id"], seeded["group_key"])
+            job_id = _add_job(seeded["project_id"], seeded["group_key"])
+            intent_id = register_waiting_analysis_intent(
+                seeded["config_id"], seeded["group_key"], job_id=job_id
+            )
+            assert intent_id != job_id, (
+                "前提：意图 id 与 job id 必须不同 —— 相同的话这条断言什么都测不出来"
+            )
+            outcome = wake_waiting_analysis_intents()
+            assert "skipped" not in outcome, f"唤醒又走了「原地放弃」那条路：{outcome}"
+            # `handed_off` 是全表计数（别的文件的意图也能把它填满）；「这次转交了」在这里
+            # 由**我这条任务行存在、且带着我这次的身份**判出来 —— 那比计数强
+            # （`blocked` 那条路什么都不建，所以任务行在 = 转交确实发生了）。
+            tasks = _analysis_tasks(seeded["group_key"])
+            assert len(tasks) == 1, [t.id for t in tasks]
+            assert tasks[0].job_id == job_id, (
+                f"分析任务行上的引用是 {tasks[0].job_id}，应该是 job {job_id}"
+                "（写意图 id 的话，页面按 job_id 查不到这次分析）"
+            )
+            handed = _handed_off_task_of_intent(db.session.get(BackgroundTask, intent_id))
+            assert handed is not None and handed.id == tasks[0].id, (
+                "反着查不到那条任务 —— 意图下一轮会被当成悬空、提前作废"
+            )
+            # 意图行上那一列**不动**（它归 job_service：表述的是「服务于哪个 job」）
+            assert db.session.get(BackgroundTask, intent_id).job_id == job_id
+
+    def test_a_task_of_another_job_is_repointed_when_reused(self):
+        """去重命中**另一条 job 的任务**时，那一行改指新的 job（否则新页面什么都查不到）。"""
+        from services.task_worker_queue_service import create_weekly_ai_analysis_task
+
+        seeded = _seed()
+        first_job = _add_job(seeded["project_id"], seeded["group_key"])
+        second_job = _add_job(seeded["project_id"], seeded["group_key"])
+        with flask_app.app_context():
+            task_id = create_weekly_ai_analysis_task(
+                seeded["config_id"], group_key=seeded["group_key"], job_id=first_job
+            )
+            again = create_weekly_ai_analysis_task(
+                seeded["config_id"], group_key=seeded["group_key"], job_id=second_job
+            )
+            row = db.session.get(BackgroundTask, task_id)
+            assert again == task_id, f"没有复用那一条（{again} != {task_id}）"
+            assert row.job_id == second_job, (
+                f"这一行还指着 job {row.job_id} —— 用户拿着自己的 job_id 查不到任何东西"
+            )
+
+
+class TestTheJobHooks:
+    """两个钩子：任务进 processing（记 `started_at`）与 run 落到终态（结算）。
+
+    都落在 `services/task_worker_task_handlers._handle_weekly_ai_analysis_task` 里 ——
+    run 真正建出来的那一刻在 `run_weekly_analysis_background` 内部（不在本分片名下的
+    文件），所以这一侧只能钩在**任务的开始与结束**两个边界上。
+    """
+
+    def test_marking_running_records_the_task_and_the_start_time(self):
+        import services.task_worker_task_handlers as handlers
+
+        seeded = _seed()
+        job_id = _add_job(seeded["project_id"], seeded["group_key"])
+        task_id = _add_analysis_task_row(seeded, job_id)
+        with flask_app.app_context():
+            handlers.mark_job_running_for_task(task_id, run_id=777)
+            job = db.session.get(AiAnalysisJob, job_id)
+            assert job.state == "running", job.state
+            assert job.task_id == task_id, "没有记下这条任务的号"
+            assert job.run_id == 777, "没有把运行号补上"
+            assert job.started_at is not None, "没有记开始时刻"
+
+    def test_a_task_whose_reference_is_not_a_job_is_left_alone(self):
+        """**过渡期的坑**：任务行上的引用可能是**意图 id**（没有 job 的那条路）。
+
+        意图 id 与 job id 数值上会撞车，直接拿去 `mark_running` 会把一条完全无关的 job
+        标成「分析中」。所以认不出来就当没有 job。
+        """
+        import services.task_worker_task_handlers as handlers
+
+        seeded = _seed()
+        other_job = _add_job(seeded["project_id"], seeded["group_key"])
+        with flask_app.app_context():
+            intent_like = BackgroundTask(
+                task_type="weekly_ai_waiting",
+                commit_id=str(seeded["config_id"]),
+                file_path=seeded["group_key"],
+                priority=6,
+                status="pending",
+            )
+            db.session.add(intent_like)
+            db.session.commit()
+            task_id = _add_analysis_task_row(seeded, intent_like.id)
+
+            assert handlers.job_id_for_task(task_id) is None, (
+                "把一个不是 job 的号当成了 job —— 会去改一条无关的 job"
+            )
+            handlers.mark_job_running_for_task(task_id)
+            assert db.session.get(AiAnalysisJob, other_job).state != "running", (
+                "无关的 job 被标成了分析中"
+            )
+
+    def test_settling_from_a_terminal_run_closes_the_job(self):
+        import services.task_worker_task_handlers as handlers
+
+        seeded = _seed()
+        job_id = _add_job(
+            seeded["project_id"], seeded["group_key"],
+            state="running", active_key="weekly|abc",
+        )
+        with flask_app.app_context():
+            run = AiAnalysisRun(
+                project_id=seeded["project_id"],
+                target_type="weekly",
+                target_id=seeded["config_id"],
+                target_key=seeded["group_key"],
+                status="degraded",
+                response_mode="blocking",
+                trigger_source="manual",
+            )
+            db.session.add(run)
+            db.session.commit()
+            job = db.session.get(AiAnalysisJob, job_id)
+            job.run_id = run.id
+            db.session.commit()
+            run_id = run.id
+
+            settled = handlers.settle_job_from_result({"status": "succeeded", "run_id": run_id})
+
+            job = db.session.get(AiAnalysisJob, job_id)
+            assert settled is not None, "没有找到要结算的 job"
+            assert job.state == "degraded", (
+                f"job 状态是 {job.state} —— degraded 是终态且有可复用结论，不许折叠"
+            )
+            assert job.finished_at is not None
+            assert job.active_key is None, (
+                "跑完没有清 active_key —— 同一份输入的下一次分析永远创建不出 job"
+            )
+
+    def test_no_run_without_a_task_settles_nothing(self):
+        """拿不到 `task_id` 时**不猜** —— 没有它找不到那条 job，什么也不做。
+
+        （「没有 run 的结局」本身已经在第二波收尾补上了出口：带上 `task_id` 时会交给
+        `job_service.settle_without_run` 按 `reason` 选终态。覆盖它的用例见
+        `tests/test_ai_job_settlement_and_scope.py` 那一组。这里钉的是**另一半**：
+        认不出 job 时必须原样返回 `None`，不许去改别人的 job 行 —— 任务行上那一列在
+        过渡路径上可能是**意图 id**，而意图 id 与 job id 数值上会撞车。）
+        """
+        import services.task_worker_task_handlers as handlers
+
+        assert handlers.settle_job_from_result(
+            {"status": "skipped", "reason": "no_change"}
+        ) is None
+        assert handlers.settle_job_from_result(None) is None
+        assert handlers.settle_job_from_result(
+            {"status": "skipped", "reason": "no_change"}, task_id=None
+        ) is None
+
+    def test_the_handler_calls_both_hooks(self, monkeypatch):
+        """接线：handler 必须真的调这两处（只写函数不接线是最容易漏的一跳）。"""
+        import services.task_worker_service as worker
+        import services.task_worker_task_handlers as handlers
+
+        calls = {"mark": [], "settle": []}
+
+        def _fake_mark(task_id, *, run_id=None):
+            calls["mark"].append((task_id, run_id))
+            return None
+
+        # **用 `**kwargs` 收尾**：这一跳的形参正在被第二波扩（`task_id=` 已经在路上了），
+        # 判据只认第一个位置参数（那次的结果），形参再多也不该让这条用例假红。
+        def _fake_settle(result, **kwargs):
+            calls["settle"].append(result)
+            return None
+
+        def _fake_run(config_id, task_id=None, trigger_source="scheduled"):
+            return {"status": "succeeded", "run_id": 4242}
+
+        seeded = _seed()
+        job_id = _add_job(seeded["project_id"], seeded["group_key"])
+        task_id = _add_analysis_task_row(seeded, job_id)
+        monkeypatch.setattr(handlers, "mark_job_running_for_task", _fake_mark)
+        monkeypatch.setattr(handlers, "settle_job_from_result", _fake_settle)
+        with flask_app.app_context():
+            monkeypatch.setattr(worker, "run_weekly_analysis_background", _fake_run)
+            monkeypatch.setattr(worker, "update_task_status_with_retry", lambda *a, **k: None)
+            worker._handle_weekly_ai_analysis_task(
+                {"type": "weekly_ai_analysis", "config_id": seeded["config_id"],
+                 "task_id": task_id}
+            )
+
+        # **两跳都要在**：进 processing 那一刻（还不知道 run 号）与拿到 run 号之后。
+        # 只判「至少调过一次」挡不住「少了一跳」—— 那两跳的缺失形态不同（前者丢
+        # started_at，后者丢 run_id）。
+        assert len(calls["mark"]) == 2, (
+            f"job 的写回少了或多了：{calls['mark']}（应为「开始」与「补 run 号」两次）"
+        )
+        assert calls["mark"][0] == (task_id, None), calls["mark"]
+        assert calls["mark"][1] == (task_id, 4242), calls["mark"]
+        assert calls["settle"] and calls["settle"][0].get("run_id") == 4242, (
+            f"run 跑完没有收口 job：{calls['settle']}"
+        )
+
+
+class TestTheRequestedModeReachesTheExecutionSide:
+    """`requested_mode` 从**库列**喂进执行侧（第二波）。
+
+    任务行上已经有这一列（`create_weekly_ai_analysis_task(requested_mode=…)`），执行侧
+    （`run_weekly_analysis_background`）在第二波收尾时补上了 `requested_mode` / `focus`
+    两个形参 —— 于是这一跳**现在是通的**，行为验收落在
+    `tests/test_ai_job_settlement_and_scope.py`（断言那条 run 的 `scope == "full"`，
+    不是断言源码里有没有字符串）。
+
+    这一组守的是**接线本身**：行上有就带上，对方接受就传出去，不接受就留一行警告
+    （不许静默降级）。最后那条「不接受」的分支是对**未来的**执行侧说的（形参被改名或
+    被去掉时，这一跳必须留下痕迹而不是把「用户点了全量」咽掉）。
+    """
+
+    def test_it_reads_the_mode_from_the_task_row_not_the_payload(self):
+        """行是权威：去重复用一条更早的任务时，载荷里根本没有这次请求的模式。"""
+        import services.task_worker_task_handlers as handlers
+
+        seeded = _seed()
+        with flask_app.app_context():
+            task_id = BackgroundTask(
+                task_type="weekly_ai_analysis",
+                commit_id=str(seeded["config_id"]),
+                file_path=seeded["group_key"],
+                priority=2,
+                status="pending",
+                requested_mode="full",
+            )
+            db.session.add(task_id)
+            db.session.commit()
+            task_id = task_id.id
+
+            assert handlers.requested_mode_for_task(task_id, {"requested_mode": "incremental"}) == "full", (
+                "行上的模式被载荷盖掉了 —— 用户点的全量又丢了"
+            )
+            # 行上没有（老行）才退回载荷；两处都没有就是 None（而不是猜一个）
+            BackgroundTask.query.filter_by(id=task_id).update(
+                {"requested_mode": None}, synchronize_session=False
+            )
+            db.session.commit()
+            assert handlers.requested_mode_for_task(task_id, {"requested_mode": "full"}) == "full"
+            assert handlers.requested_mode_for_task(task_id, None) is None
+
+    def test_a_callable_that_does_not_accept_the_keyword_is_recognized(self):
+        import services.task_worker_task_handlers as handlers
+
+        def _without(config_id, task_id=None, trigger_source="scheduled"):
+            return None
+
+        def _with(config_id, task_id=None, trigger_source="scheduled", requested_mode=None):
+            return None
+
+        assert handlers.accepts_keyword(_without, "requested_mode") is False
+        assert handlers.accepts_keyword(_with, "requested_mode") is True
+
+    def test_the_mode_flows_through_when_the_execution_side_accepts_it(self, monkeypatch):
+        """执行侧一加形参，这一跳就自动通（这就是「接受就传」的意义）。"""
+        import services.task_worker_service as worker
+
+        seen = {}
+
+        def _fake_run(config_id, task_id=None, trigger_source="scheduled", requested_mode=None):
+            seen["requested_mode"] = requested_mode
+            return {"status": "succeeded"}
+
+        seeded = _seed()
+        with flask_app.app_context():
+            row = BackgroundTask(
+                task_type="weekly_ai_analysis",
+                commit_id=str(seeded["config_id"]),
+                file_path=seeded["group_key"],
+                priority=2,
+                status="pending",
+                requested_mode="full",
+            )
+            db.session.add(row)
+            db.session.commit()
+            task_id = row.id
+            monkeypatch.setattr(worker, "run_weekly_analysis_background", _fake_run)
+            monkeypatch.setattr(worker, "update_task_status_with_retry", lambda *a, **k: None)
+            worker._handle_weekly_ai_analysis_task(
+                {"type": "weekly_ai_analysis", "config_id": seeded["config_id"],
+                 "task_id": task_id}
+            )
+
+        assert seen.get("requested_mode") == "full", (
+            f"执行侧支持这个形参时没有把行上的模式传过去：{seen}"
+        )
+
+    def test_a_dropped_mode_is_not_silent(self, monkeypatch):
+        """执行侧**不再接受**这个形参时，也必须留下痕迹（不许静默降级）。
+
+        真的执行侧今天已经接受它了（见类 docstring），所以这里用 `_fake_run`
+        模拟「形参被改名或去掉」的那一天 —— 那一跳的处置不许变成「用户点了全量、
+        平台按增量跑、而哪里都没说」。
+        """
+        import services.task_worker_service as worker
+
+        logged = []
+
+        def _fake_run(config_id, task_id=None, trigger_source="scheduled"):
+            return {"status": "succeeded"}
+
+        seeded = _seed()
+        with flask_app.app_context():
+            row = BackgroundTask(
+                task_type="weekly_ai_analysis",
+                commit_id=str(seeded["config_id"]),
+                file_path=seeded["group_key"],
+                priority=2,
+                status="pending",
+                requested_mode="full",
+            )
+            db.session.add(row)
+            db.session.commit()
+            task_id = row.id
+            monkeypatch.setattr(worker, "run_weekly_analysis_background", _fake_run)
+            monkeypatch.setattr(worker, "update_task_status_with_retry", lambda *a, **k: None)
+            monkeypatch.setattr(
+                worker, "log_print",
+                lambda message, *a, **k: logged.append(str(message)),
+            )
+            worker._handle_weekly_ai_analysis_task(
+                {"type": "weekly_ai_analysis", "config_id": seeded["config_id"],
+                 "task_id": task_id}
+            )
+
+        assert any("全量" in message and "requested_mode" in message for message in logged), (
+            f"全量请求被降级成了静默：{logged}"
         )

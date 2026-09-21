@@ -167,3 +167,129 @@ def test_a_run_that_never_hit_the_budget_reports_zeros():
     budget = result_payload(_outcome(), {}, suppressed=frozenset())["context"]["request_budget"]
 
     assert budget == {"used": 0, "refused": 0, "refused_items": []}
+
+
+# ===========================================================================
+# 裁决与候选血缘走**结构化的字段**（AI-P0-05 / AI-P0-06）
+# ===========================================================================
+
+
+def _lineage_outcome() -> EngineOutcome:
+    """一次**带复核裁决**的子代理运行的结果：裁决在 `verdict` 里，血缘在异常里。"""
+    from services.ai.verdict import (
+        VERDICT_RETRACTED,
+        VerifyVerdict,
+        reduce_findings,
+    )
+
+    landed = Anomaly(
+        title="【协议】A 被就地替换",
+        category="code_logic",
+        severity="critical",
+        confidence="very_high",
+        evidence=("code/qz_pub/protocols/ProtoCGas.lua 第 9 行",),
+        commit="b" * 40,
+        file_path="code/qz_pub/protocols/ProtoCGas.lua",
+        # 它来源于分片 S3 的第 3 条候选 —— 血缘要一路落进载荷。
+        source_candidate_ids=("S3-3", "S1-2"),
+    )
+    reduction = reduce_findings(
+        [landed],
+        verdicts=(
+            VerifyVerdict(
+                finding_id="F1",
+                verdict=VERDICT_RETRACTED,
+                reason="客户端已同步",
+                evidence_refs=("ProtoCGas.lua:9",),
+            ),
+        ),
+    )
+    return EngineOutcome(
+        status="succeeded",
+        anomalies=reduction.active_anomalies(),
+        report_markdown="## 复核裁决（平台）\n\n已撤销 1 条。\n",
+        verdict=reduction.as_dict(),
+        draft_markdown="# 变更理解\n\n模型自己写的那份草稿。\n",
+        verify_report_markdown="## 对账结果（找反证）\n\n未找到反证。\n",
+    )
+
+
+def test_the_candidate_lineage_reaches_the_payload():
+    """**血缘必须落库**：读侧要在**运行之后**还能回答「这条结论是哪个分片报的」。
+
+    只存在内存里的话，任何一次回看（抽屉、历史、下一轮基线）都只能再去猜 —— 而「猜」
+    正是 AI-P0-06 整段删掉的那套启发式。
+    """
+    payload = result_payload(_lineage_outcome(), {"summary": {}}, suppressed=frozenset())
+
+    assert payload["retracted_findings"][0]["source_candidate_ids"] == ["S3-3", "S1-2"], (
+        "载荷里的裁决行没带上候选血缘 —— 读侧再也核不了「这条候选的去向」"
+    )
+    # 被撤销的那条不在活动清单里（`anomalies` 是它的活动投影），血缘只在审计轨迹上
+    # —— 而那条轨迹恰恰是「这条候选去哪儿了」唯一的出处。
+    assert payload["anomalies"] == []
+    assert payload["final_findings"][0]["source_candidate_ids"] == ["S3-3", "S1-2"]
+
+
+def test_the_batch_lineage_survives_on_an_active_finding():
+    """活动的那一条同样带血缘（撤销的那条走 `retracted_findings`，两条路都要有）。"""
+    from services.ai.verdict import reduce_findings
+
+    landed = Anomaly(
+        title="【协议】A 被就地替换",
+        category="code_logic",
+        severity="high",
+        confidence="high",
+        evidence=("code/qz_pub/protocols/ProtoCGas.lua 第 9 行",),
+        commit="b" * 40,
+        file_path="code/qz_pub/protocols/ProtoCGas.lua",
+        source_candidate_ids=("S3-3",),
+    )
+    reduction = reduce_findings([landed])
+    payload = result_payload(
+        EngineOutcome(
+            status="succeeded",
+            anomalies=reduction.active_anomalies(),
+            report_markdown="# 报告\n",
+            verdict=reduction.as_dict(),
+        ),
+        {"summary": {}},
+        suppressed=frozenset(),
+    )
+
+    assert payload["anomalies"][0]["source_candidate_ids"] == ["S3-3"]
+    assert payload["final_findings"][0]["source_candidate_ids"] == ["S3-3"]
+
+
+def test_the_draft_and_the_verify_original_land_in_their_own_keys():
+    """草稿与对账轮原文各有一个独立键（AI-P1-01），而且**都不在** `report_markdown` 里。"""
+    payload = result_payload(_lineage_outcome(), {"summary": {}}, suppressed=frozenset())
+
+    assert payload["draft_markdown"].startswith("# 变更理解"), "草稿没有存档"
+    assert payload["verify_report_markdown"].startswith("## 对账结果（找反证）")
+    assert "# 变更理解" not in payload["report_markdown"], (
+        "同一段正文又出现在 `report_markdown` 里 —— 同一件事在报告里出现两遍"
+    )
+    assert payload["report_markdown"].startswith("## 复核裁决（平台）")
+
+
+def test_a_single_agent_payload_has_no_verdict_key_value():
+    """单代理路径没有裁决、没有草稿存档：形状不变，值是空/None。"""
+    payload = result_payload(_outcome(), {"summary": {}}, suppressed=frozenset())
+
+    assert payload["draft_markdown"] == ""
+    assert payload["verify_report_markdown"] == ""
+    assert payload["report_markdown"] == "# 风险评估\n\n没问题。\n"
+    assert payload["final_findings"][0]["source_candidate_ids"] == []
+
+
+def test_the_whole_payload_is_json_safe_and_has_no_machine_json():
+    """下发给界面那一份必须能序列化，而且**一个字节的机器 json 都没有**。
+
+    这一条同时守着 SSE：`result` 事件的 data 就是这份字典的 `json.dumps`。
+    """
+    payload = result_payload(_lineage_outcome(), {"summary": {}}, suppressed=frozenset())
+
+    dumped = json.dumps(payload, ensure_ascii=False)
+    assert "ai-verify-ruling" not in dumped
+    assert "<!--" not in dumped, "载荷里出现了 HTML 注释（渲染器会把它显示出来）"

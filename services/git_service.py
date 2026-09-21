@@ -25,6 +25,7 @@ from services.git_excel_parser_helpers import (
     parse_excel_diff,
 )
 from utils.path_security import build_repository_local_path
+from services.log_sampling import OUTCOME_HIT, OUTCOME_MISS, log_sampled, log_stage_event
 from utils.security_utils import sanitize_text, sanitize_url
 from utils.text_decoding import decode_text_bytes
 
@@ -140,18 +141,23 @@ class GitService:
         """安全执行Git命令，处理编码问题"""
         try:
             from utils.safe_print import log_print
-            log_print(f"🔧 执行Git命令: {sanitize_text(' '.join(cmd))}", 'GIT')
-            log_print(f"🔧 工作目录: {cwd or self.local_path}", 'GIT')
-            
+            command_text = sanitize_text(' '.join(cmd))
+            work_dir = cwd or self.local_path
+            # 「执行Git命令」+「工作目录」原是两行、每条命令各刷一次 → 合成一条采样记录
+            # （首条 + 末条 + 计数；`LOG_SAMPLE_MODE=all` 可逐条放开）。
+            log_sampled('git.command', '执行Git命令',
+                        f"🔧 执行Git命令: {command_text}（工作目录: {work_dir}）", log_type='GIT')
+
             # 设置环境变量以处理中文编码
             env = os.environ.copy()
             env['LC_ALL'] = 'C.UTF-8'
             env['LANG'] = 'C.UTF-8'
             env['PYTHONIOENCODING'] = 'utf-8'
-            
+
+            started_at = time.monotonic()
             result = subprocess.run(
                 cmd,
-                cwd=cwd or self.local_path,
+                cwd=work_dir,
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
@@ -159,21 +165,39 @@ class GitService:
                 env=env,
                 timeout=timeout
             )
-            
-            log_print(f"✅ Git命令完成，返回码: {result.returncode}", 'GIT')
-            if result.stdout:
-                log_print(f"📤 stdout: {sanitize_text(result.stdout[:200])}...", 'GIT')
-            if result.stderr:
+            duration_ms = (time.monotonic() - started_at) * 1000
+
+            stdout_text = result.stdout or ''
+            stderr_text = result.stderr or ''
+            log_sampled(
+                'git.command_result', 'Git命令返回',
+                f"✅ Git命令完成，返回码: {result.returncode} | 耗时: {duration_ms:.0f}ms | {command_text}",
+                outcome='ok' if result.returncode == 0 else 'fail', log_type='GIT',
+            )
+            # 耗时/返回码**逐条**落结构化字段 —— 上面那行文字已被采样收敛成计数，
+            # 「按 stage 查耗时/失败」只能靠这里。
+            if result.returncode != 0:
+                log_stage_event('git_command', log_type='GIT', command=command_text,
+                                cwd=str(work_dir), duration_ms=round(duration_ms, 1),
+                                returncode=result.returncode, failed=True,
+                                stdout_preview_truncated=len(stdout_text) > 200,
+                                stderr_preview_truncated=len(stderr_text) > 200)
+            if stdout_text:
+                log_print(f"📤 stdout: {sanitize_text(stdout_text[:200])}...", 'GIT')
+            if stderr_text:
                 # SSH 后量子加密警告等非错误信息不使用 force
                 _stderr_is_warning = (result.returncode == 0 and
-                    ('WARNING' in result.stderr or 'post-quantum' in result.stderr))
-                log_print(f"📤 stderr: {sanitize_text(result.stderr[:200])}...",
+                    ('WARNING' in stderr_text or 'post-quantum' in stderr_text))
+                log_print(f"📤 stderr: {sanitize_text(stderr_text[:200])}...",
                           'GIT', force=not _stderr_is_warning)
-            
+
             return result
         except subprocess.TimeoutExpired:
             from utils.safe_print import log_print
             log_print(f"⏰ Git命令超时: {sanitize_text(' '.join(cmd))}", 'GIT', force=True)
+            log_stage_event('git_command', log_type='GIT', command=sanitize_text(' '.join(cmd)),
+                            cwd=str(cwd or self.local_path), timeout_seconds=timeout,
+                            timed_out=True, failed=True)
             # 返回一个模拟的失败结果，而不是None
             class TimeoutResult:
                 def __init__(self):
@@ -184,6 +208,8 @@ class GitService:
         except (subprocess.SubprocessError, OSError, ValueError) as e:
             from utils.safe_print import log_print
             log_print(f"Git命令执行失败: {e}", 'GIT', force=True)
+            log_stage_event('git_command', log_type='GIT', command=sanitize_text(' '.join(cmd)),
+                            cwd=str(cwd or self.local_path), failed=True, error=str(e))
             return None
         
     def test_network_connectivity(self):
@@ -442,21 +468,21 @@ class GitService:
     def clone_or_update_repository(self):
         """克隆或更新本地仓库"""
         try:
-            # 避免循环导入，直接使用print
-            print(f"🔧 [GIT_SERVICE] 进入 clone_or_update_repository 方法")
-            print(f"🔧 [GIT_SERVICE] 本地路径: {self.local_path}")
-            print(f"🔧 [GIT_SERVICE] 路径是否存在: {os.path.exists(self.local_path)}")
-            
-            # 使用utils中的log_print避免循环导入
-            try:
-                from utils.safe_print import log_print
-                log_print(f"检查本地路径: {self.local_path}", 'GIT')
-                log_print(f"路径是否存在: {os.path.exists(self.local_path)}", 'GIT')
-            except ImportError:
-                print(f"🔧 [GIT_SERVICE] 检查本地路径: {self.local_path}")
-                print(f"🔧 [GIT_SERVICE] 路径是否存在: {os.path.exists(self.local_path)}")
-            
-            if os.path.exists(self.local_path):
+            # 本函数后面几处 `log_print` 靠这个局部导入（模块顶层只在 pandas 导入
+            # 失败那条 except 分支里才绑定它）。
+            from utils.safe_print import log_print
+
+            # 3 行 print + 2 行 log_print 都在说同一件事（本地路径 + 它存不存在）→ 一条采样记录。
+            worktree_exists = os.path.exists(self.local_path)
+            log_sampled(
+                'git.repo_local_path',
+                '检查本地路径',
+                f"检查本地路径: {self.local_path}（存在={worktree_exists}）",
+                outcome=OUTCOME_HIT if worktree_exists else OUTCOME_MISS,
+                log_type='GIT',
+            )
+
+            if worktree_exists:
                 # 如果本地仓库已存在，则更新
                 log_print("本地仓库已存在，开始更新...", 'GIT')
 
@@ -493,6 +519,14 @@ class GitService:
                     else:
                         # pull失败后，执行一次自愈并重试
                         log_print("尝试自愈仓库状态并重试更新...", 'GIT')
+                        # 「重试过没有」原是靠这句话的语气判断的 → 结构化字段让它可查。
+                        log_stage_event(
+                            'git_repo_sync', log_type='GIT', stage='repo_sync',
+                            local_path=self.local_path,
+                            repository_id=getattr(self.repository, 'id', None),
+                            attempt=2, retrying=True, reason='pull_failed',
+                            pull_returncode=getattr(result, 'returncode', None),
+                        )
                         try:
                             heal_ok, heal_msg = self._self_heal_repository_state()
                             if not heal_ok:

@@ -53,6 +53,29 @@ def _uid(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 
+def _running_count() -> int:
+    """现在库里有多少条 `running`。
+
+    ## 为什么这几个断言不能写成固定数字
+
+    `fail_orphaned_analysis_runs()` 是**全局**清扫（`filter_by(status="running")`，
+    没有任何按项目/时间的过滤），而测试库是**会话级共用**的、没有逐用例重置。
+    所以别的文件留下的 `running` 记录会被一起扫进来：
+
+        python -m pytest tests/test_ai_route_wiring_and_claim_migration.py \
+                          tests/test_weekly_ai_auto_trigger_gate.py
+
+    实测 `test_a_run_interrupted_by_a_restart_is_marked_failed` 报 `assert 3 == 1`
+    —— 而**单独跑这个文件是绿的**。这个「全量红、子集绿」是**既有**的（在 `3bacbda`
+    上就是这样：污染方那两条 `running` 记录当时就在，本轮新增的 141 行一条都没建）。
+
+    判据改成**差分**：清扫条数必须等于**调用前库里 running 的条数**。这比 `== 0`
+    这种写法**更强** —— 它照样拦得住「清扫写成 `status != 'succeeded'`」那类顺手
+    扩大范围（那会让条数多出来），而不会被别人的残留行误伤。
+    """
+    return AiAnalysisRun.query.filter_by(status="running").count()
+
+
 def _setup_config(*, auto_weekly: bool | None = True):
     """一个可跑的项目 + 周版本配置；`auto_weekly=None` 表示**不建配置行**。"""
     project = Project(code=_uid("P"), name=_uid("ai-project"))
@@ -199,7 +222,11 @@ def test_a_run_interrupted_by_a_restart_is_marked_failed():
         project, _repo, cfg = _setup_config()
         run = _add_run(project.id, cfg, status="running")
 
-        assert ai_service.fail_orphaned_analysis_runs() == 1
+        running_before = _running_count()
+        assert running_before >= 1, "本次造的 running 记录没进库，这条用例就失去了对象"
+        assert ai_service.fail_orphaned_analysis_runs() == running_before, (
+            "清扫条数 != 调用前库里 running 的条数（见 `_running_count` 的说明）"
+        )
 
         db.session.refresh(run)
         assert run.status == "failed", "被重启中断的记录还是 running，界面会一直误判"
@@ -217,7 +244,10 @@ def test_resolving_orphans_is_idempotent():
         project, _repo, cfg = _setup_config()
         _add_run(project.id, cfg, status="running")
 
-        assert ai_service.fail_orphaned_analysis_runs() == 1
+        running_before = _running_count()
+        assert ai_service.fail_orphaned_analysis_runs() == running_before
+        # ★ 这一条才是本用例的不变量，而且它对污染**免疫**：第一遍扫完之后
+        # 库里再没有 running，第二遍无论有没有别人的残留都必须报 0。
         assert ai_service.fail_orphaned_analysis_runs() == 0
 
 
@@ -236,7 +266,12 @@ def test_only_running_records_are_touched():
         failed_run.error_message = "模型超时"
         db.session.commit()
 
-        assert ai_service.fail_orphaned_analysis_runs() == 0
+        running_before = _running_count()
+        assert ai_service.fail_orphaned_analysis_runs() == running_before, (
+            "清扫条数 != 调用前 running 的条数 —— 清扫把 succeeded/failed 也算进去了"
+            "（本用例的正文拦的就是这个）。这里不能写 `== 0`：那会把「库里有别的用例"
+            "留下的 running」和「清扫扩大了范围」混成同一句话。"
+        )
 
         db.session.refresh(ok_run)
         db.session.refresh(failed_run)

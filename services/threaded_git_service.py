@@ -6,6 +6,14 @@ import git
 import re
 import os
 from services.git_service import GitService
+from services.log_sampling import (
+    OUTCOME_FAIL,
+    OUTCOME_HIT,
+    OUTCOME_MISS,
+    OUTCOME_TIMEOUT,
+    LogSampler,
+    log_sampled,
+)
 from utils.path_security import build_repository_local_path
 
 class ThreadedGitService(GitService):
@@ -28,6 +36,11 @@ class ThreadedGitService(GitService):
         
     def _collect_previous_commits_threaded(self, repo, commits):
         """多线程版本的前一次提交收集，显著提升性能"""
+        # 这个采样器**由父线程持有、交给 worker 用**：worker 里调 `log_sampled` 拿到的
+        # 是那个线程自己的隐式采样器，6 个 worker 就是 6 份「首条 + 汇总」，计数还被
+        # 切成 6 份 ——「这次扫了多少个文件」谁也答不出来。父线程建一个、末尾自己
+        # flush，汇总才是一条完整的账（`LogSampler` 因此带锁）。
+        sampler = LogSampler(name='threaded_git_collect')
         try:
             print(f"🚀 [THREADED_GIT] 开始多线程收集前一次提交记录 (工作线程: {self.max_workers})...")
             start_time = time.time()
@@ -92,13 +105,21 @@ class ThreadedGitService(GitService):
                         )
                         
                         if result.returncode != 0:
-                            print(f"⚠️ [THREADED_GIT] Git命令执行失败 {file_path}: {result.stderr}")
+                            sampler.record(
+                                'threaded_git.command_failed', 'Git命令执行失败',
+                                f"⚠️ [THREADED_GIT] Git命令执行失败 {file_path}: {result.stderr}",
+                                outcome=OUTCOME_FAIL, log_type='GIT',
+                            )
                             return local_additional_commits
-                            
+
                         log_output = result.stdout
-                        
+
                     except Exception as git_error:
-                        print(f"⚠️ [THREADED_GIT] Git log命令失败 {file_path}: {git_error}")
+                        sampler.record(
+                            'threaded_git.command_failed', 'Git命令执行失败',
+                            f"⚠️ [THREADED_GIT] Git log命令失败 {file_path}: {git_error}",
+                            outcome=OUTCOME_FAIL, log_type='GIT',
+                        )
                         return local_additional_commits
                         
                     if log_output:
@@ -146,10 +167,18 @@ class ThreadedGitService(GitService):
                                         'message': prev_message.strip()
                                     })
                                     
-                                    print(f"📝 [THREADED_GIT] 线程找到前一次提交: {file_path} -> {prev_commit_id[:8]}")
-                
+                                    sampler.record(
+                                        'threaded_git.prev_commit', '线程找到前一次提交',
+                                        f"📝 [THREADED_GIT] 线程找到前一次提交: {file_path} -> {prev_commit_id[:8]}",
+                                        outcome=OUTCOME_HIT, log_type='GIT',
+                                    )
+
                 except Exception as e:
-                    print(f"⚠️ [THREADED_GIT] 处理文件 {file_path} 时出错: {e}")
+                    sampler.record(
+                        'threaded_git.file_error', '处理文件出错',
+                        f"⚠️ [THREADED_GIT] 处理文件 {file_path} 时出错: {e}",
+                        outcome=OUTCOME_FAIL, log_type='GIT',
+                    )
                 
                 return local_additional_commits
             
@@ -175,22 +204,49 @@ class ThreadedGitService(GitService):
                             result = future.result(timeout=10)  # 单个任务结果获取超时
                             with thread_lock:
                                 additional_commits.extend(result)
-                            print(f"✅ [THREADED_GIT] 完成处理文件 {file_path} ({completed_count}/{total_tasks})")
+                            # 这一个 group 同时回答两个问题：处理了几个文件（总数）
+                            # 与其中几个真的找到了更早的提交（命中）。逐文件打的那两行
+                            # （完成处理 / 线程找到前一次提交）就是它汇总掉的。
+                            sampler.record(
+                                'threaded_git.file_done', '完成处理文件',
+                                f"✅ [THREADED_GIT] 完成处理文件 {file_path} ({completed_count}/{total_tasks})",
+                                outcome=OUTCOME_HIT if result else OUTCOME_MISS, log_type='GIT',
+                            )
                         except concurrent.futures.TimeoutError:
-                            print(f"⚠️ [THREADED_GIT] 处理文件 {file_path} 超时 ({completed_count}/{total_tasks})")
+                            sampler.record(
+                                'threaded_git.file_done', '完成处理文件',
+                                f"⚠️ [THREADED_GIT] 处理文件 {file_path} 超时 ({completed_count}/{total_tasks})",
+                                outcome=OUTCOME_TIMEOUT, log_type='GIT',
+                            )
                         except Exception as e:
-                            print(f"⚠️ [THREADED_GIT] 处理文件 {file_path} 失败: {e} ({completed_count}/{total_tasks})")
-                            
+                            sampler.record(
+                                'threaded_git.file_done', '完成处理文件',
+                                f"⚠️ [THREADED_GIT] 处理文件 {file_path} 失败: {e} ({completed_count}/{total_tasks})",
+                                outcome=OUTCOME_FAIL, log_type='GIT',
+                            )
+
                 except concurrent.futures.TimeoutError:
-                    print(f"⚠️ [THREADED_GIT] 整体处理超时，已完成 {completed_count}/{total_tasks} 个任务")
+                    sampler.record(
+                        'threaded_git.overall_timeout', '整体处理超时',
+                        f"⚠️ [THREADED_GIT] 整体处理超时，已完成 {completed_count}/{total_tasks} 个任务",
+                        outcome=OUTCOME_TIMEOUT, log_type='GIT',
+                    )
                     # 取消所有未完成的任务
                     for future in future_to_file:
                         if not future.done():
                             future.cancel()
                             file_path = future_to_file[future]
-                            print(f"🚫 [THREADED_GIT] 取消未完成任务: {file_path}")
+                            sampler.record(
+                                'threaded_git.cancelled', '取消未完成任务',
+                                f"🚫 [THREADED_GIT] 取消未完成任务: {file_path}",
+                                outcome=OUTCOME_MISS, log_type='GIT',
+                            )
                 except Exception as e:
-                    print(f"❌ [THREADED_GIT] 任务收集过程中出现异常: {e}")
+                    sampler.record(
+                        'threaded_git.collect_error', '任务收集过程异常',
+                        f"❌ [THREADED_GIT] 任务收集过程中出现异常: {e}",
+                        outcome=OUTCOME_FAIL, log_type='GIT',
+                    )
                     # 取消所有未完成的任务
                     for future in future_to_file:
                         if not future.done():
@@ -198,19 +254,25 @@ class ThreadedGitService(GitService):
             
             end_time = time.time()
             processing_time = end_time - start_time
-            
+
             print(f"✅ [THREADED_GIT] 多线程收集完成!")
             print(f"📊 [THREADED_GIT] 处理文件数: {len(files_commits)}")
             print(f"📊 [THREADED_GIT] 找到前一次提交: {len(additional_commits)}")
             print(f"⏱️ [THREADED_GIT] 处理耗时: {processing_time:.2f}秒")
-            print(f"🚀 [THREADED_GIT] 平均每文件: {(processing_time/len(files_commits)*1000):.1f}ms")
-            
+            # 没有文件时不打这一行：`processing_time/0` 会抛 ZeroDivisionError，
+            # 被下面那个 except 接住 → 日志里出现一句「多线程收集前一次提交失败」外加
+            # 「降级到串行处理」，而其实什么都没发生。空输入的正确答案就是什么都不做。
+            if files_commits:
+                print(f"🚀 [THREADED_GIT] 平均每文件: {(processing_time/len(files_commits)*1000):.1f}ms")
+
+            sampler.flush()
             return commits + additional_commits
-            
+
         except Exception as e:
             print(f"❌ [THREADED_GIT] 多线程收集前一次提交失败: {e}")
             # 降级到原始方法
             print("🔄 [THREADED_GIT] 降级到串行处理...")
+            sampler.flush()
             return super()._collect_previous_commits(repo, commits)
     
     def _get_commits_base_threaded(self, since_date=None, limit=100):
@@ -491,15 +553,30 @@ class ThreadedGitService(GitService):
 
                     commits_data.append(commit_data)
 
-                print(f"✅ [THREADED_GIT] 获取到文件 {file_path} 的 {len(commits_data)} 个提交记录")
+                # 本函数**按文件调用**（周版本同步的 VCS 基准回查），逐文件打就是刷屏。
+                # 这一条同时是两个问题的答案：查了几次（总数）与几次真查到了（命中）。
+                log_sampled(
+                    'threaded_git.file_history', '获取文件提交历史',
+                    f"✅ [THREADED_GIT] 获取到文件 {file_path} 的 {len(commits_data)} 个提交记录",
+                    outcome=OUTCOME_HIT if commits_data else OUTCOME_MISS,
+                    log_type='GIT',
+                )
                 return commits_data
 
             except git.exc.GitCommandError as e:
-                print(f"❌ [THREADED_GIT] Git命令执行失败: {e}")
+                log_sampled(
+                    'threaded_git.file_history_failed', '获取文件提交历史失败',
+                    f"❌ [THREADED_GIT] Git命令执行失败: {e}",
+                    outcome=OUTCOME_FAIL, log_type='GIT',
+                )
                 return []
 
         except Exception as e:
-            print(f"❌ [THREADED_GIT] 获取文件提交历史失败: {e}")
+            log_sampled(
+                'threaded_git.file_history_failed', '获取文件提交历史失败',
+                f"❌ [THREADED_GIT] 获取文件提交历史失败: {e}",
+                outcome=OUTCOME_FAIL, log_type='GIT',
+            )
             import traceback
             traceback.print_exc()
             return []

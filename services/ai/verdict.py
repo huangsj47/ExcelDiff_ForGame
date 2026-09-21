@@ -45,10 +45,19 @@
 切片）—— 与读模型其它结构化输出是同一套口径。读回来的裁决还会被平台**重新渲染**成报告里
 的「## 复核裁决（平台）」一节：那一节是与正文并列的最终口径。
 
-reducer 的产出另外写回一个**机器可读块**（报告末尾的一行 HTML 注释，见 `ruling_block`），
-`result_payload` 从那里把它取回来放进结论载荷 —— 于是 **markdown、落库的值、读侧、导出
-全部从 `final_findings` 渲染**，模型写的正文不再是独立真相源（它仍然留在报告里，但被那一节
-明确降级为「原文附在后面」）。
+reducer 的产出由平台**结构化地带出去**（`EngineOutcome.verdict`，就是 `Reduction.as_dict()`
+那一份）：`result_payload` 从那个字段把它取回来放进结论载荷 —— 于是 **markdown、落库的值、
+读侧、导出全部从 `final_findings` 渲染**，模型写的正文不再是独立真相源。
+
+## 裁决**不再**写进报告正文（AI-P0-05，2026-09-21）
+
+原先 reducer 的产出还会被序列化成一行 HTML 注释追加在报告末尾（`ruling_block`），假设
+「markdown 渲染看不见它」。那个假设是错的：本平台的安全渲染器是**先整体转义、再套白名单**
+（`static/js/ai-report-markdown.js`），注释必然变成一段可见的乱码 —— 实测 run 20 的
+`response_text` 里 35.3%（12,617 / 35,763 字符）就是那段机器 json，而用户在页面上真的看到了它。
+
+现在机器裁决只走结构化的那一条路。报告正文里只留**给人看**的内容：本模块渲染的
+「复核裁决（平台）」一节（`render_ruling`），以及「未归类 / 条数上限 / 信息缺口」那几节。
 
 ## 四条落到结论上的口径（2026-09-21，全部来自 run 15 的实测）
 
@@ -169,7 +178,8 @@ NEW_FINDING_PREFIX = "V1"
 # 并列：**这些条目的去向是「被复核裁掉或被平台校验拒收」**，与「模型没报」不是一回事。
 KIND_VERIFY = "verify"
 
-# 报告里那一节的标题与机器可读块的标记。
+# 报告里那一节的标题，以及**历史数据**里那行机器可读块的标记（见 `strip_ruling_block`：
+# 新运行不再写它，标记只用来把老行的残留认出来）。
 RULING_TITLE = "## 复核裁决（平台）"
 RULING_BLOCK_MARKER = "ai-verify-ruling"
 
@@ -297,6 +307,13 @@ class FindingRow:
     # 这条的置信度是不是被平台**按证据缺口**压下来的（口径 ③④）。报告据此单列一节说明
     # 理由：降置信度而不说为什么，与缺陷本身是同一类问题。
     evidence_capped: bool = False
+    # 这条结论**来源于哪几条分片候选**（`protocol.Anomaly.source_candidate_ids` 原样带来）。
+    #
+    # 它在这里的作用是让**候选对账**（`family_ledger.reconcile_candidates`）能按编号问
+    # 「这条候选的去向是哪条结论」——在这之前那一层是靠标题/文件/证据文本反推的，而反推
+    # 产生的假缺口正是 AI-P0-06 要修的那一类。撤销与降级都保持这个字段（`origin` 的那一份
+    # 一路 `replace` 过来），所以「候选 → 结论」的对应关系不会因为裁决而断掉。
+    source_candidate_ids: tuple[str, ...] = ()
 
     @property
     def active(self) -> bool:
@@ -318,7 +335,7 @@ class FindingRow:
         )
 
     def as_dict(self) -> dict:
-        """机器可读形态（进报告那一行注释、也进结论载荷的 `final_findings`）。"""
+        """机器可读形态（进结论载荷的 `final_findings` / `retracted_findings`）。"""
         return {
             "finding_id": self.finding_id,
             "source": self.source,
@@ -340,6 +357,8 @@ class FindingRow:
             "confidence": self.anomaly.confidence,
             "original_severity": self.origin.severity,
             "original_confidence": self.origin.confidence,
+            # 候选血缘：读侧据此回看「这条结论是哪个分片报的」。
+            "source_candidate_ids": list(self.source_candidate_ids),
         }
 
 
@@ -395,6 +414,29 @@ class Reduction:
     def active_anomalies(self) -> tuple[Anomaly, ...]:
         """落库与界面要用的那一份（`outcome.anomalies` 就取它）。"""
         return tuple(row.anomaly for row in self.active)
+
+    @property
+    def claimed_candidate_ids(self) -> frozenset[str]:
+        """这份结果里**出现过的候选编号**（`FindingRow.source_candidate_ids` 的并集）。
+
+        给候选对账用（`family_ledger.reconcile_candidates`）：汇总把哪些编号交回来了。
+        **含被撤销的那几行** —— 撤销本身也是一个去向（「已撤销」），把它排除会让那条候选
+        又变成「找不到去向」，而那正是 AI-P0-06 要修的那一类假缺口。
+        """
+        return frozenset(
+            candidate_id for row in self.rows for candidate_id in row.source_candidate_ids
+        )
+
+    @property
+    def landed_candidate_ids(self) -> frozenset[str]:
+        """**进了最终结论清单**（活动行）的那些候选编号。
+
+        与 `claimed_candidate_ids` 的差别是「汇总写过它」还是「它真的还在清单里」：
+        对账时前者解释「这条候选有去向」，后者才叫「已采纳」。
+        """
+        return frozenset(
+            candidate_id for row in self.active for candidate_id in row.source_candidate_ids
+        )
 
     def by_fingerprint(self) -> dict[str, FindingRow]:
         return {row.fingerprint: row for row in self.rows}
@@ -1060,8 +1102,15 @@ def _row_of(finding: Finding, verdicts: Sequence[VerifyVerdict]) -> FindingRow:
         (item for item in verdicts if item.finding_id == finding.finding_id), None
     )
     origin = finding.anomaly
+    # 候选血缘**在两条路上都带上**：`_apply_verdict` 各分支都是用 `origin` 建行的
+    # （保留在 `anomaly` 里），而这里要保证「没收到裁决」那条路也一样不缺。
     if verdict is None:
-        return FindingRow(finding_id=finding.finding_id, anomaly=origin, origin=origin)
+        return FindingRow(
+            finding_id=finding.finding_id,
+            anomaly=origin,
+            origin=origin,
+            source_candidate_ids=origin.source_candidate_ids,
+        )
     return _apply_verdict(finding.finding_id, origin, verdict)
 
 
@@ -1073,8 +1122,15 @@ def _apply_verdict(finding_id: str, origin: Anomaly, verdict: VerifyVerdict) -> 
 
     出口统一过一道 `_with_ref_shapes`（口径 ③）：`evidence_refs` 是模型写的自由文本，
     形状校验与「有没有收到裁决」无关 —— 每条路径都得出这一道。
+
+    **候选血缘也在这里补一道**（不逐分支写）：下面每个分支都是拿 `origin` 建行的，
+    血缘在 `origin` 里；逐分支各写一次迟早会漏掉一个分支，而漏掉的后果是「这条候选的
+    去向查不到」——正是 AI-P0-06 要修的那一类假缺口。
     """
-    return _with_ref_shapes(_apply_verdict_inner(finding_id, origin, verdict))
+    row = _with_ref_shapes(_apply_verdict_inner(finding_id, origin, verdict))
+    if row.source_candidate_ids == origin.source_candidate_ids:
+        return row
+    return replace(row, source_candidate_ids=origin.source_candidate_ids)
 
 
 def _apply_verdict_inner(
@@ -1290,8 +1346,11 @@ _NOT_APPLIED_SECTION = (
     + "\n\n"
     + "本次开着「对账轮（找反证）」，但它**没有给出可逐条应用的裁决**（按任务书要求，"
     "裁决要在 `report_markdown` 里单独给一个 json 代码块）。因此**本次复核对下面的结论"
-    "一条都没有生效** —— 清单里这些条按原样采信，读的时候按未复核看；它的原文附在"
-    "下面那一节里。\n"
+    "一条都没有生效** —— 清单里这些条按原样采信，读的时候按未复核看。"
+    # 2026-09-21：原文**不再进报告正文**（AI-P1-01：报告只有一份规范结论），所以那句话
+    # 不能再写「附在下面那一节里」—— 它现在是一份独立存档（结论载荷的
+    # `verify_report_markdown`），报告里没有它。
+    "它的原文留档在本次运行的结论载荷里（`verify_report_markdown`），不再附进报告。\n"
 )
 
 
@@ -1311,8 +1370,9 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
         "",
         "本节是平台按对账轮（找反证）的结构化裁决渲染的**最终口径**：裁决已经应用到下面的"
         "结论清单上（保留 / 降级 / 撤销 / 转人工核验），落库的异常、下一轮的基线、导出报告"
-        "读的都是这一份。**报告正文里凡与本节不一致的地方（例如正文仍写着「（critical，"
-        "仍成立）」），以本节为准** —— 正文是裁决之前的原文，平台不改模型写的那份稿子。",
+        "读的都是这一份。**报告里没有第二份结论清单** —— 模型写的那份汇总草稿不再进报告"
+        "正文（它是一份独立存档，见这次运行的结论载荷 `draft_markdown`），所以读的人"
+        "不必再去辨认哪一句已经被本节改掉。",
         "",
     ]
     reviewed = len(reduction.rows) - len(reduction.unreviewed)
@@ -1536,61 +1596,37 @@ def _ref_text(row: FindingRow) -> tuple[str, ...]:
     )
 
 
-# `-->` 在 HTML 注释里会**提前闭合**，而这个块整个是一条注释（见 `ruling_block`）。
-# 替换成 JSON 对 `>` 的转义：注释不再被打断，而 `json.loads` 解回来仍是原来的 `-->`。
+# 历史数据里那行机器块的形状：`<!-- ai-verify-ruling: {...} -->`。它里面若含 `-->`，
+# 写进去时被转义成 `-->`（见 git 历史里的 `ruling_block`），所以这个正则里的
+# `-->` 一定是那条注释真正的收尾。
 #
-# **必须是模块级常量，不许内联回下面那个 f-string 的表达式里。** 表达式部分出现反斜杠
-# 是 PEP 701（3.12+）才允许的写法，CI 的 3.11 会当场 `SyntaxError`
-# （`tests/test_python311_syntax_compat.py::test_no_fstring_expression_contains_a_backslash`
-# 钉着这条，本文件曾因此红过一次）。
-_JSON_GT_ESCAPE = "--\\u003e"
-
-
-def ruling_block(reduction: Reduction) -> str:
-    """机器可读块：报告末尾的一行 HTML 注释（markdown 渲染看不见，平台读得回）。
-
-    为什么放在报告里而不是新加一个 `EngineOutcome` 字段：`EngineOutcome` 的字段是引擎
-    那边的契约（本模块不拥有），而这一份**本来就是报告的一部分** —— 报告到哪儿它到哪儿，
-    导出、历史回放、SSE 全都自动带上。`result_payload` 用 `read_ruling` 取回它。
-
-    `-->` 会被转义：`reason` 是模型写的，里面出现一个 `-->` 就会把这个注释**提前关掉**，
-    于是剩下的 json 变成正文里的一段乱码，而 `read_ruling` 读不回来。
-    """
-    if not reduction.changed:
-        return ""
-    payload = json.dumps(reduction.as_dict(), ensure_ascii=False, sort_keys=True)
-    return f"<!-- {RULING_BLOCK_MARKER}: {payload.replace('-->', _JSON_GT_ESCAPE)} -->"
-
-
+# **只服务于历史数据的剥离**（`strip_ruling_block`）：新的运行不再往正文里写机器块，
+# 但清理脚本与导出路径还要能把**老行**里那一行认出来并摘掉。
 _RULING_BLOCK_RE = re.compile(
     r"<!--\s*" + re.escape(RULING_BLOCK_MARKER) + r"\s*:\s*(\{.*?\})\s*-->", re.DOTALL
 )
 
 
 def strip_ruling_block(markdown: str) -> str:
-    """去掉报告末尾那一行机器可读块（`ruling_block` 写进去的）。
+    """去掉**历史数据**里那行机器可读块（`<!-- ai-verify-ruling: {...} -->`）。
 
-    给**导出**用：那一行是给平台读的 HTML 注释（网页里渲染看不见），但导出的是原始
-    markdown，读的人会看到一行 `<!-- ... -->`。导出那一侧只要在拼文档前调一次这个函数，
-    报告里就只剩给人看的那几节。
+    ## 它现在只服务两件事，都不是「新写入的兼容层」
+
+    * **一次性数据清理**（`scripts/clean_ruling_block_from_runs.py`）：库里已有的那些行
+      还带着它，清理脚本按同一个正则摘掉；
+    * **导出路径**（`routes/ai_analysis_routes.py`）：用户下载的是原始 markdown，
+      在旧行被清理之前（或者清理脚本没跑过的库上），那一行会原样出现在文件里。
+      导出前摘一次，读的人只看到给人看的那几节。
+
+    ## 为什么这条设计被废掉了（AI-P0-05）
+
+    原先裁决的机器形态就写在报告正文末尾，理由是「HTML 注释在 markdown 渲染里看不见」。
+    但本平台的安全渲染器是**先整体转义、再套白名单**（`static/js/ai-report-markdown.js`），
+    注释必然变成一段可见的乱码 —— 实测 run 20 的正文里 35.3% 是那段 json。靠注释藏内部
+    数据本身就不可靠，所以裁决改走结构化字段（`EngineOutcome.verdict`），正文里只剩给人
+    看的内容。这个函数因此不再有「新写入」的一侧。
     """
     return _RULING_BLOCK_RE.sub("", markdown or "").strip()
-
-
-def read_ruling(markdown: str) -> dict | None:
-    """从报告里取回机器可读的裁决（取不到返回 `None`）。
-
-    取不到只可能是两件事：这次**根本没有复核**（单代理路径、没开对账轮），或者那次复核
-    对结论**没有产生任何影响**。两种情况下读取侧都按「没有裁决」处理 —— 也就是今天的行为。
-    """
-    matched = _RULING_BLOCK_RE.search(markdown or "")
-    if matched is None:
-        return None
-    try:
-        value = json.loads(matched.group(1))
-    except ValueError:
-        return None
-    return value if isinstance(value, dict) else None
 
 
 def retracted_fingerprints(ruling: dict | None) -> frozenset:

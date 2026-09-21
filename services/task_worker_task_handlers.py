@@ -28,6 +28,264 @@ from __future__ import annotations
 import os
 
 import services.task_worker_service as worker
+from services.task_worker_weekly_handlers import resolve_trigger_source
+
+
+def trigger_source_for_task(task_id, payload=None):
+    """这次分析该记成谁发起的：**数据库行是权威**，载荷只作兜底。
+
+    为什么必须读库：去重命中一条**更早创建的**任务时，队列复用的是那一行 —— 载荷里带的
+    `manual` 只在「这次是新排的」时才存在。实测那一幕（意图 477 复用 scheduled 任务 468）
+    就是这么被记成 `scheduled` 的：用户点击到模型开始隔了 13 分 53 秒，账单上却写着
+    「定时」。行上的来源由 `create_weekly_ai_analysis_task` 的附着逻辑改写
+    （`_attach_to_existing_analysis_task`），所以读库读到的就是权威值。
+
+    读不到行（`task_id` 为 None 的内联调用、库读失败）时才用载荷。载荷也没有就是
+    `scheduled`（调度器排的）。
+    """
+    payload_source = payload.get("trigger_source") if isinstance(payload, dict) else None
+    row_source = None
+    if task_id is not None:
+        try:
+            row = worker._db.session.get(worker._BackgroundTask, task_id)
+        except (worker.SQLAlchemyError, AttributeError, TypeError, RuntimeError):
+            # 读不到行不是失败：这次分析照跑，只是来源退回载荷。
+            # （AttributeError/TypeError 是给 `_db` 还没注入 / 测试桩的形态留的，
+            # 它们跟「读不到行」是同一件事，不该把分析打断。）
+            row = None
+        row_source = getattr(row, "trigger_source", None)
+    return resolve_trigger_source(row_source, payload_source)
+
+
+def requested_mode_for_task(task_id, payload=None):
+    """这次分析用户要的是「增量」还是「全量」：**数据库行是权威**，载荷只作兜底。
+
+    与 `trigger_source_for_task` 同一口径、同一理由：去重命中一条更早创建的任务时，改的
+    是那一行（`_attach_to_existing_analysis_task`），载荷里根本没有这次请求的模式 ——
+    只看载荷的话，「用户点了全量」在队列那一跳就丢了。
+
+    归一化借用 `models.ai_analysis` 的那一对常量（它们是唯一来源，本文件不另立一套）；
+    认不出来的值当没有 —— 不把脏值往下传。
+    """
+    payload_mode = payload.get("requested_mode") if isinstance(payload, dict) else None
+    row_mode = None
+    if task_id is not None:
+        try:
+            row = worker._db.session.get(worker._BackgroundTask, task_id)
+        except (worker.SQLAlchemyError, AttributeError, TypeError, RuntimeError):
+            row = None
+        row_mode = getattr(row, "requested_mode", None)
+    try:
+        from models.ai_analysis import ANALYSIS_MODES
+    except ImportError:
+        return None
+    for candidate in (row_mode, payload_mode):
+        text = str(candidate or "").strip().lower()
+        if text in ANALYSIS_MODES:
+            return text
+    return None
+
+
+def accepts_keyword(func, name):
+    """这个可调用对象接受这个关键字参数吗。
+
+    用在**执行侧形参还没落地**的那一跳（`requested_mode`）：不想把「传不了」写成永久
+    的硬编码，也不想在对方加形参的那一天再改一次这一跳。认不出来（内建函数 /
+    某些包装对象）就当不支持 —— 不支持只是少一个参数，支持却传错会直接把任务打死。
+    """
+    import inspect
+
+    try:
+        return name in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+# ---------------------------------------------------------------------------
+#  job 写回（第二波 P0-01 的两个钩子，都是本文件 → `services.ai.job_service`）
+#
+#  `AiAnalysisJob` 的**唯一写入口**是 `services.ai.job_service`（见它的模块 docstring），
+#  这里只负责在「真的开始跑」与「run 落到终态」两个时刻各调一次。按模块名现取而不是
+#  `from ... import`：与 `worker.X` 同一个理由（那是别的分片正在改的文件，属性取用
+#  才看得见补丁），并且避免把 ai 那一层拖进本模块的 import 链。
+# ---------------------------------------------------------------------------
+
+
+def job_id_for_task(task_id):
+    """这条分析任务服务于哪条 job（没有 job / 认不出来 → None）。
+
+    **必须验一下那个 id 真的是一条 job。** 任务行上的 `job_id` 的冻结语义是
+    「服务于哪个 `ai_analysis_job`」，但在 job 体系落地之前的路径上，写进去的是
+    **意图行的 id**（见 `task_worker_queue_service._analysis_job_ref_of_intent`）。
+    意图 id 与 job id 数值上完全可能撞车 —— 直接拿它去 `mark_running`，会把一条
+    跟这次分析毫无关系的 job 标成「分析中」。所以这里用 `get_job` 认一次：
+    认不出来就当没有 job（退回过渡期的行为：不写 job）。
+    """
+    if task_id is None:
+        return None
+    try:
+        row = worker._db.session.get(worker._BackgroundTask, task_id)
+    except (worker.SQLAlchemyError, AttributeError, TypeError, RuntimeError):
+        return None
+    ref = getattr(row, "job_id", None)
+    if not ref:
+        return None
+    try:
+        from services.ai import job_service
+    except ImportError:
+        return None
+    try:
+        return ref if job_service.get_job(ref) is not None else None
+    except (worker.SQLAlchemyError, RuntimeError, AttributeError, TypeError, ValueError):
+        return None
+
+
+def mark_job_running_for_task(task_id, *, run_id=None):
+    """把这条任务服务的 job 推到 `running`（找不到 job 就什么也不做）。
+
+    调用点有两个，缺一不可：
+
+    * **任务进 processing 那一刻**（`_handle_weekly_ai_analysis_task` 开头）——
+      这是「真的开始跑」的时刻，`started_at` 记在这里才对（等到函数返回再记，
+      记下的是**结束**时刻，job 的耗时从此永远是 0）;
+    * **拿到 run 号之后**再调一次，把 `run_id` 补上（`mark_running` 的 docstring 里
+      「记运行号」那一件事）。
+
+    `job_service` 不可用（import 失败 / 库异常）时**不打断分析** —— 分析本身比 job 的
+    状态重要，而 job 那边有它自己的恢复扫描兜底。
+    """
+    job_id = job_id_for_task(task_id)
+    if job_id is None:
+        return None
+    try:
+        from services.ai import job_service
+
+        job = job_service.mark_running(job_id, run_id=run_id, task_id=task_id)
+        worker._db.session.commit()
+        return job
+    except (ImportError, worker.SQLAlchemyError, RuntimeError, AttributeError,
+            TypeError, ValueError) as exc:
+        worker._db.session.rollback()
+        worker.log_print(
+            f"⚠️ 标记 job 开始失败（不影响这次分析）: job={job_id}, task={task_id}, {exc}",
+            "AI",
+            force=True,
+        )
+        return None
+
+
+def settle_job_from_result(result, task_id=None):
+    """这次分析跑完（或**没跑成**）之后收口它那条 job。
+
+    判据是 `result["run_id"]`：`run_weekly_analysis_background` 只有在**真的建出了 run**
+    时才带它回来。带回来就交给 `job_service.settle_from_run` 按 run 的终态映射
+    （`succeeded` / `degraded` / `failed`），并清掉 `active_key`。
+
+    ## 没有 run 的结局（第二波收尾补上的那一跳）
+
+    分析开关关着 / 预算不足 / 同步闸门拦下 / 没有变化直接复用 —— 这些结局在 worker 里
+    直接结束、**不带 run 回来**，返回的形状是 `{"status": "skipped", "reason": ...}`。
+    原先这里什么也不做，于是那条 job 永远停在非终态、`active_key` 也从没被清空 ——
+    而 `uq_ai_job_active_key` 是唯一索引，后果是**同一个 target + focus 再也建不出任何
+    job**（用户点按钮只会附着到那条永远不动的 job 上：点了没反应）。
+
+    现在这一跳按 `result["reason"]` 交给 `job_service.settle_without_run`，终态按
+    **语义**选（`no_change` → `reused`、开关/预算/闸门 → `cancelled`、真错误 → `failed`）。
+
+    `task_id` 是**必须**的入参：没有 run 的结局要靠它找到那条 job（job 行挂在任务行上）。
+    老调用方不传时行为与原来一致（什么也不做）—— 认不出 job 时不许乱改别人的 job 行，
+    见 `job_id_for_task` 的说明（任务行上那一列在过渡路径上可能是**意图 id**）。
+    """
+    run_id = (result or {}).get("run_id") if isinstance(result, dict) else None
+    reason = (result or {}).get("reason") if isinstance(result, dict) else None
+    message = (result or {}).get("message") if isinstance(result, dict) else None
+    try:
+        from services.ai import job_service
+    except ImportError:
+        return None
+    try:
+        if not run_id:
+            # **没有 run 的结局**：按 `reason` 结清（终态由 job_service 选）。
+            if task_id is None:
+                return None
+            job_id = job_id_for_task(task_id)
+            if job_id is None:
+                return None
+            job = job_service.settle_without_run(job_id, reason=reason, message=message)
+            worker._db.session.commit()
+            return job
+
+        from models.ai_analysis import AiAnalysisRun
+
+        run_row = worker._db.session.get(AiAnalysisRun, run_id)
+        if run_row is None:
+            # run 号有、那条行读不到（被人清了 / 库脏）：**按失败收口**，
+            # 不留一条「看起来还在跑」的 job。判据是「有引用但读不到」= 不确定，
+            # 而不确定在这里的正确处置是收口（否则 active_key 永远占着索引位）。
+            if task_id is None:
+                return None
+            job_id = job_id_for_task(task_id)
+            if job_id is None:
+                return None
+            job = job_service.settle_without_run(
+                job_id, reason=job_service.REASON_TASK_ENDED_WITHOUT_RUN
+            )
+            worker._db.session.commit()
+            return job
+        job = job_service.settle_from_run(run_row)
+        worker._db.session.commit()
+        return job
+    except (ImportError, worker.SQLAlchemyError, RuntimeError, AttributeError,
+            TypeError, ValueError) as exc:
+        worker._db.session.rollback()
+        worker.log_print(
+            f"⚠️ 收口 job 失败（不影响这次分析的结果落库）: run={run_id}, "
+            f"task={task_id}, reason={reason}, {exc}",
+            "AI",
+            force=True,
+        )
+        return None
+
+
+def settle_job_failed_for_task(task_id, exc):
+    """这次分析**抛异常**结束时收口它的 job（找不到 job 就什么也不做）。
+
+    第三跳，专治一种漏网：异常发生在 `run` **已经建出来之后**（收尾那一段 ——
+    载荷构造 / 推进水位线 / 落库），于是上面那两跳一个都没走到。那条 job 会带着
+    `active_key` 停在 `running`，而 `active_key` 是**唯一索引**：同一个 target 从此
+    再也建不出任何 job（用户点按钮只会附着到它上面，状态永远不变）。
+
+    启动时的恢复扫描能兜住它，但扫描要等**下一次重启** —— 一个功能性阻塞不该等重启。
+
+    终态记 `failed`：run 可能已经落成 `succeeded`，但这次交付**没有完成**，而任务行
+    在同一个分支里也被标成 `failed`（本文件既有的那一支），两者的口径一致。
+    """
+    job_id = job_id_for_task(task_id)
+    if job_id is None:
+        return None
+    try:
+        from services.ai import job_service
+
+        job = job_service.settle_without_run(
+            job_id,
+            reason=job_service.REASON_INTERRUPTED,
+            message=(
+                f"这次分析在收尾阶段中断（{type(exc).__name__}: {exc}），"
+                "按失败收口 —— 可以重新发起。"
+            ),
+        )
+        worker._db.session.commit()
+        return job
+    except (ImportError, worker.SQLAlchemyError, RuntimeError, AttributeError,
+            TypeError, ValueError) as inner:
+        worker._db.session.rollback()
+        worker.log_print(
+            f"⚠️ 异常收尾时结算 job 失败（不影响这次失败本身被记下）: "
+            f"job={job_id}, task={task_id}, {inner}",
+            "AI",
+            force=True,
+        )
+        return None
 
 
 def _handle_excel_diff_task(task, priority):
@@ -177,6 +435,11 @@ def _handle_weekly_ai_analysis_task(task):
                 worker.update_task_status_with_retry(task_id, "processing")
             except worker.NON_CRITICAL_TASK_STATUS_ERRORS as update_error:
                 worker.log_print(f"更新AI分析任务开始状态失败: {update_error}", "AI", force=True)
+        # **job 写回的第一跳**：这条任务服务的 job 现在真的开始跑了（第二波 P0-01）。
+        # 放在这里而不是等下面那个阻塞调用返回：返回时 run 已经跑完，`started_at` 记的
+        # 会是**结束**时刻（job 的耗时永远是 0）。找不到 job（没有 job 的过渡路径）时
+        # 它什么也不做。
+        mark_job_running_for_task(task_id)
         try:
             config_id = task.get("config_id") or task.get("commit_id") or task.get("repository_id")
             try:
@@ -186,14 +449,37 @@ def _handle_weekly_ai_analysis_task(task):
             if not config_id:
                 raise ValueError("weekly_ai_analysis 缺少有效 config_id")
 
-            result = worker.run_weekly_analysis_background(
-                config_id,
-                task_id=task_id,
-                # 载荷里带 `trigger_source` 时照传（「等同步跑完就自动开始」的那一次是
-                # 用户点出来的 = manual），没带就是调度器排的（scheduled）。
-                # 认不出来的值由 `run_weekly_analysis_background` 归一化。
-                trigger_source=task.get("trigger_source") or "scheduled",
-            )
+            run_kwargs = {
+                "task_id": task_id,
+                # **从数据库行读**（载荷仅作兜底）：去重复用一条更早创建的任务时，改的是
+                # 那一行的 trigger_source，载荷里根本没有这次请求的来源。原先只看载荷，
+                # 于是用户点出来的那一次被记成「定时」。见 `trigger_source_for_task`。
+                "trigger_source": trigger_source_for_task(task_id, task),
+            }
+            # `requested_mode`：行上有就带上 —— 但**执行侧目前还没有这个形参**
+            # （`services/ai_analysis_service.run_weekly_analysis_background` 的签名只有
+            # `config_id / task_id / trigger_source`，范围由 `build_weekly_payload` 自己
+            # 裁决）。所以这一跳按「对方接受就传」接线：形参一落地就自动通了，不用再改
+            # 这里；今天它至少不会**静默**丢掉「用户点了全量」这件事（留一行警告）。
+            mode = requested_mode_for_task(task_id, task)
+            if mode and accepts_keyword(worker.run_weekly_analysis_background, "requested_mode"):
+                run_kwargs["requested_mode"] = mode
+            elif mode == "full":
+                worker.log_print(
+                    f"⚠️ 这次分析请求的是**全量**，但执行侧还没有接受 `requested_mode` 的形参"
+                    f"（task_id={task_id}）—— 范围仍由平台自己裁决，这一跳被降级处理",
+                    "AI",
+                    force=True,
+                )
+
+            result = worker.run_weekly_analysis_background(config_id, **run_kwargs)
+            # **job 写回的第二跳**：run 已经落到终态，按它的终态收口那条 job
+            # （状态映射 + `finished_at` + 清 `active_key`）。先补一次 `run_id`
+            # （`mark_running` 的 docstring 里「记运行号」那一件事），再结算。
+            run_id = result.get("run_id") if isinstance(result, dict) else None
+            if run_id:
+                mark_job_running_for_task(task_id, run_id=run_id)
+            settle_job_from_result(result, task_id=task_id)
             status = result.get("status")
             if task_id is not None:
                 if status == "succeeded":
@@ -209,6 +495,11 @@ def _handle_weekly_ai_analysis_task(task):
                 worker._db.session.rollback()
             except worker.SQLAlchemyError:
                 pass
+            # **job 写回的第三跳（失败兜底）**：异常可能发生在 `run` 已经建出来**之后**
+            # （收尾那一段），于是上面两跳一个都没走到 —— 那条 job 会带着 `active_key`
+            # 停在非终态，而那是唯一索引：同一个 target 从此再也建不出 job。
+            # 顺序放在任务状态之前：先让身份闭口，再记执行体。
+            settle_job_failed_for_task(task_id, exc)
             if task_id is not None:
                 try:
                     worker.update_task_status_with_retry(task_id, "failed", str(exc))

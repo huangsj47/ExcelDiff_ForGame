@@ -27,6 +27,7 @@ from services.diff_render_helpers import render_excel_diff_html, render_git_diff
 from services.diff_service import DiffService
 from services.performance_metrics_service import get_perf_metrics_service
 from services.repository_ordering import weekly_config_order_key
+from services.task_worker_priority import WEEKLY_EXCEL_CACHE
 from services.task_worker_service import TaskWrapper, background_task_queue
 from services.task_worker_weekly_handlers import is_weekly_sync_task_enqueued
 from services.weekly_deleted_excel_helpers import render_weekly_deleted_excel as _render_weekly_deleted_excel_helper
@@ -1737,7 +1738,7 @@ def create_weekly_excel_cache_task(config_id, file_path):
             repository_id=config_id,  # 存储config_id
             file_path=file_path,
             status='pending',
-            priority=5  # 中等优先级
+            priority=WEEKLY_EXCEL_CACHE  # 中等优先级
         )
         db.session.add(new_task)
         db.session.flush()
@@ -1752,7 +1753,7 @@ def create_weekly_excel_cache_task(config_id, file_path):
                     project_id=config.project_id,
                     repository_id=config.repository_id,
                     source_task_id=new_task.id,
-                    priority=5,
+                    priority=WEEKLY_EXCEL_CACHE,
                     payload={
                         "config_id": config_id,
                         "file_path": file_path,

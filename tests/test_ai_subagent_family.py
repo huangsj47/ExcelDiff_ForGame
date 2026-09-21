@@ -40,7 +40,6 @@ from services.ai.subagent import (
     ROLE_SYNTHESIS,
     Candidate,
     MemberOutcome,
-    _path_named_in_findings,
     _percent_of,
     aggregate_outcomes,
     attach_seed,
@@ -102,6 +101,9 @@ def _anomaly_obj(**overrides) -> Anomaly:
         confidence=data["confidence"], evidence=tuple(data["evidence"]),
         commit=data["commit"], file_path=data["file_path"], impact=data["impact"],
         suggestion=data["suggestion"],
+        # 候选血缘（AI-P0-06）。**必须在这里显式传**：`_anomaly` 那份基线字典里没有它，
+        # 漏传会让「带血缘的用例」静默退化成「没交回编号」。
+        source_candidate_ids=tuple(overrides.get("source_candidate_ids") or ()),
     )
 
 
@@ -393,334 +395,278 @@ class TestTheCandidatesAndTheReconciliation:
             member_label=label, index=index, anomaly=_anomaly_obj(**overrides)
         )
 
-    def test_a_candidate_missing_from_the_report_is_recorded(self):
-        candidate = self._candidate(title="【道具】ID 被删除但生成文件仍在")
-        synthesis = EngineOutcome(
-            status=STATUS_SUCCEEDED,
-            report_markdown="# 变更理解\n\n一切正常。\n",
+    def _synthesis(self, *anomalies, report: str = "# 变更理解\n\n改了道具表。\n") -> EngineOutcome:
+        return EngineOutcome(
+            status=STATUS_SUCCEEDED, report_markdown=report, anomalies=tuple(anomalies)
         )
 
-        text, dropped = reconcile_candidates((candidate,), synthesis)
+    # ------------------------------------------------------------------
+    # 血缘：对得上、对不上
+    # ------------------------------------------------------------------
 
-        assert "信息缺口（平台补充）" in text
-        assert "[S1-1]" in text
-        assert dropped and dropped[0].kind == "subagent"
-        assert "[S1-1]" in dropped[0].detail
+    def test_a_rewritten_title_still_maps(self):
+        """**标题改写仍映射**：判据是编号，不是措辞。
 
-    def test_a_candidate_the_report_names_is_adopted(self):
-        """模型采纳时把编号带进证据里 —— 这是平台能核对的第一手。"""
-        candidate = self._candidate()
-        synthesis = EngineOutcome(
-            status=STATUS_SUCCEEDED,
-            report_markdown=f"# 风险评估\n\n[S1-1] 确认存在，见 {TABLE}。\n",
-        )
-
-        text, dropped = reconcile_candidates((candidate,), synthesis)
-
-        assert text == "" and dropped == ()
-
-    def test_a_candidate_on_the_same_file_counts_as_adopted(self):
-        """模型经常复述内容而不带编号 —— 同文件的条目算它进了报告。"""
-        candidate = self._candidate()
-        synthesis = EngineOutcome(
-            status=STATUS_SUCCEEDED,
-            report_markdown="# 风险评估\n\n改写了那条。\n",
-            anomalies=(_anomaly_obj(title="另一个说法", file_path=TABLE),),
-        )
-
-        text, dropped = reconcile_candidates((candidate,), synthesis)
-
-        assert text == "" and dropped == ()
-
-    def test_a_file_named_inside_a_findings_evidence_counts_as_adopted(self):
-        """第三手：结论**自己的证据里点了这个文件的名**。
-
-        这是一次**真实误报**（2026-09-20 线上周版本分析，报告末尾原文）：
-        分片 S1 报的是 `config/奖励模式_CfgRewardMode.xlsx`「新建表内仅含一条测试数据、
-        与两份同域表并存」，汇总把它并成了一条结论 —— 而那条结论
-        **`file_path` 指向另一张同域表**（`config/奖励模式表_CfgRewardMode.xlsx`），
-        证据第三条里才逐字写着前者的路径。
-
-        编号没带回、`file_path` 又不是同一个，前两手都看不见它，于是平台在报告末尾
-        告诉用户「1 条在最终报告里找不到去向，需要人工看一眼」—— 而那条就在报告里。
-        用户照着去核一遍，只会得出「平台数错了」。
+        分片报的是「【道具】ID 被删除但生成文件仍在」，汇总把它写成「【道具表】主键被删、
+        生成文件成了孤儿」—— 逐字比标题的时代这一条就是一条假缺口。
         """
-        candidate = self._candidate(
-            title="【奖励模式_CfgRewardMode】新建表内仅含一条测试数据，且与两份同域表并存",
-            file_path="config/奖励模式_CfgRewardMode.xlsx",
-        )
-        synthesis = EngineOutcome(
-            status=STATUS_SUCCEEDED,
-            report_markdown="# 变更理解\n\n奖励模式出现三表并存。\n",
-            anomalies=(
-                _anomaly_obj(
-                    title="【奖励模式】新建两份同名域表、删除一份现存表的工作表，三表并存",
-                    file_path="config/奖励模式表_CfgRewardMode.xlsx",
-                    evidence=[
-                        "提交 d1a0fa97：config/奖励模式表_CfgRewardMode.xlsx 整表删除",
-                        "提交 f0724d7d：config/奖励模式_CfgRewardMode.xlsx 新增工作表",
-                    ],
-                ),
-            ),
+        candidate = self._candidate(index=3, title="【道具】ID 被删除但生成文件仍在")
+        adopted = _anomaly_obj(
+            title="【道具表】主键被删、生成文件成了孤儿",
+            source_candidate_ids=("S1-3",),
         )
 
-        text, dropped = reconcile_candidates((candidate,), synthesis)
+        text, dropped = reconcile_candidates((candidate,), self._synthesis(adopted))
 
         assert (text, dropped) == ("", ()), (
-            "候选的文件被结论的证据点了名，却仍被报成「找不到去向」："
-            f"{[item.detail for item in dropped]}"
+            f"编号对上了却被报成缺口：{[item.detail for item in dropped]}"
         )
 
-    def test_the_report_body_naming_the_file_is_not_enough(self):
-        """**第三手只看结论，不看报告正文** —— 这条钉的就是这个取舍。
-
-        正文里模型也会写「这一块我没查到」（那次真实运行里，
-        `奖励模式_CfgRewardMode.xlsx` 就出现在模型自己那节「信息缺口（需人工核对）」）。
-        把「正文提到过」也算成采纳，会把**真的缺口**说成「已有去向」—— 那个方向是
-        静默的（报告读起来完全正常，只是少了那条警告），正是本函数最不该出的错。
-        """
-        candidate = self._candidate(title="【道具】ID 被删除但生成文件仍在")
-        synthesis = EngineOutcome(
-            status=STATUS_SUCCEEDED,
-            report_markdown=f"# 信息缺口（需人工核对）\n\n{TABLE} 这一份没查到，需人工确认。\n",
+    def test_two_candidates_merged_into_one_finding(self):
+        """两条候选合成一条：那条结论把两个编号都带上，两条都算有去向。"""
+        first = self._candidate(index=1, title="【道具】ID 被删除但生成文件仍在")
+        second = self._candidate(
+            index=2, title="【道具】生成文件里 1001 还在", file_path="build/lua/CfgItem.lua"
+        )
+        merged = _anomaly_obj(
+            title="【道具】主键 1001 被删、生成文件与老存档都还引用它",
+            source_candidate_ids=("S1-1", "S1-2"),
         )
 
-        text, dropped = reconcile_candidates((candidate,), synthesis)
+        text, dropped = reconcile_candidates((first, second), self._synthesis(merged))
 
-        assert dropped, "正文里点到文件名就被算成已采纳了 —— 那会把真缺口说成有去向"
-
-    def test_a_longer_path_does_not_claim_a_shorter_candidates_file(self):
-        """边界：**不能拿路径当裸子串找**。
-
-        `x/a/b.xlsx` 的后半段就是 `a/b.xlsx`。不管边界的话，一条真的没进报告的候选会被
-        另一个文件「认领」掉 —— 静默的漏报，与 `S1-2` 被 `S1-25` 认领是同一件事。
-        """
-        candidate = self._candidate(title="【道具】ID 被删除", file_path="a/b.xlsx")
-        synthesis = EngineOutcome(
-            status=STATUS_SUCCEEDED,
-            report_markdown="# 风险评估\n\n改了别的。\n",
-            anomalies=(
-                _anomaly_obj(
-                    title="另一个说法",
-                    file_path="x/a/b.xlsx",
-                    evidence=["x/a/b.xlsx 里删了一行"],
-                ),
-            ),
+        assert (text, dropped) == ("", ()), (
+            f"多对一的血缘没被认出来：{[item.detail for item in dropped]}"
         )
 
-        text, dropped = reconcile_candidates((candidate,), synthesis)
-
-        assert dropped, "更长的路径替候选认领了采纳状态（静默漏报）"
-
-    def test_the_path_matcher_holds_its_boundaries(self):
-        """把匹配器的边界单独钉一遍（`x/a/b.xlsx` / `a/b.xlsx.bak` 两种冒充）。"""
-        assert _path_named_in_findings("a/b.xlsx", "见 a/b.xlsx 处")
-        assert _path_named_in_findings("a/b.xlsx", "见「a/b.xlsx」")
-        assert _path_named_in_findings("a/b.xlsx", "改了 a/b.xlsx、还有别的")
-        assert not _path_named_in_findings("a/b.xlsx", "x/a/b.xlsx 被改了")
-        assert not _path_named_in_findings("a/b.xlsx", "a/b.xlsx.bak 被改了")
-        assert not _path_named_in_findings("b.xlsx", "a/b.xlsx 被改了")
-        assert not _path_named_in_findings("", "a/b.xlsx 被改了")
-
-    def test_a_two_digit_neighbour_does_not_make_a_one_digit_id_look_adopted(self):
-        """**编号必须整段匹配，不能当子串。**
-
-        同一个分片的候选编号到 `S1-30`（`CANDIDATE_MAX_ITEMS_PER_MEMBER`），所以
-        `"S1-2" in report` 会被报告里的 `[S1-25]` 命中 —— 一条**真的没被汇总进去**的
-        候选就此不报。方向恰好是最危险的那个：`reconcile_candidates` 存在的唯一理由
-        就是「报告看起来完全正常，只是少了一条，而没有任何人会去数」。
-        """
-        one_digit = self._candidate(index=2, title="【角色属性表】id=7007 被删除后复用")
-        two_digit = self._candidate(index=25, title="【刷怪】权重列被移出但入口还在")
-        synthesis = EngineOutcome(
-            status=STATUS_SUCCEEDED,
-            report_markdown="# 风险评估\n\n[S1-25] 确认存在。\n",
+    def test_one_candidate_split_into_two_findings(self):
+        """一条候选拆成两条：两条都带同一个编号，仍算有去向（不许报成缺了一条）。"""
+        candidate = self._candidate(index=5, title="【道具】ID 被删除但生成文件仍在")
+        split_a = _anomaly_obj(title="【道具】ID 1001 被删除", source_candidate_ids=("S1-5",))
+        split_b = _anomaly_obj(
+            title="【道具】生成文件仍引用 1001",
+            file_path="build/lua/CfgItem.lua",
+            source_candidate_ids=("S1-5",),
         )
 
-        text, dropped = reconcile_candidates((one_digit, two_digit), synthesis)
-
-        assert [item.index for item in dropped] == [2], (
-            f"采纳了 S1-25 却把 S1-2 也算成采纳了：{[item.detail for item in dropped]}"
-        )
-        assert "[S1-2]" in text and "[S1-25]" not in text.split("S1-25")[0][-200:]
-
-    def test_the_id_matches_with_or_without_brackets(self):
-        """模型写成裸编号（不带方括号）时也算引用到了 —— 否则会凭空多出一堆假缺口。"""
-        candidate = self._candidate()
-        synthesis = EngineOutcome(
-            status=STATUS_SUCCEEDED,
-            report_markdown="# 风险评估\n\nS1-1 这条确认存在。\n",
+        text, dropped = reconcile_candidates(
+            (candidate,), self._synthesis(split_a, split_b)
         )
 
-        text, dropped = reconcile_candidates((candidate,), synthesis)
-
-        assert text == "" and dropped == ()
-
-    def test_the_same_file_written_differently_still_counts_as_adopted(self):
-        """**路径要比对归一化后的形态，不能逐字相等。**
-
-        候选的文件名来自分片模型、最终报告的文件名来自汇总模型，两边写法常常不同
-        （`./` 前缀、反斜杠、首尾引号）。逐字相等会让**已经采纳**的候选被报成
-        「找不到去向」—— 假缺口不是无害的：它把一条已经进了报告的结论说成没被汇总，
-        读的人只能再去核一遍，而且这个数字会虚高。
-        """
-        candidate = self._candidate(file_path="config/60_skill/角色属性表.xlsx")
-        synthesis = EngineOutcome(
-            status=STATUS_SUCCEEDED,
-            report_markdown="# 风险评估\n\n复述了那条。\n",
-            anomalies=(
-                _anomaly_obj(title="另一个说法", file_path="./config\\60_skill\\角色属性表.xlsx"),
-            ),
+        assert (text, dropped) == ("", ()), (
+            f"一对多的血缘没被认出来：{[item.detail for item in dropped]}"
         )
 
-        text, dropped = reconcile_candidates((candidate,), synthesis)
-
-        assert text == "" and dropped == (), (
-            f"同一个文件的不同写法被当成了两个文件：{[item.detail for item in dropped]}"
-        )
-
-    def test_the_wording_only_claims_what_was_checked(self):
-        """不能写成「模型把它丢了」—— 平台查的是「报告里有没有它」。
-
-        平台现在查三手（编号 / 同一个文件 / 结论的证据里点到这个文件的路径），
-        所以这句话也只能声称这三手。**多写一手就变成平台没做过的保证**；少写一手，
-        读的人会以为某类采纳方式平台看不见，又跑去人工核一遍已经核过的条目。
-
-        ## 这句话在 2026-09-20 改过一次（原来的写法是假的）
-
-        原来写的是「上面的报告里既没有引用这个编号，**也没有任何一条结论提到这个文件**」。
-        后半句读起来是「整份报告里都没有这个文件」，可平台核对的只是**结论清单**
-        （`_findings_text`）—— 那天实测报出的三条「找不到去向」，文件全都在模型自己写的
-        正文里出现过（一条还被写进了「待取证假设」）。读的人随手一搜就能推翻这句话，
-        于是整节核对结论都不再可信。现在只说核对过的落点：正文与结论清单。
-        """
-        candidate = self._candidate()
-        text, _ = reconcile_candidates(
-            (candidate,), EngineOutcome(status=STATUS_SUCCEEDED, report_markdown="")
-        )
-
-        assert "报告里既没有引用这个编号，正文与结论清单里也都没有提到这个文件" in text
-        assert "正文里提到过不算采纳" in text, "核对口径要写出来，否则读者不知道正文不算"
-        assert "没有任何一条结论提到这个文件" not in text
-
-    def _capped_synthesis(self, **overrides) -> EngineOutcome:
-        """一份汇总：没提任何候选，但账上有一条「被条数上限截掉」的记录。"""
-        kwargs = dict(
-            status=STATUS_SUCCEEDED,
-            report_markdown="# 变更理解\n\n只写了别的。\n",
-            anomalies=(),
-            # 截断记账的 `detail` 就是报告里那节的取材（`rules.cap_anomalies` 写的）。
-            dropped=(
-                DroppedItem(
-                    kind=KIND_ANOMALY_CAP,
-                    index=16,
-                    reason="超出本次上限（15 条），已按严重度优先保留",
-                    detail=(
-                        "high 【掉落拾取】新增事务序号硬校验"
-                        "（code/qz_server/src/gas/module/drop/GasDropPickTxnMod.lua）"
-                    ),
-                ),
-            ),
-        )
-        kwargs.update(overrides)
-        return EngineOutcome(**kwargs)
-
-    def _capped_candidate(self) -> Candidate:
-        return self._candidate(
-            label="S1",
-            index=4,
-            title="【SCS↔GAS 掉落拾取】新增事务序号硬校验",
-            file_path="code/qz_server/src/gas/module/drop/GasDropPickTxnMod.lua",
-        )
-
-    def test_a_candidate_cut_by_the_cap_is_not_reported_as_missing(self):
-        """**被条数上限截掉的候选有明确去向**，不能再报一次「没有进入结论清单」。
-
-        报告里另有一节「结论条数上限（平台补充）」逐条列着它们（`build_cap_section`），
-        两节的语义是相反的：那一节是「看到了、只是没位置」，这一节是「没看到」。
-        同一个东西在两节里各出现一次，读的人只会觉得平台的账自相矛盾 —— 而且那几条
-        本来也不该算进「分片报的东西没进报告」这个降级理由里。
-        """
-        candidate = self._capped_candidate()
-        other = self._candidate(label="S2", index=6, title="【协议】中部删除导致 id 前移",
-                                file_path="code/qz_pub/protocols/ProtoCScs.lua")
-
-        text, dropped = reconcile_candidates((candidate, other), self._capped_synthesis())
-
-        assert [d.index for d in dropped] == [6], (
-            f"被上限截掉的候选仍被记成「没有去向」：{[d.detail for d in dropped]}"
-        )
-        assert "[S1-4]" not in text
-        assert "已经解释过了" in text and "1 条" in text, (
-            "不报它，但要把「少报了一条」说清楚 —— 否则「账上 2 条、只列 1 条」对不上"
-        )
-        assert "结论条数上限" in text, "要说清去向在哪一节，读者才知道去哪儿看"
-
-    def test_a_run_whose_only_missing_candidates_were_capped_has_no_gap_section(self):
-        """全是被上限截掉的 → **这一节根本不出现**：那一节已经把账记全了。
-
-        （这一条与上一条是一对：不出现是对的，出现了才是重复报。）
-        """
-        text, dropped = reconcile_candidates((self._capped_candidate(),), self._capped_synthesis())
-
-        assert (text, dropped) == ("", ())
-
-    def test_a_candidate_the_body_mentions_says_so_instead_of_claiming_otherwise(self):
-        """正文里出现过，就照实说 —— 但**不因此算它已采纳**。
-
-        「有意写成待取证 / 待确认」与「一声不响地丢了」对读的人是两件事：前者要人去补
-        证据，后者要人去追汇总。所以仍记账、仍降级（宁可吵闹），只是那一行不再声称
-        「报告里没有提到这个文件」。
-        """
-        candidate = self._candidate(
-            index=5,
-            title="【掉落 AOI 快照】备份不再深拷贝",
+    def test_a_candidate_nobody_claims_is_still_a_gap(self):
+        """**反向对照**：真缺口照旧吵闹 —— 汇总交回了别的编号，就是没交回这一条。"""
+        landed = self._candidate(index=1, title="【道具】ID 被删除但生成文件仍在")
+        orphan = self._candidate(
+            index=7,
+            title="【掉落】备份不再深拷贝",
             file_path="code/qz_pub/core/scene/aoi/pack/PackDropObjSnapshotMod.lua",
         )
-        synthesis = EngineOutcome(
-            status=STATUS_SUCCEEDED,
-            report_markdown=(
-                "# 风险评估\n\n看别的去了。\n\n## 待取证假设（未定级）\n\n"
-                "- **假设 B**：`PackDropObjSnapshotMod.lua` 备份与源对象共享道具列表，"
-                "缺少序列化时机的证据。\n"
+        adopted = _anomaly_obj(
+            title="【道具】主键被删、生成文件成了孤儿", source_candidate_ids=("S1-1",)
+        )
+
+        text, dropped = reconcile_candidates(
+            (landed, orphan), self._synthesis(adopted)
+        )
+
+        assert [item.index for item in dropped] == [7], (
+            f"真缺口没记账：{[item.detail for item in dropped]}"
+        )
+        assert dropped[0].kind == "subagent"
+        assert "[S1-7]" in text
+        assert "[S1-1]" not in text, "采纳的那条不该出现在缺口名单里"
+
+    def test_a_candidate_the_synthesis_never_handed_back_a_id_for(self):
+        """标题与文件都相同，**只要没有编号声明就不算采纳**。
+
+        这是刻意的取舍：同文件/同标题这两手都是**从自然语言反推血缘**，它们产生的假缺口
+        正是这一批缺陷（run 20 的 S3-3/F5）。判据换成显式编号之后，平台不再替汇总猜
+        「这条大概就是那条」—— 猜错的代价是静默的（真的缺口被说成有去向）。
+        """
+        candidate = self._candidate(index=1, title="【道具】ID 被删除但生成文件仍在")
+        # 同一份汇总里**有**一条带血缘的结论（另一条候选），所以这一条不算「一条编号都
+        # 没交回」——它是真缺口。
+        same_file = _anomaly_obj(
+            title="【道具】ID 被删除但生成文件仍在", source_candidate_ids=("S1-9",)
+        )
+
+        text, dropped = reconcile_candidates((candidate,), self._synthesis(same_file))
+
+        assert [item.index for item in dropped] == [1]
+        assert "[S1-1]" in text
+
+    # ------------------------------------------------------------------
+    # 一条编号都没交回：说一次，不是 N 次
+    # ------------------------------------------------------------------
+
+    def test_no_lineage_at_all_is_said_once_instead_of_n_times(self):
+        """汇总一条编号都没交回 → **不报 N 条假缺口**，如实说一句「无法按编号对账」。
+
+        这正是 run 20 的成因：模型没按 schema 交回血缘，平台却按启发式逐条报了
+        「找不到去向」，那 4 条假缺口又是 `subagent_gap` 降级的**唯一**触发源。
+        """
+        candidates = tuple(
+            self._candidate(index=index, title=f"【道具】第 {index} 条")
+            for index in range(1, 5)
+        )
+        synthesis = self._synthesis(
+            _anomaly_obj(title="【道具】汇总自己写的一条", file_path="build/lua/CfgItem.lua")
+        )
+
+        text, dropped = reconcile_candidates(candidates, synthesis)
+
+        assert dropped == (), "没有血缘时逐条报缺口 = 四条假缺口 + 一次假降级"
+        assert text.count("没有交回候选血缘") == 1, f"要说只一次：\n{text}"
+        assert "无法按编号对账" in text
+        assert "4" in text, "账上几条候选要说出来"
+
+    def test_a_run_with_no_lineage_does_not_degrade(self):
+        """上一条的端到端后果：**不降级**（这个降级以前是假缺口撑起来的）。"""
+        candidate = self._candidate(index=1, title="【道具】ID 被删除但生成文件仍在")
+        plan = _plan(2)
+        steps = tuple(
+            MemberOutcome(plan=member, outcome=EngineOutcome(status=STATUS_SUCCEEDED))
+            for member in plan.members
+        )
+
+        outcome = aggregate_outcomes(
+            synthesis=self._synthesis(),
+            steps=steps,
+            candidates=(candidate,),
+        )
+
+        assert outcome.degradation != DEGRADE_SUBAGENT
+        assert outcome.status == STATUS_SUCCEEDED
+
+    # ------------------------------------------------------------------
+    # run 20 那一幕
+    # ------------------------------------------------------------------
+
+    def test_the_run_20_s3_3_to_f5_case_no_longer_triggers_a_degradation(self):
+        """run 20：`S3-3` 的文件是 `ProtoScsGas.lua`，最终结论 `F5` 的文件是
+        `ProtoCGas.lua`（**同名协议拆在两个文件里**），标题措辞也不同
+        （「表参改为两个定长标量」vs「Lt→LIC」），而且 `F5` 的 `evidence_refs` 为空。
+
+        旧的三手一条都挂 → 报成「找不到去向」→ 4 条假缺口 → `subagent_gap` 降级。
+        显式血缘把这条路径整个删掉：对上的是**编号**。
+        """
+        candidate = self._candidate(
+            label="S3",
+            index=3,
+            title="【协议】通用蓝图 SyncNodeStateChange 报文结构被替换：表参改为两个定长标量",
+            file_path="code/qz_pub/protocols/ProtoScsGas.lua",
+        )
+        adopted = _anomaly_obj(
+            title="【协议】ProtoCGas 的 Lt 改为 LIC，通用蓝图报文结构被就地替换",
+            file_path="code/qz_pub/protocols/ProtoCGas.lua",
+            evidence=["提交 f0724d7d：ProtoCGas.lua 的字段定义整段被换掉"],
+            source_candidate_ids=("S3-3",),
+        )
+        plan = _plan(3)
+        steps = tuple(
+            MemberOutcome(plan=member, outcome=EngineOutcome(status=STATUS_SUCCEEDED))
+            for member in plan.members
+        )
+
+        text, dropped = reconcile_candidates((candidate,), self._synthesis(adopted))
+
+        assert (text, dropped) == ("", ()), (
+            f"S3-3 又被报成找不到去向：{[item.detail for item in dropped]}"
+        )
+
+        outcome = aggregate_outcomes(
+            synthesis=self._synthesis(adopted), steps=steps, candidates=(candidate,)
+        )
+
+        assert outcome.degradation != DEGRADE_SUBAGENT, "假缺口把整次 run 判成了降级"
+        assert outcome.status == STATUS_SUCCEEDED
+        assert "信息缺口（平台补充）" not in outcome.report_markdown, (
+            "没对上编号的那条候选被写进了报告的信息缺口"
+        )
+
+    # ------------------------------------------------------------------
+    # 与复核裁决的接续（撤销 / 降级 / 转人工核验）
+    # ------------------------------------------------------------------
+
+    def test_a_retracted_candidate_is_not_missing(self):
+        """被复核撤销的候选**不是遗漏**：它的去向是「已撤销」，平台如实说。"""
+        from services.ai.verdict import (
+            VERDICT_RETRACTED,
+            VerifyVerdict,
+            reduce_findings,
+        )
+
+        base = _anomaly_obj(
+            title="【协议】通用蓝图报文结构被替换",
+            file_path="code/qz_pub/protocols/ProtoScsGas.lua",
+            source_candidate_ids=("S3-3",),
+        )
+        reduction = reduce_findings(
+            [base],
+            verdicts=(
+                VerifyVerdict(
+                    finding_id="F1",
+                    verdict=VERDICT_RETRACTED,
+                    reason="客户端与服务端已同步",
+                    evidence_refs=("ProtoScsGas.lua:9",),
+                ),
             ),
         )
+        candidate = self._candidate(
+            label="S3", index=3, title="【协议】通用蓝图报文结构被替换",
+            file_path="code/qz_pub/protocols/ProtoScsGas.lua",
+        )
 
-        text, dropped = reconcile_candidates((candidate,), synthesis)
+        text, dropped = reconcile_candidates(
+            (candidate,), self._synthesis(), reduction=reduction
+        )
 
-        assert [d.kind for d in dropped] == ["subagent"], "正文提到过不算采纳，仍要记账"
-        assert "报告正文里出现过这个文件" in text
-        assert "待取证 / 待确认" in text, "要给出这两种可能，让读者自己去分辨"
-        assert "没有任何一条结论提到这个文件" not in text
+        assert dropped == (), "撤销不是缺口"
+        assert "[S3-3]" in text and "撤销" in text
+        assert "[F1]" in text, "要说清它对应哪条结论"
 
-    def test_the_gap_text_says_it_is_the_platforms_own_check(self):
+    def test_the_sources_are_persisted_on_the_finding_row(self):
+        """血缘一路带到 `Reduction`：`FindingRow.source_candidate_ids` 与落库载荷都要有。"""
+        from services.ai.verdict import reduce_findings
+
+        base = _anomaly_obj(
+            title="【协议】通用蓝图报文结构被替换", source_candidate_ids=("S3-3",)
+        )
+
+        reduction = reduce_findings([base])
+
+        assert reduction.rows[0].source_candidate_ids == ("S3-3",)
+        assert reduction.claimed_candidate_ids == frozenset({"S3-3"})
+        assert reduction.as_dict()["rows"][0]["source_candidate_ids"] == ["S3-3"]
+
+    # ------------------------------------------------------------------
+    # 措辞
+    # ------------------------------------------------------------------
+
+    def test_the_wording_only_claims_what_was_checked(self):
+        """不能写成「模型把它丢了」—— 平台查的是「汇总有没有交回这个编号」。
+
+        多写一手就变成平台没做过的保证（例如「整份报告里都没有这个文件」）；少写一手，
+        读的人会以为某类采纳方式平台看不见，又跑去人工核一遍已经核过的条目。
+        """
         candidate = self._candidate()
-        text, _ = reconcile_candidates(
-            (candidate,), EngineOutcome(status=STATUS_SUCCEEDED, report_markdown="")
-        )
+        orphan = reconcile_candidates(
+            (candidate,),
+            self._synthesis(_anomaly_obj(title="别的", source_candidate_ids=("S1-9",))),
+        )[0]
+        no_lineage = reconcile_candidates(
+            (candidate,), self._synthesis(_anomaly_obj(title="别的"))
+        )[0]
 
-        assert "不是模型的自我说明" in text, (
-            "读的人必须知道这条是平台按记录核对出来的，不是模型的自述"
-        )
-
-    def test_an_omitted_candidate_lands_in_dropped_accounting(self):
-        client = FlakyClient(
-            # S1 报一条；S2 什么都没报；汇总既没引用编号、也没提同一个文件。
-            # （三次调用按顺序取：S1 / S2 / 汇总。桩会重复最后一条，所以三条都要给。）
-            _final(_anomaly(title="【道具】只有 S1 发现了这个")),
-            _final(),
-            _final(),
-        )
-        result = run_family(
-            client=client, provider=FakeProvider(), plan=_plan(2), **_args()
-        )
-
-        assert any(item.kind == "subagent" for item in result.outcome.dropped), (
-            "被漏掉的候选没有记账 —— 「为什么少了一条」就永远查不出来"
-        )
-        assert result.outcome.degradation == DEGRADE_SUBAGENT
-        assert result.outcome.status == STATUS_DEGRADED
-        assert "信息缺口（平台补充）" in result.outcome.report_markdown
+        assert "没有任何一条声明来源于这个编号" in orphan
+        assert "既没有引用这个编号" not in orphan, "编号当子串找过了 —— 只比集合，不比文本"
+        assert "不是模型的自我说明" in orphan
+        assert "不是模型的自我说明" in no_lineage
+        assert "没有提到这个文件" not in orphan, "平台不再按文件名核对，这句话是假承诺"
 
     def test_the_candidates_fed_to_the_synthesis_are_pre_threshold(self):
         """喂给汇总的是**过门槛之前**那批。

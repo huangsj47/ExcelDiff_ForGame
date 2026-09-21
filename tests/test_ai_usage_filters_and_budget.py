@@ -48,7 +48,6 @@ from services.ai.analysis_budget import (
 from services.ai_analysis_service import (
     run_weekly_analysis_background,
     stream_commit_analysis,
-    stream_weekly_analysis,
     update_project_analysis_config,
 )
 from services.ai_usage_service import (
@@ -691,8 +690,15 @@ def test_the_commit_stream_is_blocked_before_any_request_is_made():
         ), "拦下了却还是留下了一条 run 记录"
 
 
-def test_the_weekly_stream_is_blocked_before_any_request_is_made(monkeypatch):
-    """手动·周版本：同一条闸，走的是 `error` 事件。"""
+def test_the_weekly_entry_is_blocked_before_any_request_is_made(monkeypatch):
+    """手动·周版本：同一条闸，位置在**建 run 之前**。
+
+    P0-01 之后「手动·周版本」这条路上唯一会建 run 的地方是后台执行入口
+    （`run_weekly_analysis_background`）—— 建 job 的那一跳（`POST /jobs`）只落身份、
+    排任务，**不建 run、不发模型请求**（见 `job_service` 的模块 docstring）。
+    所以这道闸的验收从「SSE 里有没有 error」换成：**结局是 `over_budget`、
+    且库里没有那条 run**。
+    """
     with flask_app.app_context():
         create_tables()
         project_id = _project()
@@ -716,16 +722,15 @@ def test_the_weekly_stream_is_blocked_before_any_request_is_made(monkeypatch):
             ),
         )
 
-        text = "".join(stream_weekly_analysis(config_id))
+        outcome = run_weekly_analysis_background(config_id)
 
-        message = _sse_error_message(text)
-        assert message, f"没有回 error 事件：{text[:400]}"
-        assert "预算" in message, message
+        assert outcome.get("reason") == "over_budget", outcome
+        assert "预算" in (outcome.get("message") or ""), outcome
         assert (
             AiAnalysisRun.query.filter_by(
                 target_type="weekly", target_id=config_id, project_id=project_id
             ).count() == 0
-        )
+        ), "拦下了却还是留下了一条 run 记录"
 
 
 def test_the_background_weekly_run_is_skipped_and_says_why():

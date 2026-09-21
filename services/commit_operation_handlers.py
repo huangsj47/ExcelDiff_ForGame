@@ -16,6 +16,7 @@ from models import Commit, DiffCache, ExcelHtmlCache, db
 from services.api_response_service import json_error, json_success
 from services.agent_commit_diff_dispatch import dispatch_or_get_commit_diff, is_agent_dispatch_mode
 from services.model_loader import get_runtime_model
+from services.task_worker_priority import EXCEL_DIFF_PAGE
 from utils.request_security import (
     _has_project_access,
     can_current_user_operate_project_confirmation,
@@ -486,7 +487,7 @@ def request_priority_diff(commit_id):
                 'cached': True
             })
         # 添加到高优先级队列
-        add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=1)
+        add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=EXCEL_DIFF_PAGE)
         return jsonify({
             'success': True, 
             'message': f'已将 {commit.path} 添加到高优先级处理队列',

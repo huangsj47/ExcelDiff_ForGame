@@ -241,11 +241,25 @@ def test_the_verify_round_runs_and_lands_on_the_same_run(monkeypatch):
         )
         assert [row.agent for row in traces] == ["S1", "S2", None, "V1"]
         assert [row.round_index for row in traces] == [1, 2, 3, 4]
+        # 「对账轮落在**同一条** run 上」是这一条要保的不变量（`uq_ai_trace_run_round` 靠
+        # 家族内全局递增的 `round_index` 撑住）—— 上面那个查询按 `run_id=run.id` 过滤，
+        # 这里把它写成明文断言：对账轮不许另起一条运行。
+        assert all(row.run_id == run.id for row in traces), "对账轮落到了另一条 run 上"
 
         payload = json.loads(run.response_payload)
         assert [item["label"] for item in payload["subagents"]] == ["S1", "S2", "汇总", "V1"]
         assert payload["subagents"][-1]["role"] == "verify"
-        assert "## 对账结果（找反证）" in run.response_text
+        # AI-P1-01（2026-09-21）：对账轮的**原文不再进报告正文** —— 正文里只留平台那几节
+        # 规范结论，读的人不必自己辨认哪一句已经被裁决改掉。但原文一个字节都不许少：
+        # 它作为独立存档落进结论载荷的 `verify_report_markdown`（默认不渲染）。
+        assert "## 对账结果（找反证）" not in run.response_text, (
+            "对账轮原文又回到了报告正文里（AI-P1-01：正文只能有一份规范结论）"
+        )
+        archived = payload["verify_report_markdown"]
+        assert archived.startswith("## 对账结果（找反证）"), (
+            "对账轮的原文没有落进它自己的键 —— 那次复核说了什么就再也读不到了"
+        )
+        assert "道具表删了一行。" in archived, "存档要逐字保留模型交回的那段正文"
 
 
 def test_the_verify_flag_does_nothing_on_its_own(monkeypatch):

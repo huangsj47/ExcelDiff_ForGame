@@ -346,3 +346,75 @@ def test_the_renderer_is_loaded_on_every_page():
     for template in TEMPLATES:
         head = (PROJECT_ROOT / template).read_text(encoding="utf-8")[:200]
         assert "extends \"base.html\"" in head, f"{template} 不再继承 base.html"
+
+
+# --------------------------------------------------------------------------
+# 机器裁决**不可能**靠 HTML 注释藏起来（AI-P0-05 的现场证据）
+# --------------------------------------------------------------------------
+# 这一段拿**真实的**规范正文（平台自己渲染的那几节）跑一遍真渲染器。它钉住的是
+# 「为什么那行注释必须从契约里删掉」：这个渲染器先整体转义、再套白名单，注释会变成
+# 一段可见文字。XSS 防护靠这个构造（`test_model_supplied_markup_can_never_become_a_tag` 守着它），
+# **不许为了藏注释而开放原始 HTML**。
+
+
+def _render(markdown: str) -> str:
+    """拿真实渲染器渲染一段 markdown（node 不在就跳过）。"""
+    if not shutil.which("node"):
+        pytest.skip("环境里没有 Node，跳过真实渲染断言")
+    with tempfile.TemporaryDirectory() as tmp:
+        driver = Path(tmp) / "d.js"
+        driver.write_text(_DRIVER, encoding="utf-8")
+        cases = Path(tmp) / "c.json"
+        cases.write_text(
+            json.dumps([{"name": "one", "md": markdown}], ensure_ascii=False),
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            ["node", str(driver), str(RENDERER), str(cases)],
+            capture_output=True, text=True, timeout=60,
+        )
+    assert proc.returncode == 0, f"Node 执行渲染器失败：\n{proc.stdout}\n{proc.stderr}"
+    return json.loads(proc.stdout)[0]["html"]
+
+
+def test_an_html_comment_becomes_visible_text_not_hidden():
+    """**这一条就是那 12,617 个字符的来源**：注释在页面上是看得见的文字。
+
+    从前的设计假设「HTML 注释在 markdown 渲染里看不见」，而本渲染器为了防 XSS 会先把
+    整个输入转义 —— 于是 `<!-- ai-verify-ruling: {...} -->` 原样显示给用户（实测 run 20
+    的 `response_text` 里 35.3% 是它）。既然藏不住，它就不该写在正文里。
+    """
+    html = _render('<!-- ai-verify-ruling: {"changed": 1} --> 后面还有一句')
+
+    assert "ai-verify-ruling" in html, "机器 json 的标记**看得见**（这正是当初的缺陷）"
+    assert "&lt;!--" in html, "注释的开头应当以转义形态出现"
+    assert "<!" not in html.replace("&lt;!", ""), "出现了真的注释节点"
+
+
+def test_a_canonical_report_renders_without_any_machine_payload():
+    """平台渲染的那份规范正文过一遍真渲染器：只有给人看的内容。"""
+    from services.ai.verdict import (
+        VERDICT_RETRACTED,
+        VerifyVerdict,
+        reduce_findings,
+        render_ruling,
+    )
+    from tests.test_ai_verify_verdict import EVIDENCE_REF, _obj
+
+    reduction = reduce_findings(
+        [_obj()],
+        verdicts=(
+            VerifyVerdict(
+                finding_id="F1",
+                verdict=VERDICT_RETRACTED,
+                reason="同一提交里生成文件已经删掉了",
+                evidence_refs=(EVIDENCE_REF,),
+            ),
+        ),
+    )
+    html = _render(render_ruling(reduction, review_ran=True))
+
+    assert "<h2>复核裁决（平台）</h2>" in html, "那一节的标题没渲染成二级标题"
+    assert "ai-verify-ruling" not in html
+    assert "&lt;!" not in html, "规范正文里出现了注释（它会被显示出来）"
+    assert "反证成立（撤销）" in html

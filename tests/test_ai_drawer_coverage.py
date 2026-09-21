@@ -245,9 +245,15 @@ process.stdout.write(JSON.stringify({{
 def test_the_coverage_section_never_enters_the_report_text():
     """覆盖段落**不许**进 `report_markdown` / `response_text`。
 
-    它们不是「给人看的文本」那么简单：`family_ledger.reconcile_candidates` 拿它核对候选
-    编号与候选的文件名、`verdict.read_ruling` 从里面取回复核裁决块、下一轮的基线摘要也读
-    它。平台自己追加的段落混进去，等于往这些判据里塞平台自己的字。
+    正文是「这一次分析的结论」。抽屉、导出、历史三条读路径拿它当报告给用户看，下一轮的
+    基线摘要也从里面读（`services/ai/run_cache_source.py` 逐行 split `response_text`）。
+    平台自己追加的覆盖段落混进去，等于把平台的记账字混进结论里。
+
+    **2026-09-21 追记**：这段 docstring 原先还列了两条理由 —— `family_ledger.reconcile_candidates`
+    拿正文核对候选编号与候选的文件名、`verdict.read_ruling` 从正文里取回裁决块 ——
+    这两条现在都不成立了（P0-06 改成只按候选 ID 集合对账，P0-05 把裁决搬进
+    `EngineOutcome.verdict` / 载荷的 `ruling` 字段）。两条理由消失、结论不变，
+    所以这个测试保留：判据换成「正文是给用户看的结论，记账不是结论」。
     """
     seeded = _persisted_payload()
     try:
@@ -289,8 +295,21 @@ def test_the_failed_path_in_the_coverage_section_is_not_adoption_evidence():
     本该判「没有进入最终结论清单」的候选变成「已采纳」。
 
     构造的是最坏情况：那条候选的文件正是**覆盖段里点名列出的取数失败路径**，而结论清单
-    （`anomalies`）里没有它、报告正文也没提它。对账必须仍然报「没有进入最终结论清单」——
-    说成「已采纳」是**静默**的（平台自己那条缺口就此消失，报告读起来完全正常）。
+    （`anomalies`）里没有它、报告正文也没提它。
+
+    ## 2026-09-21 改写（AI-P0-06 之后）
+
+    这条用例原先断言 `dropped` 非空、文案里出现「没有进入最终结论清单」。**那个断言在
+    P0-06 之后不再成立，而且它本来就不该成立**：对账改成**只按候选编号**（候选清单 vs
+    汇总回填的 `source_candidate_ids`）之后，这条 fixture 里汇总**一个编号都没交回** ——
+    平台拿到的是「无法对账」，不是一个「这条被丢了」的证据。按旧口径报「没有进入最终
+    结论清单」，是在**没有证据**的情况下替模型定罪：那条候选完全可能已经写进了正文，
+    只是编号没回填。所以 W1（P0-06 的实现方）把它降级成一条**说清自己不知道**的话，
+    并把这一档单列出来要求人工对照。
+
+    这条用例因此改成钉**新的**那个口径（三条一起钉，缺一条都会漏掉一种坏改法）：
+    ① 说清「无法按编号对账」，不假装对上了；② **不许**出现「没有进入最终结论清单」
+    这种没有证据的定罪；③ `dropped` 为空 —— 不往平台的账上塞假缺口。
     """
     seeded = _persisted_payload()
     try:
@@ -301,7 +320,6 @@ def test_the_failed_path_in_the_coverage_section_is_not_adoption_evidence():
             "要么被写进了报告正文（正文是对账拿来做字符串判据的那份文本）"
         )
 
-        # 对账读的是落库的报告正文 + 结论清单（`family_ledger._report_text` 那两份）。
         synthesis = EngineOutcome(
             status=STATUS_SUCCEEDED,
             report_markdown=stored.get("report_markdown") or "",
@@ -310,33 +328,101 @@ def test_the_failed_path_in_the_coverage_section_is_not_adoption_evidence():
         )
         text, dropped = reconcile_candidates((_candidate(),), synthesis)
 
-        assert dropped, (
-            "覆盖段里出现了候选的文件路径，对账就把它判成「已采纳」了 —— "
-            "那条真缺口会从平台的账上静默消失"
+        assert "无法按编号对账" in text, (
+            "汇总没有交回任何编号时，平台必须**明说自己对不了账**（并要求人工过一遍）—— "
+            f"现在的文案是：{text!r}"
         )
-        assert "[S1-1]" in dropped[0].detail, dropped[0].detail
-        assert "没有进入最终结论清单" in text, text
-        # 正文里没提它 → 措辞也不该说「正文里出现过这个文件」。
-        assert "正文里出现过" not in text, text
+        assert "没有进入最终结论清单" not in text, (
+            "一个编号都没交回 ≠ 这条候选被丢掉了。把「对不了账」写成「没有进入最终结论"
+            f"清单」是在没有证据的情况下定罪 —— 现在的文案是：{text!r}"
+        )
+        assert dropped == (), (
+            f"对不了账的时候不该往账上塞缺口，实际塞了：{[d.detail for d in dropped]!r}"
+        )
+        # 覆盖段里出现了那条失败路径这件事，**全程不参与**对账判据。
+        assert FAILED_PATH not in text
     finally:
         _cleanup(seeded)
 
 
-def test_a_failed_path_names_the_file_but_never_adopts_it():
-    """把这份覆盖段**塞进正文**（错误实现会这么做）也仍然不算采纳。
+def test_the_reconciliation_is_blind_to_the_report_body():
+    """对账的结果**必须与报告正文无关** —— 同一批候选、同一个汇总，正文换个字，账不变。
 
-    这一条钉的是那条取舍：对账的第 3 手**只看结论清单**，不看报告正文 —— 正文正是模型写
-    「这一块我没查到」的地方，拿它当采纳证据会把**真缺口**说成「已有去向」。所以本任务的
-    保证有两层：这里是行为层（正文里的路径不算数），上面那条是结构层（覆盖段压根不进正文）。
+    这是「正文里的路径不算采纳证据」那条保证的**最强形式**：不是去断言某个具体文案，
+    而是断言这个函数**根本不看正文**。P0-06 之前它看（`family_ledger._report_text`
+    拿正文做字符串判据：候选编号当子串、文件名出现过就算被提到），于是模型在正文里写一句
+    「这一块我没查到，涉及 `config/xxx.xlsx`」就足以把一条**真缺口**洗成「已有去向」。
+
+    差分形式比断言某个文案更难被绕过：只要有人把任何形式的正文匹配加回来，这两次调用的
+    结果就会不同，这条用例立刻红。
+
+    ## 为什么 fixture 里要**交回一条编号**（否则这条用例是假绿）
+
+    只喂「一条编号都没交回」的话，`reconcile_candidates` 会走「无法按编号对账」那一档，
+    而那一档把缺口清单**无条件清空** —— 于是就算有人把正文匹配加回来，两次调用结果照样
+    相等，这条用例永远绿。所以这里让汇总交回 `S2-1`：`no_lineage` 为假、缺口判定真的
+    跑起来；`S1-1` 既没被交回也没进最终清单，它是一条**真缺口**，两条臂都必须报出来。
+    下面那条「先确认真的报了缺口」的断言就是防这个假绿的。
     """
-    covered_text = "# 变更理解\n\n" + coverage_section_with_failed_path()
-    synthesis = EngineOutcome(
-        status=STATUS_SUCCEEDED, report_markdown=covered_text, anomalies=(), dropped=(),
+    def _outcome(body: str) -> EngineOutcome:
+        return EngineOutcome(
+            status=STATUS_SUCCEEDED,
+            report_markdown=body,
+            anomalies=(_synth_anomaly(),),
+            dropped=(),
+        )
+
+    # 正文里**点名**了那条候选的文件 + 它的分片编号，两种旧启发式都喂到嘴边。
+    bait = (
+        "# 变更理解\n\n"
+        f"这一块我没查到，涉及 `{FAILED_PATH}`。\n"
+        "分片 S1 的候选 1 值得再看一眼。\n"
+    )
+    candidates = (_candidate(), _other_candidate())
+    with_bait = reconcile_candidates(candidates, _outcome(bait))
+    without_bait = reconcile_candidates(candidates, _outcome("# 变更理解\n\n没别的了。\n"))
+
+    # 先确认这一档**真的在报缺口** —— 否则下面的相等只是「两边都空」那种假绿。
+    _, dropped = with_bait
+    assert "S1-1" in " | ".join(item.detail for item in dropped), (
+        "汇总交回了 S2-1 却没交回 S1-1，S1-1 就是一条真缺口 —— 平台必须报出来。"
+        f"实际 dropped={[item.detail for item in dropped]!r}"
     )
 
-    _, dropped = reconcile_candidates((_candidate(),), synthesis)
+    assert with_bait == without_bait, (
+        "正文一变，对账结果就变了 —— 说明有人又在拿正文当判据了。\n"
+        f"带诱饵：{with_bait!r}\n不带诱饵：{without_bait!r}"
+    )
 
-    assert dropped, "正文里的路径被当成了采纳证据"
+
+def _synth_anomaly() -> Anomaly:
+    """汇总交回的那条结论：它**只**认领 `S2-1`（于是 `S1-1` 成了真缺口）。"""
+    return Anomaly(
+        title="【其它】汇总只认领了 S2-1",
+        category="code_logic",
+        severity="mid",
+        confidence="mid",
+        evidence=["提交 f844faa6f59c：改动"],
+        source_candidate_ids=("S2-1",),
+    )
+
+
+def _other_candidate() -> Candidate:
+    """第二条候选（`S2-1`）—— 它是被交回的那一条，用来让缺口判定真的跑起来。"""
+    return Candidate(
+        member_label="S2",
+        index=1,
+        anomaly=Anomaly(
+            title="【其它】一条无关的候选",
+            category="code_logic",
+            severity="low",
+            confidence="low",
+            evidence=["提交 f844faa6f59c：改动"],
+            file_path=FETCHED_PATH,
+            impact="无",
+            suggestion="无",
+        ),
+    )
 
 
 def coverage_section_with_failed_path() -> str:

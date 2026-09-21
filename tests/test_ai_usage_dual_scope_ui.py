@@ -175,7 +175,9 @@ _NOTE_OUT = """function (A, sandbox, makeElement) {
 }"""
 
 
-def _run_node(script: str, probe_source: str, out_source: str) -> dict:
+def _run_node(
+    script: str, probe_source: str, out_source: str, cases: dict | None = None
+) -> dict:
     """把模板里那段脚本读进 node 跑起来，按 `out_source` 把要断言的东西取回来。"""
     if not shutil.which("node"):
         pytest.skip("环境里没有 Node，跳过真实运行的纯函数断言")
@@ -219,7 +221,8 @@ process.stdout.write(JSON.stringify(out));
         script_path.write_text(script, encoding="utf-8")
         cases_path = Path(tmp) / "cases.json"
         cases_path.write_text(
-            json.dumps({"noteCases": _NOTE_CASES}, ensure_ascii=False), encoding="utf-8"
+            json.dumps(cases or {"noteCases": _NOTE_CASES}, ensure_ascii=False),
+            encoding="utf-8",
         )
         driver_path = Path(tmp) / "driver.js"
         driver_path.write_text(driver, encoding="utf-8")
@@ -359,10 +362,21 @@ class TestTheWiring:
         )
 
     def test_the_kpi_subtitle_says_the_runs_are_completed(self):
-        body = _function_body(_dashboard_script(), "renderKpis")
+        """「N / M 次」里的两个数都是**已完成**的运行，而且 M 是这一屏的运行总数。
 
-        assert "次已完成运行采集到用量" in body, "「N / M 次运行」会被读成「一共跑了 M 次」"
+        这条原先钉的是 `renderKpis` 里的一句字面量；现在那句话搬进了纯函数
+        `aiuKpiCards`（口径没变，只是搬了家 —— 搬家的理由是那样能被 node 真跑，
+        见下面 `TestTheKpiCardsKeepTheKnownNumbersVisible`）。
+        """
+        script = _dashboard_script()
+        body = _function_body(script, "aiuKpiCards")
+        coverage = _function_body(script, "aiuCoverageText")
+        render = _function_body(script, "renderKpis")
+
+        assert "次已完成运行" in coverage, "「N / M 次运行」会被读成「一共跑了 M 次」"
         assert "次运行中，未计入" in body, "有在途运行时没有说一句「另有 N 次没算进来」"
+        # 渲染这一层**不做任何口径判断**：卡片内容全部来自那个纯函数。
+        assert "aiuKpiCards(" in render, "renderKpis 又自己算起口径来了"
 
     def test_the_running_row_is_never_padded_with_a_zero(self):
         """运行列表里在途那一条：token 读不出来就是「未上报」，不许 `|| 0`。"""
@@ -386,6 +400,25 @@ class TestTheWiring:
             "项目行只写「N 次运行」而合计只算已完成的那些 —— 不说清就会出现"
             "「这行写 3 次、点开列了 4 条」"
         )
+
+    def test_the_project_and_weekly_rows_also_keep_the_known_numbers(self):
+        """行内的命中率与费用**也要**先读已上报样本，不能只有顶部 KPI 修了。
+
+        验收标准写的是「部分历史缺字段时，已知费用与缓存命中仍然可见」—— 只修 KPI
+        的话，用户点进项目看到的仍然是一整格「未上报」，而下面那行还写着
+        「20 次运行 · 15 次采集到用量」。
+        """
+        script = _dashboard_script()
+        for name in ("renderProjects", "renderWeekly"):
+            body = _function_body(script, name)
+            assert "reported_samples" in body, f"{name} 还在只读那一份全体齐全的值"
+            assert "known_value" in body, name
+
+    def test_the_weekly_row_states_its_coverage(self):
+        """周版本行要把覆盖率写在**行上**：行里的数字是已上报样本的值。"""
+        body = _function_body(_dashboard_script(), "renderWeekly")
+
+        assert "collected_runs" in body and "次采集到用量" in body
 
     def test_no_markdown_asterisks_leak_into_the_page(self):
         """这段脚本里**不许出现 `**`**：注释全部剥掉之后还剩下的星号，只可能在字符串里。
@@ -472,3 +505,442 @@ class TestTheAutoRefreshKeepsThatPromise:
         assert body.index("if (!opts.quiet)") < body.index("加载中..."), (
             "安静那一拍也写「加载中...」，会把眼前的表格抹掉一瞬"
         )
+
+
+# ==========================================================================
+#  四、KPI 卡片读的是「已上报样本 + 覆盖度」（AI-P1-02）
+# ==========================================================================
+# 库里的真实形状：20 次已完成运行里 5 次（失败在半路）token 三列全 NULL。
+# 修之前，`tokens.total` / `cache.hit_rate` / `cost` 三者同时是 `null`，于是整屏
+# 「未上报」——**一个历史缺失值抹掉了另外 15 次的有效统计**。
+#
+# 修法不是放宽旧的三个字段（它们仍然是「全体齐全时的精确值」），而是让页面优先读
+# 服务端并列下发的 `reported_samples.*.known_value`，并把覆盖率写在副标题里。
+# 这里用 **node 真跑** `aiuKpiCards`：静态断言只看得到字符串，看不见「到底显示了哪个数」。
+
+
+def _totals(**overrides) -> dict:
+    """一份 `completed_totals`（形状与 `aggregate_runs` 的产物一致）。"""
+    totals = {
+        "runs": 20,
+        "collected_runs": 20,
+        "tokens": {"input": 15000, "output": 3000, "total": None,
+                   "cache_read": 6000, "cache_write": None},
+        "cache": {"hit_rate": None, "read": 6000, "missing_runs": 5},
+        "missing_runs": {"input": 5, "output": 5, "cache_read": 5, "cache_write": 20,
+                         "context_chars": 0, "duration_ms": 0},
+        "cost": None,
+        "reported_samples": {
+            "total_runs": 20,
+            "tokens": {"total_runs": 20, "reported_runs": 15, "unknown_runs": 5,
+                       "known_value": 18000, "known_input": 15000, "known_output": 3000},
+            "cache": {"total_runs": 20, "reported_runs": 15, "unknown_runs": 5,
+                      "known_value": 0.4, "known_input": 15000, "known_cache_read": 6000},
+            "cost": {"total_runs": 20, "reported_runs": 15, "unknown_runs": 5,
+                     "known_value": {"amount": "0.04", "amount_exact": "0.0432",
+                                     "currency": "CNY", "price_version": "dual-1",
+                                     "notes": []},
+                     "reason": ""},
+        },
+    }
+    totals.update(overrides)
+    return totals
+
+
+_ALL_REPORTED = _totals(
+    tokens={"input": 15000, "output": 3000, "total": 18000,
+            "cache_read": 6000, "cache_write": None},
+    cache={"hit_rate": 0.4, "read": 6000, "missing_runs": 0},
+    missing_runs={"input": 0, "output": 0, "cache_read": 0, "cache_write": 20,
+                  "context_chars": 0, "duration_ms": 0},
+    cost={"amount": "0.04", "amount_exact": "0.0432", "currency": "CNY",
+          "price_version": "dual-1", "notes": []},
+    reported_samples={
+        "total_runs": 20,
+        "tokens": {"total_runs": 20, "reported_runs": 20, "unknown_runs": 0,
+                   "known_value": 18000, "known_input": 15000, "known_output": 3000},
+        "cache": {"total_runs": 20, "reported_runs": 20, "unknown_runs": 0,
+                  "known_value": 0.4, "known_input": 15000, "known_cache_read": 6000},
+        "cost": {"total_runs": 20, "reported_runs": 20, "unknown_runs": 0,
+                 "known_value": {"amount": "0.04", "amount_exact": "0.0432",
+                                 "currency": "CNY", "price_version": "dual-1",
+                                 "notes": []},
+                 "reason": ""},
+    },
+)
+
+_NOTHING_DONE = _totals(
+    runs=0, collected_runs=0,
+    tokens={"input": None, "output": None, "total": None,
+            "cache_read": None, "cache_write": None},
+    cache={"hit_rate": None, "read": None, "missing_runs": 0},
+    missing_runs={"input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
+                  "context_chars": 0, "duration_ms": 0},
+    reported_samples={
+        "total_runs": 0,
+        "tokens": {"total_runs": 0, "reported_runs": 0, "unknown_runs": 0,
+                   "known_value": None, "known_input": None, "known_output": None},
+        "cache": {"total_runs": 0, "reported_runs": 0, "unknown_runs": 0,
+                  "known_value": None, "known_input": None, "known_cache_read": None},
+        "cost": {"total_runs": 0, "reported_runs": 0, "unknown_runs": 0,
+                 "known_value": None, "reason": "还没有配置价格表"},
+    },
+)
+
+# 老响应：没有 `reported_samples`（接口回落的形状）—— 退回旧字段渲染，不许抛。
+_OLD_RESPONSE = {
+    "runs": 3,
+    "tokens": {"input": 3000, "output": 600, "total": 3600,
+               "cache_read": 1200, "cache_write": None},
+    "cache": {"hit_rate": 0.4}, "missing_runs": {}, "cost": None,
+}
+
+_KPI_CASES = [
+    # 0：**这个文件存在的理由** —— 部分历史缺字段。三张卡片都必须给出已知值。
+    [_totals(), 0, 0],
+    # 1：全体齐全 → 样本值与旧的精确值同时存在，卡片按精确值显示（不带「已上报样本」后缀）。
+    [_ALL_REPORTED, 0, 0],
+    # 2：一次都没完成（新项目，第一条还在跑）→ 三张卡片「未上报」，但**不报错、不补 0**。
+    [_NOTHING_DONE, 0, 0],
+    # 3：有在途运行 + 有超预算项目 → 两句都要出现，且不能把在途那次的临时值算进来。
+    [_totals(), 2, 3],
+    # 4：老响应（没有 `reported_samples`）→ 退回旧字段渲染，**不许抛**。
+    [_OLD_RESPONSE, 0, 0],
+]
+
+_KPI_OUT = """function (A, sandbox, makeElement) {
+    return {
+        cards: A.kpiCases.map(function (item) {
+            return sandbox.aiuKpiCards(item[0], item[1], item[2]);
+        }),
+        coverage: [
+            sandbox.aiuCoverageText(20, 5, '输入 token'),
+            sandbox.aiuCoverageText(20, 0, '输入 token'),
+            sandbox.aiuCoverageText(0, 0, '输入 token')
+        ]
+    };
+}"""
+
+
+@pytest.fixture(scope="module")
+def kpi_js() -> dict:
+    return _run_node(
+        _dashboard_script(), "", _KPI_OUT, cases={"kpiCases": _KPI_CASES}
+    )
+
+
+def _card(cards: list, label: str) -> dict:
+    matched = [card for card in cards if card["label"].startswith(label)]
+    assert len(matched) == 1, [card["label"] for card in cards]
+    return matched[0]
+
+
+class TestTheKpiCardsKeepTheKnownNumbersVisible:
+    def test_the_functions_are_really_callable(self, kpi_js):
+        assert len(kpi_js["cards"]) == len(_KPI_CASES)
+
+    def test_one_missing_history_row_does_not_blank_the_screen(self, kpi_js):
+        """15 次有数、5 次没有 → 三张卡片全部显示**已上报样本**的值，覆盖率写在副标题里。
+
+        这一条就是整件事的验收：修之前这三张卡片一起写「未上报」。
+        """
+        cards = kpi_js["cards"][0]
+
+        assert "未上报" not in [card["value"] for card in cards], cards
+        assert _card(cards, "合计 token")["value"] == "18.0k"
+        assert _card(cards, "合计 token")["unknown"] is False
+        assert "已上报样本 15 / 20 次已完成运行" in _card(cards, "合计 token")["sub"]
+        assert "已知值，不是总额" in _card(cards, "合计 token")["sub"]
+
+    def test_the_cache_rate_and_cost_stay_visible_and_say_what_they_are(self, kpi_js):
+        cards = kpi_js["cards"][0]
+        rate = _card(cards, "缓存命中率")
+        cost = _card(cards, "费用估算")
+
+        assert rate["value"] == "40.0%", rate
+        assert rate["unknown"] is False, "命中率整格「未上报」—— 那正是这次要修的症状"
+        assert "已上报样本" in rate["sub"]
+
+        assert cost["value"] == "¥0.04", cost
+        assert "已知最低费用" in cost["sub"], "费用的口径没写出来 —— 读的人会当成总额"
+        assert "已上报样本" in cost["sub"], cost["sub"]
+
+    def test_a_fully_reported_history_keeps_using_the_exact_values(self, kpi_js):
+        """全体齐全时**不**给卡片加「（已上报样本）」后缀 —— 那时两组数本来就相同。"""
+        cards = kpi_js["cards"][1]
+
+        assert _card(cards, "合计 token")["label"] == "合计 token"
+        assert _card(cards, "合计 token")["value"] == "18.0k"
+        assert _card(cards, "缓存命中率")["label"] == "缓存命中率"
+        assert "已上报样本" not in _card(cards, "缓存命中率")["sub"]
+
+    def test_nothing_completed_means_unknown_not_zero(self, kpi_js):
+        """一次都没完成 → 「未上报」，**不是 0**：0 是「跑了但没花」，与「还没跑」正相反。"""
+        cards = kpi_js["cards"][2]
+
+        assert _card(cards, "合计 token")["value"] == "未上报"
+        assert _card(cards, "合计 token")["unknown"] is True
+        assert _card(cards, "缓存命中率")["value"] == "未上报"
+
+    def test_an_unconfigured_price_table_gives_the_reason_not_unknown(self, kpi_js):
+        """价格表算不出费用时给**理由**，不写「未上报」—— 那是 token 的口径。"""
+        cost = _card(kpi_js["cards"][2], "费用估算")
+
+        assert cost["value"] == "还没有配置价格表", cost
+        assert cost["unknown"] is True
+
+    def test_active_runs_are_named_in_the_subtitle_not_counted_in(self, kpi_js):
+        cards = kpi_js["cards"][3]
+
+        assert "另有 3 次运行中，未计入" in _card(cards, "合计 token")["sub"]
+        assert _card(cards, "合计 token")["value"] == "18.0k", (
+            "在途那几次的临时值混进了合计"
+        )
+        assert _card(cards, "已超预算的项目")["value"] == "2 个"
+
+    def test_an_old_response_without_samples_still_renders(self, kpi_js):
+        """老响应（没有 `reported_samples`）→ 退回旧字段，不抛、不白屏。"""
+        cards = kpi_js["cards"][4]
+
+        assert _card(cards, "合计 token")["value"] == "3.6k"
+        assert _card(cards, "缓存命中率")["value"] == "40.0%"
+        assert len([card for card in cards if card["label"] == "费用估算"]) == 0
+
+    def test_the_coverage_sentence_has_three_shapes(self, kpi_js):
+        """覆盖率那句在三种情况下都要说得通：部分 / 全部 / 一次都没有。"""
+        partial, full, none = kpi_js["coverage"]
+
+        assert partial == "已上报样本 15 / 20 次已完成运行，另有 5 次未上报输入 token"
+        assert full == "全部 20 次已完成运行都已上报"
+        assert none == "还没有已完成的运行"
+
+
+# ==========================================================================
+#  五、执行前的预估卡片（AI-P1-03）
+# ==========================================================================
+# 同一段脚本里再跑一个纯函数：`aiuEstimateCards`。三条硬要求各有用例 ——
+# **只给区间不给单点**、**价格没配置时只给 token 与时间**、**基线单独一张卡**。
+
+_ESTIMATE_CASES = [
+    # 0：价格表没配（`DEFAULT_PRICE_TABLE` 是空表，这是常态）→ 只给 token 与时间。
+    [{
+        "tokens": {"low": 1519646, "high": 3424708, "unit": "token"},
+        "duration_ms": {"low": 1214893, "high": 2165817},
+        "shard_count": 3,
+        "baseline": {"reusable": False, "note": "没有命中可复用基线，这次会真的跑一遍模型。"},
+        "cost": {"low": None, "high": None, "computable": False,
+                 "reason": "还没有配置价格表", "currency": ""},
+        "last_actual": {"run_id": 20, "files": 1009, "tokens": 1999833,
+                        "duration_ms": 1595548, "shards": 3},
+        "basis": {"source": "files", "runs": 15, "same_mode_runs": 15,
+                  "files": {"low": 847, "high": 1009}, "shards": None, "run_ids": [1]},
+        "notes": [],
+    }],
+    # 1：配了价格表 → 给区间；两端相同就写一个数（不写 `2.0M ~ 2.0M`）。
+    [{
+        "tokens": {"low": 2000000, "high": 2000000, "unit": "token"},
+        "duration_ms": {"low": 1500000, "high": 1500000},
+        "shard_count": 1,
+        "baseline": {"reusable": True,
+                     "note": "命中可复用基线：这次不需要新建付费运行，直接复用已有结论。"},
+        "cost": {"low": {"amount": "4.00", "price_version": "v2", "currency": "CNY"},
+                 "high": {"amount": "4.00", "price_version": "v2", "currency": "CNY"},
+                 "computable": True, "reason": "", "currency": "CNY"},
+        "last_actual": None,
+        "basis": {"source": "totals", "runs": 2, "same_mode_runs": 0,
+                  "files": {"low": None, "high": None}, "shards": None, "run_ids": []},
+        "notes": ["没有「incremental」的历史运行，区间按最近 2 次运行估算；"],
+    }],
+    # 1.5：**借来的区间**：增量没有实测样本，服务端给的是全量运行的区间
+    #      （`basis.mode_samples_missing`）—— 必须照实标出来，不许写成「预计增量代价」。
+    [{
+        "mode": "incremental",
+        "tokens": {"low": 1275659, "high": 2874854, "unit": "token"},
+        "duration_ms": {"low": 900000, "high": 1600000},
+        "shard_count": 3,
+        "baseline": {"reusable": True, "note": "命中可复用基线：这次不需要新建付费运行。"},
+        "cost": {"low": None, "high": None, "computable": False,
+                 "reason": "还没有配置价格表", "currency": ""},
+        "last_actual": None,
+        "basis": {"source": "files", "runs": 15, "same_mode_runs": 0,
+                  "mode_samples_missing": True,
+                  "files": {"low": 847, "high": 1009}, "shards": 3, "run_ids": [1]},
+        "notes": ["**incremental 没有实测样本**：这里参照的是全量运行的区间（最近 15 次），"
+                  "不是这个模式的实测值 —— 换了模式之后文件数与轮次都会变，实际可能明显偏离。"],
+    }],
+    # 2：一条可参照的运行都没有 → 三格「未上报」，不许抛、不许编数字。
+    [{"basis": {"source": "none", "runs": 0, "same_mode_runs": 0,
+                "files": {"low": None, "high": None}, "shards": None, "run_ids": []},
+      "tokens": {"low": None, "high": None, "unit": "token"},
+      "duration_ms": {"low": None, "high": None},
+      "baseline": {"reusable": None, "note": "这次能不能复用基线还没有判定。"},
+      "cost": {"low": None, "high": None, "computable": False,
+               "reason": "还没有配置价格表", "currency": ""},
+      "last_actual": None,
+      "notes": ["还没有可参照的历史运行，无法估算 —— 先跑一次才有区间。"]}],
+]
+
+_ESTIMATE_OUT = """function (A, sandbox, makeElement) {
+    return {
+        type: typeof sandbox.aiuEstimateCards,
+        cards: A.estimateCases.map(function (item) {
+            return sandbox.aiuEstimateCards(item[0]);
+        })
+    };
+}"""
+
+
+@pytest.fixture(scope="module")
+def estimate_js() -> dict:
+    return _run_node(
+        _dashboard_script(), "", _ESTIMATE_OUT,
+        cases={"estimateCases": _ESTIMATE_CASES},
+    )
+
+
+class TestTheEstimateCardsNeverFakeACost:
+    def test_the_function_is_really_callable(self, estimate_js):
+        assert estimate_js["type"] == "function"
+        assert len(estimate_js["cards"]) == len(_ESTIMATE_CASES)
+
+    def test_without_a_price_table_tokens_and_time_still_come_through(self, estimate_js):
+        """**价格没配置时显示 token 与时间，不伪造费用**（AI-P1-03 的硬要求）。"""
+        cards = estimate_js["cards"][0]
+
+        assert _card(cards, "预计 token")["value"] == "1.52M ~ 3.42M"
+        assert _card(cards, "预计时间")["value"] == "20.2 min ~ 36.1 min"
+        assert _card(cards, "预计费用")["value"] == "算不出", cards
+        assert _card(cards, "预计费用")["unknown"] is True
+        assert "还没有配置价格表" in _card(cards, "预计费用")["sub"]
+        assert "0" not in _card(cards, "预计费用")["value"], "把「算不出」写成了 0"
+
+    def test_the_last_actual_value_and_the_baseline_are_shown(self, estimate_js):
+        """确认框要的四样这里都有：预计 token / 预计时间 / 最近一次实际值 / 是否命中基线。"""
+        cards = estimate_js["cards"][0]
+
+        last = _card(cards, "最近一次实际值")
+        assert "2.00M token" in last["value"], last
+        assert "运行 #20" in last["sub"] and "1009 个文件" in last["sub"]
+        assert _card(cards, "可复用基线")["value"] == "没有命中"
+        assert "命中可复用基线" in _card(cards, "可复用基线")["sub"]
+
+    def test_a_single_ended_range_is_not_written_twice(self, estimate_js):
+        """区间两端相同时写一个数（`2.0M ~ 2.0M` 会被读成「范围很大」）。"""
+        cards = estimate_js["cards"][1]
+
+        assert _card(cards, "预计 token")["value"] == "2.00M"
+        assert _card(cards, "预计时间")["value"] == "25.0 min"
+        assert _card(cards, "可复用基线")["value"] == "命中"
+        assert _card(cards, "预计费用")["value"] == "¥4.00", cards
+
+    def test_a_borrowed_range_says_it_is_borrowed(self, estimate_js):
+        """增量没有实测样本 → 区间**照给**，但必须写明它是从全量借来的。
+
+        这一条是裁定过的口径：库里全是全量运行，那就不要假装知道增量要花多少。
+        界面**不许**把这个数标成「预计增量代价」—— 一个偏保守但自称准确的数字，
+        比一句「这个模式没有实测样本」更容易被当真、更容易被拿去做决策。
+        """
+        cards = estimate_js["cards"][2]
+
+        token = _card(cards, "预计 token")
+        assert "增量：参照全量" in token["label"], token["label"]
+        assert "全量" in token["sub"] and "不是增量的实测值" in token["sub"], token["sub"]
+        assert "同类运行" not in token["sub"], (
+            "借来的区间却说是「同类运行」折算的 —— 那是两件事"
+        )
+        assert "增量：参照全量" in _card(cards, "预计时间")["label"]
+
+    def test_a_same_mode_range_is_not_labelled_as_borrowed(self, estimate_js):
+        """有本模式实测样本时**不许**挂那个后缀（挂上去会把真估算说成借来的）。"""
+        cards = estimate_js["cards"][0]
+
+        assert "参照全量" not in _card(cards, "预计 token")["label"]
+        assert "同类运行" in _card(cards, "预计 token")["sub"]
+
+    def test_no_history_is_unknown_and_says_so(self, estimate_js):
+        cards = estimate_js["cards"][3]
+
+        assert _card(cards, "预计 token")["value"] == "未上报"
+        assert "先跑一次才有区间" in _card(cards, "预计 token")["sub"]
+        assert _card(cards, "预计费用")["value"] == "算不出"
+
+
+class TestTheEstimateWiring:
+    """估算那一格的接线：卡片在、端点对、数字来自接口而不是模板里写死的常数。"""
+
+    def test_the_card_exists_and_sits_with_the_kpi_block(self):
+        html = _read(DASHBOARD)
+
+        for anchor in ("aiuEstimateCard", "aiuEstimateBody", "aiuEstimateProject",
+                       "aiuEstimateMode", "aiuEstimateFiles"):
+            assert f'id="{anchor}"' in html, anchor
+        # 它在 KPI 下面（「已经花了多少」→「下一次大概花多少」），在项目表上面。
+        assert html.index('id="aiuKpis"') < html.index('id="aiuEstimateCard"')
+        assert html.index('id="aiuEstimateCard"') < html.index("各项目消耗")
+
+    def test_it_calls_the_read_only_endpoint(self):
+        script = _dashboard_script()
+
+        assert "/ai-analysis/usage/estimate" in script, "估算没有走服务端的端点"
+        body = _function_body(script, "loadEstimate")
+        assert "params.set('project'" in body
+        assert "params.set('mode'" in body, "模式没传，服务端只能按全量估"
+        # 失败**不覆盖**上面那些已经取回来的数字（那是这一页的正文）。
+        assert "renderEstimate({})" in body
+
+    def test_the_numbers_come_from_the_payload_not_from_the_template(self):
+        script = _dashboard_script()
+        body = _function_body(script, "aiuEstimateCards")
+
+        for key in ("tokens", "duration_ms", "last_actual", "baseline", "cost", "basis"):
+            assert key in body, f"估算卡片没有读 {key}"
+
+    def test_a_failed_estimate_does_not_blank_the_grid(self):
+        body = _function_body(_dashboard_script(), "renderEstimate")
+
+        assert "payload.basis" in body, (
+            "没有估算结果时也摆一排「未上报」—— 那是「还没问」，不是「算不出」"
+        )
+
+    def test_the_notes_are_rendered_on_the_page_not_only_returned(self):
+        """**前提必须落在页面上**，不能只躺在接口字段里。
+
+        `notes` 里写着「分片是串行的，按 N 个分片折算」「目标文件数超出样本区间属于外推」
+        「增量参照的是全量区间」这些前提 —— 区间一旦离开前提，读起来就是一个承诺。
+        所以 `notes` 只回给接口 = 丢了前提，这一条钉的就是「它真的被写进页面」。
+        """
+        script = _dashboard_script()
+        body = _function_body(script, "renderEstimate")
+
+        assert "aiuEstimateNotes" in body, "notes 没有写进页面上那个节点"
+        assert "payload.notes" in body
+        assert "notes.hidden = !lines.length" in body, "没有 notes 时那一行要收起来"
+        # 接口给的前提里有 markdown 味的 `**加粗**`（后端文案自带），front-end 必须抹掉 ——
+        # `textContent` 不认 markdown，原样落下去用户看到的是两个星号。
+        assert "replace(/\*\*/g" in body, "notes 里的 ** 会原样显示给用户"
+        # 页面里那个承载节点必须是可见的普通段落（不是 hidden 的容器）。
+        html = _read(DASHBOARD)
+        assert 'id="aiuEstimateNotes"' in html
+
+    def test_the_shard_precondition_is_in_the_notes_not_just_in_the_payload(self):
+        """分片折算那句前提必须**同时在**接口字段与页面可见处 —— 服务端 `notes` 里
+        有一句「按 N 个分片折算…分片是串行的」，页面照单渲染（上一条钉渲染）。
+
+        这里再钉一次**文案本身**还在：它是「token 按分片数折算」这个做法的唯一说明，
+        删掉它，那个数字就从「有依据的粗估」变成「来路不明的精确值」。
+        """
+        from services.ai.usage import estimate_analysis
+
+        result = estimate_analysis(
+            planned_files=100, mode="full", shard_count=4,
+            recent_runs=[{
+                "run_id": 1, "created_at": "2026-09-01", "scope": "full",
+                "tokens_input": 1_000_000, "tokens_output": 200_000,
+                "cache_read": 800_000, "duration_ms": 600_000,
+                "files": 100, "shards": 2, "model": "m", "cost": None,
+            }],
+        )
+
+        shard_notes = [note for note in result["notes"] if "分片" in note]
+        assert shard_notes, result["notes"]
+        assert any("串行" in note for note in shard_notes), shard_notes

@@ -62,6 +62,7 @@ from services.agent_task_enqueue_service import (
     AGENT_TASK_ACTIVE_STATUSES,
     enqueue_agent_task_once,
 )
+from services.task_worker_priority import AGENT_FILE_CONTENT
 from utils.content_window import CONTENT_MAX_CHARS
 
 FILE_CONTENT_TASK_TYPE = "file_content"
@@ -467,7 +468,7 @@ def _request_from_agent(
                 project_id=project_id,
                 repository_id=repository_id,
                 source_task_id=None,
-                priority=4,
+                priority=AGENT_FILE_CONTENT,
                 payload={
                     "repository_id": int(repository_id),
                     "project_id": int(project_id),

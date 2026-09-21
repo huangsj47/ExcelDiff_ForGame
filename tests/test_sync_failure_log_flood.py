@@ -197,3 +197,128 @@ class _FakeApp:
             yield
 
         return _ctx()
+
+
+class TestHotPathLoggingNoLongerFloods:
+    """第三种刷屏：热路径里**按文件**打的路径日志。
+
+    复测文档 7.1 实测的那一份：日志写到 3,826 行时，其中 1,003 + 1,005 = 2,008 行
+    只是「检查本地路径 / 路径是否存在」（占 52.5%）。它们由
+    `vcs_content_service.get_file_content_from_git` 按文件打印，所以条数与仓库文件数
+    成正比 —— 833 个文件的同步就是 1,666 行，只会随仓库变大而变大。
+
+    验收不能只看「行数少了」：那 2,008 行原来回答的是「扫了多少个文件、有多少不存在」，
+    删干净同样能让行数变少，但诊断能力就没了。所以这里同时钉住汇总计数。
+    """
+
+    def _drive(self, count, tmp_path):
+        """跑真的那个调用点 `get_file_content_from_git`，返回它打出来的行。
+
+        **要连带堵住真日志入口**：只桩 `log_sampling.log_print` 的话，这句
+        `from utils.logger import log_print`（`vcs_content_service` 模块里绑的那个）
+        一旦被改回无条件打印，那些行会落到 `logs/runlog.log` 而不进 `lines` ——
+        断言照绿、回归照漏。这个洞是变异验证试出来的。
+        """
+        from types import SimpleNamespace
+
+        from services import log_sampling, vcs_content_service
+
+        worktree = tmp_path / 'repos' / 'demo'
+        worktree.mkdir(parents=True)
+
+        class _FakeBlob:
+            data_stream = SimpleNamespace(read=lambda: b'x')
+
+        class _FakeTree(dict):
+            def __getitem__(self, key):
+                return _FakeBlob()
+
+        class _FakeCommit:
+            tree = _FakeTree()
+
+        class _FakeRepo:
+            def __init__(self, _path):
+                pass
+
+            def commit(self, _commit_id):
+                return _FakeCommit()
+
+        import git as git_module
+
+        lines = []
+        original_log_print = log_sampling.log_print
+        original_module_log_print = vcs_content_service.log_print
+        original_get_git_service = vcs_content_service.get_git_service
+        original_Repo = git_module.Repo
+        git_module.Repo = _FakeRepo
+        log_sampling.log_print = lambda message, log_type='INFO', force=False: lines.append(message)
+        vcs_content_service.log_print = log_sampling.log_print
+        vcs_content_service.get_git_service = lambda _repo: SimpleNamespace(
+            local_path=str(worktree),
+            clone_or_update_repository=lambda: (True, 'ok'),
+        )
+        log_sampling.reset_log_sampling()
+        try:
+            repository = SimpleNamespace(id=1, name='demo')
+            with log_sampling.log_sampling_scope('weekly_diff'):
+                for index in range(count):
+                    vcs_content_service.get_file_content_from_git(
+                        repository, 'a' * 40, f'code/file_{index}.lua',
+                    )
+        finally:
+            git_module.Repo = original_Repo
+            log_sampling.log_print = original_log_print
+            vcs_content_service.log_print = original_module_log_print
+            vcs_content_service.get_git_service = original_get_git_service
+            log_sampling.reset_log_sampling()
+        return lines
+
+    def test_a_thousand_files_no_longer_produce_two_thousand_lines(self, tmp_path):
+        lines = self._drive(1003, tmp_path)
+
+        path_lines = [line for line in lines if '检查本地路径' in line or '路径是否存在' in line]
+        assert len(path_lines) <= 10, (
+            f'1,003 个文件打出了 {len(path_lines)} 行路径日志（原来是 2,006 行）：\n'
+            + '\n'.join(path_lines[:20])
+        )
+
+    def test_the_counts_still_answer_how_many_were_scanned(self, tmp_path):
+        """采样不许把「扫了多少个」弄丢 —— 那是原来那 2,008 行在回答的问题。"""
+        lines = self._drive(1003, tmp_path)
+
+        summaries = [line for line in lines if '检查本地路径: 处理' in line]
+        assert summaries, f'没有汇总行，计数丢了：{lines[:10]}'
+        assert any('处理 1003 次' in line for line in summaries), summaries
+        assert any('1003 次命中' in line for line in summaries), summaries
+
+    def test_a_missing_worktree_is_reported_as_a_number(self, tmp_path):
+        """「有多少个不存在」也要能查到：命中/未命中分开计。"""
+        from types import SimpleNamespace
+
+        from services import log_sampling, vcs_content_service
+
+        missing = tmp_path / 'repos' / 'not-cloned'
+        lines = []
+        original_log_print = log_sampling.log_print
+        original_get_git_service = vcs_content_service.get_git_service
+        fake_service = SimpleNamespace(
+            local_path=str(missing),
+            clone_or_update_repository=lambda: (False, '工作副本不存在'),
+        )
+        vcs_content_service.get_git_service = lambda _repo: fake_service
+        log_sampling.log_print = lambda message, log_type='INFO', force=False: lines.append(message)
+        log_sampling.reset_log_sampling()
+        try:
+            repository = SimpleNamespace(id=1, name='demo')
+            with log_sampling.log_sampling_scope('weekly_diff'):
+                for _index in range(5):
+                    vcs_content_service.get_file_content_from_git(repository, 'a' * 40, 'code/x.lua')
+        finally:
+            vcs_content_service.get_git_service = original_get_git_service
+            log_sampling.log_print = original_log_print
+            log_sampling.reset_log_sampling()
+
+        assert any('5 次未命中' in line for line in lines), (
+            f'「本地工作副本不存在」没被计数：{lines}'
+        )
+

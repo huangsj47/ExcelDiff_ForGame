@@ -462,6 +462,13 @@ def delete_project(project_id):
     AiProjectAnalysisConfig = _optional_runtime("AiProjectAnalysisConfig")
     AiProjectApiKey = _optional_runtime("AiProjectApiKey")
     AiWeeklyAnalysisState = _optional_runtime("AiWeeklyAnalysisState")
+    # Diff 快照（`models/ai_analysis/diff_snapshot.py`）：`project_id` 是**非空**外键，
+    # 且 `Project` 上的 backref 默认 cascade 里没有 delete —— 不显式清，删除项目时
+    # SQLAlchemy 会先把子行的 `project_id` 置 NULL，撞 NOT NULL，**整个项目删不掉**。
+    AiDiffSnapshot = _optional_runtime("AiDiffSnapshot")
+    AiDiffSnapshotItem = _optional_runtime("AiDiffSnapshotItem")
+    # 同理：AI 分析的**任务身份**表（`models/ai_analysis/job.py`）。
+    AiAnalysisJob = _optional_runtime("AiAnalysisJob")
     AgentTempCache = _optional_runtime("AgentTempCache")
 
     def _safe_delete(query, label):
@@ -609,6 +616,40 @@ def delete_project(project_id):
                     AiWeeklyAnalysisState.project_id == project_id
                 ),
                 "AiWeeklyAnalysisState",
+            )
+        if AiDiffSnapshot is not None:
+            # **先子后父**：`ai_diff_snapshot_item.snapshot_id` 也是非空外键。两张表都要
+            # 清掉，只删父表会留一堆谁也读不到的条目行（同 `ai_analysis_trace`
+            # 那一条的取舍，见 `services/ai/run_cache_source.cleanup_expired_analysis_runs`）。
+            snapshot_ids = [
+                row[0]
+                for row in db.session.query(AiDiffSnapshot.id).filter(
+                    AiDiffSnapshot.project_id == project_id
+                ).all()
+            ]
+            if snapshot_ids and AiDiffSnapshotItem is not None:
+                _safe_delete(
+                    AiDiffSnapshotItem.query.filter(
+                        AiDiffSnapshotItem.snapshot_id.in_(snapshot_ids)
+                    ),
+                    "AiDiffSnapshotItem",
+                )
+            _safe_delete(
+                AiDiffSnapshot.query.filter(AiDiffSnapshot.project_id == project_id),
+                "AiDiffSnapshot",
+            )
+        if AiAnalysisJob is not None:
+            # 同上（`models/ai_analysis/job.py` 的 `project_id` 同样是非空外键）。
+            # 这一条是**删除能不能成功**的必要条件，不是「顺手清垃圾」：项目下只要有过
+            # 一次 AI 分析动作，`backref` 的默认 cascade 就会去把 `project_id` 置 NULL，
+            # 撞 NOT NULL 之后整个删除事务回滚 —— 用户看到的是「删不掉」。
+            #
+            # **没有子表**：指向 job 的只有 `BackgroundTask.job_id`，那是普通整数列、
+            # 没有外键（见 `models/task.py` 里那段说明），所以这一条是单表删除，
+            # 不需要像上面 `AiDiffSnapshot` 那样先子后父。
+            _safe_delete(
+                AiAnalysisJob.query.filter(AiAnalysisJob.project_id == project_id),
+                "AiAnalysisJob",
             )
         if AgentTempCache is not None:
             # 这张表**没有外键**（`project_id` 只是个可空列），所以它既不会让删除失败，

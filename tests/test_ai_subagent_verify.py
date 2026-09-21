@@ -166,41 +166,56 @@ class TestTheRoundRunsAfterTheSynthesis:
 
 
 class TestTheReportGetsTheSection:
-    def test_the_section_is_appended_with_a_heading(self):
-        client = FlakyClient(_final(_anomaly()), _final(_anomaly()), _final(_anomaly()), VERIFY_REPLY)
-        result = run_family(client=client, provider=FakeProvider(), plan=_plan(2), **_args())
+    """AI-P1-01（2026-09-21）：对账轮的原文**不再进报告正文**，改为独立存档。
 
-        report = result.outcome.report_markdown
-        assert "## 对账结果（找反证）" in report
-        assert "未找到反证" in report, "模型写的那段要原样带进报告"
-        # 抬头在前、正文在后（读者先知道这是什么，再读结论）。
-        assert report.index("## 对账结果（找反证）") < report.index("未找到反证")
+    改之前：报告 = 模型汇总稿 + 「复核裁决（平台）」+ 「对账结果（找反证）」原文 ——
+    同一件事在报告里出现三遍（模型稿一遍、平台按裁决渲染一遍、对账轮原文一遍），
+    而读的人还得自己辨认哪一句已经被裁决改掉。run 20 的正文里那份汇总稿、裁决节、
+    对账轮原文分别从 0 / 13833 / 16981 字符处开始，就是这么来的。
 
-    def test_the_appended_section_adds_no_top_level_heading(self):
-        """对账轮那段**要降一级再贴**：报告的一级标题不许因为它变多或重名。
+    现在正文只留平台那几节规范结论，原文进结论载荷的 `verify_report_markdown`
+    （存档，默认不渲染）。**原文一个字都不许丢**，下面几条钉的就是这个。
+    """
 
-        实测那次：对账轮交回的是**一整份报告**（7 个一级标题一个不少），原样贴进
-        `## 对账结果（找反证）` 之后，整份文档有 **15 个一级标题**（7 个各出现两次）。
-        而契约是「固定 7 个一级标题、顺序固定」（`skill_contract.REPORT_SECTIONS`，
-        `docs/AI分析使用说明.md` 也是这么写给测试同学看的）；读的人会以为收到两份报告，
-        按 `^# ` 切的解析拿到的段数也不对。
-
-        这条不数「是不是 7」（主报告的模板由 fixture 决定），只钉**不变量**：
-        追加这一节不许让一级标题变多、也不许重名。
-        """
+    def _run(self):
         client = FlakyClient(
             _final(_anomaly()), _final(_anomaly()), _final(_anomaly()), VERIFY_REPLY
         )
-        result = run_family(client=client, provider=FakeProvider(), plan=_plan(2), **_args())
+        return run_family(client=client, provider=FakeProvider(), plan=_plan(2), **_args())
 
-        report = result.outcome.report_markdown
-        h1 = [line for line in report.split("\n") if line.startswith("# ")]
-        assert "# 对账" not in h1, "对账轮那段没降级，报告多了一套一级标题"
-        assert "## 对账" in report, "降级过头了：它应当挂在二级标题下"
+    def test_the_original_survives_as_an_archive_instead_of_the_body(self):
+        outcome = self._run().outcome
+
+        assert "## 对账结果（找反证）" not in outcome.report_markdown, (
+            "对账轮原文又回到了报告正文里（AI-P1-01：正文只能有一份规范结论）"
+        )
+        archived = outcome.verify_report_markdown
+        assert "## 对账结果（找反证）" in archived, "原文要有抬头，不能只剩光秃秃一段"
+        assert "未找到反证" in archived, "模型写的那段要原样带进存档"
+        # 抬头在前、正文在后（读者先知道这是什么，再读结论）。
+        assert archived.index("## 对账结果（找反证）") < archived.index("未找到反证")
+
+    def test_the_archived_section_keeps_its_headings_demoted(self):
+        """对账轮那段**要降一级再存档**：它交回的是一整份报告（7 个一级标题一个不少）。
+
+        实测那次：原样贴进 `## 对账结果（找反证）` 之后整份文档有 **15 个一级标题**
+        （7 个各出现两次）。而契约是「固定 7 个一级标题、顺序固定」
+        （`skill_contract.REPORT_SECTIONS`）。存档这一份同样降级 —— 它随时可能被渲染给
+        人看（调试页），两处各写一份拼接迟早会漂移。
+        """
+        archived = self._run().outcome.verify_report_markdown
+
+        h1 = [line for line in archived.split("\n") if line.startswith("# ")]
+        assert "# 对账" not in h1, "对账轮那段没降级，存档里又出现一套一级标题"
+        assert "## 对账" in archived, "降级过头了：它应当挂在二级标题下"
         assert len(h1) == len(set(h1)), f"一级标题重名：{h1}"
 
-    def test_it_sits_before_the_gap_section(self):
-        """信息缺口永远在最后：读的人一眼就能看到「哪些东西没看到」。"""
+    def test_the_body_still_ends_with_the_gap_section(self):
+        """信息缺口永远在最后：读的人一眼就能看到「哪些东西没看到」。
+
+        （对账轮原文离开正文之后，这一条次序仍然成立 —— 正文里剩下的那几节里，
+        它排最后。）
+        """
         client = FlakyClient(
             _final(_anomaly()), _final(_anomaly()), _final(_anomaly()), VERIFY_REPLY,
             fail_on=1,
@@ -208,7 +223,10 @@ class TestTheReportGetsTheSection:
         result = run_family(client=client, provider=FakeProvider(), plan=_plan(2), **_args())
 
         report = result.outcome.report_markdown
-        assert report.index("## 对账结果（找反证）") < report.index("信息缺口（平台补充）")
+        assert "信息缺口（平台补充）" in report
+        assert report.rstrip().endswith("不是模型的自我说明。"), (
+            "信息缺口那一节不再收尾了"
+        )
 
     def test_a_failed_synthesis_gets_no_section_and_no_round(self):
         """汇总都没跑成时**不跑对账轮**：它核对的就是那份报告，而报告不存在。
@@ -407,6 +425,95 @@ def _outcome_engine(anomalies):
     from services.ai.engine import EngineOutcome
 
     return EngineOutcome(status=OK, anomalies=tuple(anomalies), report_markdown="# 报告\n")
+
+
+# ===========================================================================
+# AI-P1-01 的边界：唯一规范结论在**默认配置**下也得成立
+# ===========================================================================
+# 「有裁决节时草稿让位」这一条臂是安全的，因为 `render_ruling` 自己把最终结论清单渲染
+# 出来了 —— 正文里不会没有结论。而默认配置（`DEFAULT_SUBAGENT_VERIFY = False`，见
+# `models/ai_analysis/project_config.py`）**没有对账轮、没有裁决节**：这时没有任何东西
+# 替代草稿，把草稿也移出正文，等于每份报告与导出只剩「未归类 / 条数上限 / 信息缺口」，
+# 模型的全部结论散文消失 —— 那不是「唯一规范结论」，那是没有结论。
+#
+# 所以准则是「**同一份结论不许有两个来源**」：草稿让位时另存一份，不让位时它就是正文、
+# 且**不再另存**。下面两条各钉一条臂，反转判据（改成无条件移出）时第一条必须红。
+
+
+class TestTheDefaultConfigKeepsTheModelTextAsTheOneCanonicalReport:
+    """没有裁决节那条臂：模型交回的那份文本**就是**正文（而且不重复存一份）。"""
+
+    DRAFT = "# 变更理解\n\n改了道具表，主键被删。\n"
+    DRAFT_MARKER = "改了道具表，主键被删。"
+
+    def _run(self):
+        """默认配置（`verify=False`）跑一次**真实聚合**：两个分片 + 汇总，没有对账轮。"""
+        client = FlakyClient(
+            _final(_anomaly()),  # S1
+            _final(_anomaly()),  # S2
+            _final(_anomaly(), report=self.DRAFT),  # 汇总：模型交回的那份文本
+        )
+        return run_family(
+            client=client, provider=FakeProvider(), plan=_plan(2, verify=False), **_args()
+        )
+
+    def test_the_model_text_is_the_one_canonical_report(self):
+        outcome = self._run().outcome
+
+        assert self.DRAFT_MARKER in outcome.report_markdown, (
+            "默认配置下模型交回的结论散文不在正文里 —— 报告只剩平台那几节，"
+            "而这一档没有裁决节来替代它"
+        )
+        assert outcome.draft_markdown == "", (
+            "草稿既在正文又另存了一份：同一段字节在结论载荷里出现两次"
+        )
+
+        from services.ai.result_payload import result_payload
+
+        payload = result_payload(outcome, {"summary": {}}, suppressed=frozenset())
+        assert payload["report_markdown"] == outcome.report_markdown
+        assert self.DRAFT_MARKER in payload["report_markdown"]
+        assert payload["draft_markdown"] == ""
+
+    def test_the_platform_sections_are_still_appended_to_it(self):
+        """草稿留在正文 ≠ 平台不说话：平台那几节照样接在它后面（次序也不变）。"""
+        report = self._run().outcome.report_markdown
+
+        assert "## 信息缺口（平台补充）" in report, (
+            "汇总没交回候选血缘时这一节必然出现；它不在说明平台那几节没接上"
+        )
+        assert report.index(self.DRAFT_MARKER) < report.index("## 信息缺口（平台补充）"), (
+            "平台那几节没有排在模型正文之后"
+        )
+
+
+class TestTheDraftYieldsWhenThePlatformHasItsOwnSection:
+    """另一条臂：**有**裁决节时，草稿离开正文、只在 `draft_markdown` 里。"""
+
+    def test_the_draft_leaves_the_body_and_lands_in_its_own_key(self):
+        from tests.test_ai_verify_verdict import _critical_round, _run, _verdict_reply
+
+        outcome = _run(
+            _critical_round(
+                _verdict_reply(
+                    {
+                        "finding_id": "F1",
+                        "verdict": "retracted",
+                        "reason": "同一提交里生成文件已经删掉了",
+                        "evidence_refs": ["config/[30]道具表_CfgItem.xlsx 第 12 行"],
+                    }
+                )
+            )
+        ).outcome
+
+        assert outcome.report_markdown.startswith("## 复核裁决（平台）"), (
+            "这一条臂没走到「有裁决节」—— 那它就没在验 P1-01 的移出判据"
+        )
+        assert "改了道具表。" not in outcome.report_markdown, (
+            "有裁决节了，草稿还在正文里：读的人得自己辨认哪一句已经被裁决改掉"
+        )
+        assert outcome.draft_markdown.startswith("# 变更理解"), "草稿没进它自己的键"
+        assert "改了道具表。" in outcome.draft_markdown, "存档要逐字保留模型的原文"
 
 
 @pytest.mark.parametrize("count", [2, 3, 6])

@@ -4,9 +4,18 @@
 ## 缺陷形态（实测）
 
 `run_weekly_analysis_background`（后台路径）有 `weekly_sync_in_flight(group_config_ids(config))`
-这道闸，`stream_weekly_analysis`（手工路径，抽屉里那个按钮走的就是它）**全函数体没有**。
-实测：run 13 于 10:50:08 创建时，同组 config 2 的 `weekly_sync` 任务 355 正 processing
-（10:49:28→11:06:34）—— 那次分析建立在一份**还会变的跨仓库缓存**上。
+这道闸，而手工路径（抽屉里那个按钮）**全函数体没有**。实测：run 13 于 10:50:08 创建时，
+同组 config 2 的 `weekly_sync` 任务 355 正 processing（10:49:28→11:06:34）—— 那次分析
+建立在一份**还会变的跨仓库缓存**上。
+
+## P0-01 之后「手工路径」是哪里
+
+那条老的手工流式入口（`stream_weekly_analysis`）**已经没有生产调用方了**，已被删除。
+现在手工点击走的是 **`POST /ai-analysis/weekly/<id>/jobs` → `POST /jobs` →
+`job_service.create_or_attach_job` → `job_service._dispatch`**，闸门在这一跳上
+（`_dispatch` 里的 `weekly_sync_in_flight(group_config_ids(config))`，与后台那道
+**同一个判据、同一份实现**）。所以本文件的入口从「读 SSE 文本」换成「建一条 job →
+看它落到哪个状态 → 需要的话把它的任务真的跑一次」。
 
 ## 为什么这道闸必须按「整批」判
 
@@ -24,18 +33,38 @@
 """
 from __future__ import annotations
 
+# ruff: noqa: I001 —— 本文件的**导入顺序是语义要求**（与 `tests/test_ai_job_protocol.py`
+# 同一条处置）：`services.task_worker_service` 必须在 `services.task_worker_queue_service`
+# **之前**加载。两者互为环形依赖 —— 队列服务在它的模块级（第 31 行）就
+# `import services.task_worker_service as worker`，而 worker 要
+# `from services.task_worker_queue_service import TASK_LEASE_SECONDS`，那个常量定义在队列
+# 服务的第 78 行。队列先加载的话，worker 去取它时那一行还没执行到 → ImportError。
+# isort 要的字母序恰好与这个要求相反。
+
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import services.ai.job_service as job_service
+import services.task_worker_service as worker
+import services.task_worker_queue_service as queue_service
 import services.ai_analysis_service as ai_service
 from app import app as flask_app
 from app import create_tables, db
 from models import BackgroundTask, Project, Repository, WeeklyVersionConfig
-from models.ai_analysis import AiAnalysisRun
+from models.ai_analysis import (
+    MODE_INCREMENTAL,
+    STATE_QUEUED,
+    STATE_WAITING_SNAPSHOT,
+    AiAnalysisJob,
+    AiAnalysisRun,
+)
+from services.ai.project_config_source import build_weekly_group_key
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+#: 本文件建出来的 job 行（收尾时一并删掉，见 `_cleanup_runs`）。
+_CREATED_JOBS: list = []
 # 两份走周版本流的手工入口（第三份 commit_diff_new.html 走单提交流，不在这条路上）。
 WEEKLY_TEMPLATES = (
     "templates/weekly_version_diff.html",
@@ -178,20 +207,76 @@ def _stub(monkeypatch, seeded: dict, calls: list) -> None:
     monkeypatch.setattr(ai_service, "_execute_analysis", _execute)
 
 
-def _run_stream(config_id: int) -> list:
-    return _events("".join(ai_service.stream_weekly_analysis(config_id)))
+def _create_manual_job(config_id: int):
+    """走**手工入口那一跳**（P0-01 之后是 `POST /jobs` → `create_or_attach_job`）。
+
+    这一跳只落身份与排程：**不建 run、不发模型请求**。引擎有没有被调用由
+    `_drive_the_job_task`（真的把排出去的任务跑一次）来判 —— 这正是原来那条
+    「同步还在跑却发起了模型调用」的响亮断言。
+    """
+    config = db.session.get(WeeklyVersionConfig, config_id)
+    result = job_service.create_or_attach_job(
+        config=config, requested_mode=MODE_INCREMENTAL, trigger_source="manual"
+    )
+    if result.job is not None and result.job.id is not None:
+        _CREATED_JOBS.append(result.job.id)
+    db.session.commit()
+    return result
+
+
+def _analysis_tasks(group_key: str) -> list:
+    if not group_key:
+        return []
+    return (
+        BackgroundTask.query.filter(
+            BackgroundTask.task_type == "weekly_ai_analysis",
+            BackgroundTask.file_path == group_key,
+        )
+        .order_by(BackgroundTask.id.asc())
+        .all()
+    )
+
+
+def _drive_the_job_task(cfg, group_key: str) -> None:
+    """把这条 job 排出去的任务**真的跑一次**（worker 末端 → 后台执行入口）。"""
+    tasks = _analysis_tasks(group_key)
+    assert tasks, "没有排出去的任务，这一跳跑不起来"
+    worker._handle_weekly_ai_analysis_task(
+        {"type": "weekly_ai_analysis", "config_id": cfg.id, "task_id": tasks[-1].id}
+    )
 
 
 def _cleanup_runs(seeded: dict) -> None:
-    """把这一组用例建出来的运行行删掉。
+    """把这一组用例建出来的行删掉。
 
     **测试库是会话级共用的**（没有逐用例重置），而这一组的引擎桩**不会**走
     `_persist_outcome` —— 留下的 run 会一直是 `running`，然后被
     `tests/test_weekly_ai_auto_trigger_gate.py::test_a_run_interrupted_by_a_restart_is_marked_failed`
     那条**全局计数**断言（`fail_orphaned_analysis_runs() == 1`）算进去，让它在
     「一起跑」时红、单独跑时绿。
+
+    job / 意图行一并收掉，理由同上（一条 `active_key` 非空的 job 会占着唯一索引，
+    让**别的**用例建不出同目标的 job）。
     """
     AiAnalysisRun.query.filter_by(target_id=seeded["primary_config_id"]).delete()
+    for job_id in list(_CREATED_JOBS):
+        row = db.session.get(AiAnalysisJob, job_id)
+        if row is not None and row.active_key is not None:
+            row.active_key = None
+        if row is not None:
+            db.session.delete(row)
+    _CREATED_JOBS.clear()
+    for cfg_id in seeded["config_ids"]:
+        cfg = db.session.get(WeeklyVersionConfig, cfg_id)
+        if cfg is None:
+            continue
+        group_key = build_weekly_group_key(cfg)
+        for row in _analysis_tasks(group_key):
+            db.session.delete(row)
+        BackgroundTask.query.filter(
+            BackgroundTask.file_path == group_key,
+            BackgroundTask.task_type == queue_service.WAITING_INTENT_TASK_TYPE,
+        ).delete(synchronize_session=False)
     db.session.commit()
 
 
@@ -200,54 +285,60 @@ def _cleanup_runs(seeded: dict) -> None:
 # ==========================================================================
 
 
-def test_the_manual_stream_is_blocked_while_the_batch_sync_runs(monkeypatch):
+def test_the_manual_entry_is_blocked_while_the_batch_sync_runs(monkeypatch):
     """**用户报的那一条**：同步正 processing 时点「开始分析」，必须被拦下。
 
     三件事一起断言，缺一条都会漏掉一种错法：
-      * 没有 `run` 事件 —— 界面不会看到一个运行号，说明服务端没有建运行；
-      * 没有 `result` 事件 —— 没有结论可交付；
-      * 引擎一次都没被调用 —— 没有花钱。
+      * job 停在 `waiting_snapshot` —— 页面据此显示「等待同步」，不是「没有运行号」；
+      * 没有排出去任何分析任务、没有建 run —— 服务端没有替用户开始花钱；
+      * 引擎一次都没被调用 —— 这是最响亮的那条（「先建 run 再被拦」的实现同样会
+        留下 run 行，但报出来的原因是错的）。
     """
     seeded = _seed(sync_on="primary", sync_status="processing")
     calls: list = []
     with flask_app.app_context():
         _stub(monkeypatch, seeded, calls)
-        events = _run_stream(seeded["primary_config_id"])
-        names = [name for name, _ in events]
+        created = _create_manual_job(seeded["primary_config_id"])
+        cfg = db.session.get(WeeklyVersionConfig, seeded["primary_config_id"])
+        group_key = build_weekly_group_key(cfg)
 
-        assert "run" not in names, f"同步还在跑，却建了运行记录：{events}"
-        assert "result" not in names, f"同步还在跑，却交付了结论：{events}"
+        assert created.job.state == STATE_WAITING_SNAPSHOT, created.job.state
+        assert _analysis_tasks(group_key) == [], "同步还在跑，却排出了分析任务"
         assert calls == [], "同步还在跑，却发起了模型调用"
         assert (
             AiAnalysisRun.query.filter_by(target_id=seeded["primary_config_id"]).count() == 0
         ), "被拦下了却还是留下了一条 run 记录"
+        _cleanup_runs(seeded)
 
 
-def test_the_manual_stream_says_it_is_waiting_for_the_diff_sync(monkeypatch):
-    """**不许静默失败**：页面必须明确看到「等待 Diff 同步完成」，而不是装作开始了。
+def test_the_manual_entry_says_it_is_waiting_for_the_diff_sync(monkeypatch):
+    """**不许静默失败**：页面必须明确看到「等着呢、会自动开始」，而不是装作开始了。
 
-    「装作开始」比报错更糟：徽章会变成「分析中」，用户以为钱已经花了。
+    「装作开始」比报错更糟：徽章会变成「分析中」，用户以为钱已经花了。这段话由
+    **服务端给**（`job_service.notice_for_waiting` → `describe_waiting_analysis`），
+    文案只有一份，页面不许自己编。
+
+    「是哪个同步任务在跑、跑了多久」那两句在**闸门那一层**断言
+    （`tests/test_ai_weekly_sync_gate.py`），这里不重复。
     """
     seeded = _seed(sync_on="primary", sync_status="processing", age_minutes=3)
     calls: list = []
     with flask_app.app_context():
         _stub(monkeypatch, seeded, calls)
-        events = _run_stream(seeded["primary_config_id"])
+        created = _create_manual_job(seeded["primary_config_id"])
+        notice = job_service.notice_for_waiting(created.job)
 
-        waiting = [payload for name, payload in events if name == "waiting"]
-        assert waiting, f"同步在跑，却没有任何「等待同步」的信号：{events}"
-        payload = waiting[0]
-        assert payload["reason"] == "sync_in_flight", payload
-        message = payload.get("message") or ""
-        assert "等待 Diff 同步完成" in message, message
-        # 闸门本身那句话也要带上：是哪个任务在跑、跑了多久。
-        assert str(seeded["task_id"]) in message, message
-        assert "3 分钟" in message, message
+        assert created.job.state == STATE_WAITING_SNAPSHOT
+        assert notice["waiting"] is True, notice
+        message = notice.get("message") or ""
+        assert "自动" in message, message
         # 「没有花钱」这句必须说 —— 用户第一件想知道的就是这个。
         assert "没有" in message and "消耗" in message, message
+        assert calls == [], "被拦下了却发起了模型调用"
+        _cleanup_runs(seeded)
 
 
-def test_the_manual_stream_proceeds_while_a_pending_sync_waits_behind_a_busy_worker(monkeypatch):
+def test_the_manual_entry_proceeds_while_a_pending_sync_waits_behind_a_busy_worker(monkeypatch):
     """**真机实测的那一条**：同步只是**在排队**、执行侧被别的任务占着（缓存没有被写）
     → 手工分析必须开跑。
 
@@ -260,20 +351,21 @@ def test_the_manual_stream_proceeds_while_a_pending_sync_waits_behind_a_busy_wor
     try:
         with flask_app.app_context():
             _stub(monkeypatch, seeded, calls)
-            events = _run_stream(seeded["primary_config_id"])
-            names = [name for name, _ in events]
+            created = _create_manual_job(seeded["primary_config_id"])
+            cfg = db.session.get(WeeklyVersionConfig, seeded["primary_config_id"])
+            group_key = build_weekly_group_key(cfg)
 
-            assert "waiting" not in names, (
-                f"排队等 worker 的同步把手工分析拦下了（缓存没有被写）：{events}"
+            assert created.job.state == STATE_QUEUED, (
+                f"排队等 worker 的同步把手工分析拦下了（缓存没有被写）：{created.job.state}"
             )
-            assert "run" in names, f"没建运行记录：{events}"
+            _drive_the_job_task(cfg, group_key)
             assert calls == ["execute"], "没分析"
             _cleanup_runs(seeded)
     finally:
         _release_busy_worker(seeded)
 
 
-def test_the_sibling_repository_sync_also_blocks_the_manual_stream(monkeypatch):
+def test_the_sibling_repository_sync_also_blocks_the_manual_entry(monkeypatch):
     """闸门按**整批**判：入口是 primary，而同步任务挂在兄弟配置上。
 
     只按单仓判的实现在这条用例下会放行，而那时变更清单正缺着兄弟仓库那半份文件。
@@ -282,40 +374,51 @@ def test_the_sibling_repository_sync_also_blocks_the_manual_stream(monkeypatch):
     calls: list = []
     with flask_app.app_context():
         _stub(monkeypatch, seeded, calls)
-        events = _run_stream(seeded["primary_config_id"])
+        created = _create_manual_job(seeded["primary_config_id"])
+        cfg = db.session.get(WeeklyVersionConfig, seeded["primary_config_id"])
+        group_key = build_weekly_group_key(cfg)
 
-        assert "run" not in [name for name, _ in events], events
+        assert created.job.state == STATE_WAITING_SNAPSHOT, created.job.state
+        assert _analysis_tasks(group_key) == [], "兄弟仓库的同步在跑，却排出了分析任务"
         assert calls == [], "兄弟仓库的同步在跑，却发起了模型调用"
+        _cleanup_runs(seeded)
 
 
-def test_the_manual_stream_proceeds_when_the_sync_is_done(monkeypatch):
+def test_the_manual_entry_proceeds_when_the_sync_is_done(monkeypatch):
     """反面：同步不在跑时**不许**被这道闸门挡住（否则手工分析永久停摆）。"""
     seeded = _seed(sync_on="primary", sync_status="completed")
     calls: list = []
     with flask_app.app_context():
         _stub(monkeypatch, seeded, calls)
-        events = _run_stream(seeded["primary_config_id"])
-        names = [name for name, _ in events]
+        created = _create_manual_job(seeded["primary_config_id"])
+        cfg = db.session.get(WeeklyVersionConfig, seeded["primary_config_id"])
+        group_key = build_weekly_group_key(cfg)
 
-        assert "waiting" not in names, f"同步已经跑完了，却还在等：{events}"
-        assert "run" in names, f"同步跑完了却没建运行记录：{events}"
+        assert created.job.state == STATE_QUEUED, (
+            f"同步已经跑完了，却还停在 {created.job.state}"
+        )
+        _drive_the_job_task(cfg, group_key)
         assert calls == ["execute"], "同步跑完了却没分析"
         _cleanup_runs(seeded)
 
 
 def test_the_manual_gate_sits_before_the_run_is_created():
-    """结构断言：闸门必须排在 `_create_run` **之前**（与后台那道同一个理由）。
+    """结构断言：闸门必须排在**排任务 / 建 run** 之前（与后台那道同一个理由）。
 
     建了 run 再跳过会留下一条「跑了但没结论」的记录，用量面板上还会多一条零消费运行，
     排查时看不出它是被闸门挡下的。
+
+    P0-01 之后手工入口的闸门在 `job_service._dispatch` —— 那是**唯一**会为一次手工
+    点击排任务的地方，而 job_service 本身**不建 run**（它连 `_create_run` 都没有），
+    所以「先建 run 再被拦」在这个结构下不可能发生；要钉的是**闸门在排任务之前**。
     """
-    source = (PROJECT_ROOT / "services" / "ai_analysis_service.py").read_text(encoding="utf-8")
-    body = source[source.index("def stream_weekly_analysis"):]
-    body = body[: body.index("def run_weekly_analysis_background")]
+    source = (PROJECT_ROOT / "services" / "ai" / "job_service.py").read_text(encoding="utf-8")
+    body = source[source.index("def _dispatch("):]
+    body = body[: body.index("def _register_intent(")]
 
     assert "weekly_sync_in_flight" in body, "手工入口没有查同步是否还在跑"
-    assert body.index("weekly_sync_in_flight") < body.index("_create_run("), (
-        "手工路径的闸门排在建 run 之后 —— 会留下一条零消费的运行记录"
+    assert body.index("weekly_sync_in_flight") < body.index("_create_analysis_task("), (
+        "手工路径的闸门排在建任务之后 —— 同步写到一半就会派出一次分析"
     )
 
 

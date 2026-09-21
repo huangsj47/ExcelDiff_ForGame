@@ -474,7 +474,12 @@
         <button class="btn btn-outline-secondary btn-sm" id="aiHistoryBtn">
             <i class="fas fa-clock-rotate-left" aria-hidden="true"></i> 历次结论
         </button>
-        <button class="btn btn-primary btn-sm" id="aiAnalyzeBtn">重新分析</button>
+        <!-- AI-P0-03：单提交**没有增量基线**（`AiAnalysisRun.target_type=commit`
+             不分增量/全量，每次都是对这一份 diff 的完整评审），所以这里只有一个入口 ——
+             造一个「增量」按钮出来就是给用户一个点了会说「没有这个概念」的控件。
+             颜色与两份周版本模板的「全量重新分析」对齐（同一种语义 → 同一种颜色）。 -->
+        <button class="btn btn-danger btn-sm" id="aiAnalyzeBtn"
+                title="对这一份提交做一次完整评审（单提交没有增量基线）">重新分析</button>
         <!-- 「导出 md」：把这一次的结论（报告原文 + 异常清单附录）交给浏览器下载。
              **刻意不写 `download` 属性** —— 空值会让浏览器按 URL 末段命名（report.md），
              把服务端拼好的中文文件名盖掉（响应带 Content-Disposition，见
@@ -1041,6 +1046,15 @@ function initCommitAiAnalysis() {
             loadLatestResult(true);
         });
         eventSource.addEventListener('error', function(event) {
+            // **收到过终结事件之后再冒出来的 `error` 是收尾噪声，一律丢掉。**
+            //
+            // 与两个周版本抽屉同一个病（复测文档 AI-P0-01）：`result` / 服务端 `error`
+            // 处理器置真 `streamSettled` 并关掉流之后，浏览器**仍可能补派一个没有
+            // `data` 的连接层 `error`**，执行流落到下面那句关流后的兜底处理，
+            // 把刚写好的收尾文案覆盖成「连接中断」。
+            //
+            // 放在**最开头**：终结之后这条流已经关掉，后续 `error` 不再有新信息。
+            if (streamSettled) return;
             // `error` 这个事件名底下压着**两件完全不同的事**，只能靠有没有 `data` 区分：
             //   * 有 data —— 服务端主动发的 error 事件（闸门拦下 / 跑挂了），原因就在里面；
             //   * 没有 data —— **连接层断了**（代理把长时间没有字节流动的 SSE 掐了、

@@ -44,11 +44,17 @@ from models import (  # noqa: E402
 )
 from models.ai_analysis import (  # noqa: E402
     AiAnalysisAnomaly,
+    AiAnalysisJob,
     AiAnalysisRun,
     AiAnalysisTrace,
     AiProjectAnalysisConfig,
     AiProjectApiKey,
     AiWeeklyAnalysisState,
+)
+from models.ai_analysis.job import (  # noqa: E402
+    MODE_FULL,
+    SOURCE_MANUAL,
+    STATE_WAITING_SNAPSHOT,
 )
 
 
@@ -177,6 +183,22 @@ def test_delete_project_removes_the_whole_ai_analysis_family(monkeypatch):
                 repository_id=repo.id,
             )
         )
+        # 任务身份表（`models/ai_analysis/job.py`，2026-09-21 新加）。
+        #
+        # 它的 `project_id` 是**非空外键**，所以它与这一族里其它表是同一个坑：不显式清，
+        # 删项目时 ORM 把子行 `project_id` 置 NULL 撞 NOT NULL，**整个项目删不掉**。
+        # 刻意用 `waiting_snapshot`（最常见的非终态）而不是终态：终态的 job 也照样要清，
+        # 但非终态更能代表「用户点了按钮、还没跑完就删项目」这个真实形态。
+        db.session.add(
+            AiAnalysisJob(
+                project_id=project_id,
+                target_type="weekly",
+                target_key=_uid("grp"),
+                requested_mode=MODE_FULL,
+                state=STATE_WAITING_SNAPSHOT,
+                trigger_source=SOURCE_MANUAL,
+            )
+        )
         db.session.flush()
 
         run = AiAnalysisRun(project_id=project_id, target_type="weekly", target_id=1)
@@ -204,6 +226,9 @@ def test_delete_project_removes_the_whole_ai_analysis_family(monkeypatch):
         assert AiAnalysisRun.query.filter_by(project_id=project_id).count() == 0
         assert AiAnalysisTrace.query.filter_by(run_id=run_id).count() == 0
         assert AiAnalysisAnomaly.query.filter_by(project_id=project_id).count() == 0
+        assert AiAnalysisJob.query.filter_by(project_id=project_id).count() == 0, (
+            "任务身份表没清干净 —— 它的 project_id 是非空外键，留着就是下一条删不掉的项目"
+        )
 
 
 def test_delete_project_leaves_no_weekly_config_behind(monkeypatch):

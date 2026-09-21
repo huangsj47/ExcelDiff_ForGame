@@ -225,6 +225,31 @@ def _migrate_agent_nodes_columns(db, log_print):
         log_print,
     )
 
+def _migrate_background_task_columns(db, log_print):
+    """`background_tasks` 的任务身份与所有权列（复测文档 AI-P0-04）。
+
+    这五列此前只活在内存载荷里（见 `models/task.py` 上那段注释）：进程重启、或去重
+    命中一条更早创建的任务行，来源与模式就没了 —— 实测中一次**手工**发起的分析
+    在库里被记成 `scheduled`，页面与账单都跟着错。
+
+    不写 DEFAULT：老行读出来是 NULL，读侧按「未记录」处理（`trigger_source` 为 NULL
+    时 `ai_analysis_service` 会归一到 `scheduled` —— 与改动前的行为一致，不会把
+    历史任务说成手工发起的）。
+    """
+    _migrate_table_columns(
+        db,
+        "background_tasks",
+        {
+            "trigger_source": "trigger_source VARCHAR(20)",
+            "requested_mode": "requested_mode VARCHAR(20)",
+            "idempotency_key": "idempotency_key VARCHAR(120)",
+            "job_id": "job_id INTEGER",
+            "lease_expires_at": "lease_expires_at DATETIME",
+        },
+        log_print,
+    )
+
+
 def _migrate_ai_weekly_analysis_state_columns(db, log_print):
     _migrate_table_columns(
         db,
@@ -236,6 +261,11 @@ def _migrate_ai_weekly_analysis_state_columns(db, log_print):
             # （`last_analyzed_at`）做不到这件事：降级跑完的 run 按设计**不推进**水位线，
             # 于是同一份输入每小时都会被重新分析一次，白花钱。
             "last_snapshot_digest": "last_snapshot_digest VARCHAR(64)",
+            # 两个基线指针（复测文档 AI-P0-02）：把「结论基线」与「完整覆盖快照」
+            # 从那个三用的时间水位里拆出来。语义与分工见
+            # `models/ai_analysis/weekly_state.py` 上那一段注释。
+            "last_concluded_run_id": "last_concluded_run_id INTEGER",
+            "last_complete_snapshot_id": "last_complete_snapshot_id INTEGER",
         },
         log_print,
     )
@@ -378,6 +408,10 @@ def apply_schema_migrations(db, log_print):
     _migrate_commits_log_columns(db, log_print)
     _migrate_weekly_version_diff_cache_columns(db, log_print)
     _migrate_agent_nodes_columns(db, log_print)
+    # 任务身份与所有权（trigger_source / requested_mode / idempotency_key / job_id /
+    # lease_expires_at）。**少了它，老库上的任务来源与租约就是「代码在写、库里没有这一列」
+    # 的启动期报错** —— `create_all()` 只建新表，不会给已存在的表补列。
+    _migrate_background_task_columns(db, log_print)
     _migrate_ai_weekly_analysis_state_columns(db, log_print)
     _migrate_ai_analysis_columns(db, log_print)
     # 认领那一列与它的唯一索引（`migrations/ai_run_claim_columns.py`）。**少了它，老库上

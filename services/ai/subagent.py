@@ -83,10 +83,8 @@ from services.ai.family_ledger import (  # noqa: F401 —— 本模块与测试�
     FamilyResult,
     MemberOutcome,
     MemberPlan,
-    _findings_text,
     _gap_lines,
     _markdown_excerpt,
-    _path_named_in_findings,
     _shard_never_ran,
     reconcile_candidates,
 )
@@ -114,7 +112,6 @@ from services.ai.verdict import (
     parse_verdicts,
     reduce_findings,
     render_ruling,
-    ruling_block,
     strip_verdict_block,
     verdict_instructions,
 )
@@ -583,12 +580,18 @@ def build_member_task(member: MemberPlan, plan: FamilyPlan) -> str:
 def build_synthesis_task(plan: FamilyPlan, steps: Sequence[MemberOutcome]) -> str:
     """主代理的任务书：各分片的候选结论 + 谁没跑成 + 汇总纪律。
 
-    ## 为什么候选要带 `[S1-2]` 这样的编号
+    ## 候选编号是**平台对账的唯一判据**（AI-P0-06）
 
-    编号是**平台发出去的**，所以平台能查「这一条进了最终报告没有」。模型被要求采纳时
-    把编号带进 `evidence`；即便它没带，平台侧还有第二手（同文件匹配，见
-    `reconcile_candidates`）。漏掉的候选会被平台追加进报告的「信息缺口（平台补充）」——
-    **这条保证不建立在模型听话上**。
+    编号是**平台发出去的**（`[S1-2]`），所以平台能查「这一条进了最终报告没有」。查的
+    方式在 2026-09-21 换过一次：以前是平台从报告正文、结论的文件路径和标题措辞里**反推**
+    血缘（三手启发式），而真机上它产生的全是假缺口 —— 同名协议拆在两个文件里、标题换个
+    说法、证据为空，三手就一条都对不上，于是被报成「找不到去向」，还把那一次运行判成了
+    `subagent_gap` 降级。现在改为**显式血缘**：每条结论在 `source_candidate_ids` 里列出
+    它来源于哪几条候选（可以一对多、多对一），平台只比这一组编号。
+
+    **所以这一条纪律是硬的**：不带编号的结论，平台无法把它和候选对上；而一条编号都没
+    交回时，平台的账只能笼统地说一句「无法按编号对账」——那是**读的人拿不到结论去向**
+    的一种失败，不是「平台查不出问题」。
     """
     blocks = [
         "# 分工：你是主代理（汇总）",
@@ -598,17 +601,22 @@ def build_synthesis_task(plan: FamilyPlan, steps: Sequence[MemberOutcome]) -> st
             "而不是另起一份。"
         ),
         (
-            "## 纪律（四条）\n\n"
-            "1. **每一条候选都要有去向**：要么进你的 `anomalies`（采纳，并在证据里保留它的"
-            "编号，例如 `[S1-2]`），要么在报告正文与 `dimensions` 里说明为什么不采纳"
-            "（重复、证据不足、与其它条目冲突）。**不许一声不响地丢掉**。\n"
-            f"2. **各分片负责的维度必须都有交代**：系统提示词那份「本项目适用的维度清单」"
+            "## 纪律（五条）\n\n"
+            "1. **每一条候选都要有去向**：要么进你的 `anomalies`（采纳），要么在报告正文"
+            "与 `dimensions` 里说明为什么不采纳（重复、证据不足、与其它条目冲突）。"
+            "**不许一声不响地丢掉**。\n"
+            "2. **采纳的每条结论都要带 `source_candidate_ids`**：列上它来源于哪几条候选，"
+            "形如 `\"source_candidate_ids\": [\"S1-2\"]`。两条候选合成一条就列两个"
+            "（`[\"S1-2\", \"S2-5\"]`），一条候选拆成两条就两条都写上它。"
+            "**这是平台对账的唯一判据** —— 没带编号的结论，平台查不出这条候选的去向，"
+            "报告末尾就会多出一段「需要人工看一眼」。\n"
+            f"3. **各分片负责的维度必须都有交代**：系统提示词那份「本项目适用的维度清单」"
             f"上的 {len(plan.synthesis.dimensions)} 个维度一个都不能空着；"
             "某个维度没人报出问题，也要写 `hit: false` 与理由。\n"
-            "3. **报告是最终报告**：七个章节写全，长度不受分片影响。"
+            "4. **报告是最终报告**：七个章节写全，长度不受分片影响。"
             "你还可以用工具去核对候选里可疑的地方（文件、行号、提交），"
             "也可以补充分片漏掉的发现。\n"
-            "4. **篇幅要收着写**：单次输出有硬上限，写超了会被**截断**，"
+            "5. **篇幅要收着写**：单次输出有硬上限，写超了会被**截断**，"
             "整份 JSON 作废、你的结论一条都留不下。所以同类候选合并成一条写，"
             "只写能改变结论的内容；候选很多时按后果排序写透前几条，"
             "其余用一行列出来即可 —— 但 `dimensions` 与 `anomalies` 必须完整。"
@@ -1513,34 +1521,27 @@ def aggregate_outcomes(
     任一成员没上报就是 `None`（**不是 0**）：一轮报了 900/1000、另一个没报，只把报了的那几
     个加起来会得出一个偏高、且看起来完全正常的命中率。
     """
-    report = synthesis.report_markdown or ""
-    # **复核裁决先算**：后面那几节（对账轮原文、未归类、条数上限）都要与它对齐，
+    report_source = synthesis.report_markdown or ""
+    report = report_source
+    # **复核裁决先算**：后面那几节（未归类、条数上限、信息缺口）都要与它对齐，
     # 而且 `anomalies` 最终取的就是它算出来的活动清单（见文件末尾的 `anomalies=`）。
     reduction = _reduce_with_verify(synthesis, steps, threshold_limit=anomaly_limit)
-    # 「复核裁决」排在对账轮原文**之前**：它是平台按裁决渲染的**最终口径**，而模型写的那份
-    # 正文是裁决**之前**的稿子（它可能整段写着「（critical，仍成立）」）。先给结论、
-    # 再附原文，读的人不会把那份稿子当成独立真相源。
-    ruling_text = render_ruling(reduction, review_ran=_verify_ran(steps))
-    if ruling_text and synthesis.status != STATUS_FAILED:
-        report = (report.rstrip() + "\n\n" + ruling_text).strip() + "\n"
-    # 对账轮那一节排在「信息缺口」**之前**：它是对报告本身的补充（结论该不该采信），
-    # 而信息缺口是「哪些东西没看到」—— 后者永远在最后，读的人一眼能看到缺口在哪。
+    # 对账轮的整份原文**不再进报告正文**（AI-P1-01：同一件事在报告里出现三遍 ——
+    # 模型稿一遍、平台裁决节一遍、对账轮原文一遍，读的人还得自己辨认哪一句已经失效）。
+    # 它作为**独立存档**放进结论载荷（`verify_report_markdown`），报告只留平台那几节。
     verify_text = "".join(
         verify_section(step) for step in steps if step.plan.role == ROLE_VERIFY
     )
-    if verify_text and synthesis.status != STATUS_FAILED:
-        report = (report.rstrip() + "\n\n" + verify_text).strip() + "\n"
-    # 「未归类」也排在信息缺口之前、对账轮之后：它对读者同样是**结论的一部分**
-    # （有几条发现不属于任何维度），而信息缺口永远收尾。
+    # 「复核裁决」是平台对结论的**最终口径**：有它的时候，模型那份草稿就不再进正文 ——
+    # 报告里只能有一份结论清单，读的人才不必去比对「哪句被改掉了」。
+    ruling_text = render_ruling(reduction, review_ran=_verify_ran(steps))
+    # 「未归类」也排在信息缺口之前：它对读者同样是**结论的一部分**（有几条发现不属于
+    # 任何维度），而信息缺口永远收尾。
     unclassified_text = build_unclassified_section(synthesis.anomalies, dimensions)
-    if unclassified_text and synthesis.status != STATUS_FAILED:
-        report = (report.rstrip() + "\n\n" + unclassified_text).strip() + "\n"
     # 「结论条数上限」排在「未归类」之后：两节都是**对上面那份结论清单本身的补充**
     # （一节说「有几条不属于任何维度」，一节说「有几条根本没列进来」），而信息缺口
     # 说的是「没看到」，永远收尾。
     cap_text = build_cap_section(synthesis.dropped)
-    if cap_text and synthesis.status != STATUS_FAILED:
-        report = (report.rstrip() + "\n\n" + cap_text).strip() + "\n"
     # 复核裁决**传进去**（`reduction=`）：被裁决撤销的候选，去向是「已撤销」而不是
     # 「找不到去向」—— 不传的话，同一条候选会在正文的「已推翻」与这一节的「需要人工看一眼」
     # 里各说一遍，而两遍互相矛盾。**传上面算好的那一个对象，不在这里重算**（见 `:1519`）：
@@ -1548,18 +1549,38 @@ def aggregate_outcomes(
     gaps_text, gap_dropped = reconcile_candidates(
         candidates, synthesis, steps=steps, reduction=reduction
     )
+    # 平台自己那几节（次序即正文里的次序，见各节自己的说明）。
+    platform_sections = tuple(
+        item for item in (unclassified_text, cap_text, gaps_text) if item
+    )
     # 汇总没跑成时**没有报告**：那段缺口说明写进 `error_message`（见下面那个分支）。
     # 往一份空报告后面追加一段「信息缺口」等于凭空造出一份看得见的报告，而这次其实
-    # 什么都没得到 —— 两份东西都不能给。
-    if gaps_text and synthesis.status != STATUS_FAILED:
-        report = (report.rstrip() + "\n\n" + gaps_text).strip() + "\n"
-    # 机器可读的裁决块**收尾**（一行 HTML 注释，markdown 渲染看不见）。放最后是因为
-    # 上面每一节的取舍都依赖前面几节的状态（汇总失败时一个字都不追加），而这一块要么
-    # 与报告同在、要么不在 —— 它承载的是「`final_findings` 是怎么来的」，`result_payload`
-    # 靠它把同一份裁决放进结论载荷（读侧与导出据此渲染）。
-    machine = ruling_block(reduction)
-    if machine and synthesis.status != STATUS_FAILED:
-        report = (report.rstrip() + "\n\n" + machine).strip() + "\n"
+    # 什么都没得到 —— 两份东西都不能给。所以失败时一个字都不追加。
+    # ## 草稿什么时候另存一份
+    #
+    # **只有它被移出正文时才有 `draft_markdown`**（下面 `if ruling_text:` 那一支）。
+    # 判据不是「正文变了没有」：没有裁决节时平台那几节是**接在草稿后面**的（`else` 支），
+    # 草稿仍然在正文里 —— 那时再另存一份就是同一段字节在载荷里出现两次，而「同一份东西
+    # 重复持久化」正是这一批缺陷的形态。**只有草稿被整份换掉时，存档才是唯一那一份。**
+    draft_markdown = ""
+    if synthesis.status != STATUS_FAILED:
+        if ruling_text:
+            # 有裁决节 = 平台对结论说了话。正文**只保留平台那几节**：模型那份草稿是裁决
+            # 之前写的稿子（它可能整段写着「（critical，仍成立）」），留着它就得要求读的
+            # 人自己辨认哪一句已经失效 —— 那正是 AI-P1-01 要收的口子。
+            #
+            # 而这一支是安全的：`render_ruling` 自己把**最终结论清单**渲染出来了，正文里
+            # 不会没有结论。反过来（默认配置：没有对账轮、没有裁决节）没有任何东西替代
+            # 草稿，把草稿也移出正文等于报告只剩平台那几节 —— 那不是「唯一规范结论」，
+            # 那是没有结论。所以那一支保留草稿，见 `elif`。
+            report = _assemble_report(ruling_text, platform_sections)
+            draft_markdown = report_source
+        elif platform_sections:
+            # 没有裁决节：草稿就是正文里**唯一那份结论**，平台那几节接在它后面
+            # （次序：模型正文 → 未归类 / 条数上限 / 信息缺口）。**不另存**。
+            report = _assemble_report(report, platform_sections)
+        # 两个分支都不成立时 `report` 逐字不变：这时模型写的那份正文**就是**这份报告里
+        # 唯一的结论，没有第二份口径要它让位（没开对账轮是绝大多数运行的形状）。
 
     rounds = _merge_rounds(steps)
     dropped = tuple(item for step in steps if step.outcome for item in step.outcome.dropped)
@@ -1608,6 +1629,13 @@ def aggregate_outcomes(
         dropped=dropped,
         refused_requests=refused_requests,
         report_markdown=report,
+        # 复核裁决**结构化地**带出去（AI-P0-05）：`result_payload` 只认这个字段，不再从
+        # 报告正文末尾那行 HTML 注释里反向解析。`changed` 为假时给 `None` —— 与原先
+        # 「没有影响就不写那个块」的语义一致，读侧按「没有裁决」处理。
+        verdict=reduction.as_dict() if reduction.changed else None,
+        # 草稿与对账轮原文的存档（AI-P1-01）：报告正文里没有它们，读侧要看得去这两处。
+        draft_markdown=draft_markdown,
+        verify_report_markdown=verify_text,
         rounds=rounds,
         # 本次生效的维度清单跟着汇总那一次带出来（它来自 `LoadedSkills.dimensions`，
         # 见 `run_analysis`）。落库那一份（`result_payload`）据此把 category 翻成中文名，
@@ -1644,6 +1672,21 @@ def aggregate_outcomes(
             f"{step.plan.label}：{step.skipped_reason}" for step in steps if step.skipped_reason
         ),
     )
+
+
+def _assemble_report(head: str, sections: Sequence[str]) -> str:
+    """把报告拼成一份：`head` 在前，平台那几节依次接在后面。
+
+    与原先「一节一节 `.rstrip()` 之后追加 `\\n\\n`、最后整体 `.strip() + "\\n"`」逐字等价
+    —— 逐节追加的写法在节数变成五个之后就没人读得懂了，而**这一份文本是有契约的**：
+    它是 `ai_analysis_run.response_text`、是抽屉与导出显示的那份报告。
+
+    空节丢掉（`render_ruling` / `build_cap_section` 在无事可说时返回空串），节间恰好一个
+    空行，结尾恰好一个换行。
+    """
+    parts = [head.strip(), *(str(item).strip() for item in sections if str(item).strip())]
+    body = "\n\n".join(item for item in parts if item)
+    return (body + "\n") if body else ""
 
 
 def _sum_optional(values: Sequence[int | None]) -> int | None:

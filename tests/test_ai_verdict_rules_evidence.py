@@ -52,10 +52,8 @@ from services.ai.verdict import (
     evidence_gaps_of,
     gap_reasons_of,
     is_locatable_ref,
-    read_ruling,
     reduce_findings,
     render_ruling,
-    ruling_block,
     severity_step_down,
 )
 
@@ -78,6 +76,9 @@ def _anomaly(**overrides) -> Anomaly:
         file_path=overrides.pop("file_path", LUA),
         impact=overrides.pop("impact", "任何玩家都能改队伍归属"),
         suggestion=overrides.pop("suggestion", "确认是否已移到服务端校验"),
+        # 候选血缘（AI-P0-06）：对账**只按编号**，用例要显式声明它 ——
+        # 漏传会静默退化成「汇总没有交回编号」，而症状与「这条候选没被采纳」逐字相同。
+        source_candidate_ids=tuple(overrides.pop("source_candidate_ids", ())),
     )
 
 
@@ -187,7 +188,10 @@ class TestTheEvidenceShortfallDropsTheSeverityOneNotch:
                 VerifyVerdict(finding_id="F1", verdict=VERDICT_NEEDS_MORE_EVIDENCE),
             ),
         )
-        ruling = read_ruling("# 报告\n\n" + ruling_block(reduction) + "\n")
+        # 2026-09-21（AI-P0-05）：裁决不再序列化成正文末尾那行 HTML 注释，落库的形态
+        # 就是 `reduction.as_dict()`（`EngineOutcome.verdict` 携带的正是它）。
+        # 这一条测的是裁决**结果**（新旧等级都在），与「从哪里读回来」无关。
+        ruling = reduction.as_dict()
 
         active = [row for row in ruling["rows"] if row["active"]]
         assert [row["severity"] for row in active] == ["high"]
@@ -275,7 +279,7 @@ class TestTheBodyLabelMapping:
         )
 
         assert "[F1]（正文 R3）" in render_ruling(reduction, review_ran=True)
-        ruling = read_ruling("# 报告\n\n" + ruling_block(reduction) + "\n")
+        ruling = reduction.as_dict()
         assert ruling["rows"][0]["body_label"] == "R3"
 
     def test_no_body_text_means_everything_is_numbered_by_nothing(self):
@@ -416,7 +420,7 @@ class TestTheEvidenceRefShape:
         section = render_ruling(reduction, review_ran=True)
         assert HUNK_REF in section, "模型写了什么，一字不许改写"
         assert f"{HUNK_REF}（不可定位）" in section
-        ruling = read_ruling("# 报告\n\n" + ruling_block(reduction) + "\n")
+        ruling = reduction.as_dict()
         assert ruling["rows"][0]["evidence_refs"] == [HUNK_REF], "机器可读的原文一字不动"
         assert ruling["rows"][0]["unlocatable_refs"] == [HUNK_REF]
 
@@ -750,21 +754,37 @@ class TestTheFamilyPathAppliesTheGaps:
 class TestTheReconcileCallIsWiredToTheSameReduction:
     """对账侧（`family_ledger.reconcile_candidates`）把 `reduction` 做成 keyword-only。
 
-    也就是说**不传也不会报错、行为还与接线前逐字相同** —— 那个文件自己的 12 个用例全是
-    直接调 `reconcile_candidates(..., reduction=…)`，一条都不走 `aggregate_outcomes`。
-    所以「接线」这件事只有在这里钉得住：不钉，它会在某次重构里静默掉线，而掉线的症状
-    （同一件事在报告里说两遍、两遍互相矛盾）没人会当成回归。
+    也就是说**不传也不会报错** —— 但它会掉进另一个分支。所以「接线」这件事只有在这里
+    钉得住：不钉，它会在某次重构里静默掉线，而掉线的症状（同一件事在报告里说两遍、
+    两遍互相矛盾）没人会当成回归。
+
+    ## 接没接线的判据（AI-P0-06 之后：去向只按编号认）
+
+    这条候选的编号由**汇总**声明（`_merged` 里的 `source_candidate_ids=("S1-1",)`），
+    而它的处置来自**对账轮**的裁决。两个分支各有一句独有的措辞：
+
+    * **接线了**：`_ruling_fate` 在对账轮的裁决行里按编号认出它 → 「已撤销」那一段按候选
+      逐条写（`RULING_CLAIM_PHRASE`），结算那一段不出现；
+    * **没接线**（`reduction=None`）：认领无从谈起，它落到「编号交回过、但没有留在最终
+      清单里」那一段（`SETTLED_PHRASE`），逐条写的那一段不出现。
+
+    两个措辞各只属于一个分支，所以这一对断言能分辨接线与否（而不是靠「这一节永远不
+    出现」造成的假绿）。
     """
 
-    # 「找不到去向」那一段的独有措辞（`family_ledger` 里那一段的结尾）。
+    # 「已撤销」那一段的独有措辞（`family_ledger._RULING_BLOCK_TEXT[VERDICT_RETRACTED]`）。
+    RULING_CLAIM_PHRASE = "撤销本身也是结论，不是遗漏"
+    # 「编号交回过、但没留在最终清单里」那一段的独有措辞（`reconcile_candidates` 尾部的
+    # 结算块）—— 只有没接到 `reduction` 时这条候选才会落到那里。
+    SETTLED_PHRASE = "没有留在最终清单里"
+    # 「找不到去向」那一段的独有措辞。
     GAP_PHRASE = "需要人工看一眼"
 
     def _candidate(self):
-        """一条**只可能**被裁决认领的候选。
+        """一条**只能**被裁决按编号认领的候选（`file_path` 留空，用例尽量小）。
 
-        `file_path` 留空是刻意的：采纳判定的第二、三手（结论清单里有没有这个文件）都要求
-        有路径，空路径时它们下不去，于是这条候选**只能**靠裁决那一手找到去向 ——
-        不接线时它必然被报成「找不到去向」，接线后必然是「已撤销」。
+        汇总声明了它的编号（`S1-1`），处置则在裁决行上 —— 所以它到底落在「已撤销」还是
+        「结算」那一段，完全取决于 `reduction` 有没有传进对账。
         """
         return Candidate(
             member_label="S1", index=1, anomaly=_anomaly(file_path="", title=_anomaly().title)
@@ -779,7 +799,8 @@ class TestTheReconcileCallIsWiredToTheSameReduction:
         return aggregate_outcomes(
             synthesis=EngineOutcome(
                 status=STATUS_SUCCEEDED,
-                anomalies=(_anomaly(),),
+                # 汇总声明这条结论来源于 `S1-1` —— 对账据此把候选与裁决行对上。
+                anomalies=(_anomaly(source_candidate_ids=("S1-1",)),),
                 report_markdown="# 报告\n",
             ),
             steps=[
@@ -800,8 +821,15 @@ class TestTheReconcileCallIsWiredToTheSameReduction:
 
         assert "[S1-1]" in merged.report_markdown
         assert "已撤销" in merged.report_markdown, "去向要如实说「已撤销」"
+        assert self.RULING_CLAIM_PHRASE in merged.report_markdown, (
+            "按编号认领那一段没出现 —— 接线没生效（`reduction=` 没传进对账，"
+            "候选掉进了结算那一支）"
+        )
+        assert self.SETTLED_PHRASE not in merged.report_markdown, (
+            "被复核撤销的候选被写进了「编号交回过但没留在清单里」那一支"
+        )
         assert self.GAP_PHRASE not in merged.report_markdown, (
-            "被复核撤销的候选仍被写进「信息缺口」——接线没生效（`reduction=` 没传进去）"
+            "被复核撤销的候选仍被写进「信息缺口」"
         )
 
     def test_a_candidate_no_ruling_matches_is_still_reported(self):
@@ -817,6 +845,7 @@ class TestTheReconcileCallIsWiredToTheSameReduction:
         assert self.GAP_PHRASE in merged.report_markdown
         assert "[S2-7]" in merged.report_markdown
         assert "已撤销" in merged.report_markdown, "对照组与撤销那一条共存"
+        assert self.RULING_CLAIM_PHRASE in merged.report_markdown, "撤销那一段仍在"
 
 
 # ==========================================================================
@@ -835,12 +864,31 @@ def test_the_gap_section_never_adds_a_top_level_heading():
 
 
 def test_a_run_without_any_gap_behaves_exactly_as_before():
-    """默认值那条路逐字不变：没有缺口时一个字都不加、一个值都不动。"""
+    """默认值那条路逐字不变：没有缺口时一个字都不加、一个值都不动。
+
+    这条判据以前落在「那行机器块是不是空串」上（`ruling_block(reduction) == ""`）。
+    块没了（AI-P0-05），判据改成**同一个判据在新结构上的形态**：一条裁决都没被逐条应用
+    （`verdicts_seen == 0`）、没有一条置信度被压（`evidence_capped == 0`）、没有拒收的条目、
+    每一行都还是「未复核」且平台一个字都没写。这正是 `result_payload` 判定
+    `EngineOutcome.verdict = None`（载荷里没有裁决）与 `render_ruling` 返回空串的依据
+    —— 不是换个函数名让它恒真。
+    """
     reduction = reduce_findings([_anomaly()])
 
     assert reduction.changed is False
     assert reduction.active_anomalies() == (_anomaly(),)
-    assert ruling_block(reduction) == ""
+    assert render_ruling(reduction, review_ran=False) == "", "没缺口时那一节不该出现"
+    ruling = reduction.as_dict()
+    assert ruling["verdicts_seen"] == 0
+    assert ruling["evidence_capped"] == 0
+    assert ruling["rejected"] == []
+    rows = ruling["rows"]
+    assert rows, "结论清单本身就是这份裁决的内容（行必须在）"
+    assert {row["verdict_label"] for row in rows} == {UNREVIEWED_LABEL}
+    assert all(not row["note"] and not row["reason"] for row in rows), (
+        "平台没话说的时候不许往行里塞说明"
+    )
+    assert all(row["source_candidate_ids"] == [] for row in rows)
 
 
 # ==========================================================================

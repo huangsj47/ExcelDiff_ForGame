@@ -11,6 +11,13 @@ import threading
 import time
 
 from services.deployment_mode import is_agent_dispatch_mode
+from services.log_sampling import (
+    OUTCOME_HIT,
+    OUTCOME_MISS,
+    current_diagnostics,
+    log_sampled,
+    log_stage_event,
+)
 from utils.logger import log_print
 from services.performance_metrics_service import get_perf_metrics_service
 
@@ -105,8 +112,13 @@ def get_file_content_from_svn(repository, commit_id, file_path):
         elif file_path.startswith('/'):
             # 去掉开头的/
             relative_path = file_path[1:]
-        log_print(f"原始路径: {file_path}", 'SVN')
-        log_print(f"转换后相对路径: {relative_path}", 'SVN')
+        # 同样是逐文件的两行（原始路径 / 转换后相对路径），合并成一条采样记录。
+        log_sampled(
+            'vcs.svn_path',
+            'SVN 路径转换',
+            f"原始路径: {file_path} → 转换后相对路径: {relative_path}",
+            log_type='SVN',
+        )
         # 使用SVN cat命令获取文件内容
         import subprocess
         # 构建正确的SVN URL，避免路径重复
@@ -175,19 +187,39 @@ def get_file_content_from_git(repository, commit_id, file_path):
         import git
         # 使用缓存的GitService实例
         git_service = get_git_service(repository)
-        log_print(f"检查本地路径: {git_service.local_path}", 'GIT')
-        log_print(f"路径是否存在: {os.path.exists(git_service.local_path)}", 'GIT')
-        if not os.path.exists(git_service.local_path):
+        # 这两行原来是**逐文件**打印的：一次周版本同步实测 1,003 个文件 → 2,008 行，
+        # 占整份日志 52.5%（复测文档 7.1）。而且 `os.path.exists` 为了写日志白跑了一次。
+        # 现在：一次 stat + 一条采样记录（首条 + 末条 + 一行汇总计数）。
+        # 计数不是副产品 —— 汇总行回答的正是原来那 2,008 行在回答的
+        # 「扫了多少个文件、有多少不存在」。
+        worktree_exists = os.path.exists(git_service.local_path)
+        log_sampled(
+            'vcs.git_local_path',
+            '检查本地路径',
+            f"检查本地路径: {git_service.local_path}（存在={worktree_exists}）",
+            outcome=OUTCOME_HIT if worktree_exists else OUTCOME_MISS,
+            log_type='GIT',
+        )
+        if not worktree_exists:
             if _is_agent_dispatch_mode():
-                log_print(
+                # 这句原来也是逐文件的 force 日志：agent 模式下整个仓库的工作副本都
+                # 不在本地，于是每个文件都命中同一条分支。采样后首条照样看得见。
+                log_sampled(
+                    'vcs.git_clone_blocked',
+                    'agent 模式禁止平台本地 clone（工作副本缺失）',
                     "platform/agent 模式：禁止平台本地 clone Git 仓库，请由 Agent 节点提供数据",
-                    'GIT',
-                    force=True,
+                    log_type='GIT',
                 )
                 return None
             success, message = git_service.clone_or_update_repository()
             if not success:
-                log_print(f"仓库克隆失败: {message}", 'GIT', force=True)
+                log_sampled(
+                    'vcs.git_clone_failed',
+                    '仓库克隆失败',
+                    f"仓库克隆失败: {message}",
+                    outcome='fail',
+                    log_type='GIT',
+                )
                 return None
 
         repo = git.Repo(git_service.local_path)
@@ -255,6 +287,16 @@ def get_file_content_from_git(repository, commit_id, file_path):
 
     except Exception as e:
         log_print(f"获取Git文件内容失败: {str(e)}", 'GIT', force=True)
+        # 失败要能按 job/run/stage 查 —— 文字行可能被采样收敛，结构化字段不会。
+        log_stage_event(
+            'vcs_content_read',
+            log_type='GIT',
+            source='git',
+            file_path=file_path,
+            commit=commit_id,
+            failed=True,
+            error=str(e),
+        )
         return None
 
 
@@ -449,23 +491,45 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
     perf_project_tags = {
         "project_id": repository.project_id if repository else "",
         "project_code": (repository.project.code if repository and repository.project else ""),
+        # 诊断上下文（`job_id` / `run_id` / `stage` / `task_id`）随每一行性能样本一起落库。
+        # 「按 job/run/stage 查耗时」靠的就是这里 —— 文字日志已经被采样收敛，
+        # 不能再指望从日志行里 grep 出这些字段。没绑定时一个都不加（不写空串占位）。
+        **{
+            key: value
+            for key, value in current_diagnostics().items()
+            if value not in (None, "")
+        },
     }
     start_time = time.time()
     try:
-        log_print(f"🔧 统一差异服务开始处理: {commit.path}", 'DIFF', force=True)
-        log_print(f"📂 当前提交: {commit.commit_id[:8]} | 前一提交: {previous_commit.commit_id[:8] if has_previous else 'None'}", 'DIFF', force=True)
+        # 「统一差异服务开始处理」+「当前提交」原来是两行 force 日志、逐文件各一遍。
+        # 合成一条采样记录；`stage` 由上面的诊断上下文带上。
+        log_sampled(
+            'vcs.diff_start',
+            '统一差异服务处理',
+            f"🔧 统一差异服务开始处理: {commit.path} | "
+            f"当前提交: {commit.commit_id[:8]} | "
+            f"前一提交: {previous_commit.commit_id[:8] if has_previous else 'None'}",
+            log_type='DIFF',
+        )
         # 如果是Excel文件，优先检查缓存
         is_excel = excel_cache_service.is_excel_file(commit.path)
         cache_lookup_start = time.time()
         if is_excel:
-            log_print(f"🔍 Excel文件，检查缓存: {commit.path}", 'CACHE')
+            cache_lookup_start = time.time()
             # 检查Excel diff缓存 —— 必须带上本次的基线，不能交给服务自解析
             cached_diff = excel_cache_service.get_cached_diff(
                 repository.id, commit.commit_id, commit.path, previous_commit_id=read_baseline
             )
             if cached_diff:
                 cache_time = time.time() - start_time
-                log_print(f"✅ 缓存命中，跳过实时计算: {commit.path} | 耗时: {cache_time:.2f}秒", 'CACHE')
+                log_sampled(
+                    'vcs.diff_cache',
+                    'diff缓存',
+                    f"✅ 缓存命中，跳过实时计算: {commit.path} | 耗时: {cache_time:.2f}秒",
+                    outcome=OUTCOME_HIT,
+                    log_type='CACHE',
+                )
                 perf_metrics_service.record(
                     "unified_excel_diff",
                     success=True,
@@ -473,19 +537,34 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
                     tags={
                         "source": "cache_hit",
                         "repository_id": repository.id,
-                        "project_id": perf_project_tags["project_id"],
-                        "project_code": perf_project_tags["project_code"],
+                        # 展开而不是逐键取：`perf_project_tags` 里带着
+                        # `job_id/run_id/stage` 这些诊断字段，逐键取会把它们丢掉
+                        # （测试构造出来的那个洞就是这么发现的）。
+                        **perf_project_tags,
                         "file_path": commit.path,
                     },
                 )
                 return json.loads(cached_diff.diff_data)
 
             else:
-                log_print(f"❌ 缓存未命中，开始实时计算: {commit.path}", 'CACHE')
-                log_print(f"⏱️ 缓存查询耗时: {time.time() - cache_lookup_start:.2f}秒", 'DIFF')
+                log_sampled(
+                    'vcs.diff_cache',
+                    'diff缓存',
+                    f"❌ 缓存未命中，开始实时计算: {commit.path} | "
+                    f"缓存查询耗时: {time.time() - cache_lookup_start:.2f}秒",
+                    outcome=OUTCOME_MISS,
+                    log_type='CACHE',
+                )
         # 如果没有前一提交，这可能是问题所在
         if not has_previous:
-            log_print("⚠️ 警告: 没有前一提交，将与空版本比较 - 这可能导致显示为初始版本", 'DIFF', force=True)
+            # 逐文件 force 的一行：整批「新增文件」（没有基线）会把它刷满。改成采样后，
+            # 汇总行给出的正是有价值的那个数 —— 这一批有多少个文件是与空版本比的。
+            log_sampled(
+                'vcs.diff_no_baseline',
+                '没有前一提交（与空版本比较）',
+                f"⚠️ 没有前一提交，将与空版本比较: {commit.path}",
+                log_type='DIFF',
+            )
         # 根据仓库类型获取文件内容
         read_start = time.time()
         if repository.type == 'git':
@@ -570,11 +649,18 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
         processing_time = time.time() - calc_start_time
         if diff_data:
             total_time = time.time() - start_time
-            log_print(f"✅ 实时diff计算完成: {commit.path} | 类型: {diff_data.get('type', 'unknown')} | 计算耗时: {processing_time:.2f}秒 | 总耗时: {total_time:.2f}秒", 'DIFF')
-            log_print(
-                f"📊 diff分段耗时: read={read_time:.2f}s, calc={processing_time:.2f}s | "
+            # 原来是两行逐文件的耗时明细（`实时diff计算完成` + `diff分段耗时`）。
+            # 耗时本身**已经**逐文件落在性能面板里（下面的 perf_metrics_service.record，
+            # 带 total_ms/read_ms/diff_ms 与 file_path），所以文字这边只留采样后的
+            # 首条 + 末条 + 计数，不再为同一个数字写两遍。
+            log_sampled(
+                'vcs.diff_done',
+                '实时diff计算完成',
+                f"✅ 实时diff计算完成: {commit.path} | 类型: {diff_data.get('type', 'unknown')} | "
+                f"计算耗时: {processing_time:.2f}秒 | 总耗时: {total_time:.2f}秒 | "
+                f"read={read_time:.2f}s, calc={processing_time:.2f}s | "
                 f"content_bytes(current={len(current_content or b'')}, previous={len(previous_content or b'')})",
-                'DIFF'
+                log_type='DIFF',
             )
             # 如果是Excel文件且没有缓存，保存到缓存
             if is_excel and diff_data.get('type') == 'excel':
@@ -592,11 +678,15 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
                     )
                     cache_save_time = time.time() - cache_save_start
                     metrics = _collect_excel_metrics(diff_data)
-                    log_print(f"💾 Excel diff结果已保存到缓存: {commit.path}", 'CACHE')
-                    log_print(
-                        f"📈 Excel diff指标: sheets={metrics['sheet_count']}, rows={metrics['changed_rows']}, "
+                    # 两行逐文件的 Excel 明细（保存到缓存 + 指标）也一起采样：
+                    # 它们与原「实时diff计算完成」讲的是同一个文件的同一件事。
+                    log_sampled(
+                        'vcs.excel_cache_save',
+                        'Excel diff 结果已保存到缓存',
+                        f"💾 Excel diff结果已保存到缓存: {commit.path} | 指标: "
+                        f"sheets={metrics['sheet_count']}, rows={metrics['changed_rows']}, "
                         f"summary={metrics['summary']} | save_cache={cache_save_time:.2f}s",
-                        'DIFF'
+                        log_type='CACHE',
                     )
                     perf_metrics_service.record(
                         "unified_excel_diff",
@@ -612,8 +702,7 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
                         tags={
                             "source": "realtime_excel",
                             "repository_id": repository.id,
-                            "project_id": perf_project_tags["project_id"],
-                            "project_code": perf_project_tags["project_code"],
+                            **perf_project_tags,
                             "file_path": commit.path,
                         },
                     )
@@ -630,8 +719,7 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
                         tags={
                             "source": "realtime_excel_save_cache_failed",
                             "repository_id": repository.id,
-                            "project_id": perf_project_tags["project_id"],
-                            "project_code": perf_project_tags["project_code"],
+                            **perf_project_tags,
                             "file_path": commit.path,
                         },
                     )
@@ -647,8 +735,10 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
                     tags={
                         "source": "realtime_non_excel",
                         "repository_id": repository.id,
-                        "project_id": perf_project_tags["project_id"],
-                        "project_code": perf_project_tags["project_code"],
+                        # 展开而不是逐键取：`perf_project_tags` 里带着
+                        # `job_id/run_id/stage` 这些诊断字段，逐键取会把它们丢掉
+                        # （测试构造出来的那个洞就是这么发现的）。
+                        **perf_project_tags,
                         "file_path": commit.path,
                     },
                 )
@@ -662,8 +752,7 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
                 tags={
                     "source": "diff_data_empty",
                     "repository_id": repository.id,
-                    "project_id": perf_project_tags["project_id"],
-                    "project_code": perf_project_tags["project_code"],
+                    **perf_project_tags,
                     "file_path": commit.path,
                 },
             )
@@ -679,8 +768,7 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
             tags={
                 "source": "exception",
                 "repository_id": repository.id if repository else "",
-                "project_id": perf_project_tags["project_id"],
-                "project_code": perf_project_tags["project_code"],
+                **perf_project_tags,
                 "file_path": commit.path if commit else "",
             },
         )

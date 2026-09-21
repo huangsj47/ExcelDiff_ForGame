@@ -21,7 +21,50 @@ Agent 模式才会走到**，单机模式下它们是死路径 —— 单独一�
 
 from __future__ import annotations
 
+import json
+
 import services.task_worker_service as worker
+from services.task_worker_task_handlers import trigger_source_for_task
+
+
+def _merge_agent_task_payload(agent_task, extra_payload):
+    """把新的来源/模式补进**已下发的那条 AgentTask** 的载荷里。
+
+    原先这里命中已有 AgentTask 就直接 `return False` —— 什么都不更新。后果与「单机模式下
+    什么都不做」是同一个：远端拿到的是**旧载荷**，回传时把用户点出来的那一次记成
+    `scheduled`（`execute_task_inline_for_agent` 读的就是这份载荷）。
+
+    合并而不是整体替换：原载荷里有 `repository` / `limit` 那类只有建任务时才拼得出来的
+    东西，覆盖掉会让远端失去它们。读不动的载荷按空字典处理（宁可只补新的几个键，
+    也不要把任务卡住）。
+    """
+    if not extra_payload:
+        return False
+    try:
+        current = json.loads(agent_task.payload or "{}")
+    except (TypeError, ValueError):
+        current = {}
+    if not isinstance(current, dict):
+        current = {}
+    changed = False
+    for key, value in dict(extra_payload).items():
+        if value is None:
+            continue
+        if current.get(key) != value:
+            current[key] = value
+            changed = True
+    if not changed:
+        return False
+    agent_task.payload = json.dumps(current, ensure_ascii=False)
+    worker.log_structured_event(
+        "agent_task_payload_updated",
+        log_type="AGENT",
+        agent_task_id=getattr(agent_task, "id", None),
+        source_task_id=getattr(agent_task, "source_task_id", None),
+        task_type=getattr(agent_task, "task_type", None),
+        payload_keys=sorted(current.keys()),
+    )
+    return True
 
 
 def _enqueue_agent_task_from_background_task(db_task, extra_payload=None):
@@ -119,7 +162,12 @@ def _enqueue_agent_task_from_background_task(db_task, extra_payload=None):
 
 
 def _ensure_agent_dispatch_for_background_task(db_task, extra_payload=None):
-    """确保 pending 的 BackgroundTask 在 platform/agent 模式下有可领取的 AgentTask。"""
+    """确保 pending 的 BackgroundTask 在 platform/agent 模式下有可领取的 AgentTask。
+
+    命中已有 AgentTask 时**必须把新的载荷合并进去**（见 `_merge_agent_task_payload`）：
+    否则「手工要的一次分析」在远端被当成「定时」（用户点击到模型开始隔了 13 分 53 秒，
+    账单上写着 scheduled —— 实测那一幕）。
+    """
     if not worker._use_agent_dispatch() or db_task is None:
         return None
     try:
@@ -132,6 +180,8 @@ def _ensure_agent_dispatch_for_background_task(db_task, extra_payload=None):
             AgentTask.status.in_(["pending", "processing"]),
         ).first()
         if existing_agent_task:
+            if _merge_agent_task_payload(existing_agent_task, extra_payload):
+                worker._db.session.commit()
             return False
     except (ImportError, worker.SQLAlchemyError, RuntimeError, AttributeError) as exc:
         worker.log_print(f"检查 AgentTask 关联关系失败，改为直接补下发: {exc}", "SYNC", force=True)
@@ -263,15 +313,14 @@ def execute_task_inline_for_agent(task_type, payload):
         result = worker.run_weekly_analysis_background(
             int(config_id),
             # 与本地 handler（`task_worker_task_handlers` 的 weekly_ai_analysis 分支）
-            # 同一口径：载荷里带 `trigger_source` 就照传，没带就是调度器排的。
-            # 键确实能到这一行：`create_weekly_ai_analysis_task` 把它放进
-            # `payload_extra`（`task_worker_queue_service.py`），随 AgentTask 下发，
-            # Agent 原样回传（`agent/executor.py` 调本函数时用的就是那份载荷）。
-            #
-            # 不传的后果是**账会撒谎**：「等同步跑完就自动开始」转交出来的那一次是
-            # **用户点出来的**（manual），漏传就被记成 `scheduled`，用量面板显示
-            # 「定时」—— 用户明明点过，面板上却写着系统自己跑的。
-            trigger_source=payload.get("trigger_source") or "scheduled",
+            # 同一口径：**先读数据库行**（`background_task_id` 由
+            # `_enqueue_agent_task_from_background_task` 放进载荷），载荷只作兜底。
+            # 去重命中一条更早创建的任务时，权威值在那一行上（附着逻辑改的就是它）；
+            # 只信载荷会把用户点出来的那一次记成「定时」—— 用户明明点过，
+            # 用量面板上却写着系统自己跑的。
+            trigger_source=trigger_source_for_task(
+                payload.get("background_task_id"), payload
+            ),
         )
         return {"message": "weekly_ai_analysis completed", "result": result}
 

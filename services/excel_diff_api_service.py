@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from services.api_response_service import json_error, json_success
 from services.commit_diff_input_models import CommitDiffQueryInput
 from services.exception_rollout_service import resolve_exception_narrowing_rollout
+from services.task_worker_priority import EXCEL_DIFF_PAGE
 
 EXCEL_DIFF_API_AGENT_RENDER_ERRORS = (
     RuntimeError,
@@ -329,7 +330,7 @@ def handle_get_excel_diff_data(
                     metadata,
                     previous_commit_id=expected_baseline,
                 )
-                add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=1)
+                add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=EXCEL_DIFF_PAGE)
                 total_time = time_module.time() - request_start
                 log_print(f"✅ Excel差异实时处理完成，HTML缓存已保存: {commit.path}", "EXCEL")
                 log_print(
@@ -368,7 +369,7 @@ def handle_get_excel_diff_data(
                 )
             except EXCEL_DIFF_API_HTML_RENDER_ERRORS as exc:
                 log_print(f"⚠️ HTML生成失败，返回原始数据: {exc}", "INFO")
-                add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=1)
+                add_excel_diff_task(repository.id, commit.commit_id, commit.path, priority=EXCEL_DIFF_PAGE)
                 performance_metrics_service.record(
                     "api_excel_diff",
                     success=False,

@@ -350,12 +350,17 @@ def test_the_default_request_and_item_caps_agree():
 
 
 def test_the_stream_route_reads_and_forwards_focus():
-    """光有筛选不算数，URL 参数得真的传进去。"""
+    """光有筛选不算数，参数得真的传进去。
+
+    P0-01 之后范围的入口是**创建这次分析的那一步**（`POST /ai-analysis/weekly/<id>/jobs`
+    的 JSON body）—— 流式 GET 不再创建任务，所以它也不再读范围。判据因此从
+    `request.args.get("focus")` 换成读 body，但「读到就必须传下去」这一条没变。
+    """
     source = open(
         os.path.join(PROJECT_ROOT, "routes", "ai_analysis_routes.py"), encoding="utf-8"
     ).read()
-    assert 'request.args.get("focus"' in source, "路由没有读 focus 参数"
-    assert "focus=focus" in source, "读到了 focus 却没有传给 stream_weekly_analysis"
+    assert 'payload.get("focus"' in source, "路由没有读 focus 参数"
+    assert "focus=focus" in source, "读到了 focus 却没有传进 create_or_attach_job"
 
 
 def test_the_drawer_offers_a_range_selector_and_sends_it():
@@ -366,7 +371,10 @@ def test_the_drawer_offers_a_range_selector_and_sends_it():
 
     assert 'id="weeklyAiFocus"' in source, "抽屉里没有范围选择控件"
     assert "weeklyAiFocusValue()" in source, "没有读取所选范围的函数"
-    assert "focus=${focus}" in source, "stream 请求里没有带上所选范围"
+    # P0-01 之后范围随**创建那一步**一起提交（`POST /jobs` 的 body），不再是流式 GET 的
+    # 查询串 —— 但「选中的范围必须跟着这次分析走」这一条没变：它进了 job 行，
+    # 也是 `active_key` 的一部分（同一快照下「只看配表」与「只看代码」是两份输入）。
+    assert "focus: focus" in source, "创建这次分析的请求里没有带上所选范围"
     # 「只影响下次分析」这件事要说清：否则用户会以为切换就能换掉已显示的结果
     assert "只影响下次分析" in source
 

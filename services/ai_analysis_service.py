@@ -22,18 +22,37 @@ from models import (
     db,
 )
 from models.ai_analysis import (
-    # 测试按 `ai_service.AiProjectAnalysisConfig` 直接建行 / 数列（属性访问，不是 import），
-    # 所以这个「本文件不直接用」的模型类必须留着 —— ruff 的 F401 会想删它。
-    AiProjectAnalysisConfig,  # noqa: F401 —— 测试按属性取
     AiAnalysisAnomaly,
     AiAnalysisRun,
     AiAnalysisTrace,
+    # 测试按 `ai_service.AiProjectAnalysisConfig` 直接建行 / 数列（属性访问，不是 import），
+    # 所以这个「本文件不直接用」的模型类必须留着 —— ruff 的 F401 会想删它。
+    AiProjectAnalysisConfig,  # noqa: F401 —— 测试按属性取
     AiWeeklyAnalysisState,
+    # 「用户点了全量」那一个取值（`run_weekly_analysis_background` 的判据）：
+    # 常量只有一份，在 `models/ai_analysis/job.py`，本文件不另立字面量。
+    MODE_FULL,
 )
 from models.ai_analysis.project_config import (
     DEFAULT_MAX_FILES_PER_RUN,
 )
 from services.ai.analysis_budget import budget_gate_reason, early_stop_guard
+
+# 增量基线的编排块（AI-P0-02）：拿基准、冻目标快照、推进指针。**全部逻辑在那边**，
+# 本文件只按名字取用 —— 本文件贴着长度闸门（WARN 1800 / ERROR 2000），新增逻辑写在这里
+# 只会把它推过硬上限。
+#
+# 与下面 `baseline_source` 那一块**同一个坑**：`# noqa: F401` 必须写在**每个别名自己
+# 那一行**。写在 `from … import (` 那一行盖不住按名字报的 F401，`ruff check --fix` 会把
+# 测试要用的别名当垃圾删掉（真发生过：它删掉了 `_complete_coverage_ratio`，而
+# `tests/test_ai_diff_snapshot_baseline.py` 按那个名字断言「阈值可配置」）。
+from services.ai.baseline_blocks import (
+    advance_weekly_state,
+    complete_coverage_ratio as _complete_coverage_ratio,  # noqa: F401 —— 测试按这个名字取
+    resolve_baseline,
+    seal_target_snapshot,
+    snapshot_digest_for as _snapshot_digest_for,
+)
 
 # 基线的读侧：从库里取「上一次为止的结论」，做成提示词里那段「已经报过的问题」与
 # 本轮该抹掉的指纹。**保留这里的同名引用**（下面两处调用点与既有测试都按这几个名字 import）。
@@ -55,10 +74,6 @@ from services.ai.baseline_source import (
 from services.ai.budget import effective_prompt_budget
 from services.ai.change_set import from_commit_payload, from_weekly_payload
 
-# 同上面那个模型类：本文件不直接调它，但测试用 `monkeypatch` 打的是
-# `ai_service.build_probe_client` 这个名字（属性访问），删掉就等于让补丁落空。
-from services.ai.endpoint_service import build_probe_client  # noqa: F401 —— 测试按属性打补丁
-
 # 读侧形态（进行中 / 有结论 / 最近一次失败）：只依赖 run 行与两个标签函数，
 # 与「怎么跑一次分析」没有耦合，单独一层也好单测。
 from services.ai.conclusion_view import (  # noqa: F401 —— 本文件的读侧路由仍在用
@@ -68,9 +83,14 @@ from services.ai.conclusion_view import (  # noqa: F401 —— 本文件的读�
     _last_attempt_failed_result,
     _parse_response_payload,
 )
+
 # 覆盖账本（「这次看了多少、缺什么」）：只在落库那一刻算一次 —— 它要读已落库的请求
 # 载荷 + 逐轮明细 + 按工具计数，而分析过程中那几样还散在内存里（见 `_persist_outcome`）。
 from services.ai.coverage_ledger import ledger_from_run as coverage_ledger
+
+# 同上面那个模型类：本文件不直接调它，但测试用 `monkeypatch` 打的是
+# `ai_service.build_probe_client` 这个名字（属性访问），删掉就等于让补丁落空。
+from services.ai.endpoint_service import build_probe_client  # noqa: F401 —— 测试按属性打补丁
 from services.ai.engine import (
     STATUS_DEGRADED,
     STATUS_FAILED,
@@ -103,6 +123,7 @@ from services.ai.project_config_source import (  # noqa: F401 —— 调用点�
 from services.ai.project_facts import (
     generated_prefixes,
 )
+from services.ai.prompt import platform_prompt_chars
 from services.ai.provenance import current_provenance
 from services.ai.result_payload import (
     coverage_notice_text,
@@ -132,12 +153,11 @@ from services.ai.scope_sampling import (  # noqa: F401 —— 任务服务与测
     has_weekly_changes,
     weekly_snapshot_digest,
 )
-from services.ai.prompt import platform_prompt_chars
 from services.ai.skill_loader import describe_load_error, load_skills
+from services.ai.snapshot_store import DEFAULT_COMPENSATION_MAX_FILES
 from services.ai.subagent import plan_family, run_family_with_seed, subagent_mode_of
 from services.ai.trace_evidence import encode_evidence
 from services.ai.usage import encode_tools
-from services.ai.weekly_state import get_or_create_weekly_state
 from services.ai.weekly_sync_gate import group_config_ids, weekly_sync_in_flight
 from utils.logger import log_print
 
@@ -299,6 +319,23 @@ def _filter_delta_files_by_focus(
     return kept, f"仅仓库「{repo.name}」"
 
 
+def _concluded_run(state) -> Optional[AiAnalysisRun]:
+    """这个分组的**结论基线**那条运行（`ai_weekly_analysis_state.last_concluded_run_id`）。
+
+    降级也算（它跑完了、有可复用的结论，只是浅），所以指针与「时间水位线」不是一回事。
+    指不到就回 `None`：补偿集宁可不补，也不去猜「上一次是哪一次」。
+    """
+    if state is None:
+        return None
+    run_id = getattr(state, "last_concluded_run_id", None)
+    if not run_id:
+        return None
+    try:
+        return db.session.get(AiAnalysisRun, run_id)
+    except Exception:  # noqa: BLE001 —— 读不到基线不是「这次分析起不来」的理由
+        return None
+
+
 def build_weekly_payload(
     config_id: int,
     *,
@@ -318,31 +355,50 @@ def build_weekly_payload(
     base_name = _resolve_base_name(config)
     project_config = get_project_analysis_config(config.project_id)
     state = AiWeeklyAnalysisState.query.filter_by(group_key=group_key).first()
-    last_analyzed_at = None if force_full else (state.last_analyzed_at if state else None)
 
-    summary, details, skip_reason = _summarize_weekly_files(configs, last_analyzed_at)
+    # **做差的基准是快照，不是时间水位线**（AI-P0-02）。`force_full` 时永远是 None ——
+    # 全量模式不看基线。退回时间水位线的只有一种情形：这个分组还没有任何冻结快照
+    # （升级上来的老分组），见 `baseline_blocks.resolve_baseline`。
+    baseline, baseline_account = resolve_baseline(group_key, state, force_full=force_full)
+    summary, details, skip_reason = _summarize_weekly_files(
+        configs,
+        baseline,
+        # 补偿集的事实来源：**上一次有可复用结论的运行**（降级也算）。它那 94% 没取到
+        # 证据的文件不许就这么算了 —— 按风险排序后回到这一轮的输入里。
+        base_run=_concluded_run(state),
+        compensation_max=_configured_int(
+            project_config.get("compensation_max_files"), DEFAULT_COMPENSATION_MAX_FILES
+        ),
+    )
     if skip_reason and not force_full:
         return None, state, skip_reason
 
-    scope, policy = _decide_scope(summary, last_analyzed_at)
+    scope, policy = _decide_scope(summary, baseline)
     max_files = int(project_config.get("max_files_per_run") or MAX_FILES_DEFAULT)
 
     repo_details = details.get("repos", [])
     repo_details.sort(key=lambda item: (item.get("priority", 1), item.get("repository_name", "")), reverse=True)
 
     delta_files = details.get("delta_files", [])
+    compensation_files = list(details.get("compensation_files") or [])
     focus_label = ""
     if focus:
         delta_files, focus_label = _filter_delta_files_by_focus(delta_files, focus, configs)
         if not delta_files:
             return None, state, "focus_empty"
-        # **计数要跟着筛选走**（三个都跟）：不跟的话提示词会告诉模型「本次变更共 767 个
+        # **计数要跟着筛选走**（四个都跟）：不跟的话提示词会告诉模型「本次变更共 767 个
         # 文件」而它只看得到 19 个 —— 「把清单当全量」的镜像错误，这次是把全量说大了。
+        # 补偿项那一份同样要跟着筛：它已经算进 `delta_files` 里，两本账不能对不上。
+        kept = {item.get("file_path") for item in delta_files}
+        compensation_files = [
+            item for item in compensation_files if item.get("file_path") in kept
+        ]
         summary = {
             **summary,
             "total_files": len(delta_files),
             "delta_files": len(delta_files),
             "batch_files": len(delta_files),
+            "compensation_files": len(compensation_files),
         }
     list_files, list_truncated = _select_listed_files(delta_files, max_files)
 
@@ -377,6 +433,15 @@ def build_weekly_payload(
             "end_time": config.end_time.isoformat() if config.end_time else None,
         },
         "summary": summary,
+        # 这次做差的**基准**（快照 id / 指纹 / 条数 / 覆盖面）。落进 request_payload 之后，
+        # 「这次为什么是增量、基准是哪一份」不必再去猜状态行的当前值 —— 状态行是**会变的**，
+        # 而这份账冻结在运行记录上（同 `coverage_ledger` 读 request_payload 的口径）。
+        "baseline": baseline_account,
+        # **补偿项单独列一份**（复测文档 :163 的验收：「这 5 个文件 + 必要依赖和**明确
+        # 列出的补偿项**」）。它们已经在 `delta_files` 里（模型读得到），这里再显式列一遍
+        # 是为了让「这周真的改了什么」与「上一轮漏看了什么」在账上分得开 —— 混在一起，
+        # 报告里的变更数会被补偿项虚增。
+        "compensation_files": compensation_files,
         "repositories": repo_details,
         # 白名单：本批次**全部**改动过的文件。模型能读的 diff 就是这个集合。
         "delta_files": delta_files,
@@ -648,9 +713,11 @@ def _persist_outcome(
     # **为什么是独立一个键、而不是追加进报告正文**：正文被别的环节当**字符串判据**用 ——
     # `services/ai/family_ledger.reconcile_candidates` 靠它核对候选编号与候选的
     # `file_path` 有没有被点名（那条判据的明文取舍是「正文里提到过不算采纳」），而覆盖段
-    # 里恰好会列出**取数失败的文件路径**；`verdict.read_ruling`、下一轮的基线摘要也都会
-    # 读回正文。写成独立一个键，这些判据连碰都碰不到它。屏幕侧由
+    # 里恰好会列出**取数失败的文件路径**；下一轮的基线摘要也会读回正文。写成独立一个键，
+    # 这些判据连碰都碰不到它。屏幕侧由
     # `static/js/ai_context_notice.js` 贴到结论后面（见 `result_payload.coverage_notice_text`）。
+    # （这里原先还提了一句 `verdict.read_ruling` —— 那个从正文取回裁决块的函数已随
+    # AI-P0-05 删除，正文里不再有机器 json 可读。）
     # 取值只在**还没被判定为失败**的那条路上做：失败不写结论字段（`response_payload`
     # 保持 `None`）是上面那段注释里写死的一条口径 —— 前端只判这个字段就能把失败显示成
     # 「已有结果 · 风险等级 high」，这一段不许把它破掉。
@@ -827,6 +894,12 @@ def _create_run(
     周版本那两份抽屉附着上去接着看，单提交那份说清「已经有一次在跑」。
     """
     summary = payload.get("summary") or {}
+    # 冻结这次的**目标快照**（AI-P0-02）：位置在**所有闸门之后**，所以冻下来的必定是
+    # 一份同步已经写完的清单。它同时是「这次分析的是哪一份」的账与下一次做差的基准。
+    # 出错只记日志（见 `baseline_blocks.seal_target_snapshot`），不阻断这次分析。
+    snapshot_account = seal_target_snapshot(payload)
+    if snapshot_account:
+        payload["snapshot"] = snapshot_account
     # 溯源在重试路径上会被用两次，所以先算一次（它要哈希源码文件，不便宜）。
     provenance = current_provenance(project_id)
     claim_key = _analysis_claim_key(
@@ -1153,22 +1226,6 @@ def _blocked_sse(target_type: str, *, reason: str, message: str, run_id=None, ex
     return _sse_event("error", {"message": message})
 
 
-# 「等同步跑完就自动开始」的等待意图（手工入口这一侧）。**函数内 import**：模块级会成环
-# （`task_worker_service` 在模块级从本模块取名字，队列服务又要 import 它）。语义见队列服务。
-def _register_waiting_intent(config_id: int, group_key: str):
-    """登记「这次分析在等同步跑完」。**登记本身不产生任何模型调用。**"""
-    from services.task_worker_queue_service import register_waiting_analysis_intent
-
-    return register_waiting_analysis_intent(config_id, group_key)
-
-
-def _effective_waiting_intent(group_key: str):
-    """这个分组现在有一条**生效**的等待意图吗（登记了但还没跑起来的那种）。"""
-    from services.task_worker_queue_service import effective_waiting_analysis_intent
-
-    return effective_waiting_analysis_intent(group_key)
-
-
 def _already_running_message(run: AiAnalysisRun) -> str:
     return (
         f"这个目标已经有一次分析在进行中（运行 #{run.id}，"
@@ -1246,154 +1303,12 @@ def stream_commit_analysis(commit_id: int, user_label: str = "") -> Iterable[str
     yield _sse_event("result", {**result, "run_id": run.id})
 
 
-def stream_weekly_analysis(
-    config_id: int, trigger_source: str = "manual", focus: Optional[str] = None
-) -> Iterable[str]:
-    payload, state, skip_reason = build_weekly_payload(config_id, focus=focus)
-    if skip_reason == "no_change":
-        cached = get_latest_weekly_result(config_id)
-        if cached and cached.get("run_id"):
-            run = db.session.get(AiAnalysisRun, cached["run_id"])
-            if run and _is_run_fresh(run):
-                yield from _stream_cached_run(run)
-                return
-        payload, state, skip_reason = build_weekly_payload(config_id, force_full=True, focus=focus)
-    if skip_reason == "focus_empty":
-        yield _sse_event(
-            "error",
-            {"message": "选定的分析范围里没有改动过的文件，换一个范围再试。"},
-        )
-        return
-    if payload is None:
-        yield _sse_event("error", {"message": "Weekly analysis payload not ready."})
-        return
-
-    project_id = payload["group"]["project_id"]
-
-    # 预算闸门（手动·周版本）。与 commit 那条同理：缓存复用之后、真正开跑之前。
-    budget_reason = budget_gate_reason(project_id, entry="weekly_manual")
-    if budget_reason:
-        yield _sse_event("error", {"message": budget_reason})
-        return
-
-    if not _get_project_api_key(project_id):
-        yield _sse_event("error", {"message": "Project API key not configured."})
-        return
-
-    group_key = payload["group"]["key"]
-    # **已经登记过的那一次还在等 → 只附着，不新建 run。**
-    #
-    # 同步刚跑完、而等排的那条分析任务还没被 worker 取走时，用户又点了一下：这时
-    # 同步闸门**已经放行**（缓存确实写完了），于是会直接建一条新 run —— 而队列里那条
-    # 稍后执行时，手工这次可能已经跑完、认领也放开了，`_create_run` 于是照常建一条新的：
-    # 同一份输入跑两遍 = 两次付费。所以「已经登记过」必须在这一层就被认出来。
-    #
-    # 与下面那道闸门同一个位置口径：都在 `_create_run` **之前**（建了 run 再返回等待，
-    # 会留下一条零消费运行，用量面板上还看不出它是被拦下的）。
-    existing_intent = _effective_waiting_intent(group_key)
-    if existing_intent is not None:
-        yield _blocked_sse(
-            "weekly",
-            reason="waiting_snapshot",
-            message=(
-                f"这次分析已经登记过（登记号 #{existing_intent.id}）：同步一结束就会自动开始，"
-                "页面会接上那一次运行的进度，不需要再点「重新分析」。"
-                "本次没有发起新的分析，也没有产生任何消耗（一个模型请求都没有发出去）。"
-            ),
-            extra={"intent_registered": True},
-        )
-        return
-
-    # 同步闸门（手工·周版本）。与后台路径那一道**同一个判据、同一份实现**：
-    # `weekly_sync_in_flight(group_config_ids(config))` 判的是**整批**仓库的同步，
-    # 因为变更清单来自这一批全部仓库的缓存行 —— 只看自己那一个仓库的同步，另一个
-    # 仓库还在写的时候照样会漏文件，而漏文件是**静默**的（提示词里的「共 N 个文件」
-    # 跟着变小，模型与读报告的人都以为那是全量）。实测那次：run 13 建立时，同组
-    # config 2 的 weekly_sync 任务正 processing。
-    #
-    # 位置与预算闸门同理：在缓存复用之后（回放一份已有结论不花钱，不该被拦）、在
-    # `_create_run` **之前**（建了 run 再跳过会留下一条零消耗运行，用量面板上还看不出
-    # 它是被闸门挡下的）。
-    #
-    # **不许静默失败，也不许装作开始分析**：装作开始的后果是徽章变成「分析中」、
-    # 用户以为钱已经花了。发一个 `waiting` 事件，页面说「等待 Diff 同步完成」。
-    #
-    # **而且不能只回一句「等着」**（这就是用户报的那个病：反复点、每次都被同句话挡回来）。
-    # 拦下时**登记这次分析意图**：同步一收尾由 worker 自动把它跑起来，页面接上那一次
-    # 运行的进度 —— 用户点一次就够。登记本身不产生任何模型调用（见
-    # `task_worker_queue_service.register_waiting_analysis_intent`）。
-    sync_reason = weekly_sync_in_flight(
-        group_config_ids(db.session.get(WeeklyVersionConfig, config_id))
-    )
-    if sync_reason:
-        intent_id = _register_waiting_intent(config_id, group_key)
-        log_print(
-            f"周版本手工分析推迟（sync_in_flight）: config_id={config_id} —— {sync_reason}"
-            + (f"；已登记意图 intent_id={intent_id}（同步结束会自动开始）" if intent_id
-               else "；意图登记失败，需要用户手动重试"),
-            "AI",
-            force=True,
-        )
-        yield _blocked_sse(
-            "weekly",
-            reason="sync_in_flight",
-            message=(
-                f"等待 Diff 同步完成后再分析 —— {sync_reason}。"
-                + (
-                    "这次分析已经登记（登记号 #%d）：同步一结束就会自动开始，页面会接上"
-                    "那一次运行的进度 —— 不需要再点「重新分析」。"
-                    "本次没有发起分析，也没有产生任何消耗（一个模型请求都没有发出去）。"
-                    % intent_id
-                    if intent_id
-                    else "本次没有发起分析，也没有产生任何消耗（一个模型请求都没有发出去）。"
-                )
-            ),
-            extra={"intent_registered": bool(intent_id)},
-        )
-        return
-
-    try:
-        run = _create_run(
-            project_id=project_id,
-            target_type="weekly",
-            target_id=config_id,
-            target_key=group_key,
-            response_mode="streaming",
-            scope=payload.get("scope", "full"),
-            trigger_source=trigger_source,
-            payload=payload,
-        )
-    except ActiveAnalysisConflict as conflict:
-        # 同一目标 + 同一份输入已经有一条活动运行（**数据库**的唯一约束拦下的）。
-        # 把运行号交出去：界面附着到那一次上继续看它的进度与结论，而不是自己再跑一遍。
-        yield _blocked_sse(
-            "weekly", reason="already_running",
-            message=_already_running_message(conflict.run), run_id=conflict.run.id,
-        )
-        return
-    # 与单提交那条同理：运行号必须在**开跑之前**给出去，界面才能一边跑一边问进度。
-    yield _sse_event("run", {"run_id": run.id})
-
-    result = _execute_analysis(
-        run,
-        project_id=project_id,
-        payload=payload,
-        project_config=get_project_analysis_config(project_id),
-        target_type="weekly",
-        target_key=group_key,
-    )
-    for line in (result.get("report_markdown") or "").splitlines():
-        yield _sse_event("chunk", {"text": line})
-
-    _update_weekly_state(payload, run, state, engine_status=result.get("status"))
-    # 带上 run_id：抽屉里那一行「本次消耗」的「明细」按钮要按**运行记录**取数
-    # （`/ai-analysis/runs/<id>/usage`），而 SSE 的 result 事件只带结论本身。
-    # 只加在事件上，不进 `response_payload` —— 那是落库的结论，不该混入运行身份。
-    yield _sse_event("result", {**result, "run_id": run.id})
-
-
 def run_weekly_analysis_background(
-    config_id: int, task_id: Optional[int] = None, trigger_source: str = "scheduled"
+    config_id: int,
+    task_id: Optional[int] = None,
+    trigger_source: str = "scheduled",
+    requested_mode: Optional[str] = None,
+    focus: Optional[str] = None,
 ) -> dict:
     """后台跑一次周版本分析。
 
@@ -1402,6 +1317,27 @@ def run_weekly_analysis_background(
     被「等同步跑完就自动开始」的登记唤醒的那一次要传 `"manual"` —— 那是**用户点出来的**
     一次分析，只是被同步闸门推迟了。不传就记成「定时」是一条会误导人的账
     （用户明明点过，面板上却写着系统自己跑的）。
+
+    ## `requested_mode` 与 `focus`：用户点的东西必须走到这里（第二波收尾补上的那一跳）
+
+    这两个形参在 P0-01 之前**不存在**，于是「用户点了全量」与「用户选了仅配表」在
+    POST → worker 这一跳上被静默丢掉：范围由平台自己裁决，而界面上写着「全量 /
+    仅配表仓库」。默认值（`None`）让**老调用方逐字保持原行为**（平台自己裁决、不筛）。
+
+    * `requested_mode == "full"` → **强制全量**。走的是 `build_weekly_payload(
+      force_full=True, …)` —— 那是这条链上既有的、正确的入口（`force_full` 让
+      `resolve_baseline` 永远返回 None，`_decide_scope` 于是判 `("full", "first_run")`），
+      不在这里另塞一个变量把 `scope` 改掉。全量**不看基线**，所以也**不走**「没有变化
+      就复用结论」那一支：用户要的是一份对目标快照的完整分析。
+    * `focus` 非空 → 传给 `build_weekly_payload(focus=…)`（筛清单、筛补偿项、
+      计数跟着走、范围名进提示词）。不传（`None`）时**读它那条 job**：job 行上有
+      `focus`，而任务行上有 `job_id` —— 见 `job_service.focus_for_task`。
+
+    **「用户点了全量、平台却想跑增量」不需要在调用模型前让用户确认**：那是同一个方向
+    上的加强（全量包含增量），确认框在**发起之前**（`POST /jobs` 那条路上，P1-03 的
+    成本预估在那里）。反过来（平台想把增量升成全量）的决策落在 worker 里，快照冻结
+    之后，worker 没法同步问人 —— 那一档由 job 行的 `effective_mode` / `upgrade_reason`
+    如实记账、报告里说明，**不装作问过**。
     """
     # **执行前再查一次开关。** `schedule_weekly_ai_analysis_tasks` 在建任务时查过，
     # 但任务一旦入队就独立于开关了：关掉自动分析**不会**取消已经排队的任务，而重启时
@@ -1410,14 +1346,16 @@ def run_weekly_analysis_background(
     # 这正是用户报的「停止了自动分析后仍然自动触发」。
     #
     # 闸设在这里是安全的：本函数是**后台路径的唯一入口**（两个调用点都在
-    # `task_worker_service`），手动分析走的是 `stream_weekly_analysis`，不受影响。
+    # `task_worker_service`）。P0-01 之后**手动那一侧也走这条**（`POST /jobs` 建 job →
+    # 任务 → 本函数），所以它不再只管「自动」—— 开关那一支的判据见下面 `trigger_source`
+    # 那一行（手动来的照跑）。
     config = db.session.get(WeeklyVersionConfig, config_id)
     if config is not None:
         project_cfg = get_project_analysis_config(config.project_id)
         # **这个开关只管「自动」。** 用户点出来的那一次（`trigger_source="manual"`，
-        # 例如被同步闸门推迟后由登记唤醒的那一次）不受它管 —— 抽屉里那个「重新分析」
-        # 从来不看这个开关（它走 `stream_weekly_analysis`），同一个用户动作不该因为
-        # 换了一条执行路径就被否掉。
+        # 例如被同步闸门推迟后由登记唤醒的那一次）不受它管 —— 同一个用户动作不该因为
+        # 换了一条执行路径就被否掉。P0-01 之后抽屉里那个按钮走的就是这条（`POST /jobs`），
+        # 它的触发来源是 `manual`。
         if trigger_source != "manual" and not project_cfg.get("auto_weekly_enabled", True):
             log_print(
                 f"周版本自动分析已关闭，跳过已排队的任务: config_id={config_id}", "AI", force=True,
@@ -1451,16 +1389,27 @@ def run_weekly_analysis_background(
             )
             return {"status": "skipped", "reason": "sync_in_flight", "message": sync_reason}
 
-    payload, state, skip_reason = build_weekly_payload(config_id)
-    if skip_reason == "no_change":
-        cached = get_latest_weekly_result(config_id)
-        if cached and cached.get("run_id"):
-            run = db.session.get(AiAnalysisRun, cached["run_id"])
-            if run and _is_run_fresh(run):
+    # 用户选的「分析范围」：显式给的优先，否则读它那条 job（任务行上有 `job_id`）。
+    focus = _weekly_focus_for_task(task_id, focus)
+    if _requests_full_analysis(requested_mode):
+        # 用户说的「全量」是**指令**：不看基线、也**不**走「没有变化就复用结论」那一支。
+        payload, state, skip_reason = build_weekly_payload(
+            config_id, force_full=True, focus=focus
+        )
+    else:
+        payload, state, skip_reason = build_weekly_payload(config_id, focus=focus)
+        if skip_reason == "no_change":
+            # 与流式入口同一条口径（见那里的注释）：有可复用的结论就**不建 run**。
+            if _reusable_conclusion(config_id, state) is not None:
                 return {"status": "skipped", "reason": "no_change"}
-        payload, state, skip_reason = build_weekly_payload(config_id, force_full=True)
+            payload, state, skip_reason = build_weekly_payload(
+                config_id, force_full=True, focus=focus
+            )
     if payload is None:
-        return {"status": "skipped", "reason": "payload_empty"}
+        # **把真实的理由带出去**（`no_configs` / `focus_empty`）：一律压成 `payload_empty`
+        # 会让「你选的范围里没有改动过的文件」与「这个分组一条配置都没有」在 job 上
+        # 长得一样，而用户该做的事完全不同。
+        return {"status": "skipped", "reason": skip_reason or "payload_empty"}
 
     project_id = payload["group"]["project_id"]
     if not _get_project_api_key(project_id):
@@ -1518,6 +1467,46 @@ def run_weekly_analysis_background(
     }
 
 
+def _requests_full_analysis(requested_mode) -> bool:
+    """用户**明确**要求全量吗。
+
+    只认 `full`（`models.ai_analysis.MODE_FULL` 那一个字面值）：`None` / `incremental`
+    / 认不出来的值一律返回 False —— 这一支的默认行为是「平台自己裁决」，
+    把脏值当全量的后果是**静默多花钱**（全量不看基线、不增量）。
+    """
+    return str(requested_mode or "").strip().lower() == MODE_FULL
+
+
+def _weekly_focus_for_task(task_id, focus):
+    """这次分析的范围：显式给的优先，否则读它那条 job。
+
+    `focus` 只落在 `AiAnalysisJob.focus` 上，而任务行上有 `job_id` —— 所以执行侧
+    只要拿到 `task_id` 就能把用户选的范围读回来，**不需要改
+    `create_weekly_ai_analysis_task` / `register_waiting_analysis_intent` 的签名**。
+    取用与判据都在 `job_service.focus_for_task`（含「任务行上那一列可能是意图 id」
+    那一坑的处置）。
+
+    读不到就返回 `None` = **不筛**：范围是**缩窄**输入的东西，读不到它只会让这次分析
+    看全，不会让它看漏（看漏才是那个「静默把一半输入丢掉」的缺陷）。
+    """
+    if focus:
+        return focus
+    if task_id is None:
+        return None
+    try:
+        from services.ai.job_service import focus_for_task
+
+        return focus_for_task(task_id)
+    except Exception as exc:  # noqa: BLE001 —— 读不到范围不该让这次分析起不来
+        log_print(
+            f"⚠️ 周版本分析：读不到这次分析的范围（按「不筛」处理）: "
+            f"task_id={task_id}, {type(exc).__name__}: {exc}",
+            "AI",
+            force=True,
+        )
+        return None
+
+
 def _update_weekly_state(
     payload: dict,
     run: AiAnalysisRun,
@@ -1525,93 +1514,51 @@ def _update_weekly_state(
     *,
     engine_status: Optional[str],
 ) -> None:
-    """推进这个周版本分组的「分析水位线」。
+    """推进这个周版本分组的指针（**三路**，判据是引擎状态）。
 
-    **只有真正跑完整了的 run 才推进。** `last_analyzed_at` 是增量分析的水位线
-    （`_summarize_weekly_files` 用它筛 `updated_at > last_analyzed_at` 的文件），
-    一次没跑完的分析如果把它推到当前时刻，那批变更就被整体判成「已看过」——
-    下一次分析直接返回 no_change 静默跳过，用户再点多少次都跑不动。
+    ## 为什么判据只能是 `engine_status`
 
-    这里刻意**不看 `run.status`**：`run.status` 的语义是「这次**交付**是什么形态」
-    （succeeded / degraded / failed，见 `_persist_outcome`），而水位线问的是
-    「模型这次**读全了没有**」—— 两把尺子。降级（例如「上下文索取额度用尽，基于已有
-    证据出结论」）恰恰是最不该推进水位线的那一类：线上有一次 767 个文件里有 748 个
-    `.lua` 的 diff 根本没读到，却被标成「已分析」，增量从此只看得到水位线之后的新文件。
+    它是「模型这次**读全了没有**」的判据，而 `run.status` 回答的是「这次**交付**是什么
+    形态」（succeeded / degraded / failed，见 `_persist_outcome`）—— 两把尺子。降级
+    （例如「上下文索取额度用尽，基于已有证据出结论」）恰恰是最不该推进时间水位线的
+    那一类：线上有一次 767 个文件里有 748 个 `.lua` 的 diff 根本没读到，却被标成
+    「已分析」，增量从此只看得到水位线之后的新文件。
 
-    判据用引擎侧的 `outcome.status`（`STATUS_SUCCEEDED` 才推进），
-    所以这是个**必填的关键字参数** —— 将来新增调用点时，忘了传会直接报错，
-    而不是悄悄退回一个分不出 degraded 的判据。
+    ## 三路（AI-P0-02 把「一个值当三件事用」拆开了）
+
+    * **succeeded** → 时间水位线 + 运行号 + 结论基线 + （达标时）完整覆盖指针 + 指纹；
+    * **degraded** → **只推结论基线**（且必须是结构化结论）+ 指纹；时间水位线与完整覆盖
+      指针都不推 —— 降级结论可以当下一轮的基线，但**不能伪装为完整覆盖**；
+    * **失败 / 认不出来的状态** → 一个都不推，**连指纹也不写**（写了指纹，调度器下一轮
+      就会以「输入逐字相同」跳过它，而这个版本其实一次都没跑成）。
+
+    具体实现在 `services/ai/baseline_blocks.advance_weekly_state`（本文件贴着长度闸门）。
     """
-    if engine_status != STATUS_SUCCEEDED:
-        # **降级的 run 不推进时间水位线，但要留下内容指纹**（理由见
-        # `_remember_snapshot_digest`）：否则同一份输入会被一遍遍重新分析。
-        _remember_snapshot_digest(payload, state)
-        return
-    group = payload.get("group") or {}
-    summary = payload.get("summary") or {}
-    if not group:
-        return
-    if not state:
-        # 并发首跑时「先查后插」必有一个输家（见 `get_or_create_weekly_state`）——
-        # 这里原本就是那个写法，而它撞约束的代价是**结论落库了却交付不出去**。
-        state = get_or_create_weekly_state(
-            project_id=group.get("project_id"),
-            group_key=str(group.get("key") or ""),
-            base_name=str(group.get("base_name") or ""),
-            start_time=_parse_iso_datetime(group.get("start_time")),
-            end_time=_parse_iso_datetime(group.get("end_time")),
-        )
-
-    state.last_snapshot_digest = _snapshot_digest_for(payload) or state.last_snapshot_digest
-    state.last_analyzed_at = _utcnow()
-    state.last_analysis_run_id = run.id
-    state.last_scope = run.scope
-    state.last_summary = _json_dumps(summary)
-    state.last_triggered_at = run.started_at or _utcnow()
-    state.updated_at = _utcnow()
-    db.session.commit()
+    advance_weekly_state(payload, run, state, engine_status=engine_status)
 
 
-def _snapshot_digest_for(payload: dict) -> str:
-    """这次分析对应的快照指纹；算不出来返回空串（调用方保留原值）。"""
-    group = payload.get("group") or {}
-    if not group:
-        return ""
-    try:
-        return weekly_snapshot_digest(list(group.get("config_ids") or []))
-    except Exception:  # pragma: no cover - 指纹算不出来不该影响交付
-        return ""
+def _reusable_conclusion(
+    config_id: int, state: Optional[AiWeeklyAnalysisState]
+) -> Optional[AiAnalysisRun]:
+    """没有新变化时该复用的那条结论。
 
+    **先看状态行的结论基线指针**（`last_concluded_run_id`），它才是「上一轮那份可复用的
+    结论」；指针指不到或那条不可用了，才退回读侧口径（`get_latest_weekly_result`）。
 
-def _remember_snapshot_digest(payload: dict, state) -> None:
-    """**降级路径**记下「这次分析的是哪一份快照」（成功路径在上面一起写）。
-
-    为什么降级也要记：`last_analyzed_at` 只在跑完整了时推进是有意的（否则模型没真读到
-    的变更会被标成「已看过」，线上真出过 767 个文件里 748 个没读到却被标成已分析），
-    可这样一来「降级跑完 → 水位线不动 → 下个周期又判有新变化 → 同一份输入再分析一遍」
-    就会一直转，每小时烧一次全量分析，而输入一字未变。
-
-    指纹只写失败的日志、不抛：它只影响**下一次**要不要跳过，不影响这次的交付。
+    复用的前提是 `_is_run_fresh`：交付形态有结论 + 有内容 + 没过保留期 + 溯源一致。
+    **复用不建 run**，所以它同时也是「没有新变化不花钱」这条验收的实现位置。
     """
-    try:
-        digest = _snapshot_digest_for(payload)
-        if not digest:
-            return
-        group = payload.get("group") or {}
-        if not state:
-            state = get_or_create_weekly_state(
-                project_id=group.get("project_id"),
-                group_key=str(group.get("key") or ""),
-                base_name=str(group.get("base_name") or ""),
-                start_time=_parse_iso_datetime(group.get("start_time")),
-                end_time=_parse_iso_datetime(group.get("end_time")),
-            )
-        state.last_snapshot_digest = digest
-        state.updated_at = _utcnow()
-        db.session.commit()
-    except Exception as exc:  # pragma: no cover - 只影响下次是否跳过
-        db.session.rollback()
-        log_print(f"⚠️ AI 分析：记快照指纹失败（不影响本次交付）: {exc}", "AI", force=True)
+    pointer = getattr(state, "last_concluded_run_id", None) if state else None
+    candidate = db.session.get(AiAnalysisRun, pointer) if pointer else None
+    if candidate is not None and _is_run_fresh(candidate):
+        return candidate
+
+    cached = get_latest_weekly_result(config_id)
+    run_id = (cached or {}).get("run_id") if isinstance(cached, dict) else None
+    fallback = db.session.get(AiAnalysisRun, run_id) if run_id else None
+    if fallback is not None and _is_run_fresh(fallback):
+        return fallback
+    return None
 
 
 def _parse_iso_datetime(raw: Optional[str]) -> Optional[datetime]:

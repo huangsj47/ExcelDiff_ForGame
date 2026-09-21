@@ -45,8 +45,11 @@ from .agent import AgentNode, AgentProjectBinding, AgentTask, AgentDefaultAdmin,
 from .agent_temp_cache import AgentTempCache
 from .ai_analysis import (  # noqa: E402 —— 本文件刻意先定义 `db` 再导入模型（见上）
     AiAnalysisAnomaly,
+    AiAnalysisJob,
     AiAnalysisRun,
     AiAnalysisTrace,
+    AiDiffSnapshot,
+    AiDiffSnapshotItem,
     AiPlatformBudget,
     AiProjectAnalysisConfig,
     AiProjectApiKey,
@@ -113,6 +116,9 @@ __all__ = [
     'AiWeeklyAnalysisState',
     'AiProjectAnalysisConfig',
     'AiPlatformBudget',
+    'AiAnalysisJob',
+    'AiDiffSnapshot',
+    'AiDiffSnapshotItem',
 ]
 
 if _AUTH_MODELS_LOADED:

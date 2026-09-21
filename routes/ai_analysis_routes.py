@@ -19,9 +19,10 @@ from flask import (
 
 from models import Commit, Project, Repository, WeeklyVersionConfig, db
 from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
+from models.ai_analysis import job as job_model
 from models.ai_analysis.anomaly import DEFAULT_DISPOSITION, DISPOSITION_LABELS, DISPOSITIONS
 from services import ai_report_history_service as report_history_service
-from services.ai import project_pack_service, report_document, run_progress, verdict
+from services.ai import job_service, project_pack_service, report_document, run_progress, verdict
 from services.ai.analysis_budget import (
     budget_status,
     platform_budget_status,
@@ -58,10 +59,15 @@ from services.ai_analysis_service import (
     project_price_table,
     set_project_api_key,
     stream_commit_analysis,
-    stream_weekly_analysis,
     update_project_analysis_config,
 )
+
+# 注意：**这里不再 import `stream_weekly_analysis`**。P0-01 之后周版本那条流式入口
+# 没有生产调用方了（创建在 POST /jobs，订阅在 GET /jobs/<id>/events）—— 它留在
+# `services/ai_analysis_service.py` 里由 Owner 处理（那是别人的文件，本轮只报告不删）。
 from services.ai_usage_service import (
+    analysis_estimate,
+    parse_estimate_args,
     parse_usage_filters,
     project_usage,
     run_usage,
@@ -237,21 +243,355 @@ def ai_commit_stream(commit_id):
 
 @ai_analysis_bp.route("/ai-analysis/weekly/<int:config_id>/stream", methods=["GET"])
 def ai_weekly_stream(config_id):
-    trigger_source = request.args.get("source", "manual")
-    # 分析范围：all（默认）/ table / code / <repository_id>。认不出来的值不会把分析变成
-    # 空跑 —— `_filter_delta_files_by_focus` 一律退回「不筛」。
-    focus = request.args.get("focus", "all")
+    """**只订阅**（P0-01 之前它一边创建任务一边流式传输）。
+
+    这条路径不再创建任何东西：不建 job、不建 task、不建 run、不发模型请求。
+    它要求一个 `?job_id=`（POST `/ai-analysis/weekly/<id>/jobs` 拿到的那个）。
+    没有 job_id 时回 400 并**说明去哪儿创建** —— 回 404 会让「页面是旧的」看起来
+    像「服务端坏了」。
+
+    选「改成只订阅」而不是「删掉路由」的理由：`/jobs/<id>/events` 是给新页面用的，
+    而这条老路径按分组身份寻址（`config_id`），保留它能让「手里只有一个 config_id」
+    的调用方（老书签、别的页面、排查时手敲的 URL）拿到一条**说得清**的回答，
+    而不是一个没有路由的 404。它自己不产生任何副作用，所以留着不增加付费面。
+    """
     config = WeeklyVersionConfig.query.get_or_404(config_id)
     if not _has_project_access(config.project_id):
         return jsonify({"success": False, "message": "Access denied."}), 403
 
+    raw_job_id = (request.args.get("job_id") or "").strip()
+    if not raw_job_id:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "message": (
+                        "这条路径已经不创建分析了（创建与订阅是两件事）。"
+                        f"请先 POST /ai-analysis/weekly/{config_id}/jobs 拿到 job_id，"
+                        "再用 GET /ai-analysis/jobs/<job_id>/events 订阅，"
+                        "或者直接带上 ?job_id=<job_id>。"
+                    ),
+                }
+            ),
+            400,
+        )
+    job = job_service.get_job(raw_job_id)
+    if job is None or job.target_id != config_id:
+        # 不属于这个分组的 job 一律按「没有这个 job」回答：换个 config_id 就能读到
+        # 别人那次分析的进度与结论是不行的（判权在上面对 config 的 project_id 做过，
+        # 这里挡的是**跨目标**读）。
+        return jsonify({"success": False, "message": "Not found."}), 404
+    return _job_events_response(job)
+
+
+# ---------------------------------------------------------------------------
+#  Job 协议（AI-P0-01）：创建身份 / 读身份 / **只订阅**身份的事件流
+# ---------------------------------------------------------------------------
+# 这一组把「发起任务」与「SSE 订阅」拆开：
+#   POST /ai-analysis/weekly/<config_id>/jobs   → 建身份（不跑分析）
+#   GET  /ai-analysis/jobs/<job_id>             → 读身份（刷新 / 关抽屉再打开时恢复）
+#   GET  /ai-analysis/jobs/<job_id>/events      → 只订阅（重连不会创建任何东西）
+#
+# **创建任务一定不是 GET**：GET 既不可幂等（浏览器、代理、预取都会重放）又落在 CSRF
+# 保护之外（`enforce_csrf` 对 GET 直接放行），而它要做的正是「可能花钱的那次发起」。
+
+#: 心跳间隔。SSE 会被中间设备按「多久没有字节流动」掐断，而一次分析可能几分钟没有新
+#: 状态 —— 心跳是**保活**，不是进度（进度另有 `progress` 帧）。
+JOB_EVENTS_HEARTBEAT_SECONDS = 15
+
+#: 一条订阅流最长活多久。与 `models/ai_analysis/job.py` 的 `JOB_STALE_SECONDS`
+#: （30 分钟）同量级：超过它还没到终态的 job 由恢复扫描判死，页面也**重连一次**
+#: 重新问状态，比挂一条永远不会再有事件的长连接好。
+JOB_EVENTS_MAX_SECONDS = 30 * 60
+
+
+def _job_state_payload(job, *, last_event_id=None, stream_timeout=False) -> dict:
+    """`state` 事件：这条 job 现在到哪一步了。**状态名就是 `STATE_*` 的字面值。**"""
+    payload = {
+        "job_id": job.id,
+        "state": job.state,
+        "requested_mode": job.requested_mode,
+        "effective_mode": job.effective_mode,
+        "upgrade_reason": job.upgrade_reason or "",
+        "trigger_source": job.trigger_source,
+        "run_id": job.run_id,
+        "task_id": job.task_id,
+        "reused_run_id": job.reused_run_id,
+        "focus": job.focus or "",
+        "terminal": bool(job.is_terminal),
+        "last_event_id": last_event_id,
+    }
+    if stream_timeout:
+        # 流自己到点了（不是分析失败、也不是同步卡住）。页面据此重连一次 ——
+        # 那句话必须由服务端说，否则界面只能猜「怎么忽然连不上了」。
+        payload["stream_timeout"] = True
+    return payload
+
+
+def _job_event_frame(event_id: int, name: str, payload: dict) -> str:
+    """一帧带 `id:` 的 SSE。**`id` 是 `Last-Event-ID` 的凭据**（见下面的 docstring）。"""
+    body = json.dumps(payload, ensure_ascii=False, default=str)
+    return f"id: {event_id}\nevent: {name}\ndata: {body}\n\n"
+
+
+def _job_event_frames(job_id, last_event_id=None):
+    """订阅一条 job 的事件流。**只读**：全过程不写任何一行。
+
+    ## 事件词汇（三份模板的既有处理器就认这几个）
+
+    * `state`   —— 当前状态（状态名 = `AiAnalysisJob.STATE_*` 字面值）。首帧必发；
+    * `waiting` —— 在等同步跑完（文案取 `describe_waiting_analysis`，服务端给）；
+    * `progress`—— 跑的过程中那一眼（形状与 `/ai-analysis/runs/<id>/progress` 同源）；
+    * `result`  —— 终态，载荷与流式入口那条 `result` **同形**（含 `run_id` / `status`）；
+    * `heartbeat`、`error`（异常兜底）。
+
+    ## `Last-Event-ID`
+
+    浏览器自动重连时会带上最后收到的 `id`。这里的实现是：**从它继续编号**，并把
+    收到的那个值回显在首帧的 `last_event_id` 上。不做历史回放 —— 每一帧都是
+    「当前状态」的完整快照（幂等），重连时补发历史只会让页面把同一件事演两遍。
+
+    ## 为什么不断言「这个端点不写库」
+
+    不是靠自觉，是**结构上**没有写路径：本函数只调 `get_job` / `result_payload` /
+    `progress_payload` / `notice_for_waiting`，四个都只读。`tests/test_ai_job_protocol.py`
+    用行数断言钉住这一点（按 `job_id` / `target_key` 过滤，不数全表）。
+    """
+    import time
+
+    heartbeat = max(int(JOB_EVENTS_HEARTBEAT_SECONDS), 1)
+    try:
+        event_id = int(str(last_event_id or "").strip() or 0)
+    except (TypeError, ValueError):
+        event_id = 0
+    if event_id < 0:
+        event_id = 0
+    deadline = time.monotonic() + JOB_EVENTS_MAX_SECONDS
+    seen_last_id = last_event_id
+
+    job = job_service.get_job(job_id)
+    if job is None:
+        yield _job_event_frame(event_id + 1, "error", {"message": "这次分析不存在。"})
+        return
+
+    event_id += 1
+    yield _job_event_frame(
+        event_id, "state", _job_state_payload(job, last_event_id=seen_last_id)
+    )
+    if job.is_terminal:
+        # 终态的 job：把结论直接发出去，然后收尾关闭（不再有心跳）。
+        event_id += 1
+        yield _job_event_frame(
+            event_id,
+            "result",
+            job_service.result_payload(job) or {"run_id": job.run_id, "status": ""},
+        )
+        return
+
+    # 运行号一到手就发一条 `run`：它与老流式入口那个 `run` 事件**同名同义**
+    # （「运行号在这儿，接着看它的进度」），所以三份抽屉里既有的那个监听器
+    # （`startAiBudgetWatch`）直接复用 —— 不为 Job 协议再写一套进度接线。
+    sent_run_id = None
+    if job.run_id:
+        sent_run_id = job.run_id
+        event_id += 1
+        yield _job_event_frame(
+            event_id, "run", {"job_id": job.id, "run_id": job.run_id, "state": job.state}
+        )
+
+    if job.state == job_model.STATE_WAITING_SNAPSHOT:
+        event_id += 1
+        notice = job_service.notice_for_waiting(job)
+        yield _job_event_frame(
+            event_id,
+            "waiting",
+            {
+                "job_id": job.id,
+                "state": job.state,
+                "waiting": True,
+                "run_id": job.run_id or notice.get("run_id"),
+                "message": notice.get("message") or "",
+            },
+        )
+
+    while True:
+        if time.monotonic() >= deadline:
+            event_id += 1
+            yield _job_event_frame(
+                event_id,
+                "state",
+                _job_state_payload(job, last_event_id=seen_last_id, stream_timeout=True),
+            )
+            return
+        time.sleep(heartbeat)
+        # 只读流：每一轮把事务收掉再读。挂一个几十分钟的读事务在 SQLite 上没有任何
+        # 好处（下一次读本来就会开新事务），而它会让「这个连接占着库」成为一个
+        # 要排查的现象。
+        try:
+            db.session.rollback()
+        except Exception:  # noqa: BLE001 —— 收事务失败不影响读下一帧
+            pass
+        job = job_service.get_job(job_id)
+        if job is None:
+            event_id += 1
+            yield _job_event_frame(event_id, "error", {"message": "这次分析不存在。"})
+            return
+        if job.is_terminal:
+            event_id += 1
+            yield _job_event_frame(
+                event_id,
+                "result",
+                job_service.result_payload(job) or {"run_id": job.run_id, "status": ""},
+            )
+            return
+        # 运行号在这一轮才出现（排队 → 在跑）：补一条 `run`，让页面接上进度轮询。
+        if job.run_id and job.run_id != sent_run_id:
+            sent_run_id = job.run_id
+            event_id += 1
+            yield _job_event_frame(
+                event_id,
+                "run",
+                {"job_id": job.id, "run_id": job.run_id, "state": job.state},
+            )
+        event_id += 1
+        yield _job_event_frame(
+            event_id, "heartbeat", _job_state_payload(job, last_event_id=seen_last_id)
+        )
+        event_id += 1
+        yield _job_event_frame(
+            event_id,
+            "progress",
+            {
+                "job_id": job.id,
+                "run_id": job.run_id,
+                "status": job.state,
+                # 读不到就是 null（不是 0）：界面显示「进度不可用」。
+                "progress": job_service.progress_payload(job),
+            },
+        )
+
+
+def _job_events_response(job):
+    """把订阅流包成 SSE 响应。**`end_with_a_terminal_event` 那一层不许省**：
+    生成器中途抛异常时，客户端只会看到连接断掉，而那句话在界面上就是含糊的
+    「连接中断」—— 原因要跟着最后一条事件发出去。"""
+
     def _generate():
-        # 与单提交那条同理：异常也要带着原因收尾，不能让界面只看到「连接中断」。
         yield from end_with_a_terminal_event(
-            stream_weekly_analysis(config_id, trigger_source=trigger_source, focus=focus)
+            _job_event_frames(job.id, request.headers.get("Last-Event-ID"))
         )
 
     return Response(stream_with_context(_generate()), mimetype="text/event-stream")
+
+
+def _job_message(result) -> str:
+    """给用户的一句话：这次是**新建**还是**附着**、以及现在在哪一步。"""
+    job = result.job
+    if result.attached:
+        head = (
+            f"这次点击附着到已有的分析（job #{job.id}，同一个目标同一份输入只跑一次）"
+        )
+    else:
+        head = f"已收下这次分析（job #{job.id}）"
+    if result.upgraded:
+        head += "；这次要的是全量，已把模式升级为全量"
+    if job.state == job_model.STATE_WAITING_SNAPSHOT:
+        tail = "：正在等周版本同步写完缓存，同步一结束会自动开始（本次没有产生任何消耗）。"
+    elif job.state == job_model.STATE_QUEUED:
+        tail = f"：已排进后台队列（任务 #{job.task_id}），轮到它就开跑。"
+    elif job.state == job_model.STATE_RUNNING:
+        tail = f"：它正在跑（运行 #{job.run_id}）。"
+    else:
+        tail = "：它已经跑完了，结论见 /ai-analysis/weekly/<config_id>/latest。"
+    return head + tail
+
+
+@ai_analysis_bp.route("/ai-analysis/weekly/<int:config_id>/jobs", methods=["POST"])
+def ai_weekly_job_create(config_id):
+    """**创建这次分析的身份**（不跑分析）：返回稳定的 `job_id`。
+
+    body（JSON，全部可选）：
+
+    * `analysis_mode`：`incremental`（默认）/ `full`。**认不出来回 400** ——
+      静默当成增量会让「我点了全量」变成一句谎话；
+    * `focus`：分析范围（`all` / `table` / `code` / 仓库 id），缺省 `all`；
+    * `source`：`manual`（默认）/ `scheduled`；
+    * `idempotency_key`：**客户端**给的动作标识。同一次点击重试要复用同一个键 ——
+      「关掉抽屉再打开又点一下」不该变成第二次付费调用。
+
+    权限与其余 `/ai-analysis/*` 端点同一口径（`_has_project_access`，取不到也拒绝）。
+
+    返回 `{success, job_id, state, run_id, requested_mode, effective_mode,
+    upgrade_reason, reused_run_id, attached, job}`。**同步没跑完也照样返回 `job_id`**
+    （状态 `waiting_snapshot`）—— 这就是「不再有『没有运行号所以无法确认』那一档」。
+    """
+    config = WeeklyVersionConfig.query.get_or_404(config_id)
+    if not _has_project_access(config.project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+
+    payload, error = read_json_object()
+    if error is not None:
+        return error
+
+    # 两个取值都在这里先落地成变量：一是为了让「读到了什么」与「传下去什么」在同一条
+    # 语句上下文里看得见，二是 `analysis_mode` 的**非法值判定**发生在服务层的归一化里
+    # （`JobRequestError` → 400），不在这里静默回落。
+    analysis_mode = payload.get("analysis_mode", job_model.MODE_INCREMENTAL)
+    focus = payload.get("focus", job_service.FOCUS_ALL)
+
+    try:
+        result = job_service.create_or_attach_job(
+            config=config,
+            requested_mode=analysis_mode,
+            focus=focus,
+            trigger_source=payload.get("source", job_model.SOURCE_MANUAL),
+            idempotency_key=payload.get("idempotency_key"),
+        )
+    except job_service.JobRequestError as exc:
+        return jsonify({"success": False, "message": str(exc)}), 400
+
+    # 提交在这里（本层的口径，见 `services/ai/job_service.py` 的事务说明）：
+    # 上面那几步都只是 flush，谁调用谁提交。
+    db.session.commit()
+    body = {"success": True, **result.to_dict()}
+    body["message"] = _job_message(result)
+    return jsonify(body), 200
+
+
+@ai_analysis_bp.route("/ai-analysis/jobs/<int:job_id>", methods=["GET"])
+def ai_job_status(job_id):
+    """读一条 job 的持久状态。**页面刷新 / 关抽屉再打开时的恢复入口。**
+
+    按 `job.project_id` 判权（不接受调用方指定项目：换个号就能读到别人的分析进度与
+    结论是不行的）；不存在 → 404。
+    """
+    job = job_service.get_job(job_id)
+    if job is None:
+        return jsonify({"success": False, "message": "Not found."}), 404
+    if not _has_project_access(job.project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+    return jsonify({"success": True, "job": job.to_dict()}), 200
+
+
+@ai_analysis_bp.route("/ai-analysis/jobs/<int:job_id>/events", methods=["GET"])
+def ai_job_events(job_id):
+    """**只订阅**这条 job 的事件流。创建任务一次都不在这里发生。
+
+    * `waiting_snapshot` → `waiting`（文案由服务端给）+ 心跳保活；
+    * `queued` / `running` → 心跳 + 进度帧；
+    * 终态 → `result`（与既有抽屉消费的那一份同形）后关闭；
+    * 支持 `Last-Event-ID`（断线重连从它继续编号）。
+
+    这个端点在任何情况下都**不产生**新的 job / run / task 行 —— 这是「重连不会创建
+    第二条 run，也不会再次调用模型」那条验收；`tests/test_ai_job_protocol.py` 用行数
+    断言钉它。
+    """
+    job = job_service.get_job(job_id)
+    if job is None:
+        return jsonify({"success": False, "message": "Not found."}), 404
+    if not _has_project_access(job.project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+    return _job_events_response(job)
 
 
 @ai_analysis_bp.route("/ai-analysis/weekly/<int:config_id>/latest", methods=["GET"])
@@ -573,6 +913,43 @@ def ai_usage_overview():
         _get_accessible_project_ids(), filters, show_platform=platform_scope_visible()
     )
     return jsonify(payload), 200
+
+
+@ai_analysis_bp.route("/ai-analysis/usage/estimate", methods=["GET"])
+def ai_usage_estimate():
+    """**执行前**的代价区间（AI-P1-03）：预计 token / 预计时间 / 最近一次实际值 / 是否命中基线。
+
+    只读、只回 JSON、不产生任何模型消耗 —— 与上面三个端点同一条口径（也因此被
+    `test_the_three_endpoints_are_read_only` 的那张网照着：只许 GET、路径里不许有 stream）。
+
+    参数（**全部是可选的**，缺了就降级，不 500）：
+
+    * `project`：必填才有意义，缺失或不合法 → 400；
+    * `mode`：`full` / `incremental`，认不出来按 `full`（与 Job 协议同一套字面量）；
+    * `files`：目标文件数，非数字/负数按「不知道」处理（区间就不缩放，见估算函数）；
+    * `baseline`：`1` / `0` / 缺省（缺省 = 还没判定）。
+
+    解析全部在 `parse_estimate_args`（服务层，与 `parse_usage_filters` 同一套回落规则）——
+    路由这一层**只做权限**，第二波接手这个文件时不必读一遍参数解析。
+
+    权限与 `/usage/project/<id>` 逐字相同（`_has_project_access`）：估算依据的是这个项目
+    的历史运行，能看那些数字的人才能看这个区间。
+    """
+    project_id, params = parse_estimate_args(request.args)
+    if project_id is None:
+        return jsonify({"success": False, "message": "缺少有效的项目编号。"}), 400
+    if not _has_project_access(project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+
+    payload = analysis_estimate(
+        project_id,
+        mode=params["mode"],
+        planned_files=params["planned_files"],
+        baseline_reusable=params["baseline_reusable"],
+    )
+    if params["notes"]:
+        payload["notes"] = [*payload["notes"], *params["notes"]]
+    return jsonify({"success": True, "project_id": project_id, **payload}), 200
 
 
 @ai_analysis_bp.route("/ai-analysis/usage/project/<int:project_id>", methods=["GET"])
