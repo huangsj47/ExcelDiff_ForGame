@@ -42,6 +42,7 @@ from services.task_worker_queue_service import (
     load_pending_tasks,
     regenerate_repository_cache,
     schedule_cleanup_task,
+    wake_waiting_analysis_intents,
 )
 from services.task_worker_task_handlers import (
     _abandon_timed_out_auto_sync_task,
@@ -88,7 +89,13 @@ from services.ai.analysis_budget import budget_gate_reason
 from services.ai.scope_sampling import snapshot_already_analyzed
 from services.ai.weekly_state import get_or_create_weekly_state
 # 「周版本同步还在跑就先别分析」的闸门（同步逐文件写缓存，跑到一半的清单会静默变小）
-from services.ai.weekly_sync_gate import weekly_sync_in_flight, weekly_sync_stuck_note
+# `group_config_ids` 在这里的用处是**排同步时的批次判据**（同一批只跑一轮，见
+# `_group_is_writing_cache`）—— 与闸门用的是同一个分组口径，不另立一份。
+from services.ai.weekly_sync_gate import (
+    group_config_ids,
+    weekly_sync_in_flight,
+    weekly_sync_stuck_note,
+)
 # 周版本同步的显式结局 → 任务状态映射：process_weekly_version_sync 过去用 None
 # 同时表示「配置不存在/被禁用/窗口内无提交/正常跑完」四种结局，调用方只能无条件
 # 标 completed，于是真正的失败与「这周本来就没数据」在任务列表里长得一模一样。
@@ -796,15 +803,35 @@ def _handle_auto_sync_task_inner(task):
 
 def _handle_weekly_sync_task(task):
     """处理周版本同步任务"""
-    return handle_weekly_sync_task_service(
-        task=task,
-        app=_app,
-        update_task_status_with_retry=update_task_status_with_retry,
-        process_weekly_version_sync=_process_weekly_version_sync,
-        non_critical_task_status_errors=NON_CRITICAL_TASK_STATUS_ERRORS,
-        non_critical_task_execution_errors=NON_CRITICAL_TASK_EXECUTION_ERRORS,
-        log_print=log_print,
-    )
+    try:
+        return handle_weekly_sync_task_service(
+            task=task,
+            app=_app,
+            update_task_status_with_retry=update_task_status_with_retry,
+            process_weekly_version_sync=_process_weekly_version_sync,
+            non_critical_task_status_errors=NON_CRITICAL_TASK_STATUS_ERRORS,
+            non_critical_task_execution_errors=NON_CRITICAL_TASK_EXECUTION_ERRORS,
+            log_print=log_print,
+        )
+    finally:
+        # **同步一收尾就唤醒「等同步跑完就自动开始」的意图**（审计要求的那一半：
+        # 用户点一次就够）。放在 finally 里的理由：这一轮同步是跑完了、跳过了还是失败了，
+        # 对「缓存已经不再被写」这件事是一样的 —— 该被唤醒的时刻是同一个。
+        wake_waiting_analysis_intents_safely()
+
+
+def wake_waiting_analysis_intents_safely():
+    """唤醒等待意图，**绝不把 worker 打死**（它在 worker 主循环的调用链上）。
+
+    单机模式下这里跑在唯一那个工作线程里：抛出去会被循环的
+    `NON_CRITICAL_WORKER_LOOP_ERRORS` 接住（只打一行日志），但已经领到的那个任务的收尾
+    记账会被跳过；而这条路径上最坏的结果只是「这次没自动开始」（下一次同步收尾或下一个
+    调度周期还会再试），不值得拿工作线程去赌。
+    """
+    try:
+        wake_waiting_analysis_intents()
+    except Exception as wake_error:  # noqa: BLE001 —— 见 docstring
+        log_print(f"⚠️ 唤醒等待同步的分析意图失败（不影响这次同步）: {wake_error}", 'AI', force=True)
 
 
 def _handle_weekly_excel_cache_task(task):
@@ -1188,6 +1215,49 @@ def _starvation_yield_note(now_utc_naive, *, limit=3):
     )
 
 
+def _group_is_writing_cache(config):
+    """本批（同一个 `group_key`）**此刻**正被 worker 写缓存吗。
+
+    ## 为什么要有这条判据
+
+    `create_weekly_sync_task` 的去重是按 **config** 的：同一批里的另一条配置照样会在
+    同一个 tick 里被排上。实测大仓一轮同步 340~420 秒（421=339s、427=352s、431=418s），
+    而 tick 原来每 2 分钟就来一次 —— 于是队列里**永远**有一条优先级 3 的同步在等：低
+    优先级任务永远轮不到，而 AI 分析那道闸门判的正是「本批有没有同步在写缓存」，
+    「同步在跑」因此接近于稳态，用户才会**反复**撞上「等待 Diff 同步完成」。
+
+    ## 判据为什么只认 `processing`（而不是「有 pending/processing」）
+
+    「有排队中的同步就不再排」是一条**已经踩过的坑**：队列一旦积压一条就再也不补，
+    同步直接停摆（比饿死更难查 —— 连日志都是「正常让路」，见
+    `test_a_starved_sync_task_does_not_stop_syncing`）。而 `processing` 是**worker 正拿在
+    手里写**：这一刻再排一条同批的同步只会增加队列深度、不会让缓存更早写完 ——
+    下一轮跑完（下一个 tick）再排，语义正好是「一轮跑完才有下一次机会」。
+
+    卡死的 `processing`（超过 `WEDGED_SYNC_PROCESSING_SECONDS` 没人再写它）**不算**：
+    那种行会把这一批永久挡住，而它自己另有机制兜（`create_weekly_sync_task` 会把它
+    置 failed 重建）。
+
+    读不动（模型桩不认识分组键、库连不上）时返回 False —— **照旧排**：少一道节流，
+    而不是让同步停摆。
+    """
+    try:
+        config_ids = [str(item) for item in (group_config_ids(config) or [])]
+        if not config_ids:
+            return False
+        rows = _BackgroundTask.query.filter(
+            _BackgroundTask.task_type == 'weekly_sync',
+            _BackgroundTask.commit_id.in_(config_ids),
+            _BackgroundTask.status == 'processing',
+        ).all()
+    except Exception:  # noqa: BLE001 —— 见 docstring：少一道节流，不让同步停摆
+        return False
+    for row in rows:
+        if not _is_wedged_processing_sync_task(row):
+            return True
+    return False
+
+
 def schedule_weekly_sync_tasks():
     """调度周版本同步任务"""
     try:
@@ -1228,6 +1298,14 @@ def schedule_weekly_sync_tasks():
                         starvation_yield = _starvation_yield_note(now_utc_naive)
                         if starvation_yield:
                             log_print(starvation_yield, 'WEEKLY', force=True)
+                    if _group_is_writing_cache(config):
+                        # 「一轮跑完才有下一次机会」：这一批**此刻**正被写缓存，本轮不补新的。
+                        # 判据按**批**而不是按 config —— 见 `_group_is_writing_cache`。
+                        log_print(
+                            f"⏳ 本批正在写缓存，本轮不补新的同步任务: config_id={config.id}",
+                            'WEEKLY',
+                        )
+                        continue
                     if not starvation_yield:
                         create_weekly_sync_task(config.id)
             log_print(f"检查了 {len(active_configs)} 个周版本配置", 'WEEKLY')
@@ -1238,24 +1316,107 @@ def schedule_weekly_sync_tasks():
         log_print(f"调度周版本同步任务失败: {e}", 'WEEKLY', force=True)
 
 
+def _pending_weekly_analysis_task_exists(group_key):
+    """这个分组已经有一条排队中/正在跑的周版本分析任务吗。
+
+    **只用于日志记账**（「新建」与「复用」要分开），不参与任何控制流：去重仍由
+    `create_weekly_ai_analysis_task` 内部那条查询裁决 —— 把它抄一份到这里就等于
+    多了一个会漂移的第二事实源。读不动时按「没有」处理（记账少一分，不影响调度）。
+    """
+    try:
+        return (
+            _BackgroundTask.query.filter(
+                _BackgroundTask.task_type == 'weekly_ai_analysis',
+                _BackgroundTask.file_path == group_key,
+                _BackgroundTask.status.in_(['pending', 'processing']),
+            ).first()
+            is not None
+        )
+    except SQLAlchemyError:
+        return False
+
+
+def _note_weekly_ai_skip(counts, reason_key):
+    """记一次「这一组被跳过了」，按原因分桶（桶名见 `_WEEKLY_AI_SKIP_LABELS`）。"""
+    counts["skipped"] += 1
+    counts["skip_reasons"][reason_key] = counts["skip_reasons"].get(reason_key, 0) + 1
+
+
+def _weekly_ai_schedule_summary(counts):
+    """这一轮调度**实际发生了什么**的一句话。
+
+    ## 为什么这三个数是真的（2026-09-21 修的那条「日志在说谎」）
+
+    旧实现无条件打印 `调度了 {len(grouped)} 组周版本AI分析任务`，而 `len(grouped)` 是
+    **扫到的分组数**、不是**建成几个任务**：循环体里至少有四条 `continue`（开关关闭、
+    未到间隔、无变更、闸门拦下）都不会阻止它打印。实测 14:19→15:20 整 61 分钟打了 61 次
+    「调度了 1 组」，而同期 `background_tasks` 里只建了 **1 条** `weekly_ai_analysis`
+    —— 排查时据此把「调度器在空转」当成了事实。
+
+    现在的口径：`checked` 是扫到的分组数、`created` 是**真的建了新行**的任务数、
+    `reused` 是去重命中了已有任务（`create_weekly_ai_analysis_task` 返回的是既有 id）、
+    `skipped` 按 `continue` 的原因分桶，四者之和 = `checked`。
+
+    ## 为什么「没事也要打印」
+
+    静默与说谎一样坏：把「无变化就不打印」当成省事，会让**「调度器死了」与「调度器空转」
+    长得一模一样**。这一行必须每分钟都在，且如实说它这一分钟没做事。
+    """
+    reasons = counts["skip_reasons"]
+    detail = " / ".join(
+        f"{label} {reasons.get(key, 0)}" for key, label in _WEEKLY_AI_SKIP_LABELS
+    )
+    return (
+        f"周版本AI分析调度：检查 {counts['checked']} 组，新建 {counts['created']} 个，"
+        f"复用 {counts['reused']} 个，跳过 {counts['skipped']} 个（{detail}）"
+    )
+
+
+# 跳过原因 → 桶名。顺序就是日志里出现的顺序（**全部**要出现：少一个桶，
+# 「为什么这一组没排上」就答不上来）。
+_WEEKLY_AI_SKIP_LABELS = (
+    ("auto_disabled", "开关关闭"),
+    ("not_due", "未到间隔"),
+    ("over_budget", "超预算"),
+    ("no_change", "无变更"),
+    ("same_snapshot", "输入相同"),
+    ("sync_in_flight", "同步中"),
+)
+
+
 def schedule_weekly_ai_analysis_tasks():
-    """按组调度周版本AI分析任务（默认每小时执行）。"""
+    """按组调度周版本AI分析任务（默认每小时执行）。
+
+    ## 收尾那一行的契约（**不许省**）
+
+    无论这一轮做了什么、甚至什么都没做，函数结束前一定打印一行
+    `周版本AI分析调度：检查 N 组，新建 N 个，复用 N 个，跳过 N 个（… 分桶 …）`
+    （见 `_weekly_ai_schedule_summary`）。它挂在 `finally` 上，所以连
+    「数据库报错」那条路径也会先如实报出这一轮扫到/跳过多少 —— 报错另行一行。
+    """
+    counts = {"checked": 0, "created": 0, "reused": 0, "skipped": 0, "skip_reasons": {}}
     try:
         with _app.app_context():
+            # **兜底唤醒等待意图**：同步收尾那个钩子只在「本进程跑过那条同步」时才会响
+            # （agent 派发模式下同步由别的节点执行；进程重启也会丢掉那一瞬间），所以
+            # 每个分析调度周期再扫一遍 —— 没有意图时这条查询是空的，代价可以忽略。
+            wake_waiting_analysis_intents_safely()
             active_configs = _WeeklyVersionConfig.query.filter_by(
                 is_active=True, auto_sync=True, status='active'
             ).all()
-            if not active_configs:
-                return
+            # **没有活跃配置也要走到收尾那一行**（`检查 0 组…`）：静默与说谎一样坏，
+            # 见 `_weekly_ai_schedule_summary`。
             grouped = {}
             for cfg in active_configs:
                 group_key = build_weekly_group_key(cfg)
                 grouped.setdefault(group_key, []).append(cfg)
 
             for group_key, configs in grouped.items():
+                counts["checked"] += 1
                 project_id = configs[0].project_id
                 project_cfg = get_project_analysis_config(project_id)
                 if not project_cfg.get("auto_weekly_enabled", True):
+                    _note_weekly_ai_skip(counts, "auto_disabled")
                     continue
                 interval_minutes = int(project_cfg.get("weekly_interval_minutes") or 60)
                 now_utc = datetime.now(timezone.utc)
@@ -1265,6 +1426,7 @@ def schedule_weekly_ai_analysis_tasks():
                     if getattr(last_triggered, "tzinfo", None) is None:
                         last_triggered = last_triggered.replace(tzinfo=timezone.utc)
                     if (now_utc - last_triggered).total_seconds() < interval_minutes * 60:
+                        _note_weekly_ai_skip(counts, "not_due")
                         continue
 
                 # 预算闸门：超预算就不排队。放在间隔判定**之后**，所以这条日志最多
@@ -1284,6 +1446,7 @@ def schedule_weekly_ai_analysis_tasks():
                     if state is not None:
                         state.last_triggered_at = now_utc
                         _db.session.commit()
+                    _note_weekly_ai_skip(counts, "over_budget")
                     continue
 
                 stale_tasks = _BackgroundTask.query.filter(
@@ -1306,6 +1469,7 @@ def schedule_weekly_ai_analysis_tasks():
                 primary = select_primary_weekly_config(configs)
                 config_ids = [cfg.id for cfg in configs]
                 if not has_weekly_changes(config_ids, state.last_analyzed_at if state else None):
+                    _note_weekly_ai_skip(counts, "no_change")
                     continue
                 # **输入一字未变就别再分析一遍**（内容判据，与上面那条时间判据互补）。
                 # 时间水位线只在跑完整了时推进（降级不推进是有意的：模型没真读到的变更
@@ -1325,6 +1489,7 @@ def schedule_weekly_ai_analysis_tasks():
                     if state is not None:
                         state.last_triggered_at = now_utc
                         _db.session.commit()
+                    _note_weekly_ai_skip(counts, "same_snapshot")
                     continue
 
                 # **同步没写完就不要分析。** 变更清单来自周版本缓存行，而同步是逐文件
@@ -1337,10 +1502,19 @@ def schedule_weekly_ai_analysis_tasks():
                 sync_reason = weekly_sync_in_flight(config_ids)
                 if sync_reason:
                     log_print(f"⏸️ 周版本自动分析推迟（{sync_reason}）: group_key={group_key}", "AI", force=True)
+                    _note_weekly_ai_skip(counts, "sync_in_flight")
                     continue
 
+                # 「复用」= 去重命中了已有任务（`create_weekly_ai_analysis_task` 返回的是
+                # 既有那一行的 id）。**只看返回值分不出「新建」与「复用」**，所以先看一眼
+                # 队列里有没有 —— 这一眼只用于记账，不参与控制流（去重仍由 create 内部裁决）。
+                reused = _pending_weekly_analysis_task_exists(group_key)
                 task_id = create_weekly_ai_analysis_task(primary.id, group_key=group_key)
                 if task_id:
+                    if reused:
+                        counts["reused"] += 1
+                    else:
+                        counts["created"] += 1
                     if not state:
                         # 与 `_update_weekly_state` 共用同一个 get-or-create：
                         # 「先查后插」在这里同样会撞唯一约束 —— 首次手动分析正在进行中时
@@ -1356,12 +1530,18 @@ def schedule_weekly_ai_analysis_tasks():
                         )
                     state.last_triggered_at = now_utc
                     _db.session.commit()
-            log_print(f"调度了 {len(grouped)} 组周版本AI分析任务", "AI")
     except SQLAlchemyError as e:
         _db.session.rollback()
         log_print(f"调度周版本AI分析任务数据库失败: {e}", "AI", force=True)
     except (TypeError, ValueError, RuntimeError, AttributeError) as e:
         log_print(f"调度周版本AI分析任务失败: {e}", "AI", force=True)
+    finally:
+        # **收尾那一行不许省、也不许挂在循环之外无条件打印一句假的。**
+        # 旧实现打印的是「调度了 {扫到的分组数} 组」，四条 `continue` 都拦不住它 ——
+        # 实测 61 分钟打了 61 次「调度了 1 组」，而同期只建了 1 条任务，排查时被它带偏。
+        # 详见 `_weekly_ai_schedule_summary`。放 `finally`：报错那条路径也要如实报出
+        # 这一轮扫到/跳过多少（错误原因另有一行）。
+        log_print(_weekly_ai_schedule_summary(counts), "AI")
 
 
 def schedule_repository_sync_tasks():
@@ -1412,7 +1592,18 @@ def setup_schedule(include_cleanup=True):
     sched_module.clear()
     if include_cleanup:
         sched_module.every().day.at("04:00").do(schedule_cleanup_task)
-    sched_module.every(2).minutes.do(schedule_weekly_sync_tasks)
+    # **周版本同步：15 分钟一轮，而不是每 2 分钟。**
+    #
+    # 一条 weekly_sync 要逐仓走，实测大仓一轮 340~420 秒（421=339s、425=342s、427=352s、
+    # 431=418s、436=409s）；两仓一批合计约 7 分钟。原来每 2 分钟补一条，队列里于是
+    # **永远**有一条优先级 3 的同步在等：低优先级任务（auto_sync=5 / weekly_excel_cache=5
+    # / weekly_ai_analysis=6）永远轮不到，而 AI 分析那道闸门判的正是「有没有同步在写缓存」
+    # —— 「同步在跑」接近稳态，用户点「重新分析」才会**反复**只看到「等待 Diff 同步完成」。
+    #
+    # 15 分钟 = 单轮最长实测值（418 秒）的两倍以上；再配合 `schedule_weekly_sync_tasks`
+    # 里那条「本批已有同步在跑就本轮不补」的判据，节拍真正变成「上一轮跑完才排下一轮」：
+    # 批次再大也只是把下一次机会推后到之后的某个 tick，队列深度不会累积。
+    sched_module.every(15).minutes.do(schedule_weekly_sync_tasks)
     sched_module.every(1).minutes.do(schedule_weekly_ai_analysis_tasks)
     sched_module.every(2).minutes.do(schedule_repository_sync_tasks)
     _schedule_initialized = True

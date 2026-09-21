@@ -1551,6 +1551,15 @@ let weeklyAiStreamSettled = false;
 // 不是允许前端放行重按的借口：用户看到的「又能按了」本身就是错的。
 let weeklyAiRunActive = false;
 
+// 「这次分析已经登记、等同步跑完自动开始」期间的轮询（见 startWeeklyAiWaitingPoll）。
+let weeklyAiWaitingTimer = null;
+let weeklyAiWaitingPolls = 0;
+// 15 秒一帧；120 帧 = 30 分钟 —— 与服务端那条意图上限
+// （`task_worker_queue_service.WAITING_INTENT_TTL_SECONDS`）同量级：等服务端先放弃，
+// 别让页面比服务端更早说「不等了」。
+const WEEKLY_AI_WAITING_POLL_MS = 15000;
+const WEEKLY_AI_WAITING_MAX_POLLS = 120;
+
 function aiBudgetHost() {
     return document.getElementById('aiBudgetBanner');
 }
@@ -1577,6 +1586,72 @@ function stopAiBudgetWatch() {
     // 放在这里而不是各个出口：所有出口都走 `stopAiBudgetWatch`（下面那段注释说的
     // 就是这条纪律），在每处各写一遍必然漏一处。
     AiDrawerTabs.markSettled();
+}
+
+// ---------------------------------------------------------------------------
+//  「已登记，等同步跑完自动开始」的轮询
+//
+//  为什么必须有它：被同步闸门拦下时**一个模型请求都没发出去**，那次分析由 worker 在
+//  同步收尾后自动开始（登记见 services/task_worker_queue_service.py）。而它开始的那一刻，
+//  浏览器这头**没有任何连接**（SSE 已经关了）—— 页面不轮询就只能让用户自己盯着按钮
+//  再点一次，而那正是用户报的「反复点、每次都被同一句话挡回来」。
+//
+//  服务端的三种回答（`/ai-analysis/weekly/<id>/waiting`，文案也是服务端给的）：
+//    * `run_id` 有值 → 那次分析真的开始了 → 交给 `loadWeeklyAiLatest` 附着上去
+//      （它认得「进行中」这一态：会起进度轮询，跑完自动取落库的结论）；
+//    * `waiting` 为真 → 继续等；
+//    * `waiting` 为假 → 登记已经结束（同步一直没结束 / 已被别的分析覆盖）→
+//      把按钮放回可点，如实说一句「可以再点一次」。
+// ---------------------------------------------------------------------------
+function stopWeeklyAiWaitingPoll() {
+    if (weeklyAiWaitingTimer !== null) {
+        clearInterval(weeklyAiWaitingTimer);
+        weeklyAiWaitingTimer = null;
+    }
+}
+
+function startWeeklyAiWaitingPoll() {
+    stopWeeklyAiWaitingPoll();
+    weeklyAiWaitingPolls = 0;
+    weeklyAiWaitingTimer = setInterval(async function () {
+        weeklyAiWaitingPolls += 1;
+        const btn = document.getElementById('weeklyAiStartBtn');
+        if (weeklyAiWaitingPolls > WEEKLY_AI_WAITING_MAX_POLLS) {
+            stopWeeklyAiWaitingPoll();
+            weeklyAiRunActive = false;
+            if (btn) btn.disabled = false;
+            setWeeklyAiStatusBadge('等待同步', 'warning');
+            setWeeklyAiMeta('等了太久还没等到同步结束：可以再点一次「重新分析」。');
+            return;
+        }
+        let data = null;
+        try {
+            const resp = await fetch(`/ai-analysis/weekly/${configId}/waiting`, { cache: 'no-store' });
+            data = await resp.json();
+        } catch (_err) {
+            // 网络抖一下**不算**登记结束：下一帧再试（说成「没了」会让用户白点一次）。
+            return;
+        }
+        if (!data || !data.success) return;
+        if (data.run_id) {
+            stopWeeklyAiWaitingPoll();
+            // 那次运行还在跑的话，`loadWeeklyAiLatest` 会起它自己的进度轮询并在跑完时
+            // 取回落库的结论 —— 收尾不再归这条通道管。
+            await loadWeeklyAiLatest(true);
+            if (!weeklyAiRunActive && btn) btn.disabled = false;
+            return;
+        }
+        if (!data.waiting) {
+            stopWeeklyAiWaitingPoll();
+            weeklyAiRunActive = false;
+            if (btn) btn.disabled = false;
+            setWeeklyAiStatusBadge('等待同步', 'warning');
+            setWeeklyAiOutput(data.message || '这次登记已经结束。', false, 'busy');
+            setWeeklyAiMeta(data.message || '');
+            return;
+        }
+        setWeeklyAiMeta(data.message || '');
+    }, WEEKLY_AI_WAITING_POLL_MS);
 }
 
 // 进度那一行与文案的**全部口径**都在 static/js/ai_stream_status.js 里（三份模板共用）：
@@ -1893,6 +1968,9 @@ function startWeeklyAiAnalysis(force = false) {
         return;
     }
     closeWeeklyAiStream();
+    // 用户自己又发起了一次 → 上一次那条「等同步」的登记不再由本页看着（服务端那条意图
+    // 还在，但它要么被这次分析覆盖、要么在同步收尾时自行了结）。
+    stopWeeklyAiWaitingPoll();
     weeklyAiRunId = null;
     weeklyAiStreamSettled = false;
     // 这次分析从现在起算「在跑」—— 直到某一条出口把它清掉（见上面那几处）。
@@ -1970,10 +2048,13 @@ function startWeeklyAiAnalysis(force = false) {
     weeklyAiSource.addEventListener('cached', function() {
         setWeeklyAiStatusBadge('已有结果', 'success');
     });
-    // **这一次没有发起分析**（不是失败，也不是连接断了）。服务端有两种情形会发它：
+    // **这一次没有发起分析**（不是失败，也不是连接断了）。服务端有三种情形会发它：
     //   * `reason=sync_in_flight` —— 周版本同步还没写完缓存。这时分析只能看到半份
     //     变更清单（静默漏文件），所以闸门拦下，而且**一个请求都没发出去**。
-    //     说法必须是「等待同步」而不是「失败」：下一次点它很可能会成功。
+    //     说法必须是「等待同步」而不是「失败」，而且服务端已经把这次分析**登记**了
+    //     （`intent_registered`）：同步一跑完由 worker 自动开始（一条消息说清三件事）。
+    //   * `reason=waiting_snapshot` —— 上一次登记还生效（同步刚结束、那次还没跑起来），
+    //     这次点击**只认领那条登记**，不再新建一条会重复付费的运行。
     //   * `reason=already_running` —— 同一目标 + 同一份输入已经有一次分析在跑
     //     （数据库的活动运行唯一约束拦下的）。这一次不重复发起，页面**附着**到
     //     那一次上：接着看它的进度，跑完自动显示它的结论。
@@ -1999,8 +2080,21 @@ function startWeeklyAiAnalysis(force = false) {
             startAiBudgetWatch(payload.run_id, document.getElementById('weeklyAiMeta'));
             return;
         }
-        // `sync_in_flight`：**这次一个请求都没发出去**，按钮照旧可点（用户等同步跑完
-        // 再点一次就会成功）。徽章用「等待同步」而不是「失败」。
+        // `sync_in_flight`：**这次一个请求都没发出去**。而且服务端已经把这次分析
+        // **登记**了（`intent_registered`）—— 同步一跑完由 worker 自动开始，页面接上
+        // 那一次运行的进度。所以按钮**保持禁用**（不然用户又去点，而每次都会被同一句话
+        // 挡回来 —— 那正是用户报的「反复点」）。
+        if (payload.intent_registered) {
+            weeklyAiRunActive = true;
+            weeklyAiHasCached = false;
+            setWeeklyAiStatusBadge('等待同步', 'warning');
+            if (startBtn) startBtn.disabled = true;
+            AiReportExport.track({ runId: null });
+            setWeeklyAiMeta(payload.message || '');
+            startWeeklyAiWaitingPoll();
+            return;
+        }
+        // 登记失败（极少数：库写不进去）→ 只能照旧让用户自己再点一次，如实说。
         weeklyAiRunActive = false;
         setWeeklyAiStatusBadge('等待同步', 'warning');
         if (startBtn) startBtn.disabled = false;

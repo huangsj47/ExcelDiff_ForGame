@@ -186,7 +186,14 @@ def _handle_weekly_ai_analysis_task(task):
             if not config_id:
                 raise ValueError("weekly_ai_analysis 缺少有效 config_id")
 
-            result = worker.run_weekly_analysis_background(config_id, task_id=task_id)
+            result = worker.run_weekly_analysis_background(
+                config_id,
+                task_id=task_id,
+                # 载荷里带 `trigger_source` 时照传（「等同步跑完就自动开始」的那一次是
+                # 用户点出来的 = manual），没带就是调度器排的（scheduled）。
+                # 认不出来的值由 `run_weekly_analysis_background` 归一化。
+                trigger_source=task.get("trigger_source") or "scheduled",
+            )
             status = result.get("status")
             if task_id is not None:
                 if status == "succeeded":

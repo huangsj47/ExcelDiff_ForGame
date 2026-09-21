@@ -786,6 +786,31 @@ def ai_commit_history(commit_id):
     return jsonify(payload), 200
 
 
+@ai_analysis_bp.route("/ai-analysis/weekly/<int:config_id>/waiting", methods=["GET"])
+def ai_weekly_waiting(config_id):
+    """「等同步」的那次登记现在到哪一步了（抽屉轮询它，好在分析自动开始时接上去）。
+
+    ## 为什么需要这个端点
+
+    被同步闸门拦下时**一个模型请求都没发出去**，那次分析由 worker 在同步收尾后自动开始
+    （见 `task_worker_queue_service.register_waiting_analysis_intent`）。而开始的那一刻
+    浏览器这头没有任何连接 —— 页面只有两个办法知道「它开跑了」：轮询，或者假装知道。
+    这里给的是轮询那条路：**只读**，不建 run、不排队、不发请求。
+
+    三种回答对应页面的三种动作（文案由服务端给，`describe_waiting_analysis`）：
+    拿到 `run_id` 就附着到那次运行上、`waiting` 为真就继续等、为假就把按钮放回可点。
+    """
+    config = WeeklyVersionConfig.query.get_or_404(config_id)
+    if not _has_project_access(config.project_id):
+        return jsonify({"success": False, "message": "Access denied."}), 403
+    # **函数内 import**：队列服务在模块级 `import services.task_worker_service`，而那个
+    # 模块又从队列服务取名字 —— 在模块级 import 会成环（谁先被 import 谁就炸）。
+    from services.task_worker_queue_service import describe_waiting_analysis
+
+    status = describe_waiting_analysis(config_id, build_weekly_group_key(config))
+    return jsonify({"success": True, **status})
+
+
 @ai_analysis_bp.route("/ai-analysis/weekly/<int:config_id>/history", methods=["GET"])
 def ai_weekly_history(config_id):
     config = WeeklyVersionConfig.query.get_or_404(config_id)

@@ -24,8 +24,12 @@ from __future__ import annotations
 
 import time
 import traceback
+from datetime import datetime, timezone
 
 import services.task_worker_service as worker
+# 同步闸门：唤醒意图时**必须**走同一道判据（手工与后台那两道用的就是它）。
+# 这里按模块取用（`sync_gate.X`）而不是 `from … import X`：测试要能按属性打补丁。
+from services.ai import weekly_sync_gate as sync_gate
 
 
 def create_auto_sync_task(repository_id, extra_payload=None):
@@ -133,7 +137,21 @@ def load_pending_tasks():
         pending_tasks = worker._BackgroundTask.query.filter_by(status='pending').order_by(
             worker._BackgroundTask.priority.asc(), worker._BackgroundTask.created_at.asc()
         ).all()
+        # 这一轮里哪些分组还有「等同步跑完就自动开始」的登记。重启会把**意图行**留在库里
+        # （它不是可执行任务，不入队），而被它转交出去的那条分析任务要重新入队 —— 装载时
+        # 得让它继续记成「手动」（用户点出来的那一次），否则用量面板上会凭空变成「定时」。
+        waiting_groups = {
+            str(row.file_path)
+            for row in pending_tasks
+            if row.task_type == WAITING_INTENT_TASK_TYPE
+        }
         for db_task in pending_tasks:
+            if db_task.task_type == WAITING_INTENT_TASK_TYPE:
+                # **「等待同步」的意图不是可执行任务**（登记意图本身不许产生任何模型
+                # 调用，见 register_waiting_analysis_intent）：worker 不认识它，装载时
+                # 一律跳过。唤醒由同步收尾的钩子与每个分析调度周期负责
+                # （`wake_waiting_analysis_intents`）—— 进程重启丢掉的那一瞬间由后者兜住。
+                continue
             if db_task.task_type == 'weekly_sync':
                 # 载荷必须带 config_id（周版本任务把它存在 commit_id 列里，见
                 # create_weekly_sync_task）。原先没有这条分支 → 落进下面的通用分支、
@@ -162,6 +180,9 @@ def load_pending_tasks():
                     'commit_id': db_task.commit_id,
                     'task_id': db_task.id
                 }
+                if str(db_task.file_path) in waiting_groups:
+                    # 这一组还留着等待登记 → 这条分析是被它转交出去的（用户点的那一次）。
+                    task_data['trigger_source'] = 'manual'
             else:
                 task_data = {
                     'type': db_task.task_type,
@@ -237,8 +258,14 @@ def schedule_cleanup_task():
     worker.log_print("添加缓存清理任务到队列", 'TASK')
 
 
-def create_weekly_ai_analysis_task(config_id, group_key=None):
-    """为周版本配置创建AI分析任务（按组去重）。"""
+def create_weekly_ai_analysis_task(config_id, group_key=None, trigger_source=None):
+    """为周版本配置创建AI分析任务（按组去重）。
+
+    `trigger_source`：这次运行该记成谁发起的（`"manual"` / `"scheduled"`），随载荷传给
+    执行侧，最终落进 `AiAnalysisRun.trigger_source`。**只有「等同步跑完就自动开始」那条**
+    需要传 `"manual"` —— 那是用户点出来的一次分析，被同步闸门推迟了而已（见
+    `wake_waiting_analysis_intents`）；调度器排的走默认值。
+    """
     try:
         config = worker._db.session.get(worker._WeeklyVersionConfig, config_id)
         if not config:
@@ -246,6 +273,9 @@ def create_weekly_ai_analysis_task(config_id, group_key=None):
             return None
 
         group_key = group_key or worker.build_weekly_group_key(config)
+        payload_extra = {"config_id": config_id, "group_key": group_key}
+        if trigger_source:
+            payload_extra["trigger_source"] = trigger_source
         existing_task = worker._BackgroundTask.query.filter(
             worker._BackgroundTask.task_type == 'weekly_ai_analysis',
             worker._BackgroundTask.file_path == group_key,
@@ -255,7 +285,7 @@ def create_weekly_ai_analysis_task(config_id, group_key=None):
             if worker._use_agent_dispatch():
                 worker._ensure_agent_dispatch_for_background_task(
                     existing_task,
-                    extra_payload={"config_id": config_id, "group_key": group_key},
+                    extra_payload=payload_extra,
                 )
                 worker._db.session.commit()
             worker.log_print(f"周版本AI分析任务已存在: group_key={group_key}", "AI")
@@ -273,7 +303,7 @@ def create_weekly_ai_analysis_task(config_id, group_key=None):
         worker._db.session.flush()
         worker._ensure_agent_dispatch_for_background_task(
             new_task,
-            extra_payload={"config_id": config_id, "group_key": group_key},
+            extra_payload=payload_extra,
         )
         worker._db.session.commit()
         if not worker._use_agent_dispatch():
@@ -284,6 +314,8 @@ def create_weekly_ai_analysis_task(config_id, group_key=None):
                 'commit_id': str(config_id),
                 'task_id': new_task.id,
             }
+            if trigger_source:
+                task_data['trigger_source'] = trigger_source
             task_counter = int(time.time() * 1000000)
             tw = worker.TaskWrapper(6, task_counter, task_data)
             worker.background_task_queue.put(tw)
@@ -297,3 +329,332 @@ def create_weekly_ai_analysis_task(config_id, group_key=None):
         worker._db.session.rollback()
         worker.log_print(f"创建周版本AI分析任务失败: {e}", "AI", force=True)
         return None
+
+
+# ---------------------------------------------------------------------------
+#  「等同步跑完就自动开始」的等待意图
+#
+#  ## 为什么需要它（用户报的那句话）
+#
+#  闸门（`services/ai/weekly_sync_gate.py`）判得**对**：同步正逐文件写缓存时分析只能看到
+#  半份变更清单，而且漏文件是**静默**的。但拦下之后原先**没有任何出路** —— 不排队、不
+#  重试、不登记，用户只能自己再点一次，撞上哪一段看运气。而大仓一轮同步要 340~420 秒，
+#  调度器（改节拍前）每 2 分钟还补一条，「有一条同步在写缓存」接近于稳态，于是用户看到
+#  的是**反复**只出现同一句「等待 Diff 同步完成」。
+#
+#  审计文档要求的那一半（原文）：「同步中点击按钮时不应静默失败。创建 `waiting_snapshot`
+#  任务并展示『等待 Diff 同步完成』，**同步结束后再冻结快照**」。
+#
+#  ## 为什么是「一行意图」而不是「直接排一条分析任务」
+#
+#  * 直接排 = 立刻开跑 → 撞上同步闸门被标 skipped，**意图随之丢失**（用户又得自己再点）；
+#  * 它还会被「自动分析开关」管住，而这一次是**用户手动发起**的；
+#  * 而意图行是一条**不执行**的记录（`load_pending_tasks` 明确跳过它），于是「登记意图
+#    本身不产生任何模型调用」是结构上成立的，不靠调用方的自觉。
+#
+#  ## 三条不许破的口径
+#
+#  1. 登记不产生任何模型调用；
+#  2. 转交出去的那一次照走**同一道闸门**（`sync_gate.weekly_sync_in_flight`）与**运行
+#     认领**（`create_weekly_ai_analysis_task` → `run_weekly_analysis_background` →
+#     `_create_run`），不绕过任何一条 —— 否则又会出现重复付费；
+#  3. 用户在这期间**已经跑成了**，登记的那次必须自动作废。
+# ---------------------------------------------------------------------------
+
+# 意图在 BackgroundTask 里的类型。**不是**可执行任务：worker 不取它、不执行它。
+WAITING_INTENT_TASK_TYPE = "weekly_ai_waiting"
+
+# 意图最多等多久。判据与闸门那条上限（`SYNC_IN_FLIGHT_MAX_SECONDS`）同量级：同步超过
+# 30 分钟还没把这一轮跑完，就不再让用户在页面上干等，改回「可以手动再点一次」。
+WAITING_INTENT_TTL_SECONDS = 30 * 60
+
+
+def _naive_utc(value):
+    """库里的时间是 naive-UTC，比较的另一头可能带时区 —— 混着减会抛 TypeError。"""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _now_utc_naive(now=None):
+    current = _naive_utc(now)
+    return current or datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def register_waiting_analysis_intent(config_id, group_key):
+    """登记「这次分析在等同步跑完」。返回意图行的 id（登记不了返回 None）。
+
+    **登记不许产生任何模型调用**：这里只落一行 `weekly_ai_waiting`，不入内存队列、
+    不建 `weekly_ai_analysis` 任务、不建 `AiAnalysisRun`。真正开跑要等
+    `wake_waiting_analysis_intents` 在同步收尾时把它转交出去。
+
+    同一个分组**只留一条** pending 意图（连点两次不该攒出两条，否则唤醒时会各转交一次）。
+    """
+    if not group_key:
+        return None
+    try:
+        existing = (
+            worker._BackgroundTask.query.filter(
+                worker._BackgroundTask.task_type == WAITING_INTENT_TASK_TYPE,
+                worker._BackgroundTask.file_path == group_key,
+                worker._BackgroundTask.status == "pending",
+            )
+            .order_by(worker._BackgroundTask.id.desc())
+            .first()
+        )
+        if existing is not None:
+            return existing.id
+
+        row = worker._BackgroundTask(
+            task_type=WAITING_INTENT_TASK_TYPE,
+            repository_id=None,
+            commit_id=str(config_id),
+            file_path=group_key,
+            priority=6,
+            status="pending",
+        )
+        worker._db.session.add(row)
+        worker._db.session.commit()
+        worker.log_print(
+            f"📝 已登记「等同步跑完就自动分析」: config_id={config_id}, "
+            f"intent_id={row.id}, group_key={group_key}"
+            "（本次没有发起分析，也没有产生任何消耗）",
+            "AI",
+            force=True,
+        )
+        return row.id
+    except worker.SQLAlchemyError as exc:
+        worker._db.session.rollback()
+        worker.log_print(f"❌ 登记等待同步的分析意图失败: {exc}", "AI", force=True)
+        return None
+    except (TypeError, ValueError, RuntimeError, AttributeError) as exc:
+        worker.log_print(f"❌ 登记等待同步的分析意图失败: {exc}", "AI", force=True)
+        return None
+
+
+def pending_waiting_analysis_intents():
+    """所有还没了结的等待意图（按登记先后）。"""
+    try:
+        return (
+            worker._BackgroundTask.query.filter(
+                worker._BackgroundTask.task_type == WAITING_INTENT_TASK_TYPE,
+                worker._BackgroundTask.status == "pending",
+            )
+            .order_by(worker._BackgroundTask.id.asc())
+            .all()
+        )
+    except worker.SQLAlchemyError as exc:
+        worker.log_print(f"⚠️ 读取等待同步的分析意图失败: {exc}", "AI")
+        return []
+
+
+def _intent_age_seconds(intent, *, now=None):
+    created = _naive_utc(getattr(intent, "created_at", None))
+    if created is None:
+        return 0.0
+    return max((_now_utc_naive(now) - created).total_seconds(), 0.0)
+
+
+def _weekly_runs_of_group(group_key):
+    """这个分组最近的几次周版本运行（读不到就是空列表 —— 见下面的口径）。"""
+    if not group_key:
+        return []
+    from models.ai_analysis import AiAnalysisRun
+
+    try:
+        return (
+            AiAnalysisRun.query.filter(
+                AiAnalysisRun.target_type == "weekly",
+                AiAnalysisRun.target_key == group_key,
+            )
+            .order_by(AiAnalysisRun.id.desc())
+            .limit(5)
+            .all()
+        )
+    except Exception as exc:  # noqa: BLE001 —— 读不到只是少一条判据，不该把唤醒流程打断
+        worker.log_print(f"⚠️ 读取周版本分析运行记录失败（按「没有已有运行」处理）: {exc}", "AI")
+        return []
+
+
+def _run_covering_intent(group_key, intent):
+    """已经有一次分析把这条意图「替」了吗（返回那条运行，没有返回 None）。
+
+    两种情况都算「替了」：
+
+    * **现在还在跑**（`pending` / `running`）：同一份输入的认领握在别人手里，再转交一次
+      只会被认领拦下（或更糟：等它跑完认领放开之后又跑一遍 = 第二次付费）；
+    * **在意图之后建的**（不论成败）：就是用户报的那句「我在此期间已经跑成了」。
+    """
+    intent_created = _naive_utc(getattr(intent, "created_at", None))
+    for row in _weekly_runs_of_group(group_key):
+        if str(getattr(row, "effective_status", "") or "") in ("pending", "running"):
+            return row
+        created = _naive_utc(getattr(row, "created_at", None))
+        if intent_created is not None and created is not None and created >= intent_created:
+            return row
+    return None
+
+
+def effective_waiting_analysis_intent(group_key, *, now=None):
+    """这个分组现在有一条**生效**的等待意图吗（没有返回 None）。
+
+    「生效」= 还没过期 **且** 还没有任何一次分析覆盖掉这份输入。三处用它，必须是同一
+    把尺子：手工入口（挡住重复建 run）、唤醒（决定要不要转交）、页面轮询（决定还要不要等）。
+
+    从**最新**的一条往回找：旧的那条过期了不该把后来登记的那条一起否掉。
+    """
+    wanted = str(group_key or "")
+    for intent in reversed(pending_waiting_analysis_intents()):
+        if str(getattr(intent, "file_path", None) or "") != wanted:
+            continue
+        if _intent_age_seconds(intent, now=now) > WAITING_INTENT_TTL_SECONDS:
+            continue
+        if _run_covering_intent(group_key, intent) is not None:
+            continue
+        return intent
+    return None
+
+
+def _retire_waiting_intent(intent, message, *, status="completed"):
+    """把一条意图了结掉（completed=被覆盖/已转交，cancelled=过期作废）。"""
+    try:
+        intent.status = status
+        intent.error_message = message
+        intent.completed_at = datetime.now(timezone.utc)
+        worker._db.session.commit()
+    except worker.SQLAlchemyError as exc:
+        worker._db.session.rollback()
+        worker.log_print(f"❌ 收尾等待意图失败: intent={getattr(intent, 'id', None)}, {exc}", "AI", force=True)
+        return
+    worker.log_print(
+        f"⏹️ 等待同步的分析意图 #{getattr(intent, 'id', None)} 结束（{status}）: {message}",
+        "AI",
+        force=True,
+    )
+
+
+def _pending_analysis_task_exists(group_key):
+    try:
+        return (
+            worker._BackgroundTask.query.filter(
+                worker._BackgroundTask.task_type == "weekly_ai_analysis",
+                worker._BackgroundTask.file_path == group_key,
+                worker._BackgroundTask.status.in_(["pending", "processing"]),
+            ).first()
+            is not None
+        )
+    except worker.SQLAlchemyError:
+        return False
+
+
+def wake_waiting_analysis_intents(*, now=None):
+    """同步收尾（以及每个分析调度周期）时检查等待意图：该作废的作废、该转交的转交。
+
+    返回各项计数，用于日志与测试断言。
+    """
+    outcome = {"checked": 0, "handed_off": 0, "blocked": 0, "retired": 0, "expired": 0, "skipped": 0}
+    for intent in pending_waiting_analysis_intents():
+        outcome["checked"] += 1
+        result = _wake_one_waiting_intent(intent, now=now)
+        if result in outcome:
+            outcome[result] += 1
+    return outcome
+
+
+def _wake_one_waiting_intent(intent, *, now=None):
+    """一条意图的处置。返回 outcome 的键名。"""
+    group_key = getattr(intent, "file_path", None)
+    config_id = worker.parse_config_id_from_commit_id(getattr(intent, "commit_id", None))
+    if not group_key or config_id is None:
+        _retire_waiting_intent(intent, "意图载荷不完整（缺少分组键或 config_id），无法转交")
+        return "retired"
+
+    covering = _run_covering_intent(group_key, intent)
+    if covering is not None:
+        # **用户在这期间已经跑成了**（或正跑着）：这条登记就地作废 —— 转交出去就是
+        # 第二次付费运行。
+        _retire_waiting_intent(
+            intent,
+            f"已经有一次分析（run={covering.id}）覆盖了这份输入，本次登记自动作废"
+            "（没有再发起任何分析）",
+        )
+        return "retired"
+
+    if _intent_age_seconds(intent, now=now) > WAITING_INTENT_TTL_SECONDS:
+        _retire_waiting_intent(
+            intent,
+            f"等待超过 {WAITING_INTENT_TTL_SECONDS // 60} 分钟仍没等到同步结束，"
+            "本次登记已作废 —— 可以在同步跑完之后手动再点一次「重新分析」",
+            status="cancelled",
+        )
+        return "expired"
+
+    config = worker._db.session.get(worker._WeeklyVersionConfig, config_id)
+    if config is None:
+        _retire_waiting_intent(intent, f"周版本配置 {config_id} 已不存在，本次登记作废")
+        return "retired"
+
+    # **同一道闸门**（与手工、后台那两道同一个判据、同一份实现）：同步还在写缓存就继续等。
+    reason = sync_gate.weekly_sync_in_flight(sync_gate.group_config_ids(config))
+    if reason:
+        return "blocked"
+
+    # 已经转交过（那一条分析任务在排队或在跑）→ 不重复转交。
+    if _pending_analysis_task_exists(group_key):
+        return "skipped"
+
+    task_id = worker.create_weekly_ai_analysis_task(
+        config_id, group_key=group_key, trigger_source="manual"
+    )
+    if not task_id:
+        return "skipped"
+    worker.log_print(
+        f"▶️ 同步已结束，等待的分析自动开始: intent={getattr(intent, 'id', None)}, "
+        f"config_id={config_id}, task_id={task_id}",
+        "AI",
+        force=True,
+    )
+    return "handed_off"
+
+
+def describe_waiting_analysis(config_id, group_key):
+    """页面轮询用：这次登记现在到哪一步了。**只读**，不建 run、不排队、不发请求。
+
+    三种回答对应页面的三种动作：
+
+    * `run_id` 有值 → **附着**到那次运行上（接着看它的进度与结论）；
+    * 只有 `waiting` → 继续等（同步还没跑完）；
+    * `waiting` 为假 → 别再等了（登记作废了、或者已经被别的分析覆盖），
+      页面把按钮放回可点，并去读一次落库的结论。
+    """
+    for row in _weekly_runs_of_group(group_key):
+        if str(getattr(row, "effective_status", "") or "") in ("pending", "running"):
+            return {
+                "waiting": True,
+                "run_id": row.id,
+                "message": (
+                    f"同步已结束，这次分析已经自动开始（运行 #{row.id}）——"
+                    "页面会接着显示它的进度与结论，不需要再点「重新分析」。"
+                ),
+            }
+    intent = effective_waiting_analysis_intent(group_key)
+    if intent is not None:
+        return {
+            "waiting": True,
+            "run_id": None,
+            "message": (
+                f"这次分析已经登记（登记号 #{intent.id}）：同步一跑完就会自动开始，"
+                "不需要再点「重新分析」。本次没有发起分析，也没有产生任何消耗。"
+            ),
+        }
+    return {
+        "waiting": False,
+        "run_id": None,
+        "message": (
+            "这次登记已经结束：没有在等同步，也没有正在跑的分析（可能是同步一直没结束，"
+            "或者已经被另一次分析覆盖）。可以再点一次「重新分析」。"
+        ),
+    }
+

@@ -1136,22 +1136,37 @@ def end_with_a_terminal_event(events: Iterable[str]) -> Iterable[str]:
         yield _sse_event("error", {"message": message})
 
 
-def _blocked_sse(target_type: str, *, reason: str, message: str, run_id=None) -> str:
-    """「这一次**没有**发起分析」的一个 SSE 事件。
+def _blocked_sse(target_type: str, *, reason: str, message: str, run_id=None, extra=None) -> str:
+    """「这一次**没有**发起分析」的一个 SSE 事件。两种事件名都是**明确的**（都不静默），
+    差别只是收件人认哪一种：周版本那两份抽屉认识 `waiting`（能把「等待同步」与
+    「已经有一次在跑」分开说，后者还要保持禁用并附着到那一次运行上）；单提交那份抽屉
+    （`commit_diff_new.html`）不在本次改动范围内，它的 `error` 分支已能如实说
+    「未开始 / 没有产生消耗」—— 给它发 `waiting` 只会变成「与服务器的连接中断了」，那是假话。
 
-    ## 为什么两条路用不同的事件名
-
-    周版本那两份抽屉（`weekly_version_diff.html` / `merged_project_view.html`）认识
-    `waiting`：它能把「等待同步」与「已经有一次在跑」分开说，后者还要把按钮**保持**
-    禁用、并附着到那一次运行上。单提交那份抽屉（`commit_diff_new.html`）不在这一版的
-    改动范围内，而它的 `error` 分支已经能如实说「未开始 / 分析没有发起，没有产生消耗」
-    —— 给它发 `waiting` 只会变成一句「与服务器的连接中断了」，那是假话。
-
-    两种都是**明确的**（都不静默），差别只是收件人认哪一种。
+    `extra` 是给周版本抽屉的附加事实（如 `intent_registered`），**由服务端给**
+    —— 界面按「服务端说这次没有发起、而且已经登记了」来决定保持禁用并轮询，不靠猜。
     """
     if target_type == "weekly":
-        return _sse_event("waiting", {"reason": reason, "message": message, "run_id": run_id})
+        payload = {"reason": reason, "message": message, "run_id": run_id}
+        payload.update(extra or {})
+        return _sse_event("waiting", payload)
     return _sse_event("error", {"message": message})
+
+
+# 「等同步跑完就自动开始」的等待意图（手工入口这一侧）。**函数内 import**：模块级会成环
+# （`task_worker_service` 在模块级从本模块取名字，队列服务又要 import 它）。语义见队列服务。
+def _register_waiting_intent(config_id: int, group_key: str):
+    """登记「这次分析在等同步跑完」。**登记本身不产生任何模型调用。**"""
+    from services.task_worker_queue_service import register_waiting_analysis_intent
+
+    return register_waiting_analysis_intent(config_id, group_key)
+
+
+def _effective_waiting_intent(group_key: str):
+    """这个分组现在有一条**生效**的等待意图吗（登记了但还没跑起来的那种）。"""
+    from services.task_worker_queue_service import effective_waiting_analysis_intent
+
+    return effective_waiting_analysis_intent(group_key)
 
 
 def _already_running_message(run: AiAnalysisRun) -> str:
@@ -1266,6 +1281,29 @@ def stream_weekly_analysis(
         return
 
     group_key = payload["group"]["key"]
+    # **已经登记过的那一次还在等 → 只附着，不新建 run。**
+    #
+    # 同步刚跑完、而等排的那条分析任务还没被 worker 取走时，用户又点了一下：这时
+    # 同步闸门**已经放行**（缓存确实写完了），于是会直接建一条新 run —— 而队列里那条
+    # 稍后执行时，手工这次可能已经跑完、认领也放开了，`_create_run` 于是照常建一条新的：
+    # 同一份输入跑两遍 = 两次付费。所以「已经登记过」必须在这一层就被认出来。
+    #
+    # 与下面那道闸门同一个位置口径：都在 `_create_run` **之前**（建了 run 再返回等待，
+    # 会留下一条零消费运行，用量面板上还看不出它是被拦下的）。
+    existing_intent = _effective_waiting_intent(group_key)
+    if existing_intent is not None:
+        yield _blocked_sse(
+            "weekly",
+            reason="waiting_snapshot",
+            message=(
+                f"这次分析已经登记过（登记号 #{existing_intent.id}）：同步一结束就会自动开始，"
+                "页面会接上那一次运行的进度，不需要再点「重新分析」。"
+                "本次没有发起新的分析，也没有产生任何消耗（一个模型请求都没有发出去）。"
+            ),
+            extra={"intent_registered": True},
+        )
+        return
+
     # 同步闸门（手工·周版本）。与后台路径那一道**同一个判据、同一份实现**：
     # `weekly_sync_in_flight(group_config_ids(config))` 判的是**整批**仓库的同步，
     # 因为变更清单来自这一批全部仓库的缓存行 —— 只看自己那一个仓库的同步，另一个
@@ -1279,12 +1317,20 @@ def stream_weekly_analysis(
     #
     # **不许静默失败，也不许装作开始分析**：装作开始的后果是徽章变成「分析中」、
     # 用户以为钱已经花了。发一个 `waiting` 事件，页面说「等待 Diff 同步完成」。
+    #
+    # **而且不能只回一句「等着」**（这就是用户报的那个病：反复点、每次都被同句话挡回来）。
+    # 拦下时**登记这次分析意图**：同步一收尾由 worker 自动把它跑起来，页面接上那一次
+    # 运行的进度 —— 用户点一次就够。登记本身不产生任何模型调用（见
+    # `task_worker_queue_service.register_waiting_analysis_intent`）。
     sync_reason = weekly_sync_in_flight(
         group_config_ids(db.session.get(WeeklyVersionConfig, config_id))
     )
     if sync_reason:
+        intent_id = _register_waiting_intent(config_id, group_key)
         log_print(
-            f"周版本手工分析推迟（sync_in_flight）: config_id={config_id} —— {sync_reason}",
+            f"周版本手工分析推迟（sync_in_flight）: config_id={config_id} —— {sync_reason}"
+            + (f"；已登记意图 intent_id={intent_id}（同步结束会自动开始）" if intent_id
+               else "；意图登记失败，需要用户手动重试"),
             "AI",
             force=True,
         )
@@ -1293,8 +1339,16 @@ def stream_weekly_analysis(
             reason="sync_in_flight",
             message=(
                 f"等待 Diff 同步完成后再分析 —— {sync_reason}。"
-                "本次没有发起分析，也没有产生任何消耗（一个模型请求都没有发出去）。"
+                + (
+                    "这次分析已经登记（登记号 #%d）：同步一结束就会自动开始，页面会接上"
+                    "那一次运行的进度 —— 不需要再点「重新分析」。"
+                    "本次没有发起分析，也没有产生任何消耗（一个模型请求都没有发出去）。"
+                    % intent_id
+                    if intent_id
+                    else "本次没有发起分析，也没有产生任何消耗（一个模型请求都没有发出去）。"
+                )
             ),
+            extra={"intent_registered": bool(intent_id)},
         )
         return
 
@@ -1338,7 +1392,17 @@ def stream_weekly_analysis(
     yield _sse_event("result", {**result, "run_id": run.id})
 
 
-def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None) -> dict:
+def run_weekly_analysis_background(
+    config_id: int, task_id: Optional[int] = None, trigger_source: str = "scheduled"
+) -> dict:
+    """后台跑一次周版本分析。
+
+    `trigger_source`：这次运行**是谁发起**的，落进 `AiAnalysisRun.trigger_source`
+    （用量面板按它显示「手动 / 定时」）。默认 `"scheduled"`（调度器排的）；
+    被「等同步跑完就自动开始」的登记唤醒的那一次要传 `"manual"` —— 那是**用户点出来的**
+    一次分析，只是被同步闸门推迟了。不传就记成「定时」是一条会误导人的账
+    （用户明明点过，面板上却写着系统自己跑的）。
+    """
     # **执行前再查一次开关。** `schedule_weekly_ai_analysis_tasks` 在建任务时查过，
     # 但任务一旦入队就独立于开关了：关掉自动分析**不会**取消已经排队的任务，而重启时
     # `load_pending_tasks` 还会把上次残留的 `processing` 任务改回 `pending` 重新入队
@@ -1350,7 +1414,11 @@ def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None
     config = db.session.get(WeeklyVersionConfig, config_id)
     if config is not None:
         project_cfg = get_project_analysis_config(config.project_id)
-        if not project_cfg.get("auto_weekly_enabled", True):
+        # **这个开关只管「自动」。** 用户点出来的那一次（`trigger_source="manual"`，
+        # 例如被同步闸门推迟后由登记唤醒的那一次）不受它管 —— 抽屉里那个「重新分析」
+        # 从来不看这个开关（它走 `stream_weekly_analysis`），同一个用户动作不该因为
+        # 换了一条执行路径就被否掉。
+        if trigger_source != "manual" and not project_cfg.get("auto_weekly_enabled", True):
             log_print(
                 f"周版本自动分析已关闭，跳过已排队的任务: config_id={config_id}", "AI", force=True,
             )
@@ -1407,7 +1475,9 @@ def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None
             target_key=group_key,
             response_mode="blocking",
             scope=payload.get("scope", "full"),
-            trigger_source="scheduled",
+            # 归一化：这一列是 String(20)，而且用量面板按 `scheduled` / 其余分「定时 / 手动」
+            # —— 认不出来的值一律记成 `scheduled`（不把脏值写进库）。
+            trigger_source=trigger_source if trigger_source in ("manual", "scheduled") else "scheduled",
             payload=payload,
         )
     except ActiveAnalysisConflict as conflict:

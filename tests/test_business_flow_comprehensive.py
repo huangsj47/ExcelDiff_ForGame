@@ -100,11 +100,20 @@ class TestWeeklySyncScheduler:
             "任务年龄恒多算 28800 秒 → 刚创建 5 秒的 pending 任务也会被判超时置 failed。"
         )
 
-    def test_scheduler_registered_every_2_minutes(self):
-        """定时器应注册为每 2 分钟执行"""
+    def test_scheduler_registered_on_a_cycle_slower_than_a_sync_round(self):
+        """定时器应**按周期**注册 —— 但周期必须长于一轮同步的耗时。
+
+        契约变更（2026-09-21）：原断言是 `every(2).minutes.do(schedule_weekly_sync_tasks)`，
+        而 2 分钟追不上一条 `weekly_sync`（实测大仓一轮 340~420 秒）：队列里永远有一条
+        优先级 3 的同步在等，低优先级任务轮不到，AI 分析那道闸门（判「本批有没有同步在
+        写缓存」）于是永远在拦人 —— 用户反复看到「等待 Diff 同步完成」。
+        断言强度不变：仍要钉住「这个调度器**被按时钟排上了**」这件事，只是周期变了。
+        （周期与单轮耗时的关系另有一条行为断言：
+        tests/test_sync_wait_cadence.py::TestTheRegisteredPeriod）
+        """
         # setup_schedule 已拆分到 services/task_worker_service.py
         content = _read_source("services/task_worker_service.py")
-        assert "every(2).minutes.do(schedule_weekly_sync_tasks)" in content
+        assert "every(15).minutes.do(schedule_weekly_sync_tasks)" in content
 
     def test_merged_project_view_uses_beijing_now(self):
         """合并项目视图的活跃状态判断必须用北京墙钟（与 config 窗口同口径）。"""
