@@ -83,6 +83,12 @@ STATUS_LABELS = {
     "pending": "排队中",
     "running": "分析中",
     "succeeded": "已有结论",
+    # **降级完成**：跑完了、有报告，但流程没走完（轮次用尽 / 额度用尽 / 没按协议输出 JSON /
+    # 上下文超长后收尾 / 有分片没跑成）。原先这张表里没有它，于是这种运行在历次结论里显示的
+    # 是原始英文码 `degraded` —— 而它恰恰是最需要被读出来的一档（「这次不是正常跑完的」）。
+    # 措辞与消耗面板上那一档逐字一致（`templates/ai_usage_dashboard.html` 的
+    # `{ succeeded: '完成', degraded: '降级完成', failed: '失败' }`）。
+    "degraded": "降级完成",
     "failed": "分析失败",
 }
 
@@ -122,7 +128,12 @@ UNCLASSIFIED_LABEL = skill_contract.UNCLASSIFIED_LABEL
 UNCLASSIFIED_UNKNOWN = f"{UNCLASSIFIED_LABEL}（未标注）"
 
 # 「这次没有可导出的结论」的判定只此一份：跑完了、而且真的落了报告正文。
-EXPORTABLE_STATUSES = ("succeeded",)
+#
+# `degraded` 与 `succeeded` 一样是**跑完了、有结论**（见
+# `run_cache_source.CONCLUDED_STATUSES`）。把降级排除在外的后果是**倒退**：这些运行在
+# `status` 能原生表示 degraded 之前存的就是 succeeded，本来就是可导出的；不改这一处，
+# 它们会从「能导出」变成「不能导出」，而报告正文一个字都没少。
+EXPORTABLE_STATUSES = ("succeeded", "degraded")
 
 
 def dimension_labels_from_payload(payload: Any) -> dict[str, str]:
@@ -200,10 +211,10 @@ def dimension_label(category: Any, labels: Mapping[str, str] | None = None) -> s
 def is_exportable(*, status: Any, report_text: Any) -> bool:
     """这次运行能不能导出一份文档。
 
-    **两条都要**：状态是成功，且确实有报告正文。只看状态不行 —— 失败也可能留下半份
-    文本；只看正文也不行 —— 一次「模型没答上来、平台按规模估了个等级」的运行，
-    `report_text` 是空的，导出会得到一份只有元信息表的文件（那比不给更糟：它看起来
-    像一份正常报告）。
+    **两条都要**：状态是「有结论」（`EXPORTABLE_STATUSES`：succeeded 或 degraded），
+    且确实有报告正文。只看状态不行 —— 失败也可能留下半份文本；只看正文也不行 ——
+    一次「模型没答上来、平台按规模估了个等级」的运行，`report_text` 是空的，导出会得到
+    一份只有元信息表的文件（那比不给更糟：它看起来像一份正常报告）。
     """
     return (
         str(status or "").strip() in EXPORTABLE_STATUSES
@@ -360,6 +371,54 @@ def _reasons_text(reasons: Iterable[Any]) -> str:
     return "；".join(items)
 
 
+def coverage_scope_note(coverage: Mapping[str, Any] | None) -> str:
+    """账本 → 「分析范围」那一格的限定语（没账本 / 没缺口时是空串）。
+
+    空串是**默认**：没有覆盖数据时一个字都不加（见 `_meta_rows` 里那段）。
+    """
+    if not isinstance(coverage, Mapping):
+        return ""
+    return str(coverage.get("scope_note") or "").strip()
+
+
+def coverage_table_rows(coverage: Mapping[str, Any] | None) -> list[tuple[str, str]]:
+    """账本 → 元信息表里那几行。**只搬运** —— 措辞与数字都由账本给（见
+    `services/ai/coverage_ledger.coverage_rows`：数字与口径是同一件事）。
+
+    形状不对的条目直接丢掉：这里的东西会被写进一张发出去的表格，一条坏数据不该让整份
+    导出失败，也不该在表里留下半行。
+    """
+    if not isinstance(coverage, Mapping):
+        return []
+    rows: list[tuple[str, str]] = []
+    for item in coverage.get("rows") or ():
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        name, value = str(item[0] or "").strip(), str(item[1] or "").strip()
+        if name and value:
+            rows.append((name, value))
+    return rows
+
+
+def coverage_gap_lines(coverage: Mapping[str, Any] | None) -> list[str]:
+    """账本 → 「覆盖与缺口」那一段的每一条（**逐字搬运**账本里的 `gaps`）。"""
+    if not isinstance(coverage, Mapping):
+        return []
+    return [str(one).strip() for one in coverage.get("gaps") or () if str(one or "").strip()]
+
+
+def coverage_for_run(run: Any) -> dict:
+    """一条 `AiAnalysisRun` → 覆盖账本。**导出路由用的一行入口。**
+
+    实现在 `services/ai/coverage_ledger.py`（那边要读库：`request_payload` + 逐轮明细 +
+    按工具计数）。import 刻意放在函数里 —— 本模块的其余部分全是纯函数（不碰库、不碰
+    Flask，所以能被直接单测），不能因为这一个补账的入口把模型层拉进模块级的 import。
+    """
+    from services.ai import coverage_ledger
+
+    return coverage_ledger.ledger_from_run(run)
+
+
 def _meta_rows(
     *,
     project_label: str,
@@ -373,16 +432,30 @@ def _meta_rows(
     model: str,
     degradation_label: str,
     focus_label: str,
+    scope_note: str = "",
+    coverage_rows: Sequence[tuple[str, str]] = (),
 ) -> Sequence[tuple[str, str]]:
+    # 「分析范围」那一格在**有覆盖账本时**要带上限定语：`全量` 是**分析口径**，不等于
+    # 「整个版本都看过了」——不加限定语，读者会把它读成「全读完了」，而实测一次周版本分析
+    # 只取到过 60/996 个文件的证据（见 `services/ai/coverage_ledger.py`）。
+    # 限定语由账本给（`scope_note`）：**没有覆盖数据时一个字都不加** —— 拿不确定当结论，
+    # 与不加限定语一样糟。
+    scope_value = scope_label(scope)
+    if scope_note:
+        scope_value = f"{scope_value}（{scope_note}）"
     rows: list[tuple[str, str]] = [
         ("项目", project_label),
         ("目标", target_label),
         ("分析时间", f"{created_at_display}（北京时间）" if created_at_display else "-"),
         ("风险等级", risk_label(risk_level)),
         ("定级依据", _reasons_text(risk_reasons)),
-        ("分析范围", scope_label(scope)),
-        ("触发方式", trigger_label(trigger_source)),
+        ("分析范围", scope_value),
     ]
+    # 覆盖那几行**紧跟分析范围**：范围与「实际覆盖了多少」是同一件事的两半，隔开摆就没人
+    # 会把它们连起来读。行的字由账本给（数字与口径是同一件事，见 `coverage_rows`）。
+    for name, value in coverage_rows:
+        rows.append((str(name), str(value)))
+    rows.append(("触发方式", trigger_label(trigger_source)))
     if focus_label:
         rows.append(("分析焦点", focus_label))
     # 降级要**紧跟着风险等级说**：等级那一行的依据里已经带了降级那句话（见
@@ -497,6 +570,11 @@ def anomaly_rows(
 
 APPENDIX_TITLE = "异常清单（平台按门槛过滤后）"
 
+# 「覆盖与缺口」那一段的标题。**它不是一级标题**（用粗体行）：这份文档对外承诺「报告正文
+# 固定 7 个一级标题」（`skill_contract.REPORT_SECTIONS`），平台自己再插一个一级标题会把
+# 那个承诺打破，而读者是拿它当目录用的。
+COVERAGE_TITLE = "本次覆盖与缺口"
+
 # 附录里查不到处置记录时那一格写什么。见 `anomaly_rows` 里那段注释：不回落成「待确认」。
 DISPOSITION_UNKNOWN = "-"
 
@@ -550,6 +628,11 @@ def build_report_markdown(
     # `fingerprint → 人工处置的中文名`，**导出这一刻**现查（见 `anomaly_rows`）。
     # 不传就是整列 `-`：宁可写「不知道」，也不替用户断言「这一条还没人处理过」。
     dispositions: Mapping[str, str] | None = None,
+    # **这一次运行的覆盖账本**（`services/ai/coverage_ledger.ledger_from_run(run)`）。
+    # 传了它，元信息表里就会出现「覆盖（版本清单 / 列出的名字 / 取到证据）」那几行、
+    # 「分析范围」那一格带上限定语，表下再列出缺口。不传（`None`）时这份文档与以前
+    # **逐字相同** —— 覆盖数据是「额外的诚实」，不是让老调用方跟着改的理由。
+    coverage: Mapping[str, Any] | None = None,
     title: str = "AI 变更风险分析报告",
 ) -> str:
     """拼出整份文档。**报告原文逐字出现在中间**，前后各一条 `---` 把它隔开。
@@ -563,6 +646,11 @@ def build_report_markdown(
 
     「处置」那一列**反过来**：它要的就是导出这一刻的现状（见模块抬头第 2 条口径），
     所以由调用方现查、翻好中文名传进来。
+
+    **覆盖那一组行与「覆盖与缺口」那一段只在调用方传了账本时出现**（`coverage`）：
+    「分析范围：全量」本来是这一份文档里唯一关于「看了多少」的字，而它是分析口径、不是
+    覆盖率 —— 传了账本，读者才看得到「这个版本 996 个文件里 60 个取到过证据」。没传时
+    这份文档与以前**逐字相同**（覆盖是额外的诚实，不是让老调用方跟着改的理由）。
     """
     lines: list[str] = [f"# {title}", ""]
     lines.append("| 项 | 内容 |")
@@ -579,8 +667,20 @@ def build_report_markdown(
         model=model,
         degradation_label=degradation_label,
         focus_label=focus_label,
+        scope_note=coverage_scope_note(coverage),
+        coverage_rows=coverage_table_rows(coverage),
     ):
         lines.append(f"| {name} | {_cell(value)} |")
+
+    # 缺口那几句话紧跟在元信息表之后、正文之前：读者是在这里建立「这份报告看了多少」的
+    # 前提的，等读完正文再看到它就晚了（而正文里的每一条结论都建立在这个前提上）。
+    gap_lines = coverage_gap_lines(coverage)
+    if gap_lines:
+        lines.append("")
+        lines.append(f"**{COVERAGE_TITLE}**")
+        lines.append("")
+        for one in gap_lines:
+            lines.append(f"- {one}")
 
     lines.append("")
     lines.append("---")

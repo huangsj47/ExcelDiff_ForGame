@@ -21,7 +21,7 @@ from models import Commit, Project, Repository, WeeklyVersionConfig, db
 from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
 from models.ai_analysis.anomaly import DEFAULT_DISPOSITION, DISPOSITION_LABELS, DISPOSITIONS
 from services import ai_report_history_service as report_history_service
-from services.ai import project_pack_service, report_document, run_progress
+from services.ai import project_pack_service, report_document, run_progress, verdict
 from services.ai.analysis_budget import (
     budget_status,
     platform_budget_status,
@@ -323,8 +323,9 @@ def ai_run_progress(run_id):
     if snap is None:
         return jsonify(payload), 200
 
-    # 本次运行**还没落库**的那部分用量：token 直接取快照，费用按这条运行的模型与项目
-    # 价格表现算（算不出就是 `None`，`with_live_usage` 会据此**不判**费用那一档）。
+    # 本次运行**还没落库**的那部分用量：token 取快照里**跨成员累计**的那一份（`job_tokens`），
+    # 费用按这条运行的模型与项目价格表现算（算不出就是 `None`，`with_live_usage` 会据此
+    # **不判**费用那一档）。
     table, _errors = project_price_table(run.project_id)
     live_cost = None
     currency = ""
@@ -344,7 +345,13 @@ def ai_run_progress(run_id):
     payload["budget"] = visible_budget(
         with_live_usage(
             status,
-            tokens=snap.live_tokens,
+            # **job 级那一份**（跨成员累计、单调不减），不是 `live_tokens` ——
+            # 后者是**当前成员**的局部量，子代理模式下换个成员就从 0 重新开始
+            # （见 `services/ai/run_progress.py` 的「两个用量口径」），
+            # 于是「这次其实已经超了」的提示会在换成员那一帧当场消失。
+            # 两者都是下界（上游报多少算多少），`with_live_usage` 的口径不变；
+            # 读不到时它是 `None`，那里按 0 加（与 `live_tokens` 为 `None` 时逐字一样）。
+            tokens=snap.job_tokens,
             cost=live_cost,
             currency=currency,
         )
@@ -716,11 +723,20 @@ def ai_run_report_md(run_id):
         model=str(run.model or ""),
         degradation_label=str(payload.get("degradation_label") or ""),
         focus_label=_focus_label_of(run),
-        report_text=run.response_text,
+        # 报告正文末尾可能带一行**机器可读的裁决块**（`<!-- ai-verify-ruling: {...} -->`，
+        # 见 services/ai/verdict.py）。它是给平台读回去的（`result_payload.read_ruling`），
+        # 网页渲染看不见它，但用户下载的是一份原始 markdown —— 那一行会原样出现在文件里。
+        # 导出只留给人读的那几节。
+        report_text=verdict.strip_ruling_block(run.response_text),
         anomalies=payload.get("anomalies") or [],
         suppressed_count=int(payload.get("suppressed_count") or 0),
         dimension_labels=dimension_labels,
         dispositions=dispositions,
+        # 覆盖账本（哪些文件进了本次输入、哪些真的取到过证据、还缺什么）。**这一行是必需的**：
+        # 不传就没有「覆盖与缺口」那几行，而「分析范围：全量」会被读成「整个版本都看过了」
+        # （实测一次周版本分析只取到过 60/996 个文件的证据，见 services/ai/coverage_ledger.py）。
+        # 它只读库里已有的输入账与逐轮明细，**不发起任何计费调用**。
+        coverage=report_document.coverage_for_run(run),
     )
     filename = report_document.report_filename(
         project_name=getattr(project, "name", "") or "",

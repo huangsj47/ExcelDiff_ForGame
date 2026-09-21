@@ -24,6 +24,7 @@ import pytest
 
 import routes.ai_analysis_routes as ai_routes
 import services.ai.provenance as provenance
+import services.ai.verdict as verdict
 import services.ai_analysis_service as ai_service
 from app import app, create_tables, db
 from models import Commit, Project, Repository, WeeklyVersionConfig
@@ -532,7 +533,8 @@ def test_the_downloaded_body_is_exactly_what_the_document_builder_produces():
             model=run.model,
             degradation_label="",
             focus_label="",
-            report_text=REPORT_TEXT,
+            report_text=verdict.strip_ruling_block(REPORT_TEXT),
+            coverage=doc.coverage_for_run(run),
             anomalies=[],
             suppressed_count=0,
         )

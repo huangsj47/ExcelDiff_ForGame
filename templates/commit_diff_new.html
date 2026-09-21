@@ -1028,6 +1028,10 @@ function initCommitAiAnalysis() {
                 // 只会在「正文 + 提示」的拼法被改动时漂移，文案本身仍然只有一份。
                 const contextNotice = AiContextNotice.contextNotice(payload);
                 if (contextNotice) { appendAiLine('\n' + contextNotice); }
+                // 覆盖与缺口同理（文案与读法在 static/js/ai_context_notice.js，与周版本那两份
+                // 模板共用同一份 —— 只有这一处是单提交的中间态，落库正文那条路已经带上了）。
+                const coverageNotice = AiContextNotice.coverageNotice(payload);
+                if (coverageNotice) { appendAiLine('\n' + coverageNotice); }
             }
             setAiStatusBadge(outcome.badge, outcome.tone);
             streamSettled = true;

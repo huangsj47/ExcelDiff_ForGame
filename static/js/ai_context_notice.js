@@ -146,6 +146,33 @@
     }
 
     /**
+     * 「本次覆盖与缺口」那一段（这次看了多少、缺的是什么）。
+     *
+     * ## 为什么它必须出现在屏幕上（2026-09-21）
+     *
+     * 审计要求（AI-P1-03）是「报告必须显示证据覆盖与缺口」，而**抽屉才是用户第一眼
+     * 看到的地方**。导出那份 `.md` 早就有了（导出路由现算账本传给报告文档），可抽屉读的
+     * 是落库的 `response_payload.report_markdown` —— 真机验证时那份里「本次覆盖与缺口」
+     * 「覆盖（版本清单）」「覆盖（取到证据）」这些关键词**一个都没有**。
+     *
+     * ## 为什么这段字是服务端给的、而不是在这里拼
+     *
+     * 行与缺口的措辞在 `services/ai/coverage_ledger.py`（导出文档读的是同一份）：
+     * 同一份数据在两处显示时必须**逐字一致**，各拼一份迟早会说不到一起（这一行按文件
+     * 去重、那一行按提交去重，两个「覆盖率」没人知道差在哪）。服务端已经拼好整段中文
+     * （`result_payload.coverage_notice_text`），放在结论载荷的 `coverage_notice` 键上
+     * —— 这里只负责把它贴到屏幕上。
+     *
+     * 它**不在报告正文里**是刻意的：正文会被别的环节当字符串判据用
+     * （`family_ledger.reconcile_candidates` 核对候选编号与候选文件有没有被点名，
+     * 而覆盖段里恰好列着**取数失败的文件路径**），写成独立一个键，那些判据连碰都碰不到。
+     */
+    function coverageNotice(payload) {
+        if (!payload || typeof payload !== 'object') { return ''; }
+        return str(payload.coverage_notice).trim();
+    }
+
+    /**
      * 把提示行贴到一份**已经落库的报告正文**后面（没有可说的就原样返回正文）。
      *
      * ## 为什么必须单独有这一条（2026-09-19）
@@ -161,10 +188,14 @@
      * 而它不是可有可无的装饰：`degradation` 说的是「**这块可能没人看过**」，
      * `context.budget_note` 说的是「**这次是在被压过的提示词上作答的**」—— 少了它，
      * 「模型看完说没问题」与「模型压根没答上来」在界面上长得一模一样，而这两件事的
-     * 处理方式完全相反（见本模块开头的 docstring）。
+     * 处理方式完全相反（见本模块开头的 docstring）。覆盖段同理：少了它，「范围：全量」
+     * 这一个词会被读成「整个版本都看过了」。
      *
      * 拼接用**空行**：报告渲染器把段落内的单换行当软换行接起来，单换行会让「正文的最后
      * 一句」与「⚠️ 第一句」粘成一段。
+     *
+     * **顺序**：覆盖段在前、告警在后 —— 与导出那份一致（读的人在正文之前先建立
+     * 「这份报告看了多少」这个前提），而告警是紧接着要读的那一句。
      *
      * 所以口径改成：**提示是「这一次运行」的属性，不是某一条传输通道的属性** ——
      * 凡是把一份报告正文画到屏幕上的地方，都从这里取「正文 + 提示」的合体。
@@ -172,13 +203,15 @@
      */
     function withContextNotice(responseText, payload) {
         var body = str(responseText);
-        var notice = contextNotice(payload);
+        var extra = [coverageNotice(payload), contextNotice(payload)];
+        var notice = extra.filter(function (one) { return one; }).join('\n\n');
         if (!notice) { return body; }
         return body ? body + '\n\n' + notice : notice;
     }
 
     global.AiContextNotice = {
         contextNotice: contextNotice,
+        coverageNotice: coverageNotice,
         withContextNotice: withContextNotice,
         MEANING: MEANING
     };
