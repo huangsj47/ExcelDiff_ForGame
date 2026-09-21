@@ -301,12 +301,17 @@ class TestAMemberThatRanButDidNotHandBackConclusions:
     平台按 markdown 降级保存 —— 它那一路的**结构化结论是 0 条**，而报告末尾一个字的缺口
     都没有。它负责的三个维度（`code_logic`/`version_branch`/`process`）在清单里看起来是
     「看过、没问题」，实际是「结论没回来」。
+
+    这里的 S2 **两次**都给 markdown：写完报告之后平台会再问一次「把上一条原样转成 JSON」
+    （见 `engine.build_markdown_reemit_hint`），它仍然不转 —— 于是才落到下面这些缺口上。
+    只给一次 markdown 的话，那个成员会**真的交回结构化结论**，这一整类缺口就不会出现了。
     """
 
     def _run_with_a_broken_member(self):
         client = FlakyClient(
             _final(_anomaly()),                      # S1 正常
             _markdown("改了道具表，风险中等。"),        # S2 没按协议出 JSON
+            _markdown("改了道具表，风险中等。"),        # S2 收到「原样转成 JSON」后仍然不转
             _final(_anomaly()),                      # 汇总
             _final(_anomaly()),                      # 对账轮
         )

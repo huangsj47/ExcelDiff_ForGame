@@ -8,11 +8,13 @@
    这里断言的是「每一次真正发出去的请求都在预算内」，而不是「某个函数返回了什么」。
 2. **压缩绝不静默。** 压掉的轮次要留下可读的记录（第几轮、索取了什么、可以重新索取），
    而且必须写进 trace。少一条，模型就会以为自己没拿到过、于是重新要一遍 —— 额度花两遍。
-3. **上游拒绝不能把一次分析作废。** 估算终究是估算（字符 ≠ token）。上游说装不下时，
-   换成一段必然装得下的「收尾」提示词把结论要回来。**前面几轮的钱已经花了，
+3. **上游拒绝不能把一次分析作废。** 估算终究是估算（字符 ≠ token）。上游说装不下时按
+   「丢得越少越先试」补救：先把本轮条目压到 1/4 重发（历史留着）→ 还不行就连历史一起丢
+   再压一遍 → 都不行才换成一段必然装得下的「收尾」提示词。**前面几轮的钱已经花了，
    空手而归是最坏的结果。**
-4. **不是超长的错不要当成超长。** 认错的代价是一次多余的调用，但把网络错误、鉴权错误
-   当成超长会掩盖真正的原因 —— 那两类都必须按原样快速失败。
+4. **不是超长的错不要当成超长。** 认错的代价是最多多花三次压缩后的调用，但把网络错误、
+   鉴权错误当成超长会掩盖真正的原因 —— 那两类都必须按原样快速失败（包括在补救过程中
+   撞上的时候，见 `test_a_non_overflow_failure_during_the_retry_...`）。
 
 `tests/test_ai_engine.py` 的假件（`ScriptedClient` / `FakeProvider` / `_run`）直接复用：
 这里要测的正是「真跑一次多轮」，而不是某个纯函数。
@@ -379,31 +381,39 @@ def test_a_run_inside_the_budget_never_compacts():
 
 
 # ==========================================================================
-# 四、上游拒绝了：压掉重试 → 收尾
+# 四、上游拒绝了：先压条目 → 再丢历史 → 最后收尾
 # ==========================================================================
 
 
 class RejectAt:
     """在**指定的第几次调用**上抛「上下文超长」，其余正常回答。
 
-    用集合而不是「前 N 次」来指定，是因为要测的两种局面差别很大：第一次调用就被拒
-    （提示词本身就太大）与跑到第 5 轮才被拒（历史攒大了）。后者才是「压掉历史就能救」
-    的情形，而前者只能走收尾。
+    用集合而不是「前 N 次」来指定，是因为要测的几种局面差别很大：第一次调用就被拒
+    （提示词本身就太大）、跑到第 5 轮才被拒（历史攒大了）、以及**补救本身也被拒**
+    （`reject_at=(3, 4)`：压小那次也没过）。后者才是「一直退到收尾」的情形。
 
     回答按**成功**的调用次数取，所以一次拒绝不会吃掉一条脚本回答。
+
+    `error` 可以是一句话（所有被拒的调用都用它），也可以是 `{第几次调用: 那句话}` ——
+    后者用来测「压小重发那一次撞上的是**别的**故障」。
     """
 
-    def __init__(self, *replies, reject_at=(1,), error: str = OVERFLOW_ERRORS[0]):
+    def __init__(self, *replies, reject_at=(1,), error: object = None):
         self._replies = list(replies)
         self._reject_at = set(reject_at)
-        self._error = error
+        self._error = OVERFLOW_ERRORS[0] if error is None else error
         self.calls: list[list[dict]] = []
 
     def complete(self, messages, *, temperature=None):
         self.calls.append([dict(item) for item in messages])
         number = len(self.calls)
         if number in self._reject_at:
-            raise LLMResponseError(self._error)
+            text = (
+                self._error.get(number, OVERFLOW_ERRORS[0])
+                if isinstance(self._error, dict)
+                else self._error
+            )
+            raise LLMResponseError(str(text))
         succeeded = sum(1 for index in range(1, number + 1) if index not in self._reject_at)
         index = min(succeeded - 1, len(self._replies) - 1)
         result = ChatResult(
@@ -415,41 +425,93 @@ class RejectAt:
         return [estimate_chars(call) for call in self.calls]
 
 
-def test_a_rejection_is_recovered_by_the_salvage_not_by_a_second_attempt():
+def test_a_rejection_is_recovered_by_shrinking_the_items_first():
     """**这条是「分析不会因为超出上下文而作废」的证据。**
 
-    上游拒绝之后**只做一件事**：换成一段必然装得下的收尾提示词，把结论要回来。
+    上游拒绝之后按「丢得越少越先试」补救，第一步是**把本轮条目压到 1/4 重发，历史留着**。
 
-    ## 为什么不是「压掉历史再试一次」
+    ## 为什么第一步不是压历史
 
-    那是第一版的做法，测下来基本是空转：我们自己那一关（窗口 × 60% 的水位）早就过了，
-    上游还被拒，说明真实可用的量远小于声明的窗口 —— 那种偏差不是「少发一轮历史」能补上
-    的，压完还是超，只是多等一次超时、多留一条失败日志。收尾提示词是千字符级的，
-    所以这里断言的是「第二次调用就是收尾」，而不是「第二次调用小一点」。
+    条目是按我们自己的额度渲染出来的**确定量**（每轮最多 40 条 × 11,000 字，而且每轮
+    都要重发一遍），压到 1/4 是我们说了算的；压历史则是不可逆的 —— 那些轮次的内容模型
+    再也看不到，只能重新索取，而索取是花额度的。所以先试代价小的那一步。
+
+    第 2 轮被拒（而不是更晚）是有意的：那时条目还没被压到下限，第一步才**压得动**
+    （贴着下限时第一步是空转，见 `..._that_cannot_reduce_anything_is_not_sent`）。
     """
-    client = RejectAt(*([_requests(_ROTATION[i]) for i in range(2)] + [_final(_anomaly())]), reject_at=(3,))
+    client = RejectAt(
+        *([_requests(_ROTATION[i]) for i in range(2)] + [_final(_anomaly())]), reject_at=(2,)
+    )
 
     outcome = _run_big(client)
 
     assert outcome.status == STATUS_DEGRADED, outcome.error_message
     assert outcome.degradation == DEGRADE_CONTEXT
-    assert outcome.anomalies, "收尾之后结论丢了"
+    assert outcome.anomalies, "压小之后结论丢了"
     assert outcome.compaction.overflow_recovered is True
-    assert len(client.calls) == 4, "第 3 次被拒 → 第 4 次就是收尾"
-    salvage = client.calls[-1]
-    assert estimate_chars(salvage) < 8_000, f"收尾请求还是太大：{estimate_chars(salvage)}"
-    assert "收尾请求" in salvage[-1]["content"]
+    assert len(client.calls) == 4, "第 2 次被拒 → 第 3 次是压小重发，不是收尾"
+    rejected, retry = client.calls[1], client.calls[2]
+    assert estimate_chars(retry) < estimate_chars(rejected), "重发的那一次没有变小"
+    assert len(retry) == len(rejected), "这一步不该动历史 —— 历史还在"
+    assert "压到 1/4" in " ".join(record.note for record in outcome.rounds)
 
 
-def test_the_salvage_is_small_enough_for_any_window():
-    """收尾请求必须**小到任何窗口都装得下**：它存在的唯一理由就是「上面那些装不下」。
+def test_a_shrink_that_cannot_reduce_anything_is_not_sent():
+    """**压不动的补救不许发。** 条目已经贴着额度下限时，「把额度砍到 1/4」压出来的是
+    一模一样的体积（下限 4,000 字兜着，还多一行「额度被压到 4,000 字」的提示 ——
+    实测比原来还长 59 个字符）。那不是补救，是白烧一次调用。
 
-    只带变更清单的开头与已取内容的目录，一条正文都不带 —— 正文正是装不下的那部分。
+    所以这一步直接跳过，进下一步（丢历史）：历史才是那时的大头。
     """
-    client = RejectAt(*([_requests(_ROTATION[i]) for i in range(2)] + [_final(_anomaly())]), reject_at=(3,))
+    # 第 3 轮被拒：这一轮的条目在预算 35,000 下早已贴着下限。
+    client = RejectAt(
+        *([_requests(_ROTATION[i]) for i in range(2)] + [_final(_anomaly())]), reject_at=(3,)
+    )
 
     outcome = _run_big(client)
 
+    assert len(client.calls) == 4, "第 3 次被拒 → 第 4 次应当是丢历史，而不是原样重发"
+    third, fourth = client.calls[2], client.calls[3]
+    assert len(fourth) == 2, "跳过压不动的那一步，直接丢历史（只留 system + 本轮）"
+    assert estimate_chars(fourth) < estimate_chars(third)
+    assert "历史丢弃" in " ".join(record.note for record in outcome.rounds)
+    assert outcome.anomalies, "丢历史之后结论丢了"
+
+
+def test_when_the_shrunk_retry_is_rejected_too_the_history_goes():
+    """第二步才丢历史：条目压到 1/4 还装不下，说明大头在**历史**那边（水位估得不准）。
+
+    这一步同样保留「最近这一批证据文本」，丢的只是早先那几轮的对话 —— 顺序是
+    「丢得越少的越先试」，不是「一次丢光」。
+    """
+    client = RejectAt(
+        *([_requests(_ROTATION[i]) for i in range(2)] + [_final(_anomaly())]), reject_at=(2, 3)
+    )
+
+    outcome = _run_big(client)
+
+    assert len(client.calls) == 5, "第 2 次被拒 → 压条目（第 3 次）也被拒 → 第 4 次丢历史"
+    rejected, first_try, second_try = client.calls[1], client.calls[2], client.calls[3]
+    assert len(first_try) == len(rejected), "第一步之后、第二步之前，历史还在"
+    assert len(second_try) == 2, "第二步只留 system + 本轮，历史被丢掉"
+    assert estimate_chars(second_try) < estimate_chars(first_try)
+    assert outcome.status == STATUS_DEGRADED, outcome.error_message
+    assert outcome.degradation == DEGRADE_CONTEXT
+    assert outcome.anomalies, "丢历史之后结论丢了"
+    assert "历史丢弃" in " ".join(record.note for record in outcome.rounds)
+
+
+def test_the_last_resort_is_still_a_prompt_that_fits_any_window():
+    """三级补救全被拒之后，才用那段**必然装得下**的收尾提示词。
+
+    收尾请求必须小到任何窗口都装得下：它存在的唯一理由就是「上面那些装不下」。
+    只带变更清单的开头与已取内容的目录，一条正文都不带 —— 正文正是装不下的那部分。
+    """
+    client = RejectAt(_requests(_ROTATION[0]), _final(_anomaly()), reject_at=(2, 3, 4))
+
+    outcome = _run_big(client)
+
+    assert len(client.calls) == 5, "压条目、丢历史都被拒 → 第 5 次才是收尾"
     salvage = client.calls[-1]
     assert len(salvage) == 2, "收尾请求只该有 system 与一条 user 消息"
     assert estimate_chars(salvage) < 8_000
@@ -459,6 +521,96 @@ def test_the_salvage_is_small_enough_for_any_window():
     )
     assert "上下文" in DEGRADATION_LABELS[DEGRADE_CONTEXT]
     assert outcome.status == STATUS_DEGRADED
+
+
+def test_a_recovered_overflow_still_marks_the_whole_run_as_degraded():
+    """第 3 轮撞了窗口、第 4 轮才交结论 —— 这份结论仍然是「在被裁剪过的提示词上得到的」。
+
+    判据必须是**整次运行**的，不能只看交结论那一轮：只按当前轮判就会把这次降级记成一次
+    干净的运行，而用户正是靠这个标签判断「这份报告我该信几分」。
+    """
+    replies = [_requests(_ROTATION[index % len(_ROTATION)]) for index in range(3)]
+    client = RejectAt(*replies, _final(_anomaly()), reject_at=(3,))
+
+    outcome = _run_big(client)
+
+    assert outcome.requests_used == 3
+    assert outcome.status == STATUS_DEGRADED, outcome.error_message
+    assert outcome.degradation == DEGRADE_CONTEXT, "撞过窗口这件事随交结论的轮次一起丢了"
+
+
+def test_a_recovered_overflow_tightens_the_budget_for_the_rest_of_the_run():
+    """实测到的上限要**用在本次运行剩下的轮次**上。
+
+    否则下一轮照原来的预算组装、再被拒一次、再补救一次 —— 每一轮都多烧一到三次调用。
+    上限是从「刚被拒的那份提示词有多大」来的：它是这次运行里唯一一个实测值（水位是按
+    窗口估的，估错了才会走到这里）。
+
+    **它是一个「下限兜着」的软上限。** 系统提示词与第一轮（变更清单）钉住不压，最近几轮
+    原文也要留 —— 那几块合起来本身就可能比上限大，那时压不到上限（这是既有设计，
+    不是这次补救能改的），能保证的是**不再往上涨回被拒的那条**。
+    """
+    replies = [_requests(_ROTATION[index % len(_ROTATION)]) for index in range(3)]
+    client = RejectAt(*replies, _final(_anomaly()), reject_at=(2,))
+
+    outcome = _run_big(client)
+
+    assert outcome.status == STATUS_DEGRADED
+    rejected_chars = estimate_chars(client.calls[1])
+    cap = int(rejected_chars * 3 / 4)
+    assert cap < BUDGET, "这一组数据没测到收紧（上限还比原预算大）"
+    notes = " ".join(record.note for record in outcome.rounds)
+    assert f"收到 {cap:,} 字" in notes, f"没有把实测到的上限写进记录：{notes!r}"
+    later = [estimate_chars(call) for call in client.calls[3:]]
+    assert len(later) >= 2, "补救之后应当还有不止一轮"
+    assert max(later) <= rejected_chars, (
+        f"补救之后又涨回超过被拒的那一条：{later}（被拒的那条 {rejected_chars}）"
+    )
+
+
+def test_the_message_that_was_rejected_does_not_land_in_the_history():
+    """补救成功之后，进历史的必须是**真发出去的那一条**。
+
+    出口处那句 `messages.append(entry)` 追加的是「这一轮发给模型的消息」。收缩之后忘了把
+    `entry` 换掉的话，进历史的是**刚被上游拒掉的超大消息** —— 于是下一轮更大、再被拒一次、
+    再补救一次（实测：补救后的下一轮 21,845 → 27,136，越补越大），而补救的意义恰恰是
+    别让它留在上下文里。
+    """
+    client = RejectAt(
+        *([_requests(_ROTATION[i]) for i in range(2)] + [_final(_anomaly())]), reject_at=(2,)
+    )
+
+    outcome = _run_big(client)
+
+    rejected_chars = estimate_chars(client.calls[1])
+    assert outcome.status == STATUS_DEGRADED, outcome.error_message
+    assert len(client.calls) == 4
+    after = estimate_chars(client.calls[3])
+    assert after < rejected_chars, (
+        f"补救之后那一轮比被拒的那条还大（{after} >= {rejected_chars}）——"
+        "被拒的消息进了历史"
+    )
+
+
+def test_a_non_overflow_failure_during_the_retry_is_reported_as_itself():
+    """压小重发时撞上**别的**故障（502 之类）要如实报。
+
+    **不许**拿它去触发收尾提示词：那会把一次传输故障记成「窗口不够」，而用户会照着
+    「上下文不足」的建议去调预算、换模型 —— 做什么都没用（与 `looks_like_context_overflow`
+    那条取舍同一个理由）。
+    """
+    client = RejectAt(
+        *([_requests(_ROTATION[i]) for i in range(2)] + [_final(_anomaly())]),
+        reject_at=(3, 4),
+        error={3: OVERFLOW_ERRORS[0], 4: "LLMResponseError: 502 Bad Gateway"},
+    )
+
+    outcome = _run_big(client)
+
+    assert outcome.status == STATUS_FAILED
+    assert len(client.calls) == 4, "第 4 次是传输故障 → 就此打住，不再收尾"
+    assert "502" in outcome.error_message, outcome.error_message
+    assert "上下文不足" not in outcome.error_message, "传输故障被说成了窗口不够"
 
 
 def test_every_rejection_is_recorded_in_the_trace():
@@ -476,7 +628,8 @@ def test_every_rejection_is_recorded_in_the_trace():
     outcome = _run_big(client)
 
     notes = " ".join(record.note for record in outcome.rounds)
-    assert "超长" in notes and "收尾" in notes, notes
+    assert "超长" in notes, notes
+    assert "压到 1/4" in notes, f"没写清补救做了什么：{notes!r}"
     assert "累计已用" in notes, f"没有写清是在什么基础上被拒的：{notes!r}"
     assert outcome.compaction.overflow_recovered is True
 
@@ -541,12 +694,12 @@ def test_the_salvage_lists_what_was_already_fetched():
     否则模型会以为自己什么都没看过 —— 而它其实看过好几个文件的 diff，只是那些正文
     已经不在上下文里了。不说的话，它要么不敢下结论，要么凭猜测下结论。
     """
-    # 第 1 轮正常索取（真的取到了一份 diff），第 2 轮的消息被拒 → 收尾。
-    client = RejectAt(_requests(_ROTATION[0]), _final(_anomaly()), reject_at=(2,))
+    # 第 1 轮正常索取（真的取到了一份 diff），第 2 轮的消息被拒 → 后面两次补救也没过 → 收尾。
+    client = RejectAt(_requests(_ROTATION[0]), _final(_anomaly()), reject_at=(2, 3, 4))
 
     _run_big(client)
 
-    assert len(client.calls) == 3, "第 2 次被拒 → 第 3 次就是收尾"
+    assert len(client.calls) == 5, "第 2 次被拒、后两次补救也没过 → 第 5 次才是收尾"
     salvage_text = client.calls[-1][-1]["content"]
     assert "你已经取到过的内容" in salvage_text
     assert TABLE in salvage_text, "取过的文件没有列进收尾提示词"

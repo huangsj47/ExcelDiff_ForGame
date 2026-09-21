@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Iterable, Mapping, Optional, Sequence
 
 from services.ai.budget import ContextItem
-from services.ai.protocol import build_budget_exhausted_hint
+from services.ai.protocol import build_budget_exhausted_hint, build_final_round_hint
 from services.ai.skill_contract import DIMENSION_IDS
 from services.ai.skill_loader import LoadedSkills
 
@@ -510,6 +510,12 @@ def build_user_message(
         # `requests_total` 一起传进去：额度是**用完的**还是**从来就没有**，是两件事
         # （见 `_budget_line` 的 docstring）。
         blocks.append(build_budget_exhausted_hint(requests_total=requests_total))
+    elif max_rounds and round_index >= max_rounds:
+        # **轮次也能先耗尽，而且比额度更隐蔽**：额度还剩着，模型就完全不知道自己只剩
+        # 这一轮 —— 实测它会把这一轮写成一段 markdown 叙述（run 10 的 S3 就是这样：8 轮
+        # 只用了 38/40 次索取，负责的三个维度一条结构化结论都没交回来）。
+        # 与上面那支互斥（同一轮只说一次），因为两句都在讲「这一轮别再要了」。
+        blocks.append(build_final_round_hint(round_index=round_index, max_rounds=max_rounds))
 
     if correction_hint.strip():
         blocks.append("## 上一轮的问题\n\n" + correction_hint.strip())

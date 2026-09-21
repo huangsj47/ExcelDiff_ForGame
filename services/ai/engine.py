@@ -68,6 +68,7 @@ from services.ai.protocol import (
     ProtocolError,
     TRUNCATED_OUTPUT_HINT,
     build_correction_hint,
+    build_markdown_reemit_hint,
     ground_payload,
     looks_like_markdown_report,
     looks_like_truncated_json,
@@ -112,7 +113,10 @@ DEGRADATION_LABELS = {
     DEGRADE_REQUESTS: "上下文索取额度用尽，基于已有证据出结论",
     DEGRADE_MARKDOWN: "模型没有按协议输出 JSON，已按 markdown 报告降级保存",
     DEGRADE_PROTOCOL: "连续多轮无法解析出协议要求的 JSON",
-    DEGRADE_CONTEXT: "提示词超出模型上下文窗口，已压掉历史后收尾出结论",
+    # 三种补救都算（先压条目、再丢历史、最后收尾），所以这里**不写具体压了什么** ——
+    # 写死「已压掉历史」在「只压了条目、历史还在」那一支上就是一句假话。
+    # 具体做了什么在 trace 的轮次备注里（`round_notes`）。
+    DEGRADE_CONTEXT: "提示词超出模型上下文窗口，已压缩上下文后出结论",
     DEGRADE_SUBAGENT: (
         "子代理模式：有分片没有跑成、或它报出的结论没有进入最终报告"
         "（见报告末尾的「信息缺口（平台补充）」）"
@@ -567,6 +571,10 @@ def run_analysis(
     degradation = DEGRADE_NONE
     payload: AnalysisPayload | None = None
     markdown_fallback = ""
+    # 「已经为 markdown 重问过一次了吗」。**只给一次机会**，不跟着 `max_corrections`
+    # 走：把上一条原样转成 JSON 是个确定性很高的动作，第一次没做、第三次更不会做，
+    # 而每一次重问都要把整份提示词重发一遍（钱与时间都按轮次走）。
+    markdown_retried = False
     # 跨轮累计的输入 / 输出 token，与下面两个缓存字段**同一套口径**：逐轮记下来，
     # 出口处用 `_sum_optional` 合成 —— **只要有一轮没上报，整次就是 `None`**。
     # 以前这里是 `prompt_tokens = 0` 然后在循环里 `+=`，读不到的那一轮直接按 0 加进去，
@@ -584,6 +592,11 @@ def run_analysis(
     compaction_turns = 0
     compaction_chars = 0
     overflow_recovered = False
+    # 这次运行**撞过上下文窗口**（三种补救里任何一种发生过都算）。它**不能按轮记**：
+    # 第 3 轮撞了窗口、第 5 轮才交结论时，结论仍然是「在一份被裁剪过的提示词上得到的」，
+    # 只看当前轮就会把这次降级记成一次干净的运行 —— 而用户正是靠这个标签判断
+    # 「这份报告我该信几分」。
+    context_overflow_recovered = False
     # 每一轮留一句「索取了什么」，压历史时用它生成摘要（见 budget.compact_history）。
     round_memos: list[TurnMemo] = []
     # 这次分析**取到过**的全部上下文。收尾请求（上游拒绝之后）只带它们的目录。
@@ -715,14 +728,30 @@ def run_analysis(
                 force=True,
             )
 
-    for round_index in range(1, limits.max_rounds + 1):
+    # 轮次上限。**格式转换可以借用一轮**（`format_retry_granted`，见下面 markdown 那一支）：
+    # 它一次上下文都不取，只是把上一条原样换成协议 JSON。轮次刚好用尽时不给这一轮，
+    # 那一片的结论就整份丢掉 —— 实测就是这么丢的（一个分片 8 轮的最后一条是 markdown，
+    # 它负责的三个维度一条结构化结论都没交回来）。
+    format_retry_granted = False
+    for round_index in range(1, limits.max_rounds + 2):
+        if round_index > limits.max_rounds and not format_retry_granted:
+            # 没借到那一轮 —— 与 `for ... else`（轮次跑完都没 break）同一件事，只是现在
+            # 循环多跑一次判断，所以那句兜底要在这里补上。**只在还没定过原因时才写**
+            # （理由见循环末尾那段）。
+            if degradation == DEGRADE_NONE:
+                degradation = DEGRADE_ROUNDS
+            break
+        # 这一轮对外报的轮次上限：借来的那一轮要报成「第 N/N 轮」，不能出现「第 9/8 轮」。
+        reported_max_rounds = (
+            round_index if format_retry_granted else limits.max_rounds
+        )
         exhausted = tools.requests_remaining <= 0
         # 这一轮要写进 trace 的补充说明：压过历史、被上游拒过、走了收尾 —— 都是「这次分析
         # 不是正常跑完的」的证据，只留在日志里等于没说。
         round_notes: list[str] = []
         brief = _RoundBrief(
             round_index=round_index,
-            max_rounds=limits.max_rounds,
+            max_rounds=reported_max_rounds,
             change_summary=change_summary,
             baseline_digest=baseline_digest,
             correction_hint=correction_hint,
@@ -793,7 +822,6 @@ def run_analysis(
             movable_breakpoint = entry
 
         round_started = time.monotonic()
-        salvaged = False
         try:
             result = client.complete([*messages, entry], temperature=limits.temperature)
         except Exception as exc:  # noqa: BLE001 —— 网络/鉴权/超时都归为「这次没跑成」
@@ -818,43 +846,104 @@ def run_analysis(
 
             # 上游说装不下。**不能认输**：前面几轮的钱已经花了，空手而归是最坏的结果。
             #
-            # 补救只有一步：换成一段**必然装得下**的「收尾」提示词，把结论要回来。
+            # 补救按「丢得越少越先试」的顺序来：
+            #   ① 历史留着，把**本轮的条目**按更小的额度重压一遍再发；
+            #   ② 历史丢掉，条目仍按紧缩后的额度重压（保住最近这一批证据文本）；
+            #   ③ 都不行才用「收尾」提示词 —— 它只带变更清单开头与已取内容**目录**，
+            #      正文一条不带，必然装得下，但模型只能靠记得的东西作答。
+            # 每一步都**要先算出它确实压小了**才发（见下面 `original_chars` 那段）。
             #
-            # 为什么不「压掉历史再试一次」：上游拒了，说明我们按字符估的那个水位在这台
-            # 模型上不准（水位本身只有窗口的 60%，还被拒就意味着真实可用的量远小于声明
-            # 的窗口）。那种偏差不是「少发一轮历史」能补上的 —— 压完还是超，只是多等一次
-            # 超时、多留一条失败日志。而收尾提示词是千字符级的，任何窗口都装得下。
+            # 原先只有 ③，理由是「上游拒了说明水位估得不准，压历史也补不上」。那句话对
+            # **历史**成立，对**条目**不成立：条目是按我们自己的额度渲染出来的，压到
+            # 1/4 是我们说了算的确定量（每次最多 40 条 × 11,000 字符，是提示词里最大的
+            # 一块，而且每轮都要重发一遍）。所以先把确定能压掉的那块压掉，再谈放弃。
             log_print(
                 f"⚠️ AI 分析：上游拒绝了本次请求（{error_text[:300]}）。"
-                "按「提示词超出上下文窗口」处理，改用收尾提示词。",
+                "按「提示词超出上下文窗口」处理。",
                 "AI",
                 force=True,
             )
-            # 上游**确实**以超长拒过 —— 这件事本身就要记下来：它意味着这次的结论是在一份
-            # 被大幅裁剪的提示词上得到的。彻底失败的那条路径读的是 `error_message`。
-            overflow_recovered = True
-            salvaged = True
-            messages[:] = messages[:1]
-            items = ()
-            user_message = _salvage_user_message(change_summary, seen_items)
-            entry = _mark_current({"role": "user", "content": user_message}, movable_breakpoint)
-            movable_breakpoint = entry
-            round_notes.append(
-                "上游以「上下文超长」拒绝了这次请求（累计已用 "
-                f"{len(rounds)} 轮、{tools.requests_seen} 次索取），已改用「收尾」提示词"
-                "（只带变更清单开头与已取内容目录）。"
-            )
-            try:
-                result = client.complete([*messages, entry], temperature=limits.temperature)
-            except Exception as final_exc:  # noqa: BLE001
-                # 同上面那条：这一轮连着两次都没发出去，也要留痕（`transport_error`），
-                # 否则「上游到底拒了什么」在 trace 上无从查起。
+            shrunk_result = None
+            transport_error: Exception | None = None
+            # 「这一压到底有没有用」**发之前**就能算出来（`_prepare_round` 是确定性的，
+            # 同一份输入必然组装出同一份消息）。这一步不能省：条目额度有个下限
+            # （`_MIN_ITEM_BUDGET` = 4,000），条目**已经贴着下限**时把额度再砍到 1/4 也还是
+            # 4,000 字，重发出去的那一条与刚被拒的那条一样的体积 —— 实测里它甚至因为多了
+            # 一行「额度被压到 4,000 字」的提示而**更长**。那不是补救，是白烧一次调用。
+            # 压不出东西就直接进下一步（丢历史），三步都压不动才走收尾。
+            original_chars = estimate_chars([*messages, {"role": "user", "content": user_message}])
+            if items:
+                for keep_history, factor in ((True, 4), (False, 4)):
+                    shrunk_limits = replace(
+                        limits,
+                        prompt_char_budget=max(
+                            _MIN_ITEM_BUDGET, limits.prompt_char_budget // factor
+                        ),
+                    )
+                    base = list(messages) if keep_history else list(messages[:1])
+                    fitted, shrunk_text = _prepare_round(
+                        replace(brief, limits=shrunk_limits), base
+                    )
+                    shrunk_entry = {"role": "user", "content": shrunk_text}
+                    if estimate_chars([*base, shrunk_entry]) >= original_chars:
+                        continue
+                    # **标记要在「确定要发」之后才打**：`_mark_current` 会顺手把上一条上的
+                    # 缓存断点摘掉，而放弃的那一次不该动它 —— 摘了却没有新消息接手，
+                    # 这个可挪动的断点就凭空消失了（下一轮的缓存命中会跟着掉）。
+                    shrunk_entry = _mark_current(shrunk_entry, movable_breakpoint)
+                    try:
+                        shrunk_result = client.complete(
+                            [*base, shrunk_entry], temperature=limits.temperature
+                        )
+                    except Exception as shrink_exc:  # noqa: BLE001
+                        if looks_like_context_overflow(shrink_exc):
+                            continue
+                        transport_error = shrink_exc
+                        break
+                    # **`entry` 必须换成真发出去的那一条。** 出口处那句
+                    # `messages.append(entry)` 追加的是「这一轮发给模型的消息」—— 不同步过来，
+                    # 进历史的会是**刚被上游拒掉的那条超大消息**，它比发出去的这条大一倍，
+                    # 于是下一轮再被拒一次、再补救一次，越补越大（实测：补救后那一轮
+                    # 21,845 → 之后每轮 27,000+）。补救的意义就是别让它留在上下文里。
+                    messages[:] = base
+                    entry = shrunk_entry
+                    # 与正常路径逐字同一条规矩（见上面 `if round_index > 1 or seed_messages`）：
+                    # 不记下来的话，断点会一轮一轮往上堆 —— 上一轮那条没被摘掉，下一轮又加
+                    # 一个，超过 `MAX_CACHE_BREAKPOINTS` 之后被**静默丢掉**的恰好是最新的那条。
+                    # 这条路径只可能在 `round_index >= 2` 上走（第 1 轮没有条目可压），
+                    # 所以那个条件在这里恒真。
+                    movable_breakpoint = shrunk_entry
+                    user_message = shrunk_text
+                    items = fitted
+                    context_overflow_recovered = True
+                    overflow_recovered = True
+                    # **把这次观测到的上限记下来，供本次运行剩下的轮次用。**
+                    # 上游刚说了「这么大装不下」，而那份提示词正是 `original_chars` 这么大
+                    # —— 这是本次运行里唯一一个**实测**的上限（水位那些数是估出来的，估错
+                    # 了才会走到这里）。不记的话，下一轮照原样组装、再被拒一次、再补救一次。
+                    # 落成 3/4 是给「字符 → token 的换算误差」留的余量。
+                    #
+                    # 不需要另加机制：`compact_history` 与 `_fit_items` 都按
+                    # `limits.prompt_char_budget` 干活，调小它，下一轮自己就会压。
+                    limits = replace(
+                        limits,
+                        prompt_char_budget=max(_MIN_ITEM_BUDGET, int(original_chars * 3 / 4)),
+                    )
+                    round_notes.append(
+                        f"上游以「上下文超长」拒绝了这次请求（累计已用 {len(rounds)} 轮、"
+                        f"{tools.requests_seen} 次索取），已把上下文压到 1/{factor}"
+                        f"{'（历史保留）' if keep_history else '（历史丢弃）'}后重发；"
+                        f"本次运行后续轮次的提示词预算按这次实测的上限收到 "
+                        f"{limits.prompt_char_budget:,} 字。"
+                    )
+                    break
+            if transport_error is not None:
+                # 重试过程中撞上的是**别的**故障（502 之类），不是「装不下」：如实报，
+                # 别拿它去触发收尾提示词 —— 那会把一次传输故障记成「窗口不够」。
                 _emit(RoundRecord(
                     round_index, "transport_error",
-                    note=(
-                        f"上游以「上下文超长」拒绝（{error_text[:200]}），收尾请求也被拒绝"
-                        f"（{type(final_exc).__name__}: {final_exc}）"
-                    )[:400],
+                    note=f"压小上下文重发时失败（{type(transport_error).__name__}: "
+                         f"{transport_error}）"[:400],
                 ))
                 return EngineOutcome(
                     status=STATUS_FAILED,
@@ -863,14 +952,62 @@ def run_analysis(
                     requests_used=tools.requests_seen,
                     cache_hits=tools.cache_hits,
                     **_totals(),
-                    error_message=(
-                        "模型上下文不足：收尾请求也被拒绝"
-                        f"（{type(final_exc).__name__}: {final_exc}）。"
-                        "建议缩小本次分析的范围（按单个提交或指定文件分析），"
-                        "或改用上下文窗口更大的模型。"
-                    ),
+                    error_message=f"调用模型失败（{type(transport_error).__name__}）：{transport_error}",
                     **_usage_fields(),
                 )
+            if shrunk_result is not None:
+                result = shrunk_result
+            else:
+                # 连压到 1/4 都装不下（或这一轮本来就没有条目可压）→ 收尾提示词。
+                # 它是千字符级的，任何窗口都装得下。
+                # 上游**确实**以超长拒过 —— 这件事本身就要记下来：它意味着这次的结论是在
+                # 一份被大幅裁剪的提示词上得到的。彻底失败的那条路径读的是 `error_message`。
+                context_overflow_recovered = True
+                overflow_recovered = True
+                # 同上面那条：把实测到的上限记进本次运行剩下的轮次（收尾之后模型还可能
+                # 再要一轮上下文，那一轮不该再按原来那个已经被拒过的预算组装）。
+                limits = replace(
+                    limits,
+                    prompt_char_budget=max(_MIN_ITEM_BUDGET, int(original_chars * 3 / 4)),
+                )
+                messages[:] = messages[:1]
+                items = ()
+                user_message = _salvage_user_message(change_summary, seen_items)
+                entry = _mark_current({"role": "user", "content": user_message}, movable_breakpoint)
+                movable_breakpoint = entry
+                round_notes.append(
+                    "上游以「上下文超长」拒绝了这次请求（累计已用 "
+                    f"{len(rounds)} 轮、{tools.requests_seen} 次索取），已改用「收尾」提示词"
+                    "（只带变更清单开头与已取内容目录）；本次运行后续轮次的提示词预算按"
+                    f"这次实测的上限收到 {limits.prompt_char_budget:,} 字。"
+                )
+                try:
+                    result = client.complete([*messages, entry], temperature=limits.temperature)
+                except Exception as final_exc:  # noqa: BLE001
+                    # 同上面那条：这一轮连着两次都没发出去，也要留痕（`transport_error`），
+                    # 否则「上游到底拒了什么」在 trace 上无从查起。
+                    _emit(RoundRecord(
+                        round_index, "transport_error",
+                        note=(
+                            f"上游以「上下文超长」拒绝（{error_text[:200]}），收尾请求也被拒绝"
+                            f"（{type(final_exc).__name__}: {final_exc}）"
+                        )[:400],
+                    ))
+                    return EngineOutcome(
+                        status=STATUS_FAILED,
+                        rounds=tuple(rounds),
+                        dropped=tuple(dropped),
+                        requests_used=tools.requests_seen,
+                        cache_hits=tools.cache_hits,
+                        **_totals(),
+                        error_message=(
+                            "模型上下文不足：收尾请求也被拒绝"
+                            f"（{type(final_exc).__name__}: {final_exc}）。"
+                            "建议缩小本次分析的范围（按单个提交或指定文件分析），"
+                            "或改用上下文窗口更大的模型。"
+                        ),
+                        **_usage_fields(),
+                    )
 
         usage = _usage_of(result)
         text = usage["text"]
@@ -948,15 +1085,46 @@ def run_analysis(
                 degradation = DEGRADE_MARKDOWN
                 break
             if looks_like_markdown_report(text):
-                # 模型给了一份像样的 markdown 报告。与其把它扔掉重问，不如留下来当降级产出：
-                # 内容通常是有用的，用户至少能读到。
+                # 模型给了一份像样的 markdown 报告。**先留下来当降级产出**：内容通常是有用的，
+                # 用户至少能读到。然后才决定要不要再问一次结构。
+                payload = None
+                markdown_fallback = text.strip()
+                degradation = DEGRADE_MARKDOWN
+                if limits.max_corrections > 0 and not markdown_retried:
+                    # 还有纠正额度、且没为 markdown 重问过 → 问一次：**只要求把上一条
+                    # 原样转成 JSON**。
+                    #
+                    # 原先这里是不看额度直接 `break` 的 —— 哪怕还剩三轮，结构化结论也整份
+                    # 放弃。实测 run 10 的 S3 就是这么丢掉 code_logic / version_branch /
+                    # process 三个维度的：它跑满 8 轮后写了一段 markdown，平台留下了正文、
+                    # 结构没了，报告里只能按「跑完了但结论没有按协议交回」把它标出来。
+                    #
+                    # 重问的代价是**一轮**，而且**不会丢东西**：正文已经存在 `markdown_fallback`
+                    # 里，重问失败也只是回到今天这个结局。转格式比重新写一份报告容易得多 ——
+                    # 内容已经在对话里，模型只需换一种包装。
+                    if round_index >= limits.max_rounds:
+                        # **轮次正好用尽**：借一轮给这次格式转换（只借一次，见循环头部）。
+                        # 不借的话，下面的 `continue` 就等于「循环到此结束」—— 那句重问
+                        # 永远发不出去。而这一支（最后一条消息写成 markdown）恰恰最常见：
+                        # 模型被明确告知「这是最后一条消息」之后，最容易改写成叙述。
+                        # 实测 run 11 的两个分片都是这样：一个余一轮、一个正好到顶。
+                        format_retry_granted = True
+                    markdown_retried = True
+                    correction_hint = build_markdown_reemit_hint()
+                    _emit(RoundRecord(
+                        round_index, "unparsable",
+                        correction_hint=correction_hint,
+                        note=_combine_notes(round_notes, "按 markdown 报告降级，已要求原样转成 JSON"),
+                        **round_extra,
+                    ))
+                    pending_items = ()
+                    budget_notes = []
+                    round_memos.append(TurnMemo(index=round_index, status="unparsable"))
+                    continue
                 _emit(RoundRecord(
                     round_index, "unparsable",
                     note=_combine_notes(round_notes, "按 markdown 报告降级"), **round_extra,
                 ))
-                payload = None
-                markdown_fallback = text.strip()
-                degradation = DEGRADE_MARKDOWN
                 break
             if limits.max_corrections <= 0:
                 _emit(RoundRecord(
@@ -983,9 +1151,15 @@ def run_analysis(
         correction_hint = ""
         if parsed.is_final:
             payload = parsed
-            if salvaged:
-                # 这份结论是在**被压过的提示词**上得出的，与正常跑完不是一回事。
+            if context_overflow_recovered:
+                # 这份结论是在**被裁剪过的提示词**上得出的，与正常跑完不是一回事。
+                # 判据是**整次运行**的，不是当前这一轮（见 `context_overflow_recovered`）。
                 degradation = DEGRADE_CONTEXT
+            elif degradation == DEGRADE_MARKDOWN:
+                # 前一轮写成了 markdown、这一轮按要求原样转成了 JSON —— **结构化结论到手了**。
+                # 不抹掉这个原因的话，`family_ledger` 会按它写一句「跑完了但结论没有按协议
+                # 交回」，而那正是它这一轮刚刚交回来的东西（一句假话）。
+                degradation = DEGRADE_NONE
             _emit(RoundRecord(
                 round_index, "final",
                 item_count=len(items), note=_combine_notes(round_notes), **round_extra,
@@ -1045,7 +1219,14 @@ def run_analysis(
         # 不知道拿过什么，于是重新要一遍 —— 额度花两遍，还是没看到内容。
         round_memos.append(TurnMemo(index=round_index, status="requests", items=tuple(batch.items)))
     else:
-        degradation = DEGRADE_ROUNDS
+        # `for` 的 else：轮次跑完都没 `break` —— 也就是「一直没交结论」。
+        #
+        # **只在还没定过原因时才兜底**：模型的 markdown 那一条路（`DEGRADE_MARKDOWN`）
+        # 现在会 `continue`（重问一次格式），于是最后一轮走完之后会落到这里 ——
+        # 无条件覆盖的话，「模型写了报告但没按协议交」会被改写成「轮次用尽」，
+        # 而这两句话对应的处置完全不同（前者要人工去读那份正文，后者是「没看完」）。
+        if degradation == DEGRADE_NONE:
+            degradation = DEGRADE_ROUNDS
 
     # 这里**不需要**再判断一次「最后一轮是不是一份报告」：每一轮解析失败时都已经查过
     # `looks_like_markdown_report`（最后一轮也不例外），像报告的在循环里就留下了。

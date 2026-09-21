@@ -22,6 +22,7 @@ from services.ai.protocol import (
     ContextRequest,
     ProtocolError,
     build_budget_exhausted_hint,
+    build_final_round_hint,
     build_correction_hint,
     ground_payload,
     looks_like_markdown_report,
@@ -721,3 +722,31 @@ def test_dimension_ids_used_in_tests_are_the_real_ones():
     assert "config_id" in DIMENSION_IDS
     assert "config_data" in DIMENSION_IDS
     assert "value_sanity" in DIMENSION_IDS
+
+
+def test_final_round_hint_explains_why_asking_again_is_useless():
+    """轮次先耗尽时的那句收尾指令。
+
+    「请输出 final」这种客套话不够：模型对「还剩 2 次索取」是有判断力的，不说清它就会
+    把这 2 次花掉 —— 而**最后一轮索取回来的内容要等下一轮才送到它手上，下一轮不存在**。
+    所以这句必须带上机制，模型才会真的收手。
+    """
+    hint = build_final_round_hint(round_index=8, max_rounds=8)
+
+    assert "第 8/8 轮" in hint, "没说清是第几轮 —— 模型据此判断还剩几轮"
+    assert "下一轮不存在" in hint
+    assert "永远看不到" in hint
+    assert "final" in hint
+
+
+def test_both_convergence_hints_share_the_same_tail():
+    """三份收敛指令（额度耗尽 / 没有额度 / 最后一轮）的尾巴必须**逐字相同**。
+
+    它管的是交回来的形态：证据不足的维度要写 `hit` 为 false 而不是整段省掉。分开写就会
+    像以前那样改一处漏一处 —— 当时 prompt 与 protocol 各有一份同义文案，两句话不一样，
+    下场是「这里只说请给结论、没说禁止再索取」，模型把最后一轮花在又一次请求上。
+    """
+    tail = "对于证据不足的维度，在 dimensions 里写 hit 为 false"
+    assert tail in build_budget_exhausted_hint()
+    assert tail in build_budget_exhausted_hint(requests_total=0)
+    assert tail in build_final_round_hint(round_index=3, max_rounds=3)

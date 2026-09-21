@@ -89,7 +89,7 @@ def results() -> dict:
                 }},
                 {"name": "上游拒绝过", "payload": {
                     "status": "degraded", "degradation": "context_overflow",
-                    "degradation_label": "提示词超出模型上下文窗口，已压掉历史后收尾出结论",
+                    "degradation_label": "提示词超出模型上下文窗口，已压缩上下文后出结论",
                     "context": {"compaction": {
                         "events": 0, "dropped_turns": 0, "dropped_chars": 0,
                         "overflow_recovered": True,

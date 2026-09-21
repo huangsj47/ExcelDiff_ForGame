@@ -571,7 +571,8 @@ def test_the_progress_callback_also_fires_on_the_degraded_rounds():
     outcome = _run(ScriptedClient(_markdown()), on_round=seen.append)
 
     assert outcome.degradation == DEGRADE_MARKDOWN
-    assert [item.status for item in seen] == ["unparsable"]
+    # 两轮：写成 markdown 的那一轮 + 要求「原样转成 JSON」的那一轮（见上面那条上限）。
+    assert [item.status for item in seen] == ["unparsable", "unparsable"]
     assert seen[0].index == 1
 
 
@@ -883,12 +884,19 @@ def test_a_markdown_report_is_kept_instead_of_thrown_away():
     assert outcome.anomalies == (), "降级路径不该凭空造出异常条目"
 
 
-def test_an_immediate_markdown_answer_does_not_burn_another_call():
+def test_an_immediate_markdown_answer_burns_at_most_one_extra_call():
+    """markdown 只要求转一次格式，**不跟着纠正额度走**。
+
+    把上一条原样转成 JSON 是个确定性很高的动作：第一次没做、第三次更不会做，而每一次
+    重问都要把整份提示词重发一遍。所以这条上限是「一次」，与 `max_corrections`（默认 2、
+    给截断重发用的）无关 —— 后者放宽时不该顺带把这条也放宽。
+    """
     client = ScriptedClient(_markdown())
 
-    _run(client)
+    outcome = _run(client, limits=EngineLimits(max_corrections=5))
 
-    assert len(client.calls) == 1
+    assert len(client.calls) == 2, f"重问了不止一次：{len(client.calls)} 轮"
+    assert outcome.degradation == DEGRADE_MARKDOWN, "两次都是 markdown，仍要按降级收工"
 
 
 def test_a_truncated_json_is_asked_to_shorten_instead_of_being_dropped():
@@ -1345,3 +1353,144 @@ def test_a_failing_start_callback_does_not_kill_the_analysis():
 
     assert outcome.status == STATUS_SUCCEEDED
     assert outcome.usable
+
+
+def test_the_last_round_is_told_it_is_the_last_round():
+    """**轮次先耗尽的那条路**也要有人明说「这是最后一条消息」。
+
+    只按索取额度判「该收尾了」是不够的：额度还剩着、轮次到顶时，模型完全不知道这是最后
+    一次机会 —— 实测 run 10 的 S3 跑满 8 轮（只用了 38/40 次索取）后写了一段 markdown
+    叙述而不是协议 JSON，它负责的三个维度（code_logic / version_branch / process）
+    **一条结构化结论都没交回来**，报告里只能按「跑完了但结论没交回」标出来。
+    """
+    client = ScriptedClient(
+        _requests({"type": "commit_detail", "commit": COMMIT}),
+        _final(),
+    )
+
+    _run(client, limits=EngineLimits(max_rounds=2))
+
+    last_user = client.calls[1][-1]["content"]
+    assert "最后一条消息" in last_user
+    assert "下一轮不存在" in last_user, "没有说清「这一轮索取的东西送不到你手上」这个机制"
+    assert "不要写成 markdown 叙述" in last_user
+    assert "预算已耗尽" not in last_user, "轮次到顶不是「额度用完」，两者不能混成一句话"
+
+
+def test_a_middle_round_is_not_told_to_stop_asking():
+    """**反自检**：中间几轮不许出现这句 —— 那等于让模型提前放弃索取。
+
+    少要一次上下文，报告就少一块证据，而这种损伤在报告里看不出来（它只会写得更自信）。
+    """
+    client = ScriptedClient(
+        _requests({"type": "commit_detail", "commit": COMMIT}),
+        _requests({"type": "file_diff", "path": LUA}),
+        _final(),
+    )
+
+    _run(client, limits=EngineLimits(max_rounds=3))
+
+    middle_user = client.calls[1][-1]["content"]
+    assert "最后一条消息" not in middle_user, "第 2 轮（共 3 轮）就被要求收尾了"
+    assert "最后一条消息" in client.calls[2][-1]["content"], "真正的最后一轮反而没说"
+
+
+def test_a_markdown_answer_is_asked_once_more_for_the_same_content_as_json():
+    """模型写成 markdown 时，**先要一次结构，再谈降级**。
+
+    原先这条路是不看额度的直接收工：正文留下了，结构化结论整份放弃 —— 哪怕还剩三轮、
+    纠正额度一次没用。实测 run 10 的 S3 就是这么丢掉 code_logic / version_branch /
+    process 三个维度的（跑满 8 轮后写成 markdown，那一块维度**一条结构化结论都没进清单**）。
+
+    这里钉住三件事：重问一次、重问的是**同一条回答**（原样转格式）、以及成功之后
+    **不再挂着** `markdown_report` 这个降级原因 —— 后者会让 `family_ledger` 写出一句
+    「跑完了但结论没有按协议交回」，而结论这一轮刚刚交回来了。
+    """
+    client = ScriptedClient(_markdown(), _final(_anomaly()))
+
+    outcome = _run(client, limits=EngineLimits(max_rounds=4))
+
+    assert outcome.status == STATUS_SUCCEEDED, outcome.error_message
+    assert outcome.degradation == DEGRADE_NONE, (
+        f"接到 JSON 之后还挂着「没有结构化结论」的降级原因：{outcome.degradation}"
+    )
+    assert outcome.payload is not None and outcome.payload.anomalies
+    retry_user = client.calls[1][-1]["content"]
+    assert "markdown 报告" in retry_user
+    assert "原样" in retry_user, "没要求「原样转」，模型会借机重写并丢掉已写实的证据"
+    assert "不要新增、不要省略" in retry_user
+
+
+def test_a_markdown_answer_that_never_becomes_json_keeps_the_fallback_report():
+    """**反自检**：重问也没转成 JSON 时，正文必须还在，且降级原因仍是 markdown。
+
+    少了这一条，一个「把 markdown 重问一遍就扔掉」的实现能让上面那条全绿 —— 而那等于
+    用一次额外的调用换来一份空报告。
+    """
+    client = ScriptedClient(_markdown("改了道具表，值被删了。"), _markdown("还是 markdown。"))
+
+    outcome = _run(client, limits=EngineLimits(max_rounds=4))
+
+    assert outcome.status == STATUS_DEGRADED, outcome.status
+    assert outcome.degradation == DEGRADE_MARKDOWN, outcome.degradation
+    # 留**最后一次**的正文：那是模型最近一次、也是最完整的一次作答。
+    assert "还是 markdown" in (outcome.report_markdown or ""), "正文被丢掉了"
+
+
+def test_the_markdown_retry_is_capped_by_the_correction_budget():
+    """重问要占**纠正额度**，否则一个只肯写 markdown 的模型能把轮次全耗在重问上。
+
+    额度用完之后必须落到「留下正文 + 降级」，而不是继续追问到轮次耗尽。
+    """
+    client = ScriptedClient(_markdown())
+
+    outcome = _run(client, limits=EngineLimits(max_rounds=8, max_corrections=0))
+
+    assert outcome.degradation == DEGRADE_MARKDOWN
+    # 纠正额度关掉时连那一次重问都不该发生：1 轮就收工
+    assert len(client.calls) == 1, f"纠正额度为 0 却仍然重问了：{len(client.calls)} 轮"
+
+
+def test_a_markdown_answer_in_the_last_round_still_gets_its_one_retry():
+    """**最后一条消息写成 markdown 时，那一次重问必须真的发出去。**
+
+    重问走的是「下一轮」，而轮次正好用尽时 `continue` 就等于「循环到此结束」—— 重问的
+    那句话永远发不出去，那一片的结论整份丢掉。实测就是这个形态：一个分片跑满 8 轮、
+    最后一条是 markdown，它负责的三个维度一条结构化结论都没交回来。
+
+    所以格式转换可以**借用一轮**（只借一次）：它不取任何上下文，一次调用的事，
+    而它换回来的是整片维度能不能进清单。
+    """
+    client = ScriptedClient(_markdown(), _final(_anomaly()))
+
+    outcome = _run(client, limits=EngineLimits(max_rounds=1))
+
+    assert len(client.calls) == 2, "轮次用尽就放弃重问了 —— 那一次转换调用没发出去"
+    assert outcome.degradation == DEGRADE_NONE, outcome.degradation
+    assert [item.title for item in outcome.anomalies], "转成 JSON 之后结论应当留下"
+
+
+def test_the_borrowed_round_is_reported_as_the_last_round():
+    """借来的那一轮要对模型报成「第 N/N 轮」，不能出现「第 9/8 轮」。
+
+    提示词里的轮次是给模型看的（它据此判断还有没有机会），一个自相矛盾的编号会让它
+    以为后面还有轮次 —— 而那一轮之后分析就结束了。
+    """
+    client = ScriptedClient(_markdown(), _final(_anomaly()))
+
+    _run(client, limits=EngineLimits(max_rounds=1))
+
+    retry_user = client.calls[1][-1]["content"]
+    assert "第 2/2 轮" in retry_user, f"轮次编号自相矛盾：{retry_user[:200]!r}"
+    assert "9/8" not in retry_user
+
+
+def test_a_second_markdown_answer_does_not_borrow_another_round():
+    """借轮**只借一次**：再问一次还是 markdown 就收工，不能无限借下去。"""
+    client = ScriptedClient(_markdown(), _markdown())
+
+    outcome = _run(client, limits=EngineLimits(max_rounds=1))
+
+    assert len(client.calls) == 2, f"借轮没有收敛：发了 {len(client.calls)} 次"
+    assert outcome.degradation == DEGRADE_MARKDOWN
+    assert outcome.report_markdown, "正文被丢掉了"
