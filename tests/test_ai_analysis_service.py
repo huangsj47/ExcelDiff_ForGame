@@ -1172,7 +1172,12 @@ def test_a_finding_below_the_configured_bar_is_not_persisted(monkeypatch):
 
         run = db.session.get(AiAnalysisRun, outcome["run_id"])
         assert AiAnalysisAnomaly.query.filter_by(run_id=run.id).count() == 0
-        assert run.status == "succeeded", "门槛没过不等于这次分析失败"
+        # 门槛没过 = **这条结论没进清单**，不是这次分析失败：引擎照样跑完并出了报告，
+        # 落库的状态是 `degraded`（写入侧原生存它，见 `_persist_outcome`）。这里不写死
+        # `succeeded` —— 那等于把「跑成什么样」的判据交给写入侧的措辞。
+        assert run.status in ("succeeded", "degraded"), (
+            f"门槛没过不等于这次分析失败：{run.status}"
+        )
 
 
 def test_the_second_run_carries_the_first_runs_findings_as_a_baseline(monkeypatch):
@@ -1245,11 +1250,11 @@ def test_the_second_run_carries_the_first_runs_findings_as_a_baseline(monkeypatc
 def test_a_degraded_run_does_not_advance_the_weekly_watermark():
     """`degraded`（降级但有报告）不许推进水位线。
 
-    `_persist_outcome` 把 degraded 也存成 `run.status == "succeeded"`，所以旧的
-    `if run.status != "succeeded": return` 拦不住它 —— 而 degraded 恰恰是最不该
-    推进的那一类：线上那个周版本 767 个文件里有 748 个 `.lua` 的 diff 根本没读到，
-    照样被判成「已分析」，增量从此只看得到水位线之后的新文件，那批变更再也不会被
-    重新分析。判据必须是引擎侧的 `outcome.status`。
+    写入侧现在**原样**存 `degraded`（以前它被存成 `run.status == "succeeded"`，于是
+    `if run.status != "succeeded": return` 那一版拦不住它）—— 但判据仍然必须是引擎侧的
+    `outcome.status`，不是 `run.status`：degraded 恰恰是最不该推进的那一类。线上那个
+    周版本 767 个文件里有 748 个 `.lua` 的 diff 根本没读到，照样被判成「已分析」，
+    增量从此只看得到水位线之后的新文件，那批变更再也不会被重新分析。
     """
     with app.app_context():
         create_tables()

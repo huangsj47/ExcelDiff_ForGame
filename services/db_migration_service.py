@@ -7,6 +7,8 @@ import re
 from sqlalchemy import inspect, text as sa_text
 from sqlalchemy.exc import SQLAlchemyError
 
+from migrations.ai_run_claim_columns import apply as apply_ai_run_claim_columns
+
 DB_MIGRATION_RUNTIME_ERRORS = (
     SQLAlchemyError,
     RuntimeError,
@@ -349,6 +351,27 @@ def _migrate_ai_analysis_columns(db, log_print):
     )
 
 
+def _migrate_ai_run_claim_columns(db, log_print):
+    """给 `ai_analysis_run` 补「活动运行认领」那一列与它的唯一索引。
+
+    **为什么必须接上**：那道 UNIQUE 索引是**并发幂等**的地基 —— 手工与定时同时触发、
+    或同页连按两次时，「同一目标 + 同一份输入同时只允许一条活动运行」由数据库裁决
+    （写入侧接住 `IntegrityError`）。漏了这一段，保留数据的老库上那一列与索引都不会
+    生成 → 撞不出 `IntegrityError` → 幂等**静默失效**（行为退回改动前，且没有任何报错）。
+    `create_all()` 只对**新建**的表建索引，对已存在的表什么都不做，正是这个缺口。
+
+    实现在 `migrations/ai_run_claim_columns.py`（那边也能单跑：
+    `python -m migrations.ai_run_claim_columns [--apply]`）。它自己已经是幂等的
+    （列 / 索引已存在就跳过、失败只记日志不抛），所以这里只负责把它接上，
+    不再自己判一遍「要不要跑」。
+    """
+    report = apply_ai_run_claim_columns(db, log_print)
+    if not report["added_columns"] and not report["added_indexes"]:
+        # 没动库也要留一句（与 `_migrate_table_columns` 的「无需迁移」同一条口径）：
+        # 否则「接上了但一次都没生效」与「压根没接」在日志上分不开。
+        log_print("ℹ️ ai_analysis_run 认领列与唯一索引已完整，无需迁移", "DB")
+
+
 def apply_schema_migrations(db, log_print):
     """Apply all lightweight runtime schema migrations."""
     _migrate_repository_columns(db, log_print)
@@ -357,5 +380,9 @@ def apply_schema_migrations(db, log_print):
     _migrate_agent_nodes_columns(db, log_print)
     _migrate_ai_weekly_analysis_state_columns(db, log_print)
     _migrate_ai_analysis_columns(db, log_print)
+    # 认领那一列与它的唯一索引（`migrations/ai_run_claim_columns.py`）。**少了它，老库上
+    # 就没有 UNIQUE，并发幂等静默失效**。它在一次调用里既加列又加索引、各自自判存在与否，
+    # 所以放在列迁移这一组，索引迁移之前。
+    _migrate_ai_run_claim_columns(db, log_print)
     # 索引放在最后：列迁移先跑完，避免出现「列还没 add 就要给它建索引」。
     apply_index_migrations(db, log_print)

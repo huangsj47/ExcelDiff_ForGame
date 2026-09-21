@@ -4146,6 +4146,17 @@ let aiBudgetWatch = null;
 let weeklyAiRunId = null;
 let weeklyAiStreamSettled = false;
 
+// **这一次分析还在跑吗**（本页发起的，或本页刚附着上的那一次）。
+//
+// 为什么必须有这么一个变量：点开抽屉时那一段就绪检查在配置就绪且未超预算时
+// **无条件**把「重新分析」放回可点，而它在**每次打开抽屉**时都跑一遍 —— 于是
+// 「按一次 → 关抽屉 → 再打开」就能重按，而服务端那次分析还在跑、还在计费
+// （`closeWeeklyAiStream()` 只关浏览器端连接）。
+//
+// 服务端那道数据库级幂等（同一目标 + 同一份输入同时只允许一条活动运行）是**兜底**，
+// 不是允许前端放行重按的借口：用户看到的「又能按了」本身就是错的。
+let weeklyAiRunActive = false;
+
 function aiBudgetHost() {
     return document.getElementById('aiBudgetBanner');
 }
@@ -4205,6 +4216,7 @@ function startAiBudgetWatch(runId, metaEl) {
         onFinished: function () {
             // 「重新分析」要能再点：这条路径没有走 result 事件，而按钮是在开始分析时
             // 禁掉的（分析已经结束还禁着，用户只会以为页面卡住了）。
+            weeklyAiRunActive = false;
             const btn = document.getElementById('weeklyAiStartBtn');
             if (btn) btn.disabled = false;
             // 跑完了 → 不再看进度快照（`refreshWeeklyAiLatest` 会去取落库的结果）。
@@ -4316,6 +4328,7 @@ async function refreshWeeklyAiLatest(configId) {
     // 当成结论渲染，还会附上按变更规模估出来的兜底风险等级。必须按 status 分叉。
     if (result && result.status === 'failed') {
         weeklyAiHasCached = false;
+        weeklyAiRunActive = false;
         setWeeklyAiOutput(`上次分析失败：${result.error_message || '原因未知'}`, false, 'error');
         setWeeklyAiStatusBadge('失败', 'danger');
         if (meta) {
@@ -4333,6 +4346,12 @@ async function refreshWeeklyAiLatest(configId) {
     // 那句话会让调用方以为没有结果，进而又起一次分析。
     if (result && (result.status === 'running' || result.in_progress)) {
         weeklyAiHasCached = false;
+        // 这一次在跑 —— 页面刚打开（刷新、或另一个标签页发起的）也算数：按钮必须跟着
+        // 灰掉，否则「打开抽屉 → 按一下」会对着同一份输入再发起一次（服务端那道唯一
+        // 约束会拦，但用户看到的是「按了没反应」）。
+        weeklyAiRunActive = true;
+        const busyBtn = document.getElementById('weeklyAiStartBtn');
+        if (busyBtn) busyBtn.disabled = true;
         setWeeklyAiOutput('AI 分析进行中...', false, 'busy');
         setWeeklyAiStatusBadge('分析中', 'primary');
         if (meta) {
@@ -4367,6 +4386,7 @@ async function refreshWeeklyAiLatest(configId) {
     }
     if (result && result.response_text) {
         weeklyAiHasCached = true;
+        weeklyAiRunActive = false;
         const risk = result.risk_label || result.result?.risk_level || '-';
         const createdAt = result.created_at_display || result.created_at || '-';
         const scope = result.scope_label || result.scope || '-';
@@ -4396,6 +4416,7 @@ async function refreshWeeklyAiLatest(configId) {
         return true;
     }
     weeklyAiHasCached = false;
+    weeklyAiRunActive = false;
     setWeeklyAiOutput('暂无分析结果。', true);
     setWeeklyAiStatusBadge('待分析', 'secondary');
     // 这个目标没有跑过分析 → 「思考过程」如实说没有，而不是留一片空白。
@@ -4413,6 +4434,8 @@ async function startWeeklyAiAnalysis(force = false) {
     closeWeeklyAiStream();
     weeklyAiRunId = null;
     weeklyAiStreamSettled = false;
+    // 这次分析从现在起算「在跑」—— 直到某一条出口把它清掉（见上面那几处）。
+    weeklyAiRunActive = true;
     // 开跑了：抽屉切到「思考过程」（那时候唯一有内容的标签就是它），面板进入
     // 「看着它跑」的状态（运行号还没来，`run` 事件到了再补上）。
     AiDrawerTabs.markRunning();
@@ -4450,6 +4473,7 @@ async function startWeeklyAiAnalysis(force = false) {
             payload = JSON.parse(event.data || '{}');
         } catch (_err) {}
         renderAiUsageLine(payload.usage, payload.run_id);
+        weeklyAiRunActive = false;
         // 失败也走 `result` 事件，所以不能无条件打「完成」（见 refreshWeeklyAiLatest）。
         // 徽章与状态行那行字的说法都在 static/js/ai_stream_status.js 里（三份模板共用）。
         const outcome = AiStreamStatus.resultOutcome(payload);
@@ -4460,6 +4484,10 @@ async function startWeeklyAiAnalysis(force = false) {
                 appendWeeklyAiLine(`\n风险等级：${payload.risk_level}`);
                 updateRiskLabelByConfig(weeklyAiCurrentConfigId, payload.risk_level);
             }
+            // 「本次覆盖与缺口」（这次看了多少、缺什么）同理：它在 payload 的
+            // `coverage_notice` 里，**不在报告正文里**（见 static/js/ai_context_notice.js）。
+            const coverageNotice = AiContextNotice.coverageNotice(payload);
+            if (coverageNotice) { appendWeeklyAiLine('\n' + coverageNotice); }
             // 降级 / 压过上下文时补一行说明。文案在 static/js/ai_context_notice.js。
             // `loadWeeklyAiLatest(true)` 紧随其后、用落库正文整体重渲染 —— 那一条走的是
             // 同一个模块的 `withContextNotice`。两处都要有，文案只有一份。
@@ -4485,6 +4513,42 @@ async function startWeeklyAiAnalysis(force = false) {
     weeklyAiSource.addEventListener('cached', function() {
         setWeeklyAiStatusBadge('已有结果', 'success');
     });
+    // **这一次没有发起分析**（不是失败，也不是连接断了）。服务端有两种情形会发它：
+    //   * `reason=sync_in_flight` —— 周版本同步还没写完缓存。这时分析只能看到半份
+    //     变更清单（静默漏文件），所以闸门拦下，而且**一个请求都没发出去**。
+    //     说法必须是「等待同步」而不是「失败」：下一次点它很可能会成功。
+    //   * `reason=already_running` —— 同一目标 + 同一份输入已经有一次分析在跑
+    //     （数据库的活动运行唯一约束拦下的）。这一次不重复发起，页面**附着**到
+    //     那一次上：接着看它的进度，跑完自动显示它的结论。
+    weeklyAiSource.addEventListener('waiting', function(event) {
+        let payload = {};
+        try {
+            payload = JSON.parse(event.data || '{}');
+        } catch (_err) {
+        }
+        weeklyAiStreamSettled = true;
+        closeWeeklyAiStream();
+        setWeeklyAiOutput(payload.message || '这次分析没有发起。', false, 'busy');
+        // 判据用**服务端给的原因**，不是「有没有 run_id」：`already_running` 一定带运行号
+        // （要附着到它上面），`sync_in_flight` 一定没有（那次分析根本没建起来）。
+        // 按运行号判会在服务端哪天漏发运行号时**静默**变成「等待同步」。
+        if (payload.reason === 'already_running' && payload.run_id) {
+            // 已经有一次在跑：按钮**保持禁用** —— 它确实还在跑，重新启用等于告诉用户
+            // 「可以再按一次」，而那正是这次要修的那个坑（关抽屉再打开就能重按）。
+            weeklyAiRunActive = true;
+            setWeeklyAiStatusBadge('分析中', 'primary');
+            weeklyAiCache.delete(weeklyAiCurrentConfigId);
+            AiReportExport.track({ runId: payload.run_id, status: 'running' });
+            startAiBudgetWatch(payload.run_id, document.getElementById('weeklyAiMeta'));
+            return;
+        }
+        // `sync_in_flight`：**这次一个请求都没发出去**，按钮照旧可点（用户等同步跑完
+        // 再点一次就会成功）。徽章用「等待同步」而不是「失败」。
+        weeklyAiRunActive = false;
+        setWeeklyAiStatusBadge('等待同步', 'warning');
+        if (startBtn) startBtn.disabled = false;
+        setWeeklyAiMeta(payload.message || '');
+    });
     weeklyAiSource.addEventListener('error', function(event) {
         // `error` 这个事件名底下压着**两件完全不同的事**，只能靠有没有 `data` 区分：
         //   * 有 data —— 服务端主动发的 error 事件（闸门拦下 / 跑挂了），原因就在里面；
@@ -4500,6 +4564,7 @@ async function startWeeklyAiAnalysis(force = false) {
             const outcome = AiStreamStatus.errorOutcome(payload, !!weeklyAiRunId);
             setWeeklyAiOutput(outcome.output, false, 'error');
             setWeeklyAiStatusBadge(outcome.badge, outcome.tone);
+            weeklyAiRunActive = false;
             if (startBtn) startBtn.disabled = false;
             weeklyAiStreamSettled = true;
             closeWeeklyAiStream();
@@ -4530,6 +4595,7 @@ async function handleWeeklyAiStreamDrop(startBtn) {
         return;
     }
     setWeeklyAiOutput(outcome.output, false, 'error');
+    weeklyAiRunActive = false;
     if (startBtn) startBtn.disabled = false;
     stopAiBudgetWatch();
     if (outcome.refresh) refreshWeeklyAiLatest(weeklyAiCurrentConfigId);
@@ -4619,6 +4685,16 @@ function initWeeklyAiDrawer() {
                     false,
                     'error'
                 );
+                return;
+            }
+            // **正在跑的那一次不许被放回可点。** 上面那句 `disabled = true` 是「先禁、
+            // 就绪了再放开」，而关掉抽屉再打开会重走一遍这里 —— 服务端那次分析还在跑
+            // （关抽屉只关掉浏览器这头的连接），把它放回可点就是在邀请用户再按一次。
+            // 这里**不写正文**：那一段此刻的归属是「这次运行的进度与结论」，由轮询与
+            // `refreshWeeklyAiLatest` 负责，抢过来写会打架。
+            if (weeklyAiRunActive) {
+                setWeeklyAiStatusBadge('分析中', 'primary');
+                refreshWeeklyAiLatest(configId);
                 return;
             }
             setWeeklyAiStatusBadge('已配置', 'success');

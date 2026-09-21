@@ -12,7 +12,13 @@ from ..big_text import BigText
 # 运行状态。原实现只有 pending/running/succeeded 三种，**没有 failed**，于是
 # 「进程中断」「模型返回不可用」这类情况只能留下一条永远 running 的僵尸记录，
 # `error_message` 列存在但从未被写入过 —— 用户看到的是「一直在分析中」，无从判断。
-RUN_STATUSES = ("pending", "running", "succeeded", "failed")
+#
+# `degraded` 是后来补上的第三态。补之前 `_persist_outcome` 把引擎的
+# succeeded / degraded 一起写成 `"succeeded"`，于是「跑完了」与「跑**完整**了」
+# 在列上合成一个值：实测库里 13 条完成运行里 12 条 payload 是 degraded，而 status
+# 列全是 succeeded —— 任何按 status 写的 SQL（用量面板筛选、历史列表、基线挑选）
+# 都看不见它，只能去解析整份 payload 大文本。
+RUN_STATUSES = ("pending", "running", "succeeded", "degraded", "failed")
 
 # 超过这个时长仍是 running 的记录，视为僵尸（进程被杀 / 容器重启留下的）。
 # 判定放在读取侧而不是靠定时清理：定时任务本身也会被杀，而读取侧判断是幂等的、
@@ -34,6 +40,27 @@ class AiAnalysisRun(db.Model):
     response_mode = db.Column(db.String(20), default="streaming")
     scope = db.Column(db.String(20), default="full")  # full / incremental
     trigger_source = db.Column(db.String(20), default="manual")  # manual / scheduled
+
+    # --- 活动运行认领（**数据库级**幂等）---
+    # 「同一个目标 + 同一份输入」同时只允许**一条**活动运行，这条约束由本列上的
+    # UNIQUE 索引裁决（见下面的 `uq_ai_run_active_key`），**不是**「先查再插」：
+    # 查与插之间永远有一个窗口，而用户连按两次按钮（或手工与定时同时触发）恰好就
+    # 落在那条窗口里 —— 那是两次真金白银的模型调用。
+    #
+    # 取值是「目标 + 输入指纹」的哈希（见 `ai_analysis_service._analysis_claim_key`），
+    # **跑完就清空**（`_persist_outcome`），所以这里的 NULL 有两种：这条运行已经结束，
+    # 或者它是一条老行（这一列是后加的）。界面上两者没有区别 —— 都不占着那份输入。
+    #
+    # 为什么用「可空 + UNIQUE」而不是「部分唯一索引」：MySQL 没有部分索引，而平台
+    # 两种后端都要跑。可空唯一列在两种后端上的语义一致 —— 多行 NULL 共存、一行有值。
+    active_key = db.Column(db.String(120), nullable=True)
+
+    # 降级原因（引擎的 `DEGRADE_*` 取值，如 `subagent_gap` / `requests_exhausted`）。
+    # `status == "degraded"` 只说「这次是降级交付」，**降级在哪**此前只能去解 payload。
+    # 而「这一周有多少次是分片没跑成」是一个要按原因**分组计数**的问题，为一个枚举值
+    # 去解析整坨大文本不该是常态。给人看的那句话仍在 payload 的 `degradation_label` 里，
+    # 这里**不复制一份**。
+    degradation = db.Column(db.String(40))
 
     # 这次运行的**结论形态**：模型按协议给了结构化结论（True），还是只留下一份 markdown
     # 报告、一条结构化结论都没有（False）。失败/未完成没有结论，是 NULL。
@@ -128,6 +155,10 @@ class AiAnalysisRun(db.Model):
     __table_args__ = (
         # 运行历史列表：WHERE project_id = ? ORDER BY created_at DESC
         db.Index("idx_ai_run_project_created", "project_id", "created_at"),
+        # 活动运行唯一性（幂等的地基）。**必须是唯一索引而不是普通索引** —— 名字里的
+        # `uq_` 前缀就是这件事的唯一提示，改名字的时候别把它当成一个普通的 idx。
+        # 老库上这一列与索引都要靠迁移补（`migrations/ai_run_claim_columns.py`）。
+        db.Index("uq_ai_run_active_key", "active_key", unique=True),
     )
 
     @property
@@ -160,6 +191,7 @@ class AiAnalysisRun(db.Model):
             "target_key": self.target_key,
             "status": self.effective_status,
             "stored_status": self.status,
+            "degradation": self.degradation,
             "scope": self.scope,
             "trigger_source": self.trigger_source,
             "analysis_revision": self.analysis_revision,

@@ -6,10 +6,13 @@ AI analysis service（真实执行器）。
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
+
+from sqlalchemy.exc import IntegrityError
 
 from models import (
     Commit,
@@ -65,7 +68,11 @@ from services.ai.conclusion_view import (  # noqa: F401 —— 本文件的读�
     _last_attempt_failed_result,
     _parse_response_payload,
 )
+# 覆盖账本（「这次看了多少、缺什么」）：只在落库那一刻算一次 —— 它要读已落库的请求
+# 载荷 + 逐轮明细 + 按工具计数，而分析过程中那几样还散在内存里（见 `_persist_outcome`）。
+from services.ai.coverage_ledger import ledger_from_run as coverage_ledger
 from services.ai.engine import (
+    STATUS_DEGRADED,
     STATUS_FAILED,
     STATUS_SUCCEEDED,
     EngineLimits,
@@ -98,12 +105,14 @@ from services.ai.project_facts import (
 )
 from services.ai.provenance import current_provenance
 from services.ai.result_payload import (
+    coverage_notice_text,
     failed_result,
     result_payload,
 )
 from services.ai.rules import RuleThresholds
 from services.ai.run_cache_source import (  # noqa: F401 —— 启动清理与流式入口仍在用
     ANALYSIS_CACHE_DAYS,
+    CONCLUDED_STATUSES,
     _analysis_cache_cutoff,
     _is_run_fresh,
     _json_dumps,
@@ -510,16 +519,44 @@ def _persist_outcome(
 
     `pricing_version` 由调用方传（它在建引擎时已经读过项目配置，见 `_execute_analysis`），
     这里不为了一个版本号再查一次库。
+
+    ## 三种终态要**原生**落进 `status` 列
+
+    原先只有一句 `"failed" if outcome.status == STATUS_FAILED else "succeeded"`，于是
+    引擎的 succeeded / degraded 在列上合成一个值：实测库里 13 条完成运行里 12 条
+    payload 是 degraded，而 `status` 列全是 `succeeded` —— 「这次是降级交付」只能去解
+    整坨 payload 才看得出来。降级原因另存一列（短标识，不是那段给人看的文字）。
+
+    **水位线的判据不在这一列上**（见 `_update_weekly_state`：它读引擎给的
+    `engine_status`）—— 两把尺子不要合并。
     """
-    run.status = "failed" if outcome.status == STATUS_FAILED else "succeeded"
+    if outcome.status == STATUS_FAILED:
+        run.status = STATUS_FAILED
+    elif outcome.status == STATUS_DEGRADED:
+        run.status = STATUS_DEGRADED
+    else:
+        run.status = STATUS_SUCCEEDED
+    # 降级原因用**短标识**（`DEGRADE_*`），给人看的那句话仍在 payload 的
+    # `degradation_label` 里 —— 不在这边再抄一份，两处各自演化迟早对不上。
+    run.degradation = outcome.degradation or None
+    # **认领就此释放**（见 `_create_run` 的幂等一节）。不释放的后果是这份输入
+    # 从此再也发起不了分析 —— 一条永远解不开的死锁。
+    run.active_key = None
     run.finished_at = _utcnow()
     # 结论形态：模型按协议给了结构化结论 → True；只有一份 markdown 报告 → False；
     # 失败 → None（下面那支会把结论字段清空，本来就没有结论）。
     # 判据是 `outcome.payload` 而不是 `outcome.status`：降级分两种，有 payload 的那种
     # （轮次/额度/上下文用尽）结论仍然是结构化的，只是浅；没有 payload 的那种
     # （`DEGRADE_MARKDOWN`）一条结构化结论都没有。**只有后者不能当基线**。
-    run.conclusion_structured = bool(outcome.payload is not None) if run.status == "succeeded" else None
-    if run.status == "failed":
+    #
+    # **例外是失败**：原先这里写的是 `if run.status == "succeeded"`，靠「降级也存成
+    # succeeded」顺带算对了。`status` 能原生表示 degraded 之后那句话对降级变成假 ——
+    # 于是所有降级运行会在**基线上静默消失**（下一轮把上轮报过的问题全部当新发现重报）。
+    # 所以这里判的必须是「有没有失败」，而不是「是不是 succeeded」。
+    run.conclusion_structured = (
+        bool(outcome.payload is not None) if outcome.status != STATUS_FAILED else None
+    )
+    if run.status == STATUS_FAILED:
         # 失败**不写结论字段**。以前这里照样写 response_payload / response_text，
         # 于是库里那条失败记录长得和成功记录一样：有「结论」、有风险等级、有范围，
         # 前端只判「有没有结果」就把徽章显示成「已有结果」并附上「风险等级 high」。
@@ -599,7 +636,161 @@ def _persist_outcome(
             )
         )
 
+    # **覆盖与缺口**（审计 P1-03）：挂进 payload，`report_markdown` 一个字节都不动。
+    #
+    # 落在这里（逐轮明细已 `add`、`coverage_ledger` 的查询会顺手 flush）而不是更早，
+    # 是因为账本要读那些明细才能算出「哪些文件真的被看过」。导出那份 `.md` 早就有这一段
+    # （`routes/ai_analysis_routes.ai_run_report_md` 现算账本传给 `report_document`），
+    # 而**抽屉读的是这一份落库的 payload** —— 真机验证时它里面「本次覆盖与缺口」「覆盖
+    # （版本清单）」「覆盖（取到证据）」这些关键词一个都没有，用户第一眼看到的那份报告
+    # 于是既不说看了多少、也不说缺了什么。
+    #
+    # **为什么是独立一个键、而不是追加进报告正文**：正文被别的环节当**字符串判据**用 ——
+    # `services/ai/family_ledger.reconcile_candidates` 靠它核对候选编号与候选的
+    # `file_path` 有没有被点名（那条判据的明文取舍是「正文里提到过不算采纳」），而覆盖段
+    # 里恰好会列出**取数失败的文件路径**；`verdict.read_ruling`、下一轮的基线摘要也都会
+    # 读回正文。写成独立一个键，这些判据连碰都碰不到它。屏幕侧由
+    # `static/js/ai_context_notice.js` 贴到结论后面（见 `result_payload.coverage_notice_text`）。
+    # 取值只在**还没被判定为失败**的那条路上做：失败不写结论字段（`response_payload`
+    # 保持 `None`）是上面那段注释里写死的一条口径 —— 前端只判这个字段就能把失败显示成
+    # 「已有结果 · 风险等级 high」，这一段不许把它破掉。
+    if run.response_payload is not None:
+        try:
+            coverage_notice = coverage_notice_text(coverage_ledger(run))
+        except Exception as coverage_exc:  # noqa: BLE001 —— 一段补充说明不该毁掉整条结论
+            coverage_notice = ""
+            log_print(
+                f"⚠️ AI 分析：覆盖账本没能算出来（{type(coverage_exc).__name__}: {coverage_exc}），"
+                f"抽屉里「本次覆盖与缺口」这一段会缺席（run={run.id}）",
+                "AI",
+                force=True,
+            )
+        if coverage_notice:
+            result["coverage_notice"] = coverage_notice
+            # 上面已经写过一次 payload，这里带上覆盖段**重写**（`result` 是同一个对象，
+            # 调用方拿它当 SSE 的 `result` 事件下发 —— 于是「刚跑完」那一次也带得动这段话）。
+            run.response_payload = _json_dumps(result)
+
     db.session.commit()
+
+
+class ActiveAnalysisConflict(RuntimeError):
+    """同一目标 + 同一份输入**已经有一条活动运行**（数据库的唯一约束拦下的）。
+
+    它不是错误，是一次**幂等命中**：调用方应当附着到 `run` 上（把运行号交给界面，
+    让它接着看那一次的进度与结论），而不是再发起一次。建一条活动运行是「要花钱」的
+    前置条件 —— 拦住它 = 拦住计费。
+
+    为什么要有这个类型而不是返回 None：调用方必须**显式**处理这件事。悄悄返回
+    None 或者悄悄复用，都会让「手工与定时同时触发」这类并发在代码里看不出发生过。
+    """
+
+    def __init__(self, run: AiAnalysisRun):
+        super().__init__(f"已有一次分析在进行中（运行 #{run.id}）")
+        self.run = run
+
+
+def _analysis_claim_key(
+    *,
+    project_id: int,
+    target_type: str,
+    target_id: Optional[int],
+    target_key: Optional[str],
+    scope: str,
+    payload: dict,
+) -> str:
+    """「同一目标 + 同一份输入」的指纹 —— 活动运行唯一约束的键。
+
+    它要能把两件事分开（这是需求里那一句「变更后应允许新建」）：
+
+    * **同一次输入**：手工连按两次、手工与定时同时触发 → 同一个键 → 第二次被拦下，
+      两次只花一次钱；
+    * **输入确实变了的新一轮**：周版本的缓存行内容变了（快照指纹跟着变）→ 换一个键
+      → 照常允许新建。不换的话，快照更新之后这个目标再也分析不了（复用旧结论）；
+      反过来若键里不含输入，任何时候都拦，用户就永远无法重新分析。
+
+    目标身份用 `group_key`（周版本）而不是 config_id：一次分析的输入是**整批**仓库的
+    缓存行，同一批里的两条配置各存一份会因为键不同而各跑一次，而那两次看到的清单
+    逐字相同。
+
+    **不含溯源**（提示词 / skill / 规则 / 模型的版本号）：那几个是「这份结论能不能
+    复用」的判据（`_is_run_fresh`），不是「是不是同一份输入」。把它们并进来会让
+    「改一条规则」与「换一份快照」在幂等键上变得一样，而在一次 23 分钟的分析中途
+    改配置并不构成再跑一次的理由。
+    """
+    group = payload.get("group") or {}
+    focus = (payload.get("focus") or {}).get("key") or FOCUS_ALL
+    if target_type == "weekly":
+        # 内容身份：这一批配置当前这份快照（见 scope_sampling.weekly_snapshot_digest）。
+        # 算不出来时是空串 —— 宁可退化成「同一目标只有一次」，也不能因为一个指纹
+        # 算不出来就放行第二次真金白银的调用。
+        digest = _snapshot_digest_for(payload) or ""
+    else:
+        # 单提交：`target_id` 本身就是内容身份（一条提交的内容不可变）。
+        digest = ""
+    raw = "|".join(
+        [
+            str(project_id),
+            str(target_type),
+            str(target_key or target_id or group.get("key") or ""),
+            str(scope),
+            str(focus),
+            digest,
+        ]
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _holds_active_claim(run: AiAnalysisRun) -> bool:
+    """这条运行**现在**还占着那份输入吗。
+
+    `pending` / `running` 且不是僵尸才算占着。「还在排队」也算 —— 它马上就要跑，
+    放行第二次只会在它跑完之后再花一次钱。
+
+    僵尸（超过 `STALE_RUNNING_SECONDS` 没动静）**不算**：进程可能只是慢，但界面早已
+    按 `effective_status` 把它报成失败了，认领就不能比界面的口径活得更久。
+    """
+    if run is None:
+        return False
+    if (run.status or "") not in ("pending", "running"):
+        return False
+    return not run.is_stale_running
+
+
+def _claim_holder(claim_key: str) -> Optional[AiAnalysisRun]:
+    """这个键现在握在谁手里。**握在一条已经死掉的运行上就地清掉**并把位置让出来。
+
+    为什么必须判「它还活着吗」而不是「有没有这一行」：`active_key` 由 `_persist_outcome`
+    在跑完时清空，但那不是唯一的结束方式 —— 进程被杀、平台重启
+    （`fail_orphaned_analysis_runs` 只改 `status`，不认识这一列）、落库本身失败，
+    都会留下一条**带着认领的死人**。只按「有没有这一行」判的话，那份输入从此再也
+    发起不了分析：一条永远解不开的死锁，比不加约束更糟。
+    """
+    try:
+        holder = (
+            AiAnalysisRun.query.filter(AiAnalysisRun.active_key == claim_key)
+            .order_by(AiAnalysisRun.created_at.desc())
+            .first()
+        )
+    except Exception as exc:  # noqa: BLE001 —— 查不动时按「没人占着」处理，理由见下
+        # 查不动（表还没建出来 / 连接断了）就当成没有占用者：让这次分析照常建起来。
+        # 反过来（当成有人占着）会把「读一次库失败」升级成「这个目标再也分析不了」，
+        # 而重复一次分析的代价只是钱，不是数据。
+        log_print(f"⚠️ AI 分析：读取活动运行认领失败（{exc}），按无占用处理", "AI")
+        return None
+    if holder is None:
+        return None
+    if _holds_active_claim(holder):
+        return holder
+    try:
+        holder.active_key = None
+        db.session.commit()
+    except Exception as exc:  # noqa: BLE001 —— 清不掉就让下面那次 INSERT 去撞约束
+        db.session.rollback()
+        log_print(
+            f"⚠️ AI 分析：清理失效的活动运行认领失败（run={holder.id}）：{exc}", "AI"
+        )
+    return None
 
 
 def _create_run(
@@ -620,32 +811,86 @@ def _create_run(
 
     溯源四个值（prompt / skill / rules / model）在这里一次写全：它们同时是缓存键，
     缺一个就会出现「改了 skill 却还在复用旧结论」——那个坑已经踩过一次。
+
+    ## 幂等：活动运行唯一约束（**不是**「先查再插」）
+
+    `active_key` 是「同一目标 + 同一份输入」的指纹，表上有一个 **UNIQUE** 索引，
+    而它**跑完就清空**（`_persist_outcome`）。于是「同一份输入同时只允许一条活动运行」
+    由数据库裁决：两个进程、两个标签页同时按下去，只有一个 INSERT 会成功，另一个拿到
+    `IntegrityError` —— 那正是要的信号，不是要吞掉的错误。
+
+    为什么不「先查再插」：查与插之间永远有一个窗口，而**连按两次按钮恰好就落在那个
+    窗口里**（前端那句 `startBtn.disabled = true` 只挡得住一个页面内的重复点击，
+    关掉抽屉再打开就能重按）。
+
+    冲突时抛 `ActiveAnalysisConflict`（带**已有那条运行**），由调用方决定怎么告诉界面：
+    周版本那两份抽屉附着上去接着看，单提交那份说清「已经有一次在跑」。
     """
     summary = payload.get("summary") or {}
-    run = AiAnalysisRun(
+    # 溯源在重试路径上会被用两次，所以先算一次（它要哈希源码文件，不便宜）。
+    provenance = current_provenance(project_id)
+    claim_key = _analysis_claim_key(
         project_id=project_id,
         target_type=target_type,
         target_id=target_id,
         target_key=target_key,
-        status="running",
-        response_mode=response_mode,
         scope=scope,
-        trigger_source=trigger_source,
-        trace_id=f"{target_type}-{target_id}-{int(_utcnow().timestamp())}",
-        **current_provenance(project_id),
-        request_payload=_json_dumps(payload),
-        delta_summary=_json_dumps(
-            {
-                "delta_files": summary.get("delta_files", 0),
-                "total_files": summary.get("total_files", 0),
-                "scope": scope,
-            }
-        ),
-        started_at=_utcnow(),
+        payload=payload,
     )
-    db.session.add(run)
-    db.session.commit()
-    return run
+
+    def _build() -> AiAnalysisRun:
+        return AiAnalysisRun(
+            project_id=project_id,
+            target_type=target_type,
+            target_id=target_id,
+            target_key=target_key,
+            status="running",
+            response_mode=response_mode,
+            scope=scope,
+            trigger_source=trigger_source,
+            trace_id=f"{target_type}-{target_id}-{int(_utcnow().timestamp())}",
+            active_key=claim_key,
+            **provenance,
+            request_payload=_json_dumps(payload),
+            delta_summary=_json_dumps(
+                {
+                    "delta_files": summary.get("delta_files", 0),
+                    "total_files": summary.get("total_files", 0),
+                    "scope": scope,
+                }
+            ),
+            started_at=_utcnow(),
+        )
+
+    for attempt in range(2):
+        run = _build()
+        db.session.add(run)
+        try:
+            db.session.commit()
+            return run
+        except IntegrityError:
+            # 唯一索引挡下了「同一份输入的第二次并发发起」—— 一个模型请求都还没发出去。
+            db.session.rollback()
+            holder = _claim_holder(claim_key)
+            if holder is None and attempt == 0:
+                # 占用者刚好在这一瞬间结束了（`_claim_holder` 顺手清掉了它的认领）：
+                # 那份输入现在是空的，再建一次。
+                continue
+            if holder is None:
+                # 第二次还是撞约束，而按认领查不到人 —— 认不出来就不猜，把原始错误
+                # 抛出去（它是真异常，不是幂等命中）。
+                raise
+            log_print(
+                f"AI 分析：同一份输入已有活动运行（run={holder.id}，"
+                f"{holder.target_type}:{holder.target_key or holder.target_id}），"
+                f"本次不重复发起（target={target_type}:{target_key or target_id}）",
+                "AI",
+                force=True,
+            )
+            raise ActiveAnalysisConflict(holder) from None
+    # 循环里每一条分支都已经 return 或 raise，走到这里说明上面的控制流被改坏了。
+    # 用 RuntimeError 而不是 assert：`python -O` 会把 assert 整句剥掉。
+    raise RuntimeError("_create_run：重试路径没有收敛（这是一处代码缺陷，不是运行期状态）")
 
 
 def _execute_analysis(
@@ -879,6 +1124,9 @@ def end_with_a_terminal_event(events: Iterable[str]) -> Iterable[str]:
     顺带钉住一件更容易被忽略的事：**正常跑完的流不许被这层改动**。它只在异常路径上
     追加事件，成功路径逐字透传（`return` 之后不能再 yield —— 那会给已经收尾的流
     补一个 `error`，把一次成功的分析显示成失败）。
+
+    例外是**闸门**：`_blocked_sse` 发的是 `waiting`（周版本）或 `error`（单提交），
+    两者都是**明确的**收尾 —— 界面知道「这次没有发起」，不会误读成静默断流。
     """
     try:
         yield from events
@@ -886,6 +1134,32 @@ def end_with_a_terminal_event(events: Iterable[str]) -> Iterable[str]:
         message = f"分析中断：{type(exc).__name__}: {exc}"
         log_print(f"❌ AI 分析的 SSE 流异常中断（{message}），已把原因发给界面", "AI", force=True)
         yield _sse_event("error", {"message": message})
+
+
+def _blocked_sse(target_type: str, *, reason: str, message: str, run_id=None) -> str:
+    """「这一次**没有**发起分析」的一个 SSE 事件。
+
+    ## 为什么两条路用不同的事件名
+
+    周版本那两份抽屉（`weekly_version_diff.html` / `merged_project_view.html`）认识
+    `waiting`：它能把「等待同步」与「已经有一次在跑」分开说，后者还要把按钮**保持**
+    禁用、并附着到那一次运行上。单提交那份抽屉（`commit_diff_new.html`）不在这一版的
+    改动范围内，而它的 `error` 分支已经能如实说「未开始 / 分析没有发起，没有产生消耗」
+    —— 给它发 `waiting` 只会变成一句「与服务器的连接中断了」，那是假话。
+
+    两种都是**明确的**（都不静默），差别只是收件人认哪一种。
+    """
+    if target_type == "weekly":
+        return _sse_event("waiting", {"reason": reason, "message": message, "run_id": run_id})
+    return _sse_event("error", {"message": message})
+
+
+def _already_running_message(run: AiAnalysisRun) -> str:
+    return (
+        f"这个目标已经有一次分析在进行中（运行 #{run.id}，"
+        f"开始于 {_created_at_display(run)}），本次没有重复发起 —— "
+        "重复发起会再花一次钱。"
+    )
 
 
 def stream_commit_analysis(commit_id: int, user_label: str = "") -> Iterable[str]:
@@ -916,16 +1190,26 @@ def stream_commit_analysis(commit_id: int, user_label: str = "") -> Iterable[str
         return
 
     payload = build_commit_payload(commit_id)
-    run = _create_run(
-        project_id=project_id,
-        target_type="commit",
-        target_id=commit_id,
-        target_key=None,
-        response_mode="streaming",
-        scope="full",
-        trigger_source="manual",
-        payload=payload,
-    )
+    try:
+        run = _create_run(
+            project_id=project_id,
+            target_type="commit",
+            target_id=commit_id,
+            target_key=None,
+            response_mode="streaming",
+            scope="full",
+            trigger_source="manual",
+            payload=payload,
+        )
+    except ActiveAnalysisConflict as conflict:
+        # 同一个提交已经在跑（连按两次、或另一个标签页先按了）：**不重复发起**。
+        # 这条路上没有「附着上去」这一步 —— 那份抽屉不在这一版的改动范围内，
+        # 而它的 `error` 分支会如实说「分析没有发起，没有产生消耗」。
+        yield _blocked_sse(
+            "commit", reason="already_running",
+            message=_already_running_message(conflict.run), run_id=conflict.run.id,
+        )
+        return
     # **开跑之前**先把运行号发出去：界面要按它轮询「跑到第几轮、现在超了没」
     # （`/ai-analysis/runs/<id>/progress`），而分析是阻塞跑的 —— 等结束再给号，
     # 那个提示就只能在跑完之后才可能出现，也就没有意义了。
@@ -982,16 +1266,57 @@ def stream_weekly_analysis(
         return
 
     group_key = payload["group"]["key"]
-    run = _create_run(
-        project_id=project_id,
-        target_type="weekly",
-        target_id=config_id,
-        target_key=group_key,
-        response_mode="streaming",
-        scope=payload.get("scope", "full"),
-        trigger_source=trigger_source,
-        payload=payload,
+    # 同步闸门（手工·周版本）。与后台路径那一道**同一个判据、同一份实现**：
+    # `weekly_sync_in_flight(group_config_ids(config))` 判的是**整批**仓库的同步，
+    # 因为变更清单来自这一批全部仓库的缓存行 —— 只看自己那一个仓库的同步，另一个
+    # 仓库还在写的时候照样会漏文件，而漏文件是**静默**的（提示词里的「共 N 个文件」
+    # 跟着变小，模型与读报告的人都以为那是全量）。实测那次：run 13 建立时，同组
+    # config 2 的 weekly_sync 任务正 processing。
+    #
+    # 位置与预算闸门同理：在缓存复用之后（回放一份已有结论不花钱，不该被拦）、在
+    # `_create_run` **之前**（建了 run 再跳过会留下一条零消耗运行，用量面板上还看不出
+    # 它是被闸门挡下的）。
+    #
+    # **不许静默失败，也不许装作开始分析**：装作开始的后果是徽章变成「分析中」、
+    # 用户以为钱已经花了。发一个 `waiting` 事件，页面说「等待 Diff 同步完成」。
+    sync_reason = weekly_sync_in_flight(
+        group_config_ids(db.session.get(WeeklyVersionConfig, config_id))
     )
+    if sync_reason:
+        log_print(
+            f"周版本手工分析推迟（sync_in_flight）: config_id={config_id} —— {sync_reason}",
+            "AI",
+            force=True,
+        )
+        yield _blocked_sse(
+            "weekly",
+            reason="sync_in_flight",
+            message=(
+                f"等待 Diff 同步完成后再分析 —— {sync_reason}。"
+                "本次没有发起分析，也没有产生任何消耗（一个模型请求都没有发出去）。"
+            ),
+        )
+        return
+
+    try:
+        run = _create_run(
+            project_id=project_id,
+            target_type="weekly",
+            target_id=config_id,
+            target_key=group_key,
+            response_mode="streaming",
+            scope=payload.get("scope", "full"),
+            trigger_source=trigger_source,
+            payload=payload,
+        )
+    except ActiveAnalysisConflict as conflict:
+        # 同一目标 + 同一份输入已经有一条活动运行（**数据库**的唯一约束拦下的）。
+        # 把运行号交出去：界面附着到那一次上继续看它的进度与结论，而不是自己再跑一遍。
+        yield _blocked_sse(
+            "weekly", reason="already_running",
+            message=_already_running_message(conflict.run), run_id=conflict.run.id,
+        )
+        return
     # 与单提交那条同理：运行号必须在**开跑之前**给出去，界面才能一边跑一边问进度。
     yield _sse_event("run", {"run_id": run.id})
 
@@ -1074,16 +1399,33 @@ def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None
         return {"status": "skipped", "reason": "missing_api_key"}
 
     group_key = payload["group"]["key"]
-    run = _create_run(
-        project_id=project_id,
-        target_type="weekly",
-        target_id=config_id,
-        target_key=group_key,
-        response_mode="blocking",
-        scope=payload.get("scope", "full"),
-        trigger_source="scheduled",
-        payload=payload,
-    )
+    try:
+        run = _create_run(
+            project_id=project_id,
+            target_type="weekly",
+            target_id=config_id,
+            target_key=group_key,
+            response_mode="blocking",
+            scope=payload.get("scope", "full"),
+            trigger_source="scheduled",
+            payload=payload,
+        )
+    except ActiveAnalysisConflict as conflict:
+        # 手工那一次正拿着这份输入的认领（实测里那条：「手工运行结束时，同一分组的
+        # 后台 AI 任务仍在 pending；没有数据库幂等键阻止它再跑一次」）。
+        # **跳过且不推进水位线**：水位线不动，下一个调度周期会重新排队 —— 与上面
+        # 同步闸门那道同一个口径（推进了就变成「跳过这一次，这一周都不再尝试」）。
+        log_print(
+            f"周版本自动分析推迟（already_running）: config_id={config_id} "
+            f"—— 已有活动运行 run={conflict.run.id}",
+            "AI",
+            force=True,
+        )
+        return {
+            "status": "skipped",
+            "reason": "already_running",
+            "message": _already_running_message(conflict.run),
+        }
 
     result = _execute_analysis(
         run,
@@ -1095,6 +1437,10 @@ def run_weekly_analysis_background(config_id: int, task_id: Optional[int] = None
     )
 
     _update_weekly_state(payload, run, state, engine_status=result.get("status"))
+    # **这里的二态是有意的，不要顺手改成三态。** 它报的是「这个**后台任务**成没成」，
+    # 收件人 `task_worker_task_handlers` 只认 `succeeded` / `skipped`，其余一律落
+    # `failed` —— 把 `degraded` 原样传出去会让每一次降级分析都变成一条失败任务。
+    # 「这次交付降级了没有」记在 `run.status` / `run.degradation` 上（见 `_persist_outcome`）。
     return {
         "status": "succeeded" if result.get("status") != "failed" else "failed",
         "run_id": run.id,
@@ -1116,11 +1462,11 @@ def _update_weekly_state(
     一次没跑完的分析如果把它推到当前时刻，那批变更就被整体判成「已看过」——
     下一次分析直接返回 no_change 静默跳过，用户再点多少次都跑不动。
 
-    这里刻意**不看 `run.status`**：`_persist_outcome` 把 `degraded`（降级但有报告，
-    例如「上下文索取额度用尽，基于已有证据出结论」）也存成 `"succeeded"`，所以
-    `run.status` 分不出「跑完了」与「没跑完就出结论」。而 degraded 恰恰是水位线
-    最不该推进的那一类：线上有一次 767 个文件里有 748 个 `.lua` 的 diff 根本没读到，
-    却被标成「已分析」，增量从此只看得到水位线之后的新文件。
+    这里刻意**不看 `run.status`**：`run.status` 的语义是「这次**交付**是什么形态」
+    （succeeded / degraded / failed，见 `_persist_outcome`），而水位线问的是
+    「模型这次**读全了没有**」—— 两把尺子。降级（例如「上下文索取额度用尽，基于已有
+    证据出结论」）恰恰是最不该推进水位线的那一类：线上有一次 767 个文件里有 748 个
+    `.lua` 的 diff 根本没读到，却被标成「已分析」，增量从此只看得到水位线之后的新文件。
 
     判据用引擎侧的 `outcome.status`（`STATUS_SUCCEEDED` 才推进），
     所以这是个**必填的关键字参数** —— 将来新增调用点时，忘了传会直接报错，
@@ -1231,16 +1577,34 @@ STALE_REASON_INTERRUPTED = "interrupted"
 
 
 def _latest_concluded_run(conditions) -> Optional[AiAnalysisRun]:
-    """该目标最近一条**真的有结论**的成功记录。**刻意不看溯源。**
+    """该目标最近一条**真的有结论**的运行。**刻意不看溯源。**
 
     溯源自（提示词 / skill / 规则 / 模型的版本号）只该决定「这份结论能不能拿来跳过
     重跑」—— 那是省一次调用的事；不该决定「这份结论还看不看得到」—— 那是用户以为
     自己的分析白做了的事。两者混用一把尺子的后果已经出现过：改过 `prompt.py` 或
     `SKILL.md` 之后，所有历史结论在界面上一起变成「未分析」，而结论一直躺在库里。
+
+    ## 「有结论」= succeeded 或 degraded
+
+    `run.status` 回答的是「这次**交付**是什么形态」：`degraded` = 有结论但浅（有报告
+    正文、有结构化结论形态），**与 succeeded 同等对待**；`failed` 才是没有结论。写入侧
+    已经原生区分三态，这里若不跟着放宽，降级运行在 `/latest` 上整条看不见 —— 界面拿到
+    「没有结果」还会去自动开跑一次（**再花一次钱**）。
+
+    ## 这一条**必须**和 `run_cache_source._is_run_fresh` 一起改
+
+    `_read_latest_result` 第 1 步用 `_is_run_fresh` 判「最新那条能不能直接用」，第 3 步
+    才退到这里。只放宽这一处的话：第 1 步仍判不可用，第 3 步又命中**同一条**记录，于是
+    `concluded.id == run.id` 成立 → 判成 `STALE_REASON_RULES_CHANGED` → 界面对用户说
+    「该结论由旧版评审规程产出（提示词/规则/模型已更新）」。那是一句**假话** ——
+    提示词一个字都没改，变的是我们把 degraded 写进了 `status` 列。
     """
     run = (
         AiAnalysisRun.query.filter(*conditions)
-        .filter(AiAnalysisRun.status == "succeeded")
+        # `degraded` 也是「有结论」：它跑完了、有报告正文、有结构化结论形态，只是浅。
+        # `run.status` 回答的是**交付形态**，不是「模型读全了没有」（那看引擎状态）。
+        # 见 `run_cache_source.CONCLUDED_STATUSES`，以及本函数 docstring 里「必须一起改」那段。
+        .filter(AiAnalysisRun.status.in_(CONCLUDED_STATUSES))
         .order_by(AiAnalysisRun.created_at.desc())
         .first()
     )
