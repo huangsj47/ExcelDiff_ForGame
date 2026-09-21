@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -1065,9 +1065,12 @@ def create_weekly_sync_task(config_id, auto_commit=True):
       （唯一那条被当成超时重置了）。手动分析走请求线程，不受影响，所以这个病一直
       没在界面上暴露出来。
 
-    把 `processing` 一起纳入去重之后，同步就不会在自己跑的时候再给自己排一条：一条跑完
-    到下一个 tick 之间队列里没有优先级 3，低优先级的任务自然轮得到。代价是同步不再
-    「背靠背连跑」，间隔变成「上一轮跑完 + 最多一个 tick」，这类后台预热本来就该如此。
+    把 `processing` 一起纳入去重之后，一个配置同时只会有**一条**同步在排队或执行（原先
+    可以是「一条在跑 + 一条在等」）。这压住的是队列**深度**，`p=5` 的任务因此排得更靠前 ——
+    但**它自己不足以解除饿死**：一条带改动的同步要跑 4~5 分钟，而调度器每 2 分钟就补一条，
+    两个配置就能让队列永不空（实测重启后 `auto_sync` 与 27 条 `weekly_excel_cache` 从
+    06:10 一直挂到第二天；那一轮排空只是因为当周范围里暂时没有新提交，同步退化成秒级）。
+    真正给低优先级任务留窗口的是 `_starvation_yield_note`：有人等太久时本轮不再补同步。
     """
     try:
         existing_task = _BackgroundTask.query.filter(
@@ -1141,6 +1144,50 @@ def create_weekly_sync_task(config_id, auto_commit=True):
         return None
 
 
+# 「低优先级任务等了多久就算被饿死」。单 worker + 每 2 分钟补一条的 `weekly_sync`
+# （优先级 3）构成的是一条**永不空**的队列：一条带改动的同步要跑 4~5 分钟，而调度器每
+# 2 分钟就补一条，于是 worker 每次醒来都有优先级 3 可取 —— 优先级 ≥5 的任务
+# （`auto_sync` / `weekly_excel_cache` / `weekly_ai_analysis`）**无限等待**：不报错、
+# 不失败，只是永远「排队中」。实测过 19 小时（`auto_sync` 与 27 条 `weekly_excel_cache`
+# 从 06:10 一直挂到第二天重启）。
+#
+# 这个阈值就是给它们留的窗口：只要有非同步任务等过了这么久，本轮就不再补新同步，让
+# worker 把积压消化掉；消化完（没有任务再等过阈值）同步自然恢复。
+#
+# 为什么是**生产侧让步**而不是让队列按等待时长老化：老化要动 `TaskWrapper.__lt__` 或
+# 换掉 `queue.PriorityQueue` 的取值方式，影响的就不只是这一处了；而这里要的只是
+# 「别让高优先级的来源无限补给」，判据放在唯一那个来源上最清楚。
+STARVED_TASK_WAIT_SECONDS = 900
+
+
+def _starvation_yield_note(now_utc_naive, *, limit=3):
+    """本轮该让路吗；该就让返回那句日志，不该返回 ""（见上面常量的注释）。
+
+    **`weekly_sync` 必须排除**：它正是那个高频来源，算进来就变成「因为有同步在排队，
+    所以不再排同步」—— 队列一旦积压一条就永远不再补，同步直接停摆。
+    `created_at` 是 naive-UTC，与 `now_utc_naive` 同口径（混用会把年龄算错 8 小时）。
+    """
+    cutoff = now_utc_naive - timedelta(seconds=STARVED_TASK_WAIT_SECONDS)
+    starved = _BackgroundTask.query.filter(
+        _BackgroundTask.status == 'pending',
+        _BackgroundTask.task_type != 'weekly_sync',
+        _BackgroundTask.created_at <= cutoff,
+    ).order_by(_BackgroundTask.created_at.asc()).limit(limit).all()
+    if not starved:
+        return ""
+    oldest = starved[0]
+    waited_minutes = int(
+        (now_utc_naive - (oldest.created_at or now_utc_naive)).total_seconds() // 60
+    )
+    kinds = ", ".join(
+        f"{getattr(task, 'task_type', '?')}#{getattr(task, 'id', '?')}" for task in starved
+    )
+    return (
+        f"⏸️ 本轮不为周版本补新的同步任务（队列里有等待超过 "
+        f"{STARVED_TASK_WAIT_SECONDS // 60} 分钟的任务，最久的等了 {waited_minutes} 分钟: {kinds}）"
+    )
+
+
 def schedule_weekly_sync_tasks():
     """调度周版本同步任务"""
     try:
@@ -1148,6 +1195,9 @@ def schedule_weekly_sync_tasks():
             active_configs = _WeeklyVersionConfig.query.filter_by(
                 is_active=True, auto_sync=True
             ).all()
+            # 本轮要不要**让路**（见 `_starvation_yield_note`）：一次 tick 算一次，多个配置
+            # 共用同一个结论，日志也就只出一条。
+            starvation_yield = None
             for config in active_configs:
                 # ⚠️ 这里有两个不同口径的「现在」，混用会出静默错误：
                 #   * config.end_time 是**北京墙钟**（用户在 datetime-local 里填的）
@@ -1174,7 +1224,12 @@ def schedule_weekly_sync_tasks():
                     log_print(f"周版本配置已完成: {config.name}", 'WEEKLY')
                     continue
                 if config.status == 'active':
-                    create_weekly_sync_task(config.id)
+                    if starvation_yield is None:
+                        starvation_yield = _starvation_yield_note(now_utc_naive)
+                        if starvation_yield:
+                            log_print(starvation_yield, 'WEEKLY', force=True)
+                    if not starvation_yield:
+                        create_weekly_sync_task(config.id)
             log_print(f"检查了 {len(active_configs)} 个周版本配置", 'WEEKLY')
     except SQLAlchemyError as e:
         _db.session.rollback()

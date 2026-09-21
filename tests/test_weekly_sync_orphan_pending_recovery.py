@@ -448,6 +448,19 @@ class _ConfigQuery:
         return list(self._configs)
 
 
+class _NoRowsQuery:
+    """「一行都不匹配」的查询：链式调用照收，`all()` 返回空。"""
+
+    def order_by(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, *_args, **_kwargs):
+        return self
+
+    def all(self):
+        return []
+
+
 class _TaskRowsQuery:
     def __init__(self, rows):
         self._rows = rows
@@ -455,8 +468,42 @@ class _TaskRowsQuery:
     def filter_by(self, **_kwargs):
         return self
 
+    def filter(self, *_args, **_kwargs):
+        """给「让路判据」那条查询用（`status='pending'` 且**不是** weekly_sync）。
+
+        本用例的行全是 weekly_sync —— 按真实语义一条都不该匹配，所以返回空集合。
+        但这个方法**必须存在**：缺了它 `_starvation_yield_note` 会抛 AttributeError，
+        被调度器的 except 吞成「一行日志 + 什么都不做」，这条用例就变成假红。
+        """
+        return _NoRowsQuery()
+
     def all(self):
         return list(self._rows)
+
+
+class _FilterColumn:
+    """模型列的占位：`_starvation_yield_note` 会读 `_BackgroundTask.status/task_type/created_at`。
+
+    桩不解释判据，所以 `==` / `in_()` / `<=` 一律为真 —— 判据本身由真库用例
+    （`tests/test_weekly_sync_dedup_blocks_starvation.py`）负责；这里只要求**列存在**，
+    否则会在建查询条件时就抛 AttributeError，被调度器的 except 吞成「什么都不做」。
+    """
+
+    def __eq__(self, _other):
+        return True
+
+    def __le__(self, _other):
+        # 判据里还有一句 `created_at <= cutoff`，另一头是真的 datetime。
+        return True
+
+    def in_(self, _values):
+        return True
+
+    def asc(self):
+        return self
+
+    def desc(self):
+        return self
 
 
 def _run_scheduler(monkeypatch, config, stale_rows):
@@ -465,7 +512,12 @@ def _run_scheduler(monkeypatch, config, stale_rows):
     app = flask.Flask("weekly_scheduler_probe")
     monkeypatch.setattr(worker, "_app", app, raising=False)
     monkeypatch.setattr(worker, "_WeeklyVersionConfig", SimpleNamespace(query=_ConfigQuery([config])))
-    monkeypatch.setattr(worker, "_BackgroundTask", SimpleNamespace(query=_TaskRowsQuery(stale_rows)))
+    monkeypatch.setattr(worker, "_BackgroundTask", SimpleNamespace(
+        query=_TaskRowsQuery(stale_rows),
+        status=_FilterColumn(),
+        task_type=_FilterColumn(),
+        created_at=_FilterColumn(),
+    ))
     monkeypatch.setattr(worker, "_db", SimpleNamespace(session=SimpleNamespace(
         commit=lambda: None, rollback=lambda: None,
     )))

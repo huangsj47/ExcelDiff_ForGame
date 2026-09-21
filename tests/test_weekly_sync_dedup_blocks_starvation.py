@@ -30,7 +30,7 @@ import pytest
 
 import services.task_worker_service as worker
 import services.task_worker_weekly_handlers as handlers
-from models import BackgroundTask, db
+from models import BackgroundTask, WeeklyVersionConfig, db
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +39,32 @@ def _clean_enqueue_ledger():
     handlers._enqueued_weekly_sync_task_ids.clear()
     yield
     handlers._enqueued_weekly_sync_task_ids.clear()
+
+
+# 测试库是会话级共用的，没有逐用例重置。而**让路判据是按全表判定的**
+# （「有没有非同步任务等太久」），所以上一个用例造出来的积压行会被下一个用例看到 ——
+# 这一条是真栽过的：「刚等 1 分钟不该让路」那条用例失败，原因却是前一个用例留下的
+# 20 分钟前的那一行。造出来的东西必须自己收干净。
+_CREATED_TASK_IDS: list = []
+_CREATED_CONFIG_IDS: list = []
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_rows_this_file_creates(app):
+    yield
+    with app.app_context():
+        if _CREATED_TASK_IDS:
+            BackgroundTask.query.filter(BackgroundTask.id.in_(list(_CREATED_TASK_IDS))).delete(
+                synchronize_session=False
+            )
+            _CREATED_TASK_IDS.clear()
+        if _CREATED_CONFIG_IDS:
+            # 别留下活跃配置：调度器会为**库里所有**活跃配置建任务，留给后面的用例就是污染。
+            WeeklyVersionConfig.query.filter(
+                WeeklyVersionConfig.id.in_(list(_CREATED_CONFIG_IDS))
+            ).update({"is_active": False}, synchronize_session=False)
+            _CREATED_CONFIG_IDS.clear()
+        db.session.commit()
 
 
 @pytest.fixture()
@@ -51,6 +77,10 @@ def single_mode(monkeypatch):
     monkeypatch.setattr(worker, "background_task_queue", SimpleNamespace(put=enqueued.append))
     monkeypatch.setattr(worker, "TaskWrapper", lambda priority, counter, data: data)
     return enqueued
+
+
+def _uid(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 
 def _config_id() -> int:
@@ -68,6 +98,7 @@ def _add_task(config_id, status):
     )
     db.session.add(task)
     db.session.commit()
+    _CREATED_TASK_IDS.append(task.id)
     return task
 
 
@@ -212,3 +243,143 @@ def app():
     with app_module.app.app_context():
         app_module.create_tables()
     return app_module.app
+
+
+# ===========================================================================
+#  二、生产侧的让步：队列里有人等太久时，**不要再补新的同步**
+#
+#  去重（上面那一节）只能把队列压到「每个配置一条」，压不到空 —— 一条带改动的同步要跑
+#  4~5 分钟，而调度器每 2 分钟就补一条，所以只要两个配置就能让队列**永不空**：worker 每次
+#  醒来都有优先级 3 可取，优先级 ≥5 的任务无限等待。
+#
+#  判据因此放在唯一那个高频来源上：有非同步任务等过阈值，本轮就不补同步，让 worker 把积压
+#  消化掉。下面这几条同时钉住**两个方向** —— 少了任一条，要么饿死复发，要么同步停摆。
+# ===========================================================================
+def _seed_active_config():
+    """一个活跃的周版本配置（窗口没结束 —— 否则调度器会先把它置 completed 再 continue）。"""
+    from models import Project, Repository, WeeklyVersionConfig
+    from utils.timezone_utils import now_beijing
+
+    project = Project(code=_uid("P"), name=_uid("proj"), department="QA")
+    db.session.add(project)
+    db.session.flush()
+    repo = Repository(
+        project_id=project.id,
+        name=_uid("repo"),
+        type="git",
+        url=f"https://example.com/{_uid('r')}.git",
+        branch="main",
+        clone_status="completed",
+    )
+    db.session.add(repo)
+    db.session.flush()
+    cfg = WeeklyVersionConfig(
+        project_id=project.id,
+        repository_id=repo.id,
+        name=_uid("weekly"),
+        branch="main",
+        start_time=now_beijing().replace(tzinfo=None) - timedelta(days=3),
+        end_time=now_beijing().replace(tzinfo=None) + timedelta(days=3),
+        is_active=True,
+        auto_sync=True,
+        status="active",
+    )
+    db.session.add(cfg)
+    db.session.commit()
+    _CREATED_CONFIG_IDS.append(cfg.id)
+    return cfg
+
+
+def _add_waiting(task_type, *, minutes_ago, status='pending', commit_id=None):
+    task = BackgroundTask(
+        task_type=task_type,
+        repository_id=None,
+        commit_id=commit_id,
+        priority=5 if task_type != 'weekly_ai_analysis' else 6,
+        status=status,
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=minutes_ago),
+    )
+    db.session.add(task)
+    db.session.commit()
+    _CREATED_TASK_IDS.append(task.id)
+    return task
+
+
+def _run_scheduler(monkeypatch):
+    """跑一次**真实的** `schedule_weekly_sync_tasks`，只把「建任务」换成记录器。"""
+    import app as app_module
+
+    created = []
+    logs = []
+    monkeypatch.setattr(worker, "_app", app_module.app)
+    monkeypatch.setattr(worker, "create_weekly_sync_task", lambda config_id: created.append(config_id))
+    monkeypatch.setattr(worker, "log_print", lambda msg, *a, **k: logs.append(str(msg)))
+    with app_module.app.app_context():
+        worker.schedule_weekly_sync_tasks()
+    return created, logs
+
+
+def test_a_starved_lower_priority_task_makes_the_scheduler_yield(app, monkeypatch):
+    """有非同步任务等过阈值 → 本轮**不补新同步**。
+
+    变红 = 那条 `auto_sync` / `weekly_excel_cache` 又会无限「排队中」（实测 19 小时）。
+    """
+    with app.app_context():
+        cfg = _seed_active_config()
+        _add_waiting('weekly_excel_cache', minutes_ago=20)
+
+        created, logs = _run_scheduler(monkeypatch)
+
+        assert cfg.id not in created, f"有人等了 20 分钟，调度器还在补同步：{created}"
+        assert any("不为周版本补新的同步任务" in msg for msg in logs), (
+            f"让路时没有留下日志 —— 静默不排队与「调度坏了」分不开：{logs[-3:]}"
+        )
+
+
+def test_a_fresh_lower_priority_task_does_not_make_the_scheduler_yield(app, monkeypatch):
+    """**反自检**：刚排上队的低优先级任务不算饿死 —— 否则每个 tick 都让路，同步就停了。"""
+    with app.app_context():
+        cfg = _seed_active_config()
+        _add_waiting('weekly_excel_cache', minutes_ago=1)
+
+        created, logs = _run_scheduler(monkeypatch)
+
+        assert cfg.id in created, (
+            f"才等了 1 分钟就被当成饿死，同步被无谓地停掉了；实际建的：{created}；日志：{logs[-3:]}"
+        )
+
+
+def test_a_starved_sync_task_does_not_stop_syncing(app, monkeypatch):
+    """**关键反向**：`weekly_sync` 自己等再久都不算「被饿死」。
+
+    它正是那个高频来源。把它算进来就变成「因为有同步在排队，所以不再排同步」——
+    队列一旦积压一条就永远不再补，同步直接停摆（比饿死更难查：连日志都是「正常让路」）。
+    """
+    with app.app_context():
+        cfg = _seed_active_config()
+        _add_waiting('weekly_sync', minutes_ago=30, commit_id=str(cfg.id))
+
+        created, logs = _run_scheduler(monkeypatch)
+
+        assert cfg.id in created, (
+            f"同步任务等久了就再也不补新的 —— 同步会直接停摆；实际建的：{created}；日志：{logs[-3:]}"
+        )
+
+
+def test_yielding_still_resets_a_stale_pending_sync(app, monkeypatch):
+    """让路的只是「建新任务」这一步，**卡死 pending 的清理照做**。
+
+    清理整段如果被让路一起跳过，那些行就会永久停在 pending（这正是上一轮修过的病）。
+    """
+    with app.app_context():
+        cfg = _seed_active_config()
+        _add_waiting('weekly_excel_cache', minutes_ago=20)
+        stale = _add_waiting('weekly_sync', minutes_ago=30, commit_id=str(cfg.id))
+        stale_id = stale.id
+
+        _run_scheduler(monkeypatch)
+
+        db.session.expire_all()
+        row = db.session.get(BackgroundTask, stale_id)
+        assert row.status == 'failed', "让路时把卡死 pending 的清理也跳过了"
+        assert row.error_message, "重置时没有写入原因"
