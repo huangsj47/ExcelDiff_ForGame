@@ -43,6 +43,7 @@ import pytest
 
 from app import app as flask_app
 from app import create_tables, db
+from utils.timezone_utils import now_beijing
 from models import Project
 from models.ai_analysis import AiAnalysisRun, AiUsageStatistics
 from services.ai import run_progress
@@ -524,12 +525,20 @@ class TestTheFilterScopeMovesBothSides:
             assert _entry(body)["running_runs"] == 1
 
     def test_a_time_window_that_excludes_the_active_run_also_drops_the_note(self):
-        """时间窗把那条在途运行排除掉之后，活动任务也要跟着消失 —— 提示不许残留。"""
+        """时间窗把那条在途运行排除掉之后，活动任务也要跟着消失 —— 提示不许残留。
+
+        `created_at` 存的是 naive UTC，而筛选窗按**北京日历**切（`resolve_window`），
+        所以这条记录要取「北京当天**正午**」再换算成 UTC 才算落在窗口正中。
+        直接写 `_now() - 10 天` 是**按时钟飘的**：北京 00:00~08:00 之间 UTC 日期比北京
+        晚一天，那条记录会掉到窗口外，用例只在白天跑得过（实测 01:2x 复现）。
+        """
         with flask_app.app_context():
             create_tables()
             project_id = _project()
             _price_the_project(project_id)
-            old = _now() - timedelta(days=10)
+            beijing_day = (now_beijing() - timedelta(days=10)).date()
+            old = datetime(beijing_day.year, beijing_day.month, beijing_day.day, 12)
+            old -= timedelta(hours=8)
             _run(project_id, created_at=old)
             _run(project_id, status="running", tokens_input=None,
                  tokens_output=None, cache_read=None)
@@ -543,8 +552,8 @@ class TestTheFilterScopeMovesBothSides:
                     {
                         "project": str(project_id),
                         "range": "custom",
-                        "from": old.date().isoformat(),
-                        "to": old.date().isoformat(),
+                        "from": beijing_day.isoformat(),
+                        "to": beijing_day.isoformat(),
                     }
                 ),
             )
