@@ -34,6 +34,7 @@ from models.ai_analysis import (
     MODE_FULL,
 )
 from models.ai_analysis.project_config import (
+    DEFAULT_AUTO_WEEKLY_ENABLED,
     DEFAULT_MAX_FILES_PER_RUN,
 )
 from services.ai.analysis_budget import budget_gate_reason, early_stop_guard
@@ -1464,7 +1465,12 @@ def run_weekly_analysis_background(
         # 例如被同步闸门推迟后由登记唤醒的那一次）不受它管 —— 同一个用户动作不该因为
         # 换了一条执行路径就被否掉。P0-01 之后抽屉里那个按钮走的就是这条（`POST /jobs`），
         # 它的触发来源是 `manual`。
-        if trigger_source != "manual" and not project_cfg.get("auto_weekly_enabled", True):
+        # 默认值取常量、不写字面量：`get_project_analysis_config` 总会带上这个键
+        # （`row.resolved()` 或 `FIELD_DEFAULTS`），所以今天这个兜底**不会触发**；
+        # 但它一旦写成与常量相反的字面量，将来某条路径真的缺键时就会静默走反默认。
+        if trigger_source != "manual" and not project_cfg.get(
+            "auto_weekly_enabled", DEFAULT_AUTO_WEEKLY_ENABLED
+        ):
             log_print(
                 f"周版本自动分析已关闭，跳过已排队的任务: config_id={config_id}", "AI", force=True,
             )

@@ -269,7 +269,16 @@ def _block_every_gate(monkeypatch, *, reused: bool):
     test_ai_usage_filters_and_budget，间隔/输入指纹见 test_weekly_ai_auto_trigger_gate。）
     """
     built: list = []
-    monkeypatch.setattr(worker, "get_project_analysis_config", lambda _pid: {})
+    # **配置要显式给，不能返回 `{}`。** 这一行原本是 `lambda _pid: {}`，而调度器读开关
+    # 时带兜底（`project_cfg.get("auto_weekly_enabled", DEFAULT_AUTO_WEEKLY_ENABLED)`）——
+    # 于是这一组用例真正的行为取决于**那个兜底值**，不是这里。2026-09-22 把默认值从
+    # 「开」改成「关」之后，它们全部停在第一道闸后面，报出来的失败是「记账不准」，
+    # 而真正的原因是「这组用例没有声明自己的前提」。
+    # 它想说的本来就是「闸门都放开，走到建任务那一步」，那就把开关明说成开的。
+    monkeypatch.setattr(
+        worker, "get_project_analysis_config",
+        lambda _pid: {"auto_weekly_enabled": True},
+    )
     monkeypatch.setattr(worker, "has_weekly_changes", lambda *_a, **_k: True)
     monkeypatch.setattr(worker, "snapshot_already_analyzed", lambda *_a, **_k: False)
     monkeypatch.setattr(worker, "weekly_sync_in_flight", lambda *_a, **_k: "")

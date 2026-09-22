@@ -37,6 +37,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_BUDGET_PERIOD,
     DEFAULT_BUDGET_TOKEN_LIMIT,
     DEFAULT_MAX_ANALYSIS_ROUNDS,
+    DEFAULT_AUTO_WEEKLY_ENABLED,
     DEFAULT_MAX_ANOMALIES_PER_RUN,
     DEFAULT_MAX_FILES_PER_RUN,
     DEFAULT_MAX_TOOL_REQUESTS,
@@ -164,10 +165,17 @@ FIELD_RULES: Mapping[str, FieldRule] = {
 }
 
 # 界面上显示默认值时要用的值（与模型层的列默认值同源）。
+#
+# ★ 这里**必须引用常量**，不能再写一个字面量。`auto_weekly_enabled` 曾经在这份表里
+# 写死 `True`，而模型层的常量是权威 —— 结果是「项目从没配过配置行」这条**最常见的路径**
+# 走的是这份副本（`project_config_source.get_project_analysis_config` 在 `row is None`
+# 时用 `dict(FIELD_DEFAULTS)`），于是改模型层的默认值对它**毫无影响**：
+# 2026-09-22 把默认改成「关」之后，`tests/test_weekly_ai_auto_trigger_gate.py` 里
+# 「没配过的项目」那条用例照样读出「开」——断言没红，因为真相在另一份副本里。
 FIELD_DEFAULTS: Mapping[str, Any] = {
     "api_base_url": "",
     "api_model": "",
-    "auto_weekly_enabled": True,
+    "auto_weekly_enabled": DEFAULT_AUTO_WEEKLY_ENABLED,
     "weekly_interval_minutes": DEFAULT_WEEKLY_INTERVAL_MINUTES,
     "max_files_per_run": DEFAULT_MAX_FILES_PER_RUN,
     "max_analysis_rounds": DEFAULT_MAX_ANALYSIS_ROUNDS,

@@ -49,6 +49,7 @@ from services.ai.weekly_sync_gate import (
     weekly_sync_in_flight,
     weekly_sync_stuck_note,
 )
+from services.ai_analysis_service import update_project_analysis_config
 
 
 def _uid(prefix: str) -> str:
@@ -89,6 +90,14 @@ def _seed(*, sync_status: str = "pending", sync_on: str = "primary", age_minutes
         )
         db.session.add(sync)
         db.session.commit()
+        # **显式打开自动分析开关。** 默认值是**关**（2026-09-22 起），而本文件测的是
+        # **同步闸门**的判据 —— 前提是这次分析本来会被放行到闸门那一步。不声明这个前提，
+        # 它们会全部停在「开关关闭」那道更靠前的闸后面，报出来的失败是「闸门没拦住」。
+        # 走 `update_project_analysis_config`（用户点开关走的就是这条），不 monkeypatch。
+        ok, message, errors = update_project_analysis_config(
+            project.id, {"auto_weekly_enabled": True}, updated_by="tester"
+        )
+        assert ok, f"开关没打开，这组用例的前提就不成立：{message} {errors}"
         return {
             "project_id": project.id,
             "config_ids": [cfg.id for cfg in configs],

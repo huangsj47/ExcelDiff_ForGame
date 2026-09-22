@@ -191,12 +191,18 @@ def test_the_gate_does_not_block_a_run_while_the_switch_is_on():
 
 
 def test_a_project_without_a_config_row_keeps_the_documented_default():
-    """没有配置行时按文档默认（开）走 —— 这条钉的是**现状口径**，不是价值判断。
+    """**没有配置行时按默认走「关」** —— 这条钉的是现状口径，不是价值判断。
 
-    `FIELD_DEFAULTS["auto_weekly_enabled"] = True`，所以「从没配过」=「自动分析开着」。
-    界面上这个开关只在项目总览页，写的是那个页面的 `project_id`；若用户关的是另一个
-    项目，承载 config 的项目仍然是默认开。这里把它写成用例，是为了让这个默认值
-    变成**有人看过、改起来会被发现**的东西，而不是埋在两层 `.get(..., True)` 里。
+    2026-09-22 之前默认是**开**（`FIELD_DEFAULTS["auto_weekly_enabled"] = True`），
+    于是「从没配过」=「自动分析开着」。用户要求改成默认关、间隔 2 小时、定时走增量。
+
+    ## 这条用例当天差点没红，原因是「同一口径有两份副本」
+
+    改完 `project_config.DEFAULT_AUTO_WEEKLY_ENABLED = False` 之后它**照样通过** ——
+    因为「没有配置行」这条路读的是 `endpoint_service.FIELD_DEFAULTS` 里**另一份**
+    写死的 `True`（`project_config_source.get_project_analysis_config` 在 `row is None`
+    时用 `dict(FIELD_DEFAULTS)`）。两份副本里改一份，最常见的路径一点没变。
+    现在那份也改成引用常量了，这条用例才真的钉住这个默认值。
     """
     with app.app_context():
         create_tables()
@@ -205,9 +211,94 @@ def test_a_project_without_a_config_row_keeps_the_documented_default():
         resolved = ai_service.get_project_analysis_config(cfg.project_id)
 
         assert resolved["configured"] is False
-        assert resolved["auto_weekly_enabled"] is True
+        assert resolved["auto_weekly_enabled"] is False, (
+            "没配过的项目必须默认「不自动分析」—— 否则它会按默认间隔自己烧钱"
+        )
         outcome = ai_service.run_weekly_analysis_background(cfg.id)
-        assert outcome.get("reason") != "auto_weekly_disabled"
+        # 这条路径是 `trigger_source="scheduled"`（不是手工），所以**应当**被开关挡下。
+        assert outcome.get("reason") == "auto_weekly_disabled", outcome
+
+
+def test_the_scheduling_defaults_have_exactly_one_source():
+    """三个默认值只许有**一份**权威定义 —— 而这条口径今天就有两份副本。
+
+    改默认值那天差点被它骗过去：把 `project_config.DEFAULT_AUTO_WEEKLY_ENABLED` 改成
+    `False` 之后，上一条用例**照样通过** —— 因为「没有配置行」这条路读的是
+    `endpoint_service.FIELD_DEFAULTS` 里**另一份**写死的 `True`
+    （`get_project_analysis_config` 在 `row is None` 时用 `dict(FIELD_DEFAULTS)`）。
+    两份副本只改一份的结果是：最常见的路径一字未变 —— 新装的平台什么都没配过，
+    于是它按默认值自己烧钱，而代码里躺着一个「已经改成关」的常量。
+
+    所以这里断言的不是「默认值等于多少」（那是上一条用例的事），而是**同源**：
+    常量、`FIELD_DEFAULTS`、以及 NULL 行的 `resolved()` 兜底，三者必须是同一个答案。
+    把任意一处改回字面量 `True` / `60`，这条立刻红。
+    """
+    from models.ai_analysis.project_config import (
+        DEFAULT_AUTO_WEEKLY_ENABLED,
+        DEFAULT_WEEKLY_INTERVAL_MINUTES,
+        AiProjectAnalysisConfig,
+    )
+    from services.ai.endpoint_service import FIELD_DEFAULTS
+
+    assert DEFAULT_AUTO_WEEKLY_ENABLED is False
+    assert DEFAULT_WEEKLY_INTERVAL_MINUTES == 120
+    # 副本一：没有配置行时走的那份表。
+    assert FIELD_DEFAULTS["auto_weekly_enabled"] is DEFAULT_AUTO_WEEKLY_ENABLED
+    assert FIELD_DEFAULTS["weekly_interval_minutes"] == DEFAULT_WEEKLY_INTERVAL_MINUTES
+
+    with app.app_context():
+        create_tables()
+        project, _repo, _cfg = _setup_config(auto_weekly=None)
+        # 副本二：有配置行、但列是 NULL（`_migrate_table_columns` 用 `ALTER TABLE
+        # ... ADD COLUMN` 加列**不带 DEFAULT**，所以老库的行就是这个形态）。
+        row = AiProjectAnalysisConfig(
+            project_id=project.id,
+            auto_weekly_enabled=None,
+            weekly_interval_minutes=None,
+        )
+        db.session.add(row)
+        db.session.commit()
+
+        resolved = row.resolved()
+        assert resolved["auto_weekly_enabled"] is DEFAULT_AUTO_WEEKLY_ENABLED, (
+            "NULL 行的兜底与常量不同源 —— 老库里的项目会走另一套默认值"
+        )
+        assert resolved["weekly_interval_minutes"] == DEFAULT_WEEKLY_INTERVAL_MINUTES
+
+
+def test_the_scheduled_path_asks_for_the_incremental_analysis():
+    """定时那条路必须走**增量**（用户 2026-09-22 明确要求）。
+
+    ## 这条口径的全部实现就是「调度器没有替用户选模式」
+
+    执行侧：`requested_mode` 为 `None` ⇒ 增量（`_requests_full_analysis(None)` 是
+    `False`）。调度器建任务时**不传** `requested_mode`，于是任务行上那一列是 NULL、
+    执行侧读到 `None`、走增量 —— 口径落在一个**什么都没写**的地方。
+
+    而「定时就该查全量」是个很顺手的改法：给那个调用点补一个
+    `requested_mode="full"` 就反了，且不会有任何测试变红（全量是能跑通的，只是每次
+    都不看基线、每次都按约 1000 个文件的规模重来）。判据因此必须分两层：**执行侧**
+    （没有模式 = 不是全量）与**调度器调用点**（确实没传模式）。只钉前者是空的 ——
+    调用点被改掉之后那种用例照样绿。
+    """
+    from models.ai_analysis import MODE_FULL
+    from services import task_worker_service
+    from services.ai_analysis_service import _requests_full_analysis
+
+    # 执行侧口径：只有显式 "full" 才算全量，其余（含 None）一律「平台自己裁决」= 增量。
+    assert _requests_full_analysis(None) is False
+    assert _requests_full_analysis(MODE_FULL) is True, "断言失去参照：full 认不出来"
+
+    source = re.sub(
+        r"#[^\n]*", " ", inspect.getsource(task_worker_service.schedule_weekly_ai_analysis_tasks)
+    )
+    calls = re.findall(r"create_weekly_ai_analysis_task\s*\((.*?)\)", source, re.S)
+    assert calls, "找不到建任务的调用点，断言失去参照（函数名变了？）"
+    for args in calls:
+        assert "requested_mode" not in args, (
+            f"调度器替用户选了分析模式（{args.strip()!r}）—— "
+            f"定时必须走增量，口径就是「不传」"
+        )
 
 
 # ==========================================================================

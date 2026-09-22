@@ -104,6 +104,13 @@ def _seed(*, with_cache_row: bool = True, commit_id: str = "c1") -> dict:
                 )
             )
         ai_service.set_project_api_key(project.id, "sk-test", updated_by="tester")
+        # **把自动分析开关显式打开。** 默认值是**关**（2026-09-22 起），而本文件测的是
+        # 「一次分析正在跑时，另一个入口该怎么办」—— 前提是那次分析本来会跑起来。
+        # 不声明这个前提，用例会停在更靠前的「开关关闭」上，报出来是
+        # 「结局不是 already_running」，而真正的原因与幂等无关。
+        ai_service.update_project_analysis_config(
+            project.id, {"auto_weekly_enabled": True}, updated_by="tester"
+        )
         db.session.commit()
         return {"project_id": project.id, "config_id": config.id,
                 "repository_id": repository.id, "group_key": f"g-{config.id}"}

@@ -247,7 +247,7 @@ def advance_weekly_state(
     ## 反方向的担忧（重试风暴）不成立
 
     「不写指纹」不等于「每分钟重试一次」：调度器**先**判 `not_due`
-    （`state.last_triggered_at` + 项目的 `weekly_interval_minutes`，默认 60 分钟），
+    （`state.last_triggered_at` + 项目的 `weekly_interval_minutes`，默认 120 分钟），
     而排队与执行都会推进那个水位线；预算闸门与同步闸门也各自有节流。所以最坏情况是
     **每个分析间隔重试一次**，直到跑成为止 —— 那正是想要的语义。
 

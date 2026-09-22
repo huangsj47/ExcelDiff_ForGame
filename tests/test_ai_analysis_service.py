@@ -52,6 +52,19 @@ def _create_weekly_config(project_id: int, repo: Repository, base_name: str, sta
     )
     db.session.add(cfg)
     db.session.flush()
+    # **把自动分析开关显式打开。** 默认值是**关**（2026-09-22 起），而本文件里
+    # 凡是用到周版本配置的用例，前提都是「这次分析本来会跑起来」——
+    # `run_weekly_analysis_background` 的执行入口要先过这道开关。
+    #
+    # 不显式声明的后果不是「用例报错很吵」，而是**报错指向错的地方**：它们会停在
+    # 「开关关闭」上，于是 `assert outcome["status"] == "failed"` 报的是
+    # 「skipped != failed」—— 看起来像失败记账坏了，其实与被测对象无关。
+    # 这一族踩过同一个坑（见 `test_ai_subagent_wiring._disable_subagents` 的注释）：
+    # **前提要显式声明，不要靠默认值兜。**
+    ok, message, errors = ai_service.update_project_analysis_config(
+        project_id, {"auto_weekly_enabled": True}, updated_by="tester"
+    )
+    assert ok, f"开关没打开，本文件周版本用例的前提就不成立：{message} {errors}"
     return cfg
 
 
@@ -279,7 +292,7 @@ def test_ai_project_analysis_config_update():
 
         config = ai_service.get_project_analysis_config(project.id)
         assert config["configured"] is False
-        assert config["weekly_interval_minutes"] == 60
+        assert config["weekly_interval_minutes"] == 120
         # 界面用的字段元信息从接口来，不在模板里写死。
         assert config["field_schema"]["max_analysis_rounds"]["min"] == 1
         assert config["field_schema"]["max_analysis_rounds"]["max"] == 30

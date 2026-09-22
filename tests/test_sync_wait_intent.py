@@ -1089,6 +1089,15 @@ class TestTheWokenRunIsRecordedAsManual:
 
         seeded = _seed()
         self._stub_pipeline(monkeypatch, seeded)
+        # **开关要显式给成开的。** 「周版本自动分析」默认是**关**（2026-09-22 起），
+        # 而这条用例测的是「`trigger_source` 的默认值」，前提是那次分析真的跑得起来。
+        # 不给的话它停在「开关关闭」那道更靠前的闸后面，报出来是「没有那次运行记录」——
+        # 看起来像 trigger_source 丢了，其实与它无关。
+        # 与下面那条（明说 `False` 来测 manual 豁免）对称。
+        monkeypatch.setattr(
+            ai_service, "get_project_analysis_config",
+            lambda _pid: {"auto_weekly_enabled": True},
+        )
         with flask_app.app_context():
             ai_service.run_weekly_analysis_background(seeded["config_id"])
             run = AiAnalysisRun.query.filter_by(target_key=seeded["group_key"]).first()

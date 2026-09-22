@@ -705,7 +705,9 @@ def test_the_weekly_entry_is_blocked_before_any_request_is_made(monkeypatch):
         repo = _repo(project_id)
         cfg = _weekly_config(project_id, repo.id)
         config_id = cfg.id
-        _configure(project_id, {"budget_token_limit": 10})
+        # **开关显式打开**：默认是「关」（2026-09-22 起），不打开就会停在更靠前的
+        # 「开关关闭」上，而这条用例要验的是**预算闸门的位置**（结局必须是 over_budget）。
+        _configure(project_id, {"budget_token_limit": 10, "auto_weekly_enabled": True})
         _run(project_id, tokens_input=1000, tokens_output=100)
         ai_service.set_project_api_key(project_id, "sk-test", updated_by="tester")
         db.session.commit()

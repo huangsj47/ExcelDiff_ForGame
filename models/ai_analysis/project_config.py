@@ -18,8 +18,12 @@ from ..big_text import BigText
 # 另一件必须记住的事：`_migrate_table_columns` 用 `ALTER TABLE ... ADD COLUMN` 加列，
 # **不会带 DEFAULT 子句**，所以已部署的库里老行的新列是 NULL。因此列的 `default=` 只对
 # 「新建的行」有效，读取时必须用 `resolved()` 兜住 NULL —— 不能假设读出来就是默认值。
-DEFAULT_AUTO_WEEKLY_ENABLED = True
-DEFAULT_WEEKLY_INTERVAL_MINUTES = 60
+DEFAULT_AUTO_WEEKLY_ENABLED = False
+# 60 → 120（2026-09-22，用户要求）。理由不只是「慢一点」：一次周版本分析实测约 20 分钟、
+# 约 ¥3.4（Run 31），而**开关默认是关的**（见上）—— 用户主动打开它时，多数人期待的是
+# 「隔一段时间复查一次」，不是「每小时烧一次」。间隔太短还有个害处：上一轮刚跑完，
+# 变更输入往往一字未变，那一轮大概率被 `snapshot_already_analyzed` 挡掉，白算一次指纹。
+DEFAULT_WEEKLY_INTERVAL_MINUTES = 120
 DEFAULT_MAX_FILES_PER_RUN = 200
 DEFAULT_MAX_ANALYSIS_ROUNDS = 8
 DEFAULT_MAX_TOOL_REQUESTS = 40

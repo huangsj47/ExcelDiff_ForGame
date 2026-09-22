@@ -50,6 +50,7 @@ from models.ai_analysis import (
     AiWeeklyAnalysisState,
 )
 from services.ai import snapshot_store
+from services.ai_analysis_service import update_project_analysis_config
 from services.ai.coverage_ledger import build_ledger
 from services.ai.scope_sampling import (
     _decide_scope,
@@ -116,6 +117,15 @@ def _make_group(*, file_count: int = 200, commit_prefix: str = "c") -> dict:
             )
         )
     db.session.commit()
+    # **显式打开自动分析开关。** 默认值是**关**（2026-09-22 起），而本文件测的是
+    # 增量基线（复用结论 / 快照指针）—— 前提是这次分析本来会跑起来。不声明这个前提，
+    # 这些用例会全部停在「开关关闭」那道更靠前的闸后面，报出来的失败看起来像
+    # 「没复用结论」，而真正的原因与基线无关。
+    # 走 `update_project_analysis_config`（用户点开关走的就是这条），不 monkeypatch。
+    ok, message, errors = update_project_analysis_config(
+        project.id, {"auto_weekly_enabled": True}, updated_by="tester"
+    )
+    assert ok, f"开关没打开，这组用例的前提就不成立：{message} {errors}"
     return {"project": project, "repo": repo, "cfg": cfg, "commits": commits}
 
 

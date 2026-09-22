@@ -103,6 +103,10 @@ from services.ai_analysis_service import (
     has_weekly_changes,
 )
 from models.ai_analysis import AiWeeklyAnalysisState
+from models.ai_analysis.project_config import (
+    DEFAULT_AUTO_WEEKLY_ENABLED,
+    DEFAULT_WEEKLY_INTERVAL_MINUTES,
+)
 from services.ai.analysis_budget import budget_gate_reason
 # 启动恢复扫描：把卡在非终态、且确定不会再有下文的 job 结清（`start_background_task_worker`
 # 里紧跟 `fail_orphaned_analysis_runs()` 的那一步）。写侧只有一份，实现在 `job_service`。
@@ -1556,10 +1560,17 @@ def schedule_weekly_ai_analysis_tasks():
                 counts["checked"] += 1
                 project_id = configs[0].project_id
                 project_cfg = get_project_analysis_config(project_id)
-                if not project_cfg.get("auto_weekly_enabled", True):
+                if not project_cfg.get("auto_weekly_enabled", DEFAULT_AUTO_WEEKLY_ENABLED):
                     _note_weekly_ai_skip(counts, "auto_disabled")
                     continue
-                interval_minutes = int(project_cfg.get("weekly_interval_minutes") or 60)
+                # 兜底不写 `or 60` 这种字面量：与 `DEFAULT_WEEKLY_INTERVAL_MINUTES` 是同一件事，
+                # 各写一份的结果是「改了默认间隔，只有配置行是 NULL 的项目跟着变」——
+                # 而配置行**绝大多数**不是 NULL（`resolved()` 会兜），于是这个字面量长期是死的，
+                # 直到有人把默认值改掉才发现它拦在中间。
+                interval_minutes = int(
+                    project_cfg.get("weekly_interval_minutes")
+                    or DEFAULT_WEEKLY_INTERVAL_MINUTES
+                )
                 now_utc = datetime.now(timezone.utc)
                 state = AiWeeklyAnalysisState.query.filter_by(group_key=group_key).first()
                 if state and state.last_triggered_at:

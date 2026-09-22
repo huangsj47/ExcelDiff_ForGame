@@ -2747,7 +2747,10 @@ function fillAiConfigForm(data) {
     setOptionalValue('aiBudgetTokenInput', data.budget_token_limit);
     setOptionalValue('aiBudgetCostInput', data.budget_cost_limit);
     const autoToggle = aiEl('aiWeeklyAutoToggle');
-    if (autoToggle) autoToggle.checked = data.auto_weekly_enabled !== false;
+    // 与下面两个开关**同一口径**：只有明确的 `true` 才勾上。这里原先是 `!== false`
+    // （字段缺失/为 null 时显示成「开」）—— 那是「默认开」时代的写法；2026-09-22 默认
+    // 改成关之后，那种写法会让「服务端没给这个键」看起来像用户自己打开了它。
+    if (autoToggle) autoToggle.checked = data.auto_weekly_enabled === true;
     // 子代理模式：服务端回 `false` / `null`（老行）都读成「关」—— 它是这个功能的
     // 唯一安全默认值，所以只有明确的 `true` 才勾上。
     const subagentToggle = aiEl('aiSubagentToggle');

@@ -378,7 +378,10 @@ def test_resolved_fills_every_null_with_a_default():
     assert resolved["max_anomalies_per_run"] == DEFAULT_MAX_ANOMALIES_PER_RUN
     assert resolved["max_files_per_run"] == DEFAULT_MAX_FILES_PER_RUN
     assert resolved["weekly_interval_minutes"] == DEFAULT_WEEKLY_INTERVAL_MINUTES
-    assert resolved["auto_weekly_enabled"] is True
+    # 写死具体值、**不**跟常量比：跟常量比等于「实现的另一份副本」，常量被改时它照样绿，
+    # 而这行断言存在的意义正是「默认值被改动时要有人看见」。2026-09-22 由用户拍板
+    # 改成「默认不自动分析」（`False`）。
+    assert resolved["auto_weekly_enabled"] is False
     assert resolved["prompt_template"] == ""
     assert resolved["api_base_url"] == ""
     assert resolved["api_model"] == ""

@@ -284,9 +284,21 @@ def _prepare_weekly_run(monkeypatch):
     db.session.commit()
 
     ai_service.set_project_api_key(project.id, "k")
+    # **把自动分析开关显式打开。** 「周版本自动分析」的默认值是**关**（2026-09-22 起），
+    # 而 `run_weekly_analysis_background` 的执行入口要先过这道开关。这一族用例测的是
+    # 预算闸门 / 进度上报 / 子代理编排 —— 与开关无关 —— 但都会先撞上它，
+    # 报出来的失败是「status 不是 succeeded」，看不出真正原因。
+    #
+    # 这条经验在同一族里已经有先例：`subagent_enabled` 改默认值时，
+    # `test_ai_subagent_wiring._disable_subagents` 的注释就写明「靠默认值等于把用例
+    # 绑在默认值上，改一次默认值就红一片」。**前提要显式声明，不要靠默认值兜。**
     ai_service.update_project_analysis_config(
         project.id,
-        {"api_base_url": "http://127.0.0.1:15721/v1", "api_model": "fake-model"},
+        {
+            "api_base_url": "http://127.0.0.1:15721/v1",
+            "api_model": "fake-model",
+            "auto_weekly_enabled": True,
+        },
     )
     db.session.commit()
     return ai_service, project, cfg
