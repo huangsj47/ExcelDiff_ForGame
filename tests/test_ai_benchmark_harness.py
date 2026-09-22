@@ -836,13 +836,6 @@ class TestRedactionIsStableAndOnByDefault:
 
         assert Pseudonymizer().text(text) == text, "数值比值被当成路径换掉了"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "已知缺陷：text() 把路径拆成「目录 + 文件名」分别换，而结构化字段走 path() "
-            "（整条路径一个假名），同一个原始路径于是得到两个不同的假名。"
-        ),
-    )
     def test_a_label_path_redacts_to_the_same_pseudonym_as_the_structured_field(self):
         """工具标签里的路径必须换成与结构化字段**同一个**假名。
 

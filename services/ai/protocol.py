@@ -118,6 +118,9 @@ class ContextRequest:
             return f"read_reference {self.name}"
         if self.type == "commit_detail":
             return f"commit_detail {self.commit[:12]}"
+        if self.type == "find_references":
+            scope = normalize_path(self.path)
+            return f"find_references {self.query}" + (f"（范围 {scope}）" if scope else "")
         return f"{self.type} {self.commit[:12]} {self.path}"
 
 

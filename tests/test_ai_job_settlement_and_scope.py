@@ -507,6 +507,66 @@ def test_the_handler_settles_a_job_that_came_back_without_a_run(reason, expected
         assert settled.active_key is None
 
 
+def test_no_change_job_points_to_and_returns_the_reused_report():
+    import services.task_worker_task_handlers as handlers
+
+    with app.app_context():
+        group = _make_group()
+        reused = _make_run(group, status="succeeded")
+        reused.response_payload = json.dumps({"report_markdown": "# 旧结论"}, ensure_ascii=False)
+        reused.response_text = "# 旧结论"
+        job = _make_job(group, state=STATE_RUNNING)
+        task = _make_task(group, job_id=job.id, status="processing")
+
+        settled = handlers.settle_job_from_result(
+            {"status": "skipped", "reason": "no_change", "reused_run_id": reused.id},
+            task_id=task.id,
+        )
+        db.session.commit()
+
+        assert settled.state == STATE_REUSED
+        assert settled.reused_run_id == reused.id
+        assert job_service.result_payload(settled)["report_markdown"] == "# 旧结论"
+
+
+def test_already_running_job_attaches_to_the_existing_run_and_tracks_its_scope():
+    import services.task_worker_task_handlers as handlers
+
+    with app.app_context():
+        group = _make_group()
+        active = _make_run(group, status="running")
+        active.scope = MODE_FULL
+        active.request_payload = json.dumps({"policy": {"reason": "critical_path_detected"}})
+        job = _make_job(group, state=STATE_RUNNING)
+        job.effective_mode = MODE_INCREMENTAL
+        task = _make_task(group, job_id=job.id, status="processing")
+
+        attached = handlers.settle_job_from_result(
+            {"status": "skipped", "reason": "already_running", "run_id": active.id},
+            task_id=task.id,
+        )
+        db.session.commit()
+
+        assert attached.state == STATE_RUNNING
+        assert attached.run_id == active.id
+        assert attached.effective_mode == MODE_FULL
+        assert attached.upgrade_reason == "critical_path_detected"
+        assert attached.active_key is not None
+
+
+def test_progress_payload_falls_back_to_the_persisted_job_snapshot():
+    with app.app_context():
+        group = _make_group()
+        active = _make_run(group, status="running")
+        job = _make_job(group, state=STATE_RUNNING, run_id=active.id)
+        job.progress_json = json.dumps({"run_id": active.id, "round": 3, "job_tokens": 12345})
+        db.session.commit()
+
+        progress = job_service.progress_payload(job)
+        assert progress["round"] == 3
+        assert progress["job_tokens"] == 12345
+
+
 def test_the_handler_still_does_nothing_when_there_is_no_job():
     """没有 job 的过渡路径（任务行上是意图 id、或根本没有引用）：不猜、不乱改。"""
     import services.task_worker_task_handlers as handlers

@@ -95,6 +95,7 @@ S1 为了查耦合读了表 A 的 diff，S2 也要读同一份 —— 有了它�
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, MutableMapping, Protocol, runtime_checkable
 
@@ -218,6 +219,9 @@ _STAT_COUNTERS = (
     "refused_by_budget",  # 因超出索取上限而未执行
     "source_chars",       # 工具取回的原始字符数
     "produced_chars",     # 实际交给模型的字符数（截断后）
+    "avoided_duplicate_chars",  # 本成员重复索取时，用指针省下的提示词字符
+    "cross_member_replayed_chars",  # 跨成员缓存命中后仍需重发的正文字符
+    "unscoped_content_requests",  # file_content 未指定行/工作表，可能退化成大范围读取
 )
 
 
@@ -370,7 +374,21 @@ def _repeat_item(item: ContextItem) -> ContextItem:
         kind=item.kind,
         label=item.label,
         text=_repeat_text(item),
-        meta={"repeat_pointer": True},
+        meta={"repeat_pointer": True, "chunk_id": item.meta.get("chunk_id", "")},
+    )
+
+
+def _with_chunk_id(item: ContextItem, key: CacheKey) -> ContextItem:
+    """为证据正文生成稳定地址；相同请求与内容在不同成员中得到同一 id。"""
+    digest = hashlib.sha256()
+    digest.update("\x1f".join(key).encode("utf-8", errors="replace"))
+    digest.update(b"\x00")
+    digest.update(item.text.encode("utf-8", errors="replace"))
+    return ContextItem(
+        kind=item.kind,
+        label=item.label,
+        text=item.text,
+        meta={**item.meta, "chunk_id": digest.hexdigest()[:20]},
     )
 
 
@@ -518,6 +536,8 @@ class ContextTools:
                 )
                 continue
             self._requests_seen += 1
+            if request.type == "file_content" and not str(request.lines or "").strip():
+                self._bump(request.type, "unscoped_content_requests")
 
             key = _cache_key(request)
             cached = self._cache.get(key)
@@ -534,6 +554,11 @@ class ContextTools:
                 # 指针那一小段，不是 11,000 字正文。
                 pointer = _repeat_item(cached)
                 self._bump(request.type, "produced_chars", len(pointer.text))
+                self._bump(
+                    request.type,
+                    "avoided_duplicate_chars",
+                    max(0, len(cached.text) - len(pointer.text)),
+                )
                 items.append(pointer)
                 continue
 
@@ -548,6 +573,7 @@ class ContextTools:
                 self._bump(request.type, "cache_hits")
                 self._bump(request.type, "source_chars", _meta_chars(shared))
                 self._bump(request.type, "produced_chars", len(shared.text))
+                self._bump(request.type, "cross_member_replayed_chars", len(shared.text))
                 # 复用的若是**一条已经截断过的正文**，这一笔截断也要记（模块 docstring
                 # 第 6 条）：明细侧本来就这么记，计数侧原先只在真正执行的那条路上记 ——
                 # 于是同一条正文在明细里出现 N 次、在计数里只记 1 次，两本账对不上
@@ -582,6 +608,8 @@ class ContextTools:
                     text=_failure_text(request, f"{type(exc).__name__}: {exc}"),
                     meta={"tool_failed": True, "reason": str(exc)},
                 )
+
+            item = _with_chunk_id(item, key)
 
             executions += 1
             self._executions += 1

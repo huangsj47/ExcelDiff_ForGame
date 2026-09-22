@@ -632,8 +632,8 @@ def ai_run_progress(run_id):
     """**跑的过程中的一眼**：第几轮、已用多少 token、现在有没有超预算。
 
     为什么要轮询而不是 SSE 推：分析入口是「生成器里跑一次阻塞调用」，
-    `_execute_analysis` 返回之前一个事件都 yield 不出去（见 services/ai/run_progress.py
-    的模块 docstring）。引擎每跑完一轮把累计用量写进进程内的快照，这里读它。
+    `_execute_analysis` 返回之前一个事件都 yield 不出去。引擎每跑完一轮先写进程内快照，
+    同时写入关联 job；Web 与 worker 不在同一进程时从 job 读持久化快照。
 
     三件事必须说清：
 
@@ -651,16 +651,17 @@ def ai_run_progress(run_id):
         return jsonify({"success": False, "message": "Access denied."}), 403
 
     snap = run_progress.snapshot(run_id)
+    progress = snap.to_dict() if snap else job_service.progress_payload_for_run(run_id)
     status = budget_status(run.project_id)
     payload = {
         "success": True,
         "run_id": run_id,
         "project_id": run.project_id,
         "status": run.effective_status,
-        "progress": snap.to_dict() if snap else None,
+        "progress": progress,
         "budget": visible_budget(status),
     }
-    if snap is None:
+    if progress is None:
         return jsonify(payload), 200
 
     # 本次运行**还没落库**的那部分用量：token 取快照里**跨成员累计**的那一份（`job_tokens`），
@@ -672,9 +673,9 @@ def ai_run_progress(run_id):
     if table is not None:
         estimate = estimate_cost(
             str(run.model or ""),
-            tokens_input=snap.prompt_tokens,
-            tokens_output=snap.completion_tokens,
-            cache_read=snap.cache_read_tokens,
+            tokens_input=progress.get("prompt_tokens"),
+            tokens_output=progress.get("completion_tokens"),
+            cache_read=progress.get("cache_read_tokens"),
             table=table,
         )
         live_cost = estimate.amount
@@ -691,7 +692,7 @@ def ai_run_progress(run_id):
             # 于是「这次其实已经超了」的提示会在换成员那一帧当场消失。
             # 两者都是下界（上游报多少算多少），`with_live_usage` 的口径不变；
             # 读不到时它是 `None`，那里按 0 加（与 `live_tokens` 为 `None` 时逐字一样）。
-            tokens=snap.job_tokens,
+            tokens=progress.get("job_tokens"),
             cost=live_cost,
             currency=currency,
         )

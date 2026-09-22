@@ -290,6 +290,15 @@ def _migrate_ai_analysis_columns(db, log_print):
     """
     _migrate_table_columns(
         db,
+        "ai_analysis_job",
+        {
+            "progress_json": "progress_json TEXT",
+            "progress_updated_at": "progress_updated_at DATETIME",
+        },
+        log_print,
+    )
+    _migrate_table_columns(
+        db,
         "ai_project_analysis_config",
         {
             "api_base_url": "api_base_url VARCHAR(500)",

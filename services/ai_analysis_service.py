@@ -103,6 +103,7 @@ from services.ai.engine import (
     failed as engine_failed,
 )
 from services.ai.llm_client import LLMError
+from services.ai.incremental_baseline import reconcile_result as reconcile_incremental_result
 from services.ai.platform_provider import PlatformContextProvider
 from services.ai.project_config_source import (  # noqa: F401 —— 调用点与测试仍在用
     _coerce_timeout,
@@ -557,6 +558,19 @@ def _engine_limits(project_config: dict, *, platform_chars: int = 0) -> EngineLi
     )
 
 
+def _publish_progress(run_id: int, project_id: int, progress) -> None:
+    """同时更新快速内存快照与跨进程可读的 job 快照。"""
+    publish_run_progress(run_id, project_id, progress)
+    try:
+        from services.ai import job_service, run_progress
+
+        snap = run_progress.snapshot(run_id)
+        if snap is not None:
+            job_service.persist_progress(run_id, snap.to_dict())
+    except Exception as exc:  # noqa: BLE001 —— 展示进度失败不能中断付费分析
+        log_print(f"⚠️ 持久化 AI 进度失败（不影响分析）: run={run_id} {exc}", "AI", force=True)
+
+
 # 基线的读侧（`previous_run` / `baseline_findings` / `baseline_digest` / `suppressed`）
 # 搬去了 `services/ai/baseline_source.py`：它们只依赖 run / anomaly 两张表与纯函数那一层
 # `baseline.py`，与「怎么跑一次分析」没有耦合，而这个文件贴着 2000 行的硬上限。
@@ -632,7 +646,10 @@ def _persist_outcome(
         run.response_text = ""
     else:
         run.response_payload = _json_dumps(result)
-        run.response_text = outcome.report_markdown or outcome.error_message or ""
+        # 增量结果会在模型返回后由平台把上一轮仍有效的结论确定性合并进来。正文必须读
+        # `result` 的最终形态；继续读 `outcome` 会让 payload 有累积结论、页面正文却只剩
+        # 本轮模型那几条，两份真相当场分叉。
+        run.response_text = result.get("report_markdown") or outcome.error_message or ""
     run.rounds_used = outcome.rounds_used
     run.tokens_input = outcome.prompt_tokens
     run.tokens_output = outcome.completion_tokens
@@ -698,6 +715,9 @@ def _persist_outcome(
                 file_path=item["file_path"],
                 impact=item["impact"],
                 suggestion=item["suggestion"],
+                # 平台延续的历史结论保留人工处置；相关文件再次变化时，合并器已经把它
+                # 退回 pending，避免一次旧的“已确认/已忽略”覆盖新证据。
+                disposition=item.get("disposition") or "pending",
             )
         )
 
@@ -1137,12 +1157,12 @@ def _run_engine_and_persist(
         "baseline_digest": _baseline_digest(target_type, target_key, change),
         # 每跑完一轮把累计用量写进进程内的进度快照（services/ai/run_progress.py，界面
         # 一边跑一边轮询它）。**它是给界面看的一眼，不是账** —— 账在 `_persist_outcome`。
-        "on_round": lambda progress: publish_run_progress(run.id, project_id, progress),
+        "on_round": lambda progress: _publish_progress(run.id, project_id, progress),
         # 第一次模型调用**之前**也报一帧。没有它，从开跑到第一轮跑完之间（可以是几分钟）
         # 快照是空的，界面显示「分析中：进度不可用」，而结论面板一直挂着
         # 「AI 分析进行中...」—— 看起来像卡住了，实际它正在干活。子代理模式下它还负责
         # 把归属从上一个分片换成汇总/主代理（见 subagent._call_engine 的 report）。
-        "on_start": lambda progress: publish_run_progress(run.id, project_id, progress),
+        "on_start": lambda progress: _publish_progress(run.id, project_id, progress),
     }
     # 子代理模式（services/ai/subagent.py）：默认关、只对周版本生效，不适用时返回 None
     # 走原来的单代理路径。`verify` 是对账轮，它依附在子代理上 —— 没开子代理时不生效。
@@ -1172,6 +1192,32 @@ def _run_engine_and_persist(
         suppressed=_suppressed(target_type, target_key, change),
         context_budget_note=budget_note,
     )
+    baseline_account = payload.get("baseline") or {}
+    if baseline_account.get("kind") == "snapshot":
+        previous = _previous_run(target_type, target_key)
+        if previous is not None:
+            previous_rows = [
+                {
+                    "fingerprint": row.fingerprint,
+                    "title": row.title,
+                    "category": row.category,
+                    "severity": row.severity,
+                    "confidence": row.confidence,
+                    "evidence": row.evidence,
+                    "commit_ref": row.commit_ref,
+                    "file_path": row.file_path,
+                    "impact": row.impact,
+                    "suggestion": row.suggestion,
+                    "disposition": row.disposition,
+                }
+                for row in AiAnalysisAnomaly.query.filter_by(run_id=previous.id).all()
+            ]
+            result = reconcile_incremental_result(
+                result,
+                previous_rows,
+                changed_paths=change.paths,
+                previous_run_id=previous.id,
+            )
     _persist_outcome(
         run, outcome, result, pricing_version=_price_version_for(project_config)
     )
@@ -1400,8 +1446,13 @@ def run_weekly_analysis_background(
         payload, state, skip_reason = build_weekly_payload(config_id, focus=focus)
         if skip_reason == "no_change":
             # 与流式入口同一条口径（见那里的注释）：有可复用的结论就**不建 run**。
-            if _reusable_conclusion(config_id, state) is not None:
-                return {"status": "skipped", "reason": "no_change"}
+            reusable = _reusable_conclusion(config_id, state)
+            if reusable is not None:
+                return {
+                    "status": "skipped",
+                    "reason": "no_change",
+                    "reused_run_id": reusable.id,
+                }
             payload, state, skip_reason = build_weekly_payload(
                 config_id, force_full=True, focus=focus
             )
@@ -1444,7 +1495,22 @@ def run_weekly_analysis_background(
             "status": "skipped",
             "reason": "already_running",
             "message": _already_running_message(conflict.run),
+            "run_id": conflict.run.id,
         }
+
+    # run 一创建就与 job 绑定；否则第一轮回调发生时持久化进度找不到接收行。
+    if task_id is not None:
+        try:
+            from models import BackgroundTask
+            from services.ai import job_service
+
+            task_row = db.session.get(BackgroundTask, task_id)
+            if task_row is not None and getattr(task_row, "job_id", None):
+                job_service.mark_running(task_row.job_id, run_id=run.id, task_id=task_id)
+                db.session.commit()
+        except Exception as exc:  # noqa: BLE001
+            db.session.rollback()
+            log_print(f"⚠️ 绑定 AI run 与 job 失败（不影响分析）: run={run.id} {exc}", "AI", force=True)
 
     result = _execute_analysis(
         run,

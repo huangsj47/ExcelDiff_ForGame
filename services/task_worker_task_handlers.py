@@ -25,6 +25,7 @@ AI 分析。它们的共同点是**只被 worker 主循环调用**、彼此之�
 
 from __future__ import annotations
 
+import json
 import os
 
 import services.task_worker_service as worker
@@ -199,16 +200,38 @@ def settle_job_from_result(result, task_id=None):
     run_id = (result or {}).get("run_id") if isinstance(result, dict) else None
     reason = (result or {}).get("reason") if isinstance(result, dict) else None
     message = (result or {}).get("message") if isinstance(result, dict) else None
+    reused_run_id = (result or {}).get("reused_run_id") if isinstance(result, dict) else None
     try:
         from services.ai import job_service
     except ImportError:
         return None
     try:
+        job_id = job_id_for_task(task_id) if task_id is not None else None
+        if reason == "no_change" and job_id is not None:
+            job = job_service.settle_without_run(job_id, reason=reason, message=message)
+            if job is not None and reused_run_id:
+                job.reused_run_id = reused_run_id
+            worker._db.session.commit()
+            return job
+        if reason == "already_running" and run_id and job_id is not None:
+            job = job_service.mark_running(job_id, run_id=run_id, task_id=task_id)
+            from models.ai_analysis import AiAnalysisRun
+            active_run = worker._db.session.get(AiAnalysisRun, run_id)
+            if job is not None and active_run is not None:
+                job.effective_mode = active_run.scope
+                try:
+                    request_payload = json.loads(active_run.request_payload or "{}")
+                except (TypeError, ValueError):
+                    request_payload = {}
+                policy = request_payload.get("policy") or {}
+                if job.requested_mode == "incremental" and active_run.scope == "full":
+                    job.upgrade_reason = str(policy.get("reason") or "runtime_scope_upgrade")
+            worker._db.session.commit()
+            return job
         if not run_id:
             # **没有 run 的结局**：按 `reason` 结清（终态由 job_service 选）。
             if task_id is None:
                 return None
-            job_id = job_id_for_task(task_id)
             if job_id is None:
                 return None
             job = job_service.settle_without_run(job_id, reason=reason, message=message)
@@ -224,7 +247,6 @@ def settle_job_from_result(result, task_id=None):
             # 而不确定在这里的正确处置是收口（否则 active_key 永远占着索引位）。
             if task_id is None:
                 return None
-            job_id = job_id_for_task(task_id)
             if job_id is None:
                 return None
             job = job_service.settle_without_run(

@@ -332,16 +332,16 @@ def _events(text: str) -> list:
     return events
 
 
-def test_the_manual_entry_does_not_start_a_second_run_for_the_same_input(monkeypatch):
-    """手工路径撞上「同一输入已经在跑」：**不重复发起**，也**不许把 job 留成非终态**。
+def test_the_manual_entry_attaches_to_the_existing_run_for_the_same_input(monkeypatch):
+    """手工路径撞上「同一输入已经在跑」：**不重复发起**，并附着现有 run。
 
     P0-01 之后手工入口是 `POST /jobs` → 任务 → `run_weekly_analysis_background`：
     那一次执行会撞上 `_create_run` 的 UNIQUE 约束（同一份输入的认领握在别人手里），
     于是按 `skipped/already_running` 结束 —— **一个模型请求都不发**。
 
-    这里同时钉住第二件事（第二波收尾补上的那一跳）：这条 job **没有建出 run**，
-    所以它必须由 `settle_without_run` 收口。不收口的后果是 `active_key` 永远占着
-    唯一索引 —— 同一个 target 此后**再也建不出 job**（用户点按钮只会附着到它上面）。
+    新 job 关联持有认领的 run，因此用户继续看到同一份进度和结果；run 终结时
+    `settle_from_run` 会一次收口所有附着 job。它在此之前保持 running/active_key，
+    正好阻止同一 target 再排出第三个后台任务。
     """
     seeded = _seed()
     calls: list = []
@@ -370,10 +370,15 @@ def test_the_manual_entry_does_not_start_a_second_run_for_the_same_input(monkeyp
             ).count() == 1, "又建了一条运行（= 同一份输入付两次费）"
 
             job = db.session.get(AiAnalysisJob, job_id)
-            assert job.state == STATE_CANCELLED, (
-                f"没有 run 的结局没有把 job 收口，它停在 {job.state} —— "
-                "active_key 会永远占着唯一索引，同一个 target 再也建不出 job"
-            )
+            assert job.state == "running"
+            assert job.run_id == holder.id
+            assert job.active_key is not None
+
+            holder.status = "succeeded"
+            job_service.settle_from_run(holder)
+            db.session.commit()
+            db.session.refresh(job)
+            assert job.state == "succeeded"
             assert job.active_key is None
         finally:
             _drop_job_and_state(job_id, seeded["group_key"], [holder.id])

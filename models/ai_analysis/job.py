@@ -227,6 +227,9 @@ class AiAnalysisJob(db.Model):
     # 创建时的输入摘要（给人看的：变更文件数、窗口总数）。BigText 与
     # `AiAnalysisRun.delta_summary` 同一用法。
     delta_summary = db.Column(BigText, nullable=True)
+    # 每轮结束时持久化一份显示用进度。它不是最终用量账，只用于跨进程/重启后继续展示。
+    progress_json = db.Column(BigText, nullable=True)
+    progress_updated_at = db.Column(db.DateTime, nullable=True)
 
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(

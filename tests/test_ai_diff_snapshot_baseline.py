@@ -573,7 +573,11 @@ def test_no_change_reuses_the_conclusion_without_creating_a_run():
         outcome = ai_service.run_weekly_analysis_background(cfg_id)
 
         assert _run_count(group) == before, "没有新变化却建了一条 run —— 白花一次调用"
-        assert outcome == {"status": "skipped", "reason": "no_change"}, (
+        assert outcome == {
+            "status": "skipped",
+            "reason": "no_change",
+            "reused_run_id": first["run"].id,
+        }, (
             f"没有走「复用结论」那一支，用户会白等一次（或白花一次）：{outcome}"
         )
         # 复用的正是**结论基线**那一条

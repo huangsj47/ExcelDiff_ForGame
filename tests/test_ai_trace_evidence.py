@@ -80,6 +80,17 @@ class TestTheCountsSurvive:
         assert json.loads(columns["executed_json"])["details"][0]["chars"] > 0
         assert "未执行" in json.loads(columns["dropped_json"])["details"][0]["reason"]
 
+    def test_find_references_keeps_the_query_in_trace(self):
+        """引用扫描没有 commit/path，trace 必须靠 query 才能说明模型要查什么。"""
+        columns = encode_evidence(_record(
+            request_count=1,
+            requests=(ContextRequest(type="find_references", query="CfgRewardMode"),),
+        ))
+
+        item = json.loads(columns["requests_json"])["items"][0]
+        assert item["query"] == "CfgRewardMode"
+        assert item["text"] == "find_references CfgRewardMode"
+
     def test_an_empty_round_writes_none_not_an_empty_object(self):
         """没有明细时写 `None`：`{}` 会被读成「有一轮，但它是空的」。"""
         columns = encode_evidence(_record(

@@ -73,10 +73,9 @@ reducer 的产出由平台**结构化地带出去**（`EngineOutcome.verdict`，
    **可复现的判据**（同一个 `file_path` / 标题词集相似度）建立；一个正文号被两条结论认领、
    或者一条结论对上两个正文号时**都不写** —— 写错比不写糟得多（写错会把裁决的账记到别的
    发现头上）。
-3. **依据的形状校验**（`is_locatable_ref`）。实测 `F3` 的第二条依据是
-   `…TmsTeamMgrMod.lua:diff@@ -61,66 +66,26 @@` —— 那是 diff 的 hunk 头，照它定位不到任何
-   东西，而审计的完成标准是「所有 high/critical 结论具有可定位快照证据」。拦的是**伪装成
-   证据的散文**（hunk 头、`x.xlsx:第 3 个 sheet`、`见 a.lua 第 61 行`）；裸文件路径
+3. **依据的形状校验**（`is_locatable_ref`）。标准 unified diff hunk 同时带文件路径和
+   old/new 行区间，固定 commit 后可以稳定复现，属于可定位证据；不完整的 `diff@@` 残片、
+   `x.xlsx:第 3 个 sheet`、`见 a.lua 第 61 行` 等散文仍会被拦截。裸文件路径
    （`build/lua/CfgItem.lua`）**算可定位** —— 它是能去查的快照坐标。不成形的**照原样留着
    并标成「不可定位」**（模型说了什么不许篡改），但一条都定位不到时**不得维持 `very_high`**。
 4. **证据缺口压置信度**（`EvidenceGaps`）。`F1` 是 `critical`/`very_high` 且裁决「反证不成立
@@ -224,14 +223,20 @@ _BODY_WINDOW_LINES = 2
 # 不 import 它：本模块是纯函数层，engine 是执行层，反向依赖会把执行栈拖进来。
 QUOTA_EXHAUSTED_CODE = "requests_exhausted"
 
-# 可定位依据的四种形态（口径 ③）。**逐条判据都在 `is_locatable_ref` 里**，这里只放形状：
+# 可定位依据的五种形态（口径 ③）。**逐条判据都在 `is_locatable_ref` 里**，这里只放形状：
 #
 # * 行号 / 行范围：`12`、`12-15`、`12 ~ 15`；
 # * sheet 名：`Sheet1`（不许含空白、`!`、`:`、`@`）；
 # * 单元格 / 区间：`Sheet1!A1`、`Sheet1!A1:C5`。
+# * unified diff hunk：`a.lua @@ -12,3 +14,5 @@` 或兼容旧模型的
+#   `a.lua:diff@@ -12,3 +14,5 @@`；必须同时有完整 old/new 坐标。
 _REF_LINE_RE = re.compile(r"^\d{1,7}(?:\s*[-~]\s*\d{1,7})?$")
 _REF_SHEET_RE = re.compile(r"^[^\s!:@]{1,64}$")
 _REF_CELL_RE = re.compile(r"^[^\s!:@]{1,64}![A-Za-z]{1,3}\d{1,7}(?::[A-Za-z]{1,3}\d{1,7})?$")
+_REF_HUNK_RE = re.compile(
+    r"^(?P<path>\S+?)(?:\s+|:diff)"
+    r"@@ -\d{1,7}(?:,\d{1,7})? \+\d{1,7}(?:,\d{1,7})? @@(?: .*)?$"
+)
 # 配表类扩展名。sheet / 单元格这两种定位符**只对它们成立**：`.lua` 文件没有 sheet，
 # 认下来就等于把一句自由文本当成坐标。
 _SHEET_SUFFIXES = (".xlsx", ".xlsm", ".xlsb", ".xls", ".csv")
@@ -582,7 +587,7 @@ def _same_finding_as_window(anomaly: Anomaly, window: str) -> bool:
 def is_locatable_ref(ref: str) -> bool:
     """这条依据能不能**照着它定位到东西**（口径 ③）。
 
-    认可两种形态，其余一律不成形：
+    认可三组形态，其余一律不成形：
 
     * **裸路径**（`build/lua/CfgItem.lua`）：**能去查**的快照坐标 —— 平台自己的 diff
       载荷就是这么标的（`file_diff <commit> <path>`），按提交取一份快照就能核。判据复用
@@ -600,16 +605,11 @@ def is_locatable_ref(ref: str) -> bool:
       | sheet | 无空白 / `!` / `:` / `@` 的名字 | `Sheet1` |
       | 单元格 / 区间 | `sheet!A1` / `sheet!A1:C5` | `Sheet1!B2` |
 
-      后三种**只对配表类扩展名成立**：`.lua` 没有 sheet，`Sheet1` 挂在它后面是自由文本，
+      后两种**只对配表类扩展名成立**：`.lua` 没有 sheet，`Sheet1` 挂在它后面是自由文本，
       不是坐标。
-
-    实测的反面例子（`F3` 的第二条依据）：
-
-        code/qz_server/src/tms/module/TmsTeamMgrMod.lua:diff@@ -61,66 +66,26 @@
-
-    `:` 后面那一段是 **diff 的 hunk 头**，既不是行号也不是 sheet —— 照它去文件里找，
-    找不到任何东西。**拦的正是这种「伪装成证据的散文」**（还有 `x.xlsx:第 3 个 sheet`、
-    `见 a.lua 第 61 行`、`详见上文`）：它们看着像坐标，实际给不出任何可核的位置。
+    * **路径 + 完整 unified diff hunk**：同时给出 old/new 起始行和可选长度，例如
+      `a.lua @@ -61,66 +66,26 @@`。固定 commit 后它能直接定位对应改动块。兼容模型曾输出的
+      `a.lua:diff@@ ... @@`，但不接受少一侧坐标、缺路径或混入 hunk 语法的散文。
 
     ## 两处宁严勿宽的取舍
 
@@ -625,6 +625,9 @@ def is_locatable_ref(ref: str) -> bool:
     是本层唯一会改结论的副作用。
     """
     text = _ref_body(ref)
+    hunk = _REF_HUNK_RE.fullmatch(text)
+    if hunk:
+        return _looks_like_path(hunk.group("path"))
     path, locator = _split_ref(text)
     if not locator:
         # 裸路径（或整个字符串里就没有 `:`）。判据与切分那一侧同一个函数，不另写一份。
@@ -653,8 +656,8 @@ def _split_ref(ref: str) -> tuple[str, str]:
     * `C:/work/a.lua:61` —— 盘符那个 `:` 的左边是 `C`，最后一段没有点，跳过；
     * `config/x.xlsx:Sheet1!A1:C5` —— 单元格区间**自带一个 `:`**，从右边切会把路径切成
       `config/x.xlsx:Sheet1!A1`（一个不存在的文件），反过来切才对；
-    * `…TmsTeamMgrMod.lua:diff@@ -61,66 +66,26 @@` —— 左边是路径、右边不是定位符，
-      两样都留在返回值里，由 `is_locatable_ref` 判它不成形。
+    标准 hunk 在进入这里前已经由 `is_locatable_ref` 单独识别；不完整的 `diff@@` 残片仍会
+    保留成 `(路径, 定位符)`，并由形状校验拒绝。
 
     路径里含空白（模型写了一句「见 xxx.lua 第 61 行」）或含 `@@` 一律判不成形：那是散文，
     不是坐标。
@@ -1247,8 +1250,8 @@ def _with_ref_shapes(row: FindingRow) -> FindingRow:
         return row
     return _cap_very_high(
         row,
-        f"复核给的 {len(bad)} 条依据**没有一条能定位**到「文件:行 / 文件:sheet/单元格」"
-        "（例如 diff 的 hunk 头），够不上「可定位快照证据」",
+        f"复核给的 {len(bad)} 条依据**没有一条能定位**到「文件:行 / 文件:sheet/单元格 / "
+        "完整 diff hunk」，够不上「可定位快照证据」",
     )
 
 
@@ -1470,7 +1473,12 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
     lines.extend(_gap_section(reduction, shown=shown))
 
     if reduction.rejected:
-        lines.append(f"### 平台记账：{len(reduction.rejected)} 条没有进入清单")
+        lines.append(f"### 复核阶段记账：{len(reduction.rejected)} 条没有进入清单")
+        lines.append("")
+        lines.append(
+            "这里**只记录对账轮（V1）新增或改写结论时被平台拒绝的条目**；主分析阶段因"
+            "结论条数上限淘汰的条目会单独列在后面的「结论条数上限」中，两组不是重复计数。"
+        )
         lines.append("")
         for item in reduction.rejected:
             detail = item.detail or "（未记标题）"

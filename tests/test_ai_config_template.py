@@ -684,6 +684,16 @@ def test_the_examples_are_collapsed_by_default():
     assert "<summary" in html
 
 
+def test_analysis_limits_explain_their_real_scope():
+    """配置页不能把每个 agent 的额度说成整个 job，也不能把文件清单说成白名单。"""
+    html = _modal_html()
+
+    assert "仅控制文件名清单过长时列出多少个名称" in html
+    assert "每个分析 agent 最多来回几轮" in html
+    assert "每个分析 agent 的索取总次数" in html
+    assert "每个分片和汇总各有这份额度" in html
+
+
 def test_the_examples_do_not_leak_internal_tool_names():
     """示例会进版本库，不能带上内部工具、内部系统或同事的名字。"""
     html = _modal_html()

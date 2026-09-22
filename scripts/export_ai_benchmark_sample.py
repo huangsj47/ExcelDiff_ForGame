@@ -106,6 +106,17 @@ _TEXT_PATH_RE = re.compile(
 )
 _TEXT_COMMIT_RE = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
 _TEXT_URL_RE = re.compile(r"\b(?:https?|ssh|svn|git)://[^\s\"'<>]+", re.IGNORECASE)
+# 工具标签有可靠语法，必须先按语法整段取 path。普通的 `_TEXT_PATH_RE` 为了不把
+# 散文吞得太宽，不包含 `【】（）空格`；直接靠它会把
+# `config/.../【158】商店商品表.xlsx` 拆成目录和文件名两个假名，结构化字段却把整条
+# 路径换成一个假名，覆盖率对账因此失真。
+_TOOL_LABEL_PATH_RE = re.compile(
+    r"\b(file_diff|file_content)\s+([0-9a-fA-F]{7,40})\s+"
+    r"(.+?\.(?:xlsx|xlsm|xlsb|xls|csv|lua|py|json|ts|js|cs|cpp|h|java|txt|"
+    r"xml|yaml|yml|md|proto|prefab|asset|ini|toml|sql))"
+    r"(?=\s+lines=|\s+at\s+|$)",
+    re.IGNORECASE | re.MULTILINE,
+)
 # **只有目录、没有文件名**的路径（`a/b/C/`、`b/C`）。正文里常见，而带扩展名那条
 # 正则抓不到它 —— 实测就是它把仓库目录漏在报告正文里的。
 # 段首必须是字母/下划线（挡住 `3/4` 这种数值比值），至少两段。
@@ -189,6 +200,13 @@ class Pseudonymizer:
         raw = "" if value is None else str(value)
         if not raw or not self.enabled:
             return raw
+        raw = _TOOL_LABEL_PATH_RE.sub(
+            lambda match: (
+                f"{match.group(1)} {self.commit(match.group(2))} "
+                f"{self.path(match.group(3).strip())}"
+            ),
+            raw,
+        )
         raw = _TEXT_URL_RE.sub(lambda match: self.pseudonym(match.group(0), prefix="url"), raw)
         raw = _TEXT_PATH_RE.sub(lambda match: self.path(match.group(0)), raw)
         raw = _TEXT_DIR_RE.sub(

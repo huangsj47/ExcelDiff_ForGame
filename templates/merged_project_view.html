@@ -1523,21 +1523,21 @@
                             <label class="form-label" for="aiMaxFilesInput">清单过长时的取样上限</label>
                             <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiMaxFilesInput"
                                    aria-describedby="aiMaxFilesInputHelp aiMaxFilesInputError">
-                            <div class="form-text" id="aiMaxFilesInputHelp">单次分析最多纳入多少个文件，用于控制 token 消耗。</div>
+                            <div class="form-text" id="aiMaxFilesInputHelp">仅控制文件名清单过长时列出多少个名称；未列出的本批文件仍可读取，不限制实际分析白名单。</div>
                             <div class="form-text text-danger d-none" id="aiMaxFilesInputError"></div>
                         </div>
                         <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiMaxRoundsInput">最大分析轮次</label>
                             <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiMaxRoundsInput"
                                    aria-describedby="aiMaxRoundsInputHelp aiMaxRoundsInputError">
-                            <div class="form-text" id="aiMaxRoundsInputHelp">模型最多可以来回几轮。轮次越多结论越细，也更慢更贵。</div>
+                            <div class="form-text" id="aiMaxRoundsInputHelp">每个分析 agent 最多来回几轮；开启分片和对账后，每个角色各有这份上限。轮次越多越慢、也可能重复消耗。</div>
                             <div class="form-text text-danger d-none" id="aiMaxRoundsInputError"></div>
                         </div>
                         <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiMaxToolRequestsInput">上下文索取上限（次）</label>
                             <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiMaxToolRequestsInput"
                                    aria-describedby="aiMaxToolRequestsInputHelp aiMaxToolRequestsInputError">
-                            <div class="form-text" id="aiMaxToolRequestsInputHelp">整次分析允许索取上下文的总次数（跨轮次累计，重复索要同一个文件也计入）。</div>
+                            <div class="form-text" id="aiMaxToolRequestsInputHelp">每个分析 agent 的索取总次数（跨该角色的轮次累计）；开启分片后每个分片和汇总各有这份额度，重复索要也计入。</div>
                             <div class="form-text text-danger d-none" id="aiMaxToolRequestsInputError"></div>
                         </div>
                         <!-- 子代理模式（services/ai/subagent.py）。**默认开**，且只对周版本生效。
@@ -4816,6 +4816,14 @@ function weeklyAiBaselineText(estimate) {
     return '还没判定（取决于快照与依赖有没有变化）';
 }
 
+function weeklyAiMoneyText(value) {
+    if (value === undefined || value === null) return '';
+    if (typeof value === 'object') {
+        return value.amount === undefined || value.amount === null ? '' : String(value.amount);
+    }
+    return String(value);
+}
+
 /**
  * 确认框里的那几行事实。**数字全部来自 `GET /ai-analysis/usage/estimate`**
  * （服务端算的），前端只负责摆出来 —— 自己乘一个系数就是编。
@@ -4851,8 +4859,10 @@ function weeklyAiEstimateLines(estimate) {
     }
     const cost = (estimate && estimate.cost) || {};
     if (cost.computable && cost.low !== undefined) {
-        const low = cost.low;
-        const high = cost.high === undefined || cost.high === null ? low : cost.high;
+        const low = weeklyAiMoneyText(cost.low);
+        const high = weeklyAiMoneyText(
+            cost.high === undefined || cost.high === null ? cost.low : cost.high
+        );
         const unit = cost.currency || cost.unit || '';
         lines.push(['预计费用', low === high ? (low + ' ' + unit) : (low + ' ~ ' + high + ' ' + unit)]);
     } else {

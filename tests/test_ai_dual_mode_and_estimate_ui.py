@@ -363,6 +363,12 @@ _SCENARIOS = [
     {"name": "estimate_lines_full", "action": "estimateLines", "payload": _ESTIMATE},
     {"name": "estimate_lines_nopricing", "action": "estimateLines",
      "payload": {**_ESTIMATE, "cost": {"computable": False, "reason": "没有配置模型单价"}}},
+    {"name": "estimate_lines_priced", "action": "estimateLines",
+     "payload": {**_ESTIMATE, "cost": {
+         "computable": True, "currency": "CNY",
+         "low": {"amount": "2.00", "amount_exact": "2", "currency": "CNY"},
+         "high": {"amount": "5.25", "amount_exact": "5.25", "currency": "CNY"},
+     }}},
     {"name": "estimate_lines_nohistory", "action": "estimateLines",
      "payload": {"mode": "full", "planned_files": None, "tokens": {"low": None, "high": None},
                  "duration_ms": {"low": None, "high": None},
@@ -397,6 +403,7 @@ def _probe_source(rel: str) -> str:
         _function_source(script, "weeklyAiTokensText"),
         _function_source(script, "weeklyAiDurationText"),
         _function_source(script, "weeklyAiBaselineText"),
+        _function_source(script, "weeklyAiMoneyText"),
         _function_source(script, "weeklyAiEstimateLines"),
         _function_source(script, "weeklyAiEstimateNote"),
         _function_source(script, "weeklyAiNoteMismatchAccepted"),
@@ -535,6 +542,14 @@ def test_the_estimate_never_invents_a_price_when_the_price_table_is_missing(rel:
     facts = dict((pair[0], pair[1]) for pair in _case(rel, "estimate_lines_nopricing")["lines"])
     assert facts["预计费用"] == "未配置模型单价，只能给 token 与时间", facts["预计费用"]
     assert "token" in facts["预计 token"] and "分钟" in facts["最近一次实际耗时"], facts
+
+
+@with_rels
+def test_the_estimate_formats_the_money_objects_instead_of_object_object(rel: str):
+    """费用端点是结构化金额对象；确认框必须取展示金额，不能隐式转字符串。"""
+    facts = dict((pair[0], pair[1]) for pair in _case(rel, "estimate_lines_priced")["lines"])
+    assert facts["预计费用"] == "2.00 ~ 5.25 CNY", facts["预计费用"]
+    assert "[object Object]" not in facts["预计费用"]
 
 
 @with_rels

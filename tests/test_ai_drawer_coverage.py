@@ -82,6 +82,32 @@ def _weekly_payload(project_id: int, group_key: str) -> dict:
     }
 
 
+def test_compensation_and_dependency_inputs_are_visible_in_scope_and_coverage_text():
+    """补偿/依赖文件进入机器账后，也必须在人读报告中说明来源与数量。"""
+    payload = _weekly_payload(1, "visible-extra-inputs")
+    payload["summary"].update({"compensation_files": 2, "dependency_files": 1})
+    payload["compensation_files"] = [
+        {"file_path": "config/上轮未读A.xlsx", "reason": "previous_uncovered"},
+        {"file_path": "code/上轮未读B.lua", "reason": "previous_failed"},
+    ]
+    payload["dependency_files"] = [
+        {"file_path": "code/协议消费者.lua", "reason": "baseline_finding_reference"},
+    ]
+
+    from services.ai.change_set import _scope_note
+
+    scope = _scope_note(payload)
+    assert "2 个上轮未覆盖补偿项" in scope
+    assert "1 个依赖核查项" in scope
+
+    ledger = coverage_ledger.build_ledger(request_payload=payload, executed=[])
+    assert ledger["counts"]["compensation_files"] == 2
+    assert ledger["counts"]["dependency_files"] == 1
+    rendered = "\n".join(f"{key}: {value}" for key, value in ledger["rows"])
+    assert "上轮未覆盖补偿" in rendered
+    assert "依赖核查" in rendered
+
+
 def _fetched(kind: str, path: str, text: str) -> SimpleNamespace:
     """逐轮明细里的一条（`trace_evidence.summarize_executed` 按属性读它）。"""
     return SimpleNamespace(

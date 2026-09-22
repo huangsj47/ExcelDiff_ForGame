@@ -723,21 +723,38 @@ def settle_from_run(run):
         # 猜错的代价是把一条还在跑的 job 判死（用户再也等不到结论）。
         return None
 
-    job = _job_of_run(run)
-    if job is None:
+    jobs = (
+        AiAnalysisJob.query.filter(AiAnalysisJob.run_id == getattr(run, "id", None))
+        .order_by(AiAnalysisJob.id.desc())
+        .all()
+    )
+    if not jobs:
+        fallback = _job_of_run(run)
+        jobs = [fallback] if fallback is not None else []
+    if not jobs:
         return None
-    if _is_terminal(job):
-        return job
-    job.state = new_state
-    job.run_id = getattr(run, "id", job.run_id)
-    job.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    job.active_key = None
-    job.lease_expires_at = None
-    error_message = str(getattr(run, "error_message", "") or "").strip()
-    if new_state == STATE_FAILED and error_message:
-        job.error_message = error_message
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    try:
+        request_payload = json.loads(getattr(run, "request_payload", None) or "{}")
+    except (TypeError, ValueError):
+        request_payload = {}
+    policy = request_payload.get("policy") or {}
+    for job in jobs:
+        if _is_terminal(job):
+            continue
+        job.state = new_state
+        job.run_id = getattr(run, "id", job.run_id)
+        job.effective_mode = getattr(run, "scope", None) or job.effective_mode
+        if job.requested_mode == MODE_INCREMENTAL and job.effective_mode == MODE_FULL:
+            job.upgrade_reason = str(policy.get("reason") or job.upgrade_reason or "runtime_scope_upgrade")
+        job.finished_at = now
+        job.active_key = None
+        job.lease_expires_at = None
+        error_message = str(getattr(run, "error_message", "") or "").strip()
+        if new_state == STATE_FAILED and error_message:
+            job.error_message = error_message
     db.session.flush()
-    return job
+    return jobs[0]
 
 
 def settle_without_run(job_id, *, reason, state=None, message=None):
@@ -1122,6 +1139,10 @@ def result_payload(job) -> Optional[dict]:
     那一支，而不是拿到一个空壳当成一份结论。
     """
     run = _run_of_job(job)
+    if run is None and getattr(job, "reused_run_id", None):
+        from models.ai_analysis import AiAnalysisRun
+
+        run = db.session.get(AiAnalysisRun, job.reused_run_id)
     if run is None:
         return None
     parsed = _parsed_payload(getattr(run, "response_payload", None))
@@ -1149,8 +1170,37 @@ def progress_payload(job) -> Optional[dict]:
 
         snap = run_progress.snapshot(run.id)
     except Exception:  # noqa: BLE001 —— 进度只是给界面看的一眼，读不到不该打断流
+        snap = None
+    if snap is not None:
+        return snap.to_dict()
+    return _parsed_payload(getattr(job, "progress_json", None))
+
+
+def progress_payload_for_run(run_id: int) -> Optional[dict]:
+    """按 run 读取进度；Web 与 worker 分进程时退回 job 的持久化快照。"""
+    if not run_id:
         return None
-    return snap.to_dict() if snap is not None else None
+    job = (
+        AiAnalysisJob.query.filter(AiAnalysisJob.run_id == run_id)
+        .order_by(AiAnalysisJob.progress_updated_at.desc(), AiAnalysisJob.id.desc())
+        .first()
+    )
+    return progress_payload(job) if job is not None else None
+
+
+def persist_progress(run_id, payload: dict) -> None:
+    """把显示用进度写到所有附着于该 run 的 job；失败不得影响模型分析。"""
+    if not run_id or not isinstance(payload, dict):
+        return
+    rows = AiAnalysisJob.query.filter(AiAnalysisJob.run_id == run_id).all()
+    if not rows:
+        return
+    encoded = json.dumps(payload, ensure_ascii=False)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    for row in rows:
+        row.progress_json = encoded
+        row.progress_updated_at = now
+    db.session.commit()
 
 
 def _run_of_job(job):

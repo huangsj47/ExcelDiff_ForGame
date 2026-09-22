@@ -187,7 +187,8 @@ def test_a_repeated_request_gets_a_pointer_instead_of_the_body_again():
     second = tools.execute([_diff_request()]).items[0]
 
     assert first.meta["truncated"] is True, "首次该截断还是要截断"
-    assert second.meta == {"repeat_pointer": True}
+    assert second.meta["repeat_pointer"] is True
+    assert second.meta["chunk_id"] == first.meta["chunk_id"]
     assert (second.kind, second.label) == (first.kind, first.label), "指针丢了回查地址"
     assert f"### [{first.kind}] {first.label}" in second.text, "没告诉模型内容在哪一节"
     assert "不要再次索取" in second.text, "没告诉模型不用再要一遍"
@@ -343,6 +344,19 @@ def test_the_shared_cache_counts_as_a_hit_not_an_execution():
     assert counters["executions"] == 0, "没有真的去取数"
     assert counters["produced_chars"] == len(item.text)
     assert counters["source_chars"] == len(item.text)
+    assert counters["cross_member_replayed_chars"] == len(item.text)
+
+
+def test_tool_stats_measure_saved_duplicate_chars_and_unscoped_full_reads():
+    tools = ContextTools(FakeProvider(file_content="正文" * 500))
+    request = ContextRequest(type="file_content", commit=COMMIT_A, path=PATH_B)
+    first = tools.execute([request]).items[0]
+    second = tools.execute([request]).items[0]
+
+    counters = tools.stats["file_content"]
+    assert counters["avoided_duplicate_chars"] == len(first.text) - len(second.text)
+    assert counters["unscoped_content_requests"] == 2
+    assert first.meta["chunk_id"] == second.meta["chunk_id"]
 
 
 def test_without_a_shared_cache_nothing_is_shared():

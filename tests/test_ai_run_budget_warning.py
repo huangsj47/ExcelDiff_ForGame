@@ -426,6 +426,35 @@ def test_the_progress_endpoint_reports_no_progress_instead_of_zero(client, monke
     assert "budget" in body
 
 
+def test_the_progress_endpoint_falls_back_to_a_worker_process_snapshot(client, monkeypatch):
+    """Web 进程没有内存帧时，运行级轮询必须读取 job 的持久化帧。"""
+    with flask_app.app_context():
+        create_tables()
+        run = _run_row()
+        db.session.commit()
+        run_id = run.id
+
+    persisted = {
+        "run_id": run_id,
+        "round": 3,
+        "max_rounds": 8,
+        "prompt_tokens": 1000,
+        "completion_tokens": 200,
+        "cache_read_tokens": 700,
+        "job_tokens": 1200,
+    }
+    monkeypatch.setattr(ai_routes, "_has_project_access", lambda _pid: True)
+    monkeypatch.setattr(ai_routes.run_progress, "snapshot", lambda _rid: None)
+    monkeypatch.setattr(
+        ai_routes.job_service, "progress_payload_for_run", lambda _rid: persisted
+    )
+
+    body = client.get(f"/ai-analysis/runs/{run_id}/progress").get_json()
+
+    assert body["progress"]["round"] == 3
+    assert body["progress"]["job_tokens"] == 1200
+
+
 def test_the_progress_endpoint_folds_the_live_usage_into_the_verdict(client, monkeypatch):
     """跑中的那份判定要**含本次运行尚未落库的用量** —— 这正是这个端点的用途。"""
     with flask_app.app_context():

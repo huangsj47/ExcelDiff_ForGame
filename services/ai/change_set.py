@@ -333,6 +333,15 @@ def _scope_note(payload: Mapping[str, object]) -> str:
             f"（其余 {window - batch} 个在上次分析时就已在窗口里，这次没有重新给）。"
             "报告里不要把它说成「本版本整体没问题」。"
         )
+    extras: list[str] = []
+    compensation = _positive_int(summary.get("compensation_files"))
+    dependency = _positive_int(summary.get("dependency_files"))
+    if compensation:
+        extras.append(f"{compensation} 个上轮未覆盖补偿项")
+    if dependency:
+        extras.append(f"{dependency} 个依赖核查项")
+    if extras:
+        note += "本次输入还包含" + "、".join(extras) + "；它们不是本轮新增改动，报告须单独标明来源。"
     return note + _focus_note(payload)
 
 

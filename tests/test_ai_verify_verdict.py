@@ -570,7 +570,8 @@ class TestTheRulingSection:
     def test_it_lists_the_rejected_items(self):
         section = self._section(new=[_obj(title="", evidence=())])
 
-        assert "被拒" in section or "没有进入清单" in section
+        assert "复核阶段记账" in section
+        assert "只记录对账轮" in section
         assert "缺标题或证据" in section
 
     def test_a_run_without_any_verdict_says_so(self):

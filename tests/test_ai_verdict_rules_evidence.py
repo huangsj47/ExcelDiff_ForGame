@@ -10,9 +10,8 @@
 `F1`…`F17`（实测条数也不等：13 对 17），读者没法把裁决落回正文那一条。映射只按**可复现的
 判据**（同一 `file_path` / 标题词集）建立，**对不上时宁可不写**（写错比不写糟得多）。
 
-**三、依据要有形状校验。** `F3` 的第二条依据是
-`…TmsTeamMgrMod.lua:diff@@ -61,66 +66,26 @@` —— diff 的 hunk 头，照它定位不到任何东西，
-而审计的完成标准是「所有 high/critical 结论具有可定位快照证据」。
+**三、依据要有形状校验。** 完整的 unified diff hunk（文件路径 + old/new 行区间）可以在
+固定 commit 上复现，应当算可定位证据；`diff@@` 残片、缺路径的 hunk 和散文仍必须拒绝。
 
 **四、证据有缺口不得维持 `very_high`。** `F1` 是 critical/very_high 且裁决「维持」，而信息
 缺口里写着它引用的 `ProtoCScs.lua` 的 diff 被长度上限截断过；`F3` 转人工的原因是
@@ -61,8 +60,9 @@ COMMIT = "b" * 40
 LUA = "code/qz_server/src/tms/module/TmsTeamMgrMod.lua"
 PROTO = "code/qz_server/src/proto/ProtoCScs.lua"
 TABLE = "config/[30]道具表_CfgItem.xlsx"
-# 实测 run 15 里那条**不可定位**的依据（diff 的 hunk 头，不是行号）。
-HUNK_REF = f"{LUA}:diff@@ -61,66 +66,26 @@"
+# Run 22 实测使用的标准 unified diff 定位符；旧版把它误判为不可定位并压低置信度。
+HUNK_REF = f"{LUA} @@ -61,66 +66,26 @@"
+LEGACY_HUNK_REF = f"{LUA}:diff@@ -61,66 +66,26 @@"
 
 
 def _anomaly(**overrides) -> Anomaly:
@@ -294,8 +294,17 @@ class TestTheBodyLabelMapping:
 
 
 class TestTheEvidenceRefShape:
-    def test_the_run_15_hunk_header_is_not_locatable(self):
-        assert is_locatable_ref(HUNK_REF) is False
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            HUNK_REF,
+            LEGACY_HUNK_REF,
+            f"{LUA} @@ -61 +66 @@ validate_member",
+            f"`{LUA} @@ -61,0 +66,4 @@`",
+        ],
+    )
+    def test_a_complete_unified_diff_hunk_is_locatable(self, ref):
+        assert is_locatable_ref(ref) is True
 
     @pytest.mark.parametrize(
         "ref",
@@ -325,7 +334,9 @@ class TestTheEvidenceRefShape:
             "",
             "   ",
             "没有冒号的一段话",
-            f"{LUA}:diff@@ -61,66 +66,26 @@",
+            f"{LUA}:diff@@ -61,66 + @@",  # new 坐标不完整
+            f"{LUA} @@ -61,66 @@",  # 缜密语法要求同时给出 old/new 坐标
+            "@@ -61,66 +66,26 @@",  # 没有文件路径
             f"{LUA}:第 61 行",  # 行号与散文混在一起
             f"{LUA}:61,66",  # 逗号分隔不是行范围
             f"{LUA}:Sheet1",  # `.lua` 没有 sheet —— 这是自由文本，不是坐标
@@ -365,7 +376,7 @@ class TestTheEvidenceRefShape:
         assert row.unlocatable_refs == ()
         assert "（不可定位）" not in render_ruling(reduction, review_ran=True)
 
-    def test_all_refs_unlocatable_cannot_stay_very_high(self):
+    def test_a_complete_hunk_keeps_very_high_confidence(self):
         reduction = reduce_findings(
             [_anomaly()],
             verdicts=(
@@ -379,9 +390,29 @@ class TestTheEvidenceRefShape:
         )
 
         row = _row(reduction)
+        assert row.active
+        assert row.anomaly.confidence == "very_high"
+        assert row.unlocatable_refs == ()
+        assert row.evidence_capped is False
+
+    def test_all_refs_unlocatable_cannot_stay_very_high(self):
+        bad_ref = f"{LUA}:diff@@ -61,66 + @@"
+        reduction = reduce_findings(
+            [_anomaly()],
+            verdicts=(
+                VerifyVerdict(
+                    finding_id="F1",
+                    verdict=VERDICT_CONFIRMED,
+                    reason="查了调用点，没找到反证",
+                    evidence_refs=(bad_ref,),
+                ),
+            ),
+        )
+
+        row = _row(reduction)
         assert row.active, "「不可定位」不是撤销的理由 —— 它只是不能当证据用"
         assert row.anomaly.confidence == CONFIDENCE_CEILING_WITH_GAP
-        assert row.unlocatable_refs == (HUNK_REF,)
+        assert row.unlocatable_refs == (bad_ref,)
         assert row.evidence_capped is True
         assert "没有一条能定位" in row.note
 
@@ -401,7 +432,7 @@ class TestTheEvidenceRefShape:
 
         row = _row(reduction)
         assert row.anomaly.confidence == "very_high", "有一条能定位的依据撑着，不压"
-        assert row.unlocatable_refs == (HUNK_REF,)
+        assert row.unlocatable_refs == ()
         assert row.evidence_capped is False
         assert row.note == ""
 
@@ -419,10 +450,10 @@ class TestTheEvidenceRefShape:
 
         section = render_ruling(reduction, review_ran=True)
         assert HUNK_REF in section, "模型写了什么，一字不许改写"
-        assert f"{HUNK_REF}（不可定位）" in section
+        assert f"{HUNK_REF}（不可定位）" not in section
         ruling = reduction.as_dict()
         assert ruling["rows"][0]["evidence_refs"] == [HUNK_REF], "机器可读的原文一字不动"
-        assert ruling["rows"][0]["unlocatable_refs"] == [HUNK_REF]
+        assert ruling["rows"][0]["unlocatable_refs"] == []
 
     def test_a_locatable_ref_alone_is_not_marked(self):
         reduction = reduce_findings(

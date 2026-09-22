@@ -357,6 +357,12 @@ def build_ledger(
         "list_truncated": list_truncated,
         "truncation_reason": truncation_reason,
         "tool_stats_recorded": totals["recorded"],
+        "compensation_files": _count(
+            _as_mapping(payload.get("summary")).get("compensation_files")
+        ) or len(payload.get("compensation_files") or []),
+        "dependency_files": _count(
+            _as_mapping(payload.get("summary")).get("dependency_files")
+        ) or len(payload.get("dependency_files") or []),
     }
     ledger = {
         "mode": inventory["mode"],
@@ -485,6 +491,13 @@ def coverage_rows(ledger: Mapping[str, Any]) -> list[tuple[str, str]]:
             rows.append(("覆盖（列出的名字）", f"{batch} 个文件的名称都列进了提示词"))
         else:
             rows.append(("覆盖（列出的名字）", UNKNOWN))
+
+    compensation = _count(counts.get("compensation_files")) or 0
+    dependency = _count(counts.get("dependency_files")) or 0
+    if compensation:
+        rows.append(("补偿输入", f"包含 {compensation} 个上轮未覆盖补偿项，按本轮证据重新核查"))
+    if dependency:
+        rows.append(("依赖输入", f"包含 {dependency} 个依赖核查项，用于验证改动的上下游影响"))
 
     if not evidence.get("collected"):
         rows.append(
