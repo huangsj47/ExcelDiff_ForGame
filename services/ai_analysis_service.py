@@ -10,7 +10,7 @@ import hashlib
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Mapping, Optional, Tuple
 
 from sqlalchemy.exc import IntegrityError
 
@@ -473,6 +473,25 @@ def _load_project_skills(project_id: int) -> Tuple[object, str]:
     except Exception as exc:  # noqa: BLE001
         log_print(f"⚠️ AI 分析：skill 加载失败（project={project_id}）: {exc}")
         return None, describe_load_error(exc, _REPO_ROOT)
+
+
+def _delta_bases(payload: Mapping[str, object]) -> dict:
+    """增量那一段的基线表，键 `(latest_commit_id, file_path)`。
+
+    来源是 payload 的 `delta_files`（写入侧在 `_summarize_weekly_files` 里按做差基准
+    填的 `diff_base_commit_id`）。**键里带提交号**：同一个相对路径可能出现在两个仓库里，
+    而提交号能把它分清。
+    """
+    bases: dict = {}
+    for item in payload.get("delta_files") or ():
+        if not isinstance(item, Mapping):
+            continue
+        base = str(item.get("diff_base_commit_id") or "").strip()
+        commit = str(item.get("latest_commit_id") or "").strip()
+        path = str(item.get("file_path") or "").strip()
+        if base and commit and path:
+            bases[(commit, path)] = base
+    return bases
 
 
 def _apply_model_window(
@@ -1189,6 +1208,12 @@ def _run_engine_and_persist(
             loaded=loaded, scope=change.scope,
             manifest=change.manifest,
             use_stored_batch_diff=(payload.get("mode") != "commit"),
+            # 增量分析里每个变化文件的**比较基线**（上一轮看到的那条提交），键
+            # `(latest_commit_id, file_path)`。有它时那个文件的 diff 是
+            # 「上一轮 → 这一轮」两点对比，而不是整窗口的合并差异 —— 见
+            # `platform_provider._delta_diff`。单提交分析不带（`delta_files` 只在周
+            # 版本 payload 里）。
+            delta_bases=_delta_bases(payload),
         ),
         "loaded": loaded,
         "scope": change.scope,

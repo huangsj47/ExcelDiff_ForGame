@@ -416,6 +416,20 @@ def _operation(value: object) -> str:
     return text if text in ("A", "M", "D") else "M"
 
 
+def _count_delta_bases(payload: Mapping[str, object]) -> int:
+    """有多少个文件的差异是「上一轮之后那一段」（见 `_scope_note`）。
+
+    **数的是写入侧真的填了基线的那些**，不是「范围是增量」：全量分析、新文件、
+    补偿项都拿不到基线，那时窗口那一份**就是**它的全部改动，说「只给了新增那一段」
+    是错的。
+    """
+    total = 0
+    for item in payload.get("delta_files") or ():
+        if isinstance(item, Mapping) and str(item.get("diff_base_commit_id") or "").strip():
+            total += 1
+    return total
+
+
 def _positive_int(value: object) -> Optional[int]:
     """转成正整数；转不出来或 <= 0 时返回 `None`（0 与缺值同义：这条数没得用）。"""
     try:
@@ -460,6 +474,18 @@ def _scope_note(payload: Mapping[str, object]) -> str:
             f"**这次输入覆盖的是本版本改动过的 {window} 个文件里的 {batch} 个**"
             f"（其余 {window - batch} 个在上次分析时就已在窗口里，这次没有重新给）。"
             "报告里不要把它说成「本版本整体没问题」。"
+        )
+    # **每个文件的差异也不再是整个窗口了。** 增量时写入侧给了每个变化文件一个比较
+    # 基线（上一轮看到的那条提交），模型拿到的就是「上一轮 → 这一轮」那一段。不说明
+    # 这一点，它会把这周更早的改动当成「不存在」——「这里没有」与「这周没改过」在报告
+    # 里是完全不同的两句话。
+    delta_count = _count_delta_bases(payload)
+    if delta_count:
+        note += (
+            f"其中 {delta_count} 个文件这次**只给了上次分析之后新增的那一段**"
+            "（差异正文里会写明是「上一轮分析之后新增的那一段」）。"
+            "它们在本版本更早的改动已经在上次分析里看过，**不在这份输入里** ——"
+            "不要把这部分说成「没有改动」或「这周没改过」。"
         )
     extras: list[str] = []
     compensation = _nonneg_int(summary.get("compensation_files"))

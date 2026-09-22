@@ -320,6 +320,22 @@ def _summarize_weekly_files(
             "commit_count": entry.commit_count,
             "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
         }
+        # **这一轮该拿哪两个版本去比**：身份里上一轮那条 `latest` 就是基线。
+        # 增量分析的语义是「上一轮之后新增的那一段」，而不是把整窗口再讲一遍 ——
+        # 没有这一项，模型对每个文件的正文仍然是整窗口的合并 diff（多付一遍 token，
+        # 也把「这次变了什么」淹在「这周一共改了什么」里）。
+        #
+        # 取不到就不写：新文件（基线里没有它）与补偿/依赖项（这一轮没变）本来就该
+        # 给整窗口那一份 —— 那时整窗口**就是**它的全部改动。
+        prev_latest = None
+        if baseline is not None:
+            prev_latest = snapshot_store.identity_latest(
+                (getattr(baseline, "items", None) or {}).get(
+                    (entry.config_id, entry.file_path)
+                )
+            )
+        if prev_latest and prev_latest != entry.latest_commit_id:
+            item["diff_base_commit_id"] = prev_latest
         if (entry.config_id, entry.file_path) in compensated_keys:
             # **明确列出来**：这一条不是「这次变了」，而是「上一轮没看到，这轮补上」。
             # 两条不分开写，读者会把补偿项当成新变更，于是「这周改了什么」那本账就错了。

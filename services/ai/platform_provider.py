@@ -142,6 +142,20 @@ def render_diff_payload(
 # --------------------------------------------------------------------------
 
 
+def _delta_provenance(base_commit_id: str, commit: str) -> str:
+    """增量那一段的出处说明。**必须有**：模型读到的是「增量」，而这一份只覆盖
+
+    `上一轮 → 这一轮`。不写清楚，它会把「本版本更早的改动不在里面」读成「那些改动
+    不存在」—— 与 `_batch_provenance` 是同一件事的两个方向：那个说明「这里比你以为的
+    宽」，这个说明「这里比你以为的窄」。
+    """
+    return (
+        f"（出处：**上一轮分析之后新增的那一段** —— {str(base_commit_id)[:8]} … "
+        f"{str(commit)[:8]}。这个文件在本版本更早的改动**已经在上次分析里看过**，"
+        "不在这份差异里；不要把「这里没有」说成「这周没改过」。）"
+    )
+
+
 def _render_excel(payload: Mapping[str, Any], *, path: str, max_rows: int) -> str:
     where = path or str(payload.get("file_path") or "")
 
@@ -627,9 +641,18 @@ class PlatformContextProvider:
         use_stored_batch_diff: bool = True,
         scope: AnalysisScope | None = None,
         manifest=None,
+        delta_bases: Optional[Mapping[Any, str]] = None,
     ):
         self._loaded = loaded
         self._max_rows = max_rows_per_sheet
+        # 增量分析里**上一轮看到的那条提交**，键是 `(latest_commit_id, file_path)`。
+        #
+        # 有它的时候，这个文件的 diff 是 `上一轮的 latest → 这一轮的 latest` 两点对比，
+        # 而不是缓存里那一份整窗口的合并差异（见 `_delta_diff`）。理由：增量说的是
+        # 「上次分析之后新增的部分」，把整窗口再讲一遍既多付一遍 token，也把「这次变了
+        # 什么」淹在「这周一共改了什么」里。没有它（新文件 / 这一轮没变的补偿项 /
+        # 全量分析）就照旧给整窗口那一份 —— 那时整窗口**就是**它的全部改动。
+        self._delta_bases = dict(delta_bases or {})
         # 本批次的范围（哪些提交、各改了哪些文件）。只有 `find_references` 用它 —— 那个
         # 工具的问题是「这个标识符本批次里还有谁在用」，而「本批次」正是 scope 知道、
         # 别处都不知道的事（见 `ai/scope.py::batch_paths`）。不传时为 None：那几处
@@ -756,7 +779,15 @@ class PlatformContextProvider:
 
         为什么要有那个布尔值：失败说明是一句完整的话（`[取数失败] … 这不等于「没有改动」`），
         与真差异在调用方眼里长得一样 —— 没有它，「本地算不出来」就只能是终点。
+
+        顺序：**先看增量基线**（有它才是「上一轮之后新增的那一段」），再退回平台已落库的
+        整窗口合并 diff，最后才现场重算。取数失败时逐级放宽并各自带上出处说明 ——
+        「退回了更宽的那一份」必须写在给模型的文本里，否则它会把更早的改动说成这次的。
         """
+        delta = self._delta_diff(row, commit, path)
+        if delta is not None:
+            return delta
+
         if self._use_stored_batch_diff:
             stored, provenance = _weekly_stored_diff(
                 getattr(row, "repository_id", None), path, commit
@@ -791,6 +822,42 @@ class PlatformContextProvider:
         # 渲染不出来（认不出的结构）与失败载荷（读不到内容）都算「没拿到真差异」——
         # 两者都要让调用方去问 Agent，而`rendered` 仍然返回：问不到时它就是如实的原因。
         return rendered, rendered is None or _is_failed_payload(payload)
+
+    def _delta_diff(self, row, commit: str, path: str):
+        """增量的那一段：`上一轮的 latest → 这一轮的 latest`。
+
+        返回 `None` 表示「这一轮不走这条路」（没有基线 —— 新文件 / 补偿项 / 全量分析），
+        调用方照旧给整窗口那一份。**取数失败也返回 `None`**：那是「退回了更宽的那一份」，
+        而更宽那一份自带 `_batch_provenance` 的出处说明，读的人知道它覆盖了整个批次。
+        这里绝不返回一句「没有改动」——那份载荷是空的，不等于这个文件没变。
+        """
+        base_commit_id = self._delta_bases.get((str(commit), str(path)))
+        if not base_commit_id:
+            return None
+        try:
+            from types import SimpleNamespace
+
+            from services.vcs_content_service import get_unified_diff_data
+
+            # 虚拟基线：`get_unified_diff_data` 只从它身上读 `commit_id`
+            # （同 `commit_diff_logic` 里那处假基线，属性集由
+            # `tests/test_commit_diff_virtual_baseline.py` 钉着）。
+            previous = SimpleNamespace(
+                commit_id=str(base_commit_id), path=path,
+                repository_id=getattr(row, "repository_id", None),
+            )
+            payload = get_unified_diff_data(row, previous)
+        except Exception as exc:  # noqa: BLE001 —— 取数失败只该让这一条降级
+            log_print(
+                f"⚠️ AI 取数：增量区间 diff 失败 {commit[:12]} {path}: "
+                f"{type(exc).__name__}: {exc}（退回整窗口那一份）"
+            )
+            return None
+
+        rendered = render_diff_payload(payload, path=path, max_rows_per_sheet=self._max_rows)
+        if not rendered or _is_failed_payload(payload):
+            return None
+        return (f"{_delta_provenance(base_commit_id, commit)}\n{rendered}", False)
 
     def file_content(self, commit: str, path: str, lines: str = "") -> Optional[str]:
         """某个文件在这个提交上的正文（默认只给**一段窗口**，见下）。

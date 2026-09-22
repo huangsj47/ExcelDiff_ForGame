@@ -52,8 +52,21 @@ from services.ai.trace_evidence import decode_evidence
 
 #: 条目键：`(config_id, file_path)`。与模型上的唯一索引是同一对。
 ItemKey = Tuple[int, str]
-#: 内容身份：`(base_commit_id, latest_commit_id, diff_version)`。
-Identity = Tuple[Optional[str], Optional[str], Optional[str]]
+#: 内容身份：`(base_commit_id, latest_commit_id, diff_version, commit_count)`。
+#: 与 `AiDiffSnapshotItem.identity()` 逐项对应 —— 改那边必须改这里（`commit_count`
+#: 是 2026-09 补的第四项，别名当时漏了，而漏掉一个类型注解不会有任何报错）。
+Identity = Tuple[Optional[str], Optional[str], Optional[str], int]
+
+
+def identity_latest(identity: Optional[Sequence[Any]]) -> Optional[str]:
+    """身份元组里的 `latest_commit_id`。
+
+    下标**只写在这一处**：身份的项数变过一次（加 `commit_count` 时是往末尾加的），
+    调用点直接写 `identity[1]` 的话，将来在中间插一项就会静默错位。
+    """
+    if not identity or len(identity) < 2:
+        return None
+    return identity[1]
 
 #: 完整覆盖门槛的**默认值**（可被项目配置的 `complete_coverage_ratio` 覆盖）。
 #:
