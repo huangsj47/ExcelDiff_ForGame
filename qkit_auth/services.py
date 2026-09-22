@@ -848,6 +848,13 @@ def request_create_project(
     if existing_project:
         return False, f"项目编码 '{code}' 已存在"
 
+    # 折成同一个知识包目录的代号也不许并存（见 services/project_code_rules.py）。
+    from services.project_code_rules import slug_conflict, slug_conflict_message
+
+    conflict = slug_conflict(code)
+    if conflict is not None:
+        return False, slug_conflict_message(code, conflict)
+
     pending = QkitAuthProjectCreateRequest.query.filter_by(
         project_code=code,
         status=QkitRequestStatus.PENDING.value,
@@ -888,6 +895,15 @@ def handle_create_project_request(
         existing = Project.query.filter_by(code=req.project_code).first()
         if existing:
             return False, f"项目编码 '{req.project_code}' 已存在，无法创建"
+
+        # 申请是通过之后才建的，所以这里也要判一次 —— 判据只有一份
+        # （`services/project_code_rules.py`）：申请提交到审批之间，可能已经有
+        # 另一个折成同名的项目建起来了。
+        from services.project_code_rules import slug_conflict, slug_conflict_message
+
+        conflict = slug_conflict(req.project_code)
+        if conflict is not None:
+            return False, slug_conflict_message(req.project_code, conflict)
 
         project = Project(
             code=req.project_code,

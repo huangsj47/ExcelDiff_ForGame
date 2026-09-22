@@ -1084,6 +1084,15 @@ def register_agent_node():
             project_code = spec["code"]
             project = Project.query.filter_by(code=project_code).first()
             if project is None:
+                # 折成同一个知识包目录的代号也不许并存（见 project_code_rules）：
+                # 建出来两个项目会共用一份知识包，读写全串。走 `conflict_projects`
+                # 那一条既有出口，返回的 409 里能看出是哪个代号挡住的。
+                from services.project_code_rules import slug_conflict
+
+                folded = slug_conflict(project_code)
+                if folded is not None:
+                    conflict_projects.append(project_code)
+                    continue
                 project = Project(
                     code=project_code,
                     name=spec.get("name") or project_code,

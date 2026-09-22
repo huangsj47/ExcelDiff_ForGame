@@ -332,6 +332,15 @@ def projects():
             flash("项目代号已存在", "error")
             return redirect(url_for("index"))
 
+        # 折成同一个知识包目录的代号也不许并存（`unique=True` 是大小写敏感的，
+        # 而目录名会 lower —— 见 `services/project_code_rules.py`）。
+        from services.project_code_rules import slug_conflict, slug_conflict_message
+
+        conflict = slug_conflict(code)
+        if conflict is not None:
+            flash(slug_conflict_message(code, conflict), "error")
+            return redirect(url_for("index"))
+
         if is_agent_dispatch_mode() and not has_any_agent_nodes:
             flash("暂未启动任何节点，请先启动并注册至少一个Agent节点后再创建项目。", "error")
             return redirect(url_for("index"))
