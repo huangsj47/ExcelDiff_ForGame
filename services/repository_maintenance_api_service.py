@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from sqlalchemy.exc import SQLAlchemyError
+from services.repository_sync_window import apply_start_date, resolve_sync_window
 from services.task_worker_priority import EXCEL_DIFF_DEFAULT, MAINTENANCE_REBUILD
 
 
@@ -247,25 +248,27 @@ def handle_sync_repository(
                 return jsonify({"status": "error", "message": f"Git操作失败: {message}"}), 500
 
             log_print(f"✅ [MANUAL_SYNC] Git操作成功: {message}", "INFO")
+            # 与后台同步同一个口径：**分支 tip 变了没有**优先，日期水位线兜底
+            # （理由见 `services/repository_sync_window.py`）。
             latest_commit = Commit.query.filter_by(repository_id=repository_id).order_by(Commit.commit_time.desc()).first()
-            since_date = None
-            if latest_commit and latest_commit.commit_time:
-                since_date = latest_commit.commit_time
-                log_print(f"🔍 [MANUAL_SYNC] 从最新提交时间开始增量同步: {since_date}", "INFO")
-            else:
-                log_print("🔍 [MANUAL_SYNC] 首次同步，获取最近800个提交", "INFO")
-
             repository = db.session.get(Repository, repository_id)
-            if repository and repository.start_date:
-                if since_date is None or since_date < repository.start_date:
-                    since_date = repository.start_date
-                    log_print(f"🔍 [MANUAL_SYNC] 应用仓库配置的起始日期限制: {since_date}", "INFO")
+            window = resolve_sync_window(
+                git_service, repository,
+                latest_known_commit_time=getattr(latest_commit, 'commit_time', None),
+            )
+            log_print(f"🔍 [MANUAL_SYNC] 采集口径：{window.reason}", "INFO")
 
-            limit = 800 if not since_date else 1000
+            limit = 800 if not window.since_date else 1000
             import time
 
             start_time = time.time()
-            commits = git_service.get_commits_threaded(since_date=since_date, limit=limit)
+            commits = git_service.get_commits_threaded(
+                since_date=window.since_date, limit=limit,
+                rev_range=window.rev_range,
+            )
+            if window.rev_range:
+                # 区间不看日期，但 `start_date` 是用户声明的下界，仍然作数。
+                commits = apply_start_date(commits, repository.start_date)
             end_time = time.time()
             log_print(
                 f"⚡ [THREADED_GIT] 多线程获取提交记录耗时: {(end_time - start_time):.2f}秒, 提交数: {len(commits)}",
@@ -274,12 +277,21 @@ def handle_sync_repository(
             log_print(f"🔍 [MANUAL_SYNC] 获取到 {len(commits)} 个提交记录")
             commits_added = 0
             excel_tasks_added = 0
+            # 判重键必须是 `(commit_id, path)`：`get_commits` 对一次提交里**每一个**
+            # 变更文件各产出一条记录（commit_id 是同一个 hexsha），只按 commit_id 判重
+            # 会让同一次提交的第 2 个文件起全被跳过 —— 评审者看到的那条提交等于
+            # 确认了没看过的改动（后台同步那条路修过同一个坑）。
+            existing_pairs = {
+                (row[0], row[1] or '')
+                for row in db.session.query(Commit.commit_id, Commit.path)
+                .filter(Commit.repository_id == repository_id)
+                .filter(Commit.commit_id.in_([cd['commit_id'] for cd in commits] or ['']))
+                .all()
+            }
             for i, commit_data in enumerate(commits):
-                existing_commit = Commit.query.filter_by(
-                    repository_id=repository_id,
-                    commit_id=commit_data["commit_id"],
-                ).first()
-                if not existing_commit:
+                pair = (commit_data["commit_id"], commit_data.get("path", "") or "")
+                if pair not in existing_pairs:
+                    existing_pairs.add(pair)
                     new_commit = Commit(
                         repository_id=repository_id,
                         commit_id=commit_data["commit_id"],
@@ -306,6 +318,10 @@ def handle_sync_repository(
                         log_print(f"📊 [MANUAL_SYNC] 添加Excel缓存任务: {commit_data.get('path', '')}")
                 else:
                     log_print(f"⏭️ [MANUAL_SYNC] 跳过已存在提交 {i + 1}/{len(commits)}: {commit_data['commit_id'][:8]}")
+            # 记下这一轮的 tip：不记的话下一轮（不论手工还是后台）还会拿同一个旧区间
+            # 再采一遍 —— 判重键是 `(commit_id, path)`，重采不会插重行，但白扫一次。
+            if window.tip:
+                repository.last_synced_tip = window.tip
             db.session.commit()
             clear_repository_sync_error(
                 db.session,

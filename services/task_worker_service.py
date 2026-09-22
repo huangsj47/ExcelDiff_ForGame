@@ -112,6 +112,7 @@ from services.ai.analysis_budget import budget_gate_reason
 # 里紧跟 `fail_orphaned_analysis_runs()` 的那一步）。写侧只有一份，实现在 `job_service`。
 from services.ai.job_service import recover_stale_jobs
 from services.ai.scope_sampling import snapshot_already_analyzed
+from services.repository_sync_window import apply_start_date, resolve_sync_window
 from services.ai.weekly_state import get_or_create_weekly_state
 # 「周版本同步还在跑就先别分析」的闸门（同步逐文件写缓存，跑到一半的清单会静默变小）
 # `group_config_ids` 在这里的用处是**排同步时的批次判据**（同一批只跑一轮，见
@@ -717,20 +718,27 @@ def _handle_auto_sync_task_inner(task):
                     # 同步成功 → 清除之前的错误状态
                     _clear_sync_error(repository)
 
-                    # 确定同步起始日期
-                    since_date = None
-                    if repository.start_date:
-                        since_date = repository.start_date
-                        log_print(f"🔍 [BACKGROUND_SYNC] 应用仓库配置的起始日期限制: {since_date}", 'SYNC')
+                    # 这一轮按什么口径采集：**分支 tip 变了没有**优先，日期水位线兜底。
+                    # 提交日期可以被回填（导表工具带上原始日期），而 `git log --since`
+                    # 遇到日期更旧的 tip 会**当场停住整个遍历** —— 那一批提交（含日期
+                    # 正常的）全都进不来，且没有任何提示。判据见
+                    # `services/repository_sync_window.py`。
                     latest_commit = _Commit.query.filter_by(repository_id=repository.id)\
                         .order_by(_Commit.commit_time.desc()).first()
-                    if latest_commit and latest_commit.commit_time:
-                        if since_date is None or latest_commit.commit_time > since_date:
-                            since_date = latest_commit.commit_time
-                            log_print(f"🔍 [BACKGROUND_SYNC] 从最新提交时间开始增量同步: {since_date}", 'SYNC')
+                    window = resolve_sync_window(
+                        git_service, repository,
+                        latest_known_commit_time=getattr(latest_commit, 'commit_time', None),
+                    )
+                    log_print(f"🔍 [BACKGROUND_SYNC] 采集口径：{window.reason}", 'SYNC')
 
                     start_time = time.time()
-                    commits = git_service.get_commits_threaded(since_date=since_date, limit=1000)
+                    commits = git_service.get_commits_threaded(
+                        since_date=window.since_date, limit=1000,
+                        rev_range=window.rev_range,
+                    )
+                    if window.rev_range:
+                        # 区间不看日期，但 `start_date` 是用户声明的下界，仍然作数。
+                        commits = apply_start_date(commits, repository.start_date)
                     end_time = time.time()
                     log_print(f"⚡ [THREADED_GIT] 多线程获取提交记录耗时: {(end_time - start_time):.2f}秒, 提交数: {len(commits)}", 'GIT')
                     log_print(f"🔍 [BACKGROUND_SYNC] Git服务获取到 {len(commits)} 个提交记录", 'SYNC')
@@ -809,6 +817,10 @@ def _handle_auto_sync_task_inner(task):
                     if excel_tasks_added > 0:
                         log_print(f"📊 [BACKGROUND_SYNC] 批量添加 {excel_tasks_added} 个Excel缓存任务", 'SYNC')
 
+                    # 落库成功之后才记 tip：中途失败时下一轮还会用旧区间重采一遍，
+                    # 而重采是安全的（判重键是 `(commit_id, path)`）。
+                    if window.tip:
+                        repository.last_synced_tip = window.tip
                     _db.session.commit()
                     log_print(f"✅ [BACKGROUND_SYNC] 后台同步完成，添加了 {commits_added} 个新提交，{excel_tasks_added} 个Excel缓存任务", 'SYNC')
                     log_print(f"✅ 自动数据分析完成: {repository.name}, 添加了 {commits_added} 个提交记录，{excel_tasks_added} 个Excel缓存任务", 'SYNC')

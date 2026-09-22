@@ -94,6 +94,16 @@ class Repository(db.Model):
     tag_selection = db.Column(db.String(500))
     start_date = db.Column(db.DateTime)
 
+    # 上次同步时**本地分支 HEAD 的 sha**。下一轮拿它和新的 tip 比：变了就按
+    # `<旧 tip>..<新 tip>` 采集提交，而不是按提交日期水位线 —— 日期可以被回填
+    # （自动导表那类工具），而 `git log --since` 遇到一个日期更旧的 tip 会**当场停住
+    # 整个遍历**，那一批提交全都进不来。判据与实测见
+    # `services/repository_sync_window.py`。
+    #
+    # NULL = 还没按这个口径同步过（新仓库 / 升级上来的老仓库）：下一轮退回日期口径，
+    # 并把这一列填上。
+    last_synced_tip = db.Column(db.String(100))
+
     # 同步状态字段
     last_sync_error = db.Column(BigText)        # 最近一次同步失败的错误信息（成功后清空）
     last_sync_error_time = db.Column(db.DateTime)  # 最近一次同步失败的时间

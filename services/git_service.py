@@ -26,6 +26,7 @@ from services.git_excel_parser_helpers import (
 )
 from utils.path_security import build_repository_local_path
 from services.log_sampling import OUTCOME_HIT, OUTCOME_MISS, log_sampled, log_stage_event
+from services.repository_sync_window import iter_commits_args
 from utils.security_utils import sanitize_text, sanitize_url
 from utils.text_decoding import decode_text_bytes
 
@@ -619,8 +620,12 @@ class GitService:
             traceback.print_exc()
             return False, error_msg
     
-    def get_commits(self, since_date=None, limit=100):
-        """获取提交记录"""
+    def get_commits(self, since_date=None, limit=100, rev_range=None):
+        """获取提交记录。
+
+        `rev_range` 是 `<旧 tip>..<新 tip>` 形式的**提交区间**：给了它就只看这个区间，
+        不看提交日期（理由见 `services/repository_sync_window.py`）。
+        """
         try:
             if not os.path.exists(self.local_path):
                 success, message = self.clone_or_update_repository()
@@ -642,15 +647,13 @@ class GitService:
             # 获取指定分支的提交记录
             branch = repo.heads[self.repository.branch] if self.repository.branch in [h.name for h in repo.heads] else repo.head
             
-            # 构建iter_commits参数
-            iter_kwargs = {'max_count': limit}
-            if since_date:
-                iter_kwargs['since'] = since_date
-                print(f"🔍 [GIT_SERVICE] 增量同步，从 {since_date} 开始获取最多 {limit} 个提交")
-            else:
-                print(f"🔍 [GIT_SERVICE] 全量同步，获取最多 {limit} 个提交")
-            
-            commit_iter = repo.iter_commits(branch, **iter_kwargs)
+            # 采集口径（区间还是日期水位线）的判据在
+            # `services/repository_sync_window.py`，两个采集器共用那一份。
+            rev, iter_kwargs, note = iter_commits_args(
+                branch, since_date=since_date, limit=limit, rev_range=rev_range)
+            print(f"🔍 [GIT_SERVICE] {note}")
+
+            commit_iter = repo.iter_commits(rev, **iter_kwargs)
             
             processed_count = 0
             for commit in commit_iter:

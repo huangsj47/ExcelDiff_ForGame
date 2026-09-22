@@ -6,6 +6,7 @@ import git
 import re
 import os
 from services.git_service import GitService
+from services.repository_sync_window import iter_commits_args
 from services.log_sampling import (
     OUTCOME_FAIL,
     OUTCOME_HIT,
@@ -275,8 +276,13 @@ class ThreadedGitService(GitService):
             sampler.flush()
             return super()._collect_previous_commits(repo, commits)
     
-    def _get_commits_base_threaded(self, since_date=None, limit=100):
-        """多线程版本的基础提交记录获取方法"""
+    def _get_commits_base_threaded(self, since_date=None, limit=100, rev_range=None):
+        """多线程版本的基础提交记录获取方法。
+
+        `rev_range` 是 `<旧 tip>..<新 tip>` 形式的**提交区间**，给了它就不看日期 ——
+        提交日期可以被回填，而 `--since` 遇到日期更旧的 tip 会停住整个遍历（判据见
+        `services/repository_sync_window.py`）。两者互斥，区间优先。
+        """
         try:
             import os
             if not os.path.exists(self.local_path):
@@ -299,15 +305,13 @@ class ThreadedGitService(GitService):
             # 获取指定分支的提交记录
             branch = repo.heads[self.repository.branch] if self.repository.branch in [h.name for h in repo.heads] else repo.head
             
-            # 构建iter_commits参数
-            iter_kwargs = {'max_count': limit}
-            if since_date:
-                iter_kwargs['since'] = since_date
-                print(f"🔍 [THREADED_GIT] 增量同步，从 {since_date} 开始获取最多 {limit} 个提交")
-            else:
-                print(f"🔍 [THREADED_GIT] 全量同步，获取最多 {limit} 个提交")
+            # 采集口径（区间还是日期水位线）的判据在
+            # `services/repository_sync_window.py`，两个采集器共用那一份。
+            rev, iter_kwargs, note = iter_commits_args(
+                branch, since_date=since_date, limit=limit, rev_range=rev_range)
+            print(f"🔍 [THREADED_GIT] {note}")
             
-            commit_iter = repo.iter_commits(branch, **iter_kwargs)
+            commit_iter = repo.iter_commits(rev, **iter_kwargs)
             
             processed_count = 0
             for commit in commit_iter:
@@ -433,13 +437,13 @@ class ThreadedGitService(GitService):
             traceback.print_exc()
             return []
     
-    def get_commits_threaded(self, since_date=None, limit=100):
-        """多线程优化版本的获取提交记录方法"""
+    def get_commits_threaded(self, since_date=None, limit=100, rev_range=None):
+        """多线程优化版本的获取提交记录方法。`rev_range` 见 `_get_commits_base_threaded`。"""
         try:
             print(f"🔍 [THREADED_GIT] 开始获取提交记录 (多线程优化版本)...")
             
             # 直接使用多线程版本获取基础提交记录，不调用父类方法
-            commits = self._get_commits_base_threaded(since_date, limit)
+            commits = self._get_commits_base_threaded(since_date, limit, rev_range)
             
             if not commits:
                 print(f"🔍 [THREADED_GIT] 没有找到提交记录")
@@ -481,15 +485,15 @@ class ThreadedGitService(GitService):
             print(f"🔄 [THREADED_GIT] 降级到单线程处理...")
             # 降级到原始方法
             try:
-                return super().get_commits(since_date, limit)
+                return super().get_commits(since_date, limit, rev_range)
             except Exception as fallback_error:
                 print(f"❌ [THREADED_GIT] 降级处理也失败: {fallback_error}")
                 print(f"🔄 Git操作完全失败，退出当前操作")
                 return []
     
-    def get_commits(self, since_date=None, limit=100):
+    def get_commits(self, since_date=None, limit=100, rev_range=None):
         """重写父类的get_commits方法，使用多线程版本"""
-        return self.get_commits_threaded(since_date, limit)
+        return self.get_commits_threaded(since_date, limit, rev_range)
     
     def _collect_previous_commits(self, repo, commits):
         """重写父类的_collect_previous_commits方法，使用多线程版本"""

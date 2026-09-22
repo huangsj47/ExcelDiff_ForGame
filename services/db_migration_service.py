@@ -175,6 +175,9 @@ def _migrate_repository_columns(db, log_print):
             # 「一个仓库并存多种表头格式」的选用规则（JSON 文本，见
             # `services/excel_header_profiles.py`）。空 = 只用上面那三个标量。
             "header_profiles": "header_profiles TEXT",
+            # 上次同步时的分支 tip（sha）。增量采集改看它，不看提交日期 ——
+            # 日期会被回填，而 `--since` 遇到更旧的 tip 会停住整轮扫描。
+            "last_synced_tip": "last_synced_tip VARCHAR(100)",
         },
         log_print,
     )
