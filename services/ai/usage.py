@@ -672,7 +672,11 @@ def estimation_sample(run: Any, *, price_table: PriceTable | None = None) -> dic
     两样读不到都**不编造**：给 `None`，估算那边据此降低分辨率（见返回值的 `basis`）。
     """
     usage = usage_from_run(run, price_table=price_table)
-    delta_files = _int_or_none(_json_field(getattr(run, "delta_summary", None), "delta_files"))
+    delta_summary = getattr(run, "delta_summary", None)
+    delta_files = _int_or_none(_json_field(delta_summary, "delta_files"))
+    window_files = _int_or_none(_json_field(delta_summary, "window_files"))
+    if window_files is None:
+        window_files = _int_or_none(_json_field(delta_summary, "total_files"))
     subagents = _json_field(getattr(run, "response_payload", None), "subagents")
     shards = None
     if isinstance(subagents, list) and subagents:
@@ -695,6 +699,10 @@ def estimation_sample(run: Any, *, price_table: PriceTable | None = None) -> dic
         "rounds": usage["rounds"],
         "requests": usage["requests"],
         "files": delta_files,
+        # `scope=full` 在旧数据里可能只表示「全量分析深度」，并不保证模型真的收到了
+        # 整个版本窗口。保留分母后，估算器才能区分 35/1020 的增量输入与 1020/1020
+        # 的整窗全量输入，避免把前者的单文件固定开销放大一千多倍。
+        "window_files": window_files,
         "shards": shards,
         "cost": usage["cost"],
     }
@@ -882,13 +890,42 @@ def estimate_analysis(
     """
     wanted = str(mode or "").strip().lower() or MODE_FULL
     samples = [item for item in recent_runs if isinstance(item, Mapping)]
-    same_mode = [
+    same_mode_all = [
         item for item in samples if str(item.get("scope") or "").strip().lower() == wanted
     ]
     notes: list[str] = []
     mode_samples_missing = False
+    excluded_partial_runs = 0
+    same_mode = same_mode_all
+    if wanted == MODE_FULL and same_mode_all:
+        comparable: list[Mapping[str, Any]] = []
+        for item in same_mode_all:
+            sample_files = _int_or_none(item.get("files"))
+            window_files = _int_or_none(item.get("window_files"))
+            if (
+                sample_files is not None
+                and window_files is not None
+                and window_files > 0
+                and sample_files < window_files
+            ):
+                excluded_partial_runs += 1
+            else:
+                # 老运行没有分母时无法证明是部分输入；保留它作为兼容样本，并让已有的
+                # 修剪极值策略继续兜住偶发异常。新运行都有 window_files。
+                comparable.append(item)
+        same_mode = comparable
+        if excluded_partial_runs:
+            notes.append(
+                f"已排除 {excluded_partial_runs} 次标记为 full、实际属于部分输入的运行；"
+                "它们的固定上下文开销不能按单文件强度外推到整窗全量。"
+            )
     if same_mode:
         usable = same_mode
+    elif wanted == MODE_FULL and same_mode_all and excluded_partial_runs:
+        # 全部同模式样本都明确是部分输入时，宁可不给数字，也不能退回刚排除的污染样本。
+        usable = []
+        mode_samples_missing = True
+        notes.append("还没有一次可比的整窗全量输入实测，暂时无法给出可信的全量区间。")
     elif samples:
         usable = samples
         mode_samples_missing = True
@@ -1104,6 +1141,7 @@ def estimate_analysis(
             "source": basis_source,
             "runs": len(usable),
             "same_mode_runs": len(same_mode),
+            "excluded_partial_runs": excluded_partial_runs,
             # **这一格是给界面用的**：为真时这个区间是**借来的**（用别的模式的运行折算），
             # 界面必须写出来，而且**不许**把它标成「预计增量代价」—— 一个偏保守但自称
             # 准确的数字，比一句「这个模式没有实测样本」更容易被当真、被拿去做决策。

@@ -1174,7 +1174,7 @@ def _estimate_window_note(
     return "".join(parts)
 
 
-def _weekly_payload_facts(config_id: int) -> dict[str, Any]:
+def _weekly_payload_facts(config_id: int, *, force_full: bool = False) -> dict[str, Any]:
     """这一轮会进输入的账，以及运行侧已经能确定的范围裁决。
 
     ## 为什么敢在**只读**端点上读它
@@ -1192,12 +1192,16 @@ def _weekly_payload_facts(config_id: int) -> dict[str, Any]:
     from services.ai_analysis_service import build_weekly_payload
 
     try:
-        payload, _state, skip_reason = build_weekly_payload(config_id)
+        payload, _state, skip_reason = build_weekly_payload(
+            config_id, force_full=force_full
+        )
     except Exception as exc:  # noqa: BLE001 —— 预检读不到账不该让整个估算变成 500
-        return {"delta": None, "compensation": None, "scope": "", "reason": "",
+        return {"delta": None, "compensation": None, "planned": None,
+                "scope": "", "reason": "",
                 "note": f"本次的输入账没有算出来（{exc}）。"}
     if payload is None:
-        return {"delta": None, "compensation": None, "scope": "", "reason": "",
+        return {"delta": None, "compensation": None, "planned": None,
+                "scope": "", "reason": "",
                 "note": "本次的输入账没有算出来（平台裁决："
                 + str(skip_reason or "未知") + "）。"}
     summary = payload.get("summary") or {}
@@ -1207,6 +1211,10 @@ def _weekly_payload_facts(config_id: int) -> dict[str, Any]:
     return {
         "delta": int(delta) if isinstance(delta, int) else None,
         "compensation": int(compensation) if isinstance(compensation, int) else None,
+        # 估算缩放必须用**真正会交给引擎的文件数**。它通常等于 delta，但全量预检
+        # 会以 force_full 重建 payload，此时这里就是整窗文件数。由服务端算这一项，
+        # 避免页面把上一次增量预检缓存的 files= 带进全量预检。
+        "planned": len(payload.get("delta_files") or []),
         "scope": str(payload.get("scope") or ""),
         "reason": str(policy.get("reason") or ""),
         "note": "",
@@ -1241,6 +1249,7 @@ def _weekly_action_facts(
     不加那句话（无话找话的说明会让真正的警告贬值）。
     """
     blank: dict[str, Any] = {
+        "planned_files": None,
         "delta_files": None,
         "compensation_files": None,
         "baseline_run": None,
@@ -1287,17 +1296,33 @@ def _weekly_action_facts(
         upgrade_reason = ""
 
     if mode != MODE_INCREMENTAL:
+        payload_facts = (
+            _weekly_payload_facts(exact_config.id, force_full=True)
+            if exact_config is not None else None
+        )
         return {
             **blank,
+            "planned_files": payload_facts["planned"] if payload_facts else None,
             "upgrade_reason": upgrade_reason,
-            "note": "这次是全量：平台不看增量基线，所以本次增量文件数与补偿文件数不适用。",
+            "note": (
+                "这次是全量：平台不看增量基线，所以本次增量文件数与补偿文件数不适用。"
+                + ((payload_facts or {}).get("note") or "")
+            ),
         }
     if run_id is None:
+        payload_facts = (
+            _weekly_payload_facts(exact_config.id, force_full=True)
+            if exact_config is not None else None
+        )
         return {
             **blank,
+            "planned_files": payload_facts["planned"] if payload_facts else None,
             "upgrade_reason": upgrade_reason,
-            "note": "还没有可复用的结论基线，所以没有「本次增量文件数」可言"
-                    "（平台会把这次增量升级为全量）。",
+            "note": (
+                "还没有可复用的结论基线，所以没有「本次增量文件数」可言"
+                "（平台会把这次增量升级为全量）。"
+                + ((payload_facts or {}).get("note") or "")
+            ),
         }
 
     run = db.session.get(AiAnalysisRun, run_id)
@@ -1317,7 +1342,17 @@ def _weekly_action_facts(
     payload_facts = _weekly_payload_facts(facts_config_id)
     if mode == MODE_INCREMENTAL and payload_facts["scope"] == MODE_FULL:
         upgrade_reason = payload_facts["reason"] or "runtime_scope_upgrade"
+    planned_for_effective_mode = payload_facts["planned"]
+    if upgrade_reason and exact_config is not None:
+        # 页面在看到 upgrade_reason 后会把确认结果明确转成 mode=full 再建任务；运行侧
+        # 因而会 `force_full=True`，输入是整窗，而不是上面那份增量账。预检仍要展示真实
+        # delta/补偿数，但 token 与耗时区间必须按**将要执行的全量输入**缩放。
+        # 否则就会出现「弹窗写 221 个，点继续后实际跑 1196 个」这种数量级错误。
+        full_facts = _weekly_payload_facts(exact_config.id, force_full=True)
+        if full_facts["planned"] is not None:
+            planned_for_effective_mode = full_facts["planned"]
     return {
+        "planned_files": planned_for_effective_mode,
         "delta_files": payload_facts["delta"],
         "compensation_files": payload_facts["compensation"],
         "baseline_run": baseline_run,
@@ -1361,6 +1396,16 @@ def analysis_estimate(
     query = AiAnalysisRun.query.filter_by(project_id=project_id)
     if target_type:
         query = query.filter(AiAnalysisRun.target_type == target_type)
+    if target_type == "weekly" and config_id is not None:
+        # 同一项目里可以同时有真实大周版本与 1～11 文件的 E2E 小版本。按项目混样本会
+        # 把小版本的高固定开销当成「每文件强度」，再乘到 1000+ 文件，实测会从约 4M
+        # 被夸到 90M token。config 已由路由校验归属；服务层直调时也只在归属吻合时
+        # 收窄，避免一个错误 config 把样本静默清空。
+        exact_config = db.session.get(WeeklyVersionConfig, config_id)
+        if exact_config is not None and exact_config.project_id == project_id:
+            query = query.filter(
+                AiAnalysisRun.target_key == build_weekly_group_key(exact_config)
+            )
     rows = query.order_by(AiAnalysisRun.created_at.desc()).limit(sample_limit).all()
 
     samples = [
@@ -1377,9 +1422,25 @@ def analysis_estimate(
     facts = _weekly_action_facts(
         project_id, mode=mode, target_type=target_type, config_id=config_id
     )
+    # 有精确 config 时，输入账比页面回传的 files= 更新、也更可信。页面变量会跨两次
+    # 确认框存活：先看增量再切全量时，那个值仍是增量数，若让它覆盖服务端事实，区间会
+    # 被缩小几个数量级。只有服务端算不出本次输入账时才回落调用方给的近似值。
+    effective_planned_files = (
+        facts["planned_files"]
+        if facts.get("planned_files") is not None
+        else planned_files
+    )
+    # 预检已判定会升级时，页面确认后发送的是 mode=full。样本也必须选 full；继续拿
+    # incremental 的 7～47 文件运行算单文件强度，再乘 1196，会把固定提示词/汇总开销
+    # 重复放大上百次（实测约 4M 会被报成 90M）。
+    estimation_mode = (
+        MODE_FULL
+        if mode == MODE_INCREMENTAL and facts.get("upgrade_reason")
+        else mode
+    )
     estimate = estimate_analysis(
-        planned_files=planned_files,
-        mode=mode,
+        planned_files=effective_planned_files,
+        mode=estimation_mode,
         baseline_reusable=baseline_reusable,
         recent_runs=samples,
         shard_count=_int_or_zero(config.get("subagent_count")) or None,

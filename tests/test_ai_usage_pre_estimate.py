@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 from flask import make_response
@@ -31,14 +32,16 @@ from flask import make_response
 import routes.ai_analysis_routes as ai_routes
 from app import app as flask_app
 from app import create_tables, db
-from models import Project
+from models import Project, Repository, WeeklyVersionConfig
 from models.ai_analysis import AiAnalysisRun
 from services.ai.pricing import parse_price_table
+from services.ai.project_config_source import build_weekly_group_key
 from services.ai.usage import (
     estimate_analysis,
     estimation_sample,
 )
 from services.ai_analysis_service import update_project_analysis_config
+import services.ai_usage_service as usage_service
 from services.ai_usage_service import analysis_estimate, parse_estimate_args
 
 PRICE_TABLE = json.dumps(
@@ -66,6 +69,7 @@ def _sample(
     run_id: int,
     *,
     files: int | None = 100,
+    window_files: int | None = None,
     tokens_input: int | None = 1_000_000,
     tokens_output: int | None = 200_000,
     cache_read: int | None = 800_000,
@@ -88,6 +92,7 @@ def _sample(
         "rounds": 20,
         "requests": 60,
         "files": files,
+        "window_files": window_files,
         "shards": shards,
         "cost": cost,
     }
@@ -250,6 +255,31 @@ class TestTheModeOnlyChoosesTheSamples:
         assert result["basis"]["mode_samples_missing"] is False
         assert not any("没有实测样本" in note for note in result["notes"])
         assert result["tokens"]["low"] == 9_000_000, "用了全量的样本"
+
+    def test_full_estimate_excludes_partial_input_runs_labelled_full(self):
+        """分析深度为 full、输入仍是增量的旧运行，不能拿来估整窗全量。"""
+        result = estimate_analysis(
+            planned_files=1000,
+            mode="full",
+            recent_runs=[
+                _sample(
+                    1, files=35, window_files=1000,
+                    tokens_input=1_600_000, tokens_output=100_000,
+                    duration_ms=24_000_000,
+                ),
+                _sample(
+                    2, files=1000, window_files=1000,
+                    tokens_input=2_400_000, tokens_output=100_000,
+                    duration_ms=1_200_000,
+                ),
+            ],
+        )
+
+        assert result["tokens"] == {"low": 2_500_000, "high": 2_500_000, "unit": "token"}
+        assert result["duration_ms"] == {"low": 1_200_000, "high": 1_200_000}
+        assert result["last_actual"]["run_id"] == 2
+        assert result["basis"]["excluded_partial_runs"] == 1
+        assert any("部分输入" in note for note in result["notes"])
 
     def test_incremental_without_incremental_history_falls_back_and_says_so(self):
         """库里全是全量运行（这是常态）→ 回落全量样本，**两端都锚回全量实测区间**。
@@ -442,7 +472,91 @@ class TestTheSampleReadsWhatTheRunActuallyRecorded:
             sample = estimation_sample(run)
 
             assert sample["files"] == 321
+            assert sample["window_files"] == 321
             assert sample["shards"] == 2
+
+    def test_exact_weekly_estimate_does_not_mix_another_group(self):
+        """小型 E2E 周版本不能污染同项目真实周版本的单文件强度。"""
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+            repo = Repository(
+                project_id=project_id, name=_uid("repo"), type="git",
+                url="https://example.invalid/estimate.git", branch="main",
+            )
+            db.session.add(repo)
+            db.session.flush()
+            now = datetime.utcnow()
+            cfg = WeeklyVersionConfig(
+                project_id=project_id, repository_id=repo.id, name=_uid("weekly"),
+                branch="main", start_time=now - timedelta(days=7), end_time=now,
+            )
+            db.session.add(cfg)
+            db.session.flush()
+            wanted_key = build_weekly_group_key(cfg)
+            wanted = _run(
+                project_id, target_id=cfg.id, target_key=wanted_key,
+                delta_summary=json.dumps({"delta_files": 100}),
+            )
+            _run(
+                project_id, target_id=cfg.id + 999, target_key="other-e2e-group",
+                tokens_input=90_000_000, tokens_output=10_000_000,
+                delta_summary=json.dumps({"delta_files": 1}),
+            )
+
+            result = analysis_estimate(
+                project_id, mode="full", planned_files=100, config_id=cfg.id
+            )
+
+        assert result["last_actual"]["run_id"] == wanted.id
+        assert result["tokens"]["high"] < 10_000_000, result["tokens"]
+
+
+class TestTheEstimateUsesTheCurrentServerInputAccount:
+    """`files=` 是页面近似；精确 config 的本轮输入账才是最终事实。"""
+
+    @staticmethod
+    def _facts(planned: int) -> dict:
+        return {
+            "planned_files": planned,
+            "delta_files": planned,
+            "compensation_files": 0,
+            "baseline_run": {"run_id": 7, "created_at": None, "scope": "incremental"},
+            "upgrade_reason": "",
+            "note": "",
+        }
+
+    def test_first_preflight_scales_with_the_server_count(self, monkeypatch):
+        """首次点击时页面还没有缓存 files=，区间也必须立刻按本轮 7 个文件算。"""
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+            _run(project_id, delta_summary=json.dumps({"delta_files": 100}))
+            monkeypatch.setattr(
+                usage_service, "_weekly_action_facts", lambda *a, **k: self._facts(7)
+            )
+
+            result = analysis_estimate(
+                project_id, mode="incremental", planned_files=None, config_id=123
+            )
+
+        assert result["planned_files"] == 7
+
+    def test_stale_browser_count_cannot_override_the_server_count(self, monkeypatch):
+        """先看过增量再切全量时，页面带来的旧数不能把全量区间缩成增量区间。"""
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+            _run(project_id, delta_summary=json.dumps({"delta_files": 100}))
+            monkeypatch.setattr(
+                usage_service, "_weekly_action_facts", lambda *a, **k: self._facts(1096)
+            )
+
+            result = analysis_estimate(
+                project_id, mode="full", planned_files=11, config_id=123
+            )
+
+        assert result["planned_files"] == 1096
 
     def test_only_real_shards_are_counted_as_shards(self):
         """`subagents` 里还混着「汇总」与「对账」两个成员 —— **它们不是分片**。

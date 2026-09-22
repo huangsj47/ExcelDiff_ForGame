@@ -417,6 +417,10 @@ class TestTheFiveWeeklyPathsOverHttp:
             ).get_json()
 
         assert body["success"] is True, body
+        # 2/6 触发 delta_ratio_high；页面确认后会明确按 full 建任务，所以区间必须按
+        # 真正将执行的 6 个文件缩放，同时下面的 delta 事实仍保留 2。
+        assert body["planned_files"] == 6, body
+        assert body["mode"] == "full", body
         assert body["delta_files"] == 2, body
         assert body["compensation_files"] == 0, body
         assert body["baseline_run"]["run_id"] == baseline_run_id, body["baseline_run"]
