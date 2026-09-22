@@ -28,6 +28,7 @@ from services.diff_service import DiffService
 from services.performance_metrics_service import get_perf_metrics_service
 from services.repository_ordering import weekly_config_order_key
 from services.task_worker_priority import WEEKLY_EXCEL_CACHE
+from utils.timezone_utils import now_beijing
 from services.task_worker_service import TaskWrapper, background_task_queue
 from services.task_worker_weekly_handlers import is_weekly_sync_task_enqueued
 from services.weekly_deleted_excel_helpers import render_weekly_deleted_excel as _render_weekly_deleted_excel_helper
@@ -305,6 +306,14 @@ def weekly_version_config(project_id):
                          # 少了它，周期性同步会让页面永远显示「排队中，请稍候」。
                          sync_finished_by_config=configs_with_finished_sync(BackgroundTask, all_configs),
                          pagination=pagination)
+def _window_still_open(config) -> bool:
+    """窗口还没走完（北京时间）。判据与调度器同源 —— 见更新分支里的说明。"""
+    end = getattr(config, "end_time", None)
+    if end is None:
+        return False
+    return now_beijing().replace(tzinfo=None) <= end.replace(tzinfo=None)
+
+
 def weekly_version_config_api(project_id):
     """周版本配置API"""
     project = db.session.get(Project, project_id)
@@ -497,6 +506,15 @@ def weekly_version_config_detail_api(project_id, config_id):
             config.auto_sync = True
             if 'status' in data:
                 config.status = data['status']
+            elif time_changed and config.status != 'active' and _window_still_open(config):
+                # 把已结束的窗口顺延到未来 = 这个版本重新开张，**必须在这里复位**：
+                # 调度器的两个分支都要求 `status == 'active'`（窗口结束→置 completed→
+                # continue，紧随其后才是建任务），而窗口一过它就把这条置成 completed。
+                # 于是「顺延一周」之后界面上 `end_time` 是未来、`is_active` 是 True，
+                # 同步与分析却再也不会发生（实测：配置建出来 6 分钟后就到点了）。
+                log_print(f"周版本配置 {config.name} 窗口顺延到未来，"
+                          f"状态 {config.status} → active", 'WEEKLY', force=True)
+                config.status = 'active'
             config.updated_at = datetime.now(timezone.utc)
             # 如果时间范围发生变化，清空所有相关的diff缓存和确认状态
             if time_changed:
