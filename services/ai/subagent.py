@@ -76,6 +76,7 @@ from services.ai.family_ledger import (  # noqa: F401 —— 本模块与测试�
     CANDIDATE_BLOCK_MAX_CHARS,
     CANDIDATE_MAX_ITEMS_PER_MEMBER,
     CANDIDATE_TEXT_MAX_CHARS,
+    KIND_SHARD_GAP,
     ROLE_SUBAGENT,
     ROLE_SYNTHESIS,
     ROLE_VERIFY,
@@ -1789,7 +1790,14 @@ def aggregate_outcomes(
         label for step in steps if step.outcome for label in step.outcome.refused_requests
     )
 
-    has_gap = _shard_never_ran(steps) or bool(gap_dropped)
+    # 真缺口只认两种：「分片压根没跑」（`_shard_never_ran`）与「汇总交回的结论里没有
+    # 一条声明来源于这条候选」（`KIND_SHARD_GAP`）。**待复核不在此列**（`KIND_DEFERRED`）：
+    # 那是汇总主动交代的处置，报告里另有一节逐条写明理由 —— 把它算进来会把
+    # 「五个代理全部 succeeded、零真缺口」的运行（run 40）整体判成「有分片没有跑成」，
+    # 一句与事实相反的降级标签。
+    has_gap = _shard_never_ran(steps) or any(
+        item.kind == KIND_SHARD_GAP for item in gap_dropped
+    )
     degradation = _worst(
         [
             *(step.outcome.degradation for step in steps if step.outcome),

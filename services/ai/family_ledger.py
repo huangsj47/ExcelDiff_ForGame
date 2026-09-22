@@ -77,6 +77,15 @@ MEMBER_MARKDOWN_EXCERPT_CHARS = 2_000
 CANDIDATE_TEXT_MAX_CHARS = 400
 # 平台侧对账用的编号前缀。模型被要求在采纳某条候选时把编号带进它的 `evidence`。
 CANDIDATE_ID_PREFIX = "S"
+# 对账账本里两种「没进最终清单」的候选，**降级判定必须区分**（`subagent.aggregate_outcomes`
+# 的 `has_gap` 只认真缺口那一种）：
+# * `KIND_SHARD_GAP`：汇总交回的结论里**没有一条声明来源于这条候选** —— 静默漏项，
+#   这正是这套对账要防的「最危险的失真」，触发 `subagent_gap` 降级；
+# * `KIND_DEFERRED`：汇总**主动**把它标记为待复核、理由写明、报告里另有一节逐条交代 ——
+#   它有去向、有理由，不触发降级（run 40：五个代理全部 succeeded、零真缺口，
+#   却因 7 条待复核被判成「有分片没有跑成」）。
+KIND_SHARD_GAP = "subagent"
+KIND_DEFERRED = "deferred"
 # 维度怎么分给 n 个成员：**按清单里的相邻顺序均分**，不是一张写死的表。
 #
 # 原先这里是一张手工表（2~6 组各写一行），它有两个问题，都在「维度集合一旦项目化」时
@@ -526,9 +535,14 @@ def reconcile_candidates(
             settled += 1
             continue
         if disposition is not None and disposition.status == "deferred":
+            # **待复核不是缺口**（run 40 实测改的）：汇总把这条候选**主动交代了去向**、
+            # 理由也写明了，报告的「信息缺口」一节还有它的逐条说明 —— 它与「汇总一声不响
+            # 地丢了某条发现」（下面那种，`KIND_SHARD_GAP`）是两件事。那次实测里五个代理
+            # 全部 succeeded、零真缺口，整次 run 却因为 7 条待复核被判成 `subagent_gap`
+            # 降级 —— 降级标签写的是「有分片没有跑成」，一句与事实相反的话。
             dropped.append(
                 DroppedItem(
-                    kind="subagent",
+                    kind=KIND_DEFERRED,
                     index=candidate.index,
                     reason="汇总明确标记为待复核",
                     detail=f"[{candidate.id}] {disposition.reason}"[:300],
@@ -544,7 +558,7 @@ def reconcile_candidates(
             continue
         dropped.append(
             DroppedItem(
-                kind="subagent",
+                kind=KIND_SHARD_GAP,
                 index=candidate.index,
                 reason="汇总交回的结论里没有一条声明来源于这条候选",
                 detail=f"[{candidate.id}] {candidate.anomaly.title}"[:300],

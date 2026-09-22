@@ -633,6 +633,78 @@ class TestTheCandidatesAndTheReconciliation:
         )
 
     # ------------------------------------------------------------------
+    # 待复核（deferred）：有去向的主动处置，不是缺口
+    # ------------------------------------------------------------------
+
+    def _deferred_synthesis(self, *anomalies) -> EngineOutcome:
+        """汇总带着机器可读的处置：把 S1-1 标成待复核、理由写明。"""
+        return EngineOutcome(
+            status=STATUS_SUCCEEDED,
+            report_markdown="# 变更理解\n\n改了道具表。\n",
+            anomalies=tuple(anomalies),
+            payload=AnalysisPayload(
+                status="final",
+                report_markdown="# 变更理解\n\n改了道具表。\n",
+                candidate_dispositions=(
+                    CandidateDisposition(
+                        candidate_id="S1-1",
+                        status="deferred",
+                        reason="find_references 只覆盖本批次 238/1199 个文件，不能定级",
+                    ),
+                ),
+            ),
+        )
+
+    def test_a_deferred_candidate_is_not_a_shard_gap(self):
+        """run 40 的形态：五个代理全部 succeeded、零真缺口，只有汇总标记的待复核。
+
+        待复核有去向、有理由、报告里另有一节逐条交代 —— 它与「汇总一声不响地丢了
+        某条发现」不是一回事，不许触发 `subagent_gap` 降级（那条标签写的是「有分片
+        没有跑成」，一句与事实相反的话）。
+        """
+        candidate = self._candidate(index=1, title="【道具】ID 被删除但生成文件仍在")
+        plan = _plan(2)
+        steps = tuple(
+            MemberOutcome(plan=member, outcome=EngineOutcome(status=STATUS_SUCCEEDED))
+            for member in plan.members
+        )
+
+        outcome = aggregate_outcomes(
+            synthesis=self._deferred_synthesis(), steps=steps, candidates=(candidate,)
+        )
+
+        assert outcome.degradation != DEGRADE_SUBAGENT, "待复核把整次 run 判成了降级"
+        assert outcome.status == STATUS_SUCCEEDED
+        # **但账要照记**：读的人得知道有这条候选、它的去向与理由是什么。
+        deferred = [item for item in outcome.dropped if item.kind == "deferred"]
+        assert [item.reason for item in deferred] == ["汇总明确标记为待复核"]
+        assert deferred[0].detail.startswith("[S1-1]"), "要写出候选编号"
+        assert "待复核" in outcome.report_markdown, "报告里必须还有那一节逐条交代"
+
+    def test_a_real_gap_still_degrades(self):
+        """反向对照：真缺口（汇总没声明任何来源、也没给处置）照旧触发降级。
+
+        分支要证明是活的 —— 上一条「不降级」不许顺手把这一条也抹平。
+        """
+        candidate = self._candidate(index=1, title="【道具】ID 被删除但生成文件仍在")
+        # 汇总只声明了 S1-2 的血缘；S1-1 既没进清单、也没给处置 → 真缺口。
+        adopted = _anomaly_obj(
+            title="【道具】汇总自己新写的一条", source_candidate_ids=("S1-2",)
+        )
+        plan = _plan(2)
+        steps = tuple(
+            MemberOutcome(plan=member, outcome=EngineOutcome(status=STATUS_SUCCEEDED))
+            for member in plan.members
+        )
+
+        outcome = aggregate_outcomes(
+            synthesis=self._synthesis(adopted), steps=steps, candidates=(candidate,)
+        )
+
+        assert outcome.degradation == DEGRADE_SUBAGENT, "真缺口必须是降级"
+        assert any(item.kind == "subagent" for item in outcome.dropped)
+
+    # ------------------------------------------------------------------
     # 与复核裁决的接续（撤销 / 降级 / 转人工核验）
     # ------------------------------------------------------------------
 

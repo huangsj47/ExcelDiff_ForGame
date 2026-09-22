@@ -253,12 +253,16 @@ class CandidateDisposition:
 class DroppedItem:
     """条目级记账：**被丢弃**的条目及原因，以及**被归到「未归类」**的条目。
 
-    `kind` 的取值为 `anomaly` / `dimension` / `request` / `subagent` / `unclassified` /
-    `mid_round_field` / `reason` / `reason_code` / `shared_cache` / `evidence`。
-    `unclassified` 那一条与其他几种**不是一回事**：那条发现**没有被丢掉**（它在
+    `kind` 的取值为 `anomaly` / `dimension` / `request` / `subagent` / `deferred` /
+    `unclassified` / `mid_round_field` / `reason` / `reason_code` / `shared_cache` /
+    `evidence`。`unclassified` 那一条与其他几种**不是一回事**：那条发现**没有被丢掉**（它在
     `payload.anomalies` 里，报告里也列着），这里只是把「为什么它的维度显示成未归类」
     记下来。它借用这一个结构是因为 trace 是平台里唯一一条按条目把记录带到面板上的
     通道（`result_payload` 的 `dropped` → `trace_evidence.summarize_dropped`）。
+
+    `deferred` 与 `subagent` 同样要分开：前者是汇总**主动**把候选标成待复核（有理由、
+    报告里另有一节），后者才是「汇总一声不响地丢了某条发现」的真缺口 —— `subagent.py`
+    的降级判定只认后者。
 
     `mid_round_field` 与 `reason` / `reason_code` 同样不是「结论被丢了」：它们记的是
     **格式约束**（E4）。中间轮不接受的那四个字段确实没有读者，但「它本来写了什么」
