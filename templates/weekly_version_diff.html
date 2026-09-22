@@ -181,16 +181,13 @@
         position: fixed;
         top: 0;
         right: 0;
-        /* 宽度按「正文一行放得下多少字」定，不按「放得下一个表单」定。
-           原来 460px：body 左右各 20px、正文框再各 20px 内边距，正文只剩约 380px，
-           而正文当时是等宽字体 —— 一个汉字占两个字宽，一行只放得下 27 个汉字，
-           稍长的报告全是折行（用户反馈「放不下多少文本」）。
-           720px 是上限：14px 无衬线下正文区实测 638px、一行 45 个汉字（旧版实测 402px / 30 字），
-           落在「中文 40~50 字」这个中文字行的常用区间里，再宽一行就过长。
-           62vw 是中段的相对值：视口不足 1161px 时抽屉按 62% 收，不把小笔记本横着占满
-           （1366 上仍是 720px，1024 上实测 635px）；手机（<=576px）反过来铺到 92vw，
-           并把内边距收到 12px，否则正文只剩十几字一行。 */
-        width: clamp(340px, 62vw, 720px);
+        /* 按「一行放得下多少字」定，不按「放得下一个表单」定。
+           三档在 720px 那一版上**整体 ×1.4**（用户要求「默认宽度增大 40%」）：
+           1008 / 87vw / 476px，任意视口下都是原来的 1.4 倍。代价是每行偏长
+           （1008px 时正文区约 928px、一行约 66 个汉字，已超出「中文 40~50 字」
+           那个常用区间），换的是少折行、表格能横向摆开。
+           手机（<=576px）仍是 92vw。 */
+        width: clamp(476px, 87vw, 1008px);
         height: 100%;    /* 无 dvh 支持时的兜底 */
         height: 100dvh;  /* 移动端按动态视口高度，避免地址栏遮挡 */
         background: var(--color-surface, #fff);
@@ -493,6 +490,46 @@
         .weekly-ai-dialog__facts dd { margin-bottom: var(--space-2, 8px); }
         .weekly-ai-dialog__actions { justify-content: stretch; }
         .weekly-ai-dialog__actions .btn { flex: 1 1 100%; }
+    }
+
+    /* ===== 表头方案分组标题（只出现在配了多表头的仓库）===== */
+    /* 说明文本长度不可控：默认单行截断 + 可展开，**不用固定高度盒子**（会被文字裁掉），
+       也不把完整内容藏在 hover tooltip 里（键盘用户取不到）。 */
+    .hp-heading {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: var(--space-2, 8px);
+        padding: 6px 12px;
+        margin: 4px 0 2px;
+        background: #f1f3f5;
+        border-left: 3px solid #adb5bd;
+        border-radius: 3px;
+        font-size: 0.78rem;
+    }
+    .hp-heading-index { flex: none; color: #6c757d; white-space: nowrap; }
+    .hp-heading-name { flex: none; color: #343a40; font-weight: 600; white-space: nowrap; }
+    .hp-note-wrap { flex: 1 1 auto; display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+    .hp-note {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #495057;
+        font-weight: 600;
+    }
+    .hp-note-expanded { flex-basis: 100%; white-space: normal; overflow: visible; }
+    .hp-note-toggle {
+        flex: none;
+        padding: 0;
+        border: 0;
+        background: none;
+        color: #0d6efd;
+        font-size: 0.78rem;
+        text-decoration: underline;
+        white-space: nowrap;
+        cursor: pointer;
     }
 </style>
 {% endblock %}
@@ -1430,10 +1467,17 @@
         <!-- AI-P0-03 两个入口：**默认是增量**（绿），全量是红色危险语义 —— 它忽略基线、
              更贵，所以由 JS 先摆出预计代价再问一次。三份模板同一套语法与文案
              （`commit_diff_new.html` 只有一次「重新分析」：单提交没有增量基线）。 -->
-        <button type="button" class="btn btn-sm btn-success" id="weeklyAiStartBtn"
-                title="只分析上次结论之后变化的部分（默认）">增量分析</button>
-        <button type="button" class="btn btn-sm btn-danger" id="weeklyAiFullBtn"
-                title="忽略增量基线，对整个窗口重新做一次完整评审（更贵，会先给预计代价）">全量重新分析</button>
+        {# 触发的门槛是**管理员**（服务端 `_has_project_admin_access` 是权威，这里只是
+           不给他一个点了必然 403 的按钮）。**只影响触发** —— 结论、历次结论、导出这些
+           读的入口对项目内所有人照旧开放。 #}
+        {% if is_admin() or has_project_admin_access(config.project_id) %}
+            <button type="button" class="btn btn-sm btn-success" id="weeklyAiStartBtn"
+                    title="只分析上次结论之后变化的部分（默认）">增量分析</button>
+            <button type="button" class="btn btn-sm btn-danger" id="weeklyAiFullBtn"
+                    title="忽略增量基线，对整个窗口重新做一次完整评审（更贵，会先给预计代价）">全量重新分析</button>
+        {% else %}
+        <span class="small text-muted">只有项目管理员能发起分析；结论对项目内所有人可见。</span>
+        {% endif %}
         <!-- 「导出 md」：把这一次的结论（报告原文 + 异常清单附录）交给浏览器下载。
              **刻意不写 `download` 属性** —— 空值会让浏览器按 URL 末段命名（report.md），
              把服务端拼好的中文文件名盖掉（响应带 Content-Disposition，见
@@ -1529,6 +1573,9 @@ let configId = {{ config.id }};
 let currentConfigId = {{ current_config_id }};
 let allFiles = [];
 let filteredFiles = [];
+// 表头方案清单，**顺序即「第几种」**（由接口下发）。空数组 = 这个仓库没配多表头，
+// 列表行为与改动前逐字一致：不重排、不插分组标题。
+let headerProfiles = [];
 let currentFilePath = '';
 let selectedFilePath = '';
 let allAuthors = new Set();
@@ -1553,6 +1600,13 @@ function setWeeklyAiStatusBadge(text, variant) {
     badge.className = `badge bg-${variant}`;
 }
 
+// 必须显式声明：`scheduleWeeklyAi` 第一句是**读** `weeklyAiRenderQueued`，读一个
+// 未声明的名字会抛 ReferenceError（隐式全局只在赋值那一侧成立）—— 于是
+// `appendWeeklyAiLine` 每次都抛，而它在 `result` 处理器里，异常会把处理器剩下的部分
+// （关流、清忙态、取落库结论）整段掀掉。
+let weeklyAiBuffer = '';
+let weeklyAiRenderQueued = false;
+
 // variant：'busy'（进行中，居中给个转圈）/ 'error'（失败，危险色实底）/ 省略（普通正文或提示语）。
 // 进行中与失败是两种完全不同的状态，不能混进「暂无分析结果」那套灰色提示里。
 function setWeeklyAiOutput(text, isEmpty, variant) {
@@ -1568,16 +1622,22 @@ function setWeeklyAiOutput(text, isEmpty, variant) {
     output.classList.toggle('is-error', variant === 'error');
 }
 
+// 只有逐行推过来时才粘到末尾（跟着输出看）；整篇一次性给过来（打开抽屉读已存结论）
+// 时回到顶部 —— 粘末尾会让用户一进来就看到报告最后一屏。
+let weeklyAiFollowTail = false;
+
 // 成功报告走这里：累积原始 Markdown，再整体渲染。
 // **不能逐行渲染**：列表、代码围栏、引用都可能跨行，一行一行渲染会把一个列表
 // 拆成一串单元素列表。
 function setWeeklyAiReport(markdown) {
     weeklyAiBuffer = String(markdown === null || markdown === undefined ? '' : markdown);
+    weeklyAiFollowTail = false;
     renderWeeklyAi();
 }
 
 function appendWeeklyAiLine(text) {
     weeklyAiBuffer += (weeklyAiBuffer ? '\n' : '') + text;
+    weeklyAiFollowTail = true;
     scheduleWeeklyAi();
 }
 
@@ -1597,7 +1657,7 @@ function renderWeeklyAi() {
     // 渲染器先整体转义再套白名单标签，模型给的内容永远以实体形式出现
     // （见 static/js/ai-report-markdown.js），所以这里赋 innerHTML 是安全的。
     output.innerHTML = AiReportMarkdown.render(weeklyAiBuffer);
-    output.scrollTop = output.scrollHeight;
+    output.scrollTop = weeklyAiFollowTail ? output.scrollHeight : 0;
 }
 
 // 逐行推送时若每行都整篇重解析，几百行的报告会明显卡顿；合并到一帧只渲染一次。
@@ -3436,6 +3496,7 @@ function loadFileList() {
             clearWeeklySyncRetry();
 
             allFiles = data.files || [];
+            headerProfiles = data.header_profiles || [];
             if (selectedFilePath && !allFiles.some(file => file.file_path === selectedFilePath)) {
                 selectedFilePath = '';
             }
@@ -3653,19 +3714,21 @@ function bindFileStatusActions() {
 }
 
 function updateFileTable() {
+    // **先按表头方案排好再分页**：这样「配了 3 种就先显示第三种」在翻页时也成立。
+    const orderedFiles = sortByHeaderProfile(filteredFiles);
+
     // 计算分页
-    totalPages = Math.ceil(filteredFiles.length / itemsPerPage);
+    totalPages = Math.ceil(orderedFiles.length / itemsPerPage);
     if (currentPage > totalPages) currentPage = 1;
 
     const startIndex = (currentPage - 1) * itemsPerPage;
-    const endIndex = Math.min(startIndex + itemsPerPage, filteredFiles.length);
-    const currentPageFiles = filteredFiles.slice(startIndex, endIndex);
+    const endIndex = Math.min(startIndex + itemsPerPage, orderedFiles.length);
+    const currentPageFiles = orderedFiles.slice(startIndex, endIndex);
 
-    // 构建文件树结构
-    const fileTree = buildFileTree(currentPageFiles);
-    const treeHtml = renderFileTree(fileTree);
+    const treeHtml = renderGroupedFileTree(currentPageFiles);
 
     document.getElementById('fileTreeContainer').innerHTML = treeHtml;
+    setupHeaderProfileNotes();
     applySelectedFileHighlight();
 
     // 重置为展开状态
@@ -3677,6 +3740,78 @@ function updateFileTable() {
 
     // 更新分页信息
     updatePaginationInfo();
+}
+
+// ===== 按表头方案分组 =====
+// 口径：方案**倒序**（配了 3 种就先显示第三种），没命中规则的「默认表头」垫底。
+// 没配多表头的仓库（headerProfiles 为空）走原路，逐字不变。
+
+function sortByHeaderProfile(files) {
+    if (!headerProfiles.length) return files.slice();
+    // 下标即「第几种」；倒序 ⇒ 下标大的在前。sort 是稳定的，同一组内保持接口原序。
+    return files.slice().sort((a, b) => headerProfileRank(b) - headerProfileRank(a));
+}
+
+function headerProfileRank(file) {
+    const index = headerProfiles.findIndex(p => p.key === file.header_profile_key);
+    return index < 0 ? -1 : index;   // -1 = 默认表头，永远排最后
+}
+
+function renderGroupedFileTree(files) {
+    if (!headerProfiles.length) {
+        return renderFileTree(buildFileTree(files));
+    }
+    let html = '';
+    let start = 0;
+    while (start < files.length) {
+        const key = files[start].header_profile_key || '';
+        let end = start + 1;
+        while (end < files.length && (files[end].header_profile_key || '') === key) end++;
+        html += renderHeaderProfileHeading(key);
+        html += renderFileTree(buildFileTree(files.slice(start, end)));
+        start = end;
+    }
+    return html;
+}
+
+function renderHeaderProfileHeading(key) {
+    const index = headerProfiles.findIndex(p => p.key === key);
+    if (index < 0) {
+        return '<div class="hp-heading"><span class="hp-heading-name">默认表头</span></div>';
+    }
+    const profile = headerProfiles[index];
+    const note = (profile.note || '').trim();
+    const noteHtml = note
+        ? `<span class="hp-note-wrap">
+               <span class="hp-note">${escapeHtmlText(note)}</span>
+               <button type="button" class="hp-note-toggle" hidden
+                       onclick="toggleHeaderProfileNote(this)">展开</button>
+           </span>`
+        : '';
+    return `<div class="hp-heading">
+                <span class="hp-heading-index">第 ${index + 1} 种表头</span>
+                <span class="hp-heading-name">${escapeHtmlText(profile.label)}</span>
+                ${noteHtml}
+            </div>`;
+}
+
+function toggleHeaderProfileNote(button) {
+    const note = button.previousElementSibling;
+    const expanded = note.classList.toggle('hp-note-expanded');
+    button.textContent = expanded ? '收起' : '展开';
+}
+
+function setupHeaderProfileNotes() {
+    // 说明文本长度不可控。默认单行截断，**只有真的溢出才给「展开」** ——
+    // 否则一句短说明旁边挂个按钮反而让人以为还有下文。
+    document.querySelectorAll('.hp-note-wrap').forEach(wrap => {
+        const note = wrap.querySelector('.hp-note');
+        const toggle = wrap.querySelector('.hp-note-toggle');
+        if (!note || !toggle) return;
+        const overflow = note.scrollWidth > note.clientWidth + 1;
+        toggle.hidden = !overflow;
+        if (!overflow) note.classList.remove('hp-note-expanded');
+    });
 }
 
 function buildFileTree(files) {

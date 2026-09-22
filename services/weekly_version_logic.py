@@ -34,7 +34,6 @@ from services.weekly_deleted_excel_helpers import render_weekly_deleted_excel as
 from services.weekly_deleted_excel_helpers import (
     render_weekly_deleted_excel_notice as _render_weekly_deleted_excel_notice_helper,
 )
-from services.weekly_deleted_excel_helpers import resolve_primary_operation as _resolve_primary_operation_helper
 from services.weekly_deleted_excel_helpers import (
     resolve_weekly_deleted_excel_state as _resolve_weekly_deleted_excel_state_helper,
 )
@@ -55,12 +54,16 @@ from services.weekly_file_sync import (
     weekly_cache_is_unchanged,
 )
 from services.weekly_version_files_api_helpers import (
+    collect_file_entries,
+    describe_file_header_profile,
+    describe_header_profiles,
     extract_author_lookup_keys,
     normalize_naive_datetime,
     parse_confirm_usernames,
     parse_json_list,
     parse_json_obj,
     resolve_author_display,
+    resolve_weekly_file_header_profile,
     should_treat_sync_task_as_stale,
 )
 
@@ -906,71 +909,20 @@ def weekly_version_files_api(config_id):
             except Exception as e:
                 log_print(f"加载周版本确认用户姓名映射失败，回退为用户名显示: {e}", 'WEEKLY')
 
-        files = []
-        authors = set()
-        for cache in diff_caches:
-            # 解析提交者信息
-            commit_authors = parse_json_list(cache.commit_authors)
-            commit_messages = parse_json_list(cache.commit_messages)
-            commit_times = parse_json_list(cache.commit_times)
-            mapped_commit_authors = [
-                resolve_author_display(
-                    author,
-                    username_to_display_name_lower=username_to_display_name_lower,
-                    email_prefix_to_display_name=email_prefix_to_display_name,
-                )
-                for author in commit_authors
-                if str(author or '').strip()
-            ]
-            authors.update(mapped_commit_authors)
-
-            confirm_usernames = parse_confirm_usernames(cache.status_changed_by)
-            confirm_display_names = [
-                username_to_display_name.get(username)
-                or username_to_display_name_lower.get(username.lower(), username)
-                for username in confirm_usernames
-            ]
-            confirm_user_display = ''
-            confirm_user_title = ''
-            if cache.overall_status in ('confirmed', 'rejected') and confirm_usernames:
-                confirm_user_display = ', '.join(confirm_display_names)
-                # title 保留用户名，便于定位账号
-                confirm_user_title = ', '.join(confirm_usernames)
-
-            # 解析合并diff数据以获取文件操作信息
-            file_operations = []
-            if cache.merged_diff_data:
-                try:
-                    merged_data = parse_json_obj(cache.merged_diff_data)
-                    file_operations = merged_data.get('operations', [])
-                except Exception:
-                    pass
-
-            # 确定文件的主要操作类型（用于颜色编码）
-            # 跟**窗口内的最终状态**走，而不是「操作里出现过 D 就标红」：
-            # 文件被删掉又建回来时，旧口径会把它标成红色的「删除文件」，而它的
-            # diff 页显示的是新增内容（线上 奖励模式_CfgRewardMode.xlsx）。
-            primary_operation = _resolve_primary_operation_helper(file_operations)
-            files.append({
-                'file_path': cache.file_path,
-                'commit_count': cache.commit_count,
-                'commit_authors': json.dumps(mapped_commit_authors, ensure_ascii=False),
-                'commit_messages': json.dumps(commit_messages, ensure_ascii=False),  # 添加提交日志
-                'commit_times': json.dumps(commit_times, ensure_ascii=False),        # 添加提交时间
-                'overall_status': cache.overall_status,
-                'status_changed_by': cache.status_changed_by,  # 操作者用户名
-                'confirm_user_display': confirm_user_display,
-                'confirm_user_title': confirm_user_title,
-                'confirmation_status': cache.confirmation_status,
-                'last_sync_time': cache.last_sync_time.isoformat() if cache.last_sync_time else None,
-                'operations': file_operations,  # 所有操作
-                'primary_operation': primary_operation  # 主要操作类型
-            })
+        # 组装搬到 collect_file_entries（本文件贴着 1800 行硬闸门）。
+        files, authors = collect_file_entries(
+            diff_caches,
+            username_to_display_name=username_to_display_name,
+            username_to_display_name_lower=username_to_display_name_lower,
+            email_prefix_to_display_name=email_prefix_to_display_name,
+        )
         return jsonify({
             'success': True,
             'files': files,
             'authors': list(authors),
             'total_files': len(files),
+            # 方案清单，顺序即「第几种表头」（前端按它倒序分组）。
+            'header_profiles': describe_header_profiles(repository),
             'repository_name': repository.name,
             'enable_id_confirmation': bool(repository.enable_id_confirmation),
             'sync_task_id': sync_task_id,
@@ -1092,6 +1044,13 @@ def weekly_version_file_full_diff_data(config_id):
             'diff_html': diff_html,
             'base_commit_info': base_commit_info,
             'file_type': file_type,
+            # 这张表命中的表头方案（含用户写的说明文本）；走兜底坐标时为 None，
+            # 页面据此决定挂不挂那条说明。
+            'header_profile': describe_file_header_profile(
+                db.session.get(Repository, config.repository_id),
+                file_path,
+                diff_cache.latest_commit_id,
+            ),
             'recalculated': False
         })
     except HTTPException:
@@ -1491,10 +1450,15 @@ def generate_weekly_merged_diff(config, file_path, commits) -> Optional[WeeklyFi
             repository, file_path, base_commit, latest_commit, commits
         )
         payload_json = json.dumps(merged_diff_data)
+        # 这张表命中哪套表头（列表按它分组）。它**参与「要不要重写这一行」的判定**：
+        # 用户改了匹配规则之后，diff 内容可能一字未变，而「这张表算哪一套」已经变了 ——
+        # 不带上它，那一列会一直停在旧值上。
+        header_profile_key = resolve_weekly_file_header_profile(
+            repository, file_path, latest_commit.commit_id)
         unchanged = bool(existing_cache) and weekly_cache_is_unchanged(
             existing_cache, payload_json, base_commit, latest_commit, commits,
             _current_diff_logic_version(),
-        )
+        ) and existing_cache.header_profile_key == header_profile_key
         if unchanged:
             # **内容与上次逐字相同就一个字节都不写。** 本表逐文件写一次，`updated_at`
             # （onupdate）就被顶高一次，而 AI 分析的变更判据读的正是它
@@ -1522,6 +1486,7 @@ def generate_weekly_merged_diff(config, file_path, commits) -> Optional[WeeklyFi
             # （is_merged_diff_cache_current）只能把 NULL 当历史行宽容处理，「升级版本后
             # 合并 diff 自动失效」就永远不生效。详见 models/weekly_version.py。
             existing_cache.diff_version = _current_diff_logic_version()
+            existing_cache.header_profile_key = header_profile_key
             existing_cache.last_sync_time = datetime.now(timezone.utc)
             if previous_latest_commit_id != latest_commit.commit_id:
                 # 重置确认状态时操作者必须一起清（否则留下「待确认 + 有确认人」的记录）
@@ -1547,6 +1512,7 @@ def generate_weekly_merged_diff(config, file_path, commits) -> Optional[WeeklyFi
                 overall_status='pending',
                 cache_status='completed',
                 diff_version=_current_diff_logic_version(),  # 理由见上「更新现有缓存」分支
+                header_profile_key=header_profile_key,
                 last_sync_time=datetime.now(timezone.utc)
             )
             db.session.add(new_cache)

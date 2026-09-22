@@ -38,6 +38,7 @@ import hashlib
 from typing import Sequence
 
 from models import Repository, WeeklyVersionConfig, db
+from services.excel_header_profiles import parse_config
 
 
 def scoped_version(version, scope: str) -> str:
@@ -55,6 +56,41 @@ def scoped_version(version, scope: str) -> str:
     return f"{version or ''}|{scope}"
 
 
+def _profiles_digest_text(raw) -> str:
+    """把 `header_profiles` 那一列 JSON 压成**语义表示**再进指纹。
+
+    直接拿原文进哈希有两个后果，都是白花钱：
+
+    * 改一句**说明文本**（`note`，纯展示字段，模型一个字都看不到）会让指纹变
+      ⇒ 自动分析重跑一遍（约 ¥3.4）；
+    * 只是调整了 JSON 的缩进、或调换了键的书写顺序（语义一字未改）也一样。
+
+    所以这里过一遍 `parse_config`，只取**影响读法**的东西：方案的坐标，以及规则的
+    匹配方式与目标。`note` 与 `label` 都不取 —— 它们不改变模型看到的内容。
+
+    **两个列表都保持原序、不排序**：`bindings` 的顺序有语义（`path_regex` 是
+    「按用户填的顺序取首个命中」，见 `resolve_for_file`），排序会让两套先后不同的
+    配置算出同一个指纹。
+    """
+    config = parse_config(raw)
+    parts = [
+        "P|%s|%s|%s|%s|%s"
+        % (
+            profile.key,
+            profile.header_rows if profile.header_rows is not None else "",
+            profile.header_name_row if profile.header_name_row is not None else "",
+            profile.key_columns or "",
+            profile.marker_column or "",
+        )
+        for profile in config.profiles
+    ]
+    parts += [
+        "B|%s|%s|%s" % (binding.match, binding.value, binding.profile_key)
+        for binding in config.bindings
+    ]
+    return ";".join(parts)
+
+
 def header_scope_fingerprint(config_ids: Sequence[int]) -> str:
     """这批配置所属仓库的比较口径指纹（sha1 前 8 位；查不到就返回空串）。
 
@@ -63,9 +99,11 @@ def header_scope_fingerprint(config_ids: Sequence[int]) -> str:
     * `header_rows` / `header_name_row` / `key_columns` —— 仓库级的坐标标量；
     * `header_profiles` —— 「一个仓库并存多种表头格式」时的按文件选用规则。
 
-    **原值直接参与哈希，不做规范化**：这里的用途是「变了没有」，不是「等价类相同」
-    （要规范化的是另一件事，见 `agent_file_content_dispatch.header_config_fingerprint`）。
-    填 `3` 与填 `"3"` 在库里都是 int，所以不会因为写法不同而抖动。
+    **前半段原值直接参与哈希**：`header_rows` / `header_name_row` / `key_columns` 三个
+    标量是从 int 列读出来的，填 `3` 与填 `"3"` 在库里都是 int，不会因为写法不同而抖动。
+    **`header_profiles` 那一列相反，要先过语义规范化**（见 `_profiles_digest_text`）——
+    它是用户手写的 JSON 文本，原文里混着缩进和纯展示字段，直接哈希会让「改了一句说明」
+    或「只是重新缩进」这种与读法无关的改动也付出一次重跑的代价。
 
     查不到（配置刚被删、库不通）时返回空串：空串是个**常量**，不会让指纹无端抖动 ——
     这里宁可在异常时退化成今天的行为，也不要因为一次查询失败就让每轮分析都重跑。
@@ -104,7 +142,7 @@ def header_scope_fingerprint(config_ids: Sequence[int]) -> str:
             header_rows if header_rows is not None else "",
             header_name_row if header_name_row is not None else "",
             key_columns or "",
-            header_profiles or "",
+            _profiles_digest_text(header_profiles),
         )
         for config_id, repository_id, header_rows, header_name_row, key_columns, header_profiles in rows
     )

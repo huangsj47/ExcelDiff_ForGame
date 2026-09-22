@@ -203,6 +203,8 @@ def _migrate_weekly_version_diff_cache_columns(db, log_print):
             # 合并 diff 的输入是窗口内多条提交，比单文件缓存更难靠人工发现口径过期。
             # 老库缺这一列时读侧会直接抛 `no such column: diff_version`。
             "diff_version": "diff_version VARCHAR(20)",
+            # 列表按表头方案分组排序用（NULL = 「默认表头」那一组）。
+            "header_profile_key": "header_profile_key VARCHAR(64)",
         },
         log_print,
     )

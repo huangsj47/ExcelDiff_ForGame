@@ -300,16 +300,13 @@
         position: fixed;
         top: 0;
         right: 0;
-        /* 宽度按「正文一行放得下多少字」定，不按「放得下一个表单」定。
-           原来 460px：body 左右各 20px、正文框再各 20px 内边距，正文只剩约 380px，
-           而正文当时是等宽字体 —— 一个汉字占两个字宽，一行只放得下 27 个汉字，
-           稍长的报告全是折行（用户反馈「放不下多少文本」）。
-           720px 是上限：14px 无衬线下正文区实测 638px、一行 45 个汉字（旧版实测 402px / 30 字），
-           落在「中文 40~50 字」这个中文字行的常用区间里，再宽一行就过长。
-           62vw 是中段的相对值：视口不足 1161px 时抽屉按 62% 收，不把小笔记本横着占满
-           （1366 上仍是 720px，1024 上实测 635px）；手机（<=576px）反过来铺到 92vw，
-           并把内边距收到 12px，否则正文只剩十几字一行。 */
-        width: clamp(340px, 62vw, 720px);
+        /* 按「一行放得下多少字」定，不按「放得下一个表单」定。
+           三档在 720px 那一版上**整体 ×1.4**（用户要求「默认宽度增大 40%」）：
+           1008 / 87vw / 476px，任意视口下都是原来的 1.4 倍。代价是每行偏长
+           （1008px 时正文区约 928px、一行约 66 个汉字，已超出「中文 40~50 字」
+           那个常用区间），换的是少折行、表格能横向摆开。
+           手机（<=576px）仍是 92vw。 */
+        width: clamp(476px, 87vw, 1008px);
         height: 100%;    /* 无 dvh 支持时的兜底 */
         height: 100dvh;  /* 移动端按动态视口高度，避免地址栏遮挡 */
         background: var(--color-surface, #fff);
@@ -1583,7 +1580,7 @@
                             <label class="form-label" for="aiSubagentVerifyToggle">对账轮（找反证，仅周版本）</label>
                             <div class="form-check form-switch">
                                 <input class="form-check-input" type="checkbox" id="aiSubagentVerifyToggle"
-                                       aria-describedby="aiSubagentVerifyToggleHelp">
+                                       aria-describedby="aiSubagentVerifyToggleHelp aiSubagentVerifyToggleError">
                                 <label class="form-check-label" for="aiSubagentVerifyToggle">启用</label>
                             </div>
                             <div class="form-text" id="aiSubagentVerifyToggleHelp">
@@ -1595,6 +1592,9 @@
                                 结果会如实标成降级 —— 报告里的结论**没有经过这道复核**。
                                 需要先打开上面的「子代理模式」。
                             </div>
+                            <!-- 跨字段校验的落点：这一栏单独看永远合法，它错在**与上面那个开关的组合**。
+                                 没有这个槽位的话，错误只会出现在顶部摘要里，用户在这一栏旁边看不到任何提示。 -->
+                            <div class="form-text text-danger d-none" id="aiSubagentVerifyToggleError"></div>
                         </div>
                         <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiPromptCharBudgetInput">提示词字符预算</label>
@@ -1717,8 +1717,11 @@
    <风险点要写清什么；报告篇幅>
 <span class="ai-example__section">示例之一（来自 G119）：只作行文参考，事实以你这个项目的知识包为准</span>
 1. 技术栈与工程结构
-   Unity + C# + Lua。配表在 qz_config 下，导表产物是 CfgXxx.lua，且生成物要提交进版本库
-   （否则无法 diff、无法追溯）。表名形如 [30]道具表_CfgItem.xlsx，[NN] 就是 ID 段位。
+   Unity + C# + Lua。配表在 qz_config 仓的 config/ 下（源表 .xlsx），导表产物是 CfgXxx.lua，
+   落在同一个仓的 lua/client 与 lua/server，且生成物要提交进版本库（否则无法 diff、
+   无法追溯）。导表有两条并存管线：ExportExcelTool（全量）与 CustomTableExport
+   （按 g119_rules.py 逐条导出，表定义在 def_files 下的 *_def.py）。
+   表名形如【30】物品表（14外观）.xlsx，【NN】就是 ID 段位。
 
 2. 配表规范要点
    ID 为 6 位，前两位是类型段（10-19 角色、20-29 场景地图关卡、30-39 道具、40-49 怪物、
@@ -2381,10 +2384,17 @@
         <!-- AI-P0-03 两个入口：**默认是增量**（绿），全量是红色危险语义 —— 它忽略基线、
              更贵，所以由 JS 先摆出预计代价再问一次。三份模板同一套语法与文案
              （`commit_diff_new.html` 只有一次「重新分析」：单提交没有增量基线）。 -->
-        <button type="button" class="btn btn-sm btn-success" id="weeklyAiStartBtn"
-                title="只分析上次结论之后变化的部分（默认）">增量分析</button>
-        <button type="button" class="btn btn-sm btn-danger" id="weeklyAiFullBtn"
-                title="忽略增量基线，对整个窗口重新做一次完整评审（更贵，会先给预计代价）">全量重新分析</button>
+        {# 触发的门槛是**管理员**（服务端 `_has_project_admin_access` 是权威，这里只是
+           不给他一个点了必然 403 的按钮）。**只影响触发** —— 结论、历次结论、导出这些
+           读的入口对项目内所有人照旧开放。 #}
+        {% if is_admin() or has_project_admin_access(project.id) %}
+            <button type="button" class="btn btn-sm btn-success" id="weeklyAiStartBtn"
+                    title="只分析上次结论之后变化的部分（默认）">增量分析</button>
+            <button type="button" class="btn btn-sm btn-danger" id="weeklyAiFullBtn"
+                    title="忽略增量基线，对整个窗口重新做一次完整评审（更贵，会先给预计代价）">全量重新分析</button>
+        {% else %}
+        <span class="small text-muted">只有项目管理员能发起分析；结论对项目内所有人可见。</span>
+        {% endif %}
         <!-- 「导出 md」：把这一次的结论（报告原文 + 异常清单附录）交给浏览器下载。
              **刻意不写 `download` 属性** —— 空值会让浏览器按 URL 末段命名（report.md），
              把服务端拼好的中文文件名盖掉（响应带 Content-Disposition，见
@@ -2518,6 +2528,9 @@ const AI_FIELD_DOM = {
     max_analysis_rounds: 'aiMaxRoundsInput',
     max_tool_requests: 'aiMaxToolRequestsInput',
     subagent_count: 'aiSubagentCountInput',
+    // 对账轮：这一栏的校验是**跨字段**的（见 validateAiFieldLocally 里的 subagent_verify 分支），
+    // 落点就是它下面那个错误槽。
+    subagent_verify: 'aiSubagentVerifyToggle',
     prompt_char_budget: 'aiPromptCharBudgetInput',
     request_timeout_seconds: 'aiRequestTimeoutInput',
     min_severity: 'aiMinSeveritySelect',
@@ -3002,40 +3015,81 @@ function collectAiConfigPayload() {
     return payload;
 }
 
-// blur 时的本地校验只做「数字 / 范围」这一类，范围数字取自 field_schema（与后端同源）。
-// 读不到 schema（配置还没加载出来）时就跳过，交给后端 —— 本地校验只是提前反馈，
-// 服务端校验始终是唯一权威。
-function validateAiFieldLocally(field) {
+// 一个字段的本地判据。**返回 null 表示没问题**，否则回 `{field, label, message}` ——
+// 与后端 `FieldError.as_dict()` 同一形状，所以 `showAiConfigErrors` 两处通用。
+//
+// 抽成一个纯判据（而不是直接往 DOM 里写错误）是为了让「逐栏 blur 时校验」与
+// 「点保存时整体校验」用**同一套规则**。两处各写一份的话，早晚会出现
+// 「blur 说没问题、保存却被打回来」这种自相矛盾的界面。
+//
+// 本地这一遍只是提前反馈、省一次往返 —— **服务端始终是唯一权威**，它判过才算数。
+function aiFieldProblem(field) {
     const rule = aiConfigCache && aiConfigCache.field_schema ? aiConfigCache.field_schema[field] : null;
+    const label = (rule && rule.label) || field;
+
+    // --- 跨字段：对账轮依附在子代理模式上 ---
+    // 与 services/ai/project_config_source._cross_field_errors 同一条规则、同一句话。
+    // 服务端那道闸门是权威（界面可能被绕过），这里这一道是为了让用户在**点保存之前**
+    // 就看到它，而不是提交完被 400 打回来。
+    if (field === 'subagent_verify') {
+        const verify = aiEl('aiSubagentVerifyToggle');
+        const subagent = aiEl('aiSubagentToggle');
+        if (verify && verify.checked && subagent && !subagent.checked) {
+            return {
+                field: field,
+                label: label,
+                message: '需要先打开「子代理模式」：对账轮核对的是各分片各自的结论，单代理那条路没有东西可核对。要么打开上面的开关，要么把这一栏关掉。'
+            };
+        }
+        return null;
+    }
+
     const domId = AI_FIELD_DOM[field];
     const input = domId ? aiEl(domId) : null;
-    if (!rule || !input || AI_RANGE_KINDS.indexOf(rule.kind) < 0) return;
+    if (!rule || !input || AI_RANGE_KINDS.indexOf(rule.kind) < 0) return null;
 
-    const optional = AI_OPTIONAL_KINDS.indexOf(rule.kind) >= 0;
     const raw = String(input.value || '').trim();
+    // `type="number"` 在**输入中间态**（敲了一半的 `1e`、只有一个 `-`）会把 `value` 读成
+    // 空串。不单独认这一种，「留空 = 不限制」那两栏就会把用户**已经敲进去的东西**当成
+    // 「不限制」静默存下去 —— 界面显示的是一个空框，库里存的却是「没上限」。
+    if (raw === '' && input.validity && input.validity.badInput) {
+        return { field: field, label: label, message: '请填写数字' };
+    }
     if (raw === '') {
         // 「留空 = 不限制」那两栏，空是合法取值，不是「还没填」。
-        setAiFieldError(field, '');
-        return;
+        return null;
     }
     const num = Number(raw);
     if (!Number.isFinite(num)) {
-        setAiFieldError(field, '请填写数字');
-        return;
+        return { field: field, label: label, message: '请填写数字' };
     }
+    const optional = AI_OPTIONAL_KINDS.indexOf(rule.kind) >= 0;
     if (optional && num <= 0) {
-        setAiFieldError(field, '必须大于 0；留空表示不限制');
-        return;
+        return { field: field, label: label, message: '必须大于 0；留空表示不限制' };
     }
     if (!optional && rule.min !== null && rule.min !== undefined && num < rule.min) {
-        setAiFieldError(field, `不能小于 ${rule.min}`);
-        return;
+        return { field: field, label: label, message: `不能小于 ${rule.min}` };
     }
     if (rule.max !== null && rule.max !== undefined && num > rule.max) {
-        setAiFieldError(field, `不能大于 ${rule.max}`);
-        return;
+        return { field: field, label: label, message: `不能大于 ${rule.max}` };
     }
-    setAiFieldError(field, '');
+    return null;
+}
+
+function validateAiFieldLocally(field) {
+    const problem = aiFieldProblem(field);
+    setAiFieldError(field, problem ? problem.message : '');
+}
+
+// 保存前把**所有**栏过一遍，而不是依赖逐栏 blur：用户改完最后一栏直接点保存时，
+// 前面某一栏可能还是错的 —— 而 blur 只在它失焦那一刻报过一次，早被他一路忽略过去了。
+function validateAllAiFieldsLocally() {
+    const problems = [];
+    Object.keys(AI_FIELD_DOM).forEach(field => {
+        const problem = aiFieldProblem(field);
+        if (problem) problems.push(problem);
+    });
+    return problems;
 }
 
 function fillAiModelOptions(models) {
@@ -3151,6 +3205,17 @@ async function aiTestConnection() {
 async function aiSaveConfig() {
     const saveBtn = aiEl('aiConfigSaveBtn');
     clearAiConfigErrors();
+
+    // 本地先整体过一遍：省一次往返，也让「点保存」这个动作本身保证校验跑过了。
+    // **不能只依赖逐栏 blur** —— 用户改完最后一栏直接点保存时，前面某一栏的提示
+    // 可能早就报过一次、又被他一路忽略了。服务端紧接着还会判一次，那才是权威。
+    const problems = validateAllAiFieldsLocally();
+    if (problems.length) {
+        showAiConfigErrors(problems);
+        setAiConfigFeedback(`有 ${problems.length} 处需要修改。`, 'error');
+        return;
+    }
+
     if (saveBtn) {
         saveBtn.disabled = true;
         saveBtn.setAttribute('aria-busy', 'true');
@@ -3183,6 +3248,7 @@ async function aiSaveConfig() {
             if (!keyData || !keyData.success) {
                 // 配置已经存进去了，只是 Token 没存上。必须说清楚 —— 只说「保存失败」的话
                 // 用户会以为整份配置都没生效，然后把所有栏重填一遍。
+                // **这一条不关弹层**：还有一栏要改，关掉了他得重新打开。
                 setAiFieldError('api_key', (keyData && keyData.message) || 'Token 更新失败。');
                 setAiConfigFeedback('配置已保存，但 Token 更新失败。', 'error');
                 await refreshAiAnalysisConfig();
@@ -3192,7 +3258,11 @@ async function aiSaveConfig() {
         }
 
         await refreshAiAnalysisConfig();
-        setAiConfigFeedback('保存成功。', 'success');
+        // 保存成功 → **关掉弹层**（用户点「保存配置」的预期就是这件事做完了）。
+        // 关掉之后模态框底部那行反馈没人看得见，所以把「已保存」写回卡片上那行
+        // `role="status"` —— 那是用户关掉弹层后视线所在的地方，读屏也会念它。
+        closeAiConfigModal();
+        announceAiConfigSaved();
     } catch (_err) {
         setAiConfigFeedback('保存失败，请稍后重试。', 'error');
     } finally {
@@ -3201,6 +3271,23 @@ async function aiSaveConfig() {
             saveBtn.removeAttribute('aria-busy');
         }
     }
+}
+
+function closeAiConfigModal() {
+    const modal = aiEl('aiConfigModal');
+    if (!modal || !window.bootstrap || !window.bootstrap.Modal) return;
+    const instance = window.bootstrap.Modal.getInstance(modal)
+        || window.bootstrap.Modal.getOrCreateInstance(modal);
+    instance.hide();
+}
+
+// 卡片上那行 `role="status"` 同时承载「还没就绪：还缺…」（见 renderAiConfigSummary）。
+// 直接覆盖会把那句更有用的话盖掉，所以**接在前面**而不是替掉它。
+function announceAiConfigSaved() {
+    const status = aiEl('aiConnectionStatus');
+    if (!status) return;
+    const saved = 'AI 分析配置已保存。';
+    status.textContent = status.textContent ? saved + status.textContent : saved;
 }
 
 function initAiKeyToggle() {
@@ -3312,8 +3399,19 @@ function initAiConfig() {
             const el = aiEl(AI_FIELD_DOM[field]);
             if (!el) return;
             el.addEventListener('blur', () => validateAiFieldLocally(field));
-            el.addEventListener('input', () => setAiFieldError(field, ''));
+            el.addEventListener('input', () => {
+                // 跨字段那一栏（对账轮）勾上/取消就**当场**该有结论，不必等失焦：
+                // 它的合法性取决于另一个开关，而那个开关可能几秒前才被关掉。
+                if (field === 'subagent_verify') validateAiFieldLocally(field);
+                else setAiFieldError(field, '');
+            });
         });
+        // 对账轮依附在子代理模式上，所以子代理开关一变就要重判它 ——
+        // 否则用户先勾对账轮、再关掉子代理，界面上不会有任何提示，直到点保存才被打回来。
+        const subagentToggle = aiEl('aiSubagentToggle');
+        if (subagentToggle) {
+            subagentToggle.addEventListener('change', () => validateAiFieldLocally('subagent_verify'));
+        }
         initAiKeyToggle();
         initAiSourceRadios();
 
@@ -3323,7 +3421,12 @@ function initAiConfig() {
             // 打开时看到的应该是服务端的当前状态。
             modal.addEventListener('show.bs.modal', () => {
                 clearAiConfigErrors();
-                refreshAiAnalysisConfig();
+                // 读回来的这一份也要判一次跨字段：库里可能就存着「对账轮开着、子代理关着」
+                // （这条规则是后加的，之前存得进去）。不判的话用户在这一栏旁边看不到
+                // 任何提示，一路改到点保存才被打回来。
+                Promise.resolve(refreshAiAnalysisConfig()).then(() => {
+                    validateAiFieldLocally('subagent_verify');
+                });
             });
         }
     }
@@ -4162,6 +4265,13 @@ function setWeeklyAiStatusBadge(text, variant) {
     badge.className = `badge bg-${variant}`;
 }
 
+// 必须显式声明：`scheduleWeeklyAi` 第一句是**读** `weeklyAiRenderQueued`，读一个
+// 未声明的名字会抛 ReferenceError（隐式全局只在赋值那一侧成立）—— 于是
+// `appendWeeklyAiLine` 每次都抛，而它在 `result` 处理器里，异常会把处理器剩下的部分
+// （关流、清忙态、取落库结论）整段掀掉。
+let weeklyAiBuffer = '';
+let weeklyAiRenderQueued = false;
+
 // variant：'busy'（进行中，居中给个转圈）/ 'error'（失败，危险色实底）/ 省略（普通正文或提示语）。
 // 进行中与失败是两种完全不同的状态，不能混进「暂无分析结果」那套灰色提示里。
 function setWeeklyAiOutput(text, isEmpty, variant) {
@@ -4177,16 +4287,22 @@ function setWeeklyAiOutput(text, isEmpty, variant) {
     output.classList.toggle('is-error', variant === 'error');
 }
 
+// 只有逐行推过来时才粘到末尾（跟着输出看）；整篇一次性给过来（打开抽屉读已存结论）
+// 时回到顶部 —— 粘末尾会让用户一进来就看到报告最后一屏。
+let weeklyAiFollowTail = false;
+
 // 成功报告走这里：累积原始 Markdown，再整体渲染。
 // **不能逐行渲染**：列表、代码围栏、引用都可能跨行，一行一行渲染会把一个列表
 // 拆成一串单元素列表。
 function setWeeklyAiReport(markdown) {
     weeklyAiBuffer = String(markdown === null || markdown === undefined ? '' : markdown);
+    weeklyAiFollowTail = false;
     renderWeeklyAi();
 }
 
 function appendWeeklyAiLine(text) {
     weeklyAiBuffer += (weeklyAiBuffer ? '\n' : '') + text;
+    weeklyAiFollowTail = true;
     scheduleWeeklyAi();
 }
 
@@ -4206,7 +4322,7 @@ function renderWeeklyAi() {
     // 渲染器先整体转义再套白名单标签，模型给的内容永远以实体形式出现
     // （见 static/js/ai-report-markdown.js），所以这里赋 innerHTML 是安全的。
     output.innerHTML = AiReportMarkdown.render(weeklyAiBuffer);
-    output.scrollTop = output.scrollHeight;
+    output.scrollTop = weeklyAiFollowTail ? output.scrollHeight : 0;
 }
 
 // 逐行推送时若每行都整篇重解析，几百行的报告会明显卡顿；合并到一帧只渲染一次。

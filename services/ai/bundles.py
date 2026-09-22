@@ -3,7 +3,7 @@
 ## 为什么要合
 
 配表驱动的项目里，一张表与它的生成物通常由**同一次导表**产生：改了
-`[30]道具表_CfgItem.xlsx`，产物 `CfgItem.lua` 跟着变。把它们当成两个独立的 diff 看，
+`【30】道具表_CfgItem.xlsx`，产物 `CfgItem.lua` 跟着变。把它们当成两个独立的 diff 看，
 有两个代价：
 
 1. **丢掉最关键的关联。** 「表里加了 ID，生成的代码里有没有对应项」「表删了条目，生成的
@@ -20,7 +20,7 @@
 
 按「生成物模块名」这个**共同记号**配对：两个路径的**文件名**里出现同一个
 `<前缀><名字>` 记号（默认前缀 `Cfg`，例：`CfgItem`、`CfgModuleSub`），它们就被放进
-同一个单元。表名里的 `[30]道具表_` 前缀、目录、扩展名都不参与匹配。
+同一个单元。表名里的 `【30】道具表_` 前缀、目录、扩展名都不参与匹配。
 
 前缀**由项目自己声明**：`services/ai/project_facts.py` 从项目知识包的
 `references/project-facts.md` 读 `generated_prefixes`（不声明时用平台默认值；声明成
@@ -44,7 +44,7 @@
    「表与其生成物，必须一起看」，把它们并起来就是把一句不存在的话写进提示词。
 
 同一份数据里，**真正该配对的那些反而配不上**。项目的知识包里写着「导表产物是
-`CfgXxx.lua`」、表名形如 `[30]道具表_CfgItem.xlsx`，规则就是照这个写的；但**这一次
+`CfgXxx.lua`」、表名形如 `【30】道具表_CfgItem.xlsx`，规则就是照这个写的；但**这一次
 改动到的产物**都是 `code/qz_pub/cfg/<模块名>CfgMod.lua` 这一种，而它们的表（`角色属性表`、
 `背包属性表`、`剧情表` …）在名字层面与产物**没有任何共同记号**：表名是中文、没有 `Cfg`，
 产物里的模块名是英文。名字配对在这里做不到，**也不该硬做**（靠猜「RoleAttr 就是
@@ -70,7 +70,7 @@ from typing import Iterable, Mapping, Sequence, Tuple
 
 from services.ai.scope import normalize_path
 
-# 生成物模块名的前缀。G119 的知识里写的产物是 `CfgXxx.lua`、表名形如 `[30]道具表_CfgItem.xlsx`，
+# 生成物模块名的前缀。G119 的知识里写的产物是 `CfgXxx.lua`、表名形如 `【30】道具表_CfgItem.xlsx`，
 # 这个默认值就是照那个项目的约定取的 —— 它**只是默认值**：项目可以在知识包里声明自己的
 # 前缀（见 `project_facts.generated_prefixes`），声明了就以声明为准。
 DEFAULT_GENERATED_PREFIXES = ("Cfg",)
@@ -92,7 +92,7 @@ _MIN_TOKEN_TAIL = 2
 
 # 记号必须从**名字分量的起点**开始。前缀前不能是 ASCII 字母数字：
 # `SeasonRankCfgMod` 里的 `Cfg` 前面是 `k` → 不是分量起点，不认；
-# `[30]道具表_CfgItem`（前面是 `_`）与 `图标表CfgItem`（前面是中文）→ 认。
+# `【30】道具表_CfgItem`（前面是 `_`）与 `图标表CfgItem`（前面是中文）→ 认。
 # 下划线与中文都算分量边界，因为这两种写法在配表项目里都是分隔符。
 # 必须按 **ASCII** 判，不能用 `\w`：中文在 `\w` 里算字母数字，上面那个中文例子会被误判。
 _NOT_AT_COMPONENT_START = re.compile(r"[A-Za-z0-9]")

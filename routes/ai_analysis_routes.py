@@ -227,8 +227,12 @@ def ai_commit_stream(commit_id):
     # `commit.repository_id` / `repository.project_id` 都是 nullable=False，删仓库又连带删
     # commit，所以今天构造不出「仓库丢了但 commit 还在」的请求 —— 但这条链上少一个
     # `project_id` 就等于**跳过权限判定**，而权限判定不该有一条 fail-open 的支路。
-    if not project_id or not _has_project_access(project_id):
-        return jsonify({"success": False, "message": "Access denied."}), 403
+    #
+    # **管理员**而不是成员：这条路径是**触发**（它真的会发起一次付费分析，约 3.4 元），
+    # 与「看结果」是两件事。看结果的那两个端点（`/latest`、`/history`）仍旧是
+    # `_has_project_access` —— 项目里所有人都能看到分析结果，这一条没变。
+    if not project_id or not _has_project_admin_access(project_id):
+        return jsonify({"success": False, "message": "Admin permission required."}), 403
 
     def _generate():
         # 包一层「一定以 result / error 收尾」：生成器中途抛异常时，客户端只会看到
@@ -519,15 +523,17 @@ def ai_weekly_job_create(config_id):
     * `idempotency_key`：**客户端**给的动作标识。同一次点击重试要复用同一个键 ——
       「关掉抽屉再打开又点一下」不该变成第二次付费调用。
 
-    权限与其余 `/ai-analysis/*` 端点同一口径（`_has_project_access`，取不到也拒绝）。
+    权限**比其余 `/ai-analysis/*` 端点高一档：管理员**（`_has_project_admin_access`，
+    平台管理员自动满足）。理由是这个端点会真的发起一次付费分析 —— 与「看结果」是两件事，
+    看结果的端点是项目成员即可。取不到项目也拒绝。
 
     返回 `{success, job_id, state, run_id, requested_mode, effective_mode,
     upgrade_reason, reused_run_id, attached, job}`。**同步没跑完也照样返回 `job_id`**
     （状态 `waiting_snapshot`）—— 这就是「不再有『没有运行号所以无法确认』那一档」。
     """
     config = WeeklyVersionConfig.query.get_or_404(config_id)
-    if not _has_project_access(config.project_id):
-        return jsonify({"success": False, "message": "Access denied."}), 403
+    if not _has_project_admin_access(config.project_id):
+        return jsonify({"success": False, "message": "Admin permission required."}), 403
 
     payload, error = read_json_object()
     if error is not None:
@@ -546,6 +552,13 @@ def ai_weekly_job_create(config_id):
             focus=focus,
             trigger_source=payload.get("source", job_model.SOURCE_MANUAL),
             idempotency_key=payload.get("idempotency_key"),
+        )
+    except job_service.ProjectBusyError as exc:
+        # **409 而不是 400**：请求本身没毛病，是这个项目里已经有一次分析在跑，等一下就行。
+        # 与「参数不对」分开，前端才能把「等它跑完」与「你填错了」分成两种提示。
+        return (
+            jsonify({"success": False, "reason": exc.reason, "message": str(exc)}),
+            409,
         )
     except job_service.JobRequestError as exc:
         return jsonify({"success": False, "message": str(exc)}), 400

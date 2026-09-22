@@ -54,6 +54,9 @@ class WeeklyVersionDiffCache(db.Model):
     repository_id = db.Column(db.Integer, db.ForeignKey('repository.id'), nullable=False)
     file_path = db.Column(db.String(500), nullable=False)
     file_type = db.Column(db.String(50))  # 文件类型：'code', 'table', 'res', etc.
+    # 这张表命中的表头方案 key（NULL = 没命中任何规则，即「默认表头」那一组）。
+    # 写入在 generate_weekly_merged_diff（唯一写本表的地方），读取用于列表分组排序。
+    header_profile_key = db.Column(db.String(64))
 
     # 差异数据
     merged_diff_data = db.Column(BigText)  # JSON格式的合并diff数据

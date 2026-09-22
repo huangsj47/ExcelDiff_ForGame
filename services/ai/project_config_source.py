@@ -113,6 +113,42 @@ def get_project_analysis_config(project_id: int) -> dict:
         "endpoint_ready": not validate_endpoint_ready(values, has_key=bool(key_state.get("configured"))),
     }
 
+def _cross_field_errors(row, normalized: dict) -> list:
+    """跨字段规则。**单字段校验器看不到另一栏**，所以只能放在这一层。
+
+    只有「两栏的最终值都能定下来」时才判：提交里没有的键回落到**这一行实际生效的值**
+    （`row.resolved()`，NULL 也按默认值补齐）。界面可能只改一栏，那时拿不到的那一栏
+    必须按现值算 —— 否则一个本来就合法的组合会被误判成冲突，用户改个模型名都存不进去。
+
+    为什么「对账轮 + 子代理关闭」必须**报错**而不是静默改成关：那正是本仓库反复要挡的
+    那类缺陷 —— 界面显示 A、存下去/跑起来是 B。用户勾着「对账轮」，报告里却没有
+    「对账结果」，他找不到任何地方说明为什么。`plan_family` 那边（`services/ai/subagent.py`）
+    已经写明「没开子代理就没有对账轮」，这里做的是把同一句话**提前到保存那一刻**说出来。
+
+    也**不做**「越界就夹到边界内」那种兜底：与 `_coerce_int` 同一条纪律 ——
+    要改的是告诉他为什么不行，不是悄悄改掉他的值。
+    """
+    current = row.resolved() if hasattr(row, "resolved") else {}
+
+    def final(field_name: str):
+        if field_name in normalized:
+            return normalized[field_name]
+        return current.get(field_name, FIELD_DEFAULTS.get(field_name))
+
+    verify = bool(final("subagent_verify"))
+    enabled = bool(final("subagent_enabled"))
+    if verify and not enabled:
+        return [
+            FieldError(
+                "subagent_verify",
+                "对账轮（找反证，仅周版本）",
+                "需要先打开「子代理模式」：对账轮核对的是各分片各自的结论，"
+                "单代理那条路没有东西可核对，这一轮不会执行。"
+                "要么打开上面的开关，要么把这一栏关掉。",
+            )
+        ]
+    return []
+
 def update_project_analysis_config(
     project_id: int, payload: dict, updated_by: str = ""
 ) -> Tuple[bool, str, list]:
@@ -135,6 +171,16 @@ def update_project_analysis_config(
     except ConfigValidationError as exc:
         db.session.rollback()
         return False, str(exc), [item.as_dict() for item in exc.errors]
+
+    # 跨字段（对账轮 ⇐ 子代理模式）。与逐字段校验**同一套出口**，界面不必为它再写一份渲染。
+    cross_errors = _cross_field_errors(row, normalized)
+    if cross_errors:
+        db.session.rollback()
+        return (
+            False,
+            "；".join(str(item) for item in cross_errors),
+            [item.as_dict() for item in cross_errors],
+        )
 
     # 改单价必须同时改 version（见 pricing.price_change_requires_version_bump）。
     # 判定要拿**库里现在这一份**去比，不能用界面加载时那一份 —— 两个人同时开着配置

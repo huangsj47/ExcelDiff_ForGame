@@ -303,7 +303,15 @@ def test_ai_project_analysis_config_update():
             project.id,
             {
                 "weekly_interval_minutes": 15,
-                "auto_weekly_enabled": False,
+                # **必须取与默认值相反的值。** 这一组四个字段本来就是这么挑的（15、150、
+                # "test prompt" 都不是默认值）。`auto_weekly_enabled` 原先写的 `False`
+                # 在默认还是**开**的时候是对的；2026-09-22 默认改成**关**之后，它就退化
+                # 成了同义反复 —— 把这一列的写入整段跳过，读回来仍是默认的 False，
+                # 这条断言照样绿（变异验证实测：写入被摘掉后仍 `2 passed`）。
+                # 与默认相反的 `True` 才证得出「这一列真的落库了」；
+                # 「能关掉」那一向由 `test_weekly_ai_auto_trigger_gate` 里
+                # True→False 的翻动覆盖。
+                "auto_weekly_enabled": True,
                 "max_files_per_run": 150,
                 "prompt_template": "test prompt",
             },
@@ -315,7 +323,7 @@ def test_ai_project_analysis_config_update():
         updated = ai_service.get_project_analysis_config(project.id)
         assert updated["configured"] is True
         assert updated["weekly_interval_minutes"] == 15
-        assert updated["auto_weekly_enabled"] is False
+        assert updated["auto_weekly_enabled"] is True
         assert updated["max_files_per_run"] == 150
         assert updated["prompt_template"] == "test prompt"
 
@@ -347,6 +355,95 @@ def test_an_out_of_range_value_is_rejected_and_nothing_is_written():
         after = ai_service.get_project_analysis_config(project.id)
         assert after["weekly_interval_minutes"] == 15, "失败的那次不该动已存的配置"
         assert after["max_analysis_rounds"] == 8, "仍是默认值：既没被夹取也没被写入"
+
+
+def test_the_verify_round_needs_the_subagent_mode_it_depends_on():
+    """**对账轮依附在子代理模式上：没开子代理就存不进「对账轮」。**
+
+    `plan_family`（`services/ai/subagent.py`）写明「没开子代理就没有对账轮」，所以
+    「对账轮开着、子代理关着」是一种**永远不生效**的配置。旧实现让它静默存进去 ——
+    用户勾着「对账轮」，报告末尾却永远没有「对账结果」，而且找不到任何地方说明原因。
+
+    判据是**拒绝 + 指名到栏**，不是「悄悄把它改成关」（与越界不夹取同一条纪律）。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        db.session.commit()
+
+        ok, _message, errors = ai_service.update_project_analysis_config(
+            project.id,
+            {"subagent_enabled": False, "subagent_verify": True},
+            updated_by="tester",
+        )
+        assert ok is False, "「对账轮开着、子代理关着」被存进去了"
+        assert [item["field"] for item in errors] == ["subagent_verify"]
+        assert errors[0]["label"], "错误里没有给用户看的中文栏名"
+        assert "子代理" in errors[0]["message"], errors[0]["message"]
+
+        after = ai_service.get_project_analysis_config(project.id)
+        assert after["subagent_verify"] is False, "被拒的那次不许落库"
+        assert after["subagent_enabled"] is True, "另一个字段也不许被顺带改掉"
+
+
+def test_the_subagent_default_alone_does_not_trip_the_verify_rule():
+    """默认组合（子代理**开**、对账轮关）要存得进去 —— 否则默认值本身就把用户挡住了。
+
+    这条同时钉住「回落的是**解析后**的默认值」：新项目根本没有配置行，
+    `row.subagent_enabled` 是 None，直接 `bool(None)` 会算成 False，于是
+    「只提交对账轮」这一栏会被误判成冲突。必须走 `row.resolved()` 拿到 True。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        db.session.commit()
+
+        ok, message, errors = ai_service.update_project_analysis_config(
+            project.id, {"subagent_verify": True}, updated_by="tester"
+        )
+        assert ok is True, f"{message} {errors}"
+        after = ai_service.get_project_analysis_config(project.id)
+        assert after["subagent_verify"] is True
+        assert after["subagent_enabled"] is True
+
+
+def test_the_verify_rule_reads_the_stored_value_when_only_one_field_is_submitted():
+    """**只提交一栏时，另一栏要按库里现值算** —— 这条分支不测就等于没测。
+
+    界面可能只改一栏（`validate_payload` 也是按「只处理提交里出现的键」写的），
+    所以「提交里没有 `subagent_enabled`」不能当成 False：那会把一个本来就合法的组合
+    误判成冲突，用户改个模型名都存不进去。
+
+    三种情形的**组合**才证得出这件事：同一个提交 `{subagent_verify: True}`，
+    库里子代理关着时必须红、开着时必须绿。只测一边的话，「无论怎样都拒」与
+    「无论怎样都放行」都能让用例通过。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        db.session.commit()
+
+        ok, message, errors = ai_service.update_project_analysis_config(
+            project.id, {"subagent_enabled": False}
+        )
+        assert ok is True, f"{message} {errors}"
+
+        # 只提交对账轮 → 回落到库里的「子代理关」→ 必须被拒。
+        ok, _message, errors = ai_service.update_project_analysis_config(
+            project.id, {"subagent_verify": True}
+        )
+        assert ok is False, "只提交一栏时没有回落到库里现值"
+        assert [item["field"] for item in errors] == ["subagent_verify"]
+
+        # 把子代理打开（不带对账轮），再用**同一个提交**试一次 → 这次必须放行。
+        ok, message, errors = ai_service.update_project_analysis_config(
+            project.id, {"subagent_enabled": True}
+        )
+        assert ok is True, f"{message} {errors}"
+        ok, message, errors = ai_service.update_project_analysis_config(
+            project.id, {"subagent_verify": True}
+        )
+        assert ok is True, f"{message} {errors}"
 
 
 def test_the_endpoint_fields_round_trip():

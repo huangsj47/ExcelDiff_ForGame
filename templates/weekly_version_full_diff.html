@@ -588,6 +588,23 @@ window.initWeeklyExcelDiff = function(diffData) {
     window.generateWeeklyExcelTabs(tabsContainer, diffData.sheets);
 };
 
+// 表头方案说明条：**只在这张表命中了用户配的规则时才有** —— 默认表头占绝大多数，
+// 给它们也挂一条就等于把说明变成噪音。说明文本不截断（单文件页有空间看全）。
+function renderHeaderProfileNotice(profile) {
+    if (!profile) return '';
+    const note = (profile.note || '').trim();
+    const noteHtml = note
+        ? `<div class="small fw-semibold text-body mt-1">${escapeHtml(note)}</div>`
+        : '';
+    return `<div class="alert alert-light border py-2 px-3 mb-2">
+                <div class="small text-muted">
+                    <i class="bi bi-table me-1" aria-hidden="true"></i>表头方案
+                    <strong class="text-body">${escapeHtml(profile.label)}</strong>
+                </div>
+                ${noteHtml}
+            </div>`;
+}
+
 function loadDiffContent() {
     const url = `/weekly-version-config/${configId}/file-full-diff-data?file_path=${encodeURIComponent(filePath)}`;
 
@@ -609,7 +626,7 @@ function loadDiffContent() {
         .then(data => {
             if (data.success) {
                 const diffContainer = document.getElementById('diffContent');
-                diffContainer.innerHTML = data.diff_html;
+                diffContainer.innerHTML = renderHeaderProfileNotice(data.header_profile) + data.diff_html;
 
                 // 插入内容里的脚本标签一律**不执行**。
                 // 旧实现在这里 querySelectorAll('script') 逐个 eval(script.textContent)，

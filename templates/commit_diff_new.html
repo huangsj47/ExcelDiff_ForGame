@@ -49,16 +49,13 @@
         position: fixed;
         top: 0;
         right: 0;
-        /* 宽度按「正文一行放得下多少字」定，不按「放得下一个表单」定。
-           原来 460px：body 左右各 20px、正文框再各 20px 内边距，正文只剩约 380px，
-           而正文当时是等宽字体 —— 一个汉字占两个字宽，一行只放得下 27 个汉字，
-           稍长的报告全是折行（用户反馈「放不下多少文本」）。
-           720px 是上限：14px 无衬线下正文区实测 638px、一行 45 个汉字（旧版实测 402px / 30 字），
-           落在「中文 40~50 字」这个中文字行的常用区间里，再宽一行就过长。
-           62vw 是中段的相对值：视口不足 1161px 时抽屉按 62% 收，不把小笔记本横着占满
-           （1366 上仍是 720px，1024 上实测 635px）；手机（<=576px）反过来铺到 92vw，
-           并把内边距收到 12px，否则正文只剩十几字一行。 */
-        width: clamp(340px, 62vw, 720px);
+        /* 按「一行放得下多少字」定，不按「放得下一个表单」定。
+           三档在 720px 那一版上**整体 ×1.4**（用户要求「默认宽度增大 40%」）：
+           1008 / 87vw / 476px，任意视口下都是原来的 1.4 倍。代价是每行偏长
+           （1008px 时正文区约 928px、一行约 66 个汉字，已超出「中文 40~50 字」
+           那个常用区间），换的是少折行、表格能横向摆开。
+           手机（<=576px）仍是 92vw。 */
+        width: clamp(476px, 87vw, 1008px);
         height: 100%;    /* 无 dvh 支持时的兜底 */
         height: 100dvh;  /* 移动端按动态视口高度，避免地址栏遮挡 */
         background: var(--color-surface, #fff);
@@ -348,6 +345,18 @@
             <div class="mb-3">
                 <strong>文件路径:</strong> <code>{{ commit.path }}</code>
             </div>
+            {# 只在命中了用户配的表头规则时才有 —— 默认表头的文件不挂，否则全是噪音。 #}
+            {% if header_profile %}
+            <div class="alert alert-light border py-2 px-3 mb-3">
+                <div class="small text-muted">
+                    <i class="bi bi-table me-1" aria-hidden="true"></i>表头方案
+                    <strong class="text-body">{{ header_profile.label }}</strong>
+                </div>
+                {% if header_profile.note %}
+                <div class="small fw-semibold text-body mt-1">{{ header_profile.note }}</div>
+                {% endif %}
+            </div>
+            {% endif %}
             <div class="row">
                 <div class="col-md-6">
                     <div class="version-info">
@@ -478,8 +487,14 @@
              不分增量/全量，每次都是对这一份 diff 的完整评审），所以这里只有一个入口 ——
              造一个「增量」按钮出来就是给用户一个点了会说「没有这个概念」的控件。
              颜色与两份周版本模板的「全量重新分析」对齐（同一种语义 → 同一种颜色）。 -->
+        {# 触发的门槛是**管理员**（服务端 `_has_project_admin_access` 是权威，这里只是不给
+           他一个点了必然 403 的按钮）。**只影响触发** —— 结论、历次结论、导出照旧对所有人开放。 #}
+        {% if is_admin() or has_project_admin_access(project.id) %}
         <button class="btn btn-danger btn-sm" id="aiAnalyzeBtn"
                 title="对这一份提交做一次完整评审（单提交没有增量基线）">重新分析</button>
+        {% else %}
+        <span class="small text-muted">只有项目管理员能发起分析；结论对项目内所有人可见。</span>
+        {% endif %}
         <!-- 「导出 md」：把这一次的结论（报告原文 + 异常清单附录）交给浏览器下载。
              **刻意不写 `download` 属性** —— 空值会让浏览器按 URL 末段命名（report.md），
              把服务端拼好的中文文件名盖掉（响应带 Content-Disposition，见
@@ -627,6 +642,12 @@ function setAiStatusBadge(text, variant) {
     badge.className = `badge bg-${variant}`;
 }
 
+// 必须显式声明：`scheduleAi` 第一句是**读** `aiRenderQueued`，读一个未声明的名字会抛
+// ReferenceError（隐式全局只在赋值那一侧成立）—— 于是 `appendAiLine` 每次都抛，而它在
+// `result` 处理器里，异常会把处理器剩下的部分（关流、清忙态、取落库结论）整段掀掉。
+let aiBuffer = '';
+let aiRenderQueued = false;
+
 // variant：'busy'（进行中，居中给个转圈）/ 'error'（失败，危险色实底）/ 省略（普通正文或提示语）。
 // 进行中与失败是两种完全不同的状态，不能混进「暂无分析结果」那套灰色提示里。
 function setAiOutput(text, isEmpty, variant) {
@@ -642,16 +663,22 @@ function setAiOutput(text, isEmpty, variant) {
     output.classList.toggle('is-error', variant === 'error');
 }
 
+// 只有逐行推过来时才粘到末尾（`chunk` 事件，跟着输出看）；整篇一次性给过来
+// （打开抽屉读已存结论）时回到顶部 —— 粘末尾会让用户一进来就看到报告最后一屏。
+let aiFollowTail = false;
+
 // 成功报告走这里：累积原始 Markdown，再整体渲染。
 // **不能逐行渲染**：列表、代码围栏、引用都可能跨行，一行一行渲染会把一个列表
 // 拆成一串单元素列表。
 function setAiReport(markdown) {
     aiBuffer = String(markdown === null || markdown === undefined ? '' : markdown);
+    aiFollowTail = false;
     renderAi();
 }
 
 function appendAiLine(text) {
     aiBuffer += (aiBuffer ? '\n' : '') + text;
+    aiFollowTail = true;
     scheduleAi();
 }
 
@@ -671,7 +698,7 @@ function renderAi() {
     // 渲染器先整体转义再套白名单标签，模型给的内容永远以实体形式出现
     // （见 static/js/ai-report-markdown.js），所以这里赋 innerHTML 是安全的。
     output.innerHTML = AiReportMarkdown.render(aiBuffer);
-    output.scrollTop = output.scrollHeight;
+    output.scrollTop = aiFollowTail ? output.scrollHeight : 0;
 }
 
 // 逐行推送时若每行都整篇重解析，几百行的报告会明显卡顿；合并到一帧只渲染一次。

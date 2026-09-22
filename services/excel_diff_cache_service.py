@@ -22,6 +22,9 @@ db = None
 # 一致性由 tests/test_diff_service_fidelity.py::TestDiffLogicVersionSingleSource
 # 扫描全部三处锁定（tests/test_diff_logic_version_single_source.py 只覆盖 app.py / config.py）。
 DIFF_LOGIC_VERSION = "1.18.0"
+# 仓库**没配** path_regex 时，按这些后缀认配置表。配了就一律以 path_regex 为准 ——
+# 那是用户显式声明的口径（见 get_recent_excel_commits）。
+CONFIG_TABLE_SUFFIXES = ('.xlsx', '.xls', '.xlsm', '.xlsb', '.csv')
 DiffCache = None
 OperationLog = None
 Commit = None
@@ -804,7 +807,10 @@ class ExcelDiffCacheService:
             db.session.rollback()
     
     def get_recent_excel_commits(self, repository, limit=1000):
-        """获取最近的Excel文件提交（从最近1000条提交中筛选）"""
+        """获取最近的可对比文件提交（从最近 limit 条提交中筛选）。
+
+        返回什么由仓库的 `path_regex` 决定；没配时才按 `CONFIG_TABLE_SUFFIXES` 认配置表。
+        """
         try:
             # 先获取最近1000条提交记录，应用仓库起始日期过滤
             query = Commit.query.filter(Commit.repository_id == repository.id)
@@ -820,30 +826,20 @@ class ExcelDiffCacheService:
             
             recent_commits = query.order_by(Commit.commit_time.desc()).limit(limit).all()
             
-            # 从中筛选出Excel文件
-            excel_commits = []
-            for commit in recent_commits:
-                if (commit.path.endswith('.xlsx') or 
-                    commit.path.endswith('.xls') or 
-                    commit.path.endswith('.xlsm') or 
-                    commit.path.endswith('.xlsb') or 
-                    commit.path.endswith('.csv')):
-                    excel_commits.append(commit)
-            
-            commits = excel_commits
-            
-            # 进一步过滤符合仓库正则条件的文件
+            # 筛出要进 diff 的文件。**配了 path_regex 就以它为准**：那是用户显式声明的口径。
+            # 原先这里是「先按内置 Excel 后缀筛、再用正则进一步过滤」，于是用户把 .py 写进
+            # 正则也永远进不来（后缀那一关先挡掉了）—— 表现为「改了配置不生效」。
+            import re
+            pattern = re.compile(repository.path_regex) if repository.path_regex else None
             filtered_commits = []
-            if repository.path_regex:
-                import re
-                pattern = re.compile(repository.path_regex)
-                for commit in commits:
+            for commit in recent_commits:
+                if pattern is not None:
                     if pattern.search(commit.path):
                         filtered_commits.append(commit)
-            else:
-                filtered_commits = commits
-            
-            log_print(f"📊 从最近{limit}条提交中筛选出{len(filtered_commits)}个Excel文件", 'CACHE')
+                elif commit.path.endswith(CONFIG_TABLE_SUFFIXES):
+                    filtered_commits.append(commit)
+
+            log_print(f"📊 从最近{limit}条提交中筛选出{len(filtered_commits)}个可对比文件", 'CACHE')
             return filtered_commits
         except Exception as e:
             log_print(f"获取最近Excel提交失败: {e}", 'CACHE', force=True)

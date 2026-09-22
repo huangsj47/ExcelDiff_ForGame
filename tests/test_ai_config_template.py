@@ -286,9 +286,15 @@ def test_the_script_sets_the_range_from_the_schema():
 
 
 def test_the_script_does_not_keep_its_own_copy_of_the_ranges():
-    """本地 blur 校验的范围也必须取自 schema，不能在 JS 里再抄一份数字。"""
+    """本地 blur 校验的范围也必须取自 schema，不能在 JS 里再抄一份数字。
+
+    切片起点跟着代码走：范围判据从 `validateAiFieldLocally` 里抽成了纯函数
+    `aiFieldProblem`（为了让「逐栏 blur」与「点保存时整体校验」共用同一套规则），
+    所以这一段的起点改成它。**断言本身一个字没改** —— 「范围来自 schema」这条
+    不变量仍由它守着，只是被判的那段代码换了名字。
+    """
     script = _ai_script()
-    body = script[script.index("function validateAiFieldLocally") : script.index("function fillAiModelOptions")]
+    body = script[script.index("function aiFieldProblem") : script.index("function fillAiModelOptions")]
     assert "aiConfigCache.field_schema[field]" in body, "本地校验没有从 schema 取范围"
 
 
@@ -786,3 +792,170 @@ class TestTheVerifyField:
         assert block, "找不到只读额外清单"
         for element_id in ("aiSubagentToggle", "aiSubagentVerifyToggle"):
             assert element_id in block.group(1), f"{element_id} 没有被只读态覆盖"
+
+
+# ==========================================================================
+# 12. 保存前的整体校验、跨字段规则、保存成功即关闭
+# ==========================================================================
+
+
+def _strip_js_comments(source: str) -> str:
+    """剥掉 `//` 与 `/* */` 注释（引号里的 `//` 不算）。
+
+    **本仓库在静态断言上踩过这个坑**：注释里会原样引用「要禁掉的写法」，
+    不剥就会假通过（注释里写着 `closeAiConfigModal()` 也算命中）。
+    """
+    out = []
+    index, length = 0, len(source)
+    quote = ""
+    while index < length:
+        char = source[index]
+        if quote:
+            out.append(char)
+            if char == "\\" and index + 1 < length:
+                out.append(source[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in "\"'`":
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        if source.startswith("//", index):
+            while index < length and source[index] != "\n":
+                index += 1
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            index = length if end < 0 else end + 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _code_slice(start_marker: str, end_marker: str) -> str:
+    """模板里 `start_marker` 到 `end_marker` 之间的**代码**（注释已剥）。"""
+    raw = _ai_script()
+    body = raw[raw.index(start_marker) : raw.index(end_marker, raw.index(start_marker))]
+    return _strip_js_comments(body)
+
+
+class TestTheCrossFieldRuleAndTheSaveFlow:
+    """保存按钮这一条链路：**校验 → 保存 → 关闭**。
+
+    用户报的是「点确定了应该保存并关闭，但是需要校验部分输入的合法性」——
+    这两件事必须一起看：只关不校验，等于把非法值静默存进库；只校验不关，
+    用户以为没保存、再点一次。
+    """
+
+    def test_the_error_slot_of_the_verify_toggle_is_reachable(self):
+        """跨字段那条错误要能**落到那一栏上**，不能只出现在顶部摘要里。
+
+        `setAiFieldError` 是按 `${domId}Error` 找容器的：字段进了 `AI_FIELD_DOM`
+        却没有对应的错误容器时它会静默 no-op（页面上那一栏旁边什么都没有）。
+        """
+        html = _modal_html()
+        script = _ai_script()
+
+        assert "subagent_verify: 'aiSubagentVerifyToggle'" in script, (
+            "对账轮不在字段表里 —— 后端回的错误落不到这一栏上"
+        )
+        assert 'id="aiSubagentVerifyToggleError"' in html, "没有错误容器"
+        tag = re.search(r'<input[^>]*id="aiSubagentVerifyToggle"[^>]*>', html)
+        assert tag, "找不到对账轮那个 checkbox"
+        assert "aiSubagentVerifyToggleError" in tag.group(0), (
+            "错误容器没有被 aria-describedby 关联 —— 读屏用户听不到那条错误"
+        )
+
+    def test_one_judgement_serves_both_the_blur_check_and_the_save_check(self):
+        """逐栏 blur 与「点保存时整体校验」必须用**同一套判据**。
+
+        两处各写一份的话，早晚出现「blur 说没问题、保存却被打回来」这种自相矛盾的界面。
+        """
+        script = _strip_js_comments(_ai_script())
+
+        assert "function aiFieldProblem(field)" in script
+        blur = _code_slice("function validateAiFieldLocally", "function validateAllAiFieldsLocally")
+        whole = _code_slice("function validateAllAiFieldsLocally", "function fillAiModelOptions")
+        assert "aiFieldProblem(field)" in blur, "blur 那条路没有走共用判据"
+        assert "aiFieldProblem(field)" in whole, "整体校验那条路没有走共用判据"
+
+    def test_the_save_button_checks_every_field_before_it_posts(self):
+        """`aiSaveConfig` 必须**先整体校验、再发请求**。
+
+        只依赖逐栏 blur 是不够的：用户改完最后一栏直接点保存时，前面某一栏的错误提示
+        可能早就报过一次、又被他一路忽略过去。
+        """
+        body = _code_slice("async function aiSaveConfig", "function closeAiConfigModal")
+        check = body.index("validateAllAiFieldsLocally()")
+        post = body.index("await fetch(")
+        assert check < post, "整体校验排在发请求之后 —— 非法值已经提交出去了"
+        assert "showAiConfigErrors(problems)" in body, "本地判出来的问题没有呈现给用户"
+        assert "return;" in body[check:post], "本地校验不通过时没有中断，照样会发请求"
+
+    def test_the_cross_field_rule_is_the_same_rule_the_server_enforces(self):
+        """「对账轮开着、子代理关着」在**前后端各判一次**，两处说的必须是同一件事。
+
+        服务端那道是权威（界面可以被绕过）；前端这道是为了让用户在点保存之前就看到它。
+        只写前端 → 脚本/别的客户端能存进去；只写后端 → 用户提交完才被打回来。
+        """
+        body = _code_slice("function aiFieldProblem", "function validateAiFieldLocally")
+        assert "subagent_verify" in body, "前端没有这条跨字段判据"
+        assert "aiSubagentVerifyToggle" in body and "aiSubagentToggle" in body, (
+            "跨字段判据没有同时看两个开关"
+        )
+        assert "子代理模式" in body, "错误文案没有说清缺的是哪一个开关"
+
+        server = (
+            PROJECT_ROOT / "services" / "ai" / "project_config_source.py"
+        ).read_text(encoding="utf-8")
+        rule = server[server.index("def _cross_field_errors") : server.index("def update_project_analysis_config")]
+        assert "subagent_verify" in rule and "subagent_enabled" in rule
+        assert "子代理模式" in rule, "服务端那条规则与界面说的不是同一件事"
+
+    def test_an_illegal_number_is_not_read_as_left_blank(self):
+        """`type="number"` 的**输入中间态**会把 `value` 读成空串。
+
+        敲了一半的 `1e`、只有一个 `-`：`value` 是空的，但用户明明往里敲了东西。
+        不单独认这一种，「留空 = 不限制」那两栏就会把「不限制」存下去 ——
+        界面上是一个空框，库里却是一个用户从没表达过的语义。
+        """
+        body = _code_slice("function aiFieldProblem", "function validateAiFieldLocally")
+        assert "validity.badInput" in body, "没有认「敲了一半」这种输入"
+        bad_input = body.index("badInput")
+        blank_return = body.index("if (raw === '') {")
+        assert bad_input < blank_return, (
+            "badInput 判在「空串 = 允许留空」之后 —— 那个分支永远轮不到它，等于没写"
+        )
+
+    def test_a_successful_save_closes_the_modal(self):
+        """保存成功 → **关掉弹层**（用户点「保存配置」的预期就是这件事做完了）。
+
+        关掉之后模态框底部那行反馈没人看得见，所以要有**另一处**说「已保存」，
+        否则用户关掉之后不知道到底存没存上。
+        """
+        body = _code_slice("async function aiSaveConfig", "function initAiKeyToggle")
+        assert "closeAiConfigModal()" in body, "保存成功后没有关闭弹层"
+        assert "announceAiConfigSaved()" in body
+
+        closer = _code_slice("function closeAiConfigModal", "function announceAiConfigSaved")
+        assert "bootstrap.Modal" in closer, "没有真的去调 Bootstrap 的关闭"
+
+        announcer = _code_slice("function announceAiConfigSaved", "function initAiKeyToggle")
+        assert "aiConnectionStatus" in announcer, (
+            "「已保存」写去了一个关掉弹层后看不见的地方"
+        )
+
+    def test_the_token_failure_keeps_the_modal_open(self):
+        """Token 那一步失败时**不许关**：还有一栏要改，关掉了他得重新打开。"""
+        body = _code_slice("async function aiSaveConfig", "function closeAiConfigModal")
+        token_fail = body.index("配置已保存，但 Token 更新失败。")
+        assert "return;" in body[token_fail:], "Token 失败那条分支没有提前返回"
+        assert body.index("closeAiConfigModal()") > token_fail, (
+            "Token 失败时也走到了关闭那一步"
+        )

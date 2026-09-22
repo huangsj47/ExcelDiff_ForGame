@@ -101,6 +101,8 @@ from models.ai_analysis import (
     AiAnalysisJob,
 )
 
+from services.ai import project_gate
+
 # 目标身份的字面值。与 `AiAnalysisRun.target_type` / `BackgroundTask.task_type`
 # 同一套词，**不另立一套**：三张表说的是同一次分析。
 TARGET_TYPE_WEEKLY = "weekly"
@@ -224,6 +226,18 @@ class JobRequestError(ValueError):
     单独一个类型是为了让路由层**只**接这一种异常回 400：接 `ValueError` 会把
     「我们自己代码里的一个 bug」也变成一句「你的参数不对」。
     """
+
+
+class ProjectBusyError(JobRequestError):
+    """同一项目下已经有分析在跑。
+
+    **继承 `JobRequestError` 是为了「同一条出口」**（路由按本类型统一回结构化错误），
+    但它是**另一种语义**：请求本身没毛病，等一会儿再来就行。所以路由那侧把它接在
+    父类**之前**、回 409 而不是 400 —— 前端据此把「等它跑完」与「你的参数错了」
+    分成两种提示。`reason` 就是这个区分用的机器可读值。
+    """
+
+    reason = "project_analysis_running"
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +483,22 @@ def create_or_attach_job(
     existing = _find_by_active_key(active_key)
     if existing is not None and existing.state in ACTIVE_JOB_STATES:
         return _attach(existing, mode)
+
+    # ---- 第 2.5 步：项目级互斥 ----
+    # 走到这里说明第 2 步没找到可附着的 job —— 这确实是一次**新的**分析。第 1、2 步都是
+    # target 级的：同目标重复点会附着（好行为），但同一项目下两个不同目标能同时跑，
+    # 而一次分析约 3.4 元。
+    #
+    # **要排除「这个请求所针对的那一个目标」自己**（见 project_gate 的 docstring）：
+    # 同一个目标在处理中，结论是「附着 / skipped-already_running」，由既有那两层闸门
+    # 裁决；在这里拦住会把那套正确行为改坏。这道闸门管的是**别的目标**。
+    busy = project_gate.describe_active_analysis(
+        project_id,
+        exclude_active_key=active_key,
+        exclude_target=(TARGET_TYPE_WEEKLY, getattr(config, "id", None)),
+    )
+    if busy is not None:
+        raise ProjectBusyError(project_gate.project_busy_message(busy))
 
     # ---- 第 3 步：新建 ----
     state_row = _weekly_state(config, target_key)

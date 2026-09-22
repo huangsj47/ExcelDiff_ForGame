@@ -16,16 +16,28 @@
    * Content Jumping（Layout/High）—— 校验提示占**固定高度的槽位**，
      不让「✓/✗」出现时把下面的行推走。
    ========================================================================== #}
+{# 卡片观感对齐同页的「Table 资源配置」（`templates/add_git_repository.html` 的
+   `.table-config-section`）：那套样式是按容器类名写的，这里用本块的 id 复刻一份。 #}
+<style>
+    #headerProfilesBlock .card { border: 1.5px solid #dbeafe; border-radius: 0.625rem; }
+    #headerProfilesBlock .card-header {
+        background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+        border-bottom: 1px solid #bfdbfe;
+        padding: 0.75rem 1rem;
+        border-radius: 0.625rem 0.625rem 0 0 !important;
+    }
+    #headerProfilesBlock .card-body { background: #fafcff; }
+</style>
 <div class="mb-3" id="headerProfilesBlock">
     <div class="d-flex align-items-center justify-content-between mb-1">
         <label class="form-label mb-0" for="headerProfilesJson">
             表头方案 <span class="text-muted fw-normal">（可选）</span>
         </label>
         <div class="d-flex gap-2">
-            <button type="button" class="btn btn-sm btn-outline-secondary" id="hpAddProfileBtn">
+            <button type="button" class="btn btn-outline-secondary" id="hpAddProfileBtn">
                 <i class="fas fa-plus" aria-hidden="true"></i> 新建方案
             </button>
-            <button type="button" class="btn btn-sm btn-outline-secondary" id="hpToggleJsonBtn"
+            <button type="button" class="btn btn-outline-secondary" id="hpToggleJsonBtn"
                     aria-expanded="false" aria-controls="hpJsonPanel">
                 <i class="fas fa-chevron-right" aria-hidden="true" id="hpJsonCaret"></i> 高级模式：编辑 JSON
             </button>
@@ -43,22 +55,25 @@
         <ul class="mb-0 ps-3" id="hpErrorList" style="font-size: 0.85rem;"></ul>
     </div>
 
-    <div class="card mb-2">
-        <div class="card-header py-2" style="font-size: 0.85rem;">
-            <i class="fas fa-layer-group me-1" aria-hidden="true"></i>方案
-            <span class="text-muted fw-normal">（内置预设可直接选用，也可以自己新建）</span>
+    <div class="card mb-3">
+        <div class="card-header">
+            <h6 class="mb-0" style="font-size: 0.85rem; color: #1e40af;">
+                <i class="fas fa-layer-group me-1" aria-hidden="true"></i>表头方案
+                <span class="text-muted fw-normal">（内置预设可直接选用，也可以自己新建）</span>
+            </h6>
         </div>
         <div class="card-body p-0">
-            <table class="table table-sm align-middle mb-0">
+            <table class="table align-middle mb-0">
                 <caption class="visually-hidden">表头方案列表</caption>
                 <thead>
                     <tr>
-                        <th scope="col" style="width: 26%;">名称</th>
-                        <th scope="col" style="width: 12%;">表头行数</th>
-                        <th scope="col" style="width: 12%;">名称行</th>
-                        <th scope="col" style="width: 16%;">关键列</th>
-                        <th scope="col" style="width: 12%;">标记列</th>
-                        <th scope="col" style="width: 22%;"><span class="visually-hidden">操作</span></th>
+                        <th scope="col" style="width: 20%;">名称</th>
+                        <th scope="col" style="width: 9%;">表头行数</th>
+                        <th scope="col" style="width: 9%;">名称行</th>
+                        <th scope="col" style="width: 12%;">关键列</th>
+                        <th scope="col" style="width: 9%;">标记列</th>
+                        <th scope="col" style="width: 29%;">说明文本</th>
+                        <th scope="col" style="width: 12%;"><span class="visually-hidden">操作</span></th>
                     </tr>
                 </thead>
                 <tbody id="hpProfileRows"></tbody>
@@ -66,13 +81,15 @@
         </div>
     </div>
 
-    <div class="card mb-2">
-        <div class="card-header py-2" style="font-size: 0.85rem;">
-            <i class="fas fa-filter me-1" aria-hidden="true"></i>按以下规则选用
-            <span class="text-muted fw-normal">（固定文件名 → 目录前缀 → 路径正则 → 表头特征）</span>
+    <div class="card mb-3">
+        <div class="card-header">
+            <h6 class="mb-0" style="font-size: 0.85rem; color: #1e40af;">
+                <i class="fas fa-filter me-1" aria-hidden="true"></i>按以下规则选用
+                <span class="text-muted fw-normal">（固定文件名 → 目录前缀 → 路径正则 → 表头特征）</span>
+            </h6>
         </div>
         <div class="card-body p-0">
-            <table class="table table-sm align-middle mb-0">
+            <table class="table align-middle mb-0">
                 <caption class="visually-hidden">表头方案选用规则</caption>
                 <thead>
                     <tr>
@@ -85,7 +102,7 @@
                 <tbody id="hpBindingRows"></tbody>
             </table>
             <div class="p-2">
-                <button type="button" class="btn btn-sm btn-outline-secondary" id="hpAddBindingBtn">
+                <button type="button" class="btn btn-outline-secondary" id="hpAddBindingBtn">
                     <i class="fas fa-plus" aria-hidden="true"></i> 增加一条规则
                 </button>
             </div>
@@ -142,7 +159,11 @@
 
     // JSON 里没有输入框的键也要原样留着 —— 丢掉它们就是丢数据。
     var HP_KEEP_KEYS = ['key_columns'];
-    var HP_PROFILE_FIELDS = ['label', 'header_rows', 'header_name_row', 'marker_column'];
+    var HP_PROFILE_FIELDS = ['label', 'header_rows', 'header_name_row', 'marker_column', 'note'];
+    // 这几个字段用文本框渲染，其余按数字框。
+    var HP_TEXT_FIELDS = ['key_columns', 'marker_column', 'note'];
+    // 与服务端 MAX_NOTE_LENGTH 一致（services/excel_header_profiles.py）。
+    var HP_NOTE_MAX = 200;
 
     var hpProfiles = [];
     var hpBindings = [];
@@ -200,6 +221,7 @@
             item.header_rows = row.header_rows === '' ? null : Number(row.header_rows);
             item.header_name_row = row.header_name_row === '' ? null : Number(row.header_name_row);
             if (row.marker_column) item.marker_column = row.marker_column;
+            if (row.note) item.note = row.note;
             HP_KEEP_KEYS.forEach(function (field) {
                 if (row.extra && row.extra[field] !== undefined) item[field] = row.extra[field];
             });
@@ -241,6 +263,9 @@
             }
             if (row.marker_column && !/^[A-Za-z]{1,3}$/.test(row.marker_column)) {
                 return '标记列要写成列字母，如 A';
+            }
+            if (hpText(row.note).length > HP_NOTE_MAX) {
+                return '说明文本最多 ' + HP_NOTE_MAX + ' 字';
             }
             return '';
         }
@@ -303,7 +328,7 @@
         } else {
             var input = document.createElement('input');
             input.type = 'text';
-            input.className = 'form-control form-control-sm';
+            input.className = 'form-control';
             input.value = hpText(row.label);
             input.id = hpFieldId('profile', index, 'label');
             input.setAttribute('data-field', 'label');
@@ -312,13 +337,14 @@
         }
         tr.appendChild(nameTd);
 
-        [['header_rows', '表头行数'], ['header_name_row', '名称行'], ['key_columns', '关键列'], ['marker_column', '标记列']]
+        [['header_rows', '表头行数'], ['header_name_row', '名称行'], ['key_columns', '关键列'],
+         ['marker_column', '标记列'], ['note', '说明文本']]
             .forEach(function (pair) {
                 var field = pair[0];
                 var td = document.createElement('td');
                 var cell = document.createElement('input');
-                cell.type = (field === 'key_columns' || field === 'marker_column') ? 'text' : 'number';
-                cell.className = 'form-control form-control-sm';
+                cell.type = HP_TEXT_FIELDS.indexOf(field) === -1 ? 'number' : 'text';
+                cell.className = 'form-control';
                 cell.value = (field in row) ? hpText(row[field]) : hpText(row.extra && row.extra[field]);
                 cell.id = hpFieldId('profile', index, field);
                 cell.setAttribute('data-field', field);
@@ -353,7 +379,7 @@
 
         var matchTd = document.createElement('td');
         var select = document.createElement('select');
-        select.className = 'form-select form-select-sm';
+        select.className = 'form-select';
         select.setAttribute('data-field', 'match');
         select.setAttribute('aria-label', '第 ' + (index + 1) + ' 条规则的匹配方式');
         HP_MATCHES.forEach(function (item) {
@@ -369,7 +395,7 @@
         var valueTd = document.createElement('td');
         var input = document.createElement('input');
         input.type = 'text';
-        input.className = 'form-control form-control-sm font-monospace';
+        input.className = 'form-control font-monospace';
         input.value = hpText(row.value);
         input.setAttribute('data-field', 'value');
         input.setAttribute('aria-label', '第 ' + (index + 1) + ' 条规则的匹配内容');
@@ -380,7 +406,7 @@
 
         var profileTd = document.createElement('td');
         var profileSelect = document.createElement('select');
-        profileSelect.className = 'form-select form-select-sm';
+        profileSelect.className = 'form-select';
         profileSelect.setAttribute('data-field', 'profile');
         profileSelect.setAttribute('aria-label', '第 ' + (index + 1) + ' 条规则使用的方案');
         // **必须有这个空选项。** 没有它的时候，`row.profile` 为空（比如引用它的方案
@@ -627,7 +653,7 @@
             addProfile.addEventListener('click', function () {
                 var key = 'p' + (hpProfiles.length + 1) + '-' + Math.random().toString(36).slice(2, 6);
                 hpProfiles.push({ key: key, label: '', header_rows: '1', header_name_row: '1',
-                                  marker_column: '', extra: {} });
+                                  marker_column: '', note: '', extra: {} });
                 hpRender();
                 var input = hpEl(hpFieldId('profile', hpProfiles.length - 1, 'label'));
                 if (input) input.focus();   // 键盘用户点完不用自己 Tab 进新行

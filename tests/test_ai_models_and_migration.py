@@ -463,14 +463,22 @@ def test_resolved_treats_a_zero_or_garbage_budget_as_unset():
 
 
 def test_resolved_prefers_stored_values():
-    """反向自检：不能无差别覆盖成默认值。"""
+    """反向自检：不能无差别覆盖成默认值。
+
+    **每个字段都要取与默认值不同的值** —— 这条用例的命题是「存进去的值不会被默认
+    值盖掉」，那么一个字段的取值若恰好等于默认值，它对这条命题就**一点证明力都没有**。
+    `auto_weekly_enabled` 原先取的 `False` 在默认还是**开**的时候是合格的；默认改
+    成**关**之后它变成了默认值本身：`resolved()` 就算无脑返回默认值，这一条也照样绿
+    （变异验证实测：把该列的写入整段跳过，此用例仍 `2 passed`）。现在跟着其余四个
+    字段一起改成与默认相反的 `True`。
+    """
     config = AiProjectAnalysisConfig(
         project_id=1,
         min_severity="critical",
         max_analysis_rounds=3,
         api_model="gpt-x",
         project_knowledge="只看配表",
-        auto_weekly_enabled=False,
+        auto_weekly_enabled=True,
     )
     resolved = config.resolved()
 
@@ -478,7 +486,7 @@ def test_resolved_prefers_stored_values():
     assert resolved["max_analysis_rounds"] == 3
     assert resolved["api_model"] == "gpt-x"
     assert resolved["project_knowledge"] == "只看配表"
-    assert resolved["auto_weekly_enabled"] is False
+    assert resolved["auto_weekly_enabled"] is True
 
 
 def test_resolved_normalizes_case_and_whitespace():

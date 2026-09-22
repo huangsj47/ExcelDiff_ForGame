@@ -62,7 +62,7 @@ PASSWORD = "pw-123456"
 STAMP = uuid.uuid4().hex[:6]
 MODEL = "claude-sonnet-5"
 
-REPORT = """# 变更理解
+_REPORT_SECTION = """# 变更理解
 
 本次把「无敌帧」的判定从 `BattleMgr.update` 挪到了 `BattleMgr.onHit`，判定顺序因此
 发生了变化：先算无敌、再算扣血。
@@ -77,6 +77,13 @@ REPORT = """# 变更理解
 | 风险等级 | 高 |
 |---|---|
 """
+
+# 报告正文要**足够长**：这里有一条读数是「打开抽屉时滚动位置在不在顶部」，而短报告
+# 撑不出滚动条、`scrollTop` 恒等于 0 —— 那条断言就退化成同义反复（假绿）。
+# 六份约 1800px，900 高的视口里抽屉正文区只有约 700px，滚得动。
+REPORT = "\n".join(
+    f"## 第 {index} 份结论\n\n{_REPORT_SECTION}" for index in range(1, 7)
+)
 
 
 def _round_records() -> list:
@@ -345,7 +352,21 @@ _MEASURE_JS = r"""
         height: Math.round(el.getBoundingClientRect().height)
     }));
     const exportLink = document.getElementById('aiExportMdLink');
+    // 抽屉宽度与正文框的滚动位置：两条都只有真浏览器算得出来（宽度是 clamp 的
+    // 解算结果、滚动位置取决于内容与盒子的真实高度）。
+    const box = (id) => {
+        const el = document.getElementById(id);
+        if (!el) return null;
+        return {
+            width: Math.round(el.getBoundingClientRect().width),
+            scrollTop: Math.round(el.scrollTop),
+            scrollHeight: Math.round(el.scrollHeight),
+            clientHeight: Math.round(el.clientHeight)
+        };
+    };
     return {
+        drawer: box('aiDrawer'),
+        output: box('aiAnalysisOutput'),
         think: pick('aiDrawerPanelThink'),
         report: pick('aiAnalysisOutput'),
         thinkSelected: sel('aiDrawerTabThink'),
@@ -575,6 +596,42 @@ def _main(out_prefix: str) -> int:
             path=str(out_dir / f"{out_prefix}_{name}.png"))
         settled = page.evaluate(_MEASURE_JS)
         _report("跑完之后：默认落在完整结论", settled)
+        # 抽屉宽度：三档在 720 那一版上整体 ×1.4（用户要求「默认宽度增大 40%」）。
+        # 视口 1440 → 87vw 超过上限，取的就是 1008。
+        print(f"  抽屉宽度: {settled['drawer']['width']}px"
+              f"  正文框滚动: top={settled['output']['scrollTop']}"
+              f" 内容高={settled['output']['scrollHeight']}"
+              f"/可见高={settled['output']['clientHeight']}")
+        assert 1000 <= settled["drawer"]["width"] <= 1010, (
+            f"抽屉宽度是 {settled['drawer']['width']}px，不是加宽后的 1008px"
+            "（加宽前是 720px）"
+        )
+        # **先证明这一档是活的**：撑不出滚动条时 `scrollTop` 恒为 0，下面那条断言就
+        # 变成同义反复 —— 本仓库在「假绿的守卫」上踩过不止一次。
+        assert settled["output"]["scrollHeight"] > settled["output"]["clientHeight"] + 20, (
+            "正文框没撑出滚动条，「打开抽屉停在顶部」这条断言会退化成恒真；"
+            "先把 REPORT 加长再验"
+        )
+        assert settled["output"]["scrollTop"] == 0, (
+            f"打开抽屉时正文停在 {settled['output']['scrollTop']}px —— "
+            "用户一进来看到的是报告最后一屏（反馈「显示的是最底部的结论文本」）"
+        )
+        # 反方向：**流式 chunk 推进来时必须跟到末尾**（跑动中用户看着的就是那一屏）。
+        # 少了这一条，「不粘末尾」写成死值 `scrollTop = 0` 也照样骗过上面那条断言，
+        # 而跑动中新推来的输出会停在第一屏不动。探完把正文还原回去，后面的截图不受影响。
+        page.evaluate("() => { window.__probeBuffer = aiBuffer; }")
+        page.evaluate("() => appendAiLine('\\n流式追加的一行')")
+        page.wait_for_timeout(400)
+        tail = page.evaluate(_MEASURE_JS)
+        print(f"  逐行追加之后: top={tail['output']['scrollTop']}"
+              f"/最大可滚={tail['output']['scrollHeight'] - tail['output']['clientHeight']}")
+        assert tail["output"]["scrollTop"] > 0, (
+            "逐行追加之后仍停在顶部 —— 跑动中新推来的输出看不见"
+        )
+        page.evaluate(
+            "() => { setAiReport(window.__probeBuffer); delete window.__probeBuffer; }"
+        )
+        page.wait_for_timeout(300)
         # 有结论 → 「导出 md」可见，且指向**这一次**的运行。
         assert settled["exportLink"] and settled["exportLink"]["hidden"] is False, (
             "有结论时「导出 md」仍然藏着 —— 用户没法把结论交出去"

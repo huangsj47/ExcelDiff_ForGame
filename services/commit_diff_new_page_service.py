@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from services.weekly_version_files_api_helpers import describe_file_header_profile
+
 AUTHOR_DISPLAY_FALLBACK_ERRORS = (
     RuntimeError,
     TypeError,
@@ -46,4 +48,11 @@ def handle_commit_diff_new_page(
         diff_data=diff_data,
         file_commits=file_commits,
         previous_commit=previous_commit,
+        # 这张表命中的表头方案（含用户写的说明文本）；走兜底坐标时为 None，
+        # 页面据此决定挂不挂那条说明。
+        header_profile=describe_file_header_profile(
+            repository,
+            getattr(commit, "path", None),
+            getattr(commit, "commit_id", None),
+        ),
     )

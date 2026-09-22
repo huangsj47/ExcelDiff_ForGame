@@ -695,3 +695,38 @@ def test_the_prompt_sources_stay_deterministic():
                 "提示词的输入必须是确定的：一次不确定的输入会让 prompt cache 的跨运行"
                 "命中静默归零（分析照跑，只是每次都比上一次贵）。"
             )
+
+
+def test_the_pair_rule_keeps_its_exclusions():
+    """「成对改动」那条指引：**收窄到「源 ↔ 它的生成物」这一对**，不能一刀切。
+
+    用户的要求是「已经取到配表 diff 就不要再去取导出的 lua」，为的是省 token。
+    但一刀切会砍掉两个真实场景：
+
+      * `客户端 ↔ 服务端`、`协议 ↔ 打包解包` 两边都是人写的、各说各的话，都得看；
+      * 「对侧不在本批」的那种只改了一半，本来就取不到（白名单只放本批改动过的文件）。
+
+    所以这里钉的是**边界**：省 token 那一句在，两类成对关系也被显式排除在外。
+    只钉「有那句话」是不够的 —— 有人把排除句删掉时用例照样绿，而那正是最可能出事的
+    改法：模型会对客户端/服务端也只读一边，分析质量静默下降。
+    """
+    from services.ai.prompt import _FIRST_ROUND_TRIAGE_STEP
+
+    assert "只取表那一边的 diff" in _FIRST_ROUND_TRIAGE_STEP
+    # 范围是「同一次或前后相邻的两次提交」—— 有项目是自动导表的，表与产物会落在相邻提交里。
+    assert "同一次提交或前后相邻的两次提交" in _FIRST_ROUND_TRIAGE_STEP
+    assert "客户端↔服务端、协议↔打包解包不适用这条" in _FIRST_ROUND_TRIAGE_STEP, (
+        "排除句没了 —— 「省一次索取」会被读成「所有成对关系都只读一边」"
+    )
+    assert "只改了一半" in _FIRST_ROUND_TRIAGE_STEP, "省 token 不能把那个信号本身省掉"
+
+
+def test_the_skill_says_the_same_thing_about_the_generated_pair():
+    """`SKILL.md` 是**无条件注入**的方法说明，与第一轮提示是同一件事的两处说法。
+
+    两处不一致的后果不是报错，是模型按其中一处行事、而人在另一处找原因。
+    """
+    skill = (Path(__file__).resolve().parents[1]
+             / "skills" / "version-diff-review" / "SKILL.md").read_text(encoding="utf-8")
+    assert "只取表那一边的 diff" in skill
+    assert "其余成对关系两边都要看" in skill, "SKILL.md 里少了那条排除"

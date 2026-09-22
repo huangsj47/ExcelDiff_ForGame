@@ -38,7 +38,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_MAX_FILES_PER_RUN,
 )
 from services.ai.analysis_budget import budget_gate_reason, early_stop_guard
-
+from services.ai import project_gate
 # 增量基线的编排块（AI-P0-02）：拿基准、冻目标快照、推进指针。**全部逻辑在那边**，
 # 本文件只按名字取用 —— 本文件贴着长度闸门（WARN 1800 / ERROR 2000），新增逻辑写在这里
 # 只会把它推过硬上限。
@@ -1368,6 +1368,20 @@ def stream_commit_analysis(commit_id: int, user_label: str = "") -> Iterable[str
     budget_reason = budget_gate_reason(project_id, entry="commit_manual")
     if budget_reason:
         yield _sse_event("error", {"message": budget_reason})
+        return
+
+    # 项目级互斥（手动·单提交）：与周版本那条**同一道闸门、同一个说法**。
+    # **要排除这个提交自己在跑的那一条** —— 那是 `already_running`，下面 `_create_run`
+    # 会带着运行号把它判出来，界面据此附着上去接着看进度；在这里提前改成「项目忙」
+    # 就把那个能力丢掉了（连按两次会变成一句「等它跑完」，而不是直接看到在跑的那条）。
+    busy = project_gate.describe_active_analysis(
+        project_id, exclude_target=("commit", commit_id)
+    )
+    if busy is not None:
+        yield _blocked_sse(
+            "commit", reason="project_busy",
+            message=project_gate.project_busy_message(busy),
+        )
         return
 
     payload = build_commit_payload(commit_id)

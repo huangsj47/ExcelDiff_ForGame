@@ -122,6 +122,16 @@ class HeaderProfile:
     header_name_row: Optional[int] = None
     key_columns: Optional[str] = None
     marker_column: Optional[str] = None
+    # 用户填的**说明文本**：给看 diff 的人解释「这张表为什么这么读」。
+    #
+    # 与 `reason` 的分工：`reason` 是平台自动生成的（「命中目录前缀：EditorCfgTool/excel」），
+    # 回答「为什么选中了这套」；`note` 是用户写的人话（「第 3 行才是字段名，A 列是 id」），
+    # 回答「这套坐标是什么意思」。前者进日志，后者进页面。
+    #
+    # 它是**纯展示字段**：不参与坐标计算，也**不进比较口径指纹** —— 改一句说明就让
+    # AI 分析重跑一遍（约 ¥3.4）是荒唐的。指纹那边按语义算，见
+    # `services/ai/header_scope.py`。
+    note: str = ""
     reason: str = ""
 
     @property
@@ -224,6 +234,27 @@ def _coerce_text(raw: Any) -> Optional[str]:
     return text or None
 
 
+# 说明文本的长度上限。它在页面上是一行小字（超一行截断 + 展开），200 字够写两三句
+# 「这张表为什么这么读」；再长就不该放这儿了 —— 那是文档的位置。
+MAX_NOTE_LENGTH = 200
+
+
+def _note_text(raw: Any) -> str:
+    """说明文本：压成单行、限长。
+
+    **压单行**不是洁癖：它在列表里是一行小字，用户从别处粘进来的多行文本会把每一行的
+    行高都撑开，几百个文件时列表就没法看了。
+
+    读取侧的超长处理是**截断**（`parse_config` 对坏值一贯宽容，不能让一条超长说明
+    把整页拖垮）；写入侧则是**拒绝**（见 `validate_config`）—— 截断是静默的，
+    只有写入侧拦下来，用户才知道自己写的东西没被完整保存。
+    """
+    text = _coerce_text(raw)
+    if not text:
+        return ""
+    return " ".join(text.split())[:MAX_NOTE_LENGTH]
+
+
 # ==========================================================================
 # 解析：JSON 文本 → 配置对象
 # ==========================================================================
@@ -268,6 +299,7 @@ def parse_config(raw: Any) -> HeaderProfileConfig:
                 header_name_row=_coerce_int(item.get("header_name_row")),
                 key_columns=_coerce_text(item.get("key_columns")),
                 marker_column=normalize_column(item.get("marker_column")),
+                note=_note_text(item.get("note")),
             )
         )
 
@@ -522,16 +554,21 @@ def resolve_for_file(
     *,
     probe: Optional[Callable[[str, Optional[int]], Sequence[str]]] = None,
     config: Optional[HeaderProfileConfig] = None,
-) -> HeaderProfile:
+    match_only: bool = False,
+) -> Optional[HeaderProfile]:
     """这张表该用哪一组坐标。
 
     `probe` 只有配了 `header_detect` 规则时才会被调用；不传就等于「不做表头特征匹配」，
     前三种纯路径规则照常工作。**只有这一档会去读文件** —— diff 主路径上不传 probe
     就与今天一样，一次多余的解析都没有。
+
+    `match_only=True` 时**没命中就返回 None**，而不是回落到仓库兜底坐标。列表分组与
+    diff 页的「显示说明文本」要的正是这个区分：走兜底的那些表不该挂说明（否则每个
+    文件都挂一条）。默认 False，行为与改动前逐字一致。
     """
     cfg = config if config is not None else parse_config(getattr(repository, "header_profiles", None))
     if not cfg.bindings:
-        return default_profile_for(repository)
+        return None if match_only else default_profile_for(repository)
 
     norm_path = normalize_path(file_path)
 
@@ -577,7 +614,7 @@ def resolve_for_file(
                 if hit is not None:
                     return hit
 
-    return default_profile_for(repository, reason="没有规则命中")
+    return None if match_only else default_profile_for(repository, reason="没有规则命中")
 
 
 def header_kwargs_for(
@@ -674,6 +711,16 @@ def validate_config(payload: Any) -> List[str]:
         marker = item.get("marker_column")
         if marker not in (None, "") and normalize_column(marker) is None:
             errors.append(f"{where}：标记列要写成列字母，如 A")
+        # 说明文本按**规范化之后**的长度判（与 `_note_text` 同一套压单行规则），
+        # 否则用户会看到「我明明只有 190 个字却被拒了」—— 多半是粘进来的换行在算数。
+        # 这里不能用 `_note_text` 的结果：它会截断，截断之后永远不超限，校验就废了。
+        raw_note = _coerce_text(item.get("note"))
+        if raw_note:
+            normalized_note = " ".join(raw_note.split())
+            if len(normalized_note) > MAX_NOTE_LENGTH:
+                errors.append(
+                    f"{where}：说明文本最多 {MAX_NOTE_LENGTH} 字（现在 {len(normalized_note)} 字）"
+                )
 
     known_keys = {p.key for p in parse_config(payload).profiles} | set(BUILTIN_PROFILES)
     for index, item in enumerate(payload.get("bindings") or [], start=1):

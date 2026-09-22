@@ -55,13 +55,13 @@ def handle_regenerate_cache(
             log_print(f"已清理仓库 {repository_id} 的所有缓存数据", "INFO")
             for commit in recent_commits:
                 add_excel_diff_task(repository_id, commit.commit_id, commit.path, priority=MAINTENANCE_REBUILD)
-            message = f"已将 {task_count} 个Excel文件差异放入缓存队列，正在后台处理中..."
+            message = f"已将 {task_count} 个文件差异放入缓存队列，正在后台处理中..."
             excel_cache_service.log_cache_operation(
                 f"🔄 重新生成缓存: 仓库 {repository.name}, 任务数量 {task_count}",
                 "info",
             )
         else:
-            message = f"仓库 {repository.name} 最近2周内没有Excel文件提交，无需重新生成缓存。"
+            message = f"仓库 {repository.name} 最近2周内没有文件变更，无需重新生成缓存。"
         return jsonify({"success": True, "message": message, "task_count": task_count})
     except REPOSITORY_MAINTENANCE_CACHE_REBUILD_ERRORS as exc:
         log_print(f"重新生成缓存失败: {exc}", "INFO")

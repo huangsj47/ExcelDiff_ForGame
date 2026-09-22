@@ -455,6 +455,19 @@
             <div class="mb-3">
                 <strong>文件路径:</strong> <code>{{ commit.path }}</code>
             </div>
+
+            {# 只在命中了用户配的表头规则时才有 —— 默认表头的文件不挂，否则全是噪音。 #}
+            {% if header_profile %}
+            <div class="alert alert-light border py-2 px-3 mb-3">
+                <div class="small text-muted">
+                    <i class="bi bi-table me-1" aria-hidden="true"></i>表头方案
+                    <strong class="text-body">{{ header_profile.label }}</strong>
+                </div>
+                {% if header_profile.note %}
+                <div class="small fw-semibold text-body mt-1">{{ header_profile.note }}</div>
+                {% endif %}
+            </div>
+            {% endif %}
             
             <!-- 版本信息对比 -->
             <div class="row">

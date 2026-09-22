@@ -809,7 +809,7 @@ def regenerate_repository_cache(repository_id):
         worker.log_print(f"删除了 {cache_deleted} 个缓存记录", 'CACHE')
         worker._db.session.commit()
         recent_commits = worker._excel_cache_service.get_recent_excel_commits(repository, limit=1000)
-        worker.log_print(f"找到 {len(recent_commits)} 个最近的Excel文件提交", 'CACHE')
+        worker.log_print(f"找到 {len(recent_commits)} 个最近的可对比文件提交", 'CACHE')
         for commit in recent_commits:
             worker.add_excel_diff_task(repository_id, commit.commit_id, commit.path)
         worker.log_print(f"已添加 {len(recent_commits)} 个缓存重建任务", 'CACHE')

@@ -34,6 +34,9 @@ if PROJECT_ROOT not in sys.path:
 from services.weekly_deleted_excel_helpers import resolve_primary_operation  # noqa: E402
 
 WEEKLY_LOGIC = os.path.join(PROJECT_ROOT, 'services', 'weekly_version_logic.py')
+# 列表条目的组装已搬到这个文件（weekly_version_logic 贴着 1800 行硬闸门），
+# 所以「色标走哪个口径」的断言要跟着搬 —— 守在旧文件上会变成假绿。
+FILES_API_HELPERS = os.path.join(PROJECT_ROOT, 'services', 'weekly_version_files_api_helpers.py')
 
 
 class TestOperationLabel:
@@ -70,17 +73,19 @@ class TestOperationLabel:
 
 class TestTheListUsesThisRule:
     def test_the_weekly_list_resolves_through_the_helper(self):
-        with open(WEEKLY_LOGIC, encoding='utf-8') as handle:
+        with open(FILES_API_HELPERS, encoding='utf-8') as handle:
             text = handle.read()
-        assert '_resolve_primary_operation_helper(file_operations)' in text, (
+        assert 'resolve_primary_operation(file_operations)' in text, (
             '周版本列表没有走 resolve_primary_operation —— 色标口径又各算各的了'
         )
 
     def test_the_old_membership_rule_is_gone(self):
-        """「操作里出现过 D 就标红」这行不许回来。"""
-        with open(WEEKLY_LOGIC, encoding='utf-8') as handle:
-            text = handle.read()
-        assert "'D' in file_operations" not in text, (
-            '「序列里出现过 D 就标成删除」的旧口径又回来了 —— '
-            '被删掉又建回来的文件会在列表里标红，而它的 diff 页显示的是新增内容'
-        )
+        """「操作里出现过 D 就标红」这行不许回来。**两个文件都要守** —— 组装搬走之后，
+        只守旧文件等于把真正的实现放空了。"""
+        for path in (WEEKLY_LOGIC, FILES_API_HELPERS):
+            with open(path, encoding='utf-8') as handle:
+                text = handle.read()
+            assert "'D' in file_operations" not in text, (
+                f'{os.path.basename(path)}：「序列里出现过 D 就标成删除」的旧口径又回来了 —— '
+                '被删掉又建回来的文件会在列表里标红，而它的 diff 页显示的是新增内容'
+            )
