@@ -319,6 +319,12 @@ def _summarize_weekly_files(
             "latest_commit_id": entry.latest_commit_id,
             "commit_count": entry.commit_count,
             "updated_at": entry.updated_at.isoformat() if entry.updated_at else None,
+            # **这一条 delta 是从哪一行缓存来的**（REV-AI-003）。缓存行是按 `config_id`
+            # 写的（一个周版本一行），而 AI 取数原先只按
+            # `(repository_id, path, latest_commit_id)` 查、取 id 最大的那一行 ——
+            # 两个周窗口的终点指向同一条提交时（回填日期、同刻提交），它会**猜**，
+            # 而且可能猜中另一个窗口那一份。把行主键带过去，读取侧就不用猜了。
+            "cache_row_id": entry.id,
         }
         # **这一轮该拿哪两个版本去比**：身份里上一轮那条 `latest` 就是基线。
         # 增量分析的语义是「上一轮之后新增的那一段」，而不是把整窗口再讲一遍 ——

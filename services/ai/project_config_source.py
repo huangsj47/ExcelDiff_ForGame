@@ -276,6 +276,42 @@ def _resolve_base_name(config: WeeklyVersionConfig) -> str:
         return name.split(" - ", 1)[0]
     return name
 
+def weekly_batch_configs(config: WeeklyVersionConfig) -> list:
+    """一个周版本批次里的全部配置 —— **同项目 + 同窗口 + 同版本名**。
+
+    三件事必须一起看，否则会把两个版本当成一个：
+
+    * 「同项目 + 同窗口」是最初的判据，但它**不够**：同一窗口下可以有另一个名字的
+      周版本配置（界面上完全建得出来，`weekly_version_config` 上没有任何唯一约束）。
+    * 分组键 `build_weekly_group_key` 含**版本名** —— 平台自己就把「同窗口不同名」当成
+      **两个版本**（两条 `AiWeeklyAnalysisState`、两次独立分析）。
+    * 于是判据分了家：AI 的输入集按「项目 + 窗口」取，把两个版本的文件混进同一份清单，
+      而报告标题写的是触发的那一个版本名。症状是报告写着 release-candidate，
+      `delta_files` 里却有 unrelated-experiment 的文件（REV-AI-002）。
+
+    **多仓库的批次不受影响**：它们由 `weekly_version_logic` 建成
+    `f"{name} - {repository.name}"`，取版本名时按第一个 `" - "` 切开，所以
+    「W1 - repoA / W1 - repoB」仍然在同一批里。
+
+    调用方：`ai_analysis_service.build_weekly_payload`（输入集）、
+    `weekly_sync_gate.group_config_ids`（同步闸门）、
+    `weekly_version_logic.weekly_version_diff`（页面上的仓库标签页）—— 三处必须是
+    同一份判据，各写一遍就会再次分家。
+    """
+    if config is None:
+        return []
+    base_name = _resolve_base_name(config)
+    rows = (
+        WeeklyVersionConfig.query.filter(
+            WeeklyVersionConfig.project_id == config.project_id,
+            WeeklyVersionConfig.start_time == config.start_time,
+            WeeklyVersionConfig.end_time == config.end_time,
+        )
+        .order_by(WeeklyVersionConfig.repository_id.asc())
+        .all()
+    )
+    return [row for row in rows if _resolve_base_name(row) == base_name]
+
 def build_weekly_group_key(config: WeeklyVersionConfig) -> str:
     base_name = _resolve_base_name(config)
     start_key = config.start_time.strftime("%Y%m%d%H%M") if config.start_time else "unknown"

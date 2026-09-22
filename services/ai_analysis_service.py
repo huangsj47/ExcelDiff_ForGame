@@ -129,6 +129,7 @@ from services.ai.project_config_source import (  # noqa: F401 —— 调用点�
     _price_table_from_config,
     _price_version_for,
     _resolve_base_name,
+    weekly_batch_configs,
     _utcnow,
     build_endpoint_client,
     build_weekly_group_key,
@@ -361,11 +362,10 @@ def build_weekly_payload(
     focus: Optional[str] = None,
 ) -> Tuple[Optional[dict], Optional[AiWeeklyAnalysisState], Optional[str]]:
     config = WeeklyVersionConfig.query.get_or_404(config_id)
-    configs = WeeklyVersionConfig.query.filter(
-        WeeklyVersionConfig.project_id == config.project_id,
-        WeeklyVersionConfig.start_time == config.start_time,
-        WeeklyVersionConfig.end_time == config.end_time,
-    ).order_by(WeeklyVersionConfig.repository_id.asc()).all()
+    # 输入集 = 这个**批次**的全部配置。判据必须与分组键同源（同项目 + 同窗口 +
+    # **同版本名**）—— 只按「项目 + 窗口」取会把同一窗口下另一个名字的周版本配置
+    # 也拉进来，于是报告标题写着一个版本、清单里却有另一个版本的文件（REV-AI-002）。
+    configs = weekly_batch_configs(config)
     if not configs:
         return None, None, "no_configs"
 
@@ -507,6 +507,28 @@ def _delta_bases(payload: Mapping[str, object]) -> dict:
         if base and commit and path:
             bases[(repository_id, commit, path)] = base
     return bases
+
+
+def _cache_rows(payload: Mapping[str, object]) -> dict:
+    """增量那一段的**缓存行主键**表，键 `(repository_id, latest_commit_id, file_path)`。
+
+    缓存行是按 `config_id` 写的（一个周版本一行），而 AI 取数原先只按
+    `(repository_id, path, latest_commit_id)` 查、取 id 最大的那一行 —— 两个周窗口的
+    终点指向同一条提交时（回填日期的提交、同刻提交），它会**猜**，而且可能猜中另一个
+    窗口那一份（REV-AI-003）。写侧（`scope_sampling._summarize_weekly_files`）把来源行
+    一并写进每条 delta，这里抽出来交给 provider。
+    """
+    rows: dict = {}
+    for item in payload.get("delta_files") or ():
+        if not isinstance(item, Mapping):
+            continue
+        row_id = item.get("cache_row_id")
+        commit = str(item.get("latest_commit_id") or "").strip()
+        path = str(item.get("file_path") or "").strip()
+        if row_id is None or not commit or not path:
+            continue
+        rows[(item.get("repository_id"), commit, path)] = int(row_id)
+    return rows
 
 
 def _apply_model_window(
@@ -1245,6 +1267,9 @@ def _run_engine_and_persist(
             # `platform_provider._delta_diff`。单提交分析不带（`delta_files` 只在周
             # 版本 payload 里）。
             delta_bases=_delta_bases(payload),
+            # 每条 delta 来自哪一行周版本缓存（REV-AI-003）。有它时落库 diff 按行主键取，
+            # 两个周窗口终点撞上同一条提交时不会取错窗口。
+            cache_row_ids=_cache_rows(payload),
         ),
         "loaded": loaded,
         "scope": change.scope,

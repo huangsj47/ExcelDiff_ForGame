@@ -85,7 +85,12 @@ def _uid(prefix: str) -> str:
 
 
 def _seed_two_configs_in_one_group():
-    """同一项目、同一窗口的两条配置 —— 它们**同属一个批次**（`group_config_ids`）。"""
+    """同一项目、同一窗口、**同一版本名**的两条配置 —— 它们同属一个批次。
+
+    名字必须共用（真实的多仓库批次是 `f"{版本名} - {仓库名}"`）：批次判据是
+    「同项目 + 同窗口 + 同版本名」（`project_config_source.weekly_batch_configs`），
+    随手起两个不同的随机名在平台眼里就是两个版本。
+    """
     now = datetime.now(timezone.utc)
     with flask_app.app_context():
         create_tables()
@@ -93,6 +98,7 @@ def _seed_two_configs_in_one_group():
         db.session.add(project)
         db.session.flush()
         configs = []
+        base_name = _uid("W")
         for index in range(2):
             repository = Repository(
                 project_id=project.id, name=_uid(f"repo{index}"), type="git",
@@ -104,7 +110,8 @@ def _seed_two_configs_in_one_group():
             # 窗口要**覆盖现在**：`schedule_weekly_sync_tasks` 拿北京墙钟与 `end_time`
             # 比，窗口一过就把配置置 completed 并跳过（那就测不到节拍了）。
             config = WeeklyVersionConfig(
-                project_id=project.id, repository_id=repository.id, name=_uid("W"),
+                project_id=project.id, repository_id=repository.id,
+                name=f"{base_name} - {repository.name}",
                 branch="main", start_time=now - timedelta(days=7),
                 end_time=now + timedelta(days=7),
                 is_active=True, auto_sync=True, status="active",

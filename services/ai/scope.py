@@ -49,6 +49,16 @@ class AnalysisScope:
     commits: tuple[str, ...] = ()
     # 全哈希 -> 该 commit 实际改动过的文件路径集合。
     paths_by_commit: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    # 全哈希 -> **本批次里带这个提交号的仓库**集合。
+    #
+    # **SVN 修订号只在单个仓库内唯一**，两个仓库完全可能同时有 revision 42。取数侧
+    # （`platform_provider._commit_row` / `_commit_rows`）查的是一张**跨仓库共用**的
+    # `commits_log` 表，不带仓库维度时它会按 `id` 取到另一个仓库那一行 —— 于是 A 项目
+    # 的分析里冒出 C 项目的文件（REV-AI-001）。这里把「本批次哪些仓库有这个号」交下去。
+    #
+    # 空 / 缺省 = **不知道**（手工构造的 scope、单提交模式）：那时取数侧不收窄，与
+    # 加这个字段之前的行为逐字一致。
+    repository_ids_by_commit: Mapping[str, frozenset[int]] = field(default_factory=dict)
     # 可读的文档名（skill 的 references 与项目知识文档）。
     readable_references: frozenset[str] = frozenset()
 

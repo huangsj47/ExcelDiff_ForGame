@@ -153,9 +153,10 @@ def _add_code_repo(group, *, file_count: int = 10) -> dict:
     cfg = WeeklyVersionConfig(
         project_id=group["project"].id,
         repository_id=repo.id,
-        name=_uid("weekly-code"),
+        name=group["cfg"].name,
         branch="main",
-        # 与主配置同一时间窗 → 落进同一个分组。
+        # 与主配置同一时间窗**且同一个版本名** → 落进同一个分组（判据见
+        # `project_config_source.weekly_batch_configs`）。
         start_time=group["cfg"].start_time,
         end_time=group["cfg"].end_time,
         is_active=True,

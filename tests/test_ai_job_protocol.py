@@ -439,11 +439,13 @@ def test_the_sync_gate_covers_the_whole_group_not_just_this_config():
     """
     with app.app_context():
         group = _make_group()
-        # 同一个项目、同一个窗口、另一个仓库（= 同一个分组里的另一个 config）。
+        # 同一个项目、同一个窗口、同一个**版本名**（= 同一个分组里的另一个 config）。
+        # 名字必须共用：批次判据是「同项目 + 同窗口 + 同版本名」，随手起两个不同的
+        # 随机名在平台眼里就是两个版本，那样造出来的根本不是「一批」。
         sibling = WeeklyVersionConfig(
             project_id=group["project"].id,
             repository_id=group["repo"].id,
-            name=_uid("weekly-sibling"),
+            name=group["cfg"].name,
             branch="main",
             start_time=group["cfg"].start_time,
             end_time=group["cfg"].end_time,

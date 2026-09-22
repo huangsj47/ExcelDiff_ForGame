@@ -641,6 +641,7 @@ class PlatformContextProvider:
         scope: AnalysisScope | None = None,
         manifest=None,
         delta_bases: Optional[Mapping[Any, str]] = None,
+        cache_row_ids: Optional[Mapping[Any, int]] = None,
     ):
         self._loaded = loaded
         self._max_rows = max_rows_per_sheet
@@ -652,6 +653,13 @@ class PlatformContextProvider:
         # 什么」淹在「这周一共改了什么」里。没有它（新文件 / 这一轮没变的补偿项 /
         # 全量分析）就照旧给整窗口那一份 —— 那时整窗口**就是**它的全部改动。
         self._delta_bases = dict(delta_bases or {})
+        # 每条 delta 来自哪一行 `WeeklyVersionDiffCache`（REV-AI-003），键
+        # `(repository_id, latest_commit_id, file_path)` —— 与 `_delta_bases` 同形。
+        #
+        # 有它的时候，落库 diff 的来源**按行主键取**；没有时退回旧查询，但命中多行就
+        # **拒绝猜测**（见 `stored_diff_source._weekly_stored_diff`）：两个周窗口的终点
+        # 撞上同一条提交时，旧查询会取 id 最大的那一行，而那可能是**另一个窗口**的。
+        self._cache_row_ids = dict(cache_row_ids or {})
         # 本批次的范围（哪些提交、各改了哪些文件）。只有 `find_references` 用它 —— 那个
         # 工具的问题是「这个标识符本批次里还有谁在用」，而「本批次」正是 scope 知道、
         # 别处都不知道的事（见 `ai/scope.py::batch_paths`）。不传时为 None：那几处
@@ -789,7 +797,10 @@ class PlatformContextProvider:
 
         if self._use_stored_batch_diff:
             stored, provenance = _weekly_stored_diff(
-                getattr(row, "repository_id", None), path, commit
+                getattr(row, "repository_id", None),
+                path,
+                commit,
+                row_id=self._cache_row_for(row, commit, path),
             )
             if stored is not None and not _is_failed_payload(stored):
                 rendered = render_diff_payload(
@@ -1317,15 +1328,36 @@ class PlatformContextProvider:
                 return repository
         return None
 
+    def _cache_row_for(self, row, commit: str, path: str) -> Optional[int]:
+        """这条 delta 来自哪一行周版本缓存（REV-AI-003）。取不到就返回 `None`。
+
+        键与 `_delta_bases` 同形（带仓库优先，缺仓库时退回不带仓库的旧键）。
+        """
+        repository_id = getattr(row, "repository_id", None)
+        found = self._cache_row_ids.get((repository_id, str(commit), str(path)))
+        if found is None and repository_id is not None:
+            found = self._cache_row_ids.get((None, str(commit), str(path)))
+        return found
+
+    def _repositories_for(self, commit: str) -> tuple[int, ...]:
+        """本批次里带这个提交号的仓库。空元组 = **不知道**，调用方不收窄（REV-AI-001）。
+
+        `commits_log` 是**跨仓库共用**的一张表，而 SVN 修订号只在单个仓库内唯一 ——
+        不带仓库维度查它，会按 `id` 取到另一个仓库（甚至另一个项目）那一行。
+        """
+        if self._scope is None:
+            return ()
+        return tuple(self._scope.repository_ids_by_commit.get(str(commit), ()))
+
     def _commit_row(self, commit: str, path: str):
         from models import Commit, db
 
         try:
-            return (
-                Commit.query.filter_by(commit_id=commit, path=path)
-                .order_by(Commit.id.desc())
-                .first()
-            )
+            query = Commit.query.filter_by(commit_id=commit, path=path)
+            repositories = self._repositories_for(commit)
+            if repositories:
+                query = query.filter(Commit.repository_id.in_(repositories))
+            return query.order_by(Commit.id.desc()).first()
         except Exception as exc:  # noqa: BLE001
             log_print(f"⚠️ AI 取数：查提交行失败 {commit[:12]}: {exc}")
             _ = db
@@ -1335,9 +1367,11 @@ class PlatformContextProvider:
         from models import Commit
 
         try:
-            return (
-                Commit.query.filter_by(commit_id=commit).order_by(Commit.id.asc()).all()
-            )
+            query = Commit.query.filter_by(commit_id=commit)
+            repositories = self._repositories_for(commit)
+            if repositories:
+                query = query.filter(Commit.repository_id.in_(repositories))
+            return query.order_by(Commit.id.asc()).all()
         except Exception as exc:  # noqa: BLE001
             log_print(f"⚠️ AI 取数：查提交失败 {commit[:12]}: {exc}")
             return []

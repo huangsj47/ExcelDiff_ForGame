@@ -26,7 +26,13 @@ from typing import Any, Mapping, Optional, Sequence
 from utils.logger import log_print
 
 
-def _weekly_stored_diff(repository_id: Optional[int], path: str, commit: str):
+def _weekly_stored_diff(
+    repository_id: Optional[int],
+    path: str,
+    commit: str,
+    *,
+    row_id: Optional[int] = None,
+):
     """这个文件在这个提交上的、**平台已经算好并落库**的周版本合并 diff。
 
     返回 `(载荷, 出处说明)`：载荷是渲染层能直接吃的
@@ -57,6 +63,17 @@ def _weekly_stored_diff(repository_id: Optional[int], path: str, commit: str):
     索取时原样传回来 —— 于是「它问的那个提交」与「这条缓存行」是同一个东西，
     不需要再猜「哪一次周版本」。
 
+    **但这个键不唯一**（REV-AI-003）：缓存行是**按 `config_id` 写的**，而同一个仓库、
+    同一个文件、同一个 `latest_commit_id` 在两个周窗口里都可能出现（回填日期的提交、
+    同一时刻的两条提交都会让两个窗口的终点撞上）。这时旧实现 `order_by(id.desc())`
+    就是**在猜**，而且会猜中后建的那个窗口。
+
+    所以现在的口径是：
+
+    * 传了 `row_id`（写侧把这条 delta 的来源行带下来了）→ **按主键取**，不猜；
+    * 没传 → 旧查询照跑，但**命中多行时拒绝猜测**，返回 `(None, "")` 让调用方按既有
+      链路降级（现场重算 / 问 Agent），而不是悄悄给一份别的窗口的差异。
+
     ## 不许张冠李戴
 
     这条缓存覆盖的是**一个窗口**（可能好几条提交），而模型的索取长成
@@ -73,13 +90,27 @@ def _weekly_stored_diff(repository_id: Optional[int], path: str, commit: str):
     from models.weekly_version import WeeklyVersionDiffCache
 
     try:
-        row = (
-            WeeklyVersionDiffCache.query.filter_by(
-                repository_id=repository_id, file_path=path, latest_commit_id=commit
+        if row_id is not None:
+            row = WeeklyVersionDiffCache.query.filter_by(id=row_id).first()
+        else:
+            # 旧路径（老 payload 没带行主键）。**命中多行时拒绝猜测** —— 见 docstring：
+            # 猜中的是另一个周窗口那一份，而它看起来完全正常。
+            candidates = (
+                WeeklyVersionDiffCache.query.filter_by(
+                    repository_id=repository_id, file_path=path, latest_commit_id=commit
+                )
+                .order_by(WeeklyVersionDiffCache.id.desc())
+                .limit(2)
+                .all()
             )
-            .order_by(WeeklyVersionDiffCache.id.desc())
-            .first()
-        )
+            if len(candidates) > 1:
+                log_print(
+                    f"⚠️ AI 取数：{path} 在提交 {str(commit)[:8]} 上有 {len(candidates)} 条"
+                    "周版本缓存（两个窗口的终点撞上了），这一份没有带来源行，不猜是哪一条",
+                    'AI',
+                )
+                return None, ""
+            row = candidates[0] if candidates else None
     except Exception as exc:  # noqa: BLE001 —— 取不到只是少一条来源，不该让整次索取失败
         log_print(f"⚠️ AI 取数：查周版本合并 diff 失败 {path}: {type(exc).__name__}: {exc}")
         return None, ""

@@ -170,14 +170,10 @@ def group_config_ids(config) -> list:
     """
     if config is None:
         return []
-    from models.weekly_version import WeeklyVersionConfig
-
     try:
-        rows = WeeklyVersionConfig.query.filter(
-            WeeklyVersionConfig.project_id == config.project_id,
-            WeeklyVersionConfig.start_time == config.start_time,
-            WeeklyVersionConfig.end_time == config.end_time,
-        ).all()
+        from services.ai.project_config_source import weekly_batch_configs
+
+        rows = weekly_batch_configs(config)
     except Exception:  # noqa: BLE001
         return [getattr(config, "id", None)] if getattr(config, "id", None) else []
     ids = [getattr(row, "id", None) for row in rows]

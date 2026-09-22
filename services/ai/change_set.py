@@ -134,6 +134,9 @@ def from_weekly_payload(
     `commit_detail` 查出某个提交的完整文件清单再点名索取。
     """
     grouped: dict[str, list[FileChange]] = {}
+    # 提交号 -> 本批次里带这个号的仓库（见 `AnalysisScope.repository_ids_by_commit`）。
+    # payload 的每一条**本来就带 `repository_id`**，只是原先在这两个归并循环里被扔掉了。
+    repositories: dict[str, set[int]] = {}
     for item in payload.get("list_files") or payload.get("delta_files") or []:
         entry = dict(item or {})
         commit_id = str(entry.get("latest_commit_id") or "")
@@ -141,6 +144,7 @@ def from_weekly_payload(
         if not commit_id or not path:
             continue
         grouped.setdefault(commit_id, []).append(FileChange(path=path, operation="M"))
+        _note_repository(repositories, commit_id, entry.get("repository_id"))
 
     commits = tuple(
         CommitSummary(commit=commit_id, files=tuple(files))
@@ -155,6 +159,7 @@ def from_weekly_payload(
         path = normalize_path(str(entry.get("file_path") or ""))
         if commit_id and path:
             whitelist.setdefault(commit_id, []).append(path)
+            _note_repository(repositories, commit_id, entry.get("repository_id"))
 
     # 截断说明由 `render_change_summary` 统一写（它会说清「没列出来但可以索取」），
     # 这里不再重复一句同义的话 —— 两处各写一半的后果是改一处漏一处。
@@ -203,6 +208,7 @@ def from_weekly_payload(
         prefixes=prefixes,
         manifest=manifest,
         extra_inputs=_extra_inputs(payload.get("delta_files") or ()),
+        repositories=repositories,
     )
 
 
@@ -217,6 +223,7 @@ def build(
     prefixes: Optional[PrefixDeclaration] = None,
     manifest: Optional[ManifestPlan] = None,
     extra_inputs: Sequence[tuple[str, str]] = (),
+    repositories: Optional[Mapping[str, Iterable[int]]] = None,
 ) -> ChangeSet:
     """渲染清单并算出白名单范围。两种模式共用。
 
@@ -310,6 +317,11 @@ def build(
                 for commit_id, paths_ in resolved_whitelist.items()
                 if commit_id
             },
+            repository_ids_by_commit={
+                commit_id: frozenset(ids)
+                for commit_id, ids in (repositories or {}).items()
+                if ids
+            },
             readable_references=frozenset(
                 [str(name) for name in readable_references if name] + [MANIFEST_REFERENCE]
             ),
@@ -320,6 +332,20 @@ def build(
         bundle_note=bundle_note,
         manifest=resolved_manifest,
     )
+
+
+def _note_repository(
+    into: dict[str, set[int]], commit_id: str, raw_repository_id: object
+) -> None:
+    """把「这个提交号属于哪个仓库」记下来（REV-AI-001）。
+
+    读不出来就**不记**：宁可少一条、让取数侧退回旧行为，也不要拿一个猜出来的仓库去
+    收窄查询 —— 那会把「本批次真的读不到」变成「读到了别的仓库那一行」。
+    """
+    try:
+        into.setdefault(commit_id, set()).add(int(raw_repository_id))
+    except (TypeError, ValueError):
+        return
 
 
 def _assignment_note(manifest: ManifestPlan) -> str:

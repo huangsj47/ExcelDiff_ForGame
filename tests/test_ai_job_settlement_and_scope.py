@@ -201,8 +201,9 @@ def _make_group(
         table_cfg = WeeklyVersionConfig(
             project_id=project.id,
             repository_id=table_repo.id,
-            # **同一个 (project_id, start_time, end_time) 才算同一组**
-            name=_uid("weekly_table"),
+            # **同一个 (project_id, start_time, end_time, 版本名) 才算同一组** ——
+            # 名字必须共用，随手起两个不同的随机名在平台眼里就是两个版本。
+            name=cfg.name,
             branch="main",
             start_time=cfg.start_time,
             end_time=cfg.end_time,

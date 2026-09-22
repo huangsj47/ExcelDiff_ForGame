@@ -44,7 +44,13 @@ def _uid(prefix: str) -> str:
 
 
 def _seed(*, with_sync_task: bool = True, status: str = "pending", age_minutes: int = 1):
-    """造一个项目 + 两条同窗口的周版本配置（模拟多仓库分组），可选一条同步任务。"""
+    """造一个项目 + 两条同窗口的周版本配置（模拟**多仓库分组**），可选一条同步任务。
+
+    两条配置共用同一个**版本名**（`f"{名字} - {仓库名}"`，与
+    `weekly_version_logic` 建多仓库配置时逐字同形）：批次判据是「同项目 + 同窗口 +
+    **同版本名**」（`project_config_source.weekly_batch_configs`），两个各不相同的
+    随机名字在平台眼里是**两个版本**，那样造出来的就不是「一整批」。
+    """
     now = datetime.now(timezone.utc)
     with flask_app.app_context():
         create_tables()
@@ -52,6 +58,7 @@ def _seed(*, with_sync_task: bool = True, status: str = "pending", age_minutes: 
         db.session.add(project)
         db.session.flush()
         configs = []
+        base_name = _uid("W")
         for index in range(2):
             repository = Repository(
                 project_id=project.id, name=_uid(f"repo{index}"), type="git",
@@ -61,7 +68,8 @@ def _seed(*, with_sync_task: bool = True, status: str = "pending", age_minutes: 
             db.session.add(repository)
             db.session.flush()
             config = WeeklyVersionConfig(
-                project_id=project.id, repository_id=repository.id, name=_uid("W"),
+                project_id=project.id, repository_id=repository.id,
+                name=f"{base_name} - {repository.name}",
                 branch="main", start_time=now - timedelta(days=7), end_time=now,
                 is_active=True, auto_sync=True, status="active",
             )

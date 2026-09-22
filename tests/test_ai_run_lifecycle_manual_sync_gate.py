@@ -78,7 +78,11 @@ def _uid(prefix: str) -> str:
 
 def _seed(*, sync_on: str = "primary", sync_status: str = "processing",
           age_minutes: int = 2, busy_worker: bool = False) -> dict:
-    """一个项目 + 两条同窗口的周版本配置（模拟多仓库分组），可选一条同步任务。
+    """一个项目 + 两条同窗口的周版本配置（模拟**多仓库分组**），可选一条同步任务。
+
+    两条共用同一个**版本名**（`f"{名字} - {仓库名}"`，与 `weekly_version_logic` 建
+    多仓库配置时逐字同形）：批次判据是「同项目 + 同窗口 + **同版本名**」，两个各不
+    相同的随机名字在平台眼里是两个版本，那样造出来的不是「一整批」。
 
     `sync_on="sibling"` 把同步任务挂在**另一条**配置上 —— 手工分析的入口是 primary，
     而闸门必须按整批判，否则这条用例就会漏过去。
@@ -94,6 +98,7 @@ def _seed(*, sync_on: str = "primary", sync_status: str = "processing",
         db.session.add(project)
         db.session.flush()
         configs = []
+        base_name = _uid("W")
         for index in range(2):
             repository = Repository(
                 project_id=project.id, name=_uid(f"repo{index}"), type="git",
@@ -103,7 +108,8 @@ def _seed(*, sync_on: str = "primary", sync_status: str = "processing",
             db.session.add(repository)
             db.session.flush()
             config = WeeklyVersionConfig(
-                project_id=project.id, repository_id=repository.id, name=_uid("W"),
+                project_id=project.id, repository_id=repository.id,
+                name=f"{base_name} - {repository.name}",
                 description="", branch="main",
                 start_time=now - timedelta(days=7), end_time=now,
                 is_active=True, auto_sync=True, status="active",

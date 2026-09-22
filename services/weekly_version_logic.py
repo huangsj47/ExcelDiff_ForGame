@@ -722,13 +722,11 @@ def weekly_version_diff(config_id):
     config = WeeklyVersionConfig.query.get_or_404(config_id)
     if not _has_project_access(config.project_id):
         abort(403)
-    # 查找同一项目下相同时间段的其他配置
-    related_configs = WeeklyVersionConfig.query.filter(
-        WeeklyVersionConfig.project_id == config.project_id,
-        WeeklyVersionConfig.start_time == config.start_time,
-        WeeklyVersionConfig.end_time == config.end_time,
-        WeeklyVersionConfig.id != config_id  # 排除当前配置
-    ).order_by(WeeklyVersionConfig.repository_id.asc()).all()
+    # 同一项目、同一窗口、**同一版本名**的其他仓库配置。最后一条不能省：同窗口下
+    # 可以有另一个名字的周版本（那是**另一个版本**，`build_weekly_group_key` 也把它
+    # 分成另一组），把它列成本版本的标签页会让读者以为那是同一个版本的一部分。
+    from services.ai.project_config_source import weekly_batch_configs
+    related_configs = [item for item in weekly_batch_configs(config) if item.id != config_id]
     all_configs = [config] + related_configs
     # 标签顺序与「第一个仓库」同一把尺子（services/repository_ordering.py），否则各说各话。
     all_configs.sort(key=weekly_config_order_key)
