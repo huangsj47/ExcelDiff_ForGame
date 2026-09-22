@@ -285,11 +285,30 @@ class TestAFailedMemberIsAGap:
         assert "没能交回结论的分片" in task and "S2" in task
         assert "上游 502" in task
 
-    def test_a_failed_synthesis_makes_the_family_fail(self):
-        """汇总没跑成 = 这一家子没有报告。不许把某个成员的半份报告当成结论。"""
-        client = FlakyClient(_final(), fail_on=3)
+    def test_a_failed_synthesis_preserves_successful_shards_as_a_degraded_report(self):
+        """汇总失败不能把已经完成的分片与其 token 成本一起抹掉。
+
+        平台只能把它标成降级结果，并明确说没有完成跨分片汇总；不得伪装成完整报告。
+        """
+        client = FlakyClient(_final(_anomaly()), fail_on=3)
         result = run_family(
             client=client, provider=FakeProvider(), plan=_plan(2), **_args()
+        )
+
+        assert result.outcome.status == STATUS_DEGRADED
+        assert result.outcome.degradation == DEGRADE_SUBAGENT
+        assert "汇总失败后的分片保全报告" in result.outcome.report_markdown
+        assert "未完成跨分片" in result.outcome.report_markdown
+        assert "上游 502" in result.outcome.report_markdown
+        assert result.outcome.anomalies, "分片已经交回的结构化结论必须保留"
+
+    def test_a_failed_synthesis_with_no_usable_shard_still_fails(self):
+        class AlwaysFails:
+            def complete(self, messages, *, temperature=None):
+                raise RuntimeError("上游 502")
+
+        result = run_family(
+            client=AlwaysFails(), provider=FakeProvider(), plan=_plan(2), **_args()
         )
 
         assert result.outcome.status == STATUS_FAILED

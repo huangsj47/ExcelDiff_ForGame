@@ -101,6 +101,7 @@ from services.ai.rules import (
     DEFAULT_MAX_ANOMALIES,
     KIND_ANOMALY_CAP,
     RuleThresholds,
+    normalize_anomalies,
 )
 from services.ai.scope import AnalysisScope
 from services.ai.skill_contract import (
@@ -165,6 +166,9 @@ MIN_MEMBER_ROUNDS = 2
 # `成员数 × 100% + 汇总那一份`（3 个分片：2.1 倍 → 3 倍）。额度是**上限不是预扣**，
 # 只有真的用掉才花钱；而「用了多少」在报告与用量面板里都看得到。
 MEMBER_BUDGET_PERCENT = 100
+# 汇总失败后的保全报告只保存各分片报告的有限摘录。分片的完整轮次与结构化异常仍在 trace
+# 和结果载荷中；这里的目的只是让人能读到已经完成的工作，不能再造一份无限膨胀的报告。
+SALVAGE_MEMBER_REPORT_CHARS = 12_000
 
 
 def _percent_of(total: int, percent: int) -> int:
@@ -1089,7 +1093,7 @@ def run_family(
         steps.append(step)
         spent_tokens += _tokens_of(step.outcome)
 
-    synthesis_outcome = _run_synthesis(
+    raw_synthesis_outcome = _run_synthesis(
         plan=plan,
         steps=steps,
         client=client,
@@ -1106,10 +1110,20 @@ def run_family(
         body_cache=body_cache,
         run_analysis_fn=run_analysis_fn,
     )
+    synthesis_outcome = _salvage_failed_synthesis(
+        synthesis=raw_synthesis_outcome,
+        steps=steps,
+        thresholds=thresholds or RuleThresholds(),
+    )
     synthesis_step = MemberOutcome(
         plan=plan.synthesis,
         outcome=synthesis_outcome,
-        error="" if synthesis_outcome.status != STATUS_FAILED else synthesis_outcome.error_message,
+        # 保全成功也必须在成员账里留下“汇总调用失败”的原始事实。
+        error=(
+            raw_synthesis_outcome.error_message
+            if raw_synthesis_outcome.status == STATUS_FAILED
+            else ""
+        ),
     )
     steps.append(synthesis_step)
 
@@ -1119,7 +1133,7 @@ def run_family(
     # 汇总没跑成时**不跑它**：它核对的对象就是那份报告，而报告不存在 —— 跑下去要么是空转
     # （任务书里只剩「主代理没报出任何结论」那一支），要么是让模型对着一份失败的运行凭空
     # 产出「对账结论」。这一条与预算无关，所以不走 `should_skip`。
-    if plan.verify and synthesis_outcome.status != STATUS_FAILED:
+    if plan.verify and raw_synthesis_outcome.status != STATUS_FAILED:
         # 预算早停同样管它：这时再花一整份提示词去买一道**复核**，而复核的对象（报告）
         # 已经产出了 —— 跳过它并在报告里点名（`DEGRADE_VERIFY`）比挤掉下一个版本更划算。
         verify_member = MemberPlan(
@@ -1163,6 +1177,71 @@ def run_family(
         anomaly_limit=int(thresholds.max_anomalies) if thresholds is not None else None,
     )
     return FamilyResult(outcome=outcome, steps=tuple(steps), candidates=candidates)
+
+
+def _salvage_failed_synthesis(
+    *,
+    synthesis: EngineOutcome,
+    steps: Sequence[MemberOutcome],
+    thresholds: RuleThresholds,
+) -> EngineOutcome:
+    """汇总失败时，把已完成分片保全成一份**明确降级**的结果。
+
+    这不是再次“假装汇总”：平台仅做既有的门槛、证据裁剪、近似去重和条数封顶，并把
+    各分片原报告按负责维度并列。若没有任何成功分片或结构化结论，仍返回原失败结果。
+    """
+    if synthesis.status != STATUS_FAILED:
+        return synthesis
+
+    usable = tuple(
+        step
+        for step in steps
+        if step.plan.role == ROLE_SUBAGENT
+        and step.outcome is not None
+        and step.outcome.status != STATUS_FAILED
+        and step.outcome.usable
+    )
+    if not usable:
+        return synthesis
+
+    raw: list[Anomaly] = []
+    for step in usable:
+        for candidate in step.candidates:
+            item = candidate.anomaly
+            source_ids = tuple(dict.fromkeys((*item.source_candidate_ids, candidate.id)))
+            raw.append(replace(item, source_candidate_ids=source_ids))
+    normalized = normalize_anomalies(raw, thresholds)
+
+    reason = synthesis.error_message.strip() or "汇总模型调用失败（未返回具体原因）"
+    sections = [
+        "# 汇总失败后的分片保全报告\n\n"
+        "> ⚠️ 本次最终汇总调用失败。以下内容来自已成功完成的分析分片，平台仅执行了"
+        "规则门槛、近似去重和条数上限；**未完成跨分片归并、冲突裁决与独立对账**。"
+        "这是一份可追溯的降级结果，不应当作完整报告。\n\n"
+        f"失败原因：{reason}"
+    ]
+    for step in usable:
+        outcome = step.outcome
+        assert outcome is not None
+        body, truncated = truncate_text(
+            outcome.report_markdown.strip(), SALVAGE_MEMBER_REPORT_CHARS
+        )
+        dimensions = "、".join(step.plan.dimensions) or "未声明"
+        note = "\n\n> 此分片正文过长，保全报告只显示前段；完整记录请查看逐轮明细。" if truncated else ""
+        sections.append(
+            f"## 分片 {step.plan.label}（负责：{dimensions}）\n\n"
+            f"{demote_headings(body).strip()}{note}"
+        )
+
+    return replace(
+        synthesis,
+        status=STATUS_DEGRADED,
+        anomalies=normalized.anomalies,
+        dropped=(*synthesis.dropped, *normalized.dropped),
+        report_markdown=_assemble_report(sections[0], sections[1:]),
+        degradation=DEGRADE_SUBAGENT,
+        error_message=reason,
+    )
 
 
 def run_family_with_seed(*, plan: FamilyPlan, limits: EngineLimits | None = None, **engine_args: Any) -> EngineOutcome:

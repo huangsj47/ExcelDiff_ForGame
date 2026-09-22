@@ -88,9 +88,10 @@ def resolve_sync_window(
     if not previous_tip:
         return SyncWindow(tip=tip, since_date=since_date, reason="首次同步，按提交日期水位线")
     if previous_tip == tip:
-        # 什么都没推。这里**不提前返回空**：调用方照旧走一次采集（结果必然为空），
-        # 保持「空结果也去重、也记账」这条既有路径不变。
-        return SyncWindow(tip=tip, since_date=since_date, reason="分支 tip 未变")
+        # 用 `tip..tip` 表达一个确定为空的区间。若退回日期路径，调度器每次检查都会把
+        # 水位线之后的几百条历史重新扫描、逐文件再找前一提交；实测两个未变仓库每 2 分钟
+        # 白跑约 40 秒。空区间仍走既有的去重/记账路径，但 git 能立即返回。
+        return SyncWindow(tip=tip, rev_range=f"{tip}..{tip}", reason="分支 tip 未变（空区间）")
 
     try:
         known = bool(local_commit_exists(git_service, previous_tip))

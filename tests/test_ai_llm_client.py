@@ -328,6 +328,39 @@ def test_retries_a_retryable_status_then_succeeds(monkeypatch):
     assert len(slept) == 1
 
 
+def test_retries_the_generic_gateway_400_then_succeeds(monkeypatch):
+    """部分兼容网关会把瞬态请求解析故障错误地报成 400。
+
+    只认这一句没有配置语义的固定响应；普通 400 仍然是配置错误、只请求一次。
+    """
+    slept: list[float] = []
+
+    def handler(_method, _url, _kwargs, call_no):
+        if call_no == 1:
+            return FakeResponse(status_code=400, body_text="Invalid HTTP request received.")
+        return FakeResponse(payload=_models_payload("m"))
+
+    calls = _patch(monkeypatch, handler)
+
+    assert _client(sleep=slept.append).list_models() == ("m",)
+    assert len(calls) == 2
+    assert len(slept) == 1
+
+
+def test_a_semantic_400_is_still_not_retried(monkeypatch):
+    slept: list[float] = []
+    calls = _patch(
+        monkeypatch,
+        lambda *_: FakeResponse(status_code=400, body_text="invalid model name"),
+    )
+
+    with pytest.raises(LLMConfigError):
+        _client(sleep=slept.append).list_models()
+
+    assert len(calls) == 1
+    assert slept == []
+
+
 def test_retry_after_header_wins_over_the_backoff_curve(monkeypatch):
     """上游明确说了多久之后再来，就按它说的来，比我们自己猜退避曲线准。"""
     slept: list[float] = []

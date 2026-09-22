@@ -83,6 +83,11 @@ _MAX_PLAUSIBLE_CONTEXT = 100_000_000
 
 # 这些 HTTP 状态码值得重试：限流与上游故障。
 RETRYABLE_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+# 少数 OpenAI 兼容网关会在连接复用/请求解析瞬态失败时回 400，并只给这句固定文本。
+# 它没有任何“哪个配置字段不合法”的语义；真实运行中一次这样的响应曾让已经完成的
+# 三个分析分片全部作废。只对白名单中的**精确通用文案**重试，避免把 invalid model / key
+# 这类确定性的 400 也打三遍。
+RETRYABLE_BAD_REQUEST_DETAILS = frozenset({"invalid http request received."})
 
 # 会被收窄的异常元组（与仓库其它模块的 `*_ERRORS` 约定一致，
 # 便于 tests/test_*_exception_narrowing.py 这类守卫统一检查）。
@@ -221,8 +226,13 @@ def _backoff_seconds(attempt: int) -> float:
     return min(BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), BACKOFF_MAX_SECONDS)
 
 
-def _should_retry_status(status_code: int) -> bool:
-    return status_code in RETRYABLE_STATUS_CODES
+def _should_retry_status(status_code: int, detail: str = "") -> bool:
+    if status_code in RETRYABLE_STATUS_CODES:
+        return True
+    return (
+        status_code == 400
+        and str(detail or "").strip().lower() in RETRYABLE_BAD_REQUEST_DETAILS
+    )
 
 
 @dataclass(frozen=True)
@@ -438,7 +448,7 @@ class LLMClient:
             f"{purpose}失败（HTTP {response.status_code}）："
             f"{redact_secret(detail, self._api_key)}"
         )
-        if _should_retry_status(response.status_code):
+        if _should_retry_status(response.status_code, detail):
             raise LLMTransportError(message)
         # 401/403 是配置问题，重试无意义，必须让用户看到「密钥不对」而不是「网络错误」。
         raise LLMConfigError(message)

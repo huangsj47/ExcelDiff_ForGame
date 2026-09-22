@@ -98,15 +98,15 @@ class TestWhichWindowThisRoundUses:
         assert window.rev_range == f"{_PREV}..{_TIP}", window
         assert git.exists_calls == [_PREV], "没有确认旧 tip 还在不在对象库里"
 
-    def test_an_unchanged_tip_keeps_the_date_watermark(self):
-        """tip 没变时采集结果必然为空 —— 原口径就是这样，不必改。"""
+    def test_an_unchanged_tip_uses_an_empty_commit_range(self):
+        """tip 没变时直接给空区间，不能每轮重新扫描日期窗口内的整批历史。"""
         git = _FakeGit(tip=_PREV)
         window = resolve_sync_window(
             git, _repository(last_synced_tip=_PREV),
             latest_known_commit_time=_T0 + timedelta(hours=2),
         )
-        assert window.rev_range == ""
-        assert window.since_date == _T0 + timedelta(hours=2)
+        assert window.rev_range == f"{_PREV}..{_PREV}"
+        assert window.since_date is None
 
     def test_the_first_sync_has_no_range_to_use(self):
         git = _FakeGit()
