@@ -37,6 +37,8 @@ import os
 import re
 import shutil
 import tempfile
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -53,7 +55,10 @@ from services.ai.skill_contract import (
     validate_project_pack,
 )
 from services.ai.skill_loader import (
+    PACK_OWNER_FILENAME,
     SkillLoadError,
+    pack_belongs_to,
+    pack_owner,
     project_pack_slug,
     resolve_projects_root,
     safe_join,
@@ -322,6 +327,18 @@ def locate_pack(project_code: str, *, repo_root: Path | None = None) -> PackLoca
     except SkillLoadError as exc:  # pragma: no cover - safe_join 对 slug 已不可能失败
         raise _reject("name", "项目代号", f"项目代号无法映射到合法目录：{exc}") from exc
     _reject_platform_target(pack_dir)
+    # **归属校验**（REV-KNOW-001）：slug 会 `lower()`，两个只差大小写的项目代号映到
+    # 同一个目录，而那两张 `project` 行在 SQLite 上合法共存。不查归属的话，
+    # B 用自己的项目 URL 就能读写 A 的知识包 —— 权限那一道只看「你是不是这个 project_id
+    # 的成员」，不会反查目录属于谁。
+    if pack_dir.is_dir() and not pack_belongs_to(pack_dir, project_code):
+        raise _reject(
+            "name",
+            "项目代号",
+            f"这个项目代号会映射到目录 `{slug}`，而那个知识包属于项目 "
+            f"「{pack_owner(pack_dir)}」—— 两个代号折成同一个目录（只差大小写或在别名上"
+            "撞车）时平台不会把别人的知识包交出去。请改用别的项目代号。",
+        )
     return PackLocation(project_code=project_code, slug=slug, pack_dir=pack_dir, projects_root=root)
 
 
@@ -505,7 +522,32 @@ def _atomic_write(target: Path, text: str) -> None:
         raise
 
 
-def _apply_with_validation(pack_dir: Path, mutate, *, edited_rel: str) -> None:
+_PACK_LOCKS: dict = {}
+_PACK_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def _pack_write_lock(pack_dir: Path):
+    """同一个知识包目录上的写操作**串行化**。
+
+    清单是「读真目录 → 合并 → 影子校验 → 落盘」四步，而 `_atomic_write` 只保证
+    **单文件**原子：两个线程各读一份旧清单、各自合并、后写的覆盖先写的 —— 结果是
+    **两份文件都在、清单里少一条引用**，而且真目录落地后不再复验，于是这个不一致状态
+    被静默留在盘上（REV-KNOW-002）。`runtime_entry` 用 `threaded=True` 跑 Flask，
+    两个并发 PUT 真的会落在两条线程上。
+
+    **这是进程内锁**：多进程 / 多副本部署时它不成立 —— 与
+    `services/agent_task_enqueue_service._ENQUEUE_LOCK` 同一个限制。那时需要的是一道
+    包级 CAS，现成的令牌是 `skill_loader.skill_revision`（整包 sha256）。
+    """
+    key = str(Path(pack_dir).resolve())
+    with _PACK_LOCKS_GUARD:
+        lock = _PACK_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        yield
+
+
+def _apply_with_validation(location: "PackLocation", mutate, *, edited_rel: str) -> None:
     """先在一份**影子目录**上做改动并校验，通过了才动真目录。
 
     「先把内容写进临时目录再校验、通过后再原子替换」这句话落到实现上是两步：
@@ -524,7 +566,22 @@ def _apply_with_validation(pack_dir: Path, mutate, *, edited_rel: str) -> None:
     复制它的开销远小于「校验通过但落地落成另一个样子」的排查成本。
 
     校验失败时抛 `ConfigValidationError`，真目录**一个字节都没被碰过**。
+
+    **整段在 `_pack_write_lock` 里**（REV-KNOW-002）：读-改-写必须整段串行，只把落盘
+    那一步上锁是没用的 —— 两个线程在进入之前就已经各读到同一份旧清单了。锁还顺带保证
+    `mutate` 的两次调用（影子一次、真目录一次）之间没有第三方改动，所以「从 `root` 现读
+    清单」的两遍结果必然一致。
     """
+    with _pack_write_lock(location.pack_dir):
+        _apply_with_validation_locked(location.pack_dir, mutate, edited_rel=edited_rel)
+        # 写下/刷新**归属标记**（REV-KNOW-001）：这个包目录从此归这个代号。
+        # 写在成功落地之后 —— 校验没过时一个字节都不该动，标记也算。
+        _atomic_write(
+            location.pack_dir / PACK_OWNER_FILENAME, location.project_code + "\n"
+        )
+
+
+def _apply_with_validation_locked(pack_dir: Path, mutate, *, edited_rel: str) -> None:
     staged_parent = Path(tempfile.mkdtemp(prefix="pack-stage-"))
     try:
         staged_pack = staged_parent / pack_dir.name
@@ -841,7 +898,7 @@ def write_manifest(project_code: str, content: str, *, repo_root: Path | None = 
     def mutate(root: Path) -> None:
         _atomic_write(root / PROJECT_PACK_MANIFEST, text)
 
-    _apply_with_validation(location.pack_dir, mutate, edited_rel=PROJECT_PACK_MANIFEST)
+    _apply_with_validation(location, mutate, edited_rel=PROJECT_PACK_MANIFEST)
     return {"rel_path": PROJECT_PACK_MANIFEST, "slug": location.slug}
 
 
@@ -876,22 +933,24 @@ def write_reference(
     _check_content_size(text, label=file_name)
     _check_pack_size(location.pack_dir, extra_bytes=len(text.encode("utf-8")))
 
-    manifest_path = location.pack_dir / PROJECT_PACK_MANIFEST
-    current_manifest = manifest_path.read_text(encoding="utf-8")
-    updated_manifest = _append_reference_mention(
-        current_manifest, file_name, _normalize_text(description)
-    )
-    mention_added = updated_manifest != current_manifest
+    # 清单**在 mutate 里现读**：读-改-写要整段在 `_apply_with_validation` 的锁内，
+    # 在外面先读好的那份基线到了锁里可能已经过期（REV-KNOW-002）。
+    seen = {"mention_added": False}
 
     def mutate(root: Path) -> None:
+        current_manifest = (root / PROJECT_PACK_MANIFEST).read_text(encoding="utf-8")
+        updated_manifest = _append_reference_mention(
+            current_manifest, file_name, _normalize_text(description)
+        )
+        seen["mention_added"] = updated_manifest != current_manifest
         _atomic_write(safe_join(root, REFERENCES_DIR_NAME, file_name), text)
-        if updated_manifest != current_manifest:
+        if seen["mention_added"]:
             _atomic_write(root / PROJECT_PACK_MANIFEST, updated_manifest)
 
     # 归因的目标是**用户正在编辑的那份文档**：清单那一行的改动是我们替他做的，
     # 把问题标到清单上他会找不到地方改。
-    _apply_with_validation(location.pack_dir, mutate, edited_rel=rel_path)
-    return {"rel_path": rel_path, "slug": location.slug, "mention_added": mention_added}
+    _apply_with_validation(location, mutate, edited_rel=rel_path)
+    return {"rel_path": rel_path, "slug": location.slug, "mention_added": seen["mention_added"]}
 
 
 def _append_reference_mention(manifest_text: str, file_name: str, description: str) -> str:
@@ -956,7 +1015,7 @@ def create_pack_from_template(project_code: str, *, repo_root: Path | None = Non
         for file_name, text in documents.items():
             _atomic_write(safe_join(root, REFERENCES_DIR_NAME, file_name), text)
 
-    _apply_with_validation(location.pack_dir, mutate, edited_rel=PROJECT_PACK_MANIFEST)
+    _apply_with_validation(location, mutate, edited_rel=PROJECT_PACK_MANIFEST)
     return {"slug": location.slug, "documents": sorted(documents)}
 
 
@@ -1008,7 +1067,7 @@ def write_skill(
         skill_dir.mkdir(parents=True, exist_ok=True)
         _atomic_write(skill_dir / SKILL_MD_NAME, markdown)
 
-    _apply_with_validation(location.pack_dir, mutate, edited_rel=rel_path)
+    _apply_with_validation(location, mutate, edited_rel=rel_path)
     return {"rel_path": rel_path, "slug": location.slug, "content": markdown}
 
 
@@ -1039,20 +1098,21 @@ def delete_reference(project_code: str, name: str, *, repo_root: Path | None = N
     if not target.is_file():
         raise _reject("name", "文件名", f"`{rel_path}` 不存在，可能已经被删掉了。")
 
-    manifest_path = location.pack_dir / PROJECT_PACK_MANIFEST
-    current_manifest = manifest_path.read_text(encoding="utf-8")
-    updated_manifest = _remove_reference_mention(current_manifest, file_name)
-    mention_removed = updated_manifest != current_manifest
+    # 同 `write_reference`：基线在锁内现读，见那里的说明。
+    seen = {"mention_removed": False}
 
     def mutate(root: Path) -> None:
+        current_manifest = (root / PROJECT_PACK_MANIFEST).read_text(encoding="utf-8")
+        updated_manifest = _remove_reference_mention(current_manifest, file_name)
+        seen["mention_removed"] = updated_manifest != current_manifest
         candidate = safe_join(root, REFERENCES_DIR_NAME, file_name)
         if candidate.is_file():
             candidate.unlink()
-        if mention_removed:
+        if seen["mention_removed"]:
             _atomic_write(root / PROJECT_PACK_MANIFEST, updated_manifest)
 
-    _apply_with_validation(location.pack_dir, mutate, edited_rel=rel_path)
-    return {"rel_path": rel_path, "slug": location.slug, "mention_removed": mention_removed}
+    _apply_with_validation(location, mutate, edited_rel=rel_path)
+    return {"rel_path": rel_path, "slug": location.slug, "mention_removed": seen["mention_removed"]}
 
 
 def delete_skill(project_code: str, name: str, *, repo_root: Path | None = None) -> dict:
@@ -1074,7 +1134,7 @@ def delete_skill(project_code: str, name: str, *, repo_root: Path | None = None)
             shutil.rmtree(candidate)
 
     # 删掉之后整包也必须仍然合法（例如它不能是包里唯一的内容）。
-    _apply_with_validation(location.pack_dir, mutate, edited_rel=f"{dir_name}/{SKILL_MD_NAME}")
+    _apply_with_validation(location, mutate, edited_rel=f"{dir_name}/{SKILL_MD_NAME}")
     return {"rel_path": f"{dir_name}/{SKILL_MD_NAME}", "slug": location.slug}
 
 

@@ -144,6 +144,45 @@ def project_pack_slug(project_code: str) -> str:
     return slug
 
 
+# 知识包目录里的**归属标记**：这个包是哪个项目代号创建的（**逐字**，大小写敏感）。
+#
+# ## 为什么需要它
+#
+# `project_pack_slug` 会 `lower()`，所以代号 `QAREV42` 与 `qarev42` 映到**同一个目录** ——
+# 而项目代号的唯一约束是大小写敏感的（SQLite 的 TEXT UNIQUE 走 BINARY 排序），两个项目
+# 完全建得出来。Windows 的文件系统也不区分大小写，所以这不是「可以靠改名躲开」的事：
+# 在那个平台上两个代号**本来就只能是同一个目录**。
+#
+# 后果是 B 用自己的项目 URL 读写时直接落到 A 的包上（读 200、写覆盖），而权限校验只看
+# 「你是不是这个 project_id 的成员」，中间没有任何一步反查「这个目录属于谁」
+# （REV-KNOW-001）。更隐蔽的一条是分析：`load_skills` 会把 A 的 references 与子 skill
+# 整份灌进 B 的提示词，没有任何 HTTP 状态码看得出来。
+#
+# 标记记**代号原文**而不是 project_id：这样校验只需要调用方手上本来就有的 `code`，
+# `load_skills` / `declaration_path` / `locate_pack` 三处的签名一个都不用改。
+#
+# **没有标记的包按「未认领」放行**：仓库里手工维护的包（`skills/projects/g119/`）本来
+# 就没有标记，按「代码即归属」判会误伤。第一次写入时补上标记，之后这个包就归它了。
+PACK_OWNER_FILENAME = ".pack-owner"
+
+
+def pack_owner(pack_dir: Path) -> str:
+    """这个知识包属于哪个项目代号。没有归属标记时返回空串（= 未认领）。"""
+    try:
+        return (pack_dir / PACK_OWNER_FILENAME).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def pack_belongs_to(pack_dir: Path, project_code: str) -> bool:
+    """这个目录能不能给 `project_code` 用。
+
+    未认领（没有标记）→ 可以；有标记 → 必须**逐字**相同。
+    """
+    owner = pack_owner(pack_dir)
+    return not owner or owner == str(project_code or "").strip()
+
+
 def safe_join(root: Path, *segments: str) -> Path:
     """把若干**单个**路径片段拼到 root 下，并确认结果没跑到 root 外面。
 
@@ -322,7 +361,17 @@ def load_skills(
         root = projects_root or resolve_projects_root(repo_root)
         if slug:
             pack_dir = safe_join(root, slug)
-            if pack_dir.is_dir():
+            # **归属校验**（REV-KNOW-001）：slug 会 lower()，两个只差大小写的项目代号
+            # 映到同一个目录。不查归属的话，B 的分析会把 A 的知识包整份灌进提示词 ——
+            # 而这一条没有任何 HTTP 状态码看得出来。
+            if pack_dir.is_dir() and not pack_belongs_to(pack_dir, project_code):
+                log_print(
+                    f"⛔ 项目 {project_code} 的知识包目录被另一个项目占用"
+                    f"（{pack_dir} 属于 {pack_owner(pack_dir)!r}），本次不加载它",
+                    'AI', force=True,
+                )
+                pack_dir = None
+            if pack_dir is not None and pack_dir.is_dir():
                 manifest_path = pack_dir / PROJECT_PACK_MANIFEST
                 if manifest_path.is_file():
                     manifest = _read_document(manifest_path, require_frontmatter=True)

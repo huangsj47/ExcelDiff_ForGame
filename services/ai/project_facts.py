@@ -103,8 +103,11 @@ from services.ai.skill_contract import (
     build_dimensions,
     parse_frontmatter,
 )
+from utils.logger import log_print
+
 from services.ai.skill_loader import (
     SkillLoadError,
+    pack_belongs_to,
     project_pack_slug,
     resolve_projects_root,
     safe_join,
@@ -201,10 +204,21 @@ def declaration_path(project_code: Optional[str], *, repo_root: Path = _REPO_ROO
         return None
     try:
         root = resolve_projects_root(repo_root)
-        return safe_join(root, slug, DECLARATIONS_DIRNAME, DECLARATIONS_FILENAME)
+        pack_dir = safe_join(root, slug, DECLARATIONS_DIRNAME, DECLARATIONS_FILENAME)
     except SkillLoadError:
         # 代号全是非法字符之类 —— 按「没有知识包」处理，与 `load_skills` 的口径一致。
         return None
+    # **归属校验**（REV-KNOW-001）：`slug` 会 lower()，两个只差大小写的项目代号映到同一个
+    # 目录。不查的话，项目 B 会把项目 A 的 `project-facts.md` 声明当成自己的（维度清单、
+    # 关键路径模式、生成物前缀都会跟着走错），而这条没有任何 HTTP 状态码看得出来。
+    if not pack_belongs_to(safe_join(root, slug), project_code):
+        log_print(
+            f"⚠️ AI 分析：项目 {project_code} 的知识包目录被另一个项目占用，"
+            "本次不读它的声明文件",
+            'AI', force=True,
+        )
+        return None
+    return pack_dir
 
 
 def read_declarations(project_code: Optional[str], *, repo_root: Path = _REPO_ROOT) -> Declarations:
