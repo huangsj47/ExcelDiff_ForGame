@@ -980,10 +980,21 @@ def test_a_task_whose_reference_is_an_intent_id_is_not_read_as_a_job():
         group = _make_group()
         unrelated = _make_job(group, state=STATE_QUEUED, focus="table")
         intent_like = _make_intent(group, status="pending")
+        # 意图行与 job 行在**两张表**上各自自增，数值撞车无法从 id 上分辨（见
+        # 「跨表 id 撞号」那条教训）。撞上了就**再要一个意图行**，直到这个 id 不是
+        # 任何一条 job —— 判据与实现同一把尺子（`get_job`）。
+        #
+        # 这里原先写的是 `pytest.skip(...)`：并发跑（pytest-xdist）时每条 worker 的库
+        # 都是新的、两表计数更容易对齐，跳过于是变成常态 —— **断言没跑，却报绿**。
+        while job_service.get_job(intent_like.id) is not None:
+            intent_like = _make_intent(group, status="pending")
         task = _make_task(group, job_id=intent_like.id, status="processing")
 
-        # 意图 id 恰好指向一条**存在**的 job 时才算命中（数值撞车无法从 id 上分辨）；
-        # 这里我们保证它指向的不是那条 focus=table 的 job。
-        if intent_like.id == unrelated.id:
-            pytest.skip("意图 id 与 job id 撞上了同一个数值，这条用例的前提被破坏")
-        assert job_service.focus_for_task(task.id) != "table"
+        # 意图 id 认不出 job（这里已保证它认不出）→ 必须退回「不筛」，不许拿别人的范围
+        assert job_service.focus_for_task(task.id) is None
+
+        # 反方向：id 真是一条 job 时必须读得到 —— 否则上面那条断言在「读什么都不认」
+        # 的实现下也是绿的（本仓库那条「差分测试要先证明那一档是活的」）。
+        assert job_service.focus_for_task(
+            _make_task(group, job_id=unrelated.id, status="processing").id
+        ) == "table"

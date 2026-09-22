@@ -47,5 +47,11 @@ jobs:
       # 这是有意的，别在 CI 里覆盖掉，否则失败时看不到业务日志。
       # 测试库由 tests/conftest.py 隔离到 .pytest_tmp/ 下的临时 sqlite，
       # 并带一道「目标不是临时库就中止」的保护，不会碰真实数据。
+      #
+      # 并发跑：串行在本机是 3 分半，`-n auto --dist loadfile` 实测 1 分钟左右，
+      # 结果逐条一致。前提是 tests/conftest.py 给**每个进程**各造一个临时 sqlite
+      # （按进程隔离，与串行同一套守卫）。
+      # `--dist loadfile`：整个文件的用例钉在同一条 worker 上，文件内顺序与串行一致，
+      # 只有跨文件才并发 —— 默认的 load 会把同一文件摊开，那是另一种语义。
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest -q -n auto --dist loadfile

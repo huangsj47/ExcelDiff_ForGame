@@ -7,3 +7,8 @@ pre-commit==3.8.0
 # 新同学照 requirements-dev.txt 装完也跑不了测试。
 # 版本取自当前验证通过的本地环境（Python 3.13 + pytest 9.1.1）。
 pytest==9.1.1
+
+# 并发跑用例。整轮约 5900 条、串行 3 分半，`-n 8 --dist loadfile` 实测 50~75 秒，
+# 结果与串行逐条一致（5911 passed / 1 skipped，那 1 条是「本机建不了软链接」）。
+# 隔离靠的是 `tests/conftest.py` 每个进程各造一个临时 sqlite —— 这就是它能并行的前提。
+pytest-xdist==3.8.0
