@@ -1033,6 +1033,71 @@ class TestThePlatformSideLease:
             isinstance(p, dict) and p.get("task_id") == task_id for p in recorder.payloads
         ), "被抢走的任务还被重新排进了内存队列"
 
+    def test_startup_reclaims_orphaned_ai_task_even_before_lease_expiry(self, monkeypatch):
+        """Run 已被重启恢复判死时，不能再让旧进程的一小时租约堵住新 Job。"""
+        seeded = _seed()
+        recorder = _QueueRecorder()
+        _single_mode(monkeypatch, recorder)
+        with flask_app.app_context():
+            task_id = queue_service.create_weekly_ai_analysis_task(
+                seeded["config_id"], group_key=seeded["group_key"]
+            )
+            _track(db.session.get(BackgroundTask, task_id))
+            BackgroundTask.query.filter_by(id=task_id).update({
+                "status": "processing",
+                "started_at": datetime.now(timezone.utc).replace(tzinfo=None)
+                - timedelta(seconds=queue_service.ORPHANED_AI_TASK_GRACE_SECONDS + 60),
+                "lease_expires_at": datetime.now(timezone.utc).replace(tzinfo=None)
+                + timedelta(seconds=queue_service.TASK_LEASE_SECONDS),
+            })
+            db.session.commit()
+            monkeypatch.setattr(worker, "check_and_create_auto_sync_tasks", lambda: None)
+            recorder.payloads.clear()
+
+            worker.load_pending_tasks()
+            row = _row(task_id)
+
+        assert row.status == "pending", "没有活动 Run 的旧 AI 执行体仍被未来租约堵住"
+        assert row.lease_expires_at is None
+        assert any(
+            isinstance(p, dict) and p.get("task_id") == task_id for p in recorder.payloads
+        ), "孤儿任务收回后没有重新入队"
+
+    def test_startup_keeps_old_ai_task_when_a_live_run_exists(self, monkeypatch):
+        """保护期之外也不能误抢：同目标还有 running Run 就说明别的 worker 真在工作。"""
+        seeded = _seed()
+        recorder = _QueueRecorder()
+        _single_mode(monkeypatch, recorder)
+        with flask_app.app_context():
+            task_id = queue_service.create_weekly_ai_analysis_task(
+                seeded["config_id"], group_key=seeded["group_key"]
+            )
+            _track(db.session.get(BackgroundTask, task_id))
+            BackgroundTask.query.filter_by(id=task_id).update({
+                "status": "processing",
+                "started_at": datetime.now(timezone.utc).replace(tzinfo=None)
+                - timedelta(seconds=queue_service.ORPHANED_AI_TASK_GRACE_SECONDS + 60),
+                "lease_expires_at": datetime.now(timezone.utc).replace(tzinfo=None)
+                + timedelta(seconds=queue_service.TASK_LEASE_SECONDS),
+            })
+            db.session.add(AiAnalysisRun(
+                project_id=seeded["project_id"],
+                target_type="weekly",
+                target_key=seeded["group_key"],
+                status="running",
+            ))
+            db.session.commit()
+            monkeypatch.setattr(worker, "check_and_create_auto_sync_tasks", lambda: None)
+            recorder.payloads.clear()
+
+            worker.load_pending_tasks()
+            row = _row(task_id)
+
+        assert row.status == "processing"
+        assert not any(
+            isinstance(p, dict) and p.get("task_id") == task_id for p in recorder.payloads
+        )
+
     def test_startup_recovery_reclaims_an_expired_one(self, monkeypatch):
         """反向：上一个进程死了（租约过期 / 老行没有租约）→ 必须收回来重投。"""
         seeded = _seed()

@@ -22,6 +22,9 @@
 
 from __future__ import annotations
 
+# ruff: noqa: I001 —— `task_worker_service` 必须先导入；两模块互相引用，字母序会在本模块
+# 尚未初始化完成时让 worker 取这里的名字。测试文件也固定使用同一导入顺序。
+
 import os
 import threading
 import time
@@ -92,6 +95,13 @@ TASK_LEASE_RENEW_INTERVAL_SECONDS = max(30, TASK_LEASE_SECONDS // 6)
 # 没有它，一条每次都把 worker 弄死的任务会永远在 pending/processing 之间来回。
 MAX_TASK_LEASE_RECLAIMS = 3
 
+# `weekly_ai_analysis` 在 worker 认领任务后、创建 Run 前还要冻结快照与组装输入；这段
+# 合法空窗里数据库会短暂呈现「task=processing、run=不存在」。只在空窗持续超过 5 分钟
+# 后才用跨层状态判断孤儿，避免把正在准备大快照的另一个 worker 误判为死亡。
+ORPHANED_AI_TASK_GRACE_SECONDS = max(
+    60, int(os.environ.get("ORPHANED_AI_TASK_GRACE_SECONDS", "300") or 300)
+)
+
 
 def lease_deadline(now=None):
     """这次取走任务的租约到期时刻（naive-UTC，与库里的 `created_at` 同口径）。"""
@@ -159,6 +169,48 @@ def lease_is_expired(db_task, *, now=None, timeout_seconds=None):
     if started is None:
         return True
     return (current - started).total_seconds() >= bound
+
+
+def _processing_ai_task_is_orphaned(db_task, *, now=None):
+    """跨层判断一条仍在有效租约内的 AI 执行体是否已经失去执行者。
+
+    平台重启恢复会先把旧进程留下的活动 Run 置为 failed。若后台任务的租约仍有几十分钟，
+    单看租约会让这条执行体继续占位；新 Job 随后附着到它上面，只能永久停在 queued。
+
+    活动 Run 是最强的反证：存在就不碰。没有活动 Run 时，保护期内也不碰（worker 可能仍在
+    冻结快照）；超过保护期后，如果关联 Job 仍是 running，也视为执行者存活。其余组合都已
+    违反 task/job/run 状态机，应当收回。导入放在函数内，避免 models 与 worker 的环依赖。
+    """
+    if (
+        db_task is None
+        or getattr(db_task, "task_type", None) != "weekly_ai_analysis"
+        or getattr(db_task, "status", None) != "processing"
+    ):
+        return False
+    current = _now_utc_naive(now)
+    started = _naive_utc(getattr(db_task, "started_at", None))
+    if started is None:
+        started = _naive_utc(getattr(db_task, "created_at", None))
+    if started is None or (current - started).total_seconds() < ORPHANED_AI_TASK_GRACE_SECONDS:
+        return False
+
+    from models.ai_analysis import AiAnalysisJob, AiAnalysisRun
+
+    group_key = str(getattr(db_task, "file_path", "") or "")
+    live_run = AiAnalysisRun.query.filter(
+        AiAnalysisRun.target_type == "weekly",
+        AiAnalysisRun.target_key == group_key,
+        AiAnalysisRun.status.in_(("pending", "running")),
+    ).first()
+    if live_run is not None:
+        return False
+
+    job_id = getattr(db_task, "job_id", None)
+    if job_id is not None:
+        job = worker._db.session.get(AiAnalysisJob, job_id)
+        if job is not None and str(getattr(job, "state", "") or "") == "running":
+            return False
+    return True
 
 
 def reclaim_expired_task_leases(*, now=None, requeue=True):
@@ -690,7 +742,8 @@ def load_pending_tasks():
         processing_tasks = worker._BackgroundTask.query.filter_by(status='processing').all()
         reclaimed = []
         for task in processing_tasks:
-            if not lease_is_expired(task, now=now_utc_naive):
+            orphaned_ai = _processing_ai_task_is_orphaned(task, now=now_utc_naive)
+            if not orphaned_ai and not lease_is_expired(task, now=now_utc_naive):
                 # 租约还有效 = 它的执行者可能还活着（双 worker / 上一个进程还没死透）。
                 # 抢走它比放着它更危险，留给 `reclaim_expired_task_leases` 在到期后处理。
                 worker.log_print(
@@ -698,6 +751,12 @@ def load_pending_tasks():
                     'TASK',
                 )
                 continue
+            if orphaned_ai:
+                worker.log_print(
+                    f"♻️ AI 任务 {task.id} 已无活动 Run/Job，忽略旧租约并启动恢复",
+                    'TASK',
+                    force=True,
+                )
             task.status = 'pending'
             task.started_at = None
             clear_task_lease(task)
@@ -799,7 +858,7 @@ def _analysis_priority(trigger_source):
 
 def _active_analysis_tasks(group_key):
     """这个分组**所有**排队中/正在跑的分析任务（按 id 升序）。"""
-    return (
+    tasks = (
         worker._BackgroundTask.query.filter(
             worker._BackgroundTask.task_type == 'weekly_ai_analysis',
             worker._BackgroundTask.file_path == group_key,
@@ -808,6 +867,26 @@ def _active_analysis_tasks(group_key):
         .order_by(worker._BackgroundTask.id.asc())
         .all()
     )
+    # 防御运行期的异常退出：不必等平台下次重启或一小时租约到期。新请求到来时，若旧执行体
+    # 已经跨过保护期且 task/job/run 三层明确矛盾，就先恢复成 pending；后续附着流程会更新
+    # job 关联并确保它重新入队。仍有活动 Run/Job 的任务不会进入这里。
+    now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    reclaimed = []
+    for task in tasks:
+        if not _processing_ai_task_is_orphaned(task, now=now_utc_naive):
+            continue
+        task.status = "pending"
+        task.started_at = None
+        clear_task_lease(task)
+        reclaimed.append(task)
+    if reclaimed:
+        worker._db.session.commit()
+        worker.log_print(
+            f"♻️ 用户请求唤醒了 {len(reclaimed)} 个无活动 Run/Job 的 AI 执行体",
+            "AI",
+            force=True,
+        )
+    return tasks
 
 
 def _pick_attachable_analysis_task(tasks, requested_mode):
