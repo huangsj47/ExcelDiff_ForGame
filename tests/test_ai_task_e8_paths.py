@@ -412,7 +412,8 @@ class TestTheFiveWeeklyPathsOverHttp:
         with app.test_client() as client:
             _login(client)
             body = client.get(
-                f"/ai-analysis/usage/estimate?project={group['project_id']}&mode=incremental"
+                f"/ai-analysis/usage/estimate?project={group['project_id']}"
+                f"&config={group['cfg_id']}&mode=incremental"
             ).get_json()
 
         assert body["success"] is True, body
@@ -421,7 +422,7 @@ class TestTheFiveWeeklyPathsOverHttp:
         assert body["baseline_run"]["run_id"] == baseline_run_id, body["baseline_run"]
         assert body["baseline_run"]["created_at"], body["baseline_run"]
         assert body["baseline_run"]["scope"], body["baseline_run"]
-        assert not body["upgrade_reason"], body
+        assert body["upgrade_reason"] == "delta_ratio_high", body
         # 这三项**不参与**区间折算：带上这句话，读的人才不会拿它当折扣。
         assert any("不参与" in note for note in body["notes"]), body["notes"]
 
@@ -436,7 +437,7 @@ class TestTheFiveWeeklyPathsOverHttp:
         with app.app_context():
             create_tables()
             first = _make_group()
-            _settle_and_advance(first)
+            first_run_id = _settle_and_advance(first)
             second = _second_group(first)
             _settle_and_advance(second)
 
@@ -445,10 +446,16 @@ class TestTheFiveWeeklyPathsOverHttp:
             body = client.get(
                 f"/ai-analysis/usage/estimate?project={first['project_id']}&mode=incremental"
             ).get_json()
+            exact = client.get(
+                f"/ai-analysis/usage/estimate?project={first['project_id']}"
+                f"&config={first['cfg_id']}&mode=incremental"
+            ).get_json()
 
         ambiguity = [note for note in body["notes"] if "个周版本分组" in note]
         assert ambiguity, body["notes"]
         assert "窗口" in ambiguity[0], ambiguity
+        assert exact["baseline_run"]["run_id"] == first_run_id, exact
+        assert not [note for note in exact["notes"] if "个周版本分组" in note], exact["notes"]
 
     def test_path_2_a_stale_baseline_still_runs_incremental_when_the_user_insists(self):
         """**版本不匹配增量**：基线是旧规则产出的，用户仍选增量 → 照跑增量。

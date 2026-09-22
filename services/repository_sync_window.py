@@ -171,16 +171,18 @@ def iter_commits_args(branch: Any, *, since_date: Any = None, limit: int = 100,
                       rev_range: Any = "") -> tuple:
     """`repo.iter_commits` 的 `(rev, kwargs, 一行说明)`。
 
-    **区间口径只给 `rev`，绝不带 `since`。** 这是整条修法里最容易被「顺手补上」的一处：
+    **区间口径只给 `rev`，既不带 `since`，也不带 `max_count`。** 这是整条修法里最容易
+    被「顺手补上」的一处：
     `since` 看上去只是个下界，可 `git log --since` 的语义是「按提交日期剪枝并停止遍历」，
-    与区间一起用等于把回填的提交**再丢一次** —— 而那时口径判定是对的、日志也写着
-    「按提交区间」，现象与没修一模一样。
+    与区间一起用等于把回填的提交**再丢一次**。`max_count` 也不能保留：同步完成后会把
+    水位直接推进到新区间终点；若这里截掉第 1001 个及更早的提交，它们之后永远不会再
+    进入同步窗口。
 
     两个采集器（`GitService.get_commits` 与 `ThreadedGitService._get_commits_base_threaded`）
     共用这一份：抄成两份，早晚有一份被改回带 `since` 的样子。
     """
     if rev_range:
-        return rev_range, {'max_count': limit}, f"按提交区间获取：{rev_range}（最多 {limit} 个）"
+        return rev_range, {}, f"按完整提交区间获取：{rev_range}"
     kwargs = {'max_count': limit}
     if since_date:
         kwargs['since'] = since_date

@@ -35,7 +35,6 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from services.ai.docx_view import is_docx, render_docx_text
-
 from services.ai.reference_search import (
     entries_for,
     normalize_query,
@@ -211,12 +210,12 @@ def _render_excel(payload: Mapping[str, Any], *, path: str, max_rows: int) -> st
 # `services/ai/excel_view.py`（各自的 docstring 里写了为什么）。原处回导：本模块的
 # `render_diff_payload` / `_render_excel` / `PlatformContextProvider` 仍按旧名字调它们，
 # 外部（`services/agent_file_content_reader.py`）与测试也一直直接 import 这些私有名。
-from services.ai.excel_source import (  # noqa: F401 —— 本模块与测试仍在按旧名字用
+from services.ai.excel_source import (  # noqa: E402,F401 —— 本模块与测试仍在按旧名字用
     _is_openpyxl_workbook,
     _read_excel_sheets,
     parse_sheet_window,
 )
-from services.ai.excel_view import (  # noqa: F401 —— `_render_excel` 与测试仍在按旧名字用
+from services.ai.excel_view import (  # noqa: E402,F401 —— `_render_excel` 与测试仍在按旧名字用
     _cell,
     _render_header_block,
     _render_row,
@@ -616,7 +615,7 @@ def _render_error(payload: Mapping[str, Any], *, path: str) -> str:
     return f"[取数失败] {where}：{detail}。**这不等于「没有改动」。**"
 # 「平台已经算好的那份 diff」的取数搬到 `services/ai/stored_diff_source.py`
 # （见那边的 docstring）。原处回导：`PlatformContextProvider` 仍按旧名字调它们。
-from services.ai.stored_diff_source import (  # noqa: F401 —— 类方法与测试仍在按旧名字用
+from services.ai.stored_diff_source import (  # noqa: E402,F401 —— 类方法与测试仍在按旧名字用
     _batch_provenance,
     _is_failed_payload,
     _weekly_stored_diff,
@@ -831,7 +830,12 @@ class PlatformContextProvider:
         而更宽那一份自带 `_batch_provenance` 的出处说明，读的人知道它覆盖了整个批次。
         这里绝不返回一句「没有改动」——那份载荷是空的，不等于这个文件没变。
         """
-        base_commit_id = self._delta_bases.get((str(commit), str(path)))
+        key = (getattr(row, "repository_id", None), str(commit), str(path))
+        base_commit_id = self._delta_bases.get(key)
+        if not base_commit_id and key[0] is not None:
+            # 仅兼容没有 repository_id 的旧快照/手工构造载荷。生产快照始终带仓库 ID；
+            # 两个真实仓库因此不会退化为只按 SVN 修订号和路径匹配。
+            base_commit_id = self._delta_bases.get((None, key[1], key[2]))
         if not base_commit_id:
             return None
         try:

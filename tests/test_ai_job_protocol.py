@@ -663,6 +663,30 @@ def test_a_finished_job_does_not_block_the_next_create():
         assert second.job_id != first.job_id
 
 
+def test_mark_running_publishes_the_runtime_scope_before_the_run_finishes():
+    """运行一创建，轮询端点就应看到真实 scope，不能等结算时才从 incremental 改 full。"""
+    with app.app_context():
+        group = _make_group()
+        result = job_service.create_or_attach_job(
+            config=group["cfg"], requested_mode=MODE_INCREMENTAL
+        )
+        _track(result.job)
+        _track_task(result.job.task_id)
+        db.session.commit()
+
+        running = job_service.mark_running(
+            result.job_id,
+            run_id=987654,
+            effective_mode=MODE_FULL,
+            upgrade_reason="critical_path_detected",
+        )
+        db.session.commit()
+
+        assert running.state == STATE_RUNNING
+        assert running.effective_mode == MODE_FULL
+        assert running.upgrade_reason == "critical_path_detected"
+
+
 def test_a_late_mark_running_does_not_resurrect_a_finished_job():
     with app.app_context():
         group = _make_group()

@@ -100,7 +100,6 @@ from models.ai_analysis import (
     TRIGGER_SOURCES,
     AiAnalysisJob,
 )
-
 from services.ai import project_gate
 
 # 目标身份的字面值。与 `AiAnalysisRun.target_type` / `BackgroundTask.task_type`
@@ -702,7 +701,10 @@ def _create_analysis_task(job, config_id, target_key, *, mode, source, key) -> O
 # ---------------------------------------------------------------------------
 
 
-def mark_running(job_id, *, run_id=None, task_id=None, lease_seconds=None):
+def mark_running(
+    job_id, *, run_id=None, task_id=None, lease_seconds=None,
+    effective_mode=None, upgrade_reason=None,
+):
     """这条 job 开始跑了：记运行号 / 任务号 / 租约，状态置 `running`。
 
     返回那条 job（找不到返回 `None`）。**已经终态的 job 不复活** —— 迟到的
@@ -720,6 +722,10 @@ def mark_running(job_id, *, run_id=None, task_id=None, lease_seconds=None):
         job.run_id = run_id
     if task_id is not None:
         job.task_id = task_id
+    if effective_mode:
+        job.effective_mode = effective_mode
+    if upgrade_reason:
+        job.upgrade_reason = upgrade_reason
     if lease_seconds:
         job.lease_expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(
             seconds=int(lease_seconds)

@@ -64,7 +64,6 @@ from services.ai.analysis_budget import (
     platform_budget_status,
     redact_platform_scope,
 )
-from services.ai.platform_budget import platform_budget_public
 from services.ai.budget import (
     COMPACT_AT_RATIO,
     context_reserved_chars,
@@ -73,10 +72,11 @@ from services.ai.budget import (
     resolve_context_window,
 )
 from services.ai.budget_plan import build_budget_plan, derive_tool_limits
-from services.ai.job_service import UPGRADE_REASON_FIRST_RUN
 from services.ai.engine import EngineLimits
+from services.ai.job_service import UPGRADE_REASON_FIRST_RUN
+from services.ai.platform_budget import platform_budget_public
 from services.ai.pricing import amount_exact, amount_of, money
-from services.ai.project_config_source import get_project_analysis_config
+from services.ai.project_config_source import build_weekly_group_key, get_project_analysis_config
 from services.ai.trace_evidence import decode_evidence
 from services.ai.usage import (
     ESTIMATE_SAMPLE_LIMIT,
@@ -1107,10 +1107,16 @@ def parse_estimate_args(args: Mapping[str, Any]) -> tuple[Optional[int], dict[st
     if raw_baseline:
         baseline = raw_baseline not in ("0", "false", "no", "off")
 
+    raw_config = _first_arg(args, "config", "config_id")
+    config_id = _parse_int(raw_config)
+    if raw_config and config_id is None:
+        notes.append("周版本配置编号不是有效数字，已按未指定分组处理。")
+
     return project_id, {
         "mode": mode,
         "planned_files": planned_files,
         "baseline_reusable": baseline,
+        "config_id": config_id,
         "notes": notes,
     }
 
@@ -1168,8 +1174,8 @@ def _estimate_window_note(
     return "".join(parts)
 
 
-def _weekly_payload_facts(config_id: int) -> tuple[Optional[int], Optional[int], str]:
-    """这一轮会进输入的账（增量文件数 / 补偿文件数）→ `(增量, 补偿, 说明)`。
+def _weekly_payload_facts(config_id: int) -> dict[str, Any]:
+    """这一轮会进输入的账，以及运行侧已经能确定的范围裁决。
 
     ## 为什么敢在**只读**端点上读它
 
@@ -1188,22 +1194,28 @@ def _weekly_payload_facts(config_id: int) -> tuple[Optional[int], Optional[int],
     try:
         payload, _state, skip_reason = build_weekly_payload(config_id)
     except Exception as exc:  # noqa: BLE001 —— 预检读不到账不该让整个估算变成 500
-        return None, None, f"本次的输入账没有算出来（{exc}）。"
+        return {"delta": None, "compensation": None, "scope": "", "reason": "",
+                "note": f"本次的输入账没有算出来（{exc}）。"}
     if payload is None:
-        return None, None, (
-            "本次的输入账没有算出来（平台裁决：" + str(skip_reason or "未知") + "）。"
-        )
+        return {"delta": None, "compensation": None, "scope": "", "reason": "",
+                "note": "本次的输入账没有算出来（平台裁决："
+                + str(skip_reason or "未知") + "）。"}
     summary = payload.get("summary") or {}
     delta = summary.get("delta_files")
     compensation = summary.get("compensation_files")
-    return (
-        int(delta) if isinstance(delta, int) else None,
-        int(compensation) if isinstance(compensation, int) else None,
-        "",
-    )
+    policy = payload.get("policy") or {}
+    return {
+        "delta": int(delta) if isinstance(delta, int) else None,
+        "compensation": int(compensation) if isinstance(compensation, int) else None,
+        "scope": str(payload.get("scope") or ""),
+        "reason": str(policy.get("reason") or ""),
+        "note": "",
+    }
 
 
-def _weekly_action_facts(project_id: int, *, mode: str, target_type: str) -> dict[str, Any]:
+def _weekly_action_facts(
+    project_id: int, *, mode: str, target_type: str, config_id: Optional[int] = None
+) -> dict[str, Any]:
     """本次动作的**事实**：增量文件数 / 补偿文件数 / 基线 run / 升级原因（E8）。
 
     **只查库、不探测模型**（这就是这个端点存在的护栏）：
@@ -1238,8 +1250,14 @@ def _weekly_action_facts(project_id: int, *, mode: str, target_type: str) -> dic
     if target_type != "weekly":
         return blank
 
+    exact_config = db.session.get(WeeklyVersionConfig, config_id) if config_id else None
+    if exact_config is not None and exact_config.project_id != project_id:
+        exact_config = None
+    query = AiWeeklyAnalysisState.query.filter_by(project_id=project_id)
+    if exact_config is not None:
+        query = query.filter_by(group_key=build_weekly_group_key(exact_config))
     states = (
-        AiWeeklyAnalysisState.query.filter_by(project_id=project_id)
+        query
         # 「最近更新过的那个分组」：`updated_at` 是状态行每次推进都会写的时刻（基线指针、
         # 水位线都写它）。按它排而不是按 `last_analyzed_at` —— 后者在降级运行时不推进，
         # 于是「刚跑完但降级」的分组会被排到后面去。
@@ -1295,13 +1313,16 @@ def _weekly_action_facts(project_id: int, *, mode: str, target_type: str) -> dic
         "created_at": _iso(run.created_at),
         "scope": str(run.scope or ""),
     }
-    delta, compensation, reason = _weekly_payload_facts(_int_or_zero(run.target_id))
+    facts_config_id = exact_config.id if exact_config is not None else _int_or_zero(run.target_id)
+    payload_facts = _weekly_payload_facts(facts_config_id)
+    if mode == MODE_INCREMENTAL and payload_facts["scope"] == MODE_FULL:
+        upgrade_reason = payload_facts["reason"] or "runtime_scope_upgrade"
     return {
-        "delta_files": delta,
-        "compensation_files": compensation,
+        "delta_files": payload_facts["delta"],
+        "compensation_files": payload_facts["compensation"],
         "baseline_run": baseline_run,
         "upgrade_reason": upgrade_reason,
-        "note": (reason or "") + ambiguity_note,
+        "note": (payload_facts["note"] or "") + ambiguity_note,
     }
 
 
@@ -1312,6 +1333,7 @@ def analysis_estimate(
     planned_files: Optional[int] = None,
     baseline_reusable: Optional[bool] = None,
     target_type: str = "weekly",
+    config_id: Optional[int] = None,
     sample_limit: int = ESTIMATE_SAMPLE_LIMIT,
 ) -> dict[str, Any]:
     """**执行前**的代价区间（AI-P1-03）：取数在这里，算术在 `services/ai/usage.py`。
@@ -1352,7 +1374,9 @@ def analysis_estimate(
     # **只读、不探测模型**（与这个端点的另外三条护栏同一条口径）：读的是平台自己的
     # 快照账与结论基线指针，没有任何一次出网调用。
     # ------------------------------------------------------------------
-    facts = _weekly_action_facts(project_id, mode=mode, target_type=target_type)
+    facts = _weekly_action_facts(
+        project_id, mode=mode, target_type=target_type, config_id=config_id
+    )
     estimate = estimate_analysis(
         planned_files=planned_files,
         mode=mode,

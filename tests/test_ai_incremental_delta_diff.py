@@ -240,6 +240,31 @@ class TestTheReadPathComparesTheTwoVersions:
             )
             assert old_latest[:8] in text and new_latest[:8] in text, text[:200]
 
+    def test_same_svn_revision_and_path_in_two_repositories_do_not_share_a_baseline(self):
+        """SVN 修订号跨仓库会重复；基线键必须包含 repository_id。"""
+        payload = {
+            "delta_files": [
+                {
+                    "repository_id": 11,
+                    "file_path": "config/shared.xlsx",
+                    "latest_commit_id": "12345",
+                    "diff_base_commit_id": "12000",
+                },
+                {
+                    "repository_id": 22,
+                    "file_path": "config/shared.xlsx",
+                    "latest_commit_id": "12345",
+                    "diff_base_commit_id": "12200",
+                },
+            ]
+        }
+
+        bases = ai_service._delta_bases(payload)
+
+        assert bases[(11, "12345", "config/shared.xlsx")] == "12000"
+        assert bases[(22, "12345", "config/shared.xlsx")] == "12200"
+        assert len(bases) == 2, "跨仓库同修订号/路径的基线被后写的一项覆盖了"
+
     def test_without_a_baseline_it_falls_back_to_the_whole_window(self, monkeypatch):
         """新文件 / 补偿项没有基线 → 照旧给平台已落库的整窗口那一份。"""
         with app.app_context():

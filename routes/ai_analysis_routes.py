@@ -954,12 +954,17 @@ def ai_usage_estimate():
         return jsonify({"success": False, "message": "缺少有效的项目编号。"}), 400
     if not _has_project_access(project_id):
         return jsonify({"success": False, "message": "Access denied."}), 403
+    if params["config_id"] is not None:
+        config = db.session.get(WeeklyVersionConfig, params["config_id"])
+        if config is None or config.project_id != project_id:
+            return jsonify({"success": False, "message": "周版本配置不属于该项目。"}), 400
 
     payload = analysis_estimate(
         project_id,
         mode=params["mode"],
         planned_files=params["planned_files"],
         baseline_reusable=params["baseline_reusable"],
+        config_id=params["config_id"],
     )
     if params["notes"]:
         payload["notes"] = [*payload["notes"], *params["notes"]]

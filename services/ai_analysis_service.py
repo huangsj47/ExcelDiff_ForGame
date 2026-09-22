@@ -22,6 +22,9 @@ from models import (
     db,
 )
 from models.ai_analysis import (
+    # 「用户点了全量」那一个取值（`run_weekly_analysis_background` 的判据）：
+    # 常量只有一份，在 `models/ai_analysis/job.py`，本文件不另立字面量。
+    MODE_FULL,
     AiAnalysisAnomaly,
     AiAnalysisRun,
     AiAnalysisTrace,
@@ -29,16 +32,14 @@ from models.ai_analysis import (
     # 所以这个「本文件不直接用」的模型类必须留着 —— ruff 的 F401 会想删它。
     AiProjectAnalysisConfig,  # noqa: F401 —— 测试按属性取
     AiWeeklyAnalysisState,
-    # 「用户点了全量」那一个取值（`run_weekly_analysis_background` 的判据）：
-    # 常量只有一份，在 `models/ai_analysis/job.py`，本文件不另立字面量。
-    MODE_FULL,
 )
 from models.ai_analysis.project_config import (
     DEFAULT_AUTO_WEEKLY_ENABLED,
     DEFAULT_MAX_FILES_PER_RUN,
 )
-from services.ai.analysis_budget import budget_gate_reason, early_stop_guard
 from services.ai import project_gate
+from services.ai.analysis_budget import budget_gate_reason, early_stop_guard
+
 # 增量基线的编排块（AI-P0-02）：拿基准、冻目标快照、推进指针。**全部逻辑在那边**，
 # 本文件只按名字取用 —— 本文件贴着长度闸门（WARN 1800 / ERROR 2000），新增逻辑写在这里
 # 只会把它推过硬上限。
@@ -49,9 +50,13 @@ from services.ai import project_gate
 # `tests/test_ai_diff_snapshot_baseline.py` 按那个名字断言「阈值可配置」）。
 from services.ai.baseline_blocks import (
     advance_weekly_state,
-    complete_coverage_ratio as _complete_coverage_ratio,  # noqa: F401 —— 测试按这个名字取
     resolve_baseline,
     seal_target_snapshot,
+)
+from services.ai.baseline_blocks import (
+    complete_coverage_ratio as _complete_coverage_ratio,  # noqa: F401 —— 测试按这个名字取
+)
+from services.ai.baseline_blocks import (
     snapshot_digest_for as _snapshot_digest_for,
 )
 
@@ -67,15 +72,22 @@ from services.ai.baseline_blocks import (
 # 在收集阶段就 ImportError）。
 from services.ai.baseline_source import (
     baseline_digest as _baseline_digest,  # noqa: F401 —— 测试按这个名字 import
+)
+from services.ai.baseline_source import (
     baseline_findings as _baseline_findings,  # noqa: F401 —— 测试按这个名字 import
+)
+from services.ai.baseline_source import (
     previous_run as _previous_run,  # noqa: F401 —— 测试按这个名字 import
+)
+from services.ai.baseline_source import (
     skipped_unstructured_runs as _skipped_unstructured_runs,  # noqa: F401 —— 测试按这个名字 import
+)
+from services.ai.baseline_source import (
     suppressed as _suppressed,
 )
 from services.ai.budget import effective_prompt_budget
 from services.ai.budget_plan import build_budget_plan, derive_tool_limits
 from services.ai.change_set import from_commit_payload, from_weekly_payload
-from services.ai.manifest import build_manifest
 
 # 读侧形态（进行中 / 有结论 / 最近一次失败）：只依赖 run 行与两个标签函数，
 # 与「怎么跑一次分析」没有耦合，单独一层也好单测。
@@ -105,8 +117,9 @@ from services.ai.engine import (
 from services.ai.engine import (
     failed as engine_failed,
 )
-from services.ai.llm_client import LLMError
 from services.ai.incremental_baseline import reconcile_result as reconcile_incremental_result
+from services.ai.llm_client import LLMError
+from services.ai.manifest import build_manifest
 from services.ai.platform_provider import PlatformContextProvider
 from services.ai.project_config_source import (  # noqa: F401 —— 调用点与测试仍在用
     _coerce_timeout,
@@ -476,11 +489,11 @@ def _load_project_skills(project_id: int) -> Tuple[object, str]:
 
 
 def _delta_bases(payload: Mapping[str, object]) -> dict:
-    """增量那一段的基线表，键 `(latest_commit_id, file_path)`。
+    """增量那一段的基线表，键 `(repository_id, latest_commit_id, file_path)`。
 
     来源是 payload 的 `delta_files`（写入侧在 `_summarize_weekly_files` 里按做差基准
-    填的 `diff_base_commit_id`）。**键里带提交号**：同一个相对路径可能出现在两个仓库里，
-    而提交号能把它分清。
+    填的 `diff_base_commit_id`）。仓库 ID 不能省：SVN 修订号只在单个仓库内唯一，两个
+    SVN 仓库完全可能同时出现相同修订号和相同相对路径。
     """
     bases: dict = {}
     for item in payload.get("delta_files") or ():
@@ -489,8 +502,9 @@ def _delta_bases(payload: Mapping[str, object]) -> dict:
         base = str(item.get("diff_base_commit_id") or "").strip()
         commit = str(item.get("latest_commit_id") or "").strip()
         path = str(item.get("file_path") or "").strip()
+        repository_id = item.get("repository_id")
         if base and commit and path:
-            bases[(commit, path)] = base
+            bases[(repository_id, commit, path)] = base
     return bases
 
 
@@ -1613,7 +1627,20 @@ def run_weekly_analysis_background(
 
             task_row = db.session.get(BackgroundTask, task_id)
             if task_row is not None and getattr(task_row, "job_id", None):
-                job_service.mark_running(task_row.job_id, run_id=run.id, task_id=task_id)
+                policy = payload.get("policy") or {}
+                runtime_reason = ""
+                if (
+                    str(requested_mode or "").strip().lower() == "incremental"
+                    and run.scope == "full"
+                ):
+                    runtime_reason = str(policy.get("reason") or "runtime_scope_upgrade")
+                job_service.mark_running(
+                    task_row.job_id,
+                    run_id=run.id,
+                    task_id=task_id,
+                    effective_mode=run.scope,
+                    upgrade_reason=runtime_reason,
+                )
                 db.session.commit()
         except Exception as exc:  # noqa: BLE001
             db.session.rollback()

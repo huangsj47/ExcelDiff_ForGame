@@ -257,6 +257,9 @@ class TestTheCollectorDoesNotAlsoApplyTheDateFilter:
         assert "since" not in kwargs, (
             "区间口径下同时传了 since —— 等于又按提交日期剪一遍，回填的提交会再丢一次"
         )
+        assert "max_count" not in kwargs, (
+            "区间同步被截断后仍会把水位推进到新 tip，超过上限的旧提交将永久丢失"
+        )
 
     @pytest.mark.parametrize("cls, method", _COLLECTORS, ids=[m for _c, m in _COLLECTORS])
     def test_the_date_path_still_passes_since(self, monkeypatch, cls, method):

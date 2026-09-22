@@ -5084,6 +5084,7 @@ async function fetchWeeklyAiEstimate(mode) {
     if (!project) return null;
     const params = new URLSearchParams();
     params.set('project', String(project));
+    params.set('config', String(configId));
     params.set('mode', mode === 'full' ? 'full' : 'incremental');
     // 把**已经从服务端知道的本次增量文件数**带回去：区间是按文件数缩放的
     // （`estimate_analysis`：单文件强度 × 目标文件数）。不带的话 `planned_files` 恒为
@@ -5313,7 +5314,7 @@ async function weeklyAiChooseMode(requested) {
             okText: '继续（按全量）',
             okClass: 'btn-danger'
         });
-        return choice === 'ok' ? 'incremental' : null;
+        return choice === 'ok' ? 'full' : null;
     }
     // provenance 没变、基线也在 → **先把这次要做的事摆出来**，再让用户点确认。
     //
@@ -5327,6 +5328,20 @@ async function weeklyAiChooseMode(requested) {
     // `mismatch` / `first_run` 两条分支里，这里不重复问一次（同一件事问两次会让人以为
     // 第一次的答案没用）。
     const estimate = await fetchWeeklyAiEstimate('incremental');
+    if (estimate && estimate.upgrade_reason) {
+        const reason = WEEKLY_AI_UPGRADE_REASONS[estimate.upgrade_reason]
+            || ('平台给出的原因码：' + estimate.upgrade_reason);
+        const upgradeChoice = await weeklyAiChoiceDialog({
+            title: '这次会被升级为全量',
+            intro: '平台已经根据当前周版本的真实输入账判定：增量范围不足以保证结论完整。'
+                + '确认之后将明确按全量模式创建任务。',
+            lines: weeklyAiEstimateLines(estimate),
+            note: reason + ' ' + weeklyAiEstimateNote(estimate),
+            okText: '继续（按全量）',
+            okClass: 'btn-danger'
+        });
+        return upgradeChoice === 'ok' ? 'full' : null;
+    }
     const choice = await weeklyAiChoiceDialog({
         title: '增量分析',
         intro: '这次只分析基线之后变化的部分。下面是本次的事实与按历史实测给出的区间 ——'
