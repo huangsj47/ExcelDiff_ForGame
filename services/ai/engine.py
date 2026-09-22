@@ -63,11 +63,11 @@ from services.ai.llm_client import non_negative_int
 from services.ai.prompt import build_system_prompt, build_user_message, change_block
 from services.ai.prompt_cache import CACHE_BREAKPOINT_KEY, mark_cache_breakpoint
 from services.ai.protocol import (
+    TRUNCATED_OUTPUT_HINT,
     AnalysisPayload,
     Anomaly,
     DroppedItem,
     ProtocolError,
-    TRUNCATED_OUTPUT_HINT,
     build_correction_hint,
     build_markdown_reemit_hint,
     ground_payload,
@@ -176,6 +176,14 @@ class EngineLimits:
     baseline_char_budget: int = DEFAULT_BASELINE_CHARS
     max_corrections: int = 2
     temperature: float = 0.0
+    # **单次输出上限**（token）。`None` = 不传这个字段，用端点的默认值（**默认行为逐字节
+    # 不变**，见 `llm_client._request_body`）。
+    #
+    # 它管的是「一次模型调用最多能写多长」，与分析逻辑无关：配了它，撞上上限与否就由项目
+    # 说了算，而不是由网关那个看不见的默认值说了算。**它不掐任何一轮的内容** ——
+    # 谁该看多少上下文、该报几条结论，与这个数字无关（`EngineLimits` 里其余那些才管
+    # 那些事）。撞上上限时的处理见 `run_analysis` 里 `finish_reason == "length"` 那一支。
+    max_output_tokens: int | None = None
     tool_limits: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_TOOL_LIMITS))
 
     @classmethod
@@ -239,6 +247,17 @@ class RoundRecord:
     correction_hint: str = ""
     # 上游停止原因（stop / length / content_filter…）。`length` 是输出被硬截断的直接证据。
     finish_reason: str = ""
+    # **这一轮的输出撞上了单次输出上限**。
+    #
+    # 判据是两个信号的并集：上游明说的 `finish_reason == "length"`，以及我们自己看出来的
+    # 括号不配平（`protocol.looks_like_truncated_json`）。前者更直接（它不依赖形状 ——
+    # 断点恰好落在一个仍然合法的 JSON 上时，括号是配平的），后者是端点上没有
+    # `finish_reason` 时的兜底。
+    #
+    # 单独一个 bool 而不是让读的人自己去比 `finish_reason`：**「截断」这件事有两个来源**，
+    # 而在 trace 上「这一轮被截断过」必须是一个能直接读到的结论 —— 让每个读者各写一遍
+    # 那个并集判据，迟早会有人只判 `finish_reason`（于是漏掉端点上不报的那一半）。
+    output_budget_hit: bool = False
 
 
 @dataclass(frozen=True)
@@ -851,7 +870,9 @@ def run_analysis(
 
         round_started = time.monotonic()
         try:
-            result = client.complete([*messages, entry], temperature=limits.temperature)
+            result = client.complete(
+                [*messages, entry], **_complete_kwargs(limits)
+            )
         except Exception as exc:  # noqa: BLE001 —— 网络/鉴权/超时都归为「这次没跑成」
             error_text = f"{type(exc).__name__}: {exc}"
             if not looks_like_context_overflow(error_text):
@@ -921,7 +942,7 @@ def run_analysis(
                     shrunk_entry = _mark_current(shrunk_entry, movable_breakpoint)
                     try:
                         shrunk_result = client.complete(
-                            [*base, shrunk_entry], temperature=limits.temperature
+                            [*base, shrunk_entry], **_complete_kwargs(limits)
                         )
                     except Exception as shrink_exc:  # noqa: BLE001
                         if looks_like_context_overflow(shrink_exc):
@@ -1010,7 +1031,7 @@ def run_analysis(
                     f"这次实测的上限收到 {limits.prompt_char_budget:,} 字。"
                 )
                 try:
-                    result = client.complete([*messages, entry], temperature=limits.temperature)
+                    result = client.complete([*messages, entry], **_complete_kwargs(limits))
                 except Exception as final_exc:  # noqa: BLE001
                     # 同上面那条：这一轮连着两次都没发出去，也要留痕（`transport_error`），
                     # 否则「上游到底拒了什么」在 trace 上无从查起。
@@ -1069,9 +1090,52 @@ def run_analysis(
             # 的那几轮恰恰是最需要原文的（它到底返回了什么，才没被认成 JSON）。
             "response_text": text,
             "finish_reason": usage["finish_reason"],
+            # 「这一轮的输出撞上了单次输出上限」——**可观测**（E4）。两个信号取并集：
+            # 上游明说的 `finish_reason == "length"`，以及我们自己看出来的括号不配平。
+            # 落成 RoundRecord 上的一个 bool 而不是让读的人自己去比 `finish_reason`：
+            # 判据只有一个来源，才不会有人只判其中一半。
+            "output_budget_hit": _output_limit_hit(usage) or looks_like_truncated_json(text),
         }
         messages.append(entry)
         messages.append({"role": "assistant", "content": text})
+
+        # **上游说「你写超了」，这句话比我们自己猜形状准。**
+        #
+        # 判据放在 `parse_payload` **之前**，因为这一支要处理的正是「解析得通、内容残缺」
+        # 那一种：断点恰好落在一个仍然合法的 JSON 上（`requests` 数组已闭合、后面的字段
+        # 整段没写）时，`json.loads` 成功、括号也配平 —— 只看形状的话，这份**半句话**会
+        # 被当成正常结果收下，而它是残缺的（该要的上下文没要全、该写的字段一个没写）。
+        # 原先 `finish_reason` 只被**存储**（→ trace），从来没有人读它。
+        #
+        # 只在「还有下一轮可借」时才花这次纠正（`round_index < limits.max_rounds`）：
+        # 最后一轮要求它重发是白花一次纠正额度 —— 那句话永远发不出去，而这份额度本该留给
+        # 别处。额度用完/没有下一轮时下面的解析照常进行（**一份能解析的结论不许被丢掉**：
+        # 收下它并让 `output_budget_hit` 如实记着这件事，比丢掉它强得多）。
+        if (
+            _output_limit_hit(usage)
+            and limits.max_corrections > 0
+            and round_index < limits.max_rounds
+        ):
+            limits = replace(limits, max_corrections=limits.max_corrections - 1)
+            correction_hint = TRUNCATED_OUTPUT_HINT
+            salvaged_report = salvage_report_markdown(text)
+            if salvaged_report is not None:
+                # 与下面那一支同一套兜底：重问再失败时至少还有一份正文，而不是 JSON 源码。
+                markdown_fallback = salvaged_report
+            _emit(RoundRecord(
+                round_index, "unparsable",
+                correction_hint=correction_hint,
+                note=_combine_notes(
+                    round_notes,
+                    "上游报告输出撞上单次输出上限（finish_reason=length），"
+                    "已要求压短后重发（不再按括号配平判断）",
+                ),
+                **round_extra,
+            ))
+            pending_items = ()
+            budget_notes = []
+            round_memos.append(TurnMemo(index=round_index, status="unparsable"))
+            continue
 
         try:
             parsed = parse_payload(text, dimension_ids=dimension_ids)
@@ -1081,6 +1145,9 @@ def run_analysis(
             # `\n# 变更理解` 同样能数到章节标题，晚一步就会把 JSON 原文当成正文存下来
             # （实测 run 7：55k 字的报告被包在 `{"status": "final", …` 里面）。
             salvaged_report = salvage_report_markdown(text)
+            # **括号配平降为兜底**（E4）：上面那一支已经在 `finish_reason` 说明「写超了」
+            # 时先走过一遍，这里供端点上**不报** `finish_reason` 的情形用。
+            #
             # **只看形状**（括号配平），不要求抢得到正文：run 8 有一轮是在**要上下文的
             # 半截**被切掉的，那种回答里没有 `report_markdown`，但它同样是「写太长了」，
             # 给的提示也该是压短，而不是改格式。
@@ -1454,6 +1521,32 @@ def _usage_of(result: Any) -> dict[str, Any]:
         "cache_source": str(getattr(result, "cache_source", "") or ""),
         "finish_reason": str(getattr(result, "finish_reason", "") or ""),
     }
+
+
+def _complete_kwargs(limits: EngineLimits) -> dict[str, Any]:
+    """发给 `client.complete` 的那些可选参数。
+
+    **不配就不传**（`max_output_tokens is None` 时不出现 `max_tokens` 这个键）：端点默认
+    行为必须逐字节不变，而「传一个 None 进去」在有些客户端实现里会被写成 `"max_tokens":
+    null` 发出去 —— 那是一个与默认值不同、且没人验证过的请求。
+
+    集中一处是因为调用点有三个（正常轮、压小重发、收尾），而漏掉任何一处都表现为
+    「这个参数只在某些轮生效」——那种不一致查起来最费劲。
+    """
+    kwargs: dict[str, Any] = {"temperature": limits.temperature}
+    if limits.max_output_tokens is not None:
+        kwargs["max_tokens"] = limits.max_output_tokens
+    return kwargs
+
+
+def _output_limit_hit(usage: Mapping[str, Any]) -> bool:
+    """上游是否明说「这次输出被长度上限截断了」。
+
+    `finish_reason == "length"` 是上游给的**直接证据**，比我们自己按括号配平猜形状准 ——
+    断点恰好落在一个仍然合法的 JSON 上时（`requests` 数组已闭合、后面的字段整段没写），
+    `json.loads` 会成功、括号也配平，只有这句话能识破它。
+    """
+    return str(usage.get("finish_reason") or "").strip().lower() == "length"
 
 
 def _combine_notes(notes: Sequence[str], extra: str = "") -> str:

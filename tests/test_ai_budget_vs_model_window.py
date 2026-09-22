@@ -40,6 +40,7 @@ from services.ai.budget import (
     effective_prompt_budget,
     resolve_context_window,
 )
+from services.ai.budget_plan import derive_tool_limits
 from services.ai.engine import EngineLimits
 from services.ai.llm_client import LLMError
 from services.ai_analysis_service import _apply_model_window
@@ -111,6 +112,59 @@ def test_the_default_budget_does_not_trigger_any_watermark():
             client, {"api_model": "m"}, EngineLimits(prompt_char_budget=360_000)
         )
         assert (limits.prompt_char_budget, note) == (360_000, ""), window
+
+
+def test_a_clamped_budget_still_carries_the_platform_prompt():
+    """被水位压过的那个数交给引擎时**必须是整份提示词的额度**，不能再扣一次平台那段。
+
+    引擎比的是**整份提示词**：`engine.estimate_chars(messages)`，而 `messages` 的第一条
+    就是系统提示词（`subagent.build_seed_messages` 的「system + 含整份变更清单的 user」）。
+    所以 `limits.prompt_char_budget` 是「平台内置提示词 + 用户内容」的**总数**。
+
+    这里原先放的是 `总数 − platform_chars`，于是平台那段被**扣了两次**：一次在
+    `effective_prompt_budget` 的水位里，一次在这个减法里。重度压缩的项目因此白少用
+    `platform_chars` 那么多额度。
+
+    **为什么此前没被发现**：上面那条 `test_other_fields_of_the_limits_survive_the_clamp`
+    用的是默认的 `platform_chars=0`，两种写法都得 60,000 —— 于是这个
+    `platform_chars != 0` 的形状**一条用例都没有**。这条补的就是那个空档。
+    """
+    client = _FakeClient({"m": 100_000})  # 水位 = 100,000 × 60% = 60,000 字
+
+    limits, note = _apply_model_window(
+        client,
+        {"api_model": "m"},
+        EngineLimits(prompt_char_budget=500_000, max_tool_requests=40),
+        platform_chars=20_000,
+    )
+
+    assert "水位" in note, note
+    # 引擎拿到的总数 = 水位本身，**不是** 60,000 − 20,000。
+    assert limits.prompt_char_budget == 60_000, limits.prompt_char_budget
+    # 而派生单条上限用的是**用户内容**的额度（平台那段不能吃掉用户的额度）：
+    # 这一半必须留着，否则上一条会退化成「干脆别减」。
+    assert limits.tool_limits["file_diff"] == derive_tool_limits(
+        prompt_char_budget=40_000, max_tool_requests=40
+    )["file_diff"], limits.tool_limits
+
+
+def test_the_clamped_budget_does_not_spend_the_window_on_the_platform_prompt():
+    """反向自检：把平台那段的减法去掉，总数就会**超过水位** —— 那正是要防的事。
+
+    没有这一条，上面那条只能证明「等于 60,000」，证明不了「60,000 是水位而不是别的数」。
+    """
+    client = _FakeClient({"m": 100_000})
+
+    limits, _ = _apply_model_window(
+        client,
+        {"api_model": "m"},
+        EngineLimits(prompt_char_budget=500_000),
+        platform_chars=20_000,
+    )
+
+    # 水位是窗口的 60%，不是窗口本身 —— 上限不能被平台提示词顶到水位以上。
+    assert limits.prompt_char_budget <= context_watermark_chars(100_000)
+    assert limits.prompt_char_budget < 500_000, "没压住用户配的 500,000"
 
 
 def test_an_unknown_window_falls_back_to_a_stated_default():
@@ -394,3 +448,141 @@ def test_a_missing_skill_loader_result_is_zero_not_an_exception():
     from services.ai.prompt import platform_prompt_chars
 
     assert platform_prompt_chars(None) == 0
+
+
+# ==========================================================================
+#  四、运行计划（E3）：额度必须**真的**改变截断点
+#
+#  上面那些用例守的是「水位怎么算」与「谁调用谁」—— 全是形状与接线。形状对、接线对，
+#  但额度算完被绕过、或者 `ContextTools` 读的是另一个键，两种实现都能让它们全绿。
+#  这一节拿真的一份 40,000 字 diff 走一遍取数，看它到底被砍在哪里。
+# ==========================================================================
+
+
+def test_the_planned_tool_limits_really_move_the_truncation_point():
+    """**计划里的单条上限必须真的改变取数的截断点。**
+
+    期望值取自 `derive_tool_limits(prompt_char_budget=560_000, max_tool_requests=40)`：
+    `share = int(560000 * 0.65 / 12) = 30,333`。同一份 40,000 字的 diff：
+
+    * 默认额度（11,000）→ 砍到 11,000；
+    * 计划额度（30,333）→ 砍到 30,333。
+
+    两份都截断了（内容本身超过 30,333），所以差别**只**能来自额度 —— 这正是这条用例
+    要证明的那一件事。
+    """
+    from services.ai.budget_plan import derive_tool_limits
+    from services.ai.context_tools import DEFAULT_TOOL_LIMITS, ContextTools
+    from services.ai.protocol import ContextRequest
+
+    body = "x" * 40_000
+
+    class Provider:
+        def file_diff(self, commit, path):
+            # 切不开的一整块（没有 `@@` 块头）→ 走 `truncate_text_middle`，
+            # 它的截断点就是 `limits` 里给的那个数。
+            return body
+
+    request = ContextRequest(type="file_diff", commit="a" * 40, path="a.lua")
+
+    def delivered(limits) -> object:
+        tools = ContextTools(Provider(), max_tool_requests=40, limits=limits)
+        return tools.execute([request]).items[0]
+
+    planned = derive_tool_limits(prompt_char_budget=560_000, max_tool_requests=40)
+    assert planned["file_diff"] == 30_333, planned
+
+    default_item = delivered(dict(DEFAULT_TOOL_LIMITS))
+    planned_item = delivered(planned)
+
+    assert default_item.meta["limit"] == 11_000, default_item.meta
+    assert planned_item.meta["limit"] == 30_333, planned_item.meta
+    assert len(default_item.text) <= 11_000
+    assert 30_333 - 100 <= len(planned_item.text) <= 30_333, len(planned_item.text)
+    assert len(planned_item.text) > len(default_item.text) + 15_000
+
+
+def test_a_planned_file_content_cap_is_capped_by_what_the_provider_delivers():
+    """`file_content` **不许**在计划里报一个取数侧根本给不出的数。
+
+    正文在取数侧就按 `CONTENT_MAX_CHARS`（11,000）切好了（`platform_provider` /
+    Agent 两侧都读这个常量）。计划里若写 30,333，那条抬头说的行数与实际给出的正文
+    就对不上 —— 而那个行号是模型写进结论里的坐标。
+
+    `file_diff` / `read_reference` 不受这个夹：它们的正文由平台自己拼，取数侧的
+    「11,000」只是**旧的默认额度**，不是硬上限。
+    """
+    from services.ai.budget_plan import derive_tool_limits
+    from utils.content_window import CONTENT_MAX_CHARS
+
+    planned = derive_tool_limits(prompt_char_budget=560_000, max_tool_requests=40)
+
+    assert planned["file_diff"] == 30_333, "diff 的额度没有被抬起来"
+    assert planned["file_content_provider_max_chars"] == CONTENT_MAX_CHARS
+    assert planned["file_content_provider_max_chars"] <= planned["file_content"]
+
+
+def test_the_remaining_budget_form_of_the_limits():
+    """按**剩余**预算算的那一档：剩余少了，单条上限跟着降；不给就走总预算口径。
+
+    两种口径并存不是冗余：运行到一半时该看剩余（前面几轮已经花掉的不该再被算一遍），
+    而起跑前只有总预算。判据必须是「给没给」，不是「剩余是不是 0」—— 剩余真的为 0
+    时按 0 算出来的额度由下限兜住，而不是悄悄退回总预算。
+    """
+    from services.ai.budget_plan import derive_tool_limits
+
+    full = derive_tool_limits(prompt_char_budget=560_000, max_tool_requests=40)
+    same = derive_tool_limits(
+        prompt_char_budget=560_000,
+        max_tool_requests=40,
+        remaining_chars=560_000,
+        remaining_requests=40,
+    )
+    assert same == full, "给了与总预算相同的剩余时结果应当逐字相同"
+
+    shrunk = derive_tool_limits(
+        prompt_char_budget=560_000,
+        max_tool_requests=40,
+        remaining_chars=120_000,
+        remaining_requests=4,
+    )
+    assert shrunk["file_diff"] < full["file_diff"], shrunk
+    # 下限仍在：剩余再少也不会给一个小于 11,000 的 diff 额度（那是既有默认值，
+    # 降到它之下等于让「预算还有余」的项目比默认更差）。
+    assert shrunk["file_diff"] >= 11_000, shrunk
+
+
+def test_the_plan_carries_the_window_source_and_the_reserved_output_space():
+    """E3 要求的另外两项事实：**窗口来源**与**保留输出空间**。
+
+    它们必须在计划里、而且必须能被界面渲染出来：窗口来源是
+    「600,000 这个水位是怎么来的」的唯一说明（按默认值压的 ≠ 端点声明的）；
+    保留输出空间是「为什么水位只到 60%」的那个数。
+    """
+    from services.ai.budget import context_reserved_chars
+    from services.ai.budget_plan import build_budget_plan
+
+    plan = build_budget_plan(
+        configured_prompt_chars=2_000_000,
+        effective_prompt_chars=580_000,
+        platform_chars=20_000,
+        max_rounds=8,
+        max_tool_requests=40,
+        window_source="not_probed_default",
+        reserved_output_chars=context_reserved_chars(1_000_000),
+        window_note="端点未声明窗口，按默认值",
+    )
+
+    assert plan["prompt_chars"]["window_source"] == "not_probed_default"
+    assert plan["prompt_chars"]["reason"] == "端点未声明窗口，按默认值"
+    assert plan["reserved_output"]["chars"] == 400_000, plan["reserved_output"]
+    # 默认不给时是 0 / 空串，不是 None（界面按「有没有」判，None 会让它去猜）。
+    bare = build_budget_plan(
+        configured_prompt_chars=560_000,
+        effective_prompt_chars=560_000,
+        platform_chars=0,
+        max_rounds=8,
+        max_tool_requests=40,
+    )
+    assert bare["prompt_chars"]["window_source"] == ""
+    assert bare["reserved_output"]["chars"] == 0

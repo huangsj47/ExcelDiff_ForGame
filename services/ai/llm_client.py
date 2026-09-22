@@ -590,11 +590,18 @@ class LLMClient:
         temperature: float | None,
         marker: Mapping[str, str] | None,
         stream: bool = False,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """请求体。**消息一律过一遍断点处理**：内部标记绝不能漏进 JSON。
 
         `marker is None` 时发出去的东西与缓存功能上线前逐字节相同（见
         `prompt_cache.strip_cache_breakpoints`）—— 「默认关掉」这条路径必须是真的关掉。
+        `max_tokens` 同理：**不配就不出现在请求体里**（`None` 不是「发一个 0」）。
+
+        `max_tokens` 的用途只有一个：把「单次输出上限」这件事从网关的隐性默认值变成项目
+        可配的显式值。它**不改变分析逻辑**，也不与 `finish_reason == "length"` 那条纠正
+        路径冲突 —— 后者本来就要处理「撞上上限」这件事（见 `engine` 里 `TRUNCATED_OUTPUT_HINT`
+        那一支），配了它只是让撞上与否由我们说了算。
         """
         body: dict[str, Any] = {
             "model": self.model,
@@ -604,16 +611,28 @@ class LLMClient:
             body["temperature"] = temperature
         if stream:
             body["stream"] = True
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         return body
 
-    def complete(self, messages: list[dict[str, str]], *, temperature: float | None = None) -> ChatResult:
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> ChatResult:
         """一次非流式补全。**不因缓存标记失败**，见模块 docstring。"""
         marker = self._cache_marker()
         if marker is None:
-            return self._complete_once(messages, temperature=temperature, marker=None)
+            return self._complete_once(
+                messages, temperature=temperature, marker=None, max_tokens=max_tokens
+            )
 
         try:
-            return self._complete_once(messages, temperature=temperature, marker=marker)
+            return self._complete_once(
+                messages, temperature=temperature, marker=marker, max_tokens=max_tokens
+            )
         except LLMError as exc:
             # 安全阀。未知字段被 4xx 拒绝是最常见的失败形态，而它的后果是**整个分析
             # 跑不起来** —— 用一个省钱的优化换掉一次分析，这笔账怎么算都是亏的。
@@ -622,7 +641,9 @@ class LLMClient:
             # 不碰 KeyboardInterrupt 这类必须继续向上传播的东西。
             reason = redact_secret(f"{type(exc).__name__}: {exc}", self._api_key)
             try:
-                result = self._complete_once(messages, temperature=temperature, marker=None)
+                result = self._complete_once(
+                    messages, temperature=temperature, marker=None, max_tokens=max_tokens
+                )
             except LLMError:
                 # 去掉标记**仍然**失败 → 与标记无关（密钥、网络、网关故障）。
                 # 这时候不能把端点拉黑：拉黑等于把这个功能永久关掉，而它其实没问题。
@@ -644,6 +665,7 @@ class LLMClient:
         *,
         temperature: float | None,
         marker: Mapping[str, str] | None,
+        max_tokens: int | None = None,
     ) -> ChatResult:
         """发一次请求并把响应解析成 `ChatResult`。带不带标记由 `marker` 决定。"""
         if not self.model:
@@ -651,7 +673,9 @@ class LLMClient:
         if not messages:
             raise LLMConfigError("消息为空")
 
-        body = self._request_body(messages, temperature=temperature, marker=marker)
+        body = self._request_body(
+            messages, temperature=temperature, marker=marker, max_tokens=max_tokens
+        )
 
         response = self._request(
             "POST",

@@ -31,10 +31,10 @@ pending 再跑一次（见 `ai_analysis_service.run_weekly_analysis_background` 
   就带着一条醒目日志放行。卡死本身有别的机制兜（`schedule_weekly_sync_tasks` 会把
   超时的 pending 任务置 failed；重启时 `load_pending_tasks` 会把 processing 改回 pending），
   这道上限是最后一道保底。
-* **`pending` 只在「它马上会开跑」时才算在跑**（2026-09-21 收窄，见 `_executor_busy`）：
-  本地后台任务是**单线程**的，一次 AI 分析就把它占满，这时调度器每 2 分钟补进来的
-  `weekly_sync` 只能停在 `pending` —— 而**缓存并没有在被写**。把它也算作「在跑」的后果
-  是这期间的手工分析全部起不来（实测连续 22 次、跨度约 7 分钟全被回 `sync_in_flight`）。
+* **`pending` 与 `processing` 一律算在跑**（2026-09-22；此前 2026-09-21 曾收窄过一次，
+  见 `_in_flight_sync_task` 的 docstring —— 那次收窄的前提已被队列拆分推翻）。
+  结论是不对称的：误拦的代价是分析晚几分钟（有上限兜底、同步**真的会跑完**），
+  误放的代价是一份**看起来完整、实则缺文件**的报告 —— 后者是静默的。
 """
 
 from __future__ import annotations
@@ -64,18 +64,25 @@ def _as_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
 
 
 def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] = None):
-    """这个批次里**算在跑**的周版本同步任务，返回最新的那一条。
+    """这个批次里**算在跑**的周版本同步任务，返回最该被说出口的那一条。
 
     返回 `(task, 已跑秒数)`；没有就 `(None, 0)`。
 
-    ## 「算在跑」是两种，不是三种（2026-09-21 收窄）
+    ## 「算在跑」= `pending` 与 `processing` **一律算**（2026-09-22）
 
-    * `processing` —— 真正在往缓存里写。**这是本模块存在的理由**，一律算；
-    * `pending` **且执行侧空着** —— 它会在 worker 下一次取任务时立刻开跑（队列是内存
-      队列、`get(timeout=1)`），所以与「正在写」没有区别，也算；
-    * `pending` **而执行侧正忙** —— **不算**。单线程的 worker 被别的任务（实测：一次
-      AI 分析）占住时，这条 pending 在整个分析期间都不会开始，**缓存没有在被写**；
-      拿它拦只会让分析永远起不来。见 `_executor_busy`。
+    这条判据被收窄过一次又被改回来，两次都有实测依据 —— 改动前**必须先读**
+    `tests/test_ai_weekly_sync_gate_scope.py` 的模块 docstring，那里留着完整来龙去脉。
+    一句话版本：2026-09-21 那次「执行侧忙就放行」的前提是**单线程 worker 被分析占满**，
+    而 `62b4746` 把 `weekly_ai_analysis` 拆进独立队列 + 独立线程
+    （`services/task_worker_service.py:984-987`）之后，分析**不再占住通用线程**，
+    一条 `pending` 的同步**一定**会在分析期间被通用线程取走并开始写缓存。
+
+    ## 上限的判据是「还有没有一条在上限内」，不是「最老的那条超没超」
+
+    `SYNC_IN_FLIGHT_MAX_SECONDS` 的用途是「一条卡死的同步不能把分析永久挡住」，所以它
+    **逐条**作用：一批里同时有一条卡死 40 分钟的旧同步与一条刚开跑 2 分钟的新同步时，
+    后者仍可能在写缓存，必须继续拦。只有**全都在上限之外**时才返回最老的那条 ——
+    那是给 `weekly_sync_stuck_note` 指名用的。
     """
     ids = [str(int(item)) for item in config_ids if item is not None]
     if not ids:
@@ -94,7 +101,7 @@ def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] =
             # —— 那拿到的是**最旧**的一条：一批里同时有一条卡死 40 分钟的同步与一条刚起跑
             # 10 秒的同步时，闸门按旧那条算 age 已经超过 `SYNC_IN_FLIGHT_MAX_SECONDS`，
             # 于是**直接放行**，而另一个同步正在往缓存里写 —— 变更清单缺文件，正是这个
-            # 模块存在的理由。改回降序之后，「只剩一条卡死的」仍然照旧放行（上限语义不变）。
+            # 模块存在的理由。
             .order_by(BackgroundTask.created_at.desc())
             .all()
         )
@@ -104,79 +111,27 @@ def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] =
         return None, 0.0
 
     current = _as_naive_utc(now) or datetime.now(timezone.utc).replace(tzinfo=None)
-    # 「算在跑」的那一档：真正在写的优先（它比排队更接近出问题的时刻）。
-    blocking = [row for row in rows if _status_of(row) == "processing"]
-    if not blocking:
-        # 全是 pending：只有执行侧空着，它们才真的马上会开跑。
-        # 执行侧忙（单线程 worker 正拿着 AI 分析 / 别的同步 / 一堆 excel_diff）时返回
-        # 「没有在跑」—— 这正是这次要修的那条：那段最不需要拦的时间里，闸门一直拦着。
-        if _executor_busy():
-            return None, 0.0
-        blocking = list(rows)
 
-    # 最新的那一条（两个列表都保持查询的 created_at 降序）。
-    newest = blocking[0]
-    # 用 created_at 而不是 started_at：排队等着开跑同样是「还没写完」，
-    # 而 started_at 在 pending 阶段是空的。
-    created = _as_naive_utc(newest.created_at)
-    age = (current - created).total_seconds() if created else 0.0
-    return newest, max(age, 0.0)
+    def _age_of(row) -> float:
+        # 用 created_at 而不是 started_at：排队等着开跑同样是「还没写完」，
+        # 而 started_at 在 pending 阶段是空的。
+        created = _as_naive_utc(row.created_at)
+        return max((current - created).total_seconds(), 0.0) if created else 0.0
 
-
-def _status_of(task) -> str:
-    """任务行的状态（小写；取不动时当空串 —— 它两个分支都不进，也就是不拦）。"""
-    return str(getattr(task, "status", "") or "").strip().lower()
-
-
-def _executor_busy() -> bool:
-    """执行侧（本进程那个**唯一**的后台任务 worker）正拿着别的任务吗？
-
-    ## 为什么需要这一条
-
-    本地后台任务是**单线程**的（`task_worker_service.background_task_worker` 只有一个
-    线程，任务先进内存队列、再逐个执行）。一次 AI 分析就能把它占满，这时调度器每 2 分钟
-    补进来的 `weekly_sync` 只能停在 `pending`。实测精确到毫秒：任务 381 在 `12:52:30.079`
-    才开始，而 run 15 结束于 `12:52:29.994`（晚 0.085 秒）；382 又在 381 完成后 0.008 秒
-    接上 —— 也就是说**分析期间缓存并没有在被写**，但旧判据把那条 pending 也算成「在跑」，
-    于是闸门在那段最不需要拦的时间里一直拦着：连续 22 次手工发起、跨度约 7 分钟，
-    全部被回 `event: waiting`（`reason: sync_in_flight`），run 数一条没涨。
-
-    ## 判据为什么是「`processing` **且 `started_at` 有值**」
-
-    * `processing`：只有被 worker 取走过的行才会是这个状态
-      （`update_task_status_with_retry`）；
-    * `started_at` 有值：**「被取走过」的凭据**。只翻状态列、不写这一列的写入路径
-      （以及测试里手工造的行）不能证明执行侧忙；少了这个限定，一行永久卡在 `processing`
-      的残留会把判据钉死在「忙」上，闸门于是再也不会在「马上要开跑」时拦人。
-
-    ## 边界
-
-    * **不区分任务类型**：AI 分析、`auto_sync`、`excel_diff` 都占着同一个线程；
-    * agent 派发模式下任务由别的节点执行，本进程忙不忙说明不了什么 —— 那种部署里这条
-      判据基本恒为「不忙」，也就是**退回旧的严判据**（`pending` 一律拦），防护不变弱；
-    * 查不动时按「忙」处理：与 `_in_flight_sync_task` 的 `except` 同一条口径 ——
-      少一道闸，不把分析卡死。
-    """
-    from models import BackgroundTask
-
-    try:
-        busy = (
-            BackgroundTask.query.filter(
-                BackgroundTask.status == "processing",
-                BackgroundTask.started_at.isnot(None),
-            ).first()
-        )
-    except Exception:  # noqa: BLE001 —— 见 docstring：少一道闸，不把分析卡死
-        return True
-    return busy is not None
+    aged = [(_age_of(row), row) for row in rows]
+    within = [item for item in aged if item[0] <= SYNC_IN_FLIGHT_MAX_SECONDS]
+    # 在上限内的取**最老**的那条：它最接近上限，报出来信息量最大。
+    # 全超上限时取最老的那条 = 真正卡死的那条（`stuck_note` 要指名它）。
+    age, worst = max(within or aged, key=lambda item: item[0])
+    return worst, age
 
 
 def weekly_sync_in_flight(config_ids: Iterable[int], *, now: Optional[datetime] = None) -> str:
     """同步**正把缓存写在半路**吗？是的话返回一句**给人看的原因**，否则返回空串。
 
-    判据是「算在跑」（见 `_in_flight_sync_task`）：真正在写的（`processing`）一律拦；
-    排队等 worker 的（`pending`）只在**执行侧空着、它马上会开跑**时才拦。执行侧被别的
-    任务占住时那条 pending 不会开始写，不拦 —— 见 `_executor_busy`。
+    判据是「算在跑」（见 `_in_flight_sync_task`）：`pending` 与 `processing` **一律拦**。
+    2026-09-21 曾经把「执行侧忙」的 `pending` 放行，那条前提已被 `62b4746` 的队列/线程
+    拆分推翻（分析不再占住通用线程）—— 改回去之前先读 `_in_flight_sync_task` 的 docstring。
 
     调用方拿到原因后应当**跳过这一次分析并保留触发水位线**（不要推进
     `last_triggered_at`/`last_analyzed_at`），下一个周期自然会重试。

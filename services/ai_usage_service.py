@@ -48,8 +48,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from models import Project, WeeklyVersionConfig
-from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace
+from models import Project, WeeklyVersionConfig, db
+from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace, AiWeeklyAnalysisState
 from services.ai import run_progress
 from services.ai.analysis_budget import (
     PERIOD_ALL_TIME,
@@ -65,7 +65,15 @@ from services.ai.analysis_budget import (
     redact_platform_scope,
 )
 from services.ai.platform_budget import platform_budget_public
+from services.ai.budget import (
+    COMPACT_AT_RATIO,
+    context_reserved_chars,
+    context_watermark_chars,
+    effective_prompt_budget,
+    resolve_context_window,
+)
 from services.ai.budget_plan import build_budget_plan, derive_tool_limits
+from services.ai.job_service import UPGRADE_REASON_FIRST_RUN
 from services.ai.engine import EngineLimits
 from services.ai.pricing import amount_exact, amount_of, money
 from services.ai.project_config_source import get_project_analysis_config
@@ -1107,6 +1115,196 @@ def parse_estimate_args(args: Mapping[str, Any]) -> tuple[Optional[int], dict[st
     }
 
 
+#: 「生效预算是怎么来的」的一个取值：**运行前不探测模型**。
+#:
+#: 预估端点是只读的（`test_it_is_get_only_and_produces_no_model_call`），所以它算出来的
+#: 窗口只能是平台默认口径 —— 这个取值一路传到界面那一行「模型窗口来源」上，读者据此知道
+#: 「600,000 是按默认窗口算的，不是端点说的」。
+WINDOW_SOURCE_NOT_PROBED = "not_probed_default"
+
+
+def _platform_prompt_chars_for(project_id: int) -> tuple[int, str]:
+    """平台内置提示词一共多少字（`prompt.platform_prompt_chars`，与运行侧**同一个**函数）。
+
+    返回 `(字数, 拿不到时的说明)`。拿不到时回 0 并且**明说**：悄悄回 0 等于告诉用户
+    「平台一段内置提示词都不占」，那是一个假事实（而界面那一行正是拿它解释「生效值里
+    为什么有一部分不属于你」）。加载失败本身不阻断估算 —— 估算只是几行数字。
+    """
+    from services.ai.prompt import platform_prompt_chars
+
+    try:
+        from services.ai_analysis_service import _load_project_skills
+
+        loaded, failure = _load_project_skills(project_id)
+    except Exception as exc:  # noqa: BLE001 —— 读不到内置提示词不该让估算变成 500
+        return 0, f"平台内置提示词的字符数没有读出来（{exc}），下面的生效值里**不含**它。"
+    if loaded is None:
+        return 0, (
+            "平台内置提示词的字符数没有读出来（"
+            + str(failure or "分析协议未加载")
+            + "），下面的生效值里**不含**它。"
+        )
+    return platform_prompt_chars(loaded), ""
+
+
+def _estimate_window_note(
+    *, clamp_note: str, window_tokens: int, watermark: int, platform_note: str
+) -> str:
+    """预估端点那一行「模型窗口来源」的原文（界面直接渲染它）。
+
+    三件事按这个顺序说：**先说这次没问端点**（这是前提）、再说被压到哪里（如果有压）、
+    最后说内置提示词那一份有没有算进来。顺序不能反 —— 先说「未声明窗口」会让读者以为
+    平台问过了，而事实是这一条路径**没有探测**。
+    """
+    parts = [
+        f"运行前不探测模型：这里的生效预算是按平台默认窗口 {window_tokens:,} token 的 "
+        f"{int(COMPACT_AT_RATIO * 100)}% 水位（{watermark:,} 字）算的；"
+        "任务真正启动前会向端点问一次真实窗口，届时以那一个为准（可能更小）。"
+    ]
+    if clamp_note:
+        parts.append(clamp_note)
+    if platform_note:
+        parts.append(platform_note)
+    return "".join(parts)
+
+
+def _weekly_payload_facts(config_id: int) -> tuple[Optional[int], Optional[int], str]:
+    """这一轮会进输入的账（增量文件数 / 补偿文件数）→ `(增量, 补偿, 说明)`。
+
+    ## 为什么敢在**只读**端点上读它
+
+    `build_weekly_payload` 是**平台自己的账**：读快照缓存行、按基线做差、把上轮没取到
+    证据的文件按风险补回来（`scope_sampling`）。它不发任何模型请求，也没有副作用
+    （不建 run、不写状态行）—— 与报告 §5.5 要求的「调用模型之前先看清要做什么」是同一件事。
+
+    「不另立血缘」在这里是硬要求：补偿集与增量集的算法只有这一份实现（`_compensation_entries`
+    / `_select_delta_entries`）。在这里重算一遍，两处迟早会在「风险排序」「焦点筛选」
+    这些细节上分叉 —— 用户看到的预检数字与真正跑的内容对不上，比不给数字更坏。
+
+    拿不到时回 `(None, None, 说明)`：界面如实写「没有算出来」并把原因转述出来。
+    """
+    from services.ai_analysis_service import build_weekly_payload
+
+    try:
+        payload, _state, skip_reason = build_weekly_payload(config_id)
+    except Exception as exc:  # noqa: BLE001 —— 预检读不到账不该让整个估算变成 500
+        return None, None, f"本次的输入账没有算出来（{exc}）。"
+    if payload is None:
+        return None, None, (
+            "本次的输入账没有算出来（平台裁决：" + str(skip_reason or "未知") + "）。"
+        )
+    summary = payload.get("summary") or {}
+    delta = summary.get("delta_files")
+    compensation = summary.get("compensation_files")
+    return (
+        int(delta) if isinstance(delta, int) else None,
+        int(compensation) if isinstance(compensation, int) else None,
+        "",
+    )
+
+
+def _weekly_action_facts(project_id: int, *, mode: str, target_type: str) -> dict[str, Any]:
+    """本次动作的**事实**：增量文件数 / 补偿文件数 / 基线 run / 升级原因（E8）。
+
+    **只查库、不探测模型**（这就是这个端点存在的护栏）：
+
+    * **基线 run** 取自 `AiWeeklyAnalysisState.last_concluded_run_id` —— 与
+      `job_service.create_or_attach_job` 的 `base_run_id` **同一个指针**（不另立血缘：
+      预检说「基线是 Run 22」而建出来的 job 指向 Run 19，是最坏的一种不一致）；
+    * **升级原因**用 `job_service._decide_effective_mode` **同一套判据**（同一份状态行的
+      同一个指针），所以界面上的「这次会被升级为全量」就是建 job 时真的会发生的事；
+    * **增量/补偿文件数**读平台的输入账（见 `_weekly_payload_facts`）。
+
+    一个分组都没有 / 不是周版本 / 全量模式时，四个字段各自回它们的「不适用」值
+    （`None` 或空串）—— **不是 0**：0 是「一个文件都不变」这个确定的结论。
+
+    ## 哪个分组？—— 一个**说出来**的近似
+
+    预检请求里只有项目号（`/usage/estimate` 的参数表里没有 config：路由那一层不归本模块，
+    而 `parse_estimate_args` 多解析一个键也传不到这里）。所以这里取「**最近更新过的那条
+    状态行**」所属的分组，并且在有歧义时**把这件事写进 `note`**（带上那个分组的窗口）。
+
+    把近似说成事实是最坏的一种处置：用户在看 A 窗口的抽屉，而预检摆的是 B 窗口的基线 run
+    —— 一句「取自最近更新过的分组（窗口 …）」能让这件事当场被认出来。项目只有一个分组时
+    不加那句话（无话找话的说明会让真正的警告贬值）。
+    """
+    blank: dict[str, Any] = {
+        "delta_files": None,
+        "compensation_files": None,
+        "baseline_run": None,
+        "upgrade_reason": "",
+        "note": "",
+    }
+    if target_type != "weekly":
+        return blank
+
+    states = (
+        AiWeeklyAnalysisState.query.filter_by(project_id=project_id)
+        # 「最近更新过的那个分组」：`updated_at` 是状态行每次推进都会写的时刻（基线指针、
+        # 水位线都写它）。按它排而不是按 `last_analyzed_at` —— 后者在降级运行时不推进，
+        # 于是「刚跑完但降级」的分组会被排到后面去。
+        .order_by(AiWeeklyAnalysisState.updated_at.desc(), AiWeeklyAnalysisState.id.desc())
+        .all()
+    )
+    if not states:
+        return blank
+    state = states[0]
+    ambiguous = [
+        item for item in states[1:] if _int_or_zero(getattr(item, "last_concluded_run_id", None))
+    ]
+    ambiguity_note = ""
+    if ambiguous and getattr(state, "start_time", None) and getattr(state, "end_time", None):
+        ambiguity_note = (
+            f"这个项目里有 {len(ambiguous) + 1} 个周版本分组有结论基线；上面的基线 run 与"
+            f"输入账取自**最近更新过的那个分组**（窗口 {state.start_time:%Y-%m-%d} ~ "
+            f"{state.end_time:%Y-%m-%d}）。如果你看的是另一个窗口，请以那一份为准。"
+        )
+
+    run_id = _int_or_zero(getattr(state, "last_concluded_run_id", None)) or None
+    # 升级原因：用户要的就是全量时**没有**升级可言（那是他自己点的），
+    # 只有「要增量但一个可复用基线都没有」才是平台替他改的那一种。
+    if mode == MODE_INCREMENTAL and run_id is None:
+        upgrade_reason = UPGRADE_REASON_FIRST_RUN
+    else:
+        upgrade_reason = ""
+
+    if mode != MODE_INCREMENTAL:
+        return {
+            **blank,
+            "upgrade_reason": upgrade_reason,
+            "note": "这次是全量：平台不看增量基线，所以本次增量文件数与补偿文件数不适用。",
+        }
+    if run_id is None:
+        return {
+            **blank,
+            "upgrade_reason": upgrade_reason,
+            "note": "还没有可复用的结论基线，所以没有「本次增量文件数」可言"
+                    "（平台会把这次增量升级为全量）。",
+        }
+
+    run = db.session.get(AiAnalysisRun, run_id)
+    if run is None:
+        return {
+            **blank,
+            "upgrade_reason": upgrade_reason,
+            "note": f"结论基线指针指向的运行 #{run_id} 已经不在了，这个分组的基线要重新建立。",
+        }
+
+    baseline_run = {
+        "run_id": run.id,
+        "created_at": _iso(run.created_at),
+        "scope": str(run.scope or ""),
+    }
+    delta, compensation, reason = _weekly_payload_facts(_int_or_zero(run.target_id))
+    return {
+        "delta_files": delta,
+        "compensation_files": compensation,
+        "baseline_run": baseline_run,
+        "upgrade_reason": upgrade_reason,
+        "note": (reason or "") + ambiguity_note,
+    }
+
+
 def analysis_estimate(
     project_id: int,
     *,
@@ -1148,6 +1346,13 @@ def analysis_estimate(
         for run in rows
         if usage_from_run(run, price_table=table)["collected"]
     ]
+    # ------------------------------------------------------------------
+    # 本次动作的三个事实（E8）：增量文件数 / 补偿文件数 / 基线 run
+    #
+    # **只读、不探测模型**（与这个端点的另外三条护栏同一条口径）：读的是平台自己的
+    # 快照账与结论基线指针，没有任何一次出网调用。
+    # ------------------------------------------------------------------
+    facts = _weekly_action_facts(project_id, mode=mode, target_type=target_type)
     estimate = estimate_analysis(
         planned_files=planned_files,
         mode=mode,
@@ -1162,6 +1367,10 @@ def analysis_estimate(
         ),
         price_table=table,
         model=model,
+        # 三个事实字段（见 `estimate_analysis` 末节）：原样穿过去、不进算术。
+        delta_files=facts["delta_files"],
+        compensation_files=facts["compensation_files"],
+        baseline_run=facts["baseline_run"],
     )
     engine_defaults = EngineLimits()
     configured_chars = (
@@ -1180,20 +1389,43 @@ def analysis_estimate(
         if config.get("subagent_enabled")
         else 1
     )
+    window_tokens, _window_defaulted = resolve_context_window(None)
+    watermark = context_watermark_chars(window_tokens)
+    platform_chars, platform_note = _platform_prompt_chars_for(project_id)
+    # 与运行侧 `_apply_model_window` 同一条口径：窗口管的是**整份提示词**，所以先把
+    # 「配置值 + 平台内置」压到水位，再把内置那一段减掉还给用户的部分。差别只有一处：
+    # 这里窗口是**未探测**的（预估端点不探模型），所以按 `DEFAULT_CONTEXT_TOKENS` 算。
+    effective_total, clamp_note = effective_prompt_budget(
+        configured_chars + platform_chars, window_tokens
+    )
+    effective_chars = min(
+        configured_chars,
+        effective_total if not clamp_note else max(0, effective_total - platform_chars),
+    )
     estimate["budget_plan"] = build_budget_plan(
         configured_prompt_chars=configured_chars,
-        # 预估端点不发模型探测请求；真正的有效窗口会在运行冻结后再次计算并落库。
-        effective_prompt_chars=configured_chars,
-        platform_chars=0,
+        # **不许把配置值当成生效值。** 原先这里写的是 `effective_prompt_chars=configured_chars`
+        # 与 `platform_chars=0`，于是配 2,000,000 的项目显示「2,000,000 配置 / 2,000,000
+        # 当前预估生效」—— 那是一次必然被上游拒绝的调用被说成「预算够用」（E3 验收点名的
+        # 那一条）。现在按未探测下的水位算，并如实标明来源。
+        effective_prompt_chars=effective_chars,
+        platform_chars=platform_chars,
         max_rounds=configured_rounds,
         max_tool_requests=configured_requests,
         shard_count=configured_shards,
         verify=bool(config.get("subagent_verify")),
         tool_limits=derive_tool_limits(
-            prompt_char_budget=configured_chars,
+            prompt_char_budget=effective_chars,
             max_tool_requests=configured_requests,
         ),
-        window_note="模型窗口将在任务启动前探测；若端点未声明则按平台默认窗口计算。",
+        window_source=WINDOW_SOURCE_NOT_PROBED,
+        reserved_output_chars=context_reserved_chars(window_tokens),
+        window_note=_estimate_window_note(
+            clamp_note=clamp_note,
+            window_tokens=window_tokens,
+            watermark=watermark,
+            platform_note=platform_note,
+        ),
     )
     excluded = len(rows) - len(samples)
     if excluded:
@@ -1202,9 +1434,17 @@ def analysis_estimate(
             f"最近 {len(rows)} 次运行里有 {excluded} 次没有上报用量（失败在半路），"
             "它们不参与估算，「最近一次实际值」指的也是最近一次**有上报**的那次。",
         ]
+    if facts["note"]:
+        # 「本次增量文件数 / 补偿文件数」没有算出来时，**必须**跟着一句为什么：
+        # 界面上那一行写的是「见下面的说明」，空着就是让用户去猜。
+        estimate["notes"] = [*estimate["notes"], facts["note"]]
     # 价格表的状态也一并带出去：界面据此决定「显示费用」还是「提示去配置」
     # （`DEFAULT_PRICE_TABLE` 是空表，这是常态，不是异常）。
     estimate["pricing"] = _price_block(table, errors)
+    # 升级原因（E8 的预检要摆的第四样）：与 `job_service._decide_effective_mode` **同一个
+    # 判据**（同一份状态行的同一个指针），所以界面看到的「这次会被升级为全量」与建 job
+    # 时真正发生的事不可能分叉。全量不问这件事（用户自己要的，没有「升级」可言）。
+    estimate["upgrade_reason"] = facts["upgrade_reason"]
     estimate["generated_at"] = _iso(datetime.now(timezone.utc))
     return estimate
 

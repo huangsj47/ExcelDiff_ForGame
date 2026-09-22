@@ -1,32 +1,37 @@
 # -*- coding: utf-8 -*-
-"""同步闸门的**判据收窄**：排队等 worker 的同步不算「在跑」（2026-09-21 真机实测）。
+"""同步闸门判据的**两次反转**：`pending` 现在一律算「在跑」（2026-09-22 线程拆分后）。
 
-## 缺陷形态（真机）
+## 这段历史必须留着，否则下一个人会再收窄一次
 
-连续 22 次手工发起、跨度约 7 分钟，**全部**被回 `event: waiting`（`reason: sync_in_flight`），
-run 数一条没涨。机制已查实：本地后台任务是**单线程**的
-（`services/task_worker_service.background_task_worker` 只有一个线程），一次 AI 分析就把
-它占满，调度器每 2 分钟补进来的 `weekly_sync` 只能停在 `pending`。证据精确到毫秒：
-任务 381 在 `12:52:30.079` 才开始，而 run 15 结束于 `12:52:29.994`（晚 0.085 秒）；
-382 又在 381 完成后 0.008 秒接上。
+**2026-09-21 的收窄**（真机实测）：连续 22 次手工发起、跨度约 7 分钟，**全部**被回
+`event: waiting`（`reason: sync_in_flight`），run 数一条没涨。机制查实：本地后台任务当时是
+**单线程**的（`background_task_worker` 只有一个线程），一次 AI 分析就把它占满，调度器每
+2 分钟补进来的 `weekly_sync` 只能停在 `pending`。证据精确到毫秒：任务 381 在
+`12:52:30.079` 才开始，而 run 15 结束于 `12:52:29.994`（晚 0.085 秒）。既然分析期间
+**缓存一个字都没被写**，把 `pending` 也算作「在跑」就是白拦 —— 于是加了
+`_executor_busy()`：**执行侧忙时，pending 不算在跑**。
 
-也就是说：**分析期间缓存并没有在被写**（worker 根本没空去写），但旧判据把 `pending`
-也算作「在跑」，于是闸门在这段最不需要拦的时间里一直拦着。
+**2026-09-22 的反转**：`62b4746` 把队列拆成两条 —— `weekly_ai_analysis` 进
+`ai_task_queue`、由**独立的 `ai_task_worker` 线程**执行
+（`services/task_worker_service.py:984-987`，投递侧 `task_worker_queue_service._analysis_task_queue`）。
+那次收窄赖以成立的前提就此消失：
 
-## 收窄后的判据（两种算「在跑」）
+* 分析跑在 **AI 线程**上，**通用线程是空的**；
+* 那条 `pending` 的 `weekly_sync` 下一秒就会在**通用线程**上开跑、开始往缓存里写。
 
-1. `processing` —— 真正在往缓存里写，**一律拦**（这是这道闸门存在的理由，没有放松）；
-2. `pending` **且执行侧空着** —— 它会在 worker 下一次取任务时立刻开跑，**拦**；
-3. `pending` **而执行侧正忙** —— 不算：那条 pending 在整个分析期间都不会开始写缓存。
+此时再放行，分析就是在一份**写了一半**的缓存上开跑 —— 变更清单静默缺文件，正是本模块
+存在的唯一理由。所以判据回到「`pending` 与 `processing` **一律**算在跑」。
+
+> **判据的取向是不对称的**：误拦的代价是分析晚几分钟（有 30 分钟上限兜底、下一周期重试、
+> 而且同步**真的会跑完**，不像单线程时代会一直挂着）；误放的代价是一份**看起来完整、
+> 实则缺文件**的风险报告。后者是静默的，所以要往拦的那边倒。
 
 ## 这一组守什么
 
-* 收窄**真的生效**（忙的时候放行）—— 三条：`weekly_sync_in_flight` 本身、后台入口
-  不再被它跳过、手工流不再被它拦下；
-* 收窄**没有过头** —— `processing`、兄弟仓库的同步、30 分钟上限、以及「worker 空着时
-  pending 照样拦」这四条一条都不许丢；
-* 「执行侧忙」的判据是 `processing` **且 `started_at` 有值**（只翻状态列的行不算，
-  见 `weekly_sync_gate._executor_busy`）。
+* `pending` 被放行的那三条**已经反转**：AI 分析在跑时照样拦、后台入口照样被跳过、
+  并且**任何别的任务在跑都不构成放行理由**（`_executor_busy` 已删除）；
+* 不许过头的那几条一条都不许丢：`processing`、兄弟仓库的同步、30 分钟上限、
+  以及上限之外的**任何一条**都不能成为放行依据（只要**还有一条**在上限内就继续拦）。
 """
 from __future__ import annotations
 
@@ -95,14 +100,15 @@ def _seed(*, sync_status: str = "pending", sync_on: str = "primary", age_minutes
 
 @pytest.fixture
 def busy_worker():
-    """让**执行侧真的忙起来**：造一条 `processing` 且 `started_at` 有值的别的任务。
+    """造一条 `processing` 且 `started_at` 有值的 **AI 分析**任务 = 「AI 线程正被占住」。
 
-    `started_at` 是这条判据的凭据（`update_task_status_with_retry` 在把任务置为
-    `processing` 时写它）：只翻状态列、不写这一列的行（以及测试里手工造的行）不能证明
-    worker 被占着 —— 「忙」被误判的代价是闸门再也不拦人，方向更危险。
+    线程拆分之后，这条行描述的是**另一条线程**上的忙（`weekly_ai_analysis` 由
+    `ai_task_worker` 执行），通用线程仍然空着 —— 所以它**不再**是放行 `pending` 同步的
+    理由。留着这个 fixture 是为了让「AI 分析正在跑」这个场景在用例里**显式可见**，
+    而不是靠读者自己脑补。
 
-    用完**删掉自己造的那一行**（测试库是会话级共用的）：留着它会让后面那些「执行侧空着」
-    的用例看到一条永远 `processing` 的任务，于是它们要么假绿要么假红。
+    用完**删掉自己造的那一行**（测试库是会话级共用的）：留着它会让后面那些用例看到一条
+    永远 `processing` 的任务，于是它们要么假绿要么假红。
     """
     created: list = []
 
@@ -149,38 +155,35 @@ def idle_worker():
 
 
 # ==========================================================================
-#  一、收窄真的生效：执行侧忙时，排队等 worker 的同步不再拦
+#  一、线程拆分之后：`pending` 一律算在跑（2026-09-21 的放行已反转）
 # ==========================================================================
 
 
-def test_a_pending_sync_behind_a_busy_worker_does_not_block(busy_worker):
-    """**真机实测的那一条**：一条 AI 分析占住唯一那个 worker 时，手工分析必须放行。
+def test_a_pending_sync_behind_a_running_analysis_still_blocks(busy_worker):
+    """**本次回归**：一次 AI 分析正在 AI 线程上跑时，排队中的同步照样拦。
 
-    旧判据在这里回一句「周版本同步还在跑（已 N 分钟）」—— 而缓存一个字都没被写
-    （worker 正忙着分析），于是这句话在整个分析期间一直成立：用户点 22 次、22 次被拦。
+    2026-09-21 那条收窄在这里断言的是 `""`（放行），前提是「后台只有一个 worker 线程、
+    分析把它占满、pending 的同步动不了、缓存没有被写」。`62b4746` 之后前提没了：分析在
+    `ai_task_worker` 上，**通用线程是空的**，那条 pending 下一秒就在通用线程上开跑并开始
+    写缓存。这时放行的后果是分析在一份写了一半的缓存上开跑 —— 变更清单静默缺文件。
     """
     seeded = _seed(sync_status="pending", age_minutes=3)
     busy_worker("weekly_ai_analysis")
     with flask_app.app_context():
-        assert weekly_sync_in_flight(seeded["config_ids"]) == "", (
-            "执行侧正忙（缓存没有被写），排队等它的同步却把分析拦住了 —— 正是实测的 "
-            "22/22 被回 sync_in_flight 的那个形态"
-        )
+        reason = weekly_sync_in_flight(seeded["config_ids"])
+
+    assert reason, (
+        "AI 分析跑在 AI 线程上、通用线程空着 —— 那条 pending 的同步马上就会开始写缓存，"
+        "却放行了分析（这正是线程拆分引入的回归）"
+    )
+    assert str(seeded["sync_task_id"]) in reason, reason
 
 
-def test_a_pending_sync_behind_a_busy_worker_gets_no_stuck_note(busy_worker):
-    """同一情形下也不该冒出一句「卡死」的日志：它没卡死，只是在排队。"""
-    seeded = _seed(sync_status="pending", age_minutes=(SYNC_IN_FLIGHT_MAX_SECONDS // 60) + 5)
-    busy_worker("weekly_ai_analysis")
-    with flask_app.app_context():
-        assert weekly_sync_stuck_note(seeded["config_ids"]) == ""
+def test_the_background_entry_is_skipped_for_a_pending_sync(busy_worker):
+    """后台路径同样被这条 pending 拦住（同一道闸、同一判据）。
 
-
-def test_the_background_entry_is_no_longer_skipped_for_a_pending_sync(busy_worker):
-    """后台路径同样不再被这条 pending 拦住（同一道闸、同一判据）。
-
-    走到底会停在「没配 API key」这类既有闸门上 —— 那正好说明它越过了同步这一道。
-    **没有 API key 也是这条用例的自保**：它保证这次不会真的发出模型请求（不花钱）。
+    走到底会停在「没配 API key」这类既有闸门上；这条用例自保的地方在于**它必须停在同步
+    这一道**，否则就会真的发出模型请求（花钱）。
     """
     from services.ai_analysis_service import run_weekly_analysis_background
 
@@ -189,13 +192,54 @@ def test_the_background_entry_is_no_longer_skipped_for_a_pending_sync(busy_worke
     with flask_app.app_context():
         outcome = run_weekly_analysis_background(seeded["primary_config_id"])
 
-    assert outcome.get("reason") != "sync_in_flight", (
-        f"自动分析被一条排队中的同步挡住了（缓存没有被写）：{outcome}"
+    assert outcome.get("reason") == "sync_in_flight", (
+        f"一条马上要写缓存的同步没能挡住自动分析：{outcome}"
     )
 
 
+def test_another_generic_task_running_does_not_open_the_gate(idle_worker):
+    """**任何别的任务在跑都不是放行理由** —— `_executor_busy` 已按线程拆分前的假设删除。
+
+    通用线程上正跑着一条 `auto_sync`（`processing` + `started_at`）：它一结束，线程就交给
+    队列里那条 pending 的 `weekly_sync`，而它可能在分析中途结束。所以「通用线程现在忙」
+    同样不能证明「缓存不会被写」。
+    """
+    seeded = _seed(sync_status="pending", age_minutes=3)
+    with flask_app.app_context():
+        other = BackgroundTask(
+            task_type="auto_sync", commit_id="0", priority=5, status="processing",
+            created_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+        )
+        db.session.add(other)
+        db.session.commit()
+        try:
+            reason = weekly_sync_in_flight(seeded["config_ids"])
+        finally:
+            db.session.delete(other)
+            db.session.commit()
+
+    assert reason, "另一条通用任务在跑被当成了「缓存不会被写」的理由，于是放行了分析"
+
+
+def test_a_pending_sync_wedged_past_the_cap_still_gets_a_stuck_note(busy_worker):
+    """排队超过上限的 pending 是真**卡住**了（worker 一直没取走它），该报出来。
+
+    上限的语义没变：超过 `SYNC_IN_FLIGHT_MAX_SECONDS` 就不再拦（放行 + 一条醒目日志）。
+    线程拆分之后 pending 也会走到这一支 —— 一条永远排不上的同步同样是病。
+    """
+    seeded = _seed(sync_status="pending", age_minutes=(SYNC_IN_FLIGHT_MAX_SECONDS // 60) + 5)
+    busy_worker("weekly_ai_analysis")
+    with flask_app.app_context():
+        assert weekly_sync_in_flight(seeded["config_ids"]) == ""
+        note = weekly_sync_stuck_note(seeded["config_ids"])
+
+    assert note and "不再拦" in note, note
+    assert "不完整" in note, f"放行时没说清代价：{note}"
+
+
 # ==========================================================================
-#  二、收窄没有过头：这四条一条都不许丢
+#  二、不许过头：这几条一条都不许丢
 # ==========================================================================
 
 
@@ -258,26 +302,22 @@ def test_the_age_limit_still_releases_a_wedged_processing_sync(busy_worker):
     assert "不完整" in note, f"放行时没说清代价：{note}"
 
 
-def test_only_a_started_task_counts_as_a_busy_worker(idle_worker):
-    """「忙」的判据是 `processing` **且 `started_at` 有值**。
+def test_a_wedged_sync_does_not_release_while_a_fresh_one_is_still_writing(idle_worker):
+    """**上限的判据是「还有没有一条在上限内」，不是「有没有最老的一条超了上限」。**
 
-    只翻状态列、不写 `started_at` 的行不能证明 worker 被占着（真正取走任务的是
-    `update_task_status_with_retry`，它会写这一列）。少了这个限定，一行永久卡在
-    `processing` 的残留会把判据钉死在「忙」上 —— 闸门于是再也不会在「马上要开跑」时拦人，
-    而这是**静默**的。
+    闸门按**整批**判（`group_config_ids`：同项目、同窗口的全部配置）。一批里可以同时有一条
+    卡死 35 分钟的旧同步与一条刚开跑 2 分钟的新同步。旧实现「`processing` 优先」会拿那条
+    35 分钟的算 age → 超过上限 → **放行** —— 而另一条正在往缓存里写，变更清单照样缺文件。
+    上限的用途是「一条卡死的同步不能把分析永久挡住」，不是「只要有一条老的就可放行」。
     """
-    seeded = _seed(sync_status="pending", age_minutes=3)
+    wedged = _seed(sync_status="processing", age_minutes=(SYNC_IN_FLIGHT_MAX_SECONDS // 60) + 5)
+    fresh = _seed(sync_status="pending", age_minutes=2)
+    # 两批同窗口的配置各自成一组；这里把它们的 config_ids 合起来 = 一个批次里两条同步。
+    batch = list(wedged["config_ids"]) + list(fresh["config_ids"])
     with flask_app.app_context():
-        stale = BackgroundTask(
-            task_type="auto_sync", commit_id="0", priority=5, status="processing",
-            created_at=datetime.now(timezone.utc), started_at=None,
-        )
-        db.session.add(stale)
-        db.session.commit()
-        try:
-            reason = weekly_sync_in_flight(seeded["config_ids"])
-        finally:
-            db.session.delete(stale)
-            db.session.commit()
+        reason = weekly_sync_in_flight(batch)
 
-    assert reason, "一行没有 started_at 的 processing 残留把闸门永久关掉了"
+    assert reason, "同批里还有一条刚开跑的同步在写缓存，却因为另一条卡死了就放行"
+    assert str(fresh["sync_task_id"]) in reason, (
+        f"该拦住分析的是**还在上限内**的那一条，报出来的却是别的：{reason}"
+    )

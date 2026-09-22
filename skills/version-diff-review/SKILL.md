@@ -67,18 +67,19 @@ description: Use this skill whenever you review a game version's change set — 
 ```json
 {
   "status": "need_more_context",
-  "reason": "一句话说明为什么当前证据还不足以形成稳定结论",
+  "reason_code": "短标识，说明这一轮为什么还不够（形如 triage_cross_module、need_config_pair）",
   "requests": [
     {"type": "commit_detail", "commit": "本批次中的某个 commit id"},
     {"type": "file_diff", "commit": "本批次中的某个 commit id", "path": "该 commit 改动过的文件路径"},
     {"type": "file_content", "commit": "本批次中的某个 commit id", "path": "该 commit 改动过的文件路径", "lines": "1180-1260"},
     {"type": "read_reference", "name": "references 下的文件名", "lines": "3-5"},
-    {"type": "find_references", "query": "字段名或协议名", "path": "（可选）范围前缀"}
+    {"type": "find_references", "query": "字段名或协议名", "path": "（可选）范围前缀"},
+    {"type": "evidence", "name": "任务书或抬头里给出的 evidence_id，形如 a1b2c3d4e5f6a7b8c9d0"}
   ]
 }
 ```
 
-`commit` 必须是初始上下文里**真实出现过**的 commit；`path` 必须是**该 commit 确实改动过**的文件。服务端会校验这两点，越权的请求会被直接丢弃——写错只会浪费一轮，拿不到数据。
+**这一轮只有这三个字段**（外加可选的 `reason`，一行以内）：`report_markdown`、`anomalies`、`dimensions`、`candidate_dispositions` 属于 `final`——在中间轮写它们**一点作用都没有**（引擎在中间轮不读这四个字段），而单次输出有长度上限：写超了会把整份 JSON 截断，这一轮连同它的 `requests` 一起作废。**按地址取回原文**：每条正文的抬头里带着 `evidence_id=…`，那是这一份的稳定地址；要重新看哪一份（或汇总、对账时按给出的候选地址取原文）就把请求的 `type` 填 `evidence`、`name` 填那个地址，平台把**原件原样**附回来，不重新取数（地址只在本次分析内有效）。`commit` 必须是初始上下文里**真实出现过**的 commit；`path` 必须是**该 commit 确实改动过**的文件。服务端会校验这两点，越权的请求会被直接丢弃——写错只会浪费一轮，拿不到数据。
 
 `read_reference` 用来读本 skill 的 `references/` 文档，可用的文件名见文末索引。
 
@@ -119,13 +120,13 @@ description: Use this skill whenever you review a game version's change set — 
 
 `anomalies` 可以是空数组——如果确实没有达到门槛的问题，空数组就是正确答案。
 
-子代理汇总任务会给出候选编号。此时 `candidate_dispositions` 必须覆盖每个编号：采纳写 `adopted`，确认重复或不成立写 `rejected`，证据不足但不能安全排除写 `deferred`。普通单代理分析没有候选编号时可省略该字段。上下文抬头中的 `evidence_id` 是稳定证据地址；引用同一份正文时优先带回该 ID，无需在中间说明里重复粘贴长段原文。
+子代理汇总任务会给出候选编号。此时 `candidate_dispositions` 必须覆盖每个编号：采纳写 `adopted`，确认重复或不成立写 `rejected`，证据不足但不能安全排除写 `deferred`。普通单代理分析没有候选编号时可省略该字段。上下文抬头中的 `evidence_id` 是稳定证据地址；引用同一份正文时优先带回该 ID，无需在中间说明里重复粘贴长段原文；汇总/对账的任务书里给出的候选地址（`@evidence_id=…`）用上面「按地址取回原文」的写法索取即可拿到原件。
 
 ## 渐进式披露：先分诊，再点名索取
 
 你拿到的初始上下文只有**变更摘要**（提交信息、文件清单、周版本的差异文件列表），**不含 diff 正文**。这是刻意的：
 
-- **第一轮先分诊**：把这次变更按「最可能出事」排序并说出依据（改了什么业务行为、涉及哪条业务链、清单里哪些文件互相关联），把这段判断写进 `reason`；然后**一次点名 4~8 个**最关键的 `file_diff`，在 `reason` 里说清为什么是它们。
+- **第一轮先分诊**：把这次变更按「最可能出事」排序并说出依据（改了什么业务行为、涉及哪条业务链、清单里哪些文件互相关联），把这段判断压成 `reason_code` 里的一个短标识（需要时在 `reason` 里补一行）；然后**一次点名 4~8 个**最关键的 `file_diff`，用 `reason_code` 说明这一批是围绕哪个判断挑的。
 - **禁止请求整条 commit 的 diff。** 先根据文件清单缩小范围，再按文件要。
 - 索要前先问自己「这个文件里什么内容会改变我的结论」，只取能改变结论的。
 - **清单被截断时**（首行会写「还有 N 个文件的名字没有列出来」），那些文件**照样能读**：

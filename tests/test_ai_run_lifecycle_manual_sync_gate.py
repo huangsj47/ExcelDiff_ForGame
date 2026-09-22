@@ -338,13 +338,17 @@ def test_the_manual_entry_says_it_is_waiting_for_the_diff_sync(monkeypatch):
         _cleanup_runs(seeded)
 
 
-def test_the_manual_entry_proceeds_while_a_pending_sync_waits_behind_a_busy_worker(monkeypatch):
-    """**真机实测的那一条**：同步只是**在排队**、执行侧被别的任务占着（缓存没有被写）
-    → 手工分析必须开跑。
+def test_the_manual_entry_waits_while_a_pending_sync_is_about_to_write(monkeypatch):
+    """**2026-09-22 反转**：同步在排队、而 AI 分析跑在**另一条线程**上时，手工分析要等。
 
-    本地后台任务是单线程的：那一个 worker 正拿着别的任务时，排在后头的 `weekly_sync`
-    不会开始写缓存（实测：任务 381 在 run 15 结束后 0.085 秒才开始）。拿它拦等于让手工
-    分析永远起不来 —— 实测连续 22 次发起、跨度约 7 分钟，全部被回 `waiting`。
+    2026-09-21 这条断言的是 `STATE_QUEUED`，前提是「后台只有一个 worker 线程，那一个被
+    占住时排在后头的 `weekly_sync` 不会开始写缓存」（实测：任务 381 在 run 15 结束后
+    0.085 秒才开始）。`62b4746` 把 `weekly_ai_analysis` 拆进 `ai_task_queue` + 独立的
+    `ai_task_worker` 线程之后，前提没了：那条 pending 的同步下一秒就会在**通用线程**上
+    开跑并开始写缓存，而分析是在 AI 线程上跑的、并不会占住通用线程。
+
+    放行的后果不是「晚一点」，而是分析在一份**写了一半**的缓存上开跑 —— 变更清单静默
+    缺文件。完整来龙去脉见 `tests/test_ai_weekly_sync_gate_scope.py` 的模块 docstring。
     """
     seeded = _seed(sync_on="primary", sync_status="pending", busy_worker=True)
     calls: list = []
@@ -355,11 +359,11 @@ def test_the_manual_entry_proceeds_while_a_pending_sync_waits_behind_a_busy_work
             cfg = db.session.get(WeeklyVersionConfig, seeded["primary_config_id"])
             group_key = build_weekly_group_key(cfg)
 
-            assert created.job.state == STATE_QUEUED, (
-                f"排队等 worker 的同步把手工分析拦下了（缓存没有被写）：{created.job.state}"
+            assert created.job.state == STATE_WAITING_SNAPSHOT, (
+                f"一条马上要写缓存的同步没能挡住手工分析：{created.job.state}"
             )
-            _drive_the_job_task(cfg, group_key)
-            assert calls == ["execute"], "没分析"
+            assert _analysis_tasks(group_key) == [], "同步还在排队，却排出了分析任务"
+            assert calls == [], "同步还在排队，却发起了模型调用"
             _cleanup_runs(seeded)
     finally:
         _release_busy_worker(seeded)

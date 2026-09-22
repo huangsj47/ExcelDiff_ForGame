@@ -60,6 +60,50 @@ STATUS_NEED_MORE_CONTEXT = "need_more_context"
 STATUS_FINAL = "final"
 STATUSES = (STATUS_NEED_MORE_CONTEXT, STATUS_FINAL)
 
+# 中间轮**只认这四个字段**。其余的一律解析后丢弃并逐条记账（见 `_mid_round_drops`）。
+#
+# 为什么中间轮要收窄：那一轮存在的意义只有一个 —— 把「我还需要什么」交回来并开始下一轮。
+# 而 `report_markdown` / `anomalies` / `dimensions` / `candidate_dispositions` 这四个
+# 字段**在中间轮没有任何读者**（引擎只在 `is_final` 那一支读它们）。模型顺手在中间轮
+# 写一整份报告时，平台原先**不拦不丢**：白花输出 token，还让那一轮的输出更容易撞上
+# 单次输出上限（撞上就是整轮作废）。现在丢弃并记账 —— 丢弃是**有账**的，不是静默消失。
+MID_ROUND_FIELDS = ("status", "reason", "reason_code", "requests")
+
+# 中间轮里**不该出现**的那四个字段，以及它们在文档里的别名。别名（`report`）只记一条账：
+# 记两条会让人以为模型交了两份报告。
+_MID_ROUND_EXTRA_FIELDS = (
+    ("report_markdown", ("report_markdown", "report")),
+    ("anomalies", ("anomalies",)),
+    ("dimensions", ("dimensions",)),
+    ("candidate_dispositions", ("candidate_dispositions",)),
+)
+
+# `reason` 的硬长度上限（字符）。
+#
+# 这个字段原先**没有任何长度约束**，而长 `reason` 是**平台自己要来的**：SKILL.md 与
+# 提示词里有五处要求模型「把判断写进 `reason`」。收紧的办法是**换字段**（判断写成
+# `reason_code`，`reason` 只留一句可选补充）而不是把模型按提示词写下的那句话砍掉 ——
+# 砍掉的正是它被要求说的东西。真的超了上限时截断并记账（不静默截断：静默截断读起来
+# 像「模型只写了这么点」）。
+REASON_MAX_CHARS = 200
+# `reason_code` 是一个**短标识**（形如 `need_config_pair`），不该有段落那么长。
+REASON_CODE_MAX_CHARS = 60
+
+# 「按 evidence_id 取回原件」的请求类型。
+#
+# 它存在的理由：E5 的共享证据仓给每条正文发了一个稳定地址，而中间协议收窄之后，汇总与
+# 对账的任务书只给地址与体量（`@evidence_id=abc123（原文 11,000 字，按需索取）`）。
+# **那个承诺必须真的能兑现**，否则它就是平台自己写下的一句假话。
+EVIDENCE_REQUEST_TYPE = "evidence"
+# 允许的请求类型**就是**契约里那一份（现在含 `evidence`）。
+#
+# 2026-09-22 收口：这里曾经写成 `(*REQUEST_TYPES, EVIDENCE_REQUEST_TYPE)` —— 因为当时
+# `evidence` 只写在 SKILL.md 的正文里，没进 `skill_contract.REQUEST_TYPES`（提取器逐字
+# 比对，文档加一行 JSON 校验就红）。那个绕法让**协议比契约多一个成员**，而契约校验正是
+# 防「文档写了、服务端不认」的那道闸 —— 绕过去的代价是那道闸对这个类型失效。
+# 现在两处是同一个元组，那个失效面没有了；**别再拼第二份**。
+ALLOWED_REQUEST_TYPES = REQUEST_TYPES
+
 # 工具类型、severity、confidence 的允许集合定义在 `skill_contract` 里 —— 它们是
 # 契约的一部分（必须与 SKILL.md 里给模型看的枚举逐字一致），由校验器自动守住。
 REQUEST_TYPES_NEEDING_COMMIT = ("commit_detail", "file_diff", "file_content")
@@ -71,6 +115,11 @@ _WINDOW_TYPES = ("file_content", "file_diff", "read_reference", "commit_detail")
 
 # 报告健康检查需要命中多少个章节标题才认为「这像一份报告」。
 REPORT_HEALTH_MIN_SECTIONS = 2
+
+# `evidence_id` 的规范形状：sha256 的前 20 位十六进制（见 `evidence_store.blob_id_of`）。
+# **判形状而不是判它在不在**：查得到与否是执行层的事（那里才知道有没有这一份），
+# 而形状是协议自己的约定 —— 不像它的按畸形请求丢掉，别拿去执行。
+_EVIDENCE_ID_RE = re.compile(r"[0-9a-f]{20}")
 
 # 去掉模型可能带上的推理块。
 _THINK_BLOCK_RE = re.compile(r"<think\b.*?</think\s*>", re.S | re.I)
@@ -116,6 +165,9 @@ class ContextRequest:
             return f"{head} lines={self.lines}"
         if self.type == "read_reference":
             return f"read_reference {self.name}"
+        if self.type == EVIDENCE_REQUEST_TYPE:
+            # 地址就是这条请求的全部内容（`name` 装的是 `evidence_id`）。
+            return f"evidence {self.name}"
         if self.type == "commit_detail":
             return f"commit_detail {self.commit[:12]}"
         if self.type == "find_references":
@@ -201,11 +253,16 @@ class CandidateDisposition:
 class DroppedItem:
     """条目级记账：**被丢弃**的条目及原因，以及**被归到「未归类」**的条目。
 
-    `kind` 的取值为 `anomaly` / `dimension` / `request` / `subagent` / `unclassified`。
+    `kind` 的取值为 `anomaly` / `dimension` / `request` / `subagent` / `unclassified` /
+    `mid_round_field` / `reason` / `reason_code` / `shared_cache` / `evidence`。
     `unclassified` 那一条与其他几种**不是一回事**：那条发现**没有被丢掉**（它在
     `payload.anomalies` 里，报告里也列着），这里只是把「为什么它的维度显示成未归类」
     记下来。它借用这一个结构是因为 trace 是平台里唯一一条按条目把记录带到面板上的
     通道（`result_payload` 的 `dropped` → `trace_evidence.summarize_dropped`）。
+
+    `mid_round_field` 与 `reason` / `reason_code` 同样不是「结论被丢了」：它们记的是
+    **格式约束**（E4）。中间轮不接受的那四个字段确实没有读者，但「它本来写了什么」
+    必须留痕 —— 否则读的人只看到「这一轮只说了这么点」。
     """
 
     kind: str
@@ -218,6 +275,13 @@ class DroppedItem:
 class AnalysisPayload:
     status: str
     reason: str = ""
+    # 这一轮**为什么**是这样：一个短标识，不是一段叙述。
+    #
+    # `reason` 与它是**两个字段**而不是一个带长度上限的字段：`reason` 原先被提示词要求
+    # 承载「你的分诊判断」这类内容（SKILL.md 与提示词里有五处这么写），那本来就是一段话；
+    # 而平台真正需要机器处理的只有「是哪一类」，那是一个短标识。把两者合成一个字段、
+    # 再给它加长度上限，被砍掉的恰好是平台让模型说的那句话。
+    reason_code: str = ""
     requests: tuple[ContextRequest, ...] = ()
     report_markdown: str = ""
     anomalies: tuple[Anomaly, ...] = ()
@@ -526,6 +590,71 @@ def _coerce_candidate_dispositions(
     return tuple(kept), tuple(dropped)
 
 
+def _clip_field(value: str, limit: int, kind: str, label: str) -> tuple[str, tuple[DroppedItem, ...]]:
+    """按硬上限截断一个**模型给的自由文本字段**，超了就截断并记一条账。
+
+    **不许静默截断**：截断之后的文本进的是 trace 与提示词，读的人看到的是一段自己收尾
+    的话 —— 「模型只写了这么点」与「平台砍掉了后半段」在界面上长得一模一样，而后者
+    意味着我们**替模型改写了它的判断**。所以账要记，且账里写清原文多长。
+    """
+    text = str(value or "")
+    if len(text) <= limit:
+        return text, ()
+    return text[:limit], (
+        DroppedItem(
+            kind,
+            0,
+            f"{label} 超过 {limit} 字符上限（原文 {len(text)} 字符），已截断",
+            # 把**被砍掉的那一段的开头**留在账里：它是「模型本来还想说什么」，而这一条
+            # 账的唯一用途就是让人看得到那件事。
+            _safe_repr(text[limit : limit + 80]),
+        ),
+    )
+
+
+def _mid_round_drops(raw: dict) -> tuple[DroppedItem, ...]:
+    """中间轮里那份**不该出现的报告**：逐个字段记账。
+
+    判据是「非空才算」：`"anomalies": []` 是模型的正当写法（这一轮没有发现），把它记成
+    「写了报告被丢弃」是假账 —— 而假账比没有账更糟，读的人会去找一份不存在的报告。
+    """
+    dropped: list[DroppedItem] = []
+    for name, keys in _MID_ROUND_EXTRA_FIELDS:
+        for key in keys:
+            value = raw.get(key)
+            if isinstance(value, str):
+                # 只有空白（`"report_markdown": "   "`）与空串是一回事：模型**没有**写报告。
+                # 不 strip 就把它记成「写了报告被丢弃」是假账 —— 而假账比没有账更糟，
+                # 读的人会去找一份不存在的报告。
+                value = value.strip()
+            if not value:
+                continue
+            if isinstance(value, (list, tuple, dict, str)):
+                # `detail` 里**带上字段名**：面板对 `dropped` 的前缀是「未执行：」（
+                # `static/js/ai_think_log.js`），只写「给了 3 条」那句话读不成句 ——
+                # 「未执行：给了 3 条」看不出是什么给了 3 条。
+                detail = f"{name} 给了 " + (
+                    f"{len(value)} 条"
+                    if isinstance(value, (list, tuple))
+                    else f"{len(value)} 字符"
+                )
+            else:
+                detail = _safe_repr(value)
+            dropped.append(
+                DroppedItem(
+                    "mid_round_field",
+                    len(dropped),
+                    f"中间轮（need_more_context）不接受 `{name}`，已丢弃"
+                    f"（这一轮只认 {'、'.join(MID_ROUND_FIELDS)}）",
+                    detail,
+                )
+            )
+            # 同一个字段的两个写法（`report_markdown` 与 `report`）只记一条 —— 记两条
+            # 会让人以为模型交了两份报告。
+            break
+    return tuple(dropped)
+
+
 def _select_payload_object(parsed: Iterable[Any]) -> dict:
     """从解析结果里挑出符合协议外壳的那个对象。
 
@@ -571,14 +700,34 @@ def parse_payload(
     if status == STATUS_NEED_MORE_CONTEXT and not requests:
         raise ProtocolError("status 为 need_more_context 时必须给出非空的 requests")
 
-    report_markdown = _as_str(raw.get("report_markdown")) or _as_str(raw.get("report"))
-    anomalies, dropped_anomalies = _coerce_anomalies(
-        raw.get("anomalies"), dimension_ids=dimension_ids
+    reason, dropped_reason = _clip_field(
+        _as_str(raw.get("reason")), REASON_MAX_CHARS, "reason", "reason"
     )
-    dimensions, dropped_dimensions = _coerce_dimensions(raw.get("dimensions"))
-    dispositions, dropped_dispositions = _coerce_candidate_dispositions(
-        raw.get("candidate_dispositions")
+    reason_code, dropped_reason_code = _clip_field(
+        _as_str(raw.get("reason_code")), REASON_CODE_MAX_CHARS, "reason_code", "reason_code"
     )
+
+    # **中间轮只留那四个字段**（`MID_ROUND_FIELDS`）。其余四个字段在这一轮没有读者 ——
+    # 与其「解析了不用」（白花输出 token，还更容易撞上单次输出上限），不如丢弃并记账。
+    # 收窄**只管中间轮**：`final` 那一支必须照旧拿到全部字段，差一点就是整份结论丢掉。
+    dropped_mid: tuple[DroppedItem, ...] = ()
+    report_markdown = ""
+    anomalies: tuple[Anomaly, ...] = ()
+    dimensions: tuple[DimensionReview, ...] = ()
+    dispositions: tuple[CandidateDisposition, ...] = ()
+    dropped_entries: tuple[DroppedItem, ...] = ()
+    if status == STATUS_NEED_MORE_CONTEXT:
+        dropped_mid = _mid_round_drops(raw)
+    else:
+        report_markdown = _as_str(raw.get("report_markdown")) or _as_str(raw.get("report"))
+        anomalies, dropped_anomalies = _coerce_anomalies(
+            raw.get("anomalies"), dimension_ids=dimension_ids
+        )
+        dimensions, dropped_dimensions = _coerce_dimensions(raw.get("dimensions"))
+        dispositions, dropped_dispositions = _coerce_candidate_dispositions(
+            raw.get("candidate_dispositions")
+        )
+        dropped_entries = dropped_anomalies + dropped_dimensions + dropped_dispositions
 
     if status == STATUS_FINAL:
         if not report_markdown:
@@ -592,13 +741,14 @@ def parse_payload(
 
     return AnalysisPayload(
         status=status,
-        reason=_as_str(raw.get("reason")),
+        reason=reason,
+        reason_code=reason_code,
         requests=requests,
         report_markdown=report_markdown,
         anomalies=anomalies,
         dimensions=dimensions,
         candidate_dispositions=dispositions,
-        dropped=dropped_anomalies + dropped_dimensions + dropped_dispositions,
+        dropped=dropped_entries + dropped_mid + dropped_reason + dropped_reason_code,
     )
 
 
@@ -722,7 +872,7 @@ def sanitize_requests(
 
     for index, request in enumerate(requests):
         request_type = str(request.type or "").strip()
-        if request_type not in REQUEST_TYPES:
+        if request_type not in ALLOWED_REQUEST_TYPES:
             dropped.append(DroppedItem("request", index, "type 不在白名单内", request_type))
             continue
 
@@ -758,6 +908,33 @@ def sanitize_requests(
             allowed.append(
                 ContextRequest(type=request_type, name=request.name, lines=request.lines)
             )
+            continue
+
+        if request_type == EVIDENCE_REQUEST_TYPE:
+            # **按地址取回原件**（E5）。它与其他五种有一处根本不同：它不指向仓库里的
+            # 任何东西，指向的是**本次运行自己的证据仓**，所以这里既不校验 commit、
+            # 也不校验 path —— 能校验的只有「这个 id 长得对不对」。
+            #
+            # 判形状而不是判「在不在」：在不在是执行层才知道的事（`EvidenceStore.by_id`），
+            # 而这里丢掉一条形状不对的请求，理由要说得清（「这不是一个证据地址」），
+            # 而不是让它跑到执行层再回一句含义不明的「取不到」。
+            evidence_id = str(request.name or "").strip().lower()
+            if _EVIDENCE_ID_RE.fullmatch(evidence_id) is None:
+                dropped.append(
+                    DroppedItem(
+                        "request",
+                        index,
+                        "evidence 必须带一个合法地址（上下文抬头里那个 20 位十六进制的 "
+                        "evidence_id），这次给的形状不对",
+                        _safe_repr(request.name),
+                    )
+                )
+                continue
+            key = (request_type, "", "", evidence_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            allowed.append(ContextRequest(type=request_type, name=evidence_id))
             continue
 
         if request_type == "find_references":

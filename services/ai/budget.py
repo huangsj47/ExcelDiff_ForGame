@@ -274,6 +274,14 @@ def shrink_item(item: ContextItem, level: int) -> ContextItem:
     # False），而它恰恰是这一整层要消灭的那种静默。
     meta["truncated"] = True
     meta["limit"] = room
+    # **这一刀也要说清是哪条约束砍的**（E3 验收：「每次截断都能说明命中了哪个独立约束」）。
+    # 只有 `limit` 时，事后翻账看到的是「被砍到 4,000 字」，但看不出那是逐级压缩的哪一级
+    # —— 而「该调哪个配置」的答案就在这个层级里（第 3 级是换成说明文字，那已经丢内容了）。
+    # 写进 meta 之后由 `trace_evidence.summarize_executed` 落到 trace 明细上。
+    #
+    # 取数侧那一刀（`context_tools`）有自己的约束名，不在这里写 —— 两处各记各的，
+    # 混用一个名字会让「是取数上限还是预算压缩」这件事重新变得分不清。
+    meta["truncated_by"] = f"item_shrink_level_{level}"
     return replace(item, text=text, meta=meta)
 
 
@@ -476,6 +484,17 @@ def context_watermark_chars(window_tokens: int) -> int:
     """窗口对应的字符水位（窗口 × 60%，按 `CHARS_PER_TOKEN` 折算）。"""
     window, _ = resolve_context_window(window_tokens)
     return max(1, int(window * COMPACT_AT_RATIO * CHARS_PER_TOKEN))
+
+
+def context_reserved_chars(window_tokens: int) -> int:
+    """窗口里**没被**水位用掉的那部分字符 —— 留给模型回复与估算误差的空间。
+
+    E3 的运行计划要把它单独列出来：水位只到 60% 不是「丢了 40% 的额度」，而是那 40%
+    本来就留给输出与误差（见 `COMPACT_AT_RATIO` 的注释）。用户看不到这个数时，
+    「为什么 1M 的窗口只能装 600,000 字」永远是个谜。
+    """
+    window, _ = resolve_context_window(window_tokens)
+    return max(0, int(window * (1 - COMPACT_AT_RATIO) * CHARS_PER_TOKEN))
 
 
 def effective_prompt_budget(configured_chars: object, window_tokens: int) -> tuple[int, str]:

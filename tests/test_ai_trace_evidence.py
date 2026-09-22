@@ -221,17 +221,32 @@ class TestFailureVersusEmpty:
         monkeypatch.setattr(
             dispatch,
             "request_references",
-            lambda repository, *, query, entries, prefix="": {
+            # ★ `total_files` 这个关键字**必须收**（2026-09-22 补）。
+            #
+            # 少了它，调用会抛 `TypeError: got an unexpected keyword argument 'total_files'`，
+            # 而 provider 的宽 `except` 会把它兜成**另一句**失败说明 —— 于是这条用例照样绿，
+            # 却**一次都没走到它要测的那条分支**（`status: pending` → `[检索还没回来]`）。
+            # 这正是「兜底分支抹平两臂」：两臂都被异常兜底成「有一句失败说明」，断言分不开。
+            # 所以下面同时**钉死具体前缀**，让「走错了分支」再也绿不了。
+            lambda repository, *, query, entries, prefix="", total_files=0: {
                 "status": "pending",
                 "message": "Agent 当前离线",
             },
         )
         samples = [
-            provider.find_references("target_id"),               # [检索还没回来]
-            pp.PlatformContextProvider(loaded=loaded_skills()).find_references("x"),  # [检索不可用]
+            # 向 Agent 索取但还没回来
+            (provider.find_references("target_id"), "[检索还没回来]"),
+            # 没有 scope / 项目没绑 Agent 节点
+            (
+                pp.PlatformContextProvider(loaded=loaded_skills()).find_references("x"),
+                "[检索不可用]",
+            ),
         ]
 
-        for text in samples:
+        for text, expected in samples:
+            assert expected in text, (
+                f"该走「{expected}」这一支，实际拿到的是：{text!r}"
+            )
             notice = failure_notice(text)
             assert notice, f"认不出这句失败说明：{text!r}"
             item = ContextItem("find_references", "find_references target_id", text)

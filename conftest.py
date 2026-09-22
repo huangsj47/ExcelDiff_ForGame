@@ -36,7 +36,22 @@ import os
 import tempfile
 from pathlib import Path
 
-_TEMP_DB_DIR = os.path.join(".pytest_tmp", "db")
+# ★ 必须是**绝对路径**，锚在本文件所在目录上 —— **不能靠 cwd**。
+#
+# 这个坑我踩了两次，是同一族：
+#   1. `_targets_outside_tests` 曾经拿 `os.getcwd()` 当仓库根，从别的目录点名跑
+#      `tests/xxx.py` 时判成「伸到外面了」→ 无条件改写 → 正常测试全断（已改成
+#      `config.rootpath`）；
+#   2. 这里 `os.path.abspath(".pytest_tmp/db")` 仍然是 **cwd 相对**的，于是
+#      `_is_temp_sqlite` 在别的 cwd 下会把**我们自己刚造出来的临时库**判成非临时库。
+#
+# CI（Linux）就是这么红的：
+#     test_the_temp_db_we_create_is_recognised_by_the_platform_safety_layer
+#     assert root_conftest._is_temp_sqlite(uri) is True  →  assert False is True
+# 本地复现：`cd <别的目录> && pytest <仓库>/tests/test_pytest_db_isolation_guard.py`
+# 症状和「守卫坏了」一模一样，但根因是**判据的基准选错了**。
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_TEMP_DB_DIR = os.path.join(_REPO_ROOT, ".pytest_tmp", "db")
 
 
 def _is_temp_sqlite(url: str) -> bool:

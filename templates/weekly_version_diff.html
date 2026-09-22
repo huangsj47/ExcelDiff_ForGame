@@ -2082,6 +2082,9 @@ let weeklyAiJobPolls = 0;
 // 它只活在页面内存里（服务端那一列见 `AiAnalysisJob.baseline_provenance_mismatch`，
 // 但今天没有任何生产代码写它 —— `create_or_attach_job` 也没有接这个意图）。
 let weeklyAiMismatchAccepted = false;
+// 服务端上一次告诉我们的「本次增量文件数」。它只用来给下一次预检带上 `files=`（区间按文件数缩放），**不是**页面自己算出来的数。
+let weeklyAiKnownDeltaFiles = null;
+
 // 最近一次看到的「平台把增量升成了全量」那句话（POST 的响应 / `/jobs/<id>` 两条路都会写它）。
 let weeklyAiUpgradeNoticeText = '';
 
@@ -2283,6 +2286,39 @@ function weeklyAiEstimateLines(estimate) {
     }
     lines.push(['预计 token', weeklyAiTokensText(estimate)]);
     lines.push(['预计耗时', weeklyAiDurationText(estimate)]);
+    // **本次动作的三个事实**（服务端读平台自己的账，不探模型）。它们回答的是「这次要
+    // 做什么」，与下面的区间是两件事 —— 所以分开摆，算不出来时如实说「没有算出来」，
+    // 不拿 0 顶替（0 是「一个文件都不变」这个确定的结论）。
+    const isFull = !!(estimate && estimate.mode === 'full');
+    if (isFull) {
+        lines.push(['本次增量文件数', '不适用（全量不看增量基线，整个窗口重跑）']);
+        lines.push(['补偿文件数', '不适用（同上）']);
+    } else {
+        const delta = estimate ? estimate.delta_files : null;
+        lines.push(['本次增量文件数', (delta === undefined || delta === null)
+            ? '没有算出来（见下面的说明）'
+            : (weeklyAiFormatInt(delta) + ' 个')]);
+        const compensation = estimate ? estimate.compensation_files : null;
+        lines.push(['补偿文件数', (compensation === undefined || compensation === null)
+            ? '没有算出来（见下面的说明）'
+            : (weeklyAiFormatInt(compensation) + ' 个（上轮没取到证据、按风险补回的）')]);
+    }
+    const baseRun = (estimate && estimate.baseline_run) || null;
+    if (baseRun && baseRun.run_id) {
+        const at = baseRun.created_at
+            ? String(baseRun.created_at).replace('T', ' ').slice(0, 16) : '时间未记录';
+        lines.push(['基线 run', '#' + weeklyAiFormatInt(baseRun.run_id) + '（' + at
+            + (baseRun.scope ? '，' + baseRun.scope : '') + '）']);
+    } else {
+        lines.push(['基线 run', '这个分组还没有可复用的结论基线']);
+    }
+    // 升级原因：**有才说，没有就如实说没有**。原因码由 `job_service._decide_effective_mode`
+    // 定，翻成中文的那张表与「平台把增量升成了全量」那句通知**共用同一份**
+    // （`WEEKLY_AI_UPGRADE_REASONS`），不在这里另写一套词。
+    const upgradeReason = (estimate && estimate.upgrade_reason) || '';
+    lines.push(['升级原因', upgradeReason
+        ? (WEEKLY_AI_UPGRADE_REASONS[upgradeReason] || ('平台给出的原因码：' + upgradeReason))
+        : '没有升级：这次跑的就是你选的那个模式']);
     const budget = (estimate && estimate.budget_plan) || {};
     const promptChars = budget.prompt_chars || {};
     const perRole = budget.per_role || {};
@@ -2290,8 +2326,34 @@ function weeklyAiEstimateLines(estimate) {
     const roles = budget.roles || {};
     if (promptChars.configured !== undefined) {
         const effective = promptChars.effective === undefined ? promptChars.configured : promptChars.effective;
+        // **「会被压到」与「已经生效」是两句话。** 运行前窗口还没探测（预估端点不探模型），
+        // 所以被水位夹住时只能说「会被压到 N」；把未探测说成事实，用户会以为
+        // 「我配的 2,000,000 真的生效了」。
+        const tail = promptChars.clamped
+            ? ('会被模型窗口压到 ' + weeklyAiFormatInt(effective))
+            : (weeklyAiFormatInt(effective) + ' 当前预估生效');
         lines.push(['提示词字符预算', weeklyAiFormatInt(promptChars.configured)
-            + ' 配置 / ' + weeklyAiFormatInt(effective) + ' 当前预估生效']);
+            + ' 配置 / ' + tail]);
+    }
+    // 窗口来源：`600,000` 这个水位是怎么来的。**必须写** —— 「按默认窗口压的」与
+    // 「端点声明了窗口」是两件事，不说清就会被读成「平台问到了端点」。
+    if (promptChars.reason) {
+        lines.push(['模型窗口来源', promptChars.reason]);
+    }
+    if (promptChars.platform_overhead !== undefined) {
+        lines.push(['平台内置提示词占用', weeklyAiFormatInt(promptChars.platform_overhead)
+            + ' 字（不占用户额度，但占整份提示词）']);
+    }
+    const caps = budget.tool_limits || {};
+    if (caps.file_diff !== undefined) {
+        lines.push(['单条上限', 'diff ' + weeklyAiFormatInt(caps.file_diff)
+            + ' 字 / 正文取数侧实际夹在 '
+            + weeklyAiFormatInt(caps.file_content_provider_max_chars) + ' 字 / 文档 '
+            + weeklyAiFormatInt(caps.read_reference) + ' 字']);
+    }
+    if (budget.reserved_output && budget.reserved_output.chars) {
+        lines.push(['预留输出空间', weeklyAiFormatInt(budget.reserved_output.chars)
+            + ' 字（模型窗口里留给模型回复与估算误差的部分）']);
     }
     if (roles.count) {
         lines.push(['每角色 / 整单理论上限', weeklyAiFormatInt(perRole.max_rounds) + ' 轮、'
@@ -2344,11 +2406,19 @@ async function fetchWeeklyAiEstimate(mode) {
     const params = new URLSearchParams();
     params.set('project', String(project));
     params.set('mode', mode === 'full' ? 'full' : 'incremental');
+    // 把**已经从服务端知道的本次增量文件数**带回去：区间是按文件数缩放的
+    // （`estimate_analysis`：单文件强度 × 目标文件数）。不带的话 `planned_files` 恒为
+    // 空，区间只能拿历史总量顶（「预计文件数」那一行也就永远是「按最近一次估」）。
+    if (weeklyAiKnownDeltaFiles !== null && weeklyAiKnownDeltaFiles !== undefined) {
+        params.set('files', String(weeklyAiKnownDeltaFiles));
+    }
     try {
         const resp = await fetch('/ai-analysis/usage/estimate?' + params.toString(),
             { cache: 'no-store' });
         const data = await resp.json();
-        return data && data.success ? data : null;
+        if (!data || !data.success) return null;
+        if (typeof data.delta_files === 'number') weeklyAiKnownDeltaFiles = data.delta_files;
+        return data;
     } catch (_err) {
         // 估算读不到**不阻断**这次分析：它只是确认框里那几行数字。页面照常问用户
         // 「要不要全量」，只是数字那一栏如实写「估不出来」。
@@ -2566,8 +2636,27 @@ async function weeklyAiChooseMode(requested) {
         });
         return choice === 'ok' ? 'incremental' : null;
     }
-    // provenance 没变、基线也在 → **一个字都不弹**，直接按增量走（验收第 4 条）。
-    return 'incremental';
+    // provenance 没变、基线也在 → **先把这次要做的事摆出来**，再让用户点确认。
+    //
+    // 这一档原先「一个字都不弹」直接开跑（当时的验收第 4 条）。用户否掉了它：复核报告
+    // §5.5 记着「点击绿色增量按钮后任务直接启动，没有先显示 35 个 delta、20 个补偿文件、
+    // 基线 Run 22 和升级原因；这仍不满足用户要求的『调用模型前选择』」。所以现在连最普通
+    // 的那一次也要先给一份预检。
+    //
+    // **它是只读的，不是决策框**：只摆事实（本次增量文件数 / 补偿文件数 / 基线 run /
+    // 区间），选项就是「开始增量分析 / 取消」两个默认键 —— 「换成全量」那个决策在
+    // `mismatch` / `first_run` 两条分支里，这里不重复问一次（同一件事问两次会让人以为
+    // 第一次的答案没用）。
+    const estimate = await fetchWeeklyAiEstimate('incremental');
+    const choice = await weeklyAiChoiceDialog({
+        title: '增量分析',
+        intro: '这次只分析基线之后变化的部分。下面是本次的事实与按历史实测给出的区间 ——'
+            + '确认之后才会调用模型。',
+        lines: weeklyAiEstimateLines(estimate),
+        note: weeklyAiEstimateNote(estimate),
+        okText: '开始增量分析'
+    });
+    return choice === 'ok' ? 'incremental' : null;
 }
 
 async function startWeeklyAiAnalysis(mode = 'incremental') {

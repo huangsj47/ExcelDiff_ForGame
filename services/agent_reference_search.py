@@ -12,23 +12,28 @@
 `git grep <commit>` 更快，但它在工作副本上的行为受 clone 形态影响（浅克隆、部分检出、
 GIT_DIR 的解析各不一样），而 `get_file_content_from_git` 是**平台与 Agent 两端已经共用**的
 那一条路 —— 同一份实现、两端结果一致这条纪律（见 `utils/content_window`）在这里同样成立。
-代价是慢一些，所以有文件数上限与扫描额度（`ai/reference_search.py`），并且**扫了多少、
-跳过了多少都要如实回报**：模型必须分得清「没搜到」与「没搜完」。
+代价是慢一些，所以这里**不逐个文件重复读**：一次读整批建快照索引
+（`ai/reference_index.SnapshotReferenceIndex`，有 `MAX_INDEX_FILES` 的预热门槛），
+之后的查询只查内存。**扫了多少、跳过了哪几类都要如实回报** —— 模型必须分得清
+「没搜到」与「没搜完」。
 """
 
 from __future__ import annotations
 
-import hashlib
 import threading
 from collections import OrderedDict
 from dataclasses import replace
 
 from models import Repository, db
+from services.ai.reference_index import (
+    MAX_INDEX_FILES,
+    SnapshotReferenceIndex,
+    snapshot_digest,
+)
 from services.ai.reference_search import (
     SearchResult,
     render_result,
 )
-from services.ai.reference_index import SnapshotReferenceIndex
 
 _INDEX_CACHE: "OrderedDict[str, SnapshotReferenceIndex]" = OrderedDict()
 _INDEX_CACHE_LOCK = threading.Lock()
@@ -36,8 +41,8 @@ _INDEX_CACHE_MAX = 8
 
 
 def _snapshot_key(repository_id: int, pairs: list[tuple[str, str]]) -> str:
-    body = "\n".join(f"{path}\0{commit}" for path, commit in pairs)
-    return f"{repository_id}:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
+    """索引缓存键 = 仓库 + **文件清单本身**的指纹（不是条数，见 `reference_index.snapshot_digest`）。"""
+    return f"{repository_id}:" + snapshot_digest(pairs)
 
 
 def _cached_index(key: str):
@@ -57,12 +62,13 @@ def _store_index(key: str, value: SnapshotReferenceIndex) -> None:
 
 
 def apply_batch_total(result: SearchResult, total_files) -> SearchResult:
-    """把「本批次一共改了多少个文件」这一个数换成平台给的那个。
+    """把「这次结论的分母」这一个数换成平台给的那个。
 
-    它比这里数出来的大时，说明发过来的 `entries` 已经被平台截过（额度上限），也就是
-    **这一批压根没搜完** —— 分母换成真实的总数，并把 `truncated_files` 标上。模型靠
-    `scanned` 与 `files_total` 是否相等区分「没搜到」与「没搜完」，写错了它会把一次只扫了
-    240 个文件的搜索当成结论（`render_result` 的 docstring 明写这两种「没有」必须分得开）。
+    它比这里数出来的大时，说明**平台看到的本批次比 Agent 手里的这份清单大** ——
+    平台发的是整批（索引按快照建，前缀只在查询时筛），所以两者本该相等；不等只可能来自
+    更旧的任务 payload 或某一端被截过。这时把分母换成平台的数，并把 `truncated_files` 标上。
+    模型靠 `scanned` 与 `files_total` 是否相等区分「没搜到」与「没搜完」，写错了它会把一次
+    只扫了一部分的搜索当成结论（`render_result` 的 docstring 明写这两种「没有」必须分得开）。
 
     单独提出来是因为它是这一段里**唯一**会算错的判断，而它只依赖两个输入 —— 拆开之后
     可以直接喂数进来验，不必起数据库、不必造 Agent 任务。
@@ -83,17 +89,18 @@ def apply_batch_total(result: SearchResult, total_files) -> SearchResult:
 def search_references_for_agent(payload: dict) -> dict:
     """返回体（会被原样 JSON 落到 `AgentTask.result_summary`）：
 
-    `{text, query, scanned, files_total, hits, missing, binary, truncated_files, truncated_hits}`
+    `{text, query, scanned, files_total, hits, matched, missing, binary, oversized,
+    undecodable, unindexed, truncated_files, truncated_hits, index_version, snapshot_digest}`
     —— `text` 就是给模型看的那一整段（抬头 + 命中清单），其余几个数是**账**：
-    平台侧按 `scanned` 扣检索额度，而模型能不能对「没搜到」下结论，取决于
-    `scanned` 与 `files_total` 是否相等。
+    模型能不能对「没搜到」下结论，取决于 `scanned` 与 `files_total` 是否相等、
+    以及那几种缺口各有多少（`missing` / `binary` / `oversized` / `undecodable` / `unindexed`）。
 
-    ## `files_total` 的分母是平台给的，不是这里数出来的
+    ## `files_total` 的分母：本批次 ∩ 前缀
 
-    `entries` 已经被平台截到额度上限了，所以 `len(entries)` **不是**本批次改了多少个文件
-    —— 拿它当分母会得出「240/240，全覆盖了」，而真相是 767 个里只看了 240 个。平台把
-    真实总数放在 `total_files` 里带过来（见 `agent_file_content_dispatch.request_references`
-    的 docstring），这里只负责如实用它，并在两数不等时把 `truncated_files` 标上。
+    它由**索引自己**从平台发来的整批文件清单里数出来（`search(prefix=...)` 的 `files_total`），
+    所以「一共改了多少个」不经过任何一次截断。`total_files` 那份平台声明的兜底（见
+    `apply_batch_total`）只在两边不一致时把分母抬上去 —— 平台发的是**整批**，正常情况下
+    两个数相等。
     """
     repository_id = payload.get('repository_id')
     query = str(payload.get('query') or '').strip()
@@ -120,7 +127,10 @@ def search_references_for_agent(payload: dict) -> dict:
     cache_key = _snapshot_key(int(repository_id), pairs)
     index = _cached_index(cache_key)
     if index is None:
-        index = SnapshotReferenceIndex.build(pairs, reader=reader)
+        # 一次读整批，但**有预热门槛**（`MAX_INDEX_FILES`）：Agent 这条路的等待上限是
+        # 40 秒（`REFERENCES_WAIT_SECONDS`），整批顺序读 blob 会让第一次查询落成 `pending`。
+        # 门槛之外的那些如实算缺口（`search()` 报 `unindexed`）。
+        index = SnapshotReferenceIndex.build(pairs, reader=reader, max_files=MAX_INDEX_FILES)
         _store_index(cache_key, index)
     result = index.search(query, prefix=str(payload.get('prefix') or ''))
     result = apply_batch_total(result, payload.get('total_files'))
@@ -128,6 +138,7 @@ def search_references_for_agent(payload: dict) -> dict:
         result,
         scope_note=(
             f"索引版本 `{result.index_version}`，快照 `{result.snapshot_digest[:12]}`；"
+            f"索引覆盖本批次的前 {index.indexed_files} 个文件，"
             "相同快照后续查询复用索引，不重复读取 blob。"
         ),
     )
@@ -137,8 +148,15 @@ def search_references_for_agent(payload: dict) -> dict:
         'scanned': result.scanned,
         'files_total': result.files_total,
         'hits': len(result.hits),
+        # 截断/分页**之前**的真实命中数。少了它，「命中 80 处」在读的人眼里就是全部。
+        'matched': result.matched,
         'missing': result.missing,
         'binary': result.binary,
+        'oversized': result.oversized,
+        'undecodable': result.undecodable,
+        'unindexed': result.unindexed,
+        'cursor': result.cursor,
+        'next_cursor': result.next_cursor,
         'truncated_files': result.truncated_files,
         'truncated_hits': result.truncated_hits,
         'index_version': result.index_version,

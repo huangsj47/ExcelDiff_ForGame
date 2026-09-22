@@ -518,10 +518,21 @@ def _apply_model_window(
     # 压完再减去内置那一段：**用户的额度不能被平台自己的提示词吃掉**。窗口小到连
     # 内置提示词都装不下时落到 0 —— 那时组装侧还有条目下限兜着，而这一轮的说明已经
     # 把「窗口太小」讲清楚了。
+    #
+    # ★ 这个 `effective` 是**用户内容**的额度，它的两个去处是「派生单条上限」与「报给 UI」，
+    # **不是** `limits.prompt_char_budget`。
+    #
+    # 2026-09-22 修：这一行原先把 `effective` 赋给了 `prompt_char_budget`，那是**扣了两次**
+    # 平台提示词 —— 引擎比的是**整份提示词**（`engine.estimate_chars(messages)`，而 `messages`
+    # 里第一条就是系统提示词，见 `subagent.build_seed_messages`），所以它要的是压过的**总数**
+    # `budget`；把「总数 − 平台那段」再交给它，等于平台那段先从水位里扣一次、又在比较里扣一次。
+    # 后果是重度压缩的项目白少用 `platform_chars` 那么多额度（本机 560k 的配置走的是**没压**
+    # 那条路，所以线上一直没暴露）。同一个数还让界面与预估端点对不上：预估侧报的是**内容额度**，
+    # 运行侧报的是总数，于是「配置 560,000 / 生效 580,000」这种读不通的话就出现了。
     effective = max(0, budget - platform_chars)
     return replace(
         limits,
-        prompt_char_budget=effective,
+        prompt_char_budget=budget,
         tool_limits=derive_tool_limits(
             prompt_char_budget=effective,
             max_tool_requests=limits.max_tool_requests,
@@ -1210,7 +1221,11 @@ def _run_engine_and_persist(
         configured_prompt_chars=_configured_int(
             project_config.get("prompt_char_budget"), EngineLimits().prompt_char_budget
         ),
-        effective_prompt_chars=limits.prompt_char_budget,
+        # `limits.prompt_char_budget` 是**整份提示词**的额度（引擎按它比总长），而这一栏
+        # 报的是**用户内容**的额度 —— 两者差一个平台内置提示词。减掉它让运行侧与预估端点
+        # （`ai_usage_service.analysis_estimate` 的 `effective_prompt_chars`）说的是同一个数，
+        # 否则界面会出现「配置 560,000 / 当前预估生效 580,000」这种读不通的对照。
+        effective_prompt_chars=max(0, limits.prompt_char_budget - platform_chars),
         platform_chars=platform_chars,
         max_rounds=limits.max_rounds,
         max_tool_requests=limits.max_tool_requests,

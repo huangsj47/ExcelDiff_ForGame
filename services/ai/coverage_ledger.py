@@ -153,6 +153,23 @@ def _num(value: Any) -> str:
     return str(number) if number is not None else UNKNOWN
 
 
+def _extra_input_row(label: str, value: Any, detail: str) -> str:
+    """「补偿输入 / 依赖输入」那一行的内容。**三种取值三种写法**：
+
+    * 有数（含 0）：写数字 —— 「0 个」是一个**结论**（这轮确实没有补偿项）；
+    * 读不出来（老 payload 没有这个键）：写 `未记录` —— 平台没这个数，不是 0。
+
+    两者原先都不输出（`if x:` 才写一行），于是「0 个」与「没有这个概念」在报告里
+    长得一模一样。
+    """
+    number = _count(value)
+    if number is None:
+        return UNKNOWN
+    if number == 0:
+        return f"本次输入里没有{label}（0 个）"
+    return f"包含 {number} 个{detail}"
+
+
 def parse_evidence_label(label: Any) -> tuple[str, str, str]:
     """逐轮明细里那一行人读的标签 → `(12 位提交, 路径, 行窗口/段)`。
 
@@ -238,6 +255,10 @@ def _evidence_files(
     `pairs` 是**保守口径**（这一版改动看过没有），`paths` 是**宽松口径**（这个文件碰过
     没有），`segments` **不是覆盖率**（同一个文件分段读多次会重复计），它只说明前两个数
     是怎么来的。
+
+    `paths` 同时就是 `inspection_coverage` 的分子：**都叫「已检查」，判据只能有一套**
+    （`build_ledger` 里那处原先另写了一遍统计，既没排 `failed`/`empty`、也没校验白名单，
+    于是「取数失败」被算成了「已检查」）。
     """
     pairs: set = set()
     paths: set = set()
@@ -298,6 +319,39 @@ def _tool_totals(tool_stats: Any) -> dict:
     }
 
 
+def _declared_count(payload: Mapping[str, Any], key: str) -> Optional[int]:
+    """`summary.<key>`（平台声明的计数）优先，缺失时退回 `payload[<key>]` 的条数。
+
+    **读不出来就是 `None`**（不是 0）：原先写的是 `_count(summary[key]) or len(payload[key])`，
+    缺键时 `None or 0` 会得到 **0** —— 于是「这份 payload 里没有补偿项这个概念」被写成了
+    「这轮 0 个补偿项」，与 `_count` 自己的 `None` 语义（`:113`）当场矛盾。
+    """
+    declared = _count(_as_mapping(payload.get("summary")).get(key))
+    if declared is not None:
+        return declared
+    rows = payload.get(key)
+    return len(rows) if isinstance(rows, (list, tuple)) else None
+
+
+def _extra_input_rows(payload: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """白名单里 `source != delta` 的那些 → `(来源, 路径)`，按原顺序、同路径只留一条。
+
+    来源由 `scope_sampling` 写在**逐文件那一行**上（`compensation` / `dependency`），
+    所以「这几条到底取没取到证据」只能在这里看 —— `summary` 里那两个数只是计数。
+    """
+    rows: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in payload.get("delta_files") or ():
+        entry = _as_mapping(item)
+        source = str(entry.get("source") or "delta").strip() or "delta"
+        path = str(entry.get("file_path") or "").strip()
+        if source == "delta" or not path or path in seen:
+            continue
+        seen.add(path)
+        rows.append((source, path))
+    return rows
+
+
 def build_ledger(
     *,
     request_payload: Any,
@@ -324,15 +378,26 @@ def build_ledger(
     else:
         pairs, paths, segments, failures = set(), set(), set(), []
 
-    inspected_paths: set[str] = set()
-    if collected:
-        for raw in executed_rows:
-            item = _as_mapping(raw)
-            if str(item.get("kind") or "") not in FILE_EVIDENCE_KINDS:
-                continue
-            _commit, path, _lines = parse_evidence_label(item.get("label"))
-            if path:
-                inspected_paths.add(str(path))
+    # 「已检查」= 白名单里**真的取到过内容**的文件（按「文件」去重）。判据与 `_evidence_files`
+    # 同源（`failed` / `empty` 不算、白名单外的路径不算）——原先这里另写了一遍统计，两个都
+    # 没做，于是**取数失败被算成了已检查**。
+    inspected_paths: set[str] = paths
+
+    # 补偿 / 依赖核查项：逐条看它取到证据没有（`summary` 里那两个数只是计数，
+    # 而「哪一条没看成」才是报告里要写成缺口的东西）。
+    extra_rows = _extra_input_rows(payload)
+    extra_by_source: dict[str, dict] = {}
+    for source, path in extra_rows:
+        bucket = extra_by_source.setdefault(
+            source, {"total": 0, "fetched": 0, "pending_paths": []}
+        )
+        bucket["total"] += 1
+        if not collected:
+            continue
+        if path in paths:
+            bucket["fetched"] += 1
+        else:
+            bucket["pending_paths"].append(path)
 
     manifest = _as_mapping(payload.get("manifest"))
     manifest_entries = manifest.get("entries") if isinstance(manifest.get("entries"), list) else []
@@ -377,12 +442,21 @@ def build_ledger(
         "list_truncated": list_truncated,
         "truncation_reason": truncation_reason,
         "tool_stats_recorded": totals["recorded"],
-        "compensation_files": _count(
-            _as_mapping(payload.get("summary")).get("compensation_files")
-        ) or len(payload.get("compensation_files") or []),
-        "dependency_files": _count(
-            _as_mapping(payload.get("summary")).get("dependency_files")
-        ) or len(payload.get("dependency_files") or []),
+        "compensation_files": _declared_count(payload, "compensation_files"),
+        "dependency_files": _declared_count(payload, "dependency_files"),
+        # 补偿 / 依赖核查项**逐条**的账（`source` 写在白名单那一行上）：
+        # `total` / `fetched` 是计数，`pending_paths` 是没取到证据的那些路径。
+        # 采集不到逐轮明细时 `fetched` / `pending_paths` 只能是「未记录」——
+        # 那时候平台连「看过哪些文件」都不知道，更说不出这些补上了没有。
+        "pending_by_source": {
+            source: {
+                "total": bucket["total"],
+                "fetched": bucket["fetched"] if collected else None,
+                "pending": len(bucket["pending_paths"]) if collected else None,
+                "pending_paths": bucket["pending_paths"] if collected else None,
+            }
+            for source, bucket in extra_by_source.items()
+        },
     }
     ledger = {
         "mode": inventory["mode"],
@@ -525,12 +599,46 @@ def coverage_rows(ledger: Mapping[str, Any]) -> list[tuple[str, str]]:
         else:
             rows.append(("覆盖（列出的名字）", UNKNOWN))
 
-    compensation = _count(counts.get("compensation_files")) or 0
-    dependency = _count(counts.get("dependency_files")) or 0
-    if compensation:
-        rows.append(("补偿输入", f"包含 {compensation} 个上轮未覆盖补偿项，按本轮证据重新核查"))
-    if dependency:
-        rows.append(("依赖输入", f"包含 {dependency} 个依赖核查项，用于验证改动的上下游影响"))
+    # 三层覆盖率要**摆在报告里**：`assignment_coverage` / `inspection_coverage` 原先算了
+    # 却没有任何消费点（算了不显示 = 没人看得到）。口径与那两个字段同源，不许在这里另算。
+    if not single_commit:
+        assigned = ledger.get("assignment_coverage") or {}
+        inspected = ledger.get("inspection_coverage") or {}
+        rows.append(
+            (
+                "覆盖（已分配）",
+                f"{_num(assigned.get('covered'))} / {_num(assigned.get('total'))}"
+                f"（{_percent(assigned.get('ratio'))}）—— 完整清单里被分配到了分片的文件"
+                "（每个变更文件至少属于一个分片；没有这份账时写「未记录」，不是 0）",
+            )
+        )
+        rows.append(
+            (
+                "覆盖（已检查）",
+                f"{_num(inspected.get('covered'))} / {_num(inspected.get('total'))}"
+                f"（{_percent(inspected.get('ratio'))}）—— 按「文件」去重，真的取到过 diff 或"
+                "正文的（取不到、以及工具明确回了「没有内容」的，都不算）",
+            )
+        )
+
+    # **0 与「未记录」必须分得开**：两个都是 `if x:` 才输出时，「这轮 0 个补偿项」与
+    # 「这份 payload 里没有这个概念」在报告里长得一模一样（`_count` 的 `None` 语义）。
+    rows.append(
+        (
+            "补偿输入",
+            _extra_input_row(
+                "补偿项", counts.get("compensation_files"), "上轮未覆盖补偿项，按本轮证据重新核查"
+            ),
+        )
+    )
+    rows.append(
+        (
+            "依赖输入",
+            _extra_input_row(
+                "依赖核查项", counts.get("dependency_files"), "依赖核查项，用于验证改动的上下游影响"
+            ),
+        )
+    )
 
     if not evidence.get("collected"):
         rows.append(
@@ -594,7 +702,8 @@ def gap_notes(ledger: Mapping[str, Any]) -> list[str]:
         if pending:
             notes.append(
                 f"**没有取到证据**：本次输入的 {_num(counts.get('batch_files'))} 个文件里，"
-                f"还有 {pending} 个这次没有任何 diff 或正文进来（按「(最新提交, 文件)」去重）。"
+                f"还有 {pending} 个这次没有任何 diff 或正文进来（按「(最新提交, 文件)」去重；"
+                f"{_layers_note(ledger)}）。"
                 "这不是「这些文件没问题」，是**这次没有看**。"
             )
     else:
@@ -602,6 +711,7 @@ def gap_notes(ledger: Mapping[str, Any]) -> list[str]:
             "**这次没有留下取数明细**：平台说不出「看过哪些文件」（只能说清输入里有哪些），"
             "所以下面那些结论**不要**当成「这些文件都看过了」。"
         )
+    notes.extend(_extra_input_gaps(ledger))
     failed = _count(counts.get("failed_requests"))
     if failed:
         labels = [one for one in (evidence.get("failed_labels") or []) if one]
@@ -626,6 +736,52 @@ def gap_notes(ledger: Mapping[str, Any]) -> list[str]:
         notes.append(
             f"**本次只分析了「{ledger['focus_label']}」**：其它仓库的改动不在这次输入里，"
             "结论不能读成「整个版本没问题」。"
+        )
+    return notes
+
+
+def _layers_note(ledger: Mapping[str, Any]) -> str:
+    """「已分配 X / 已检查 Y」那一小句（缺口与行共用同一份账）。
+
+    只写「还有 N 个没看」看不出成因：是分片压根没铺到它（已分配 < 总数），还是铺到了但
+    这一轮没取到证据（已分配 = 总数、已检查 < 已分配）。两者下一步要做的事完全不同。
+    """
+    assigned = ledger.get("assignment_coverage") or {}
+    inspected = ledger.get("inspection_coverage") or {}
+    return f"已分配 {_num(assigned.get('covered'))} / 已检查 {_num(inspected.get('covered'))}"
+
+
+def _extra_input_gaps(ledger: Mapping[str, Any]) -> list[str]:
+    """补偿 / 依赖核查项里**没取到证据**的那些 → 缺口。
+
+    它们进输入的唯一理由就是「上一轮没看到，这一轮补上」/「改了它就要跟着看」——没取到
+    证据等于这件事没做成，而原先的缺口里一个字都不提（`gap_notes` 通篇不讲补偿与依赖）。
+    """
+    counts = ledger.get("counts") or {}
+    by_source = counts.get("pending_by_source") or {}
+    reasons = {
+        "compensation": (
+            "补偿项",
+            "这类文件正是「上一轮没看到、这一轮专门补上」的那些，"
+            "报告里必须把它们写成信息缺口，不能当成已核实。",
+        ),
+        "dependency": (
+            "依赖核查项",
+            "它们是「与本轮变更文件同名的源表或生成物」，正是「改了它就要跟着看」的那一跳；"
+            "没取到证据等于这一跳没走，报告里要写成信息缺口。",
+        ),
+    }
+    notes: list[str] = []
+    for source, (label, why) in reasons.items():
+        bucket = by_source.get(source) or {}
+        pending = _count(bucket.get("pending"))
+        if not pending:
+            continue
+        paths = [str(one) for one in (bucket.get("pending_paths") or []) if one]
+        example = f"例如：{'；'.join(f'`{one}`' for one in paths[:2])}。" if paths else ""
+        notes.append(
+            f"**{label}没有取到证据**：本轮输入里的 {_num(bucket.get('total'))} 个{label}中，"
+            f"{pending} 个这次没有任何 diff 或正文进来（按「文件」去重）。{why}{example}"
         )
     return notes
 

@@ -41,6 +41,9 @@ from utils.logger import log_print
 # 变更清单里最多列几组「同记号关联」（疑似同一次改动的那些）。列太多会把清单本身挤长，
 # 而它每一轮都在提示词里；剩下多少组由 `describe_bundles` 自己说明。
 DEFAULT_BUNDLE_LIMIT = 12
+# **只在「payload 里没有 manifest」时兜底**（老 payload、单提交模式）。有 payload 就用
+# payload 那份：一次运行的提示词、落库账、`read_reference` 的 S 标签、成员归属必须读
+# 同一个指纹，各自造一份的下场见 `manifest.py` 的抬头。
 DEFAULT_MANIFEST_SHARDS = 3
 MANIFEST_REFERENCE = "change-manifest"
 
@@ -176,9 +179,19 @@ def from_weekly_payload(
         declared_total = _positive_int(summary.get("total_files"))
     total_files = declared_total if declared_total is not None else (whitelist_total or None)
 
-    manifest = build_manifest(
-        payload.get("delta_files") or (),
-        shard_count=DEFAULT_MANIFEST_SHARDS,
+    # **落库那份优先**：`payload["manifest"]` 是按配置的成员数（`subagent_count`）算的，
+    # 而提示词、`read_reference` 的 S 标签、成员实际分到的文件都从这一份出发。这里若各造
+    # 一份（原先写死 3 个分片），模型读到的 S 标签就与它分到的文件对不上 —— 默认 3 时两个
+    # 数巧合相等，所以这个 bug 只在 `subagent_count != 3` 时现形。缺这份键（老 payload）
+    # 时才退回平台默认分片数。
+    persisted = ManifestPlan.from_dict(payload.get("manifest"))
+    manifest = (
+        persisted
+        if persisted.entries
+        else build_manifest(
+            payload.get("delta_files") or (),
+            shard_count=DEFAULT_MANIFEST_SHARDS,
+        )
     )
     return build(
         commits,
@@ -189,6 +202,7 @@ def from_weekly_payload(
         whitelist=whitelist or None,
         prefixes=prefixes,
         manifest=manifest,
+        extra_inputs=_extra_inputs(payload.get("delta_files") or ()),
     )
 
 
@@ -202,6 +216,7 @@ def build(
     whitelist: Optional[Mapping[str, Iterable[str]]] = None,
     prefixes: Optional[PrefixDeclaration] = None,
     manifest: Optional[ManifestPlan] = None,
+    extra_inputs: Sequence[tuple[str, str]] = (),
 ) -> ChangeSet:
     """渲染清单并算出白名单范围。两种模式共用。
 
@@ -211,6 +226,10 @@ def build(
 
     `prefixes` 是**项目声明的生成物前缀**（不传时用平台默认值）。配对规则本身与项目
     无关，但「产物叫什么前缀」是项目事实，见 `project_facts.py`。
+
+    `extra_inputs` 是**本轮输入里不是本轮改动的那几条**（`(路径, 来源)`，来源取值
+    `compensation` / `dependency`）。它们会单独成一小节逐条列出 —— 只给一句计数时，
+    模型分不清哪个文件不是本轮改的，报告里就会把补偿项当成新变更。
     """
     ordered = tuple(commits)
     rendered_paths = _collect_paths(ordered)
@@ -263,13 +282,22 @@ def build(
         shard_count=DEFAULT_MANIFEST_SHARDS,
     )
     manifest_summary = resolved_manifest.summary()
+    # 这一段是**模型知道「完整清单在哪、怎么翻」的唯一出口**：`SKILL.md` 的可读文档清单
+    # 里没有 `change-manifest`，平台提示词的可读文档索引读的也不是 `scope.readable_references`。
+    # 不写这一句，`read_reference` 那条分页通路就是「存在但没人知道」。
     body += (
         "\n## 确定性文件分工\n\n"
         f"完整 manifest 共 {manifest_summary['total']} 个文件，"
         f"已分配 {manifest_summary['assigned']} 个（{manifest_summary['assigned_rate']:.1%}）；"
-        f"分配指纹 `{manifest_summary['assignment_digest'][:12]}`。"
-        "分片先检查自己的文件，跨文件证据仍可读取整个白名单。\n"
+        f"分配指纹 `{manifest_summary['assignment_digest'][:12]}`"
+        f"（分片数 {resolved_manifest.shard_count}）。"
+        "**上面这份清单只是取样，完整的那一份可以用 `read_reference` 读 `change-manifest`**："
+        "它按小节点名分段，**第 N 节就是第 N 页（每页 100 个文件）**，"
+        '`lines` 写页号即可点名（例如 `lines`: `"3"` 拿第 3 页）。'
+        + _assignment_note(resolved_manifest)
     )
+    if extra_inputs:
+        body += _extra_inputs_section(extra_inputs)
 
     return ChangeSet(
         summary=body,
@@ -291,6 +319,61 @@ def build(
         bundle_lines=bundle_lines,
         bundle_note=bundle_note,
         manifest=resolved_manifest,
+    )
+
+
+def _assignment_note(manifest: ManifestPlan) -> str:
+    """「分工」那一段的落款。**单代理运行时不许说「分片先检查自己的文件」** ——
+    那时没有分片，也没有那份任务书，这句话会让模型去找一个不存在的东西，或者以为
+    自己只该看一部分文件。
+
+    为什么要留那半句条件句：`shard_count` 是按**配置的成员数**算的，而「这一次真的拆没拆」
+    由 `plan_family` 决定（子代理没开、维度不足 2 个时不拆）。change_set 拿不到 plan（它
+    在 `build()` 之后才算），所以分片那支写的是**条件句**：无论这一次是真拆了还是没拆，
+    读起来都是真话。
+    """
+    if manifest.shard_count > 1:
+        return (
+            "如果你是被分配了文件的某个分片代理，先检查分到你的那些文件（见任务书里的"
+            "「确定性文件分工」）；**单代理运行时没有分片**，清单里每个文件都在你的检查范围内。"
+            "跨文件证据始终可以读取整个白名单。\n"
+        )
+    return (
+        "本次没有分片（一个分析代理负责全部文件）：清单里每个文件都在你的检查范围内。"
+        "跨文件证据可以读取整个白名单。\n"
+    )
+
+
+def _extra_inputs(rows: Iterable[Mapping[str, object]]) -> tuple[tuple[str, str], ...]:
+    """本轮输入里 `source != delta` 的那些 → `(路径, 来源)`，按原顺序去重。
+
+    来源只有两种（`scope_sampling.build_weekly_payload` 写的）：`compensation`（上一轮
+    装进了输入却没取到证据）与 `dependency`（与本轮变更文件同名的源表 / 生成物）。
+    """
+    seen: set[str] = set()
+    result: list[tuple[str, str]] = []
+    for item in rows or ():
+        entry = dict(item or {})
+        source = str(entry.get("source") or "delta").strip() or "delta"
+        path = normalize_path(str(entry.get("file_path") or ""))
+        if source == "delta" or not path or path in seen:
+            continue
+        seen.add(path)
+        result.append((path, source))
+    return tuple(result)
+
+
+def _extra_inputs_section(rows: Sequence[tuple[str, str]]) -> str:
+    """补偿 / 依赖核查项**逐条**列出来（只有一句计数时，模型不知道是哪几条）。"""
+    listed = "\n".join(f"- `{path}`（source={source}）" for path, source in rows)
+    return (
+        "\n## 本轮输入中的补偿/依赖核查项\n\n"
+        f"这一轮有 {len(rows)} 个文件**不是本轮新增改动**，是平台按来源挑进来的核查项：\n\n"
+        f"{listed}\n\n"
+        "**补偿项**（`source=compensation`）是上一轮装进了输入、却一个证据都没取到的文件；"
+        "**依赖项**（`source=dependency`）是与本轮变更文件同名的源表或生成物（平台只按文件名"
+        "推断，**没有核实**它们之间是什么关系）。报告里必须把它们与「本轮改了什么」分开写，"
+        "并单独标明来源。\n"
     )
 
 
@@ -342,6 +425,21 @@ def _positive_int(value: object) -> Optional[int]:
     return number if number > 0 else None
 
 
+def _nonneg_int(value: object) -> Optional[int]:
+    """转成非负整数；**读不出来（含缺键）时返回 `None`**。
+
+    与 `_positive_int` 只差一处，但那一处很要命：`_positive_int` 把 0 与缺值都当 `None`，
+    于是「这轮 0 个补偿项」与「这份 payload 里根本没有这个概念」被写成同一句话。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return max(0, number)
+
+
 def _scope_note(payload: Mapping[str, object]) -> str:
     scope = str(payload.get("scope") or "")
     label = _SCOPE_LABELS.get(scope)
@@ -364,13 +462,28 @@ def _scope_note(payload: Mapping[str, object]) -> str:
             "报告里不要把它说成「本版本整体没问题」。"
         )
     extras: list[str] = []
-    compensation = _positive_int(summary.get("compensation_files"))
-    dependency = _positive_int(summary.get("dependency_files"))
-    if compensation:
-        extras.append(f"{compensation} 个上轮未覆盖补偿项")
-    if dependency:
-        extras.append(f"{dependency} 个依赖核查项")
-    if extras:
+    compensation = _nonneg_int(summary.get("compensation_files"))
+    dependency = _nonneg_int(summary.get("dependency_files"))
+    if compensation is None and dependency is None:
+        # 老 payload 里没有这两个键：**一个字都不说**（「没记录」不该编成「0 个」）。
+        pass
+    elif not compensation and not dependency:
+        # **0 与「没有这个概念」要分得开**：两个都是 0 时说清「这轮输入就是新增改动本身」，
+        # 而缺键时上面那支什么都不说 —— 原先两者都表现为「不提」，读的人分不出来。
+        note += "本次输入里没有补偿项与依赖核查项（两者都是 0 个）：这一轮的输入就是本批次的新增改动。"
+    else:
+        if compensation:
+            extras.append(f"{compensation} 个上轮未覆盖补偿项")
+        elif compensation == 0:
+            extras.append("0 个上轮未覆盖补偿项")
+        else:
+            extras.append("上轮未覆盖补偿项的数量未记录")
+        if dependency:
+            extras.append(f"{dependency} 个依赖核查项")
+        elif dependency == 0:
+            extras.append("0 个依赖核查项")
+        else:
+            extras.append("依赖核查项的数量未记录")
         note += "本次输入还包含" + "、".join(extras) + "；它们不是本轮新增改动，报告须单独标明来源。"
     return note + _focus_note(payload)
 

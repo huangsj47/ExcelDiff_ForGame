@@ -82,9 +82,13 @@ skills/projects/*/
 #
 # **这些不算临时品，是交付物，没有忽略**（列在这里只是为了避免被上面那个想法误伤）：
 #   scripts/export_ai_benchmark_sample.py + benchmarks/ai_analysis/**（任务 H 的工具链）
+#   scripts/clean_ruling_block_from_runs.py —— ★ 它**有已提交的测试依赖**：
+#     tests/test_ai_route_wiring_and_claim_migration.py 里有 3 条要 exec 它。
+#     曾经被错误地忽略在这里，结果是**本地绿、CI 红**（FileNotFoundError:
+#     .../scripts/clean_ruling_block_from_runs.py）。判据很简单：
+#     **凡是被 tests/ 引用到的文件都不是「临时品」，不许进这个名单。**
 # ---------------------------------------------------------------------------
 scripts/clean_probe_residue.py
-scripts/clean_ruling_block_from_runs.py
 docs/AI分析P0重构交付状况.md
 docs/AI分析P0重构接口冻结.md
 docs/AI分析修复后复测与剩余优化方案.md

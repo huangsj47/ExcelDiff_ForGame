@@ -10,8 +10,9 @@
    线上一个周版本有 767 个文件，而一次搜索最多扫 240 个。
 3. **越权的搜索词会被丢掉并说明原因**：太短的词（"id"）会把整批都搜出来，匹配不到任何
    改动文件的范围前缀则只会得到一句「没命中」——那会被读成「那里没有引用」。
-4. **两端同一条实现**：平台本地与 Agent 端用的是同一份 `search_files` + 同一个
-   `get_file_content_from_git`，只是跑在不同进程里。
+4. **两端同一条实现**：平台本地与 Agent 端用的是同一个 `SnapshotReferenceIndex`
+   （`ai/reference_index`）+ 同一个 `get_file_content_from_git`，只是跑在不同进程里；
+   而它与**穷举基准**（`reference_search.search_files`）必须逐条给出相同的命中（第十节）。
 5. **平台本地读不到时如实回报，并去问 Agent**（platform/agent 模式下平台被禁止 clone，
    本地永远读不到 —— 那正是「AI 看不到代码 diff」那个老问题的同一个根）。
 """
@@ -24,7 +25,6 @@ from services.agent_reference_search import apply_batch_total
 from services.ai import reference_search as rs
 from services.ai.protocol import ContextRequest, parse_payload, sanitize_requests
 from services.ai.reference_search import (
-    SearchBudget,
     is_binary,
     render_result,
     search_files,
@@ -431,7 +431,13 @@ def test_the_local_path_searches_the_batch(monkeypatch):
 
 def test_the_platform_asks_the_agent_when_it_cannot_read_locally(monkeypatch):
     """platform/agent 模式下平台被禁止 clone —— 本地取数是**确定**读不到的，
-    这时必须去问业务节点上的 Agent，而不是回一句「读不到」。"""
+    这时必须去问业务节点上的 Agent，而不是回一句「读不到」。
+
+    **发给 Agent 的是整批文件清单**（不只是前缀范围内的那些）：Agent 按这份清单建一次
+    快照索引，前缀交给它自己的 `search()`。只发前缀命中的那一批会让 Agent 端的索引缓存
+    按前缀分叉 —— 同一个「先问 `scripts/`、再问全局」的 bug 换个进程再犯一次。
+    分母（`total_files`）仍然是**前缀范围内**的文件数：那是「这次结论覆盖了多少」的分母。
+    """
     import services.agent_file_content_dispatch as dispatch
     from services.ai import platform_provider as pp
 
@@ -454,68 +460,64 @@ def test_the_platform_asks_the_agent_when_it_cannot_read_locally(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["query"] == "target_id"
     assert calls[0]["prefix"] == "scripts/"
-    assert all(path.startswith("scripts/") for path, _ in calls[0]["entries"])
-    assert calls[0]["entries"][0][1] == COMMIT_B, "每条路径配它自己最后那次提交"
+    assert [(path, commit) for path, commit in calls[0]["entries"]] == [
+        ("config/goods.xlsx", COMMIT_A),
+        ("scripts/optional/activity.lua", COMMIT_B),
+        ("scripts/net/proto.lua", COMMIT_B),
+    ], "整批（含前缀之外的）都要发过去 —— 索引按快照建，前缀只在查询那一刻生效"
+    assert calls[0]["entries"][1][1] == COMMIT_B, "每条路径配它自己最后那次提交"
     # 范围前缀 `scripts/` 下本批次有 2 个文件（`config/goods.xlsx` 不在范围内）。
-    # 带过去的分母是**这个数**（本批次的总数），不是 `entries` 的长度 —— 截断那一半见
-    # `test_the_agent_is_told_the_real_batch_size_not_the_truncated_one`。
+    # 带过去的分母是**这个数**，不是 `len(entries)`（后者现在是整批的 3）。
     assert calls[0]["total_files"] == 2
 
 
-def test_both_search_paths_charge_the_budget_by_the_same_rule(monkeypatch):
-    """**同一次检索，本地与 Agent 两条路扣的额度必须一样。**
+def test_no_search_budget_gate_remains(monkeypatch):
+    """`SearchBudget` 不是被调松了，是**被删了**。
 
-    额度按「**动过**的文件」扣（`scanned + binary + missing`），不是「读成的文件」——
-    `allowance = min(MAX_SCAN_FILES, remaining)` 直接决定第 2、3 次检索允许搜多少文件、
-    覆盖率的分母与命中数是多少。两条路口径不同的话，同一个周版本在单机与多节点部署下
-    会给出不同的覆盖率，甚至一边回「[检索额度用尽] 这一次没有搜」而另一边正常搜 ——
-    而这两句话都会进提示词，模型据此写的「有没有其它引用」是相反的结论。
+    它曾经挂在 provider 上（子代理模式下 N 个成员共用一份），但 `remaining` 在生产代码里
+    **零读者** —— 唯一的效果是让「第 2、3 次检索能搜多少文件」取决于前几次动过几个文件，
+    而且两条部署路径扣的数还不一样。真正管住成本的是索引（读一次、查询不再读）与预热门槛。
+
+    这条用例钉两件事：那个名字在模块里不存在了；连续问很多次也不会被任何计数器挡住。
     """
-    import services.agent_file_content_dispatch as dispatch
+    import services.vcs_content_service as vcs
     from services.ai import platform_provider as pp
 
-    def fake(repository, *, query, entries, prefix="", total_files=0):
-        # 一次「3 个动过、其中 2 个读不到、1 个是二进制」的检索：三个数都要计入额度。
-        return {
-            "status": "ready",
-            "text": "a.lua:1: hit",
-            "scanned": 3,
-            "binary": 1,
-            "missing": 2,
-        }
+    assert "SearchBudget" not in dir(rs), "「额度」这个名字不该再出现在检索模块里"
 
-    monkeypatch.setattr(dispatch, "request_references", fake)
-    monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: True)
-    provider = _provider(_scope())
-    monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=7))
-    before = provider._search_budget.remaining
-
-    provider.find_references("target_id", "scripts/")
-
-    assert provider._search_budget.remaining == before - 6, (
-        "Agent 那条路只扣了读成的文件数 —— 与本地那条 `scanned + binary + missing` 分叉了"
+    files = {("scripts/optional/activity.lua", COMMIT_B): "target_id = 1\n"}
+    monkeypatch.setattr(
+        vcs, "get_file_content_from_git", lambda repo, commit, path: files.get((path, commit))
     )
+    monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: False)
+    provider = _provider(_scope())
+    monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=1))
+    assert not hasattr(provider, "_search_budget"), "provider 上不该再有额度计数器"
+
+    for index in range(6):
+        text = provider.find_references(f"target_id{index}")
+
+        assert "检索额度用尽" not in text, f"第 {index + 1} 次检索被额度挡住了"
+        assert "索引版本" in text, f"第 {index + 1} 次检索没有真的走检索"
 
 
 def test_the_agent_receives_the_full_snapshot_for_indexing(monkeypatch):
-    """Agent receives the full frozen snapshot once so later queries can reuse its index.
+    """Agent 拿到的是**整批**快照，而覆盖率的分母是整批总数 —— 两者都不能是「被截过的那一批」。
 
-    平台把 `entries` 截到额度上限（`MAX_SCAN_FILES`）才发出去，所以 Agent 手里
-    `len(entries)` 恒等于上限。让它拿这个数当分母，抬头就会写成
-    「本次搜索覆盖了本批次的 240/240 个文件」—— 读起来是**全覆盖**，而真相是
-    线上那个周版本的 767 个文件里只看了 240 个。
+    平台曾经把 `entries` 截到额度上限（`MAX_SCAN_FILES`）才发出去，于是 Agent 手里
+    `len(entries)` 恒等于上限。让它拿这个数当分母，抬头就会写成「本批次的 240/240 个文件」
+    —— 读起来是**全覆盖**，而真相是那个周版本的 767 个文件里只看了 240 个。
 
-    这不是文字问题：模型正是拿「扫完了没有」决定能不能把「没有其它引用」写进结论
-    （`render_result` 的 docstring 明写这两种「没有」必须分得开）。而平台本地那条路把
-    **完整**列表交给 `search_files`、由 `max_files` 在里面截，分母是 767 —— 同一个
-    周版本的两条路会给出互相矛盾的两个覆盖率，取决于平台有没有工作副本。
+    现在即使批次比索引的预热门槛（`MAX_INDEX_FILES`）大，分母仍然是**整批的总数**，
+    没索引的那部分走 `unindexed` 这条缺口如实报出来 —— 上面那段话里「240/240 全覆盖」
+    与「一批 280 个文件」在这个 fixture 里同时成立，正是要钉的形状。
     """
     import services.agent_file_content_dispatch as dispatch
     from services.ai import platform_provider as pp
-    from services.ai.reference_search import MAX_SCAN_FILES
-    from services.ai.reference_index import SnapshotReferenceIndex
+    from services.ai.reference_index import MAX_INDEX_FILES, SnapshotReferenceIndex
 
-    batch = [f"scripts/f{index:04d}.lua" for index in range(MAX_SCAN_FILES + 40)]
+    # 比预热门槛大 40：索引只读到 `MAX_INDEX_FILES`，剩下的必须算成缺口而不是消失。
+    batch = [f"scripts/f{index:04d}.lua" for index in range(MAX_INDEX_FILES + 40)]
     scope = AnalysisScope.from_iterables(
         commits=(COMMIT_A,), paths_by_commit={COMMIT_A: batch}, readable_references=[]
     )
@@ -524,8 +526,10 @@ def test_the_agent_receives_the_full_snapshot_for_indexing(monkeypatch):
     def fake(repository, *, query, entries, prefix="", total_files=0):
         sent["entries"] = entries
         sent["total_files"] = total_files
+        # 与 `agent_reference_search.search_references_for_agent` 同一套调用（含预热门槛）：
+        # 「分母是整批」与「门槛之外如实报缺口」两件事必须同时成立。
         result = SnapshotReferenceIndex.build(
-            entries, reader=lambda path, commit: None
+            entries, reader=lambda path, commit: None, max_files=MAX_INDEX_FILES
         ).search(query)
         result = apply_batch_total(result, total_files)
         return {"status": "ready", "scanned": result.scanned, "text": render_result(result)}
@@ -540,16 +544,17 @@ def test_the_agent_receives_the_full_snapshot_for_indexing(monkeypatch):
     assert sent["total_files"] == len(batch), "分母被截成了 Agent 收到的那一批"
     assert len(sent["entries"]) == len(batch), "完整快照必须交给 Agent 构建索引"
     assert f"0/{len(batch)}" in text, f"分母必须是 {len(batch)}（本批次总数）：{text}"
+    assert f"{40} 个还没索引" in text, "预热门槛之外的那些必须如实报出来，不能静默"
     assert "不代表整批里没有" in text, "「没搜到」与「没搜完」要分开"
 
 
 def test_the_batch_total_only_moves_the_denominator_up():
     """纯函数那一半：平台给的总数**小于**这里数出来的时不生效。
 
-    真的会小：平台算总数时按前缀筛过，而 `entries` 是同一个列表切出来的，两者本该相等；
-    但 Agent 端还有一道 `entries[:MAX_SCAN_FILES]` 的兜底，历史任务的 payload 也可能没有
-    这个键（`total_files` 缺失 → 0）。这时必须保持原样 —— 把一个更小的数写进分母，
-    会得出「扫了 300 个文件里的 240 个」这种不可能的数。
+    真的会小吗：平台算的是「本批次里落在这个前缀范围内的文件数」，而 `entries` 是整批 ——
+    前缀范围的数**必然小于等于** `entries` 的长度（现在这两者可以不等了）。这时必须保持
+    原样：把一个更小的数写进分母，会得出「扫了 300 个文件里的 240 个」这种不可能的数。
+    历史任务的 payload 也可能没有这个键（`total_files` 缺失 → 0），同样要按「平台没说」处理。
     """
     from services.agent_reference_search import apply_batch_total
     from services.ai.reference_search import SearchResult
@@ -586,25 +591,11 @@ def test_a_pending_agent_answer_is_not_a_conclusion(monkeypatch):
     assert "不等于「没有其它引用」" in text, "这句话缺了就会被读成「这里没有引用」"
 
 
-def test_snapshot_index_replaces_the_legacy_shared_scan_budget(monkeypatch):
-    """An exhausted legacy budget must not block a query after snapshot indexing exists."""
-    import services.vcs_content_service as vcs
-    from services.ai import platform_provider as pp
+def test_the_agent_side_uses_the_same_index_and_the_same_reader(monkeypatch):
+    """Agent 端不是另一套实现：同一个 `SnapshotReferenceIndex` + 同一个读文件函数。
 
-    monkeypatch.setattr(vcs, "get_file_content_from_git", lambda repo, commit, path: "target\n")
-    monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: False)
-    provider = _provider(_scope())
-    monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=1))
-    provider._search_budget = SearchBudget(limit=0)
-
-    text = provider.find_references("target_id")
-
-    assert "检索额度用尽" not in text
-    assert "索引版本" in text
-
-
-def test_the_agent_side_uses_the_same_search(monkeypatch):
-    """Agent 端不是另一套实现：同一个 `search_files` + 同一个读文件函数。"""
+    （它以前也走 `search_files`，那条路现在是**穷举基准**，见文件末尾第十节。）
+    """
     import services.vcs_content_service as vcs
     from app import app as flask_app
     from app import create_tables, db
@@ -641,6 +632,59 @@ def test_the_agent_side_uses_the_same_search(monkeypatch):
 
     assert outcome["hits"] == 1 and outcome["scanned"] == 2
     assert "a.lua:1: target_id = 1" in outcome["text"]
+    assert outcome["matched"] == 1, "真实命中数要跟着回传（截断之前的那一个）"
+
+
+def test_the_agent_side_bounds_its_first_read_and_reports_the_rest(monkeypatch):
+    """Agent 那条路也有预热门槛，而且**门槛之外要如实报**。
+
+    这条是「首次查询成本」在 Agent 端的判据：`search_references_for_agent` 一次读整批会让
+    第一次查询超过它自己的等待上限（40 秒）落成 `pending`，所以它和平台本地那条路一样把
+    `MAX_INDEX_FILES` 传给 `build()`。**顺带钉住它不静默**：没索引的那些走 `unindexed`。
+    """
+    import services.vcs_content_service as vcs
+    from app import app as flask_app
+    from app import create_tables, db
+    from models import Project, Repository
+    from services.agent_reference_search import search_references_for_agent
+    from services.ai.reference_index import MAX_INDEX_FILES
+
+    batch = [[f"code/f{index:04d}.lua", COMMIT_A] for index in range(MAX_INDEX_FILES + 25)]
+    reads: list[str] = []
+
+    with flask_app.app_context():
+        create_tables()
+        project = Project(code="p_rs_cap", name="检索门槛测试")
+        db.session.add(project)
+        db.session.flush()
+        repository = Repository(
+            project_id=project.id, name="r_rs_cap", type="git",
+            url="https://example.invalid/rs_cap.git", branch="main",
+            resource_type="code", clone_status="completed",
+        )
+        db.session.add(repository)
+        db.session.flush()
+        repository_id = repository.id
+
+        def reader(repo, commit, path):
+            reads.append(path)
+            return "local target_id = 1\n"
+
+        monkeypatch.setattr(vcs, "get_file_content_from_git", reader)
+        outcome = search_references_for_agent(
+            {
+                "repository_id": repository_id,
+                "query": "target_id",
+                "prefix": "",
+                "total_files": len(batch),
+                "entries": batch,
+            }
+        )
+
+    assert len(reads) == MAX_INDEX_FILES, f"Agent 首次查询读了 {len(reads)} 个 blob"
+    assert outcome["files_total"] == len(batch), "分母仍是整批（不是被索引的那 240 个）"
+    assert outcome["unindexed"] == 25 and outcome["truncated_files"] is True
+    assert "25 个还没索引" in outcome["text"] and "文件数到了上限就停了" in outcome["text"]
 
 
 # ==========================================================================
@@ -806,3 +850,422 @@ class TestEveryProviderStubKnowsTheNewDoor:
 
         assert seen >= 3, f"一个 provider 桩都没扫到（seen={seen}），这条守卫是空的"
         assert not offenders, f"这些文件的 provider 桩少了 find_references：{offenders}"
+
+
+# ==========================================================================
+# 十、索引 == 穷举搜索（E2 的**唯一**正确性判据）
+# ==========================================================================
+#
+# 生产路径已经切到 `SnapshotReferenceIndex`，而 `search_files` 是它替换掉的那份**逐行
+# 子串匹配**。两份实现只要有一处不等价，模型拿到的「还有谁在用这个标识符」就是**错的**
+# ——不是「不完整」，是「说没有、其实有」，它会据此写下一条错误结论。
+#
+# 所以这一节把两份实现放在同一份语料上跑，对一组**边界查询**逐条比对命中
+# （路径, 行号, 那一行的内容）。`search_files` 从此只在这条用例里活着（穷举基准/oracle）。
+
+# 语料刻意凑齐「同一个关键词的不同写法」：整 token、更长 token 里的前缀/后缀/复数、
+# 大小写、点号（非 token）、中文、数字 token、数字开头后接字母。旧索引口径只查
+# 「整 token 相等」的桶，于是 query `target_id` 会漏掉 `target_id_extra` 那一行 ——
+# **同一个仓库里只要有任何一处把标识符当独立词用过，桶就存在，其它形式就全被漏掉**。
+_EQUIV_ACTIVITY = "\n".join([
+    "local target_id = 1",           # 1  整 token
+    "local target_id_extra = 2",     # 2  query 是**更长** token 的前缀（旧口径漏的就是这一行）
+    "local x_target_id = 3",         # 3  后缀变体
+    "local target_ids = 4",          # 4  复数变体
+    "print(item.target_id)",         # 5  非 token（含点）→ 走逐行兜底
+    "local Target_ID = 5",           # 6  大小写
+    "-- 攻击力 就是 target_id",      # 7  中文与标识符混排
+    "local ver = 12345",             # 8  数字 token（`\\d{3,}`）
+    "local y = 12abc",               # 9  数字开头后接字母（`2abc` 只可能是子串，不可能是 token）
+    "local unrelated = 9",           # 10 任何 query 都不该命中
+]) + "\n"
+
+_EQUIV_PROTO = "\n".join([
+    "TARGET_ID = 100",               # 1  全大写
+    "local target = 1",              # 2  query `target` 的整 token 形态
+    "local targetable = 2",          # 3  query `target` 的更长 token 形态
+    "self.target_id = nil",          # 4
+]) + "\n"
+
+# 非 ASCII 编码：GBK 的 lua。判成文本的判据是 `looks_binary`（魔数/NUL），不是「按 utf-8
+# 解不解得出来」—— 后者会把这份文件判成二进制、一个词都搜不到。
+_EQUIV_GBK = "local 攻击力 = 1\n属性 = 攻击力\nlocal target_id = 7\n".encode("gbk")
+
+# 边界查询：整 token / token 子串 / `_` 分段 / 非 token（点号）/ 中文 / 数字 token /
+# 数字子串 / 大小写。**每一个都要两种实现给出逐条相同的命中**。
+_EQUIV_QUERIES = (
+    "target_id",
+    "TARGET_ID",
+    "target",
+    "_id",
+    "item.id",
+    "abc",
+    "2abc",
+    "123",
+    "12",
+    "攻击力",
+)
+
+
+def _equiv_corpus():
+    files = {
+        ("scripts/optional/activity.lua", COMMIT_A): _EQUIV_ACTIVITY,
+        ("scripts/net/proto.lua", COMMIT_A): _EQUIV_PROTO,
+        ("config/goods.lua", COMMIT_A): _EQUIV_GBK,
+    }
+    return files, [(path, commit) for path, commit in files]
+
+
+def _tuples(hits):
+    return [(hit.path, hit.line, hit.text) for hit in hits]
+
+
+def test_index_hits_equal_exhaustive_search():
+    """索引的命中集合必须与穷举搜索**逐条相等**（E2「与穷举一致」的唯一凭据）。
+
+    这条用例之前不存在 —— 生产路径换成了索引，而索引与它替换掉的 `search_text`/`search_files`
+    只有一份实现被单独测过，没有任何一条用例把两者放在同一份语料上比。于是那个召回缺口
+    （只查整 token 的桶 → `target_id_extra` 这类行全漏）在测试里是隐形的。
+    """
+    from services.ai.reference_index import SnapshotReferenceIndex
+
+    files, pairs = _equiv_corpus()
+
+    def reader(path, commit):
+        return files.get((path, commit))
+
+    index = SnapshotReferenceIndex.build(pairs, reader=reader)
+    mismatches = []
+    for query in _EQUIV_QUERIES:
+        oracle = _tuples(search_files(pairs, query, reader=reader).hits)
+        indexed = _tuples(index.search(query).hits)
+        if indexed != oracle:
+            mismatches.append(
+                f"  query={query!r}\n"
+                f"    索引  ：{indexed}\n"
+                f"    穷举  ：{oracle}"
+            )
+    assert not mismatches, "索引与穷举搜索的命中不一致：\n" + "\n".join(mismatches)
+
+
+def test_the_recall_gap_is_named():
+    """把缺口本身钉住（上一条是判据，这一条是机理）。
+
+    `target_id_extra` / `x_target_id` / `target_ids` 这三行里，query `target_id` 出现在
+    **更长 token 的内部**。旧索引 `hits_by_token.get("target_id")` 只拿到整 token 相等的那
+    几行，这三行一个都不在里面，而抬头照样写「本次搜索覆盖了 3/3 个文件」——
+    「没搜到」被当成了「不存在」。
+    """
+    from services.ai.reference_index import SnapshotReferenceIndex
+
+    files, pairs = _equiv_corpus()
+    index = SnapshotReferenceIndex.build(pairs, reader=lambda path, commit: files.get((path, commit)))
+
+    lines = {hit.line for hit in index.search("target_id").hits if hit.path.endswith("activity.lua")}
+
+    assert {2, 3, 4} <= lines, (
+        "「更长 token 里包含 query」的三行一个都不能少：漏掉它等于告诉模型「这里没有引用」"
+    )
+    assert lines == {1, 2, 3, 4, 5, 6, 7}, "含 `target_id` 的每一行都要在命中里"
+
+
+def test_the_oracle_and_the_index_agree_on_a_non_ascii_corpus():
+    """非 ASCII 编码那一档单独再钉一次：GBK 的 lua 里中文标识符要能被两种实现同样搜到。"""
+    files, pairs = _equiv_corpus()
+
+    def reader(path, commit):
+        return files.get((path, commit))
+
+    from services.ai.reference_index import SnapshotReferenceIndex
+
+    oracle = _tuples(search_files(pairs, "攻击力", reader=reader).hits)
+    indexed = _tuples(
+        SnapshotReferenceIndex.build(pairs, reader=reader).search("攻击力").hits
+    )
+
+    assert oracle and indexed == oracle
+
+
+def test_the_index_decodes_like_the_shared_implementation():
+    """索引的严格解码必须是共用那份实现的**前两档**，而且顺序一致。
+
+    顺序本身就是口径的一部分（utf-8 优先、中文项目 GBK 第二）：把 gbk 提到前面，一份两边
+    都能解的字节序列就会解出不同的文本 —— 同一个文件在「索引」与「正文」两条路上变成两种
+    内容，而两边都不会报错。
+    """
+    from services.ai.reference_index import INDEX_ENCODINGS
+    from utils.text_decoding import TEXT_ENCODINGS
+
+    assert INDEX_ENCODINGS == tuple(TEXT_ENCODINGS[:2])
+
+
+# ==========================================================================
+# 十一、前缀只筛「这次查询」，不筛「索引」
+# ==========================================================================
+
+
+def _scope_across_prefixes() -> AnalysisScope:
+    return AnalysisScope.from_iterables(
+        commits=(COMMIT_A, COMMIT_B),
+        paths_by_commit={
+            COMMIT_A: ["config/goods.lua"],
+            COMMIT_B: ["scripts/optional/activity.lua", "scripts/net/proto.lua"],
+        },
+        readable_references=[],
+    )
+
+
+def test_the_second_query_with_a_different_prefix_still_sees_the_whole_batch(monkeypatch):
+    """**索引按快照建，前缀只在 `search()` 那一刻筛。**
+
+    这里曾经有过一次污染：`find_references` 先按 `prefix` 过滤 `batch_paths()`，再把那份
+    **已过滤**的列表交给 `_search_local` 建索引，而索引被永久缓存在 `self._reference_index`
+    上。于是「先问 `scripts/`、再问全局」的第二次查询**只能看见 `scripts/` 下的文件** ——
+    `files_total` / `scanned` / 命中全是那个子集的，而模型完全看不出这是上一次查询的残留：
+    它只会读到「本次搜索覆盖了 2/2 个文件」，然后写下「本批次里没有别处引用」。
+    """
+    import services.vcs_content_service as vcs
+    from services.ai import platform_provider as pp
+
+    files = {
+        ("config/goods.lua", COMMIT_A): "local target_id = 1\n",
+        ("scripts/optional/activity.lua", COMMIT_B): "print(target_id)\n",
+        ("scripts/net/proto.lua", COMMIT_B): "local target_id = 2\n",
+    }
+    reads: list[str] = []
+
+    def reader(repo, commit, path):
+        reads.append(path)
+        return files.get((path, commit))
+
+    monkeypatch.setattr(vcs, "get_file_content_from_git", reader)
+    monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: False)
+    provider = _provider(_scope_across_prefixes())
+    monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=1))
+
+    scoped = provider.find_references("target_id", "scripts/")
+
+    assert "2/2" in scoped, f"第一个范围下就是 2 个文件：{scoped}"
+    assert "config/goods.lua" not in scoped
+
+    whole = provider.find_references("target_id")
+
+    assert "3/3" in whole, f"第二次查询（无前缀）必须看到整批 3 个文件：{whole}"
+    assert "config/goods.lua:1: local target_id = 1" in whole, (
+        "第一个前缀的范围把配置文件从索引里挤掉了 —— 这一条命中再也拿不回来"
+    )
+    assert reads == ["config/goods.lua", "scripts/net/proto.lua", "scripts/optional/activity.lua"], (
+        f"整批只该读一次，且读的是**整批**（前缀不参与建索引）：读了 {reads}"
+    )
+
+
+def test_the_index_belongs_to_exactly_one_snapshot(monkeypatch):
+    """索引与它服务的那份批次是**绑定**的：换了批次就重建，绝不复用。
+
+    `PlatformContextProvider` 通常一次分析一个实例（批次在一次分析里是固定的），所以这道
+    校验平时不会触发。留着它是因为「索引属于哪一份快照」必须是代码里看得见的事实：
+    `self._reference_index` 一旦被同一实例的**另一份**批次复用，命中清单、`files_total`
+    （覆盖率的分母）与 `scanned` 就全是从上一份批次带过来的 —— 而界面上完全看不出来，
+    模型只会读到一句「本次搜索覆盖了 N/N 个文件」。
+    """
+    import services.vcs_content_service as vcs
+    from services.ai import platform_provider as pp
+
+    files = {
+        ("a.lua", COMMIT_A): "target_id = 1\n",
+        ("b.lua", COMMIT_A): "other_id = 2\n",
+    }
+    reads: list[str] = []
+
+    def reader(repo, commit, path):
+        reads.append(path)
+        return files.get((path, commit))
+
+    monkeypatch.setattr(vcs, "get_file_content_from_git", reader)
+    monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: False)
+    provider = _provider(_scope())
+    monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=1))
+
+    first = provider._search_local([("a.lua", COMMIT_A)], "target_id", prefix="")
+    second = provider._search_local([("b.lua", COMMIT_A)], "other_id", prefix="")
+
+    assert "1/1" in first and "a.lua:1: target_id = 1" in first
+    assert "1/1" in second and "b.lua:1: other_id = 2" in second, (
+        "第二次是另一份批次，索引没重建 —— 它拿第一份的快照搜了，覆盖率的分母也是错的"
+    )
+    assert reads == ["a.lua", "b.lua"], (
+        f"第二份批次必须重新读（读的只是它自己那几个）：读了 {reads}"
+    )
+
+
+# ==========================================================================
+# 十二、分页游标
+# ==========================================================================
+
+
+def test_a_cursor_returns_the_next_page():
+    """命中被上限截断之后，取下一页的途径必须存在。
+
+    `search()` 原来硬截 `candidates[:max_hits]`，而 `MAX_HITS = 80` —— 一次周版本里一个
+    公共字段的命中常常不止 80 处。截掉之后**没有任何途径**取回剩下的：抬头只有一句
+    「命中数到了上限」，模型只能把它当成「就这些」。这里同时钉住 `matched`（截断**之前**
+    的真实命中数）：少了它，「命中 10 处」在读的人眼里就是全部。
+    """
+    from services.ai.reference_index import SnapshotReferenceIndex
+
+    body = "\n".join(f"local target_id = {index}" for index in range(25)) + "\n"
+    files = {("a.lua", COMMIT_A): body}
+    pairs = [("a.lua", COMMIT_A)]
+
+    def reader(path, commit):
+        return files.get((path, commit))
+
+    index = SnapshotReferenceIndex.build(pairs, reader=reader)
+
+    first = index.search("target_id", max_hits=10)
+
+    assert len(first.hits) == 10
+    assert first.matched == 25, "截断之前的真实命中数必须报出来"
+    assert first.truncated_hits is True and first.next_cursor == 10
+
+    second = index.search("target_id", max_hits=10, cursor=first.next_cursor)
+    third = index.search("target_id", max_hits=10, cursor=second.next_cursor)
+
+    assert [hit.line for hit in second.hits] == list(range(11, 21))
+    assert [hit.line for hit in third.hits] == list(range(21, 26))
+    assert third.next_cursor is None and third.truncated_hits is False, "最后一页要说明列完了"
+
+    paged = _tuples(first.hits + second.hits + third.hits)
+    oracle = _tuples(search_files(pairs, "target_id", reader=reader, max_hits=100).hits)
+
+    assert paged == oracle, "一页一页拼起来必须与穷举搜索逐条相等（不多一条、不少一条）"
+
+    beyond = index.search("target_id", max_hits=10, cursor=999)
+
+    assert beyond.hits == () and beyond.next_cursor is None, "越界游标给空页，不许回卷"
+    assert beyond.matched == 25
+
+    header = render_result(first)
+
+    assert "共 25 处" in header, f"抬头要说明这只是第一页：{header}"
+    assert "命中数到了上限" in header
+
+
+def test_the_two_result_types_carry_the_same_account():
+    """同一个 `render_result` 渲染两条路（本地索引 / Agent 索引）的结果 —— 少一个**账**字段，
+    那条路的抬头就少一句话，而两条部署路径的文字分叉正是「同一个周版本给出两种覆盖率」的成因。
+
+    唯一允许只有索引那条路有的，是**索引的身份**（`index_version` / `snapshot_digest`）：
+    它不进 `render_result` 的判断，只写进抬头末尾那句「索引版本 …」。
+    """
+    import dataclasses
+
+    from services.ai.reference_index import IndexedSearchResult
+    from services.ai.reference_search import SearchResult
+
+    account = (
+        "query", "hits", "files_total", "scanned", "missing", "binary",
+        "truncated_files", "truncated_hits", "prefix", "matched",
+        "oversized", "undecodable", "unindexed", "cursor", "next_cursor",
+    )
+    indexed = {field.name for field in dataclasses.fields(IndexedSearchResult)}
+    plain = {field.name for field in dataclasses.fields(SearchResult)}
+
+    for name in account:
+        assert name in indexed, f"索引那条路少了 `{name}`"
+        assert name in plain, f"基准那条路少了 `{name}` —— `render_result` 会 AttributeError"
+    assert indexed - plain == {"index_version", "snapshot_digest"}
+    assert plain - indexed == set()
+
+
+# ==========================================================================
+# 十三、缺口：太大 / 解不出文本 / 预热门槛之外
+# ==========================================================================
+
+
+def test_oversized_and_undecodable_files_are_counted_as_gaps():
+    """三种「读了但没索引」的文件都要**有名字、有计数**，不能静默消失。
+
+    * 太大（`MAX_INDEX_FILE_BYTES` 之上）：索引它只会把首次查询拖死；
+    * 解不出文本：既不是 utf-8 也不是 gbk。这里**刻意不共用** `decode_text_bytes` 的宽松
+      路径 —— `latin-1` 能解任意字节，用它就永远判不出这一档，一份乱码会被算成「搜过了」，
+      而中文标识符在乱码里一个都匹配不上：又一处「没搜到」被写成「不存在」；
+    * 预热门槛之外：见下一条用例。
+    """
+    from services.ai.reference_index import MAX_INDEX_FILE_BYTES, SnapshotReferenceIndex
+
+    big = "target_id = 1\n" * (MAX_INDEX_FILE_BYTES // 14 + 10)
+    files = {
+        ("a.lua", COMMIT_A): "local target_id = 1\n",
+        ("latin.lua", COMMIT_A): b"\xff\xfe target_id \x81\x8d",
+        ("big.lua", COMMIT_A): big,
+        ("bin.xlsx", COMMIT_A): b"PK\x03\x04target_id",
+        ("gone.lua", COMMIT_A): None,
+    }
+    pairs = list(files)
+
+    def reader(path, commit):
+        return files.get((path, commit))
+
+    result = SnapshotReferenceIndex.build(pairs, reader=reader).search("target_id")
+
+    assert result.files_total == 5
+    assert result.scanned == 1, "只有 a.lua 真的进了索引"
+    assert (result.oversized, result.undecodable, result.binary, result.missing) == (1, 1, 1, 1)
+    assert [hit.path for hit in result.hits] == ["a.lua"], "没索引的文件不许出现在命中里"
+
+    note = render_result(result)
+
+    assert "1 个太大" in note and "1 个解不出文本" in note
+    assert "1 个不是文本" in note and "1 个读不到" in note
+    assert "1/5" in note and "不代表整批里没有" in note
+
+    # 与穷举基准的**有意不同**：基准用宽松解码（任何字节都出文本），所以它在「解不出文本」
+    # 的那份内容里照样搜得到 ASCII 的 target_id。差别被记成了缺口（上面那几行），不是被抹平。
+    oracle = search_files(pairs, "target_id", reader=reader, max_hits=60)
+
+    assert oracle.scanned == 3, "基准把太大与解不出文本的那两份都当文本搜了"
+    assert ("latin.lua", 1) in [(hit.path, hit.line) for hit in oracle.hits]
+
+
+def test_the_first_query_indexes_only_a_bounded_prefix_and_says_so(monkeypatch):
+    """首次查询的成本有上限，而**没索引的那部分必须被说出来**。
+
+    767 个文件逐个 `git show` 是几十秒，而 Agent 侧等检索回来只有 40 秒
+    （`REFERENCES_WAIT_SECONDS`）—— 索引一次读完整批会让第一次查询直接落成 `pending`
+    （Run 22 实测）。所以 `build()` 只预热门槛（`MAX_INDEX_FILES`）内的前 N 个。
+    剩下的走 `unindexed`：抬头写「文件数到了上限就停了，剩下的没搜」，
+    否则模型会把「只看了前 N 个」当成「本批次里没有别处引用」。
+    """
+    import services.vcs_content_service as vcs
+    from services.ai import platform_provider as pp
+    from services.ai.reference_index import MAX_INDEX_FILES
+
+    batch = [f"scripts/f{index:04d}.lua" for index in range(MAX_INDEX_FILES + 30)]
+    scope = AnalysisScope.from_iterables(
+        commits=(COMMIT_A,), paths_by_commit={COMMIT_A: batch}, readable_references=[]
+    )
+    reads: list[str] = []
+
+    def reader(repo, commit, path):
+        reads.append(path)
+        return "local target_id = 1\n"
+
+    monkeypatch.setattr(vcs, "get_file_content_from_git", reader)
+    monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: False)
+    provider = _provider(scope)
+    monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=1))
+
+    text = provider.find_references("target_id")
+
+    assert len(reads) == MAX_INDEX_FILES, f"首次查询只该读预热门槛那么多：读了 {len(reads)}"
+    assert f"{MAX_INDEX_FILES}/{len(batch)}" in text
+    assert "30 个还没索引" in text, f"门槛之外的那些必须如实报出来：{text}"
+    assert "文件数到了上限就停了" in text and "不代表整批里没有" in text
+
+    before = len(reads)
+    other_range = provider.find_references("target_id", "scripts/")
+
+    assert len(reads) == before, "同一个快照的第二次查询又读了 blob —— 索引没被复用"
+    assert f"{MAX_INDEX_FILES}/{len(batch)}" in other_range
+

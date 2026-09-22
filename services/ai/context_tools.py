@@ -95,12 +95,12 @@ S1 为了查耦合读了表 A 的 diff，S2 也要读同一份 —— 有了它�
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, MutableMapping, Protocol, runtime_checkable
 
 from services.ai.budget import ContextItem, truncate_text
-from services.ai.protocol import ContextRequest, DroppedItem
+from services.ai.evidence_store import blob_id_of, evidence_id_of
+from services.ai.protocol import EVIDENCE_REQUEST_TYPE, ContextRequest, DroppedItem
 from services.ai.scope import normalize_path
 from services.ai.trace_evidence import failure_notice
 from services.ai.windowed_view import render_window, windowed_kinds
@@ -236,6 +236,9 @@ def _human_request_label(request: ContextRequest) -> str:
     """
     if request.type == "read_reference":
         return f"参考文档 {request.name}"
+    if request.type == EVIDENCE_REQUEST_TYPE:
+        # 按地址取回的那一份，用户要认的是「哪一份证据」，而地址就是它的名字。
+        return f"证据 {request.name}"
     if request.type == "find_references":
         return f"引用扫描 {request.query}" if request.query else "引用扫描"
     if request.type == "commit_detail":
@@ -289,6 +292,25 @@ def _cache_key(request: ContextRequest) -> CacheKey:
     )
 
 
+def _request_of_key(key: CacheKey) -> ContextRequest:
+    """把缓存键还原成一个请求，**只为了写一句给人看的记账**（`describe_request`）。
+
+    记账里必须说清「对不上的是哪一条」，否则读的人是知道「有一条缓存坏了」，却不知道
+    坏的是哪一份 —— 而这一条的用途正是让人去查那一份内容。字段顺序与 `_cache_key`
+    一处定义（两处各写一遍必然漂移，而漂移的表现是记账里印出另一个文件的路径）。
+    """
+    parts = [str(part or "") for part in tuple(key)]
+    parts += [""] * (6 - len(parts))
+    return ContextRequest(
+        type=parts[0],
+        commit=parts[1],
+        path=parts[2],
+        name=parts[3],
+        lines=parts[4],
+        query=parts[5],
+    )
+
+
 def describe_request(request: ContextRequest) -> str:
     """给模型看的一行标签。也用于续跑摘要（`budget.build_continuation_summary`）。
 
@@ -308,6 +330,10 @@ def describe_request(request: ContextRequest) -> str:
         return f"{head} lines={request.lines}"
     if request.type == "read_reference":
         return f"read_reference {request.name}"
+    if request.type == EVIDENCE_REQUEST_TYPE:
+        # 地址本身就是「这一节讲的是哪一份内容」，所以它必须逐字写进标题 ——
+        # 尾部那句「按需索取」指的就是这个地址（`subagent._render_candidates`）。
+        return f"evidence {request.name}"
     if request.type == "commit_detail":
         return f"commit_detail {request.commit[:12]}"
     if request.type == "find_references":
@@ -383,17 +409,26 @@ def _repeat_item(item: ContextItem) -> ContextItem:
 
 
 def _with_chunk_id(item: ContextItem, key: CacheKey) -> ContextItem:
-    """为证据正文生成稳定地址；相同请求与内容在不同成员中得到同一 id。"""
-    digest = hashlib.sha256()
-    digest.update("\x1f".join(key).encode("utf-8", errors="replace"))
-    digest.update(b"\x00")
-    digest.update(item.text.encode("utf-8", errors="replace"))
-    evidence_id = digest.hexdigest()[:20]
+    """为证据正文生成稳定地址；相同请求与内容在不同成员中得到同一 id。
+
+    `meta` 里同时留下 `blob_id`（**只按内容**算的 id，见 `evidence_store`）与
+    `cache_key`（算 `evidence_id` 用过的那些输入）。后者不是装饰：`evidence_store.verify`
+    要重算一次这个 id 并比对，而**没有 `cache_key` 就重算不了** —— 那样 `verify` 只能
+    永远返回「不知道」，于是共享缓存读回来的每一份正文都无从自证。
+    """
+    evidence_id = evidence_id_of(key, item.text)
     return ContextItem(
         kind=item.kind,
         label=item.label,
         text=item.text,
-        meta={**item.meta, "chunk_id": evidence_id, "evidence_id": evidence_id},
+        meta={
+            **item.meta,
+            "chunk_id": evidence_id,
+            "evidence_id": evidence_id,
+            "blob_id": blob_id_of(item.text),
+            # 存的是**键本身**（一个 6 元组），不是它的摘要：hash 要按原样重算。
+            "cache_key": tuple(str(part or "") for part in key),
+        },
     )
 
 
@@ -481,6 +516,18 @@ class ContextTools:
             )
 
         limit = self._limit_for(request.type)
+        # 这一刀砍在**哪个约束**上，必须有个名字。`meta["limit"]` 只是那个数字，读 trace 的
+        # 人拿着它不知道该去调哪个旋钮（单条上限？窗口水位？模型窗口？），只能猜 —— 而
+        # 「截断不可归因」正是任务 E3 点名的毛病之一。
+        #
+        # 取数侧这一刀**只可能**是「本工具本轮的条数上限」（`_limit_for` → 计划里的
+        # `tool_limits`，见 `budget_plan.derive_tool_limits`）。`file_content` 那条另有一个
+        # **provider 侧的夹子**（`utils.content_window.CONTENT_MAX_CHARS`），但它在取数时就
+        # 生效了，这里拿到的正文已经 ≤ 它 —— 所以真在这里被砍，砍它的仍是条数上限。
+        # 名字与 `budget.shrink_item` 的 `item_shrink_level_N` 同一族（也顺带与
+        # `tests/test_ai_task_e8_paths.py` 里那几条断言取的名字一致），都进
+        # `trace_evidence.summarize_executed` 的 `truncated_by`。
+        cap_name = f"tool_limit_{request.type}"
         meta: dict[str, Any] = {"original_chars": len(body)}
         if request.type in _WINDOWED_KINDS:
             # 超长时**分段 + 让模型点名**，而不是从中间砍一刀（见 windowed_view）：
@@ -492,6 +539,7 @@ class ContextTools:
             meta.update(window_meta)
             if meta.get("truncated"):
                 meta["limit"] = limit
+                meta["truncated_by"] = cap_name
             return ContextItem(kind=request.type, label=label, text=text, meta=meta)
 
         # 剩下的全是**纯文本**：只砍尾巴（保留首尾的中间省略是 `file_diff` 的待遇，而它
@@ -503,6 +551,7 @@ class ContextTools:
         if truncated:
             meta["truncated"] = True
             meta["limit"] = limit
+            meta["truncated_by"] = cap_name
         return ContextItem(kind=request.type, label=label, text=text, meta=meta)
 
     def execute(
@@ -544,6 +593,28 @@ class ContextTools:
             if request.type == "file_content" and not str(request.lines or "").strip():
                 self._bump(request.type, "unscoped_content_requests")
 
+            if request.type == EVIDENCE_REQUEST_TYPE:
+                item, note = self._evidence_item(request, index)
+                if note is not None:
+                    dropped.append(note)
+                self._bump(request.type, "calls")
+                if item.meta.get("tool_failed"):
+                    self._bump(request.type, "failed")
+                else:
+                    # 按地址取回**不执行取数**（正文已经在手里），所以它算一次缓存命中 ——
+                    # 与「同一成员内重复索取」记同一类账：省下的都是取数，不是额度。
+                    cache_hits += 1
+                    self._cache_hits += 1
+                    self._bump(request.type, "cache_hits")
+                    self._bump(request.type, "source_chars", _meta_chars(item))
+                    self._bump(request.type, "produced_chars", len(item.text))
+                    if item.meta.get("truncated"):
+                        # 口径是**交付**（模块 docstring 第 6 条）：交出去的确实是截断正文。
+                        truncated += 1
+                        self._bump(request.type, "truncated")
+                items.append(item)
+                continue
+
             key = _cache_key(request)
             cached = self._cache.get(key)
             if cached is not None:
@@ -567,7 +638,10 @@ class ContextTools:
                 items.append(pointer)
                 continue
 
-            shared = self._shared_get(key)
+            shared, shared_dropped = self._shared_get(key)
+            if shared_dropped is not None:
+                # 读到的那一条**自证不了**（见 `_shared_get`）：不拿它去下结论，退回真取数。
+                dropped.append(shared_dropped)
             if shared is not None:
                 # 别的成员已经取过这一份。**给全文，不给指针** —— 见模块 docstring 第 5 条。
                 # 记账口径与本地命中一致（省下的是取数，不是模型的索取额度），只有
@@ -669,16 +743,130 @@ class ContextTools:
             truncated=truncated,
         )
 
-    def _shared_get(self, key: CacheKey) -> ContextItem | None:
-        """跨成员缓存里有没有这一份。**失败的条目也算命中**。
+    def _evidence_item(
+        self, request: ContextRequest, index: int
+    ) -> tuple[ContextItem, DroppedItem | None]:
+        """按 `evidence_id` 把**原件**取回来（`type: evidence`）。
+
+        ## 为什么它不走 `_fetch` / `_render`
+
+        那两层的职责是「去仓库取数，然后按这个类型的字符上限渲染」。而这一条既不去取数
+        （正文就在证据仓里），也不该被重渲染：`_render` 会按 `_limit_for(type)` 再砍一刀
+        （`evidence` 没有自己的上限，落到默认的 8,000 字），于是任务书里那句
+        「原文 11,000 字，按需索取」**当场变成假话** —— 拿回来的比承诺的少。
+
+        所以这里直接交原件：`text` 一个字不动，`meta` 保留当初的 `original_chars` /
+        `truncated`（记账行照旧如实说明「这份被截断过」）。唯一改的是 `label` ——
+        它必须是一条**唯一**的地址，否则提示词里会出现两节标题相同的 `###`，
+        而「见上文那一节」那种话就指向了一个不唯一的位置。
+
+        ## 三种取不到，各自说清
+
+        证据仓没有（单代理路径）、地址不在仓里、地址在但**自证不了**（`verify` 为假）——
+        三种都给一段明确说「取不到、不要猜」的文本（`_failure_text`），并在后两种记一条账。
+        给一段空文本是最坏的处理：那会被读成「这份内容没有改动」。
+        """
+        store = self.body_cache
+        by_id = getattr(store, "by_id", None)
+        label = describe_request(request)
+        if not callable(by_id):
+            return (
+                ContextItem(
+                    kind=EVIDENCE_REQUEST_TYPE,
+                    label=label,
+                    text=_failure_text(
+                        request,
+                        "本次运行没有共享证据仓（按地址取回只在子代理模式下可用）",
+                    ),
+                    meta={"tool_failed": True, "reason": "no_evidence_store"},
+                ),
+                None,
+            )
+
+        item = by_id(request.name)
+        if item is None:
+            return (
+                ContextItem(
+                    kind=EVIDENCE_REQUEST_TYPE,
+                    label=label,
+                    text=_failure_text(
+                        request, "这个地址不在本次运行的证据仓里（它可能来自上一次分析）"
+                    ),
+                    meta={"tool_failed": True, "reason": "evidence_not_found"},
+                ),
+                DroppedItem(
+                    "evidence", index, "按地址取证据：仓里没有这个地址", request.name
+                ),
+            )
+
+        verify = getattr(store, "verify", None)
+        if callable(verify) and not verify(request.name):
+            # **不交出可能坏了的内容**：读回来的这一份与它自称的地址对不上，说明它已经不是
+            # 当初那一份了。这时候给模型一段「它说过的话」比给一份别的内容安全得多。
+            return (
+                ContextItem(
+                    kind=EVIDENCE_REQUEST_TYPE,
+                    label=label,
+                    text=_failure_text(
+                        request, "这一份的正文与它自称的证据地址对不上（hash 校验失败）"
+                    ),
+                    meta={"tool_failed": True, "reason": "evidence_hash_mismatch"},
+                ),
+                DroppedItem(
+                    "evidence",
+                    index,
+                    "按地址取证据：正文与地址对不上（hash 校验失败），未交出",
+                    request.name,
+                ),
+            )
+
+        return (
+            ContextItem(
+                kind=EVIDENCE_REQUEST_TYPE,
+                label=label,
+                text=item.text,
+                meta={**item.meta, "evidence_id": request.name, "evidence_of": item.label},
+            ),
+            None,
+        )
+
+    def _shared_get(self, key: CacheKey) -> tuple[ContextItem | None, DroppedItem | None]:
+        """跨成员缓存里有没有这一份 → `(条目, 记账)`。**失败的条目也算命中**。
 
         「这个文件这次取不到」在同一个进程里几秒之内不会变（Agent 离线、这个提交里确实
         没有这个路径），让 N 个成员各等一遍 15 秒的上限只会拖长整次分析。给出去的是同一句
         带着原因的失败说明 —— 它本来就要求模型写成信息缺口，不会长成「没问题」。
+
+        ## 命中时校验一次 hash（第二个返回值就是为它准备的）
+
+        这条分支**给出去的是全文**（模块 docstring 第 5 条），所以它是「平台替另一份正文
+        作保」的地方：交出去的必须是当初取回来的那一份。而这层保证原先**一个字都没有** ——
+        读完从不校验，读到什么都照发。缓存被谁改过、条目被一条形状相同的顶掉，都不会报错，
+        只是静默地把**别的内容**当成「那个文件的 diff」交给模型，而模型据此写下的结论
+        看起来完全正常。
+
+        `EvidenceStore.verify` 答不了「这条对不对」（内容质量不是它的事），它能答的是
+        「这条还是它自称的那一条吗」。校验不过就**当没命中**：调用方退回真取数，并记一条
+        `shared_cache` 的账 —— 静默用一份可疑的内容比重新取一次贵得多。
+
+        `body_cache` 不是 `EvidenceStore` 时（测试里的普通 dict、别处的实现）**不校验**：
+        那一层没有 `verify` 可言，凭空判它「不可信」会把所有非本类的缓存实现变成永不命中。
         """
         if self.body_cache is None:
-            return None
-        return self.body_cache.get(key)
+            return None, None
+        item = self.body_cache.get(key)
+        if item is None:
+            return None, None
+        verify = getattr(self.body_cache, "verify", None)
+        evidence_id = str(item.meta.get("evidence_id") or "")
+        if callable(verify) and evidence_id and not verify(evidence_id):
+            return None, DroppedItem(
+                "shared_cache",
+                0,
+                "共享缓存里这一条的正文与它自称的证据地址对不上（hash 校验失败），已改回重新取数",
+                describe_request(_request_of_key(key)),
+            )
+        return item, None
 
     def _shared_put(self, key: CacheKey, item: ContextItem) -> None:
         if self.body_cache is not None:

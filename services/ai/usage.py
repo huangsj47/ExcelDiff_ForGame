@@ -811,6 +811,26 @@ def _cost_range(
     }
 
 
+def _fact_baseline_run(value: Any) -> dict[str, Any] | None:
+    """基线运行那一条事实 → **只留这三个键**（多余的字段不往下发）。
+
+    白名单而不是原样透传：调用方给什么就发什么，等于把一个能塞任意内容的字典挂到
+    接口响应上（界面会把它当事实渲染）。给不出 `run_id` 时整体回 `None` ——
+    一条没有运行号的「基线」在界面上只会显示成「基线 #」（一个坏掉的句子）。
+    """
+    if not isinstance(value, Mapping):
+        return None
+    run_id = _int_or_none(value.get("run_id"))
+    if run_id is None:
+        return None
+    created = str(value.get("created_at") or "").strip()
+    return {
+        "run_id": run_id,
+        "created_at": created or None,
+        "scope": str(value.get("scope") or "").strip(),
+    }
+
+
 def estimate_analysis(
     *,
     planned_files: int | None,
@@ -822,6 +842,9 @@ def estimate_analysis(
     max_tool_requests: int | None = None,
     price_table: PriceTable | None = None,
     model: str = "",
+    delta_files: int | None = None,
+    compensation_files: int | None = None,
+    baseline_run: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """**执行前**的代价区间：预计 token / 预计时间 / 最近一次实际值 / 是否命中可复用基线。
 
@@ -844,6 +867,18 @@ def estimate_analysis(
     「命中可复用基线」的后果是**不用建这次付费 run 了**（见 AI-P0-02），而不是「便宜一点」。
     把它折成一个折扣系数会让区间凭空变小，而那个折扣没有任何观测支撑。所以它只如实出现
     在 `baseline` 里，由界面决定怎么说（「命中基线：这次不需要新建付费运行」）。
+
+    ## `delta_files` / `compensation_files` / `baseline_run` 是**事实**，不是输入
+
+    这三样回答的是「这次动作要做什么」（增量文件数 / 上轮没取到证据、按风险补回的文件数 /
+    这次做差的那条基线运行）。界面在**调用模型之前**要先把它们摆给用户看（报告 §5.5），
+    而它们与「预计花多少」是两件事：补偿文件数折进 token 区间等于凭空造一个观测不到的
+    系数（与上面 `baseline_reusable` 是同一条处置）。
+
+    所以它们**原样穿过去**、不进任何一个算式，并附一句说明（`notes`）讲清这一点 ——
+    不说的话，读的人会以为「补偿 20 个」已经被算进区间了。三个都是可选入参：
+    给不出就是 `None`（「不知道」），**不是 `0`**（`0` 是「一个文件都不变/没有基线」
+    这个确定的结论）。
     """
     wanted = str(mode or "").strip().lower() or MODE_FULL
     samples = [item for item in recent_runs if isinstance(item, Mapping)]
@@ -1030,9 +1065,24 @@ def estimate_analysis(
             "属于**外推**。"
         )
 
+    facts = {
+        "delta_files": _int_or_none(delta_files),
+        "compensation_files": _int_or_none(compensation_files),
+        "baseline_run": _fact_baseline_run(baseline_run),
+    }
+    if any(value is not None for value in facts.values()):
+        notes.append(
+            "「本次增量文件数 / 补偿文件数 / 基线 run」这三项是**本次动作的事实**"
+            "（平台读快照与基线指针得到），**不参与**上面的区间折算 —— 区间仍是按历史"
+            "实测值推的，别把「补偿了 20 个文件」当成「贵了 20 个文件」。"
+        )
+
     return {
         "mode": wanted,
         "planned_files": target,
+        # 三个事实字段（见函数 docstring 末节）。位置放在区间之前：它们是「这次做什么」，
+        # 区间是「大概花多少」，读的人先看前者。
+        **facts,
         "shard_count": shard_count,
         "baseline": {
             "reusable": baseline_reusable,

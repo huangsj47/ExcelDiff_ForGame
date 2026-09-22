@@ -17,11 +17,24 @@
 从 N 次索取变成 1 次调用。搜到的是这些文件在**该提交上的完整内容**（不只是本次改动的行）：
 「谁在读这个字段」这个问题，答案通常就在没改的那几行里。
 
-## 三个必须如实回报的数
+## 必须如实回报的每一个数
 
-`scanned` / `skipped`（二进制或读不到的）/ `truncated_*`（文件数或命中数被上限截断）。
+`scanned` / `files_total`（覆盖率的分母是**本批次的总数**，不是索引里那多少个）/
+`missing`（读不到）/ `binary`（不是文本）/ `oversized`（太大没索引）/ `undecodable`
+（解不出文本）/ `unindexed`（首次查询的预热门槛之外）/ `truncated_*`（文件数或命中数被
+上限截断）/ `matched`（截断之前的真实命中数）。
+
 「没搜到」与「没搜完」在模型那里必须分得开 —— 否则它会写出一句「没有其它引用」，
-而那只是我们扫了一半。所以抬头里这三样都写出来。
+而那只是我们扫了一半。**少写一种缺口，那一类文件就被当成了「搜过、里面没有」**，
+所以抬头（`_coverage_note`）把每一种各写一行。
+
+## 两份实现、一份口径
+
+生产路径是 `ai/reference_index.SnapshotReferenceIndex`（读一次建索引、查询只查内存），
+本模块的 `search_files` 是**穷举基准**（子串匹配那份语义的可执行定义），
+两者必须逐条给出相同的命中（`tests/test_ai_find_references.py::test_index_hits_equal_exhaustive_search`）。
+渲染（`render_result`）与那两个结果类型是**共用**的：两条部署路径（平台本地 / 问 Agent）
+的文字必须逐字一致，否则同一次分析在单机与多节点下会给出不同的覆盖率。
 """
 
 from __future__ import annotations
@@ -33,9 +46,13 @@ from utils.text_decoding import decode_text_bytes, looks_binary
 
 # 一次搜索最多扫多少个文件、最多给多少条命中、每条命中留多长。
 #
-# 这三个数是**上限而不是目标**：文件数上限是为了让一次搜索不至于把整次分析卡住
-# （767 个文件逐个 `git show` 是几十秒的量级），命中数上限是因为「这个字段有 300 处引用」
-# 这句话本身没有价值 —— 模型要的是「还有哪几个文件在用」。
+# **前两个数是穷举基准自己的上限**（见 `search_files`）：生产路径已经切到
+# `ai/reference_index.SnapshotReferenceIndex`，它有自己的 `MAX_INDEX_FILES`（预热门槛）
+# 与 `MAX_HITS`（每页命中数）。`MAX_SCAN_FILES` 留着是因为基准要有一份「最多读多少个文件」
+# 的口径，两条实现在同一份语料上比命中时必须站在同一条起跑线上。
+#
+# 「上限而不是目标」这条没变：命中数上限是因为「这个字段有 300 处引用」这句话本身没有价值
+# ——模型要的是「还有哪几个文件在用」。
 MAX_SCAN_FILES = 240
 MAX_HITS = 80
 MAX_LINE_CHARS = 200
@@ -57,7 +74,19 @@ class Hit:
 
 @dataclass(frozen=True)
 class SearchResult:
-    """一次搜索的账。**每个上限都要有对应的一行**，模型才知道自己拿到的是不是全部。"""
+    """一次搜索的账。**每一个上限都要有对应的一行**，模型才知道自己拿到的是不是全部。
+
+    字段与 `ai/reference_index.IndexedSearchResult` 一一对应：两条部署路径（平台本地读
+    工作副本 / 问业务节点上的 Agent）各自建索引，但**渲染与口径是同一份**（`render_result`），
+    所以两边的字段必须一样多、意思必须一样。
+
+    * `matched` 是**真实命中数**（截断/分页之前的那一个）。少了它，「命中 80 处」这句话
+      在读的人（模型或人）眼里就是全部，而真相可能是 300 处 —— 「没列出来」被读成「只有这些」。
+    * `cursor` / `next_cursor` 是分页：`hits` 只是**这一页**，`next_cursor` 为 None 才是
+      真的列完了（`truncated_hits` 就是这个判断）。
+    * `oversized` / `undecodable` / `unindexed` 是三种**没被索引**的文件（太大 / 解不出文本 /
+      预热门槛之外），与 `missing`（读不到）/ `binary`（不是文本）同级 —— 全都是缺口。
+    """
 
     query: str
     hits: tuple[Hit, ...] = ()
@@ -68,6 +97,12 @@ class SearchResult:
     truncated_files: bool = False
     truncated_hits: bool = False
     prefix: str = ""
+    matched: int = 0
+    oversized: int = 0
+    undecodable: int = 0
+    unindexed: int = 0
+    cursor: int = 0
+    next_cursor: "int | None" = None
 
     @property
     def hit_files(self) -> tuple[str, ...]:
@@ -118,7 +153,15 @@ def search_files(
     max_hits: int = MAX_HITS,
     prefix: str = "",
 ) -> SearchResult:
-    """按 `(路径, 提交)` 逐个读回内容并搜索。
+    """**穷举基准（oracle）：生产路径已经不用它了。**
+
+    它现在是「子串匹配、逐个文件读」这份语义的**唯一可执行定义**：
+    `ai/reference_index.SnapshotReferenceIndex` 是生产走的那条路（读一次建索引、查询只查内存），
+    而 `tests/test_ai_find_references.py::test_index_hits_equal_exhaustive_search` 把两者放在
+    同一份语料上逐条比命中 —— 索引漏一条命中就是一句错误结论（「这里没有引用」），
+    所以这份基准必须留着、且必须是对的。它的正确性由上面那组用例保证，不是由「谁在调它」保证。
+
+    按 `(路径, 提交)` 逐个读回内容并搜索。
 
     `reader(path, commit)` 由两端各自注入（Agent 端与平台本地用的是同一个
     `get_file_content_from_git`，只是跑在不同的进程里）。它的返回值按三态处理：
@@ -152,10 +195,17 @@ def search_files(
             # 解码走 `utils.text_decoding`（**两端唯一一份实现**）：GBK 的 lua 与搜索词
             # 都要能被解出来，否则「这个词在这份文件里出现过吗」这个问题根本没法回答
             # （按 utf-8 + replace 解出来的乱码里，中文标识符一个都匹配不上）。
+            #
+            # 注意这里是**宽松**的那一档（五级兜底、任何字节都出文本），而索引那条路是
+            # 严格的（只认 utf-8/gbk，解不出就算缺口）—— 这是**有意的不同**，写在
+            # `ai/reference_index` 的模块 docstring 里：基准要的是「子串匹配这份语义」，
+            # 而索引要的是「别把一份乱码索引进去还声称搜过了」。
             content = decode_text_bytes(content)
         scanned += 1
         remaining = max_hits - len(hits)
         if remaining <= 0:
+            # 命中数满了：**这一页已经列不下了**。`matched` 取已知条数（扫到一半就停下来了，
+            # 真实总数这里本来就算不出来），`truncated_hits` 是「还有没列出来的」。
             return SearchResult(
                 query=query,
                 hits=tuple(hits),
@@ -166,6 +216,7 @@ def search_files(
                 truncated_files=truncated_files,
                 truncated_hits=True,
                 prefix=prefix,
+                matched=len(hits),
             )
         hits.extend(
             search_text(str(content), query, path=path, limit=remaining)
@@ -181,6 +232,7 @@ def search_files(
         truncated_files=truncated_files,
         truncated_hits=len(hits) >= max_hits,
         prefix=prefix,
+        matched=len(hits),
     )
 
 
@@ -208,9 +260,12 @@ def render_result(result: SearchResult, *, scope_note: str = "") -> str:
     结论所需的数。
     """
     where = f"（范围：{result.prefix}）" if result.prefix else ""
+    total_note = (
+        f"（共 {result.matched} 处）" if result.matched > len(result.hits) else ""
+    )
     lines = [
         f"[find_references] 关键词 `{result.query}`{where}："
-        f"命中 {len(result.hits)} 处，分布在 {len(result.hit_files)} 个文件里。",
+        f"命中 {len(result.hits)} 处{total_note}，分布在 {len(result.hit_files)} 个文件里。",
         _coverage_note(result, scope_note),
     ]
     if result.hits:
@@ -225,6 +280,12 @@ def render_result(result: SearchResult, *, scope_note: str = "") -> str:
 
 
 def _coverage_note(result: SearchResult, scope_note: str) -> str:
+    """覆盖率那一句。**每一种「没搜到的东西」都要在这里出现一次**。
+
+    五类缺口各有一行：不是文本（`binary`）、读不到（`missing`）、太大没索引（`oversized`）、
+    解不出文本（`undecodable`）、首次查询的预热门槛之外（`unindexed`）。少写一行，模型就会
+    把那一类文件当成「搜过、里面没有」—— 而它正是拿这个决定能不能写「没有其它引用」。
+    """
     parts = [
         f"本次搜索覆盖了本批次改动的 {result.scanned}/{result.files_total} 个文件"
     ]
@@ -232,10 +293,20 @@ def _coverage_note(result: SearchResult, scope_note: str) -> str:
         parts.append(f"{result.binary} 个不是文本（配表等二进制，没搜）")
     if result.missing:
         parts.append(f"{result.missing} 个读不到（工作副本里取不到，没搜）")
+    if result.oversized:
+        parts.append(f"{result.oversized} 个太大（超过单文件索引上限，没索引）")
+    if result.undecodable:
+        parts.append(f"{result.undecodable} 个解不出文本（既不是 utf-8 也不是 gbk，没索引）")
+    if result.unindexed:
+        parts.append(f"{result.unindexed} 个还没索引（首次查询只索引本批次的前一部分，没读）")
     if result.truncated_files:
         parts.append("**文件数到了上限就停了，剩下的没搜**")
     if result.truncated_hits:
-        parts.append("**命中数到了上限，还有没列出来的**")
+        parts.append(
+            "**命中数到了上限，还有没列出来的**"
+            + (f"（共 {result.matched} 处，这一页列了 {len(result.hits)} 处）" if result.matched else "")
+        )
+        parts.append("要看得更全就给一个更具体的前缀（`path`）再搜一次")
     text = "；".join(parts) + "。"
     if result.scanned < result.files_total or result.missing:
         text += "所以「没搜到」只代表**搜过的这些**里没有，不代表整批里没有。"
@@ -243,27 +314,6 @@ def _coverage_note(result: SearchResult, scope_note: str) -> str:
     if scope_note:
         text += scope_note
     return text
-
-
-@dataclass
-class SearchBudget:
-    """一次分析里 `find_references` 一共能扫多少个文件。
-
-    **按扫过的文件数计，不是按调用次数**：一次搜索可以是 3 个文件，也可以是 240 个，
-    后者贵两个数量级，只卡次数等于没卡。额度挂在 provider 上 —— 子代理模式下 N 个成员
-    共用一个 provider，所以这一份额度是**一家子共用**的（与正文缓存同一层）。
-    用完时如实告诉模型「这一轮的检索额度用完了」，而不是悄悄扫 0 个文件返回「没命中」。
-    """
-
-    limit: int = 900
-    used: int = 0
-
-    @property
-    def remaining(self) -> int:
-        return max(0, self.limit - self.used)
-
-    def consume(self, files: int) -> None:
-        self.used += max(0, int(files))
 
 
 def entries_for(paths: Sequence[str], commit_of: Callable[[str], str | None]):

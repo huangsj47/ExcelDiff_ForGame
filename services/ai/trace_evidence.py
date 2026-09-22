@@ -76,7 +76,13 @@ FAILURE_NOTICE_PREFIXES = (
     "[检索不到]",
     "[检索还没回来]",
     "[检索不可用]",
-    "[检索额度用尽]",
+    # ★ `[检索额度用尽]` 已删除（2026-09-22）：E2 把 `SearchBudget` 那道**共享扫描额度**
+    # 整个拆掉了（`reference_search` 现在是「建一次索引、按查询查内存」），于是**没有任何
+    # 地方再发出这句话**。留在清单里的害处不是说错，而是**攒死代码**：`failure_notice()`
+    # 永远匹配不到它，下一个人看到这行会以为「额度用尽」这条路径还在。
+    # 钉住这一点的测试是 `tests/test_ai_trace_evidence.py::
+    # test_the_prefixes_are_the_ones_the_provider_emits` —— 它**扫源码**核对每个前缀都还有
+    # 发出方，所以这一行的删除不是审美，是被一条会红的用例逼出来的。
 )
 
 
@@ -95,6 +101,20 @@ def failure_notice(text: Any) -> str:
 
 def _clip(value: Any, limit: int = TRACE_DETAIL_MAX_CHARS) -> str:
     return str(value or "")[:limit]
+
+
+def _int_or_none(value: Any) -> Optional[int]:
+    """数字字段 → int / None。**认不出来就是 `None`（「不知道」），不是 0。**
+
+    `0` 是一个确定的结论（「上限是 0 字」），而「这一条没有上限可报」（没被截断）
+    与它是两件事 —— 见 `summarize_executed` 里 `limit` 的说明。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _head(items: Any, limit: int = TRACE_LIST_MAX_ITEMS) -> list:
@@ -155,6 +175,13 @@ def summarize_executed(items: Any, *, limit: int = TRACE_LIST_MAX_ITEMS) -> list
             "empty": bool(meta.get("tool_empty")),
             "reason": notice or _clip(meta.get("reason", "")),
             "truncated": bool(meta.get("truncated")),
+            # **截断要可归因**（E3 验收）。原先只有 `truncated` 这个布尔，于是事后
+            # 翻账只能看到「这一条被砍了」，看不出该去调哪个配置 —— 而单条上限、
+            # 总预算、窗口水位、逐级压缩这四条约束要调的地方完全不同。
+            #
+            # 没人置位时是 `None` / 空串：`0` 会被读成「上限是 0 字」这个确定的错误事实。
+            "limit": _int_or_none(meta.get("limit")),
+            "truncated_by": _clip(meta.get("truncated_by", ""), 60),
         })
     return out
 

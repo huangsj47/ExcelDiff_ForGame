@@ -81,18 +81,21 @@ from services.ai.family_ledger import (  # noqa: F401 —— 本模块与测试�
     ROLE_VERIFY,
     VERIFY_LABEL,
     Candidate,
+    EvidenceRef,
     FamilyResult,
     MemberOutcome,
     MemberPlan,
     _gap_lines,
     _markdown_excerpt,
     _shard_never_ran,
+    evidence_index_of,
+    evidence_refs_for,
     reconcile_candidates,
 )
+from services.ai.manifest import ManifestPlan, build_manifest
 from services.ai.prompt import build_system_prompt, build_user_message
 from services.ai.prompt_cache import mark_cache_breakpoint
 from services.ai.protocol import Anomaly, DroppedItem, unclassified_anomalies
-from services.ai.manifest import ManifestPlan, build_manifest
 from services.ai.report_document import demote_headings
 from services.ai.rules import (
     DEFAULT_MAX_ANOMALIES,
@@ -624,7 +627,12 @@ def build_member_task(member: MemberPlan, plan: FamilyPlan) -> str:
     return "\n\n".join(blocks).rstrip() + "\n"
 
 
-def build_synthesis_task(plan: FamilyPlan, steps: Sequence[MemberOutcome]) -> str:
+def build_synthesis_task(
+    plan: FamilyPlan,
+    steps: Sequence[MemberOutcome],
+    *,
+    evidence_index: Mapping[str, EvidenceRef] | None = None,
+) -> str:
     """主代理的任务书：各分片的候选结论 + 谁没跑成 + 汇总纪律。
 
     ## 候选编号是**平台对账的唯一判据**（AI-P0-06）
@@ -663,7 +671,11 @@ def build_synthesis_task(plan: FamilyPlan, steps: Sequence[MemberOutcome]) -> st
             "某个维度没人报出问题，也要写 `hit: false` 与理由。\n"
             "4. **报告是最终报告**：七个章节写全，长度不受分片影响。"
             "你还可以用工具去核对候选里可疑的地方（文件、行号、提交），"
-            "也可以补充分片漏掉的发现。\n"
+            "也可以补充分片漏掉的发现。"
+            "候选的「证据」那一栏给的是**地址**（`@evidence_id=…`，后面写着那份原件的字数）："
+            "要看原文时按 `{\"type\": \"evidence\", \"name\": \"<那个地址>\"}` 索取，"
+            "平台会把原件原样附回来（不重新取数）；**不要凭地址猜内容**，"
+            "也不要因为它是一条地址就当成「证据缺失」——地址就是证据的入口。\n"
             "5. **篇幅要收着写**：单次输出有硬上限，写超了会被**截断**，"
             "整份 JSON 作废、你的结论一条都留不下。所以同类候选合并成一条写，"
             "只写能改变结论的内容；候选很多时按后果排序写透前几条，"
@@ -679,7 +691,7 @@ def build_synthesis_task(plan: FamilyPlan, steps: Sequence[MemberOutcome]) -> st
         + (f"\n\n{plan.count_note}" if plan.count_note else ""),
     ]
 
-    candidates_block = _render_candidates(plan, steps)
+    candidates_block = _render_candidates(plan, steps, evidence_index)
     if candidates_block:
         blocks.append(candidates_block)
 
@@ -703,7 +715,12 @@ def build_synthesis_task(plan: FamilyPlan, steps: Sequence[MemberOutcome]) -> st
     return "\n\n".join(blocks).rstrip() + "\n"
 
 
-def build_verify_task(plan: FamilyPlan, synthesis: EngineOutcome) -> str:
+def build_verify_task(
+    plan: FamilyPlan,
+    synthesis: EngineOutcome,
+    *,
+    evidence_index: Mapping[str, EvidenceRef] | None = None,
+) -> str:
     """对账轮的任务书：把最严重的几条交出去，**要求它去找反证 + 给出结构化裁决**。
 
     ## 为什么是「找反证」，而不是「再评审一遍」
@@ -780,8 +797,16 @@ def build_verify_task(plan: FamilyPlan, synthesis: EngineOutcome) -> str:
                 lines.append(f"- 位置：{anomaly.file_path}")
             if anomaly.impact:
                 lines.append(f"- 它说会造成：{truncate_text(anomaly.impact, CANDIDATE_TEXT_MAX_CHARS)[0]}")
-            for evidence in anomaly.evidence[:3]:
-                lines.append(f"- 它的证据：{truncate_text(str(evidence), CANDIDATE_TEXT_MAX_CHARS)[0]}")
+            refs = evidence_refs_for(evidence_index or {}, anomaly.file_path)
+            if refs:
+                # 找反证要读的正是**那份正文**。原先这里贴的是结论自己的复述（模型写的话），
+                # 而反证必须落到「哪个文件、哪几行」上 —— 给地址让它自己去读那一份，
+                # 比让它对着复述推理更接近这一轮的目的。
+                for ref in refs:
+                    lines.append(f"- 它的证据：{ref.describe()}")
+            else:
+                for evidence in anomaly.evidence[:3]:
+                    lines.append(f"- 它的证据：{truncate_text(str(evidence), CANDIDATE_TEXT_MAX_CHARS)[0]}")
         blocks.append("## 待核对结论（逐条回答）\n\n" + "\n".join(lines))
         blocks.append(verdict_instructions())
     blocks.append(
@@ -796,8 +821,18 @@ def build_verify_task(plan: FamilyPlan, synthesis: EngineOutcome) -> str:
     return "\n\n".join(blocks).rstrip() + "\n"
 
 
-def _render_candidates(plan: FamilyPlan, steps: Sequence[MemberOutcome]) -> str:
-    """把各成员报出的候选结论渲染成任务书里的一段（含「还有几条没列出来」）。"""
+def _render_candidates(
+    plan: FamilyPlan,
+    steps: Sequence[MemberOutcome],
+    evidence_index: Mapping[str, EvidenceRef] | None = None,
+) -> str:
+    """把各成员报出的候选结论渲染成任务书里的一段（含「还有几条没列出来」）。
+
+    `evidence_index` 是**共享证据仓**的地址表（`evidence_index_of(body_cache)`）。给了它，
+    每条候选「证据」那一栏就换成地址（`file_diff @evidence_id=…（原文 N 字，按需索取）`）——
+    汇总/对账要看正文时按地址取原件，任务书里不再复述一遍。查不到地址的候选照旧贴它
+    自己写的那几行（**空元组是常态**，不是异常）。
+    """
     lines: list[str] = []
     total = 0
     for step in steps:
@@ -805,7 +840,7 @@ def _render_candidates(plan: FamilyPlan, steps: Sequence[MemberOutcome]) -> str:
             continue
         block: list[str] = []
         for candidate in step.candidates[:CANDIDATE_MAX_ITEMS_PER_MEMBER]:
-            block.append(candidate.describe())
+            block.append(candidate.describe(evidence_index))
         hidden = step.candidate_total - len(step.candidates)
         if hidden > 0:
             block.append(
@@ -1217,7 +1252,7 @@ def _run_one(
         body_cache=body_cache,
         run_analysis_fn=run_analysis_fn,
     )
-    candidates = _candidates_of(member, outcome)
+    candidates = _candidates_of(member, outcome, evidence_index_of(body_cache))
     return MemberOutcome(
         plan=member,
         outcome=outcome,
@@ -1234,12 +1269,30 @@ def _raw_candidate_count(outcome: EngineOutcome) -> int:
     return len(outcome.payload.anomalies)
 
 
-def _candidates_of(member: MemberPlan, outcome: EngineOutcome) -> tuple[Candidate, ...]:
+def _candidates_of(
+    member: MemberPlan,
+    outcome: EngineOutcome,
+    evidence_index: Mapping[str, EvidenceRef] | None = None,
+) -> tuple[Candidate, ...]:
+    """抽候选（见 `_run_one`），并把**每条候选背后的正文地址**一并记下来。
+
+    `evidence_index` 是共享证据仓的地址表（`evidence_index_of(body_cache)`）：按候选点名的
+    文件路径查出它的地址（`family_ledger.evidence_refs_for`）。查不到就是空元组 ——
+    任务书那边会回落到贴它自己写的证据。
+    """
     raw: Sequence[Anomaly] = ()
     if outcome.payload is not None:
         raw = outcome.payload.anomalies
+    index = evidence_index or {}
     items = tuple(
-        Candidate(member_label=member.label, index=position, anomaly=item)
+        Candidate(
+            member_label=member.label,
+            index=position,
+            anomaly=item,
+            evidence_ids=tuple(
+                ref.evidence_id for ref in evidence_refs_for(index, item.file_path)
+            ),
+        )
         for position, item in enumerate(raw, start=1)
     )
     return items[:CANDIDATE_MAX_ITEMS_PER_MEMBER]
@@ -1282,7 +1335,9 @@ def _run_verify(
         baseline_digest=baseline_digest,
         plan=plan,
         member=member,
-        task_message=build_verify_task(plan, synthesis),
+        task_message=build_verify_task(
+            plan, synthesis, evidence_index=evidence_index_of(body_cache)
+        ),
         on_round=on_round,
         on_start=on_start,
         body_cache=body_cache,
@@ -1332,7 +1387,9 @@ def _run_synthesis(
         baseline_digest=baseline_digest,
         plan=plan,
         member=plan.synthesis,
-        task_message=build_synthesis_task(plan, steps),
+        task_message=build_synthesis_task(
+            plan, steps, evidence_index=evidence_index_of(body_cache)
+        ),
         on_round=on_round,
         on_start=on_start,
         body_cache=body_cache,

@@ -37,7 +37,6 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from services.ai.docx_view import is_docx, render_docx_text
 
 from services.ai.reference_search import (
-    SearchBudget,
     entries_for,
     normalize_query,
     render_result,
@@ -636,9 +635,6 @@ class PlatformContextProvider:
         # 调用方（测试、探测）本来也不会用到这个工具。
         self._scope = scope
         self._manifest = manifest
-        # 「检索扫过多少文件」的额度（见 `reference_search.SearchBudget`）。挂在实例上，
-        # 所以子代理模式下 N 个成员**共用一份**（它们共用一个 provider）。
-        self._search_budget = SearchBudget()
         # 「向 Agent 取正文」的会话内记忆（见 `_content_from_agent`）：同一个进程里同一份
         # 请求只等一次。放在实例上而不是模块级 —— 一次分析一个 provider，跨分析复用会把
         # 上一份分析的结果喂给下一次。
@@ -650,10 +646,19 @@ class PlatformContextProvider:
         self._agent_diff_fetched: set = set()
         self._agent_diff_cached: dict = {}
         self._agent_diff_pending: dict = {}
-        # 「一次检索只做一次」的记忆（见 `_search_local`）：240 个文件是真读的，
+        # 「一次检索只做一次」的记忆（见 `_search_local`）：建索引是要真读文件的，
         # 模型对同一个词问两遍不该让节点把同一件事做两遍。
         self._search_cache: dict = {}
+        # 快照索引（读一次整批、查询只查内存）。`_reference_index_key` 是建它时那份
+        # 文件清单的指纹 —— 换了批次就重建，绝不把上一批的索引当成这一批的。
+        #
+        # **没有「检索额度」这种东西了**：`SearchBudget` 曾经假装是一个闸门（累加 used、
+        # 比 remaining），但生产代码里没有任何地方读 `remaining` —— 唯一的效果是让
+        # 第 2、3 次检索能搜多少文件取决于前几次「动过几个文件」，而两条部署路径
+        # （本地 / 问 Agent）扣的数还不一样。真正管住成本的是索引的预热门槛
+        # （`MAX_INDEX_FILES`）与「读一次、查询不再读」，不是那个计数器。
         self._reference_index = None
+        self._reference_index_key = ""
         self._content_max_chars = DEFAULT_CONTENT_MAX_CHARS
         # 读平台已算好并落库的那一份（周版本合并 diff，页面同源），而不是现场重算。
         #
@@ -1062,12 +1067,19 @@ class PlatformContextProvider:
         """在本批次改动的文件里找这个标识符的其它出现位置（`ai/reference_search.py`）。
 
         与 `file_content` / `file_diff` 同一条路数：**平台本地能读就本地读，读不了就问
-        Agent**。区别在于它一次要读很多文件，所以两条来源都加了额度与上限，并且**读了
-        几个、跳过了几个、有没有被上限截断**都要写进给模型的文本里 ——
+        Agent**。区别在于它一次要读很多文件，所以两条来源**读了几个、跳过了几个、有没有
+        被上限截断**都要写进给模型的文本里 ——
 
         「没搜到」与「没搜完」在模型那里必须分得开：前者可以写进结论，后者只能写成
-        信息缺口。少了这几个数，它会用一句「没有其它引用」把一次只扫了 240 个文件的
-        搜索说成结论，而线上一个周版本有 767 个文件。
+        信息缺口。少了这几个数，它会用一句「没有其它引用」把一次只扫了一部分的搜索说成
+        结论，而线上一个周版本有 767 个文件。
+
+        ## 前缀只影响 `search()`，不影响索引
+
+        给出的 `path` 是**查询范围内**的前缀（`batch_paths()` 按它过滤过的那份列表曾经
+        直接进了索引 —— 那个 bug 见 `_search_local`）。现在传给索引的是**未过滤的整批**，
+        `prefix` 交给 `search()`：于是「先问 `scripts/`、再问全局」的第二次查询仍然看得见
+        整批，覆盖率的分母与命中都不会被上一次查询的范围污染。
         """
         search = normalize_query(query)
         if not search:
@@ -1079,14 +1091,15 @@ class PlatformContextProvider:
             )
 
         prefix = normalize_path(path)
-        pairs = entries_for(
-            [item for item in self._scope.batch_paths() if not prefix or item.startswith(prefix)],
-            self._scope.commit_of_path,
-        )
-        local = self._search_local(pairs, search, prefix=prefix, allowance=len(pairs))
+        # **整批**（未过滤）：索引与前缀无关，前缀只在查询那一刻生效。
+        pairs = entries_for(self._scope.batch_paths(), self._scope.commit_of_path)
+        # 覆盖率的分母：本批次里**落在这个前缀范围内**的文件数（与本地那条路
+        # `index.search(prefix=...)` 算出来的 `files_total` 是同一个数）。
+        in_scope = sum(1 for item, _commit in pairs if not prefix or item.startswith(prefix))
+        local = self._search_local(pairs, search, prefix=prefix)
         if local is not None:
             return local
-        return self._search_from_agent(pairs, search, prefix=prefix, allowance=len(pairs))
+        return self._search_from_agent(pairs, search, prefix=prefix, total_files=in_scope)
 
     def _search_local(
         self,
@@ -1094,12 +1107,22 @@ class PlatformContextProvider:
         query: str,
         *,
         prefix: str,
-        allowance: int,
     ) -> Optional[str]:
         """平台本地的工作副本。**单机模式**走这条；多节点模式返回 `None`（改问 Agent）。
 
         与 `_content_from_agent` 同一套记忆：同一个进程里同一份检索只做一次
-        （模型可能对同一个词问两遍，而 240 个文件是要真读的）。
+        （模型可能对同一个词问两遍，而建索引是要真读文件的）。
+
+        ## 索引按**快照**缓存，按**前缀**过滤
+
+        索引只建一次（一次分析里批次是固定的），但**不能用带前缀的那份文件列表建** ——
+        前缀是**这次查询**的范围，不是批次的范围。拿它建索引会永久污染：
+        「先问 `path='scripts/'`，再问全局」时第二次查询只能看见 `scripts/` 下的文件，
+        而它报出来的 `files_total` / `scanned` / 命中全都是那个子集的，
+        **模型看不出这是上次查询的残留**（它只会读到一句「覆盖了 12/12 个文件」）。
+
+        所以：`pairs` 永远是整批，索引建在整批上，前缀进 `search()` 时再过滤；
+        缓存键里放**快照指纹**做校验（同一批 = 同一个索引，换了批次就重建）。
         """
         from services.vcs_content_service import get_file_content_from_git
 
@@ -1107,27 +1130,39 @@ class PlatformContextProvider:
         if key in self._search_cache:
             return self._search_cache[key]
         # 一次就够的判断：没有本地工作副本时 `get_file_content_from_git` 会返回 None，
-        # 于是每个文件都算「读不到」——那会把 240 个文件白读一遍，还给出一句
-        # 「240 个都读不到」的假话（真相是平台本地根本没有这个仓库）。
+        # 于是每个文件都算「读不到」——那会把整批白读一遍，还给出一句
+        # 「N 个都读不到」的假话（真相是平台本地根本没有这个仓库）。
         repository = self._repository_of(pairs)
         if repository is None:
             return None
         if is_agent_dispatch_mode():
-            # 多节点模式下平台被禁止 clone：本地读不到是**确定**的，别去读 240 次。
+            # 多节点模式下平台被禁止 clone：本地读不到是**确定**的，别去读一遍。
             return None
 
         def reader(path: str, commit: str):
             return get_file_content_from_git(repository, commit, path)
 
-        from services.ai.reference_index import SnapshotReferenceIndex
+        from services.ai.reference_index import (
+            MAX_INDEX_FILES,
+            SnapshotReferenceIndex,
+            snapshot_digest,
+        )
 
-        if self._reference_index is None:
-            self._reference_index = SnapshotReferenceIndex.build(pairs, reader=reader)
+        digest = snapshot_digest(pairs)
+        if self._reference_index is None or self._reference_index_key != digest:
+            # 预热门槛（`MAX_INDEX_FILES`）：整批顺序读 blob 会把首次查询从 240 个文件拖到
+            # 767 个，而 Agent 侧等检索只有 40 秒 —— 门槛之外的那些**如实算成缺口**
+            # （`search()` 报 `unindexed`，抬头写「文件数到了上限就停了，剩下的没搜」）。
+            self._reference_index = SnapshotReferenceIndex.build(
+                pairs, reader=reader, max_files=MAX_INDEX_FILES
+            )
+            self._reference_index_key = digest
         result = self._reference_index.search(query, prefix=prefix)
         text = render_result(
             result,
             scope_note=(
                 f"索引版本 `{result.index_version}`，快照 `{result.snapshot_digest[:12]}`；"
+                f"索引覆盖本批次的前 {self._reference_index.indexed_files} 个文件，"
                 "后续查询不重复读取 blob。"
             ),
         )
@@ -1140,7 +1175,7 @@ class PlatformContextProvider:
         query: str,
         *,
         prefix: str,
-        allowance: int,
+        total_files: int,
     ) -> Optional[str]:
         """业务节点上的 Agent 拿它自己的工作副本搜（platform/agent 模式的唯一取数点）。"""
         from services.agent_file_content_dispatch import request_references
@@ -1154,13 +1189,16 @@ class PlatformContextProvider:
             outcome = request_references(
                 repository,
                 query=query,
+                # **整批**：Agent 也按快照建一次索引，前缀交给它自己的 `search()`。
+                # 只发前缀命中的那一批会让 Agent 的索引缓存按前缀分叉 —— 同一个 bug
+                # 换个进程再犯一次（第二次查询看到的还是第一个前缀的范围）。
                 entries=pairs,
                 prefix=prefix,
-                # **本批次的总数，不是 `entries` 的长度**：`entries` 已经截到额度上限，
-                # 而覆盖率的分母必须是「这次一共改了多少个文件」。带错了它就会在报告里
-                # 写「240/240 全覆盖」，把「没搜到」当成结论 —— 与本地那条路（分母是完整
-                # 列表）会给出互相矛盾的两个覆盖率。
-                total_files=len(pairs),
+                # 覆盖率的分母：**本批次里落在这个前缀范围内的文件数**（与本地那条路
+                # `index.search(prefix=...)` 算出来的 `files_total` 一致）。两条路对分母的
+                # 口径必须一样，否则同一个周版本在单机与多节点下印出互相矛盾的覆盖率，
+                # 而模型正是拿这个数决定能不能说「没有其它引用」。
+                total_files=total_files,
             )
         except Exception as exc:  # noqa: BLE001 —— 取一次检索失败只该让这一条降级
             log_print(f"⚠️ AI 取数：向 Agent 检索失败 {query}: {type(exc).__name__}: {exc}")
@@ -1170,18 +1208,6 @@ class PlatformContextProvider:
         if status == "ready":
             rendered = str(outcome.get("text") or "")
             if rendered:
-                # **与本地那条路同一口径**：额度按「动过的文件」扣，不是「读成的文件」。
-                # 本地那行是 `scanned + binary + missing`，而这里原先只取 `scanned` ——
-                # 于是同一次周版本分析，单机与多节点两条部署算出来的 `remaining` 不同，
-                # 而 `allowance = min(MAX_SCAN_FILES, remaining)` 直接决定第 2、3 次检索
-                # 允许搜多少文件、覆盖率的分母与命中数是多少，甚至一边回「[检索额度用尽]
-                # 这一次没有搜」而另一边正常搜。返回体里 `missing` / `binary` 是现成的
-                # （`agent_reference_search.read_reference` 原样回传），不读它就没有理由。
-                self._search_budget.consume(
-                    int(outcome.get("scanned") or 0)
-                    + int(outcome.get("binary") or 0)
-                    + int(outcome.get("missing") or 0)
-                )
                 return rendered
         reason = str(outcome.get("message") or "原因未知")
         # 两句的尾巴逐字相同 —— 用常量而不是抄两遍：`trace_evidence` 按**开头**认这几句，

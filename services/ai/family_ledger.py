@@ -37,7 +37,7 @@ MOVE 里，所以是同一个文件内部的调用，不构成往返依赖。
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from services.ai.budget import truncate_text
 from services.ai.engine import (
@@ -48,6 +48,7 @@ from services.ai.engine import (
     EngineOutcome,
 )
 from services.ai.protocol import Anomaly, DroppedItem
+from services.ai.scope import normalize_path
 from services.ai.verdict import (
     VERDICT_DOWNGRADED,
     VERDICT_NEEDS_MORE_EVIDENCE,
@@ -139,12 +140,25 @@ class Candidate:
     member_label: str
     index: int
     anomaly: Anomaly
+    # 这条候选**背后的正文**在共享证据仓里的地址（0 到 `CANDIDATE_EVIDENCE_REFS_MAX` 个）。
+    #
+    # 有了它，汇总的任务书就不必把正文（或对正文的复述）再贴一遍 —— 只给地址与体量，
+    # 需要看的时候按 `type: evidence` 索取原件。**空元组是常态**（那条候选点名的文件
+    # 本次没被取过），那时渲染回落到原来的写法（贴它自己写的证据），不是把这一栏省掉。
+    evidence_ids: tuple[str, ...] = ()
 
     @property
     def id(self) -> str:
         return f"{CANDIDATE_ID_PREFIX}{self.member_label.lstrip('S')}-{self.index}"
 
-    def describe(self) -> str:
+    def describe(self, evidence_index: Mapping[str, "EvidenceRef"] | None = None) -> str:
+        """任务书里这一条候选的那几行。
+
+        `evidence_index` 给了、且这条候选的 `evidence_ids` 在里面查得到时，**证据那一栏
+        换成地址**（`file_diff @evidence_id=abc123（原文 11,000 字，按需索取）`）；
+        查不到就照旧贴它自己写的证据 —— 给一个取不回来的地址比不给地址糟得多
+        （模型会去取，取回一句失败说明，白花一次索取额度，还以为是那一份内容有问题）。
+        """
         item = self.anomaly
         parts = [
             f"[{self.id}] {item.title}",
@@ -154,9 +168,149 @@ class Candidate:
             parts.append(f"  文件：{item.file_path}{(' @ ' + item.commit[:12]) if item.commit else ''}")
         if item.impact:
             parts.append(f"  影响：{truncate_text(item.impact, CANDIDATE_TEXT_MAX_CHARS)[0]}")
-        for evidence in item.evidence[:3]:
-            parts.append(f"  证据：{truncate_text(str(evidence), CANDIDATE_TEXT_MAX_CHARS)[0]}")
+        refs = _refs_of(self.evidence_ids, evidence_index)
+        if refs:
+            for ref in refs:
+                parts.append(f"  证据：{ref.describe()}")
+        else:
+            for evidence in item.evidence[:3]:
+                parts.append(f"  证据：{truncate_text(str(evidence), CANDIDATE_TEXT_MAX_CHARS)[0]}")
         return "\n".join(parts)
+
+
+def _refs_of(
+    evidence_ids: Sequence[str], evidence_index: Mapping[str, "EvidenceRef"] | None
+) -> tuple["EvidenceRef", ...]:
+    """把一组地址查成 `EvidenceRef`（查不到的**跳过**，不做任何补位）。"""
+    if not evidence_index:
+        return ()
+    refs: list[EvidenceRef] = []
+    for evidence_id in evidence_ids:
+        ref = evidence_index.get(str(evidence_id or ""))
+        if ref is not None:
+            refs.append(ref)
+    return tuple(refs)
+
+
+# 一条候选/一条结论最多列几个证据地址：任务书里每多一行，就与上下文条目抢一份预算，
+# 而「这条结论背后有一份完整的 diff 可读」这件事，一两条就说清了。
+CANDIDATE_EVIDENCE_REFS_MAX = 2
+# 哪些工具取的正文**算得上「这条结论的依据」**。只有这两类是「某个文件的正文」：
+# `commit_detail` 是一次提交的全貌、`find_references` 是命中清单、`read_reference` 是
+# 平台文档，它们都不能替一条点名了具体文件的结论背书。
+_EVIDENCE_REFERRABLE_KINDS = ("file_diff", "file_content")
+
+
+@dataclass(frozen=True)
+class EvidenceRef:
+    """证据仓里一份**可取回**的正文的地址（对应 `context_tools` 的 `type: evidence`）。"""
+
+    evidence_id: str
+    kind: str = ""
+    label: str = ""
+    chars: int = 0
+
+    def describe(self) -> str:
+        """任务书里那一行。
+
+        `chars` 记的是**这份地址取回来能拿到多少字符**（不是取数时的原始长度）——
+        写「原文 11,000 字」而实际取回 8,000，这个承诺当场就是假的，而模型不会知道
+        自己少看了什么。
+        """
+        head = f"{self.kind} @evidence_id={self.evidence_id}".strip()
+        if self.chars <= 0:
+            return head
+        return f"{head}（原文 {self.chars:,} 字，按需索取）"
+
+
+def evidence_index_of(body_cache: object) -> dict[str, EvidenceRef]:
+    """把共享证据仓读成 `evidence_id → EvidenceRef`。
+
+    **只收「真的能把正文取回来」的那些条目**：指针条目（`repeat_pointer`，正文是一句
+    「见上文那一节」）、取数失败、空内容三种都不进 —— 把一句「取不到」宣传成
+    「原文 11,000 字，按需索取」，模型会去取，取回一句失败说明，白花一次索取额度。
+
+    `body_cache` 可以是 `None`（单代理路径）或任何 `MutableMapping`；拿不到
+    `values()` 就返回空索引（那时渲染回落到贴证据文本，一切照旧）。
+    """
+    index: dict[str, EvidenceRef] = {}
+    values = getattr(body_cache, "values", None)
+    if not callable(values):
+        return index
+    for item in list(values()):
+        meta = dict(getattr(item, "meta", None) or {})
+        evidence_id = str(meta.get("evidence_id") or "")
+        if not evidence_id or evidence_id in index:
+            continue
+        if meta.get("repeat_pointer") or meta.get("tool_failed") or meta.get("tool_empty"):
+            continue
+        text = str(getattr(item, "text", "") or "")
+        if not text.strip():
+            continue
+        index[evidence_id] = EvidenceRef(
+            evidence_id=evidence_id,
+            kind=str(getattr(item, "kind", "") or ""),
+            label=str(getattr(item, "label", "") or ""),
+            chars=len(text),
+        )
+    return index
+
+
+def evidence_refs_for(
+    evidence_index: Mapping[str, EvidenceRef],
+    file_path: str,
+    *,
+    limit: int = CANDIDATE_EVIDENCE_REFS_MAX,
+) -> tuple[EvidenceRef, ...]:
+    """这条结论点名的那个文件，在证据仓里的地址（查不到就给空元组）。
+
+    ## 判据是**文件路径**，不是模型的话
+
+    平台手里唯一确定的事实是：这条结论点名了某个文件，而本次运行**取过**那个文件
+    （`label` 里带着 `类型 提交 路径` 这套坐标，见 `context_tools.describe_request`）。
+    按它连起来是**可当场校验的** —— 复核的人打开那个地址就看到了那一段，对不上马上能发现。
+
+    刻意**不**从结论的 `evidence` 文本里反推地址（那是模型自己写的话，可能抄错、也可能
+    写的是别的文件的行）：这条链路上任何一处猜错，代价都是让复核的人去读一份无关的正文，
+    而这种错**看起来完全正常**。
+
+    `limit` 是给任务书省字符用的：一两条地址足以说明「背后有全文可读」。
+    """
+    path = normalize_path(str(file_path or ""))
+    if not path or not evidence_index:
+        return ()
+    refs: list[EvidenceRef] = []
+    for ref in evidence_index.values():
+        if ref.kind not in _EVIDENCE_REFERRABLE_KINDS:
+            continue
+        if not _label_names_path(ref.label, ref.kind, path):
+            continue
+        refs.append(ref)
+        if len(refs) >= limit:
+            break
+    return tuple(refs)
+
+
+def _label_names_path(label: str, kind: str, path: str) -> bool:
+    """这个 `label` 说的是**这个文件**吗。
+
+    判据是「路径作为**一段**出现」，**不是** `in` 子串：`config/a.lua` 是
+    `file_diff ab12 x/config/a.lua` 的子串，而它们背后是两份不同的正文 —— 那种错会让
+    复核的人读到另一个文件，且看不出哪里不对。
+
+    所以只有两种情形算命中：
+
+    * 路径是 label 里**一个完整的空白分隔段**（绝大多数路径：没有空格）；
+    * 路径本身**带空格**，于是它必然是 label 的结尾，且前一个字符是分隔它的空格
+      （`... my dir/a.lua` 的前缀以空格收尾）。这一条**必须**带上前面那个字符的判据，
+      否则 `x/config/a.lua` 会靠 `endswith` 混进来 —— 那正是上面那个错。
+    """
+    text = str(label or "")
+    if not text.startswith(f"{kind} ") or path not in text:
+        return False
+    if path in text.split():
+        return True
+    return text.endswith(path) and text[: len(text) - len(path)].endswith(" ")
 
 
 @dataclass(frozen=True)

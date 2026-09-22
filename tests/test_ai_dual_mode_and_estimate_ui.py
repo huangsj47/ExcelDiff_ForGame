@@ -239,6 +239,36 @@ _ESTIMATE = {
               "mode_samples_missing": False, "files": {"low": 8, "high": 40},
               "shards": 4, "run_ids": [1, 2, 3]},
     "notes": ["按最近 3 次同类运行的单文件用量折算（每文件 100,000 ~ 200,000 token，目标 19 个文件）。"],
+    # 本次动作的三个**事实**（E8）：增量文件数 / 补偿文件数 / 基线 run。它们不参与
+    # 区间折算（见 `usage.estimate_analysis`），界面把它们单独摆一行。
+    "delta_files": 35,
+    "compensation_files": 20,
+    "baseline_run": {"run_id": 22, "created_at": "2026-09-21T09:30:00", "scope": "incremental"},
+    "upgrade_reason": "",
+    # 运行计划（E3）：窗口来源 / 平台内置提示词占用 / 每工具单条上限 / 保留输出空间。
+    "budget_plan": {
+        "prompt_chars": {
+            "configured": 2_000_000,
+            "effective": 580_000,
+            "platform_overhead": 20_000,
+            "clamped": True,
+            "window_source": "not_probed_default",
+            "reason": "运行前不探测模型：按平台默认窗口 1,000,000 token 的 60% 水位"
+                      "（600,000 字）算，扣除平台内置提示词后是 580,000 字。",
+        },
+        "per_role": {"max_rounds": 8, "max_tool_requests": 40},
+        "roles": {"count": 5, "shards": 3, "synthesis": True, "verify": True},
+        "job_theoretical_max": {"rounds": 40, "tool_requests": 200},
+        "reserved_output": {"chars": 400_000},
+        "tool_limits": {
+            "commit_detail": 20_000,
+            "file_diff": 30_333,
+            "file_content": 30_333,
+            "file_content_provider_max_chars": 11_000,
+            "read_reference": 30_333,
+            "find_references": 20_000,
+        },
+    },
 }
 
 _PROBE_TEMPLATE = """
@@ -335,12 +365,20 @@ async function runOne(probeSource, scenarios) {
 });
 """
 
+# 增量那一份代价载荷：除了模式之外与 `_ESTIMATE` 逐字相同（`_ESTIMATE` 是全量那份）。
+_INCREMENTAL_ESTIMATE = {**_ESTIMATE, "mode": "incremental"}
+
 _SCENARIOS = [
-    # provenance 没变 + 基线在 → **一个字都不弹**（验收第 4 条的反向用例）
-    {"name": "unchanged", "action": "choose", "requested": "incremental",
-     "baseline": {"hasResult": True, "mismatch": False, "note": "", "createdAt": "2026-09-20 10:00:00"}},
-    # 基线状态读不到（网络抖）→ 也不弹假警告
-    {"name": "unreadable", "action": "choose", "requested": "incremental", "baseline": None},
+    # provenance 没变 + 基线在 → 弹**一份只读预检**（报告 §5.5：调用模型前先看清要做什么）
+    {"name": "unchanged", "action": "choose", "requested": "incremental", "choices": ["ok"],
+     "baseline": {"hasResult": True, "mismatch": False, "note": "", "createdAt": "2026-09-20 10:00:00"},
+     "estimate": _INCREMENTAL_ESTIMATE},
+    {"name": "unchanged_cancel", "action": "choose", "requested": "incremental", "choices": [None],
+     "baseline": {"hasResult": True, "mismatch": False, "note": "", "createdAt": "2026-09-20 10:00:00"},
+     "estimate": _INCREMENTAL_ESTIMATE},
+    # 基线状态读不到（网络抖）→ 不弹**假警告**（普通增量那份预检照弹，但它不是警告）
+    {"name": "unreadable", "action": "choose", "requested": "incremental", "choices": ["ok"],
+     "baseline": None, "estimate": _INCREMENTAL_ESTIMATE},
     # provenance 变了：列出这件事、推荐全量、**仍允许继续增量**
     {"name": "mismatch_continue", "action": "choose", "requested": "incremental", "choices": ["incremental"],
      "baseline": {"hasResult": True, "mismatch": True,
@@ -368,6 +406,18 @@ _SCENARIOS = [
          "computable": True, "currency": "CNY",
          "low": {"amount": "2.00", "amount_exact": "2", "currency": "CNY"},
          "high": {"amount": "5.25", "amount_exact": "5.25", "currency": "CNY"},
+     }}},
+    {"name": "estimate_lines_incremental", "action": "estimateLines",
+     "payload": _INCREMENTAL_ESTIMATE},
+    {"name": "estimate_lines_upgrade", "action": "estimateLines",
+     "payload": {**_ESTIMATE, "mode": "incremental", "upgrade_reason": "first_run"}},
+    {"name": "estimate_lines_not_clamped", "action": "estimateLines",
+     "payload": {**_ESTIMATE, "budget_plan": {
+         **_ESTIMATE["budget_plan"],
+         "prompt_chars": {**_ESTIMATE["budget_plan"]["prompt_chars"],
+                          "configured": 560_000, "effective": 560_000,
+                          "platform_overhead": 0, "clamped": False,
+                          "reason": ""},
      }}},
     {"name": "estimate_lines_nohistory", "action": "estimateLines",
      "payload": {"mode": "full", "planned_files": None, "tokens": {"low": None, "high": None},
@@ -449,26 +499,68 @@ def _case(rel: str, name: str) -> dict:
 # --- 验收 4 的反向用例：provenance 没变时不弹窗 ------------------------------
 
 @with_rels
-def test_an_unchanged_provenance_pops_nothing_and_goes_incremental(rel: str):
-    """**provenance 没变时默认增量不弹窗**（验收第 4 条）。
+def test_an_unchanged_provenance_pops_a_read_only_precheck_before_any_model_call(rel: str):
+    """**普通增量也要先弹一份只读预检** —— 这一条本轮的断言被**故意改过**。
 
-    这一条只有真跑才算数：静态断言下「每次点击都弹一个框」的实现照样绿灯。
+    改之前的断言是「provenance 没变时一个字都不弹」（当时的验收第 4 条）。用户后来
+    明确否掉了它：复核报告 §5.5 记着「点击绿色增量按钮后任务直接启动，没有先显示 35 个
+    delta、20 个补偿文件、基线 Run 22 和升级原因；这仍不满足用户要求的『调用模型前
+    选择』」。所以现在这条例的语义翻了过来：
+
+    * **弹**（普通增量不再是「静默开跑」）；
+    * 而且弹的是一份**只读**预检 —— 它只摆事实（本次增量文件数 / 补偿文件数 / 基线 run /
+      区间），**不替用户做决定**，没有第二个选项；
+    * 用户点确认才 `return 'incremental'`，取消则返回 `null`（调用方什么都不做）。
+
+    「只读」这一条不是形容词：弹窗的选项必须只有一个确认键，出现第二个「换成全量」之类
+    的选项就说明它变成了决策框 —— 那是 `mismatch` / `first_run` 那两条分支的活。
     """
     item = _case(rel, "unchanged")
     assert item["mode"] == "incremental", item
-    assert item["dialogs"] == [], f"provenance 没变却弹了框：{item['dialogs']}"
-    assert item["mismatchAccepted"] is False, "没弹框却把「与基线不可比」记上了"
-    assert item["estimateModes"] == [], (
-        f"provenance 没变也去要了估算（多一次请求）：{item['estimateModes']}"
+    assert len(item["dialogs"]) == 1, f"普通增量没有先摆事实：{item['dialogs']}"
+    dialog = item["dialogs"][0]
+    assert dialog.get("choices") is None, (
+        f"这份预检带着选项表（它应当只有确认/取消两个默认键）：{dialog['choices']}"
     )
+    assert "开始增量分析" == dialog["okText"], dialog
+    assert item["mismatchAccepted"] is False, "普通增量不该被记上「与基线不可比」"
+    assert item["estimateModes"] == ["incremental"], (
+        f"这次预检要按**增量**去要估算：{item['estimateModes']}"
+    )
+    # 事实要真的被摆出来（不是弹一个空框）。
+    facts = dict((pair[0], pair[1]) for pair in dialog["lines"])
+    assert "本次增量文件数" in facts and "补偿文件数" in facts and "基线 run" in facts, facts
+
+
+@with_rels
+def test_cancelling_the_incremental_precheck_creates_nothing(rel: str):
+    """普通增量那份预检取消 → `null`，调用方**什么都不做**（不建 job、不花钱）。
+
+    与 `mismatch_cancel` 是同一语义的两个入口：**新增的这个确认点不能变成一个新的事故点**
+    （「点了取消却还是跑起来了」是这类改动最容易引入的回归）。
+    """
+    item = _case(rel, "unchanged_cancel")
+    assert item["mode"] is None, item
+    assert item["mismatchAccepted"] is False, item
 
 
 @with_rels
 def test_an_unreadable_baseline_state_does_not_fake_a_warning(rel: str):
-    """基线状态**读不到**（网络抖 / 403）时不弹假警告 —— 假警告会让人学会不看警告。"""
+    """基线状态**读不到**（网络抖 / 403）时不弹**假警告** —— 假警告会让人学会不看警告。
+
+    注意它仍然会弹普通增量那份预检（那是「这次要做什么」，不是警告）：这条守的是
+    **框里有没有一句凭空的话**，不是「弹不弹框」。
+    """
     item = _case(rel, "unreadable")
     assert item["mode"] == "incremental", item
-    assert item["dialogs"] == [], item["dialogs"]
+    assert len(item["dialogs"]) == 1, item["dialogs"]
+    dialog = item["dialogs"][0]
+    assert dialog.get("choices") is None, dialog["choices"]
+    blob = json.dumps(dialog, ensure_ascii=False)
+    # 只查**警告本身**的措辞：普通预检里那句「没有升级：这次跑的就是你选的那个模式」
+    # 是一句正常的说明，不是警告（拿「升级」两个字当判据会把它误伤）。
+    for forbidden in ("不可比", "旧版评审规程", "会被升级为全量"):
+        assert forbidden not in blob, f"读不到基线状态却弹了一句「{forbidden}」：{blob}"
 
 
 # --- 验收 3：provenance 变了 → 列出来、推荐全量、仍允许增量 --------------------
@@ -534,6 +626,123 @@ def test_the_confirm_dialog_covers_the_four_required_facts(rel: str):
     assert "1,200,000" in facts["预计 token"] and "3,400,000" in facts["预计 token"], facts
     assert "8.0 分钟" in facts["最近一次实际耗时"], facts
     assert "没有命中可复用基线" in facts["可复用基线"], facts
+
+
+@with_rels
+def test_the_estimate_request_carries_the_delta_count_it_already_knows(rel: str):
+    """预检请求要带上**服务端上一轮告诉我们的增量文件数**（`files=`）。
+
+    区间是按文件数缩放的（`estimate_analysis`：单文件强度 × 目标文件数）。不带的话
+    `planned_files` 恒为空，区间只能拿历史总量顶 —— 「预计文件数」那一行也就永远是
+    「按最近一次实测的 N 个文件估」。这个数**来自服务端**（`delta_files`），不是页面
+    自己算的：页面算不出增量差集，编一个数就是把区间建在沙子上。
+    """
+    script = _script(rel)
+
+    assert "params.set('files', String(weeklyAiKnownDeltaFiles))" in script, script[:200]
+    assert "if (typeof data.delta_files === 'number') weeklyAiKnownDeltaFiles = data.delta_files;" in script
+    assert "let weeklyAiKnownDeltaFiles = null;" in script, "那个变量没有声明"
+
+
+# --- E3：运行计划（窗口来源 / 平台开销 / 单条上限）必须在框里看得见 -------------
+
+@with_rels
+def test_the_dialog_says_where_the_window_came_from(rel: str):
+    """**模型窗口来源**：`600,000` 这个水位是怎么来的，必须写出来。
+
+    「按默认窗口压的」与「端点声明了窗口」是两件事，界面不写清的话，读的人会以为
+    平台问到了端点。预估端点**不探测模型**，所以这条在运行前只可能是「按默认值」。
+    """
+    facts = dict((pair[0], pair[1]) for pair in _case(rel, "estimate_lines_full")["lines"])
+
+    assert "模型窗口来源" in facts, list(facts)
+    assert "1,000,000 token" in facts["模型窗口来源"], facts["模型窗口来源"]
+    # 不许把「未探测」说成端点给的（那是假设，不是事实）。
+    assert "不探测" in facts["模型窗口来源"], facts["模型窗口来源"]
+
+
+@with_rels
+def test_the_dialog_names_the_platform_overhead_and_every_single_item_cap(rel: str):
+    """**平台内置提示词占用**与**单条上限**：大预算为什么仍被截断，这两行是答案。"""
+    facts = dict((pair[0], pair[1]) for pair in _case(rel, "estimate_lines_full")["lines"])
+
+    assert "平台内置提示词占用" in facts, list(facts)
+    assert "20,000" in facts["平台内置提示词占用"], facts
+
+    assert "单条上限" in facts, list(facts)
+    cap = facts["单条上限"]
+    assert "30,333" in cap, cap
+    # `file_content` 那一档要写出**取数侧**的真实上限 —— 计划里那个 30,333 给不到模型，
+    # 正文在取数侧就按 11,000 切好了（写 30,333 就是一句谎话）。
+    assert "取数侧实际夹在 11,000 字" in cap, cap
+    assert "预留输出空间" in facts and "400,000" in facts["预留输出空间"], facts
+
+
+@with_rels
+def test_a_clamped_budget_is_written_as_a_clamp_not_as_a_fact(rel: str):
+    """被窗口压住时写「**会被**模型窗口压到 N」，没压住时写「N 当前预估生效」。
+
+    这两句话不能混用：前者是一次预测（运行前还没探测端点），后者是一个已经成立的
+    事实。原先无论哪种情况都写「N 当前预估生效」，于是把「未探测」说成了事实 —— 而
+    用户据此以为「我配的 2,000,000 真的生效了」。
+    """
+    clamped = dict((pair[0], pair[1]) for pair in _case(rel, "estimate_lines_full")["lines"])
+    assert "2,000,000" in clamped["提示词字符预算"], clamped
+    assert "会被模型窗口压到 580,000" in clamped["提示词字符预算"], clamped["提示词字符预算"]
+    assert "当前预估生效" not in clamped["提示词字符预算"], clamped["提示词字符预算"]
+
+    plain = dict((pair[0], pair[1]) for pair in _case(rel, "estimate_lines_not_clamped")["lines"])
+    assert "560,000" in plain["提示词字符预算"], plain
+    assert "当前预估生效" in plain["提示词字符预算"], plain["提示词字符预算"]
+    assert "会被模型窗口压到" not in plain["提示词字符预算"], plain["提示词字符预算"]
+
+
+# --- E8：本次动作的三个事实 + 升级原因 ----------------------------------------
+
+@with_rels
+def test_the_dialog_shows_the_three_facts_of_this_action(rel: str):
+    """**本次增量文件数 / 补偿文件数 / 基线 run**（报告 §5.5 点名要的三样）。
+
+    用的是**增量**那份载荷：全量不看增量基线，那两行在那边写的是「不适用」
+    （见 `test_a_full_estimate_marks_the_incremental_facts_as_not_applicable`）。
+    """
+    facts = dict(
+        (pair[0], pair[1]) for pair in _case(rel, "estimate_lines_incremental")["lines"]
+    )
+
+    assert "本次增量文件数" in facts and "35" in facts["本次增量文件数"], facts
+    assert "补偿文件数" in facts and "20" in facts["补偿文件数"], facts
+    assert "基线 run" in facts, facts
+    assert "#22" in facts["基线 run"], facts["基线 run"]
+    assert "2026-09-21 09:30" in facts["基线 run"], facts["基线 run"]
+
+
+@with_rels
+def test_the_dialog_says_there_is_no_upgrade_and_says_what_it_is_when_there_is(rel: str):
+    """**升级原因**：没有就如实说没有（不许无话找话），有就说人话（不许给码）。"""
+    plain = dict(
+        (pair[0], pair[1]) for pair in _case(rel, "estimate_lines_incremental")["lines"]
+    )
+    assert "升级原因" in plain, list(plain)
+    assert "没有升级" in plain["升级原因"], plain["升级原因"]
+
+    upgraded = dict((pair[0], pair[1]) for pair in _case(rel, "estimate_lines_upgrade")["lines"])
+    assert "全量" in upgraded["升级原因"], upgraded["升级原因"]
+    assert "first_run" not in upgraded["升级原因"], upgraded["升级原因"]
+
+
+@with_rels
+def test_a_full_estimate_marks_the_incremental_facts_as_not_applicable(rel: str):
+    """全量不看不看增量基线 —— 那两行写「不适用」，**不是**「没有算出来」。
+
+    两句话的处置完全不同：前者是「这件事对全量没有意义」，后者是「平台这次没读出来」。
+    把后者说成前者会掩盖一次真实的读取失败。
+    """
+    facts = dict((pair[0], pair[1]) for pair in _case(rel, "estimate_lines_full")["lines"])
+
+    assert "不适用" in facts["本次增量文件数"], facts["本次增量文件数"]
+    assert "不适用" in facts["补偿文件数"], facts["补偿文件数"]
+    assert "没有算出来" not in facts["本次增量文件数"], facts
 
 
 @with_rels

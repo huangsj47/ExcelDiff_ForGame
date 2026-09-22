@@ -703,3 +703,128 @@ class TestTheEstimateEndpoint:
 
         assert body["mode"] == "full"
         assert any("认不出来" in note for note in body["notes"])
+
+
+# ==========================================================================
+#  六、三个**事实**字段：算进来的是区间，不是这三样（2026-09-22，E8）
+# ==========================================================================
+
+
+class TestTheThreeFactsDoNotEnterTheArithmetic:
+    """`delta_files` / `compensation_files` / `baseline_run` 是**本次动作的事实**。
+
+    界面要拿它们回答「这次到底要分析什么」（用户点增量之后最先问的就是这个），
+    而它们与「预计花多少」是两件事：把补偿文件数折进 token 区间等于凭空造一个
+    观测不到的系数（本模块 docstring 第 5 条对 `baseline_reusable` 是同一条处置）。
+    所以这几个字段必须**原样穿过去**，且不能动算术的任何一格。
+    """
+
+    def test_it_passes_them_through_and_keeps_the_range_untouched(self):
+        plain = estimate_analysis(planned_files=100, mode="incremental", recent_runs=[_sample(1)])
+        with_facts = estimate_analysis(
+            planned_files=100,
+            mode="incremental",
+            recent_runs=[_sample(1)],
+            delta_files=35,
+            compensation_files=20,
+            baseline_run={
+                "run_id": 7,
+                "created_at": "2026-09-20T10:00:00",
+                "scope": "incremental",
+            },
+        )
+
+        assert with_facts["tokens"] == plain["tokens"], "事实字段混进了 token 区间"
+        assert with_facts["duration_ms"] == plain["duration_ms"]
+        assert with_facts["cost"] == plain["cost"]
+        assert with_facts["delta_files"] == 35
+        assert with_facts["compensation_files"] == 20
+        assert with_facts["baseline_run"]["run_id"] == 7
+        assert with_facts["baseline_run"]["scope"] == "incremental"
+        # 这句话是给用户看的：这三个数不进上面的区间，别把它当成「便宜了/贵了」的依据。
+        assert any("不参与" in note for note in with_facts["notes"]), with_facts["notes"]
+
+    def test_unknown_facts_stay_none_instead_of_zero(self):
+        """算不出来时是 `None`，不是 `0`。**`0` 是一个确定的结论**（「一个文件都不变」）。"""
+        result = estimate_analysis(planned_files=100, mode="incremental", recent_runs=[])
+
+        assert result["delta_files"] is None
+        assert result["compensation_files"] is None
+        assert result["baseline_run"] is None
+        assert not any("不参与" in note for note in result["notes"])
+
+
+# ==========================================================================
+#  七、有效预算：**配置 2,000,000 不许显示成 2,000,000**（E3 验收的唯一必须改点）
+# ==========================================================================
+
+
+class TestTheEstimateSaysWhatTheWindowReallyAllows:
+    """E3 验收原文：「配置 2M 字但端点未声明窗口时，页面在运行前明确显示有效约 600k
+    减平台开销」。
+
+    预估端点是**只读**的（不探模型，见 `test_it_is_get_only_and_produces_no_model_call`），
+    所以这里算的是「未探测下的水位」：按 `DEFAULT_CONTEXT_TOKENS`（1M）的 60% 水位，
+    也就是 600,000 字，再减掉平台内置提示词那一段。**不能**拿配置值冒充生效值 ——
+    那是把一次必然被上游拒绝的调用说成「预算够用」。
+    """
+
+    def test_a_two_million_budget_is_reported_at_the_watermark(self):
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+            ok, message, errors = update_project_analysis_config(
+                project_id, {"prompt_char_budget": 2_000_000}, updated_by="tester"
+            )
+            assert ok, (message, errors)
+
+            result = analysis_estimate(project_id, mode="full")
+            plan = result["budget_plan"]
+
+        prompt = plan["prompt_chars"]
+        assert prompt["configured"] == 2_000_000
+        assert prompt["clamped"] is True, prompt
+        assert prompt["effective"] < prompt["configured"], prompt
+        # 生效值 + 平台开销 == 窗口水位（600,000）：平台内置那一段从水位里出，
+        # 不能重复算两次（与 `_apply_model_window` 同一条口径）。
+        assert prompt["effective"] + prompt["platform_overhead"] == 600_000, prompt
+        assert prompt["window_source"] == "not_probed_default", prompt
+        # 这句说明必须能被界面直接渲染（它是「600,000 是哪来的」的唯一出处）。
+        assert prompt["reason"].strip(), prompt
+        assert "1,000,000" in prompt["reason"] or "默认" in prompt["reason"], prompt["reason"]
+
+    def test_a_budget_under_the_watermark_is_left_alone(self):
+        """水位**只压不放**：560,000 的项目显示的就是 560,000（既有项目行为不变）。"""
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+            ok, _, errors = update_project_analysis_config(
+                project_id, {"prompt_char_budget": 560_000}, updated_by="tester"
+            )
+            assert ok, errors
+
+            prompt = analysis_estimate(project_id, mode="full")["budget_plan"]["prompt_chars"]
+
+        assert prompt["configured"] == 560_000
+        assert prompt["effective"] == 560_000, prompt
+        assert prompt["clamped"] is False, prompt
+        assert prompt["window_source"] == "not_probed_default", prompt
+
+    def test_the_plan_names_every_single_item_cap_and_the_provider_truth(self):
+        """计划要把每工具的单条上限摆出来，且 `file_content` 要标明**取数侧**的真实上限。"""
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+
+            plan = analysis_estimate(project_id, mode="full")["budget_plan"]
+
+        limits = plan["tool_limits"]
+        for kind in ("commit_detail", "file_diff", "file_content", "read_reference",
+                     "find_references"):
+            assert kind in limits, (kind, limits)
+        # 抬起来的是 diff / reference 这一档（取数侧不再夹它们）……
+        assert limits["file_diff"] > 11_000, limits
+        # ……而正文那一档必须如实给出「取数侧实际夹在多少字」，否则这个键就是谎言。
+        assert limits["file_content_provider_max_chars"] == 11_000, limits
+        assert limits["file_content_provider_max_chars"] <= limits["file_content"]
+        assert plan["reserved_output"]["chars"] > 0, plan["reserved_output"]
