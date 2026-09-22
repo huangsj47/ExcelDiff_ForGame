@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from models import Project, Repository, WeeklyVersionConfig, WeeklyVersionDiffCache, db
@@ -33,6 +34,29 @@ from utils.logger import log_print
 FULL_ANALYSIS_FILE_THRESHOLD = 50
 
 FULL_ANALYSIS_RATIO_THRESHOLD = 0.30
+DEPENDENCY_MAX_FILES = 50
+
+
+def _same_stem_dependency_entries(entries, roots, *, already, limit=DEPENDENCY_MAX_FILES):
+    """为变更根补齐同名生成物/源表；只做一跳，且不把它冒充本轮改动。"""
+    stems = {
+        PurePosixPath(str(getattr(item, "file_path", "") or "").replace("\\", "/")).stem.lower()
+        for item in roots
+        if getattr(item, "file_path", None)
+    }
+    if not stems or limit <= 0:
+        return []
+    result = []
+    for entry in entries:
+        key = (entry.config_id, entry.file_path)
+        if key in already:
+            continue
+        stem = PurePosixPath(str(entry.file_path or "").replace("\\", "/")).stem.lower()
+        if stem and stem in stems:
+            result.append(entry)
+            if len(result) >= limit:
+                break
+    return result
 
 def _repo_priority(repo: Repository) -> int:
     """取样时仓库的先手顺序：代码仓库优先于配表仓库。
@@ -252,11 +276,20 @@ def _summarize_weekly_files(
     if compensation:
         delta_entries = delta_entries + compensation
 
+    dependency = _same_stem_dependency_entries(
+        entries,
+        delta_entries,
+        already={(entry.config_id, entry.file_path) for entry in delta_entries},
+    )
+    if dependency:
+        delta_entries = delta_entries + dependency
+
     if baseline is not None and not delta_entries:
         return {}, {}, "no_change"
 
     delta_files: List[dict] = []
     compensated_keys = {(entry.config_id, entry.file_path) for entry in compensation}
+    dependency_keys = {(entry.config_id, entry.file_path) for entry in dependency}
     for entry in delta_entries:
         repo = repo_lookup.get(entry.repository_id)
         repo_name = repo.name if repo else f"repo-{entry.repository_id}"
@@ -278,6 +311,9 @@ def _summarize_weekly_files(
             # 两条不分开写，读者会把补偿项当成新变更，于是「这周改了什么」那本账就错了。
             item["source"] = "compensation"
             item["reason"] = "上一轮装进了输入但没有取到任何证据"
+        elif (entry.config_id, entry.file_path) in dependency_keys:
+            item["source"] = "dependency"
+            item["reason"] = "与本轮变更文件同名的源表或生成物，作为一跳依赖核查项"
         delta_files.append(item)
 
     for cfg in configs:
@@ -307,6 +343,7 @@ def _summarize_weekly_files(
             (entry.file_path, tables_by_repo.get(entry.repository_id, ()))
             for entry in delta_entries
             if (entry.config_id, entry.file_path) not in compensated_keys
+            and (entry.config_id, entry.file_path) not in dependency_keys
         ),
         facts=facts,
     )
@@ -331,6 +368,7 @@ def _summarize_weekly_files(
         # 这轮输入里有多少条是**补偿项**（上一轮没取到证据的那些）。单独一个计数是为了
         # 让「这周真的改了多少」与「补了多少」在报告里能分开读。
         "compensation_files": len(compensation),
+        "dependency_files": len(dependency),
         "critical_paths": scan.hit,
         # 命中的前几条（含理由）与模式来源：`_decide_scope` 只回一个原因串，具体是哪条
         # 路径、依据是谁声明的，只有这里才有。来源那一条哪怕没命中也要记 —— 否则
@@ -343,6 +381,9 @@ def _summarize_weekly_files(
         "delta_files": delta_files,
         "compensation_files": [
             item for item in delta_files if item.get("source") == "compensation"
+        ],
+        "dependency_files": [
+            item for item in delta_files if item.get("source") == "dependency"
         ],
     }, None
 

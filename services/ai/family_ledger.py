@@ -100,6 +100,7 @@ class MemberPlan:
     label: str
     role: str
     dimensions: tuple[str, ...]
+    assigned_paths: tuple[str, ...] = ()
 
     @property
     def is_synthesis(self) -> bool:
@@ -342,12 +343,19 @@ def reconcile_candidates(
     # 汇总交回了哪些编号、其中哪些落到了最终清单上。
     submitted = _submitted_candidate_ids(synthesis, reduction)
     landed = _landed_candidate_ids(synthesis, reduction)
+    dispositions = {
+        item.candidate_id: item
+        for item in (
+            synthesis.payload.candidate_dispositions if synthesis.payload is not None else ()
+        )
+    }
     lines: list[str] = []
     dropped: list[DroppedItem] = []
     settled = 0
     # 复核裁决那三种去向各攒一段（`_ruling_blocks`）。撤销与降级**分开攒**：前者是移出
     # 清单、后者是还在清单里，读的人对这两件事的处置不一样。
     ruling_lines: dict[str, list[str]] = {verdict: [] for verdict in RULING_FATES}
+    disposition_lines: list[str] = []
     for candidate in candidates:
         fate = _ruling_fate(candidate, reduction)
         if fate is not None:
@@ -355,6 +363,24 @@ def reconcile_candidates(
             ruling_lines[verdict].append(_ruling_line(candidate, verdict, row))
             continue
         if candidate.id in landed:
+            continue
+        disposition = dispositions.get(candidate.id)
+        if disposition is not None and disposition.status == "rejected":
+            disposition_lines.append(
+                f"- [{candidate.id}] **已明确拒绝**：{disposition.reason}"
+            )
+            settled += 1
+            continue
+        if disposition is not None and disposition.status == "deferred":
+            dropped.append(
+                DroppedItem(
+                    kind="subagent",
+                    index=candidate.index,
+                    reason="汇总明确标记为待复核",
+                    detail=f"[{candidate.id}] {disposition.reason}"[:300],
+                )
+            )
+            lines.append(f"- [{candidate.id}] **待复核**：{disposition.reason}")
             continue
         if candidate.id in submitted:
             # 汇总交过这个编号，但它没有留在最终清单里 —— 平台在这一侧把它处置掉了
@@ -373,7 +399,7 @@ def reconcile_candidates(
         lines.append(_gap_line(candidate))
 
     # 一条编号都没交回：**说一次，不报 N 条**（见 docstring 最后那两节）。
-    no_lineage = bool(candidates) and not submitted
+    no_lineage = bool(candidates) and not submitted and not dispositions
     shard_gaps = _shard_gap_lines(steps)
     verify_gaps = _verify_gap_lines(steps)
     explained = tuple(
@@ -393,10 +419,16 @@ def reconcile_candidates(
         and not verify_gaps
         and not explained
         and not settled
+        and not disposition_lines
     ):
         return "", ()
 
     blocks: list[str] = ["## 信息缺口（平台补充）"]
+    if disposition_lines:
+        blocks.append(
+            "汇总已对以下候选给出明确拒绝理由；它们不是静默漏项：\n\n"
+            + "\n".join(disposition_lines)
+        )
     if shard_gaps:
         blocks.append(
             "本次分析启用了分片代理，以下几块**没能交回结论** —— 是「压根没跑」还是"

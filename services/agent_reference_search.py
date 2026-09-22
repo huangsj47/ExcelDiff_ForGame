@@ -18,15 +18,42 @@ GIT_DIR 的解析各不一样），而 `get_file_content_from_git` 是**平台�
 
 from __future__ import annotations
 
+import hashlib
+import threading
+from collections import OrderedDict
 from dataclasses import replace
 
 from models import Repository, db
 from services.ai.reference_search import (
-    MAX_SCAN_FILES,
     SearchResult,
     render_result,
-    search_files,
 )
+from services.ai.reference_index import SnapshotReferenceIndex
+
+_INDEX_CACHE: "OrderedDict[str, SnapshotReferenceIndex]" = OrderedDict()
+_INDEX_CACHE_LOCK = threading.Lock()
+_INDEX_CACHE_MAX = 8
+
+
+def _snapshot_key(repository_id: int, pairs: list[tuple[str, str]]) -> str:
+    body = "\n".join(f"{path}\0{commit}" for path, commit in pairs)
+    return f"{repository_id}:" + hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _cached_index(key: str):
+    with _INDEX_CACHE_LOCK:
+        value = _INDEX_CACHE.get(key)
+        if value is not None:
+            _INDEX_CACHE.move_to_end(key)
+        return value
+
+
+def _store_index(key: str, value: SnapshotReferenceIndex) -> None:
+    with _INDEX_CACHE_LOCK:
+        _INDEX_CACHE[key] = value
+        _INDEX_CACHE.move_to_end(key)
+        while len(_INDEX_CACHE) > _INDEX_CACHE_MAX:
+            _INDEX_CACHE.popitem(last=False)
 
 
 def apply_batch_total(result: SearchResult, total_files) -> SearchResult:
@@ -81,7 +108,7 @@ def search_references_for_agent(payload: dict) -> dict:
     from services.vcs_content_service import get_file_content_from_git
 
     pairs: list[tuple[str, str]] = []
-    for entry in entries[:MAX_SCAN_FILES]:
+    for entry in entries:
         if isinstance(entry, (list, tuple)) and len(entry) >= 2 and entry[0]:
             pairs.append((str(entry[0]), str(entry[1] or '')))
     if not pairs:
@@ -90,9 +117,20 @@ def search_references_for_agent(payload: dict) -> dict:
     def reader(path: str, commit: str):
         return get_file_content_from_git(repository, commit, path)
 
-    result = search_files(pairs, query, reader=reader, prefix=str(payload.get('prefix') or ''))
+    cache_key = _snapshot_key(int(repository_id), pairs)
+    index = _cached_index(cache_key)
+    if index is None:
+        index = SnapshotReferenceIndex.build(pairs, reader=reader)
+        _store_index(cache_key, index)
+    result = index.search(query, prefix=str(payload.get('prefix') or ''))
     result = apply_batch_total(result, payload.get('total_files'))
-    text = render_result(result)
+    text = render_result(
+        result,
+        scope_note=(
+            f"索引版本 `{result.index_version}`，快照 `{result.snapshot_digest[:12]}`；"
+            "相同快照后续查询复用索引，不重复读取 blob。"
+        ),
+    )
     return {
         'text': text,
         'query': result.query,
@@ -103,4 +141,6 @@ def search_references_for_agent(payload: dict) -> dict:
         'binary': result.binary,
         'truncated_files': result.truncated_files,
         'truncated_hits': result.truncated_hits,
+        'index_version': result.index_version,
+        'snapshot_digest': result.snapshot_digest,
     }

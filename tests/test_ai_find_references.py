@@ -497,8 +497,8 @@ def test_both_search_paths_charge_the_budget_by_the_same_rule(monkeypatch):
     )
 
 
-def test_the_agent_is_told_the_real_batch_size_not_the_truncated_one(monkeypatch):
-    """**Agent 那条路的覆盖率分母必须是「本批次一共改了多少个文件」。**
+def test_the_agent_receives_the_full_snapshot_for_indexing(monkeypatch):
+    """Agent receives the full frozen snapshot once so later queries can reuse its index.
 
     平台把 `entries` 截到额度上限（`MAX_SCAN_FILES`）才发出去，所以 Agent 手里
     `len(entries)` 恒等于上限。让它拿这个数当分母，抬头就会写成
@@ -512,7 +512,8 @@ def test_the_agent_is_told_the_real_batch_size_not_the_truncated_one(monkeypatch
     """
     import services.agent_file_content_dispatch as dispatch
     from services.ai import platform_provider as pp
-    from services.ai.reference_search import MAX_SCAN_FILES, SearchResult
+    from services.ai.reference_search import MAX_SCAN_FILES
+    from services.ai.reference_index import SnapshotReferenceIndex
 
     batch = [f"scripts/f{index:04d}.lua" for index in range(MAX_SCAN_FILES + 40)]
     scope = AnalysisScope.from_iterables(
@@ -523,8 +524,9 @@ def test_the_agent_is_told_the_real_batch_size_not_the_truncated_one(monkeypatch
     def fake(repository, *, query, entries, prefix="", total_files=0):
         sent["entries"] = entries
         sent["total_files"] = total_files
-        # 用**真的**那一段渲染：一个文件都读不到（读不到会记进 missing，被如实说出去）
-        result = search_files(entries, query, reader=lambda path, commit: None)
+        result = SnapshotReferenceIndex.build(
+            entries, reader=lambda path, commit: None
+        ).search(query)
         result = apply_batch_total(result, total_files)
         return {"status": "ready", "scanned": result.scanned, "text": render_result(result)}
 
@@ -536,9 +538,8 @@ def test_the_agent_is_told_the_real_batch_size_not_the_truncated_one(monkeypatch
     text = provider.find_references("target_id")
 
     assert sent["total_files"] == len(batch), "分母被截成了 Agent 收到的那一批"
-    assert len(sent["entries"]) == MAX_SCAN_FILES, "前提：这一批发出去时确实被截了"
+    assert len(sent["entries"]) == len(batch), "完整快照必须交给 Agent 构建索引"
     assert f"0/{len(batch)}" in text, f"分母必须是 {len(batch)}（本批次总数）：{text}"
-    assert "文件数到了上限就停了" in text, "没搜完就必须说出来"
     assert "不代表整批里没有" in text, "「没搜到」与「没搜完」要分开"
 
 
@@ -585,9 +586,8 @@ def test_a_pending_agent_answer_is_not_a_conclusion(monkeypatch):
     assert "不等于「没有其它引用」" in text, "这句话缺了就会被读成「这里没有引用」"
 
 
-def test_the_scan_budget_stops_it_from_scanning_forever(monkeypatch):
-    """一次搜索最多扫 240 个文件，而一次分析里所有搜索加起来有总上限 ——
-    用完时如实说「这一轮没搜」，不能悄悄返回「没命中」。"""
+def test_snapshot_index_replaces_the_legacy_shared_scan_budget(monkeypatch):
+    """An exhausted legacy budget must not block a query after snapshot indexing exists."""
     import services.vcs_content_service as vcs
     from services.ai import platform_provider as pp
 
@@ -599,7 +599,8 @@ def test_the_scan_budget_stops_it_from_scanning_forever(monkeypatch):
 
     text = provider.find_references("target_id")
 
-    assert "检索额度用尽" in text
+    assert "检索额度用尽" not in text
+    assert "索引版本" in text
 
 
 def test_the_agent_side_uses_the_same_search(monkeypatch):

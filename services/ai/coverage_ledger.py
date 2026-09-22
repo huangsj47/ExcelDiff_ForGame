@@ -318,10 +318,30 @@ def build_ledger(
     listed = inventory["listed_files"]
 
     collected = executed is not None
+    executed_rows = tuple(executed or ()) if collected else ()
     if collected:
-        pairs, paths, segments, failures = _evidence_files(entries, executed)
+        pairs, paths, segments, failures = _evidence_files(entries, executed_rows)
     else:
         pairs, paths, segments, failures = set(), set(), set(), []
+
+    inspected_paths: set[str] = set()
+    if collected:
+        for raw in executed_rows:
+            item = _as_mapping(raw)
+            if str(item.get("kind") or "") not in FILE_EVIDENCE_KINDS:
+                continue
+            _commit, path, _lines = parse_evidence_label(item.get("label"))
+            if path:
+                inspected_paths.add(str(path))
+
+    manifest = _as_mapping(payload.get("manifest"))
+    manifest_entries = manifest.get("entries") if isinstance(manifest.get("entries"), list) else []
+    assigned_total = _count(manifest.get("total"))
+    assigned_count = _count(manifest.get("assigned"))
+    if assigned_total is None and manifest_entries:
+        assigned_total = len(manifest_entries)
+    if assigned_count is None and manifest_entries:
+        assigned_count = sum(bool(_as_mapping(item).get("assigned_shards")) for item in manifest_entries)
 
     evidence_pair = len(pairs) if collected else None
     evidence_path = len(paths) if collected else None
@@ -378,6 +398,19 @@ def build_ledger(
             "covered": listed,
             "total": batch,
             "ratio": _ratio(listed, batch),
+        },
+        "assignment_coverage": {
+            "covered": assigned_count,
+            "total": assigned_total,
+            "ratio": _ratio(assigned_count, assigned_total),
+        },
+        "inspection_coverage": {
+            "covered": len(inspected_paths) if collected else None,
+            "total": assigned_total or batch,
+            "ratio": _ratio(
+                len(inspected_paths) if collected else None,
+                assigned_total or batch,
+            ),
         },
         "evidence_coverage": {
             # 报告与结论按**保守**这一份读（见模块抬头）；宽松那一份同样给出来，免得

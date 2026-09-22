@@ -5,6 +5,7 @@ venv/
 env/
 
 /.codemaker/rules/rules.mdc
+.codex_runtime
 
 openspec/
 

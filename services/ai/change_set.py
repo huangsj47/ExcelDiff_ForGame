@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional, Sequence
 
 from services.ai.bundles import build_bundles, describe_bundles
+from services.ai.manifest import ManifestPlan, build_manifest
 from services.ai.prompt import CommitSummary, FileChange, render_change_summary
 from services.ai.project_facts import DEFAULT_PREFIX_DECLARATION, PrefixDeclaration
 from services.ai.scope import AnalysisScope, normalize_path
@@ -40,6 +41,8 @@ from utils.logger import log_print
 # 变更清单里最多列几组「同记号关联」（疑似同一次改动的那些）。列太多会把清单本身挤长，
 # 而它每一轮都在提示词里；剩下多少组由 `describe_bundles` 自己说明。
 DEFAULT_BUNDLE_LIMIT = 12
+DEFAULT_MANIFEST_SHARDS = 3
+MANIFEST_REFERENCE = "change-manifest"
 
 _SCOPE_LABELS = {
     "full": "全量",
@@ -63,6 +66,7 @@ class ChangeSet:
     # **它是一个结论字段，不是装饰**：没有它，「这个项目本来就没得配」与
     # 「平台根本不会配」在界面上、日志里都长得一模一样。
     bundle_note: str = ""
+    manifest: ManifestPlan = ManifestPlan((), DEFAULT_MANIFEST_SHARDS, "")
 
     @property
     def is_empty(self) -> bool:
@@ -172,6 +176,10 @@ def from_weekly_payload(
         declared_total = _positive_int(summary.get("total_files"))
     total_files = declared_total if declared_total is not None else (whitelist_total or None)
 
+    manifest = build_manifest(
+        payload.get("delta_files") or (),
+        shard_count=DEFAULT_MANIFEST_SHARDS,
+    )
     return build(
         commits,
         readable_references=readable_references,
@@ -180,6 +188,7 @@ def from_weekly_payload(
         total_files=total_files,
         whitelist=whitelist or None,
         prefixes=prefixes,
+        manifest=manifest,
     )
 
 
@@ -192,6 +201,7 @@ def build(
     total_files: Optional[int] = None,
     whitelist: Optional[Mapping[str, Iterable[str]]] = None,
     prefixes: Optional[PrefixDeclaration] = None,
+    manifest: Optional[ManifestPlan] = None,
 ) -> ChangeSet:
     """渲染清单并算出白名单范围。两种模式共用。
 
@@ -244,6 +254,23 @@ def build(
             "再据此推理。确认不了就按本批次实际改了什么如实写，不要把它当成前提。\n"
         )
 
+    resolved_manifest = manifest or build_manifest(
+        (
+            {"latest_commit_id": commit_id, "file_path": path}
+            for commit_id, paths_ in resolved_whitelist.items()
+            for path in paths_
+        ),
+        shard_count=DEFAULT_MANIFEST_SHARDS,
+    )
+    manifest_summary = resolved_manifest.summary()
+    body += (
+        "\n## 确定性文件分工\n\n"
+        f"完整 manifest 共 {manifest_summary['total']} 个文件，"
+        f"已分配 {manifest_summary['assigned']} 个（{manifest_summary['assigned_rate']:.1%}）；"
+        f"分配指纹 `{manifest_summary['assignment_digest'][:12]}`。"
+        "分片先检查自己的文件，跨文件证据仍可读取整个白名单。\n"
+    )
+
     return ChangeSet(
         summary=body,
         scope=AnalysisScope(
@@ -255,12 +282,15 @@ def build(
                 for commit_id, paths_ in resolved_whitelist.items()
                 if commit_id
             },
-            readable_references=frozenset(str(name) for name in readable_references if name),
+            readable_references=frozenset(
+                [str(name) for name in readable_references if name] + [MANIFEST_REFERENCE]
+            ),
         ),
         paths=paths or rendered_paths,
         commits=ordered,
         bundle_lines=bundle_lines,
         bundle_note=bundle_note,
+        manifest=resolved_manifest,
     )
 
 

@@ -31,7 +31,7 @@ from services.ai.engine import (
 )
 from services.ai.engine import failed as engine_failed
 from services.ai.llm_client import ChatResult
-from services.ai.protocol import Anomaly, DroppedItem
+from services.ai.protocol import AnalysisPayload, Anomaly, CandidateDisposition, DroppedItem
 from services.ai.rules import KIND_ANOMALY_CAP
 from services.ai.subagent import (
     CANDIDATE_MAX_ITEMS_PER_MEMBER,
@@ -479,6 +479,31 @@ class TestTheCandidatesAndTheReconciliation:
         assert dropped[0].kind == "subagent"
         assert "[S1-7]" in text
         assert "[S1-1]" not in text, "采纳的那条不该出现在缺口名单里"
+
+    def test_explicit_rejection_is_a_settled_disposition_not_a_gap(self):
+        candidate = self._candidate(index=7, title="【掉落】备份不再深拷贝")
+        synthesis = self._synthesis()
+        synthesis = __import__("dataclasses").replace(
+            synthesis,
+            payload=AnalysisPayload(
+                status="final",
+                report_markdown=synthesis.report_markdown,
+                dimensions=(),
+                candidate_dispositions=(
+                    CandidateDisposition(
+                        candidate_id="S1-7",
+                        status="rejected",
+                        reason="与 S2-2 是同一根因，后者证据更完整",
+                    ),
+                ),
+            ),
+        )
+
+        text, dropped = reconcile_candidates((candidate,), synthesis)
+
+        assert dropped == ()
+        assert "已明确拒绝" in text
+        assert "与 S2-2 是同一根因" in text
 
     def test_a_candidate_the_synthesis_never_handed_back_a_id_for(self):
         """标题与文件都相同，**只要没有编号声明就不算采纳**。

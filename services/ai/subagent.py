@@ -66,6 +66,7 @@ from services.ai.engine import (
     RoundRecord,
     run_analysis,
 )
+from services.ai.evidence_store import EvidenceStore
 
 # 数据模型（`MemberPlan`/`MemberOutcome`/`Candidate`/`FamilyResult`）与「平台侧对账 +
 # 谁没交回结论」的文字搬到 `services/ai/family_ledger.py`（那个文件的 docstring 写了
@@ -91,6 +92,7 @@ from services.ai.family_ledger import (  # noqa: F401 —— 本模块与测试�
 from services.ai.prompt import build_system_prompt, build_user_message
 from services.ai.prompt_cache import mark_cache_breakpoint
 from services.ai.protocol import Anomaly, DroppedItem, unclassified_anomalies
+from services.ai.manifest import ManifestPlan, build_manifest
 from services.ai.report_document import demote_headings
 from services.ai.rules import (
     DEFAULT_MAX_ANOMALIES,
@@ -427,6 +429,34 @@ def apply_dimensions(plan: FamilyPlan, dimensions: Sequence[str]) -> FamilyPlan:
     )
 
 
+def apply_manifest(plan: FamilyPlan, manifest: ManifestPlan) -> FamilyPlan:
+    """Attach deterministic discovery ownership without narrowing read permissions."""
+    if manifest.shard_count != plan.count:
+        manifest = build_manifest(
+            (
+                {
+                    "repository_id": item.repository_id,
+                    "repository_name": item.repository_name,
+                    "commit": item.commit,
+                    "path": item.path,
+                    "source": item.source,
+                }
+                for item in manifest.entries
+            ),
+            shard_count=plan.count,
+        )
+    members = tuple(
+        replace(
+            member,
+            assigned_paths=tuple(
+                item.path for item in manifest.entries if member.label in item.assigned_shards
+            ),
+        )
+        for member in plan.members
+    )
+    return replace(plan, members=members)
+
+
 def _clamp_verify_items(value: Any) -> int:
     try:
         size = int(value or 0)
@@ -556,6 +586,23 @@ def build_member_task(member: MemberPlan, plan: FamilyPlan) -> str:
             + "\n\n你读到了属于它们维度的问题也可以报（宁可多报，由主代理去重），"
             "但不要为了它们专门花索取额度。"
         )
+    if member.assigned_paths:
+        visible = member.assigned_paths[:200]
+        listed = "\n".join(f"- `{path}`" for path in visible)
+        omitted = len(member.assigned_paths) - len(visible)
+        tail = (
+            f"\n- ……另有 {omitted} 个，请用 "
+            "`read_reference` 读取 `change-manifest` 的后续分段"
+            if omitted
+            else ""
+        )
+        blocks.append(
+            "## 确定性文件分工\n\n"
+            f"平台给你分配了 {len(member.assigned_paths)} 个优先检查文件。每个变更文件"
+            "至少属于一个分片；关键路径可能同时属于两个分片。\n\n"
+            + listed
+            + tail
+        )
     blocks.extend(
         [
             (
@@ -602,8 +649,9 @@ def build_synthesis_task(plan: FamilyPlan, steps: Sequence[MemberOutcome]) -> st
         ),
         (
             "## 纪律（五条）\n\n"
-            "1. **每一条候选都要有去向**：要么进你的 `anomalies`（采纳），要么在报告正文"
-            "与 `dimensions` 里说明为什么不采纳（重复、证据不足、与其它条目冲突）。"
+            "1. **每一条候选都要有去向并可机器读取**：在顶层 `candidate_dispositions` 数组"
+            "逐条写 `{candidate_id, status, reason}`；status 只能是 adopted、rejected、deferred。"
+            "采纳用 adopted，明确不成立或重复用 rejected，证据不足待复核用 deferred。"
             "**不许一声不响地丢掉**。\n"
             "2. **采纳的每条结论都要带 `source_candidate_ids`**：列上它来源于哪几条候选，"
             "形如 `\"source_candidate_ids\": [\"S1-2\"]`。两条候选合成一条就列两个"
@@ -979,7 +1027,7 @@ def run_family(
     默认就是引擎的 `run_analysis`；测试用它注入假实现（本模块因此不必碰网络）。
     """
     steps: list[MemberOutcome] = []
-    body_cache: dict[Any, ContextItem] = {}
+    body_cache: MutableMapping[Any, ContextItem] = EvidenceStore()
     spent_tokens = 0
     for member in plan.members:
         reason = should_skip(member, spent_tokens) if should_skip is not None else ""

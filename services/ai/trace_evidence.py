@@ -342,6 +342,7 @@ def live_round_entry(record: Any) -> dict:
             str(note) for note in (getattr(record, "budget_notes", ()) or ()) if str(note).strip()
         )[:LIVE_RESPONSE_MAX_CHARS],
         "correction_hint": _clip(getattr(record, "correction_hint", "")),
+        "finish_reason": _clip(getattr(record, "finish_reason", ""), 40),
     }
 
 

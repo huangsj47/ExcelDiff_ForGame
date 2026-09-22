@@ -54,6 +54,13 @@ from services.task_worker_weekly_handlers import (
 # 这里按模块取用（`sync_gate.X`）而不是 `from … import X`：测试要能按属性打补丁。
 from services.ai import weekly_sync_gate as sync_gate
 
+
+def _analysis_task_queue():
+    """运行态隔离 AI 队列；未启动 worker 的维护脚本沿用原队列。"""
+    if getattr(worker, "background_task_running", False):
+        return getattr(worker, "ai_task_queue", worker.background_task_queue)
+    return worker.background_task_queue
+
 # ---------------------------------------------------------------------------
 #  平台侧租约
 #
@@ -640,7 +647,12 @@ def _enqueue_pending_row(db_task, *, waiting_groups=frozenset(), now=None):
     # （按 `time.time()` 起算等于刚入队，aging 恒为 0 —— 那正好是本次要修的那个病）。
     # 读不到 `created_at`（测试里的桩）时不动它。
     backdate_wrapper(tw, _row_waited_seconds(db_task, now=now))
-    worker.background_task_queue.put(tw)
+    target_queue = (
+        _analysis_task_queue()
+        if db_task.task_type == "weekly_ai_analysis"
+        else worker.background_task_queue
+    )
+    target_queue.put(tw)
     return True
 
 
@@ -913,7 +925,7 @@ def _ensure_analysis_task_enqueued(db_task, group_key, config_id, trigger_source
         return False
     if _is_weekly_ai_task_enqueued(getattr(db_task, 'id', None)):
         worker.retune_queued_task(
-            worker.background_task_queue,
+            _analysis_task_queue(),
             db_task.id,
             priority=priority,
             # 载荷里那份来源也要跟着改：随载荷走到执行侧（Agent 模式还会原样回传），
@@ -922,7 +934,7 @@ def _ensure_analysis_task_enqueued(db_task, group_key, config_id, trigger_source
         )
         return False
     _enqueue_weekly_ai_analysis_task(
-        worker.background_task_queue,
+        _analysis_task_queue(),
         worker.TaskWrapper,
         db_task.id,
         config_id,

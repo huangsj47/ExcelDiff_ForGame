@@ -185,6 +185,18 @@ class DimensionReview:
     note: str = ""
 
 
+CANDIDATE_DISPOSITION_STATUSES = frozenset({"adopted", "rejected", "deferred"})
+
+
+@dataclass(frozen=True)
+class CandidateDisposition:
+    """汇总代理对一条分片候选的机器可读处置。"""
+
+    candidate_id: str
+    status: str
+    reason: str = ""
+
+
 @dataclass(frozen=True)
 class DroppedItem:
     """条目级记账：**被丢弃**的条目及原因，以及**被归到「未归类」**的条目。
@@ -210,6 +222,7 @@ class AnalysisPayload:
     report_markdown: str = ""
     anomalies: tuple[Anomaly, ...] = ()
     dimensions: tuple[DimensionReview, ...] = ()
+    candidate_dispositions: tuple[CandidateDisposition, ...] = ()
     dropped: tuple[DroppedItem, ...] = field(default_factory=tuple)
 
     @property
@@ -469,6 +482,50 @@ def _coerce_dimensions(value: Any) -> tuple[tuple[DimensionReview, ...], tuple[D
     return tuple(kept), tuple(dropped)
 
 
+def _coerce_candidate_dispositions(
+    value: Any,
+) -> tuple[tuple[CandidateDisposition, ...], tuple[DroppedItem, ...]]:
+    """读取候选处置表；坏行逐条记账，不作废其余最终报告。"""
+    if value is None:
+        return (), ()
+    if not isinstance(value, list):
+        raise ProtocolError("candidate_dispositions 必须是数组")
+    kept: list[CandidateDisposition] = []
+    dropped: list[DroppedItem] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            dropped.append(DroppedItem("candidate_disposition", index, "条目不是对象"))
+            continue
+        candidate_ids = _as_candidate_ids(entry.get("candidate_id"))
+        candidate_id = candidate_ids[0] if candidate_ids else ""
+        status = _as_str(entry.get("status")).lower()
+        reason = _as_str(entry.get("reason"))
+        if not candidate_id:
+            dropped.append(DroppedItem("candidate_disposition", index, "缺 candidate_id"))
+            continue
+        if candidate_id in seen:
+            dropped.append(
+                DroppedItem("candidate_disposition", index, "candidate_id 重复", candidate_id)
+            )
+            continue
+        if status not in CANDIDATE_DISPOSITION_STATUSES:
+            dropped.append(
+                DroppedItem("candidate_disposition", index, "status 不在允许集合内", status)
+            )
+            continue
+        if status != "adopted" and not reason:
+            dropped.append(
+                DroppedItem(
+                    "candidate_disposition", index, f"{status} 必须说明 reason", candidate_id
+                )
+            )
+            continue
+        seen.add(candidate_id)
+        kept.append(CandidateDisposition(candidate_id, status, reason))
+    return tuple(kept), tuple(dropped)
+
+
 def _select_payload_object(parsed: Iterable[Any]) -> dict:
     """从解析结果里挑出符合协议外壳的那个对象。
 
@@ -519,6 +576,9 @@ def parse_payload(
         raw.get("anomalies"), dimension_ids=dimension_ids
     )
     dimensions, dropped_dimensions = _coerce_dimensions(raw.get("dimensions"))
+    dispositions, dropped_dispositions = _coerce_candidate_dispositions(
+        raw.get("candidate_dispositions")
+    )
 
     if status == STATUS_FINAL:
         if not report_markdown:
@@ -537,7 +597,8 @@ def parse_payload(
         report_markdown=report_markdown,
         anomalies=anomalies,
         dimensions=dimensions,
-        dropped=dropped_anomalies + dropped_dimensions,
+        candidate_dispositions=dispositions,
+        dropped=dropped_anomalies + dropped_dimensions + dropped_dispositions,
     )
 
 
@@ -605,6 +666,7 @@ def ground_payload(payload: AnalysisPayload, scope: AnalysisScope) -> AnalysisPa
         report_markdown=payload.report_markdown,
         anomalies=tuple(kept),
         dimensions=payload.dimensions,
+        candidate_dispositions=payload.candidate_dispositions,
         dropped=tuple(dropped),
     )
 
@@ -693,7 +755,9 @@ def sanitize_requests(
             if key in seen:
                 continue
             seen.add(key)
-            allowed.append(ContextRequest(type=request_type, name=request.name))
+            allowed.append(
+                ContextRequest(type=request_type, name=request.name, lines=request.lines)
+            )
             continue
 
         if request_type == "find_references":

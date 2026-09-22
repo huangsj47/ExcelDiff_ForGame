@@ -374,7 +374,11 @@ def _repeat_item(item: ContextItem) -> ContextItem:
         kind=item.kind,
         label=item.label,
         text=_repeat_text(item),
-        meta={"repeat_pointer": True, "chunk_id": item.meta.get("chunk_id", "")},
+        meta={
+            "repeat_pointer": True,
+            "chunk_id": item.meta.get("chunk_id", ""),
+            "evidence_id": item.meta.get("evidence_id", item.meta.get("chunk_id", "")),
+        },
     )
 
 
@@ -384,11 +388,12 @@ def _with_chunk_id(item: ContextItem, key: CacheKey) -> ContextItem:
     digest.update("\x1f".join(key).encode("utf-8", errors="replace"))
     digest.update(b"\x00")
     digest.update(item.text.encode("utf-8", errors="replace"))
+    evidence_id = digest.hexdigest()[:20]
     return ContextItem(
         kind=item.kind,
         label=item.label,
         text=item.text,
-        meta={**item.meta, "chunk_id": digest.hexdigest()[:20]},
+        meta={**item.meta, "chunk_id": evidence_id, "evidence_id": evidence_id},
     )
 
 

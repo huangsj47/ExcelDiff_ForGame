@@ -479,7 +479,7 @@ def _evidence_inventory(sample: BenchmarkSample, gold: GoldLabel) -> Tuple[Set[s
     混起来会让「这次没记明细」显示成「一个文件都没看」。
     """
     inventory: Set[str] = set()
-    for path in sample.change_files():
+    for path in (gold.change_files or sample.change_files()):
         inventory.add(normalize_path(path))
     for path in gold.dependency_closure:
         inventory.add(normalize_path(path))
@@ -551,6 +551,21 @@ def evaluate_sample(sample: BenchmarkSample, gold: GoldLabel, *, price_table: An
             "recall": _ratio(bucket["matched"], bucket["total"]),
         }
         for severity, bucket in sorted(by_severity.items())
+    }
+    by_family: Dict[str, Dict[str, Any]] = {}
+    for issue in confirmed:
+        family = str(getattr(issue, "family", "") or "uncategorized")
+        bucket = by_family.setdefault(family, {"matched": 0, "total": 0})
+        bucket["total"] += 1
+        if issue.issue_id in matched_issue_ids:
+            bucket["matched"] += 1
+    recall_by_family = {
+        family: {
+            "matched": bucket["matched"],
+            "total": bucket["total"],
+            "recall": _ratio(bucket["matched"], bucket["total"]),
+        }
+        for family, bucket in sorted(by_family.items())
     }
 
     # --- 误报率 ---------------------------------------------------------
@@ -637,6 +652,21 @@ def evaluate_sample(sample: BenchmarkSample, gold: GoldLabel, *, price_table: An
         }
 
     tokens, cost, duration_ms = _token_and_cost(sample, price_table)
+    token_total = None
+    if tokens.get("input") is not None or tokens.get("output") is not None:
+        token_total = int(tokens.get("input") or 0) + int(tokens.get("output") or 0)
+    efficiency = {
+        "tokens_per_matched_finding": (
+            round(token_total / len(matched_issue_ids), 4)
+            if token_total is not None and matched_issue_ids
+            else None
+        ),
+        "tokens_per_locatable_evidence": (
+            round(token_total / locatable_count, 4)
+            if token_total is not None and locatable_count
+            else None
+        ),
+    }
 
     return {
         "sample_id": sample.sample_id,
@@ -653,9 +683,18 @@ def evaluate_sample(sample: BenchmarkSample, gold: GoldLabel, *, price_table: An
         },
         "recall": {
             "overall": _ratio(len(matched_issue_ids), len(confirmed)),
+            "critical": _ratio(
+                sum(
+                    1
+                    for issue in confirmed
+                    if issue.severity == "critical" and issue.issue_id in matched_issue_ids
+                ),
+                sum(1 for issue in confirmed if issue.severity == "critical"),
+            ),
             "matched": len(matched_issue_ids),
             "total": len(confirmed),
             "by_severity": recall_by_severity,
+            "by_family": recall_by_family,
         },
         "false_positive": {
             "rate": _ratio(len(unmatched_findings), len(findings)),
@@ -684,6 +723,7 @@ def evaluate_sample(sample: BenchmarkSample, gold: GoldLabel, *, price_table: An
             "scopes": evidence_coverage_scopes(sample, gold),
         },
         "tokens": tokens,
+        "efficiency": efficiency,
         "cost": cost,
         "duration_ms": duration_ms,
         "stages": [dict(stage) for stage in sample.stages],

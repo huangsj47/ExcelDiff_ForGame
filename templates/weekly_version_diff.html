@@ -2283,6 +2283,22 @@ function weeklyAiEstimateLines(estimate) {
     }
     lines.push(['预计 token', weeklyAiTokensText(estimate)]);
     lines.push(['预计耗时', weeklyAiDurationText(estimate)]);
+    const budget = (estimate && estimate.budget_plan) || {};
+    const promptChars = budget.prompt_chars || {};
+    const perRole = budget.per_role || {};
+    const jobMax = budget.job_theoretical_max || {};
+    const roles = budget.roles || {};
+    if (promptChars.configured !== undefined) {
+        const effective = promptChars.effective === undefined ? promptChars.configured : promptChars.effective;
+        lines.push(['提示词字符预算', weeklyAiFormatInt(promptChars.configured)
+            + ' 配置 / ' + weeklyAiFormatInt(effective) + ' 当前预估生效']);
+    }
+    if (roles.count) {
+        lines.push(['每角色 / 整单理论上限', weeklyAiFormatInt(perRole.max_rounds) + ' 轮、'
+            + weeklyAiFormatInt(perRole.max_tool_requests) + ' 次索取 / '
+            + weeklyAiFormatInt(jobMax.rounds) + ' 轮、'
+            + weeklyAiFormatInt(jobMax.tool_requests) + ' 次索取（' + roles.count + ' 个角色）']);
+    }
     if (last) {
         const bits = [];
         if (last.files) bits.push(weeklyAiFormatInt(last.files) + ' 个文件');

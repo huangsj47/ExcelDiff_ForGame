@@ -37,12 +37,10 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from services.ai.docx_view import is_docx, render_docx_text
 
 from services.ai.reference_search import (
-    MAX_SCAN_FILES,
     SearchBudget,
     entries_for,
     normalize_query,
     render_result,
-    search_files,
 )
 from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_loader import LoadedSkills
@@ -628,6 +626,7 @@ class PlatformContextProvider:
         max_rows_per_sheet: int = DEFAULT_MAX_ROWS_PER_SHEET,
         use_stored_batch_diff: bool = True,
         scope: AnalysisScope | None = None,
+        manifest=None,
     ):
         self._loaded = loaded
         self._max_rows = max_rows_per_sheet
@@ -636,6 +635,7 @@ class PlatformContextProvider:
         # 别处都不知道的事（见 `ai/scope.py::batch_paths`）。不传时为 None：那几处
         # 调用方（测试、探测）本来也不会用到这个工具。
         self._scope = scope
+        self._manifest = manifest
         # 「检索扫过多少文件」的额度（见 `reference_search.SearchBudget`）。挂在实例上，
         # 所以子代理模式下 N 个成员**共用一份**（它们共用一个 provider）。
         self._search_budget = SearchBudget()
@@ -653,6 +653,7 @@ class PlatformContextProvider:
         # 「一次检索只做一次」的记忆（见 `_search_local`）：240 个文件是真读的，
         # 模型对同一个词问两遍不该让节点把同一件事做两遍。
         self._search_cache: dict = {}
+        self._reference_index = None
         self._content_max_chars = DEFAULT_CONTENT_MAX_CHARS
         # 读平台已算好并落库的那一份（周版本合并 diff，页面同源），而不是现场重算。
         #
@@ -669,6 +670,10 @@ class PlatformContextProvider:
     def read_reference(self, name: str) -> Optional[str]:
         """读 skill 文档。**只能读白名单里的** —— 白名单由 `AnalysisScope` 把着，
         这里再确认一次路径确实来自加载结果，而不是模型拼出来的相对路径。"""
+        if str(name or "").strip() == "change-manifest" and self._manifest is not None:
+            from services.ai.manifest import render_manifest_reference
+
+            return render_manifest_reference(self._manifest)
         target = self._loaded.readable.get(str(name or ""))
         if target is None:
             return None
@@ -1078,17 +1083,10 @@ class PlatformContextProvider:
             [item for item in self._scope.batch_paths() if not prefix or item.startswith(prefix)],
             self._scope.commit_of_path,
         )
-        allowance = min(MAX_SCAN_FILES, self._search_budget.remaining)
-        if allowance <= 0:
-            return (
-                "[检索额度用尽] 本次分析里 `find_references` 能扫的文件数已经用完，"
-                "这一次没有搜。请改用已知的路径直接索取 diff 或正文。"
-            )
-
-        local = self._search_local(pairs, search, prefix=prefix, allowance=allowance)
+        local = self._search_local(pairs, search, prefix=prefix, allowance=len(pairs))
         if local is not None:
             return local
-        return self._search_from_agent(pairs, search, prefix=prefix, allowance=allowance)
+        return self._search_from_agent(pairs, search, prefix=prefix, allowance=len(pairs))
 
     def _search_local(
         self,
@@ -1121,11 +1119,18 @@ class PlatformContextProvider:
         def reader(path: str, commit: str):
             return get_file_content_from_git(repository, commit, path)
 
-        result = search_files(
-            pairs, query, reader=reader, max_files=allowance, prefix=prefix
+        from services.ai.reference_index import SnapshotReferenceIndex
+
+        if self._reference_index is None:
+            self._reference_index = SnapshotReferenceIndex.build(pairs, reader=reader)
+        result = self._reference_index.search(query, prefix=prefix)
+        text = render_result(
+            result,
+            scope_note=(
+                f"索引版本 `{result.index_version}`，快照 `{result.snapshot_digest[:12]}`；"
+                "后续查询不重复读取 blob。"
+            ),
         )
-        self._search_budget.consume(result.scanned + result.binary + result.missing)
-        text = render_result(result)
         self._search_cache[key] = text
         return text
 
@@ -1149,7 +1154,7 @@ class PlatformContextProvider:
             outcome = request_references(
                 repository,
                 query=query,
-                entries=pairs[:allowance],
+                entries=pairs,
                 prefix=prefix,
                 # **本批次的总数，不是 `entries` 的长度**：`entries` 已经截到额度上限，
                 # 而覆盖率的分母必须是「这次一共改了多少个文件」。带错了它就会在报告里

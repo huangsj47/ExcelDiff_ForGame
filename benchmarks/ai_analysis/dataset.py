@@ -250,8 +250,12 @@ class GoldIssue:
     issue_id: str
     title: str
     severity: str = "unknown"
+    family: str = "uncategorized"
     file_paths: List[str] = field(default_factory=list)
     commit_refs: List[str] = field(default_factory=list)
+    evidence: List[str] = field(default_factory=list)
+    trigger: str = ""
+    expected_disposition: str = "active"
     note: str = ""
     # 标注时是否已确证（对应报告里的 `verification_state`）。它决定这条要不要
     # 进「误报」的分母：一条**明确标注为假设**的金标问题被模型报出来不算误报，
@@ -263,8 +267,12 @@ class GoldIssue:
             "issue_id": self.issue_id,
             "title": self.title,
             "severity": self.severity,
+            "family": self.family,
             "file_paths": list(self.file_paths),
             "commit_refs": list(self.commit_refs),
+            "evidence": list(self.evidence),
+            "trigger": self.trigger,
+            "expected_disposition": self.expected_disposition,
             "note": self.note,
             "verification_state": self.verification_state,
         }
@@ -288,8 +296,14 @@ class GoldIssue:
             issue_id=issue_id,
             title=title,
             severity=severity,
+            family=str(payload.get("family") or "uncategorized").strip() or "uncategorized",
             file_paths=[normalize_path(p) for p in _as_str_list(payload.get("file_paths"))],
             commit_refs=_as_str_list(payload.get("commit_refs")),
+            evidence=_as_str_list(payload.get("evidence")),
+            trigger=str(payload.get("trigger") or "").strip(),
+            expected_disposition=(
+                str(payload.get("expected_disposition") or "active").strip() or "active"
+            ),
             note=str(payload.get("note") or ""),
             verification_state=str(payload.get("verification_state") or "confirmed"),
         )

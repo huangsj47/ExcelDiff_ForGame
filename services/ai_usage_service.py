@@ -65,6 +65,8 @@ from services.ai.analysis_budget import (
     redact_platform_scope,
 )
 from services.ai.platform_budget import platform_budget_public
+from services.ai.budget_plan import build_budget_plan, derive_tool_limits
+from services.ai.engine import EngineLimits
 from services.ai.pricing import amount_exact, amount_of, money
 from services.ai.project_config_source import get_project_analysis_config
 from services.ai.trace_evidence import decode_evidence
@@ -1161,6 +1163,38 @@ def analysis_estimate(
         price_table=table,
         model=model,
     )
+    engine_defaults = EngineLimits()
+    configured_chars = (
+        _int_or_zero(config.get("prompt_char_budget")) or engine_defaults.prompt_char_budget
+    )
+    configured_rounds = (
+        _int_or_zero(config.get("max_analysis_rounds")) or engine_defaults.max_rounds
+    )
+    configured_requests = (
+        _int_or_zero(config.get("max_tool_requests"))
+        if config.get("max_tool_requests") is not None
+        else engine_defaults.max_tool_requests
+    )
+    configured_shards = (
+        (_int_or_zero(config.get("subagent_count")) or 1)
+        if config.get("subagent_enabled")
+        else 1
+    )
+    estimate["budget_plan"] = build_budget_plan(
+        configured_prompt_chars=configured_chars,
+        # 预估端点不发模型探测请求；真正的有效窗口会在运行冻结后再次计算并落库。
+        effective_prompt_chars=configured_chars,
+        platform_chars=0,
+        max_rounds=configured_rounds,
+        max_tool_requests=configured_requests,
+        shard_count=configured_shards,
+        verify=bool(config.get("subagent_verify")),
+        tool_limits=derive_tool_limits(
+            prompt_char_budget=configured_chars,
+            max_tool_requests=configured_requests,
+        ),
+        window_note="模型窗口将在任务启动前探测；若端点未声明则按平台默认窗口计算。",
+    )
     excluded = len(rows) - len(samples)
     if excluded:
         estimate["notes"] = [
@@ -1432,6 +1466,14 @@ def run_usage(run_id: int) -> Optional[dict[str, Any]]:
                 "context_chars": row.context_chars,
                 "duration_ms": row.duration_ms,
                 "error": row.error or "",
+                "finish_reason": next(
+                    (
+                        part.removeprefix("finish_reason=")
+                        for part in str(row.error or "").split("；")
+                        if part.startswith("finish_reason=")
+                    ),
+                    "",
+                ),
                 **decode_evidence(row),
             }
             for row in rounds

@@ -72,7 +72,9 @@ from services.ai.baseline_source import (
     suppressed as _suppressed,
 )
 from services.ai.budget import effective_prompt_budget
+from services.ai.budget_plan import build_budget_plan, derive_tool_limits
 from services.ai.change_set import from_commit_payload, from_weekly_payload
+from services.ai.manifest import build_manifest
 
 # 读侧形态（进行中 / 有结论 / 最近一次失败）：只依赖 run 行与两个标签函数，
 # 与「怎么跑一次分析」没有耦合，单独一层也好单测。
@@ -156,7 +158,7 @@ from services.ai.scope_sampling import (  # noqa: F401 —— 任务服务与测
 )
 from services.ai.skill_loader import describe_load_error, load_skills
 from services.ai.snapshot_store import DEFAULT_COMPENSATION_MAX_FILES
-from services.ai.subagent import plan_family, run_family_with_seed, subagent_mode_of
+from services.ai.subagent import apply_manifest, plan_family, run_family_with_seed, subagent_mode_of
 from services.ai.trace_evidence import encode_evidence
 from services.ai.usage import encode_tools
 from services.ai.weekly_sync_gate import group_config_ids, weekly_sync_in_flight
@@ -450,6 +452,10 @@ def build_weekly_payload(
         "list_files": list_files,
         "delta_truncated": truncated,
     }
+    payload["manifest"] = build_manifest(
+        delta_files,
+        shard_count=max(1, int(project_config.get("subagent_count") or 1)),
+    ).to_dict()
     payload["policy"]["truncated"] = truncated
     if truncated:
         payload["policy"]["truncation_reason"] = "token_budget"
@@ -502,11 +508,25 @@ def _apply_model_window(
 
     budget, note = effective_prompt_budget(limits.prompt_char_budget, window)
     if not note:
-        return limits, ""
+        return replace(
+            limits,
+            tool_limits=derive_tool_limits(
+                prompt_char_budget=limits.prompt_char_budget,
+                max_tool_requests=limits.max_tool_requests,
+            ),
+        ), ""
     # 压完再减去内置那一段：**用户的额度不能被平台自己的提示词吃掉**。窗口小到连
     # 内置提示词都装不下时落到 0 —— 那时组装侧还有条目下限兜着，而这一轮的说明已经
     # 把「窗口太小」讲清楚了。
-    return replace(limits, prompt_char_budget=max(0, budget - platform_chars)), note
+    effective = max(0, budget - platform_chars)
+    return replace(
+        limits,
+        prompt_char_budget=effective,
+        tool_limits=derive_tool_limits(
+            prompt_char_budget=effective,
+            max_tool_requests=limits.max_tool_requests,
+        ),
+    ), note
 
 
 def _configured_int(value: object, default: int) -> int:
@@ -687,7 +707,17 @@ def _persist_outcome(
                 # `trace_evidence` 一处（写库侧与读库侧共用），这里不拼 JSON：
                 # 原先只写计数，于是「取数失败」与「真的读了一份 diff」在面板上长得一样。
                 **encode_evidence(record),
-                error=record.note or None,
+                error=(
+                    "；".join(
+                        item
+                        for item in (
+                            record.note,
+                            f"finish_reason={record.finish_reason}" if record.finish_reason else "",
+                        )
+                        if item
+                    )
+                    or None
+                ),
                 # 逐轮用量。这几列同样一直是 NULL：没有它们，「钱花在第几轮」答不上来，
                 # 而提示词每轮都把上一轮的上下文重发一遍，后几轮才是贵的那些。
                 tokens_input=record.prompt_tokens,
@@ -1145,6 +1175,7 @@ def _run_engine_and_persist(
             # `scope` 只有 `find_references` 用：那个工具要知道「本批次改了哪些文件」，
             # 而这正是 scope 才知道的事（工具本身不带 commit，见 ai/reference_search.py）。
             loaded=loaded, scope=change.scope,
+            manifest=change.manifest,
             use_stored_batch_diff=(payload.get("mode") != "commit"),
         ),
         "loaded": loaded,
@@ -1173,6 +1204,21 @@ def _run_engine_and_persist(
         verify=bool(project_config.get("subagent_verify")),
         limits=limits,
     )
+    if plan is not None:
+        plan = apply_manifest(plan, change.manifest)
+    budget_plan_payload = build_budget_plan(
+        configured_prompt_chars=_configured_int(
+            project_config.get("prompt_char_budget"), EngineLimits().prompt_char_budget
+        ),
+        effective_prompt_chars=limits.prompt_char_budget,
+        platform_chars=platform_chars,
+        max_rounds=limits.max_rounds,
+        max_tool_requests=limits.max_tool_requests,
+        shard_count=plan.count if plan is not None else 1,
+        verify=bool(plan and plan.verify),
+        tool_limits=limits.tool_limits,
+        window_note=budget_note,
+    )
     outcome = (
         run_analysis(**engine_args)
         if plan is None
@@ -1191,6 +1237,7 @@ def _run_engine_and_persist(
         payload,
         suppressed=_suppressed(target_type, target_key, change),
         context_budget_note=budget_note,
+        budget_plan=budget_plan_payload,
     )
     baseline_account = payload.get("baseline") or {}
     if baseline_account.get("kind") == "snapshot":

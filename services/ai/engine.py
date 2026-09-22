@@ -54,6 +54,7 @@ from services.ai.budget import (
 )
 from services.ai.context_tools import (
     DEFAULT_MAX_TOOL_REQUESTS,
+    DEFAULT_TOOL_LIMITS,
     ContextProvider,
     ContextTools,
     describe_request,
@@ -175,6 +176,7 @@ class EngineLimits:
     baseline_char_budget: int = DEFAULT_BASELINE_CHARS
     max_corrections: int = 2
     temperature: float = 0.0
+    tool_limits: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_TOOL_LIMITS))
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any] | None) -> "EngineLimits":
@@ -235,6 +237,8 @@ class RoundRecord:
     budget_notes: tuple = ()
     # 协议不合规时给模型的纠正提示：那一轮为什么被重问。
     correction_hint: str = ""
+    # 上游停止原因（stop / length / content_filter…）。`length` 是输出被硬截断的直接证据。
+    finish_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -562,6 +566,7 @@ def run_analysis(
     tools = ContextTools(
         provider=provider,
         max_tool_requests=limits.max_tool_requests,
+        limits=limits.tool_limits,
         body_cache=body_cache,
     )
     if seed_messages:
@@ -1063,6 +1068,7 @@ def run_analysis(
             # 模型这一轮的原文也挂在**每一个**构造点上（同一条 splat 的理由）：解析失败
             # 的那几轮恰恰是最需要原文的（它到底返回了什么，才没被认成 JSON）。
             "response_text": text,
+            "finish_reason": usage["finish_reason"],
         }
         messages.append(entry)
         messages.append({"role": "assistant", "content": text})
@@ -1446,6 +1452,7 @@ def _usage_of(result: Any) -> dict[str, Any]:
         "cache_read_tokens": getattr(result, "cache_read_tokens", None),
         "cache_write_tokens": getattr(result, "cache_write_tokens", None),
         "cache_source": str(getattr(result, "cache_source", "") or ""),
+        "finish_reason": str(getattr(result, "finish_reason", "") or ""),
     }
 
 

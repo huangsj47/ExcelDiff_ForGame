@@ -99,6 +99,7 @@ description: Use this skill whenever you review a game version's change set — 
   "dimensions": [
     {"id": "config_id", "hit": true, "note": "命中的具体依据；未命中就写未命中及理由"}
   ],
+  "candidate_dispositions": [{"candidate_id": "S1-1", "status": "adopted | rejected | deferred", "reason": "拒绝或延后时必填"}],
   "anomalies": [
     {
       "title": "【系统或模块】对象或条件下的可观察异常",
@@ -107,7 +108,8 @@ description: Use this skill whenever you review a game version's change set — 
       "evidence": ["具体到文件、字段、ID、行或提交的依据", "至少一条，且不得是空泛表述"],
       "commit": "该异常所在的 commit id", "file_path": "该异常所在的文件路径",
       "impact": "一旦成立会造成什么后果",
-      "suggestion": "建议的验证或修复动作"
+      "suggestion": "建议的验证或修复动作",
+      "source_candidate_ids": ["S1-1"]
     }
   ]
 }
@@ -116,6 +118,8 @@ description: Use this skill whenever you review a game version's change set — 
 `dimensions` 在 `final` 里是**必填**：把**本次生效的清单**上的维度逐一列出（清单 = 下面「检查维度」那一节，或提示词末尾「本项目适用的维度清单」那一节），**没命中的也要显式写 `hit: false` 并说明为什么不适用**，不要只挑好说的说。这是防止「只报容易报的」的主要手段。
 
 `anomalies` 可以是空数组——如果确实没有达到门槛的问题，空数组就是正确答案。
+
+子代理汇总任务会给出候选编号。此时 `candidate_dispositions` 必须覆盖每个编号：采纳写 `adopted`，确认重复或不成立写 `rejected`，证据不足但不能安全排除写 `deferred`。普通单代理分析没有候选编号时可省略该字段。上下文抬头中的 `evidence_id` 是稳定证据地址；引用同一份正文时优先带回该 ID，无需在中间说明里重复粘贴长段原文。
 
 ## 渐进式披露：先分诊，再点名索取
 

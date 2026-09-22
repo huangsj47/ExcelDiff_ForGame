@@ -385,6 +385,8 @@ def _render_accounting(meta: Mapping[str, object]) -> str:
     当成全部，然后给出一个看起来很确定的结论。
     """
     parts: list[str] = []
+    if meta.get("evidence_id"):
+        parts.append(f"evidence_id={meta['evidence_id']}")
     if meta.get("original_chars"):
         parts.append(f"原文 {meta['original_chars']} 字")
     if meta.get("truncated"):

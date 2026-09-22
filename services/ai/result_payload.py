@@ -244,6 +244,7 @@ def result_payload(
     *,
     suppressed: frozenset = frozenset(),
     context_budget_note: str = "",
+    budget_plan: dict | None = None,
 ) -> dict:
     """给前端与后续读取用的结果。
 
@@ -304,6 +305,7 @@ def result_payload(
         # SSE 的 result 事件与 /latest 自动都有，界面不必再拉一次接口。
         "context": {
             "budget_note": str(context_budget_note or ""),
+            "budget_plan": dict(budget_plan or {}),
             "compaction": outcome.compaction.to_dict(),
             # 「上下文索取额度」这本账。原先只有一句 `degradation_label`
             # （「上下文索取额度用尽，基于已有证据出结论」），用户看完只知道**出事了**，

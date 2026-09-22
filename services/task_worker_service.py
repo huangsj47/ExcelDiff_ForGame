@@ -149,8 +149,10 @@ _db_retry = None
 
 # 后台任务队列和状态
 background_task_queue = queue.PriorityQueue()
+ai_task_queue = queue.PriorityQueue()
 background_task_running = False
 background_task_thread = None
+ai_task_thread = None
 scheduler_running = False
 scheduler_thread = None
 _schedule_initialized = False
@@ -438,11 +440,12 @@ def update_task_status_with_retry(task_id, status, error_message=None):
 # ---------------------------------------------------------------------------
 #  后台任务工作线程
 # ---------------------------------------------------------------------------
-def background_task_worker():
+def background_task_worker(task_queue=None, worker_label="通用"):
     """后台任务工作线程"""
     global background_task_running
-    log_print("后台任务工作线程启动", 'APP')
-    log_print(f"初始队列大小: {background_task_queue.qsize()}", 'APP')
+    active_queue = task_queue or background_task_queue
+    log_print(f"{worker_label}后台任务工作线程启动", 'APP')
+    log_print(f"{worker_label}初始队列大小: {active_queue.qsize()}", 'APP')
     while background_task_running:
         # 「临时暂停」要真的停 —— 这个标志由 `refresh_merge_diff` 在删缓存前后设/清，
         # 目的是别让后台线程把它刚删掉的那批缓存在同一瞬间算完写回去
@@ -462,8 +465,12 @@ def background_task_worker():
             # 同步每 15 分钟补一条、一条要跑 4~5 分钟，低优先级任务于是无限「排队中」。
             # 在**外面**做：队里那条本该被提上来的任务还在堆底，不重算就永远取不到它。
             # 读不动（假队列）时它自己返回 0，不影响主循环。
-            reweigh_queue(background_task_queue)
-            task_wrapper = background_task_queue.get(timeout=1)
+            if task_queue is None:
+                reweigh_queue(background_task_queue)
+                task_wrapper = background_task_queue.get(timeout=1)
+            else:
+                reweigh_queue(active_queue)
+                task_wrapper = active_queue.get(timeout=1)
             task_processed = True
             priority = task_wrapper.priority
             task = task_wrapper.task_data
@@ -479,7 +486,7 @@ def background_task_worker():
                     force=True,
                 )
                 continue
-            log_print(f"🔧 后台任务开始处理: {task['type']} (优先级: {priority}) | 队列剩余: {background_task_queue.qsize()}", 'EXCEL')
+            log_print(f"🔧 后台任务开始处理: {task['type']} (优先级: {priority}) | 队列剩余: {active_queue.qsize()}", 'EXCEL')
 
             if task['type'] == 'excel_diff':
                 _handle_excel_diff_task(task, priority)
@@ -538,7 +545,7 @@ def background_task_worker():
                 _handle_weekly_excel_cache_task(task)
             elif task['type'] == 'weekly_ai_analysis':
                 _handle_weekly_ai_analysis_task(task)
-            log_print(f"✅ 后台任务完成: {task['type']} (优先级: {priority}) | 队列剩余: {background_task_queue.qsize()}", 'TASK')
+            log_print(f"✅ 后台任务完成: {task['type']} (优先级: {priority}) | 队列剩余: {active_queue.qsize()}", 'TASK')
         except queue.Empty:
             continue
         except NON_CRITICAL_WORKER_LOOP_ERRORS as e:
@@ -557,7 +564,7 @@ def background_task_worker():
                 if isinstance(_finished_payload, dict):
                     forget_inflight_task(_finished_payload.get('task_id'))
                 try:
-                    background_task_queue.task_done()
+                    active_queue.task_done()
                 except ValueError:
                     pass
     log_print("后台任务工作线程停止", 'APP')
@@ -943,7 +950,7 @@ def _handle_weekly_excel_cache_task(task):
 
 def start_background_task_worker():
     """启动后台任务工作线程"""
-    global background_task_running, background_task_thread
+    global background_task_running, background_task_thread, ai_task_thread
     if not background_task_running:
         background_task_running = True
         # **先清墓碑，再收活**：平台重启会留下 status='running' 的 AI 分析记录，
@@ -971,6 +978,12 @@ def start_background_task_worker():
         start_lease_renewer()
         background_task_thread = threading.Thread(target=background_task_worker, daemon=True)
         background_task_thread.start()
+        ai_task_thread = threading.Thread(
+            target=background_task_worker,
+            args=(ai_task_queue, "AI "),
+            daemon=True,
+        )
+        ai_task_thread.start()
         # single 模式下需要本地执行任务，顺带启用清理任务调度。
         start_scheduler(include_cleanup=not _use_agent_dispatch())
         log_print("后台任务工作线程已启动", 'APP')
@@ -978,7 +991,7 @@ def start_background_task_worker():
 
 def stop_background_task_worker():
     """停止后台任务工作线程"""
-    global background_task_running, background_task_thread
+    global background_task_running, background_task_thread, ai_task_thread
     if background_task_running:
         log_print("正在停止后台任务工作线程...", 'APP')
         background_task_running = False
@@ -993,6 +1006,11 @@ def stop_background_task_worker():
                 log_print(f"停止后台任务线程时出现错误: {e}", 'APP', force=True)
         else:
             log_print("后台任务工作线程已停止", 'APP')
+        if ai_task_thread and ai_task_thread.is_alive():
+            try:
+                ai_task_thread.join(timeout=3)
+            except RuntimeError as e:
+                log_print(f"停止 AI 任务线程时出现错误: {e}", 'APP', force=True)
         # 收工就不该再有人续租：此刻还挂在名单里的任务，本进程不会把它们跑完了。
         stop_lease_renewer()
         stop_scheduler()
