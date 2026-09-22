@@ -48,8 +48,33 @@ def configure_vcs_service(active_git_processes_ref):
     _active_git_processes = active_git_processes_ref
 
 
+def _rebind(service, repository):
+    """把缓存实例上的 `repository` 换成本次调用方那个对象，再交回去。
+
+    **缓存里存的是第一个调用方的 ORM 对象**，而那个对象属于**那个会话**（一个请求、
+    一次 worker 的 app context）。会话一收它就 detached；之后再有人从缓存里拿到它，
+    一句 `self.repository.branch` 就是
+
+        DetachedInstanceError: Instance <Repository ...> is not bound to a Session;
+        attribute refresh operation cannot proceed
+
+    实测（2026-09-22）：worker 的 `excel_diff` 任务建了缓存项 → 管理员的「同步」按钮
+    **必然 500**，三次调用报的是同一个对象地址；失败又把仓库写进 `last_sync_error`，
+    于是 `sync_failure_backoff_active` 把它的**自动同步也停 30 分钟**。
+
+    为什么不是「干脆不缓存」：这两个服务各自持有线程池，重建等于漏线程。而同一个仓库的
+    任意两个实例字段值相同（同 id 同 url），换过去只换会话归属，不换语义。
+    """
+    if service is not None:
+        service.repository = repository
+    return service
+
+
 def get_git_service(repository):
-    """获取Git服务实例（使用缓存避免重复创建）"""
+    """获取Git服务实例（使用缓存避免重复创建）。
+
+    缓存复用实例，但**返回前重新绑定 `repository`**（理由见 `_rebind`）。
+    """
     cache_key = f"{repository.id}_{repository.url}"
     with _git_service_lock:
         if cache_key not in _git_service_cache:
@@ -60,18 +85,18 @@ def get_git_service(repository):
                 repository, _active_git_processes
             )
             log_print(f"🔧 创建新的Git服务实例: {repository.name}", 'GIT')
-        return _git_service_cache[cache_key]
+        return _rebind(_git_service_cache[cache_key], repository)
 
 
 def get_svn_service(repository):
-    """获取SVN服务实例（使用缓存避免重复创建）"""
+    """获取SVN服务实例（使用缓存避免重复创建）。同上，**返回前重新绑定**。"""
     cache_key = f"{repository.id}_{repository.url}"
     with _svn_service_lock:
         if cache_key not in _svn_service_cache:
             from services.svn_service import SVNService
             _svn_service_cache[cache_key] = SVNService(repository)
             log_print(f"🔧 创建新的SVN服务实例: {repository.name}", 'SVN')
-        return _svn_service_cache[cache_key]
+        return _rebind(_svn_service_cache[cache_key], repository)
 
 
 # ---------------------------------------------------------------------------
