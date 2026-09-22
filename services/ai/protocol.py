@@ -1169,6 +1169,21 @@ def salvage_report_markdown(text: str) -> str | None:
     一份完整清单。所以这里只抢正文，结构化结论该没有还是没有，降级标签照旧。
     """
     content = _THINK_BLOCK_RE.sub("", str(text or ""))
+    merged = _report_chunks(content)
+    if merged is None:
+        return None
+    report, _opening_end, _end, _chunk_count = merged
+    return report if report.strip() else None
+
+
+def _report_chunks(content: str) -> tuple[str, int, int, int] | None:
+    """把 `report_markdown` 的正文（含续写块）从 `content` 里读出来。
+
+    返回 `(拼接后的正文, 开引号之后的位置, 最后一段之后的位置, 段数)`；开不了头
+    （没有 `report_markdown`、或第一个字符串空/救不回来）返回 None。`salvage_report_markdown`
+    与 `repair_split_string_payload` 共用这一份扫描逻辑 —— 两者的差别只在**拿这些段去干嘛**
+    （一个只要正文，一个要把整份 JSON 拼回去），段怎么读必须是同一套判据。
+    """
     opening = _REPORT_MARKDOWN_OPENING_RE.search(content)
     if opening is None:
         return None
@@ -1189,7 +1204,47 @@ def salvage_report_markdown(text: str) -> str | None:
             parts.append("\n\n")
         parts.append(chunk)
         position = next_position
-    return "".join(parts)
+    return "".join(parts), opening.end(), position, len(parts)
+
+
+def repair_split_string_payload(text: str) -> str | None:
+    """把模型**切成多段字符串**的 final payload 拼回一份能解析的 JSON；拼不回返回 None。
+
+    ## 这是实测过的一种失败形态（2026-09-23 run 38 的 S2 第 7 轮）
+
+    模型写两万 token 的正文时会把字符串断开重开：`"report_markdown": "第一段","第二段",`
+    段与段之间只有逗号、没有键名，整份 JSON 因此**不合法**——但括号是配平的、
+    `finish_reason` 也是 `stop`。于是三道判据全数绕过：`parse_payload` 解析失败、
+    `looks_like_truncated_json` 判否（配平）、`looks_like_markdown_report` 判真
+    （正文里的 `\\n# 变更理解` 照样能数到章节标题）—— 整轮被当成 markdown 报告重发。
+    重发的代价不只是 token：模型按「原样转成 JSON」交回的正文**普遍更短**
+    （那一轮 16.5k token 的正文，重发回来只剩 6.7k），内容先丢了一截。
+
+    而 `anomalies` / `dimensions` 写在正文**之后**、本来就是好的：把续写块拼回一个
+    字符串，这份 JSON 就能解析 —— 不用重发、不用降级、正文一个字不少。
+
+    ## 拼不回的形态
+
+    * **没有被切开**（段数为 1）：这不是「切开」的病，交给别的分支按各自判据处理；
+    * **连后续字段也坏了**：拼回后仍解析失败，同样交给别的分支 —— 调用方拿 None/解析失败
+      走原有路径，本函数不堵任何路。
+    """
+    content = _THINK_BLOCK_RE.sub("", str(text or ""))
+    merged = _report_chunks(content)
+    if merged is None:
+        return None
+    report, opening_end, end, chunk_count = merged
+    if chunk_count < 2:
+        return None
+    # 开引号之前与最后一段之后的内容原样保留：前者是 `{"status": "final", …`，
+    # 后者是 `,"anomalies": …}` —— 病只在中间那几段，只修中间。最后一段的闭合引号
+    # 在扫描时被吃掉了，这里补回来。
+    return (
+        content[:opening_end]
+        + json.dumps(report, ensure_ascii=False)[1:-1]
+        + '"'
+        + content[end:]
+    )
 
 
 def looks_like_truncated_json(text: str) -> bool:

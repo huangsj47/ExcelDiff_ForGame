@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -29,6 +30,7 @@ from services.ai.protocol import (
     looks_like_truncated_json,
     parse_json_candidates,
     parse_payload,
+    repair_split_string_payload,
     salvage_report_markdown,
     sanitize_requests,
 )
@@ -677,6 +679,97 @@ def test_salvage_returns_none_when_there_is_no_report_to_pull():
 def test_salvage_gives_up_on_a_half_written_unicode_escape():
     """`\\u12` 这种救不回来：宁可返回 None，也不要吐出一段带反斜杠的假正文。"""
     assert salvage_report_markdown('{"report_markdown": "abc\\u12') is None
+
+
+# --------------------------------------------------------------------------
+# 续写块拼接修复：`"第一段","第二段"` 的 final payload 不用重发
+# --------------------------------------------------------------------------
+
+
+SPLIT_REPORT = (
+    "# 变更理解\n\n本次改的是道具表的回收价，回收价从 100 提到 10000，等于商店卖出价，"
+    "经济闭环被打破。\n\n# 风险评估\n\n第一条：回收价与售价相等，玩家可以无限刷钱，"
+    "后果是经济系统通胀，证据是同一行的两列取值相等。\n"
+)
+
+
+def _split_final_text(report: str = SPLIT_REPORT) -> str:
+    """实测形态（2026-09-23 run 38 的 S2 第 7 轮）：正文被切成两段字符串。
+
+    段与段之间只有逗号、没有键名，整份 JSON 不合法 —— 但括号配平，`anomalies` /
+    `dimensions` 写在正文之后、本来就是好的。每一段都**长于 40 字**：短段会被当成
+    键名（`_CONTINUATION_CHUNK_MIN`），这个形态就切不起来了。
+    """
+    escaped = json.dumps(report, ensure_ascii=False)[1:-1]
+    head, tail = escaped[: len(escaped) // 2], escaped[len(escaped) // 2 :]
+    return (
+        '{"status": "final", "report_markdown":'
+        '"' + head + '","' + tail + '", '
+        '"anomalies": [], "dimensions": [{"id": "config_id", "hit": false, "note": ""}]}'
+    )
+
+
+def test_repair_stitches_a_split_final_back_into_parseable_json():
+    """两段正文拼回一个字符串后，整份 payload 必须能直接解析，且一个字不少。"""
+    repaired = repair_split_string_payload(_split_final_text())
+
+    assert repaired is not None
+    parsed = parse_payload(repaired, dimension_ids=("config_id",))
+    assert parsed.is_final
+    # `.strip()` 是 `_as_str` 对**一切**字段的协议规范化（正常解析的 final 也一样丢
+    # 首尾空白），丢的只是它 —— 中间的内容一个字都不许少：重发回来的正文恰恰是
+    # 这么被压短的。
+    assert parsed.report_markdown == SPLIT_REPORT.strip(), (
+        "拼接修复不许压短正文 —— 重发回来的正文恰恰是这么丢的"
+    )
+
+
+def test_repair_keeps_the_fields_written_after_the_report():
+    """`anomalies`/`dimensions` 写在正文之后：修复只动中间那几段，别碰前后。"""
+    text = _split_final_text()
+    repaired = repair_split_string_payload(text)
+
+    assert repaired is not None
+    assert repaired.startswith('{"status": "final", "report_markdown":')
+    assert '"anomalies": []' in repaired, "正文之后的字段必须原样保留"
+
+
+def test_repair_is_not_attempted_when_the_string_was_not_split():
+    """只有一个字符串（哪怕整份 JSON 因为别的原因不合法）不是这条路的病。
+
+    没有续写块时返回 None，交给截断/markdown 等分支按各自判据处理 ——
+    这条修复不堵任何原有的路。
+    """
+    assert (
+        repair_split_string_payload(
+            '{"status": "final", "report_markdown": "# 变更理解\n\n正文", "anomalies": []}\n以上。'
+        )
+        is None
+    )
+    assert repair_split_string_payload('{"status": "need_more_context", "requests": []}') is None
+    assert repair_split_string_payload("我觉得这个改动还行。") is None
+
+
+def test_repair_keeps_a_section_heading_at_line_start():
+    """切点落在标题前时必须补 `\n\n`：下游按 `^# ` 切章节，标题粘在句尾会丢一整节。
+
+    正文里的换行必须是 **JSON 转义**（`\\n` 两个字符），不是真实换行 —— 模型输出的
+    JSON 源码里真实换行是非法控制字符，`_decode_json_string_body` 会按协议拒收。
+    """
+    text = (
+        '{"status": "final", "report_markdown":'
+        '"# 变更理解\\n\\n本次改的是道具表的回收价，回收价从 100 提到 10000，'
+        '等于商店卖出价，经济闭环被打破。"'
+        ',"# 风险评估\\n\\n第一条：回收价与售价相等，玩家可以无限刷钱，'
+        '后果是经济系统通胀，证据是同一行的两列取值相等。"'
+        ', "anomalies": [], "dimensions": [{"id": "config_id", "hit": false, "note": ""}]}'
+    )
+    repaired = repair_split_string_payload(text)
+
+    assert repaired is not None
+    parsed = parse_payload(repaired, dimension_ids=("config_id",))
+    assert "# 风险评估" in parsed.report_markdown
+    assert "\n\n# 风险评估" in parsed.report_markdown, "标题必须留在行首"
 
 
 @pytest.mark.parametrize(

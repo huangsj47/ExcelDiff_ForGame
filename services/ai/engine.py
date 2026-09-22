@@ -74,6 +74,7 @@ from services.ai.protocol import (
     looks_like_markdown_report,
     looks_like_truncated_json,
     parse_payload,
+    repair_split_string_payload,
     salvage_report_markdown,
     sanitize_requests,
 )
@@ -1186,7 +1187,41 @@ def run_analysis(
                 markdown_fallback = salvaged_report
                 degradation = DEGRADE_MARKDOWN
                 break
-            if looks_like_markdown_report(text):
+            # **先试平台自己拼**（实测 run 38 的 S2 第 7 轮）：模型把两万 token 的
+            # report_markdown 写成 `"第一段","第二段"` 的续写块形态 —— 括号配平、
+            # `finish_reason=stop`，`parse_payload` 解析失败、truncated 判否、
+            # `looks_like_markdown_report` 判真（JSON 字符串里的 `\n# 变更理解`
+            # 照样能数到章节标题），于是整轮被当成 markdown 报告重发。重发的代价
+            # 不只是 token：按「原样转成 JSON」交回的正文**普遍更短**（那一轮
+            # 16.5k token 的正文，重发回来只剩 6.7k），内容先丢了一截。
+            # 而 `anomalies`/`dimensions` 写在正文之后、本来就是好的 ——
+            # 把续写块拼回一个字符串，这份 JSON 就能解析，不重发也不降级。
+            repaired_parsed = None
+            repaired_text = repair_split_string_payload(text)
+            if repaired_text is not None:
+                try:
+                    repaired_parsed = parse_payload(repaired_text, dimension_ids=dimension_ids)
+                except ProtocolError as exc:
+                    # **失败也要留痕**：「识别出续写块、但拼回后仍解析失败」与「根本没识别
+                    # 出续写块」在 trace 上必须分得开 —— 前者说明后续字段另有毛病，后者说明
+                    # 是别的失败形态。不留这句话，下一轮实测又要靠猜（run 40 的 S1 第 6 轮）。
+                    round_notes.append(
+                        "已尝试把续写块拼接回去，但整份 payload 仍解析失败（"
+                        + str(exc)[:120]
+                        + "），按原分支处理"
+                    )
+                    repaired_parsed = None
+            if repaired_parsed is not None:
+                parsed = repaired_parsed
+                round_notes.append(
+                    "模型把 report_markdown 切成多段字符串导致 JSON 不合法；"
+                    "平台已自动拼接修复，未重发"
+                )
+                # **不 continue、不 break、也不再发这一轮的记录**：except 块到此结束，
+                # 落回循环体尾部的常规处理（与「这一轮本来就解析成功」同一条路），
+                # 由那里统一发这一轮的 `final`/`requests` 记录 —— 同一轮发两份会撞
+                # `uq_ai_trace_run_round`。
+            elif looks_like_markdown_report(text):
                 # 模型给了一份像样的 markdown 报告。**先留下来当降级产出**：内容通常是有用的，
                 # 用户至少能读到。然后才决定要不要再问一次结构。
                 payload = None
@@ -1228,27 +1263,28 @@ def run_analysis(
                     note=_combine_notes(round_notes, "按 markdown 报告降级"), **round_extra,
                 ))
                 break
-            if limits.max_corrections <= 0:
+            elif limits.max_corrections <= 0:
                 _emit(RoundRecord(
                     round_index, "unparsable",
                     note=_combine_notes(round_notes, str(exc)[:200]), **round_extra,
                 ))
                 degradation = DEGRADE_PROTOCOL
                 break
-            # 重问也要占一轮：否则一个不肯说 JSON 的模型能把循环变成无限次重试。
-            limits = replace(limits, max_corrections=limits.max_corrections - 1)
-            correction_hint = build_correction_hint(exc, dimension_ids=dimension_ids)
-            _emit(RoundRecord(
-                round_index, "unparsable",
-                # 那一轮为什么被重问：`note` 里是协议错误本身（给人看），
-                # `correction_hint` 是随后发给模型的那段纠正提示（原样记下来）。
-                correction_hint=correction_hint,
-                note=_combine_notes(round_notes, str(exc)[:200]), **round_extra,
-            ))
-            pending_items = ()
-            budget_notes = []
-            round_memos.append(TurnMemo(index=round_index, status="unparsable"))
-            continue
+            else:
+                # 重问也要占一轮：否则一个不肯说 JSON 的模型能把循环变成无限次重试。
+                limits = replace(limits, max_corrections=limits.max_corrections - 1)
+                correction_hint = build_correction_hint(exc, dimension_ids=dimension_ids)
+                _emit(RoundRecord(
+                    round_index, "unparsable",
+                    # 那一轮为什么被重问：`note` 里是协议错误本身（给人看），
+                    # `correction_hint` 是随后发给模型的那段纠正提示（原样记下来）。
+                    correction_hint=correction_hint,
+                    note=_combine_notes(round_notes, str(exc)[:200]), **round_extra,
+                ))
+                pending_items = ()
+                budget_notes = []
+                round_memos.append(TurnMemo(index=round_index, status="unparsable"))
+                continue
 
         correction_hint = ""
         if parsed.is_final:

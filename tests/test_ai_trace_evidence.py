@@ -283,6 +283,33 @@ class TestTheRoundKeepsTheAnswer:
         assert len(columns["response_text"]) == TRACE_RESPONSE_MAX_CHARS
         assert columns["response_text"].endswith(TRUNCATION_SUFFIX), "截断要说出来"
 
+    def test_an_unparsable_round_keeps_more_of_the_answer(self):
+        """解析失败那一轮的原文是唯一证据，比正常轮多存一些。
+
+        run 38 与 run 40 两次实测的 unparsable 都断在 4000 字之外 —— 存下来的开头
+        足以证明「是 JSON 开头」，却永远看不到失败发生在哪。正常轮不在此列（见常量注释）。
+        """
+        from services.ai.trace_evidence import UNPARSABLE_RESPONSE_MAX_CHARS
+
+        columns = encode_evidence(_record(
+            status="unparsable",
+            response_text="x" * (UNPARSABLE_RESPONSE_MAX_CHARS - 1),
+        ))
+
+        assert columns["response_text"] is not None
+        assert len(columns["response_text"]) == UNPARSABLE_RESPONSE_MAX_CHARS - 1
+
+    def test_an_unparsable_round_is_still_truncated_at_its_own_cap(self):
+        from services.ai.trace_evidence import UNPARSABLE_RESPONSE_MAX_CHARS
+
+        columns = encode_evidence(_record(
+            status="unparsable",
+            response_text="x" * (UNPARSABLE_RESPONSE_MAX_CHARS + 500),
+        ))
+
+        assert len(columns["response_text"]) == UNPARSABLE_RESPONSE_MAX_CHARS
+        assert columns["response_text"].endswith(TRUNCATION_SUFFIX)
+
     def test_the_correction_hint_is_kept(self):
         columns = encode_evidence(_record(correction_hint="你上一轮的返回不符合协议：…"))
 

@@ -899,6 +899,86 @@ def test_an_immediate_markdown_answer_burns_at_most_one_extra_call():
     assert outcome.degradation == DEGRADE_MARKDOWN, "两次都是 markdown，仍要按降级收工"
 
 
+SPLIT_REPORT = (
+    "# 变更理解\n\n本次改的是道具表的回收价，回收价从 100 提到 10000，等于商店卖出价，"
+    "经济闭环被打破。\n\n# 影响面分析\n\n只影响道具系统，回收价与售价相等，玩家可以无限刷钱。\n"
+)
+
+
+def _split_final(*anomalies, report: str = SPLIT_REPORT) -> str:
+    """一份**被切成多段字符串**的 final payload（实测 run 38 的 S2 第 7 轮）。
+
+    正文被写成 `"第一段","第二段"`：段与段之间只有逗号、没有键名，整份 JSON 因此
+    不合法 —— 但括号配平、`finish_reason=stop`，`anomalies`/`dimensions` 写在正文
+    之后、本来就是好的。每一段都长于 40 字（`_CONTINUATION_CHUNK_MIN`）：短段会被
+    当成键名，这个形态就切不起来了。
+    """
+    escaped = json.dumps(report, ensure_ascii=False)[1:-1]
+    head, tail = escaped[: len(escaped) // 2], escaped[len(escaped) // 2 :]
+    return (
+        '{"status": "final", "report_markdown":'
+        '"' + head + '","' + tail + '", '
+        '"anomalies": ' + json.dumps([dict(item) for item in anomalies], ensure_ascii=False) + ', '
+        '"dimensions": [{"id": "config_id", "hit": ' + ("true" if anomalies else "false")
+        + ', "note": ""}]}'
+    )
+
+
+def test_a_split_string_final_is_repaired_in_place_without_a_resend():
+    """续写块形态的 final 不再整轮重发：平台把段拼回一个字符串就地解析。
+
+    实测 run 38 的 S2 第 7 轮：这种回答以前被 `looks_like_markdown_report` 判成
+    markdown 报告（JSON 字符串里的 `\\n# 变更理解` 照样能数到章节标题），整轮重发
+    再要一次「原样转成 JSON」—— 重发回来的正文从 16.5k token 压到 6.7k，
+    **内容先丢了一截**。而 anomalies/dimensions 就写在正文后面、本来就是好的。
+    """
+    client = ScriptedClient(_split_final(_anomaly()))
+
+    outcome = _run(client)
+
+    assert len(client.calls) == 1, "拼接修复不花一轮重发"
+    assert outcome.status == STATUS_SUCCEEDED
+    assert outcome.degradation == DEGRADE_NONE, "修好的是格式，不是跑完的流程，不许降级"
+    assert outcome.rounds_used == 1
+    assert "经济闭环被打破" in outcome.report_markdown
+    assert "玩家可以无限刷钱" in outcome.report_markdown, "后半段正文必须一字不少"
+    assert [item.title for item in outcome.anomalies] == ["【道具】ID 被删除但生成文件仍在"], (
+        "正文之后的结构化结论必须原样保留"
+    )
+    assert "拼接修复" in outcome.rounds[0].note, "修复必须留痕：读 trace 的人得知道发生过什么"
+
+
+def test_an_unrepairable_split_still_takes_the_markdown_road():
+    """续写块后面的字段也坏了时，修复让路：不堵 markdown 降级那条原有的路。
+
+    差分的关键：同一形态、但 `anomalies` 给了非法类型 —— 拼回后 `json.loads` 通了、
+    `_coerce_anomalies` 拒收，修复这条路走不通，必须落回「按 markdown 报告降级重问」
+    的既有行为，而不是把这份回答丢掉。
+    """
+    text = _split_final().replace('"anomalies": []', '"anomalies": 5')
+    client = ScriptedClient(text)
+
+    outcome = _run(client)
+
+    assert outcome.degradation == DEGRADE_MARKDOWN, "修复不了时必须回到原有的降级路"
+    assert len(client.calls) == 2, "markdown 分支只重问一次格式"
+
+
+def test_a_failed_repair_leaves_a_note_in_the_round_record():
+    """「识别出续写块、拼回后仍失败」必须留痕：与「没识别出续写块」在 trace 上分得开。
+
+    run 40 的 S1 第 6 轮正是这么丢的确诊线索 —— 不留这句话，下次只能再猜一遍。
+    """
+    text = _split_final().replace('"anomalies": []', '"anomalies": 5')
+    client = ScriptedClient(text)
+
+    outcome = _run(client)
+
+    assert any("已尝试把续写块拼接回去" in (round_.note or "") for round_ in outcome.rounds), (
+        "失败的修复尝试必须写进那一轮的 note"
+    )
+
+
 def test_a_truncated_json_is_asked_to_shorten_instead_of_being_dropped():
     """单次输出撞上限时，第一次要**要求压短重发**，而不是就地降级。
 

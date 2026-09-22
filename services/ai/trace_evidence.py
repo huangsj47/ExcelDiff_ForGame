@@ -33,6 +33,10 @@ from utils.logger import log_print
 # （一个 JSON），但结论那一轮可能是一整份报告（几万字）—— 面板上展开几十份报告没有意义，
 # 报告正文本来就在 `ai_analysis_run.response_text` 里。
 TRACE_RESPONSE_MAX_CHARS = 4000
+# **解析失败的那一轮例外**：它的原文是「模型到底返回了什么」的唯一证据（run 38/40 两次实测，
+# 都恰好在这一轮 4000 字之外断掉、无法确诊），而那种一轮一次运行里最多出现一两次，
+# 多存一点不构成面板负担。正常轮照旧 4000。
+UNPARSABLE_RESPONSE_MAX_CHARS = 32_000
 # 每条明细里那个自由文本字段（丢弃原因等）的上限。
 TRACE_DETAIL_MAX_CHARS = 300
 # 每轮最多记多少条明细。索取一次最多几十条，正常分析远低于这个数。
@@ -230,7 +234,10 @@ def encode_evidence(record: Any) -> dict:
             "truncated": int(getattr(record, "truncated", 0) or 0),
             "details": summarize_dropped(getattr(record, "dropped", ())),
         }),
-        "response_text": _clip_response(getattr(record, "response_text", "")),
+        "response_text": _clip_response(
+            getattr(record, "response_text", ""),
+            status=str(getattr(record, "status", "") or ""),
+        ),
         "budget_notes": "\n".join(
             str(note) for note in (getattr(record, "budget_notes", ()) or ()) if str(note).strip()
         ) or None,
@@ -238,14 +245,22 @@ def encode_evidence(record: Any) -> dict:
     }
 
 
-def _clip_response(text: Any) -> Optional[str]:
+def _clip_response(text: Any, *, status: str = "") -> Optional[str]:
     content = str(text or "")
     if not content:
         return None
+    # 上限跟着这一轮的结局走：unparsable 的原文是诊断「模型到底说了什么」的唯一证据，
+    # 按 `UNPARSABLE_RESPONSE_MAX_CHARS` 存；其余轮照旧 `TRACE_RESPONSE_MAX_CHARS`
+    # （那一档的理由见常量处的注释，没有变）。
+    limit = (
+        UNPARSABLE_RESPONSE_MAX_CHARS
+        if status == "unparsable"
+        else TRACE_RESPONSE_MAX_CHARS
+    )
     try:
-        return truncate_text(content, TRACE_RESPONSE_MAX_CHARS)[0]
+        return truncate_text(content, limit)[0]
     except ValueError:  # pragma: no cover —— 常量必然为正，留着只是不让它炸
-        log_print(f"⚠️ AI trace：单轮原文截断失败，改为不记（{TRACE_RESPONSE_MAX_CHARS}）", "AI")
+        log_print(f"⚠️ AI trace：单轮原文截断失败，改为不记（{limit}）", "AI")
         return None
 
 
