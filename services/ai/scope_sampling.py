@@ -136,15 +136,19 @@ def _as_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 def _identity_of(entry, scope: str = "") -> tuple:
-    """一条缓存行的**内容身份** —— 做差比的就是这三个（不是 `updated_at`）。
+    """一条缓存行的**内容身份** —— 做差比的就是这四个（不是 `updated_at`）。
 
     `scope` 是这批配置的比较口径（表头坐标 / 多套表头方案）。**必须与快照那一侧
     在同一个位置并上**（`services/ai/header_scope.scoped_version`）：快照条目在写入时
     已经并过，这里不并的话两边永远不相等 —— 那不是「漏报一次」，而是**每一个文件**
     都被判成变了（或都没变），整个增量做差失真。
+
+    `commit_count` 见 `AiDiffSnapshotItem.identity`：回填的旧日期提交落在窗口中间时，
+    前两项一个都不动，只有它动。
     """
     return (entry.base_commit_id, entry.latest_commit_id,
-            scoped_version(entry.diff_version, scope))
+            scoped_version(entry.diff_version, scope),
+            int(entry.commit_count or 0))
 
 def _select_delta_entries(entries: List, baseline, scope: str = "") -> List:
     """按基准挑出「这次要装进输入」的那些条目。
@@ -419,9 +423,14 @@ def weekly_snapshot_digest(config_ids: List[int]) -> str:
     这条循环会一直转，每小时烧一次全量分析，而输入一字未变。
 
     指纹取自同一条查询的**内容身份**：每个文件的 `(base_commit_id, latest_commit_id,
-    diff_version)` 排序后取 sha1。这三者决定合并 diff 的输入，也就决定了这一轮分析
-    能看到的全部内容；它们没变，再跑一遍只会得到同一份结果。只哈希**这个三元组**，
-    不哈希 `updated_at`：后者是「什么时候写的」，不是「写了什么」。
+    diff_version, commit_count)` 排序后取 sha1。这些决定合并 diff 的输入，也就决定了
+    这一轮分析能看到的全部内容；它们没变，再跑一遍只会得到同一份结果。只哈希**这个
+    四元组**，不哈希 `updated_at`：后者是「什么时候写的」，不是「写了什么」。
+
+    `commit_count` 那一项不能省（见 `models/ai_analysis/diff_snapshot.py`）：提交按
+    `commit_time` 定序挑 base/latest，而回填的提交可能日期早、推送晚 —— 它落在窗口
+    中间，前两项一个都不动，合并 diff 却已经变了。省掉它，这一轮自动分析会被
+    `snapshot_already_analyzed` 当成「同一份输入」整轮跳过。
 
     用途见 `services/task_worker_service.schedule_weekly_ai_analysis_tasks`：指纹与
     `AiWeeklyAnalysisState.last_snapshot_digest` 相同就跳过这一轮自动分析。
@@ -439,6 +448,7 @@ def weekly_snapshot_digest(config_ids: List[int]) -> str:
             WeeklyVersionDiffCache.base_commit_id,
             WeeklyVersionDiffCache.latest_commit_id,
             WeeklyVersionDiffCache.diff_version,
+            WeeklyVersionDiffCache.commit_count,
         )
         .all()
     )
@@ -450,8 +460,10 @@ def weekly_snapshot_digest(config_ids: List[int]) -> str:
     # 可模型能看到的东西（列名、哪些行算数据）已经换了一套。
     scope = header_scope_fingerprint(config_ids)
     parts = sorted(
-        "%s|%s|%s|%s|%s" % (path or "", base or "", latest or "", version or "", scope)
-        for path, base, latest, version in rows
+        "%s|%s|%s|%s|%s|%s"
+        % (path or "", base or "", latest or "", version or "",
+           str(int(count or 0)), scope)
+        for path, base, latest, version, count in rows
     )
     return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()
 

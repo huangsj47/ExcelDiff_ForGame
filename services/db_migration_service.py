@@ -393,6 +393,16 @@ def _migrate_ai_analysis_columns(db, log_print):
         },
         log_print,
     )
+    _migrate_table_columns(
+        db,
+        "ai_diff_snapshot_item",
+        {
+            # 内容身份的第四项（见 `models/ai_analysis/diff_snapshot.py`）。
+            # 老行是 NULL，做差时两处都折成 `int(x or 0)`。
+            "commit_count": "commit_count INTEGER",
+        },
+        log_print,
+    )
 
 
 def _migrate_ai_run_claim_columns(db, log_print):

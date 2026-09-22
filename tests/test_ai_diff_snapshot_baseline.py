@@ -403,6 +403,47 @@ def test_diff_snapshots_splits_added_changed_and_unchanged():
         }
 
 
+def test_a_backdated_commit_inside_the_window_is_a_change_too():
+    """**回填的旧日期提交那一类漏。**
+
+    提交是按 `commit_time` 定序挑 base/latest 的，而自动导表那类工具回填的提交可能
+    **日期早于窗口里已有的提交、推送却在之后**：它落在窗口中间，`base`/`latest`/
+    `diff_version` 一个都不动，可合并 diff（窗口内该文件的提交按序合起来）已经变了、
+    缓存行也重写了（`weekly_file_sync.weekly_cache_is_unchanged` 就是把 `commit_count`
+    算作内容变化的）。做差少了这一项，判据说「没变」；而基准每轮都往前推 ——
+    这一处改动**永远**补不回来，报告里一个字都不会提。
+
+    只把两行的条数加一、其余一字不动：判据退回三元组时这条必须红。
+    """
+    with app.app_context():
+        create_tables()
+        group = _make_group(file_count=6)
+        cfg_id = group["cfg"].id
+
+        first = _run_once(group)
+        assert first["payload"]["scope"] == "full", "首跑不是全量，后面的增量不成立"
+
+        touched = set(_paths(group, [1, 2]))
+        for row in WeeklyVersionDiffCache.query.filter_by(config_id=cfg_id).all():
+            if row.file_path in touched:
+                row.commit_count = (row.commit_count or 0) + 1
+        db.session.commit()
+
+        payload, _state, skip = ai_service.build_weekly_payload(cfg_id)
+        assert skip is None, f"这次 payload 没建出来：{skip}"
+        delta = {item["file_path"] for item in payload["delta_files"]}
+        assert touched <= delta, (
+            "窗口里多了一条提交（base/latest 都没动）却没进增量输入 —— "
+            f"这些文件再也不会被重看：{sorted(touched - delta)}"
+        )
+
+        # 反向：没被碰过的那几行不许跟着一起进来。
+        untouched = set(_paths(group, [3, 4, 5]))
+        assert not (untouched & delta), (
+            f"没变化的文件被算成了变化：{sorted(untouched & delta)}"
+        )
+
+
 def test_a_new_diff_version_is_a_change_even_without_any_new_commit():
     """比较口径变了（`DIFF_LOGIC_VERSION`）就必须重看，哪怕 commit 一个都没动。"""
     with app.app_context():

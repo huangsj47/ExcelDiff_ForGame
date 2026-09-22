@@ -110,6 +110,29 @@ def test_the_digest_changes_when_only_the_latest_commit_changes():
         assert weekly_snapshot_digest([cfg.id]) != before, "同文件换了提交，指纹却没变"
 
 
+def test_the_digest_changes_when_a_backdated_commit_joins_the_window():
+    """**回填的旧日期提交**：`base` / `latest` / `diff_version` 一字未动，只有窗口内
+    碰过这个文件的提交**条数**变了。
+
+    这正是自动导表那类工具的形态 —— 它提交时带上原始日期，于是新提交的 `commit_time`
+    可能早于窗口里已有的提交。合并 diff（窗口内该文件的提交按序合起来）已经变了，
+    缓存行也重写了，可指纹里少了 `commit_count` 就说「同一份输入」—— 后果不是
+    「分析得不全」，是**这一轮自动分析根本不会发生**（`snapshot_already_analyzed`
+    在调度器里那道闸直接跳过）。
+    """
+    with app.app_context():
+        create_tables()
+        _project, _repo, cfg, cache = _setup()
+        before = weekly_snapshot_digest([cfg.id])
+
+        cache.commit_count = (cache.commit_count or 0) + 1
+        db.session.commit()
+
+        assert weekly_snapshot_digest([cfg.id]) != before, (
+            "窗口里多了一条提交，指纹却没变 —— 这一轮分析会被当成「同一份输入」跳过"
+        )
+
+
 def test_the_digest_is_empty_without_any_cache_rows():
     with app.app_context():
         create_tables()

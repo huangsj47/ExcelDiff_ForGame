@@ -27,12 +27,19 @@
 **做差的判据是内容身份，不是时间**：
 
 ```text
-条目内容身份 = (base_commit_id, latest_commit_id, diff_version)
+条目内容身份 = (base_commit_id, latest_commit_id, diff_version, commit_count)
 本次要分析 = target 中存在、而 base 中没有或身份不同的条目
 ```
 
 `diff_version` 必须进身份：比较口径变了（见 `docs/代码架构说明.md` 第 3.4 节）
 就**必须**重新分析，哪怕 commit 一个都没动。
+
+`commit_count` 也必须进身份 —— 它是**窗口内碰过这个文件的提交条数**。提交是按
+`commit_time` 定序挑 base/latest 的，而自动导表那类工具回填的提交可能**日期早于已有
+提交、推送却在之后**：它落在窗口中间，base/latest 一个都不动，可合并 diff（窗口内该文件
+的提交按序合起来）已经变了、缓存行也重写了。少了这一项，判据说「没变」，而基准每轮都
+往前推 —— 这一处改动**永远**补不回来。`weekly_file_sync.weekly_cache_is_unchanged`
+判「要不要重写这一行」时早就把它算作内容变化了，两个判据必须是同一个口径。
 
 ## 快照是**只增不删**的
 
@@ -81,9 +88,11 @@ class AiDiffSnapshot(db.Model):
     group_key = db.Column(db.String(200), nullable=False)
 
     # 与 `scope_sampling.weekly_snapshot_digest` **逐字相同**的算法（那是个纯函数，
-    # 这里只是把结果落库）。刻意不改算法：`AiAnalysisRun.active_key` 的输入指纹里
-    # 含这个值，换算法会让所有「同目标同输入」的历史活动运行突然不再匹配，
-    # 同一次输入被放行第二次 —— 而那个代价是静默的。
+    # 这里只是把结果落库）。**算法改过一次**（2026-09，加进 `commit_count`）：改它
+    # 有代价 —— `AiAnalysisRun.active_key` 的输入指纹里含这个值，换算法会让所有
+    # 「同目标同输入」的历史活动运行突然不再匹配，同一次输入被放行第二次。那次是有意
+    # 承担的：旧算法把「回填的旧日期提交改变了窗口内容」也算成「同一份输入」（见模块
+    # docstring），而漏掉的代价比多跑一次大得多。再动它请照这个标准掂量。
     content_digest = db.Column(db.String(64), nullable=False)
 
     # 条目数（做差时先比它：数目相等且 digest 相等就是同一份，不必捞条目）。
@@ -154,13 +163,16 @@ class AiDiffSnapshotItem(db.Model):
     repository_id = db.Column(db.Integer, nullable=True)
     file_path = db.Column(db.String(1000), nullable=False)
 
-    # 内容身份三元组。**做差比的就是这三个**（见模块 docstring）：
+    # 内容身份四元组。**做差比的就是这四个**（见模块 docstring）：
     # * `latest_commit_id` 变了 = 这个文件有了新提交；
     # * `base_commit_id` 变了 = 比较基准换了（同样要重看）；
-    # * `diff_version` 变了 = 比较口径变了（`DIFF_LOGIC_VERSION`），必须重看。
+    # * `diff_version` 变了 = 比较口径变了（`DIFF_LOGIC_VERSION`），必须重看；
+    # * `commit_count` 变了 = 窗口内碰过它的提交条数变了（回填的旧日期提交也算，
+    #   见模块 docstring 上那段）。
     base_commit_id = db.Column(db.String(100), nullable=True)
     latest_commit_id = db.Column(db.String(100), nullable=True)
     diff_version = db.Column(db.String(40), nullable=True)
+    commit_count = db.Column(db.Integer, nullable=True)
 
     __table_args__ = (
         # 条目在快照内唯一 —— 做差按 `(config_id, file_path)` 取，重复条目会让
@@ -175,8 +187,13 @@ class AiDiffSnapshotItem(db.Model):
     )
 
     def identity(self) -> tuple:
-        """内容身份。两份快照里同一个键的这个元组不同 = 这个文件要重看。"""
-        return (self.base_commit_id, self.latest_commit_id, self.diff_version)
+        """内容身份。两份快照里同一个键的这个元组不同 = 这个文件要重看。
+
+        `commit_count` 折成 `int(x or 0)`：老库里的行在这一列上是 NULL，而做差另一侧
+        读的是缓存行上的整数 —— 不折就会出现 `None != 1`，把每一行都判成变了。
+        """
+        return (self.base_commit_id, self.latest_commit_id, self.diff_version,
+                int(self.commit_count or 0))
 
     def to_dict(self) -> dict:
         return {
@@ -186,6 +203,7 @@ class AiDiffSnapshotItem(db.Model):
             "base_commit_id": self.base_commit_id or "",
             "latest_commit_id": self.latest_commit_id or "",
             "diff_version": self.diff_version or "",
+            "commit_count": int(self.commit_count or 0),
         }
 
     def __repr__(self) -> str:

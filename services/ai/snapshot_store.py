@@ -96,18 +96,20 @@ def _cache_rows(config_ids: Sequence[int]) -> List[WeeklyVersionDiffCache]:
 
 
 def _digest_of(rows: Sequence[Any], scope: str = "") -> str:
-    """`(file_path, base, latest, diff_version)` 的内容指纹。
+    """`(file_path, base, latest, diff_version, commit_count)` 的内容指纹。
 
     **与 `scope_sampling.weekly_snapshot_digest` 逐字相同**（见模块抬头）。两边的输入
-    来自同一条查询、同一个排序、同一个分隔符；`None` 一律折成空串。
+    来自同一条查询、同一个排序、同一个分隔符；`None` 一律折成空串，`commit_count`
+    两边都折成 `int(x or 0)` 再转字符串（不然 NULL 与 0 会写出两个不同的指纹）。
     """
     parts = sorted(
-        "%s|%s|%s|%s|%s"
+        "%s|%s|%s|%s|%s|%s"
         % (
             getattr(row, "file_path", None) or "",
             getattr(row, "base_commit_id", None) or "",
             getattr(row, "latest_commit_id", None) or "",
             getattr(row, "diff_version", None) or "",
+            str(int(getattr(row, "commit_count", 0) or 0)),
             scope,
         )
         for row in rows
@@ -173,6 +175,7 @@ def seal_snapshot(
                 base_commit_id=row.base_commit_id,
                 latest_commit_id=row.latest_commit_id,
                 diff_version=scoped_version(row.diff_version, scope),
+                commit_count=row.commit_count,
             )
         )
     db.session.flush()
