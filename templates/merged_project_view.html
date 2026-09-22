@@ -1573,6 +1573,20 @@
                             </div>
                             <div class="form-text text-danger d-none" id="aiSubagentCountInputError"></div>
                         </div>
+                        <!-- 分片额度。它和下面那个「单次异常上限」是一对：那一栏是**事后**闸门
+                             （不花 token），这一栏是**写给模型看的**额度（省输出 token）。 -->
+                        <div class="col-12 col-lg-6 ai-config-field">
+                            <label class="form-label" for="aiMaxAnomaliesPerSubagentInput">每个分片异常上限</label>
+                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiMaxAnomaliesPerSubagentInput"
+                                   aria-describedby="aiMaxAnomaliesPerSubagentInputHelp aiMaxAnomaliesPerSubagentInputError">
+                            <div class="form-text" id="aiMaxAnomaliesPerSubagentInputHelp">
+                                默认 10，只对上面的子代理模式生效。这一栏会<strong>写进分片任务书</strong>，
+                                分片按严重度取前几条报，低风险与小问题不再写 —— 所以它省的是
+                                <strong>输出 token</strong>（与下面「单次异常上限」不同，那一栏是模型答完之后
+                                才截，不省任何调用）。超出全次上限时按全次上限算。
+                            </div>
+                            <div class="form-text text-danger d-none" id="aiMaxAnomaliesPerSubagentInputError"></div>
+                        </div>
                         <!-- 对账轮（阶段 3）。**默认关**，且它是「子代理模式」之上的可选一道复核：
                              汇总之后再跑一次独立请求，要它去找反证。不写清「它买的是什么」，
                              用户会以为开了子代理就已经有复核了。 -->
@@ -2528,6 +2542,7 @@ const AI_FIELD_DOM = {
     max_analysis_rounds: 'aiMaxRoundsInput',
     max_tool_requests: 'aiMaxToolRequestsInput',
     subagent_count: 'aiSubagentCountInput',
+    max_anomalies_per_subagent: 'aiMaxAnomaliesPerSubagentInput',
     // 对账轮：这一栏的校验是**跨字段**的（见 validateAiFieldLocally 里的 subagent_verify 分支），
     // 落点就是它下面那个错误槽。
     subagent_verify: 'aiSubagentVerifyToggle',
@@ -2736,6 +2751,7 @@ function fillAiConfigForm(data) {
     setValue('aiMaxRoundsInput', data.max_analysis_rounds);
     setValue('aiMaxToolRequestsInput', data.max_tool_requests);
     setValue('aiSubagentCountInput', data.subagent_count);
+    setValue('aiMaxAnomaliesPerSubagentInput', data.max_anomalies_per_subagent);
     setValue('aiPromptCharBudgetInput', data.prompt_char_budget);
     setValue('aiRequestTimeoutInput', data.request_timeout_seconds);
     setValue('aiMaxAnomaliesInput', data.max_anomalies_per_run);
@@ -2984,6 +3000,7 @@ function collectAiConfigPayload() {
     numberValue('aiMaxRoundsInput', 'max_analysis_rounds');
     numberValue('aiMaxToolRequestsInput', 'max_tool_requests');
     numberValue('aiSubagentCountInput', 'subagent_count');
+    numberValue('aiMaxAnomaliesPerSubagentInput', 'max_anomalies_per_subagent');
     numberValue('aiPromptCharBudgetInput', 'prompt_char_budget');
     numberValue('aiRequestTimeoutInput', 'request_timeout_seconds');
     numberValue('aiMaxAnomaliesInput', 'max_anomalies_per_run');

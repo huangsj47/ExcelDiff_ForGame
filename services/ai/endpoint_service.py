@@ -39,6 +39,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_MAX_ANALYSIS_ROUNDS,
     DEFAULT_AUTO_WEEKLY_ENABLED,
     DEFAULT_MAX_ANOMALIES_PER_RUN,
+    DEFAULT_MAX_ANOMALIES_PER_SUBAGENT,
     DEFAULT_MAX_FILES_PER_RUN,
     DEFAULT_MAX_TOOL_REQUESTS,
     DEFAULT_MIN_CONFIDENCE,
@@ -53,6 +54,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_WEEKLY_INTERVAL_MINUTES,
     MAX_ANALYSIS_ROUNDS_RANGE,
     MAX_ANOMALIES_PER_RUN_RANGE,
+    MAX_ANOMALIES_PER_SUBAGENT_RANGE,
     MAX_FILES_PER_RUN_RANGE,
     MAX_TOOL_REQUESTS_RANGE,
     PROMPT_CACHE_FORMAT_CHOICES,
@@ -146,6 +148,10 @@ FIELD_RULES: Mapping[str, FieldRule] = {
     "max_anomalies_per_run": FieldRule(
         "单次异常上限", "int", *MAX_ANOMALIES_PER_RUN_RANGE
     ),
+    # 分片额度：**这一栏会写进分片任务书**，模型照它写，省的是输出 token。
+    "max_anomalies_per_subagent": FieldRule(
+        "每个分片异常上限（仅子代理）", "int", *MAX_ANOMALIES_PER_SUBAGENT_RANGE
+    ),
     # 这两栏是长文本，长度只做一个防呆上限。
     "prompt_template": FieldRule("项目补充指令", "text", max_length=20_000),
     # 单价表按 JSON 校验（kind="price_table"），见 `_coerce_price_table`：保存时就报错，
@@ -187,6 +193,7 @@ FIELD_DEFAULTS: Mapping[str, Any] = {
     "min_severity": DEFAULT_MIN_SEVERITY,
     "min_confidence": DEFAULT_MIN_CONFIDENCE,
     "max_anomalies_per_run": DEFAULT_MAX_ANOMALIES_PER_RUN,
+    "max_anomalies_per_subagent": DEFAULT_MAX_ANOMALIES_PER_SUBAGENT,
     "subagent_enabled": DEFAULT_SUBAGENT_ENABLED,
     "subagent_count": DEFAULT_SUBAGENT_COUNT,
     "subagent_verify": DEFAULT_SUBAGENT_VERIFY,

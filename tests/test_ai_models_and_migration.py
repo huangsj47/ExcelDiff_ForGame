@@ -106,6 +106,8 @@ CONFIG_NEW_COLUMNS = (
     "min_severity",
     "min_confidence",
     "max_anomalies_per_run",
+    # 每个分片的条数额度（2026-09）。老行 NULL → `resolved()` 读成 10。
+    "max_anomalies_per_subagent",
     "project_knowledge",
     "model_price_table",
     # 预算闸门（2026-09）。老行在这三列上是 NULL，而 NULL 的语义就是「不限制」——

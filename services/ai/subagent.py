@@ -564,6 +564,9 @@ def build_member_task(member: MemberPlan, plan: FamilyPlan) -> str:
     （于是跨模块耦合永远发现不了），或者**它以为没人管的维度要自己兜底**（于是重复劳动、
     还把别人的活干浅了）。
     """
+    # 条数额度（见 `EngineLimits.max_anomalies_per_subagent`）。写进任务书的那个数字
+    # **就是**额度本身：模型照它写，省下的是输出 token —— 事后封顶省不了这笔钱。
+    cap = max(1, int(plan.limits.max_anomalies_per_subagent))
     others = [
         f"- {item.label}：{'、'.join(item.dimensions)}"
         for item in plan.members
@@ -616,7 +619,12 @@ def build_member_task(member: MemberPlan, plan: FamilyPlan) -> str:
                 "## 输出要求\n\n"
                 "与常规分析**完全一样**：走同一套 JSON 协议、同样的精度要求。"
                 "唯一的差别是 `report_markdown` 只写**你这几个维度的发现与依据**"
-                "（不必写整版报告，主代理会把它们汇总成最终报告）。"
+                "（不必写整版报告，主代理会把它们汇总成最终报告）。\n\n"
+                f"**条数额度：`anomalies` 最多 {cap} 条。** 这是额度不是目标 —— 按严重度"
+                f"从高到低取前 {cap} 条，**低风险与小问题不用写**（它们本来也会被汇总那道"
+                "按严重度挡在外面，写出来只是白花时间）。上面那句「宁可多报，由主代理去重」"
+                f"是**在这 {cap} 条之内**说的：越出自己维度的要报，但别拿它把额度撑满。\n\n"
+                "每条的 `evidence` 写到**看得懂就行**，不要为了显得严谨把整段文件贴进去。\n\n"
                 "`dimensions` 里**系统提示词那份「本项目适用的维度清单」上的每一个维度"
                 f"都要留痕（本次共 {len(plan.synthesis.dimensions)} 个）**：你负责的那几个"
                 "写 `hit` 与理由，其余写 `hit: false` 并注明「由 S? 负责」即可。"
@@ -714,7 +722,10 @@ def build_synthesis_task(
         "## 额度\n\n"
         f"你和每个分片代理的额度是一样的（各 {plan.limits.max_tool_requests} 次索取、"
         f"最多 {plan.limits.max_rounds} 轮）。汇总不需要重新通读整批，"
-        "把额度花在核对可疑条目上。"
+        "把额度花在核对可疑条目上。\n\n"
+        f"每个分片代理报上来的条目**最多 {max(1, int(plan.limits.max_anomalies_per_subagent))} "
+        "条**（平台给的额度，按严重度取的前几条）。所以候选清单是**有上限的抽样**，"
+        "不是「全版本只有这些」—— 别因为条数少就推断这个版本没问题。"
     )
     return "\n\n".join(blocks).rstrip() + "\n"
 

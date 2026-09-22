@@ -35,6 +35,7 @@ from models.ai_analysis import (
 )
 from models.ai_analysis.project_config import (
     DEFAULT_AUTO_WEEKLY_ENABLED,
+    DEFAULT_MAX_ANOMALIES_PER_RUN,
     DEFAULT_MAX_FILES_PER_RUN,
 )
 from services.ai import project_gate
@@ -619,6 +620,22 @@ def _engine_limits(project_config: dict, *, platform_chars: int = 0) -> EngineLi
         prompt_char_budget=max(0, platform_chars)
         + _configured_int(
             project_config.get("prompt_char_budget"), defaults.prompt_char_budget
+        ),
+        # 分片额度**不超过全次上限**：项目把「单次异常上限」调小（比如 5）却留下分片额度
+        # 10，会变成「每个分片照报 10 条、汇总再砍掉一半」—— 白写的那些 token 正是这
+        # 一栏要省的。两个值都从同一份 project_config 里读，所以夹在这里是免费的。
+        max_anomalies_per_subagent=max(
+            1,
+            min(
+                _configured_int(
+                    project_config.get("max_anomalies_per_subagent"),
+                    defaults.max_anomalies_per_subagent,
+                ),
+                _configured_int(
+                    project_config.get("max_anomalies_per_run"),
+                    DEFAULT_MAX_ANOMALIES_PER_RUN,
+                ),
+            ),
         ),
     )
 

@@ -65,6 +65,17 @@ DEFAULT_MIN_CONFIDENCE = "high"
 # 上一次抬到 15 之后仍有**复核确认为真**的 high 结论（`PsSkSpcMod`）被截在清单外，
 # 所以再抬一档。
 DEFAULT_MAX_ANOMALIES_PER_RUN = 20
+# 每个**分片**最多报几条（仅子代理模式）。与上面那道事后闸门不同，**这一条是写给模型
+# 的指令** —— 它会进分片任务书，所以模型从一开始就按这个数写，省下的是**输出 token**
+# （实测一次分析里分片的输出能占到七成以上）。
+#
+# 10 的来历：默认 3 个分片 × 10 = 30 ≥ 全次上限 20，于是「各分片各报 10 条、汇总再取
+# 全次前 20」与「各分片不限、汇总取前 20」在绝大多数情况下是同一份清单 —— 只有某一个
+# 分片独占了全次前 20 里的 11 条以上才会少一条。代价是每个分片的报告不再无限长。
+#
+# 它是一种**额度**而不是承诺：模型多报了不会因此丢结论（汇总那一道 `max_anomalies_per_run`
+# 照旧封顶并逐条点名），只是白写。
+DEFAULT_MAX_ANOMALIES_PER_SUBAGENT = 10
 
 # --- 提示词缓存标记（行为在 services/ai/prompt_cache.py，这里只存值）---
 # 两栏合起来才决定「这次请求带不带缓存断点」，默认值是**不发**：
@@ -117,6 +128,8 @@ REQUEST_TIMEOUT_RANGE = (10, 3600)
 MAX_FILES_PER_RUN_RANGE = (1, 5_000)
 WEEKLY_INTERVAL_RANGE = (5, 10_080)
 MAX_ANOMALIES_PER_RUN_RANGE = (0, 200)
+# 下限是 1 而不是 0：0 会让分片一个字都不许写结论，那不是一个额度、是一把锁。
+MAX_ANOMALIES_PER_SUBAGENT_RANGE = (1, 50)
 SEVERITY_CHOICES = ("high", "critical")
 CONFIDENCE_CHOICES = ("high", "very_high")
 
@@ -258,6 +271,11 @@ class AiProjectAnalysisConfig(db.Model):
     subagent_count = db.Column(db.Integer, default=DEFAULT_SUBAGENT_COUNT)
     # 对账轮（2026-09）。NULL 同样是老行 → `resolved()` 读成「关闭」。
     subagent_verify = db.Column(db.Boolean, default=DEFAULT_SUBAGENT_VERIFY)
+    # 每个分片的结论条数额度（2026-09，见 DEFAULT_MAX_ANOMALIES_PER_SUBAGENT）。
+    # NULL 同样是老行 → `resolved()` 读成 10。
+    max_anomalies_per_subagent = db.Column(
+        db.Integer, default=DEFAULT_MAX_ANOMALIES_PER_SUBAGENT
+    )
 
     # --- 告警门槛（规则侧，改这里不用改提示词）---
     min_severity = db.Column(db.String(20), default=DEFAULT_MIN_SEVERITY)
@@ -354,6 +372,9 @@ class AiProjectAnalysisConfig(db.Model):
             "min_confidence": (self.min_confidence or DEFAULT_MIN_CONFIDENCE).strip().lower(),
             "max_anomalies_per_run": _int_or(
                 self.max_anomalies_per_run, DEFAULT_MAX_ANOMALIES_PER_RUN
+            ),
+            "max_anomalies_per_subagent": _int_or(
+                self.max_anomalies_per_subagent, DEFAULT_MAX_ANOMALIES_PER_SUBAGENT
             ),
             "project_knowledge": self.project_knowledge or "",
             # 空串 = 没有项目单价表（用平台默认表）。**不是「免费」**，读取侧据此返回

@@ -338,6 +338,9 @@ def _migrate_ai_analysis_columns(db, log_print):
             "subagent_enabled": "subagent_enabled BOOLEAN",
             "subagent_count": "subagent_count INTEGER",
             "subagent_verify": "subagent_verify BOOLEAN",
+            # 每个分片报几条（2026-09）。同样无 DEFAULT 子句，老行 NULL → `resolved()`
+            # 读成 10。
+            "max_anomalies_per_subagent": "max_anomalies_per_subagent INTEGER",
         },
         log_print,
     )

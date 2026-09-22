@@ -81,6 +81,7 @@ from services.ai.rules import RuleThresholds, normalize_anomalies
 from services.ai.scope import AnalysisScope
 from services.ai.skill_contract import DIMENSION_IDS, DimensionSpec, dimension_ids_of
 from services.ai.skill_loader import LoadedSkills
+from models.ai_analysis.project_config import DEFAULT_MAX_ANOMALIES_PER_SUBAGENT
 from utils.logger import log_print
 
 # 结果状态。`degraded` 是「有产出，但流程没走完」——必须与 `succeeded` 分开，
@@ -172,6 +173,11 @@ class EngineLimits:
     max_rounds: int = 8
     max_tool_requests: int = DEFAULT_MAX_TOOL_REQUESTS
     max_items: int = DEFAULT_MAX_ITEMS
+    # 每个**分片**最多报几条结论（仅子代理模式）。与 `max_tool_requests` 一样是**额度**：
+    # 它会写进分片任务书，模型照它写，所以省的是输出 token。
+    #
+    # 单代理那条路用不到它（那时 `max_anomalies_per_run` 就是全部），所以留着默认值即可。
+    max_anomalies_per_subagent: int = DEFAULT_MAX_ANOMALIES_PER_SUBAGENT
     prompt_char_budget: int = DEFAULT_TOTAL_CHARS
     baseline_char_budget: int = DEFAULT_BASELINE_CHARS
     max_corrections: int = 2
