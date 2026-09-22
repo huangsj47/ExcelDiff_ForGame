@@ -21,7 +21,7 @@ from models import (
     WeeklyVersionExcelCache,
     db,
 )
-from services.commit_ordering import commit_merge_sort_key
+from services.commit_ordering import commit_merge_sort_key, order_for_merge
 from services.deployment_mode import is_agent_dispatch_mode
 from services.diff_render_helpers import render_excel_diff_html, render_git_diff_content, render_new_file_content
 from services.diff_service import DiffService
@@ -49,6 +49,7 @@ from services.weekly_excel_merge_helpers import (
 from services.weekly_file_sync import (
     WeeklyFileSyncResult,
     annotate_same_instant_order,
+    annotate_topology_order,
     describe_weekly_file_totals,
     get_real_base_commit_from_vcs,
     weekly_cache_is_unchanged,
@@ -1249,8 +1250,10 @@ def generate_weekly_excel_merged_diff_html(config, diff_cache, file_path, force_
             # 同刻提交同样要按 git 拓扑定序：这条回退路径自己取 `commits[-1]` 当 latest，
             # 次序错了这里**展示的**收尾内容就是前一个提交的状态（写入侧的理由见
             # services/commit_ordering.py）。无平局时不调 git。
+            # 回填日期那条（整组拓扑序）同样适用 —— 这里和写入侧必须给出同一个次序。
             annotate_same_instant_order(repository, commits)
-            commits = sorted(commits, key=commit_merge_sort_key)
+            annotate_topology_order(repository, commits)
+            commits = order_for_merge(commits)
             log_print(f"回退模式找到 {len(commits)} 个相关提交", 'WEEKLY')
             base_commit = None
             if diff_cache.base_commit_id:
@@ -1363,7 +1366,14 @@ def process_weekly_version_sync(config_id):
         annotated = annotate_same_instant_order(repository, commits_in_range)
         if annotated:
             log_print(f"按 git 拓扑定序的同刻提交: {annotated} 个", 'WEEKLY')
-        commits_in_range = sorted(commits_in_range, key=commit_merge_sort_key)
+        # **回填日期的提交没有平局，可时间序照样是反的**：导表工具提交时带上原始日期，
+        # 子提交可能比父提交「旧」。排反之后 `commits[-1]`（写进 `latest_commit_id` 的那个）
+        # 指向旧状态，`_generate_merged_diff_data` 里更会退化成「自己和自己比」、
+        # 整段区间的改动算成无变化。整组问一次 git，一次同步只多一次 rev-list。
+        # 上面那条并存作兜底：拓扑序问不到时，`order_for_merge` 会退回
+        # `commit_merge_sort_key`，那条路用的正是同刻定序。
+        annotate_topology_order(repository, commits_in_range)
+        commits_in_range = order_for_merge(commits_in_range)
 
         # 按文件路径分组提交
         files_commits = {}

@@ -153,6 +153,28 @@ def annotate_same_instant_order(repository, commits):
         return 0
 
 
+def annotate_topology_order(repository, commits):
+    """给**整组提交**按 git 拓扑定序（写进 commit_ordering 的缓存）。
+
+    与 `annotate_same_instant_order` 的分工：那个治「同一时刻的多个提交」，这个治
+    **回填日期** —— 工具提交时带上原始日期，子提交可能比父提交「旧」，没有平局也照样排反。
+    排反的后果是合并 diff 自己和自己比（见 `services/commit_ordering.py`）。
+
+    代价是每轮一次 `git rev-list --topo-order`，所以只在这里（一次同步、一次读回退）
+    调用，不要放进逐文件的循环。**任何失败都不抛**：定序失败退回时间序，同步照跑。
+    """
+    from services.commit_ordering import annotate_topology_order as _annotate
+    from services.weekly_version_logic import _get_git_service
+
+    try:
+        if getattr(repository, 'type', None) != 'git' or _get_git_service is None:
+            return 0
+        return _annotate(_get_git_service(repository), commits)
+    except Exception as exc:
+        log_print(f"⚠️ 提交拓扑定序失败（沿用时间序）: {exc}", 'WEEKLY', force=True)
+        return 0
+
+
 def get_real_base_commit_from_vcs(config, file_path):
     """从Git/SVN获取文件的真实基准版本提交"""
     # 这两个名字还在 weekly_version_logic 里：`weekly_window_in_utc` 是窗口换算的

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 from models import db, Commit, Repository, DiffCache, ExcelHtmlCache
 from services.commit_lookup_service import is_svn_revision
-from services.commit_ordering import commit_merge_sort_key
+from services.commit_ordering import commit_merge_sort_key, order_for_merge
 from services.deployment_mode import is_agent_dispatch_mode
 from services.diff_service import DiffService
 from services.task_worker_priority import EXCEL_DIFF_PAGE
@@ -84,6 +84,18 @@ def _normalize_commit_operation(operation):
 def _commit_sort_key_for_merge(commit):
     """合并用排序键 —— 判据本体在 `services.commit_ordering`（同刻提交必须两个模块同一个答案）。"""
     return commit_merge_sort_key(commit)
+
+
+def _order_for_merge(commits):
+    """合并用的次序 —— 判据本体在 `services.commit_ordering.order_for_merge`。
+
+    **不是** `sorted(..., key=_commit_sort_key_for_merge)`：排序键的主键是提交时间，而
+    回填日期的提交时间与图序不一致（子提交可能比父提交「旧」）。排反之后
+    `handle_consecutive_commits_merge_internal` 取到的 earliest 是图序上最后那条，
+    于是它去取 `get_parent_commit(earliest)` —— 那正是 latest 自己 —— 交出去的是
+    「自己和自己比」，整段区间的改动算成无变化。问过 git 拓扑序的走拓扑，其余退回原口径。
+    """
+    return order_for_merge(commits)
 
 
 def _commit_time_to_iso(commit_time):
@@ -515,7 +527,7 @@ def _apply_inline_highlight_to_code_diff(diff_data):
 def generate_merged_diff_data(repository, file_path, base_commit, latest_commit, commits):
     """Generate merged diff data with real merge strategy and compatible metadata."""
     try:
-        ordered_commits = sorted((commits or []), key=_commit_sort_key_for_merge)
+        ordered_commits = _order_for_merge(commits)
         if not ordered_commits:
             return {
                 'file_path': file_path,

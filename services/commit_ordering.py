@@ -31,6 +31,23 @@
 没被问过 git 的提交保持原有行为（行 id 兜底）。**这条路只用来更接近真相，不用来报错**：
 取不到 git 答案时调用方的行为与改动前逐字相同，同步不会因为定序失败而中断。
 
+## 平局不是唯一的坑：**回填日期**
+
+上面那一套只治「同一时刻」。**时间序与图序不一致还有第二种成因**：自动导表那类工具
+提交时带上原始日期，于是**子提交可能比父提交「旧」**。按时间排出来就是反的，而后果比
+平局严重得多 —— `handle_consecutive_commits_merge_internal` 取 `file_commits[0]` 当
+earliest、`[-1]` 当 latest；回填时 earliest 是**图序上最后**的那条，于是它去取
+`get_parent_commit(earliest)`（那正是 latest 自己）再算 `latest ↔ parent(earliest)`，
+**自己和自己比**：整段区间的改动被算成「无变化」，缓存行的 `latest_commit_id` 也指向旧状态。
+
+所以多了一半：
+
+* `annotate_topology_order(...)` —— 有 I/O 的一半：**整组提交问一次 git 拓扑序**
+  （与平局那条路共用 `order_commits_by_topology`，都是一次 `rev-list`）。
+* `order_for_merge(...)` —— 用它的那一半：**全有或全无**。组里每一条都问过才按拓扑排，
+  否则整体退回 `(时间, 平局序, 行 id)` —— 两套序号不可比，混排出来的次序是任意的，
+  而且看起来完全正常。
+
 ## 缓存为什么按 (repository_id, commit_id) 存
 
 不挂在 ORM 对象上：`db.session.commit()` 会 expire 实例，而被搬走/重查的提交
@@ -52,6 +69,12 @@ _SAME_INSTANT_RANK: Dict[Tuple[Any, str], int] = {}
 # 缓存上限：超过就整体丢弃重建。一次同步涉及的提交是千级，这个上限只在长期不重启的
 # 进程里才会碰到，而重建的代价只是下一次同步多问一次 git。
 _SAME_INSTANT_RANK_LIMIT = 20000
+
+# (repository_id, commit_id) -> **整组**的拓扑位次（0 是最早的，祖先在前）。
+# 与上面那张表分开存：那张是「平局组内第几」，这张是「整组里第几」，两者的数轴不同，
+# 合并成一张表会让 `same_instant_rank`（排序键的兜底）读到另一个数轴的序号。
+_TOPOLOGY_RANK: Dict[Tuple[Any, str], int] = {}
+_TOPOLOGY_RANK_LIMIT = 20000
 
 
 def order_commits_by_topology(git_service, commit_ids, timeout=180):
@@ -195,8 +218,81 @@ def commit_merge_sort_key(commit) -> Tuple[float, int]:
 
     平局且没问过 git 时落回数据库行 id —— 那是**改动前**的行为，保留它意味着
     「没标注」与「改动前」逐字相同，不会引入新的不确定性。
+
+    **回填日期治不了**（时间是主键）：那一类要问过 git 之后走 `order_for_merge`。
+    这个函数是它的兜底口径，两边不能分叉。
     """
     rank = same_instant_rank(commit)
     if rank is None:
         rank = getattr(commit, "id", 0) or 0
     return commit_timestamp(commit), rank
+
+
+def annotate_topology_order(git_service, commits: Iterable[Any]) -> int:
+    """把**整组提交**的 git 拓扑序记进缓存，返回标注了多少个。
+
+    与 `annotate_same_instant_order` 的区别：那个只在平局组内定序，这个对整组做一次 ——
+    回填日期的提交**没有平局**，可时间序仍然是反的。
+
+    代价是每轮一次 `git rev-list --topo-order`（与平局那条路同一个调用），所以只该
+    在「一次同步 / 一次读回退」这种**整组拿得到**的地方调，不要放进逐文件的循环里。
+
+    **不抛异常**：git 不可用（克隆缺失、仓库是 SVN）时返回 0，排序退回原口径 ——
+    与平局那条路同一条纪律，定序失败不该中断同步。
+    """
+    commit_list: List[Any] = [c for c in (commits or ())]
+    if git_service is None or len(commit_list) < 2:
+        return 0
+
+    by_id: Dict[str, Any] = {}
+    for commit in commit_list:
+        commit_id = str(getattr(commit, "commit_id", "") or "").strip()
+        if commit_id and commit_id not in by_id:
+            by_id[commit_id] = commit
+    if len(by_id) < 2:
+        return 0
+
+    try:
+        ordered_ids = git_service.order_commits_by_topology(list(by_id))
+    except Exception:
+        return 0
+
+    annotated = 0
+    for rank, commit_id in enumerate(ordered_ids or []):
+        repository_id = getattr(by_id.get(commit_id), "repository_id", None)
+        _remember_topology_rank((repository_id, commit_id), rank)
+        annotated += 1
+    return annotated
+
+
+def _remember_topology_rank(key: Tuple[Any, str], rank: int) -> None:
+    if len(_TOPOLOGY_RANK) >= _TOPOLOGY_RANK_LIMIT:
+        _TOPOLOGY_RANK.clear()
+    _TOPOLOGY_RANK[key] = rank
+
+
+def topology_rank(commit) -> Optional[int]:
+    """这条提交在**整组**里的拓扑位次；没问过 git 返回 None。"""
+    key = _commit_key(commit)
+    if key is None:
+        return None
+    return _TOPOLOGY_RANK.get(key)
+
+
+def order_for_merge(commits: Iterable[Any]) -> List[Any]:
+    """合并 diff 该用的次序 —— **全有或全无**。
+
+    组里每一条都问过 git 拓扑序才按拓扑排（祖先在前）；只要有一条没有，**整体**退回
+    `commit_merge_sort_key`。不能混着来：两套序号（拓扑位次与时间戳）不可比，一部分按
+    拓扑、一部分按时间丢进同一个 `sorted`，出来的次序是任意的，而且看起来完全正常。
+
+    为什么需要它：时间序在图序之前**不成立**（回填日期），而合并 diff 取
+    `commits[0]` 当 earliest、`[-1]` 当 latest —— 排反了就是自己和自己比。
+    """
+    items: List[Any] = [c for c in (commits or ())]
+    if len(items) < 2:
+        return items
+    ranks = [topology_rank(commit) for commit in items]
+    if all(rank is not None for rank in ranks):
+        return [c for _rank, c in sorted(zip(ranks, items), key=lambda pair: pair[0])]
+    return sorted(items, key=commit_merge_sort_key)
