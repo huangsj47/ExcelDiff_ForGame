@@ -15,6 +15,14 @@ diff 缓存的键是 `(repository_id, commit_id, file_path, previous_commit_id, 
 （分支/版本号切换，必须重新同步）。比较配置只是「怎么读同一批文件」变了，文件本身没变，
 所以只清缓存、让下次访问重算即可 —— 用前者会让「改一个表头行数」变成「整仓重新同步」。
 
+## AI 分析那一侧也吃这份配置（2026-09-22 补）
+
+`AiDiffSnapshot` / `AiDiffSnapshotItem` 原先**不在**清理名单里。它们的身份是
+`(base_commit_id, latest_commit_id, diff_version)` —— 全是「文件变了没」，没有一个字说
+「这些文件该怎么读」。于是改了表头配置之后：缓存清了、重算出来的四元组逐字相同、
+做差判「没变」⇒ 这一版不会被重看。现在两份都在名单里，且
+`services/ai/header_scope.py` 把口径并进了新快照的版本号。
+
 ## 为什么解析与校验也放在这里
 
 这三项是**同一件事**（怎么读同一批文件），而「哪些项影响口径」这份清单必须与
@@ -34,9 +42,14 @@ from models import (
     WeeklyVersionDiffCache,
     WeeklyVersionExcelCache,
 )
+from models.ai_analysis import AiDiffSnapshot, AiDiffSnapshotItem
 
 # 只有「影响比较口径」的项才在这里：改了它，已算出的 diff 就不再有意义。
-DIFF_SETTING_FIELDS = ("header_rows", "header_name_row", "key_columns")
+#
+# `header_profiles` 是「一个仓库并存多种表头格式」时的按文件选用规则
+# （`services/excel_header_profiles.py`）。它改的是**怎么读同一批文件**，
+# 与前三项同一性质 —— 不进这份清单的表现同样是「改完看不到任何变化」。
+DIFF_SETTING_FIELDS = ("header_rows", "header_name_row", "key_columns", "header_profiles")
 
 
 def parse_header_rows(value) -> tuple:
@@ -172,6 +185,30 @@ def reset_repository_diff_caches(repository_id, *, changed_fields=(), log_print=
         else:
             query = model.query.filter_by(repository_id=repository_id)
         deleted[name] = _delete(query, name, repository_id, log_print)
+
+    # **AI 分析的快照与增量基线也吃这份配置。**
+    #
+    # `AiDiffSnapshotItem` 的内容身份是 `(base_commit_id, latest_commit_id, diff_version)`——
+    # 全是「文件变了没」。配置改了而文件没变时，做差判「没变」、这一版就不重看。
+    # `services/ai/header_scope.py` 已经把比较口径并进 `diff_version`（**新建的**快照
+    # 因此天然不同），但**已经存在的那一份**仍是按旧口径建的，只能清掉。
+    #
+    # 删 item 必须连它的 snapshot 一起删：快照的 `item_count` / `content_digest` 建立在
+    # items 之上，留下空壳会让「完整覆盖」那套门槛判断失准。代价是同一分组里**别的**
+    # 仓库的基线也跟着没（下一轮自动分析重跑一次）—— 这个方向是对的：宁可多重看一轮，
+    # 也不要拿一份按旧口径读出来的结论继续当基线。
+    conditions = [AiDiffSnapshotItem.repository_id == repository_id]
+    if config_ids:
+        conditions.append(AiDiffSnapshotItem.config_id.in_(config_ids))
+    item_query = AiDiffSnapshotItem.query.filter(or_(*conditions))
+    snapshot_ids = [
+        row[0] for row in item_query.with_entities(AiDiffSnapshotItem.snapshot_id).distinct().all()
+    ]
+    deleted["ai_snapshot_item"] = _delete(item_query, "ai_snapshot_item", repository_id, log_print)
+    deleted["ai_snapshot"] = _delete(
+        AiDiffSnapshot.query.filter(AiDiffSnapshot.id.in_(snapshot_ids)),
+        "ai_snapshot", repository_id, log_print,
+    ) if snapshot_ids else 0
 
     if log_print:
         log_print(

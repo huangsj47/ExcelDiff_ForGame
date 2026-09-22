@@ -58,6 +58,7 @@ from datetime import datetime, timezone
 from typing import Optional, Sequence
 
 from models import AgentNode, AgentProjectBinding, AgentTask, db
+from services.excel_header_profiles import resolve_for_file
 from services.agent_task_enqueue_service import (
     AGENT_TASK_ACTIVE_STATUSES,
     enqueue_agent_task_once,
@@ -559,8 +560,12 @@ def request_file_content(
     `request_key`（见 `header_config_fingerprint`）：不这么做的话，改了配置之后再索取
     同一个文件会命中按旧配置渲染的那一份缓存 —— 等于没改。
     """
-    header_rows = getattr(repository, "header_rows", None)
-    header_name_row = getattr(repository, "header_name_row", None)
+    # 坐标**按这个文件**解析（一个仓库里可以并存多种表头格式），而不是取仓库上的标量。
+    # 解析发生在请求方（平台侧，那里有文件字节可用），随 payload 一起发给 Agent ——
+    # 于是两端渲染用的是同一组坐标，「同一次索取给同一份文本」这条纪律不受影响。
+    header_profile = resolve_for_file(repository, file_path)
+    header_rows = header_profile.header_rows
+    header_name_row = header_profile.header_name_row
     header_config = header_config_fingerprint(header_rows, header_name_row)
     return _request_from_agent(
         task_type=FILE_CONTENT_TASK_TYPE,

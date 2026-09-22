@@ -44,6 +44,7 @@ from services.ai.reference_search import (
 from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_loader import LoadedSkills
 from services.deployment_mode import is_agent_dispatch_mode
+from services.excel_header_profiles import header_kwargs_for, resolve_for_file
 from utils.content_window import (
     CONTENT_MAX_CHARS,
     DEFAULT_WINDOW_LINES,
@@ -880,11 +881,14 @@ class PlatformContextProvider:
                 # 与发给 Agent 的是**同一个值**（见上面 `content_budget` 那段）：
                 # 两端渲染出来的正文必须逐字节相同。
                 char_budget=content_budget,
-                # 表头坐标从**仓库配置**来（与 diff 引擎同一套口径）：
+                # 表头坐标从**仓库配置**来（与 diff 引擎同一套口径、同一个收口函数）：
                 # 列名取哪一行、表头块占几行，决定了正文里哪些行算数据。
-                # 取不到 repository 时按未配置处理（见 `_read_excel_sheets` 的默认口径）。
-                header_rows=getattr(repository, "header_rows", None),
-                header_name_row=getattr(repository, "header_name_row", None),
+                #
+                # `only` 只要两个坐标：`marker_column`（标记列）的语义是「diff 时不算
+                # 数据变更」，而这里是**给模型看内容** —— 把备注列从正文里抹掉只会让
+                # 它少看到东西。所以 AI 正文这一侧不消费标记列。
+                **header_kwargs_for(repository, path, raw=raw,
+                                    only=("header_rows", "header_name_row")),
             )
             if rendered is None:
                 return (
@@ -971,9 +975,17 @@ class PlatformContextProvider:
         # （与派发层 `_matches` 的判据同一口径，见 `header_config_fingerprint`）。
         # 不带上它的话，一次分析中途改了仓库配置，第二次索取会拿到按旧坐标渲染的正文 ——
         # 而报告里看不出任何异样。非配表路径这两个值恒为未配置，指纹也就是个常数。
+        #
+        # 坐标**按这个文件**解析（与渲染那处同一个收口函数）—— 取仓库标量的话，
+        # 指纹反映的就不是实际渲染用的那一组坐标，「坐标变了指纹没变」于是变成
+        # 一次静默的缓存命中。
+        #
+        # 这里**不传 probe**（这一步拿不到文件字节）：所以「表头特征」规则不进指纹。
+        # 影响面很小 —— 靠判据选中的方案只在**文件内容**变化时才可能翻转，而那种情况下
+        # `commit` 已经变了、key 本来就不命中。
+        header_profile = resolve_for_file(repository, path)
         header_config = header_config_fingerprint(
-            getattr(repository, "header_rows", None),
-            getattr(repository, "header_name_row", None),
+            header_profile.header_rows, header_profile.header_name_row
         )
         key = (getattr(repository, "id", None), commit, path, lines, header_config)
         if key in self._agent_content_fetched:

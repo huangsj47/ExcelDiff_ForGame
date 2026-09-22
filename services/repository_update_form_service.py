@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from services.excel_header_profiles import validate_config
 from services.repository_diff_cache_reset import (
     diff_settings_changed,
     parse_header_name_row,
@@ -243,6 +244,17 @@ def handle_update_repository_form(
         repository.header_rows = header_rows_value
         repository.header_name_row = header_name_row
         repository.key_columns = request.form.get("key_columns")
+        # 「一个仓库并存多种表头格式」的按文件选用规则（JSON 文本）。
+        # **写入侧校验，读取侧容错** —— 读取侧对坏值只跳过（一条坏配置不能打死整仓
+        # diff），所以坏值必须在这里拦下：放进去的东西读的时候会被静默丢掉，
+        # 用户看到「保存成功」而配置不生效。
+        raw_profiles = request.form.get("header_profiles")
+        if raw_profiles is not None:
+            profiles_errors = validate_config(raw_profiles)
+            if profiles_errors:
+                flash("表头方案配置有问题：" + "；".join(profiles_errors[:3]), "error")
+                return redirect(url_for("edit_repository", repository_id=repository_id))
+        repository.header_profiles = (raw_profiles or "").strip() or None
         repository.enable_id_confirmation = bool(request.form.get("enable_id_confirmation"))
         repository.show_duplicate_id_warning = bool(request.form.get("show_duplicate_id_warning"))
         repository.tag_selection = request.form.get("tag_selection")
@@ -337,7 +349,11 @@ def handle_update_repository_form(
                 old_value=switch_old_value,
                 new_value=switch_new_value,
             )
-        elif changed_diff_settings:
+        # **独立判断，不是 `elif`。** 原来是 `if switch_changed: … elif changed_diff_settings:`，
+        # 于是「切分支」与「改比较配置」同时发生时，后者被整个跳过 —— 用户在同一次提交里
+        # 换了分支又改了表头行数，diff 缓存一条不清，页面上看到的还是按旧坐标算出来的结果。
+        # 两件事互不排斥：切换要清状态，比较配置要清缓存。
+        if changed_diff_settings:
             # 只清缓存，**不**动提交记录与同步状态：文件没变，变的只是「怎么读它」。
             # 位置必须在 db.session.commit() 之前 —— 同一个事务，commit 一起生效；
             # 否则请求结束时回滚，缓存一条没删而日志说删了（静默失败）。

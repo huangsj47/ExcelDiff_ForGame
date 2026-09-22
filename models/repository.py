@@ -69,6 +69,24 @@ class Repository(db.Model):
     # 引擎在比较之前把列名换成这一行的取值（见 DiffService._plan_name_row）。
     header_name_row = db.Column(db.Integer)
     key_columns = db.Column(db.String(200))
+    # 一个仓库里**并存多种表头格式**时的选用规则（JSON 文本；空 = 只用上面那三个标量）。
+    #
+    # 形状：`{"profiles": [{key,label,header_rows,header_name_row,key_columns,marker_column}],
+    #        "bindings": [{match,value,profile}]}`，解析与匹配全在
+    # `services/excel_header_profiles.py`。四种匹配方式：固定文件名 / 目录前缀 /
+    # 路径正则 / 表头特征（只有最后一种会去读文件）。
+    #
+    # 为什么需要它：上面那三个标量是**仓库级**的，而一个配表仓库里可以并存多种表头
+    # （实测某仓库里有 5 行自描述表头、4 行编辑器表头、1 行简化表头三种，**A 列的
+    # 语义三种都不同**）—— 一个标量表达不了，按列号硬编码的解析器在它们之间必然错列。
+    #
+    # 为什么是文本列而不是 `db.JSON`：平台里没有任何 JSON 列，先例是
+    # `AiProjectAnalysisConfig.model_price_table`（JSON 文本 + 行编辑器 UI）。
+    # 行编辑器与 JSON 文本框编辑的是**同一份文本**，谁最后被编辑就以谁为准 ——
+    # 两边各存一份状态的写法必然漂移，而漂移的方向是「界面上显示 A、存下去的是 B」。
+    #
+    # **空值 = 今天的行为**，逐字不变。平台里绝大多数仓库不会配它。
+    header_profiles = db.Column(BigText)
     enable_id_confirmation = db.Column(db.Boolean, default=False)
     show_duplicate_id_warning = db.Column(db.Boolean, default=False)
 

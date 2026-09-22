@@ -241,6 +241,10 @@
                         <label for="important_tables" class="form-label">重点表名</label>
                         <textarea class="form-control" id="important_tables" name="important_tables" rows="2" placeholder="用英文逗号分隔">{% if is_edit %}{{ repository.important_tables or '' }}{% endif %}</textarea>
                     </div>
+
+                    {# 表头方案：一个仓库并存多种表头格式时的按文件选用规则。
+                       抽成 partial 是因为本模板与 svn 那份的高级设置是逐字重复的两份。 #}
+                    {% include 'partials/header_profiles_editor.html' %}
                 </div>
 
                 <!-- ===== 提交按钮 ===== -->

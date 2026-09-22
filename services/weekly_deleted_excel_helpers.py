@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import quote
 
 from services.commit_lookup_service import find_commit_by_commit_id
+from services.excel_header_profiles import header_kwargs_for
 
 
 def is_deleted_operation(operation: Any) -> bool:
@@ -175,7 +176,8 @@ def previous_version_url(
 
 
 def build_deleted_excel_payload(*, file_path: str, previous_content: bytes | None, diff_service,
-                                header_rows=None, header_name_row=None):
+                                key_columns=None, header_rows=None, header_name_row=None,
+                                marker_column=None):
     """删除前那一版的字节 → 「整份删除」载荷（每张表、每一行都是删除行）。
 
     与提交页同一条路（`services/vcs_content_service.py::get_deleted_file_diff_data`）：
@@ -189,13 +191,17 @@ def build_deleted_excel_payload(*, file_path: str, previous_content: bytes | Non
 
     header_name_row 是仓库配的「名称行」：删除态的表头块同样按它取列名，
     否则同一张表在「改了一格」与「整份删除」两种提交里会显示两套列头。
+
+    marker_column 是标记列（`services/excel_header_profiles.py`）：删除态也要按它
+    把那一列排除掉，否则同一列备注在「改了一格」时不算变更、在「整份删除」时
+    被算成 N 行变更。
     """
     if not previous_content:
         return None
     try:
         payload = diff_service.process_deleted_file(
-            file_path, previous_content, header_rows=header_rows,
-            header_name_row=header_name_row)
+            file_path, previous_content, key_columns=key_columns, header_rows=header_rows,
+            header_name_row=header_name_row, marker_column=marker_column)
     except Exception:
         return None
     if not isinstance(payload, dict) or not payload.get("sheets"):
@@ -318,8 +324,7 @@ def render_weekly_deleted_excel(
     )
     payload = build_deleted_excel_payload(
         file_path=file_path, previous_content=previous_content, diff_service=diff_service,
-        header_rows=getattr(repository, "header_rows", None),
-        header_name_row=getattr(repository, "header_name_row", None),
+        **header_kwargs_for(repository, file_path, raw=previous_content),
     )
     if payload:
         if log_print:

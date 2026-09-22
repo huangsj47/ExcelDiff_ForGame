@@ -1,0 +1,700 @@
+{# ==========================================================================
+   表头方案：一个仓库里并存多种表头格式时的**按文件选用规则**。
+
+   为什么是独立的一个 partial：git / svn 两个模板的 `#advancedSettings` 是逐字抄的
+   两份（`templates/add_git_repository.html` 与 `add_svn_repository.html`），再加一份
+   逐字重复的编辑器，以后改一处忘一处只是时间问题。新功能一律走 include。
+
+   交互照 `templates/ai_usage_dashboard.html` 的模型单价表（同一套「结构化行编辑 +
+   JSON 高级模式」）：两边编辑的是**同一份文本**（下面那个 textarea），谁最后被编辑
+   就以谁为准。两边各存一份状态的写法必然漂移，而漂移方向是「界面显示 A、存下去是 B」。
+
+   排版按 ui-ux-pro-max 查到的三条指引：
+   * Inline Validation（Forms/Medium）—— 正则、判据、行数在 **blur 时**校验；
+   * Focusable Error Summary（Forms & Accessibility/High）—— 提交前给出
+     `role="alert" tabindex="-1"` 的摘要，每项链接到出错的那一行；
+   * Content Jumping（Layout/High）—— 校验提示占**固定高度的槽位**，
+     不让「✓/✗」出现时把下面的行推走。
+   ========================================================================== #}
+<div class="mb-3" id="headerProfilesBlock">
+    <div class="d-flex align-items-center justify-content-between mb-1">
+        <label class="form-label mb-0" for="headerProfilesJson">
+            表头方案 <span class="text-muted fw-normal">（可选）</span>
+        </label>
+        <div class="d-flex gap-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="hpAddProfileBtn">
+                <i class="fas fa-plus" aria-hidden="true"></i> 新建方案
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="hpToggleJsonBtn"
+                    aria-expanded="false" aria-controls="hpJsonPanel">
+                <i class="fas fa-chevron-right" aria-hidden="true" id="hpJsonCaret"></i> 高级模式：编辑 JSON
+            </button>
+        </div>
+    </div>
+    <p class="text-muted small mb-2">
+        一个仓库里可以并存多种表头格式时，用下面的规则指定「哪些文件用哪一套坐标」。
+        <strong>不配就走上面那三个字段</strong>（表头行数 / 名称行 / 关键列），行为与原来完全一致。
+    </p>
+
+    {# 错误摘要：可聚焦（提交失败时脚本把焦点送到这里），每项链接到出错的那一行 #}
+    <div id="hpErrorSummary" class="alert alert-danger py-2 px-3 mb-2" role="alert"
+         tabindex="-1" aria-labelledby="hpErrorTitle" hidden>
+        <div class="fw-semibold" id="hpErrorTitle" style="font-size: 0.9rem;">表头方案有需要改的地方</div>
+        <ul class="mb-0 ps-3" id="hpErrorList" style="font-size: 0.85rem;"></ul>
+    </div>
+
+    <div class="card mb-2">
+        <div class="card-header py-2" style="font-size: 0.85rem;">
+            <i class="fas fa-layer-group me-1" aria-hidden="true"></i>方案
+            <span class="text-muted fw-normal">（内置预设可直接选用，也可以自己新建）</span>
+        </div>
+        <div class="card-body p-0">
+            <table class="table table-sm align-middle mb-0">
+                <caption class="visually-hidden">表头方案列表</caption>
+                <thead>
+                    <tr>
+                        <th scope="col" style="width: 26%;">名称</th>
+                        <th scope="col" style="width: 12%;">表头行数</th>
+                        <th scope="col" style="width: 12%;">名称行</th>
+                        <th scope="col" style="width: 16%;">关键列</th>
+                        <th scope="col" style="width: 12%;">标记列</th>
+                        <th scope="col" style="width: 22%;"><span class="visually-hidden">操作</span></th>
+                    </tr>
+                </thead>
+                <tbody id="hpProfileRows"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card mb-2">
+        <div class="card-header py-2" style="font-size: 0.85rem;">
+            <i class="fas fa-filter me-1" aria-hidden="true"></i>按以下规则选用
+            <span class="text-muted fw-normal">（固定文件名 → 目录前缀 → 路径正则 → 表头特征）</span>
+        </div>
+        <div class="card-body p-0">
+            <table class="table table-sm align-middle mb-0">
+                <caption class="visually-hidden">表头方案选用规则</caption>
+                <thead>
+                    <tr>
+                        <th scope="col" style="width: 18%;">匹配方式</th>
+                        <th scope="col" style="width: 42%;">匹配内容</th>
+                        <th scope="col" style="width: 28%;">使用方案</th>
+                        <th scope="col" style="width: 12%;"><span class="visually-hidden">操作</span></th>
+                    </tr>
+                </thead>
+                <tbody id="hpBindingRows"></tbody>
+            </table>
+            <div class="p-2">
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="hpAddBindingBtn">
+                    <i class="fas fa-plus" aria-hidden="true"></i> 增加一条规则
+                </button>
+            </div>
+        </div>
+    </div>
+
+    {# 每行的校验提示占固定高度（min-height），避免出现时把下面的行推走 #}
+    <div id="hpHint" class="form-text hp-hint-slot" aria-live="polite"></div>
+
+    {# JSON 面板：始终在 DOM 里（hidden 的元素照样提交），
+       `name="header_profiles"` 就是表单字段本身。 #}
+    <div id="hpJsonPanel" hidden>
+        <label class="form-label" for="headerProfilesJson">表头方案（JSON 原文）</label>
+        <textarea class="form-control font-monospace" id="headerProfilesJson" name="header_profiles"
+                  rows="6" spellcheck="false"
+                  aria-describedby="hpJsonHelp hpJsonError">{% if is_edit and repository.header_profiles %}{{ repository.header_profiles }}{% endif %}</textarea>
+        <p class="form-text" id="hpJsonHelp">
+            上面的行编辑与这里编辑的是<strong>同一份文本</strong>：谁最后被编辑，就以谁为准。
+            留空 = 不配置。
+        </p>
+        <p class="text-danger small mb-0 hp-hint-slot" id="hpJsonError" hidden></p>
+    </div>
+</div>
+
+<style>
+    /* 固定高度的提示槽位：校验结果出现/消失时，下面的行不会被推走 */
+    .hp-hint-slot { min-height: 1.35rem; }
+    .hp-row-invalid td { background-color: rgba(220, 53, 69, 0.06); }
+</style>
+
+<script>
+(function () {
+    'use strict';
+
+    // 内置预设：与 services/excel_header_profiles.py 的 BUILTIN_PROFILES 同源。
+    // 这里再写一份是因为模板渲染拿不到 Python 侧那份（两个模板都要用），
+    // 而**服务端才是权威** —— 用户选了这里的预设名，发出去的仍然是 JSON 里的坐标值，
+    // 所以这份副本漂移的后果只是「下拉里的说明文字过时」，不会读错表。
+    var HP_BUILTINS = [
+        { key: 'builtin:single',  label: '单行表头', header_rows: 1, header_name_row: 1, marker_column: '' },
+        { key: 'builtin:multi5',  label: '多行表头（5 行，字段名在第 2 行）', header_rows: 5, header_name_row: 2, marker_column: 'A' },
+        { key: 'builtin:editor4', label: '编辑器式表头（4 行，A 列是 id）', header_rows: 4, header_name_row: 2, marker_column: '' }
+    ];
+    var HP_MATCHES = [
+        { key: 'file_name',     label: '固定文件名', hint: '仓库里的相对路径，如 config/奖励模式_CfgRewardMode.xlsx；只写文件名也认' },
+        { key: 'dir_prefix',    label: '目录前缀',   hint: '目录前缀，如 EditorCfgTool/excel/actor；支持 * 与 **；多处命中取最长的那条' },
+        { key: 'path_regex',    label: '路径正则',   hint: '正则，如 ^config/.*\\.xlsx$；忽略大小写；多条命中取靠上的那条' },
+        { key: 'header_detect', label: '表头特征',   hint: '表头判据，如 r1:A == SKIP 或 within30:A has TYPE, EXPORT' }
+    ];
+    var HP_DEFAULT_MATCH = 'dir_prefix';
+
+    function hpEl(id) { return document.getElementById(id); }
+    function hpText(value) { return (value === undefined || value === null) ? '' : String(value); }
+
+    // JSON 里没有输入框的键也要原样留着 —— 丢掉它们就是丢数据。
+    var HP_KEEP_KEYS = ['key_columns'];
+    var HP_PROFILE_FIELDS = ['label', 'header_rows', 'header_name_row', 'marker_column'];
+
+    var hpProfiles = [];
+    var hpBindings = [];
+    var hpJsonDirty = false;   // JSON 框在最后一次行同步之后被手改过 → 以 JSON 为准
+    var hpLastError = '';
+
+    function hpParse(text) {
+        var raw = hpText(text).trim();
+        if (!raw) return { profiles: [], bindings: [] };
+        try {
+            var parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+            return {
+                profiles: Array.isArray(parsed.profiles) ? parsed.profiles : [],
+                bindings: Array.isArray(parsed.bindings) ? parsed.bindings : []
+            };
+        } catch (err) {
+            return null;
+        }
+    }
+
+    function hpRowsFromText(text) {
+        var parsed = hpParse(text);
+        if (parsed === null) return null;
+        var profiles = parsed.profiles.filter(function (item) {
+            return item && typeof item === 'object' && !Array.isArray(item);
+        }).map(function (item) {
+            var row = { key: hpText(item.key), extra: {} };
+            HP_PROFILE_FIELDS.forEach(function (field) {
+                row[field] = hpText(item[field]);
+            });
+            HP_KEEP_KEYS.forEach(function (field) {
+                if (item[field] !== undefined && item[field] !== null && item[field] !== '') {
+                    row.extra[field] = item[field];
+                }
+            });
+            return row;
+        });
+        var bindings = parsed.bindings.filter(function (item) {
+            return item && typeof item === 'object' && !Array.isArray(item);
+        }).map(function (item) {
+            return {
+                match: hpText(item.match) || HP_DEFAULT_MATCH,
+                value: hpText(item.value),
+                profile: hpText(item.profile)
+            };
+        });
+        return { profiles: profiles, bindings: bindings };
+    }
+
+    function hpSerialize() {
+        if (!hpProfiles.length && !hpBindings.length) return '';
+        var profiles = hpProfiles.map(function (row) {
+            var item = { key: row.key, label: row.label };
+            item.header_rows = row.header_rows === '' ? null : Number(row.header_rows);
+            item.header_name_row = row.header_name_row === '' ? null : Number(row.header_name_row);
+            if (row.marker_column) item.marker_column = row.marker_column;
+            HP_KEEP_KEYS.forEach(function (field) {
+                if (row.extra && row.extra[field] !== undefined) item[field] = row.extra[field];
+            });
+            Object.keys(row.extra || {}).forEach(function (field) {
+                if (HP_KEEP_KEYS.indexOf(field) === -1) item[field] = row.extra[field];
+            });
+            return item;
+        });
+        var bindings = hpBindings.map(function (row) {
+            return { match: row.match, value: row.value, profile: row.profile };
+        });
+        return JSON.stringify({ profiles: profiles, bindings: bindings }, null, 2);
+    }
+
+    function hpProfileLabel(key) {
+        for (var i = 0; i < HP_BUILTINS.length; i++) {
+            if (HP_BUILTINS[i].key === key) return HP_BUILTINS[i].label;
+        }
+        for (var j = 0; j < hpProfiles.length; j++) {
+            if (hpProfiles[j].key === key) return hpProfiles[j].label || key;
+        }
+        return key;
+    }
+
+    // ---- 校验 --------------------------------------------------------------
+    // 与服务端 services/excel_header_profiles.validate_config 同一套规矩。
+    // 客户端这一份是为了**在 blur 时就说话**，服务端那一份才是权威（绕过页面提交也拦得住）。
+    function hpValidateRow(kind, index) {
+        var row = (kind === 'profile' ? hpProfiles : hpBindings)[index];
+        if (!row) return '';
+        if (kind === 'profile') {
+            if (!hpText(row.label).trim()) return '名称不能为空';
+            var rows = Number(row.header_rows);
+            if (!row.header_rows || isNaN(rows) || rows < 1) return '表头行数要是大于 0 的整数';
+            if (row.header_name_row) {
+                var nameRow = Number(row.header_name_row);
+                if (isNaN(nameRow) || nameRow < 1) return '名称行要是大于 0 的整数';
+                if (nameRow > rows) return '名称行不能超过表头行数（' + rows + '）';
+            }
+            if (row.marker_column && !/^[A-Za-z]{1,3}$/.test(row.marker_column)) {
+                return '标记列要写成列字母，如 A';
+            }
+            return '';
+        }
+        if (!hpText(row.value).trim()) return '匹配内容不能为空';
+        if (!hpText(row.profile).trim()) return '要选一个方案';
+        if (!hpProfileLabel(row.profile)) return '找不到方案「' + row.profile + '」';
+        if (row.match === 'path_regex') {
+            try { new RegExp(row.value); } catch (err) { return '正则写错了 —— ' + err.message; }
+        }
+        if (row.match === 'header_detect') {
+            var parts = hpText(row.value).split('&&');
+            for (var i = 0; i < parts.length; i++) {
+                var piece = parts[i].trim();
+                if (!piece) return '判据里有一个空条件（多余的 &&？）';
+                if (!/^(r\d+|within\d*|anywhere)\s*:\s*[A-Za-z]{1,3}\s*(==|has)\s*.+$/.test(piece)) {
+                    return '读不懂这个条件：' + piece + '（写法是「范围:列 运算符 值」，'
+                        + '范围形如 r1 / within30 / anywhere，运算符是 == 或 has）';
+                }
+            }
+        }
+        return '';
+    }
+
+    function hpFieldId(kind, index, field) {
+        return 'hp-' + kind + '-' + index + '-' + field;
+    }
+
+    function hpCellError(td, message) {
+        // 每个输入格下面都有**固定高度**的错误槽位，出错时只改文字不改布局
+        var slot = td.querySelector('.hp-cell-error');
+        if (!slot) {
+            slot = document.createElement('div');
+            slot.className = 'hp-cell-error text-danger hp-hint-slot';
+            slot.style.fontSize = '0.78rem';
+            td.appendChild(slot);
+        }
+        slot.textContent = message || '';
+        var input = td.querySelector('input, select');
+        if (input) input.classList.toggle('is-invalid', !!message);
+    }
+
+    // ---- 渲染 --------------------------------------------------------------
+    function hpProfileRowNode(row, index) {
+        var tr = document.createElement('tr');
+        tr.dataset.kind = 'profile';
+        tr.dataset.index = String(index);
+        if (row.key && row.key.indexOf('builtin:') === 0) tr.classList.add('table-light');
+
+        var nameTd = document.createElement('td');
+        if (row.key && row.key.indexOf('builtin:') === 0) {
+            // 内置预设不可改（改了就与别的仓库对不上），只显示
+            var badge = document.createElement('span');
+            badge.className = 'badge bg-secondary';
+            badge.textContent = '内置';
+            nameTd.appendChild(badge);
+            var nameText = document.createElement('span');
+            nameText.className = 'ms-1';
+            nameText.textContent = row.label;
+            nameTd.appendChild(nameText);
+        } else {
+            var input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'form-control form-control-sm';
+            input.value = hpText(row.label);
+            input.id = hpFieldId('profile', index, 'label');
+            input.setAttribute('data-field', 'label');
+            input.setAttribute('aria-label', '第 ' + (index + 1) + ' 个方案的名称');
+            nameTd.appendChild(input);
+        }
+        tr.appendChild(nameTd);
+
+        [['header_rows', '表头行数'], ['header_name_row', '名称行'], ['key_columns', '关键列'], ['marker_column', '标记列']]
+            .forEach(function (pair) {
+                var field = pair[0];
+                var td = document.createElement('td');
+                var cell = document.createElement('input');
+                cell.type = (field === 'key_columns' || field === 'marker_column') ? 'text' : 'number';
+                cell.className = 'form-control form-control-sm';
+                cell.value = (field in row) ? hpText(row[field]) : hpText(row.extra && row.extra[field]);
+                cell.id = hpFieldId('profile', index, field);
+                cell.setAttribute('data-field', field);
+                cell.setAttribute('aria-label', '第 ' + (index + 1) + ' 个方案的' + pair[1]);
+                if (cell.type === 'number') cell.setAttribute('min', '1');
+                if (row.key && row.key.indexOf('builtin:') === 0) cell.disabled = true;
+                td.appendChild(cell);
+                tr.appendChild(td);
+            });
+
+        var actionTd = document.createElement('td');
+        if (!(row.key && row.key.indexOf('builtin:') === 0)) {
+            var remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'btn btn-sm btn-outline-danger';
+            remove.setAttribute('data-hp-remove', 'profile');
+            remove.setAttribute('aria-label', '删除方案「' + (row.label || row.key) + '」');
+            remove.innerHTML = '<i class="fas fa-trash" aria-hidden="true"></i>';
+            actionTd.appendChild(remove);
+            tr.dataset.key = row.key;
+        } else {
+            tr.dataset.key = row.key;
+        }
+        tr.appendChild(actionTd);
+        return tr;
+    }
+
+    function hpBindingRowNode(row, index) {
+        var tr = document.createElement('tr');
+        tr.dataset.kind = 'binding';
+        tr.dataset.index = String(index);
+
+        var matchTd = document.createElement('td');
+        var select = document.createElement('select');
+        select.className = 'form-select form-select-sm';
+        select.setAttribute('data-field', 'match');
+        select.setAttribute('aria-label', '第 ' + (index + 1) + ' 条规则的匹配方式');
+        HP_MATCHES.forEach(function (item) {
+            var option = document.createElement('option');
+            option.value = item.key;
+            option.textContent = item.label;
+            if (item.key === row.match) option.selected = true;
+            select.appendChild(option);
+        });
+        matchTd.appendChild(select);
+        tr.appendChild(matchTd);
+
+        var valueTd = document.createElement('td');
+        var input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'form-control form-control-sm font-monospace';
+        input.value = hpText(row.value);
+        input.setAttribute('data-field', 'value');
+        input.setAttribute('aria-label', '第 ' + (index + 1) + ' 条规则的匹配内容');
+        var hint = HP_MATCHES.filter(function (item) { return item.key === row.match; })[0];
+        if (hint) input.placeholder = hint.hint;
+        valueTd.appendChild(input);
+        tr.appendChild(valueTd);
+
+        var profileTd = document.createElement('td');
+        var profileSelect = document.createElement('select');
+        profileSelect.className = 'form-select form-select-sm';
+        profileSelect.setAttribute('data-field', 'profile');
+        profileSelect.setAttribute('aria-label', '第 ' + (index + 1) + ' 条规则使用的方案');
+        // **必须有这个空选项。** 没有它的时候，`row.profile` 为空（比如引用它的方案
+        // 刚被删掉）时浏览器会默认选中第一项 —— 界面上显示着「单行表头」，而 JSON 里
+        // 那一格是空的。这正是本仓库反复出现的那类缺陷：界面显示 A、存下去的是 B。
+        var blank = document.createElement('option');
+        blank.value = '';
+        blank.textContent = '— 请选择 —';
+        if (!row.profile) blank.selected = true;
+        profileSelect.appendChild(blank);
+
+        var seen = {};
+        HP_BUILTINS.concat(hpProfiles).forEach(function (item) {
+            var key = item.key || '';
+            if (!key || seen[key]) return;
+            seen[key] = true;
+            var option = document.createElement('option');
+            option.value = key;
+            option.textContent = hpProfileLabel(key);
+            if (key === row.profile) option.selected = true;
+            profileSelect.appendChild(option);
+        });
+        if (row.profile && !seen[row.profile]) {
+            var stale = document.createElement('option');
+            stale.value = row.profile;
+            stale.textContent = row.profile + '（找不到）';
+            stale.selected = true;
+            profileSelect.appendChild(stale);
+        }
+        profileTd.appendChild(profileSelect);
+        tr.appendChild(profileTd);
+
+        var actionTd = document.createElement('td');
+        var remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'btn btn-sm btn-outline-danger';
+        remove.setAttribute('data-hp-remove', 'binding');
+        remove.setAttribute('aria-label', '删除第 ' + (index + 1) + ' 条规则');
+        remove.innerHTML = '<i class="fas fa-trash" aria-hidden="true"></i>';
+        actionTd.appendChild(remove);
+        tr.appendChild(actionTd);
+        return tr;
+    }
+
+    function hpRender() {
+        var profileBody = hpEl('hpProfileRows');
+        var bindingBody = hpEl('hpBindingRows');
+        if (profileBody) {
+            profileBody.textContent = '';
+            hpProfiles.forEach(function (row, index) {
+                profileBody.appendChild(hpProfileRowNode(row, index));
+            });
+        }
+        if (bindingBody) {
+            bindingBody.textContent = '';
+            hpBindings.forEach(function (row, index) {
+                bindingBody.appendChild(hpBindingRowNode(row, index));
+            });
+        }
+        hpRenderEmptyHints();
+        hpRevalidateAll();
+    }
+
+    function hpRenderEmptyHints() {
+        var profileBody = hpEl('hpProfileRows');
+        if (profileBody && !hpProfiles.length) {
+            var tr = document.createElement('tr');
+            var td = document.createElement('td');
+            td.colSpan = 6;
+            td.className = 'text-muted small';
+            td.textContent = '还没有方案。点「新建方案」，或直接从规则里选用内置预设。';
+            tr.appendChild(td);
+            profileBody.appendChild(tr);
+        }
+        var bindingBody = hpEl('hpBindingRows');
+        if (bindingBody && !hpBindings.length) {
+            var tr2 = document.createElement('tr');
+            var td2 = document.createElement('td');
+            td2.colSpan = 4;
+            td2.className = 'text-muted small';
+            td2.textContent = '还没有规则 —— 所有文件都用上面那三个字段（表头行数 / 名称行 / 关键列）。';
+            tr2.appendChild(td2);
+            bindingBody.appendChild(tr2);
+        }
+    }
+
+    function hpRevalidateAll() {
+        var problems = [];
+        hpProfiles.forEach(function (row, index) {
+            var tr = hpEl('hpProfileRows').querySelector('tr[data-index="' + index + '"]');
+            if (!tr) return;
+            var td = tr.children[1];
+            var message = hpValidateRow('profile', index);
+            hpCellError(td, message);
+            if (message) problems.push('方案「' + (row.label || row.key || (index + 1)) + '」：' + message);
+        });
+        hpBindings.forEach(function (row, index) {
+            var tr = hpEl('hpBindingRows').querySelector('tr[data-index="' + index + '"]');
+            if (!tr) return;
+            var message = hpValidateRow('binding', index);
+            hpCellError(tr.children[1], message);
+            if (message) problems.push('规则 ' + (index + 1) + '：' + message);
+        });
+        hpLastError = problems.length ? problems[0] : '';
+        // 修好之后摘要必须**自己退场**：它只在提交那一刻出现过一次，之后没人再动它，
+        // 于是用户改完所有问题、摘要还挂在那里说「有需要改的地方」——
+        // 下一眼看到的人会以为还没改好。（下面只隐藏，不抢焦点：见 `hpShowErrorSummary`
+        // 里那句「把焦点送到摘要」，那是提交失败时才该做的事。）
+        var summary = hpEl('hpErrorSummary');
+        if (summary && !problems.length && !summary.hidden) summary.hidden = true;
+        var hint = hpEl('hpHint');
+        if (hint) {
+            // `aria-live` 会把这句读给读屏用户；视觉上也占固定高度
+            hint.className = 'form-text hp-hint-slot ' + (problems.length ? 'text-danger' : 'text-muted');
+            hint.textContent = problems.length
+                ? problems.length + ' 处需要改：' + problems[0]
+                : (hpProfiles.length || hpBindings.length ? '配置看起来没问题。' : '');
+        }
+        return problems;
+    }
+
+    function hpShowErrorSummary() {
+        var problems = hpRevalidateAll();
+        var box = hpEl('hpErrorSummary');
+        var list = hpEl('hpErrorList');
+        if (!box || !list) return !problems.length;
+        list.textContent = '';
+        if (!problems.length) {
+            box.hidden = true;
+            return true;
+        }
+        problems.forEach(function (text) {
+            var li = document.createElement('li');
+            li.textContent = text;
+            list.appendChild(li);
+        });
+        box.hidden = false;
+        // 把焦点送到摘要本身（role="alert" + tabindex="-1"）——键盘与读屏用户据此知道
+        // 提交为什么没通过，而不是停在一个看不出问题的按钮上。
+        box.focus();
+        return false;
+    }
+
+    // ---- 双向同步 ----------------------------------------------------------
+    function hpSyncJsonFromRows() {
+        var textarea = hpEl('headerProfilesJson');
+        if (!textarea) return;
+        textarea.value = hpSerialize();
+        hpJsonDirty = false;
+        var err = hpEl('hpJsonError');
+        if (err) { err.hidden = true; err.textContent = ''; }
+    }
+
+    function hpLoadFromText() {
+        var textarea = hpEl('headerProfilesJson');
+        var raw = textarea ? textarea.value : '';
+        var parsed = hpRowsFromText(raw);
+        if (parsed === null) {
+            hpJsonDirty = true;   // 别让一次行编辑把用户手上的 JSON 覆盖掉
+            var err = hpEl('hpJsonError');
+            if (err) {
+                err.hidden = false;
+                err.textContent = '这段 JSON 读不出来（行编辑器没有跟着变），改行会覆盖它。';
+            }
+            return false;
+        }
+        hpProfiles = parsed.profiles;
+        hpBindings = parsed.bindings;
+        hpRender();
+        var err2 = hpEl('hpJsonError');
+        if (err2) { err2.hidden = true; err2.textContent = ''; }
+        return true;
+    }
+
+    function hpApplyEdit(kind, index, field, value) {
+        var row = (kind === 'profile' ? hpProfiles : hpBindings)[index];
+        if (!row) return;
+        if (kind === 'profile' && HP_PROFILE_FIELDS.indexOf(field) === -1 && HP_KEEP_KEYS.indexOf(field) === -1) {
+            return;
+        }
+        row[field] = value;
+        var problems = hpRevalidateAll();
+        if (problems.length) return;   // 行里还有说不通的地方时不回写 JSON（否则会把坏值写进去）
+        hpSyncJsonFromRows();
+    }
+
+    // ---- 事件 --------------------------------------------------------------
+    function hpBindEvents() {
+        var profileBody = hpEl('hpProfileRows');
+        var bindingBody = hpEl('hpBindingRows');
+        [profileBody, bindingBody].forEach(function (body) {
+            if (!body) return;
+            // 事件委托：行是动态生成的，逐行挂监听会在每次增删后留下悬空引用
+            body.addEventListener('input', function (event) {
+                var input = event.target;
+                var tr = input && input.closest ? input.closest('tr') : null;
+                if (!tr || !input.dataset || !input.dataset.field) return;
+                hpApplyEdit(tr.dataset.kind, Number(tr.dataset.index), input.dataset.field, input.value);
+            });
+            body.addEventListener('change', function (event) {
+                var input = event.target;
+                var tr = input && input.closest ? input.closest('tr') : null;
+                if (!tr || !input.dataset || !input.dataset.field) return;
+                if (input.tagName !== 'SELECT') return;
+                // 匹配方式换了，提示文字跟着换。
+                //
+                // **这里不许 `hpRender()`。** 重建整行会把用户眼前这一行的 DOM 整个换掉：
+                // 焦点丢到 body、正在编辑的那个输入框变成悬空节点（后续打字落在一个
+                // 已经不在文档里的元素上，界面上什么都不发生）。改动只是占位提示文字，
+                // 就地改掉即可 —— 无头 Chrome 探针里这一条实测就是「选完匹配方式再填内容，
+                // 内容没进 JSON」。
+                if (input.dataset.field === 'match') {
+                    var valueInput = tr.querySelector('[data-field="value"]');
+                    var hint = HP_MATCHES.filter(function (item) { return item.key === input.value; })[0];
+                    if (valueInput && hint) valueInput.placeholder = hint.hint;
+                }
+                hpApplyEdit(tr.dataset.kind, Number(tr.dataset.index), input.dataset.field, input.value);
+            });
+            // blur 时校验（不等提交）—— 正则与判据是最容易写错的两处
+            body.addEventListener('focusout', function () { hpRevalidateAll(); });
+            body.addEventListener('click', function (event) {
+                var btn = event.target && event.target.closest ? event.target.closest('[data-hp-remove]') : null;
+                if (!btn) return;
+                var tr = btn.closest('tr');
+                if (!tr) return;
+                var index = Number(tr.dataset.index);
+                if (tr.dataset.kind === 'profile') {
+                    var removed = hpProfiles[index];
+                    hpProfiles.splice(index, 1);
+                    // 方案被删了，引用它的规则一起失效 —— 留着会让「找不到方案」变成常态
+                    hpBindings.forEach(function (row) {
+                        if (row.profile === removed.key) row.profile = '';
+                    });
+                } else {
+                    hpBindings.splice(index, 1);
+                }
+                hpRender();
+                hpSyncJsonFromRows();
+            });
+        });
+
+        var addProfile = hpEl('hpAddProfileBtn');
+        if (addProfile) {
+            addProfile.addEventListener('click', function () {
+                var key = 'p' + (hpProfiles.length + 1) + '-' + Math.random().toString(36).slice(2, 6);
+                hpProfiles.push({ key: key, label: '', header_rows: '1', header_name_row: '1',
+                                  marker_column: '', extra: {} });
+                hpRender();
+                var input = hpEl(hpFieldId('profile', hpProfiles.length - 1, 'label'));
+                if (input) input.focus();   // 键盘用户点完不用自己 Tab 进新行
+            });
+        }
+
+        var addBinding = hpEl('hpAddBindingBtn');
+        if (addBinding) {
+            addBinding.addEventListener('click', function () {
+                hpBindings.push({ match: HP_DEFAULT_MATCH, value: '', profile: '' });
+                hpRender();
+                var input = hpEl('hpBindingRows').querySelector('tr:last-child [data-field="value"]');
+                if (input) input.focus();
+            });
+        }
+
+        var toggleJson = hpEl('hpToggleJsonBtn');
+        if (toggleJson) {
+            toggleJson.addEventListener('click', function () {
+                var panel = hpEl('hpJsonPanel');
+                if (!panel) return;
+                var open = panel.hidden;
+                panel.hidden = !open;
+                toggleJson.setAttribute('aria-expanded', String(open));
+                var caret = hpEl('hpJsonCaret');
+                if (caret) caret.className = open ? 'fas fa-chevron-down' : 'fas fa-chevron-right';
+                // 打开高级模式 = 「接下来我按 JSON 来」：用当前 JSON 重新生成行
+                if (open) hpLoadFromText();
+            });
+        }
+
+        var textarea = hpEl('headerProfilesJson');
+        if (textarea) {
+            textarea.addEventListener('input', function () { hpJsonDirty = true; });
+            textarea.addEventListener('blur', function () { hpLoadFromText(); });
+        }
+
+        // 提交前把行里的改动回写进 JSON（JSON 被手改过时以 JSON 为准），
+        // 并拦住明显写错的配置 —— 服务端还会再校验一次（那一份才是权威）。
+        var form = hpEl('headerProfilesBlock') ? hpEl('headerProfilesBlock').closest('form') : null;
+        if (form) {
+            form.addEventListener('submit', function (event) {
+                if (!hpJsonDirty) hpSyncJsonFromRows();
+                if (!hpShowErrorSummary()) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                }
+            });
+        }
+    }
+
+    function hpInit() {
+        var textarea = hpEl('headerProfilesJson');
+        if (!textarea) return;
+        var parsed = hpRowsFromText(textarea.value);
+        if (parsed !== null) {
+            hpProfiles = parsed.profiles;
+            hpBindings = parsed.bindings;
+        }
+        hpRender();
+        hpBindEvents();
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', hpInit);
+    } else {
+        hpInit();
+    }
+})();
+</script>

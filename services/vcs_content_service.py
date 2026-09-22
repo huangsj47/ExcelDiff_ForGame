@@ -11,6 +11,7 @@ import threading
 import time
 
 from services.deployment_mode import is_agent_dispatch_mode
+from services.excel_header_profiles import header_kwargs_for
 from services.log_sampling import (
     OUTCOME_HIT,
     OUTCOME_MISS,
@@ -411,8 +412,7 @@ def get_deleted_file_diff_data(commit, previous_commit):
 
         diff_data = DiffService().process_deleted_file(
             commit.path, previous_content,
-            header_rows=getattr(repository, 'header_rows', None),
-            header_name_row=getattr(repository, 'header_name_row', None))
+            **header_kwargs_for(repository, commit.path, raw=previous_content))
         if diff_data and diff_data.get('sheets'):
             excel_cache_service.save_cached_diff(
                 repository_id=repository.id,
@@ -643,9 +643,7 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
         # （见 DiffService._plan_name_row）。
         diff_data = diff_service.process_diff(
             commit.path, current_content, previous_content,
-            key_columns=getattr(repository, 'key_columns', None),
-            header_rows=getattr(repository, 'header_rows', None),
-            header_name_row=getattr(repository, 'header_name_row', None))
+            **header_kwargs_for(repository, commit.path, raw=current_content))
         processing_time = time.time() - calc_start_time
         if diff_data:
             total_time = time.time() - start_time

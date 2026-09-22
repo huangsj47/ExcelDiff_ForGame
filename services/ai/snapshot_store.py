@@ -47,6 +47,7 @@ from models.ai_analysis.diff_snapshot import (
     STATUS_SEALED,
 )
 from services.ai.coverage_ledger import FILE_EVIDENCE_KINDS, parse_evidence_label
+from services.ai.header_scope import header_scope_fingerprint, scoped_version
 from services.ai.trace_evidence import decode_evidence
 
 #: 条目键：`(config_id, file_path)`。与模型上的唯一索引是同一对。
@@ -94,19 +95,20 @@ def _cache_rows(config_ids: Sequence[int]) -> List[WeeklyVersionDiffCache]:
     )
 
 
-def _digest_of(rows: Sequence[Any]) -> str:
+def _digest_of(rows: Sequence[Any], scope: str = "") -> str:
     """`(file_path, base, latest, diff_version)` 的内容指纹。
 
     **与 `scope_sampling.weekly_snapshot_digest` 逐字相同**（见模块抬头）。两边的输入
     来自同一条查询、同一个排序、同一个分隔符；`None` 一律折成空串。
     """
     parts = sorted(
-        "%s|%s|%s|%s"
+        "%s|%s|%s|%s|%s"
         % (
             getattr(row, "file_path", None) or "",
             getattr(row, "base_commit_id", None) or "",
             getattr(row, "latest_commit_id", None) or "",
             getattr(row, "diff_version", None) or "",
+            scope,
         )
         for row in rows
     )
@@ -129,7 +131,10 @@ def seal_snapshot(
     if not config_ids or not group_key:
         return None
     rows = _cache_rows(config_ids)
-    digest = _digest_of(rows)
+    # 比较口径（表头坐标 / 多套表头方案）：并进内容身份，于是「改了怎么读」在做差里
+    # 等价于「换了一份输入」。理由见 `services/ai/header_scope.py` 的模块抬头。
+    scope = header_scope_fingerprint(config_ids)
+    digest = _digest_of(rows, scope)
     if not digest:
         return None
 
@@ -167,7 +172,7 @@ def seal_snapshot(
                 file_path=row.file_path,
                 base_commit_id=row.base_commit_id,
                 latest_commit_id=row.latest_commit_id,
-                diff_version=row.diff_version,
+                diff_version=scoped_version(row.diff_version, scope),
             )
         )
     db.session.flush()

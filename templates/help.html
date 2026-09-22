@@ -196,6 +196,22 @@
                         </div>
                     </div>
                     <div class="step-item">
+                        <div class="step-badge"><i class="fas fa-layer-group" style="font-size: 12px;"></i></div>
+                        <div class="step-content">
+                            <h4>表头方案 <span class="badge bg-secondary" style="font-size: 0.7rem; vertical-align: middle;">可选</span></h4>
+                            <p>一个仓库里<b>并存多种表头格式</b>时，用它指定「哪些文件用哪一套坐标」。上面那三项（表头行数 / 名称行 / 关键列）是<b>仓库级</b>的 —— 一个仓库只能有一套；而真实的配表仓库里常常几种格式混在一起：有的表 5 行自描述表头（第 3 行 <code>TYPE</code>、第 5 行 <code>EXPORT</code>、第 2 行才是字段名），有的表 4 行、A 列直接就是 id，还有的表只有 1 行、A1 写着 <code>SKIP</code>。</p>
+                            <p><b>这几种的 A 列含义完全不同</b>（标记列 / 真正的 id 字段 / 哨兵），所以拿一套坐标去读全部文件，必然有几张表是错的 —— 常见的表现是「列头显示的是中文名」「表头那几行被当成数据报变更」。</p>
+                            <p class="text-muted">配置方式是「<b>方案</b> + <b>规则</b>」：先定义几套坐标（也可以直接用内置预设：单行表头 / 多行表头 / 编辑器式表头），再写规则说明「什么样的文件用哪一套」。规则按下面的顺序匹配，<b>先命中先用</b>：</p>
+                            <ul class="text-muted" style="font-size: 0.9rem;">
+                                <li><b>固定文件名</b> —— 仓库里的相对路径，如 <code>config/奖励模式_CfgRewardMode.xlsx</code></li>
+                                <li><b>目录前缀</b> —— 如 <code>EditorCfgTool/excel/actor</code>，支持 <code>*</code> 与 <code>**</code>；<b>多处命中取最长的那条</b>，所以「先写通用规则、再写特例」符合直觉</li>
+                                <li><b>路径正则</b> —— 如 <code>^config/.*\.xlsx$</code>；多条命中取靠上的那条</li>
+                                <li><b>表头特征</b> —— 直接判表头长什么样，如 <code>r1:A == SKIP</code>、<code>within30:A has TYPE, EXPORT</code>（<code>&amp;&amp;</code> 连接多个条件，逗号分隔一个条件里的多个值）。<b>只有这一种会去读文件</b>，所以它排在最后</li>
+                            </ul>
+                            <p class="text-muted"><b>不配就是原来的行为</b>：一条规则都没有时，全部文件都用上面那三个字段。改动比较口径之后，已算出的 diff 缓存会自动清掉，下次访问重算。</p>
+                        </div>
+                    </div>
+                    <div class="step-item">
                         <div class="step-badge"><i class="fas fa-filter" style="font-size: 12px;"></i></div>
                         <div class="step-content">
                             <h4>路径 / 文件类型正则</h4>

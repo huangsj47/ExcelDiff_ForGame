@@ -148,7 +148,7 @@ class DiffService(
     
     def process_diff(self, file_path: str, current_content: bytes, previous_content: bytes = None,
                      key_columns: str = None, header_rows: int = None,
-                     header_name_row: int = None) -> Dict[str, Any]:
+                     header_name_row: int = None, marker_column: str = None) -> Dict[str, Any]:
         """处理文件差异，根据文件类型选择合适的处理方式。
 
         key_columns：仓库上配置的「关键列」（`Repository.key_columns`，列号从 1 开始、
@@ -180,7 +180,8 @@ class DiffService(
                 return self._process_excel_diff(file_path, current_content, previous_content,
                                                 key_columns=key_columns,
                                                 header_rows=header_rows,
-                                                header_name_row=header_name_row)
+                                                header_name_row=header_name_row,
+                                                marker_column=marker_column)
             elif file_type == 'image':
                 return self._process_image_diff(file_path, current_content, previous_content)
             else:
@@ -194,8 +195,10 @@ class DiffService(
             }
     
     def process_deleted_file(self, file_path: str, previous_content: bytes,
+                             key_columns: str = None,
                              header_rows: int = None,
-                             header_name_row: int = None) -> Dict[str, Any]:
+                             header_name_row: int = None,
+                             marker_column: str = None) -> Dict[str, Any]:
         """整份文件被删除时的差异：基线的**每一张工作表**都按「已删除」处理。
 
         为什么不复用 `process_diff(path, None, previous_content)`：通用路径上
@@ -220,8 +223,10 @@ class DiffService(
                 'summary': {'added': 0, 'removed': 0, 'modified': 0, 'total': 0},
             }
         previous_data = self._read_excel_data(previous_content, file_path)
-        return self._compare_excel_data({}, previous_data, file_path, header_rows=header_rows,
-                                        header_name_row=header_name_row)
+        return self._compare_excel_data({}, previous_data, file_path, key_columns=key_columns,
+                                        header_rows=header_rows,
+                                        header_name_row=header_name_row,
+                                        marker_column=marker_column)
 
     def _process_text_diff(self, file_path: str, current_content: bytes, previous_content: bytes = None) -> Dict[str, Any]:
         """处理文本文件差异"""
@@ -279,7 +284,7 @@ class DiffService(
     
     def _process_excel_diff(self, file_path: str, current_content: bytes, previous_content: bytes = None,
                             key_columns: str = None, header_rows: int = None,
-                            header_name_row: int = None) -> Dict[str, Any]:
+                            header_name_row: int = None, marker_column: str = None) -> Dict[str, Any]:
         """处理Excel文件差异"""
         import time
         start_time = time.time()
@@ -310,7 +315,8 @@ class DiffService(
             diff_result = self._compare_excel_data(current_data, previous_data, file_path,
                                                    key_columns=key_columns,
                                                    header_rows=header_rows,
-                                                   header_name_row=header_name_row)
+                                                   header_name_row=header_name_row,
+                                                   marker_column=marker_column)
             
             self.performance_stats['excel_diff_time'] += time.time() - start_time
             

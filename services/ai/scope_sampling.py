@@ -24,6 +24,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from models import Project, Repository, WeeklyVersionConfig, WeeklyVersionDiffCache, db
 from services.ai import snapshot_store
+from services.ai.header_scope import header_scope_fingerprint, scoped_version
 from services.ai.project_facts import (
     critical_path_facts,
     declared_important_tables_by_repo,
@@ -134,11 +135,18 @@ def _as_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
         return value
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
-def _identity_of(entry) -> tuple:
-    """一条缓存行的**内容身份** —— 做差比的就是这三个（不是 `updated_at`）。"""
-    return (entry.base_commit_id, entry.latest_commit_id, entry.diff_version)
+def _identity_of(entry, scope: str = "") -> tuple:
+    """一条缓存行的**内容身份** —— 做差比的就是这三个（不是 `updated_at`）。
 
-def _select_delta_entries(entries: List, baseline) -> List:
+    `scope` 是这批配置的比较口径（表头坐标 / 多套表头方案）。**必须与快照那一侧
+    在同一个位置并上**（`services/ai/header_scope.scoped_version`）：快照条目在写入时
+    已经并过，这里不并的话两边永远不相等 —— 那不是「漏报一次」，而是**每一个文件**
+    都被判成变了（或都没变），整个增量做差失真。
+    """
+    return (entry.base_commit_id, entry.latest_commit_id,
+            scoped_version(entry.diff_version, scope))
+
+def _select_delta_entries(entries: List, baseline, scope: str = "") -> List:
     """按基准挑出「这次要装进输入」的那些条目。
 
     ## 基准的三种形态（见 `snapshot_store.BaselineSnapshot`）
@@ -162,7 +170,7 @@ def _select_delta_entries(entries: List, baseline) -> List:
         ]
     delta = []
     for entry in entries:
-        if items.get((entry.config_id, entry.file_path)) != _identity_of(entry):
+        if items.get((entry.config_id, entry.file_path)) != _identity_of(entry, scope):
             delta.append(entry)
     return delta
 
@@ -249,7 +257,9 @@ def _summarize_weekly_files(
     total_files = total_query.count()
 
     entries = total_query.all()
-    delta_entries = _select_delta_entries(entries, baseline)
+    delta_entries = _select_delta_entries(
+        entries, baseline, header_scope_fingerprint([cfg.id for cfg in configs]),
+    )
 
     repo_lookup = {cfg.repository_id: cfg.repository for cfg in configs}
     repo_summaries: Dict[int, dict] = {}
@@ -434,8 +444,13 @@ def weekly_snapshot_digest(config_ids: List[int]) -> str:
     )
     if not rows:
         return ""
+    # **比较口径也要进身份**（见 `services/ai/header_scope.py`）：上面那四项全在说
+    # 「文件变了没有」，没有一项说「这些文件该怎么读」。改了表头配置之后缓存会重算，
+    # 而文件确实没变、四元组逐字相同 ⇒ 这份判据会说「输入一字未变」而跳过自动分析 ——
+    # 可模型能看到的东西（列名、哪些行算数据）已经换了一套。
+    scope = header_scope_fingerprint(config_ids)
     parts = sorted(
-        "%s|%s|%s|%s" % (path or "", base or "", latest or "", version or "")
+        "%s|%s|%s|%s|%s" % (path or "", base or "", latest or "", version or "", scope)
         for path, base, latest, version in rows
     )
     return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()

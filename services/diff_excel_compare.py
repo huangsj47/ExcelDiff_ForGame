@@ -19,6 +19,8 @@ MRO 拿到它，但本模块 import `DiffService` 会成环）。这是全次拆
 import re
 from typing import Any, Dict
 
+from services.excel_header_profiles import column_index
+
 
 class DiffExcelCompareMixin:
 
@@ -90,8 +92,13 @@ class DiffExcelCompareMixin:
 
     def _compare_excel_data(self, current_data: Dict, previous_data: Dict, file_path: str,
                             key_columns: str = None, header_rows: int = None,
-                            header_name_row: int = None) -> Dict[str, Any]:
-        """比较Excel数据"""
+                            header_name_row: int = None, marker_column: str = None) -> Dict[str, Any]:
+        """比较Excel数据
+
+        marker_column：「标记列」的列字母（如 `A`）。常规配表把这一列当**元数据**用 ——
+        表头区放 `TYPE`/`DEFAULT`/`EXPORT` 这类标记，数据区放策划备注，两处都不是数据。
+        配了它，该列在数据区就不产生任何变更（处理见 `_blank_marker_column`）。
+        """
 
         header_count = self._header_row_count(header_rows)
         name_row = self._header_name_row(header_name_row, header_count)
@@ -113,7 +120,8 @@ class DiffExcelCompareMixin:
             sheet_diff = self._compare_dataframes(current_df, previous_df, sheet_name,
                                                   key_columns=key_columns,
                                                   header_rows=header_count,
-                                                  header_name_row=name_row)
+                                                  header_name_row=name_row,
+                                                  marker_column=marker_column)
             result['sheets'][sheet_name] = sheet_diff
             
             # 更新统计信息
@@ -125,10 +133,48 @@ class DiffExcelCompareMixin:
         
         return result
 
+    @staticmethod
+    def _blank_marker_column(df, marker_column):
+        """把标记列的值清空 —— 它在数据区是备注，不是数据。
+
+        ## 为什么是「清空」而不是「删掉这一列」
+
+        删列会让列数少一个，`key_columns` 的**列号语义**当场错位：帮助页写明
+        「列号从 1 开始，B 列就填 2」，删掉 A 列之后配了 `key_columns=2` 的仓库会突然
+        按 C 列去认行 —— 而认错行的表现是「删一行 + 加一行」成对出现，不报错。
+        清空则列序、列数、列名一个都不动。
+
+        ## 为什么不是「保留显示、只跳过比较」
+
+        那要把「显示用」和「比较用」两份数据分开往下传，改动会渗进 `_smart_row_diff`
+        的比较循环，而收益只是「数据区还能看到备注」。备注的**变更**本来就不该出现在
+        数据变更里；要在页面上看备注，表头区那一份照旧逐格显示（`_build_header_rows`
+        读的是原始帧，不受这里影响）。
+
+        已经全空时直接返回原帧，不走 `copy()` —— 每张表都复制一遍是白花的。
+        """
+        if df is None or not marker_column:
+            return df
+        index = column_index(marker_column)
+        if index is None or df.shape[1] <= index:
+            return df
+        try:
+            if not df[df.columns[index]].astype(str).str.strip().any():
+                return df
+        except Exception:  # noqa: BLE001 —— 判空失败就照常往下处理
+            pass
+        blanked = df.copy()
+        blanked.iloc[:, index] = ""
+        return blanked
+
     def _compare_dataframes(self, current_df, previous_df, sheet_name: str,
                             key_columns: str = None, header_rows: int = None,
-                            header_name_row: int = None) -> Dict[str, Any]:
+                            header_name_row: int = None, marker_column: str = None) -> Dict[str, Any]:
         """比较两个DataFrame
+
+        marker_column：标记列（见 `_compare_excel_data`）。**必须在三个分支之前处理** ——
+        整表增/删那两条分支同样要按它把这一列排除掉，否则同一列备注在「改了一格」时
+        不算变更、在「整表重建」时被算成 N 行变更，两边的口径对不上。
 
         header_rows 是「表头块占前几行」（含第 1 行的列名行，见 `_header_row_count`）。
         整个工作表增/删的两条分支同样要把表头行分出来 —— 否则新加一张三行表头的表，
@@ -141,6 +187,12 @@ class DiffExcelCompareMixin:
 
         header_count = self._header_row_count(header_rows)
         name_row = self._header_name_row(header_name_row, header_count)
+
+        # 标记列：数据区是策划备注、表头区是 TYPE/DEFAULT/EXPORT 这类标记，两处都不是数据。
+        # **必须排在三个分支之前** —— 整表增/删那两条分支同样要排除它，否则同一列备注
+        # 在「改了一格」时不算变更、在「整表重建」时被算成 N 行变更，两边口径对不上。
+        current_df = self._blank_marker_column(current_df, marker_column)
+        previous_df = self._blank_marker_column(previous_df, marker_column)
 
         if current_df is None and previous_df is None:
             return {'headers': [], 'rows': [], 'stats': {'added': 0, 'removed': 0, 'modified': 0}}

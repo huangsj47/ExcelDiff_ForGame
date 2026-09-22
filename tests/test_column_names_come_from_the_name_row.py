@@ -650,11 +650,21 @@ class TestTheFormCarriesTheField:
         """三个调用点都要传：提交页主漏斗、提交页删除态、周版本删除态。
 
         漏传一处的表现是「同一张表在两种页面上列头不一样」，而且不报错。
+
+        ## 断言对象变了（2026-09-22）：从「三处写法一致」变成「三处调同一个函数」
+
+        原来是数 `header_name_row=getattr(repository, ...)` 出现了几次 —— 那时每个
+        调用点各写一遍三行 `getattr`，所以只能靠「数次数 + 盯写法」守。
+
+        现在坐标**按文件解析**（一个仓库里可以并存多种表头格式，仓库级标量表达不了），
+        那三行收口成一个 `header_kwargs_for(...)`。守的东西没变，而且更强：
+        「三处都调同一个函数」这件事上，不存在「漏传其中一项」这种失败方式。
         """
         vcs = _strip_comments(_read("services/vcs_content_service.py"))
         weekly = _strip_comments(_read("services/weekly_deleted_excel_helpers.py"))
-        assert vcs.count('header_name_row=getattr(repository, "header_name_row", None)') == 2 \
-            or vcs.count("header_name_row=getattr(repository, 'header_name_row', None)") == 2, (
-                "提交页的两个入口没有都传名称行"
+        assert vcs.count("header_kwargs_for(") == 2, "提交页的两个入口没有都走收口函数"
+        assert "header_kwargs_for(" in weekly, "周版本删除态没有走收口函数"
+        for name, source in (("提交页", vcs), ("周版本删除态", weekly)):
+            assert 'getattr(repository, "header_rows"' not in source, (
+                f"{name}还有调用点直接读仓库标量 —— 那样它拿不到按文件选出来的坐标"
             )
-        assert 'header_name_row=getattr(repository, "header_name_row", None)' in weekly

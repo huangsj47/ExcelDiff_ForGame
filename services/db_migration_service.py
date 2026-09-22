@@ -172,6 +172,9 @@ def _migrate_repository_columns(db, log_print):
             "header_rows": "header_rows INTEGER",
             "header_name_row": "header_name_row INTEGER",
             "key_columns": "key_columns VARCHAR(200)",
+            # 「一个仓库并存多种表头格式」的选用规则（JSON 文本，见
+            # `services/excel_header_profiles.py`）。空 = 只用上面那三个标量。
+            "header_profiles": "header_profiles TEXT",
         },
         log_print,
     )

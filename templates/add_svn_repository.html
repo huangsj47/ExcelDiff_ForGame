@@ -204,6 +204,9 @@
                             <input type="text" class="form-control" id="commit_filter" name="commit_filter" placeholder="邮箱，多个用英文逗号分隔" value="{% if is_edit %}{{ repository.commit_filter or '' }}{% endif %}">
                         </div>
                     </div>
+
+                    {# 表头方案：见 templates/partials/header_profiles_editor.html #}
+                    {% include 'partials/header_profiles_editor.html' %}
                 </div>
 
                 <div class="form-actions">

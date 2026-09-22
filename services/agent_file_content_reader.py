@@ -26,6 +26,7 @@ from __future__ import annotations
 from models import Repository, db
 from utils.content_window import CONTENT_MAX_CHARS, slice_lines
 from utils.logger import log_print
+from services.excel_header_profiles import resolve_for_file
 from utils.text_decoding import binary_content_notice, text_or_notice
 
 # payload 里承载表头坐标的两个键。**正常路径上它们一定在**：平台侧那唯一的调用方
@@ -34,7 +35,7 @@ from utils.text_decoding import binary_content_notice, text_or_notice
 _HEADER_CONFIG_KEYS = ('header_rows', 'header_name_row')
 
 
-def _header_config(payload: dict, repository) -> tuple:
+def _header_config(payload: dict, repository, file_path: str = '') -> tuple:
     """表头坐标（列名取第几行 / 表头块占几行）从哪来：**payload 优先**，缺了才回落查库。
 
     返回 `(header_rows, header_name_row, source)`，`source` 是 `'payload'` 或 `'repository'`。
@@ -63,14 +64,18 @@ def _header_config(payload: dict, repository) -> tuple:
     if any(key in payload for key in _HEADER_CONFIG_KEYS):
         return payload.get('header_rows'), payload.get('header_name_row'), 'payload'
 
-    header_rows = getattr(repository, 'header_rows', None)
-    header_name_row = getattr(repository, 'header_name_row', None)
+    # 回落也**按这个文件**解析，不取仓库标量 —— 一个仓库里可以并存多种表头格式，
+    # 拿标量会让这张表用上别的表的坐标。这条路径本身已经是异常（payload 该带而没带）。
+    profile = resolve_for_file(repository, file_path)
+    header_rows = profile.header_rows
+    header_name_row = profile.header_name_row
     log_print(
         '⚠️ Agent 取数：file_content 的 payload 没带表头坐标'
         '（header_rows/header_name_row），已回落到本节点仓库行 '
-        f'{getattr(repository, "id", "?")} 的值：header_rows={header_rows}、'
-        f'header_name_row={header_name_row}。两端不是同一份库时，这份正文的列名会与'
-        '平台侧不同 —— 请调用方在 payload 里补齐这两个键。',
+        f'{getattr(repository, "id", "?")} 按 {file_path!r} 解析出的值：'
+        f'header_rows={header_rows}、header_name_row={header_name_row}。'
+        '两端不是同一份库时，这份正文的列名会与平台侧不同 —— '
+        '请调用方在 payload 里补齐这两个键。',
         'AGENT',
     )
     return header_rows, header_name_row, 'repository'
@@ -128,7 +133,8 @@ def read_file_content_for_agent(payload: dict) -> dict:
             # 那条路（同一个 `_read_excel_sheets`）渲染出同一份文本。payload 没带才回落到
             # 本节点的仓库行，并且留痕（见 `_header_config`）—— 静默回落正是「两端列名
             # 不一致」这个毛病能被藏起来的原因。
-            header_rows, header_name_row, header_source = _header_config(payload, repository)
+            header_rows, header_name_row, header_source = _header_config(
+                payload, repository, file_path)
             rendered = _read_excel_sheets(
                 raw,
                 max_rows=int(payload.get('max_rows') or DEFAULT_MAX_ROWS_PER_SHEET),
