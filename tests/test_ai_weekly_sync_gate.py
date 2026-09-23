@@ -21,11 +21,13 @@
 """
 from __future__ import annotations
 
+import ast
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app import app as flask_app, create_tables, db
+from app import app as flask_app
+from app import create_tables, db
 from models import BackgroundTask, Project, Repository
 from models.weekly_version import WeeklyVersionConfig
 from services.ai.weekly_sync_gate import (
@@ -41,6 +43,30 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 def _uid(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
+
+
+def _function_source(source: str, name: str) -> str:
+    """把一个**顶层函数**的源码整段取出来（按语法树的 `lineno`/`end_lineno`）。
+
+    ## 为什么不写成 `source[source.index("def x(") : source.index("def <下一个函数>")]`
+
+    因为那种切法的**下界是邻居**，而不是这个函数自己。邻居被搬走（或改名、或换顺序，
+    或干脆删掉）的那一刻，`index()` 会抛 `ValueError: substring not found` ——
+    而那个红的理由**跟被测的行为毫无关系**。2026-09-23 把读侧那一组函数拆去
+    `services/ai/latest_result.py` 时就正好踩响：切片下界原来是
+    `def get_latest_weekly_result`，它一搬走这条守卫就炸，而闸门本身一个字没动。
+
+    `ast` 的 `end_lineno` 是**这个函数自己**的边界，邻居怎么搬都不影响它。
+    """
+    tree = ast.parse(source)
+    lines = source.splitlines()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return "\n".join(lines[node.lineno - 1 : node.end_lineno])
+    raise AssertionError(
+        f"{name} 不在这个文件里了 —— 这条守卫失去了它的对象，"
+        f"先把守卫挪到它现在待的文件，再删掉这句"
+    )
 
 
 def _seed(*, with_sync_task: bool = True, status: str = "pending", age_minutes: int = 1):
@@ -267,8 +293,7 @@ class TestBothEntrypoints:
     def test_the_execution_gate_sits_before_the_run_is_created(self):
         """执行那道闸必须排在 `_create_run` 之前，理由同上面「不留零消费 run」。"""
         source = (PROJECT_ROOT / "services" / "ai_analysis_service.py").read_text(encoding="utf-8")
-        body = source[source.index("def run_weekly_analysis_background"):]
-        body = body[: body.index("def get_latest_weekly_result")]
+        body = _function_source(source, "run_weekly_analysis_background")
 
         assert "weekly_sync_in_flight" in body, "后台入口没有查同步是否还在跑"
         assert body.index("weekly_sync_in_flight") < body.index("_create_run("), (

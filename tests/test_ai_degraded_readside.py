@@ -798,6 +798,12 @@ READ_SIDE_FILES = (
     "services/ai_report_history_service.py",
     "services/ai/report_document.py",
     "services/ai_analysis_service.py",
+    # 2026-09-23：`_read_latest_result` / `_latest_concluded_run` 这一组读侧函数从这里
+    # 搬到了 `services/ai/latest_result.py`（那个文件顶着 2000 行 ERROR 闸门）。
+    # **搬了文件不等于搬出了这张清单**：本清单是这道静态守卫的覆盖范围，漏掉新模块
+    # 就等于让「读侧不许只看 succeeded」这条约束对搬走的那一半**静默失效** ——
+    # 守卫照样全绿，而它已经不再看那份代码了。
+    "services/ai/latest_result.py",
 )
 
 
