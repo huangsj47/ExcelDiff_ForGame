@@ -1,0 +1,6 @@
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="read_reference">
+<｜｜DSML｜｜ parameter name="name" string="true">change-manifest</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="lines" string="true">1</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

@@ -95,7 +95,7 @@ S1 为了查耦合读了表 A 的 diff，S2 也要读同一份 —— 有了它�
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping, MutableMapping, Protocol, runtime_checkable
 
 from services.ai.budget import ContextItem, truncate_text
@@ -105,6 +105,7 @@ from services.ai.scope import normalize_path
 from services.ai.trace_evidence import failure_notice
 from services.ai.windowed_view import render_window, windowed_kinds
 from utils.content_window import CONTENT_MAX_CHARS
+from utils.logger import log_print
 
 # 单条上下文的字符上限。Excel 的 diff 通常是最大的，但也不该无限大。
 #
@@ -226,6 +227,7 @@ _STAT_COUNTERS = (
     "avoided_duplicate_chars",  # 本成员重复索取时，用指针省下的提示词字符
     "cross_member_replayed_chars",  # 跨成员缓存命中后仍需重发的正文字符
     "unscoped_content_requests",  # file_content 未指定行/工作表，可能退化成大范围读取
+    "prefetched",         # **平台预取**的条数（不占模型的索取额度，见 `prefetch()`）
 )
 
 
@@ -412,6 +414,21 @@ def _repeat_item(item: ContextItem) -> ContextItem:
     )
 
 
+def _mark_prefetched(item: ContextItem) -> ContextItem:
+    """给预取条目盖一个痕（`meta["prefetch"]`），**其余一字不动**。
+
+    `label` 与 `meta`（含 `cache_key` / `evidence_id` / `truncated`）都必须原样保留：
+    前者的标题是模型回查内容的地址，后者是 `forget()` 与记账读的东西。只多一个键，
+    于是读 trace 或落库明细的人能一眼分出「这条是模型要的」还是「这条是平台预取的」。
+    """
+    return ContextItem(
+        kind=item.kind,
+        label=item.label,
+        text=item.text,
+        meta={**item.meta, "prefetch": True},
+    )
+
+
 def _with_chunk_id(item: ContextItem, key: CacheKey) -> ContextItem:
     """为证据正文生成稳定地址；相同请求与内容在不同成员中得到同一 id。
 
@@ -465,10 +482,38 @@ class ContextTools:
     # 按工具类型的记账。与上面几个总数分开：总数是给预算逻辑用的，这份是给「这次分析把
     # 索取额度花在哪了、取回了多少字」用的（消耗面板按类型展示）。
     _stats: dict[str, dict[str, int]] = field(default_factory=dict, init=False, repr=False)
+    # 「当前这次执行是**平台预取**」。由 `prefetch()` 短暂打开，`execute()` 里面读它决定
+    # 记账口径（见 `_count_call`）。用实例上的一个开关而不是给 `execute` 加参数：那会
+    # 改掉一个被引擎与测试大量调用的公开签名，而这里要的只是「同一段执行逻辑的另一种
+    # 记账口径」。
+    _prefetching: bool = field(default=False, init=False, repr=False)
 
     @property
     def executions(self) -> int:
         return self._executions
+
+    def __post_init__(self) -> None:
+        """把**本轮生效的单条上限**交给取数侧（只对那些认这件事的 provider）。
+
+        ## 为什么在这里
+
+        `file_content` 的正文在取数侧就被切（那才是给模型看到的一页），所以取数侧的
+        上限必须等于计划推导出来的那个数 —— 否则用户把提示词预算调高、正文还是只有
+        11,000 字，而计划上写着 30,333（工作包 D 点名的「隐藏截断」）。而**只有这一层**
+        同时知道「生效的 `limits`」与「provider 是谁」，所以交接点在这里。
+
+        用鸭子类型而不是往 `ContextProvider` 协议上加方法：那五个方法是有意做窄的
+        （假 provider、探针、测试用的桩一大堆），加一个「配置自己」的方法会让每个实现
+        都得跟一遍。认这个约定的 provider 实现 `apply_tool_limits(limits)` 即可，
+        不实现就什么都不会发生（行为与从前逐字相同）。
+        """
+        apply_limits = getattr(self.provider, "apply_tool_limits", None)
+        if not callable(apply_limits):
+            return
+        try:
+            apply_limits(self.limits)
+        except Exception as exc:  # noqa: BLE001 —— 交接失败只该让「页大小」退回初值
+            log_print(f"⚠️ AI 取数：把单条上限交给取数侧失败：{type(exc).__name__}: {exc}")
 
     @property
     def cache_hits(self) -> int:
@@ -491,6 +536,21 @@ class ContextTools:
         """
         bucket = self._stats.setdefault(kind, {name: 0 for name in _STAT_COUNTERS})
         bucket[counter] += amount
+
+    def _count_call(self, kind: str) -> None:
+        """「这次取数算不算**模型的索取**」这一笔账（唯一的分岔点）。
+
+        * 模型自己要的 → `calls`（它同时由 `_requests_seen` 计进索取额度）；
+        * **平台预取的** → `prefetched`。
+
+        为什么预取不算 `calls`：`calls` 在面板上就是「索取次数」，而 `requests_remaining`
+        会把这个数交给模型（「本轮还剩 N 次」）。把平台自己的预取算进去，等于告诉模型
+        「你已经要过 6 次了」—— 而它一次都没要过；更糟的是额度会被预取吃掉，P3 省下来的
+        轮次又赔回去。**但正文与字符数照记**（`produced_chars` 等由调用处照旧记），
+        否则面板上的「这次取回多少字」会与提示词里真实有多少字对不上 ——
+        那才是「白拿又追不到」的隐藏上下文。
+        """
+        self._bump(kind, "prefetched" if self._prefetching else "calls")
 
     @property
     def requests_remaining(self) -> int:
@@ -578,22 +638,25 @@ class ContextTools:
         truncated = 0
 
         for index, request in enumerate(requests):
-            if self._requests_seen >= self.max_tool_requests:
-                refused += 1
-                # 被拒的请求**不算 calls** —— 它没有消耗额度（额度由下面那行
-                # `self._requests_seen += 1` 记）。算进去会让「额度花在哪了」对不上总数。
-                self._bump(request.type, "refused_by_budget")
-                refused_labels.append(_human_request_label(request))
-                dropped.append(
-                    DroppedItem(
-                        "request",
-                        index,
-                        f"超出本次工具请求总预算（{self.max_tool_requests} 次），未执行",
-                        f"{describe_request(request)}（累计第 {self._requests_seen + 1} 次）",
+            # 预取**不查也不占**索取额度：它不是模型要的（见 `_count_call`）。其余一切
+            # 照旧 —— 缓存、记账、失败降级走的都是同一段代码，这正是「同一本账」。
+            if not self._prefetching:
+                if self._requests_seen >= self.max_tool_requests:
+                    refused += 1
+                    # 被拒的请求**不算 calls** —— 它没有消耗额度（额度由下面那行
+                    # `self._requests_seen += 1` 记）。算进去会让「额度花在哪了」对不上总数。
+                    self._bump(request.type, "refused_by_budget")
+                    refused_labels.append(_human_request_label(request))
+                    dropped.append(
+                        DroppedItem(
+                            "request",
+                            index,
+                            f"超出本次工具请求总预算（{self.max_tool_requests} 次），未执行",
+                            f"{describe_request(request)}（累计第 {self._requests_seen + 1} 次）",
+                        )
                     )
-                )
-                continue
-            self._requests_seen += 1
+                    continue
+                self._requests_seen += 1
             if request.type == "file_content" and not str(request.lines or "").strip():
                 self._bump(request.type, "unscoped_content_requests")
 
@@ -601,7 +664,7 @@ class ContextTools:
                 item, note = self._evidence_item(request, index)
                 if note is not None:
                     dropped.append(note)
-                self._bump(request.type, "calls")
+                self._count_call(request.type)
                 if item.meta.get("tool_failed"):
                     self._bump(request.type, "failed")
                 else:
@@ -624,7 +687,7 @@ class ContextTools:
             if cached is not None:
                 cache_hits += 1
                 self._cache_hits += 1
-                self._bump(request.type, "calls")
+                self._count_call(request.type)
                 self._bump(request.type, "cache_hits")
                 # 命中缓存时这些字符是**上一轮已经取过**的，仍然算这一类型的产出 ——
                 # 否则「这个类型很省」的结论会凭空少掉一半字符。
@@ -652,7 +715,7 @@ class ContextTools:
                 # `produced_chars` 不同：这次真的把正文交给了模型，所以算全文的长度。
                 cache_hits += 1
                 self._cache_hits += 1
-                self._bump(request.type, "calls")
+                self._count_call(request.type)
                 self._bump(request.type, "cache_hits")
                 self._bump(request.type, "source_chars", _meta_chars(shared))
                 self._bump(request.type, "produced_chars", len(shared.text))
@@ -696,7 +759,7 @@ class ContextTools:
 
             executions += 1
             self._executions += 1
-            self._bump(request.type, "calls")
+            self._count_call(request.type)
             self._bump(request.type, "executions")
             # 「失败」的判据是**这两条之一**，缺一不可：
             #
@@ -746,6 +809,59 @@ class ContextTools:
             refused_items=tuple(refused_labels),
             truncated=truncated,
         )
+
+    def prefetch(self, requests: Iterable[ContextRequest]) -> ToolBatch:
+        """**平台自己发起**的预取：同一本账、同一套证据地址，但**不占模型的索取额度**。
+
+        与 `execute` 的关系：执行路径**逐字相同**（白名单之外的一切 —— 缓存、跨成员共享、
+        截断、失败降级、证据 id —— 都走同一段代码），只有两处口径不同：
+
+        1. **不查也不增 `_requests_seen`**（额度是模型的，见 `_count_call`）；
+        2. 记账落 `prefetched` 而不是 `calls`，条目上盖 `meta["prefetch"] = True`。
+
+        ## 为什么要有它，而不是让调用方直接 `execute`
+
+        「预取」曾经是很容易写歪的一件事：直接 `execute` 就吃掉了模型的额度；自己拼一段
+        文本塞进提示词就成了**白拿又追不到**的隐藏上下文（面板上的取数字符与提示词里真实
+        有多少字对不上，复核的人无从发现）。这一层把「预取的正文也必须是 ContextItem、
+        也必须记账、也必须能按 evidence_id 取回」变成**结构上的**约束。
+
+        ## 一个必须由调用方处理的后果（只在这一处出现）
+
+        预取**写本地缓存**，而本地命中给的是指针（模块 docstring 第 4 条：「见上文那一节」）。
+        所以「预取到了」必须真的等于「进了提示词」—— 被预算裁掉的条目要用 `forget()` 摘掉，
+        否则模型之后要同一份内容时会被告知「看上面」，而上面没有那一节。
+        调用方的判据已经备好：`evidence_prefetch.forget_unfitted(prefetch.items, items, tools)`。
+        """
+        pending = tuple(requests)
+        if not pending:
+            return ToolBatch()
+        self._prefetching = True
+        try:
+            batch = self.execute(pending)
+        finally:
+            # `finally`：预取里抛异常（provider 炸了也会在 execute 里被吞掉，这里是兜底）
+            # 不能让 `_prefetching` 一直开着 —— 那会把**之后模型自己的索取**全记成预取。
+            self._prefetching = False
+        return replace(batch, items=tuple(_mark_prefetched(item) for item in batch.items))
+
+    def forget(self, items: Iterable[ContextItem]) -> int:
+        """把**没能交付出去**的条目从本地缓存里摘掉，返回摘掉几条。
+
+        只被一个场景用到（见 `prefetch` 的说明）：预取写进了缓存，而预算把某几条挡在
+        提示词之外 —— 那时后续的重复索取会给出一条「见上文那一节」的指针，而那一节并不存在。
+
+        只摘**本地** `_cache`，不动跨成员共享的 `body_cache`：共享命中给的是**全文**
+        （模块 docstring 第 5 条），它对任何成员都是真话，而且摘掉它会让别的成员白取一次。
+        """
+        removed = 0
+        for item in items:
+            key = item.meta.get("cache_key")
+            if not key:
+                continue
+            if self._cache.pop(tuple(key), None) is not None:
+                removed += 1
+        return removed
 
     def _evidence_item(
         self, request: ContextRequest, index: int

@@ -6,6 +6,7 @@ from .platform_budget import PLATFORM_BUDGET_DEFAULTS, SINGLETON_ID, AiPlatformB
 from .usage_statistics import AiUsageStatistics, now_utc_naive
 from .anomaly import DISPOSITION_LABELS, DISPOSITIONS, AiAnalysisAnomaly
 from .trace import TRACE_OUTCOMES, AiAnalysisTrace
+from .round_event import AiAnalysisRoundEvent
 from .diff_snapshot import (
     CHANGE_ADDED,
     CHANGE_CHANGED,
@@ -52,6 +53,7 @@ __all__ = [
     "now_utc_naive",
     "AiAnalysisAnomaly",
     "AiAnalysisTrace",
+    "AiAnalysisRoundEvent",
     "AiAnalysisJob",
     "AiDiffSnapshot",
     "AiDiffSnapshotItem",

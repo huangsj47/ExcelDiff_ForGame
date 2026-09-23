@@ -1,0 +1,4 @@
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="think">分诊：本批次三个文件跨三个提交 —— 战斗逻辑（src/battle_logic.py）、物品表、技能表。技能表数值与 battle_logic 的战斗结算直接耦合（技能等级→蓝耗），物品表则是纯配表改动（config_data/value_sanity 的主战场）。我负责 config_data / value_sanity，因此优先索取两张配表的 diff 与整表统计，以及 battle_logic 的 diff 用于验证技能表数值与代码是否一致（也与历史待确认项相关）。</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

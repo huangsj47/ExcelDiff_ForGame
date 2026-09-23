@@ -46,6 +46,7 @@ from .agent_temp_cache import AgentTempCache
 from .ai_analysis import (  # noqa: E402 —— 本文件刻意先定义 `db` 再导入模型（见上）
     AiAnalysisAnomaly,
     AiAnalysisJob,
+    AiAnalysisRoundEvent,
     AiAnalysisRun,
     AiAnalysisTrace,
     AiDiffSnapshot,

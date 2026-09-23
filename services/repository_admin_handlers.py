@@ -459,6 +459,12 @@ def delete_project(project_id):
     AiAnalysisRun = _optional_runtime("AiAnalysisRun")
     AiAnalysisTrace = _optional_runtime("AiAnalysisTrace")
     AiAnalysisAnomaly = _optional_runtime("AiAnalysisAnomaly")
+    # 逐轮事件账（`models/ai_analysis/round_event.py`）：`project_id` 是**可空**列，
+    # 那张表也**刻意不声明外键**（见它的模块抬头）—— 所以删项目时 SQLAlchemy 既不会
+    # 碰它、也不会撞 NOT NULL。不清的代价不是「删不掉」，而是**留下孤儿行**；
+    # 而那条「跟着 schema 走」的护栏扫的正是「带非空外键的表」，看不见它。
+    # 清单是手写的，所以这里必须显式列出来。
+    AiAnalysisRoundEvent = _optional_runtime("AiAnalysisRoundEvent")
     AiProjectAnalysisConfig = _optional_runtime("AiProjectAnalysisConfig")
     AiProjectApiKey = _optional_runtime("AiProjectApiKey")
     AiWeeklyAnalysisState = _optional_runtime("AiWeeklyAnalysisState")
@@ -581,6 +587,17 @@ def delete_project(project_id):
             _safe_delete(
                 AiAnalysisTrace.query.filter(AiAnalysisTrace.run_id.in_(ai_run_ids)),
                 "AiAnalysisTrace",
+            )
+        if AiAnalysisRoundEvent is not None:
+            # 两个条件都要，理由与下面 `AiAnalysisAnomaly` 那段同款：`run_id` 那条覆盖
+            # 「挂在本项目运行上的逐轮事件」，`project_id` 那条覆盖「运行记录已经没了、
+            # 事件还在」的孤儿行。放在删 `ai_analysis_run` **之前**——事件行是运行的下级。
+            event_filters = [AiAnalysisRoundEvent.project_id == project_id]
+            if ai_run_ids:
+                event_filters.append(AiAnalysisRoundEvent.run_id.in_(ai_run_ids))
+            _safe_delete(
+                AiAnalysisRoundEvent.query.filter(or_(*event_filters)),
+                "AiAnalysisRoundEvent",
             )
         if AiAnalysisAnomaly is not None:
             # 两个条件都要：`run_id` 那条覆盖「挂在本项目运行上的异常」，`project_id`

@@ -4,15 +4,25 @@ from __future__ import annotations
 from typing import Mapping
 
 from services.ai.context_tools import DEFAULT_TOOL_LIMITS
-from utils.content_window import CONTENT_MAX_CHARS
+# `utils.content_window.CONTENT_MAX_CHARS` 不再在这里被读：取数侧的页大小现在由
+# `derive_tool_limits` 推导出来的 `file_content` 决定（见 `PROVIDER_MAX_CHARS_KEY`），
+# 那个常量只剩「没有别的依据时的初值」这一个身份（`platform_provider` 用它当默认值）。
 
 #: `file_content` 那一档「取数侧真正会给多少字」的键名。
 #:
-#: **这个键是必须的，不是装饰。** 正文在**取数侧**就按 `CONTENT_MAX_CHARS` 切好了
-#: （`platform_provider` / `agent_file_content_reader` / `agent_file_content_dispatch`
-#: 三处都读这个常量），所以 `file_content` 在加权预算下算出来的 30,333 是**给不到的** ——
-#: 只报那个数，「单条上限」这一行就是一句谎话（用户按它去理解「为什么还是只有一万字」，
-#: 永远找不到答案）。`context_tools.DEFAULT_TOOL_LIMITS` 上方那段注释解释过同一件事。
+#: **这个键是必须的，不是装饰。** 正文在**取数侧**就按这个额度切好了（切在行边界上，
+#: 并把「这是哪一段、整份多少字、下一页怎么要」写进抬头），所以计划里的 `file_content`
+#: 必须**等于**取数侧真正交付的那一页 —— 报一个取数侧给不出的数，界面那一行就是一句谎话
+#: （用户按它去理解「为什么还是只有一万字」，永远找不到答案）。
+#:
+#: ## 2026-09-24（工作包 D 的 P2）：它**不再**被 `CONTENT_MAX_CHARS` 夹住
+#:
+#: 原先这里取 `min(content, CONTENT_MAX_CHARS)` —— 因为取数侧硬夹在 11,000，用户把提示词
+#: 预算调到再高也没用，而计划里那个 30,333 是**给不出来的**。现在取数侧的页大小由计划
+#: 自己推导（`ContextTools` 构造时经 `apply_tool_limits` 交给 provider），超过一页的正文
+#: 用 `next_cursor` **继续要**（`utils.content_window.page_lines`）。于是这个键与
+#: `tool_limits["file_content"]` 是同一个数，而「隐藏截断」在结构上消失：
+#: 模型看得见「这不是全部」，也拿得到剩下的。
 PROVIDER_MAX_CHARS_KEY = "file_content_provider_max_chars"
 
 
@@ -38,15 +48,15 @@ def derive_tool_limits(
     判据是「给没给」，不是「剩余是不是 0」：剩余真的为 0 时按 0 算出来的额度由下面的
     下限兜住 —— 静默退回总预算会让「这一轮已经没有余地了」这件事消失。
 
-    ## `file_content` 的谎言与那个额外的键
+    ## `file_content` 的那一页：`file_content_provider_max_chars`
 
-    返回的 `file_content` 是**加权预算**允许的上限，而正文在取数侧硬夹在
-    `CONTENT_MAX_CHARS`：大于它的那一部分永远不生效。所以这里额外给出
-    `file_content_provider_max_chars`（见 `PROVIDER_MAX_CHARS_KEY`）—— 计划要能回答
-    「模型实际最长得看到多少字」，而不只是「我们允许了多少」。
+    返回的 `file_content` 就是**取数侧真正交付的一页**（它由 `ContextTools` 转交给
+    provider，见 `PROVIDER_MAX_CHARS_KEY` 的说明）：切在行边界上、抬头写明「这是第几段 /
+    整份多少字 / 下一页的 `lines` 怎么写」。所以这个额外的键与 `file_content` 同值 ——
+    它存在的理由是让界面能明确回答「模型实际最长得看到多少字」，而不是只报一个"允许"。
 
-    `file_diff` / `read_reference` 不欠这个账：它们的正文由平台自己拼装，
-    取数侧的 11,000 只是**旧的默认额度**，不是硬上限。
+    `file_diff` / `read_reference` 不走这条：它们的正文由平台自己拼，分段靠
+    `windowed_view` 的段号 + 点名（同一件事的另一种坐标）。
     """
     budget = max(
         0, int(remaining_chars if remaining_chars is not None else prompt_char_budget)
@@ -62,7 +72,7 @@ def derive_tool_limits(
         "file_content": content,
         "read_reference": content,
         "find_references": _clamp(share, 8_000, 20_000),
-        PROVIDER_MAX_CHARS_KEY: min(content, CONTENT_MAX_CHARS),
+        PROVIDER_MAX_CHARS_KEY: content,
     }
 
 
@@ -80,6 +90,7 @@ def build_budget_plan(
     window_source: str = "",
     reserved_output_chars: int = 0,
     family_pool: Mapping[str, object] | None = None,
+    plan: Mapping[str, object] | None = None,
 ) -> dict:
     """返回可直接落库/下发 UI 的预算事实，不做费用预测。
 
@@ -154,4 +165,9 @@ def build_budget_plan(
         else None,
         "tool_limits": {key: max(0, int(value)) for key, value in limits.items()},
         "reserved_output": {"chars": max(0, int(reserved_output_chars))},
+        # 计划（工作包 B）：模式 / 分组 / 每成员额度 / 单次 token 上限 / 两个预留 /
+        # 阈值与估算公式。**原样放进预算计划**，于是「这次是怎么分工的、为什么」在
+        # 落库的载荷与预估端点的返回里都能读到，不需要再去别处推一遍。
+        # 不给时是 `None`（老调用方逐字不变），不是一份编出来的空计划。
+        "plan": dict(plan or {}) or None,
     }

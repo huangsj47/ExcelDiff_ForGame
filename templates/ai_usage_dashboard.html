@@ -1456,6 +1456,10 @@ function aiuOrUnknown(text, placeholder) {
  * 临时值（`active.live`）**另起一句**，并且明写「不计入上面的统计」：它是进度快照里的
  * 下界（只含上游已上报的部分），把它和完成统计混在一句话里读，很容易被当成已经结账。
  *
+ * 「**当前任务未实时统计**」这七个字是**要求里点名的一句**（工作包 E）：这一页永远显示
+ * 已落库的历史值，在途那几次只是「还没统计进来」，不是「统计里少了它们」——
+ * 不写这一句，用户会以为这一屏少了钱。
+ *
  * 句子开头写「当前筛选范围内」不是啰嗦：「统计口径」卡片里那个 `in_flight_runs` 是
  * **全平台**的计数（它管的是「全量重置能不能点」），两者在同一屏上可能不是同一个数。
  * 不写清范围，读的人会以为其中一个是错的。
@@ -1464,7 +1468,8 @@ function aiuActiveNoteText(active, completed) {
     var count = active && active.count ? active.count : 0;
     if (!count) return null;
     var upto = completed ? completed.latest_run_id : null;
-    var text = '当前筛选范围内有 ' + count + ' 个新任务运行中，实时用量尚未计入；以下统计截至'
+    var text = '当前筛选范围内有 ' + count + ' 个新任务运行中（当前任务未实时统计，'
+        + '实时用量尚未计入）；以下统计截至'
         + (upto === null || upto === undefined ? '还没有已完成的运行' : '运行 #' + upto)
         + '，任务完成后自动更新。';
     var live = (active && active.live) || {};

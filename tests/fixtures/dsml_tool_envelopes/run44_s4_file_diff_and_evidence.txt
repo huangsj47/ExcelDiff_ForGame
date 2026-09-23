@@ -1,0 +1,10 @@
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="get_file_diff">{"type":"file_diff","commit":"2971caf7a737b75631d98a33d08315429ca6971d","path":"src/battle_logic.py"}</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="get_file_diff">{"type":"file_diff","commit":"aa3fd90be0852d79e97f5a217fb77615c612642c","path":"config/物品表.xlsx"}</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="get_file_diff">{"type":"file_diff","commit":"e54c73df2c61ae8a242b7146776be9e6bdc47c52","path":"config/技能表.xlsx"}</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="get_evidence">{"type":"evidence","name":"095950227e0a5051"}</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

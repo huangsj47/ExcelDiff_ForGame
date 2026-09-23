@@ -177,11 +177,21 @@ class _Progress:
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    """进度表是**进程内**的全局状态：用例之间必须清干净，否则前一个用例的快照会让
-    后一个用例的 `snapshot(...) is None` 断言失败。"""
+    """进度快照里**进程内**那一份是全局状态：用例之间必须清干净，否则前一个用例的快照会让
+    后一个用例的 `snapshot(...) is None` 断言失败。
+
+    工作包 E 之后进程内那一份不再是唯一的来路：库里另有逐轮事件账时，`snapshot()` 会
+    **从账本补一份**（`source == "ledger"`，见 `services/ai/round_events.py`）。所以本文件里
+    凡是要钉「读不到（`None`）」的地方**都用一个库里不存在的 run_id**：那些断言要验的是
+    内存这一层，而 run_id 在库里存在与否不由这一层决定。账本那一路由
+    `tests/test_ai_round_event_ledger.py` 钉。"""
     run_progress.reset_for_tests()
     yield
     run_progress.reset_for_tests()
+
+
+# 库里**必然不存在**的 run_id：让「读不到进度」这件事只由内存那一层决定。
+ABSENT_RUN_ID = 999001
 
 
 def test_a_published_progress_is_readable():
@@ -201,20 +211,33 @@ def test_an_unknown_run_has_no_progress_rather_than_zero():
 
 
 def test_clearing_removes_the_snapshot():
-    run_progress.publish(7, 3, _Progress())
-    run_progress.clear(7)
+    """`clear()` 清的是**进程内**那一份。
 
-    assert run_progress.snapshot(7) is None
+    「清掉之后什么都读不到」在有了逐轮事件账之后不再无条件成立：这条 run 在库里另有账时，
+    读进度会从**账本补一份**（需求里的「SSE 断开再连：从数据库补快照」）。所以这里用一个
+    库里不存在的 run_id —— 「读不到」就只由内存这一层决定。
+    """
+    run_progress.publish(ABSENT_RUN_ID, 3, _Progress())
+    assert run_progress.snapshot(ABSENT_RUN_ID) is not None, "发过一帧就该读得到"
+
+    run_progress.clear(ABSENT_RUN_ID)
+
+    assert run_progress.snapshot(ABSENT_RUN_ID) is None
     # 幂等：清一个不存在的键不报错
-    run_progress.clear(7)
+    run_progress.clear(ABSENT_RUN_ID)
 
 
 def test_a_stale_snapshot_is_not_reported_as_running(monkeypatch):
-    """进程里留下的残影不该被当成「正在跑」。"""
-    run_progress.publish(7, 3, _Progress())
+    """进程里留下的残影不该被当成「正在跑」。
+
+    run_id 同样取库里不存在的号：剩下的那一份来路（账本）**自带 run 的状态**
+    （`source == "ledger"` + `run_status`），界面据此说的不是「正在跑」
+    （见 `static/js/ai_think_log.js` 的 `ledger_*` 两种说法）。
+    """
+    run_progress.publish(ABSENT_RUN_ID, 3, _Progress())
     monkeypatch.setattr(run_progress, "MAX_AGE_SECONDS", -1)
 
-    assert run_progress.snapshot(7) is None
+    assert run_progress.snapshot(ABSENT_RUN_ID) is None
 
 
 def test_publishing_junk_does_not_break_the_analysis():
@@ -252,10 +275,14 @@ def test_live_tokens_stays_unknown_when_a_round_did_not_report():
 
 def test_the_registry_does_not_grow_without_bound(monkeypatch):
     monkeypatch.setattr(run_progress, "MAX_ENTRIES", 3)
-    for run_id in range(10):
+    # run_id 取一批库里必不存在的号：工作包 E 之后，run 在库里有逐轮事件账时
+    # `snapshot()` 会从账本补一份 —— 那一条来路不由 MAX_ENTRIES 管，混进来会让
+    # 「存活数 ≤ 3」这句话失去意义。要验的是**内存表**的清理。
+    ids = [ABSENT_RUN_ID + i for i in range(10)]
+    for run_id in ids:
         run_progress.publish(run_id, 1, _Progress())
 
-    alive = [run_id for run_id in range(10) if run_progress.snapshot(run_id) is not None]
+    alive = [run_id for run_id in ids if run_progress.snapshot(run_id) is not None]
     assert len(alive) <= 3, f"清理没有生效，留下 {alive}"
 
 
@@ -495,12 +522,24 @@ def test_the_progress_endpoint_folds_the_live_usage_into_the_verdict(client, mon
     assert body["budget"]["over"] is True, "含本次运行已经超了，界面必须能提前说"
     assert "含本次运行" in body["budget"]["reason"], body["budget"]["reason"]
 
-    # 反向自检：把快照清掉之后，同一份判定**不许**再显示超 —— 否则这条测的是
+    # 反向自检：把**进程内**那一份清掉之后，同一份判定**不许**再显示超 —— 否则这条测的是
     # 「预算超了」，而不是「本次运行把它顶超了」。
+    #
+    # 工作包 E 之后 `clear()` 只清进程内那一份：这条 run 在库里已经有逐轮事件账，于是读进度
+    # 会**从账本补一份**（`source == "ledger"`，需求里的「SSE 断开再连：从数据库补快照」）。
+    # 所以判据不能再是 `progress is None`，真正要钉的是**补回来的那一份不再把同一笔用量
+    # 折第二遍**：这条 run 的 token 已经写在 run 上（`_run_row` 造的 1.0M），预算那一档
+    # 已经把它算进 `used` 了 —— 再折一次就会凭空多出 1.3M。
     run_progress.clear(run_id)
     with flask_app.app_context():
         plain = client.get(f"/ai-analysis/runs/{run_id}/progress").get_json()
-    assert plain["progress"] is None
+    assert plain["progress"] is not None and plain["progress"]["source"] == "ledger", (
+        "清掉内存那一份之后读不到任何进度了 —— 账本这一条来路正是这次要补上的"
+    )
+    assert plain["progress"]["job_tokens"] is None, (
+        "已落库的账被当成「尚未落库的用量」又报了一遍 —— 同一笔会被算两次"
+    )
+    assert plain["budget"]["used"]["tokens"] == 1_000_000, plain["budget"]["used"]
     assert plain["budget"]["over"] is False, plain["budget"]
 
 

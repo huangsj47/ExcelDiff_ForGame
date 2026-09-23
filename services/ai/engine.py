@@ -37,7 +37,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, MutableMapping, Protocol, Sequence
 
-from services.ai import trace_evidence
+from services.ai import round_events, trace_evidence
 from services.ai.baseline import DEFAULT_BASELINE_CHARS
 from services.ai.budget import (
     DEFAULT_MAX_ITEMS,
@@ -59,8 +59,37 @@ from services.ai.context_tools import (
     ContextTools,
     describe_request,
 )
+from services.ai.evidence_prefetch import (
+    PrefetchResult,
+    forget_unfitted,
+    prefetch_evidence,
+)
+from services.ai.frozen_repo import provider_repo_paths
+from services.ai.round_message import (
+    MIN_ITEM_BUDGET,
+)
+from services.ai.round_message import (
+    fit_items as _fit_items,
+)
+from services.ai.round_message import (
+    prepare_round as _prepare_round,
+)
+from services.ai.round_observability import (
+    CORRECTION_CHANNEL_MISMATCH,
+    CORRECTION_TRUNCATED_OUTPUT,
+    CORRECTION_UNPARSABLE,
+    replay_chars as _replay_chars,
+    truncation_reason as _truncation_reason,
+    visible_response_chars as _visible_response_chars,
+    with_observability as _merge_observability,
+)
 from services.ai.llm_client import non_negative_int
-from services.ai.prompt import build_system_prompt, build_user_message, change_block
+from services.ai.prompt import (
+    build_system_prompt,
+    build_user_message,
+    change_block,
+    render_context_items,
+)
 from services.ai.prompt_cache import CACHE_BREAKPOINT_KEY, mark_cache_breakpoint
 from services.ai.protocol import (
     TRUNCATED_OUTPUT_HINT,
@@ -68,12 +97,15 @@ from services.ai.protocol import (
     Anomaly,
     DroppedItem,
     ProtocolError,
+    build_channel_mismatch_hint,
     build_correction_hint,
     build_markdown_reemit_hint,
     ground_payload,
     looks_like_markdown_report,
+    looks_like_tool_call_envelope,
     looks_like_truncated_json,
     parse_payload,
+    repair_dsml_tool_calls_payload,
     repair_split_string_payload,
     repair_unescaped_quotes_payload,
     salvage_report_markdown,
@@ -130,8 +162,7 @@ DEGRADATION_LABELS = {
     ),
 }
 
-# 给上下文条目留的最小额度。低于这个值就没什么可给的了，与其压到 0 不如如实记账。
-_MIN_ITEM_BUDGET = 4_000
+
 
 # 收尾提示词里保留多少变更清单（字符）。只要够模型认出「这次改的是哪一片」即可：
 # 收尾请求的前提就是「装不下」，所以它必须小到任何窗口都装得下。
@@ -151,6 +182,28 @@ def _live_round_entry(record: RoundRecord) -> dict | None:
         log_print(
             f"⚠️ AI 分析：整理本轮明细失败（{type(exc).__name__}：{exc}），"
             "本轮不进「思考过程」，分析继续。",
+            "AI",
+            force=True,
+        )
+        return None
+
+
+def _round_counts(record: RoundRecord) -> dict | None:
+    """这一轮的**计数**（要了几次 / 执行几条 / 几条取不到 / 几条被截断 / 报了几条候选）。
+
+    **必须从这一层出去**：进「思考过程」的明细是截断过的（`LIVE_LIST_MAX_ITEMS = 8`，
+    而且 `executed` 只留取不到的），拿它数数会把「索取 19 次、执行 3 次」数成「8 次、0 次」。
+    逐轮事件账本的计数列（`models/ai_analysis/round_event.py`）读的就是这一份。
+
+    与 `_live_round_entry` 同一条纪律：算不出来就是 `None`，绝不作废一次付费分析。
+    实现放在 `services/ai/round_events.py`（这个文件贴着行数闸门，只留薄钩子）。
+    """
+    try:
+        return round_events.round_counts(record)
+    except Exception as exc:  # noqa: BLE001 —— 见 docstring，显示层不许弄挂分析
+        log_print(
+            f"⚠️ AI 分析：整理本轮计数失败（{type(exc).__name__}：{exc}），"
+            "这一轮的计数按未上报处理，分析继续。",
             "AI",
             force=True,
         )
@@ -183,6 +236,11 @@ class EngineLimits:
     prompt_char_budget: int = DEFAULT_TOTAL_CHARS
     baseline_char_budget: int = DEFAULT_BASELINE_CHARS
     max_corrections: int = 2
+    # 「输出通道错位」（模型把取数请求写成工具调用信封）**单独一本账**，默认 1 次：
+    # 那 2 次 `max_corrections` 是给截断 / JSON 结构错误的，共用会让「撞过两次截断的
+    # 分片再遇一次信封」整片阵亡。**重问仍占一轮**（见循环体里那句注释）——换本账
+    # 不解除循环上界。判据与理由见 `protocol.repair_dsml_tool_calls_payload`。
+    max_channel_corrections: int = 1
     temperature: float = 0.0
     # **单次输出上限**（token）。`None` = 不传这个字段，用端点的默认值（**默认行为逐字节
     # 不变**，见 `llm_client._request_body`）。
@@ -266,6 +324,34 @@ class RoundRecord:
     # 而在 trace 上「这一轮被截断过」必须是一个能直接读到的结论 —— 让每个读者各写一遍
     # 那个并集判据，迟早会有人只判 `finish_reason`（于是漏掉端点上不报的那一半）。
     output_budget_hit: bool = False
+    # ---- 逐轮可观测性（P5）--------------------------------------------------
+    # 回答「这一轮的钱花在哪、为什么」。口径：**未上报存 `None`，不存 0**（0 是确定的
+    # 观测值，「上游没报」不是）。每条字段的判据与理由见 `round_observability`。
+    # 这一轮模型**可见正文**的字符数（剥掉 `think` 块之后）。
+    # `None` = 读不出来（没有响应文本）。
+    visible_response_chars: int | None = None
+    # 上游若提供推理 token 就记在这里。**`None` = 上游没提供**（当前
+    # `llm_client.ChatResult` 不解析 `completion_tokens_details`，所以现实中它一直是
+    # `None`）—— 这一格是**留给上游的**，不是「读到 0」。
+    reasoning_tokens: int | None = None
+    # 这一轮交给模型的**工具正文**字符数里，有多少是**跨成员重放**的
+    # （同一个证据在别的分片里已经取过、这一轮又把全文发了一遍）。
+    # 子代理模式下这是「多角色串行」的主要成本来源之一，而它原先只在按类型的统计里
+    # 能看出来、在逐轮账上完全没有。
+    tool_replay_chars: int = 0
+    # 这一轮**为什么被截断**（如 `tool_limit_file_content` / `item_shrink_level_1`）。
+    # 空串 = 这一轮没有交付截断。截断不可归因正是任务 E3 点名的毛病。
+    truncation_reason: str = ""
+    # 这一轮**为什么被纠正**（如 `unparsable` / `truncated_output` / `channel_mismatch`）。
+    # 空串 = 没纠正。纠正的**成本**就是它占掉的那一轮（`index` 与 `max_rounds` 的对比）。
+    correction_reason: str = ""
+    # 这一轮**报出了几条候选结论**（模型这一轮交回的 `anomalies` 条数）。
+    #
+    # 只有交结论的那一轮（`status == "final"`）才有值，其余轮次是 `None` —— 而 `None`
+    # 与 `0` 是两件事：前者是「这一轮不是交结论的那一轮」，后者是「交了一份结论，
+    # 一条候选都没有」。逐轮事件账本按这个口径落列（`round_events.event_fields`），
+    # 界面按「每个成员报了几条候选」读它。
+    candidates: int | None = None
 
 
 @dataclass(frozen=True)
@@ -311,6 +397,14 @@ class RoundProgress:
     # 是同一个渲染器 —— 两套键名就是两种真相。
     # 默认 `None`：不传它的调用方（老代码、测试替身）行为与这一层之前完全一样。
     round_entry: dict | None = None
+    # 这一轮的**计数**（要了几次 / 执行几条 / 几条取不到 / 几条被截断 / 几条被拒 /
+    # 报了几条候选），由 `round_events.round_counts` 从**未截断**的 `RoundRecord` 上算。
+    #
+    # 与 `round_entry` 分开是必要的：那一份是**给人看的明细**，条数有上限（8 条）而且
+    # 「取不到」是筛过一遍的，拿它数数会把 19 次索取数成 8 次。逐轮事件账本
+    # （`models/ai_analysis/round_event.py`）的计数列读的就是这一份。
+    # 默认 `None`：老调用方、测试替身不传它，行为与这一层之前完全一样。
+    round_counts: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -597,6 +691,26 @@ def run_analysis(
         limits=limits.tool_limits,
         body_cache=body_cache,
     )
+    # 冻结仓库的只读范围（工作包 D 的 P1）。**一次解析、整次分析复用**：
+    # provider 自己知道仓库与 tip（它一直在按提交行取数），引擎不该再问一遍 ——
+    # 两处各推一次必然漂移，而漂移的表现是「协议层放行的路径取数层读不了」。
+    repo_paths = provider_repo_paths(provider)
+    # P3：**把最有用的证据提前到第 1 轮**（有界、可追、可复现 —— 三条纪律与上界都在
+    # `evidence_prefetch` 的模块 docstring 里）。位置就在这里：`tools` 已建好，而循环
+    # 还没开始 —— 第 1 轮的消息正是由下面 `pending_items` 拼出来的，晚一步就白做。
+    # `repo_paths` 一并传下去：预取里的「邻近窗口」会落在**未改动**的文件上（金标形态：
+    # 改了定义、调用方没改），它在协议层要靠冻结 tip 的跟踪集合放行。
+    # **只在单代理那条路上跑预取**。子代理模式的第 1 轮是**任务书**（`task_message`），
+    # 那时本函数不拼 `pending_items`（`_prepare_round` 直接返回任务书）—— 预取出来的
+    # 东西只能带到第 2 轮，而**模型的第 1 轮索取已经执行过了**：那些请求会命中预取写下的
+    # 缓存，拿回一句「见上文那一节」，而那一节根本还没出现。这不是概率问题，是稳定复现的
+    # 假话，所以宁可不预取（分片的「证据前置」由 `subagent._render_candidates` 那份候选
+    # 地址负责，那是另一条路）。
+    prefetch = (
+        PrefetchResult()
+        if task_message.strip()
+        else prefetch_evidence(tools, scope=scope, limits=limits, repo_paths=repo_paths)
+    )
     if seed_messages:
         # 共享前缀整段照用（**拷贝**，别让下面的断点挪动改到调用方那份 —— 它正要被
         # 同一批的其它成员再用一次）。断点①②已经在里面了，system 也**不再重建**：
@@ -621,8 +735,8 @@ def run_analysis(
     # 因额度用尽而没执行的请求**分别是哪几个**（跨轮累计）。只有计数说明不了「缺的是
     # 哪几块」，而用户看到「额度用尽，还有文件没看」时第二个问题一定是「哪些」。
     refused_items: list[str] = []
-    pending_items: tuple[ContextItem, ...] = ()
-    budget_notes: list[str] = []
+    pending_items: tuple[ContextItem, ...] = prefetch.items
+    budget_notes: list[str] = list(prefetch.notes)
     correction_hint = ""
     degradation = DEGRADE_NONE
     payload: AnalysisPayload | None = None
@@ -740,7 +854,10 @@ def run_analysis(
                     # 逐轮明细（思考过程标签页）。放在**这个唯一出口**里算，5 条轮次路径
                     # 自动全覆盖；算它不许影响分析 —— 所以整段包在 try 里，失败了就只是
                     # 这一次没有过程可看（下面那条 except 已经在兜回调本身）。
-                    round_entry=_live_round_entry(record),
+                    round_entry=_with_observability(record),
+                    # 逐轮的**计数**（同一处算、同一条纪律）。它与上面那一份明细是两件事：
+                    # 明细有上限、且只留「取不到」的条目，数不出真数（见 `_round_counts`）。
+                    round_counts=_round_counts(record),
                 )
             )
         except Exception as exc:  # noqa: BLE001 —— 回调失败不作废分析，见 docstring
@@ -822,6 +939,10 @@ def run_analysis(
             dimension_ids=dimension_ids,
         )
         items, user_message = _prepare_round(brief, messages)
+        if prefetch.items:
+            # 预取写进了缓存，所以「取到了」必须真的等于「进了提示词」—— 被预算裁掉的
+            # 要用 `forget_unfitted` 摘掉，否则后面的「见上文那一节」是一句假话。
+            forget_unfitted(prefetch.items, items, tools)
 
         # **整份提示词**（系统提示词 + 变更清单 + 历史 + 本轮上下文）超出预算时压历史。
         #
@@ -832,7 +953,7 @@ def run_analysis(
         # `budget.compact_history`），而且可以重新索取。
         if estimate_chars(messages) + len(user_message) > limits.prompt_char_budget:
             # 目标里**先扣掉本轮消息自己的位置**：只按总预算压历史的话，压到刚好等于预算、
-            # 再把本轮消息加上去就又超了。而且条目的额度有下限（`_MIN_ITEM_BUDGET`）——
+            # 再把本轮消息加上去就又超了。而且条目的额度有下限（`MIN_ITEM_BUDGET`）——
             # 压到负数它也会给 4,000 字，那 4,000 字必须有地方放。
             compacted = compact_history(
                 messages,
@@ -925,7 +1046,7 @@ def run_analysis(
             transport_error: Exception | None = None
             # 「这一压到底有没有用」**发之前**就能算出来（`_prepare_round` 是确定性的，
             # 同一份输入必然组装出同一份消息）。这一步不能省：条目额度有个下限
-            # （`_MIN_ITEM_BUDGET` = 4,000），条目**已经贴着下限**时把额度再砍到 1/4 也还是
+            # （`MIN_ITEM_BUDGET` = 4,000），条目**已经贴着下限**时把额度再砍到 1/4 也还是
             # 4,000 字，重发出去的那一条与刚被拒的那条一样的体积 —— 实测里它甚至因为多了
             # 一行「额度被压到 4,000 字」的提示而**更长**。那不是补救，是白烧一次调用。
             # 压不出东西就直接进下一步（丢历史），三步都压不动才走收尾。
@@ -935,7 +1056,7 @@ def run_analysis(
                     shrunk_limits = replace(
                         limits,
                         prompt_char_budget=max(
-                            _MIN_ITEM_BUDGET, limits.prompt_char_budget // factor
+                            MIN_ITEM_BUDGET, limits.prompt_char_budget // factor
                         ),
                     )
                     base = list(messages) if keep_history else list(messages[:1])
@@ -985,7 +1106,7 @@ def run_analysis(
                     # `limits.prompt_char_budget` 干活，调小它，下一轮自己就会压。
                     limits = replace(
                         limits,
-                        prompt_char_budget=max(_MIN_ITEM_BUDGET, int(original_chars * 3 / 4)),
+                        prompt_char_budget=max(MIN_ITEM_BUDGET, int(original_chars * 3 / 4)),
                     )
                     round_notes.append(
                         f"上游以「上下文超长」拒绝了这次请求（累计已用 {len(rounds)} 轮、"
@@ -1026,7 +1147,7 @@ def run_analysis(
                 # 再要一轮上下文，那一轮不该再按原来那个已经被拒过的预算组装）。
                 limits = replace(
                     limits,
-                    prompt_char_budget=max(_MIN_ITEM_BUDGET, int(original_chars * 3 / 4)),
+                    prompt_char_budget=max(MIN_ITEM_BUDGET, int(original_chars * 3 / 4)),
                 )
                 messages[:] = messages[:1]
                 items = ()
@@ -1104,6 +1225,11 @@ def run_analysis(
             # 落成 RoundRecord 上的一个 bool 而不是让读的人自己去比 `finish_reason`：
             # 判据只有一个来源，才不会有人只判其中一半。
             "output_budget_hit": _output_limit_hit(usage) or looks_like_truncated_json(text),
+            # P5：这一轮**可见**正文的长度（剥掉 think 块），以及上游若给的推理 token。
+            # 两个都在这里算/读一次，于是 5 个 RoundRecord 构造点自动带上（splat 的理由
+            # 同上）—— 逐处复制一定会漏，而漏掉的那一轮在账上看不出「输出都花在推理上」。
+            "visible_response_chars": _visible_response_chars(text),
+            "reasoning_tokens": non_negative_int(getattr(result, "reasoning_tokens", None)),
         }
         messages.append(entry)
         messages.append({"role": "assistant", "content": text})
@@ -1134,6 +1260,7 @@ def run_analysis(
             _emit(RoundRecord(
                 round_index, "unparsable",
                 correction_hint=correction_hint,
+                correction_reason=CORRECTION_TRUNCATED_OUTPUT,
                 note=_combine_notes(
                     round_notes,
                     "上游报告输出撞上单次输出上限（finish_reason=length），"
@@ -1172,6 +1299,7 @@ def run_analysis(
                 _emit(RoundRecord(
                     round_index, "unparsable",
                     correction_hint=correction_hint,
+                    correction_reason=CORRECTION_TRUNCATED_OUTPUT,
                     note=_combine_notes(round_notes, "输出被截断，已要求压短后重发"),
                     **round_extra,
                 ))
@@ -1199,16 +1327,30 @@ def run_analysis(
             #  * 裸引号：正文原样引用了 `require("…")` 这类带双引号的代码、没转义
             #    （run 41 的汇总第 4 轮，trace 存了完整原文确诊）。
             # 都修不好就按原分支处理 —— 这条修复不堵任何原有的路，失败也留痕。
+            #
+            # 第三项（2026-09-23）：**输出通道错位**（模型把取数请求写成工具调用信封，
+            # trace 里 run 38/44/45 共 5 轮实测）。它同样是「有请求可救、救回来就不用
+            # 重发」，所以挂在同一个循环里；抽不到就返回 None，落到下面通道错位那一支。
+            # 三条 note 各自一份：note 是给读 trace 的人看的，「把 report_markdown 写坏」
+            # 对信封那种病是一句假话（正文没坏）。
             repaired_parsed = None
             repair_note = ""
-            for repair_name, repair_text in (
+            for repair_name, repair_text, repaired_note in (
                 (
                     "续写块拼接",
                     repair_split_string_payload(text),
+                    "模型把 report_markdown 写坏（续写块拼接），平台已自动修复，未重发",
                 ),
                 (
                     "正文裸引号转义",
                     repair_unescaped_quotes_payload(text),
+                    "模型把 report_markdown 写坏（正文裸引号转义），平台已自动修复，未重发",
+                ),
+                (
+                    "工具调用信封抽取",
+                    repair_dsml_tool_calls_payload(text),
+                    "模型把取数请求写成了工具调用信封（工具调用信封抽取），"
+                    "已按平台取数类型抽出请求并执行，未重发",
                 ),
             ):
                 if repair_text is None:
@@ -1225,7 +1367,7 @@ def run_analysis(
                     )
                     repaired_parsed = None
                     continue
-                repair_note = f"模型把 report_markdown 写坏（{repair_name}），平台已自动修复，未重发"
+                repair_note = repaired_note
                 break
             if repaired_parsed is not None:
                 parsed = repaired_parsed
@@ -1264,6 +1406,7 @@ def run_analysis(
                     _emit(RoundRecord(
                         round_index, "unparsable",
                         correction_hint=correction_hint,
+                        correction_reason=CORRECTION_UNPARSABLE,
                         note=_combine_notes(round_notes, "按 markdown 报告降级，已要求原样转成 JSON"),
                         **round_extra,
                     ))
@@ -1275,6 +1418,39 @@ def run_analysis(
                     round_index, "unparsable",
                     note=_combine_notes(round_notes, "按 markdown 报告降级"), **round_extra,
                 ))
+                break
+            elif looks_like_tool_call_envelope(text):
+                # **输出通道错位**：模型把取数请求写成工具调用信封，而不是协议 JSON。
+                # 能就地抽出来的走不到这里（上面第三项修复已接管），到这里的是抽不出请求
+                # 的信封（trace 实测：整段只有一个思考块）。排在 markdown 判据**之后**
+                # （不动既有两个分支的先后）、排在 `max_corrections` 那两支**之前** ——
+                # 这一种病不从那本账里扣（理由见 `EngineLimits.max_channel_corrections`）。
+                if limits.max_channel_corrections > 0:
+                    limits = replace(
+                        limits, max_channel_corrections=limits.max_channel_corrections - 1
+                    )
+                    correction_hint = build_channel_mismatch_hint()
+                    _emit(RoundRecord(
+                        round_index, "unparsable",
+                        # 留痕分三档：修复（上面那一支的 note）/ 纠正（这一句）/
+                        # 失败（下面那一支的 note）。
+                        correction_hint=correction_hint,
+                        correction_reason=CORRECTION_CHANNEL_MISMATCH,
+                        note=_combine_notes(round_notes, "输出通道错位（工具调用信封），已重问一次"),
+                        **round_extra,
+                    ))
+                    pending_items = ()
+                    budget_notes = []
+                    round_memos.append(TurnMemo(index=round_index, status="unparsable"))
+                    continue
+                _emit(RoundRecord(
+                    round_index, "unparsable",
+                    note=_combine_notes(
+                        round_notes, "输出通道错位（工具调用信封），独立纠正额度已用完"
+                    ),
+                    **round_extra,
+                ))
+                degradation = DEGRADE_PROTOCOL
                 break
             elif limits.max_corrections <= 0:
                 _emit(RoundRecord(
@@ -1292,6 +1468,7 @@ def run_analysis(
                     # 那一轮为什么被重问：`note` 里是协议错误本身（给人看），
                     # `correction_hint` 是随后发给模型的那段纠正提示（原样记下来）。
                     correction_hint=correction_hint,
+                    correction_reason=CORRECTION_UNPARSABLE,
                     note=_combine_notes(round_notes, str(exc)[:200]), **round_extra,
                 ))
                 pending_items = ()
@@ -1313,18 +1490,33 @@ def run_analysis(
                 degradation = DEGRADE_NONE
             _emit(RoundRecord(
                 round_index, "final",
-                item_count=len(items), note=_combine_notes(round_notes), **round_extra,
+                item_count=len(items), note=_combine_notes(round_notes),
+                # 这一轮报了几条候选（给逐轮事件账本与「每个成员报了几条」那一栏）。
+                candidates=len(parsed.anomalies),
+                **round_extra,
             ))
             round_memos.append(TurnMemo(index=round_index, status="final", items=tuple(items)))
             break
 
         # `sanitize_requests` 同时返回「通过白名单的」与「被丢掉的及原因」——两样都要：
         # 前者去执行，后者进 trace（否则「为什么这次少看了一个文件」无从追溯）。
+        #
+        # `repo_paths` 是**本次冻结 tip 上 Git 跟踪文件的路径集合**（P1）：有它时
+        # `file_content` 的判据从「本批次改动过的文件」放宽到「这一版里存在的文件」，
+        # 于是「改公共接口、读调用方」能在同一轮完成；没有它时判据与从前逐字相同。
+        # 集合从 `provider_repo_paths` 来：**不猜**，拿不到就给 `None`。
         dropped_before = len(dropped)
-        requests, request_dropped = sanitize_requests(parsed.requests, scope)
+        requests, request_dropped = sanitize_requests(
+            parsed.requests, scope, repo_paths=repo_paths
+        )
         dropped.extend(parsed.dropped)
         dropped.extend(request_dropped)
+        # P5：这一轮的工具重放字符 = 执行前后「跨成员重放」累计值的差。
+        # 用**差**而不是累计值：累计值在第 3 轮会把第 1 轮的重放再算一遍，而
+        # 「这一轮为什么贵」问的正是本轮那一段。记账本身在 `context_tools`（唯一口径）。
+        replay_before = _replay_chars(tools)
         batch = tools.execute(requests)
+        replay_chars = max(0, _replay_chars(tools) - replay_before)
         dropped.extend(batch.dropped)
         refused_items.extend(batch.refused_items)
         pending_items = batch.items
@@ -1362,6 +1554,10 @@ def run_analysis(
                 dropped=tuple(dropped[dropped_before:]),
                 budget_notes=tuple(budget_notes),
                 note=_combine_notes(round_notes),
+                # P5：这一轮交给模型的工具正文里有多少是跨成员重放的（子代理模式下
+                # 「多角色串行」的主要成本之一），以及**这一轮的交付为什么被截断**。
+                tool_replay_chars=replay_chars,
+                truncation_reason=_truncation_reason(batch),
                 **round_extra,
             )
         )
@@ -1505,45 +1701,6 @@ class _RoundBrief:
     dimension_ids: tuple[str, ...] = DIMENSION_IDS
 
 
-def _prepare_round(
-    brief: _RoundBrief, messages: Sequence[Mapping[str, Any]]
-) -> tuple[tuple[ContextItem, ...], str]:
-    """组装本轮要发的 user 消息，返回 `(真正进得去的上下文, 消息文本)`。
-
-    **预算与消息必须用同一份变更清单文本**（`prompt.change_block`）：按清单全文算预算、
-    消息里只放指针，会让平台白白少用几十万字符的额度；反过来的组合则是超预算。
-
-    子代理模式的第 1 轮走上面那条 `task_message` 分支：变更清单已经在**共享消息**里
-    （`seed_messages`）且已经按 `estimate_chars(messages)` 计入预算，这里再拼一遍会把它
-    算两次 —— 于是平台会白白少给自己的成员几万字符的上下文额度。
-    """
-    if brief.round_index <= 1 and brief.task_message.strip():
-        # 第 1 轮没有待发条目（`pending_items` 要等第一次索取之后才有），所以不必过 `_fit_items`。
-        return (), brief.task_message
-    block = change_block(brief.change_summary, round_index=brief.round_index)
-    items, item_notes = _fit_items(
-        brief.pending_items,
-        messages=messages,
-        change_summary=block,
-        limits=brief.limits,
-    )
-    message = build_user_message(
-        change_summary=brief.change_summary,
-        round_index=brief.round_index,
-        max_rounds=brief.max_rounds,
-        items=items,
-        baseline_digest=brief.baseline_digest,
-        budget_notes=[*brief.budget_notes, *item_notes],
-        requests_remaining=brief.requests_remaining,
-        requests_total=brief.requests_total,
-        correction_hint=brief.correction_hint,
-        budget_exhausted=brief.budget_exhausted,
-        history_recap=brief.recap,
-        dimension_ids=brief.dimension_ids,
-    )
-    return items, message
-
-
 def _mark_current(
     entry: dict[str, Any], previous: dict[str, Any] | None
 ) -> dict[str, Any]:
@@ -1558,6 +1715,15 @@ def _mark_current(
         previous.pop(CACHE_BREAKPOINT_KEY, None)
     mark_cache_breakpoint(entry)
     return entry
+
+
+def _with_observability(record: RoundRecord) -> dict | None:
+    """把 P5 的逐轮观测字段**并进**这一轮的明细（实现与理由见 `round_observability`）。
+
+    薄钩子留在这里只为一件事：`_live_round_entry` 的兜底在这一层（明细算不出来就返回
+    None，**不编一份只有 P5 字段的半份明细** —— 那会让读的人以为其余明细本来就是空的）。
+    """
+    return _merge_observability(record, _live_round_entry(record))
 
 
 def _usage_of(result: Any) -> dict[str, Any]:
@@ -1662,34 +1828,6 @@ def _salvage_user_message(change_summary: str, seen_items: Sequence[ContextItem]
         ]
     )
     return "\n".join(blocks)
-
-
-def _fit_items(
-    items: Sequence[ContextItem],
-    *,
-    messages: Sequence[Mapping[str, str]],
-    change_summary: str,
-    limits: EngineLimits,
-) -> tuple[tuple[ContextItem, ...], list[str]]:
-    """把上下文条目压进「除条目之外还剩多少」的额度里。
-
-    **不能拿总预算当条目额度**：系统提示词、变更摘要、基线摘要、前几轮的问答都要从
-    同一份预算里出。按总预算给条目，必然超；超了以后要么被服务端拒绝，要么被截断，
-    而模型分不出「文件就这么大」和「预算不够」——正是 `budget.py` 要解决的那个问题。
-    """
-    notes: list[str] = []
-    overhead = estimate_chars(messages) + len(change_summary) + limits.baseline_char_budget
-    residual = limits.prompt_char_budget - overhead
-    if residual < _MIN_ITEM_BUDGET:
-        notes.append(
-            f"提示词已用掉 {overhead:,} 字（上限 {limits.prompt_char_budget:,}），"
-            f"留给上下文的额度被压到 {_MIN_ITEM_BUDGET:,} 字，本轮内容会大幅压缩。"
-        )
-        residual = _MIN_ITEM_BUDGET
-
-    result = enforce_budget(items, max_items=limits.max_items, total_chars=residual)
-    notes.extend(result.notes)
-    return result.items, notes
 
 
 def _rejected_note(rejected: Any) -> str:

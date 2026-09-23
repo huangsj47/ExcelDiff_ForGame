@@ -31,9 +31,15 @@ S3 收尾约 493,531 → 汇总第一轮 34,960）。
    权威口径是 `services/ai/usage.py`。这里只回答「现在跑到哪了、已经花了多少」，
    而且**允许查不到**（进程重启、多进程部署、跑在别的 worker 里）—— 查不到时返回
    `None`，界面显示「进度不可用」，**不显示 0**。
+   **逐轮的账本已经从这一层搬走了**（工作包 E）：每一轮结束会往
+   `ai_analysis_round_event` 写一条独立、立刻提交的事件行（见
+   `services/ai/round_events.py`）。`ai_analysis_job.progress_json` 里那份快照**只做 UI
+   快照** —— 它是整条覆盖写的、只带最近 8 轮，拿它当「这次跑了多少」的账必然丢。
+   内存快照读不到时，`snapshot()` 会**从那份事件账本补一份**（重启、换进程、SSE 重连）。
 2. **跑完就清。** 快照的存在时间不该超过一次分析：`clear()` 在 `_execute_analysis`
    的出口（含异常路径）调用；另外每条快照带 `updated_at`，超过 `MAX_AGE_SECONDS`
    没有更新就视为过期（进程里留下的残影不该被当成「正在跑」）。
+   **事件行不清**：它就是要活过这一次进程的（重启后按它恢复）。
 3. **不能因为进度而出错。** 写快照失败、读快照失败一律吞掉：它是给界面看的一眼，
    而它服务的是一条要花钱的分析路径 —— 为了显示进度把分析弄挂，是本末倒置。
 """
@@ -41,9 +47,10 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from services.ai import round_events
 from utils.logger import log_print
 
 # 超过这么久没有更新就当作过期（分析已经不在跑了，或者上一轮卡住了）。
@@ -62,6 +69,10 @@ MAX_ENTRIES = 200
 # 3 秒（`static/js/ai_stream_status.js` 的 POLL_INTERVAL_MS）重发一次，30 轮全带上就是
 # 每帧上百 KB，而界面本来就滚不到那么上面去。超出时如实标 `rounds_truncated`。
 MAX_LIVE_ROUNDS = 8
+
+# 一个 run 的内存事件账本最多留几行。家族最多几十轮，这个数只是防呆；超出时从最早的
+# 丢起，逐成员合计因此变成**下界**（不是算错）—— 而重启后从库里补的那一份是全量的。
+MAX_LEDGER_EVENTS = 400
 
 
 @dataclass(frozen=True)
@@ -108,6 +119,24 @@ class ProgressSnapshot:
     # 上面那个数**不含正在跑的那次调用**（引擎是跑完一轮才报的）。`status == "final"`
     # 那一帧之后这个成员不再发请求，所以它是 `False` —— 这是「比真实花费小」的唯一说明。
     job_tokens_pending_call: bool = False
+    # **逐成员**的账（分片 / 汇总 / 复核各一份，形状见 `round_events.member_totals`）。
+    # 需求要的是「每个成员分别显示输入/输出/缓存、工具请求/执行/失败/截断、耗时、候选数」，
+    # 而快照原先只有一个跨成员的合计数 —— 那份账在界面上只能回答「一共花了多少」。
+    #
+    # 默认空元组：不传它的调用方（老代码、测试替身、绕开 publish 手搓的帧）行为与这一层
+    # 之前**完全一样**（界面在没有它时不画那一块）。
+    members: tuple[Any, ...] = ()
+    # 这份快照是从哪来的：
+    #   * `""`      —— 进程内的实时快照（正在跑，本进程看着它）；
+    #   * `"ledger"` —— **从逐轮事件账本补的**（`round_events.restored_snapshot`）。
+    # 两者是同一种形状、含义不同：后者说明本进程没有它的实时快照（跑在别的 worker 里、
+    # 或者是被中断的那一次）。界面据此换一句说明 —— 混为一谈就会把「读不到实时进度」
+    # 说成「正在跑」。
+    source: str = ""
+    # 运行本身的状态与「有没有结束」（只有账本那一份带得回来：实时那一份不需要它，
+    # 界面此时正连着运行）。空串 = 不知道。
+    run_status: str = ""
+    run_finished: bool = False
 
     def __post_init__(self) -> None:
         """**直接构造**的快照（截图脚本、测试替身）没有账本，job 那一份就等于局部量。
@@ -167,6 +196,11 @@ class ProgressSnapshot:
             "job_tokens": self.job_tokens,
             "job_tokens_partial": self.job_tokens_partial,
             "job_tokens_pending_call": self.job_tokens_pending_call,
+            # 逐成员的账（见字段说明）与「这一份是实时快照还是账本补的」。
+            "members": [dict(item) for item in self.members],
+            "source": self.source,
+            "run_status": self.run_status,
+            "run_finished": self.run_finished,
             "age_seconds": max(0, int(time.monotonic() - self.updated_at)),
             # 逐轮过程（思考过程标签页）。`rounds_seen` 是**一共跑过几轮**：截断时界面要说
             # 「只列出最近 N 轮」，没有这个数就只能沉默地少给几轮。
@@ -249,10 +283,30 @@ class _JobLedger:
     missing_seen: bool = False
     # 当前成员已报过的局部量（各帧最大值）。
     member_peak: Optional[int] = None
+    # 已经报过的**逐轮事件行**（形状 = `round_events.event_fields` 的产物，也就是写进
+    # `ai_analysis_round_event` 的那一份）。
+    #
+    # 它存在的理由只有一条：**逐成员的账要有两个来源、一个算法**。正在跑的时候事件还没
+    # 全在库里（每轮写一条、但不保证读得到），而重启之后库是唯一来源。两处各写一遍求和，
+    # 迟早会算出两个数 —— 所以实时这一份也走 `round_events.member_totals`，与从库里读的
+    # 那一份是同一个归约函数。上限只是防呆（一个家族 100 轮以内），超了从最早的丢起
+    # （丢掉的后果是逐成员合计变成下界，不是算错）。
+    events: list = field(default_factory=list)
     # 最后一帧的时间（`time.monotonic()`）。**过期只按它判，不按快照在不在**：
     # 快照过期或被挤掉只说明界面看不到那一帧，不代表这条运行结束了 —— 跟着快照一起
     # 丢掉账，下一次报进来的数就会从当前成员重新数，也就是又回退一次。
     last_seen: float = 0.0
+
+    def remember(self, row: dict) -> None:
+        """记一条逐轮事件行。**同一 (成员, 轮次) 原位替换**（重报不许记两遍）。"""
+        key = (str(row.get("member", "")), int(row.get("round", 0) or 0))
+        for position, existing in enumerate(self.events):
+            if (str(existing.get("member", "")), int(existing.get("round", 0) or 0)) == key:
+                self.events[position] = row
+                return
+        self.events.append(row)
+        if len(self.events) > MAX_LEDGER_EVENTS:
+            del self.events[: len(self.events) - MAX_LEDGER_EVENTS]
 
     def advance(
         self,
@@ -430,10 +484,39 @@ def _merge_rounds(
 
 
 def publish(run_id: int, project_id: int, progress: Any) -> None:
-    """把一轮的进度写进快照。**任何异常都吞掉**（见模块 docstring 第 3 条）。"""
+    """把一轮的进度写进快照，并把这一轮**落进逐轮事件账本**。**任何异常都吞掉**。
+
+    ## 两条出路，一条纪律
+
+    * **内存快照**（界面每 3 秒读的那一份）：跑动过程中的一眼，跑完就清；
+    * **事件账本**（数据库，见 `services/ai/round_events.py`）：每一轮一条、立刻提交，
+      重启之后还在 —— 需求里「不丢账」「不重复计费」「每个成员分别显示」都建在它上面。
+
+    两条出路**读的是同一份行**（`round_events.event_fields(progress)`）：这一行既进内存
+    账本（逐成员的账要在没落库时也算得出来），也写进库。算两遍的话，两处迟早对不上。
+
+    **进展快照与落库顺序是有意的**：先把界面那一份写好（它坏了只是一眼看不成），再写库
+    （它自己吞异常、自己管事务）。这条纪律与这个模块的三条纪律是同一条：为显示服务的
+    东西坏了，代价不能是分析白跑。
+
+    事件行那一段**单独包一层 try**：它算不出来时只是「这一轮不记事件」，**不许把这一帧
+    快照也带走**（两者是两份东西，一份坏不该让另一份也没有）。
+    """
     try:
         agent = str(getattr(progress, "agent", "") or "")
         run_key = int(run_id)
+        # 这一轮的**事件行**（纯函数，不碰数据库）。`None` = 这一帧不是「一轮跑完」
+        # （引擎的 `on_start` 帧，index=0）—— 它不记账。
+        try:
+            event_row = round_events.event_fields(progress)
+        except Exception as exc:  # noqa: BLE001 —— 见 docstring：别带走这一帧快照
+            log_print(
+                f"⚠️ 整理 AI 逐轮事件失败（只影响这一次的事件账）: run={run_id} "
+                f"{type(exc).__name__}：{exc}",
+                "AI",
+                force=True,
+            )
+            event_row = None
         with _lock:
             previous = _snapshots.get(run_key)
             rounds, rounds_seen, rounds_truncated = _merge_rounds(
@@ -457,6 +540,11 @@ def publish(run_id: int, project_id: int, progress: Any) -> None:
                 local=_local_tokens(progress),
                 status=str(getattr(progress, "status", "") or ""),
             )
+            if event_row is not None:
+                ledger.remember(event_row)
+            # 逐成员的账：与「重启后从库里补的那一份」共用同一个归约函数
+            # （`round_events.member_totals`），所以两条路上的数不会分叉。
+            members = tuple(round_events.member_totals(run_key, rows=ledger.events))
             ledger.last_seen = time.monotonic()
             job_tokens = ledger.job_tokens
             job_partial = ledger.partial
@@ -488,6 +576,8 @@ def publish(run_id: int, project_id: int, progress: Any) -> None:
             job_tokens=job_tokens,
             job_tokens_partial=job_partial,
             job_tokens_pending_call=job_pending,
+            # 逐成员的账（分片 / 汇总 / 复核），见字段说明。
+            members=members,
             updated_at=time.monotonic(),
         )
         now = time.monotonic()
@@ -496,22 +586,51 @@ def publish(run_id: int, project_id: int, progress: Any) -> None:
             _prune_locked(now)
     except Exception as exc:  # noqa: BLE001
         log_print(f"⚠️ 写分析进度快照失败（不影响分析）: run={run_id} {exc}", "AI", force=True)
+        return
+    # **落库在最后一步**（见 docstring）：内存那一份已经写好了，这一笔才是重启之后还在的账。
+    # `record` 自己吞异常、自己提交（它不许持着写事务跨过那次模型调用）。
+    if event_row is not None:
+        round_events.record(run_key, project_id, progress, fields=event_row)
 
 
 def snapshot(run_id: int) -> Optional[ProgressSnapshot]:
-    """读一眼进度。读不到（没在跑 / 已过期 / 别的进程在跑）返回 `None`，**不是 0**。"""
+    """读一眼进度。读不到返回 `None`，**不是 0**。
+
+    ## 两条来路
+
+    1. **进程内的实时快照**（正在跑、本进程看着它）—— 原样返回，与以前一字不差；
+    2. 内存里没有（页面刚刷新、跑在别的 worker 里、或者 **worker 已经被杀**）→
+       **从逐轮事件账本补一份**（`round_events.restored_snapshot`）。这就是需求里
+       「SSE 断开再连：从数据库补快照」——不是只发新的增量，也不是让这一页永远读不到。
+
+    第 2 条**只服务「还没有落库结论」的运行**（判据在那个函数里）：跑完的运行该读它落库
+    的结论与 trace，再从事件拼一份进度出来只会让抽屉在两种状态之间来回跳。它同样只在
+    **读不到实时快照时**发生 —— 正在跑的分析一次多余的库查询都不会有。
+    """
     try:
         now = time.monotonic()
         with _lock:
             _prune_locked(now)
             item = _snapshots.get(int(run_id))
-        if item is None:
-            return None
-        if now - item.updated_at > MAX_AGE_SECONDS:
-            return None
-        return item
+        if item is not None and now - item.updated_at <= MAX_AGE_SECONDS:
+            return item
+        return _restore_from_ledger(int(run_id))
     except Exception as exc:  # noqa: BLE001
         log_print(f"⚠️ 读分析进度快照失败: run={run_id} {exc}", "AI", force=True)
+        return None
+
+
+def _restore_from_ledger(run_id: int) -> Optional[ProgressSnapshot]:
+    """内存快照不在时，从逐轮事件账本补一份。**任何异常都吞掉**（读进度不许出错）。
+
+    「发现这条运行已经死了」这件事也在这里发生（见 `round_events._recover_if_dead` 的
+    docstring）：内存快照不在、库里只有事件，说明写它的那个进程已经不在了 —— 那一刻顺手
+    把事件账本补成落库的 trace 与 run 汇总，**不重跑任何模型调用**。
+    """
+    try:
+        return round_events.restored_snapshot(run_id)
+    except Exception as exc:  # noqa: BLE001 —— 补不到就是「读不到进度」，不是错误
+        log_print(f"⚠️ 从逐轮事件账本补进度失败: run={run_id} {exc}", "AI", force=True)
         return None
 
 
@@ -532,3 +651,5 @@ def reset_for_tests() -> None:
     with _lock:
         _snapshots.clear()
         _ledgers.clear()
+    # 恢复路径的「这个 run 已经补过账了」也是进程内状态，一起清（测试之间会重用 run id）。
+    round_events.reset_recovery_memo()

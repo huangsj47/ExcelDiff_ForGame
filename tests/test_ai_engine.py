@@ -16,6 +16,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+from services.ai.context_tools import DEFAULT_TOOL_LIMITS
 from services.ai.engine import (
     DEGRADE_MARKDOWN,
     DEGRADE_NONE,
@@ -239,10 +240,19 @@ def test_a_single_round_final_returns_the_report_and_anomalies():
 
 
 def test_the_model_can_ask_for_context_and_gets_it_back():
-    """**多轮的核心断言**：第二轮的消息里必须有第一轮要来的内容。
+    """**多轮的核心断言**：模型要的内容必须真的到达它。
 
     只断言「调用过两次模型」是不够的：那样一个「要了但没回灌」的实现也能通过，
     而它会让模型永远在盲猜。
+
+    ## 2026-09-24（工作包 D 的 P3）：到达的轮次变了，判据没变
+
+    平台现在会**预取**（`evidence_prefetch`）——本批次这几个文件的差异在第 1 轮就附上了，
+    所以模型第 1 轮要的这份内容在第 2 轮给的是**指针**（「见上文那一节」，正文不重发，
+    见 `context_tools` 第 4 条）。断言因此拆成两半，合起来仍然证明「内容到达了模型」：
+
+    * 正文在**第 1 轮**的消息里（预取那份，带 `evidence_id`）；
+    * 第 2 轮明确指出它在哪一节 —— 不重发正文是刻意的（重复一次按未命中价计费）。
     """
     client = ScriptedClient(
         _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
@@ -253,8 +263,12 @@ def test_the_model_can_ask_for_context_and_gets_it_back():
 
     assert outcome.rounds_used == 2
     assert outcome.requests_used == 1
-    assert "+ 一行改动" in client.calls[1][-1]["content"], "要来的 diff 没有回灌"
-    assert TABLE in client.calls[1][-1]["content"]
+    assert "+ 一行改动" in client.calls[0][-1]["content"], "预取来的 diff 没有进第 1 轮"
+    assert TABLE in client.calls[0][-1]["content"]
+    assert "[已在上文给出]" in client.calls[1][-1]["content"], (
+        "重复索要同一份内容时没有给出指针 —— 模型会以为没拿到而反复要"
+    )
+    assert "### [file_diff]" in client.calls[1][-1]["content"], "指针要指到那一节的标题"
     # 第二轮**不再重发**变更清单，而是给一段指向它的说明。清单本身仍在这次请求里
     # （就是第 1 轮那条消息），所以模型并没有失去它 —— 见下一条用例。
     assert "本次变更共 1 个提交" not in client.calls[1][-1]["content"], (
@@ -547,7 +561,12 @@ def test_the_progress_callback_fires_once_per_round_in_order():
 
 
 def test_the_progress_callback_reports_the_context_that_went_into_the_prompt():
-    """`items_chars` 是**真正进了提示词**的字符数（不是工具取回的原始量）。"""
+    """`items_chars` 是**真正进了提示词**的字符数（不是工具取回的原始量）。
+
+    2026-09-24（P3）之后第一轮就有条目了（平台预取），而且**同一份正文只进一次**：
+    模型第 2 轮再要时给的是指针 —— 于是第 2 轮那个数**远小于**正文长度，这正是
+    「进了提示词的量 ≠ 取回的量」那条判据在本轮的样子。
+    """
     provider = FakeProvider({("file_diff", COMMIT, TABLE): "差异" * 500})
     client = ScriptedClient(
         _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
@@ -557,9 +576,14 @@ def test_the_progress_callback_reports_the_context_that_went_into_the_prompt():
 
     _run(client, provider=provider, on_round=seen.append)
 
-    assert seen[0].items_chars == 0, "第一轮还没有任何上下文"
-    assert seen[1].items_chars == len("差异" * 500)
-    assert "差异" * 10 in client.calls[1][-1]["content"]
+    body = len("差异" * 500)
+    # 条目文本 = 标题 + 正文（标题那几十个字也算进了提示词，所以取一个区间而不是等号）。
+    assert body <= seen[0].items_chars < body + 500, "第 1 轮带的是预取来的正文，一字不少"
+    assert "差异" * 10 in client.calls[0][-1]["content"]
+    assert 0 < seen[1].items_chars < body, (
+        "第 2 轮该是那段指针（很小），不是又一次 1,000 字的正文"
+    )
+    assert "差异" * 10 not in client.calls[1][-1]["content"], "同一份正文重发了一遍"
 
 
 def test_the_progress_callback_also_fires_on_the_degraded_rounds():
@@ -723,7 +747,10 @@ def test_a_request_for_a_path_outside_the_change_set_is_not_executed():
     outcome = _run(client, provider)
 
     assert outcome.requests_used == 0, "越权路径被执行了"
-    assert all(key[0] != "file_diff" for key in provider.seen)
+    # 判据落在**那个越权路径**上，不是「有没有执行过任何 file_diff」：P3 之后平台自己会
+    # 预取（`evidence_prefetch`），而它只取 scope 里的路径。用后者当判据的话，
+    # 预取一上线这条断言就失效（它量的是别的东西），而失效的方向恰好是「漏报越权」。
+    assert not [key for key in provider.seen if key[2] == "src/secret/keys.lua"], provider.seen
 
 
 def test_a_partially_valid_batch_still_executes_the_valid_ones():
@@ -761,8 +788,16 @@ def test_a_failing_tool_does_not_kill_the_round():
     outcome = _run(client, FakeProvider(failing=True))
 
     assert outcome.status == STATUS_SUCCEEDED
-    assert "取数失败" in client.calls[1][-1]["content"]
-    assert "不要据此下结论" in client.calls[1][-1]["content"], "没告诉模型取不到不等于没问题"
+    # P3 之后这份失败说明是**预取**带回来的，落在第 1 轮；第 2 轮给的是那条指针
+    # （「见上文那一节」）。要钉的性质没变：取不到这件事**必须说清**，而且不能只说一次
+    # 就消失 —— 所以两轮都断言。
+    assert "取数失败" in client.calls[0][-1]["content"]
+    # 这句「不等于没问题」来自 `context_tools._failure_text`（失败文本自带），而不是
+    # `_batch_notes` 那句 `不要据此下结论` —— 后者只在**模型自己索取的那一轮**才拼进去，
+    # 而 P3 之后这一次是预取取回来的（模型第 2 轮拿到的是指针）。要守的性质没变：
+    # 「取不到」必须与「没问题」分开说，两轮都不能让它消失。
+    assert "不代表它没有问题" in client.calls[0][-1]["content"], "没告诉模型取不到不等于没问题"
+    assert "[已在上文给出]" in client.calls[1][-1]["content"], "第 2 轮要指回那份说明"
 
 
 def test_an_empty_result_is_labelled_as_empty_not_as_success():
@@ -776,7 +811,9 @@ def test_an_empty_result_is_labelled_as_empty_not_as_success():
 
     _run(client, provider)
 
-    assert "无内容" in client.calls[1][-1]["content"]
+    # 同一条性质，落在第 1 轮（P3 起这份「空」是预取带回来的）。
+    assert "无内容" in client.calls[0][-1]["content"]
+    assert "不要把「无内容」等同于「没有风险」" in client.calls[0][-1]["content"]
 
 
 # ==========================================================================
@@ -1166,6 +1203,14 @@ def test_the_cap_keeps_the_most_severe_ones():
 # 预算
 # ==========================================================================
 
+#: 本组用例把**单条上限**固定成计划推导出来的那一档（`budget_plan.derive_tool_limits`
+#: 在 560k 预算下给 30,333）。理由：这两条测的是「条目额度 vs 基线」，而 P3 的预取
+#: 有一条**硬份额**判据（`evidence_prefetch`：份额装不下一条就一条都不取）——
+#: 默认的 11,000 单条上限会让 200,000 × 12% = 24,000 的份额装得下两条，于是预取
+#: 先把这两份 diff 取走，第 2 轮就变成指针而不是正文，测的就不是额度这件事了。
+#: 固定成 30,333 之后份额（24,000）装不下一条，预取自动跳过，这条用例回到它本来的问题。
+_FAT_TOOL_LIMITS = {**DEFAULT_TOOL_LIMITS, "file_diff": 30_333, "file_content": 30_333}
+
 
 def test_a_big_baseline_squeezes_the_context_items():
     """**「条目按剩余额度给」的直接后果**：基线摘要变长，能给的上下文就变少。
@@ -1194,12 +1239,16 @@ def test_a_big_baseline_squeezes_the_context_items():
     roomy = _run(
         roomy_client,
         FakeProvider(contents),
-        limits=EngineLimits(prompt_char_budget=200_000, baseline_char_budget=0),
+        limits=EngineLimits(
+            prompt_char_budget=200_000, baseline_char_budget=0, tool_limits=_FAT_TOOL_LIMITS
+        ),
     )
     _run(
         tight_client,
         FakeProvider(contents),
-        limits=EngineLimits(prompt_char_budget=200_000, baseline_char_budget=196_000),
+        limits=EngineLimits(
+            prompt_char_budget=200_000, baseline_char_budget=196_000, tool_limits=_FAT_TOOL_LIMITS
+        ),
     )
 
     assert roomy.status == STATUS_SUCCEEDED
@@ -1242,7 +1291,12 @@ def test_the_cache_short_circuit_still_counts_against_the_budget():
 
     assert outcome.requests_used == 2, "重复索要没有计入额度"
     assert outcome.cache_hits == 1, "第二次应当命中缓存"
-    assert len([key for key in provider.seen if key[0] == "file_diff" and key[2] == TABLE]) == 1
+    # 「同一份内容不重复取数」这条性质现在要在**两本账**上读（P3）：预取取一次（平台
+    # 发起，不占模型的额度），模型自己那两次里第二次命中缓存 —— 所以同一个文件一共
+    # 只执行 2 次，而**模型侧只执行了 1 次**。只数 `provider.seen` 里 TABLE 的条数
+    # 会把平台那次也算进去，断言里的「1」就变成了一句空话（数的不是同一件事）。
+    table_runs = [key for key in provider.seen if key[0] == "file_diff" and key[2] == TABLE]
+    assert len(table_runs) == 2, "预取一次 + 模型第一次索取一次；第二次必须走缓存"
 
 
 # ==========================================================================

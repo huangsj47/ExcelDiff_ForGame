@@ -44,7 +44,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 from services.ai.reference_search import MIN_QUERY_CHARS, normalize_query
 from services.ai.scope import AnalysisScope, normalize_path
@@ -852,13 +852,34 @@ def _safe_repr(value) -> str:
 
 
 def sanitize_requests(
-    requests: Iterable[ContextRequest], scope: AnalysisScope
+    requests: Iterable[ContextRequest],
+    scope: AnalysisScope,
+    *,
+    repo_paths: Optional[frozenset] = None,
 ) -> tuple[tuple[ContextRequest, ...], tuple[DroppedItem, ...]]:
     """工具白名单：把越权的上下文请求丢掉。
 
     这是「模型不能诱导服务端读任意文件」的落点。四重校验：类型在集合内、需要的字段
     齐全、commit 能解析到本批次、path 属于该 commit 改动过的文件。任一不满足就丢弃
     （不报错——模型偶尔写错一个字段不该作废整轮），并记账。
+
+    ## `repo_paths`：冻结仓库的只读范围（工作包 D 的 P1）
+
+    `file_content` 原先只允许本批次改动过的路径 —— 小 diff 恰好改了公共接口时，
+    「调用方改了没有」既证实不了也证伪不了。给了 `repo_paths`（**本次冻结 tip 上 Git
+    跟踪文件的路径集合**）之后：
+
+    * `file_content` 的路径只要**在这个集合里**就放行，`commit` 允许为空或不是本批次的
+      提交（读取走的是冻结版本，模型给的 commit 只用于描述它想看的范围）；
+    * `find_references` 的 `path` 前缀只要**匹配到集合里的路径**就放行。
+
+    **这里不是「信任模型」**：集合是服务端从冻结 tip 的对象库里列出来的，而真正的读取
+    还会在取数层再判一次（`frozen_repo` 的 tracked 检查 + 凭证排除 + 路径形状判据）。
+    这一层只回答「这条请求该不该被执行」。
+
+    `repo_paths=None`（默认）时行为**逐字不变**。空集合与 `None` 是两件事：空集合意味着
+    「仓库里一个跟踪文件都没有」（几乎不可能），那会让每一条仓库范围请求都被判越权 ——
+    所以调用方拿不到集合时必须传 `None`。
 
     ## 另加一道：字段里带控制字符的请求按畸形丢掉
 
@@ -870,9 +891,16 @@ def sanitize_requests(
     正常的请求用不到控制字符（`normalize_path` 本来就会 strip 掉首尾空白），所以判据取
     「出现即畸形」，理由用 `repr` 转义后记账 —— 不把原样的控制字符回显出去。
     """
+    repo_set = None if repo_paths is None else frozenset(repo_paths)
     allowed: list[ContextRequest] = []
     dropped: list[DroppedItem] = []
     seen: set[tuple[str, str, str, str]] = set()
+    # 冻结范围可用时，**路径形状先判一次**：绝对路径 / 带 `..` 的写法在这里就拒掉，
+    # 并给出可照做的理由。不先判的话，它们会落进「不在跟踪树里」那条更含糊的理由里 ——
+    # 而模型据那条理由只会反复换路径（`frozen_repo.resolve_repo_path` 是同一套判据的
+    # 唯一实现，这里 import 它而不是再写一份）。
+    if repo_set is not None:
+        from services.ai.frozen_repo import resolve_repo_path
 
     for index, request in enumerate(requests):
         request_type = str(request.type or "").strip()
@@ -958,12 +986,19 @@ def sanitize_requests(
                 )
                 continue
             prefix = normalize_path(request.path)
-            if prefix and not scope.prefix_allowed(prefix):
+            if prefix and not scope.prefix_allowed(prefix) and not _repo_matches_prefix(
+                repo_set, prefix
+            ):
                 dropped.append(
                     DroppedItem(
                         "request",
                         index,
-                        "path 前缀匹配不到本批次改动过的任何文件",
+                        "path 前缀匹配不到本批次改动过的任何文件"
+                        + (
+                            "、也不在本次冻结版本的跟踪文件里"
+                            if repo_set is not None
+                            else ""
+                        ),
                         prefix,
                     )
                 )
@@ -975,6 +1010,23 @@ def sanitize_requests(
             allowed.append(
                 ContextRequest(type=request_type, path=prefix, query=query)
             )
+            continue
+
+        if repo_set is not None and request_type in _REPO_SCOPED_TYPES:
+            # 冻结范围可用时，`file_content` 走**仓库范围**这条判据（见 docstring）：
+            # 路径形状先判（给得出可照做的理由），再看它在不在冻结 tip 的跟踪树里。
+            scoped = _repo_scoped_content_request(
+                request, index, request_type, repo_set, resolve_repo_path
+            )
+            if scoped[0] is None:
+                dropped.append(scoped[1])
+                continue
+            prepared = scoped[0]
+            key = (request_type, prepared.commit, normalize_path(prepared.path), prepared.lines)
+            if key in seen:
+                continue
+            seen.add(key)
+            allowed.append(prepared)
             continue
 
         resolved = scope.resolve_commit(request.commit)
@@ -1071,6 +1123,77 @@ def _normalize_line_window(value) -> str:
             return ""
         return f"{start}-{end}"
     return str(start)
+
+
+# --------------------------------------------------------------------------
+# 冻结仓库范围（`sanitize_requests` 的 `repo_paths` 那一支）
+# --------------------------------------------------------------------------
+
+#: 走**仓库范围**判据的请求类型（工作包 D 的 P1）。`file_diff` 刻意不在里面：
+#: 它要一条提交才算得出差异，而「同一条提交上任意文件」这个概念对 diff 不成立
+#: （未改动 = 没有差异，给它是给一份空的东西）。
+_REPO_SCOPED_TYPES = frozenset({"file_content"})
+
+
+def _repo_matches_prefix(repo_set, prefix: str) -> bool:
+    """这个前缀匹配到冻结版本里的跟踪文件吗（`repo_set` 为 `None` 时恒 False）。"""
+    if repo_set is None:
+        return False
+    text = str(prefix or "")
+    if not text:
+        return False
+    return any(item == text or item.startswith(text) for item in repo_set)
+
+
+def _repo_scoped_content_request(
+    request: ContextRequest,
+    index: int,
+    request_type: str,
+    repo_set,
+    resolve_repo_path,
+):
+    """`file_content` 的仓库范围判据：`(可执行的请求, None)` 或 `(None, 记账)`。
+
+    ## 与「本批次那条路」的差别
+
+    * **`commit` 可以不给**（或给一条不属于本批次的）：读取走的是服务端固定的冻结版本，
+      模型给的 commit 只用来描述它想看哪个范围。硬要求它写对一条本批次的提交，会让
+      「我已经知道调用方路径了、直接读」这条最省的路径又变成一次试错 ——
+      而工作包 D 明说了这条路要省掉那一轮。
+    * **路径必须在冻结 tip 的跟踪树里**：这是白名单本身。不在里面 = 这条请求不执行，
+      理由写清「不在本轮版本里」，而不是含糊的「越权」。
+
+    ## 路径形状先判、且判据只有一份
+
+    `resolve_repo_path` 来自 `frozen_repo`（绝对路径 / 盘符 / `..` / 控制字符各有一条
+    可照做的理由）。在这里先判一次，是为了让模型**这一轮**就拿到准确的原因；
+    真正的读取还会在取数层再判一次（那里才是安全边界）。
+    """
+    raw_path = str(request.path or "")
+    normalized, reject = resolve_repo_path(raw_path)
+    if reject:
+        return None, DroppedItem(
+            "request", index, f"路径不合法：{reject}", raw_path
+        )
+    if normalized not in repo_set:
+        return None, DroppedItem(
+            "request",
+            index,
+            "这个路径不在本次冻结版本的 Git 跟踪文件里（拼错、改过名，或在别的仓库）",
+            normalized,
+        )
+    lines = _normalize_line_window(request.lines)
+    # `commit` 原样带着（可能是空的、也可能是模型随手写的那一条）——取数层对
+    # 「不在本批次」的路径一律读冻结版本，不看它。
+    return (
+        ContextRequest(
+            type=request_type,
+            commit=str(request.commit or "").strip(),
+            path=normalized,
+            lines=lines,
+        ),
+        None,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1316,6 +1439,149 @@ def repair_unescaped_quotes_payload(text: str) -> str | None:
     return content[:opening.end()] + "".join(out) + content[closing:]
 
 
+# --------------------------------------------------------------------------
+# 输出通道错位：模型把「取数请求」写成了工具调用信封
+# --------------------------------------------------------------------------
+#
+# ## 实测形态（`ai_analysis_trace` 里 run 38 / 44 / 45 共 5 轮）
+#
+# 模型不写 JSON，而是吐一段**工具调用信封**：外面包着调用标签、里面每条是一个
+# `invoke` 标签（标签名两侧是全角竖线 `｜｜` + `DSML`），参数体放在开标签与闭标签之间。
+# 原文样本（逐字取自 `ai_analysis_trace.response_text`，见下面的用例注释）里出现过
+# 三种 `invoke`：
+#  * 体是**协议请求 JSON**（`{"type": "file_diff", …}`）—— 能就地救回来；
+#  * 空体、**地址写在属性里**（`name="<20 位十六进制>"`）—— 只有 `evidence` 是这个形状；
+#  * 体是一段**思考散文**（`think`）—— 里面没有任何请求，救不了，只能重问。
+#
+# ## 判据为什么必须保守
+#
+# 从一段**自由文本**里认出「模型想要什么」是猜；猜错的代价不是少一条请求，而是平台**替
+# 模型编了一份请求**（它会进白名单、会被执行、会在报告里留下没有证据的结论）。所以这里
+# 只吃上面那两种有明确形状的形态，其余一律 `None`，交回原有的纠正提示：
+#  * 纯思考（`think`）、未知工具名、普通正文 → `None`；
+#  * 抽出来的东西**照样**要过 `parse_payload → sanitize_requests → ground_payload`：
+#    本函数只把它拼回一份 JSON 文本，白名单一步都不少（越权 commit / 畸形地址照样被丢、
+#    照样记账）。
+#  * **绝不伪造 `final`**，也**绝不**回一个空 `requests` 的 `need_more_context` —— 后者会
+#    撞上「`need_more_context` 必须给出非空 requests」，反而把纠正提示变得更差。
+
+# 信封里的任何标签（`calls` / `invoke` / `parameter`）。竖线**全角半角都认**：本机抓到的
+# 四个真实样本用的都是全角（`U+FF5C`），而半角竖线在别处也可能出现，认它不增加风险
+# —— 判据的严格性在下面那两个形状上，不在标记本身。
+_DSML_TAG_RE = re.compile(r"<\s*[|｜]{1,2}\s*DSML\s*[|｜]{1,2}[^<>]*>", re.I)
+# `invoke` 的开标签：捕获属性串（可能以 `/` 结尾 = 自闭合）。
+_DSML_INVOKE_OPEN_RE = re.compile(
+    r"<\s*[|｜]{1,2}\s*DSML\s*[|｜]{1,2}\s*invoke\b([^<>]*)>", re.I
+)
+# 任意一个 DSML 闭标签。它同时也是「下一条 invoke 已经开始」的界碑（见 `_dsml_body`）。
+_DSML_CLOSE_RE = re.compile(r"<\s*/\s*[|｜]{1,2}\s*DSML[|｜]{1,2}[^<>]*>", re.I)
+# 属性里的 `name="…"`（信封里同一行可能出现两个 `name`：前一个是工具名）。
+_DSML_ATTR_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_:.-]*)\s*=\s*\"([^\"]*)\"")
+# `evidence` 的地址形状（`evidence_store.blob_id_of` 的 20 位十六进制）。与
+# `_EVIDENCE_ID_RE` 是**同一条约定**，用 `fullmatch` 判「整条属性值就是一个地址」
+# （为什么不能是 `search`，见 `_dsml_request` 里那段）。
+_DSML_ADDRESS_RE = re.compile(r"[0-9a-fA-F]{20}")
+
+
+def looks_like_tool_call_envelope(text: str) -> bool:
+    """回答「这段文本是不是一段工具调用信封」。
+
+    只判**标记在不在**，不判它里面有没有可用请求：两种读者需要的正是这个粗判据 ——
+    引擎据它把这一轮的纠正额度记到「输出通道错位」那一本账上（而不是协议那本），
+    并据此换一句**正面事实**的提醒。
+    """
+    return _DSML_TAG_RE.search(str(text or "")) is not None
+
+
+def _dsml_body(content: str, start: int) -> str:
+    """一个 `invoke` 开标签之后、下一个 DSML 标签之前的正文。
+
+    界碑取「最近的闭标签」与「下一条 invoke 的开标签」里更靠前的那个：实测样本里两种
+    收尾都出现过（`</… invoke>`、以及自闭合 `/>` 后直接跟下一条），只认闭标签会把
+    「自闭合 + 下一条开标签」之间的那一段（也就是下一条的属性）当成正文。
+    """
+    ends = [len(content)]
+    for pattern in (_DSML_CLOSE_RE, _DSML_INVOKE_OPEN_RE):
+        match = pattern.search(content, start)
+        if match is not None:
+            ends.append(match.start())
+    return content[start : min(ends)]
+
+
+def _dsml_request(content: str, match: re.Match) -> dict | None:
+    """把一个 `invoke` 读成一条**协议请求对象**；认不出这个形状返回 None。"""
+    attributes = match.group(1) or ""
+    # 自闭合（`… name="…" />`）的体一定是空的，别把下一条的属性当体。
+    body = "" if attributes.rstrip().endswith("/") else _dsml_body(content, match.end()).strip()
+    if body:
+        try:
+            value = json.loads(body)
+        except (ValueError, TypeError):
+            return None
+        # `invoke` 名（`get_file_diff` / `request` / …）**一律不看**：它正是模型自己编的
+        # 那部分（run 44 的 S4 编出过 `get_file_diff`）。可信的只有体里那个平台协议对象。
+        if not isinstance(value, dict) or not _as_str(value.get("type")):
+            return None
+        return value
+    # 空体：唯一认识的形态是「地址写在属性里」。**在全部属性值里找那个地址**，不取「第一个
+    # `name`」—— 信封里 `name="evidence"`（工具名）就在地址前面，取第一个会把工具名当地址。
+    #
+    # 判据是 `fullmatch`（整条属性值就是一个 20 位地址），**不是 `search`**：`search` 会把
+    # `commit="<40 位提交号>"` 的前 20 位当地址，于是平台**凭空造出**一条地址合法的
+    # `evidence` 请求（它能过白名单，执行层只会回一句「取不到」）—— 那正是「替模型编请求」。
+    for _key, raw in _DSML_ATTR_RE.findall(attributes):
+        value = raw.strip()
+        if _DSML_ADDRESS_RE.fullmatch(value) is not None:
+            return {"type": EVIDENCE_REQUEST_TYPE, "name": value}
+    return None
+
+
+def repair_dsml_tool_calls_payload(text: str) -> str | None:
+    """认出工具调用信封、把里面的请求抽成一份协议 JSON；抽不到返回 `None`。
+
+    ## 实测收益（`ai_analysis_trace` 的真实原文，逐字喂进 `parse_payload`）
+
+    | 样本 | 抽出请求 | 结果 |
+    |---|---|---|
+    | run 44 **S4** 第 1 轮 | 4 条（3 `file_diff` + 1 `evidence`） | 解析通过；`sanitize_requests` 放行 3 条、丢 1 条（地址只有 16 位，形状不对） |
+    | run 38 **V1** 第 1 轮 | 1 条（`evidence`） | 解析通过 |
+    | run 44 **S2** 第 1 轮 | 0 条（纯思考） | 返回 `None` → 走原有的重问，**行为逐字不变** |
+
+    即：**有请求的那种整轮救回**（省一轮 + 一次纠正额度），纯思考那种救不了、仍靠重试。
+
+    ## 合成的按语
+
+    拼回去的 JSON 除了 `requests` 还带上 `reason_code` / `reason`：这一份 payload 得能
+    说清「我的请求是从信封里抽出来的」，而不是**看起来**像模型自己按协议写的一样。
+
+    留痕分工要说准（本条是**实测**，不是推断）：这两个字段跟着 payload 走，而 payload
+    除了 `candidate_dispositions` 之外没有别的读者；**trace 上真正留痕的是引擎那一轮的
+    `note`**（"模型把取数请求写成了工具调用信封（工具调用信封抽取）…未重发"）。两处都写，
+    是为了让「读 trace 的人」与「读这份 payload 的人」都不会把它当成模型的正常输出。
+    """
+    content = str(text or "")
+    if not content.strip() or _DSML_TAG_RE.search(content) is None:
+        return None
+    requests: list[dict] = []
+    for match in _DSML_INVOKE_OPEN_RE.finditer(content):
+        entry = _dsml_request(content, match)
+        if entry is not None:
+            requests.append(entry)
+    # 一条都没抽到：**不许**回一个空 `requests` 的 need_more_context（见本节开头），
+    # 老老实实返回 None，让纠正提示那条老路去处理。
+    if not requests:
+        return None
+    return json.dumps(
+        {
+            "status": STATUS_NEED_MORE_CONTEXT,
+            "reason_code": "recovered_from_tool_envelope",
+            "reason": "平台已从工具调用信封里抽取本轮的取数请求（这几条是信封里的原始内容）。",
+            "requests": requests,
+        },
+        ensure_ascii=False,
+    )
+
+
 def looks_like_truncated_json(text: str) -> bool:
     """回答「这段文本是不是一份没收尾的 JSON 对象」。
 
@@ -1352,6 +1618,38 @@ def looks_like_truncated_json(text: str) -> bool:
     return depth > 0
 
 
+# 「输出通道错位」要说给模型的那句**正面事实**。
+#
+# 为什么写成正面事实、而不是「禁止…」：本仓已经吃过一次亏 —— `build_correction_hint`
+# 第 2 条写着「不要输出 `<think>` 块」，而 `think` 恰恰是实测里出现过的 `invoke` 名
+# （run 44 的 S2 那一轮）。**写「禁止 X」会把 X 的字面量送进上下文。**
+#
+# 也**不复述那段信封的写法**：旧行为是把模型那段错误信封原样抄回去，对这种病等于又示范
+# 了一遍（run 45 的汇总第 1 轮就是这么被重问的）。所以这里只说清两件事：没有可调用的
+# 工具、以及这些名字到底该写在哪。
+_OUTPUT_CHANNEL_FACT = (
+    "本次分析里**没有可以直接调用的 API 工具**：平台只接受一个 JSON 对象，"
+    "而 `commit_detail`、`file_diff`、`file_content`、`read_reference`、`find_references`、"
+    "`evidence` 这六个名字是**写在 `requests` 数组里的平台取数类型**，由平台代为执行、"
+    "结果附在下一轮。想取什么就按这些类型写进 `requests`。"
+)
+
+
+def build_channel_mismatch_hint() -> str:
+    """模型走了「工具调用」这条不存在的通道时，发给它的纠正提示。
+
+    这一句**只讲事实、不举反例**（理由见 `_OUTPUT_CHANNEL_FACT` 上面那段），也**不回显**
+    模型上一轮那段信封 —— 两个读者都因此受益：模型不必再读一遍自己的错误写法，人读 trace
+    时看到的是「平台怎么纠正的」而不是「模型又抄了什么」。
+    """
+    return (
+        "你上一轮把取数请求写成了**对工具的调用**，而这条通道本次不存在。"
+        + _OUTPUT_CHANNEL_FACT
+        + "\n请只返回那个 JSON 对象：`status` 为 `need_more_context`，"
+        "把要取的内容逐条写进 `requests`。"
+    )
+
+
 def build_correction_hint(
     error: Exception, *, dimension_ids: Iterable[str] = DIMENSION_IDS
 ) -> str:
@@ -1381,8 +1679,17 @@ def build_correction_hint(
     declared = ""
     if ids and ids != DIMENSION_IDS:
         declared = "\n本次生效的维度清单是：" + "、".join(f"`{item}`" for item in ids) + "。"
+    # **错误原文里带着工具调用信封时，不回显它。**
+    #
+    # `ProtocolError` 的「原文开头：…」是给人读的线索，抄进这句提示里就变成了给模型的
+    # **示范**（这段文本本来就是模型自己吐错了的东西）。换成同一句正面事实，模型的应对
+    # 与「禁止写法」完全一样，但上下文里不再出现那个形态。
+    if looks_like_tool_call_envelope(str(error)):
+        detail = _OUTPUT_CHANNEL_FACT
+    else:
+        detail = str(error)
     return (
-        f"你上一轮的返回不符合协议：{error}。\n"
+        f"你上一轮的返回不符合协议：{detail}。\n"
         "请严格修正后重新返回：\n"
         "1. 只返回一个可被 json.loads 解析的 JSON 对象；\n"
         "2. 不要输出 <think> 块、不要用代码围栏包住 JSON、不要写 JSON 之外的说明文字；\n"

@@ -2083,6 +2083,34 @@ main:focus {
 .ai-think-model-body > :first-child { margin-top: 0; }
 .ai-think-model-body > :last-child { margin-bottom: 0; }
 
+/* 逐成员的账（分片 / 汇总 / 复核各一份）。排在逐轮卡片**之前**：它是这一次运行的总账，
+   逐轮是过程。数据来自服务端的逐轮事件账本（`services/ai/round_events.member_totals`）。 */
+.ai-think-members {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2, 8px);
+    padding: var(--space-3, 12px) var(--space-4, 16px);
+    background: var(--color-surface-subtle, #f8fafc);
+    border: 1px solid var(--color-border, #e2e8f0);
+    border-radius: var(--radius-xl, 8px);
+}
+
+.ai-think-members-title { margin: 0; }
+
+.ai-think-member { font-size: var(--font-size-sm, 12px); line-height: 1.7; }
+
+.ai-think-member-head {
+    font-weight: 600;
+    color: var(--color-text, #1e293b);
+    font-variant-numeric: tabular-nums;
+}
+
+.ai-think-member-line {
+    margin: var(--space-1, 4px) 0 0;
+    color: var(--color-text-muted, #656d76);
+    font-variant-numeric: tabular-nums;
+}
+
 /* ===================================================================
    抽屉 footer 里的「导出 md」
    -------------------------------------------------------------------

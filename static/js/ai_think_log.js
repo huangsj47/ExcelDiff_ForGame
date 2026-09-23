@@ -77,7 +77,26 @@
         // 这一次运行的过程），不能说成「没有」，也不能说成「正在跑、马上会多」。
         unavailable_stale: '读不到这次运行的最新进度（它可能跑在别的进程，或快照已过期）。'
             + '下面是已经拿到的逐轮记录。',
+        // 这一份来自**逐轮事件账本**（服务端从库里补的快照，`progress.source === "ledger"`）。
+        // 两种处境共用同一份数据、说法不同 —— 混为一谈就会把「已经死了的那一次」说成
+        // 「正在跑」：
+        //   * 还在跑（本页看不到实时快照：跑在别的进程、或页面刚刷新）；
+        //   * **已经结束**（worker 被中断）。这一句必须点明「没有跑完」：落库的 trace 是
+        //     空的（它是整次跑完才批量写的），用户手上这份是**唯一**的过程记录。
+        ledger_running: '这次分析的进度来自数据库里的逐轮事件账本（本页没有它的实时快照：'
+            + '它跑在别的进程，或者这一页刚刷新）。每跑完一轮这里就多一条。',
+        ledger_interrupted: '这次运行没有跑完（worker 被中断）。下面是它**已经跑完**的轮次'
+            + '与用量账 —— 来自逐轮事件账本，平台没有重跑任何一次模型调用。',
         empty: '这个目标还没有跑过分析。'
+    };
+
+    // 成员在家族里的角色（`services/ai/round_events.member_role` 的四个取值）。
+    // 「分片 S1」这种带名字的在 `memberTitle` 里拼，这里只管没有名字的那几种。
+    var ROLE = {
+        main: '主分析者',
+        synthesis: '汇总',
+        verify: '复核（对账）',
+        subagent: '分片'
     };
 
     // 结局那几个词与 `ai_usage_service` 的读法一致；`unparsable` 单独说，因为它是
@@ -115,6 +134,18 @@
     // 列表**不全**时顶上那一句（见 `truncationNote`）。与 `blocks` 一起设、一起清 ——
     // 分头设的话会出现「列表已经换了一份，那句话还是上一份的」。
     var moreNote = '';
+    // **逐成员**的账（分片 / 汇总 / 复核各一份）：需求要的是「每个成员分别显示输入/输出/
+    // 缓存、工具请求/执行/失败/截断、耗时、候选数」，而快照原先只有跨成员的一个合计数。
+    // 数据由服务端归约（`services/ai/round_events.member_totals`），两条来路（实时快照 /
+    // 从逐轮事件账本补的那一份）都是同一个形状。
+    //
+    // **粘住不清**：一帧没有 `members` 键时保留上一次的（老服务端、测试替身）。换运行号
+    // 才清（见 `applyRun`）—— 上一个运行的分成员账留在面板上就是假信息。
+    var members = [];
+    // 这一次运行的轮次来自**逐轮事件账本**（而不是本进程的实时快照）。它只影响一件事：
+    // 落库的逐轮取回来是**空的**时怎么办（见 `applyRounds`）—— 被中断的那次运行本来就是
+    // 空的（trace 一行都没有），那份空表不该把手上的账抹掉。
+    var fromLedger = false;
 
     // 哪几轮的「模型这一轮返回的内容」是展开的（轮次的 key → true）。
     //
@@ -383,12 +414,95 @@
         return '这一轮返回的是' + what + '（原文是 JSON，不在这里重复贴）；' + where;
     }
 
-    function noteFor(current, count) {        if (current === 'live') return count ? NOTE.live : NOTE.running_no_rounds;
+    function noteFor(current, count) {
+        if (current === 'live') return count ? NOTE.live : NOTE.running_no_rounds;
         if (current === 'starting') return NOTE.starting;
         if (current === 'loading') return NOTE.loading;
         if (current === 'settled') return count ? NOTE.settled : NOTE.no_trace;
+        if (current === 'ledger_running') return NOTE.ledger_running;
+        if (current === 'ledger_interrupted') return NOTE.ledger_interrupted;
         if (current === 'unavailable') return count ? NOTE.unavailable_stale : NOTE.unavailable;
         return NOTE.empty;
+    }
+
+    /**
+     * 一个成员的名字。**分片带自己的标签**（`S1`/`S2`…），汇总与复核没有名字，按角色说
+     * —— 这三句与 `services/ai/round_events.member_role` 的判据一一对应（那份判据只用
+     * 标签与位次，不写死 `V1` 字面量）。
+     */
+    function memberTitle(item) {
+        var name = item && typeof item.member === 'string' ? item.member : '';
+        var role = item && item.role ? item.role : '';
+        if (name) return (ROLE[role] || '成员') + ' ' + name;
+        return ROLE[role] || '成员';
+    }
+
+    /** 一个数：**「未上报」与 0 分开**（`null` 说未上报，0 就说 0）。 */
+    function memberAmount(value, unit) {
+        if (value === null || value === undefined || value === '') return '未上报';
+        var text = fmtTokens(value);
+        if (!text) text = fmtDuration(value);
+        if (!text) text = String(value);
+        return text + (unit || '');
+    }
+
+    /**
+     * 一个成员那一块要写的两行字（**纯函数**，node 下真跑）。
+     *
+     * 三条口径：
+     *   * `null` = **未上报**（不是 0）—— 上游没给这个数就直说，不补 0；
+     *   * 合计不全时（服务端给的 `tokens_reported` / `counts_reported` 为假）**明写
+     *     「已知下界」**：那几个数只含报上来的部分，拿去当「这次花了多少」会偏小；
+     *   * `candidates` 的 `null` 是「这个成员**没有交结论**」（不是「没上报」）——
+     *     那正是报告里「有一块没人看过」要说的那件事，所以单独一句。
+     */
+    function memberLines(item) {
+        var data = item || {};
+        var tokens =
+            '输入 ' + memberAmount(data.tokens_input) + ' · 输出 ' + memberAmount(data.tokens_output)
+            + ' · 缓存读 ' + memberAmount(data.cache_read_tokens)
+            + ' · 缓存写 ' + memberAmount(data.cache_write_tokens) + ' tokens';
+        if (data.tokens_reported === false) tokens += '（已知下界，有轮次没上报）';
+        var cost = fmtDuration(data.duration_ms);
+        var tools =
+            '工具：请求 ' + memberAmount(data.tool_requests)
+            + ' / 执行 ' + memberAmount(data.tool_executed)
+            + ' / 失败 ' + memberAmount(data.tool_failed)
+            + ' / 截断 ' + memberAmount(data.tool_truncated)
+            + (cost ? ' · 模型耗时 ' + cost : '');
+        if (data.counts_reported === false) tools += '（计数只含已上报的轮次）';
+        var candidates = data.candidates_reported
+            ? ('候选结论 ' + (data.candidates === null || data.candidates === undefined
+                ? '未上报' : data.candidates) + ' 条')
+            : '候选结论：这个成员没有交结论';
+        return {tokens: tokens, tools: tools, candidates: candidates};
+    }
+
+    /** 逐成员那一块。**没有 `members` 数据就一个节点都不加**（老载荷行为逐字不变）。 */
+    function paintMembers(log, doc) {
+        if (!members.length) return;
+        var box = doc.createElement('div');
+        box.className = 'ai-think-members';
+        var title = doc.createElement('p');
+        title.className = 'ai-think-note ai-think-members-title';
+        title.textContent = '逐成员用量（来自逐轮事件账本；每个分片、汇总、复核各一份）';
+        box.appendChild(title);
+        members.forEach(function (item) {
+            var card = doc.createElement('div');
+            card.className = 'ai-think-member';
+            var head = doc.createElement('div');
+            head.className = 'ai-think-member-head';
+            var rounds = Number(item && item.rounds);
+            head.textContent = memberTitle(item) + ' · '
+                + (isFinite(rounds) && rounds > 0 ? rounds + ' 轮' : '还没有跑完一轮');
+            card.appendChild(head);
+            var lines = memberLines(item);
+            addLine(card, 'ai-think-member-line', lines.tokens);
+            addLine(card, 'ai-think-member-line', lines.tools);
+            addLine(card, 'ai-think-member-line', lines.candidates);
+            box.appendChild(card);
+        });
+        log.appendChild(box);
     }
 
     function addLine(parent, className, text) {
@@ -454,8 +568,13 @@
         // `toggle` 事件是异步的，等不到）。下一帧重画时按这份状态恢复。
         expandedModelRounds = captureExpanded(log);
         log.textContent = '';
-        if (!blocks.length) return;
         var doc = global.document;
+        // 逐成员那一块排在逐轮卡片**之前**：它是这一次运行的总账，逐轮是过程。
+        // 只在载荷里真有 `members` 时才出现（老服务端/测试替身的载荷一个节点都不多）。
+        // **它排在「没有逐轮就早退」之前**：账与逐轮是两件事，一轮都还没画出来时
+        // 逐成员的合计照样是有内容的（界面画不画由 `members` 决定，不由 `blocks` 决定）。
+        paintMembers(log, doc);
+        if (!blocks.length) return;
         if (moreNote) {
             // 放在**列表之上**：要解释的正是「这个列表为什么从第 3 轮开始」。
             // class 借 `.ai-think-note` 的排版（同一处的说明文字，样式只此一份），
@@ -583,6 +702,11 @@
         if (opts.settled) runSettled = true;
         if (mode === 'live') {
             mode = 'settled';
+        } else if (mode === 'ledger_running') {
+            // 账本那一份说「还在跑」，而现在确认结束了 → 换成「没跑完」那一句。
+            // **不换成 `settled`**：`settled` 说「分析已结束，下面是逐轮记录」，
+            // 而被中断的那一次没有落库的逐轮记录（trace 是空的），那句话是假的。
+            mode = 'ledger_interrupted';
         } else if (mode === 'starting') {
             // **一句有时限的话不许挂在这儿过期。** 「才刚发起」的判据里第一条就是
             // 「本页看着它开跑」（`startingNow`），而这一句之后本页不再看着它了 ——
@@ -643,6 +767,16 @@
         watching = true;
         sawSnapshot = true;
         mode = 'live';
+        // 这一份进度是**服务端从逐轮事件账本补的**（`source === "ledger"`）还是本进程的
+        // 实时快照（`source` 空）。两者形状一样、含义不同：账本那一份说明本页看不到它的
+        // 实时过程（跑在别的进程，或者它**已经被中断了**）。说错的方向只有一个 ——
+        // 把「已经死了的那一次」说成「正在跑」。
+        if (progress.source === 'ledger') {
+            fromLedger = true;
+            mode = progress.run_finished ? 'ledger_interrupted' : 'ledger_running';
+        }
+        // 逐成员的账（有就画，没有就保留上一次的 —— 老服务端/测试替身的载荷没有这个键）。
+        if (progress.members && progress.members.length) members = progress.members;
         blocks = buildRoundBlocks(progress.rounds, { max_rounds: progress.max_rounds });
         // **实时这一份只有最近 8 轮**（`run_progress.MAX_LIVE_ROUNDS`）：不说出来的话，
         // 列表看起来就是「从第 3 轮开始」—— 用户读到的同样是「顺序不对」。
@@ -670,6 +804,18 @@
         //     （`onShowThink`）当时没关。
         //   * **已经结束** → 那才是真话：这次运行没留下记录（功能上线前的分析）。
         var pending = !list.length && !runSettled && !!LIVE_STATUS[lastRunStatus];
+        // **手上的轮次来自逐轮事件账本、而落库那份是空的 → 留着手上的。**
+        // 被中断的那次运行正是这个形态：`ai_analysis_trace` 是整次跑完才批量写的，
+        // worker 被杀时一行都没有 —— 那份空表**不是**「没有留下记录」，而这句
+        // `blocks = []` 会把手上的账抹掉，用户看到的是「这次运行没有留下逐轮记录」，
+        // 而账其实就在库里（事件表）。判据用 `fromLedger`：只有账本补来的那一份才留。
+        if (!list.length && fromLedger && blocks.length) {
+            loaded = true;
+            loading = false;
+            mode = runSettled ? 'ledger_interrupted' : mode;
+            paint();
+            return;
+        }
         // **有逐轮取回来，就说明这次运行已经结束了** —— 逐轮是跑完才落库的（同上）。
         // 这条不只是记账：结论那一轮的说明要据此决定说「报告已经在那儿」还是「还没
         // 到时候」（见 `blockHint`）。不置这一位的话，**打开一个早就跑完的目标**时
@@ -702,6 +848,10 @@
         mode = value === null ? 'empty' : (watching ? 'live' : 'settled');
         blocks = [];
         moreNote = '';
+        // 逐成员的账与「来自账本」这一位都属于上一次运行：留着它们，新的一次运行会
+        // 顶着上一次的成员账与「worker 被中断」那句说明（两句都是假话）。
+        members = [];
+        fromLedger = false;
         // 换了运行，「见过快照」与「看着它开跑的时刻」都属于上一次 —— 留着它们会让
         // 新的一次运行继承上一次的处境（`starting` 那句说明的期限就是从这里算的）。
         sawSnapshot = false;
@@ -824,13 +974,23 @@
     }
 
     function state() {
-        return {mode: mode, runId: runId, watching: watching, loaded: loaded};
+        return {
+            mode: mode,
+            runId: runId,
+            watching: watching,
+            loaded: loaded,
+            members: members.length,
+            fromLedger: fromLedger
+        };
     }
 
     global.AiThinkLog = {
         NOTE: NOTE,
         OUTCOME: OUTCOME,
+        ROLE: ROLE,
         buildRoundBlocks: buildRoundBlocks,
+        memberLines: memberLines,
+        memberTitle: memberTitle,
         shardText: shardText,
         watch: watch,
         unwatch: unwatch,

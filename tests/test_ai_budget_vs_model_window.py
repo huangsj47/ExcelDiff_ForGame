@@ -502,24 +502,41 @@ def test_the_planned_tool_limits_really_move_the_truncation_point():
     assert len(planned_item.text) > len(default_item.text) + 15_000
 
 
-def test_a_planned_file_content_cap_is_capped_by_what_the_provider_delivers():
-    """`file_content` **不许**在计划里报一个取数侧根本给不出的数。
+def test_a_planned_file_content_cap_is_what_the_provider_really_delivers():
+    """`file_content` 在计划里报的数**必须等于**取数侧真正交付的那一页。
 
-    正文在取数侧就按 `CONTENT_MAX_CHARS`（11,000）切好了（`platform_provider` /
-    Agent 两侧都读这个常量）。计划里若写 30,333，那条抬头说的行数与实际给出的正文
-    就对不上 —— 而那个行号是模型写进结论里的坐标。
+    ## 这条断言在 2026-09-24（工作包 D 的 P2）改了口径
 
-    `file_diff` / `read_reference` 不受这个夹：它们的正文由平台自己拼，取数侧的
-    「11,000」只是**旧的默认额度**，不是硬上限。
+    原先它断言的是「计划里的取数侧上限被 `CONTENT_MAX_CHARS`（11,000）夹住」——
+    而那正是 P2 要拆掉的**隐藏截断**：用户把提示词预算调到 560,000，计划上写着 30,333，
+    而正文在取数侧先被 11,000 夹住，界面上（和报告里）都看不出来。
+
+    现在：`ContextTools` 构造时把**本轮生效的单条上限**交给取数侧
+    （`PlatformContextProvider.apply_tool_limits`），超过一页的正文用
+    `content_window.page_lines` 的 `next_cursor` **继续要**。于是计划里那个数与取数侧
+    给出来的一页是同一个，而「给不出来的数」这件事在结构上不再可能。
     """
-    from services.ai.budget_plan import derive_tool_limits
+    from services.ai.budget_plan import (
+        PROVIDER_MAX_CHARS_KEY,
+        derive_tool_limits,
+    )
+    from services.ai.context_tools import ContextTools
+    from services.ai.platform_provider import PlatformContextProvider
     from utils.content_window import CONTENT_MAX_CHARS
+
+    from types import SimpleNamespace
 
     planned = derive_tool_limits(prompt_char_budget=560_000, max_tool_requests=40)
 
     assert planned["file_diff"] == 30_333, "diff 的额度没有被抬起来"
-    assert planned["file_content_provider_max_chars"] == CONTENT_MAX_CHARS
-    assert planned["file_content_provider_max_chars"] <= planned["file_content"]
+    assert planned[PROVIDER_MAX_CHARS_KEY] == planned["file_content"] == 30_333
+    assert planned[PROVIDER_MAX_CHARS_KEY] > CONTENT_MAX_CHARS, "又被那个常量夹住了"
+    # **行为断言**：那个数真的传到了取数侧（只看计划里的数字证明不了「生效」）。
+    provider = PlatformContextProvider(
+        loaded=SimpleNamespace(readable={}), scope=None
+    )
+    ContextTools(provider=provider, limits=planned)
+    assert provider._content_max_chars == planned[PROVIDER_MAX_CHARS_KEY]
 
 
 def test_the_remaining_budget_form_of_the_limits():

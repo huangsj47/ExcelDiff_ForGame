@@ -456,7 +456,11 @@ def test_the_platform_asks_the_agent_when_it_cannot_read_locally(monkeypatch):
 
     text = provider.find_references("target_id", "scripts/")
 
-    assert text == "a.lua:1: hit"
+    # 2026-09-24（工作包 D 的 P1）：没有冻结仓库范围时，结果前面**必须**有一句范围声明。
+    # 这条分支（问 Agent）覆盖的仍然只有**本批次改动的文件**，而「没有命中」与「没搜那么宽」
+    # 在模型那里必须分得开 —— 少了这句话，它会写「仓库里没有其它引用」。
+    assert text.endswith("a.lua:1: hit")
+    assert "[范围说明]" in text and "只覆盖本批次改动过的文件" in text
     assert len(calls) == 1
     assert calls[0]["query"] == "target_id"
     assert calls[0]["prefix"] == "scripts/"

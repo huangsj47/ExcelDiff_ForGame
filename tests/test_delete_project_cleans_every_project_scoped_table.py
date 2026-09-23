@@ -45,6 +45,7 @@ from models import (  # noqa: E402
 from models.ai_analysis import (  # noqa: E402
     AiAnalysisAnomaly,
     AiAnalysisJob,
+    AiAnalysisRoundEvent,
     AiAnalysisRun,
     AiAnalysisTrace,
     AiProjectAnalysisConfig,
@@ -210,6 +211,16 @@ def test_delete_project_removes_the_whole_ai_analysis_family(monkeypatch):
         db.session.add(
             AiAnalysisAnomaly(run_id=run.id, project_id=project_id, title="一条异常")
         )
+        # 逐轮事件账（`models/ai_analysis/round_event.py`，2026-09-23 新加）。
+        #
+        # 它**不在**上面那条「跟着 schema 走」的护栏视野里：那张表刻意不声明外键、
+        # `project_id` 也是可空的，所以删项目时既不会撞 NOT NULL、也不会被护栏扫到。
+        # 代价换成了**孤儿行** —— 只有这里显式钉住才看得见。
+        db.session.add(
+            AiAnalysisRoundEvent(
+                run_id=run.id, project_id=project_id, member="S1", round=1
+            )
+        )
         db.session.commit()
         run_id = run.id
 
@@ -226,6 +237,10 @@ def test_delete_project_removes_the_whole_ai_analysis_family(monkeypatch):
         assert AiAnalysisRun.query.filter_by(project_id=project_id).count() == 0
         assert AiAnalysisTrace.query.filter_by(run_id=run_id).count() == 0
         assert AiAnalysisAnomaly.query.filter_by(project_id=project_id).count() == 0
+        assert AiAnalysisRoundEvent.query.filter_by(project_id=project_id).count() == 0, (
+            "逐轮事件没清干净 —— 这张表没有外键、project_id 可空，"
+            "删项目时 SQLAlchemy 不会碰它，只能靠 delete_project 那份手写清单"
+        )
         assert AiAnalysisJob.query.filter_by(project_id=project_id).count() == 0, (
             "任务身份表没清干净 —— 它的 project_id 是非空外键，留着就是下一条删不掉的项目"
         )

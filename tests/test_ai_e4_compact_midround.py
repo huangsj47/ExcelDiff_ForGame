@@ -401,7 +401,12 @@ def test_a_parseable_midround_cut_by_the_output_limit_is_not_executed_as_is():
     outcome = _run(client, provider)
 
     # 它的 `requests` **没有被执行** —— 平台要求它压短后重发。
-    assert provider.seen == [], provider.seen
+    #
+    # 判据是**模型的索取额度**（`requests_used`），不是「provider 有没有被调用过」：
+    # P3 之后平台自己会预取本批次的文件（那条路不计入模型的额度，也不经
+    # `sanitize_requests` 之外的任何入口）。用后者当判据，这条用例就会因为「预取调了
+    # provider」而红 —— 而它真正要守的「残 JSON 的请求没有被执行」反而没人看了。
+    assert outcome.requests_used == 0, provider.seen
     assert TRUNCATED_OUTPUT_HINT in client.user_text(1)
     assert outcome.rounds[0].correction_hint == TRUNCATED_OUTPUT_HINT
 

@@ -35,19 +35,32 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from services.ai.docx_view import is_docx, render_docx_text
+from services.ai.frozen_repo import (
+    FrozenRepository,
+    FrozenTreeReader,
+    build_read_scope,
+    exclusion_reason,
+    reject_text,
+    resolve_frozen_repository,
+    resolve_repo_path,
+)
 from services.ai.reference_search import (
     entries_for,
     normalize_query,
     render_result,
 )
+from services.ai.repo_reference import search_frozen_repository
 from services.ai.scope import AnalysisScope, normalize_path
+from services.ai.trace_evidence import failure_notice
 from services.ai.skill_loader import LoadedSkills
 from services.deployment_mode import is_agent_dispatch_mode
 from services.excel_header_profiles import header_kwargs_for, resolve_for_file
 from utils.content_window import (
     CONTENT_MAX_CHARS,
     DEFAULT_WINDOW_LINES,
+    ContentPage,
     ContentWindow,
+    page_lines,
     slice_lines,
 )
 from utils.logger import log_print
@@ -67,12 +80,14 @@ _NO_PATCH = (
     "**这不等于「没有改动」。**"
 )
 
-# 单次 `file_content` 的正文上限（字符）。**与预算层的单条上限是同一个数**
-# （`utils.content_window.CONTENT_MAX_CHARS`，`ContextTools` 也引用它）：
+# 单次 `file_content` 交付的**一页**上限（字符）。**没有别的依据时**用这个值（初始值）：
+# 计划推导出来的那个额度经 `ContextTools` → `apply_tool_limits` 交进来，于是同一份
+# 提示词预算在小批次与大批次上给出不同的页大小 —— 而不是所有项目都被 11,000 夹住。
 #
-# 取值比它小没有好处（额度就在那里，不用就浪费了），比它大则是**净损失** ——
-# 取数侧按自己的上限切好、写好「第 a–b 行 / 共 N 行」的抬头之后，预算层还会再按
-# 自己的上限砍一次尾巴：砍在半行中间，抬头说的行数也就成了假的。
+# 超过一页的正文**不是被砍掉了**，而是可以继续要（`utils.content_window.page_lines`
+# 的 `next_cursor`，回执写在抬头里）。这一条是 2026-09-24（工作包 D 的 P2）改的：
+# 原先「一次 11,000 字，剩下的没了」在给模型的文本里看不出来，而它据此认为
+# 「这份文件就这么大」。
 DEFAULT_CONTENT_MAX_CHARS = CONTENT_MAX_CHARS
 
 # Agent 取回**配表**正文时，平台会在正文**前面**补的那一行出处（见
@@ -287,47 +302,124 @@ def _fit_numbered_content(
     —— 连「不是全文」都没有 —— 而正文只到第 276 行，同屏唯一的截断信号是末尾那句英文
     `... [truncated by local tool]`。模型完全有理由按抬头引用第 290 行，而它从没拿到过。
 
-    ## 收敛：两轮足够，剩下的用「从尾部按行裁」兜底
+    ## 收敛：**二分出「装得下的最大正文额度」**（2026-09-24 改，工作包 D 的 P2）
 
-    第一轮量出真实开销（抬头 + 行号 + 指路），第二轮按 `limit - 开销` 重切；行只可能
-    变少、开销随之变小，所以第二轮一定装得下。第三轮留给「行号位数跨过 10 的幂」把
-    开销推大的边界。最后那道 while 是**保证**：抬头本身很大时上面几轮可能仍差几十字，
-    这时**从尾部整行地裁正文**（不裁整串 —— 那会砍掉末尾那句补救指路，而它是唯一的
-    重来路径），抬头与正文永远由同一个 `window` 生成，两者始终自洽。
+    原先这里是「量出开销 → 按 `limit - 开销` 重切」的两轮法。它在额度大（11,000）时够用，
+    但在**页小**的时候会把页切得远小于额度：第一轮量的是**整份文件**那一版的渲染开销
+    （每行 `数字│` 前缀都算），而重切之后的页只有几行，真实开销比它小一个数量级 ——
+    于是「按上一轮的开销算出来的额度」把页按到了十分之一。实测（`content_max_chars=2,000`、
+    400 行 × 52 字的文件）：**每页只给了 5 行 / 517 字**，而额度是 2,000 —— 这正是 P2 要
+    拆的那种「额度在，却拿不到」。
+
+    现在改成：先把「整段直接装得下」这一档短路返回（模型点名的那一段本来就装得下时
+    一个字都不许少），否则在 `[1, limit]` 上**二分**出「渲染结果仍不超上限」的最大正文额度。
+    `build` 的长度对额度单调不减，所以二分到的就是最大的那一档；迭代次数是对数级
+    （`limit ≤ 32,000` → 至多 15 次），每次只做一次按行切分。
+
+    最后那道 while 是**保证**：金额度太小（抬头自己就顶满）时二分可能一个可行解都没有，
+    这时**从尾部整行地裁正文**（不裁整串 —— 那会砍掉末尾那句补救指路，而它是唯一的重来
+    路径），抬头与正文永远由同一个页对象生成，两者始终自洽。
     """
     window = window_of(0)
     if limit <= 0:
         return build(window)
 
     rendered = build(window)
-    for _ in range(4):
-        if len(rendered) <= limit:
-            return rendered
-        # 至少留 1 个字符给正文：抬头自己就顶满额度时已经没有任何正文可给，
-        # 继续算下去只会得到负数。
-        budget = max(1, limit - (len(rendered) - len(window.content)))
-        nxt = window_of(budget)
-        if nxt.content == window.content:
-            break  # 切不动了（限制来自行窗口本身，不是字符数）
-        window = nxt
-        rendered = build(window)
+    if len(rendered) <= limit:
+        # 模型点名的那一段本来就装得下 —— 一个字都不动（`tests/test_content_window.py`
+        # 的 `test_a_named_window_is_not_shrunk_when_it_already_fits` 钉着这件事）。
+        return rendered
+
+    # 二分的下界：整份内容那一版的**开销**（抬头 + 行号前缀 + 指路）是最终这一页开销的
+    # 上界（行只可能变少），所以「最优正文额度 ≥ limit - 开销」。这样起点比 1 更靠近答案，
+    # 但下界永远不小于 1。
+    overhead = max(0, len(rendered) - len(window.content))
+    low = max(1, limit - overhead)
+    high = max(1, limit)
+    best: tuple | None = None
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = window_of(middle)
+        candidate_text = build(candidate)
+        if len(candidate_text) <= limit:
+            best = (candidate, candidate_text)
+            low = middle + 1
+        else:
+            high = middle - 1
+    if best is not None:
+        return best[1]
 
     while len(rendered) > limit and window.content:
         cut = window.content.rfind("\n")
         content = window.content[:cut] if cut > 0 else ""
-        window = ContentWindow(
-            content=content,
-            start_line=window.start_line,
-            end_line=max(window.start_line, window.start_line + content.count("\n")),
-            total_lines=window.total_lines,
-            truncated=True,
-        )
+        end_line = max(window.start_line, window.start_line + content.count("\n"))
+        # `_replace` 而不是重建一个 `ContentWindow`：**页对象上多出来的那几个回执字段
+        # （`total_chars` / `returned_chars` / `next_cursor`）必须跟着走**。重建会把它们
+        # 悄悄丢掉，于是「被字符上限再裁了一刀」这件事在回执里还是「否」——
+        # 而回执正是这一层要修的那种静默。
+        window = _renumber(window, content=content, end_line=end_line, truncated=True)
         rendered = build(window)
     return rendered
 
 
-def _render_text_content(text: str, *, path: str, lines: str = "", auto: bool = False) -> str:
-    """文本/代码正文：**带行号的一段窗口** + 「这是哪一段」的抬头。
+def _renumber(window, *, content: str, end_line: int, truncated: bool):
+    """把一段收窄后的正文写回**同一类**页对象，并把回执字段一起更新。
+
+    `returned_chars` / `next_cursor` 是「这一页还剩多少、下一页怎么要」——
+    它们跟着正文走，不跟着请求走：正文被再裁一刀之后，`next_cursor` 必须从**新的**
+    末端继续，否则模型照它再要一次会拿到一段重叠的正文（而它不会知道自己看重复了）。
+    """
+    updated = window._replace(
+        content=content, end_line=end_line, truncated=truncated
+    )
+    if hasattr(updated, "returned_chars"):
+        total_lines = int(getattr(updated, "total_lines", 0) or 0)
+        cursor = ""
+        if total_lines and end_line < total_lines:
+            width = max(1, int(getattr(updated, "end_line", end_line)) - window.start_line + 1)
+            cursor = f"{end_line + 1}-{min(total_lines, end_line + width)}"
+        updated = updated._replace(returned_chars=len(content), next_cursor=cursor)
+    return updated
+
+
+def _page_receipt(page) -> str:
+    """一条**可以直接核对的回执**：这一页多少字、是不是全部、下一页的 `lines` 写什么。
+
+    ## 为什么把回执塞进抬头那一行，而不是另起一行
+
+    抬头的行号区间与正文的行号是**同一套坐标**（模型写进结论里的定位靠它），所以这一行
+    必须自带「给的是哪一段」。而回执说的也正是这件事的另外几个面（整份多少字、这一页
+    是不是被字符上限砍过、下一页怎么要）。放在同一行还有一个副作用是好的：
+    `_fit_numbered_content` 把抬头算作开销，回执因此**永远不会**被裁掉 ——
+    它要是单独一行，尾截断第一刀就可能砍到它（`render_result` 里那段「覆盖率那句必须
+    排在最前面」是同一个教训）。
+
+    `next_cursor` 用引号包起来：那是一段可以直接抄进 `lines` 的字符串（`"1181-1260"`），
+    模型不必自己做行号算术。没有更多内容时它是 `无`（**不是空**）——
+    「没给」与「没有了」是两件事。
+    """
+    page_truncated = "是" if bool(getattr(page, "truncated", False)) else "否"
+    cursor = str(getattr(page, "next_cursor", "") or "")
+    total_chars = int(getattr(page, "total_chars", 0) or 0)
+    returned = int(getattr(page, "returned_chars", len(getattr(page, "content", "") or "")) or 0)
+    return (
+        f"｜回执：total_chars={total_chars} "
+        f"returned_range={page.start_line}-{page.end_line} "
+        f"returned_chars={returned} truncated={page_truncated} "
+        f'next_cursor={chr(34) + cursor + chr(34) if cursor else "无"}'
+    )
+
+
+def _render_text_content(
+    text: str,
+    *,
+    path: str,
+    lines: str = "",
+    auto: bool = False,
+    limit: int | None = None,
+    origin: str = "",
+) -> str:
+    """文本/代码正文：**带行号的一段窗口** + 「这是哪一段」的抬头 + **一页回执**。
 
     为什么带行号：模型写进结论里的定位（「第 1180 行那个判断」）必须能被人复核，而补丁里的
     `@@ -1180,7 +1180,9 @@` 也是行号 —— 两边用同一套坐标，模型才能把正文与改动对上。
@@ -336,46 +428,69 @@ def _render_text_content(text: str, *, path: str, lines: str = "", auto: bool = 
     `auto=True` 表示这一段是**平台按改动位置挑的**（模型没点名）。要说出来：一段从第 1700 行
     开始的正文，不说来源就像随机截的，模型会以为这就是文件的开头。
 
-    额度的口径见 `_fit_numbered_content`：**抬头与行号前缀算在这 11,000 里**，不是切完
+    `origin` 是「这一份是从哪读的」那一句（冻结版本的读取会带上它）。同一个路径可能在本次
+    分析里被读到过两次（本批次那条提交一份、冻结 tip 一份），不写清版本，模型会把两份
+    内容混着用 —— 而它接下来正是要拿它们做「调用方改了没有」的对比。
+
+    额度的口径见 `_fit_numbered_content`：**抬头与行号前缀算在这份额度里**，不是切完
     正文再让预算层砍一刀 —— 那样抬头说的行号与正文实际给到的行对不上。
+
+    `limit` 缺省时用**取数侧的页大小初值**（`DEFAULT_CONTENT_MAX_CHARS`）。一次真实分析里
+    它由计划推导（见 `PlatformContextProvider.apply_tool_limits`），于是「用户把预算调高、
+    正文还是只有 11,000 字」这件事在结构上不再成立 —— 这是工作包 D 的 P2。
     """
     where = path or ""
+    cap = DEFAULT_CONTENT_MAX_CHARS if limit is None else max(1, int(limit))
 
-    def _build(window: ContentWindow) -> str:
-        if window.total_lines == 0:
+    def _build(page) -> str:
+        if page.total_lines == 0:
             return f"[{where}] 这个文件在当前版本里是空的（0 行）。"
         head = (
-            f"文件正文：{where}（共 {window.total_lines} 行；"
-            f"下面是第 {window.start_line}–{window.end_line} 行"
+            f"文件正文：{where}（共 {page.total_lines} 行；"
+            f"下面是第 {page.start_line}–{page.end_line} 行"
         )
-        if window.is_partial():
+        if page.is_partial():
             head += "，**不是全文**"
         head += "）"
+        if origin:
+            head += origin
+        head += _page_receipt(page)
         if auto:
             head += "；这一段是按本次改动的位置自动选的（要看别处请指定 lines）"
         numbered = [
             f"{number}│{line}"
             for number, line in enumerate(
-                window.content.split("\n"), start=window.start_line
+                page.content.split("\n"), start=page.start_line
             )
         ]
         body = "\n".join(numbered)
-        if window.truncated:
+        if page.truncated:
+            # 末尾这句是**唯一的重来路径**（抬头说「不是全文」而不说怎么继续时，模型知道
+            # 自己没看全、却不知道怎么要剩下的 —— 配表那边先前就是这么变成死路的）。
+            #
+            # 例子里填的是**回执算出来的 `next_cursor`**，不是取数侧自己编一个
+            # `end+1～end+120`：后者与「模型实际点名的那一段有多宽」无关，
+            # 而按实际宽度给的下一页让「一次要点几次」是可预期的。
+            cursor = str(getattr(page, "next_cursor", "") or "")
+            follow = f'，例如 "{cursor}"' if cursor else ""
             body += (
-                f"\n（这段在第 {window.end_line} 行被截断；需要更多请指定 lines，"
-                f'例如 "{window.end_line + 1}-{window.end_line + 120}"）'
+                f"\n（这段在第 {page.end_line} 行被字符上限截断；需要更多请指定 lines{follow}）"
             )
+        # 没有被字符上限砍、但窗口本来就没到文件末尾时**不加正文行**：这种情况下续页的
+        # 坐标已经在上面的回执里（`next_cursor="61-71"`）。多加一行会挤掉一行正文 ——
+        # 模型点名要的那一段本来就装得下时，一个字都不该少（`tests/test_content_window.py`
+        # 的 `test_a_named_window_is_not_shrunk_when_it_already_fits` 钉着这件事）。
         return f"{head}\n{body}"
 
     return _fit_numbered_content(
-        limit=DEFAULT_CONTENT_MAX_CHARS,
-        window_of=lambda budget: slice_lines(text, lines, max_chars=budget),
+        limit=cap,
+        window_of=lambda budget: page_lines(text, lines, max_chars=budget),
         build=_build,
     )
 
 
 def _render_agent_file_content(
-    outcome: Mapping[str, Any], *, path: str, auto: bool = False
+    outcome: Mapping[str, Any], *, path: str, auto: bool = False, limit: int | None = None
 ) -> str:
     """业务节点取回来的正文（它自带「哪一段 / 共多少行」，行号由这里补上）。
 
@@ -429,6 +544,7 @@ def _render_agent_file_content(
         if auto:
             head += "，这一段是按本次改动的位置自动选的（要看别处请指定 lines）"
         head += "）"
+        head += _page_receipt(window)
         numbered = [
             f"{number}│{line}"
             for number, line in enumerate(
@@ -437,14 +553,23 @@ def _render_agent_file_content(
         ]
         body = "\n".join(numbered)
         if window.truncated:
+            cursor = str(getattr(window, "next_cursor", "") or "")
+            follow = f'，例如 "{cursor}"' if cursor else ""
             body += (
-                f"\n（这段在第 {window.end_line} 行被截断；需要更多请指定 lines，"
-                f'例如 "{window.end_line + 1}-{window.end_line + 120}"）'
+                f"\n（这段在第 {window.end_line} 行被截断；需要更多请指定 lines{follow}）"
             )
         return f"{head}\n{body}"
 
     def _window_of(budget: int) -> ContentWindow:
-        """把 Agent 回来的正文从尾部整行地收到 `budget` 之内。"""
+        """把 Agent 回来的正文从尾部整行地收到 `budget` 之内。
+
+        ## 回执里的 `total_chars` 说的是**Agent 回传的这一份**，不是整份文件
+
+        平台这一层拿不到整份文件的字节数（正文在业务节点上），能如实说的是「我手里这份
+        有多少字」。抬头里的「共 N 行」是 Agent 报的文件总行数（那个数它是知道的），
+        所以「是不是全文」由行数判断，而 `total_chars` 只作为「这一份有多大」的量度。
+        把不知道的东西写成 0 或假的是一个更糟的错（同 `round_events` 的「未上报 ≠ 0」）。
+        """
         content = raw
         truncated = from_agent_truncated
         if budget > 0 and len(content) > budget:
@@ -452,16 +577,26 @@ def _render_agent_file_content(
             cut = head.rfind("\n")
             content = head[:cut] if cut > 0 else head
             truncated = True
-        return ContentWindow(
+        end_line = start + (content.count("\n") if content else 0)
+        cursor = ""
+        if total and end_line < total:
+            width = max(1, end_line - start + 1)
+            cursor = f"{end_line + 1}-{min(total, end_line + width)}"
+        return ContentPage(
             content=content,
             start_line=start,
-            end_line=start + (content.count("\n") if content else 0),
+            end_line=end_line,
             total_lines=total,
+            total_chars=len(raw),
+            returned_chars=len(content),
             truncated=truncated,
+            next_cursor=cursor,
         )
 
     return _fit_numbered_content(
-        limit=DEFAULT_CONTENT_MAX_CHARS, window_of=_window_of, build=_build
+        limit=DEFAULT_CONTENT_MAX_CHARS if limit is None else max(1, int(limit)),
+        window_of=_window_of,
+        build=_build,
     )
 
 
@@ -642,6 +777,10 @@ class PlatformContextProvider:
         manifest=None,
         delta_bases: Optional[Mapping[Any, str]] = None,
         cache_row_ids: Optional[Mapping[Any, int]] = None,
+        frozen_repository: FrozenRepository | None = None,
+        content_max_chars: int | None = None,
+        repo_git_service: Any = None,
+        repo_index_files: int | None = None,
     ):
         self._loaded = loaded
         self._max_rows = max_rows_per_sheet
@@ -690,7 +829,24 @@ class PlatformContextProvider:
         # （`MAX_INDEX_FILES`）与「读一次、查询不再读」，不是那个计数器。
         self._reference_index = None
         self._reference_index_key = ""
-        self._content_max_chars = DEFAULT_CONTENT_MAX_CHARS
+        # 取数侧的一页上限。计划推导出来的值由 `ContextTools` 在构造时交进来
+        # （`apply_tool_limits`）；没交时用初始值 —— 它是**页大小**，不是硬上限：
+        # 超过一页的正文可以按 `next_cursor` 继续要。
+        self._content_max_chars = int(content_max_chars or DEFAULT_CONTENT_MAX_CHARS)
+        # 冻结仓库的只读范围（工作包 D 的 P1）。`frozen_repository` 显式给了就用它（测试、
+        # 或者将来由调用方在派发前定好版本）；没给就**惰性**从本批次解析 ——
+        # 理由见 `_frozen_reader` 的 docstring。
+        self._frozen_declared = frozen_repository
+        self._repo_git_service = repo_git_service
+        # 仓库范围检索一次索引多少个文件（上限，不是目标）。给了就覆盖模块初值——
+        # 调用方（或测试）据此把「一页多大」与运行预算对上。
+        self._repo_index_files = repo_index_files
+        self._frozen_reader: FrozenTreeReader | None = None
+        self._frozen_resolved = False
+        self._frozen_reason = ""
+        # 读侧对「冻结范围」的一次性结论（跟踪树清单）。同一个 provider 里复用，
+        # 免得每轮索取都列一次树。
+        self._repo_scope = None
         # 读平台已算好并落库的那一份（周版本合并 diff，页面同源），而不是现场重算。
         #
         # **默认开**：这条来源是「评审者看到的 diff」本身，而现场重算在
@@ -719,6 +875,232 @@ class PlatformContextProvider:
         except OSError as exc:
             log_print(f"⚠️ AI 取数：读文档失败 {name}: {exc}")
             return None
+
+    # -- 冻结仓库的只读范围（工作包 D 的 P1） -------------------------------
+
+    def apply_tool_limits(self, limits: Mapping[str, int] | None) -> None:
+        """把**本轮真正生效的单条上限**交给取数侧（页大小）。
+
+        ## 为什么要有这个入口
+
+        `file_content` 的正文在取数侧就被切（切在行边界上、抬头写着「这是第几段」），
+        所以取数侧的上限**才是**给模型看到的那一页的大小。计划（`budget_plan`）已经按
+        提示词预算推导出 `file_content` 该给多少，如果取数侧还按出厂常量 11,000 切，
+        计划里那个数就是一句给不出来的话 —— 这正是工作包 D 点名的「隐藏截断」：
+        用户把预算调高，正文仍然先被 11,000 夹住，而**界面上看不出来**。
+
+        `ContextTools` 在构造时把 `limits` 交进来（它有那一份生效值）。
+        非正数忽略：0 会让取数侧切出一段空正文，那是比不生效更糟的结果。
+        """
+        try:
+            value = int((limits or {}).get("file_content") or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            self._content_max_chars = value
+
+    def _batch_repository(self):
+        """本批次属于哪个仓库。冻结范围与检索都要它（拿不到返回 `None`）。
+
+        先查本批次提交对应的仓库 ID（`scope.repository_ids_by_commit`，跨仓库同名修订号
+        那件事的收口），查不到退回「按路径找第一条能查出提交行的路径的仓库」
+        （`_repository_of`，与 `find_references` 一直以来的取法一致）。
+        """
+        if self._scope is not None:
+            ids: set = set()
+            for value in (self._scope.repository_ids_by_commit or {}).values():
+                ids.update(int(item) for item in value or ())
+            if ids:
+                try:
+                    from models import Repository
+
+                    rows = (
+                        Repository.query
+                        .filter(Repository.id.in_(sorted(ids)))
+                        .order_by(Repository.id.asc())
+                        .all()
+                    )
+                    if rows:
+                        return rows[0]
+                except Exception as exc:  # noqa: BLE001 —— 查不动就退回下面那条
+                    log_print(f"⚠️ AI 取数：查本批次仓库失败：{exc}")
+            pairs = entries_for(self._scope.batch_paths(), self._scope.commit_of_path)
+            return self._repository_of(pairs)
+        return None
+
+    def _resolved_reader(self) -> tuple[FrozenTreeReader | None, str]:
+        """本次可用的冻结读取器（**懒解析一次**）。第二个返回值是拿不到的原因。
+
+        为什么懒解析而不是在 `__init__` 里解析：provider 的构造点在
+        `services/ai_analysis_service.py`（本工作包**不允许改**），而那里拿不到仓库对象；
+        而「本批次属于哪个仓库」这一层本来就知道（`_commit_row` 一直在用）。第一次真正
+        需要仓库范围时解析一次，之后连同结论（包括「不可用」）一起记住 ——
+        每轮索取都去问一遍 git 是白花时间。
+        """
+        if self._frozen_resolved:
+            return self._frozen_reader, self._frozen_reason
+        self._frozen_resolved = True
+        frozen = self._frozen_declared
+        if frozen is None:
+            commits: tuple = ()
+            if self._scope is not None:
+                commits = tuple(self._scope.commits)
+            frozen, reason = resolve_frozen_repository(
+                self._batch_repository(),
+                scope_commits=commits,
+                git_service=self._repo_git_service,
+            )
+            if frozen is None:
+                self._frozen_reason = reason
+                log_print(
+                    f"🔍 AI 取数：本次没有冻结仓库的只读范围（{reason}）——"
+                    "引用检索退回「只搜本批次改动的文件」",
+                    "AI",
+                )
+                return None, reason
+        self._frozen_reader = FrozenTreeReader(frozen)
+        self._frozen_reason = ""
+        return self._frozen_reader, ""
+
+    def repo_read_scope(self):
+        """本次分析可读的冻结范围（`frozen_repo.RepoReadScope`）；拿不到返回 `None`。
+
+        协议层（`sanitize_requests`）拿它的 `paths` 判「这个路径能不能读」，而真正读的
+        那一层仍然自己再判一次（**绝不因为协议层放行就信任**）。
+        """
+        if self._repo_scope is None:
+            reader, _reason = self._resolved_reader()
+            self._repo_scope = build_read_scope(
+                getattr(reader, "frozen", None), reader=reader
+            )
+        return self._repo_scope
+
+    def repo_tracked_paths(self):
+        """给协议层用的跟踪路径集合；不可用时返回 `None`（**不是空集合**）。
+
+        「空集合」会让协议层把每一条仓库范围的请求都判成越权（理由还会说「不在跟踪树
+        里」—— 一句假话）；`None` 让它退回本批次那一套判据。
+        """
+        scope = self.repo_read_scope()
+        if scope is None or not scope.available:
+            return None
+        return scope.paths
+
+    def _content_outside_batch(self, path: str, lines: str) -> Optional[str]:
+        """读**不在本批次**的那个文件（`file_content` 的冻结版本分支）。
+
+        判定顺序是刻意的（与 `frozen_repo` 的分工一致）：先纯路径判据 → 再凭证排除 →
+        再问「在不在跟踪树里」→ 最后才读。**每一步的拒绝都要给理由**，否则模型会把它
+        读成「平台取数失败」并写进信息缺口。
+
+        没有冻结范围时返回 `None` —— 与「本批次里没有这个路径」在此之前的语义**逐字
+        相同**（那是这条路加进来之前的全部行为）。
+        """
+        reader, reason = self._resolved_reader()
+        if reader is None:
+            return None
+        normalized, reject = resolve_repo_path(path)
+        if reject:
+            return reject_text(str(path or ""), reject)
+        blocked = exclusion_reason(normalized)
+        if blocked:
+            return reject_text(normalized, blocked)
+        tip = str(getattr(reader.frozen, "tip", "") or "")
+        tracked = reader.is_tracked(normalized)
+        if tracked is None:
+            return (
+                f"[无法检索] `{normalized}`：列不出本次冻结版本（{tip[:12]}）的跟踪文件 ——"
+                "对象库里读不到它。**这不等于「这个文件不存在」**，"
+                "需要它时请在报告里写成信息缺口。"
+            )
+        if not tracked:
+            return (
+                f"[路径不在本轮版本里] `{normalized}`：它不在冻结版本 {tip[:12]} 的"
+                "Git 跟踪文件清单里（拼错、改过名、或它在别的仓库）。\n"
+                "**这不等于「没有引用」** —— 请核对路径后另要一次，"
+                "或者把这件事写成信息缺口。"
+            )
+        data, why = reader.read_within_limit(normalized)
+        if data is None:
+            return (
+                f"[读不到正文] `{normalized}`@{tip[:12]}：{why}。"
+                "**这不等于「没有内容」，也不等于「没有改动」**。"
+            )
+        return self._render_frozen_content(data, path=normalized, lines=lines, tip=tip)
+
+    def _render_frozen_content(
+        self, data: bytes, *, path: str, lines: str, tip: str
+    ) -> str:
+        """把冻结版本上读到的字节渲染成给模型看的正文（各类型走**与本地同一条**渲染）。
+
+        出处那一行**必须有**：同一个路径在本批次里也可能被读到过（那条走的是该文件
+        自己那条提交的内容），不说清「这一份读的是哪个版本」，模型会把两处的内容
+        混成一份 —— 而它接下来正是要拿这两份做「调用方改了没有」的对比。
+        """
+        where = f"{path}@{tip[:12]}"
+        repository = self._batch_repository()
+        if _is_openpyxl_workbook(path):
+            rendered = _read_excel_sheets(
+                data,
+                max_rows=self._max_rows,
+                path=path,
+                window=lines,
+                char_budget=max(1, self._content_max_chars - len(_AGENT_EXCEL_NOTE)),
+                **header_kwargs_for(
+                    repository, path, raw=data, only=("header_rows", "header_name_row")
+                ),
+            )
+            if rendered is None:
+                return (
+                    f"[配表解析失败] {where}：内容无法解析成文本表格。**这不等于「没有内容」**。"
+                )
+            return f"（出处：冻结版本 {tip[:12]} 上的内容，不是工作副本）\n{rendered}"
+        if is_docx(path):
+            rendered = render_docx_text(data, path=path)
+            if rendered is None:
+                return (
+                    f"[文档解析失败] {where}：内容无法解析成文本（不是可读的 OOXML 文档）。"
+                    "**这不等于「没有内容」**。"
+                )
+            return self._render_text_page(
+                rendered, path=where, lines=lines, auto=False, frozen_tip=tip
+            )
+        text = text_or_notice(data)
+        if text is None:
+            return binary_content_notice(where)
+        return self._render_text_page(
+            text, path=where, lines=lines, auto=False, frozen_tip=tip
+        )
+
+    def _render_text_page(
+        self,
+        text: str,
+        *,
+        path: str,
+        lines: str = "",
+        auto: bool = False,
+        frozen_tip: str = "",
+    ) -> str:
+        """文本/代码正文的一页：**按本轮生效的页大小切**，并把出处写进抬头。
+
+        这是 `_render_text_content` 的取数侧入口：唯一的差别是额度来自
+        `self._content_max_chars`（计划推导出来的那个数，见 `apply_tool_limits`），
+        于是「计划里写 30,333、正文只给 11,000」这一类对不上的账在结构上不可能出现。
+        """
+        origin = ""
+        if frozen_tip:
+            origin = (
+                f"；内容来自**冻结版本 {frozen_tip[:12]}**"
+                "（不是工作副本，也不是本批次那条提交上的内容）"
+            )
+        return _render_text_content(
+            text,
+            path=path,
+            lines=lines,
+            auto=auto,
+            limit=self._content_max_chars,
+            origin=origin,
+        )
 
     # -- 提交 ---------------------------------------------------------------
 
@@ -905,7 +1287,10 @@ class PlatformContextProvider:
         """
         row = self._commit_row(commit, path)
         if row is None:
-            return None
+            # 不在本批次里。**这不再是终点**（工作包 D 的 P1）：模型可能在别处看到过这个
+            # 路径（例如它在引用检索的命中里读到了一个调用方），而「读不到」会让它把
+            # 「调用方改了没有」写成信息缺口。这里改走**冻结版本**的只读范围。
+            return self._content_outside_batch(path, lines)
         repository = getattr(row, "repository", None)
         if repository is None:
             return None
@@ -945,7 +1330,7 @@ class PlatformContextProvider:
             )
 
         if isinstance(raw, str):
-            return _render_text_content(raw, path=path, lines=lines, auto=auto)
+            return self._render_text_page(raw, path=path, lines=lines, auto=auto)
         if not raw:
             # 取到了、长度为零：这是「确实没有内容」，按契约返回空串。
             return ""
@@ -988,7 +1373,7 @@ class PlatformContextProvider:
                     f"[文档解析失败] {path}：内容无法解析成文本（不是可读的 OOXML 文档，"
                     "或文件已损坏）。**这不等于「没有内容」**。"
                 )
-            return _render_text_content(rendered, path=path, lines=lines, auto=auto)
+            return self._render_text_page(rendered, path=path, lines=lines, auto=auto)
 
         # 文本/代码：解码走 `utils.text_decoding`（**两端唯一一份实现**）。
         #
@@ -1004,7 +1389,7 @@ class PlatformContextProvider:
         text = text_or_notice(raw)
         if text is None:
             return binary_content_notice(path)
-        return _render_text_content(text, path=path, lines=lines, auto=auto)
+        return self._render_text_page(text, path=path, lines=lines, auto=auto)
 
     def _default_window(self, commit: str, path: str) -> str:
         """模型没点名时，把窗口放在这个文件**本次改动**的位置上（返回 `"a-b"`）。
@@ -1091,7 +1476,9 @@ class PlatformContextProvider:
 
         status = str(outcome.get("status") or "")
         if status == "ready":
-            rendered = _render_agent_file_content(outcome, path=path, auto=auto)
+            rendered = _render_agent_file_content(
+                outcome, path=path, auto=auto, limit=self._content_max_chars
+            )
             self._agent_content_cached[key] = rendered
             return rendered
 
@@ -1158,15 +1545,18 @@ class PlatformContextProvider:
     # -- 检索 ---------------------------------------------------------------
 
     def find_references(self, query: str, path: str = "") -> Optional[str]:
-        """在本批次改动的文件里找这个标识符的其它出现位置（`ai/reference_search.py`）。
+        """找这个标识符还有哪些出现位置。
 
-        与 `file_content` / `file_diff` 同一条路数：**平台本地能读就本地读，读不了就问
-        Agent**。区别在于它一次要读很多文件，所以两条来源**读了几个、跳过了几个、有没有
-        被上限截断**都要写进给模型的文本里 ——
+        ## 范围（工作包 D 的 P1，2026-09-24 起）
 
-        「没搜到」与「没搜完」在模型那里必须分得开：前者可以写进结论，后者只能写成
-        信息缺口。少了这几个数，它会用一句「没有其它引用」把一次只扫了一部分的搜索说成
-        结论，而线上一个周版本有 767 个文件。
+        默认搜 **本次仓库冻结 tip 的 Git 跟踪文件**（`frozen_repo` + `repo_reference`），
+        不再是「只搜本批次改动过的文件」。理由：小 diff 恰好改了公共接口时，只搜本批次
+        会让「调用方改了没有」**既证实不了也证伪不了**，而 run 45/46 正是把这条写成了
+        信息缺口 —— 继续加 `file_diff` 次数解决不了它。
+
+        冻结范围拿不到时（没有本地工作副本、platform/agent 模式、不是 git 仓库）退回原来
+        那条路（本批次 / 问 Agent），并**在结果里显式写明范围只有本批次** ——
+        「搜不到」与「没搜那么宽」在模型那里必须分得开。
 
         ## 前缀只影响 `search()`，不影响索引
 
@@ -1178,6 +1568,11 @@ class PlatformContextProvider:
         search = normalize_query(query)
         if not search:
             return None
+
+        repo_text = self._search_frozen_repo(search, normalize_path(path))
+        if repo_text is not None:
+            return repo_text
+
         if self._scope is None:
             return (
                 "[检索不可用] 这次分析没有把「本批次改动了哪些文件」传给取数层，"
@@ -1192,8 +1587,72 @@ class PlatformContextProvider:
         in_scope = sum(1 for item, _commit in pairs if not prefix or item.startswith(prefix))
         local = self._search_local(pairs, search, prefix=prefix)
         if local is not None:
-            return local
-        return self._search_from_agent(pairs, search, prefix=prefix, total_files=in_scope)
+            return self._with_narrow_scope_note(local)
+        return self._with_narrow_scope_note(
+            self._search_from_agent(pairs, search, prefix=prefix, total_files=in_scope)
+        )
+
+    def _search_frozen_repo(self, query: str, prefix: str) -> Optional[str]:
+        """冻结版本的仓库范围检索。**不可用时返回 `None`**（调用方退回本批次那条路）。
+
+        这里只有一条「不搜」的分支：拿不到跟踪树（`reader.tracked_paths()` 回 `None`）。
+        那是「无法检索」，不是「没有命中」—— 调用方会在结果前面补一句范围声明。
+        """
+        reader, _reason = self._resolved_reader()
+        if reader is None:
+            return None
+        extra = (
+            {"max_files": int(self._repo_index_files)}
+            if self._repo_index_files
+            else {}
+        )
+        outcome = search_frozen_repository(reader, query, prefix=prefix, **extra)
+        if outcome is None:
+            return (
+                f"[无法检索] 冻结版本的范围列不出来（对象库里读不到 "
+                f"{str(getattr(reader.frozen, 'tip', ''))[:12]} 的跟踪文件），"
+                f"所以 `{query}` **这一次没有在仓库范围内搜过**。"
+                "**这不等于「没有其它引用」** —— 请把这条写成信息缺口。"
+            )
+        return outcome.text
+
+    def _narrow_scope_note(self) -> str:
+        """退回「只搜本批次」时补在结果前面的一句**范围声明**（拿得到范围时为空串）。
+
+        没有它，模型会把「本批次里没有命中」读成「仓库里没有引用」—— 而这两句话的证据
+        强度差着一个数量级，报告里的结论也因此分叉。
+        """
+        _reader, reason = self._resolved_reader()
+        if _reader is not None:
+            return ""
+        return (
+            f"[范围说明] 本次**没有**仓库冻结范围可用（{reason}），"
+            "所以下面这次检索**只覆盖本批次改动过的文件**，"
+            "未改动过的文件（例如别的模块里的调用方）不在里面。\n"
+            "**「没有命中」只代表本批次里没有**，不能说成「仓库里没有引用」。\n\n"
+        )
+
+    def _with_narrow_scope_note(self, text: str) -> str:
+        """给结果补上范围声明。**失败说明原样返回**。
+
+        ## 为什么失败时不能补
+
+        `[检索不到]` / `[检索还没回来]` 这几句是**取数层的失败说明**，而记账那一层
+        （`trace_evidence.failure_notice` 与 `context_tools` 的 `failed` 计数）按**开头**
+        认它们：在它们前面插一段话，这条失败就会被记成「成功取到内容」——
+        同一个面板上「失败 0 条」与明细里列出的失败条数于是对不上，而后者被当成
+        「取数都很顺」。
+
+        代价是这种情况下范围声明缺席 —— 可以接受：那几句失败说明自己就带着
+        「**这不等于「没有其它引用」**，请写成信息缺口」，而「一条都没搜成」比
+        「只搜了本批次」是更强的限定。
+        """
+        note = self._narrow_scope_note()
+        if not note:
+            return text
+        if failure_notice(text):
+            return text
+        return note + text
 
     def _search_local(
         self,
