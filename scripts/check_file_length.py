@@ -49,10 +49,12 @@ EXCLUDED_FILES = {
 }
 
 # 历史遗留超长文件白名单（仅用于 --strict 时渐进治理，不阻断当前提交）
+#
+# 2026-09-23 清掉三条**已经毕业**的：`app.py`(1246) / `services/git_service.py`(1797) /
+# `services/weekly_version_logic.py`(1795) 都已被拆到门槛之下。留着它们等于给三个
+# 已经不超标的文件发免死金牌 —— 哪天再长回 2000 行以上，闸门不会响。
+# 白名单里只该留**当前仍超标**的；这也是这个名单「渐进治理」该有的收敛方向。
 LEGACY_OVERSIZE_ALLOWLIST = {
-    "app.py",
-    "services/git_service.py",
-    "services/weekly_version_logic.py",
     "services/agent_management_handlers.py",
 }
 
