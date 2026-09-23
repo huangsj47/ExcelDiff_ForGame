@@ -50,7 +50,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from models import Project, WeeklyVersionConfig, db
 from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace, AiWeeklyAnalysisState
-from services.ai import run_progress
+from services.ai import round_diagnostics, run_progress
 from services.ai.auto_sizing import (
     MODE_FAMILY,
     AnalysisPlan,
@@ -1851,7 +1851,7 @@ def _subagent_rows(run: AiAnalysisRun) -> list[dict[str, Any]]:
     **读不出来就给空列表，绝不编造一条**：面板据此区分「这次不是分片跑的」与「跑了但
     没记」—— 两者都不是「一个成员都没跑」。老运行（这个功能之前）走的就是空列表这条。
     """
-    payload = _json_object(getattr(run, "response_payload", None))
+    payload = round_diagnostics.json_object(getattr(run, "response_payload", None))
     rows = payload.get("subagents")
     if not isinstance(rows, list):
         return []
@@ -1888,17 +1888,6 @@ def _subagent_rows(run: AiAnalysisRun) -> list[dict[str, Any]]:
     return result
 
 
-def _json_object(raw: Any) -> dict[str, Any]:
-    """把库里那列 JSON 文本读成 dict。读不出来给 `{}`（老行/坏行不该让整页炸掉）。"""
-    if not raw:
-        return {}
-    try:
-        value = json.loads(raw)
-    except (TypeError, ValueError):
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
 def _run_row(run: AiAnalysisRun, table) -> dict[str, Any]:
     usage = usage_from_run(run, price_table=table)
     return {
@@ -1917,10 +1906,21 @@ def _run_row(run: AiAnalysisRun, table) -> dict[str, Any]:
 
 
 def run_usage(run_id: int) -> Optional[dict[str, Any]]:
-    """单次运行的明细：token 三段、命中率、费用、逐轮、按工具类型。
+    """单次运行的明细：token 四格、命中率、费用、逐轮（含诊断）、按工具类型。
 
     权限判定在路由层按**这条运行自己的 `project_id`** 做 —— 不能只信 URL 里的项目号，
     否则换个项目号就能读到别人的运行明细。
+
+    ## 诊断值与四格用量来自**逐轮事件账本**与 `usage_from_run`
+
+    trace 上没有推理 token / 三类耗时 / 请求指纹这几列（它只记「这一轮花了多少」那一
+    组），那几样在跑的时候就已经逐轮写进事件账本了（事件账本是工作包 E 的那一张）。
+    读取、口径与摆形状全在 `services/ai/round_diagnostics.py`：**不另建一张诊断表、
+    也不重算** —— 同一件事只该有一个来源。
+
+    诊断值摆在 `round_diagnostics` 这一块里，**不并进 `rounds[i]`**：那一行的键必须与
+    「跑的过程中」那一份（`trace_evidence.live_round_entry`）逐字相同，加了键就会把
+    同一个面板拆成两种真相。理由与那条契约的测试都在那个模块的 docstring 里。
     """
     run = AiAnalysisRun.query.filter_by(id=run_id).first()
     if run is None:
@@ -1933,6 +1933,9 @@ def run_usage(run_id: int) -> Optional[dict[str, Any]]:
         .limit(MAX_ROUNDS)
         .all()
     )
+    # 逐轮诊断块（按 `round_index`）与运行级四格用量：一次读全，口径在
+    # `services/ai/round_diagnostics.py`（这里只摆位置）。
+    diagnostics_block, breakdown = round_diagnostics.collect(run, rounds)
     return {
         "success": True,
         "run": {
@@ -1946,6 +1949,9 @@ def run_usage(run_id: int) -> Optional[dict[str, Any]]:
             "skill_version": run.skill_version or "",
             "rules_version": run.rules_version or "",
         },
+        # **四格并排**：总输入（含缓存命中）/ 未命中输入 / 缓存输入 / 输出（含推理）。
+        # 口径（未命中只减一次、`None` 是未上报不是 0）都在 `round_diagnostics` 里。
+        "input_breakdown": breakdown,
         # 逐轮：为什么后几轮更贵（提示词每轮重发上一轮的上下文），只有逐轮列出来才看得出。
         # `evidence` 那一块回答的是另一个问题：**这一轮到底看没看到东西** —— 计数分不出
         # 「取数失败」与「真的读了一份 diff」（见 `services/ai/trace_evidence.py`）。
@@ -1979,6 +1985,9 @@ def run_usage(run_id: int) -> Optional[dict[str, Any]]:
             }
             for row in rounds
         ],
+        # 逐轮的**诊断值**（推理 token / 用量来源 / 三类耗时 / 请求指纹 / 未命中输入），
+        # 按 `round_index` 排成一块 —— **不并进 `rounds[i]`**（形状契约，见 docstring）。
+        "round_diagnostics": diagnostics_block,
         "rounds_truncated": len(rounds) >= MAX_ROUNDS,
         # 子代理模式下**每个成员**的账（谁跑成了、谁没跑成、各花了多少）。
         # 没有这一块时给空列表 —— **不编造一条**：面板据此判断「这次不是分片跑的」，

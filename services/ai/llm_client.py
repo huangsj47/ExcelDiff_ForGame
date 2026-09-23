@@ -253,6 +253,15 @@ class ChatResult:
     cache_write_tokens: int | None = None
     # 上面两个数是从哪个字段读到的；`""` = 没读到。换网关会换字段名，留着便于排查。
     cache_source: str = ""
+    # 输出 token 里**有多少是隐藏推理**（上游报 `completion_tokens_details.reasoning_tokens`
+    # 这类字段时）。`None` = 上游没报这个字段，与「报了 0」（确实没有推理）是两件事。
+    #
+    # 这一格直接决定一件具体的事：**能不能下调各角色的 `max_output_tokens`**。输出撞上
+    # 上限时，是「写得太长」还是「想得太久」的处置完全相反（前者压输出格式，后者压
+    # 上限只会让结论更残缺）。没有这个数就下调上限，等于凭感觉砍。
+    reasoning_tokens: int | None = None
+    # 上面这个数是从哪个字段读到的；`""` = 没读到（见 `_extract_reasoning_usage`）。
+    reasoning_source: str = ""
 
     @property
     def total_tokens(self) -> int | None:
@@ -387,6 +396,48 @@ def _extract_cache_usage(payload: Any) -> tuple[int | None, int | None, str]:
         return read, write, "cache_read_input_tokens"
 
     return None, None, ""
+
+
+def _extract_reasoning_usage(payload: Any) -> tuple[int | None, str]:
+    """读「输出 token 里有多少是隐藏推理」，返回 `(数量, 来源标记)`。
+
+    按语义最明确的顺序探测两种真实存在的形态：
+
+    1. `usage.completion_tokens_details.reasoning_tokens` —— 把推理数放在
+       `completion_tokens` 的明细对象里（**推理是输出的一部分**），这是主流形态；
+    2. `usage.reasoning_tokens` —— 少数网关直接平铺一个同名字段。
+
+    ## 第 1 类要交叉校验，第 2 类不能
+
+    第 1 类里推理是输出的**子集**，所以「推理 > 输出」只可能是字段读错了对象（与
+    `_extract_cache_usage` 里那句「命中 + 未命中 ≠ 输入就不采信」同一条纪律：拆错的
+    分子分母比没有更糟，它会算出一个看起来很合理但错误的占比）。第 2 类平铺字段有
+    **额外计**的写法（推理不计入 `completion_tokens`），那时推理大于输出是合法的，
+    所以对它不加这条校验。
+
+    **读不到返回 `(None, "")`，不是 0**：0 是「确实没有推理」这个确定的观测值，
+    而面板上把「上游没报」显示成「推理 0」正好会把「输出 token 花在哪」这个问题答反。
+    """
+    if not isinstance(payload, dict):
+        return None, ""
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return None, ""
+
+    details = usage.get("completion_tokens_details")
+    if isinstance(details, dict):
+        reasoning = non_negative_int(details.get("reasoning_tokens"))
+        if reasoning is not None:
+            completion = non_negative_int(usage.get("completion_tokens"))
+            if completion is not None and reasoning > completion:
+                return None, ""
+            return reasoning, "completion_tokens_details.reasoning_tokens"
+
+    flat = non_negative_int(usage.get("reasoning_tokens"))
+    if flat is not None:
+        return flat, "reasoning_tokens"
+
+    return None, ""
 
 
 class LLMClient:
@@ -704,6 +755,7 @@ class LLMClient:
 
         prompt_tokens, completion_tokens = _extract_usage(payload)
         cache_read, cache_write, cache_source = _extract_cache_usage(payload)
+        reasoning_tokens, reasoning_source = _extract_reasoning_usage(payload)
         finish_reason = ""
         choices = payload.get("choices") if isinstance(payload, dict) else None
         if isinstance(choices, list) and choices and isinstance(choices[0], dict):
@@ -718,6 +770,8 @@ class LLMClient:
             cache_read_tokens=cache_read,
             cache_write_tokens=cache_write,
             cache_source=cache_source,
+            reasoning_tokens=reasoning_tokens,
+            reasoning_source=reasoning_source,
         )
 
     def stream(

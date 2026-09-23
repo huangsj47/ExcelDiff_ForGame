@@ -29,6 +29,7 @@ from services.ai.engine import (
     run_analysis,
 )
 from services.ai.rules import RuleThresholds
+from services.ai.request_fingerprint import DIVERGENCE_REASONS
 from services.ai.scope import AnalysisScope
 from services.ai.skill_loader import LoadedSkills, SkillDocument
 
@@ -255,3 +256,126 @@ class _FakeProvider:
 
     def find_references(self, query, path=""):
         return f"{query} 命中 1 处"
+
+
+# ---------------------------------------------------------------------------
+#  诊断值真的走到了进度帧上（缓存诊断的接线证明）
+#
+#  这一组补的是「**接线了不等于被用了**」那个坑：`RoundDiagnostics` 在引擎里有 9 个
+#  调用点，任何一处漏调都不会报错 —— 字段有默认值，那一轮在界面上只是永远空着。
+#  所以要跑一次真引擎、从进度回调里把帧捞出来看。
+#
+#  诊断值挂在 `RoundProgress`（**进度帧**）而不是返回值的 `RoundRecord` 上，这是有意的：
+#  逐轮事件账本读的就是进度帧（`round_events.record` ← `run_progress.publish`），
+#  所以拿 `outcome.rounds[i]` 去断言这一组会 AttributeError —— 那不是 bug，是走错了门。
+# ---------------------------------------------------------------------------
+
+
+def _diagnostics_frames(client):
+    """跑一次两轮的分析，返回每个进度帧上的诊断字典。"""
+    truncated = '{"status": "final", "report_markdown": "写了一半就断了'
+    final = json.dumps(
+        {
+            "status": "final",
+            "report_markdown": "# 变更理解\n\n改了协议。\n",
+            "anomalies": [],
+            "dimensions": [{"id": "module_coupling", "hit": False, "note": ""}],
+        },
+        ensure_ascii=False,
+    )
+    client._replies = [truncated, final]
+    frames: list = []
+    run_analysis(
+        client=client, provider=_FakeProvider(), loaded=_loaded(), scope=_scope(),
+        change_summary="本次变更共 1 个提交、1 个文件。\n", thresholds=RuleThresholds(),
+        on_round=frames.append,
+    )
+    assert len(frames) == 2, "这一组要的是两轮：第一轮截断、第二轮交结论"
+    return frames, client
+
+
+def test_the_first_round_reports_initial_and_no_previous_request():
+    """第一次调用**没有可比的上一请求** → 公共前缀是 `None`，不是 `0`。
+
+    「公共前缀 0 条」是一个真实观测值（上一次请求与这一次第一条就不同），而第一次调用
+    根本没有上一次 —— 两者在界面上都显示成 0 的话，「前缀从第一条就被改写」这个信号
+    就永远查不出来（它会被满屏的第一次调用淹没）。
+    """
+    client = _ScriptedClient()
+    frames, _ = _diagnostics_frames(client)
+    first = frames[0].round_diagnostics
+
+    assert first["prefix_divergence_reason"] == "initial"
+    assert first["prefix_common_messages"] is None
+    assert first["prefix_common_chars"] is None
+    # 16 个十六进制字符的短哈希（用途是本机对照，不是密码学，见 DIGEST_CHARS）。
+    assert len(first["request_fingerprint"]) == 16
+    assert all(c in "0123456789abcdef" for c in first["request_fingerprint"])
+
+
+def test_the_second_round_is_an_append_over_the_same_stable_prefix():
+    """第二轮是上一轮的**严格延长** → `append`，且稳定前缀哈希**一个字符都没变**。
+
+    后半句才是重点：跨运行复用缓存靠的就是「稳定前缀哈希相等」这一条
+    （`RequestFingerprint` 的 docstring 里写明了它与 `prefix_common_*` 分工不同）。
+    如果纠正轮重拼了系统提示词，这个哈希就会变 —— 而那正是「平台自己重写了前缀」
+    这一类要去看代码的情形。
+    """
+    client = _ScriptedClient()
+    frames, client = _diagnostics_frames(client)
+    first, second = frames[0].round_diagnostics, frames[1].round_diagnostics
+
+    assert second["prefix_divergence_reason"] == "append"
+    assert second["prefix_common_messages"] == len(client.calls[0]), (
+        "公共前缀的条数应当等于上一次请求的条数（这一次把它整个接了下去）"
+    )
+    assert second["prefix_common_chars"] > 0
+    assert second["stable_prefix_fingerprint"] == first["stable_prefix_fingerprint"], (
+        "稳定前缀（系统提示词 + 首轮变更清单）跨轮必须逐字节不变"
+    )
+    assert second["request_fingerprint"] != first["request_fingerprint"], (
+        "整请求哈希当然要变 —— 它变而稳定前缀不变，正是 append 的定义"
+    )
+
+
+def test_the_local_preparation_time_is_recorded_once_on_the_first_round():
+    """「拼系统提示词 / 预取」那一段只发生一次，所以只记在第 1 轮。
+
+    其余轮记 `None`（**不是 0**）：0 会让逐轮图看起来像「每一轮都花了 0 秒准备」，
+    而真相是那一段根本不属于后面的轮次。
+    """
+    client = _ScriptedClient()
+    frames, _ = _diagnostics_frames(client)
+
+    assert frames[0].round_diagnostics["index_build_ms"] is not None
+    assert frames[1].round_diagnostics["index_build_ms"] is None
+
+
+def test_an_unreported_reasoning_count_stays_none_on_the_progress_frame():
+    """上游没报推理 token → 帧上是 `None`，**不是 0**。
+
+    `_ScriptedClient` 就是一个不报这个字段的上游（它只给 prompt/completion 两个数）。
+    写成 0 的话，用量面板会显示一个确定的「推理 0 tokens」—— 而真相是这次调用压根
+    没测到，两者对「能不能下调单次输出上限」这个决定的意义完全相反。
+    """
+    client = _ScriptedClient()
+    frames, _ = _diagnostics_frames(client)
+
+    for frame in frames:
+        diagnostics = frame.round_diagnostics
+        assert diagnostics["reasoning_tokens"] is None
+        assert diagnostics["usage_source"] is None
+        assert diagnostics["reasoning_source"] is None
+
+
+def test_every_recorded_divergence_reason_is_on_the_whitelist():
+    """落库的分叉原因必须取自 `DIVERGENCE_REASONS` 那份白名单。
+
+    这一列在界面上是给人拿去**筛**的（「哪几次是 `other`」就是要去看代码的那一类），
+    出现一个白名单外的自由文本，那个筛选框就会静默地少掉几行。
+    """
+    client = _ScriptedClient()
+    frames, _ = _diagnostics_frames(client)
+
+    for frame in frames:
+        assert frame.round_diagnostics["prefix_divergence_reason"] in DIVERGENCE_REASONS

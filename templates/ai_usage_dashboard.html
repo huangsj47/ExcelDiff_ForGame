@@ -1492,6 +1492,99 @@ function aiuFmtDuration(ms) {
 }
 
 // ---------------------------------------------------------------------------
+//  逐轮的**诊断**（分叉原因 / 三类耗时 / 推理 token）：纯函数
+// ---------------------------------------------------------------------------
+// 这一组回答的是此前**没有任何数据**能回答的那个问题：「这次请求与上一次在哪个消息
+// 开始分叉」。它由后端在每次模型调用之前算好（`services/ai/request_fingerprint.py`），
+// 逐轮存在事件账本上，这里只负责把它读成人话。
+//
+// **哈希是本机诊断指标，不是命中率**（这句话必须跟着这些数字一起出现在界面上）：
+// 提供商按 token / 自己的内部单元匹配缓存，哈希相同**不保证**命中（服务端可能已经
+// 过期），哈希不同也**不保证**未命中（我们这一侧多一个不参与匹配的字段就会让哈希变掉）。
+// 所以下面那一行文案写的是「分叉原因」，不是「命中/未命中」。
+//
+// 分叉原因的取值来自后端白名单（`request_fingerprint.DIVERGENCE_REASONS`），这里给
+// 中文说法。**认不出的取值原样显示**（不吞掉）：换版本时多一个取值，界面上应该看得见
+// 那个新词，而不是一个空白。
+var AIU_DIVERGENCE_LABELS = {
+    initial: '首次请求（这一次运行还没有可比的上一请求）',
+    append: '追加（这次的消息是上一次的延长 —— 缓存能命中的理想形态）',
+    compaction: '压缩（平台压过历史 / 压小重发，前缀被改写）',
+    prompt_change: '提示词版本变了（允许的自然失效）',
+    snapshot_change: '快照变了（允许的自然失效 —— 复用旧前缀反而是错的）',
+    other: '其他（前缀变了而提示词版本与快照都没变 —— 这一类要去看代码）'
+};
+
+/** 这一轮的诊断值（逐轮事件账本上那几列，后端摆在 `payload.round_diagnostics` 里）。
+ *
+ * 为什么诊断值不并进 `rounds[i]`：那一行的键必须与「跑的过程中」那一份
+ * （`trace_evidence.live_round_entry`）**逐字相同** —— 同一个面板两条来路，键不一样
+ * 就会有两种真相。所以逐轮那一层要读诊断，就先查这一下（按 `round_index` 对号）。
+ *
+ * **没有就是 `null`**（老运行、事件行对不上），不是一个「全 0」的诊断。
+ */
+function aiuRoundDiag(round, table) {
+    if (!round) return null;
+    var source = table || {};
+    return source[String(round.round_index)] || null;
+}
+
+/** 逐轮诊断 → 给界面读的几行。**没有诊断值时返回空数组**（那一行不渲染）。
+ *
+ * 三个「未上报」的写法要分清（与全库同一条口径）：
+ *  * 某个数缺失 → 那一格不写，或者明写「未上报」；
+ *  * `0` 是一个**确定的观测值**（上游明确报了 0），要照实写 0；
+ *  * 整块指纹缺失（老运行、诊断没算出来）→ 空数组，不编一行「分叉原因：未知」。
+ */
+function aiuRoundDiagnosticLines(diag) {
+    var lines = [];
+    var fingerprint = (diag || {}).request_fingerprint || null;
+    if (fingerprint) {
+        var reason = fingerprint.prefix_divergence_reason || '';
+        lines.push('分叉原因：' + (AIU_DIVERGENCE_LABELS[reason] || reason || '未上报'));
+        if (fingerprint.prefix_common_messages !== null
+            && fingerprint.prefix_common_messages !== undefined) {
+            lines.push('与前一次请求的公共前缀：' + fingerprint.prefix_common_messages + ' 条消息 / '
+                + aiuFmtInt(fingerprint.prefix_common_chars) + ' 字');
+        }
+        if (fingerprint.request_fingerprint) {
+            lines.push('请求指纹 ' + fingerprint.request_fingerprint
+                + '，稳定前缀指纹 ' + (fingerprint.stable_prefix_fingerprint || '未上报')
+                + (fingerprint.message_count === null || fingerprint.message_count === undefined
+                    ? '' : '（本次 ' + fingerprint.message_count + ' 条消息 / '
+                        + aiuFmtInt(fingerprint.request_chars) + ' 字）'));
+        }
+        var versions = [];
+        if (fingerprint.prompt_version) versions.push('提示词 ' + fingerprint.prompt_version);
+        if (fingerprint.snapshot_id) versions.push('快照 ' + fingerprint.snapshot_id);
+        if (fingerprint.model) versions.push('模型 ' + fingerprint.model);
+        if (fingerprint.endpoint) versions.push('端点 ' + fingerprint.endpoint);
+        if (versions.length) lines.push(versions.join(' · '));
+        lines.push('哈希是本机诊断指标，不是命中率：提供商按 token 匹配，哈希相同'
+            + '也不保证缓存命中（服务端可能已过期）；哈希不同也不保证未命中。');
+    }
+    var timings = [];
+    var values = diag || {};
+    if (values.model_call_ms !== null && values.model_call_ms !== undefined) {
+        timings.push('模型调用 ' + aiuFmtDuration(values.model_call_ms));
+    }
+    if (values.tool_fetch_ms !== null && values.tool_fetch_ms !== undefined) {
+        timings.push('本地取数 ' + aiuFmtDuration(values.tool_fetch_ms));
+    }
+    if (values.index_build_ms !== null && values.index_build_ms !== undefined) {
+        timings.push('建索引 ' + aiuFmtDuration(values.index_build_ms));
+    }
+    if (timings.length) lines.push('耗时构成：' + timings.join(' · ') + '（其余为组装与解析）');
+    if (values.reasoning_tokens !== null && values.reasoning_tokens !== undefined) {
+        lines.push('其中推理 token ' + aiuFmtInt(values.reasoning_tokens)
+            + (values.reasoning_source ? '（来源 ' + values.reasoning_source + '）' : ''));
+    } else if (values.reasoning_source) {
+        lines.push('推理 token 上游未上报（字段来源标记：' + values.reasoning_source + '）');
+    }
+    return lines;
+}
+
+// ---------------------------------------------------------------------------
 //  顶部 KPI 卡片的**内容**：纯函数（理由同 `aiuActiveNoteText`）
 // ---------------------------------------------------------------------------
 // 一屏「已经花了多少」由三组数字组成，服务端把其中两组**并列**下发（见
@@ -1557,10 +1650,22 @@ function aiuKpiCards(totals, overBudget, activeCount) {
     cards.push({
         label: '其中命中缓存',
         value: aiuOrUnknown(aiuFmtTokens(hit), AIU_UNKNOWN),
-        sub: (hit === null || hit === undefined)
-            ? aiuCoverageText(runs, missing.cache_read, '缓存字段')
-            : '按未命中价计费的输入：' + aiuOrUnknown(aiuFmtTokens(miss), AIU_UNKNOWN),
+        sub: aiuCoverageText(runs, missing.cache_read, '缓存字段'),
         unknown: aiuFmtTokens(hit) === null
+    });
+    // **「未命中输入」单独一格**（四格并排：总输入 / 未命中输入 / 缓存输入 / 输出）。
+    //
+    // 它此前只藏在上一格的副标题里，而它恰恰是「真正按未命中价计费」的那一档 ——
+    // 让读的人为了看它自己做一次减法是不行的：那个减法是这一页最容易算错的一步
+    // （对面那套 API 的 `inputTokens` 已经把命中减掉了，拿它当总输入就会减第二遍，
+    // 见 `services/ai_usage_service.input_breakdown`）。
+    cards.push({
+        label: '未命中输入（按未命中价计费）',
+        value: aiuOrUnknown(aiuFmtTokens(miss), AIU_UNKNOWN),
+        sub: (miss === null || miss === undefined)
+            ? '上游没报输入或缓存字段 —— 这一格是未知，不是 0'
+            : '总输入 − 缓存输入（只减这一次）',
+        unknown: aiuFmtTokens(miss) === null
     });
     cards.push({
         label: '输出 token',
@@ -3811,7 +3916,7 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
      * 是一句「平台读不到 X」）与一次真的读了一份 diff，在「条数 + 字符数」上长得一模一样
      * （见 services/ai/trace_evidence.py）。
      */
-    function renderRoundDetail(host, round) {
+    function renderRoundDetail(host, round, diag) {
         host.textContent = '';
         var requests = round.requests || [];
         var executed = round.executed || [];
@@ -3819,8 +3924,16 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         var raw = round.response_text || '';
         var notes = round.budget_notes || '';
         var hint = round.correction_hint || '';
+        // 诊断那几行（分叉原因 / 三类耗时 / 推理 token）。它**先于**下面那句「明细未采集」
+        // 的判断进 `host`：老运行也可能有指纹（诊断是后加的列），而一句「未采集」会把
+        // 已有的诊断一起说没了。
+        var diagnosticLines = aiuRoundDiagnosticLines(diag);
+        if (diagnosticLines.length) {
+            host.appendChild(roundBlock('请求指纹与耗时（本机诊断）', diagnosticLines));
+        }
         // 老行（这一层之前写下的）只有计数：如实说没采集，而不是显示成「什么都没要」。
-        if (!requests.length && !executed.length && !dropped.length && !raw && !notes && !hint) {
+        if (!requests.length && !executed.length && !dropped.length && !raw && !notes && !hint
+            && !diagnosticLines.length) {
             host.appendChild(roundNote('这一轮的明细未采集（该功能上线前的运行没有记录）。'));
             return;
         }
@@ -3870,7 +3983,7 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
     }
 
     /** 逐轮表的最后一格：一个「明细」按钮 + 它下面那一整行的容器（按需渲染）。 */
-    function roundDetailCell(round, columns) {
+    function roundDetailCell(round, columns, diag) {
         var td = document.createElement('td');
         td.className = 'aiu-round-actions';
         var button = document.createElement('button');
@@ -3892,7 +4005,7 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             button.setAttribute('aria-expanded', detailRow.hidden ? 'false' : 'true');
             // 第一次展开时才渲染：几十轮全渲染出来会让这个弹层又长又慢。
             if (!detailRow.hidden && !detailCell.childNodes.length) {
-                renderRoundDetail(detailCell, round);
+                renderRoundDetail(detailCell, round, diag);
             }
         });
         // 明细行紧跟在这一轮后面 —— 在 `td` 上挂一个引用，调用方 append 完 `tr` 再 append 它。
@@ -4019,10 +4132,54 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             }
             var grid = document.createElement('div');
             grid.className = 'aiu-kpi-grid';
-            grid.appendChild(kpi('输入 token', aiuOrUnknown(aiuFmtTokens((usage.tokens || {}).input), AIU_UNKNOWN)));
-            grid.appendChild(kpi('命中缓存', aiuOrUnknown(aiuFmtTokens((usage.tokens || {}).cache_read), AIU_UNKNOWN),
-                aiuFmtRate((usage.cache || {}).hit_rate) === null ? '未上报' : '命中率 ' + aiuFmtRate((usage.cache || {}).hit_rate)));
-            grid.appendChild(kpi('输出 token', aiuOrUnknown(aiuFmtTokens((usage.tokens || {}).output), AIU_UNKNOWN)));
+            // **四格并排**：总输入 / 未命中输入 / 缓存输入 / 输出（含推理）。
+            //
+            // 为什么是四格而不是「输入 + 命中缓存」两格：上游的 `prompt_tokens` **含**
+            // 缓存命中，所以「输入」那一格本身是**总输入**；把命中从总输入里减出来的那个数
+            // （真正按未命中价计费的量）此前只藏在副标题里，读的人得自己做一次减法 ——
+            // 而跨系统对照时最容易犯的错就是**减第二遍**（对面那套 API 的 inputTokens
+            // 已经减过命中了）。摆成并排的三格之后，减法只由后端做一次
+            // （`ai_usage_service.input_breakdown`），界面上只显示结果。
+            //
+            // 口径：**「未上报」与「0」必须分开**。后端给的 `null`（上游没报那个字段）
+            // 走 `aiuOrUnknown` 显示「未上报」，而 `0`（上游明确报了 0）显示 0 ——
+            // 两者对用户的含义正好相反（一边是「没花钱」，一边是「不知道花了多少」）。
+            var breakdown = payload.input_breakdown || {};
+            grid.appendChild(kpi(
+                '总输入 token',
+                aiuOrUnknown(aiuFmtTokens(breakdown.total_input), AIU_UNKNOWN),
+                '含缓存命中的那部分（与上游 prompt_tokens 同口径）',
+                aiuFmtTokens(breakdown.total_input) === null
+            ));
+            grid.appendChild(kpi(
+                '未命中输入',
+                aiuOrUnknown(aiuFmtTokens(breakdown.uncached_input), AIU_UNKNOWN),
+                '总输入 − 缓存输入，按未命中价计费的那一档',
+                aiuFmtTokens(breakdown.uncached_input) === null
+            ));
+            grid.appendChild(kpi(
+                '缓存输入（命中）',
+                aiuOrUnknown(aiuFmtTokens(breakdown.cached_input), AIU_UNKNOWN),
+                aiuFmtRate((usage.cache || {}).hit_rate) === null
+                    ? '上游没报缓存字段（命中率未知，不是 0%）'
+                    : '命中率 ' + aiuFmtRate((usage.cache || {}).hit_rate),
+                aiuFmtTokens(breakdown.cached_input) === null
+            ));
+            // 输出那一格的口径是「**含**推理」：上游把推理 token 放在输出明细里，
+            // 所以「输出 8k」可能是「写了 8k」也可能是「写了 1k、想了 7k」——
+            // 这两种情况该调的东西完全相反（压输出格式 vs 调单次输出上限）。
+            // 推理那一格**只有上游报过才算得出**（`null` = 未上报，不是 0）。
+            var reasoningText = aiuFmtTokens(breakdown.reasoning);
+            grid.appendChild(kpi(
+                '输出（含推理）',
+                aiuOrUnknown(aiuFmtTokens(breakdown.output), AIU_UNKNOWN),
+                reasoningText === null
+                    ? '上游未上报推理 token（因此这一格看不出输出花在写还是想）'
+                    : '其中推理 ' + reasoningText + '（'
+                        + (breakdown.reasoning_reported_rounds || 0) + '/'
+                        + (breakdown.reasoning_rounds || 0) + ' 轮上报）',
+                aiuFmtTokens(breakdown.output) === null
+            ));
             grid.appendChild(kpi('合计 token', aiuOrUnknown(aiuFmtTokens((usage.tokens || {}).total), AIU_UNKNOWN),
                 (usage.rounds === null || usage.rounds === undefined ? '-' : usage.rounds) + ' 轮，耗时 '
                 + aiuOrUnknown(aiuFmtDuration(usage.duration_ms), '未采集')));
@@ -4049,8 +4206,18 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             // 给它们加一列全是「—」的列只会把表挤宽。
             var slices = payload.subagents || [];
             var hasSlices = slices.length > 0;
+            // 推理那一列**只在真的有哪一轮报过时才加**（与「分片」那一列同一个理由：
+            // 给绝大多数运行加一列全是「未上报」的列，只会把表挤宽、把眼睛带偏）。
+            // 它是「输出 token 涨了，是写得更长还是想得更久」的唯一逐轮依据。
+            var rounds = payload.rounds || [];
+            var diagnostics = payload.round_diagnostics || {};
+            var hasReasoning = rounds.some(function (item) {
+                var diag = aiuRoundDiag(item, diagnostics) || {};
+                return diag.reasoning_tokens !== null && diag.reasoning_tokens !== undefined;
+            });
             var caption = '每一轮的 token 与耗时。输入 token 是累计值：每轮都会把上一轮的上下文重发一遍。'
-                + '「明细」里是这一轮要了什么、拿到的那一份到底是内容还是一句「取不到」、丢了什么。'
+                + '「明细」里是这一轮要了什么、拿到的那一份到底是内容还是一句「取不到」、丢了什么，'
+                + '以及请求指纹（与其他轮次/其他运行的分叉原因）与分开的耗时。'
                 + (hasSlices
                     ? '「分片」是这一轮由哪个分片代理跑的 —— 轮次号在分片之间是连着的，只看它分不出「S1 的第 2 轮」与「S2 的第 2 轮」。'
                     : '');
@@ -4059,14 +4226,21 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
                 + (hasSlices ? '<th scope="col">分片</th>' : '')
                 + '<th scope="col">轮次</th><th scope="col">结局</th>'
                 + '<th scope="col" class="num">输入 token</th><th scope="col" class="num">其中命中</th>'
-                + '<th scope="col" class="num">输出 token</th><th scope="col" class="num">提示词字符</th>'
+                + '<th scope="col" class="num">其中未命中</th>'
+                + '<th scope="col" class="num">输出 token</th>'
+                + (hasReasoning ? '<th scope="col" class="num">其中推理</th>' : '')
+                + '<th scope="col" class="num">提示词字符</th>'
                 + '<th scope="col" class="num">上下文字符</th><th scope="col" class="num">耗时</th>'
                 + '<th scope="col">备注</th><th scope="col">明细</th></tr></thead>';
             var tbody = document.createElement('tbody');
-            // 列数有一个名字：空态那一行的 `colSpan` 必须与它一致（多一列就多一个 11）。
-            var roundColumns = hasSlices ? 11 : 10;
-            (payload.rounds || []).forEach(function (round) {
+            // 列数有一个名字：空态那一行的 `colSpan` 必须与它一致（少算一列就会缺一块）。
+            // 两个「有时才有」的列（分片、推理）都要算进来，见上面那两处判断。
+            var roundColumns = 11 + (hasSlices ? 1 : 0) + (hasReasoning ? 1 : 0);
+            rounds.forEach(function (round) {
                 var tr = document.createElement('tr');
+                // 这一轮的诊断值（后端摆在 `payload.round_diagnostics` 里，见 `aiuRoundDiag`）。
+                // 没有就是 `null` → 「未上报」，不是 0。
+                var diag = aiuRoundDiag(round, diagnostics);
                 if (hasSlices) {
                     // `agent_round` 是这一轮在那个分片内部的序号；主代理自己那几轮
                     // `agent` 是空的，写「汇总」而不是留一个空格。
@@ -4079,12 +4253,19 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
                 tr.appendChild(cell(round.outcome || '—'));
                 tr.appendChild(numCell(aiuFmtInt(round.tokens_input)));
                 tr.appendChild(numCell(aiuFmtTokens(round.cache_read_tokens)));
+                // 未命中：后端已经减好了（`input_breakdown`，**只减一次**）。`null` 是
+                // 「上游没报总输入或缓存字段」→ 未上报，**不是 0**。
+                tr.appendChild(numCell(aiuFmtTokens((diag || {}).uncached_input)));
                 tr.appendChild(numCell(aiuFmtInt(round.tokens_output)));
+                if (hasReasoning) {
+                    // 推理那一格也来自诊断块（它不是 `rounds[i]` 上的键，见 `aiuRoundDiag`）。
+                    tr.appendChild(numCell(aiuFmtInt((diag || {}).reasoning_tokens)));
+                }
                 tr.appendChild(numCell(aiuFmtInt(round.request_chars)));
                 tr.appendChild(numCell(aiuFmtInt(round.context_chars)));
                 tr.appendChild(numCell(aiuFmtDuration(round.duration_ms)));
                 tr.appendChild(cell(round.error || '—'));
-                var actionCell = roundDetailCell(round, roundColumns);
+                var actionCell = roundDetailCell(round, roundColumns, diag);
                 tr.appendChild(actionCell);
                 tbody.appendChild(tr);
                 // 明细行紧跟在这一轮后面（占满整行），默认收起。

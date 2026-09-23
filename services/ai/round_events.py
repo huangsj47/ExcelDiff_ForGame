@@ -57,6 +57,25 @@ _COUNT_FIELDS = (
     ("dropped", "tool_dropped"),
 )
 
+# 逐轮**诊断值**的列名（工作包 F）。这一份白名单与
+# `request_fingerprint.RoundDiagnostics.event_fields()` 的键必须**逐字相同** ——
+# 两边各写一份、谁也不检查谁，表现就是「界面上那几列永远是空的」而不报错。
+# `tests/test_ai_usage_input_breakdown.py` 拿同一张集合把两份钉在一起。
+_DIAGNOSTIC_COLUMNS = (
+    "reasoning_tokens",
+    "usage_source",
+    "reasoning_source",
+    "model_call_ms",
+    "tool_fetch_ms",
+    "index_build_ms",
+    "request_fingerprint",
+    "stable_prefix_fingerprint",
+    "prefix_common_messages",
+    "prefix_common_chars",
+    "prefix_divergence_reason",
+    "fingerprint_json",
+)
+
 # 成员角色（给界面说人话用）。判据只有位次与标签两条，见 `member_role`。
 ROLE_MAIN = "main"
 ROLE_SUBAGENT = "subagent"
@@ -192,6 +211,16 @@ def event_fields(progress: Any) -> Optional[dict]:
 
     没有 `round_entry` 的帧（老调用方、测试替身）→ 用量与计数都记 `None`（未上报），
     **不编一个 0**：一次没上报的调用与一次没花的调用在界面上是两句不同的话。
+
+    ## 诊断三组（指纹 / 推理 token / 三类耗时）同样从帧上读，缺了就是 `None`
+
+    它们是工作包 F 加进来的观测值，来源与上面的用量分开：
+
+    * `reasoning_tokens` / `usage_source` —— 上游报了什么（`None` = 没报）；
+    * `model_call_ms` / `tool_fetch_ms` / `index_build_ms` —— 分开的耗时（`None` =
+      这一轮没有这一类，例如没跑取数）；
+    * 指纹那几列 —— 列名由本模块的 `_DIAGNOSTIC_COLUMNS` 白名单收口（键名不在这里
+      拼，见那条常量的说明）。
     """
     index = _optional_int(_frame_value(progress, "index", 0))
     if index is None or index < 1:
@@ -214,12 +243,21 @@ def event_fields(progress: Any) -> Optional[dict]:
         "tokens_output": _entry_int(entry, "tokens_output"),
         "cache_read_tokens": _entry_int(entry, "cache_read_tokens"),
         "cache_write_tokens": _entry_int(entry, "cache_write_tokens"),
+        # 推理 token 与它的两个来源标记：同样是「上游没报就是 None」（见模块纪律 3）。
+        # 真正**直接落列**的那几格在下面由 `_DIAGNOSTIC_COLUMNS` 一次填好；这里不再写一遍
+        # （两处各写一份键名，迟早有一边漏掉，而漏掉的那一列在界面上只是永远空着）。
         "duration_ms": _entry_int(entry, "duration_ms"),
         "context_chars": _entry_int(entry, "context_chars"),
         "request_chars": _entry_int(entry, "request_chars"),
         "candidates": None,
         "entry_json": _encode_entry(entry),
     }
+    # 诊断值（推理 token / 来源标记 / 三类耗时 / 请求指纹的哈希与计数）：整块来自
+    # `RoundDiagnostics.event_fields`（列名与模型逐字对齐），**列名在这里是白名单**。
+    diagnostics = _frame_value(progress, "round_diagnostics", None)
+    sources = diagnostics if isinstance(diagnostics, dict) else {}
+    for column in _DIAGNOSTIC_COLUMNS:
+        row[column] = sources.get(column)
     for source, column in _COUNT_FIELDS:
         row[column] = _optional_int(counts.get(source)) if counts else None
     candidates = counts.get("candidates") if counts else None
@@ -414,6 +452,12 @@ def member_totals(run_id: int, *, rows: Optional[Sequence[Any]] = None) -> list[
             [_field(item, "cache_write_tokens") for item in items]
         )
         duration, _duration_ok = _sum_known([_field(item, "duration_ms") for item in items])
+        # 推理 token 与模型调用耗时：逐成员各一份。推理这一格**只有上游报过的轮次才算
+        # 得出来**（`None` = 一轮都没报，不是 0），所以它与 tokens 一样带「是不是完整的」
+        # 判断；模型调用耗时是本地量的，取「所有轮次的已知值之和」。
+        reasoning, reasoning_ok = _sum_known(
+            [_field(item, "reasoning_tokens") for item in items]
+        )
         # 候选数另有一条口径：**只有交结论的那一轮才有值**（其余轮是 `NULL` = 「这一轮不是
         # 交结论的那一轮」，不是「没上报」）。所以判据是「有没有哪一轮报过」，
         # 而不是「每一轮都报了」—— 否则每个成员都会显示成「候选数未上报」。
@@ -437,7 +481,13 @@ def member_totals(run_id: int, *, rows: Optional[Sequence[Any]] = None) -> list[
             "cache_write_tokens": cache_write,
             # 输入与输出都要齐全才算「这个成员的账是全的」。
             "tokens_reported": bool(tokens_ok and out_ok),
+            # 输出里有多少是隐藏推理（`None` = 这个成员一轮都没报过；不全时是下界）。
+            "reasoning_tokens": reasoning,
+            "reasoning_reported": bool(reasoning_ok),
             "duration_ms": duration,
+            # 逐成员的模型调用耗时（三类耗时里唯一能跨成员横比的那一项：指引实测本样本
+            # 99.7% 的时间在模型调用链上，见 `services/ai/request_fingerprint.py` 的模块文档）。
+            "model_call_ms": _sum_known([_field(item, "model_call_ms") for item in items])[0],
             # 候选数只在「交结论的那一轮」有值：一轮都没有就是 `None`（未上报），
             # 交过但一条都没有才是 0。
             "candidates": candidates,

@@ -244,10 +244,16 @@ class TestTheRoundTableGrewAColumn:
         script = _dashboard_script()
 
         assert script.count('<th scope="col">明细</th>') == 1, "明细列的表头"
-        # 列数只有一个来源（`roundColumns`），而它现在**随「这次分没分片」变**：
-        # 分片那一列只在真的分了片时才加（见 `TestTheSliceColumn`）。
-        assert "var roundColumns = hasSlices ? 11 : 10" in script, (
+        # 列数只有一个来源（`roundColumns`），而它现在**随两个可选列变**：
+        # 分片那一列只在真的分了片时才加（见 `TestTheSliceColumn`），推理那一列只在
+        # 真有哪一轮报过推理 token 时才加（工作包 F：多数端点一次都不报，给它们加一列
+        # 全是「未上报」的列只会把表挤宽）。两个可选列都要算进去 —— 少算一列，
+        # 空态那一行就会缺一块。
+        assert "var roundColumns = 11 + (hasSlices ? 1 : 0) + (hasReasoning ? 1 : 0)" in script, (
             "列数要有一个名字 —— 空态那一行的 colSpan 与它必须是一致的"
+        )
+        assert "var hasReasoning = rounds.some(" in script, (
+            "推理那一列要**按有没有数**决定加不加（与分片那一列同一条纪律）"
         )
 
     def test_the_empty_row_uses_the_same_column_count(self):
@@ -263,8 +269,10 @@ class TestTheRoundTableGrewAColumn:
 
         assert "detailRow.hidden = true" in body, "明细行默认要是收起的"
         assert "aria-expanded" in body, "展开状态要报给读屏"
-        # 按需渲染：几十轮全渲染出来会让这个弹层又长又慢
-        assert "renderRoundDetail(detailCell, round)" in body
+        # 按需渲染：几十轮全渲染出来会让这个弹层又长又慢。
+        # 诊断值（指纹 / 三类耗时 / 推理）也一起传进去 —— 它在 `round_diagnostics`
+        # 那一块里，不在 `round` 上（见 `ai_usage_service.run_usage` 的 docstring）。
+        assert "renderRoundDetail(detailCell, round, diag)" in body
         assert "detailCell.childNodes.length" in body, "少了「只渲染一次」的判断"
         assert "tbody.appendChild(actionCell.aiuDetailRow)" in script, (
             "明细行没有被挂进表里 —— 点了「明细」什么都不会出现"

@@ -23,6 +23,7 @@ from models.ai_analysis import (
     RUN_STATUSES,
     TRACE_OUTCOMES,
     AiAnalysisAnomaly,
+    AiAnalysisRoundEvent,
     AiAnalysisRun,
     AiAnalysisTrace,
     AiProjectAnalysisConfig,
@@ -290,6 +291,140 @@ def test_the_migration_is_wired_into_startup():
 
     source = pyinspect.getsource(db_migration_service.apply_schema_migrations)
     assert "_migrate_ai_analysis_columns" in source
+
+
+# ==========================================================================
+# 逐轮事件账的诊断列
+#
+# 这张表与上面三张不同：它**在工作包 E 上线时就已经建出来了**，所以它不是「新表」，
+# `db.create_all()` 不会给它补列 —— 后来加的 12 个诊断列**必须**走迁移。
+#
+# 漏了那一步的症状是**静默**的：写入侧那条 `except` 把它咽成一行日志，读取侧拿到空，
+# 面板上全部显示「未上报」—— 与「上游确实没上报」逐字相同。实测时会以为功能没生效。
+# ==========================================================================
+
+# 工作包 E 上线时那张表的实际形态（27 列，线上库导出）。**故意手抄成一个快照**，
+# 而不是从模型里生成 —— 从模型生成就永远等于模型，那份「模型加了列、迁移忘了跟」
+# 的漂移就再也测不出来了。
+_OLD_ROUND_EVENT_DDL = """
+CREATE TABLE ai_analysis_round_event (
+    id INTEGER NOT NULL,
+    run_id INTEGER NOT NULL,
+    job_id INTEGER,
+    project_id INTEGER,
+    member VARCHAR(40) NOT NULL,
+    member_index INTEGER,
+    member_total INTEGER,
+    round INTEGER NOT NULL,
+    status VARCHAR(30),
+    parsed_ok BOOLEAN,
+    tokens_input INTEGER,
+    tokens_output INTEGER,
+    cache_read_tokens INTEGER,
+    cache_write_tokens INTEGER,
+    tool_requests INTEGER,
+    tool_executed INTEGER,
+    tool_failed INTEGER,
+    tool_truncated INTEGER,
+    tool_refused INTEGER,
+    tool_dropped INTEGER,
+    candidates INTEGER,
+    duration_ms INTEGER,
+    context_chars INTEGER,
+    request_chars INTEGER,
+    entry_json TEXT,
+    created_at DATETIME,
+    updated_at DATETIME,
+    PRIMARY KEY (id),
+    CONSTRAINT uq_ai_round_event_run_member_round UNIQUE (run_id, member, round),
+    CONSTRAINT uq_ai_round_event_job_member_round UNIQUE (job_id, run_id, member, round)
+)
+"""
+
+
+@pytest.fixture()
+def old_round_event_db(tmp_path):
+    path = tmp_path / "old_round_event.db"
+    engine = create_engine(f"sqlite:///{path.as_posix()}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(_OLD_ROUND_EVENT_DDL)
+    stub = _DbStub(engine)
+    yield stub
+    stub.session.close()
+    engine.dispose()
+
+
+def test_the_round_event_migration_lands_exactly_on_the_model(old_round_event_db):
+    """迁移后的列集合必须与模型**完全相等**（不是「包含」）。
+
+    相等拦两头：漏掉某一列（实测会静默显示「未上报」），以及迁移里写了一个模型上
+    不存在的列名（那条 `ALTER` 会成功、库里从此多一列垃圾，而没有任何地方读它）。
+    """
+    from services.db_migration_service import _migrate_round_event_diagnostics_columns
+
+    _migrate_round_event_diagnostics_columns(old_round_event_db, lambda *a, **k: None)
+
+    assert _columns(old_round_event_db, "ai_analysis_round_event") == set(
+        AiAnalysisRoundEvent.__table__.columns.keys()
+    )
+
+
+def test_the_round_event_migration_leaves_old_rows_unreported(old_round_event_db):
+    """老行迁移后是 **NULL，不是 0**。
+
+    这 12 列里多数是「上游没报」的语义（`reasoning_tokens` / 三段耗时 / 前缀公共
+    条数）：NULL 与 0 是两件不同的事 —— 0 是一个真实读数（这次调用确实消耗了 0 个
+    推理 token），NULL 是「没量到」。所以迁移**不带 DEFAULT 子句**，读取侧据此显示
+    「未上报」。把老行回填成 0 会让面板谎报一堆真实的零。
+    """
+    from services.db_migration_service import _migrate_round_event_diagnostics_columns
+
+    with old_round_event_db.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO ai_analysis_round_event"
+            " (id, run_id, member, round, tokens_input, tokens_output)"
+            " VALUES (1, 42, '', 1, 100, 20)"
+        )
+
+    _migrate_round_event_diagnostics_columns(old_round_event_db, lambda *a, **k: None)
+
+    row = old_round_event_db.session.query(AiAnalysisRoundEvent).filter_by(id=1).first()
+    assert row is not None
+    assert row.tokens_input == 100, "老数据不能被改动"
+    assert row.reasoning_tokens is None, "未上报就是 NULL，不许回填成 0"
+    assert row.model_call_ms is None
+    assert row.prefix_common_messages is None
+    assert row.request_fingerprint is None
+
+
+def test_the_round_event_migration_is_idempotent(old_round_event_db):
+    """启动时每次都会跑一遍。第二遍必须无害且**不报失败**。"""
+    from services.db_migration_service import _migrate_round_event_diagnostics_columns
+
+    messages: list[str] = []
+
+    def _log(*args, **_kwargs):
+        messages.append(" ".join(str(arg) for arg in args))
+
+    _migrate_round_event_diagnostics_columns(old_round_event_db, _log)
+    before = _columns(old_round_event_db, "ai_analysis_round_event")
+    messages.clear()
+
+    _migrate_round_event_diagnostics_columns(old_round_event_db, _log)
+
+    assert _columns(old_round_event_db, "ai_analysis_round_event") == before
+    failures = [message for message in messages if "失败" in message]
+    assert not failures, f"第二遍迁移报了失败：{failures}"
+
+
+def test_the_round_event_migration_is_wired_into_startup():
+    """挂了才算数 —— 没挂的话函数再对也不会有一次真正生效。"""
+    import inspect as pyinspect
+
+    from services import db_migration_service
+
+    source = pyinspect.getsource(db_migration_service.apply_schema_migrations)
+    assert "_migrate_round_event_diagnostics_columns" in source
 
 
 def test_migrations_run_clean_against_the_real_schema():

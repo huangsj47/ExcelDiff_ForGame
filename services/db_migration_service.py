@@ -411,6 +411,48 @@ def _migrate_ai_analysis_columns(db, log_print):
     )
 
 
+def _migrate_round_event_diagnostics_columns(db, log_print):
+    """给 `ai_analysis_round_event` 补缓存诊断的 12 列。
+
+    **为什么必须接上**：逐轮事件账（工作包 E）上线时这张表就已经建出来了 ——
+    它已经**不是**「新表」，`db.create_all()` 对已存在的表什么都不做。所以少了这一段，
+    老库上就是「写入侧写 `reasoning_tokens` 等列、库里没有这些列」，而症状**不是**报错：
+    写入侧那条 `except` 会把它咽成一行日志，读取侧拿到空结果，面板上全部显示
+    「未上报」—— 与「上游确实没上报」**逐字相同**，实测时会以为功能就是没生效。
+
+    12 列全部**没有 DEFAULT 子句**，老行是 NULL。这里 NULL 的语义正是「未上报」，
+    也是读取侧要显示的东西，所以**不需要也不该回填成 0**（0 是一个真实读数：
+    这次调用确实消耗了 0 个推理 token）。
+    """
+    _migrate_table_columns(
+        db,
+        "ai_analysis_round_event",
+        {
+            # 推理 token。上游**不报**时留 NULL（见 services/ai/llm_client.py 的
+            # `_extract_reasoning_usage`：取不到就是 None，绝不写 0）。
+            "reasoning_tokens": "reasoning_tokens INTEGER",
+            "usage_source": "usage_source VARCHAR(60)",
+            "reasoning_source": "reasoning_source VARCHAR(60)",
+            # 三段耗时分开记：模型调用 / 工具取数 / 建索引。合成一个总数就看不出
+            # 「钱花在等模型还是等本地 git」。
+            "model_call_ms": "model_call_ms INTEGER",
+            "tool_fetch_ms": "tool_fetch_ms INTEGER",
+            "index_build_ms": "index_build_ms INTEGER",
+            # 请求指纹（services/ai/request_fingerprint.py）。**这只是本机诊断值，
+            # 不是命中率**：算的是「发出去的请求长什么样」，不含服务端的缓存命中结果。
+            "request_fingerprint": "request_fingerprint VARCHAR(64)",
+            "stable_prefix_fingerprint": "stable_prefix_fingerprint VARCHAR(64)",
+            "prefix_common_messages": "prefix_common_messages INTEGER",
+            "prefix_common_chars": "prefix_common_chars INTEGER",
+            # 取值见 request_fingerprint.DIVERGENCE_REASONS（6 种）。
+            "prefix_divergence_reason": "prefix_divergence_reason VARCHAR(30)",
+            # 指纹的组成明细（JSON）。**不含提示词正文**，只有长度/角色/哈希。
+            "fingerprint_json": "fingerprint_json TEXT",
+        },
+        log_print,
+    )
+
+
 def _migrate_ai_run_claim_columns(db, log_print):
     """给 `ai_analysis_run` 补「活动运行认领」那一列与它的唯一索引。
 
@@ -444,6 +486,10 @@ def apply_schema_migrations(db, log_print):
     _migrate_background_task_columns(db, log_print)
     _migrate_ai_weekly_analysis_state_columns(db, log_print)
     _migrate_ai_analysis_columns(db, log_print)
+    # 逐轮事件账的诊断列。这张表在上线时就已经建出来了，`create_all()` 不会给它补列；
+    # 漏了这一段，诊断值会**静默**恒为「未上报」（写入侧被 except 咽掉），与上游真没
+    # 上报分不开。
+    _migrate_round_event_diagnostics_columns(db, log_print)
     # 认领那一列与它的唯一索引（`migrations/ai_run_claim_columns.py`）。**少了它，老库上
     # 就没有 UNIQUE，并发幂等静默失效**。它在一次调用里既加列又加索引、各自自判存在与否，
     # 所以放在列迁移这一组，索引迁移之前。

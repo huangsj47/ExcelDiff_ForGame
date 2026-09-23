@@ -111,6 +111,7 @@ from services.ai.protocol import (
     salvage_report_markdown,
     sanitize_requests,
 )
+from services.ai.request_fingerprint import RoundDiagnostics
 from services.ai.rules import RuleThresholds, normalize_anomalies
 from services.ai.scope import AnalysisScope
 from services.ai.skill_contract import DIMENSION_IDS, DimensionSpec, dimension_ids_of
@@ -330,10 +331,11 @@ class RoundRecord:
     # 这一轮模型**可见正文**的字符数（剥掉 `think` 块之后）。
     # `None` = 读不出来（没有响应文本）。
     visible_response_chars: int | None = None
-    # 上游若提供推理 token 就记在这里。**`None` = 上游没提供**（当前
-    # `llm_client.ChatResult` 不解析 `completion_tokens_details`，所以现实中它一直是
-    # `None`）—— 这一格是**留给上游的**，不是「读到 0」。
+    # 上游若提供推理 token 就记在这里（由 `llm_client._extract_reasoning_usage` 读）。
+    # **`None` = 上游没提供，不是 0** —— 这一格是「能不能下调单次输出上限」的前置数据。
     reasoning_tokens: int | None = None
+    # 三类耗时与逐请求指纹**不在这张账上**：它们是诊断值，直接由 `RoundDiagnostics`
+    # 落进逐轮事件账本（见 `services/ai/request_fingerprint.py`，那边有全部口径）。
     # 这一轮交给模型的**工具正文**字符数里，有多少是**跨成员重放**的
     # （同一个证据在别的分片里已经取过、这一轮又把全文发了一遍）。
     # 子代理模式下这是「多角色串行」的主要成本来源之一，而它原先只在按类型的统计里
@@ -405,6 +407,11 @@ class RoundProgress:
     # （`models/ai_analysis/round_event.py`）的计数列读的就是这一份。
     # 默认 `None`：老调用方、测试替身不传它，行为与这一层之前完全一样。
     round_counts: dict | None = None
+    # 这一轮的**诊断值**（推理 token / 来源标记 / 三类耗时 / 请求指纹的哈希与计数），
+    # 形状 = 逐轮事件账本的那几列（`RoundDiagnostics.event_fields`）。与 token 那几格
+    # 同一口径：**没上报就是 `None`**。默认 `None`：老调用方、测试替身不传，
+    # 行为与这一层之前完全一样。
+    round_diagnostics: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -679,6 +686,11 @@ def run_analysis(
     limits = limits or EngineLimits()
     thresholds = thresholds or RuleThresholds()
 
+    # 逐请求指纹（诊断「缓存为什么没命中」）+ 三类耗时。**一次运行（一个成员）一个**：
+    # 它保存「上一次请求」用来算公共前缀。算法、口径与理由全在 `RoundDiagnostics`。
+    diagnostics = RoundDiagnostics.for_run(client, provider=provider)
+    diagnostics.start()
+
     # 本次分析生效的维度清单（id 那一份）。**来源只有一个**：`LoadedSkills.dimensions`。
     # 解析层的记账（`parse_payload(dimension_ids=…)`）、纠正提示、第一轮开场指令、
     # 以及报告末尾「未归类」那一节读的都是它 —— 四处各取一次平台出厂值，正好就是
@@ -858,6 +870,9 @@ def run_analysis(
                     # 逐轮的**计数**（同一处算、同一条纪律）。它与上面那一份明细是两件事：
                     # 明细有上限、且只留「取不到」的条目，数不出真数（见 `_round_counts`）。
                     round_counts=_round_counts(record),
+                    # 逐轮的诊断值（推理 token / 来源标记 / 三类耗时 / 请求指纹），同样
+                    # 从这一个出口出去：逐轮事件账本按这一份落列（列名与模型逐字对齐）。
+                    round_diagnostics=diagnostics.event_fields(record.index),
                 )
             )
         except Exception as exc:  # noqa: BLE001 —— 回调失败不作废分析，见 docstring
@@ -919,6 +934,8 @@ def run_analysis(
             round_index if format_retry_granted else limits.max_rounds
         )
         exhausted = tools.requests_remaining <= 0
+        # 这一轮的诊断状态重置（耗时与指纹都只属于这一轮，见 `RoundDiagnostics`）。
+        diagnostics.begin_round()
         # 这一轮要写进 trace 的补充说明：压过历史、被上游拒过、走了收尾 —— 都是「这次分析
         # 不是正常跑完的」的证据，只留在日志里等于没说。
         round_notes: list[str] = []
@@ -971,6 +988,7 @@ def run_analysis(
                 compaction_turns += compacted.dropped_turns
                 compaction_chars += compacted.dropped_chars
                 round_notes.extend(compacted.notes)
+                diagnostics.mark_compacted()
                 log_print(f"ℹ️ AI 分析：{compacted.notes[0]}", "AI", force=True)
                 # 重算一遍：条目额度取决于「除条目之外占了多少」，压历史正是为了把它腾出来。
                 # 少算这一步，压出来的空间就白压了（条目仍按旧额度被裁）。
@@ -1000,8 +1018,8 @@ def run_analysis(
 
         round_started = time.monotonic()
         try:
-            result = client.complete(
-                [*messages, entry], **_complete_kwargs(limits)
+            result = diagnostics.model_call(
+                [*messages, entry], client.complete, _complete_kwargs(limits)
             )
         except Exception as exc:  # noqa: BLE001 —— 网络/鉴权/超时都归为「这次没跑成」
             error_text = f"{type(exc).__name__}: {exc}"
@@ -1071,8 +1089,8 @@ def run_analysis(
                     # 这个可挪动的断点就凭空消失了（下一轮的缓存命中会跟着掉）。
                     shrunk_entry = _mark_current(shrunk_entry, movable_breakpoint)
                     try:
-                        shrunk_result = client.complete(
-                            [*base, shrunk_entry], **_complete_kwargs(limits)
+                        shrunk_result = diagnostics.model_call(
+                            [*base, shrunk_entry], client.complete, _complete_kwargs(limits)
                         )
                     except Exception as shrink_exc:  # noqa: BLE001
                         if looks_like_context_overflow(shrink_exc):
@@ -1096,6 +1114,7 @@ def run_analysis(
                     items = fitted
                     context_overflow_recovered = True
                     overflow_recovered = True
+                    diagnostics.mark_compacted()
                     # **把这次观测到的上限记下来，供本次运行剩下的轮次用。**
                     # 上游刚说了「这么大装不下」，而那份提示词正是 `original_chars` 这么大
                     # —— 这是本次运行里唯一一个**实测**的上限（水位那些数是估出来的，估错
@@ -1152,6 +1171,7 @@ def run_analysis(
                 messages[:] = messages[:1]
                 items = ()
                 user_message = _salvage_user_message(change_summary, seen_items)
+                diagnostics.mark_compacted()
                 entry = _mark_current({"role": "user", "content": user_message}, movable_breakpoint)
                 movable_breakpoint = entry
                 round_notes.append(
@@ -1161,7 +1181,9 @@ def run_analysis(
                     f"这次实测的上限收到 {limits.prompt_char_budget:,} 字。"
                 )
                 try:
-                    result = client.complete([*messages, entry], **_complete_kwargs(limits))
+                    result = diagnostics.model_call(
+                        [*messages, entry], client.complete, _complete_kwargs(limits)
+                    )
                 except Exception as final_exc:  # noqa: BLE001
                     # 同上面那条：这一轮连着两次都没发出去，也要留痕（`transport_error`），
                     # 否则「上游到底拒了什么」在 trace 上无从查起。
@@ -1229,8 +1251,12 @@ def run_analysis(
             # 两个都在这里算/读一次，于是 5 个 RoundRecord 构造点自动带上（splat 的理由
             # 同上）—— 逐处复制一定会漏，而漏掉的那一轮在账上看不出「输出都花在推理上」。
             "visible_response_chars": _visible_response_chars(text),
-            "reasoning_tokens": non_negative_int(getattr(result, "reasoning_tokens", None)),
+            # 从 `usage` 读（读法集中在 `_usage_of` 一处）：上游没报就是 `None`。
+            "reasoning_tokens": usage["reasoning_tokens"],
         }
+        # 诊断值（推理 token 的来源、三类耗时、请求指纹）进的是**事件账本**，
+        # 不在这张账上（见 `RoundDiagnostics`）。调用点在 `usage` 之后。
+        diagnostics.note_usage(usage)
         messages.append(entry)
         messages.append({"role": "assistant", "content": text})
 
@@ -1515,7 +1541,8 @@ def run_analysis(
         # 用**差**而不是累计值：累计值在第 3 轮会把第 1 轮的重放再算一遍，而
         # 「这一轮为什么贵」问的正是本轮那一段。记账本身在 `context_tools`（唯一口径）。
         replay_before = _replay_chars(tools)
-        batch = tools.execute(requests)
+        # 本地取数耗时（含 provider 内部建索引的那一段，见 `RoundDiagnostics`）。
+        batch = diagnostics.tool_fetch(tools.execute, requests)
         replay_chars = max(0, _replay_chars(tools) - replay_before)
         dropped.extend(batch.dropped)
         refused_items.extend(batch.refused_items)
@@ -1741,6 +1768,10 @@ def _usage_of(result: Any) -> dict[str, Any]:
         "cache_write_tokens": getattr(result, "cache_write_tokens", None),
         "cache_source": str(getattr(result, "cache_source", "") or ""),
         "finish_reason": str(getattr(result, "finish_reason", "") or ""),
+        # 输出里有多少是隐藏推理，以及这个数是从哪个字段读到的（见
+        # `llm_client._extract_reasoning_usage`）。**上游没报就是 `None`**，不是 0。
+        "reasoning_tokens": non_negative_int(getattr(result, "reasoning_tokens", None)),
+        "reasoning_source": str(getattr(result, "reasoning_source", "") or ""),
     }
 
 

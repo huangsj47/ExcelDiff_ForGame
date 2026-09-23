@@ -34,6 +34,19 @@ token 与缓存四列照抄全库同一条口径（见 `services/ai/usage.py`）
 `0` 是一个确定的结论（这一轮确实没花）。读取侧（`round_events.member_totals`）据此区分
 「未上报」与「零」，界面不许把前者显示成后者。
 
+## 为什么诊断数据（指纹 / 推理 token / 三类耗时）也落在这张表上
+
+因为它们与逐轮用量是**同一件事的三个面**：「这一轮花了多少」「这一轮的钱花在哪
+（模型调用还是本地取数）」「这一轮为什么没有复用上一次的前缀」。分开记就要在两张表上
+各写一遍轮次键，而两边的轮次口径一旦分叉（成员内序号 vs 家族全局序号），对齐它们的
+代码就会在某次改动里静默错位。
+
+**不另建表、不另造一套账**：新列落在这一张上，写入口仍然是唯一那一个
+（`round_events.record`），读入口仍然是 `round_events.member_totals` 与
+`round_events.events_for_run`。诊断值的算法与口径在
+`services/ai/request_fingerprint.py`（哈希是本机诊断指标，**不是命中率**，见那里的
+模块文档）。
+
 ## 为什么没有指向 run/project 的外键（**实测过的硬约束**）
 
 这张表**刻意不声明** `ForeignKey`。两条都是这一行 `nullable=False` 会踩到的：
@@ -88,6 +101,51 @@ class AiAnalysisRoundEvent(db.Model):
     tokens_output = db.Column(db.Integer)
     cache_read_tokens = db.Column(db.Integer)
     cache_write_tokens = db.Column(db.Integer)
+    # 输出 token 里有多少是**隐藏推理**（上游报 `completion_tokens_details` 那一类字段
+    # 时）。**NULL = 上游没报**，与「报了 0」是两件事 —— 逐轮事件账本与全库同一条口径
+    # （见 `services/ai/usage.py`）。这一格是「输出 token 涨了，是写得更长还是想得更久」
+    # 的唯一依据，也是「能不能下调单次输出上限」的前置数据。
+    reasoning_tokens = db.Column(db.Integer)
+    # **缓存/命中字段是从哪读到的**（`cache_read_tokens` 的来源标记），与 run 上那一列
+    # `cache_source` 同义；空/NULL = 没读到。它回答的是「为什么这个端点从来不上报缓存」。
+    usage_source = db.Column(db.String(60))
+    # 推理 token 是从哪个字段读到的（与上一列分开：两者是**两次独立的探测**，一个端点
+    # 完全可能报缓存却不报推理 —— 合成一列就说不清是哪一项没有）。空/NULL = 没读到。
+    reasoning_source = db.Column(db.String(60))
+    # 三类耗时**分开记**（原先把模型调用与本地取数/建索引混在一个 `duration_ms` 里）。
+    #
+    # 优先级说明（指引实测）：本样本 99.7% 的时间在模型调用链，所以这三样是次要的观测值，
+    # 不是优化的靶子。**NULL = 这一轮没有这一类耗时**（没发生 / 没分开量），不是 0。
+    model_call_ms = db.Column(db.Integer)
+    tool_fetch_ms = db.Column(db.Integer)
+    index_build_ms = db.Column(db.Integer)
+
+    # ---- 逐请求指纹（诊断「缓存为什么没命中」）-------------------------------
+    #
+    # 它回答的是一个此前**没有任何数据**能回答的问题：这次请求与上一次在哪个消息开始
+    # 分叉。四个诊断值由 `services/ai/request_fingerprint.py` 在**每次模型调用之前**
+    # 对真正发出去的消息序列算出来（去掉内部缓存断点之后的那一份）。
+    #
+    # **哈希是本机诊断指标，不是命中率。** 提供商按 token / 自己的内部单元匹配缓存：
+    # 哈希相同**不保证**缓存命中（服务端可能已过期），哈希不同也**不保证**未命中
+    # （我们这一侧多一个不参与匹配的字段就会让哈希变掉）。别把它当命中率用。
+    #
+    # **这里不存提示词正文**（只存哈希与计数），也不存 API key —— 端点标识是
+    # `normalize_base_url` 归一之后的地址，URL 里的凭据已经被它去掉。
+    request_fingerprint = db.Column(db.String(64))
+    stable_prefix_fingerprint = db.Column(db.String(64))
+    # 与**上一个请求**（同一次运行、同一个成员内的上一次调用）的最长公共前缀。
+    # **NULL = 没有可比的上一个请求**（这一次运行的第一次调用），不是「公共前缀 0 条」。
+    prefix_common_messages = db.Column(db.Integer)
+    prefix_common_chars = db.Column(db.Integer)
+    # 分叉原因，取值见 `request_fingerprint.DIVERGENCE_REASONS`：
+    # `initial` / `append` / `compaction` / `prompt_change` / `snapshot_change` / `other`。
+    # **`other` 才是要去看代码的那一类**（前缀变了而提示词版本与快照都没变）。
+    prefix_divergence_reason = db.Column(db.String(30))
+    # 指纹的其余形状与版本号（消息条数、请求字符数、稳定前缀条数、prompt 版本、快照 id、
+    # 是否压缩、模型、端点）。单独占列的只有上面那几个会被筛/被比的字段，其余进这一份
+    # JSON —— 它们要按整体读，拆成十列只会让这张表再宽十格。
+    fingerprint_json = db.Column(BigText)
 
     # 工具账（**计数**，不是明细）：要了几次、执行了几条、几条取不到、几条被截断、
     # 几条因额度被拒、几条在入白名单时被丢。明细仍在 `entry_json` 里（有上限），
