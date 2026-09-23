@@ -17,11 +17,18 @@
    `.excel-row-number.excel-removed/.excel-added/.excel-modified` 写了
    **`position: relative !important`** —— 特异性更高又带 `!important`，
    直接把 `sticky` 顶掉了。这三个恰好是评审最需要盯的行。
-2. 即便改回 sticky，**修改行**的第一列仍会被右侧单元格盖住：
-   `.excel-row-modified-old` 与 `-new` 各自带 `isolation: isolate` +
-   `contain: style`，是两个**层叠上下文**；行号列的 z-index 被困在 `-old` 里出不来，
-   与同级、DOM 更靠后的 `-new` 相比就落在下面。所以还要给 `-old` 一个更高的
-   层叠级别，行号列才真正可见（命中测试才通得过）。
+2. 即便改回 sticky，**修改行**的行号格仍会看不见（几何上位置正确，只是被画在下面）。
+   修改行是**成对**渲染的，-old 里的未变更格子带 `rowspan="2"`，横跨到 -new 那一行带，
+   于是横向滚动后它们滑到冻结列所在的 x，把 -new 自己的行号格盖住。
+   历史上这里有两层错：`-old` 与 `-new` 各自被 `isolation: isolate` 变成层叠上下文
+   （行号格的 z-index 被困在行里出不来），而当时的修法是给 `-old` 加
+   `position: relative; z-index: 3` —— 那只把 **-old 整行**抬高，于是 -old 的 rowspan
+   格子反过来盖住 -new 的行号格（线上表现：「改动前的行号冻住了，改动后的没冻住」）。
+   现在的做法：**两个 tr 都不生成层叠上下文**（`isolation` / `z-index` /
+   `contain: layout|paint` / `transform` / `filter` / `opacity<1` / `will-change`
+   一个都不能有），行号格自己的 `position: sticky` + `z-index: 2` 于是直接在**表的
+   层叠上下文**里说话，永远压在普通单元格之上 —— 现代形态（上下两格）与老形态
+   （-old 上那个 `rowspan="2"` 的 `excel-modified` 格）同时成立。
 
 表头那一格还有第三层：`thead` 与两条表头 `tr` 都是 `static`、不生成层叠上下文，
 所有表头 th 在同一上下文里比 z-index，而 `.excel-row-header` 自己写的
@@ -34,8 +41,13 @@
 
 三条都不抛异常、不报错，只是「列会滑走」「字会串」，人眼扫过去很容易当成正常的
 横向滚动。`excel-scroll-fix.css` 里有 180 多条 `!important`，任何一个
-`position` 声明都能静默地把冻结功能关掉，所以这里把「行号列只能是 sticky」
-这条不变量钉死。
+`position` / `z-index` / `isolation` 声明都能静默地把冻结功能关掉，所以这里把
+「行号列只能是 sticky，且必须压在普通单元格之上」这条不变量钉死。
+
+第 2 条**量不出几何**：被盖住的那一格 `getBoundingClientRect()` 位置是对的
+（这正是上一轮把缺陷判成绿的原因）。真渲染下的判据是
+`document.elementFromPoint(行号格中心) === 该格`，见
+`.pytest_tmp/ui_split/sticky_probe.py`（现代形态 + 老形态，scrollLeft 0/900/2500）。
 """
 from __future__ import annotations
 
@@ -153,36 +165,113 @@ def test_the_background_bleed_fix_keeps_the_row_number_sticky():
     )
 
 
-def test_the_modified_row_owning_the_rowspan_cell_outranks_its_sibling():
-    """修改行有两层 <tr>，承载 rowspan 行号列的 -old 必须压在 -new 之上。
+def _opacity_creates_context(value):
+    """opacity < 1 才生成层叠上下文；`opacity: 1` 不是。"""
+    if value is None:
+        return False
+    match = re.search(r'\d*\.?\d+', value)
+    return bool(match) and float(match.group()) < 1
 
-    这两行各自是层叠上下文，行号列的 z-index 出不了 -old；
-    不给 -old 更高的层叠级别，-new 的单元格就会盖住冻结列。
+
+# 会让元素成为**层叠上下文**的声明。任何一个落到修改行的 <tr> 上，行号格的
+# z-index 就被关在那一行里，出不到表的层叠上下文 —— 于是 -old 的 rowspan 格子
+# （横跨到 -new 那一行带）会盖住 -new 的行号格。
+# `position` 只列 sticky/fixed：这两个**无条件**生成上下文；relative/absolute
+# 要配 z-index 才算，由 z-index 那条兜住。
+_CONTEXT_CREATORS = (
+    ('isolation', lambda v: v not in (None, 'auto')),
+    ('contain', lambda v: v is not None and any(
+        word in v.replace('!important', '')
+        for word in ('layout', 'paint', 'strict', 'content'))),
+    ('transform', lambda v: v not in (None, 'none')),
+    ('filter', lambda v: v not in (None, 'none')),
+    ('backdrop-filter', lambda v: v not in (None, 'none')),
+    ('perspective', lambda v: v not in (None, 'none')),
+    ('will-change', lambda v: v not in (None, 'auto')),
+    ('opacity', _opacity_creates_context),
+)
+
+
+def _stacking_context_reason(decls: dict):
+    """这个声明块会不会让元素成为层叠上下文？返回那条声明，否则 None。"""
+    position = _first_keyword(decls, 'position')
+    if position in ('sticky', 'fixed'):
+        return f'position: {decls["position"]}'
+    zindex = _number(decls, 'z-index')
+    if zindex is not None and _first_keyword(decls, 'z-index') != 'auto':
+        return f'z-index: {decls["z-index"]}'
+    for prop, is_context in _CONTEXT_CREATORS:
+        if is_context(decls.get(prop)):
+            return f'{prop}: {decls[prop]}'
+    return None
+
+
+def test_the_modified_rows_do_not_become_stacking_contexts():
+    """修改行的两个 <tr> 都不许生成层叠上下文 —— 这是「行号格压在普通单元格之上」的前提。
+
+    守的行为：**横向滚动后，四个修改行的行号格都看得见**（现代形态：粉/绿上下两格；
+    老形态：-old 上一个 `rowspan="2"` 的 `excel-modified` 格）。修改行成对渲染，
+    -old 的未变更格子带 `rowspan="2"`、横跨到 -new 那一行带，滚动后正好滑到冻结列
+    所在的 x；只要两个 tr 都不生成层叠上下文，行号格自己的 `z-index: 2`（下面那条
+    测试找的就是它）就能在**表的层叠上下文**里压住这些格子。
+
+    反例（都真实出现过）：给 -old 加 `isolation: isolate`，或加
+    `position: relative; z-index: 3`。后者是历史上的「修法」，它把 -old **整行**
+    抬高，于是 -old 的 rowspan 格子反过来盖住 -new 的行号格 —— 线上表现就是
+    「改动前的行号冻住了、改动后的没冻住」。所以这里不是钉某一条写法，而是钉
+    「这两个 tr 上不许出现任何生成层叠上下文的声明」。
     """
-    old = None
-    new_z = None
+    offenders = []
     for name, selector, decls in _all_rules():
-        if 'tr.excel-row-modified-old' in selector and 'td' not in selector:
-            if _first_keyword(decls, 'position') is not None or _number(decls, 'z-index') is not None:
-                old = decls
-        if 'tr.excel-row-modified-new' in selector and 'td' not in selector:
-            z = _number(decls, 'z-index')
-            if z is not None:
-                new_z = z
-    assert old is not None, (
-        '找不到 tr.excel-row-modified-old 上带 position/z-index 的规则'
+        if 'tr.excel-row-modified-old' not in selector and 'tr.excel-row-modified-new' not in selector:
+            continue
+        if 'td' in selector:                      # 单元格自己的规则不在此列
+            continue
+        reason = _stacking_context_reason(decls)
+        if reason:
+            offenders.append(f'{name}: {selector} → {reason}')
+    assert not offenders, (
+        '修改行的 <tr> 成了层叠上下文，行号格的 z-index 被困在行里：\n  '
+        + '\n  '.join(offenders)
+        + '\n（-old 的 rowspan 格子横跨到 -new 那一行带，横向滚动后会盖住 -new 的行号格：'
+          '「改动前的行号冻住了、改动后的没冻住」）'
     )
-    assert _first_keyword(old, 'position') == 'relative', (
-        'tr.excel-row-modified-old 需要 position: relative —— z-index 只对定位元素生效，'
-        f'当前 position={old.get("position")}'
+
+
+def test_row_numbers_are_lifted_above_ordinary_cells():
+    """行号格的 z-index 要在**表的层叠上下文**里高过普通单元格。
+
+    上一条测试保证行号格不在行级上下文里；这一条保证它确实被抬起来了（否则
+    DOM 顺序更靠后的 -new 的单元格会盖住 -old 的行号格）。
+    另外顺带钉住反方向：普通单元格（`.excel-cell`，不含行号格）不许拿到
+    比行号格更高的 z-index —— 那会从另一头把冻结列盖掉。
+    """
+    lifted = None
+    for name, selector, decls in _all_rules():
+        if '.excel-row-number' not in selector:
+            continue
+        if not ('excel-removed' in selector and 'excel-added' in selector):
+            continue
+        zindex = _number(decls, 'z-index')
+        if zindex is not None and _first_keyword(decls, 'z-index') != 'auto':
+            lifted = (f'{name}: {selector}', zindex)
+    assert lifted is not None, (
+        '找不到给 removed/added/modified 行号格声明 z-index 的规则 —— 行号格没有被抬起来，'
+        'DOM 更靠后的修改行单元格会盖住它'
     )
-    zindex = _number(old, 'z-index')
-    assert zindex is not None, (
-        'tr.excel-row-modified-old 没有 z-index：它是层叠上下文，'
-        '行号列的 z-index 出不来，-new 会盖住冻结的第一列'
-    )
-    assert new_z is None or zindex > new_z, (
-        f'-old 的 z-index({zindex}) 没有高过 -new({new_z})，冻结列仍会被盖住'
+    where, zindex = lifted
+    assert zindex >= 1, f'{where} 的 z-index={zindex}，压不住 z-index: auto 的普通单元格'
+
+    offenders = []
+    for name, selector, decls in _all_rules():
+        if '.excel-cell' not in selector or '.excel-row-number' in selector:
+            continue
+        other = _number(decls, 'z-index')
+        if other is not None and _first_keyword(decls, 'z-index') != 'auto' and other >= zindex:
+            offenders.append(f'{name}: {selector} → z-index: {decls["z-index"]}')
+    assert not offenders, (
+        f'这些规则给普通单元格的 z-index ≥ 行号格的 {zindex}，会从另一头盖住冻结列：\n  '
+        + '\n  '.join(offenders)
     )
 
 

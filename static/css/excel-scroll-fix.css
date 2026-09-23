@@ -573,30 +573,38 @@ div.excel-table-wrapper,
 
 /* 移除行和单元格修改 */
 
-/* 特别处理修改行，确保背景色不会扩散到容器 */
+/* 特别处理修改行，确保背景色不会扩散到容器。
+
+   **这两行不许是层叠上下文**（原先这里有 `isolation: isolate`，已移除）。
+   修改行是**成对**渲染的：-old 里的未变更格子带 `rowspan="2"`（见
+   static/js/excel_diff_table.js 的 createModifiedRow），它们横跨到 -new 那一行带。
+   一旦 -old 成为层叠上下文（isolate / z-index / contain: layout|paint 都会），
+   它整行就被抬到同级之上，**它那些 rowspan 格子会盖住 -new 自己的行号格** ——
+   横向滚动时那一格明明停在冻结列的位置（sticky 生效），却看不见，
+   表现就是「改动前的行号冻住了、改动后的没冻住」。
+   反过来给 -old 加 z-index（历史写法）也治不了：那只让 -old 的**整行**更高。
+
+   行号格要能压住任何普通单元格，靠的是行号格自己的 `position: sticky` +
+   `z-index`（本文件下面那条规则给 removed/added/modified 行号格 z-index: 2），
+   而这只有在两个 tr 都不生成层叠上下文时才在**表的层叠上下文**里说话。
+   老形态（载荷没有 previous_row_number → -old 上是一格 `rowspan="2"` 的
+   `excel-modified` 行号格）同样靠这一点压住 -new 的普通格子，不再需要
+   单独给 -old 抬级。
+
+   一个可测的副作用：表**正文**的文字栅格化方式会跟着变（灰度 → LCD 次像素，
+   这是那个行级层叠上下文顺带压住的）。实测过 6 种改法，**凡是能修好这个缺陷的
+   都会变**（保住行级层叠上下文的 R2/R3 也一样），修不好的都不变；
+   页面其它文字（工具栏、工作表标签、表头）不受影响。判断口径见
+   .pytest_tmp/ui_split/sticky_probe.py 与 tests/test_excel_first_column_is_frozen.py。 */
 .excel-diff-table tr.excel-row-modified-old,
 .excel-diff-table tr.excel-row-modified-new {
     /* 确保修改行的背景色被严格限制在行内 */
     background-attachment: local !important;
     background-clip: padding-box !important;
     background-origin: padding-box !important;
-    isolation: isolate !important;
-    /* 防止背景色向上扩散 */
+    /* 防止背景色向上扩散。contain: style 不生成层叠上下文（layout/paint 会），
+       所以留着它不影响上面那条不变量。 */
     contain: style !important;
-}
-
-/* 承载「修改行」冻结行号列的那一行必须压在 -new 之上。
-   -old 与 -new 因为上面那句 isolation:isolate + contain:style 各自成了**层叠
-   上下文**（z-index auto）。行号列虽然自己有 z-index，但它被困在 -old 这个
-   上下文里、出不来，于是与同级、DOM 更靠后的 -new 相比就落在下面 —— 横向滚动
-   时第一列被 -new 的单元格盖住（新增/删除行没有这一层上下文，所以它们是好的，
-   于是同一张表里第一列时冻时不冻）。
-   给 -old 一个更高的层叠级别即可。两行纵向不重叠（-new 只有发生变化的列），
-   所以提高 -old 不改变任何内容的观感。z-index 需配 position: relative 才生效；
-   不带偏移量的 relative 不影响表格布局。 */
-.excel-diff-table tr.excel-row-modified-old {
-    position: relative;
-    z-index: 3;
 }
 
 /* 确保修改行的单元格背景色不会扩散 */
