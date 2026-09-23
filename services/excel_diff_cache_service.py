@@ -21,7 +21,9 @@ db = None
 # 一旦它比真实版本旧，就会把**刚生成的当前版本缓存**当成过期数据清掉。
 # 一致性由 tests/test_diff_service_fidelity.py::TestDiffLogicVersionSingleSource
 # 扫描全部三处锁定（tests/test_diff_logic_version_single_source.py 只覆盖 app.py / config.py）。
-DIFF_LOGIC_VERSION = "1.18.0"
+# 1.19.0：A→D 窗口删除基线取文件仍存在的那条提交 + Excel 删除分支取不到基线内容时
+#         给诚实说明载荷（639b726）。详情见 app.py 同名块。
+DIFF_LOGIC_VERSION = "1.19.0"
 # 仓库**没配** path_regex 时，按这些后缀认配置表。配了就一律以 path_regex 为准 ——
 # 那是用户显式声明的口径（见 get_recent_excel_commits）。
 CONFIG_TABLE_SUFFIXES = ('.xlsx', '.xls', '.xlsm', '.xlsb', '.csv')

@@ -70,7 +70,9 @@ system("title SEOTool - diff-confirmation-platform")
 #        header_rows/header_stats：表头行照旧显示变更，但不再冒充数据行。
 #        同一版里还加了「名称行」（Repository.header_name_row）：列名取表头块里的第几行
 #        （配 2 用于「第 1 行是大标题、第 2 行才是字段名」的表）。同样不影响未配置的仓库。
-DIFF_LOGIC_VERSION = "1.18.0"
+# 1.19.0：A→D 窗口删除基线取文件仍存在的那条提交 + Excel 删除分支取不到基线内容时
+#        给诚实说明载荷、不再产出「解析失败」假差异（639b726）。详情见 app.py 同名块。
+DIFF_LOGIC_VERSION = "1.19.0"
 
 # 日志级别配置
 LOG_LEVEL = {
