@@ -30,7 +30,7 @@ from __future__ import annotations
 import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, inspect
@@ -40,9 +40,16 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from models import WeeklyVersionDiffCache, db  # noqa: E402
+from models import (  # noqa: E402
+    Commit,
+    Project,
+    Repository,
+    WeeklyVersionConfig,
+    WeeklyVersionDiffCache,
+)
 from services import db_migration_service  # noqa: E402
 from services.repository_creation_handlers import allocate_repository_id  # noqa: E402
+from services.weekly_version_logic import _current_diff_logic_version  # noqa: E402
 
 WEEKLY_CACHE_TABLE = "weekly_version_diff_cache"
 VERSION_COLUMN = "diff_version"
@@ -229,23 +236,196 @@ class TestVersionSourceIsTheLiveOne:
         assert not literal_versions, f"helper 里出现了硬编码版本号：{literal_versions}"
 
 
-class TestWritePathStampsTheVersion:
-    """写入方必须真的赋值；只在模型/迁移上做工作等于「已接线但没通电」。"""
+def _uid(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
-    def test_both_write_branches_stamp_the_version(self):
-        import re
 
+class _StubExcelCacheService:
+    """Excel HTML 缓存服务的替身：这一组不考它，让它永远说「不欠缓存」。
+
+    不桩的话它会去读磁盘上的 Excel —— 与 `diff_version` 这件事毫无关系，
+    却会让用例因为环境里没有那个文件而红。
+    """
+
+    @staticmethod
+    def needs_merged_diff_cache(_config_id, _file_path):
+        return False
+
+    @staticmethod
+    def log_cache_operation(*_args, **_kwargs):
+        return None
+
+
+class _WeeklySyncEnv:
+    """一个能真跑 `process_weekly_version_sync` 的最小环境。
+
+    打桩的只有**外部边界**（合并 diff 的生成、Excel 缓存服务、git 拓扑序）——
+    写入那一段（含 `diff_version` 的赋值）跑的是真代码，这一组要考的正是它。
+    把写入也换成桩就等于「测了个替身」。
+    """
+
+    FILE_PATH = "code/pz/const/weekly_version_probe.lua"
+
+    def __init__(self, db, monkeypatch):
         import services.weekly_version_logic as weekly_logic
 
-        source = open(weekly_logic.__file__, encoding="utf-8").read()
-        # 允许 `diff_version=_current_diff_logic_version()` 与
-        # `existing_cache.diff_version = _current_diff_logic_version()` 两种写法
-        # （等号两侧可能有空格、可能有属性前缀）—— 断言的是「赋值」而不是空格。
-        hits = re.findall(r"\.?diff_version\s*=\s*_current_diff_logic_version\(\)", source)
-        assert len(hits) >= 2, (
-            f"只找到 {len(hits)} 处 diff_version 赋值。周版本合并 diff 缓存有两条写入分支"
-            "（更新已有 / 新建），两处都要打上 —— 实测只加列+迁移、不赋值时该列恒为 NULL，"
-            "版本失效功能完全不生效，而且全量测试仍全绿。"
+        self.db = db
+        self.monkeypatch = monkeypatch
+        self.logic = weekly_logic
+        self.payload = {"diff": "第一次"}
+
+        now = datetime.now(timezone.utc)
+        project = Project(code=_uid("WV"), name=_uid("proj"), department="QA")
+        db.session.add(project)
+        db.session.flush()
+
+        self.repository = Repository(
+            project_id=project.id,
+            name=_uid("repo"),
+            type="git",
+            url="https://example.com/probe/repo.git",
+            branch="main",
+            clone_status="completed",
+        )
+        db.session.add(self.repository)
+        db.session.flush()
+
+        self.config = WeeklyVersionConfig(
+            project_id=project.id,
+            repository_id=self.repository.id,
+            name=_uid("weekly"),
+            branch="main",
+            # 窗口必须盖住下面造的那些提交，否则 `process_weekly_version_sync`
+            # 一个文件都发现不了 —— 那时用例会以「没写行」失败，而不是以「没打版本」失败。
+            start_time=now - timedelta(days=1),
+            end_time=now + timedelta(days=1),
+            is_active=True,
+            auto_sync=True,
+            status="active",
+        )
+        db.session.add(self.config)
+        db.session.flush()
+
+        # 窗口**开始之前**的最后一个提交 = 基准。有它就不会去问 VCS 要真实基准
+        # （那条路要真的 clone，这一组不考它）。
+        db.session.add(Commit(
+            repository_id=self.repository.id,
+            commit_id=_uid("base"),
+            path=self.FILE_PATH,
+            version="v0000000",
+            operation="M",
+            author="base_user",
+            commit_time=now - timedelta(days=2),
+            message="base",
+            status="pending",
+        ))
+        db.session.commit()
+
+        monkeypatch.setattr(
+            weekly_logic, "_generate_merged_diff_data", lambda *_a, **_k: self.payload
+        )
+        monkeypatch.setattr(weekly_logic, "_weekly_excel_cache_service", _StubExcelCacheService())
+
+    def _add_commit(self, tag: str, message: str) -> None:
+        now = datetime.now(timezone.utc)
+        self.db.session.add(Commit(
+            repository_id=self.repository.id,
+            commit_id=_uid(tag),
+            path=self.FILE_PATH,
+            version=f"v{len(message):07d}",
+            operation="M",
+            author="dev_a",
+            commit_time=now - timedelta(minutes=len(self.db.session.new) + 1),
+            message=message,
+            status="pending",
+        ))
+        self.db.session.commit()
+
+    def sync(self, payload: dict) -> WeeklyVersionDiffCache:
+        """改一次输入、同步一次，返回库里那一行。"""
+        self.payload = payload
+        self._add_commit("tip", f"change-{payload.get('diff', '')}")
+        self.logic.process_weekly_version_sync(self.config.id)
+        cache = WeeklyVersionDiffCache.query.filter_by(
+            config_id=self.config.id, file_path=self.FILE_PATH
+        ).first()
+        assert cache is not None, (
+            "同步之后库里没有这一行 —— 用例没跑到写入那一段，先查窗口与提交造得对不对"
+        )
+        return cache
+
+
+def _sync_once(db, monkeypatch, *, payload: dict, again: bool = False):
+    """跑一次同步并返回缓存行。
+
+    `again=True` 表示「这个用例已经跑过一次」，复用上一轮留下的环境（同一个 config），
+    这样第二次会走**更新**分支而不是又新建一行。环境存在会话级的 `_ENVS` 里 ——
+    它要跨两次调用存活，而 `real_db` 夹具每个用例都会重新进入应用上下文。
+    """
+    key = id(db)
+    env = _ENVS.get(key)
+    if env is None or not again:
+        env = _WeeklySyncEnv(db, monkeypatch)
+        _ENVS[key] = env
+    return env.sync(payload)
+
+
+_ENVS: dict = {}
+
+
+class TestWritePathStampsTheVersion:
+    """写入方必须真的赋值；只在模型/迁移上做工作等于「已接线但没通电」。
+
+    ## 为什么这里不再用「grep 源码找赋值语句」
+
+    原先这一组的第一条是**数源码里的赋值出现次数**：
+
+        hits = re.findall(r"\\.?diff_version\\s*=\\s*_current_diff_logic_version\\(\\)", source)
+        assert len(hits) >= 2
+
+    它的判据是**写法**（两个分支里各自内联调用 helper），不是**行为**。
+    8770854 把那次调用提成了一个局部变量 `diff_version = _current_diff_logic_version()`
+    （因为同一个值现在还要喂给 `weekly_cache_inputs_unchanged` / `weekly_cache_is_unchanged`
+    两个判据）—— 两条分支照旧把版本写进列，**行为一个字都没变**，而 grep 只剩 1 处命中，
+    这条断言从那天起一直红着。它红得没有价值：真正的失效模式（「列加了、迁移写了、
+    写入方不赋值 → 恒为 NULL」）它其实也证明不了 —— 一个把赋值写在死分支里的实现照样过。
+
+    所以现在改成**跑真的写入路径、看库里的那一行**：两条分支各跑一次，断言列上就是
+    当前的运行期版本号。这正是本文件 docstring 里写的那个缺口（「没有任何用例去写一条
+    缓存再检查它的 diff_version」）。
+    """
+
+    def test_a_brand_new_row_is_stamped(self, real_db, monkeypatch):
+        """新建分支：库里有这个文件的行之前，同步一次。"""
+        cache = _sync_once(real_db, monkeypatch, payload={"diff": "第一次"})
+
+        version = _current_diff_logic_version()
+        assert version, "取不到运行期版本号，无法验证写入路径"
+        assert cache.diff_version == version, (
+            f"新建的缓存行 diff_version 是 {cache.diff_version!r}，应当是 {version!r}"
+            "（不赋值 → 该列恒为 NULL → 升级口径后合并 diff 不会失效）"
+        )
+
+    def test_a_row_written_before_the_column_existed_gets_stamped_on_rewrite(
+        self, real_db, monkeypatch
+    ):
+        """更新分支：**列是后加的**，所以线上真正存在的是「已有一行、这一列为 NULL」。
+
+        再同步一次时它会走「更新现有缓存」那条分支 —— 那次必须把版本补上，否则
+        加列之前写下的行**永远**停在 NULL 上（读侧只能一直当历史行宽容处理）。
+        库里的行是同一行（`id` 不变），所以这确实考的是更新分支而不是又新建了一行。
+        """
+        cache = _sync_once(real_db, monkeypatch, payload={"diff": "第一次"})
+        row_id = cache.id
+        cache.diff_version = None  # 模拟加列之前写入的行
+        real_db.session.commit()
+
+        updated = _sync_once(real_db, monkeypatch, payload={"diff": "改了内容"}, again=True)
+
+        version = _current_diff_logic_version()
+        assert updated.id == row_id, "这是又新建了一行 —— 那就没考到更新分支"
+        assert updated.diff_version == version, (
+            f"更新分支没有补上版本号，列里是 {updated.diff_version!r}"
         )
 
     def test_stamped_row_survives_a_round_trip(self, real_db):
