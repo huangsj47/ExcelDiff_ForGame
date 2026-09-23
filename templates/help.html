@@ -392,12 +392,15 @@
                             <h4>报告怎么读</h4>
                             <p>报告固定 7 个章节，顺序固定：</p>
                             <ul class="info-list">
-                                <li><strong>变更理解</strong> / <strong>变更内容摘要</strong>：这次到底改了什么</li>
-                                <li><strong>影响面分析</strong>：牵动哪些系统、哪些老功能</li>
-                                <li><strong>风险评估</strong>：结论在这里</li>
-                                <li><strong>测试建议</strong> / <strong>回归建议</strong>：<strong>测试直接拿去排用例</strong></li>
-                                <li><strong>上线与回滚关注点</strong>：上线盯什么、怎么回退</li>
+                                <li><strong>变更理解</strong> / <strong>变更内容摘要</strong>：开场，<strong>简明扼要</strong>，这次到底改了什么</li>
+                                <li><strong>影响面分析</strong>：<strong>重点</strong> —— 牵动哪些系统、哪些老功能、哪些入口</li>
+                                <li><strong>风险评估</strong>：<strong>重点</strong>，结论在这里</li>
+                                <li><strong>测试建议</strong> / <strong>回归建议</strong>：<strong>重点，测试直接拿去排用例</strong></li>
+                                <li><strong>上线与回滚关注点</strong>：<strong>重点</strong> —— 上线盯什么、怎么回退</li>
                             </ul>
+                            <p>头两节有意压短，信息密度在后五节。正文<strong>不贴代码片段</strong>、
+                                也<strong>不逐条点名「某文件某行」</strong> —— 它说的是「哪块逻辑有问题、
+                                QA 该验什么」，用的是模块 / 表 / 字段 / 入口这类能直接对上功能的说法。</p>
                             <p>抽屉顶部那一行是元信息：
                                 <code>最近分析：时间 | 风险等级 | 范围</code>。
                                 风险等级共 5 档：低 / 中低 / 中 / 中高 / 高风险。</p>
