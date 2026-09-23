@@ -56,6 +56,7 @@ from services.weekly_file_sync import (
     weekly_cache_inputs_unchanged,
     weekly_cache_is_unchanged,
 )
+from services.weekly_window_reconcile import group_reachable_window_files
 from services.weekly_version_files_api_helpers import (
     collect_file_entries,
     describe_file_header_profile,
@@ -1392,10 +1393,10 @@ def process_weekly_version_sync(config_id):
         annotate_topology_order(repository, commits_in_range)
         commits_in_range = order_for_merge(commits_in_range)
 
-        # 按文件路径分组提交
-        files_commits = {}
-        for commit in commits_in_range:
-            files_commits.setdefault(commit.path, []).append(commit)
+        # 按文件路径分组提交。**只分组当前 tip 可达的那些**：历史被强推/重建之后旧提交
+        # 会混在窗口里，那正是「清单说 3 个提交、差异出处说 5/6 个」的来源（对账与原子
+        # 替换见 services/weekly_window_reconcile.py）。
+        files_commits = group_reachable_window_files(config, commits_in_range)
         log_print(f"涉及 {len(files_commits)} 个文件", 'WEEKLY')
         # 单文件失败必须累计上报：过去 continue 掉之后照样打「同步完成」并标 completed。
         failed_details = []

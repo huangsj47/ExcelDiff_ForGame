@@ -23,7 +23,7 @@ from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from models import Project, Repository, WeeklyVersionConfig, WeeklyVersionDiffCache, db
-from services.ai import snapshot_store
+from services.ai import snapshot_store, window_commits
 from services.ai.header_scope import header_scope_fingerprint, scoped_version
 from services.ai.project_facts import (
     critical_path_facts,
@@ -260,6 +260,10 @@ def _summarize_weekly_files(
     )
     total_files = total_query.count()
 
+    # 窗口提交账的事实来源（读 `commits_log`）。放在这里而不是读侧：`change_set` 是
+    # 纯函数层，而「窗口里到底有哪些提交」只有这一层有库会话。
+    window_commit_ids = window_commits.window_commit_ids(configs)
+
     entries = total_query.all()
     delta_entries = _select_delta_entries(
         entries, baseline, header_scope_fingerprint([cfg.id for cfg in configs]),
@@ -411,10 +415,19 @@ def _summarize_weekly_files(
         # 「项目声明了『没有路径模式』」与「项目什么都没声明」在结果里分不开。
         "critical_path_hits": list(scan.reasons),
         "critical_path_source": scan.source,
+        # 窗口内、当前仓库上的 distinct 提交数（**读 commits_log**）。它与
+        # `delta_files` 那批文件的「最新提交数」**不是一回事**，两个数必须都在，
+        # 报告里才分得开 —— 理由见 services/ai/window_commits.py。
+        "window_commits": len(window_commit_ids),
     }
     return summary, {
         "repos": list(repo_summaries.values()),
         "delta_files": delta_files,
+        # 窗口内的提交号清单。**给读侧算「实际提交数」，也给 `AnalysisScope` 撑起
+        # `commit_detail` 的白名单**（此前白名单只有每个文件的 `latest_commit_id`，
+        # 窗口里其它可达提交一律被 `resolve_commit` 判成「不属于本批次」—— 见
+        # `services/ai/window_commits.py` 与 `change_set.from_weekly_payload`）。
+        "window_commit_ids": list(window_commit_ids),
         "compensation_files": [
             item for item in delta_files if item.get("source") == "compensation"
         ],

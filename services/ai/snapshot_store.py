@@ -36,7 +36,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from models import WeeklyVersionDiffCache, db
 from models.ai_analysis import AiDiffSnapshot, AiDiffSnapshotItem
@@ -290,6 +290,52 @@ def load_baseline(group_key: str) -> Optional[BaselineSnapshot]:
         complete=bool(snapshot.complete),
         items=items,
     )
+
+
+def snapshot_commit_ids(snapshot_id: Optional[int]) -> FrozenSet[str]:
+    """一份快照的条目引用到的**全部提交号**（`latest` 与 `base` 都算）。
+
+    用途是**来源核对**（P0 工作包 A）：某个仓库的历史被强推/重建之后，快照里记着的
+    提交可能已经不在当前 tip 上。`base_commit_id` 也要算 —— 条目身份是
+    `(base, latest, diff_version, commit_count)`，base 指向一个不存在的提交时，
+    「这个文件变了没有」这个比较的两端之一已经不在了。
+    """
+    ids: set = set()
+    for row in snapshot_items(snapshot_id).values():
+        latest = getattr(row, "latest_commit_id", None)
+        base = getattr(row, "base_commit_id", None)
+        for value in (latest, base):
+            text = str(value or "").strip()
+            if text:
+                ids.add(text)
+    return frozenset(ids)
+
+
+def entries_outside_history(
+    snapshot: Any, reachable: Iterable[str]
+) -> Tuple[ItemKey, ...]:
+    """这份快照里**指向当前历史之外**的条目键（`(config_id, file_path)`）。
+
+    `reachable` 是当前 tip 上可达的提交集合（来自
+    `services/repository_sync_window.reachable_commits`）。**空集合时返回空元组** ——
+    「问不到可达集合」不是「全都不在历史上」，把它当后者会让每一份历史快照都被判成
+    过期。与平台别处「未知 ≠ 0」是同一条纪律。
+
+    这是**只读**核对：本函数不删任何东西。历史运行与其快照保留为冻结输入（见
+    `services/weekly_window_reconcile.py` 的模块抬头），核对只回答「它还准不准」，
+    不动它 —— 冻结输入被就地改写等于伪造审计线索。
+    """
+    known = {str(item or "").strip() for item in (reachable or ()) if str(item or "").strip()}
+    if not known:
+        return ()
+    outside: List[ItemKey] = []
+    for key, row in snapshot_items(
+        snapshot if isinstance(snapshot, int) else getattr(snapshot, "id", None)
+    ).items():
+        latest = str(getattr(row, "latest_commit_id", None) or "").strip()
+        if latest and latest not in known:
+            outside.append(key)
+    return tuple(outside)
 
 
 def _identity_map(source: Any) -> Dict[ItemKey, Identity]:

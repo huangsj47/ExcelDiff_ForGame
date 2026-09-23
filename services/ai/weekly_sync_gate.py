@@ -35,6 +35,12 @@ pending 再跑一次（见 `ai_analysis_service.run_weekly_analysis_background` 
   见 `_in_flight_sync_task` 的 docstring —— 那次收窄的前提已被队列拆分推翻）。
   结论是不对称的：误拦的代价是分析晚几分钟（有上限兜底、同步**真的会跑完**），
   误放的代价是一份**看起来完整、实则缺文件**的报告 —— 后者是静默的。
+* **「缓存有没有落后」不止看时间**（2026-09-23 补）：`weekly_sync_needed_config_ids`
+  另有一条判据 —— 缓存行引用的提交还在不在**当前 tip 的可达集合**里
+  （`services/ai/snapshot_consistency.py`）。强推 / 回退 / 重建裸库之后，tip 相等、
+  也没有「同步之后新入库的 Commit」，缓存却指向了已被删除的提交；只比 tip 判不出来。
+  落地动作在 `services/weekly_window_reconcile.py`（同步时按可达集合原子替换窗口缓存），
+  所以这条闸门判出来的「需要同步」是真能被修好的。
 """
 
 from __future__ import annotations
@@ -134,10 +140,18 @@ def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] =
 def weekly_sync_needed_config_ids(config_ids: Iterable[int]) -> list[int]:
     """返回缓存可能落后于仓库采集结果的配置。
 
-    两种情况都必须挡住快照：仓库 ``auto_sync`` 仍在写 Commit 行；或它刚写完，而最近一次
-    ``weekly_sync`` 完成之后又出现了窗口内 Commit。后者是 2026-09-23 真机复现的启动竞态：
-    worker 先用旧 Commit 表完成周版本同步，随后 auto_sync 拉到新提交，AI 此时看不到任何
-    active weekly_sync，却会冻结一份已经过期的缓存。
+    三种情况都必须挡住快照：
+
+    1. 仓库 ``auto_sync`` 仍在写 Commit 行；
+    2. 它刚写完，而最近一次 ``weekly_sync`` 完成之后又出现了窗口内 Commit。这是
+       2026-09-23 真机复现的启动竞态：worker 先用旧 Commit 表完成周版本同步，随后
+       auto_sync 拉到新提交，AI 此时看不到任何 active weekly_sync，却会冻结一份已经
+       过期的缓存。
+    3. **缓存行引用了当前 tip 上不存在的提交**（`snapshot_consistency`）—— 强推 /
+       回退 / 重建裸库之后的形态。它**不能**由前两条覆盖：2026-09-23 实测里
+       ``repository.last_synced_tip`` 已经等于远端 tip、「同步之后有没有新 Commit」
+       也判为否，而配置 3 的缓存仍指向 e54c73df 等已被删除的提交。「只比 tip 是不够的」
+       说的就是这一格。
     """
     ids = sorted({int(item) for item in config_ids if item is not None})
     if not ids:
@@ -180,12 +194,24 @@ def weekly_sync_needed_config_ids(config_ids: Iterable[int]) -> list[int]:
             ).first()
             if newer is not None:
                 needed.add(cfg.id)
-        return sorted(needed)
-    except Exception as exc:  # noqa: BLE001 —— 读不动时仍由既有 active weekly_sync 闸门兜底
+    except Exception as exc:  # noqa: BLE001 —— 读不动时仍由下面那条来源核对与 active 闸门兜底
         from utils.logger import log_print
 
-        log_print(f"⚠️ 检查周版本缓存新鲜度失败，本次只按活动同步任务判定: {exc}", "AI", force=True)
-        return []
+        log_print(
+            f"⚠️ 检查周版本缓存新鲜度失败（时间口径这一条本轮放弃）: {exc}", "AI", force=True
+        )
+        needed = set()
+    # 第三条判据单独一层 try：它要问 git，而上面那条只读库 —— 两边的失败面不重合，
+    # 一个失败不该把另一个的结论一起丢掉。
+    try:
+        from services.ai.snapshot_consistency import stale_config_ids
+
+        needed.update(stale_config_ids(ids))
+    except Exception as exc:  # noqa: BLE001 —— 核对不动只是少一道闸，不该把分析卡死
+        from utils.logger import log_print
+
+        log_print(f"⚠️ 来源一致性核对失败，本次不据此拦截: {exc}", "AI")
+    return sorted(needed)
 
 
 def weekly_sync_in_flight(config_ids: Iterable[int], *, now: Optional[datetime] = None) -> str:
@@ -200,6 +226,9 @@ def weekly_sync_in_flight(config_ids: Iterable[int], *, now: Optional[datetime] 
     """
     needed = weekly_sync_needed_config_ids(config_ids)
     if needed:
+        # 措辞对三种成因**都成立**：「同步之后又入库了新提交」与「缓存里的提交已被强推
+        # 掉」都表现为「缓存落后于仓库当前历史」。`weekly_sync_needed_config_ids` 的
+        # docstring 逐条写了这三种成因，日志里另有 `snapshot_consistency` 那条 force 行。
         return (
             f"周版本缓存落后于仓库同步（待刷新 config_id={','.join(map(str, needed))}）："
             "等最新提交写入周版本缓存后再分析"

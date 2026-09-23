@@ -31,11 +31,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional, Sequence
 
+from services.ai import window_commits
 from services.ai.bundles import build_bundles, describe_bundles
 from services.ai.manifest import ManifestPlan, build_manifest
-from services.ai.prompt import CommitSummary, FileChange, render_change_summary
 from services.ai.project_facts import DEFAULT_PREFIX_DECLARATION, PrefixDeclaration
+from services.ai.prompt import CommitSummary, FileChange, render_change_summary
 from services.ai.scope import AnalysisScope, normalize_path
+from services.ai.window_commits import WindowCommitFacts
 from utils.logger import log_print
 
 # 变更清单里最多列几组「同记号关联」（疑似同一次改动的那些）。列太多会把清单本身挤长，
@@ -209,6 +211,15 @@ def from_weekly_payload(
         manifest=manifest,
         extra_inputs=_extra_inputs(payload.get("delta_files") or ()),
         repositories=repositories,
+        # **窗口里真实可达的提交**（写侧读 `commits_log` 得到）。它撑起两件事：
+        # 一是 `commit_detail` 的白名单 —— 此前只有每个文件的 `latest_commit_id`，
+        # 窗口里其它改动过的提交一律被 `resolve_commit` 判成「不属于本批次」，模型
+        # 因此**连问都问不了**；二是模型可见摘要里那三个数的第一个（见
+        # `services/ai/window_commits.py`）。
+        extra_commits=payload.get("window_commit_ids") or (),
+        commit_facts=window_commits.facts_from_payload(
+            payload, window_commit_ids=payload.get("window_commit_ids") or ()
+        ),
     )
 
 
@@ -224,6 +235,8 @@ def build(
     manifest: Optional[ManifestPlan] = None,
     extra_inputs: Sequence[tuple[str, str]] = (),
     repositories: Optional[Mapping[str, Iterable[int]]] = None,
+    extra_commits: Iterable[str] = (),
+    commit_facts: Optional[WindowCommitFacts] = None,
 ) -> ChangeSet:
     """渲染清单并算出白名单范围。两种模式共用。
 
@@ -237,6 +250,22 @@ def build(
     `extra_inputs` 是**本轮输入里不是本轮改动的那几条**（`(路径, 来源)`，来源取值
     `compensation` / `dependency`）。它们会单独成一小节逐条列出 —— 只给一句计数时，
     模型分不清哪个文件不是本轮改的，报告里就会把补偿项当成新变更。
+
+    ## `extra_commits` 只扩 `commit_detail` 的白名单，**不动 `file_diff`**
+
+    `scope.commits` 与 `scope.paths_by_commit` 是两种权限，粗细不同：
+
+    * **在 `commits` 里** → `commit_detail <提交号>` 允许执行（它给的是「这条提交改了
+      哪些文件」的名单）；
+    * **在 `paths_by_commit[提交]` 里** → `file_diff(commit, path)` 允许执行（那才是
+      「读这个文件在这个提交上的差异」）。
+
+    `extra_commits` 只做前一件。窗口里那些「改的文件没被列进本次输入」的提交，模型
+    因此可以**查到它们改了哪些文件**，但仍必须按各自文件的 `latest_commit_id` 去索取
+    diff —— 那条路是 `paths_by_commit` 把着的，一点没松。这不是保守，是必要的：给一条
+    提交配上它当时的完整文件集需要再查一次 `commits_log`，而那份数据**这一层没有**
+    （`change_set` 是纯函数层）。用「猜一组路径」去补，等于把白名单从「平台核对过」
+    降成「平台猜的」。
     """
     ordered = tuple(commits)
     rendered_paths = _collect_paths(ordered)
@@ -305,13 +334,21 @@ def build(
     )
     if extra_inputs:
         body += _extra_inputs_section(extra_inputs)
+    if commit_facts is not None:
+        # 三个数（实际提交数 / 文件最新提交数 / 合并差异覆盖数）分开说 —— 它们**本来就
+        # 可以不相等**，而此前清单里只有一个「N 个提交」，于是与差异出处那句
+        # 「覆盖 5/6 条提交」在报告里对不上（见 services/ai/window_commits.py）。
+        described = window_commits.describe_commit_counts(commit_facts)
+        if described:
+            body += "\n" + described
 
     return ChangeSet(
         summary=body,
         scope=AnalysisScope(
             commits=tuple(
                 commit_id for commit_id, _ in resolved_whitelist.items() if commit_id
-            ),
+            )
+            + _extra_commit_ids(extra_commits, resolved_whitelist),
             paths_by_commit={
                 commit_id: frozenset(paths_)
                 for commit_id, paths_ in resolved_whitelist.items()
@@ -346,6 +383,24 @@ def _note_repository(
         into.setdefault(commit_id, set()).add(int(raw_repository_id))
     except (TypeError, ValueError):
         return
+
+
+def _extra_commit_ids(
+    extra_commits: Iterable[str], whitelist: Mapping[str, Iterable[str]]
+) -> tuple[str, ...]:
+    """窗口里那些**没有出现在白名单键上**的可达提交号（去重、保序）。
+
+    只加进 `scope.commits`，**不建 `paths_by_commit` 条目**：理由见 `build` 的
+    docstring（`commit_detail` 与 `file_diff` 是两种粗细不同的权限）。
+    """
+    known = {str(item) for item in whitelist.keys() if item}
+    result: list[str] = []
+    for raw in extra_commits or ():
+        text = str(raw or "").strip()
+        if not text or text in known or text in result:
+            continue
+        result.append(text)
+    return tuple(result)
 
 
 def _assignment_note(manifest: ManifestPlan) -> str:
