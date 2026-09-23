@@ -33,6 +33,7 @@ from typing import Optional, Tuple
 from models import db
 from models.ai_analysis import AiAnalysisRun, AiWeeklyAnalysisState
 from services.ai import snapshot_store
+from services.ai.baseline import FORCE_FULL_REASON
 from services.ai.coverage_ledger import ledger_from_run
 from services.ai.engine import STATUS_DEGRADED, STATUS_SUCCEEDED
 from services.ai.project_config_source import _utcnow, get_project_analysis_config
@@ -63,7 +64,7 @@ def resolve_baseline(
     「全量模式始终新建目标快照上的完整分析任务」）。
     """
     if force_full:
-        return None, {"kind": "none", "reason": "force_full", "complete": False}
+        return None, {"kind": "none", "reason": FORCE_FULL_REASON, "complete": False}
     try:
         baseline = snapshot_store.load_baseline(group_key)
     except Exception as exc:  # noqa: BLE001 —— 读不出基准不该让整个分析起不来

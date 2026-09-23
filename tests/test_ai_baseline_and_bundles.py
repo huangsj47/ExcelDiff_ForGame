@@ -203,6 +203,32 @@ def test_an_empty_baseline_states_that_this_is_the_first_run():
     assert "第一次分析" in text
 
 
+def test_the_fingerprint_is_present_but_labelled_as_not_an_evidence_address():
+    """指纹要留着，但必须**当场说明它不是证据地址**。
+
+    ## 这条是实测踩出来的
+
+    每条结论末尾渲染的是 `#<16 位指纹>`，而模型的取数协议里「证据地址」是 **20 位**。
+    2026-09-24 的实测里，模型把上一轮的两条 16 位指纹当成 `evidence` 地址发了请求
+    （`96e503deaeeabd00`、`66d7087a1a56b78f`），四条请求全被丢弃。
+
+    **不能靠删指纹来修**：判重正是靠它（上一条用例与
+    `test_ai_analysis_service.py::test_the_second_run_carries_the_first_runs_findings_as_a_baseline`
+    都钉着「指纹得跟着进提示词，模型才能逐条对照」）。也不能放宽 `evidence` 校验 ——
+    那会把「模型编地址」这件事从被拒绝变成被接受。所以只能**消歧**：留着它，并写明
+    要用旧结论的原文就按文件路径与提交重新取证。
+    """
+    text = build_baseline_digest(classify([_finding("96e503deaeeabd00")]))
+
+    assert "#96e503deaeeabd00" in text, "指纹本身要留着 —— 判重靠它"
+    assert "不是可以读取的证据地址" in text, (
+        "没有说明指纹不是证据地址，模型还会拿它去发 evidence 请求。\n"
+        f"实际输出：\n{text}"
+    )
+    # 给出可执行的那条路（只说「不行」会把模型卡死在这一步）。
+    assert "重新取证" in text
+
+
 def test_omission_is_accounted_for_and_keeps_the_urgent_ones():
     """超长时先丢最不要紧的，并**如实写出省略了多少**。
 

@@ -213,3 +213,151 @@ def test_the_read_side_still_shows_a_markdown_only_run(ctx):
         )
     finally:
         _cleanup([markdown_only.id])
+
+
+# ==========================================================================
+#  用户**显式**点的全量：旧结论一个字都不进模型输入
+#
+#  实测的由来（2026-09-24）：全量运行仍然带着上一轮的清单，报告就把两条**从未存在过**
+#  的物品 ID 写成「本期删除」的高风险 —— 直接读那个仓库的三个提交，每一版都只有
+#  1001–1005，1006/1007 从来没有出现过。旧结论被注入之后，模型把它当成了既成事实。
+#
+#  **判据是运行账上的 `reason`，不是 `scope`**：平台把增量升格成全量时（`delta_ratio_high`
+#  等）做差基线仍在同一快照上、结论可比，那时必须照常注入。这一组把两个方向都钉住。
+# ==========================================================================
+
+
+def _empty_change():
+    from services.ai.change_set import ChangeSet
+    from services.ai.scope import AnalysisScope
+
+    # 变更集在这一组里不重要：`_baseline_digest` 只用它的 paths 判「哪条结论的证据过期了」，
+    # 空集就是「这次没有文件变动」。
+    return ChangeSet(summary="", scope=AnalysisScope(), paths=())
+
+
+def test_a_user_requested_full_run_gets_no_history_at_all(ctx):
+    """用户点了全量 → 摘要整段不出现（不是「共 0 条」，是**一个字都没有**）。
+
+    「共 0 条」与「没有这一节」在提示词里是两件事：前者会被模型读成「历史清单是空的，
+    所以这些问题是新发现」，后者才是「这次从零重判」。
+    """
+    from services.ai.baseline import FORCE_FULL_REASON
+
+    project = _project()
+    key = f"g-{uuid.uuid4().hex[:8]}"
+    older = _run(project.id, key, structured=True, marker="OLDER")
+    db.session.commit()
+    try:
+        change = _empty_change()
+        # 先确认这一份历史本来是会被注入的 —— 否则下面那条断言可能因为「压根没取到」
+        # 而假绿（这一族用例最容易踩的坑）。
+        assert "OLDER 的问题" in _baseline_digest("weekly", key, change)
+
+        digest = _baseline_digest(
+            "weekly",
+            key,
+            change,
+            baseline_account={"kind": "none", "reason": FORCE_FULL_REASON, "complete": False},
+        )
+        assert digest == "", f"用户点的全量仍然带着旧结论：{digest!r}"
+    finally:
+        _cleanup([older.id])
+
+
+def test_a_platform_upgraded_full_still_carries_the_history(ctx):
+    """**防过头**：平台把增量升格成全量时，旧结论必须照常注入。
+
+    那一档的做差基线还在同一快照上（`kind == "snapshot"`），结论可比；关掉它等于让
+    「1 小时前分析过、现在只多了 1 个 commit」这件事重新变成从零开始 —— 那正是增量评审
+    用不下去的根本原因。
+    """
+    project = _project()
+    key = f"g-{uuid.uuid4().hex[:8]}"
+    older = _run(project.id, key, structured=True, marker="OLDER")
+    db.session.commit()
+    try:
+        digest = _baseline_digest(
+            "weekly",
+            key,
+            _empty_change(),
+            baseline_account={"kind": "snapshot", "complete": True},
+        )
+        assert "OLDER 的问题" in digest, (
+            "平台升格的全量被当成「用户点的全量」关掉了历史 —— 过头了"
+        )
+    finally:
+        _cleanup([older.id])
+
+
+def test_human_suppression_survives_a_user_requested_full(ctx):
+    """**人工忽略跨全量保留**（产品决定，不是漏改）。
+
+    摘要是**给模型的输入**，忽略是**用户的分类账**。用户已经判定「这条不用再报」，
+    重跑一次不该把他的话作废；而被抑制的条目是用户自己要求抹掉的，不是平台静默抹掉的
+    —— 所以这里不违反 `baseline_source` 那条「两边同源」的原则（它的理由是防「报告里
+    被抹掉、摘要里也没说」这种两头不靠；全量档里摘要整段不出现，不存在「没说」）。
+    """
+    from services.ai.baseline import FORCE_FULL_REASON
+    from services.ai_analysis_service import _suppressed
+
+    project = _project()
+    key = f"g-{uuid.uuid4().hex[:8]}"
+    older = _run(project.id, key, structured=True, marker="IGNORED")
+    AiAnalysisAnomaly.query.filter_by(run_id=older.id).update({"disposition": "ignored"})
+    db.session.commit()
+    try:
+        change = _empty_change()
+        assert _suppressed("weekly", key, change) == frozenset({"fp-IGNORED"})
+        # 摘要关掉了，抑制照旧 —— 两者用的是**不同**的判据，这是刻意的。
+        assert (
+            _baseline_digest(
+                "weekly",
+                key,
+                change,
+                baseline_account={"kind": "none", "reason": FORCE_FULL_REASON},
+            )
+            == ""
+        )
+        assert _suppressed("weekly", key, change) == frozenset({"fp-IGNORED"}), (
+            "全量把用户的人工忽略一起作废了 —— 那是他的分类账，不是模型的输入"
+        )
+    finally:
+        _cleanup([older.id])
+
+
+@pytest.mark.parametrize(
+    "account,expected",
+    [
+        (None, False),
+        ({}, False),
+        ({"kind": "none"}, False),  # 真首跑：没有 reason
+        ({"kind": "none", "reason": "force_full"}, True),
+        ({"kind": "snapshot", "reason": "force_full"}, True),  # reason 说了算
+        ({"kind": "watermark", "reason": "watermark"}, False),
+        ({"kind": "none", "reason": "Force_Full"}, False),  # 大小写不宽容
+        ({"kind": "none", "reason": None}, False),
+        ("force_full", False),  # 脏值（不是映射）不许当成命中
+    ],
+    ids=[
+        "没有账",
+        "空账",
+        "真首跑无 reason",
+        "用户点全量",
+        "快照但 reason 说全量",
+        "老分组水位线",
+        "大小写不同",
+        "reason 是 None",
+        "脏值不是映射",
+    ],
+)
+def test_the_predicate_only_fires_on_an_explicit_full(account, expected):
+    """判据只认一个值，其余一律**不关**。
+
+    保守的方向是明确的：宁可多带一次旧结论，也不要因为账上一个字段没读到、
+    或者读出一个没见过的值，就静默改变一次全量评审的输入。
+    """
+    from services.ai.baseline_source import run_ignores_history
+
+    assert run_ignores_history(account) is expected
+

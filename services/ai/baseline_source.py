@@ -18,15 +18,35 @@
 两者都从 `baseline_findings()` 出发。**它们必须用同一批输入**：一边判「这条还要不要看」、
 另一边渲染「这条已报过」，两边取值不同的话，会出现「报告里被抹掉了、但摘要里也没说」
 这种两头不靠的条目。
+
+## 唯一的例外：用户**显式**点的全量（`run_ignores_history`）
+
+那一档 `baseline_digest` 返回空串（旧结论一个字都不进模型输入），而 `suppressed` **照常生效**。
+这**不是**破坏上面那条同源规则，是一个**刻意的产品决定**，理由写两遍免得下一个人修回去：
+
+* 「用户点了全量」的语义是**从零重判** —— 旧结论一旦进了提示词，模型就会把它当既成事实
+  复述。实测有过一次：报告把两条**从未存在过**的物品 ID 写成「本期删除」的高风险，
+  根因就是旧结论被注入了全量运行。
+* 而「人工忽略」是**用户的分类账**，不是模型的输入。用户已经判定「这条不用再报」，
+  重跑一次不该把他的话作废 —— 所以他忽略过的条目在全量里**仍然被抑制**。
+* 上面那条同源规则要防的是「报告里被抹掉、摘要里也没说」这种**两头不靠**。全量档里
+  摘要整段不出现，不存在「没说」的问题；被抑制的条目是用户自己要求抹掉的，不是平台
+  静默抹掉的。
+
+判据取**运行账上的 `reason`**，不是 `run.scope`：平台把增量**升格**成全量（`delta_ratio_high`
+等）时，做差基线仍在同一快照上、结论可比，那时**必须**照常注入 —— 有测试钉着
+（`tests/test_ai_analysis_service.py::test_the_second_run_carries_the_first_runs_findings_as_a_baseline`）。
+能区分这两种「全量」的只有 `payload["baseline"]` 的 `reason`。
 """
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, List, Mapping, Optional
 
 from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
 from services.ai.baseline import (
     DISPOSITION_PENDING,
+    FORCE_FULL_REASON,
     BaselineFinding,
     build_baseline_digest,
     classify,
@@ -128,7 +148,30 @@ def baseline_findings(target_type: str, target_key: Optional[str]) -> List[Basel
     ]
 
 
-def baseline_digest(target_type: str, target_key: Optional[str], change: ChangeSet) -> str:
+def run_ignores_history(baseline_account: Optional[Mapping[str, Any]]) -> bool:
+    """这次运行要不要**从零重判**（旧结论一个字都不进模型输入）。
+
+    只认运行账上 `reason == "force_full"` 这一种 —— 那是**用户显式点了全量**留下的标记
+    （`services/ai/baseline_blocks.py::resolve_baseline` 写的）。**不要**改成看
+    `run.scope == "full"`：平台把增量升格成全量时 `scope` 也是 `full`，但那时做差基线
+    仍在同一快照上、结论可比，旧结论**必须**照常注入（有测试钉着，见模块 docstring）。
+    老分组的 `watermark` 过渡态同样不关 —— 它不是用户要的全量。
+
+    `None` / 缺键 / 脏值一律**不关**（保守：宁可多带一次旧结论，也不要因为账上一个
+    字段没读到就静默改变一次全量评审的输入）。
+    """
+    if not isinstance(baseline_account, Mapping):
+        return False
+    return str(baseline_account.get("reason") or "") == FORCE_FULL_REASON
+
+
+def baseline_digest(
+    target_type: str,
+    target_key: Optional[str],
+    change: ChangeSet,
+    *,
+    baseline_account: Optional[Mapping[str, Any]] = None,
+) -> str:
     """给模型看的「已经报过的问题」。取不到就是空串（提示词里那一段整个不出现）。
 
     `changed_paths` 传「上次报过、这次又变了」的文件：那类结论的证据已经过期，要重新
@@ -137,7 +180,13 @@ def baseline_digest(target_type: str, target_key: Optional[str], change: ChangeS
     **先 `classify` 再渲染，两件事必须分开做**：`build_baseline_digest` 刻意不收
     `changed_paths`，因为它再判一遍状态会把刚判成「需要重新确认」的结论判回「已忽略」
     并从摘要里抹掉 —— 而且是静默的（报告里只是少一条）。
+
+    `baseline_account` 传本次运行的基线账（`payload["baseline"]`）。用户**显式**点全量时
+    直接返回空串（理由与产品决定见模块 docstring）。它是**关键字可选**的：只传三个位置
+    参数的调用方（既有测试与老代码）行为逐字不变。
     """
+    if run_ignores_history(baseline_account):
+        return ""
     findings = baseline_findings(target_type, target_key)
     if not findings:
         return ""

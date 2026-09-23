@@ -1407,7 +1407,12 @@ def _run_engine_and_persist(
         ),
         "project_knowledge": project_config.get("project_knowledge") or "",
         "project_instructions": project_config.get("prompt_template") or "",
-        "baseline_digest": _baseline_digest(target_type, target_key, change),
+        # 用户**显式**点的全量：旧结论一个字都不进模型输入（判据与理由见
+        # `baseline_source.run_ignores_history`）。注意 `suppressed` **不跟着关** ——
+        # 那是用户的分类账，不是模型的输入。
+        "baseline_digest": _baseline_digest(
+            target_type, target_key, change, baseline_account=payload.get("baseline")
+        ),
         # 每跑完一轮把累计用量写进进程内的进度快照（services/ai/run_progress.py，界面
         # 一边跑一边轮询它）。**它是给界面看的一眼，不是账** —— 账在 `_persist_outcome`。
         "on_round": lambda progress: _publish_progress(run.id, project_id, progress),

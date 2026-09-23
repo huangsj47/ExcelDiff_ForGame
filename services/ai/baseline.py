@@ -51,6 +51,13 @@ STATE_SUPPRESSED = "suppressed"  # 人工已忽略且没有新变化，不再出
 # 超限时按「先丢最不要紧的」压缩，并明确写出省略了多少（同 `budget.py` 的原则）。
 DEFAULT_BASELINE_CHARS = 6_000
 
+# 运行账上 `baseline.reason` 的取值之一：**用户显式点了全量**。
+#
+# 只有这一个取值会让「旧结论不进模型输入」（判据在 `baseline_source.run_ignores_history`）。
+# 它**定义在这里**（而不是在写它的 `baseline_blocks.py`）是因为本模块是叶子：写侧与读侧
+# 都能 import 它而不产生环，两处各写一个字面量迟早会漂。
+FORCE_FULL_REASON = "force_full"
+
 _STATE_ORDER = (STATE_NEEDS_RECHECK, STATE_OPEN, STATE_SUPPRESSED)
 
 # 短标签用于计数行与分组标题，补充说明只在有内容时才拼在后面（不拼成双层括号）。
@@ -216,7 +223,10 @@ def _render_header(
         f"共 {len(classified)} 条：{counts or '无'}。\n"
         "这些是**已知问题，不要当作新发现重复报**。请逐条给出它现在的状态："
         "仍成立 / 已修复 / 已被推翻（说明依据）。标为「已忽略」的默认不要再提，"
-        "除非你发现它正是因为这次改动而重新成立的。"
+        "除非你发现它正是因为这次改动而重新成立的。\n"
+        "**每条末尾的 `#…` 是「问题指纹」（16 位十六进制）**，只用来让你逐条对照"
+        "「这是不是上次那一条」—— 它**不是可以读取的证据地址**，不要拿它去发 "
+        "`evidence` 请求。要复核某条旧结论的原文，按它的 `文件路径` 与 `提交` 重新取证。"
     )
 
 

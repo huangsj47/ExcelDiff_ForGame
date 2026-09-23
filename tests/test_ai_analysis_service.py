@@ -1377,6 +1377,69 @@ def test_the_second_run_carries_the_first_runs_findings_as_a_baseline(monkeypatc
         assert "#" in user
 
 
+def test_a_user_requested_full_run_does_not_carry_the_previous_findings(monkeypatch):
+    """**用户显式点全量 → 提示词里一个字都不许有上一轮的清单。**
+
+    这是上一条用例的**反面**，两条必须同时成立才算对：平台升格的全量要带历史
+    （同一快照、结论可比），用户点的全量要从零重判。
+
+    实测的由来（2026-09-24）：配置 3 的全量运行把「物品 ID 1006/1007 被整行删除」写成
+    高风险，而那个仓库的三个提交每一版都只有 1001–1005 —— 这两个 ID 从来没存在过。
+    直接读 Git 历史就能证伪，所以它不是「证据不足但可能成立」，是确凿的误报；
+    根因就是上一轮那条结论被注入了这次全量的提示词。
+    """
+    from models.ai_analysis.job import MODE_FULL
+
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo = _create_repo(project.id, _uid("table"), "svn", "table")
+        cfg = _create_weekly_config(
+            project.id, repo, "W1", datetime(2026, 3, 1), datetime(2026, 3, 8)
+        )
+        _seed_diff_cache(cfg, repo, TABLE_PATH, datetime.now(timezone.utc), commit_id=COMMIT_SHA)
+        db.session.commit()
+
+        ai_service.set_project_api_key(project.id, "k")
+        ai_service.update_project_analysis_config(
+            project.id,
+            {"api_base_url": "http://127.0.0.1:15721/v1", "api_model": "m"},
+        )
+        db.session.commit()
+
+        # 第一次：跑出「上一轮结论」。
+        first_client = _FakeClient()
+        monkeypatch.setattr(
+            ai_service, "build_endpoint_client", lambda *a, **k: (first_client, [])
+        )
+        first = ai_service.run_weekly_analysis_background(cfg.id)
+        assert first["status"] == "succeeded", first
+
+        # 又来了一个提交：把缓存记录推到「上次分析之后」，否则这次会被判 no_change。
+        entry = WeeklyVersionDiffCache.query.filter_by(config_id=cfg.id).first()
+        entry.updated_at = datetime.now(timezone.utc) + timedelta(minutes=1)
+        db.session.commit()
+
+        full_client = _FakeClient()
+        monkeypatch.setattr(
+            ai_service, "build_endpoint_client", lambda *a, **k: (full_client, [])
+        )
+        full = ai_service.run_weekly_analysis_background(cfg.id, requested_mode=MODE_FULL)
+        assert full["status"] == "succeeded", full
+
+        # 先确认这一份旧结论**本来会被注入**（同一条用例的前半段已证），再去断言它没进来 ——
+        # 否则「没带」可能只是因为压根没取到，那这条用例就什么也没证明。
+        run = db.session.get(AiAnalysisRun, full["run_id"])
+        assert (run.request_payload or "").find("force_full") != -1, (
+            "这次不是「用户点的全量」——判据取错了，用例的前提不成立"
+        )
+        user = full_client.calls[0][-1]["content"]
+        assert "已经报过的问题" not in user, (
+            "用户点的全量仍然带着上一轮的清单 —— 模型会把它当既成事实复述"
+        )
+        assert "【道具】删除了已放出的 ID" not in user
+
+
 # ==========================================================================
 # 增量水位线：只有「真正跑完」的 run 才能推进
 # ==========================================================================
