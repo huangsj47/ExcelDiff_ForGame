@@ -76,14 +76,29 @@
                     </button>
                 </div>
             </form>
-            <p class="aiu-hint">
-                「清空条件」只取消项目 / 来源 / 状态这三项，<strong>保留你正在看的时间范围</strong>；
-                「重置为默认」把时间范围也回到「全部」，等于刚打开这一页的状态。
-                这两个按钮都<strong>只动筛选条件</strong>，不碰任何用量记录。
-                （页面上确实有会删数据的动作 —— 「全量重置」在下面的「统计口径」卡片里，
-                它是不可撤销的，所以不在这一排按钮里。）
-                条件写在地址栏里，刷新、分享、收藏都不会丢。
-            </p>
+            {# 操作说明：**一句安全边界 + 一个可展开的细节**。这两段原来各占好几行，
+               而这一屏上（数据还没到 / 一条运行都没有）它比要说明的那个表单还长。
+               事实一条没删，只改了「默认看不看得到」：两条「只动筛选条件 / 不碰用量
+               记录」与「会删数据的『全量重置』在『统计口径』卡片里、不可撤销」留在
+               **默认可见**的这一句里，两个按钮各自的范围与「条件在地址栏」收进折叠。 #}
+            <div class="aiu-filters-help">
+                <p class="aiu-filters-help__line">
+                    <i class="fas fa-shield" aria-hidden="true"></i>
+                    <span>这两个按钮都<strong>只动筛选条件</strong>，不碰任何用量记录；
+                        会删数据的「全量重置」不在这里 —— 它在页面下面的「统计口径」
+                        卡片里，并且<strong>不可撤销</strong>。</span>
+                </p>
+                <details class="aiu-filters-more">
+                    <summary><i class="fas fa-chevron-right" aria-hidden="true"></i>两个按钮的区别</summary>
+                    <ul class="aiu-filters-more__body">
+                        <li><strong>清空条件</strong>：只取消 项目 / 来源 / 状态 这三项，
+                            <strong>保留你正在看的时间范围</strong>。</li>
+                        <li><strong>重置为默认</strong>：把时间范围也回到「全部」，
+                            等于刚打开这一页的状态。</li>
+                        <li>条件写在地址栏里，刷新、分享、收藏都不会丢。</li>
+                    </ul>
+                </details>
+            </div>
 
             {# 口径联动：上面的「时间范围」决定表里列出哪些运行，而「本期预算」那一列永远
                按各项目自己的预算周期统计。同一屏上出现两个「本月」时，读的人几乎一定会把
@@ -170,15 +185,34 @@
             </div>
             <p class="aiu-stats-line" id="aiuStatsLine" role="status" aria-live="polite">正在读取…</p>
             <p class="aiu-field-help" id="aiuStatsResetLine" hidden></p>
-            <p class="aiu-hint">
-                统计起点是<strong>平台级口径</strong>：对所有人、所有筛选都生效，与上面「时间范围」
-                那个临时筛选不是一回事。它<strong>只改这一页怎么算</strong>，一条记录都不删 ——
-                <strong>预算的「已用」不跟着它变</strong>，起点之前的运行照旧计入预算与拦截判定。
-                全量重置是另一件事：它<strong>真删</strong>掉运行记录（含 AI 报告正文），不可撤销。
-            </p>
+            {# 这一段原来是一整段四行长句，讲了三件互相独立的事，压成一段的结果是
+               **没人读** —— 而它恰恰是「上面那些数字从哪一刻开始算」的唯一说明。
+               现在拆成两条要点（口径是什么 / 它不动什么），第三件事（全量重置真删、
+               不可撤销）是**危险动作的说明**，单独拎成一条警示条，紧贴在按钮上方。
+
+               **三句的正文逐字未动，连换行点都留在原处、一个 `<strong>` 都没多加**
+               （强调改由警示条本身的底色/描边/图标承担）—— 于是这段文字与改前
+               逐字节相同，只换了承载它的元素。拆段必然在**句与句之间**引入空白，
+               句内则一处不差。 #}
+            <ul class="aiu-stats-facts" role="list">
+                <li>
+                    <i class="fas fa-globe" aria-hidden="true"></i>
+                    <span>统计起点是<strong>平台级口径</strong>：对所有人、所有筛选都生效，与上面「时间范围」
+                        那个临时筛选不是一回事。</span>
+                </li>
+                <li>
+                    <i class="fas fa-shield-alt" aria-hidden="true"></i>
+                    <span>它<strong>只改这一页怎么算</strong>，一条记录都不删 ——
+                        <strong>预算的「已用」不跟着它变</strong>，起点之前的运行照旧计入预算与拦截判定。</span>
+                </li>
+            </ul>
             <div class="aiu-readonly" id="aiuStatsReadonly" hidden>
                 <i class="fas fa-lock" aria-hidden="true"></i>
                 <span>统计口径由<strong>平台管理员</strong>维护；你看到的是当前生效的口径与数字。</span>
+            </div>
+            <div class="aiu-stats-danger" role="note">
+                <i class="fas fa-triangle-exclamation" aria-hidden="true"></i>
+                <span>全量重置是另一件事：它<strong>真删</strong>掉运行记录（含 AI 报告正文），不可撤销。</span>
             </div>
             <div class="aiu-stats-actions" id="aiuStatsActions" hidden>
                 <button type="button" class="aiu-btn secondary" id="aiuStatsBaselineBtn">
@@ -1130,6 +1164,203 @@
 /* 横滚容器拿得到焦点（`tabindex="0"`）之后，焦点圈就归它管了：没有圈的话键盘用户
    不知道自己现在停在哪儿 —— 给了可达性却看不见焦点，等于没给。 */
 .aiu-table-wrap:focus-visible { outline: 3px solid var(--color-focus, #0b5ed7); outline-offset: 2px; }
+
+/* ---------------------------------------------------------------------------
+   KPI 那一排的主次（本轮新增。上面那些规则一条都没改，这一段只做覆盖）
+   ---------------------------------------------------------------------------
+   改之前：七张卡一模一样 —— 同一个白底、同一个 `24px/600` 数字、同一条 1px 边框。
+   无头 Chrome 实测那一排每一张都是 `value 24px/600`、`bg rgb(255,255,255)`、
+   `border-left 1px`；主卡（首格）的**墨量份额 0.123 还低于它的面积份额 0.136** ——
+   也就是说这一排里没有任何一张在视觉上更重，读下来就是一块白。
+
+   主次用三条**不同维度**的差一起建立（不靠颜色单独表意，色盲/灰度打印一样读得出）：
+
+     1. **位置**：主卡排在网格第一格（`order: -1`，理由见下）。
+     2. **字号 + 字重**：主数字 24px/700，细节数字 18px/600，差 6px，正好是这一页
+        字号刻度（12/14/16/18/24）上的两档。**主数字不能再往上加** —— 24px 是这条
+        刻度的顶格（`test_every_font_size_is_on_the_scale` 钉着，`.aiu-hero h1` 也
+        是 24px），所以这一档差是把**细节压下去**换来的。
+     3. **底与边**：主卡浅蓝底 + 3px 主色左准线 + 更强的边框色，标签升到 14px/600
+        并改用正文色。
+
+   **作用域只到 `#aiuKpis`**：`.aiu-kpi-grid` / `.aiu-kpi` 是**共用**的
+   （「下一次的预计代价」`#aiuEstimateBody` 与单次运行弹层的用量那一格都在调），
+   那两处没有主次之分，不该跟着变样 —— 改完之后那两处的数值字号实测一字未动。
+   --------------------------------------------------------------------------- */
+
+/* 主卡：由 `aiuKpiCards` 判定「哪一张是一共花了多少」，`renderKpis` 只负责把那个
+   判定贴成 `is-primary` 这个类名。
+
+   **`order: -1` 只改「画在第几格」，不改 DOM 顺序。** 网格自动布局按
+   order-modified document order 排格，主卡于是落到第一格。之所以不搬数据数组：
+   那一串自带语义链（「输入 token」→「其中命中缓存」→「输出 token」→「合计 token」，
+   那个「其中」指着前一张卡），搬数组会把这串拆散；而这些卡里**没有任何可聚焦元素**
+   （只有 label / value / sub 三个 span），所以视觉顺序与 DOM 顺序不一致不会造成
+   焦点顺序错位 —— 读屏用户听到的仍是那条语义链。 */
+#aiuKpis .aiu-kpi.is-primary {
+    order: -1;
+    background: var(--aiu-primary-soft);
+    border-color: var(--aiu-border-strong);
+    border-left: 3px solid var(--aiu-primary);
+}
+
+/* 主卡的标签升一档（12 → 14px）、加粗、改用正文色：和细节卡那个 muted 的
+   `12px/400` 拉开两层，主卡因此是「有标题的一张卡」，不是「又一格数字」。 */
+#aiuKpis .aiu-kpi.is-primary .aiu-kpi-label {
+    font-size: 0.875rem; font-weight: 600; color: var(--aiu-text);
+}
+
+/* 细节卡的数字降一档（24 → 18px）。**主次的承重墙就是这个 6px** —— 它不依赖颜色，
+   所以灰度打印、色盲、屏幕反光之下都还读得出来。 */
+#aiuKpis .aiu-kpi:not(.is-primary) .aiu-kpi-value { font-size: 1.125rem; }
+
+/* 上面那条是 ID 选择器，会连 `.aiu-kpi-value.is-unknown`（16px）一起盖掉 ——
+   把「未上报」那一档按原样补回来，否则那三个字会被放大到和真数字一样响，
+   而「未上报」恰恰是**不该响**的那一种值。 */
+#aiuKpis .aiu-kpi .aiu-kpi-value.is-unknown {
+    font-size: 1rem; color: var(--aiu-muted); font-weight: 500;
+}
+
+/* 主卡的数字。第二条选择器是为了压过上面那条 `.is-unknown`：费用只算得出
+   「已知最低费用」时 `unknown` 仍是 true，可那个金额是真数字 —— 副标题里已经
+   写着「已知最低费用（…）」，数字本身不该再被压成 16px 的弱化样式。 */
+#aiuKpis .aiu-kpi.is-primary .aiu-kpi-value,
+#aiuKpis .aiu-kpi.is-primary .aiu-kpi-value.is-unknown {
+    font-size: 1.5rem; font-weight: 700;
+    /* 主卡是浅蓝底：正文色压上去 13.5:1。这一条顺带避开「灰字压浅灰底」
+       （2.8:1）那类反例 —— 底色变了，字色就得跟着变重。 */
+    color: var(--aiu-text);
+}
+
+@media (max-width: 767px) {
+    /* 窄屏整体收一档，但**相对差保持**：主 18 / 细节 16。
+
+       细节**不能**跟着降到 14：那离 12px 的标签只有一档，正是这一页当初那个
+       「13 与 14 只差 1px，于是说明与数据看起来是同一层」的坑，只不过换了个位置。
+       16px 离标签两档，又比表格正文（14px）大一档，数字仍是这一档里最响的。
+
+       这几条必须写在这里：原来的 `.aiu-kpi-value { font-size: 1.125rem }` 在**上面**
+       那个 767px 段里，而这几条在它后面又带 ID，会盖掉它 —— 不重写一遍窄屏的值，
+       420px 下细节数字会停在全宽的 18px，整排又平掉。 */
+    #aiuKpis .aiu-kpi.is-primary .aiu-kpi-value,
+    #aiuKpis .aiu-kpi.is-primary .aiu-kpi-value.is-unknown { font-size: 1.125rem; }
+    #aiuKpis .aiu-kpi:not(.is-primary) .aiu-kpi-value { font-size: 1rem; }
+    #aiuKpis .aiu-kpi .aiu-kpi-value.is-unknown { font-size: 0.875rem; }
+    #aiuKpis .aiu-kpi.is-primary .aiu-kpi-label { font-size: 0.75rem; }
+}
+
+/* ---------------------------------------------------------------------------
+   统计口径卡片：把原来那一整段四行长句拆成「两条要点 + 一条警示条」
+   ---------------------------------------------------------------------------
+   改前它是**一段**连续文字，里面压着三件互相独立的事（口径是什么 / 它不动什么 /
+   全量重置真删）。三件事混成一段的结果不是「难看」，是**没人读** —— 而这段是
+   「上面那些数字从哪一刻开始算」的唯一说明，读不到就会被误读。
+
+   拆法：前两件是**口径的前提**，做成带图标的两条要点（每条一句，扫一眼拿到结论）；
+   第三件是**危险动作的说明**，性质与前两件不同 —— 它讲的是那个红按钮按下去会怎样 ——
+   所以单独做成一条警示条，紧贴在按钮上方。
+
+   字号/行距跟着 `.aiu-hint` 那套（12px / 1.6），颜色一律走令牌：警示条用的是
+   `--aiu-warning` + `--aiu-warning-bg`（与 `.aiu-price-warn` 同一组已实测的搭配），
+   红色只给图标与描边，用来标「这是破坏性的那条」。
+   窄屏不用另写规则：`16px + 1fr` 两列的网格在任何宽度下都成立。
+   --------------------------------------------------------------------------- */
+.aiu-stats-facts {
+    display: flex; flex-direction: column; gap: 6px;
+    margin: 0 0 10px; padding: 0; list-style: none; max-width: 900px;
+}
+.aiu-stats-facts li {
+    display: grid; grid-template-columns: 16px 1fr; gap: 8px; align-items: start;
+    color: var(--aiu-muted); font-size: 0.75rem; line-height: 1.6;
+}
+/* 图标列固定 16px：两条图标的字形宽窄不同（地球 vs 盾牌），不钉住的话第二条的
+   正文会比第一条往右缩一点 —— 两条要点应当共用同一条正文左边界。 */
+.aiu-stats-facts li > i {
+    color: var(--aiu-primary); font-size: 0.75rem; line-height: 1.6; text-align: center;
+}
+.aiu-stats-facts strong { color: var(--aiu-text); font-weight: 600; }
+
+/* 全量重置的说明。它讲的是「那个红按钮会真删、不可撤销」，所以按警示条画：
+   amber 底 + 红描边 + 红图标，与其它说明文字在**形状**上就分开。 */
+.aiu-stats-danger {
+    display: grid; grid-template-columns: 16px 1fr; gap: 8px; align-items: start;
+    margin: 0 0 10px; padding: 8px 12px; border-radius: 8px; max-width: 900px;
+    border: 1px solid var(--aiu-danger); background: var(--aiu-warning-bg);
+    color: var(--aiu-warning); font-size: 0.75rem; line-height: 1.6;
+}
+.aiu-stats-danger > i {
+    color: var(--aiu-danger); font-size: 0.75rem; line-height: 1.6; text-align: center;
+}
+.aiu-stats-danger strong { color: var(--aiu-danger); font-weight: 600; }
+
+/* ---------------------------------------------------------------------------
+   筛选区说明 + 口径联动（本次改动：**只新增规则，上面一条已有规则都没改**）
+   ---------------------------------------------------------------------------
+   1. 操作说明原来两段七八行，而这一屏上往往一个数据都还没有 —— 说明比它要说明的
+      东西还长。现在压成一句（安全边界，默认可见）+ 一个可展开的 <details>（两个
+      按钮各自的范围、条件在地址栏）。**事实一条没删**，改的只是「默认看不看得到」。
+   2. 「口径联动」原来读起来是一段正文。它其实是**状态**（同口径 / 可对齐 / 不统一），
+      所以按提示条来画：浅底 + 左侧一道主色强调线，正文与动作分成两端。
+
+   选择器都带 `.aiu-filters-help*` / `#aiuFilterCard` 作用域：`.aiu-linkage` 与
+   `.aiu-hint` 是别的分片也在用的共享声明，这里只覆盖这一处的观感（后写的赢）。 */
+.aiu-filters-help {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px;
+    margin: 8px 0 0;
+}
+.aiu-filters-help__line {
+    display: flex; align-items: baseline; gap: 6px;
+    flex: 1 1 auto; min-width: 0; max-width: 900px; margin: 0;
+    color: var(--aiu-muted); font-size: 0.75rem; line-height: 1.6;
+}
+.aiu-filters-help__line > i { flex: 0 0 auto; color: var(--aiu-muted); }
+.aiu-filters-help__line > span { min-width: 0; overflow-wrap: anywhere; }
+.aiu-filters-help__line strong { color: var(--aiu-text); }
+
+/* 收起时和说明同处一行（所以整块只占一行）；一展开就独占一行，不去挤那句说明。 */
+.aiu-filters-more { flex: 0 0 auto; font-size: 0.75rem; line-height: 1.6; }
+.aiu-filters-more[open] { flex: 1 0 100%; }
+.aiu-filters-more > summary {
+    display: inline-flex; align-items: center; gap: 5px;
+    color: var(--aiu-primary); list-style: none; cursor: pointer;
+}
+.aiu-filters-more > summary::-webkit-details-marker { display: none; }
+.aiu-filters-more > summary > i { display: inline-block; }
+.aiu-filters-more > summary:hover { text-decoration: underline; }
+.aiu-filters-more > summary:focus-visible {
+    outline: 3px solid var(--aiu-primary); outline-offset: 2px; border-radius: 4px;
+}
+.aiu-filters-more[open] > summary > i { transform: rotate(90deg); }
+.aiu-filters-more__body {
+    max-width: 900px; margin: 6px 0 0; padding: 8px 12px 8px 26px;
+    border: 1px solid var(--aiu-border); border-radius: 8px;
+    background: var(--aiu-bg); color: var(--aiu-muted);
+}
+.aiu-filters-more__body li { margin-bottom: 4px; }
+.aiu-filters-more__body li:last-child { margin-bottom: 0; }
+.aiu-filters-more__body strong { color: var(--aiu-text); }
+
+/* 口径联动 → 状态条（同一份内容，改成一眼能认出「这是一条状态」的形状）。 */
+#aiuFilterCard .aiu-linkage {
+    /* 提示条（不是正文）：左侧一道主色强调线 + 浅底，右侧不封口。
+       竖直内缩 6px —— 这一行的实际高度由里面那个 44px 的触控目标决定（仓库硬约束），
+       再多给内边距只是白白拉高；水平内缩也刻意取小：无头 Chrome 实测 420px 下多占
+       十几 px 就会把服务端那句 note 从两行挤成三行（另一种画法实测 230px vs 209px）。 */
+    margin-top: 10px; padding: 6px 0 6px 10px; gap: 4px 12px;
+    border: 0; border-left: 3px solid var(--aiu-primary);
+    border-radius: 0 8px 8px 0; background: var(--aiu-bg);
+}
+#aiuFilterCard .aiu-linkage__note > i { color: var(--aiu-primary); }
+#aiuFilterCard .aiu-linkage__action { margin-left: auto; }
+
+@media (max-width: 767px) {
+    /* 窄屏：一行放不下，说明与折叠入口各占一行（并排会把那句说明挤成一列窄条）；
+       折叠块的内缩少一点；动作不再靠右（说明占满一行之后靠右会孤零零的）。 */
+    .aiu-filters-help { display: block; }
+    .aiu-filters-more { margin-top: 2px; }
+    .aiu-filters-more__body { padding: 8px 10px 8px 22px; }
+    #aiuFilterCard .aiu-linkage__action { margin-left: 0; }
+}
 </style>
 {% endblock %}
 
@@ -1302,6 +1533,10 @@ function aiuKpiCards(totals, overBudget, activeCount) {
     var active = Number(activeCount) || 0;
     var activeNote = active ? '（另有 ' + active + ' 次运行中，未计入）' : '';
     var cards = [];
+    // 「一共花了多少」的**候选位**：费用（算得出时）优先，其次合计 token。
+    // 判定放在函数末尾，理由写在 `return cards;` 上面。
+    var costAt = -1;
+    var totalAt = -1;
 
     var input = tokens.input;
     var hit = tokens.cache_read;
@@ -1333,6 +1568,7 @@ function aiuKpiCards(totals, overBudget, activeCount) {
     // 但它为 null 时页面不许整格写「未上报」（那会抹掉已上报的那十几次）。
     var totalText = aiuFmtTokens(tokenSample.known_value);
     var totalIsExact = totalText !== null && tokens.total !== null && tokens.total !== undefined;
+    totalAt = cards.length;
     cards.push({
         label: '合计 token' + (totalIsExact ? '' : '（已上报样本）'),
         value: aiuOrUnknown(totalText === null ? aiuFmtTokens(tokens.total) : totalText, AIU_UNKNOWN),
@@ -1374,6 +1610,7 @@ function aiuKpiCards(totals, overBudget, activeCount) {
     var costText = aiuFmtCost(costSource);
     var costUnknownRuns = Number(costSample.unknown_runs) || 0;
     if (costText !== null) {
+        costAt = cards.length;
         cards.push({
             label: '费用估算',
             value: costText,
@@ -1403,6 +1640,20 @@ function aiuKpiCards(totals, overBudget, activeCount) {
             unknown: false
         });
     }
+    // **哪一张是这一页的主数字。** 判据分两层，都在这里（渲染那一层不做判断）：
+    //
+    //   1. **费用算得出时，费用就是主数字** —— 这一页叫「AI 消耗」，顶部那句注释
+    //      也写的是「先给『一共花了多少』再给细节」，而「花了多少」问的是钱。
+    //   2. **费用算不出时退回合计 token。** `DEFAULT_PRICE_TABLE` 是空表，价格表
+    //      没配是**常态而不是异常**（见 `services/ai/pricing.py`），那时费用那一格
+    //      只会写一句理由；把一句理由摆成主数字比不摆更糟。
+    //   3. 两个都拿不到（一次都没完成：全是「未上报」）→ **一张主卡都不给**，
+    //      整排按细节卡渲染。那时没有「一共花了多少」这回事，硬指一张只是骗人。
+    //
+    // 费用那一张即使带着 `unknown`（只算得出「已知最低费用」，有几次没上报）
+    // 仍然算数：那个金额是真金额，副标题已经说明了它的口径。
+    if (costAt >= 0) cards[costAt].primary = true;
+    else if (totalAt >= 0 && !cards[totalAt].unknown) cards[totalAt].primary = true;
     return cards;
 }
 
@@ -1913,9 +2164,14 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         return td;
     }
 
-    function kpi(label, value, sub, unknown) {
+    /** 建一张 KPI 卡。
+     *
+     *  `tone` 是**可选**的变体类名（目前只有 `is-primary` 一个值）。不传就是不加强调 ——
+     *  所以「下一次的预计代价」（`renderEstimate`）与单次运行弹层那两个调用点一个字
+     *  都不用改，也就不会被「主次」这件事带着变样。 */
+    function kpi(label, value, sub, unknown, tone) {
         var card = document.createElement('div');
-        card.className = 'aiu-kpi';
+        card.className = 'aiu-kpi' + (tone ? ' ' + tone : '');
         var l = document.createElement('span'); l.className = 'aiu-kpi-label'; l.textContent = label;
         var v = document.createElement('span');
         v.className = 'aiu-kpi-value' + (unknown ? ' is-unknown' : '');
@@ -1947,7 +2203,10 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         var host = $('aiuKpis');
         host.textContent = '';
         aiuKpiCards(totals, overBudget, activeCount).forEach(function (card) {
-            host.appendChild(kpi(card.label, card.value, card.sub, card.unknown));
+            // 「哪一张是主卡」由纯函数判定（`card.primary`），这一层只把那个判定翻成
+            // 类名 —— 这里不做任何口径判断。
+            host.appendChild(kpi(card.label, card.value, card.sub, card.unknown,
+                                 card.primary ? 'is-primary' : ''));
         });
     }
 
@@ -2240,7 +2499,13 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
         var legend = document.createElement('div');
         legend.className = 'aiu-legend';
         var legendText = document.createElement('span');
-        legendText.innerHTML = '<i class="fas fa-chart-simple" aria-hidden="true"></i>输入 + 输出 token 的相对量级';
+        // **图标名要用 base.html 那份字体里真有的。** 这里原来写的是 `fa-chart-simple`，
+        // 那是 FontAwesome **6.1** 才有的名字，而 `base.html` 引的是 **6.0.0**（`chart-simple`
+        // 在 6.0.0 里叫 `chart-column`）。后果与「漏引字体」一模一样：类名不存在时
+        // `::before` 的 `content` 是 `none`、宽 0 —— 这一格**空着，且不报任何错**，
+        // 所以一直没人发现。无头 Chrome 实测（建元素读 computedStyle）：
+        // `fa-chart-simple` content=none 宽=0 / `fa-chart-column` content="\f0e1" 宽=11。
+        legendText.innerHTML = '<i class="fas fa-chart-column" aria-hidden="true"></i>输入 + 输出 token 的相对量级';
         legend.appendChild(legendText);
         bars.appendChild(legend);
         projects.forEach(function (item) {
