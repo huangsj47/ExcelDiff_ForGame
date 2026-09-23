@@ -143,6 +143,9 @@ var OP = {
     watch: function () { api.watch(null); },
     watchWithRun: function () { api.watch(7); },
     unwatch: function () { api.unwatch(); },
+    // **真的跑完了**（SSE / 轮询读到终态）。与上面那个「用户不想看了」是两件事，
+    // 结论那一轮的说明要看它决定说「报告已经在那儿」还是「还没到时候」。
+    unwatchSettled: function () { api.unwatch({settled: true}); },
     setRun: function () { api.setRun(7); },
     clearRun: function () { api.setRun(null); },
     markEmpty: function () { api.markEmpty(); },
@@ -160,6 +163,7 @@ var OP = {
     // 这条只验「过了期限就改口」，不验期限具体是多少。
     runLong: function () { advance(3600000); },
     roundsStored: function () { api.applyRounds(ROUNDS.stored, {}); },
+    roundsMainFinal: function () { api.applyRounds(ROUNDS.mainFinal, {}); },
     roundsSame: function () { api.applyRounds(ROUNDS.sameAsLive, {}); },
     roundsEmpty: function () { api.applyRounds([], {}); },
     // 用户点开「模型这一轮返回的内容」。
@@ -491,6 +495,28 @@ def _rounds() -> dict:
                 "budget_notes": "", "correction_hint": "",
             },
         ],
+        # 主代理自己那几轮的收尾（`agent` 留空）：它给的才是**整份**报告。
+        # 与上面那份分片的对照，是「这一轮返回的是谁的结论」这个区分的唯一依据。
+        "mainFinal": [
+            {
+                "round_index": 1, "agent": "", "agent_round": 1, "outcome": "requests",
+                "parsed_ok": True, "tokens_input": 12000, "tokens_output": 800,
+                "cache_read_tokens": None, "cache_write_tokens": None,
+                "request_chars": 40000, "context_chars": 9000, "duration_ms": 18400,
+                "error": "", "requests": [], "executed": [], "dropped": [],
+                "response_text": '{"status": "need_more_context", "reason": "先看战斗逻辑"}',
+                "budget_notes": "", "correction_hint": "",
+            },
+            {
+                "round_index": 2, "agent": "", "agent_round": 2, "outcome": "final",
+                "parsed_ok": True, "tokens_input": 9000, "tokens_output": 1500,
+                "cache_read_tokens": None, "cache_write_tokens": None,
+                "request_chars": 20000, "context_chars": 12000, "duration_ms": 9000,
+                "error": "", "requests": [], "executed": [], "dropped": [],
+                "response_text": '{"status": "final", "report_markdown": "# 变更理解\\n\\n整份报告正文"}',
+                "budget_notes": "", "correction_hint": "",
+            },
+        ],
     }
 
 
@@ -505,6 +531,12 @@ def run() -> dict:
         {"name": "开跑还没第一轮", "ops": ["watch", "progressEmpty"]},
         # 3. 跑了两个轮次：每轮一张卡。
         {"name": "跑动中两轮", "ops": ["watchWithRun", "progressTwo"]},
+        # 3b. **真的跑完了**（读到终态）。与下面那条「跑完后保留列表」的区别就在这里：
+        #     那一条只是「用户不想看了」，运行本身还没结束，结论那一轮的说明**不许**改口。
+        {"name": "跑完收到终态", "ops": ["watchWithRun", "progressTwo", "unwatchSettled"]},
+        # 3c. 打开一个**早就跑完**的目标：走的是 `setRun` + `applyRounds`（落库那份），
+        #     不经过 `unwatch({settled:true})` —— 报告明明已经在了，那句话也必须说对。
+        {"name": "落库的主代理结论轮", "ops": ["setRun", "roundsMainFinal"]},
         # 4. 跑完了：那句话换成「已结束」，但列表**不动**。
         {"name": "跑完后保留列表", "ops": ["watchWithRun", "progressTwo", "unwatch"]},
         # 5. 读不到进度（别的进程在跑 / 快照过期）。
@@ -623,7 +655,8 @@ def _drive(cases: list, rounds: dict, same: list) -> dict:
         .replace("__CASES__", json.dumps(cases, ensure_ascii=False))
         .replace("__PROGRESS__", json.dumps(progress, ensure_ascii=False))
         .replace("__ROUNDS__", json.dumps(
-            {"stored": rounds["stored"], "sameAsLive": same}, ensure_ascii=False))
+            {"stored": rounds["stored"], "sameAsLive": same,
+             "mainFinal": rounds["mainFinal"]}, ensure_ascii=False))
     )
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "driver.js"
@@ -977,23 +1010,65 @@ def test_the_final_round_does_not_repeat_the_whole_report(run):
     assert "先看战斗逻辑" in json.dumps(rounds[0], ensure_ascii=False)
 
 
-def test_the_final_round_says_where_the_report_went(run):
-    """结论那一轮不重复贴报告，所以那张卡只剩头一行 —— 要说清它为什么是空的。
+def _final_hint(run: dict, case: str) -> list:
+    """取某个用例里「结论那一轮」那张卡上的说明行（第 2 轮就是 final）。"""
+    card = _by_name(run)[case]["snaps"][-1]["rounds"][1]
+    lines = []
+    _texts(card, lines)
+    return [line for line in lines if "这一轮返回的是" in line]
 
-    「看着像空的卡片」与「这一轮什么都没干」在界面上长得一样，而这是两件事。
+
+def test_the_final_round_does_not_claim_the_report_is_ready_while_it_runs(run):
+    """**跑动中不许说报告已经在那儿。**（线上报的就是这一条）
+
+    那条卡的说明原来是一句定死的话：「这一轮返回的就是完整结论，内容在「完整结论」
+    标签里」。可「完整结论」要等这次运行**结束**才有内容 —— 跑动中那里写的是
+    「AI 分析进行中…」。用户看到的就是「分片 S1 · 第 3/15 轮 · 给出结论」配那句
+    「内容在「完整结论」标签里」，点过去却是空的，而整批明明还在跑（别的分片没收到工）。
+
+    「跑动中两轮」正是那个状态：`watchWithRun` + 一帧进度，**没有**终态。
     """
-    flat = _flat(_by_name(run)["跑动中两轮"]["snaps"][-1])
-    final_card = _by_name(run)["跑动中两轮"]["snaps"][-1]["rounds"][1]
-    final_lines = []
-    _texts(final_card, final_lines)
+    hints = _final_hint(run, "跑动中两轮")
+    assert len(hints) == 1, hints
+    assert "还没有内容" in hints[0] and "要等这次运行结束" in hints[0], hints[0]
+    assert "内容在「完整结论」标签里" not in hints[0], hints[0]
 
-    assert any("完整结论" in line and "标签" in line for line in final_lines), final_lines
-    assert "整份报告正文" not in json.dumps(final_card, ensure_ascii=False)
-    # 先要上下文那一轮的卡不该带这句（它没有报告可指）。
+    # 先要上下文那一轮的卡不该带这句（它没有结论可指）。
     first_lines = []
     _texts(_by_name(run)["跑动中两轮"]["snaps"][-1]["rounds"][0], first_lines)
-    assert not any("这一轮返回的就是完整结论" in line for line in first_lines)
-    assert flat
+    assert not any("这一轮返回的是" in line for line in first_lines), first_lines
+
+
+def test_the_final_round_says_whose_conclusion_it_is(run):
+    """分片给的只是**这个分片**的结论，不是整份报告 —— 说法必须分开。
+
+    子代理模式下 `agent` 为空的是主代理那几轮（它给的才是整份报告），`S1`/`S2`
+    是分片。把分片那一轮说成「完整结论」是错的，而线上就是那么显示的。
+    """
+    shard = _final_hint(run, "跑动中两轮")
+    assert shard and "这个分片的结论" in shard[0], shard
+
+    main = _final_hint(run, "落库的主代理结论轮")
+    assert main and "整份结论" in main[0] and "这个分片" not in main[0], main
+
+
+def test_the_final_round_switches_once_the_run_has_settled(run):
+    """跑完了就该说「报告在那儿」—— **两个方向都要对**，这句话是现算的。
+
+    「早就跑完」那一条尤其要紧：它走 `setRun` + `applyRounds`（落库那份），**不经过**
+    `unwatch({settled:true})`。不给这条路置终态位的话，一个已经跑完的目标会永远显示
+    「要等这次运行结束」—— 把新写的那句反过来说错了。
+
+    另外这里钉住「跑完只是换一句话，已经画出来的那几轮原样留着」不受影响。
+    """
+    settled = _final_hint(run, "跑完收到终态")
+    assert settled, "跑完收到终态之后，结论那一轮仍要有那张卡"
+    assert "要等这次运行结束" not in settled[0], settled[0]
+    # 分片跑完之后：并入最终报告，而不是「它就是报告」。
+    assert "已并入最终报告" in settled[0], settled[0]
+
+    stored = _final_hint(run, "落库的主代理结论轮")
+    assert stored and "内容在「完整结论」标签里" in stored[0], stored
 
 
 def test_a_round_with_nothing_to_show_still_gets_a_card(run):

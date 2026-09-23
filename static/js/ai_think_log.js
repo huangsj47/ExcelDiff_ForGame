@@ -253,18 +253,51 @@
                         reason: (item && item.reason) || ''
                     };
                 }),
-                // 模型这一轮的原话：结论那一轮（final）的原文就是整份报告，不在这里重复贴
-                // —— 报告在「完整结论」那个标签里，完整、且是渲染过的。
+                // 模型这一轮的原话：结论那一轮（final）返回的是一段 JSON 信封
+                // （`{"status":"final","report_markdown":"…"}`），正文在里面那个字段里、
+                // 已经在「完整结论」渲染过，所以这里不重复贴那段 JSON。
                 modelText: entry.outcome === 'final' ? '' : (entry.response_text || ''),
-                // 于是结论那一轮会是一张「只有头一行」的卡，看着像空的 —— 说一句它为什么
-                // 是空的，并指明去哪儿看（这一段话也只能有一份，所以它长在这里）。
-                hint: entry.outcome === 'final'
-                    ? '这一轮返回的就是完整结论，内容在「完整结论」标签里。' : '',
+                // 于是结论那一轮会是一张「只有头一行」的卡，看着像空的 —— 要说一句它为什么
+                // 是空的、去哪儿看。**这句话不能在建模板块时就定死**，它有两个变量：
+                //
+                //   1. **是谁的结论**：`agent` 为空的是主代理那几轮，它给的才是整份报告；
+                //      `S1`/`S2` 是分片，它给的只是**这个分片**那份结论（会并入最终报告）。
+                //      把分片那轮说成「完整结论」是错的 —— 线上就是这么显示的。
+                //   2. **报告在不在**：「完整结论」标签要等这次运行**结束**才有内容，
+                //      跑动中那里写的是「AI 分析进行中…」。此时指过去等于指了个空，
+                //      而用户读到的意思是「已经可以去看了」。
+                //
+                // 而跑完那一刻只 `paint()`、**不重建 block**（见 `unwatch`），所以这里只记
+                // 事实（这一轮是哪个成员给的），话留到 `blockHint` 里现算。
+                finalAgent: entry.outcome === 'final' ? (entry.agent || '') : null,
                 budgetNotes: entry.budget_notes || '',
                 error: entry.error || ''
             });
         });
         return blocks;
+    }
+
+    /**
+     * 「给出结论」那一轮那张卡上要说的话。**每次画的时候现算**，不要在建模板块时定死
+     * —— 跑完那一刻只 `paint()`、不重建 block（见 `unwatch`），定死的话那句话会停在
+     * 「要等结束」上，而它其实已经结束了。
+     *
+     * 两个变量合起来四种情形，每一种都要说真话：
+     *   * 分片给的只是这个分片那份结论，不是整份报告；
+     *   * 没结束的时候，「完整结论」标签里**还没有东西**（那里写着「AI 分析进行中…」），
+     *     指过去等于告诉用户「已经可以看了」——线上报的就是这一条。
+     */
+    function blockHint(block) {
+        if (block.finalAgent === null || block.finalAgent === undefined) {
+            return '';
+        }
+        var isShard = !!block.finalAgent;
+        var what = isShard ? '这个分片的结论' : '整份结论';
+        var where = runSettled
+            ? (isShard ? '它已并入最终报告 —— 见「完整结论」标签。'
+                       : '内容在「完整结论」标签里。')
+            : '「完整结论」标签里现在还没有内容，要等这次运行结束。';
+        return '这一轮返回的是' + what + '（原文是 JSON，不在这里重复贴）；' + where;
     }
 
     function noteFor(current, count) {        if (current === 'live') return count ? NOTE.live : NOTE.running_no_rounds;
@@ -390,7 +423,7 @@
                          '未执行：' + item.detail + (item.reason ? '（' + item.reason + '）' : ''));
             });
             if (block.budgetNotes) addLine(card, 'ai-think-note-line', block.budgetNotes);
-            if (block.hint) addLine(card, 'ai-think-note-line', block.hint);
+            addLine(card, 'ai-think-note-line', blockHint(block));
             if (block.error) addLine(card, 'ai-think-missing', block.error);
 
             if (block.modelText) {
@@ -537,6 +570,13 @@
         //     （`onShowThink`）当时没关。
         //   * **已经结束** → 那才是真话：这次运行没留下记录（功能上线前的分析）。
         var pending = !list.length && !runSettled && !!LIVE_STATUS[lastRunStatus];
+        // **有逐轮取回来，就说明这次运行已经结束了** —— 逐轮是跑完才落库的（同上）。
+        // 这条不只是记账：结论那一轮的说明要据此决定说「报告已经在那儿」还是「还没
+        // 到时候」（见 `blockHint`）。不置这一位的话，**打开一个早就跑完的目标**时
+        // `setRun` + `applyRounds` 这条路不会经过 `unwatch({settled:true})`，
+        // 于是那句话会一直停在整个反了的另一头。
+        // 只在这里置位是安全的：`list` 非空时 `pending` 本来就是假，上面那条判据不受影响。
+        if (list.length) runSettled = true;
         loaded = !pending;
         loading = false;
         mode = pending ? 'live' : 'settled';
