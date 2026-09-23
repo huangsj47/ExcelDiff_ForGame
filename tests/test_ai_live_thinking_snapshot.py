@@ -308,6 +308,46 @@ class TestTheSnapshotAccumulates:
 
         assert entry["agent"] == "S1", "实时那一份缺分片标签，与落库那份对不上"
 
+    def test_the_family_position_and_the_member_round_are_filled_too(self):
+        """**位次也要补**：没有它，界面写不出「分片 S3 (3/7)」，也排不出家族顺序。
+
+        引擎那一层 `agent_round` 是空的（`trace_evidence.live_round_entry` 照实记，
+        「不猜」），而 `record.index` **就是**这一轮在那个成员内部的序号（每个成员的引擎
+        各自从 1 开始编号）。界面显示的「第 N 轮」读的正是 `agent_round`
+        （`models/ai_analysis/trace.py` 那一段写的就是它），所以实时那一份不补，就只能
+        退回到 `round_index` —— 而同一个 `round_index` 在落库那份里是**家族全局**序号，
+        两个来源的同一个键含义不同。
+        """
+        run_progress.publish(7, 1, self._progress(3, agent="S3", agent_index=3, agent_total=7))
+
+        entry = run_progress.snapshot(7).rounds[0]
+
+        assert entry["agent_index"] == 3 and entry["agent_total"] == 7
+        assert entry["agent_round"] == 3, "成员内轮次没补上（界面显示的「第 N 轮」就是它）"
+
+    def test_a_stale_repeat_of_an_older_round_replaces_it_in_place(self):
+        """**重报的那一轮不在末尾时，也得原位替换，不能往后再接一条。**
+
+        判重原先只看 `existing[-1]`：同一个 (分片, 轮次) 恰好落在末尾才替换，否则就
+        **再 append 一条**。而「一轮一行」是这个列表的契约（面板每 3 秒拿的是同一份列表，
+        不该越滚越长），一旦某条晚到的帧重报了不在末尾的那一轮，面板上就会出现两遍，
+        而且第二遍在末尾 —— 界面上是「第 1 轮 / 第 2 轮 / **第 1 轮**」这种轮次往回跳的
+        样子（用户报的「乱序」）。原位替换同时保住两件事：一轮一行，且顺序不变。
+        """
+        run_progress.publish(7, 1, self._progress(1, agent="S1", agent_index=1, agent_total=2))
+        run_progress.publish(7, 1, self._progress(2, agent="S1", agent_index=1, agent_total=2))
+        # 一条晚到的帧重报了第 1 轮（重试 / 重连之后补发 / 慢回调）
+        run_progress.publish(7, 1, self._progress(1, agent="S1", agent_index=1, agent_total=2,
+                                                  status="final"))
+
+        snap = run_progress.snapshot(7)
+
+        assert [item["round_index"] for item in snap.rounds] == [1, 2], (
+            "重报的那一轮被接到了末尾 —— 面板上会出现两遍，而且第二遍在最后"
+        )
+        assert snap.rounds[0]["outcome"] == "final", "重报的那一份没顶掉旧的那一份"
+        assert snap.rounds_seen == 2, "重报不该让「一共跑过几轮」多算一轮"
+
     def test_a_junk_progress_still_publishes_the_numbers(self):
         """老调用方/测试替身没有 `round_entry`：数字照报，只是没有过程可看。"""
         class _Bare:

@@ -3185,9 +3185,6 @@ async function resumeWeeklyAiJob() {
     weeklyAiJobConfigId = configId;
     weeklyAiRunActive = true;
     weeklyAiSetBusy(true);
-    if (job.run_id) {
-        startAiBudgetWatch(job.run_id, document.getElementById('weeklyAiMeta'));
-    }
     weeklyAiUpgradeNoticeText = weeklyAiUpgradeNotice(job) || weeklyAiUpgradeNoticeText;
     if (job.state === 'waiting_snapshot') {
         setWeeklyAiStatusBadge('等待同步', 'warning');
@@ -3198,7 +3195,30 @@ async function resumeWeeklyAiJob() {
         setWeeklyAiStatusBadge('分析中', 'primary');
         setWeeklyAiOutput('AI 分析进行中...', false, 'busy');
     }
+    // **订阅在前、起进度轮询在后。这两句的顺序是功能本身，不是风格。**
+    //
+    // `subscribeWeeklyAiJob` 的第一句是 `closeWeeklyAiStream()`（订阅之前要先把上一次的
+    // 连接与轮询收掉），而那个函数会走到 `stopAiBudgetWatch()` —— 它会**把刚起来的这次
+    // 进度轮询当场掐掉**：`watchRun` 的第一帧是在它返回之前就发出去的，`stop()` 之后那一帧
+    // 的响应走到 `if (stopped …) return` 就被丢掉，「思考过程」**一帧都拿不到**。
+    //
+    // 症状（用户报的）：关掉抽屉再打开（或者带 `?ai_job=` 刷新页面），正在跑的分析那几轮
+    // **不会马上出现**，只有服务端推来下一条 progress（也就是**下一轮跑完之后**）才重画。
+    // 中间那一段面板还停在 `unwatch()` 留下的「分析已结束 / 没有留下逐轮记录」上，
+    // 抽屉也被 `AiDrawerTabs.markSettled()` 切回了「完整结论」。
+    //
+    // 顺序反过来就对了：先把流订阅上（它自己要清的那点状态是**上一次**的），再起本次的
+    // 进度轮询。这与「点开跑」那条路一致 —— 那里也是先 `subscribeWeeklyAiJob`，
+    // 等 SSE 的 `run` 帧到了才 `startAiBudgetWatch`（见 `applyWeeklyAiJobState`）。
     subscribeWeeklyAiJob(job.job_id);
+    if (job.run_id) {
+        startAiBudgetWatch(job.run_id, document.getElementById('weeklyAiMeta'));
+        // **本页不是这次运行的发起方**（它是刷新页面 / 重开抽屉时附着上来的）：
+        // 「才刚发起、第一帧还没出来」本页没有资格说 —— 它可能已经跑了十分钟。
+        // 撤掉那个时刻，同一处境就只剩「读不到」这句更弱的实话（见 `markExternalRun`）。
+        // 与 `loadWeeklyAiLatest` 的「进行中」那一支同一口径。
+        AiThinkLog.markExternalRun();
+    }
     if (job.state === 'waiting_snapshot') {
         startWeeklyAiJobPoll(job.job_id);
     }

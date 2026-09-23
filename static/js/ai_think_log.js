@@ -112,6 +112,9 @@
     // 当前画着的那几块（`buildRoundBlocks` 的产物）。留住它是为了让「只改一句说明」的
     // 场景（跑完那一刻）能重画，而不必重新算一遍或把列表留在旧状态。
     var blocks = [];
+    // 列表**不全**时顶上那一句（见 `truncationNote`）。与 `blocks` 一起设、一起清 ——
+    // 分头设的话会出现「列表已经换了一份，那句话还是上一份的」。
+    var moreNote = '';
 
     // 哪几轮的「模型这一轮返回的内容」是展开的（轮次的 key → true）。
     //
@@ -187,10 +190,21 @@
         return isFinite(num) && num > 0 ? String(num) : '';
     }
 
-    /** 分片前缀。有完整位次时交给共享模块（那一行的口径与 meta 行一致），只有名字时自己说。 */
+    /**
+     * 分片前缀。有完整位次时交给共享模块（那一行的口径与 meta 行一致），只有名字时自己说。
+     *
+     * **`agent` 为空不等于「没有分片信息」**：子代理模式下**汇总那一次**的 `agent` 就是空的
+     * （`services/ai/subagent.py` 贴标签时留空），要靠 `agent_index === agent_total` 认出来
+     * —— 那条口径就在 `AiStreamStatus.agentText` 里，它还专门写了「只看轮次会误读」。
+     * 所以这里**先问位次、再退回名字**：先按空名字早退（原先的写法）等于把汇总那几轮永远
+     * 画成一句没有任何前缀的「第 1 轮」，而它紧跟在「分片 S5 · 第 8 轮」下面 ——
+     * 编号看着往回跳，用户读到的就是「分片信息的排序乱了」。
+     *
+     * 落库那份**没有家族位次**（`run_usage` 的逐轮行只有 `agent`），所以它仍然只能说名字
+     * —— **不编一个 (1/3)**：编出来的位次会被当成事实。
+     */
     function shardText(entry) {
         var name = entry && typeof entry.agent === 'string' ? entry.agent : '';
-        if (!name) return '';
         var withPosition = global.AiStreamStatus && global.AiStreamStatus.agentText;
         if (withPosition) {
             var text = withPosition({
@@ -200,9 +214,78 @@
             });
             if (text) return text;
         }
-        // 落库那份没有家族位次（`run_usage` 的逐轮行只有 `agent`），所以只能说名字 ——
-        // **不编一个 (1/3)**：编出来的位次会被当成事实。
+        if (!name) return '';
         return '分片 ' + name;
+    }
+
+    /**
+     * 这一轮在**家族里的位次**（排序键）。读不到位次就返回 `null`。
+     *
+     * 两个数来自同一处：`services/ai/run_progress.py` 的 `publish` 给每一条实时轮次
+     * 补上的家族位次与成员内轮次。缺一个都不排。
+     *
+     *   * `position` —— 这个成员在家族里排第几（`agent_index`）。成员按家族顺序**顺序跑**
+     *     （`services/ai/subagent.py` 的 `run_family`），所以它就是时间顺序；
+     *   * `round` —— 这一轮在**那个成员内部**的序号（`agent_round`）。**不许拿
+     *     `round_index` 顶替它**：实时那份的 `round_index` 是成员内序号、落库那份是家族
+     *     全局序号，同一个键在两个来源里是两个含义（见 `models/ai_analysis/trace.py`）。
+     */
+    function roundPosition(entry) {
+        if (!entry || typeof entry !== 'object') return null;
+        var position = Number(entry.agent_index);
+        if (!isFinite(position) || position <= 0) return null;
+        var round = Number(entry.agent_round);
+        if (!isFinite(round) || round <= 0) round = Number(entry.round_index);
+        return {position: position, round: (isFinite(round) && round > 0) ? round : 0};
+    }
+
+    /**
+     * 按**家族顺序**排一遍：先成员位次（`S1` → `S2` → … → 汇总 → 对账），再成员内的
+     * 轮次升序。稳定（键相同的条目保持原相对顺序）。
+     *
+     * ## 服务端已经是这个顺序了，为什么还要排
+     *
+     * 顺序原先**只在服务端**：实时那一份按到达顺序累积（`run_progress._merge_rounds`），
+     * 落库那一份 `order_by(round_index asc)`。渲染端原样画数组 —— 于是任何一条把顺序弄乱
+     * 的路径都会**静默地**画出来：面板上一串「… 第 8 轮 / 第 1 轮 / 第 2 轮 …」，
+     * 用户读到的就是「分片信息的排序乱了，没有按预期的顺序规则」。
+     *
+     * ## 位次不全时**一律不排**
+     *
+     * 落库那份**没有**家族位次（`run_usage` 的逐轮行只有 `agent`，理由见 `shardText`），
+     * 它的顺序权威是服务端那句 `order_by(round_index asc)`。一半有条目位次、一半没有时
+     * 写不出合法的比较器（传递性都不成立），结果不可预料 —— 所以缺位次就原样画。
+     */
+    function familyOrder(rounds) {
+        var list = (rounds || []).slice();
+        var keys = [];
+        for (var i = 0; i < list.length; i++) {
+            keys.push(roundPosition(list[i]));
+            if (!keys[i]) return list;
+        }
+        return list.map(function (entry, position) {
+            return {entry: entry, key: keys[position], position: position};
+        }).sort(function (left, right) {
+            return (left.key.position - right.key.position)
+                || (left.key.round - right.key.round)
+                || (left.position - right.position);
+        }).map(function (wrapped) {
+            return wrapped.entry;
+        });
+    }
+
+    /**
+     * 实时那一份**只带最近 8 轮**（`run_progress.MAX_LIVE_ROUNDS`）。不说出来的话，
+     * 列表看起来就是「从第 3 轮开始」—— 那同样被读成「顺序不对」。
+     *
+     * 只说这一份里列了几轮；`rounds_seen` 读得到才连「一共跑过几轮」一起说 ——
+     * 读不到就不提总数，**不编一个**。
+     */
+    function truncationNote(meta, shown) {
+        if (!meta || !meta.truncated || !shown) return '';
+        var seen = Number(meta.seen);
+        var total = (isFinite(seen) && seen > shown) ? ('这次一共跑过 ' + seen + ' 轮，') : '';
+        return total + '这里只列出最近 ' + shown + ' 轮。';
     }
 
     /**
@@ -211,7 +294,7 @@
     function buildRoundBlocks(rounds, meta) {
         var total = meta && meta.max_rounds ? Number(meta.max_rounds) : 0;
         var blocks = [];
-        (rounds || []).forEach(function (entry, position) {
+        familyOrder(rounds).forEach(function (entry, position) {
             if (!entry || typeof entry !== 'object') return;
             var index = Number(entry.round_index);
             if (!isFinite(index) || index <= 0) index = position + 1;
@@ -373,6 +456,15 @@
         log.textContent = '';
         if (!blocks.length) return;
         var doc = global.document;
+        if (moreNote) {
+            // 放在**列表之上**：要解释的正是「这个列表为什么从第 3 轮开始」。
+            // class 借 `.ai-think-note` 的排版（同一处的说明文字，样式只此一份），
+            // 另加一个自己的名字供断言/定位用。
+            var more = doc.createElement('p');
+            more.className = 'ai-think-note ai-think-more';
+            more.textContent = moreNote;
+            log.appendChild(more);
+        }
         blocks.forEach(function (block) {
             var card = doc.createElement('div');
             card.className = 'ai-think-round';
@@ -461,6 +553,7 @@
         loading = false;
         mode = 'live';
         blocks = [];
+        moreNote = '';
         // 记下「本页看着它开跑」的时刻 —— `starting` 那句说明的期限从这一刻起算。
         watchingSince = now();
         // **这一次是新的一次运行**：上一条命的「已结束」不许留着，否则跑动中取回的
@@ -551,6 +644,13 @@
         sawSnapshot = true;
         mode = 'live';
         blocks = buildRoundBlocks(progress.rounds, { max_rounds: progress.max_rounds });
+        // **实时这一份只有最近 8 轮**（`run_progress.MAX_LIVE_ROUNDS`）：不说出来的话，
+        // 列表看起来就是「从第 3 轮开始」—— 用户读到的同样是「顺序不对」。
+        // 落库那份不在这里说（它是全量，见 `applyRounds`）。
+        moreNote = truncationNote(
+            {seen: progress.rounds_seen, truncated: progress.rounds_truncated},
+            blocks.length
+        );
         paint();
     }
 
@@ -581,6 +681,10 @@
         loading = false;
         mode = pending ? 'live' : 'settled';
         blocks = buildRoundBlocks(list, meta || {});
+        // 落库那份**是全量**：服务端按 `round_index asc` 取（`ai_usage_service.py`），
+        // `rounds_truncated` 只在 60 轮以上才为真。所以这里不挂「只列出最近 N 轮」
+        // 那句 —— 那句是实时那份 8 轮窗口的实话（见 `applyProgress`）。
+        moreNote = '';
         paint();
     }
 
@@ -597,6 +701,7 @@
         loading = false;
         mode = value === null ? 'empty' : (watching ? 'live' : 'settled');
         blocks = [];
+        moreNote = '';
         // 换了运行，「见过快照」与「看着它开跑的时刻」都属于上一次 —— 留着它们会让
         // 新的一次运行继承上一次的处境（`starting` 那句说明的期限就是从这里算的）。
         sawSnapshot = false;
@@ -697,6 +802,7 @@
                 if (watching) return;
                 mode = 'unavailable';
                 blocks = [];
+                moreNote = '';
                 paint();
                 var note = el('aiThinkNote');
                 if (note) {

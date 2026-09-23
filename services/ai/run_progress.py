@@ -327,8 +327,25 @@ def _prune_locked(now: float) -> None:
         _ledgers.pop(run_id, None)
 
 
+def _as_int(value: Any) -> int:
+    """读一个整数，读不出来就是 0。**这一层读不出来的东西不该让整帧进度丢掉。**
+
+    与 `_local_tokens` 同一条纪律：脏值只让这一个字段缺失，不是这一帧作废
+    （`publish` 的宽 `except` 会把异常咽掉，代价是这一轮**整个**快照没写 —— 而那正是
+    「思考过程」一帧都收不到的那种症状）。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _merge_rounds(
-    previous: Optional[ProgressSnapshot], entry: Any, agent: str
+    previous: Optional[ProgressSnapshot],
+    entry: Any,
+    agent: str,
+    agent_index: int = 0,
+    agent_total: int = 0,
 ) -> tuple[tuple[Any, ...], int, bool]:
     """把这一轮接在**已有的那几轮**后面。返回 `(rounds, rounds_seen, truncated)`。
 
@@ -338,15 +355,25 @@ def _merge_rounds(
     都必须把前面几轮带上，否则界面上永远只剩最后一轮。放在锁内读是为了不与并发的另一轮
     互相盖掉（子代理模式是顺序跑的，但同一进程里可能同时跑着别的项目）。
 
-    ## 同一轮被报两次时**替换**，不追加
+    ## 同一轮被报两次时**原位替换**，不追加
 
     引擎的 `_emit` 是每轮的唯一出口，但一次重试/重问可能让同一个 `round_index` 出现两次
     （例如协议纠错那一轮）。按 `round_index` 去重更接近「一轮一行」的读法，也让重放同一帧
     幂等（界面每 3 秒拿到的是同一份列表，不该越滚越长）。
 
-    **但判重必须带上 `agent`**：子代理模式下每个分片的引擎都从第 1 轮开始编号，
+    **判重必须带上 `agent`**：子代理模式下每个分片的引擎都从第 1 轮开始编号，
     只按 `round_index` 判重会把「第二个分片的第一轮」当成「第一个分片最后一轮的重报」
     而替换掉它（见下面那段注释）。
+
+    **替换是原位替换、比较是整条列表**（两条都是后来才补上的，理由见注释）。
+
+    ## 分片位次也在这里补齐
+
+    `agent` / `agent_index` / `agent_total` 在引擎那一层是空的（引擎每次只跑一个成员，
+    标签由 `subagent` 在回调外层贴，见 `trace_evidence.live_round_entry` 的 docstring），
+    而这个进度对象知道 —— 这里补，让实时那一份与落库那份的 `agent` 含义一致，
+    并且让界面能写出「分片 S3 (3/7)」这种位次（`static/js/ai_stream_status.js` 的
+    `agentText` 读的就是这两个键）。
     """
     if not isinstance(entry, dict) or not entry:
         # 拿不到这一轮的明细（老调用方、测试替身）：保留已有的那几轮，别把它清掉。
@@ -359,25 +386,42 @@ def _merge_rounds(
         # 引擎不知道自己在哪个分片里（标签由 subagent 在回调外层贴），而进度对象知道。
         # 这里补一次，让实时那一份与落库那份的 `agent` 含义一致。
         item["agent"] = str(item.get("agent") or agent)
+    # 家族位次：**有这个键界面才写得出「分片 S3 (3/7)」**，也才排得出家族顺序
+    # （`static/js/ai_think_log.js` 的 `familyOrder`）。读不到（0）就不写 ——
+    # 编一个位次会被当成事实。
+    if agent_index > 0:
+        item.setdefault("agent_index", agent_index)
+    if agent_total > 0:
+        item.setdefault("agent_total", agent_total)
+    # 成员内轮次：引擎那一层是空的（`record.agent_round` 恒为 0），而这个成员的
+    # `round_index` **就是**它在本成员内的序号（每个成员的引擎各自从 1 开始编号）。
+    # 界面上「第 N 轮」显示的正是这个字段（`buildRoundBlocks`），不补的话它只能退回到
+    # `round_index` —— 巧合之上没有契约：同一个 `round_index` 在落库那份里是**家族全局**
+    # 序号（见 `models/ai_analysis/trace.py`），两个来源的同一个键含义不同。
+    if not _as_int(item.get("agent_round")):
+        item["agent_round"] = _as_int(item.get("round_index"))
 
     existing = list(previous.rounds) if previous is not None else []
     # 「一共跑过几轮」用上一条记的那个数继续累加：截断之后列表会变短，拿列表长度当总数
     # 等于把「已经跑了 12 轮」说成「只跑了 8 轮」。
     seen = previous.rounds_seen if previous is not None else 0
     index = item.get("round_index")
-    # **判重要连 `agent` 一起看。** 子代理模式下每个分片的引擎都从第 1 轮开始编号
-    # （`engine.py` 的成员引擎各自独立），只按 `round_index` 判重的话，第二个分片的第一轮
-    # 会被当成「第一个分片最后一轮的重报」而**替换掉它** —— 于是实时面板上少一轮，
-    # 而落库那份（重编号成家族全局序号）两轮都在，两个来源画出来的东西不一样。
-    # `agent` 是上面才补上的，所以判重必须在补完之后做（这里正是）。
-    same_round_of_the_same_shard = (
-        existing
-        and index is not None
-        and existing[-1].get("round_index") == index
-        and str(existing[-1].get("agent") or "") == str(item.get("agent") or "")
-    )
-    if same_round_of_the_same_shard:
-        existing[-1] = item
+    # **判重看整条列表，不是只看最后一条。** 原先只比 `existing[-1]`：同一个
+    # (agent, round) 恰好落在末尾时才替换，否则就**再 append 一条**。而「一轮一行」是
+    # 这个列表的契约（上面那段）—— 一旦某条晚到的帧重报了不在末尾的那一轮（重试、重连
+    # 之后补发、慢回调），面板上就会出现两遍，而且第二遍在末尾：界面上是「第 8 轮 /
+    # 第 1 轮 / 第 2 轮 / **第 5 轮**」这种**轮次往回跳**的样子，用户读到的就是「乱序」。
+    # 原位替换同时保住两件事：一轮一行，且**不改变已有顺序**。
+    target = None
+    if index is not None:
+        wanted = (index, str(item.get("agent") or ""))
+        for position, existing_item in enumerate(existing):
+            if (existing_item.get("round_index"),
+                    str(existing_item.get("agent") or "")) == wanted:
+                target = position
+                break
+    if target is not None:
+        existing[target] = item
     else:
         existing.append(item)
         seen += 1
@@ -393,7 +437,11 @@ def publish(run_id: int, project_id: int, progress: Any) -> None:
         with _lock:
             previous = _snapshots.get(run_key)
             rounds, rounds_seen, rounds_truncated = _merge_rounds(
-                previous, getattr(progress, "round_entry", None), agent
+                previous,
+                getattr(progress, "round_entry", None),
+                agent,
+                agent_index=int(getattr(progress, "agent_index", 0) or 0),
+                agent_total=int(getattr(progress, "agent_total", 0) or 0),
             )
             # job 级那一笔账**与快照在同一把锁里**：它是一份跨帧的状态（上一个成员的峰值、
             # 已经入账多少），分开算的话同时跑着的另一条分析会插进来（子代理是顺序跑的，

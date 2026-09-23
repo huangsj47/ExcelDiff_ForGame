@@ -38,6 +38,9 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = PROJECT_ROOT / "static" / "js" / "ai_think_log.js"
 USAGE_LINE = PROJECT_ROOT / "static" / "js" / "ai_usage_line.js"
+# 「这是哪个分片、它是第几个」的口径只有一处实现（`agentText`），分片前缀要走它
+# —— 真页面也是两个文件都加载的，替身会把「位次到底有没有传进去」这件事测没。
+STREAM_STATUS = PROJECT_ROOT / "static" / "js" / "ai_stream_status.js"
 
 DRIVER = r"""
 const fs = require('fs');
@@ -92,6 +95,7 @@ sandbox.window = sandbox;
 vm.createContext(sandbox);
 // 真加载「数字口径」那个模块：token 的 k / M 写法只有它一处实现，替身会掩盖分叉。
 vm.runInContext(fs.readFileSync(__USAGE_LINE__, 'utf8'), sandbox);
+vm.runInContext(fs.readFileSync(__STREAM_STATUS__, 'utf8'), sandbox);
 vm.runInContext(fs.readFileSync(__SCRIPT__, 'utf8'), sandbox);
 var api = sandbox.AiThinkLog;
 
@@ -132,7 +136,11 @@ function snap() {
         note: els[NOTE_ID].textContent,
         mode: api.state().mode,
         watching: api.state().watching,
-        rounds: els[LOG_ID].children.map(dumpNode)
+        rounds: els[LOG_ID].children.map(dumpNode),
+        // 列表顶上那句「只列出最近 N 轮」（它也是一个子节点，但不是一轮）。
+        more: (els[LOG_ID].children.filter(function (node) {
+            return String(node.className).indexOf('ai-think-more') >= 0;
+        })[0] || {}).textContent || ''
     };
 }
 
@@ -166,6 +174,9 @@ var OP = {
     roundsMainFinal: function () { api.applyRounds(ROUNDS.mainFinal, {}); },
     roundsSame: function () { api.applyRounds(ROUNDS.sameAsLive, {}); },
     roundsEmpty: function () { api.applyRounds([], {}); },
+    // 实时那一份：一次子代理运行收尾的样子（分片收尾 → 汇总 → 对账），**payload 顺序是乱的**
+    // —— 与真跑出来的那一份同源同形，只把顺序换成「一轮被重报 / 某一帧晚到」能造出来的样子。
+    progressFamily: function () { api.applyProgress(PROGRESS.family, 'running'); },
     // 用户点开「模型这一轮返回的内容」。
     //
     // 浏览器点一下 summary 做两件事：**同步**把 `open` 翻成 true，另**异步**派发一个
@@ -517,6 +528,45 @@ def _rounds() -> dict:
                 "budget_notes": "", "correction_hint": "",
             },
         ],
+        # **实时那一份的窗口**（run 44 的最后一帧：S5 收尾 → 汇总 4 轮 → 对账 3 轮），
+        # 但 **payload 顺序是故意打乱的**：对账 → 汇总 → S5 末轮 → S5 次末轮。
+        # 这不是编出来的形状 —— 「一轮被重报 / 某一帧晚到」就是这个样子
+        # （`run_progress._merge_rounds` 的判重原先只看最后一条，重报会直接 append），
+        # 而渲染端原先**原样画数组**，于是面板上是「第 8 轮 / 第 1 轮 / 第 7 轮」。
+        #
+        # `agent_index` / `agent_total` 是 `run_progress.publish` 给每条实时轮次补的家族位次；
+        # `agent_round` 是成员内轮次（引擎那一层是 0，所以必须由 publish 补 —— 界面显示的
+        # 「第 N 轮」读的就是它）。
+        "family": [
+            {
+                "round_index": 1, "agent": "V1", "agent_index": 7, "agent_total": 7,
+                "agent_round": 1, "outcome": "requests", "parsed_ok": True,
+                "tokens_input": 8000, "tokens_output": 400, "duration_ms": 4000,
+                "error": "", "requests": [], "executed": [], "dropped": [],
+                "response_text": "", "budget_notes": "", "correction_hint": "",
+            },
+            {
+                "round_index": 1, "agent": "", "agent_index": 6, "agent_total": 7,
+                "agent_round": 1, "outcome": "requests", "parsed_ok": True,
+                "tokens_input": 17000, "tokens_output": 900, "duration_ms": 3200,
+                "error": "", "requests": [], "executed": [], "dropped": [],
+                "response_text": "汇总这一轮的原话", "budget_notes": "", "correction_hint": "",
+            },
+            {
+                "round_index": 8, "agent": "S5", "agent_index": 5, "agent_total": 7,
+                "agent_round": 8, "outcome": "final", "parsed_ok": True,
+                "tokens_input": 26300, "tokens_output": 9000, "duration_ms": 72000,
+                "error": "", "requests": [], "executed": [], "dropped": [],
+                "response_text": "", "budget_notes": "", "correction_hint": "",
+            },
+            {
+                "round_index": 7, "agent": "S5", "agent_index": 5, "agent_total": 7,
+                "agent_round": 7, "outcome": "requests", "parsed_ok": True,
+                "tokens_input": 22000, "tokens_output": 700, "duration_ms": 66000,
+                "error": "", "requests": [], "executed": [], "dropped": [],
+                "response_text": "", "budget_notes": "", "correction_hint": "",
+            },
+        ],
     }
 
 
@@ -637,6 +687,9 @@ def run() -> dict:
             "ops": ["watchWithRun", "progressTwoRunning", "openModel",
                     "clearRun", "setRun", "progressTwoRunning"],
         },
+        # 14. **实时那一份的家族顺序**：payload 顺序是乱的（对账 → 汇总 → S5 末轮 → S5 次末轮），
+        #     画出来必须是家族顺序（分片位次升序 → 成员内轮次升序）。
+        {"name": "家族顺序", "ops": ["watchWithRun", "progressFamily"]},
     ]
     return _drive(cases, rounds, same)
 
@@ -648,10 +701,15 @@ def _drive(cases: list, rounds: dict, same: list) -> dict:
         "empty": {"round": 0, "max_rounds": 8, "rounds": [], "rounds_seen": 0},
         "two": {"round": 2, "max_rounds": 8, "rounds": rounds["stored"],
                 "rounds_seen": 2, "rounds_truncated": False},
+        # 实时那一份的窗口：只带最近 8 轮，超出时 `rounds_truncated` 为真、`rounds_seen`
+        # 是**一共跑过几轮**（截断之后拿列表长度当总数会把 34 说成 8）。
+        "family": {"round": 3, "max_rounds": 23, "rounds": rounds["family"],
+                   "rounds_seen": 34, "rounds_truncated": True},
     }
     driver = (
         DRIVER.replace("__SCRIPT__", json.dumps(str(SCRIPT)))
         .replace("__USAGE_LINE__", json.dumps(str(USAGE_LINE)))
+        .replace("__STREAM_STATUS__", json.dumps(str(STREAM_STATUS)))
         .replace("__CASES__", json.dumps(cases, ensure_ascii=False))
         .replace("__PROGRESS__", json.dumps(progress, ensure_ascii=False))
         .replace("__ROUNDS__", json.dumps(
@@ -978,6 +1036,98 @@ def test_the_shard_prefix_comes_from_the_progress(run):
 
     assert any("分片 S1" in line for line in flat), flat
     assert not any(line.startswith("分片  ·") for line in flat), "没有分片的那一轮不该有前缀"
+
+
+def _head_of(card: dict) -> str:
+    """一张轮次卡的头一行（`.` 是卡片自己，头一行在它的头一个子节点里）。"""
+    for child in card.get("children", []):
+        if child["cls"] == "ai-think-round-head":
+            return child["text"]
+    return ""
+
+
+def _card_heads(snap: dict) -> list:
+    """这一帧里**轮次卡**的头一行。跳过顶上那句「只列出最近 N 轮」（它也是一个子节点）。"""
+    return [_head_of(node) for node in snap["rounds"] if node["cls"] == "ai-think-round"]
+
+
+def test_the_live_list_is_painted_in_the_family_order(run):
+    """**用户报的「分片信息的排序没有按预期顺序规则，是乱序」。**
+
+    实时那一份的窗口是 `payload 顺序原样`（服务端按到达顺序累积），而渲染端原先一个
+    `sort` 都没有 —— 于是任何一条把顺序弄乱的路径（一轮被重报、某一帧晚到）都会
+    **静默地**画出来：面板上是「第 8 轮 / 第 1 轮 / 第 7 轮」。
+
+    预期规则（依据都在仓库里，不是这里推断的）：
+
+      * 顺序 = **家族顺序**：成员按 `agent_index`（`services/ai/subagent.py` 的
+        `run_family` docstring：「顺序跑 N 个成员 + 1 次汇总」）→ 成员内轮次升序
+        （`agent_round`，`models/ai_analysis/trace.py` 写着界面显示的就是这一列）；
+      * 落库那份的顺序权威是 `order_by(round_index asc)`（`ai_usage_service.py`），
+        它没有家族位次，所以渲染端对那一份**原样画**（见 `familyOrder`）。
+
+    这一条喂进去的 payload 顺序是「对账 → 汇总 → S5 末轮 → S5 次末轮」，画出来必须是
+    S5 的两轮在前、汇总居中、对账收尾。
+    """
+    heads = _card_heads(_by_name(run)["家族顺序"]["snaps"][-1])
+
+    assert len(heads) == 4, heads
+    assert [head.split(" · ")[0] for head in heads] == [
+        "分片 S5 (5/7)", "分片 S5 (5/7)", "分片 主代理 (6/7)", "分片 V1 (7/7)",
+    ], f"没有按家族顺序画：{heads}"
+    assert "第 7/23 轮" in heads[0] and "第 8/23 轮" in heads[1], heads
+
+
+def test_the_main_agent_rounds_carry_their_family_position(run):
+    """**「第 8 轮」下面紧跟一句「第 1 轮」，而那句话原先一个字的前缀都没有。**
+
+    子代理模式下**汇总那一次的 `agent` 就是空的**（`services/ai/subagent.py` 贴标签时留空），
+    所以卡片上原先写的是「第 1/23 轮」—— 紧跟在「分片 S5 · 第 8/23 轮」下面，读起来就是
+    编号往回跳。判据不是「有没有名字」，而是 `AiStreamStatus.agentText` 那条既有口径：
+    `agent` 空 + `agent_index === agent_total` 认「汇总」，否则认「主代理」，**并且要写位次**
+    （那个函数的注释写着「只看轮次会误读」）。
+    """
+    heads = _card_heads(_by_name(run)["家族顺序"]["snaps"][-1])
+
+    assert heads[2].startswith("分片 主代理 (6/7) · 第 1/23 轮"), (
+        f"汇总那几轮没有带上「是哪个成员」：{heads[2]!r} —— 它就是「第 8 轮下面写着"
+        "第 1 轮」那一幕"
+    )
+
+
+def test_a_round_without_a_family_position_gets_no_invented_one(run):
+    """落库那份没有家族位次（`run_usage` 的逐轮行只有 `agent`）：**不许编一个 (1/3)**。
+
+    编出来的位次会被当成事实读。所以没有位次时只能说名字，连名字都没有就什么都不说
+    —— 反向自检是上面那一条（实时那份有位次，**必须**写出来）。
+    """
+    stored = _card_heads(_by_name(run)["落库的逐轮"]["snaps"][-1])
+
+    assert stored, "落库那一份一张卡都没有"
+    assert not any("(" in head.split(" · ")[0] for head in stored), (
+        f"落库那份没有位次，却写出了位次：{stored}"
+    )
+    assert any("(" in head.split(" · ")[0]
+               for head in _card_heads(_by_name(run)["家族顺序"]["snaps"][-1])), (
+        "反向自检：实时那份有位次时也没写出来"
+    )
+
+
+def test_the_live_list_says_when_it_is_only_the_last_few_rounds(run):
+    """实时那份只有**最近 8 轮**（`run_progress.MAX_LIVE_ROUNDS`），必须说出来。
+
+    不说的话列表看起来就是「从第 3 轮开始」—— 那同样被读成「顺序不对」。
+    这句也是 `run_progress` 模块 docstring 自己的承诺（「超出时如实标 `rounds_truncated`」）。
+    """
+    snaps = _by_name(run)["家族顺序"]["snaps"]
+    more = snaps[-1]["more"]
+
+    assert more, "一共 34 轮、只列了 4 条，面板上一个字都没说"
+    assert "34" in more and "最近 4 轮" in more, more
+    # 没截断的那一份**不许**挂这句话（两句话不能同时为真）。
+    assert _by_name(run)["跑动中两轮"]["snaps"][-1]["more"] == "", (
+        "没截断也挂着「只列出最近 N 轮」"
+    )
 
 
 def test_missing_and_empty_are_written_differently(run):
