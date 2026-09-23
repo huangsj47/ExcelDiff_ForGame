@@ -75,6 +75,7 @@ from services.ai.protocol import (
     looks_like_truncated_json,
     parse_payload,
     repair_split_string_payload,
+    repair_unescaped_quotes_payload,
     salvage_report_markdown,
     sanitize_requests,
 )
@@ -1187,36 +1188,47 @@ def run_analysis(
                 markdown_fallback = salvaged_report
                 degradation = DEGRADE_MARKDOWN
                 break
-            # **先试平台自己拼**（实测 run 38 的 S2 第 7 轮）：模型把两万 token 的
-            # report_markdown 写成 `"第一段","第二段"` 的续写块形态 —— 括号配平、
-            # `finish_reason=stop`，`parse_payload` 解析失败、truncated 判否、
-            # `looks_like_markdown_report` 判真（JSON 字符串里的 `\n# 变更理解`
-            # 照样能数到章节标题），于是整轮被当成 markdown 报告重发。重发的代价
-            # 不只是 token：按「原样转成 JSON」交回的正文**普遍更短**（那一轮
-            # 16.5k token 的正文，重发回来只剩 6.7k），内容先丢了一截。
-            # 而 `anomalies`/`dimensions` 写在正文之后、本来就是好的 ——
-            # 把续写块拼回一个字符串，这份 JSON 就能解析，不重发也不降级。
+            # **先试平台自己修**（实测 run 38/40/41 的三个形态）：模型把两万 token 的
+            # report_markdown 写坏，但括号配平、`finish_reason=stop` —— 三道判据全数绕过，
+            # 整轮被当成 markdown 报告重发。重发的代价不只是 token：按「原样转成 JSON」
+            # 交回的正文**普遍更短**（run 38：16.5k→6.7k），内容先丢了一截。而
+            # `anomalies`/`dimensions` 写在正文之后、本来就是好的 —— 修好正文就地解析，
+            # 不重发也不降级。两种病、同一副骨架：
+            #  * 续写块：正文被切成 `"第一段","第二段"`（run 38 的 S2 第 7 轮）；
+            #  * 裸引号：正文原样引用了 `require("…")` 这类带双引号的代码、没转义
+            #    （run 41 的汇总第 4 轮，trace 存了完整原文确诊）。
+            # 都修不好就按原分支处理 —— 这条修复不堵任何原有的路，失败也留痕。
             repaired_parsed = None
-            repaired_text = repair_split_string_payload(text)
-            if repaired_text is not None:
+            repair_note = ""
+            for repair_name, repair_text in (
+                (
+                    "续写块拼接",
+                    repair_split_string_payload(text),
+                ),
+                (
+                    "正文裸引号转义",
+                    repair_unescaped_quotes_payload(text),
+                ),
+            ):
+                if repair_text is None:
+                    continue
                 try:
-                    repaired_parsed = parse_payload(repaired_text, dimension_ids=dimension_ids)
+                    repaired_parsed = parse_payload(repair_text, dimension_ids=dimension_ids)
                 except ProtocolError as exc:
-                    # **失败也要留痕**：「识别出续写块、但拼回后仍解析失败」与「根本没识别
-                    # 出续写块」在 trace 上必须分得开 —— 前者说明后续字段另有毛病，后者说明
-                    # 是别的失败形态。不留这句话，下一轮实测又要靠猜（run 40 的 S1 第 6 轮）。
+                    # **失败也要留痕**：「识别出这种病、但修完仍解析失败」与「根本不是
+                    # 这种病」在 trace 上必须分得开 —— 不留这句话，下一轮实测又要靠猜。
                     round_notes.append(
-                        "已尝试把续写块拼接回去，但整份 payload 仍解析失败（"
+                        f"已尝试{repair_name}，但整份 payload 仍解析失败（"
                         + str(exc)[:120]
                         + "），按原分支处理"
                     )
                     repaired_parsed = None
+                    continue
+                repair_note = f"模型把 report_markdown 写坏（{repair_name}），平台已自动修复，未重发"
+                break
             if repaired_parsed is not None:
                 parsed = repaired_parsed
-                round_notes.append(
-                    "模型把 report_markdown 切成多段字符串导致 JSON 不合法；"
-                    "平台已自动拼接修复，未重发"
-                )
+                round_notes.append(repair_note)
                 # **不 continue、不 break、也不再发这一轮的记录**：except 块到此结束，
                 # 落回循环体尾部的常规处理（与「这一轮本来就解析成功」同一条路），
                 # 由那里统一发这一轮的 `final`/`requests` 记录 —— 同一轮发两份会撞

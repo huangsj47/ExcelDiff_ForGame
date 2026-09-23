@@ -945,7 +945,7 @@ def test_a_split_string_final_is_repaired_in_place_without_a_resend():
     assert [item.title for item in outcome.anomalies] == ["【道具】ID 被删除但生成文件仍在"], (
         "正文之后的结构化结论必须原样保留"
     )
-    assert "拼接修复" in outcome.rounds[0].note, "修复必须留痕：读 trace 的人得知道发生过什么"
+    assert "续写块拼接" in outcome.rounds[0].note, "修复必须留痕：读 trace 的人得知道发生过什么"
 
 
 def test_an_unrepairable_split_still_takes_the_markdown_road():
@@ -974,9 +974,41 @@ def test_a_failed_repair_leaves_a_note_in_the_round_record():
 
     outcome = _run(client)
 
-    assert any("已尝试把续写块拼接回去" in (round_.note or "") for round_ in outcome.rounds), (
+    assert any("已尝试续写块拼接" in (round_.note or "") for round_ in outcome.rounds), (
         "失败的修复尝试必须写进那一轮的 note"
     )
+
+
+RAW_QUOTE_FINAL = (
+    '{"status": "final", "report_markdown": '
+    '"# 变更理解\\n\\n起服链路里 `require(\\"headcode/LaunchArgs\\").apply()` 未包 pcall。'
+    '\\n\\n# 影响面分析\\n\\n只影响起服。", '
+    '"anomalies": [], "dimensions": [{"id": "config_id", "hit": false, "note": ""}]}'
+)
+
+
+def test_raw_quotes_in_the_report_are_escaped_in_place_without_a_resend():
+    """正文原样引用了带双引号的代码（没做 JSON 转义）→ 平台转义修复，就地解析。
+
+    实测形态（run 41 的汇总第 4 轮，trace 存档了完整原文）：`json.loads` 在体内那个
+    引号处认定字符串提前闭合 —— 括号配平、finish_reason=stop，与续写块是**同一个
+    漏斗的另一种病**，旧实现同样掉进 markdown 分支整轮重发。而真实闭合引号可以靠
+    「正文之后的第一个顶级键」定位，转义后整份 payload 直接可解析。
+    """
+    broken = RAW_QUOTE_FINAL.replace('require(\\"headcode/LaunchArgs\\").apply()',
+                                     'require("headcode/LaunchArgs").apply()')
+    assert broken != RAW_QUOTE_FINAL, "fixture 没真的把引号弄坏，这条用例是空转"
+    client = ScriptedClient(broken)
+
+    outcome = _run(client)
+
+    assert len(client.calls) == 1, "转义修复不花一轮重发"
+    assert outcome.status == STATUS_SUCCEEDED
+    assert outcome.degradation == DEGRADE_NONE
+    assert 'require("headcode/LaunchArgs").apply()' in outcome.report_markdown, (
+        "带引号的代码必须原样保留在正文里"
+    )
+    assert "裸引号" in outcome.rounds[0].note, "修复必须留痕"
 
 
 def test_a_truncated_json_is_asked_to_shorten_instead_of_being_dropped():

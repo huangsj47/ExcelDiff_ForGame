@@ -31,6 +31,7 @@ from services.ai.protocol import (
     parse_json_candidates,
     parse_payload,
     repair_split_string_payload,
+    repair_unescaped_quotes_payload,
     salvage_report_markdown,
     sanitize_requests,
 )
@@ -770,6 +771,64 @@ def test_repair_keeps_a_section_heading_at_line_start():
     parsed = parse_payload(repaired, dimension_ids=("config_id",))
     assert "# 风险评估" in parsed.report_markdown
     assert "\n\n# 风险评估" in parsed.report_markdown, "标题必须留在行首"
+
+
+# --------------------------------------------------------------------------
+# 体内裸引号修复：正文原样引用 `require("…")` 这类代码、没做 JSON 转义
+# --------------------------------------------------------------------------
+
+
+def _raw_quote_final_text() -> str:
+    """实测形态（run 41 的汇总第 4 轮）：正文里的 `require("x")` 没转义。"""
+    return (
+        '{"status": "final", "report_markdown": '
+        '"# 变更理解\\n\\n起服链路里 `require("headcode/LaunchArgs").apply()` 未包 pcall，'
+        '异常直接卡起服。\\n\\n# 影响面分析\\n\\n只影响起服。", '
+        '"anomalies": [], "dimensions": [{"id": "config_id", "hit": false, "note": ""}]}'
+    )
+
+
+def test_quote_repair_escapes_the_body_and_the_payload_parses():
+    """真实闭合引号靠「正文之后的第一个顶级键」定位，体内裸引号全部转义后可解析。"""
+    repaired = repair_unescaped_quotes_payload(_raw_quote_final_text())
+
+    assert repaired is not None
+    parsed = parse_payload(repaired, dimension_ids=("config_id",))
+    assert parsed.is_final
+    assert 'require("headcode/LaunchArgs").apply()' in parsed.report_markdown, (
+        "带引号的代码必须原样保留 —— 修复只动 JSON 转义，不动内容"
+    )
+
+
+def test_quote_repair_does_not_double_escape_existing_escapes():
+    """正文里**已有的合法转义**（`\\n`、`\\"`）整对保留，不许二次转义。"""
+    text = (
+        '{"status": "final", "report_markdown": '
+        '"# 变更理解\\n\\n已有转义 \\"quoted\\" 与裸引号 "raw"。", '
+        '"anomalies": [], "dimensions": [{"id": "config_id", "hit": false, "note": ""}]}'
+    )
+    repaired = repair_unescaped_quotes_payload(text)
+
+    assert repaired is not None
+    parsed = parse_payload(repaired, dimension_ids=("config_id",))
+    assert parsed.report_markdown == '# 变更理解\n\n已有转义 "quoted" 与裸引号 "raw"。', (
+        "已有的转义被二次转义（\\\\\\\"…），或裸引号没转义成"
+    )
+
+
+def test_quote_repair_declines_when_the_body_has_no_raw_quotes():
+    """体内没有裸引号就不是这种病（错在别处）—— 返回 None，交回原分支。"""
+    text = (
+        '{"status": "final", "report_markdown": "# 变更理解\\n\\n正文没有引号", '
+        '"anomalies": [], "dimensions": [{"id": "config_id", "hit": false, "note": ""}]}'
+    )
+    assert repair_unescaped_quotes_payload(text) is None
+
+
+def test_quote_repair_declines_without_a_following_top_level_key():
+    """正文之后找不到顶级键（比如真被截断了）：不猜边界，返回 None。"""
+    text = '{"status": "final", "report_markdown": "# 变更理解\\n\\n正文带 "引号" 就断了'
+    assert repair_unescaped_quotes_payload(text) is None
 
 
 @pytest.mark.parametrize(

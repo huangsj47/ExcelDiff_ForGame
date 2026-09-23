@@ -1251,6 +1251,71 @@ def repair_split_string_payload(text: str) -> str | None:
     )
 
 
+# report_markdown 之后的下一个顶级键。final 载荷必有 `dimensions` 与 `anomalies`
+# （协议要求，见 parse_payload 的校验），所以它们的位置就是正文字符串的**真实边界**
+# —— 引号转义修复要靠它定位「哪个引号是闭合引号、哪些是体内裸引号」。
+_NEXT_FINAL_KEY_RE = re.compile(
+    r'\s*,\s*"(?:anomalies|dimensions|candidate_dispositions)"\s*:'
+)
+
+
+def repair_unescaped_quotes_payload(text: str) -> str | None:
+    """把 report_markdown 体内**未转义的双引号**转义回去；不属于这种病返回 None。
+
+    ## 实测形态（2026-09-23 run 41 的汇总第 4 轮，trace 存档了完整原文）
+
+    模型写正文时原样引用了带双引号的代码 —— `require("headcode/LaunchArgs")` ——
+    而没有做 JSON 转义。`json.loads` 在那个引号处认定字符串提前闭合，于是「括号
+    配平、finish_reason=stop 的合法开头 JSON」又一次绕过截断判据、掉进 markdown
+    降级分支整轮重发（与续写块是同一个漏斗的两种病）。
+
+    ## 为什么边界是「下一个顶级键」而不是「下一个引号」
+
+    体内的裸引号长得和闭合引号一模一样，逐个猜必错。但 final 载荷的
+    `anomalies` / `dimensions` / `candidate_dispositions` **一定**写在正文之后
+    （协议校验钉着），所以「第一个出现在正文之后的顶级键」之前的最后一个引号
+    才是真实闭合。定位错了也不怕：修完的文本还要过一遍 `parse_payload`，
+    解析失败就按没修过处理（同 `repair_split_string_payload` 的规矩，不堵路）。
+
+    ## 体内没有裸引号时返回 None
+
+    那就不是这种病（错在别处），交回原分支 —— 别让调用方的「失败留痕」把病因
+    记到引号头上。
+    """
+    content = _THINK_BLOCK_RE.sub("", str(text or ""))
+    opening = _REPORT_MARKDOWN_OPENING_RE.search(content)
+    if opening is None:
+        return None
+    following = _NEXT_FINAL_KEY_RE.search(content, opening.end())
+    if following is None:
+        return None
+    closing = content.rfind('"', opening.end(), following.start())
+    if closing < opening.end():
+        return None
+    body = content[opening.end():closing]
+    out: list[str] = []
+    index = 0
+    total = len(body)
+    has_raw_quote = False
+    while index < total:
+        char = body[index]
+        if char == "\\":
+            # 已有的合法转义（`\n`、`\"`…）整对保留，**不许二次转义**。
+            out.append(body[index:index + 2])
+            index += 2
+            continue
+        if char == '"':
+            out.append('\\"')
+            has_raw_quote = True
+            index += 1
+            continue
+        out.append(char)
+        index += 1
+    if not has_raw_quote:
+        return None
+    return content[:opening.end()] + "".join(out) + content[closing:]
+
+
 def looks_like_truncated_json(text: str) -> bool:
     """回答「这段文本是不是一份没收尾的 JSON 对象」。
 
