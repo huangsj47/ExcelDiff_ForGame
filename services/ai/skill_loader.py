@@ -49,8 +49,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from utils.logger import log_print
-
 from services.ai.skill_contract import (
     DEFAULT_DIMENSION_SPECS,
     PLATFORM_SKILL_RELATIVE_PATH,
@@ -59,9 +57,11 @@ from services.ai.skill_contract import (
     DimensionSpec,
     SkillContractError,
     is_platform_default_dimensions,
+    iter_platform_skill_dirs,
     parse_frontmatter,
     render_dimension_section,
 )
+from utils.logger import log_print
 
 # 声明坏掉时的那一行日志的前缀。与 `project_facts` 的其余两组事实同一条纪律：
 # 坏掉的声明不能悄悄退化成默认值（那与「本项目没声明」在行为上一模一样）。
@@ -105,6 +105,13 @@ class LoadedSkills:
     project_manifest: SkillDocument | None
     project_references: tuple[SkillDocument, ...]
     project_skills: tuple[SkillDocument, ...]
+    # **全部平台 skill 的正文**，承载报告契约的那一份在最前（顺序由
+    # `iter_platform_skill_dirs` 定死）。它们都无条件进系统提示词。
+    #
+    # 为什么另立一个复数而不把 `platform_skill` 改成列表：后者是十几处调用方与测试
+    # 直接构造的字段名，改名等于把一次「加一个 skill」变成一次全仓重构。
+    # 默认空元组：直接构造 `LoadedSkills` 的老代码不填它，提示词那边会退回单数那一份。
+    platform_skills: tuple[SkillDocument, ...] = ()
     # 可读文档白名单：键是模型在 `read_reference` 里写的名字，值是文件所在路径。
     readable: dict[str, Path] = field(default_factory=dict)
     # 项目知识包的目录名（None 表示该项目没有知识包）。
@@ -332,22 +339,49 @@ def load_skills(
 ) -> LoadedSkills:
     """加载平台 skill，以及（若给了项目）该项目的专属知识。
 
+    **平台 skill 是复数**：`skills/` 下每个子目录（`projects/` 除外）都是一份，
+    全部无条件进提示词 —— 这是「所有项目都必须加载的底层 skill」的落点。
+    加载顺序由 `iter_platform_skill_dirs` 定死（承载报告契约的那一份在最前）。
+
     `project_code` 为空时只加载平台 skill —— 这是「项目还没配 skill」的正常情形，
     不是错误。
 
     检查维度清单（`LoadedSkills.dimensions`）来自项目声明；项目没声明时是平台出厂的那
     九个，且**提示词里一个字节都不多**（见 `is_platform_default_dimensions`）。
     """
-    platform_dir = repo_root / PLATFORM_SKILL_RELATIVE_PATH
-    platform_md = platform_dir / "SKILL.md"
-    if not platform_md.is_file():
+    # 承载契约的那一份缺失 = 坏掉的部署，不是「没配」。它同时也是提示词里报告格式的
+    # 唯一来源，少了它模型会自由发挥出一份服务端认不出的报告，所以照旧硬失败。
+    contract_md = repo_root / PLATFORM_SKILL_RELATIVE_PATH / "SKILL.md"
+    if not contract_md.is_file():
         raise SkillLoadError(
-            f"平台内置 skill 缺失：{platform_md}。它是分析功能的必需依赖，"
+            f"平台内置 skill 缺失：{contract_md}。它是分析功能的必需依赖，"
             "请确认部署包里带上了 skills/ 目录"
         )
 
-    platform_skill = _read_document(platform_md, require_frontmatter=True)
-    platform_references = _collect_references(platform_dir / "references")
+    platform_documents: list[SkillDocument] = []
+    platform_reference_list: list[SkillDocument] = []
+    for directory in iter_platform_skill_dirs(repo_root):
+        skill_md = directory / "SKILL.md"
+        if not skill_md.is_file():
+            # 目录在、SKILL.md 不在：多半是有人手工建了个目录或解压到一半。
+            # 静默跳过等于「这份底层 skill 悄悄没生效」，而它看起来与正常加载一模一样。
+            raise SkillLoadError(
+                f"平台 skill 目录 {directory} 下没有 SKILL.md。"
+                f"平台 skill 是每条分析都无条件加载的底层内容，缺失即部署不完整"
+            )
+        # 文档名取**目录名**，不取文件名。与 `_collect_project_sub_skills` 同一条理由，
+        # 只是平台层现在才撞上：平台 skill 的正文文件一律叫 `SKILL.md`，取文件名的话
+        # 加第二份平台 skill 起就全是重名 —— 而 `build_readable_index` 对重名是**硬错**，
+        # 轻则两份文档在按名字索引的地方互相覆盖（静默），重则整条加载链失败。
+        # 目录名才是身份：`iter_platform_skill_dirs` 按它排序，frontmatter 的 `name` 也等于它。
+        platform_documents.append(
+            _read_document(skill_md, require_frontmatter=True, name=directory.name)
+        )
+        platform_reference_list.extend(_collect_references(directory / "references"))
+
+    # `iter_platform_skill_dirs` 把承载契约的那一份排在最前，所以这里就是它。
+    platform_skill = platform_documents[0]
+    platform_references = tuple(platform_reference_list)
 
     manifest: SkillDocument | None = None
     project_references: tuple[SkillDocument, ...] = ()
@@ -415,13 +449,21 @@ def load_skills(
     )
     readable = build_readable_index(platform_references, documents)
 
+    # 复数那一份**由 `platform_skill` 现拼**，不用上面那个列表的第 0 项 —— 维度清单那段
+    # 会重新绑定 `platform_skill`，从列表里取的话两份就分叉了：提示词读的是复数这一份，
+    # 于是「项目声明了维度清单」变成提示词里不生效，而 revision 已经变了、缓存也作废了
+    # （一次白跑的全量分析，报告里那九个维度还是出厂口径）。
+    # 写成「现拼」之后这个分叉在结构上就不可能出现，不需要谁记得同步。
+    platform_skills = (platform_skill, *platform_documents[1:])
+
     hasher = hashlib.sha256()
-    for document in (platform_skill, *platform_references, *documents):
+    for document in (*platform_skills, *platform_references, *documents):
         hasher.update(document.name.encode("utf-8"))
         hasher.update(document.content_hash.encode("utf-8"))
 
     return LoadedSkills(
         platform_skill=platform_skill,
+        platform_skills=platform_skills,
         platform_references=platform_references,
         project_manifest=manifest,
         project_references=project_references,

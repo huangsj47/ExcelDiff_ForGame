@@ -25,8 +25,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-# 平台内置 skill 的位置（仓库根相对）。
-PLATFORM_SKILL_RELATIVE_PATH = "skills/version-diff-review"
+# 平台内置 skill 的父目录：直接挂在它下面的**每个子目录**都是一个平台 skill
+# （`projects/` 除外 —— 那是项目知识包）。平台 skill 不随项目走，`load_skills`
+# **无条件**把它们的正文注入每一次分析的系统提示词。
+PLATFORM_SKILLS_RELATIVE_PATH = "skills"
+# 承载「检查维度 + 报告结构」契约的那一份平台 skill。
+#
+# **只有它**要求正文里写出那几组枚举（`_check_body_contract`）：那份文档是**报告格式**
+# 的载体，运行期常量以它为准。别的平台 skill 是各自领域的方法论（例如资产发放安全审查），
+# 它们不该被要求复述版本评审的报告章节 —— 那只会逼它们抄一份不属于自己的清单，
+# 而抄出来的那份一旦与代码分叉就是静默的错。
+BODY_CONTRACT_SKILL_NAME = "version-diff-review"
+# 平台内置 skill 的位置（仓库根相对）。**历史调用方按这个常量找承载契约的那一份**；
+# 「全部平台 skill」要用 `iter_platform_skill_dirs()`。
+PLATFORM_SKILL_RELATIVE_PATH = f"{PLATFORM_SKILLS_RELATIVE_PATH}/{BODY_CONTRACT_SKILL_NAME}"
 # 项目知识包的父目录。每个子目录是一个项目专属知识包。
 PROJECT_PACKS_RELATIVE_PATH = "skills/projects"
 # 项目知识包内描述自身的文件。
@@ -594,13 +606,18 @@ def validate_project_pack(pack_dir: Path) -> list[str]:
 
 
 def validate_all(root: Path) -> dict[str, list[str]]:
-    """校验平台 skill 与全部项目知识包，返回 {相对路径: 问题列表}（只含失败的）。"""
+    """校验全部平台 skill 与全部项目知识包，返回 {相对路径: 问题列表}（只含失败的）。"""
     failures: dict[str, list[str]] = {}
 
-    platform_dir = root / PLATFORM_SKILL_RELATIVE_PATH
-    problems = validate_skill_dir(platform_dir)
-    if problems:
-        failures[PLATFORM_SKILL_RELATIVE_PATH] = problems
+    for skill_dir in iter_platform_skill_dirs(root):
+        rel_path = f"{PLATFORM_SKILLS_RELATIVE_PATH}/{skill_dir.name}"
+        # 正文契约只对承载报告格式的那一份成立，见 `BODY_CONTRACT_SKILL_NAME`。
+        # `name` 必须等于目录名这一条对**所有**平台 skill 都成立（打包产物按目录名命名）。
+        problems = validate_skill_dir(
+            skill_dir, require_body_contract=skill_dir.name == BODY_CONTRACT_SKILL_NAME
+        )
+        if problems:
+            failures[rel_path] = problems
 
     packs_root = root / PROJECT_PACKS_RELATIVE_PATH
     for pack_dir in sorted(path for path in packs_root.glob("*") if path.is_dir()):
@@ -609,6 +626,29 @@ def validate_all(root: Path) -> dict[str, list[str]]:
             failures[f"{PROJECT_PACKS_RELATIVE_PATH}/{pack_dir.name}"] = problems
 
     return failures
+
+
+def iter_platform_skill_dirs(root: Path) -> list[Path]:
+    """列出全部平台 skill 目录，**承载契约的那一份排在最前**。
+
+    顺序是确定的（其余按目录名排序）。这**不是**整洁癖：平台 skill 的正文会按这个顺序
+    拼进系统提示词，而提示词要靠前缀命中缓存 —— 顺序随文件系统的返回顺序变的话，
+    同样的内容会算出不同的前缀，每次分析都从零开始付全价。
+
+    `skills/projects/` 被排除：它装的是项目知识包，随 `project_code` 寻址，不是平台 skill。
+    """
+    platform_root = root / PLATFORM_SKILLS_RELATIVE_PATH
+    if not platform_root.is_dir():
+        return []
+    packs_name = Path(PROJECT_PACKS_RELATIVE_PATH).name
+    found = [
+        path
+        for path in sorted(platform_root.glob("*"))
+        if path.is_dir() and path.name != packs_name
+    ]
+    contract = [path for path in found if path.name == BODY_CONTRACT_SKILL_NAME]
+    others = [path for path in found if path.name != BODY_CONTRACT_SKILL_NAME]
+    return contract + others
 
 
 def iter_reference_files(skill_dir: Path) -> Iterable[Path]:

@@ -467,12 +467,22 @@ def _platform_sections(loaded: LoadedSkills) -> list[str]:
 
     **不可信数据的声明也在这里**：它讲的是「你读到的东西算什么」，是平台出给每一次分析
     的判据（与项目无关），而且它是数据封套的使用说明 —— 不跟着数据一起走就会失效。
+
+    **平台 skill 是复数**（`skills/` 下每个子目录一份，见 `skill_loader.load_skills`）：
+    承载报告契约的那一份在最前，其余按目录名排序。顺序是 `iter_platform_skill_dirs`
+    定死的 —— 提示词靠前缀命中缓存，顺序一变，同样的内容每次都要从零付全价。
+    每份 SKILL.md 自带 `# 标题`，所以直接接在下面就是可读的分节。
     """
+    # `platform_skills` 为空 = 调用方直接构造的 `LoadedSkills`（测试里的写法）→ 退回单数。
+    platform_bodies = [
+        document.text
+        for document in (loaded.platform_skills or (loaded.platform_skill,))
+    ]
     return [
         _PRIMACY_NOTICE,
         _UNTRUSTED_DATA_NOTICE,
         "# 角色与方法（强制）",
-        loaded.platform_skill.text,
+        *platform_bodies,
     ]
 
 

@@ -81,8 +81,13 @@ def _make_repo(
 def test_loads_the_real_platform_skill_and_g119_pack():
     loaded = load_skills(REPO_ROOT, project_code="G119")
 
-    assert loaded.platform_skill.name == "SKILL.md"
+    # 平台 skill 的文档名是**目录名**，不是文件名 —— 它们的正文文件一律叫 SKILL.md，
+    # 取文件名的话从第二份平台 skill 起就全是重名（`build_readable_index` 对重名是硬错）。
+    assert loaded.platform_skill.name == "version-diff-review"
     assert loaded.platform_skill.char_count > 1000
+    # 底层 skill 全部无条件加载：加一份新的就该在这里出现。
+    assert [doc.name for doc in loaded.platform_skills][:1] == ["version-diff-review"]
+    assert "grant-safety-review" in {doc.name for doc in loaded.platform_skills}
     assert loaded.project_slug == "g119"
     assert loaded.project_manifest is not None
     # 项目事实文档必须在可读清单里，否则模型读不到它们。
