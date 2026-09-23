@@ -443,7 +443,15 @@ _RESULTS: dict = {}
 
 
 def _probe_source(rel: str) -> str:
-    """把模板里**逐字那一份**决策代码抽出来，配一份页面全局桩（抄一份进测试就没意义了）。"""
+    """把模板里**逐字那一份**决策代码抽出来，配一份页面全局桩（抄一份进测试就没意义了）。
+
+    **这里不提供 `configId`。** 原先是有的（一句手写的 `var configId = 42;`），但
+    它凭空造出了 `merged_project_view.html` 根本没有的那个全局 —— 而这一组又把
+    `fetchWeeklyAiEstimate` / `fetchWeeklyAiBaselineState` 整个换成桩，于是那两个函数体
+    从没执行过。两条加起来把真机上一个「两个按钮点了没反应」的故障盖成了全绿。
+    需要真实全局的那两个函数由下面 `test_*_runs_against_this_template_s_own_globals`
+    单独真跑（它**不**桩那两个函数，全局也从模板里抽）。
+    """
     script = _script(rel)
     extracted = "\n".join([
         _const_object_source(script, "WEEKLY_AI_UPGRADE_REASONS"),
@@ -461,7 +469,6 @@ def _probe_source(rel: str) -> str:
         _function_source(script, "weeklyAiChooseMode"),
         "var weeklyAiMismatchAccepted = false;",
         "var weeklyAiUpgradeNoticeText = '';",
-        "var configId = 42;",
     ])
     return _PROBE_TEMPLATE.replace("__EXTRACTED__", extracted)
 
@@ -856,3 +863,234 @@ def test_the_settled_guard_survives_the_dual_button_refactor(rel: str):
     assert first_line == "if (weeklyAiStreamSettled) return;", (
         f"{rel}: settled 守卫不在处理器开头，第一句是：{first_line!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+#  两个预检函数必须能在**这份模板自己的全局**下跑起来
+#
+#  为什么单开一组：上面那一组把 `fetchWeeklyAiEstimate` / `fetchWeeklyAiBaselineState`
+#  **整个换成桩**（`_PROBE_TEMPLATE` 里那两行 `async function fetchWeeklyAi*(…) { … }`），
+#  于是这两个函数的真实函数体从来没被执行过；而 `_probe_source` 原先还手写一句
+#  `var configId = 42;`，凭空提供了 `merged_project_view.html` **没有**的那个全局。
+#
+#  两件事的真实后果（2026-09-23 部署后用户报的「增量分析 / 全量重新分析点了没反应」）：
+#  `merged` 是「同一个抽屉换目标」，顶层只有 `weeklyAiCurrentConfigId`，**没有** `configId`
+#  （那一块是从 `weekly_version_diff.html` 搬过来的，那边的 `let configId = {{ config.id }}`
+#  是单一分组页专有的）。于是：
+#    * `fetchWeeklyAiEstimate` 里 `String(configId)` 抛 `ReferenceError`，而那一行在它自己
+#      的 `try` **之外** —— 异常穿过 `weeklyAiChooseMode` 落进点击回调的 async 函数，
+#      变成 unhandled rejection：两个按钮点下去**页面上一行提示都没有**；
+#    * `fetchWeeklyAiBaselineState` 里同一行在它自己的 `try` **里面**，被「读不到就当没变化」
+#      吞掉 —— 按钮能点，但 `baseline` 永远是 `null`，「基线是旧规则产出的」与
+#      「还没有基线、这次会被升级为全量」两条事前提示**永远不出现**。
+#
+#  所以这一组**不桩这两个函数**：把真实函数体抽出来，配一份**从这份模板自己抽出来的**
+#  全局声明去跑。哪份模板缺了自己要读的全局，就会在这里以 `ReferenceError` 现形 ——
+#  「模板声明了什么」与「函数读了什么」两边的差集，就是这一组要钉的东西。
+# ---------------------------------------------------------------------------
+
+_PREFLIGHT_FUNCS = (
+    "weeklyAiProjectIdOf",
+    "fetchWeeklyAiEstimate",
+    "fetchWeeklyAiBaselineState",
+)
+
+# 「这次分析是哪个分组」在两个模板里不是同一个名字：单一分组页是常量 `configId`，
+# 项目页是「同一个抽屉换目标」的 `weeklyAiCurrentConfigId`。取哪个由模板自己说了算 ——
+# 一个都没有才算缺（缺了就是这里要抓的东西，不许测试替它补上）。
+_CONFIG_ID_NAMES = ("weeklyAiCurrentConfigId", "configId")
+# 同理，项目 id 也有两个名字（`aiProjectId` / `weeklyAiProjectId`）。
+_PROJECT_ID_NAMES = ("aiProjectId", "weeklyAiProjectId")
+_KNOWN_DELTA_NAME = "weeklyAiKnownDeltaFiles"
+
+# 探针里给的分组号 / 项目号。URL 断言要看到它们 —— 只断言「没抛异常」是不够的：
+# 读到一个 `null` 全局同样不抛，但它请求的是 `/ai-analysis/weekly/null/latest`。
+# **两个数取不同的值**：否则「分组号进了 URL」与「项目号进了 URL」分不出来，
+# 而这两个函数的区别恰恰在分组号那一段上。
+_PROBE_CONFIG_ID = 7
+_PROBE_PROJECT_ID = 11
+
+_PREFLIGHT_HARNESS = r"""
+var probeUrls = [];
+var probePayload = null;
+
+async function fetch(url) {
+    probeUrls.push(url);
+    return { json: async () => (probePayload || {}) };
+}
+
+__GLOBALS__
+
+__EXTRACTED__
+
+globalThis.__preflight = {
+    urls: function () { return probeUrls; },
+    setPayload: function (value) { probePayload = value; },
+    estimate: function () { return fetchWeeklyAiEstimate('incremental'); },
+    baseline: function () { return fetchWeeklyAiBaselineState(); }
+};
+"""
+
+_PREFLIGHT_DRIVER = r"""
+const fs = require('fs');
+const vm = require('vm');
+
+const payload = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const ESTIMATE_PAYLOAD = { success: true, delta_files: 3, result: null, run_id: 12 };
+
+function call(P, name) {
+    return P[name]().then(
+        function (value) { return { ok: true, value: value }; },
+        function (err) { return { ok: false, error: String((err && err.message) || err) }; }
+    );
+}
+
+(async function () {
+    const result = {};
+    for (const template of Object.keys(payload.probes)) {
+        const item = { loadError: null, estimate: null, baseline: null, urls: [] };
+        result[template] = item;
+        const sandbox = { console: console, URLSearchParams: URLSearchParams };
+        sandbox.window = sandbox;
+        vm.createContext(sandbox);
+        try {
+            vm.runInContext(payload.probes[template], sandbox, { filename: 'preflight_probe.js' });
+        } catch (err) {
+            item.loadError = String((err && err.message) || err);
+            continue;
+        }
+        const P = sandbox.__preflight;
+        P.setPayload(ESTIMATE_PAYLOAD);
+        item.estimate = await call(P, 'estimate');
+        item.baseline = await call(P, 'baseline');
+        item.urls = P.urls();
+    }
+    process.stdout.write(JSON.stringify(result));
+})().catch(function (err) {
+    console.error(err && err.stack ? err.stack : String(err));
+    process.exit(1);
+});
+"""
+
+_PREFLIGHT_RESULTS: dict = {}
+
+
+def _top_level_declaration(script: str, name: str) -> str | None:
+    """模板顶层那条声明语句，**原样取出来**（Jinja 占位没替换，由调用方填）。
+
+    取不到返回 `None` —— 调用方据此判断「这份模板有没有这个全局」，而不是替它补一个。
+    行首锚定 `^(?:let|const|var)`：缩进的那些是函数内的局部变量，不算页面全局。
+    """
+    match = re.search(rf"(?m)^(?:let|const|var)\s+{re.escape(name)}\s*=[^;]*;", script)
+    return match.group(0) if match else None
+
+
+def _preflight_global(rel: str, raw: str, value: int, names: tuple[str, ...]) -> str:
+    """把一条顶层声明填成探针值，并**确保函数读到的就是探针值**。
+
+    `const` 不能重新赋值，所以只能靠 Jinja 占位把值带进去（`{{ project.id }}`）；
+    `let`/`var` 则一律补一句赋值 —— 模板里它们是 `= null`（页面从 0 开始），
+    不补的话 URL 里会出现 `/weekly/null/latest`，断言就失去意义了。
+    """
+    code = re.sub(r"\{\{.*?\}\}", str(value), raw)
+    if re.match(r"^(?:let|var)\s", raw):
+        return code + "\n" + re.sub(r"^(?:let|var)\s+", "",
+                                    re.sub(r"=.*;$", f"= {value};", code))
+    assert "{{" in raw, (
+        f"{rel}: `{raw}` 是 const 且没有 Jinja 占位，探针没法把 "
+        f"{' / '.join(names)} 的值写进去"
+    )
+    return code
+
+
+def _preflight_source(rel: str) -> str:
+    """真实函数体 + **这份模板自己的**全局声明。缺失的全局一概不补。"""
+    script = _script(rel)
+    globals_code: list[str] = []
+    for names, value in (
+        (_CONFIG_ID_NAMES, _PROBE_CONFIG_ID),
+        (_PROJECT_ID_NAMES, _PROBE_PROJECT_ID),
+    ):
+        found = [decl for decl in (_top_level_declaration(script, n) for n in names) if decl]
+        if not found:
+            raise AssertionError(
+                f"{rel}: 模板里找不到 {' / '.join(names)} 的顶层声明 —— "
+                f"预检函数要读的分组身份在这份模板里不存在"
+            )
+        # 两个名字都声明了的模板（今天没有）也只取第一个，避免重复声明同一件事。
+        globals_code.append(_preflight_global(rel, found[0], value, names))
+    known_delta = _top_level_declaration(script, _KNOWN_DELTA_NAME)
+    assert known_delta, f"{rel}: 模板里没有 {_KNOWN_DELTA_NAME} 的顶层声明"
+    globals_code.append(known_delta)
+
+    extracted = "\n".join(_function_source(script, name) for name in _PREFLIGHT_FUNCS)
+    return _PREFLIGHT_HARNESS.replace("__GLOBALS__", "\n".join(globals_code)) \
+                           .replace("__EXTRACTED__", extracted)
+
+
+def _run_preflight_node() -> dict:
+    if not shutil.which("node"):
+        pytest.skip("环境里没有 Node，跳过真实运行的断言")
+    if _PREFLIGHT_RESULTS:
+        return _PREFLIGHT_RESULTS
+    workdir = PROJECT_ROOT / ".pytest_tmp"
+    workdir.mkdir(exist_ok=True)
+    driver = workdir / "ai_preflight_driver.js"
+    payload = workdir / "ai_preflight_probes.json"
+    driver.write_text(_PREFLIGHT_DRIVER, encoding="utf-8")
+    payload.write_text(
+        json.dumps({"probes": {rel: _preflight_source(rel) for rel in WEEKLY}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["node", str(driver), str(payload)],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    assert result.returncode == 0, (
+        f"预检探针在 node 里跑不起来：\n{result.stdout}\n{result.stderr}"
+    )
+    _PREFLIGHT_RESULTS.update(json.loads(result.stdout))
+    return _PREFLIGHT_RESULTS
+
+
+@with_rels
+def test_the_two_preflight_requests_run_against_this_template_s_own_globals(rel: str):
+    """两个预检函数在**这份模板自己的全局**下必须真的跑出一次请求来。
+
+    反例（就是本轮修掉的那个）：`merged_project_view.html` 里它们读的 `configId` 是
+    `weekly_version_diff.html` 搬过来时没改的残留，这份模板没有这个全局 ——
+    `fetchWeeklyAiEstimate` 抛 `ReferenceError`（两个按钮点了没反应），
+    `fetchWeeklyAiBaselineState` 被自己的 `try` 吞成 `null`（两条事前提示永远不出现）。
+    """
+    item = _run_preflight_node()[rel]
+    assert not item["loadError"], f"{rel}: 预检探针加载就失败了：{item['loadError']}"
+
+    estimate = item["estimate"]
+    assert estimate["ok"], (
+        f"{rel}: `fetchWeeklyAiEstimate` 抛了 —— {estimate['error']}。"
+        f"它读的全局这份模板没有（多半是从另一份模板搬过来时没改名）"
+    )
+    assert estimate["value"] and estimate["value"].get("success"), (
+        f"{rel}: `fetchWeeklyAiEstimate` 没有真的发出请求，返回了 {estimate['value']!r}"
+    )
+
+    baseline = item["baseline"]
+    assert baseline["ok"], f"{rel}: `fetchWeeklyAiBaselineState` 抛了 —— {baseline['error']}"
+    assert baseline["value"] is not None, (
+        f"{rel}: 基线状态读成了 `null`（函数内部的 catch 把异常咽了）——"
+        f"「基线是旧规则产出的」「这次会被升级为全量」两条事前提示会永远不出现"
+    )
+    assert baseline["value"].get("runId") == 12, (
+        f"{rel}: 基线状态的字段没从响应里读出来：{baseline['value']!r}"
+    )
+    # 最强的那个断言：分组号真的进了 URL —— 读到 `null` 全局不至于抛异常，但请求是废的。
+    # 两个函数打的地址**形状不同**（一个 query、一个 path），所以要分别认：
+    # 分组号在估算那一路是 `config=` 参数，在基线那一路是路径段。
+    urls = item["urls"]
+    assert any(f"config={_PROBE_CONFIG_ID}&" in url for url in urls), (
+        f"{rel}: 代价估算没有把分组号 {_PROBE_CONFIG_ID} 带进查询串：{urls}"
+    )
+    assert f"/ai-analysis/weekly/{_PROBE_CONFIG_ID}/latest" in urls, (
+        f"{rel}: 基线状态没有去请求分组 {_PROBE_CONFIG_ID} 的结论：{urls}"
+    )
+

@@ -94,10 +94,16 @@ def _declarations(css: str) -> str:
 
 
 def _extract_function(name: str) -> str:
-    """按大括号配对抠出一个函数声明 —— 下面要跑的是真实现，不是复刻。"""
+    """按大括号配对抠出一个函数声明 —— 下面要跑的是真实现，不是复刻。
+
+    `async` 必须一起带上：只取 `function …` 的话，函数体里的 `await` 到了 node 里
+    就变成语法错误（`await is only valid in async functions`），而报错行是函数体里
+    随便哪一行，看不出是抽取时把关键字丢了。
+    """
     text = _read()
     match = re.search(r"function %s\s*\(" % re.escape(name), text)
     assert match, f"找不到 {name}"
+    start = match.start() - len("async ") if text[: match.start()].endswith("async ") else match.start()
     depth = 0
     for index in range(match.start(), len(text)):
         if text[index] == "{":
@@ -105,15 +111,30 @@ def _extract_function(name: str) -> str:
         elif text[index] == "}":
             depth -= 1
             if depth == 0:
-                return text[match.start() : index + 1]
+                return text[start : index + 1]
     raise AssertionError(f"{name} 的大括号不配对")
 
 
-def _run_js(harness: str, payload) -> dict:
+def _run_js(harness: str, payload, *, async_probe: bool = False) -> dict:
+    """把 harness + payload 交给 node 跑。
+
+    `async_probe=True` 时按异步收尾 —— `probe` 是 `async` 的话，同步收尾拿到的是
+    一个 Promise，`JSON.stringify` 会把它序列化成 `{}`：测试**不报错**，
+    只是在下面以 `KeyError` 的形式失败（像「字段名写错了」而不像「没 await」）。
+    """
     if NODE is None:
         pytest.skip("本机没有 node，跳过（这是唯一能真跑这几个函数的方式）")
     script = harness + f"\nconst INPUT = {json.dumps(payload)};\n"
-    script += """
+    if async_probe:
+        script += """
+(async () => {
+    const out = {};
+    for (const key of Object.keys(INPUT)) { out[key] = await probe(INPUT[key]); }
+    process.stdout.write(JSON.stringify(out));
+})().catch(err => { console.error(err && err.stack ? err.stack : String(err)); process.exit(1); });
+"""
+    else:
+        script += """
 const out = {};
 for (const key of Object.keys(INPUT)) { out[key] = probe(INPUT[key]); }
 process.stdout.write(JSON.stringify(out));
@@ -527,3 +548,212 @@ class TestTheFrontmatterParser:
         """只有一个 `---` 的坏文件：整份当正文，用户能看到它坏在哪，而不是看到空白。"""
         result = _run_frontmatter({"broken": "---\nname: x\n\n# 正文\n"})["broken"]
         assert result["body"] == "---\nname: x\n\n# 正文\n"
+
+
+# ==========================================================================
+# 3. 编辑已有内容时，正文框里必须是**磁盘上那一份**
+# ==========================================================================
+#
+# 用户 2026-09-23 报的：「有默认的知识文档，例如 config-table-spec.md …… 但我打开编辑时，
+# 没有显示这个文档默认的配置内容给我，编辑 UI 的内容是空的」。
+#
+# 根因不在读取接口（`read_entry` 一直是对的），而在**接线**：列表里那个「编辑」按钮
+# 调的是同步的 `openAiKnowledgeEditor`，而它第一件事就是把正文框清空；真正去读文件的是
+# 另一个函数 `startAiKnowledgeEdit`（它清空**之后**才把内容填回来）。按钮把第二步跳过了。
+#
+# 为什么这条非跑不可、静态断言不够：`openAiKnowledgeEditor` 与
+# `startAiKnowledgeEdit` 的定义都完好无损，两边各自看都挑不出错 ——
+# 「弹窗里是空的」只发生在**接线**那一步。
+#
+# 而且它不止是「看不见内容」：那一份空白**是可以保存的** —— 用户点一下保存，
+# `saveAiKnowledgeEntry` 就把 `contentInput.value`（空串）PUT 回去，文档当场被清空。
+# 所以这一组既查「显示」，也查「不许把空内容当成用户写的东西」。
+
+
+_MINI_DOM = r"""
+// 只够 `buildAiKnowledgeRow` / 编辑器那一串用的一具假 DOM。
+// 刻意**不**做通用实现：多一个特性就多一处「假 DOM 替真浏览器做决定」的地方。
+function makeEl(tag) {
+    const el = {
+        tagName: tag, className: '', innerHTML: '', value: '', textContent: '',
+        children: [], handlers: {},
+        classList: { toggle() {}, add() {}, remove() {}, contains() { return false; } },
+        setAttribute() {}, removeAttribute() {}, getAttribute() { return null; },
+        appendChild(child) { el.children.push(child); return child; },
+        addEventListener(type, handler) { (el.handlers[type] = el.handlers[type] || []).push(handler); },
+        focus() {}, closest() { return null; }, remove() {},
+        querySelector() { return null; }, querySelectorAll() { return []; },
+        click() { (el.handlers.click || []).forEach(handler => handler()); }
+    };
+    return el;
+}
+
+const elements = {};
+function aiEl(id) { return elements[id] || (elements[id] = makeEl('div')); }
+const document = {
+    createElement: tag => makeEl(tag),
+    createTextNode: text => ({ textContent: text })
+};
+
+// 面板的全局（真机上由服务端与页面其它部分提供）
+const aiProjectId = 1;
+let aiCanEdit = true;
+let aiKnowledgeEdit = null;
+let aiKnowledgeCache = {
+    slug: 'g119',
+    limits: { max_file_bytes: 65536 },
+    skill_body_template: '# <子 skill 目录名>\n'
+};
+const AI_KNOW_KINDS = {
+    manifest: { title: '知识清单', hint: '' },
+    reference: { title: '知识文档', hint: '' },
+    skill: { title: '子 skill', hint: '' }
+};
+function clearAiKnowledgeErrors() {}
+const feedbackCalls = [];
+function setAiKnowledgeFeedback(text) { feedbackCalls.push(text); }
+
+// 服务端：真的在磁盘上的那两份文档
+const DISK = {
+    'config-table-spec.md': '# 配表规范\n\nID 是 6 位，前两位为类型段。\n',
+    'segment-rules': '---\nname: segment-rules\ndescription: ID 段位的判定规则\n---\n\n# 段位\n\n正文。\n'
+};
+const fetchedUrls = [];
+async function fetch(url) {
+    fetchedUrls.push(url);
+    const name = String(url).split('/').pop();
+    if (!(name in DISK)) return { ok: false, json: async () => ({ success: false }) };
+    return { ok: true, json: async () => ({ success: true, content: DISK[name], name: name }) };
+}
+
+// 从建出来的那一行里把「编辑」按钮找出来 —— 按图标类名找，不按文案找：
+// `aiKnowIconButton` 的文案是 `appendChild(createTextNode(...))` 进去的，不是 textContent。
+function findEditButton(node) {
+    if (node.innerHTML && node.innerHTML.indexOf('fa-edit') >= 0) return node;
+    for (const child of node.children || []) {
+        const found = findEditButton(child);
+        if (found) return found;
+    }
+    return null;
+}
+
+const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+"""
+
+
+def _run_knowledge_edit(entry: dict) -> dict:
+    """真跑「点列表里的编辑」这条路：建行 → 点按钮 → 读接口 → 看正文框里是什么。"""
+    harness = (
+        _extract_function("aiKnowFormatSize")
+        + "\n" + _extract_function("aiKnowUrl")
+        + "\n" + _extract_function("aiKnowShow")
+        + "\n" + _extract_function("aiKnowSetText")
+        + "\n" + _extract_function("parseAiKnowledgeFrontmatter")
+        + "\n" + _extract_function("refreshAiKnowledgeFrontmatter")
+        + "\n" + _extract_function("refreshAiKnowledgeCount")
+        + "\n" + _extract_function("aiKnowIconButton")
+        + "\n" + _extract_function("buildAiKnowledgeRow")
+        + "\n" + _extract_function("openAiKnowledgeEditor")
+        + "\n" + _extract_function("closeAiKnowledgeEditor")
+        + "\n" + _extract_function("readAiKnowledgeEntry")
+        + "\n" + _extract_function("startAiKnowledgeEdit")
+        + "\n" + _MINI_DOM
+        + """
+async function probe(entry) {
+    const row = buildAiKnowledgeRow(entry);
+    const button = findEditButton(row);
+    if (!button) return { found: false };
+    button.click();          // 处理器里 `startAiKnowledgeEdit` 是 async、没人 await
+    await flush();
+    await flush();
+    return {
+        found: true,
+        content: aiEl('aiKnowledgeContentInput').value,
+        fetchedUrls: fetchedUrls,
+        feedback: feedbackCalls,
+        editing: aiKnowledgeEdit
+    };
+}
+"""
+    )
+    return _run_js(harness, {"one": entry}, async_probe=True)["one"]
+
+
+class TestEditingLoadsTheDiskContent:
+    def test_the_edit_button_opens_the_editor_through_the_reading_path(self):
+        """列表里的「编辑」必须走 `startAiKnowledgeEdit`（读了正文），不能直连编辑器。
+
+        直连 `openAiKnowledgeEditor` 的写法**看起来更直接**（都是「打开编辑器」），
+        所以这一条要用「直接调用点只剩一个」来钉 —— 光断言「按钮里有
+        startAiKnowledgeEdit」挡不住有人再加一条直连的路径。
+        """
+        script = _ai_script()
+        calls = [
+            match.start()
+            for match in re.finditer(r"(?<!function )openAiKnowledgeEditor\(", script)
+        ]
+        assert len(calls) == 1, (
+            f"`openAiKnowledgeEditor` 有 {len(calls)} 处直接调用 —— 其中至少一处"
+            f"跳过了读正文那一步（编辑器会是空的，而且空内容可以保存回磁盘）"
+        )
+        # 唯一那一处必须落在 `startAiKnowledgeEdit` 的**函数体里面**（只比定义位置不够：
+        # 定义后面的位置多得很）。
+        reader_start = script.index("async function startAiKnowledgeEdit(")
+        brace = script.index("{", reader_start)
+        depth, index = 0, brace
+        while index < len(script):
+            if script[index] == "{":
+                depth += 1
+            elif script[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            index += 1
+        assert brace < calls[0] < index, (
+            "`openAiKnowledgeEditor` 的唯一一处调用不在 `startAiKnowledgeEdit` 的函数体里"
+        )
+        row = script[script.index("function buildAiKnowledgeRow("):script.index("function renderAiKnowledge(")]
+        assert "startAiKnowledgeEdit(entry.kind" in row, (
+            "行内「编辑」按钮没有走读正文那条路"
+        )
+
+    def test_a_reference_opens_with_the_content_that_is_on_disk(self):
+        item = _run_knowledge_edit({
+            "kind": "reference", "name": "config-table-spec.md", "size": 48,
+            "modified_at": "2026-09-23 14:37", "usage": "", "removable": True,
+        })
+        assert item["found"], "行里没有「编辑」按钮"
+        assert item["content"] == "# 配表规范\n\nID 是 6 位，前两位为类型段。\n", (
+            f"正文框里不是磁盘上那一份，而是 {item['content']!r}"
+        )
+        assert any("references/config-table-spec.md" in url for url in item["fetchedUrls"]), (
+            f"没有去读这份文档：{item['fetchedUrls']}"
+        )
+
+    def test_a_skill_opens_with_its_body_and_description_split_out(self):
+        """子 skill 那一份要拆 frontmatter：正文进正文框、说明进说明框。"""
+        item = _run_knowledge_edit({
+            "kind": "skill", "name": "segment-rules", "dir_name": "segment-rules",
+            "size": 90, "modified_at": "2026-09-23 14:37", "usage": "", "removable": True,
+        })
+        assert item["found"], "行里没有「编辑」按钮"
+        assert any("skills/segment-rules" in url for url in item["fetchedUrls"]), item["fetchedUrls"]
+        assert item["editing"] and item["editing"]["name"] == "segment-rules", item["editing"]
+        # frontmatter **不能**原样进正文框：平台自己会重新拼一份，正文里再带一份就重复了。
+        assert item["content"].startswith("# 段位"), item["content"]
+        assert "description:" not in item["content"], item["content"]
+
+    def test_a_file_that_vanished_still_closes_the_editor_instead_of_saving_blank(self):
+        """文件已被别人删掉：如实说、并**把编辑器收起来**。
+
+        这一条与上面两条是同一个问题的另一面 —— 编辑器开着、正文框是空的，
+        用户接着点保存就把一份空文档写回磁盘。读不到时宁可关掉，也不留一个能保存的空白。
+        """
+        item = _run_knowledge_edit({
+            "kind": "reference", "name": "gone.md", "size": 10,
+            "modified_at": "—", "usage": "", "removable": True,
+        })
+        assert item["found"], "行里没有「编辑」按钮"
+        assert item["editing"] is None, "读不到内容却把编辑器留着了"
+        assert any("没有读回来" in text for text in item["feedback"]), item["feedback"]
+

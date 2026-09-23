@@ -3698,8 +3698,14 @@ function buildAiKnowledgeRow(entry) {
     if (aiCanEdit) {
         const actions = document.createElement('span');
         actions.className = 'ai-know-row__actions';
+        // **必须走 `startAiKnowledgeEdit`，不能直接调 `openAiKnowledgeEditor`。**
+        // 两者的区别就是「读不读正文」：`openAiKnowledgeEditor` 会把正文框清空
+        // （见它里面那句 `contentInput.value = ''`），而 `startAiKnowledgeEdit` 在清空
+        // **之后**才去把磁盘上的内容填回来。直接调前者 = 编辑器打开就是一片空白，
+        // 而它看起来完全正常 —— 用户 2026-09-23 报的「打开编辑没有显示默认内容」。
+        // 更糟的是那一份空白**是可以保存的**：点保存就把这份文档清空写回磁盘。
         actions.appendChild(aiKnowIconButton('fa-edit', '编辑', () => {
-            openAiKnowledgeEditor('edit', entry.kind, entry.dir_name || entry.name);
+            startAiKnowledgeEdit(entry.kind, entry.dir_name || entry.name);
         }));
         if (entry.removable) {
             actions.appendChild(aiKnowIconButton('fa-trash-alt', '删除', () => {
@@ -4139,10 +4145,21 @@ function applyRiskLabel(el, level, stale, staleNote) {
     }
 }
 
-function updateRiskLabelByConfig(configId, level) {
+// 刷新某张卡片上的风险标签。**两个调用点的意图是相反的**，所以旧/新必须由调用方说：
+//
+//   * 流里的 `result` 事件（刚跑完一次）：这次结论一定是当前规则产出的 → 传 `false`，
+//     把「（旧）」清掉；
+//   * 读落库结论（`refreshWeeklyAiLatest`：打开抽屉、关抽屉、「刷新结果」）：
+//     读到的可能就是一份**旧结论**（规则变了 / 上一次没跑完）→ 必须把服务端给的
+//     `stale` / `stale_note` 原样带过来。
+//
+// 早先这个函数只有 (configId, level) 两个参数、里面写死「刚跑完的结论一定是当前规则下的，
+// 把『旧』的痕迹清掉」—— 那句话只对第一个调用点成立。于是**开关一次抽屉就会把「（旧）」
+// 抹掉**：用户刷新页面看到的是「版本AI分析：高风险（旧）」，点开抽屉再关掉就变成
+// 「版本AI分析：高风险」，看起来像刚重新分析过一样（用户 2026-09-23 报的）。
+function updateRiskLabelByConfig(configId, level, stale = false, staleNote = '') {
     document.querySelectorAll(`.version-risk-label[data-config-id="${configId}"]`).forEach(el => {
-        // 刚跑完的那次结果一定是当前规则下的：把「旧」的痕迹清掉。
-        applyRiskLabel(el, level);
+        applyRiskLabel(el, level, stale, staleNote);
     });
 }
 
@@ -4643,7 +4660,23 @@ async function refreshWeeklyAiLatest(configId) {
     if (result && result.response_text) {
         weeklyAiHasCached = true;
         weeklyAiRunActive = false;
-        const risk = result.risk_label || result.result?.risk_level || '-';
+        // **同一个「风险等级」在这一段里有两条出口，而它们要的口径是相反的**：
+        //
+        //   * 下面那行摘要（`最近分析：… | 风险等级 …`）是写给人看的 → 中文，
+        //     取服务端算好的 `risk_label`（`conclusion_view._risk_label_of`，与导出
+        //     报告、历史列表同一份实现；码值直出是 602d4b8 修掉的那条「半中半英」）；
+        //   * 卡片上的标签（本函数末尾的 `updateRiskLabelByConfig`）是拿这个值去
+        //     `RISK_LEVEL_MAP` **查表**的，而那张表的键是**码值**（`high` / `mid_high`）。
+        //
+        // 602d4b8 为了让摘要行说中文，把这一处整个换成了 `risk_label` —— 摘要行对了，
+        // 但标签拿到的是「高」这种中文，查表查不到，于是**打开一次抽屉就把卡片上的等级
+        // 画成「版本AI分析：未分析」**（用户 2026-09-23 报：「高风险（旧）」→「未分析」）。
+        // 同一个 `refreshRiskLabels`（页面加载时那条路）读的是码值，所以刷新页面是对的、
+        // 点开抽屉就不对 —— 两条路读同一件事却不同口径，正是这个 bug 的形态。
+        //
+        // 所以这里拆成两个名字：`riskCode` 只喂标签，`risk` 只喂摘要行。别再合回去。
+        const riskCode = result.result?.risk_level || '';
+        const risk = result.risk_label || riskCode || '-';
         const createdAt = result.created_at_display || result.created_at || '-';
         const scope = result.scope_label || result.scope || '-';
         if (meta) {
@@ -4668,7 +4701,10 @@ async function refreshWeeklyAiLatest(configId) {
         AiReportExport.track({ runId: result.runId, status: result.status });
         setWeeklyAiStatusBadge(result.stale_note ? '旧结论' : '已有结果',
                                result.stale_note ? 'warning' : 'success');
-        updateRiskLabelByConfig(configId, risk);
+        // 把 `stale` 交给标签：这里读到的是**落库的那一份**，它可能正是旧规则产出的。
+        // 漏传的后果见 `updateRiskLabelByConfig` 上面的注释（开关一次抽屉就把「（旧）」抹掉）。
+        // **喂码值**（`riskCode`）而不是上面那句中文 `risk` —— 理由见 `riskCode` 的注释。
+        updateRiskLabelByConfig(configId, riskCode, !!result.stale, result.stale_note || '');
         return true;
     }
     weeklyAiHasCached = false;
@@ -5047,7 +5083,16 @@ async function fetchWeeklyAiEstimate(mode) {
     if (!project) return null;
     const params = new URLSearchParams();
     params.set('project', String(project));
-    params.set('config', String(configId));
+    // **这里必须写 `weeklyAiCurrentConfigId`，不能写 `configId`。**
+    // 这一块是从 `weekly_version_diff.html` 搬过来的，那边顶层有 `let configId = {{ config.id }}`；
+    // 本页是「同一个抽屉换目标」，那个全局叫 `weeklyAiCurrentConfigId`（见 `openWeeklyAiDrawer`）。
+    // 写成裸 `configId` 的后果不是降级而是**整个按钮没反应**：`configId` 在这里既不是参数
+    // 也没在函数内声明，非严格模式下读未声明的名字抛 `ReferenceError`，而这一行在下面那个
+    // `try` **之外** —— 异常一路冒到点击回调的 async 函数里变成 unhandled rejection，
+    // 页面上一行提示都没有（用户看到的就是「点了没响应」）。
+    // 别指望 catch 兜：`fetchWeeklyAiBaselineState` 也踩过同一行，它那行在 `try` **里面**，
+    // 于是被自己的「读不到就当没变化」吞掉 —— 两种症状，同一个根。
+    params.set('config', String(weeklyAiCurrentConfigId));
     params.set('mode', mode === 'full' ? 'full' : 'incremental');
     // 把**已经从服务端知道的本次增量文件数**带回去：区间是按文件数缩放的
     // （`estimate_analysis`：单文件强度 × 目标文件数）。不带的话 `planned_files` 恒为
@@ -5178,7 +5223,12 @@ function weeklyAiChoiceDialog(options) {
  */
 async function fetchWeeklyAiBaselineState() {
     try {
-        const resp = await fetch(`/ai-analysis/weekly/${configId}/latest`, { cache: 'no-store' });
+        // 同 `fetchWeeklyAiEstimate`：本页没有 `configId` 这个全局，只有 `weeklyAiCurrentConfigId`。
+        // 写成裸 `configId` 时异常落在**这个 try 里面**，于是被下面那句「读不到就当没变化」
+        // 静默吞掉 —— 症状更阴：按钮照样能点，但 `baseline` 永远是 `null`，
+        // 「基线是旧规则产出的」（mismatch）与「还没有基线，这次会被升级为全量」（first_run）
+        // 两条事前提示**永远不会出现**，平台会不打招呼地把增量按全量跑。
+        const resp = await fetch(`/ai-analysis/weekly/${weeklyAiCurrentConfigId}/latest`, { cache: 'no-store' });
         const data = await resp.json();
         const result = (data && data.result) || null;
         return {
@@ -5455,7 +5505,8 @@ function subscribeWeeklyAiJob(jobId) {
         } else {
             if (payload.risk_level) {
                 appendWeeklyAiLine(`\n风险等级：${payload.risk_level}`);
-                updateRiskLabelByConfig(weeklyAiCurrentConfigId, payload.risk_level);
+                // 这一次是**刚跑完**的：等级一定是当前规则产出的，所以显式清掉「（旧）」。
+                updateRiskLabelByConfig(weeklyAiCurrentConfigId, payload.risk_level, false, '');
             }
             // 「本次覆盖与缺口」与「降级 / 上下文被压过」两句说明都在 payload 里
             // （**不在报告正文里**，见 static/js/ai_context_notice.js）。`refreshWeeklyAiLatest`
