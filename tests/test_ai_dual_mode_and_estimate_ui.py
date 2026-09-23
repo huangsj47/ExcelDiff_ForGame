@@ -145,6 +145,7 @@ def test_the_two_weekly_drawers_carry_a_byte_identical_p0_03_block():
             _const_object_source(script, "WEEKLY_AI_UPGRADE_REASONS")
             + "\n" + _function_source(script, "weeklyAiChooseMode")
             + "\n" + _function_source(script, "weeklyAiEstimateLines")
+            + "\n" + _function_source(script, "weeklyAiSplitEstimateLines")
             + "\n" + _function_source(script, "weeklyAiUpgradeNotice")
             + "\n" + _function_source(script, "weeklyAiChoiceDialog")
         )
@@ -463,6 +464,7 @@ def _probe_source(rel: str) -> str:
         _function_source(script, "weeklyAiBaselineText"),
         _function_source(script, "weeklyAiMoneyText"),
         _function_source(script, "weeklyAiEstimateLines"),
+        _function_source(script, "weeklyAiSplitEstimateLines"),
         _function_source(script, "weeklyAiEstimateNote"),
         _function_source(script, "weeklyAiNoteMismatchAccepted"),
         _function_source(script, "weeklyAiComparabilityLine"),

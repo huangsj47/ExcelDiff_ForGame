@@ -467,6 +467,24 @@
         /* 数字用等宽：区间上下两行的位数对得上，扫一眼就能比 */
         font-variant-numeric: tabular-nums;
     }
+    /* 「展开预算与运行计划」：那几行是运行计划的内部账（窗口水位、单条上限、共享池…），
+       不参与「这次要不要跑」这个决定，默认收起来 —— 框里那一屏只剩决定要用的几行。 */
+    .weekly-ai-dialog__more {
+        margin: 0 0 var(--space-3, 12px);
+        font-size: var(--font-size-sm, 13px);
+    }
+    .weekly-ai-dialog__more > summary {
+        cursor: pointer;
+        color: var(--color-text-muted, var(--ai-text-muted, #656d76));
+        list-style: none;
+    }
+    .weekly-ai-dialog__more > summary::-webkit-details-marker { display: none; }
+    .weekly-ai-dialog__more > summary > i { font-size: 0.75em; }
+    /* 展开/收起只靠 `[open]` 这个**属性**选择器：不去监听 <details> 的 toggle 事件
+       （那个事件是异步派发的，重画会赶不上那一帧 —— 本仓库踩过一次）。 */
+    .weekly-ai-dialog__more[open] > summary { margin-bottom: var(--space-2, 8px); }
+    .weekly-ai-dialog__more[open] > summary > i { transform: rotate(90deg); }
+    .weekly-ai-dialog__more .weekly-ai-dialog__facts { margin-bottom: 0; }
     .weekly-ai-dialog__note {
         margin: 0 0 var(--space-4, 16px);
         font-size: var(--font-size-sm, 12px);
@@ -2334,6 +2352,38 @@ function weeklyAiMoneyText(value) {
  * 价格没配置时（`cost.computable` 为假）**只给 token 与时间**，并把服务端给的理由
  * 原样写出来：估不出费用是常态（`DEFAULT_PRICE_TABLE` 是空表），编一个金额才是最坏的。
  */
+// 「决定要不要跑」要看的那几行，与「这份预估是怎么算出来的」那几行。
+//
+// 预估框原来把 `weeklyAiEstimateLines` 的**全部**十几行一次摆出来，其中一半是运行计划的
+// 内部账（提示词字符预算 / 模型窗口来源 / 平台内置提示词占用 / 单条上限 / 预留输出空间 /
+// 每片名义额…）。用户在这个框里要回答的只有一个问题：「这次要不要跑」—— 那些行不参与
+// 这个决定，却把框撑成了一屏半。现在只把 `PRIMARY` 里这几行摆在明面上，其余收进框内的
+// 「展开」里。
+//
+// **一行都没有删**：`weeklyAiEstimateLines` 的返回值一字未动（测试读的就是它），
+// 改的只是这个框**默认**把它们放在哪儿。名单写在函数里（只有这一个调用方），
+// 不放模块级常量 —— 测试那边是靠函数名抽取源码去跑的，多一个模块级名字就要多一处
+// 抽取规则。
+function weeklyAiSplitEstimateLines(lines, mode) {
+    const PRIMARY = [
+        '预计文件数', '预计 token', '预计耗时', '预计费用', '可复用基线', '基线 run', '升级原因'
+    ];
+    // 「本次增量文件数 / 补偿文件数」**按模式决定摆不摆**：增量那次它们是必须摆出来的
+    // （验收明确要求「先显示 35 个 delta、20 个补偿文件、基线 Run 22 和升级原因」，
+    // 见 `weeklyAiChooseMode` 里那段注释）；全量那次这两行只会写「不适用（全量不看增量
+    // 基线）」，摆出来是纯噪声 —— 而「框太长」正是这次要解决的问题。
+    // 传进来的 `mode` 用**服务端给的那个**（`estimate.mode`），不是按钮：升级那一档点的是
+    // 增量、跑的是全量，而它的 delta/补偿 是真实数字，该照常摆出来。
+    if (mode !== 'full') PRIMARY.push('本次增量文件数', '补偿文件数');
+    const primary = [];
+    const detail = [];
+    (lines || []).forEach(function (row) {
+        if (PRIMARY.indexOf(row[0]) >= 0) primary.push(row);
+        else detail.push(row);
+    });
+    return { primary: primary, detail: detail };
+}
+
 function weeklyAiEstimateLines(estimate) {
     const lines = [];
     const last = (estimate && estimate.last_actual) || null;
@@ -2472,8 +2522,10 @@ function weeklyAiEstimateNote(estimate) {
     const notes = ((estimate && estimate.notes) || []).slice(0, 2);
     // 服务端的 `notes` 里带 markdown 的星号（`**全量没有实测样本**` 这种），而确认框是
     // 纯文本（`textContent`）—— 原样落上去就是把星号印给用户看。与用量面板同一个口径。
-    const price = '区间来自历史运行的实测值（执行前估算端点 /ai-analysis/usage/estimate），'
-        + '不是精确值；没有配置模型单价时只给 token 与时间，不给金额。';
+    // 这句前提每次都要出现，所以压到最短：端点路径（`/ai-analysis/usage/estimate`）留给
+    // 排障的人看代码，摆在框里只是让用户多读半行。「不是精确值」这四个字不能删 ——
+    // 它是这句话的**全部意义**（测试也钉着它）。
+    const price = '区间来自历史实测，不是精确值；没配模型单价时只给 token 与时间。';
     return notes.length ? (notes.join(' ') + ' ' + price).replace(/\*\*/g, '') : price;
 }
 
@@ -2537,11 +2589,11 @@ function weeklyAiChoiceDialog(options) {
             intro.textContent = spec.intro;
             box.appendChild(intro);
         }
-        const lines = spec.lines || [];
-        if (lines.length) {
+        // 两栏事实表。抽成一个小函数是因为要建**两张**：明面上那张，与「展开」里那张。
+        function appendFacts(parent, rows) {
             const list = document.createElement('dl');
             list.className = 'weekly-ai-dialog__facts';
-            lines.forEach(function (line) {
+            rows.forEach(function (line) {
                 const term = document.createElement('dt');
                 term.textContent = line[0];
                 const value = document.createElement('dd');
@@ -2549,7 +2601,28 @@ function weeklyAiChoiceDialog(options) {
                 list.appendChild(term);
                 list.appendChild(value);
             });
-            box.appendChild(list);
+            parent.appendChild(list);
+        }
+        const lines = spec.lines || [];
+        if (lines.length) appendFacts(box, lines);
+        // 运行计划的内部账收进一个折叠块（见 `WEEKLY_AI_PRIMARY_FACTS` 上面那段说明）。
+        // 用 `<details>` 而不是自己写开关：键盘可达、读屏会念、Esc 与焦点这些浏览器
+        // 已经做对了，自己写只会漏掉其中几样。
+        const detailLines = spec.detailLines || [];
+        if (detailLines.length) {
+            const more = document.createElement('details');
+            more.className = 'weekly-ai-dialog__more';
+            const summary = document.createElement('summary');
+            const caret = document.createElement('i');
+            caret.className = 'fas fa-chevron-right';
+            caret.setAttribute('aria-hidden', 'true');
+            summary.appendChild(caret);
+            summary.appendChild(document.createTextNode(
+                ' 展开预算与运行计划（' + detailLines.length + ' 项）'
+            ));
+            more.appendChild(summary);
+            appendFacts(more, detailLines);
+            box.appendChild(more);
         }
         if (spec.note) {
             const note = document.createElement('p');
@@ -2665,11 +2738,12 @@ async function weeklyAiChooseMode(requested) {
         // 全量：**先把代价与基线状况摆出来**（预计文件数 / token 区间 / 最近一次耗时 /
         // 能不能复用基线），用户点了才发起。
         const estimate = await fetchWeeklyAiEstimate('full');
+        const facts = weeklyAiSplitEstimateLines(weeklyAiEstimateLines(estimate), 'full');
         const choice = await weeklyAiChoiceDialog({
             title: '全量重新分析',
-            intro: '这次会忽略增量基线，对整个窗口重新做一遍完整评审 —— 比增量贵，也慢。'
-                + '下面是按历史实测给出的区间。',
-            lines: weeklyAiEstimateLines(estimate),
+            intro: '这次会忽略增量基线，对整个窗口重新做一遍完整评审 —— 比增量贵，也慢。',
+            lines: facts.primary,
+            detailLines: facts.detail,
             note: weeklyAiEstimateNote(estimate),
             okText: '开始全量分析',
             okClass: 'btn-danger'
@@ -2703,11 +2777,13 @@ async function weeklyAiChooseMode(requested) {
         // 还没有可复用的结论基线 → 平台会把这次增量**升级为全量**（`upgrade_reason=first_run`）。
         // 这是唯一一个**在调用模型之前**看得见的升级原因，所以先把代价摆出来再问。
         const estimate = await fetchWeeklyAiEstimate('full');
+        const facts = weeklyAiSplitEstimateLines(weeklyAiEstimateLines(estimate), 'full');
         const choice = await weeklyAiChoiceDialog({
             title: '这次会被升级为全量',
             intro: '这个分组还没有可复用的结论基线，平台对增量的口径是「没有基线就按全量跑」'
                 + '（`upgrade_reason=first_run`）。全量的预计代价如下：',
-            lines: weeklyAiEstimateLines(estimate),
+            lines: facts.primary,
+            detailLines: facts.detail,
             note: weeklyAiEstimateNote(estimate),
             okText: '继续（按全量）',
             okClass: 'btn-danger'
@@ -2729,22 +2805,26 @@ async function weeklyAiChooseMode(requested) {
     if (estimate && estimate.upgrade_reason) {
         const reason = WEEKLY_AI_UPGRADE_REASONS[estimate.upgrade_reason]
             || ('平台给出的原因码：' + estimate.upgrade_reason);
+        const upgradeFacts = weeklyAiSplitEstimateLines(weeklyAiEstimateLines(estimate), estimate && estimate.mode);
         const upgradeChoice = await weeklyAiChoiceDialog({
             title: '这次会被升级为全量',
             intro: '平台已经根据当前周版本的真实输入账判定：增量范围不足以保证结论完整。'
                 + '确认之后将明确按全量模式创建任务。',
-            lines: weeklyAiEstimateLines(estimate),
+            lines: upgradeFacts.primary,
+            detailLines: upgradeFacts.detail,
             note: reason + ' ' + weeklyAiEstimateNote(estimate),
             okText: '继续（按全量）',
             okClass: 'btn-danger'
         });
         return upgradeChoice === 'ok' ? 'full' : null;
     }
+    const incrementalFacts = weeklyAiSplitEstimateLines(weeklyAiEstimateLines(estimate), estimate && estimate.mode);
     const choice = await weeklyAiChoiceDialog({
         title: '增量分析',
         intro: '这次只分析基线之后变化的部分。下面是本次的事实与按历史实测给出的区间 ——'
             + '确认之后才会调用模型。',
-        lines: weeklyAiEstimateLines(estimate),
+        lines: incrementalFacts.primary,
+        detailLines: incrementalFacts.detail,
         note: weeklyAiEstimateNote(estimate),
         okText: '开始增量分析'
     });
