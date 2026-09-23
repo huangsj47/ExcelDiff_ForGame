@@ -629,6 +629,10 @@ class TestTheServiceLayerUsesOnlyReportedRuns:
 
         但排除这件事**要说出来**：不说的话，「最近一次实际值」看起来像是库里最新的
         那一次，可能对不上号。
+
+        2026-09-23（工作包 B）之后**两类**排除分开说，因为它们不是一回事：
+        「没有跑完」（进程被杀 / 失败在半路，token 账只有半截）与
+        「跑完了但上游没回 token」。这条用例两边都覆盖，且都要求有对应的说明。
         """
         with flask_app.app_context():
             create_tables()
@@ -647,24 +651,74 @@ class TestTheServiceLayerUsesOnlyReportedRuns:
                 duration_ms=None,
                 delta_summary=json.dumps({"delta_files": 100}),
             )
+            # 第二种：**跑完了**（succeeded）但上游一个 token 都没回。
+            _run(
+                project_id,
+                status="succeeded",
+                tokens_input=None,
+                tokens_output=None,
+                cache_read_tokens=None,
+                duration_ms=None,
+                delta_summary=json.dumps({"delta_files": 100}),
+            )
 
             result = analysis_estimate(project_id, mode="full", planned_files=100)
 
             assert result["basis"]["runs"] == 1, "没上报的那一条也进了样本"
             assert result["last_actual"]["run_id"] is not None
-            assert any("没有上报用量" in note for note in result["notes"])
+            assert any("没有跑完" in note for note in result["notes"]), result["notes"]
+            assert any("没有上报用量" in note for note in result["notes"]), result["notes"]
             assert result["pricing"]["configured"] is True
 
-    def test_the_shard_count_comes_from_the_derivation(self):
-        """分片数/轮次/索取从**平台推导**取（`auto_sizing`），不在估算函数里写死，
-        也不再看库里的 `subagent_count`（2026-09-23 收敛后那一列不可配、周版本不读）。"""
+    def test_a_partial_run_never_becomes_the_reference_sample(self):
+        """**没跑完的运行不许当「最近一次实际值」**（工作包 B 的验收）。
+
+        构造：一条跑完的（10 万 token）+ 一条**更新的**、被中断的（只烧了 1 万 token
+        就被杀，job 以 `worker_interrupted` 收口）。拿后者当参照，用户会以为「这类分析
+        只要 1 万 token」。判据是**引擎亲手写的终态**（succeeded / degraded），不是
+        「有没有 token 数」—— 中断的运行照样会留下半截 token 账。
+        """
+        with flask_app.app_context():
+            create_tables()
+            project_id = _project()
+            _run(
+                project_id,
+                delta_summary=json.dumps({"delta_files": 100}),
+                tokens_input=80_000,
+                tokens_output=20_000,
+            )
+            interrupted = _run(
+                project_id,
+                status="running",          # 进程被杀：run 停在 running（job 侧已收口）
+                tokens_input=8_000,
+                tokens_output=2_000,
+                delta_summary=json.dumps({"delta_files": 100}),
+            )
+
+            result = analysis_estimate(project_id, mode="full", planned_files=100)
+
+            assert result["basis"]["runs"] == 1, "被中断的那一条进了样本"
+            assert result["last_actual"]["run_id"] != interrupted.id, (
+                "「最近一次实际值」取的是被中断的那一次 —— 它的账只有半截"
+            )
+            assert any("没有跑完" in note for note in result["notes"]), result["notes"]
+
+    def test_the_shard_count_comes_from_the_persisted_plan(self):
+        """分片数/轮次/索取从**同一份计划**取（工作包 B），不在估算函数里写死，
+        也不再看库里的 `subagent_count`（2026-09-23 收敛后那一列不可配、周版本不读）。
+
+        以前这里断言的是 `auto_sizing.SHARD_TARGET == 5` —— 那个常量现在是**预算上限**，
+        真正的片数由冻结快照的事实（独立变更簇与证据体积）推导。所以这条改成钉**同源**：
+        预估返回的分片数必须等于它自己返回的那份计划里的片数，池账必须等于
+        「计划里的片数 × 名义额」。
+        """
         with flask_app.app_context():
             create_tables()
             project_id = _project()
             ok, message, errors = update_project_analysis_config(
                 project_id,
                 # 注意**不许**再写 subagent_count —— 收敛键提交会 400；分片数只能推导。
-                {"model_price_table": PRICE_TABLE},
+                {"model_price_table": PRICE_TABLE, "subagent_enabled": True},
                 updated_by="tester",
             )
             assert ok, (message, errors)
@@ -673,15 +727,17 @@ class TestTheServiceLayerUsesOnlyReportedRuns:
 
             result = analysis_estimate(project_id, mode="full", planned_files=100)
 
-            # 100 个文件、默认预算 → 5 片、10 轮/片（auto_sizing.SHARD_TARGET /
-            # ROUNDS_PER_SHARD）。钉住这两个常量，防止「估算里又写死一份」回潮。
-            assert result["shard_count"] == 5
+            plan = result["plan"]
+            assert plan is not None, "预估没有带上计划 —— 运行侧与预估就不再同源了"
+            shards = plan["family"]["shard_count"]
+            assert result["shard_count"] == shards
+            assert result["budget_plan"]["plan"]["mode"] == plan["mode"]
             assert any("分片" in note for note in result["notes"])
             assert result["generated_at"]
             # 预算计划带的是池口径与推导依据，不是「roles × 名义额」。
             pool = result["budget_plan"]["family_pool"]
             assert pool is not None
-            assert pool["requests_pool"] == 5 * pool["requests_nominal"]
+            assert pool["requests_pool"] == shards * pool["requests_nominal"]
             assert pool["note"]
 
     def test_it_only_looks_at_the_same_target_type(self):
@@ -947,7 +1003,11 @@ class TestTheEstimateSaysWhatTheWindowReallyAllows:
             assert kind in limits, (kind, limits)
         # 抬起来的是 diff / reference 这一档（取数侧不再夹它们）……
         assert limits["file_diff"] > 11_000, limits
-        # ……而正文那一档必须如实给出「取数侧实际夹在多少字」，否则这个键就是谎言。
-        assert limits["file_content_provider_max_chars"] == 11_000, limits
-        assert limits["file_content_provider_max_chars"] <= limits["file_content"]
+        # ……正文那一档同样抬起来了（2026-09-24，工作包 D 的 P2）：**这个键必须等于
+        # 取数侧真正交付的一页**，否则它就是谎言。原先它被夹在 11,000 —— 那是隐藏截断
+        # 的一个面：用户把提示词预算调到 560,000，正文仍然只有 11,000 字，而界面上
+        # 看不出来。现在取数侧的页大小由这里推导（`ContextTools` 交给 provider），
+        # 超过一页的正文用 `next_cursor` 继续要。
+        assert limits["file_content_provider_max_chars"] == limits["file_content"], limits
+        assert limits["file_content_provider_max_chars"] > 11_000, limits
         assert plan["reserved_output"]["chars"] > 0, plan["reserved_output"]

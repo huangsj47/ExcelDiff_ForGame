@@ -45,7 +45,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Callable, Mapping, MutableMapping, Sequence
 
-from services.ai.auto_sizing import FamilySizing
+from services.ai.auto_sizing import FamilySizing, conservative_member_tokens
 from services.ai.budget import ContextItem, truncate_text
 from services.ai.engine import (
     DEGRADATION_LABELS,
@@ -155,8 +155,10 @@ WEEKLY_MODE = "weekly"
 # 成员数上限。与配置项的 `SUBAGENT_COUNT_RANGE` 是同一件事，这里再钉一次是因为
 # `plan_family` 也可能被别的调用方按数字直接调（测试就是）。
 MAX_SUBAGENTS = 6
-# 与模型层常量同源（models/ai_analysis/project_config.py）。收敛后周版本路径的分片数
-# 由 `auto_sizing.SHARD_TARGET` 推导，这里只服务 `plan_family` 的老调用方与单提交路径。
+# 与模型层常量同源（models/ai_analysis/project_config.py）。**2026-09-23 起它不再决定
+# 周版本的分片数** —— 那个数由 `auto_sizing.plan_analysis` 按快照事实推导（独立变更簇
+# 2~5 个），本常量只剩两个读者：单提交路径不拆分片、`plan_family` 的老调用方。
+# 它**不等于**任何推导目标，别再按它去解释「为什么是 5 片」。
 DEFAULT_SUBAGENT_COUNT = 5
 
 
@@ -563,7 +565,7 @@ def run_family(
             # 扣账按实跑数：轮次按 len(rounds)（引擎的 +2 格式重问轮不双记），索取按
             # requests_used —— 名义额是「上限不是预扣」，只有真用掉的才滚不出去。
             quota.spend(step.outcome.requests_used, len(step.outcome.rounds))
-        spent_tokens += _tokens_of(step.outcome)
+        spent_tokens += _tokens_of(step.outcome, output_cap=plan.limits.max_output_tokens or 0)
 
     # 汇总那一次：池内剩余全给它，但保下限、**可越池**（唯一产出最终报告的一步，不许
     # 被前面的分片饿死 —— 见 FamilyQuota.synthesis_caps）。
@@ -776,17 +778,24 @@ def run_family_with_seed(*, plan: FamilyPlan, limits: EngineLimits | None = None
     return run_family(plan=prepared, **engine_args).outcome
 
 
-def _tokens_of(outcome: EngineOutcome | None) -> int:
-    """一个成员烧掉多少 token。没跑成的算 0（上游没报的也算 0）。
+def _tokens_of(outcome: EngineOutcome | None, *, output_cap: int) -> int:
+    """一个成员烧掉多少 token，用于 `should_skip` 的**下界**。
 
-    **这里刻意不返回 `None`**：它的用途是 `early_stop_guard` 的**下界**——「已经确定烧掉
-    的」够不够触发提前收尾。读不到的那部分按 0 算等于「先不拦」，代价是最多多跑一轮；
-    反过来把它当成已知就会凭一个猜出来的数掐断一次正在进行的分析。
-    （落库那一份走的是 `_sum_optional`，读不到就是 `None` —— 两者读者不同，口径也应当不同。）
+    ## 上游没报用量时**按保守估算，不当 0**（工作包 B）
+
+    原先这里返回 0（上游没报就算 0）。它的用途是单次硬上限的判定，而 0 的含义是
+    「还没花钱」—— 于是「上游不回 usage」的那些成员会让闸门每一片都判「还没超」，
+    一路跑到把单次上限超穿。现在缺用量时按「请求字符 + 每轮固定前缀 + 输出上限」
+    估一个下界（`auto_sizing.conservative_member_tokens`），方向是**先不拦**但**不许当 0**。
+
+    **落库那一份走的是 `_sum_optional`**：读不到就是 `None`（「未上报」），仍然如实
+    记成未上报 —— 闸门要的是「至少花了这么多」，账要的是「上游到底报没报」。两者
+    读者不同，口径也应当不同（这条区别在本函数的返回值与 `run.tokens_input` 上各有一半）。
     """
-    if outcome is None:
-        return 0
-    return max(0, int(outcome.prompt_tokens or 0)) + max(0, int(outcome.completion_tokens or 0))
+    tokens, _estimated = conservative_member_tokens(
+        outcome, output_cap=max(0, int(output_cap or 0))
+    )
+    return tokens
 
 
 def _run_one(

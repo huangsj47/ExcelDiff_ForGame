@@ -51,7 +51,13 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from models import Project, WeeklyVersionConfig, db
 from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace, AiWeeklyAnalysisState
 from services.ai import run_progress
-from services.ai.auto_sizing import derive_family_sizing
+from services.ai.auto_sizing import (
+    MODE_FAMILY,
+    AnalysisPlan,
+    SnapshotFacts,
+    derive_family_sizing,  # noqa: F401 —— 与运行侧同源（`test_ai_auto_sizing` 钉着）
+    plan_analysis,
+)
 from services.ai.analysis_budget import (
     PERIOD_ALL_TIME,
     PERIOD_CHOICES,
@@ -77,6 +83,7 @@ from services.ai.job_service import UPGRADE_REASON_FIRST_RUN
 from services.ai.platform_budget import platform_budget_public
 from services.ai.pricing import amount_exact, amount_of, money
 from services.ai.project_config_source import build_weekly_group_key, get_project_analysis_config
+from services.ai.skill_contract import DIMENSION_IDS
 from services.ai.subagent import MIN_MEMBER_ROUNDS, MIN_MEMBER_TOOL_REQUESTS
 from services.ai.trace_evidence import decode_evidence
 from services.ai.usage import (
@@ -1196,13 +1203,15 @@ def _weekly_payload_facts(config_id: int, *, force_full: bool = False) -> dict[s
         payload, _state, skip_reason = build_weekly_payload(
             config_id, force_full=force_full
         )
+    # 目录里那三处 `{"delta": None, ...}` 的失败返回也必须带上这个键，否则调用方读
+    # `facts["plan"]` 会 KeyError（失败路径的字段集与成功路径不一致是最难查的一类）。
     except Exception as exc:  # noqa: BLE001 —— 预检读不到账不该让整个估算变成 500
         return {"delta": None, "compensation": None, "planned": None,
-                "scope": "", "reason": "",
+                "scope": "", "reason": "", "plan": None,
                 "note": f"本次的输入账没有算出来（{exc}）。"}
     if payload is None:
         return {"delta": None, "compensation": None, "planned": None,
-                "scope": "", "reason": "",
+                "scope": "", "reason": "", "plan": None,
                 "note": "本次的输入账没有算出来（平台裁决："
                 + str(skip_reason or "未知") + "）。"}
     summary = payload.get("summary") or {}
@@ -1218,6 +1227,9 @@ def _weekly_payload_facts(config_id: int, *, force_full: bool = False) -> dict[s
         "planned": len(payload.get("delta_files") or []),
         "scope": str(payload.get("scope") or ""),
         "reason": str(policy.get("reason") or ""),
+        # **同一份计划**（工作包 B）：`build_weekly_payload` 已经算好并挂上去了，
+        # 预估这一侧只读不推 —— 再推一次就会出现「确认框说 5 片、实际跑 3 片」。
+        "plan": payload.get("plan") if isinstance(payload.get("plan"), dict) else None,
         "note": "",
     }
 
@@ -1255,6 +1267,10 @@ def _weekly_action_facts(
         "compensation_files": None,
         "baseline_run": None,
         "upgrade_reason": "",
+        # 计划（工作包 B）：**读不到就是 None**，调用方据此现算一份兜底计划并说明。
+        # 四处 `**blank` 的返回都要带上它 —— 「有的分支带、有的分支不带」正是这种键
+        # 最容易丢的地方（丢了的症状是预估悄悄换成兜底计划，而界面上看不出来）。
+        "plan": None,
         "note": "",
     }
     if target_type != "weekly":
@@ -1263,6 +1279,40 @@ def _weekly_action_facts(
     exact_config = db.session.get(WeeklyVersionConfig, config_id) if config_id else None
     if exact_config is not None and exact_config.project_id != project_id:
         exact_config = None
+
+    if mode != MODE_INCREMENTAL:
+        # **全量这一支放在状态行之前**：全量不看基线，所以「这个分组有没有状态行」
+        # 与「基线适不适用」是两件事。原先它挂在 `if not states: return blank` 之后，
+        # 于是**新分组**（还没有状态行）的全量预览会显示「还没有可复用的结论基线」——
+        # 一句与事实相反的话（全量根本不用基线，谈不上有没有）。
+        payload_facts = (
+            _weekly_payload_facts(exact_config.id, force_full=True)
+            if exact_config is not None else None
+        )
+        return {
+            **blank,
+            "planned_files": payload_facts["planned"] if payload_facts else None,
+            "plan": (payload_facts or {}).get("plan"),
+            # **「全量不使用基线」不是「还没有可复用基线」**（工作包 B 的验收）。
+            # 两者原先在界面上都是 `baseline_run: null`。这里给一个显式的、能被渲染的判据。
+            "baseline_run": {
+                "run_id": None,
+                "created_at": None,
+                "scope": "",
+                "not_applicable": "full",
+                "label": "全量不使用基线",
+                "note": (
+                    "全量重新分析不看增量基线（整个窗口重跑），所以「本次增量文件数」"
+                    "「补偿文件数」「基线 run」三项都不适用 —— 它们不是「没有」，是"
+                    "「这次不用」。"
+                ),
+            },
+            "note": (
+                "这次是全量：平台不看增量基线，所以本次增量文件数与补偿文件数不适用。"
+                + ((payload_facts or {}).get("note") or "")
+            ),
+        }
+
     query = AiWeeklyAnalysisState.query.filter_by(project_id=project_id)
     if exact_config is not None:
         query = query.filter_by(group_key=build_weekly_group_key(exact_config))
@@ -1275,6 +1325,26 @@ def _weekly_action_facts(
         .all()
     )
     if not states:
+        # 这个分组还没有状态行（一次都没跑过）。四个事实字段仍回「不适用」值，
+        # 但**计划要带上** —— 「这次要跑多大」是从快照缓存算出来的，与有没有基线无关；
+        # 少了它，确认框会退回「只知文件数」的兜底计划，而兜底版本的每片额度是按上限配的
+        # （`plan_analysis` 的 `unknown_volume`），摆给用户看就是一串虚高的数。
+        #
+        # 无状态行的增量**一定是首次全量**（运行侧同一条判据：`job_service` 见
+        # `run_id is None` 即 `UPGRADE_REASON_FIRST_RUN`），所以这里按全量取证。
+        if mode == MODE_INCREMENTAL and exact_config is not None:
+            payload_facts = _weekly_payload_facts(exact_config.id, force_full=True)
+            return {
+                **blank,
+                "planned_files": payload_facts["planned"],
+                "plan": payload_facts.get("plan"),
+                "upgrade_reason": UPGRADE_REASON_FIRST_RUN,
+                "note": (
+                    "这个分组还没有跑过，没有可复用的结论基线，"
+                    "所以没有「本次增量文件数」可言（平台会把这次增量升级为全量）。"
+                    + (payload_facts.get("note") or "")
+                ),
+            }
         return blank
     state = states[0]
     ambiguous = [
@@ -1296,20 +1366,6 @@ def _weekly_action_facts(
     else:
         upgrade_reason = ""
 
-    if mode != MODE_INCREMENTAL:
-        payload_facts = (
-            _weekly_payload_facts(exact_config.id, force_full=True)
-            if exact_config is not None else None
-        )
-        return {
-            **blank,
-            "planned_files": payload_facts["planned"] if payload_facts else None,
-            "upgrade_reason": upgrade_reason,
-            "note": (
-                "这次是全量：平台不看增量基线，所以本次增量文件数与补偿文件数不适用。"
-                + ((payload_facts or {}).get("note") or "")
-            ),
-        }
     if run_id is None:
         payload_facts = (
             _weekly_payload_facts(exact_config.id, force_full=True)
@@ -1318,6 +1374,7 @@ def _weekly_action_facts(
         return {
             **blank,
             "planned_files": payload_facts["planned"] if payload_facts else None,
+            "plan": (payload_facts or {}).get("plan"),
             "upgrade_reason": upgrade_reason,
             "note": (
                 "还没有可复用的结论基线，所以没有「本次增量文件数」可言"
@@ -1357,6 +1414,9 @@ def _weekly_action_facts(
         "delta_files": payload_facts["delta"],
         "compensation_files": payload_facts["compensation"],
         "baseline_run": baseline_run,
+        # 计划：**增量这一支也要带**（否则「有基线的增量」会退回兜底计划，
+        # 而它恰恰是最常跑的那一支）。
+        "plan": payload_facts.get("plan"),
         "upgrade_reason": upgrade_reason,
         "note": (payload_facts["note"] or "") + ambiguity_note,
     }
@@ -1409,11 +1469,28 @@ def analysis_estimate(
             )
     rows = query.order_by(AiAnalysisRun.created_at.desc()).limit(sample_limit).all()
 
-    samples = [
-        estimation_sample(run, price_table=table)
-        for run in rows
-        if usage_from_run(run, price_table=table)["collected"]
-    ]
+    # ------------------------------------------------------------------
+    # 样本只取**跑完了的**运行（工作包 B 的验收：「最近完整运行」）
+    #
+    # 「上报了 token」不等于「跑完了」：一个 worker 被杀掉的运行（job 以
+    # `REASON_INTERRUPTED` 收口、run 停在 running 或被标成 failed）也会留下半截 token 账，
+    # 而它的 token 数**只覆盖跑到一半的那部分**。拿它当「最近一次实际值」，用户会看到
+    # 「上次这类分析只要 12 万 token」，而那次根本没跑完。
+    #
+    # 判据用 status 而不是某个用时/覆盖率：`succeeded` / `degraded` 是引擎亲手写的终态
+    # （degraded = 有结论但浅，照样是完整跑完的一次），`running` / `pending`（僵尸或被杀的）
+    # 与 `failed`（半路失败）都不是。两类分开计数，因为「没跑完」与「跑完了但上游没回
+    # token」是两件事，在 notes 里也要分开说。
+    # ------------------------------------------------------------------
+    usage_missing: list[Any] = []
+    samples = []
+    for run in rows:
+        if str(getattr(run, "status", "") or "") not in ("succeeded", "degraded"):
+            continue
+        if not usage_from_run(run, price_table=table)["collected"]:
+            usage_missing.append(run)
+            continue
+        samples.append(estimation_sample(run, price_table=table))
     # ------------------------------------------------------------------
     # 本次动作的三个事实（E8）：增量文件数 / 补偿文件数 / 基线 run
     #
@@ -1456,26 +1533,58 @@ def analysis_estimate(
         configured_chars,
         effective_total if not clamp_note else max(0, effective_total - platform_chars),
     )
-    # 周版本 + 子代理模式：**与运行侧同一份推导**（`derive_family_sizing`，配置面收敛
-    # 2026-09-23）。预估侧不加载项目 skill，维度数按平台出厂 9 个算 —— 项目声明了更短
-    # 清单时运行侧会少开几个分片，预估因此略偏高（方向保守）。不接同一份推导的话，
-    # 确认框会说 5 片、预估按旧配置算 3 片（:1483 一类口径 bug 的同族）。
-    sizing = (
-        derive_family_sizing(
-            effective_user_chars=effective_chars,
-            # 文件数未知（调用方没带 `files` 参数、库里也没有可折算的历史）时按 0 推导：
-            # 取样上限会落到 200 的下限，索取次数按「清单=下限」反解 —— 方向是**少估**
-            # 而不是崩（崩在预估端点上表现为确认框打不开，比一个偏小的数糟糕得多）。
-            file_count=int(
-                facts["planned_files"]
-                if facts.get("planned_files") is not None
-                else (effective_planned_files or 0)
+    # 周版本 + 子代理模式：**读运行侧那一份计划**（工作包 B，2026-09-23）。
+    #
+    # 以前这里是各推一次：运行侧按「生效额度 + 清单文件数」推 5 片、预估侧按
+    # 「未探测额度 + planned_files」推一遍，两边的文件数与额度来源都不同 ——
+    # 于是「确认框说 5 片、实际跑 3 片」这种分叉不会报错，只会让确认框里的数字变成谎话。
+    # 现在两侧读的都是 `build_weekly_payload` 挂上去的 `payload["plan"]`：
+    # **同一份数据，不是两次相同的计算**。
+    #
+    # 读不到时（payload 为空、老记录）现算一份**兜底**计划，并把这件事写进 notes ——
+    # 兜底走的是同一个纯函数（`plan_analysis`），所以它至少是同一套口径，只是事实更少。
+    planning = AnalysisPlan.from_dict(facts.get("plan"))
+    plan_note = ""
+    if planning is None and target_type == "weekly":
+        fallback_files = int(
+            facts["planned_files"]
+            if facts.get("planned_files") is not None
+            else (effective_planned_files or 0)
+        )
+        planning = plan_analysis(
+            SnapshotFacts.from_mapping(
+                {
+                    "file_count": fallback_files,
+                    # **只知文件数**时也要能分成簇，否则「100 个文件」会被判成
+                    # 「只有一个变更簇 → 单代理」。合成的条目只带路径与提交（**编码的是
+                    # 「这是 N 个各自独立的文件」，不是任何真实内容**），体量留 0 ——
+                    # 计划会把「体量未知」按上限配（`plan_analysis` 的 `unknown_volume`）。
+                    "entries": [
+                        {"path": f"unknown/{index}.bin", "commit": f"unknown{index}"}
+                        for index in range(max(0, fallback_files))
+                    ],
+                }
             ),
+            # 与运行侧同一份额度口径（那边由 `attach_weekly_plan` 组装）：预算 + 周期上限。
+            # 兜底计划也要带上周期上限，否则「读不到计划」时摆出来的单次上限会比实际跑的大
+            # （周期上限收紧了它），又是「确认框与实际不一致」那类问题的另一种形态。
+            {
+                "user_chars": effective_chars,
+                "period_token_limit": config.get("budget_token_limit"),
+            },
+            DIMENSION_IDS,
+            subagent_enabled=bool(config.get("subagent_enabled")),
+            verify=bool(config.get("subagent_verify")),
         )
-        if (
-            target_type == "weekly"
-            and bool(config.get("subagent_enabled"))
+        plan_note = (
+            "本次的输入账没有算出来，计划是按「只知文件数」现算的兜底版本 ——"
+            "每个文件的体量未知，所以按上限配的；实际分工与每片额度以运行记录里的计划为准。"
         )
+    sizing = (
+        planning.family
+        if planning is not None
+        and planning.mode == MODE_FAMILY
+        and bool(config.get("subagent_enabled"))
         else None
     )
     estimate = estimate_analysis(
@@ -1483,7 +1592,15 @@ def analysis_estimate(
         mode=estimation_mode,
         baseline_reusable=baseline_reusable,
         recent_runs=samples,
-        shard_count=(sizing.shard_count if sizing is not None else None),
+        # 分片数：家族计划给池里的片数；**单代理计划给 1**（不是 None）—— 它是「这次几个
+        # 分析者」，而 1 会让区间按样本的分片数**折算下来**（run 46 单代理 114k token vs
+        # run 45 多代理 980k，同一个快照），正是用户要看到的那个差距。给 None 等于
+        # 「没记录分片数」，区间就按样本原样照搬了。
+        shard_count=(
+            sizing.shard_count
+            if sizing is not None
+            else (1 if planning is not None else None)
+        ),
         max_rounds=(sizing.rounds_per_shard if sizing is not None else None),
         max_tool_requests=(
             sizing.requests_per_shard if sizing is not None else None
@@ -1495,11 +1612,27 @@ def analysis_estimate(
         compensation_files=facts["compensation_files"],
         baseline_run=facts["baseline_run"],
     )
+    # 「全量不使用基线」**必须活着走到接口响应里**。`usage._fact_baseline_run` 是一道
+    # **白名单**（只留 run_id / created_at / scope，给不出 run_id 就整体回 None）——
+    # 那道白名单是对的，不该为这一条放宽（它挡的是「把一个能塞任意内容的字典挂到接口
+    # 响应上」）。所以这里在全量模式下**显式覆盖**那三个键之外的事实：基线不是「没有」，
+    # 而是「这次不用」。
+    full_baseline = facts.get("baseline_run") or {}
+    if estimate.get("mode") == MODE_FULL and full_baseline.get("not_applicable") == "full":
+        estimate["baseline_run"] = dict(full_baseline)
     configured_rounds = (
-        sizing.rounds_per_shard if sizing is not None else engine_defaults.max_rounds
+        sizing.rounds_per_shard
+        if sizing is not None
+        else (planning.members[0].max_rounds if planning is not None else engine_defaults.max_rounds)
     )
     configured_requests = (
-        sizing.requests_per_shard if sizing is not None else engine_defaults.max_tool_requests
+        sizing.requests_per_shard
+        if sizing is not None
+        else (
+            planning.members[0].max_tool_requests
+            if planning is not None
+            else engine_defaults.max_tool_requests
+        )
     )
     configured_shards = sizing.shard_count if sizing is not None else 1
     estimate["budget_plan"] = build_budget_plan(
@@ -1541,14 +1674,27 @@ def analysis_estimate(
             if sizing is not None
             else None
         ),
+        # 计划：**原样**穿给预算计划（就是运行侧会读的那一份）。
+        plan=(planning.to_dict() if planning is not None else None),
     )
-    excluded = len(rows) - len(samples)
-    if excluded:
+    # 这次分的工与为什么（预估端点自己也算一份，界面/接口直接读它，不必去解预算计划）。
+    estimate["plan"] = planning.to_dict() if planning is not None else None
+    excluded_partial = len(rows) - len(samples) - len(usage_missing)
+    if excluded_partial:
         estimate["notes"] = [
             *estimate["notes"],
-            f"最近 {len(rows)} 次运行里有 {excluded} 次没有上报用量（失败在半路），"
-            "它们不参与估算，「最近一次实际值」指的也是最近一次**有上报**的那次。",
+            f"最近 {len(rows)} 次运行里有 {excluded_partial} 次是**没有跑完的**"
+            "（进程中断 / 失败在半路），它们的 token 账是半截的，"
+            "不能当「最近一次完整运行」的样本 —— 已排除。",
         ]
+    if usage_missing:
+        estimate["notes"] = [
+            *estimate["notes"],
+            f"另有 {len(usage_missing)} 次跑完了但没有上报用量（上游没回 token），"
+            "它们不参与缩放，「最近一次实际值」指的也是最近一次**有上报**的那次。",
+        ]
+    if plan_note:
+        estimate["notes"] = [*estimate["notes"], plan_note]
     if facts["note"]:
         # 「本次增量文件数 / 补偿文件数」没有算出来时，**必须**跟着一句为什么：
         # 界面上那一行写的是「见下面的说明」，空着就是让用户去猜。

@@ -40,9 +40,20 @@ from models.ai_analysis.project_config import (
 )
 from services.ai import project_gate
 from services.ai.analysis_budget import budget_gate_reason, early_stop_guard
+
+# 计划（工作包 B）：`auto_sizing.plan_analysis` 是**纯函数**，取数与落库在下面这一层 ——
+# 运行侧与预估端点读的必须是**同一份**（`payload["plan"]`），不能再各推一次。
+from services.ai.analysis_plan import (
+    attach_plan,
+    compose_skip_guards,
+    make_single_run_guard,
+    plan_of,
+    single_member_limits,
+)
 from services.ai.auto_sizing import (
     ANOMALY_RUN_CAP,
-    derive_family_sizing,
+    MODE_FAMILY,
+    derive_family_sizing,  # noqa: F401 —— 测试按这个名字打补丁/取用
     sampling_cap_for,
 )
 
@@ -202,6 +213,7 @@ from services.ai.scope_sampling import (  # noqa: F401 —— 任务服务与测
     has_weekly_changes,
     weekly_snapshot_digest,
 )
+from services.ai.skill_contract import DIMENSION_IDS, dimension_ids_of
 from services.ai.skill_loader import describe_load_error, load_skills
 from services.ai.snapshot_store import DEFAULT_COMPENSATION_MAX_FILES
 from services.ai.subagent import (
@@ -514,7 +526,73 @@ def build_weekly_payload(
     payload["policy"]["truncated"] = truncated
     if truncated:
         payload["policy"]["truncation_reason"] = "token_budget"
+    attach_weekly_plan(payload)
     return payload, state, None
+
+
+def attach_weekly_plan(payload: dict) -> object:
+    """给这份 payload 算一份计划并挂上去（`payload["plan"]`）。**周版本唯一的计划入口**。
+
+    ## 为什么在 `build_weekly_payload` 里算（而不是在真正开跑时）
+
+    因为**预估端点也必须读同一份**。预估发生在用户点「开始」之前，那时还没有运行记录，
+    唯一的共同载体就是这份 payload（`ai_usage_service._weekly_payload_facts` 本来就调
+    `build_weekly_payload`）。计划算在这里，于是「预估说 5 片、实际跑 3 片」在结构上
+    不可能发生 —— 这不是一致性检查，是**同一份数据**。
+
+    ## 预算取**配置值**（窗口未探测），这一点如实写在计划里
+
+    真正生效的额度要等 `_apply_model_window` 向端点问过窗口才知道，而那个探测需要一次
+    网络往返（预估端点承诺**不探测模型**）。所以这里用项目配置的提示词预算当**上限**：
+    计划里的每片额度本来就是上限（真正的单条上限由 `tool_limits` 在开跑时按生效额度
+    再压一次），所以「窗口比配置小」时不会超发，只是计划里的名义额偏宽松。
+    `thresholds.user_chars_source` 把这件事写出来。
+
+    ## 维度清单用**项目声明**的那一份（拿不到时退回出厂清单）
+
+    「单分析者仍要覆盖全部声明维度」这句话必须落在计划上，所以这里真的去加载 skill
+    （`_load_project_skills` 已有失败兜底）。加载失败时退回出厂清单，并在计划的
+    `thresholds.dimensions_source` 里说明 —— 一份「不知道项目声明了什么」的计划不该
+    看起来像「项目声明了出厂那 9 个」。
+    """
+    project_id = (payload.get("group") or {}).get("project_id")
+    project_config = get_project_analysis_config(project_id) if project_id else {}
+    loaded, failure = _load_project_skills(project_id) if project_id else (None, "没有项目号")
+    dimensions = dimension_ids_of(getattr(loaded, "dimensions", ()) or ()) if loaded else ()
+    source = "项目声明" if dimensions else f"平台出厂清单（读不到项目声明：{failure or '未知'}）"
+    if not dimensions:
+        dimensions = DIMENSION_IDS
+    configured = _configured_int(
+        project_config.get("prompt_char_budget"), EngineLimits().prompt_char_budget
+    )
+    plan = attach_plan(
+        payload,
+        effective_budget={
+            "user_chars": max(0, configured),
+            "single_run_token_limit": project_config.get("single_run_token_limit"),
+            # `output_tokens` / `single_run_token_limit` 目前都不是项目配置里的列（配置面
+            # 2026-09-23 收敛过一轮），所以它们通常取不到值 → 计划用平台初值。真正能改的
+            # 那个是下面这个**周期**上限（`budget_token_limit`，管理员可改）：它比单次初值
+            # 更紧时单次也不许超过它 —— 「用户可覆盖单次上限」的现成入口就是它。
+            "period_token_limit": project_config.get("budget_token_limit"),
+            "output_tokens": project_config.get("max_output_tokens"),
+        },
+        dimensions=dimensions,
+        # **手动关掉子代理 = 强制单代理**（指引 §3.B）。这条判据在计划里，不在配置读取侧：
+        # 计划是唯一决定分工的地方，写在这里就不可能出现「界面关了、计划又开了」。
+        subagent_enabled=bool(project_config.get("subagent_enabled")),
+        verify=bool(project_config.get("subagent_verify")),
+        cost_limit=project_config.get("budget_cost_limit"),
+    )
+    plan.thresholds["user_chars_source"] = "项目配置的提示词预算（窗口未探测，运行时会再压）"
+    plan.thresholds["dimensions_source"] = source
+    payload["plan"] = plan.to_dict()
+    log_print(
+        f"AI 分析计划：模式 {plan.mode}、{plan.member_count} 个成员、"
+        f"单次上限 {plan.total_token_budget:,} token（{plan.reason}）",
+        "AI",
+    )
+    return plan
 
 
 def _load_project_skills(project_id: int) -> Tuple[object, str]:
@@ -1342,26 +1420,33 @@ def _run_engine_and_persist(
     # 子代理模式（services/ai/subagent.py）：默认关、只对周版本生效，不适用时返回 None
     # 走原来的单代理路径。`verify` 是对账轮，它依附在子代理上 —— 没开子代理时不生效。
     #
-    # 周版本的数值参数（分片数/每片索取/轮次/每片异常）由 `auto_sizing` 按预算与本周
-    # 清单规模推导（2026-09-23 配置面收敛；校准出处 runs 38~41）。分片数传推导值 ——
-    # 库里冻结的 `subagent_count` 已在界面上收掉，不再进这条路径。
-    sizing = None
-    if (payload.get("mode") or "") == "weekly" and bool(
-        project_config.get("subagent_enabled")
-    ):
-        sizing = derive_family_sizing(
-            effective_user_chars=max(0, limits.prompt_char_budget - platform_chars),
-            file_count=len(change.manifest.entries),
-            dimension_count=len(getattr(loaded, "dimensions", ()) or ()),
-        )
+    # **数值参数读的是已落库的那份计划**（工作包 B，2026-09-23）：分片数、每片索取/轮次/
+    # 每片异常全部来自 `payload["plan"]`，而那一份是 `build_weekly_payload` 算好、预估
+    # 端点也读过的那一份。这里**不再现推一次** —— 现推就会出现「确认框说 5 片、实际跑 3 片」
+    # 那种只体现在账目上的分叉（这正是这次要修的东西）。库里冻结的 `subagent_count`
+    # 在界面上已收掉，不进这条路径。
+    analysis_plan = plan_of(payload)
+    if analysis_plan is None:
+        # 老 payload（这次改动之前建的那一份）没有计划。**现算一份并写回去**，而不是
+        # 退回旧公式：旧公式正是「3 个文件也开 5 片」的来源。补记之后这份计划也进
+        # request_payload，事后能查「当时凭什么这么分工」。
+        log_print("AI 分析：这份 payload 里没有计划，按当前口径现算一份并补记", "AI")
+        analysis_plan = attach_weekly_plan(payload)
+    sizing = (
+        analysis_plan.family
+        if (payload.get("mode") or "") == "weekly"
+        and analysis_plan.mode == MODE_FAMILY
+        and bool(project_config.get("subagent_enabled"))
+        else None
+    )
+    if sizing is None and analysis_plan.members:
+        # **单代理路径也要听计划的**：这一档的轮次/索取由计划里的成员决定（见
+        # `analysis_plan.single_member_limits` 的说明）。
+        engine_args["limits"] = single_member_limits(limits, analysis_plan)
     plan = plan_family(
         mode=payload.get("mode") or "",
         enabled=bool(project_config.get("subagent_enabled")),
-        count=(
-            sizing.shard_count
-            if sizing is not None
-            else int(project_config.get("subagent_count") or 0)
-        ),
+        count=(analysis_plan.member_count if sizing is not None else 0),
         verify=bool(project_config.get("subagent_verify")),
         limits=limits,
         sizing=sizing,
@@ -1398,16 +1483,24 @@ def _run_engine_and_persist(
             if plan is not None and plan.quota is not None
             else None
         ),
+        # 计划本身（模式 / 分组 / 每成员额度 / 单次上限 / 两个预留 / 阈值与估算公式）。
+        # **与预估端点返回的那一份逐字相同** —— 两边都是同一个 `payload["plan"]`。
+        plan=analysis_plan.to_dict(),
     )
     outcome = (
         run_analysis(**engine_args)
         if plan is None
         else run_family_with_seed(
             plan=plan,
-            # 每片开跑前看一眼预算（含本次已消耗的）：判据与起跑闸门同一个 `budget_status`，
-            # 只是多算了这一家子已花掉的 token —— 否则前面几片的花费还没落库，每一片都
-            # 看到「还没超」。被跳过的分片会进报告的信息缺口。
-            should_skip=early_stop_guard(project_id, entry="subagent"),
+            # 每片开跑前看一眼预算，**两把尺子都要看**：
+            #   * `early_stop_guard`：这个项目/这个月还有钱吗（既有闸门，判据与起跑同源）；
+            #   * `make_single_run_guard`：**这一次**还能花多少（单次硬上限，
+            #     「已花 + 本轮保守预留 + 收尾预留」）。超了就跳过这个成员并在报告的
+            #     信息缺口里点名 —— 不再新增模型调用（那是「预算不足时报告可读」的判据）。
+            should_skip=compose_skip_guards(
+                early_stop_guard(project_id, entry="subagent"),
+                make_single_run_guard(analysis_plan),
+            ),
             **engine_args,
         )
     )

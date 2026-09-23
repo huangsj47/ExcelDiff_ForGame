@@ -5045,6 +5045,12 @@ function weeklyAiEstimateLines(estimate) {
             ? String(baseRun.created_at).replace('T', ' ').slice(0, 16) : '时间未记录';
         lines.push(['基线 run', '#' + weeklyAiFormatInt(baseRun.run_id) + '（' + at
             + (baseRun.scope ? '，' + baseRun.scope : '') + '）']);
+    } else if (baseRun && baseRun.not_applicable === 'full') {
+        // **全量不使用基线** —— 这不是「还没有基线」，是「这次根本不需要它」。
+        // 服务端为此给出了 `not_applicable: "full"` 与现成的 `label`（`ai_usage_service`），
+        // 这里只负责照说。原先一律落到下面那句，于是用户自己点的全量会读到
+        // 「这个分组还没有可复用的结论基线」—— 与事实相反（有没有基线跟这次无关）。
+        lines.push(['基线 run', baseRun.label || '全量不使用基线']);
     } else {
         lines.push(['基线 run', '这个分组还没有可复用的结论基线']);
     }

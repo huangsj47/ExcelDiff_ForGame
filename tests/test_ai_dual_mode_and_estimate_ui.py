@@ -400,6 +400,17 @@ _SCENARIOS = [
     {"name": "full_ok", "action": "choose", "requested": "full", "choices": ["ok"], "estimate": _ESTIMATE},
     {"name": "full_cancel", "action": "choose", "requested": "full", "choices": [None], "estimate": _ESTIMATE},
     {"name": "estimate_lines_full", "action": "estimateLines", "payload": _ESTIMATE},
+    # 全量模式**不使用**基线：服务端为此给了 `not_applicable: "full"` 与现成的 `label`。
+    # 这条钉的是「用户自己点的全量，别被说成『这个分组还没有可复用的结论基线』」——
+    # 有没有基线跟这次无关，说成「还没有」是把用户的选择读成了平台的缺失。
+    {"name": "estimate_lines_full_no_baseline", "action": "estimateLines",
+     "payload": {**_ESTIMATE,
+                 "baseline_run": {"run_id": None, "not_applicable": "full",
+                                  "label": "全量不使用基线"}}},
+    # 反向自检：同样的空 `run_id`、但**没有** `not_applicable` 时仍须说「还没有基线」——
+    # 否则上面那条测的是「这句话存在」，而不是「全量与真没有基线说得不一样」。
+    {"name": "estimate_lines_no_baseline_at_all", "action": "estimateLines",
+     "payload": {**_ESTIMATE, "baseline_run": {"run_id": None}}},
     {"name": "estimate_lines_nopricing", "action": "estimateLines",
      "payload": {**_ESTIMATE, "cost": {"computable": False, "reason": "没有配置模型单价"}}},
     {"name": "estimate_lines_priced", "action": "estimateLines",
@@ -598,6 +609,29 @@ def test_the_incremental_choice_leaves_a_note_the_report_can_carry(rel: str):
     item = _run_node()[rel]["comparability"]
     assert "不可比" in item["line"], item
     assert "全量重新分析" in item["line"], item
+
+
+@with_rels
+def test_full_mode_says_the_baseline_is_not_used_rather_than_missing(rel: str):
+    """全量模式**不使用**基线，这和「还没有基线」是两件事。
+
+    用户自己点的全量，原先会读到「这个分组还没有可复用的结论基线」—— 与事实相反
+    （有没有基线跟这次无关）。服务端已经给了 `not_applicable: "full"` 与现成的 `label`，
+    这里钉住界面照说，并且**反向**钉住「真没有基线」时那句话没变。
+    """
+    used = [row for row in _case(rel, "estimate_lines_full_no_baseline")["lines"]
+            if row[0] == "基线 run"]
+    assert used, _case(rel, "estimate_lines_full_no_baseline")["lines"]
+    assert "全量不使用基线" in used[0][1], used
+    assert "还没有可复用的结论基线" not in used[0][1], (
+        f"用户自己点的全量被说成「还没有基线」：{used[0][1]}"
+    )
+
+    absent = [row for row in _case(rel, "estimate_lines_no_baseline_at_all")["lines"]
+              if row[0] == "基线 run"]
+    assert absent and "还没有可复用的结论基线" in absent[0][1], (
+        f"真没有基线时那句话被改掉了（这条反向自检是防上面那条退化成「只说这句话」）：{absent}"
+    )
 
 
 @with_rels

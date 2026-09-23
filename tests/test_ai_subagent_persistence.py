@@ -261,9 +261,11 @@ class TestTheConfig:
 
             resolved = row.resolved()
 
-            # **NULL 跟着默认值走**：这一列加出来时默认是关，历史行几乎都是 NULL，
-            # 所以「默认开」要真的生效，就必须让 NULL 读成 DEFAULT_SUBAGENT_ENABLED。
-            assert resolved["subagent_enabled"] is DEFAULT_SUBAGENT_ENABLED is True
+            # **NULL 跟着默认值走**（2026-09-23 起默认是**关**）：这一列加出来时默认就是
+            # 关，历史行几乎都是 NULL，所以「NULL = 没主动打开」与新的默认值一致 ——
+            # 详见 `models/ai_analysis/project_config.py` 里 `DEFAULT_SUBAGENT_ENABLED`
+            # 上方那段实测对照（run 45 多代理 979,910 token vs run 46 单代理 114,333）。
+            assert resolved["subagent_enabled"] is DEFAULT_SUBAGENT_ENABLED is False
             assert resolved["subagent_count"] == DEFAULT_SUBAGENT_COUNT == 5
             db.session.delete(row)
             db.session.commit()

@@ -23,6 +23,18 @@
 这件事规则层早就写清楚了（`RuleThresholds.revision_component` 的 docstring：「门槛变了
 就是另一个问题，**必须**重跑」），那个方法也一直在，只是**没有任何生产调用点** ——
 `AiAnalysisRun.analysis_revision` 这一列从建出来起就没被写过。
+
+## 口径四件套（2026-09-23，工作包 B）
+
+门槛只是「尺子」的一半。指引 §3.B 要求 `analysis_revision` 同时覆盖
+**diff/快照、提示词、证据协议、规划版本** —— 这四样任一变化，「旧结论与新结论可比」
+这句话就不成立，增量入口必须在**调用模型之前**提示用户「基线口径已变，建议全量重算」，
+而不是在 worker 里静默升级或复用旧结论。
+
+其中提示词那一件由 `prompt_version()` 承载（它本来就是独立一列，读侧逐字比对）。
+剩下三样在 `auto_sizing.compose_analysis_revision` 里折进本列（列宽 80，理由写在那边）。
+**读侧与写侧调的都是本函数**（`current_provenance`），所以「预估说口径没变、运行时
+又变了」在结构上不可能发生 —— 一致性不是靠两处各写一遍维持的。
 """
 
 from __future__ import annotations
@@ -32,6 +44,7 @@ from typing import Any, Mapping, Optional
 
 from models import Project, db
 from models.ai_analysis import AiAnalysisRun, AiProjectAnalysisConfig
+from services.ai.auto_sizing import compose_analysis_revision
 from services.ai.prompt import prompt_version
 from services.ai.rules import RulesConfigError, RuleThresholds, rules_version
 from services.ai.skill_loader import skill_revision
@@ -58,7 +71,8 @@ def current_provenance(project_id: int) -> dict:
     `from_config` 对不认识的取值抛 `RulesConfigError`（「不降级、不猜」）。读取侧从来不
     校验配置，所以库里真被手工改坏时不能让它把 `/latest` 变成 500 —— 给一个独有的取值
     即可：非法配置照样与任何历史结论都不相等，于是**照旧逼出一次重跑**，而重跑时会以
-    正常路径报出配置错误。
+    正常路径报出配置错误。这个独有的取值（`invalid-config`）**不参与口径四件套的合成**：
+    它本身已经是一个「与谁都不等」的哨兵值，再拼上位数不定的后缀只会白白占用列宽。
     """
     project = db.session.get(Project, project_id)
     project_code = getattr(project, "code", None) if project else None
@@ -66,7 +80,9 @@ def current_provenance(project_id: int) -> dict:
     resolved: Mapping[str, Any] | None = row.resolved() if row is not None else None
     model = str((resolved or {}).get("api_model") or "")
     try:
-        analysis_revision = RuleThresholds.from_config(resolved).revision_component()
+        analysis_revision = compose_analysis_revision(
+            RuleThresholds.from_config(resolved).revision_component()
+        )
     except RulesConfigError:
         analysis_revision = "invalid-config"
     return {

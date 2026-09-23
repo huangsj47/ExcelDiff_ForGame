@@ -737,6 +737,11 @@ def test_the_default_budget_gives_each_shard_a_workable_allowance():
 
     10 这个下限来自线上数据：一个分片要覆盖它那几组维度（含跨模块引用），3~5 次会在
     跑到第二个维度时就断粮，报告里只能写「本轮上下文额度已用尽」。
+
+    2026-09-23（工作包 B）：`DEFAULT_SUBAGENT_ENABLED` 改成**关**（实测：3 个文件的
+    配置 3 多代理 979,910 token / 单代理 114,333 token，覆盖率一样）。所以这条用例不再
+    用「默认开着」当前提，而是显式地把开关**打开**再验那件事 —— 它守的东西（打开之后
+    每片的额度必须可用）一个字没变，变的只是「默认值是什么」。
     """
     from models.ai_analysis.project_config import (
         DEFAULT_MAX_ANALYSIS_ROUNDS,
@@ -747,9 +752,9 @@ def test_the_default_budget_gives_each_shard_a_workable_allowance():
     from services.ai.engine import EngineLimits
     from services.ai.subagent import plan_family
 
-    assert DEFAULT_SUBAGENT_ENABLED, (
-        "前提：默认开着子代理。关掉的话下面这条断言就没有意义了（每人拿到全部额度），"
-        "那种情况下这条用例该跟着一起改，而不是继续在这里空转"
+    assert DEFAULT_SUBAGENT_ENABLED is False, (
+        "默认值必须是**关**：打开子代理会让模型调用次数变成 (n+1) 倍，而小批次里那多花的"
+        "钱买不到任何覆盖率（见 models 层常量上方那段实测对照）。"
     )
     plan = plan_family(
         mode="weekly",
@@ -760,7 +765,7 @@ def test_the_default_budget_gives_each_shard_a_workable_allowance():
             max_tool_requests=DEFAULT_MAX_TOOL_REQUESTS,
         ),
     )
-    assert plan is not None, "前提：默认配置要真的会开子代理"
+    assert plan is not None, "前提：管理员打开之后要真的会开子代理"
     per_shard = plan.limits.max_tool_requests
     assert per_shard >= 10, (
         f"默认配置下每个分片只有 {per_shard} 次上下文索取（总上限 {DEFAULT_MAX_TOOL_REQUESTS}"

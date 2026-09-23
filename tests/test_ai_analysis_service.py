@@ -373,6 +373,13 @@ def test_the_verify_round_needs_the_subagent_mode_it_depends_on():
         project = _create_project()
         db.session.commit()
 
+        # 前提：子代理**开着**（2026-09-23 起默认是关的）。要验的是「只提交一栏、
+        # 另一栏按库里现值算」，所以先把那一栏显式打开。
+        ok, _message, _errors = ai_service.update_project_analysis_config(
+            project.id, {"subagent_enabled": True}, updated_by="tester"
+        )
+        assert ok is True
+
         ok, _message, errors = ai_service.update_project_analysis_config(
             project.id,
             {"subagent_enabled": False, "subagent_verify": True},
@@ -389,17 +396,33 @@ def test_the_verify_round_needs_the_subagent_mode_it_depends_on():
 
 
 def test_the_subagent_default_alone_does_not_trip_the_verify_rule():
-    """默认组合（子代理**开**、对账轮关）要存得进去 —— 否则默认值本身就把用户挡住了。
+    """**回落的是「解析后」的默认值**，不是 `bool(None)`。
 
-    这条同时钉住「回落的是**解析后**的默认值」：新项目根本没有配置行，
-    `row.subagent_enabled` 是 None，直接 `bool(None)` 会算成 False，于是
-    「只提交对账轮」这一栏会被误判成冲突。必须走 `row.resolved()` 拿到 True。
+    新项目根本没有配置行，`row.subagent_enabled` 是 None，直接 `bool(None)` 会算成
+    False —— 那样「子代理开着、只提交对账轮」会被误判成冲突。所以这条用例两半一起钉：
+    先把子代理显式打开，再只提交对账轮，必须通过。
+
+    2026-09-23（工作包 B）之后默认组合变成了「子代理**关**、对账轮关」：所以这条也
+    顺带钉住「默认关」这件事 —— 默认关的项目只提交对账轮会被**正确拒绝**（那是一种
+    永远不生效的配置），而不是被静默存进去。
     """
     with app.app_context():
         create_tables()
         project = _create_project()
         db.session.commit()
 
+        # 默认关 → 只提交对账轮应当被拒（对账轮在单代理路径上不生效）。
+        ok, _message, errors = ai_service.update_project_analysis_config(
+            project.id, {"subagent_verify": True}, updated_by="tester"
+        )
+        assert ok is False, "默认（子代理关）下只提交对账轮被存进去了"
+        assert [item["field"] for item in errors] == ["subagent_verify"]
+
+        # 把子代理显式打开之后，同一栏必须能存进去。
+        ok, _message, _errors = ai_service.update_project_analysis_config(
+            project.id, {"subagent_enabled": True}, updated_by="tester"
+        )
+        assert ok is True
         ok, message, errors = ai_service.update_project_analysis_config(
             project.id, {"subagent_verify": True}, updated_by="tester"
         )

@@ -42,24 +42,49 @@ def _enable_subagents(project_id: int) -> None:
 
 
 def _force_shard_count(monkeypatch, count: int) -> None:
-    """把推导出的分片数钉在 `count` 片。
+    """把**计划**钉成 `count` 个分片（工作包 B 之后唯一能控制片数的入口）。
 
-    收敛后这是**唯一**能控制片数的入口：运行侧从 `ai_service.derive_family_sizing`
-    读推导值，库里的 subagent_count 列已被忽略。直接改配置行的老写法会写出
-    「存了但没生效」—— 正是 RETIRED_FIELDS 要消灭的那种状态。
+    2026-09-23 之后周版本的分片数由 `auto_sizing.plan_analysis` **按冻结快照的事实**
+    推导，而这一族用例的 fixture 只有 1 个文件（属「小批次」）—— 那一档**正确地**走
+    单代理（那正是工作包 B 要的行为）。这些用例测的是「分工的接线对不对」，所以必须
+    显式地把这一批做成「有 `count` 个独立变更簇的大版本」：
+
+    * 三个小批次门槛降到 0（一定不是小批次）；
+    * 补 `count` 个**合成条目**（各自的提交与目录不同 → 确定性分簇给出 `count` 个簇）；
+    * 证据体积常数降到 1（「体积想要多少片就给多少片」），再把上下限钉在 `count`。
+
+    这一层改的是**计划的输入与阈值**，不是「绕开计划塞一个数字」—— 走的仍是
+    `plan_analysis` 那条真实路径。
     """
-    real = ai_service.derive_family_sizing
+    import services.ai.analysis_plan as analysis_plan
+    import services.ai.auto_sizing as auto_sizing
 
-    def fake(**kwargs):
-        sizing = real(**kwargs)
-        return replace(
-            sizing,
-            shard_count=count,
-            family_requests_pool=count * sizing.requests_per_shard,
-            family_rounds_pool=count * sizing.rounds_per_shard,
+    monkeypatch.setattr(auto_sizing, "SMALL_BATCH_MAX_FILES", 0)
+    monkeypatch.setattr(auto_sizing, "SMALL_BATCH_MAX_TOTAL_CHARS", 0)
+    monkeypatch.setattr(auto_sizing, "SMALL_BATCH_MAX_FILE_CHARS", 0)
+    monkeypatch.setattr(auto_sizing, "MEMBER_EVIDENCE_CHARS", 1)
+    monkeypatch.setattr(auto_sizing, "FAMILY_MIN_MEMBERS", count)
+    monkeypatch.setattr(auto_sizing, "FAMILY_MAX_MEMBERS", count)
+
+    real = analysis_plan.snapshot_facts_from_payload
+
+    def forced(payload, **kwargs):
+        facts = real(payload, **kwargs)
+        entries = [dict(item) for item in facts.entries]
+        for index in range(count):
+            entries.append(
+                {
+                    "path": f"forced/dir{index}/file_{index}.lua",
+                    "commit": f"forced{index}",
+                    "source": "delta",
+                    "chars": 20_000,
+                }
+            )
+        return auto_sizing.SnapshotFacts.from_mapping(
+            {**facts.to_dict(), "entries": entries}
         )
 
-    monkeypatch.setattr(ai_service, "derive_family_sizing", fake)
+    monkeypatch.setattr(analysis_plan, "snapshot_facts_from_payload", forced)
 
 
 def _disable_subagents(project_id: int) -> None:
@@ -206,14 +231,18 @@ def test_a_frozen_dirty_count_no_longer_changes_the_weekly_run(monkeypatch, froz
     """库里冻结的 `subagent_count` 脏值（1 或 0）**不再影响周版本运行**。
 
     收敛（2026-09-23）之前这一列还能把分片数压成 1（退化成单代理）；现在周版本的分片
-    数一律由 `auto_sizing` 推导、这一列被忽略 —— 老行里的 0/1 只是一段死数据。
-    这里同时守住「死数据不炸、也不生效」两个方向。
+    数由**计划**（`auto_sizing.plan_analysis`）按快照事实推导、这一列被忽略 ——
+    老行里的 0/1 只是一段死数据。这里同时守住「死数据不炸、也不生效」两个方向。
+
+    片数用 `_force_shard_count` 显式钉住（工作包 B 之后 1 个文件的 fixture 按阈值**正确
+    地**走单代理，靠默认值是测不出「脏列不生效」的）。
     """
     client = _FakeClient()
     with flask_app.app_context():
         create_tables()
         ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
         _enable_subagents(project.id)
+        _force_shard_count(monkeypatch, 2)
         row = AiProjectAnalysisConfig.query.filter_by(project_id=project.id).first()
         row.subagent_count = frozen  # 直接改列：模拟收敛之前的老行
         db.session.commit()
@@ -222,8 +251,8 @@ def test_a_frozen_dirty_count_no_longer_changes_the_weekly_run(monkeypatch, froz
         outcome = ai_service.run_weekly_analysis_background(cfg.id)
 
         assert outcome["status"] == "succeeded", outcome
-        # 推导目标 5 片 + 汇总 = 6 次模型调用 —— 脏列没有把分片压没。
-        assert len(client.calls) == 6, (
+        # 计划里的 2 片 + 汇总 = 3 次模型调用 —— 脏列没有把分片压没。
+        assert len(client.calls) == 3, (
             f"冻结的脏 subagent_count={frozen} 仍然在起作用（只调了 {len(client.calls)} 次）"
         )
         run = (
@@ -233,7 +262,7 @@ def test_a_frozen_dirty_count_no_longer_changes_the_weekly_run(monkeypatch, froz
             .order_by(AiAnalysisRun.id.desc())
             .first()
         )
-        assert run.subagent_count == 5, "落库记的应是推导值，不是库里的冻结值"
+        assert run.subagent_count == 2, "落库记的应是计划里的片数，不是库里的冻结值"
 
 
 def _enable_verify(project_id: int, *, enabled: bool) -> None:
