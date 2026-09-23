@@ -760,8 +760,17 @@
 .aiu-kpi-value {
     font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums;
     font-family: "Fira Code", ui-monospace, monospace;
+    /* 数字是这一行的主角：给它上下留够气口，别让说明文字贴到它脸上 */
+    margin: 2px 0 4px;
 }
-.aiu-kpi-sub { color: var(--aiu-muted); font-size: 0.75rem; line-height: 1.5; }
+/* **说明文字钉在卡片底部。** 这一行的说明长短不一（一句到三句都有），顶部对齐时
+   每张卡底部的留白各差一截，整排看起来是毛的 —— 网格会把卡片拉成等高，但拉不住
+   卡**里面**的内容。`margin-top: auto` 把最后一段推到下沿，一排卡片于是共用一条基线，
+   而且一个字都不用删。 */
+.aiu-kpi-sub {
+    color: var(--aiu-muted); font-size: 0.75rem; line-height: 1.45;
+    margin-top: auto;
+}
 .aiu-kpi-value.is-unknown { font-size: 1rem; color: var(--aiu-muted); font-weight: 500; }
 
 .aiu-card {
@@ -812,7 +821,18 @@
 .aiu-badge.miss { color: var(--aiu-miss); border-color: var(--aiu-miss); }
 .aiu-badge.failed { color: var(--aiu-danger); border-color: var(--aiu-danger); }
 
-.aiu-notes { margin: 0; padding-left: 20px; color: var(--aiu-text); font-size: 0.875rem; line-height: 1.7; }
+/* 「口径说明」那六条是**参考资料**，不是正文 —— 原先它是全对比度的正文色，六条一起
+   就成了页面上最响的一块（而它讲的恰恰是「数字该怎么读」这种查一次就够的事）。
+   压到 muted 之后（#656d76 在白底约 5.4:1，仍过 AA），每条的 `<strong>` 领起句
+   留在正文色 —— 于是扫一眼就能拿到「这条讲什么」，要用时再读细节。 */
+.aiu-notes {
+    margin: 0; padding: 8px 0 0 20px;
+    border-top: 1px solid var(--aiu-border);
+    color: var(--aiu-muted); font-size: 0.875rem; line-height: 1.65;
+}
+.aiu-notes li { margin-bottom: 6px; }
+.aiu-notes li:last-child { margin-bottom: 0; }
+.aiu-notes strong { color: var(--aiu-text); font-weight: 600; }
 .aiu-legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--aiu-muted); font-size: 0.75rem; margin-top: 8px; }
 .aiu-legend i { margin-right: 4px; }
 .aiu-bars { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
