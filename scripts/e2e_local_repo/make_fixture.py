@@ -42,14 +42,22 @@ def _rmtree(path):
     shutil.rmtree(path, onerror=_on_error)
 
 
-def _git(*args, env_extra=None, cwd=SRC):
+def _git(*args, env_extra=None, cwd=None):
+    """在**工作副本**里跑一条 git。
+
+    `cwd` 的默认值写成 `None` 再在调用点回落到 `SRC`，而不是直接写 `cwd=SRC`：
+    默认值是在 `def` 那一刻绑定的，之后改模块里的 `SRC` 它就跟着不走 —— 而
+    `tests/test_ai_e2e_fixture_self_consistency.py` 正是靠改 `SRC` 把整个造数过程
+    挪进临时目录的（不挪的话，跑一次测试就把本地那份 e2e 仓库重新建一遍，
+    正在联调平台的人会莫名其妙地掉数据）。
+    """
     env = dict(os.environ)
     env.update({
         "GIT_AUTHOR_NAME": "e2e", "GIT_AUTHOR_EMAIL": "e2e@example.com",
         "GIT_COMMITTER_NAME": "e2e", "GIT_COMMITTER_EMAIL": "e2e@example.com",
     })
     env.update(env_extra or {})
-    subprocess.run(["git", *args], cwd=str(cwd), env=env, check=True,
+    subprocess.run(["git", *args], cwd=str(cwd or SRC), env=env, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
@@ -121,6 +129,13 @@ SKILLS_V2 = [
     [2003, "治疗术", 6000, 200, "自身"],
     [2004, "陨石术", 20000, 500, "范围，冷却与伤害需重新平衡"],
 ]
+
+# `build()` 的 **c2 之后、到 tip 为止**，`config/物品表.xlsx` 就停在这个状态：
+# 1005 降到 25，没有 1006/1007。`build()` 的 c3 只改技能表与战斗逻辑，没碰它。
+#
+# 单独提出来是因为**第三轮（`round3`）是 `build()` 的续集**，必须以这里为基 ——
+# 见 `round3` 的说明（拿 `ITEMS_V2` 当基会把 1006/1007 悄悄塞进历史）。
+ITEMS_AT_BUILD_TIP = ITEMS_V1[:4] + [[1005, "回城卷轴", "消耗品", 25, "回到主城"]]
 
 LOGIC_V1 = '''# -*- coding: utf-8 -*-
 """战斗结算。配表读进来之后在这里算伤害。"""
@@ -196,8 +211,9 @@ def build():
     _commit("初始导入配表与战斗逻辑", "2026-09-15T10:00:00+08:00")
 
     # ── c2：一次正常的改动 ─────────────────────────────────────────
-    items = ITEMS_V1[:4] + [[1005, "回城卷轴", "消耗品", 25, "回到主城"]]
-    _write_items(items).save(SRC / "config" / "物品表.xlsx")
+    # 这一版就是 `ITEMS_AT_BUILD_TIP`（第三轮以它为基，别在这里现写一份 —— 两处各写
+    # 一份的话，c2 改了而 round3 没跟着改，round3 的「干净小 delta」就又脏了）。
+    _write_items(ITEMS_AT_BUILD_TIP).save(SRC / "config" / "物品表.xlsx")
     (SRC / "src" / "battle_logic.py").write_text(
         LOGIC_V1.replace("def calc_damage", "def calc_damage_v1"), encoding="utf-8")
     _commit("回城卷轴降价，伤害函数改名", "2026-09-18T14:00:00+08:00")
@@ -236,8 +252,25 @@ def round2():
 
 
 def round3():
-    """第三轮：**只改一个文件**（铁剑价格），让增量做差有一个干净的小 delta。"""
-    items = [list(r) for r in ITEMS_V2]
+    """第三轮：**只改一个文件里的一格**（铁剑价格），让增量做差有一个干净的小 delta。
+
+    ## 它必须以 `build()` 的产物为基，**不是** `ITEMS_V2`
+
+    原先这里拿 `ITEMS_V2` 当基，而 `ITEMS_V2` 含 1006（高级药水）/ 1007（秘银剑）两行。
+    `round2()` 全仓**从来没有被调用过**（`phases.py` 只调 `round3`），所以在一个
+    `build()` 出来的仓库上跑 `phases.py incremental`，那笔「干净的小 delta」会**新增
+    1006/1007** —— 而真实 Git 历史里这两个 ID 从未存在过。
+
+    实测 run 52 / run 53 的报告把它们写成「本期删除」的高风险，污染源就是这里：
+    那个仓库是 `build` + `round3` 造出来的，从没跑过 `round2`。
+
+    ## `round2` 与 `round3` 是 `build()` 之后**两条互斥的续集**
+
+    两条都以 `build()` 的 tip 为起点，各自往下走一步。跑了 `round2`（真加了 1006/1007）
+    之后再跑 `round3`，就会把这两行又删回去 —— 那不是「干净的小 delta」，是另一件事。
+    要验「新增两行」那条路就单独跑 `round2`，别接 `round3`。
+    """
+    items = [list(row) for row in ITEMS_AT_BUILD_TIP]
     for row in items:
         if row[0] == 1003:
             row[3] = 260
