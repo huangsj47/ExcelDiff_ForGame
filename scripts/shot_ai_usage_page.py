@@ -355,17 +355,30 @@ _MEASURE_JS = r"""
         const size = px(getComputedStyle(el).fontSize);
         scale[size] = (scale[size] || 0) + 1;
     });
-    // 一段文本折成几行：Range.getClientRects().length 才是行数（高度量不出来）。
+    // 一段文本折成几行。**不能用 `Range.getClientRects().length`**：它数的是
+    // **行内片段**不是**行**，同一行里夹了 `<code>`/`<strong>` 就被切成好几个 rect。
+    // 实测过一段**真的只有 3 行**的说明被它报成 27 行（8 个行内元素），差点据此
+    // 去改一处并不存在的问题。行数是 `高度 / 行高`（同段落 line-height 是定值），
+    // rect 数另外留着 —— 两者差得多，说明这段的行内标记很碎，不是它更长。
+    //
+    // 还要滤掉**看不见**的元素：收起的 `<details>` 在 Chrome 里**仍有布局盒**
+    // （content-visibility 那套），于是 `getBoundingClientRect()` 会给出一个
+    // 57px 宽的假尺寸、`offsetParent` 也**不是** null —— 只有 `checkVisibility()`
+    // 说真话。折叠起来的长说明不是「文本墙」，它默认根本没画出来。
     const prose = Array.from(document.querySelectorAll('.aiu-page p, .aiu-page li'))
         .filter((el) => el.textContent.trim().length > 40)
+        .filter((el) => (el.checkVisibility ? el.checkVisibility() : true))
         .map((el) => {
             const range = document.createRange();
             range.selectNodeContents(el);
             const rect = el.getBoundingClientRect();
+            const cs = getComputedStyle(el);
+            const lh = parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) * 1.5);
             return {
                 width: Math.round(rect.width),
                 height: Math.round(rect.height),
-                lines: range.getClientRects().length,
+                lines: lh ? Math.round(rect.height / lh) : 0,
+                rectCount: range.getClientRects().length,
                 chars: el.textContent.trim().length,
                 cls: String(el.className || ''),
                 id: el.id || (el.closest('[id]') || {}).id || '',
@@ -403,9 +416,10 @@ def _measure(page, label: str) -> dict:
         for item in data["overflowing"]:
             print(f"    {item['cls'][:40]} {item['scroll']} > {item['client']}")
     print("字号分布: " + "  ".join(f"{k}px×{v}" for k, v in sorted(data["typeScale"].items(), key=lambda kv: -kv[1])))
-    print("最长的几段说明文字（行数按 Range 量）:")
+    print("最长的几段说明文字（行数=高度/行高；rect 数只作参照，差得多说明行内标记碎）:")
     for item in data["prose"]:
         print(f"    宽 {item['width']}px / {item['lines']} 行 / {item['chars']} 字"
+              f"（rect {item['rectCount']}）"
               f"  [{item['cls'][:24]}] {item['id'][:20]} 「{item['head']}…」")
     if data["projectRowColumns"]:
         print(f"项目表列宽合计 {sum(data['projectRowColumns'])}: {data['projectRowColumns']}")
