@@ -40,6 +40,46 @@ CPython 文档也说明 `feature_version` 是 best-effort，并不覆盖全部�
 该判据已双向验证：对缺陷源码命中，对合法写法（如 `chr(92)`、以及反斜杠落在 `{}`
 外面的那条真实误报）不误报——都固化成本文件里的自检用例，避免守卫哪天悄悄失效。
 
+## 第二类缺陷：表达式里复用**外层定界符**（同一份真值表定的）
+
+反斜杠之外，3.11 还拒另一种写法：f-string 的定界符出现在它自己的表达式里。
+
+    latest = client.get(f"/ai-analysis/weekly/{group["cfg_id"]}/latest")
+
+3.11 上这是 `SyntaxError: f-string: unmatched '['`（`tests/test_ai_task_e8_paths.py` 第
+485 行，2026-09-23 挂的 CI），3.13 上完全合法。机理与反斜杠同源：3.11 及以前整条 `f"…"`
+是**一个** STRING token，表达式部分交给老解析器单独扫，它一见构成外层定界符的引号就把
+字符串提前收尾；3.12（PEP 701）换成真正的词法器，同种引号可以复用。
+
+判据的形状是拿 `py -3.11`（3.11.9）与 3.13 各跑一遍同一组片段**实测**出来的，三条要点：
+
+  * **比的是定界符那串字符，不是「内层引号 == 外层引号」**：外层是三引号时，表达式里
+    出现单个 `"` 是**合法**的（`f<三引号>{d["k"]}<三引号>` 在 3.11 上过），连续三个
+    `"` 才拒；
+  * **只在 `{…}` 里找**：反斜杠转义出来的引号落在外层**字面量**部分
+    （`f"a <反斜杠>" b {y}"`）合法，扫整条字面量会在这里误报；
+  * 定界符**以任何方式**进入表达式都拒，不限于它是个字符串的引号 —— `f"{d['a"b']}"`
+    里那个 `"` 只是另一个字符串的**内容**，3.11 照样拒。
+
+（上面写 `<三引号>` 而不是直接写出那三个引号：本文件的 docstring 自己就是三引号包的，
+写出来会把它**提前收尾**成语法错误。与反斜杠用 `<反斜杠>` 是两种不同理由的同一个坑。）
+
+所以复用 `_braced_regions`（它已经在算「哪些字符属于表达式与格式说明」）。与反斜杠那条
+并列成两条全仓守卫，而不是合并：两条的**修法**不同，报出来的原因也不该混在一句话里。
+
+**但这条判据是 3.12+ 专用的，与反斜杠那条不同。** 3.11 的 **tokenizer**（比解析器更早）
+就会在复用引号处把字面量**截断**：实测 `_fstring_literals` 在 3.11 上对
+`f"/ai-analysis/weekly/{group["cfg_id"]}/latest"` 返回的是
+`f"/ai-analysis/weekly/{group["` —— `{` 没闭合，`_braced_regions` 于是拿到空区域。所以它的
+自检在 3.11 上要么失败、要么**空绿**（两边都返回空，等于没验），一律 `skipif` 掉；3.11 那
+一边的覆盖面由 `_scan_sources` 的**解析判据**兜住（这类源码在 3.11 上本来就是 `SyntaxError`），
+全仓那条守卫在 3.11 上断言的就是这个等价性。**覆盖面没有缺口，只是换了一条判据兜。**
+
+**覆盖不到的**：表达式里的字符串字面量含 `}` 时 `_braced_regions` 会提前收尾，那处之后的
+定界符复用会漏报（只漏报、不误报）。PEP 701 还有**第三处**放宽 —— 表达式里放 `#` 注释 3.11
+同样拒 —— 那由并列的第三条判据 `_fstring_expressions_containing_a_comment` 管（同样是
+3.12+ 专用、3.11 由解析判据兜）。
+
 ## 这个文件自己也要守这条规矩
 
 它扫的是「被跟踪的全部 .py」，**包括它自己**。所以它自己的 f-string 里不能出现反斜杠
@@ -62,6 +102,7 @@ from __future__ import annotations
 import ast
 import io
 import subprocess
+import sys
 import tokenize
 from pathlib import Path
 
@@ -147,6 +188,23 @@ def _line_offsets(source: str) -> list[int]:
     return offsets
 
 
+def _tokens_leniently(source: str) -> list[tokenize.TokenInfo]:
+    """tokenize 一遍源码；**词法不完整时返回已经拿到的部分**，不往外抛。
+
+    下面几条判据都靠它：一个文件可能既有多行字符串没闭合、又有我们要报的东西，
+    不能因为前者的 `TokenError` 就把后者一起咽掉。真·解析不了的文件由
+    `_scan_sources` 的解析判据单独报（那条判据与这里互不遮蔽）。
+    """
+    tokens: list[tokenize.TokenInfo] = []
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            tokens.append(token)
+    except (tokenize.TokenError, IndentationError):
+        # 词法都不完整（多行字符串没闭合等）：交给 `_scan_sources` 的解析判据去报。
+        pass
+    return tokens
+
+
 def _fstring_literals(source: str) -> list[tuple[int, str]]:
     """源码里每一段 f-string 字面量的 `(起始行, 原文)`。
 
@@ -180,13 +238,6 @@ def _fstring_literals(source: str) -> list[tuple[int, str]]:
     out: list[tuple[int, str]] = []
     fstring_start = getattr(tokenize, "FSTRING_START", None)
     fstring_end = getattr(tokenize, "FSTRING_END", None)
-    tokens: list[tokenize.TokenInfo] = []
-    try:
-        for token in tokenize.generate_tokens(io.StringIO(source).readline):
-            tokens.append(token)
-    except (tokenize.TokenError, IndentationError):
-        # 词法都不完整（多行字符串没闭合等）：交给 `_scan_sources` 的解析判据去报。
-        pass
 
     offsets = _line_offsets(source)
     pending: list[tuple[int, int]] = []
@@ -194,7 +245,7 @@ def _fstring_literals(source: str) -> list[tuple[int, str]]:
     def slice_from(start: tuple[int, int], end: tuple[int, int]) -> str:
         return source[offsets[start[0] - 1] + start[1] : offsets[end[0] - 1] + end[1]]
 
-    for token in tokens:
+    for token in _tokens_leniently(source):
         if fstring_start is not None and token.type == fstring_start:
             pending.append(token.start)
         elif pending and fstring_end is not None and token.type == fstring_end:
@@ -250,6 +301,135 @@ def _fstring_expressions_with_backslash(source: str) -> list[str]:
     for line, literal in _fstring_literals(source):
         if any(_BACKSLASH in region for region in _braced_regions(_fstring_body(literal))):
             offenders.append(f"line {line}: {literal.strip()}")
+    return offenders
+
+
+def _fstring_delimiter(literal: str) -> str:
+    """f-string 的定界符：1 个或 3 个引号（`f"` → `"`、`rf'''` → `'''`）。
+
+    第一个引号字符之前的一律当前缀（`f` / `r` / 大小写及其组合）。
+    """
+    quote_at = next((i for i, ch in enumerate(literal) if ch in "\"'"), -1)
+    if quote_at < 0:
+        return ""
+    quote = literal[quote_at]
+    return quote * 3 if literal[quote_at : quote_at + 3] == quote * 3 else quote
+
+
+def _fstring_expressions_reusing_the_outer_delimiter(source: str) -> list[str]:
+    """返回所有「表达式里出现外层定界符」的 f-string 片段，形如 `line 12: f"…"`。
+
+    ## 为什么要这条：3.11 不许在表达式里复用外层定界符
+
+    3.11 及以前整条 `f"…"` 是**一个** STRING token，表达式部分交给老解析器单独扫一遍；
+    它一见构成外层定界符的引号就把字符串提前收尾，于是：
+
+        f"/ai-analysis/weekly/{group["cfg_id"]}/latest"   # 3.11: f-string: unmatched '['
+        f"{f"{y}"}"                                        # 3.11: f-string: expecting '}'
+
+    3.12（PEP 701）换成真正的词法器，同种引号可以复用，所以这两种写法在本机（3.13）全绿。
+    **本仓真挂过一次**（`tests/test_ai_task_e8_paths.py` 第 485 行，2026-09-23）。
+
+    ## 判据的形状是实测出来的，不是想出来的
+
+    用 `py -3.11`（3.11.9）与 3.13 各跑一遍同一组片段，得到三条要点：
+
+      * **比的是定界符那串字符，不是「内层引号 == 外层引号」**：外层是三引号时表达式里的
+        单个 `"` 是**合法**的（`f<三引号>{d["k"]}<三引号>` 在 3.11 上过），连续三个 `"` 才拒；
+      * **只在 `{…}` 里找**：转义引号落在外层字面量部分（`f"a <反斜杠>" b {y}"`）合法，
+        扫整条字面量会误报；
+      * 定界符**以任何方式**出现在表达式里都拒，不限于它是个字符串的引号 ——
+        `f"{d['a"b']}"` 里那个 `"` 只是另一个字符串的**内容**，3.11 照样拒。
+
+    所以复用 `_braced_regions`（它已经在算「哪些字符属于表达式与格式说明」）而不是自己
+    数引号。
+
+    ## 只在 3.12+ 上有效，3.11 上天然瞎
+
+    3.11 的 **tokenizer**（早于解析器）就会在复用引号处把字面量截断 —— 实测
+    `_fstring_literals` 对它返回的是 `f"/ai-analysis/weekly/{group["`：`{` 没闭合，
+    `_braced_regions` 拿到空区域。所以它的自检全部 `skipif(3.12)`（在 3.11 上跑要么失败、
+    要么空绿），3.11 那一边的覆盖面由 `_scan_sources` 的**解析判据**兜住 —— 这类源码在
+    3.11 上本来就是 `SyntaxError`。**缺口只在「判据」上，不在「覆盖面」上。**
+
+    ## 已知覆盖不到（都在 docstring 里说清，别让它们变成「以为守住了」）
+
+      * **表达式里的字符串字面量含 `}`**（实测确认，只漏报、不误报）：`_braced_regions`
+        会提前收尾（它自己的 docstring 写了），那处**之后**的定界符复用就扫不到了。
+        漏网例子：`f"{d['}'] + d["k"]}"`（3.11 报 `f-string: unmatched '['`、3.13 过）。
+        本仓目前没有这种写法 —— 出现了就得先修 `_braced_regions` 的收尾判据。
+
+    曾经也报不到「表达式里带 `#` 注释」，现由**另一条并列判据**
+    `_fstring_expressions_containing_a_comment` 管（同一条纪律：先拿真 3.11 与 3.13
+    各编一遍定方向，再写断言）。
+    """
+    offenders: list[str] = []
+    for line, literal in _fstring_literals(source):
+        delimiter = _fstring_delimiter(literal)
+        if not delimiter:
+            continue
+        if any(delimiter in region for region in _braced_regions(_fstring_body(literal))):
+            offenders.append(f"line {line}: {literal.strip()}")
+    return offenders
+
+
+def _fstring_expressions_containing_a_comment(source: str) -> list[str]:
+    """返回所有「表达式里带 `#` 注释」的 f-string 片段，形如 `line 12: # c`。
+
+    ## 为什么要这条：3.11 不许 f-string 的表达式里有 `#`
+
+    PEP 701 放宽的第三处。3.11 及以前，f-string 的表达式部分交给老解析器单独扫一遍，
+    它一见到 `#` 就报 `f-string expression part cannot include '#'`（本仓 2026-09-23
+    那一轮里也验过）。3.12+ 由真正的词法器处理，表达式里可以有注释（前提是那条注释
+    得有换行收尾，所以通常出现在三引号 f-string 里）。实测（`py -3.11` vs 3.13）：
+
+        f<三引号>{
+            d['k']  # c        ← 3.11 拒 / 3.13 过
+        }<三引号>
+
+    两种外层引号（`<三引号>` 与 `'''`）都拒；注释出现在**嵌套 f-string 的表达式**里也拒。
+    （`<三引号>` 是本文件的占位写法：docstring 自己就是三引号包的，写出来会把它提前收尾。）
+
+    ## 判据：数「在 f-string 里面的 COMMENT token」，不做文本搜索
+
+    3.11 拒的**不是**那个字符本身，而是「表达式里的注释」。实测这几条 3.11 都**合法**，
+    文本搜索 `#` 会全部误报：
+
+        f"{d['#']}"              # `#` 在表达式的字符串字面量里
+        f"a # b {y}"             # `#` 在 f-string 的字面量文本里
+        f"{f'{a} # b'}"          # `#` 在嵌套 f-string 的字面量文本里
+
+    这三处的 `#` 都不是 COMMENT token（分别落在 STRING / FSTRING_MIDDLE 里），所以
+    只要认 token 类型就天然不误报。而且 3.12+ 的 COMMENT token 只可能出现在表达式里 ——
+    字面量文本里的 `#` 是 FSTRING_MIDDLE 的一部分 —— 于是判据简化成：
+
+        **一个 COMMENT token，只要它落在某条 f-string 的 FSTRING_START 与配对的
+        FSTRING_END 之间，就是 3.11 会拒的写法。**
+
+    不需要按 f-string 分组，用**嵌套深度计数器**就够了（`FSTRING_START` +1、
+    `FSTRING_END` -1，深度 > 0 时见到的 COMMENT 即违规）：COMMENT 不可能出现在
+    FSTRING_END 之后又算进同一条 f-string 里。
+
+    ## 与引号复用那条同命运：只在 3.12+ 上有效
+
+    3.11 上整条 f-string 是一个 STRING token、也没有 `FSTRING_START`，深度恒为 0，
+    这里返回空 —— 与 `_fstring_expressions_reusing_the_outer_delimiter` 一样是
+    **3.12+ 专用**，3.11 那一边由 `_scan_sources` 的解析判据兜住。
+    """
+    offenders: list[str] = []
+    fstring_start = getattr(tokenize, "FSTRING_START", None)
+    fstring_end = getattr(tokenize, "FSTRING_END", None)
+    if fstring_start is None or fstring_end is None:
+        return offenders
+
+    depth = 0
+    for token in _tokens_leniently(source):
+        if token.type == fstring_start:
+            depth += 1
+        elif token.type == fstring_end:
+            depth = max(0, depth - 1)
+        elif depth > 0 and token.type == tokenize.COMMENT:
+            offenders.append(f"line {token.start[0]}: {token.string.strip()}")
     return offenders
 
 
@@ -396,6 +576,194 @@ def test_detector_does_not_fire_on_a_plain_backslash_string():
 
 
 # --------------------------------------------------------------------------
+# 自检：引号复用（定界符）检测器
+#
+# **这些用例只在 3.12+ 上跑**（`_needs_pep701_tokenizer`）：3.11 的 tokenizer 会在复用
+# 引号处把字面量截断，检测器在那里天然瞎 —— 硬跑的话要么失败（`fires_on_the_defect…`），
+# 要么**空绿**（`does_not_fire_on_the_legal_spellings` 在 3.11 上两边都返回空，等于没验，
+# 那种「绿」比红更坏）。3.11 上这一类由 `_scan_sources` 的解析判据兜住，见全仓守卫里
+# 那条版本分支与 `_fstring_expressions_reusing_the_outer_delimiter` 的 docstring。
+# --------------------------------------------------------------------------
+
+_needs_pep701_tokenizer = pytest.mark.skipif(
+    sys.version_info < (3, 12),
+    reason="3.11 的 tokenizer 会在复用引号处截断 f-string，这条判据天然瞎；那一版由解析判据兜住",
+)
+
+# 本仓 2026-09-23 真挂过 CI 的那一行（tests/test_ai_task_e8_paths.py:485）的写法。
+# 3.11 报 `f-string: unmatched '['`，3.13 合法。
+_QUOTE_REUSE_DEFECT_SOURCE = 'latest = client.get(f"/ai-analysis/weekly/{group["cfg_id"]}/latest")'
+
+# 3.11 上**合法**的写法（逐条都拿 `py -3.11` 实测过）。检测器一个都不许报。
+_QUOTE_REUSE_LEGAL_SOURCES = {
+    # 换一种引号 —— 3.11 下的推荐写法，也是本仓 485 行改成的样子
+    "other_quote": 'x = f"{d[\'k\']}"',
+    # 外层三引号时，表达式里的**单个** `"` 合法（比的是定界符那串字符，不是引号字符）
+    "triple_outer_single_inner": 'x = f"""{d["k"]}"""',
+    # 转义引号落在外层**字面量**部分，3.11 合法 —— 扫整条字面量会在这里误报
+    "escaped_in_literal_part": 'x = f"a \\" b {y}"',
+    # 撇号出现在字面量部分（不是表达式），3.11 合法
+    "apostrophe_in_literal_part": "x = f\"it's {y}\"",
+    # 显式拼接而不是复用引号，合法
+    "adjacent_other_quote": "x = f\"{'a' 'b'}\"",
+    # 反斜杠在表达式里由**另一条**判据管，这条不许重复报
+    "backslash_is_the_other_criterion": 'x = f"{p.replace(chr(92), chr(47))}"',
+}
+
+
+@_needs_pep701_tokenizer
+def test_the_quote_reuse_source_really_has_the_delimiter_inside_the_expression():
+    """先钉住前提：这条合成源码的定界符确实落在 `{…}` 里面。
+
+    否则「检测器能命中」可能只是因为源码构造错了，守卫就成了空转。
+    """
+    literal = _fstring_literals(_QUOTE_REUSE_DEFECT_SOURCE)[0][1]
+    assert _fstring_delimiter(literal) == '"', literal
+    assert any('"' in region for region in _braced_regions(_fstring_body(literal)))
+
+
+@_needs_pep701_tokenizer
+def test_quote_reuse_detector_fires_on_the_defect_it_was_written_for():
+    """核心自检：检测器必须能命中本仓真挂过的那一行。
+
+    没有这条，将来 `_fstring_expressions_reusing_the_outer_delimiter` 被改坏（比如返回
+    空列表）时，全仓守卫会**照样全绿**，守卫变成装饰品。
+    """
+    offenders = _fstring_expressions_reusing_the_outer_delimiter(_QUOTE_REUSE_DEFECT_SOURCE)
+    assert offenders, "检测器漏掉了「表达式里复用外层定界符」的写法"
+    assert offenders[0].startswith("line 1: "), offenders
+    assert 'cfg_id' in offenders[0], "报出来的片段不是那一行"
+
+
+@_needs_pep701_tokenizer
+def test_quote_reuse_detector_does_not_fire_on_the_legal_spellings():
+    """反证：3.11 上合法的写法一条都不许报（含那条最容易误报的转义引号）。"""
+    for name, source in _QUOTE_REUSE_LEGAL_SOURCES.items():
+        assert _fstring_expressions_reusing_the_outer_delimiter(source) == [], name
+
+
+@_needs_pep701_tokenizer
+def test_quote_reuse_counts_the_delimiter_not_the_quote_character():
+    """**真值表里最刺眼的那一对**，钉住「比定界符」而不是「比引号字符」。
+
+    外层是三引号时，表达式里嵌一个 `f"…"` 是**合法**的（3.11 过）；嵌一个
+    `f<三引号>…<三引号>` 才拒。判据若写错成「内层引号 == 外层引号」，前半条就会误报。
+    """
+    assert _fstring_expressions_reusing_the_outer_delimiter('x = f"""{f"{y}"}"""') == []
+    assert _fstring_expressions_reusing_the_outer_delimiter('x = f"""{f"""{y}"""}"""')
+
+
+@_needs_pep701_tokenizer
+def test_quote_reuse_is_caught_however_the_delimiter_gets_in():
+    """定界符**以任何方式**进入表达式都算 —— 不限于它是个字符串的引号。"""
+    # 嵌套 f-string 复用同种引号（PEP 701 的招牌例子）
+    assert _fstring_expressions_reusing_the_outer_delimiter('x = f"{f"{y}"}"')
+    # 格式说明里的嵌套替换字段
+    assert _fstring_expressions_reusing_the_outer_delimiter('x = f"{v:{d["k"]}}"')
+    # `"` 只是表达式里**另一个字符串的内容**（3.11 报 unterminated string literal）
+    assert _fstring_expressions_reusing_the_outer_delimiter('x = f"{d[\'a"b\']}"')
+
+
+@_needs_pep701_tokenizer
+def test_quote_reuse_detection_does_not_depend_on_the_parser(monkeypatch):
+    """同 `test_detection_does_not_depend_on_the_parser`：这条判据也不许调解析器。
+
+    3.11 上缺陷源码**解析不了**，任何「先 parse 再取片段」的实现都会在那里失灵。
+    """
+    def always_refuse(*args, **kwargs):
+        raise SyntaxError("f-string: unmatched '['")
+
+    monkeypatch.setattr(ast, "parse", always_refuse)
+    offenders = _fstring_expressions_reusing_the_outer_delimiter(_QUOTE_REUSE_DEFECT_SOURCE)
+
+    assert offenders, "解析不了的时候检测器就漏报了"
+    assert 'cfg_id' in offenders[0], "报出来的片段不是那一行"
+
+
+# --------------------------------------------------------------------------
+# 自检：表达式里的 `#` 注释（第三条判据，同样只在 3.12+ 上跑）
+# --------------------------------------------------------------------------
+
+# 3.11 报 `f-string expression part cannot include '#'`，3.13 合法。四条都实测过。
+_COMMENT_IN_EXPRESSION_DEFECT_SOURCES = {
+    # 基本形态：三引号 f-string，表达式里一条注释
+    "single_level": 'x = f"""{\n    d[\'k\']  # c\n}"""',
+    # 外层单引号三引号也拒
+    "triple_single_outer": "x = f'''{\n    d['k']  # c\n}'''",
+    # 注释在**嵌套 f-string 的**表达式里（3.11 报 unterminated string literal）
+    "nested_fstring": 'x = f"{f\'\'\'{\n    a  # c\n}\'\'\'}"',
+    # 注释把后面的 `}` 一起吞掉，仍然算表达式里的注释
+    "comment_swallows_a_brace": 'x = f"""{\n    a  # c }\n}"""',
+}
+
+# 3.11 上**合法**的写法（逐条实测过）。文本搜索 `#` 会全部误报，认 token 类型则不会。
+_COMMENT_LEGAL_SOURCES = {
+    # `#` 在表达式的**字符串字面量**里 —— 是 STRING token 的内容，不是注释
+    "hash_inside_a_string": 'x = f"{d[\'#\']}"',
+    "hash_inside_a_string_multiline": 'x = f"""{\n    d[\'#\']\n}"""',
+    # `#` 在 f-string 的**字面量文本**里 —— 是 FSTRING_MIDDLE 的一部分
+    "hash_in_literal_text": 'x = f"a # b {y}"',
+    "hash_in_literal_text_multiline": 'x = f"""a # b\n{y}"""',
+    "hash_in_nested_literal_text": 'x = f"{f\'{a} # b\'}"',
+    # f-string **外面**的普通注释：与本判据无关
+    "plain_comment_outside": "x = 1  # c",
+}
+
+
+@_needs_pep701_tokenizer
+def test_the_comment_defect_source_really_has_a_comment_inside_the_fstring():
+    """先钉住前提：那个 `#` 确实是一个**落在 f-string 里面**的 COMMENT token。
+
+    只是「源码里有 `#`、也有 f-string」不够 —— 那样连 `f"a # b {y}"` 都算违规，
+    判据就成了文本搜索。要钉的是顺序：COMMENT 出现在 FSTRING_START **之后**，
+    且两者之间没有 FSTRING_END（也就是它在 f-string 里面，而不是在后面）。
+    """
+    tokens = _tokens_leniently(_COMMENT_IN_EXPRESSION_DEFECT_SOURCES["single_level"])
+    start_at = next(i for i, t in enumerate(tokens) if t.type == tokenize.FSTRING_START)
+    comment_at = next(i for i, t in enumerate(tokens) if t.type == tokenize.COMMENT)
+
+    assert start_at < comment_at, "COMMENT 出现在 f-string 开始之前"
+    assert not any(t.type == tokenize.FSTRING_END for t in tokens[start_at:comment_at]), (
+        "COMMENT 落在 f-string 之外，这条用例就验错东西了"
+    )
+
+
+@_needs_pep701_tokenizer
+def test_comment_detector_fires_on_the_defect_it_was_written_for():
+    """核心自检：四种形态必须全中（含嵌套 f-string 与「注释吞掉 `}`」）。"""
+    for name, source in _COMMENT_IN_EXPRESSION_DEFECT_SOURCES.items():
+        offenders = _fstring_expressions_containing_a_comment(source)
+        assert offenders, f"{name}：检测器漏掉了「表达式里的 `#` 注释」"
+        assert offenders[0].startswith("line 2: "), (name, offenders)
+        assert "# c" in offenders[0], (name, offenders)
+
+
+@_needs_pep701_tokenizer
+def test_comment_detector_does_not_fire_on_the_legal_spellings():
+    """反证：`#` 在字符串里、在字面量文本里、在 f-string 外面，3.11 都合法。
+
+    这条是本判据最容易写错的方向 —— 只要退化成「搜 `#` 字符」，这一整组会立刻变红。
+    """
+    for name, source in _COMMENT_LEGAL_SOURCES.items():
+        assert _fstring_expressions_containing_a_comment(source) == [], name
+
+
+@_needs_pep701_tokenizer
+def test_comment_detection_does_not_depend_on_the_parser(monkeypatch):
+    """同前两条：这条判据也不许调解析器（3.11 上缺陷源码是解析不了的）。"""
+    def always_refuse(*args, **kwargs):
+        raise SyntaxError("f-string expression part cannot include '#'")
+
+    monkeypatch.setattr(ast, "parse", always_refuse)
+    offenders = _fstring_expressions_containing_a_comment(
+        _COMMENT_IN_EXPRESSION_DEFECT_SOURCES["single_level"]
+    )
+
+    assert offenders, "解析不了的时候检测器就漏报了"
+    assert "# c" in offenders[0], offenders
+
+
+# --------------------------------------------------------------------------
 # 真正的守卫
 # --------------------------------------------------------------------------
 
@@ -430,6 +798,21 @@ def _scan_sources(sources: dict) -> tuple[list[str], list[str]]:
     return offenders, unparsable
 
 
+def _assert_the_parse_criterion_covers_it_on_311(source: str) -> None:
+    """3.12+ 专用的那两条判据在 3.11 上是瞎的，那里改钉「有人兜」。
+
+    见 `_fstring_expressions_reusing_the_outer_delimiter` 与
+    `_fstring_expressions_containing_a_comment` 的 docstring：这类源码在 3.11 上
+    **本来就过不了 `ast.parse`**，所以 3.11 边的验收标准不是「新判据报得出来」，
+    而是「解析判据确实报得出来」。
+
+    不写成 `pytest.skip`：跳过等于**没人守**，而这个断言至少能证明覆盖面还在；
+    它本身也是活的（把入参换成合法源码就会塌，见 `branchlive` 那类验证）。
+    """
+    _, unparsable = _scan_sources({"defect.py": source})
+    assert unparsable, "3.11 上这类源码必须被解析判据报出来，否则这一类就没人守了"
+
+
 def test_no_fstring_expression_contains_a_backslash():
     """全仓守卫：任何被跟踪的 .py 都不得在 f-string 表达式里用反斜杠。"""
     offenders, unparsable = _scan_sources(
@@ -443,6 +826,66 @@ def test_no_fstring_expression_contains_a_backslash():
         "以下 f-string 的表达式部分里出现了反斜杠。这是 Python 3.12+（PEP 701）"
         "才允许的写法，CI 的 3.11 会直接 SyntaxError；若该文件是 conftest.py，"
         "整个测试任务都无法启动。改用 Path(...).as_posix()、os.sep 或 chr(92)：\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_no_fstring_reuses_its_own_delimiter_inside_the_expression():
+    """全仓守卫：任何被跟踪的 .py 都不得在 f-string 表达式里复用外层定界符。
+
+    与反斜杠那条并列而不是合并：两条判据的**修法**不同（一个改用 `chr(92)` / `as_posix()`，
+    一个把内层引号换一种），报出来的原因也不该混在同一句话里。
+
+    **3.11 上换一种断言**：这条判据在 3.11 上天然瞎（3.11 的 tokenizer 会在复用引号处截断
+    字面量），全仓扫过去只会得到一个**没有意义的空绿** —— 那种绿比红更坏。而 3.11 上这类
+    源码本来就过不了 `ast.parse`，所以那里改钉**等价性**：拿真源码确认它确实被判成「解析
+    不了」。覆盖面没有缺口，只是换了一条判据兜（见本函数 docstring 里那条版本分支的说明）。
+    """
+    if sys.version_info < (3, 12):
+        _assert_the_parse_criterion_covers_it_on_311(_QUOTE_REUSE_DEFECT_SOURCE)
+        return
+
+    offenders: list[str] = []
+    for rel in _tracked_python_files():
+        offenders.extend(
+            f"{rel}:{item}"
+            for item in _fstring_expressions_reusing_the_outer_delimiter(_read_source(rel))
+        )
+
+    assert not offenders, (
+        "以下 f-string 的表达式里出现了外层定界符。这是 Python 3.12+（PEP 701）才允许的"
+        "写法，CI 的 3.11 会直接 SyntaxError（`f-string: unmatched '['`），而本机 3.13 "
+        "全绿 —— 正是本仓 2026-09-23 挂 CI 的那一类。把内层字符串换成另一种引号"
+        "（外层是双引号就用单引号）：\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_no_fstring_expression_contains_a_comment():
+    """全仓守卫：任何被跟踪的 .py 都不得在 f-string 的表达式里放 `#` 注释。
+
+    第三条并列判据（PEP 701 的另一处放宽）。**认 token 类型、不搜 `#` 字符** ——
+    `f"{d['#']}"`、`f"a # b {y}"` 在 3.11 上都是合法的，搜字符会误报一片（自检里钉着）。
+
+    3.11 上这条判据同样天然瞎（整条 f-string 是一个 STRING token，认不出里面的
+    COMMENT），那里换钉解析判据兜不兜得住 —— 与引号复用那条同款处理。
+    """
+    if sys.version_info < (3, 12):
+        _assert_the_parse_criterion_covers_it_on_311(
+            _COMMENT_IN_EXPRESSION_DEFECT_SOURCES["single_level"]
+        )
+        return
+
+    offenders: list[str] = []
+    for rel in _tracked_python_files():
+        offenders.extend(
+            f"{rel}:{item}"
+            for item in _fstring_expressions_containing_a_comment(_read_source(rel))
+        )
+
+    assert not offenders, (
+        "以下 f-string 的表达式里出现了 `#` 注释。这是 Python 3.12+（PEP 701）才允许的"
+        "写法，CI 的 3.11 会直接 SyntaxError（`f-string expression part cannot include "
+        "'#'`），而本机 3.13 全绿。把注释挪到 f-string 外面，或先算好再插值：\n  "
         + "\n  ".join(offenders)
     )
 

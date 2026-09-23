@@ -482,7 +482,10 @@ class TestTheFiveWeeklyPathsOverHttp:
         with app.test_client() as client:
             _login(client)
             latest = client.get(
-                f"/ai-analysis/weekly/{group["cfg_id"]}/latest"
+                # 内层用单引号：f-string 的**表达式部分**里复用外层同种引号是 3.12+
+                # （PEP 701）才允许的写法，CI 的 3.11 会 SyntaxError，见
+                # tests/test_python311_syntax_compat.py。
+                f"/ai-analysis/weekly/{group['cfg_id']}/latest"
             ).get_json()
             body = _post_job(
                 client, group["cfg_id"],
