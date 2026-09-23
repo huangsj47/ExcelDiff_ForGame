@@ -489,6 +489,7 @@ def run_family(
     on_start: Callable[[RoundProgress], None] | None = None,
     should_skip: Callable[[MemberPlan, int], str] | None = None,
     run_analysis_fn: Callable[..., EngineOutcome] = run_analysis,
+    single_run_budget: Any | None = None,
 ) -> FamilyResult:
     """顺序跑 N 个成员 + 1 次汇总，返回一家子的结果。
 
@@ -514,6 +515,32 @@ def run_family(
 
     **汇总那一次不查预算**：它是唯一产出最终报告的一步，跳过它等于这一家子白跑 ——
     真的付不起就不该起跑（那是起跑前的闸门管的，见 `analysis_budget.budget_gate_reason`）。
+
+    ## `single_run_budget`：`should_skip` 挡不住的那一半
+
+    `should_skip` 只在**成员开跑前**看一眼，一个成员自己跑起来之后花多少没人管 ——
+    上限被撑破正是从这个缺口漏出去的。传了 `single_run_budget` 之后，**同一个账本**
+    会跟着进到每一个成员的引擎里：引擎在每轮开头读它、每次调用后扣它（判据与保证的
+    边界见 `services/ai/budget_gate.py`）。于是
+
+    * 成员开跑前：`should_skip` 用家族下界估值（既有闸门，一行不动）；
+    * 成员跑起来之后：引擎读的是**逐次调用累出来的同一份账**，而它跨全部成员共享 ——
+      所以它同时就是「这家子到现在花了多少」。
+
+    ## 这道闸拦「探路」，不拦「交付」
+
+    **汇总那一次不接这个账本**，与上面「汇总不查预算」是同一条产品决定：它是唯一产出
+    最终报告的一步，而分片们已经把钱花了。拦下它，等于把一份「已查部分 + 缺口」的报告
+    换成一次彻底的失败 —— 同样的钱，更差的结果（实测就撞上过这条：一次
+    `test_an_exhausted_single_run_cap_stops_the_exploration_without_new_model_calls`
+    在改动后从 degraded 掉成 failed，因为分片被跳过的同时汇总也被拦了）。真的付不起
+    就该在起跑前被 `budget_gate_reason` 挡住 —— 那是「这次运行要不要开始」，
+    不是「报告要不要写」。
+
+    分片与对账轮都要接：那两步是**探路**，停下来只是「这一块没查完」，会如实进信息缺口。
+
+    不传它时（老调用点与测试）行为与从前**逐字节相同**：`_call_engine` 只在它不是 `None`
+    时才把那个关键字交给 `run_analysis_fn`（测试注入的假实现不认这个参数）。
 
     ## `run_analysis_fn`
 
@@ -559,6 +586,7 @@ def run_family(
             run_analysis_fn=run_analysis_fn,
             member_limits=member_limits,
             pool_note=_pool_note(quota, cap_requests, cap_rounds, role_line=""),
+            single_run_budget=single_run_budget,
         )
         steps.append(step)
         if step.outcome is not None:
@@ -655,6 +683,10 @@ def run_family(
                     on_start=on_start,
                     body_cache=body_cache,
                     run_analysis_fn=run_analysis_fn,
+                    # 对账轮是**探路**（找反证），所以要接账本 —— 它没跑成只是
+                    # 「结论没经过复核」，如实写进报告即可（见 `run_family` 的
+                    # `single_run_budget` 一节：拦探路，不拦交付）。
+                    single_run_budget=single_run_budget,
                     member_limits=replace(
                         plan.limits,
                         max_tool_requests=verify_caps[0],
@@ -817,6 +849,7 @@ def _run_one(
     run_analysis_fn: Callable[..., EngineOutcome],
     member_limits: EngineLimits,
     pool_note: str,
+    single_run_budget: Any | None = None,
 ) -> MemberOutcome:
     """跑一个成员（子代理或汇总），把它报出的候选结论抽出来。
 
@@ -848,6 +881,7 @@ def _run_one(
         on_start=on_start,
         body_cache=body_cache,
         run_analysis_fn=run_analysis_fn,
+        single_run_budget=single_run_budget,
     )
     candidates = _candidates_of(member, outcome, evidence_index_of(body_cache))
     return MemberOutcome(
@@ -915,6 +949,7 @@ def _run_verify(
     run_analysis_fn: Callable[..., EngineOutcome],
     member_limits: EngineLimits,
     pool_note: str,
+    single_run_budget: Any | None = None,
 ) -> MemberOutcome:
     """跑对账轮。它**不是分片**：维度是空的，`role` 是 `verify`，面板上标签是 `V1`。
 
@@ -945,6 +980,7 @@ def _run_verify(
         on_start=on_start,
         body_cache=body_cache,
         run_analysis_fn=run_analysis_fn,
+        single_run_budget=single_run_budget,
     )
     return MemberOutcome(
         plan=member,
@@ -1026,6 +1062,7 @@ def _call_engine(
     on_start: Callable[[RoundProgress], None] | None,
     body_cache: MutableMapping[Any, ContextItem],
     run_analysis_fn: Callable[..., EngineOutcome],
+    single_run_budget: Any | None = None,
 ) -> EngineOutcome:
     """调一次引擎，把「我是谁」贴到进度上。
 
@@ -1052,6 +1089,12 @@ def _call_engine(
             )
         )
 
+    # 只有真给了账本才把这个关键字交下去：测试注入的 `run_analysis_fn` 是假实现，
+    # 多塞一个它不认的参数就等于把那些用例打断（而「不传时行为逐字节相同」是这几个
+    # 子代理专属参数的既有承诺，见 `run_analysis` 的 docstring）。
+    budget_kwargs: dict[str, Any] = (
+        {} if single_run_budget is None else {"single_run_budget": single_run_budget}
+    )
     return run_analysis_fn(
         client=client,
         provider=provider,
@@ -1068,6 +1111,7 @@ def _call_engine(
         seed_messages=plan.seed_messages,
         task_message=task_message,
         body_cache=body_cache,
+        **budget_kwargs,
     )
 
 

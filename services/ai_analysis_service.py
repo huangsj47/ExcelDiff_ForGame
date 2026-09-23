@@ -103,6 +103,7 @@ from services.ai.baseline_source import (
     suppressed as _suppressed,
 )
 from services.ai.budget import effective_prompt_budget
+from services.ai.budget_gate import SingleRunBudget
 from services.ai.budget_plan import build_budget_plan, derive_tool_limits
 from services.ai.change_set import from_commit_payload, from_weekly_payload
 
@@ -1417,6 +1418,16 @@ def _run_engine_and_persist(
         # **单代理路径也要听计划的**：这一档的轮次/索取由计划里的成员决定（见
         # `analysis_plan.single_member_limits` 的说明）。
         engine_args["limits"] = single_member_limits(limits, analysis_plan)
+    # **单次 token 硬上限：两条路共用一个闸**（P1-1）。
+    #
+    # 原先这道闸只接在家族分支的 `should_skip` 上，于是有两个洞：单分析者路径**一个字都
+    # 没检查**（页面却写着「单次上限」），子代理路径也只在成员**开跑前**看一眼 ——
+    # 成员自己跑起来之后花多少没人管。
+    #
+    # 现在账本挂在这里、跟着 `engine_args` 进引擎：引擎每轮开头读它、每次调用后扣它
+    # （判据与边界见 `services/ai/budget_gate.py`，公式只有 `single_run_guard` 那一份）。
+    # 家族路径上它跨成员共享，所以「这一次运行还能花多少」在成员内部同样成立。
+    engine_args["single_run_budget"] = SingleRunBudget.from_plan(analysis_plan)
     plan = plan_family(
         mode=payload.get("mode") or "",
         enabled=bool(project_config.get("subagent_enabled")),

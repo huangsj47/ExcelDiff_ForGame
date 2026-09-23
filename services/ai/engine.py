@@ -39,6 +39,7 @@ from typing import Any, Callable, Mapping, MutableMapping, Protocol, Sequence
 
 from services.ai import round_events, trace_evidence
 from services.ai.baseline import DEFAULT_BASELINE_CHARS
+from services.ai.auto_sizing import conservative_tokens_for
 from services.ai.budget import (
     DEFAULT_MAX_ITEMS,
     DEFAULT_TOTAL_CHARS,
@@ -111,7 +112,21 @@ from services.ai.protocol import (
     salvage_report_markdown,
     sanitize_requests,
 )
+from services.ai.budget_gate import SingleRunBudget
 from services.ai.request_fingerprint import RoundDiagnostics
+# 引擎侧的中文措辞（trace 备注 + 收尾提示词）：纯文本拼装，不碰引擎状态，搬出去让本文件
+# 离 2000 行 ERROR 闸门远一点。**仍按原名回导**，于是下面几十个调用点一个字都不用改。
+#
+# `# noqa: F401` 必须写在**每一行别名上**：写在 `from ... import (` 那一行时 ruff 认为
+# 整块是未使用导入，`ruff --fix` 会把这些刻意保留的回导直接删掉（真发生过）。
+from services.ai.round_notes import (  # noqa: F401
+    batch_notes as _batch_notes,  # noqa: F401
+    combine_notes as _combine_notes,  # noqa: F401
+    join_recap as _join_recap,  # noqa: F401
+    rejected_note as _rejected_note,  # noqa: F401
+    request_labels,  # noqa: F401
+    salvage_user_message as _salvage_user_message,  # noqa: F401
+)
 from services.ai.rules import RuleThresholds, normalize_anomalies
 from services.ai.scope import AnalysisScope
 from services.ai.skill_contract import DIMENSION_IDS, DimensionSpec, dimension_ids_of
@@ -119,55 +134,30 @@ from services.ai.skill_loader import LoadedSkills
 from models.ai_analysis.project_config import DEFAULT_MAX_ANOMALIES_PER_SUBAGENT
 from utils.logger import log_print
 
+# 退化（degradation）的取值域与中文标签：常量与文案，没有任何依赖，单独一层。
+# 搬到 `degradation.py` 是为了让本文件离 2000 行 ERROR 闸门远一点（本文件顶着那个闸门）。
+#
+# **仍按原名回导**：`subagent.py`、`result_payload` 与十几处测试都是按
+# `engine.DEGRADE_*` 这个**属性**取用的，直接搬走就等于把它们全部打断。
+from services.ai.degradation import (  # noqa: F401 —— 读侧与测试按属性名取用
+    DEGRADATION_LABELS,
+    DEGRADE_BUDGET,
+    DEGRADE_CONTEXT,
+    DEGRADE_MARKDOWN,
+    DEGRADE_NONE,
+    DEGRADE_PROTOCOL,
+    DEGRADE_REQUESTS,
+    DEGRADE_ROUNDS,
+    DEGRADE_SUBAGENT,
+    DEGRADE_VERIFY,
+)
+
 # 结果状态。`degraded` 是「有产出，但流程没走完」——必须与 `succeeded` 分开，
 # 否则用户分不出「模型看完说没问题」和「模型没答上来我们拿旧内容凑了一份」。
 STATUS_SUCCEEDED = "succeeded"
 STATUS_DEGRADED = "degraded"
 STATUS_FAILED = "failed"
 
-# 退化原因。空字符串表示没有退化。
-DEGRADE_NONE = ""
-DEGRADE_ROUNDS = "rounds_exhausted"
-DEGRADE_REQUESTS = "requests_exhausted"
-DEGRADE_MARKDOWN = "markdown_report"
-DEGRADE_PROTOCOL = "protocol_corrections_exhausted"
-# 上游以「上下文超长」拒绝了请求，平台收缩提示词后把结论收回来了。**它是一次退化**：
-# 模型是在一份被压过的提示词上作答的，与正常跑完不是一回事，必须说出来。
-DEGRADE_CONTEXT = "context_overflow"
-# 子代理模式（`services/ai/subagent.py`）下「有成员没跑成」或「它报出的结论没有进入最终
-# 报告」。**它比上面几条都重**：那几条说的是「这块看过了但看得不够」，这一条说的是
-# 「这块**没有人看过**」—— 而它最容易被读成「这里没问题」。所以它必须出现在
-# `degradation` 上（抽屉会显示 ⚠️ 与这段话），不能只写在报告正文里。
-DEGRADE_SUBAGENT = "subagent_gap"
-# 对账轮（`subagent_verify`）没跑成。它与上面那条的分别要读清楚：那条是「有一块维度
-# 没人看过」，这条是**「结论没经过复核」**—— 报告本身是完整的，只是少了「找反证」这一步。
-# 所以它比 `DEGRADE_SUBAGENT` 轻一档（见 subagent.py 的 `_DEGRADE_RANK`），但**仍然要说**：
-# 用户打开对账轮，图的正是那一步，静默没了等于他以为自己买到了没买到的东西。
-DEGRADE_VERIFY = "subagent_verify"
-
-DEGRADATION_LABELS = {
-    DEGRADE_ROUNDS: "轮次用尽，基于已有证据出结论",
-    DEGRADE_REQUESTS: "上下文索取额度用尽，基于已有证据出结论",
-    DEGRADE_MARKDOWN: "模型没有按协议输出 JSON，已按 markdown 报告降级保存",
-    DEGRADE_PROTOCOL: "连续多轮无法解析出协议要求的 JSON",
-    # 三种补救都算（先压条目、再丢历史、最后收尾），所以这里**不写具体压了什么** ——
-    # 写死「已压掉历史」在「只压了条目、历史还在」那一支上就是一句假话。
-    # 具体做了什么在 trace 的轮次备注里（`round_notes`）。
-    DEGRADE_CONTEXT: "提示词超出模型上下文窗口，已压缩上下文后出结论",
-    DEGRADE_SUBAGENT: (
-        "子代理模式：有分片没有跑成、或它报出的结论没有进入最终报告"
-        "（见报告末尾的「信息缺口（平台补充）」）"
-    ),
-    DEGRADE_VERIFY: (
-        "子代理模式：对账轮（找反证）没有跑成，报告里的结论**没有经过这道复核**"
-    ),
-}
-
-
-
-# 收尾提示词里保留多少变更清单（字符）。只要够模型认出「这次改的是哪一片」即可：
-# 收尾请求的前提就是「装不下」，所以它必须小到任何窗口都装得下。
-_SALVAGE_SUMMARY_CHARS = 1_500
 
 
 def _live_round_entry(record: RoundRecord) -> dict | None:
@@ -636,6 +626,7 @@ def run_analysis(
     seed_messages: Sequence[Mapping[str, Any]] = (),
     task_message: str = "",
     body_cache: MutableMapping[Any, ContextItem] | None = None,
+    single_run_budget: SingleRunBudget | None = None,
 ) -> EngineOutcome:
     """跑完一次分析。**不抛异常**：任何失败都变成 `status="failed"` 的结果。
 
@@ -682,6 +673,14 @@ def run_analysis(
     全部前提 —— 上游按**逐字节前缀**匹配缓存，任何一处重建（重新排序、重写 system、
     把上下文插回去）都会让第 2 轮及以后的缓存命中归零。`cache_control` 断点也挂在这条
     性质上：断点只落在「跨轮次不变、跨运行也尽量不变」的那几段末尾。
+
+    ## 单次 token 硬上限（`single_run_budget`）
+
+    不传它时本函数的行为与它不存在时**逐字节相同**（老调用点一个都不用改）。传了就在
+    每一轮开头问一次「还付得起下一轮吗」，付不起就带着已经拿到的证据停住 —— 判据与
+    保证的边界写在 `services/ai/budget_gate.py`，那**唯一的**公式在
+    `auto_sizing.single_run_guard`。停住的原因进 `degradation`（`DEGRADE_BUDGET`），
+    与「轮次用尽」「索取额度用尽」并列成三件不同的事：那两条是额度，这条是钱。
     """
     limits = limits or EngineLimits()
     thresholds = thresholds or RuleThresholds()
@@ -928,6 +927,21 @@ def run_analysis(
             # （理由见循环末尾那段）。
             if degradation == DEGRADE_NONE:
                 degradation = DEGRADE_ROUNDS
+            break
+        # **单次 token 硬上限：唯一一道闸，在每一轮开头判一次。**
+        #
+        # 放在这里（而不是塞进 `client.complete` 前或包一层异常）有三个理由：一轮里最多
+        # 三次调用（主调用、压小重发、收尾补救）全在这一道之后，**每轮的保守预留**本来就
+        # 覆盖了它们（`round_reserve_tokens` 的语义就是「本轮最坏情况」）；三个调用点外面
+        # 各有一圈 `except Exception`，在那里抛异常会被它们咽掉、变成「传输失败」这种
+        # 与钱无关的说法；而按轮判不需要用异常做控流。
+        #
+        # 这一停**不是失败**，是「再花就超上限了」：下面的兜底会带着已有的轮次出结论。
+        # 已经有了更具体的原因（例如上一轮刚写了 markdown 报告、正等它转成 JSON）时不覆盖
+        # —— 与上面「轮次上限」那一段同一条规矩。
+        if single_run_budget is not None and not single_run_budget.affordable():
+            if degradation == DEGRADE_NONE:
+                degradation = DEGRADE_BUDGET
             break
         # 这一轮对外报的轮次上限：借来的那一轮要报成「第 N/N 轮」，不能出现「第 9/8 轮」。
         reported_max_rounds = (
@@ -1257,6 +1271,14 @@ def run_analysis(
         # 诊断值（推理 token 的来源、三类耗时、请求指纹）进的是**事件账本**，
         # 不在这张账上（见 `RoundDiagnostics`）。调用点在 `usage` 之后。
         diagnostics.note_usage(usage)
+        if single_run_budget is not None:
+            # 单次上限的账也在这里扣（**按次**；上面那道闸是**按轮**判的，因为一轮里可能
+            # 有两次调用，第二次用的是压小后的提示词）。上游没报用量时的口径在
+            # `_tokens_for_budget`。
+            spent, estimated = _tokens_for_budget(
+                usage, len(user_message), estimate_chars(messages), text, limits
+            )
+            single_run_budget.note_usage(spent, estimated=estimated)
         messages.append(entry)
         messages.append({"role": "assistant", "content": text})
 
@@ -1775,6 +1797,41 @@ def _usage_of(result: Any) -> dict[str, Any]:
     }
 
 
+def _tokens_for_budget(
+    usage: Mapping[str, Any],
+    user_message_chars: int,
+    history_chars: int,
+    text: str,
+    limits: EngineLimits,
+) -> tuple[int, bool]:
+    """这一次调用往单次上限的账上记多少，以及这个数**是不是估算出来的**。
+
+    上游两项都报了就是精确值。缺哪一项补哪一项的保守估算，并把整笔记成「估算」——
+    那两条纪律与 `auto_sizing.conservative_member_tokens` 逐字同源：
+
+    * **未知不许当 0** —— 那等于无限放行，单次上限永远判「还没超」；
+    * **也不许当真值** —— `estimated` 这个标记会被 `single_run_guard` 带进那句 `reason`
+      里（「其中含保守估算的部分」），报告的措辞跟着它走。
+
+    提示词那半按**这一轮实际发出去的那一份**估（历史 + 本轮 user 消息，与 `prompt_chars`
+    是同一处口径）；输出那半优先用配置的输出上限 —— 它是我们能承诺的最大值。
+    """
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    if prompt is not None and completion is not None:
+        return max(0, int(prompt)) + max(0, int(completion)), False
+    prompt_est = history_chars + user_message_chars if prompt is None else max(0, int(prompt))
+    if completion is None:
+        # 没配输出上限时退到这一轮实际写回来的正文长度 —— 那是**下界**（推理 token 不算在
+        # 里面），但比当 0 强；这一档本来就是「别把它当 0」。
+        completion_est = limits.max_output_tokens or estimate_chars(
+            [{"role": "assistant", "content": text}]
+        )
+    else:
+        completion_est = max(0, int(completion))
+    return conservative_tokens_for(prompt_est, completion_est), True
+
+
 def _complete_kwargs(limits: EngineLimits) -> dict[str, Any]:
     """发给 `client.complete` 的那些可选参数。
 
@@ -1799,165 +1856,6 @@ def _output_limit_hit(usage: Mapping[str, Any]) -> bool:
     `json.loads` 会成功、括号也配平，只有这句话能识破它。
     """
     return str(usage.get("finish_reason") or "").strip().lower() == "length"
-
-
-def _combine_notes(notes: Sequence[str], extra: str = "") -> str:
-    """把这一轮的补充说明与构造点自己那句拼成一条 trace 备注。"""
-    parts = [str(item).strip() for item in notes if str(item).strip()]
-    if str(extra).strip():
-        parts.append(str(extra).strip())
-    return "；".join(parts)
-
-
-def _join_recap(first: str, second: str) -> str:
-    """把两段压缩记录接起来（一次分析可能压了不止一次）。空的那段不留空行。"""
-    parts = [str(part).strip() for part in (first, second) if str(part or "").strip()]
-    return "\n\n".join(parts)
-
-
-def _salvage_user_message(change_summary: str, seen_items: Sequence[ContextItem]) -> str:
-    """上游反复拒绝之后的**收尾**提示词。
-
-    ## 为什么值得单独写一段
-
-    这时的局面是：前面几轮的钱已经花了，模型也确实看到过一些内容，但整份提示词塞不进
-    它的窗口。丢掉这次分析 = 全部白花；而**一份「证据不足、缺口写清楚了」的报告**仍然
-    是用户能用的东西（`rules`/`protocol` 那一层本来就会按证据强度压结论）。
-
-    ## 它必须小到任何窗口都装得下
-
-    所以正文一条都不带：只带**变更清单的开头**（够认出改的是哪一片）与**取到过什么的
-    目录**（`build_continuation_summary`，只有标签）。这两段加起来是千字符级，
-    128k 窗口的模型也装得下。
-    """
-    head, truncated = truncate_text(str(change_summary or ""), _SALVAGE_SUMMARY_CHARS)
-    blocks = [
-        "# 本次变更（收尾请求）",
-        "",
-        "这次分析的提示词超出了模型的上下文窗口，平台已经把历史压过一轮，仍然装不下。"
-        "所以这一轮只给你这些：变更清单的开头，以及你之前取到过什么的目录。",
-        "",
-        "## 变更清单（开头部分）",
-        head + ("\n\n（清单在此处被截断，后面还有内容。）" if truncated else ""),
-    ]
-    if seen_items:
-        blocks.extend(
-            [
-                "",
-                "## 你已经取到过的内容",
-                build_continuation_summary(seen_items, keep=8),
-            ]
-        )
-    blocks.extend(
-        [
-            "",
-            "## 现在要做的",
-            "**立刻输出协议要求的 JSON**，用你已经看到过的内容作答：",
-            "- 只报有证据支持的问题，每条的证据必须来自你确实看过的内容；",
-            "- 你没能看完的部分写进报告的「信息缺口」，不要用猜测填补；",
-            "- 不要再索取上下文 —— 这一轮之后本次分析就结束了。",
-        ]
-    )
-    return "\n".join(blocks)
-
-
-def _rejected_note(rejected: Any) -> str:
-    """把「你上一轮这些索取没有被执行、原因是这些」说给模型（一句话，见调用处注释）。
-
-    **最后那句不是客套**：实测里模型把「被拒」读成了「平台取数失败」，并据此写进报告的
-    信息缺口。所以这里要显式说清「这不等于那里没有内容」，并告诉它下一步该做什么。
-    """
-    items = list(rejected)
-    shown = items[:4]
-    parts = []
-    for item in shown:
-        subject = str(getattr(item, "detail", "") or "").strip()
-        reason = str(getattr(item, "reason", "") or "").strip()
-        parts.append(f"{subject}（{reason}）" if subject else reason)
-    more = f"，另有 {len(items) - len(shown)} 条同类未逐条列出" if len(items) > len(shown) else ""
-    return (
-        f"你上一轮有 {len(items)} 条上下文索取**没有被执行**：{'；'.join(parts)}{more}。"
-        "**这不等于「那里没有内容」**，也不是平台取数失败 —— 按上面的原因改对之后重新索取即可；"
-        "照原样再要一次不会被执行。"
-    )
-
-
-def _batch_notes(batch: Any) -> list[str]:
-    """把一次批量执行里的异常情况转成给模型看的一句话。"""
-    notes: list[str] = []
-    if batch.refused_by_budget:
-        notes.append(
-            f"有 {batch.refused_by_budget} 个上下文请求因超出本次索取额度而未执行。"
-        )
-    cut = [item for item in batch.items if item.meta.get("truncated")]
-    if cut:
-        notes.append(_truncation_note(cut))
-    failed = [item for item in batch.items if item.meta.get("tool_failed")]
-    if failed:
-        notes.append(
-            f"有 {len(failed)} 条上下文取数失败（{'、'.join(describe_item(item) for item in failed[:3])}）。"
-            "**取不到不等于没有风险**，不要据此下结论。"
-        )
-    return notes
-
-
-def _truncation_note(cut: Sequence[ContextItem]) -> str:
-    """截断那句话必须**点名是哪一条**，并说清**怎么把剩下的拿回来**。
-
-    线上的一次真实核对逼出了这两件事：面板上写着「有 1 条上下文因长度上限被截断」，
-    而那一轮要了两样东西（一份规格文档 + 一张配表）—— 模型（和人）都不知道是哪一条被砍的，
-    更不知道下一步该做什么。
-
-    旁边那两条说明都是既点名又给动作的：取数失败那条列出条目并说「取不到不等于没有风险」，
-    预算省略那条（`budget._omission_note`）说「如果结论依赖被省略的部分，请重新索取」。
-    只有这一条两个都没有，而它说的事情（**你看的内容少了一截**）比那两条更需要行动。
-
-    ## 三种坐标，各自说清给哪类内容用
-
-    「怎么拿回来」按内容形态分三种，而这个函数**看不到形态** —— 它拿到的只是一段渲染好的
-    文本（配表的渲染与代码的渲染在这里长得一样，虽然配表的抬头自己写着怎么点名）。
-    所以三种都给，并各自点明**是哪类内容用的** —— 模型自己知道它刚才要的是什么。
-    按文本抬头去猜形态是可行的，但猜错的方向很坏：把一份规格文档说成「配表，拿不回来」，
-    模型就不再去要了，而它本来只要带个 `lines` 就能拿到。
-
-    ## 配表：**工作表**这一级拿得回来，**表内被砍掉的行**拿不回来
-
-    原先这里写的是「配表的正文拿不回来」，那是**半错的**，而且半错的那一半正好把模型劝退：
-    模型读到「配表拿不回来」，就不再去要本来拿得到的那几张表了。
-
-    * **工作表这一级是可点名的**：`platform_provider.parse_sheet_window` 就把 `lines` 解释成
-      「第几张工作表」，渲染出来的抬头自己写着 `"lines": "<第几张表>"` 并逐张点名缺了谁
-      （`_assemble_workbook._render`）。所以这里要求模型「点名工作表」。
-    * **表内被砍掉的行不可续**：配表没有行坐标，`_read_excel_sheets` 的 `window` 形参是
-      「第几张表」而不是行区间；`_assemble_workbook` 的 `take` 降到 `_EXCEL_MIN_BODY_ROWS`
-      之后仍装不下就落到 `truncate_text`（只砍尾巴）—— 重问同一张表得到**逐字节相同**的
-      结果，那一段永久不可达。
-
-    后面这半句仍然要说给模型听：不说，它就会对着一张被砍过的表下结论（那正是这条说明存在
-    的理由）。但它是**表内行**这一级的结论，不能升格成「整类配表拿不回来」。
-    """
-    labels = "、".join(describe_item(item) for item in cut[:3])
-    more = f"等 {len(cut)} 条" if len(cut) > 3 else ""
-    return (
-        f"有 {len(cut)} 条上下文因**单条长度上限**被截断（{labels}{more}），"
-        "**只砍了尾巴**，后面的内容你没看到。要拿回来："
-        "文本 / 代码类重新索取时点名行窗口（`lines=\"1200-1600\"`）；"
-        "文档、差异与提交清单类点名段（`lines=\"4-6\"`）；"
-        "**配表点名工作表**（`lines=\"2\"` 就是第 2 张表）。"
-        "**同一张工作表里被砍掉的行没有坐标**（配表按行渲染、没有行窗口），"
-        "要核对那些行请用 `file_diff` —— 它按改动行给。"
-    )
-
-
-def describe_item(item: ContextItem) -> str:
-    return str(item.label or item.kind)
-
-
-def request_labels(payload: AnalysisPayload | None) -> list[str]:
-    """给 trace 用：这次分析向模型要过哪些东西。"""
-    if payload is None:
-        return []
-    return [describe_request(request) for request in payload.requests]
 
 
 # 保留给调用方做「轮次摘要」用。
