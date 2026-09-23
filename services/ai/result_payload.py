@@ -283,19 +283,20 @@ def result_payload(
         "risk_level": risk_level,
         "risk_reasons": risk_reasons,
         # **给人看的那一份报告正文**（= `ai_analysis_run.response_text`）。
-        # 里面对外只有一个规范结论：平台那几节（复核裁决 / 未归类 / 条数上限 / 信息缺口），
-        # 子代理模式下模型自己写的那份汇总草稿与对账轮原文**都不在这里**（见下面
-        # `draft_markdown` / `verify_report_markdown`）。
+        # 正文主体是模型写的整体汇总报告，复核标注与平台那几节（未归类 / 条数上限 /
+        # 信息缺口）按次序排在它后面；对账轮原文不在这里（见下面
+        # `verify_report_markdown`）。
         #
         # **一个字节的机器 JSON 都不许有**：裁决走 `outcome.verdict`，正文只给人读
         # （AI-P0-05）。从前这里还会带一行 `<!-- ai-verify-ruling: {...} -->`。
         "report_markdown": outcome.report_markdown,
-        # **模型自己写的那份汇总草稿**：只在它被移出正文时有值（没开对账轮的那些运行里，
-        # 它就是上面那份正文，再存一份等于同一段字节在载荷里出现两次）。它是**存档**，
-        # 默认不渲染 —— 屏幕与导出读的都是上面那份规范正文（AI-P1-01）。
+        # **模型自己写的那份汇总草稿**：只有有复核标注时才另存这一份（没开对账轮的运行里
+        # 它就是上面那份正文的开头，再存一份等于同一段字节在载荷里出现两次）。它是给外部
+        # 读侧保留的**存档**（模型原始草稿、不含平台拼接），默认不渲染 —— 屏幕与导出读的
+        # 都是上面那份正文。
         "draft_markdown": outcome.draft_markdown,
         # 对账轮的整份原文（同样只作为存档；它的结论已经由平台按裁决**结果**渲染进了
-        # 正文的「复核裁决（平台）」那一节，原文里那个 json 块也已被摘掉）。
+        # 正文的「复核标注（平台）」那一节，原文里那个 json 块也已被摘掉）。
         "verify_report_markdown": outcome.verify_report_markdown,
         "status": outcome.status,
         "degradation": outcome.degradation,

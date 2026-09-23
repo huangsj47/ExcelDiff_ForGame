@@ -155,7 +155,7 @@ class TestARetractedCandidateIsNotMissing:
         assert "[S1-9]" in text
         assert "已撤销" in text or "撤销" in text, text
         assert "[F1]" in text, f"没给出它对应哪条结论：\n{text}"
-        assert "复核裁决（平台）" in text, "要说清撤销的理由在哪一节，读者才知道去哪看"
+        assert "复核标注（平台）" in text, "要说清撤销的理由在哪一节，读者才知道去哪看"
 
     def test_only_the_explained_candidates_still_produce_the_section(self):
         """这一节**不因为「没有真缺口」就整个消失**：账上有一条候选，就得交代它去哪了。

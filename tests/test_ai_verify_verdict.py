@@ -560,8 +560,11 @@ class TestTheRulingSection:
         assert "critical" in section, "要写明是从哪一级撤掉的"
         assert "同一提交里生成文件已经删掉了" in section
         assert EVIDENCE_REF in section
-        assert "报告里没有第二份结论清单" in section, (
-            "要说清「报告里只有这一份结论」—— 模型那份草稿不再进正文了（AI-P1-01）"
+        assert "只标注有变化的条目" in section, (
+            "要说清「未点名的按原样采信」—— 草稿是正文主体，标注只点名被改判的条目"
+        )
+        assert "报告里没有第二份结论清单" not in section, (
+            "草稿回到正文里了，这句「草稿不在正文」的话必须跟着消失"
         )
         assert "正文里凡与本节不一致" not in section, (
             "正文里已经没有模型那份稿子了，这句「以本节为准」指向的东西不存在"
@@ -571,7 +574,7 @@ class TestTheRulingSection:
         section = self._section(new=[_obj(title="", evidence=())])
 
         assert "复核阶段记账" in section
-        assert "只记录对账轮" in section
+        assert "只记对账轮" in section
         assert "缺标题或证据" in section
 
     def test_a_run_without_any_verdict_says_so(self):
@@ -579,7 +582,41 @@ class TestTheRulingSection:
 
         assert RULING_TITLE in section
         assert "没有给出可逐条应用的裁决" in section
-        assert "一条都没有生效" in section
+        assert "按原样采信" in section
+        assert "一条都没有生效" not in section, (
+            "旧替身文案的那句「本次复核一条都没生效」—— 那时它会把整份草稿顶出正文，"
+            "现在标注只做一行说明，不许回潮"
+        )
+
+    def test_the_no_change_form_stays_one_line(self):
+        """零裁决那一形态只许是一行说明：正文主体是模型草稿，这一节不许长出分组小节
+        （AI-P1-01 时期它曾是正文本身，替身文案一长就又喧宾夺主）。"""
+        section = render_ruling(reduce_findings([_obj()]), review_ran=True)
+
+        assert section.startswith(RULING_TITLE)
+        assert "### " not in section, "零裁决时渲染出了分组小节 —— 替身文案回潮"
+        assert section.count("\n") <= 5, "一行说明写成了多段 —— 替身文案回潮"
+
+    def test_the_opening_never_grows_back_into_essays(self):
+        """开头的口径说明不许膨胀回三大段（AI-P1-01 时期的形态）：这一节是跟在草稿
+        后面的标注，第一个分组小节（###）之前只许有「标题 + 两段说明 + 覆盖账」。"""
+        from services.ai.verdict import VerifyVerdict
+
+        section = self._section(
+            VerifyVerdict(
+                finding_id="F1",
+                verdict="downgraded",
+                reason="主要读取方已同步改造",
+                final_severity="high",
+                evidence_refs=(EVIDENCE_REF,),
+            )
+        )
+
+        head = section.split("### ")[0]
+        paragraphs = [item for item in head.split("\n\n") if item.strip()]
+        assert len(paragraphs) <= 3, (
+            f"标注节开头膨胀到了 {len(paragraphs)} 段 —— 口径说明回潮成正文了"
+        )
 
 
 # ==========================================================================
@@ -666,10 +703,19 @@ class TestARetractedCriticalIsNoLongerActive:
         assert RULING_BLOCK_MARKER not in report, (
             "机器可读块又回到报告正文里了（AI-P0-05）"
         )
-        assert not [line for line in report.split(chr(10)) if line.startswith("# ")], (
-            "平台这几节都是二级标题 —— 追加它们不该凭空造出一级标题"
+        # 正文现在以模型的汇总草稿开头（2026-09-23 起），所以「正文无一级标题」的旧断言
+        # 作废；钉的是平台自己那几节仍然不新增 H1：正文里的 H1 集合 == 草稿的 H1 集合。
+        h1s = {
+            line for line in report.split("\n") if line.startswith("# ")
+        }
+        draft_h1s = {
+            line for line in (outcome.draft_markdown or "").split("\n")
+            if line.startswith("# ")
+        }
+        assert h1s == draft_h1s, (
+            "平台追加的那几节自己造出了一级标题 —— 它们必须永远是二级以下"
         )
-        assert "## 复核裁决（平台）" in report
+        assert RULING_TITLE in report
 
     def test_the_payload_renders_from_the_final_findings(self):
         payload = result_payload(

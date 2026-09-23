@@ -675,10 +675,12 @@ def test_the_dimension_column_falls_back_when_the_result_has_no_list(tmp_path, m
 # 四条路径因此天然一致；这四条用例钉住「以后也一致」。
 
 def _canonical_report() -> str:
-    """一份**平台视角**的规范正文：裁决节 + 条数上限的一节，没有一行机器 JSON。"""
+    """一份**规范正文**：模型汇总草稿开头 + 复核标注节，没有一行机器 JSON
+    （2026-09-23 起的正文形态 —— 草稿是主体，裁决只做标注）。"""
     return (
-        "## 复核裁决（平台）\n\n"
-        "本节是平台按对账轮（找反证）的结构化裁决渲染的**最终口径**……\n\n"
+        "# 变更理解\n\n改了道具表。\n\n"
+        "## 复核标注（平台）\n\n"
+        "对账轮（找反证）的裁决已经应用到上面的汇总结论与落库异常清单上……\n\n"
         "### 已撤销 1 条（移出当前结论清单）\n\n"
         "- **[F1]（正文 R1）【道具】ID 被删除但生成文件仍在**："
         "原 `critical` / `very_high` → **反证成立（撤销）**，已从当前结论清单移除；"
@@ -851,7 +853,7 @@ def test_the_sse_result_event_carries_the_same_canonical_payload(monkeypatch):
     assert verdict.RULING_BLOCK_MARKER not in dumped, (
         "交出去的结论载荷里又出现了机器 json"
     )
-    assert "## 复核裁决（平台）" in data["report_markdown"], (
+    assert "## 复核标注（平台）" in data["report_markdown"], (
         "给人看的那一节没发出去"
     )
 

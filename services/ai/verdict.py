@@ -43,7 +43,7 @@
 对账轮按 `verdict_instructions` 的形状在 `report_markdown` 里给一个 json 代码块；平台用
 **自己那套容错解析**读它（`protocol.parse_json_candidates`：剥推理块、剥围栏、首尾大括号
 切片）—— 与读模型其它结构化输出是同一套口径。读回来的裁决还会被平台**重新渲染**成报告里
-的「## 复核裁决（平台）」一节：那一节是与正文并列的最终口径。
+的「## 复核标注（平台）」一节：跟在模型汇总报告正文之后的标注，点名哪些结论被复核改了判。
 
 reducer 的产出由平台**结构化地带出去**（`EngineOutcome.verdict`，就是 `Reduction.as_dict()`
 那一份）：`result_payload` 从那个字段把它取回来放进结论载荷 —— 于是 **markdown、落库的值、
@@ -56,8 +56,9 @@ reducer 的产出由平台**结构化地带出去**（`EngineOutcome.verdict`，
 （`static/js/ai-report-markdown.js`），注释必然变成一段可见的乱码 —— 实测 run 20 的
 `response_text` 里 35.3%（12,617 / 35,763 字符）就是那段机器 json，而用户在页面上真的看到了它。
 
-现在机器裁决只走结构化的那一条路。报告正文里只留**给人看**的内容：本模块渲染的
-「复核裁决（平台）」一节（`render_ruling`），以及「未归类 / 条数上限 / 信息缺口」那几节。
+现在机器裁决只走结构化的那一条路。报告正文里只留**给人看**的内容：模型写的整体汇总报告
+（正文主体，见 `subagent.aggregate_outcomes`），以及本模块渲染的「复核标注（平台）」一节
+（`render_ruling`）与「未归类 / 条数上限 / 信息缺口」那几节。
 
 ## 四条落到结论上的口径（2026-09-21，全部来自 run 15 的实测）
 
@@ -179,7 +180,9 @@ KIND_VERIFY = "verify"
 
 # 报告里那一节的标题，以及**历史数据**里那行机器可读块的标记（见 `strip_ruling_block`：
 # 新运行不再写它，标记只用来把老行的残留认出来）。
-RULING_TITLE = "## 复核裁决（平台）"
+# 2026-09-23：节名从「复核裁决（平台）」改为「复核标注（平台）」—— 正文主体回归模型写的
+# 整体汇总报告（AI-P1-01 的呈现层反转），这一节降为跟在草稿后的标注（`subagent.aggregate_outcomes`）。
+RULING_TITLE = "## 复核标注（平台）"
 RULING_BLOCK_MARKER = "ai-verify-ruling"
 
 # 报告里每条理由/依据占的字符上限。裁决是模型写的，长度不受控 —— 一段几千字的「理由」
@@ -908,7 +911,7 @@ _FENCED_BLOCK_RE = re.compile(r"```[ \t]*(?:json)?[ \t]*\r?\n?(.*?)```", re.DOTA
 def strip_verdict_block(markdown: str) -> str:
     """把模型写的那一段裁决块从正文里去掉。
 
-    内容已经由平台渲染成「复核裁决（平台）」那一节（而且是**按裁决结果**渲染的），
+    内容已经由平台渲染成「复核标注（平台）」那一节（而且是**按裁决结果**渲染的），
     原样留着只会让同一件事在报告里出现两遍，其中一遍还是未加工的 json。
     只删**认得出来的**那一个块（`verdict_block_of` 认得出才算），认不出来时正文一个字不动。
 
@@ -1344,38 +1347,37 @@ def _apply_limit(
 # 渲染
 # --------------------------------------------------------------------------
 
-_NOT_APPLIED_SECTION = (
+# 对账轮跑了、但一条可逐条应用的裁决都没给（它可能只报了新发现、也可能把裁决写成了正文
+# 里的一段话）。2026-09-23 起正文主体是模型写的汇总报告，这一节只做一行说明 —— 不能再让
+# 替身文案把整份草稿顶出正文（AI-P1-01 时期的旧形态，用户实测后明确不要）。
+_NO_CHANGE_SECTION = (
     RULING_TITLE
     + "\n\n"
-    + "本次开着「对账轮（找反证）」，但它**没有给出可逐条应用的裁决**（按任务书要求，"
-    "裁决要在 `report_markdown` 里单独给一个 json 代码块）。因此**本次复核对下面的结论"
-    "一条都没有生效** —— 清单里这些条按原样采信，读的时候按未复核看。"
-    # 2026-09-21：原文**不再进报告正文**（AI-P1-01：报告只有一份规范结论），所以那句话
-    # 不能再写「附在下面那一节里」—— 它现在是一份独立存档（结论载荷的
-    # `verify_report_markdown`），报告里没有它。
-    "它的原文留档在本次运行的结论载荷里（`verify_report_markdown`），不再附进报告。\n"
+    + "本次对账轮**没有给出可逐条应用的裁决**（按任务书要求，裁决要在 `report_markdown` "
+    "里单独给一个 json 代码块），上面的汇总按原样采信，读的时候各条按未复核看；"
+    "对账轮原文存档在本次运行的结论载荷里（`verify_report_markdown`）。\n"
 )
 
 
 def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
-    """把复核结果渲染成报告里那一节。**从 `final_findings` 渲染，不是模型写的正文。**
+    """把复核结果渲染成跟在汇总正文后的「复核标注」一节。**从 `final_findings` 渲染，不是
+    模型写的正文。**
 
     `review_ran` 为假（没开对账轮 / 它没跑成）时一个字都不渲染：没有复核就没有裁决，
-    报告不该为此多出一节。
+    报告不该为此多出一节。开头口径说明**不许膨胀回三大段**（2026-09-23 起）：正文主体是
+    模型写的整体汇总报告，这一节是标注 —— 开头写一大段就把「不喧宾夺主」又写没了
+    （有测试钉着 ≤3 行）。
     """
     if not review_ran:
         return ""
     if not reduction.changed:
-        return _NOT_APPLIED_SECTION
+        return _NO_CHANGE_SECTION
 
     lines: list[str] = [
         RULING_TITLE,
         "",
-        "本节是平台按对账轮（找反证）的结构化裁决渲染的**最终口径**：裁决已经应用到下面的"
-        "结论清单上（保留 / 降级 / 撤销 / 转人工核验），落库的异常、下一轮的基线、导出报告"
-        "读的都是这一份。**报告里没有第二份结论清单** —— 模型写的那份汇总草稿不再进报告"
-        "正文（它是一份独立存档，见这次运行的结论载荷 `draft_markdown`），所以读的人"
-        "不必再去辨认哪一句已经被本节改掉。",
+        "对账轮（找反证）的裁决已经应用到上面的汇总结论与落库异常清单上（保留 / 降级 / "
+        "撤销 / 转人工核验）；下面**只标注有变化的条目**，未点名的按原样采信。",
         "",
     ]
     reviewed = len(reduction.rows) - len(reduction.unreviewed)
@@ -1392,16 +1394,15 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
         # 复核有没有给裁决无关，它照样会压置信度 —— 说「一律按原样」就把平台自己刚做的
         # 事说成了没发生。
         notice = (
-            "**注意**：本次复核**没有回结构化裁决**（正文里的话不构成裁决，平台只认那个 "
-            "json 块），所以下面的结论**去留**一律按原样采信；只有它新报出来的条目被合入了"
-            "清单。"
+            "**注意**：本次复核没有回结构化裁决（正文里的话不构成裁决，平台只认 json 块），"
+            "下面的结论**去留**按原样采信，只有它新报出来的条目被合入了清单"
         )
         if reduction.evidence_capped:
             notice += (
-                f"另外，平台按本次运行的**证据缺口**压了 {reduction.evidence_capped} 条的"
-                "置信度（见下面「证据缺口」那一节）—— 那不是复核的裁决，是平台自己的动作。"
+                f"；平台另按本次运行的证据缺口压了 {reduction.evidence_capped} 条的置信度"
+                "（见「证据缺口」一节），那不是复核的裁决，是平台自己的动作"
             )
-        lines.append(notice)
+        lines.append(notice + "。")
         lines.append("")
 
     retracted = reduction.retracted
@@ -1409,8 +1410,8 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
         lines.append(f"### 已撤销 {len(retracted)} 条（移出当前结论清单）")
         lines.append("")
         lines.append(
-            "这几条**不进异常表、不进下一轮基线**（下一轮的基线语义是「上一次为止仍然成立的"
-            "问题全集」）。原文与撤销理由保留在这一节里 —— 撤销本身也是结论，不能没有痕迹。"
+            "这几条**不进异常表、不进下一轮基线**（下一轮的基线语义是「上一次为止仍然成立"
+            "的问题全集」）；原文与撤销理由留在下面 —— 撤销本身也是结论，不能没有痕迹。"
         )
         lines.append("")
         for row in retracted:
@@ -1433,9 +1434,8 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
         lines.append("")
         lines.append(
             "这几条**仍在清单里**，但平台按口径把它们**降了一档等级**（`critical` → `high`、"
-            "`high` → `medium`），置信度也不再按 `very_high` 采信 —— 请人工看一遍再决定处置。"
-            "为什么降：裁决给的是「证据不足」，而一条自己都说证据不足的结论不该同时挂着"
-            "最高等级与最高置信度。"
+            "`high` → `medium`），置信度也不再按 `very_high` 采信 —— 一条自己都说证据不足的"
+            "结论不该同时挂着最高等级与最高置信度，请人工看一遍再决定处置。"
         )
         lines.append("")
         for row in pending:
@@ -1458,7 +1458,7 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
         lines.append("")
         lines.append(
             "这几条是对账轮在找反证的过程中新报出来的，经与主结论同一道校验（结构、重复、"
-            "条数上限）之后合入 —— 它们**不是**「找反证」的结果，是这一轮的附带产出。"
+            "条数上限）后合入 —— 它们是这一轮的附带产出，不是「找反证」的结果。"
         )
         lines.append("")
         for row in new_findings:
@@ -1476,8 +1476,8 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
         lines.append(f"### 复核阶段记账：{len(reduction.rejected)} 条没有进入清单")
         lines.append("")
         lines.append(
-            "这里**只记录对账轮（V1）新增或改写结论时被平台拒绝的条目**；主分析阶段因"
-            "结论条数上限淘汰的条目会单独列在后面的「结论条数上限」中，两组不是重复计数。"
+            "这里**只记对账轮（V1）新增或改写结论时被平台拒绝的条目**；主分析阶段因条数上限"
+            "淘汰的另列在「结论条数上限」，两组不是重复计数。"
         )
         lines.append("")
         for item in reduction.rejected:

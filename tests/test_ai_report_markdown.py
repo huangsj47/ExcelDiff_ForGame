@@ -414,7 +414,7 @@ def test_a_canonical_report_renders_without_any_machine_payload():
     )
     html = _render(render_ruling(reduction, review_ran=True))
 
-    assert "<h2>复核裁决（平台）</h2>" in html, "那一节的标题没渲染成二级标题"
+    assert "<h2>复核标注（平台）</h2>" in html, "那一节的标题没渲染成二级标题"
     assert "ai-verify-ruling" not in html
     assert "&lt;!" not in html, "规范正文里出现了注释（它会被显示出来）"
     assert "反证成立（撤销）" in html

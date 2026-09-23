@@ -38,6 +38,7 @@ from services.ai.subagent import (
     run_family,
     verify_section,
 )
+from services.ai.verdict import RULING_TITLE
 from tests.test_ai_engine import (
     FakeProvider,
     _anomaly,
@@ -428,16 +429,15 @@ def _outcome_engine(anomalies):
 
 
 # ===========================================================================
-# AI-P1-01 的边界：唯一规范结论在**默认配置**下也得成立
+# 报告正文的边界：模型草稿始终是正文主体（2026-09-23 起）
 # ===========================================================================
-# 「有裁决节时草稿让位」这一条臂是安全的，因为 `render_ruling` 自己把最终结论清单渲染
-# 出来了 —— 正文里不会没有结论。而默认配置（`DEFAULT_SUBAGENT_VERIFY = False`，见
-# `models/ai_analysis/project_config.py`）**没有对账轮、没有裁决节**：这时没有任何东西
-# 替代草稿，把草稿也移出正文，等于每份报告与导出只剩「未归类 / 条数上限 / 信息缺口」，
-# 模型的全部结论散文消失 —— 那不是「唯一规范结论」，那是没有结论。
-#
-# 所以准则是「**同一份结论不许有两个来源**」：草稿让位时另存一份，不让位时它就是正文、
-# 且**不再另存**。下面两条各钉一条臂，反转判据（改成无条件移出）时第一条必须红。
+# AI-P1-01 时期「有裁决节时草稿让位」的形态，用户实测后明确不要：报告要读的是模型的
+# 整体汇总，复核只做跟在后面的标注。现在两条臂的准则是「**正文永远以草稿开头**」：
+# 有裁决标注时它跟在草稿后面、且 `draft_markdown` 另存模型原稿（给外部读侧的存档）；
+# 没有裁决标注时（默认配置 `DEFAULT_SUBAGENT_VERIFY = False`）平台那几节直接接在草稿
+# 后面、**不另存**（草稿同时是正文的开头，再存一份就是同一段字节出现两次）。
+# 「单一结论清单」的口径由落库层承担：异常表 / `final_findings` / 下一轮基线仍然只认
+# `reduce_findings` 那一份。下面两条各钉一条臂，反转判据（把草稿又顶出正文）时两条都红。
 
 
 class TestTheDefaultConfigKeepsTheModelTextAsTheOneCanonicalReport:
@@ -487,10 +487,12 @@ class TestTheDefaultConfigKeepsTheModelTextAsTheOneCanonicalReport:
         )
 
 
-class TestTheDraftYieldsWhenThePlatformHasItsOwnSection:
-    """另一条臂：**有**裁决节时，草稿离开正文、只在 `draft_markdown` 里。"""
+class TestTheDraftStaysAsTheBodyWhenThePlatformAnnotates:
+    """另一条臂：**有**裁决标注时，草稿**仍然是正文主体**（2026-09-23 起），复核标注跟在
+    它后面；`draft_markdown` 是给外部读侧保留的模型原稿存档（AI-P1-01 时期「裁决节取代
+    正文」的形态用户实测后明确不要：报告要读的是整体汇总，反证只做标注）。"""
 
-    def test_the_draft_leaves_the_body_and_lands_in_its_own_key(self):
+    def test_the_draft_is_the_body_and_the_annotation_follows(self):
         from tests.test_ai_verify_verdict import _critical_round, _run, _verdict_reply
 
         outcome = _run(
@@ -505,15 +507,27 @@ class TestTheDraftYieldsWhenThePlatformHasItsOwnSection:
                 )
             )
         ).outcome
+        report = outcome.report_markdown
 
-        assert outcome.report_markdown.startswith("## 复核裁决（平台）"), (
-            "这一条臂没走到「有裁决节」—— 那它就没在验 P1-01 的移出判据"
+        assert report.startswith("# 变更理解"), (
+            "这一条臂没走到「有裁决标注」—— 那它就没在验这条判据；"
+            "同时也钉「草稿是正文开头」，不许标注节顶到它前面"
         )
-        assert "改了道具表。" not in outcome.report_markdown, (
-            "有裁决节了，草稿还在正文里：读的人得自己辨认哪一句已经被裁决改掉"
+        assert "改了道具表。" in report, (
+            "有裁决标注了，草稿却不在正文里 —— 报告又只剩裁决那节了"
         )
-        assert outcome.draft_markdown.startswith("# 变更理解"), "草稿没进它自己的键"
+        assert RULING_TITLE in report, "裁决标注节没有跟在草稿后面"
+        assert report.index("改了道具表。") < report.index(RULING_TITLE), (
+            "复核标注排到了草稿前面 —— 标注是标注，不是正文主体"
+        )
+        assert outcome.draft_markdown.startswith("# 变更理解"), (
+            "模型原稿的存档没了 —— 外部读侧（API/SSE）可能只认这个键"
+        )
         assert "改了道具表。" in outcome.draft_markdown, "存档要逐字保留模型的原文"
+        assert report.index(RULING_TITLE) < report.index("## 信息缺口（平台补充）"), (
+            "次序必须是 草稿 → 复核标注 → 平台补充节：标注节排到了信息缺口后面，"
+            "读者会在「没看到什么」之后才看到「哪条被改判」"
+        )
 
 
 @pytest.mark.parametrize("count", [2, 3, 6])
