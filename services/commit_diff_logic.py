@@ -1064,8 +1064,24 @@ def handle_consecutive_commits_merge_internal(file_commits):
             if is_excel:
                 log_print(f"🔍 处理Excel连续提交合并diff", 'APP')
                 parent_commit_id = service.get_parent_commit(earliest_commit.commit_id)
-                if parent_commit_id:
-                    log_print(f"🎯 计算Excel范围diff: {parent_commit_id[:8]}..{latest_commit.commit_id[:8]}", 'APP')
+                # **删除提交的基线必须是这个文件还存在的版本**。窗口末尾是 D 时，
+                # `parent(earliest)` 里可能根本没有这个文件 —— 窗口内「新增后删除」
+                # （疑似重命名）就是这种形状：删除分支取不到基线字节，落回通用路径后
+                # 拿空字节去喂 Excel 解析器，产出一份与真差异长得一模一样的「解析失败」
+                # 载荷，再以 completed 状态**冻结**进周版本缓存（实测：奖励模式表_
+                # CfgRewardMode.xlsx，2026-09-20 冻结至今，页面永远显示解析失败、
+                # AI 每次取数都要绕开缓存重算）。本窗口内最后一条仍带着这个文件的
+                # 提交（A→D 就是那条 A；M 链则是最后一次修改）才是「删除前内容」
+                # 的正确出处 —— 用它，被删内容的渲染才不会漏掉窗口内的修改。
+                if (
+                    _normalize_commit_operation(getattr(latest_commit, 'operation', None)) == 'D'
+                    and len(file_commits) > 1
+                ):
+                    baseline_commit_id = file_commits[-2].commit_id
+                else:
+                    baseline_commit_id = parent_commit_id
+                if baseline_commit_id:
+                    log_print(f"🎯 计算Excel范围diff: {baseline_commit_id[:8]}..{latest_commit.commit_id[:8]}", 'APP')
                     try:
                         # 假基线：`commit_id` 是下游**唯一**读的字段（`get_unified_diff_data`
                         # 与 `get_deleted_file_diff_data` 都只读它，见
@@ -1084,7 +1100,7 @@ def handle_consecutive_commits_merge_internal(file_commits):
                         # 用不属于 ORM 的载体就没有关系可级联 —— 这段代码要的本来就只是
                         # 一个「有 commit_id 的东西」（本模块第 13 行已经在用 SimpleNamespace）。
                         virtual_previous_commit = SimpleNamespace(
-                            commit_id=parent_commit_id,
+                            commit_id=baseline_commit_id,
                             path=earliest_commit.path,
                         )
                         diff_data = _get_unified_diff_data(latest_commit, virtual_previous_commit)

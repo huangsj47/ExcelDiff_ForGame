@@ -223,6 +223,81 @@ class TestTheMergePathIsClean:
                 _cleanup(project, repository)
 
 
+class TestTheBaselineForAWindowEndingInDeletion:
+    """窗口末尾是删除时，基线必须取「本窗口内最后一条该文件仍存在的提交」。
+
+    实测形态（奖励模式表_CfgRewardMode.xlsx，疑似重命名）：窗口里 A→D，
+    `parent(earliest)` 里这个文件**还不存在** —— 拿它当基线，删除分支读不到
+    「删除前的内容」，落回通用路径后空字节喂 Excel 解析器，产出一份与真差异长得
+    一样的「解析失败」载荷，以 completed 状态冻结进周版本缓存。基线换成窗口内
+    那条 A（或 M 链的最后一次修改）之后，被删内容按它**最终存在过的样子**渲染。
+    """
+
+    def _run_merge(self, monkeypatch, *, latest_operation):
+        """跑一次连续提交合并，返回 `(结果, 实际交给 diff 的基线)`。"""
+        import services.threaded_git_service as threaded_git_service
+
+        class _FakeGitService:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_parent_commit(self, _commit_id):
+                return 'a' * 40  # parent(earliest)：对 A→D 窗口里这个文件不存在
+
+        monkeypatch.setattr(threaded_git_service, 'ThreadedGitService', _FakeGitService)
+        monkeypatch.setattr(
+            commit_diff_logic, '_excel_cache_service',
+            SimpleNamespace(is_excel_file=lambda _path: True),
+        )
+
+        with flask_app.app_context():
+            create_tables()
+            project, repository = _make_repository()
+            try:
+                earliest = _make_commit(repository, commit_id='1' * 40, path='t.xlsx')
+                latest = Commit(
+                    repository_id=repository.id,
+                    commit_id='2' * 40,
+                    path='t.xlsx',
+                    status='pending',
+                    operation=latest_operation,
+                )
+                db.session.add(latest)
+                db.session.commit()
+
+                seen_baseline = []
+
+                def _fake_unified_diff(_latest, previous):
+                    seen_baseline.append(previous)
+                    return {'type': 'excel', 'sheets': {'奖励模式': {'operation': 'deleted', 'rows': []}}}
+
+                monkeypatch.setattr(commit_diff_logic, '_get_unified_diff_data', _fake_unified_diff)
+
+                result = commit_diff_logic.handle_consecutive_commits_merge_internal(
+                    [earliest, latest]
+                )
+                return result, (seen_baseline[0].commit_id if seen_baseline else None)
+            finally:
+                _cleanup(project, repository)
+
+    def test_an_add_then_delete_window_uses_the_in_window_baseline(self, monkeypatch):
+        result, baseline_id = self._run_merge(monkeypatch, latest_operation='D')
+
+        assert result is not None, '没走到假基线分支，这条用例就没测到东西'
+        assert baseline_id == '1' * 40, (
+            '删除窗口的基线用了窗口外的东西（parent(earliest)）—— '
+            'A→D 窗口在 parent 里没有这个文件，删除分支取不到基线字节，'
+            '就会落回通用路径产出「解析失败」载荷'
+        )
+
+    def test_a_modified_window_still_uses_the_parent_of_the_earliest(self, monkeypatch):
+        """反向对照：非删除窗口照旧用 parent(earliest) —— 那才是「覆盖整段区间」。"""
+        result, baseline_id = self._run_merge(monkeypatch, latest_operation='M')
+
+        assert result is not None
+        assert baseline_id == 'a' * 40, '普通窗口的基线口径被这次修复顺手改了'
+
+
 class TestTheAttributeSetIsPinned:
     """假基线上**只允许**读 `commit_id`。
 

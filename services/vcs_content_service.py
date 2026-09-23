@@ -513,6 +513,25 @@ def get_unified_diff_data(commit, previous_commit=PREVIOUS_COMMIT_UNSET):
         deleted_diff = get_deleted_file_diff_data(commit, previous_commit)
         if deleted_diff and deleted_diff.get("sheets"):
             return deleted_diff
+        # **Excel 的删除分支拿不出内容时，不许落回下面的通用路径。** 通用路径拿不到
+        # 当前内容（文件已删）与基线内容（基线版本里可能根本没有这个文件 —— 窗口内
+        # 「新增后删除」就是这种形状），会把空字节喂给 Excel 解析器，产出的「读取
+        # Excel 文件失败」载荷带着 `type='excel'`，**与真差异一起被写进缓存、以
+        # completed 状态冻结**：页面从此永远显示解析失败，AI 侧每次取数都得绕开缓存
+        # 重算（实测：奖励模式表_CfgRewardMode.xlsx，2026-09-20 冻结至今）。这里如实
+        # 交代「删了，但删除前的内容拿不到」。代码文件不在此列 —— 它们的删除由
+        # 通用路径的 git diff 正常处理，删掉那一条路才是真破坏。
+        if excel_cache_service.is_excel_file(commit.path):
+            return {
+                'type': 'excel',
+                'file_path': commit.path,
+                'sheets': {},
+                'summary': {'added': 0, 'removed': 0, 'modified': 0, 'total': 0},
+                'message': (
+                    '文件已删除，但基线版本取不到该文件的内容'
+                    '（可能在本窗口内新增后删除），删除前的内容无法展示。'
+                ),
+            }
     perf_project_tags = {
         "project_id": repository.project_id if repository else "",
         "project_code": (repository.project.code if repository and repository.project else ""),

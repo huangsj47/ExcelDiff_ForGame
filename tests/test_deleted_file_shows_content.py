@@ -86,6 +86,9 @@ def patched(monkeypatch):
             self.saved_rows = []
             self.cached_json = None  # 设为 JSON 文本即模拟「缓存命中」
 
+        def is_excel_file(self, path):
+            return str(path).lower().endswith((".xlsx", ".xls", ".csv"))
+
         def get_cached_diff(self, *_args, **_kwargs):
             if self.cached_json is None:
                 return None
@@ -177,6 +180,42 @@ class TestDeletedFileDiffData:
         from services.vcs_content_service import get_deleted_file_diff_data
 
         assert get_deleted_file_diff_data(self._commit(), None) is None
+
+    def test_unified_diff_does_not_fall_through_to_empty_bytes_when_the_baseline_is_gone(self, patched):
+        """基线取不到时，`get_unified_diff_data` 不许落回通用路径（实测冻结的成因）。
+
+        窗口内「新增后删除」的文件在基线版本里不存在：删除分支返回 None 后，旧实现
+        落回通用路径，拿空字节喂 Excel 解析器，产出 `type='excel'` 且带 `error` 的
+        「解析失败」载荷 —— 它与真差异长得一样、以 completed 状态冻结进周版本缓存，
+        页面从此永远显示解析失败、AI 每次取数都要绕开缓存重算
+        （奖励模式表_CfgRewardMode.xlsx，2026-09-20 冻结至今）。
+        """
+        from services.vcs_content_service import get_unified_diff_data
+
+        previous = type("P", (), {"commit_id": "c" * 40})()  # 基线版本里没有这个文件
+
+        result = get_unified_diff_data(self._commit(), previous)
+
+        assert result["type"] == "excel"
+        assert not result.get("error"), (
+            f"又是那台「解析失败」造载荷机：{result.get('error')}"
+        )
+        assert "读取Excel文件失败" not in str(result.get("message", ""))
+        assert "删除前的内容无法展示" in result["message"], "要如实交代为什么没有内容"
+
+    def test_that_honest_payload_is_not_classified_as_a_failure_by_the_ai_guard(self, patched):
+        """上面那份「删了但拿不到内容」对 AI 是**信息**（它知道发生过删除），不是失败。
+
+        `_is_failed_payload` 若把它当失败，AI 侧会绕开缓存去问 Agent —— 那台机器
+        算不出任何不同的东西（基线版本里确实没有这个文件）。
+        """
+        from services.ai.stored_diff_source import _is_failed_payload
+        from services.vcs_content_service import get_unified_diff_data
+
+        previous = type("P", (), {"commit_id": "c" * 40})()
+        result = get_unified_diff_data(self._commit(), previous)
+
+        assert not _is_failed_payload(result), "诚实的删除说明被当成了取数失败"
 
     def test_cached_payload_without_sheets_is_ignored_and_recomputed(self, patched):
         """缓存里那份「没有工作表的 excel」是通用路径写下的（历史缺陷）：对删除提交
