@@ -1372,7 +1372,7 @@ def _starvation_yield_note(now_utc_naive, *, limit=3):
     )
 
 
-def _group_is_writing_cache(config):
+def _group_is_writing_cache(config, *, created_before=None):
     """本批（同一个 `group_key`）**此刻**正被 worker 写缓存吗。
 
     ## 为什么要有这条判据
@@ -1391,6 +1391,17 @@ def _group_is_writing_cache(config):
     手里写**：这一刻再排一条同批的同步只会增加队列深度、不会让缓存更早写完 ——
     下一轮跑完（下一个 tick）再排，语义正好是「一轮跑完才有下一次机会」。
 
+    ## `created_before`：本 tick 自己刚建的**不算**（2026-09-23 真机饿死形态）
+
+    「一轮跑完才有下一次机会」要挡的是**上一批**还在写；本 tick 刚给组里第一条配置
+    排上的任务，是这一批自己的成员。调度器给 config 1 建完任务到走到 config 2 之间，
+    worker 完全来得及把那条认领成 `processing`（真机实测 ~3ms，2026-09-23 PID 45456：
+    config 2 从进程启动起每个 tick 都被「本批正在写缓存」挡住、一次同步都没跑过，
+    1141 行周版本缓存停在前一天；而前一天 worker 认领慢，同一 tick 三条任务 6ms 内
+    全部建出 —— 同一份代码，竞速输赢决定饿不饿死）。传 `created_before`（tick 起点）
+    就把这条竞速钉死了：本 tick 建的任务 `created_at >= tick_started`，被它挡住的
+    只能是**它自己**。
+
     卡死的 `processing`（超过 `WEDGED_SYNC_PROCESSING_SECONDS` 没人再写它）**不算**：
     那种行会把这一批永久挡住，而它自己另有机制兜（`create_weekly_sync_task` 会把它
     置 failed 重建）。
@@ -1402,11 +1413,15 @@ def _group_is_writing_cache(config):
         config_ids = [str(item) for item in (group_config_ids(config) or [])]
         if not config_ids:
             return False
-        rows = _BackgroundTask.query.filter(
+        query = _BackgroundTask.query.filter(
             _BackgroundTask.task_type == 'weekly_sync',
             _BackgroundTask.commit_id.in_(config_ids),
             _BackgroundTask.status == 'processing',
-        ).all()
+        )
+        if created_before is not None:
+            # 本 tick 自己刚建的那条不算：它就是这一批的一部分（理由见 docstring）。
+            query = query.filter(_BackgroundTask.created_at < created_before)
+        rows = query.all()
     except Exception:  # noqa: BLE001 —— 见 docstring：少一道节流，不让同步停摆
         return False
     for row in rows:
@@ -1425,6 +1440,10 @@ def schedule_weekly_sync_tasks():
             # 本轮要不要**让路**（见 `_starvation_yield_note`）：一次 tick 算一次，多个配置
             # 共用同一个结论，日志也就只出一条。
             starvation_yield = None
+            # 本 tick 的起点。组闸门（`_group_is_writing_cache`）只数**这之前**建的任务：
+            # 本 tick 里刚排上的任务是这一批自己的成员，不许拿它挡同批的其他配置
+            # （真机饿死形态见 `_group_is_writing_cache` 的 docstring）。
+            tick_started_naive = datetime.now(timezone.utc).replace(tzinfo=None)
             for config in active_configs:
                 # ⚠️ 这里有两个不同口径的「现在」，混用会出静默错误：
                 #   * config.end_time 是**北京墙钟**（用户在 datetime-local 里填的）
@@ -1455,7 +1474,7 @@ def schedule_weekly_sync_tasks():
                         starvation_yield = _starvation_yield_note(now_utc_naive)
                         if starvation_yield:
                             log_print(starvation_yield, 'WEEKLY', force=True)
-                    if _group_is_writing_cache(config):
+                    if _group_is_writing_cache(config, created_before=tick_started_naive):
                         # 「一轮跑完才有下一次机会」：这一批**此刻**正被写缓存，本轮不补新的。
                         # 判据按**批**而不是按 config —— 见 `_group_is_writing_cache`。
                         log_print(

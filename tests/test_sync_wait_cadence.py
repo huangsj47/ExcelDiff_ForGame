@@ -234,6 +234,42 @@ class TestTheGroupWideGuard:
             f"{[(t.id, t.commit_id) for t in after]}"
         )
 
+    def test_a_task_claimed_mid_tick_does_not_starve_its_own_batch(self, monkeypatch):
+        """本 tick 里刚排上、立刻被 worker 认领的任务，不许挡住同批的另一条配置。
+
+        2026-09-23 真机饿死形态（PID 45456）：调度器先给组里 config 1 建任务，worker
+        ~3ms 内认领成 processing；循环走到 config 2 时组闸门看到「本批正在写缓存」——
+        每个 tick 如此，config 2 从进程启动起一次同步都没跑过，1141 行周版本缓存停在
+        前一天。而前一天 worker 认领慢，同一 tick 三条任务 6ms 内全部建出：同一份代码，
+        竞速输赢决定饿不饿死。闸门要挡的是**上一批**（那条已有
+        `test_a_group_with_a_running_sync_does_not_get_another_one` 钉着），本 tick
+        自己刚建的那条是这一批的一部分。
+        """
+        seeded = _seed_two_configs_in_one_group()
+        original_create = worker.create_weekly_sync_task
+
+        def create_and_claim_immediately(config_id):
+            """模拟 worker 在调度循环走到下一个配置之前就把任务认领走（真机 ~3ms）。"""
+            task_id = original_create(config_id)
+            if task_id:
+                with flask_app.app_context():
+                    row = db.session.get(BackgroundTask, task_id)
+                    if row is not None and row.status == 'pending':
+                        row.status = 'processing'
+                        db.session.commit()
+            return task_id
+
+        monkeypatch.setattr(worker, "create_weekly_sync_task", create_and_claim_immediately)
+
+        self._run_scheduler(monkeypatch)
+
+        after = _pending_sync_tasks(seeded["config_ids"])
+        assert len(after) == 2, (
+            "本 tick 刚被认领的那条把同批另一条配置饿死了 —— 那一条这个 tick 又没排上，"
+            "每个 tick 都这样就是永远不同步："
+            f"{[(t.id, t.commit_id, t.status) for t in after]}"
+        )
+
 
 # ==========================================================================
 #  三、收尾那一行日志必须**只说实际发生的事**
