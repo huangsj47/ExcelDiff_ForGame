@@ -21,23 +21,11 @@ import os
 import re
 
 from models.ai_analysis.project_config import (
-    DEFAULT_MAX_ANALYSIS_ROUNDS,
-    DEFAULT_MAX_ANOMALIES_PER_RUN,
-    DEFAULT_MAX_FILES_PER_RUN,
-    DEFAULT_MAX_TOOL_REQUESTS,
     DEFAULT_PROMPT_CHAR_BUDGET,
-    DEFAULT_REQUEST_TIMEOUT_SECONDS,
-    DEFAULT_SUBAGENT_COUNT,
     DEFAULT_SUBAGENT_ENABLED,
     DEFAULT_SUBAGENT_VERIFY,
     DEFAULT_WEEKLY_INTERVAL_MINUTES,
-    MAX_ANALYSIS_ROUNDS_RANGE,
-    MAX_ANOMALIES_PER_RUN_RANGE,
-    MAX_FILES_PER_RUN_RANGE,
-    MAX_TOOL_REQUESTS_RANGE,
     PROMPT_CHAR_BUDGET_RANGE,
-    REQUEST_TIMEOUT_RANGE,
-    SUBAGENT_COUNT_RANGE,
     WEEKLY_INTERVAL_RANGE,
 )
 from services.ai.skill_contract import DIMENSION_IDS, REPORT_SECTIONS
@@ -101,17 +89,13 @@ def test_the_help_page_tells_qa_about_coupling_analysis():
 # ==========================================================================
 
 # 界面标签 → (常量, 取值范围常量)。标签按 `docs/AI分析使用说明.md` 的表格写法。
+#
+# 2026-09-23 配置面收敛：清单取样上限 / 最大分析轮次 / 上下文索取上限 / 分片数 /
+# 异常上限 / 请求超时这七项**不再是可配置项**（`endpoint_service.RETIRED_FIELDS`），
+# 文档配置表里相应行已删，取而代之的是「平台自动推导」说明 —— 由下面那条测试钉住。
 _DOCUMENTED_DEFAULTS = {
     "分析间隔（分钟）": (DEFAULT_WEEKLY_INTERVAL_MINUTES, WEEKLY_INTERVAL_RANGE),
-    "清单过长时的取样上限": (DEFAULT_MAX_FILES_PER_RUN, MAX_FILES_PER_RUN_RANGE),
-    "最大分析轮次": (DEFAULT_MAX_ANALYSIS_ROUNDS, MAX_ANALYSIS_ROUNDS_RANGE),
-    "上下文索取上限": (DEFAULT_MAX_TOOL_REQUESTS, MAX_TOOL_REQUESTS_RANGE),
     "提示词字符预算": (DEFAULT_PROMPT_CHAR_BUDGET, PROMPT_CHAR_BUDGET_RANGE),
-    "单次请求超时（秒）": (DEFAULT_REQUEST_TIMEOUT_SECONDS, REQUEST_TIMEOUT_RANGE),
-    "单次异常上限": (DEFAULT_MAX_ANOMALIES_PER_RUN, MAX_ANOMALIES_PER_RUN_RANGE),
-    # 子代理模式（services/ai/subagent.py）。**开关那一行不在这个表里**（它没有数字），
-    # 但「数量」这一行必须有 —— 它同时钉住默认值 3 与范围 1~6。
-    "子代理数量": (DEFAULT_SUBAGENT_COUNT, SUBAGENT_COUNT_RANGE),
 }
 
 
@@ -149,6 +133,26 @@ def test_the_documented_defaults_and_ranges_match_the_code():
         low, high = bounds
         row = f"| {label} | {value} | {low}~{high} |"
         assert row in doc, f"说明文档里的配置表与代码不一致，期望这一行：{row}"
+
+
+def test_the_doc_says_the_numeric_knobs_are_auto_derived():
+    """收敛后文档要**两件都写**：收敛键的行删掉了、取代它们的说明在场。
+
+    只删行不写说明，用户会去找那个已经不存在的输入框（或者以为平台在偷偷用某个
+    他不知道的值）；只写说明不删行，读的人还以为那一栏能配。
+    """
+    doc = _read(AI_DOC)
+
+    # 收敛键在配置表里不该再有整行（表行以「| 标签 |」开头）。
+    for retired_label in (
+        "清单过长时的取样上限", "最大分析轮次", "上下文索取上限",
+        "子代理数量", "单次请求超时（秒）", "单次异常上限",
+    ):
+        assert f"| {retired_label} |" not in doc, f"配置表还有收敛键的行：{retired_label}"
+    # 取代它们的说明必须在场，且把默认片数写出来。
+    assert "平台自动推导" in doc
+    assert "默认 5 个分片" in doc, "没有写清默认分片数（推导目标 5）"
+    assert "auto_sizing" in doc, "没指向推导模块的事实源"
 
 
 # ==========================================================================

@@ -79,6 +79,7 @@ def build_budget_plan(
     window_note: str = "",
     window_source: str = "",
     reserved_output_chars: int = 0,
+    family_pool: Mapping[str, object] | None = None,
 ) -> dict:
     """返回可直接落库/下发 UI 的预算事实，不做费用预测。
 
@@ -91,6 +92,15 @@ def build_budget_plan(
 
     两者默认空 / 0：老调用方（还没接这两项的那些）拿到的是「未说明」，而不是一个
     编出来的默认值 —— 「不知道」与「按默认窗口算的」在界面上是两句话。
+
+    ## `family_pool`：串行共享池的账（2026-09-23 起）
+
+    子代理模式开了池之后，`per_role` 里的两个数字是**每片的名义额**（保底），而全家
+    实际能花多少由池决定 —— 计划不带上它，界面与预估端点就会按
+    `roles × 名义额` 高估整次分析的理论上限。给了 `family_pool`（键：`requests_pool` /
+    `rounds_pool` / `*_nominal` / `synthesis_floor_*` / `note`）时，`job_theoretical_max`
+    改按「池 + 汇总保底下限」算（汇总可越池，见 `subagent.FamilyQuota`）。老调用方不传
+    时行为与从前逐字相同。
     """
     shards = max(1, int(shard_count))
     family = shards > 1
@@ -98,6 +108,19 @@ def build_budget_plan(
     limits = dict(tool_limits or DEFAULT_TOOL_LIMITS)
     configured = max(0, int(configured_prompt_chars))
     effective = max(0, int(effective_prompt_chars))
+    pool = dict(family_pool or {}) or None
+    if pool is not None:
+        theoretical_max = {
+            "rounds": max(0, int(pool.get("rounds_pool") or 0))
+            + max(0, int(pool.get("synthesis_floor_rounds") or 0)),
+            "tool_requests": max(0, int(pool.get("requests_pool") or 0))
+            + max(0, int(pool.get("synthesis_floor_requests") or 0)),
+        }
+    else:
+        theoretical_max = {
+            "rounds": roles * max(0, int(max_rounds)),
+            "tool_requests": roles * max(0, int(max_tool_requests)),
+        }
     return {
         "prompt_chars": {
             "configured": configured,
@@ -117,10 +140,18 @@ def build_budget_plan(
             "synthesis": family,
             "verify": bool(verify and family),
         },
-        "job_theoretical_max": {
-            "rounds": roles * max(0, int(max_rounds)),
-            "tool_requests": roles * max(0, int(max_tool_requests)),
-        },
+        "job_theoretical_max": theoretical_max,
+        "family_pool": {
+            "requests_pool": max(0, int(pool.get("requests_pool") or 0)),
+            "rounds_pool": max(0, int(pool.get("rounds_pool") or 0)),
+            "requests_nominal": max(0, int(pool.get("requests_nominal") or 0)),
+            "rounds_nominal": max(0, int(pool.get("rounds_nominal") or 0)),
+            "synthesis_floor_requests": max(0, int(pool.get("synthesis_floor_requests") or 0)),
+            "synthesis_floor_rounds": max(0, int(pool.get("synthesis_floor_rounds") or 0)),
+            "note": str(pool.get("note") or ""),
+        }
+        if pool is not None
+        else None,
         "tool_limits": {key: max(0, int(value)) for key, value in limits.items()},
         "reserved_output": {"chars": max(0, int(reserved_output_chars))},
     }

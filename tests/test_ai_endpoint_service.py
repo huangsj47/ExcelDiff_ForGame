@@ -19,11 +19,13 @@ from services.ai.endpoint_service import (
     FIELD_DEFAULTS,
     FIELD_RULES,
     OPENAI_BASE_URL,
+    RETIRED_FIELDS,
     SOURCE_CUSTOM,
     SOURCE_OPENAI,
     ConfigValidationError,
     FieldError,
     build_probe_client,
+    describe_field_schema,
     probe_connection,
     probe_models,
     source_of,
@@ -80,37 +82,39 @@ class FakeClient:
 
 
 def test_an_in_range_integer_passes():
-    assert validate_field("max_analysis_rounds", "5") == 5
-    assert validate_field("max_analysis_rounds", 5) == 5
+    # 2026-09-23 配置面收敛后原来的数值例（max_analysis_rounds 等）进了 RETIRED_FIELDS，
+    # 这里换用仍然可配的整型栏当例子。
+    assert validate_field("weekly_interval_minutes", "30") == 30
+    assert validate_field("weekly_interval_minutes", 30) == 30
 
 
 def test_an_out_of_range_integer_is_rejected_not_clamped():
     """**这条是刻意的，也是与原实现的区别所在。**
 
-    `_clamp_int` 会把 999 悄悄变成 30，用户看到「保存成功」却不知道自己填的值被改了。
+    `_clamp_int` 会把 999 悄悄变成 10080，用户看到「保存成功」却不知道自己填的值被改了。
     """
     with pytest.raises(FieldError) as excinfo:
-        validate_field("max_analysis_rounds", "999")
+        validate_field("weekly_interval_minutes", "99999")
 
-    assert "30" in str(excinfo.value)
-    assert "999" in str(excinfo.value), "要把用户填的值也说出来"
+    assert "10080" in str(excinfo.value)
+    assert "99999" in str(excinfo.value), "要把用户填的值也说出来"
 
 
 def test_a_below_minimum_integer_is_rejected():
     with pytest.raises(FieldError):
-        validate_field("max_tool_requests", "-1")
+        validate_field("weekly_interval_minutes", "-1")
 
 
 def test_a_non_integer_is_rejected_with_the_offending_text():
     with pytest.raises(FieldError) as excinfo:
-        validate_field("max_files_per_run", "abc")
+        validate_field("prompt_char_budget", "abc")
     assert "abc" in str(excinfo.value)
 
 
 def test_an_empty_integer_is_rejected():
     for raw in ("", None, "   "):
         with pytest.raises(FieldError):
-            validate_field("max_files_per_run", raw)
+            validate_field("prompt_char_budget", raw)
 
 
 def test_a_boolean_field_accepts_the_usual_spellings():
@@ -133,11 +137,11 @@ def test_an_unknown_choice_is_rejected_and_lists_the_options():
 
 
 def test_the_error_message_uses_the_chinese_label():
-    """报错里出现 `max_analysis_rounds` 这种列名，用户不知道指的是界面上哪一栏。"""
+    """报错里出现 `weekly_interval_minutes` 这种列名，用户不知道指的是界面上哪一栏。"""
     with pytest.raises(FieldError) as excinfo:
-        validate_field("max_analysis_rounds", "999")
-    assert excinfo.value.label == "最大分析轮次"
-    assert "max_analysis_rounds" not in str(excinfo.value)
+        validate_field("weekly_interval_minutes", "99999")
+    assert excinfo.value.label == "分析间隔（分钟）"
+    assert "weekly_interval_minutes" not in str(excinfo.value)
 
 
 def test_an_unknown_field_is_rejected():
@@ -199,7 +203,7 @@ def test_all_errors_are_collected_in_one_pass():
     with pytest.raises(ConfigValidationError) as excinfo:
         validate_payload(
             {
-                "max_analysis_rounds": "999",
+                "weekly_interval_minutes": "99999",
                 "min_severity": "medium",
                 "api_base_url": "ftp://x",
                 "api_model": "x" * 300,
@@ -207,7 +211,7 @@ def test_all_errors_are_collected_in_one_pass():
         )
 
     fields = {error.field for error in excinfo.value.errors}
-    assert fields == {"max_analysis_rounds", "min_severity", "api_base_url", "api_model"}
+    assert fields == {"weekly_interval_minutes", "min_severity", "api_base_url", "api_model"}
 
 
 def test_a_valid_payload_produces_no_errors():
@@ -216,13 +220,13 @@ def test_a_valid_payload_produces_no_errors():
         {
             "api_base_url": "http://127.0.0.1:15721/v1",
             "api_model": "deepseek-v4-flash",
-            "max_analysis_rounds": "4",
+            "weekly_interval_minutes": "30",
             "min_severity": "critical",
             "auto_weekly_enabled": False,
             "prompt_template": "",
         }
     )
-    assert normalized["max_analysis_rounds"] == 4
+    assert normalized["weekly_interval_minutes"] == 30
     assert normalized["auto_weekly_enabled"] is False
 
 
@@ -405,10 +409,54 @@ def test_every_rule_has_a_chinese_label():
 
 
 def test_every_default_is_accepted_by_its_own_rule():
-    """默认值自己必须能通过校验。否则「留空保存」会失败，而用户什么都没做错。"""
+    """默认值自己必须能通过校验。否则「留空保存」会失败，而用户什么都没做错。
+
+    2026-09-23 配置面收敛：`RETIRED_FIELDS` 里的 7 个键**故意留在 FIELD_DEFAULTS**
+    （无配置行路径的兜底），但已没有规则 —— 它们不是「可保存的默认值」，是给库里
+    老行与单提交路径读的出厂值，所以只对可配字段做这个自检。
+    """
     for name, value in FIELD_DEFAULTS.items():
+        if name in RETIRED_FIELDS:
+            continue
         assert name in FIELD_RULES, f"{name} 有默认值但没有规则"
         validate_field(name, value)
+
+
+def test_retired_fields_are_rejected_on_sight():
+    """收敛键**收到即报错**，不静默忽略。
+
+    走「未知字段忽略」那支的话，老脚本或浏览器缓存的旧页面把 `subagent_count` 发上来
+    会保存成功，用户以为改了参数 —— 而周版本路径已经不读它了（auto_sizing 推导）。
+    """
+    with pytest.raises(ConfigValidationError) as excinfo:
+        validate_payload({"subagent_count": "5"})
+
+    errors = excinfo.value.errors
+    assert len(errors) == 1
+    assert errors[0].field == "subagent_count"
+    assert "平台自动推导" in errors[0].message
+    # 报错信息要说清这一项去哪了，而不是一个光秃秃的「不是可配置的字段」。
+    assert "分片数" in errors[0].message
+    # 多个收敛键一次全报（与「收集全部错误再抛」同一纪律）。
+    with pytest.raises(ConfigValidationError) as excinfo:
+        validate_payload({"max_tool_requests": "60", "request_timeout_seconds": "300"})
+    assert {error.field for error in excinfo.value.errors} == {
+        "max_tool_requests",
+        "request_timeout_seconds",
+    }
+    # 收敛键的默认值仍然存在：它们是「无配置行」路径的兜底（FIELD_DEFAULTS 注释），
+    # 消费方按 `config.get(key)` 读，删掉会让最常见路径缺键。
+    for name in RETIRED_FIELDS:
+        assert name in FIELD_DEFAULTS, f"{name} 收敛后仍应保有出厂默认值"
+
+
+def test_the_schema_no_longer_serves_the_retired_fields():
+    """`describe_field_schema` 是前端渲染 min/max 的事实源：不含收敛键，界面随之不渲染。"""
+    schema = describe_field_schema()
+    for name in RETIRED_FIELDS:
+        assert name not in schema
+    # 而仍在面上的键一个没丢。
+    assert set(schema) == set(FIELD_RULES)
 
 
 def test_field_defaults_agree_with_the_model_layer():

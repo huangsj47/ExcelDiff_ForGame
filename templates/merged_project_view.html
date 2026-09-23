@@ -1516,27 +1516,10 @@
                             <div class="form-text" id="aiWeeklyIntervalInputHelp">最小 5 分钟。没有变更时不会触发分析。</div>
                             <div class="form-text text-danger d-none" id="aiWeeklyIntervalInputError"></div>
                         </div>
-                        <div class="col-12 col-lg-6 ai-config-field">
-                            <label class="form-label" for="aiMaxFilesInput">清单过长时的取样上限</label>
-                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiMaxFilesInput"
-                                   aria-describedby="aiMaxFilesInputHelp aiMaxFilesInputError">
-                            <div class="form-text" id="aiMaxFilesInputHelp">仅控制文件名清单过长时列出多少个名称；未列出的本批文件仍可读取，不限制实际分析白名单。</div>
-                            <div class="form-text text-danger d-none" id="aiMaxFilesInputError"></div>
-                        </div>
-                        <div class="col-12 col-lg-6 ai-config-field">
-                            <label class="form-label" for="aiMaxRoundsInput">最大分析轮次</label>
-                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiMaxRoundsInput"
-                                   aria-describedby="aiMaxRoundsInputHelp aiMaxRoundsInputError">
-                            <div class="form-text" id="aiMaxRoundsInputHelp">每个分析 agent 最多来回几轮；开启分片和对账后，每个角色各有这份上限。轮次越多越慢、也可能重复消耗。</div>
-                            <div class="form-text text-danger d-none" id="aiMaxRoundsInputError"></div>
-                        </div>
-                        <div class="col-12 col-lg-6 ai-config-field">
-                            <label class="form-label" for="aiMaxToolRequestsInput">上下文索取上限（次）</label>
-                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiMaxToolRequestsInput"
-                                   aria-describedby="aiMaxToolRequestsInputHelp aiMaxToolRequestsInputError">
-                            <div class="form-text" id="aiMaxToolRequestsInputHelp">每个分析 agent 的索取总次数（跨该角色的轮次累计）；开启分片后每个分片和汇总各有这份额度，重复索要也计入。</div>
-                            <div class="form-text text-danger d-none" id="aiMaxToolRequestsInputError"></div>
-                        </div>
+                        <!-- 2026-09-23 配置面收敛：清单取样上限、最大轮次、上下文索取上限、
+                             分片数、每片/单次异常上限、请求超时这七栏已改为平台自动推导
+                             （services/ai/auto_sizing.py 按预算与本周规模算，账写在预算计划里），
+                             界面不再渲染。 -->
                         <!-- 子代理模式（services/ai/subagent.py）。**默认开**，且只对周版本生效。
                              这一栏的代价必须写清楚：它会让模型调用次数变成 (n+1) 倍 ——
                              一个不写代价的开关，用户打开之后只会从账单上发现。
@@ -1555,37 +1538,9 @@
                                 <strong>代价是模型调用次数变成「分片数 + 1」倍</strong>
                                 （变更清单那一段从第二个分片起命中缓存、按缓存价计费）。
                                 单个提交的分析<strong>不受影响</strong>。
-                                <!-- 额度口径（每个成员拿配置值的 MEMBER_BUDGET_PERCENT%）**不在这里展开**：
-                                     它是使用说明里的细节，配置页只需要说清这个开关做什么、代价是什么。 -->
+                                分片数与各片的索取/轮次额度由<strong>平台按预算与本周规模自动推导</strong>
+                                （默认 5 片），推导依据写在预算计划里 —— 不需要也不接受手动配置。
                             </div>
-                        </div>
-                        <div class="col-12 col-lg-6 ai-config-field">
-                            <label class="form-label" for="aiSubagentCountInput">子代理数量</label>
-                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiSubagentCountInput"
-                                   aria-describedby="aiSubagentCountInputHelp aiSubagentCountInputError">
-                            <div class="form-text" id="aiSubagentCountInputHelp">
-                                默认 3，最多 6；填 1（或不启用上面的开关）就是原来的单代理。
-                                维度按清单里的<strong>相邻顺序</strong>均分（相邻即相关）：3 个分片时是
-                                「配置 ID / 取值 / 配置数据」「数值合理性 / 单表连锁 / 模块耦合」
-                                「代码逻辑 / 版本分支 / 流程」。项目在知识包里声明了自己的维度清单
-                                （<code>references/project-facts.md</code> 的 <code>dimensions</code>）时
-                                按那一份分，维度比这个数少时实际分片数按维度数走。
-                            </div>
-                            <div class="form-text text-danger d-none" id="aiSubagentCountInputError"></div>
-                        </div>
-                        <!-- 分片额度。它和下面那个「单次异常上限」是一对：那一栏是**事后**闸门
-                             （不花 token），这一栏是**写给模型看的**额度（省输出 token）。 -->
-                        <div class="col-12 col-lg-6 ai-config-field">
-                            <label class="form-label" for="aiMaxAnomaliesPerSubagentInput">每个分片异常上限</label>
-                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiMaxAnomaliesPerSubagentInput"
-                                   aria-describedby="aiMaxAnomaliesPerSubagentInputHelp aiMaxAnomaliesPerSubagentInputError">
-                            <div class="form-text" id="aiMaxAnomaliesPerSubagentInputHelp">
-                                默认 10，只对上面的子代理模式生效。这一栏会<strong>写进分片任务书</strong>，
-                                分片按严重度取前几条报，低风险与小问题不再写 —— 所以它省的是
-                                <strong>输出 token</strong>（与下面「单次异常上限」不同，那一栏是模型答完之后
-                                才截，不省任何调用）。超出全次上限时按全次上限算。
-                            </div>
-                            <div class="form-text text-danger d-none" id="aiMaxAnomaliesPerSubagentInputError"></div>
                         </div>
                         <!-- 对账轮（阶段 3）。**默认关**，且它是「子代理模式」之上的可选一道复核：
                              汇总之后再跑一次独立请求，要它去找反证。不写清「它买的是什么」，
@@ -1616,13 +1571,6 @@
                                    aria-describedby="aiPromptCharBudgetInputHelp aiPromptCharBudgetInputError">
                             <div class="form-text" id="aiPromptCharBudgetInputHelp">只算你自己要发的内容（变更清单、取回的上下文、项目知识包与补充指令）；平台内置提示词不占这个额度。超出时按「保留首尾」压缩，并在内容里标注省略了多少。</div>
                             <div class="form-text text-danger d-none" id="aiPromptCharBudgetInputError"></div>
-                        </div>
-                        <div class="col-12 col-lg-6 ai-config-field">
-                            <label class="form-label" for="aiRequestTimeoutInput">单次请求超时（秒）</label>
-                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiRequestTimeoutInput"
-                                   aria-describedby="aiRequestTimeoutInputHelp aiRequestTimeoutInputError">
-                            <div class="form-text" id="aiRequestTimeoutInputHelp">单次请求的超时时间，多轮分析中每一轮各自计时。</div>
-                            <div class="form-text text-danger d-none" id="aiRequestTimeoutInputError"></div>
                         </div>
                         <!-- 预算闸门。三栏的语义是「留空 = 不限制」，所以**不能给默认值**：
                              填 0 会被预算闸门读成「一个 token 都不许花」，把分析整个锁死。 -->
@@ -1692,13 +1640,6 @@
                                 调高可以减少误报，代价是可能漏掉证据略弱的问题。
                             </div>
                             <div class="form-text text-danger d-none" id="aiMinConfidenceSelectError"></div>
-                        </div>
-                        <div class="col-12 col-lg-6 ai-config-field">
-                            <label class="form-label" for="aiMaxAnomaliesInput">单次异常上限</label>
-                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiMaxAnomaliesInput"
-                                   aria-describedby="aiMaxAnomaliesInputHelp aiMaxAnomaliesInputError">
-                            <div class="form-text" id="aiMaxAnomaliesInputHelp">超出的条目按严重度优先保留，被截掉的会在报告里记账。</div>
-                            <div class="form-text text-danger d-none" id="aiMaxAnomaliesInputError"></div>
                         </div>
                     </div>
                 </fieldset>
@@ -2538,19 +2479,16 @@ const AI_FIELD_DOM = {
     api_model: 'aiModelInput',
     api_key: 'aiKeyInput',
     weekly_interval_minutes: 'aiWeeklyIntervalInput',
-    max_files_per_run: 'aiMaxFilesInput',
-    max_analysis_rounds: 'aiMaxRoundsInput',
-    max_tool_requests: 'aiMaxToolRequestsInput',
-    subagent_count: 'aiSubagentCountInput',
-    max_anomalies_per_subagent: 'aiMaxAnomaliesPerSubagentInput',
+    // 2026-09-23 配置面收敛：max_files_per_run / max_analysis_rounds / max_tool_requests /
+    // subagent_count / max_anomalies_per_subagent / request_timeout_seconds /
+    // max_anomalies_per_run 七栏已改为平台自动推导，界面不渲染、提交不再携带 ——
+    // 服务端对这七个键「收到即报错」（endpoint_service.RETIRED_FIELDS）。
     // 对账轮：这一栏的校验是**跨字段**的（见 validateAiFieldLocally 里的 subagent_verify 分支），
     // 落点就是它下面那个错误槽。
     subagent_verify: 'aiSubagentVerifyToggle',
     prompt_char_budget: 'aiPromptCharBudgetInput',
-    request_timeout_seconds: 'aiRequestTimeoutInput',
     min_severity: 'aiMinSeveritySelect',
     min_confidence: 'aiMinConfidenceSelect',
-    max_anomalies_per_run: 'aiMaxAnomaliesInput',
     prompt_template: 'aiPromptInput',
     project_knowledge: 'aiProjectKnowledgeInput',
     budget_period: 'aiBudgetPeriodSelect',
@@ -2747,14 +2685,8 @@ function fillAiConfigForm(data) {
     setValue('aiBaseUrlInput', data.api_base_url);
     setValue('aiModelInput', data.api_model);
     setValue('aiWeeklyIntervalInput', data.weekly_interval_minutes);
-    setValue('aiMaxFilesInput', data.max_files_per_run);
-    setValue('aiMaxRoundsInput', data.max_analysis_rounds);
-    setValue('aiMaxToolRequestsInput', data.max_tool_requests);
-    setValue('aiSubagentCountInput', data.subagent_count);
-    setValue('aiMaxAnomaliesPerSubagentInput', data.max_anomalies_per_subagent);
+    // 收敛掉的七个数值栏不再回填（DOM 已删，见 AI_FIELD_DOM 的注释）。
     setValue('aiPromptCharBudgetInput', data.prompt_char_budget);
-    setValue('aiRequestTimeoutInput', data.request_timeout_seconds);
-    setValue('aiMaxAnomaliesInput', data.max_anomalies_per_run);
     setValue('aiMinSeveritySelect', data.min_severity);
     setValue('aiMinConfidenceSelect', data.min_confidence);
     setValue('aiPromptInput', data.prompt_template);
@@ -2996,14 +2928,9 @@ function collectAiConfigPayload() {
     textValue('aiBaseUrlInput', 'api_base_url');
     textValue('aiModelInput', 'api_model');
     numberValue('aiWeeklyIntervalInput', 'weekly_interval_minutes');
-    numberValue('aiMaxFilesInput', 'max_files_per_run');
-    numberValue('aiMaxRoundsInput', 'max_analysis_rounds');
-    numberValue('aiMaxToolRequestsInput', 'max_tool_requests');
-    numberValue('aiSubagentCountInput', 'subagent_count');
-    numberValue('aiMaxAnomaliesPerSubagentInput', 'max_anomalies_per_subagent');
+    // 收敛掉的七个数值栏不进提交体 —— 服务端对它们收到即报错（endpoint_service.RETIRED_FIELDS），
+    // 哪怕值没变也提交上去，会把自己锁在配置页之外。
     numberValue('aiPromptCharBudgetInput', 'prompt_char_budget');
-    numberValue('aiRequestTimeoutInput', 'request_timeout_seconds');
-    numberValue('aiMaxAnomaliesInput', 'max_anomalies_per_run');
     // 预算：空串原样提交，服务端把它读成「不限制」（`optional_int` / `optional_money`）。
     // **不能把空串转成 0** —— 0 是「一个 token 都不许花」，会把分析整个锁死。
     numberValue('aiBudgetTokenInput', 'budget_token_limit');
@@ -5052,10 +4979,27 @@ function weeklyAiEstimateLines(estimate) {
             + ' 字（模型窗口里留给模型回复与估算误差的部分）']);
     }
     if (roles.count) {
-        lines.push(['每角色 / 整单理论上限', weeklyAiFormatInt(perRole.max_rounds) + ' 轮、'
-            + weeklyAiFormatInt(perRole.max_tool_requests) + ' 次索取 / '
-            + weeklyAiFormatInt(jobMax.rounds) + ' 轮、'
-            + weeklyAiFormatInt(jobMax.tool_requests) + ' 次索取（' + roles.count + ' 个角色）']);
+        const pool = budget.family_pool;
+        if (pool && pool.requests_pool) {
+            // 串行共享池（2026-09-23 配置面收敛后周版本的口径）：每片名义额是保底，
+            // 全家实际花多少由池决定 —— 前片用剩的滚给后片，汇总另有保底。
+            lines.push(['每片名义额 / 家族共享池', weeklyAiFormatInt(perRole.max_rounds) + ' 轮、'
+                + weeklyAiFormatInt(perRole.max_tool_requests) + ' 次索取 / '
+                + weeklyAiFormatInt(pool.requests_pool) + ' 次索取、'
+                + weeklyAiFormatInt(pool.rounds_pool) + ' 轮（串行滚动，前片用剩的滚给后片；'
+                + '汇总保底 ' + weeklyAiFormatInt(pool.synthesis_floor_requests) + ' 次/'
+                + weeklyAiFormatInt(pool.synthesis_floor_rounds) + ' 轮）']);
+        } else {
+            lines.push(['每角色 / 整单理论上限', weeklyAiFormatInt(perRole.max_rounds) + ' 轮、'
+                + weeklyAiFormatInt(perRole.max_tool_requests) + ' 次索取 / '
+                + weeklyAiFormatInt(jobMax.rounds) + ' 轮、'
+                + weeklyAiFormatInt(jobMax.tool_requests) + ' 次索取（' + roles.count + ' 个角色）']);
+        }
+    }
+    // 推导依据（auto_sizing 的 note）：让用户看到「为什么是这个数」。
+    const familyNote = (budget.family_pool && budget.family_pool.note) || '';
+    if (familyNote) {
+        lines.push(['推导依据', familyNote]);
     }
     if (last) {
         const bits = [];

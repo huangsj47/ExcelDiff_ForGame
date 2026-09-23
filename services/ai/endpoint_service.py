@@ -52,17 +52,10 @@ from models.ai_analysis.project_config import (
     DEFAULT_SUBAGENT_ENABLED,
     DEFAULT_SUBAGENT_VERIFY,
     DEFAULT_WEEKLY_INTERVAL_MINUTES,
-    MAX_ANALYSIS_ROUNDS_RANGE,
-    MAX_ANOMALIES_PER_RUN_RANGE,
-    MAX_ANOMALIES_PER_SUBAGENT_RANGE,
-    MAX_FILES_PER_RUN_RANGE,
-    MAX_TOOL_REQUESTS_RANGE,
     PROMPT_CACHE_FORMAT_CHOICES,
     PROMPT_CACHE_MODE_CHOICES,
     PROMPT_CHAR_BUDGET_RANGE,
-    REQUEST_TIMEOUT_RANGE,
     SEVERITY_CHOICES,
-    SUBAGENT_COUNT_RANGE,
     WEEKLY_INTERVAL_RANGE,
 )
 from services.ai.pricing import parse_price_table
@@ -118,15 +111,7 @@ FIELD_RULES: Mapping[str, FieldRule] = {
     "weekly_interval_minutes": FieldRule(
         "分析间隔（分钟）", "int", *WEEKLY_INTERVAL_RANGE
     ),
-    # 标签改过：这个值**不再**限制「一次分析能处理多少个文件」（那由变更清单与
-    # `MAX_LIST_CHARS` 决定），也不再限制「模型能读多少」（白名单给本批次全部改动文件）。
-    # 它现在只在**清单长到列不下**的时候决定取样多少个 —— 旧的「单次最大文件数」
-    # 会让用户以为调大它就能多看文件，而实际上绝大多数版本根本走不到这一支。
-    "max_files_per_run": FieldRule("清单过长时的取样上限", "int", *MAX_FILES_PER_RUN_RANGE),
-    "max_analysis_rounds": FieldRule("最大分析轮次", "int", *MAX_ANALYSIS_ROUNDS_RANGE),
-    "max_tool_requests": FieldRule("上下文索取上限", "int", *MAX_TOOL_REQUESTS_RANGE),
     "prompt_char_budget": FieldRule("提示词字符预算", "int", *PROMPT_CHAR_BUDGET_RANGE),
-    "request_timeout_seconds": FieldRule("单次请求超时（秒）", "int", *REQUEST_TIMEOUT_RANGE),
     # 提示词缓存标记。这两栏**不猜端点**：`cache_control` 不是 OpenAI 协议的一部分，
     # 一个私有域名既可能是 Anthropic 兼容层，也可能是完全不认这个字段的转发器，
     # 而猜错的代价是一次 400。所以默认是「不发标记」（auto + none），要发的部署者
@@ -139,19 +124,13 @@ FIELD_RULES: Mapping[str, FieldRule] = {
     ),
     # 子代理模式（2026-09，见 services/ai/subagent.py）。**默认关**：打开它会让一次分析
     # 的模型调用次数变成 (n+1) 倍，必须由人主动打开。只对**周版本**分析生效。
+    # 分片数与每片的索取/轮次额度由平台按预算与本周规模自动推导（默认 5 片，
+    # `services/ai/auto_sizing.py`），**不再可配**（见 RETIRED_FIELDS）。
     "subagent_enabled": FieldRule("子代理模式（仅周版本）", "bool"),
-    "subagent_count": FieldRule("子代理数量", "int", *SUBAGENT_COUNT_RANGE),
     # 对账轮：汇总之后再跑一次「找反证」。同样是**默认关**的额外一轮模型调用。
     "subagent_verify": FieldRule("对账轮（找反证，仅周版本）", "bool"),
     "min_severity": FieldRule("严重度门槛", "choice", choices=SEVERITY_CHOICES),
     "min_confidence": FieldRule("置信度门槛", "choice", choices=CONFIDENCE_CHOICES),
-    "max_anomalies_per_run": FieldRule(
-        "单次异常上限", "int", *MAX_ANOMALIES_PER_RUN_RANGE
-    ),
-    # 分片额度：**这一栏会写进分片任务书**，模型照它写，省的是输出 token。
-    "max_anomalies_per_subagent": FieldRule(
-        "每个分片异常上限（仅子代理）", "int", *MAX_ANOMALIES_PER_SUBAGENT_RANGE
-    ),
     # 这两栏是长文本，长度只做一个防呆上限。
     "prompt_template": FieldRule("项目补充指令", "text", max_length=20_000),
     # 单价表按 JSON 校验（kind="price_table"），见 `_coerce_price_table`：保存时就报错，
@@ -170,6 +149,22 @@ FIELD_RULES: Mapping[str, FieldRule] = {
     ),
 }
 
+# 已收敛为平台自动推导的配置键：**收到即报字段级错误**，不静默忽略。
+#
+# 静默忽略会制造「存了但没生效」：老脚本或浏览器缓存的旧页面把这几个键发上来，
+# 保存成功、用户以为改了参数 —— 而周版本路径已经不读它们（分片/索取/轮次由
+# `services/ai/auto_sizing.py` 推导，超时/异常上限走平台常量）。报错而不是吞掉，
+# 与 `_cross_field_errors` 的「不许静默」是同一条纪律。键名 → 给用户看的一句话。
+RETIRED_FIELDS: Mapping[str, str] = {
+    "max_files_per_run": "清单取样上限已改为平台按本周规模自动推导",
+    "max_analysis_rounds": "最大分析轮次已改为平台按预算自动推导",
+    "max_tool_requests": "上下文索取上限已改为平台按预算自动推导",
+    "request_timeout_seconds": "单次请求超时已改为平台内置默认",
+    "subagent_count": "分片数已改为平台按预算与维度自动推导（默认 5 片）",
+    "max_anomalies_per_run": "单次异常上限已改为平台内置默认",
+    "max_anomalies_per_subagent": "每个分片异常上限已改为平台自动推导",
+}
+
 # 界面上显示默认值时要用的值（与模型层的列默认值同源）。
 #
 # ★ 这里**必须引用常量**，不能再写一个字面量。`auto_weekly_enabled` 曾经在这份表里
@@ -178,6 +173,13 @@ FIELD_RULES: Mapping[str, FieldRule] = {
 # 时用 `dict(FIELD_DEFAULTS)`），于是改模型层的默认值对它**毫无影响**：
 # 2026-09-22 把默认改成「关」之后，`tests/test_weekly_ai_auto_trigger_gate.py` 里
 # 「没配过的项目」那条用例照样读出「开」——断言没红，因为真相在另一份副本里。
+#
+# ★ 注意 2026-09-23 配置面收敛之后，`RETIRED_FIELDS` 里的 7 个键**故意留在这里**：
+# 模型层的列还在（单提交分析路径与 `resolved()` 继续读出厂默认），删掉这里的键会让
+# 「无配置行」那条最常见路径返回的字典缺键 —— 消费方是 `project_config.get(key)`
+# 还是 `project_config[key]` 没有逐一审过，缺键的 KeyError 比多一个不可配的默认值
+# 危险得多。它们只是**不再出现在 FIELD_RULES**（界面不渲染、下发 schema 不含、
+# 提交时被 `RETIRED_FIELDS` 拒掉），不再能被用户改到。
 FIELD_DEFAULTS: Mapping[str, Any] = {
     "api_base_url": "",
     "api_model": "",
@@ -403,6 +405,18 @@ def validate_payload(payload: Mapping[str, Any]) -> dict:
     errors: list[FieldError] = []
     normalized: dict[str, Any] = {}
     for field_name, raw in dict(payload).items():
+        if field_name in RETIRED_FIELDS:
+            # 收敛键：**收到即报错**。走「未知字段忽略」那支的话，老脚本把
+            # `subagent_count` 发上来会保存成功，用户以为改了分片数 ——
+            # 而它早就不被读了（见 RETIRED_FIELDS 注释）。
+            errors.append(
+                FieldError(
+                    field_name,
+                    field_name,
+                    f"这一项已改为平台自动推导，不再接受手动配置（{RETIRED_FIELDS[field_name]}）",
+                )
+            )
+            continue
         if field_name not in FIELD_RULES:
             continue  # 未知字段忽略，不报错（前端可能带上别的 state）
         try:

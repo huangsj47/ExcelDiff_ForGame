@@ -655,14 +655,16 @@ class TestTheServiceLayerUsesOnlyReportedRuns:
             assert any("没有上报用量" in note for note in result["notes"])
             assert result["pricing"]["configured"] is True
 
-    def test_the_project_config_supplies_the_shard_count(self):
-        """分片数/轮次上限从**项目配置**取，不在估算函数里写死。"""
+    def test_the_shard_count_comes_from_the_derivation(self):
+        """分片数/轮次/索取从**平台推导**取（`auto_sizing`），不在估算函数里写死，
+        也不再看库里的 `subagent_count`（2026-09-23 收敛后那一列不可配、周版本不读）。"""
         with flask_app.app_context():
             create_tables()
             project_id = _project()
             ok, message, errors = update_project_analysis_config(
                 project_id,
-                {"model_price_table": PRICE_TABLE, "subagent_count": 4},
+                # 注意**不许**再写 subagent_count —— 收敛键提交会 400；分片数只能推导。
+                {"model_price_table": PRICE_TABLE},
                 updated_by="tester",
             )
             assert ok, (message, errors)
@@ -671,9 +673,16 @@ class TestTheServiceLayerUsesOnlyReportedRuns:
 
             result = analysis_estimate(project_id, mode="full", planned_files=100)
 
-            assert result["shard_count"] == 4
+            # 100 个文件、默认预算 → 5 片、10 轮/片（auto_sizing.SHARD_TARGET /
+            # ROUNDS_PER_SHARD）。钉住这两个常量，防止「估算里又写死一份」回潮。
+            assert result["shard_count"] == 5
             assert any("分片" in note for note in result["notes"])
             assert result["generated_at"]
+            # 预算计划带的是池口径与推导依据，不是「roles × 名义额」。
+            pool = result["budget_plan"]["family_pool"]
+            assert pool is not None
+            assert pool["requests_pool"] == 5 * pool["requests_nominal"]
+            assert pool["note"]
 
     def test_it_only_looks_at_the_same_target_type(self):
         """周版本分析的历史不该拿单提交分析的样本去估（反之亦然）。"""

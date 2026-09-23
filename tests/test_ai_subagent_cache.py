@@ -123,11 +123,13 @@ class TestTheSharedPrefixIsByteIdentical:
             "系统消息不一致 —— 那是跨运行复用的最基本的一段"
         )
 
-    def test_at_the_same_limits_the_change_list_prefix_is_identical_too(self):
-        """**额度相同**时，单代理的第一轮与子代理的共享消息是同一段字节。
+    def test_the_family_line_replaces_the_single_agent_line_in_the_seed(self):
+        """家族路径的共享消息说的是**共享池**（家族口径行），单代理说的还是它自己的额度。
 
-        额度不同就不相同，而且**应该**不同：那一句要如实告诉模型它能花多少（见下一组
-        测试）。所以这里钉的是「同额度 ⇒ 同字节」，不是「永远同字节」。
+        2026-09-23 起这两句**有意不是同一句**：池语义下「本次分析总共可索取 N 次」若照抄
+        单代理措辞，会把池总量说成这一个成员的额度。跨模式的逐字节身份就此让位 ——
+        跨运行复用里最值钱的系统消息（断点①）不受影响（上一条钉着），家族内部
+        N+1 个成员 + 对账轮的复用是省钱主体，完整保留。
         """
         plan = _plan(3)
         single = QueueClient(_final())
@@ -141,14 +143,21 @@ class TestTheSharedPrefixIsByteIdentical:
         family = QueueClient(_final())
         run_family(client=family, provider=FakeProvider(), plan=plan, **_family_args())
 
-        assert _sent(single.calls[0][:2]) == _sent(family.calls[0][:2])
+        single_first = single.calls[0][1]["content"]
+        family_shared = family.calls[0][1]["content"]
+        assert f"可索取 {plan.limits.max_tool_requests} 次" in single_first, (
+            "单代理路径的额度行被家族口径污染了 —— 那条路没有池的概念"
+        )
+        assert f"全家共可索取 {plan.quota.requests_pool} 次" in family_shared, (
+            "共享前缀里没有池总量 —— 成员不知道自己在共享池里跑"
+        )
 
     def test_the_quota_number_is_a_family_constant(self):
         """额度那一句在共享消息里，所以每个成员看到的数字必须一样。
 
-        它同时也是「自己该花多少」的唯一依据 —— 额度是按 `MEMBER_BUDGET_PERCENT`% 从
-        配置值算出来的家族常量（与成员数无关，见 `subagent.plan_family`），所以成员
-        不该自己去猜一份。
+        2026-09-23 起它是**家族口径行**（`_family_budget_line`）：池总量、分片数、名义额
+        都是 `plan.quota` 的纯函数 —— 成员之间逐字节相同（缓存才成立），而随成员变化的
+        数字（当片上限、全家已用）只进成员私有的任务书。
         """
         plan = _plan(3)
         call = QueueClient(_final())
@@ -157,7 +166,12 @@ class TestTheSharedPrefixIsByteIdentical:
         )
         shared = call.calls[0][1]["content"]
 
-        assert f"可索取 {plan.limits.max_tool_requests} 次" in shared, shared[-400:]
+        assert plan.quota is not None
+        assert f"全家共可索取 {plan.quota.requests_pool} 次" in shared, shared[-400:]
+        assert f"{plan.count} 个分片代理串行深挖" in shared, shared[-400:]
+        assert f"名义额 {plan.quota.requests_nominal} 次" in shared, shared[-400:]
+        # 池 = 成员数 × 名义额：家族行说的每个数都必须对得上账本。
+        assert plan.quota.requests_pool == plan.count * plan.quota.requests_nominal
 
 
 class TestTheBreakpointsStayAtThree:

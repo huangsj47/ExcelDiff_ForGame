@@ -2416,10 +2416,27 @@ function weeklyAiEstimateLines(estimate) {
             + ' 字（模型窗口里留给模型回复与估算误差的部分）']);
     }
     if (roles.count) {
-        lines.push(['每角色 / 整单理论上限', weeklyAiFormatInt(perRole.max_rounds) + ' 轮、'
-            + weeklyAiFormatInt(perRole.max_tool_requests) + ' 次索取 / '
-            + weeklyAiFormatInt(jobMax.rounds) + ' 轮、'
-            + weeklyAiFormatInt(jobMax.tool_requests) + ' 次索取（' + roles.count + ' 个角色）']);
+        const pool = budget.family_pool;
+        if (pool && pool.requests_pool) {
+            // 串行共享池（2026-09-23 配置面收敛后周版本的口径）：每片名义额是保底，
+            // 全家实际花多少由池决定 —— 前片用剩的滚给后片，汇总另有保底。
+            lines.push(['每片名义额 / 家族共享池', weeklyAiFormatInt(perRole.max_rounds) + ' 轮、'
+                + weeklyAiFormatInt(perRole.max_tool_requests) + ' 次索取 / '
+                + weeklyAiFormatInt(pool.requests_pool) + ' 次索取、'
+                + weeklyAiFormatInt(pool.rounds_pool) + ' 轮（串行滚动，前片用剩的滚给后片；'
+                + '汇总保底 ' + weeklyAiFormatInt(pool.synthesis_floor_requests) + ' 次/'
+                + weeklyAiFormatInt(pool.synthesis_floor_rounds) + ' 轮）']);
+        } else {
+            lines.push(['每角色 / 整单理论上限', weeklyAiFormatInt(perRole.max_rounds) + ' 轮、'
+                + weeklyAiFormatInt(perRole.max_tool_requests) + ' 次索取 / '
+                + weeklyAiFormatInt(jobMax.rounds) + ' 轮、'
+                + weeklyAiFormatInt(jobMax.tool_requests) + ' 次索取（' + roles.count + ' 个角色）']);
+        }
+    }
+    // 推导依据（auto_sizing 的 note）：让用户看到「为什么是这个数」。
+    const familyNote = (budget.family_pool && budget.family_pool.note) || '';
+    if (familyNote) {
+        lines.push(['推导依据', familyNote]);
     }
     if (last) {
         const bits = [];

@@ -19,30 +19,47 @@ import pytest
 
 from app import app as flask_app
 from app import create_tables, db
+from dataclasses import replace
 from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace
 from services import ai_analysis_service as ai_service
 from models.ai_analysis import AiProjectAnalysisConfig
-from models.ai_analysis.project_config import SUBAGENT_COUNT_RANGE
 from services.ai_analysis_service import build_weekly_group_key
 from tests.test_ai_analysis_service import COMMIT_SHA, TABLE_PATH, _FakeClient
 from tests.test_ai_run_budget_warning import _prepare_weekly_run
 
 
-def _enable_subagents(project_id: int, *, count: int) -> None:
+def _enable_subagents(project_id: int) -> None:
     """打开子代理模式。
 
-    `count` 不在合法范围（1~6）时**再直接改一次列**：接口会把整个 payload 一起拒掉
-    （一个字段都不落库），而在库里留一个脏值正是 `test_a_count_below_two_...`
-    要测的东西 —— 不补这一下，那条用例测的其实是「payload 被拒了」。
+    2026-09-23 配置面收敛后 `subagent_count` 不可再提交（服务端收到即 400），分片数由
+    `auto_sizing` 推导（默认 5 片）；**要控制片数用 `_force_shard_count`**（改推导
+    结果），不是改配置行。
     """
     ai_service.update_project_analysis_config(
-        project_id, {"subagent_enabled": True, "subagent_count": count}
+        project_id, {"subagent_enabled": True}
     )
     db.session.commit()
-    if count < SUBAGENT_COUNT_RANGE[0]:
-        row = AiProjectAnalysisConfig.query.filter_by(project_id=project_id).first()
-        row.subagent_count = count
-        db.session.commit()
+
+
+def _force_shard_count(monkeypatch, count: int) -> None:
+    """把推导出的分片数钉在 `count` 片。
+
+    收敛后这是**唯一**能控制片数的入口：运行侧从 `ai_service.derive_family_sizing`
+    读推导值，库里的 subagent_count 列已被忽略。直接改配置行的老写法会写出
+    「存了但没生效」—— 正是 RETIRED_FIELDS 要消灭的那种状态。
+    """
+    real = ai_service.derive_family_sizing
+
+    def fake(**kwargs):
+        sizing = real(**kwargs)
+        return replace(
+            sizing,
+            shard_count=count,
+            family_requests_pool=count * sizing.requests_per_shard,
+            family_rounds_pool=count * sizing.rounds_per_shard,
+        )
+
+    monkeypatch.setattr(ai_service, "derive_family_sizing", fake)
 
 
 def _disable_subagents(project_id: int) -> None:
@@ -71,7 +88,8 @@ def test_the_family_runs_and_persists_as_one_run(monkeypatch):
     with flask_app.app_context():
         create_tables()
         ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
-        _enable_subagents(project.id, count=2)
+        _enable_subagents(project.id)
+        _force_shard_count(monkeypatch, 2)
         _run(monkeypatch, client=client)
 
         outcome = ai_service.run_weekly_analysis_background(cfg.id)
@@ -148,7 +166,7 @@ def test_a_commit_analysis_never_splits_even_when_enabled(monkeypatch):
     with flask_app.app_context():
         create_tables()
         ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
-        _enable_subagents(project.id, count=3)
+        _enable_subagents(project.id)
         _run(monkeypatch, client=client)
 
         run = AiAnalysisRun(
@@ -183,20 +201,39 @@ def test_a_commit_analysis_never_splits_even_when_enabled(monkeypatch):
         assert run.subagent_mode is None
 
 
-@pytest.mark.parametrize("count", [1, 0])
-def test_a_count_below_two_degrades_to_one_agent(monkeypatch, count):
-    """1（或 0）= 退化成单代理：白白多跑一次汇总没有意义。"""
+@pytest.mark.parametrize("frozen", [1, 0])
+def test_a_frozen_dirty_count_no_longer_changes_the_weekly_run(monkeypatch, frozen):
+    """库里冻结的 `subagent_count` 脏值（1 或 0）**不再影响周版本运行**。
+
+    收敛（2026-09-23）之前这一列还能把分片数压成 1（退化成单代理）；现在周版本的分片
+    数一律由 `auto_sizing` 推导、这一列被忽略 —— 老行里的 0/1 只是一段死数据。
+    这里同时守住「死数据不炸、也不生效」两个方向。
+    """
     client = _FakeClient()
     with flask_app.app_context():
         create_tables()
         ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
-        _enable_subagents(project.id, count=count)
+        _enable_subagents(project.id)
+        row = AiProjectAnalysisConfig.query.filter_by(project_id=project.id).first()
+        row.subagent_count = frozen  # 直接改列：模拟收敛之前的老行
+        db.session.commit()
         _run(monkeypatch, client=client)
 
         outcome = ai_service.run_weekly_analysis_background(cfg.id)
 
         assert outcome["status"] == "succeeded", outcome
-        assert len(client.calls) == 1
+        # 推导目标 5 片 + 汇总 = 6 次模型调用 —— 脏列没有把分片压没。
+        assert len(client.calls) == 6, (
+            f"冻结的脏 subagent_count={frozen} 仍然在起作用（只调了 {len(client.calls)} 次）"
+        )
+        run = (
+            AiAnalysisRun.query.filter_by(
+                target_type="weekly", target_key=build_weekly_group_key(cfg)
+            )
+            .order_by(AiAnalysisRun.id.desc())
+            .first()
+        )
+        assert run.subagent_count == 5, "落库记的应是推导值，不是库里的冻结值"
 
 
 def _enable_verify(project_id: int, *, enabled: bool) -> None:
@@ -214,7 +251,8 @@ def test_the_verify_round_runs_and_lands_on_the_same_run(monkeypatch):
     with flask_app.app_context():
         create_tables()
         ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
-        _enable_subagents(project.id, count=2)
+        _enable_subagents(project.id)
+        _force_shard_count(monkeypatch, 2)
         _enable_verify(project.id, enabled=True)
         _run(monkeypatch, client=client)
 
@@ -313,7 +351,8 @@ def test_the_main_agent_announces_itself_before_it_starts(monkeypatch):
     with flask_app.app_context():
         create_tables()
         ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
-        _enable_subagents(project.id, count=2)
+        _enable_subagents(project.id)
+        _force_shard_count(monkeypatch, 2)
         _run(monkeypatch, client=client)
         monkeypatch.setattr(
             ai_service, "publish_run_progress",

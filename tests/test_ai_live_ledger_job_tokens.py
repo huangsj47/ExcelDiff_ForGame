@@ -402,13 +402,16 @@ def _run_a_family(monkeypatch, *, reporting_calls: int | None = None):
     """真跑一次「2 个分片 + 汇总」并把最后那一帧快照留下来（清快照那一步换掉）。"""
     import services.ai_analysis_service as ai_service
     from tests.test_ai_run_budget_warning import _prepare_weekly_run
-    from tests.test_ai_subagent_wiring import _enable_subagents
+    from tests.test_ai_subagent_wiring import _enable_subagents, _force_shard_count
 
     client = _fake_client(reporting_calls)
     with flask_app.app_context():
         create_tables()
         ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
-        _enable_subagents(project.id, count=2)
+        _enable_subagents(project.id)
+        # 收敛后分片数由 auto_sizing 推导（默认 5）；这条要的是「2 个分片 + 汇总」
+        # 的固定形态（3 次调用、3 份用量），所以把推导结果钉在 2 片。
+        _force_shard_count(monkeypatch, 2)
         monkeypatch.setattr(ai_service, "build_endpoint_client", lambda *a, **k: (client, []))
         # 跑完就清是设计（见模块 docstring），但这一条要读**最后那一帧**：
         # 清快照那一步换成记账，别让快照在断言之前消失。

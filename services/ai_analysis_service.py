@@ -37,6 +37,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_AUTO_WEEKLY_ENABLED,
     DEFAULT_MAX_ANOMALIES_PER_RUN,
     DEFAULT_MAX_FILES_PER_RUN,
+    DEFAULT_REQUEST_TIMEOUT_SECONDS,
 )
 from services.ai import project_gate
 from services.ai.analysis_budget import budget_gate_reason, early_stop_guard
@@ -174,7 +175,19 @@ from services.ai.scope_sampling import (  # noqa: F401 —— 任务服务与测
 )
 from services.ai.skill_loader import describe_load_error, load_skills
 from services.ai.snapshot_store import DEFAULT_COMPENSATION_MAX_FILES
-from services.ai.subagent import apply_manifest, plan_family, run_family_with_seed, subagent_mode_of
+from services.ai.auto_sizing import (
+    ANOMALY_RUN_CAP,
+    derive_family_sizing,
+    sampling_cap_for,
+)
+from services.ai.subagent import (
+    MIN_MEMBER_ROUNDS,
+    MIN_MEMBER_TOOL_REQUESTS,
+    apply_manifest,
+    plan_family,
+    run_family_with_seed,
+    subagent_mode_of,
+)
 from services.ai.trace_evidence import encode_evidence
 from services.ai.usage import encode_tools
 from services.ai.weekly_sync_gate import group_config_ids, weekly_sync_in_flight
@@ -392,12 +405,15 @@ def build_weekly_payload(
         return None, state, skip_reason
 
     scope, policy = _decide_scope(summary, baseline)
-    max_files = int(project_config.get("max_files_per_run") or MAX_FILES_DEFAULT)
 
     repo_details = details.get("repos", [])
     repo_details.sort(key=lambda item: (item.get("priority", 1), item.get("repository_name", "")), reverse=True)
 
     delta_files = details.get("delta_files", [])
+    # 清单取样上限按本周规模推导（配置面收敛，2026-09-23）：clamp(文件数, 200, 500)。
+    # 旧的 `max_files_per_run` 配置已收掉 —— 公式与 `derive_family_sizing` 同一份常数
+    # （`auto_sizing.sampling_cap_for`），不是第二个事实源。
+    max_files = sampling_cap_for(len(delta_files))
     compensation_files = list(details.get("compensation_files") or [])
     focus_label = ""
     if focus:
@@ -1196,11 +1212,12 @@ def _run_engine_and_persist(
 ) -> dict:
     summary = payload.get("summary") or {}
 
-    # 正式分析用配置里的单次请求超时（默认 300 秒，界面可改），**不是**探测用的 30 秒。
-    # 这两者混用会让分析必然超时，见 build_endpoint_client 的说明。
-    configured_timeout = get_project_analysis_config(project_id).get("request_timeout_seconds")
+    # 正式分析的单次请求超时用平台默认（300 秒），**不是**探测用的 30 秒 —— 这两者
+    # 混用会让分析必然超时，见 build_endpoint_client 的说明。2026-09-23 配置面收敛后
+    # 这一栏不再可配（`endpoint_service.RETIRED_FIELDS`），这里直接读模型层默认常量；
+    # 老配置行里存的值继续躺在库里，但已无人读取。
     client, errors = build_endpoint_client(
-        project_id, {}, timeout_seconds=_coerce_timeout(configured_timeout)
+        project_id, {}, timeout_seconds=_coerce_timeout(DEFAULT_REQUEST_TIMEOUT_SECONDS)
     )
     if client is None:
         message = "接口配置不完整：" + "；".join(item["message"] for item in errors)
@@ -1275,7 +1292,17 @@ def _run_engine_and_persist(
         "scope": change.scope,
         "change_summary": change.summary,
         "limits": limits,
-        "thresholds": RuleThresholds.from_config(project_config),
+        # 周版本路径的「单次异常上限」用平台常量（`auto_sizing.ANOMALY_RUN_CAP`）：
+        # 2026-09-23 收敛后这一栏不再可配，库里老行存的自定义值对周版本已失效。
+        # 单提交分析继续读列（`RuleThresholds.from_config` 的原逻辑）。
+        "thresholds": (
+            replace(
+                RuleThresholds.from_config(project_config),
+                max_anomalies=ANOMALY_RUN_CAP,
+            )
+            if (payload.get("mode") or "") == "weekly"
+            else RuleThresholds.from_config(project_config)
+        ),
         "project_knowledge": project_config.get("project_knowledge") or "",
         "project_instructions": project_config.get("prompt_template") or "",
         "baseline_digest": _baseline_digest(target_type, target_key, change),
@@ -1290,12 +1317,30 @@ def _run_engine_and_persist(
     }
     # 子代理模式（services/ai/subagent.py）：默认关、只对周版本生效，不适用时返回 None
     # 走原来的单代理路径。`verify` 是对账轮，它依附在子代理上 —— 没开子代理时不生效。
+    #
+    # 周版本的数值参数（分片数/每片索取/轮次/每片异常）由 `auto_sizing` 按预算与本周
+    # 清单规模推导（2026-09-23 配置面收敛；校准出处 runs 38~41）。分片数传推导值 ——
+    # 库里冻结的 `subagent_count` 已在界面上收掉，不再进这条路径。
+    sizing = None
+    if (payload.get("mode") or "") == "weekly" and bool(
+        project_config.get("subagent_enabled")
+    ):
+        sizing = derive_family_sizing(
+            effective_user_chars=max(0, limits.prompt_char_budget - platform_chars),
+            file_count=len(change.manifest.entries),
+            dimension_count=len(getattr(loaded, "dimensions", ()) or ()),
+        )
     plan = plan_family(
         mode=payload.get("mode") or "",
         enabled=bool(project_config.get("subagent_enabled")),
-        count=project_config.get("subagent_count") or 0,
+        count=(
+            sizing.shard_count
+            if sizing is not None
+            else int(project_config.get("subagent_count") or 0)
+        ),
         verify=bool(project_config.get("subagent_verify")),
         limits=limits,
+        sizing=sizing,
     )
     if plan is not None:
         plan = apply_manifest(plan, change.manifest)
@@ -1309,12 +1354,26 @@ def _run_engine_and_persist(
         # 否则界面会出现「配置 560,000 / 当前预估生效 580,000」这种读不通的对照。
         effective_prompt_chars=max(0, limits.prompt_char_budget - platform_chars),
         platform_chars=platform_chars,
-        max_rounds=limits.max_rounds,
-        max_tool_requests=limits.max_tool_requests,
+        # 有家族计划时报**每片的名义额**（保底）；池账与推导依据走 `family_pool` 那一节。
+        max_rounds=(plan.limits if plan is not None else limits).max_rounds,
+        max_tool_requests=(plan.limits if plan is not None else limits).max_tool_requests,
         shard_count=plan.count if plan is not None else 1,
         verify=bool(plan and plan.verify),
         tool_limits=limits.tool_limits,
         window_note=budget_note,
+        family_pool=(
+            {
+                "requests_pool": plan.quota.requests_pool,
+                "rounds_pool": plan.quota.rounds_pool,
+                "requests_nominal": plan.quota.requests_nominal,
+                "rounds_nominal": plan.quota.rounds_nominal,
+                "synthesis_floor_requests": MIN_MEMBER_TOOL_REQUESTS,
+                "synthesis_floor_rounds": MIN_MEMBER_ROUNDS,
+                "note": (sizing.note if sizing is not None else ""),
+            }
+            if plan is not None and plan.quota is not None
+            else None
+        ),
     )
     outcome = (
         run_analysis(**engine_args)

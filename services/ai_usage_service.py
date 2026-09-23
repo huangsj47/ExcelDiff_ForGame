@@ -51,14 +51,14 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from models import Project, WeeklyVersionConfig, db
 from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace, AiWeeklyAnalysisState
 from services.ai import run_progress
+from services.ai.auto_sizing import derive_family_sizing
 from services.ai.analysis_budget import (
     PERIOD_ALL_TIME,
     PERIOD_CHOICES,
     PERIOD_LABELS,
     PERIOD_MONTHLY,
     PERIOD_WEEKLY,
-    SCOPE_PROJECT,
-    as_utc,
+    SCOPE_PROJECT,    as_utc,
     budget_rows_for_overview,
     budget_status,
     platform_budget_status,
@@ -77,6 +77,7 @@ from services.ai.job_service import UPGRADE_REASON_FIRST_RUN
 from services.ai.platform_budget import platform_budget_public
 from services.ai.pricing import amount_exact, amount_of, money
 from services.ai.project_config_source import build_weekly_group_key, get_project_analysis_config
+from services.ai.subagent import MIN_MEMBER_ROUNDS, MIN_MEMBER_TOOL_REQUESTS
 from services.ai.trace_evidence import decode_evidence
 from services.ai.usage import (
     ESTIMATE_SAMPLE_LIMIT,
@@ -1438,41 +1439,9 @@ def analysis_estimate(
         if mode == MODE_INCREMENTAL and facts.get("upgrade_reason")
         else mode
     )
-    estimate = estimate_analysis(
-        planned_files=effective_planned_files,
-        mode=estimation_mode,
-        baseline_reusable=baseline_reusable,
-        recent_runs=samples,
-        shard_count=_int_or_zero(config.get("subagent_count")) or None,
-        max_rounds=_int_or_zero(config.get("max_analysis_rounds")) or None,
-        max_tool_requests=(
-            _int_or_zero(config.get("max_tool_requests"))
-            if config.get("max_tool_requests") is not None
-            else None
-        ),
-        price_table=table,
-        model=model,
-        # 三个事实字段（见 `estimate_analysis` 末节）：原样穿过去、不进算术。
-        delta_files=facts["delta_files"],
-        compensation_files=facts["compensation_files"],
-        baseline_run=facts["baseline_run"],
-    )
     engine_defaults = EngineLimits()
     configured_chars = (
         _int_or_zero(config.get("prompt_char_budget")) or engine_defaults.prompt_char_budget
-    )
-    configured_rounds = (
-        _int_or_zero(config.get("max_analysis_rounds")) or engine_defaults.max_rounds
-    )
-    configured_requests = (
-        _int_or_zero(config.get("max_tool_requests"))
-        if config.get("max_tool_requests") is not None
-        else engine_defaults.max_tool_requests
-    )
-    configured_shards = (
-        (_int_or_zero(config.get("subagent_count")) or 1)
-        if config.get("subagent_enabled")
-        else 1
     )
     window_tokens, _window_defaulted = resolve_context_window(None)
     watermark = context_watermark_chars(window_tokens)
@@ -1487,6 +1456,52 @@ def analysis_estimate(
         configured_chars,
         effective_total if not clamp_note else max(0, effective_total - platform_chars),
     )
+    # 周版本 + 子代理模式：**与运行侧同一份推导**（`derive_family_sizing`，配置面收敛
+    # 2026-09-23）。预估侧不加载项目 skill，维度数按平台出厂 9 个算 —— 项目声明了更短
+    # 清单时运行侧会少开几个分片，预估因此略偏高（方向保守）。不接同一份推导的话，
+    # 确认框会说 5 片、预估按旧配置算 3 片（:1483 一类口径 bug 的同族）。
+    sizing = (
+        derive_family_sizing(
+            effective_user_chars=effective_chars,
+            # 文件数未知（调用方没带 `files` 参数、库里也没有可折算的历史）时按 0 推导：
+            # 取样上限会落到 200 的下限，索取次数按「清单=下限」反解 —— 方向是**少估**
+            # 而不是崩（崩在预估端点上表现为确认框打不开，比一个偏小的数糟糕得多）。
+            file_count=int(
+                facts["planned_files"]
+                if facts.get("planned_files") is not None
+                else (effective_planned_files or 0)
+            ),
+        )
+        if (
+            target_type == "weekly"
+            and bool(config.get("subagent_enabled"))
+        )
+        else None
+    )
+    estimate = estimate_analysis(
+        planned_files=effective_planned_files,
+        mode=estimation_mode,
+        baseline_reusable=baseline_reusable,
+        recent_runs=samples,
+        shard_count=(sizing.shard_count if sizing is not None else None),
+        max_rounds=(sizing.rounds_per_shard if sizing is not None else None),
+        max_tool_requests=(
+            sizing.requests_per_shard if sizing is not None else None
+        ),
+        price_table=table,
+        model=model,
+        # 三个事实字段（见 `estimate_analysis` 末节）：原样穿过去、不进算术。
+        delta_files=facts["delta_files"],
+        compensation_files=facts["compensation_files"],
+        baseline_run=facts["baseline_run"],
+    )
+    configured_rounds = (
+        sizing.rounds_per_shard if sizing is not None else engine_defaults.max_rounds
+    )
+    configured_requests = (
+        sizing.requests_per_shard if sizing is not None else engine_defaults.max_tool_requests
+    )
+    configured_shards = sizing.shard_count if sizing is not None else 1
     estimate["budget_plan"] = build_budget_plan(
         configured_prompt_chars=configured_chars,
         # **不许把配置值当成生效值。** 原先这里写的是 `effective_prompt_chars=configured_chars`
@@ -1510,6 +1525,21 @@ def analysis_estimate(
             window_tokens=window_tokens,
             watermark=watermark,
             platform_note=platform_note,
+        ),
+        family_pool=(
+            {
+                "requests_pool": sizing.family_requests_pool,
+                "rounds_pool": sizing.family_rounds_pool,
+                "requests_nominal": sizing.requests_per_shard,
+                "rounds_nominal": sizing.rounds_per_shard,
+                # 预估侧给的是**理论上限**（池 + 汇总保底）；floor 直接引运行侧的
+                # `MIN_MEMBER_*` 常量 —— 写死一个「同值」的 2 早晚漂移成 3 对 2。
+                "synthesis_floor_requests": MIN_MEMBER_TOOL_REQUESTS,
+                "synthesis_floor_rounds": MIN_MEMBER_ROUNDS,
+                "note": sizing.note,
+            }
+            if sizing is not None
+            else None
         ),
     )
     excluded = len(rows) - len(samples)

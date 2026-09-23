@@ -46,6 +46,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Mapping, MutableMapping, Sequence
 
+from services.ai.auto_sizing import FamilySizing
 from services.ai.budget import ContextItem, truncate_text
 from services.ai.engine import (
     DEGRADATION_LABELS,
@@ -131,7 +132,9 @@ WEEKLY_MODE = "weekly"
 # 成员数上限。与配置项的 `SUBAGENT_COUNT_RANGE` 是同一件事，这里再钉一次是因为
 # `plan_family` 也可能被别的调用方按数字直接调（测试就是）。
 MAX_SUBAGENTS = 6
-DEFAULT_SUBAGENT_COUNT = 3
+# 与模型层常量同源（models/ai_analysis/project_config.py）。收敛后周版本路径的分片数
+# 由 `auto_sizing.SHARD_TARGET` 推导，这里只服务 `plan_family` 的老调用方与单提交路径。
+DEFAULT_SUBAGENT_COUNT = 5
 
 # 对账轮一次核对几条。**只核对最严重的几条**：对账要的是深度（去找反证、指出证据够不够），
 # 而不是把整份报告重读一遍 —— 后者正是汇总那一次已经做过的事。
@@ -186,6 +189,93 @@ def _percent_of(total: int, percent: int) -> int:
 
 
 
+@dataclass
+class FamilyQuota:
+    """家族共享池的账本（`run_family` 持有，串行滚动 —— 2026-09-23 起）。
+
+    ## 为什么共享：runs 38~41 的实测浪费
+
+    每代理各一份额度时，重分片撞顶降级、轻分片的富余**永远没有出路**：run 41 的 S2
+    撞满 50 次索取 + 10 轮双顶（`requests_exhausted`），而 S1 只用 32、S3 只用 36 ——
+    18 + 14 次富余白放着。分片本来就是**串行**执行的，前片用剩的滚动给后片天然安全，
+    也不需要动 `ContextTools` 的实例字段（它有「不许共享实例」的既有纪律）：编排层
+    在每片开跑前算一份「当片上限」，跑完按实耗扣池。
+
+    ## 上限怎么算：名义额保底 + 富余滚动
+
+    每片**保证拿到名义额**（后面几片的名义额在开跑前就被预留），前面省下来的部分才滚
+    给当前这片 —— 富余流向**最早需要它的分片**，但谁也不会因此被压到名义额以下：
+
+        cap_i = 名义额 + max(0, 池剩余 − 名义额 − 后面几片的名义额 − 汇总下限)
+
+    汇总那一次**保下限、可越池**（它是唯一产出最终报告的一步，不许被前面的分片饿死）；
+    对账轮只用剩余、不保下限（它本来就是可跳过的一道）。
+
+    扣账按**实跑数**：轮次按 `len(outcome.rounds)`（引擎的 `+2` 格式重问轮不计入名义
+    额度，按实耗扣就不会双记），索取按 `outcome.requests_used`。被 `should_skip` 跳过的
+    成员不扣池 —— 但它的名义额在后面的预留里已经按「会跑」算过，方向保守（多留少花），
+    与「判错的方向必须落在多写一次」同一条纪律。
+    """
+
+    requests_pool: int
+    rounds_pool: int
+    requests_nominal: int
+    rounds_nominal: int
+    requests_used: int = 0
+    rounds_used: int = 0
+
+    def shard_caps(self, members_after: int) -> tuple[int, int]:
+        """一个分片开跑前的「当片上限」：`(索取上限, 轮次上限)`。
+
+        `members_after` 是本片**之后**还要跑的分片数（不含汇总）；汇总的下限在这里
+        一并预留（`MIN_MEMBER_*`）。
+        """
+        return (
+            self._cap(
+                left=self.requests_left,
+                nominal=self.requests_nominal,
+                reserved=members_after * self.requests_nominal + MIN_MEMBER_TOOL_REQUESTS,
+            ),
+            self._cap(
+                left=self.rounds_left,
+                nominal=self.rounds_nominal,
+                reserved=members_after * self.rounds_nominal + MIN_MEMBER_ROUNDS,
+            ),
+        )
+
+    def synthesis_caps(self) -> tuple[int, int]:
+        """汇总那一次的上限：池内剩余全给，但保下限、**可越池**（不许被饿死）。"""
+        return (
+            max(self.requests_left, MIN_MEMBER_TOOL_REQUESTS),
+            max(self.rounds_left, MIN_MEMBER_ROUNDS),
+        )
+
+    def verify_caps(self) -> tuple[int, int]:
+        """对账轮的上限：只用池内剩余，不保下限（可跳过的一道）。"""
+        return (self.requests_left, self.rounds_left)
+
+    def spend(self, requests_used: int, rounds_used: int) -> None:
+        """跑完一个成员按实耗扣池。"""
+        self.requests_used += max(0, int(requests_used or 0))
+        self.rounds_used += max(0, int(rounds_used or 0))
+
+    @property
+    def requests_left(self) -> int:
+        return max(0, self.requests_pool - self.requests_used)
+
+    @property
+    def rounds_left(self) -> int:
+        return max(0, self.rounds_pool - self.rounds_used)
+
+    @staticmethod
+    def _cap(*, left: int, nominal: int, reserved: int) -> int:
+        """名义额 + 富余，且不许超池、池空时如实给 0（引擎会如实降级）。"""
+        if left <= 0:
+            return 0
+        rolled = max(0, left - nominal - reserved)
+        return min(left, nominal + rolled)
+
+
 @dataclass(frozen=True)
 class FamilyPlan:
     """一家子的计划：几个成员 + 一份共享前缀 + 一套家族常量额度。
@@ -209,6 +299,10 @@ class FamilyPlan:
     # 分片数短时成员会少几个 —— 少开成员是**显式**的：这句话会写进汇总任务书，
     # 而不是让用户自己对着面板数为什么 6 变成了 3。
     count_note: str = ""
+    # 家族共享池（串行滚动，见 `FamilyQuota`）。`plan_family` 总是建好它；None 只留给
+    # 直接手搓 `FamilyPlan` 的调用方（测试）—— `run_family` 会按 `limits × 成员数`
+    # 重建一份，行为退回「名义额即池」。
+    quota: FamilyQuota | None = None
 
     @property
     def all_steps(self) -> tuple[MemberPlan, ...]:
@@ -271,6 +365,7 @@ def plan_family(
     verify: bool = False,
     verify_items: int = 0,
     dimensions: Sequence[str] = DIMENSION_IDS,
+    sizing: "FamilySizing | None" = None,
 ) -> FamilyPlan | None:
     """要不要开子代理、怎么分。**不适用时返回 `None`**，调用方走原来的单代理路径。
 
@@ -333,10 +428,23 @@ def plan_family(
     """
     if mode != WEEKLY_MODE or not enabled:
         return None
+    # 配置面收敛后（2026-09-23），周版本的数值参数由 `auto_sizing` 按预算与本周规模
+    # 推导，`count` 参数传的就是推导出的分片数 —— 库里冻结的 `subagent_count` 不再
+    # 进这条路径（它在界面上已收掉）。直接调 `plan_family` 的调用方（测试）仍可手传
+    # `count`，行为与从前一致。
     size = int(count or 0)
     if size < 2:
         return None
     size = min(size, MAX_SUBAGENTS)
+    if sizing is not None:
+        # 推导值覆盖 `limits` 里的三个数字（索取/轮次/每片异常）。注意顺序：先覆盖
+        # 再做下面的成员名义额夹取 —— 名义额就是推导值本身，不会变小。
+        limits = replace(
+            limits,
+            max_tool_requests=sizing.requests_per_shard,
+            max_rounds=sizing.rounds_per_shard,
+            max_anomalies_per_subagent=sizing.anomalies_per_subagent,
+        )
 
     dimension_ids = tuple(str(item).strip() for item in dimensions if str(item or "").strip())
     if len(dimension_ids) < 2:
@@ -393,6 +501,15 @@ def plan_family(
         # 那几组。
         dimensions=dimension_ids,
     )
+    # 家族共享池：池 = 实际开出的成员数 × 名义额（维度比目标少、少开了成员时，池跟着
+    # 缩 —— 池是「这几个成员能花的钱」，不是「配置面收敛前那个数字」）。汇总与对账轮
+    # 从池内剩余取用，见 `FamilyQuota`。
+    quota = FamilyQuota(
+        requests_pool=member_requests * len(members),
+        rounds_pool=member_rounds * len(members),
+        requests_nominal=member_requests,
+        rounds_nominal=member_rounds,
+    )
     return FamilyPlan(
         count=len(members),
         members=members,
@@ -401,6 +518,7 @@ def plan_family(
         verify=bool(verify),
         verify_items=_clamp_verify_items(verify_items),
         count_note=count_note,
+        quota=quota,
     )
 
 
@@ -483,21 +601,22 @@ def build_seed_messages(
     baseline_digest: str = "",
     project_knowledge: str = "",
     project_instructions: str = "",
+    budget_line_override: str = "",
 ) -> tuple[Mapping[str, Any], ...]:
     """一家子共用的**前两条消息**：system + 含整份变更清单的第一条 user 消息。
 
-    ## 它必须与「按同一份额度跑的单代理」逐字节相同
+    ## 家族口径的额度行（2026-09-23 起）
 
-    拼装用的是引擎自己的 `build_system_prompt` / `build_user_message`，参数也与引擎在
-    第 1 轮用的完全一样（`requests_remaining` 就是 `limits.max_tool_requests`，`items` /
-    `budget_notes` / `correction_hint` 都是空）。**额度那一句也在这条消息里**，而分摊之后
-    每个成员的额度比项目配置的小（`plan.limits`），所以：
+    `budget_line_override` 非空时，额度那一句用它（家族共享池的口径，见
+    `_family_budget_line`）；空串 = 单代理口径（`_budget_line`），逐字不变。家族行是
+    **家族常量的纯函数**（池总量、分片数、名义额都来自 `plan.quota`），所有成员拿到的
+    是同一串字节 —— prompt cache 仍然全命中。「随成员变化的数字」（当片上限、已用量）
+    只进成员私有的任务书，永远不进共享前缀。
 
-    * 与**同额度**的单代理运行：前两条消息逐字节相同；
-    * 与**项目配置那份额度**的单代理运行：只有系统消息相同（断点①那一段跨运行恒定）。
-
-    这两条都写成了测试（`tests/test_ai_subagent_cache.py`）。不要把第二句写成第一句 ——
-    额度必须如实告诉模型它能花多少，那是它决定「一次要完还是逐步逼近」的依据。
+    与「同额度的单代理运行」的**跨模式**逐字节相同（前两条消息）就此让位：家族行说
+    的是共享池，单代理行说的是它自己的额度，两句话本来就不该是同一句。跨运行复用里
+    最值钱的那一段（系统消息，断点①）不受影响；家族内部（N+1 个成员 + 对账轮）的
+    复用是这套机制省钱的主体，完整保留。
 
     ## 断点挂在这里，不挂在任务书上
 
@@ -520,13 +639,31 @@ def build_seed_messages(
         requests_remaining=limits.max_tool_requests,
         requests_total=limits.max_tool_requests,
         # 本次生效的维度清单。**必须与引擎第 1 轮传的是同一份**（`run_analysis` 里那
-        # 一处取的是 `loaded.dimensions`），否则「按同一份额度跑的单代理」与家庭成员
-        # 的第 1 条消息不再逐字节相同 —— 而那是这套机制省钱的**全部**依据。
+        # 一处取的是 `loaded.dimensions`），否则家族成员之间的第 1 条消息不再逐字节
+        # 相同 —— 而那是这套机制省钱的**全部**依据。
         dimension_ids=dimension_ids_of(loaded.dimensions),
+        budget_line_override=budget_line_override,
     )
     return (
         mark_cache_breakpoint({"role": "system", "content": system_prompt}),
         mark_cache_breakpoint({"role": "user", "content": first_user}),
+    )
+
+
+def _family_budget_line(quota: FamilyQuota, shards: int) -> str:
+    """共享前缀里那句「全家共享池」的额度行（家族常量的纯函数，见 `build_seed_messages`）。
+
+    这句话模型会原样转述进报告，所以它必须自己站得住（`prompt._budget_line` 的教训）：
+    池总量、分片数、名义额、滚动规则、用完的后果，一件不少。
+    """
+    return (
+        f"本次分析由 {shards} 个分片代理串行深挖、共享一个索取池：全家共可索取 "
+        f"{quota.requests_pool} 次上下文、跑 {quota.rounds_pool} 轮（跨轮次累计，"
+        "重复索要同一个文件也计入）。每个分片先按名义额 "
+        f"{quota.requests_nominal} 次索取规划，**你这一段的实际上限与全家已用的次数"
+        "写在你的任务书里**；你用剩的额度会滚给后面的分片，所以按你需要去拿，"
+        "不必为后面的分片省着。额度用完就只能基于已有证据出报告，"
+        "所以请优先要最关键的。"
     )
 
 
@@ -539,7 +676,11 @@ def attach_seed(
     project_knowledge: str = "",
     project_instructions: str = "",
 ) -> FamilyPlan:
-    """给计划装上共享前缀。**一家子只装一次**（顺序执行 → 也只用写一次缓存）。"""
+    """给计划装上共享前缀。**一家子只装一次**（顺序执行 → 也只用写一次缓存）。
+
+    额度行走家族口径（`_family_budget_line`）；没有 `quota` 的手搓计划（测试）退回
+    单代理口径，行为与从前一致。
+    """
     return replace(
         plan,
         seed_messages=build_seed_messages(
@@ -549,6 +690,11 @@ def attach_seed(
             baseline_digest=baseline_digest,
             project_knowledge=project_knowledge,
             project_instructions=project_instructions,
+            budget_line_override=(
+                _family_budget_line(plan.quota, plan.count)
+                if plan.quota is not None
+                else ""
+            ),
         ),
     )
 
@@ -558,7 +704,27 @@ def attach_seed(
 # --------------------------------------------------------------------------
 
 
-def build_member_task(member: MemberPlan, plan: FamilyPlan) -> str:
+def _pool_note(
+    quota: FamilyQuota, cap_requests: int, cap_rounds: int, *, role_line: str
+) -> str:
+    """成员私有任务书里的「额度账」：当片上限 + 全家已用（随成员变化，永不进共享前缀）。
+
+    与共享前缀里那句家族口径行（`_family_budget_line`）配套：那句说池，这段说
+    「你这一段」。两个数字必须一致地出现在同一份任务书里，模型才知道名义额之外的
+    部分从哪来（前面分片省下的富余）。
+    """
+    return (
+        f"{role_line}全家共享池 {quota.requests_pool} 次索取 / {quota.rounds_pool} 轮，"
+        f"串行滚动；你开跑前全家已用 {quota.requests_used} 次索取 / {quota.rounds_used} 轮。"
+        f"**你这一段的上限是 {cap_requests} 次索取、{cap_rounds} 轮**"
+        f"（名义额 {quota.requests_nominal} 次 / {quota.rounds_nominal} 轮"
+        "，名义额之外的部分是前面分片省下来的富余）。"
+        "你用剩的会滚给后面的分片，所以按你需要去拿，不必为后面省着；"
+        "额度用完就只能基于已有证据出报告。"
+    )
+
+
+def build_member_task(member: MemberPlan, plan: FamilyPlan, *, pool_note: str = "") -> str:
     """一个子代理的任务书（它第 1 轮的 user 消息，也是唯一私有的一段）。
 
     六件事都要说清，否则会出两种具体的错：**它以为自己的读取范围只有自己那几个维度**
@@ -637,6 +803,9 @@ def build_member_task(member: MemberPlan, plan: FamilyPlan) -> str:
             ),
         ]
     )
+    if pool_note.strip():
+        # 额度账是**私有段**（随成员变化），放共享前缀会毁掉 prompt cache。
+        blocks.append("## 额度账（你这一段）\n\n" + pool_note.strip())
     return "\n\n".join(blocks).rstrip() + "\n"
 
 
@@ -645,6 +814,7 @@ def build_synthesis_task(
     steps: Sequence[MemberOutcome],
     *,
     evidence_index: Mapping[str, EvidenceRef] | None = None,
+    pool_note: str = "",
 ) -> str:
     """主代理的任务书：各分片的候选结论 + 谁没跑成 + 汇总纪律。
 
@@ -721,10 +891,16 @@ def build_synthesis_task(
 
     blocks.append(
         "## 额度\n\n"
-        f"你和每个分片代理的额度是一样的（各 {plan.limits.max_tool_requests} 次索取、"
-        f"最多 {plan.limits.max_rounds} 轮）。汇总不需要重新通读整批，"
-        "把额度花在核对可疑条目上。\n\n"
-        f"每个分片代理报上来的条目**最多 {max(1, int(plan.limits.max_anomalies_per_subagent))} "
+        + (
+            pool_note.strip()
+            if pool_note.strip()
+            else (
+                f"你和每个分片代理的额度是一样的（各 {plan.limits.max_tool_requests} 次索取、"
+                f"最多 {plan.limits.max_rounds} 轮）。"
+            )
+        )
+        + "\n\n汇总不需要重新通读整批，把额度花在核对可疑条目上。\n\n"
+        + f"每个分片代理报上来的条目**最多 {max(1, int(plan.limits.max_anomalies_per_subagent))} "
         "条**（平台给的额度，按严重度取的前几条）。所以候选清单是**有上限的抽样**，"
         "不是「全版本只有这些」—— 别因为条数少就推断这个版本没问题。"
     )
@@ -736,6 +912,7 @@ def build_verify_task(
     synthesis: EngineOutcome,
     *,
     evidence_index: Mapping[str, EvidenceRef] | None = None,
+    pool_note: str = "",
 ) -> str:
     """对账轮的任务书：把最严重的几条交出去，**要求它去找反证 + 给出结构化裁决**。
 
@@ -834,6 +1011,9 @@ def build_verify_task(
         "`anomalies` 只放**你在找反证的过程中新发现的**问题，没有就给空数组"
         "（这些新发现平台会照收 —— 与主结论同一道校验之后合入清单）。"
     )
+    if pool_note.strip():
+        # 对账轮的额度账：只用池内剩余、不保下限 —— 它本来就是可跳过的一道。
+        blocks.append("## 额度（你这一段）\n\n" + pool_note.strip())
     return "\n\n".join(blocks).rstrip() + "\n"
 
 
@@ -1080,11 +1260,25 @@ def run_family(
     steps: list[MemberOutcome] = []
     body_cache: MutableMapping[Any, ContextItem] = EvidenceStore()
     spent_tokens = 0
-    for member in plan.members:
+    # 家族共享池（串行滚动，见 `FamilyQuota`）。手搓的 `FamilyPlan`（测试）没带账本时，
+    # 按「名义额即池」重建一份 —— 行为等价于「每片各拿名义额、互不借贷」的旧口径。
+    quota = plan.quota or FamilyQuota(
+        requests_pool=int(plan.limits.max_tool_requests) * len(plan.members),
+        rounds_pool=int(plan.limits.max_rounds) * len(plan.members),
+        requests_nominal=int(plan.limits.max_tool_requests),
+        rounds_nominal=int(plan.limits.max_rounds),
+    )
+    for position, member in enumerate(plan.members):
         reason = should_skip(member, spent_tokens) if should_skip is not None else ""
         if reason:
             steps.append(MemberOutcome(plan=member, skipped_reason=reason))
             continue
+        # 当片上限 = 名义额 + 前片省下的富余（后面几片的名义额与汇总下限先被预留）。
+        members_after = len(plan.members) - (position + 1)
+        cap_requests, cap_rounds = quota.shard_caps(members_after)
+        member_limits = replace(
+            plan.limits, max_tool_requests=cap_requests, max_rounds=cap_rounds
+        )
         step = _run_one(
             member,
             plan=plan,
@@ -1101,10 +1295,24 @@ def run_family(
             on_start=on_start,
             body_cache=body_cache,
             run_analysis_fn=run_analysis_fn,
+            member_limits=member_limits,
+            pool_note=_pool_note(quota, cap_requests, cap_rounds, role_line=""),
         )
         steps.append(step)
+        if step.outcome is not None:
+            # 扣账按实跑数：轮次按 len(rounds)（引擎的 +2 格式重问轮不双记），索取按
+            # requests_used —— 名义额是「上限不是预扣」，只有真用掉的才滚不出去。
+            quota.spend(step.outcome.requests_used, len(step.outcome.rounds))
         spent_tokens += _tokens_of(step.outcome)
 
+    # 汇总那一次：池内剩余全给它，但保下限、**可越池**（唯一产出最终报告的一步，不许
+    # 被前面的分片饿死 —— 见 FamilyQuota.synthesis_caps）。
+    synthesis_caps = quota.synthesis_caps()
+    synthesis_limits = replace(
+        plan.limits,
+        max_tool_requests=synthesis_caps[0],
+        max_rounds=synthesis_caps[1],
+    )
     raw_synthesis_outcome = _run_synthesis(
         plan=plan,
         steps=steps,
@@ -1121,7 +1329,18 @@ def run_family(
         on_start=on_start,
         body_cache=body_cache,
         run_analysis_fn=run_analysis_fn,
+        member_limits=synthesis_limits,
+        pool_note=_pool_note(
+            quota,
+            synthesis_caps[0],
+            synthesis_caps[1],
+            role_line="汇总这一次从池内剩余取用（保底、可越池）。",
+        ),
     )
+    if raw_synthesis_outcome is not None:
+        quota.spend(
+            raw_synthesis_outcome.requests_used, len(raw_synthesis_outcome.rounds)
+        )
     synthesis_outcome = _salvage_failed_synthesis(
         synthesis=raw_synthesis_outcome,
         steps=steps,
@@ -1155,6 +1374,7 @@ def run_family(
         if reason:
             steps.append(MemberOutcome(plan=verify_member, skipped_reason=reason))
         else:
+            verify_caps = quota.verify_caps()
             steps.append(
                 _run_verify(
                     plan=plan,
@@ -1173,6 +1393,17 @@ def run_family(
                     on_start=on_start,
                     body_cache=body_cache,
                     run_analysis_fn=run_analysis_fn,
+                    member_limits=replace(
+                        plan.limits,
+                        max_tool_requests=verify_caps[0],
+                        max_rounds=verify_caps[1],
+                    ),
+                    pool_note=_pool_note(
+                        quota,
+                        verify_caps[0],
+                        verify_caps[1],
+                        role_line="对账轮只用池内剩余，不保下限（它本来就是可跳过的一道）。",
+                    ),
                 )
             )
 
@@ -1315,8 +1546,14 @@ def _run_one(
     on_start: Callable[[RoundProgress], None] | None,
     body_cache: MutableMapping[Any, ContextItem],
     run_analysis_fn: Callable[..., EngineOutcome],
+    member_limits: EngineLimits,
+    pool_note: str,
 ) -> MemberOutcome:
     """跑一个成员（子代理或汇总），把它报出的候选结论抽出来。
+
+    `member_limits` 是编排层按共享池算出的**当片上限**（名义额 + 前片滚下来的富余，
+    见 `run_family`），`pool_note` 是写进它私有任务书的额度账 —— 引擎与 `ContextTools`
+    一行不动，额度对引擎来说就是 `limits.max_tool_requests` 那个数字。
 
     ## 抽的是**过门槛之前**的 `payload.anomalies`
 
@@ -1330,14 +1567,14 @@ def _run_one(
         loaded=loaded,
         scope=scope,
         change_summary=change_summary,
-        limits=plan.limits,
+        limits=member_limits,
         thresholds=thresholds,
         project_knowledge=project_knowledge,
         project_instructions=project_instructions,
         baseline_digest=baseline_digest,
         plan=plan,
         member=member,
-        task_message=build_member_task(member, plan),
+        task_message=build_member_task(member, plan, pool_note=pool_note),
         on_round=on_round,
         on_start=on_start,
         body_cache=body_cache,
@@ -1407,11 +1644,14 @@ def _run_verify(
     on_start: Callable[[RoundProgress], None] | None,
     body_cache: MutableMapping[Any, ContextItem],
     run_analysis_fn: Callable[..., EngineOutcome],
+    member_limits: EngineLimits,
+    pool_note: str,
 ) -> MemberOutcome:
     """跑对账轮。它**不是分片**：维度是空的，`role` 是 `verify`，面板上标签是 `V1`。
 
     `member` 由 `run_family` 建好传进来（那里要用它先问一次预算），所以这里不再自己造一个 ——
     两处各造一个的下场是 `index` / `label` 迟早对不上，而标签正是面板上的那一列。
+    `member_limits` 是池内剩余推出的当轮上限（不保下限），`pool_note` 是它的额度账。
     """
     outcome = _call_engine(
         client=client,
@@ -1419,7 +1659,7 @@ def _run_verify(
         loaded=loaded,
         scope=scope,
         change_summary=change_summary,
-        limits=plan.limits,
+        limits=member_limits,
         thresholds=thresholds,
         project_knowledge=project_knowledge,
         project_instructions=project_instructions,
@@ -1427,7 +1667,10 @@ def _run_verify(
         plan=plan,
         member=member,
         task_message=build_verify_task(
-            plan, synthesis, evidence_index=evidence_index_of(body_cache)
+            plan,
+            synthesis,
+            evidence_index=evidence_index_of(body_cache),
+            pool_note=pool_note,
         ),
         on_round=on_round,
         on_start=on_start,
@@ -1464,14 +1707,18 @@ def _run_synthesis(
     on_start: Callable[[RoundProgress], None] | None,
     body_cache: MutableMapping[Any, ContextItem],
     run_analysis_fn: Callable[..., EngineOutcome],
+    member_limits: EngineLimits,
+    pool_note: str,
 ) -> EngineOutcome:
+    """汇总那一次。`member_limits` 是池内剩余推出的上限（保下限、可越池，见
+    `FamilyQuota.synthesis_caps`），`pool_note` 是写进汇总任务书的额度账。"""
     return _call_engine(
         client=client,
         provider=provider,
         loaded=loaded,
         scope=scope,
         change_summary=change_summary,
-        limits=plan.limits,
+        limits=member_limits,
         thresholds=thresholds,
         project_knowledge=project_knowledge,
         project_instructions=project_instructions,
@@ -1479,7 +1726,10 @@ def _run_synthesis(
         plan=plan,
         member=plan.synthesis,
         task_message=build_synthesis_task(
-            plan, steps, evidence_index=evidence_index_of(body_cache)
+            plan,
+            steps,
+            evidence_index=evidence_index_of(body_cache),
+            pool_note=pool_note,
         ),
         on_round=on_round,
         on_start=on_start,

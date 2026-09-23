@@ -1027,9 +1027,8 @@ def test_saving_only_the_price_table_keeps_every_other_field():
             {
                 "api_base_url": "https://api.example.com/v1",
                 "api_model": "fake-model",
-                "max_analysis_rounds": 5,
+                "weekly_interval_minutes": 45,
                 "min_severity": "critical",
-                "max_anomalies_per_run": 3,
                 "budget_period": "weekly",
                 "budget_token_limit": 123456,
                 "budget_cost_limit": "9.5",
@@ -1044,8 +1043,8 @@ def test_saving_only_the_price_table_keeps_every_other_field():
         after = ai_service.get_project_analysis_config(project_id)
 
         for key in (
-            "api_base_url", "api_model", "max_analysis_rounds", "min_severity",
-            "max_anomalies_per_run", "budget_period", "budget_token_limit",
+            "api_base_url", "api_model", "weekly_interval_minutes", "min_severity",
+            "budget_period", "budget_token_limit",
             "budget_cost_limit", "project_knowledge", "prompt_template",
         ):
             assert after[key] == before[key], f"只提交单价表，`{key}` 却被改掉了"
@@ -1057,7 +1056,7 @@ def test_the_panel_route_only_sends_the_price_table(client, monkeypatch):
     with flask_app.app_context():
         create_tables()
         project_id = _project()
-        _configure(project_id, {"max_analysis_rounds": 7, "budget_token_limit": 555})
+        _configure(project_id, {"weekly_interval_minutes": 45, "budget_token_limit": 555})
 
     monkeypatch.setattr(ai_routes, "_has_project_admin_access", lambda _pid: True)
     # 「没有用户对象」这一档仍然是留着要测的（环境变量管理员就是这种会话），只是取人名的
@@ -1076,7 +1075,7 @@ def test_the_panel_route_only_sends_the_price_table(client, monkeypatch):
         assert resp.status_code == 200
         with flask_app.app_context():
             config = ai_service.get_project_analysis_config(project_id)
-            assert config["max_analysis_rounds"] == 7
+            assert config["weekly_interval_minutes"] == 45
             assert config["budget_token_limit"] == 555
             assert config["model_price_table"] == _table("v1")
 

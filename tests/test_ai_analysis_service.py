@@ -293,9 +293,11 @@ def test_ai_project_analysis_config_update():
         config = ai_service.get_project_analysis_config(project.id)
         assert config["configured"] is False
         assert config["weekly_interval_minutes"] == 120
-        # 界面用的字段元信息从接口来，不在模板里写死。
-        assert config["field_schema"]["max_analysis_rounds"]["min"] == 1
-        assert config["field_schema"]["max_analysis_rounds"]["max"] == 30
+        # 界面用的字段元信息从接口来，不在模板里写死。收敛键（max_analysis_rounds 等）
+        # 不再出现在 schema 里 —— 有 `test_ai_endpoint_service` 那边的用例专门钉。
+        assert config["field_schema"]["weekly_interval_minutes"]["min"] == 5
+        assert config["field_schema"]["weekly_interval_minutes"]["max"] == 10080
+        assert "max_analysis_rounds" not in config["field_schema"]
         assert config["api_key"]["configured"] is False
         assert config["endpoint_ready"] is False, "地址/模型/Token 都没配，不具备跑分析的条件"
 
@@ -312,7 +314,7 @@ def test_ai_project_analysis_config_update():
                 # 「能关掉」那一向由 `test_weekly_ai_auto_trigger_gate` 里
                 # True→False 的翻动覆盖。
                 "auto_weekly_enabled": True,
-                "max_files_per_run": 150,
+                "prompt_char_budget": 150_000,
                 "prompt_template": "test prompt",
             },
             updated_by="tester",
@@ -324,7 +326,7 @@ def test_ai_project_analysis_config_update():
         assert updated["configured"] is True
         assert updated["weekly_interval_minutes"] == 15
         assert updated["auto_weekly_enabled"] is True
-        assert updated["max_files_per_run"] == 150
+        assert updated["prompt_char_budget"] == 150_000
         assert updated["prompt_template"] == "test prompt"
 
 
@@ -345,16 +347,16 @@ def test_an_out_of_range_value_is_rejected_and_nothing_is_written():
         assert ok is True
 
         ok, _message, errors = ai_service.update_project_analysis_config(
-            project.id, {"max_analysis_rounds": 999, "min_severity": "medium"}
+            project.id, {"weekly_interval_minutes": 99999, "min_severity": "medium"}
         )
         assert ok is False
         fields = {item["field"] for item in errors}
-        assert fields == {"max_analysis_rounds", "min_severity"}
+        assert fields == {"weekly_interval_minutes", "min_severity"}
         assert all(item["label"] and item["message"] for item in errors)
 
         after = ai_service.get_project_analysis_config(project.id)
         assert after["weekly_interval_minutes"] == 15, "失败的那次不该动已存的配置"
-        assert after["max_analysis_rounds"] == 8, "仍是默认值：既没被夹取也没被写入"
+        assert after["prompt_char_budget"] == 560_000, "仍是默认值：既没被夹取也没被写入"
 
 
 def test_the_verify_round_needs_the_subagent_mode_it_depends_on():
@@ -1559,8 +1561,11 @@ def test_a_small_repository_still_reaches_the_payload_when_truncated(monkeypatch
 
         monkeypatch.setattr(
             ai_service, "get_project_analysis_config",
-            lambda *a, **k: {"max_files_per_run": 10},
+            lambda *a, **k: {},
         )
+        # 取样上限 2026-09-23 起按规模推导（旧配置 `max_files_per_run` 已收掉），
+        # 「退化时取多少个」就是它：这里压到 10 逼出公平取样那一支。
+        monkeypatch.setattr(ai_service, "sampling_cap_for", lambda count: 10)
         monkeypatch.setattr(ai_service, "MAX_LIST_CHARS", 100)
         payload, _state, skip_reason = ai_service.build_weekly_payload(cfg_code.id)
         assert skip_reason is None

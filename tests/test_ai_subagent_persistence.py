@@ -36,7 +36,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_SUBAGENT_ENABLED,
     AiProjectAnalysisConfig,
 )
-from services.ai.endpoint_service import FIELD_DEFAULTS, FIELD_RULES
+from services.ai.endpoint_service import FIELD_DEFAULTS, FIELD_RULES, RETIRED_FIELDS
 from services.ai.engine import (
     STATUS_SUCCEEDED,
     EngineOutcome,
@@ -239,16 +239,19 @@ class TestTheUsagePanelCanReadIt:
 
 class TestTheConfig:
     def test_the_field_rules_and_defaults_are_wired(self):
+        # 2026-09-23 配置面收敛：分片数不再可配（endpoint_service.RETIRED_FIELDS），
+        # 只剩开关在配置面上；`resolved()` 的兜底默认仍在（老行 NULL 读回 DEFAULT_*）。
         assert FIELD_RULES["subagent_enabled"].label == "子代理模式（仅周版本）"
-        assert FIELD_RULES["subagent_count"].minimum == 1
-        assert FIELD_RULES["subagent_count"].maximum == 6
+        assert "subagent_count" not in FIELD_RULES
+        assert "subagent_count" in RETIRED_FIELDS
         assert FIELD_DEFAULTS["subagent_enabled"] is DEFAULT_SUBAGENT_ENABLED, (
             "界面上的默认勾选状态必须与代码里的默认值同源（`FIELD_DEFAULTS` 是从"
             "`project_config` 取的那一个常量），否则会出现「配置页默认关、服务端默认开」"
         )
-        assert FIELD_DEFAULTS["subagent_count"] == 3
+        # 默认 3→5 与 auto_sizing.SHARD_TARGET 对齐（推导口径见 models 层常量注释）。
+        assert FIELD_DEFAULTS["subagent_count"] == 5
 
-    def test_resolved_reads_null_as_the_default_and_three(self):
+    def test_resolved_reads_null_as_the_default(self):
         with flask_app.app_context():
             create_tables()
             project = _project()
@@ -261,7 +264,7 @@ class TestTheConfig:
             # **NULL 跟着默认值走**：这一列加出来时默认是关，历史行几乎都是 NULL，
             # 所以「默认开」要真的生效，就必须让 NULL 读成 DEFAULT_SUBAGENT_ENABLED。
             assert resolved["subagent_enabled"] is DEFAULT_SUBAGENT_ENABLED is True
-            assert resolved["subagent_count"] == DEFAULT_SUBAGENT_COUNT == 3
+            assert resolved["subagent_count"] == DEFAULT_SUBAGENT_COUNT == 5
             db.session.delete(row)
             db.session.commit()
 

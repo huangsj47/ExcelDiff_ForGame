@@ -163,7 +163,9 @@ def test_config_read_returns_every_field_and_the_schema(client, project_id, monk
     body = client.get(f"/ai-analysis/projects/{project_id}/config").get_json()
 
     assert body["success"] is True
-    # 界面要用的 4 组字段都在
+    # 界面要用的字段组都在。2026-09-23 配置面收敛后，七个数值栏**在响应体里仍然返回**
+    # （库里的存量值照读，`resolved()` 兜默认），但**不再出现在 field_schema 里** ——
+    # schema 是前端渲染的事实源，不含它们界面就不渲染那一栏。
     for name in (
         "api_base_url",
         "api_model",
@@ -180,9 +182,13 @@ def test_config_read_returns_every_field_and_the_schema(client, project_id, monk
         assert name in body, f"配置接口没有返回 {name}"
 
     schema = body["field_schema"]
-    assert schema["max_analysis_rounds"]["label"] == "最大分析轮次"
-    assert schema["max_analysis_rounds"]["min"] == 1
+    assert schema["weekly_interval_minutes"]["label"] == "分析间隔（分钟）"
+    assert schema["weekly_interval_minutes"]["min"] == 5
     assert schema["min_severity"]["choices"] == ["high", "critical"]
+    for retired in ("max_analysis_rounds", "max_tool_requests", "subagent_count",
+                    "request_timeout_seconds", "max_files_per_run",
+                    "max_anomalies_per_run", "max_anomalies_per_subagent"):
+        assert retired not in schema, f"收敛键 {retired} 不该再下发渲染规则"
 
     assert body["api_key"]["configured"] is True
     assert body["source"] == "openai", "没配地址时应回落到预设"
@@ -213,7 +219,7 @@ def test_a_valid_update_succeeds(client, project_id, monkeypatch):
         json={
             "api_base_url": "http://127.0.0.1:15721/v1",
             "api_model": "deepseek-v4-flash",
-            "max_analysis_rounds": 4,
+            "weekly_interval_minutes": 30,
             "min_severity": "critical",
         },
     )
@@ -224,7 +230,26 @@ def test_a_valid_update_succeeds(client, project_id, monkeypatch):
     with flask_app.app_context():
         config = ai_service.get_project_analysis_config(project_id)
     assert config["api_model"] == "deepseek-v4-flash"
-    assert config["max_analysis_rounds"] == 4
+    assert config["weekly_interval_minutes"] == 30
+
+
+def test_an_update_with_a_retired_field_is_rejected(client, project_id, monkeypatch):
+    """收敛键提交必须 400，而不是「保存成功但没生效」。
+
+    老脚本或浏览器缓存的旧页面还会发 `max_tool_requests` 这种键上来 —— 静默忽略
+    的话用户以为改了参数，而周版本路径已不读它们（`endpoint_service.RETIRED_FIELDS`）。
+    """
+    _allow(monkeypatch)
+    resp = client.post(
+        f"/ai-analysis/projects/{project_id}/config",
+        json={"api_model": "deepseek-v4-flash", "subagent_count": 5},
+    )
+
+    assert resp.status_code == 400
+    body = resp.get_json()
+    fields = {error["field"] for error in body["errors"]}
+    assert "subagent_count" in fields
+    assert any("平台自动推导" in error["message"] for error in body["errors"])
 
 
 def test_an_invalid_update_returns_field_level_errors(client, project_id, monkeypatch):
@@ -290,7 +315,7 @@ def _api_key_actor(project_id):
     [
         (
             lambda pid: f"/ai-analysis/projects/{pid}/config",
-            {"max_analysis_rounds": 5},
+            {"weekly_interval_minutes": 30},
             _config_actor,
         ),
         (

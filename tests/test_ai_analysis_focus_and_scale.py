@@ -125,28 +125,26 @@ def two_repos():
 
 
 def test_the_list_is_not_capped_at_max_files(monkeypatch, two_repos):
-    """`max_files_per_run` 不再是「列多少」的硬上限。"""
+    """清单取样上限（收敛后由 `sampling_cap_for` 推导）在 34 个文件时夹到 200 > 34，
+    所以全列 —— 它仍然**只在清单长到列不下时**才起作用，不是「能分析多少」的上限。"""
     with app.app_context():
-        monkeypatch.setattr(
-            ai_service, "get_project_analysis_config",
-            lambda *a, **k: {"max_files_per_run": 5},
-        )
         payload, _state, skip = ai_service.build_weekly_payload(two_repos["cfg_code"].id)
 
         assert skip is None
         assert len(payload["list_files"]) == 34, (
-            f"清单被 max_files_per_run 截断了：{len(payload['list_files'])}"
+            f"清单被取样上限截断了：{len(payload['list_files'])}"
         )
         assert payload["delta_truncated"] is False
+        # 取样上限是推导值：34 个文件 → clamp(34, 200, 500) = 200，够装下全部。
+        assert ai_service.sampling_cap_for(34) == 200
 
 
 def test_the_whitelist_always_carries_every_changed_file(monkeypatch, two_repos):
     """清单可以少列，**白名单不能少给** —— 少给就是「读不到」。"""
     with app.app_context():
-        monkeypatch.setattr(
-            ai_service, "get_project_analysis_config",
-            lambda *a, **k: {"max_files_per_run": 5},
-        )
+        # 收敛后取样上限由 `sampling_cap_for` 推导（clamp(文件数, 200, 500)），不再读
+        # 配置键 —— 所以这里改成压推导函数，而不是往配置字典里塞一个已退休的键。
+        monkeypatch.setattr(ai_service, "sampling_cap_for", lambda count: 5)
         monkeypatch.setattr(ai_service, "MAX_LIST_CHARS", 50)   # 逼出退化那一支
         payload, _state, _skip = ai_service.build_weekly_payload(two_repos["cfg_code"].id)
 

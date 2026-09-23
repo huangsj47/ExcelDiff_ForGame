@@ -691,13 +691,21 @@ def test_the_examples_are_collapsed_by_default():
 
 
 def test_analysis_limits_explain_their_real_scope():
-    """配置页不能把每个 agent 的额度说成整个 job，也不能把文件清单说成白名单。"""
+    """2026-09-23 配置面收敛：七个数值栏（取样/轮次/索取/分片/异常/超时）整体下架，
+    取代它们的是一句「平台按预算与规模自动推导」的说明 —— 没有这句，用户会去找
+    那个已经不存在的输入框，或者以为平台在偷偷用某个他不知道的值。"""
     html = _modal_html()
 
-    assert "仅控制文件名清单过长时列出多少个名称" in html
-    assert "每个分析 agent 最多来回几轮" in html
-    assert "每个分析 agent 的索取总次数" in html
-    assert "每个分片和汇总各有这份额度" in html
+    # 七个输入框整个下架（DOM 上不能有残骸：fill/collect 不再引用它们）。
+    for gone in (
+        "aiMaxFilesInput", "aiMaxRoundsInput", "aiMaxToolRequestsInput",
+        "aiSubagentCountInput", "aiMaxAnomaliesPerSubagentInput",
+        "aiRequestTimeoutInput", "aiMaxAnomaliesInput",
+    ):
+        assert f'id="{gone}"' not in html, f"收敛键的输入框还在界面上：{gone}"
+    # 而取代它们的说明必须在场：说清推导这件事存在、且默认几片。
+    assert "平台按预算与本周规模自动推导" in html
+    assert "默认 5 片" in html
 
 
 def test_the_examples_do_not_leak_internal_tool_names():
@@ -724,21 +732,36 @@ class TestTheSubagentFields:
             "开关旁边没有写清代价（模型调用次数变成分片数 + 1 倍）"
         )
         assert "仅周版本" in html, "没写清它只对周版本生效（单提交分析不受影响）"
+        # 2026-09-23 收敛：分片数由平台推导，这个说明必须紧跟在开关后面 ——
+        # 否则用户会去找一个已经不存在的「分片数」输入框。
+        assert "自动推导" in html, "没有说清分片数与额度由平台自动推导"
 
-    def test_the_count_field_is_wired_to_dom_and_errors(self):
+    def test_the_count_field_is_no_longer_configurable(self):
+        """分片数输入框整体下架：DOM、字段表、错误槽都不能有残骸。
+
+        残骸的后果不是「多一个没用的框」：`setAiFieldError` 按字段表找 DOM，
+        收敛键一旦还留在 `AI_FIELD_DOM` 里，服务端对它的报错（收到即 400）会去
+        挂一个不存在的输入框 —— 前端静默 no-op，用户只看到保存失败、不知道为什么。
+        """
         dom = _field_dom_map()
-
-        assert dom["subagent_count"] == "aiSubagentCountInput"
         html = _modal_html()
-        assert 'id="aiSubagentCountInput"' in html
-        assert 'id="aiSubagentCountInputHelp"' in html
-        assert 'id="aiSubagentCountInputError"' in html
-        assert "aria-describedby=\"aiSubagentCountInputHelp aiSubagentCountInputError\"" in html
+
+        for retired in ("subagent_count", "max_files_per_run", "max_analysis_rounds",
+                        "max_tool_requests", "request_timeout_seconds",
+                        "max_anomalies_per_run", "max_anomalies_per_subagent"):
+            assert retired not in dom, f"收敛键还留在 AI_FIELD_DOM 里：{retired}"
+        assert 'id="aiSubagentCountInput"' not in html
+        assert 'id="aiSubagentCountInputHelp"' not in html
+        assert 'id="aiSubagentCountInputError"' not in html
 
     def test_both_fields_are_saved(self):
         script = _ai_script()
 
-        assert "numberValue('aiSubagentCountInput', 'subagent_count')" in script
+        # 2026-09-23 收敛后「两个控件」只剩开关；分片数不再提交 —— 服务端对
+        # `subagent_count` 收到即报错（RETIRED_FIELDS），带着它发等于把自己锁在外面。
+        assert "numberValue('aiSubagentCountInput', 'subagent_count')" not in script, (
+            "分片数已收敛为平台推导，提交体里不许再带这个键"
+        )
         assert "payload.subagent_enabled = !!subagentToggle.checked" in script, (
             "开关的勾选状态没有被提交 —— 打开之后什么都不会变"
         )
@@ -751,10 +774,18 @@ class TestTheSubagentFields:
             "用了 `!== false` 之类的写法：NULL（老行）会被勾成「已启用」"
         )
 
-    def test_the_count_is_loaded_from_the_config(self):
+    def test_the_count_is_no_longer_loaded_from_the_config(self):
+        """分片数收敛后**不再回填**：DOM 已删，setValue 指向一个不存在的元素只会是
+        一段永远不生效的死代码。"""
         script = _ai_script()
 
-        assert "setValue('aiSubagentCountInput', data.subagent_count)" in script
+        assert "setValue('aiSubagentCountInput'" not in script
+        for retired in (
+            "setValue('aiMaxFilesInput'", "setValue('aiMaxRoundsInput'",
+            "setValue('aiMaxToolRequestsInput'", "setValue('aiRequestTimeoutInput'",
+            "setValue('aiMaxAnomaliesInput'",
+        ):
+            assert retired not in script, f"收敛键的回填残留：{retired}"
 
 
 class TestTheVerifyField:

@@ -605,6 +605,7 @@ def build_user_message(
     budget_exhausted: bool = False,
     history_recap: str = "",
     dimension_ids: Iterable[str] = DIMENSION_IDS,
+    budget_line_override: str = "",
 ) -> str:
     """组装某一轮的 user 消息。
 
@@ -655,8 +656,15 @@ def build_user_message(
         blocks.append("## 上下文完整性提示（重要）\n\n" + "\n".join(f"- {note}" for note in notes))
 
     # 第一轮也要说额度：模型是在第一轮决定整体策略的（要一次要完还是逐步逼近），
-    # 不知道额度就没法做这个决定。
-    blocks.append(_budget_line(requests_total=requests_total, requests_remaining=requests_remaining))
+    # 不知道额度就没法做这个决定。`budget_line_override` 非空时用它（家族共享池口径，
+    # 见 `subagent.build_seed_messages`）：家族行是家族常量的纯函数，所有成员拿到
+    # 同一串字节；空串 = 单代理口径，逐字不变。
+    blocks.append(
+        budget_line_override.strip()
+        or _budget_line(
+            requests_total=requests_total, requests_remaining=requests_remaining
+        )
+    )
 
     if budget_exhausted:
         # 这段文案**只有一份**（在 `protocol` 里，与纠正提示放在一起）。以前这里另写了

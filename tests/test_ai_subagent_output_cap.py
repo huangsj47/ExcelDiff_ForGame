@@ -21,14 +21,15 @@ import pytest
 
 from models.ai_analysis.project_config import (
     DEFAULT_MAX_ANOMALIES_PER_SUBAGENT,
-    MAX_ANOMALIES_PER_SUBAGENT_RANGE,
     AiProjectAnalysisConfig,
 )
 from services.ai.endpoint_service import (
     FIELD_DEFAULTS,
     FIELD_RULES,
+    ConfigValidationError,
     FieldError,
     validate_field,
+    validate_payload,
 )
 from services.ai.engine import EngineLimits
 from services.ai.subagent import build_member_task, build_synthesis_task, plan_family
@@ -47,12 +48,17 @@ def _member_task(*, cap: int, count: int = 3) -> str:
 
 
 def test_the_default_matches_between_the_model_and_the_service_layer():
-    """默认值有两份副本（模型层 / 服务层），漂移过一次就够受了。"""
+    """默认值有两份副本（模型层 / 服务层），漂移过一次就够受了。
+
+    2026-09-23 收敛后这一栏**不再可配**（不在 FIELD_RULES、提交即报错），但出厂默认
+    仍有两处副本：模型层常量与「无配置行」路径的 FIELD_DEFAULTS —— 单提交路径与
+    `resolved()` 继续读它们，两边必须一致。
+    """
     assert DEFAULT_MAX_ANOMALIES_PER_SUBAGENT == 10
     assert _engine_limits({}).max_anomalies_per_subagent == DEFAULT_MAX_ANOMALIES_PER_SUBAGENT
     assert FIELD_DEFAULTS["max_anomalies_per_subagent"] == DEFAULT_MAX_ANOMALIES_PER_SUBAGENT
-    assert FIELD_RULES["max_anomalies_per_subagent"].minimum == MAX_ANOMALIES_PER_SUBAGENT_RANGE[0]
-    assert FIELD_RULES["max_anomalies_per_subagent"].maximum == MAX_ANOMALIES_PER_SUBAGENT_RANGE[1]
+    # 收敛键不再有校验规则（界面不渲染、schema 不下发）。
+    assert "max_anomalies_per_subagent" not in FIELD_RULES
 
 
 def test_the_member_task_carries_the_cap():
@@ -104,17 +110,23 @@ def test_the_synthesis_is_told_the_candidates_are_a_capped_sample():
     assert "抽样" in text
 
 
-def test_the_field_is_writable_through_the_endpoint_layer():
-    """配置接口得能存它：`FIELD_RULES` 里有、且范围按常量收。
+def test_the_field_is_no_longer_writable_through_the_endpoint_layer():
+    """2026-09-23 收敛后这一栏**收到即报错**：周版本路径的每片额度由平台推导
+    （`auto_sizing.anomalies_per_subagent`），不再接受手动配置 —— 静默存进去的
+    话，用户以为改了每片额度，而它根本不被读。
 
     （「老库加列读成 NULL 也不炸」由 `tests/test_ai_models_and_migration.py` 的
     `CONFIG_NEW_COLUMNS` 那份清单验 —— 那一组是拿真库跑一遍迁移的。）
     """
-    assert validate_field("max_anomalies_per_subagent", "8") == 8
+    # 单字段入口：不再是可配置字段。
     with pytest.raises(FieldError):
-        validate_field("max_anomalies_per_subagent", str(MAX_ANOMALIES_PER_SUBAGENT_RANGE[1] + 1))
-    with pytest.raises(FieldError):
-        validate_field("max_anomalies_per_subagent", "0")
+        validate_field("max_anomalies_per_subagent", "8")
+    # 整体提交入口：报的是「已改为平台自动推导」那条，而不是「不认识这个字段」。
+    with pytest.raises(ConfigValidationError) as excinfo:
+        validate_payload({"max_anomalies_per_subagent": "8"})
+    errors = excinfo.value.errors
+    assert len(errors) == 1
+    assert "平台自动推导" in errors[0].message
 
 
 def test_the_run_cap_still_wins_at_the_aggregation_step():
