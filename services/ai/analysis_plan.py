@@ -20,18 +20,26 @@
 `AiAnalysisRun.request_payload`（`payload` 本来就是它的一部分），所以一次跑完的计划
 **是可查的**：出问题时能回答「当时是凭什么这么分的工」。
 
-## 渲染 diff 体量：量的是**载荷**，不是渲染后的 Markdown（如实标注）
+## 差异载荷估算字符数：量的是**载荷**，不是渲染后的 Markdown（名字已如实改过来）
 
 指引要的是「**实际渲染后**的 diff 字符数」。渲染层（表格 → 逐格文本）在本模块里跑不起：
 对 1000+ 个文件把每份 `merged_diff_data` 渲染一遍是分钟级的开销，而这个函数在**预估端点
 每次打开确认框**时都会被调一次。所以这里量的是**解码后载荷**的字符数
-（`json.dumps(payload, ensure_ascii=False)`），并把结果标成 `chars_estimated`：
+（`json.dumps(payload, ensure_ascii=False)`），并把结果标成 `chars_estimated`。
+
+**字段与文案在 2026-09-24 改成了 `diff_payload_chars` / 「差异载荷估算」。** 原先它叫
+`rendered_diff_chars`、各处文案写「渲染后 diff N 字」—— 那是**名不副实**：读的人
+（包括实测时看计划理由的人）会以为平台真的渲染过一遍，于是拿这个数去对「模型看到的
+diff 有多长」，怎么对都对不上。口径一个字没改，改的是它**自称是什么**：
 
 * 它比渲染后的 Markdown **偏大**（含 JSON 键名与结构），所以门槛判定偏保守 ——
   宁可早一点分工，也不要把一次装不下的输入判成小批次；
 * 大版本按**等距抽样**放大（`EVIDENCE_SAMPLE_FILES` 个样本），并把
   `chars_estimated=True` 与 `sample_size` 一起带上 —— 「量出来的」与「推出来的」不许
-  看起来一样（与「未上报不许写成 0」同一条纪律）。
+  看起来一样（与「未上报不许写成 0」同一条纪律）；
+* 旧键名 `rendered_diff_chars` 读侧仍然认（`SnapshotFacts.from_mapping`）：已经在库里
+  的那几十条运行（含实测的 run 45/46/52/53）的 `snapshot_facts` 都写着旧名字，
+  不认就会把它们的事实读成 0，「当时凭什么这么分工」就成了一句空话。
 
 ## 不做的事
 
@@ -190,7 +198,7 @@ def snapshot_facts_from_payload(
     return SnapshotFacts.from_mapping(
         {
             "file_count": total,
-            "rendered_diff_chars": sum(chars),
+            "diff_payload_chars": sum(chars),
             "max_file_diff_chars": max(chars) if chars else 0,
             # **输入被截断过时「没有超限」不成立**（清单取样、hunk 截断都会让它为真）。
             "truncated": bool(payload.get("delta_truncated")),

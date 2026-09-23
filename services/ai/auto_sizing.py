@@ -42,7 +42,7 @@
 
 `plan_analysis` 是新的入口，纯函数，顺序是：
 
-1. **小批次直接单分析者**：文件数、**实际渲染后的 diff 字符总量**、单文件最大值三个确定性
+1. **小批次直接单分析者**：文件数、**差异载荷估算字符数**、单文件最大值三个确定性
    事实都在门槛内 → 一个分析者看完，且它仍然覆盖**全部**声明维度（维度是检查清单，不是
    分工依据）；
 2. 超门槛才分工：先按文件/提交/生成物/引用关系构造**确定性变更簇**（`cluster_changes`），
@@ -281,7 +281,7 @@ class SnapshotFacts:
 
     ## 为什么是这些字段
 
-    指引 §2 点名要从快照算的六样：文件数、**实际渲染后的** diff 字符数、单文件最大值、
+    指引 §2 点名要从快照算的六样：文件数、**差异载荷估算**字符数、单文件最大值、
     二进制/表格/代码比例、关键路径、截断状态。它们的共同点是**都不依赖用户配了多少钱**
     —— 这正是要修的那条因果：改预算不该改变分工。
 
@@ -297,7 +297,7 @@ class SnapshotFacts:
     """
 
     file_count: int = 0
-    rendered_diff_chars: int = 0
+    diff_payload_chars: int = 0
     max_file_diff_chars: int = 0
     # 输入本身被截断过（清单取样、hunk 截断…）。截断时「没有超限」这句话不成立。
     truncated: bool = False
@@ -323,7 +323,19 @@ class SnapshotFacts:
                 entries.append(item)
         return cls(
             file_count=_int(data.get("file_count")) or len(entries),
-            rendered_diff_chars=_int(data.get("rendered_diff_chars")),
+            # **差异载荷估算字符数**（旧键名 `rendered_diff_chars` 仍要认）。
+            #
+            # 名字改过：这个数**不是**渲染成模型看到的 Markdown 之后的长度，而是库里的
+            # `merged_diff_data` 解码再 `json.dumps(ensure_ascii=False)` 的**载荷**长度
+            # ——它比渲染后偏大（含 JSON 键名与结构），所以门槛判定偏保守。原先叫
+            # 「渲染后 diff 字数」，那是**名不副实**：读的人会以为平台真的渲染过一遍。
+            #
+            # 旧键名必须继续认：`snapshot_facts` 冻在 `request_payload` 里，已经在库里的
+            # 那几十条运行（含实测的 run 45/46/52/53）都写着旧名字。不认的话它们的事实
+            # 会被读成 0，而那会让「当时凭什么这么分工」变成一句空话。
+            diff_payload_chars=_int(
+                data.get("diff_payload_chars", data.get("rendered_diff_chars"))
+            ),
             max_file_diff_chars=_int(data.get("max_file_diff_chars")),
             truncated=bool(data.get("truncated")),
             chars_estimated=bool(data.get("chars_estimated")),
@@ -344,9 +356,9 @@ class SnapshotFacts:
         """
         if self.file_count > SMALL_BATCH_MAX_FILES:
             return f"变更文件 {self.file_count} 个 > 门槛 {SMALL_BATCH_MAX_FILES} 个"
-        if self.rendered_diff_chars > SMALL_BATCH_MAX_TOTAL_CHARS:
+        if self.diff_payload_chars > SMALL_BATCH_MAX_TOTAL_CHARS:
             return (
-                f"渲染后的 diff 共 {self.rendered_diff_chars:,} 字 > 门槛 "
+                f"差异载荷估算共 {self.diff_payload_chars:,} 字 > 门槛 "
                 f"{SMALL_BATCH_MAX_TOTAL_CHARS:,} 字"
             )
         if self.max_file_diff_chars > SMALL_BATCH_MAX_FILE_CHARS:
@@ -365,7 +377,7 @@ class SnapshotFacts:
     def to_dict(self) -> dict[str, Any]:
         return {
             "file_count": self.file_count,
-            "rendered_diff_chars": self.rendered_diff_chars,
+            "diff_payload_chars": self.diff_payload_chars,
             "max_file_diff_chars": self.max_file_diff_chars,
             "truncated": self.truncated,
             "chars_estimated": self.chars_estimated,
@@ -393,7 +405,7 @@ class SnapshotFacts:
         body = json.dumps(
             {
                 "files": self.file_count,
-                "chars": self.rendered_diff_chars,
+                "chars": self.diff_payload_chars,
                 "max_file": self.max_file_diff_chars,
                 "truncated": self.truncated,
                 "paths": [item.get("path") for item in self.entries],
@@ -555,7 +567,7 @@ def planner_metadata(facts: SnapshotFacts) -> dict[str, Any]:
     sizes = cluster_chars(clusters, facts.entries)
     return {
         "file_count": facts.file_count,
-        "rendered_diff_chars": facts.rendered_diff_chars,
+        "diff_payload_chars": facts.diff_payload_chars,
         "max_file_diff_chars": facts.max_file_diff_chars,
         "truncated": facts.truncated,
         "chars_estimated": facts.chars_estimated,
@@ -1089,7 +1101,7 @@ def plan_analysis(
     forced_single = not subagent_enabled
     if forced_single or not exceeded:
         scale = exceeded or (
-            f"变更文件 {facts.file_count} 个、渲染后 diff {facts.rendered_diff_chars:,} 字、"
+            f"变更文件 {facts.file_count} 个、差异载荷估算 {facts.diff_payload_chars:,} 字、"
             f"单文件最大 {facts.max_file_diff_chars:,} 字，三条都在门槛内"
         )
         reason = (
@@ -1141,7 +1153,7 @@ def plan_analysis(
     # 成员数由**证据体积与独立簇数**推导：既不是维度数，也不是预算反解出来的片数。
     needed = max(
         FAMILY_MIN_MEMBERS,
-        -(-max(1, facts.rendered_diff_chars) // MEMBER_EVIDENCE_CHARS),
+        -(-max(1, facts.diff_payload_chars) // MEMBER_EVIDENCE_CHARS),
     )
     # **`ceiling.shard_count` 刻意不在这个 min 里。** 它来自 `derive_family_sizing`，
     # 而那个函数把分片数按**维度数**夹过一次（`min(目标, max(2, 维度数))`）—— 那正是指引
@@ -1186,7 +1198,7 @@ def plan_analysis(
     # **体量未知时按上限配，不按下限配。** 「量不出这一簇有多少字」不等于「这一簇很小」：
     # 按 0 算会让每一片都落到 8 次索取的下限，而真正的大版本会在跑到一半时才发现不够
     # （那时代价已经付了）。未知一律走保守侧 —— 与「未上报的 token 不许当 0」同一条纪律。
-    unknown_volume = facts.rendered_diff_chars <= 0 and facts.file_count > 0
+    unknown_volume = facts.diff_payload_chars <= 0 and facts.file_count > 0
     members: list[PlanMember] = []
     for position, paths in enumerate(merged, start=1):
         evidence = sum(
@@ -1194,7 +1206,7 @@ def plan_analysis(
         )
         if evidence <= 0:
             # 拿不到字符数（老 payload / 抽样之外）时**按文件数摊**，不当作「这一簇不用读」。
-            evidence = len(paths) * (facts.rendered_diff_chars // max(1, facts.file_count))
+            evidence = len(paths) * (facts.diff_payload_chars // max(1, facts.file_count))
         requests = (
             _clamp(ceiling.requests_per_shard, REQUESTS_FLOOR_PER_SHARD, REQUESTS_CEILING_PER_SHARD)
             if unknown_volume
@@ -1241,8 +1253,8 @@ def plan_analysis(
         sampling_cap=sampling_cap_for(facts.file_count),
         anomalies_per_subagent=ceiling.anomalies_per_subagent,
         note=(
-            f"按**快照事实**分工：{facts.file_count} 个变更文件、渲染后 diff "
-            f"{facts.rendered_diff_chars:,} 字"
+            f"按**快照事实**分工：{facts.file_count} 个变更文件、差异载荷估算 "
+            f"{facts.diff_payload_chars:,} 字"
             + ("（体量为抽样估算）" if facts.chars_estimated else "")
             + f"、单文件最大 {facts.max_file_diff_chars:,} 字 → {len(members)} 个变更簇；"
             f"每片的名义额由**本簇证据体积**推导（每片 {requests_nominal} 次索取 / "

@@ -27,6 +27,7 @@ from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
+from services.ai.auto_sizing import MODE_FAMILY
 from services.ai.scope import normalize_path
 
 _CRITICAL_MARKERS = (
@@ -231,6 +232,27 @@ def build_manifest(rows: Iterable[Mapping[str, Any]], *, shard_count: int) -> Ma
         shard_count=count,
         assignment_digest=_digest(entries),
     )
+
+
+def shard_count_for_plan(plan: object) -> int:
+    """这份清单该按几个分片分配文件：**计划说几片就是几片**。
+
+    放在本模块而不是调用方（`ai_analysis_service.build_weekly_payload`）里，是因为它
+    与 `build_manifest` 的 `shard_count` 是同一个概念的两面 —— 谁造这份清单，谁就得
+    用这个数；分开写迟早会出现「清单按 5 片分、计划说 2 片」那种只在账上看得出的分叉。
+
+    * 单分析者（`MODE_SINGLE`）恒为 1 —— 那一路没有分片，清单里每个文件都在同一个人的
+      检查范围内（文案见 `change_set._assignment_note`）。拿配置里的 `subagent_count`
+      当这个数，就会在一份「一个人看完」的输入上写出「S1/S2/S3 各分到几个文件」，
+      而模型会照着它去找一份并不存在的任务书（实测 run 53 就是这个症状）。
+    * 计划读不出来（老 payload、被裁过的 payload）时回 1：**宁可说「没有分片」，
+      也不要编一个分片数出来**。
+    """
+    if plan is None:
+        return 1
+    if str(getattr(plan, "mode", "") or "") != MODE_FAMILY:
+        return 1
+    return max(1, int(getattr(plan, "member_count", 1) or 1))
 
 
 def render_manifest_reference(plan: ManifestPlan, *, page_size: int = 100) -> str:

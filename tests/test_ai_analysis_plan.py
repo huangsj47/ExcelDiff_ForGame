@@ -61,7 +61,7 @@ def _config_three() -> SnapshotFacts:
     return SnapshotFacts.from_mapping(
         {
             "file_count": 3,
-            "rendered_diff_chars": 1_597,
+            "diff_payload_chars": 1_597,
             "max_file_diff_chars": 900,
             "entries": [
                 _entry("config/道具表_CfgItem.xlsx", "e54c73df", 700),
@@ -81,7 +81,7 @@ def _large_version(files: int = 847, *, chars_per_file: int = 5_000) -> Snapshot
     return SnapshotFacts.from_mapping(
         {
             "file_count": files,
-            "rendered_diff_chars": files * chars_per_file,
+            "diff_payload_chars": files * chars_per_file,
             "max_file_diff_chars": chars_per_file,
             "truncated": True,
             "entries": entries,
@@ -124,11 +124,11 @@ def test_a_single_analyzer_reports_the_full_batch_as_its_own_scope():
 @pytest.mark.parametrize(
     ("facts", "why"),
     [
-        ({"file_count": 9, "rendered_diff_chars": 1_000}, "文件数超过 8"),
-        ({"file_count": 3, "rendered_diff_chars": 80_001}, "总量超过 80,000 字"),
-        ({"file_count": 2, "rendered_diff_chars": 41_000, "max_file_diff_chars": 40_001},
+        ({"file_count": 9, "diff_payload_chars": 1_000}, "文件数超过 8"),
+        ({"file_count": 3, "diff_payload_chars": 80_001}, "总量超过 80,000 字"),
+        ({"file_count": 2, "diff_payload_chars": 41_000, "max_file_diff_chars": 40_001},
          "单文件超过 40,000 字"),
-        ({"file_count": 3, "rendered_diff_chars": 1_000, "truncated": True},
+        ({"file_count": 3, "diff_payload_chars": 1_000, "truncated": True},
          "输入被截断（「没有超限」证明不了）"),
     ],
 )
@@ -140,7 +140,7 @@ def test_any_of_the_four_facts_alone_leaves_the_small_batch_tier(facts, why):
             _entry(
                 f"dir{index}/f{index}.lua",
                 f"c{index}",
-                facts.get("rendered_diff_chars", 0) // max(1, facts["file_count"]),
+                facts.get("diff_payload_chars", 0) // max(1, facts["file_count"]),
             )
             for index in range(facts["file_count"])
         ]}
@@ -381,7 +381,7 @@ def test_the_planner_input_has_no_table_bodies():
 
     assert set(metadata) == {
         "file_count",
-        "rendered_diff_chars",
+        "diff_payload_chars",
         "max_file_diff_chars",
         "truncated",
         "chars_estimated",
@@ -470,7 +470,7 @@ def test_an_invalid_proposal_falls_back_to_the_deterministic_grouping(broken, wh
     """**无效建议一律退回确定性分组**，并说清为什么（`planner.problems` 会落进计划）。"""
     facts = _config_three()
     forced = SnapshotFacts.from_mapping(
-        {**facts.to_dict(), "file_count": 30, "rendered_diff_chars": 30_000,
+        {**facts.to_dict(), "file_count": 30, "diff_payload_chars": 30_000,
          "entries": [*facts.entries, *[
              _entry(f"extra/dir{i}/f{i}.lua", f"x{i}", 1_000) for i in range(27)
          ]]}
@@ -902,14 +902,14 @@ def test_a_small_batch_is_measured_file_by_file(monkeypatch):
 
         assert facts.file_count == len(payload["delta_files"]) == len(expected)
         assert facts.chars_estimated is False, "两个文件的批次必须逐个量，不许抽样放大"
-        assert facts.rendered_diff_chars == sum(expected.values()), (
+        assert facts.diff_payload_chars == sum(expected.values()), (
             "量出来的字数与解码后的载荷对不上 —— 门槛判定就建立在这个数上"
         )
-        assert facts.rendered_diff_chars * 3 < raw_total, (
+        assert facts.diff_payload_chars * 3 < raw_total, (
             "量的是库里那串原样长度（没有解码）：中文被算成了 6 倍，"
             "这正是把 3 个文件的配置 3 误判成需要分工的那条路"
         )
-        assert facts.max_file_diff_chars <= facts.rendered_diff_chars
+        assert facts.max_file_diff_chars <= facts.diff_payload_chars
         assert facts.is_small_batch is True
         assert facts.digest(), "事实必须有内容指纹（「是不是同一份输入」要能回答）"
 
@@ -947,10 +947,10 @@ def test_a_big_batch_is_sampled_and_says_so(monkeypatch):
             "抽样条数必须如实写出来，否则「估的」与「量的」在数据上分不开"
         )
         # 放大口径：总和 = 文件数 × 每份均值（每份载荷一样大，所以这里可以逐字对）。
-        assert facts.rendered_diff_chars == facts.file_count * per_file
-        assert facts.rendered_diff_chars > auto_sizing.SMALL_BATCH_MAX_TOTAL_CHARS
+        assert facts.diff_payload_chars == facts.file_count * per_file
+        assert facts.diff_payload_chars > auto_sizing.SMALL_BATCH_MAX_TOTAL_CHARS
         assert facts.is_small_batch is False
-        assert facts.rendered_diff_chars * 3 < raw_total * facts.file_count / facts.sample_size
+        assert facts.diff_payload_chars * 3 < raw_total * facts.file_count / facts.sample_size
         assert facts.digest()
 
 

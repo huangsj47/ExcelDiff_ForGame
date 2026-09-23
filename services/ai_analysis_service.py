@@ -177,7 +177,7 @@ from services.ai.latest_result import (
     select_primary_weekly_config,  # noqa: F401 —— 调用点与测试仍在用
 )
 from services.ai.llm_client import LLMError
-from services.ai.manifest import build_manifest
+from services.ai.manifest import build_manifest, shard_count_for_plan
 from services.ai.platform_provider import PlatformContextProvider
 from services.ai.project_config_source import (  # noqa: F401 —— 调用点与测试仍在用
     _coerce_timeout,
@@ -489,14 +489,20 @@ def build_weekly_payload(
         "list_files": list_files,
         "delta_truncated": truncated,
     }
-    payload["manifest"] = build_manifest(
-        delta_files,
-        shard_count=max(1, int(project_config.get("subagent_count") or 1)),
-    ).to_dict()
     payload["policy"]["truncated"] = truncated
     if truncated:
         payload["policy"]["truncation_reason"] = "token_budget"
-    attach_weekly_plan(payload)
+    # **先有计划，再有清单**（P2-3）：清单里的分片数必须是**这次真的要拆几片**，
+    # 而不是配置里那个 `subagent_count`。原先它读配置，于是实测 run 53（单分析者）
+    # 的 `manifest.by_shard` 写着 `{S1:1, S2:1, S3:1}` —— 一份「3 个分片各拿一个文件」
+    # 的账，而这一轮根本没有人被分片。模型读到的 `change-manifest` 也照着这个数说分工。
+    #
+    # 顺序反过来还有一层：清单是**计划的下游**（`subagent.apply_manifest` 按它分配文件），
+    # 所以只能由计划决定它，不能由它反过来暗示计划。
+    plan = attach_weekly_plan(payload)
+    payload["manifest"] = build_manifest(
+        delta_files, shard_count=shard_count_for_plan(plan)
+    ).to_dict()
     return payload, state, None
 
 
@@ -1438,6 +1444,14 @@ def _run_engine_and_persist(
     )
     if plan is not None:
         plan = apply_manifest(plan, change.manifest)
+    # 有家族计划时报**每片的名义额**（保底）；池账与推导依据走 `family_pool` 那一节。
+    #
+    # 单代理那一路报的必须是 `engine_args["limits"]` —— **实际交给引擎的那一份**。
+    # 原先这里写的是原始的 `limits`，于是单代理档（几十个文件只有一个变更簇）会出现
+    # 「计划把额度抬到 10 轮/50 次、引擎也拿到了 10/50，界面却按 8/40 报」：实测 run 53
+    # 的计划与预算展示就是这么对不上的。计划抬额度而展示不抬，等于让用户按一个**不存在
+    # 的上限**去理解这次分析的深浅。
+    reported_limits = plan.limits if plan is not None else engine_args["limits"]
     budget_plan_payload = build_budget_plan(
         configured_prompt_chars=_configured_int(
             project_config.get("prompt_char_budget"), EngineLimits().prompt_char_budget
@@ -1448,9 +1462,8 @@ def _run_engine_and_persist(
         # 否则界面会出现「配置 560,000 / 当前预估生效 580,000」这种读不通的对照。
         effective_prompt_chars=max(0, limits.prompt_char_budget - platform_chars),
         platform_chars=platform_chars,
-        # 有家族计划时报**每片的名义额**（保底）；池账与推导依据走 `family_pool` 那一节。
-        max_rounds=(plan.limits if plan is not None else limits).max_rounds,
-        max_tool_requests=(plan.limits if plan is not None else limits).max_tool_requests,
+        max_rounds=reported_limits.max_rounds,
+        max_tool_requests=reported_limits.max_tool_requests,
         shard_count=plan.count if plan is not None else 1,
         verify=bool(plan and plan.verify),
         tool_limits=limits.tool_limits,
