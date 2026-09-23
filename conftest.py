@@ -53,6 +53,8 @@ from pathlib import Path
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _TEMP_DB_DIR = os.path.join(_REPO_ROOT, ".pytest_tmp", "db")
 
+_SQLITE_SCHEME = "sqlite:///"
+
 
 def _is_temp_sqlite(url: str) -> bool:
     """是不是「我们自己造的临时库」。**判据要精确。**
@@ -61,11 +63,44 @@ def _is_temp_sqlite(url: str) -> bool:
     任何路径里带 `tmp` 的都算数（`.../instance/tmp_backup/diff_platform.db` 也会被判成临时），
     而这条判据的用途是「要不要警告」，判松了就等于**该警告时不警告**。
     改成两个精确去处：本仓库的 `.pytest_tmp/` 底下，或者系统临时目录底下。
+
+    ## 为什么**只许**折 scheme 的大小写，不许 `url.lower()` 整串（2026-09-23，CI 红）
+
+    第二版是 `lowered = url.lower()`，再从 `lowered` 里切出路径交给 `realpath`。看着没问题，
+    但它的正确性**碰巧**依赖「`realpath` 会把路径还原成磁盘上的真实大小写」：
+
+        输入 URL 里的路径   /home/runner/work/ExcelDiff_ForGame/…/.pytest_tmp/db/x.db
+        被 lower 之后       /home/runner/work/exceldiff_forgame/…/.pytest_tmp/db/x.db
+        基准 _TEMP_DB_DIR   …/ExcelDiff_ForGame/…/.pytest_tmp/db    ← 从 __file__ 来，原样大小写
+        str.startswith      → False   ← 一侧被 lower 了、另一侧没有，POSIX 的 startswith 区分大小写
+
+    本仓库的目录名就叫 `ExcelDiff_ForGame`，于是只要 `realpath` 不还原大小写，这条判据必错：
+
+    * **Windows**：`os.path.realpath` 走 `nt._getfinalpathname`，把**已存在**的那段还原成
+      磁盘上的真实大小写（把 `excelldiff_forgame` 又「修」回 `ExcelDiff_ForGame`）→ 绿；
+    * **Linux / 任何大小写敏感的文件系统**：`realpath` 只规范化符号链接和 `.`/`..`，
+      **不动大小写** → 候选是 lower 的、基准是原样的 → 只剩 False。
+
+    所以 Windows 上那两个用例是**碰巧**绿的，不是设计绿的；同机把 `realpath` 换成
+    「返回原样大小写」的实现就能立刻复现 CI 的红。修法：**路径按原样保留**，只折 scheme
+    那一段的大小写 —— URL 的 scheme 按 RFC 3986 本来就大小写不敏感。
+
+    （这条修法顺带解开一个隐藏耦合：Windows 的 realpath 只对**存在**的路径段还原大小写，
+    所以旧写法在 `.pytest_tmp/db` 还没被建出来时也会红 —— 也就是它依赖了「别的用例先建过
+    这个目录」这种执行顺序。）
+
+    ## 为什么不干脆改成「大小写不敏感的比较」
+
+    那等于放松判据：在大小写敏感的文件系统上 `…/ExcelDiff_ForGame/…` 和 `…/excelldiff_forgame/…`
+    是**两个不同的目录**，把后者认成前者正是「该警告时不警告」。而且保持现状的写法还有个好处：
+    判错的**方向是安全的** —— 认不出来只会多警告一次并把库改写到临时库，不会漏警告。
     """
-    lowered = url.lower()
-    if not lowered.startswith("sqlite:///"):
+    # ★ scheme 用**切片**比对、不 `url.lower()` 整串：`str.lower()` 对个别 Unicode 字符会
+    #   **变长**（`'İ'.lower()` 是两个字符），整串折过之后再按固定长度切，切点会偏。
+    if url[: len(_SQLITE_SCHEME)].lower() != _SQLITE_SCHEME:
         return False
-    raw = lowered[len("sqlite:///"):]
+    # ★ 从这里往下 path **一律按原样大小写**用，谁都不许再 lower —— 见上面的说明。
+    raw = url[len(_SQLITE_SCHEME):]
     try:
         # 去掉可能的 `?mode=ro` 之类的查询串，再规范化。
         raw = raw.split("?", 1)[0]

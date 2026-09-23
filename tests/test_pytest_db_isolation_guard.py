@@ -274,6 +274,76 @@ def test_the_temp_db_predicate_is_not_too_loose():
     assert root_conftest._is_temp_sqlite("mysql://user@host/db") is False
 
 
+def test_the_temp_db_predicate_keeps_the_path_case(monkeypatch):
+    """**大小写敏感的文件系统上必须也对**：path 段按原样保留，不许整串 `url.lower()`。
+
+    2026-09-23 CI（ubuntu-latest）红的就是这一族：
+
+        FAILED test_the_temp_db_predicate_is_not_too_loose
+          assert _is_temp_sqlite('sqlite:///…/ExcelDiff_ForGame/…/.pytest_tmp/db/x.db') is True
+        FAILED test_the_temp_db_we_create_is_recognised_by_the_platform_safety_layer
+          assert _is_temp_sqlite(uri) is True
+
+    当时实现的第一句是 `lowered = url.lower()`，再从 `lowered` 里切出路径去和
+    `_TEMP_DB_DIR` 比 `startswith`。本仓库的目录名 `ExcelDiff_ForGame` **带大写**，于是：
+
+        被 lower 掉的候选   …/excelldiff_forgame/…/.pytest_tmp/db/x.db
+        基准（从 __file__） …/ExcelDiff_ForGame/…/.pytest_tmp/db
+        str.startswith     → False      ← 一侧 lower 了、另一侧没有，POSIX 区分大小写
+
+    Windows 上之所以是绿的，纯粹因为 `os.path.realpath` 会把**已存在**的路径段还原成磁盘上
+    的真实大小写，把被 lower 掉的那段又「修」了回来 —— 这份绿是**碰巧**的，不是设计出来的。
+
+    ## 为什么必须把 realpath 换掉才钉得住
+
+    「造一个大小写变体看返回什么」这种断言**天然是平台相关的**：大小写不敏感的文件系统上
+    `…/ExcelDiff_ForGame/…` 和 `…/excelldiff_forgame/…` 是同一个目录（该 True），
+    大小写敏感的系统上是两个目录（该 False）。钉不住。
+
+    要钉的是「**不依赖 realpath 修大小写**」这个性质本身。所以这里把 realpath 换成 Linux
+    语义的实现（只规范化符号链接与 `.`/`..`，不动大小写），再喂 CI 上那条真实输入 ——
+    这条断言在 Windows 和 Linux 上都会红，也正是 CI 上红的那一条。
+    """
+    sys.path.insert(0, str(ROOT))
+    import conftest as root_conftest
+
+    # Linux 的 realpath：没有符号链接时 == normpath(abspath(x))，**不动大小写**。
+    monkeypatch.setattr(
+        os.path, "realpath", lambda p: os.path.normpath(os.path.abspath(p))
+    )
+
+    assert root_conftest._is_temp_sqlite(
+        "sqlite:///" + (ROOT / ".pytest_tmp" / "db" / "x.db").as_posix()
+    ) is True, (
+        "判据依赖了「realpath 会把大小写修回来」—— 大小写敏感的文件系统上它不修，"
+        "于是我们自己造的临时库被判成非临时库（CI 就是这么红的）。"
+    )
+    assert root_conftest._is_temp_sqlite(
+        "sqlite:///"
+        + (ROOT / ".pytest_tmp" / "db" / "diff_platform_test_rootguard_ab12.db").as_posix()
+    ) is True
+    # 反向：修掉大小写那一处**不许**顺手把判据放松。
+    assert root_conftest._is_temp_sqlite(
+        "sqlite:///" + (ROOT / "instance" / "diff_platform.db").as_posix()
+    ) is False
+    assert root_conftest._is_temp_sqlite(
+        "sqlite:///" + (ROOT / "instance" / "tmp_backup" / "diff_platform.db").as_posix()
+    ) is False
+
+    # 反向之二：**不许**为了「兼容大小写」把比较改成不区分大小写（`candidate.lower() ==
+    # base.lower()`）。在大小写敏感的文件系统上 `…/ExcelDiff_ForGame/…` 和
+    # `…/excelldiff_forgame/…` 是**两个不同的目录**，把后者认成前者正是把判据放松。
+    # 变异验证：把比较改成 `.lower()` 那种写法，仓库里**只有这一条**会红（其余 14 条全绿）。
+    lowered_repo = ROOT.as_posix().lower()
+    if lowered_repo != ROOT.as_posix():
+        # 整个绝对路径本来就全小写时（比如克隆到 /tmp/repo）这条不成立，跳过即可。
+        assert root_conftest._is_temp_sqlite(
+            "sqlite:///" + lowered_repo + "/.pytest_tmp/db/x.db"
+        ) is False, (
+            "判据被改成大小写不敏感了 —— 那是放松：大小写敏感的文件系统上这是两个目录。"
+        )
+
+
 def test_the_temp_db_we_create_is_recognised_by_the_platform_safety_layer():
     """**本守卫自己造的库，必须被平台的安全层认成临时库。**
 
