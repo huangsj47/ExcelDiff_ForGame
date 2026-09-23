@@ -239,6 +239,7 @@ def _summarize_weekly_files(
     *,
     base_run=None,
     compensation_max: int = snapshot_store.DEFAULT_COMPENSATION_MAX_FILES,
+    window_configs: Optional[List[WeeklyVersionConfig]] = None,
 ) -> Tuple[dict, dict, Optional[str]]:
     """这一轮的输入账：窗口里有多少、这次装进输入多少、关键路径命中没有。
 
@@ -262,7 +263,14 @@ def _summarize_weekly_files(
 
     # 窗口提交账的事实来源（读 `commits_log`）。放在这里而不是读侧：`change_set` 是
     # 纯函数层，而「窗口里到底有哪些提交」只有这一层有库会话。
-    window_commit_ids = window_commits.window_commit_ids(configs)
+    #
+    # `window_configs` 是**按用户选的「分析范围」收窄过的**配置集（默认就是全部）。
+    # 不收窄的话，用户选「只看仓库 A」时窗口提交账里仍会带上仓库 B 的提交，于是
+    # `commit_detail` 的白名单会**放行本批次根本不该看的仓库** —— 那正是
+    # `AnalysisScope.repository_ids_by_commit` 那条跨仓判据（REV-AI-001）要挡的事。
+    scoped_configs = configs if window_configs is None else window_configs
+    window_commit_ids = window_commits.window_commit_ids(scoped_configs)
+    window_commit_files = window_commits.window_commit_files(scoped_configs)
 
     entries = total_query.all()
     delta_entries = _select_delta_entries(
@@ -428,6 +436,15 @@ def _summarize_weekly_files(
         # 窗口里其它可达提交一律被 `resolve_commit` 判成「不属于本批次」—— 见
         # `services/ai/window_commits.py` 与 `change_set.from_weekly_payload`）。
         "window_commit_ids": list(window_commit_ids),
+        # 每个窗口提交**自己改过哪些文件**。`commit_detail` 的白名单只解决「能不能问这个
+        # 提交」，逐提交核对还需要单提交的 `file_diff` —— 而那条路要的是
+        # `(提交, 路径)`。此前这张表只按文件的 `latest_commit_id` 建，于是早期提交
+        # （它的文件后来又被改过）**一条 diff 都读不到**：模型想问「这一行是不是本期
+        # 删掉的」时连问都问不了，最后把「取不到」写成了一条高风险结论。
+        #
+        # 口径是**这个提交自己改过的路径**（`commits_log` 里 `commit_id == 它` 的行），
+        # 不是拿 `latest_commit_id` 反推的历史路径，也不是周窗口的合并 diff。
+        "window_commit_files": window_commit_files,
         "compensation_files": [
             item for item in delta_files if item.get("source") == "compensation"
         ],

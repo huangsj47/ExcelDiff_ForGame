@@ -29,7 +29,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from services.ai import window_commits
 from services.ai.bundles import build_bundles, describe_bundles
@@ -217,6 +217,10 @@ def from_weekly_payload(
         # 因此**连问都问不了**；二是模型可见摘要里那三个数的第一个（见
         # `services/ai/window_commits.py`）。
         extra_commits=payload.get("window_commit_ids") or (),
+        # 窗口提交**各自改过的路径** —— 撑起单提交的 `file_diff`（见 `build` 的说明）。
+        # 缺这个键（老 payload / 写侧还没接线）时退回旧行为：`commit_detail` 能问，
+        # 但旧提交的 `file_diff` 会被路径白名单拒。那是**已知边界**，不是静默失效。
+        window_commit_files=payload.get("window_commit_files") or None,
         commit_facts=window_commits.facts_from_payload(
             payload, window_commit_ids=payload.get("window_commit_ids") or ()
         ),
@@ -237,6 +241,7 @@ def build(
     repositories: Optional[Mapping[str, Iterable[int]]] = None,
     extra_commits: Iterable[str] = (),
     commit_facts: Optional[WindowCommitFacts] = None,
+    window_commit_files: Optional[Mapping[str, Any]] = None,
 ) -> ChangeSet:
     """渲染清单并算出白名单范围。两种模式共用。
 
@@ -342,6 +347,37 @@ def build(
         if described:
             body += "\n" + described
 
+    # 窗口提交**各自改过的路径**（`{提交: {"paths": (...), "repository_id": N}}`，
+    # 见 `window_commits.window_commit_files`）。只给**还不是白名单键**的那些提交补条目：
+    #
+    # * 白名单键上那些提交的路径表来自「文件最后一次改动落在哪个提交」，那是**另一种**
+    #   口径（它回答的是「本次输入里的这些文件各自归谁」）。拿窗口账去覆盖它，会让
+    #   单提交模式的既有语义跟着变；
+    # * 而窗口里的早期提交（它的文件后来又被改过）**根本不在白名单键上**，这正是要补的
+    #   那一类：不补，模型连「这一行是不是本期删掉的」都问不出来。
+    #
+    # **不计进 `whitelist_total`**（那个数决定「还有 M 个文件没列出来」怎么说）：窗口账
+    # 覆盖的是整个窗口，把它并进「本次输入的文件数」会把提示词里那个数说大。
+    extra_paths: dict[str, frozenset] = {}
+    extra_repos: dict[str, set[int]] = {}
+    for commit_id, entry in (window_commit_files or {}).items():
+        text = str(commit_id or "").strip()
+        if not text or text in resolved_whitelist:
+            continue
+        payload_entry = entry if isinstance(entry, Mapping) else {}
+        paths_ = payload_entry.get("paths") or ()
+        cleaned = frozenset(
+            normalize_path(str(path)) for path in paths_ if str(path or "").strip()
+        )
+        if cleaned:
+            extra_paths[text] = cleaned
+        try:
+            extra_repos[text] = {int(payload_entry.get("repository_id"))}
+        except (TypeError, ValueError):
+            # 仓库归属读不出来就**不记**（与 `_note_repository` 同一条口径）：宁可让
+            # 取数侧退回旧行为，也不要拿一个猜出来的仓库去收窄查询。
+            pass
+
     return ChangeSet(
         summary=body,
         scope=AnalysisScope(
@@ -353,12 +389,14 @@ def build(
                 commit_id: frozenset(paths_)
                 for commit_id, paths_ in resolved_whitelist.items()
                 if commit_id
-            },
+            }
+            | extra_paths,
             repository_ids_by_commit={
                 commit_id: frozenset(ids)
                 for commit_id, ids in (repositories or {}).items()
                 if ids
-            },
+            }
+            | {commit_id: frozenset(ids) for commit_id, ids in extra_repos.items() if ids},
             readable_references=frozenset(
                 [str(name) for name in readable_references if name] + [MANIFEST_REFERENCE]
             ),

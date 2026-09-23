@@ -234,6 +234,156 @@ def test_an_empty_focus_is_reported_instead_of_running_on_nothing(two_repos):
         assert ai_service.build_weekly_payload(two_repos["cfg_code"].id)[2] is None
 
 
+def _seed_commits(repo: Repository, rows):
+    """往 `commits_log` 里造窗口内的提交（`(commit_id, path, operation)`）。
+
+    时间刻意落在 config 的窗口里：`_create_weekly_config` 用的是北京时间
+    2026-03-01 ~ 03-08，而 `commit_time` 存的是 **naive UTC**（差 8 小时），
+    所以取 3 月 3 日肯定在里面。
+    """
+    from models import Commit
+
+    for commit_id, path, operation in rows:
+        db.session.add(
+            Commit(
+                repository_id=repo.id,
+                commit_id=commit_id,
+                path=path,
+                operation=operation,
+                commit_time=datetime(2026, 3, 3, 12, 0),
+            )
+        )
+    db.session.flush()
+
+
+# ==========================================================================
+# 窗口提交账：**写侧要真的把它冻进 payload**，读侧才可能用得上
+#
+# 实测（2026-09-24）：run 53 的 `request_payload.summary.window_commits=3`，顶层却**没有**
+# `window_commit_ids` —— 写侧算出来了、没往 payload 里放。后果是报告写「累计 2 个提交」，
+# 且模型对第三个提交的 `commit_detail` 取证请求被判「不属于本批次」。
+#
+# 既有的 `test_ai_weekly_commit_accounting.py` 构造的是**已经含清单**的 payload，验的是
+# 读侧；接线那一层漏了。这一组走真入口，把整条链钉住。
+# ==========================================================================
+
+
+def test_the_window_commits_are_frozen_into_the_payload(two_repos):
+    """写侧：`build_weekly_payload` 必须把清单与每个提交的文件账一起放进 payload。"""
+    with app.app_context():
+        repo, cfg = two_repos["code_repo"], two_repos["cfg_code"]
+        early, mid, tip = "a" * 40, "b" * 40, "c" * 40
+        _seed_commits(repo, [
+            (early, "code/mod/Mod0.lua", "A"),
+            (early, "code/mod/Mod1.lua", "A"),
+            (mid, "code/mod/Mod0.lua", "M"),
+            (tip, "code/mod/Mod2.lua", "M"),
+        ])
+        db.session.commit()
+
+        payload, _state, skip = ai_service.build_weekly_payload(cfg.id)
+
+        assert skip is None
+        assert payload["summary"]["window_commits"] == 3
+        assert set(payload["window_commit_ids"]) == {early, mid, tip}, (
+            "写侧算了「窗口里有多少提交」却没把清单放进 payload —— 读侧拿到的是空"
+        )
+        files = payload["window_commit_files"]
+        assert files[early]["paths"] == ["code/mod/Mod0.lua", "code/mod/Mod1.lua"]
+        assert files[early]["repository_id"] == repo.id
+
+
+def test_the_window_commits_extend_both_whitelists_end_to_end(two_repos):
+    """读侧 + 执行闸门：**能问、也能逐提交读 diff**，越权的仍然被拒。
+
+    这是审查报告点名要的那条集成测试（`build_weekly_payload → from_weekly_payload →
+    sanitize_requests`）。三个提交里 `early` 的文件后来又被 `mid` 改过，所以它**不在**
+    「文件最后一次改动」那张表上 —— 修之前它连自己的 diff 都读不到，模型因此把
+    「取不到」写成了高风险结论。
+    """
+    from services.ai.protocol import ContextRequest, sanitize_requests
+
+    with app.app_context():
+        repo, cfg = two_repos["code_repo"], two_repos["cfg_code"]
+        early, mid, tip = "a" * 40, "b" * 40, "c" * 40
+        _seed_commits(repo, [
+            (early, "code/mod/Mod0.lua", "A"),
+            (early, "code/mod/Mod1.lua", "A"),
+            (mid, "code/mod/Mod0.lua", "M"),
+            (tip, "code/mod/Mod2.lua", "M"),
+        ])
+        db.session.commit()
+
+        payload, _state, _skip = ai_service.build_weekly_payload(cfg.id)
+        change = from_weekly_payload(payload, readable_references=())
+        scope = change.scope
+
+        # ① 三个提交都能问。
+        for commit_id in (early, mid, tip):
+            assert commit_id in scope.commits, f"{commit_id[:8]} 问不了"
+
+        # ② 早期提交**自己的** diff 能读了（修之前这里是空的）。
+        assert scope.paths_by_commit.get(early) == frozenset(
+            {"code/mod/Mod0.lua", "code/mod/Mod1.lua"}
+        ), "窗口早期提交的单提交 diff 仍然读不到 —— 模型只能把「取不到」当结论"
+        assert scope.repository_ids_by_commit.get(early) == frozenset({repo.id}), (
+            "补了路径却没给仓库归属 —— `scope` 对空仓库集的口径是「不知道就不收窄」，"
+            "跨仓判据（REV-AI-001）会因此失效"
+        )
+
+        kept, dropped = sanitize_requests(
+            [
+                ContextRequest(type="commit_detail", commit=early),
+                ContextRequest(type="file_diff", commit=early, path="code/mod/Mod1.lua"),
+                # 这个文件不是 `early` 改的（是 `tip` 改的）——**不许**放行。
+                ContextRequest(type="file_diff", commit=early, path="code/mod/Mod2.lua"),
+                ContextRequest(type="commit_detail", commit="d" * 40),
+            ],
+            scope,
+        )
+
+        assert len(kept) == 2, f"该放行的没放行：{[k.type + ':' + k.commit[:8] for k in kept]}"
+        assert len(dropped) == 2, f"该拒的没拒：{dropped}"
+        reasons = " ".join(item.reason for item in dropped)
+        assert "不属于本批次" in reasons
+        # 那条越权的 `file_diff`：路径记在 `DroppedItem.detail` 上，理由里只会点出提交号
+        # （「这个文件不在 commit X 的改动清单里；本批次里改过它的是 Y」）。
+        wrong_path = [
+            item for item in dropped if item.detail.startswith("code/mod/Mod2.lua")
+        ]
+        assert wrong_path, "把一个提交没改过的文件放行了 —— 那不是它的 diff"
+        assert "不在 commit" in wrong_path[0].reason and "换那条提交再问" in wrong_path[0].reason, (
+            "拒绝理由没有指出「去哪条提交问」—— 只说不行会把模型卡死在这一步"
+        )
+
+
+def test_the_window_commits_follow_the_selected_focus(two_repos):
+    """窗口提交账要**跟着用户选的范围收窄**，否则白名单会放行不该看的仓库。
+
+    `commit_detail` 的白名单由窗口提交账撑起。用户选「只看配表仓库」时，若清单里还带着
+    代码仓库的提交，模型就能去读**这次明确排除掉的**那一半 —— 那既是越权，也让报告里
+    「本次只看了配表」那句话失真。跨仓那一条另有 `repository_ids_by_commit` 把守
+    （REV-AI-001），但那是「同一个提交号在两个仓库都有」时的兜底，不是本该收窄的理由。
+    """
+    with app.app_context():
+        code_repo, table_repo = two_repos["code_repo"], two_repos["table_repo"]
+        code_commit, table_commit = "e" * 40, "f" * 40
+        _seed_commits(code_repo, [(code_commit, "code/mod/Mod0.lua", "M")])
+        _seed_commits(table_repo, [(table_commit, "config/0_奖励模式_CfgRewardMode0.xlsx", "M")])
+        db.session.commit()
+
+        # 不选范围时两个仓库的提交都在账上（先证明这一条是「收窄」而不是「压根没有」）。
+        all_payload, _s, _k = ai_service.build_weekly_payload(two_repos["cfg_code"].id)
+        assert set(all_payload["window_commit_ids"]) == {code_commit, table_commit}
+
+        table_payload, _s, _k = ai_service.build_weekly_payload(
+            two_repos["cfg_code"].id, focus="table"
+        )
+        assert table_payload["window_commit_ids"] == [table_commit], (
+            "选了「仅配表仓库」却把代码仓库的提交也放进了白名单"
+        )
+
+
 def test_the_prompt_says_which_range_was_analyzed(two_repos):
     """范围必须写进提示词：不写，模型会把「这个范围没问题」说成「本版本没问题」。"""
     with app.app_context():

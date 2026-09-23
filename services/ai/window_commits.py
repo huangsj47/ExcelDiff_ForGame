@@ -210,3 +210,69 @@ def window_commit_ids(configs: Iterable[Any]) -> Tuple[str, ...]:
             if text and text not in found:
                 found.append(text)
     return tuple(found)
+
+
+def window_commit_files(configs: Iterable[Any]) -> dict[str, dict[str, Any]]:
+    """窗口内每个提交**自己改过哪些文件**（`{commit_id: {"paths": (...), "repository_id": int}}`）。
+
+    ## 它撑起的是「能不能逐提交核对」这件事
+
+    `commit_detail` 只能在 `scope.commits` 里问，而**单提交的 `file_diff`** 还要过
+    `paths_by_commit`。此前那张表只按每个文件的 `latest_commit_id` 建 —— 于是一个
+    早期提交（它的文件后来又被改过）**自己的 diff 一条都读不到**。实测里模型正是卡在
+    这里：它想核对「这一行是不是本期删掉的」，却发现连问都问不了，最后把一个**取不到**
+    写成了一条高风险结论。
+
+    ## 口径：**这个提交自己改过的路径**，不是「文件最后一次改动在哪」
+
+    来源是 `commits_log` 里 `commit_id == 该提交` 的那些行（每行一个 `path` + 一个
+    `operation`）。**不许**拿文件的 `latest_commit_id` 去反推历史路径，也不许拿周窗口的
+    合并 diff 冒充单提交 diff —— 那两者都会让模型读到一份**不属于这个提交**的差异。
+
+    查询失败 / 没有配置时返回空 dict（= 「没记录」），调用方据此退回旧行为，不编造条目。
+    """
+    items = [cfg for cfg in (configs or ()) if getattr(cfg, "id", None)]
+    if not items:
+        return {}
+    try:
+        from models import Commit
+        from services.weekly_version_logic import weekly_window_in_utc
+    except Exception as exc:  # noqa: BLE001 —— 拿不到依赖只是少一份账
+        log_print(f"⚠️ AI 分析：窗口提交文件账取不到（{exc}），本次不给逐提交路径白名单", "AI")
+        return {}
+
+    found: dict[str, dict[str, Any]] = {}
+    for cfg in items:
+        try:
+            start_utc, end_utc = weekly_window_in_utc(cfg)
+        except Exception:  # noqa: BLE001
+            continue
+        if start_utc is None or end_utc is None:
+            continue
+        try:
+            rows = (
+                Commit.query
+                .filter(
+                    Commit.repository_id == cfg.repository_id,
+                    Commit.commit_time >= start_utc,
+                    Commit.commit_time <= end_utc,
+                )
+                .with_entities(Commit.commit_id, Commit.path)
+                .all()
+            )
+        except Exception as exc:  # noqa: BLE001
+            log_print(f"⚠️ AI 分析：窗口提交文件账查询失败（config={cfg.id}）：{exc}", "AI")
+            continue
+        for row in rows:
+            commit_id, path = (row[0], row[1])
+            text = str(commit_id or "").strip()
+            if not text:
+                continue
+            entry = found.setdefault(
+                text, {"paths": [], "repository_id": cfg.repository_id}
+            )
+            # 同一提交在同一路径上可能有多行（不同 version）——去重保序。
+            normalized = str(path or "").strip()
+            if normalized and normalized not in entry["paths"]:
+                entry["paths"].append(normalized)
+    return found

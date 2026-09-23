@@ -134,6 +134,21 @@ from services.ai.engine import (
 from services.ai.engine import (
     failed as engine_failed,
 )
+
+# 「分析范围」（focus）的判据：只读配置对象与 delta 的 `repository_id`，不碰库、不写报告。
+# 搬到 `focus_scope` 是为了让本文件回到 2000 行硬上限之内（本文件顶着 ERROR 闸门）。
+#
+# **仍按原来的私有名回导**：`tests/test_ai_analysis_focus_and_scale.py` 是
+# `from services.ai_analysis_service import _filter_delta_files_by_focus` 这样取的，
+# 直接改名就等于把它打断。`# noqa: F401` 逐名写在别名那一行（理由见上面
+# `baseline_source` 那一段：写在 `from ( )` 那一行盖不住按名字报的 F401，
+# `ruff --fix` 会把回导当垃圾删掉）。
+from services.ai.focus_scope import (
+    configs_in_focus as _configs_in_focus,
+)
+from services.ai.focus_scope import (
+    filter_delta_files_by_focus as _filter_delta_files_by_focus,
+)
 from services.ai.incremental_baseline import reconcile_result as reconcile_incremental_result
 
 # 读侧「最近一次结论」那一段（`get_latest_*_result` / `_read_latest_result` …）已经搬到
@@ -325,68 +340,6 @@ def build_commit_payload(commit_id: int) -> dict:
     return payload
 
 
-def _resource_type_of(repo) -> str:
-    """仓库的资源类型，**空值按「代码」算**。
-
-    `models/repository.py` 写明取值是 `'table' / 'res' / 'code'`，而这一列**可空**
-    （写入侧还有一条裸赋值会写进 NULL）。界面上那一栏的选项是这么分的：
-
-        {% if (cfg.repository.resource_type or 'code') == 'table' %}…配表…{% else %}…代码…
-
-    也就是 **NULL 与 `'res'` 都算代码仓库**。这里原先回的是空串，而调用方拿它去比
-    `== "code"` —— `"" != "code"`，于是用户选「只看代码仓库」时，那些 `resource_type`
-    为空的仓库的改动**一条都不会进输入**，而报告上写着「仅代码仓库」，模型据此把
-    一个缺口说成覆盖完整。两侧必须同一套判据。
-    """
-    kind = str(getattr(repo, "resource_type", "") or "").strip().lower()
-    return kind or "code"
-
-
-def _filter_delta_files_by_focus(
-    delta_files: List[dict], focus: Optional[str], configs: List[WeeklyVersionConfig]
-) -> Tuple[List[dict], str]:
-    """按用户选的「分析范围」筛文件，返回 (筛选后的清单, 给人看的范围名)。
-
-    ## 为什么要有这个
-
-    一个 767 个文件的版本，**人比任何自动策略都清楚这周该看哪一半**：这周改的是配表数值，
-    下几周才轮到代码。让用户先选范围，比在服务端猜「哪 200 个更重要」准得多，而且成本是
-    线性的（筛选之后清单短了、额度也集中了）。
-
-    取值：`all`（或空）不筛；`table` / `code` 按仓库的 `resource_type` 筛；数字按
-    仓库 id 筛。**认不出来的一律不筛**（`focus` 是 URL 参数，不能让它把分析变成空跑）。
-    """
-    text = str(focus or "").strip().lower()
-    if not text or text == FOCUS_ALL:
-        return list(delta_files), ""
-
-    repo_by_id = {cfg.repository_id: cfg.repository for cfg in configs}
-
-    if text in ("table", "code"):
-        # **只有 `'table'` 算配表**，其余（含 `'res'` 与空值）都算代码 —— 与模板里
-        # 「`resource_type or 'code'` 是否等于 `'table'`」那三行是同一套判据。
-        # 判据分叉的后果见 `_resource_type_of`：选「只看代码仓库」会静默吞掉老仓库。
-        want_table = text == "table"
-        kept = [
-            item for item in delta_files
-            if (_resource_type_of(repo_by_id.get(item.get("repository_id"))) == "table")
-            is want_table
-        ]
-        label = "仅配表仓库" if want_table else "仅代码仓库"
-        return kept, label
-
-    try:
-        repo_id = int(text)
-    except (TypeError, ValueError):
-        return list(delta_files), ""
-
-    repo = repo_by_id.get(repo_id)
-    if repo is None:
-        return list(delta_files), ""
-    kept = [item for item in delta_files if item.get("repository_id") == repo_id]
-    return kept, f"仅仓库「{repo.name}」"
-
-
 def _concluded_run(state) -> Optional[AiAnalysisRun]:
     """这个分组的**结论基线**那条运行（`ai_weekly_analysis_state.last_concluded_run_id`）。
 
@@ -436,6 +389,9 @@ def build_weekly_payload(
         compensation_max=_configured_int(
             project_config.get("compensation_max_files"), DEFAULT_COMPENSATION_MAX_FILES
         ),
+        # 窗口提交账要**跟着用户选的范围收窄**（见下面 `_configs_in_focus` 的说明）：
+        # 不收窄就会放行本批次不该看的仓库的提交。
+        window_configs=_configs_in_focus(configs, focus),
     )
     if skip_reason and not force_full:
         return None, state, skip_reason
@@ -513,6 +469,19 @@ def build_weekly_payload(
         # 报告里的变更数会被补偿项虚增。
         "compensation_files": compensation_files,
         "repositories": repo_details,
+        # 窗口里**真实可达的提交**与**每个提交自己改过哪些文件**。
+        #
+        # 这两个键必须**冻结进 request payload**，不能只在读侧现算：
+        # `change_set` 是纯函数层（不碰库），而「窗口里有哪些提交」只有上面那次
+        # `_summarize_weekly_files` 有库会话。先前写侧把它们算进了 `details` 却**没有
+        # 复制到这个 payload 里** —— 于是下游 `payload.get("window_commit_ids")` 恒为空，
+        # 新增的白名单代码在真实链路上**从未生效**：模型问不了窗口里其它提交
+        # （`resolve_commit` 一律判「不属于本批次」），也读不到它们的单提交 diff。
+        # 实测的症状是报告写「累计 2 个提交」而平台统计是 3 个，且模型对第三个提交的
+        # 取证请求被拒。既有的 `tests/test_ai_weekly_commit_accounting.py` 只构造
+        # **已经含清单**的 payload，验的是读侧，接线漏了这一层。
+        "window_commit_ids": list(details.get("window_commit_ids") or ()),
+        "window_commit_files": details.get("window_commit_files") or {},
         # 白名单：本批次**全部**改动过的文件。模型能读的 diff 就是这个集合。
         "delta_files": delta_files,
         # 提示词里**列出来**的那部分。绝大多数版本与 `delta_files` 相同（见下面的说明）。
