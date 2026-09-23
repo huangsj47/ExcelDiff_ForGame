@@ -42,12 +42,13 @@ import pytest
 
 from app import app as flask_app
 from app import create_tables, db
-from models import BackgroundTask, Project, Repository
+from models import BackgroundTask, Commit, Project, Repository
 from models.weekly_version import WeeklyVersionConfig
 from services.ai.weekly_sync_gate import (
     SYNC_IN_FLIGHT_MAX_SECONDS,
     weekly_sync_in_flight,
     weekly_sync_stuck_note,
+    weekly_sync_needed_config_ids,
 )
 from services.ai_analysis_service import update_project_analysis_config
 
@@ -101,6 +102,7 @@ def _seed(*, sync_status: str = "pending", sync_on: str = "primary", age_minutes
         return {
             "project_id": project.id,
             "config_ids": [cfg.id for cfg in configs],
+            "repository_ids": [cfg.repository_id for cfg in configs],
             "primary_config_id": configs[0].id,
             "sibling_config_id": configs[1].id,
             "sync_task_id": sync.id,
@@ -231,6 +233,59 @@ def test_another_generic_task_running_does_not_open_the_gate(idle_worker):
     assert reason, "另一条通用任务在跑被当成了「缓存不会被写」的理由，于是放行了分析"
 
 
+def test_auto_sync_for_a_batch_repository_blocks_the_snapshot():
+    """auto_sync 会新增 Commit；它在跑时冻结周版本快照仍会得到旧输入。"""
+    seeded = _seed(sync_status="completed", age_minutes=1)
+    with flask_app.app_context():
+        row = BackgroundTask(
+            task_type="auto_sync", repository_id=seeded["repository_ids"][1],
+            priority=5, status="processing", created_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
+        )
+        db.session.add(row)
+        db.session.commit()
+        try:
+            needed = weekly_sync_needed_config_ids(seeded["config_ids"])
+            reason = weekly_sync_in_flight(seeded["config_ids"])
+        finally:
+            db.session.delete(row)
+            db.session.commit()
+
+    assert seeded["sibling_config_id"] in needed
+    assert "缓存落后" in reason
+
+
+def test_a_commit_ingested_after_weekly_sync_marks_that_config_stale():
+    """weekly_sync 先完成、auto_sync 后落 Commit 时，不能出现一个静默放行窗口。"""
+    seeded = _seed(sync_status="completed", age_minutes=2)
+    with flask_app.app_context():
+        sync = db.session.get(BackgroundTask, seeded["sync_task_id"])
+        sync.completed_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        config = db.session.get(WeeklyVersionConfig, seeded["primary_config_id"])
+        from utils.timezone_utils import beijing_window_to_utc_naive
+        start_utc, end_utc = beijing_window_to_utc_naive(config.start_time, config.end_time)
+        commit = Commit(
+            repository_id=config.repository_id, commit_id=_uid("late"),
+            path="code/late.lua", operation="M", author="tester", message="late",
+            commit_time=end_utc - timedelta(minutes=3),
+            created_at=datetime.now(timezone.utc), status="pending",
+        )
+        db.session.add(commit)
+        db.session.commit()
+
+        db.session.expire_all()
+        sync = db.session.get(BackgroundTask, seeded["sync_task_id"])
+        commit = db.session.get(Commit, commit.id)
+        assert commit.created_at > sync.completed_at
+        assert start_utc <= commit.commit_time <= end_utc
+
+        needed = weekly_sync_needed_config_ids(seeded["config_ids"])
+        reason = weekly_sync_in_flight(seeded["config_ids"])
+
+    assert seeded["primary_config_id"] in needed
+    assert "缓存落后" in reason
+
+
 def test_a_pending_sync_wedged_past_the_cap_still_gets_a_stuck_note(busy_worker):
     """排队超过上限的 pending 是真**卡住**了（worker 一直没取走它），该报出来。
 
@@ -265,6 +320,32 @@ def test_a_processing_sync_still_blocks_even_though_the_worker_is_busy(busy_work
 
     assert reason, "同步正在写缓存，却放行了分析"
     assert str(seeded["sync_task_id"]) in reason
+
+
+def test_a_reclaimed_old_sync_uses_the_fresh_execution_start_for_the_age_cap():
+    """重启恢复会保留 ``created_at``，但本次执行的 30 分钟上限必须从 ``started_at`` 算。
+
+    真机回归：一条 31 分钟前创建的任务在进程重启后刚被重新认领 5 分钟，旧判据仍按
+    ``created_at`` 把它当成卡死任务放行，AI 因而在同步写到一半时冻结快照。排队任务没有
+    ``started_at``，仍按创建时间判断；进入 processing 后则以本次认领时间为准。
+    """
+    seeded = _seed(
+        sync_status="processing",
+        age_minutes=(SYNC_IN_FLIGHT_MAX_SECONDS // 60) + 5,
+    )
+    now = datetime.now(timezone.utc)
+    with flask_app.app_context():
+        sync = db.session.get(BackgroundTask, seeded["sync_task_id"])
+        sync.started_at = now - timedelta(minutes=5)
+        db.session.commit()
+
+        reason = weekly_sync_in_flight(seeded["config_ids"], now=now)
+        note = weekly_sync_stuck_note(seeded["config_ids"], now=now)
+
+    assert reason, "恢复后只执行了 5 分钟的同步被误判成卡死，AI 会读取半份缓存"
+    assert str(seeded["sync_task_id"]) in reason
+    assert "5 分钟" in reason, reason
+    assert note == "", note
 
 
 def test_the_sibling_repository_processing_sync_still_blocks(busy_worker):

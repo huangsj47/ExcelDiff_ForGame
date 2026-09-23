@@ -53,6 +53,7 @@ from services.weekly_file_sync import (
     annotate_topology_order,
     describe_weekly_file_totals,
     get_real_base_commit_from_vcs,
+    weekly_cache_inputs_unchanged,
     weekly_cache_is_unchanged,
 )
 from services.weekly_version_files_api_helpers import (
@@ -1442,6 +1443,18 @@ def generate_weekly_merged_diff(config, file_path, commits) -> Optional[WeeklyFi
 
         repository = config.repository
         vcs_base_lookup = False
+        latest_commit = commits[-1]
+        existing_cache = WeeklyVersionDiffCache.query.filter_by(
+            config_id=config.id,
+            file_path=file_path
+        ).first()
+        commit_authors = [commit.author for commit in commits]
+        commit_messages = [commit.message.strip() for commit in commits]
+        commit_times = [commit.commit_time.isoformat() for commit in commits]
+        header_profile_key = resolve_weekly_file_header_profile(
+            repository, file_path, latest_commit.commit_id)
+        diff_version = _current_diff_logic_version()
+
         # 基准版本（窗口起始前的最后一个提交；窗口须换算，否则基准会被选晚 8 小时）
         _win_start_utc, _ = weekly_window_in_utc(config)
         base_commit = Commit.query.filter(
@@ -1449,6 +1462,17 @@ def generate_weekly_merged_diff(config, file_path, commits) -> Optional[WeeklyFi
             Commit.path == file_path,
             Commit.commit_time < _win_start_utc
         ).order_by(Commit.commit_time.desc()).first()
+
+        # 周期同步首先做输入指纹快路径。输入完全相同时，diff 是同一个确定性结果；继续
+        # 逐文件回查 Git 与读取两版正文只会把 1207 个文件的同步拖到一小时以上。
+        # Excel HTML 缓存缺失时仍走旧路径，让后面的任务创建逻辑有机会补齐它。
+        if weekly_cache_inputs_unchanged(
+            existing_cache, base_commit, latest_commit, commits, diff_version,
+            header_profile_key,
+        ) and not _weekly_excel_cache_service.needs_merged_diff_cache(config.id, file_path):
+            log_print(f"输入未变，跳过 diff 重算: {file_path}", 'DETAIL')
+            return WeeklyFileSyncResult()
+
         # 优化策略：如果数据库中没有找到基准版本，直接查询Git/SVN获取真实的提交历史
         if not base_commit:
             vcs_base_lookup = True
@@ -1460,17 +1484,6 @@ def generate_weekly_merged_diff(config, file_path, commits) -> Optional[WeeklyFi
                 log_print(f"✅ 从Git/SVN获取到真实基准版本: {base_commit.commit_id[:8]} ({base_commit.commit_time})", 'DETAIL')
             else:
                 log_print("ℹ️ Git/SVN中也未找到更早的提交，确认为新文件", 'DETAIL')
-        # 获取最新版本（时间范围内的最后一个提交）
-        latest_commit = commits[-1]
-        # 检查是否已存在缓存
-        existing_cache = WeeklyVersionDiffCache.query.filter_by(
-            config_id=config.id,
-            file_path=file_path
-        ).first()
-        # 准备提交信息
-        commit_authors = [commit.author for commit in commits]
-        commit_messages = [commit.message.strip() for commit in commits]
-        commit_times = [commit.commit_time.isoformat() for commit in commits]
         # 生成合并diff数据
         merged_diff_data = _generate_merged_diff_data(
             repository, file_path, base_commit, latest_commit, commits
@@ -1479,11 +1492,9 @@ def generate_weekly_merged_diff(config, file_path, commits) -> Optional[WeeklyFi
         # 这张表命中哪套表头（列表按它分组）。它**参与「要不要重写这一行」的判定**：
         # 用户改了匹配规则之后，diff 内容可能一字未变，而「这张表算哪一套」已经变了 ——
         # 不带上它，那一列会一直停在旧值上。
-        header_profile_key = resolve_weekly_file_header_profile(
-            repository, file_path, latest_commit.commit_id)
         unchanged = bool(existing_cache) and weekly_cache_is_unchanged(
             existing_cache, payload_json, base_commit, latest_commit, commits,
-            _current_diff_logic_version(),
+            diff_version,
         ) and existing_cache.header_profile_key == header_profile_key
         if unchanged:
             # **内容与上次逐字相同就一个字节都不写。** 本表逐文件写一次，`updated_at`
@@ -1511,7 +1522,7 @@ def generate_weekly_merged_diff(config, file_path, commits) -> Optional[WeeklyFi
             # 打上本次比较口径的版本号：不写则本表 diff_version 恒为 NULL，读侧
             # （is_merged_diff_cache_current）只能把 NULL 当历史行宽容处理，「升级版本后
             # 合并 diff 自动失效」就永远不生效。详见 models/weekly_version.py。
-            existing_cache.diff_version = _current_diff_logic_version()
+            existing_cache.diff_version = diff_version
             existing_cache.header_profile_key = header_profile_key
             existing_cache.last_sync_time = datetime.now(timezone.utc)
             if previous_latest_commit_id != latest_commit.commit_id:
@@ -1537,7 +1548,7 @@ def generate_weekly_merged_diff(config, file_path, commits) -> Optional[WeeklyFi
                 confirmation_status=json.dumps({"dev": "pending"}),
                 overall_status='pending',
                 cache_status='completed',
-                diff_version=_current_diff_logic_version(),  # 理由见上「更新现有缓存」分支
+                diff_version=diff_version,  # 理由见上「更新现有缓存」分支
                 header_profile_key=header_profile_key,
                 last_sync_time=datetime.now(timezone.utc)
             )

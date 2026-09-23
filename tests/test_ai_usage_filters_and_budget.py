@@ -449,16 +449,12 @@ def test_the_overview_exposes_the_budget_of_every_project(client, monkeypatch):
 
 
 # ==========================================================================
-# 四、预算：未配置 = 不限制
+# 四、预算：未配置 = 100M/月安全默认
 # ==========================================================================
 
 
-def test_an_unconfigured_budget_is_unlimited_not_zero():
-    """**未配置 = 不限制。** 不是 0，也不是任何拍脑袋的默认值。
-
-    0 会被读成「一个 token 都不许花」，把 AI 分析整个锁死；而界面上那一栏是空的，
-    用户找不到任何解释。
-    """
+def test_an_unconfigured_budget_uses_the_safe_monthly_default():
+    """忘记配置时仍有明确的月度硬上限，避免定时任务长期累积。"""
     with flask_app.app_context():
         create_tables()
         project_id = _project()
@@ -466,18 +462,18 @@ def test_an_unconfigured_budget_is_unlimited_not_zero():
 
         status = budget_status(project_id)
 
-        assert status["limited"] is False
-        assert status["over"] is False
-        assert status["blocks_analysis"] is False
-        assert status["limits"]["tokens"] is None
+        assert status["limited"] is True
+        assert status["over"] is True
+        assert status["blocks_analysis"] is True
+        assert status["limits"]["tokens"] == 100_000_000
         assert status["limits"]["cost"] is None
-        assert budget_gate_reason(project_id, entry="test") is None, "没配预算却把分析拦了"
+        assert budget_gate_reason(project_id, entry="test"), "超过默认额度后仍继续分析"
 
 
-def test_a_zero_or_negative_budget_does_not_lock_the_project():
+def test_a_zero_or_negative_budget_falls_back_to_the_safe_default():
     """库里出现 0 只可能来自遗留数据或手工改库（配置校验不允许填 0）。
 
-    「因为一个 0 把分析彻底锁死」的代价远大于「放过一次」，所以按不限制处理。
+    非法遗留值不能变成 0 token 的死锁，也不能绕过默认额度变成无限制。
     """
     with flask_app.app_context():
         create_tables()
@@ -491,7 +487,9 @@ def test_a_zero_or_negative_budget_does_not_lock_the_project():
         db.session.commit()
 
         status = budget_status(project_id)
-        assert status["limited"] is False
+        assert status["limited"] is True
+        assert status["limits"]["tokens"] == 100_000_000
+        assert status["over"] is False
         assert budget_gate_reason(project_id, entry="test") is None
 
 
@@ -1407,11 +1405,11 @@ class TestTheBudgetConfigFields:
             assert f'id="{dom_id}Help"' in html, f"{dom_id} 没有帮助文案"
             assert f'id="{dom_id}Error"' in html, f"{dom_id} 没有内联错误位置"
 
-    def test_the_fields_say_that_blank_means_unlimited(self):
+    def test_the_token_field_explains_the_safe_default(self):
         html = _read(PROJECT_VIEW)
         text = html[html.index('id="aiBudgetTokenInputHelp"'):]
         text = text[: text.index("</div>") + 6]
-        assert "留空 = 不限制" in text.replace("<strong>", "").replace("</strong>", "")
+        assert "留空 = 使用 100M/月安全默认" in text.replace("<strong>", "").replace("</strong>", "")
 
     def test_the_ranges_are_not_hardcoded_in_the_markup(self):
         """范围只有一份（`FIELD_RULES`），写在 HTML 里就会出现「界面写 1~30、

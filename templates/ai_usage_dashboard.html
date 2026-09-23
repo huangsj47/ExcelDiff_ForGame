@@ -342,7 +342,7 @@
             <p class="aiu-hint">
                 与每个项目自己的预算<strong>叠加</strong>：任意一档超了，都会挡住下一次分析。
                 平台档回答的是「整个平台一共能花多少」，项目档回答的是「这个项目能花多少」——
-                少了哪一档都会失控。两个上限都<strong>留空 = 不限制</strong>（不是 0）。
+                少了哪一档都会失控。平台档两个上限都<strong>留空 = 不限制</strong>；每个项目仍有自己的 100M/月安全默认。
             </p>
 
             <div class="aiu-readonly" id="aiuPlatformBudgetReadonly" hidden>
@@ -402,7 +402,7 @@
                         <input type="text" inputmode="numeric" autocomplete="off"
                                class="aiu-input" id="aiuPlatformTokenInput">
                         <span class="aiu-field-help" id="aiuPlatformTokenHelp">
-                            留空 = 不限制。填 0 不是「不限制」，会被拒绝 —— 那等于把全平台的分析关掉。
+                            留空 = 不限制。填 0 会被拒绝。
                         </span>
                         <span class="aiu-field-error" id="aiuPlatformTokenError" hidden></span>
                     </div>
@@ -572,7 +572,7 @@
                         <label class="aiu-label" for="aiuBudgetTokenInput">周期内 token 上限</label>
                         <input type="text" inputmode="numeric" autocomplete="off"
                                class="aiu-input" id="aiuBudgetTokenInput">
-                        <span class="aiu-field-help" id="aiuBudgetTokenHelp">留空 = 不限制。</span>
+                        <span class="aiu-field-help" id="aiuBudgetTokenHelp">留空 = 恢复 100M/月安全默认。</span>
                         <span class="aiu-field-error" id="aiuBudgetTokenError" hidden></span>
                     </div>
                     <div class="aiu-field">
@@ -1604,8 +1604,7 @@ function aiuMeterPercent(ratio) {
 
 /** 预算表单 → POST body。
  *
- *  **留空 = 不限制**，提交 `null`（不是 0，也不是空串 —— 空串虽然也被服务端读成
- *  不限制，但 `null` 把「不限制」这件事说得更直白）。
+ *  留空提交 `null`：token 回落到安全默认，费用表示不按费用限制。
  *
  *  这里**刻意不做数值转换**：`Number('abc')` 是 NaN，`JSON.stringify` 会把它写成
  *  `null` —— 一个填错的数会被静默读成「随便花」。所以原样把用户填的字符串交给服务端，
@@ -2659,7 +2658,7 @@ function aiuBudgetFormPayload(period, tokenText, costText) {
             updated.textContent = config.configured
                 ? ('最后修改：' + aiuFmtTime(config.updated_at)
                    + (config.updated_by ? ' · ' + config.updated_by : ''))
-                : '两个上限都留空 = 不限制；任意一栏填了数，就按那一栏拦住下一次分析。';
+                : '两个上限都留空 = 不限制；每个项目仍有自己的 100M/月安全默认。';
         }
     }
 

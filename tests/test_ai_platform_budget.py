@@ -203,17 +203,11 @@ def client():
 
 
 # ==========================================================================
-# 一、没配平台预算时，行为与改动前逐字一致
+# 一、没配平台预算时启用安全默认
 # ==========================================================================
 
 
 def test_an_unconfigured_platform_budget_changes_nothing():
-    """**最要紧的一条向后兼容。**
-
-    平台没设上限时，`notes` 里不许出现任何平台相关的话（那会把项目档的说明稀释掉），
-    `reason` 也必须还是改动前那一句（带项目档的收尾）。这条一旦破了，77 条既有断言的
-    可读性会一起下降，而且用户会开始怀疑「平台到底有没有在管」。
-    """
     with flask_app.app_context():
         create_tables()
         _clear_platform_budget()
@@ -226,7 +220,6 @@ def test_an_unconfigured_platform_budget_changes_nothing():
         assert status["over"] is True
         assert status["over_scopes"] == [SCOPE_PROJECT]
         assert status["platform"]["limited"] is False
-        assert status["notes"] == [], status["notes"]
         assert status["reason"].endswith(
             "。已暂停 AI 分析，请在项目的「AI 分析配置」里调高预算或等下个周期。"
         ), status["reason"]
@@ -243,8 +236,6 @@ def test_an_unconfigured_platform_budget_reports_itself_as_unlimited():
         assert config["token_limit"] is None and config["cost_limit"] is None
         status = platform_budget_status()
         assert status["limited"] is False and status["over"] is False
-        # 没配 → 不产出任何 note（见上一条的理由）。
-        assert status["notes"] == []
 
 
 # ==========================================================================
@@ -560,12 +551,8 @@ def test_mixed_budget_periods_have_no_single_target():
     assert {item["period"] for item in link["periods"]} == {"monthly", "all_time"}
 
 
-def test_only_projects_with_a_configured_budget_count_as_a_budget_period():
-    """没配预算的项目也有个默认周期（本月），但它不该参与联动。
-
-    把它算进来的话，界面会对一批**根本没设预算**的项目宣称「与预算周期一致」，
-    而用户会以为它们受着某个上限的约束。
-    """
+def test_the_safe_default_participates_in_budget_period_alignment():
+    """未显式配置的项目也受 100M/月约束，所以它的月度周期必须参与联动。"""
     with flask_app.app_context():
         create_tables()
         _clear_platform_budget()
@@ -579,9 +566,9 @@ def test_only_projects_with_a_configured_budget_count_as_a_budget_period():
         body = usage_overview()
 
         link = body["budget_link"]
-        assert link["periods"] == [{"period": "all_time", "label": "全部时间", "count": 1}]
-        assert link["target_range"] == RANGE_ALL
-        assert link["mixed"] is False
+        assert {item["period"] for item in link["periods"]} == {"monthly", "all_time"}
+        assert link["target_range"] is None
+        assert link["mixed"] is True
 
 
 def test_the_overview_carries_the_platform_budget_and_the_linkage():

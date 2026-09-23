@@ -211,7 +211,16 @@ def test_unchanged_content_does_not_touch_the_cache_row(monkeypatch):
         cache_id = cache.id
         before_stamp = cache.updated_at
 
-        monkeypatch.setattr(weekly_logic, "_generate_merged_diff_data", lambda *_a, **_k: dict(payload))
+        def must_not_recompute(*_a, **_k):
+            raise AssertionError("输入完全相同却重新读取正文并生成 diff")
+
+        monkeypatch.setattr(weekly_logic, "_generate_merged_diff_data", must_not_recompute)
+        monkeypatch.setattr(
+            weekly_logic, "get_real_base_commit_from_vcs",
+            lambda *_a, **_k: (_ for _ in ()).throw(
+                AssertionError("输入完全相同却逐文件回查 Git 历史")
+            ),
+        )
         monkeypatch.setattr(weekly_logic, "_weekly_excel_cache_service", _StubWeeklyExcelCacheService())
 
         result = weekly_logic.generate_weekly_merged_diff(config, target_file, [commit_v1])
@@ -292,7 +301,8 @@ def test_changed_content_still_writes_the_cache_row(monkeypatch):
             confirmation_status=json.dumps({"dev": "confirmed"}),
             overall_status="confirmed",
             cache_status="completed",
-            diff_version=weekly_logic._current_diff_logic_version(),
+            # 口径变化必须绕过输入快路径并完整重算。
+            diff_version="older-diff-version",
             last_sync_time=now_utc - timedelta(minutes=5),
         )
         db.session.add(cache)

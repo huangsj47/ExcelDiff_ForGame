@@ -139,14 +139,17 @@ SEVERITY_CHOICES = ("high", "critical")
 CONFIDENCE_CHOICES = ("high", "very_high")
 
 # --- 预算（AI 分析的闸门）---
-# **未配置 = 不限制。** 这两个上限的默认值是 `None`，不是 0，也不是任何拍脑袋的数字：
-# 0 会被读成「一个 token 都不许花」，把 AI 分析整个锁死；而一个编出来的默认上限
-# 会在用户完全不知情的时候开始拦他的分析。
+# token 未配置时启用月度安全默认值。它不是单次分析目标，而是防止忘记配置预算后，
+# 定时任务长期无限累计。按 runs 38~41 的实测（完整全量约 2.1M~4.0M raw tokens），
+# 100M 可容纳约 25 次重型全量分析；常规增量会更多。用户可在配置页明确调高或调低。
+# 费用仍允许为空：没有可靠价格表时编一个金额上限反而会给出错误的安全感。
 #
 # 周期默认「本月」，也可以选「本周」或「全部时间」。跨周期时用量自然回到 0，
 # 所以**不需要任何「重置」动作** —— 需要人工点的重置必然有人忘，或者被当成清账按钮。
 DEFAULT_BUDGET_PERIOD = "monthly"
-DEFAULT_BUDGET_TOKEN_LIMIT = None
+DEFAULT_BUDGET_TOKEN_LIMIT = 100_000_000
+# 平台档由平台管理员显式配置；默认安全额度作用在每个项目上。
+DEFAULT_PLATFORM_BUDGET_TOKEN_LIMIT = None
 DEFAULT_BUDGET_COST_LIMIT = None
 BUDGET_PERIOD_CHOICES = ("monthly", "weekly", "all_time")
 # token 上限的量级上限：1 万亿 token —— 有生之年撞不到，只是个防呆边界。
@@ -157,10 +160,9 @@ BUDGET_COST_LIMIT_MAX = 1_000_000_000
 # `resolved()` 里**允许返回 None** 的键。
 #
 # `None` 在别处是「忘了补默认值」的信号（`min_severity=None` 会让规则层什么都过滤不掉，
-# 而且不报错），所以 `test_resolved_never_returns_none_for_any_key` 逐键拦着。这两栏
-# 是例外，因为它们的 `None` 是一个**有意义的取值**：不限制。把它们改成 0 或者任何
-# 拍脑袋的默认值，都会让「没配预算」变成「预算为 0 / 某个没人知道的数」。
-NULLABLE_RESOLVED_KEYS = ("budget_token_limit", "budget_cost_limit")
+# 而且不报错），所以 `test_resolved_never_returns_none_for_any_key` 逐键拦着。费用栏是例外：
+# 没有可靠价格表时，`None` 明确表示不按金额限制；token 栏则回落到 100M/月安全默认。
+NULLABLE_RESOLVED_KEYS = ("budget_cost_limit",)
 
 
 def _int_or(value, fallback: int) -> int:
@@ -188,11 +190,10 @@ def _clamp_int(value, fallback: int, bounds: tuple[int, int]) -> int:
 
 
 def _optional_int(value) -> int | None:
-    """读一个**可空**的整数上限：NULL / 空串 / 读不动 → `None`（= 不限制）。
+    """读一个**可空**的整数上限：NULL / 空串 / 读不动 → `None`。
 
-    **不回落成 0，也不回落成任何默认值。** 这个函数是「未配置 = 不限制」这条口径的
-    实现点：把它改成 `return 0`，所有没配预算的项目会在下一次分析时被全部拦掉，
-    而且界面上找不到任何解释。
+    这里仅负责解析存储值；调用方决定 `None` 是回落到项目安全默认，还是代表平台档不限制。
+    **绝不回落成 0**，否则空配置会把 AI 分析全部锁死。
     """
     if value is None or isinstance(value, bool):
         return None
@@ -303,8 +304,7 @@ class AiProjectAnalysisConfig(db.Model):
     model_price_table = db.Column(BigText)
 
     # --- 预算闸门（超了就禁用 AI 分析，见 services/ai/analysis_budget.py）---
-    # 这两列**可为 NULL**，NULL 的语义是「不限制」。加列迁移不带 DEFAULT 子句，
-    # 所以老行上它们就是 NULL —— 与「不限制」正好一致，不需要额外的回填。
+    # token 列可为 NULL，但读取时会落到月度安全默认值；费用 NULL 仍表示不按金额限制。
     budget_period = db.Column(db.String(20), default=DEFAULT_BUDGET_PERIOD)
     budget_token_limit = db.Column(db.BigInteger)
     budget_cost_limit = db.Column(db.String(40))
@@ -385,9 +385,11 @@ class AiProjectAnalysisConfig(db.Model):
             # 空串 = 没有项目单价表（用平台默认表）。**不是「免费」**，读取侧据此返回
             # 「还没有配置价格表」而不是 0（见 services/ai/usage.py 的口径）。
             "model_price_table": self.model_price_table or "",
-            # 预算：NULL 一律读成「不限制」，见 _optional_int / _optional_money。
+            # token NULL 使用月度安全默认值；费用 NULL 表示不按金额限制。
             "budget_period": _budget_period_or_default(self.budget_period),
-            "budget_token_limit": _optional_int(self.budget_token_limit),
+            "budget_token_limit": (
+                _optional_int(self.budget_token_limit) or DEFAULT_BUDGET_TOKEN_LIMIT
+            ),
             "budget_cost_limit": _optional_money(self.budget_cost_limit),
         }
 

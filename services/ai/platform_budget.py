@@ -73,9 +73,8 @@ def _row() -> AiPlatformBudget | None:
 def get_platform_budget() -> dict[str, Any]:
     """读平台总预算。**没有这一行时返回默认值**，而不是 `None`。
 
-    返回 `None` 会迫使每一个调用点各写一次「没配就当不限制」的兜底 —— 而那正是
-    「未配置 = 不限制」这条口径被写歪的地方（写成「没配就不检查」和写成「没配就禁止」
-    都能通过一次人工测试）。这里一律给出完整字典，`configured` 说明有没有真的配过。
+    返回 `None` 会迫使每一个调用点各写一次兜底。这里一律给出完整字典，`configured`
+    说明平台管理员有没有显式保存过上限。
     """
     row = _row()
     if row is None:

@@ -412,23 +412,19 @@ def test_resolved_never_returns_none_for_any_key():
         assert value is not None, f"{key} 读出来是 None"
 
 
-def test_the_nullable_resolved_keys_are_only_the_budget_limits():
+def test_the_nullable_resolved_keys_are_only_the_cost_limit():
     """**反向守卫**：例外清单只许装预算那两栏。
 
     没有这一条，将来有人加了一栏新配置、又不想补默认值，最省事的做法就是把它塞进
     这个清单 —— 上面那条用例照样全绿，而 `resolved()` 又开始返回 None 了。
     """
-    assert tuple(NULLABLE_RESOLVED_KEYS) == ("budget_token_limit", "budget_cost_limit")
+    assert tuple(NULLABLE_RESOLVED_KEYS) == ("budget_cost_limit",)
 
 
-def test_resolved_treats_an_unset_budget_as_unlimited():
-    """**未配置 = 不限制**，不是 0、也不是任何默认值。
-
-    0 会被预算闸门读成「一个 token 都不许花」，把 AI 分析整个锁死；而界面上
-    找不到任何解释（那一栏是空的）。
-    """
+def test_resolved_uses_a_safe_token_budget_when_unset():
+    """忘记配置预算时仍有月度 token 止损，费用保持可空。"""
     resolved = AiProjectAnalysisConfig(project_id=1).resolved()
-    assert resolved["budget_token_limit"] is None
+    assert resolved["budget_token_limit"] == 100_000_000
     assert resolved["budget_cost_limit"] is None
     assert resolved["budget_period"] == DEFAULT_BUDGET_PERIOD
 
@@ -448,8 +444,8 @@ def test_resolved_keeps_a_configured_budget():
     assert resolved["budget_cost_limit"] == "12.50"
 
 
-def test_resolved_treats_a_zero_or_garbage_budget_as_unset():
-    """0 / 负数 / 空串 / 乱码一律读成「不限制」。
+def test_resolved_treats_a_zero_or_garbage_token_budget_as_the_safe_default():
+    """0 / 负数 / 空串 / 乱码一律回落到安全默认，费用仍按未配置处理。
 
     0 尤其要紧：它要么是「用户手动填的 0」（= 不许花钱，那是另一件事，应该报错让他
     改），要么是「某个上游把 NULL 写成了 0」。这两种在库里分不开，而把功能锁死的
@@ -460,7 +456,7 @@ def test_resolved_treats_a_zero_or_garbage_budget_as_unset():
             project_id=1, budget_token_limit=raw, budget_cost_limit=raw
         )
         resolved = config.resolved()
-        assert resolved["budget_token_limit"] is None, f"budget_token_limit={raw!r}"
+        assert resolved["budget_token_limit"] == 100_000_000, f"budget_token_limit={raw!r}"
         assert resolved["budget_cost_limit"] is None, f"budget_cost_limit={raw!r}"
 
 

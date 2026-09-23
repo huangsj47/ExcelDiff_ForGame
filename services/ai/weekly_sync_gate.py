@@ -113,10 +113,15 @@ def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] =
     current = _as_naive_utc(now) or datetime.now(timezone.utc).replace(tzinfo=None)
 
     def _age_of(row) -> float:
-        # 用 created_at 而不是 started_at：排队等着开跑同样是「还没写完」，
-        # 而 started_at 在 pending 阶段是空的。
-        created = _as_naive_utc(row.created_at)
-        return max((current - created).total_seconds(), 0.0) if created else 0.0
+        # pending 还没有执行起点，只能从 created_at 计算「排队卡了多久」。processing
+        # 必须从本次 started_at 计算：启动恢复会保留原 created_at，再重新认领并写一个新的
+        # started_at。若仍用 created_at，一条排队/中断了 31 分钟、实际只重跑 5 分钟的同步
+        # 会被误判为超过上限，AI 随即在它写缓存的中途冻结半份快照。
+        status = str(getattr(row, "status", "") or "").strip().lower()
+        started = _as_naive_utc(getattr(row, "started_at", None))
+        created = _as_naive_utc(getattr(row, "created_at", None))
+        anchor = started if status == "processing" and started is not None else created
+        return max((current - anchor).total_seconds(), 0.0) if anchor else 0.0
 
     aged = [(_age_of(row), row) for row in rows]
     within = [item for item in aged if item[0] <= SYNC_IN_FLIGHT_MAX_SECONDS]
@@ -124,6 +129,63 @@ def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] =
     # 全超上限时取最老的那条 = 真正卡死的那条（`stuck_note` 要指名它）。
     age, worst = max(within or aged, key=lambda item: item[0])
     return worst, age
+
+
+def weekly_sync_needed_config_ids(config_ids: Iterable[int]) -> list[int]:
+    """返回缓存可能落后于仓库采集结果的配置。
+
+    两种情况都必须挡住快照：仓库 ``auto_sync`` 仍在写 Commit 行；或它刚写完，而最近一次
+    ``weekly_sync`` 完成之后又出现了窗口内 Commit。后者是 2026-09-23 真机复现的启动竞态：
+    worker 先用旧 Commit 表完成周版本同步，随后 auto_sync 拉到新提交，AI 此时看不到任何
+    active weekly_sync，却会冻结一份已经过期的缓存。
+    """
+    ids = sorted({int(item) for item in config_ids if item is not None})
+    if not ids:
+        return []
+    from models import BackgroundTask, Commit, WeeklyVersionConfig
+    from utils.timezone_utils import beijing_window_to_utc_naive
+
+    try:
+        configs = WeeklyVersionConfig.query.filter(WeeklyVersionConfig.id.in_(ids)).all()
+        repo_ids = [cfg.repository_id for cfg in configs]
+        active_repo_ids = {
+            row.repository_id
+            for row in BackgroundTask.query.filter(
+                BackgroundTask.task_type == "auto_sync",
+                BackgroundTask.repository_id.in_(repo_ids),
+                BackgroundTask.status.in_(("pending", "processing")),
+            ).all()
+            if row.repository_id is not None
+        }
+        needed = {cfg.id for cfg in configs if cfg.repository_id in active_repo_ids}
+        for cfg in configs:
+            latest_sync = (
+                BackgroundTask.query.filter(
+                    BackgroundTask.task_type == "weekly_sync",
+                    BackgroundTask.commit_id == str(cfg.id),
+                    BackgroundTask.status == "completed",
+                    BackgroundTask.completed_at.isnot(None),
+                )
+                .order_by(BackgroundTask.completed_at.desc())
+                .first()
+            )
+            if latest_sync is None:
+                continue
+            start_utc, end_utc = beijing_window_to_utc_naive(cfg.start_time, cfg.end_time)
+            newer = Commit.query.filter(
+                Commit.repository_id == cfg.repository_id,
+                Commit.commit_time >= start_utc,
+                Commit.commit_time <= end_utc,
+                Commit.created_at > latest_sync.completed_at,
+            ).first()
+            if newer is not None:
+                needed.add(cfg.id)
+        return sorted(needed)
+    except Exception as exc:  # noqa: BLE001 —— 读不动时仍由既有 active weekly_sync 闸门兜底
+        from utils.logger import log_print
+
+        log_print(f"⚠️ 检查周版本缓存新鲜度失败，本次只按活动同步任务判定: {exc}", "AI", force=True)
+        return []
 
 
 def weekly_sync_in_flight(config_ids: Iterable[int], *, now: Optional[datetime] = None) -> str:
@@ -136,6 +198,12 @@ def weekly_sync_in_flight(config_ids: Iterable[int], *, now: Optional[datetime] 
     调用方拿到原因后应当**跳过这一次分析并保留触发水位线**（不要推进
     `last_triggered_at`/`last_analyzed_at`），下一个周期自然会重试。
     """
+    needed = weekly_sync_needed_config_ids(config_ids)
+    if needed:
+        return (
+            f"周版本缓存落后于仓库同步（待刷新 config_id={','.join(map(str, needed))}）："
+            "等最新提交写入周版本缓存后再分析"
+        )
     task, age = _in_flight_sync_task(config_ids, now=now)
     if task is None:
         return ""

@@ -621,14 +621,27 @@ def _dispatch(job, config, target_key, *, mode, source, key, now=None) -> None:
     让分析看到半份变更清单（漏文件是**静默**的，提示词里的「共 N 个文件」会跟着变小）。
     拦下时登记一条**等待意图**（不执行、不产生任何消耗），同步收尾由 worker 转交。
     """
-    from services.ai.weekly_sync_gate import group_config_ids, weekly_sync_in_flight
+    from services.ai.weekly_sync_gate import (
+        group_config_ids,
+        weekly_sync_in_flight,
+        weekly_sync_needed_config_ids,
+    )
 
     config_id = getattr(config, "id", None)
     # **判据是整批**（同一个项目 / 同一个窗口里的全部仓库），不是这一个 config：
     # 变更清单来自这一批全部的缓存行，另一个仓库还在写的时候照样会漏文件。
     # 这与 `run_weekly_analysis_background`（后台/任务那条路唯一的执行入口）用的是
     # 同一个 `group_config_ids(config)` —— 闸门只有一份实现，判定也跟着只有一处。
-    sync_reason = weekly_sync_in_flight(group_config_ids(config), now=now)
+    config_ids = group_config_ids(config)
+    # 手动点击发生在 auto_sync 刚拉到新提交之后时，不能只说「缓存旧了」然后永久等待；
+    # 立即补齐整批 weekly_sync，完成回调会把下面登记的等待意图转交给分析 worker。
+    needed = weekly_sync_needed_config_ids(config_ids)
+    if needed:
+        from services.task_worker_service import create_weekly_sync_task
+
+        for needed_id in needed:
+            create_weekly_sync_task(needed_id)
+    sync_reason = weekly_sync_in_flight(config_ids, now=now)
     if sync_reason:
         job.state = STATE_WAITING_SNAPSHOT
         _register_intent(job, config_id, target_key, mode=mode, key=key)

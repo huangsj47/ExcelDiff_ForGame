@@ -1572,8 +1572,7 @@
                             <div class="form-text" id="aiPromptCharBudgetInputHelp">只算你自己要发的内容（变更清单、取回的上下文、项目知识包与补充指令）；平台内置提示词不占这个额度。超出时按「保留首尾」压缩，并在内容里标注省略了多少。</div>
                             <div class="form-text text-danger d-none" id="aiPromptCharBudgetInputError"></div>
                         </div>
-                        <!-- 预算闸门。三栏的语义是「留空 = 不限制」，所以**不能给默认值**：
-                             填 0 会被预算闸门读成「一个 token 都不许花」，把分析整个锁死。 -->
+                        <!-- token 留空恢复 100M/月安全默认；费用留空才是不按费用限制。 -->
                         <div class="col-12 col-lg-6 ai-config-field">
                             <label class="form-label" for="aiBudgetPeriodSelect">预算周期</label>
                             <select class="form-select form-select-sm" id="aiBudgetPeriodSelect"
@@ -1592,7 +1591,7 @@
                             <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiBudgetTokenInput"
                                    aria-describedby="aiBudgetTokenInputHelp aiBudgetTokenInputError">
                             <div class="form-text" id="aiBudgetTokenInputHelp">
-                                <strong>留空 = 不限制。</strong>用超之后 AI 分析会被暂停（手动与定时都停），
+                                <strong>留空 = 使用 100M/月安全默认。</strong>用超之后 AI 分析会被暂停（手动与定时都停），
                                 界面上会写明已用多少、上限多少。
                             </div>
                             <div class="form-text text-danger d-none" id="aiBudgetTokenInputError"></div>
@@ -2522,7 +2521,7 @@ const AI_CHOICE_LABELS = {
 // 需要按 `field_schema` 设置 min/max 的字段类型。`optional_int` 与 `int` 共用同一套
 // 范围提示；`optional_money` 只设 max（它的下限是「> 0」，由本地校验与服务端各判一次）。
 const AI_RANGE_KINDS = ['int', 'optional_int', 'optional_money'];
-// 「留空 = 不限制」的字段：范围提示的文案要说清楚，否则用户会以为空着是填错了。
+// 可空预算字段：token 留空恢复安全默认，费用留空表示不按费用限制。
 const AI_OPTIONAL_KINDS = ['optional_int', 'optional_money'];
 
 // 只读用户不该动的东西（radio 与开关不在 AI_FIELD_DOM 里，单独列）。
@@ -2644,11 +2643,12 @@ function applyAiFieldSchema(schema) {
             hint.className = 'ai-range-hint ms-1';
             help.appendChild(hint);
         }
-        // 「留空 = 不限制」那两栏不能只说范围：不说清楚的话，空着的那一栏看起来像
-        // 「还没填完」，而它的语义其实是「不限」。
+        // 可空预算字段要把各自的回落语义写清楚。
         if (rule.max !== null && rule.max !== undefined) {
             hint.textContent = AI_OPTIONAL_KINDS.indexOf(rule.kind) >= 0
-                ? `（上限 ${rule.max}，留空 = 不限制）`
+                ? (field === 'budget_token_limit'
+                    ? `（上限 ${rule.max}，留空 = 100M/月安全默认）`
+                    : `（上限 ${rule.max}，留空 = 不限制）`)
                 : `（可填 ${rule.min}~${rule.max}）`;
         } else if (rule.min !== null && rule.min !== undefined) {
             hint.textContent = `（最小 ${rule.min}）`;
@@ -2697,7 +2697,7 @@ function fillAiConfigForm(data) {
     // 「自动」，而库里其实是空的；两者目前等价，但显示的前提必须是数据本身）。
     setValue('aiPromptCacheModeSelect', data.prompt_cache_mode || 'auto');
     setValue('aiPromptCacheFormatSelect', data.prompt_cache_format || 'none');
-    // 预算那两栏是「留空 = 不限制」，所以服务端回 null 时**必须清空输入框**：
+    // 可空预算字段：token 的 null 代表恢复安全默认，费用的 null 代表不按费用限制。
     // `setValue` 对 null 是「不动」，留着上一轮的旧数字会让界面显示一个库里并不存在的
     // 上限；而用户按这个数字去推算「还能跑几次」会完全错。
     function setOptionalValue(id, value) {
@@ -2931,7 +2931,7 @@ function collectAiConfigPayload() {
     // 收敛掉的七个数值栏不进提交体 —— 服务端对它们收到即报错（endpoint_service.RETIRED_FIELDS），
     // 哪怕值没变也提交上去，会把自己锁在配置页之外。
     numberValue('aiPromptCharBudgetInput', 'prompt_char_budget');
-    // 预算：空串原样提交，服务端把它读成「不限制」（`optional_int` / `optional_money`）。
+    // 预算：空串原样提交；token 在读取侧回落到 100M/月，费用表示不按金额限制。
     // **不能把空串转成 0** —— 0 是「一个 token 都不许花」，会把分析整个锁死。
     numberValue('aiBudgetTokenInput', 'budget_token_limit');
     numberValue('aiBudgetCostInput', 'budget_cost_limit');
@@ -3000,7 +3000,7 @@ function aiFieldProblem(field) {
         return { field: field, label: label, message: '请填写数字' };
     }
     if (raw === '') {
-        // 「留空 = 不限制」那两栏，空是合法取值，不是「还没填」。
+        // 两个预算栏都允许清空：token 恢复安全默认，费用取消金额限制。
         return null;
     }
     const num = Number(raw);
@@ -3009,7 +3009,9 @@ function aiFieldProblem(field) {
     }
     const optional = AI_OPTIONAL_KINDS.indexOf(rule.kind) >= 0;
     if (optional && num <= 0) {
-        return { field: field, label: label, message: '必须大于 0；留空表示不限制' };
+        return { field: field, label: label, message: field === 'budget_token_limit'
+            ? '必须大于 0；留空恢复 100M/月安全默认'
+            : '必须大于 0；留空表示不限制' };
     }
     if (!optional && rule.min !== null && rule.min !== undefined && num < rule.min) {
         return { field: field, label: label, message: `不能小于 ${rule.min}` };

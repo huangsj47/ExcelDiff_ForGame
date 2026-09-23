@@ -573,9 +573,10 @@ class TestTheIsolationItself:
 
             status = budget_status(project_id)
 
-            assert status["limited"] is False
-            assert status["over"] is False
-            assert status["blocks_analysis"] is False
+            assert status["limited"] is True
+            assert status["over"] is True
+            assert status["blocks_analysis"] is True
+            assert status["limits"]["tokens"] == 100_000_000
             assert platform_budget_status()["used"]["runs"] == 0
 
 

@@ -23,8 +23,10 @@
 反向只有 `get_real_base_commit_from_vcs` 函数体内那一处延迟导入，见那里的说明。
 """
 
+import json
 import traceback
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from models import Commit, db
 from services.log_sampling import (
@@ -124,6 +126,61 @@ def weekly_cache_is_unchanged(
     if (existing_cache.commit_count or 0) != len(commits):
         return False
     return (existing_cache.merged_diff_data or '') == payload_json
+
+
+def weekly_cache_inputs_unchanged(
+    existing_cache, base_commit, latest_commit, commits, diff_version, header_profile_key
+):
+    """不读取文件正文，就能证明这行缓存的所有输入仍然相同吗。
+
+    `weekly_cache_is_unchanged` 适合首次计算或口径变化后的保守复核；周期同步的绝大多数
+    文件已经有一行 completed 缓存，且 base/latest/窗口内提交元数据/规则版本均未变化。
+    对这些行继续逐个查 Git 历史、读两版正文、生成 diff，最终只是在证明刚才所有输入
+    确实没变。1207 个文件的实测因此超过一小时，并把 AI 分析一直挡在同步门禁外。
+
+    缺失 base 也可以复用：仓库同步若后来拉到了更早历史，会先把那个提交写入 Commit 表，
+    调用方本轮的 `base_commit` 就不再是 None，自然与缓存的 NULL 不匹配。任何字段读不懂
+    都返回 False，走原来的完整重算；快路径只允许漏掉优化，不能漏掉变化。
+    """
+    if not existing_cache or existing_cache.cache_status != 'completed':
+        return False
+    if not (existing_cache.merged_diff_data or '').strip():
+        return False
+    if existing_cache.diff_version != diff_version:
+        return False
+    if existing_cache.header_profile_key != header_profile_key:
+        return False
+    if (existing_cache.base_commit_id or None) != (base_commit.commit_id if base_commit else None):
+        return False
+    if existing_cache.latest_commit_id != latest_commit.commit_id:
+        return False
+    if (existing_cache.commit_count or 0) != len(commits):
+        return False
+
+    def time_key(value):
+        """SQLite 会把 aware UTC 写回 naive；两种表示在本系统里是同一时刻。"""
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            parsed = datetime.fromisoformat(str(value))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed.isoformat()
+
+    expected = (
+        [commit.author for commit in commits],
+        [commit.message.strip() for commit in commits],
+        [time_key(commit.commit_time) for commit in commits],
+    )
+    try:
+        actual = (
+            json.loads(existing_cache.commit_authors or '[]'),
+            json.loads(existing_cache.commit_messages or '[]'),
+            [time_key(value) for value in json.loads(existing_cache.commit_times or '[]')],
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return actual == expected
 
 
 def annotate_same_instant_order(repository, commits):

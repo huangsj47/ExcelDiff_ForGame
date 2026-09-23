@@ -94,7 +94,7 @@ class FieldRule:
 
     label: str
     # int / optional_int / optional_money / bool / text / url / choice / price_table
-    # `optional_*` 两种是**可为空**的：空 = 不限制（预算那一栏），见 _coerce_optional_*。
+    # `optional_*` 两种是**可为空**的；解析成 None 后由读取侧决定使用安全默认或不限制。
     kind: str
     minimum: int | None = None
     maximum: int | None = None
@@ -137,9 +137,9 @@ FIELD_RULES: Mapping[str, FieldRule] = {
     # 而不是等到算费用时才发现——那时用户只看到「费用算不出来」，原因在几步之外。
     "model_price_table": FieldRule("模型单价表（JSON）", "price_table", max_length=20_000),
     "project_knowledge": FieldRule("项目补充知识", "text", max_length=20_000),
-    # --- 预算闸门。**空 = 不限制**，所以用 optional_* 两种 kind：它们收空串/NULL，
+    # --- 预算闸门。字段允许清空，所以用 optional_* 两种 kind：它们收空串/NULL，
     # 收成一个 `None`；用 kind="int" 的话「留空」会被判成「请填写一个整数」，
-    # 用户就没法表达「不限制」这个意思了。
+    # token 空值在读取侧回落到 100M/月，费用空值表示不按金额限制。
     "budget_period": FieldRule("预算周期", "choice", choices=BUDGET_PERIOD_CHOICES),
     "budget_token_limit": FieldRule(
         "周期内 token 上限", "optional_int", *BUDGET_TOKEN_LIMIT_RANGE
@@ -202,8 +202,7 @@ FIELD_DEFAULTS: Mapping[str, Any] = {
     "prompt_template": "",
     "project_knowledge": "",
     "model_price_table": "",
-    # 预算：`None` 是**有意义的取值**（不限制），不是「还没填」。界面据此留空输入框，
-    # 而不是显示一个 0。
+    # token 默认显示 100M/月安全额度；费用 None 表示不按金额限制。
     "budget_period": DEFAULT_BUDGET_PERIOD,
     "budget_token_limit": DEFAULT_BUDGET_TOKEN_LIMIT,
     "budget_cost_limit": DEFAULT_BUDGET_COST_LIMIT,
@@ -265,10 +264,10 @@ def _coerce_int(field_name: str, rule: FieldRule, raw: Any) -> int:
 
 
 def _coerce_optional_int(field_name: str, rule: FieldRule, raw: Any) -> int | None:
-    """可空整数上限。**空 = 不限制（`None`）**，非空则照 `_coerce_int` 那套范围校验。
+    """可空整数上限。空值先存为 `None`，非空则照 `_coerce_int` 校验。
 
-    刻意不把空串当成 0：0 会被预算闸门读成「一个 token 都不许花」，于是「没配预算」
-    与「不许花钱」变成同一件事 —— 而用户只是没填这一栏。
+    项目 token 的读取侧会把 `None` 解析为 100M/月；平台 token 的读取侧仍可解释为不限制。
+    刻意不把空串当成 0，因为 0 会把分析完全锁死。
     """
     if raw is None or (not isinstance(raw, bool) and str(raw).strip() == ""):
         return None

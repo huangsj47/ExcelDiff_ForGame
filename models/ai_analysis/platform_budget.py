@@ -16,11 +16,10 @@
 塞进 `key/value` 之后，校验、默认值、NULL 语义全都要在读取侧重新实现一遍，而那正是
 「同一个规则写两份、然后漂移」的老路。
 
-## 未配置 = 不限制（与项目档同一条口径）
+## 未配置 = 不限制
 
-三列都可为 NULL，NULL 的语义是「没有这一档上限」，**不是 0**。理由与
-`models/ai_analysis/project_config.py` 里那段注释完全一样（0 会把分析整个锁死），
-所以这里连读取用的辅助函数都直接复用那边的，不另写一份：
+平台预算由管理员显式配置；两列为 NULL 时平台档不限制。项目自身仍有 100M/月的
+安全默认，因此普通用户忘记配置时不会无限累计。0 仍是非法配置。
 
 * `_optional_int` / `_optional_money` / `_budget_period_or_default`。
 
@@ -34,7 +33,7 @@ from .. import db
 from .project_config import (
     DEFAULT_BUDGET_COST_LIMIT,
     DEFAULT_BUDGET_PERIOD,
-    DEFAULT_BUDGET_TOKEN_LIMIT,
+    DEFAULT_PLATFORM_BUDGET_TOKEN_LIMIT,
     _budget_period_or_default,
     _optional_int,
     _optional_money,
@@ -53,7 +52,7 @@ class AiPlatformBudget(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     # 与项目档同一个枚举（`budget_period` 三选一），默认同样是「本月」。
     period = db.Column(db.String(20), default=DEFAULT_BUDGET_PERIOD)
-    # NULL = 不限制。见模块 docstring。
+    # NULL = 平台档不限制。见模块 docstring。
     token_limit = db.Column(db.BigInteger)
     cost_limit = db.Column(db.String(40))
 
@@ -66,7 +65,7 @@ class AiPlatformBudget(db.Model):
     )
 
     def resolved(self) -> dict:
-        """读成「实际生效的配置」：NULL 一律补成「不限制」。
+        """读成「实际生效的配置」：平台档 NULL 表示不限制。
 
         与 `AiProjectAnalysisConfig.resolved()` 同一口径。`configured` 是给界面用的：
         「没配过」与「配了但不限制」在数据上难以区分（都是两列 NULL），而在界面上必须
@@ -74,7 +73,9 @@ class AiPlatformBudget(db.Model):
         """
         return {
             "period": _budget_period_or_default(self.period),
-            "token_limit": _optional_int(self.token_limit),
+            "token_limit": (
+                _optional_int(self.token_limit) or DEFAULT_PLATFORM_BUDGET_TOKEN_LIMIT
+            ),
             "cost_limit": _optional_money(self.cost_limit),
             "configured": (
                 _optional_int(self.token_limit) is not None
@@ -88,6 +89,6 @@ class AiPlatformBudget(db.Model):
 # 未配置时的默认值（与列默认值同源，界面回填与校验都用这两个）。
 PLATFORM_BUDGET_DEFAULTS = {
     "period": DEFAULT_BUDGET_PERIOD,
-    "token_limit": DEFAULT_BUDGET_TOKEN_LIMIT,
+    "token_limit": DEFAULT_PLATFORM_BUDGET_TOKEN_LIMIT,
     "cost_limit": DEFAULT_BUDGET_COST_LIMIT,
 }

@@ -15,9 +15,8 @@
 
 ## 三条纪律
 
-1. **未配置 = 不限制。** 读不到上限（NULL）就是「没有上限」，既不回落到 0
-   （那会把功能整个锁死：0 表示「一个 token 都不许花」），也不回落到任何拍脑袋的
-   默认值。`AiProjectAnalysisConfig.resolved()` 把 NULL 读成 `None`，这里据此判定。
+1. **项目 token 未配置 = 安全默认。** 项目档默认 100M/月，防止定时分析在忘记配置预算时
+   长期累计；平台档由管理员显式配置，费用上限仍允许为空。
 2. **算不出就不拦。** 上游没报 token、价格表算不出费用、配置读不出来、数据库报错 ——
    这些情况下**一律放行**，并把原因写进 `notes`。宁可放过一次超预算的分析，也不能
    因为算不出费用就把 AI 分析功能整个锁死；后者的表现是「所有项目突然都不能分析了，
@@ -42,6 +41,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from models.ai_analysis import AiAnalysisRun
+from models.ai_analysis.project_config import DEFAULT_BUDGET_TOKEN_LIMIT
 from services.ai.pricing import (
     DEFAULT_CURRENCY,
     amount_exact,
@@ -411,6 +411,11 @@ def _project_scope(project_id: int) -> dict[str, Any]:
     cost_limit = _decimal_or_none(config.get("budget_cost_limit"))
     label = period_label(period)
 
+    # `get_project_analysis_config()` 正常会返回 resolved 后的 100M/月默认值；这里再兜一层，
+    # 防止测试替身、旧调用方或异常迁移行直接给出 NULL，重新把「忘记配置」变成无限累计。
+    if token_limit is None:
+        token_limit = DEFAULT_BUDGET_TOKEN_LIMIT
+
     if token_limit is None and cost_limit is None:
         status = _unlimited("", period=period, period_label=label)
         status["checked"] = True
@@ -710,7 +715,7 @@ def budget_status(project_id: int, *, platform: dict[str, Any] | None = None) ->
 
     返回体的关键字段（界面与闸门都读这几个）：
 
-    * `limited`：配了至少一个上限（项目档**或**平台档）。未配置 = 不限制。
+    * `limited`：至少一个上限生效（项目档未显式配置时仍有 100M/月 token 安全默认）。
     * `over`：**确定**已经超了（任意一档，判据见模块 docstring 第 2、3 条）。
     * `used` / `limits`：**项目档**的已用量与上限（token 是整数，金额是十进制字符串）。
     * `platform`：平台档的同一套字段（`used` / `limits` / `over` / `period_label` / ...）。
