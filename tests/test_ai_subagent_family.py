@@ -115,7 +115,7 @@ class TestTheFamilyProducesOneResult:
 
         # 2 个成员 + 1 次汇总，各一轮
         assert len(result.outcome.rounds) == 3
-        assert [item.agent for item in result.outcome.rounds] == ["S1", "S2", ""]
+        assert [item.agent for item in result.outcome.rounds] == ["S1", "S2", "汇总"]
         assert [item.agent_round for item in result.outcome.rounds] == [1, 1, 1], (
             "每个成员内部的轮次都从 1 开始（界面显示「S1 · 第 1/4 轮」用它）"
         )

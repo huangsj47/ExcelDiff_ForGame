@@ -80,6 +80,7 @@ from services.ai.family_ledger import (  # noqa: F401 —— 本模块与测试�
     ROLE_SUBAGENT,
     ROLE_SYNTHESIS,
     ROLE_VERIFY,
+    SYNTHESIS_LABEL,
     VERIFY_LABEL,
     Candidate,
     EvidenceRef,
@@ -372,7 +373,9 @@ def plan_family(
     )
     synthesis = MemberPlan(
         index=len(members) + 1,
-        label="",
+        # 显式给名字（见 `family_ledger.SYNTHESIS_LABEL`）：空串会让 trace、面板与几处
+        # 日志渲染出病句，而且实时进度只能靠位次去猜「这一段是不是汇总」。
+        label=SYNTHESIS_LABEL,
         role=ROLE_SYNTHESIS,
         # 汇总那一次的「维度」是全部：它要保证清单上的每个维度都有人答过，而不是只管自己
         # 那几组。
@@ -1315,11 +1318,15 @@ def aggregate_outcomes(
     verify_text = "".join(
         verify_section(step) for step in steps if step.plan.role == ROLE_VERIFY
     )
-    # 「复核标注」是平台对结论说的话，**跟在草稿后面**（2026-09-23 起）：草稿是正文主体
-    # （用户要读的是模型写的整体汇总报告，AI-P1-01 时期「裁决节取代正文」的形态用户实测后
-    # 明确不要），标注节只点名被改判的条目（标题 + 等级变化 + 理由），读者不需要猜哪句失效
-    # —— 落库的异常表 / 下一轮基线 / `final_findings` 仍然只认 `reduce_findings` 那一份，
-    # 「单一结论清单」的关切由落库层承担，呈现层不重复造第二份清单。
+    # 「复核标注」是平台对结论说的话，**排在正文之前**（2026-09-24 起，run 57）：
+    # 读者先看到的是正文里那些**未经复核**的断言，读到尾部才知道「复核只覆盖 3 条」——
+    # 实测那一轮正文写着 20 条结论、只裁了 3 条，正文的高严重度陈述与尾部的「待人工核验」
+    # 互相矛盾。前置 + 开头写明覆盖数，这条矛盾第一眼就能看见。
+    #
+    # **模型原文一个字都不改**（顺序变了，内容没变）——AI-P1-01 时期「裁决节取代正文」的
+    # 形态用户实测后明确不要，所以草稿仍是正文主体，标注只点名被改判的条目（标题 + 等级
+    # 变化 + 理由）。落库的异常表 / 下一轮基线 / `final_findings` 仍然只认 `reduce_findings`
+    # 那一份，「单一结论清单」的关切由落库层承担，呈现层不重复造第二份清单。
     ruling_text = render_ruling(reduction, review_ran=_verify_ran(steps))
     # 「未归类」也排在信息缺口之前：它对读者同样是**结论的一部分**（有几条发现不属于
     # 任何维度），而信息缺口永远收尾。
@@ -1352,13 +1359,13 @@ def aggregate_outcomes(
     draft_markdown = ""
     if synthesis.status != STATUS_FAILED:
         if ruling_text:
-            # 有裁决 = 平台对结论说了话。**草稿仍然是正文主体**，复核标注与平台那几节
-            # 排在它后面（次序：模型草稿 → 复核标注 → 未归类 / 条数上限 / 信息缺口）。
+            # 有裁决 = 平台对结论说了话，而**读者要先知道复核覆盖了多少条**：
+            # 次序是 复核标注 → 模型草稿 → 未归类 / 条数上限 / 信息缺口。
             # 草稿里可能整段写着裁决之前的等级（如「critical，仍成立」），标注节逐条点名
             # 了被改判的结论并写明「原 X → 新 Y」，读者对着读即可，不需要平台替他删改
             # 模型的原文 —— 被改判后的**规范值**在落库异常表与 `final_findings` 里，
             # 报告呈现不承担那份口径。
-            report = _assemble_report(report_source, (ruling_text, *platform_sections))
+            report = _assemble_report(ruling_text, (report_source, *platform_sections))
             draft_markdown = report_source
         elif platform_sections:
             # 没有裁决节：草稿就是正文里**唯一那份结论**，平台那几节接在它后面
@@ -1523,7 +1530,7 @@ def _member_block(step: MemberOutcome) -> dict[str, Any]:
     """一个成员在 `response_payload["subagents"]` 里的一行。**纯数据**（JSON 安全）。"""
     outcome = step.outcome
     return {
-        "label": step.plan.label or "汇总",
+        "label": step.plan.label or SYNTHESIS_LABEL,
         "role": step.plan.role,
         "index": step.plan.index,
         "dimensions": list(step.plan.dimensions),

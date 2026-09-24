@@ -145,7 +145,7 @@ def test_the_family_runs_and_persists_as_one_run(monkeypatch):
             .order_by(AiAnalysisTrace.round_index.asc())
             .all()
         )
-        assert [row.agent for row in traces] == ["S1", "S2", None]
+        assert [row.agent for row in traces] == ["S1", "S2", "汇总"]
         assert [row.round_index for row in traces] == [1, 2, 3]
 
         payload = json.loads(run.response_payload)
@@ -306,7 +306,7 @@ def test_the_verify_round_runs_and_lands_on_the_same_run(monkeypatch):
             .order_by(AiAnalysisTrace.round_index.asc())
             .all()
         )
-        assert [row.agent for row in traces] == ["S1", "S2", None, "V1"]
+        assert [row.agent for row in traces] == ["S1", "S2", "汇总", "V1"]
         assert [row.round_index for row in traces] == [1, 2, 3, 4]
         # 「对账轮落在**同一条** run 上」是这一条要保的不变量（`uq_ai_trace_run_round` 靠
         # 家族内全局递增的 `round_index` 撑住）—— 上面那个查询按 `run_id=run.id` 过滤，
@@ -399,14 +399,15 @@ def test_the_main_agent_announces_itself_before_it_starts(monkeypatch):
         "少了就等于某个成员在跑的时候界面还挂着上一个的名字"
     )
 
-    # 汇总那一次的开始帧：`agent` 空、位次等于总数 —— 与 subagent/ai_stream_status
-    # 两处共同的判定口径一致（界面据此念「汇总」）。
+    # 汇总那一次的开始帧：`agent` 就是「汇总」（服务端显式给的标签），位次等于总数。
     synthesis_start = starts[-1]
-    assert synthesis_start.agent == "", f"汇总的开始帧带了分片名：{synthesis_start.agent}"
+    assert synthesis_start.agent == "汇总", (
+        f"汇总的开始帧没有名字：{synthesis_start.agent}"
+    )
     assert synthesis_start.agent_index == synthesis_start.agent_total == 3
 
     # 而且它必须在**汇总那一次的第一个模型调用之前**发 —— 排在分片的帧后面。
     labels = [(p.agent, p.index) for p in published]
-    assert labels.index(("", 0)) > labels.index(("S2", 1)), (
+    assert labels.index(("汇总", 0)) > labels.index(("S2", 1)), (
         f"汇总的开始帧没有排在最后一个分片之后：{labels}"
     )

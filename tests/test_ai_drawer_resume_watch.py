@@ -467,13 +467,13 @@ def test_the_rounds_are_labelled_and_ordered_by_the_family_rule(resume):
         heads = _entry(resume, path)["afterFirstTick"]["cards"]
 
         assert heads[0].startswith("分片 S5 (5/7) · 第 8/23 轮"), heads
-        assert heads[1].startswith("分片 主代理 (6/7) · 第 1/23 轮"), (
+        assert heads[1].startswith("主代理 (6/7) · 第 1/23 轮"), (
             f"[{path}] 汇总那一轮没有分片标签（或位次不对）：{heads[1]!r} —— 它就是"
             "「第 8 轮下面写着第 1 轮」那一幕"
         )
-        assert heads[4].startswith("分片 主代理 (6/7) · 第 4/23 轮"), heads
-        assert heads[5].startswith("分片 V1 (7/7) · 第 1/23 轮"), heads
-        assert heads[7].startswith("分片 V1 (7/7) · 第 3/23 轮"), heads
+        assert heads[4].startswith("主代理 (6/7) · 第 4/23 轮"), heads
+        assert heads[5].startswith("V1 (7/7) · 第 1/23 轮"), heads
+        assert heads[7].startswith("V1 (7/7) · 第 3/23 轮"), heads
         # 家族顺序：位次单调不减，同一个成员内轮次严格递增。
         positions = [head.split(" (")[1].split("/")[0] for head in heads]
         assert positions == sorted(positions), f"[{path}] 成员位次不是单调递增的：{positions}"

@@ -1360,8 +1360,15 @@ _NO_CHANGE_SECTION = (
 
 
 def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
-    """把复核结果渲染成跟在汇总正文后的「复核标注」一节。**从 `final_findings` 渲染，不是
-    模型写的正文。**
+    """把复核结果渲染成**排在正文之前**的「复核标注」一节。**从 `final_findings` 渲染，
+    不是模型写的正文。**
+
+    ## 为什么在前（2026-09-24，run 57）
+
+    原先它跟在正文后面。读者先读到的是**未经复核的断言**，读到尾部才知道「复核只覆盖
+    3 条、其余待人工核验」—— 实测那一轮的报告正文写着 20 条结论、只有 3 条被裁决，
+    而正文里那几条高严重度陈述与尾部的状态说明是矛盾的。放在前面 + 明写覆盖数，
+    这条矛盾在第一眼就能看见；模型原文仍然一个字都不改（顺序变了，内容没变）。
 
     `review_ran` 为假（没开对账轮 / 它没跑成）时一个字都不渲染：没有复核就没有裁决，
     报告不该为此多出一节。开头口径说明**不许膨胀回三大段**（2026-09-23 起）：正文主体是
@@ -1373,19 +1380,23 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
     if not reduction.changed:
         return _NO_CHANGE_SECTION
 
+    total_rows = len(reduction.rows)
+    reviewed = total_rows - len(reduction.unreviewed)
+    # **覆盖数写在最前面**：这一节现在排在报告正文**之前**（2026-09-24 起，见
+    # `subagent._assemble_report` 的调用点），读者第一眼要知道的是「下面那些结论里
+    # 有多少条被核过」——run 57 的病正是正文写着 20 条结论、尾部才说「待人工核验」，
+    # 而读者先看到、也更容易相信的是正文。
     lines: list[str] = [
         RULING_TITLE,
         "",
-        "对账轮（找反证）的裁决已经应用到上面的汇总结论与落库异常清单上（保留 / 降级 / "
-        "撤销 / 转人工核验）；下面**只标注有变化的条目**，未点名的按原样采信。",
+        f"本次复核**只覆盖 {reviewed} 条**（主结论共 {total_rows} 条），"
+        f"**其余 {total_rows - reviewed} 条未经复核** —— 它们在下面的正文里按模型原话"
+        "保留，等级与置信度都还是模型自己填的。",
+        "",
+        "对账轮（找反证）的裁决已经应用到落库的异常清单与最终结论上（保留 / 降级 / "
+        "撤销 / 转人工核验）；这一节**只标注有变化的条目**，未点名的按原样采信。",
         "",
     ]
-    reviewed = len(reduction.rows) - len(reduction.unreviewed)
-    lines.append(
-        f"本次复核覆盖：主结论 {len(reduction.rows)} 条里给出裁决 {reviewed} 条"
-        f"（对账轮只核对最严重的几条，其余按原样采信）。"
-    )
-    lines.append("")
     if not reduction.verdicts_seen:
         # 有影响但**一条裁决都没读到**：可能是它只报了新发现、也可能是它把裁决写成了
         # 正文里的一段话（那不是裁决）。这两种情况下「结论为什么没动」都得说明白，

@@ -1226,7 +1226,7 @@ class TestTheSubagentProgressLine:
     def test_the_synthesis_is_called_what_it_is(self):
         text = _run_node()["progressText"][10]
 
-        assert "分片 汇总 (4/4)" in text, text
+        assert "汇总 (4/4)" in text, text
         assert "tokens" not in text, "用量没上报时不许补一个 0"
 
     def test_without_slices_the_line_is_unchanged(self):
@@ -1383,7 +1383,7 @@ def test_the_start_frame_still_names_who_is_running():
     """
     lines = _run_node()["progressText"]
 
-    assert lines[12] == "分析中：分片 汇总 (4/4) · 正在调用模型（第一轮还没跑完）", lines[12]
+    assert lines[12] == "分析中：汇总 (4/4) · 正在调用模型（第一轮还没跑完）", lines[12]
     assert lines[13] == "分析中：分片 S2 (2/3) · 正在调用模型（第一轮还没跑完）", lines[13]
 
 

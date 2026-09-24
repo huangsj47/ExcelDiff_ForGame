@@ -611,7 +611,7 @@ def test_the_line_reads_the_job_total_not_the_shard_local_amount():
     line = _run_node()["lines"][0]
 
     assert "本次分析已用 1008491 tokens" in line, line
-    assert line.startswith("分析中：分片 汇总 (4/4) · 第 2/8 轮 · "), line
+    assert line.startswith("分析中：汇总 (4/4) · 第 2/8 轮 · "), line
     assert "其中本分片 34960" in line, line
     assert "尚未落库" in line, line
 

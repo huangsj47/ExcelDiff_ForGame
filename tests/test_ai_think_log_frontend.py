@@ -1073,7 +1073,7 @@ def test_the_live_list_is_painted_in_the_family_order(run):
 
     assert len(heads) == 4, heads
     assert [head.split(" · ")[0] for head in heads] == [
-        "分片 S5 (5/7)", "分片 S5 (5/7)", "分片 主代理 (6/7)", "分片 V1 (7/7)",
+        "分片 S5 (5/7)", "分片 S5 (5/7)", "主代理 (6/7)", "V1 (7/7)",
     ], f"没有按家族顺序画：{heads}"
     assert "第 7/23 轮" in heads[0] and "第 8/23 轮" in heads[1], heads
 
@@ -1089,7 +1089,7 @@ def test_the_main_agent_rounds_carry_their_family_position(run):
     """
     heads = _card_heads(_by_name(run)["家族顺序"]["snaps"][-1])
 
-    assert heads[2].startswith("分片 主代理 (6/7) · 第 1/23 轮"), (
+    assert heads[2].startswith("主代理 (6/7) · 第 1/23 轮"), (
         f"汇总那几轮没有带上「是哪个成员」：{heads[2]!r} —— 它就是「第 8 轮下面写着"
         "第 1 轮」那一幕"
     )
