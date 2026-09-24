@@ -297,8 +297,10 @@
         //
         // 印的是 `heading`（服务端拼好的「状态词 + 断言正文」）而不是
         // `status_label + ' —— ' + display`：`display` 自己就带着状态前缀（「待核查：…」），
-        // 两个一起印会变成「待核查 —— 待核查：…」（2026-09-24 修）。老载荷没有 `heading`
-        // 时回落到 `display`（它至少是完整的一句话）。
+        // 两个一起印会变成「待核查 —— 待核查：…」（2026-09-24 修）。
+        //
+        // 老载荷没有 `heading`（这一天之前写下的行）：回落到 `display`；已证实的那一条
+        // `display` 是**裸正文**，直接印看不出「核过了没有」—— 那一档补上状态词。
         //
         // 待核查的排在最前（服务端已经排好了次序）：这一段的用途是让人一眼看到
         // 「哪几条还没立住」，而不是从头读一遍。
@@ -307,7 +309,14 @@
             var claimsList = doc().createElement('ul');
             claimsList.className = 'ai-anomaly-claims';
             claims.forEach(function (claim) {
-                var heading = claim && (claim.heading || claim.display);
+                if (!claim) return;
+                var heading = claim.heading || '';
+                if (!heading) {
+                    heading = claim.display || claim.statement || '';
+                    if (String(claim.status || '') === 'verified' && heading) {
+                        heading = (claim.status_label || '已证实') + '：' + heading;
+                    }
+                }
                 if (!heading) return;
                 var li = doc().createElement('li');
                 li.className = 'ai-anomaly-claim ai-anomaly-claim-'
@@ -317,10 +326,6 @@
                     + (claim.checked_scope ? '（查过：' + claim.checked_scope + '）' : '');
                 claimsList.appendChild(li);
             });
-            // 用 `children` 而不是 `childNodes`：本文件其余的地方（以及跑它的那几个
-            // 用例里的假 DOM）都按元素子节点算，而这一行是**唯一**读 `childNodes` 的
-            // —— 一条都没有 claims 的行时它不会被走到，所以这个不一致一直没暴露
-            // （2026-09-24 给面板补 claims 用例时才撞上）。
             if (claimsList.children.length) item.appendChild(claimsList);
         }
         if (row.impact) addLine(item, 'ai-anomaly-item-impact', '影响：' + row.impact);

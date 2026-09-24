@@ -669,6 +669,25 @@ class TestTheExportReadsTheSameAdjudicatedClaims:
         rows = anomaly_rows([{"title": "老的一条", "severity": "high", "confidence": "high"}])
         assert rows[0]["claims"] == []
 
+    def test_an_old_payload_without_heading_still_shows_the_status(self):
+        """2026-09-24 之前写下的载荷没有 `heading`（库里那些行也一样）。
+
+        回落到 `display` 是对的，但**已证实**那一档的 `display` 是裸正文（标题安全的那
+        一份）—— 直接印就看不出「核过了没有」。所以那一档补上状态词；`narrowed` 的
+        `display` 自带「已检查范围内未发现」，不动它。
+        """
+        from services.ai.report_document import _claim_text
+
+        old = [
+            {"claim_id": "C1", "status": "verified", "status_label": "已证实",
+             "display": "客户端提示被删除。"},
+            {"claim_id": "C2", "status": "unverified", "status_label": "待核查", "narrowed": True,
+             "display": "已检查范围内未发现：整个项目没有迁移兼容读取"},
+        ]
+
+        assert _claim_text(old[0]) == "`C1` 已证实：客户端提示被删除。"
+        assert _claim_text(old[1]) == "`C2` 已检查范围内未发现：整个项目没有迁移兼容读取"
+
 
 class TestTheStatusWordIsPrintedOnce:
     """三个渲染点印的都是服务端拼好的 `heading`：**状态词只说一次**（2026-09-24，run 63）。

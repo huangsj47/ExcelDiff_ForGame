@@ -47,6 +47,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from utils.timezone_utils import format_beijing_time
 
 from services.ai import skill_contract
+from services.ai.claims import CLAIM_VERIFIED
 from services.ai.skill_contract import DEFAULT_DIMENSION_SPECS, dimension_labels_of
 
 # ---------------------------------------------------------------------------
@@ -582,11 +583,20 @@ def _claim_text(claim: Any) -> str:
 
     `heading` 是服务端算好的「状态词 + 断言正文」（三者只印一次；从前这里是
     `status_label + " —— " + display`，而 `display` 本来带状态前缀，于是印成
-    「证据读不到 —— 证据读不到：…」）。老载荷没有 `heading` 时回落到 `display`。
+    「证据读不到 —— 证据读不到：…」）。
+
+    **老载荷没有 `heading`**（2026-09-24 之前写下的那些）：回落到 `display`；但已证实的
+    那一条 `display` 是**裸正文**（它是标题安全的那一份），直接印会看不出「核过了没有」
+    —— 那一档补上状态词。`narrowed` 的 `display` 自带「已检查范围内未发现」，不动它。
     """
     if not isinstance(claim, Mapping):
         return ""
-    heading = str(claim.get("heading") or claim.get("display") or "").strip()
+    heading = str(claim.get("heading") or "").strip()
+    if not heading:
+        display = str(claim.get("display") or claim.get("statement") or "").strip()
+        if str(claim.get("status") or "") == CLAIM_VERIFIED and display:
+            display = f"{str(claim.get('status_label') or '已证实').strip()}：{display}"
+        heading = display
     if not heading:
         return ""
     parts = [f"`{str(claim.get('claim_id') or '').strip()}`", heading]
