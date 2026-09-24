@@ -54,6 +54,12 @@ class AiAnalysisAnomaly(db.Model):
     file_path = db.Column(db.String(500))
     impact = db.Column(BigText)
     suggestion = db.Column(BigText)
+    # 这条结论的**原子断言**与各自的裁决结果（P0-01，JSON 数组文本，与 `evidence` 同一存法）。
+    #
+    # 为什么必须落库：`claims` 不是运行期的中间产物，而是「这条结论凭什么算核实过了」的
+    # 答案 —— 下一轮的基线、冻结结论的重放、导出文档、异常面板都要读它。不存的话，
+    # 「哪一条断言没被证实」只活在这一次运行的报告文字里，任何一次回看都只能重读那段话。
+    claims = db.Column(BigText)
 
     disposition = db.Column(db.String(20), default=DEFAULT_DISPOSITION, index=True)
     disposition_by = db.Column(db.String(100))
@@ -104,6 +110,14 @@ class AiAnalysisAnomaly(db.Model):
             evidence = []
         if not isinstance(evidence, list):
             evidence = []
+        # 断言清单与证据同一套读法（存的是 JSON 文本，出成数组；坏掉回空的 `[]`，
+        # 不让一条存坏的字段把整次读取打成 500）。
+        try:
+            claims = json.loads(self.claims) if self.claims else []
+        except (TypeError, ValueError):
+            claims = []
+        if not isinstance(claims, list):
+            claims = []
         from services.ai.report_document import (
             beijing_display,
             confidence_label,
@@ -123,6 +137,9 @@ class AiAnalysisAnomaly(db.Model):
             "confidence": self.confidence,
             "confidence_label": confidence_label(self.confidence),
             "evidence": evidence,
+            # 逐条原子断言与各自的裁决（P0-01）。每一条自己带着 `status` / `status_label`
+            # 与平台改写后的 `display` —— 中文口径在服务端算，界面不自己映射（同本文档）。
+            "claims": claims,
             "commit_ref": self.commit_ref,
             "file_path": self.file_path,
             "impact": self.impact,

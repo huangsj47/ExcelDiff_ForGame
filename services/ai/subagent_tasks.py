@@ -74,6 +74,16 @@ MAX_VERIFY_REQUESTS = 12
 # 对账轮预留的轮次：一次找反证 + 一次按地址补读。
 VERIFY_ROUNDS_RESERVE = 2
 
+#: 断言类型的**中文说法**（给复核轮看的那一份）。与 `protocol.CLAIM_KINDS` 一一对应 ——
+#: 把 `negative_scope` 这种标识符直接印给模型，它会当成又一个要照抄的字符串，而不是
+#: 一个「这类断言要查范围」的提示；而**哪一类要查范围**正是这一段话的全部目的。
+_CLAIM_KIND_LABELS = {
+    "fact": "正向事实",
+    "negative_scope": "否定性范围声明：查过的范围必须覆盖它声称的范围",
+    "inference": "推断：要机制证据，不是「我觉得会」",
+}
+
+
 def _percent_of(total: int, percent: int) -> int:
     """`total` 的 `percent`%，**向上取整**。
 
@@ -849,6 +859,19 @@ def build_verify_task(
                 lines.append(f"- 位置：{anomaly.file_path}")
             if anomaly.impact:
                 lines.append(f"- 它说会造成：{truncate_text(anomaly.impact, CANDIDATE_TEXT_MAX_CHARS)[0]}")
+            # 断言清单（P0-01）：一条结论常常是**复合断言**，逐条回答才让「哪一半没核实」
+            # 有地方安放。不给这份清单，复核只能整条回答，而实测就是那么出错的 ——
+            # run 58 的 F3 标题断言「断言中断进程」，复核在理由里承认没核实，整条仍被
+            # 标成 confirmed。
+            if anomaly.claims:
+                lines.append(
+                    "- **它的断言（逐条回答，编号照抄）**："
+                    + "；".join(
+                        f"`{claim.claim_id}`（{_CLAIM_KIND_LABELS.get(claim.kind, claim.kind)}）"
+                        f"{truncate_text(claim.statement, CANDIDATE_TEXT_MAX_CHARS)[0]}"
+                        for claim in anomaly.claims
+                    )
+                )
             refs = evidence_refs_for(evidence_index or {}, anomaly.file_path)
             if refs:
                 # 找反证要读的正是**那份正文**。原先这里贴的是结论自己的复述（模型写的话），

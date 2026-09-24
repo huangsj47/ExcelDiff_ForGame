@@ -46,6 +46,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
+from services.ai.claims import (  # noqa: F401 —— Claim 在本模块重新导出（既有导入点按 protocol 走）
+    CLAIM_KINDS,
+    CLAIM_SOURCE_LAYERS,
+    Claim,
+    _as_evidence,
+    _as_str,
+    parse_claims,
+)
 from services.ai.reference_search import MIN_QUERY_CHARS, normalize_query
 from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_contract import (
@@ -210,6 +218,16 @@ class Anomaly:
     #
     # 单代理路径永远是空的：没有分片，也就没有候选编号可言。
     source_candidate_ids: tuple[str, ...] = ()
+    # 这条结论**由哪些可以逐项核实的原子断言组成**（P0-01，见 `Claim`）。
+    #
+    # 空元组 = 模型没给（旧形态 / 没按协议写）。**平台不因此丢弃这条结论**，但也
+    # **不再把它当作可以「已核实」的整体** —— 无法逐项裁决的复合断言正是
+    # 「未核实却 confirmed」的成因（run 58 的 F3：标题断言「断言中断进程」，
+    # 复核轮自己在理由里承认这一点没核实，整条却仍是 confirmed）。
+    claims: tuple["Claim", ...] = ()
+
+
+
 
 
 # 候选编号两侧可能附带的装饰符（模型爱写 `[S1-2]`、`S1-2、`、`（S1-2）`）。剥掉它们
@@ -267,10 +285,13 @@ class DroppedItem:
 
     `kind` 的取值为 `anomaly` / `dimension` / `request` / `subagent` / `deferred` /
     `unclassified` / `mid_round_field` / `reason` / `reason_code` / `shared_cache` /
-    `evidence`。`unclassified` 那一条与其他几种**不是一回事**：那条发现**没有被丢掉**（它在
+    `evidence` / `claim`。`unclassified` 那一条与其他几种**不是一回事**：那条发现**没有被丢掉**（它在
     `payload.anomalies` 里，报告里也列着），这里只是把「为什么它的维度显示成未归类」
     记下来。它借用这一个结构是因为 trace 是平台里唯一一条按条目把记录带到面板上的
     通道（`result_payload` 的 `dropped` → `trace_evidence.summarize_dropped`）。
+
+    `claim` 也是**不是一回事**的那一类：丢的是**一条原子断言**（缺正文、类型认不出来），
+    不是那条结论 —— 结论照旧留下，只是它因此不能算「已核实」（见 `verdict`）。
 
     `deferred` 与 `subagent` 同样要分开：前者是汇总**主动**把候选标成待复核（有理由、
     报告里另有一节），后者才是「汇总一声不响地丢了某条发现」的真缺口 —— `subagent.py`
@@ -354,28 +375,6 @@ def parse_json_candidates(text: str) -> list[Any]:
             continue
         parsed.append(value)
     return parsed
-
-
-def _as_str(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, (int, float, bool)):
-        return str(value)
-    return ""
-
-
-def _as_evidence(value: Any) -> tuple[str, ...]:
-    if isinstance(value, str):
-        text = value.strip()
-        return (text,) if text else ()
-    if isinstance(value, list):
-        items = tuple(
-            item.strip() for item in (_as_str(entry) for entry in value) if item
-        )
-        return items
-    return ()
 
 
 def _coerce_requests(value: Any) -> tuple[ContextRequest, ...]:
@@ -477,6 +476,16 @@ def _coerce_anomalies(
             dropped.append(DroppedItem("anomaly", index, "evidence 为空"))
             continue
 
+        # 原子断言（P0-01）。**解析失败不丢整条结论**：断言是「这条结论怎么被核实」的
+        # 依据，缺了它这条结论仍然是一条结论（只是不能算 confirmed，见 `verdict`）。
+        # 解析与判据都在 `services/ai/claims.py`（那里是它的第二个读者所在层），
+        # 这里只把它的记账包成平台统一的 `DroppedItem`。
+        claims, claim_drops = parse_claims(entry.get("claims"), index)
+        dropped.extend(
+            DroppedItem("claim", item.index, item.reason, item.detail)
+            for item in claim_drops
+        )
+
         # 这一条**留下来了**，只是没有归属（或归属不在清单内）—— 记账在这里写，
         # 上面那个「未丢弃」的说法才不会是假的。
         if not category:
@@ -508,6 +517,7 @@ def _coerce_anomalies(
                 # 「这条候选有没有去向」。解析不做任何合法性判断（编号集合是
                 # `family_ledger` 那边的事），只负责把形状读成一组字符串。
                 source_candidate_ids=_as_candidate_ids(entry.get("source_candidate_ids")),
+                claims=claims,
             )
         )
     return tuple(kept), tuple(dropped)
@@ -822,6 +832,9 @@ def ground_payload(payload: AnalysisPayload, scope: AnalysisScope) -> AnalysisPa
                 # 血缘原样带过去：这一层校验的是 commit / file_path 是否真实，
                 # 与「这条结论来源于哪几条候选」无关（漏传等于把血缘静默丢掉）。
                 source_candidate_ids=anomaly.source_candidate_ids,
+                # 同理：断言这一层一个字都不校验，漏传等于把「这条结论由什么组成」
+                # 静默丢掉 —— 而复核轮与渲染都按它工作。
+                claims=anomaly.claims,
             )
         )
 

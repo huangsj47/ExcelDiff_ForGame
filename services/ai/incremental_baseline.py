@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from difflib import SequenceMatcher
-from typing import Iterable, Mapping
+from typing import Any, Iterable, Mapping
 
 from services.ai.scope import normalize_path
 
@@ -63,7 +63,30 @@ def _historical_anomaly(row: Mapping, state: str, previous_run_id: int) -> dict:
         "evidence_capped": False,
         "original_severity": str(row.get("severity") or "high"),
         "original_confidence": str(row.get("confidence") or "high"),
+        # 历史结论的断言清单：上一轮存下来的那一份**原样带回**（它在库里就是 JSON 文本）。
+        # 不带的话，这条结论的 `claims` 会在「这一轮没有被模型重新报到」之后消失 ——
+        # 而它恰恰是「这条结论当时凭什么算核实过了」的唯一记录。
+        # 逐条断言的**裁决**不带：那是上一轮的复核结论，这一轮没核过它（`verify_basis`
+        # 保持空 = 未取证），拿上一轮的状态冒充这一轮的核实结果是另一回事。
+        "claims": _claims(row.get("claims")),
+        "pending_claims": 0,
+        "original_title": str(row.get("title") or "（无标题）"),
+        "verify_basis": "",
+        "verify_basis_label": "",
     }
+
+
+def _claims(raw: Any) -> list:
+    """历史行里的 `claims`（JSON 文本）读成数组。坏数据回空数组，不抛。"""
+    if isinstance(raw, list):
+        return [dict(item) for item in raw if isinstance(item, dict)]
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return []
+    return [dict(item) for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
 
 
 def _final_row(item: Mapping) -> dict:
@@ -89,6 +112,12 @@ def _final_row(item: Mapping) -> dict:
         "confidence": item["confidence"],
         "original_severity": item["severity"],
         "original_confidence": item["confidence"],
+        # 与 `_historical_anomaly` 同一份（键一个不少，读侧不必分支）。
+        "claims": item.get("claims") or [],
+        "pending_claims": 0,
+        "original_title": item.get("title") or "",
+        "verify_basis": "",
+        "verify_basis_label": "",
         "baseline_state": item["baseline_state"],
         "baseline_run_id": item["baseline_run_id"],
     }

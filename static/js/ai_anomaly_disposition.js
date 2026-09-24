@@ -291,6 +291,28 @@
             });
             item.appendChild(list);
         }
+        // **逐条断言与各自的裁决**（P0-01）。它是这一条「凭什么算核实过了」的答案，
+        // 而上面那个标题只是模型的概括。文案全部来自服务端（`display` / `status_label`
+        // / `checked_scope` 都是算好的）—— 这里只排版，不另说一句话。
+        //
+        // 待核查的排在最前（服务端已经排好了次序）：这一段的用途是让人一眼看到
+        // 「哪几条还没立住」，而不是从头读一遍。
+        var claims = row.claims || [];
+        if (claims.length) {
+            var claimsList = doc().createElement('ul');
+            claimsList.className = 'ai-anomaly-claims';
+            claims.forEach(function (claim) {
+                if (!claim || !claim.display) return;
+                var li = doc().createElement('li');
+                li.className = 'ai-anomaly-claim ai-anomaly-claim-'
+                    + String(claim.status || 'unverified');
+                li.textContent = (claim.claim_id ? '[' + claim.claim_id + '] ' : '')
+                    + (claim.status_label || '') + ' —— ' + claim.display
+                    + (claim.checked_scope ? '（查过：' + claim.checked_scope + '）' : '');
+                claimsList.appendChild(li);
+            });
+            if (claimsList.childNodes.length) item.appendChild(claimsList);
+        }
         if (row.impact) addLine(item, 'ai-anomaly-item-impact', '影响：' + row.impact);
         if (row.suggestion) addLine(item, 'ai-anomaly-item-suggestion', '建议：' + row.suggestion);
 

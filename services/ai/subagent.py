@@ -142,6 +142,7 @@ from services.ai.subagent_tasks import (
     verify_section,
 )
 from services.ai.verdict import (
+    INDEPENDENT_REQUEST_TYPES,
     EvidenceGaps,
     Reduction,
     evidence_gaps_of,
@@ -1194,6 +1195,28 @@ def _verify_ran(steps: Sequence[MemberOutcome]) -> bool:
     )
 
 
+def verify_did_independent_work(steps: Sequence[MemberOutcome]) -> bool:
+    """对账轮**有没有自己取过新证据**（P0-01）。
+
+    判据是它**实际执行过**的取数类型（`EngineOutcome.tool_stats` 的 `calls`），不是它
+    自己说做了什么：`evidence`（按地址取回已有原文）与 `read_reference`（读 skill 文档）
+    都**不算** —— 它们看的是这次之前就有的东西。
+
+    为什么非要判这一条：实测 run 58 的复核轮 6 次索取**全部**是 `evidence`，一次独立检索
+    都没有，而报告里那三条写的是「反证不成立（维持原结论）」—— 读的人会把它当成
+    「有人独立去搜过、没搜到」。事实核对无误，但它答的是另一个问题。
+    """
+    for step in steps:
+        if step.plan.role != ROLE_VERIFY or step.outcome is None:
+            continue
+        stats = step.outcome.tool_stats or {}
+        for kind in INDEPENDENT_REQUEST_TYPES:
+            bucket = stats.get(kind) or {}
+            if int(bucket.get("calls") or 0) > 0:
+                return True
+    return False
+
+
 def _anomaly_limit(dropped: Sequence[DroppedItem], fallback: int | None = None) -> int:
     """本次生效的**条数上限**。
 
@@ -1269,6 +1292,8 @@ def _reduce_with_verify(
         limit=limit,
         body_text=synthesis.report_markdown,
         gaps=gaps,
+        # 取证方式由**平台按它实际执行过的取数类型**判定，不采信它自己说做了什么。
+        verify_independent=verify_did_independent_work(steps),
     )
 
 

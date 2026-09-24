@@ -568,9 +568,31 @@ def anomaly_rows(
                 "impact": _cell(item.get("impact")),
                 "evidence": [_cell(one) for one in evidence if str(one or "").strip()],
                 "suggestion": str(item.get("suggestion") or "").strip(),
+                # 逐条断言与各自的裁决（P0-01）。渲染成**已经翻好的一句话**（`display`
+                # 与 `status_label` 都是服务端算好的，见 `verdict.ClaimReview`）——
+                # 导出与界面读的是同一份，不在这里另造说法。
+                "claims": [_claim_text(one) for one in item.get("claims") or ()],
             }
         )
     return rows
+
+
+def _claim_text(claim: Any) -> str:
+    """一条断言在导出里那一行。认不出的形状返回空串（**不印半行假信息**）。"""
+    if not isinstance(claim, Mapping):
+        return ""
+    display = str(claim.get("display") or claim.get("statement") or "").strip()
+    if not display:
+        return ""
+    parts = [
+        f"`{str(claim.get('claim_id') or '').strip()}`",
+        str(claim.get("status_label") or "").strip(),
+        f"—— {display}",
+    ]
+    scope = str(claim.get("checked_scope") or "").strip()
+    if scope:
+        parts.append(f"（查过：{scope}）")
+    return _cell(" ".join(part for part in parts if part))
 
 
 APPENDIX_TITLE = "异常清单（平台按门槛过滤后）"
@@ -731,12 +753,16 @@ def build_report_markdown(
                 )
             )
         # 证据与建议单独列在表下：它们是多行的长文本，塞进表格单元格里会把表撑得没法读。
-        blocks = [row for row in rows if row["evidence"] or row["suggestion"]]
+        blocks = [row for row in rows if row["evidence"] or row["suggestion"] or row["claims"]]
         if blocks:
             lines.append("")
             for index, row in enumerate(blocks, 1):
                 lines.append(f"**{index}. {row['title'] or '（无标题）'}**")
                 lines.append("")
+                if row["claims"]:
+                    # 断言清单排在证据之前：它回答的是「这条结论凭什么算核过了」，
+                    # 而证据是「它引用了什么」。读者要按这个次序读才对得上。
+                    lines.append("- 断言：" + "；".join(row["claims"]))
                 for one in row["evidence"]:
                     lines.append(f"- 证据：{one}")
                 if row["suggestion"]:

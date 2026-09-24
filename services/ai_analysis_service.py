@@ -923,6 +923,9 @@ def _persist_outcome(
                 file_path=item["file_path"],
                 impact=item["impact"],
                 suggestion=item["suggestion"],
+                # 逐条断言与各自的裁决结果（P0-01）。它是「这条结论凭什么算核实过了」的
+                # 答案，必须跟着结论一起落库（下一轮基线、导出、面板都读它）。
+                claims=_json_dumps(item.get("claims") or []),
                 # 平台延续的历史结论保留人工处置；相关文件再次变化时，合并器已经把它
                 # 退回 pending，避免一次旧的“已确认/已忽略”覆盖新证据。
                 disposition=item.get("disposition") or "pending",

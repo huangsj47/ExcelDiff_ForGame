@@ -132,6 +132,15 @@ def _anomaly_entry(item, row: dict | None) -> dict:
         "evidence_capped": bool((row or {}).get("evidence_capped")),
         "original_severity": str((row or {}).get("original_severity") or ""),
         "original_confidence": str((row or {}).get("original_confidence") or ""),
+        # **逐条原子断言**与各自的裁决（P0-01）。异常面板与导出都读这一份：一条结论
+        # 「凭什么算核实过了」这个问题，只有它答得了 —— 标题是模型的概括，而这里
+        # 逐条写着哪一条已证实、哪一条待核查、查过的范围是什么。
+        "claims": [dict(item) for item in (row or {}).get("claims") or []],
+        "pending_claims": int((row or {}).get("pending_claims") or 0),
+        "original_title": str((row or {}).get("original_title") or ""),
+        # 这一轮复核是**独立取证**还是**原证据复读**（由平台按实际执行过的取数类型判定）。
+        "verify_basis": str((row or {}).get("verify_basis") or ""),
+        "verify_basis_label": str((row or {}).get("verify_basis_label") or ""),
     }
 
 
@@ -184,6 +193,14 @@ def _final_findings_of(ruling: dict | None, kept: list, suppressed: frozenset) -
             "confidence": item.confidence,
             "original_severity": item.severity,
             "original_confidence": item.confidence,
+            # 没有复核 = 没有裁决，**也没有逐条断言的裁决结果**。键照给、值为空：
+            # 读侧不必为「这次没开复核」另写一个分支（同上面那条口径）。
+            # 注意 `claims` 的**模型原文**仍然在 `anomalies[]` 里 —— 这里是裁决那一份。
+            "claims": [],
+            "pending_claims": 0,
+            "original_title": item.title,
+            "verify_basis": "",
+            "verify_basis_label": "",
         }
         for item in kept
     ]

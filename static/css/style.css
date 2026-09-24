@@ -2304,6 +2304,33 @@ main:focus {
     line-height: 1.6;
 }
 
+/* 逐条断言与各自的裁决（P0-01）。与证据同一个缩进层级（都属于「这条结论的支撑」），
+   但**待核查那几条要用左边框标出来**：这一段的用途是让人一眼看到哪几条还没立住，
+   而一列同色的文字读起来是分不出来的。色不单独承载信息 —— 每一条的文字里本来
+   就写着「已证实 / 待核查 / 反证成立」。 */
+.ai-anomaly-claims {
+    margin: var(--space-2, 8px) 0 0 var(--space-4, 16px);
+    padding: 0;
+    list-style: none;
+    font-size: var(--font-size-sm, 12px);
+    line-height: 1.6;
+}
+
+.ai-anomaly-claim {
+    margin-top: 2px;
+    padding-left: var(--space-2, 8px);
+    border-left: 2px solid var(--color-border-muted, #d8dee4);
+}
+
+.ai-anomaly-claim-unverified,
+.ai-anomaly-claim-unreadable {
+    border-left-color: var(--color-warning-text, #856404);
+}
+
+.ai-anomaly-claim-refuted {
+    border-left-color: var(--color-danger-text, #b3261e);
+}
+
 .ai-anomaly-item-impact,
 .ai-anomaly-item-suggestion {
     margin-top: 2px;
