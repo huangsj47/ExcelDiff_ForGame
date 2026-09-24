@@ -299,6 +299,7 @@ def build(
     log_print(bundle_note + (f"；{declaration.warning}" if declaration.warning else ""), "AI")
 
     body = render_change_summary(ordered, total_files=total_files)
+    body = f"{_material_legend(repositories)}\n\n{body}"
     if scope_note:
         body = f"{scope_note}\n\n{body}"
     if bundle_lines:
@@ -417,6 +418,47 @@ def build(
         bundle_lines=bundle_lines,
         bundle_note=bundle_note,
         manifest=resolved_manifest,
+    )
+
+
+def _material_legend(repositories: Optional[Mapping[str, Iterable[int]]] = None) -> str:
+    """给模型的三层标注：**这次分析里的材料分三类，只有第一类能支撑「本次改动了什么」**。
+
+    ## 它挡的是哪一次错
+
+    实测 run 55：报告反复把**上一笔提交**（皮甲之外那笔铁剑 200→260）写成「本次差异」，
+    还据此编出一条「提交信息与差异不一致」的风险。同一族的 run 57 里，窗口内更早的改动
+    也被当成「本次」。提示词原先只说「共 N 个提交、M 个文件」，**没有一处说清「这些材料
+    里哪一类才是本次」** —— 而对着三类材料说「本次」，在报告里是读不出区别的。
+
+    所以三类**点名写**：本轮输入 / 窗口内更早的提交 / 项目背景（当前冻结版本）。第三类
+    是本轮新增的能力（原来读不到仓库里的其它文件），它最容易与被混淆的第二类混起来 ——
+    「现在长什么样」与「本次改了它」是两件事，而模型手上有了前者之后更可能拿它当后者。
+
+    `repositories` 是「本批次的提交分别属于哪些仓库」（`{提交: {仓库 id, …}}`）；给了就说
+    出本次涉及几个仓库，以及**读取范围是本项目全部已接入仓库**（不再是本批次的那些）。
+    """
+    ids: set[int] = set()
+    for value in (repositories or {}).values():
+        ids.update(int(item) for item in value)
+    scope_line = (
+        f"本项目全部已接入仓库（本次输入来自其中 {len(ids)} 个）"
+        if ids
+        else "本项目全部已接入仓库"
+    )
+    return (
+        "## 这次分析里的材料分三类（**只有第一类能支撑「本次改动了什么」**）\n\n"
+        "- **本轮输入（本次改动）**：下面清单里列出的、以及各条差异正文里给出的改动。"
+        "报告里说「本次改了什么」只能引用它。\n"
+        "- **窗口内更早的提交**：本窗口时间范围里更早的那些改动（也就是上面那段提交账里"
+        "「本窗口实际提交数」所说的那一批）。它们**查得到**（`commit_detail` 给名单、"
+        "`file_diff` 给正文），但**不是本次的改动** —— 把它们写成「本次差异」是错的，"
+        "要说就说「本版本更早的改动」。\n"
+        f"- **项目背景（{scope_line}的当前冻结版本）**：`file_content` 与 `find_references`"
+        "读的是**当前冻结 tip** 上的内容。用它核对「调用方现在长什么样」「这个配置还在不在」"
+        "可以；**不能**拿它当「本次改了它」的证据。同一个路径在多个仓库里都有时，平台会回"
+        "一份要你点名 `repository_id` 的拒绝（不替你猜）；正文抬头的出处一行会写明读的是"
+        "哪个仓库的哪个版本。\n"
     )
 
 
