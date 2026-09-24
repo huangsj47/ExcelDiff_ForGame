@@ -231,7 +231,7 @@ from services.ai.scope_sampling import (  # noqa: F401 —— 任务服务与测
 )
 from services.ai.skill_contract import DIMENSION_IDS, dimension_ids_of
 from services.ai.skill_loader import describe_load_error, load_skills
-from services.ai.snapshot_store import DEFAULT_COMPENSATION_MAX_FILES
+from services.ai.snapshot_store import DEFAULT_COMPENSATION_MAX_FILES, record_unread
 from services.ai.subagent import (
     MIN_MEMBER_ROUNDS,
     MIN_MEMBER_TOOL_REQUESTS,
@@ -963,6 +963,12 @@ def _persist_outcome(
                 "AI",
                 force=True,
             )
+        # 未读账（P1b）：它是**下一轮的补偿游标**（连着几轮没读到的排前面），所以落进
+        # payload 而不只是留在日志里。与覆盖段同一条纪律：算不出来只该少一份账。
+        try:
+            record_unread(run)
+        except Exception as unread_exc:  # noqa: BLE001 —— 少一份账不该毁掉结论
+            log_print(f"⚠️ AI 分析：未读账没落库（{unread_exc}），下轮补偿退回按风险排", "AI")
         if coverage_notice:
             result["coverage_notice"] = coverage_notice
             # 上面已经写过一次 payload，这里带上覆盖段**重写**（`result` 是同一个对象，
@@ -1479,6 +1485,11 @@ def _run_engine_and_persist(
                 "rounds_nominal": plan.quota.rounds_nominal,
                 "synthesis_floor_requests": MIN_MEMBER_TOOL_REQUESTS,
                 "synthesis_floor_rounds": MIN_MEMBER_ROUNDS,
+                # 对账轮的预留**也要报**：它跑在池的账之外（编排层不为它 spend），
+                # 于是 `job_theoretical_max` 必须单独把它加上，否则那个数永远比实际
+                # 发出去的次数小（实测 run 58：计划说 252、实际 256）。
+                "verify_requests": plan.quota.verify_requests,
+                "verify_rounds": plan.quota.verify_rounds,
                 "note": (sizing.note if sizing is not None else ""),
             }
             if plan is not None and plan.quota is not None

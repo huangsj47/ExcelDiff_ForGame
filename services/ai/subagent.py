@@ -82,6 +82,7 @@ from services.ai.family_ledger import (  # noqa: F401 —— 本模块与测试�
     ROLE_VERIFY,
     SYNTHESIS_LABEL,
     VERIFY_LABEL,
+    AssignedFile,
     Candidate,
     EvidenceRef,
     FamilyResult,
@@ -92,8 +93,10 @@ from services.ai.family_ledger import (  # noqa: F401 —— 本模块与测试�
     _shard_never_ran,
     evidence_index_of,
     evidence_refs_for,
+    mandatory_request_floor,
     reconcile_candidates,
 )
+from services.ai.mandatory_progress import coverage_precheck
 from services.ai.manifest import ManifestPlan, build_manifest
 from services.ai.protocol import Anomaly, DroppedItem
 from services.ai.report_document import demote_headings
@@ -125,6 +128,7 @@ from services.ai.subagent_tasks import (
     MAX_VERIFY_ITEMS,
     MIN_MEMBER_ROUNDS,
     MIN_MEMBER_TOOL_REQUESTS,
+    VERIFY_MAX_EVIDENCE,
     FamilyPlan,
     FamilyQuota,
     _cap_limit_of,  # noqa: F401 —— 测试按属性名取用
@@ -139,6 +143,7 @@ from services.ai.subagent_tasks import (
     build_verify_task,
     pool_exhausted_note,
     verify_reserve,
+    verify_reserve_for,  # noqa: F401 —— 估算侧按这个名字从本模块取（转出，见上面那段）
     verify_section,
 )
 from services.ai.verdict import (
@@ -462,13 +467,38 @@ def apply_manifest(plan: FamilyPlan, manifest: ManifestPlan) -> FamilyPlan:
     members = tuple(
         replace(
             member,
-            assigned_paths=tuple(
-                item.path for item in manifest.entries if member.label in item.assigned_shards
+            assigned_files=tuple(
+                AssignedFile(
+                    repository_id=item.repository_id,
+                    commit=item.commit,
+                    path=item.path,
+                    source=item.source,
+                )
+                for item in manifest.entries
+                if member.label in item.assigned_shards
             ),
         )
         for member in plan.members
     )
-    return replace(plan, members=members)
+    quota = plan.quota
+    if quota is not None:
+        # 启动前的覆盖预检（P1b）：分给各片的必读文件（**按三元组去重** —— 一个文件落在
+        # 两个分片里只需要被读一次）比池还多时，在这里留下那句话，`run_family` 开跑前
+        # 打进日志。放在这里是因为**只有这里同时知道清单与池**（清单刚挂上）。
+        quota = replace(
+            quota,
+            coverage_note=coverage_precheck(
+                assigned=len(
+                    {
+                        (item.repository_id, item.commit, item.path)
+                        for member in members
+                        for item in member.assigned_files
+                    }
+                ),
+                pool=quota.requests_pool,
+            ),
+        )
+    return replace(plan, members=members, quota=quota)
 
 
 def _clamp_verify_items(value: Any) -> int:
@@ -561,6 +591,11 @@ def run_family(
     """
     steps: list[MemberOutcome] = []
     body_cache: MutableMapping[Any, ContextItem] = EvidenceStore()
+    # 覆盖预检要在**开跑前**说出来（`apply_manifest` 算好的那一句）：等跑完再从报告里
+    # 读到「本次有 N 个文件未取到证据」时，钱已经花了、这一轮也过去了。
+    _precheck = str(getattr(plan.quota, "coverage_note", "") or "")
+    if _precheck:
+        log_print(_precheck, "AI")
     spent_tokens = 0
     # 家族共享池（串行滚动，见 `FamilyQuota`）。手搓的 `FamilyPlan`（测试）没带账本时，
     # 按「名义额即池」重建一份 —— 行为等价于「每片各拿名义额、互不借贷」的旧口径。
@@ -578,10 +613,19 @@ def run_family(
         if reason:
             steps.append(MemberOutcome(plan=member, skipped_reason=reason))
             continue
-        # 当片上限 = 名义额 + 前片省下的富余（后面几片的名义额、汇总下限与对账轮的预留
-        # 都先被扣下）。
+        # 当片上限 = 名义额 + **必读清单保底** + 前片省下的富余（后面几片的名义额、
+        # 它们的必读保底、汇总下限与对账轮的预留都先被扣下）。保底的口径见
+        # `mandatory_request_floor`：名义额够读必读清单时它是 0，行为与从前逐字节相同。
         members_after = len(plan.members) - (position + 1)
-        cap_requests, cap_rounds = quota.shard_caps(members_after)
+        nominal = quota.requests_nominal
+        cap_requests, cap_rounds = quota.shard_caps(
+            members_after,
+            mandatory_floor=mandatory_request_floor(member, nominal),
+            later_mandatory_floor=sum(
+                mandatory_request_floor(item, nominal)
+                for item in plan.members[position + 1:]
+            ),
+        )
         if cap_requests <= 0:
             # 池见底要**说清是哪一步、还剩多少**（引擎那句「额度用尽」说的是这一次成员的
             # 上限，读日志的人分不出「池真没了」与「这一片本来就只有这么多」）。
@@ -989,7 +1033,15 @@ def _run_verify(
         scope=scope,
         change_summary=change_summary,
         limits=member_limits,
-        thresholds=thresholds,
+        # **对账轮不套常规轮那个「依据最多 3 条」的夹子**（判据见 `VERIFY_MAX_EVIDENCE`）。
+        # 阈值对象是 frozen 的，替换出一份**只改这一项**的副本交下去 —— 其余门槛
+        # （严重度、条数上限、近似去重）与常规轮必须完全一致，否则同一批结论在两轮里
+        # 会按两套标准过筛。
+        thresholds=(
+            replace(thresholds, max_evidence=VERIFY_MAX_EVIDENCE)
+            if thresholds is not None
+            else None
+        ),
         project_knowledge=project_knowledge,
         project_instructions=project_instructions,
         baseline_digest=baseline_digest,
@@ -1120,9 +1172,14 @@ def _call_engine(
     # 只有真给了账本才把这个关键字交下去：测试注入的 `run_analysis_fn` 是假实现，
     # 多塞一个它不认的参数就等于把那些用例打断（而「不传时行为逐字节相同」是这几个
     # 子代理专属参数的既有承诺，见 `run_analysis` 的 docstring）。
-    budget_kwargs: dict[str, Any] = (
+    optional_kwargs: dict[str, Any] = (
         {} if single_run_budget is None else {"single_run_budget": single_run_budget}
     )
+    # 必读清单（P1b）：**空清单不传**。汇总与对账轮本来就没有清单（`MemberPlan`
+    # 的默认值），而分片在没有 manifest 的运行里也没有 —— 那时引擎那一段进度恒为空，
+    # 提示词与从前逐字相同。
+    if member.assigned_files:
+        optional_kwargs["mandatory_files"] = tuple(member.assigned_files)
     return run_analysis_fn(
         client=client,
         provider=provider,
@@ -1139,7 +1196,7 @@ def _call_engine(
         seed_messages=plan.seed_messages,
         task_message=task_message,
         body_cache=body_cache,
-        **budget_kwargs,
+        **optional_kwargs,
     )
 
 

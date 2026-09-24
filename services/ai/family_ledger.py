@@ -37,7 +37,7 @@ MOVE 里，所以是同一个文件内部的调用，不构成往返依赖。
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from services.ai.budget import truncate_text
 from services.ai.engine import (
@@ -107,6 +107,55 @@ KIND_DEFERRED = "deferred"
 
 
 @dataclass(frozen=True)
+class AssignedFile:
+    """一个成员分到的**一条必读文件**：某个仓库的某条提交改动的某个路径。
+
+    ## 为什么路径之外还要带仓库与提交
+
+    任务书里原先只列路径。而**去取这一条的 diff** 需要三样东西
+    （`file_diff` 的 `commit` + `path` + `repository_id`），只给路径等于把「怎么取」
+    留给模型猜 —— 它猜出来的多半是另一个仓库或另一条提交，而平台为这两种都只回一句
+    含混的失败。带上三元组之后，「先把你分到的这几条各取一次 diff」才是一句**能照做**
+    的话（这也是 P1b「每个优先文件至少取一次对应 diff」的落点）。
+
+    `source` 取自 manifest（`delta` / `compensation` / `dependency`）：补偿项是**上一轮
+    没看到证据**的那些，它们的优先级高于新改动 —— 任务书里单独标出来。
+    """
+
+    repository_id: int
+    commit: str
+    path: str
+    source: str = "delta"
+
+    @property
+    def is_compensation(self) -> bool:
+        return self.source == "compensation"
+
+    def describe(self) -> str:
+        """给模型看的一行：**三样都写全**，它照着填就能发一条 `file_diff`。"""
+        return f"`{self.path}`（提交 {self.commit[:12]}、仓库 {self.repository_id}）"
+
+
+def mandatory_request_floor(member: Any, nominal: int) -> int:
+    """这一片的必读清单**超出名义额**的那部分索取次数（0 = 名义额已够，保底不生效）。
+
+    读一份 diff 要一次索取，所以「把分到的文件各读一次」的代价就是它们的条数。
+    **减去名义额**是关键：名义额本来就是这一片可自由支配的额度，直接拿条数当保底会在
+    每一条真实批次上生效，而池子不会因此变大 —— 前片多拿、后片少拿，最后一片照样饿死
+    （见 `FamilyQuota.shard_caps`）。
+
+    `member` 允许是任何带 `assigned_files` 的对象（`MemberPlan`，或测试里的替身）：
+    没有这个属性时按 0 条算 —— 「没接线」与「没有必读清单」在额度上等价，都不该多占池子。
+    """
+    files = getattr(member, "assigned_files", ()) or ()
+    try:
+        count = len(files)
+    except TypeError:  # pragma: no cover —— 非序列的替身，按「没接线」处理
+        return 0
+    return max(0, count - max(0, int(nominal or 0)))
+
+
+@dataclass(frozen=True)
 class MemberPlan:
     """一个成员（子代理或汇总那一次）要怎么跑。"""
 
@@ -114,7 +163,9 @@ class MemberPlan:
     label: str
     role: str
     dimensions: tuple[str, ...]
-    assigned_paths: tuple[str, ...] = ()
+    #: 平台分给这个成员的必读文件（三元组 + 来源，见 `AssignedFile`）。
+    #: 空元组 = 没分到（汇总那一次、或者这份清单没接线）。
+    assigned_files: tuple[AssignedFile, ...] = ()
 
     @property
     def is_synthesis(self) -> bool:

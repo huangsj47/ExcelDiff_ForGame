@@ -64,12 +64,12 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from models.ai_analysis import AiAnalysisTrace
 from services.ai import window_commits
-from services.ai.trace_evidence import decode_evidence
-
-# 只有这两类工具的结果算「这个文件被看过」：`file_diff`（某个提交上这个文件的差异）与
-# `file_content`（这个文件的内容）。`commit_detail` 只给「这个提交改了哪些文件」的名单、
-# `find_references` 只回「哪个文件的第几行」、`read_reference` 读的是平台自己的规程文档。
-FILE_EVIDENCE_KINDS = ("file_diff", "file_content")
+# `FILE_EVIDENCE_KINDS` 由 `trace_evidence` 定义（那里是纯层，运行中的进度也要用它），
+# 本模块转出这个名字供既有调用方按原路径取用。
+from services.ai.trace_evidence import (  # noqa: F401
+    FILE_EVIDENCE_KINDS,
+    decode_evidence,
+)
 
 MODE_WEEKLY = "weekly"
 MODE_COMMIT = "commit"

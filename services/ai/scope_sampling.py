@@ -178,6 +178,30 @@ def _select_delta_entries(entries: List, baseline, scope: str = "") -> List:
             delta.append(entry)
     return delta
 
+def compensation_rank(entry, *, tables, repo_priority: int, facts, streaks) -> tuple:
+    """补偿集的排序键（**降序**取前几名）。
+
+    三档，从重到轻：
+
+    1. **连续未读的轮数**（`streaks`，P1b）。补偿项本来就是「上一轮没取到证据」的那些，
+       而其中连着几轮都没读到的说明它每轮都被别的项挤掉了 —— 只按风险排序的话，每轮
+       排出来的次序都一样，它会**一直被挤在名额之外**（这正是「补了还是没读到」的成因）。
+    2. **命不命中关键路径**（风险策略的老判据：项目声明的重点表 / 路径模式）；
+    3. 仓库优先级、这条文件被几条提交改过、路径本身 —— 纯粹是为了**排序稳定**
+       （同一份输入永远排成同一个次序，否则「补偿了谁」每轮都不同）。
+
+    老运行没有未读账 ⇒ 第一项全是 0 ⇒ 与加这一项之前**逐字相同**。
+    """
+    hit = bool(facts.why(entry.file_path, tables))
+    return (
+        int(streaks.get(entry.file_path, 0) or 0),
+        hit,
+        max(0, int(repo_priority or 0)),
+        int(entry.commit_count or 0),
+        entry.file_path,
+    )
+
+
 def _compensation_entries(
     entries: List,
     *,
@@ -223,14 +247,21 @@ def _compensation_entries(
         repo = repo_lookup.get(entry.repository_id)
         return _repo_priority(repo) if repo else 1
 
-    def _order(entry):
-        tables = tables_by_repo.get(entry.repository_id, ())
-        hit = bool(facts.why(entry.file_path, tables))
-        return (hit, _priority(entry), int(entry.commit_count or 0), entry.file_path)
-
-    # 风险排序（`_order` 的第一项就是「命不命中关键路径」）。候选可能有上千条（线上
-    # 1009 个文件里 967 个没取到证据），但这一步只做一次比较排序，代价与候选数同阶。
-    candidates.sort(key=_order, reverse=True)
+    # 上一轮也没读到的那些：**连续未读优先**（P1b）。补偿项本来就是「上一轮没取到证据」
+    # 的，而其中连着几轮都没读到的说明它每轮都被别的项挤掉了 —— 只按风险排序的话，
+    # 排序结果每轮都一样，它会一直被挤在名额之外（这就是「补偿了还是没读到」的成因）。
+    # 老运行没有这份账 ⇒ 全 0 ⇒ 排序与从前逐字相同。
+    previous = snapshot_store.unread_streaks(base_run)
+    candidates.sort(
+        key=lambda entry: compensation_rank(
+            entry,
+            tables=tables_by_repo.get(entry.repository_id, ()),
+            repo_priority=_priority(entry),
+            facts=facts,
+            streaks=previous,
+        ),
+        reverse=True,
+    )
     return candidates[:limit]
 
 def _summarize_weekly_files(
@@ -445,6 +476,10 @@ def _summarize_weekly_files(
         # 口径是**这个提交自己改过的路径**（`commits_log` 里 `commit_id == 它` 的行），
         # 不是拿 `latest_commit_id` 反推的历史路径，也不是周窗口的合并 diff。
         "window_commit_files": window_commit_files,
+        # 上一条运行（做差/补偿的基准）。**它在这里是为了未读游标**：本轮跑完之后要按
+        # 它把「连着几轮没读到」接上（`snapshot_store.record_unread`），而运行结束后
+        # 没有任何一处还知道基准是谁。首轮 / 老运行是 None。
+        "base_run_id": getattr(base_run, "id", None),
         "compensation_files": [
             item for item in delta_files if item.get("source") == "compensation"
         ],

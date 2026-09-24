@@ -540,3 +540,214 @@ def uncovered_paths(run: Any) -> Optional[set]:
     if covered is None:
         return None
     return {path for path in whitelist_paths(run) if path not in covered}
+
+
+# ---------------------------------------------------------------------------
+#  未读账：没取到证据的那些文件**与原因**（P1b）
+# ---------------------------------------------------------------------------
+#
+# `uncovered_paths` 只说得出「哪些没读到」，说不出「为什么没读到」。而下一轮要回答的
+# 恰恰是后者：**没索取**的要催，**被额度拒**的要给额度，**读不到**的要换个坐标或如实
+# 写成信息缺口 —— 三件事的处置完全不同，混在一个集合里只能一律重排一次。
+#
+# 这份账落在 `run.request_payload["unread"]` 上（**运行结束后追加的派生账**，不是对
+# 冻结输入的改写：`delta_files` 那些键一个字节都不动）。它同时是**补偿游标**：连着几轮
+# 没读到的文件，下一轮补偿时排在前面（此前每轮都从零重算，等于没有记忆）。
+
+UNREAD_NOT_REQUESTED = "not_requested"
+UNREAD_REFUSED = "refused_by_budget"
+UNREAD_UNREADABLE = "unreadable"
+UNREAD_NO_RESULT = "no_result"
+
+#: 原因 → 给报告与面板读的中文说法。**一份**，两处各写一遍必然对不上。
+UNREAD_REASON_LABELS = {
+    UNREAD_NOT_REQUESTED: "模型一次都没索取过（覆盖缺口，不是取数失败）",
+    UNREAD_REFUSED: "索取过，被额度拒（提高「单个 agent 可索取次数」可解）",
+    UNREAD_UNREADABLE: "索取过但读不到（路径或仓库对不上 / 平台读不了这一份）",
+    UNREAD_NO_RESULT: "索取过，跑到结束都没有结果落下来",
+}
+
+#: 「被额度拒」在逐轮明细里的那一句开头（`context_tools.execute` 的拒绝分支写的）。
+#: **判据落在文案上**，所以有一条测试会扫发出方源码核对它还写得出来 ——
+#: 与 `trace_evidence.FAILURE_NOTICE_PREFIXES` 是同一套做法（改那句话就要改这里）。
+REFUSED_REASON_PREFIX = "超出本次工具请求总预算"
+
+#: `request_payload["unread"]["items"]` 最多留几条。线上的窗口可能有上千个没读到的文件
+#: （实测一次 1009 里 967 个），整份塞进 payload 会让每一次读这条 run 的接口都背上它；
+#: 而**计数照旧是全量的**，截断的条数也如实写出来。
+UNREAD_MAX_ITEMS = 120
+
+
+def _trace_rows(run: Any) -> Tuple[bool, List[Any]]:
+    """`(有没有逐轮明细, 逐轮明细行)`。没有明细 = 未知（与 `evidence_paths` 同一条纪律）。"""
+    from models.ai_analysis import AiAnalysisTrace
+
+    rows = (
+        AiAnalysisTrace.query
+        .filter(AiAnalysisTrace.run_id == getattr(run, "id", None))
+        .order_by(AiAnalysisTrace.id.asc())
+        .all()
+    )
+    collected = any(getattr(row, "executed_json", None) is not None for row in rows)
+    return collected, list(rows)
+
+
+def _input_files(run: Any) -> List[dict]:
+    """本次输入的文件 `[{path, repository_id, commit}]`（顺序即 payload 里的顺序）。"""
+    payload = _payload_mapping(run)
+    out: List[dict] = []
+    seen: set = set()
+    rows = list(payload.get("delta_files") or []) + list(
+        payload.get("compensation_files") or []
+    )
+    for item in rows:
+        if not isinstance(item, Mapping):
+            continue
+        path = str(item.get("file_path") or "").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        out.append({
+            "path": path,
+            "repository_id": item.get("repository_id"),
+            "commit": str(item.get("latest_commit_id") or "").strip(),
+        })
+    return out
+
+
+def _asked_paths(rows: Sequence[Any]) -> Tuple[set, set]:
+    """逐轮明细 → `(索取过的路径, 被额度拒过的路径)`。
+
+    两个来源都要读：模型自己写的请求在 `requests_json`，被拒的那些进 `dropped_json`
+    （拒绝**不执行**，所以它在 requests 里可能看得到、也可能因为那一轮没记而看不到）。
+    """
+    asked: set = set()
+    refused: set = set()
+    for row in rows:
+        item = decode_evidence(row)
+        for request in item.get("requests") or ():
+            if not isinstance(request, Mapping):
+                continue
+            if str(request.get("type") or "") not in FILE_EVIDENCE_KINDS:
+                continue
+            path = str(request.get("path") or "").strip()
+            if path:
+                asked.add(path)
+        for dropped in item.get("dropped") or ():
+            if not isinstance(dropped, Mapping):
+                continue
+            if not str(dropped.get("reason") or "").startswith(REFUSED_REASON_PREFIX):
+                continue
+            _commit, path, _lines = parse_evidence_label(dropped.get("detail"))
+            if path:
+                refused.add(path)
+    return asked, refused
+
+
+def unread_files(run: Any) -> Optional[List[dict]]:
+    """本次输入里**一条证据都没取到**的文件，逐条带上原因。未知时返回 `None`。
+
+    「未知」的判据与 `evidence_paths` 逐字相同（没有逐轮明细）：那时不许把整份输入
+    当成「没读到」—— 那是把未知当结论。
+    """
+    if run is None:
+        return None
+    covered = evidence_paths(run)
+    if covered is None:
+        return None
+    collected, rows = _trace_rows(run)
+    if not collected:
+        return None
+    asked, refused = _asked_paths(rows)
+    unreadable = {
+        path
+        for path in (
+            parse_evidence_label(item.get("label"))[1]
+            for row in rows
+            for item in (decode_evidence(row).get("executed") or [])
+            if isinstance(item, Mapping)
+            and str(item.get("kind") or "") in FILE_EVIDENCE_KINDS
+            and (item.get("failed") or item.get("empty"))
+        )
+        if path
+    }
+    out: List[dict] = []
+    for entry in _input_files(run):
+        path = entry["path"]
+        if path in covered:
+            continue
+        if path in refused:
+            reason = UNREAD_REFUSED
+        elif path in unreadable:
+            reason = UNREAD_UNREADABLE
+        elif path in asked:
+            reason = UNREAD_NO_RESULT
+        else:
+            reason = UNREAD_NOT_REQUESTED
+        out.append({**entry, "reason": reason})
+    return out
+
+
+def unread_streaks(run: Any) -> dict:
+    """上一条运行里那些没读到的文件 → **它已经连着几轮没读到了**（1 = 上一轮第一次）。
+
+    给补偿排序用（`scope_sampling._compensation_entries`）。老运行没有这份账 ⇒ 空表 ⇒
+    排序退回原来的口径（行为与从前逐字相同）。
+    """
+    payload = _payload_mapping(run) if run is not None else {}
+    section = payload.get("unread")
+    if not isinstance(section, Mapping):
+        return {}
+    out: dict = {}
+    for item in section.get("items") or ():
+        if not isinstance(item, Mapping):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        try:
+            streak = int(item.get("streak") or 0)
+        except (TypeError, ValueError):
+            streak = 0
+        out[path] = max(1, streak)
+    return out
+
+
+def record_unread(run: Any) -> Optional[dict]:
+    """把未读账写回 `run.request_payload["unread"]`（**调用方负责提交**）。未知时不动它。
+
+    游标在这里延续：上一轮也没读到的那些，`streak` 加一 —— 「连着三轮没读到」与
+    「这一轮才漏」在下一轮的补偿排序里不是一回事。
+    """
+    files = unread_files(run)
+    if files is None:
+        return None
+    payload = _payload_mapping(run)
+    previous = unread_streaks(_run_by_id(payload.get("base_run_id")))
+    items: List[dict] = []
+    counts: dict = {}
+    for item in files:
+        counts[item["reason"]] = counts.get(item["reason"], 0) + 1
+        items.append({**item, "streak": previous.get(item["path"], 0) + 1})
+    section = {
+        "total": len(items),
+        "counts": counts,
+        "labels": {key: UNREAD_REASON_LABELS[key] for key in counts},
+        "shown": min(len(items), UNREAD_MAX_ITEMS),
+        "items": items[:UNREAD_MAX_ITEMS],
+    }
+    payload["unread"] = section
+    run.request_payload = json.dumps(payload, ensure_ascii=False)
+    return section
+
+
+def _run_by_id(run_id: Any) -> Any:
+    """按 id 取上一条运行（拿它的未读游标）。取不到就是 `None` —— 不猜。"""
+    if not run_id:
+        return None
+    try:
+        from models.ai_analysis import AiAnalysisRun
+
+        return db.session.get(AiAnalysisRun, int(run_id))
+    except (TypeError, ValueError):  # pragma: no cover —— 坏 id 只该让游标断开
+        return None

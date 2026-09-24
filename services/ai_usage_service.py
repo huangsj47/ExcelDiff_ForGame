@@ -84,7 +84,7 @@ from services.ai.platform_budget import platform_budget_public
 from services.ai.pricing import amount_exact, amount_of, money
 from services.ai.project_config_source import build_weekly_group_key, get_project_analysis_config
 from services.ai.skill_contract import DIMENSION_IDS
-from services.ai.subagent import MIN_MEMBER_ROUNDS, MIN_MEMBER_TOOL_REQUESTS
+from services.ai.subagent import MIN_MEMBER_ROUNDS, MIN_MEMBER_TOOL_REQUESTS, verify_reserve_for
 from services.ai.trace_evidence import decode_evidence
 from services.ai.usage import (
     ESTIMATE_SAMPLE_LIMIT,
@@ -1659,6 +1659,8 @@ def analysis_estimate(
             watermark=watermark,
             platform_note=platform_note,
         ),
+        # 对账轮的预留：与运行侧**同一个函数**算（见 `verify_reserve_for`）。
+        verify_reserve=verify_reserve_for(config),
         family_pool=(
             {
                 "requests_pool": sizing.family_requests_pool,

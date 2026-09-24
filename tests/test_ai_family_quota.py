@@ -18,6 +18,7 @@ from services.ai.engine import (
     EngineOutcome,
     RoundRecord,
 )
+from services.ai.family_ledger import AssignedFile, mandatory_request_floor
 from services.ai.subagent import (
     FamilyPlan,
     FamilyQuota,
@@ -385,3 +386,87 @@ def test_a_manual_plan_without_quota_falls_back_to_nominal_pools():
     assert _cap_of(engine, 0) == 30
     assert _cap_of(engine, 1) == 30
     assert _cap_of(engine, 2) == 2, "汇总仍保下限"
+
+
+class TestTheMandatoryListHasItsOwnQuota:
+    """必读清单的保底额度（P1b）：**分到的文件要读得起**。
+
+    分工是平台按 `(仓库, 路径, 提交)` 定下来的，而取证此前只靠模型自主 —— 一片分到 60 个
+    文件、名义额只有 48 次索取时，「把它们各读一次」这件事在额度上根本做不到，任务书里
+    那句「先都取一次 diff」就是一句空话。这一档补的是那个差。
+
+    判据落在**当片上限**上，不落在 `_cap` 的算术细节上：算术由下面两条纯函数用例钉。
+    """
+
+    @staticmethod
+    def _files(count: int) -> tuple:
+        return tuple(
+            AssignedFile(repository_id=1, commit=f"{index:040x}", path=f"code/m{index}.lua")
+            for index in range(count)
+        )
+
+    def test_the_floor_is_the_part_the_nominal_cannot_cover(self):
+        """名义额 48、清单 60 条 ⇒ 保底 12；清单 40 条 ⇒ 0（行为与从前逐字节相同）。"""
+        long_member = MemberPlan(
+            index=1, label="S1", role="subagent", dimensions=("a",), assigned_files=self._files(60)
+        )
+        short_member = MemberPlan(
+            index=1, label="S1", role="subagent", dimensions=("a",), assigned_files=self._files(40)
+        )
+        assert mandatory_request_floor(long_member, 48) == 12
+        assert mandatory_request_floor(short_member, 48) == 0
+        # 没接线（老计划 / 汇总那一次）不占池子。
+        assert mandatory_request_floor(MemberPlan(1, "S1", "subagent", ("a",)), 48) == 0
+
+    def test_a_shard_gets_its_floor_even_when_the_pool_is_tight(self):
+        """池紧到快没富余时，保底仍然给足（**这正是它要管的那一档**）。
+
+        池 200、名义 48、后面 3 片名义 144 + 汇总下限 2：不加保底只剩 6 次富余 → 54，
+        读不完 60 个文件；加了保底就是 60。池**宽**时两者一样（保底只是把富余少算 12，
+        而算式里保底又加回来了）—— 所以这一档不会让宽裕的批次少拿。
+        """
+        quota = FamilyQuota(
+            requests_pool=200, rounds_pool=50, requests_nominal=48, rounds_nominal=10
+        )
+        assert quota.shard_caps(3)[0] == 54, "不加保底：名义 48 + 富余 6"
+        assert quota.shard_caps(3, mandatory_floor=12)[0] == 60
+
+    def test_a_shard_without_a_mandatory_list_is_untouched(self):
+        """保底为 0（名义额够读 / 没接线）时，算式与加这一档之前**逐字相同**。"""
+        quota = FamilyQuota(
+            requests_pool=240, rounds_pool=50, requests_nominal=48, rounds_nominal=10
+        )
+        assert quota.shard_caps(3, mandatory_floor=0) == quota.shard_caps(3)
+        assert quota.shard_caps(3, mandatory_floor=0, later_mandatory_floor=0) == (94, 18)
+
+    def test_the_floor_of_the_later_shards_is_held_back(self):
+        """后面几片的保底先从富余里扣掉 —— 否则它们的那一份会被当前这一片花掉。"""
+        quota = FamilyQuota(
+            requests_pool=240, rounds_pool=50, requests_nominal=48, rounds_nominal=10
+        )
+        assert quota.shard_caps(3)[0] == 94, "富余应当是 46（240−48−3×48−2）"
+        assert quota.shard_caps(3, later_mandatory_floor=36)[0] == 58
+
+    def test_no_shard_is_starved_below_its_own_mandatory_list(self):
+        """四片各 60 个必读文件、池 260（恰好够 4×60 + 汇总下限 2）。
+
+        不加保底时这一串会这样走：S1 名义 48 + 富余 66 = 114 全花掉 → 后面每片只剩名义额
+        48 → **最后一片拿 48，读不完它的 60 个文件**。保底把「后面几片各自要读多少」提前
+        扣下，于是每片都拿得到自己那一份（实测 run 58 的 20 个补偿项正是这样漏掉的）。
+        """
+        quota = FamilyQuota(
+            requests_pool=260, rounds_pool=50, requests_nominal=48, rounds_nominal=10
+        )
+        caps = []
+        for position in range(4):
+            members_after = 4 - (position + 1)
+            floor = 12  # 每片 60 个文件 − 名义额 48
+            cap, _ = quota.shard_caps(
+                members_after,
+                mandatory_floor=floor,
+                later_mandatory_floor=members_after * floor,
+            )
+            caps.append(cap)
+            quota.spend(cap, 10)
+        assert caps == [78, 60, 60, 60], caps
+        assert all(cap >= 60 for cap in caps), f"有分片读不完必读清单：{caps}"

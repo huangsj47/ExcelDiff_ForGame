@@ -100,6 +100,7 @@ from typing import Any, Iterable, Mapping, MutableMapping, Protocol, runtime_che
 
 from services.ai.budget import ContextItem, truncate_text
 from services.ai.evidence_store import blob_id_of, evidence_id_of
+from services.ai.mandatory_progress import MandatoryProgress
 from services.ai.protocol import EVIDENCE_REQUEST_TYPE, ContextRequest, DroppedItem
 from services.ai.scope import normalize_path
 from services.ai.trace_evidence import failure_notice
@@ -476,6 +477,10 @@ class ContextTools:
     limits: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_TOOL_LIMITS))
     # 跨成员共享的正文缓存。`None` = 单代理（今天的全部行为不变）。
     body_cache: MutableMapping[CacheKey, ContextItem] | None = None
+    #: 本成员的**必读清单**（`(仓库, 提交, 路径)` 三元组，P1b，见 `mandatory_progress`）。
+    #: 由编排层经 `run_analysis(mandatory_files=…)` 交下来；**空元组 = 没有清单**
+    #: （单代理、汇总、对账轮），那时 `mandatory_note()` 恒为空串，行为与从前逐字相同。
+    mandatory_files: tuple = ()
 
     _cache: dict[CacheKey, ContextItem] = field(
         default_factory=dict, init=False, repr=False
@@ -493,10 +498,28 @@ class ContextTools:
     # 改掉一个被引擎与测试大量调用的公开签名，而这里要的只是「同一段执行逻辑的另一种
     # 记账口径」。
     _prefetching: bool = field(default=False, init=False, repr=False)
+    # 必读清单的进度（P1b）。**每一处分岔都要喂它一次**：命中缓存的指针不算证据，
+    # 跨成员共享的全文与真取数、按地址取回都算 —— 判据在 `mandatory_progress` 里，
+    # 这一层只负责在「一条内容真的交到模型手上」的那几处调 `observe`。
+    _mandatory: Any = field(default=None, init=False, repr=False)
 
     @property
     def executions(self) -> int:
         return self._executions
+
+    def mandatory_note(self) -> str:
+        """必读清单的进度行（每轮一次，见 `mandatory_progress.MandatoryProgress.note`）。
+
+        没有清单时是空串 —— 调用方据此什么都不加，于是单代理/汇总/对账轮那条路上的
+        提示词逐字节不变。
+        """
+        progress = self._mandatory
+        return "" if progress is None else progress.note()
+
+    def _observe_mandatory(self, request: ContextRequest, item: ContextItem) -> None:
+        """把「这一条真的交出去了」记进必读清单进度（判据与去重都在那一层）。"""
+        if self._mandatory is not None:
+            self._mandatory.observe(request, item)
 
     def __post_init__(self) -> None:
         """把**本轮生效的单条上限**交给取数侧（只对那些认这件事的 provider）。
@@ -514,12 +537,16 @@ class ContextTools:
         不实现就什么都不会发生（行为与从前逐字相同）。
         """
         apply_limits = getattr(self.provider, "apply_tool_limits", None)
-        if not callable(apply_limits):
-            return
-        try:
-            apply_limits(self.limits)
-        except Exception as exc:  # noqa: BLE001 —— 交接失败只该让「页大小」退回初值
-            log_print(f"⚠️ AI 取数：把单条上限交给取数侧失败：{type(exc).__name__}: {exc}")
+        if callable(apply_limits):
+            try:
+                apply_limits(self.limits)
+            except Exception as exc:  # noqa: BLE001 —— 交接失败只该让「页大小」退回初值
+                log_print(
+                    f"⚠️ AI 取数：把单条上限交给取数侧失败：{type(exc).__name__}: {exc}"
+                )
+        # 必读清单进度只在这里建一次（清单在这一次成员运行里不变）。
+        if self.mandatory_files:
+            self._mandatory = MandatoryProgress(entries=tuple(self.mandatory_files))
 
     @property
     def cache_hits(self) -> int:
@@ -692,6 +719,7 @@ class ContextTools:
                         # 口径是**交付**（模块 docstring 第 6 条）：交出去的确实是截断正文。
                         truncated += 1
                         self._bump(request.type, "truncated")
+                self._observe_mandatory(request, item)
                 items.append(item)
                 continue
 
@@ -744,6 +772,7 @@ class ContextTools:
                 # 也存进本地：同一个成员再要第三次时，它的上文里确实已经有这一节了，
                 # 那时才轮到指针。
                 self._cache[key] = shared
+                self._observe_mandatory(request, shared)
                 items.append(shared)
                 continue
 
@@ -803,6 +832,7 @@ class ContextTools:
                 self._bump(request.type, "truncated")
             self._cache[key] = item
             self._shared_put(key, item)
+            self._observe_mandatory(request, item)
             items.append(item)
 
         if refused:

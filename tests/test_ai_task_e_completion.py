@@ -252,7 +252,7 @@ def test_weekly_change_set_carries_full_manifest_into_member_assignments():
     assigned = apply_manifest(plan, change.manifest)
 
     assert change.manifest.summary()["assigned"] == 9
-    assert set().union(*(set(member.assigned_paths) for member in assigned.members)) == {
+    assert set().union(*({item.path for item in member.assigned_files} for member in assigned.members)) == {
         row["file_path"] for row in rows
     }
     assert "确定性文件分工" in build_member_task(assigned.members[0], assigned)
@@ -536,10 +536,10 @@ def test_the_prompt_manifest_is_the_persisted_one_even_when_the_shard_count_is_n
     assert plan is not None and plan.count == 5
     assigned = apply_manifest(plan, change.manifest)
     for member in assigned.members:
-        assert set(member.assigned_paths) == {
+        assert {item.path for item in member.assigned_files} == {
             entry.path for entry in change.manifest.entries if member.label in entry.assigned_shards
         }, f"{member.label} 分到的文件与 manifest 的 S 标签对不上"
-    assert set().union(*(set(member.assigned_paths) for member in assigned.members)) == {
+    assert set().union(*({item.path for item in member.assigned_files} for member in assigned.members)) == {
         row["file_path"] for row in rows
     }
 

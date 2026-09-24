@@ -624,6 +624,7 @@ def run_analysis(
     task_message: str = "",
     body_cache: MutableMapping[Any, ContextItem] | None = None,
     single_run_budget: SingleRunBudget | None = None,
+    mandatory_files: Sequence[Any] = (),
 ) -> EngineOutcome:
     """跑完一次分析。**不抛异常**：任何失败都变成 `status="failed"` 的结果。
 
@@ -655,7 +656,11 @@ def run_analysis(
       断点①②都挂好了）。传了它就**不重建** system，也不重发变更清单；
     * `task_message` —— 第 1 轮的 user 消息**原文**（「你负责哪几个维度」）；
     * `body_cache` —— N 个成员共享的正文缓存。**它只影响取数，不影响提示词的形状**：
-      别的成员取过的同一份内容直接给全文，不再取第二次（见 `context_tools` 第 5 条）。
+      别的成员取过的同一份内容直接给全文，不再取第二次（见 `context_tools` 第 5 条）；
+    * `mandatory_files` —— **本成员分到的必读清单**（`(仓库, 提交, 路径)` 三元组，
+      P1b）。它只被用来**每轮算一次进度**（「还有几条没取到证据」，见
+      `mandatory_progress`），既不改工具白名单、也不改取数行为；不传时那一段恒为空，
+      提示词与从前**逐字节相同**。
 
     于是子代理的请求长成 `[system, 共享消息, 任务书, assistant, …]`：前两条在**同一批的
     所有成员之间逐字节相同**，所以第一个成员写下的 prompt cache，后面每个成员（含汇总那
@@ -698,6 +703,7 @@ def run_analysis(
         max_tool_requests=limits.max_tool_requests,
         limits=limits.tool_limits,
         body_cache=body_cache,
+        mandatory_files=tuple(mandatory_files),
     )
     # 冻结仓库的只读范围（工作包 D 的 P1）。**一次解析、整次分析复用**：
     # provider 自己知道仓库与 tip（它一直在按提交行取数），引擎不该再问一遍 ——
@@ -950,6 +956,16 @@ def run_analysis(
         # 这一轮要写进 trace 的补充说明：压过历史、被上游拒过、走了收尾 —— 都是「这次分析
         # 不是正常跑完的」的证据，只留在日志里等于没说。
         round_notes: list[str] = []
+        # 必读清单进度（P1b）：**每轮都重报一次**，因为它每轮都在变（模型正在读）。
+        # 走 `budget_notes` 这条路是刻意的 —— 它是**每轮都发给模型**的（任务书只发一次），
+        # 而这一段随成员/轮次变化，本来就只该出现在成员私有消息里（共享前缀逐字节相同
+        # 是 prompt cache 的全部依据，见 `subagent.build_seed_messages`）。
+        #
+        # **拼进 brief 的那一份元组，而不是往 `budget_notes` 这个列表里 append**：
+        # 那个列表的生命周期是「本轮执行完之后由 `_batch_notes(batch)` 整体替换」，
+        # 往里塞一条会在任何一条「本轮提前 continue」的路径上留下来，下一轮再塞一次
+        # 就成了重复的一条。
+        mandatory_note = tools.mandatory_note()
         brief = _RoundBrief(
             round_index=round_index,
             max_rounds=reported_max_rounds,
@@ -957,7 +973,9 @@ def run_analysis(
             baseline_digest=baseline_digest,
             correction_hint=correction_hint,
             budget_exhausted=exhausted,
-            budget_notes=tuple(budget_notes),
+            budget_notes=(
+                (*budget_notes, mandatory_note) if mandatory_note else tuple(budget_notes)
+            ),
             pending_items=tuple(pending_items),
             recap=recap_text,
             requests_remaining=tools.requests_remaining,

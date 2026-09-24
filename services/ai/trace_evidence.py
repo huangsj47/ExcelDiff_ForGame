@@ -29,6 +29,16 @@ from typing import Any, Iterable, Optional, Sequence
 from services.ai.budget import truncate_text
 from utils.logger import log_print
 
+# 只有这两类工具的结果算「这个文件被看过」：`file_diff`（某个提交上这个文件的差异）与
+# `file_content`（这个文件的内容）。`commit_detail` 只给「这个提交改了哪些文件」的名单、
+# `find_references` 只回「哪个文件的第几行」、`read_reference` 读的是平台自己的规程文档。
+#
+# **放在这一层**（而不是 `coverage_ledger`）：这是「一条内容算不算证据」的判据，覆盖账
+# 与运行中的必读清单进度（`mandatory_progress`）都要用它，而后者要被 `context_tools`
+# （纯层、不碰数据库）import —— 从 `coverage_ledger` 取会把它连带 `models` 一起拖进来。
+# `coverage_ledger.FILE_EVIDENCE_KINDS` 仍然可用（它从本模块转出）。
+FILE_EVIDENCE_KINDS = ("file_diff", "file_content")
+
 # 单轮模型原文的入库上限。**不是省空间，是省得看不出重点**：一轮的原文通常只有几百字
 # （一个 JSON），但结论那一轮可能是一整份报告（几万字）—— 面板上展开几十份报告没有意义，
 # 报告正文本来就在 `ai_analysis_run.response_text` 里。

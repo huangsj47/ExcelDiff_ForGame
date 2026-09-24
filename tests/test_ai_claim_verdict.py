@@ -591,3 +591,60 @@ def _json_dumps(value) -> str:
     import json as _json
 
     return _json.dumps(value, ensure_ascii=False)
+
+
+class TestTheVerifyRoundIsNotCappedLikeANormalRound:
+    """对账轮的依据**不是「支撑结论的几个坐标」，是它核过的清单**（实测 run 58）。
+
+    常规轮的 `max_evidence=3` 是防注水；照搬到对账轮上，削掉的恰恰是「这一处我也去看过」
+    —— 报告里那句「已核」于是没有对应的记录可回看。所以对账轮单独放宽，**其余门槛
+    （严重度 / 条数上限 / 近似去重）一个都不动**：同一批结论在两轮里必须按同一套标准过筛。
+    """
+    def test_only_the_evidence_cap_is_loosened(self):
+        import ast
+        import io as _io
+
+        from services.ai.rules import DEFAULT_MAX_EVIDENCE, RuleThresholds
+        from services.ai.subagent import _run_verify  # noqa: F401 —— 存在性
+        from services.ai.subagent_tasks import VERIFY_MAX_EVIDENCE
+
+        assert VERIFY_MAX_EVIDENCE > DEFAULT_MAX_EVIDENCE
+
+        source = _io.open(_run_verify.__code__.co_filename, encoding="utf-8").read()
+        tree = ast.parse(source)
+        node = next(
+            item for item in ast.walk(tree)
+            if isinstance(item, ast.FunctionDef) and item.name == "_run_verify"
+        )
+        body = ast.get_source_segment(source, node)
+
+        assert "max_evidence=VERIFY_MAX_EVIDENCE" in body
+        assert "replace(thresholds, max_evidence=VERIFY_MAX_EVIDENCE)" in body, (
+            "必须只替换这一项；整份换掉会把常规轮的门槛一起改掉"
+        )
+        # 其余门槛一项都没在这里被改写。
+        for field in ("min_severity", "min_confidence", "similarity_threshold", "max_anomalies"):
+            assert f"{field}=" not in body, f"{field} 不该在对账轮被另设一个值"
+
+        # 而且它真的生效：同一批 5 条依据，常规轮削成 3 条、对账轮的阈值留下 5 条。
+        from services.ai.protocol import Anomaly
+        from services.ai.rules import normalize_anomalies
+
+        def _one(thresholds):
+            return normalize_anomalies(
+                [
+                    Anomaly(
+                        title="t", category="c", severity="high", confidence="high",
+                        evidence=tuple(f"e{i}" for i in range(5)),
+                    )
+                ],
+                thresholds=thresholds,
+            )
+
+        normal = _one(RuleThresholds())
+        verify = _one(RuleThresholds(max_evidence=VERIFY_MAX_EVIDENCE))
+
+        assert len(normal.anomalies[0].evidence) == DEFAULT_MAX_EVIDENCE
+        assert len(verify.anomalies[0].evidence) == 5, "对账轮的依据不该被削"
+        assert any("仅保留前" in item.reason for item in normal.dropped)
+        assert not [item for item in verify.dropped if "仅保留前" in item.reason]

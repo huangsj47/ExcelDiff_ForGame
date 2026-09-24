@@ -91,6 +91,7 @@ def build_budget_plan(
     reserved_output_chars: int = 0,
     family_pool: Mapping[str, object] | None = None,
     plan: Mapping[str, object] | None = None,
+    verify_reserve: tuple[int, int] | None = None,
 ) -> dict:
     """返回可直接落库/下发 UI 的预算事实，不做费用预测。
 
@@ -112,6 +113,12 @@ def build_budget_plan(
     `rounds_pool` / `*_nominal` / `synthesis_floor_*` / `note`）时，`job_theoretical_max`
     改按「池 + 汇总保底下限」算（汇总可越池，见 `subagent.FamilyQuota`）。老调用方不传
     时行为与从前逐字相同。
+
+    ## `verify_reserve`：估算侧带进来的对账预留
+
+    运行侧手里有 `plan.quota`，把预留放在 `family_pool` 里带进来；**估算侧拿不到 plan**
+    （它算的是「如果按这套配置跑会怎样」），只能自己按配置算一份 —— 走这个关键字。
+    两个来路算的是同一份数（同一个 `verify_reserve`），谁给就以谁为准。
     """
     shards = max(1, int(shard_count))
     family = shards > 1
@@ -121,11 +128,26 @@ def build_budget_plan(
     effective = max(0, int(effective_prompt_chars))
     pool = dict(family_pool or {}) or None
     if pool is not None:
+        # **三层都要算进去**：分片怎么花（池）＋ 汇总的保底（可越池）＋ 对账轮的预留。
+        #
+        # 最后一层原先漏了，于是计划里的理论上限比实际能发出去的次数**小**：实测 run 58
+        # 的面板写 252，而那一次真的发出了 256 次。原因是对账轮跑在「池内剩余 + 它那一份
+        # 预留」上，而编排层**不为它记账**（`run_family` 只对分片与汇总调 `quota.spend`），
+        # 于是它的那几次发生在池的账之外 —— 上限公式必须单独把它们加上，否则这个数永远
+        # 比实际小，而「理论上限」正是用户拿来判断「这次到底花了多少」的那把尺子。
+        reserve_requests = max(0, int(pool.get("verify_requests") or 0))
+        reserve_rounds = max(0, int(pool.get("verify_rounds") or 0))
+        if verify_reserve is not None:
+            # 显式给的那个压过池里带的（两者本来同源，估算侧那一份是**配置级**的估算）。
+            reserve_requests = max(0, int(verify_reserve[0] or 0))
+            reserve_rounds = max(0, int(verify_reserve[1] or 0))
         theoretical_max = {
             "rounds": max(0, int(pool.get("rounds_pool") or 0))
-            + max(0, int(pool.get("synthesis_floor_rounds") or 0)),
+            + max(0, int(pool.get("synthesis_floor_rounds") or 0))
+            + reserve_rounds,
             "tool_requests": max(0, int(pool.get("requests_pool") or 0))
-            + max(0, int(pool.get("synthesis_floor_requests") or 0)),
+            + max(0, int(pool.get("synthesis_floor_requests") or 0))
+            + reserve_requests,
         }
     else:
         theoretical_max = {
@@ -159,6 +181,9 @@ def build_budget_plan(
             "rounds_nominal": max(0, int(pool.get("rounds_nominal") or 0)),
             "synthesis_floor_requests": max(0, int(pool.get("synthesis_floor_requests") or 0)),
             "synthesis_floor_rounds": max(0, int(pool.get("synthesis_floor_rounds") or 0)),
+            # 对账轮的预留（上面那两项已经把它算进 `job_theoretical_max` 了）。
+            "verify_requests": reserve_requests,
+            "verify_rounds": reserve_rounds,
             "note": str(pool.get("note") or ""),
         }
         if pool is not None

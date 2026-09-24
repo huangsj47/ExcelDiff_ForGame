@@ -73,6 +73,25 @@ MIN_VERIFY_REQUESTS = 3
 MAX_VERIFY_REQUESTS = 12
 # 对账轮预留的轮次：一次找反证 + 一次按地址补读。
 VERIFY_ROUNDS_RESERVE = 2
+#: 对账轮**每条结论**最多留几条依据。它与常规轮不同：常规轮的 `evidence` 是「支撑这条
+#: 结论的几个坐标」（3 条是防注水），而**对账轮的 `evidence` 是它核过的清单** —— 一条
+#: 结论有几条断言、每一条核自哪里，本来就多于 3 条。沿用常规轮那个 3 会把它核过的部分
+#: 抹掉：实测 run 58 有 5 条对账轮的结论被那句「仅保留前 3 条」削过，而**削掉的正是
+#: 「这一处我也去看过」** —— 报告里那句「已核」于是没有对应的记录可回看。
+#:
+#: 仍然要有个上限（模型可以把依据列到几十条），取 12：够覆盖「读 diff + 读正文 + 查
+#: 引用 + 逐条断言的坐标」这一整套，又不至于让一条结论的依据长过它自己的正文。
+VERIFY_MAX_EVIDENCE = 12
+
+#: 任务书里逐条列出的必读文件上限。**它是提示词长度与「照做」之间的折中**：
+#: 列太多会把分片任务书撑大（而每个成员都要付这一份的钱），列太少则「必读」这句话
+#: 落不到具体文件上。超出的那些由 `change-manifest` 分段给出（同样带仓库与提交）。
+#:
+#: 旧值是 200，那时每行只有一个裸路径；现在每行要写「路径 + 提交 + 仓库」三样，
+#: 同样的行数会长出两倍多，所以收紧到 60。真实批次里每片的分配量在几十条这一档
+#: （实测 run 58：120 个文件分给若干片），60 够用；**它绑住的是超大批次**，
+#: 而那种情况本来就不该靠任务书把文件名逐个念完。
+MANDATORY_LIST_MAX_ITEMS = 60
 
 #: 断言类型的**中文说法**（给复核轮看的那一份）。与 `protocol.CLAIM_KINDS` 一一对应 ——
 #: 把 `negative_scope` 这种标识符直接印给模型，它会当成又一个要照抄的字符串，而不是
@@ -135,21 +154,51 @@ class FamilyQuota:
     #: 「正文与复核状态不一致」不可能再因为额度而出现。
     verify_requests: int = 0
     verify_rounds: int = 0
+    #: **启动前**的覆盖预检那句话（`mandatory_progress.coverage_precheck`）：分到各片的
+    #: 必读文件比池还多时，它在这里留一份，由 `run_family` 在开跑前打进日志。
+    #: 空串 = 够用（绝大多数批次）；它不参与任何额度计算。
+    coverage_note: str = ""
 
-    def shard_caps(self, members_after: int) -> tuple[int, int]:
+    def shard_caps(
+        self,
+        members_after: int,
+        *,
+        mandatory_floor: int = 0,
+        later_mandatory_floor: int = 0,
+    ) -> tuple[int, int]:
         """一个分片开跑前的「当片上限」：`(索取上限, 轮次上限)`。
 
         `members_after` 是本片**之后**还要跑的分片数（不含汇总）；汇总的下限与**对账轮的
         预留**都在这里一并扣掉 —— 分片永远消费不到那一份（见 `verify_reserve`）。
+
+        ## `mandatory_floor`：必读清单的**保底**（P1b）
+
+        前两个参数来自 `mandatory_request_floor`：本片必读清单**超出名义额**的条数，以及
+        后面几片各自的那个数。语义是「这一片至少要能把它分到的文件各读一次」——
+        而读一次要一次索取，所以它是索取额度的下限。
+
+        三个刻意的口径：
+
+        * **减去名义额**再算保底。名义额本来就是这一片可自由支配的索取次数，一份 diff
+          一次索取，`名义额 ≥ 必读条数` 时保底是 0 ⇒ **行为与加这一项之前逐字节相同**。
+          直接用条数当保底会在每一条真实批次上生效，而它**不是**「多给」：池子就那么大，
+          前片多拿意味着后片少拿（实测口径下第 4 片会被压到 10 次），与「保底」正好相反。
+        * **后面的分片也要留**（`later_mandatory_floor`）。只保住当前这一片，等于把
+          「必读清单」这件事推给最先跑的那一片 —— 而饿死恰恰发生在最后一片。
+        * **只在索取这一维**。读 N 个文件要 N 次索取，但引擎一轮能执行多条，轮次数与
+          文件数没有对应关系；给轮次也加一个按文件数的保底只会虚占池子。
         """
+        floor = max(0, int(mandatory_floor or 0))
         return (
             self._cap(
                 left=self.requests_left,
                 nominal=self.requests_nominal,
+                floor=floor,
                 reserved=(
                     members_after * self.requests_nominal
                     + MIN_MEMBER_TOOL_REQUESTS
                     + self.verify_requests
+                    + max(0, int(later_mandatory_floor or 0))
                 ),
             ),
             self._cap(
@@ -203,12 +252,17 @@ class FamilyQuota:
         return max(0, self.rounds_pool - self.rounds_used)
 
     @staticmethod
-    def _cap(*, left: int, nominal: int, reserved: int) -> int:
-        """名义额 + 富余，且不许超池、池空时如实给 0（引擎会如实降级）。"""
+    def _cap(*, left: int, nominal: int, floor: int = 0, reserved: int) -> int:
+        """名义额 + 保底 + 富余，且不许超池、池空时如实给 0（引擎会如实降级）。
+
+        `floor` 是**必读清单的保底**（见 `shard_caps`）：它不被富余的计算吞掉 ——
+        富余是「别人省下来的」，保底是「这一片本来就该有的」，把保底并进 `nominal`
+        会让「池紧时保底优先于后片的富余」这件事在算式里消失。
+        """
         if left <= 0:
             return 0
-        rolled = max(0, left - nominal - reserved)
-        return min(left, nominal + rolled)
+        rolled = max(0, left - nominal - floor - reserved)
+        return min(left, nominal + floor + rolled)
 
 
 @dataclass(frozen=True)
@@ -374,6 +428,25 @@ def verify_reserve(*, enabled: bool, items: int) -> tuple[int, int]:
     return (requests, VERIFY_ROUNDS_RESERVE)
 
 
+def verify_reserve_for(config: Mapping[str, Any] | None) -> tuple[int, int]:
+    """配置 dict → 对账轮的预留（给**估算侧**用的那一个调用口）。
+
+    运行侧手里有 `plan.quota`（它按汇总出来的真实条数算），估算侧只有配置 ——
+    所以它只能用**规划期的默认条数**（跑之前不知道会出几条结论，`plan_family` 在
+    `verify_items` 缺省时拿到的也是这个值）。口径必须与运行侧是同一个函数：两份各算
+    一遍的话，预估端点的理论上限会与运行侧对不上，而那个数正是用户判断「这个额度够
+    不够」的依据。
+
+    **它在这里而不是在调用方**：估算端点那个文件顶着 2000 行的 ERROR 闸门
+    （`scripts/check_file_length.py`），调用方多一行就过不去；而这段判断与
+    `verify_reserve` 是同一件事，放在一起也更好读。
+    """
+    data = dict(config or {})
+    return verify_reserve(
+        enabled=bool(data.get("subagent_verify")), items=DEFAULT_VERIFY_ITEMS
+    )
+
+
 def pool_exhausted_note(quota: "FamilyQuota", stage: str) -> str:
     """池耗尽那一刻的告警：**阶段名 + 池剩余数**（原先只有引擎那句「额度用尽」）。
 
@@ -459,22 +532,42 @@ def build_member_task(member: MemberPlan, plan: FamilyPlan, *, pool_note: str = 
             + "\n\n你读到了属于它们维度的问题也可以报（宁可多报，由主代理去重），"
             "但不要为了它们专门花索取额度。"
         )
-    if member.assigned_paths:
-        visible = member.assigned_paths[:200]
-        listed = "\n".join(f"- `{path}`" for path in visible)
-        omitted = len(member.assigned_paths) - len(visible)
+    # **确定性分工 → 确定性取证**（P1b）。分片是平台按 `(仓库, 路径, 提交)` 定下来的，
+    # 而取证此前完全靠模型自主：平台只预取 `DEFAULT_MAX_FILES` 个 diff，剩下的没有任何
+    # 机制要求「分到这个文件的人」去读它 —— 实测 run 58 分配 120 个、取到证据的只有 63 个，
+    # 20 个补偿项里 14 个第二次仍然没读。这一段把那句话落到具体文件上：清单里每一条都
+    # 写好了它的三样（路径、提交、仓库），照着填就能索取，不必它自己再去找。
+    if member.assigned_files:
+        visible = member.assigned_files[:MANDATORY_LIST_MAX_ITEMS]
+        compensation = [item for item in visible if item.is_compensation]
+        listed = "\n".join(
+            f"- {item.describe()}" + ("　**← 补偿项**" if item.is_compensation else "")
+            for item in visible
+        )
+        omitted = len(member.assigned_files) - len(visible)
         tail = (
-            f"\n- ……另有 {omitted} 个，请用 "
-            "`read_reference` 读取 `change-manifest` 的后续分段"
+            f"\n- ……另有 {omitted} 个，请用 `read_reference` 读取 "
+            "`change-manifest` 的后续分段（那一份里每条都带仓库与提交）"
             if omitted
             else ""
         )
         blocks.append(
-            "## 确定性文件分工\n\n"
-            f"平台给你分配了 {len(member.assigned_paths)} 个优先检查文件。每个变更文件"
-            "至少属于一个分片；关键路径可能同时属于两个分片。\n\n"
+            "## 确定性文件分工（**必读清单**）\n\n"
+            f"平台给你分配了 {len(member.assigned_files)} 个优先检查文件。"
+            "**先把下面这些各取一次 `file_diff`，再去做你那几个维度的深挖。**"
+            "每行已经把这条 diff 需要的三样都写好了（路径、提交、仓库），照着填即可 —— "
+            "**这是本次分析的覆盖底线**：它们一条都没被读过，报告里的覆盖率就不成立。"
+            "\n\n"
             + listed
             + tail
+            + (
+                "\n\n"
+                f"其中 **{len(compensation)} 条是补偿项**（标了「← 补偿项」的那些）："
+                "它们**不是本轮新改的**，而是上一轮没取到证据的那些。优先级高于新改动 —— "
+                "上一轮已经漏过一次，再漏一次就没有下一轮可补了。"
+                if compensation
+                else ""
+            )
         )
     blocks.extend(
         [
