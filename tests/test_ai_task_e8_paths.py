@@ -35,7 +35,7 @@ import services.task_worker_service as worker_service  # noqa: F401 —— 环�
 import services.task_worker_task_handlers as task_handlers
 from app import app, create_tables, db
 from models import Project, Repository, WeeklyVersionConfig, WeeklyVersionDiffCache
-from models.ai_analysis import AiAnalysisRun, AiWeeklyAnalysisState
+from models.ai_analysis import AiAnalysisJob, AiAnalysisRun, AiWeeklyAnalysisState
 from services.ai import job_service
 from services.ai.provenance import current_provenance
 
@@ -594,3 +594,129 @@ class TestTheFiveWeeklyPathsOverHttp:
             assert _runs_for(group) == before, "没有新变化却建了一条 run —— 白花一次调用"
         assert job["state"] == "reused", job
         assert job["reused_run_id"] == baseline_run_id, job
+
+
+# ---------------------------------------------------------------------------
+#  P2-2：job 上的计划三列与目标快照**必须真的被写**
+# ---------------------------------------------------------------------------
+
+
+class TestTheJobRemembersItsPlan:
+    """`planned_files` / `planned_tokens_low|high` / `target_snapshot_id` 此前**零生产写入**
+    （只有 `to_dict` 在读）—— 面板上那几格永远是空的，而「这次要跑多少文件、大概多少钱」
+    正是执行前唯一还能拦一下的信息。
+
+    写的时刻是「快照已冻结、模式升格已确定」：那两样只有到那时才是事实，而升格会把计划
+    整体换一次（增量 → 全量），早写的那一份必然作废。
+    """
+
+    def _job(self, group):
+        config = db.session.get(WeeklyVersionConfig, group["cfg_id"])
+        result = job_service.create_or_attach_job(
+            config=config, requested_mode="incremental", trigger_source="manual"
+        )
+        db.session.commit()
+        return db.session.get(AiAnalysisJob, result.job_id)
+
+    def test_the_facts_are_written_from_the_payload(self):
+        with app.app_context():
+            create_tables()
+            group = _make_group(file_count=6)
+            job = self._job(group)
+            payload = {
+                "scope": "full",
+                "delta_files": [{"file_path": _PATH.format(index=i)} for i in range(6)],
+                "snapshot": {"snapshot_id": 4242},
+            }
+
+            job_service.record_plan(
+                job.id,
+                payload=payload,
+                project_id=group["project_id"],
+                config_id=group["cfg_id"],
+            )
+            db.session.commit()
+
+            row = AiAnalysisJob.query.filter_by(id=job.id).one()
+            assert row.planned_files == 6
+            assert row.target_snapshot_id == 4242
+
+    def test_a_missing_input_account_says_why_instead_of_writing_zero(self):
+        """没有输入账时 `planned_files` 保持 NULL，并把原因写下来 —— 0 会读成「这次 0 个文件」。"""
+        with app.app_context():
+            create_tables()
+            group = _make_group(file_count=4)
+            job = self._job(group)
+
+            job_service.record_plan(job.id, payload={"scope": "commit"})
+            db.session.commit()
+
+            row = AiAnalysisJob.query.filter_by(id=job.id).one()
+            assert row.planned_files is None, "把「没有清单」写成了 0"
+            assert "未估" in (row.planned_estimate_note or "")
+
+    def test_an_estimate_failure_is_stored_as_a_reason_not_a_zero(self, monkeypatch):
+        """估算炸了（配置读不动、样本查不到）⇒ `planned_tokens_*` 留空 + **写明原因**。"""
+        import services.ai_usage_service as usage_service
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("价格表坏了")
+
+        monkeypatch.setattr(usage_service, "analysis_estimate", boom)
+        with app.app_context():
+            create_tables()
+            group = _make_group(file_count=3)
+            job = self._job(group)
+            job_service.record_plan(
+                job.id,
+                payload={
+                    "scope": "full",
+                    "delta_files": [{"file_path": _PATH.format(index=0)}],
+                    "snapshot": {"snapshot_id": 8},
+                },
+                project_id=group["project_id"],
+                config_id=group["cfg_id"],
+            )
+            db.session.commit()
+
+            row = AiAnalysisJob.query.filter_by(id=job.id).one()
+            assert row.planned_tokens_low is None and row.planned_tokens_high is None
+            assert "估算失败" in (row.planned_estimate_note or "")
+            assert "不是 0" in (row.planned_estimate_note or "")
+            # 估算失败**不挡住这次分析**：两个事实照样写下去
+            assert row.planned_files == 1 and row.target_snapshot_id == 8
+
+    def test_the_estimate_comes_from_the_same_function_as_the_precheck(self, monkeypatch):
+        """估算走**预检端点用的同一个函数**：两处各算一遍，用户会在两个地方看到两个数。"""
+        import services.ai_usage_service as usage_service
+
+        seen = {}
+
+        def fake_estimate(project_id, **kwargs):
+            seen["project_id"] = project_id
+            seen.update(kwargs)
+            return {"tokens": {"low": 1200, "high": 3400}, "notes": []}
+
+        monkeypatch.setattr(usage_service, "analysis_estimate", fake_estimate)
+        with app.app_context():
+            create_tables()
+            group = _make_group(file_count=3)
+            job = self._job(group)
+            job_service.record_plan(
+                job.id,
+                payload={
+                    "scope": "full",
+                    "delta_files": [{"file_path": _PATH.format(index=0)}],
+                    "snapshot": {"snapshot_id": 7},
+                },
+                project_id=group["project_id"],
+                config_id=group["cfg_id"],
+            )
+            db.session.commit()
+
+            row = AiAnalysisJob.query.filter_by(id=job.id).one()
+            assert (row.planned_tokens_low, row.planned_tokens_high) == (1200, 3400)
+            assert row.planned_estimate_note in (None, "")
+            assert seen["project_id"] == group["project_id"]
+            assert seen["config_id"] == group["cfg_id"]
+            assert seen["planned_files"] == 1

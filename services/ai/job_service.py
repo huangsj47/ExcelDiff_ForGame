@@ -76,7 +76,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 from sqlalchemy.exc import IntegrityError
 
@@ -712,6 +712,108 @@ def _create_analysis_task(job, config_id, target_key, *, mode, source, key) -> O
 # ---------------------------------------------------------------------------
 #  执行侧写回（worker 调用）
 # ---------------------------------------------------------------------------
+
+
+def record_plan(
+    job_id,
+    *,
+    payload: Mapping[str, Any] | None = None,
+    project_id: Optional[int] = None,
+    config_id: Optional[int] = None,
+    target_type: str = "weekly",
+):
+    """把**这一轮的计划**写回这条 job（P2-2）：输入文件数 / token 区间 / 目标快照 id。
+
+    ## 为什么落在这里、这个时刻
+
+    三个 `planned_*` 与 `target_snapshot_id` 此前**没有任何生产写入**（只有 `to_dict`
+    在读它们），于是 `/jobs/<id>` 与确认框上那几格永远是空的 —— 而「这次要跑多少文件、
+    大概多少钱」正是执行前唯一还能拦一下的信息。
+
+    写的时刻是「快照已冻结、模式升格已确定」：这三样里有两样（目标快照、真实输入文件数）
+    只有到那时才是**事实**而不是预估值；模式升格则会让计划整体变一次（增量 → 全量），
+    早写的那一份必然作废。
+
+    ## 估算走**预检端点用的同一个函数**
+
+    `analysis_estimate` 是那个端点的取数+算术入口，这里原样调它（同参数、同口径）——
+    两处各算一遍，用户就会在确认框看到一个数、在 job 详情里看到另一个数，而两个数都是
+    「预计消耗」。取不到区间时（没有同类样本、配置读不动、函数抛错）**不写 0**：把原因
+    留进 `planned_estimate_note`，界面照它显示。
+    """
+    job = get_job(job_id)
+    if job is None:
+        return None
+    data = dict(payload) if isinstance(payload, Mapping) else {}
+    files = _payload_file_count(data)
+    if files is not None:
+        job.planned_files = files
+    snapshot_id = _payload_snapshot_id(data)
+    if snapshot_id is not None:
+        job.target_snapshot_id = snapshot_id
+
+    if files is None or project_id is None:
+        job.planned_estimate_note = (
+            "这次没有可用的输入账（payload 里没有文件清单），区间没有估算 ——"
+            "面板上那两格空白表示**未估**，不是 0"
+        )
+    else:
+        try:
+            from services.ai_usage_service import analysis_estimate
+
+            estimate = analysis_estimate(
+                project_id,
+                planned_files=files,
+                mode=str(data.get("scope") or ""),
+                target_type=target_type,
+                config_id=config_id,
+            )
+            tokens = (estimate or {}).get("tokens") or {}
+            low, high = tokens.get("low"), tokens.get("high")
+            if low is None and high is None:
+                job.planned_estimate_note = "；".join(
+                    str(note) for note in ((estimate or {}).get("notes") or [])[:2]
+                ) or "没有同类历史运行可作样本，区间未估算（不是 0）"
+            else:
+                job.planned_tokens_low = low
+                job.planned_tokens_high = high
+                job.planned_estimate_note = ""
+        except Exception as exc:  # noqa: BLE001 —— 估算失败不该挡住这次分析
+            job.planned_estimate_note = (
+                f"区间估算失败（{type(exc).__name__}: {exc}）—— 空白表示**未估**，不是 0"
+            )
+            _log(f"⚠️ AI 分析：job {job_id} 的计划估算写不进去：{exc}")
+    db.session.flush()
+    return job
+
+
+def _payload_file_count(payload: Mapping[str, Any]) -> Optional[int]:
+    """这次运行的输入文件数（`delta_files` 的条数；取不到时退回 summary 里的计数）。
+
+    **取不到就是 `None`**：写成 0 会让面板显示「这次 0 个文件」，而真相是「这份 payload
+    里没有清单」（单提交模式就是那样）。
+    """
+    rows = payload.get("delta_files")
+    if isinstance(rows, (list, tuple)):
+        return len(rows)
+    summary = payload.get("summary")
+    if isinstance(summary, Mapping):
+        for key in ("delta_files", "batch_files"):
+            value = summary.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+    return None
+
+
+def _payload_snapshot_id(payload: Mapping[str, Any]) -> Optional[int]:
+    """这次分析冻结的目标快照 id（`payload["snapshot"]["snapshot_id"]`）。"""
+    snapshot = payload.get("snapshot")
+    if not isinstance(snapshot, Mapping):
+        return None
+    value = snapshot.get("snapshot_id")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def mark_running(

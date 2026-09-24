@@ -302,6 +302,9 @@ def _migrate_ai_analysis_columns(db, log_print):
         {
             "progress_json": "progress_json TEXT",
             "progress_updated_at": "progress_updated_at DATETIME",
+            # 计划三列取不到值时的**原因**（P2-2）。老行是 NULL —— 而那正好是
+            # 「还没写过计划」那个语义，与「估了但估不出来」是两件事。
+            "planned_estimate_note": "planned_estimate_note LONGTEXT",
         },
         log_print,
     )

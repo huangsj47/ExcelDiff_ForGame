@@ -1871,6 +1871,10 @@ def run_weekly_analysis_background(
                     effective_mode=run.scope,
                     upgrade_reason=runtime_reason,
                 )
+                # 计划三列 + 目标快照（P2-2）：快照已冻结、模式升格已确定，此刻它们才是事实
+                job_service.record_plan(
+                    task_row.job_id, payload=payload, project_id=project_id, config_id=config_id
+                )
                 db.session.commit()
         except Exception as exc:  # noqa: BLE001
             db.session.rollback()

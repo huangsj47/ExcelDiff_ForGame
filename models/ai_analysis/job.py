@@ -216,6 +216,10 @@ class AiAnalysisJob(db.Model):
     planned_files = db.Column(db.Integer, nullable=True)
     planned_tokens_low = db.Column(db.Integer, nullable=True)
     planned_tokens_high = db.Column(db.Integer, nullable=True)
+    # 三列 `planned_*` **取不到值时写在这里的文字**（P2-2）。NULL 本身说不出「为什么没有」
+    # ——界面上一个空格子既可以读成「没估」，也可以读成「估出来是 0」，而这两件事对
+    # 「这次要不要跑」的判断正好相反。写不了估算时就把原因留在这里，一个字都不许省。
+    planned_estimate_note = db.Column(BigText, nullable=True)
 
     # --- 租约 ---
     # worker 取走时写，跑完清空。过期即可被恢复扫描判死或放回队列 ——
@@ -312,6 +316,7 @@ class AiAnalysisJob(db.Model):
             "planned_files": self.planned_files,
             "planned_tokens_low": self.planned_tokens_low,
             "planned_tokens_high": self.planned_tokens_high,
+            "planned_estimate_note": self.planned_estimate_note or "",
             "error_message": self.error_message or "",
             "delta_summary": self.delta_summary or "",
             "created_at": _iso(self.created_at),
