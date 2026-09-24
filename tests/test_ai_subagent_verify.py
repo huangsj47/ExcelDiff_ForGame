@@ -823,3 +823,40 @@ class TestWhoTheVerifyRoundChecks:
             assert finding.finding_id == official[finding.anomaly.title], (
                 "挑子集时重排了编号 —— 裁决会打到另一条结论上"
             )
+
+
+def test_only_one_place_in_production_builds_a_family_outcome():
+    """`aggregate_outcomes(verify_requested=…)` 的默认值是 `False`（＝**没有复核**）。
+
+    那个默认对测试是对的（直接调它的用例压根没有对账轮），但它有一个安静的坏法：
+    生产里再多一个调用点、而那一处忘了传，症状就是「配置要了复核、报告却一个字不说」
+    原地复现 —— 与 run 65 一模一样，而且不会有任何报错。
+
+    所以这里钉住两件事：**生产代码里只有一处**调它（新加调用点必须来改这条，等于强制
+    做一次决定），且那一处**显式传了** `verify_requested`。
+
+    用 AST 而不是数文本：注释与字符串里的同名片段不该算进去（本仓库有过这种假通过）。
+    """
+    import ast
+    from pathlib import Path
+
+    production = Path(__file__).resolve().parents[1] / "services"
+    calls: list[tuple[str, int, set[str]]] = []
+    for path in sorted(production.rglob("*.py")):
+        # `utf-8-sig`：生产侧有带 BOM 的文件，而 `ast.parse` 会把 BOM 当非法字符。
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "aggregate_outcomes":
+                calls.append(
+                    (
+                        str(path.relative_to(production)),
+                        node.lineno,
+                        {kw.arg for kw in node.keywords if kw.arg},
+                    )
+                )
+
+    assert len(calls) == 1, f"生产里有 {len(calls)} 处调 aggregate_outcomes：{calls}"
+    where, line, keywords = calls[0]
+    assert "verify_requested" in keywords, (
+        f"{where}:{line} 没传 verify_requested —— 要了复核却没跑成时，报告会静默不提"
+    )
