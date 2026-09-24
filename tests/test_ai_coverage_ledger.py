@@ -473,8 +473,10 @@ def test_the_report_shows_the_ledger_and_never_says_full_means_everything_read()
     assert "| 分析范围 | 全量 |" not in text
     assert "不等于「整个版本都看过了」" in text
     assert "看完了" not in text and "全部读完" not in text
-    # 三段式没被改坏：正文两侧仍然各一条分隔线
-    assert text.count("\n---\n") == 2
+    # 分隔线数 = 元信息｜正文｜附录｜页脚三处（2026-09-25 末尾加了渲染版本页脚，
+    # 原来只有元信息与正文两处；页脚那一段见 `report_document.RENDER_FOOTER`）。
+    # 这里钉的是**覆盖那一段没有把三段式挤坏**：它在元信息表之后、正文之前，不占分隔线。
+    assert text.count("\n---\n") == 3
 
 
 def test_a_report_without_a_ledger_is_byte_for_byte_what_it_was():

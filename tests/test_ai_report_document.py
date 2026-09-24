@@ -237,8 +237,37 @@ def test_the_document_is_meta_then_report_then_appendix():
     report_at = text.index("# 变更理解")
     appendix_at = text.index(doc.APPENDIX_TITLE)
     assert meta_at < report_at < appendix_at
-    # 正文两侧各有一条分隔线
-    assert text.count("\n---\n") == 2
+    # 元信息／正文／附录／页脚四处，各由一条分隔线隔开。
+    # **2026-09-25 从 2 变 3**：末尾加了那行渲染版本页脚（见
+    # `test_the_export_names_the_render_version_that_produced_it`）。
+    assert text.count("\n---\n") == 3
+
+
+def test_the_export_names_the_render_version_that_produced_it():
+    """页脚写明**渲染版本**（2026-09-25）。
+
+    这份文档不是存下来的文本：元信息、附录表格、各列标签全是**导出那一刻**现拼的。于是
+    同一个 run 在平台升级前后导出的两份可能不一样 —— 而「同一个 run 的两份导出一致吗」
+    正是审计场景里会被问的问题。没有这个标记，差异只能被读成「数据被改过」。
+
+    判据是**两件事都在**：版本号（分清平台改没改），以及「正文是存档原文／处置列是现查的」
+    （分清变的是哪一半）。只写版本号，读者仍然不知道哪一部分会变。
+    """
+    footer = _build().split("\n---\n")[-1].strip()
+
+    assert doc.RENDER_VERSION in footer
+    assert "存档原文" in footer and "处置" in footer
+    assert footer.endswith("*"), "页脚是斜体那一行，后面不该还有正文"
+    assert "\n" not in footer, "页脚是一行；换行了它就不像出处说明，而像又一节"
+
+
+def test_the_render_version_looks_like_a_version():
+    """版本号是**日期式**的（与 `auto_sizing.PLAN_VERSION` 同一套写法），不是占位符。
+
+    钉格式是因为它要出现在对外文档里：写成 `dev` / 空串 / `1` 都读不出「新旧」，
+    而读者判断「这两份是不是同一个渲染器出的」全靠它。
+    """
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}\.\d+", doc.RENDER_VERSION)
 
 
 def test_the_meta_table_carries_the_things_a_reader_needs_to_locate_this_run():
