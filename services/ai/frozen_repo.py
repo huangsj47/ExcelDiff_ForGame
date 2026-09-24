@@ -590,9 +590,16 @@ def _label_of(frozen: Any) -> str:
 
 
 def reader_for_repository(readers: Sequence[Any], repository_id: Any) -> Any:
-    """在一组读取器里按仓库 id 找那一个。找不到返回 `None`。"""
+    """在一组读取器里按仓库 id 找那一个。找不到返回 `None`。
+
+    **按字符串形态比**：这个 id 有两个来源 —— 库里的整数（`FrozenRepository.repository_id`）
+    与模型在 `repository_id` 字段里写的文本（`"2"`）。用 `==` 比会让「模型点名了仓库 2」
+    永远匹配不上、被回一句「这个仓库不在范围里」，而界面上两个 2 长得一模一样。
+    """
+    wanted = "" if repository_id is None else str(repository_id)
     for reader in readers or ():
-        if getattr(getattr(reader, "frozen", None), "repository_id", None) == repository_id:
+        got = getattr(getattr(reader, "frozen", None), "repository_id", None)
+        if ("" if got is None else str(got)) == wanted:
             return reader
     return None
 
@@ -605,12 +612,7 @@ def ambiguous_path_text(scope: RepoReadScope, path: str) -> str:
     仓库并说明怎么指定（带 `repository_id`，或给一条改过它的提交）。
     """
     candidates = scope.candidates(path)
-    labels = [
-        _label_of(item)
-        for item in (getattr(scope, "frozens", ()) or ())
-        if getattr(item, "repository_id", None) in candidates
-    ]
-    named = "、".join(labels) or "、".join(str(item) for item in candidates)
+    named = _labels_of(scope, candidates)
     return (
         f"[需要在多个仓库之间指定] `{path}`：本项目的 {len(candidates)} 个"
         f"仓库里都有这条路径（{named}）。**平台不替你猜是哪一个** —— 在请求里带上"
@@ -630,6 +632,115 @@ def not_tracked_text(scope: RepoReadScope, path: str) -> str:
         "**这不等于「没有引用」** —— 请核对路径后另要一次，"
         "或者把这件事写成信息缺口。"
     )
+
+
+def _labels_of(scope: RepoReadScope, repository_ids: Sequence[Any]) -> str:
+    """把一串仓库 id 写成 `编号（名字）` 列表（名字取冻结对象自带的那一份）。"""
+    wanted = tuple(repository_ids)
+    labels = [
+        _label_of(item)
+        for item in (getattr(scope, "frozens", ()) or ())
+        if getattr(item, "repository_id", None) in wanted
+    ]
+    return "、".join(labels) or "、".join(str(item) for item in wanted)
+
+
+def unknown_repository_text(scope: RepoReadScope, path: str, repository_id: Any) -> str:
+    """模型点名了一个**本次没冻结**的仓库（id 写错，或那个仓库这次没读到）。
+
+    与 `ambiguous_path_text` 是一对：那条说「有几个候选、怎么指定」，这条说
+    「你指定的这个不在范围里，在范围里的是这些」—— 都得让下一轮能换对。
+    """
+    known = _labels_of(
+        scope, [getattr(item, "repository_id", None) for item in scope.frozens or ()]
+    )
+    tracked_by = _labels_of(scope, scope.candidates(path))
+    return (
+        f"[仓库不在本次范围里] `{path}`：你指定的是仓库 {repository_id}，"
+        f"而本次只读范围里的是 {known or '（一个都没有）'}。\n"
+        f"跟踪这条路径的是：{tracked_by or '以上任何一个都没有'}。"
+        "带上其中之一的 `repository_id` 再问一次。"
+    )
+
+
+def not_tracked_in_repository_text(
+    scope: RepoReadScope, path: str, repository_id: Any
+) -> str:
+    """点名的那个仓库**自己不跟踪**这条路径。跟踪它的是哪几个，必须说出来。"""
+    tracked_by = _labels_of(scope, scope.candidates(path))
+    return (
+        f"[路径不在这个仓库里] `{path}`：仓库 {repository_id} 的冻结版本里没有跟踪它"
+        "（拼错、改过名，或者它在另一个仓库里）。\n"
+        + (
+            f"跟踪这条路径的是：{tracked_by}。带上它的 `repository_id` 再问一次。"
+            if tracked_by
+            else "本次冻结的任何仓库都没有跟踪它 —— 请核对路径。"
+        )
+        + "\n**这不等于「没有引用」**。"
+    )
+
+
+@dataclass(frozen=True)
+class FrozenRead:
+    """一次冻结版本读取的**去向**：用哪个读取器读哪条路径，或者回哪一句拒绝。"""
+
+    reader: Any = None
+    path: str = ""
+    #: 非空表示「不读，回这一句」——理由必须能指路（见模块抬头「拒绝要给理由」）。
+    refusal: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.reader is not None and not self.refusal
+
+
+def resolve_frozen_read(
+    scope: RepoReadScope,
+    readers: Sequence[Any],
+    path: Any,
+    repository_id: Any = "",
+) -> FrozenRead:
+    """要读一条**不在本批次**的路径 → 决定「用哪个读取器读」或「回哪一句拒绝」。
+
+    判定顺序是刻意的，**每一步的拒绝都要给理由**（否则模型把它读成「平台取数失败」，
+    再写进报告的信息缺口）：
+
+    1. **路径形状**（`resolve_repo_path`：绝对路径 / 盘符 / `..` / 控制字符）；
+    2. **凭证排除**（`exclusion_reason`）；
+    3. 点名了仓库（`repository_id`）→ **只认那一个**，点错就说清在范围内的是谁、
+       跟踪这条路径的又是谁；
+    4. 没点名而**多个仓库都跟踪**这条路径 → 不猜，回一份列出候选的可操作拒绝；
+    5. 否则用跟踪它的那个仓库，或第一个（只用来渲染「不在跟踪树里」那句）。
+
+    1 与 2 排在 3、4 **之前**，且与加多仓支持之前逐字相同 —— 扩大范围只放宽了路径集合，
+    这两条判据一步都没绕过（`protocol.sanitize_requests` 的同一套判据在协议层也各判一次）。
+
+    `readers` 为空时的处理**不在这里**：那是「这一层读不了」而不是「这条路不合法」，
+    调用方据此返回 `None`（`ContextProvider` 契约里 `None` 与「没有内容」是两件事）。
+    """
+    normalized, reject = resolve_repo_path(path)
+    if reject:
+        return FrozenRead(refusal=reject_text(str(path or ""), reject))
+    blocked = exclusion_reason(normalized)
+    if blocked:
+        return FrozenRead(refusal=reject_text(normalized, blocked))
+    wanted = "" if repository_id is None else str(repository_id).strip()
+    if wanted:
+        reader = reader_for_repository(readers, wanted)
+        if reader is None:
+            return FrozenRead(refusal=unknown_repository_text(scope, normalized, wanted))
+        if reader.is_tracked(normalized) is False:
+            return FrozenRead(
+                refusal=not_tracked_in_repository_text(scope, normalized, wanted)
+            )
+        return FrozenRead(reader=reader, path=normalized)
+    candidates = scope.candidates(normalized)
+    if len(candidates) > 1:
+        return FrozenRead(refusal=ambiguous_path_text(scope, normalized))
+    reader = reader_for_repository(
+        readers, candidates[0] if candidates else None
+    ) or (readers[0] if readers else None)
+    return FrozenRead(reader=reader, path=normalized)
 
 
 def build_read_scope(
@@ -754,6 +865,7 @@ def resolve_frozen_repositories(
 __all__ = [
     "BLOB_CACHE_MAX_ENTRIES",
     "MAX_READ_BYTES",
+    "FrozenRead",
     "FrozenRepository",
     "FrozenTreeReader",
     "RepoReadScope",
@@ -762,6 +874,7 @@ __all__ = [
     "build_read_scope_multi",
     "cache_sizes",
     "exclusion_reason",
+    "not_tracked_in_repository_text",
     "not_tracked_text",
     "provider_repo_paths",
     "reader_for_repository",
@@ -769,8 +882,10 @@ __all__ = [
     "repository_label",
     "reset_caches",
     "resolve_frozen_repositories",
+    "resolve_frozen_read",
     "resolve_frozen_repository",
     "resolve_repo_path",
+    "unknown_repository_text",
 ]
 
 

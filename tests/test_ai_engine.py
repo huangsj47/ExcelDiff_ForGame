@@ -103,7 +103,7 @@ class FakeProvider:
     def file_diff(self, commit, path):
         return self._lookup(("file_diff", commit, path), f"diff of {path} at {commit}\n+ 一行改动")
 
-    def file_content(self, commit, path, lines=""):
+    def file_content(self, commit, path, lines="", repository_id=""):
         # `lines` 是 `file_content` 的可选行窗口（协议的一部分，见 services/ai/protocol.py）。
         # 这个桩忽略它（不关心给的是哪一段），但**形参不能少** —— 少了就会 TypeError，
         # 而取数失败是被接住的：表现不是报错，是「这一轮什么都没拿到」，测试静默退化。

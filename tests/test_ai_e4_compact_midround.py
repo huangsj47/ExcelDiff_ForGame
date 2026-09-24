@@ -326,7 +326,7 @@ class StubProvider:
         self.seen.append(("file_diff", commit, path))
         return f"diff of {path}"
 
-    def file_content(self, commit, path, lines=""):
+    def file_content(self, commit, path, lines="", repository_id=""):
         self.seen.append(("file_content", commit, path, lines))
         return "正文"
 

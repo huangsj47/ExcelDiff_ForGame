@@ -213,6 +213,99 @@ def test_background_read_of_the_same_path_says_it_must_not_guess(two_repos):
 
 
 # ==========================================================================
+#  一之二、点名了仓库就**读那一个**（`repository_id`）
+# ==========================================================================
+
+
+def test_naming_a_repository_reads_that_repositorys_version(two_repos):
+    """上一轮那份拒绝请它带 `repository_id`，它带了 —— 就得读到**那个仓库**的那一版。
+
+    这是「不猜」的另一半：不给就等于把另一个仓库的内容当成这个仓库的交出去，而两份同名
+    文件的内容与含义都可能不同（fixture 里两个 `config/item.lua` 的价格一个是 190、
+    一个是 999）。
+    """
+    provider = _provider(two_repos)
+
+    code_text = provider.file_content("", SHARED, "1-10", repository_id=str(CODE_REPO_ID))
+    config_text = provider.file_content("", SHARED, "1-10", repository_id=str(CONFIG_REPO_ID))
+
+    assert code_text is not None and config_text is not None
+    assert "999" in code_text and "这一个是代码仓库的" in code_text, code_text
+    assert "190" in config_text, config_text
+    assert code_text != config_text, "两个仓库读到的是同一份，说明仓库维度根本没生效"
+    # 读过哪个仓库要写在回执里：两份同名文件的抬头必须分得开。
+    assert "code" in code_text and "cfg" in config_text
+
+
+def test_naming_an_int_repository_id_matches_too(two_repos):
+    """模型写的是文本 `"2"`，而冻解对象上的 id 是整数 —— 两种形态必须都能匹配。
+
+    只按 `==` 比会让「点名了仓库 2」永远落进「这个仓库不在范围里」，而界面上两个 2
+    长得一模一样（这条是写测试时先踩到的）。
+    """
+    provider = _provider(two_repos)
+
+    text = provider.file_content("", SHARED, "1-10", repository_id=CODE_REPO_ID)
+
+    assert text is not None and "999" in text, text
+
+
+def test_naming_a_repository_that_does_not_track_the_path_says_who_does(two_repos):
+    """点名的仓库**自己不跟踪**这条路径 → 说清跟踪它的是哪几个（下一轮要能换对）。"""
+    provider = _provider(two_repos)
+
+    text = provider.file_content("", CONFIG_ONLY, "1-10", repository_id=str(CODE_REPO_ID))
+
+    assert text is not None
+    assert "不在这个仓库里" in text, text
+    assert f"{CONFIG_REPO_ID}（cfg）" in text, "没说清跟踪这条路径的是哪个仓库"
+    assert "199" not in text and "skills = {}" not in text, "点错仓库居然还是读到了另一个仓库的正文"
+
+
+def test_naming_a_repository_out_of_scope_lists_what_is_in_scope(two_repos):
+    """点名了一个本次没冻结的仓库（id 写错）→ 列出在范围里的仓库，而不是「读不到」。"""
+    provider = _provider(two_repos)
+
+    text = provider.file_content("", SHARED, "1-10", repository_id="9")
+
+    assert text is not None
+    assert "仓库不在本次范围里" in text, text
+    assert "cfg" in text and "code" in text, "没列出现在能读的是哪几个仓库"
+
+
+def test_the_repository_field_survives_the_protocol_and_the_dedup(two_repos):
+    """协议层：`repository_id` 原样带下去，而且**同一条路径的两个仓库是两条请求**。
+
+    去重键不带仓库时，模型在一轮里要「仓库 1 的 A + 仓库 2 的 A」会被静默吞掉一条 ——
+    它收到的是一份正文加一句「本轮没有附带上下文」，而它要的那个仓库一个字都没有。
+    """
+    provider = _provider(two_repos, changed_paths={SHARED})
+
+    allowed, dropped = sanitize_requests(
+        [
+            ContextRequest(type="file_content", commit="", path=SHARED, repository_id="1"),
+            ContextRequest(type="file_content", commit="", path=SHARED, repository_id="2"),
+        ],
+        provider._scope,
+        repo_paths=provider.repo_tracked_paths(),
+    )
+
+    assert dropped == (), f"被拒了：{[item.reason for item in dropped]}"
+    assert [item.repository_id for item in allowed] == ["1", "2"], "去重把它们合并了"
+
+
+def test_the_cache_key_carries_the_repository(two_repos):
+    """缓存键也必须带仓库：它决定返回的是哪个仓库的正文（`context_tools` 的模块纪律）。"""
+    from services.ai.context_tools import _cache_key
+
+    one = ContextRequest(type="file_content", commit="", path=SHARED, repository_id="1")
+    two = ContextRequest(type="file_content", commit="", path=SHARED, repository_id="2")
+
+    assert _cache_key(one) != _cache_key(two), "同一个路径的两个仓库共用一条缓存"
+
+
+
+# ==========================================================================
 #  二、部分冻结失败不许把整份范围关掉
 # ==========================================================================
 

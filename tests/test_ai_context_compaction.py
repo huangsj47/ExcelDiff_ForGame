@@ -259,7 +259,7 @@ class FatProvider(FakeProvider):
         self.seen.append(("file_diff", commit, path))
         return f"diff of {path} at {commit}\n" + "+ 一行改动\n" * 4_000
 
-    def file_content(self, commit, path, lines=""):
+    def file_content(self, commit, path, lines="", repository_id=""):
         # 形参不能少（协议里有这个可选窗口）。少了它取数会抛 TypeError，而取数失败是被
         # 接住的 —— 表现不是报错，是这个文件里四条「历史涨到撑破预算」的用例全变成
         # 「历史根本没涨」（实测：本文件 4 条红，报的是「跑了这么多轮都没压过历史」）。

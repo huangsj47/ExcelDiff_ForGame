@@ -1082,9 +1082,15 @@ class TestEveryProviderStubFollowsTheProtocol:
     ——`tests/test_ai_context_compaction.py` 里四条「历史涨到撑破预算」的用例一起变成了
     「历史根本没涨」，报出来的话是「跑了这么多轮都没压过历史，说明约束没生效」。
 
+    2026-09-24 又加了 `repository_id`（同一条路径在两个仓库里都有时读哪一个）—— 同一个坑
+    再走一遍，所以这条守卫对**两个**形参都扫，而不是只钉住当年出事的那个。
+
     所以这条守卫扫的是**源码里的每一个 `def file_content`**（不是 import 进来的那几个）：
     新写的桩忘了这个形参，这里会直接指名道姓。
     """
+
+    #: 协议上 `file_content` 现有的可选形参（协议再加一个就往这里加一个）。
+    REQUIRED_KEYWORDS = ("lines", "repository_id")
 
     def _stubs_missing_lines(self):
         import ast
@@ -1099,8 +1105,9 @@ class TestEveryProviderStubFollowsTheProtocol:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == 'file_content':
                     seen += 1
                     names = [arg.arg for arg in node.args.args] + [arg.arg for arg in node.args.kwonlyargs]
-                    if 'lines' not in names:
-                        offenders.append(f'{path.name}:{node.lineno}')
+                    missing = [name for name in self.REQUIRED_KEYWORDS if name not in names]
+                    if missing:
+                        offenders.append(f'{path.name}:{node.lineno}（缺 {", ".join(missing)}）')
         return offenders, seen
 
     def test_no_stub_drops_the_window_argument(self):
@@ -1109,7 +1116,7 @@ class TestEveryProviderStubFollowsTheProtocol:
         # 那种「守卫永远为真」的假绿比漏报更坏。
         assert seen >= 3, f'一个 file_content 桩都没扫到（seen={seen}），这条守卫是空的'
         assert not offenders, (
-            '这些桩的 file_content 少了 lines 形参（取数会抛 TypeError，用例会静默退化）：'
+            '这些桩的 file_content 少了协议上的形参（取数会抛 TypeError，用例会静默退化）：'
             + ', '.join(offenders)
         )
 
@@ -1121,7 +1128,7 @@ class TestEveryProviderStubFollowsTheProtocol:
             'class P:\n'
             '    def file_content(self, commit, path):\n'
             '        return ""\n'
-            '    def file_content_ok(self, commit, path, lines=""):\n'
+            '    def file_content_ok(self, commit, path, lines="", repository_id=""):\n'
             '        return ""\n'
         )
         found = [

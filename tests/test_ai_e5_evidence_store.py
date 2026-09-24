@@ -37,8 +37,8 @@ COMMIT = "a" * 40
 PATH = "config/30_goods/item.xlsx"
 PATH_B = "scripts/export.py"
 
-KEY = ("file_diff", COMMIT, PATH, "", "", "")
-KEY_B = ("file_diff", COMMIT, PATH_B, "", "", "")
+KEY = ("file_diff", COMMIT, PATH, "", "", "", "")
+KEY_B = ("file_diff", COMMIT, PATH_B, "", "", "", "")
 
 
 class FakeProvider:
@@ -58,7 +58,7 @@ class FakeProvider:
     def file_diff(self, commit, path):
         return self._respond("file_diff", commit, path)
 
-    def file_content(self, commit, path, lines=""):
+    def file_content(self, commit, path, lines="", repository_id=""):
         return self._respond("file_content", commit, path, lines)
 
     def read_reference(self, name):
@@ -115,7 +115,7 @@ def test_blob_index_maps_every_blob_to_its_evidence_ids():
     store = EvidenceStore()
     store[KEY], first_id = _stored("同一份正文")
     store[KEY_B], second_id = _stored("同一份正文", KEY_B)
-    third_key = ("file_diff", COMMIT, PATH, "3-9", "", "")
+    third_key = ("file_diff", COMMIT, PATH, "3-9", "", "", "")
     store[third_key], third_id = _stored("另一份正文", third_key)
 
     index = store.blob_index()
@@ -318,7 +318,7 @@ def test_the_delivered_evidence_counts_against_the_request_budget():
 def _store_with(diff_text: str, path: str = PATH, lines: str = "") -> tuple[EvidenceStore, str]:
     """建一个只装着「某个文件的 diff」的证据仓，返回 (仓, evidence_id)。"""
     store = EvidenceStore()
-    key = ("file_diff", COMMIT, path, lines, "", "")
+    key = ("file_diff", COMMIT, path, lines, "", "", "")
     item = _item(diff_text, key)
     item = _with_chunk_id(item, key)
     store[key] = item
@@ -382,7 +382,7 @@ def test_the_evidence_index_only_keeps_bodies_that_can_be_fetched():
         text=failed.text,
         meta={**failed.meta, "tool_failed": True},
     )
-    pointer_key = ("file_diff", COMMIT, PATH, "9-9", "", "")
+    pointer_key = ("file_diff", COMMIT, PATH, "9-9", "", "", "")
     pointer, pointer_id = _stored("见上文那一节")
     store[pointer_key] = ContextItem(
         kind=pointer.kind,

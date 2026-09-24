@@ -152,6 +152,18 @@ class ContextRequest:
     # `find_references` 的搜索词（一个标识符：字段名、协议名、函数名、配置 ID）。
     # 只有这一个类型用它；其余类型的请求里它一律被清空（见 `sanitize_requests`）。
     query: str = ""
+    # **哪一个仓库**（`Repository.id`，形如 `"2"`）。**加在最后**：`ContextRequest` 在测试
+    # 与脚本里有按位置构造的写法（`tests/test_ai_live_thinking_snapshot.py`、
+    # `scripts/shot_ai_drawer.py`），插在中间会静默错位。
+    #
+    # 只在**背景核查**那条路上有意义：同一条相对路径（`config/item.xlsx`）在本项目的两个
+    # 仓库里都存在时，平台不替模型猜是哪一个，而是回一份可操作的拒绝，请它带上这个字段。
+    # 指向的是**仓库**而不是提交：那条路读的是服务端固定的冻结 tip，模型给不给 commit
+    # 都不影响读到的版本。
+    #
+    # **它不进 `describe()` 的标签**（那份标签是被逐字断言的地址格式，见 `context_tools`
+    # 的模块说明），但要进缓存键 —— 它决定返回的是哪个仓库的正文。
+    repository_id: str = ""
 
     def describe(self) -> str:
         if self.lines:
@@ -883,7 +895,7 @@ def sanitize_requests(
 
     ## 另加一道：字段里带控制字符的请求按畸形丢掉
 
-    请求字段（`commit` / `path` / `name` / `query`）会被**原样拼进下一轮的提示词**：平台
+    请求字段（`commit` / `path` / `name` / `query` / `repository_id`）会被**原样拼进下一轮的提示词**：平台
     用它们写一句「你上一轮这些索取没有被执行：<detail>（<reason>）」（`engine._rejected_note`），
     那句话是**平台自己写的话**，不在任何数据封套里（封套见 `prompt._wrap_untrusted`）。
     一个带换行的路径因此能在提示词里伪造出一行新指令，而且不经过数据封套那条路。
@@ -914,7 +926,13 @@ def sanitize_requests(
         unsafe = next(
             (
                 value
-                for value in (request.commit, request.path, request.name, request.query)
+                for value in (
+                    request.commit,
+                    request.path,
+                    request.name,
+                    request.query,
+                    request.repository_id,
+                )
                 if _has_control_chars(value)
             ),
             "",
@@ -1025,7 +1043,15 @@ def sanitize_requests(
             if prepared is None:
                 dropped.append(drop)
                 continue
-            key = (request_type, prepared.commit, normalize_path(prepared.path), prepared.lines)
+            key = (
+                request_type,
+                prepared.commit,
+                normalize_path(prepared.path),
+                prepared.lines,
+                # 仓库也进这条去重键：同一条路径、同一条提交、**两个仓库**各要一次是两条
+                # 请求，只去重掉一条等于把另一个仓库的正文静默吞掉。
+                prepared.repository_id,
+            )
             if key in seen:
                 continue
             seen.add(key)
@@ -1187,6 +1213,10 @@ def _content_request(
     """
     raw_path = str(request.path or "")
     resolved = scope.resolve_commit(request.commit)
+    # 仓库维度**只在这一层做形状归一**（去空白）；「这个仓库是不是真的跟踪这条路径」是
+    # 取数层的判据（那里才有 `paths_by_repository`）—— 这一层只回答「该不该执行」，
+    # 多判一次反而会多一句可能过期的拒绝理由。
+    repository_id = str(request.repository_id or "").strip()
 
     if repo_set is None:
         # **没有冻结范围**：只有本批次一个授权来源，判据与本函数出现之前**逐字相同**
@@ -1225,19 +1255,28 @@ def _content_request(
     if resolved is not None and scope.path_allowed(resolved, raw_path):
         # 第 1 条：读**那条提交上**的版本。
         return (
-            ContextRequest(type=request_type, commit=resolved, path=normalized, lines=lines),
+            ContextRequest(
+                type=request_type,
+                commit=resolved,
+                path=normalized,
+                lines=lines,
+                repository_id=repository_id,
+            ),
             None,
         )
 
     if normalized in repo_set:
         # 第 2 条：读冻结 tip 上那一版。`commit` 原样带着（可能是空的、也可能是模型随手
         # 写的那一条）——取数层对「不在本批次」的路径一律读冻结版本，不看它。
+        # `repository_id` 同理：同一条路径在多个仓库里都有时，取数层据此读指定仓库的那一版；
+        # 给错了（那个仓库没跟踪它）取数层会回一份说清「跟踪它的是哪几个」的拒绝。
         return (
             ContextRequest(
                 type=request_type,
                 commit=str(request.commit or "").strip(),
                 path=normalized,
                 lines=lines,
+                repository_id=repository_id,
             ),
             None,
         )

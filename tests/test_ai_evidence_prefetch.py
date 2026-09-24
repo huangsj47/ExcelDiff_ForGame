@@ -259,7 +259,7 @@ class _Provider:
     def file_diff(self, commit, path):
         return self._answer(("file_diff", commit, path), f"diff of {path}")
 
-    def file_content(self, commit, path, lines=""):
+    def file_content(self, commit, path, lines="", repository_id=""):
         return self._answer(("file_content", commit, path, lines), f"{path} 的正文")
 
     def read_reference(self, name):

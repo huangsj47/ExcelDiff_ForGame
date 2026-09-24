@@ -248,7 +248,7 @@ class _FakeProvider:
     def file_diff(self, commit, path):
         return f"diff of {path}"
 
-    def file_content(self, commit, path, lines=""):
+    def file_content(self, commit, path, lines="", repository_id=""):
         return f"{path} 的正文"
 
     def read_reference(self, name):

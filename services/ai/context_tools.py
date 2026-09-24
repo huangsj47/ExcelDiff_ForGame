@@ -178,7 +178,9 @@ class ContextProvider(Protocol):
 
     def file_diff(self, commit: str, path: str) -> str | None: ...
 
-    def file_content(self, commit: str, path: str, lines: str = "") -> str | None: ...
+    def file_content(
+        self, commit: str, path: str, lines: str = "", repository_id: str = ""
+    ) -> str | None: ...
 
     def read_reference(self, name: str) -> str | None: ...
 
@@ -284,7 +286,7 @@ def _meta_chars(item: ContextItem) -> int:
 #
 # 键里的每一项都必须是**决定返回内容**的字段。加字段时的判据就是这一条：
 # `protocol.ContextRequest` 上除了「模型自己看的说明」之外，没有一项可以漏。
-CacheKey = tuple[str, str, str, str, str, str]
+CacheKey = tuple[str, str, str, str, str, str, str]
 
 
 def _cache_key(request: ContextRequest) -> CacheKey:
@@ -295,6 +297,9 @@ def _cache_key(request: ContextRequest) -> CacheKey:
         request.name or "",
         request.lines or "",
         request.query or "",
+        # 同一条相对路径在两个仓库里都有时，`repository_id` 决定读到的是哪一份 ——
+        # 它进了「决定内容的字段」那一类的判据（见上面 CacheKey 的说明）。
+        request.repository_id or "",
     )
 
 
@@ -306,7 +311,7 @@ def _request_of_key(key: CacheKey) -> ContextRequest:
     一处定义（两处各写一遍必然漂移，而漂移的表现是记账里印出另一个文件的路径）。
     """
     parts = [str(part or "") for part in tuple(key)]
-    parts += [""] * (6 - len(parts))
+    parts += [""] * (7 - len(parts))
     return ContextRequest(
         type=parts[0],
         commit=parts[1],
@@ -314,6 +319,7 @@ def _request_of_key(key: CacheKey) -> ContextRequest:
         name=parts[3],
         lines=parts[4],
         query=parts[5],
+        repository_id=parts[6],
     )
 
 
@@ -999,7 +1005,10 @@ class ContextTools:
             return self.provider.file_diff(request.commit, normalize_path(request.path))
         if request.type == "file_content":
             return self.provider.file_content(
-                request.commit, normalize_path(request.path), request.lines
+                request.commit,
+                normalize_path(request.path),
+                request.lines,
+                repository_id=request.repository_id,
             )
         if request.type == "read_reference":
             return self.provider.read_reference(request.name)

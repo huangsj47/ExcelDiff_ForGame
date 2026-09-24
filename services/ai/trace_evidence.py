@@ -139,6 +139,8 @@ def summarize_requests(requests: Any, *, limit: int = TRACE_LIST_MAX_ITEMS) -> l
             "name": _clip(getattr(request, "name", "")),
             "lines": _clip(getattr(request, "lines", ""), 40),
             "query": _clip(getattr(request, "query", ""), 200),
+            # 点名的仓库（同一个路径在两个仓库里都有时，它就是「读的是哪一份」）。
+            "repository_id": _clip(getattr(request, "repository_id", ""), 40),
             # 人读的那一行（面板直接显示它）。`describe()` 是协议自带的写法，不在这里另写一套。
             "text": _clip(describe() if callable(describe) else "", 200),
         })

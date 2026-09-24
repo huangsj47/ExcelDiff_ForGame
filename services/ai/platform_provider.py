@@ -38,15 +38,12 @@ from services.ai.docx_view import is_docx, render_docx_text
 from services.ai.frozen_repo import (
     FrozenRepository,
     FrozenTreeReader,
-    ambiguous_path_text,
     build_read_scope_multi,
-    exclusion_reason,
     not_tracked_text,
     reader_for_repository,
-    reject_text,
     repository_label,
+    resolve_frozen_read,
     resolve_frozen_repositories,
-    resolve_repo_path,
 )
 from services.ai.reference_search import (
     entries_for,
@@ -1077,39 +1074,26 @@ class PlatformContextProvider:
             return None
         return scope.paths
 
-    def _content_outside_batch(self, path: str, lines: str) -> Optional[str]:
+    def _content_outside_batch(
+        self, path: str, lines: str, repository_id: str = ""
+    ) -> Optional[str]:
         """读**不在本批次**的那个文件（`file_content` 的冻结版本分支）。
 
-        判定顺序是刻意的（与 `frozen_repo` 的分工一致）：先纯路径判据 → 再凭证排除 →
-        再问「在不在某个冻结仓库的跟踪树里」→ 最后才读。**每一步的拒绝都要给理由**，
-        否则模型会把它读成「平台取数失败」并写进信息缺口。
-
-        ## 同一条相对路径在多个仓库里都有时**不猜**
-
-        `config/item.xlsx` 这种路径在两个仓库里同时存在是可能的，而两个版本的内容与含义
-        都可能不同 —— 猜一个等于把另一个仓库的内容当成这个仓库的交给模型。所以这时给一份
-        **可操作**的拒绝：列出候选仓库，并说明怎么指定（`repository_id`，或给一条改过它的
-        提交）。
+        「用哪个仓库的哪一版、或者回哪一句拒绝」在 `frozen_repo.resolve_frozen_read` 里
+        （连同每一条拒绝的理由）；这里只做剩下的两件事：把读不到的两种情形说清楚
+        （列不出跟踪树 / 读不到正文），以及把字节渲染成模型读得懂的正文。
 
         没有冻结范围时返回 `None` —— 与「本批次里没有这个路径」在此之前的语义**逐字
         相同**（那是这条路加进来之前的全部行为）。
         """
-        readers, reason = self._resolved_readers()
+        readers, _reason = self._resolved_readers()
         if not readers:
             return None
-        normalized, reject = resolve_repo_path(path)
-        if reject:
-            return reject_text(str(path or ""), reject)
-        blocked = exclusion_reason(normalized)
-        if blocked:
-            return reject_text(normalized, blocked)
         scope = self.repo_read_scope()
-        candidates = scope.candidates(normalized)
-        if len(candidates) > 1:
-            return ambiguous_path_text(scope, normalized)
-        reader = reader_for_repository(
-            readers, candidates[0] if candidates else None
-        ) or readers[0]
+        outcome = resolve_frozen_read(scope, readers, path, repository_id)
+        if not outcome.ok:
+            return outcome.refusal
+        reader, normalized = outcome.reader, outcome.path
         tip = str(getattr(reader.frozen, "tip", "") or "")
         tracked = reader.is_tracked(normalized)
         if tracked is None:
@@ -1203,13 +1187,23 @@ class PlatformContextProvider:
                     "**这不等于「没有内容」**。"
                 )
             return self._render_text_page(
-                rendered, path=where, lines=lines, auto=False, frozen_tip=tip
+                rendered,
+                path=where,
+                lines=lines,
+                auto=False,
+                frozen_tip=tip,
+                frozen_repo=name,
             )
         text = text_or_notice(data)
         if text is None:
             return binary_content_notice(where)
         return self._render_text_page(
-            text, path=where, lines=lines, auto=False, frozen_tip=tip
+            text,
+            path=where,
+            lines=lines,
+            auto=False,
+            frozen_tip=tip,
+            frozen_repo=name,
         )
 
     def _render_text_page(
@@ -1220,6 +1214,7 @@ class PlatformContextProvider:
         lines: str = "",
         auto: bool = False,
         frozen_tip: str = "",
+        frozen_repo: str = "",
     ) -> str:
         """文本/代码正文的一页：**按本轮生效的页大小切**，并把出处写进抬头。
 
@@ -1229,8 +1224,15 @@ class PlatformContextProvider:
         """
         origin = ""
         if frozen_tip:
+            # **仓库名也要写**（多仓之后）：同一条相对路径在两个仓库里都存在时，
+            # `路径@tip` 仍然分不清读到的是哪一份 —— 而模型正要拿它下结论。
+            where = (
+                f"仓库 {frozen_repo} 的冻结版本 {frozen_tip[:12]}"
+                if frozen_repo
+                else f"冻结版本 {frozen_tip[:12]}"
+            )
             origin = (
-                f"；内容来自**冻结版本 {frozen_tip[:12]}**"
+                f"；内容来自**{where}**"
                 "（不是工作副本，也不是本批次那条提交上的内容）"
             )
         return _render_text_content(
@@ -1396,7 +1398,9 @@ class PlatformContextProvider:
             return None
         return (f"{_delta_provenance(base_commit_id, commit)}\n{rendered}", False)
 
-    def file_content(self, commit: str, path: str, lines: str = "") -> Optional[str]:
+    def file_content(
+        self, commit: str, path: str, lines: str = "", repository_id: str = ""
+    ) -> Optional[str]:
         """某个文件在这个提交上的正文（默认只给**一段窗口**，见下）。
 
         ## 正文从哪来：按部署模式两条来源
@@ -1430,7 +1434,7 @@ class PlatformContextProvider:
             # 不在本批次里。**这不再是终点**（工作包 D 的 P1）：模型可能在别处看到过这个
             # 路径（例如它在引用检索的命中里读到了一个调用方），而「读不到」会让它把
             # 「调用方改了没有」写成信息缺口。这里改走**冻结版本**的只读范围。
-            return self._content_outside_batch(path, lines)
+            return self._content_outside_batch(path, lines, repository_id)
         repository = getattr(row, "repository", None)
         if repository is None:
             return None

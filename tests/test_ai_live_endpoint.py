@@ -258,7 +258,7 @@ class ScriptedProvider:
         self.requests.append(("file_diff", commit, path))
         return FAKE_DIFFS.get(path, f"（{path} 无差异）")
 
-    def file_content(self, commit, path, lines=""):
+    def file_content(self, commit, path, lines="", repository_id=""):
         self.requests.append(("file_content", commit, path))
         return FAKE_DIFFS.get(path, f"（{path} 的完整内容略）")
 
