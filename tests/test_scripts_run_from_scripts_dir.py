@@ -24,9 +24,11 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -34,6 +36,10 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "scripts"
 INSTANCE_DB = REPO_ROOT / "instance" / "diff_platform.db"
+
+# 判「生产库是自己变的还是脚本改的」时，空跑多久算数。取 15 秒：真机服务的后台调度按分钟
+# 级 tick，太短会漏掉一次写、把假红放过去；太长则每次真回归都要白等。
+_CONTROL_WINDOW_SECONDS = 15
 
 # 需要仓库根在 sys.path 上、因此必须自带引导的脚本。
 # extract_diff_lines.py 只用 stdlib + requests，不需要引导，故不在此列。
@@ -136,13 +142,41 @@ def test_init_scripts_actually_create_tables_in_the_temp_db(tmp_path):
         assert "ModuleNotFoundError" not in combined
 
 
+def _app_server_is_listening() -> bool:
+    """本机有没有在跑真机服务（`python app.py`）。
+
+    端口与 `bootstrap/runtime_entry.py` 的 `os.environ.get("PORT", "8002")` 同源：
+    同样先看 `PORT`，默认同样是 8002。**只探「有没有人在这个端口上监听」**，不发请求 ——
+    这条判据要的是「服务很可能开着」，不是「服务答得对」。
+    """
+    try:
+        port = int(os.environ.get("PORT", "8002"))
+    except (TypeError, ValueError):
+        return False
+    with socket.socket() as sock:
+        sock.settimeout(0.3)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
 def test_smoke_runs_never_touch_the_production_db(tmp_path):
     """整组冒烟跑完后，生产库文件不应被创建或改动。
 
     `instance/` 目录本身可能出现（凭据加密密钥会自动落盘，见
     utils/security_utils._auto_generated_key_material），所以这里只钉数据库文件。
     连 `-wal` / `-shm` 一起比 —— WAL 模式下数据可能还没并回主文件，
-    只比主文件会漏掉「真的写了、只是没 checkpoint」这种情况。
+    只比主文件会漏掉「真的写了、只是没 checkpoint」。
+
+    ## 这条判据会被环境证伪，所以要能分清「谁改的」（2026-09-25）
+
+    真机服务（`python app.py`）自己开着生产库，后台调度每跑一次就往 WAL 里落一笔。
+    **实测**：什么都不跑的 20 秒里，`-wal` 的内容也变了（大小不变、内容变），而四个冒烟
+    脚本**各自单独跑完，生产库一个字都没变** —— 也就是说这条断言红的时候，多半不是脚本
+    写的。这个假红与真回归长得一模一样（同一条断言、同一句话），照它排查只会一路怀疑
+    隔离配方：实测全量跑会红、单独重跑又绿。
+
+    所以按「跑前跑后不相等」之后**再分一次谁改的**：本机有服务在监听 ⇒ 跳过（理由写在
+    跳过信息里，`-rs` 看得见）；没有服务、再空跑一个同样长的窗口它**还在变** ⇒ 也是别人
+    在写，同样跳过。两条都不成立（安静环境里它只在我们跑脚本时变）才判红。
     """
     def snapshot():
         return {
@@ -155,9 +189,25 @@ def test_smoke_runs_never_touch_the_production_db(tmp_path):
     for script in BOOTSTRAPPED_SCRIPTS:
         _run(script, tmp_path)
     after = snapshot()
+    if before == after:
+        return
+
+    # 变了 —— 先分清是谁改的，判据见 docstring。
+    if INSTANCE_DB.exists() and _app_server_is_listening():
+        pytest.skip(
+            "本机有真机服务在监听（它自己在写生产库 WAL）—— 这次量测不成立，不是回归"
+        )
+    settled = snapshot()
+    time.sleep(_CONTROL_WINDOW_SECONDS)
+    if snapshot() != settled:
+        pytest.skip(
+            f"没人跑脚本的这 {_CONTROL_WINDOW_SECONDS} 秒里生产库自己还在变 —— "
+            "另有进程在写它，这次量测不成立，不是回归"
+        )
     assert before == after, (
         f"{INSTANCE_DB} 在冒烟测试期间被创建或改动了 —— "
         "隔离只覆盖了 SQLite 后端，检查是否有脚本绕开 DATABASE_URL 直接连文件"
+        f"（已排除环境因素：本机没有服务监听，且空跑 {_CONTROL_WINDOW_SECONDS} 秒它稳着不动）"
     )
 
 
