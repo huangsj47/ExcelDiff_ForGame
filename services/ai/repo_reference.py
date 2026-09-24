@@ -47,6 +47,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence
 
+from services.ai.frozen_repo import repository_label
 from services.ai.reference_index import (
     IndexedSearchResult,
     SnapshotReferenceIndex,
@@ -292,6 +293,56 @@ def render_repo_result(
     return "\n".join(lines)
 
 
+def search_frozen_repositories(
+    readers: Sequence[Any],
+    query: str,
+    *,
+    prefix: str = "",
+    **kwargs: Any,
+) -> Optional[str]:
+    """在**每一个**冻结仓库里各搜一次，结果**分开写**。一个都没有时返回 `None`。
+
+    ## 为什么要逐个搜、逐段给
+
+    本项目可能有多个仓库（配置仓库 + 代码仓库），而「这个函数被谁调用」的答案往往就在
+    **另一个**仓库里 —— 只搜第一个仓库，正是 run 57 那条「只读到本批次的文件」的病根。
+    两份结果的 `path` 可能同名，所以每段**抬头写明是哪个仓库**：混成一段会让模型把 A 仓库
+    的命中当成 B 仓库的。
+
+    「不搜」只有一种：某个仓库的跟踪树列不出来，那一段换成「无法检索」（调用方还会补一句
+    范围声明）—— **绝不写成「没有命中」**。
+    """
+    blocks: list[str] = []
+    failures: list[str] = []
+    for reader in readers or ():
+        frozen = getattr(reader, "frozen", None)
+        label = repository_label(frozen)
+        outcome = search_frozen_repository(reader, query, prefix=prefix, **kwargs)
+        if outcome is None:
+            failures.append(
+                f"{label}：对象库里读不到 "
+                f"{str(getattr(frozen, 'tip', ''))[:12]} 的跟踪文件"
+            )
+            continue
+        blocks.append(
+            f"### 仓库 {label}\n{outcome.text}" if len(readers) > 1 else outcome.text
+        )
+    if not blocks and not failures:
+        return None
+    if not blocks:
+        return (
+            f"[无法检索] 冻结版本的范围列不出来（{'；'.join(failures)}），"
+            f"所以 `{query}` **这一次没有在仓库范围内搜过**。"
+            "**这不等于「没有其它引用」** —— 请把这条写成信息缺口。"
+        )
+    if failures:
+        blocks.append(
+            f"[范围说明] 还有 {len(failures)} 个仓库这次没能检索（{'；'.join(failures)}）——"
+            "上面那份结果**不覆盖**它们，别据此说「仓库里没有引用」。"
+        )
+    return "\n\n".join(blocks)
+
+
 def _skips(result: IndexedSearchResult) -> int:
     return (
         int(result.binary or 0)
@@ -317,4 +368,5 @@ __all__ = [
     "render_repo_result",
     "reset_index_cache",
     "search_frozen_repository",
+    "search_frozen_repositories",
 ]

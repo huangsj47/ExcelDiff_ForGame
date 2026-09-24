@@ -895,12 +895,15 @@ def sanitize_requests(
     allowed: list[ContextRequest] = []
     dropped: list[DroppedItem] = []
     seen: set[tuple[str, str, str, str]] = set()
-    # 冻结范围可用时，**路径形状先判一次**：绝对路径 / 带 `..` 的写法在这里就拒掉，
-    # 并给出可照做的理由。不先判的话，它们会落进「不在跟踪树里」那条更含糊的理由里 ——
-    # 而模型据那条理由只会反复换路径（`frozen_repo.resolve_repo_path` 是同一套判据的
-    # 唯一实现，这里 import 它而不是再写一份）。
-    if repo_set is not None:
-        from services.ai.frozen_repo import resolve_repo_path
+    # **路径形状先判一次**：绝对路径 / 带 `..` 的写法在这里就拒掉，并给出可照做的理由。
+    # 不先判的话，它们会落进「不在跟踪树里」那条更含糊的理由里 —— 而模型据那条理由只会
+    # 反复换路径（`frozen_repo.resolve_repo_path` 是同一套判据的唯一实现，这里 import 它
+    # 而不是再写一份）。
+    #
+    # **无条件 import**（原先只在 `repo_set is not None` 时）：`file_content` 的两条路
+    # 都要这一份判据 —— 批次授权那条同样需要「这个路径形状本身合不合法」，
+    # 而它正是 `sanitize_requests` 里 path 相关的唯一安全边界。
+    from services.ai.frozen_repo import resolve_repo_path
 
     for index, request in enumerate(requests):
         request_type = str(request.type or "").strip()
@@ -1012,16 +1015,16 @@ def sanitize_requests(
             )
             continue
 
-        if repo_set is not None and request_type in _REPO_SCOPED_TYPES:
-            # 冻结范围可用时，`file_content` 走**仓库范围**这条判据（见 docstring）：
-            # 路径形状先判（给得出可照做的理由），再看它在不在冻结 tip 的跟踪树里。
-            scoped = _repo_scoped_content_request(
-                request, index, request_type, repo_set, resolve_repo_path
+        if request_type in _REPO_SCOPED_TYPES:
+            # `file_content` 有**两条**可通的路（本批次授权读那条提交上的版本 / 冻结仓库的
+            # 背景版本），判据与顺序都在 `_content_request` 里。它必须排在下面那条
+            # 「只有本批次一条路」的分支**之前** —— 那条会对 `file_content` 直接下结论。
+            prepared, drop = _content_request(
+                request, index, request_type, scope, repo_set, resolve_repo_path
             )
-            if scoped[0] is None:
-                dropped.append(scoped[1])
+            if prepared is None:
+                dropped.append(drop)
                 continue
-            prepared = scoped[0]
             key = (request_type, prepared.commit, normalize_path(prepared.path), prepared.lines)
             if key in seen:
                 continue
@@ -1145,54 +1148,141 @@ def _repo_matches_prefix(repo_set, prefix: str) -> bool:
     return any(item == text or item.startswith(text) for item in repo_set)
 
 
-def _repo_scoped_content_request(
+def _content_request(
     request: ContextRequest,
     index: int,
     request_type: str,
+    scope,
     repo_set,
     resolve_repo_path,
 ):
-    """`file_content` 的仓库范围判据：`(可执行的请求, None)` 或 `(None, 记账)`。
+    """`file_content` 的判据：`(可执行的请求, None)` 或 `(None, 记账)`。
 
-    ## 与「本批次那条路」的差别
+    ## 两条路，**先判批次授权**
 
-    * **`commit` 可以不给**（或给一条不属于本批次的）：读取走的是服务端固定的冻结版本，
-      模型给的 commit 只用来描述它想看哪个范围。硬要求它写对一条本批次的提交，会让
-      「我已经知道调用方路径了、直接读」这条最省的路径又变成一次试错 ——
-      而工作包 D 明说了这条路要省掉那一轮。
-    * **路径必须在冻结 tip 的跟踪树里**：这是白名单本身。不在里面 = 这条请求不执行，
-      理由写清「不在本轮版本里」，而不是含糊的「越权」。
+    同一条路径在两种意义上都可以是被允许的，而它们读到的**不是同一份东西**：
+
+    1. **本批次授权**（`commit` 是本批次的、且这个文件在那条提交的改动清单里）→ 读
+       **那条提交上**的版本。周内改过、tip 上已经删掉的路径因此仍然读得到（实测 run 57
+       的 `config/150_shopping_mall/…`：周内提交里确实有，tip 上已无）；「改了公共接口、
+       去看**当时**的调用方」也走这条。
+    2. **背景核查**（路径在本项目冻结仓库的跟踪树里）→ 读服务端固定的**冻结 tip** 版本。
+       `commit` 可以不给、也可以给一条不属于本批次的 —— 它只用来描述范围。硬要求模型
+       写对一条本批次的提交，会把「我已经知道调用方路径了、直接读」这条最省的路径又变成
+       一次试错。
+
+    ## 为什么顺序不能反（2026-09-24，run 57）
+
+    原先这条判据在批次那条**之前**返回，于是只要冻解范围可用，**每一条** `file_content`
+    都走第 2 条：批次授权连问都不问，而第 2 条的路径判据是「在不在**第一个**冻结仓库的
+    当前 tip 跟踪树里」—— 一次周版本分析同时覆盖配置仓库与代码仓库时，代码仓库的文件
+    全部落进那一句拒绝里。实测 run 57 的 7 条被拒请求中有 4 条是 `code/qz_*`。
 
     ## 路径形状先判、且判据只有一份
 
     `resolve_repo_path` 来自 `frozen_repo`（绝对路径 / 盘符 / `..` / 控制字符各有一条
     可照做的理由）。在这里先判一次，是为了让模型**这一轮**就拿到准确的原因；
-    真正的读取还会在取数层再判一次（那里才是安全边界）。
+    真正的读取还会在取数层再判一次（那里才是安全边界）。**扩大范围到「本项目全部仓库」
+    只放宽了第 2 条的路径集合，这两条判据一步都没绕过。**
     """
     raw_path = str(request.path or "")
+    resolved = scope.resolve_commit(request.commit)
+
+    if repo_set is None:
+        # **没有冻结范围**：只有本批次一个授权来源，判据与本函数出现之前**逐字相同**
+        # （`sanitize_requests` 的契约：`repo_paths=None` 时行为不变）。
+        if resolved is None:
+            return None, DroppedItem("request", index, "commit 不属于本批次", request.commit)
+        if not normalize_path(raw_path):
+            return None, DroppedItem(
+                "request",
+                index,
+                f"{request_type} 必须带 path（这次没给，或给了归一化后为空的路径）",
+                repr(request.path),
+            )
+        if not scope.path_allowed(resolved, raw_path):
+            return None, DroppedItem(
+                "request",
+                index,
+                _batch_mismatch_reason(scope, resolved, raw_path),
+                f"{raw_path}（配的是 {resolved[:12]}）",
+            )
+        return (
+            ContextRequest(
+                type=request_type,
+                commit=resolved,
+                path=normalize_path(raw_path),
+                lines=_normalize_line_window(request.lines),
+            ),
+            None,
+        )
+
     normalized, reject = resolve_repo_path(raw_path)
     if reject:
-        return None, DroppedItem(
-            "request", index, f"路径不合法：{reject}", raw_path
+        return None, DroppedItem("request", index, f"路径不合法：{reject}", raw_path)
+    lines = _normalize_line_window(request.lines)
+
+    if resolved is not None and scope.path_allowed(resolved, raw_path):
+        # 第 1 条：读**那条提交上**的版本。
+        return (
+            ContextRequest(type=request_type, commit=resolved, path=normalized, lines=lines),
+            None,
         )
-    if normalized not in repo_set:
+
+    if normalized in repo_set:
+        # 第 2 条：读冻结 tip 上那一版。`commit` 原样带着（可能是空的、也可能是模型随手
+        # 写的那一条）——取数层对「不在本批次」的路径一律读冻结版本，不看它。
+        return (
+            ContextRequest(
+                type=request_type,
+                commit=str(request.commit or "").strip(),
+                path=normalized,
+                lines=lines,
+            ),
+            None,
+        )
+
+    # 两条都不通。理由要**说清是哪一条不通**，模型才知道下一步该换路径还是换提交。
+    if resolved is None:
         return None, DroppedItem(
             "request",
             index,
             "这个路径不在本次冻结版本的 Git 跟踪文件里（拼错、改过名，或在别的仓库）",
             normalized,
         )
-    lines = _normalize_line_window(request.lines)
-    # `commit` 原样带着（可能是空的、也可能是模型随手写的那一条）——取数层对
-    # 「不在本批次」的路径一律读冻结版本，不看它。
+    suggested = scope.commit_of_path(normalized)
+    hint = f"；本批次里改过它的是 {suggested[:12]}，换那条提交再问" if suggested else ""
+    return None, DroppedItem(
+        "request",
+        index,
+        f"这个路径既不在 commit {resolved[:12]} 的改动清单里，"
+        f"也不在本项目冻结仓库的跟踪文件里（拼错、改过名，或它在别的项目里）{hint}",
+        f"{normalized}（配的是 {resolved[:12]}）",
+    )
+
+
+def _batch_mismatch_reason(scope, resolved: str, raw_path: str) -> str:
+    """「这个文件不在这条提交的改动清单里」那一句（**单一来源**）。
+
+    两个读者，两边都因为「只说『不属于』」吃过亏：
+
+    * **模型**：它只收到「本轮没有附带任何上下文」，于是把「我把 (commit, path) 配错了」
+      写成「平台取数失败」，还写进报告的信息缺口 —— 读者会去找一个不存在的平台故障。
+      实测那一轮 28 条被拒（占索取数 23%）。
+    * **人**：`detail` 原先只记 path、不记 commit，事后根本判不出是谁配错了。
+
+    本批次里改过这个文件的是哪条提交，平台是知道的（`commit_of_path`，
+    `find_references` 用的也是它）—— 说出来，模型下一轮就能问对。
+    """
+    suggested = scope.commit_of_path(raw_path)
+    if suggested:
+        return (
+            f"这个文件不在 commit {resolved[:12]} 的改动清单里；"
+            f"本批次里改过它的是 {suggested[:12]}，换那条提交再问"
+        )
     return (
-        ContextRequest(
-            type=request_type,
-            commit=str(request.commit or "").strip(),
-            path=normalized,
-            lines=lines,
-        ),
-        None,
+        f"这个文件不在 commit {resolved[:12]} 的改动清单里，"
+        "也不在本批次改动过的任何文件里"
     )
 
 

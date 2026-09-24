@@ -38,10 +38,14 @@ from services.ai.docx_view import is_docx, render_docx_text
 from services.ai.frozen_repo import (
     FrozenRepository,
     FrozenTreeReader,
-    build_read_scope,
+    ambiguous_path_text,
+    build_read_scope_multi,
     exclusion_reason,
+    not_tracked_text,
+    reader_for_repository,
     reject_text,
-    resolve_frozen_repository,
+    repository_label,
+    resolve_frozen_repositories,
     resolve_repo_path,
 )
 from services.ai.reference_search import (
@@ -49,10 +53,10 @@ from services.ai.reference_search import (
     normalize_query,
     render_result,
 )
-from services.ai.repo_reference import search_frozen_repository
+from services.ai.repo_reference import search_frozen_repositories
 from services.ai.scope import AnalysisScope, normalize_path
-from services.ai.trace_evidence import failure_notice
 from services.ai.skill_loader import LoadedSkills
+from services.ai.trace_evidence import failure_notice
 from services.deployment_mode import is_agent_dispatch_mode
 from services.excel_header_profiles import header_kwargs_for, resolve_for_file
 from utils.content_window import (
@@ -761,6 +765,23 @@ from services.ai.stored_diff_source import (  # noqa: E402,F401 —— 类方法
 # --------------------------------------------------------------------------
 
 
+def _as_frozen_tuple(value: Any) -> tuple:
+    """`frozen_repository` 参数 → 一组冻结对象（单个、`None`、序列都收）。
+
+    允许一次给一组，是因为**本项目可能有多个仓库**（见 `_batch_repositories`）：显式
+    指定版本的那条路（测试、将来由调用方在派发前定好版本）同样要能一次给全。给单个的
+    老写法继续有效 —— 它是长度为 1 的一组。
+    """
+    if value is None:
+        return ()
+    if isinstance(value, FrozenRepository):
+        return (value,)
+    try:
+        return tuple(item for item in value if item is not None)
+    except TypeError:  # 不是可迭代的：当成单个（鸭子类型，取数层只认那三个属性）
+        return (value,)
+
+
 class PlatformContextProvider:
     """接到平台取数链路上的 `ContextProvider`。
 
@@ -835,13 +856,19 @@ class PlatformContextProvider:
         self._content_max_chars = int(content_max_chars or DEFAULT_CONTENT_MAX_CHARS)
         # 冻结仓库的只读范围（工作包 D 的 P1）。`frozen_repository` 显式给了就用它（测试、
         # 或者将来由调用方在派发前定好版本）；没给就**惰性**从本批次解析 ——
-        # 理由见 `_frozen_reader` 的 docstring。
-        self._frozen_declared = frozen_repository
+        # 理由见 `_resolved_readers` 的 docstring。
+        #
+        # 可以给**一个**，也可以给**一组**：本项目有多个仓库时逐一冻结（见
+        # `_batch_repositories`），显式指定这条路同样按组收。
+        self._frozen_declared = _as_frozen_tuple(frozen_repository)
         self._repo_git_service = repo_git_service
         # 仓库范围检索一次索引多少个文件（上限，不是目标）。给了就覆盖模块初值——
         # 调用方（或测试）据此把「一页多大」与运行预算对上。
         self._repo_index_files = repo_index_files
         self._frozen_reader: FrozenTreeReader | None = None
+        # 本次冻结的**全部**仓库的读取器（本项目全部已接入仓库）。`_frozen_reader` 是旧的
+        # 单仓读法（第一个），只留给「表头坐标」这类不需要多仓的调用点。
+        self._frozen_readers: tuple[FrozenTreeReader, ...] = ()
         self._frozen_resolved = False
         self._frozen_reason = ""
         # 读侧对「冻结范围」的一次性结论（跟踪树清单）。同一个 provider 里复用，
@@ -900,67 +927,131 @@ class PlatformContextProvider:
             self._content_max_chars = value
 
     def _batch_repository(self):
-        """本批次属于哪个仓库。冻结范围与检索都要它（拿不到返回 `None`）。
+        """本批次属于哪个仓库。**只给回执抬头用**（表头坐标、仓库归属那一行）。
 
-        先查本批次提交对应的仓库 ID（`scope.repository_ids_by_commit`，跨仓库同名修订号
-        那件事的收口），查不到退回「按路径找第一条能查出提交行的路径的仓库」
-        （`_repository_of`，与 `find_references` 一直以来的取法一致）。
+        冻结范围不要再用它 —— 那是 `_batch_repositories()` 的事，见那里的说明。
         """
+        ids: set = set()
         if self._scope is not None:
-            ids: set = set()
             for value in (self._scope.repository_ids_by_commit or {}).values():
                 ids.update(int(item) for item in value or ())
-            if ids:
-                try:
-                    from models import Repository
+        if ids:
+            try:
+                from models import Repository
 
-                    rows = (
-                        Repository.query
-                        .filter(Repository.id.in_(sorted(ids)))
-                        .order_by(Repository.id.asc())
-                        .all()
-                    )
-                    if rows:
-                        return rows[0]
-                except Exception as exc:  # noqa: BLE001 —— 查不动就退回下面那条
-                    log_print(f"⚠️ AI 取数：查本批次仓库失败：{exc}")
+                rows = (
+                    Repository.query
+                    .filter(Repository.id.in_(sorted(ids)))
+                    .order_by(Repository.id.asc())
+                    .all()
+                )
+                if rows:
+                    return rows[0]
+            except Exception as exc:  # noqa: BLE001 —— 查不动就退回下面那条
+                log_print(f"⚠️ AI 取数：查本批次仓库失败：{exc}")
+        if self._scope is not None:
             pairs = entries_for(self._scope.batch_paths(), self._scope.commit_of_path)
             return self._repository_of(pairs)
         return None
 
-    def _resolved_reader(self) -> tuple[FrozenTreeReader | None, str]:
-        """本次可用的冻结读取器（**懒解析一次**）。第二个返回值是拿不到的原因。
+    def _batch_repositories(self):
+        """**要冻结的全部仓库**：本批次各仓库所属项目下的全部已接入仓库。
 
-        为什么懒解析而不是在 `__init__` 里解析：provider 的构造点在
-        `services/ai_analysis_service.py`（本工作包**不允许改**），而那里拿不到仓库对象；
-        而「本批次属于哪个仓库」这一层本来就知道（`_commit_row` 一直在用）。第一次真正
-        需要仓库范围时解析一次，之后连同结论（包括「不可用」）一起记住 ——
-        每轮索取都去问一遍 git 是白花时间。
+        ## 为什么不是「本批次涉及的那几个」
+
+        一次周版本分析覆盖的仓库可以不止一个（配置仓库 + 代码仓库同窗是常态），而窗口里
+        被改动的往往只是其中一个 —— 核查「改了公共接口，调用方改没改」要读的恰恰是
+        **没被改动**的那个仓库里的文件。只冻结本批次涉及的那几个，仍然会把「改的是配置表、
+        要看代码仓库里的读取方」这类核查挡在门外。
+
+        所以范围取「本项目全部已接入仓库的只读 Git 跟踪内容」——判据仍然是本项目，没有
+        放宽到任意文件（路径形状与凭证排除两条判据在多仓之前照旧各判一次）。
+
+        实测 run 57：本批次涉及 `qz_config`(1) 与 `qz_luaworkspace代码`(2)，而
+        `_batch_repository()` 按 id 升序只冻结了 1，于是 4 条 `code/qz_*` 的文件全被
+        判成「不在本次冻结版本的 Git 跟踪文件里」。
+
+        查不到项目（老 payload、手工构造的 scope、单提交模式）时**退回本批次那几个仓库**，
+        与加这一层之前的行为一致。
+        """
+        try:
+            from models import Repository
+
+            batch_ids: set = set()
+            if self._scope is not None:
+                for value in (self._scope.repository_ids_by_commit or {}).values():
+                    batch_ids.update(int(item) for item in value or ())
+            rows = ()
+            if batch_ids:
+                rows = (
+                    Repository.query
+                    .filter(Repository.id.in_(sorted(batch_ids)))
+                    .order_by(Repository.id.asc())
+                    .all()
+                )
+            project_ids = {getattr(row, "project_id", None) for row in rows}
+            project_ids.discard(None)
+            if project_ids:
+                return tuple(
+                    Repository.query
+                    .filter(Repository.project_id.in_(sorted(project_ids)))
+                    .order_by(Repository.id.asc())
+                    .all()
+                )
+            if rows:
+                return tuple(rows)
+        except Exception as exc:  # noqa: BLE001 —— 查不动就退回下面那条
+            log_print(f"⚠️ AI 取数：查本项目仓库失败：{exc}")
+        single = self._batch_repository()
+        return (single,) if single is not None else ()
+
+    def _resolved_readers(self) -> tuple[tuple[FrozenTreeReader, ...], str]:
+        """本次可用的**冻结读取器（一组）**。第二个返回值是拿不到的原因。
+
+        为什么懒解析：provider 的构造点在 `services/ai_analysis_service.py`，那里拿不到
+        仓库对象；而「本批次属于哪些仓库」这一层本来就知道。第一次真正需要仓库范围时解析
+        一次，之后连同结论（包括「不可用」）一起记住 —— 每轮索取都去问一遍 git 是白花时间。
         """
         if self._frozen_resolved:
-            return self._frozen_reader, self._frozen_reason
+            return self._frozen_readers, self._frozen_reason
         self._frozen_resolved = True
         frozen = self._frozen_declared
-        if frozen is None:
-            commits: tuple = ()
-            if self._scope is not None:
-                commits = tuple(self._scope.commits)
-            frozen, reason = resolve_frozen_repository(
-                self._batch_repository(),
-                scope_commits=commits,
-                git_service=self._repo_git_service,
+        if frozen:
+            self._frozen_readers = tuple(FrozenTreeReader(item) for item in frozen)
+            self._frozen_reason = ""
+            return self._frozen_readers, ""
+        commits: tuple = ()
+        if self._scope is not None:
+            commits = tuple(self._scope.commits)
+        frozens, note = resolve_frozen_repositories(
+            self._batch_repositories(),
+            scope_commits=commits,
+            git_service_for=(
+                (lambda repository: self._repo_git_service)
+                if self._repo_git_service is not None
+                else None
+            ),
+        )
+        if not frozens:
+            self._frozen_reason = note or "本批次里没有解析到仓库"
+            log_print(
+                f"🔍 AI 取数：本次没有冻结仓库的只读范围（{self._frozen_reason}）——"
+                "引用检索退回「只搜本批次改动的文件」",
+                "AI",
             )
-            if frozen is None:
-                self._frozen_reason = reason
-                log_print(
-                    f"🔍 AI 取数：本次没有冻结仓库的只读范围（{reason}）——"
-                    "引用检索退回「只搜本批次改动的文件」",
-                    "AI",
-                )
-                return None, reason
-        self._frozen_reader = FrozenTreeReader(frozen)
+            return (), self._frozen_reason
+        self._frozen_readers = tuple(FrozenTreeReader(item) for item in frozens)
         self._frozen_reason = ""
-        return self._frozen_reader, ""
+        if note:
+            # 部分仓库没冻结成功**照样可读剩下的那些** —— 但要说出来，否则「这个文件读不到」
+            # 会被读成「它不存在」。
+            log_print(f"⚠️ AI 取数：有仓库没能冻结（{note}），其余仓库照常可读", "AI")
+        return self._frozen_readers, ""
+
+    def _resolved_reader(self) -> tuple[FrozenTreeReader | None, str]:
+        """第一个冻结读取器（旧读法）。**多仓判据一律用 `_resolved_readers()`。**"""
+        readers, reason = self._resolved_readers()
+        return (readers[0] if readers else None), reason
 
     def repo_read_scope(self):
         """本次分析可读的冻结范围（`frozen_repo.RepoReadScope`）；拿不到返回 `None`。
@@ -969,14 +1060,14 @@ class PlatformContextProvider:
         那一层仍然自己再判一次（**绝不因为协议层放行就信任**）。
         """
         if self._repo_scope is None:
-            reader, _reason = self._resolved_reader()
-            self._repo_scope = build_read_scope(
-                getattr(reader, "frozen", None), reader=reader
+            readers, _reason = self._resolved_readers()
+            self._repo_scope = build_read_scope_multi(
+                tuple(reader.frozen for reader in readers)
             )
         return self._repo_scope
 
     def repo_tracked_paths(self):
-        """给协议层用的跟踪路径集合；不可用时返回 `None`（**不是空集合**）。
+        """给协议层用的跟踪路径集合（**全部已冻结仓库的并集**）；不可用时返回 `None`。
 
         「空集合」会让协议层把每一条仓库范围的请求都判成越权（理由还会说「不在跟踪树
         里」—— 一句假话）；`None` 让它退回本批次那一套判据。
@@ -990,14 +1081,21 @@ class PlatformContextProvider:
         """读**不在本批次**的那个文件（`file_content` 的冻结版本分支）。
 
         判定顺序是刻意的（与 `frozen_repo` 的分工一致）：先纯路径判据 → 再凭证排除 →
-        再问「在不在跟踪树里」→ 最后才读。**每一步的拒绝都要给理由**，否则模型会把它
-        读成「平台取数失败」并写进信息缺口。
+        再问「在不在某个冻结仓库的跟踪树里」→ 最后才读。**每一步的拒绝都要给理由**，
+        否则模型会把它读成「平台取数失败」并写进信息缺口。
+
+        ## 同一条相对路径在多个仓库里都有时**不猜**
+
+        `config/item.xlsx` 这种路径在两个仓库里同时存在是可能的，而两个版本的内容与含义
+        都可能不同 —— 猜一个等于把另一个仓库的内容当成这个仓库的交给模型。所以这时给一份
+        **可操作**的拒绝：列出候选仓库，并说明怎么指定（`repository_id`，或给一条改过它的
+        提交）。
 
         没有冻结范围时返回 `None` —— 与「本批次里没有这个路径」在此之前的语义**逐字
         相同**（那是这条路加进来之前的全部行为）。
         """
-        reader, reason = self._resolved_reader()
-        if reader is None:
+        readers, reason = self._resolved_readers()
+        if not readers:
             return None
         normalized, reject = resolve_repo_path(path)
         if reject:
@@ -1005,6 +1103,13 @@ class PlatformContextProvider:
         blocked = exclusion_reason(normalized)
         if blocked:
             return reject_text(normalized, blocked)
+        scope = self.repo_read_scope()
+        candidates = scope.candidates(normalized)
+        if len(candidates) > 1:
+            return ambiguous_path_text(scope, normalized)
+        reader = reader_for_repository(
+            readers, candidates[0] if candidates else None
+        ) or readers[0]
         tip = str(getattr(reader.frozen, "tip", "") or "")
         tracked = reader.is_tracked(normalized)
         if tracked is None:
@@ -1014,31 +1119,66 @@ class PlatformContextProvider:
                 "需要它时请在报告里写成信息缺口。"
             )
         if not tracked:
-            return (
-                f"[路径不在本轮版本里] `{normalized}`：它不在冻结版本 {tip[:12]} 的"
-                "Git 跟踪文件清单里（拼错、改过名、或它在别的仓库）。\n"
-                "**这不等于「没有引用」** —— 请核对路径后另要一次，"
-                "或者把这件事写成信息缺口。"
-            )
+            return not_tracked_text(scope, normalized)
         data, why = reader.read_within_limit(normalized)
         if data is None:
             return (
                 f"[读不到正文] `{normalized}`@{tip[:12]}：{why}。"
                 "**这不等于「没有内容」，也不等于「没有改动」**。"
             )
-        return self._render_frozen_content(data, path=normalized, lines=lines, tip=tip)
+        return self._render_frozen_content(
+            data, path=normalized, lines=lines, tip=tip, reader=reader
+        )
+
+    def _repository_row(self, repository_id: Any):
+        """按 id 取仓库行（取不到返回 `None`）。给「这一份是从哪个仓库读的」用。"""
+        if repository_id is None:
+            return None
+        try:
+            from models import Repository
+
+            return Repository.query.filter_by(id=repository_id).first()
+        except Exception as exc:  # noqa: BLE001 —— 查不到只是少一个表头坐标来源
+            log_print(f"⚠️ AI 取数：查仓库 {repository_id} 失败：{exc}")
+            return None
+
+    def _describe_repository(self, repository_id: Any) -> str:
+        """候选仓库给人看的名字（`编号（名字）`）。名字取冻结对象自带的那一份 —— 不再查库
+        （见 `frozen_repo.repository_label`）。"""
+        reader = reader_for_repository(self._frozen_readers, repository_id)
+        frozen = getattr(reader, "frozen", None) if reader is not None else None
+        return repository_label(repository_id, getattr(frozen, "name", ""))
 
     def _render_frozen_content(
-        self, data: bytes, *, path: str, lines: str, tip: str
+        self,
+        data: bytes,
+        *,
+        path: str,
+        lines: str,
+        tip: str,
+        reader: FrozenTreeReader | None = None,
     ) -> str:
         """把冻结版本上读到的字节渲染成给模型看的正文（各类型走**与本地同一条**渲染）。
 
         出处那一行**必须有**：同一个路径在本批次里也可能被读到过（那条走的是该文件
         自己那条提交的内容），不说清「这一份读的是哪个版本」，模型会把两处的内容
         混成一份 —— 而它接下来正是要拿这两份做「调用方改了没有」的对比。
+
+        多仓之后出处还要写**哪个仓库**：同一条相对路径在两个仓库里都存在时，只写
+        `路径@tip` 仍然分不清是哪一份。
+
+        `reader` 是**读到这一份的那个**仓库的读取器（配表的表头坐标要按它那个仓库的
+        配置算）；不传时退回第一个仓库 —— 只在单仓调用点发生。
         """
+        frozen = getattr(reader, "frozen", None)
+        repository = None
+        if frozen is not None:
+            repository = self._repository_row(getattr(frozen, "repository_id", None))
+        if repository is None:
+            repository = self._batch_repository()
+        name = str(getattr(frozen, "name", "") or "")
         where = f"{path}@{tip[:12]}"
-        repository = self._batch_repository()
+        origin = f"冻结版本 {tip[:12]} 上的内容" + (f"，仓库 {name}" if name else "")
         if _is_openpyxl_workbook(path):
             rendered = _read_excel_sheets(
                 data,
@@ -1054,7 +1194,7 @@ class PlatformContextProvider:
                 return (
                     f"[配表解析失败] {where}：内容无法解析成文本表格。**这不等于「没有内容」**。"
                 )
-            return f"（出处：冻结版本 {tip[:12]} 上的内容，不是工作副本）\n{rendered}"
+            return f"（出处：{origin}，不是工作副本）\n{rendered}"
         if is_docx(path):
             rendered = render_docx_text(data, path=path)
             if rendered is None:
@@ -1593,28 +1733,20 @@ class PlatformContextProvider:
         )
 
     def _search_frozen_repo(self, query: str, prefix: str) -> Optional[str]:
-        """冻结版本的仓库范围检索。**不可用时返回 `None`**（调用方退回本批次那条路）。
+        """冻结版本的仓库范围检索（**每个仓库各搜一次**，见 `search_frozen_repositories`）。
 
-        这里只有一条「不搜」的分支：拿不到跟踪树（`reader.tracked_paths()` 回 `None`）。
-        那是「无法检索」，不是「没有命中」—— 调用方会在结果前面补一句范围声明。
+        **不可用时返回 `None`** —— 调用方退回「只搜本批次」那条路，并补一句范围声明
+        （「搜不到」与「没搜那么宽」在模型那里必须分得开）。
         """
-        reader, _reason = self._resolved_reader()
-        if reader is None:
+        readers, _reason = self._resolved_readers()
+        if not readers:
             return None
         extra = (
             {"max_files": int(self._repo_index_files)}
             if self._repo_index_files
             else {}
         )
-        outcome = search_frozen_repository(reader, query, prefix=prefix, **extra)
-        if outcome is None:
-            return (
-                f"[无法检索] 冻结版本的范围列不出来（对象库里读不到 "
-                f"{str(getattr(reader.frozen, 'tip', ''))[:12]} 的跟踪文件），"
-                f"所以 `{query}` **这一次没有在仓库范围内搜过**。"
-                "**这不等于「没有其它引用」** —— 请把这条写成信息缺口。"
-            )
-        return outcome.text
+        return search_frozen_repositories(readers, query, prefix=prefix, **extra)
 
     def _narrow_scope_note(self) -> str:
         """退回「只搜本批次」时补在结果前面的一句**范围声明**（拿得到范围时为空串）。

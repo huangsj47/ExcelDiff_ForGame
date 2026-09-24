@@ -614,10 +614,17 @@ def provider_snapshot_id(provider: Any) -> str:
     协议，而它的实现有一大堆（真实 provider、假 provider、测试桩），往协议上加一项
     等于要求每一个都跟上 —— 而它们大多根本不懂「冻结快照」这回事。
 
-    读的是 `repo_read_scope().frozen.tip`（`platform_provider` 那一层已经解析过一次，
+    读的是 `repo_read_scope().identity`（`platform_provider` 那一层已经解析过一次，
     结果被缓存，不会每轮去问 git）。**拿不到给空串**，它的含义是「这次不知道快照是
     哪一个」—— 判据那一侧据此退回 `other`（见 `deviation_reason`），而不是断言
     「快照没变」。
+
+    ## 为什么标识要覆盖**每个**仓库的 tip（2026-09-24）
+
+    原先只取第一个仓库的 `frozen.tip`。一次周版本分析可以覆盖多个仓库（配置仓库 +
+    代码仓库），而「代码仓库换了 tip、配置仓库没换」时快照**确实变了**，只取第一个
+    会让判据说「没变」。`RepoReadScope.identity` 把每个 `(仓库 id, tip)` 都拼进去。
+    只认得 `frozen.tip` 的旧读法（测试桩里那些）继续能用 —— 拿不到 `identity` 就退回它。
     """
     getter = getattr(provider, "repo_read_scope", None)
     if not callable(getter):
@@ -626,6 +633,9 @@ def provider_snapshot_id(provider: Any) -> str:
         scope = getter()
     except Exception:  # noqa: BLE001 —— 拿不到标识不该影响这次运行
         return ""
+    identity = str(getattr(scope, "identity", "") or "")
+    if identity:
+        return identity[:200]
     frozen = getattr(scope, "frozen", None)
     return str(getattr(frozen, "tip", "") or "")[:40]
 

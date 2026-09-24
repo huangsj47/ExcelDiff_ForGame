@@ -50,7 +50,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from services.ai.scope import normalize_path
 from utils.logger import log_print
@@ -506,12 +506,35 @@ class RepoReadScope:
 
     它只携带事实（路径集合 + 一行出处），不携带 reader —— 协议层要的是「这个路径合法吗」，
     读取仍然由 `platform_provider` 走 `FrozenTreeReader`（那是唯一碰 git 的地方）。
+
+    ## 为什么是**一组**仓库而不是一个（2026-09-24，run 57）
+
+    一次周版本分析覆盖的仓库可以不止一个（配置仓库 + 代码仓库同窗是常态）。此前这里只装
+    得下一个 `FrozenRepository`，而挑哪一个由 `_batch_repository()` 按仓库 id 升序取第一
+    —— 于是**代码仓库的文件全都落在「不在本次冻结版本的 Git 跟踪文件里」这一句里**。
+    实测 run 57：7 条被拒请求中有 4 条是 `code/qz_*`，而那两个文件在代码仓库自己的 tip 上
+    确实被跟踪。
+
+    所以这里改成装一组，`paths` 是**并集**：判据仍然是「本项目已接入仓库的只读 Git 跟踪
+    内容」，没有放宽到任意文件；`resolve_repo_path`（绝对路径 / 盘符 / `..` / 控制字符）与
+    `exclusion_reason`（凭证类）两条判据在多仓之前照旧各判一次。
     """
 
     frozen: FrozenRepository = field(default_factory=FrozenRepository)
     paths: frozenset = frozenset()
     #: 判不出来的原因（`paths` 为空且它非空时，调用方必须报「无法检索」而不是「没有」）。
+    #: **只在整份不可用时非空** —— 部分仓库失败走 `note`，否则 `available` 会跟着变假，
+    #: 协议层就会退回「只认本批次」，把能读的那些仓库一起关掉。
     reason: str = ""
+    #: 部分仓库没冻结成功时的说明（`paths` 仍然可用）。给人看，不参与判据。
+    note: str = ""
+    #: **本次冻结的全部仓库**（`frozen` 是其中第一个，留给只认单仓的旧读法）。
+    frozens: tuple = ()
+    #: 仓库 id -> 这一个仓库跟踪的路径集合。
+    paths_by_repository: Mapping[Any, frozenset] = field(default_factory=dict)
+    #: 路径 -> 跟踪它的仓库 id 元组（**顺序确定**，按 id 升序）。同一条相对路径在两个仓库里
+    #: 都存在时，它就是「该读哪一个」的歧义判据 —— 调用方必须据此报可操作错误，不许猜。
+    repositories_by_path: Mapping[str, tuple] = field(default_factory=dict)
 
     @property
     def available(self) -> bool:
@@ -526,11 +549,93 @@ class RepoReadScope:
             return False
         return any(item == text or item.startswith(text) for item in self.paths)
 
+    def candidates(self, path: str) -> tuple:
+        """跟踪这条路径的仓库 id（0 个 = 谁都不跟踪；≥2 个 = 有歧义，别猜）。"""
+        return tuple(self.repositories_by_path.get(str(path or ""), ()))
+
+    @property
+    def identity(self) -> str:
+        """「这一份冻结版本」的稳定标识：**每个仓库的 (id, tip) 都要在里面**。
+
+        只取第一个仓库的 tip 是不够的：代码仓库换了 tip 而配置仓库没换时，快照其实变了，
+        而标识没变 —— 判「快照是否变化」的地方会据此说「没变」（`request_fingerprint`）。
+        按仓库 id 升序拼，内容确定、可比较。空 scope 给空串（= 不知道）。
+        """
+        parts = []
+        items = self.frozens or ((self.frozen,) if self.frozen.available else ())
+        for item in items:
+            tip = str(getattr(item, "tip", "") or "")
+            if not tip:
+                continue
+            parts.append(f"{getattr(item, 'repository_id', None)}:{tip[:40]}")
+        return "|".join(sorted(parts))
+
+
+def repository_label(repository_id: Any, name: Any = "") -> str:
+    """一个仓库给人看的短名：`编号（名字）`；拿不到名字就只给编号。
+
+    **名字一律从调用方手上那份冻结对象/仓库行里取**（解析冻结版本时就从仓库行上取下来了）：
+    为了凑一个名字再去查一次库，既多一次查询，也会在没有 app 上下文的调用点（测试、探针）
+    刷出警告，而那种警告会淹掉真的失败。
+    """
+    text = str(name or "")
+    return f"{repository_id}（{text}）" if text else str(repository_id)
+
+
+def _label_of(frozen: Any) -> str:
+    """`FrozenRepository` → 短名。"""
+    return repository_label(
+        getattr(frozen, "repository_id", None), getattr(frozen, "name", "")
+    )
+
+
+def reader_for_repository(readers: Sequence[Any], repository_id: Any) -> Any:
+    """在一组读取器里按仓库 id 找那一个。找不到返回 `None`。"""
+    for reader in readers or ():
+        if getattr(getattr(reader, "frozen", None), "repository_id", None) == repository_id:
+            return reader
+    return None
+
+
+def ambiguous_path_text(scope: RepoReadScope, path: str) -> str:
+    """同一条相对路径**被多个仓库跟踪**时给模型的那份可操作拒绝。
+
+    两个仓库里都有 `config/item.xlsx` 是可能的，而两个版本的内容与含义都可能不同 ——
+    **猜一个等于把另一个仓库的内容当成这个仓库的交给模型**。所以这里不读，只列出候选
+    仓库并说明怎么指定（带 `repository_id`，或给一条改过它的提交）。
+    """
+    candidates = scope.candidates(path)
+    labels = [
+        _label_of(item)
+        for item in (getattr(scope, "frozens", ()) or ())
+        if getattr(item, "repository_id", None) in candidates
+    ]
+    named = "、".join(labels) or "、".join(str(item) for item in candidates)
+    return (
+        f"[需要在多个仓库之间指定] `{path}`：本项目的 {len(candidates)} 个"
+        f"仓库里都有这条路径（{named}）。**平台不替你猜是哪一个** —— 在请求里带上"
+        " `repository_id` 指明仓库；或者给一条**改过这个文件**的提交（那条路读的是"
+        "该提交上的版本）。\n"
+        "**这不等于「读不到」**。"
+    )
+
+
+def not_tracked_text(scope: RepoReadScope, path: str) -> str:
+    """「不在任何冻结仓库的跟踪树里」那句。**说清查了几个仓库** —— 少写这个数，
+    「不在跟踪树里」会被读成「这个文件不存在」。"""
+    count = len(getattr(scope, "frozens", ()) or ())
+    return (
+        f"[路径不在本轮版本里] `{path}`：它不在本次冻结的 {count} 个仓库的"
+        "Git 跟踪文件清单里（拼错、改过名，或它在**其它项目**的仓库里）。\n"
+        "**这不等于「没有引用」** —— 请核对路径后另要一次，"
+        "或者把这件事写成信息缺口。"
+    )
+
 
 def build_read_scope(
     frozen: Optional[FrozenRepository], *, reader: Optional[FrozenTreeReader] = None
 ) -> RepoReadScope:
-    """把冻结对象变成一份范围说明（列一次跟踪树）。**拒绝的理由会写进 `reason`。**"""
+    """把**一个**冻结对象变成一份范围说明。保留给只认单仓的调用方与既有测试。"""
     if frozen is None:
         return RepoReadScope(reason="本次没有可用的冻结仓库")
     reader = reader or FrozenTreeReader(frozen)
@@ -540,7 +645,110 @@ def build_read_scope(
             frozen=frozen,
             reason=f"列不出冻结版本 {frozen.tip[:8]} 的跟踪文件（对象库读不到这个提交）",
         )
-    return RepoReadScope(frozen=frozen, paths=frozenset(paths))
+    return RepoReadScope(
+        frozen=frozen,
+        paths=frozenset(paths),
+        frozens=(frozen,),
+        paths_by_repository={getattr(frozen, "repository_id", None): frozenset(paths)},
+        repositories_by_path={
+            path: (getattr(frozen, "repository_id", None),) for path in paths
+        },
+    )
+
+
+def build_read_scope_multi(
+    frozens: Sequence[FrozenRepository],
+    *,
+    readers: Optional[Mapping[Any, FrozenTreeReader]] = None,
+) -> RepoReadScope:
+    """把**一组**冻结对象合成一份范围说明（`paths` = 并集）。
+
+    ## 一个一个来，坏的那个不拖垮整体
+
+    某个仓库列不出跟踪树（对象库缺那个提交、本地副本不在）时，只把它从这一份里去掉、
+    把原因写进 `note`；**其余仓库照常可读**。整份一起失败会让「配置仓库能读、代码仓库
+    临时读不了」变成「这次什么都不能读」—— 那是把一次局部故障放大成全面降级。
+
+    全都没成时 `paths` 为空、`reason` 非空：调用方据此退回「只搜本批次」（既有语义）。
+    """
+    kept: list[FrozenRepository] = []
+    by_repo: dict = {}
+    by_path: dict = {}
+    failures: list[str] = []
+    for frozen in frozens or ():
+        if frozen is None:
+            continue
+        reader = (readers or {}).get(getattr(frozen, "repository_id", None))
+        reader = reader or FrozenTreeReader(frozen)
+        paths = reader.tracked_paths()
+        if paths is None:
+            failures.append(
+                f"{getattr(frozen, 'name', '') or frozen.repository_id}"
+                f"（列不出 {frozen.tip[:8]} 的跟踪文件）"
+            )
+            continue
+        kept.append(frozen)
+        repository_id = getattr(frozen, "repository_id", None)
+        cleaned = frozenset(str(path) for path in paths if str(path or "").strip())
+        by_repo[repository_id] = cleaned
+        for path in cleaned:
+            by_path.setdefault(path, []).append(repository_id)
+    if not kept:
+        reason = "本次没有可用的冻结仓库"
+        if failures:
+            reason += "：" + "；".join(failures)
+        return RepoReadScope(reason=reason)
+    return RepoReadScope(
+        frozen=kept[0],
+        paths=frozenset(by_path),
+        note=("；".join(failures) if failures else ""),
+        frozens=tuple(kept),
+        paths_by_repository=by_repo,
+        repositories_by_path={
+            path: tuple(sorted(ids, key=lambda item: (item is None, item)))
+            for path, ids in by_path.items()
+        },
+    )
+
+
+def resolve_frozen_repositories(
+    repositories: Sequence[Any],
+    *,
+    scope_commits: Sequence[str] = (),
+    git_service_for: Any = None,
+) -> Tuple[Tuple[FrozenRepository, ...], str]:
+    """把**一批**仓库解析成各自的冻结版本。返回 `(成功的那些, 说明)`。
+
+    ## 一个仓库失败只记一笔，不让整批失败
+
+    某个仓库不是 git、没有本地副本、tip 不在对象库里 —— 这些都不该让**别的仓库**也读不了。
+    实测 run 57 的形状正是「配置仓库冻结成功、代码仓库没被冻结」，而当时整批只能挑一个。
+    失败的仓库连原因一起写进 `note`（给日志与回执），成功的照常交出去。
+
+    全部失败时返回 `((), note)`：调用方据此退回「只搜本批次」，那是既有语义。
+    """
+    frozens: list[FrozenRepository] = []
+    failures: list[str] = []
+    for repository in repositories or ():
+        if repository is None:
+            continue
+        service = None
+        if callable(git_service_for):
+            try:
+                service = git_service_for(repository)
+            except Exception:  # noqa: BLE001 —— 拿不到就交给下一档自己解析
+                service = None
+        frozen, reason = resolve_frozen_repository(
+            repository, scope_commits=scope_commits, git_service=service
+        )
+        if frozen is None:
+            name = str(getattr(repository, "name", "") or getattr(repository, "id", ""))
+            failures.append(f"{name}（{reason}）")
+            continue
+        frozens.append(frozen)
+    note = "；".join(failures)
+    return tuple(frozens), note
+
 
 
 __all__ = [
@@ -549,12 +757,18 @@ __all__ = [
     "FrozenRepository",
     "FrozenTreeReader",
     "RepoReadScope",
+    "ambiguous_path_text",
     "build_read_scope",
+    "build_read_scope_multi",
     "cache_sizes",
     "exclusion_reason",
+    "not_tracked_text",
     "provider_repo_paths",
+    "reader_for_repository",
     "reject_text",
+    "repository_label",
     "reset_caches",
+    "resolve_frozen_repositories",
     "resolve_frozen_repository",
     "resolve_repo_path",
 ]
