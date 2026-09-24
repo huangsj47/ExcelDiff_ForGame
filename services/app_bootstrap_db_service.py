@@ -14,6 +14,8 @@ from utils.db_config import (
 )
 from utils.db_safety import collect_sqlite_runtime_diagnostics
 
+from services.db_migration_service import missing_columns
+
 DB_STARTUP_DIR_CREATE_ERRORS = (OSError, ValueError, TypeError)
 DB_STARTUP_INSPECT_ERRORS = (SQLAlchemyError, AttributeError, ValueError, TypeError, RuntimeError)
 DB_STARTUP_CREATE_ALL_ERRORS = (SQLAlchemyError, AttributeError, ValueError, TypeError, RuntimeError)
@@ -68,6 +70,27 @@ def create_tables_with_runtime_checks(*, app, db, log_print, apply_schema_migrat
             return
 
         apply_schema_migrations(db, log_print)
+
+        # **列**也要自己量一遍：表在、列缺是启动时唯一看不出来的那一类 —— 模型加了列而
+        # 迁移清单里漏写，进程照常起来，直到某条查询用到那一列才炸（实测代价：一轮 22
+        # 分钟的周版本分析作废在 `no such column: ai_analysis_anomaly.claims`）。
+        # 只报不拦：列缺了也要能起平台来排查，但报错信息必须指向这一句。
+        try:
+            absent = missing_columns(db)
+        except DB_STARTUP_INSPECT_ERRORS as exc:
+            log_print(f"检查缺失列失败: {exc}", "DB", force=True)
+        else:
+            if absent:
+                detail = "；".join(f"{name} 缺 {', '.join(cols)}" for name, cols in absent.items())
+                log_print(
+                    f"⚠️ 模型上有、库里没有的列：{detail} —— "
+                    "`services/db_migration_service.py` 的迁移清单漏了它，"
+                    "用到这一列的查询会直接报错",
+                    "DB",
+                    force=True,
+                )
+            else:
+                log_print("✅ 模型列与库一致，无缺失列", "DB")
 
         try:
             final_tables = inspect(db.engine).get_table_names()

@@ -23,6 +23,7 @@ from models.ai_analysis import (
     RUN_STATUSES,
     TRACE_OUTCOMES,
     AiAnalysisAnomaly,
+    AiAnalysisJob,
     AiAnalysisRoundEvent,
     AiAnalysisRun,
     AiAnalysisTrace,
@@ -90,6 +91,73 @@ CREATE TABLE ai_analysis_trace (
     context_chars INTEGER,
     duration_ms INTEGER,
     created_at DATETIME
+)
+"""
+
+# P0 之前的样子：`claims` 还没有（迁移清单里也曾经漏了它 —— 真机上跑了 22 分钟才炸）。
+_OLD_ANOMALY_DDL = """
+CREATE TABLE ai_analysis_anomaly (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL,
+    project_id INTEGER,
+    fingerprint VARCHAR(64),
+    title VARCHAR(500),
+    category VARCHAR(50),
+    severity VARCHAR(20),
+    confidence VARCHAR(20),
+    evidence TEXT,
+    commit_ref VARCHAR(100),
+    file_path VARCHAR(500),
+    impact TEXT,
+    suggestion TEXT,
+    disposition VARCHAR(20),
+    disposition_by VARCHAR(100),
+    disposition_at DATETIME,
+    disposition_note TEXT,
+    created_at DATETIME,
+    updated_at DATETIME
+)
+"""
+
+# 任务表同样是个「已存在的表」：这三列是后加的（进度两列、P2-2 的计划原因列）。
+_OLD_JOB_DDL = """
+CREATE TABLE ai_analysis_job (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL,
+    target_type VARCHAR(30),
+    target_id INTEGER,
+    target_key VARCHAR(200),
+    requested_mode VARCHAR(20),
+    effective_mode VARCHAR(20),
+    upgrade_reason VARCHAR(200),
+    state VARCHAR(30),
+    trigger_source VARCHAR(30),
+    idempotency_key VARCHAR(200),
+    active_key VARCHAR(200),
+    base_run_id INTEGER,
+    base_snapshot_id INTEGER,
+    target_snapshot_id INTEGER,
+    reused_run_id INTEGER,
+    run_id INTEGER,
+    task_id INTEGER,
+    prompt_version VARCHAR(50),
+    skill_version VARCHAR(50),
+    rules_version VARCHAR(50),
+    analysis_revision VARCHAR(50),
+    model VARCHAR(100),
+    baseline_provenance_mismatch BOOLEAN,
+    focus VARCHAR(50),
+    planned_files INTEGER,
+    planned_tokens_low INTEGER,
+    planned_tokens_high INTEGER,
+    lease_owner VARCHAR(100),
+    lease_expires_at DATETIME,
+    error_message TEXT,
+    delta_summary TEXT,
+    created_at DATETIME,
+    updated_at DATETIME,
+    started_at DATETIME,
+    finished_at DATETIME
 )
 """
 
@@ -171,6 +239,8 @@ def old_db(tmp_path):
         connection.exec_driver_sql(_OLD_CONFIG_DDL)
         connection.exec_driver_sql(_OLD_RUN_DDL)
         connection.exec_driver_sql(_OLD_TRACE_DDL)
+        connection.exec_driver_sql(_OLD_ANOMALY_DDL)
+        connection.exec_driver_sql(_OLD_JOB_DDL)
     stub = _DbStub(engine)
     yield stub
     stub.session.close()
@@ -194,6 +264,64 @@ def test_migration_adds_every_new_column(old_db):
     assert set(CONFIG_NEW_COLUMNS).issubset(_columns(old_db, "ai_project_analysis_config"))
     assert set(RUN_NEW_COLUMNS).issubset(_columns(old_db, "ai_analysis_run"))
     assert set(TRACE_NEW_COLUMNS).issubset(_columns(old_db, "ai_analysis_trace"))
+
+
+def test_an_old_table_ends_up_with_every_model_column(old_db):
+    """**派生自模型**，不是手抄清单：模型加了列而迁移清单漏写，这里立刻红。
+
+    真机踩过这个坑：`AiAnalysisAnomaly.claims`（P0 逐条裁决）只进了模型、没进迁移
+    清单 —— 表在、列缺，启动期什么都没说，那一轮周版本分析跑了 22 分钟，最后在读基线
+    结论时 `no such column` 整轮作废。手抄的期望清单抓不住它，模型元数据能。
+    """
+    from services.db_migration_service import _migrate_ai_analysis_columns
+
+    _migrate_ai_analysis_columns(old_db, lambda *a, **k: None)
+
+    for model in (AiAnalysisJob, AiAnalysisAnomaly):
+        table = model.__table__.name
+        want = {column.name for column in model.__table__.columns}
+        gone = want - _columns(old_db, table)
+        assert not gone, (
+            f"{table} 迁移后仍缺列 {sorted(gone)}：模型加了它，"
+            "`services/db_migration_service.py` 的清单里没有"
+        )
+
+
+def test_the_startup_check_sees_the_columns_the_migration_had_not_written(old_db):
+    """启动期自检的口径：**迁移之前**它必须把缺口报出来，迁移之后归零。
+
+    这一句是「表在、列缺」唯一能在启动时看见的地方 —— 没有它，缺口只会在某条查询
+    第一次用到那一列时以 OperationalError 的形式出现。
+    """
+    from services.db_migration_service import _migrate_ai_analysis_columns, missing_columns
+
+    tables = {
+        "ai_analysis_anomaly": AiAnalysisAnomaly.__table__,
+        "ai_analysis_job": AiAnalysisJob.__table__,
+    }
+    assert missing_columns(old_db, tables=tables) == {
+        "ai_analysis_anomaly": ["claims"],
+        "ai_analysis_job": ["planned_estimate_note", "progress_json", "progress_updated_at"],
+    }
+    _migrate_ai_analysis_columns(old_db, lambda *a, **k: None)
+    assert missing_columns(old_db, tables=tables) == {}
+
+
+def test_the_check_does_not_count_a_table_that_is_not_there(old_db):
+    """表不存在不算「缺列」—— 建表是 `create_all()` 的活，自检不该替它报警。"""
+    from services.db_migration_service import missing_columns
+
+    assert missing_columns(old_db, tables={"nope": AiAnalysisAnomaly.__table__}) == {}
+
+
+def test_the_startup_check_is_wired_into_create_tables():
+    """光有函数不算数：它必须真的挂在启动链路上（同 `_migrate_*` 的接线纪律）。"""
+    import inspect as pyinspect
+
+    from services import app_bootstrap_db_service
+
+    source = pyinspect.getsource(app_bootstrap_db_service.create_tables_with_runtime_checks)
+    assert "missing_columns" in source, "启动期不再量「缺列」了，这一层守卫静默失效"
 
 
 def test_migration_is_idempotent(old_db):

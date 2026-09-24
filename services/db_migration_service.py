@@ -159,6 +159,35 @@ def _migrate_table_columns(db, table_name, desired_cols, log_print):
             pass
 
 
+def missing_columns(db, tables=None) -> dict:
+    """模型上有、库里没有的列：`{表名: [列名, ...]}`。**只报，不改**（启动期自检用）。
+
+    ## 为什么要有这一句
+
+    `db.create_all()` 只建**不存在的表**，`_migrate_*` 只补**写进清单的**列。两者之间那条
+    缝 ——「模型加了列、迁移清单里忘了写」—— 在启动时**看不出来**：表在、列缺，进程照常
+    起来，直到某条查询真的用到那一列才炸。实测的代价是一轮周版本分析：跑了 22 分钟，最后
+    在读基线结论时 `no such column: ai_analysis_anomaly.claims`，整轮结论作废。
+
+    模型元数据（`db.metadata.tables`）是这份清单的唯一天然来源，所以这里逐表逐列对着库里
+    的 `inspect` 结果比一遍。表不存在不算缺列（那是 `create_all` 的活）。
+
+    `tables` 只是给测试留的注入点（默认取全部模型表）。
+    """
+    targets = db.metadata.tables if tables is None else tables
+    inspector = inspect(db.engine)
+    existing = set(inspector.get_table_names())
+    missing = {}
+    for name, table in targets.items():
+        if name not in existing:
+            continue
+        have = {column["name"] for column in inspector.get_columns(name)}
+        absent = sorted(column.name for column in table.columns if column.name not in have)
+        if absent:
+            missing[name] = absent
+    return missing
+
+
 def _migrate_repository_columns(db, log_print):
     _migrate_table_columns(
         db,
@@ -286,10 +315,12 @@ def _migrate_ai_analysis_columns(db, log_print):
     所以已部署库里的老行在新列上是 NULL。`AiProjectAnalysisConfig.resolved()` 负责把
     NULL 读成默认值 —— 不要假设数据库会替我们补上。
 
-    新表（`ai_analysis_anomaly` / `ai_analysis_trace`）原本不在这里出现：`db.create_all()`
+    新表（`ai_analysis_anomaly` / `ai_analysis_trace`）**当初**不在这里出现：`db.create_all()`
     在启动时会创建它们（它只建不存在的表，不会动已有的表）。只有**给已存在的表加列**
-    才需要走这里。若将来给这两张新表补索引，则要同时加进 `REQUIRED_INDEXES`
-    （老库里表已建好，`create_all` 不会再给它补索引）。
+    才需要走这里。但它们后来都进了这张清单（trace 补缓存 token、anomaly 补 `claims`）——
+    「它是新表」这句话只在建表那一次成立，**此后给它加列一律走这里**。
+    若将来给这两张表补索引，则要同时加进 `REQUIRED_INDEXES`（表已建好，`create_all`
+    不会再补索引）。
 
     `ai_analysis_trace` 现在**必须**出现在这里：它已经不是「新表」了 —— 用量采集上线时
     它已经是既有的表，而那次要给它的每轮记录补两列缓存 token。`create_all` 对已存在的
@@ -305,6 +336,20 @@ def _migrate_ai_analysis_columns(db, log_print):
             # 计划三列取不到值时的**原因**（P2-2）。老行是 NULL —— 而那正好是
             # 「还没写过计划」那个语义，与「估了但估不出来」是两件事。
             "planned_estimate_note": "planned_estimate_note LONGTEXT",
+        },
+        log_print,
+    )
+    # `ai_analysis_anomaly` 从「新表」变成了「已存在的表」：P0 给它加了 `claims`
+    # （逐条原子断言的裁决结果）。**真机实测漏过这一条** —— 模型加了列、这张清单没加，
+    # 那一轮周版本分析跑了 22 分钟，最后在「读基线结论」那一步炸出
+    # `no such column: ai_analysis_anomaly.claims`，整轮结论作废。
+    # 老行在新列上是 NULL，`to_dict` 把 NULL 读成空清单 —— 那正是迁移前那些结论该有的
+    # 语义（「这条结论没有拆过断言」，不是「拆了但没有一条被证实」）。
+    _migrate_table_columns(
+        db,
+        "ai_analysis_anomaly",
+        {
+            "claims": "claims LONGTEXT",
         },
         log_print,
     )
