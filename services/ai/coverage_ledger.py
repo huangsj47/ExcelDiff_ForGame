@@ -194,7 +194,8 @@ def parse_evidence_label(label: Any) -> tuple[str, str, str]:
 def _inventory(payload: Mapping[str, Any]) -> dict:
     """本次输入的**白名单**：允许模型读的那些文件，以及几个总数。
 
-    * `entries`：`(path, 本批次的提交)`，用来算保守口径的证据覆盖；
+    * `entries`：`(仓库, path, 本批次的提交)` 三元组，用来算保守口径的证据覆盖
+      （`repository_id` 读不出来时是空串 = **不知道**，见 `_evidence_files`）；
     * `batch_files`：白名单条数（**证据覆盖的分母**）；
     * `window_files`：本版本改动总数（**输入覆盖的分母** —— 只有它才知道「装没装下」）；
     * `listed_files`：提示词里列出的名字数；
@@ -215,7 +216,10 @@ def _inventory(payload: Mapping[str, Any]) -> dict:
         # 单提交模式：这一次分析的对象就是那一条提交改的那一个文件。
         commit = _as_mapping(payload.get("commit"))
         path = str(commit.get("path") or "").strip()
-        entries = [(path, str(commit.get("commit_id") or ""))] if path else []
+        repository_id = commit.get("repository_id")
+        entries = (
+            [(repository_id, path, str(commit.get("commit_id") or ""))] if path else []
+        )
         return {
             "mode": mode,
             "entries": entries,
@@ -226,14 +230,18 @@ def _inventory(payload: Mapping[str, Any]) -> dict:
             "input_commits": None,
         }
 
-    entries: list[tuple[str, str]] = []
+    entries: list[tuple] = []
     for item in payload.get("delta_files") or ():
         if not isinstance(item, Mapping):
             continue
         path = str(item.get("file_path") or "").strip()
         if not path:
             continue
-        entries.append((path, str(item.get("latest_commit_id") or "")))
+        # 仓库是**身份的一部分**（P1a）：同一条 `(提交, 路径)` 在两个仓库里可能是两份
+        # 内容，只按路径记账会让两者互相顶替。写侧本来就带这个键（`scope_sampling`）。
+        entries.append(
+            (item.get("repository_id"), path, str(item.get("latest_commit_id") or ""))
+        )
 
     listed = payload.get("list_files")
     listed_files = len(listed) if isinstance(listed, (list, tuple)) else None
@@ -260,9 +268,9 @@ def _inventory(payload: Mapping[str, Any]) -> dict:
 
 
 def _evidence_files(
-    entries: Sequence[tuple[str, str]], executed: Iterable[Any]
+    entries: Sequence[tuple], executed: Iterable[Any]
 ) -> tuple[set, set, set, list[dict]]:
-    """逐轮明细 → `(按 (提交, 路径) 去重, 按路径去重, 按 (路径, 段) 去重, 没取到的条目)`。
+    """逐轮明细 → `(按 (仓库, 路径, 提交) 去重, 按路径去重, 按 (路径, 段) 去重, 没取到的条目)`。
 
     「取到过」= 工具真的把内容交回给了模型：`failed`（取不到，例如没绑 Agent）与
     `empty`（工具明确回了「确实没有内容」）都不算。这两者分开记账是本仓库的底线，
@@ -276,12 +284,22 @@ def _evidence_files(
     `paths` 同时就是 `inspection_coverage` 的分子：**都叫「已检查」，判据只能有一套**
     （`build_ledger` 里那处原先另写了一遍统计，既没排 `failed`/`empty`、也没校验白名单，
     于是「取数失败」被算成了「已检查」）。
+
+    ## `entries` 是三元组，`expected` 是**一列**而不是一个值（P1a）
+
+    `expected` 原先写成 `{路径: 提交}` —— **同一个相对路径在两个仓库里各有一条时，后写
+    的顶掉先写的**：读的是 A 仓库那一版，却按 B 仓库那条提交做前缀匹配，匹配不上就被
+    当成「没看过」，覆盖账于是少报。现在按路径收成一列三元组，逐条匹配。
+
+    `pairs` 的键是 `(仓库, 提交, 路径)`：**两个仓库的同名文件是两条覆盖**，只算一条会把
+    「只看了一半」说成「看完了」。仓库取自逐轮明细的 `repository_id`（`context_tools`
+    写进 `meta` 的那一项）；老行没有它 ⇒ 空串 = 不知道，退回按 `(路径, 提交)` 记。
     """
     pairs: set = set()
     paths: set = set()
     segments: set = set()
     failures: list[dict] = []
-    expected = {path: commit for path, commit in entries}
+    expected = _expected_by_path(entries)
 
     for item in executed or ():
         if not isinstance(item, Mapping):
@@ -292,20 +310,65 @@ def _evidence_files(
             failures.append(dict(item))
             continue
         commit, path, lines = parse_evidence_label(item.get("label"))
+        if not path:
+            continue
         # 只算**白名单里真的有**的文件：模型越权点名时平台会把它丢掉（它根本取不到内容），
         # 万一有漏网的一条，把它算进覆盖率就是虚报。
-        if not path or path not in expected:
+        candidates = expected.get(path)
+        if not candidates:
             continue
+        repository_id = str(item.get("repository_id") or "")
         # 按路径口径：取过这个文件的任何一版都算。
         paths.add(path)
         segments.add((path, lines))
-        # 按 (提交, 路径) 口径：只有「正是白名单里那一条」才算。标签里只有 12 位提交
-        # （`describe_request` 切的），所以与白名单里的完整提交号做前缀匹配。
-        expect = expected[path]
-        if expect and commit and not str(expect).startswith(commit):
+        # 按 (仓库, 路径, 提交) 口径：标签里只有 12 位提交（`describe_request` 切的），
+        # 所以与白名单里的完整提交号做前缀匹配；仓库只有**两边都写得出**时才拿来收窄。
+        matched = _match_entry(candidates, commit, repository_id)
+        if matched is None:
             continue
-        pairs.add((path, expect))
+        # 键是 `(仓库, 路径, 提交)` 三元组 —— **路径必须在里面**：`expected` 是按路径分
+        # 组的，而 `_match_entry` 还回来的只是 `(仓库, 提交)`，直接拿它当键会让所有路径
+        # 折叠成同一个键（覆盖数立刻从 N 变成 1）。
+        pairs.add((matched[0], path, matched[1]))
     return pairs, paths, segments, failures
+
+
+def _expected_by_path(entries: Iterable[tuple]) -> dict[str, list]:
+    """白名单 → `{路径: [(仓库, 提交), …]}`（同一路径的多个仓库**都留着**）。"""
+    expected: dict[str, list] = {}
+    for entry in entries or ():
+        try:
+            repository_id, path, commit = entry
+        except (TypeError, ValueError):
+            continue
+        text = str(path or "").strip()
+        if not text:
+            continue
+        expected.setdefault(text, []).append(
+            (str(repository_id or "").strip(), str(commit or "").strip())
+        )
+    for rows in expected.values():
+        rows.sort()
+    return expected
+
+
+def _match_entry(candidates: list, commit: str, repository_id: str):
+    """这条证据对应白名单里的哪一条 `(仓库, 提交, 路径)`（对不上返回 `None`）。
+
+    提交对不上就是**没看过这一版**（放宽会让覆盖率虚报）。仓库只在两边都知道、且其中
+    有一条正好对上时才用来收窄 —— 拿一个「不知道」去和「知道」比，那一条会永远匹配不上，
+    症状是覆盖率永远差一截。
+    """
+    if not commit:
+        return None
+    hits = [row for row in candidates if row[1] and row[1].startswith(commit)]
+    if not hits:
+        return None
+    if repository_id:
+        exact = [row for row in hits if row[0] == repository_id]
+        if exact:
+            return exact[0]
+    return hits[0]
 
 
 def _tool_totals(tool_stats: Any) -> dict:

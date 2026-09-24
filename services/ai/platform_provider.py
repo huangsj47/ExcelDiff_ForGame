@@ -1752,11 +1752,32 @@ class PlatformContextProvider(ReferenceSearchMixin):
         """
         try:
             return lookup_commit(
-                commit, path, repository_id, batch=self._repositories_for(commit)
+                commit, path, repository_id, batch=self._commit_batch(commit, path)
             )
         except Exception as exc:  # noqa: BLE001
             log_print(f"⚠️ AI 取数：查提交行失败 {commit[:12]}: {exc}")
             return None, ()
+
+    def _commit_batch(self, commit: str, path: str) -> tuple[int, ...]:
+        """查这条 `(提交, 路径)` 时该收窄到哪几个仓库。
+
+        批次集合（`_repositories_for`）说的是「**可能**有它的仓库」（按提交号收窄，
+        REV-AI-001）；归属表（`scope.entries`）在知道这条路径属于谁时给出**确切**的答案
+        （P1a）。两者都有时取交集 —— 那正是「同一条修订号在两个仓库里都有、而这条
+        `(提交, 路径)` 只属于其中一个」的情形：有归属就不必回一句「请点名仓库」去问模型，
+        而那本来也不是猜（归属是写侧冻结的事实，不是这里的推断）。
+
+        归属与批次**交集为空**（两边矛盾）时退回批次集合 —— 拿一个对不上的集合去查
+        只会得到「查不到」，把一处内部矛盾伪装成「这条不存在」。退回去，让候选说得出来。
+        """
+        batch = self._repositories_for(commit)
+        if self._scope is None:
+            return batch
+        owners = self._scope.repositories_for_path(path, commit)
+        if not owners:
+            return batch
+        narrowed = tuple(sorted(set(batch) & set(owners))) if batch else tuple(sorted(owners))
+        return narrowed or batch
 
     def _commit_rows(self, commit: str, repository_id: Any = ""):
         """→ `(行列表, 候选仓库)`。这条提交改过的**全部**文件。
@@ -1767,9 +1788,7 @@ class PlatformContextProvider(ReferenceSearchMixin):
         模型点名了 `repository_id` 时才收窄到那一个。
         """
         try:
-            return lookup_commit_files(
-                commit, repository_id, batch=self._repositories_for(commit)
-            )
+            return lookup_commit_files(commit, repository_id, batch=self._repositories_for(commit))
         except Exception as exc:  # noqa: BLE001
             log_print(f"⚠️ AI 取数：查提交失败 {commit[:12]}: {exc}")
             return (), ()

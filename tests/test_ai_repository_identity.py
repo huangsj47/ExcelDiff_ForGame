@@ -499,3 +499,150 @@ class TestThePayloadPlumbing:
             assert scope.entry_allowed(second, revision, PATH) is False, (
                 "叉乘会把这条配对也「授权」出去 —— 而它在两个仓库里都不存在"
             )
+
+
+class TestTheAttributionResolvesTheAmbiguity:
+    """归属**知道**这条 `(提交, 路径)` 属于谁时，就不必再回一句「请点名仓库」。
+
+    那不是猜：归属是写侧冻结的事实（payload 的每一条本来就带 `repository_id`）。
+    回一句「请点名仓库」只有在归属也不知道时才是对的。
+    """
+
+    def test_a_known_owner_is_read_without_asking(self):
+        with app.app_context():
+            create_tables()
+            revision, first, second = _seed_two_repositories()
+            scope = _scope(
+                revision=revision,
+                repository_ids_by_commit={revision: frozenset({first, second})},
+                entries=build_entries([(second, revision, PATH)]),
+            )
+
+            row, _candidates = _provider(scope)._commit_row(revision, PATH)
+
+            assert row is not None, "归属已经说了是第二个仓库，不该回一句请点名"
+            assert row.repository_id == second
+
+    def test_an_unknown_owner_still_asks(self):
+        """反方向：没有归属时照旧**不猜**（这正是上面那条的前提）。"""
+        with app.app_context():
+            create_tables()
+            revision, first, second = _seed_two_repositories()
+            scope = _scope(
+                revision=revision,
+                repository_ids_by_commit={revision: frozenset({first, second})},
+            )
+
+            row, candidates = _provider(scope)._commit_row(revision, PATH)
+
+            assert row is None and candidates == (first, second)
+
+    def test_a_contradiction_between_the_two_sources_falls_back(self):
+        """归属与批次**矛盾**（归属说 A、批次里只有 B）时退回批次集合。
+
+        拿一个对不上的集合去查只会得到「查不到」—— 那会把一处内部矛盾伪装成
+        「这条不存在」，而模型据此写下的是一句更硬的结论。
+        """
+        with app.app_context():
+            create_tables()
+            revision, first, second = _seed_two_repositories()
+            scope = _scope(
+                revision=revision,
+                repository_ids_by_commit={revision: frozenset({second})},
+                entries=build_entries([(first, revision, PATH)]),
+            )
+
+            row, candidates = _provider(scope)._commit_row(revision, PATH)
+
+            assert row is not None and row.repository_id == second, (
+                "退回批次集合之后，第二个仓库那一行照旧查得到"
+            )
+            # 候选**只在批次里找**（REV-AI-001）：归属说的那个仓库不在本批次里，
+            # 它不进候选 —— 否则这句拒绝会把别的项目的仓库编号报给模型。
+            assert candidates == (second,)
+
+
+class TestTheWindowAccountCarriesPerRepositoryPaths:
+    """窗口账（`window_commit_files`）**逐仓库**记路径。
+
+    同一条修订号落在两个仓库里时，旧形状只有一个 `repository_id`（先到的那个），
+    另一个仓库的路径虽然进了 `paths`，但取数侧按那一个仓库收窄 —— 那些路径的 diff
+    连行都查不出来，模型只能把「读不到」写成结论。
+    """
+
+    def _two_configs(self, first: int, second: int):
+        """两个周版本配置，各绑一个仓库（窗口覆盖住刚才那些提交）。
+
+        窗口的两端是**北京墙钟**（`weekly_window_in_utc` 才换成 UTC），所以这里给足
+        余量 —— 差 8 小时正是这个函数存在的理由。
+        """
+        from datetime import timedelta
+
+        from models import WeeklyVersionConfig
+
+        project_id = db.session.get(Repository, first).project_id
+        now = datetime.now(timezone.utc)
+        configs = []
+        for repository_id in (first, second):
+            cfg = WeeklyVersionConfig(
+                project_id=project_id, repository_id=repository_id, name=_uid("w"),
+                branch="trunk",
+                start_time=now - timedelta(days=7),
+                end_time=now + timedelta(days=2),
+                # **不启用、不自动同步**：默认值是启用的，而测试库是会话级共用的 ——
+                # 一条 active + auto_sync 的配置会真的被调度器排进任务（本机跑测试时
+                # 那个后台线程就在同一个进程里），于是别的用例莫名其妙地多出一条 run。
+                is_active=False,
+                auto_sync=False,
+                status="archived",
+            )
+            db.session.add(cfg)
+            configs.append(cfg)
+        db.session.commit()
+        return configs
+
+    def test_the_payload_carries_each_repositorys_paths(self):
+        from services.ai.window_commits import window_commit_files
+
+        with app.app_context():
+            create_tables()
+            revision, first, second = _seed_two_repositories(same_path=False)
+            configs = self._two_configs(first, second)
+
+            entry = window_commit_files(configs).get(revision)
+
+            assert entry is not None, "这条修订号两个仓库都在窗口里"
+            by_repo = entry["repositories"]
+            assert set(by_repo) == {str(first), str(second)}, by_repo
+            assert by_repo[str(first)] == [PATH]
+            assert by_repo[str(second)] == [OTHER_PATH]
+            # 老读者要的扁平那一份照旧在（两个仓库的并集）。
+            assert set(entry["paths"]) == {PATH, OTHER_PATH}
+
+    def test_the_batch_scope_gets_both_repositories_and_both_triples(self):
+        """窗口账进 `change_set` 之后：两个仓库都要被收窄进去，两条三元组都要有归属。"""
+        from services.ai.change_set import from_weekly_payload
+        from services.ai.window_commits import window_commit_files
+
+        with app.app_context():
+            create_tables()
+            revision, first, second = _seed_two_repositories(same_path=False)
+            configs = self._two_configs(first, second)
+            account = window_commit_files(configs)
+
+            scope = from_weekly_payload({
+                "scope": "full",
+                # 白名单是**另一条**提交：窗口账只给「还不是白名单键」的那些提交补条目。
+                "delta_files": [
+                    {"latest_commit_id": "f" * 40, "file_path": "config/别的.xlsx",
+                     "repository_id": first},
+                ],
+                "window_commit_files": account,
+            }).scope
+
+            assert scope.repository_ids_by_commit.get(revision) == frozenset({first, second}), (
+                "只记了先到的那个仓库 —— 另一个仓库的路径会永远读不到"
+            )
+            assert scope.entry_allowed(first, revision, PATH) is True
+            assert scope.entry_allowed(second, revision, OTHER_PATH) is True
+            assert scope.entry_allowed(first, revision, OTHER_PATH) is False

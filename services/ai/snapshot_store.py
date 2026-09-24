@@ -173,10 +173,11 @@ def seal_snapshot(
 
     seen: set = set()
     for row in rows:
-        key = (row.config_id, row.file_path)
+        # 去重键与唯一索引**同一份**（`uq_ai_snapshot_item_key`，含仓库）。真出现重复
+        # 也不能让 INSERT 撞唯一索引 —— 那时整条 run 都建不出来，代价远大于少一条。
+        key = (row.repository_id, row.config_id, row.file_path)
         if key in seen:
-            # `file_path` 在 `(config_id, file_path)` 下唯一是这张表的前提；真出现重复
-            # 也不能让 INSERT 撞唯一索引 —— 那时整条 run 都建不出来，代价远大于少一条。
+            # `file_path` 在 `(仓库, config_id, file_path)` 下唯一是这张表的前提。
             continue
         seen.add(key)
         db.session.add(

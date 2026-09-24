@@ -176,6 +176,11 @@ def summarize_executed(items: Any, *, limit: int = TRACE_LIST_MAX_ITEMS) -> list
         out.append({
             "kind": _clip(getattr(item, "kind", ""), 40),
             "label": _clip(getattr(item, "label", ""), 200),
+            # 这一条正文**属于哪个仓库**（P1a）。标签里不许有它（那是被逐字断言的地址
+            # 格式），而覆盖账要用它：同一条 `(提交, 路径)` 在两个仓库里是两份不同的内容，
+            # 只按路径记「看过这一版」会把两个仓库的覆盖混成一个数。
+            # 老行没有这一项 ⇒ 空串 = **不知道**，覆盖账退回按 `(路径, 提交)` 记。
+            "repository_id": _clip(meta.get("repository_id", ""), 20),
             "chars": len(text),
             "failed": bool(notice or meta.get("tool_failed")),
             "empty": bool(meta.get("tool_empty")),

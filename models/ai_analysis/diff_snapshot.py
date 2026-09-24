@@ -148,7 +148,7 @@ class AiDiffSnapshot(db.Model):
 
 
 class AiDiffSnapshotItem(db.Model):
-    """快照里的一条：某个 `(config_id, file_path)` 在那一刻的内容身份。"""
+    """快照里的一条：某个 `(仓库, config_id, file_path)` 在那一刻的内容身份。"""
 
     __tablename__ = "ai_diff_snapshot_item"
 
@@ -175,15 +175,31 @@ class AiDiffSnapshotItem(db.Model):
     commit_count = db.Column(db.Integer, nullable=True)
 
     __table_args__ = (
-        # 条目在快照内唯一 —— 做差按 `(config_id, file_path)` 取，重复条目会让
+        # 条目在快照内唯一 —— 做差按 `(仓库, config_id, file_path)` 取，重复条目会让
         # 差集出现「同一个文件两次」。
+        #
+        # `repository_id` 加进来（2026-09-24，P1a）：它原先只由 `config_id` 隐含决定
+        # （一个周版本配置绑一个仓库），于是「这条属于哪个仓库」这件事在表的形态上
+        # **看不出来** —— 而快照是按**组**建的（一个组横跨配置仓库与代码仓库），
+        # 于是读侧只能拿某一个仓库的可达集去核对整份清单，另一个仓库的每一条都被判
+        # 「指向历史上不存在的提交」（实测 run 58：快照 28 的 1304 项分属两个仓库，
+        # 必然报 1242 条假警报）。把它写进唯一键之后，「条目身份含仓库」是**表自己
+        # 说得清的事实**，读侧不必再靠 config 反推。
+        #
+        # **NULL 上这条唯一性不成立**（SQL 的唯一索引把 NULL 当互不相同），而这一列
+        # 是可空的。实际写入的每一行都带着仓库（`seal_snapshot` 从缓存行抄，
+        # `WeeklyVersionDiffCache.repository_id` 是 NOT NULL），所以这不是一个已知的洞，
+        # 而是一句要说出来的前提：真出现 NULL 行时，挡重复的是 `seal_snapshot` 里那道
+        # 去重，不是索引。
         db.Index(
             "uq_ai_snapshot_item_key",
-            "snapshot_id", "config_id", "file_path",
+            "snapshot_id", "repository_id", "config_id", "file_path",
             unique=True,
         ),
         # 做差时按 `(snapshot_id, config_id)` 批量捞（一个快照可能跨多个 config）。
         db.Index("idx_ai_snapshot_item_config", "snapshot_id", "config_id"),
+        # 按仓库核对可达性（`snapshot_consistency`）：判据是 `(快照, 仓库)` 这一个小集合。
+        db.Index("idx_ai_snapshot_item_repository", "snapshot_id", "repository_id"),
     )
 
     def identity(self) -> tuple:

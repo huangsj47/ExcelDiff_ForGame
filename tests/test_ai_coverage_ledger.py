@@ -40,9 +40,15 @@ LATEST = "f844faa6f59c3f1b571226e92ac03dbd22a6b790"
 OLDER = "322ece563731088a334a1d71870016078d76bbc8"
 
 
-def _weekly_payload(*, files, listed=None, window=None, truncated=False, focus=""):
-    """周版本模式的 `request_payload`（照 `build_weekly_payload` 落库的那种形状）。"""
+def _weekly_payload(*, files, listed=None, window=None, truncated=False, focus="", repositories=None):
+    """周版本模式的 `request_payload`（照 `build_weekly_payload` 落库的那种形状）。
+
+    `repositories` 是「第几条属于哪个仓库」（下标 → 仓库 id），不传就不带这个键
+    （老 payload 的形状）。
+    """
     entries = [{"file_path": path, "latest_commit_id": commit} for path, commit in files]
+    for index, repository_id in (repositories or {}).items():
+        entries[index]["repository_id"] = repository_id
     summary = {
         "total_files": window if window is not None else len(entries),
         "delta_files": len(entries),
@@ -61,10 +67,18 @@ def _weekly_payload(*, files, listed=None, window=None, truncated=False, focus="
     }
 
 
-def _fetched(kind, commit, path, *, lines="", failed=False, empty=False):
-    """逐轮明细里的一条（照 `trace_evidence.summarize_executed` 的形状）。"""
+def _fetched(kind, commit, path, *, lines="", failed=False, empty=False, repository_id=None):
+    """逐轮明细里的一条（照 `trace_evidence.summarize_executed` 的形状）。
+
+    `repository_id` 是 P1a 加进明细的一项（`context_tools` 把请求上的仓库写进 `meta`）：
+    同一条 `(提交, 路径)` 在两个仓库里是两份不同的内容，只按路径记账会把两者的覆盖混成
+    一个数。老行没有这一项 ⇒ 留空 = 不知道。
+    """
     label = f"{kind} {commit[:12]} {path}" + (f" lines={lines}" if lines else "")
-    return {"kind": kind, "label": label, "chars": 1200, "failed": failed, "empty": empty}
+    row = {"kind": kind, "label": label, "chars": 1200, "failed": failed, "empty": empty}
+    if repository_id is not None:
+        row["repository_id"] = str(repository_id)
+    return row
 
 
 def _stats(**by_kind):
@@ -743,3 +757,74 @@ def test_a_single_commit_run_does_not_get_window_rows():
 
     assert "提交（本窗口）" not in rows
     assert "提交（本次输入）" not in rows
+
+
+def test_the_same_path_in_two_repositories_is_two_coverages():
+    """**同一个路径在两个仓库里各有一条时，两条都要算**（P1a）。
+
+    原先白名单收成 `{路径: 提交}`，后写的那条顶掉先写的：读的是 A 仓库那一版，却拿 B
+    仓库那条提交做匹配，匹配不上就被当成「没看过」—— 覆盖账于是少报，而报告里那个数
+    正是「这次到底看了多少」的唯一出口。
+    """
+    payload = _weekly_payload(
+        files=[("config/[30]道具表.xlsx", LATEST), ("config/[30]道具表.xlsx", LATEST)],
+        repositories={0: 1, 1: 2},
+    )
+    ledger = ledger_mod.build_ledger(
+        request_payload=payload,
+        executed=[
+            _fetched("file_diff", LATEST, "config/[30]道具表.xlsx", repository_id=1),
+            _fetched("file_diff", LATEST, "config/[30]道具表.xlsx", repository_id=2),
+        ],
+        tool_stats=_stats(),
+    )
+
+    evidence = ledger["evidence_coverage"]
+    assert evidence["by_pair"]["covered"] == 2, "两个仓库各算一条覆盖"
+    assert evidence["by_path"]["covered"] == 1, "宽松口径按路径去重，还是一个文件"
+    assert ledger["counts"]["pending_files"] == 0
+
+
+def test_reading_one_repository_does_not_cover_the_other():
+    """反方向：只读了 A 仓库那一份，B 仓库那条**不算看过**（这正是「两个仓库各一条」的意义）。"""
+    payload = _weekly_payload(
+        files=[("config/[30]道具表.xlsx", LATEST), ("config/[30]道具表.xlsx", LATEST)],
+        repositories={0: 1, 1: 2},
+    )
+    ledger = ledger_mod.build_ledger(
+        request_payload=payload,
+        executed=[
+            _fetched("file_diff", LATEST, "config/[30]道具表.xlsx", repository_id=1),
+        ],
+        tool_stats=_stats(),
+    )
+
+    assert ledger["evidence_coverage"]["by_pair"]["covered"] == 1
+    assert ledger["counts"]["pending_files"] == 1
+
+
+def test_a_row_without_a_repository_still_counts():
+    """老行没有 `repository_id` ⇒ **不许**因此判成「没看过」（那会让覆盖率永远差一截）。"""
+    payload = _weekly_payload(
+        files=[("config/[30]道具表.xlsx", LATEST)], repositories={0: 1},
+    )
+    ledger = ledger_mod.build_ledger(
+        request_payload=payload,
+        executed=[_fetched("file_diff", LATEST, "config/[30]道具表.xlsx")],
+        tool_stats=_stats(),
+    )
+
+    assert ledger["evidence_coverage"]["by_pair"]["covered"] == 1
+
+
+def test_the_wrong_commit_is_still_not_covered():
+    """提交对不上仍然是「没看过这一版」—— 放宽到只看路径会让覆盖率虚报。"""
+    payload = _weekly_payload(files=[("a.xlsx", LATEST)], repositories={0: 1})
+    ledger = ledger_mod.build_ledger(
+        request_payload=payload,
+        executed=[_fetched("file_diff", OLDER, "a.xlsx", repository_id=1)],
+        tool_stats=_stats(),
+    )
+
+    assert ledger["evidence_coverage"]["by_pair"]["covered"] == 0
+    assert ledger["evidence_coverage"]["by_path"]["covered"] == 1

@@ -281,6 +281,7 @@ def build(
     降成「平台猜的」。
     """
     ordered = tuple(commits)
+    entries = tuple(entries)
     rendered_paths = _collect_paths(ordered)
 
     if whitelist is None:
@@ -369,6 +370,11 @@ def build(
     # 覆盖的是整个窗口，把它并进「本次输入的文件数」会把提示词里那个数说大。
     extra_paths: dict[str, frozenset] = {}
     extra_repos: dict[str, set[int]] = {}
+    # 窗口账里的三元组（`(仓库, 提交, 路径)`）：它们**也**是归属的一部分，而且是原先
+    # 唯一缺归属的那一类 —— 窗口提交不在白名单键上，于是「这条提交在 A 仓改的是
+    # x.lua、在 B 仓改的是 y.lua」这件事到不了取数层（两个仓库同号时按 id 收窄到一个，
+    # 另一个仓库的路径就永远读不到）。
+    window_triples: list[tuple] = []
     for commit_id, entry in (window_commit_files or {}).items():
         text = str(commit_id or "").strip()
         if not text or text in resolved_whitelist:
@@ -380,12 +386,32 @@ def build(
         )
         if cleaned:
             extra_paths[text] = cleaned
+        # 归属优先读**逐仓库**的那一份（`repositories`，P1a 加的键）；老 payload 只有
+        # 一个 `repository_id`，那就退回旧的单仓口径。
+        by_repository = payload_entry.get("repositories")
+        if isinstance(by_repository, Mapping) and by_repository:
+            ids: set[int] = set()
+            for raw_repository, raw_paths in by_repository.items():
+                try:
+                    ids.add(int(raw_repository))
+                except (TypeError, ValueError):
+                    # 这一个仓库的编号读不出来：**它的路径照样记进三元组**（那是真的），
+                    # 只是不拿它去收窄 —— 与 `_note_repository` 同一条口径。
+                    pass
+                for path in raw_paths or ():
+                    window_triples.append((raw_repository, text, path))
+            if ids:
+                extra_repos[text] = ids
+            continue
         try:
-            extra_repos[text] = {int(payload_entry.get("repository_id"))}
+            repository_id = int(payload_entry.get("repository_id"))
         except (TypeError, ValueError):
             # 仓库归属读不出来就**不记**（与 `_note_repository` 同一条口径）：宁可让
             # 取数侧退回旧行为，也不要拿一个猜出来的仓库去收窄查询。
-            pass
+            continue
+        extra_repos[text] = {repository_id}
+        for path in cleaned:
+            window_triples.append((repository_id, text, path))
 
     # `paths_by_commit` 先拼出来，因为它同时是**授权表**与下面那张「当前版本在哪条提交上」
     # 的来源 —— 从它派生是刻意的：`commit_of_path` 的结果会被拿去发 `file_diff` 请求，
@@ -423,7 +449,7 @@ def build(
             # 三元组归属（P1a）：`(仓库, 提交, 路径)` **只收 payload 逐条给出的那一种配对**。
             # 不用 `repositories × paths_by_commit` 叉乘去凑 —— 那正是这一层要挡的错
             # （SVN 修订号只在单仓内唯一，叉乘会「授权」两个仓库里都不存在的那种组合）。
-            entries=build_entries(entries),
+            entries=build_entries((*entries, *window_triples)),
         ),
         paths=paths or rendered_paths,
         commits=ordered,

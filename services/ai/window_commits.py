@@ -213,7 +213,7 @@ def window_commit_ids(configs: Iterable[Any]) -> Tuple[str, ...]:
 
 
 def window_commit_files(configs: Iterable[Any]) -> dict[str, dict[str, Any]]:
-    """窗口内每个提交**自己改过哪些文件**（`{commit_id: {"paths": (...), "repository_id": int}}`）。
+    """窗口内每个提交**自己改过哪些文件**（`{commit_id: {"paths": (...), "repository_id": int, "repositories": {仓库: (路径, …)}}}`）。
 
     ## 它撑起的是「能不能逐提交核对」这件事
 
@@ -269,10 +269,21 @@ def window_commit_files(configs: Iterable[Any]) -> dict[str, dict[str, Any]]:
             if not text:
                 continue
             entry = found.setdefault(
-                text, {"paths": [], "repository_id": cfg.repository_id}
+                text,
+                {"paths": [], "repository_id": cfg.repository_id, "repositories": {}},
             )
             # 同一提交在同一路径上可能有多行（不同 version）——去重保序。
             normalized = str(path or "").strip()
-            if normalized and normalized not in entry["paths"]:
+            if not normalized:
+                continue
+            if normalized not in entry["paths"]:
                 entry["paths"].append(normalized)
+            # **逐仓库**那一份（P1a）：同一条修订号落在两个仓库里时，`found[text]` 这条目
+            # 会收到两个仓库各自的路径，而单个 `repository_id` 只说得出「第一个是谁」——
+            # 取数侧据此收窄，另一个仓库的路经就永远读不到（`file_diff` 连行都查不出来）。
+            # 键用字符串：这份 dict 会进 `run.request_payload`（JSON 列），整数键在那里会
+            # 变成字符串，两端各写一套必然对不上。
+            by_repo = entry["repositories"].setdefault(str(cfg.repository_id), [])
+            if normalized not in by_repo:
+                by_repo.append(normalized)
     return found

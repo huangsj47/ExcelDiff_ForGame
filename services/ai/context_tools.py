@@ -566,14 +566,21 @@ class ContextTools:
         return int(self.limits.get(request_type, DEFAULT_TOOL_LIMITS.get(request_type, 8_000)))
 
     def _render(self, request: ContextRequest, raw: str | None) -> ContextItem:
-        """把 provider 的返回渲染成一条带记账的上下文。"""
+        """把 provider 的返回渲染成一条带记账的上下文。
+
+        `meta["repository_id"]` 是**这一条证据属于哪个仓库**（P1a）。它不进给模型看的
+        标签（那是被逐字断言的地址格式），但必须进 trace 的逐条明细 —— 覆盖账要用它。
+        判据是：**同一条 `(提交, 路径)` 在两个仓库里是两份不同的内容**，只按路径记「看过
+        这一版」会把两个仓库的覆盖混成一个数（`coverage_ledger._evidence_files`）。
+        """
         label = describe_request(request)
+        repo_meta = {"repository_id": str(request.repository_id or "")}
         if raw is None:
             return ContextItem(
                 kind=request.type,
                 label=label,
                 text=_failure_text(request, "读取失败或内容不可用"),
-                meta={"tool_failed": True, "reason": "provider 返回空值"},
+                meta={**repo_meta, "tool_failed": True, "reason": "provider 返回空值"},
             )
 
         body = str(raw)
@@ -582,7 +589,7 @@ class ContextTools:
                 kind=request.type,
                 label=label,
                 text=_empty_text(request),
-                meta={"tool_empty": True},
+                meta={**repo_meta, "tool_empty": True},
             )
 
         limit = self._limit_for(request.type)
@@ -598,7 +605,7 @@ class ContextTools:
         # `tests/test_ai_task_e8_paths.py` 里那几条断言取的名字一致），都进
         # `trace_evidence.summarize_executed` 的 `truncated_by`。
         cap_name = f"tool_limit_{request.type}"
-        meta: dict[str, Any] = {"original_chars": len(body)}
+        meta: dict[str, Any] = {**repo_meta, "original_chars": len(body)}
         if request.type in _WINDOWED_KINDS:
             # 超长时**分段 + 让模型点名**，而不是从中间砍一刀（见 windowed_view）：
             # 抬头的「共 K 段 / 这是第几段 / 怎么要别的段」三件事，缺一件这份内容就有
@@ -758,7 +765,11 @@ class ContextTools:
                     kind=request.type,
                     label=describe_request(request),
                     text=_failure_text(request, f"{type(exc).__name__}: {exc}"),
-                    meta={"tool_failed": True, "reason": str(exc)},
+                    meta={
+                        "repository_id": str(request.repository_id or ""),
+                        "tool_failed": True,
+                        "reason": str(exc),
+                    },
                 )
 
             item = _with_chunk_id(item, key)

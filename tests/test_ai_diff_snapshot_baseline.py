@@ -952,3 +952,51 @@ def test_deleting_a_project_clears_the_diff_snapshots(monkeypatch):
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_two_repositories_with_the_same_path_are_two_items():
+    """同一条相对路径落在两个仓库里 ⇒ 快照里**两条**，各带自己的仓库（P1a）。
+
+    「条目身份含仓库」是快照这一层的判据：读侧要按仓库核对可达性
+    （`snapshot_consistency._baseline_source_notes` 拿的是某一个仓库的可达集，而快照
+    是按**组**建的、一个组横跨配置仓库与代码仓库 —— 不分仓库核对就会把另一个仓库的
+    每一条都判成「指向历史上不存在的提交」，实测 run 58 报了 1242 条假警报）。
+    按 `config_id` 反推仓库在这里不够用：判据要落在**条目自己**写的那个数上。
+    """
+    with app.app_context():
+        create_tables()
+        group = _make_group(file_count=2)
+        code = _add_code_repo(group, file_count=1)
+        # 让代码仓库也改一个与配表仓库**同名**的路径。
+        shared = _PATH.format(index=0)
+        db.session.add(
+            WeeklyVersionDiffCache(
+                config_id=code["cfg"].id,
+                repository_id=code["repo"].id,
+                file_path=shared,
+                file_type="code",
+                merged_diff_data="",
+                base_commit_id="b" * 40,
+                latest_commit_id="e9999",
+                commit_count=1,
+                cache_status="completed",
+                diff_version="1.18.0",
+            )
+        )
+        db.session.commit()
+
+        snapshot = snapshot_store.seal_snapshot(
+            [group["cfg"].id, code["cfg"].id],
+            group_key="g-two-repos",
+            project_id=group["project"].id,
+        )
+        db.session.commit()
+
+        items = AiDiffSnapshotItem.query.filter_by(
+            snapshot_id=snapshot.id, file_path=shared
+        ).all()
+
+        assert {item.repository_id for item in items} == {group["repo"].id, code["repo"].id}, (
+            f"同名的两条要各带自己的仓库，实际是 {[i.repository_id for i in items]}"
+        )
+        assert len(items) == 2, "两条是不同的条目，不许互相顶掉"
