@@ -415,6 +415,30 @@ def test_an_anomaly_row_ignores_junk_entries():
     assert [row["title"] for row in rows] == ["真的"]
 
 
+def test_each_claim_gets_its_own_line_like_the_report_does():
+    """**一条断言一行**（2026-09-25，run 64 实测）。
+
+    附录此前是 `"- 断言：" + "；".join(row["claims"])` —— 与报告正文里那处已经修过的
+    写法是同一个形状。真机上量到 5 项分别是 180/204/331/333/189 字、每项塞着 2~3 条断言，
+    而这几行恰恰是「这条结论凭什么算核过了」的答案，挤成一段就只能跳过。
+
+    判据是**行数**：项数少于断言条数就是又挤回去了。
+    """
+    claims = [
+        {"claim_id": "C1", "status": "verified", "status_label": "已证实", "heading": "已证实：甲"},
+        {"claim_id": "C2", "status": "unverified", "status_label": "待核查", "heading": "待核查：乙"},
+        {"claim_id": "C3", "status": "unreadable", "status_label": "证据读不到", "heading": "证据读不到：丙"},
+    ]
+    text = _build(anomalies=[{"title": "一条结论", "claims": claims}])
+
+    body = [line for line in text.splitlines() if line.startswith("- 断言") or line.startswith("- `C")]
+    assert len(body) == 3, f"三条断言只排出了 {len(body)} 行 —— 又挤在一起了"
+    assert body[0].startswith("- 断言：`C1`"), "第一行要带上这一段的小标题"
+    assert body[1].startswith("- `C2`")
+    assert "；" not in "".join(body), "断言之间还在用「；」串 —— 那就是旧的形状"
+    assert max(len(line) for line in body) < 90, "单行又长回去了"
+
+
 def test_the_document_ends_with_exactly_one_newline():
     text = _build()
     assert text.endswith("\n") and not text.endswith("\n\n")

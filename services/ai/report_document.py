@@ -773,7 +773,15 @@ def build_report_markdown(
                 if row["claims"]:
                     # 断言清单排在证据之前：它回答的是「这条结论凭什么算核过了」，
                     # 而证据是「它引用了什么」。读者要按这个次序读才对得上。
-                    lines.append("- 断言：" + "；".join(row["claims"]))
+                    #
+                    # **一条断言一行**（2026-09-25）：从前这里是
+                    # `"- 断言：" + "；".join(row["claims"])` —— 与报告正文里那处已经修过的
+                    # 写法是同一个形状，真机上量到单行 180~333 字、2~3 条挤在一起
+                    # （run 64 实测 5 项：180/204/331/333/189 字）。这几行恰恰是读者最需要
+                    # 逐条看清的地方，挤成一段就只能跳过。第一条带标签，其余接着排 ——
+                    # 与正文「复核标注（平台）」的 `claims.claim_lines` 同一形状。
+                    for position, one in enumerate(row["claims"]):
+                        lines.append(("- 断言：" if position == 0 else "- ") + one)
                 for one in row["evidence"]:
                     lines.append(f"- 证据：{one}")
                 if row["suggestion"]:
