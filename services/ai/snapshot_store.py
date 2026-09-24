@@ -313,7 +313,7 @@ def snapshot_commit_ids(snapshot_id: Optional[int]) -> FrozenSet[str]:
 
 
 def entries_outside_history(
-    snapshot: Any, reachable: Iterable[str]
+    snapshot: Any, reachable: Iterable[str], *, repository_id: Any = None
 ) -> Tuple[ItemKey, ...]:
     """这份快照里**指向当前历史之外**的条目键（`(config_id, file_path)`）。
 
@@ -322,6 +322,18 @@ def entries_outside_history(
     「问不到可达集合」不是「全都不在历史上」，把它当后者会让每一份历史快照都被判成
     过期。与平台别处「未知 ≠ 0」是同一条纪律。
 
+    ## `repository_id`：**可达集是逐仓库的**（P2-1，2026-09-24）
+
+    调用方手里那一个 `reachable` 属于**某一个仓库**（`check_configs` 按仓库分组核对），
+    而快照是**跨仓联合**的（group_key 跨仓）。不按仓库过滤时，另一个仓库的每一条都会被
+    判成「指向当前历史上不存在的提交」：实测 run 58 的快照 28 有 1304 项分属配置仓 62 +
+    代码仓 1242，于是必然报出 1242 条假警报 —— 而**假警报会把真警报淹掉**（强推是真的
+    要处理，误报只是噪声，两者混在一条日志里没人分得出来）。
+
+    给了 `repository_id` 时只看**属于它的**条目；**`repository_id` 为 NULL 的老条目一条
+    都不看** —— 它们归不了属，拿某个仓库的可达集去判等于又造一次误报。这类条目由调用方
+    单独数出来（`unattributed_items`）并如实写进详情，而不是静默丢掉。
+
     这是**只读**核对：本函数不删任何东西。历史运行与其快照保留为冻结输入（见
     `services/weekly_window_reconcile.py` 的模块抬头），核对只回答「它还准不准」，
     不动它 —— 冻结输入被就地改写等于伪造审计线索。
@@ -329,14 +341,35 @@ def entries_outside_history(
     known = {str(item or "").strip() for item in (reachable or ()) if str(item or "").strip()}
     if not known:
         return ()
+    wanted = None if repository_id is None else str(repository_id).strip()
     outside: List[ItemKey] = []
     for key, row in snapshot_items(
         snapshot if isinstance(snapshot, int) else getattr(snapshot, "id", None)
     ).items():
+        if wanted is not None:
+            owner = str(getattr(row, "repository_id", None) or "").strip()
+            if not owner or owner != wanted:
+                continue
         latest = str(getattr(row, "latest_commit_id", None) or "").strip()
         if latest and latest not in known:
             outside.append(key)
     return tuple(outside)
+
+
+def unattributed_items(snapshot: Any) -> int:
+    """这份快照里**没有仓库归属**的条目数（`repository_id` 为空的老条目）。
+
+    它是 `entries_outside_history(..., repository_id=…)` 的配套：过滤掉的那些不是「核过
+    了没问题」，而是「归不了属、这一轮核不了」。调用方要把它如实说出来 —— 数字为 0 时
+    什么都不用说（绝大多数快照都是新的）。
+    """
+    count = 0
+    for row in snapshot_items(
+        snapshot if isinstance(snapshot, int) else getattr(snapshot, "id", None)
+    ).values():
+        if not str(getattr(row, "repository_id", None) or "").strip():
+            count += 1
+    return count
 
 
 def _identity_map(source: Any) -> Dict[ItemKey, Identity]:

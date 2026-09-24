@@ -311,3 +311,104 @@ def test_a_baseline_outside_history_is_reported_but_never_blocks(tmp_path, monke
         assert weekly_sync_in_flight([config.id]) == ""
         assert any("做差基准" in line and "不据此拦截" in line for line in verdict.details), \
             verdict.details
+
+
+# ---------------------------------------------------------------------------
+#  跨仓联合快照：来源核对必须**按仓库分开**（P2-1）
+# ---------------------------------------------------------------------------
+
+
+def _second_repository(seed: dict, *, base_name: str) -> dict:
+    """同项目、同窗口、同版本名的**第二个仓库**（真工作副本，一个提交）。
+
+    生产里这种配置叫 `f"{版本名} - {仓库名}"`（`weekly_version_logic` 建的），
+    两者共用一个 `group_key` —— 也就是共用一份跨仓联合快照。
+    """
+    repository = Repository(
+        project_id=seed["project"].id, name=_uid("code"), type="git",
+        url=f"https://example.com/{_uid('r')}.git", branch="main", clone_status="completed",
+    )
+    db.session.add(repository)
+    db.session.flush()
+
+    from utils.path_security import build_repository_local_path
+
+    work = Path(build_repository_local_path(seed["project"].code, repository.name, repository.id))
+    work.mkdir(parents=True, exist_ok=True)
+    _git(work, "init", "-q")
+    (work / "t0.lua").write_text("code\n", encoding="utf-8")
+    _git(work, "add", ".")
+    _git(work, "commit", "-q", "-m", "c0")
+    tip = _git(work, "rev-parse", "HEAD").strip()
+
+    config = WeeklyVersionConfig(
+        project_id=seed["project"].id, repository_id=repository.id,
+        name=f"{base_name} - {repository.name}", branch="main",
+        start_time=_WINDOW_START_BEIJING, end_time=_WINDOW_END_BEIJING, is_active=True,
+    )
+    db.session.add(config)
+    db.session.flush()
+    return {"repository": repository, "config": config, "tip": tip, "work": work}
+
+
+def _cross_snapshot(entries_) -> None:
+    """一份**跨仓联合**快照：`entries_` 是 `(config, repository, latest_commit)`。"""
+    from models.ai_analysis import AiDiffSnapshot, AiDiffSnapshotItem
+    from services.ai.project_config_source import build_weekly_group_key
+
+    snapshot = AiDiffSnapshot(
+        project_id=entries_[0][0].project_id, group_key=build_weekly_group_key(entries_[0][0]),
+        content_digest=uuid.uuid4().hex + uuid.uuid4().hex[:8], item_count=len(entries_),
+        complete=False, status="sealed", sealed_at=_COMMIT_UTC,
+    )
+    db.session.add(snapshot)
+    db.session.flush()
+    for config, repository, latest in entries_:
+        db.session.add(AiDiffSnapshotItem(
+            snapshot_id=snapshot.id, config_id=config.id, repository_id=repository.id,
+            file_path="t0.lua", base_commit_id=None, latest_commit_id=latest,
+            diff_version="v1", commit_count=1,
+        ))
+    db.session.commit()
+    return snapshot
+
+
+def test_a_cross_repository_snapshot_is_checked_per_repository(tmp_path, monkeypatch):
+    """**零误报**：另一个仓库的条目不许拿这个仓库的可达集去判。
+
+    实测 run 58 的快照 28 有 1304 项，分属配置仓 62 + 代码仓 1242 —— 核配置仓时拿它的
+    可达集去判那 1242 项，必然全部落在「历史上不存在」（两个仓库的提交集不相交），于是
+    1242 条假警报。而假警报的害处不是吵：**真的强推失效会被淹没在噪声里**。
+    """
+    with flask_app.app_context():
+        create_tables()
+        _use_tmp_repos_base(tmp_path, monkeypatch)
+        seed = _seed()
+        base_name = "v1.2.3"
+        seed["config"].name = f"{base_name} - {seed['repository'].name}"
+        db.session.commit()
+        second = _second_repository(seed, base_name=base_name)
+
+        _cache(seed["config"], seed["repository"], file_path="fresh.lua", latest=seed["new_tip"])
+        _cache(second["config"], second["repository"], file_path="t0.lua", latest=second["tip"])
+        # 第一个仓库的条目指向**已被强推掉**的提交；第二个仓库的条目指着它自己的 tip。
+        _cross_snapshot([
+            (seed["config"], seed["repository"], seed["old_heads"][1]),
+            (second["config"], second["repository"], second["tip"]),
+        ])
+
+        verdict = check_configs([seed["config"].id, second["config"].id])
+        assert verdict.checked, verdict.reason
+        assert verdict.stale == (), "缓存行本身都是干净的"
+
+        first = [line for line in verdict.details if f"配置 {seed['config'].id}" in line]
+        second_lines = [line for line in verdict.details if f"配置 {second['config'].id}" in line]
+        assert any("做差基准" in line for line in first), verdict.details
+        assert any("本仓库 1 项" in line for line in first), (
+            f"第一个仓库被算进了别人的条目：{first}"
+        )
+        assert not [line for line in second_lines if "做差基准" in line], (
+            f"第二个仓库的条目是好的，却报了做差基准告警：{second_lines}"
+        )
+        # 真警报仍在：本仓库那一条指向历史之外，必须被点出来
+        assert any("不据此拦截" in line for line in first)

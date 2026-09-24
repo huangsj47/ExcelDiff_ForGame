@@ -230,19 +230,40 @@ def _baseline_source_notes(config: Any, reachable: ReachableCommits) -> List[str
         snapshot = snapshot_store.latest_sealed_snapshot(group_key)
         if snapshot is None:
             return []
-        outside = snapshot_store.entries_outside_history(snapshot, reachable.commits)
+        # **按仓库过滤**（P2-1）：快照是跨仓联合的，而手里的可达集只属于这一个仓库 ——
+        # 不分开就会把另一个仓库的每一条都判成「指向历史上不存在的提交」（run 58 的
+        # 快照 28：1304 项分属配置仓 62 + 代码仓 1242，必然报 1242 条假警报）。
+        outside = snapshot_store.entries_outside_history(
+            snapshot, reachable.commits, repository_id=getattr(config, "repository_id", None)
+        )
+        unattributed = snapshot_store.unattributed_items(snapshot)
     except Exception as exc:  # noqa: BLE001 —— 核对不动只是少一条详情
         return [f"配置 {getattr(config, 'id', None)} 的基准快照来源核对失败：{exc}"]
-    if not outside:
+    if not outside and not unattributed:
         return []
-    note = (
-        f"⚠️ 配置 {getattr(config, 'id', None)} 的做差基准（快照 {snapshot.id}，"
-        f"{snapshot.item_count} 项）有 {len(outside)} 项指向当前历史上不存在的提交："
-        "下一轮按它对差会把每个文件都判成「变了」（全量重算，不是错，但贵）。"
-        "**不据此拦截** —— 历史快照刻意不删，拦了会永远修不好"
+    scope = (
+        f"仓库 {getattr(config, 'repository_id', None)} 的 {len(reachable.commits)} 个可达提交前缀"
+        + ("（**已被上限截断**，不在集合里不等于不可达）" if reachable.truncated else "")
     )
-    log_print(f"⛔ AI 分析：{note}", "AI", force=True)
-    return [note]
+    notes: List[str] = []
+    if outside:
+        note = (
+            f"⚠️ 配置 {getattr(config, 'id', None)} 的做差基准（快照 {snapshot.id}，"
+            f"{snapshot.item_count} 项，其中本仓库 {len(outside)} 项指向历史之外的提交）—— "
+            f"核对范围：{scope}。这些条目下一轮按它对差会把文件判成「变了」"
+            "（全量重算，不是错，但贵）。**不据此拦截** —— 历史快照刻意不删，拦了会永远修不好"
+        )
+        log_print(f"⛔ AI 分析：{note}", "AI", force=True)
+        notes.append(note)
+    if unattributed:
+        # 归不了属的条目**不是「核过了没问题」**，而是「这一轮核不了」—— 如实说，
+        # 而不是让它们静默消失（那会把「没核」显示成「核过」）。
+        notes.append(
+            f"配置 {getattr(config, 'id', None)} 的做差基准（快照 {snapshot.id}）里有 "
+            f"{unattributed} 项**没有仓库归属**（老条目）：它们这一轮没有参与来源核对，"
+            "不能当成「已核对无误」"
+        )
+    return notes
 
 
 def check_configs(config_ids: Sequence[int]) -> ReachabilityCheck:
