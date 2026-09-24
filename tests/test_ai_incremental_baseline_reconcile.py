@@ -88,6 +88,38 @@ def test_incremental_result_carries_forward_and_marks_changed_history_for_rechec
     assert len([row for row in merged["final_findings"] if row.get("active")]) == 4
 
 
+def test_the_section_is_usable_on_its_own():
+    """这一节要能单独读懂（2026-09-24，run 63 那三条投诉）。
+
+    实测那一轮它只印「标题 + 文件」，14 条读下来分不出先后，而正文里模型自己写的
+    「历史结论状态」是同一批标题的另一个说法 —— 两节并排，读者看不出哪一份算数。
+    所以：**总数与分组计数**写在开头、**分工与谁为准**明写、每一条补上**严重度**。
+    """
+    result = {
+        "report_markdown": "# Current report\n",
+        "anomalies": [],
+        "final_findings": [],
+    }
+    previous = [
+        _old("untouched", "stable.lua", severity="critical"),
+        _old("also-untouched", "stable2.lua", severity="high"),
+        _old("changed-missing", "changed.lua"),
+    ]
+
+    merged = reconcile_result(
+        result, previous, changed_paths={"changed.lua"}, previous_run_id=22
+    )
+    section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
+
+    assert "共 3 条" in section, "开头没有给出这一节的规模"
+    assert "2 条仍成立" in section and "1 条需要重新确认" in section, section
+    assert "两处不一致时以本节为准" in section, (
+        "没有说清它与正文里模型那一节的分工 —— 两节并排时读者不知道信哪份"
+    )
+    assert "严重度 严重" in section, "每一条没有等级，14 条读下来分不出先后"
+    assert "严重度 高" in section
+
+
 def test_reconcile_is_a_noop_without_a_previous_baseline():
     result = {"report_markdown": "ok", "anomalies": [], "final_findings": []}
     assert reconcile_result(result, [], changed_paths=set(), previous_run_id=None) == result

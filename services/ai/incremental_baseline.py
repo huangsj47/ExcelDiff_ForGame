@@ -13,6 +13,7 @@ from copy import deepcopy
 from difflib import SequenceMatcher
 from typing import Any, Iterable, Mapping
 
+from services.ai.report_document import severity_label
 from services.ai.scope import normalize_path
 
 STATE_RECONFIRMED = "reconfirmed"
@@ -124,8 +125,16 @@ def _final_row(item: Mapping) -> dict:
 
 
 def _line(item: Mapping) -> str:
+    """一条历史结论那一行：**标题 + 文件 + 严重度**（2026-09-24，run 63 补的等级）。
+
+    从前只有标题与文件，14 条读下来分不出先后 —— 而这一节要回答的正是「上一轮那些
+    问题里，哪些还压着」。等级是平台算好的中文名（`report_document.severity_label`，
+    与异常面板、导出同一份映射），不在这里另写一套。
+    """
     where = f"（`{item.get('file_path')}`）" if item.get("file_path") else ""
-    return f"- **{item.get('title') or '（无标题）'}**{where}"
+    level = severity_label(item.get("severity"))
+    suffix = f" · 严重度 {level}" if level and level != "-" else ""
+    return f"- **{item.get('title') or '（无标题）'}**{where}{suffix}"
 
 
 def _semantic_match(old: Mapping, current: Mapping) -> float:
@@ -146,17 +155,37 @@ def _semantic_match(old: Mapping, current: Mapping) -> float:
 
 
 def _report_section(groups: Mapping[str, list[dict]], previous_run_id: int) -> str:
-    lines = [
-        "## 历史结论延续（平台）",
-        "",
-        f"本节由平台将 Run {previous_run_id} 的结论与本轮结果确定性合并。"
-        "旧结论不能因为模型没有重复输出就视为已修复；只有结构化反证才能关闭。",
-    ]
+    """「历史结论延续（平台）」这一节。
+
+    ## 与正文里那一节的分工（2026-09-24，run 63）
+
+    `skills/version-diff-review/SKILL.md` 要求模型自己在正文里写一节「历史结论状态」
+    （它对这些旧结论的**逐条处置意见**）。本节是平台按指纹做的**确定性清单** ——
+    两份都在同一份报告里，而 run 63 的实测是：两份各列一遍同一批 15 条标题，读者看不出
+    哪一份算数。所以开头明写分工与谁为准；每一条另给出**严重度**（从前只有标题与文件，
+    14 条读下来分不出先后）。
+
+    「只有结构化反证才能关闭」这句仍然在：旧结论不能因为模型没重复输出就当已修复。
+    """
     labels = (
         (STATE_RECONFIRMED, "本轮重新确认"),
         (STATE_CARRIED, "仍成立（相关文件本轮未变化，直接继承）"),
         (STATE_RECHECK, "需要重新确认（相关文件已变化，尚无充分反证）"),
     )
+    total = sum(len(groups[state]) for state, _ in labels)
+    counts = "、".join(
+        f"{len(groups[state])} 条{label.split('（')[0]}" for state, label in labels if groups[state]
+    )
+    lines = [
+        "## 历史结论延续（平台）",
+        "",
+        f"上一轮（Run {previous_run_id}）报过的问题，本节由平台按指纹与本轮结果确定性"
+        f"合并，共 {total} 条：{counts}。"
+        "旧结论不能因为模型没有重复输出就视为已修复；只有结构化反证才能关闭。",
+        "",
+        "正文里模型自己写的「历史结论状态」是它对这些旧结论的处置意见；"
+        "**本节是平台的确定性清单，两处不一致时以本节为准**。",
+    ]
     for state, label in labels:
         items = groups[state]
         if not items:
