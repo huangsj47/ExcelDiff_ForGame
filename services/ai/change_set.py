@@ -378,6 +378,18 @@ def build(
             # 取数侧退回旧行为，也不要拿一个猜出来的仓库去收窄查询。
             pass
 
+    # `paths_by_commit` 先拼出来，因为它同时是**授权表**与下面那张「当前版本在哪条提交上」
+    # 的来源 —— 从它派生是刻意的：`commit_of_path` 的结果会被拿去发 `file_diff` 请求，
+    # 而那个请求要过 `path_allowed`。凭空多认一条路径（例如从窗口账里读到某个提交改过它，
+    # 而那个提交是白名单键、它的 `paths_by_commit` 只收白名单那几条）会派出一条
+    # **自己授权不了的配对**，于是预取那条请求被静默丢掉、看起来像「平台取数失败」。
+    # 从授权表派生就不可能出现这种配对。
+    all_paths_by_commit = {
+        commit_id: frozenset(paths_)
+        for commit_id, paths_ in resolved_whitelist.items()
+        if commit_id
+    } | extra_paths
+
     return ChangeSet(
         summary=body,
         scope=AnalysisScope(
@@ -385,12 +397,10 @@ def build(
                 commit_id for commit_id, _ in resolved_whitelist.items() if commit_id
             )
             + _extra_commit_ids(extra_commits, resolved_whitelist),
-            paths_by_commit={
-                commit_id: frozenset(paths_)
-                for commit_id, paths_ in resolved_whitelist.items()
-                if commit_id
-            }
-            | extra_paths,
+            paths_by_commit=all_paths_by_commit,
+            latest_commit_by_path=_latest_commit_by_path(
+                resolved_whitelist, all_paths_by_commit
+            ),
             repository_ids_by_commit={
                 commit_id: frozenset(ids)
                 for commit_id, ids in (repositories or {}).items()
@@ -439,6 +449,62 @@ def _extra_commit_ids(
             continue
         result.append(text)
     return tuple(result)
+
+
+def _latest_commit_by_path(
+    whitelist: Mapping[str, Iterable[str]],
+    paths_by_commit: Mapping[str, frozenset],
+) -> dict[str, str]:
+    """路径 -> 这个文件**当前那一版**落在哪条提交上（给 `AnalysisScope.commit_of_path`）。
+
+    ## 这个映射要挡的是哪一次错
+
+    `commit_of_path` 原先按「`commits` 里最后一个改过它的提交」取，而 `commits` 的顺序是
+    「**本轮输入**的提交在前、窗口其余在后」（见 `build` 里那个拼接）。两者一撞，**本轮
+    输入的增量文件反而会取到窗口里更早的提交**：实测 run 55，`config/物品表.xlsx` 本次的
+    改动在 `159b068`（皮甲 180→190），却选中了排在后面的 `baf3148`（上一轮的铁剑
+    200→260）。预取据此取回**上一轮**那份差异 —— 而它就落在「本次输入的改动文件」这一栏
+    里，模型于是把它当成本次差异写进了报告。
+
+    ## 两个来源，**白名单优先**
+
+    * `paths_by_commit`（授权表）给每个路径一条**当时确实改过它**的提交。对窗口里**没有**
+      装进本次输入的文件，这只是「哪条提交改过它、且我读得到」—— **不是**时间上的最新：
+      `window_commit_ids` 那句查询没有 `orderBy`，顺序是查库给的，而 `commit_time` 还可能
+      被回填。对这些文件取哪条不影响结果（它们读到的是落库的**合并**差异，出处会写明
+      覆盖了几条提交），所以这里不假装它是最新；
+    * **白名单**（`list_files` / `delta_files` 按 `latest_commit_id` 分组）是写侧为
+      「本次输入的这些文件各自最新在哪条提交」冻结下来的事实，也是增量 diff 的 `latest`
+      一侧 —— 它**覆盖**上面那一份。模型问这个文件「本次改了什么」时，答案就是它。
+
+    ## 为什么从授权表派生，而不是从窗口账拼
+
+    返回值会被拿去发 `file_diff`，而那个请求要过 `path_allowed`。窗口账
+    （`window_commit_files`）记的是「这条提交改过哪些路径」，但它与授权表**不是**同一份：
+    某个提交一旦是白名单键，它的 `paths_by_commit` 就只收白名单那几条。直接从窗口账拼，
+    会为它认下一条授权表里没有的配对 —— 那条预取请求会被静默丢掉，读起来像平台故障。
+    从授权表派生，`(路径, 提交)` 必然是表里的配对。
+    """
+    latest: dict[str, str] = {}
+    # 窗口那一份：按 `paths_by_commit` 的插入顺序（与 `scope.commits` 同序），后到者覆盖。
+    for commit_id, paths in paths_by_commit.items():
+        text = str(commit_id or "").strip()
+        if not text:
+            continue
+        for path in paths:
+            cleaned = normalize_path(str(path))
+            if cleaned:
+                latest[cleaned] = text
+    # 白名单**最后写**：它覆盖窗口账，包括那些两边都有的路径（那正是本次出错的形态）。
+    for commit_id, paths in whitelist.items():
+        text = str(commit_id or "").strip()
+        if not text:
+            continue
+        for path in paths or ():
+            cleaned = normalize_path(str(path))
+            if cleaned:
+                latest[cleaned] = text
+    return latest
 
 
 def _assignment_note(manifest: ManifestPlan) -> str:

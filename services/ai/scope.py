@@ -61,6 +61,19 @@ class AnalysisScope:
     repository_ids_by_commit: Mapping[str, frozenset[int]] = field(default_factory=dict)
     # 可读的文档名（skill 的 references 与项目知识文档）。
     readable_references: frozenset[str] = frozenset()
+    # 路径 -> **这个文件的当前版本落在哪条提交上**（写侧冻结的事实，见 `commit_of_path`）。
+    #
+    # 为什么不能靠遍历 `commits` 推出来：那个元组的顺序是「**本轮输入**的提交在前，
+    # 窗口里其余的按查库顺序在后」（见 `change_set.build`），既不是时间序、也没有
+    # 「最后一条最新」这回事。而 `commit_of_path` 原先按「最后一个匹配就赢」取，
+    # 于是**本轮输入的文件反而最容易取到窗口里更早的那条提交** —— 实测 run 55：
+    # `config/物品表.xlsx` 的本次改动在 `159b068`（皮甲 180→190），却因为
+    # `baf3148`（上一轮的铁剑 200→260）排在后面而被选中，预取就把**上一轮的差异**
+    # 当成本次差异给了模型，报告照着写了出来。
+    #
+    # 空 = **不知道**（手工构造的 scope、单提交模式）：那时退回遍历，与加这个字段之前
+    # 的行为逐字一致。
+    latest_commit_by_path: Mapping[str, str] = field(default_factory=dict)
 
     def resolve_commit(self, raw: str) -> str | None:
         """把模型给的 commit 标识解析成全哈希。
@@ -116,12 +129,25 @@ class AnalysisScope:
         return tuple(seen)
 
     def commit_of_path(self, raw_path: str) -> str | None:
-        """这个路径在**本批次里最后一次**被改的那条提交。
+        """这个路径**当前那一版**落在哪条提交上（周版本里就是它最后一次被改的那条）。
 
         取最后一次：搜索要看的是这个文件当前的样子的最近一次改动之后的样子，而周版本里
-        同一个文件被多条提交改过是常态（合并 diff 就是为这件事存在的）。
+        同一个文件被多条提交改过是常态（合并 diff 就是为这件事存在的）；预取也正是拿这个
+        值去取「这个文件在本批次里的差异」。
+
+        ## 判据优先取**冻结的事实**，不靠 `commits` 的遍历顺序
+
+        `self.commits` 的顺序是「本轮输入的提交在前、窗口其余在后」，**不是时间序** ——
+        所以「遍历取最后一个匹配」会把更早的提交判成「最新」（实测 run 55 的张冠李戴，
+        见 `latest_commit_by_path` 的字段说明）。有冻结事实时先查它；没有时（手工构造的
+        scope）才退回遍历，语义与从前一致。
         """
         path = normalize_path(raw_path)
+        if not path:
+            return None
+        known = self.latest_commit_by_path.get(path)
+        if known:
+            return known
         found: str | None = None
         for commit in self.commits:
             if path in self.paths_by_commit.get(commit, ()):
