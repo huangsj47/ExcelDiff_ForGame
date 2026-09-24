@@ -1,3 +1,13 @@
+from __future__ import annotations
+
+import json
+import uuid
+
+from app import app as flask_app
+from app import create_tables, db
+from models import Project
+from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
+from services.ai.baseline_source import previous_anomaly_rows
 from services.ai.incremental_baseline import reconcile_result
 
 
@@ -105,3 +115,101 @@ def test_title_drift_on_the_same_file_reconfirms_instead_of_duplicating():
     assert merged["anomalies"][0]["baseline_state"] == "reconfirmed"
     assert merged["anomalies"][0]["baseline_previous_fingerprint"] == "old-fingerprint"
     assert merged["baseline_reconciliation"]["reconfirmed"] == 1
+
+
+def _seed_a_previous_run_with_claims():
+    """落一条上一轮结论，**带着断言清单**（+ 一条没有断言的，作为对照）。"""
+    project = Project(code=f"P{uuid.uuid4().hex[:8]}", name=f"继承{uuid.uuid4().hex[:6]}")
+    db.session.add(project)
+    db.session.flush()
+    run = AiAnalysisRun(
+        project_id=project.id,
+        target_type="weekly",
+        target_key=f"grp-{uuid.uuid4().hex[:8]}",
+        status="succeeded",
+        scope="incremental",
+        conclusion_structured=True,
+    )
+    db.session.add(run)
+    db.session.flush()
+    claims = [
+        {
+            "claim_id": "C1",
+            "kind": "fact",
+            "statement": "这张表删掉了列「是否移动中击退」",
+            "status": "verified",
+            "checked_scope": "code/qz_pub/const/BattleConst.lua@5bce80f",
+        },
+        {
+            "claim_id": "C2",
+            "kind": "negative_scope",
+            "statement": "全项目没有任何地方还在读这一列",
+            "status": "unverified",
+            "checked_scope": "只扫了本批 120 个文件（窗口 1403 个）",
+        },
+    ]
+    with_claims = AiAnalysisAnomaly(
+        run_id=run.id,
+        project_id=project.id,
+        fingerprint=f"fp-{uuid.uuid4().hex[:8]}",
+        title="【战斗配置】爆炸表整列删除「是否移动中击退」，读取方是否同步待确认（另有 1 条断言待核查）",
+        severity="high",
+        category="config_value",
+        file_path="code/qz_pub/const/BattleConst.lua",
+        evidence=json.dumps(["diff: -是否移动中击退"], ensure_ascii=False),
+        claims=json.dumps(claims, ensure_ascii=False),
+    )
+    without_claims = AiAnalysisAnomaly(
+        run_id=run.id,
+        project_id=project.id,
+        fingerprint=f"fp-{uuid.uuid4().hex[:8]}",
+        title="【配表】另一条没有断言的结论",
+        severity="high",
+        category="config_value",
+        file_path="config/other.xlsx",
+        evidence=json.dumps(["diff: x"], ensure_ascii=False),
+        claims="[]",
+    )
+    db.session.add_all([with_claims, without_claims])
+    db.session.commit()
+    return run, with_claims, without_claims
+
+
+def test_a_carried_forward_row_keeps_its_claims():
+    """继承项必须把**断言清单**带回来（真机实测，2026-09-24）。
+
+    实测：run 62（增量）的 12 条继承项 `claims` 全是 `[]`，其中 3 条在上一轮（run 61）
+    明明带着 3264 / 2210 / 3927 字节的断言。根因不在 `incremental_baseline` —— 它照
+    `row.get("claims")` 读，键不在就回空数组；根因在**喂给它的那份行形状**：
+    `ai_analysis_service` 调用处手抄的字典字面量少了 `claims` 这个键。
+
+    所以这条用例从**真入口**走一遍（库里的行 → `previous_anomaly_rows` → 合并），
+    而不是自己手写那份字典 —— 手写的那份键当然齐，正好会把这个缺陷放过去。
+    """
+    with flask_app.app_context():
+        create_tables()
+        run, with_claims, without_claims = _seed_a_previous_run_with_claims()
+
+        rows = previous_anomaly_rows(run.id)
+
+        assert len(rows) == 2
+        assert all("claims" in row for row in rows), (
+            "行形状里没有 claims 这个键 —— `_historical_anomaly` 的 row.get('claims') "
+            "只会回空数组，继承项的断言清单静默消失"
+        )
+
+        merged = reconcile_result(
+            {"report_markdown": "本轮", "anomalies": [], "final_findings": []},
+            rows,
+            changed_paths=set(),
+            previous_run_id=run.id,
+        )
+        carried = {row["fingerprint"]: row for row in merged["anomalies"]}
+        kept = carried[with_claims.fingerprint]
+        assert kept["baseline_state"] == "carried_forward"
+        assert [c["claim_id"] for c in kept["claims"]] == ["C1", "C2"], (
+            f"继承项带的断言是 {kept['claims']!r}，上一轮存的那两条没带回来"
+        )
+        assert carried[without_claims.fingerprint]["claims"] == [], (
+            "上一轮本来就没有断言的结论，这一轮凭空多出断言"
+        )

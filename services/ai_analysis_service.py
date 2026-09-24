@@ -94,6 +94,9 @@ from services.ai.baseline_source import (
     baseline_findings as _baseline_findings,  # noqa: F401 —— 测试按这个名字 import
 )
 from services.ai.baseline_source import (
+    previous_anomaly_rows,
+)
+from services.ai.baseline_source import (
     previous_run as _previous_run,  # noqa: F401 —— 测试按这个名字 import
 )
 from services.ai.baseline_source import (
@@ -1530,22 +1533,9 @@ def _run_engine_and_persist(
     if baseline_account.get("kind") == "snapshot":
         previous = _previous_run(target_type, target_key)
         if previous is not None:
-            previous_rows = [
-                {
-                    "fingerprint": row.fingerprint,
-                    "title": row.title,
-                    "category": row.category,
-                    "severity": row.severity,
-                    "confidence": row.confidence,
-                    "evidence": row.evidence,
-                    "commit_ref": row.commit_ref,
-                    "file_path": row.file_path,
-                    "impact": row.impact,
-                    "suggestion": row.suggestion,
-                    "disposition": row.disposition,
-                }
-                for row in AiAnalysisAnomaly.query.filter_by(run_id=previous.id).all()
-            ]
+            # 行形状**不许在这里手抄**（`previous_anomaly_rows` 的 docstring 写着那次实测：
+            # 手抄的那份少了 `claims`，12 条继承项的断言清单在真机上全是空的）。
+            previous_rows = previous_anomaly_rows(previous.id)
             result = reconcile_incremental_result(
                 result,
                 previous_rows,

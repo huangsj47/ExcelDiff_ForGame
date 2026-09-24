@@ -123,6 +123,31 @@ def skipped_unstructured_runs(
     return query.count()
 
 
+def previous_anomaly_rows(run_id: int) -> List[dict]:
+    """上一轮结论的**完整行形状**（喂给 `incremental_baseline.reconcile_result`）。
+
+    ## 为什么键清单只能有一份（真机实测，2026-09-24）
+
+    这张表原先是在调用处**手抄**的（`ai_analysis_service` 里那段字典字面量），抄下来的
+    那份少了 `claims` —— P0-01 落库的原子断言。于是 `incremental_baseline` 抬头那句承诺
+    「历史结论的断言清单原样带回」在真机上是空的：
+
+        run 62（增量）的 12 条继承项，`claims` 全是 `[]`；其中 3 条在上一轮（run 61）
+        明明带着 3264 / 2210 / 3927 字节的断言。
+
+    而 `_historical_anomaly` 读的是 `row.get("claims")`：键不在就**回空数组**，不报错、
+    不告警 —— 那三条结论「当时凭什么算核实过了」在下一轮静默消失（下一轮基线、导出、
+    面板都读它）。
+
+    所以这里直接给 `AiAnalysisAnomaly.to_dict()` 的结果：**读侧那一份形状就是键清单**，
+    它已经带 `claims`，以后新增字段也不必回来改第二处（手抄的那份必然会再漏一次）。
+    """
+    return [
+        row.to_dict()
+        for row in AiAnalysisAnomaly.query.filter_by(run_id=run_id).all()
+    ]
+
+
 def baseline_findings(target_type: str, target_key: Optional[str]) -> List[BaselineFinding]:
     """上一次**可以当基线**的那次运行报出的那批结论。
 
