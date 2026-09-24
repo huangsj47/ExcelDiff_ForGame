@@ -43,6 +43,7 @@ from services.ai.verdict import (
     KIND_VERIFY,
     NEW_FINDING_PREFIX,
     RULING_BLOCK_MARKER,
+    RULING_SUMMARY_TITLE,
     RULING_TITLE,
     SOURCE_VERIFY,
     UNREVIEWED_LABEL,
@@ -55,6 +56,7 @@ from services.ai.verdict import (
     parse_verdicts,
     reduce_findings,
     render_ruling,
+    render_ruling_summary,
     retracted_fingerprints,
     strip_verdict_block,
 )
@@ -85,6 +87,11 @@ def _obj(**overrides) -> Anomaly:
         impact=overrides.pop("impact", "老存档引用的道具失效"),
         suggestion=overrides.pop("suggestion", "确认是否有意下线"),
     )
+
+
+def _paragraphs(text: str) -> list[str]:
+    """报告里的段落（用来量「这一节的开头有几段」）。"""
+    return [item for item in text.split("\n\n") if item.strip()]
 
 
 def _verdict_reply(
@@ -332,8 +339,14 @@ class TestTheReducerAppliesVerdicts:
             _obj(title="另一条", severity="high"),
         )
         assert [row.verdict for row in reduction.rows] == ["", ""]
-        assert reduction.unreviewed and render_ruling(reduction, review_ran=True)
-        assert render_ruling(reduction, review_ran=False) == "", "没开对账轮就不该有这一节"
+        # 零裁决那一形态整节都在**开篇摘要**里（`render_ruling` 的明细返回空串）：
+        # 那一行说明要让人第一眼看到「复核没给出裁决」，所以它在前面。
+        assert reduction.unreviewed and render_ruling_summary(reduction, review_ran=True)
+        assert render_ruling(reduction, review_ran=True) == ""
+        assert render_ruling_summary(reduction, review_ran=False) == "", (
+            "没开对账轮就不该有这一节"
+        )
+        assert render_ruling(reduction, review_ran=False) == ""
 
 
 class TestTheNewFindingsFromTheVerifyRound:
@@ -578,9 +591,9 @@ class TestTheRulingSection:
         assert "缺标题或证据" in section
 
     def test_a_run_without_any_verdict_says_so(self):
-        section = render_ruling(reduce_findings([_obj()]), review_ran=True)
+        section = render_ruling_summary(reduce_findings([_obj()]), review_ran=True)
 
-        assert RULING_TITLE in section
+        assert RULING_SUMMARY_TITLE in section
         assert "没有给出可逐条应用的裁决" in section
         assert "按原样采信" in section
         assert "一条都没有生效" not in section, (
@@ -590,32 +603,54 @@ class TestTheRulingSection:
 
     def test_the_no_change_form_stays_one_line(self):
         """零裁决那一形态只许是一行说明：正文主体是模型草稿，这一节不许长出分组小节
-        （AI-P1-01 时期它曾是正文本身，替身文案一长就又喧宾夺主）。"""
-        section = render_ruling(reduce_findings([_obj()]), review_ran=True)
+        （AI-P1-01 时期它曾是正文本身，替身文案一长就又喧宾夺主）。
 
-        assert section.startswith(RULING_TITLE)
+        2026-09-24（run 63）：这一行在**开篇**（`render_ruling_summary`），明细节此时
+        一个字都没有 —— 两节合起来仍然只有那一行。
+        """
+        reduction = reduce_findings([_obj()])
+        section = render_ruling_summary(reduction, review_ran=True)
+
+        assert section.startswith(RULING_SUMMARY_TITLE)
         assert "### " not in section, "零裁决时渲染出了分组小节 —— 替身文案回潮"
         assert section.count("\n") <= 5, "一行说明写成了多段 —— 替身文案回潮"
-
-    def test_the_opening_never_grows_back_into_essays(self):
-        """开头的口径说明不许膨胀回三大段（AI-P1-01 时期的形态）：这一节是跟在草稿
-        后面的标注，第一个分组小节（###）之前只许有「标题 + 两段说明 + 覆盖账」。"""
-        from services.ai.verdict import VerifyVerdict
-
-        section = self._section(
-            VerifyVerdict(
-                finding_id="F1",
-                verdict="downgraded",
-                reason="主要读取方已同步改造",
-                final_severity="high",
-                evidence_refs=(EVIDENCE_REF,),
-            )
+        assert render_ruling(reduction, review_ran=True) == "", (
+            "零裁决时明细节还有内容 —— 同一句话会在报告里出现两遍"
         )
 
-        head = section.split("### ")[0]
-        paragraphs = [item for item in head.split("\n\n") if item.strip()]
-        assert len(paragraphs) <= 3, (
-            f"标注节开头膨胀到了 {len(paragraphs)} 段 —— 口径说明回潮成正文了"
+    def test_the_opening_never_grows_back_into_essays(self):
+        """**开篇那一节只报数**（2026-09-24，run 63）：正文主体是模型写的报告，开篇是给
+        读者第一眼看的几个数 —— 它膨胀回三大段，就等于又把平台记账顶到正文前面。
+
+        逐条明细那一节的「开头」（第一个 `###` 之前）同样只许有标题 + 一句口径 + 指向
+        开篇的那半句：它是明细，不是第二篇正文。
+        """
+        from services.ai.verdict import VerifyVerdict
+
+        reduction = reduce_findings(
+            [_obj()],
+            verdicts=[
+                VerifyVerdict(
+                    finding_id="F1",
+                    verdict="downgraded",
+                    reason="主要读取方已同步改造",
+                    final_severity="high",
+                    evidence_refs=(EVIDENCE_REF,),
+                )
+            ],
+        )
+
+        summary = render_ruling_summary(reduction, review_ran=True)
+        assert summary.startswith(RULING_SUMMARY_TITLE)
+        assert "### " not in summary, "开篇摘要里长出了分组小节 —— 明细没有归到正文之后"
+        # 标题 + 覆盖数 + 处置 = 三段，再多就是口径说明回潮。
+        assert len(_paragraphs(summary)) <= 3, (
+            f"开篇摘要膨胀到了 {len(_paragraphs(summary))} 段 —— 第一屏又变成平台记账了"
+        )
+
+        detail_head = render_ruling(reduction, review_ran=True).split("### ")[0]
+        assert len(_paragraphs(detail_head)) <= 3, (
+            f"标注明细的开头膨胀到了 {len(_paragraphs(detail_head))} 段 —— 口径说明回潮成正文了"
         )
 
 

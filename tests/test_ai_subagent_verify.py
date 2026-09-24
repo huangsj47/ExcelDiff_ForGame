@@ -39,7 +39,7 @@ from services.ai.subagent import (
     run_family,
     verify_section,
 )
-from services.ai.verdict import RULING_TITLE
+from services.ai.verdict import RULING_SUMMARY_TITLE, RULING_TITLE
 from tests.test_ai_engine import (
     COMMIT,
     COMMIT_B,
@@ -492,21 +492,27 @@ class TestTheDefaultConfigKeepsTheModelTextAsTheOneCanonicalReport:
         )
 
 
-class TestTheAnnotationComesFirstAndTheDraftStaysIntact:
-    """有裁决标注时：**标注在前、草稿在后**（2026-09-24 起），模型原文一个字不改。
+class TestTheSummaryComesFirstAndTheDetailComesAfterTheDraft:
+    """有复核结论时：**摘要开篇 → 模型草稿 → 逐条明细 / 平台补充节**，模型原文一个字不改。
 
-    ## 为什么次序反过来了（run 57）
+    ## 为什么摘要在前（run 57）
 
     原先草稿是正文开头、标注跟在最后（2026-09-23 为了「报告主体是模型写的整体汇总」）。
     实测 run 57 暴露了那个次序的代价：正文写着 20 条结论、复核只裁决了 3 条，读者读到
     正文那几条高严重度陈述时**没有任何提示**，读到尾部才知道「其余待人工核验」——
     正文与尾部互相矛盾，而先被相信的是正文。
 
-    所以标注前置，并把**覆盖数写在第一节的头一句**。模型草稿仍然逐字保留（顺序变了、
-    内容没变），`draft_markdown` 照样是给外部读侧的原稿存档。
+    所以覆盖数写在开篇第一节的头一句。模型草稿仍然逐字保留（顺序变了、内容没变），
+    `draft_markdown` 照样是给外部读侧的原稿存档。
+
+    ## 为什么明细挪到草稿之后（run 63）
+
+    run 57 那一修前置的是**整节明细**（run 63 的报告开篇 21 行，含逐条断言子列表），
+    读者要滚过 15% 的平台记账才读到「这次改了什么」。要前置的是那几个数，逐条明细按需
+    在正文之后查 —— 两节读同一个 `Reduction`，不会一个说 2 条、一个列 1 条。
     """
 
-    def test_the_annotation_comes_first_and_the_draft_stays_intact(self):
+    def test_the_summary_comes_first_the_detail_comes_after_the_draft(self):
         from tests.test_ai_verify_verdict import _critical_round, _run, _verdict_reply
 
         outcome = _run(
@@ -523,17 +529,20 @@ class TestTheAnnotationComesFirstAndTheDraftStaysIntact:
         ).outcome
         report = outcome.report_markdown
 
-        assert report.startswith(RULING_TITLE), (
-            "标注节没有排在正文之前 —— 读者第一眼看到的又成了未经复核的断言"
+        assert report.startswith(RULING_SUMMARY_TITLE), (
+            "开篇不是复核摘要 —— 读者第一眼看到的又成了未经复核的断言"
         )
         assert "改了道具表。" in report, (
-            "有裁决标注了，草稿却不在正文里 —— 报告又只剩裁决那节了"
+            "有复核结论了，草稿却不在正文里 —— 报告又只剩平台那几节了"
         )
-        assert report.index(RULING_TITLE) < report.index("改了道具表。"), (
-            "草稿排到了标注前面"
+        assert report.index(RULING_SUMMARY_TITLE) < report.index("改了道具表。"), (
+            "草稿排到了摘要前面"
+        )
+        assert report.index("改了道具表。") < report.index(RULING_TITLE), (
+            "逐条明细排到了草稿前面 —— run 63 的病是第一屏全是平台记账"
         )
         assert report.index(RULING_TITLE) < report.index("## 信息缺口（平台补充）"), (
-            "次序必须是 复核标注 → 草稿 → 平台补充节"
+            "次序必须是 复核摘要 → 草稿 → 复核标注明细 → 平台补充节"
         )
         assert outcome.draft_markdown.startswith("# 变更理解"), (
             "模型原稿的存档没了 —— 外部读侧（API/SSE）可能只认这个键"
@@ -541,6 +550,9 @@ class TestTheAnnotationComesFirstAndTheDraftStaysIntact:
         assert "改了道具表。" in outcome.draft_markdown, "存档要逐字保留模型的原文"
         assert RULING_TITLE not in outcome.draft_markdown, (
             "存档里混进了平台拼的节 —— 它承诺的是模型原稿"
+        )
+        assert RULING_SUMMARY_TITLE not in outcome.draft_markdown, (
+            "开篇摘要混进了模型原稿的存档 —— 那份存档承诺的是模型原文"
         )
 
     def test_the_opening_states_how_many_findings_were_actually_reviewed(self):
@@ -559,10 +571,11 @@ class TestTheAnnotationComesFirstAndTheDraftStaysIntact:
                 )
             )
         ).outcome
-        head = outcome.report_markdown.split(RULING_TITLE, 1)[1][:400]
+        head = outcome.report_markdown.split(RULING_SUMMARY_TITLE, 1)[1][:400]
 
         assert "本次复核**只覆盖" in head, f"开头没有写覆盖了多少条：{head!r}"
         assert "未经复核" in head, f"没有点明「其余的没被核过」：{head!r}"
+        assert "撤销 1 条" in head, f"开篇没有给出各条的下场：{head!r}"
 
 
 @pytest.mark.parametrize("count", [2, 3, 6])

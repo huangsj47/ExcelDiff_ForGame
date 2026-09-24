@@ -43,7 +43,8 @@
 对账轮按 `verdict_instructions` 的形状在 `report_markdown` 里给一个 json 代码块；平台用
 **自己那套容错解析**读它（`protocol.parse_json_candidates`：剥推理块、剥围栏、首尾大括号
 切片）—— 与读模型其它结构化输出是同一套口径。读回来的裁决还会被平台**重新渲染**成报告里
-的「## 复核标注（平台）」一节：跟在模型汇总报告正文之后的标注，点名哪些结论被复核改了判。
+两节（2026-09-24 起）：开篇的「## 复核摘要（平台）」（`render_ruling_summary`，只有覆盖数
+与各条的下场）与正文之后的「## 复核标注（平台）」（`render_ruling`，逐条点名被改判的结论）。
 
 reducer 的产出由平台**结构化地带出去**（`EngineOutcome.verdict`，就是 `Reduction.as_dict()`
 那一份）：`result_payload` 从那个字段把它取回来放进结论载荷 —— 于是 **markdown、落库的值、
@@ -57,8 +58,8 @@ reducer 的产出由平台**结构化地带出去**（`EngineOutcome.verdict`，
 `response_text` 里 35.3%（12,617 / 35,763 字符）就是那段机器 json，而用户在页面上真的看到了它。
 
 现在机器裁决只走结构化的那一条路。报告正文里只留**给人看**的内容：模型写的整体汇总报告
-（正文主体，见 `subagent.aggregate_outcomes`），以及本模块渲染的「复核标注（平台）」一节
-（`render_ruling`）与「未归类 / 条数上限 / 信息缺口」那几节。
+（正文主体，见 `subagent.aggregate_outcomes`），以及本模块渲染的两节
+（`render_ruling_summary` / `render_ruling`）与「未归类 / 条数上限 / 信息缺口」那几节。
 
 ## 四条落到结论上的口径（2026-09-21，全部来自 run 15 的实测）
 
@@ -218,6 +219,15 @@ KIND_VERIFY = "verify"
 # 2026-09-23：节名从「复核裁决（平台）」改为「复核标注（平台）」—— 正文主体回归模型写的
 # 整体汇总报告（AI-P1-01 的呈现层反转），这一节降为跟在草稿后的标注（`subagent.aggregate_outcomes`）。
 RULING_TITLE = "## 复核标注（平台）"
+# 报告**开篇**那一节的标题（2026-09-24，run 63）。它只放三句话：核过几条、有几条没核、
+# 被核的那几条各自什么下场；逐条明细仍在 `RULING_TITLE` 那一节，**排在正文之后**。
+#
+# 为什么要分开（run 57 的修法是对的，但做过头了）：run 57 的病是「正文写着 20 条结论、
+# 读到尾部才知道只裁了 3 条」，所以把这一节整个前置了。run 63 实测的代价：前置的是
+# **整节明细**（21 行，含逐条断言子列表），一份 141 行的报告要滚过 15% 的平台记账才读
+# 到「这次改了什么」。第一眼要看见的是**那几个数**，不是逐条的对账记录。
+RULING_SUMMARY_NAME = "复核摘要（平台）"
+RULING_SUMMARY_TITLE = "## " + RULING_SUMMARY_NAME
 RULING_BLOCK_MARKER = "ai-verify-ruling"
 
 # 报告里每条理由/依据占的字符上限。裁决是模型写的，长度不受控 —— 一段几千字的「理由」
@@ -1441,18 +1451,59 @@ def _apply_limit(
 # 对账轮跑了、但一条可逐条应用的裁决都没给（它可能只报了新发现、也可能把裁决写成了正文
 # 里的一段话）。2026-09-23 起正文主体是模型写的汇总报告，这一节只做一行说明 —— 不能再让
 # 替身文案把整份草稿顶出正文（AI-P1-01 时期的旧形态，用户实测后明确不要）。
-_NO_CHANGE_SECTION = (
-    RULING_TITLE
+# 2026-09-24：它是**开篇那一节**（`RULING_SUMMARY_TITLE`），所以说的是「下面的汇总」。
+_NO_CHANGE_SUMMARY = (
+    RULING_SUMMARY_TITLE
     + "\n\n"
     + "本次对账轮**没有给出可逐条应用的裁决**（按任务书要求，裁决要在 `report_markdown` "
-    "里单独给一个 json 代码块），上面的汇总按原样采信，读的时候各条按未复核看；"
+    "里单独给一个 json 代码块），下面的汇总按原样采信，读的时候各条按未复核看；"
     "对账轮原文存档在本次运行的结论载荷里（`verify_report_markdown`）。\n"
 )
 
 
-def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
-    """把复核结果渲染成**排在正文之前**的「复核标注」一节。**从 `final_findings` 渲染，
-    不是模型写的正文。**
+def _fate_counts(reduction: Reduction) -> list[str]:
+    """被复核的条目各是什么下场（`render_ruling_summary` 那一段用它）。
+
+    **与逐条明细同一份数据**（`Reduction` 的同一组属性）：摘要说「转人工核验 2 条」而明细只
+    列出 1 条，是这一节最不能出的错 —— 两次各算一遍迟早会分叉。`维持原结论` 那一档拆出
+    「只是重看了已有依据」的条数（P0-01 的两种「没找到反证」），因为它的可信度不一样。
+    """
+    confirmed = [row for row in reduction.rows if row.verdict == VERDICT_CONFIRMED]
+    replayed = [
+        row for row in confirmed if row.verify_basis != VERIFY_BASIS_INDEPENDENT
+    ]
+    groups = (
+        ("撤销", reduction.retracted),
+        (
+            "降级",
+            tuple(row for row in reduction.rows if row.verdict == VERDICT_DOWNGRADED),
+        ),
+        (
+            "转人工核验",
+            tuple(
+                row
+                for row in reduction.rows
+                if row.verdict == VERDICT_NEEDS_MORE_EVIDENCE
+            ),
+        ),
+        ("维持原结论", tuple(confirmed)),
+        ("复核新发现（已合入清单）", reduction.new_findings),
+    )
+    parts = []
+    for label, rows in groups:
+        if not rows:
+            continue
+        extra = (
+            f"（其中 {len(replayed)} 条只是重看了已有依据、未经独立反证）"
+            if label == "维持原结论" and replayed
+            else ""
+        )
+        parts.append(f"**{label} {len(rows)} 条**{extra}")
+    return parts
+
+
+def render_ruling_summary(reduction: Reduction, *, review_ran: bool) -> str:
+    """**开篇**那一节：核过几条、有几条没核、被核的那几条各自什么下场。
 
     ## 为什么在前（2026-09-24，run 57）
 
@@ -1461,31 +1512,68 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
     而正文里那几条高严重度陈述与尾部的状态说明是矛盾的。放在前面 + 明写覆盖数，
     这条矛盾在第一眼就能看见；模型原文仍然一个字都不改（顺序变了，内容没变）。
 
+    ## 为什么拆成两节（2026-09-24，run 63）
+
+    run 57 那一修把**整节明细**前置了：run 63 的报告开篇是 21 行平台记账（含逐条断言
+    子列表），正文被推到第 23 行 —— 一份 141 行的报告，要滚过 15% 的记账才读到「这次
+    改了什么」。要前置的是**那几个数**，不是对账记录本身；逐条明细归 `render_ruling`，
+    排在正文之后、与其余平台几节同处。
+
     `review_ran` 为假（没开对账轮 / 它没跑成）时一个字都不渲染：没有复核就没有裁决，
-    报告不该为此多出一节。开头口径说明**不许膨胀回三大段**（2026-09-23 起）：正文主体是
-    模型写的整体汇总报告，这一节是标注 —— 开头写一大段就把「不喧宾夺主」又写没了
-    （有测试钉着 ≤3 行）。
+    报告不该为此多出一节。开头这一节**不许膨胀**（2026-09-23 起，有测试钉着段数）：
+    正文主体是模型写的整体汇总报告，这里只报数。
     """
     if not review_ran:
         return ""
     if not reduction.changed:
-        return _NO_CHANGE_SECTION
+        # 零裁决那一形态：整节就是这一行说明，没有明细可拆。
+        return _NO_CHANGE_SUMMARY
 
     total_rows = len(reduction.rows)
     reviewed = total_rows - len(reduction.unreviewed)
-    # **覆盖数写在最前面**：这一节现在排在报告正文**之前**（2026-09-24 起，见
-    # `subagent._assemble_report` 的调用点），读者第一眼要知道的是「下面那些结论里
-    # 有多少条被核过」——run 57 的病正是正文写着 20 条结论、尾部才说「待人工核验」，
-    # 而读者先看到、也更容易相信的是正文。
-    lines: list[str] = [
-        RULING_TITLE,
+    parts = _fate_counts(reduction)
+    fates = (
+        "被复核的这几条：" + "、".join(parts) + "。"
+        if parts
+        else "本次复核**没有改变任何一条结论**的去留或等级。"
+    )
+    lines = [
+        RULING_SUMMARY_TITLE,
         "",
+        # **覆盖数写在最前面**：它排在报告正文之前，读者第一眼要知道的是「下面那些结论里
+        # 有多少条被核过」——run 57 的病正是正文写着 20 条结论、尾部才说「待人工核验」，
+        # 而读者先看到、也更容易相信的是正文。
         f"本次复核**只覆盖 {reviewed} 条**（主结论共 {total_rows} 条），"
         f"**其余 {total_rows - reviewed} 条未经复核** —— 它们在下面的正文里按模型原话"
         "保留，等级与置信度都还是模型自己填的。",
         "",
+        fates + "逐条的下落、理由与断言状态写在正文之后的「复核标注（平台）」一节。",
+        "",
+    ]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
+    """**逐条明细**：每条被复核的结论原等级是什么、裁决成什么、为什么、断言逐条什么状态。
+
+    从 `final_findings` 渲染，**不是模型写的正文**。它排在**正文之后**（2026-09-24，
+    run 63）：开篇只留 `render_ruling_summary` 那几个数，明细按需查。两节读的是同一个
+    `Reduction`，不存在「摘要说 2 条、明细只列 1 条」的分叉。
+
+    `review_ran` 为假、或这一轮什么都没改变时返回空串（零裁决那一形态整节都在摘要里，
+    见 `_NO_CHANGE_SUMMARY`）。
+    """
+    if not review_ran:
+        return ""
+    if not reduction.changed:
+        return ""
+
+    lines: list[str] = [
+        RULING_TITLE,
+        "",
         "对账轮（找反证）的裁决已经应用到落库的异常清单与最终结论上（保留 / 降级 / "
-        "撤销 / 转人工核验）；这一节**只标注有变化的条目**，未点名的按原样采信。",
+        "撤销 / 转人工核验）；这一节**只标注有变化的条目**，未点名的按原样采信。"
+        f"覆盖几条、各条什么下场，见开篇的「{RULING_SUMMARY_NAME}」。",
         "",
     ]
     if not reduction.verdicts_seen:
@@ -1497,7 +1585,7 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
         # 事说成了没发生。
         notice = (
             "**注意**：本次复核没有回结构化裁决（正文里的话不构成裁决，平台只认 json 块），"
-            "下面的结论**去留**按原样采信，只有它新报出来的条目被合入了清单"
+            "正文里的结论**去留**按原样采信，只有它新报出来的条目被合入了清单"
         )
         if reduction.evidence_capped:
             notice += (

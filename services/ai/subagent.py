@@ -154,6 +154,7 @@ from services.ai.verdict import (
     parse_verdicts,
     reduce_findings,
     render_ruling,
+    render_ruling_summary,
 )
 from utils.logger import log_print
 
@@ -1400,16 +1401,20 @@ def aggregate_outcomes(
     verify_text = "".join(
         verify_section(step) for step in steps if step.plan.role == ROLE_VERIFY
     )
-    # 「复核标注」是平台对结论说的话，**排在正文之前**（2026-09-24 起，run 57）：
-    # 读者先看到的是正文里那些**未经复核**的断言，读到尾部才知道「复核只覆盖 3 条」——
-    # 实测那一轮正文写着 20 条结论、只裁了 3 条，正文的高严重度陈述与尾部的「待人工核验」
-    # 互相矛盾。前置 + 开头写明覆盖数，这条矛盾第一眼就能看见。
+    # 平台对结论说的话分**两节**（2026-09-24，run 63）：开篇只放**几个数**（复核覆盖几条、
+    # 各条什么下场），逐条明细归正文之后那一节。run 57 定下的是「覆盖数要在第一眼看到」，
+    # 而 run 63 实测把**整节明细**（21 行，含逐条断言）前置的代价：一份 141 行的报告要滚过
+    # 15% 的平台记账才读到「这次改了什么」。
     #
     # **模型原文一个字都不改**（顺序变了，内容没变）——AI-P1-01 时期「裁决节取代正文」的
     # 形态用户实测后明确不要，所以草稿仍是正文主体，标注只点名被改判的条目（标题 + 等级
     # 变化 + 理由）。落库的异常表 / 下一轮基线 / `final_findings` 仍然只认 `reduce_findings`
     # 那一份，「单一结论清单」的关切由落库层承担，呈现层不重复造第二份清单。
-    ruling_text = render_ruling(reduction, review_ran=_verify_ran(steps))
+    #
+    # 两节读的是**同一个** `reduction`：摘要与明细不可能一个说 2 条、一个列 1 条。
+    review_ran = _verify_ran(steps)
+    ruling_summary = render_ruling_summary(reduction, review_ran=review_ran)
+    ruling_text = render_ruling(reduction, review_ran=review_ran)
     # 「未归类」也排在信息缺口之前：它对读者同样是**结论的一部分**（有几条发现不属于
     # 任何维度），而信息缺口永远收尾。
     unclassified_text = build_unclassified_section(synthesis.anomalies, dimensions)
@@ -1433,21 +1438,23 @@ def aggregate_outcomes(
     # 什么都没得到 —— 两份东西都不能给。所以失败时一个字都不追加。
     # ## 草稿什么时候另存一份
     #
-    # **只有有裁决标注时才有 `draft_markdown`**（下面 `if ruling_text:` 那一支）。判据不是
-    # 「正文变了没有」：没有裁决节时平台那几节是**接在草稿后面**的（`else` 支），草稿仍然在
-    # 正文开头 —— 那时另存一份就是同一段字节在载荷里出现两次。有裁决节时正文虽然也以草稿
+    # **只有有复核结论时才有 `draft_markdown`**（下面 `if ruling_summary:` 那一支）。判据不是
+    # 「正文变了没有」：没有复核时平台那几节是**接在草稿后面**的（`else` 支），草稿仍然在
+    # 正文开头 —— 那时另存一份就是同一段字节在载荷里出现两次。有复核节时正文虽然也以草稿
     # 开头，但这份**独立存档**是给外部读侧（API/SSE 消费者可能只认这个键取「模型原稿」）
     # 保留的兼容层，取值永远是模型的原始草稿、不含任何平台拼接。
     draft_markdown = ""
     if synthesis.status != STATUS_FAILED:
-        if ruling_text:
-            # 有裁决 = 平台对结论说了话，而**读者要先知道复核覆盖了多少条**：
-            # 次序是 复核标注 → 模型草稿 → 未归类 / 条数上限 / 信息缺口。
-            # 草稿里可能整段写着裁决之前的等级（如「critical，仍成立」），标注节逐条点名
+        if ruling_summary:
+            # 有复核 = 平台对结论说了话，而**读者要先知道复核覆盖了多少条**：
+            # 次序是 复核摘要 → 模型草稿 → 复核标注（逐条明细）/ 未归类 / 条数上限 / 信息缺口。
+            # 草稿里可能整段写着裁决之前的等级（如「critical，仍成立」），明细节逐条点名
             # 了被改判的结论并写明「原 X → 新 Y」，读者对着读即可，不需要平台替他删改
             # 模型的原文 —— 被改判后的**规范值**在落库异常表与 `final_findings` 里，
             # 报告呈现不承担那份口径。
-            report = _assemble_report(ruling_text, (report_source, *platform_sections))
+            report = _assemble_report(
+                ruling_summary, (report_source, ruling_text, *platform_sections)
+            )
             draft_markdown = report_source
         elif platform_sections:
             # 没有裁决节：草稿就是正文里**唯一那份结论**，平台那几节接在它后面
@@ -1562,8 +1569,8 @@ def _assemble_report(head: str, sections: Sequence[str]) -> str:
     —— 逐节追加的写法在节数变成五个之后就没人读得懂了，而**这一份文本是有契约的**：
     它是 `ai_analysis_run.response_text`、是抽屉与导出显示的那份报告。
 
-    空节丢掉（`render_ruling` / `build_cap_section` 在无事可说时返回空串），节间恰好一个
-    空行，结尾恰好一个换行。
+    空节丢掉（`render_ruling_summary` / `render_ruling` / `build_cap_section` 在无事可说时
+    返回空串），节间恰好一个空行，结尾恰好一个换行。
     """
     parts = [head.strip(), *(str(item).strip() for item in sections if str(item).strip())]
     body = "\n\n".join(item for item in parts if item)
