@@ -50,6 +50,7 @@ from services.ai.engine import (
 from services.ai.protocol import Anomaly, DroppedItem
 from services.ai.scope import normalize_path
 from services.ai.verdict import (
+    RULING_SUMMARY_NAME,
     VERDICT_DOWNGRADED,
     VERDICT_NEEDS_MORE_EVIDENCE,
     VERDICT_RETRACTED,
@@ -478,6 +479,14 @@ def _verify_gap_lines(steps: Sequence[MemberOutcome]) -> tuple[str, ...]:
 
     所以这里绝不能套上面那句「它负责的维度（空）没有人看过」：那是一句**错的**话
     （会读成「有一块维度没人看过」），而这两件事该被怎么处置完全不同。
+
+    ## 这里只记账，不写读法（2026-09-25）
+
+    从前这行结尾还有一句「读的时候按原样看」—— 与报告**开篇**那行说明（`verdict.
+    render_review_skipped`）说的是同一件事，只是措辞不同（「按原样看」vs「按未经复核的
+    初稿看」）。后果有两层：读的人读到末尾才看见第二遍读法，那时正文早读完了，等于没写；
+    而同一件事两种说法，会被当成两道不同的提醒。现在读法只在开篇（那里才有用），
+    这里只记「哪一步没跑成、为什么、后果是什么」。
     """
     lines: list[str] = []
     for step in steps:
@@ -490,7 +499,7 @@ def _verify_gap_lines(steps: Sequence[MemberOutcome]) -> tuple[str, ...]:
         ) or "没有给出可用结论"
         lines.append(
             f"- {step.plan.label}：{reason}；报告的结论"
-            "**没有经过「找反证」这一道**，读的时候按原样看。"
+            "**没有经过「找反证」这一道**。"
         )
     return tuple(lines)
 
@@ -668,8 +677,14 @@ def reconcile_candidates(
     if verify_gaps:
         # 与上面那段分开写：对账轮没有负责的维度，把它挂在「没能交回结论的分片」下面会读成
         # 「有一块维度没人看过」，而它真正的后果是「结论没经过复核」。
+        #
+        # 这一句是**记账的引子**：说清下面那条是什么（哪一步、为什么），并把读法指回开篇
+        # （`_verify_gap_lines` 的 docstring 写了为什么读法不许在这儿再写一遍）。指路是安全的
+        # —— 这一段只会出现在报告里，而汇总没跑成时压根没有报告（那一路走的是 `_gap_lines`
+        # 进 `error_message`，不含这一句）。
         blocks.append(
-            "另外，本次开着**「对账轮（找反证）」**，而它没有跑成：\n\n"
+            "另外，本次开着**「对账轮（找反证）」**，而它没有跑成 —— 下面记的是"
+            f"**哪一步没跑成、为什么**；这些结论该怎么读，见开篇的「{RULING_SUMMARY_NAME}」：\n\n"
             + "\n".join(verify_gaps)
         )
     if no_lineage:

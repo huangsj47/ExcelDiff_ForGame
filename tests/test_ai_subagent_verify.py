@@ -39,7 +39,7 @@ from services.ai.subagent import (
     run_family,
     verify_section,
 )
-from services.ai.verdict import RULING_SUMMARY_TITLE, RULING_TITLE
+from services.ai.verdict import RULING_SUMMARY_NAME, RULING_SUMMARY_TITLE, RULING_TITLE
 from tests.test_ai_engine import (
     COMMIT,
     COMMIT_B,
@@ -319,6 +319,23 @@ class TestAFailedRoundIsNotSilent:
         assert report.index("没有跑「找反证」复核") < report.index("改了道具表"), (
             "这句读法被排到了正文后面 —— 读者读完正文才看到，等于没写"
         )
+
+    def test_the_reading_rule_is_at_the_top_and_the_ledger_is_at_the_end(self):
+        """两处文案**分工**：开篇说读法、末尾记账（2026-09-25）。
+
+        末尾那行从前还带一句「读的时候按原样看」—— 同一件事的第二遍，措辞还不一样
+        （「按原样看」vs 开篇的「按未经复核的初稿看」），而且读到那里正文早读完了。
+        现在末尾只记「哪一步没跑成、为什么、后果」，读法指回开篇。
+
+        判据落在**位置**上：读法不许出现在开篇之后，指路的那半句不许出现在开篇里。
+        """
+        report = self._run_failing().outcome.report_markdown
+        head, tail = report.split("信息缺口（平台补充）", 1)
+
+        assert "读的时候按**未经复核的初稿**看" in head
+        assert "读的时候" not in tail, "末尾又写了一遍读法 —— 那里正文早读完了，等于没写"
+        assert f"见开篇的「{RULING_SUMMARY_NAME}」" in tail, "末尾那条账没指回开篇"
+        assert "读法" not in head, "指路的半句挂到了开篇上 —— 它该在末尾那条账上"
 
     def test_a_round_nobody_asked_for_says_nothing_at_the_top(self):
         """**没开复核**时开篇一个字都不许加：那是用户自己关的开关，报告不该为此多一句。"""
