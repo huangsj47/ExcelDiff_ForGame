@@ -46,19 +46,16 @@ from services.ai.budget import (
     MIN_KEEP_TURNS,
     ContextItem,
     TurnMemo,
-    build_continuation_summary,
     compact_history,
     enforce_budget,
     estimate_chars,
     looks_like_context_overflow,
-    truncate_text,
 )
 from services.ai.context_tools import (
     DEFAULT_MAX_TOOL_REQUESTS,
     DEFAULT_TOOL_LIMITS,
     ContextProvider,
     ContextTools,
-    describe_request,
 )
 from services.ai.evidence_prefetch import (
     PrefetchResult,
