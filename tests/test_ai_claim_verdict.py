@@ -553,6 +553,56 @@ class TestTheVerifierIsAskedPerClaim:
         assert "**已证实**" in text
 
 
+class TestTheSameFactIsNotSaidThreeTimes:
+    """一行明细里，同一件事只说一遍（2026-09-24，run 63）。
+
+    实测那一轮一条「证据不足」的明细长这样（约 700 字）：
+
+        原 `critical` / `very_high` → **证据不足（待人工核验）**，等级 `critical` → `high`、
+        置信度 `very_high` → `high`（平台按「证据不足降一档」处理）；…；平台说明：复核逐条
+        核过这条结论的 3 条断言，其中 2 条没有被证实：`C1`（证据读不到：次数记账…）、
+        `C2`（证据读不到：批次返回失败…）；…
+        - 逐条断言：`C1` **证据读不到**：次数记账…（查过：…）；`C2` **证据读不到**：批次返回失败…
+
+    起点等级印了两遍、每条断言的正文印了两遍、整件事说了三遍。读者最后什么都没记住。
+    """
+
+    def _row_and_report(self, *verdicts):
+        reduction = reduce_findings(
+            [_anomaly(DIFF_CLAIM, CONSEQUENCE_CLAIM)],
+            verdicts=parse_verdicts(_reply(*verdicts)),
+        )
+        return reduction.rows[0], render_ruling(reduction, review_ran=True)
+
+    def test_the_origin_level_is_printed_once(self):
+        row, report = self._row_and_report(
+            _verdict("F1", _claim_reply("C1", "verified") + "," + _claim_reply("C2", "unverified"))
+        )
+        assert row.verdict == VERDICT_NEEDS_MORE_EVIDENCE, "构造没生效"
+        line = next(item for item in report.splitlines() if item.startswith("- **"))
+
+        assert line.count("原 `critical` / `very_high`") == 1, "起点等级印了两遍"
+        assert line.count("等级降到 `high`") == 1
+        assert "`critical` → `high`" not in line, (
+            "又写回了「从哪一级降到哪一级」—— 起点就在这一行的开头"
+        )
+        assert "置信度降一档" not in line and "不再维持" not in line, (
+            "同一件处置在「动作」与「平台说明」里各说了一遍"
+        )
+
+    def test_a_blocked_claim_is_named_once_and_explained_once(self):
+        _, report = self._row_and_report(
+            _verdict("F1", _claim_reply("C1", "verified") + "," + _claim_reply("C2", "unverified"))
+        )
+
+        # C2 的断言正文只出现一次（下面那行「逐条断言」里）；标题由已证实的 C1 构成。
+        assert report.count(CONSEQUENCE_CLAIM.statement) == 1, (
+            "同一条断言的正文在「平台说明」与「逐条断言」里各印了一遍"
+        )
+        assert report.count("没有被证实") == 1
+        assert "`C2`" in report, "编号要在（读者顺着它去下面那行看状态）"
+
+
 @pytest.mark.parametrize("status", [CLAIM_VERIFIED, CLAIM_UNVERIFIED, CLAIM_REFUTED, CLAIM_UNREADABLE])
 def test_every_claim_status_has_a_chinese_label(status):
     """四态各有中文名（服务端算，界面不自己映射 —— 与严重度那两栏同一条口径）。"""

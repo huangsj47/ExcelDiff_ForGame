@@ -1787,10 +1787,11 @@ def _row_line(row: FindingRow) -> str:
         detail.append("依据：" + "、".join(_ref_text(row)))
     if row.note:
         detail.append(f"平台说明：{row.note}")
-    # 取证方式排在最后：它是对**上面整句**的限定（「反证不成立」是重看了已有依据，
-    # 还是自己去搜了一遍），不是另一个并列的事实。
+    # 复核方式排在最后：它是对**上面整句**的限定（「反证不成立」是重看了已有依据，
+    # 还是自己去搜了一遍），不是另一个并列的事实。字段名从「取证方式」改成「复核方式」
+    # （2026-09-24）：值本身叫「独立取证」，两个「取证」叠在一行里读着别扭。
     if row.verify_basis:
-        detail.append(f"取证方式：**{row.verify_basis_label}**")
+        detail.append(f"复核方式：**{row.verify_basis_label}**")
     line = head + "；".join(detail)
     claims = claim_lines(row.claim_reviews)
     return line + ("\n" + claims if claims else "")
@@ -1815,13 +1816,11 @@ def _action_label(row: FindingRow) -> str:
 def _body_label_text(row: FindingRow) -> str:
     """头部那一小段「（正文 R3）」。
 
-    对账轮新发现的条目**不写**：它们本来就不在模型写的那份正文里（`source` 那一栏已经
-    说了它从哪来），给它写一句「正文未编号」是拿一句真话去填一个不存在的问题。
-
-    **模型没给正文编号时也什么都不写**（2026-09-24，run 63）：模型的正文不一定带
-    `R1`/`R2` 这种编号（run 63 用的是【致命】/【高】），那时从前写的是「（正文未编号）」
-    —— 读者看到「[F1]（正文未编号）」：一个平台内部编号，加一句平台自己承认「它在正文里
-    找不到」。要落回正文靠的是**标题**（它就在这一行里），不是那个不存在的编号。
+    对账轮新发现的条目**不写**（它们本来就不在模型写的正文里，`source` 那一栏说了它从
+    哪来）。**模型没给正文编号时也什么都不写**（2026-09-24，run 63）：模型的正文不一定
+    带 `R1`/`R2` 编号（run 63 用的是【致命】/【高】），那时从前写「（正文未编号）」——
+    读者看到「[F1]（正文未编号）」：一个平台内部编号，加一句平台自己承认「它在正文里
+    找不到」。要落回正文靠的是**标题**，它就在这一行里。
     """
     if row.source == SOURCE_VERIFY:
         return ""
@@ -1829,16 +1828,20 @@ def _body_label_text(row: FindingRow) -> str:
 
 
 def _level_change_text(row: FindingRow, *, cause: str, severity: bool = True) -> str:
-    """等级 / 置信度动过的话，把两处变化写出来并注明出处（口径 ① 要求的「降到了哪一档」）。
+    """等级 / 置信度动过的话，把**新的那一档**写出来并注明出处（口径 ①）。
 
-    `severity=False` 给「降级」那一支用：那里的等级变化已经写在动作里了，再写一遍就是
-    同一件事在同一行里出现两次。
+    ## 只写新的那一档（2026-09-24，run 63）
+
+    从前写的是「等级 `critical` → `high`」—— 而这一行的开头已经印了
+    「原 `critical` / `very_high` → …」，同一个起点在一行里出现两次（run 63 的一条明细
+    里同一件事被说了三遍：动作、等级变化、置信度变化）。起点在本行开头，这里只需回答
+    「降到了哪一档」。`severity=False` 给「降级」那一支用：那里的等级变化已写在动作里。
     """
     parts: list[str] = []
     if severity and row.anomaly.severity != row.origin.severity:
-        parts.append(f"等级 `{row.origin.severity}` → `{row.anomaly.severity}`")
+        parts.append(f"等级降到 `{row.anomaly.severity}`")
     if row.anomaly.confidence != row.origin.confidence:
-        parts.append(f"置信度 `{row.origin.confidence}` → `{row.anomaly.confidence}`")
+        parts.append(f"置信度降到 `{row.anomaly.confidence}`")
     if not parts:
         return ""
     return f"，{'、'.join(parts)}（{cause}）"

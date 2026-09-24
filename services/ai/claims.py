@@ -616,12 +616,18 @@ def _blocked_note(
     """平台说明：哪几条断言没被证实、以及它带来的后果（`verdict` 那一侧的动作）。
 
     没有未证实的断言时返回空串 —— 那种情况下平台**不该**在报告里多说一句话。
+
+    ## 只点名编号，不重抄断言正文（2026-09-24，run 63）
+
+    从前这里是「`C1`（证据读不到：次数记账在批次交付之前执行…）、`C2`（…）」—— 而同一行
+    下面那行「逐条断言」把每一条的正文与状态各印了一遍，`verdict._row_line` 的头部又把
+    这件事说了第三遍。一句话在一行里出现两次是排版问题，出现三次就成了没人读的账。
+    现在这里只给**编号**（读的人顺着编号去下面那行看逐条状态），说清后果与出处。
+    三处（报告 / 面板 / 导出）读的都是同一份 `ClaimReview`，措辞不会分叉。
     """
     if not blocked:
         return ""
-    named = "、".join(
-        f"`{review.claim.claim_id}`（{review.display}）" for review in blocked[:3]
-    )
+    named = "、".join(f"`{review.claim.claim_id}`" for review in blocked[:3])
     if len(blocked) > 3:
         named += f" 等 {len(blocked)} 条"
     head = (
@@ -631,9 +637,9 @@ def _blocked_note(
     if any(review.status == CLAIM_REFUTED for review in blocked):
         head += "（含**反证成立**的断言，平台不替人决定整条撤不撤）"
     return (
-        head + "。含未证实断言的结论**不能算「反证不成立」**，"
-        "平台按「证据不足」处理（等级降一档、置信度不再维持 `very_high`）；"
-        "已证实的那部分仍然成立，见逐条列出的断言状态"
+        head + "。含未证实断言的结论**不能算「反证不成立」**，平台按「证据不足」处理"
+        "（等级与置信度降到哪一档，写在上面那一行的开头）；"
+        "已证实的那部分仍然成立，逐条状态见下面那行"
     )
 
 

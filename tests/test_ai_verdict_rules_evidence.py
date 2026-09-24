@@ -175,7 +175,10 @@ class TestTheEvidenceShortfallDropsTheSeverityOneNotch:
         )
 
         section = render_ruling(reduction, review_ran=True)
-        assert "等级 `critical` → `high`" in section
+        # 「降到哪一档」只写新的那一档（起点已经印在这一行的开头：「原 `critical` /
+        # `very_high` → …」）—— 2026-09-24 起，见 `_level_change_text` 的说明。
+        assert "原 `critical` / `very_high`" in section
+        assert "等级降到 `high`" in section
         assert "证据不足降一档" in section, "要写出这一档是从哪来的（平台口径，不是模型说的）"
         assert "缺一份服务端校验的代码" in section, "降级理由沿用复核给的理由"
         assert "待人工核验" in section
