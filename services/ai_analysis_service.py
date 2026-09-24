@@ -483,6 +483,8 @@ def build_weekly_payload(
         # **已经含清单**的 payload，验的是读侧，接线漏了这一层。
         "window_commit_ids": list(details.get("window_commit_ids") or ()),
         "window_commit_files": details.get("window_commit_files") or {},
+        # 未读游标的基准（P1b）：写侧算了、组装时漏抄 ⇒ 下游 `.get()` 恒为 None（同上面的坑）。
+        "base_run_id": details.get("base_run_id"),
         # 白名单：本批次**全部**改动过的文件。模型能读的 diff 就是这个集合。
         "delta_files": delta_files,
         # 提示词里**列出来**的那部分。绝大多数版本与 `delta_files` 相同（见下面的说明）。
@@ -1871,7 +1873,7 @@ def run_weekly_analysis_background(
                     effective_mode=run.scope,
                     upgrade_reason=runtime_reason,
                 )
-                # 计划三列 + 目标快照（P2-2）：快照已冻结、模式升格已确定，此刻它们才是事实
+                # 计划三列 + 目标快照（P2-2）：快照已冻结、模式已定，此刻它们才是事实。
                 job_service.record_plan(
                     task_row.job_id, payload=payload, project_id=project_id, config_id=config_id
                 )

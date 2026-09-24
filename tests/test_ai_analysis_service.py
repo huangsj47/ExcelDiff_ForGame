@@ -136,6 +136,67 @@ def test_ai_weekly_payload_scope_and_policy():
         assert payload["scope"] == "incremental"
         assert payload["policy"]["reason"] == "delta_small"
 
+def test_the_payload_carries_the_base_run_for_the_unread_cursor():
+    """未读游标（P1b）的基准必须**真的进 payload**，不能只活在写侧的返回值里。
+
+    `scope_sampling._summarize_weekly_files` 把 `base_run_id` 写进它返回的 `details`，
+    而组装 `request_payload` 是**逐键复制**的 —— 漏抄一个键的表现不是报错，而是
+    `snapshot_store.record_unread` 读 `payload["base_run_id"]` 恒为 `None`：每一轮的
+    `streak` 都从 1 重新开始，「连着几轮没读到」永远不成立，补偿排序的第一关键字在
+    生产路径上是死的。同一处这个坑踩过第二次（前一次是 `window_commit_ids`，注释还
+    写在那几行上面）—— 所以这条用例走的是**真入口** `build_weekly_payload`，不是在
+    用例里手工把键塞进 `run.request_payload`。
+    """
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo = _create_repo(project.id, _uid("code"), "git", "code")
+        start_time = datetime(2026, 3, 1, 0, 0)
+        end_time = datetime(2026, 3, 8, 0, 0)
+        cfg = _create_weekly_config(project.id, repo, "W1", start_time, end_time)
+        _seed_diff_cache(cfg, repo, "src/file_0.py", datetime.now(timezone.utc))
+        db.session.commit()
+
+        # 首轮：还没有任何结论基线 —— 键在、值是 None（不是「键不存在」）。
+        payload, state, skip_reason = ai_service.build_weekly_payload(cfg.id)
+        assert skip_reason is None
+        assert payload["base_run_id"] is None
+
+        base = AiAnalysisRun(
+            project_id=project.id,
+            target_type="weekly",
+            target_id=cfg.id,
+            target_key="W1",
+            status="succeeded",
+            response_text="上一轮的结论",
+            finished_at=datetime.now(timezone.utc),
+            **provenance.current_provenance(project.id),
+        )
+        db.session.add(base)
+        db.session.flush()
+        db.session.add(
+            AiWeeklyAnalysisState(
+                project_id=project.id,
+                group_key=ai_service.build_weekly_group_key(cfg),
+                base_name="W1",
+                start_time=start_time,
+                end_time=end_time,
+                last_analyzed_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+                last_concluded_run_id=base.id,
+            )
+        )
+        db.session.commit()
+        # 本轮还得有变更，否则会被「输入未变」那条判据拦掉（与基准运行无关）。
+        entry = WeeklyVersionDiffCache.query.filter_by(config_id=cfg.id).first()
+        entry.updated_at = datetime.now(timezone.utc)
+        db.session.commit()
+
+        payload, state, skip_reason = ai_service.build_weekly_payload(cfg.id)
+        assert skip_reason is None
+        assert payload["base_run_id"] == base.id, (
+            "结论基线没进 payload —— 未读游标接不上，streak 永远停在 1"
+        )
+
 
 def test_the_default_prompt_is_project_agnostic():
     """平台默认提示词**不能写死某个项目的技术栈**。
