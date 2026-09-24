@@ -19,6 +19,7 @@ import pytest
 from app import app, create_tables, db
 from services.ai.scope_sampling import compensation_rank
 from services.ai.snapshot_store import (
+    UNREAD_MAX_ITEMS,
     UNREAD_NO_RESULT,
     UNREAD_NOT_REQUESTED,
     UNREAD_REFUSED,
@@ -140,6 +141,79 @@ def test_the_refused_reason_has_a_live_producer():
         "`context_tools.execute` 的拒绝分支不再写那句话了 —— 未读账认不出「被额度拒」"
     )
 
+
+def test_the_cursor_carries_every_unread_file_not_just_the_sample():
+    """游标**不许跟着样本一起截断**（P1b 收尾，真机实测）。
+
+    `items` 是给人回看的样本（`UNREAD_MAX_ITEMS=120`），而 `record_unread` 曾经把
+    「路径 → 连着几轮没读到」也塞在那一份里 —— 于是第 121 条之后的路径**每一轮都从 1
+    重新开始**，而补偿排序的第一关键字正是这个数。真机 run 61：1293 条未读里只有 120 条
+    续上了（实测 `{2: 110, 1: 10}`），其余 1173 条永远停在 1。
+
+    这条用例要的是**样本之外**的那几条：轮 2 之后 130 条必须全部是 2。
+    """
+    with app.app_context():
+        create_tables()
+        group = _make_group(file_count=UNREAD_MAX_ITEMS + 10)
+        first = _run_once(group)
+        _record_evidence(first["run"], [], group["commits"])
+        _trace(first["run"], executed=[])
+        section = record_unread(first["run"])
+        assert section["total"] == UNREAD_MAX_ITEMS + 10
+        assert len(section["items"]) == UNREAD_MAX_ITEMS, "样本该截断"
+        assert len(section["cursor"]) == section["total"], (
+            "游标被截断了 —— 第 121 条之后的路径下一轮会从 1 重新开始"
+        )
+
+        second = _run_once(group, force_full=True)
+        second["run"].request_payload = json.dumps(
+            {**json.loads(second["run"].request_payload), "base_run_id": first["run"].id}
+        )
+        _record_evidence(second["run"], [], group["commits"])
+        _trace(second["run"], executed=[])
+        record_unread(second["run"])
+        streaks = unread_streaks(second["run"])
+        assert len(streaks) == UNREAD_MAX_ITEMS + 10, "样本之外的那几条没进游标"
+        assert set(streaks.values()) == {2}, (
+            f"第二轮应当是「连续两轮没读到」，实际 {sorted(set(streaks.values()))}"
+        )
+
+
+def test_the_sample_shows_the_longest_unread_first():
+    """样本是**给人回看**的那一份，所以最久没读到的排在最前面（而不是按路径截前 120）。"""
+    with app.app_context():
+        create_tables()
+        group = _make_group(file_count=8)
+        first = _run_once(group)
+        first_path, second_path = _paths(group, [0, 1])
+        first["run"].request_payload = json.dumps(
+            {
+                **json.loads(first["run"].request_payload),
+                "unread": {"cursor": {first_path: 5, second_path: 3}},
+            }
+        )
+        second = _run_once(group, force_full=True)
+        second["run"].request_payload = json.dumps(
+            {**json.loads(second["run"].request_payload), "base_run_id": first["run"].id}
+        )
+        _record_evidence(second["run"], [], group["commits"])
+        _trace(second["run"], executed=[])
+        items = record_unread(second["run"])["items"]
+        assert [item["path"] for item in items[:2]] == [first_path, second_path]
+        assert [item["streak"] for item in items[:2]] == [6, 4]
+
+
+def test_an_old_run_without_a_cursor_still_reads_the_sample():
+    """老运行没有 `cursor` 键：退回读 `items`（那时两者同源，行为与从前逐字相同）。"""
+    with app.app_context():
+        create_tables()
+        group = _make_group(file_count=6)
+        run = _run_once(group)["run"]
+        path = _paths(group, [0])[0]
+        run.request_payload = json.dumps(
+            {"unread": {"items": [{"path": path, "streak": 4}]}}
+        )
+        assert unread_streaks(run) == {path: 4}
 
 def test_an_unknown_coverage_reports_nothing_rather_than_everything():
     """没有逐轮明细 ⇒ **未知**，不是「一个都没读到」（与 `evidence_paths` 同一条纪律）。"""

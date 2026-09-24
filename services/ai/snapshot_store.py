@@ -605,9 +605,13 @@ UNREAD_REASON_LABELS = {
 #: 与 `trace_evidence.FAILURE_NOTICE_PREFIXES` 是同一套做法（改那句话就要改这里）。
 REFUSED_REASON_PREFIX = "超出本次工具请求总预算"
 
-#: `request_payload["unread"]["items"]` 最多留几条。线上的窗口可能有上千个没读到的文件
-#: （实测一次 1009 里 967 个），整份塞进 payload 会让每一次读这条 run 的接口都背上它；
-#: 而**计数照旧是全量的**，截断的条数也如实写出来。
+#: `request_payload["unread"]["items"]` 最多留几条 —— 它只是**给人回看的样本**
+#: （线上的窗口可能有上千个没读到的文件，实测一次 1009 里 967 个）。
+#:
+#: **`cursor` 不适用于这个上限**（P1b 收尾，2026-09-24）：它是下一轮补偿排序用的
+#: 「路径 → 连着几轮没读到」，**截断它就等于把第 N 条之后的游标清零** —— 真机实测
+#: 1293 条未读里只有 120 条能续上，其余每轮都从 1 重新开始，而补偿排序的第一关键字
+#: 正是这个数。所以游标存全量（键是路径、值是整数，比 `items` 一份对象省得多）。
 UNREAD_MAX_ITEMS = 120
 
 
@@ -731,6 +735,20 @@ def unread_streaks(run: Any) -> dict:
     section = payload.get("unread")
     if not isinstance(section, Mapping):
         return {}
+    # `cursor` 是**全量**的那一份（P1b 收尾）：老运行没有这个键，退回只读 `items`
+    # —— 那时它与 cursor 同源，行为与从前逐字相同。
+    cursor = section.get("cursor")
+    if isinstance(cursor, Mapping):
+        out: dict = {}
+        for raw_path, raw_streak in cursor.items():
+            name = str(raw_path or "").strip()
+            if not name:
+                continue
+            try:
+                out[name] = max(1, int(raw_streak or 0))
+            except (TypeError, ValueError):
+                continue
+        return out
     out: dict = {}
     for item in section.get("items") or ():
         if not isinstance(item, Mapping):
@@ -762,12 +780,17 @@ def record_unread(run: Any) -> Optional[dict]:
     for item in files:
         counts[item["reason"]] = counts.get(item["reason"], 0) + 1
         items.append({**item, "streak": previous.get(item["path"], 0) + 1})
+    # 游标**全量**（见 `UNREAD_MAX_ITEMS`）：它是下一轮排序的输入，截断等于把后面的
+    # 全部清零。展示用的样本按「最久没读到的排前面」取 —— 样本的价值就在这一头。
+    cursor = {item["path"]: item["streak"] for item in items}
+    sample = sorted(items, key=lambda item: (-item["streak"], item["path"]))
     section = {
         "total": len(items),
         "counts": counts,
         "labels": {key: UNREAD_REASON_LABELS[key] for key in counts},
         "shown": min(len(items), UNREAD_MAX_ITEMS),
-        "items": items[:UNREAD_MAX_ITEMS],
+        "items": sample[:UNREAD_MAX_ITEMS],
+        "cursor": cursor,
     }
     payload["unread"] = section
     run.request_payload = json.dumps(payload, ensure_ascii=False)
