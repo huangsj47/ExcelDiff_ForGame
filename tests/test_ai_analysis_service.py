@@ -1763,3 +1763,61 @@ def test_the_whole_list_is_rendered_when_it_fits(monkeypatch):
             "清单被 max_files_per_run 截断了 —— 全列才是默认行为"
         )
         assert payload["delta_truncated"] is False
+
+
+def test_a_single_agent_weekly_run_says_the_review_it_was_asked_for_did_not_run(monkeypatch):
+    """**配置要了复核、而这次只分得出一个分析者** ⇒ 报告开篇必须自己说出来。
+
+    2026-09-25 真机 run 65 实测：配置 `subagent_enabled=1`、`subagent_verify=1`，而窗口
+    只进了 1 个变更文件 ⇒ `plan_family` 判「分不出 2 片」返回 `None`、走单代理路径 ——
+    于是既没有对账轮，报告里也**一个字都没提**，而 `help.html` 写的是「对账轮没跑成时会
+    如实标成降级」。读者按「我开了复核」的预期读一份没复核的报告。
+
+    **这条量的不是那个函数，是接线**（`_run_engine_and_persist` 里那几行）：把接线停掉，
+    `note_review_skipped` 自己的单测全绿而这条必须红 —— 那种漏改没有任何别的东西能抓到。
+    """
+    from models.ai_analysis import AiAnalysisRun
+    from services.ai.verdict import RULING_SUMMARY_TITLE
+
+    with app.app_context():
+        create_tables()
+        project = _create_project()
+        repo = _create_repo(project.id, _uid("table"), "svn", "table")
+        cfg = _create_weekly_config(
+            project.id, repo, "W1", datetime(2026, 3, 1), datetime(2026, 3, 8)
+        )
+        _seed_diff_cache(
+            cfg, repo, TABLE_PATH, datetime.now(timezone.utc), commit_id=COMMIT_SHA
+        )
+        db.session.commit()
+
+        ai_service.set_project_api_key(project.id, "k")
+        # 子代理与对账轮**都开着** —— 承诺就此作出（任一关掉，报告都不该多这一句）。
+        ai_service.update_project_analysis_config(
+            project.id,
+            {
+                "api_base_url": "http://127.0.0.1:15721/v1",
+                "api_model": "deepseek-v4-flash",
+                "subagent_enabled": True,
+                "subagent_verify": True,
+            },
+        )
+        db.session.commit()
+
+        client = _FakeClient()
+        monkeypatch.setattr(ai_service, "build_endpoint_client", lambda *a, **k: (client, []))
+
+        outcome = ai_service.run_weekly_analysis_background(cfg.id)
+
+        assert outcome["status"] == "succeeded", outcome
+        assert len(client.calls) == 1, "这次本该是单代理（一次调用），却跑成了别的形状"
+        run = db.session.get(AiAnalysisRun, outcome["run_id"])
+        assert run.response_text.startswith(RULING_SUMMARY_TITLE), (
+            "单代理路径没有把「要了复核却没跑成」写在开篇 —— 读者会以为这份结论被核过"
+        )
+        assert "没有跑「找反证」复核" in run.response_text
+        assert "只分得出一个分析者" in run.response_text
+        assert "# 变更理解" in run.response_text, "正文被这段说明顶掉了（只该加在最前面）"
+        # 落库那一份与界面读的那一份是同一个字节串（`_persist_outcome` 读的就是它）
+        payload = json.loads(run.response_payload)
+        assert "没有跑「找反证」复核" in payload["report_markdown"]
