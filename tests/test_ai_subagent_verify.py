@@ -304,6 +304,42 @@ class TestAFailedRoundIsNotSilent:
         assert step.skipped_reason and step.outcome is None
         assert "它没有跑成" in result.outcome.report_markdown
 
+    def test_a_review_that_was_asked_for_but_did_not_run_is_named_at_the_top(self):
+        """**要了复核、而它没跑成** ⇒ 开篇要说清「下面的结论没经过复核」（真机 run 65）。
+
+        家族这一路此前只在**报告末尾**的信息缺口里点名（`test_the_report_names_it`），
+        而读者是顺着读下来的：正文里那几条高严重度结论先入眼。开篇这一行说的是**读法**，
+        末尾那条说的是**账**（哪一块没交回结论），两处不是同一句话。
+        """
+        report = self._run_failing().outcome.report_markdown
+
+        assert report.startswith(RULING_SUMMARY_TITLE)
+        assert "没有跑「找反证」复核" in report
+        assert "它跑了，但没有跑成" in report
+        assert report.index("没有跑「找反证」复核") < report.index("改了道具表"), (
+            "这句读法被排到了正文后面 —— 读者读完正文才看到，等于没写"
+        )
+
+    def test_a_round_nobody_asked_for_says_nothing_at_the_top(self):
+        """**没开复核**时开篇一个字都不许加：那是用户自己关的开关，报告不该为此多一句。"""
+        client = FlakyClient(_final(_anomaly()))
+        result = run_family(
+            client=client, provider=FakeProvider(), plan=_plan(2, verify=False), **_args()
+        )
+        report = result.outcome.report_markdown
+
+        assert "没有跑「找反证」复核" not in report
+        assert RULING_SUMMARY_TITLE not in report
+
+    def test_a_round_that_ran_keeps_the_normal_opening(self):
+        """复核跑成了：开篇是那份覆盖账，不是「没跑」那行说明（两形态不许串）。"""
+        client = FlakyClient(_final(_anomaly()), _final(_anomaly()), _final(_anomaly()), VERIFY_REPLY)
+        result = run_family(client=client, provider=FakeProvider(), plan=_plan(2), **_args())
+        report = result.outcome.report_markdown
+
+        assert report.startswith(RULING_SUMMARY_TITLE)
+        assert "没有跑「找反证」复核" not in report
+
     def test_a_missing_verify_outranks_a_degraded_shard_but_loses_to_a_missing_shard(self):
         """降级取最重的那个：缺一个分片（有一块没人看过）比「没复核」重。"""
         from services.ai.subagent import MemberOutcome, MemberPlan, aggregate_outcomes

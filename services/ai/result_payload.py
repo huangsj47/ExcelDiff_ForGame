@@ -16,12 +16,13 @@
 """
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List, Mapping, Tuple
 
 from services.ai.engine import EngineOutcome
 from services.ai.rules import anomaly_fingerprint
+from services.ai.subagent import WEEKLY_MODE
 from services.ai.usage import usage_from_outcome
-from services.ai.verdict import retracted_fingerprints, ruling_rows
+from services.ai.verdict import retracted_fingerprints, render_review_skipped, ruling_rows
 
 # 「额度用尽没轮到的」最多往结果里放几条。界面只展示前几条、其余归到「等 N 条」，
 # 所以多放没有用；而额度用尽那一轮模型可能一口气要几十个请求，整份列表会白白撑大
@@ -253,6 +254,41 @@ def risk_level_from_outcome(outcome: EngineOutcome, summary: dict) -> Tuple[str,
             "该等级仅按变更规模估算，**不是**模型评估结果"
         )
     return level, reasons
+
+
+def note_review_skipped(
+    result: dict, *, project_config: Mapping, payload: Mapping
+) -> dict:
+    """配置**要求**跑对账轮、而这次只分得出一个分析者 ⇒ 报告开篇补一行说明。
+
+    ## 判据（与 `subagent.plan_family` 同源，不许各写一套）
+
+    周版本 + 子代理开着 + `subagent_verify` 为真，三条缺一不可。子代理关掉时那个开关
+    本来就不生效（界面上也是这么写的），所以在那里沉默是对的；**要了却没跑**才要说话。
+
+    ## 为什么这一行必须写（2026-09-24，run 65 实测）
+
+    run 65：`subagent_enabled=1`、`subagent_verify=1`，而本次只有 1 个变更文件 ⇒
+    `plan_family` 判「分不出 2 片」返回 `None`、走单代理路径。于是既没有对账轮，报告里
+    也**一个字都没提**，而 `help.html` 写的是「对账轮没跑成时会如实标成降级」—— 界面那条
+    横幅只管面板，**报告才是被存档、被导出、被转发的那一份**。
+
+    「跑了但没跑成」由 `subagent.run_family` 自己写（它才知道成员账），两处判据互斥：
+    这里只在单代理路径上被调用。返回新字典，不改调用方手上那一份。
+    """
+    if not (
+        str(payload.get("mode") or "") == WEEKLY_MODE
+        and project_config.get("subagent_enabled")
+        and project_config.get("subagent_verify")
+    ):
+        return result
+    note = render_review_skipped(
+        "本次的改动只分得出一个分析者、没有分片 —— 它核对的正是各分片各自的结论"
+    )
+    return {
+        **result,
+        "report_markdown": note + "\n" + str(result.get("report_markdown") or ""),
+    }
 
 
 def result_payload(

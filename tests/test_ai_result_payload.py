@@ -22,7 +22,8 @@ import pytest
 
 from services.ai.engine import EngineOutcome
 from services.ai.protocol import AnalysisPayload, Anomaly, DimensionReview
-from services.ai.result_payload import failed_result, result_payload
+from services.ai.result_payload import failed_result, note_review_skipped, result_payload
+from services.ai.verdict import RULING_SUMMARY_TITLE
 
 
 def _anomaly() -> Anomaly:
@@ -293,3 +294,58 @@ def test_the_whole_payload_is_json_safe_and_has_no_machine_json():
     dumped = json.dumps(payload, ensure_ascii=False)
     assert "ai-verify-ruling" not in dumped
     assert "<!--" not in dumped, "载荷里出现了 HTML 注释（渲染器会把它显示出来）"
+
+
+# ==========================================================================
+# 复核「要了却没跑成」那行说明（单代理路径）
+# ==========================================================================
+
+
+def test_a_review_that_was_asked_for_but_could_not_run_is_said_at_the_top():
+    """配置要了复核、而这次只分得出一个分析者 ⇒ 报告开篇补一行。
+
+    真机 run 65：`subagent_verify=1`，而本次只有 1 个变更文件 ⇒ `plan_family` 返回 `None`
+    走单代理路径 ⇒ 报告里**一个字都没提**复核没跑，而 `help.html` 写的是「对账轮没跑成时
+    会如实标成降级」。界面那条横幅只管面板，报告才是被存档/导出/转发的那一份。
+    """
+    payload = result_payload(_outcome(), {"summary": {}}, suppressed=frozenset())
+
+    noted = note_review_skipped(
+        payload,
+        project_config={"subagent_enabled": True, "subagent_verify": True},
+        payload={"mode": "weekly"},
+    )
+
+    assert noted["report_markdown"].startswith(RULING_SUMMARY_TITLE)
+    assert "没有跑「找反证」复核" in noted["report_markdown"]
+    assert "只分得出一个分析者" in noted["report_markdown"]
+    assert "未经复核" in noted["report_markdown"], "要给出读法，不只是报一个状态"
+    assert noted["report_markdown"].endswith(payload["report_markdown"]), (
+        "说明只能加在最前面 —— 加在后面等于读者读完正文才看到"
+    )
+    assert payload["report_markdown"].startswith("# 风险评估"), (
+        "改了调用方手上那一份 —— 落库与下发的就不是同一个东西了"
+    )
+
+
+@pytest.mark.parametrize(
+    "config, run_payload, why",
+    [
+        ({"subagent_enabled": True, "subagent_verify": True}, {"mode": "commit"}, "不是周版本"),
+        (
+            {"subagent_enabled": False, "subagent_verify": True},
+            {"mode": "weekly"},
+            "子代理关着：那个开关本来就不生效",
+        ),
+        (
+            {"subagent_enabled": True, "subagent_verify": False},
+            {"mode": "weekly"},
+            "用户自己没开复核",
+        ),
+    ],
+)
+def test_nothing_is_added_when_the_review_was_not_asked_for(config, run_payload, why):
+    """**没要复核就别说话**（三种情形各自都要判）：那是用户自己的配置，报告不该多一句。"""
+    payload = result_payload(_outcome(), {"summary": {}}, suppressed=frozenset())
+
+    assert note_review_skipped(payload, project_config=config, payload=run_payload) == payload, why

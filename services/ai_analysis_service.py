@@ -207,6 +207,7 @@ from services.ai.provenance import current_provenance
 from services.ai.result_payload import (
     coverage_notice_text,
     failed_result,
+    note_review_skipped,
     result_payload,
 )
 from services.ai.rules import RuleThresholds
@@ -1529,6 +1530,13 @@ def _run_engine_and_persist(
         context_budget_note=budget_note,
         budget_plan=budget_plan_payload,
     )
+    if plan is None:
+        # 单代理路径：配置要了复核、而这次压根没跑成时，报告开篇补一行说明（判据在函数里）。
+        # 为什么非写不可见 `verdict.render_review_skipped` 的 docstring（真机 run 65：报告里
+        # 一个字都没提复核没跑）。子代理那条路在 `subagent.run_family` 里自己写，两处互斥。
+        result = note_review_skipped(
+            result, project_config=project_config, payload=payload
+        )
     baseline_account = payload.get("baseline") or {}
     if baseline_account.get("kind") == "snapshot":
         previous = _previous_run(target_type, target_key)

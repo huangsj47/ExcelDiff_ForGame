@@ -154,6 +154,7 @@ from services.ai.verdict import (
     parse_verdicts,
     reduce_findings,
     render_ruling,
+    render_review_skipped,
     render_ruling_summary,
 )
 from utils.logger import log_print
@@ -782,6 +783,9 @@ def run_family(
         dimensions=plan.synthesis.dimensions,
         # 本次配置的条数上限：合入对账轮新发现时不许把它顶穿（见 `aggregate_outcomes`）。
         anomaly_limit=int(thresholds.max_anomalies) if thresholds is not None else None,
+        # 配置**要了**复核吗 —— 要了而没跑成时，开篇要说清「下面的结论没经过复核」
+        # （见 `verdict.render_review_skipped`：真机 run 65 的报告一个字都没提）。
+        verify_requested=bool(plan.verify),
     )
     return FamilyResult(outcome=outcome, steps=tuple(steps), candidates=candidates)
 
@@ -1253,6 +1257,18 @@ def _verify_ran(steps: Sequence[MemberOutcome]) -> bool:
     )
 
 
+def _verify_skip_why(steps: Sequence[MemberOutcome]) -> str:
+    """对账轮没跑成的「为什么」——`render_review_skipped` 括号里那半句。
+
+    只分两种：**被预算早停跳过**（记了 `skipped_reason`）与**跑了但没跑成**。更细的原因
+    （谁拦的、拦在哪个额度上）在信息缺口那一节与 trace 里，这里只说读者判断「这份报告
+    差在哪一道」需要知道的那一层。
+    """
+    if any(step.plan.role == ROLE_VERIFY and step.skipped_reason for step in steps):
+        return "预算早停跳过了它"
+    return "它跑了，但没有跑成"
+
+
 def verify_did_independent_work(steps: Sequence[MemberOutcome]) -> bool:
     """对账轮**有没有自己取过新证据**（P0-01）。
 
@@ -1362,6 +1378,7 @@ def aggregate_outcomes(
     candidates: Sequence[Candidate] = (),
     dimensions: Sequence[str] = DIMENSION_IDS,
     anomaly_limit: int | None = None,
+    verify_requested: bool = False,
 ) -> EngineOutcome:
     """把一家子的账合成**一个** `EngineOutcome`（落库那一层只认一个）。
 
@@ -1413,7 +1430,16 @@ def aggregate_outcomes(
     #
     # 两节读的是**同一个** `reduction`：摘要与明细不可能一个说 2 条、一个列 1 条。
     review_ran = _verify_ran(steps)
-    ruling_summary = render_ruling_summary(reduction, review_ran=review_ran)
+    if review_ran:
+        ruling_summary = render_ruling_summary(reduction, review_ran=True)
+    elif verify_requested:
+        # **配置要了复核、而这一轮没跑成**（预算早停跳过了它 / 它跑了但失败）：开篇要说清
+        # 「下面的结论没经过复核」。不写这一行的后果见 `render_review_skipped` 的 docstring
+        # （真机 run 65：报告一个字都没提）。
+        ruling_summary = render_review_skipped(_verify_skip_why(steps))
+    else:
+        # 配置里压根没开复核：保持沉默。那是用户自己关的开关，报告不该为此多出一句。
+        ruling_summary = ""
     ruling_text = render_ruling(reduction, review_ran=review_ran)
     # 「未归类」也排在信息缺口之前：它对读者同样是**结论的一部分**（有几条发现不属于
     # 任何维度），而信息缺口永远收尾。

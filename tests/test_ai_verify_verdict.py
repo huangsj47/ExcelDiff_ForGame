@@ -683,6 +683,24 @@ class TestTheRulingSection:
         # 它落在**开篇**（正文之前）：明细那一节排在正文之后，读者读到它时已经读完正文了。
         assert "正文各章仍是模型原话" not in render_ruling(reduction, review_ran=True)
 
+    def test_a_review_that_was_asked_for_but_did_not_run_says_so(self):
+        """**配置要了复核、而它没跑成**时，开篇那一行（`render_review_skipped`）。
+
+        真机 run 65：配置 `subagent_verify=1`，而本次只有 1 个变更文件 ⇒ 只分得出一个
+        分析者 ⇒ 报告里一个字都没提复核没跑，而 `help.html` 写的是「对账轮没跑成时会
+        如实标成降级」。界面那条横幅只管面板，**报告是被存档、被导出、被转发的那一份**。
+        """
+        from services.ai.verdict import render_review_skipped
+
+        note = render_review_skipped("它跑了，但没有跑成")
+
+        assert note.startswith(RULING_SUMMARY_TITLE)
+        assert "没有跑「找反证」复核" in note
+        assert "它跑了，但没有跑成" in note, "括号里要说清为什么 —— 读者会问这一句"
+        assert "未经复核" in note, "要给出读法，不只是报一个状态"
+        # 一行说明，不许长成第二篇正文（与开篇那一节同一条纪律）。
+        assert len(_paragraphs(note)) == 2
+
 
 # ==========================================================================
 # 三、任务书：编号与结构化裁决
