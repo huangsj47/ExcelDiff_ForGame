@@ -1072,3 +1072,93 @@ def test_the_ruling_section_never_adds_a_top_level_heading(verdict):
     )
 
     assert not [line for line in section.split("\n") if line.startswith("# ")]
+
+
+# ---------------------------------------------------------------------------
+#  拆分之后的兼容面（2026-09-25）
+# ---------------------------------------------------------------------------
+CONSUMER_ROOTS = ("services", "routes", "tests", "scripts", "agent", "utils", "models", "bootstrap")
+
+
+def _names_asked_of_verdict() -> dict[str, str]:
+    """全仓**真正在从 `services.ai.verdict` 取用**的名字 → 第一个用到它的文件。
+
+    两种写法都认：`from services.ai.verdict import X`，以及
+    `import services.ai.verdict as v`（或 `from services.ai import verdict as v`）之后的 `v.X`。
+    用 AST 不数文本：注释与字符串里到处引用着这些名字（本仓库的注释就是这么写的）。
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    asked: dict[str, str] = {}
+    for base in CONSUMER_ROOTS:
+        for path in sorted((root / base).rglob("*.py")):
+            # `utf-8-sig`：生产侧有带 BOM 的文件，`ast.parse` 会把 BOM 当非法字符。
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+            except SyntaxError:  # pragma: no cover —— 仓库里不该有，有也是别的用例的事
+                continue
+            rel = path.relative_to(root).as_posix()
+            aliases: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "services.ai.verdict":
+                    for one in node.names:
+                        asked.setdefault(one.name, rel)
+                elif isinstance(node, ast.ImportFrom) and node.module == "services.ai":
+                    for one in node.names:
+                        if one.name == "verdict":
+                            aliases.add(one.asname or "verdict")
+                elif isinstance(node, ast.Import):
+                    for one in node.names:
+                        if one.name == "services.ai.verdict":
+                            aliases.add(one.asname or "verdict")
+                elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                    if node.value.id in aliases:
+                        asked.setdefault(node.attr, rel)
+    return asked
+
+
+def test_every_name_the_repo_asks_verdict_for_is_still_there():
+    """`verdict` 拆成了三层，**旧读法一个字都不用改** —— 顶部与底部各有一份回导撑着。
+
+    判据是**全仓扫真正在用的那些名字**，不是我手抄一份清单：手抄的清单挡不住「新加一个
+    调用点、回导忘了加」这种漏（本仓库栽过）—— 而漏掉一个的症状是只有恰好用它的那一处
+    ImportError，别处全绿。
+    """
+    from services.ai import verdict as verdict_module
+
+    asked = _names_asked_of_verdict()
+    assert len(asked) > 40, f"只扫到 {len(asked)} 个取用点，扫描本身是不是失效了？"
+    missing = {name: where for name, where in asked.items() if not hasattr(verdict_module, name)}
+    assert not missing, "拆分后 `services.ai.verdict` 取不到这些名字了：" + "；".join(
+        f"{name}（{where}）" for name, where in sorted(missing.items())
+    )
+
+
+def test_the_moved_things_are_the_same_objects_not_second_copies():
+    """搬走的东西在 `verdict` 上必须是**同一个对象**，不是又抄了一份定义。
+
+    这条不是假想的：拆的时候我把数据类那一段**切重了**，`verdict.py` 里还留着一份
+    `class FindingRow` —— 于是 `verdict.FindingRow is verdict_types.FindingRow` 是 False，
+    两层按各自那份做判断（`isinstance`、相等性、`dataclass` 的 `__eq__` 全歪）。
+    **当时全量测试是绿的**：谁都没拿两份东西做过比较。所以这里直接比身份。
+    """
+    from services.ai import verdict as verdict_module
+    from services.ai import verdict_render, verdict_types
+
+    for name in ("Finding", "VerifyVerdict", "FindingRow", "Reduction"):
+        assert getattr(verdict_module, name) is getattr(verdict_types, name), (
+            f"{name} 在 verdict 与 verdict_types 里不是同一个对象 —— 有一层自己又定义了一份"
+        )
+    for name in (
+        "render_review_skipped",
+        "render_ruling",
+        "render_ruling_summary",
+        "retracted_fingerprints",
+        "ruling_rows",
+        "strip_ruling_block",
+    ):
+        assert getattr(verdict_module, name) is getattr(verdict_render, name), (
+            f"{name} 在 verdict 与 verdict_render 里不是同一个对象"
+        )

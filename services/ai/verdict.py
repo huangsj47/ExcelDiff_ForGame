@@ -112,24 +112,26 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Iterable, Sequence
 
-from services.ai.budget import truncate_text
 from services.ai.claims import (
     # 下面这几个名字在本模块**重新导出**（既有的导入点与测试按 `verdict` 的名字用它们：
     # `subagent` 取 `INDEPENDENT_REQUEST_TYPES`，测试取状态常量与中文名表）。
+    #
+    # 2026-09-25 拆分后只剩下这些：原先还有几个是**为本模块自己的逻辑**导入的
+    # （`claim_lines` / `ClaimReview` / `parse_claim_verdicts` …），那些随逻辑搬去了
+    # `verdict_types` / `verdict_render`。从本模块取用它们从来不是契约 —— 需要它们就
+    # 去那一层拿。判据不是「谁还记得」，是**全仓扫 `from services.ai.verdict import …`**
+    # （`tests/test_ai_verify_verdict.py` 里那条守卫每跑一次就重扫一遍）。
     CLAIM_REFUTED,  # noqa: F401
     CLAIM_STATUS_LABELS,  # noqa: F401
     CLAIM_STATUSES,  # noqa: F401
-    CLAIM_UNREADABLE,
-    CLAIM_UNVERIFIED,
-    CLAIM_VERIFIED,
+    CLAIM_UNREADABLE,  # noqa: F401
+    CLAIM_UNVERIFIED,  # noqa: F401
+    CLAIM_VERIFIED,  # noqa: F401
     INDEPENDENT_REQUEST_TYPES,  # noqa: F401
-    VERIFY_BASIS_INDEPENDENT,
+    VERIFY_BASIS_INDEPENDENT,  # noqa: F401
     VERIFY_BASIS_LABELS,  # noqa: F401
-    VERIFY_BASIS_NONE,
-    VERIFY_BASIS_REPLAY,
-    ClaimReview,
-    ClaimVerdict,
-    claim_lines,
+    VERIFY_BASIS_REPLAY,  # noqa: F401
+    # 下面这三个是**本层逻辑自己要用**的（裁决解析与渲染的两个入口），不是回导。
     claim_outcome,
     claims_instructions,
     parse_claim_verdicts,
@@ -149,401 +151,46 @@ from services.ai.rules import (
 )
 
 # --------------------------------------------------------------------------
-# 裁决码与文案
+# 取值域、文案与数据类搬去了 `verdict_types`（本文件贴着 2000 行 ERROR 闸门）。
+# **逐个回导，不用 `import *`**：读侧与测试按 `verdict.X` 取用这些名字（`family_ledger`
+# 取裁决码与节名、`subagent` 取 `VERIFY_BASIS_*` 的邻居、多个测试取中文名表），
+# 回导让那些说法一个字都不用改。**新增常量要加进这一份**，否则老读法 ImportError。
 # --------------------------------------------------------------------------
-
-VERDICT_CONFIRMED = "confirmed"
-VERDICT_DOWNGRADED = "downgraded"
-VERDICT_RETRACTED = "retracted"
-VERDICT_NEEDS_MORE_EVIDENCE = "needs_more_evidence"
-VERDICTS = (
+from services.ai.verdict_types import (  # noqa: F401 —— 搬家的兼容出口，本文件未必每个都用
+    _BODY_LABEL_RE,
+    _BODY_WINDOW_CHARS,
+    _BODY_WINDOW_LINES,
+    _FILE_LABEL_KINDS,
+    _MIN_MATCH_CHARS,
+    _REASON_MAX_CHARS,
+    _REFS_MAX_ITEMS,
+    _SCOPE_MAX_CHARS,
+    _VERDICT_ALIASES,
+    CONFIDENCE_CEILING_WITH_GAP,
+    KIND_VERIFY,
+    NEW_FINDING_PREFIX,
+    QUOTA_EXHAUSTED_CODE,
+    RULING_BLOCK_MARKER,
+    RULING_SUMMARY_NAME,
+    RULING_SUMMARY_TITLE,
+    RULING_TITLE,
+    SEVERITY_STEP_DOWN,
+    SOURCE_SYNTHESIS,
+    SOURCE_VERIFY,
+    UNREVIEWED,
+    UNREVIEWED_LABEL,
     VERDICT_CONFIRMED,
     VERDICT_DOWNGRADED,
-    VERDICT_RETRACTED,
+    VERDICT_LABELS,
     VERDICT_NEEDS_MORE_EVIDENCE,
+    VERDICT_RETRACTED,
+    VERDICTS,
+    Finding,
+    FindingRow,
+    Reduction,
+    VerifyVerdict,
+    severity_step_down,
 )
-VERDICT_LABELS = {
-    VERDICT_CONFIRMED: "反证不成立（维持原结论）",
-    VERDICT_DOWNGRADED: "反证部分成立（降级）",
-    VERDICT_RETRACTED: "反证成立（撤销）",
-    VERDICT_NEEDS_MORE_EVIDENCE: "证据不足（待人工核验）",
-}
-# 模型偶尔会把裁决码写成中文/动词形态（提示词里给的是英文码）。**只认明确的那几个**：
-# 多认一个模糊说法就等于多一个「猜」的分支，而猜错的代价是结论被误撤销。
-_VERDICT_ALIASES = {
-    "confirm": VERDICT_CONFIRMED,
-    "确认": VERDICT_CONFIRMED,
-    "成立": VERDICT_CONFIRMED,
-    "downgrade": VERDICT_DOWNGRADED,
-    "降级": VERDICT_DOWNGRADED,
-    "retract": VERDICT_RETRACTED,
-    "撤销": VERDICT_RETRACTED,
-    "撤掉": VERDICT_RETRACTED,
-    "more_evidence": VERDICT_NEEDS_MORE_EVIDENCE,
-    "needs_evidence": VERDICT_NEEDS_MORE_EVIDENCE,
-    "证据不足": VERDICT_NEEDS_MORE_EVIDENCE,
-    "待人工核验": VERDICT_NEEDS_MORE_EVIDENCE,
-}
-
-# 没被复核覆盖到的条目（对账轮只核对最严重的几条）与它的中文说法。
-UNREVIEWED = ""
-UNREVIEWED_LABEL = "未复核"
-
-# --------------------------------------------------------------------------
-# 逐条断言的裁决（P0-01）
-# --------------------------------------------------------------------------
-#
-# 判据与措辞都在 `services/ai/claims.py`：那里是纯函数，三个渲染点（裁决节 / 异常面板 /
-# 导出文档）读同一份。本模块只负责把它算出来的结果**落到行上**（`_apply_claims`）与渲染。
-#
-# 一条结论常常是**复合断言**（「取档失败路径改为断言中断进程」里至少含两个可分别证实的
-# 事实），而裁决原先只能落在整条上。实测 run 58 的 F3 因此出现了最坏的那种组合：复核轮在
-# 理由里**自己写着**「`assert(false)` 是中断整个进程还是仅中断本次登录请求，未能核实」，
-# 整条却仍是 `critical` + `confirmed`。根因不是复核不诚实，是**粒度**。
-# 现在每条结论带 `claims[]`（`protocol.Claim`），复核轮逐条回答，平台逐条记账。
-
-# 一条发现的来源：主结论 还是 对账轮新发现。
-SOURCE_SYNTHESIS = "synthesis"
-SOURCE_VERIFY = "verify"
-
-# 对账轮新发现的编号前缀。**必须与 `family_ledger.VERIFY_LABEL` 一致**（对账轮在面板上
-# 的标签就是它，有测试钉着这两个值相等）：报告里两个地方用两个叫法，读的人会以为是两件事。
-NEW_FINDING_PREFIX = "V1"
-
-# 平台记账用的 `DroppedItem.kind`。与 `anomaly` / `anomaly_cap` / `subagent` / `unclassified`
-# 并列：**这些条目的去向是「被复核裁掉或被平台校验拒收」**，与「模型没报」不是一回事。
-KIND_VERIFY = "verify"
-
-# 报告里那一节的标题，以及**历史数据**里那行机器可读块的标记（见 `strip_ruling_block`：
-# 新运行不再写它，标记只用来把老行的残留认出来）。
-# 2026-09-23：节名从「复核裁决（平台）」改为「复核标注（平台）」—— 正文主体回归模型写的
-# 整体汇总报告（AI-P1-01 的呈现层反转），这一节降为跟在草稿后的标注（`subagent.aggregate_outcomes`）。
-RULING_TITLE = "## 复核标注（平台）"
-# 报告**开篇**那一节的标题（2026-09-24，run 63）。它只放三句话：核过几条、有几条没核、
-# 被核的那几条各自什么下场；逐条明细仍在 `RULING_TITLE` 那一节，**排在正文之后**。
-#
-# 为什么要分开（run 57 的修法是对的，但做过头了）：run 57 的病是「正文写着 20 条结论、
-# 读到尾部才知道只裁了 3 条」，所以把这一节整个前置了。run 63 实测的代价：前置的是
-# **整节明细**（21 行，含逐条断言子列表），一份 141 行的报告要滚过 15% 的平台记账才读
-# 到「这次改了什么」。第一眼要看见的是**那几个数**，不是逐条的对账记录。
-RULING_SUMMARY_NAME = "复核摘要（平台）"
-RULING_SUMMARY_TITLE = "## " + RULING_SUMMARY_NAME
-RULING_BLOCK_MARKER = "ai-verify-ruling"
-
-# 报告里每条理由/依据占的字符上限。裁决是模型写的，长度不受控 —— 一段几千字的「理由」
-# 会把报告正文挤掉，而它要说的其实一句话就够。
-_REASON_MAX_CHARS = 400
-_REFS_MAX_ITEMS = 5
-# 「查过什么」那一栏的上限。它在报告里是**一行**里的一个分句，写成长段落会把这一节
-# 顶成散文 —— 而这一节的用途是让人一眼扫出「哪几条还没被证实」。
-_SCOPE_MAX_CHARS = 240
-
-# 「证据不足」时等级降一档的阶梯（口径 ①）。
-#
-# **为什么必须动等级**：实测 run 15 的 `F3` 裁决逐字写着「原 critical / very_high →
-# 证据不足（待人工核验）」，而落库那行的 `severity` / `original_severity` 都还是 `critical`
-# —— 清单里于是同时存在「critical」与「证据不足」，自相矛盾；而且这条会作为下一轮的基线
-# （「上一次为止仍然成立的问题全集」）继续传下去。
-#
-# 阶梯比平台的严重度枚举**宽一档**：`skill_contract.SEVERITIES` 只有 `critical` / `high`，
-# 所以 `high → medium` 是**平台赋值**的等级（模型报不出它，它只在「证据不足」这个处置上
-# 出现）。`low` 是阶梯底，保持不动 —— 再降就成了「没有等级」。
-SEVERITY_STEP_DOWN = {
-    "critical": "high",
-    "high": "medium",
-    "medium": "low",
-    "low": "low",
-}
-
-# 证据有已知缺口（口径 ③④）时置信度的上限。**不许维持 `very_high`**。
-CONFIDENCE_CEILING_WITH_GAP = "high"
-
-# 正文里模型自己编的编号（口径 ②）：`R1`…`R13`。
-#
-# 三条边界都是必需的：前面不能是字母/数字/下划线（`RF1`、`SV1` 不是它），后面不能紧跟数字
-# （`R13` 不许被读成 `R1`），长度最多 3 位（正文编号不可能上千）。
-_BODY_LABEL_RE = re.compile(r"(?<![A-Za-z0-9_])R(\d{1,3})(?![0-9])")
-# 一个正文编号的上下文窗口 = 它所在的那一行 + 紧跟的一行（列表项常把「位置」写在下
-# 一行），再按字符数封顶。**不做「整段」或「整篇」**：窗口一大，每条结论都能在里面找到
-# 自己的文件路径，映射就从「判据」退化成「猜」。
-_BODY_WINDOW_CHARS = 400
-_BODY_WINDOW_LINES = 2
-
-# 「索取额度用尽」这个降级码的取值。**必须与 `engine.DEGRADE_REQUESTS` 逐字一致**
-# （有测试钉着；`subagent` 侧用的是那个常量，这里是读 `outcome.degradation` 时的比对值）。
-# 不 import 它：本模块是纯函数层，engine 是执行层，反向依赖会把执行栈拖进来。
-QUOTA_EXHAUSTED_CODE = "requests_exhausted"
-
-# 依据的形状校验（口径 ③）搬到了 `services/ai/ref_shapes.py`：它的第二个读者是
-# `claims.claim_review_of`（一条原子断言的依据能不能核），两处必须用同一份判据。
-# `is_locatable_ref` 在这里重新导出 —— 既有导入点与测试都按本模块的名字用它。
-
-# 依据/缺口两份文本比对时的**最短可比对长度**。低于它的词（`ID`、`a.lua`）在任何一份证据
-# 里都出现得太多，拿它当「这条结论引用了那个文件」的判据必然误报 —— 宁可不匹配。
-_MIN_MATCH_CHARS = 4
-
-# 被截断的文件路径从**交付条目的标签**里读（`context_tools.describe_request` 的形态：
-# `file_diff <commit12> <path>`）。只认这两种类型：`read_reference` 的标签是参考文档名、
-# `commit_detail` 只有一个提交号，它们都不是仓库里的文件路径。
-_FILE_LABEL_KINDS = ("file_diff", "file_content")
-
-
-def severity_step_down(severity: str) -> str:
-    """等级降一档（`critical` → `high` → `medium` → `low`）。
-
-    **不认识的等级原样返回**：凭空编一个更低的等级，比「没降」更糟 —— 后者在报告里看得
-    出来（写着证据不足、等级却没动），前者是一条查不出出处的假事实。
-    """
-    text = str(severity or "").strip().lower()
-    return SEVERITY_STEP_DOWN.get(text, text)
-
-
-# --------------------------------------------------------------------------
-# 数据
-# --------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Finding:
-    """进对账轮任务书的一条待核对结论：**平台发的编号**，模型按它回答。"""
-
-    finding_id: str
-    position: int
-    anomaly: Anomaly
-
-
-@dataclass(frozen=True)
-class VerifyVerdict:
-    """对账轮给出的一条结构化裁决。"""
-
-    finding_id: str
-    verdict: str
-    final_severity: str = ""
-    reason: str = ""
-    evidence_refs: tuple[str, ...] = ()
-    #: 这条结论的**逐条断言**裁决（`claims[]`）。空 = 复核轮没逐条回答，那时按
-    #: 「一条都没证实」处理（见 `_claim_reviews_of`）。
-    claims: tuple[ClaimVerdict, ...] = ()
-
-
-@dataclass(frozen=True)
-class FindingRow:
-    """`final_findings` 里的一行：原结论 + 裁决 + 裁决之后真正生效的那一条。"""
-
-    finding_id: str
-    # 裁决**之后**的结论：`severity` / `confidence` 就是落库与界面要用的值。
-    anomaly: Anomaly
-    # 裁决**之前**的原样（审计轨迹要能回答「原来报的是什么等级」）。
-    origin: Anomaly
-    source: str = SOURCE_SYNTHESIS
-    verdict: str = UNREVIEWED
-    reason: str = ""
-    evidence_refs: tuple[str, ...] = ()
-    # 平台自己写的一句（裁决不完整、证据有缺口等原因）。与 `reason`（模型写的理由）分开：
-    # 两者的作者不同，读的人需要分得清哪一句是模型说的。**多个原因用「；」连起来**放在
-    # 这一个字段里 —— 报告里它就是一行「平台说明：…」，分成几个字段只会让读者自己拼。
-    note: str = ""
-    # 正文里模型自己编的那个编号（`R3`）。空串 = 正文里找不到能对上的那一条，报告里如实写
-    # 「正文未编号」（见 `assign_body_labels`：对不上时宁可不写）。
-    body_label: str = ""
-    # `evidence_refs` 里**不成形**的那些（`is_locatable_ref` 不认）。原样留着（模型说了什么
-    # 不许篡改），但在报告里标成「不可定位」——它们不构成「可定位快照证据」。
-    unlocatable_refs: tuple[str, ...] = ()
-    # 这条的置信度是不是被平台**按证据缺口**压下来的（口径 ③④）。报告据此单列一节说明
-    # 理由：降置信度而不说为什么，与缺陷本身是同一类问题。
-    evidence_capped: bool = False
-    # 这条结论**来源于哪几条分片候选**（`protocol.Anomaly.source_candidate_ids` 原样带来）。
-    #
-    # 它在这里的作用是让**候选对账**（`family_ledger.reconcile_candidates`）能按编号问
-    # 「这条候选的去向是哪条结论」——在这之前那一层是靠标题/文件/证据文本反推的，而反推
-    # 产生的假缺口正是 AI-P0-06 要修的那一类。撤销与降级都保持这个字段（`origin` 的那一份
-    # 一路 `replace` 过来），所以「候选 → 结论」的对应关系不会因为裁决而断掉。
-    source_candidate_ids: tuple[str, ...] = ()
-    #: 这条结论的**原子断言**各自的裁决结果（P0-01）。空 = 这条结论没带断言（旧形态 /
-    #: 模型没按协议写），那时它**不得算已核实**（见 `_apply_claims`）。
-    claim_reviews: tuple[ClaimReview, ...] = ()
-    #: 这一轮复核**是怎么**得出结论的（独立取证 / 原证据复读 / 未取证）。由平台按对账轮
-    #: **实际执行过**的取数类型判定 —— 不采信模型自述（run 58 那三条的措辞是「反证不成立」，
-    #: 而它 6 次索取全是按地址取回已有原文，一次新检索都没有）。
-    verify_basis: str = VERIFY_BASIS_NONE
-
-    @property
-    def active(self) -> bool:
-        return self.verdict != VERDICT_RETRACTED
-
-    @property
-    def verdict_label(self) -> str:
-        return VERDICT_LABELS.get(self.verdict, UNREVIEWED_LABEL)
-
-    @property
-    def verify_basis_label(self) -> str:
-        return VERIFY_BASIS_LABELS.get(
-            self.verify_basis, VERIFY_BASIS_LABELS[VERIFY_BASIS_NONE]
-        )
-
-    @property
-    def pending_claims(self) -> tuple[ClaimReview, ...]:
-        """还没有被证实的那些断言（待核查 / 读不到）。**渲染与判定都读它。**"""
-        return tuple(
-            review
-            for review in self.claim_reviews
-            if review.status in (CLAIM_UNVERIFIED, CLAIM_UNREADABLE)
-        )
-
-    @property
-    def refuted_claims(self) -> tuple[ClaimReview, ...]:
-        return tuple(r for r in self.claim_reviews if r.status == CLAIM_REFUTED)
-
-    @property
-    def verified_claims(self) -> tuple[ClaimReview, ...]:
-        return tuple(r for r in self.claim_reviews if r.status == CLAIM_VERIFIED)
-
-    @property
-    def fingerprint(self) -> str:
-        """这条结论的身份指纹。**按裁决之后的那一份算**（`self.anomaly`，不是 `origin`）。
-
-        P0 的标题改写（「只拿已证实的断言当标题」，`claims.compose_title`）会改变指纹 ——
-        `anomaly_fingerprint` 收的是 `commit + 文件 + 标题词集`。而**载荷、落库、下一轮基线
-        都按裁决后的那一条算指纹**（`result_payload._anomaly_entry` 写的就是它），所以这一
-        格必须与它们同源：按 `origin` 算等于给同一行留了两个身份，两边对不上时落空的**恰好
-        只有被裁决过的那几条** —— 真机 run 60 实测：`final_findings` 少了 3 条（16 → 13）、
-        逐条断言与取证方式一个都没附上、撤销过滤对它们失效，而正文里写着已裁决。
-        """
-        return anomaly_fingerprint(self.anomaly)
-
-    @property
-    def level_changed(self) -> bool:
-        return (
-            self.anomaly.severity != self.origin.severity
-            or self.anomaly.confidence != self.origin.confidence
-        )
-
-    def as_dict(self) -> dict:
-        """机器可读形态（进结论载荷的 `final_findings` / `retracted_findings`）。"""
-        return {
-            "finding_id": self.finding_id,
-            "source": self.source,
-            "verdict": self.verdict,
-            "verdict_label": self.verdict_label,
-            "active": self.active,
-            "reason": self.reason,
-            "evidence_refs": list(self.evidence_refs),
-            "unlocatable_refs": list(self.unlocatable_refs),
-            "evidence_capped": bool(self.evidence_capped),
-            "note": self.note,
-            "body_label": self.body_label,
-            "fingerprint": self.fingerprint,
-            # `title` 是**裁决之后**那一份：有未证实断言时它由平台按已证实的断言重排
-            # （`_compose_title`），原来的标题原样留在 `original_title` 里。
-            # 「标题里不许保留正文承认未核实的肯定断言」这条要求落在这一格上。
-            "title": self.anomaly.title,
-            "original_title": self.origin.title,
-            "category": self.origin.category,
-            "file_path": self.origin.file_path,
-            "commit_ref": self.origin.commit,
-            "severity": self.anomaly.severity,
-            "confidence": self.anomaly.confidence,
-            "original_severity": self.origin.severity,
-            "original_confidence": self.origin.confidence,
-            # 候选血缘：读侧据此回看「这条结论是哪个分片报的」。
-            "source_candidate_ids": list(self.source_candidate_ids),
-            # 断言与取证方式：读侧据此回答「这条结论凭什么算核实过了」。
-            "claims": [review.as_dict() for review in self.claim_reviews],
-            "pending_claims": len(self.pending_claims),
-            "verify_basis": self.verify_basis,
-            "verify_basis_label": self.verify_basis_label,
-        }
-
-
-@dataclass(frozen=True)
-class Reduction:
-    """一次复核的**全部**结果：活动的 `final_findings` + 审计轨迹 + 平台记账。"""
-
-    rows: tuple[FindingRow, ...] = ()
-    # 被拒的条目（缺证据的新发现、与已有结论重复的新发现、超出条数上限的、无法对应的裁决）。
-    # 它们是**记账**，不是「没发生」——报告里逐条列出来。
-    rejected: tuple[DroppedItem, ...] = ()
-    # 收到几条结构化裁决。0 表示这一轮**没有可逐条应用的东西**（报告里要明说）。
-    verdicts_seen: int = 0
-    # 有**几条结论的置信度是被平台按证据缺口压下来的**（口径 ③④）。它必须计进 `changed`：
-    # 一次「复核没给裁决、但平台按截断/额度缺口压了两条」的运行同样要渲染那一节 ——
-    # 降了置信度却不解释，与这条缺陷本身是同一类问题。
-    evidence_capped: int = 0
-
-    @property
-    def active(self) -> tuple[FindingRow, ...]:
-        return tuple(row for row in self.rows if row.active)
-
-    @property
-    def retracted(self) -> tuple[FindingRow, ...]:
-        return tuple(row for row in self.rows if not row.active)
-
-    @property
-    def unreviewed(self) -> tuple[FindingRow, ...]:
-        return tuple(row for row in self.rows if row.verdict == UNREVIEWED)
-
-    @property
-    def new_findings(self) -> tuple[FindingRow, ...]:
-        """对账轮新发现、且已经合入清单的那几条。"""
-        return tuple(row for row in self.rows if row.source == SOURCE_VERIFY)
-
-    @property
-    def changed(self) -> bool:
-        """裁决或新发现有没有对结论产生任何影响。
-
-        决定要不要往报告里加那一节：**没有影响时一个字都不加**（默认行为逐字不变），
-        有影响时那一节就是「报告为什么与模型正文不一致」的出处。
-
-        `evidence_capped` 也算影响：把置信度从 `very_high` 压到 `high` 是落到结论上的
-        改动，报告必须解释它（否则读侧只看到「库里是 high、正文写着 very_high」）。
-        """
-        return bool(
-            self.verdicts_seen
-            or self.new_findings
-            or self.rejected
-            or self.evidence_capped
-        )
-
-    def active_anomalies(self) -> tuple[Anomaly, ...]:
-        """落库与界面要用的那一份（`outcome.anomalies` 就取它）。"""
-        return tuple(row.anomaly for row in self.active)
-
-    @property
-    def claimed_candidate_ids(self) -> frozenset[str]:
-        """这份结果里**出现过的候选编号**（`FindingRow.source_candidate_ids` 的并集）。
-
-        给候选对账用（`family_ledger.reconcile_candidates`）：汇总把哪些编号交回来了。
-        **含被撤销的那几行** —— 撤销本身也是一个去向（「已撤销」），把它排除会让那条候选
-        又变成「找不到去向」，而那正是 AI-P0-06 要修的那一类假缺口。
-        """
-        return frozenset(
-            candidate_id for row in self.rows for candidate_id in row.source_candidate_ids
-        )
-
-    @property
-    def landed_candidate_ids(self) -> frozenset[str]:
-        """**进了最终结论清单**（活动行）的那些候选编号。
-
-        与 `claimed_candidate_ids` 的差别是「汇总写过它」还是「它真的还在清单里」：
-        对账时前者解释「这条候选有去向」，后者才叫「已采纳」。
-        """
-        return frozenset(
-            candidate_id for row in self.active for candidate_id in row.source_candidate_ids
-        )
-
-    def by_fingerprint(self) -> dict[str, FindingRow]:
-        return {row.fingerprint: row for row in self.rows}
-
-    def as_dict(self) -> dict:
-        return {
-            "verdicts_seen": int(self.verdicts_seen),
-            "evidence_capped": int(self.evidence_capped),
-            "rows": [row.as_dict() for row in self.rows],
-            "rejected": [
-                {"reason": item.reason, "detail": item.detail} for item in self.rejected
-            ],
-        }
-
 
 # --------------------------------------------------------------------------
 # 编号
@@ -1444,498 +1091,6 @@ def _apply_limit(
 
 
 # --------------------------------------------------------------------------
-# 渲染
-# --------------------------------------------------------------------------
-
-# 对账轮跑了、但一条可逐条应用的裁决都没给（它可能只报了新发现、也可能把裁决写成了正文
-# 里的一段话）。2026-09-23 起正文主体是模型写的汇总报告，这一节只做一行说明 —— 不能再让
-# 替身文案把整份草稿顶出正文（AI-P1-01 时期的旧形态，用户实测后明确不要）。
-# 2026-09-24：它是**开篇那一节**（`RULING_SUMMARY_TITLE`），所以说的是「下面的汇总」。
-_NO_CHANGE_SUMMARY = (
-    RULING_SUMMARY_TITLE
-    + "\n\n"
-    + "本次对账轮**没有给出可逐条应用的裁决**（按任务书要求，裁决要在 `report_markdown` "
-    "里单独给一个 json 代码块），下面的汇总按原样采信，读的时候各条按未复核看；"
-    "对账轮原文存档在本次运行的结论载荷里（`verify_report_markdown`）。\n"
-)
-
-
-def render_review_skipped(why: str) -> str:
-    """配置**要求**跑对账轮、而这一轮没跑成时，开篇那一行说明（`why` = 括号里那半句）。
-
-    run 65 实测：配置 `subagent_verify=1`，而本次只有 1 个变更文件 ⇒ `plan_family` 判
-    「分不出 2 片」返回 `None`、走单代理路径 —— 报告里**一个字都没提**复核没跑，而
-    `help.html` 写的是「对账轮没跑成时会如实标成降级」。界面那条横幅只管面板，**报告才是
-    被存档、被导出、被转发的那一份**。配置里压根没开复核时，调用方不许调这里。
-    """
-    return (
-        RULING_SUMMARY_TITLE
-        + "\n\n"
-        + f"本次**没有跑「找反证」复核**（{why}）。下面正文里的结论都是模型一遍写出来的，"
-        "等级与置信度是它自己填的 —— 读的时候按**未经复核的初稿**看。\n"
-    )
-
-
-def _fate_counts(reduction: Reduction) -> list[str]:
-    """被复核的条目各是什么下场（`render_ruling_summary` 那一段用它）。
-
-    **与逐条明细同一份数据**（`Reduction` 的同一组属性）：摘要说「转人工核验 2 条」而明细只
-    列出 1 条，是这一节最不能出的错 —— 两次各算一遍迟早会分叉。`维持原结论` 那一档拆出
-    「只是重看了已有依据」的条数（P0-01 的两种「没找到反证」），因为它的可信度不一样。
-    """
-    confirmed = [row for row in reduction.rows if row.verdict == VERDICT_CONFIRMED]
-    replayed = [
-        row for row in confirmed if row.verify_basis != VERIFY_BASIS_INDEPENDENT
-    ]
-    groups = (
-        ("撤销", reduction.retracted),
-        (
-            "降级",
-            tuple(row for row in reduction.rows if row.verdict == VERDICT_DOWNGRADED),
-        ),
-        (
-            "转人工核验",
-            tuple(
-                row
-                for row in reduction.rows
-                if row.verdict == VERDICT_NEEDS_MORE_EVIDENCE
-            ),
-        ),
-        ("维持原结论", tuple(confirmed)),
-        ("复核新发现（已合入清单）", reduction.new_findings),
-    )
-    parts = []
-    for label, rows in groups:
-        if not rows:
-            continue
-        extra = (
-            f"（其中 {len(replayed)} 条只是重看了已有依据、未经独立反证）"
-            if label == "维持原结论" and replayed
-            else ""
-        )
-        parts.append(f"**{label} {len(rows)} 条**{extra}")
-    return parts
-
-
-def render_ruling_summary(reduction: Reduction, *, review_ran: bool) -> str:
-    """**开篇**那一节：核过几条、有几条没核、被核的那几条各自什么下场。
-
-    ## 为什么在前（2026-09-24，run 57）
-
-    原先它跟在正文后面，读者先读到的是**未经复核的断言**，读到尾部才知道「复核只覆盖
-    3 条、其余待人工核验」—— 而正文里那几条高严重度陈述与尾部的状态说明是矛盾的。
-    放在前面 + 明写覆盖数，这条矛盾在第一眼就能看见（模型原文一个字都不改）。
-
-    ## 为什么拆成两节（2026-09-24，run 63）
-
-    run 57 那一修把**整节明细**前置了：run 63 的报告开篇是 21 行平台记账，正文被推到第
-    23 行 —— 要前置的是**那几个数**，不是对账记录；逐条明细归 `render_ruling`，排在正文
-    之后。这一节**不许膨胀**（有测试钉着段数）：正文主体是模型写的报告，这里只报数。
-    """
-    if not review_ran:
-        return ""
-    if not reduction.changed:
-        # 零裁决那一形态：整节就是这一行说明，没有明细可拆。
-        return _NO_CHANGE_SUMMARY
-
-    total_rows = len(reduction.rows)
-    reviewed = total_rows - len(reduction.unreviewed)
-    parts = _fate_counts(reduction)
-    fates = (
-        "被复核的这几条：" + "、".join(parts) + "。"
-        if parts
-        else "本次复核**没有改变任何一条结论**的去留或等级。"
-    )
-    lines = [
-        RULING_SUMMARY_TITLE,
-        "",
-        # **覆盖数写在最前面**：它排在报告正文之前，读者第一眼要知道的是「下面那些结论里
-        # 有多少条被核过」——run 57 的病正是正文写着 20 条结论、尾部才说「待人工核验」，
-        # 而读者先看到、也更容易相信的是正文。
-        f"本次复核**只覆盖 {reviewed} 条**（主结论共 {total_rows} 条），"
-        f"**其余 {total_rows - reviewed} 条未经复核** —— 它们在下面的正文里按模型原话"
-        "保留，等级与置信度都还是模型自己填的。",
-        "",
-        fates + "逐条的下落、理由与断言状态写在正文之后的「复核标注（平台）」一节；"
-        # **这一句是读法约定，不能省**（2026-09-24，run 64 实测）：平台只改落库的结论清单
-        # 与这两节，正文一个字不动 —— 于是被撤销的那条在「风险评估」里仍写着「缓解：把静默
-        # 跳过改回至少一次告警」，而它恰恰是复核撤掉的那条。不在这里说清「正文没按复核改写」，
-        # 读者会照着一份已被否证的待办去改代码，而唯一能对上的线索在 4000 字之后。
-        "正文各章仍是模型原话、**没有按复核结果改写** —— 被撤销或降级的条目在正文里"
-        "仍按原样写着，以「复核标注（平台）」为准。",
-        "",
-    ]
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
-    """**逐条明细**：每条被复核的结论原等级是什么、裁决成什么、为什么、断言逐条什么状态。
-
-    从 `final_findings` 渲染，**不是模型写的正文**。它排在**正文之后**（2026-09-24，
-    run 63）：开篇只留 `render_ruling_summary` 那几个数，明细按需查。两节读的是同一个
-    `Reduction`，不存在「摘要说 2 条、明细只列 1 条」的分叉。
-
-    `review_ran` 为假、或这一轮什么都没改变时返回空串（零裁决那一形态整节都在摘要里，
-    见 `_NO_CHANGE_SUMMARY`）。
-    """
-    if not review_ran:
-        return ""
-    if not reduction.changed:
-        return ""
-
-    lines: list[str] = [
-        RULING_TITLE,
-        "",
-        "对账轮（找反证）的裁决已经应用到落库的异常清单与最终结论上（保留 / 降级 / "
-        "撤销 / 转人工核验）；这一节**只标注有变化的条目**，未点名的按原样采信。"
-        f"覆盖几条、各条什么下场，见开篇的「{RULING_SUMMARY_NAME}」。",
-        "",
-    ]
-    if not reduction.verdicts_seen:
-        # 有影响但**一条裁决都没读到**：可能是它只报了新发现、也可能是它把裁决写成了
-        # 正文里的一段话（那不是裁决）。这两种情况下「结论为什么没动」都得说明白，
-        # 否则读的人会以为复核不生效是平台坏了。
-        # 措辞是「**去留**按原样」而不是「按原样采信」：证据缺口那一步（口径 ③④）与
-        # 复核有没有给裁决无关，它照样会压置信度 —— 说「一律按原样」就把平台自己刚做的
-        # 事说成了没发生。
-        notice = (
-            "**注意**：本次复核没有回结构化裁决（正文里的话不构成裁决，平台只认 json 块），"
-            "正文里的结论**去留**按原样采信，只有它新报出来的条目被合入了清单"
-        )
-        if reduction.evidence_capped:
-            notice += (
-                f"；平台另按本次运行的证据缺口压了 {reduction.evidence_capped} 条的置信度"
-                "（见「证据缺口」一节），那不是复核的裁决，是平台自己的动作"
-            )
-        lines.append(notice + "。")
-        lines.append("")
-
-    retracted = reduction.retracted
-    if retracted:
-        lines.append(f"### 已撤销 {len(retracted)} 条（移出当前结论清单）")
-        lines.append("")
-        lines.append(
-            "这几条**不进异常表、不进下一轮基线**（下一轮的基线语义是「上一次为止仍然成立"
-            "的问题全集」）；原文与撤销理由留在下面 —— 撤销本身也是结论，不能没有痕迹。"
-        )
-        lines.append("")
-        for row in retracted:
-            lines.append(_row_line(row))
-        lines.append("")
-
-    downgraded = tuple(row for row in reduction.rows if row.verdict == VERDICT_DOWNGRADED)
-    if downgraded:
-        lines.append(f"### 已降级 {len(downgraded)} 条（按新等级采信）")
-        lines.append("")
-        for row in downgraded:
-            lines.append(_row_line(row))
-        lines.append("")
-
-    pending = tuple(
-        row for row in reduction.rows if row.verdict == VERDICT_NEEDS_MORE_EVIDENCE
-    )
-    if pending:
-        lines.append(f"### 待人工核验 {len(pending)} 条（证据不足）")
-        lines.append("")
-        lines.append(
-            "这几条**仍在清单里**，但平台按口径把它们**降了一档等级**（`critical` → `high`、"
-            "`high` → `medium`），置信度也不再按 `very_high` 采信 —— 一条自己都说证据不足的"
-            "结论不该同时挂着最高等级与最高置信度，请人工看一遍再决定处置。"
-        )
-        lines.append("")
-        for row in pending:
-            lines.append(_row_line(row))
-        lines.append("")
-
-    confirmed = tuple(row for row in reduction.rows if row.verdict == VERDICT_CONFIRMED)
-    if confirmed:
-        # **两种「没找到反证」分成两节**（P0-01）。它们在自己的句子里的可信度不一样：
-        # 一条是「有人独立去搜过、没搜到」，另一条是「重看了一遍已有的材料、没看出问题」。
-        # 实测 run 58 那三条**全部**是后者（6 次索取全指向已有证据地址，一次新检索都没有），
-        # 而报告里它们的措辞是「反证不成立（维持原结论）」—— 读的人会把它当成前一种。
-        independent = [
-            row for row in confirmed if row.verify_basis == VERIFY_BASIS_INDEPENDENT
-        ]
-        replayed = [
-            row for row in confirmed if row.verify_basis != VERIFY_BASIS_INDEPENDENT
-        ]
-        if independent:
-            lines.append(f"### 反证不成立 {len(independent)} 条（独立取证后维持原结论）")
-            lines.append("")
-            lines.append("有人**自己去搜过**、没找到反证。搜了哪里写在每一条的理由与查过范围里。")
-            lines.append("")
-            for row in independent:
-                lines.append(_row_line(row))
-            lines.append("")
-        if replayed:
-            lines.append(f"### 原证据复读 {len(replayed)} 条（**未经独立反证**）")
-            lines.append("")
-            lines.append(
-                "这几条复核**只重看了已有的依据**，没有做新的检索 —— 「没找到反证」在这里指的是"
-                "「在原有材料里没看出问题」，**不等于**有人独立去搜过。它们按原等级采信，"
-                "但读的时候要知道这一档的差别。"
-            )
-            lines.append("")
-            for row in replayed:
-                lines.append(_row_line(row))
-            lines.append("")
-
-    new_findings = reduction.new_findings
-    if new_findings:
-        lines.append(f"### 对账轮新发现 {len(new_findings)} 条（已合入清单）")
-        lines.append("")
-        lines.append(
-            "这几条是对账轮在找反证的过程中新报出来的，经与主结论同一道校验（结构、重复、"
-            "条数上限）后合入 —— 它们是这一轮的附带产出，不是「找反证」的结果。"
-        )
-        lines.append("")
-        for row in new_findings:
-            lines.append(_row_line(row))
-        lines.append("")
-
-    # 上面各节已经逐条列过的那些（下面那一节不重复列，理由见 `_gap_section`）。
-    shown = {
-        row.finding_id
-        for row in (*retracted, *downgraded, *pending, *confirmed, *new_findings)
-    }
-    lines.extend(_gap_section(reduction, shown=shown))
-
-    if reduction.rejected:
-        lines.append(f"### 复核阶段记账：{len(reduction.rejected)} 条没有进入清单")
-        lines.append("")
-        lines.append(
-            "这里**只记对账轮（V1）新增或改写结论时被平台拒绝的条目**；主分析阶段因条数上限"
-            "淘汰的另列在「结论条数上限」，两组不是重复计数。"
-        )
-        lines.append("")
-        for item in reduction.rejected:
-            detail = item.detail or "（未记标题）"
-            lines.append(f"- {detail}：{item.reason}")
-        lines.append("")
-
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _gap_section(reduction: Reduction, *, shown: set[str]) -> list[str]:
-    """证据缺口那一节（口径 ③④）。**按平台的动作分组，与上面按裁决分组是两把尺子。**
-
-    没被压过的运行（`evidence_capped == 0`）一个字都不渲染。已经被上面某一节列过的行
-    **不在这里重复** —— 它的「平台说明」就写在上面那一行里（两边逐字一致），而同一件事
-    在报告里出现两遍正是本节开头那句「以本节为准」要收的口子。
-    """
-    capped = tuple(row for row in reduction.rows if row.evidence_capped)
-    if not capped:
-        return []
-    lines = [
-        f"### 证据缺口 {len(capped)} 条（平台压到 `{CONFIDENCE_CEILING_WITH_GAP}`）",
-        "",
-        "本次运行的证据里**有已知的缺口**（某个文件被长度上限截断、或者索取额度用尽导致"
-        "某一块一次都没轮到）。受影响的这几条**不得维持 `very_high`** —— 证据不完整时还挂着"
-        "最高置信度，等于把「没看到」写成了「看过了」。压的是**置信度，不是结论**：它们仍在"
-        "清单里，理由写在各条的「平台说明」里。",
-        "",
-    ]
-    lines.extend(_row_line(row) for row in capped if row.finding_id not in shown)
-    if all(row.finding_id in shown for row in capped):
-        # 一个都不剩：这几条在上面某一节里已经逐条列过（同一行的「平台说明」就是理由）。
-        # 不写这一句的话，这一节看起来像「说有 N 条、一条都没列出来」—— 而那正是这一批
-        # 缺陷要防的那种「说了没做」。
-        lines.append(
-            "这几条已经在上面按裁决分组的那几节里逐条列过，"
-            "降级理由写在同一行的「平台说明」里；这里不再重复一遍。"
-        )
-    lines.append("")
-    return lines
-
-
-def _row_line(row: FindingRow) -> str:
-    """一行的措辞。**原等级、裁决、处置三样都写出来** —— 只写裁决，读的人不知道
-    「降级」是从哪一级降下来的。
-
-    三个 2026-09-21 补上的东西，都是为了让人能**把这一行落回原处**：
-
-    * 头部带上正文里那个编号（口径 ②，`（正文 R3）`）—— 模型没给正文编号时**什么都不写**
-      （2026-09-24 起：从前写「（正文未编号）」，那是拿一句真话去填一个不存在的问题，
-      而 run 63 的三条全是它 —— 读者看到的是「[F1]（正文未编号）」：一个编号加一句
-      「这个编号在正文里找不到」。**头部不再印平台内部编号 `[F…]`**：产品里没有任何
-      一处显示它（异常面板的字段里没有 `finding_id`），它只在平台自己的载荷与轨迹里
-      成立，印在给人看的报告上只是个查不到的引用）；
-    * 等级/置信度**只要动过就写出来**（口径 ①），包括「证据不足」那一档，措辞里带上
-      「平台按证据不足降一档」这句出处；
-    * 不成形的依据就地标成「（不可定位）」（口径 ③）—— 它照原样留着，但不构成证据。
-
-    2026-09-24（P0-01）再加两样：
-
-    * 头部用的是**裁决之后**的标题（`row.anomaly.title`）：有断言没被证实时它由
-      `_compose_title` 只取已证实的部分重排 —— 未证实的肯定断言不许当标题出现
-      （run 58 的 F3 标题写着「断言中断进程」，而复核自己承认那一点没核实）；
-    * 紧跟一行**逐条断言的清单**（缩进成子列表）。每一条带自己的状态与措辞：
-      `已证实` / `待核查：…` / `已检查范围内未发现：…` / `反证成立：…`。
-      这一段是「这条结论凭什么算核过了」的唯一答案。
-    """
-    head = f"- **{_body_label_text(row)}{row.anomaly.title}**："
-    original = f"原 `{row.origin.severity}` / `{row.origin.confidence}`"
-    if row.verdict == VERDICT_RETRACTED:
-        action = "**反证成立（撤销）**，已从当前结论清单移除"
-    elif row.verdict == VERDICT_DOWNGRADED:
-        action = (
-            f"**反证部分成立（降级）**：`{row.origin.severity}` → `{row.anomaly.severity}`"
-        )
-        # 等级写在动作里了（`severity=False`），但**置信度**若另被证据缺口压过，
-        # 还要单独说 —— 否则这一行会写着降了级、却看不出置信度也动了。
-        if row.evidence_capped:
-            action += _level_change_text(
-                row, cause="平台按「证据有缺口」处理", severity=False
-            )
-    elif row.verdict == VERDICT_NEEDS_MORE_EVIDENCE:
-        action = "**证据不足（待人工核验）**"
-        action += _level_change_text(row, cause="平台按「证据不足降一档」处理")
-    else:
-        action = f"**{_action_label(row)}**"
-        if row.evidence_capped:
-            action += _level_change_text(row, cause="平台按「证据有缺口」处理")
-    if row.source == SOURCE_VERIFY:
-        action += "（对账轮新发现）"
-    detail = [f"{original} → {action}"]
-    if row.reason:
-        detail.append(f"理由：{truncate_text(row.reason, _REASON_MAX_CHARS)[0]}")
-    if row.evidence_refs:
-        detail.append("依据：" + "、".join(_ref_text(row)))
-    if row.note:
-        detail.append(f"平台说明：{row.note}")
-    # 复核方式排在最后：它是对**上面整句**的限定（「反证不成立」是重看了已有依据，
-    # 还是自己去搜了一遍），不是另一个并列的事实。字段名从「取证方式」改成「复核方式」
-    # （2026-09-24）：值本身叫「独立取证」，两个「取证」叠在一行里读着别扭。
-    if row.verify_basis:
-        detail.append(f"复核方式：**{row.verify_basis_label}**")
-    line = head + "；".join(detail)
-    claims = claim_lines(row.claim_reviews)
-    return line + ("\n" + claims if claims else "")
-
-
-def _action_label(row: FindingRow) -> str:
-    """裁决那一格的中文。**`confirmed` 按取证方式分两种说法**（P0-01）。
-
-    「反证不成立（维持原结论）」这句话的读法是「**有人去找过反证**、没找到」。而复核只
-    重看了一遍已有依据时，它答的是另一个问题（「在原有材料里没看出问题」）—— 两句话
-    都写在同一行里会自相矛盾（前面说「反证不成立」、后面说「未经独立反证」），
-    所以这一格直接换名字，而不是靠后面那句限定去救。
-
-    其他裁决码不带这个区分：降级 / 撤销 / 证据不足说的是**结论本身**怎么了，
-    与复核是用哪种方式得出结论无关。
-    """
-    if row.verdict == VERDICT_CONFIRMED and row.verify_basis == VERIFY_BASIS_REPLAY:
-        return "原证据复读（维持原结论）"
-    return row.verdict_label
-
-
-def _body_label_text(row: FindingRow) -> str:
-    """头部那一小段「（正文 R3）」。
-
-    对账轮新发现的条目**不写**（它们本来就不在模型写的正文里，`source` 那一栏说了它从
-    哪来）。**模型没给正文编号时也什么都不写**（2026-09-24，run 63）：模型的正文不一定
-    带 `R1`/`R2` 编号（run 63 用的是【致命】/【高】），那时从前写「（正文未编号）」——
-    读者看到「[F1]（正文未编号）」：一个平台内部编号，加一句平台自己承认「它在正文里
-    找不到」。要落回正文靠的是**标题**，它就在这一行里。
-    """
-    if row.source == SOURCE_VERIFY:
-        return ""
-    return f"（正文 {row.body_label}）" if row.body_label else ""
-
-
-def _level_change_text(row: FindingRow, *, cause: str, severity: bool = True) -> str:
-    """等级 / 置信度动过的话，把**新的那一档**写出来并注明出处（口径 ①）。
-
-    ## 只写新的那一档（2026-09-24，run 63）
-
-    从前写的是「等级 `critical` → `high`」—— 而这一行的开头已经印了
-    「原 `critical` / `very_high` → …」，同一个起点在一行里出现两次（run 63 的一条明细
-    里同一件事被说了三遍：动作、等级变化、置信度变化）。起点在本行开头，这里只需回答
-    「降到了哪一档」。`severity=False` 给「降级」那一支用：那里的等级变化已写在动作里。
-    """
-    parts: list[str] = []
-    if severity and row.anomaly.severity != row.origin.severity:
-        parts.append(f"等级降到 `{row.anomaly.severity}`")
-    if row.anomaly.confidence != row.origin.confidence:
-        parts.append(f"置信度降到 `{row.anomaly.confidence}`")
-    if not parts:
-        return ""
-    return f"，{'、'.join(parts)}（{cause}）"
-
-
-def _ref_text(row: FindingRow) -> tuple[str, ...]:
-    """依据那一行：不成形的那些就地标成「（不可定位）」。
-
-    **不改写原字符串**（模型说了什么是一个事实），只在它后面加这三个字 —— 读的人据此
-    知道哪几条能照着去核，哪几条核不了。判据与 `is_locatable_ref` 是同一个函数，
-    不在这里另写一份（两处各判一次迟早会不一致）。
-    """
-    bad = set(row.unlocatable_refs)
-    return tuple(
-        f"{ref}（不可定位）" if ref in bad else ref for ref in row.evidence_refs
-    )
-
-
-# 历史数据里那行机器块的形状：`<!-- ai-verify-ruling: {...} -->`。它里面若含 `-->`，
-# 写进去时被转义成 `-->`（见 git 历史里的 `ruling_block`），所以这个正则里的
-# `-->` 一定是那条注释真正的收尾。
-#
-# **只服务于历史数据的剥离**（`strip_ruling_block`）：新的运行不再往正文里写机器块，
-# 但清理脚本与导出路径还要能把**老行**里那一行认出来并摘掉。
-_RULING_BLOCK_RE = re.compile(
-    r"<!--\s*" + re.escape(RULING_BLOCK_MARKER) + r"\s*:\s*(\{.*?\})\s*-->", re.DOTALL
-)
-
-
-def strip_ruling_block(markdown: str) -> str:
-    """去掉**历史数据**里那行机器可读块（`<!-- ai-verify-ruling: {...} -->`）。
-
-    ## 它现在只服务两件事，都不是「新写入的兼容层」
-
-    * **一次性数据清理**（`scripts/clean_ruling_block_from_runs.py`）：库里已有的那些行
-      还带着它，清理脚本按同一个正则摘掉；
-    * **导出路径**（`routes/ai_analysis_routes.py`）：用户下载的是原始 markdown，
-      在旧行被清理之前（或者清理脚本没跑过的库上），那一行会原样出现在文件里。
-      导出前摘一次，读的人只看到给人看的那几节。
-
-    ## 为什么这条设计被废掉了（AI-P0-05）
-
-    原先裁决的机器形态就写在报告正文末尾，理由是「HTML 注释在 markdown 渲染里看不见」。
-    但本平台的安全渲染器是**先整体转义、再套白名单**（`static/js/ai-report-markdown.js`），
-    注释必然变成一段可见的乱码 —— 实测 run 20 的正文里 35.3% 是那段 json。靠注释藏内部
-    数据本身就不可靠，所以裁决改走结构化字段（`EngineOutcome.verdict`），正文里只剩给人
-    看的内容。这个函数因此不再有「新写入」的一侧。
-    """
-    return _RULING_BLOCK_RE.sub("", markdown or "").strip()
-
-
-def retracted_fingerprints(ruling: dict | None) -> frozenset:
-    """被撤销的那些条目的指纹。
-
-    `result_payload` 用它把「待落库集合」再滤一道：撤销在 `aggregate_outcomes` 里已经
-    生效（`outcome.anomalies` 里已经没有它们），但那是一处**约定**而不是一道闸门，
-    多这一步，落库那一侧不必相信上游做对了。
-    """
-    if not ruling:
-        return frozenset()
-    return frozenset(
-        str(row.get("fingerprint") or "")
-        for row in ruling.get("rows") or ()
-        if isinstance(row, dict) and not row.get("active") and row.get("fingerprint")
-    )
-
-
-def ruling_rows(ruling: dict | None, *, active: bool | None = None) -> tuple[dict, ...]:
-    """裁决里的行（`active=True/False` 过滤；不传则全给）。"""
-    if not ruling:
-        return ()
-    rows = tuple(row for row in ruling.get("rows") or () if isinstance(row, dict))
-    if active is None:
-        return rows
-    return tuple(row for row in rows if bool(row.get("active")) is active)
-
-
-# --------------------------------------------------------------------------
 # 提示词
 # --------------------------------------------------------------------------
 
@@ -1994,3 +1149,18 @@ def verdict_instructions() -> str:
     )
 
 
+# --------------------------------------------------------------------------
+# 回导：渲染那一半搬去了 `verdict_render`（本文件贴着 2000 行 ERROR 闸门）。
+# 读侧与测试按 `verdict.render_ruling` 等取用（`subagent` / `result_payload` / 多个测试），
+# 这里**逐个回导**保住那些说法。**必须放在文件底部**：`verdict_render` 顶部要 import
+# `verdict_types`，而本文件顶部若反过来 import 它，两者就成环（谁先被导入都炸）。
+# **新增给人看的渲染函数要加进这一行。**
+# --------------------------------------------------------------------------
+from services.ai.verdict_render import (  # noqa: E402, F401, I001 —— 见上面那段
+    render_review_skipped,
+    render_ruling,
+    render_ruling_summary,
+    retracted_fingerprints,
+    ruling_rows,
+    strip_ruling_block,
+)
