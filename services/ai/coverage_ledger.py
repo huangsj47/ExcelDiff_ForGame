@@ -438,12 +438,17 @@ def build_ledger(
     executed: Optional[Iterable[Any]] = None,
     tool_stats: Any = None,
     response_payload: Any = None,
+    unread_shard_skip: Optional[Mapping[str, Any]] = None,
 ) -> dict:
     """这次运行的覆盖账本（**纯函数**：输入是已落库的 payload、逐轮明细与按工具计数）。
 
     `executed` 传 `None` 表示**没有采集过逐轮明细**（老运行）：那时证据覆盖与缺口里的
     「取不到」都是 `None`（未知），报告里写「未记录」而不是 0。传空列表表示「采集过，
     而且一条都没有」—— 那是两个完全不同的结论，不能合并。
+
+    `unread_shard_skip` 由调用方（`ledger_from_run` 那一侧）算好传进来，**不在这里重算**：
+    它要读未读账的原因，而那是 `snapshot_store.unread_files` 的判断 —— 本模块是纯函数，
+    拿不到 run 行，重写一份必然与那一份对不上。不传 = 没有这条补充（缺口里不提）。
     """
     payload = _as_mapping(request_payload)
     inventory = _inventory(payload)
@@ -541,6 +546,9 @@ def build_ledger(
             }
             for source, bucket in extra_by_source.items()
         },
+        # 未读的那些文件里，有多少**分给的分片这一轮没跑起来**（`snapshot_store` 的注记）。
+        # 与 `reason` 是两件事：这一条说的是「为什么没人去看它」，不是「读不到」。
+        "unread_shard_skip": dict(unread_shard_skip or {}),
     }
     ledger = {
         "mode": inventory["mode"],
@@ -862,6 +870,32 @@ def coverage_rows(ledger: Mapping[str, Any]) -> list[tuple[str, str]]:
     return rows
 
 
+def _unread_shard_skip(run: Any) -> dict:
+    """没取到证据、且**分给它的分片这一轮全没跑**的那些文件（计数 + 分片名）。
+
+    与 `payload["unread"]` 同源：直接问算出那份账的函数，不在这里重算一遍 —— 两份判据
+    迟早会对不上，而它们说的是同一件事（`snapshot_store` 在函数内导入：那一层 import 了
+    本模块，模块级导入会成环）。
+
+    算不出来时回 `{"count": None}`：**未知不写成 0** —— 写成 0 就是「没有文件落在没跑的
+    分片上」，那是一个结论，而这里只是没算出来（同 `_findings_account` 的纪律）。
+    """
+    try:
+        from services.ai.snapshot_store import UNREAD_SHARD_SKIPPED_KEY, unread_files
+
+        items = unread_files(run)
+    except Exception:  # noqa: BLE001 —— 少一句补充不该让整本账算不出来
+        return {"count": None}
+    if items is None:
+        return {"count": None}
+    hit = [item for item in items if item.get(UNREAD_SHARD_SKIPPED_KEY)]
+    return {
+        "count": len(hit),
+        "total": len(items),
+        "shards": sorted({str(name) for item in hit for name in (item.get("shards") or [])}),
+    }
+
+
 def gap_notes(ledger: Mapping[str, Any]) -> list[str]:
     """账本 → 「缺口」那几句话（一条一句，报告里按条列出来）。
 
@@ -895,6 +929,15 @@ def gap_notes(ledger: Mapping[str, Any]) -> list[str]:
             "所以下面那些结论**不要**当成「这些文件都看过了」。"
         )
     notes.extend(_extra_input_gaps(ledger))
+    skipped = ledger.get("counts", {}).get("unread_shard_skip") or {}
+    if _count(skipped.get("count")):
+        names = "、".join(skipped.get("shards") or [])
+        notes.append(
+            f"**有 {skipped['count']} 个没取到证据的文件，分给的分片这一轮没跑起来**"
+            f"（{names}）：这一条**不是**「模型漏看」，是那条分片被跳过了 —— "
+            "跳过原因写在它那一行上（额度 / 预算一类）。它们已经带着连续未读次数进了"
+            "下一轮的补偿清单，补跑一次就会轮到它们。"
+        )
     failed = _count(counts.get("failed_requests"))
     if failed:
         labels = [one for one in (evidence.get("failed_labels") or []) if one]
@@ -1029,4 +1072,7 @@ def ledger_from_run(run: Any) -> dict:
         # 结论账（P1b-UI）：报告正文只写**本轮**那几条，而承载结论的 payload 里还有
         # 上一轮继承下来的那些 —— 两个数都得说，见 `_findings_account`。
         response_payload=getattr(run, "response_payload", None),
+        # 未读项里「分给的分片没跑」那一档（真机实测补的口径）：与 `payload["unread"]`
+        # 同源 —— 问算出那份账的函数，不在这里重写一份判据。
+        unread_shard_skip=_unread_shard_skip(run),
     )

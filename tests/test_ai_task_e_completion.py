@@ -459,6 +459,50 @@ def test_a_compensation_or_dependency_file_without_evidence_becomes_a_gap():
     assert not any("补偿" in one for one in covered["gaps"]), covered["gaps"]
 
 
+def test_a_file_whose_shard_never_ran_says_so_instead_of_looking_like_model_sloth():
+    """未读的**第二个事实**：它分给的那片这一轮没跑 → 缺口里要写清，别读成模型偷懒。
+
+    真机实测（run 62）：20 个补偿项里 8 个没取到证据，原因一律是「模型一次都没索取过」
+    —— 而真正的原因是承载它们的 S4/S5 被**月度预算上限**跳过（`subagents[].skipped_reason`
+    写着「预算不足，提前收工」）。那句话是真的，但下一步该做的（调预算）与「催模型」
+    完全不是一件事。
+
+    **未知不写成 0**：这条补充算不出来时（`count` 是 `None`）一个字都不说。
+    """
+    payload = {
+        "mode": "weekly",
+        "scope": "full",
+        "summary": {"batch_files": 1, "window_files": 1},
+        "delta_files": [{"latest_commit_id": LATEST, "file_path": "config/a.xlsx"}],
+    }
+
+    known = build_ledger(
+        request_payload=payload,
+        executed=[],
+        tool_stats={},
+        unread_shard_skip={"count": 8, "total": 13, "shards": ["S4", "S5"]},
+    )
+    note = next((one for one in known["gaps"] if "分片这一轮没跑起来" in one), "")
+    assert note, known["gaps"]
+    assert "8" in note and "S4、S5" in note, note
+    assert "不是" in note and "模型漏看" in note, note
+
+    unknown = build_ledger(
+        request_payload=payload,
+        executed=[],
+        tool_stats={},
+        unread_shard_skip={"count": None},
+    )
+    assert not any("分片这一轮没跑起来" in one for one in unknown["gaps"]), (
+        "算不出来（未知）时把这条写成了「没有文件落在没跑的分片上」—— 那是两个结论"
+    )
+
+    absent = build_ledger(request_payload=payload, executed=[], tool_stats={})
+    assert not any("分片这一轮没跑起来" in one for one in absent["gaps"]), (
+        "没传这份补充时不该凭空长出一条缺口"
+    )
+
+
 def test_the_persisted_manifest_round_trips_without_moving_its_fingerprint():
     """落库的 `payload["manifest"]` 必须能**原样还原**（含分配指纹与逐条分片标签）。
 

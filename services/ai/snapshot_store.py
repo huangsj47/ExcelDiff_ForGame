@@ -498,8 +498,12 @@ def covers_completely(
 # ---------------------------------------------------------------------------
 
 
-def _payload_mapping(run: Any) -> dict:
-    raw = getattr(run, "request_payload", None)
+def _as_mapping(raw: Any) -> dict:
+    """「可能已经是 dict、也可能是 JSON 文本」的值 → dict（坏数据回空表，不抛）。
+
+    两个载荷列（`request_payload` / `response_payload`）都走这里：它们一个由建 run 那
+    一侧写、一个由收尾那一侧写，读侧的容错口径不该有两份。
+    """
     if isinstance(raw, Mapping):
         return dict(raw)
     if isinstance(raw, (str, bytes, bytearray)):
@@ -509,6 +513,10 @@ def _payload_mapping(run: Any) -> dict:
             return {}
         return dict(parsed) if isinstance(parsed, Mapping) else {}
     return {}
+
+
+def _payload_mapping(run: Any) -> dict:
+    return _as_mapping(getattr(run, "request_payload", None))
 
 
 def whitelist_paths(run: Any) -> List[str]:
@@ -605,6 +613,17 @@ UNREAD_REASON_LABELS = {
 #: 与 `trace_evidence.FAILURE_NOTICE_PREFIXES` 是同一套做法（改那句话就要改这里）。
 REFUSED_REASON_PREFIX = "超出本次工具请求总预算"
 
+#: 未读条目上的**一条注记**：这个文件分给的分片，这一轮**根本没跑起来**。
+#:
+#: 它**不是第五种原因**。任何成员都能读任何文件 —— 真机实测那一轮（run 62）里，被判
+#: 「S4 没跑」的 4 个补偿项**被汇总轮读到了**。所以「分片没跑」说明的是**为什么没人去看
+#: 它**，不是「谁都读不到」：它与 `reason` 并列，两个事实各自记，谁也不冒充谁。
+#:
+#: 记它的理由同样是真机实测：那一轮 20 个补偿项里 8 个没取到证据，原因一律写「模型一次
+#: 都没索取过」—— 而真正的原因是承载它们的 S4/S5 被**月度预算上限**跳过。那句话是真的，
+#: 但读起来像模型偷懒；下一步该做的（调预算）与「催模型」完全不是一件事。
+UNREAD_SHARD_SKIPPED_KEY = "shard_skipped"
+
 #: `request_payload["unread"]["items"]` 最多留几条 —— 它只是**给人回看的样本**
 #: （线上的窗口可能有上千个没读到的文件，实测一次 1009 里 967 个）。
 #:
@@ -686,6 +705,9 @@ def unread_files(run: Any) -> Optional[List[dict]]:
 
     「未知」的判据与 `evidence_paths` 逐字相同（没有逐轮明细）：那时不许把整份输入
     当成「没读到」—— 那是把未知当结论。
+
+    每条还带 `shards`（分给了哪几片）与 `shard_skipped`（那几片这一轮是不是全没跑起来，
+    见 `UNREAD_SHARD_SKIPPED_KEY`）—— 它们是**并列的事实**，不参与 `reason` 的判定。
     """
     if run is None:
         return None
@@ -708,6 +730,8 @@ def unread_files(run: Any) -> Optional[List[dict]]:
         )
         if path
     }
+    skipped_members = _skipped_member_labels(run)
+    assigned = _assigned_shards(run)
     out: List[dict] = []
     for entry in _input_files(run):
         path = entry["path"]
@@ -721,7 +745,58 @@ def unread_files(run: Any) -> Optional[List[dict]]:
             reason = UNREAD_NO_RESULT
         else:
             reason = UNREAD_NOT_REQUESTED
-        out.append({**entry, "reason": reason})
+        shards = list(assigned.get(path) or ())
+        out.append({
+            **entry,
+            "reason": reason,
+            "shards": shards,
+            # **分给它的每一片都没跑**才算（有一条跑了就可能是那一片的账）。空 `shards`
+            # （老运行没有 manifest）一律不算 —— 未知不当成结论。
+            UNREAD_SHARD_SKIPPED_KEY: bool(
+                shards and skipped_members and all(name in skipped_members for name in shards)
+            ),
+        })
+    return out
+
+
+def _skipped_member_labels(run: Any) -> set:
+    """这一轮**一次都没跑起来**的分片标签（`subagents[].status == "skipped"`）。
+
+    信息源取 `response_payload["subagents"]` —— 与界面上「子代理」那一栏、以及那条
+    `skipped_reason`（真机上是「预算不足，提前收工」）**同一份**。不拿「有没有逐轮明细」
+    反推：跑过但一轮都没产出明细的分片，与压根没跑过的分片，在明细里长得一模一样。
+    """
+    payload = _as_mapping(getattr(run, "response_payload", None))
+    out: set = set()
+    for item in payload.get("subagents") or ():
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("role") or "") != "subagent":
+            continue
+        if str(item.get("status") or "") != "skipped":
+            continue
+        label = str(item.get("label") or "").strip()
+        if label:
+            out.add(label)
+    return out
+
+
+def _assigned_shards(run: Any) -> dict:
+    """`{路径: [分片标签]}`（取自 `request_payload["manifest"]["entries"]`）。
+
+    分配账就是 `manifest` 本身（`assigned_shards` 是它写的），这里不另立一份映射 ——
+    两处各算一次，迟早会出现「账本说分给了 S4、报告说没分」这种对不上的形态。
+    """
+    manifest = _payload_mapping(run).get("manifest")
+    entries = manifest.get("entries") if isinstance(manifest, Mapping) else None
+    out: dict = {}
+    for entry in entries or ():
+        if not isinstance(entry, Mapping):
+            continue
+        path = str(entry.get("path") or "").strip()
+        names = [str(one) for one in (entry.get("assigned_shards") or []) if str(one or "").strip()]
+        if path and names:
+            out[path] = names
     return out
 
 

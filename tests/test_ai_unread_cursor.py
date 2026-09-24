@@ -23,6 +23,7 @@ from services.ai.snapshot_store import (
     UNREAD_NO_RESULT,
     UNREAD_NOT_REQUESTED,
     UNREAD_REFUSED,
+    UNREAD_SHARD_SKIPPED_KEY,
     UNREAD_UNREADABLE,
     record_unread,
     unread_files,
@@ -124,6 +125,107 @@ def test_each_unread_file_says_why_it_was_not_read():
         assert by_path[asked]["reason"] == UNREAD_NO_RESULT
         assert by_path[never]["reason"] == UNREAD_NOT_REQUESTED
         assert by_path[never]["repository_id"] == group["cfg"].repository_id
+
+
+def test_an_unread_file_whose_shard_never_ran_carries_that_fact():
+    """未读的第二条事实：**分给它的那几片这一轮全没跑**（真机实测，2026-09-24）。
+
+    实测 run 62：20 个补偿项里 8 个没取到证据，原因全写「模型一次都没索取过」—— 而真正的
+    原因是承载它们的 S4/S5 被月度预算上限跳过（`subagents[].status == "skipped"`）。
+
+    它是**注记，不是原因**：同一轮里 S4 名下的 4 个补偿项就被汇总轮读到了 —— 任何成员都能
+    读任何文件，所以「分片没跑」只能说明**为什么没人去看它**，不能当成「读不到」。
+    """
+    with app.app_context():
+        create_tables()
+        group = _make_group(file_count=8)
+        result = _run_once(group)
+        run = result["run"]
+        never = _paths(group, [4])[0]
+        _trace(run)  # 有逐轮明细、但一条证据都没取到
+
+        # 这一条**分给了哪几片**由 manifest 决定（hash 分配），所以从落库的账里读回来，
+        # 而不是在用例里猜一个标签。
+        manifest = json.loads(run.request_payload)["manifest"]
+        assigned = next(
+            entry["assigned_shards"]
+            for entry in manifest["entries"]
+            if entry["path"] == never
+        )
+        assert assigned, "前提没成立：这条没被分配到任何分片"
+
+        # 第一半：它分到的分片这一轮**没跑**（`subagents` 里 status=skipped）。
+        run.response_payload = json.dumps(
+            {
+                "subagents": [
+                    {"label": name, "role": "subagent", "status": "skipped"}
+                    for name in assigned
+                ]
+                + [{"label": "汇总", "role": "synthesis", "status": "succeeded"}]
+            }
+        )
+        db.session.commit()
+        item = {one["path"]: one for one in unread_files(run)}[never]
+        assert item["reason"] == UNREAD_NOT_REQUESTED, "原因那一位不许被这条注记改写"
+        assert item["shards"] == assigned, f"没把它分到的分片带上：{item.get('shards')!r}"
+        assert item[UNREAD_SHARD_SKIPPED_KEY] is True, (
+            "分给它的分片整轮没跑，未读账上却看不出这一点 —— 它会被读成「模型一次都没索取过」"
+        )
+
+        # 第二半：只要它分到的分片里**有一片跑了**，就不下这个结论（那一片的账还没算完）。
+        run.response_payload = json.dumps(
+            {
+                "subagents": [
+                    {"label": assigned[0], "role": "subagent", "status": "succeeded"},
+                    {"label": "汇总", "role": "synthesis", "status": "succeeded"},
+                ]
+            }
+        )
+        db.session.commit()
+        item = {one["path"]: one for one in unread_files(run)}[never]
+        assert item[UNREAD_SHARD_SKIPPED_KEY] is False, (
+            "分片跑过了（只是没读这一条），却当成「那片没跑」"
+        )
+
+        # 第三半：没有 `subagents` 这份账（老运行）时不许猜 —— 未知不当成结论。
+        run.response_payload = None
+        db.session.commit()
+        item = {one["path"]: one for one in unread_files(run)}[never]
+        assert item[UNREAD_SHARD_SKIPPED_KEY] is False
+
+
+def test_the_coverage_account_carries_that_fact_through_to_the_ledger():
+    """**接线**：这条注记要从 run 一路走到覆盖账本的缺口里（`ledger_from_run`）。
+
+    与上一条分开测，是因为「算得对」与「传得到」是两件事：`build_ledger` 是纯函数，
+    注记由调用方算好传进去 —— 只测前者的话，`ledger_from_run` 那一行不传、传错了、
+    或者传了个恒为空的 summary，用例照样全绿（真机实测过一次「接线了不等于被用了」）。
+    """
+    from services.ai.coverage_ledger import ledger_from_run
+
+    with app.app_context():
+        create_tables()
+        group = _make_group(file_count=8)
+        run = _run_once(group)["run"]
+        _trace(run)
+
+        manifest = json.loads(run.request_payload)["manifest"]
+        first = manifest["entries"][0]
+        run.response_payload = json.dumps(
+            {
+                "subagents": [
+                    {"label": name, "role": "subagent", "status": "skipped"}
+                    for name in first["assigned_shards"]
+                ]
+            }
+        )
+        db.session.commit()
+
+        ledger = ledger_from_run(run)
+        summary = ledger["counts"]["unread_shard_skip"]
+        assert summary.get("count"), f"缺口那段拿到的是一份空的补充：{summary!r}"
+        assert summary.get("shards"), "没带上分片名 —— 那句话里就只说得出一个数"
+        assert any("分片这一轮没跑起来" in one for one in ledger["gaps"]), ledger["gaps"]
 
 
 def test_the_refused_reason_has_a_live_producer():
