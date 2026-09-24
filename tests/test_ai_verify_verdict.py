@@ -653,6 +653,36 @@ class TestTheRulingSection:
             f"标注明细的开头膨胀到了 {len(_paragraphs(detail_head))} 段 —— 口径说明回潮成正文了"
         )
 
+    def test_the_opening_says_the_body_was_not_rewritten(self):
+        """**正文各章是模型原话、平台不按复核结果改写它** —— 这句读法约定必须在开篇。
+
+        2026-09-24 run 64 实测：被撤销的那条在正文的「风险评估」里仍写着「缓解：把静默
+        跳过改回至少一次告警」，而否证它的理由在 4000 字之后的「复核标注（平台）」里，
+        两处标题措辞还不同、按字面搜不到对方。不先把这句约定说清，读者会照着一份**已被
+        复核撤掉**的待办去改代码。
+        """
+        from services.ai.verdict import VerifyVerdict
+
+        reduction = reduce_findings(
+            [_obj()],
+            verdicts=[
+                VerifyVerdict(
+                    finding_id="F1",
+                    verdict=VERDICT_RETRACTED,
+                    reason="同一提交里生成文件已经删掉了",
+                    evidence_refs=(EVIDENCE_REF,),
+                )
+            ],
+        )
+
+        summary = render_ruling_summary(reduction, review_ran=True)
+
+        assert "正文各章仍是模型原话" in summary
+        assert "没有按复核结果改写" in summary
+        assert "以「复核标注（平台）」为准" in summary
+        # 它落在**开篇**（正文之前）：明细那一节排在正文之后，读者读到它时已经读完正文了。
+        assert "正文各章仍是模型原话" not in render_ruling(reduction, review_ran=True)
+
 
 # ==========================================================================
 # 三、任务书：编号与结构化裁决
