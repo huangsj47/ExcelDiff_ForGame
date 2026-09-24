@@ -87,6 +87,7 @@ from models.ai_analysis import (
     JOB_STALE_SECONDS,
     MODE_FULL,
     MODE_INCREMENTAL,
+    PRE_RUN_JOB_STATES,
     SOURCE_MANUAL,
     STATE_CANCELLED,
     STATE_DEGRADED,
@@ -969,6 +970,48 @@ def settle_without_run(job_id, *, reason, state=None, message=None):
     )
     db.session.flush()
     return job
+
+
+def settle_job_that_never_ran(job_id, *, reason, message=None):
+    """只结清**从没跑起来过**的 job（已经有 run 的返回 `None`，一个字都不改）。
+
+    与 `settle_without_run` 只差一条判据，但那条判据是**安全判据**：`settle_without_run`
+    只挡「已经终态」，**不挡「已经带着 run 在跑」**。
+
+    ## 为什么必须单独有这个出口（真机实测，2026-09-24）
+
+    扫尾路径（`task_worker_queue_service._settle_job_of_intent`）会在一条等待意图被了结时
+    收口它服务的 job。真机上的意图 #5034 **已经转交出去**、job 32 正带着 run 62 在跑，
+    下一趟扫尾却把这条意图判成「已经被 run=62 覆盖」（判据是「这个分组有没有 run 在跑」，
+    而那条 run **正是这条意图自己转交出去的那一次**），顺手把 job 32 收成 `cancelled` ——
+    run 还在跑、job 已经死了。而且这个分叉**不会被自动纠正**：`settle_from_run` 对终态
+    job 是 `continue`，那条 run 跑完也再没人把 job 摆正。
+
+    「这条 job 的终态归谁写」只有一个答案：**它有 run 就归那条 run**，别人不许替它判。
+    所以判据用 `PRE_RUN_JOB_STATES`（还没交出执行体的那几档）**并且**没有 `run_id` ——
+    两条都要成立才收。状态与 `run_id` 在 `mark_running` 里同一次 flush 写入，只有一条
+    为真只可能是脏数据，而脏数据上的正确处置是**不动它**（与 `_settle_one_stale_job`
+    判据 3 同一口径）。
+
+    `job_id` 找不到时返回 `None`；已经是终态时按 `settle_without_run` 的幂等口径原样返回。
+    """
+    job = get_job(job_id)
+    if job is None:
+        return None
+    if _is_terminal(job):
+        return job
+    if getattr(job, "run_id", None) is not None:
+        # 已经有 run：它的终态归那条 run 的映射（`settle_from_run`）。
+        _log(
+            f"⏭️ 不收口 job {job_id}：它已经带着 run {job.run_id} 在跑/跑过，"
+            f"终态归那条 run（{reason}）"
+        )
+        return None
+    if str(getattr(job, "state", "") or "") not in PRE_RUN_JOB_STATES:
+        # 不是「还没交出执行体」的那几档，却没有 run_id：脏数据，不猜，不动它。
+        _log(f"⏭️ 不收口 job {job_id}：状态 {job.state!r} 不在「还没跑」的那几档里（{reason}）")
+        return None
+    return settle_without_run(job_id, reason=reason, message=message)
 
 
 def _reason_code(reason) -> str:

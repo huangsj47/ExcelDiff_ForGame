@@ -124,6 +124,14 @@ ACTIVE_JOB_STATES = (
     STATE_RUNNING,
 )
 
+#: **还没交出执行体**的状态：这些 job 一行 `AiAnalysisRun` 都还没有。
+#:
+#: 它是「这条 job 的终态归谁写」的那条分界：在这几档上，终态只能由**没有 run 的结局**
+#: 来写（`job_service.settle_without_run`）；一旦有了 run，终态就归那条 run 的映射
+#: （`settle_from_run`）—— 别人替它判死，两边状态就分叉了。见
+#: `job_service.settle_job_that_never_ran`（真机实测的那一次）。
+PRE_RUN_JOB_STATES = (STATE_PENDING, STATE_WAITING_SNAPSHOT, STATE_QUEUED)
+
 #: 已经交出可复用结论的状态（下一轮的**结论基线**从中挑，见
 #: `models/ai_analysis/weekly_state.py::last_concluded_run_id`）。
 CONCLUDED_JOB_STATES = (STATE_SUCCEEDED, STATE_DEGRADED)

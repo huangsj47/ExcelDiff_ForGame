@@ -423,6 +423,111 @@ def test_settle_without_run_returns_none_for_an_unknown_job():
 
 
 # ===========================================================================
+#  一之二、`settle_job_that_never_ran`：**已经有 run 的 job 不许被替它判死**
+# ===========================================================================
+
+
+@pytest.mark.parametrize("run_status", ["pending", "running", "succeeded"])
+def test_a_job_that_already_has_a_run_is_not_settled_here(run_status):
+    """真机实测（2026-09-24）：扫尾把一条**正在跑**的 job 收成了 `cancelled`。
+
+    实测时间线：意图 #5034 转交出去 → job 32 带着 run 62 在跑 → 下一趟扫尾把这条意图
+    判成「已被 run 62 覆盖」并顺手收口 job（`settle_without_run` 只挡「已经终态」，
+    **不挡「带着 run 在跑」**）→ run 继续跑、job 已经死了。这个分叉**不会被自动纠正**：
+    `settle_from_run` 对终态 job 是 `continue`，run 62 跑完也再没人把 job 摆正。
+
+    「这条 job 的终态归谁写」只有一个答案：**有 run 就归那条 run** —— 不论那条 run
+    还在跑还是已经跑完（跑完的那条由 `settle_from_run` 自己收）。
+    """
+    with app.app_context():
+        group = _make_group()
+        run = _make_run(group, status=run_status)
+        job = _make_job(group, state=STATE_RUNNING, run_id=run.id, active_key="key-alive")
+
+        settled = job_service.settle_job_that_never_ran(job.id, reason="already_running")
+        db.session.commit()
+
+        assert settled is None, (
+            f"run 是 {run_status!r} 的 job 被这条判据收口了 —— 它的终态归那条 run"
+        )
+        landed = db.session.get(AiAnalysisJob, job.id)
+        assert landed.state == STATE_RUNNING, f"job 被收成了 {landed.state}，而 run 还在那儿"
+        assert landed.active_key == "key-alive", "收口顺带清了 active_key"
+        assert landed.error_message is None, f"给一条还在跑的 job 写了原因：{landed.error_message!r}"
+
+
+def test_a_job_that_never_got_a_run_is_still_settled():
+    """反向：**从没跑起来过**的 job 照收（这正是这个出口存在的理由）。
+
+    真机实测的另一半：意图 #4964 过期作废时，job 31 停在 `waiting_snapshot`、
+    `active_key` 还挂着 —— 不收它，同一份输入从此再也建不出 job（「点了没反应」）。
+    """
+    with app.app_context():
+        group = _make_group()
+        job = _make_job(group, state=STATE_WAITING_SNAPSHOT, active_key="key-stuck")
+
+        settled = job_service.settle_job_that_never_ran(job.id, reason="already_running")
+        db.session.commit()
+
+        assert settled is not None, "从没跑起来过的 job 反而没收口"
+        assert settled.state == STATE_CANCELLED
+        assert settled.state in TERMINAL_JOB_STATES
+        assert settled.active_key is None, "active_key 没释放 —— 同一份输入再也建不出 job"
+
+
+def test_the_run_reference_alone_is_enough_to_leave_a_job_alone():
+    """状态还停在「等执行体」那几档上、却已经挂了 run：**run 那条判据单独也拦得住**。
+
+    两条判据是故意重叠的（状态与 `run_id` 在 `mark_running` 里同一次 flush 写入），
+    只有一条为真就是脏数据 —— 而这里要钉的是：**少写一条都不行**。
+    """
+    with app.app_context():
+        group = _make_group()
+        run = _make_run(group, status="running")
+        job = _make_job(group, state=STATE_WAITING_SNAPSHOT, run_id=run.id)
+
+        settled = job_service.settle_job_that_never_ran(job.id, reason="already_running")
+        db.session.commit()
+
+        assert settled is None, "挂着 run 的 job 被收口了（状态那条判据兜不住它）"
+        assert db.session.get(AiAnalysisJob, job.id).state == STATE_WAITING_SNAPSHOT
+
+
+def test_a_job_without_a_run_but_past_the_pre_run_states_is_left_alone():
+    """脏数据（状态不是「还没跑」、却也没有 run_id）：不猜、不动它。
+
+    状态与 `run_id` 在 `mark_running` 里同一次 flush 写入，所以「`running` 但没有 run_id」
+    只可能来自脏数据 —— 而脏数据上的正确处置与 `_settle_one_stale_job` 判据 3 同一口径：
+    判不了就别判（猜错的代价是把一条还在跑的 job 判死）。
+    """
+    with app.app_context():
+        group = _make_group()
+        job = _make_job(group, state=STATE_RUNNING, run_id=None, active_key="key-dirty")
+
+        settled = job_service.settle_job_that_never_ran(job.id, reason="already_running")
+        db.session.commit()
+
+        assert settled is None, "状态不在「还没跑」那几档上，却被收了口"
+        assert db.session.get(AiAnalysisJob, job.id).state == STATE_RUNNING
+
+
+def test_a_settled_job_is_returned_as_is():
+    """幂等：已经终态就按 `settle_without_run` 的口径原样返回（不复活、不覆盖原因）。"""
+    with app.app_context():
+        group = _make_group()
+        job = _make_job(group, state=STATE_SUCCEEDED, run_id=None)
+        job.error_message = "原来的结论说明"
+        db.session.commit()
+
+        again = job_service.settle_job_that_never_ran(job.id, reason="over_budget")
+        db.session.commit()
+
+        assert again is not None and again.state == STATE_SUCCEEDED
+        assert again.error_message == "原来的结论说明"
+        assert job_service.settle_job_that_never_ran(99999999, reason="no_change") is None
+
+
+# ===========================================================================
 #  二、**这一条缺口的真正验收**：清掉 active_key 之后同一个 target 能再建出 job
 # ===========================================================================
 

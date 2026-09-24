@@ -1370,8 +1370,11 @@ def _retire_waiting_intent(intent, message, *, status="completed", job_reason=""
     `settle_without_run` docstring 写的那个**功能性阻塞**：同一份输入从此再也建不出
     job，用户点按钮只会附着到这条永远不动的 job 上（「点了没反应」）。
 
-    **转交成功那条路不许传 `job_reason`**：那条 job 由跑到的那条分析任务收口，
-    在这里收会把一条正在跑的 job 判死（`settle_without_run` 只挡终态，不挡「有 run 在跑」）。
+    **转交成功那条路不许传 `job_reason`**：那条 job 由跑到的那条分析任务收口。
+    （另一条出路「已经被 run 覆盖」也不能替它判死 —— 那由 `_settle_job_of_intent` 里
+    的 `settle_job_that_never_ran` 兜着：**已经有 run 的 job 不在这里收口**。真机实测
+    2026-09-24：意图 #5034 转交出去之后，下一趟扫尾把它判成「已被自己的 run 62 覆盖」，
+    顺手收口了正在跑的 job 32。）
     """
     try:
         intent.status = status
@@ -1394,6 +1397,12 @@ def _retire_waiting_intent(intent, message, *, status="completed", job_reason=""
 def _settle_job_of_intent(intent, reason, message):
     """把这条意图服务的 job 收口（意图作废时 job 不许留在非终态，见 `_retire_waiting_intent`）。
 
+    **只收「从没跑起来过」的那一条**（`settle_job_that_never_ran`）：已经有 run 的 job
+    终态归那条 run，在这里收会把一条**正在跑**的 job 判死 —— 而且这个分叉不会被自动
+    纠正（`settle_from_run` 对终态 job 是 `continue`）。真机实测（2026-09-24）：意图
+    #5034 已经转交出去、job 32 正带着 run 62 在跑，另一趟扫尾把它判成「已被 run 62
+    覆盖」并顺手收口了 job —— run 继续跑，job 已经 `cancelled`。
+
     收口失败**只记日志**：它是一个补充动作，不该把意图的作废回滚掉 —— 回滚会让页面上
     重新出现「已登记，等着」的假象（那是比一条卡住的 job 更难查的形态）。
     """
@@ -1402,9 +1411,9 @@ def _settle_job_of_intent(intent, reason, message):
         return
     try:
         # 局部导入：`job_service` 在函数内反向引用本模块（避免模块级循环）。
-        from services.ai.job_service import settle_without_run
+        from services.ai.job_service import settle_job_that_never_ran
 
-        job = settle_without_run(job_id, reason=reason, message=message)
+        job = settle_job_that_never_ran(job_id, reason=reason, message=message)
         if job is not None:
             worker._db.session.commit()
     except Exception as exc:  # noqa: BLE001 —— 见 docstring
@@ -1545,8 +1554,9 @@ def wake_waiting_analysis_intents(*, now=None):
             continue
         outcome["swept"] += 1
         worker.log_print(
-            f"🧹 等待意图 #{getattr(intent, 'id', None)} 既没在等同步、也没有一条还活着的"
-            "转交任务，guard 当场处置它（意图不许永久 pending）",
+            f"🧹 等待意图 #{getattr(intent, 'id', None)} 的等待理由已经不成立"
+            "（同步没在跑、也不在等它自己那条任务），guard 当场处置它"
+            "（意图不许永久 pending）",
             "AI",
             force=True,
         )

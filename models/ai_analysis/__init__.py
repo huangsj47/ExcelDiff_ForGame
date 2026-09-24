@@ -25,6 +25,7 @@ from .job import (
     JOB_STATES,
     MODE_FULL,
     MODE_INCREMENTAL,
+    PRE_RUN_JOB_STATES,
     SOURCE_MANUAL,
     SOURCE_SCHEDULED,
     STATE_CANCELLED,
@@ -88,4 +89,5 @@ __all__ = [
     "STATE_REUSED",
     "STATE_CANCELLED",
     "JOB_STALE_SECONDS",
+    "PRE_RUN_JOB_STATES",
 ]

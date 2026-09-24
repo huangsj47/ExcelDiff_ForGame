@@ -498,6 +498,90 @@ class TestAnIntentCannotWaitForever:
                 "用户再点一次仍然附着到那条停住的 job 上（附着了就什么都跑不起来）"
             )
 
+    def test_a_swept_intent_does_not_kill_the_run_it_handed_off(self):
+        """**已经转交出去**的意图被扫尾时，它那条正在跑的 job 不许被收口（真机实测，2026-09-24）。
+
+        实测时间线（job 32 / run 62，19:29:44 ~ 19:30:44）：
+
+        1. 意图 #5034 等到同步结束 → 转交出一条分析任务 → job 32 落 `running`、带 run 62；
+        2. 下一趟扫尾把 #5034 判成「已经被 run 62 覆盖」（判据是**这个分组有没有 run 在跑**，
+           而那条 run **正是它自己转交出去的那一次**）→ 意图作废；
+        3. 作废时顺带收口它服务的 job —— 而 `settle_without_run` 只挡「已经终态」，
+           **不挡「带着 run 在跑」**：job 32 被写成 `cancelled`，run 62 继续跑。
+
+        这个分叉**不会被自动纠正**：`settle_from_run` 对终态 job 是 `continue`，run 62 跑完
+        也再没人把 job 摆正 —— 用户看到的是「分析被取消了」，而付费的那一轮其实跑得好好的。
+
+        所以这条用例断言的是：**意图可以作废，它那条 run 和那条 job 不许被连坐**。
+        """
+        from services.ai import job_service
+        from services.task_worker_queue_service import wake_waiting_analysis_intents
+
+        seeded = _seed()
+        with flask_app.app_context():
+            intent = BackgroundTask(
+                task_type="weekly_ai_waiting",
+                commit_id=str(seeded["config_id"]),
+                file_path=seeded["group_key"],
+                priority=6,
+                status="pending",
+                trigger_source="manual",
+                created_at=datetime.now(timezone.utc),
+            )
+            db.session.add(intent)
+            db.session.commit()
+
+            # 它转交出去的那条任务已经**被执行**（processing），job 也因此跑起来了。
+            job = AiAnalysisJob(
+                project_id=seeded["project_id"],
+                target_type="weekly",
+                target_id=seeded["config_id"],
+                target_key=seeded["group_key"],
+                requested_mode="incremental",
+                effective_mode="incremental",
+                state="running",
+                trigger_source="manual",
+                active_key=f"key-{uuid.uuid4().hex[:8]}",
+                focus="all",
+            )
+            db.session.add(job)
+            db.session.commit()
+            intent.job_id = job.id
+            run = AiAnalysisRun(
+                project_id=seeded["project_id"], target_type="weekly",
+                target_id=seeded["config_id"], target_key=seeded["group_key"],
+                status="running", response_mode="streaming", trigger_source="manual",
+                created_at=datetime.now(timezone.utc),
+            )
+            db.session.add(run)
+            db.session.commit()
+            job.run_id = run.id
+            db.session.add(
+                BackgroundTask(
+                    task_type="weekly_ai_analysis",
+                    commit_id=str(seeded["config_id"]),
+                    file_path=seeded["group_key"],
+                    priority=2,
+                    status="processing",
+                    trigger_source="manual",
+                    job_id=job.id,
+                )
+            )
+            db.session.commit()
+
+            wake_waiting_analysis_intents()
+
+            assert _pending_intents(seeded["group_key"]) == [], "意图没有被扫掉（它不该永久 pending）"
+            landed = job_service.get_job(job.id)
+            assert landed.state == job_service.STATE_RUNNING, (
+                f"正在跑的 job 被扫尾收口成了 {landed.state}（run 还在跑，两边状态分叉）"
+            )
+            assert landed.active_key, "正在跑的 job 的 active_key 被清掉了"
+            assert landed.error_message is None, (
+                f"给一条还在跑的 job 写了失败原因：{landed.error_message!r}"
+            )
+            assert db.session.get(AiAnalysisRun, run.id).status == "running", "这次 run 被连坐改动了"
+
     def test_a_swept_intent_does_not_start_an_analysis(self):
         """过期 = 不再等 —— 但**也不许**因此偷偷开始一次分析（钱不能这么花）。"""
         from services.task_worker_queue_service import (
