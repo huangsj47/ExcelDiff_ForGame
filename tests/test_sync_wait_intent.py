@@ -454,6 +454,50 @@ class TestAnIntentCannotWaitForever:
             wake_waiting_analysis_intents()
             assert _pending_intents(seeded["group_key"]) == [], "过期的意图没有被收掉"
 
+    def test_a_swept_intent_also_closes_the_job_it_was_serving(self):
+        """意图作废**必须同时收口它服务的 job**（真机实测的卡死，2026-09-24）。
+
+        实测：意图 #4964 在 18:56 被判「等待超过 30 分钟」作废，而 job 31 到 19:00 仍是
+        `waiting_snapshot`、`active_key` 还挂着。那正是 `settle_without_run` docstring 写的
+        那个**功能性阻塞**：`uq_ai_job_active_key` 是唯一索引，同一份输入从此再也建不出 job，
+        用户点按钮只会附着到这条永远不动的 job 上 ——「点了没反应」。
+
+        所以这条用例断言的**不是状态好看**，而是「用户再点一次能不能真的起来」。
+        """
+        from services.ai import job_service
+        from services.task_worker_queue_service import wake_waiting_analysis_intents
+
+        # 同步在跑 ⇒ 这条 job 落到 `waiting_snapshot` 并**自己**登记意图（与真机同一条路）。
+        seeded = _seed(with_sync_task=True, sync_status="pending")
+        stale = datetime.now(timezone.utc) - timedelta(seconds=self.STALE_INTENT_AGE_SECONDS)
+        with flask_app.app_context():
+            config = db.session.get(WeeklyVersionConfig, seeded["config_id"])
+            created = job_service.create_or_attach_job(
+                config=config, requested_mode="incremental"
+            )
+            job_id = created.job_id
+            assert job_service.get_job(job_id).state == job_service.STATE_WAITING_SNAPSHOT, (
+                "前提没成立：同步在跑时这条 job 应当落到等待快照"
+            )
+            BackgroundTask.query.filter_by(
+                task_type="weekly_ai_waiting", file_path=seeded["group_key"], status="pending"
+            ).update({"created_at": stale})
+            db.session.commit()
+
+            wake_waiting_analysis_intents()
+
+            job = job_service.get_job(job_id)
+            assert job.state in job_service.TERMINAL_JOB_STATES, (
+                f"意图已作废，job 却还停在 {job.state} —— 它会永远停在这里"
+            )
+            assert job.active_key is None, "active_key 没释放 —— 同一份输入再也建不出 job"
+            again = job_service.create_or_attach_job(
+                config=config, requested_mode="incremental"
+            )
+            assert again.job_id != job_id, (
+                "用户再点一次仍然附着到那条停住的 job 上（附着了就什么都跑不起来）"
+            )
+
     def test_a_swept_intent_does_not_start_an_analysis(self):
         """过期 = 不再等 —— 但**也不许**因此偷偷开始一次分析（钱不能这么花）。"""
         from services.task_worker_queue_service import (

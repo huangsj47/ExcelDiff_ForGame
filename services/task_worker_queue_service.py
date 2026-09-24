@@ -1355,8 +1355,24 @@ def effective_waiting_analysis_intent(group_key, *, now=None):
     return None
 
 
-def _retire_waiting_intent(intent, message, *, status="completed"):
-    """把一条意图了结掉（completed=被覆盖/已转交，cancelled=过期作废）。"""
+def _retire_waiting_intent(intent, message, *, status="completed", job_reason=""):
+    """把一条意图了结掉（completed=被覆盖/已转交，cancelled=过期作废）。
+
+    `job_reason` 给「这次登记**没有转交出去**、用户这一下点击就此作废」的那几条出路用：
+    它同时把**这条意图服务的 job** 收口（`job_service.settle_without_run`）。
+
+    ## 为什么必须一起收（真机实测，2026-09-24）
+
+    少了这一步，job 会**永远停在非终态**：它的终态原先只有两条路能推
+    （`settle_from_run` 靠一条 run / `recover_stale_jobs` 靠陈旧窗口），两条都不覆盖
+    「意图过期作废」。实测：意图 #4964 在 18:56 被判「等待超过 30 分钟」作废，
+    而 job 31 到 19:00 仍是 `waiting_snapshot`、`active_key` 还挂着 —— 那正是
+    `settle_without_run` docstring 写的那个**功能性阻塞**：同一份输入从此再也建不出
+    job，用户点按钮只会附着到这条永远不动的 job 上（「点了没反应」）。
+
+    **转交成功那条路不许传 `job_reason`**：那条 job 由跑到的那条分析任务收口，
+    在这里收会把一条正在跑的 job 判死（`settle_without_run` 只挡终态，不挡「有 run 在跑」）。
+    """
     try:
         intent.status = status
         intent.error_message = message
@@ -1366,11 +1382,41 @@ def _retire_waiting_intent(intent, message, *, status="completed"):
         worker._db.session.rollback()
         worker.log_print(f"❌ 收尾等待意图失败: intent={getattr(intent, 'id', None)}, {exc}", "AI", force=True)
         return
+    if job_reason:
+        _settle_job_of_intent(intent, job_reason, message)
     worker.log_print(
         f"⏹️ 等待同步的分析意图 #{getattr(intent, 'id', None)} 结束（{status}）: {message}",
         "AI",
         force=True,
     )
+
+
+def _settle_job_of_intent(intent, reason, message):
+    """把这条意图服务的 job 收口（意图作废时 job 不许留在非终态，见 `_retire_waiting_intent`）。
+
+    收口失败**只记日志**：它是一个补充动作，不该把意图的作废回滚掉 —— 回滚会让页面上
+    重新出现「已登记，等着」的假象（那是比一条卡住的 job 更难查的形态）。
+    """
+    job_id = getattr(intent, "job_id", None)
+    if not job_id:
+        return
+    try:
+        # 局部导入：`job_service` 在函数内反向引用本模块（避免模块级循环）。
+        from services.ai.job_service import settle_without_run
+
+        job = settle_without_run(job_id, reason=reason, message=message)
+        if job is not None:
+            worker._db.session.commit()
+    except Exception as exc:  # noqa: BLE001 —— 见 docstring
+        try:
+            worker._db.session.rollback()
+        except worker.SQLAlchemyError:
+            pass
+        worker.log_print(
+            f"⚠️ 等待意图 #{getattr(intent, 'id', None)} 作废后没能收口 job {job_id}: {exc}",
+            "AI",
+            force=True,
+        )
 
 
 def _analysis_job_ref_of_intent(intent):
@@ -1528,8 +1574,21 @@ def _resolve_waiting_intent(intent, *, now=None):
     """
     group_key = getattr(intent, "file_path", None)
     config_id = worker.parse_config_id_from_commit_id(getattr(intent, "commit_id", None))
+    # 收口 job 用的原因短码（语义见 `job_service.WITHOUT_RUN_REASON_STATES`）。
+    # 局部导入：`job_service` 在函数内反向引用本模块，模块级导入会成环。
+    from services.ai.job_service import (
+        REASON_ABANDONED,
+        REASON_ALREADY_RUNNING,
+        REASON_NO_CONFIGS,
+        REASON_SYNC_IN_FLIGHT,
+    )
+
     if not group_key or config_id is None:
-        _retire_waiting_intent(intent, "意图载荷不完整（缺少分组键或 config_id），无法转交")
+        _retire_waiting_intent(
+            intent,
+            "意图载荷不完整（缺少分组键或 config_id），无法转交",
+            job_reason=REASON_ABANDONED,
+        )
         return "retired"
 
     covering = _run_covering_intent(group_key, intent)
@@ -1540,6 +1599,7 @@ def _resolve_waiting_intent(intent, *, now=None):
             intent,
             f"已经有一次分析（run={covering.id}）覆盖了这份输入，本次登记自动作废"
             "（没有再发起任何分析）",
+            job_reason=REASON_ALREADY_RUNNING,
         )
         return "retired"
 
@@ -1549,6 +1609,7 @@ def _resolve_waiting_intent(intent, *, now=None):
             f"等待超过 {WAITING_INTENT_TTL_SECONDS // 60} 分钟仍没等到同步结束，"
             "本次登记已作废 —— 可以在同步跑完之后手动再点一次「重新分析」",
             status="cancelled",
+            job_reason=REASON_SYNC_IN_FLIGHT,
         )
         return "expired"
 
@@ -1569,7 +1630,11 @@ def _resolve_waiting_intent(intent, *, now=None):
 
     config = worker._db.session.get(worker._WeeklyVersionConfig, config_id)
     if config is None:
-        _retire_waiting_intent(intent, f"周版本配置 {config_id} 已不存在，本次登记作废")
+        _retire_waiting_intent(
+            intent,
+            f"周版本配置 {config_id} 已不存在，本次登记作废",
+            job_reason=REASON_NO_CONFIGS,
+        )
         return "retired"
 
     task_id = worker.create_weekly_ai_analysis_task(
@@ -1590,6 +1655,7 @@ def _resolve_waiting_intent(intent, *, now=None):
             "同步已经结束，但没能建出分析任务（转交失败），本次登记作废 —— "
             "可以手动再点一次「重新分析」",
             status="cancelled",
+            job_reason=REASON_ABANDONED,
         )
         return "retired"
 
