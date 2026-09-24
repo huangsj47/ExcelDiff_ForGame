@@ -134,7 +134,7 @@ def _provider(two_repos, *, changed_paths=None) -> PlatformContextProvider:
         frozen_repository=(config, code),
         scope=scope,
     )
-    provider._commit_row = lambda commit, path: None
+    provider._commit_row = lambda commit, path, repository_id="": (None, ())
     return provider
 
 

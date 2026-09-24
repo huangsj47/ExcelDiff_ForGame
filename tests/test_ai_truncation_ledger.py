@@ -65,7 +65,7 @@ class FakeProvider:
         self.file_diff_response = file_diff
         self.calls: list[tuple] = []
 
-    def file_diff(self, commit, path):
+    def file_diff(self, commit, path, repository_id=""):
         self.calls.append((commit, path))
         return self.file_diff_response
 

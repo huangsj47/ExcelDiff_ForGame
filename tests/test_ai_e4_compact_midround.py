@@ -318,11 +318,11 @@ class StubProvider:
     def __init__(self):
         self.seen: list[tuple] = []
 
-    def commit_detail(self, commit):
+    def commit_detail(self, commit, repository_id=""):
         self.seen.append(("commit_detail", commit))
         return "提交详情"
 
-    def file_diff(self, commit, path):
+    def file_diff(self, commit, path, repository_id=""):
         self.seen.append(("file_diff", commit, path))
         return f"diff of {path}"
 

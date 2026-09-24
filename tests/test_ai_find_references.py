@@ -31,6 +31,7 @@ from services.ai.reference_search import (
     search_text,
 )
 from services.ai.scope import AnalysisScope, normalize_path
+from services.ai import provider_search as agent_mode_module
 
 COMMIT_A = "a" * 40
 COMMIT_B = "b" * 40
@@ -416,6 +417,10 @@ def test_the_local_path_searches_the_batch(monkeypatch):
         vcs, "get_file_content_from_git", lambda repo, commit, path: files.get((path, commit))
     )
     monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: False)
+    # 部署模式在**两个**模块里各被问一次：`_diff_from_agent` / `_content_from_agent`
+    # 住在 `platform_provider`，而 `find_references` 那一段（2026-09-24 起）住在
+    # `provider_search` —— 只打一处的话，另一条路会照旧按真实部署模式走。
+    monkeypatch.setattr(agent_mode_module, "is_agent_dispatch_mode", lambda: False)
     provider = _provider(_scope())
     monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=1))
 
@@ -451,6 +456,10 @@ def test_the_platform_asks_the_agent_when_it_cannot_read_locally(monkeypatch):
 
     monkeypatch.setattr(dispatch, "request_references", fake)
     monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: True)
+    # 部署模式在**两个**模块里各被问一次：`_diff_from_agent` / `_content_from_agent`
+    # 住在 `platform_provider`，而 `find_references` 那一段（2026-09-24 起）住在
+    # `provider_search` —— 只打一处的话，另一条路会照旧按真实部署模式走。
+    monkeypatch.setattr(agent_mode_module, "is_agent_dispatch_mode", lambda: True)
     provider = _provider(_scope())
     monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=7))
 
@@ -494,6 +503,10 @@ def test_no_search_budget_gate_remains(monkeypatch):
         vcs, "get_file_content_from_git", lambda repo, commit, path: files.get((path, commit))
     )
     monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: False)
+    # 部署模式在**两个**模块里各被问一次：`_diff_from_agent` / `_content_from_agent`
+    # 住在 `platform_provider`，而 `find_references` 那一段（2026-09-24 起）住在
+    # `provider_search` —— 只打一处的话，另一条路会照旧按真实部署模式走。
+    monkeypatch.setattr(agent_mode_module, "is_agent_dispatch_mode", lambda: False)
     provider = _provider(_scope())
     monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=1))
     assert not hasattr(provider, "_search_budget"), "provider 上不该再有额度计数器"
@@ -540,6 +553,10 @@ def test_the_agent_receives_the_full_snapshot_for_indexing(monkeypatch):
 
     monkeypatch.setattr(dispatch, "request_references", fake)
     monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: True)
+    # 部署模式在**两个**模块里各被问一次：`_diff_from_agent` / `_content_from_agent`
+    # 住在 `platform_provider`，而 `find_references` 那一段（2026-09-24 起）住在
+    # `provider_search` —— 只打一处的话，另一条路会照旧按真实部署模式走。
+    monkeypatch.setattr(agent_mode_module, "is_agent_dispatch_mode", lambda: True)
     provider = _provider(scope)
     monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=7))
 
@@ -586,6 +603,10 @@ def test_a_pending_agent_answer_is_not_a_conclusion(monkeypatch):
         },
     )
     monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: True)
+    # 部署模式在**两个**模块里各被问一次：`_diff_from_agent` / `_content_from_agent`
+    # 住在 `platform_provider`，而 `find_references` 那一段（2026-09-24 起）住在
+    # `provider_search` —— 只打一处的话，另一条路会照旧按真实部署模式走。
+    monkeypatch.setattr(agent_mode_module, "is_agent_dispatch_mode", lambda: True)
     provider = _provider(_scope())
     monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=7))
 
@@ -1044,6 +1065,10 @@ def test_the_second_query_with_a_different_prefix_still_sees_the_whole_batch(mon
 
     monkeypatch.setattr(vcs, "get_file_content_from_git", reader)
     monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: False)
+    # 部署模式在**两个**模块里各被问一次：`_diff_from_agent` / `_content_from_agent`
+    # 住在 `platform_provider`，而 `find_references` 那一段（2026-09-24 起）住在
+    # `provider_search` —— 只打一处的话，另一条路会照旧按真实部署模式走。
+    monkeypatch.setattr(agent_mode_module, "is_agent_dispatch_mode", lambda: False)
     provider = _provider(_scope_across_prefixes())
     monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=1))
 
@@ -1087,6 +1112,10 @@ def test_the_index_belongs_to_exactly_one_snapshot(monkeypatch):
 
     monkeypatch.setattr(vcs, "get_file_content_from_git", reader)
     monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: False)
+    # 部署模式在**两个**模块里各被问一次：`_diff_from_agent` / `_content_from_agent`
+    # 住在 `platform_provider`，而 `find_references` 那一段（2026-09-24 起）住在
+    # `provider_search` —— 只打一处的话，另一条路会照旧按真实部署模式走。
+    monkeypatch.setattr(agent_mode_module, "is_agent_dispatch_mode", lambda: False)
     provider = _provider(_scope())
     monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=1))
 
@@ -1257,6 +1286,10 @@ def test_the_first_query_indexes_only_a_bounded_prefix_and_says_so(monkeypatch):
 
     monkeypatch.setattr(vcs, "get_file_content_from_git", reader)
     monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: False)
+    # 部署模式在**两个**模块里各被问一次：`_diff_from_agent` / `_content_from_agent`
+    # 住在 `platform_provider`，而 `find_references` 那一段（2026-09-24 起）住在
+    # `provider_search` —— 只打一处的话，另一条路会照旧按真实部署模式走。
+    monkeypatch.setattr(agent_mode_module, "is_agent_dispatch_mode", lambda: False)
     provider = _provider(scope)
     monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=1))
 

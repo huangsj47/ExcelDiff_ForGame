@@ -112,7 +112,7 @@ def fetch(monkeypatch):
     def _install(content: bytes):
         monkeypatch.setattr(
             PlatformContextProvider, '_commit_row',
-            lambda self, commit, path: SimpleNamespace(commit_id=commit, path=path, repository=object()),
+            lambda self, commit, path, repository_id="": (SimpleNamespace(commit_id=commit, path=path, repository=object()), ()),
         )
 
         def _get_content(repository, commit_id, path):
@@ -251,7 +251,7 @@ class TestContentEmptyContract:
         assert provider.file_content(COMMIT, 'config/道具表.xlsx') == ''
 
     def test_missing_commit_row_is_none(self, provider, monkeypatch):
-        monkeypatch.setattr(PlatformContextProvider, '_commit_row', lambda self, c, p: None)
+        monkeypatch.setattr(PlatformContextProvider, '_commit_row', lambda self, c, p, r="": (None, ()))
         assert provider.file_content(COMMIT, 'config/道具表.xlsx') is None
 
 
@@ -444,9 +444,9 @@ class TestTheAgentNoteIsInsideTheBudget:
 
         monkeypatch.setattr(
             PlatformContextProvider, '_commit_row',
-            lambda self, commit, path: SimpleNamespace(
+            lambda self, commit, path, repository_id="": (SimpleNamespace(
                 commit_id=commit, path=path, repository=SimpleNamespace(id=1)
-            ),
+            ), ()),
         )
         import services.agent_file_content_dispatch as dispatch
 
@@ -512,9 +512,9 @@ class TestTheAgentNoteIsInsideTheBudget:
         monkeypatch.setattr(dispatch, 'request_file_content', _agent)
         monkeypatch.setattr(
             PlatformContextProvider, '_commit_row',
-            lambda self, commit, path: SimpleNamespace(
+            lambda self, commit, path, repository_id="": (SimpleNamespace(
                 commit_id=commit, path=path, repository=SimpleNamespace(id=1)
-            ),
+            ), ()),
         )
         import services.vcs_content_service as vcs
 

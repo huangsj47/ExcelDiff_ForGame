@@ -732,7 +732,7 @@ def test_context_render_exposes_stable_evidence_id():
     from services.ai.prompt import render_context_items
 
     class Provider:
-        def file_diff(self, commit, path):
+        def file_diff(self, commit, path, repository_id=""):
             return "@@ -1 +1 @@\n-old\n+new"
 
     request = ContextRequest(type="file_diff", commit="a" * 40, path="a.lua")

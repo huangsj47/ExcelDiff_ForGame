@@ -179,9 +179,9 @@ def fetch(monkeypatch):
     def _install(content):
         monkeypatch.setattr(
             PlatformContextProvider, '_commit_row',
-            lambda self, commit, path: SimpleNamespace(
+            lambda self, commit, path, repository_id="": (SimpleNamespace(
                 commit_id=commit, path=path, repository=object()
-            ),
+            ), ()),
         )
         import services.vcs_content_service as vcs
 

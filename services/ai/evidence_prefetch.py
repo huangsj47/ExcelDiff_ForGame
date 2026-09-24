@@ -293,7 +293,20 @@ def diff_requests(scope: AnalysisScope, *, max_files: int = DEFAULT_MAX_FILES) -
         commit = scope.commit_of_path(path)
         if not commit:
             continue
-        requests.append(ContextRequest(type="file_diff", commit=commit, path=path))
+        # 仓库是**身份的一部分**（P1a）：两个仓库都有这条 `(提交, 路径)` 时，不带仓库号的
+        # 预取请求要么被拒（取数层不猜），要么读到另一个仓库的同名文件 —— 而这一条是
+        # **平台自己发起**的，模型根本没机会纠正它。归属唯一时才写；写不出来就不写，
+        # 让取数层照旧判（同样的三态口径，见 `AnalysisScope.entries`）。
+        owners = scope.repositories_for_path(path, commit)
+        repository_id = str(next(iter(owners))) if len(owners) == 1 else ""
+        requests.append(
+            ContextRequest(
+                type="file_diff",
+                commit=commit,
+                path=path,
+                repository_id=repository_id,
+            )
+        )
     return tuple(requests)
 
 

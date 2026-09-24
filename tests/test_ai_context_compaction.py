@@ -255,7 +255,7 @@ class FatProvider(FakeProvider):
     正是「历史涨到撑破预算时会发生什么」，所以内容必须是真的体积。
     """
 
-    def file_diff(self, commit, path):
+    def file_diff(self, commit, path, repository_id=""):
         self.seen.append(("file_diff", commit, path))
         return f"diff of {path} at {commit}\n" + "+ 一行改动\n" * 4_000
 
@@ -266,7 +266,7 @@ class FatProvider(FakeProvider):
         self.seen.append(("file_content", commit, path))
         return f"{path} 的完整内容\n" + "行内容\n" * 4_000
 
-    def commit_detail(self, commit):
+    def commit_detail(self, commit, repository_id=""):
         self.seen.append(("commit_detail", commit))
         return f"提交 {commit} 的详情\n" + "文件名\n" * 4_000
 

@@ -154,7 +154,7 @@ class TestEveryTruncationNamesTheConstraintThatBit:
         from services.ai.trace_evidence import summarize_executed
 
         class _Provider:
-            def file_diff(self, commit, path):
+            def file_diff(self, commit, path, repository_id=""):
                 return "代码差异：a.lua\n@@ -1 +1 @@\n" + ("+ 一行很长的改动\n" * 4_000)
 
             def find_references(self, query, path=""):

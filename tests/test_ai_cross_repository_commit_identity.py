@@ -141,13 +141,81 @@ def test_the_same_path_does_not_read_the_other_repositorys_row():
         repo_a_id, repo_c_id = _seed()
 
         scope = from_weekly_payload(_payload(repository_id=repo_a_id)).scope
-        row = _provider(scope)._commit_row(SHARED_REVISION, SHARED_PATH)
+        # `_commit_row` 现在回答**两个**值：`(行, 候选仓库)`（P1a）—— 行是 None 而候选
+        # 非空就是「歧义」，见下面两条用例。
+        row, candidates = _provider(scope)._commit_row(SHARED_REVISION, SHARED_PATH)
 
         assert row is not None
+        assert candidates == (repo_a_id,), "本批次只涉及 A 仓，候选就该只有它"
         assert row.repository_id == repo_a_id, (
             f"读到了仓库 {row.repository_id} 那一行（本批次是 {repo_a_id}）"
         )
         assert row.repository_id != repo_c_id
+
+
+def test_two_repositories_with_the_same_pair_are_not_guessed_between():
+    """**歧义必须说出来**，不许静默取一个（P1a 的核心判据）。
+
+    两个仓库都在本批次、又都有这条 `(修订号, 路径)` 时，原先按自增 id 取「更大的那一行」
+    —— 那是**另一个仓库的同名文件**：名字一样、内容不同，而回执抬头写着模型问的那一条，
+    没有任何一处看得出来读错了。现在回 `(None, 候选)`，由调用方说「请点名仓库」。
+    """
+    with app.app_context():
+        create_tables()
+        repo_a_id, repo_c_id = _seed()
+
+        payload = _payload(repository_id=repo_a_id)
+        payload["delta_files"].append(
+            {
+                "latest_commit_id": SHARED_REVISION,
+                "file_path": SHARED_PATH,
+                "repository_id": repo_c_id,
+            }
+        )
+        scope = from_weekly_payload(payload).scope
+        provider = _provider(scope)
+
+        row, candidates = provider._commit_row(SHARED_REVISION, SHARED_PATH)
+
+        assert row is None, "歧义时不许猜一个仓库"
+        assert candidates == (repo_a_id, repo_c_id)
+
+        # 点对了仓库就读得到，而且读的是那一个仓库的行。
+        named, _ = provider._commit_row(SHARED_REVISION, SHARED_PATH, repository_id=repo_c_id)
+        assert named is not None and named.repository_id == repo_c_id
+
+        # 点一个本批次里没有这条的仓库：行是 None，但候选还在（调用方要说得出谁有）。
+        other, candidates_2 = provider._commit_row(
+            SHARED_REVISION, OTHER_PROJECT_FILE, repository_id=repo_a_id
+        )
+        assert other is None and candidates_2 == (repo_c_id,)
+
+
+def test_the_ambiguous_diff_asks_for_a_repository_instead_of_reading_one():
+    """歧义落到 `file_diff` 上时，模型拿到的是一句**可照做**的拒绝，不是某个仓库的内容。"""
+    with app.app_context():
+        create_tables()
+        repo_a_id, repo_c_id = _seed()
+
+        payload = _payload(repository_id=repo_a_id)
+        payload["delta_files"].append(
+            {
+                "latest_commit_id": SHARED_REVISION,
+                "file_path": SHARED_PATH,
+                "repository_id": repo_c_id,
+            }
+        )
+        scope = from_weekly_payload(payload).scope
+
+        text = _provider(scope).file_diff(SHARED_REVISION, SHARED_PATH)
+
+        assert text is not None, "不许回一句沉默的 None（那会被读成「读取失败」）"
+        assert "repository_id" in text, f"要请模型点名仓库：{text}"
+        assert str(repo_a_id) in text and str(repo_c_id) in text, (
+            f"候选仓库要写进去（模型才能照着改）：{text}"
+        )
+        # 开头必须是失败前缀：这一次确实没取到内容，面板上的「失败」账要对得上。
+        assert text.startswith("[取数失败]"), text
 
 
 def test_a_batch_spanning_both_repositories_keeps_both():

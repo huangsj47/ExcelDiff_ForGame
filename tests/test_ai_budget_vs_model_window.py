@@ -478,7 +478,7 @@ def test_the_planned_tool_limits_really_move_the_truncation_point():
     body = "x" * 40_000
 
     class Provider:
-        def file_diff(self, commit, path):
+        def file_diff(self, commit, path, repository_id=""):
             # 切不开的一整块（没有 `@@` 块头）→ 走 `truncate_text_middle`，
             # 它的截断点就是 `limits` 里给的那个数。
             return body

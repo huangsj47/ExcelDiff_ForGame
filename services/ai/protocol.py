@@ -919,7 +919,7 @@ def sanitize_requests(
     repo_set = None if repo_paths is None else frozenset(repo_paths)
     allowed: list[ContextRequest] = []
     dropped: list[DroppedItem] = []
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, str]] = set()
     # **路径形状先判一次**：绝对路径 / 带 `..` 的写法在这里就拒掉，并给出可照做的理由。
     # 不先判的话，它们会落进「不在跟踪树里」那条更含糊的理由里 —— 而模型据那条理由只会
     # 反复换路径（`frozen_repo.resolve_repo_path` 是同一套判据的唯一实现，这里 import 它
@@ -1133,15 +1133,73 @@ def sanitize_requests(
         # 拿回第一段。
         lines = _normalize_line_window(request.lines) if request_type in _WINDOW_TYPES else ""
 
-        key = (request_type, resolved, path, lines)
+        # 点名了仓库时先过仓库闸门（P1a）。它排在**去重键之前**：被拒的请求不该占用
+        # 一个去重位，否则同一轮里「先点名一个错的仓库、再点名对的」会被当成重复丢掉。
+        named = str(request.repository_id or "").strip()
+        if named:
+            reason = _repository_gate(scope, resolved, path, named)
+            if reason:
+                dropped.append(
+                    DroppedItem("request", index, reason, f"{path}（仓库 {named}）")
+                )
+                continue
+
+        # 仓库是去重键的第 5 位：同一条提交、同一条路径、**两个仓库**各要一次是两条请求，
+        # 只去重掉一条等于把另一个仓库的内容静默吞掉（与 `file_content` 那条支路同一个理由）。
+        key = (request_type, resolved, path, lines, named)
         if key in seen:
             continue  # 同一轮内重复索要不重复执行
         seen.add(key)
         allowed.append(
-            ContextRequest(type=request_type, commit=resolved, path=path, lines=lines)
+            ContextRequest(
+                type=request_type,
+                commit=resolved,
+                path=path,
+                lines=lines,
+                repository_id=named,
+            )
         )
 
     return tuple(allowed), tuple(dropped)
+
+
+def _repository_gate(scope, commit: str, path: str, raw_repository_id: str) -> str:
+    """点名了仓库时，这条 `(仓库, 提交, 路径)` 该不该被拒（空串 = 放行）。
+
+    ## 两道判据，判的都是「这条三元组存不存在」
+
+    1. **仓库在不在本批次里**（`repository_ids_by_commit`）。本批次带这个提交号的是哪几个
+       仓库是写侧冻结的事实，点名一个不在其中的仓库没有意义 —— 多半是把别处的编号写了
+       进来。集合为空（手工构造的 scope、单提交模式）时**不判**：那是「不知道」，不是
+       「一个都不许」。
+    2. **这条三元组本身**（`scope.entry_allowed`，纯三态）。它拦的是本批次里真实存在的
+       那种错配：两个仓库同窗、都有 revision 42，而 42 在 A 仓改的是 `config/x.xlsx`、
+       在 B 仓改的是 `code/y.lua` —— 模型点名 A 仓却要 `y.lua` 时，取数层会**读到 B 仓的
+       同名文件**（或者查不到而回一句含糊的失败），而这里的拒绝说得出「它属于哪个仓库」。
+
+    理由里**必须带上候选**：模型下一轮照它改一个字段就能问对，而「这个仓库不在本批次里」
+    这类话不写出候选，它只能盲试。仓库名不在这层的职责里（要冻结对象才拿得到），所以这里
+    只说编号 —— 面向上层的拒绝里那句带名字的版本由取数层发（`identity_refusal`）。
+    """
+    try:
+        named = int(str(raw_repository_id).strip())
+    except (TypeError, ValueError):
+        return "repository_id 必须是一个仓库编号（数字），这次给的形状不对"
+    allowed = frozenset(scope.repository_ids_by_commit.get(commit) or ())
+    if allowed and named not in allowed:
+        others = "、".join(str(item) for item in sorted(allowed))
+        return (
+            f"仓库 {named} 不在本批次里：本批次带 commit {commit[:12]} 的是仓库 {others}。"
+            "请照这些编号改一个再问。"
+        )
+    if scope.entry_allowed(named, commit, path) is False:
+        owners = "、".join(str(item) for item in sorted(scope.repositories_for_path(path, commit)))
+        return (
+            f"这条 `(仓库 {named}, commit {commit[:12]}, {path})` 在本批次里不存在："
+            f"这个文件在本批次里属于仓库 {owners}。"
+            "**不同仓库里的同名文件内容并不相同**，点名别的仓库会读到另一份。"
+        )
+    return ""
 
 
 # 行窗口的规范形态：`1180-1260`（单行写成 `1180`）。上限只是防呆 —— 真正的夹紧在

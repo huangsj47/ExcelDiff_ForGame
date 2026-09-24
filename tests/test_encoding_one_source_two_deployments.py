@@ -95,9 +95,9 @@ def platform_read(monkeypatch, provider):
     def _install(content: bytes):
         monkeypatch.setattr(
             PlatformContextProvider, '_commit_row',
-            lambda self, commit, path: SimpleNamespace(
+            lambda self, commit, path, repository_id="": (SimpleNamespace(
                 commit_id=commit, path=path, repository=SimpleNamespace(id=1)
-            ),
+            ), ()),
         )
         import services.vcs_content_service as vcs
 

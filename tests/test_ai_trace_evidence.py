@@ -40,6 +40,7 @@ from services.ai.trace_evidence import (
     summarize_executed,
     summarize_requests,
 )
+from services.ai import provider_search as agent_mode_module
 
 LUA = "code/qz_pub/battle/BattleMgr.lua"
 COMMIT = "a" * 40
@@ -218,6 +219,10 @@ class TestFailureVersusEmpty:
         monkeypatch.setattr(provider, "_repository_of", lambda pairs: SimpleNamespace(id=1))
 
         monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: True)
+        # 部署模式在**两个**模块里各被问一次：`_diff_from_agent` / `_content_from_agent`
+        # 住在 `platform_provider`，而 `find_references` 那一段（2026-09-24 起）住在
+        # `provider_search` —— 只打一处的话，另一条路会照旧按真实部署模式走。
+        monkeypatch.setattr(agent_mode_module, "is_agent_dispatch_mode", lambda: True)
         monkeypatch.setattr(
             dispatch,
             "request_references",
@@ -263,8 +268,18 @@ class TestFailureVersusEmpty:
 
         import services.ai.context_tools as context_tools
         import services.ai.platform_provider as provider
+        import services.ai.provider_search as provider_search
 
-        source = inspect.getsource(provider) + inspect.getsource(context_tools)
+        # **三个**模块（2026-09-24 起）：`find_references` 的三条取数来源（冻结仓库 /
+        # 本地索引 / 业务节点 Agent）搬进了 `provider_search` 的 mixin，`[检索不到]` /
+        # `[检索还没回来]` 两句的发出方跟着走了。扫描清单不同步的话，这条守卫会**静默
+        # 失效** —— 它不再扫到那两个前缀，而失败的表现只是「清单里留了一条死代码」，
+        # 没人会注意到。
+        source = (
+            inspect.getsource(provider)
+            + inspect.getsource(context_tools)
+            + inspect.getsource(provider_search)
+        )
         for prefix in FAILURE_NOTICE_PREFIXES:
             assert f"{prefix}" in source, (
                 f"{prefix} 已经不在 provider / context_tools 里了 —— 清单里留着它就是死代码"

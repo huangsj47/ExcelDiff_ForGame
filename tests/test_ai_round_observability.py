@@ -242,10 +242,10 @@ def test_the_protocol_correction_reason_is_named():
 class _FakeProvider:
     """取数口：一律给一句内容（这一组测的是用量记账，不是取数）。"""
 
-    def commit_detail(self, commit):
+    def commit_detail(self, commit, repository_id=""):
         return f"提交 {commit} 的详情"
 
-    def file_diff(self, commit, path):
+    def file_diff(self, commit, path, repository_id=""):
         return f"diff of {path}"
 
     def file_content(self, commit, path, lines="", repository_id=""):

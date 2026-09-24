@@ -97,10 +97,10 @@ class FakeProvider:
             raise RuntimeError("git 超时")
         return self.contents.get(key, default)
 
-    def commit_detail(self, commit):
+    def commit_detail(self, commit, repository_id=""):
         return self._lookup(("commit_detail", commit), f"提交 {commit} 的详情：改了道具表")
 
-    def file_diff(self, commit, path):
+    def file_diff(self, commit, path, repository_id=""):
         return self._lookup(("file_diff", commit, path), f"diff of {path} at {commit}\n+ 一行改动")
 
     def file_content(self, commit, path, lines="", repository_id=""):

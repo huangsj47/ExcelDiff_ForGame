@@ -174,9 +174,9 @@ class ContextProvider(Protocol):
     * 抛异常 → 同上，但会被记进 trace 的原因里。
     """
 
-    def commit_detail(self, commit: str) -> str | None: ...
+    def commit_detail(self, commit: str, repository_id: str = "") -> str | None: ...
 
-    def file_diff(self, commit: str, path: str) -> str | None: ...
+    def file_diff(self, commit: str, path: str, repository_id: str = "") -> str | None: ...
 
     def file_content(
         self, commit: str, path: str, lines: str = "", repository_id: str = ""
@@ -1000,9 +1000,15 @@ class ContextTools:
 
     def _fetch(self, request: ContextRequest) -> str | None:
         if request.type == "commit_detail":
-            return self.provider.commit_detail(request.commit)
+            return self.provider.commit_detail(
+                request.commit, repository_id=request.repository_id
+            )
         if request.type == "file_diff":
-            return self.provider.file_diff(request.commit, normalize_path(request.path))
+            return self.provider.file_diff(
+                request.commit,
+                normalize_path(request.path),
+                repository_id=request.repository_id,
+            )
         if request.type == "file_content":
             return self.provider.file_content(
                 request.commit,

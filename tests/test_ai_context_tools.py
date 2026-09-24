@@ -44,10 +44,10 @@ class FakeProvider:
             raise value
         return value
 
-    def commit_detail(self, commit):
+    def commit_detail(self, commit, repository_id=""):
         return self._respond("commit_detail", commit)
 
-    def file_diff(self, commit, path):
+    def file_diff(self, commit, path, repository_id=""):
         return self._respond("file_diff", commit, path)
 
     def file_content(self, commit, path, lines="", repository_id=""):

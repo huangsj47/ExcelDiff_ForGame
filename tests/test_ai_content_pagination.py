@@ -212,7 +212,7 @@ class _FrozenProvider(PlatformContextProvider):
             loaded=SimpleNamespace(readable={}), scope=None, frozen_repository=frozen,
             **kwargs,
         )
-        self._commit_row = lambda commit, path: None
+        self._commit_row = lambda commit, path, repository_id="": (None, ())
 
 
 def _cursor_of(text: str) -> str:
@@ -375,7 +375,9 @@ def repo_with_batch(tmp_path):
         commit_id=tip, path=changed, repository_id=12,
         repository=SimpleNamespace(id=12, name="batchrepo", branch="main"),
     )
-    provider._commit_row = lambda commit, path: row if path == changed else None
+    provider._commit_row = lambda commit, path, repository_id="": (
+            (row, ()) if path == changed else (None, ())
+        )
     provider._default_window = lambda commit, path: "520-560"
     yield provider, frozen
     reset_caches()

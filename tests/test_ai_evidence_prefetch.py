@@ -253,10 +253,10 @@ class _Provider:
         self.seen.append(key)
         return self.answers.get(key, default)
 
-    def commit_detail(self, commit):
+    def commit_detail(self, commit, repository_id=""):
         return self._answer(("commit_detail", commit), f"提交 {commit} 的详情")
 
-    def file_diff(self, commit, path):
+    def file_diff(self, commit, path, repository_id=""):
         return self._answer(("file_diff", commit, path), f"diff of {path}")
 
     def file_content(self, commit, path, lines="", repository_id=""):
@@ -558,7 +558,7 @@ def _engine_provider(repo):
     而 diff 的渲染在 P1/P2 的用例里已经钉过；这里只需要一份「只有定义被改名」的改动行。
     """
     provider = _provider(repo)
-    provider.file_diff = lambda commit, path: RENAME_DIFF
+    provider.file_diff = lambda commit, path, repository_id="": RENAME_DIFF
     return provider
 
 

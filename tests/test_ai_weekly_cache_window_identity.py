@@ -30,6 +30,7 @@ from app import app, create_tables, db
 from models import Commit, Project, Repository
 from models.weekly_version import WeeklyVersionConfig, WeeklyVersionDiffCache
 from services.ai.platform_provider import PlatformContextProvider
+from services.ai.scope import AnalysisScope
 from services.ai.stored_diff_source import _weekly_stored_diff
 
 LUA = "code/qz_pub/battle/BattleMgr.lua"
@@ -98,9 +99,26 @@ def _seed():
     return repository.id, row_wanted.id, row_other.id
 
 
-def _provider(*, cache_row_ids) -> PlatformContextProvider:
+def _provider(*, cache_row_ids, repository_id=None) -> PlatformContextProvider:
+    """取数口。给了 `repository_id` 就配一份**点名了仓库**的 scope。
+
+    这不是为了绕过什么，而是因为**测试库是会话级共用的**：四个用例各 `_seed()` 一次，
+    于是同一条 `(提交, 路径)` 在库里会攒出好几行（分属不同的仓库）。生产里 scope 带着
+    「本批次这个号属于哪个仓库」（REV-AI-001 / P1a），取数据此收窄；不带它的话，这一对
+    在测试库里就是**真的歧义**，取数层会（正确地）回一句「请点名仓库」——而那与这几个
+    用例要测的东西（缓存行身份）无关。
+    """
+    scope = None
+    if repository_id is not None:
+        scope = AnalysisScope(
+            commits=(SHARED_SHA,),
+            paths_by_commit={SHARED_SHA: frozenset({LUA})},
+            repository_ids_by_commit={SHARED_SHA: frozenset({repository_id})},
+            readable_references=frozenset(),
+        )
     return PlatformContextProvider(
         loaded=type("L", (), {"readable": {}, "skills": {}, "dimensions": ()})(),
+        scope=scope,
         use_stored_batch_diff=True,
         cache_row_ids=cache_row_ids,
     )
@@ -112,7 +130,8 @@ def test_the_wanted_window_row_is_the_one_read():
         repository_id, wanted_row_id, _ = _seed()
 
         text = _provider(
-            cache_row_ids={(repository_id, SHARED_SHA, LUA): wanted_row_id}
+            cache_row_ids={(repository_id, SHARED_SHA, LUA): wanted_row_id},
+            repository_id=repository_id,
         ).file_diff(SHARED_SHA, LUA)
 
         assert text is not None, "本窗口确实有缓存行，不该读不到"
@@ -130,7 +149,8 @@ def test_the_other_window_row_is_the_one_read_when_it_is_the_wanted_one():
         repository_id, _, other_row_id = _seed()
 
         text = _provider(
-            cache_row_ids={(repository_id, SHARED_SHA, LUA): other_row_id}
+            cache_row_ids={(repository_id, SHARED_SHA, LUA): other_row_id},
+            repository_id=repository_id,
         ).file_diff(SHARED_SHA, LUA)
 
         assert text is not None and WRONG in text and EXPECTED not in text

@@ -36,7 +36,7 @@ from services.ai.bundles import build_bundles, describe_bundles
 from services.ai.manifest import ManifestPlan, build_manifest
 from services.ai.project_facts import DEFAULT_PREFIX_DECLARATION, PrefixDeclaration
 from services.ai.prompt import CommitSummary, FileChange, render_change_summary
-from services.ai.scope import AnalysisScope, normalize_path
+from services.ai.scope import AnalysisScope, build_entries, normalize_path
 from services.ai.window_commits import WindowCommitFacts
 from utils.logger import log_print
 
@@ -139,6 +139,10 @@ def from_weekly_payload(
     # 提交号 -> 本批次里带这个号的仓库（见 `AnalysisScope.repository_ids_by_commit`）。
     # payload 的每一条**本来就带 `repository_id`**，只是原先在这两个归并循环里被扔掉了。
     repositories: dict[str, set[int]] = {}
+    # 逐条的 `(仓库, 提交, 路径)`（见 `AnalysisScope.entries`）。两个清单**各收一份**：
+    # 白名单来自 `delta_files`，而缺 `delta_files` 的老 payload 退回 `list_files` 时
+    # 归属只能从那一份里拿。多收一份没有代价（`build_entries` 会去重排序）。
+    triples: list[tuple] = []
     for item in payload.get("list_files") or payload.get("delta_files") or []:
         entry = dict(item or {})
         commit_id = str(entry.get("latest_commit_id") or "")
@@ -147,6 +151,7 @@ def from_weekly_payload(
             continue
         grouped.setdefault(commit_id, []).append(FileChange(path=path, operation="M"))
         _note_repository(repositories, commit_id, entry.get("repository_id"))
+        triples.append((entry.get("repository_id"), commit_id, path))
 
     commits = tuple(
         CommitSummary(commit=commit_id, files=tuple(files))
@@ -162,6 +167,7 @@ def from_weekly_payload(
         if commit_id and path:
             whitelist.setdefault(commit_id, []).append(path)
             _note_repository(repositories, commit_id, entry.get("repository_id"))
+            triples.append((entry.get("repository_id"), commit_id, path))
 
     # 截断说明由 `render_change_summary` 统一写（它会说清「没列出来但可以索取」），
     # 这里不再重复一句同义的话 —— 两处各写一半的后果是改一处漏一处。
@@ -211,6 +217,7 @@ def from_weekly_payload(
         manifest=manifest,
         extra_inputs=_extra_inputs(payload.get("delta_files") or ()),
         repositories=repositories,
+        entries=triples,
         # **窗口里真实可达的提交**（写侧读 `commits_log` 得到）。它撑起两件事：
         # 一是 `commit_detail` 的白名单 —— 此前只有每个文件的 `latest_commit_id`，
         # 窗口里其它改动过的提交一律被 `resolve_commit` 判成「不属于本批次」，模型
@@ -242,6 +249,7 @@ def build(
     extra_commits: Iterable[str] = (),
     commit_facts: Optional[WindowCommitFacts] = None,
     window_commit_files: Optional[Mapping[str, Any]] = None,
+    entries: Iterable[tuple] = (),
 ) -> ChangeSet:
     """渲染清单并算出白名单范围。两种模式共用。
 
@@ -412,6 +420,10 @@ def build(
             readable_references=frozenset(
                 [str(name) for name in readable_references if name] + [MANIFEST_REFERENCE]
             ),
+            # 三元组归属（P1a）：`(仓库, 提交, 路径)` **只收 payload 逐条给出的那一种配对**。
+            # 不用 `repositories × paths_by_commit` 叉乘去凑 —— 那正是这一层要挡的错
+            # （SVN 修订号只在单仓内唯一，叉乘会「授权」两个仓库里都不存在的那种组合）。
+            entries=build_entries(entries),
         ),
         paths=paths or rendered_paths,
         commits=ordered,

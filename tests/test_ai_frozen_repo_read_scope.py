@@ -47,6 +47,7 @@ from services.ai.platform_provider import PlatformContextProvider
 from services.ai.protocol import ContextRequest, sanitize_requests
 from services.ai.repo_reference import search_frozen_repository
 from services.ai.scope import AnalysisScope
+from services.ai import provider_search as agent_mode_module
 
 # 旧名 / 新名：fixture 的公共函数更名（只改定义处，不改调用方）。
 OLD_NAME = "CalcDamage"
@@ -160,7 +161,7 @@ def _provider(repo: SimpleNamespace, **overrides) -> PlatformContextProvider:
     # `commits_log` 查不到对应行（测试环境没有那个库）。不替换掉的话，每次调用都会
     # 打一条「Working outside of application context」的告警日志 —— 噪音会盖住真正的
     # 失败信号，而这条分支正是被测的东西。
-    provider._commit_row = lambda commit, path: None
+    provider._commit_row = lambda commit, path, repository_id="": (None, ())
     return provider
 
 
@@ -495,6 +496,10 @@ def test_no_frozen_scope_falls_back_to_the_batch_and_says_the_range_is_narrower(
     from services.ai import reference_index as ri
 
     monkeypatch.setattr(pp, "is_agent_dispatch_mode", lambda: False)
+    # 部署模式在**两个**模块里各被问一次：`_diff_from_agent` / `_content_from_agent`
+    # 住在 `platform_provider`，而 `find_references` 那一段（2026-09-24 起）住在
+    # `provider_search` —— 只打一处的话，另一条路会照旧按真实部署模式走。
+    monkeypatch.setattr(agent_mode_module, "is_agent_dispatch_mode", lambda: False)
     provider = PlatformContextProvider(
         loaded=SimpleNamespace(readable={}),
         scope=AnalysisScope(

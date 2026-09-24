@@ -708,9 +708,9 @@ def platform_mode(monkeypatch):
     """平台本地读不到正文（platform/agent 模式的常态）+ `_commit_row` 可用。"""
     monkeypatch.setattr(
         PlatformContextProvider, '_commit_row',
-        lambda self, commit, path: SimpleNamespace(
+        lambda self, commit, path, repository_id="": (SimpleNamespace(
             commit_id=commit, path=path, repository=SimpleNamespace(id=11, project_id=3)
-        ),
+        ), ()),
     )
     import services.vcs_content_service as vcs
 
@@ -734,9 +734,9 @@ class TestProviderLayering:
 
         monkeypatch.setattr(
             PlatformContextProvider, '_commit_row',
-            lambda self, commit, path: SimpleNamespace(
+            lambda self, commit, path, repository_id="": (SimpleNamespace(
                 commit_id=commit, path=path, repository=SimpleNamespace(id=11, project_id=3)
-            ),
+            ), ()),
         )
         monkeypatch.setattr(vcs, 'get_file_content_from_git', lambda *a, **k: 'local line\n')
         called = {'n': 0}
@@ -837,9 +837,9 @@ class TestProviderLayering:
         repository = SimpleNamespace(id=11, project_id=3, header_rows=None, header_name_row=None)
         monkeypatch.setattr(
             PlatformContextProvider, '_commit_row',
-            lambda self, commit, path: SimpleNamespace(
+            lambda self, commit, path, repository_id="": (SimpleNamespace(
                 commit_id=commit, path=path, repository=repository
-            ),
+            ), ()),
         )
         calls = []
 
@@ -930,9 +930,9 @@ class TestDefaultWindowFollowsTheChange:
 
         monkeypatch.setattr(
             PlatformContextProvider, '_commit_row',
-            lambda self, commit, path: SimpleNamespace(
+            lambda self, commit, path, repository_id="": (SimpleNamespace(
                 commit_id=commit, path=path, repository=SimpleNamespace(id=11, project_id=3)
-            ),
+            ), ()),
         )
 
         def _install(content, patch_text, *, platform_mode=False):

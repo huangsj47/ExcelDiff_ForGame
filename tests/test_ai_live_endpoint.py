@@ -244,7 +244,7 @@ class ScriptedProvider:
         self.skills = skills
         self.requests: list[tuple] = []
 
-    def commit_detail(self, commit):
+    def commit_detail(self, commit, repository_id=""):
         self.requests.append(("commit_detail", commit))
         return (
             f"提交 {commit}\n"
@@ -254,7 +254,7 @@ class ScriptedProvider:
             + "\n".join(f"  - [M] {path}" for path in CHANGED_PATHS)
         )
 
-    def file_diff(self, commit, path):
+    def file_diff(self, commit, path, repository_id=""):
         self.requests.append(("file_diff", commit, path))
         return FAKE_DIFFS.get(path, f"（{path} 无差异）")
 

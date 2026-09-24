@@ -41,6 +41,67 @@ def normalize_path(raw: str) -> str:
     return text
 
 
+def _as_int(raw) -> int | None:
+    """仓库 id 转整数（转不出来返回 `None`，**不猜**）。"""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value
+
+
+def build_entries(triples: Iterable[tuple]) -> tuple[ScopeEntry, ...]:
+    """把 `(仓库, 提交, 路径)` 原始三元组归一化成一份**确定性**的 entries。
+
+    三件事一起做：路径归一化、去重、排序（同一份输入两次构造得到逐字节相同的元组 ——
+    它会被写进日志与断言里，顺序不稳的话「两次分析为什么不一样」就没法回答）。
+
+    读不出仓库 id、或提交/路径为空的条目**丢掉**（`_note_repository` 同一条口径：
+    宁可少一条归属退回旧行为，也不要拿一个猜出来的仓库去收窄查询）。
+    """
+    unique: set[ScopeEntry] = set()
+    for raw in triples:
+        try:
+            repository_id, commit_id, path = raw
+        except (TypeError, ValueError):
+            continue
+        repo = _as_int(repository_id)
+        commit = str(commit_id or "").strip()
+        normalized = normalize_path(path)
+        if repo is None or not commit or not normalized:
+            continue
+        unique.add(ScopeEntry(repository_id=repo, commit_id=commit, path=normalized))
+    return tuple(sorted(unique))
+
+
+
+@dataclass(frozen=True, order=True)
+class ScopeEntry:
+    """本批次里**真实存在**的一条三元组：某个仓库的某条提交改动了某个文件。
+
+    ## 为什么「提交 → 仓库集合」加「提交 → 路径集合」不够
+
+    这两张表**各自都是真的**，但把它们**叉乘**起来得到的配对里有编出来的：SVN 修订号只在
+    单个仓库内唯一，两个仓库同窗时完全可能都有 revision 42 —— 42 在配置仓改的是
+    `config/x.xlsx`、在代码仓改的是 `code/y.lua`。叉乘会同时「授权」`配置仓 + 42 + y.lua`
+    与 `代码仓 + 42 + x.xlsx`，而模型点错仓库时平台读的是**另一个仓库的同名文件**（名字
+    一样、内容不同）：回执抬头写着它问的那一条，报告照着实读到的内容写，**没有任何一处
+    看得出来读错了**。
+
+    所以授权与取数都按三元组判：三个都对上才叫存在。
+
+    ## 空 = **不知道**，不是「什么都不许」
+
+    手工构造的 scope（单提交模式、既有测试）没有这份事实。空时所有以它为准的新判据一律
+    **退回旧行为**（不收窄），与加这个字段之前逐字一致 —— 带默认值的新字段，缺省时行为
+    不变，这是这一整轮改造的硬约束。
+    """
+
+    repository_id: int
+    commit_id: str
+    path: str
+
+
 @dataclass(frozen=True)
 class AnalysisScope:
     """一次分析里被允许引用的东西。"""
@@ -78,6 +139,15 @@ class AnalysisScope:
     # None 表示手工构造的旧 scope 未提供此事实，预取退回 batch_paths；
     # 空元组表示本轮明确没有输入文件，不能回退预取窗口历史。
     input_paths: tuple[str, ...] | None = None
+    # 本批次里**真实存在**的三元组（见 `ScopeEntry`）。**这是归属，不是授权范围**：
+    # 授权仍然是上面那两张表的事，它只回答「这条路径在本批次里属于哪个仓库」。
+    #
+    # 因此下面几个以它为准的判据一律是三态的：**这个键上有归属**才判是与否，**这个键上
+    # 没有归属**一律返回「不知道」并放行给旧的授权判据。写成「不在 entries 里就拒绝」会
+    # 让任何一处 attribution 缺失（老 payload 没带 `repository_id`、窗口补偿进来的路径
+    # 不在 `delta_files` 里）都变成**静默的假拒绝** —— 而假拒绝的方向最贵：模型收到的是
+    # 「这个文件你没资格读」，于是把它写进信息缺口。
+    entries: tuple[ScopeEntry, ...] = ()
 
     def resolve_commit(self, raw: str) -> str | None:
         """把模型给的 commit 标识解析成全哈希。
@@ -116,6 +186,73 @@ class AnalysisScope:
     def reference_allowed(self, raw_name: str) -> bool:
         name = str(raw_name or "").strip()
         return bool(name) and name in self.readable_references
+
+    # -- 仓库归属（P1a：`(仓库, 提交, 路径)` 三元组） -------------------------
+    #
+    # 这四条都遵守同一条契约：**没有归属就说「不知道」**，绝不把「不知道」说成
+    # 「不存在」。把空集当否定用，会让 attribution 缺失变成静默的假拒绝。
+
+    def entries_for(self, repository_id, commit_id) -> tuple[ScopeEntry, ...]:
+        """某个仓库的某条提交在本批次里改过的文件（空 = 不知道）。
+
+        确定性：同一份 entries 两次调用得到同一个顺序（按 `(仓库, 提交, 路径)` 排序）。
+        """
+        wanted_commit = str(commit_id or "").strip()
+        wanted_repo = _as_int(repository_id)
+        if wanted_repo is None or not wanted_commit:
+            return ()
+        return tuple(
+            sorted(
+                entry
+                for entry in self.entries
+                if entry.repository_id == wanted_repo and entry.commit_id == wanted_commit
+            )
+        )
+
+    def entries_of_path(self, raw_path: str, commit_id: str = "") -> tuple[ScopeEntry, ...]:
+        """这条路径在本批次里出现在哪些三元组上（`commit_id` 给了就再收窄一层）。
+
+        空 = **不知道**：可能是这条路径不在本批次里，也可能是这个 scope 根本没有 entries。
+        两者要分开只能看 `self.entries` 是否为空。
+        """
+        path = normalize_path(raw_path)
+        if not path:
+            return ()
+        wanted_commit = str(commit_id or "").strip()
+        return tuple(
+            sorted(
+                entry
+                for entry in self.entries
+                if entry.path == path and (not wanted_commit or entry.commit_id == wanted_commit)
+            )
+        )
+
+    def repositories_for_path(self, raw_path: str, commit_id: str = "") -> frozenset[int]:
+        """这条路径在本批次里**真实**属于哪几个仓库（空 = 不知道）。
+
+        给「同名路径的归属有歧义」那条拒绝用的：有归属时说得出「它在本批次里属于哪一个」，
+        没有归属时只说「不知道」，不编一个候选。
+        """
+        return frozenset(entry.repository_id for entry in self.entries_of_path(raw_path, commit_id))
+
+    def entry_allowed(self, repository_id, commit_id, raw_path) -> bool | None:
+        """这条三元组是不是本批次里真实存在的那一条。
+
+        `None` = **不知道**（这个键上没有归属），调用方照旧走原来的授权判据；`True` /
+        `False` = 有归属、这就是判据。
+
+        **为什么是三态**：见 `entries` 字段的说明 —— 把「这个键上没有归属」当成
+        `False`，任何一处 attribution 缺失都会变成假拒绝。
+        """
+        path = normalize_path(raw_path)
+        commit = str(commit_id or "").strip()
+        repo = _as_int(repository_id)
+        if not path or not commit or repo is None:
+            return None
+        known = self.entries_of_path(path, commit)
+        if not known:
+            return None
+        return any(entry.repository_id == repo for entry in known)
 
     # -- 批次级的查询（给「一次要看很多文件」的工具用） ----------------------
 

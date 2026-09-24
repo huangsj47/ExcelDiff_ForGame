@@ -45,15 +45,18 @@ from services.ai.frozen_repo import (
     resolve_frozen_read,
     resolve_frozen_repositories,
 )
-from services.ai.reference_search import (
-    entries_for,
-    normalize_query,
-    render_result,
+from services.ai.provider_search import ReferenceSearchMixin
+from services.ai.reference_search import entries_for, normalize_query
+from services.ai.repository_identity import (
+    batch_repositories,
+    batch_repository_ids,
+    identity_refusal,
+    lookup_commit,
+    lookup_commit_files,
+    repositories_by_ids,
 )
-from services.ai.repo_reference import search_frozen_repositories
 from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_loader import LoadedSkills
-from services.ai.trace_evidence import failure_notice
 from services.deployment_mode import is_agent_dispatch_mode
 from services.excel_header_profiles import header_kwargs_for, resolve_for_file
 from utils.content_window import (
@@ -779,7 +782,7 @@ def _as_frozen_tuple(value: Any) -> tuple:
         return (value,)
 
 
-class PlatformContextProvider:
+class PlatformContextProvider(ReferenceSearchMixin):
     """接到平台取数链路上的 `ContextProvider`。
 
     需要 app 上下文（会用 `db.session`）。**只读**：不写数据库、不触发 clone。
@@ -928,77 +931,26 @@ class PlatformContextProvider:
 
         冻结范围不要再用它 —— 那是 `_batch_repositories()` 的事，见那里的说明。
         """
-        ids: set = set()
-        if self._scope is not None:
-            for value in (self._scope.repository_ids_by_commit or {}).values():
-                ids.update(int(item) for item in value or ())
-        if ids:
-            try:
-                from models import Repository
-
-                rows = (
-                    Repository.query
-                    .filter(Repository.id.in_(sorted(ids)))
-                    .order_by(Repository.id.asc())
-                    .all()
-                )
-                if rows:
-                    return rows[0]
-            except Exception as exc:  # noqa: BLE001 —— 查不动就退回下面那条
-                log_print(f"⚠️ AI 取数：查本批次仓库失败：{exc}")
+        rows = repositories_by_ids(batch_repository_ids(self._scope), limit=1)
+        if rows:
+            return rows[0]
         if self._scope is not None:
             pairs = entries_for(self._scope.batch_paths(), self._scope.commit_of_path)
+            ids = tuple(sorted(set(self._attribution(pairs).values())))
+            if ids:
+                return self._repository_row(ids[0])
             return self._repository_of(pairs)
         return None
 
     def _batch_repositories(self):
         """**要冻结的全部仓库**：本批次各仓库所属项目下的全部已接入仓库。
 
-        ## 为什么不是「本批次涉及的那几个」
-
-        一次周版本分析覆盖的仓库可以不止一个（配置仓库 + 代码仓库同窗是常态），而窗口里
-        被改动的往往只是其中一个 —— 核查「改了公共接口，调用方改没改」要读的恰恰是
-        **没被改动**的那个仓库里的文件。只冻结本批次涉及的那几个，仍然会把「改的是配置表、
-        要看代码仓库里的读取方」这类核查挡在门外。
-
-        所以范围取「本项目全部已接入仓库的只读 Git 跟踪内容」——判据仍然是本项目，没有
-        放宽到任意文件（路径形状与凭证排除两条判据在多仓之前照旧各判一次）。
-
-        实测 run 57：本批次涉及 `qz_config`(1) 与 `qz_luaworkspace代码`(2)，而
-        `_batch_repository()` 按 id 升序只冻结了 1，于是 4 条 `code/qz_*` 的文件全被
-        判成「不在本次冻结版本的 Git 跟踪文件里」。
-
-        查不到项目（老 payload、手工构造的 scope、单提交模式）时**退回本批次那几个仓库**，
-        与加这一层之前的行为一致。
+        判据、理由与实测代价都在 `repository_identity.batch_repositories`（唯一实现）。
+        查不到项目时退回「本批次那几个仓库」，与加这一层之前的行为一致。
         """
-        try:
-            from models import Repository
-
-            batch_ids: set = set()
-            if self._scope is not None:
-                for value in (self._scope.repository_ids_by_commit or {}).values():
-                    batch_ids.update(int(item) for item in value or ())
-            rows = ()
-            if batch_ids:
-                rows = (
-                    Repository.query
-                    .filter(Repository.id.in_(sorted(batch_ids)))
-                    .order_by(Repository.id.asc())
-                    .all()
-                )
-            project_ids = {getattr(row, "project_id", None) for row in rows}
-            project_ids.discard(None)
-            if project_ids:
-                return tuple(
-                    Repository.query
-                    .filter(Repository.project_id.in_(sorted(project_ids)))
-                    .order_by(Repository.id.asc())
-                    .all()
-                )
-            if rows:
-                return tuple(rows)
-        except Exception as exc:  # noqa: BLE001 —— 查不动就退回下面那条
-            log_print(f"⚠️ AI 取数：查本项目仓库失败：{exc}")
+        rows = batch_repositories(self._scope)
+        if rows:
+            return rows
         single = self._batch_repository()
         return (single,) if single is not None else ()
 
@@ -1246,16 +1198,27 @@ class PlatformContextProvider:
 
     # -- 提交 ---------------------------------------------------------------
 
-    def commit_detail(self, commit: str) -> Optional[str]:
+    def commit_detail(self, commit: str, repository_id: Any = "") -> Optional[str]:
         """提交信息 + 改动文件清单。
 
         直接读平台的 `commits_log`，**不碰 GitService**：那边要先有本地检出，可能触发
         clone，而这里需要的每个字段库里都有。
+
+        `repository_id` 点名仓库时只列那一个仓库的改动（见 `_commit_rows`）。
         """
-        rows = self._commit_rows(commit)
+        rows, candidates = self._commit_rows(commit, repository_id)
         if not rows:
+            if candidates:
+                return self._identity_refusal(
+                    "commit_detail", commit, "（这条提交）", candidates, repository_id
+                )
             return None
 
+        # 这份清单**可能横跨两个仓库**（同一条修订号在两个仓库里都有，见 `_commit_rows`）。
+        # 那时必须逐行标出归属：清单里只有路径时，模型没法知道该带哪个 `repository_id`
+        # —— 而它下一句就会去要 diff，不带仓库号的话取数层只能回一句「请点名仓库」。
+        # 只在一个仓库里时不标（单仓是常态，多一行噪声不值得）。
+        marked = len({getattr(row, "repository_id", None) for row in rows}) > 1
         head = rows[0]
         lines = [
             f"提交 {commit}",
@@ -1265,10 +1228,18 @@ class PlatformContextProvider:
             f"- 改动文件（{len(rows)} 个）：",
         ]
         for row in rows:
-            lines.append(f"  - [{row.operation or 'M'}] {row.path}")
+            suffix = f"（仓库 {getattr(row, 'repository_id', None)}）" if marked else ""
+            lines.append(f"  - [{row.operation or 'M'}] {row.path}{suffix}")
+        if marked:
+            lines.append(
+                "这条修订号在多个仓库里都有，上面是**各仓库改动之和**；"
+                "要读其中某一行的差异时请带上它后面那个 `repository_id`。"
+            )
         return "\n".join(lines) + "\n"
 
-    def file_diff(self, commit: str, path: str, *, ask_agent: bool = True) -> Optional[str]:
+    def file_diff(
+        self, commit: str, path: str, *, ask_agent: bool = True, repository_id: Any = ""
+    ) -> Optional[str]:
         """某个文件在某个提交上的 diff（Excel 走结构化差异）。
 
         来源按顺序三条，前一条给不出**真差异**才走后面一条：
@@ -1288,9 +1259,19 @@ class PlatformContextProvider:
 
         `ask_agent=False` 只给「顺手看一眼本地那份补丁」的调用方用（`_default_window` 挑
         窗口位置）：它不要那句十几秒的等待，也不该为了挑个坐标派一个取数任务出去。
+
+        `repository_id` 是**身份的一部分**而不是提示：同一条 `(提交, 路径)` 在本批次的两个
+        仓库里都真实存在时，不带它**不猜**（回一句请点名仓库的拒绝，见 `_commit_row`）。
         """
-        row = self._commit_row(commit, path)
+        row, candidates = self._commit_row(commit, path, repository_id)
         if row is None:
+            if candidates:
+                # 归属不明（或点名的仓库里没有这条）：回一句可照做的拒绝。
+                # `ask_agent` 那条链在这里**不适用** —— 它要的是一行真实的提交行才知道去
+                # 问哪个仓库，而这一条恰恰是「不知道是哪个仓库」。
+                return self._identity_refusal(
+                    "file_diff", commit, path, candidates, repository_id
+                )
             return None
 
         text, failed = self._local_file_diff(row, commit, path)
@@ -1429,11 +1410,13 @@ class PlatformContextProvider:
         给不下的在抬头里逐张列出并写明怎么要 —— 配表原先**没有**补救路径（`lines` 被完全
         忽略），于是它成了唯一一个「被截断了也问不回来」的内容形态。
         """
-        row = self._commit_row(commit, path)
+        row, _candidates = self._commit_row(commit, path, repository_id)
         if row is None:
-            # 不在本批次里。**这不再是终点**（工作包 D 的 P1）：模型可能在别处看到过这个
-            # 路径（例如它在引用检索的命中里读到了一个调用方），而「读不到」会让它把
-            # 「调用方改了没有」写成信息缺口。这里改走**冻结版本**的只读范围。
+            # 不在本批次里（或这条 `(提交, 路径)` 的归属有歧义）。**这不再是终点**
+            # （工作包 D 的 P1）：模型可能在别处看到过这个路径（例如它在引用检索的命中里
+            # 读到了一个调用方），而「读不到」会让它把「调用方改了没有」写成信息缺口。
+            # 这里改走**冻结版本**的只读范围 —— 那条路自己会处理「同名路径在多个仓库里
+            # 都有」的情形（回一句请点名仓库的拒绝），所以歧义在这里不需要另判一次。
             return self._content_outside_batch(path, lines, repository_id)
         repository = getattr(row, "repository", None)
         if repository is None:
@@ -1736,192 +1719,6 @@ class PlatformContextProvider:
             self._search_from_agent(pairs, search, prefix=prefix, total_files=in_scope)
         )
 
-    def _search_frozen_repo(self, query: str, prefix: str) -> Optional[str]:
-        """冻结版本的仓库范围检索（**每个仓库各搜一次**，见 `search_frozen_repositories`）。
-
-        **不可用时返回 `None`** —— 调用方退回「只搜本批次」那条路，并补一句范围声明
-        （「搜不到」与「没搜那么宽」在模型那里必须分得开）。
-        """
-        readers, _reason = self._resolved_readers()
-        if not readers:
-            return None
-        extra = (
-            {"max_files": int(self._repo_index_files)}
-            if self._repo_index_files
-            else {}
-        )
-        return search_frozen_repositories(readers, query, prefix=prefix, **extra)
-
-    def _narrow_scope_note(self) -> str:
-        """退回「只搜本批次」时补在结果前面的一句**范围声明**（拿得到范围时为空串）。
-
-        没有它，模型会把「本批次里没有命中」读成「仓库里没有引用」—— 而这两句话的证据
-        强度差着一个数量级，报告里的结论也因此分叉。
-        """
-        _reader, reason = self._resolved_reader()
-        if _reader is not None:
-            return ""
-        return (
-            f"[范围说明] 本次**没有**仓库冻结范围可用（{reason}），"
-            "所以下面这次检索**只覆盖本批次改动过的文件**，"
-            "未改动过的文件（例如别的模块里的调用方）不在里面。\n"
-            "**「没有命中」只代表本批次里没有**，不能说成「仓库里没有引用」。\n\n"
-        )
-
-    def _with_narrow_scope_note(self, text: str) -> str:
-        """给结果补上范围声明。**失败说明原样返回**。
-
-        ## 为什么失败时不能补
-
-        `[检索不到]` / `[检索还没回来]` 这几句是**取数层的失败说明**，而记账那一层
-        （`trace_evidence.failure_notice` 与 `context_tools` 的 `failed` 计数）按**开头**
-        认它们：在它们前面插一段话，这条失败就会被记成「成功取到内容」——
-        同一个面板上「失败 0 条」与明细里列出的失败条数于是对不上，而后者被当成
-        「取数都很顺」。
-
-        代价是这种情况下范围声明缺席 —— 可以接受：那几句失败说明自己就带着
-        「**这不等于「没有其它引用」**，请写成信息缺口」，而「一条都没搜成」比
-        「只搜了本批次」是更强的限定。
-        """
-        note = self._narrow_scope_note()
-        if not note:
-            return text
-        if failure_notice(text):
-            return text
-        return note + text
-
-    def _search_local(
-        self,
-        pairs: Sequence[tuple[str, str]],
-        query: str,
-        *,
-        prefix: str,
-    ) -> Optional[str]:
-        """平台本地的工作副本。**单机模式**走这条；多节点模式返回 `None`（改问 Agent）。
-
-        与 `_content_from_agent` 同一套记忆：同一个进程里同一份检索只做一次
-        （模型可能对同一个词问两遍，而建索引是要真读文件的）。
-
-        ## 索引按**快照**缓存，按**前缀**过滤
-
-        索引只建一次（一次分析里批次是固定的），但**不能用带前缀的那份文件列表建** ——
-        前缀是**这次查询**的范围，不是批次的范围。拿它建索引会永久污染：
-        「先问 `path='scripts/'`，再问全局」时第二次查询只能看见 `scripts/` 下的文件，
-        而它报出来的 `files_total` / `scanned` / 命中全都是那个子集的，
-        **模型看不出这是上次查询的残留**（它只会读到一句「覆盖了 12/12 个文件」）。
-
-        所以：`pairs` 永远是整批，索引建在整批上，前缀进 `search()` 时再过滤；
-        缓存键里放**快照指纹**做校验（同一批 = 同一个索引，换了批次就重建）。
-        """
-        from services.vcs_content_service import get_file_content_from_git
-
-        key = (query, prefix)
-        if key in self._search_cache:
-            return self._search_cache[key]
-        # 一次就够的判断：没有本地工作副本时 `get_file_content_from_git` 会返回 None，
-        # 于是每个文件都算「读不到」——那会把整批白读一遍，还给出一句
-        # 「N 个都读不到」的假话（真相是平台本地根本没有这个仓库）。
-        repository = self._repository_of(pairs)
-        if repository is None:
-            return None
-        if is_agent_dispatch_mode():
-            # 多节点模式下平台被禁止 clone：本地读不到是**确定**的，别去读一遍。
-            return None
-
-        def reader(path: str, commit: str):
-            return get_file_content_from_git(repository, commit, path)
-
-        from services.ai.reference_index import (
-            MAX_INDEX_FILES,
-            SnapshotReferenceIndex,
-            snapshot_digest,
-        )
-
-        digest = snapshot_digest(pairs)
-        if self._reference_index is None or self._reference_index_key != digest:
-            # 预热门槛（`MAX_INDEX_FILES`）：整批顺序读 blob 会把首次查询从 240 个文件拖到
-            # 767 个，而 Agent 侧等检索只有 40 秒 —— 门槛之外的那些**如实算成缺口**
-            # （`search()` 报 `unindexed`，抬头写「文件数到了上限就停了，剩下的没搜」）。
-            self._reference_index = SnapshotReferenceIndex.build(
-                pairs, reader=reader, max_files=MAX_INDEX_FILES
-            )
-            self._reference_index_key = digest
-        result = self._reference_index.search(query, prefix=prefix)
-        text = render_result(
-            result,
-            scope_note=(
-                f"索引版本 `{result.index_version}`，快照 `{result.snapshot_digest[:12]}`；"
-                f"索引覆盖本批次的前 {self._reference_index.indexed_files} 个文件，"
-                "后续查询不重复读取 blob。"
-            ),
-        )
-        self._search_cache[key] = text
-        return text
-
-    def _search_from_agent(
-        self,
-        pairs: Sequence[tuple[str, str]],
-        query: str,
-        *,
-        prefix: str,
-        total_files: int,
-    ) -> Optional[str]:
-        """业务节点上的 Agent 拿它自己的工作副本搜（platform/agent 模式的唯一取数点）。"""
-        from services.agent_file_content_dispatch import request_references
-
-        repository = self._repository_of(pairs)
-        if repository is None:
-            return (
-                "[检索不到] 本批次的改动文件里找不到对应的仓库，无法确定去哪个节点上搜。"
-            )
-        try:
-            outcome = request_references(
-                repository,
-                query=query,
-                # **整批**：Agent 也按快照建一次索引，前缀交给它自己的 `search()`。
-                # 只发前缀命中的那一批会让 Agent 的索引缓存按前缀分叉 —— 同一个 bug
-                # 换个进程再犯一次（第二次查询看到的还是第一个前缀的范围）。
-                entries=pairs,
-                prefix=prefix,
-                # 覆盖率的分母：**本批次里落在这个前缀范围内的文件数**（与本地那条路
-                # `index.search(prefix=...)` 算出来的 `files_total` 一致）。两条路对分母的
-                # 口径必须一样，否则同一个周版本在单机与多节点下印出互相矛盾的覆盖率，
-                # 而模型正是拿这个数决定能不能说「没有其它引用」。
-                total_files=total_files,
-            )
-        except Exception as exc:  # noqa: BLE001 —— 取一次检索失败只该让这一条降级
-            log_print(f"⚠️ AI 取数：向 Agent 检索失败 {query}: {type(exc).__name__}: {exc}")
-            return f"[检索不到] `{query}`：向 Agent 检索时出错（{exc}）。"
-
-        status = str(outcome.get("status") or "")
-        if status == "ready":
-            rendered = str(outcome.get("text") or "")
-            if rendered:
-                return rendered
-        reason = str(outcome.get("message") or "原因未知")
-        # 两句的尾巴逐字相同 —— 用常量而不是抄两遍：`trace_evidence` 按**开头**认这几句，
-        # 而两条分支各写一份尾巴的那天起，「还没回来」与「读不到」的原因就会开始漂移。
-        tail = (
-            "。**这不等于「没有其它引用」。**"
-            "这一轮请只依据已取得的证据判断，并在报告里把它写成信息缺口。"
-        )
-        if status == "pending":
-            return f"[检索还没回来] `{query}`：{reason}" + tail
-        return f"[检索不到] `{query}`：{reason}" + tail
-
-    def _repository_of(self, pairs: Sequence[tuple[str, str]]):
-        """这批路径属于哪个仓库。取第一条能查出提交行的路径的仓库。
-
-        跨仓库的批次（一个周版本关联多个仓库）只有第一个仓库会被检索 —— 这是**已知的
-        局限**，写在这里而不是装作没有：结果文本里的「范围内共 N 个文件」是按这个仓库
-        算的，不会把别的仓库的文件算进去。<!-- 后续可按仓库分组各派一次任务 -->
-        """
-        for path, commit in pairs:
-            row = self._commit_row(commit, path)
-            repository = getattr(row, "repository", None)
-            if repository is not None:
-                return repository
-        return None
 
     def _cache_row_for(self, row, commit: str, path: str) -> Optional[int]:
         """这条 delta 来自哪一行周版本缓存（REV-AI-003）。取不到就返回 `None`。
@@ -1944,29 +1741,53 @@ class PlatformContextProvider:
             return ()
         return tuple(self._scope.repository_ids_by_commit.get(str(commit), ()))
 
-    def _commit_row(self, commit: str, path: str):
-        from models import Commit, db
+    def _commit_row(self, commit: str, path: str, repository_id: Any = ""):
+        """→ `(行, 候选仓库)`（判据见 `repository_identity.lookup_commit`）。
 
+        **两个返回值**是这个方法存在的主要理由：`(None, 多个候选)` 是**歧义** —— 这条
+        `(提交, 路径)` 在本批次的两个仓库里都真实存在，而模型没说它要哪一个。原先用
+        `order_by(Commit.id.desc()).first()` 把这个状态静默当成「查到了」，于是读到的是
+        **另一个仓库的同名文件**（名字一样、内容不同），回执抬头还写着模型问的那一条。
+        调用方必须把候选仓库写进拒绝理由，让模型点名后再问一次。
+        """
         try:
-            query = Commit.query.filter_by(commit_id=commit, path=path)
-            repositories = self._repositories_for(commit)
-            if repositories:
-                query = query.filter(Commit.repository_id.in_(repositories))
-            return query.order_by(Commit.id.desc()).first()
+            return lookup_commit(
+                commit, path, repository_id, batch=self._repositories_for(commit)
+            )
         except Exception as exc:  # noqa: BLE001
             log_print(f"⚠️ AI 取数：查提交行失败 {commit[:12]}: {exc}")
-            _ = db
-            return None
+            return None, ()
 
-    def _commit_rows(self, commit: str):
-        from models import Commit
+    def _commit_rows(self, commit: str, repository_id: Any = ""):
+        """→ `(行列表, 候选仓库)`。这条提交改过的**全部**文件。
 
+        **不带仓库时合并本批次各仓库的清单**（这是刻意的，有回归测试钉着）：本批次同时
+        包含两个仓库、而两个仓库都有这个号时，两边改过的文件**都是**本批次的事实，
+        只留一边会让模型看到一份「看起来完整」的清单 —— 而其中一半的文件未被列出。
+        模型点名了 `repository_id` 时才收窄到那一个。
+        """
         try:
-            query = Commit.query.filter_by(commit_id=commit)
-            repositories = self._repositories_for(commit)
-            if repositories:
-                query = query.filter(Commit.repository_id.in_(repositories))
-            return query.order_by(Commit.id.asc()).all()
+            return lookup_commit_files(
+                commit, repository_id, batch=self._repositories_for(commit)
+            )
         except Exception as exc:  # noqa: BLE001
             log_print(f"⚠️ AI 取数：查提交失败 {commit[:12]}: {exc}")
-            return []
+            return (), ()
+
+    def _identity_refusal(
+        self,
+        tool: str,
+        commit: str,
+        path: str,
+        candidates: Sequence[int],
+        named: Any,
+    ) -> str:
+        """`(提交, 路径)` 归属不明（或点名的仓库里没有这条）时给模型的一句话。
+
+        文本与理由见 `repository_identity.identity_refusal`（唯一实现）；这里只补上
+        「仓库叫什么名字」那一个只有 provider 拿得到的输入。
+        """
+        return identity_refusal(
+            tool, commit, path, candidates, named, describe=self._describe_repository
+        )
+
