@@ -650,7 +650,16 @@ def _answer_for(
 
 
 def claim_lines(reviews: Sequence[ClaimReview]) -> str:
-    """逐条断言那一行（缩进成子列表）。没有断言时返回空串。
+    """逐条断言那几行（**一条断言一行**）。没有断言时返回空串。
+
+    ## 一条一行，不是挤成一段（2026-09-24，run 63）
+
+    原先它们是**用「；」串起来的一行**，而这一行在报告里是 400+ 字 —— 真机实测渲染出来
+    是**一整段没有停顿的文字**（本仓库的渲染器把缩进丢掉，那一行不成列表）。三五个字段
+    挤在一起，读者只能跳过它，而它恰恰是「这条结论凭什么算核过了」的唯一答案。
+
+    现在每条断言自成一行（`- ` 开头，与上面那一条结论同级 —— 渲染器不认缩进，这是它
+    支持的最深一层）：第一条给「逐条断言」这个标签，其余各行接着说。
 
     **顺序固定为「先待核查、后已证实」**：这一段的用途是让人一眼看到「哪几条还没立住」，
     而按模型给的次序排会把没证实的那条埋在中间。同组内保持模型给的次序（确定性）。
@@ -659,16 +668,17 @@ def claim_lines(reviews: Sequence[ClaimReview]) -> str:
         return ""
     pending = [review for review in reviews if review.status != CLAIM_VERIFIED]
     verified = [review for review in reviews if review.status == CLAIM_VERIFIED]
-    parts: list[str] = []
-    for review in (*pending, *verified):
+    lines: list[str] = []
+    for position, review in enumerate((*pending, *verified)):
         scope = f"（查过：{review.checked_scope}）" if review.checked_scope else ""
+        label = "逐条断言：" if position == 0 else ""
         # 状态词只说一次（`heading` 的定义）：从前这里是「**状态** —— 状态：正文」，
         # 而 `display` 自己就带着状态前缀 —— run 63 的报告里每一行都印了两遍。
-        parts.append(
-            f"`{review.claim.claim_id}` **{review.status_label}**："
+        lines.append(
+            f"- {label}`{review.claim.claim_id}` **{review.status_label}**："
             f"{review.claim.statement}{scope}"
         )
-    return "  - 逐条断言：" + "；".join(parts)
+    return "\n".join(lines)
 
 
 def claims_instructions() -> str:

@@ -602,6 +602,29 @@ class TestTheSameFactIsNotSaidThreeTimes:
         assert report.count("没有被证实") == 1
         assert "`C2`" in report, "编号要在（读者顺着它去下面那行看状态）"
 
+    def test_one_claim_per_line(self):
+        """每条断言**自成一行**（2026-09-24，run 63）。
+
+        原先它们是用「；」串起来的一行，真机渲染出来是 400+ 字一整段没有停顿的文字
+        （渲染器会丢掉缩进，那一行成不了列表）—— 读者只能跳过它，而它恰恰是「这条结论
+        凭什么算核过了」的唯一答案。
+        """
+        from services.ai.claims import claim_lines
+
+        row, report = self._row_and_report(
+            _verdict("F1", _claim_reply("C1", "verified") + "," + _claim_reply("C2", "unverified"))
+        )
+        lines = claim_lines(row.claim_reviews).splitlines()
+
+        assert len(lines) == 2, f"断言没有一条一行：{lines!r}"
+        assert all(line.startswith("- ") for line in lines), (
+            "这些行不成列表 —— 渲染器认不出缩进，只有 `- ` 开头才排成条目"
+        )
+        assert lines[0].startswith("- 逐条断言："), "第一行要带上这一段的标签"
+        assert "；" not in "".join(lines), "又串成一段了"
+        for line in lines:
+            assert line in report, "报告里印的不是这一份"
+
 
 @pytest.mark.parametrize("status", [CLAIM_VERIFIED, CLAIM_UNVERIFIED, CLAIM_REFUTED, CLAIM_UNREADABLE])
 def test_every_claim_status_has_a_chinese_label(status):
