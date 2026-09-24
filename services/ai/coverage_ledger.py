@@ -63,6 +63,7 @@ import json
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from models.ai_analysis import AiAnalysisTrace
+from services.ai import window_commits
 from services.ai.trace_evidence import decode_evidence
 
 # 只有这两类工具的结果算「这个文件被看过」：`file_diff`（某个提交上这个文件的差异）与
@@ -191,15 +192,24 @@ def parse_evidence_label(label: Any) -> tuple[str, str, str]:
 
 
 def _inventory(payload: Mapping[str, Any]) -> dict:
-    """本次输入的**白名单**：允许模型读的那些文件，以及三个总数。
+    """本次输入的**白名单**：允许模型读的那些文件，以及几个总数。
 
     * `entries`：`(path, 本批次的提交)`，用来算保守口径的证据覆盖；
     * `batch_files`：白名单条数（**证据覆盖的分母**）；
     * `window_files`：本版本改动总数（**输入覆盖的分母** —— 只有它才知道「装没装下」）；
-    * `listed_files`：提示词里列出的名字数。
+    * `listed_files`：提示词里列出的名字数；
+    * `window_commits` / `input_commits`：**提交数**的两个口径（见 `coverage_rows`）。
+
+    最后那两个数取自 `window_commits.facts_from_payload` —— **同一个函数**也是提示词里
+    那三个数的来源。在这里另算一遍（比如 `len(window_commit_ids)`）看着等价，但两份实现
+    迟早会在「有没有去重」「缺键算不算 0」这种地方分叉，而分叉的表现是**报告里两个数
+    对不上**，正是要修的那个东西。
     """
     mode = str(payload.get("mode") or MODE_WEEKLY)
     summary = _as_mapping(payload.get("summary"))
+    facts = window_commits.facts_from_payload(
+        payload, window_commit_ids=payload.get("window_commit_ids") or ()
+    )
 
     if mode == MODE_COMMIT:
         # 单提交模式：这一次分析的对象就是那一条提交改的那一个文件。
@@ -212,6 +222,8 @@ def _inventory(payload: Mapping[str, Any]) -> dict:
             "batch_files": len(entries) or None,
             "window_files": len(entries) or None,
             "listed_files": len(entries) or None,
+            "window_commits": None,
+            "input_commits": None,
         }
 
     entries: list[tuple[str, str]] = []
@@ -239,6 +251,11 @@ def _inventory(payload: Mapping[str, Any]) -> dict:
         "batch_files": batch,
         "window_files": window,
         "listed_files": listed_files,
+        # 「本窗口有几条提交」与「本次输入覆盖几条提交」—— **两个数**。报告里写错的那个
+        # 就是这个（实测 run 54 窗口 4 条、报告开篇写 2 条），所以它必须由程序给出来、
+        # 摆在报告里，而不是留给正文自己挑一个。
+        "window_commits": facts.actual,
+        "input_commits": facts.latest,
     }
 
 
@@ -427,6 +444,9 @@ def build_ledger(
         "window_files": window,
         "batch_files": batch,
         "listed_files": listed,
+        # 提交数的两个口径（见 `_inventory`）。读侧不许再用别的方式推这两个数。
+        "window_commits": inventory.get("window_commits"),
+        "input_commits": inventory.get("input_commits"),
         "evidence_files_by_pair": evidence_pair,
         "evidence_files_by_path": evidence_path,
         # 「取回多少段」**不是覆盖率**：同一个文件分段读多次会重复计（run 12 是 71 段 /
@@ -581,6 +601,34 @@ def coverage_rows(ledger: Mapping[str, Any]) -> list[tuple[str, str]]:
         rows.append(("覆盖（版本清单）", f"本次输入包含 {batch} 个文件（版本改动总数{UNKNOWN}）"))
     else:
         rows.append(("覆盖（版本清单）", UNKNOWN))
+
+    # **提交数的两个口径**（周版本才有这个歧义：一个窗口里有多条提交，而本次输入只装了
+    # 其中一部分文件的改动）。它们由程序给出、摆在报告里，正文不需要也不该自己挑一个数 ——
+    # 实测 run 54 的窗口有 4 条提交，报告开篇写的是 2 条。
+    #
+    # 单提交模式不写这两行：那里只有一个分析对象，没有「窗口 vs 本次输入」这回事，
+    # 写了反而要读者去找第二份清单。
+    if not single_commit:
+        window_commits = _count(counts.get("window_commits"))
+        input_commits = _count(counts.get("input_commits"))
+        rows.append(
+            (
+                "提交（本窗口）",
+                f"本窗口共 {window_commits} 条提交"
+                "（窗口时间范围内、当前分支 tip 可达的提交，去重后）"
+                if window_commits is not None
+                else UNKNOWN,
+            )
+        )
+        rows.append(
+            (
+                "提交（本次输入）",
+                f"本次输入覆盖 {input_commits} 条提交"
+                "（本次输入的每个文件，各自「最后一次改动」落在哪条提交上；去重后）"
+                if input_commits is not None
+                else UNKNOWN,
+            )
+        )
 
     # 名字那一行只在周版本模式下有意义（单提交模式没有第二份清单，那一个文件就在提示词里）。
     if not single_commit:

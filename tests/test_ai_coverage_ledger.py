@@ -664,3 +664,82 @@ def test_the_docs_spell_out_both_dedup_conventions_and_where_the_numbers_show():
         assert name in rows, f"账本没有输出「{name}」这一行"
         assert name in doc_text, f"说明文档没有解释「{name}」这一行是什么意思"
 
+
+
+# ---------------------------------------------------------------------------
+#  五、提交数的两个口径：**由程序给出来，摆在报告里**
+# ---------------------------------------------------------------------------
+
+
+def _commits_ledger(*, window_ids, files, listed=None, window=None):
+    payload = _weekly_payload(files=files, listed=listed, window=window)
+    if window_ids is not None:
+        payload["window_commit_ids"] = list(window_ids)
+    return ledger_mod.build_ledger(
+        request_payload=payload, executed=[], tool_stats=_stats()
+    )
+
+
+def test_the_two_commit_counts_are_rendered_into_the_report():
+    """实测 run 54：冻结窗口有 **4** 条提交，报告开篇写成了 **2** 条。
+
+    三个数（本窗口实际提交数 / 文件最新提交数 / 按文件累加的合并提交数）本来就在提示词里
+    各说各的，问题是**正文仍能挑一个错的**。所以把前两个交给程序渲染、摆进报告。
+
+    判据落在「与输入账一致」上，而不是落在某句措辞上：`window_commit_ids` 是写侧冻结的
+    窗口清单，`delta_files` 的 `latest_commit_id` 是本次输入。两个数各自等于它们的去重个数。
+    """
+    window_ids = ["w1" * 20, "w2" * 20, "w3" * 20, "w4" * 20]
+    files = [("a.xlsx", LATEST), ("b.lua", LATEST), ("c.lua", OLDER)]
+
+    ledger = _commits_ledger(window_ids=window_ids, files=files)
+    rows = dict(ledger["rows"])
+
+    assert "4" in rows["提交（本窗口）"], rows["提交（本窗口）"]
+    assert "2" in rows["提交（本次输入）"], rows["提交（本次输入）"]
+    assert ledger["counts"]["window_commits"] == len(set(window_ids))
+    assert ledger["counts"]["input_commits"] == len({c for _, c in files})
+
+
+def test_the_same_two_numbers_reach_both_readers_verbatim():
+    """报告里那两行与导出文档里那两行**是同一批字** —— 读者不该看到两个版本。"""
+    ledger = _commits_ledger(window_ids=["w1" * 20, "w2" * 20], files=[("a.lua", LATEST)])
+
+    doc_text = doc.build_report_markdown(
+        project_label="P", report_text="正文", coverage=ledger
+    )
+    from services.ai.result_payload import coverage_notice_text
+
+    notice = coverage_notice_text(ledger)
+
+    for name in ("提交（本窗口）", "提交（本次输入）"):
+        for value in (dict(ledger["rows"])[name],):
+            assert name in doc_text and value in doc_text, f"导出文档里缺「{name}」这一行"
+            assert name in notice and value in notice, f"抽屉那份里缺「{name}」这一行"
+
+
+def test_a_payload_without_the_window_list_says_unknown_not_zero():
+    """老 payload 没有 `window_commit_ids` 时写「未记录」，**不许写 0**。
+
+    写成 0 就是替用户断言「这个窗口一条提交都没有」—— 与 `cache_read_tokens` 那几个
+    字段同一条口径（`None` ≠ `0`）。
+    """
+    rows = dict(_commits_ledger(window_ids=None, files=[("a.lua", LATEST)])["rows"])
+
+    assert rows["提交（本窗口）"] == ledger_mod.UNKNOWN
+    assert "0" not in rows["提交（本窗口）"]
+    # 本次输入那个数是**算得出来的**（`delta_files` 就在 payload 里），所以它照常给出。
+    assert "1" in rows["提交（本次输入）"]
+
+
+def test_a_single_commit_run_does_not_get_window_rows():
+    """单提交模式没有「窗口 vs 本次输入」这回事，写这两行只会让人去找第二份清单。"""
+    payload = {
+        "mode": "commit",
+        "scope": "full",
+        "commit": {"commit_id": LATEST, "path": "a.lua", "message": "m", "author": "x"},
+    }
+    rows = dict(ledger_mod.build_ledger(request_payload=payload, executed=[], tool_stats={})["rows"])
+
+    assert "提交（本窗口）" not in rows
+    assert "提交（本次输入）" not in rows
