@@ -64,9 +64,9 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from models.ai_analysis import AiAnalysisTrace
 from services.ai import window_commits
-# `FILE_EVIDENCE_KINDS` 由 `trace_evidence` 定义（那里是纯层，运行中的进度也要用它），
-# 本模块转出这个名字供既有调用方按原路径取用。
 from services.ai.trace_evidence import (  # noqa: F401
+    # `FILE_EVIDENCE_KINDS` 由 `trace_evidence` 定义（那里是纯层，运行中的进度也要用它），
+    # 本模块转出这个名字供既有调用方按原路径取用。
     FILE_EVIDENCE_KINDS,
     decode_evidence,
 )
@@ -437,6 +437,7 @@ def build_ledger(
     request_payload: Any,
     executed: Optional[Iterable[Any]] = None,
     tool_stats: Any = None,
+    response_payload: Any = None,
 ) -> dict:
     """这次运行的覆盖账本（**纯函数**：输入是已落库的 payload、逐轮明细与按工具计数）。
 
@@ -589,6 +590,7 @@ def build_ledger(
             ],
         },
     }
+    ledger["findings"] = _findings_account(response_payload)
     ledger["limited"] = is_limited(ledger)
     ledger["scope_note"] = SCOPE_LIMITED_NOTE if ledger["limited"] else ""
     ledger["rows"] = coverage_rows(ledger)
@@ -626,6 +628,63 @@ def is_limited(ledger: Mapping[str, Any]) -> bool:
     return False
 
 
+def _headline_row(
+    ledger: Mapping[str, Any], *, batch: Any, window: Any, evidence: Mapping[str, Any]
+) -> str:
+    """「输入 / 窗口」与「取证 / 输入」两个比值（**一条**，一眼能读完）。
+
+    单提交模式没有「窗口」这一层（分析对象就是那一条提交的那个文件），所以那里只说
+    第二个比值 —— 写了「窗口」会让读者去找一个不存在的版本清单。
+    """
+    batch_n = _positive_int(batch)
+    window_n = _positive_int(window)
+    pairs = evidence.get("by_pair") or {}
+    covered = _count(pairs.get("covered")) if evidence.get("collected") else None
+    parts: list[str] = []
+    with_window = str(ledger.get("mode") or "") != MODE_COMMIT
+    if with_window:
+        parts.append(
+            f"**输入 {_num(batch_n)} / 窗口 {_num(window_n)}**"
+            if window_n is not None
+            else f"**输入 {_num(batch_n)} / 窗口{UNKNOWN}**"
+        )
+    parts.append(
+        f"**取证 {_num(covered)} / 输入 {_num(batch_n)}**"
+        if covered is not None
+        else f"**取证{UNKNOWN} / 输入 {_num(batch_n)}**"
+    )
+    # 解释**跟着这里真正给出来的那几个数走**：单提交模式没有「窗口」这一层，写了会让
+    # 读者去找一份不存在的版本清单。
+    tail = (
+        "（第一个比值说的是「窗口里有多少改动进了本次输入」，第二个说的是「装进来的里面"
+        "有多少真的取到了证据」—— **两个都不是 100% 是常态**，别把它们读成一个）"
+        if with_window
+        else (
+            "（这个比值说的是「装进本次输入的文件里，有多少真的取到了证据」——"
+            "**不是 100% 是常态**）"
+        )
+    )
+    return "；".join(parts) + tail
+
+
+def _findings_row(findings: Mapping[str, Any]) -> Optional[tuple[str, str]]:
+    """结论那一行（**本轮新增 / 基线继承**）；没有这份数据时返回 `None`（一个字都不说）。"""
+    if not findings.get("recorded"):
+        return None
+    current = _count(findings.get("current"))
+    inherited = _count(findings.get("inherited"))
+    total = _count(findings.get("total"))
+    retracted = _count(findings.get("retracted")) or 0
+    value = (
+        f"本轮新增 {_num(current)} 条 + 基线继承 {_num(inherited)} 条 = 在挂 {_num(total)} 条"
+        "（**报告正文只写本轮那几条**，所以正文的条数比清单少是正常的；两处不一致时以"
+        "这一行为准）"
+    )
+    if retracted:
+        value += f"；另有 {retracted} 条已按复核裁决撤销（仍留在审计轨迹里）"
+    return ("结论（本轮 / 继承）", value)
+
+
 def coverage_rows(ledger: Mapping[str, Any]) -> list[tuple[str, str]]:
     """账本 → 报告元信息表里的那几行（`(项, 内容)`，**给人读的中文**）。
 
@@ -641,6 +700,13 @@ def coverage_rows(ledger: Mapping[str, Any]) -> list[tuple[str, str]]:
     # 措辞在这里会让人去找一个不存在的版本 / 第二份清单，所以换一套说法（数字口径不变）。
     single_commit = str(ledger.get("mode") or "") == MODE_COMMIT
     rows: list[tuple[str, str]] = []
+
+    # **一眼账**（P1b-UI）：先摆两个比值，再讲口径。
+    #
+    # 下面那些行每一个数都对，但它们是一堆各自正确的数 —— 实测里读者（和模型）拿它们拼不出
+    # 「这次装下了多少」「装下的看了多少」，于是把「全量」（那是**范围**口径）读成了
+    # 「都看过了」。这两个比值一次说清：分子分母都在这一行里，不必去别处凑。
+    rows.append(("本次覆盖", _headline_row(ledger, batch=batch, window=window, evidence=evidence)))
 
     if single_commit:
         rows.append(
@@ -731,6 +797,12 @@ def coverage_rows(ledger: Mapping[str, Any]) -> list[tuple[str, str]]:
                 "正文的（取不到、以及工具明确回了「没有内容」的，都不算）",
             )
         )
+
+    # 结论的**两个数**（本轮新增 / 基线继承）：报告正文只写本轮那一份，而清单里还有
+    # 上一轮继承下来的 —— 不拆开写，「13 条」与 50 条清单会互相打脸（实测 run 58）。
+    findings_row = _findings_row(ledger.get("findings") or {})
+    if findings_row:
+        rows.append(findings_row)
 
     # **0 与「未记录」必须分得开**：两个都是 `if x:` 才输出时，「这轮 0 个补偿项」与
     # 「这份 payload 里没有这个概念」在报告里长得一模一样（`_count` 的 `None` 语义）。
@@ -851,6 +923,34 @@ def gap_notes(ledger: Mapping[str, Any]) -> list[str]:
     return notes
 
 
+def _findings_account(response_payload: Any) -> dict:
+    """结论账：**本轮新增 / 基线继承 / 合计**（读 `response_payload.final_findings`）。
+
+    ## 它要说清的是一次实测里的自相矛盾（run 58）
+
+    报告正文写「主结论共 13 条」，而承载结论的载荷里是 50 条 —— 差的那些是**上一轮留下的、
+    本轮继续挂着**的条目（`incremental_baseline` 的 `source="baseline"` 行）。两个数各自都对，
+    但它们不是同一个集合；读者先看到 13、再翻到 50 条清单，只能猜是哪个错了（或者干脆
+    以为平台在虚报）。
+
+    所以这里把两个数**分开写**，并点明正文那一份只含本轮。**没有这份数据时一个字都不说**
+    （`recorded=False`）—— 老运行、失败运行都取不到它，把它们当成「0 条结论」比不说更糟。
+    """
+    payload = _as_mapping(response_payload)
+    rows = [item for item in payload.get("final_findings") or [] if isinstance(item, Mapping)]
+    if not rows:
+        return {"recorded": False}
+    active = [item for item in rows if item.get("active") is not False]
+    inherited = sum(1 for item in active if str(item.get("source") or "") == "baseline")
+    return {
+        "recorded": True,
+        "total": len(active),
+        "inherited": inherited,
+        "current": len(active) - inherited,
+        "retracted": len(rows) - len(active),
+    }
+
+
 def _layers_note(ledger: Mapping[str, Any]) -> str:
     """「已分配 X / 已检查 Y」那一小句（缺口与行共用同一份账）。
 
@@ -926,4 +1026,7 @@ def ledger_from_run(run: Any) -> dict:
         request_payload=getattr(run, "request_payload", None),
         executed=executed if collected else None,
         tool_stats=getattr(run, "tool_stats_json", None),
+        # 结论账（P1b-UI）：报告正文只写**本轮**那几条，而承载结论的 payload 里还有
+        # 上一轮继承下来的那些 —— 两个数都得说，见 `_findings_account`。
+        response_payload=getattr(run, "response_payload", None),
     )

@@ -828,3 +828,116 @@ def test_the_wrong_commit_is_still_not_covered():
 
     assert ledger["evidence_coverage"]["by_pair"]["covered"] == 0
     assert ledger["evidence_coverage"]["by_path"]["covered"] == 1
+
+
+# ---------------------------------------------------------------------------
+#  六、一眼账与结论账（P1b-UI）：**把两个比值和两个条数摆在同一行**
+# ---------------------------------------------------------------------------
+
+
+def _rows_of(ledger):
+    return dict(ledger["rows"])
+
+
+def test_the_headline_row_carries_both_ratios():
+    """「输入 / 窗口」与「取证 / 输入」**在同一条里**。
+
+    实测里读者（和模型）拿到的是十几行各自正确的数，却拼不出这两个比值 —— 于是把
+    「分析范围：全量」（那是**范围**口径）读成了「都看过了」。分子分母必须挨着写。
+    """
+    payload = _weekly_payload(
+        files=[("a.xlsx", LATEST), ("b.lua", LATEST), ("c.lua", LATEST)],
+        window=1343,
+    )
+    ledger = ledger_mod.build_ledger(
+        request_payload=payload,
+        executed=[_fetched("file_diff", LATEST, "a.xlsx")],
+        tool_stats=_stats(),
+    )
+    headline = _rows_of(ledger)["本次覆盖"]
+    assert "输入 3 / 窗口 1343" in headline, headline
+    assert "取证 1 / 输入 3" in headline, headline
+    # 两个比值**都不是 100%**，而这一行不许把它们说成一个数
+    assert "别把它们读成一个" in headline
+
+
+def test_the_headline_says_unknown_instead_of_zero_without_evidence():
+    """没有逐轮明细 ⇒ 取证那一半是**未记录**，不是 0（与整份账本同一条纪律）。"""
+    ledger = ledger_mod.build_ledger(
+        request_payload=_weekly_payload(files=[("a.xlsx", LATEST)], window=10),
+        executed=None,
+        tool_stats=_stats(),
+    )
+    headline = _rows_of(ledger)["本次覆盖"]
+    assert "取证未记录 / 输入 1" in headline, headline
+    assert "取证 0" not in headline
+
+
+def test_a_single_commit_run_does_not_pretend_there_is_a_window():
+    """单提交模式没有「窗口」这一层，写了会让读者去找一份不存在的版本清单。"""
+    payload = _weekly_payload(files=[("a.xlsx", LATEST)], window=10)
+    payload["mode"] = "commit"
+    ledger = ledger_mod.build_ledger(
+        request_payload=payload, executed=[], tool_stats=_stats()
+    )
+    assert "窗口" not in _rows_of(ledger)["本次覆盖"]
+
+
+def test_the_findings_row_splits_this_round_from_the_inherited_ones():
+    """run 58：正文写「主结论共 13 条」，而载荷里是 50 条（13 本轮 + 37 继承）。
+
+    两个数各自都对，但它们不是同一个集合 —— 不拆开写，读者只能猜是哪个错了。
+    """
+    payload = _weekly_payload(files=[("a.xlsx", LATEST)], window=10)
+    response = {
+        "final_findings": (
+            [{"fingerprint": f"s{index}", "source": "synthesis", "active": True} for index in range(13)]
+            + [{"fingerprint": f"b{index}", "source": "baseline", "active": True} for index in range(37)]
+            + [{"fingerprint": "r1", "source": "synthesis", "active": False}]
+        )
+    }
+    ledger = ledger_mod.build_ledger(
+        request_payload=payload, executed=[], tool_stats=_stats(), response_payload=response
+    )
+    row = _rows_of(ledger)["结论（本轮 / 继承）"]
+    assert "本轮新增 13 条 + 基线继承 37 条 = 在挂 50 条" in row, row
+    assert "报告正文只写本轮那几条" in row
+    assert "另有 1 条已按复核裁决撤销" in row
+
+
+def test_without_the_findings_account_the_row_is_absent_not_zero():
+    """老运行 / 失败运行取不到这份数据 ⇒ **一个字都不说**（写成 0 条比不说更糟）。"""
+    ledger = ledger_mod.build_ledger(
+        request_payload=_weekly_payload(files=[("a.xlsx", LATEST)], window=10),
+        executed=[],
+        tool_stats=_stats(),
+    )
+    assert "结论（本轮 / 继承）" not in _rows_of(ledger)
+    assert ledger["findings"] == {"recorded": False}
+
+
+def test_both_rows_reach_the_drawer_text():
+    """这两行是**服务端**给的：抽屉那一段（`coverage_notice`）必须逐字带着它们 ——
+    否则屏幕上还是那十几个拼不出比值的数。"""
+    from services.ai.result_payload import coverage_notice_text
+
+    payload = _weekly_payload(
+        files=[("a.xlsx", LATEST), ("b.lua", LATEST)], window=1343
+    )
+    ledger = ledger_mod.build_ledger(
+        request_payload=payload,
+        executed=[_fetched("file_diff", LATEST, "a.xlsx")],
+        tool_stats=_stats(),
+        response_payload={
+            "final_findings": [
+                {"fingerprint": "s1", "source": "synthesis", "active": True},
+                {"fingerprint": "b1", "source": "baseline", "active": True},
+            ]
+        },
+    )
+    text = coverage_notice_text(ledger)
+    assert "本次覆盖" in text and "输入 2 / 窗口 1343" in text, text
+    assert "取证 1 / 输入 2" in text, text
+    assert "本轮新增 1 条 + 基线继承 1 条" in text, text
+    # 覆盖段仍然**只是** payload 里的一段文本：报告正文那份一个字都不动（另有用例钉着）。
+    assert doc.coverage_table_rows(ledger), "导出那条路读的是同一份 rows"
