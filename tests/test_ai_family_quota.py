@@ -205,6 +205,93 @@ class TestTheRollingOrchestration:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 四、对账轮的预留在真跑一遍时也成立（run 57：250 次在复核之前被吃光）
+# ---------------------------------------------------------------------------
+
+
+class TestTheVerifyReserveSurvivesARealRun:
+    def _plan_with_verify(self, count: int = 3, verify_items: int = 3):
+        plan = plan_family(
+            mode="weekly", enabled=True, count=count, limits=LIMITS,
+            verify=True, verify_items=verify_items,
+        )
+        assert plan is not None and plan.quota is not None
+        return attach_seed(plan, loaded=_loaded(), change_summary=CHANGE_SUMMARY)
+
+    def test_the_shards_spend_everything_they_can_and_the_verify_still_gets_its_cap(self):
+        """分片**每一片都把自己那一段花满**（最凶的用法），对账轮仍拿到预留那一份。
+
+        这是 run 57 的形状：分片按当片上限一路花到底、汇总再取池内剩余，复核拿到 0。
+        断言落在**发给对账轮的 `limits`** 上 —— 只测 `verify_caps()` 的算术，
+        证明不了 `run_family` 用的是它。
+        """
+        plan = self._plan_with_verify(count=3, verify_items=3)
+        reserve = plan.quota.verify_requests
+        assert reserve > 0
+
+        # 每一段都按「上限」报实耗：S1/S2/S3 花满自己的当片上限，汇总也花满。
+        engine = _ScriptedEngine((10_000, 1))  # 远大于上限 → 实耗被上限夹住
+        _run_family(engine, plan)
+
+        caps = [_cap_of(engine, index) for index in range(len(engine.calls))]
+        # 最后一段是对账轮（分片 ×3 + 汇总 + 对账）
+        assert len(caps) == 5, f"成员段数不对：{caps}"
+        assert caps[-1] >= reserve, (
+            f"分片把池花光之后，对账轮只拿到 {caps[-1]} 次（预留 {reserve} 次）——"
+            "run 57 就是这么只裁了 20 条里的 3 条"
+        )
+        # 而分片那几段**没有**动用预留：它们的上限总和加上汇总的下限不超过池
+        assert sum(caps[:4]) <= plan.quota.requests_pool, (
+            "分片与汇总把池撑破了 —— 那正是预留被吃掉的形状"
+        )
+
+    def test_the_synthesis_is_not_handed_the_verify_reserve(self):
+        """汇总的上限 = **池内剩余 − 对账预留**（那一份是留给复核的）。
+
+        分片各只用 5 次（远低于名义额），于是池里剩一大截：这时候「汇总拿走多少」
+        就看得出预留在不在里面 —— 改回 `max(剩余, 下限)` 时这里会多出 `reserve` 次。
+        """
+        plan = self._plan_with_verify(count=2, verify_items=1)
+        reserve = plan.quota.verify_requests
+        assert reserve > 0
+
+        engine = _ScriptedEngine((5, 1))  # S1、S2 各用 5 次索取 1 轮
+        _run_family(engine, plan)
+
+        spent_by_shards = 10
+        synthesis_cap = _cap_of(engine, 2)  # 0/1 是分片，2 是汇总
+        assert synthesis_cap == plan.quota.requests_pool - spent_by_shards - reserve, (
+            f"汇总拿到的上限里含（或不含）对账预留，与「池内剩余 − 预留」对不上："
+            f"拿到的 {synthesis_cap}，池 {plan.quota.requests_pool}、"
+            f"分片已用 {spent_by_shards}、预留 {reserve}"
+        )
+
+    def test_a_verify_round_warning_names_the_stage(self, monkeypatch):
+        """池见底时日志里要有**阶段名 + 池剩余数**（原先只有引擎那句「额度用尽」）。
+
+        断言挂在 `log_print` 上而不是 `capsys`：日志器在 import 时就持有了原始 stdout
+        的引用，`capsys` 抓不到它写出去的内容（本仓库既有测试记着这一条）。
+        """
+        from services.ai import subagent
+
+        messages: list[str] = []
+        monkeypatch.setattr(
+            subagent, "log_print", lambda *args, **kwargs: messages.append(str(args[0] or ""))
+        )
+        plan = self._plan_with_verify(count=3, verify_items=1)
+        engine = _ScriptedEngine((10_000, 1))
+
+        _run_family(engine, plan)
+
+        joined = "\n".join(messages)
+        assert "共享池已耗尽" in joined, f"池见底没有任何一句可查的话：{joined}"
+        assert any(stage in joined for stage in ("S2", "S3", "汇总", "V1")), (
+            f"告警里没有阶段名，读日志的人不知道是哪一步见底的：{joined}"
+        )
+        assert "剩余 0 次索取" in joined, f"告警没写池剩余数：{joined}"
+
+
 class TestFamilyQuotaMath:
     @staticmethod
     def _quota() -> FamilyQuota:

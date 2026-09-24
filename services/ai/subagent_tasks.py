@@ -45,9 +45,15 @@ from services.ai.prompt_cache import mark_cache_breakpoint
 from services.ai.protocol import Anomaly, DroppedItem, unclassified_anomalies
 from services.ai.report_document import demote_headings
 from services.ai.rules import KIND_ANOMALY_CAP
+from services.ai.scope import normalize_path
 from services.ai.skill_contract import UNCLASSIFIED_LABEL, dimension_ids_of
 from services.ai.skill_loader import LoadedSkills
-from services.ai.verdict import assign_findings, strip_verdict_block, verdict_instructions
+from services.ai.verdict import (
+    Finding,
+    assign_findings,
+    strip_verdict_block,
+    verdict_instructions,
+)
 
 # 对账轮一次核对几条。**只核对最严重的几条**：对账要的是深度（去找反证、指出证据够不够），
 # 而不是把整份报告重读一遍 —— 后者正是汇总那一次已经做过的事。
@@ -58,6 +64,15 @@ MAX_VERIFY_ITEMS = 5
 # 又要多花一次整份提示词的钱，得不偿失。
 MIN_MEMBER_TOOL_REQUESTS = 2
 MIN_MEMBER_ROUNDS = 2
+
+# 对账轮每条结论预留多少次索取：它要**去找反证**（读那个文件、查那个标识符的另一端），
+# 每条至少要留「读一处、核一处」的余量。
+VERIFY_REQUESTS_PER_ITEM = 2
+# 预留的**下限**（要核的条数很少时也要真去查一次）与**上限**（不许它吃掉池的一大块）。
+MIN_VERIFY_REQUESTS = 3
+MAX_VERIFY_REQUESTS = 12
+# 对账轮预留的轮次：一次找反证 + 一次按地址补读。
+VERIFY_ROUNDS_RESERVE = 2
 
 def _percent_of(total: int, percent: int) -> int:
     """`total` 的 `percent`%，**向上取整**。
@@ -89,8 +104,9 @@ class FamilyQuota:
 
         cap_i = 名义额 + max(0, 池剩余 − 名义额 − 后面几片的名义额 − 汇总下限)
 
-    汇总那一次**保下限、可越池**（它是唯一产出最终报告的一步，不许被前面的分片饿死）；
-    对账轮只用剩余、不保下限（它本来就是可跳过的一道）。
+    汇总那一次**保下限**（它是唯一产出最终报告的一步，不许被前面的分片饿死）；
+    对账轮**规划时就有预留**（`verify_reserve`），分片与汇总都消费不到那一份 ——
+    池的账是「分片怎么花 + 汇总的底线 + 对账的预留」三笔，谁也拿不走别人那一笔。
 
     扣账按**实跑数**：轮次按 `len(outcome.rounds)`（引擎的 `+2` 格式重问轮不计入名义
     额度，按实耗扣就不会双记），索取按 `outcome.requests_used`。被 `should_skip` 跳过的
@@ -104,36 +120,64 @@ class FamilyQuota:
     rounds_nominal: int
     requests_used: int = 0
     rounds_used: int = 0
+    #: 对账轮的**预留**（规划时划走，见 `verify_reserve`）。分片与汇总的上限都把这一份
+    #: 减掉，对账轮则至少拿得到这一份 —— 于是「报告正文有 20 条结论、只裁 3 条」那种
+    #: 「正文与复核状态不一致」不可能再因为额度而出现。
+    verify_requests: int = 0
+    verify_rounds: int = 0
 
     def shard_caps(self, members_after: int) -> tuple[int, int]:
         """一个分片开跑前的「当片上限」：`(索取上限, 轮次上限)`。
 
-        `members_after` 是本片**之后**还要跑的分片数（不含汇总）；汇总的下限在这里
-        一并预留（`MIN_MEMBER_*`）。
+        `members_after` 是本片**之后**还要跑的分片数（不含汇总）；汇总的下限与**对账轮的
+        预留**都在这里一并扣掉 —— 分片永远消费不到那一份（见 `verify_reserve`）。
         """
         return (
             self._cap(
                 left=self.requests_left,
                 nominal=self.requests_nominal,
-                reserved=members_after * self.requests_nominal + MIN_MEMBER_TOOL_REQUESTS,
+                reserved=(
+                    members_after * self.requests_nominal
+                    + MIN_MEMBER_TOOL_REQUESTS
+                    + self.verify_requests
+                ),
             ),
             self._cap(
                 left=self.rounds_left,
                 nominal=self.rounds_nominal,
-                reserved=members_after * self.rounds_nominal + MIN_MEMBER_ROUNDS,
+                reserved=(
+                    members_after * self.rounds_nominal
+                    + MIN_MEMBER_ROUNDS
+                    + self.verify_rounds
+                ),
             ),
         )
 
     def synthesis_caps(self) -> tuple[int, int]:
-        """汇总那一次的上限：池内剩余全给，但保下限、**可越池**（不许被饿死）。"""
+        """汇总那一次的上限：池内剩余**减去对账轮的预留**，仍保下限。
+
+        「保下限」这一档可以越池（汇总若连下限都拿不到，报告就没了）—— 但那一档只到
+        下限为止，**不许多拿预留的那一份**：原先它取 `max(剩余, 下限)`，池见底时会把
+        对账轮的最后一格也一起拿走。
+        """
         return (
-            max(self.requests_left, MIN_MEMBER_TOOL_REQUESTS),
-            max(self.rounds_left, MIN_MEMBER_ROUNDS),
+            max(
+                self.requests_left - self.verify_requests,
+                MIN_MEMBER_TOOL_REQUESTS,
+            ),
+            max(self.rounds_left - self.verify_rounds, MIN_MEMBER_ROUNDS),
         )
 
     def verify_caps(self) -> tuple[int, int]:
-        """对账轮的上限：只用池内剩余，不保下限（可跳过的一道）。"""
-        return (self.requests_left, self.rounds_left)
+        """对账轮的上限：**至少是预留的那一份**，池里还剩的也一并给它（剩余回流）。
+
+        不保「不越池」那一档之外的任何约束：汇总真的越池时，预留照样拿得到 —— 这正是
+        预留的意义。它仍然是**可跳过的一道**（预算早停管得着它），跳过与否与额度无关。
+        """
+        return (
+            max(self.verify_requests, self.requests_left),
+            max(self.verify_rounds, self.rounds_left),
+        )
 
     def spend(self, requests_used: int, rounds_used: int) -> None:
         """跑完一个成员按实耗扣池。"""
@@ -292,6 +336,52 @@ def attach_seed(
                 else ""
             ),
         ),
+    )
+
+
+def verify_reserve(*, enabled: bool, items: int) -> tuple[int, int]:
+    """对账轮的**预留**额度 `(索取, 轮次)`：规划时就从池里划走，分片与汇总都不许动它。
+
+    ## 为什么必须预留（实测 run 57）
+
+    池 = 分片数 × 名义额（那次 5×50 = 250），而复核是**最后**一步：分片按
+    「名义额 + 富余」拿，富余来自 `池剩余 − 名义额 − 后面几片的名义额 − 汇总下限`
+    —— **复核不在任何人的预留里**。于是分片一路把池吃到见底，汇总又取
+    `max(剩余, 下限)`（可越池），到复核时只剩 0 次：报告正文写着 20 条结论，
+    只有 3 条被裁决，尾部还另写一句「待人工核验」—— 正文与复核状态不一致，
+    而读者先看到的是正文。
+
+    预留量按**要核的条数**算（每条给 `VERIFY_REQUESTS_PER_ITEM` 次：读一处、核一处），
+    下限保证真能去查一次、上限保证它吃不掉池的一大块。`enabled` 为假（这一轮不开对账）
+    时是 `(0, 0)`，一分不占。
+    """
+    if not enabled:
+        return (0, 0)
+    size = max(1, int(items or 0))
+    requests = max(
+        MIN_VERIFY_REQUESTS, min(size * VERIFY_REQUESTS_PER_ITEM, MAX_VERIFY_REQUESTS)
+    )
+    return (requests, VERIFY_ROUNDS_RESERVE)
+
+
+def pool_exhausted_note(quota: "FamilyQuota", stage: str) -> str:
+    """池耗尽那一刻的告警：**阶段名 + 池剩余数**（原先只有引擎那句「额度用尽」）。
+
+    引擎那句说的是「**这一次**成员的上限用完了」，它分不出三种完全不同的情形：池真没了、
+    这一片本来就只分到这么多、还是后面的成员还有预留。读日志的人要能一眼看出后面还有
+    多少钱 —— run 57 的对账轮就是在池见底之后才开跑的，而日志里只有一句「额度用尽」。
+    """
+    tail = (
+        f"对账轮的预留 {quota.verify_requests} 次不受影响"
+        if quota.verify_requests
+        else "对账轮没有预留"
+    )
+    return (
+        f"⚠️ AI 分析：家族共享池已耗尽（阶段 {stage}）：剩余 "
+        f"{quota.requests_left} 次索取 / {quota.rounds_left} 轮，"
+        f"已用 {quota.requests_used}/{quota.requests_pool} 次索取、"
+        f"{quota.rounds_used}/{quota.rounds_pool} 轮；{tail}。"
+        "后面的成员只能基于已有证据出结论。"
     )
 
 
@@ -503,12 +593,176 @@ def build_synthesis_task(
     return "\n\n".join(blocks).rstrip() + "\n"
 
 
+#: 复核优先级的三个**确定性**信号，以及各自的权重（见 `rank_verify_candidates`）。
+#: 权重全是小整数、顺序确定：同一份输入两次挑出的一定是同一批（复核挑谁这件事本身
+#: 不能带随机性，否则「哪几条被核过」就不可复现了）。
+VERIFY_WEIGHT_WEAK_EVIDENCE = 3
+VERIFY_WEIGHT_CROSS_REPOSITORY = 2
+VERIFY_WEIGHT_BASELINE_CONFLICT = 2
+#: 「证据薄弱」的字符阈值：证据合起来短于它，基本指不到具体位置（文件、行、字段）。
+WEAK_EVIDENCE_CHARS = 40
+#: 证据里出现这些词，说明模型**自己**就没核实过 —— 正是复核该接手的。
+_UNVERIFIED_MARKERS = ("待确认", "未找到", "尚未确认", "无法确认", "需人工")
+
+#: 从一段文本里挑路径用的形状判据。**只认平台跟踪清单里有的那些**（见 `_paths_in`），
+#: 所以宽一点不会误伤：认不出来的 token 直接丢掉。
+_PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./\-]*/[A-Za-z0-9_./\-]*[A-Za-z0-9_]")
+
+
+def _weak_evidence(anomaly: Anomaly) -> bool:
+    """这条结论的证据**薄**：一条没有、合起来短得指不到位置，或者它自己写着「待确认」。
+
+    第三种是「模型自己就没核实过」的显式标记 —— 那种结论最该被复核，而它在按严重度
+    排序时一点优势都没有（严重度是它自己填的）。
+    """
+    joined = " ".join(str(item or "") for item in anomaly.evidence).strip()
+    if not joined:
+        return True
+    if len(joined) < WEAK_EVIDENCE_CHARS:
+        return True
+    return any(marker in joined for marker in _UNVERIFIED_MARKERS)
+
+
+def _repositories_of_commit(scope: Any, commit: str) -> frozenset:
+    mapping = getattr(scope, "repository_ids_by_commit", None) or {}
+    return frozenset(mapping.get(str(commit or ""), ()) or ())
+
+
+def _paths_in(text: str, scope: Any) -> tuple[str, ...]:
+    """从一段文本里挑出**平台认识的**路径（对不上跟踪清单的一律丢掉）。
+
+    只认清单里有的那些，是为了不把散文里的斜杠当成路径：判据落在平台的跟踪表上，
+    误报与漏报都只可能来自「这条路径不在本次范围里」——而那本来就不是复核的题目。
+    """
+    known = getattr(scope, "latest_commit_by_path", None) or {}
+    if not known:
+        return ()
+    found: list[str] = []
+    for raw in _PATH_TOKEN_RE.findall(str(text or "")):
+        path = normalize_path(raw)
+        if path and path in known and path not in found:
+            found.append(path)
+    return tuple(found)
+
+
+def _cross_repository(anomaly: Anomaly, scope: Any) -> bool:
+    """这条结论**跨仓库**：它自己的提交在一个仓库，而它引的证据落在另一个仓库里。
+
+    ## 为什么这类要优先复核
+
+    run 57：平台只冻结了配置仓库，代码仓库的文件一律被拒（同一句「不在本次冻结版本的
+    Git 跟踪文件里」）—— 于是模型给出的跨仓结论**恰恰是最缺证据的那一类**，而它自己
+    感觉不到（它会把「读不到」写成信息缺口，但仍按推断下结论）。这一条判据就是把这批
+    结论挑出来复核。
+    """
+    own = _repositories_of_commit(scope, anomaly.commit)
+    if not own:
+        return False
+    for path in _paths_in(_evidence_text(anomaly), scope):
+        repositories = _repositories_of_commit(
+            scope, (getattr(scope, "latest_commit_by_path", None) or {}).get(path, "")
+        )
+        if repositories and not (repositories & own):
+            return True
+    return False
+
+
+def _baseline_conflict(anomaly: Anomaly, scope: Any) -> bool:
+    """这条结论引的那份差异**归属可疑**：同一个文件被本窗口的多条提交改过，而它引的
+    不是这个文件最近的那一条。
+
+    ## 为什么这类要优先复核（实测 run 55）
+
+    报告把**上一笔提交**（铁剑 200→260）反复写成「本次差异」（本次是皮甲 180→190）——
+    两笔改的是同一个配表，合并差异里两条都在，而清单的小标题只写「这个文件最后一次
+    改动落在哪条提交」。引错版本是这一类结论的典型失效模式，而它**读起来毫无破绽**：
+    差异正文确实出自这个文件。所以有这种形状的结论排前面。
+    """
+    path = normalize_path(anomaly.file_path)
+    if not path or scope is None:
+        return False
+    touched = [
+        commit_id
+        for commit_id, paths in (getattr(scope, "paths_by_commit", None) or {}).items()
+        if path in (paths or ())
+    ]
+    if len(touched) < 2:
+        return False
+    latest = str((getattr(scope, "latest_commit_by_path", None) or {}).get(path, "") or "")
+    return bool(latest) and str(anomaly.commit or "") != latest
+
+
+def _evidence_text(anomaly: Anomaly) -> str:
+    parts = [str(anomaly.file_path or ""), str(anomaly.impact or ""), str(anomaly.suggestion or "")]
+    parts.extend(str(item or "") for item in anomaly.evidence)
+    return " ".join(parts)
+
+
+def verify_weight_reasons(anomaly: Anomaly, scope: Any = None) -> tuple[str, ...]:
+    """这条结论被复核**优先**的理由（空元组 = 只是按严重度排到的）。
+
+    进任务书给模型与读日志的人看：复核挑谁如果不说出来，「只核了 3 条」那件事看起来
+    就像随机的。
+    """
+    reasons: list[str] = []
+    if _weak_evidence(anomaly):
+        reasons.append("证据薄弱")
+    if _cross_repository(anomaly, scope):
+        reasons.append("跨仓库依赖")
+    if _baseline_conflict(anomaly, scope):
+        reasons.append("归属可疑（同一文件被本窗口多条提交改过）")
+    return tuple(reasons)
+
+
+def verify_weight(anomaly: Anomaly, scope: Any = None) -> int:
+    score = 0
+    if _weak_evidence(anomaly):
+        score += VERIFY_WEIGHT_WEAK_EVIDENCE
+    if _cross_repository(anomaly, scope):
+        score += VERIFY_WEIGHT_CROSS_REPOSITORY
+    if _baseline_conflict(anomaly, scope):
+        score += VERIFY_WEIGHT_BASELINE_CONFLICT
+    return score
+
+
+def rank_verify_candidates(
+    anomalies: Sequence[Anomaly], *, items: int, scope: Any = None
+) -> tuple[Finding, ...]:
+    """挑对账轮要核的那几条。**编号仍是 `assign_findings` 那一套**（F1…Fn 按严重度）。
+
+    ## 在「严重度 → 置信度」之上再加三个确定性信号
+
+    原先就是取严重度最高的前 N 条（`assign_findings` 的次序）。最严重的**未必是最可能
+    错的**，而复核的价值在于**改判**：证据薄、跨仓库、差异归属可疑这三类才是它边际收益
+    最高的地方（各自的机理见 `_weak_evidence` / `_cross_repository` /
+    `_baseline_conflict`）。
+
+    ## 编号必须原样保留
+
+    `verdict` 按 `[F#]` 认结论（`assign_findings` 的编号，与封顶同一套严重度排序）。
+    所以这里只**挑子集**，不重排编号 —— 重排会让裁决打到另一条结论上，而那种错没有任何
+    征兆（报告里只会少一条裁决、多一条没被裁决的）。同样权重的排在前面的仍是**严重度
+    序**（`findings` 本来就是那个序）—— 拿 `Finding.position`（= 模型给出结论的顺序）
+    当次键会把次序整体打乱，`test_it_takes_the_most_severe_first` 正是钉这一条的。
+    """
+    findings = assign_findings(anomalies)
+    if not findings:
+        return ()
+    size = max(1, int(items or 0))
+    ordered = sorted(
+        enumerate(findings),
+        key=lambda item: (-verify_weight(item[1].anomaly, scope), item[0]),
+    )
+    return tuple(finding for _, finding in ordered[:size])
+
+
 def build_verify_task(
     plan: FamilyPlan,
     synthesis: EngineOutcome,
     *,
     evidence_index: Mapping[str, EvidenceRef] | None = None,
     pool_note: str = "",
+    scope: Any = None,
 ) -> str:
     """对账轮的任务书：把最严重的几条交出去，**要求它去找反证 + 给出结构化裁决**。
 
@@ -543,10 +797,12 @@ def build_verify_task(
     对账轮的请求形状与分片一致（system + 共享变更清单 + 本任务书），所以**它也吃缓存** ——
     这是一次额外的模型调用里最贵的那一段。
     """
-    # 排序复用 `verdict.assign_findings`（内部就是 `rules.rank_anomalies`：严重度 → 置信度，
-    # 同档保持模型给的顺序）—— 对账要挑的「最严重的几条」必须与封顶时挑的是同一个口径，
-    # 两套排序迟早会不一致；而编号也由它发，两处各排一次会让**裁决打到另一条结论上**。
-    ranked = assign_findings(synthesis.anomalies)[: plan.verify_items]
+    # 挑选复用 `verdict.assign_findings`（内部就是 `rules.rank_anomalies`：严重度 → 置信度，
+    # 同档保持模型给的顺序）—— 编号由它发，两处各排一次会让**裁决打到另一条结论上**。
+    # `rank_verify_candidates` 只在它之上按三个确定性信号加权（见那边的说明）。
+    ranked = rank_verify_candidates(
+        synthesis.anomalies, items=plan.verify_items, scope=scope
+    )
     blocks = [
         "# 分工：你是对账轮（找反证）",
         (
@@ -582,6 +838,13 @@ def build_verify_task(
             anomaly = finding.anomaly
             lines.append(f"### {index}. [{finding.finding_id}] {anomaly.title}")
             lines.append(f"- 维度：{anomaly.category} · 严重度 {anomaly.severity}")
+            reasons = verify_weight_reasons(anomaly, scope)
+            if reasons:
+                lines.append(
+                    "- 复核优先级：平台按**"
+                    + "、".join(reasons)
+                    + "**把它排在前面（不是判定它错，是这几类最需要反证）"
+                )
             if anomaly.file_path:
                 lines.append(f"- 位置：{anomaly.file_path}")
             if anomaly.impact:

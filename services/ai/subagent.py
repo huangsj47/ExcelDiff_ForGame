@@ -136,6 +136,8 @@ from services.ai.subagent_tasks import (
     build_synthesis_task,
     build_unclassified_section,
     build_verify_task,
+    pool_exhausted_note,
+    verify_reserve,
     verify_section,
 )
 from services.ai.verdict import (
@@ -379,11 +381,18 @@ def plan_family(
     # 家族共享池：池 = 实际开出的成员数 × 名义额（维度比目标少、少开了成员时，池跟着
     # 缩 —— 池是「这几个成员能花的钱」，不是「配置面收敛前那个数字」）。汇总与对账轮
     # 从池内剩余取用，见 `FamilyQuota`。
+    # 对账轮的预留**在规划时就从池里划走**（见 `verify_reserve`）：run 57 的 250 次是在
+    # 复核之前被分片与汇总吃光的，于是 20 条结论只裁了 3 条，而正文与尾部还各说各话。
+    reserve_requests, reserve_rounds = verify_reserve(
+        enabled=bool(verify), items=_clamp_verify_items(verify_items)
+    )
     quota = FamilyQuota(
         requests_pool=member_requests * len(members),
         rounds_pool=member_rounds * len(members),
         requests_nominal=member_requests,
         rounds_nominal=member_rounds,
+        verify_requests=reserve_requests,
+        verify_rounds=reserve_rounds,
     )
     return FamilyPlan(
         count=len(members),
@@ -551,20 +560,28 @@ def run_family(
     spent_tokens = 0
     # 家族共享池（串行滚动，见 `FamilyQuota`）。手搓的 `FamilyPlan`（测试）没带账本时，
     # 按「名义额即池」重建一份 —— 行为等价于「每片各拿名义额、互不借贷」的旧口径。
+    fallback_reserve = verify_reserve(enabled=bool(plan.verify), items=plan.verify_items)
     quota = plan.quota or FamilyQuota(
         requests_pool=int(plan.limits.max_tool_requests) * len(plan.members),
         rounds_pool=int(plan.limits.max_rounds) * len(plan.members),
         requests_nominal=int(plan.limits.max_tool_requests),
         rounds_nominal=int(plan.limits.max_rounds),
+        verify_requests=fallback_reserve[0],
+        verify_rounds=fallback_reserve[1],
     )
     for position, member in enumerate(plan.members):
         reason = should_skip(member, spent_tokens) if should_skip is not None else ""
         if reason:
             steps.append(MemberOutcome(plan=member, skipped_reason=reason))
             continue
-        # 当片上限 = 名义额 + 前片省下的富余（后面几片的名义额与汇总下限先被预留）。
+        # 当片上限 = 名义额 + 前片省下的富余（后面几片的名义额、汇总下限与对账轮的预留
+        # 都先被扣下）。
         members_after = len(plan.members) - (position + 1)
         cap_requests, cap_rounds = quota.shard_caps(members_after)
+        if cap_requests <= 0:
+            # 池见底要**说清是哪一步、还剩多少**（引擎那句「额度用尽」说的是这一次成员的
+            # 上限，读日志的人分不出「池真没了」与「这一片本来就只有这么多」）。
+            log_print(pool_exhausted_note(quota, member.label or "分片"), "AI")
         member_limits = replace(
             plan.limits, max_tool_requests=cap_requests, max_rounds=cap_rounds
         )
@@ -598,6 +615,8 @@ def run_family(
     # 汇总那一次：池内剩余全给它，但保下限、**可越池**（唯一产出最终报告的一步，不许
     # 被前面的分片饿死 —— 见 FamilyQuota.synthesis_caps）。
     synthesis_caps = quota.synthesis_caps()
+    if synthesis_caps[0] <= 0:
+        log_print(pool_exhausted_note(quota, "汇总"), "AI")
     synthesis_limits = replace(
         plan.limits,
         max_tool_requests=synthesis_caps[0],
@@ -665,6 +684,8 @@ def run_family(
             steps.append(MemberOutcome(plan=verify_member, skipped_reason=reason))
         else:
             verify_caps = quota.verify_caps()
+            if verify_caps[0] <= 0:
+                log_print(pool_exhausted_note(quota, VERIFY_LABEL), "AI")
             steps.append(
                 _run_verify(
                     plan=plan,
@@ -975,6 +996,9 @@ def _run_verify(
             synthesis,
             evidence_index=evidence_index_of(body_cache),
             pool_note=pool_note,
+            # 复核挑谁要按三个确定性信号加权，其中两条（跨仓、归属可疑）要读范围账：
+            # 「这个文件被本窗口几条提交改过」「证据里的路径属于哪个仓库」。
+            scope=scope,
         ),
         on_round=on_round,
         on_start=on_start,

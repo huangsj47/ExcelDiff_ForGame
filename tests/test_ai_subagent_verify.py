@@ -28,6 +28,7 @@ from services.ai.engine import (
 )
 from services.ai.llm_client import ChatResult
 from services.ai.protocol import Anomaly
+from services.ai.scope import AnalysisScope
 from services.ai.subagent import (
     DEFAULT_VERIFY_ITEMS,
     MAX_VERIFY_ITEMS,
@@ -40,6 +41,10 @@ from services.ai.subagent import (
 )
 from services.ai.verdict import RULING_TITLE
 from tests.test_ai_engine import (
+    COMMIT,
+    COMMIT_B,
+    LUA,
+    TABLE,
     FakeProvider,
     _anomaly,
     _final,
@@ -539,3 +544,203 @@ def test_the_verify_step_is_only_ever_one(count):
     )
 
     assert len(_verify_steps(result)) == 1
+
+
+# ==========================================================================
+#  复核的额度：**规划时就预留**（run 57 的 250 次在复核之前被吃光）
+# ==========================================================================
+
+
+class TestTheReserveIsTakenBeforeTheShardsRun:
+    """池 = 分片数 × 名义额，而复核是**最后**一步 —— 它不在任何人的预留里。
+
+    实测 run 57：分片按「名义额 + 富余」把池吃到见底，汇总又取 `max(剩余, 下限)`，
+    复核拿到 0 次 —— 报告正文写着 20 条结论，只有 3 条被裁决，尾部另写「待人工核验」。
+    这一组钉的就是那一份**谁都拿不走**的预留。
+    """
+
+    def _quota(self, *, verify: bool, verify_items: int = 3, count: int = 3):
+        plan = plan_family(
+            mode="weekly", enabled=True, count=count, limits=LIMITS,
+            verify=verify, verify_items=verify_items,
+        )
+        assert plan is not None and plan.quota is not None
+        return plan.quota
+
+    def test_the_reserve_exists_and_scales_with_the_items(self):
+        small = self._quota(verify=True, verify_items=1)
+        big = self._quota(verify=True, verify_items=5)
+
+        assert small.verify_requests > 0, "开了对账却没有预留 —— run 57 就是这么饿死的"
+        assert big.verify_requests > small.verify_requests, "要核的条数变多，预留没有跟着变"
+
+    def test_a_closed_verify_reserves_nothing(self):
+        quota = self._quota(verify=False)
+
+        assert (quota.verify_requests, quota.verify_rounds) == (0, 0), (
+            "没开对账却从池里划走一份 —— 分片白白少拿额度"
+        )
+
+    def test_the_shards_can_never_consume_the_reserve(self):
+        """把分片**按它自己的上限**花到极限，复核仍然拿得到预留那一份。"""
+        quota = self._quota(verify=True, verify_items=3, count=3)
+        reserve = quota.verify_requests
+
+        for members_after in (2, 1, 0):
+            cap_requests, cap_rounds = quota.shard_caps(members_after)
+            quota.spend(cap_requests, cap_rounds)
+            assert quota.verify_caps()[0] >= reserve, (
+                f"分片（后面还有 {members_after} 片）把复核的预留吃掉了"
+            )
+
+        assert quota.verify_caps()[0] >= reserve
+
+    def test_the_synthesis_cannot_eat_the_reserve(self):
+        """汇总保下限、可以越池，但**不许**跨过下限去拿复核那一份（原先它取 `max(剩余, 下限)`）。"""
+        quota = self._quota(verify=True, verify_items=3, count=2)
+        quota.spend(quota.requests_pool, quota.rounds_pool)  # 池见底
+
+        assert quota.verify_caps()[0] >= quota.verify_requests, "池见底后复核没额度了"
+        assert quota.synthesis_caps()[0] == 2, (
+            "池见底时汇总应当只拿下限（2），而不是把复核的预留一起拿走"
+        )
+
+    def test_the_leftover_flows_to_the_verify_round(self):
+        """分片省下来的**回流给复核**（它拿到的是「预留」与「池内剩余」里大的那个）。"""
+        quota = self._quota(verify=True, verify_items=1, count=3)
+
+        assert quota.verify_requests > 0
+        assert quota.verify_caps()[0] >= quota.verify_requests
+
+    def test_the_warning_names_the_stage_and_what_is_left(self):
+        """池耗尽的告警要写清**阶段名 + 池剩余数**（原先只有引擎那句「额度用尽」）。"""
+        from services.ai.subagent_tasks import pool_exhausted_note
+
+        quota = self._quota(verify=True, verify_items=3, count=2)
+        quota.spend(quota.requests_pool, quota.rounds_pool)
+
+        note = pool_exhausted_note(quota, "V1")
+
+        assert "V1" in note and "已耗尽" in note
+        assert str(quota.requests_pool) in note, "没写池总量，读日志的人不知道自己离见底多远"
+        assert "剩余 0 次索取" in note, "没写池剩余数"
+
+
+# ==========================================================================
+#  复核挑谁：严重度之上再加三个**确定性**信号
+# ==========================================================================
+
+
+def _obj(**overrides):
+    """一条 `Anomaly`（走既有 fixture，避免字段漂移）。"""
+    return _anomaly_objs([_anomaly(**overrides)])[0]
+
+
+def _strong(title="严重但证据扎实"):
+    """一条**证据扎实、且证据全在同一个仓库里**的高危结论。
+
+    fixture 的基线证据同时提到 `TABLE` 与 `LUA`（那是别的用例要的形状），拿它当
+    「对照组的正常结论」会让对照组也带上跨仓权重 —— 平局，用例就测不到想测的东西。
+    """
+    return _obj(
+        title=title,
+        severity="critical",
+        confidence="high",
+        evidence=[f"{TABLE} 里删除了 ID 1001（第 12 行），生成文件里仍在"],
+    )
+
+
+class TestWhoTheVerifyRoundChecks:
+    def _round(self, *anomalies, scope=None, items=1):
+        plan = _plan(2, verify=True, verify_items=items)
+        return build_verify_task(
+            plan,
+            _outcome_engine(tuple(anomalies)),
+            scope=scope if scope is not None else _scope(),
+        )
+
+    def test_weak_evidence_jumps_the_severity_order(self):
+        strong = _strong()
+        weak = _obj(title="低危但需要核", severity="low", confidence="low",
+                    evidence=["待确认：没读到另一端"])
+        task = self._round(strong, weak, items=1)
+
+        assert "低危但需要核" in task, "证据薄的那条（自己写着「待确认」）没有优先被核"
+        assert "证据薄弱" in task, "没有说明为什么挑它"
+
+    def test_solid_evidence_keeps_the_severity_order(self):
+        """两个信号都不成立时，挑的仍是**最严重**的那条（原有口径没被顶掉）。"""
+        strong = _obj(title="严重且扎实", severity="critical")
+        mild = _obj(title="次严重且扎实", severity="medium")
+        task = self._round(strong, mild, items=1)
+
+        assert "严重且扎实" in task
+        assert "次严重且扎实" not in task
+
+    def test_a_finding_whose_evidence_lives_in_another_repository_is_checked(self):
+        strong = _strong()
+        cross = _obj(title="跨仓结论", severity="low", confidence="low",
+                     evidence=[f"{TABLE} 改了，另一端的 {LUA} 没跟上"])
+        scope = AnalysisScope(
+            commits=(COMMIT, COMMIT_B),
+            paths_by_commit={COMMIT: frozenset({TABLE}), COMMIT_B: frozenset({LUA})},
+            latest_commit_by_path={TABLE: COMMIT, LUA: COMMIT_B},
+            repository_ids_by_commit={COMMIT: frozenset({1}), COMMIT_B: frozenset({2})},
+        )
+
+        task = self._round(strong, cross, scope=scope, items=1)
+
+        assert "跨仓结论" in task
+        assert "跨仓库依赖" in task, "没有把「证据落在另一个仓库」这件事说出来"
+
+    def test_a_finding_about_a_multi_commit_file_is_checked(self):
+        """同一个文件被本窗口多条提交改过、而它引的不是最近那条 → 归属可疑（run 55 的形状）。
+
+        对照组落在**只被一条提交改过**的文件上（`LUA`）：否则它同样吃到这个信号，
+        两边平局，用例就退化成「按严重度挑」了。
+        """
+        stale = _obj(
+            title="引了更早那条提交", severity="low", confidence="low",
+            file_path=TABLE, commit=COMMIT,
+        )
+        control = _obj(
+            title="单条提交的文件", severity="critical", confidence="high",
+            file_path=LUA, commit=COMMIT_B,
+            evidence=[f"{LUA} 里删除了 ID 1001（第 12 行），生成文件里仍在"],
+        )
+        scope = AnalysisScope(
+            commits=(COMMIT, COMMIT_B),
+            # 同一个文件被两条提交改过：合并差异里两条都在，而清单只写「最后一次改动」
+            paths_by_commit={COMMIT: frozenset({TABLE}), COMMIT_B: frozenset({TABLE, LUA})},
+            latest_commit_by_path={TABLE: COMMIT_B, LUA: COMMIT_B},
+            repository_ids_by_commit={COMMIT: frozenset({1}), COMMIT_B: frozenset({1})},
+        )
+
+        task = self._round(control, stale, scope=scope, items=1)
+
+        assert "引了更早那条提交" in task
+        assert "归属可疑" in task
+
+    def test_the_pick_is_deterministic_and_keeps_the_platform_ids(self):
+        """同一份输入两次挑出同一批；编号仍是 `assign_findings` 那一套（否则裁决会打偏）。"""
+        from services.ai.subagent_tasks import rank_verify_candidates
+        from services.ai.verdict import assign_findings
+
+        anomalies = (
+            _obj(title="甲", severity="critical"),
+            _obj(title="乙", severity="high", evidence=["待确认"]),
+            _obj(title="丙", severity="low"),
+        )
+        scope = _scope()
+
+        first = rank_verify_candidates(anomalies, items=2, scope=scope)
+        second = rank_verify_candidates(anomalies, items=2, scope=scope)
+        official = {item.anomaly.title: item.finding_id for item in assign_findings(anomalies)}
+
+        assert [item.anomaly.title for item in first] == [
+            item.anomaly.title for item in second
+        ]
+        for finding in first:
+            assert finding.finding_id == official[finding.anomaly.title], (
+                "挑子集时重排了编号 —— 裁决会打到另一条结论上"
+            )
