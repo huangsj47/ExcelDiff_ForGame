@@ -292,8 +292,13 @@
             item.appendChild(list);
         }
         // **逐条断言与各自的裁决**（P0-01）。它是这一条「凭什么算核实过了」的答案，
-        // 而上面那个标题只是模型的概括。文案全部来自服务端（`display` / `status_label`
-        // / `checked_scope` 都是算好的）—— 这里只排版，不另说一句话。
+        // 而上面那个标题只是模型的概括。文案全部来自服务端（`heading` / `checked_scope`
+        // 都是算好的）—— 这里只排版，不另说一句话。
+        //
+        // 印的是 `heading`（服务端拼好的「状态词 + 断言正文」）而不是
+        // `status_label + ' —— ' + display`：`display` 自己就带着状态前缀（「待核查：…」），
+        // 两个一起印会变成「待核查 —— 待核查：…」（2026-09-24 修）。老载荷没有 `heading`
+        // 时回落到 `display`（它至少是完整的一句话）。
         //
         // 待核查的排在最前（服务端已经排好了次序）：这一段的用途是让人一眼看到
         // 「哪几条还没立住」，而不是从头读一遍。
@@ -302,16 +307,21 @@
             var claimsList = doc().createElement('ul');
             claimsList.className = 'ai-anomaly-claims';
             claims.forEach(function (claim) {
-                if (!claim || !claim.display) return;
+                var heading = claim && (claim.heading || claim.display);
+                if (!heading) return;
                 var li = doc().createElement('li');
                 li.className = 'ai-anomaly-claim ai-anomaly-claim-'
                     + String(claim.status || 'unverified');
                 li.textContent = (claim.claim_id ? '[' + claim.claim_id + '] ' : '')
-                    + (claim.status_label || '') + ' —— ' + claim.display
+                    + heading
                     + (claim.checked_scope ? '（查过：' + claim.checked_scope + '）' : '');
                 claimsList.appendChild(li);
             });
-            if (claimsList.childNodes.length) item.appendChild(claimsList);
+            // 用 `children` 而不是 `childNodes`：本文件其余的地方（以及跑它的那几个
+            // 用例里的假 DOM）都按元素子节点算，而这一行是**唯一**读 `childNodes` 的
+            // —— 一条都没有 claims 的行时它不会被走到，所以这个不一致一直没暴露
+            // （2026-09-24 给面板补 claims 用例时才撞上）。
+            if (claimsList.children.length) item.appendChild(claimsList);
         }
         if (row.impact) addLine(item, 'ai-anomaly-item-impact', '影响：' + row.impact);
         if (row.suggestion) addLine(item, 'ai-anomaly-item-suggestion', '建议：' + row.suggestion);

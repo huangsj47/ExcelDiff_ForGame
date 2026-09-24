@@ -578,17 +578,18 @@ def anomaly_rows(
 
 
 def _claim_text(claim: Any) -> str:
-    """一条断言在导出里那一行。认不出的形状返回空串（**不印半行假信息**）。"""
+    """一条断言在导出里那一行。认不出的形状返回空串（**不印半行假信息**）。
+
+    `heading` 是服务端算好的「状态词 + 断言正文」（三者只印一次；从前这里是
+    `status_label + " —— " + display`，而 `display` 本来带状态前缀，于是印成
+    「证据读不到 —— 证据读不到：…」）。老载荷没有 `heading` 时回落到 `display`。
+    """
     if not isinstance(claim, Mapping):
         return ""
-    display = str(claim.get("display") or claim.get("statement") or "").strip()
-    if not display:
+    heading = str(claim.get("heading") or claim.get("display") or "").strip()
+    if not heading:
         return ""
-    parts = [
-        f"`{str(claim.get('claim_id') or '').strip()}`",
-        str(claim.get("status_label") or "").strip(),
-        f"—— {display}",
-    ]
+    parts = [f"`{str(claim.get('claim_id') or '').strip()}`", heading]
     scope = str(claim.get("checked_scope") or "").strip()
     if scope:
         parts.append(f"（查过：{scope}）")

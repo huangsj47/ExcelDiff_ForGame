@@ -620,6 +620,127 @@ class TestTheExportReadsTheSameAdjudicatedClaims:
         assert rows[0]["claims"] == []
 
 
+class TestTheStatusWordIsPrintedOnce:
+    """三个渲染点印的都是服务端拼好的 `heading`：**状态词只说一次**（2026-09-24，run 63）。
+
+    从前三处都是各自拼 `status_label + " —— " + display`，而 `display` 对非 `verified`
+    的状态**本来就带状态前缀** —— 报告与面板上印出来的是
+
+        证据读不到 —— 证据读不到：次数记账在批次交付之前执行，且注释声明次数一经发起不退还。
+
+    同一行两个状态词。run 63 的报告里每一条断言都是这个样子。
+    """
+
+    def _unreadable_row(self):
+        """一条「依据读不到」的断言：它同时走 status_label 与 display 两条路。
+
+        （依据全不可定位时平台判 `unreadable`，见 `claims.claim_review_of`。）
+        """
+        claim = Claim(
+            claim_id="C1",
+            kind="fact",
+            statement="次数记账在批次交付之前执行",
+            evidence_refs=("代码里某处",),
+        )
+        reply = _reply(_verdict("F1", _claim_reply("C1", "verified")))
+        return reduce_findings([_anomaly(claim)], verdicts=parse_verdicts(reply)).rows[0]
+
+    def test_an_unreadable_claim_prints_the_word_once(self):
+        row = self._unreadable_row()
+        assert row.claim_reviews[0].status == CLAIM_UNREADABLE, "构造没生效"
+        text = render_ruling(
+            reduce_findings(
+                [row.anomaly],
+                verdicts=parse_verdicts(
+                    _reply(_verdict("F1", _claim_reply("C1", "verified")))
+                ),
+            ),
+            review_ran=True,
+        )
+        assert "`C1` **证据读不到**：次数记账在批次交付之前执行" in text
+        assert "证据读不到 —— " not in text, "状态词印了两遍 —— 渲染点又在自己拼 display 前缀"
+
+    def test_the_report_line_the_panel_and_the_export_all_read_the_heading(self):
+        from services.ai.report_document import anomaly_rows
+
+        row = _reviewed_row()  # C1 已证实 / C2 待核查
+        payload_row = row.as_dict()
+        claims = {item["claim_id"]: item for item in payload_row["claims"]}
+
+        # 服务端那一份就是那一行（状态词 + 正文，各一次）。
+        assert claims["C1"]["heading"] == "已证实：调用从 return false 改成 assert(bResult)"
+        assert claims["C2"]["heading"] == "待核查：断言会中断整个进程"
+        # `display` 仍是**标题安全**那一份：已证实的不带前缀（`compose_title` 拿它当标题）。
+        assert claims["C1"]["display"] == "调用从 return false 改成 assert(bResult)"
+        assert claims["C2"]["display"] == claims["C2"]["heading"]
+
+        report = render_ruling(
+            reduce_findings(
+                [_anomaly(DIFF_CLAIM, CONSEQUENCE_CLAIM)],
+                verdicts=parse_verdicts(
+                    _reply(
+                        _verdict(
+                            "F1",
+                            _claim_reply("C1", "verified")
+                            + ","
+                            + _claim_reply("C2", "unverified"),
+                        )
+                    )
+                ),
+            ),
+            review_ran=True,
+        )
+        assert "`C1` **已证实**：调用从 return false 改成 assert(bResult)" in report
+        assert "已证实 —— " not in report and "待核查 —— " not in report, (
+            "报告那一行又印了两遍状态词"
+        )
+
+        exported = "；".join(
+            anomaly_rows(
+                [
+                    {
+                        "title": payload_row["title"],
+                        "severity": payload_row["severity"],
+                        "confidence": payload_row["confidence"],
+                        "evidence": [],
+                        "claims": payload_row["claims"],
+                    }
+                ]
+            )[0]["claims"]
+        )
+        assert "`C2` 待核查：断言会中断整个进程" in exported, "导出没读 `heading`"
+        assert "待核查 —— " not in exported
+
+    def test_a_narrowed_claim_says_so_in_the_label_not_only_in_the_sentence(self):
+        """范围不足的负断言：**状态词**就得是「已检查范围内未发现」而不是「待核查」。
+
+        渲染点把状态词印在前面（`heading` 就是这么拼的），所以这一档必须落进
+        `status_label` —— 落在 `display` 里的话，行首那个词与句子里的说法会互相打架。
+        """
+        reply = _reply(
+            _verdict(
+                "F1",
+                _claim_reply(
+                    "C1",
+                    "verified",
+                    scope='{"files_checked": 120, "files_total": 1343}',
+                    complete=False,
+                ),
+            )
+        )
+        row = reduce_findings(
+            [_anomaly(Claim(claim_id="C1", kind="negative_scope",
+                            statement="整个项目没有迁移兼容读取"))],
+            verdicts=parse_verdicts(reply),
+        ).rows[0]
+        review = row.claim_reviews[0]
+
+        assert review.status == CLAIM_UNVERIFIED, "范围不足的负断言不许算已证实"
+        assert review.status_label == "已检查范围内未发现"
+        assert review.heading == "已检查范围内未发现：整个项目没有迁移兼容读取"
+        assert review.display == review.heading, "它本来就是标题安全的那一句（带前缀）"
+
+
 class TestTheClaimVerdictIsPersisted:
     def test_the_row_keeps_the_claims_and_the_basis(self):
         """落库那一行要能把断言读回来（下一轮基线、导出、面板都读它）。"""

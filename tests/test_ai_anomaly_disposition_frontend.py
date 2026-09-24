@@ -416,6 +416,25 @@ def _anomalies() -> list:
             "evidence": ["config/道具表.xlsx 删除了 ID 1001", "build/lua/CfgItem.lua 里 1001 还在"],
             "commit_ref": "f0724d7d", "file_path": "config/道具表.xlsx",
             "impact": "老存档引用的道具失效", "suggestion": "确认是否有意下线",
+            # 逐条断言（P0-01）。`heading` 是服务端拼好的「状态词 + 断言正文」，
+            # `display` 是**标题安全**那一份（未证实的带前缀、已证实的不带）——
+            # 两者都在这里给全，好让用例能钉住「界面印的是哪一份」。
+            "claims": [
+                {
+                    "claim_id": "C1", "kind": "fact", "status": "unreadable",
+                    "status_label": "证据读不到",
+                    "display": "证据读不到：次数记账在批次交付之前执行。",
+                    "heading": "证据读不到：次数记账在批次交付之前执行。",
+                    "checked_scope": "路径 code/qz_server/RewardSvrMod.lua",
+                },
+                {
+                    "claim_id": "C2", "kind": "fact", "status": "verified",
+                    "status_label": "已证实",
+                    "display": "客户端提示「部分奖励已发送至邮箱」被删除。",
+                    "heading": "已证实：客户端提示「部分奖励已发送至邮箱」被删除。",
+                    "checked_scope": "",
+                },
+            ],
             # 库里那个 naive-UTC 是 02:03:04 → 北京时间 10:03:04；服务端两个都给，
             # 界面**只许用** display 那个（测试里钉着「带 T 的那个不许出现」）。
             "disposition": "pending", "disposition_by": None,
@@ -841,6 +860,25 @@ def test_the_list_shows_what_a_decision_needs(run):
     assert "备注：误报，已核对" in body
     # 还没处置的那一条不该凭空多出这三样。
     assert body.count("处置人：") == 1, "只有真的处置过的那一条才显示处置人"
+
+
+def test_the_claim_lines_print_the_status_word_once(run):
+    """逐条断言那一行印的是服务端的 `heading`：**状态词只说一次**。
+
+    从前这里拼的是 `status_label + ' —— ' + display`，而 `display` 自己就带着状态前缀
+    （「证据读不到：…」）—— 界面上于是印成「证据读不到 —— 证据读不到：次数记账在批次
+    交付之前执行。」（报告那一节同款，2026-09-24 run 63 一起修的）。
+    """
+    body = _last(run, "载入清单")["panel"]
+
+    assert "[C1] 证据读不到：次数记账在批次交付之前执行。" in body, (
+        "断言那一行没有照 `heading` 印（服务端拼好的状态 + 正文）"
+    )
+    assert "证据读不到 —— " not in body, "状态词印了两遍 —— 界面又在自己拼 status_label"
+    assert "[C2] 已证实：客户端提示「部分奖励已发送至邮箱」被删除。" in body, (
+        "已证实的那一条丢了状态词 —— `display` 对它是裸正文，界面必须读 `heading`"
+    )
+    assert "（查过：路径 code/qz_server/RewardSvrMod.lua）" in body
 
 
 def test_the_disposition_time_is_the_server_rendered_one(run):

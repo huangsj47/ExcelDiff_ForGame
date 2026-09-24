@@ -293,6 +293,16 @@ class ClaimReview:
 
     @property
     def status_label(self) -> str:
+        """这一条断言的**读者向状态词**。
+
+        `narrowed`（否定性范围声明、而复核查过的范围不够）不是第五种 `status` —— 库里仍
+        记 `unverified`，但对外那一格必须写「已检查范围内未发现」：写「待核查」会让人以为
+        复核什么都没查，写「已证实」则是把「我没查到」说成了「不存在」。这个词曾经由
+        `display` 自己带着前缀表达，而现在三个渲染点都要把状态词印在前面，两处各带一份
+        就成了「待核查 —— 已检查范围内未发现：…」（同一行两个状态词）。
+        """
+        if self.narrowed and self.status == CLAIM_UNVERIFIED:
+            return "已检查范围内未发现"
         return CLAIM_STATUS_LABELS.get(self.status, CLAIM_STATUS_LABELS[CLAIM_UNVERIFIED])
 
     @property
@@ -300,22 +310,33 @@ class ClaimReview:
         return VERIFY_BASIS_LABELS.get(self.basis, VERIFY_BASIS_LABELS[VERIFY_BASIS_NONE])
 
     @property
+    def heading(self) -> str:
+        """一条断言**对外那一行**（状态词 + 断言正文），不含编号与查过范围。
+
+        ## 为什么要有它（2026-09-24，run 63）
+
+        三个渲染点（报告明细节 / 异常面板 / 导出）一直是各自拼
+        `status_label + " —— " + display`，而 `display` 对非 `verified` 的状态**本来就带
+        状态前缀** —— 印出来是「证据读不到 —— 证据读不到：次数记账在批次交付之前执行…」。
+        口径归一到这一处：**状态词只说一次**，`heading` 就是那一行，三个渲染点照印。
+
+        与 `display` 的分工：`display` 是**标题安全**的那一句（`compose_title` 要用它当
+        标题，所以 `verified` 不许带前缀、未证实的必须带）—— 它不适合当行首标签；
+        `heading` 是行首标签的形态。两份都由同一组属性算，不存在口径分叉。
+        """
+        return f"{self.status_label}：{self.claim.statement}"
+
+    @property
     def display(self) -> str:
-        """平台改写后的断言正文。**读者看到的必须是这一份**，不是模型写的原句。
+        """平台改写后的断言正文，**标题安全**那一份（`compose_title` 读它）。
 
         四态的措辞各不相同，因为它们的可信度完全不同：`待核查：…` 与
         `已检查范围内未发现：…` 都**不许**读成「已经确认过了」。
+        不带前缀的那一态只有 `verified` —— 已证实的断言当标题就是它本身。
         """
-        statement = self.claim.statement
         if self.status == CLAIM_VERIFIED:
-            return statement
-        if self.status == CLAIM_REFUTED:
-            return f"反证成立：{statement}"
-        if self.status == CLAIM_UNREADABLE:
-            return f"证据读不到：{statement}"
-        if self.narrowed:
-            return f"已检查范围内未发现：{statement}"
-        return f"待核查：{statement}"
+            return self.claim.statement
+        return self.heading
 
     def as_dict(self) -> dict:
         return {
@@ -332,6 +353,8 @@ class ClaimReview:
             "reason": self.reason,
             "narrowed": bool(self.narrowed),
             "display": self.display,
+            # 渲染点印的那一行（`display` 是标题安全那一份，两者不可互替）。
+            "heading": self.heading,
         }
 
 
@@ -633,8 +656,11 @@ def claim_lines(reviews: Sequence[ClaimReview]) -> str:
     parts: list[str] = []
     for review in (*pending, *verified):
         scope = f"（查过：{review.checked_scope}）" if review.checked_scope else ""
+        # 状态词只说一次（`heading` 的定义）：从前这里是「**状态** —— 状态：正文」，
+        # 而 `display` 自己就带着状态前缀 —— run 63 的报告里每一行都印了两遍。
         parts.append(
-            f"`{review.claim.claim_id}` **{review.status_label}** —— {review.display}{scope}"
+            f"`{review.claim.claim_id}` **{review.status_label}**："
+            f"{review.claim.statement}{scope}"
         )
     return "  - 逐条断言：" + "；".join(parts)
 

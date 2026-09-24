@@ -255,7 +255,13 @@ class TestTheBodyLabelMapping:
 
         assert labels == {"F1": "R9"}
 
-    def test_a_finding_without_a_counterpart_says_so(self):
+    def test_a_finding_without_a_counterpart_says_nothing(self):
+        """对不上正文编号时**什么都不写**（2026-09-24，run 63）。
+
+        从前写的是「（正文未编号）」：头部于是成了「[F1]（正文未编号）」—— 一个平台内部
+        编号，加一句平台自己承认「它在正文里找不到」。读者要落回正文靠的是**标题**，
+        它就在这一行里；那个不存在的编号只添乱。
+        """
         reduction = reduce_findings(
             [_anomaly()],
             verdicts=(
@@ -267,9 +273,13 @@ class TestTheBodyLabelMapping:
         row = _row(reduction)
         assert row.body_label == ""
         section = render_ruling(reduction, review_ran=True)
-        assert "[F1]（正文未编号）" in section
+        assert "正文未编号" not in section, "那句自我否定的括注又回来了"
+        assert "[F1]" not in section, (
+            "平台内部编号印进了给人看的报告 —— 产品里没有一处显示 finding_id"
+        )
+        assert section.count(f"- **{row.anomaly.title}**") == 1, "这一条没有落点"
 
-    def test_the_report_and_the_block_both_carry_it(self):
+    def test_the_report_carries_the_body_number(self):
         reduction = reduce_findings(
             [_anomaly()],
             verdicts=(
@@ -278,7 +288,7 @@ class TestTheBodyLabelMapping:
             body_text=f"## 风险评估\n\nR3. 队伍成员校验被删除\n   位置：{LUA}\n",
         )
 
-        assert "[F1]（正文 R3）" in render_ruling(reduction, review_ran=True)
+        assert "（正文 R3）" in render_ruling(reduction, review_ran=True)
         ruling = reduction.as_dict()
         assert ruling["rows"][0]["body_label"] == "R3"
 
@@ -668,7 +678,7 @@ class TestAGapOnlyCapsTheFindingsItTouches:
         )
 
         section = render_ruling(reduction, review_ran=True)
-        assert "[F1]（正文未编号）" in section
+        assert f"- **{_anomaly(file_path=PROTO).title}**" in section
         assert "证据有**已知缺口**" in section
         assert "已经在上面" not in section, "它没在上面任何一节里出现过"
         assert "那不是复核的裁决" in section, (
@@ -687,7 +697,9 @@ class TestAGapOnlyCapsTheFindingsItTouches:
         section = render_ruling(reduction, review_ran=True)
         assert section.count("### 证据缺口") == 1
         assert "已经在上面" in section
-        assert section.count("[F1]") == 1, "同一件事在报告里出现两遍"
+        assert section.count(f"- **{_anomaly(file_path=PROTO).title}**") == 1, (
+            "同一件事在报告里出现两遍"
+        )
 
     def test_the_unknown_authors_are_kept_apart(self):
         """模型写的理由与平台写的理由**分开**：读的人要分得清哪句是谁说的。"""
@@ -758,7 +770,7 @@ class TestTheFamilyPathAppliesTheGaps:
             "汇总那条的引用文件被分片截断过，置信度不许维持 very_high"
         )
         assert "证据缺口" in merged.report_markdown
-        assert "[F1]（正文 R1）" in merged.report_markdown
+        assert "（正文 R1）" in merged.report_markdown, "这一行要能落回正文"
 
     def test_the_review_running_is_what_makes_it_renderable(self):
         """复核没跑成时**不压**：那一节是这些降级唯一会被说明的地方。

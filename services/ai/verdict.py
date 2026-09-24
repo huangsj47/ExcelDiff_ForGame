@@ -1059,7 +1059,7 @@ def reduce_findings(
                     KIND_VERIFY,
                     0,
                     "复核裁决指向的编号找不到对应结论，平台未应用",
-                    f"[{verdict.finding_id}] {VERDICT_LABELS.get(verdict.verdict, verdict.verdict)}",
+                    verdict.finding_id,
                 )
             )
 
@@ -1072,23 +1072,22 @@ def reduce_findings(
                     KIND_VERIFY,
                     index,
                     "对账轮新发现的条目缺标题或证据，平台不采信（与主结论同一道校验）",
-                    f"[{finding_id}] {anomaly.title or '（无标题）'}",
+                    anomaly.title or "（无标题）",
                 )
             )
             continue
         if duplicate is not None:
             reason = (
-                f"与**刚被复核撤销**的 [{duplicate.finding_id}] 是同一个问题，"
-                "需要人工判一下到底撤不撤"
+                f"与**刚被复核撤销**的「{duplicate.anomaly.title}」是同一个问题，需要人工判一下到底撤不撤"
                 if not duplicate.active
-                else f"与清单里已有的 [{duplicate.finding_id}] 重复"
+                else f"与清单里已有的「{duplicate.anomaly.title}」重复"
             )
             rejected.append(
                 DroppedItem(
                     KIND_VERIFY,
                     index,
                     reason,
-                    f"[{finding_id}] {anomaly.title}",
+                    anomaly.title,
                 )
             )
             continue
@@ -1438,7 +1437,7 @@ def _apply_limit(
                 KIND_VERIFY,
                 index,
                 f"超出本次条数上限（{size} 条），已按严重度优先保留",
-                f"[{row.finding_id}] {row.anomaly.severity} {row.anomaly.title}",
+                f"{row.anomaly.severity} {row.anomaly.title}",
             )
         )
     return tuple(kept)
@@ -1739,7 +1738,12 @@ def _row_line(row: FindingRow) -> str:
 
     三个 2026-09-21 补上的东西，都是为了让人能**把这一行落回原处**：
 
-    * 头部带上正文里那个编号（口径 ②，`[F3]（正文 R3）`）—— 没有就如实写「正文未编号」；
+    * 头部带上正文里那个编号（口径 ②，`（正文 R3）`）—— 模型没给正文编号时**什么都不写**
+      （2026-09-24 起：从前写「（正文未编号）」，那是拿一句真话去填一个不存在的问题，
+      而 run 63 的三条全是它 —— 读者看到的是「[F1]（正文未编号）」：一个编号加一句
+      「这个编号在正文里找不到」。**头部不再印平台内部编号 `[F…]`**：产品里没有任何
+      一处显示它（异常面板的字段里没有 `finding_id`），它只在平台自己的载荷与轨迹里
+      成立，印在给人看的报告上只是个查不到的引用）；
     * 等级/置信度**只要动过就写出来**（口径 ①），包括「证据不足」那一档，措辞里带上
       「平台按证据不足降一档」这句出处；
     * 不成形的依据就地标成「（不可定位）」（口径 ③）—— 它照原样留着，但不构成证据。
@@ -1753,7 +1757,7 @@ def _row_line(row: FindingRow) -> str:
       `已证实` / `待核查：…` / `已检查范围内未发现：…` / `反证成立：…`。
       这一段是「这条结论凭什么算核过了」的唯一答案。
     """
-    head = f"- **[{row.finding_id}]{_body_label_text(row)} {row.anomaly.title}**："
+    head = f"- **{_body_label_text(row)}{row.anomaly.title}**："
     original = f"原 `{row.origin.severity}` / `{row.origin.confidence}`"
     if row.verdict == VERDICT_RETRACTED:
         action = "**反证成立（撤销）**，已从当前结论清单移除"
@@ -1813,10 +1817,15 @@ def _body_label_text(row: FindingRow) -> str:
 
     对账轮新发现的条目**不写**：它们本来就不在模型写的那份正文里（`source` 那一栏已经
     说了它从哪来），给它写一句「正文未编号」是拿一句真话去填一个不存在的问题。
+
+    **模型没给正文编号时也什么都不写**（2026-09-24，run 63）：模型的正文不一定带
+    `R1`/`R2` 这种编号（run 63 用的是【致命】/【高】），那时从前写的是「（正文未编号）」
+    —— 读者看到「[F1]（正文未编号）」：一个平台内部编号，加一句平台自己承认「它在正文里
+    找不到」。要落回正文靠的是**标题**（它就在这一行里），不是那个不存在的编号。
     """
     if row.source == SOURCE_VERIFY:
         return ""
-    return f"（正文 {row.body_label}）" if row.body_label else "（正文未编号）"
+    return f"（正文 {row.body_label}）" if row.body_label else ""
 
 
 def _level_change_text(row: FindingRow, *, cause: str, severity: bool = True) -> str:
