@@ -460,3 +460,85 @@ def test_a_first_run_does_not_get_the_coverage_sentence():
 
     assert "本次分析范围：全量。" in change.summary
     assert "这次输入覆盖的是" not in change.summary
+
+
+# ==========================================================================
+#  三层材料：只有「本轮输入」能支撑「本次改了什么」
+# ==========================================================================
+
+
+class TestTheThreeKindsOfMaterialAreNamed:
+    """`change_set` 渲染的清单要把三类材料**点名分开**。
+
+    run 55/57 的病：报告把上一笔提交、以及窗口里更早的改动都写成「本次差异」，还据此
+    编出「提交信息与差异不一致」的风险。提示词原先只说「共 N 个提交、M 个文件」，
+    没有一处说清这些材料里哪一类才是「本次」。所以这三条要在**真入口渲染出来的文本**里，
+    并且**第一类要写明它才是唯一能支撑「本次改了什么」的那一类**。
+    """
+
+    def _summary(self):
+        from services.ai.change_set import from_weekly_payload
+
+        payload = {
+            "scope": "incremental",
+            "delta_files": [
+                {
+                    "file_path": "config/[30]道具表_CfgItem.xlsx",
+                    "operation": "M",
+                    "latest_commit_id": "a" * 40,
+                    "repository_id": 1,
+                },
+            ],
+            "commits": [],
+            "summary": {"window_files": 3, "batch_files": 1},
+            "window_commit_ids": ["a" * 40, "b" * 40],
+        }
+        return from_weekly_payload(payload).summary
+
+    def test_the_three_kinds_are_named_in_the_rendered_summary(self):
+        text = self._summary()
+
+        assert "本轮输入（本次改动）" in text, text
+        assert "窗口内更早的提交" in text, text
+        assert "项目背景" in text, "没有点名第三类（当前冻结版本）"
+
+    def test_it_says_only_the_first_supports_this_round(self):
+        text = self._summary()
+
+        assert "只有第一类能支撑「本次改动了什么」" in text, (
+            "没有明说哪一类才算「本次」 —— 这正是 run 55 把上一笔提交写成「本次差异」的原因"
+        )
+        assert "不是本次的改动" in text, "第二类没有写明「不是本次」"
+
+    def test_the_background_kind_is_not_mistaken_for_this_round(self):
+        """第三类最容易与被混淆的第二类混起来：当前 tip 不是「本次改了它」的证据。"""
+        text = self._summary()
+
+        assert "当前冻结版本" in text
+        assert "不能**拿它当「本次改了它」的证据" in text or "不能" in text, text
+
+    def test_the_legend_reaches_the_prompt_not_just_the_change_set(self):
+        """接线：`summary` 之外还要看它有没有进第一轮那条消息（`change_block`）。"""
+        from services.ai.change_set import from_weekly_payload
+        from services.ai.prompt import change_block
+
+        payload = {
+            "scope": "incremental",
+            "delta_files": [
+                {
+                    "file_path": "config/[30]道具表_CfgItem.xlsx",
+                    "operation": "M",
+                    "latest_commit_id": "a" * 40,
+                    "repository_id": 1,
+                },
+            ],
+            "commits": [],
+            "window_commit_ids": ["a" * 40],
+        }
+        summary = from_weekly_payload(payload).summary
+
+        block = change_block(summary, round_index=1)
+
+        assert "本轮输入（本次改动）" in block, (
+            "标注没进第一轮消息 —— 那它就只是躺在 ChangeSet 里，模型看不到"
+        )
