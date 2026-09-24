@@ -390,7 +390,16 @@ class FindingRow:
 
     @property
     def fingerprint(self) -> str:
-        return anomaly_fingerprint(self.origin)
+        """这条结论的身份指纹。**按裁决之后的那一份算**（`self.anomaly`，不是 `origin`）。
+
+        P0 的标题改写（「只拿已证实的断言当标题」，`claims.compose_title`）会改变指纹 ——
+        `anomaly_fingerprint` 收的是 `commit + 文件 + 标题词集`。而**载荷、落库、下一轮基线
+        都按裁决后的那一条算指纹**（`result_payload._anomaly_entry` 写的就是它），所以这一
+        格必须与它们同源：按 `origin` 算等于给同一行留了两个身份，两边对不上时落空的**恰好
+        只有被裁决过的那几条** —— 真机 run 60 实测：`final_findings` 少了 3 条（16 → 13）、
+        逐条断言与取证方式一个都没附上、撤销过滤对它们失效，而正文里写着已裁决。
+        """
+        return anomaly_fingerprint(self.anomaly)
 
     @property
     def level_changed(self) -> bool:

@@ -35,6 +35,7 @@ from services.ai.verdict import (
     CLAIM_VERIFIED,
     VERDICT_CONFIRMED,
     VERDICT_NEEDS_MORE_EVIDENCE,
+    VERDICT_RETRACTED,
     VERIFY_BASIS_INDEPENDENT,
     VERIFY_BASIS_REPLAY,
     parse_verdicts,
@@ -256,6 +257,112 @@ class TestAFindingWithAnUnverifiedClaimCannotBeConfirmed:
         assert row.verdict == VERDICT_CONFIRMED
         assert row.claim_reviews == ()
 
+
+# --------------------------------------------------------------------------
+# 被裁决过的结论不许从清单里消失（真机 run 60）
+# --------------------------------------------------------------------------
+
+
+class TestAnAdjudicatedFindingKeepsTheIdentityThePayloadLooksItUpBy:
+    """真机 run 60 实测：被裁决过的 3 条**从 `final_findings` 里整条消失了**。
+
+    指纹是 `commit + 文件 + 标题词集`（`rules.anomaly_fingerprint`），而 P0 的标题改写
+    （「只拿已证实的断言当标题」）**会改变它** —— 于是同一行存在两个指纹：
+    `FindingRow.fingerprint` 按**原**标题算，而载荷是拿**裁决后**的结论去对账的。
+    两边对不上时 `result_payload` 里两处查找（裁决行 ↔ 结论、撤销过滤）一起落空，
+    而落空的形状**恰好只落在被裁决过的那几条**上：
+
+    * `final_findings` 少了它们（实测 16 → 13）—— 下一轮基线与导出文档都接不到；
+    * 逐条断言、取证方式、原标题一个都没附上（面板显示「未复核」，而正文写着已裁决）；
+    * 撤销（`retracted_fingerprints`）对它们同样失效（被撤销的结论会留在活动清单里）。
+
+    这两条用例一条钉身份、一条钉端到端（载荷里那一条还在，且带着断言）。
+    """
+
+    def _reduction(self):
+        reply = _reply(
+            _verdict(
+                "F1",
+                _claim_reply("C1", "verified", basis="independent", scope='{"paths": ["code/x.lua"]}')
+                + ","
+                + _claim_reply("C2", "unverified", reason="查不到框架的异常边界"),
+            )
+        )
+        return reduce_findings(
+            [_anomaly(DIFF_CLAIM, CONSEQUENCE_CLAIM)], verdicts=parse_verdicts(reply)
+        )
+
+    def test_the_row_fingerprint_is_the_one_the_payload_computes(self):
+        from services.ai.rules import anomaly_fingerprint
+
+        row = self._reduction().rows[0]
+        assert row.anomaly.title != row.origin.title, "前提：这一条的标题被平台改写过"
+        assert row.fingerprint == anomaly_fingerprint(row.anomaly), (
+            
+            "裁决行的指纹按原标题算，而载荷按裁决后的结论找它 —— 对不上就整条消失"
+        )
+
+    def test_the_adjudicated_finding_is_still_in_the_final_list_with_its_claims(self):
+        from services.ai.result_payload import result_payload
+
+        reduction = self._reduction()
+        outcome = EngineOutcome(
+            status="succeeded",
+            anomalies=reduction.active_anomalies(),
+            verdict=reduction.as_dict(),
+        )
+        result = result_payload(outcome, {"mode": "weekly", "summary": {}})
+
+        ids = [item["finding_id"] for item in result["final_findings"]]
+        assert ids == ["F1"], f"被裁决过的那条从 final_findings 里掉了：{ids}"
+        assert result["final_findings"][0]["claims"], "逐条断言的裁决没附上"
+        assert result["final_findings"][0]["verify_basis_label"]
+        assert result["anomalies"][0]["verify_verdict"] == VERDICT_NEEDS_MORE_EVIDENCE, (
+            "落库那一份读的是裁决行 —— 对不上时它显示「未复核」"
+        )
+    def test_a_retracted_row_with_a_rewritten_title_is_still_filtered_out(self):
+        """**撤销**也必须照样生效：被撤销的结论不许留在活动清单里。
+
+        `result_payload` 按 `retracted_fingerprints` 再滤一道（那是「落库侧不必相信
+        上游做对了」的闸门）。标题被改写之后这个闸门对**恰好被撤销的那几条**失效 ——
+        它与上一条是同一处身份问题的两个面，所以分开钉：一条钉`还在`，一条钉`不在`。
+        """
+        from services.ai.result_payload import result_payload
+        from services.ai.verdict import retracted_fingerprints
+
+        reply = _reply(
+            _verdict(
+                "F1",
+                _claim_reply("C1", "verified", basis="independent")
+                + ","
+                + _claim_reply("C2", "unverified"),
+                verdict="retracted",
+                # 撤销必须带理由：既没理由也没依据的「撤销」平台按证据不足处理
+                # （`_apply_verdict_inner` 那条分支），那是另一件事，不是本用例要钉的。
+                reason="框架里另有兜底，这条断言不成立",
+            )
+        )
+        reduction = reduce_findings(
+            [_anomaly(DIFF_CLAIM, CONSEQUENCE_CLAIM)], verdicts=parse_verdicts(reply)
+        )
+        row = reduction.rows[0]
+        assert row.verdict == VERDICT_RETRACTED
+        assert row.anomaly.title != row.origin.title, "前提：撤销的这条标题也被改写过"
+        assert row.fingerprint in retracted_fingerprints(reduction.as_dict())
+
+        # **故意把上游那条约定破掉**：把已被撤销的那条仍然塞进 `outcome.anomalies`。
+        # `result_payload` 里面那道闸门存在的意义就是「落库侧不相信上游做对了」，
+        # 而喂 `active_anomalies()`（已摘掉撤销项）会让它**无事可做地通过** —— 那样
+        # 这条用例对指纹改不改都不敏感（变异验证时它就是这么假绿的）。
+        outcome = EngineOutcome(
+            status="succeeded",
+            anomalies=(row.anomaly,),
+            verdict=reduction.as_dict(),
+        )
+        result = result_payload(outcome, {"mode": "weekly", "summary": {}})
+        assert result["anomalies"] == [], "被撤销的结论还留在活动清单里"
+        trail = [item for item in result["final_findings"] if not item["active"]]
+        assert [item["finding_id"] for item in trail] == ["F1"], "撤销的痕迹要从审计轨迹里找得到"
 
 # --------------------------------------------------------------------------
 # 否定性范围声明（run 58 的 F2）
