@@ -548,12 +548,17 @@ def reconcile_candidates(
     而是如实说一句「本次汇总没有交回候选血缘，无法按编号对账」——**一次**，并且不产生
     `dropped` 记录（否则整次运行仍会被判成 `subagent_gap` 降级）。
 
-    ## 去向已经写明的候选，不进这份名单
+    ## 去向已经写明的候选，只报数
 
-    被复核撤销 / 降级 / 转人工核验的那几条由 `_ruling_line` 各成一段如实说（措辞与
-    「复核标注（平台）」那一节逐字一致）；被平台自己截掉或合并的那几条另有一句汇总
-    （它们的记账在「结论条数上限（平台补充）」那一节与运行轨迹里）。同一件事在报告里
-    出现两遍、而两遍说法不同，正是这一批缺陷的形态。
+    被复核撤销 / 降级 / 转人工核验的那几条各成一段、**报一个数并指向**「复核标注（平台）」
+    那一节（`_ruling_block`）：逐条重印两边的标题在 run 63 上是 6 行长文，而那些话在
+    正文与复核标注里已经各说过一遍 —— 同一件事在报告里出现三遍、而说法还各不相同，
+    正是这一批缺陷的形态。被平台自己截掉或合并的那几条另有一句汇总（它们的记账在
+    「结论条数上限（平台补充）」那一节与运行轨迹里）。
+
+    **候选 ↔ 结论的对应关系不靠报告正文传**：它是结构化的，在载荷的
+    `final_findings[].source_candidate_ids` 里。真缺口那几条（`KIND_SHARD_GAP`）仍然
+    **逐条列出候选编号与标题** —— 那是要人工去看的东西，含糊不得。
 
     `reduction` 由调用方（`subagent.aggregate_outcomes`，它已经算过这一份）传进来 ——
     **同一个对象，不在这里重算一遍**：两处各算一次，迟早会出现「对账说撤销、落库说还在」。
@@ -571,14 +576,16 @@ def reconcile_candidates(
     dropped: list[DroppedItem] = []
     settled = 0
     # 复核裁决那三种去向各攒一段（`_ruling_blocks`）。撤销与降级**分开攒**：前者是移出
-    # 清单、后者是还在清单里，读的人对这两件事的处置不一样。
-    ruling_lines: dict[str, list[str]] = {verdict: [] for verdict in RULING_FATES}
+    # 清单、后者是还在清单里，读的人对这两件事的处置不一样。攒的是**条数**：逐条重印
+    # 两边的标题在 run 63 上是 6 行长文，而那些话正文与复核标注里已经各说过一遍。
+    ruling_groups: dict[str, list[str]] = {verdict: [] for verdict in RULING_FATES}
     disposition_lines: list[str] = []
     for candidate in candidates:
         fate = _ruling_fate(candidate, reduction)
         if fate is not None:
-            verdict, row = fate
-            ruling_lines[verdict].append(_ruling_line(candidate, verdict, row))
+            verdict, _row = fate
+            # 留个占位：下面按 `len(items)` 报计数（这一段就是「有几条的下落写在别处」）。
+            ruling_groups[verdict].append(candidate.id)
             continue
         if candidate.id in landed:
             continue
@@ -626,7 +633,7 @@ def reconcile_candidates(
     shard_gaps = _shard_gap_lines(steps)
     verify_gaps = _verify_gap_lines(steps)
     explained = tuple(
-        (verdict, tuple(items)) for verdict, items in ruling_lines.items() if items
+        (verdict, tuple(items)) for verdict, items in ruling_groups.items() if items
     )
     if no_lineage:
         lines = []
@@ -762,54 +769,46 @@ def _ruling_fate(
 
 # 三种去向各一段（`_ruling_block`）。措辞与既有的那两段同一口气（「已经解释过了」），
 # 但**三段分开**：撤销、降级、待人工核验对读的人是三件事，合成一句会让处置说不清。
+#
+# 2026-09-24（run 63）：**只报计数 + 指向，不再逐条重印标题**。原先每一段后面挂着
+# `_ruling_line` 的逐条清单，而它把候选标题与结论标题**各抄一遍**（「`[S4-2]`【奖励发放】
+# 领奖次数改为交付前落库且不退还…（code_logic·high，path）：对应本次复核的 `[F1]`
+# 「【奖励发放】领奖次数改为交付前记账且不退还…」，裁决为 **证据不足（待人工核验）**」），
+# run 63 里 6 条 = 6 行长文。而这两句话在**正文的风险评估**与**复核标注那一节**里已经各
+# 出现过一次 —— 同一件事在报告里出现三遍，正是这批缺陷的形态。
+#
+# 这一节要回答的是「那几条候选有没有被静默丢掉」，答案是一个数；候选 ↔ 结论的对应关系
+# 是**结构化**的（`FindingRow.source_candidate_ids` 在载荷里），不靠报告正文传。
 _RULING_BLOCK_TEXT = {
     VERDICT_RETRACTED: (
         "另有 {count} 条候选的缺席**已经解释过了**：与它们同一条的结论在本次复核里"
         "**已撤销**（移出当前结论清单、不进下一轮基线）—— 撤销本身也是结论，不是遗漏，"
-        "所以不用再去人工找一遍。撤销的理由与原文列在前面那节「复核标注（平台）」里，"
-        "这里只记候选与结论的对应关系，免得两边的账对不上：\n\n{items}"
+        "所以不用再去人工找一遍。撤销的理由与原文写在「复核标注（平台）」那一节里。"
     ),
     VERDICT_DOWNGRADED: (
-        "另有 {count} 条候选**进了结论清单，只是等级被本次复核降了**：它们不是遗漏 —— "
+        "另有 {count} 条候选**进了结论清单，只是被本次复核降级了**：它们不是遗漏 —— "
         "结论还在清单里，按复核**之后**的等级采信（降到哪一级、为什么，写在"
-        "「复核标注（平台）」那一节里）。这里只记候选与结论的对应关系，"
-        "免得两边的账对不上：\n\n{items}"
+        "「复核标注（平台）」那一节里）。"
     ),
     VERDICT_NEEDS_MORE_EVIDENCE: (
         "另有 {count} 条候选**进了结论清单，但本次复核把它们转成了「待人工核验」**"
-        "（证据不足，置信度不再按 `very_high` 采信）：它们不是遗漏，处置以"
-        "「复核标注（平台）」那一节为准，这里**不另说一遍**，只记候选与结论的对应关系："
-        "\n\n{items}"
+        "（证据不足，置信度不再按 `very_high` 采信）：它们不是遗漏，逐条的下落、理由与"
+        "断言状态在「复核标注（平台）」那一节里。"
     ),
 }
 
 
 def _ruling_block(verdict: str, items: Sequence[str]) -> str:
-    """「这几条候选的去向由复核裁决写着」那一段（自己带计数）。"""
-    return _RULING_BLOCK_TEXT[verdict].format(count=len(items), items="\n".join(items))
-
-
-def _ruling_line(candidate: Candidate, verdict: str, row: FindingRow) -> str:
-    """「这条候选对应到哪条复核结论」那一行。
-
-    裁决的说法直接用 `row.verdict_label`（`verdict.VERDICT_LABELS` 那一份）—— 报告里两处
-    （「复核标注（平台）」那一节、这一节）说同一条裁决必须**逐字一致**，各写一份措辞迟早
-    会说成两件事。
-    """
-    detail = (
-        f"对应本次复核的 `[{row.finding_id}]`「{row.origin.title}」，"
-        f"裁决为 **{row.verdict_label}**"
-    )
-    if verdict == VERDICT_DOWNGRADED:
-        detail += f"（`{row.origin.severity}` → `{row.anomaly.severity}`）"
-    return f"{_candidate_head(candidate)}{detail}。"
+    """「这几条候选的去向由复核裁决写着」那一段（自己带计数，不重印标题）。"""
+    return _RULING_BLOCK_TEXT[verdict].format(count=len(items))
 
 
 def _candidate_head(candidate: Candidate) -> str:
     """一条候选在名单里的开头（编号、标题、维度/严重度、文件）。
 
-    `_gap_line` 与 `_ruling_line` 共用它：同一批候选在「没有进入清单」与「去向由裁决写着」
-    两段里出现时，读的人要靠这半个句子认出是同一条。
+    `_gap_line` 用它。它从前也与 `_ruling_line` 共用（那一段现在只报计数，见
+    `_RULING_BLOCK_TEXT` 上面的说明）—— 留着这一句是因为真缺口那几条**必须**能认出来
+    是哪一条：那是要人工去看的东西，而「已经解释过了」的那几条不是。
     """
     return (
         f"- `[{candidate.id}]` {candidate.anomaly.title}"

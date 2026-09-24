@@ -742,8 +742,11 @@ class TestTheCandidatesAndTheReconciliation:
         )
 
         assert dropped == (), "撤销不是缺口"
-        assert "[S3-3]" in text and "撤销" in text
-        assert "[F1]" in text, "要说清它对应哪条结论"
+        assert "撤销" in text
+        assert "复核标注（平台）" in text, "要说清理由在哪一节"
+        # **编号与标题都不再重印**（2026-09-24，run 63）：候选 `S3-3` 的去向是一个数，
+        # 候选↔结论的对应关系在载荷里（下一条用例钉着 `source_candidate_ids`）。
+        assert "[S3-3]" not in text and "[F1]" not in text
 
     def test_the_sources_are_persisted_on_the_finding_row(self):
         """血缘一路带到 `Reduction`：`FindingRow.source_candidate_ids` 与落库载荷都要有。"""

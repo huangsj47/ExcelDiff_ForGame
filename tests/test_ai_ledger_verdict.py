@@ -144,26 +144,39 @@ class TestARetractedCandidateIsNotMissing:
         )
         assert "没有进入最终结论清单" not in text
 
-    def test_it_says_retracted_and_names_the_finding(self):
-        """平台补充里要如实说「已撤销」，并写出它对应哪条结论 —— 读的人才能去核。"""
+    def test_it_says_retracted_without_reprinting_the_titles(self):
+        """平台补充里要如实说「已撤销」、并指向写着撤销理由的那一节。
+
+        **不再逐条重印两边标题**（2026-09-24，run 63）：从前每一条候选都要把候选标题与
+        结论标题各抄一遍（「`[S4-2]` 【奖励发放】领奖次数改为交付前落库且不退还…（
+        code_logic·high，path）：对应本次复核的 `[F1]`「【奖励发放】…」，裁决为
+        **证据不足（待人工核验）**」），6 条就是 6 行长文 —— 而那两句话在正文与复核标注
+        里已经各出现过一次。读者要的是「有没有被丢掉」，答案是一个数；候选 ↔ 结论的
+        对应关系在载荷里（`final_findings[].source_candidate_ids`），不靠报告正文传。
+        """
         _, reduction = _retracted_reduction()
 
         text, _ = reconcile_candidates(
             (self._candidate(),), _synthesis(), reduction=reduction
         )
 
-        assert "[S1-9]" in text
-        assert "已撤销" in text or "撤销" in text, text
-        assert "[F1]" in text, f"没给出它对应哪条结论：\n{text}"
+        assert "撤销" in text, text
         assert "复核标注（平台）" in text, "要说清撤销的理由在哪一节，读者才知道去哪看"
+        assert text.count("1 条") == 1, f"计数没了或者写重了：\n{text}"
+        # 没有了逐条清单 = 这一节只剩「标题 + 一段 + 收尾」。
+        assert len(text.splitlines()) <= 5, f"这一节又长回了逐条清单：\n{text}"
+        assert "[S1-9]" not in text, "候选编号又印出来了"
+        assert "ProtoCTms joinTeamByRecruit" not in text, (
+            "候选标题又抄了一遍 —— 候选↔结论的对应关系在载荷里（`source_candidate_ids`）"
+        )
 
     def test_only_the_explained_candidates_still_produce_the_section(self):
         """这一节**不因为「没有真缺口」就整个消失**：账上有一条候选，就得交代它去哪了。
 
         与「被平台自己截掉」那一种的差别在这里：那一种的去向在报告里另有记账
-        （「结论条数上限（平台补充）」那一节与运行轨迹），而复核撤销只列**结论**
-        （`[F1]`），候选编号（`[S1-9]`）在报告里别处一个都不出现 —— 这一节是唯一能回答
-        「`[S1-9]` 去哪儿了」的地方。
+        （「结论条数上限（平台补充）」那一节与运行轨迹），而复核撤销只列**结论** ——
+        这一节是唯一会交代「那几条候选去哪了」的地方（现在是一个数 + 一句指向，
+        见上一条用例）。
         """
         _, reduction = _retracted_reduction()
 
@@ -188,7 +201,8 @@ class TestARetractedCandidateIsNotMissing:
         )
 
         assert dropped == (), "撤销不是缺口"
-        assert "撤销" in text and "[S1-9]" in text
+        assert "撤销" in text, text
+        assert "[S1-9]" not in text, "候选编号不再重印（对应关系在载荷里）"
 
 
 class TestDowngradedAndPendingAreNotLumpedTogether:
@@ -217,11 +231,12 @@ class TestDowngradedAndPendingAreNotLumpedTogether:
         text, dropped = reconcile_candidates((candidate,), _synthesis(), reduction=reduction)
 
         assert dropped == ()
-        assert "[S1-4]" in text
         assert "降级" in text, text
         assert "已撤销" not in text, f"降级被写成撤销（两者处置不同）：\n{text}"
         assert "没有进入最终结论清单" not in text
-        assert "critical" in text and "high" in text, "要说清降到哪一级"
+        # 降到哪一级写在「复核标注（平台）」那一节里（这一节只报数 + 指向）——
+        # 见 `_RULING_BLOCK_TEXT` 上面那段说明。
+        assert "复核标注（平台）" in text
 
     def test_a_needs_more_evidence_candidate_is_not_told_twice(self):
         """「转人工核验」与「没有进入最终结论清单」是同一件事 —— 说一遍就够。"""
@@ -243,7 +258,7 @@ class TestDowngradedAndPendingAreNotLumpedTogether:
         text, dropped = reconcile_candidates((candidate,), _synthesis(), reduction=reduction)
 
         assert dropped == ()
-        assert "[S1-4]" in text and "待人工核验" in text
+        assert "待人工核验" in text, text
         assert "没有进入最终结论清单" not in text, f"同一件事说了两遍：\n{text}"
         assert "需要人工看一眼" not in text, f"把「待人工核验」又说了一遍：\n{text}"
 
@@ -295,7 +310,12 @@ class TestDowngradedAndPendingAreNotLumpedTogether:
         assert [item.index for item in dropped] == [3], (
             f"只有真的没有落点的那条该记账：{[item.detail for item in dropped]}"
         )
-        assert "[S1-1]" in text and "[S1-2]" in text and "[S1-3]" in text
+        # 真缺口那一条**逐条列出**（要人工去看的东西），已解释的那两条只报数。
+        assert "[S1-3]" in text, "那条真缺口没有列出编号，人工无从下手"
+        assert "[S1-1]" not in text and "[S1-2]" not in text, (
+            "去向已写明的那两条又逐条重印了一遍"
+        )
+        assert "1 条候选的缺席" in text and "1 条候选**进了结论清单" in text, text
         assert "已撤销" in text and "降级" in text
         assert "没有进入最终结论清单" in text, "那条真缺口仍要报"
 

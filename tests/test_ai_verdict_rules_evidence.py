@@ -862,12 +862,13 @@ class TestTheReconcileCallIsWiredToTheSameReduction:
     def test_a_retracted_candidate_is_not_reported_as_a_missing_one(self):
         merged = self._merged(candidates=(self._candidate(),))
 
-        assert "[S1-1]" in merged.report_markdown
-        assert "已撤销" in merged.report_markdown, "去向要如实说「已撤销」"
+        # 那一段现在是**一个数 + 一句指向**（2026-09-24，run 63）：候选编号不再重印，
+        # 逐条清单也去掉了 —— 这一段认领的判据（`RULING_CLAIM_PHRASE`）不变。
         assert self.RULING_CLAIM_PHRASE in merged.report_markdown, (
             "按编号认领那一段没出现 —— 接线没生效（`reduction=` 没传进对账，"
             "候选掉进了结算那一支）"
         )
+        assert "[S1-1]" not in merged.report_markdown
         assert self.SETTLED_PHRASE not in merged.report_markdown, (
             "被复核撤销的候选被写进了「编号交回过但没留在清单里」那一支"
         )
