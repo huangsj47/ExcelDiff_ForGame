@@ -138,6 +138,21 @@ def test_the_prefetch_asks_for_this_round_diff():
     assert OLD_COMMIT not in by_path.values() or by_path[TABLE] != OLD_COMMIT
 
 
+def test_prefetch_does_not_label_window_only_files_as_this_round_changes():
+    """窗口白名单可供按需取证，但预取的“本次改动”只能来自 delta_files。"""
+    scope = _scope()
+    assert set(scope.batch_paths()) == {TABLE, SKILLS, "src/battle_logic.py"}
+    requests = diff_requests(scope)
+    assert [(item.path, item.commit) for item in requests] == [(TABLE, NEW_COMMIT)]
+
+
+def test_empty_delta_does_not_fall_back_to_window_history():
+    """显式空输入与手工 scope 的“未提供本轮清单”不能混为一谈。"""
+    scope = _scope(_run_55_payload(delta_files=[], list_files=[]))
+    assert scope.batch_paths(), "窗口旧提交仍可供按需取证"
+    assert diff_requests(scope) == ()
+
+
 def test_a_window_path_still_gets_a_commit_that_touched_it():
     """窗口里**没有**装进本次输入的文件照旧有值（它们读到的是合并差异，出处会写明）。
 

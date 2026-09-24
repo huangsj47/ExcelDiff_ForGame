@@ -401,6 +401,7 @@ def build(
             latest_commit_by_path=_latest_commit_by_path(
                 resolved_whitelist, all_paths_by_commit
             ),
+            input_paths=_collect_whitelist_paths(resolved_whitelist),
             repository_ids_by_commit={
                 commit_id: frozenset(ids)
                 for commit_id, ids in (repositories or {}).items()

@@ -74,6 +74,10 @@ class AnalysisScope:
     # 空 = **不知道**（手工构造的 scope、单提交模式）：那时退回遍历，与加这个字段之前
     # 的行为逐字一致。
     latest_commit_by_path: Mapping[str, str] = field(default_factory=dict)
+    # 本轮真正装入模型输入的文件；窗口旧提交仍在 paths_by_commit，供按需取证。
+    # None 表示手工构造的旧 scope 未提供此事实，预取退回 batch_paths；
+    # 空元组表示本轮明确没有输入文件，不能回退预取窗口历史。
+    input_paths: tuple[str, ...] | None = None
 
     def resolve_commit(self, raw: str) -> str | None:
         """把模型给的 commit 标识解析成全哈希。

@@ -280,12 +280,14 @@ def _ext_rank(path: str) -> int:
 
 
 def diff_requests(scope: AnalysisScope, *, max_files: int = DEFAULT_MAX_FILES) -> tuple[ContextRequest, ...]:
-    """本批次里**最该先看**的几个改动文件的 `file_diff` 请求。
+    """只预取**本轮输入**里最该先看的几个文件的 `file_diff` 请求。
 
-    commit 取 `scope.commit_of_path`（这个路径在批次里**最后一次**被改的那条提交）——
-    与「合并 diff」的口径一致：要的是这个文件当前的改动，不是某一版旧的。
+    周窗口的旧提交仍在 `batch_paths` 供模型按需核查；把它们也预取并称作
+    「本次改动」，会再次把历史差异混进当前 delta。手工 scope 未给 `input_paths`
+    时保留原有行为。提交号由冻结的 `commit_of_path` 解析。
     """
-    paths = sorted(scope.batch_paths(), key=lambda item: (_ext_rank(item), item))
+    input_paths = scope.input_paths if scope.input_paths is not None else scope.batch_paths()
+    paths = sorted(input_paths, key=lambda item: (_ext_rank(item), item))
     requests: list[ContextRequest] = []
     for path in paths[: max(0, int(max_files))]:
         commit = scope.commit_of_path(path)
@@ -458,7 +460,7 @@ def prefetch_evidence(
     )
 
     planned_files = diff_requests(scope, max_files=max_files)
-    wanted = len(scope.batch_paths())
+    wanted = len(scope.input_paths if scope.input_paths is not None else scope.batch_paths())
     if char_budget < per_item:
         # 静默跳过？**不写说明**：模型从来没要过预取，告诉它「这次没预取」只是噪音；
         # 但账面要留下（`skipped`），读出 trace 的人能回答「这次为什么一条预取都没有」。
