@@ -154,35 +154,6 @@ def _num(value: Any) -> str:
     return str(number) if number is not None else UNKNOWN
 
 
-def _layer_text(covered: Any, total: Any) -> str:
-    """`57 / 995`；分母读不出来时**只写分子**。
-
-    「未记录 / 未记录」读不成话（老 payload 里两个数一起缺的时候就会这样），而它出现在
-    覆盖面那几行里 —— 那是产品要拿去汇报的那一段。分子分母都在才写分数。
-    """
-    done, whole = _count(covered), _count(total)
-    if done is None:
-        return UNKNOWN
-    return f"{done} / {whole}" if whole is not None else str(done)
-
-
-def _extra_input_row(label: str, value: Any) -> str:
-    """「额外输入」那一行里的一部分。**三种取值三种写法**：
-
-    * 有数（含 0）：写数字 —— 「0 个」是一个**结论**（这轮确实没有补偿项）；
-    * 读不出来（老 payload 没有这个键）：写 `未记录` —— 平台没这个数，不是 0。
-
-    两者原先都不输出（`if x:` 才写一行），于是「0 个」与「没有这个概念」在报告里
-    长得一模一样。
-    """
-    number = _count(value)
-    if number is None:
-        return f"{label}{UNKNOWN}"
-    if number == 0:
-        return f"{label} 0 个"
-    return f"{label} {number} 个"
-
-
 def parse_evidence_label(label: Any) -> tuple[str, str, str]:
     """逐轮明细里那一行人读的标签 → `(12 位提交, 路径, 行窗口/段)`。
 
@@ -657,21 +628,26 @@ def _headline_row(
     解释 —— 它们本来就是一串收窄，分开写读者要自己去拼。实测里读者（与模型）都没拼出来，
     于是把「全量」（那是**范围**口径）读成了「都看过了」（见 `coverage_rows` 的说明）。
 
-    两种去重口径仍然都给，但只作括号里一小截；完整口径解释在
-    `docs/AI分析使用说明.md`（有用例钉着那份文档必须写清两种去重）。
-    **百分比跟着 `取证` 走**（`取证 57（5.7%）`）：跑完一轮实测里那个 5.7% 就是这个功能
-    存在的理由，光写两个数读者要自己去除。
+    ## 2026-09-25 再收一次（用户：「杂项简要说明即可，不重要的甚至可以不说明」）
 
-    提交数也并进这一行的尾巴：它防的是「正文自己挑一个提交数」（run 54 实测：窗口 4 条、
-    报告开篇写 2 条），**数不能丢**，但不必各占一行。数**取不到时也要说**（「未记录」）：
-    悄悄省掉一个数，读起来就成了「这个窗口没有提交」（同 `_count` 的 `None` 语义）。
+    去掉了三样**解释**（都不是数）：**漏斗那句「都不是 100% 是常态」**、**取回段数**
+    （「115 段证据」）、**本窗口/输入的提交数**。判断的依据是「这个数还有没有别的家」：
+
+    * 段数是过程量，同一个文件分段读几遍而已，读者没有下一步要做；
+    * 提交数在**周版本页面**上就摆着（那是它的产地），报告里抄一份只在「正文自己挑一个
+      提交数」时有用（run 54 实测：窗口 4 条、报告写 2 条）—— 那个风险由正文与页面
+      对照，不再由这里承担；
+    * 「都不是 100% 是常态」是一句安慰话，而紧接着的缺口那几行说的是同一件事且更有用。
+
+    **按文件去重的那个数留着**：它与 `取证` **口径不同、意义也不同**（同一处改动可能被
+    多个提交各带一遍），两个数不一致时不写出来，读者会以为是算错了 —— 有用例钉着两种
+    去重口径都要能算得出（`test_two_dedup_conventions_give_two_different_numbers`）。
     """
     batch_n = _positive_int(batch)
     window_n = _positive_int(window)
     pairs = evidence.get("by_pair") or {}
     covered = _count(pairs.get("covered")) if evidence.get("collected") else None
     with_window = str(ledger.get("mode") or "") != MODE_COMMIT
-    counts = ledger.get("counts") or {}
 
     if with_window:
         head = (
@@ -693,20 +669,19 @@ def _headline_row(
         rate = pairs.get("ratio")
         tail_num = f" → 取证 {covered}" + (f"（{_percent(rate)}）" if rate is not None else "")
 
-    # 另外两截都只放括号里：另一种去重口径（一样时不写，写了只是噪声）、取回的段数
-    # （一个文件可能分段读几遍 —— 「57 个文件、71 段证据」这个差别读者会问）。
-    marks: list[str] = []
     by_path = evidence.get("by_path") or {}
     path_n = _count(by_path.get("covered")) if evidence.get("collected") else None
-    if path_n is not None and path_n != covered:
-        marks.append(f"按文件去重 {path_n}")
-    segments = _count(counts.get("evidence_segments"))
-    if segments:
-        marks.append(f"{segments} 段证据")
-    dedup = f"（{'；'.join(marks)}）" if marks else ""
+    # 一样时不写：写出来只是噪声（口径不同但结果相同，读者会去找那个不存在的差别）。
+    dedup = f"（按文件去重 {path_n}）" if path_n is not None and path_n != covered else ""
 
+    # **提交数留着**（2026-09-25 收口时唯一没跟着删的一截）：它是**产品里唯一说得出
+    # 「这个窗口有几条提交」的地方**（提示词里有，但那是给模型看的；别处没有），而它防的是
+    # 「正文自己挑一个提交数」（run 54 实测：窗口 4 条、报告开篇写 2 条）—— 删掉它，
+    # 读者就再也没法核正文里那个数。两个数**各自**给出：「窗口数读不出来」不该把
+    # 「进了本次输入的条数」一起吞掉（后者从 `delta_files` 算得出来）。
     commit_part = ""
     if with_window:
+        counts = ledger.get("counts") or {}
         window_commits = _count(counts.get("window_commits"))
         input_commits = _count(counts.get("input_commits"))
         commit_part = (
@@ -714,24 +689,12 @@ def _headline_row(
             if window_commits is not None
             else "；本窗口的提交数未记录"
         )
-        # 两个数**各自**给出：「窗口数读不出来」不该把「进了本次输入的条数」一起吞掉 ——
-        # 后者是从 `delta_files` 算得出来的（`test_a_payload_without_the_window_list...`）。
         commit_part += (
             f"、其中 {input_commits} 条进了本次输入"
             if input_commits is not None
             else "（其中进了本次输入的条数未记录）"
         )
-
-    if with_window:
-        funnel = (
-            "（漏斗：窗口里改动过的 → 进了本次输入的 → 真的取到证据的，"
-            "**都不是 100% 是常态**）"
-        )
-    else:
-        funnel = (
-            "（这条提交改的文件里有多少真的取到证据 —— **不是 100% 是常态**）"
-        )
-    return head + tail_num + dedup + commit_part + funnel
+    return head + tail_num + dedup + commit_part
 
 
 def _findings_row(findings: Mapping[str, Any]) -> Optional[tuple[str, str]]:
@@ -744,12 +707,10 @@ def _findings_row(findings: Mapping[str, Any]) -> Optional[tuple[str, str]]:
     retracted = _count(findings.get("retracted")) or 0
     value = (
         f"本轮新增 {_num(current)} 条 + 基线继承 {_num(inherited)} 条 = 在挂 {_num(total)} 条"
-        "（**正文的「风险评估」应当覆盖全部在挂条目**：本轮新报的与上一轮继承下来、仍然"
-        "成立的都要写。正文条数明显少于这一行就是正文没写全；结构化的那份在末尾的"
-        "「异常清单（平台按门槛过滤后）」里 —— 未达门槛的条目只写在正文里，那里没有）"
+        "（**正文的「风险评估」应当覆盖全部在挂条目**；明显少于这个数就是正文没写全）"
     )
     if retracted:
-        value += f"；另有 {retracted} 条已按复核裁决撤销（仍留在审计轨迹里）"
+        value += f"；另有 {retracted} 条已按复核裁决撤销"
     return ("结论（本轮 / 继承）", value)
 
 
@@ -775,48 +736,42 @@ def coverage_rows(ledger: Mapping[str, Any]) -> list[tuple[str, str]]:
 
     **一个事实都没丢**：删掉的那些要么并进了别的行，要么只在它真的构成缺口时才出现。
     逐条数字（未读清单、每一条失败原因）仍在账本的结构化字段里，面板与运行轨迹读它们。
+
+    ## 2026-09-25 第二次收口：4 行 → 2 行
+
+    用户读完 run 70 的导出件后要「只留一行计数，不重要的甚至可以不说明」。再收掉两行
+    （`覆盖（分层）`、`额外输入`）与 `本次覆盖` 那条的尾巴；判断依据是**「这个数还有没有
+    别的家、读者拿它有没有下一步动作」**：
+
+    * 分层的两个数挪到「没有取到证据」那条缺口上（那里它才有用，见 `_layers_note`）；
+    * 补偿项 / 依赖核查项**只在没取到证据时**才有下一步动作，而那件事由 `_extra_input_gaps`
+      逐类报；
+    * 提交数、段数、「都不是 100% 是常态」三样见 `_headline_row` 的说明。
+
+    留下的是 `本次覆盖`（看了多少）与 `结论（本轮 / 继承）`（正文该覆盖多少）—— 后者是
+    「正文有没有写全」唯一的判据，所以它不跟着一起删。
     """
     counts = ledger.get("counts") or {}
     evidence = ledger.get("evidence_coverage") or {}
     batch = _positive_int(counts.get("batch_files"))
     window = _positive_int(counts.get("window_files"))
-    # 单提交模式：分析对象就是那一条提交改的那一个文件。「版本清单」这类措辞会让人去找一个
-    # 不存在的版本 / 第二份清单，所以那一行（分层）在这里不出现（数字口径不变）。
-    single_commit = str(ledger.get("mode") or "") == MODE_COMMIT
 
     rows: list[tuple[str, str]] = [
         ("本次覆盖", _headline_row(ledger, batch=batch, window=window, evidence=evidence))
     ]
 
-    if not single_commit:
-        # 三层覆盖率里**要摆出来的那两个**：`assignment_coverage` / `inspection_coverage`
-        # 原先算了却没有任何消费点（算了不显示 = 没人看得到）。口径与那两个字段同源，
-        # 不许在这里另算；`_layers_note` 读的也是同一份（缺口那条用它）。
-        assigned = ledger.get("assignment_coverage") or {}
-        inspected = ledger.get("inspection_coverage") or {}
-        rows.append(
-            (
-                "覆盖（分层）",
-                f"已分配 {_layer_text(assigned.get('covered'), assigned.get('total'))}"
-                f"，已检查 {_layer_text(inspected.get('covered'), inspected.get('total'))}"
-                "（分配＝完整清单里铺到分片的；检查＝真的取到过 diff 或正文的）",
-            )
-        )
-
-    # **0 与「未记录」必须分得开**：两个都是 `if x:` 才输出时，「这轮 0 个补偿项」与
-    # 「这份 payload 里没有这个概念」在报告里长得一模一样（`_count` 的 `None` 语义）。
-    rows.append(
-        (
-            "额外输入",
-            "、".join(
-                (
-                    _extra_input_row("补偿项", counts.get("compensation_files")),
-                    _extra_input_row("依赖核查项", counts.get("dependency_files")),
-                )
-            )
-            + "（上轮没看到、这一轮专门补上的，以及改了它就要跟着看的那一跳）",
-        )
-    )
+    # **「覆盖（分层）」与「额外输入」两行都收掉了**（2026-09-25 第二次收口，用户：
+    # 「只留一行计数」）。它们的信息没有丢，只是换了个更该待的地方：
+    #
+    #   * 分层的两个数（已分配 / 已检查）现在跟着**「没有取到证据」那条缺口**走 ——
+    #     那正是它有用的地方：分辨「分片压根没铺到它」与「铺到了但没取到证据」
+    #     （`_layers_note` 的 docstring 写了为什么这两个数必须分开看）。摆在覆盖段里
+    #     只是一组没人会去解释的数；
+    #   * 补偿项 / 依赖核查项的**条数**只在它们**没取到证据**时才有下一步动作，
+    #     而那件事由 `_extra_input_gaps` 逐类报（有数、有例、有后果）。
+    #
+    # 两个字段（`assignment_coverage` / `inspection_coverage`）仍在账本里，也仍有读者
+    # —— 不是「算了不显示」。
 
     # 结论的**两个数**（本轮新增 / 基线继承）：清单里同时有本轮新报的与上一轮继承下来的。
     findings_row = _findings_row(ledger.get("findings") or {})
@@ -884,10 +839,11 @@ def gap_notes(ledger: Mapping[str, Any]) -> list[str]:
     if evidence.get("collected"):
         pending = _count(counts.get("pending_files"))
         if pending:
+            # 分层的两个数跟在这一条上（2026-09-25）：它们要回答的是「为什么没取到」——
+            # 分片压根没铺到它，还是铺到了但这一轮没取到。摆在覆盖段里没人会去解释。
             notes.append(
-                f"**没有取到证据**：还有 {pending} 个（本次输入 "
-                f"{_num(counts.get('batch_files'))} 个；{_layers_note(ledger)}）—— "
-                "这不是「这些文件没问题」，是**这次没有看**。"
+                f"**没有取到证据**：还有 {pending} 个（{_layers_note(ledger)}）"
+                "—— 这不是「这些文件没问题」，是**这次没有看**。"
             )
     else:
         notes.append(

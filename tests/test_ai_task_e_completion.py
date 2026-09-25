@@ -4,7 +4,8 @@ from services.ai import dependency_resolver
 from services.ai.budget_plan import build_budget_plan, derive_tool_limits
 from services.ai.change_set import DEFAULT_MANIFEST_SHARDS, from_weekly_payload
 from services.ai.context_tools import DEFAULT_TOOL_LIMITS
-from services.ai.coverage_ledger import build_ledger
+from services.ai.coverage_ledger import build_ledger, gap_notes
+from services.ai.result_payload import coverage_notice_text
 from services.ai.dependency_resolver import DependencyDocument, resolve_dependencies
 from services.ai.engine import EngineLimits
 from services.ai.manifest import ManifestPlan, build_manifest, render_manifest_reference
@@ -334,10 +335,11 @@ def test_the_report_rows_carry_the_assigned_and_inspected_layers():
         executed=[{"kind": "file_diff", "label": f"file_diff {LATEST[:12]} a.lua"}],
     )
 
-    # 2026-09-25：已分配 / 已检查合成一行 `覆盖（分层）`（两个数仍然来自各自的字段）。
-    layered = dict(ledger["rows"])["覆盖（分层）"]
-    assert "已分配 3 / 3" in layered, layered
-    assert "已检查 1 / 3" in layered, "分层那条必须与 inspection_coverage 同源"
+    # 2026-09-25：`覆盖（分层）`那一行收掉了 —— 分层的两个数跟着**「没有取到证据」那条
+    # 缺口**走（摆在那里才有用：分辨「分片压根没铺到它」与「铺到了但没取到证据」）。
+    # 判据不变：两个数都来自各自的字段，而且都到了读者看得到的地方。
+    notes = "\n".join(gap_notes(ledger))
+    assert "已分配 3 / 已检查 1" in notes, notes
     names = [name for name, _ in ledger["rows"]]
     assert names[0] == "本次覆盖", f"一眼账要摆在最前面：{names}"
 
@@ -370,16 +372,20 @@ def test_the_missing_evidence_gap_spells_out_the_assigned_and_inspected_counts()
 
 
 def test_zero_compensation_or_dependency_is_not_the_same_as_unrecorded():
-    """「0 个补偿项」与「这份 payload 里没有这个概念」必须在报告里长得不一样。
+    """「0 个补偿项」与「这份 payload 里没有这个概念」**在账本里必须分得开**。
 
-    两者都写成「一行都不显示」时，读者分不清「这轮没有补偿」和「这轮平台没记」 ——
-    与 `_count` 的 `None` 语义是同一条口径（`:113`）。
+    2026-09-25：报告里那一行 `额外输入` 收掉了（用户要「只留一行计数」），于是这条口径
+    落在**账本**上，判据从「报告里长得不一样」换成「账本里分得开，而且报告**不为一个
+    说不出来的数印任何话**」。
+
+    这不是降级：原来那句「0 个」本身是个**没有下一步动作**的数（这轮没有补偿项 ⇒ 什么
+    都不用做），「未记录」在报告里同样无事可做。真正的风险是**把两者写成一个数**，
+    那件事仍被下面两侧断言钉着（`_count` 的 `None` 语义）。
     """
-    rows_of = lambda payload: dict(  # noqa: E731 —— 用例内的短读法
-        build_ledger(request_payload=payload, executed=[], tool_stats={})["rows"]
-    )
+    def counts_of(payload):
+        return build_ledger(request_payload=payload, executed=[], tool_stats={})
 
-    zeroed = rows_of(
+    zeroed = counts_of(
         {
             "mode": "weekly",
             "scope": "full",
@@ -387,10 +393,10 @@ def test_zero_compensation_or_dependency_is_not_the_same_as_unrecorded():
             "delta_files": [{"latest_commit_id": LATEST, "file_path": "a.lua"}],
         }
     )
-    assert "补偿项 0 个" in zeroed["额外输入"], zeroed["额外输入"]
-    assert "依赖核查项 0 个" in zeroed["额外输入"], zeroed["额外输入"]
+    assert zeroed["counts"]["compensation_files"] == 0, zeroed["counts"]
+    assert zeroed["counts"]["dependency_files"] == 0, zeroed["counts"]
 
-    unrecorded = rows_of(
+    unrecorded = counts_of(
         {
             "mode": "weekly",
             "scope": "full",
@@ -398,8 +404,12 @@ def test_zero_compensation_or_dependency_is_not_the_same_as_unrecorded():
             "delta_files": [{"latest_commit_id": LATEST, "file_path": "a.lua"}],
         }
     )
-    assert "补偿项未记录" in unrecorded["额外输入"], unrecorded["额外输入"]
-    assert "依赖核查项未记录" in unrecorded["额外输入"], unrecorded["额外输入"]
+    # **`None`，不是 0**：读不出来时不许替用户断言「这轮没有补偿项」。
+    assert unrecorded["counts"]["compensation_files"] is None, unrecorded["counts"]
+    assert unrecorded["counts"]["dependency_files"] is None, unrecorded["counts"]
+
+    # 报告那一侧：不为一个没有下一步动作的数印话（印了就是给读者一个要去找答案的问号）。
+    assert "补偿项" not in coverage_notice_text(zeroed), coverage_notice_text(zeroed)
 
 
 def test_a_compensation_or_dependency_file_without_evidence_becomes_a_gap():

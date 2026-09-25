@@ -181,10 +181,12 @@ def test_the_exported_report_carries_the_coverage_ledger():
     # 元信息表里那一组覆盖行（措辞与数字都由账本给）
     assert "| 本次覆盖 |" in body, "账本没接上：报告里没有任何覆盖行"
     assert "版本 10 个文件 → 输入 2 → 取证 1" in body
-    assert "| 覆盖（分层） |" in body, "分层覆盖那两个数也要摆出来"
     # 「覆盖与缺口」那一段（只在传了账本时才出现，标题本身也是判据）
     assert f"**{doc.COVERAGE_TITLE}**" in body, "缺口那一段没出现"
     assert "**没有取到证据**" in body, "有 1 个文件这次没看过，报告里却没说"
+    # 分层那两个数（2026-09-25 从单独一行挪到了「没有取到证据」那条缺口上：在那里才
+    # 回答得了「为什么没取到」—— 分片压根没铺到它，还是铺到了但没取到证据）。
+    assert "已分配" in body and "已检查" in body, "分层那两个数一个都没摆出来"
 
 
 def test_the_exported_report_drops_the_machine_readable_ruling_block():

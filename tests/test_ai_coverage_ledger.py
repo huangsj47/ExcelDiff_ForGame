@@ -428,8 +428,10 @@ def test_the_real_shape_of_a_finished_run():
     assert counts["pending_files"] == 938
     headline = _rows_of(ledger)["本次覆盖"]
     assert "输入 995" in headline and "取证 57（5.7%）" in headline, headline
-    # 71 段是「分段读」留下的：57 个文件、71 段证据 —— 段数不能因为收了行就丢
-    assert "71 段证据" in headline, headline
+    # **段数不再进报告**（2026-09-25 收口）：一个文件分段读几遍是过程量，读者拿它没有
+    # 下一步动作。段数仍算在账里（上面 `counts["evidence_segments"] == 71` 钉着），
+    # 面板与运行轨迹读结构化字段 —— 只是不占报告的一行。
+    assert "段证据" not in headline, headline
 
 
 # ---------------------------------------------------------------------------
@@ -678,11 +680,12 @@ def test_the_docs_spell_out_both_dedup_conventions_and_where_the_numbers_show():
             tool_stats=_stats(),
         )["rows"]
     )
-    # 2026-09-25：行的名字收成四个（见 `coverage_rows` 的说明），文档跟着换名 ——
-    # 判据不变：账本输出的每一行，文档里都要有一句解释。
-    for name in ("本次覆盖", "覆盖（分层）", "额外输入"):
-        assert name in rows, f"账本没有输出「{name}」这一行"
-        assert name in doc_text, f"说明文档没有解释「{name}」这一行是什么意思"
+    # 2026-09-25 第二次收口：行的名字收成两个（见 `coverage_rows` 的说明）。判据不变：
+    # **账本真正输出的每一行，文档里都要有一句解释**（不许多列已经收掉的行，那会让读者
+    # 去找一个不存在的行）。
+    for name in ("覆盖（分层）", "额外输入", "覆盖（版本清单）", "提交（本窗口）"):
+        assert name not in rows, f"「{name}」那一行已经收掉了，账本不该再输出"
+    assert "本次覆盖" in doc_text, "说明文档没有解释「本次覆盖」"
     # 结论那一行要这一轮真的记了结论才有（没记就一个字都不说，另有用例钉着）。
     assert "结论（本轮 / 继承）" in doc_text, "说明文档没有解释结论那一行"
 
@@ -872,8 +875,10 @@ def test_the_headline_row_carries_both_ratios():
     # 2026-09-25：改成一条漏斗链（版本 → 输入 → 取证）。三个数与两个比值仍然挨着写，
     # 只是不再各写成一个「A / B」—— 读者（与模型）不必自己拼。
     assert "版本 1343 个文件 → 输入 3 → 取证 1" in headline, headline
-    # 两个比值**都不是 100%**，而这一行不许把它们说成一个数
-    assert "都不是 100% 是常态" in headline, headline
+    # **两个比值都在这一条链里**：两个箭头就是那个形状本身（拆成两行、或写成「A / B」
+    # 各一格，这条就红）。原先这里还断言一句「都不是 100% 是常态」的安慰话，2026-09-25
+    # 收掉了 —— 紧接着的缺口那几行说的是同一件事而且带下一步动作。
+    assert headline.count("→") == 2, headline
 
 
 def test_the_headline_says_unknown_instead_of_zero_without_evidence():

@@ -103,10 +103,18 @@ def test_compensation_and_dependency_inputs_are_visible_in_scope_and_coverage_te
     ledger = coverage_ledger.build_ledger(request_payload=payload, executed=[])
     assert ledger["counts"]["compensation_files"] == 2
     assert ledger["counts"]["dependency_files"] == 1
-    rendered = "\n".join(f"{key}: {value}" for key, value in ledger["rows"])
-    # 2026-09-25：补偿项与依赖核查项合成一行「额外输入」，两个数一个都不少。
-    assert "补偿项 2 个" in rendered, rendered
-    assert "依赖核查项 1 个" in rendered, rendered
+    # 2026-09-25：报告里那一行「额外输入」收掉了（用户要「只留一行计数」）。补偿/依赖的
+    # 条数现在有两条路：**总数**留在账本里（上面两行），**没取到证据的那些**才在报告里
+    # 说一句（`_extra_input_gaps`）—— 只有它才有下一步动作。
+    #
+    # 这个 fixture 的 `executed=[]` 属于「没有留下取数明细」那一档，账本说不出「哪些没读」，
+    # 于是报告这一侧如实说「看不出看过哪些文件」，而不是点名补偿项（那样等于拿一个数去
+    # 填一个说不出来的问题）。
+    from services.ai.result_payload import coverage_notice_text
+
+    notice = coverage_notice_text(ledger)
+    assert "没有取到证据" in notice, notice
+    assert "补偿项" not in notice, notice
 
 
 def _fetched(kind: str, path: str, text: str) -> SimpleNamespace:
@@ -207,11 +215,12 @@ def test_the_stored_payload_carries_the_coverage_section():
     try:
         notice = seeded["payload"].get("coverage_notice") or ""
         assert "本次覆盖与缺口" in notice, f"落库的 payload 里没有覆盖段：{list(seeded['payload'])}"
-        # 2026-09-25：`覆盖（版本清单）` 与 `覆盖（取到证据）` 并成 `本次覆盖` 一条漏斗，
-        # 分层那两个数在 `覆盖（分层）` 里。判据不变：**数都在**，而且都来自账本。
+        # 2026-09-25：`覆盖（分层）`那一行收掉了，分层那两个数跟着「没有取到证据」这条
+        # 缺口走（摆在那里才有用：分辨「分片压根没铺到它」与「铺到了但没取到证据」）。
+        # 判据不变：**数都在**，而且都来自账本。
         assert "本次覆盖" in notice, notice
         assert "版本 4 个文件 → 输入 2 → 取证 1" in notice, notice
-        assert "已检查 1 / 2" in notice, notice
+        assert "已分配 未记录 / 已检查 1" in notice, notice
         assert "取数失败 1 次" in notice, notice
         # **失败的路径要在覆盖段里** —— 下面那条验收核心就是在最坏情况（路径出现在
         # 平台自己写的那段字里）下成立的。
