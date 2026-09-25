@@ -108,6 +108,35 @@ def _platform_body() -> str:
     return body
 
 
+def _states_the_numbering_rule(body: str) -> bool:
+    """正文里能不能看见「`R#` 编号不许重开」这条**可执行**的规则。"""
+    return "`R#`" in body and "不重开" in body
+
+
+def test_the_body_itself_states_the_numbering_rule():
+    """**硬约束不许只写在 references 里** —— 那份是**按需读取**，真机实测会一次都没读。
+
+    真机 run 69（2026-09-25）：`SKILL.md` 与 references 表都写着 `risk-grading.md`
+    「写这一节之前必读」，而那次运行的 40 行 trace 里，模型只取过 `change-manifest`
+    一份 —— `R#` 编号这条硬约束（复核裁决落回正文的唯一锚点）**从没到过它手里**，
+    正文于是 0 个 `R#`，而正文里写全的那几条要求它照做了。
+
+    所以「写错就没人能对上」的规则必须在正文里也能看见。这条钉的就是它；
+    放在这一组是因为它和「行数上限」是同一件事的两面：正文里放不下的**细节**可以
+    拆去 references，**规则本身**不行。
+    """
+    body = _platform_body()
+    assert _states_the_numbering_rule(body), (
+        "正文里查不到「每条以 `R#` 开头、换模块不重开」—— 它只在 references 里，"
+        "而那份按需读取、实测没被读过"
+    )
+    # **反向自检**：把这条规则退回 references（正文只写一句「读 references」）时，
+    # 判据必须判红 —— 否则上面那条断言是空的。
+    assert not _states_the_numbering_rule(
+        "「风险评估」……四档判据、编号与归组的硬约束读 `references/risk-grading.md`。"
+    ), "判据是空的：不带规则的那种写法它也认"
+
+
 def test_category_enum_in_the_doc_equals_the_runtime_dimension_ids():
     """模型看到的 `category` 枚举，必须与运行期校验用的是同一组值。
 
