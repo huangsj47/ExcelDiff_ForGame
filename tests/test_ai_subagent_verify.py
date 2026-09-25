@@ -272,20 +272,31 @@ class TestAFailedRoundIsNotSilent:
         assert DEGRADATION_LABELS[DEGRADE_VERIFY] in result.outcome.error_message
 
     def test_the_report_names_it(self):
+        """**要了复核、而它没跑成** ⇒ 报告要说 —— 而且**只说一次**（2026-09-25 收口）。
+
+        从前后说两遍：开篇一行读法（`render_review_skipped`）、报告末尾的「信息缺口」再记
+        一次账（哪一步没跑成、为什么）。两处说的是同一件事，而末尾那遍出现在正文之后 ——
+        读者读到那里早已按自己的理解读完了。产品口径是「杂项简要说明即可」，所以账归开篇。
+        """
         result = self._run_failing()
 
         report = result.outcome.report_markdown
-        assert "对账轮（找反证）」**，而它没有跑成" in report
-        assert "没有经过「找反证」这一道" in report
+        assert report.startswith(RULING_SUMMARY_TITLE), "没跑成这件事要在第一眼看到"
+        assert "没有跑「找反证」复核" in report
+        assert "未经复核的初稿" in report, "读法要跟着一起给"
+        assert "而它没有跑成" not in report, "末尾又记了一遍账（开篇已经说清了）"
 
     def test_it_is_never_written_as_a_missing_dimension(self):
         """对账轮**没有负责的维度**：说「它负责的维度没人看过」是错的 —— 那是「有一块
-        维度没人看过」，而这里只是「结论没经过复核」，两件事的处理方式完全不同。"""
-        report = self._run_failing().outcome.report_markdown
-        tail = report.split("信息缺口（平台补充）")[-1]
+        维度没人看过」，而这里只是「结论没经过复核」，两件事的处理方式完全不同。
 
-        assert "它没有跑成" in tail
-        assert "它负责的维度" not in tail
+        2026-09-25 起末尾不再提它（开篇说清了），但这条判据仍要守着：那个错说法一旦出现在
+        报告里（比如有人把 V1 混进分片那份清单），就是一句**与事实相反**的话。
+        """
+        report = self._run_failing().outcome.report_markdown
+
+        assert "它负责的维度" not in report
+        assert "没有跑「找反证」复核" in report, "不是「不提了」，是「开篇提了」"
 
     def test_a_skipped_round_is_flagged_too(self):
         """预算不足提前收工把它跳过了 —— 与「失败」同样要说，理由不同而已。"""
@@ -302,7 +313,12 @@ class TestAFailedRoundIsNotSilent:
         assert result.outcome.degradation == DEGRADE_VERIFY
         step = _verify_steps(result)[0]
         assert step.skipped_reason and step.outcome is None
-        assert "它没有跑成" in result.outcome.report_markdown
+        assert "没有跑「找反证」复核" in result.outcome.report_markdown
+        # **原因**要跟着一起给（措辞由 `_verify_skip_why` 决定，这里只钉「括号里有话」，
+        # 不钉它具体怎么说 —— 它是一句给人看的中文，不是判据）。
+        after = result.outcome.report_markdown.split("没有跑「找反证」复核", 1)[1]
+        between = after.split("（", 1)[1].split("）", 1)[0]
+        assert between.strip(), "没跑成的原因没给出来（括号是空的）"
 
     def test_a_review_that_was_asked_for_but_did_not_run_is_named_at_the_top(self):
         """**要了复核、而它没跑成** ⇒ 开篇要说清「下面的结论没经过复核」（真机 run 65）。
@@ -320,21 +336,22 @@ class TestAFailedRoundIsNotSilent:
             "这句读法被排到了正文后面 —— 读者读完正文才看到，等于没写"
         )
 
-    def test_the_reading_rule_is_at_the_top_and_the_ledger_is_at_the_end(self):
-        """两处文案**分工**：开篇说读法、末尾记账（2026-09-25）。
+    def test_the_reading_rule_is_at_the_top_and_nowhere_else(self):
+        """读法**只写一次，在开篇**（2026-09-25 收口）。
 
-        末尾那行从前还带一句「读的时候按原样看」—— 同一件事的第二遍，措辞还不一样
-        （「按原样看」vs 开篇的「按未经复核的初稿看」），而且读到那里正文早读完了。
-        现在末尾只记「哪一步没跑成、为什么、后果」，读法指回开篇。
+        末尾那行从前还带一句「读的时候按原样看」+ 一句「见开篇的「复核摘要（平台）」」的
+        指路。两遍读法的措辞还不一样（「按原样看」vs 开篇的「按未经复核的初稿看」），
+        而读者读到末尾时正文早读完了 —— 那半句等于没写。指路同理：把读者从末尾送回开头
+        不如一开始就说。
 
-        判据落在**位置**上：读法不许出现在开篇之后，指路的那半句不许出现在开篇里。
+        判据落在**位置**上：读法在开篇、末尾一个字都不重复；反过来，开篇不许出现「指路」。
         """
         report = self._run_failing().outcome.report_markdown
         head, tail = report.split("信息缺口（平台补充）", 1)
 
         assert "读的时候按**未经复核的初稿**看" in head
         assert "读的时候" not in tail, "末尾又写了一遍读法 —— 那里正文早读完了，等于没写"
-        assert f"见开篇的「{RULING_SUMMARY_NAME}」" in tail, "末尾那条账没指回开篇"
+        assert "找反证" not in tail, "末尾又记了一遍「哪一步没跑成」（开篇已经说清）"
         assert "读法" not in head, "指路的半句挂到了开篇上 —— 它该在末尾那条账上"
 
     def test_a_round_nobody_asked_for_says_nothing_at_the_top(self):

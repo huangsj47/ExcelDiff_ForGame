@@ -258,12 +258,18 @@ class TestDowngradedAndPendingAreNotLumpedTogether:
         text, dropped = reconcile_candidates((candidate,), _synthesis(), reduction=reduction)
 
         assert dropped == ()
-        assert "待人工核验" in text, text
+        assert "转人工核验 1 条" in text, text
         assert "没有进入最终结论清单" not in text, f"同一件事说了两遍：\n{text}"
-        assert "需要人工看一眼" not in text, f"把「待人工核验」又说了一遍：\n{text}"
+        assert "需要人工看一眼" not in text, f"把「转人工核验」又说了一遍：\n{text}"
 
-    def test_the_three_fates_get_three_different_blocks(self):
-        """三条候选、三种去向 → 三段各自计数、各自措辞，不合并成一句「都不是遗漏」。"""
+    def test_the_three_fates_get_three_counts(self):
+        """三条候选、三种去向 → **三个计数各写各的**，不合并成一句「都不是遗漏」。
+
+        2026-09-25 收口：三种去向从前各占一段（每段 100 字上下，讲的是同一件结构），
+        现在合成一句「其余候选的去向已由复核裁决与平台处置写着：撤销 1 条、降级 1 条」。
+        判据从「三段各自的措辞」换成「**三种去向各自有数**」—— 合并成一句「都不是遗漏」
+        的话，读者就分不出这三种处置（这正是这个类要防的事）。
+        """
         base_retracted = _obj(
             "【协议】A 被撤销",
             file_path=PROTO,
@@ -315,8 +321,8 @@ class TestDowngradedAndPendingAreNotLumpedTogether:
         assert "[S1-1]" not in text and "[S1-2]" not in text, (
             "去向已写明的那两条又逐条重印了一遍"
         )
-        assert "1 条候选的缺席" in text and "1 条候选**进了结论清单" in text, text
-        assert "已撤销" in text and "降级" in text
+        # 三种去向**各自有数**（撤/降/待核各 1 条），合并成一句「都不是遗漏」的话这条就红。
+        assert "撤销 1 条" in text and "降级 1 条" in text, text
         assert "没有进入最终结论清单" in text, "那条真缺口仍要报"
 
 

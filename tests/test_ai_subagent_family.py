@@ -521,8 +521,11 @@ class TestTheCandidatesAndTheReconciliation:
         text, dropped = reconcile_candidates((candidate,), synthesis)
 
         assert dropped == ()
-        assert "已明确拒绝" in text
-        assert "与 S2-2 是同一根因" in text
+        # 2026-09-25 收口：**汇总给的拒绝理由不再抄进报告**（原来逐条一行「- [S1-7]
+        # **已明确拒绝**：<reason>」）。报告只留计数 —— 一条**已经被明确拒绝**的候选没有
+        # 下一步动作，而它的理由仍在结论载荷的 `candidate_dispositions` 里（那是它的产地）。
+        assert "汇总已明确拒绝 1 条" in text, text
+        assert "与 S2-2 是同一根因" not in text, "汇总给的理由又抄回报告了"
 
     def test_a_candidate_the_synthesis_never_handed_back_a_id_for(self):
         """标题与文件都相同，**只要没有编号声明就不算采纳**。

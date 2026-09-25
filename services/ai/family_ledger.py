@@ -50,7 +50,6 @@ from services.ai.engine import (
 from services.ai.protocol import Anomaly, DroppedItem
 from services.ai.scope import normalize_path
 from services.ai.verdict import (
-    RULING_SUMMARY_NAME,
     VERDICT_DOWNGRADED,
     VERDICT_NEEDS_MORE_EVIDENCE,
     VERDICT_RETRACTED,
@@ -640,7 +639,6 @@ def reconcile_candidates(
     # 一条编号都没交回：**说一次，不报 N 条**（见 docstring 最后那两节）。
     no_lineage = bool(candidates) and not submitted and not dispositions
     shard_gaps = _shard_gap_lines(steps)
-    verify_gaps = _verify_gap_lines(steps)
     explained = tuple(
         (verdict, tuple(items)) for verdict, items in ruling_groups.items() if items
     )
@@ -655,7 +653,6 @@ def reconcile_candidates(
         not lines
         and not no_lineage
         and not shard_gaps
-        and not verify_gaps
         and not explained
         and not settled
         and not disposition_lines
@@ -663,60 +660,54 @@ def reconcile_candidates(
         return "", ()
 
     blocks: list[str] = ["## 信息缺口（平台补充）"]
-    if disposition_lines:
-        blocks.append(
-            f"汇总已对以下 {len(disposition_lines)} 条候选给出明确拒绝理由 —— 不是静默漏项："
-            "\n\n" + "\n".join(disposition_lines)
-        )
     if shard_gaps:
-        # 2026-09-25：引子从两行收到一行（「压根没跑」/「跑了没交回」这条区别是实质的，
-        # 每条自己写着，不必再在引子里讲一遍 —— 逐条清单本身才是这一节的内容）。
-        blocks.append(
-            "以下几块**没能交回结论**（「没跑」与「跑了但没交回」每条自己写着；"
-            "后者不代表没问题，只代表这一块没结论）：\n\n" + "\n".join(shard_gaps)
-        )
-    if verify_gaps:
-        # 与上面那段分开写：对账轮没有负责的维度，把它挂在「没能交回结论的分片」下面会读成
-        # 「有一块维度没人看过」，而它真正的后果是「结论没经过复核」。
-        #
-        # 这一句是**记账的引子**：说清下面那条是什么（哪一步、为什么），并把读法指回开篇
-        # （`_verify_gap_lines` 的 docstring 写了为什么读法不许在这儿再写一遍）。指路是安全的
-        # —— 这一段只会出现在报告里，而汇总没跑成时压根没有报告（那一路走的是 `_gap_lines`
-        # 进 `error_message`，不含这一句）。
-        blocks.append(
-            "另外，本次开着**「对账轮（找反证）」**，而它没有跑成 —— 下面记的是"
-            f"**哪一步没跑成、为什么**；这些结论该怎么读，见开篇的「{RULING_SUMMARY_NAME}」：\n\n"
-            + "\n".join(verify_gaps)
-        )
+        # 2026-09-25：引子收掉。它说的是「没跑 / 跑了没交回」的区别 —— 而那个区别**每条
+        # 自己写着**（见 `_shard_gap_lines`），逐条清单本身才是这一节的内容。
+        blocks.append("\n".join(shard_gaps))
     if no_lineage:
         blocks.append(
             f"平台的账上共有 {len(candidates)} 条来自分片代理的候选结论，而**本次汇总"
-            "没有交回候选血缘**（每条结论都该在 `source_candidate_ids` 里写上它来源于哪几条"
-            "候选）—— 没有这一组编号，平台**无法按编号对账**，所以这里既不报「找不到去向」、"
-            "也不把它们算成遗漏：**请人工对照各分片的候选清单过一遍**。"
+            "没有交回候选血缘** —— 没有这一组编号，平台**无法按编号对账**，所以这里既不报"
+            "「找不到去向」、也不把它们算成遗漏：**请人工对照各分片的候选清单过一遍**。"
         )
     if lines:
         # 这一节里**唯一逐条列出的一条**（见 `reconcile_candidates` 的 docstring）：它要人工
-        # 去看，含糊不得。引子只说平台做过的那一件事（两个集合的比对），方法细节不重讲；
-        # 措辞用「没有进入最终结论清单」而不是「没有任何结论认领」—— 这一组里既有真孤儿
-        # （没有任何结论声明来源于它），也有汇总**主动**标了「待复核」的那些。
+        # 去看，含糊不得。措辞用「没有进入最终结论清单」而不是「没有任何结论认领」——
+        # 这一组里既有真孤儿，也有汇总**主动**标了「待复核」的那些。
+        #
+        # 「平台的核对**只按候选编号**」这句必须留着：它限定了上面那个判断的**判据**
+        # （不是文件名、不是标题 —— 那几手正是 AI-P0-06 删掉的东西）。没有它，读者会把
+        # 「没有进入清单」读成一个平台没做过的保证。
         blocks.append(
             f"平台的账上共有 {len(candidates)} 条来自分片代理的候选结论，其中 {len(lines)} 条"
             "**没有进入最终结论清单**。平台的核对**只按候选编号**（`source_candidate_ids`）："
             "是真的没被采纳、采纳了却忘了带编号，还是汇总主动标了「待复核」，每条自己写着"
             "—— 需要人工看一眼：\n\n" + "\n".join(lines)
         )
+    # **去向只报一句计数**（2026-09-25 收口）。从前每一种去向一段（撤销一段、降级一段、
+    # 待人工核验一段、外加「已明确拒绝」逐条），真机 run 70 这一节 267 字里那两段都是它。
+    #
+    # 为什么不能整段删掉：这一节的职责是「**没有候选悄悄消失**」。只写「账上 N 条、其中
+    # M 条没进清单」的话，读者对不上剩下的 N-M 条 —— 而「撤销本身也是结论，不是遗漏」
+    # 这句话正是为那一批写的。所以留**计数 + 指向**，逐条内容归「复核标注（平台）」。
+    tail: list[str] = []
     for verdict, items in explained:
-        blocks.append(_ruling_block(verdict, items))
+        tail.append(f"{_FATE_LABELS[verdict]} {len(items)} 条")
+    if disposition_lines:
+        tail.append(f"汇总已明确拒绝 {len(disposition_lines)} 条")
     if settled:
+        tail.append(f"平台处置 {settled} 条（超条数上限 / 未达门槛 / 判为同一问题）")
+    if tail:
         blocks.append(
-            f"另有 {settled} 条候选的编号**汇总交回过、但没有留在最终清单里** ——"
-            "平台在这一侧把它们处置掉了（超出本次条数上限 / 未达告警门槛 / 与已有条目"
-            "判为同一问题），记账在「结论条数上限（平台补充）」那一节与本次运行轨迹里。"
+            "其余候选的去向已由复核裁决与平台处置写着："
+            + "、".join(tail)
+            + "。**撤销本身也是结论，不是遗漏** —— 逐条理由与原文见「复核标注（平台）」，"
+            "逐条处置记账在运行轨迹里。"
         )
-    blocks.append(
-        "以上是平台**按记录核对**出来的，不是模型的自我说明。"
-    )
+    # 收尾这一句留着（12 字，不值当省）：这一节与它上面那几节**口吻不同** —— 上面是模型
+    # 写的，这里是平台按记录核出来的。不说这一句，读者会把平台核出来的结论当成模型的
+    # 自我说明，而两者的可信度不一样。
+    blocks.append("以上是平台**按记录核对**出来的，不是模型的自我说明。")
     return "\n\n".join(blocks), tuple(dropped)
 
 
@@ -785,40 +776,26 @@ def _ruling_fate(
     return None
 
 
-# 三种去向各一段（`_ruling_block`）。措辞与既有的那两段同一口气（「已经解释过了」），
-# 但**三段分开**：撤销、降级、待人工核验对读的人是三件事，合成一句会让处置说不清。
+# 复核裁决里**改变了候选去向**的那三种。`confirmed` 不在其中：它维持原状，那条结论照旧
+# 在清单里，与「已采纳」是同一件事，不需要另说一遍。
 #
-# 2026-09-24（run 63）：**只报计数 + 指向，不再逐条重印标题**。原先每一段后面挂着
-# `_ruling_line` 的逐条清单，而它把候选标题与结论标题**各抄一遍**（「`[S4-2]`【奖励发放】
-# 领奖次数改为交付前落库且不退还…（code_logic·high，path）：对应本次复核的 `[F1]`
-# 「【奖励发放】领奖次数改为交付前记账且不退还…」，裁决为 **证据不足（待人工核验）**」），
-# run 63 里 6 条 = 6 行长文。而这两句话在**正文的风险评估**与**复核标注那一节**里已经各
-# 出现过一次 —— 同一件事在报告里出现三遍，正是这批缺陷的形态。
+# 次序即优先级（见 `_ruling_fate`）：撤销 → 降级 → 待人工核验。
 #
-# 这一节要回答的是「那几条候选有没有被静默丢掉」，答案是一个数；候选 ↔ 结论的对应关系
-# 是**结构化**的（`FindingRow.source_candidate_ids` 在载荷里），不靠报告正文传。
-_RULING_BLOCK_TEXT = {
-    VERDICT_RETRACTED: (
-        "另有 {count} 条候选的缺席**已经解释过了**：与它们同一条的结论在本次复核里"
-        "**已撤销**（移出当前结论清单、不进下一轮基线）—— 撤销本身也是结论，不是遗漏，"
-        "所以不用再去人工找一遍。撤销的理由与原文写在「复核标注（平台）」那一节里。"
-    ),
-    VERDICT_DOWNGRADED: (
-        "另有 {count} 条候选**进了结论清单，只是被本次复核降级了**：它们不是遗漏 —— "
-        "结论还在清单里，按复核**之后**的等级采信（降到哪一级、为什么，写在"
-        "「复核标注（平台）」那一节里）。"
-    ),
-    VERDICT_NEEDS_MORE_EVIDENCE: (
-        "另有 {count} 条候选**进了结论清单，但本次复核把它们转成了「待人工核验」**"
-        "（证据不足，置信度不再按 `very_high` 采信）：它们不是遗漏，逐条的下落、理由与"
-        "断言状态在「复核标注（平台）」那一节里。"
-    ),
+# ## 2026-09-25：三段整段话收成「一个标签 + 计数」
+#
+# 那三段各自 100 字上下（「另有 N 条候选的缺席已经解释过了……」「另有 N 条候选进了结论
+# 清单，只是被本次复核降级了……」），讲的是**同一件结构**：这批候选没有消失，去向在哪一节。
+# 真机 run 70 的「信息缺口」整节 267 字里，那两段占了绝大部分，而读者要的只是那个数。
+# 现在由装配处合成一句（`_FATE_LABELS` + 计数 + 指向），逐条内容仍在「复核标注（平台）」。
+#
+# **为什么不能整段删掉**：这一节的职责是「没有候选悄悄消失」。只写「账上 N 条、其中 M 条
+# 没进清单」，读者对不上剩下的 N-M 条 —— 「撤销本身也是结论，不是遗漏」那句正是为
+# 那一批写的，所以留计数 + 这句 + 指向。
+_FATE_LABELS = {
+    VERDICT_RETRACTED: "撤销",
+    VERDICT_DOWNGRADED: "降级",
+    VERDICT_NEEDS_MORE_EVIDENCE: "转人工核验",
 }
-
-
-def _ruling_block(verdict: str, items: Sequence[str]) -> str:
-    """「这几条候选的去向由复核裁决写着」那一段（自己带计数，不重印标题）。"""
-    return _RULING_BLOCK_TEXT[verdict].format(count=len(items))
 
 
 def _candidate_head(candidate: Candidate) -> str:
