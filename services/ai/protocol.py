@@ -54,7 +54,7 @@ from services.ai.claims import (  # noqa: F401 —— Claim 在本模块重新�
     _as_str,
     parse_claims,
 )
-from services.ai.reference_search import MIN_QUERY_CHARS, normalize_query
+from services.ai.reference_search import MIN_QUERY_WEIGHT, normalize_query, query_weight
 from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_contract import (
     CONFIDENCES,
@@ -1008,13 +1008,16 @@ def sanitize_requests(
             # 提交的内容），所以它没有「某一条提交」可以校验，取而代之的是两件事 ——
             # 关键词得写得够具体（"id" 这种词会把整批都搜出来），以及可选的 `path`
             # 前缀必须真的匹配到本批次的改动文件。
+            #
+            # 「够不够具体」按**信息量权重**判、不按字符数：单位要跟着文字系统走，否则
+            # 中文二字词（`队伍`/`匹配`）一律被误拒，而拉丁泛词（`get`）照样放行。
             query = normalize_query(request.query)
-            if len(query) < MIN_QUERY_CHARS:
+            if query_weight(query) < MIN_QUERY_WEIGHT:
                 dropped.append(
                     DroppedItem(
                         "request",
                         index,
-                        f"搜索词太短（至少 {MIN_QUERY_CHARS} 个字），换个具体一点的标识符",
+                        "搜索词太短（三个字母或两个汉字起），换个具体一点的标识符",
                         query,
                     )
                 )

@@ -57,7 +57,24 @@ MAX_SCAN_FILES = 240
 MAX_HITS = 80
 MAX_LINE_CHARS = 200
 # 太短的词（"id"、"a"）会把整个批次都搜出来，纯属浪费额度。让它写清楚一点再搜。
-MIN_QUERY_CHARS = 3
+#
+# **判据是「能不能构成一个词」，所以单位要跟着文字系统走，不能数字符。**
+# 原先这里是 `len(query) < 3`，那等于假定「一个词至少三个拉丁字母」。可这个工具搜的是
+# lua 与配表 —— 里面大量是中文，而**中文一个字就是一个词素**：`队伍`、`匹配`、`冷却`
+# 都是完整的词，却全部被这条挡在门外。更糟的是拒掉的理由（「换个具体一点的标识符」）
+# 对中文词**无从下手**（没有比「队伍」更具体的两个字了），实测 run 71 里模型就因此
+# 放弃了那两条调查线。
+#
+# 反过来它也漏：`get`/`set`/`max`/`new` 这类三个字母的词在 lua 里满地都是，一个都没拦住。
+#
+# 所以按文字系统折算成一个「信息量」权重：**一个汉字按 2 计**（一个汉字承载的信息量
+# 约等于两个拉丁字母），其余字符按 1 计。阈值仍是 3 —— 也就是「三个拉丁字符，或两个汉字」。
+# 这样纯拉丁那侧的行为与原来逐字一致（`id`/`a` 照样被拒，`limit`/`mana_cost` 照样放行），
+# 改动只发生在被误伤的那一侧。
+MIN_QUERY_WEIGHT = 3
+# 汉字所在的几个区段（基本区、扩展 A、兼容表意文字）。只认汉字，不认标点与全角符号 ——
+# 它们是分隔符，不承载「这是个什么标识符」的信息。
+_CJK_RANGES = ((0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xF900, 0xFAFF))
 # 单条命中给模型看的形态：`路径:行号: 内容`
 _HIT_SEPARATOR = ": "
 
@@ -114,8 +131,23 @@ class SearchResult:
 
 
 def normalize_query(raw: str) -> str:
-    """搜索词：去掉首尾空白。太短的会被调用方拒掉（见 `MIN_QUERY_CHARS`）。"""
+    """搜索词：去掉首尾空白。太短的会被调用方拒掉（见 `MIN_QUERY_WEIGHT`）。"""
     return str(raw or "").strip()
+
+
+def _is_cjk(char: str) -> bool:
+    point = ord(char)
+    return any(low <= point <= high for low, high in _CJK_RANGES)
+
+
+def query_weight(raw: str) -> int:
+    """搜索词的**信息量权重**：汉字按 2 计，其余字符按 1 计（理由见 `MIN_QUERY_WEIGHT`）。
+
+    它只有一个用途：给「这个词够不够具体」一个不偏袒任何一种文字系统的尺子。**不要**
+    拿它去和字符数比 —— 它们不是一回事：`队伍` 是 2 个字符、权重 4，`get` 是 3 个字符、
+    权重 3。
+    """
+    return sum(2 if _is_cjk(char) else 1 for char in str(raw or ""))
 
 
 def is_binary(content) -> bool:

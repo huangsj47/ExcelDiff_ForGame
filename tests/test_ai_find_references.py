@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from services.agent_reference_search import apply_batch_total
 from services.ai import reference_search as rs
 from services.ai.protocol import ContextRequest, parse_payload, sanitize_requests
@@ -284,6 +286,57 @@ def test_a_too_short_query_is_dropped_with_a_reason():
 
     assert allowed == ()
     assert "太短" in dropped[0].reason
+
+
+@pytest.mark.parametrize(
+    "query, kept",
+    [
+        # 拉丁这一侧：与老口径（`len(query) < 3`）**逐条一致**，一个字都不许变。
+        ("a", False),
+        ("id", False),
+        ("hp", False),
+        ("get", True),
+        ("limit", True),
+        ("mana_cost", True),
+        ("1002", True),
+        # 中文这一侧：**两个字就是一个完整的词**，老口径把这一整侧全部误拒。
+        ("队伍", True),
+        ("匹配", True),
+        ("冷却", True),
+        ("药水", True),
+        ("队", False),
+    ],
+)
+def test_a_query_is_judged_by_its_script_not_by_its_character_count(query, kept):
+    """「够不够具体」按**信息量**判，不按字符数 —— 判据的单位要跟着文字系统走。
+
+    ## 这一条钉的是哪一次误伤
+
+    老口径是 `len(query) < 3`，等于假定「一个标识符至少三个拉丁字母」。而这个工具搜的是
+    lua 与配表，里面大量是中文，而中文**一个字就是一个词素**：`队伍`、`匹配`、`冷却`
+    都是完整的词，却全部被挡在门外。更糟的是拒掉的理由（「换个具体一点的标识符」）对
+    中文词无从下手 —— 没有比「队伍」更具体的两个字了。实测 run 71 的第 2 轮里，模型
+    就为这个丢掉了 `队伍` 与 `匹配` 两条调查线，第 3 轮也没有再试。
+
+    ## 为什么判据是这张表而不是一句话
+
+    两个方向的错都要钉住：中文那侧**不许再误拒**（`队伍` 放行），拉丁那侧**不许被顺手
+    改严**（`get`/`limit`/`hp` 的取舍与老口径逐条相同）。只断言「中文词能过」的话，
+    把阈值整体调小同样能过 —— 而那会让 `id`/`a` 也混进来。
+    """
+    allowed, dropped = _sanitize(ContextRequest(type="find_references", query=query))
+
+    assert bool(allowed) == kept, (query, kept, dropped)
+    if not kept:
+        assert "太短" in dropped[0].reason
+
+
+def test_the_query_weight_is_not_the_character_count():
+    """折算规则本身：汉字按 2 计、其余按 1 计（`队伍` 是 2 个字符、权重 4）。"""
+    assert rs.query_weight("队伍") == 4
+    assert rs.query_weight("get") == 3
+    assert rs.query_weight("mana_cost") == 9
+    assert len("队伍") < rs.query_weight("队伍")
 
 
 def test_a_prefix_that_matches_nothing_is_dropped():
