@@ -170,9 +170,12 @@ def test_the_declaration_count_is_capped_and_the_overflow_is_accounted():
 def test_the_list_from_the_prompt_must_be_answered_item_by_item():
     """给了清单就要求逐条交代 —— 缺的**逐条记账**（引擎据此当场要一次）。
 
-    真机实测（run 75 / 76）：这条要求只写在提示词里时，模型两次都没照做。所以它现在由
-    引擎在解析**之后**检查、缺了当场补问（`missing_baseline_statuses`）。这一层只负责
-    把「缺了哪几条」说清楚，别的一概不管。
+    这一层只负责把「缺了哪几条」说清楚，别的一概不管：**催不催、催几次、催不动怎么办
+    是引擎的事**（`engine` 的 `CORRECTION_BASELINE_COVERAGE` 那一支）。
+
+    为什么要有这条规矩：「模型多半会写」不是可以依赖的东西 —— `dimensions` 一次没漏过，
+    正因为它必填、缺了会被打回。判据落在**记账**上：少一条就是 `dropped` 里的一条
+    `baseline_coverage_missing`，引擎按它决定补问什么。
     """
     payload = parse_payload(
         _final(

@@ -54,6 +54,7 @@ from services.ai.protocol import (
     sanitize_requests,
 )
 from services.ai.rules import RuleThresholds
+from services.ai.round_observability import CORRECTION_BASELINE_COVERAGE
 from services.ai.scope import AnalysisScope
 from services.ai.skill_loader import LoadedSkills, SkillDocument
 
@@ -640,9 +641,15 @@ def _final_json(*, updates=None):
 def test_a_final_that_skips_the_history_list_is_sent_back_once():
     """**这条规矩靠「当场要」才立得住**（真机实测，两次）。
 
-    run 75 / 76：那条要求只写在提示词里时，模型两次都没照做 —— 它在正文里写「另 3 条
-    本轮复核为已修复」，而 `baseline_updates` 是空数组。平台逼得住的是当场要：
-    `dimensions` 一次没漏过，就因为它必填、缺了会被打回。
+    ## 「模型多半会写」不是可以依赖的东西（这条判据的来历改过一次）
+
+    这一条原先写的是「真机 run 75 / 76 模型两次都没照做」—— **那个观察是错的**：`[]` 由
+    `ground_payload` 漏带 `baseline_closures` 造出来，写好的也被扔了；run 77 / 78 一次
+    都没补问才是反证（缺了必补问）。
+
+    所以这条判据留着的理由**不依赖**那次观察：**规矩要平台说了算**。`dimensions` 一次
+    没漏过，正因为它必填、缺了会被打回 —— 一条只写在提示词里的要求，没有任何机制保证它
+    被遵守，而它守的是「旧结论怎么才能从在挂清单里出去」。
 
     判据要两条一起看：**真的重问了一次**，而且**提示里点名了缺的那条指纹**
     （只说「你漏了」等于让模型自己去猜少了哪个）。
@@ -657,6 +664,51 @@ def test_a_final_that_skips_the_history_list_is_sent_back_once():
     assert len(client.calls) == 2, "没有当场要一次 —— 那条规矩又变回「提示词里写着而已」"
     assert "deadbeefdeadbeef" in client.last_user, "重问时没有点名缺的是哪一条"
     assert outcome.payload is not None, "结论被作废了（它只是没交代清单，解析是成功的）"
+
+
+def test_the_round_sent_back_for_the_list_still_counts_as_a_conclusion():
+    """被退回来补清单的那一轮，**结局是 `final`，不是 `unparsable`**。
+
+    那份 JSON 解析成功了、模型确实交了一份结论 —— 只是清单没交代完。写成 `unparsable`
+    会让运行轨迹上出现两句假话：`budget._ROUND_STATUS_LABELS` 的「输出无法解析」，
+    以及 `round_events` 的 `parsed_ok=False`；`trace_evidence` 还会按「这一轮没给出能
+    解析的东西」去选那一档更大的原文上限。
+
+    判据要**两条一起看**：结局是 `final`，而且「它为什么被退回来」由 `correction_reason`
+    说清楚（只把 status 改回 `final` 而丢掉纠正原因，这一轮看起来就与一次正常收工没有
+    区别 —— 而它明明还有第二轮）。
+    """
+    client = RecordingClient(
+        (_final_json(), "stop"),
+        (_final_json(updates=[{"fingerprint": "deadbeefdeadbeef", "status": "standing"}]), "stop"),
+    )
+
+    outcome = _run(client, StubProvider(), baseline_digest=DIGEST)
+
+    assert outcome.rounds[0].status == "final", "补一块 ≠ 这一轮没有结论"
+    assert outcome.rounds[0].correction_reason == CORRECTION_BASELINE_COVERAGE
+    assert len(client.calls) == 2, "这一条要的是「退回去补」，不是「照收」"
+
+
+def test_the_close_out_the_model_answered_survives_to_the_outcome():
+    """模型答了清单，**平台要把它原样带到结局**（`outcome.payload`）。
+
+    这一条是「`ground_payload` 手抄参数表漏带 `baseline_closures`」那个 bug 的回归口：
+    漏了它，`result_payload` 里 `baseline_updates` 就永远是 `[]` —— 而真机连着四轮
+    （run 75 / 76 / 77 / 78）看到的正是那个 `[]`。**它证明不了模型没写**：平台在接地的
+    那一步把写好的也扔了。所以判据落在**结局载荷**上，不是落在「模型有没有写」上。
+    """
+    client = RecordingClient(
+        (_final_json(updates=[{"fingerprint": "deadbeefdeadbeef", "status": "standing"}]), "stop"),
+    )
+
+    outcome = _run(client, StubProvider(), baseline_digest=DIGEST)
+
+    assert outcome.payload is not None
+    assert [item.fingerprint for item in outcome.payload.baseline_closures] == [
+        "deadbeefdeadbeef"
+    ], "模型写的收口声明没走到结局 —— 报告里的 `baseline_updates` 会永远是空的"
+    assert outcome.payload.baseline_closures[0].status == "standing"
 
 
 def test_the_close_out_answered_this_time_is_not_asked_again():

@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Optional
 
 from services.ai.baseline_closures import BaselineClosure, coerce_closures
@@ -857,16 +857,21 @@ def ground_payload(payload: AnalysisPayload, scope: AnalysisScope) -> AnalysisPa
             )
         )
 
-    return AnalysisPayload(
-        status=payload.status,
-        reason=payload.reason,
-        requests=payload.requests,
-        report_markdown=payload.report_markdown,
-        anomalies=tuple(kept),
-        dimensions=payload.dimensions,
-        candidate_dispositions=payload.candidate_dispositions,
-        dropped=tuple(dropped),
-    )
+    # **只换它管得着的那两个字段**（`anomalies` / `dropped`），其余一律原样带过去。
+    #
+    # 这里原先手抄了一份构造参数表，抄漏的字段**不报错**，只会静默变成默认值 —— 而这一层
+    # 的默认值全都长得像「模型没写」。已经漏过两个：
+    #
+    # * `baseline_closures` —— 模型逐条交代了历史清单，接地这一层照旧把它丢掉，于是
+    #   `result_payload` 里 `baseline_updates` 永远是 `[]`。**收口这条通道从上线起就没
+    #   通过**（真机 run 75 / 76 / 77 / 78 连着四轮都是那个 `[]`，见 `baseline_closures`
+    #   的模块 docstring 里这次订正）；
+    # * `reason_code` —— 结局那一轮的短标识被换成了空串。
+    #
+    # 按字段抄的清单迟早会漏第三次（新增字段的人不会想到还有这一处）。`replace` 没有
+    # 那个问题：**新加的字段自动跟着走**。用例按这个口径钉着
+    # （`tests/test_ai_protocol_and_scope.py` 里那条逐字段对照的）。
+    return replace(payload, anomalies=tuple(kept), dropped=tuple(dropped))
 
 
 # 控制字符（`\n`、`\r`、`\t` 等 0x00-0x1f，以及 DEL）。**不含空格**：空格是正常路径里

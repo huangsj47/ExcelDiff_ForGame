@@ -1559,13 +1559,23 @@ def run_analysis(
         if parsed.is_final:
             # **历史清单没有逐条交代时，当场要一次。**
             #
-            # 真机实测（run 75 / 76，两次）：那条要求只写在提示词里时，模型**一次都没照做**
-            # —— 它在正文里写「另 3 条本轮复核为已修复」，而 `baseline_updates` 是空数组。
-            # 平台逼得住的是**当场要**：`dimensions` 一次没漏过，就因为它必填、缺了会被打回。
+            # 「模型不填这个字段」这个判断是**错的**（2026-09-25 晚订正）：当时拿的是
+            # run 75 / 76 的 `baseline_updates` 是 `[]`，而那个 `[]` 由平台自己造 ——
+            # `ground_payload` 漏带了 `baseline_closures`，写好的也被扔掉。反证在下面
+            # 这一支本身：清单里 5 / 6 条一条状态都没有时它会补问，而 run 77 / 78
+            # **一次都没补问**，只可能是收下了。
+            #
+            # 那这一支还要不要？要 —— 理由不依赖上面那个误判：这条规矩必须**平台说了算**，
+            # 而不是「模型多半会写」。`dimensions` 一次没漏过，正因为它必填、缺了会被打回。
             #
             # 与上面三种纠正不同的是：这一份结论**解析成功、照收不误**（缺状态不毁结论）。
             # 所以只在「还有重问额度」且「还有下一轮」时才花这一次 —— 最后一轮要求它重发是
             # 白花（那句话永远发不出去），那份额度本该留给别处。
+            # **这一轮的结局是 `final`，不是 `unparsable`**：那份 JSON 解析成功了，模型
+            # 确实给出了一份结论 —— 只是清单没交代完，平台把它退回去补一块。写成
+            # `unparsable` 会让运行轨迹里出现「输出无法解析」（`budget._ROUND_STATUS_LABELS`）
+            # 与 `parsed_ok=False`，而那两句都是假的。它被退回去这件事由 `correction_reason`
+            # 与 `correction_hint` 记着，不必借一个不成立的状态值来说。
             missing_statuses = missing_baseline_statuses(parsed)
             if (
                 missing_statuses
@@ -1575,7 +1585,7 @@ def run_analysis(
                 limits = replace(limits, max_corrections=limits.max_corrections - 1)
                 correction_hint = build_baseline_coverage_hint(missing_statuses)
                 _emit(RoundRecord(
-                    round_index, "unparsable",
+                    round_index, "final",
                     item_count=len(items),
                     correction_hint=correction_hint,
                     correction_reason=CORRECTION_BASELINE_COVERAGE,
@@ -1588,7 +1598,7 @@ def run_analysis(
                 ))
                 pending_items = ()
                 budget_notes = []
-                round_memos.append(TurnMemo(index=round_index, status="unparsable"))
+                round_memos.append(TurnMemo(index=round_index, status="final"))
                 continue
             payload = parsed
             if context_overflow_recovered:

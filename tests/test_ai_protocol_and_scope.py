@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import fields
 
 import pytest
 
@@ -42,6 +43,7 @@ COMMIT_A = "a" * 40
 COMMIT_B = "b" * 40
 PATH_A = "config/30_goods/item.xlsx"
 PATH_B = "scripts/export.py"
+FP = "deadbeefdeadbeef"
 
 
 def _scope() -> AnalysisScope:
@@ -488,6 +490,49 @@ def test_grounding_preserves_the_earlier_dropped_records():
     payload = _single_anomaly_payload(_anomaly(confidence="low"))
     grounded = ground_payload(payload, _scope())
     assert grounded.dropped == payload.dropped
+
+
+def test_grounding_only_rewrites_the_two_fields_it_is_about():
+    """接地**只**换 `anomalies` 与 `dropped`，其余字段逐字段原样带过去。
+
+    ## 这条守的是一个已经发生过两次的失效形态
+
+    `ground_payload` 原先**手抄了一份构造参数表**。抄漏的字段不会报错，只会静默变成
+    默认值 —— 而这一层的默认值全都长得像「模型没写」：
+
+    * `baseline_closures`：模型逐条交代了历史清单，平台照旧把它丢掉，于是
+      `result_payload` 里 `baseline_updates` **永远是 `[]`** —— 这条收口通道从上线起
+      就没通过（真机 run 75 / 76 / 77 / 78 连着四轮都是那个 `[]`）；
+    * `reason_code`：结局那一轮的短标识被换成了空串。
+
+    按字段逐个比，就不必在每次新增字段时回来补一行 —— 而「回来补一行」正是会漏的那一步。
+    少判一个字段的写法（只断言 `baseline_closures`）在下次漏别的字段时照样绿。
+    """
+    parsed = parse_payload(
+        json.dumps(
+            _final_payload(
+                reason_code="triage_cross_module",
+                baseline_updates=[
+                    {"fingerprint": FP, "status": "fixed", "reason": "兜底加回来了"}
+                ],
+            ),
+            ensure_ascii=False,
+        ),
+        baseline_fingerprints=(FP,),
+    )
+    assert parsed.baseline_closures, "前提没成立：解析这一层就没收下这条声明"
+
+    grounded = ground_payload(parsed, _scope())
+
+    assert getattr(grounded, "baseline_closures") == parsed.baseline_closures, (
+        "模型写的收口声明被接地这一层吃掉了 —— 报告里的 `baseline_updates` 会永远是空的"
+    )
+    for spec in fields(AnalysisPayload):
+        if spec.name in ("anomalies", "dropped"):
+            continue
+        assert getattr(grounded, spec.name) == getattr(parsed, spec.name), (
+            f"接地把 {spec.name} 换掉了 —— 它只该动 anomalies / dropped"
+        )
 
 
 # --------------------------------------------------------------------------
