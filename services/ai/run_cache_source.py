@@ -24,7 +24,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from models import db
-from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun, AiAnalysisTrace
+from models.ai_analysis import (
+    AiAnalysisAnomaly,
+    AiAnalysisRoundEvent,
+    AiAnalysisRun,
+    AiAnalysisTrace,
+)
 from services.ai.conclusion_view import _created_at_display, _parse_response_payload
 from services.ai.project_config_source import _utcnow
 from services.ai.provenance import current_provenance, provenance_matches
@@ -132,9 +137,24 @@ def cleanup_expired_analysis_runs(retention_days: int = ANALYSIS_CACHE_DAYS):
     并打印「清理AI分析缓存失败: (sqlite3.IntegrityError) FOREIGN KEY constraint failed」，
     过期 run / trace / anomaly 一行都没少。
 
-    **先子后父**，同一个事务里做完。两张子表都要删：trace 是逐轮明细，anomaly 是异常
-    条目（含人工处置状态）—— 它们都只挂在 run 上，run 一删就再也读不到
-    （`AiAnalysisAnomaly.queue` 只按 run_id 查），留着就是谁都取不到的死行。
+    **先子后父**，同一个事务里做完。**三张**子表都要删：
+
+    * `AiAnalysisTrace` 是逐轮明细，`AiAnalysisAnomaly` 是异常条目（含人工处置状态）
+      —— 它们都只挂在 run 上，run 一删就再也读不到（`AiAnalysisAnomaly.queue` 只按
+      run_id 查），留着就是谁都取不到的死行；
+    * `AiAnalysisRoundEvent` 是本表**唯一没有外键**的那张子表（见模型 docstring：加了指向
+      run/project 的非空外键会打红 `test_delete_project_cleans_every_project_scoped_table`
+      那条静态护栏）。所以它比上面两张**更危险** —— 漏掉它的后果不是「留下死行」，
+      而是**错数据**：删父行既不报错也不带走它，而 run 的 id 会被后面新建的 run
+      **复用**（SQLite 取「现存最大 + 1」），于是**下一次**运行的逐轮视图会把上一批
+      早已被清理掉的事件行混进来（`round_events.events_for_run` 按 run_id 读，再按
+      `member_index/round/id` 排序）。症状是幽灵行：2026-09-25 的全量测试红过一次，
+      机制正是它（读到了别的运行留下的 `reasoning_tokens=None`）。
+
+    **为什么在这里内联删、而不是逐条调 `round_events.forget_run`**：那个入口自己
+    `db.session.commit()` 并且吞掉异常返回 0，逐条调就等于把「先子后父、同一个事务」这条
+    性质拆散（上一段正是它存在的理由）。它仍然是**测试与工具**用的入口，生产清理路径走
+    的是下面那一句批量 DELETE。
     """
     cutoff = _utcnow() - timedelta(days=retention_days)
     try:
@@ -142,12 +162,18 @@ def cleanup_expired_analysis_runs(retention_days: int = ANALYSIS_CACHE_DAYS):
             AiAnalysisRun.created_at.isnot(None)
         ).filter(AiAnalysisRun.created_at < cutoff)
 
+        # 三张子表都在这里删（顺序上先子后父，且与父行同处这一个事务）。
+        # 前两张有外键、不删会被 FK 顶回来；第三张**没有**外键、不删则不报错 ——
+        # 后果见 docstring（run id 复用会让下一次运行读到这一批的幽灵事件行）。
         children = (
             AiAnalysisTrace.query.filter(
                 AiAnalysisTrace.run_id.in_(expired_run_ids)
             ).delete(synchronize_session=False),
             AiAnalysisAnomaly.query.filter(
                 AiAnalysisAnomaly.run_id.in_(expired_run_ids)
+            ).delete(synchronize_session=False),
+            AiAnalysisRoundEvent.query.filter(
+                AiAnalysisRoundEvent.run_id.in_(expired_run_ids)
             ).delete(synchronize_session=False),
         )
         deleted = (
@@ -159,7 +185,7 @@ def cleanup_expired_analysis_runs(retention_days: int = ANALYSIS_CACHE_DAYS):
         if any(children):
             log_print(
                 f"🧹 随过期分析记录一并清理: {children[0] or 0} 条轮次明细，"
-                f"{children[1] or 0} 条异常",
+                f"{children[1] or 0} 条异常，{children[2] or 0} 条轮次事件",
                 "AI",
             )
         return int(deleted or 0)

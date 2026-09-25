@@ -17,6 +17,21 @@
 打印「清理AI分析缓存失败: (sqlite3.IntegrityError) FOREIGN KEY constraint failed」，
 run / trace / anomaly 一行都没少。
 
+## 第二种缺陷形态：没有外键的那张子表（`ai_analysis_round_event`）
+
+`ai_analysis_trace` / `ai_analysis_anomaly` 漏删会**报错**（FK 顶回来），所以当初漏掉它们
+是立刻看得见的；而 `ai_analysis_round_event` **刻意没有外键**（见模型 docstring），
+漏掉它一声不响 —— 而且后果更重：
+
+* 删父行既不报错、也不带走它，事件行**留成孤儿**；
+* run 的 id 会被后面新建的 run **复用**（SQLite 取「现存最大 + 1」）；
+* 于是**下一次**运行的逐轮视图会把上一批早已被清理掉的事件行混进来
+  （`services/ai/round_events.events_for_run` 只按 `run_id` 读，再按
+  `member_index/round/id` 排序）。
+
+症状是幽灵行而不是垃圾：2026-09-25 的全量测试红过一次，机制正是它
+（`tests/test_ai_usage_input_breakdown.py` 读到了别的运行留下的 `reasoning_tokens=None`）。
+
 ## 断言口径
 
 * 「run 被删了」不够，**子表也必须被删** —— 否则就是换成了留下取不到的死行；
@@ -37,7 +52,12 @@ from sqlalchemy.exc import IntegrityError
 
 from app import app, create_tables, db
 from models import Project
-from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun, AiAnalysisTrace
+from models.ai_analysis import (
+    AiAnalysisAnomaly,
+    AiAnalysisRoundEvent,
+    AiAnalysisRun,
+    AiAnalysisTrace,
+)
 from services.ai_analysis_service import cleanup_expired_analysis_runs
 
 # 离别的用例足够远的窗口（见模块 docstring）
@@ -56,7 +76,7 @@ def _project() -> Project:
     return project
 
 
-def _run(project_id: int, *, age_days: int, with_children: bool = True) -> int:
+def _run(project_id: int, *, age_days: int, with_children: bool = True, events: int = 0) -> int:
     created = datetime.now(timezone.utc) - timedelta(days=age_days)
     run = AiAnalysisRun(
         project_id=project_id,
@@ -81,6 +101,21 @@ def _run(project_id: int, *, age_days: int, with_children: bool = True) -> int:
         db.session.add(
             AiAnalysisAnomaly(run_id=run.id, project_id=project_id, title="异常")
         )
+    # 逐轮事件行：条数由调用方点名（`round` 是成员内序号，同一成员内不许重复）。
+    for round_no in range(1, events + 1):
+        db.session.add(
+            AiAnalysisRoundEvent(
+                run_id=run.id,
+                project_id=project_id,
+                member="S1",
+                member_index=1,
+                member_total=2,
+                round=round_no,
+                status="final",
+                tokens_input=100,
+                tokens_output=20,
+            )
+        )
     db.session.commit()
     return run.id
 
@@ -91,6 +126,12 @@ def _survivors(run_id: int) -> dict:
         "traces": AiAnalysisTrace.query.filter_by(run_id=run_id).count(),
         "anomalies": AiAnalysisAnomaly.query.filter_by(run_id=run_id).count(),
     }
+
+
+def _event_count(run_id: int) -> int:
+    """这条 run 还留着几行逐轮事件（**单独一个读数**，不并进 `_survivors`：
+    那个字典的形状被别的用例按整体比过，加一个键就是改口径）。"""
+    return AiAnalysisRoundEvent.query.filter_by(run_id=run_id).count()
 
 
 def test_the_sweep_deletes_expired_runs_and_their_children():
@@ -114,6 +155,57 @@ def test_the_sweep_deletes_expired_runs_and_their_children():
             "AiAnalysisAnomaly.queue 只按 run_id 查，这些行谁都取不到"
         )
         assert left["anomalies"] == 0, "run 删了但异常条目还在"
+
+
+def test_the_sweep_deletes_expired_round_events_too(monkeypatch):
+    """**核心回归（幽灵行）**：过期 run 的逐轮事件行必须一起走。
+
+    这张子表**没有外键**（见模块 docstring 的第二种缺陷形态与模型 docstring），所以
+    漏删它不报错 —— 后果不是「留下几行垃圾」，而是 run id 被复用之后，**下一次**运行的
+    逐轮视图读到这一批的事件行。
+    """
+    from services.ai import run_cache_source
+
+    # 日志口径也一起钉住。断言挂在 `log_print` 上而不是 `capsys`：日志器在 import 时就
+    # 持有了原始 stdout 的引用，`capsys` 抓不到它写出去的内容（本仓库既有测试记着这条）。
+    messages: list[str] = []
+    monkeypatch.setattr(
+        run_cache_source,
+        "log_print",
+        lambda *args, **kwargs: messages.append(str(args[0] or "")),
+    )
+
+    with app.app_context():
+        create_tables()
+        project = _project()
+        old_run = _run(project.id, age_days=_OLD_AGE_DAYS, events=3)
+        fresh_run = _run(project.id, age_days=1, events=2)
+
+        # 前提守卫：事件行**确实造出来了**。没有这一句，「清理后一条不剩」在「压根没造
+        # 出来」时也是绿的 —— 那这条用例什么也没证明（本仓库的老毛病）。
+        assert _event_count(old_run) == 3, "前提不成立：过期 run 的事件行没造出来，会假绿"
+
+        result = cleanup_expired_analysis_runs(retention_days=_FAR_DAYS)
+
+        assert result is not None, (
+            "清理失败了（返回 None）—— 这几乎总是 FK 约束把整条 DELETE 顶回来了；"
+            "子表必须先删"
+        )
+        assert result >= 1, f"过期 run 没被删掉：返回 {result}"
+        assert _event_count(old_run) == 0, (
+            "run 删了但逐轮事件行还在 —— 这张子表没有外键，删父行既不报错也不带走它；"
+            "run id 会被复用，下一次运行的逐轮视图（round_events.events_for_run 只按 "
+            "run_id 读）会把这些行当成自己的"
+        )
+        # 反向自检放在同一条用例里：免得把「整表清空」写成绿的。
+        assert _event_count(fresh_run) == 2, "窗口内的运行的事件行被一起清掉了"
+        assert _survivors(old_run) == {"runs": 0, "traces": 0, "anomalies": 0}, (
+            "加事件行不该改坏原来那两张子表的删法"
+        )
+        joined = "\n".join(messages)
+        assert "3 条轮次事件" in joined, (
+            f"清理日志没把事件行的条数报出来 —— 出了事没人知道这几行是跟着 run 走的：{joined}"
+        )
 
 
 def test_runs_inside_the_window_survive_with_their_children():

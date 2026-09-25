@@ -868,10 +868,17 @@ def reconcile_interrupted_run(run_id: int) -> dict:
 def forget_run(run_id: int) -> int:
     """删掉这次运行的全部事件行，返回删了几条。**幂等。**
 
-    保留期清理（`services/ai/run_cache_source`）删 run 时会顺手清 trace / anomaly，
-    本表没有外键（见模型 docstring），所以**需要显式调一次**。那一段不在本工作包的
-    文件主权内，所以这里先把入口留好并在报告里点名 —— 没接上的后果不是错数据，而是
-    被清理掉的运行会留下几行事件垃圾。
+    本表**没有外键**（见模型 docstring），删 run 带不走它，所以这条清理必须**显式**做
+    一次。生产路径是 `services/ai/run_cache_source.cleanup_expired_analysis_runs` ——
+    它把本表的批量 DELETE **内联**进那个「先子后父、同一个事务」里，与 trace / anomaly
+    同处一次删除，日志里是「随过期分析记录一并清理: … N 条轮次事件」。
+
+    **为什么那里不逐条调本函数**：本函数自己 `db.session.commit()`、并且吞掉异常返回 0，
+    逐条调就等于把那个事务拆散 —— 而「子表与父行同一个事务」正是「FK 不把整条 DELETE
+    顶回来」的前提（见那个函数的 docstring，那里整段解释了为什么整条 DELETE 会回滚）。
+
+    所以本函数是**测试与工具**用的入口（`tests/test_ai_round_event_ledger.py` 等直接调它
+    清掉某次运行留下的行），不是保留期清理走的那条路。
     """
     try:
         from models import db

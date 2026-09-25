@@ -58,8 +58,11 @@ token 与缓存四列照抄全库同一条口径（见 `services/ai/usage.py`）
 2. 那条护栏守的是真问题（删项目会撞 NOT NULL），但它的解法是「显式清理」，而本表
    真正的清理时机是**保留期清理**（run 被删时它的逐轮事件也该走）。
 
-所以这里只存 id，并在 `services/ai/round_events` 里按 `run_id` 读写；同一次运行的孤儿行
-（run 被保留期清理删掉之后）由 `round_events.forget_run` 显式清。
+所以这里只存 id，并在 `services/ai/round_events` 里按 `run_id` 读写；run 被删时它的逐轮
+事件**必须显式清**（没有外键，删父行带不走它）—— 生产路径是
+`services/ai/run_cache_source.cleanup_expired_analysis_runs`，把这张表并进那个「先子后父、
+同一个事务」的批量删除里（`forget_run` 是测试与工具用的入口）。漏掉的后果不是「几行垃圾」
+而是**错数据**：run 的 id 会被后面新建的 run 复用，下一次运行的逐轮视图会读到这一批的行。
 """
 
 from datetime import datetime, timezone
