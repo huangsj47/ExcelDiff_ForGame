@@ -555,7 +555,10 @@
     </script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/ai-report-markdown.js') }}"></script>
+    <!-- 渲染器的版本查询串：浏览器会缓存这个文件，而它的行为会直接影响**报告读起来
+         是什么样**（2026-09-25 改过段落换行）。没有 `?v=` 时，用户看到的仍是旧渲染，
+         会以为改动没生效 —— CSS 那几行一直是这么做的，这里补齐。 -->
+    <script src="{{ url_for('static', filename='js/ai-report-markdown.js') }}?v=2"></script>
     {% if is_admin() and deployment_mode in ['platform', 'agent'] %}
     <script>
     (function() {
