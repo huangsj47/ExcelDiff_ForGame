@@ -285,6 +285,21 @@ LOGIC_V4 = LOGIC_V3.replace(
 )
 assert LOGIC_V4.count("MANA_FLOOR_RATIO") == 2, "round9 的替换没命中 —— LOGIC_V3 又被改过了？"
 
+# 第十一轮：与 `LOGIC_V4` 同一类整理 —— 把每级 2% 的减免比例也提成常量（第九轮只提了
+# 下限）。**不是修 bug、也不制造 bug。**
+#
+# 为什么还要再来一轮：第九、第十轮的收口验证都撞上了同一个平台 bug（接地那一层漏带
+# `baseline_closures`，见 commit `4e2d04d`）—— 那两轮里模型写没写都看不出来。这一轮跑的
+# 是修好之后的第一次真增量。
+LOGIC_V5 = LOGIC_V4.replace(
+    "\nMANA_FLOOR_RATIO = 0.2\n",
+    "\nMANA_FLOOR_RATIO = 0.2\n\n# 每一级减免的比例。\nMANA_REDUCTION_PER_LEVEL = 0.02\n",
+).replace(
+    "    return max(base_cost * (1 - 0.02 * level), base_cost * MANA_FLOOR_RATIO)",
+    "    return max(base_cost * (1 - MANA_REDUCTION_PER_LEVEL * level), base_cost * MANA_FLOOR_RATIO)",
+)
+assert LOGIC_V5.count("MANA_REDUCTION_PER_LEVEL") == 2, "round11 的替换没命中 —— LOGIC_V4 又被改过了？"
+
 
 # ---------------------------------------------------------------------------
 #  Lua 代码（2026-09-25 加）
@@ -780,9 +795,31 @@ def round10():
                          capture_output=True, text=True).stdout)
 
 
+def round11():
+    """第十一轮：**只改 `src/battle_logic.py`**（单文件、非关键路径）。
+
+    第九、第十轮验收口时撞上了平台自己的 bug（接地那一层漏带 `baseline_closures`，
+    commit `4e2d04d` 已修）—— 那两轮里「模型写没写」根本看不出来，因为写好的也会被
+    扔掉。这一轮是修好之后的第一次真增量，要看两件事：模型写不写、写了的能不能走到
+    报告里。
+
+    改动本身是一处正常的整理：把每级 2% 的减免比例提成命名常量。**不是修 bug、也不
+    制造 bug。**
+
+    为什么还是单文件：见 `BATTLE_LUA_V4` 上面的说明 —— delta/total = 1/4 = 0.25 < 0.30，
+    且路径里没有 `config/`。
+    """
+    (SRC / "src" / "battle_logic.py").write_text(LOGIC_V5, encoding="utf-8")
+    _commit("每级减免比例提成模块常量", "2026-09-25T12:15:00+08:00")
+    _git("push", "-q", "origin", "master")
+    print(subprocess.run(["git", "log", "--oneline", "-1"], cwd=str(SRC),
+                         capture_output=True, text=True).stdout)
+
+
 
 if __name__ == "__main__":
     {"build": build, "round2": round2, "round3": round3, "round4": round4,
      "round5": round5, "round6": round6, "round7": round7,
      "round8": round8, "round9": round9,
-     "round10": round10}[sys.argv[1] if len(sys.argv) > 1 else "build"]()
+     "round10": round10,
+     "round11": round11}[sys.argv[1] if len(sys.argv) > 1 else "build"]()
