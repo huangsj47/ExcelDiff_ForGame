@@ -161,7 +161,9 @@ def test_round2_still_adds_the_two_rows_it_is_meant_to_add(monkeypatch, tmp_path
     )
 
 
-@pytest.mark.parametrize("name", ["build", "round2", "round3", "round4", "round5"])
+@pytest.mark.parametrize(
+    "name", ["build", "round2", "round3", "round4", "round5", "round6"]
+)
 def test_every_entry_point_is_still_callable(name):
     """各入口都得在（`__main__` 那张分发表按名字取用）。"""
     assert callable(getattr(mf, name))

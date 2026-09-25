@@ -246,6 +246,27 @@ def cooldown_seconds(raw):
     return raw // 1000
 '''
 
+# 第六轮：把蓝耗减免的**上限**从「跳回原价」改成「收敛到下限」。
+#
+# 50 级那一段原先直接返回 `base_cost`，曲线是断的；这一版让它在线性减免算出的值低于
+# 下限（原价的 20%）时钳到下限 —— 等级越高越省，但不会在 51 级突然翻五倍。50 这个
+# 上限口径保留：上一轮报告的争议点是「50 是不是设计上限」，这里只修曲线的连续性。
+#
+# **下限写成字面量，不新加模块常量**：`LOGIC_V1/V2` 是已经 push 出去的历史，改它们会
+# 换掉**每一条**提交的哈希（见 `_XLSX_STAMP` 那一段的同一类理由）；所以这一版必须自洽，
+# 不能引用一个只存在于新代码里的名字。
+LOGIC_V3 = LOGIC_V2.replace(
+    "    # 等级上限 50，超过之后不再减免 —— 这是**有意**的，不是漏判\n"
+    "    if skill_level > 50:\n"
+    "        return float(base_cost)\n"
+    "    return base_cost * (1 - 0.02 * skill_level)",
+    "    # 等级上限 50，超过之后不再继续减免 —— 这是**有意**的。\n"
+    "    # 减免到下限（原价的 20%）就钳住，不再像以前那样在 51 级跳回原价。\n"
+    "    level = min(skill_level, 50)\n"
+    "    return max(base_cost * (1 - 0.02 * level), base_cost * 0.2)",
+)
+assert LOGIC_V3 != LOGIC_V2, "round6 的替换没命中 —— LOGIC_V2 又被改过了？"
+
 
 # ---------------------------------------------------------------------------
 #  Lua 代码（2026-09-25 加）
@@ -547,6 +568,23 @@ def round5():
                          capture_output=True, text=True).stdout)
 
 
+def round6():
+    """第六轮：再一笔**单文件、非关键路径**的改动（`src/battle_logic.py`），跑增量。
+
+    改的内容对着前两轮报告里那条「上次遗留（仍成立）」的蓝耗曲线：`> 50` 时直接跳回
+    全额，于是 50 级近乎不耗蓝、51 级突然恢复原价。这一版把它改成**收敛到设计下限**，
+    而不是跳回原价 —— 也就是上一轮报告自己在「缓解」里写的那条做法。
+
+    为什么还是单文件：与 `round5` 同一条理由（见 `BATTLE_LUA_V4` 上面的说明）——
+    delta 得小且不在关键路径上，否则 `_decide_scope` 会把它升格成全量。
+    """
+    (SRC / "src" / "battle_logic.py").write_text(LOGIC_V3, encoding="utf-8")
+    _commit("蓝耗减免改成收敛到下限，不再跳回原价", "2026-09-25T10:30:00+08:00")
+    _git("push", "-q", "origin", "master")
+    print(subprocess.run(["git", "log", "--oneline", "-1"], cwd=str(SRC),
+                         capture_output=True, text=True).stdout)
+
+
 if __name__ == "__main__":
     {"build": build, "round2": round2, "round3": round3, "round4": round4,
-     "round5": round5}[sys.argv[1] if len(sys.argv) > 1 else "build"]()
+     "round5": round5, "round6": round6}[sys.argv[1] if len(sys.argv) > 1 else "build"]()
