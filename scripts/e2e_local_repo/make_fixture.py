@@ -27,6 +27,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -87,10 +88,63 @@ def _battle_lua():
 #  Excel
 # ---------------------------------------------------------------------------
 
-def _write_items(rows, *, extra_header_rows=0):
-    """物品表：表头第 1 行。"""
+# 造数必须**逐字节可复现** —— 同一个 `build()` 跑两次要给出同一批提交哈希。
+#
+# 这条不是洁癖：平台里记的是**提交哈希**（`Repository.last_synced_tip`、`ai_analysis_run`
+# 的基线、`commits_log` 的每一行）。造数只要每次重来都换一批哈希，重建一次就会让平台
+# 已记录的那些身份**全部失效**，而症状是「同步成功、增量分析却对不上」这类看不出因果的怪事。
+#
+# 实测踩到过：连着两次 `build()` 给出的 c3 是 `2caae19` 与 `1d219e0`，差别只在
+# openpyxl 写进 `docProps/core.xml` 的 `dcterms:created/modified`（它默认取**当下时刻**）。
+# 那份时间戳落在 xlsx 字节里 → blob 变了 → 从 c1 起每一条提交的哈希全变。
+_XLSX_STAMP = datetime(2026, 9, 1, 0, 0, 0)
+# zip 条目头里的写入时刻（zip 能表示的最早时刻）。它同样落在文件字节里，所以也要钉死。
+_ZIP_STAMP = (1980, 1, 1, 0, 0, 0)
+
+
+def _new_workbook():
+    """建一个**时间戳固定**的工作簿（理由见 `_XLSX_STAMP`）。"""
     from openpyxl import Workbook
     wb = Workbook()
+    wb.properties.created = _XLSX_STAMP
+    wb.properties.modified = _XLSX_STAMP
+    return wb
+
+
+def _save_workbook(workbook, path):
+    """把工作簿写进 `path`，并**抹掉所有随时间变化的字节**。
+
+    不能用 `workbook.save()`。它底下是 `openpyxl.writer.excel.save_workbook`，那里有一行
+    `workbook.properties.modified = datetime.datetime.utcnow()` —— **无条件覆写**刚设好的
+    值（`created` 不覆写，所以只改 `created` 会以为已经修好了）；而 zip 的每个条目头
+    又各带一个写入时刻。两处都在文件字节里，git 认的就是字节。
+
+    所以这里自己写：内容走 `ExcelWriter.write_data()`（它照 `workbook.properties` 写，
+    不覆写时间戳），条目按文件名排序、时间戳钉成 `_ZIP_STAMP`，字节就完全确定了。
+    """
+    import io
+    import zipfile
+
+    from openpyxl.writer.excel import ExcelWriter
+
+    workbook.properties.modified = _XLSX_STAMP
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        ExcelWriter(workbook, archive).write_data()
+    buffer.seek(0)
+    with zipfile.ZipFile(buffer) as source, zipfile.ZipFile(
+        path, "w", zipfile.ZIP_DEFLATED
+    ) as target:
+        for item in sorted(source.infolist(), key=lambda entry: entry.filename):
+            info = zipfile.ZipInfo(item.filename, date_time=_ZIP_STAMP)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = item.external_attr
+            target.writestr(info, source.read(item.filename))
+
+
+def _write_items(rows, *, extra_header_rows=0):
+    """物品表：表头第 1 行。"""
+    wb = _new_workbook()
     ws = wb.active
     ws.title = "物品"
     for _ in range(extra_header_rows):
@@ -103,8 +157,7 @@ def _write_items(rows, *, extra_header_rows=0):
 
 def _write_skills(rows):
     """技能表：**表头在第 3 行**，上面两行是标题与说明（特殊表头）。"""
-    from openpyxl import Workbook
-    wb = Workbook()
+    wb = _new_workbook()
     ws = wb.active
     ws.title = "技能"
     ws.append(["技能配置表"])
@@ -376,8 +429,8 @@ def build():
     (SRC / "code" / "qz_server" / "src" / "battle").mkdir(parents=True)
 
     # ── c1：初始导入 ────────────────────────────────────────────────
-    _write_items(ITEMS_V1).save(SRC / "config" / "物品表.xlsx")
-    _write_skills(SKILLS_V1).save(SRC / "config" / "技能表.xlsx")
+    _save_workbook(_write_items(ITEMS_V1), SRC / "config" / "物品表.xlsx")
+    _save_workbook(_write_skills(SKILLS_V1), SRC / "config" / "技能表.xlsx")
     (SRC / "src" / "battle_logic.py").write_text(LOGIC_V1, encoding="utf-8")
     _battle_lua().write_text(BATTLE_LUA_V1, encoding="utf-8")
     _commit("初始导入配表与战斗逻辑", "2026-09-15T10:00:00+08:00")
@@ -385,13 +438,14 @@ def build():
     # ── c2：一次正常的改动 ─────────────────────────────────────────
     # 这一版就是 `ITEMS_AT_BUILD_TIP`（第三轮以它为基，别在这里现写一份 —— 两处各写
     # 一份的话，c2 改了而 round3 没跟着改，round3 的「干净小 delta」就又脏了）。
-    _write_items(ITEMS_AT_BUILD_TIP).save(SRC / "config" / "物品表.xlsx")
+    _save_workbook(_write_items(ITEMS_AT_BUILD_TIP), SRC / "config" / "物品表.xlsx")
     (SRC / "src" / "battle_logic.py").write_text(
         LOGIC_V1.replace("def calc_damage", "def calc_damage_v1"), encoding="utf-8")
     _commit("回城卷轴降价，伤害函数改名", "2026-09-18T14:00:00+08:00")
 
     # ── c3：全量分析的「当前版本」 ─────────────────────────────────
-    _write_skills(SKILLS_V1 + [[2004, "陨石术", 20000, 500, "范围"]]).save(SRC / "config" / "技能表.xlsx")
+    _save_workbook(_write_skills(SKILLS_V1 + [[2004, "陨石术", 20000, 500, "范围"]]),
+                   SRC / "config" / "技能表.xlsx")
     (SRC / "src" / "battle_logic.py").write_text(LOGIC_V2, encoding="utf-8")
     _battle_lua().write_text(BATTLE_LUA_V2, encoding="utf-8")
     _commit("新增陨石术，蓝耗加上等级上限", "2026-09-20T11:00:00+08:00")
@@ -404,10 +458,10 @@ def build():
 
 def round2():
     """第二轮：三件改动，其中一件是**回填日期**的。"""
-    _write_items(ITEMS_V2).save(SRC / "config" / "物品表.xlsx")
+    _save_workbook(_write_items(ITEMS_V2), SRC / "config" / "物品表.xlsx")
     _commit("初级药水涨价，新增高级药水与秘银剑", "2026-09-22T10:00:00+08:00")
 
-    _write_skills(SKILLS_V2).save(SRC / "config" / "技能表.xlsx")
+    _save_workbook(_write_skills(SKILLS_V2), SRC / "config" / "技能表.xlsx")
     # ★ 回填：日期比上一条更早，推送却在之后 —— 老口径的 `--since` 会被它整个停住
     _commit("技能表补录陨石术备注", "2026-09-19T09:00:00+08:00")
 
@@ -446,7 +500,7 @@ def round3():
     for row in items:
         if row[0] == 1003:
             row[3] = 260
-    _write_items(items).save(SRC / "config" / "物品表.xlsx")
+    _save_workbook(_write_items(items), SRC / "config" / "物品表.xlsx")
     _commit("铁剑涨价到 260", "2026-09-23T09:00:00+08:00")
     _git("push", "-q", "origin", "master")
     print(subprocess.run(["git", "log", "--oneline", "-1"], cwd=str(SRC),
@@ -468,7 +522,7 @@ def round4():
     for row in items:
         if row[0] == 1002:
             row[3] = 175
-    _write_items(items).save(SRC / "config" / "物品表.xlsx")
+    _save_workbook(_write_items(items), SRC / "config" / "物品表.xlsx")
     _commit("中级药水涨价到 175", "2026-09-24T10:00:00+08:00")
 
     _battle_lua().write_text(BATTLE_LUA_V3, encoding="utf-8")

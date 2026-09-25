@@ -165,3 +165,37 @@ def test_round2_still_adds_the_two_rows_it_is_meant_to_add(monkeypatch, tmp_path
 def test_every_entry_point_is_still_callable(name):
     """各入口都得在（`__main__` 那张分发表按名字取用）。"""
     assert callable(getattr(mf, name))
+
+
+def test_building_twice_gives_the_same_commits(monkeypatch, tmp_path):
+    """`build()` 必须**逐字节可复现**：同一个脚本跑两次要给同一批提交哈希。
+
+    ## 为什么这是判据而不是洁癖
+
+    平台里记的全是**提交哈希**：`Repository.last_synced_tip`、`ai_analysis_run` 的做差基线、
+    `commits_log` 的每一行。造数只要每次重来都换一批哈希，重建一次就让这些身份**全部失效**
+    —— 而症状是「同步成功，增量分析却对不上」这类看不出因果的怪事（实测踩到过：连跑两次
+    `build()` 给出 c3 = `2caae19` 与 `1d219e0`）。
+
+    起因是 openpyxl 把**当下时刻**写进 xlsx 字节：`docProps/core.xml` 的
+    `dcterms:created/modified`，以及 zip 每个条目头的写入时刻。三处都在文件字节里，
+    而 git 认的就是字节 —— 一个字节变，从引入该文件的那个提交起，后面**每一条**提交的哈希全变。
+
+    ## 判据为什么是「两次跑出来的哈希列表相等」
+
+    只断言「两个 xlsx 内容一样」不够：读回来是一样的表，字节可以不同（时间戳正是这样，
+    它是元数据不是单元格）。要钉的恰恰是**字节**，所以比的是 git 自己算出来的哈希。
+    """
+    src = _isolate(monkeypatch, tmp_path)
+
+    mf.build()
+    first = _git(src, "rev-list", "master").stdout.split()
+    mf.build()
+    second = _git(src, "rev-list", "master").stdout.split()
+
+    assert len(first) == 3, first
+    assert first == second, (
+        "同一个 build() 跑两次给出了不同的提交哈希 —— 造数不可复现，"
+        "平台里已记录的那些身份（tip / 基线 / commits_log）重建一次就全废了。"
+        "最先要查的是 xlsx 字节里随时间变化的东西（openpyxl 的时间戳、zip 条目时间）。"
+    )
