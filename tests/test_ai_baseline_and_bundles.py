@@ -189,13 +189,19 @@ def test_the_digest_is_deterministic():
 
 
 def test_the_header_tells_the_model_not_to_re_report():
-    """「不要重复报」这条必须写在提示词里，而不只存在于代码注释里。
+    """这条口径必须写在提示词里，而不只存在于代码注释里。
 
-    模型看不到它，就会把上一轮的七八条再报一遍 —— 基线反而让报告更长。
+    2026-09-25 口径翻向：原来是「不要重复报」（增量报告的年代），现在是
+    「**不要当成新发现，但必须逐条写进「风险评估」**」—— 产品要求那一节覆盖当前仍成立
+    的全部问题。两句话都要在：少了前半句，上一轮的七八条会被当成新发现再报一遍；
+    少了后半句，它们会从正文里整个消失（只剩平台那一节在记数）。
     """
     text = build_baseline_digest(classify([_finding("a" * 8)]))
-    assert "不要当作新发现重复报" in text
+    assert "不要再当成「本轮新发现」" in text
+    assert "必须出现在「风险评估」" in text
     assert "仍成立 / 已修复 / 已被推翻" in text
+    # 旧结论本轮没被重新取证 —— 不许替它编证据（假事实比缺信息严重得多）
+    assert "不要为它补写证据" in text
 
 
 def test_an_empty_baseline_states_that_this_is_the_first_run():

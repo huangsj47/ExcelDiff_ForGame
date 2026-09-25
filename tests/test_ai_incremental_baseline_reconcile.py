@@ -113,11 +113,17 @@ def test_the_section_is_usable_on_its_own():
 
     assert "共 3 条" in section, "开头没有给出这一节的规模"
     assert "2 条仍成立" in section and "1 条需要重新确认" in section, section
-    assert "两处不一致时以本节为准" in section, (
-        "没有说清它与正文里模型那一节的分工 —— 两节并排时读者不知道信哪份"
+    # 2026-09-25：这一节的角色反转了 —— 逐条清单归正文的「风险评估」（产品要求那一节
+    # 覆盖当前仍成立的全部问题），本节退回「账」，分工必须写明。
+    assert "逐条清单以正文的「风险评估」为准" in section, (
+        "没有说清它与正文那一节的分工 —— 两份并排时读者不知道信哪份"
     )
-    assert "严重度 严重" in section, "每一条没有等级，14 条读下来分不出先后"
-    assert "严重度 高" in section
+    # 「要人工去看」的那一类仍然逐条：需要重新确认的那 1 条要认得出是它、也要有等级。
+    assert "### 需要重新确认 1 条" in section, section
+    assert "old-changed-missing" in section and "严重度 高" in section
+    # 其余（仍成立 / 本轮重新确认）只报数：它们会在正文的风险评估里逐条出现，
+    # 本节再列一遍就是同一批标题的第二份（run 63 那个毛病换了个方向）。
+    assert "old-untouched" not in section and "old-also-untouched" not in section, section
 
 
 def test_reconcile_is_a_noop_without_a_previous_baseline():

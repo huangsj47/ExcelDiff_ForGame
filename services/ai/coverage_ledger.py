@@ -744,8 +744,8 @@ def _findings_row(findings: Mapping[str, Any]) -> Optional[tuple[str, str]]:
     retracted = _count(findings.get("retracted")) or 0
     value = (
         f"本轮新增 {_num(current)} 条 + 基线继承 {_num(inherited)} 条 = 在挂 {_num(total)} 条"
-        "（**报告正文只写本轮那几条**，所以正文的条数比清单少是正常的；两处不一致时以"
-        "这一行为准）"
+        "（**正文的「风险评估」应当覆盖全部在挂条目**：本轮新报的与上一轮继承下来、仍然"
+        "成立的都要写。正文条数明显少于这一行就是正文没写全，以这一行为准）"
     )
     if retracted:
         value += f"；另有 {retracted} 条已按复核裁决撤销（仍留在审计轨迹里）"

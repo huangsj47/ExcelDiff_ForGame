@@ -374,13 +374,13 @@ def test_later_rounds_remind_instead_of_resending_the_baseline():
 
     assert "#12345678" not in message, "整份基线被重发了，白花 6,000 字符"
     assert "【道具】ID 被删除" not in message
-    assert "不要把它里面的问题当作" in message, "提醒也没了：模型会开始重复报"
-    assert "已修复" in message and "已被推翻" in message, "没说要标注状态"
+    assert "不要把它当成「本轮新发现」" in message, "提醒也没了：模型会开始重复报"
+    assert "逐条带上" in message, "没说旧结论要进风险评估（那一条会从正文里消失）"
 
 
 def test_later_rounds_stay_silent_about_the_baseline_when_there_is_none():
     message = _message(round_index=2, baseline_digest="")
-    assert "不要把它里面的问题当作" not in message
+    assert "不要把它当成「本轮新发现」" not in message
 
 
 def test_a_whitespace_only_baseline_counts_as_no_baseline():

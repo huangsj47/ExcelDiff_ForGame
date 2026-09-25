@@ -916,7 +916,10 @@ def test_the_findings_row_splits_this_round_from_the_inherited_ones():
     )
     row = _rows_of(ledger)["结论（本轮 / 继承）"]
     assert "本轮新增 13 条 + 基线继承 37 条 = 在挂 50 条" in row, row
-    assert "报告正文只写本轮那几条" in row
+    # 2026-09-25：口径翻向 —— 正文的风险评估**应当**覆盖全部在挂条目（本轮新增 +
+    # 上次遗留仍成立），少了就是正文没写全。原来这里写的是「正文只写本轮那几条」，
+    # 那是旧口径（增量报告），也正是产品这次要改掉的那一条。
+    assert "正文的「风险评估」应当覆盖全部在挂条目" in row, row
     assert "另有 1 条已按复核裁决撤销" in row
 
 

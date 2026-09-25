@@ -1433,7 +1433,8 @@ def test_the_second_run_carries_the_first_runs_findings_as_a_baseline(monkeypatc
         user = second_client.calls[0][-1]["content"]
         assert "已经报过的问题" in user, "第二次分析没有带上历史结论"
         assert "【道具】删除了已放出的 ID" in user, "上一轮报过的那条没进基线"
-        assert "不要当作新发现重复报" in user
+        assert "不要再当成「本轮新发现」" in user, "旧结论不许当新发现报"
+        assert "必须出现在「风险评估」" in user, "旧结论还要逐条进正文那一节"
         # 判重靠指纹，指纹得跟着进提示词，模型才能逐条对照。
         assert "#" in user
 

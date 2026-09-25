@@ -155,15 +155,21 @@ def _semantic_match(old: Mapping, current: Mapping) -> float:
 
 
 def _report_section(groups: Mapping[str, list[dict]], previous_run_id: int) -> str:
-    """「历史结论延续（平台）」这一节。
+    """「历史结论延续（平台）」这一节 —— **2026-09-25 起它是「账」，不是清单**。
 
-    ## 与正文里那一节的分工（2026-09-24，run 63）
+    ## 角色反转过一次（run 63 → 本次）
 
-    `skills/version-diff-review/SKILL.md` 要求模型自己在正文里写一节「历史结论状态」
-    （它对这些旧结论的**逐条处置意见**）。本节是平台按指纹做的**确定性清单** ——
-    两份都在同一份报告里，而 run 63 的实测是：两份各列一遍同一批 15 条标题，读者看不出
-    哪一份算数。所以开头明写分工与谁为准；每一条另给出**严重度**（从前只有标题与文件，
-    14 条读下来分不出先后）。
+    2026-09-24（run 63）这一节被做成**确定性清单**，理由是：模型自己在正文里写一节
+    「历史结论状态」、平台再列一遍同一批 15 条标题，读者看不出哪一份算数。那时的分工是
+    「本节为准」。
+
+    现在产品要求**正文的「风险评估」承担当前仍成立的全部问题**（本轮新增 + 上次遗留仍然
+    成立的），于是这里再当一次清单就成了同一批标题的第二份 —— 正是 run 63 那个毛病换个
+    方向再来一遍。所以它退回「账」：**总数与分组计数 + 「需要重新确认」那几条逐条**
+    （那几条要人真的去看），其余（仍成立 / 本轮重新确认）只报数。
+    全量的结构化清单在报告末尾「异常清单（平台按门槛过滤后）」那张表里
+    （`report_document` 渲染 `anomalies`，那个集合按契约就是当前仍成立的全集），
+    不必靠这一节传。
 
     「只有结构化反证才能关闭」这句仍然在：旧结论不能因为模型没重复输出就当已修复。
     """
@@ -183,15 +189,14 @@ def _report_section(groups: Mapping[str, list[dict]], previous_run_id: int) -> s
         f"合并，共 {total} 条：{counts}。"
         "旧结论不能因为模型没有重复输出就视为已修复；只有结构化反证才能关闭。",
         "",
-        "正文里模型自己写的「历史结论状态」是它对这些旧结论的处置意见；"
-        "**本节是平台的确定性清单，两处不一致时以本节为准**。",
+        "**逐条清单以正文的「风险评估」为准**（那一节是当前仍成立的问题全集）。"
+        "本节只记数，并列出**需要重新确认**的那几条；全量的结构化清单在末尾的"
+        "「异常清单（平台按门槛过滤后）」里。",
     ]
-    for state, label in labels:
-        items = groups[state]
-        if not items:
-            continue
-        lines.extend(("", f"### {label} {len(items)} 条", ""))
-        lines.extend(_line(item) for item in items)
+    recheck = groups[STATE_RECHECK]
+    if recheck:
+        lines.extend(("", f"### 需要重新确认 {len(recheck)} 条", ""))
+        lines.extend(_line(item) for item in recheck)
     return "\n".join(lines).rstrip() + "\n"
 
 
