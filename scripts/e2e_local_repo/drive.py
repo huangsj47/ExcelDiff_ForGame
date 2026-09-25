@@ -10,6 +10,7 @@ token 从 `.env` 的 `ADMIN_API_TOKEN` 读，**只进请求头，不落盘、不
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -19,8 +20,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE = "http://127.0.0.1:8002"
-PROJECT_ID = 2
-SRC_REPO = (Path(__file__).resolve().parent / "origin.git").as_posix()
+
+# 目标项目与仓库名都可以从环境变量给（默认仍是历史那份 id=2 的联调项目）。
+# **必须能改**：这一整套是对着「一个项目 + 它名下的仓库」跑的，而要验的东西
+# （全量/增量、配表+lua 的输入集）常常要在**另一个干净项目**上重跑一遍 ——
+# 把 id 写死在源码里，那些场景就只能靠改文件，改完忘了改回来是最难查的一类事故。
+PROJECT_ID = int(os.environ.get("E2E_PROJECT_ID") or 2)
+REPO_NAME = os.environ.get("E2E_REPO_NAME") or "e2e_synctest"
+CONFIG_NAME = os.environ.get("E2E_CONFIG_NAME") or "e2e 全量/增量验证"
+
+# 裸库的位置跟着 `E2E_FIXTURE_DIR` 走（与 make_fixture 同一把尺子）：
+# 平台会对这个 url `git fetch`，指错目录就是「同步得到的是别人那份数据」。
+_FIXTURE_DIR = os.environ.get("E2E_FIXTURE_DIR") or "e2e"
+SRC_REPO = (ROOT / ".pytest_tmp" / _FIXTURE_DIR / "origin.git").as_posix()
 
 
 def _token() -> str:
@@ -63,7 +75,7 @@ def create_repo():
     # 不传 current_date → start_date 为 NULL → 首次同步走全量采集。
     status, body = call("POST", "/repositories/git", form={
         "project_id": PROJECT_ID,
-        "name": "e2e_synctest",
+        "name": REPO_NAME,
         "category": "e2e",
         "url": SRC_REPO,
         "server_url": SRC_REPO,
@@ -81,7 +93,7 @@ def manual_sync(repo_id):
 
 def create_config(repo_id):
     status, body = call("POST", f"/projects/{PROJECT_ID}/weekly-version-config/api", payload={
-        "name": "e2e 全量/增量验证",
+        "name": CONFIG_NAME,
         "description": "本地造的少量 git 测试数据（见 .pytest_tmp/e2e/make_fixture.py）",
         "repository_id": repo_id,
         "branch": "master",
@@ -112,6 +124,20 @@ def set_window(config_id, start, end):
     """
     status, body = call("PUT", f"/projects/{PROJECT_ID}/weekly-version-config/api/{config_id}",
                         payload={"start_time": start, "end_time": end})
+    _show(status, body)
+
+
+def set_token_budget(value):
+    """项目档的**分析用量预算**（token）。
+
+    与 `set_budget` 那个 `prompt_char_budget` 不是一回事：后者是单次运行的上下文预算，
+    这个才是「本月用满就不再分析」的那一档（`models/ai_analysis/project_config.py`
+    的 `budget_token_limit`，默认 100,000,000）。要跑两轮真分析就先确认它够 ——
+    用满的表现是**静默跳过**后续几档（报告里只会少掉复核轮，不会报错）。
+    """
+    status, body = call("POST", f"/ai-analysis/projects/{PROJECT_ID}/config",
+                        payload={"budget_token_limit": int(value),
+                                 "budget_period": "monthly"})
     _show(status, body)
 
 
@@ -153,6 +179,8 @@ if __name__ == "__main__":
         analyze(int(rest[0]), "incremental")
     elif cmd == "window":
         set_window(int(rest[0]), rest[1], rest[2])
+    elif cmd == "token-budget":
+        set_token_budget(rest[0])
     elif cmd == "budget":
         set_budget(rest[0])
     elif cmd == "restore-config":

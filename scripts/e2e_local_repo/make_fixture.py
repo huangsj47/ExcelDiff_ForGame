@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""造一份「少量」的本地 git 测试数据：小的 Excel 配表 + 一个小的代码模块。
+"""造一份「少量」的本地 git 测试数据：小的 Excel 配表 + 一个小的代码模块（py 与 lua）。
 
 设计意图（每一条都对应一个要验的判据）：
 
@@ -9,10 +9,16 @@
 * `src/battle_logic.py` —— 代码正文那条路（`AI 读代码正文的两条来源`）。里面埋**一个真
   问题**与**一个看起来像 bug 的有意设计**（`min_severity/min_confidence=high` 的配置下
   既要报得出来、又不能报错），与 tests/test_ai_live_endpoint.py 的双向检查同一手法。
+* `code/qz_server/src/battle/BattleMgr.lua` —— 2026-09-25 加，**同一个口径的第二份**。
+  `.py` 那条路绕开了两样只有 lua 才碰得到的东西：方案里的 lua 提取、以及 `code/` 这个
+  路径前缀（平台按前缀判资源类型）；用 `.py` 验过的结论不能直接当成「lua 也这样」。
 
 第二轮的提交里有一个是**回填日期**的（`GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` 设成比
 上一个提交更早），专治 `commit-dates-are-backfilled` 那条：老口径 `git log --since`
 遇到这种 tip 会停住整个遍历。
+
+**工作目录可用 `E2E_FIXTURE_DIR` 换**（默认 `e2e`）：同一台机器上要同时留两份互不干扰
+的联调数据时用得上（老项目的仓库 url 指着默认那份，重建它会把老项目正在用的裸库删掉）。
 """
 from __future__ import annotations
 
@@ -26,7 +32,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 # 生成物（裸库 + 工作副本）落在 .pytest_tmp 下 —— 它已在 .gitignore 里，
 # 进库的只有这几个脚本。
-BASE = ROOT / ".pytest_tmp" / "e2e"
+#
+# 2026-09-25：目录名可用 `E2E_FIXTURE_DIR` 换掉。**原因是同一台机器上可能同时需要
+# 两份互不干扰的联调数据**：一份是平台里已经注册过的老项目（它的仓库 url 指着
+# `.pytest_tmp/e2e/origin.git`），另一份是给新项目用的干净数据。落在同一个目录里的话，
+# 重建 A 的那一下会把 B 正在用的裸库删掉——而 B 那边看到的是「同步失败」，不是
+# 「仓库没了」。
+BASE = ROOT / ".pytest_tmp" / (os.environ.get("E2E_FIXTURE_DIR") or "e2e")
 SRC = BASE / "gitsrc"
 ORIGIN = BASE / "origin.git"
 
@@ -64,6 +76,11 @@ def _git(*args, env_extra=None, cwd=None):
 def _commit(message, when):
     _git("add", "-A")
     _git("commit", "-m", message, env_extra={"GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when})
+
+
+def _battle_lua():
+    """lua 那份被改动文件的路径，只写一处 —— 三处各拼一遍迟早会分叉。"""
+    return SRC / "code" / "qz_server" / "src" / "battle" / "BattleMgr.lua"
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +194,159 @@ def cooldown_seconds(raw):
 '''
 
 
+# ---------------------------------------------------------------------------
+#  Lua 代码（2026-09-25 加）
+# ---------------------------------------------------------------------------
+# 为什么要加：这个仓库的真实被测数据是**配表 + lua 代码**两只脚，而造数原先只有 xlsx
+# 与一个 `.py`。`.py` 走的是「代码正文」那条路没错，但它同时绕开了两样只有 lua 才会
+# 碰到的东西：**方案里的 lua 提取**与**`code/` 这个目录前缀**（平台按路径前缀判资源
+# 类型）。用 `.py` 验过的结论，不能直接当成「lua 也这样」。
+#
+# 埋的东西与 `LOGIC_V1/V2` 同一套口径：**一个真问题** + **一个看起来像 bug 的有意设计**。
+#   * 真问题：`can_join_team` 的成员上限校验被删掉（注释还写着「校验移到客户端」）——
+#     服务端不再拦，越权加队；
+#   * 有意设计：`mana_cost` 里 `level > 50` 之后不再减免（注释写明是有意的）。
+# v1 → v2 的 diff 就是「当前版本」那次全量分析要看的东西。
+BATTLE_LUA_V1 = """-- 战斗管理：伤害结算与队伍校验
+local BattleMgr = {}
+
+local MAX_TEAM_MEMBER = 5
+
+function BattleMgr.calc_damage(base, attack, defense)
+    local raw = base + attack - defense
+    if raw < 1 then
+        raw = 1
+    end
+    return raw
+end
+
+function BattleMgr.mana_cost(level, base_cost)
+    return base_cost * (1 - 0.02 * level)
+end
+
+function BattleMgr.can_join_team(team, player_id)
+    if #team.members >= MAX_TEAM_MEMBER then
+        return false
+    end
+    return true
+end
+
+return BattleMgr
+"""
+
+BATTLE_LUA_V2 = """-- 战斗管理：伤害结算与队伍校验
+local BattleMgr = {}
+
+-- 队伍成员上限改成由客户端与匹配服一起保证，服务端不再单独拦
+function BattleMgr.calc_damage(base, attack, defense)
+    local raw = base + attack - defense
+    if raw < 1 then
+        raw = 1
+    end
+    return raw
+end
+
+function BattleMgr.mana_cost(level, base_cost)
+    -- 等级上限 50，超过之后不再减免 —— 这是**有意**的，不是漏判
+    if level > 50 then
+        return base_cost
+    end
+    return base_cost * (1 - 0.02 * level)
+end
+
+function BattleMgr.can_join_team(team, player_id)
+    return true
+end
+
+return BattleMgr
+"""
+
+
+# 第四轮：`can_join_team` 从「一律放行」变成「按调用方给的上限兜底一次」。
+#
+# **这一笔必须真的改到行为**，不能只是一行注释：`round4` 的用途是「两笔提交各对应哪条
+# 结论」，其中一笔若只是补注释，增量分析里就只剩一笔真改动，「归因到哪一笔」这件事
+# 根本验不到（而且提交信息会与改动不符 —— 信息说改了上限归属，diff 里只有一行注释，
+# 读报告的人分不清「模型看错了」还是「造数造歪了」）。
+#
+# 埋的点：`if not limit then return true end` —— **fail-open**。调用方忘记传上限时校验
+# 静默消失，而提交信息说的正是「改由客户端与匹配服保证」。它与 `mana_cost` 那个
+# 「看起来像 bug 的有意设计」相反：这是真问题，且这一轮才引入（上一轮是「一律返回 true」，
+# 也是问题，所以增量报告应当把它写成「上次遗留、仍然成立」而不是「本次新增」）。
+BATTLE_LUA_V3 = """-- 战斗管理：伤害结算与队伍校验
+local BattleMgr = {}
+
+function BattleMgr.calc_damage(base, attack, defense)
+    local raw = base + attack - defense
+    if raw < 1 then
+        raw = 1
+    end
+    return raw
+end
+
+function BattleMgr.mana_cost(level, base_cost)
+    -- 等级上限 50，超过之后不再减免 —— 这是**有意**的，不是漏判
+    if level > 50 then
+        return base_cost
+    end
+    return base_cost * (1 - 0.02 * level)
+end
+
+-- 队伍成员上限改由客户端与匹配服一起保证：服务端不再自己定常量，
+-- 只按调用方（战斗服）传进来的 limit 兜底一次。
+function BattleMgr.can_join_team(team, player_id, limit)
+    if not limit then
+        return true
+    end
+    return #team.members < limit
+end
+
+return BattleMgr
+"""
+
+
+# 第五轮：**只改这一个文件、只改这一处行为** —— 把 round4 的 fail-open 堵掉。
+#
+# 为什么要单独一轮、而且只动一个文件：增量分析这条路**要求 delta 小且不在关键路径上**
+# （`scope_sampling._decide_scope`：`delta_count >= 50`、`delta/total >= 0.30`、
+# 命中关键路径，三条各能把增量升格成全量）。而这个造数只有 4 个受跟踪文件、其中两个在
+# `config/` 下 —— 任何一次「配表 + 代码」的改动都必然升格成**全量**（实测 job 42：
+# 2/4 = 0.50 触发 `delta_ratio_high`）。所以「增量能不能跑起来」这件事，只有拿
+# **单文件、非关键路径**的 delta 才验得到。
+#
+# 改的内容对着上一轮报告里那条「上次遗留（仍成立）」：服务端不传上限时直接放行。
+# 这一版补回服务端自己的兜底常量 —— 于是下一轮的增量报告要回答「那条旧结论现在还算不算数」。
+BATTLE_LUA_V4 = """-- 战斗管理：伤害结算与队伍校验
+local BattleMgr = {}
+
+-- 调用方没传上限时用这个兜底：服务端不能完全不设防。
+local DEFAULT_TEAM_MEMBER_LIMIT = 5
+
+function BattleMgr.calc_damage(base, attack, defense)
+    local raw = base + attack - defense
+    if raw < 1 then
+        raw = 1
+    end
+    return raw
+end
+
+function BattleMgr.mana_cost(level, base_cost)
+    -- 等级上限 50，超过之后不再减免 —— 这是**有意**的，不是漏判
+    if level > 50 then
+        return base_cost
+    end
+    return base_cost * (1 - 0.02 * level)
+end
+
+function BattleMgr.can_join_team(team, player_id, limit)
+    local effective = limit or DEFAULT_TEAM_MEMBER_LIMIT
+    return #team.members < effective
+end
+
+return BattleMgr
+"""
+
+
 def _reset_origin():
     """平台会去 fetch/checkout/pull 这个 url，所以它必须是**裸库**。
 
@@ -203,11 +373,13 @@ def build():
 
     (SRC / "config").mkdir()
     (SRC / "src").mkdir()
+    (SRC / "code" / "qz_server" / "src" / "battle").mkdir(parents=True)
 
     # ── c1：初始导入 ────────────────────────────────────────────────
     _write_items(ITEMS_V1).save(SRC / "config" / "物品表.xlsx")
     _write_skills(SKILLS_V1).save(SRC / "config" / "技能表.xlsx")
     (SRC / "src" / "battle_logic.py").write_text(LOGIC_V1, encoding="utf-8")
+    _battle_lua().write_text(BATTLE_LUA_V1, encoding="utf-8")
     _commit("初始导入配表与战斗逻辑", "2026-09-15T10:00:00+08:00")
 
     # ── c2：一次正常的改动 ─────────────────────────────────────────
@@ -219,9 +391,9 @@ def build():
     _commit("回城卷轴降价，伤害函数改名", "2026-09-18T14:00:00+08:00")
 
     # ── c3：全量分析的「当前版本」 ─────────────────────────────────
-    _write_skills(SKILLS_V1 + [[2004, "陨石术", 20000, 500, "范围"]]).save(
-        SRC / "config" / "技能表.xlsx")
+    _write_skills(SKILLS_V1 + [[2004, "陨石术", 20000, 500, "范围"]]).save(SRC / "config" / "技能表.xlsx")
     (SRC / "src" / "battle_logic.py").write_text(LOGIC_V2, encoding="utf-8")
+    _battle_lua().write_text(BATTLE_LUA_V2, encoding="utf-8")
     _commit("新增陨石术，蓝耗加上等级上限", "2026-09-20T11:00:00+08:00")
     _git("push", "-q", "-u", "origin", "master")
 
@@ -281,6 +453,46 @@ def round3():
                          capture_output=True, text=True).stdout)
 
 
+def round4():
+    """第四轮：**两个提交**，模拟「改了几笔」之后的增量分析。
+
+    与 `round3` 的分工：`round3` 是**一笔干净的 delta**（只改铁剑价格一格），用来钉住
+    「增量做差能不能归因到那一格」；这一轮**故意是两笔、两个文件、两种类型**
+    （配表 + lua 代码），因为增量分析真正要回答的是「这一次改的那几笔，各自有没有问题」
+    —— 只有一笔的时候，「哪一笔对应哪条结论」这件事根本验不到。
+
+    两笔之间**不留空提交**：lua 那一笔真的改了行为（`can_join_team` 由「一律放行」改成
+    「按传入的 limit 兜底」，见 `BATTLE_LUA_V3`），提交信息与改动一致。
+    """
+    items = [list(row) for row in ITEMS_AT_BUILD_TIP]
+    for row in items:
+        if row[0] == 1002:
+            row[3] = 175
+    _write_items(items).save(SRC / "config" / "物品表.xlsx")
+    _commit("中级药水涨价到 175", "2026-09-24T10:00:00+08:00")
+
+    _battle_lua().write_text(BATTLE_LUA_V3, encoding="utf-8")
+    _commit("队伍成员上限改由客户端保证", "2026-09-24T10:30:00+08:00")
+    _git("push", "-q", "origin", "master")
+    print(subprocess.run(["git", "log", "--oneline", "--format=%h %ci %s"],
+                         cwd=str(SRC), capture_output=True, text=True).stdout)
+
+
+def round5():
+    """第五轮：**只改 lua 一个文件**，用来真正走到增量分析那条路。
+
+    与 `round4` 的分工：`round4` 是「两笔、两类文件」，它必然被升格成全量（见
+    `BATTLE_LUA_V4` 上面的说明）；这一轮是「一笔、一个非关键路径文件」，delta/total
+    = 1/4 = 0.25 < 0.30，且路径里没有 `config/` —— 三条升格条件一条都不命中，
+    `_decide_scope` 才会返回 `("incremental", "delta_small")`。
+    """
+    _battle_lua().write_text(BATTLE_LUA_V4, encoding="utf-8")
+    _commit("服务端补回队伍人数兜底上限", "2026-09-25T10:00:00+08:00")
+    _git("push", "-q", "origin", "master")
+    print(subprocess.run(["git", "log", "--oneline", "-1"], cwd=str(SRC),
+                         capture_output=True, text=True).stdout)
+
+
 if __name__ == "__main__":
-    {"build": build, "round2": round2, "round3": round3}[
-        sys.argv[1] if len(sys.argv) > 1 else "build"]()
+    {"build": build, "round2": round2, "round3": round3, "round4": round4,
+     "round5": round5}[sys.argv[1] if len(sys.argv) > 1 else "build"]()
