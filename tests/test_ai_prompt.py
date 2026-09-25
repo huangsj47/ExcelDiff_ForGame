@@ -383,6 +383,55 @@ def test_later_rounds_stay_silent_about_the_baseline_when_there_is_none():
     assert "不要把它当成「本轮新发现」" not in message
 
 
+def test_the_close_out_rule_rides_along_on_every_later_round():
+    """**收口规则必须在「每轮重发」的那段里，不能只写在第一轮的摘要里**（真机实测）。
+
+    run 75（2026-09-25）撞的就是这一条：模型把摘要抬头里的「不要当成本轮新发现」执行得
+    很到位（旧结论一条都没当新发现报），却把**同一段抬头里**的 `baseline_updates` 整条
+    漏掉 —— 它在正文写了「另 3 条本轮复核为已修复」，最终 JSON 里那个字段是空数组。
+    平台那一节于是照旧记着「2 条仍成立、2 条本轮无结论」。
+
+    两句要求的差别只有一处：`baseline_updates` 那一句当时只投递在**第一轮**的消息里
+    （还被 `<untrusted-data>` 封套包着），而「不要当新发现」每轮都重发一遍。这条用例钉住
+    的是**投递位置**：模型动手写最终 JSON 时，那句话还在它眼前。
+    """
+    digest = "# 这个版本截至上次分析已经报过的问题\n共 1 条：仍待处理 1。\n- [high] 旧问题 #12345678\n"
+
+    message = _message(round_index=2, baseline_digest=digest)
+
+    assert "baseline_updates" in message, (
+        "收口规则没有出现在后续轮次里 —— 模型写最终 JSON 时看不到它，"
+        "旧结论只能靠正文里一句话收口（而那句话平台读不到）"
+    )
+    assert "唯一能让一条旧结论从「在挂条目」里出去的通道" in message
+
+
+def test_the_close_out_rule_has_exactly_one_producer():
+    """**一处产地、两个投递点**：首轮摘要与每轮提醒引用同一份 `CLOSURE_RULE`。
+
+    两处各写一遍的代价已经付过一次了：真机实测之后要改这句话时，改一处漏一处就会让
+    两条投递点的措辞悄悄分叉，而读报告的人分不出哪一份算数。
+    """
+    from services.ai.baseline import (
+        CLOSURE_RULE,
+        BaselineFinding,
+        build_baseline_digest,
+        classify,
+    )
+
+    digest = build_baseline_digest(
+        classify([
+            BaselineFinding(
+                fingerprint="a" * 16, title="旧问题", severity="high", category="code_logic",
+                file_path="src/x.lua", commit_ref="b" * 40, disposition="pending",
+            )
+        ])
+    )
+
+    assert CLOSURE_RULE in digest, "首轮那份摘要里没有了收口规则"
+    assert CLOSURE_RULE in _message(round_index=2, baseline_digest="x"), "每轮那份提醒里没有了"
+
+
 def test_a_whitespace_only_baseline_counts_as_no_baseline():
     """上游渲染失败时可能给回一串空白，别把它当成一份基线插进提示词。"""
     message = _message(baseline_digest="   \n\n  ")

@@ -48,6 +48,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Optional, Sequence
 
+from services.ai.baseline import CLOSURE_RULE
 from services.ai.budget import ContextItem
 from services.ai.protocol import build_budget_exhausted_hint, build_final_round_hint
 from services.ai.skill_contract import DIMENSION_IDS
@@ -196,10 +197,17 @@ _CHANGE_SUMMARY_POINTER = (
 #
 # 2026-09-25：口径从「不要重复报」改成「不要当成新发现、但必须写进风险评估」。
 # 这一段落在**缓存断点之后**（每轮重发），所以字数是加了约束的：只换说法、不加长。
+#
+# 2026-09-25 又加了一句 `CLOSURE_RULE`（**从 `baseline` 引用，不在这里重写一份**）：
+# 真机 run 75 实测，只有写在这一段里的要求被照做了 —— 同一份模型把「不要再当新发现」
+# 执行到位，却把只写在第一轮摘要抬头的 `baseline_updates` 整条漏掉（那一条要求在正文里
+# 写在，最终 JSON 里是空数组）。**要求写在哪，比写什么更要紧**；这句多出来的长度是按
+# 「每轮多发 200 字符」换「旧结论真的能被收口」付的（摘要那一份首轮也还带着，两处同源）。
 _BASELINE_REMINDER = (
     "提醒：第一轮给你的那份「已经报过的问题」清单**仍然有效**。不要把它当成「本轮新发现」，"
     "但要在「风险评估」里逐条带上并标「（上次遗留，仍成立）」—— 那一节是当前仍成立的全集。"
     "旧结论只写标题、等级与依据，**不要为它补写证据**。标为「已忽略」的不要再提。"
+    + CLOSURE_RULE
 )
 
 # 第一轮的强制性声明。放在最前面，且不依赖模型把长文读完。
