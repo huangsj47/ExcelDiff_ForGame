@@ -27,10 +27,8 @@ from services.ai.budget import truncate_text
 from services.ai.claims import (
     VERIFY_BASIS_INDEPENDENT,
     VERIFY_BASIS_REPLAY,
-    claim_lines,
 )
 from services.ai.verdict_types import (
-    _REASON_MAX_CHARS,
     CONFIDENCE_CEILING_WITH_GAP,
     RULING_BLOCK_MARKER,
     RULING_SUMMARY_NAME,
@@ -48,6 +46,26 @@ from services.ai.verdict_types import (
 # --------------------------------------------------------------------------
 # 渲染
 # --------------------------------------------------------------------------
+
+# 报告里那**一行理由**的字数上限（2026-09-25 收口）。完整理由仍按 `_REASON_MAX_CHARS`
+# 存在结论载荷里；报告只留第一句 —— 读者要的是「这条为什么被撤 / 降」，不是完整论证。
+_REASON_ONELINE_CHARS = 80
+# 「平台说明」同理（它说的是**平台**动了什么，模型/复核的理由不是它）。
+_NOTE_ONELINE_CHARS = 60
+
+
+def _one_line(text, limit: int) -> str:
+    """取**第一句**（到第一个「。」或「；」为止）；没有句读、或首句本身就太长时按上限截断。
+
+    截断处由 `truncate_text` 补标记（读者知道后面还有）。为什么按句读优先而不是硬截：
+    中文报告里一句话被砍在中间，读起来是「这段话说了一半」，比少说一句更像出了故障。
+    """
+    one = str(text or "").strip()
+    for mark in ("。", "；"):
+        cut = one.find(mark)
+        if 0 < cut < limit:
+            return one[: cut + 1]
+    return truncate_text(one, limit)[0]
 
 # 对账轮跑了、但一条可逐条应用的裁决都没给（它可能只报了新发现、也可能把裁决写成了正文
 # 里的一段话）。2026-09-23 起正文主体是模型写的汇总报告，这一节只做一行说明 —— 不能再让
@@ -158,7 +176,8 @@ def render_ruling_summary(reduction: Reduction, *, review_ran: bool) -> str:
         f"**其余 {total_rows - reviewed} 条未经复核** —— 它们在下面的正文里按模型原话"
         "保留，等级与置信度都还是模型自己填的。",
         "",
-        fates + "逐条的下落、理由与断言状态写在正文之后的「复核标注（平台）」一节；"
+        fates + "逐条的下落与**一句**理由写在正文之后的「复核标注（平台）」一节，"
+        "逐条断言在异常面板里（每条结论的「断言」区）；",
         # **这一句是读法约定，不能省**（2026-09-24，run 64 实测）：平台只改落库的结论清单
         # 与这两节，正文一个字不动 —— 于是被撤销的那条在「风险评估」里仍写着「缓解：把静默
         # 跳过改回至少一次告警」，而它恰恰是复核撤掉的那条。不在这里说清「正文没按复核改写」，
@@ -188,9 +207,13 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
     lines: list[str] = [
         RULING_TITLE,
         "",
-        "对账轮（找反证）的裁决已经应用到落库的异常清单与最终结论上（保留 / 降级 / "
-        "撤销 / 转人工核验）；这一节**只标注有变化的条目**，未点名的按原样采信。"
-        f"覆盖几条、各条什么下场，见开篇的「{RULING_SUMMARY_NAME}」。",
+        # **一整节只留这一段铺垫**（2026-09-25 收口）：下面每一组原本还各带一段引子，
+        # 而那几段说的都是各自标题已经写明的后果（「移出当前结论清单」「未经独立反证」
+        # 现在并进标题），加起来占了这一节近三成篇幅却不是新信息。
+        "对账轮（找反证）的裁决已经应用到落库的清单上；这一节**只列被改判的条目**，"
+        "未点名的按原样采信（覆盖几条、各条什么下场见开篇的「"
+        f"{RULING_SUMMARY_NAME}」）。每条只给**一句**理由 —— 完整理由与依据存在本次"
+        "运行的结论存档里，逐条断言在异常面板里。",
         "",
     ]
     if not reduction.verdicts_seen:
@@ -214,11 +237,11 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
 
     retracted = reduction.retracted
     if retracted:
-        lines.append(f"### 已撤销 {len(retracted)} 条（移出当前结论清单）")
-        lines.append("")
+        # 「不进异常表、不进下一轮基线」并进标题（2026-09-25 收口）：它原本是这一组单独一段，
+        # 而那一段只说这一件事 —— 但它是这一组最容易被误读的后果（读者会以为撤销的条目
+        # 还在跟着），所以并进标题而不是删掉。
         lines.append(
-            "这几条**不进异常表、不进下一轮基线**（下一轮的基线语义是「上一次为止仍然成立"
-            "的问题全集」）；原文与撤销理由留在下面 —— 撤销本身也是结论，不能没有痕迹。"
+            f"### 已撤销 {len(retracted)} 条（移出当前结论清单，不进下一轮基线）"
         )
         lines.append("")
         for row in retracted:
@@ -237,12 +260,11 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
         row for row in reduction.rows if row.verdict == VERDICT_NEEDS_MORE_EVIDENCE
     )
     if pending:
-        lines.append(f"### 待人工核验 {len(pending)} 条（证据不足）")
-        lines.append("")
+        # 这一条原本是一整段「这几条仍在清单里，但平台按口径把它们降了一档等级…
+        # 请人工看一遍再决定处置」。**「仍在清单里」必须留住**（读者会以为它们被移除了），
+        # 所以并进标题；其余的（降了哪一档、为什么）每一条自己那一行里都有。
         lines.append(
-            "这几条**仍在清单里**，但平台按口径把它们**降了一档等级**（`critical` → `high`、"
-            "`high` → `medium`），置信度也不再按 `very_high` 采信 —— 一条自己都说证据不足的"
-            "结论不该同时挂着最高等级与最高置信度，请人工看一遍再决定处置。"
+            f"### 待人工核验 {len(pending)} 条（仍在清单里，等级与置信度已降一档）"
         )
         lines.append("")
         for row in pending:
@@ -255,6 +277,8 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
         # 一条是「有人独立去搜过、没搜到」，另一条是「重看了一遍已有的材料、没看出问题」。
         # 实测 run 58 那三条**全部**是后者（6 次索取全指向已有证据地址，一次新检索都没有），
         # 而报告里它们的措辞是「反证不成立（维持原结论）」—— 读的人会把它当成前一种。
+        # 2026-09-25 起这一区分**只靠小节标题**（「独立取证后维持原结论」/「**未经独立反证**」）：
+        # 两段引子只是把标题换句话再说一遍。
         independent = [
             row for row in confirmed if row.verify_basis == VERIFY_BASIS_INDEPENDENT
         ]
@@ -264,19 +288,11 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
         if independent:
             lines.append(f"### 反证不成立 {len(independent)} 条（独立取证后维持原结论）")
             lines.append("")
-            lines.append("有人**自己去搜过**、没找到反证。搜了哪里写在每一条的理由与查过范围里。")
-            lines.append("")
             for row in independent:
                 lines.append(_row_line(row))
             lines.append("")
         if replayed:
             lines.append(f"### 原证据复读 {len(replayed)} 条（**未经独立反证**）")
-            lines.append("")
-            lines.append(
-                "这几条复核**只重看了已有的依据**，没有做新的检索 —— 「没找到反证」在这里指的是"
-                "「在原有材料里没看出问题」，**不等于**有人独立去搜过。它们按原等级采信，"
-                "但读的时候要知道这一档的差别。"
-            )
             lines.append("")
             for row in replayed:
                 lines.append(_row_line(row))
@@ -285,11 +301,6 @@ def render_ruling(reduction: Reduction, *, review_ran: bool) -> str:
     new_findings = reduction.new_findings
     if new_findings:
         lines.append(f"### 对账轮新发现 {len(new_findings)} 条（已合入清单）")
-        lines.append("")
-        lines.append(
-            "这几条是对账轮在找反证的过程中新报出来的，经与主结论同一道校验（结构、重复、"
-            "条数上限）后合入 —— 它们是这一轮的附带产出，不是「找反证」的结果。"
-        )
         lines.append("")
         for row in new_findings:
             lines.append(_row_line(row))
@@ -331,10 +342,11 @@ def _gap_section(reduction: Reduction, *, shown: set[str]) -> list[str]:
     lines = [
         f"### 证据缺口 {len(capped)} 条（平台压到 `{CONFIDENCE_CEILING_WITH_GAP}`）",
         "",
-        "本次运行的证据里**有已知的缺口**（某个文件被长度上限截断、或者索取额度用尽导致"
-        "某一块一次都没轮到）。受影响的这几条**不得维持 `very_high`** —— 证据不完整时还挂着"
-        "最高置信度，等于把「没看到」写成了「看过了」。压的是**置信度，不是结论**：它们仍在"
-        "清单里，理由写在各条的「平台说明」里。",
+        # 2026-09-25 收口：原本这一段占四行，说的其实是三件事 —— 有缺口、所以不许挂最高
+        # 置信度、压的是置信度不是结论。三句合成一句。
+        "本次运行的证据里**有已知的缺口**（文件被长度上限截断、或索取额度用尽导致某一块"
+        "一次都没轮到），受影响的这几条**不得维持最高档置信度**（证据不完整还挂着它，"
+        "等于把「没看到」写成了「看过了」）—— 压的是**置信度，不是结论**，它们仍在清单里。",
         "",
     ]
     lines.extend(_row_line(row) for row in capped if row.finding_id not in shown)
@@ -351,34 +363,33 @@ def _gap_section(reduction: Reduction, *, shown: set[str]) -> list[str]:
 
 
 def _row_line(row: FindingRow) -> str:
-    """一行的措辞。**原等级、裁决、处置三样都写出来** —— 只写裁决，读的人不知道
-    「降级」是从哪一级降下来的。
+    """一条结论**两到三行**：标题 + 原等级 → 裁决，之后缩进补充。
 
-    三个 2026-09-21 补上的东西，都是为了让人能**把这一行落回原处**：
+    ## 2026-09-25：这一行从「五段 + 断言子列表」收成要点
 
-    * 头部带上正文里那个编号（口径 ②，`（正文 R3）`）—— 模型没给正文编号时**什么都不写**
-      （2026-09-24 起：从前写「（正文未编号）」，那是拿一句真话去填一个不存在的问题，
-      而 run 63 的三条全是它 —— 读者看到的是「[F1]（正文未编号）」：一个编号加一句
-      「这个编号在正文里找不到」。**头部不再印平台内部编号 `[F…]`**：产品里没有任何
-      一处显示它（异常面板的字段里没有 `finding_id`），它只在平台自己的载荷与轨迹里
-      成立，印在给人看的报告上只是个查不到的引用）；
-    * 等级/置信度**只要动过就写出来**（口径 ①），包括「证据不足」那一档，措辞里带上
-      「平台按证据不足降一档」这句出处；
-    * 不成形的依据就地标成「（不可定位）」（口径 ③）—— 它照原样留着，但不构成证据。
+    收口前它是全文最重的一处：真机 run 70 的「复核标注（平台）」**2958 字 / 32 行**，
+    占整份报告的 30%，三条改动各占 900~1100 字（单条最长的行 655 字）。产品口径是
+    「读者只需要关心正文那份完整报告，平台记账简要即可」。
 
-    2026-09-24（P0-01）再加两样：
+    ## 收掉的东西**去了哪里**（这一节是「不许指向不存在的地方」的守卫）
 
-    * 头部用的是**裁决之后**的标题（`row.anomaly.title`）：有断言没被证实时它由
-      `_compose_title` 只取已证实的部分重排 —— 未证实的肯定断言不许当标题出现
-      （run 58 的 F3 标题写着「断言中断进程」，而复核自己承认那一点没核实）；
-    * 紧跟一行**逐条断言的清单**（缩进成子列表）。每一条带自己的状态与措辞：
-      `已证实` / `待核查：…` / `已检查范围内未发现：…` / `反证成立：…`。
-      这一段是「这条结论凭什么算核过了」的唯一答案。
+    * **逐条断言**不再抄进报告 —— 异常面板看得到（`static/js/ai_anomaly_disposition.js`
+      的「断言」区，数据来自 `ai_analysis_anomaly.claims`），导出附录也逐条列；
+    * **复核方式**并进小节标题（「反证不成立」与「原证据复读」本来就按它分组）；
+    * **理由 / 平台说明**只留**第一句**，不删 —— 这两样在**界面上零读者**
+      （`verify_reason` / `verify_note` 在 `static/`、`templates/`、`routes/` 里一处都不
+      出现），报告是读者唯一的入口。删掉就等于把「这条为什么被撤销」从产品里删掉，
+      而「撤销本身也是结论，不能没有痕迹」是这一节当初的设计前提。
+    * **依据明细**同样收掉，但**不可定位的引用要点出条数**：那是「这条的证据定位不到」
+      的信号（口径 ③），不能因为篇幅连它一起删。
+
+    头部仍带**正文里那个编号**（口径 ②，`（正文 R3）`），它是一行字里唯一能让人
+    **落回正文**的锚点，所以留着；模型没给编号时什么都不写（见 `_body_label_text`）。
     """
     head = f"- **{_body_label_text(row)}{row.anomaly.title}**："
     original = f"原 `{row.origin.severity}` / `{row.origin.confidence}`"
     if row.verdict == VERDICT_RETRACTED:
-        action = "**反证成立（撤销）**，已从当前结论清单移除"
+        action = "**反证成立（撤销）**"
     elif row.verdict == VERDICT_DOWNGRADED:
         action = (
             f"**反证部分成立（降级）**：`{row.origin.severity}` → `{row.anomaly.severity}`"
@@ -398,25 +409,21 @@ def _row_line(row: FindingRow) -> str:
             action += _level_change_text(row, cause="平台按「证据有缺口」处理")
     if row.source == SOURCE_VERIFY:
         action += "（对账轮新发现）"
-    detail = [f"{original} → {action}"]
+    parts = [f"{head}{original} → {action}"]
     if row.reason:
-        detail.append(f"理由：{truncate_text(row.reason, _REASON_MAX_CHARS)[0]}")
-    if row.evidence_refs:
-        detail.append("依据：" + "、".join(_ref_text(row)))
+        parts.append(f"理由：{_one_line(row.reason, _REASON_ONELINE_CHARS)}")
     if row.note:
-        detail.append(f"平台说明：{row.note}")
-    # 复核方式排在最后：它是对**上面整句**的限定（「反证不成立」是重看了已有依据，
-    # 还是自己去搜了一遍），不是另一个并列的事实。字段名从「取证方式」改成「复核方式」
-    # （2026-09-24）：值本身叫「独立取证」，两个「取证」叠在一行里读着别扭。
-    if row.verify_basis:
-        detail.append(f"复核方式：**{row.verify_basis_label}**")
-    # **每段各占一行**（首段接在标题后，其余缩进两格，属于这一条）。2026-09-25 起：
-    # 原先用「；」串成一行，真机 run 70 实测最长 **655 字一行** —— 无论屏幕还是导出的
-    # Markdown，读者拿到的都是一整段没有停顿的文字。这与 `claims.claim_lines` 2026-09-24
-    # 那次是同一条口径（一条一行），只是这里缩进，让它们明确属于上面那条结论。
-    line = head + detail[0] + "".join(f"\n  {one}" for one in detail[1:])
-    claims = claim_lines(row.claim_reviews)
-    return line + ("\n" + claims if claims else "")
+        parts.append(f"平台说明：{_one_line(row.note, _NOTE_ONELINE_CHARS)}")
+    bad = set(row.unlocatable_refs)
+    if bad:
+        parts.append(
+            f"依据里 {len(bad & set(row.evidence_refs))} 处不可定位"
+            f"（共 {len(row.evidence_refs)} 处，定位不到的不构成证据）"
+        )
+    # 首段接在标题后，其余各占一行、缩进两格（属于这一条）。缩进是**约定**而不是装饰：
+    # 渲染器（`static/js/ai-report-markdown.js`）与导出（`report_document.keep_line_breaks`）
+    # 都认「列表项之后的缩进行属于上面那一条」，于是整条结论在屏幕上是一个块。
+    return parts[0] + "".join(f"\n  {one}" for one in parts[1:])
 
 
 def _action_label(row: FindingRow) -> str:
@@ -467,19 +474,6 @@ def _level_change_text(row: FindingRow, *, cause: str, severity: bool = True) ->
     if not parts:
         return ""
     return f"，{'、'.join(parts)}（{cause}）"
-
-
-def _ref_text(row: FindingRow) -> tuple[str, ...]:
-    """依据那一行：不成形的那些就地标成「（不可定位）」。
-
-    **不改写原字符串**（模型说了什么是一个事实），只在它后面加这三个字 —— 读的人据此
-    知道哪几条能照着去核，哪几条核不了。判据与 `is_locatable_ref` 是同一个函数，
-    不在这里另写一份（两处各判一次迟早会不一致）。
-    """
-    bad = set(row.unlocatable_refs)
-    return tuple(
-        f"{ref}（不可定位）" if ref in bad else ref for ref in row.evidence_refs
-    )
 
 
 # 历史数据里那行机器块的形状：`<!-- ai-verify-ruling: {...} -->`。它里面若含 `-->`，

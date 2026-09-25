@@ -539,7 +539,15 @@ class TestTheVerifierIsAskedPerClaim:
         assert "已检查范围内未发现" in text
         assert "independent" in text and "replay" in text
 
-    def test_the_claim_list_reaches_the_report_line(self):
+    def test_the_claim_list_stays_out_of_the_report(self):
+        """逐条断言**不进报告**（2026-09-25 收口），但裁决结果一个都不能丢。
+
+        这一条原来是「断言清单要到达报告那一行」。产品口径改了（报告只留一句理由，平台
+        记账整体收口）：断言的逐条状态归**异常面板**（`static/js/ai_anomaly_disposition.js`
+        的「断言」区，数据来自 `ai_analysis_anomaly.claims` 列）与**导出附录**。
+
+        所以另一半断言落在载荷上 —— 只钉「报告里没有」的话，把断言整条丢掉也能过。
+        """
         reply = _reply(
             _verdict(
                 "F1",
@@ -548,9 +556,12 @@ class TestTheVerifierIsAskedPerClaim:
         )
         reduction = reduce_findings([_anomaly(DIFF_CLAIM, CONSEQUENCE_CLAIM)], verdicts=parse_verdicts(reply))
         text = render_ruling(reduction, review_ran=True)
-        assert "逐条断言" in text
-        assert "**待核查**" in text
-        assert "**已证实**" in text
+
+        assert "- `C1` **" not in text, "断言的逐条状态又抄回报告了"
+        assert CONSEQUENCE_CLAIM.statement not in text, "断言正文又抄回报告了"
+        headings = [item["heading"] for item in reduction.rows[0].as_dict()["claims"]]
+        assert any("已证实" in one for one in headings), headings
+        assert any("待核查" in one for one in headings), headings
 
 
 class TestTheSameFactIsNotSaidThreeTimes:
@@ -595,23 +606,23 @@ class TestTheSameFactIsNotSaidThreeTimes:
             _verdict("F1", _claim_reply("C1", "verified") + "," + _claim_reply("C2", "unverified"))
         )
 
-        # C2 的断言正文只出现一次（下面那行「逐条断言」里）；标题由已证实的 C1 构成。
-        assert report.count(CONSEQUENCE_CLAIM.statement) == 1, (
-            "同一条断言的正文在「平台说明」与「逐条断言」里各印了一遍"
-        )
+        # **断言的正文不再进报告**（2026-09-25 收口）：报告只按**编号**点名 C2，正文与
+        # 逐条状态在异常面板与导出附录里。所以这里钉的是「点名一次、不说第二遍」。
+        assert CONSEQUENCE_CLAIM.statement not in report, "断言的正文又抄回报告了"
         assert report.count("没有被证实") == 1
-        assert "`C2`" in report, "编号要在（读者顺着它去下面那行看状态）"
+        assert "`C2`" in report, "编号要在（读者顺着它去面板看状态）"
 
     def test_one_claim_per_line(self):
         """每条断言**自成一行**（2026-09-24，run 63）。
 
-        原先它们是用「；」串起来的一行，真机渲染出来是 400+ 字一整段没有停顿的文字
-        （渲染器会丢掉缩进，那一行成不了列表）—— 读者只能跳过它，而它恰恰是「这条结论
-        凭什么算核过了」的唯一答案。
+        原先它们是用「；」串起来的一行，真机渲染出来是 400+ 字一整段没有停顿的文字。
+        **2026-09-25 起这一条不再由报告承担**（报告里已经不印断言了）：产地是导出附录，
+        同一形状的守卫在那里 —— `test_ai_report_document` 的「附录每行一条断言」
+        （第一行带 `- 断言：` 标签、其余 `- ` 开头、不许出现「；」）。
         """
         from services.ai.claims import claim_lines
 
-        row, report = self._row_and_report(
+        row, _report = self._row_and_report(
             _verdict("F1", _claim_reply("C1", "verified") + "," + _claim_reply("C2", "unverified"))
         )
         lines = claim_lines(row.claim_reviews).splitlines()
@@ -622,8 +633,6 @@ class TestTheSameFactIsNotSaidThreeTimes:
         )
         assert lines[0].startswith("- 逐条断言："), "第一行要带上这一段的标签"
         assert "；" not in "".join(lines), "又串成一段了"
-        for line in lines:
-            assert line in report, "报告里印的不是这一份"
 
 
 @pytest.mark.parametrize("status", [CLAIM_VERIFIED, CLAIM_UNVERIFIED, CLAIM_REFUTED, CLAIM_UNREADABLE])
@@ -738,21 +747,20 @@ class TestTheStatusWordIsPrintedOnce:
         return reduce_findings([_anomaly(claim)], verdicts=parse_verdicts(reply)).rows[0]
 
     def test_an_unreadable_claim_prints_the_word_once(self):
+        """一条「依据读不到」的断言：状态词只说一次（判据落在载荷上）。
+
+        报告已经不印断言了（2026-09-25 收口），所以这一条改钉**面板与导出读的那一份**
+        —— `heading` 里状态词出现一次，且不许出现「状态 —— 」这种自己拼的第二遍。
+        渲染点（JS）那一侧的同名守卫在 `test_ai_anomaly_disposition_frontend.py`。
+        """
         row = self._unreadable_row()
         assert row.claim_reviews[0].status == CLAIM_UNREADABLE, "构造没生效"
-        text = render_ruling(
-            reduce_findings(
-                [row.anomaly],
-                verdicts=parse_verdicts(
-                    _reply(_verdict("F1", _claim_reply("C1", "verified")))
-                ),
-            ),
-            review_ran=True,
-        )
-        assert "`C1` **证据读不到**：次数记账在批次交付之前执行" in text
-        assert "证据读不到 —— " not in text, "状态词印了两遍 —— 渲染点又在自己拼 display 前缀"
+        headings = [item["heading"] for item in row.as_dict()["claims"]]
 
-    def test_the_report_line_the_panel_and_the_export_all_read_the_heading(self):
+        assert headings == ["证据读不到：次数记账在批次交付之前执行"], headings
+        assert "证据读不到 —— " not in headings[0], "状态词印了两遍 —— 又在自己拼 display 前缀"
+
+    def test_the_panel_and_the_export_all_read_the_heading(self):
         from services.ai.report_document import anomaly_rows
 
         row = _reviewed_row()  # C1 已证实 / C2 待核查
@@ -766,6 +774,8 @@ class TestTheStatusWordIsPrintedOnce:
         assert claims["C1"]["display"] == "调用从 return false 改成 assert(bResult)"
         assert claims["C2"]["display"] == claims["C2"]["heading"]
 
+        # **报告那一行不再印断言**（2026-09-25 收口）：状态词说两遍的风险只剩面板与导出
+        # 这一侧，而这两处读的是**同一个** `heading` —— 所以没有第三种拼法。
         report = render_ruling(
             reduce_findings(
                 [_anomaly(DIFF_CLAIM, CONSEQUENCE_CLAIM)],
@@ -782,10 +792,8 @@ class TestTheStatusWordIsPrintedOnce:
             ),
             review_ran=True,
         )
-        assert "`C1` **已证实**：调用从 return false 改成 assert(bResult)" in report
-        assert "已证实 —— " not in report and "待核查 —— " not in report, (
-            "报告那一行又印了两遍状态词"
-        )
+        assert CONSEQUENCE_CLAIM.statement not in report, "断言的正文又抄回报告了"
+        assert "已证实 —— " not in report and "待核查 —— " not in report
 
         exported = "；".join(
             anomaly_rows(

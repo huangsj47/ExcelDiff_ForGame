@@ -497,24 +497,32 @@ class TestTheEvidenceRefShape:
         assert row.evidence_capped is False
         assert row.note == ""
 
-    def test_the_report_marks_it_without_rewriting_it(self):
+    def test_the_report_says_how_many_refs_cannot_be_located(self):
+        """定位不到的依据**要点出条数**，原文不再抄进报告（2026-09-25 收口）。
+
+        判据从「原文一字不许改写」换成「不可定位的处数要点出来」：报告里已经不再印依据
+        明细了（`_row_line` 的 docstring 写了为什么），但「这条引用的东西定位不到」是
+        口径③的信号，不能因为篇幅连它一起删 —— 只是从「逐条标」收成「记一条数」。
+
+        等价的一对在下面：全部可定位时那句话**不许出现**（两边都要活，缺一边这条就是
+        假绿 —— 只钉「出现」的话，那句恒出现也能过）。
+        """
         reduction = reduce_findings(
             [_anomaly()],
             verdicts=(
                 VerifyVerdict(
                     finding_id="F1",
                     verdict=VERDICT_CONFIRMED,
-                    evidence_refs=(HUNK_REF,),
+                    evidence_refs=("代码里某处",),
                 ),
             ),
         )
 
         section = render_ruling(reduction, review_ran=True)
-        assert HUNK_REF in section, "模型写了什么，一字不许改写"
-        assert f"{HUNK_REF}（不可定位）" not in section
+        assert "1 处不可定位" in section, f"定位不到的处数没点出来：{section}"
+        assert "代码里某处" not in section, "依据原文又抄回报告了"
         ruling = reduction.as_dict()
-        assert ruling["rows"][0]["evidence_refs"] == [HUNK_REF], "机器可读的原文一字不动"
-        assert ruling["rows"][0]["unlocatable_refs"] == []
+        assert ruling["rows"][0]["evidence_refs"] == ["代码里某处"], "机器可读的原文一字不动"
 
     def test_a_locatable_ref_alone_is_not_marked(self):
         reduction = reduce_findings(
@@ -528,7 +536,7 @@ class TestTheEvidenceRefShape:
             ),
         )
 
-        assert "（不可定位）" not in render_ruling(reduction, review_ran=True)
+        assert "不可定位" not in render_ruling(reduction, review_ran=True)
 
 
 # ==========================================================================
@@ -713,8 +721,10 @@ class TestAGapOnlyCapsTheFindingsItTouches:
 
         section = render_ruling(reduction, review_ran=True)
         assert "证据缺口" in section
-        assert "不得维持 `very_high`" in section
-        assert PROTO in section
+        assert "不得维持最高档置信度" in section
+        # 这一节按 `_row_line` 的收口形状列条目：**标题 + 裁决一行**，不再带依据明细 ——
+        # 所以这里钉的是「那条结论本身还在」（按它的标题），不是它的文件路径。
+        assert "队伍成员校验被删除" in section, f"被压置信度的那条没列出来：{section}"
 
     def test_the_gap_section_is_not_rendered_when_nothing_was_capped(self):
         reduction = reduce_findings([_anomaly()], gaps=EvidenceGaps())

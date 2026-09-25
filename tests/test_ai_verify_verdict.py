@@ -572,8 +572,10 @@ class TestTheRulingSection:
         assert SAMPLE_TITLE in section, "审计轨迹里必须有原结论"
         assert "critical" in section, "要写明是从哪一级撤掉的"
         assert "同一提交里生成文件已经删掉了" in section
-        assert EVIDENCE_REF in section
-        assert "只标注有变化的条目" in section, (
+        # **依据的原文不再进报告**（2026-09-25 收口）：这一行只留标题 + 裁决 + 一句理由。
+        # 依据与逐条断言存在结论存档与异常面板里（见 `_row_line` 的 docstring）。
+        assert EVIDENCE_REF not in section, "依据明细又抄回了报告（这一节只留一句理由）"
+        assert "只列被改判的条目" in section, (
             "要说清「未点名的按原样采信」—— 草稿是正文主体，标注只点名被改判的条目"
         )
         assert "报告里没有第二份结论清单" not in section, (
