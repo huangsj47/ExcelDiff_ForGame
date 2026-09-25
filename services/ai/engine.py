@@ -38,7 +38,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, MutableMapping, Protocol, Sequence
 
 from services.ai import round_events, trace_evidence
-from services.ai.baseline import DEFAULT_BASELINE_CHARS
+from services.ai.baseline import DEFAULT_BASELINE_CHARS, digest_fingerprints
 from services.ai.auto_sizing import conservative_tokens_for
 from services.ai.budget import (
     DEFAULT_MAX_ITEMS,
@@ -73,6 +73,7 @@ from services.ai.round_message import (
     prepare_round as _prepare_round,
 )
 from services.ai.round_observability import (
+    CORRECTION_BASELINE_COVERAGE,
     CORRECTION_CHANNEL_MISMATCH,
     CORRECTION_TRUNCATED_OUTPUT,
     CORRECTION_UNPARSABLE,
@@ -91,6 +92,7 @@ from services.ai.prompt import (
 from services.ai.prompt_cache import CACHE_BREAKPOINT_KEY, mark_cache_breakpoint
 from services.ai.protocol import (
     TRUNCATED_OUTPUT_HINT,
+    build_baseline_coverage_hint,
     AnalysisPayload,
     Anomaly,
     DroppedItem,
@@ -102,6 +104,7 @@ from services.ai.protocol import (
     looks_like_markdown_report,
     looks_like_tool_call_envelope,
     looks_like_truncated_json,
+    missing_baseline_statuses,
     parse_payload,
     repair_dsml_tool_calls_payload,
     repair_split_string_payload,
@@ -697,6 +700,11 @@ def run_analysis(
     # 以及报告末尾「未归类」那一节读的都是它 —— 四处各取一次平台出厂值，正好就是
     # 「校验按 A、提示词按 B」的来源，而那种错不会报错。
     dimension_ids = dimension_ids_of(loaded.dimensions)
+
+    # 这一轮提示词里那份历史清单的指纹（给「逐条交代状态」那条规矩用）。
+    # 从**渲染好的摘要**里读回来，理由见 `baseline.digest_fingerprints`：这条规矩的
+    # 适用范围就是模型看到的那份清单，而只有那段文本知道 `_fit_groups` 丢掉了哪几条。
+    baseline_fingerprints = digest_fingerprints(baseline_digest)
 
     tools = ContextTools(
         provider=provider,
@@ -1337,7 +1345,11 @@ def run_analysis(
             continue
 
         try:
-            parsed = parse_payload(text, dimension_ids=dimension_ids)
+            parsed = parse_payload(
+                text,
+                dimension_ids=dimension_ids,
+                baseline_fingerprints=baseline_fingerprints,
+            )
         except ProtocolError as exc:
             # 先看是不是**被截断的 JSON**（单次输出有上限，汇总那一步最容易撞上）。
             # 这个判断必须排在 `looks_like_markdown_report` **之前**：JSON 字符串里的
@@ -1419,7 +1431,11 @@ def run_analysis(
                 if repair_text is None:
                     continue
                 try:
-                    repaired_parsed = parse_payload(repair_text, dimension_ids=dimension_ids)
+                    repaired_parsed = parse_payload(
+                        repair_text,
+                        dimension_ids=dimension_ids,
+                        baseline_fingerprints=baseline_fingerprints,
+                    )
                 except ProtocolError as exc:
                     # **失败也要留痕**：「识别出这种病、但修完仍解析失败」与「根本不是
                     # 这种病」在 trace 上必须分得开 —— 不留这句话，下一轮实测又要靠猜。
@@ -1541,6 +1557,39 @@ def run_analysis(
 
         correction_hint = ""
         if parsed.is_final:
+            # **历史清单没有逐条交代时，当场要一次。**
+            #
+            # 真机实测（run 75 / 76，两次）：那条要求只写在提示词里时，模型**一次都没照做**
+            # —— 它在正文里写「另 3 条本轮复核为已修复」，而 `baseline_updates` 是空数组。
+            # 平台逼得住的是**当场要**：`dimensions` 一次没漏过，就因为它必填、缺了会被打回。
+            #
+            # 与上面三种纠正不同的是：这一份结论**解析成功、照收不误**（缺状态不毁结论）。
+            # 所以只在「还有重问额度」且「还有下一轮」时才花这一次 —— 最后一轮要求它重发是
+            # 白花（那句话永远发不出去），那份额度本该留给别处。
+            missing_statuses = missing_baseline_statuses(parsed)
+            if (
+                missing_statuses
+                and limits.max_corrections > 0
+                and round_index < limits.max_rounds
+            ):
+                limits = replace(limits, max_corrections=limits.max_corrections - 1)
+                correction_hint = build_baseline_coverage_hint(missing_statuses)
+                _emit(RoundRecord(
+                    round_index, "unparsable",
+                    item_count=len(items),
+                    correction_hint=correction_hint,
+                    correction_reason=CORRECTION_BASELINE_COVERAGE,
+                    note=_combine_notes(
+                        round_notes,
+                        f"结论已解析，但历史清单里有 {len(missing_statuses)} 条没有给出状态，"
+                        "已要求补齐（结论照收，不因此作废）",
+                    ),
+                    **round_extra,
+                ))
+                pending_items = ()
+                budget_notes = []
+                round_memos.append(TurnMemo(index=round_index, status="unparsable"))
+                continue
             payload = parsed
             if context_overflow_recovered:
                 # 这份结论是在**被裁剪过的提示词**上得出的，与正常跑完不是一回事。

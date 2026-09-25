@@ -41,6 +41,9 @@ from services.ai.protocol import _THINK_BLOCK_RE
 CORRECTION_UNPARSABLE = "unparsable_json"
 CORRECTION_TRUNCATED_OUTPUT = "truncated_output"
 CORRECTION_CHANNEL_MISMATCH = "channel_mismatch"
+# 解析**成功**、但历史清单没有逐条交代（`baseline_updates` 缺条目）。它占的那一轮是
+# 「平台催模型把清单答完」的成本 —— 与上面三种「这一轮的答案没法用」不是一回事。
+CORRECTION_BASELINE_COVERAGE = "baseline_coverage"
 
 
 def visible_response_chars(text: Any) -> int | None:

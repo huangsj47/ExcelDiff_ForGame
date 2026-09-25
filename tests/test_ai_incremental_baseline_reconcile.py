@@ -7,7 +7,11 @@ from app import app as flask_app
 from app import create_tables, db
 from models import Project
 from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
-from services.ai.baseline_closures import DECLARED_FIXED, BaselineClosure
+from services.ai.baseline_closures import (
+    DECLARED_FIXED,
+    DECLARED_STANDING,
+    BaselineClosure,
+)
 from services.ai.baseline_source import baseline_findings, previous_anomaly_rows
 from services.ai.engine import STATUS_SUCCEEDED, EngineOutcome
 from services.ai.incremental_baseline import reconcile_result
@@ -86,6 +90,7 @@ def test_incremental_result_carries_forward_and_marks_changed_history_for_rechec
         "carried_forward": 1,
         "needs_recheck": 1,
         # 这一轮没有任何收口声明 —— 三个新键都是 0，行为与这条通道存在之前逐字相同。
+        "declared_standing": 0,
         "declared_fixed": 0,
         "declared_overturned": 0,
         "declarations_ignored": 0,
@@ -402,7 +407,7 @@ def test_the_section_says_out_loud_when_no_close_out_arrived():
     )
     section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
 
-    assert "没有收到任何结构化收口声明" in section, section
+    assert "没有收到 `baseline_updates`" in section, section
     assert "在平台的账里它们仍在挂" in section
 
 
@@ -429,7 +434,7 @@ def test_the_section_stops_saying_it_once_a_close_out_really_arrived():
     section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
 
     assert merged["baseline_reconciliation"]["carried_forward"] == 1, "另一条没在清单里"
-    assert "没有收到任何结构化收口声明" not in section, section
+    assert "没有收到 `baseline_updates`" not in section, section
     assert "1 条本轮声明已修复" in section
 
 
@@ -449,7 +454,62 @@ def test_the_section_stays_quiet_when_everything_was_reconfirmed():
     section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
 
     assert merged["baseline_reconciliation"]["reconfirmed"] == 1
-    assert "没有收到任何结构化收口声明" not in section, section
+    assert "没有收到 `baseline_updates`" not in section, section
+
+
+def test_saying_standing_keeps_the_item_and_counts_as_an_answer():
+    """模型逐条交代里的 `standing`（仍成立）**不关闭任何东西**，但它算「答过了」。
+
+    为什么值得单独一条：这是 2026-09-25 晚把这条通道从「可选的两档」改成「逐条枚举」时
+    带出来的第三档（见 `baseline_closures` 的模块 docstring）。它有两个作用，都必须钉住：
+
+    * **清单里那一条照旧挂着**（它只是被确认了，不是被关掉）；
+    * 报告那一节据此知道平台**收到过交代**，于是不补那句「没有收到 `baseline_updates`」
+      —— 那句话是给「模型一个字都没答」的情形配的。
+    """
+    fingerprint = "aaaa1111bbbb2222"
+    result = {
+        "report_markdown": "本轮",
+        "anomalies": [],
+        "final_findings": [],
+        "baseline_updates": [_closure(fingerprint, status=DECLARED_STANDING, reason="")],
+    }
+
+    merged = reconcile_result(
+        result, [_old(fingerprint, "code/stable.lua")], changed_paths=set(), previous_run_id=22
+    )
+    section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
+
+    assert [item["fingerprint"] for item in merged["anomalies"]] == [fingerprint], (
+        "`standing` 把一条仍成立的结论关掉了 —— 它只表示「这条还在」"
+    )
+    assert merged["baseline_reconciliation"]["declared_standing"] == 1
+    assert merged["baseline_reconciliation"]["carried_forward"] == 1
+    assert "没有收到 `baseline_updates`" not in section, (
+        "模型逐条答过了，却还在说「没有收到」—— 那句话会被读成模型什么都没说"
+    )
+
+
+def test_a_standing_answer_does_not_cancel_the_stale_evidence_signal():
+    """`standing` **不抵消**「相关文件又变了、证据已过期」。
+
+    那一格是**平台的**判断（文件变过、而这条结论的证据来自那次改动之前），模型说一句
+    「仍成立」并不能替代「它重看过那个刚变过的文件」—— 后者才是这条状态要防的东西。
+    """
+    fingerprint = "aaaa1111bbbb2222"
+    merged = reconcile_result(
+        {
+            "report_markdown": "本轮",
+            "anomalies": [],
+            "final_findings": [],
+            "baseline_updates": [_closure(fingerprint, status=DECLARED_STANDING, reason="")],
+        },
+        [_old(fingerprint, "code/changed.lua")],
+        changed_paths={"code/changed.lua"},
+        previous_run_id=22,
+    )
+
+    assert merged["anomalies"][0]["baseline_state"] == "needs_recheck"
 
 
 def test_a_declared_fix_does_not_come_back_as_an_in_flight_item():

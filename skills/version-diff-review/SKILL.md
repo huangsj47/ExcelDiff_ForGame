@@ -106,7 +106,7 @@ description: Use this skill whenever you review a game version's change set — 
     {"id": "config_id", "hit": true, "note": "命中的具体依据；未命中就写未命中及理由"}
   ],
   "candidate_dispositions": [{"candidate_id": "S1-1", "status": "adopted | rejected | deferred", "reason": "拒绝或延后时必填"}],
-  "baseline_updates": [{"fingerprint": "上面历史清单里那条末尾的 16 位十六进制", "status": "fixed | overturned", "reason": "凭什么说它修好了 / 被推翻了"}],
+  "baseline_updates": [{"fingerprint": "上面历史清单里那条末尾的 16 位十六进制", "status": "standing | fixed | overturned", "reason": "修好或被推翻时写凭什么"}],
   "anomalies": [
     {
       "title": "【系统或模块】对象或条件下的可观察异常",

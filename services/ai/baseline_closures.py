@@ -27,6 +27,14 @@
 
 **少写是信息不足，编证据是假事实。** 这条通道两个都不制造：它只把「模型说过什么」
 如实记下来，并把「平台没核过」印在旁边。
+
+## 2026-09-25 晚：从「可选的两档」改成「逐条枚举」
+
+上面那一版是**可选**字段（模型想写才写），真机跑了两次**一次都没收到**（机理见
+`prompt-contract-cannot-carry-optional-fields` 那条教训：模型对「已经在写的那份结构」
+从不出错，对可选的新数组一次没填过）。所以现在清单里有几条就要求几条状态
+（`standing` / `fixed` / `overturned`），缺了当场要求补齐 —— 与 `dimensions` 同一个手法
+（它一次没漏过，因为它必填且要逐条枚举）。
 """
 
 from __future__ import annotations
@@ -35,17 +43,34 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-# 模型能声明的两种收口。**没有「仍成立」这一档**：那一条不需要声明 —— 模型把结论照原样
-# 再报一次，`reconcile_result` 就能按指纹配到它（`reconfirmed`）。通道只补上缺的那半边。
+# 模型能给出的三种状态。**`standing` 是 2026-09-25 晚加的**，它把这条通道从「只补缺的
+# 那半边」变成「清单里每一条都要交代」：
+#
+# * `fixed` / `overturned` —— 收口（那条从「在挂」挪出去，带模型的理由）；
+# * `standing` —— 仍然成立（就是模型把这条结论照原样再报一次）。
+#
+# 为什么要它：真机实测（run 75 / 76）模型**只写正文、不填这个字段**，两次都收不到。
+# 而平台**逼得住**的字段有先例 —— `dimensions` 一次没漏过，因为它是**必填且要逐条枚举**
+# 的。所以这条通道也做成枚举：清单里有几条就要有几条状态，缺了平台当场要求补（见
+# `protocol.missing_baseline_statuses` 与 `engine` 的纠正那一支）。
+#
+# `standing` 还顺手解决另一件事：模型换个说法重报旧结论时指纹会变（实测相似度 0.643
+# 配不上兜底门槛 0.72，同一条问题于是在清单里出现两份）。现在它带上原指纹，平台按精确
+# 指纹认，不再靠标题相似度猜。
+DECLARED_STANDING = "standing"
 DECLARED_FIXED = "fixed"
 DECLARED_OVERTURNED = "overturned"
-DECLARED_STATUSES = (DECLARED_FIXED, DECLARED_OVERTURNED)
+DECLARED_STATUSES = (DECLARED_STANDING, DECLARED_FIXED, DECLARED_OVERTURNED)
 DECLARED_STATUS_LABELS = {
+    DECLARED_STANDING: "仍成立",
     DECLARED_FIXED: "声明已修复",
     DECLARED_OVERTURNED: "声明已被推翻",
 }
 # 写进提示词给模型看的枚举（与上面那份是同一件事，两处必须逐字一致）。
 DECLARED_STATUS_ENUM = " | ".join(DECLARED_STATUSES)
+# **只有收口的那两种要写理由**：`standing` 是「这条还在」，它没有新话要说 —— 要求它也写
+# 一句等于让模型为每条旧结论编一段文字（正是「不要为它补写证据」要防的那件事）。
+CLOSING_STATUSES = (DECLARED_FIXED, DECLARED_OVERTURNED)
 # 一条声明为什么要写理由：这句话是本轮唯一能解释「凭什么说它修好了」的东西，
 # 而它是**给人看的**（平台不复核）。空理由的声明等于没有声明。
 REASON_MAX_CHARS = 200
@@ -109,7 +134,7 @@ def coerce_closures(value: Any) -> tuple[tuple[BaselineClosure, ...], tuple[tupl
         if status not in DECLARED_STATUSES:
             problems.append((f"{fingerprint} · {status}", f"status 只能是 {DECLARED_STATUS_ENUM}"))
             continue
-        if not reason:
+        if status in CLOSING_STATUSES and not reason:
             problems.append((f"{fingerprint} · {status}", "没有写理由 —— 空理由的声明不算收口"))
             continue
         if fingerprint in seen:

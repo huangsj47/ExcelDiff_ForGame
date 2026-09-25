@@ -28,10 +28,17 @@
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, replace
 from typing import Iterable, Mapping, Sequence, Tuple
 
-from services.ai.baseline_closures import DECLARED_STATUS_ENUM
+from services.ai.baseline_closures import (
+    DECLARED_FIXED,
+    DECLARED_OVERTURNED,
+    DECLARED_STANDING,
+    DECLARED_STATUS_ENUM,
+)
 from services.ai.scope import normalize_path
 from services.ai.skill_contract import SEVERITIES
 
@@ -268,14 +275,44 @@ def _render_header(
 # 同一次运行里，只有写在**每轮重发**的那句提醒（`prompt._BASELINE_REMINDER`）里的要求
 # 被照做了：模型确实没把旧结论当新发现报。所以这条要求也放进那句提醒 —— **措辞只此一份，
 # 两处引用**，省得以后改一处漏一处（这正是这条实测的教训：要求写在哪，比写什么更要紧）。
+# 清单条目行末尾那个 `#<16 位十六进制>`（`_render_entry` 是唯一的生产者）。
+# 从渲染好的摘要里读回清单，理由见 `digest_fingerprints`。
+_FINGERPRINT_IN_DIGEST = re.compile(r"#([0-9a-f]{16})\b")
+
+
 CLOSURE_RULE = (
-    "**已经修好（或已被推翻）的那几条，要在最终 JSON 里交一份 `baseline_updates`**："
-    '`[{"fingerprint": "上面那条末尾的 16 位十六进制", '
-    f'"status": "{DECLARED_STATUS_ENUM}", "reason": "凭什么说它修好了 / 被推翻了"}}]`。'
-    "**那是唯一能让一条旧结论从「在挂条目」里出去的通道** —— 只在正文里写一句「已修复」，"
-    "下一轮它仍会被当作「仍然成立的问题」喂回来。平台**不复核**这份声明（所以措辞一律带"
-    "「声明」二字），`reason` 要写成一句可以核对的话（哪次提交、哪个文件的哪一处）。"
+    "**上面清单里的每一条，都要在最终 JSON 的 `baseline_updates` 里给出它现在的状态**"
+    '（清单有几条就要有几条）：`[{"fingerprint": "上面那条末尾的 16 位十六进制", '
+    f'"status": "{DECLARED_STATUS_ENUM}", "reason": "被推翻或修好时写凭什么"}}]`。'
+    f"`{DECLARED_FIXED}` / {DECLARED_OVERTURNED} 要写 `reason`（哪次提交、哪个文件的哪一处），"
+    f"`{DECLARED_STANDING}` 不用写。**这是唯一能让一条旧结论从「在挂条目」里出去的通道**"
+    " —— 只在正文里写一句「已修复」，下一轮它仍会被当作「仍然成立的问题」喂回来。"
+    "平台**不复核**这份声明（所以措辞一律带「声明」二字）。"
+    "**缺了任何一条，平台会把这一轮打回来要求补齐**（与「每个维度都要交代」同一条规矩）。"
 )
+
+
+def digest_fingerprints(digest: str) -> tuple[str, ...]:
+    """基线摘要里印出的那几个指纹（清单条目行末尾的 `#…`）。
+
+    ## 为什么从**渲染好的文本**里读回来，而不是让调用方把清单再传一遍
+
+    这条规则的适用范围就是「**你看到的那份清单**」—— 而「哪几条在清单里」这件事，只有
+    这段文本知道：摘要超长时 `_fit_groups` 会从后往前丢条目，被丢掉的**不在清单里**，
+    也就不该被要求交代。按渲染结果取，规则的范围与模型看到的东西**天然一致**。
+
+    传参那条路（`run_analysis(baseline_fingerprints=…)` → `_RoundBrief` → `parse_payload`）
+    要在**每一条**进模型的路径上各接一次（单代理、家族汇总、分片任务书…），漏接一处就是
+    静默失效 —— 而失效的样子恰好是「平台以为要求过了、模型没收到」。
+
+    `_render_entry` 是唯一的生产者，格式 `#<16 位十六进制>` 有用例钉着（改格式就要改这里）。
+    读不出任何指纹时返回空元组 —— 那表示**这一轮没有清单**，规则随之不生效（不是错误）。
+    """
+    seen: list[str] = []
+    for found in _FINGERPRINT_IN_DIGEST.findall(str(digest or "")):
+        if found not in seen:
+            seen.append(found)
+    return tuple(seen)
 
 
 def _render_entry(item: BaselineFinding) -> str:

@@ -373,7 +373,7 @@ FINAL_JSON = json.dumps(
 )
 
 
-def _run(client, provider, **limit_overrides):
+def _run(client, provider, *, baseline_digest="", **limit_overrides):
     limits = EngineLimits(max_rounds=4, max_tool_requests=10, **limit_overrides)
     return run_analysis(
         client=client,
@@ -381,6 +381,7 @@ def _run(client, provider, **limit_overrides):
         loaded=_loaded(),
         scope=_scope(),
         change_summary=f"本批次 1 个提交，改了 {TABLE}",
+        baseline_digest=baseline_digest,
         limits=limits,
         thresholds=RuleThresholds(),
     )
@@ -606,3 +607,94 @@ def test_skill_md_mid_round_form_is_narrowed():
         assert banned not in example, banned
         assert banned in form_one, f"正文里必须明说 {banned} 属于 final"
     assert "reason_code" in body.split("## 渐进式披露")[1]
+
+
+# --------------------------------------------------------------------------
+# 5. 历史清单必须逐条交代（引擎端：当场要一次，但**不作废结论**）
+# --------------------------------------------------------------------------
+
+# 一份「解析得通、但历史清单一条都没交代」的最终回答。
+DIGEST = chr(10).join(
+    [
+        "# 这个版本截至上次分析已经报过的问题",
+        "共 1 条：仍待处理 1。",
+        "- [high] 【道具】ID 被删除 (config/[30]道具表_CfgItem.xlsx) @aaaaaaaabbbb #deadbeefdeadbeef",
+        "",
+    ]
+)
+
+
+def _final_json(*, updates=None):
+    body = {
+        "status": "final",
+        "reason": "看完了",
+        "report_markdown": chr(10).join(["# 变更理解", "", "## 信息缺口", "", "没有缺口。"]),
+        "dimensions": [{"id": "config_id", "hit": False, "note": "没命中"}],
+        "anomalies": [],
+    }
+    if updates is not None:
+        body["baseline_updates"] = updates
+    return json.dumps(body, ensure_ascii=False)
+
+
+def test_a_final_that_skips_the_history_list_is_sent_back_once():
+    """**这条规矩靠「当场要」才立得住**（真机实测，两次）。
+
+    run 75 / 76：那条要求只写在提示词里时，模型两次都没照做 —— 它在正文里写「另 3 条
+    本轮复核为已修复」，而 `baseline_updates` 是空数组。平台逼得住的是当场要：
+    `dimensions` 一次没漏过，就因为它必填、缺了会被打回。
+
+    判据要两条一起看：**真的重问了一次**，而且**提示里点名了缺的那条指纹**
+    （只说「你漏了」等于让模型自己去猜少了哪个）。
+    """
+    client = RecordingClient(
+        (_final_json(), "stop"),
+        (_final_json(updates=[{"fingerprint": "deadbeefdeadbeef", "status": "standing"}]), "stop"),
+    )
+
+    outcome = _run(client, StubProvider(), baseline_digest=DIGEST)
+
+    assert len(client.calls) == 2, "没有当场要一次 —— 那条规矩又变回「提示词里写着而已」"
+    assert "deadbeefdeadbeef" in client.last_user, "重问时没有点名缺的是哪一条"
+    assert outcome.payload is not None, "结论被作废了（它只是没交代清单，解析是成功的）"
+
+
+def test_the_close_out_answered_this_time_is_not_asked_again():
+    """答全了就一轮收工 —— 这条规矩的成本必须只落在「真的漏了」的那些运行上。"""
+    client = RecordingClient(
+        (_final_json(updates=[{"fingerprint": "deadbeefdeadbeef", "status": "standing"}]), "stop"),
+    )
+
+    _run(client, StubProvider(), baseline_digest=DIGEST)
+
+    assert len(client.calls) == 1
+
+
+def test_no_history_list_means_no_such_requirement():
+    """**没有清单就不该问**：这一条要求的前提是「你看到过那份清单」。
+
+    首跑、用户点了全量、上一轮没有结构化结论 —— 这些情形下 `baseline_digest` 是空的，
+    此时再拿「你没交代清单」去重问，是拿一条不存在的规矩去纠正模型。
+    """
+    client = RecordingClient((_final_json(), "stop"))
+
+    _run(client, StubProvider(), baseline_digest="")
+
+    assert len(client.calls) == 1
+
+
+def test_the_conclusion_is_still_taken_when_the_model_never_answers_the_list():
+    """催了还是不答 —— **照收**。
+
+    这一条是同一天里最难取舍的：不催，那条规矩等于不存在（实测两次）；催到底就作废，
+    代价是整份结构化结论丢掉、降级成只有 markdown —— 比「有几条旧结论没被收口」严重得多。
+    所以额度用完就收下，并在报告那一节如实写「平台没有收到 `baseline_updates`」。
+    """
+    client = RecordingClient((_final_json(), "stop"))  # 永远不补
+
+    outcome = _run(client, StubProvider(), baseline_digest=DIGEST, max_corrections=1)
+
+    assert outcome.payload is not None
+    assert outcome.payload.is_final
+    assert len(client.calls) == 2, "催了一次就该收工（催到底是拿整份结论换一条规矩）"
+    assert outcome.status != "failed"

@@ -58,6 +58,15 @@ from services.ai.claims import (  # noqa: F401 —— Claim 在本模块重新�
 # 中间轮的字段收窄搬到 `mid_round` 了（`protocol.py` 顶着 2000 行的 ERROR 闸门）。
 # `MID_ROUND_FIELDS` 一并回导：它是「中间轮认哪四个字段」的唯一出处，读代码的人会按名字找它。
 from services.ai.mid_round import MID_ROUND_FIELDS, mid_round_drops  # noqa: F401
+
+# 说给模型听的收敛 / 补齐提示搬到 `round_hints` 了（同一个 2000 行 ERROR 闸门的理由）。
+# 在这里回导：既有导入点（`prompt.py` 等）按 `protocol.build_*` 取名字，不必跟着改。
+from services.ai.round_hints import (  # noqa: F401
+    build_baseline_coverage_hint,
+    build_budget_exhausted_hint,
+    build_final_round_hint,
+    build_markdown_reemit_hint,
+)
 from services.ai.reference_search import MIN_QUERY_WEIGHT, normalize_query, query_weight
 from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_contract import (
@@ -272,7 +281,7 @@ class DroppedItem:
 
     `kind` 的取值为 `anomaly` / `dimension` / `request` / `subagent` / `deferred` /
     `unclassified` / `mid_round_field` / `reason` / `reason_code` / `shared_cache` /
-    `evidence` / `claim`。`unclassified` 那一条与其他几种**不是一回事**：那条发现**没有被丢掉**（它在
+    `evidence` / `claim` / `baseline_update` / `baseline_coverage_missing`。`unclassified` 那一条与其他几种**不是一回事**：那条发现**没有被丢掉**（它在
     `payload.anomalies` 里，报告里也列着），这里只是把「为什么它的维度显示成未归类」
     记下来。它借用这一个结构是因为 trace 是平台里唯一一条按条目把记录带到面板上的
     通道（`result_payload` 的 `dropped` → `trace_evidence.summarize_dropped`）。
@@ -649,8 +658,41 @@ def _select_payload_object(parsed: Iterable[Any]) -> dict:
     raise ProtocolError("回答里找不到可解析的 JSON 对象")
 
 
+# 模型没有逐条交代那份历史清单时记的账（`baseline_updates` 缺条目）。
+#
+# 与 `baseline_update` 分开：那一条是「写了但收不下」（形状/枚举/理由不合规），这一条是
+# **根本没写**。两者要采取的动作不同 —— 前者是模型抄错了，后者是它漏了一整块。
+BASELINE_COVERAGE_KIND = "baseline_coverage_missing"
+BASELINE_COVERAGE_REASON = "历史清单里这一条没有给出状态（`baseline_updates` 缺它）"
+
+
+def _baseline_coverage_missing(
+    fingerprints: Iterable[str], closures: Iterable[BaselineClosure]
+) -> tuple[str, ...]:
+    covered = {str(item.fingerprint or "") for item in closures}
+    return tuple(
+        item for item in fingerprints if str(item or "") and str(item) not in covered
+    )
+
+
+def missing_baseline_statuses(payload: AnalysisPayload) -> tuple[str, ...]:
+    """这一份结论**漏交代了哪几条历史清单**（按指纹，原顺序）。
+
+    引擎据此决定要不要当场要求补齐。放在这里而不是让引擎去翻 `dropped`：`kind` 这个
+    字符串只该有一个产地，翻字符串的写法会在改了 kind 之后静默失效。
+    """
+    return tuple(
+        item.detail
+        for item in payload.dropped
+        if item.kind == BASELINE_COVERAGE_KIND and item.detail
+    )
+
+
 def parse_payload(
-    text: str, *, dimension_ids: Iterable[str] = DIMENSION_IDS
+    text: str,
+    *,
+    dimension_ids: Iterable[str] = DIMENSION_IDS,
+    baseline_fingerprints: Iterable[str] = (),
 ) -> AnalysisPayload:
     """把模型回答解析成 `AnalysisPayload`。
 
@@ -659,6 +701,15 @@ def parse_payload(
     `dimension_ids` 是**本次生效的**维度清单（`LoadedSkills.dimensions` 的 id 那一份），
     由引擎传进来；不传就是平台出厂那一份。它**只影响记账**（见 `_coerce_anomalies`），
     不影响任何一条发现的去留 —— 落不进清单的条目照样按原样保留。
+
+    `baseline_fingerprints` 是**这一轮提示词里那份历史清单**的指纹（`baseline.
+    digest_fingerprints` 从渲染好的摘要里读出来的那一份）。给了就要求模型**逐条交代**
+    它们现在的状态（`baseline_updates`），缺哪条就记一条账（`baseline_coverage_missing`），
+    由引擎当场要求补齐（见 `missing_baseline_statuses`）。
+
+    **它只记账、不抛 `ProtocolError`**：这里抛就等于把「少填一个状态」升级成「整份结论
+    作废」（重问额度用尽后会降级成只有 markdown）—— 那比今天的处境更糟。要催是引擎的事，
+    而且催不动时结论照收。
     """
     parsed = parse_json_candidates(text)
     if not parsed:
@@ -708,11 +759,18 @@ def parse_payload(
             DroppedItem("baseline_update", index, reason, detail)
             for index, (detail, reason) in enumerate(closure_problems)
         )
+        dropped_coverage = tuple(
+            DroppedItem(BASELINE_COVERAGE_KIND, index, BASELINE_COVERAGE_REASON, fingerprint)
+            for index, fingerprint in enumerate(
+                _baseline_coverage_missing(baseline_fingerprints, closures)
+            )
+        )
         dropped_entries = (
             dropped_anomalies
             + dropped_dimensions
             + dropped_dispositions
             + dropped_closures
+            + dropped_coverage
         )
 
     if status == STATUS_FINAL:
@@ -1863,85 +1921,4 @@ def build_correction_hint(
         "未命中的写 hit 为 false 并说明理由）；\n"
         "5. 所有自然语言内容使用中文。"
         f"{declared}"
-    )
-
-
-# 三份收敛指令（额度耗尽 / 没有额度 / 最后一轮）共用的尾巴，**必须逐字相同**：
-# 它管的是**交回来的形态** —— 证据不足的维度要按协议写 hit=false，而不是整段省掉。
-# 以前「预算耗尽」那段文案在 prompt 与 protocol 里各有一份、两句话不一样，下场是改一处
-# 漏一处；所以这里只留一份常量。
-_CONVERGE_TAIL = (
-    "对于证据不足的维度，在 dimensions 里写 hit 为 false "
-    "并在 note 里说明「信息不足」，同时在报告里标注信息缺口。"
-)
-
-
-def build_budget_exhausted_hint(*, requests_total: int | None = None) -> str:
-    """**上下文索取额度**耗尽时注入的收敛指令。
-
-    **不报错退出**——模型手上已有的证据通常够写一份报告了，强制它收敛比作废整轮好。
-
-    ## `requests_total == 0` 要换一句话
-
-    「**用完**了」与「**从来没有**」在模型那里会长成同一句话，而模型会把这句话原样转述
-    进报告的信息缺口。项目把上限配成 0 时，它写出来的是「额度用完」，用户据此去查额度
-    怎么会被用完 —— 查不到，因为那是配置。所以 0 这一支明说「没有配置额度」。
-
-    **只管索取额度，不管轮次** —— 轮次先耗尽的那一种见 `build_final_round_hint`。
-    """
-    if requests_total == 0:
-        opening = (
-            "本次分析**没有配置上下文索取额度**（上限 0 次），读不到任何文件内容、"
-            "也做不了跨文件检索。请基于当前已有的证据直接输出 final，禁止请求上下文。"
-        )
-    else:
-        opening = (
-            "补充上下文的预算已耗尽。请基于当前已有的证据直接输出 final，"
-            "禁止继续请求上下文。"
-        )
-    return opening + _CONVERGE_TAIL
-
-
-def build_markdown_reemit_hint() -> str:
-    """把上一条 markdown 报告**原样**转成协议 JSON 的纠正提示。
-
-    引擎原先遇到「模型给了 markdown 而不是 JSON」是直接收工的：正文留下来，结构化结论
-    整份放弃 —— 哪怕还剩三轮、纠正额度一次没用（实测 run 10 的 S3 跑满 8 轮后写成
-    markdown，它负责的 code_logic / version_branch / process 三个维度**一条结构化结论都
-    没进清单**；run 6 也出过同一形态）。而「把上一条原样转成 JSON」比「重新写一份报告」
-    容易得多：内容已经在对话里，模型只需要换一种包装。
-
-    所以措辞的重心是**不许借机重写**（新增/省略/改写都会让已经写实的证据变形），以及
-    只做格式转换、不要再索取上下文。
-    """
-    return (
-        "你上一条回答是一份 **markdown 报告**，而协议要求的是 JSON。"
-        "请把**上一条的内容原样**转成协议 JSON（`status` 为 `final`）：结论、证据、影响、"
-        "建议都要**逐条搬过来**，不要新增、不要省略、不要趁这次重写或合并。"
-        "只输出这个 JSON，不要再索取上下文。" + _CONVERGE_TAIL
-    )
-
-
-def build_final_round_hint(*, round_index: int, max_rounds: int) -> str:
-    """**最后一轮**的收敛指令（轮次先耗尽的那一条路）。
-
-    只按索取额度判「该收尾了」是不够的：额度没花完、轮次先到顶，模型就完全不知道
-    这是最后一条消息 —— 实测 run 10 的 S3 跑满 8 轮（只用了 38/40 次索取）之后写了一段
-    markdown 叙述，而不是协议 JSON：它负责的三个维度（`code_logic` / `version_branch` /
-    `process`）**一条结构化结论都没有**，报告里只能按「跑完了但结论没交回」标出来
-    （见 `family_ledger._shard_gap_lines`）。同一形态在 run 6 已经出过一次，那次是 5 轮。
-
-    ## 为什么要把机制说给模型听
-
-    模型对「还剩 2 次索取」是有判断力的：不说清，它就会把这 2 次花掉。而**最后一轮索取
-    回来的内容要等下一轮才会送到它手上，下一轮不存在** —— 那些内容平台照样去取，只是
-    永远到不了模型眼前。所以这里不是客套地让它「收尾」，而是告诉它这件事实：现在索取
-    等于白花一轮，且这一轮之后没有任何机会再交结论。
-    """
-    return (
-        f"**这是本次分析的最后一条消息（第 {round_index}/{max_rounds} 轮）。**"
-        "你这一轮索取回来的内容要等**下一轮**才会送到你手上，而下一轮不存在 ——"
-        "现在再索取等于把这一轮白白花掉：平台会去取，但你永远看不到。"
-        "所以本轮必须直接输出 final（按协议给 JSON），不要写成 markdown 叙述。"
-        + _CONVERGE_TAIL
     )

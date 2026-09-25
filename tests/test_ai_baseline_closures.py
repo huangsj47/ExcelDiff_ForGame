@@ -8,8 +8,13 @@
 那条又出现在清单里，双方都以为对方处理了。所以这一层把每一条进不来的都连**原文**和
 **原因**一起交回去，由调用方记进 `dropped`（`protocol.parse_payload` → 面板的运行轨迹）。
 
-**2. `None` / 缺键不是错误。** `baseline_updates` 是可选字段：绝大多数轮次里没有旧结论
-可收口，模型不写它就对了。把它记成一条「丢弃」是假账 —— 读的人会去找一份不存在的声明。
+**2. `None` / 缺键在这一层不是错误。** 这一层按「模型给了什么」解析，不做任何要求 ——
+没有清单的轮次（首跑 / 用户点了全量 / 上一轮没有结构化结论）模型不写它就对了，把它记成
+一条「丢弃」是假账（读的人会去找一份不存在的声明）。
+
+**「给了清单就要逐条交代」是引擎在解析之后查的**（`missing_baseline_statuses` → 当场补问
+一次），不在这里抛错：在这里抛等于把「少填一个状态」升级成「整份结论作废」（重问额度用尽
+后会降级成只有 markdown），那比今天的处境更糟。
 
 为什么这一层不自己记进 `dropped`：它不知道账记在哪（协议层记进 `payload.dropped`，
 而 `incremental_baseline` 只用解析结果、不写账），硬塞一个全局账本等于把这个决定
@@ -22,11 +27,12 @@ import json
 from services.ai.baseline_closures import (
     DECLARED_FIXED,
     DECLARED_OVERTURNED,
+    DECLARED_STANDING,
     MAX_CLOSURES,
     REASON_MAX_CHARS,
     coerce_closures,
 )
-from services.ai.protocol import parse_payload
+from services.ai.protocol import missing_baseline_statuses, parse_payload
 
 FP = "0123456789abcdef"
 FP2 = "fedcba9876543210"
@@ -106,7 +112,7 @@ def test_every_unusable_declaration_is_recorded_with_its_reason():
     assert [reason for _, reason in problems] == [
         "这一条不是一个对象",
         "fingerprint 必须是清单里那条末尾的 16 位十六进制",
-        f"status 只能是 {DECLARED_FIXED} | {DECLARED_OVERTURNED}",
+        f"status 只能是 {DECLARED_STANDING} | {DECLARED_FIXED} | {DECLARED_OVERTURNED}",
         "没有写理由 —— 空理由的声明不算收口",
         "同一条结论声明了两次，只留第一条",
     ]
@@ -154,6 +160,63 @@ def test_the_declaration_count_is_capped_and_the_overflow_is_accounted():
     assert len(closures) == MAX_CLOSURES
     assert len(problems) == 3
     assert all(f"一次最多声明 {MAX_CLOSURES} 条" in reason for _, reason in problems)
+
+
+# --------------------------------------------------------------------------
+# 三、逐条枚举：清单里有几条就要几条状态
+# --------------------------------------------------------------------------
+
+
+def test_the_list_from_the_prompt_must_be_answered_item_by_item():
+    """给了清单就要求逐条交代 —— 缺的**逐条记账**（引擎据此当场要一次）。
+
+    真机实测（run 75 / 76）：这条要求只写在提示词里时，模型两次都没照做。所以它现在由
+    引擎在解析**之后**检查、缺了当场补问（`missing_baseline_statuses`）。这一层只负责
+    把「缺了哪几条」说清楚，别的一概不管。
+    """
+    payload = parse_payload(
+        _final(
+            baseline_updates=[
+                {"fingerprint": FP, "status": "standing"},
+                {"fingerprint": FP2, "status": "fixed", "reason": "兜底加回来了"},
+            ]
+        ),
+        baseline_fingerprints=(FP, FP2, "1111222233334444"),
+    )
+
+    missing = missing_baseline_statuses(payload)
+    assert missing == ("1111222233334444",), missing
+    dropped = [item for item in payload.dropped if item.kind == "baseline_coverage_missing"]
+    assert [item.detail for item in dropped] == ["1111222233334444"]
+    # 记账归记账，**结论照收**：少填一个状态不该让整份结论作废。
+    assert payload.is_final and payload.report_markdown
+
+
+def test_standing_needs_no_reason_but_a_close_out_does():
+    """`standing` 是「这条还在」，它没有新话要说 —— 要求它也写理由等于逼模型编一段。
+
+    `reason` 是给人看的「凭什么说它修好了」，而 `standing` 的主张是「什么都没变」，
+    没有可核的东西。
+    """
+    closures, problems = coerce_closures(
+        [
+            {"fingerprint": FP, "status": "standing"},
+            {"fingerprint": FP2, "status": "overturned"},
+        ]
+    )
+
+    assert problems == (("fedcba9876543210 · overturned", "没有写理由 —— 空理由的声明不算收口"),)
+    assert [(item.fingerprint, item.status, item.reason) for item in closures] == [
+        (FP, DECLARED_STANDING, ""),
+    ]
+
+
+def test_no_list_means_nothing_to_answer():
+    """没有清单（首跑 / 全量 / 上一轮没结论）时一个字都不要求。"""
+    payload = parse_payload(_final(), baseline_fingerprints=())
+
+    assert missing_baseline_statuses(payload) == ()
+
 
 
 # --------------------------------------------------------------------------

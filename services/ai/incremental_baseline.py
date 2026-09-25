@@ -15,6 +15,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from services.ai.baseline_closures import (
     DECLARED_FIXED,
+    DECLARED_STANDING,
     BaselineClosure,
     coerce_closures,
 )
@@ -153,22 +154,32 @@ def _declared_state(closure: BaselineClosure) -> str:
 
 def _split_declarations(
     merged: Mapping, old_rows: Sequence[Mapping]
-) -> tuple[dict[str, BaselineClosure], list[BaselineClosure]]:
-    """模型的收口声明分成「对得上清单的」与「对不上的」。
+) -> tuple[dict[str, BaselineClosure], dict[str, BaselineClosure], list[BaselineClosure]]:
+    """模型的逐条交代分成三堆：`(要收口的, 说仍成立的, 对不上的)`。
 
     对不上的那批**一条都不生效**，但会被如实记账并写进报告那一节 —— 模型以为自己关掉了
     一条，而平台什么都没做，是这条通道最坏的失效形态（说了等于没说，双方都以为成了）。
+
+    `standing`（说仍成立）单列一堆：它**不关闭任何东西**，作用只是「这一条模型答过了」。
+    两处读它：一是报告那一节据此判断「平台这一轮到底有没有收到交代」（见 `_report_section`），
+    二是这一条照旧走「文件变了没」那条判定 —— 一句 `standing` 不抵消「相关文件又变了、
+    证据已过期」那个信号（模型未必重看了那个文件）。
     """
     closures, _problems = coerce_closures(merged.get("baseline_updates"))
     known = {str(row.get("fingerprint") or "") for row in old_rows}
-    matched: dict[str, BaselineClosure] = {}
+    closing: dict[str, BaselineClosure] = {}
+    standing: dict[str, BaselineClosure] = {}
     unmatched: list[BaselineClosure] = []
     for item in closures:
-        if item.fingerprint in known and item.fingerprint not in matched:
-            matched[item.fingerprint] = item
-        else:
+        if item.fingerprint not in known:
             unmatched.append(item)
-    return matched, unmatched
+            continue
+        bucket = standing if item.status == DECLARED_STANDING else closing
+        if item.fingerprint in closing or item.fingerprint in standing:
+            unmatched.append(item)  # 同一条答了两遍，第二遍不算
+            continue
+        bucket[item.fingerprint] = item
+    return closing, standing, unmatched
 
 
 def _declared_row(
@@ -253,8 +264,10 @@ def _report_section(
         f"{len(groups[state])} 条{label}" for state, label in labels if groups[state]
     )
     ignored = int((reconciliation or {}).get("declarations_ignored") or 0)
-    declared = int((reconciliation or {}).get("declared_fixed") or 0) + int(
-        (reconciliation or {}).get("declared_overturned") or 0
+    answered = (
+        int((reconciliation or {}).get("declared_standing") or 0)
+        + int((reconciliation or {}).get("declared_fixed") or 0)
+        + int((reconciliation or {}).get("declared_overturned") or 0)
     )
     undetermined = len(groups[STATE_RECHECK]) + len(groups[STATE_CARRIED])
     clauses: list[str] = []
@@ -265,7 +278,7 @@ def _report_section(
             f"另有 {ignored} 条收口声明**没有生效**（指纹对不上本次清单里的条目，"
             "或同一条又被重新报成了结论）。"
         )
-    if not declared and undetermined:
+    if not answered and undetermined:
         # **平台这一轮一条结构化收口都没收到**，而清单里还有没定论的条目 —— 把这件事说出来。
         #
         # 为什么非说不可（2026-09-25 真机，两次复现）：模型会在正文里写「某几条已修复」
@@ -278,8 +291,9 @@ def _report_section(
         # 会出现在多数报告里（多数轮次本来就没人声明收口）—— 那不是噪音，那是这条通道
         # 当前的真实状态：正文里那句话与平台的账是**两件事**，读者必须知道。
         clauses.append(
-            "本轮**没有收到任何结构化收口声明** —— 正文里若写着某几条「已修复」，"
-            "那只是模型的话（平台不复核、也读不到），在平台的账里它们仍在挂。"
+            "本轮**没有收到 `baseline_updates`**（清单上的条目一条都没有交代）—— "
+            "正文里若写着某几条「已修复」，那只是模型的话（平台不复核、也读不到），"
+            "在平台的账里它们仍在挂。"
         )
     tail = "".join(clauses)
     lines = [
@@ -353,7 +367,7 @@ def reconcile_result(
     # 声明只对**本次清单里真的有**的指纹生效。对不上清单的（模型的指纹写错、或对的是更早
     # 那一轮的条目）一条都不生效，但**要记账**：否则模型以为自己关掉了一条，而平台当没
     # 看见 —— 那正是这条通道要消灭的那种「说了等于没说」。
-    declared, unmatched = _split_declarations(merged, old_rows)
+    declared, standing, unmatched = _split_declarations(merged, old_rows)
     used: set[str] = set()
 
     for old in old_rows:
@@ -403,6 +417,13 @@ def reconcile_result(
             continue
         state = STATE_RECHECK if file_changed else STATE_CARRIED
         item = _historical_anomaly(old, state, previous_run_id)
+        # 模型**明确答过**「这一条仍成立」（`standing`）：照旧挂在清单里，只是把这件事记在
+        # 行上 —— 报告那一节据此知道「平台这一轮收到过交代」，不必再补那句「没有收到」。
+        # 它**不抵消**上面那个 `file_changed` 判断：`standing` 只说「这条还在」，没有说
+        # 「我重看过那个刚变过的文件」。
+        if str(old.get("fingerprint") or "") in standing:
+            item["declared_status"] = DECLARED_STANDING
+            used.add(str(old.get("fingerprint") or ""))
         anomalies.append(item)
         final_findings.append(_final_row(item))
         groups[state].append(item)
@@ -418,6 +439,7 @@ def reconcile_result(
         "reconfirmed": len(groups[STATE_RECONFIRMED]),
         "carried_forward": len(groups[STATE_CARRIED]),
         "needs_recheck": len(groups[STATE_RECHECK]),
+        "declared_standing": len(standing),
         "declared_fixed": len(groups[STATE_DECLARED_FIXED]),
         "declared_overturned": len(groups[STATE_DECLARED_OVERTURNED]),
         # 对不上清单的 + 声明了却又把同一条重新报成结论的（后者以前者同样的方式记账）。
