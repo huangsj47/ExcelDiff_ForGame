@@ -21,9 +21,6 @@ from models import (
     db,
 )
 from models.ai_analysis import (
-    # 「用户点了全量」那一个取值（`run_weekly_analysis_background` 的判据）：
-    # 常量只有一份，在 `models/ai_analysis/job.py`，本文件不另立字面量。
-    MODE_FULL,
     AiAnalysisAnomaly,
     AiAnalysisRun,
     AiAnalysisTrace,
@@ -65,13 +62,13 @@ from services.ai.auto_sizing import (
 # 那一行**。写在 `from … import (` 那一行盖不住按名字报的 F401，`ruff check --fix` 会把
 # 测试要用的别名当垃圾删掉（真发生过：它删掉了 `_complete_coverage_ratio`，而
 # `tests/test_ai_diff_snapshot_baseline.py` 按那个名字断言「阈值可配置」）。
-from services.ai.baseline_blocks import (
-    advance_weekly_state,
-    resolve_baseline,
-    seal_target_snapshot,
-)
+from services.ai.baseline import FORCE_FULL_REASON, FORCE_FULL_REBUILD_REASON
 from services.ai.baseline_blocks import (
     complete_coverage_ratio as _complete_coverage_ratio,  # noqa: F401 —— 测试按这个名字取
+)
+from services.ai.baseline_blocks import (
+    resolve_baseline,
+    seal_target_snapshot,
 )
 from services.ai.baseline_blocks import (
     snapshot_digest_for as _snapshot_digest_for,
@@ -94,6 +91,7 @@ from services.ai.baseline_source import (
     baseline_findings as _baseline_findings,  # noqa: F401 —— 测试按这个名字 import
 )
 from services.ai.baseline_source import (
+    has_previous_conclusion,
     previous_anomaly_rows,
 )
 from services.ai.baseline_source import (
@@ -176,7 +174,7 @@ from services.ai.latest_result import (
     _read_latest_result,  # noqa: F401 —— 路由与测试按属性名取用
     _stale_note,  # noqa: F401 —— 测试按属性名取用
     get_latest_commit_result,  # noqa: F401 —— 路由与测试按属性名取用
-    get_latest_weekly_result,
+    get_latest_weekly_result,  # noqa: F401 —— 测试按属性名取用（`_reusable_conclusion` 搬走后本文件不再直接调）
     select_primary_weekly_config,  # noqa: F401 —— 调用点与测试仍在用
 )
 from services.ai.llm_client import LLMError
@@ -246,6 +244,16 @@ from services.ai.subagent import (
 )
 from services.ai.trace_evidence import encode_evidence
 from services.ai.usage import encode_tools
+
+# 周版本运行期的四个判定搬去了 `weekly_run_decisions`（2026-09-25：本文件贴着长度闸门）。
+# **必须在这里回导**：调用点仍在本文件，而测试按 `ai_service._update_weekly_state` /
+# `._requests_full_analysis` 取用与打补丁 —— 名字不在**这个**模块上，补丁就会静默失效。
+from services.ai.weekly_run_decisions import (  # noqa: F401 —— 见上
+    _requests_full_analysis,
+    _reusable_conclusion,
+    _update_weekly_state,
+    _weekly_focus_for_task,
+)
 from services.ai.weekly_sync_gate import group_config_ids, weekly_sync_in_flight
 from utils.logger import log_print
 
@@ -366,6 +374,7 @@ def build_weekly_payload(
     config_id: int,
     *,
     force_full: bool = False,
+    force_full_reason: str = FORCE_FULL_REASON,
     focus: Optional[str] = None,
 ) -> Tuple[Optional[dict], Optional[AiWeeklyAnalysisState], Optional[str]]:
     config = WeeklyVersionConfig.query.get_or_404(config_id)
@@ -384,7 +393,9 @@ def build_weekly_payload(
     # **做差的基准是快照，不是时间水位线**（AI-P0-02）。`force_full` 时永远是 None ——
     # 全量模式不看基线。退回时间水位线的只有一种情形：这个分组还没有任何冻结快照
     # （升级上来的老分组），见 `baseline_blocks.resolve_baseline`。
-    baseline, baseline_account = resolve_baseline(group_key, state, force_full=force_full)
+    baseline, baseline_account = resolve_baseline(
+        group_key, state, force_full=force_full, force_full_reason=force_full_reason
+    )
     summary, details, skip_reason = _summarize_weekly_files(
         configs,
         baseline,
@@ -1538,7 +1549,9 @@ def _run_engine_and_persist(
             result, project_config=project_config, payload=payload
         )
     baseline_account = payload.get("baseline") or {}
-    if baseline_account.get("kind") == "snapshot":
+    # 对账的判据是**「有没有上一轮结论可比」**，不是「做差基准是不是快照」——
+    # 两件事不一样，判据与理由写在 `baseline_source.has_previous_conclusion` 里。
+    if has_previous_conclusion(baseline_account):
         previous = _previous_run(target_type, target_key)
         if previous is not None:
             # 行形状**不许在这里手抄**（`previous_anomaly_rows` 的 docstring 写着那次实测：
@@ -1804,8 +1817,16 @@ def run_weekly_analysis_background(
                     "reason": "no_change",
                     "reused_run_id": reusable.id,
                 }
+            # **平台自己决定的全量重看**，与上面「用户点了全量」不是同一件事：这里用户
+            # 点的是增量，只是「输入一字未变、而上一轮结论不可复用（规则/模型换过）」，
+            # 拿旧快照做差没有意义了。所以**旧结论照样要进模型输入** —— 用另一个 reason
+            # 把它与「从零重判」分开（真机 run 68：借用了 force_full 的语义，报告退化成
+            # 首跑，继承 0 条）。见 `baseline` 模块两个常量的说明。
             payload, state, skip_reason = build_weekly_payload(
-                config_id, force_full=True, focus=focus
+                config_id,
+                force_full=True,
+                force_full_reason=FORCE_FULL_REBUILD_REASON,
+                focus=focus,
             )
     if payload is None:
         # **把真实的理由带出去**（`no_configs` / `focus_empty`）：一律压成 `payload_empty`
@@ -1899,98 +1920,3 @@ def run_weekly_analysis_background(
         "run_id": run.id,
         "error_message": result.get("error_message") or None,
     }
-
-
-def _requests_full_analysis(requested_mode) -> bool:
-    """用户**明确**要求全量吗。
-
-    只认 `full`（`models.ai_analysis.MODE_FULL` 那一个字面值）：`None` / `incremental`
-    / 认不出来的值一律返回 False —— 这一支的默认行为是「平台自己裁决」，
-    把脏值当全量的后果是**静默多花钱**（全量不看基线、不增量）。
-    """
-    return str(requested_mode or "").strip().lower() == MODE_FULL
-
-
-def _weekly_focus_for_task(task_id, focus):
-    """这次分析的范围：显式给的优先，否则读它那条 job。
-
-    `focus` 只落在 `AiAnalysisJob.focus` 上，而任务行上有 `job_id` —— 所以执行侧
-    只要拿到 `task_id` 就能把用户选的范围读回来，**不需要改
-    `create_weekly_ai_analysis_task` / `register_waiting_analysis_intent` 的签名**。
-    取用与判据都在 `job_service.focus_for_task`（含「任务行上那一列可能是意图 id」
-    那一坑的处置）。
-
-    读不到就返回 `None` = **不筛**：范围是**缩窄**输入的东西，读不到它只会让这次分析
-    看全，不会让它看漏（看漏才是那个「静默把一半输入丢掉」的缺陷）。
-    """
-    if focus:
-        return focus
-    if task_id is None:
-        return None
-    try:
-        from services.ai.job_service import focus_for_task
-
-        return focus_for_task(task_id)
-    except Exception as exc:  # noqa: BLE001 —— 读不到范围不该让这次分析起不来
-        log_print(
-            f"⚠️ 周版本分析：读不到这次分析的范围（按「不筛」处理）: "
-            f"task_id={task_id}, {type(exc).__name__}: {exc}",
-            "AI",
-            force=True,
-        )
-        return None
-
-
-def _update_weekly_state(
-    payload: dict,
-    run: AiAnalysisRun,
-    state: Optional[AiWeeklyAnalysisState],
-    *,
-    engine_status: Optional[str],
-) -> None:
-    """推进这个周版本分组的指针（**三路**，判据是引擎状态）。
-
-    ## 为什么判据只能是 `engine_status`
-
-    它是「模型这次**读全了没有**」的判据，而 `run.status` 回答的是「这次**交付**是什么
-    形态」（succeeded / degraded / failed，见 `_persist_outcome`）—— 两把尺子。降级
-    （例如「上下文索取额度用尽，基于已有证据出结论」）恰恰是最不该推进时间水位线的
-    那一类：线上有一次 767 个文件里有 748 个 `.lua` 的 diff 根本没读到，却被标成
-    「已分析」，增量从此只看得到水位线之后的新文件。
-
-    ## 三路（AI-P0-02 把「一个值当三件事用」拆开了）
-
-    * **succeeded** → 时间水位线 + 运行号 + 结论基线 + （达标时）完整覆盖指针 + 指纹；
-    * **degraded** → **只推结论基线**（且必须是结构化结论）+ 指纹；时间水位线与完整覆盖
-      指针都不推 —— 降级结论可以当下一轮的基线，但**不能伪装为完整覆盖**；
-    * **失败 / 认不出来的状态** → 一个都不推，**连指纹也不写**（写了指纹，调度器下一轮
-      就会以「输入逐字相同」跳过它，而这个版本其实一次都没跑成）。
-
-    具体实现在 `services/ai/baseline_blocks.advance_weekly_state`（本文件贴着长度闸门）。
-    """
-    advance_weekly_state(payload, run, state, engine_status=engine_status)
-
-
-def _reusable_conclusion(
-    config_id: int, state: Optional[AiWeeklyAnalysisState]
-) -> Optional[AiAnalysisRun]:
-    """没有新变化时该复用的那条结论。
-
-    **先看状态行的结论基线指针**（`last_concluded_run_id`），它才是「上一轮那份可复用的
-    结论」；指针指不到或那条不可用了，才退回读侧口径（`get_latest_weekly_result`）。
-
-    复用的前提是 `_is_run_fresh`：交付形态有结论 + 有内容 + 没过保留期 + 溯源一致。
-    **复用不建 run**，所以它同时也是「没有新变化不花钱」这条验收的实现位置。
-    """
-    pointer = getattr(state, "last_concluded_run_id", None) if state else None
-    candidate = db.session.get(AiAnalysisRun, pointer) if pointer else None
-    if candidate is not None and _is_run_fresh(candidate):
-        return candidate
-
-    cached = get_latest_weekly_result(config_id)
-    run_id = (cached or {}).get("run_id") if isinstance(cached, dict) else None
-    fallback = db.session.get(AiAnalysisRun, run_id) if run_id else None
-    if fallback is not None and _is_run_fresh(fallback):
-        return fallback
-    return None
-

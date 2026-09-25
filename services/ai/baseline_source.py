@@ -47,6 +47,7 @@ from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
 from services.ai.baseline import (
     DISPOSITION_PENDING,
     FORCE_FULL_REASON,
+    FORCE_FULL_REBUILD_REASON,
     BaselineFinding,
     build_baseline_digest,
     classify,
@@ -182,12 +183,33 @@ def run_ignores_history(baseline_account: Optional[Mapping[str, Any]]) -> bool:
     仍在同一快照上、结论可比，旧结论**必须**照常注入（有测试钉着，见模块 docstring）。
     老分组的 `watermark` 过渡态同样不关 —— 它不是用户要的全量。
 
+    **平台自己升的那次全量重看不在此列**（`FORCE_FULL_REBUILD_REASON`，2026-09-25 加的）：
+    那一档用户点的是增量，只是「输入没变、而上一轮结论不可复用」，旧结论一条都没失效 ——
+    它必须照常注入（真机 run 68 借用了这一档的语义，报告退化成首跑、继承 0 条）。所以这里
+    **只认 `FORCE_FULL_REASON` 这一个字面值**，不要写成「reason 以 force_full 开头」之类。
+
     `None` / 缺键 / 脏值一律**不关**（保守：宁可多带一次旧结论，也不要因为账上一个
     字段没读到就静默改变一次全量评审的输入）。
     """
     if not isinstance(baseline_account, Mapping):
         return False
     return str(baseline_account.get("reason") or "") == FORCE_FULL_REASON
+
+
+def has_previous_conclusion(baseline_account: Optional[Mapping[str, Any]]) -> bool:
+    """这次运行**有没有上一轮结论可以对照** —— 决定要不要做「历史结论延续（平台）」那一节。
+
+    **判据不是「做差基准是不是快照」**（那是取数侧的事）。平台自己升的那次全量重看
+    （`FORCE_FULL_REBUILD_REASON`）做差基准是 `None`，但上一轮结论仍在、这份报告仍然是
+    「这个版本截至现在的这一份」—— 少了它，那一节连同「需要重新确认」的清单一起从报告里
+    消失（真机 run 68 就是这个形状）。用户显式点的全量则相反：它要求从零重判，
+    `baseline_digest` 整段不给，对账也就无从谈起。
+    """
+    if not isinstance(baseline_account, Mapping):
+        return False
+    if str(baseline_account.get("reason") or "") == FORCE_FULL_REBUILD_REASON:
+        return True
+    return str(baseline_account.get("kind") or "") == "snapshot"
 
 
 def baseline_digest(
@@ -219,8 +241,19 @@ def baseline_digest(
         target_type, target_key, previous_run(target_type, target_key)
     )
     note = ""
-    if skipped:
+    # 平台自己升的那次全量重看：清单照样给（判据见 `run_ignores_history`），但要交代
+    # **这一轮的口径变了** —— 重看一遍的全部意义就是按新规则重判，模型不知道就会照抄
+    # 旧结论的等级与依据。
+    reason = str((baseline_account or {}).get("reason") or "")
+    if reason == FORCE_FULL_REBUILD_REASON:
         note = (
+            "（本轮是**全量重看**：上一轮那份结论本轮不能直接复用（评审规程或模型换过，"
+            "或者它没留下可比对的结论），平台把这份内容整个重看了一遍。下面这份清单是"
+            "本版本截至上一轮报过的问题 —— 逐条给出现在的状态，**并按本轮的规则重新判断**"
+            "它的等级与依据，不要照抄旧等级。）"
+        )
+    if skipped:
+        note += (
             f"（这中间有 {skipped} 次分析**没有给出可比对的结论**"
             "——模型没按协议输出，只留下一份 markdown 报告。所以上面的清单是更早那次"
             "留下的，**不代表这中间没有问题**。）"

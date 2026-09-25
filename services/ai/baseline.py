@@ -58,6 +58,21 @@ DEFAULT_BASELINE_CHARS = 6_000
 # 都能 import 它而不产生环，两处各写一个字面量迟早会漂。
 FORCE_FULL_REASON = "force_full"
 
+# 运行账上 `baseline.reason` 的**第二个**取值：**平台自己决定的全量重看**。
+#
+# 两个 `force_full` 的**语义不同**，所以账上必须分得开（真机 run 68 的实测）：
+#
+#   * 用户显式点全量 → `FORCE_FULL_REASON`：语义是**从零重判**，旧结论不该进模型输入
+#     （理由见 `baseline_source` 的模块 docstring，那里记着一次真实的注入事故）；
+#   * 输入没变、而上一轮结论不可复用 → **这个**：用户点的是**增量**，平台只是发现
+#     「拿旧快照做差没有意义了」，于是把这份内容**重新看一遍**。旧结论在这件事上
+#     一条都没失效 —— 报告仍然是「这个版本截至目前的那一份」，那批问题仍然要带上。
+#
+# run 68 的形态：`baseline = {"kind":"none","reason":"force_full"}`、快照与上一轮**同一份**
+# （输入一字未变）、`基线继承 0 条` —— 报告退化成首跑，模型手里一份历史清单都没有。
+# 根因就是这里只有一个取值：平台自己升的那次，借用了「用户点了全量」的语义。
+FORCE_FULL_REBUILD_REASON = "force_full_rebuild"
+
 _STATE_ORDER = (STATE_NEEDS_RECHECK, STATE_OPEN, STATE_SUPPRESSED)
 
 # 短标签用于计数行与分组标题，补充说明只在有内容时才拼在后面（不拼成双层括号）。

@@ -41,7 +41,7 @@ import pytest
 from app import app as flask_app
 from app import create_tables, db
 from models import Project
-from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
+from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun, AiAnalysisTrace
 from services.ai_analysis_service import (
     _baseline_digest,
     _baseline_findings,
@@ -326,6 +326,127 @@ def test_human_suppression_survives_a_user_requested_full(ctx):
         _cleanup([older.id])
 
 
+def test_a_platform_rebuilt_full_still_carries_the_history(ctx):
+    """**平台自己升的那次全量重看照样带历史**（2026-09-25，真机 run 68）。
+
+    那一档的真实形状：用户点的是**增量**，输入与上一轮**一字未变**（快照还是同一份），
+    而上一轮结论本轮不可复用（评审规程/模型换过，或它没留下可比对的结论）——
+    于是平台把这份内容整个重看一遍。它写进账里的 reason 原来借用的是 `force_full`
+    （「用户点了全量」），后果是 `基线继承 0 条`、报告退化成首跑、模型手里一份历史
+    清单都没有。现在两档用两个 reason 分开。
+
+    判据落在**两件事**上：清单要在（否则老问题从报告里消失），口径变了也要说
+    （不然模型照抄旧等级与依据 —— 重看一遍的意义正是按新规则重判）。
+    """
+    from services.ai.baseline import FORCE_FULL_REASON, FORCE_FULL_REBUILD_REASON
+
+    project = _project()
+    key = f"g-{uuid.uuid4().hex[:8]}"
+    older = _run(project.id, key, structured=True, marker="OLDER")
+    db.session.commit()
+    try:
+        change = _empty_change()
+        # 先证明这份历史本来就会被注入（不然「在」这条断言可能因为压根没取到而假绿）
+        assert "OLDER 的问题" in _baseline_digest("weekly", key, change)
+
+        digest = _baseline_digest(
+            "weekly",
+            key,
+            change,
+            baseline_account={"kind": "none", "reason": FORCE_FULL_REBUILD_REASON},
+        )
+        assert "OLDER 的问题" in digest, (
+            "平台自己升的全量重看把旧结论关掉了 —— 报告会退回首跑（run 68 就是这样）"
+        )
+        assert "全量重看" in digest and "重新判断" in digest, (
+            f"没交代这一轮的口径变了，模型会照抄旧等级：{digest!r}"
+        )
+        # 用户显式点的全量照旧一个字都不给（两条路各走各的，别互相带偏）
+        assert (
+            _baseline_digest(
+                "weekly",
+                key,
+                change,
+                baseline_account={"kind": "none", "reason": FORCE_FULL_REASON},
+            )
+            == ""
+        )
+    finally:
+        _cleanup([older.id])
+
+
+def test_the_two_force_full_reasons_are_written_by_the_two_call_sites(ctx):
+    """两个 `force_full` 的写入方各写各的 reason —— 只改一边的表现是**静默**的。
+
+    `resolve_baseline` 在 `force_full=True` 下做的事两档一样（都返回 None），分的是写进
+    账的 `reason`，而 `reason` 是读侧「旧结论要不要进模型输入」的唯一判据。所以这里
+    断言的是**接口**：默认值仍是「用户点了全量」，而平台那次重建必须显式传另一个值。
+    """
+    import inspect
+
+    from services import ai_analysis_service
+    from services.ai import baseline_blocks
+    from services.ai.baseline import FORCE_FULL_REASON, FORCE_FULL_REBUILD_REASON
+
+    signature = inspect.signature(baseline_blocks.resolve_baseline)
+    assert signature.parameters["force_full_reason"].default == FORCE_FULL_REASON, (
+        "默认值变了：没显式传 reason 的调用方会静默改成「不要历史」或相反"
+    )
+    _, account = baseline_blocks.resolve_baseline(
+        "g-x",
+        None,
+        force_full=True,
+        force_full_reason=FORCE_FULL_REBUILD_REASON,
+    )
+    assert account["reason"] == FORCE_FULL_REBUILD_REASON, account
+    _, default_account = baseline_blocks.resolve_baseline("g-x", None, force_full=True)
+    assert default_account["reason"] == FORCE_FULL_REASON, default_account
+
+    # 平台那次重建的调用点必须传新值（中间任何一层漏传，reault 都会退回默认值）
+    rebuild_source = inspect.getsource(ai_analysis_service)
+    assert "force_full_reason=FORCE_FULL_REBUILD_REASON" in rebuild_source, (
+        "平台自己那次重建没有传 reason —— 它会退回默认值，历史又被关掉了"
+    )
+
+
+@pytest.mark.parametrize(
+    "account,expected",
+    [
+        (None, False),
+        ({}, False),
+        ("snapshot", False),  # 脏值（不是映射）不算
+        ({"kind": "snapshot"}, True),
+        ({"kind": "snapshot", "complete": False}, True),
+        ({"kind": "watermark"}, False),  # 老分组过渡态：没有快照可比
+        ({"kind": "none"}, False),  # 真首跑
+        ({"kind": "none", "reason": "force_full"}, False),  # 用户要的是从零重判
+        ({"kind": "none", "reason": "force_full_rebuild"}, True),  # 平台升的：结论还在
+    ],
+    ids=[
+        "没有账",
+        "空账",
+        "脏值不是映射",
+        "快照基线",
+        "快照基线未达标",
+        "老分组水位线",
+        "真首跑",
+        "用户点全量",
+        "平台自己升的全量重看",
+    ],
+)
+def test_the_reconciliation_gate_reads_history_not_the_difference_baseline(account, expected):
+    """要不要做「历史结论延续（平台）」那一节，判据是**有没有上一轮结论**。
+
+    容易写错的那一版是拿「做差基准是不是快照」当判据 —— 它对平台自己升的那次全量重看
+    会判成「没有历史」，于是那一节连同「需要重新确认」的清单一起从报告里消失
+    （真机 run 68 的形状）。反过来，对**用户显式点的全量**它必须判 False：那一档要求
+    从零重判，摘要整段不给，对账也就无从谈起。
+    """
+    from services.ai.baseline_source import has_previous_conclusion
+
+    assert has_previous_conclusion(account) is expected
+
+
 @pytest.mark.parametrize(
     "account,expected",
     [
@@ -338,6 +459,9 @@ def test_human_suppression_survives_a_user_requested_full(ctx):
         ({"kind": "none", "reason": "Force_Full"}, False),  # 大小写不宽容
         ({"kind": "none", "reason": None}, False),
         ("force_full", False),  # 脏值（不是映射）不许当成命中
+        # 平台自己升的那次全量重看：用户点的是**增量**，旧结论一条都没失效（2026-09-25）
+        ({"kind": "none", "reason": "force_full_rebuild"}, False),
+        ({"kind": "none", "reason": "force_full_rebuild", "complete": False}, False),
     ],
     ids=[
         "没有账",
@@ -349,6 +473,8 @@ def test_human_suppression_survives_a_user_requested_full(ctx):
         "大小写不同",
         "reason 是 None",
         "脏值不是映射",
+        "平台自己升的全量重看",
+        "平台自己升的全量重看（带 complete）",
     ],
 )
 def test_the_predicate_only_fires_on_an_explicit_full(account, expected):
@@ -361,3 +487,88 @@ def test_the_predicate_only_fires_on_an_explicit_full(account, expected):
 
     assert run_ignores_history(account) is expected
 
+
+
+@pytest.mark.parametrize(
+    "reason_literal,expect_section",
+    [("force_full_rebuild", True), ("force_full", False)],
+    ids=["平台自己升的全量重看：要出", "用户点的全量：不出"],
+)
+def test_the_reconcile_section_follows_the_account(ctx, monkeypatch, reason_literal, expect_section):
+    """**接线**：「历史结论延续（平台）」那一节出不出现，判据是账上写的 **reason**。
+
+    为什么单测判据不够（`test_the_reconciliation_gate_reads_history_not_the_difference_baseline`
+    已经把 `has_previous_conclusion` 本身钉死了）：**判据函数对了、接线没换**，那一节照样
+    从报告里消失，而没有任何单测会红 —— 那正是 run 68 的形状（当时的判据写在调用点上，
+    是 `baseline_account.get("kind") == "snapshot"`，对重建档永远为假）。
+
+    两臂的差别**只有账上那一格**：同样的项目、同样的上一轮结论、同样由
+    `_run_engine_and_persist` 这一条真链跑到落库，只有 `build_weekly_payload` 的
+    `force_full_reason` 不同。所以它同时证明「这一档是活的」与「两档分得开」——
+    只钉一臂的写法在判据永远返回 False 时也是绿的。
+    """
+    from services import ai_analysis_service as ai_service
+    from services.ai.baseline import FORCE_FULL_REASON, FORCE_FULL_REBUILD_REASON
+    from services.ai_analysis_service import build_weekly_group_key
+    from tests.test_ai_analysis_service import _FakeClient
+    from tests.test_ai_run_budget_warning import _prepare_weekly_run
+
+    reason = {
+        "force_full_rebuild": FORCE_FULL_REBUILD_REASON,
+        "force_full": FORCE_FULL_REASON,
+    }[reason_literal]
+
+    with flask_app.app_context():
+        create_tables()
+        _ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
+        monkeypatch.setattr(
+            ai_service, "build_endpoint_client", lambda *a, **k: (_FakeClient(), [])
+        )
+        # 上一轮：真的跑一次（它留下的那条异常就是「历史结论」）。
+        first = ai_service.run_weekly_analysis_background(cfg.id)
+        assert first["status"] == "succeeded", first
+
+        # 这一次的输入由**真实的组装函数**产出（不手抄行形状）—— 只差 reason 那一格。
+        payload, _state, _skip = ai_service.build_weekly_payload(
+            cfg.id, force_full=True, force_full_reason=reason
+        )
+        # **先证明这一臂真的在它该在的档上**，否则下面那条断言可能因为压根没进这条路而假绿。
+        assert payload["baseline"]["reason"] == reason, payload["baseline"]
+
+        key = build_weekly_group_key(cfg)
+        run = AiAnalysisRun(
+            project_id=project.id, target_type="weekly", target_key=key, status="running"
+        )
+        db.session.add(run)
+        db.session.flush()
+        try:
+            result = ai_service._run_engine_and_persist(
+                run,
+                project_id=project.id,
+                payload=payload,
+                project_config=ai_service.get_project_analysis_config(project.id),
+                target_type="weekly",
+                target_key=key,
+            )
+            markdown = result["report_markdown"]
+            section = "## 历史结论延续（平台）"
+            if not expect_section:
+                assert section not in markdown, (
+                    "用户点了从零重判，对账那一节却还在 —— 两档没分开"
+                )
+                return
+            assert section in markdown, (
+                "平台自己升的全量重看丢了「历史结论延续（平台）」那一节 —— run 68 就是这样"
+            )
+            # 那一节要**真的数上了上一轮那条**（不是空壳）：假 client 每跑必报同一条，
+            # 所以这里恒为 1 条。逐条标题不在这里列（2026-09-25 起它退回「账」的角色，
+            # 只列「需要重新确认」的那几条），计数与指路才是它的正文。
+            assert "共 1 条" in markdown, markdown[-1500:]
+            assert "逐条清单以正文的「风险评估」为准" in markdown, markdown[-1500:]
+        finally:
+            # 落库会带出逐轮 trace 与逐条异常：**先删子行再删 run**，否则外键拦住
+            # （这个库是会话级共用的，留下一条也够把后面的用例带红）。
+            AiAnalysisTrace.query.filter_by(run_id=run.id).delete()
+            AiAnalysisAnomaly.query.filter_by(run_id=run.id).delete()
+            AiAnalysisRun.query.filter_by(id=run.id).delete()
+            db.session.commit()

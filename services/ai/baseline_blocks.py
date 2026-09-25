@@ -53,7 +53,11 @@ def _parse_iso(raw) -> Optional[datetime]:
 
 
 def resolve_baseline(
-    group_key: str, state: Optional[AiWeeklyAnalysisState], *, force_full: bool = False
+    group_key: str,
+    state: Optional[AiWeeklyAnalysisState],
+    *,
+    force_full: bool = False,
+    force_full_reason: str = FORCE_FULL_REASON,
 ) -> Tuple[object, dict]:
     """这次做差的基准，以及写进 payload 的那一份账 `(baseline, account)`。
 
@@ -62,9 +66,21 @@ def resolve_baseline(
 
     `force_full` 时**永远返回 None** —— 全量模式不看基线（复测文档 :165：
     「全量模式始终新建目标快照上的完整分析任务」）。
+
+    ## `force_full_reason` 是给**下游**读的（2026-09-25）
+
+    这一层只关心「做差基准给不给」，两档 `force_full` 在这儿做的事**一模一样**（都返回
+    `None`）。但对下游不是：`reason` 是 `baseline_source.run_ignores_history` 的判据，
+    而它的语义是「旧结论要不要进模型输入」。所以写入方必须说清是哪一档 —— 默认值保持
+    `FORCE_FULL_REASON`（用户点了全量），平台自己那次重建传
+    `FORCE_FULL_REBUILD_REASON`（见 `baseline` 模块里两个常量的说明）。
     """
     if force_full:
-        return None, {"kind": "none", "reason": FORCE_FULL_REASON, "complete": False}
+        return None, {
+            "kind": "none",
+            "reason": str(force_full_reason or FORCE_FULL_REASON),
+            "complete": False,
+        }
     try:
         baseline = snapshot_store.load_baseline(group_key)
     except Exception as exc:  # noqa: BLE001 —— 读不出基准不该让整个分析起不来
