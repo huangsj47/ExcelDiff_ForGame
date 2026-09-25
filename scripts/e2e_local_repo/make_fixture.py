@@ -514,6 +514,25 @@ end
 return BattleMgr
 """
 
+# 第十轮：又一个同文件的小重构（`BATTLE_LUA_V7`），只为让这个文件再进一次 delta。
+#
+# 前两轮（`round7` / `round8`）验的是「模型交不交收口声明」，两次都没交；第九轮把
+# `baseline_updates` 改成逐条枚举之后，那一轮改的是客户端文件、这个文件没进 delta，
+# 服务端那两条旧结论落在「仍成立」那一组里 —— 逐条枚举的规矩对两组一视同仁（清单上
+# 有几条就要几条），但**最该被收口的那两条没被逼到**。这一轮把它重新拉进 delta，
+# 让它们回到「需要重新确认」那一组，再看一次。
+#
+# 改动本身是一处正常的整理：把伤害结算里的下限 1 提成命名常量。**不是修 bug、也不
+# 制造 bug。**
+BATTLE_LUA_V7 = BATTLE_LUA_V6.replace(
+    "    local raw = base + attack - defense\n    if raw < 1 then\n        raw = 1\n    end\n    return raw",
+    "    local raw = base + attack - defense\n    if raw < MIN_DAMAGE then\n        raw = MIN_DAMAGE\n    end\n    return raw",
+).replace(
+    "local BattleMgr = {}",
+    "local BattleMgr = {}\n\n-- 伤害结算的下限：再高的防御也不会把伤害压到 0\nlocal MIN_DAMAGE = 1",
+)
+assert BATTLE_LUA_V7.count("MIN_DAMAGE") == 3, "round10 的替换没命中 —— BATTLE_LUA_V6 又被改过了？"
+
 
 def _reset_origin():
     """平台会去 fetch/checkout/pull 这个 url，所以它必须是**裸库**。
@@ -741,8 +760,29 @@ def round9():
     print(subprocess.run(["git", "log", "--oneline", "-1"], cwd=str(SRC),
                          capture_output=True, text=True).stdout)
 
+def round10():
+    """第十轮：**再改一次服务端 lua**，把服务端那两条旧结论重新拉进 delta。
+
+    第九轮（`round9`）改的是客户端文件，delta 里只有 `src/battle_logic.py` —— 那两条
+    「服务端队伍人数上限」的旧结论因此落在「仍成立」那一组，没有被判成 `needs_recheck`。
+    逐条枚举的规矩对两组一视同仁，但要验「模型会不会给已经修好的那条写 `fixed`」，
+    就得让它重新变成「需要重新确认」。
+
+    改动本身是一处正常的整理：伤害下限提成命名常量。**不是修 bug、也不制造 bug。**
+
+    为什么还是单文件：见 `BATTLE_LUA_V4` 上面的说明 —— delta/total = 1/4 = 0.25 < 0.30，
+    且路径里没有 `config/`。
+    """
+    _battle_lua().write_text(BATTLE_LUA_V7, encoding="utf-8")
+    _commit("伤害下限提成命名常量，调数值只看一处", "2026-09-25T12:00:00+08:00")
+    _git("push", "-q", "origin", "master")
+    print(subprocess.run(["git", "log", "--oneline", "-1"], cwd=str(SRC),
+                         capture_output=True, text=True).stdout)
+
+
 
 if __name__ == "__main__":
     {"build": build, "round2": round2, "round3": round3, "round4": round4,
      "round5": round5, "round6": round6, "round7": round7,
-     "round8": round8, "round9": round9}[sys.argv[1] if len(sys.argv) > 1 else "build"]()
+     "round8": round8, "round9": round9,
+     "round10": round10}[sys.argv[1] if len(sys.argv) > 1 else "build"]()
