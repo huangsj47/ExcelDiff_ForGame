@@ -28,6 +28,7 @@ from services.ai.claims import (
     VERIFY_BASIS_INDEPENDENT,
     VERIFY_BASIS_REPLAY,
 )
+from services.ai.report_document import confidence_label, severity_label
 from services.ai.verdict_types import (
     CONFIDENCE_CEILING_WITH_GAP,
     RULING_BLOCK_MARKER,
@@ -66,6 +67,7 @@ def _one_line(text, limit: int) -> str:
         if 0 < cut < limit:
             return one[: cut + 1]
     return truncate_text(one, limit)[0]
+
 
 # 对账轮跑了、但一条可逐条应用的裁决都没给（它可能只报了新发现、也可能把裁决写成了正文
 # 里的一段话）。2026-09-23 起正文主体是模型写的汇总报告，这一节只做一行说明 —— 不能再让
@@ -340,7 +342,8 @@ def _gap_section(reduction: Reduction, *, shown: set[str]) -> list[str]:
     if not capped:
         return []
     lines = [
-        f"### 证据缺口 {len(capped)} 条（平台压到 `{CONFIDENCE_CEILING_WITH_GAP}`）",
+        f"### 证据缺口 {len(capped)} 条"
+        f"（平台压到 {confidence_label(CONFIDENCE_CEILING_WITH_GAP)}）",
         "",
         # 2026-09-25 收口：原本这一段占四行，说的其实是三件事 —— 有缺口、所以不许挂最高
         # 置信度、压的是置信度不是结论。三句合成一句。
@@ -387,12 +390,15 @@ def _row_line(row: FindingRow) -> str:
     **落回正文**的锚点，所以留着；模型没给编号时什么都不写（见 `_body_label_text`）。
     """
     head = f"- **{_body_label_text(row)}{row.anomaly.title}**："
-    original = f"原 `{row.origin.severity}` / `{row.origin.confidence}`"
+    # **等级与置信度写中文**（2026-09-25）：正文的「风险评估」现在写「R1（严重，协议）」
+    # （`references/risk-grading.md` 定的），这里再印 `critical`、`very_high` 就是同一个
+    # 事实两种语言。中文名从 `report_document` 取（异常面板、导出附录读的是同一份映射）。
+    original = f"原 {severity_label(row.origin.severity)} / {confidence_label(row.origin.confidence)}"
     if row.verdict == VERDICT_RETRACTED:
         action = "**反证成立（撤销）**"
     elif row.verdict == VERDICT_DOWNGRADED:
         action = (
-            f"**反证部分成立（降级）**：`{row.origin.severity}` → `{row.anomaly.severity}`"
+            f"**反证部分成立（降级）**：{severity_label(row.origin.severity)} → {severity_label(row.anomaly.severity)}"
         )
         # 等级写在动作里了（`severity=False`），但**置信度**若另被证据缺口压过，
         # 还要单独说 —— 否则这一行会写着降了级、却看不出置信度也动了。
@@ -468,9 +474,9 @@ def _level_change_text(row: FindingRow, *, cause: str, severity: bool = True) ->
     """
     parts: list[str] = []
     if severity and row.anomaly.severity != row.origin.severity:
-        parts.append(f"等级降到 `{row.anomaly.severity}`")
+        parts.append(f"等级降到 {severity_label(row.anomaly.severity)}")
     if row.anomaly.confidence != row.origin.confidence:
-        parts.append(f"置信度降到 `{row.anomaly.confidence}`")
+        parts.append(f"置信度降到 {confidence_label(row.anomaly.confidence)}")
     if not parts:
         return ""
     return f"，{'、'.join(parts)}（{cause}）"

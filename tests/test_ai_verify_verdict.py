@@ -570,7 +570,7 @@ class TestTheRulingSection:
         assert RULING_TITLE in section
         assert "反证成立（撤销）" in section
         assert SAMPLE_TITLE in section, "审计轨迹里必须有原结论"
-        assert "critical" in section, "要写明是从哪一级撤掉的"
+        assert "严重" in section, "要写明是从哪一级撤掉的（中文那一档）"
         assert "同一提交里生成文件已经删掉了" in section
         # **依据的原文不再进报告**（2026-09-25 收口）：这一行只留标题 + 裁决 + 一句理由。
         # 依据与逐条断言存在结论存档与异常面板里（见 `_row_line` 的 docstring）。

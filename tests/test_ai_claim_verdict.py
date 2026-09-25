@@ -592,9 +592,9 @@ class TestTheSameFactIsNotSaidThreeTimes:
         assert row.verdict == VERDICT_NEEDS_MORE_EVIDENCE, "构造没生效"
         line = next(item for item in report.splitlines() if item.startswith("- **"))
 
-        assert line.count("原 `critical` / `very_high`") == 1, "起点等级印了两遍"
-        assert line.count("等级降到 `high`") == 1
-        assert "`critical` → `high`" not in line, (
+        assert line.count("原 严重 / 很高") == 1, "起点等级印了两遍"
+        assert line.count("等级降到 高") == 1
+        assert "严重 → 高" not in line, (
             "又写回了「从哪一级降到哪一级」—— 起点就在这一行的开头"
         )
         assert "置信度降一档" not in line and "不再维持" not in line, (

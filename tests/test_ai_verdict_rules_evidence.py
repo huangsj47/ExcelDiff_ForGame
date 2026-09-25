@@ -175,10 +175,12 @@ class TestTheEvidenceShortfallDropsTheSeverityOneNotch:
         )
 
         section = render_ruling(reduction, review_ran=True)
-        # 「降到哪一档」只写新的那一档（起点已经印在这一行的开头：「原 `critical` /
-        # `very_high` → …」）—— 2026-09-24 起，见 `_level_change_text` 的说明。
-        assert "原 `critical` / `very_high`" in section
-        assert "等级降到 `high`" in section
+        # 「降到哪一档」只写新的那一档（起点已经印在这一行的开头：「原 严重 / 很高 → …」
+        # —— 2026-09-24 起，见 `_level_change_text` 的说明）。
+        # **等级与置信度写中文**（2026-09-25）：正文的「风险评估」写「R1（严重，协议）」，
+        # 这里再印 `critical`/`very_high` 就是同一个事实两种语言。
+        assert "原 严重 / 很高" in section
+        assert "等级降到 高" in section
         assert "证据不足降一档" in section, "要写出这一档是从哪来的（平台口径，不是模型说的）"
         assert "缺一份服务端校验的代码" in section, "降级理由沿用复核给的理由"
         assert "待人工核验" in section
@@ -351,7 +353,7 @@ class TestARowIsOneFieldPerLine:
         section = self._section("查了调用点，没有反证")
         first = next(line for line in section.split("\n") if line.startswith("- **"))
         assert "→" in first, first
-        assert "原 `" in first, first
+        assert "原 严重" in first or "原 高" in first, first
 
 
 class TestTheEvidenceRefShape:
@@ -1075,4 +1077,5 @@ class TestThePromptSeverityIsFoldedBackToTheModelClosedSet:
         )
 
         assert reduction.active[0].anomaly.severity == "medium", "落库的值是真实的降档等级"
-        assert "medium" in render_ruling(reduction, review_ran=True)
+        # 报告里写的是**中文那一档**（2026-09-25）：`medium` 是库里的取值，给读者看的是「中」。
+        assert "等级降到 中" in render_ruling(reduction, review_ran=True)
