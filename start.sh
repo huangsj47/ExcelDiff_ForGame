@@ -22,13 +22,29 @@ echo -e "${BLUE}========================================${NC}"
 echo ""
 
 # 检查 Python 是否安装（优先 python3）
-PYTHON_CMD=""
-if command -v python3 &> /dev/null; then
-    PYTHON_CMD="python3"
-elif command -v python &> /dev/null; then
-    PYTHON_CMD="python"
-else
-    echo -e "${RED}[错误] 未检测到 Python，请先安装 Python 3.8+${NC}"
+#
+# **判据是「能不能真的跑起来」，不是「PATH 里有没有这个名字」。**
+# Windows 上 `python3` 会被「应用执行别名」接管：`command -v python3` 命中一个转发桩，
+# 而它执行时只往 stderr 写一句「Python was not found; … Microsoft Store …」并以 **49**
+# 退出（连 `--version` 都这样）。老写法（`command -v` 判存在）于是把一个**跑不了的**
+# 解释器写进 PYTHON_CMD：版本号读成空串，后面的建虚拟环境、装依赖、读 .env 全部失败 ——
+# 而报错位置离真正的原因隔了十几行（实测 `bash start.sh` 以 49 退出，看不出为什么）。
+# 所以这里真去跑一次 `-c`，跑得通才算数。
+_pick_python() {
+    for _candidate in python3 python; do
+        command -v "$_candidate" &> /dev/null || continue
+        if "$_candidate" -c "import sys" &> /dev/null; then
+            echo "$_candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if ! PYTHON_CMD="$(_pick_python)"; then
+    echo -e "${RED}[错误] 未检测到可用的 Python，请先安装 Python 3.8+${NC}"
+    echo -e "${YELLOW}      若已经装过却仍报这个错：Windows 上多半是「应用执行别名」接管了${NC}"
+    echo -e "${YELLOW}      python3 —— 设置 → 应用 → 高级应用设置 → 应用执行别名，关掉它的开关。${NC}"
     exit 1
 fi
 
@@ -71,11 +87,13 @@ if [ "$USE_VENV" -eq 1 ]; then
 fi
 
 # PIP 命令
+#
+# 直接用 `$PYTHON_CMD -m pip`，不在 PATH 上另找一个 pip —— 与上面同一类理由：PATH 上的
+# `pip3` 可能是**另一个解释器**的（装进去的依赖跟真正启动应用的那个无关），也可能又是一个
+# 跑不了的转发桩。找不到 pip 时按原样只警告一句、继续启动。
 PIP_CMD=""
-if command -v pip3 &> /dev/null; then
-    PIP_CMD="pip3"
-elif command -v pip &> /dev/null; then
-    PIP_CMD="pip"
+if $PYTHON_CMD -m pip --version &> /dev/null; then
+    PIP_CMD="$PYTHON_CMD -m pip"
 else
     echo -e "${YELLOW}[警告] 未找到 pip，跳过依赖安装${NC}"
 fi

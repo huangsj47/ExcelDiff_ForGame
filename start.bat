@@ -8,10 +8,16 @@ echo   Diff Platform - Startup Script
 echo ========================================
 echo.
 
-where python >nul 2>&1
+rem 判据是「能不能真的跑起来」，不是「PATH 里有没有这个名字」：Windows 上 python 可能被
+rem 「应用执行别名」接管，`where python` 会命中一个转发桩，而它执行时只打印一句
+rem 「Python was not found ... Microsoft Store ...」并以 49 退出。老写法会把这样的桩
+rem 当成「装好了」，失败点被推到十几行之后的建虚拟环境，看不出真正的原因。
+python -c "import sys" >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python was not found in PATH.
+    echo [ERROR] Python was not found or is not runnable.
     echo         Install Python 3.9+ and add it to PATH, then retry.
+    echo         If it is installed: Settings ^> Apps ^> Advanced app settings
+    echo         ^> App execution aliases - turn python.exe / python3.exe off.
     goto :fail
 )
 
