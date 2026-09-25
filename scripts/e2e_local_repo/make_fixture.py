@@ -420,6 +420,45 @@ end
 return BattleMgr
 """
 
+# 第七轮：**只改这个文件**，改动是一件正常的小重构 —— 兜底上限从文件内的 `local` 挂到
+# 模块上导出，客户端与编辑器按同一个数读。它**不是**修 bug、也不制造 bug。
+#
+# 为什么这一轮要挑这个文件（这一轮的用途只有一个：验旧结论的**收口通道**）：
+# `BATTLE_LUA_V4` 已经把「服务端不传上限就放行」那条修好了，但模型没有任何结构化通道
+# 能说「这条已经修好了」—— 实测 run 73 在正文里写了「已修复」，run 74 又把它写成
+# 「上次遗留，仍成立」（同一个事实在两轮报告里翻转）。这一轮让这个文件重新进 delta，
+# 合并器把它判成 `needs_recheck`，模型被要求重新看它一眼，正好撞上那条旧结论。
+BATTLE_LUA_V5 = """-- 战斗管理：伤害结算与队伍校验
+local BattleMgr = {}
+
+-- 队伍人数上限的兜底值：挂在模块上导出，客户端与编辑器按同一个数读
+-- （原先只是文件内的 local，别的模块要读只能各自再抄一份）。
+BattleMgr.DEFAULT_TEAM_MEMBER_LIMIT = 5
+
+function BattleMgr.calc_damage(base, attack, defense)
+    local raw = base + attack - defense
+    if raw < 1 then
+        raw = 1
+    end
+    return raw
+end
+
+function BattleMgr.mana_cost(level, base_cost)
+    -- 等级上限 50，超过之后不再减免 —— 这是**有意**的，不是漏判
+    if level > 50 then
+        return base_cost
+    end
+    return base_cost * (1 - 0.02 * level)
+end
+
+function BattleMgr.can_join_team(team, player_id, limit)
+    local effective = limit or BattleMgr.DEFAULT_TEAM_MEMBER_LIMIT
+    return #team.members < effective
+end
+
+return BattleMgr
+"""
+
 
 def _reset_origin():
     """平台会去 fetch/checkout/pull 这个 url，所以它必须是**裸库**。
@@ -585,6 +624,30 @@ def round6():
                          capture_output=True, text=True).stdout)
 
 
+def round7():
+    """第七轮：**只改 `code/qz_server/src/battle/BattleMgr.lua`**（单文件、非关键路径）。
+
+    为什么这一轮要挑这个文件：第六轮之后，上一轮报告里那两条「服务端队伍人数上限」的
+    结论其实**早就修好了**（`BATTLE_LUA_V4` 补回了兜底常量），但模型没有任何结构化通道
+    能说这句话 —— 实测 run 73 在正文里写了「已修复」，run 74 又把它写成「上次遗留，
+    仍成立」。这一轮让这个文件**重新进入 delta**（合并器于是把它判成 `needs_recheck`），
+    模型会被要求重新看它一眼，正好用来验 `baseline_updates` 这条收口通道。
+
+    改动本身是一件正常的小重构：把兜底上限从文件内的 `local` 挂到模块上导出，客户端与
+    编辑器按同一个数读，不必各处再抄一份。**不是修 bug、也不制造 bug** —— 这一轮要看的
+    是「模型有没有把已经修好的旧结论如实收口」，而不是它能不能发现新问题。
+
+    为什么还是单文件：见 `BATTLE_LUA_V4` 上面的说明 —— delta/total = 1/4 = 0.25 < 0.30，
+    且路径里没有 `config/`，三条升格条件一条都不命中。
+    """
+    _battle_lua().write_text(BATTLE_LUA_V5, encoding="utf-8")
+    _commit("队伍上限兜底值导出到模块，客户端与编辑器按同一个数读",
+            "2026-09-25T11:00:00+08:00")
+    _git("push", "-q", "origin", "master")
+    print(subprocess.run(["git", "log", "--oneline", "-1"], cwd=str(SRC),
+                         capture_output=True, text=True).stdout)
+
+
 if __name__ == "__main__":
     {"build": build, "round2": round2, "round3": round3, "round4": round4,
-     "round5": round5, "round6": round6}[sys.argv[1] if len(sys.argv) > 1 else "build"]()
+     "round5": round5, "round6": round6, "round7": round7}[sys.argv[1] if len(sys.argv) > 1 else "build"]()
