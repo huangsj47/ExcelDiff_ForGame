@@ -508,6 +508,7 @@ def test_the_reconcile_section_follows_the_account(ctx, monkeypatch, reason_lite
     只钉一臂的写法在判据永远返回 False 时也是绿的。
     """
     from services import ai_analysis_service as ai_service
+    from services.ai import round_events
     from services.ai.baseline import FORCE_FULL_REASON, FORCE_FULL_REBUILD_REASON
     from services.ai_analysis_service import build_weekly_group_key
     from tests.test_ai_analysis_service import _FakeClient
@@ -566,8 +567,12 @@ def test_the_reconcile_section_follows_the_account(ctx, monkeypatch, reason_lite
             assert "共 1 条" in markdown, markdown[-1500:]
             assert "逐条清单以正文的「风险评估」为准" in markdown, markdown[-1500:]
         finally:
-            # 落库会带出逐轮 trace 与逐条异常：**先删子行再删 run**，否则外键拦住
-            # （这个库是会话级共用的，留下一条也够把后面的用例带红）。
+            # 落库会带出逐轮 trace / 逐条异常 / **逐轮事件行**：**先删子行再删 run**，否则
+            # 外键拦住（这个库是会话级共用的，留下一条也够把后面的用例带红）。
+            # 事件行**没有外键**（`round_events.forget_run` 的 docstring 写着这件事），
+            # 不显式删就会变成幽灵行：run 一删，它的 id 会被后面新建的 run 复用，
+            # 而那些用例按 `run_id` 取「第一条事件」时读到的是**上一批的**行。
+            round_events.forget_run(run.id)
             AiAnalysisTrace.query.filter_by(run_id=run.id).delete()
             AiAnalysisAnomaly.query.filter_by(run_id=run.id).delete()
             AiAnalysisRun.query.filter_by(id=run.id).delete()
