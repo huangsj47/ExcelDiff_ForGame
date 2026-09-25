@@ -306,6 +306,54 @@ class TestTheBodyLabelMapping:
 # ==========================================================================
 
 
+class TestARowIsOneFieldPerLine:
+    """一条标注**每个字段各占一行**（2026-09-25，用户实测「内容过长、读不动」）。
+
+    从前行内用「；」把「原等级 → 裁决」「理由」「依据」「平台说明」「复核方式」串成一整行：
+    真机 run 70 实测最长 **655 字一行** —— 屏幕与导出件拿到的都是一整段没有停顿的文字，
+    而那几个字段恰恰是读者要跳着找的（先看裁决、再看理由、最后核实复核方式）。
+
+    现在：首段（原等级 → 裁决）接在标题后，其余各占一行、缩进两格（属于这一条 ——
+    渲染器与导出都认这个缩进，见 `static/js/ai-report-markdown.js` 的续行分支与
+    `report_document.keep_line_breaks`）。与 `claims.claim_lines`（2026-09-24）是同一条
+    口径：一条一行。
+    """
+
+    def _section(self, reason: str) -> str:
+        reduction = reduce_findings(
+            [_anomaly(file_path=PROTO)],
+            verdicts=(
+                VerifyVerdict(finding_id="F1", verdict=VERDICT_CONFIRMED, reason=reason),
+            ),
+            gaps=EvidenceGaps(truncated_files=(PROTO,)),
+        )
+        return render_ruling(reduction, review_ran=True)
+
+    def test_every_field_starts_its_own_line(self):
+        section = self._section("查了调用点，没有反证")
+        assert "\n  理由：查了调用点，没有反证" in section
+        assert "\n  平台说明：" in section
+
+    def test_no_line_carries_two_fields(self):
+        """**一行里不许出现两个字段标签** —— 这条就是「巨行」的判据本身。
+
+        按字段数（而不是按字数）判：理由的长度由模型/复核给，平台只截断不改写，
+        所以「一行多长」不是平台能保证的；「一段一个字段」才是。
+        """
+        labels = ("理由：", "依据：", "平台说明：", "复核方式：")
+        section = self._section("反证成立：该行读的是形参，衰减照常生效")
+        for line in section.split("\n"):
+            found = [one for one in labels if one in line]
+            assert len(found) <= 1, f"一行里挤了多个字段 {found}：{line}"
+
+    def test_the_first_field_stays_on_the_title_line(self):
+        """首段接在标题后（标题那一行不能只剩一个光秃秃的标题）。"""
+        section = self._section("查了调用点，没有反证")
+        first = next(line for line in section.split("\n") if line.startswith("- **"))
+        assert "→" in first, first
+        assert "原 `" in first, first
+
+
 class TestTheEvidenceRefShape:
     @pytest.mark.parametrize(
         "ref",

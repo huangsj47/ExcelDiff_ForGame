@@ -410,7 +410,11 @@ def _row_line(row: FindingRow) -> str:
     # （2026-09-24）：值本身叫「独立取证」，两个「取证」叠在一行里读着别扭。
     if row.verify_basis:
         detail.append(f"复核方式：**{row.verify_basis_label}**")
-    line = head + "；".join(detail)
+    # **每段各占一行**（首段接在标题后，其余缩进两格，属于这一条）。2026-09-25 起：
+    # 原先用「；」串成一行，真机 run 70 实测最长 **655 字一行** —— 无论屏幕还是导出的
+    # Markdown，读者拿到的都是一整段没有停顿的文字。这与 `claims.claim_lines` 2026-09-24
+    # 那次是同一条口径（一条一行），只是这里缩进，让它们明确属于上面那条结论。
+    line = head + detail[0] + "".join(f"\n  {one}" for one in detail[1:])
     claims = claim_lines(row.claim_reviews)
     return line + ("\n" + claims if claims else "")
 
