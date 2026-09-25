@@ -2149,58 +2149,122 @@ main:focus {
     color: var(--color-text-muted, #656d76);
 }
 
-.ai-history-list {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--font-size-md, 14px);
+/* 左列历次结论 + 右栏选中那一份的报告，两栏各自滚动。
+   -------------------------------------------------------------------
+   2026-09-25 改版（用户实测）：原来是**一张宽表 + 报告接在整张表下面**。20 行
+   表格一千多像素高，报告落在折叠线以下 —— 点「看这一份」屏幕上纹丝不动，
+   用户以为没反应（原话「没有跳到正文」）。两栏之后报告**永远在视野里**。
+   窄屏（<992px）退回上下两段：列表压到 40vh，报告紧接在下面，它那一行表头
+   仍在第一屏里 —— 所以这里**一个 scrollIntoView 都不需要**。 */
+.ai-history-panes {
+    display: grid;
+    grid-template-columns: minmax(0, 360px) minmax(0, 1fr);
+    gap: var(--space-4, 16px);
+    align-items: start;
 }
 
-.ai-history-list th {
-    text-align: left;
-    font-weight: 600;
+/* 高度用视口算、不用百分比：弹层的 `.modal-content` 只有 `max-height`，
+   `height: 100%` 在它下面解析不出确定高度（会退成内容高度，两栏就都不滚了）。 */
+.ai-history-list-pane,
+.ai-history-detail-pane {
+    max-height: calc(100vh - 220px);
+    min-height: 180px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--color-border, #e2e8f0);
+    border-radius: 6px;
+    background: var(--color-surface, #fff);
+}
+
+.ai-history-list { display: flex; flex-direction: column; }
+
+.ai-history-item {
+    padding: 10px 12px;
+    /* 左边这 3px 是**占位**：选中时只换颜色、不加边框，免得整行文字横向位移。 */
+    border-left: 3px solid transparent;
+    border-bottom: 1px solid var(--color-border-subtle, #f1f5f9);
+    cursor: pointer;
+}
+
+.ai-history-item:last-child { border-bottom: 0; }
+.ai-history-item:hover { background: var(--color-surface-subtle, #f8fafc); }
+
+/* 「我正在看它的报告」。**与「当前显示」是两件事**：后者是「抽屉里那份就是它」，
+   而且带文字标签（看 `.ai-history-current-tag`），不靠颜色单独承载语义。 */
+.ai-history-item.is-selected {
+    background: var(--color-surface-subtle, #f8fafc);
+    border-left-color: var(--color-primary, #0d6efd);
+}
+
+/* 键盘焦点环。**不许拿 `.is-selected` 顶替**：焦点与选中是两件事（只靠选中色的话，
+   按 Tab 进来时看不出焦点落在哪一条）。用 `:focus-visible`：鼠标点一下不该留蓝边。 */
+.ai-history-item:focus-visible {
+    outline: 2px solid var(--color-primary, #0d6efd);
+    outline-offset: -2px;
+}
+
+.ai-history-item-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+
+.ai-history-when {
+    white-space: nowrap;
+    font-size: var(--font-size-sm, 12px);
+    font-variant-numeric: tabular-nums;
+    color: var(--color-text-muted, #656d76);
+}
+
+.ai-history-risk {
     font-size: var(--font-size-sm, 12px);
     color: var(--color-text-muted, #656d76);
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--color-border, #e2e8f0);
     white-space: nowrap;
 }
 
-.ai-history-list td {
-    padding: 8px;
-    border-bottom: 1px solid var(--color-border-subtle, #f1f5f9);
-    vertical-align: top;
+/* 「当前显示」是一个**文字标签**，不是又一条颜色：原来的 `is-current` 只有一条
+   3px 色条，而「哪一份是抽屉里那份」是一句要说得出口的话。 */
+.ai-history-current-tag {
+    padding: 0 6px;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    font-size: var(--font-size-sm, 12px);
+    line-height: 1.5;
+    color: var(--color-primary, #0d6efd);
+    white-space: nowrap;
 }
 
-/* 当前显示的那一份：左侧一条色条 + 底色。**必须与「选中」区分开** ——
-   选中是「我正在看它的报告」，「当前」是「抽屉里那份结论就是它」。 */
-.ai-history-row.is-current td:first-child { box-shadow: inset 3px 0 0 var(--color-primary, #0d6efd); }
-.ai-history-row.is-selected td { background: var(--color-surface-subtle, #f8fafc); }
+/* 一行摘要：**整句换行，不裁剪**。服务端已按 80 字截过一道，这里再挤成定高就等于
+   把一句话砍成碎句 —— 而它是「一眼认出是哪一次」的唯一线索。 */
+.ai-history-summary {
+    margin: 0;
+    font-size: var(--font-size-md, 14px);
+    line-height: 1.5;
+    color: var(--color-text, #1e293b);
+    overflow-wrap: anywhere;
+}
 
-.ai-history-when { white-space: nowrap; color: var(--color-text-muted, #656d76); }
-
-.ai-history-summary { max-width: 520px; }
 .ai-history-row-meta {
-    display: block;
-    margin-top: 2px;
+    margin: 4px 0 0;
     font-size: var(--font-size-sm, 12px);
     color: var(--color-text-muted, #656d76);
 }
 
-.ai-history-actions { white-space: nowrap; }
-
-.ai-history-report {
-    margin-top: var(--space-5, 20px);
-    padding-top: var(--space-4, 16px);
-    border-top: 1px solid var(--color-border, #e2e8f0);
-}
-
+/* 详情区那行头（标记 + 导出）**吸顶**：报告很长，读到一半还想导出时不必滚回顶部。 */
 .ai-history-report-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3, 12px);
     flex-wrap: wrap;
-    margin-bottom: var(--space-3, 12px);
+    padding: 10px 12px;
+    background: var(--color-surface, #fff);
+    border-bottom: 1px solid var(--color-border, #e2e8f0);
 }
 
 .ai-history-mark {
@@ -2211,13 +2275,33 @@ main:focus {
 
 /* 报告正文复用 `.ai-analysis-output` 的排版（同一份报告，两处读法必须一致），
    只把那几条「抽屉面板」专属的样式压回去：它在弹层里不是撑满剩余高度的阅读面，
-   而是这一段的正文。 */
-.ai-history-report .ai-analysis-output {
+   而是这一栏里的正文。 */
+.ai-history-detail-pane .ai-analysis-output {
     flex: none;
     min-height: 0;
-    padding: 0;
+    margin: 0;
+    padding: var(--space-4, 16px);
     border: 0;
     background: transparent;
+}
+
+/* 结构化结论那一块与正文对齐（它自带 border-top + 上边距，在抽屉里是「另一段」）。 */
+.ai-history-detail-pane .ai-anomaly-panel {
+    margin: 0;
+    padding: var(--space-4, 16px);
+    border-top: 1px solid var(--color-border, #e2e8f0);
+}
+
+/* 还在取这一份的报告。**与「取回来了、里面没有正文」分开**：后者是一句真话，
+   前者写成那样，读的人会以为那一次根本没留下报告。 */
+.ai-history-detail-pane[aria-busy="true"] .ai-analysis-output {
+    color: var(--color-text-muted, #656d76);
+}
+
+@media (max-width: 991.98px) {
+    .ai-history-panes { grid-template-columns: minmax(0, 1fr); }
+    .ai-history-list-pane { max-height: 40vh; }
+    .ai-history-detail-pane { max-height: calc(100vh - 160px); }
 }
 
 /* ===================================================================

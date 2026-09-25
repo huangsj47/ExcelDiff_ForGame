@@ -18,6 +18,31 @@
  * 迟早会有一份说的是「已有结论」另一份说「成功」。
  *
  * ---------------------------------------------------------------------------
+ * 2026-09-25：从「一张宽表 + 底下接报告」改成「左列 + 右详情」
+ * ---------------------------------------------------------------------------
+ * 用户实测提了三件事，根子是**同一个**：列表与报告挤在同一个滚动条里。
+ *
+ * 1. **点了看不到正文**。列表 20 行有一千多像素高，报告接在**整张表下面** —— 点
+ *    「看这一份」，屏幕上纹丝不动（变化发生在折叠线以下），用户以为没反应，要自己
+ *    往下滚。现在两栏各自滚动，报告**永远在视野里**。
+ * 2. **行里那句话读不了**。摘要被 `max-width: 520px` 挤成一个窄条（服务端已按 80 字
+ *    截断，再挤一次就成了三行碎句）。现在整条按卡片摆：时间/状态/风险一行，摘要整句
+ *    换行（**不裁剪** —— 裁了就得靠 tooltip 补，而这份摘要本来就只有 80 字）。
+ * 3. **选中态分不清**。「当前显示的那一份」只靠一条 3px 的色条（**颜色单独承载语义**），
+ *    「正在看的那一份」只靠底色。现在前者是一个写着「当前显示」的标签，后者是底色 +
+ *    左侧色条 + `aria-selected`，两个都在文字里说得出来。
+ *
+ * 顺带修掉两个真缺陷（都不是排版问题）：
+ *
+ * * **每次选中都闪一句「这一次没有报告正文。」** —— `select()` 先把
+ *   `selectedReport` 清成 null 再重画，于是「还没取回来」被画成了「取回来了但里面
+ *   没有正文」。现在详情区有**自己的加载态**（`aria-busy`），那句文案只在一份真的
+ *   取回来、真的没有正文时出现。
+ * * **报告取不到时整张列表被抹掉** —— 原来 `catch` 走的是 `renderNote()`，它写的是
+ *   `body.textContent`，也就是**整个弹层**。一次网络抖动会把用户正在翻的历史清空。
+ *   现在错误只落在详情区，列表原地不动。
+ *
+ * ---------------------------------------------------------------------------
  * 几条界面口径
  * ---------------------------------------------------------------------------
  * 1. **当前显示的那一次要标出来** —— 否则用户分不清「我正在看的是哪一份」。
@@ -25,7 +50,9 @@
  *    点开弹层的**那一刻**读一次 —— 比在每个分支里再 push 一份状态可靠（也不会过期）。
  * 2. **选中历史条目之后，报告区上方要写明「这是 <时间> 的结论（历史）」**：一份看起来
  *    完全正常的报告，会被当成当前结论用。
- * 3. **导出的是选中的那一份**（弹层里自己那个链接），不是抽屉 footer 上那个。
+ * 3. **导出的是选中的那一份**（弹层里自己那个链接），不是抽屉 footer 上那个。它的
+ *    有无**只看列表行上的 `exportable`**，不等报告取回来 —— 否则每换一条都会先少一个
+ *    按钮再长出来（实测里那一下闪动很容易被当成「这条不能导出」）。
  * 4. **列表只有一次结论时说实话**（「还没有可对比的历史」），不摆一张只有一行的表；
  *    一条都没有时说「还没跑过分析」。
  * 5. 报告正文走 `AiReportMarkdown.render`（先整体转义再套白名单），**不在这里拼 HTML**。
@@ -33,6 +60,11 @@
  *    处置是「读某一次的报告」时做的事，而这个面板已经知道看的是哪一次。这里只负责
  *    建容器 `#aiAnomalyPanel` 并把运行号交给它 —— 清单怎么画、状态名怎么取，全在那个
  *    模块里（只此一份）。
+ * 7. **换一次选中只重画详情区**，不重画列表：整块重画会把列表的滚动位置打回顶部，
+ *    翻到第 15 条按一下方向键就跳回第 1 条。列表只在「打开 / 换目标」时重建一次。
+ * 8. **方向键即选中**（`↑↓ Home End`，`role="listbox"` + roving tabindex）。这个面板
+ *    的右栏是**预览**，所以「焦点走到哪一条，看的就是哪一条」比「先移动再回车」少一半
+ *    动作。取数走 `state.reports` 那一层缓存，来回翻不重复请求。
  */
 (function (global) {
     'use strict';
@@ -48,6 +80,10 @@
         truncated: '共 %TOTAL% 次，这里只列出最近 %SHOWN% 次；更早的超出保留窗口（%DAYS% 天）。',
         all: '这个目标跑过 %TOTAL% 次，新的在最上面。',
         no_body: '这一次没有报告正文。',
+        // 详情区自己的加载态。**与 `no_body` 分开**：一个是「还没取回来」，一个是
+        // 「取回来了、里面真的没有正文」，把前者画成后者是这一批里最误导的一种假话。
+        detail_loading: '正在读取这一份的报告…',
+        detail_error: '读不到这一份的报告：',
         failed_mark: '这一次是失败的，没有结论。',
         no_target: '这个页面没有告诉它看哪个目标（入口少了一次 track）。',
         error: '读不到历次结论：'
@@ -58,6 +94,12 @@
         body: 'aiReportHistoryBody'
     };
 
+    // 键盘上「换一条」的那几个键。**只认这四个**：`Enter` / `Space` 由浏览器的 click
+    // 兜住（每一项都是可点的），其余键一律不拦（用户还要用得着 Tab）。
+    // 写成数组而不是 `'ArrowDown ArrowUp Home End'.indexOf(key)`：后者是**子串**匹配，
+    // 将来加一个 `'End'`/`'Home'` 的亲戚（比如 `'PageEnd'`）就会静默多认一个键。
+    var NAV_KEYS = ['ArrowDown', 'ArrowUp', 'Home', 'End'];
+
     var state = {
         historyUrl: null,
         loading: false,
@@ -65,9 +107,15 @@
         // 屏幕上正显示的那一次（点开弹层那一刻从 `AiThinkLog` 现取）。
         currentRunId: null,
         selectedRunId: null,
-        selectedReport: null,
+        // 已经取回来的那几份报告：runId → {payload} 或 {error}。
+        // **一次运行的报告不会变**（它是存档），所以这个缓存只按目标清、不按时间清。
+        reports: {},
+        // 正在取的那一条（null = 没有在取的）。详情区的加载态只认它。
+        loadingRunId: null,
         // Bootstrap 的 Modal 实例（懒建；模板里没有这个元素时保持 null）。
-        modal: null
+        modal: null,
+        // 这一次渲染出来的节点（列表项、详情区那几块）。列表要能单独重画而不动别的。
+        dom: null
     };
 
     function el(id) {
@@ -154,6 +202,41 @@
         return parts.join(' · ');
     }
 
+    /** 键盘按一下之后该落到第几个（`-1` = 这个键不管）。
+     *
+     * `count` = 0 时恒返回 `-1`（没有条目可落）。**首尾不环绕**：`↓` 到底就停在最后
+     * 一条 —— 翻历史是「找某一次」，绕回开头会让人以为自己翻过头了。
+     */
+    function nextIndex(key, current, count) {
+        if (count <= 0) return -1;
+        var at = (current === null || current === undefined) ? -1 : Number(current);
+        if (isNaN(at)) at = -1;
+        if (key === 'ArrowDown') return at < 0 ? 0 : Math.min(at + 1, count - 1);
+        if (key === 'ArrowUp') return at < 0 ? count - 1 : Math.max(at - 1, 0);
+        if (key === 'Home') return 0;
+        if (key === 'End') return count - 1;
+        return -1;
+    }
+
+    /** 这一行是不是**抽屉里正显示的那一次**。`currentRunId` 由调用方给 —— 渲染那条路
+     *  传 `state.currentRunId`，测试能拿它直接判，不必先走一趟 `open()`。 */
+    function isCurrentAt(row, currentRunId) {
+        return !!(row && currentRunId !== null && currentRunId !== undefined
+            && Number(row.run_id) === Number(currentRunId));
+    }
+
+    function isCurrent(row) {
+        return isCurrentAt(row, state.currentRunId);
+    }
+
+    /** 一行的 class。选中与「当前显示」是**两件事**（可能落在同一行上）：
+     *  「选中」= 我正在看它的报告，「当前显示」= 抽屉里那份结论就是它。 */
+    function itemClass(row, selected) {
+        return 'ai-history-item'
+            + (isCurrent(row) ? ' is-current' : '')
+            + (selected ? ' is-selected' : '');
+    }
+
     // -----------------------------------------------------------------------
     //  渲染
     // -----------------------------------------------------------------------
@@ -165,9 +248,11 @@
         return node;
     }
 
+    /** 整个弹层只摆一句说明（列表为空 / 读不到 / 没告诉它看哪个目标）。 */
     function renderNote(text) {
         var body = el(IDS.body);
         if (!body) return;
+        state.dom = null;
         body.textContent = '';
         var note = global.document.createElement('p');
         note.className = 'ai-history-meta';
@@ -175,63 +260,123 @@
         body.appendChild(note);
     }
 
-    function renderRow(tbody, row, currentRunId) {
+    /** 一行结论。**整行可点**，不是只有右边那个按钮可点（那个按钮已经去掉：整行
+     *  都是目标，再摆一个按钮等于把「只有这里能点」写在了脸上）。 */
+    function buildItem(row) {
         var doc = global.document;
-        var tr = doc.createElement('tr');
-        tr.className = 'ai-history-row';
-        if (Number(row.run_id) === Number(state.selectedRunId)) {
-            tr.className += ' is-selected';
-        }
-        if (currentRunId !== null && currentRunId !== undefined
-            && Number(row.run_id) === Number(currentRunId)) {
-            tr.className += ' is-current';
-        }
+        var item = doc.createElement('div');
+        item.className = itemClass(row, false);
+        // `role="option"` + roving tabindex：列表是**单选**的，而右栏是它的预览。
+        // 用 `<div>` 而不是 `<button>`：button 自带 button 角色，套在 listbox 里
+        // 会被读成「一个按钮」，而不是「清单里的一项」。
+        item.setAttribute('role', 'option');
+        item.setAttribute('tabindex', '-1');
+        item.setAttribute('aria-selected', 'false');
 
-        var when = doc.createElement('td');
+        var top = doc.createElement('div');
+        top.className = 'ai-history-item-top';
+        var when = doc.createElement('span');
         when.className = 'ai-history-when';
         when.textContent = row.created_at_display || '-';
-        tr.appendChild(when);
+        top.appendChild(when);
+        addTag(top, 'badge bg-' + statusTone(row.status), row.status_label || row.status || '-');
+        if (row.risk_label) addTag(top, 'ai-history-risk', '风险 ' + row.risk_label);
+        // 「当前显示的那一份」原来只有一条 3px 色条（**颜色单独承载语义**）。带文字的
+        // 标签与色条同时在场：色条管扫视，标签管「说不说得出来」。
+        if (isCurrent(row)) addTag(top, 'ai-history-current-tag', '当前显示');
+        item.appendChild(top);
 
-        var status = doc.createElement('td');
-        addTag(status, 'badge bg-' + statusTone(row.status), row.status_label || row.status || '-');
-        tr.appendChild(status);
+        // **摘要不裁剪**：服务端已经按 80 字截过一道，这里再挤成定高就等于把一句话
+        // 砍成碎句，而它正是「一眼认出是哪一次」的唯一线索。
+        var summary = doc.createElement('p');
+        summary.className = 'ai-history-summary';
+        summary.textContent = row.summary || '-';
+        item.appendChild(summary);
 
-        var risk = doc.createElement('td');
-        risk.textContent = row.risk_label || '-';
-        tr.appendChild(risk);
-
-        var detail = doc.createElement('td');
-        detail.className = 'ai-history-summary';
-        detail.textContent = row.summary || '-';
         var meta = rowMeta(row);
         if (meta) {
-            var metaNode = doc.createElement('span');
+            var metaNode = doc.createElement('p');
             metaNode.className = 'ai-history-row-meta';
             metaNode.textContent = meta;
-            detail.appendChild(metaNode);
+            item.appendChild(metaNode);
         }
-        tr.appendChild(detail);
 
-        var actions = doc.createElement('td');
-        actions.className = 'ai-history-actions';
-        var button = doc.createElement('button');
-        button.type = 'button';
-        button.className = 'btn btn-sm btn-outline-secondary';
-        button.textContent = '看这一份';
-        button.addEventListener('click', function () { select(row.run_id); });
-        actions.appendChild(button);
-        tr.appendChild(actions);
-
-        tbody.appendChild(tr);
+        item.addEventListener('click', function () { select(row.run_id); });
+        return item;
     }
 
-    function renderReport() {
+    /** 建左列 + 右详情两栏，并把键盘挂上。**只在打开 / 换目标时调一次**。 */
+    function buildPanes(body) {
         var doc = global.document;
-        var body = el(IDS.body);
+        var panes = doc.createElement('div');
+        panes.className = 'ai-history-panes';
+
+        var listPane = doc.createElement('div');
+        listPane.className = 'ai-history-list-pane';
+        var list = doc.createElement('div');
+        list.className = 'ai-history-list';
+        list.setAttribute('role', 'listbox');
+        list.setAttribute('aria-label', '历次结论');
+        list.addEventListener('keydown', onKeyDown);
+        listPane.appendChild(list);
+        panes.appendChild(listPane);
+
+        var detail = doc.createElement('div');
+        detail.className = 'ai-history-detail-pane';
+        panes.appendChild(detail);
+        body.appendChild(panes);
+
+        state.dom = {list: list, detail: detail, items: []};
+        return state.dom;
+    }
+
+    function renderItems() {
+        var dom = state.dom;
+        if (!dom) return;
+        var runs = (state.payload && state.payload.runs) || [];
+        dom.list.textContent = '';
+        dom.items = [];
+        runs.forEach(function (row) {
+            var node = buildItem(row);
+            dom.list.appendChild(node);
+            dom.items.push({row: row, node: node});
+        });
+    }
+
+    /** 只改选中态。**不重建列表** —— 重建会把列表的滚动位置打回顶部。 */
+    function updateSelection(focus) {
+        var dom = state.dom;
+        if (!dom) return;
+        for (var i = 0; i < dom.items.length; i += 1) {
+            var entry = dom.items[i];
+            var on = Number(entry.row.run_id) === Number(state.selectedRunId);
+            entry.node.className = itemClass(entry.row, on);
+            entry.node.setAttribute('aria-selected', on ? 'true' : 'false');
+            // roving tabindex：Tab 进得来一次，进来之后用方向键走。
+            entry.node.setAttribute('tabindex', on ? '0' : '-1');
+            // **键盘走过来时焦点要真的跟过去**（鼠标点的不抢焦点：那会把用户从
+            //  他正在滚的列表上拽走）。`focus` 不存在时（测试用的假 DOM）不报错，
+            //  但**必须有真实调用点**：这个方法在真浏览器里被 `onKeyDown` 调着。
+            if (on && focus && typeof entry.node.focus === 'function') entry.node.focus();
+        }
+    }
+
+    function currentRow() {
+        var runs = (state.payload && state.payload.runs) || [];
+        for (var i = 0; i < runs.length; i += 1) {
+            if (Number(runs[i].run_id) === Number(state.selectedRunId)) return runs[i];
+        }
+        return null;
+    }
+
+    function renderDetail() {
+        var doc = global.document;
+        var dom = state.dom;
         var row = currentRow();
-        if (!body || !row) return;
-        var wrap = doc.createElement('div');
-        wrap.className = 'ai-history-report';
+        if (!dom || !row) return;
+        var detail = dom.detail;
+        detail.textContent = '';
+        detail.setAttribute('aria-busy', 'false');
 
         var head = doc.createElement('div');
         head.className = 'ai-history-report-head';
@@ -241,6 +386,8 @@
         head.appendChild(mark);
 
         // 导出**这一份**（不是抽屉 footer 上那个 —— 那个导的是当前显示的那次）。
+        // 有无只认列表行上的 `exportable`：它是服务端按同一把尺子算出来的，现在就
+        // 知道，不必等报告取回来（等的话每换一条都会闪一下「没有导出按钮」）。
         if (row.exportable) {
             var link = doc.createElement('a');
             link.className = 'btn btn-sm btn-outline-secondary';
@@ -254,13 +401,25 @@
             link.appendChild(doc.createTextNode(' 导出这一份 md'));
             head.appendChild(link);
         }
-        wrap.appendChild(head);
+        detail.appendChild(head);
+
+        var pending = state.loadingRunId !== null
+            && Number(state.loadingRunId) === Number(row.run_id);
+        var entry = state.reports[row.run_id];
+        var payload = entry && entry.payload;
 
         var report = doc.createElement('div');
         report.className = 'ai-analysis-output';
         report.id = 'aiHistoryReportBody';
-        var payload = state.selectedReport;
-        if (payload && payload.result === null && !hasConclusion(payload.status)) {
+        if (pending) {
+            // 「还没取回来」要长得像**在等**，不像「取回来了、里面是空的」。
+            // 样式只认 `aria-busy`（一个判据一处产地）：再挂一个 `is-loading` 类
+            // 就是同一件事写两遍，两处迟早对不上。
+            detail.setAttribute('aria-busy', 'true');
+            report.textContent = NOTE.detail_loading;
+        } else if (entry && entry.error) {
+            report.textContent = NOTE.detail_error + entry.error;
+        } else if (payload && payload.result === null && !hasConclusion(payload.status)) {
             // 失败 / 进行中：如实说，不留一片空白（也不假装它是一份报告）。
             report.textContent = payload.status === 'failed'
                 ? (NOTE.failed_mark + (payload.error_message ? '原因：' + payload.error_message : ''))
@@ -268,7 +427,7 @@
         } else if (payload && payload.response_text) {
             // 正文 + 覆盖段（平台补充）+ 降级提示：与三份抽屉走**同一个**渲染入口，
             // 否则「刚跑完看到的」与「历次结论里点开的」会各有一套字。
-            // 变量名**不能叫 body** —— 这个函数上面已经把 `body` 用作面板元素了。
+            // 变量名**不能叫 body** —— `el(IDS.body)` 那个面板元素也叫 body。
             var reportBody = payload.response_text;
             if (global.AiContextNotice && global.AiContextNotice.withContextNotice) {
                 reportBody = global.AiContextNotice.withContextNotice(reportBody, payload.result);
@@ -281,7 +440,7 @@
         } else {
             report.textContent = NOTE.no_body;
         }
-        wrap.appendChild(report);
+        detail.appendChild(report);
 
         // 结构化结论 + 处置：这一份报告里那些结论的**可操作形态**（逐条确认 / 忽略 /
         // 撤销）。挂在报告**下面**而不是上面 —— 报告是叙事，先读后处置，也不动用户
@@ -290,31 +449,22 @@
         var anomalies = doc.createElement('div');
         anomalies.className = 'ai-anomaly-panel';
         anomalies.id = 'aiAnomalyPanel';
-        wrap.appendChild(anomalies);
-        body.appendChild(wrap);
+        detail.appendChild(anomalies);
 
         // **先 `appendChild` 再调 `load`**：那边是按 id 找容器的，而
-        // `getElementById` 只认**已经在文档里**的节点 —— wrap 还没挂上去时它返回 null，
-        // 于是这一块永远空着，而且不报错（假 DOM 与真浏览器在这条上一致，都找不到）。
+        // `getElementById` 只认**已经在文档里**的节点 —— detail 还没挂上去时它返回
+        // null，于是这一块永远空着，而且不报错（假 DOM 与真浏览器在这条上一致）。
         // 模块没加载时（这个页面没引那个脚本）什么都不做：缺的是脚本，不是数据。
-        if (global.AiAnomalyDisposition && global.AiAnomalyDisposition.load) {
+        // **还在取的时候不调**：那时右栏写的是「正在读取这一份的报告…」，先把它下面
+        // 那块的结论画出来，屏幕上就同时挂着「在等报告」与一份结论清单。
+        if (!pending && global.AiAnomalyDisposition && global.AiAnomalyDisposition.load) {
             global.AiAnomalyDisposition.load(row.run_id);
         }
     }
 
-    function currentRow() {
-        var runs = (state.payload && state.payload.runs) || [];
-        for (var i = 0; i < runs.length; i += 1) {
-            if (Number(runs[i].run_id) === Number(state.selectedRunId)) return runs[i];
-        }
-        return null;
-    }
-
     function render() {
-        var doc = global.document;
         var body = el(IDS.body);
         if (!body) return;
-        body.textContent = '';
         var payload = state.payload;
         if (!payload || !(payload.runs || []).length) {
             // **走 `listNote` 而不是写死 `NOTE.empty`**：空列表有**两种**处境
@@ -324,29 +474,37 @@
             renderNote(listNote(payload));
             return;
         }
-        renderNote(listNote(payload));
+        var doc = global.document;
+        state.dom = null;
+        body.textContent = '';
+        var note = doc.createElement('p');
+        note.className = 'ai-history-meta';
+        note.textContent = listNote(payload);
+        body.appendChild(note);
+        buildPanes(body);
+        renderItems();
+        updateSelection(false);
+        if (state.selectedRunId !== null) renderDetail();
+    }
 
-        var table = doc.createElement('table');
-        table.className = 'ai-history-list';
-        var thead = doc.createElement('thead');
-        var headRow = doc.createElement('tr');
-        ['时间', '状态', '风险', '这一次说了什么', ''].forEach(function (text) {
-            var th = doc.createElement('th');
-            th.textContent = text;
-            headRow.appendChild(th);
-        });
-        thead.appendChild(headRow);
-        table.appendChild(thead);
-
-        var tbody = doc.createElement('tbody');
-        var runs = payload.runs;
-        for (var i = 0; i < runs.length; i += 1) {
-            renderRow(tbody, runs[i], state.currentRunId);
+    // -----------------------------------------------------------------------
+    //  键盘
+    // -----------------------------------------------------------------------
+    function onKeyDown(event) {
+        var key = event && event.key;
+        if (!key || NAV_KEYS.indexOf(key) === -1) return;
+        var dom = state.dom;
+        if (!dom || !dom.items.length) return;
+        // 拦下方向键：不拦的话焦点会在弹层的其他控件之间跳走（Tab 走的还是原生顺序）。
+        if (event.preventDefault) event.preventDefault();
+        var at = -1;
+        for (var i = 0; i < dom.items.length; i += 1) {
+            if (Number(dom.items[i].row.run_id) === Number(state.selectedRunId)) { at = i; break; }
         }
-        table.appendChild(tbody);
-        body.appendChild(table);
-
-        if (state.selectedRunId !== null) renderReport();
+        var next = nextIndex(key, at, dom.items.length);
+        if (next < 0) return;
+        // **选中跟着焦点走**：右栏是这一条的预览，先移动再回车是多余的一步。
+        select(dom.items[next].row.run_id, null, {focus: true});
     }
 
     // -----------------------------------------------------------------------
@@ -364,20 +522,44 @@
         });
     }
 
-    /** 选中某一次：去取它的报告（与 `/latest` 同一个形状）。 */
-    function select(runId, fetchImpl) {
+    /** 选中某一次：去取它的报告（与 `/latest` 同一个形状）。
+     *
+     * `options.focus` 只在键盘走过来时为真（见 `updateSelection`）。
+     */
+    function select(runId, fetchImpl, options) {
         state.selectedRunId = runId;
-        state.selectedReport = null;
-        render();
+        updateSelection(!!(options && options.focus));
+        var cached = state.reports[runId];
+        if (cached && cached.error) {
+            // **重新点一次 = 重试**：上一次失败留在这里的只是「那一下没读到」，不是
+            // 「这一份永远读不到」。不丢掉它，用户再点这一条只会看到同一个错误。
+            delete state.reports[runId];
+            cached = null;
+        }
+        if (cached) {
+            // 看过的不再取第二遍：方向键来回翻时，这一条省掉的是**每一次**请求。
+            state.loadingRunId = null;
+            renderDetail();
+            return Promise.resolve(cached.payload || null);
+        }
+        state.loadingRunId = runId;
+        renderDetail();
         return fetchJson(fetchImpl, reportUrl(runId)).then(function (payload) {
-            // 取回来的时候用户可能已经点了别的：那就丢掉这一份，别把旧结果盖上去。
+            var report = payload.result || payload;
+            // **先落缓存再判「用户是不是已经点了别的」**：取回来的是**那一条**的报告，
+            // 与用户此刻在看哪一条无关。丢掉它，用户再点回来就要重取一次。
+            state.reports[runId] = {payload: report};
             if (Number(state.selectedRunId) !== Number(runId)) return null;
-            state.selectedReport = payload.result || payload;
-            render();
-            return state.selectedReport;
+            state.loadingRunId = null;
+            renderDetail();
+            return report;
         }).catch(function (error) {
+            // 同上：错误也先落缓存（详情区照着它写「读不到这一份的报告：…」），
+            // 换目标不改变「那一次没读到」这个事实。
+            state.reports[runId] = {error: (error && error.message) || '未知错误'};
             if (Number(state.selectedRunId) !== Number(runId)) return null;
-            renderNote(NOTE.error + ((error && error.message) || '未知错误'));
+            state.loadingRunId = null;
+            renderDetail();
             return null;
         });
     }
@@ -410,6 +592,7 @@
             state.payload = payload;
             var runs = payload.runs || [];
             state.selectedRunId = null;
+            state.loadingRunId = null;
             for (var i = 0; i < runs.length; i += 1) {
                 if (Number(runs[i].run_id) === Number(state.currentRunId)) {
                     state.selectedRunId = runs[i].run_id;
@@ -435,9 +618,13 @@
         if (next === state.historyUrl) return;
         state.historyUrl = next;
         // 换了目标就把上一个目标的列表丢掉：留着会被当成这个目标的历次结论。
+        // **报告缓存一起丢**：那些运行号属于上一个目标，留着只会让下个目标的历史
+        // 点开时拿错一份报告（运行号跨目标不会撞，但缓存本身没有意义了）。
         state.payload = null;
         state.selectedRunId = null;
-        state.selectedReport = null;
+        state.reports = {};
+        state.loadingRunId = null;
+        state.dom = null;
     }
 
     function state_() {
@@ -446,7 +633,14 @@
             currentRunId: state.currentRunId,
             selectedRunId: state.selectedRunId,
             loading: state.loading,
-            rows: (state.payload && state.payload.runs) || []
+            loadingRunId: state.loadingRunId,
+            cachedRuns: Object.keys(state.reports).map(Number),
+            rows: ((state.payload && state.payload.runs) || []).map(function (row) {
+                return {
+                    run_id: row.run_id,
+                    selected: Number(row.run_id) === Number(state.selectedRunId)
+                };
+            })
         };
     }
 
@@ -461,6 +655,8 @@
         statusTone: statusTone,
         hasConclusion: hasConclusion,
         rowMeta: rowMeta,
+        nextIndex: nextIndex,
+        isCurrentAt: isCurrentAt,
         track: track,
         open: open,
         select: select,

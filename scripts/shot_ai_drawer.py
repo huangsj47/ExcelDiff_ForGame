@@ -209,6 +209,35 @@ def _seed() -> dict:
         db.session.add(older)
         db.session.flush()
 
+        # **再补几条**（2026-09-25）：历次结论改成两栏之后，有一条只有真浏览器算得出来的
+        # 读数 —— 「左列自己滚、右栏自己滚」。两条运行的列表撑不出滚动条，那条断言就会
+        # 退化成同义反复（`scrollHeight == clientHeight`）。这几条都排在「现在」与那次
+        # 失败之间，所以**最后一条仍然是那次失败的**（探针靠这条翻历史）。
+        extra = []
+        for index in range(8):
+            # **变量名不能叫 `run`**：下面 `_seed` 的返回值与结构化的结论行都指着
+            # 上面那一次运行。循环里覆盖了它，探针就会拿一份**没有逐轮明细**的运行去
+            # 问 `/usage`，而报错的地方离这里很远（`assert ...["rounds"]`）。
+            extra_run = AiAnalysisRun(
+                project_id=project.id, target_type="commit", target_id=commit.id,
+                status="succeeded", scope="full" if index % 2 else "incremental",
+                trigger_source="manual", response_text=REPORT,
+                model=provenance["model"] or MODEL,
+                prompt_version=provenance["prompt_version"],
+                skill_version=provenance["skill_version"],
+                rules_version=provenance["rules_version"],
+                rounds_used=3, tool_requests_used=5,
+                tokens_input=180_000 + index, tokens_output=9_000 + index,
+                anomalies_found=index % 3, duration_ms=30_000,
+                created_at=datetime.now(timezone.utc) - timedelta(hours=index + 1),
+                finished_at=datetime.now(timezone.utc) - timedelta(hours=index + 1),
+                response_payload=json.dumps(
+                    {"risk_level": "高", "anomalies": []}, ensure_ascii=False),
+            )
+            db.session.add(extra_run)
+            db.session.flush()
+            extra.append(extra_run.id)
+
         # 报告下面那块「结构化结论 + 处置」要有真行才复核得到：一条还没处置、一条已经
         # 被处置过（处置人/时间/备注都得显示出来）。**失败的运行一条都不建** ——
         # 翻到那一次时看到的正是「这一次没有落库的结构化结论条目」那个空态。
@@ -234,7 +263,9 @@ def _seed() -> dict:
         ))
         db.session.commit()
         return {"_admin": admin_name, "commit_id": commit.id,
-                "project_id": project.id, "run_id": run.id, "older_run_id": older.id}
+                "project_id": project.id, "run_id": run.id, "older_run_id": older.id,
+                # 历次结论里会出现的那几条（新的在前、那次失败的仍在最后）
+                "history_run_ids": [run.id, *extra, older.id]}
 
 
 def _csrf(client) -> str:
@@ -268,8 +299,7 @@ def _capture(ids: dict) -> tuple:
         f"/ai-analysis/commit/{ids['commit_id']}/history":
             client.get(f"/ai-analysis/commit/{ids['commit_id']}/history").get_json(),
     }
-    for key in ("run_id", "older_run_id"):
-        run_id = ids[key]
+    for run_id in ids["history_run_ids"]:
         responses[f"/ai-analysis/runs/{run_id}/report"] = client.get(
             f"/ai-analysis/runs/{run_id}/report"
         ).get_json()
@@ -477,22 +507,59 @@ _HISTORY_PROBE_JS = r"""
 () => {
     const modal = document.getElementById('aiReportHistoryModal');
     const body = document.getElementById('aiReportHistoryBody');
-    const rows = document.querySelectorAll('.ai-history-list tbody tr');
+    const items = Array.from(document.querySelectorAll('.ai-history-item'));
     const findExport = (node) => {
         const link = node.querySelector('#aiHistoryExportMdLink');
         return link ? link.getAttribute('href') : null;
     };
+    const rect = (el) => {
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return {
+            top: Math.round(r.top), left: Math.round(r.left),
+            right: Math.round(r.right), bottom: Math.round(r.bottom),
+            width: Math.round(r.width), height: Math.round(r.height)
+        };
+    };
+    const scroll = (el) => el ? {
+        scrollHeight: Math.round(el.scrollHeight),
+        clientHeight: Math.round(el.clientHeight),
+        scrollTop: Math.round(el.scrollTop)
+    } : null;
+    const listPane = document.querySelector('.ai-history-list-pane');
+    const detailPane = document.querySelector('.ai-history-detail-pane');
+    const rowOf = (el) => ({
+        when: (el.querySelector('.ai-history-when') || {}).textContent || '',
+        badge: (el.querySelector('.badge') || {}).textContent || '',
+        risk: (el.querySelector('.ai-history-risk') || {}).textContent || '',
+        currentTag: (el.querySelector('.ai-history-current-tag') || {}).textContent || '',
+        summary: (el.querySelector('.ai-history-summary') || {}).textContent || '',
+        meta: (el.querySelector('.ai-history-row-meta') || {}).textContent || '',
+        selected: el.classList.contains('is-selected'),
+        tabindex: el.getAttribute('tabindex'),
+        ariaSelected: el.getAttribute('aria-selected'),
+        height: Math.round(el.getBoundingClientRect().height)
+    });
     return {
         visible: !!modal && modal.classList.contains('show'),
-        rows: rows.length,
-        rows_text: Array.from(rows).map((tr) => (tr.textContent || '').trim().slice(0, 80)),
+        rows: items.length,
+        rows_text: items.map((el) => (el.textContent || '').trim().slice(0, 80)),
+        rowShapes: items.map(rowOf),
         times: Array.from(document.querySelectorAll('.ai-history-when')).map(
-            (td) => td.textContent),
+            (node) => node.textContent),
         note: (document.querySelector('.ai-history-meta') || {}).textContent || '',
         mark: (document.querySelector('.ai-history-mark') || {}).textContent || '',
         report: (document.getElementById('aiHistoryReportBody') || {}).textContent || '',
         exportHref: findExport(body),
-        currentRows: document.querySelectorAll('.ai-history-row.is-current').length,
+        currentRows: document.querySelectorAll('.ai-history-item.is-current').length,
+        selectedRows: document.querySelectorAll('.ai-history-item.is-selected').length,
+        // 两栏的几何：**只有真浏览器算得出来**（网格解算 + 内容驱动的高度）
+        listPane: rect(listPane),
+        detailPane: rect(detailPane),
+        listScroll: scroll(listPane),
+        detailScroll: scroll(detailPane),
+        reportRect: rect(document.getElementById('aiHistoryReportBody')),
+        viewport: {width: window.innerWidth, height: window.innerHeight},
         // 报告下面那块「结构化结论 + 处置」：清单、每条三个动作、批量按钮的可否。
         // 逐条读（不是 `querySelector` 取第一个）—— 「哪一条的处置人显示出来了」
         // 只有逐条看才知道：第一个匹配到 `.ai-anomaly-item-by` 的节点未必是第一条。
@@ -523,6 +590,165 @@ _HISTORY_PROBE_JS = r"""
     };
 }
 """
+
+# 键盘那一档：焦点**真的**落在刚选中的那一条上，并且那一圈焦点环真的画出来了。
+# `:focus-visible` 的胜出只有浏览器算得出来（假 DOM 里根本没有这个概念）。
+_FOCUS_PROBE_JS = r"""
+() => {
+    const active = document.activeElement;
+    if (!active) return {tag: null};
+    const style = getComputedStyle(active);
+    return {
+        className: active.className,
+        isSelected: active.classList.contains('is-selected'),
+        role: active.getAttribute('role'),
+        outlineWidth: style.outlineStyle === 'none' ? '0px' : style.outlineWidth,
+        outlineColor: style.outlineColor
+    };
+}
+"""
+
+
+def _check_the_history_layout(page, history: dict) -> None:
+    """2026-09-25 改版的三条读数 —— **全是只有真浏览器算得出来的**。
+
+    用户报的原话：「选择某个结论后的跳转文本显示也不方便查看，**没有跳到正文**」。
+    改版把「一张宽表 + 报告接在表下面」换成「左列 + 右栏」。这三条各管一件事：
+
+    1. **两栏并排**（左栏在左、右栏在右、上沿齐平）—— 网格解算的结果；
+    2. **报告在视野里**（选中之后 `#aiHistoryReportBody` 的顶边落在视口内）——
+       这一条正是用户那句抱怨的判据；改版前报告顶边在 1000px 开外；
+    3. **两栏各自滚**（各自的 `scrollHeight > clientHeight`）—— 顺带证明第 2 条不是
+       「内容太短所以刚好看得见」那种假绿。
+    """
+    list_pane, detail_pane = history["listPane"], history["detailPane"]
+    viewport = history["viewport"]
+    print("\n=== 历次结论：两栏几何（真浏览器算的）===")
+    print(f"  视口 {viewport['width']}×{viewport['height']}")
+    print(f"  左栏 {list_pane}  滚动={history['listScroll']}")
+    print(f"  右栏 {detail_pane}  滚动={history['detailScroll']}")
+    print(f"  报告正文 rect={history['reportRect']}")
+    print(f"  选中项={history['selectedRows']}  当前项={history['currentRows']}")
+    for row in history["rowShapes"][:3]:
+        print(f"  | {row['when']} [{row['badge']}] {row['risk']} {row['currentTag']}"
+              f" / {row['summary'][:40]} / {row['meta']} / 高 {row['height']}px")
+
+    assert list_pane and detail_pane, "两栏有一个没画出来"
+    assert list_pane["right"] <= detail_pane["left"] + 1, (
+        f"两栏不是并排的（左栏右沿 {list_pane['right']} > 右栏左沿 {detail_pane['left']}）"
+        " —— 报告又回到了列表下面"
+    )
+    assert abs(list_pane["top"] - detail_pane["top"]) <= 1, "两栏上沿没对齐"
+    assert list_pane["width"] >= 300, f"左栏只有 {list_pane['width']}px，一条摘要读不了"
+
+    # 两栏都得真的撑出滚动条，否则下面那条「报告在视野里」是「内容太短」的假绿
+    assert history["listScroll"]["scrollHeight"] > history["listScroll"]["clientHeight"] + 20, (
+        f"左栏没撑出滚动条（{history['listScroll']}）—— 「两栏各自滚」这条断言会退化成恒真；"
+        "先把造数里的历史条数加上去"
+    )
+    assert (history["detailScroll"]["scrollHeight"]
+            > history["detailScroll"]["clientHeight"] + 20), (
+        f"右栏没撑出滚动条（{history['detailScroll']}）—— 报告太短就验不出「报告自己在滚」"
+    )
+
+    # **用户那句抱怨的判据**：选中之后报告正文在视野里，不用滚。
+    report = history["reportRect"]
+    assert report["top"] >= 0 and report["top"] < viewport["height"], (
+        f"选中之后报告正文的顶边在 {report['top']}px —— 不在视野里"
+        f"（视口高 {viewport['height']}），用户看到的就是「点了没反应」"
+    )
+    assert report["bottom"] > report["top"], "报告正文是零高度"
+    # 当前那一份的标记：**文字标签**，不是又一条颜色
+    current = [row for row in history["rowShapes"] if row["currentTag"]]
+    assert len(current) == 1 and current[0]["currentTag"] == "当前显示", (
+        f"「当前显示」那一条没有文字标签：{history['rowShapes']}"
+    )
+    assert current[0]["tabindex"] == "0", "当前那条 Tab 进不来"
+
+
+def _check_the_history_keyboard(page, history: dict, out_prefix: str) -> None:
+    """方向键：焦点走到哪一条，看的就是哪一条（右栏跟着换）。
+
+    这一档只有真浏览器验得了：`:focus-visible` 的胜出、`document.activeElement`
+    跟不跟得上，假 DOM 里都没有这些概念。
+
+    **先按 Tab 走进列表**：方向键的处理函数挂在清单容器上，而弹层刚打开时焦点在关闭
+    按钮上 —— 键盘用户得先 Tab 进来（roving tabindex：整张清单只有选中那条能 Tab 到）。
+    探针把这一步也真按出来，顺带证明**这条路走得通**（Tab 走不到列表项的话，方向键
+    这套快捷键对键盘用户等于不存在）。
+    """
+    reached = False
+    for _ in range(6):
+        page.keyboard.press("Tab")
+        probe = page.evaluate(_FOCUS_PROBE_JS)
+        if probe.get("role") == "option":
+            reached = True
+            break
+    assert reached, "按 Tab 走不到列表项 —— 方向键那套快捷键键盘用户够不着"
+    print("\n=== 历次结论：键盘 ===")
+    print(f"  Tab 之后焦点: {page.evaluate(_FOCUS_PROBE_JS)}")
+
+    before = history["rowShapes"].index(
+        next(row for row in history["rowShapes"] if row["selected"])
+    )
+    page.keyboard.press("ArrowDown")
+    page.wait_for_timeout(500)
+    after = page.evaluate(_HISTORY_PROBE_JS)
+    moved = after["rowShapes"].index(
+        next(row for row in after["rowShapes"] if row["selected"])
+    )
+    print(f"  选中从第 {before + 1} 条走到第 {moved + 1} 条")
+    focus = page.evaluate(_FOCUS_PROBE_JS)
+    print(f"  document.activeElement: {focus}")
+    print(f"  标记: {after['mark']}")
+    assert moved == before + 1, "方向键没有换选中"
+    assert focus["isSelected"], "焦点没落到刚选中的那一条上"
+    assert focus["role"] == "option", f"焦点那个节点的角色不对：{focus['role']}"
+    assert focus["outlineWidth"] not in ("0px", ""), (
+        f"焦点环没画出来（outlineWidth={focus['outlineWidth']}）—— 键盘用户看不出焦点在哪"
+    )
+    assert "的结论（历史）" in (after["mark"] or "") or "当前显示的结论" in (after["mark"] or ""), (
+        after["mark"]
+    )
+    # 右栏确实跟着换了：报告正文在视野里（同一条判据，键盘路径也要成立）
+    report = after["reportRect"]
+    assert report["top"] < after["viewport"]["height"], "键盘换选中之后报告跑到视野外了"
+    page.locator("#aiReportHistoryModal .modal-content").screenshot(
+        path=str(ROOT / ".pytest_tmp" / f"{out_prefix}_history_keyboard.png"))
+    page.keyboard.press("ArrowUp")
+    page.wait_for_timeout(400)
+    back = page.evaluate(_HISTORY_PROBE_JS)
+    assert back["rowShapes"].index(
+        next(row for row in back["rowShapes"] if row["selected"])
+    ) == before, "ArrowUp 没回到原来那一条"
+
+
+def _check_the_history_narrow(page, history: dict, out_prefix: str) -> None:
+    """窄屏（900px）：两栏退回上下两段，**报告的顶边仍要在第一屏里**。
+
+    退回上下之后，如果列表不封顶，报告又会被推到折叠线以下 —— 那就是改版前的毛病
+    换个宽度又犯一次。所以这一条断的是「详情栏的顶边落在视口内」（`max-height: 40vh`
+    那条规则在起作用）。
+    """
+    page.set_viewport_size({"width": 900, "height": 900})
+    page.wait_for_timeout(400)
+    narrow = page.evaluate(_HISTORY_PROBE_JS)
+    print("\n=== 历次结论：窄屏 900px（上下两段）===")
+    print(f"  左栏 {narrow['listPane']}")
+    print(f"  右栏 {narrow['detailPane']}  报告 rect={narrow['reportRect']}")
+    assert narrow["listPane"]["bottom"] <= narrow["detailPane"]["top"] + 1, (
+        "窄屏没有退回上下两段"
+    )
+    assert narrow["listPane"]["height"] <= 900 * 0.4 + 2, (
+        f"窄屏的左栏没有封顶（高 {narrow['listPane']['height']}px），报告会被推到折叠线以下"
+    )
+    assert narrow["reportRect"]["top"] < 900, (
+        f"窄屏下报告正文的顶边在 {narrow['reportRect']['top']}px（视口 900）—— 看不见"
+    )
+    page.locator("#aiReportHistoryModal .modal-content").screenshot(
+        path=str(ROOT / ".pytest_tmp" / f"{out_prefix}_history_narrow.png"))
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.wait_for_timeout(300)
 
 
 def _report(label: str, data: dict) -> None:
@@ -727,6 +953,10 @@ def _main(out_prefix: str) -> int:
         )
         page.locator("#aiReportHistoryModal .modal-content").screenshot(
             path=str(out_dir / f"{out_prefix}_history.png"))
+        # 2026-09-25 改版的三条读数（两栏几何 / 报告在不在视野里 / 两栏各自滚）
+        _check_the_history_layout(page, history)
+        _check_the_history_keyboard(page, history, out_prefix)
+        _check_the_history_narrow(page, history, out_prefix)
         # 面板在报告**下面**：滚到底单独拍一张，看清清单与处置动作长什么样。
         page.evaluate(
             "() => { const el = document.getElementById('aiAnomalyPanel');"
@@ -736,9 +966,10 @@ def _main(out_prefix: str) -> int:
         page.locator("#aiAnomalyPanel").screenshot(
             path=str(out_dir / f"{out_prefix}_disposition.png"))
         # 翻到上一次（失败的那次）：标记变「历史」，失败那条没有正文也没有导出。
+        # **点整行**（不是行里某个按钮）—— 整行可点是这一版的行为。
         page.evaluate(
-            "() => { const rows = document.querySelectorAll('.ai-history-list tbody tr');"
-            " rows[rows.length - 1].querySelector('button').click(); }"
+            "() => { const rows = document.querySelectorAll('.ai-history-item');"
+            " rows[rows.length - 1].click(); }"
         )
         page.wait_for_timeout(700)
         older = page.evaluate(_HISTORY_PROBE_JS)

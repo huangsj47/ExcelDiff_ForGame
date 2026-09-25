@@ -17,8 +17,12 @@
 
 只实现这段代码用到的那几样：`getElementById` / `createElement` / `createTextNode` /
 `appendChild` / `textContent` / `className` / `setAttribute` / `getAttribute` /
-`addEventListener`。`dump()` 把节点树摊成文本，断言就写在那上面 —— 比逐个属性断言
-更接近「用户看到的是什么」。
+`removeAttribute` / `addEventListener` / `focus`。`dump()` 把节点树摊成文本，断言就写在那上面
+—— 比逐个属性断言更接近「用户看到的是什么」。
+
+**每个节点带一个 `_uid`**（连续编号）与一个 `_focused` 标记：2026-09-25 起还要断言两件
+文本上看不出来的事 —— 「换选中时**没有重建列表**」（重建出来的树 dump 出来一模一样，
+只有节点**身份**能分辨）与「方向键走过来时焦点**真的跟着走了**」。
 """
 from __future__ import annotations
 
@@ -42,10 +46,13 @@ var MODAL_ID = 'aiReportHistoryModal';
 var BODY_ID = 'aiReportHistoryBody';
 var DRAWER_FOOTER_LINK = 'aiExportMdLink';   // 抽屉 footer 那个（**不是**弹层里这个）
 
+var uidSeq = 0;
+
 function makeEl(tag) {
     var node = {
         tagName: tag, id: '', className: '', type: '', hidden: false,
-        children: [], _attrs: {}, _handlers: {}, _text: '', _html: ''
+        children: [], _attrs: {}, _handlers: {}, _text: '', _html: '',
+        _uid: (uidSeq += 1), _focused: false
     };
     // **`textContent` 的 setter 必须清空子节点** —— 真 DOM 就是这样，而模块靠这条
     // 重画列表（`body.textContent = ''`）。假 DOM 少了这一句，断言会看到上一次的残留。
@@ -64,7 +71,46 @@ function makeEl(tag) {
     };
     node.removeAttribute = function (k) { delete node._attrs[k]; };
     node.addEventListener = function (t, fn) { node._handlers[t] = fn; };
+    // 真 DOM 里 `focus()` 会把焦点从别人身上拿走。这里只记「谁被我点过」——
+    // 够断言「方向键之后焦点落在新选中的那一条上」，也不必模拟 document.activeElement。
+    node.focus = function () {
+        clearFocus(els[BODY_ID]);
+        node._focused = true;
+    };
     return node;
+}
+
+function clearFocus(node) {
+    if (!node) return;
+    if (node._focused) node._focused = false;
+    (node.children || []).forEach(clearFocus);
+}
+
+function hasClass(node, cls) {
+    return (' ' + String(node.className || '') + ' ').indexOf(' ' + cls + ' ') !== -1;
+}
+
+/** 先序遍历，`visit` 返回真值就停。 */
+function walk(node, visit) {
+    if (!node) return null;
+    var hit = visit(node);
+    if (hit) return hit;
+    var kids = node.children || [];
+    for (var i = 0; i < kids.length; i += 1) {
+        hit = walk(kids[i], visit);
+        if (hit) return hit;
+    }
+    return null;
+}
+
+function byClass(root, cls) {
+    return walk(root, function (n) { return hasClass(n, cls) ? n : null; });
+}
+
+function allByClass(root, cls) {
+    var out = [];
+    walk(root, function (n) { if (hasClass(n, cls)) out.push(n); return null; });
+    return out;
 }
 
 function makeText(text) {
@@ -114,6 +160,10 @@ sandbox.AiReportMarkdown = {
 var currentRunId = null;
 sandbox.AiThinkLog = {currentRunId: function () { return currentRunId; }};
 
+// 页面上的 `fetch`：**整行的点击处理函数走的就是它**（那里传不了自己的实现，
+// 与真页面一致）。读的是调用那一刻的 `fetchTable`（`reset` 会换掉它）。
+sandbox.fetch = function (url) { return makeFetch(fetchTable)(url); };
+
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(__SCRIPT__, 'utf8'), sandbox);
 var api = sandbox.AiReportHistory;
@@ -141,12 +191,34 @@ function makeFetch(table) {
 var OP = {
     track: function (url) { api.track({historyUrl: url}); },
     open: function () { return api.open(makeFetch(fetchTable)); },
-    select: function (runId) { return api.select(Number(runId), makeFetch(fetchTable)); },
+    // **不传 fetch**：走 `global.fetch`（与整行点击那条路同一条）——
+    // 传自己的实现就等于把「生产路径上那个 fetch 存不存在」这件事绕过去了。
+    select: function (runId) { return api.select(Number(runId)); },
+    // **不 await** 的那一种：用来把「正在读这一份」那一刻截下来（报告永远不回来）。
+    pending: function (runId) { api.select(Number(runId), makePendingFetch); },
+    // 点整行（不是点某个按钮）：处理函数挂在这一行自己身上。
+    clickItem: function (index) {
+        var items = allByClass(els[BODY_ID], 'ai-history-item');
+        items[Number(index)]._handlers.click({});
+        // 处理函数的返回值被真 DOM 丢掉，这里也不等它 —— 等的是取数那一串
+        // 微任务排干（`setTimeout` 是宏任务，排在所有微任务之后）。
+        return new Promise(function (done) { setTimeout(done, 0); });
+    },
+    key: function (key) {
+        var list = byClass(els[BODY_ID], 'ai-history-list');
+        list._handlers.keydown({key: key, preventDefault: function () {}});
+        return new Promise(function (done) { setTimeout(done, 0); });
+    },
     setCurrent: function (runId) { currentRunId = runId; }
 };
 
 var fetchTable = __FETCH__;
 var HISTORY_URL = '/ai-analysis/commit/7/history';
+
+function makePendingFetch(url) {
+    fetchLog.push(url);
+    return new Promise(function () {});     // 永远不 settle
+}
 
 // 场景可以只给自己那一份列表（「只有一次结论」「一次都没跑过」这两条要靠它）。
 function tableFor(item) {
@@ -158,19 +230,58 @@ function tableFor(item) {
     return table;
 }
 
+// 某一行的报告「读不到」（网络抖动）：列表**不许**因此被抹掉。
+function withRejects(table, item) {
+    var next = JSON.parse(JSON.stringify(table));
+    (item.rejectRuns || []).forEach(function (runId) {
+        next['/ai-analysis/runs/' + runId + '/report'] = 'reject';
+    });
+    return next;
+}
+
 function snap() {
+    var body = els[BODY_ID];
+    var detail = byClass(body, 'ai-history-detail-pane');
     return {
-        body: dump(els[BODY_ID]),
+        body: dump(body),
+        // 详情区自己那一段（「正在读这一份」这类只在右栏里的话，看这一份）
+        detail: dump(detail),
+        // 左列**逐条的身份**：同一次打开里换选中，这些 _uid 必须一个都不变
+        //（列表被重建时 dump 出来的文本一模一样，只有身份能分辨）
+        itemUids: allByClass(body, 'ai-history-item').map(function (n) { return n._uid; }),
+        listUid: (byClass(body, 'ai-history-list') || {})._uid || null,
+        focusedUid: (walk(body, function (n) { return n._focused ? n : null; }) || {})._uid || null,
+        selectedUid: (byClass(body, 'is-selected') || {})._uid || null,
+        // `dump()` 只印 class/id/href，选中态的**属性**要另取（无障碍那几条靠它们）
+        selectedCount: allByClass(body, 'is-selected').length,
+        selectedAttrs: (function () {
+            var node = byClass(body, 'is-selected');
+            return node ? {
+                role: node.getAttribute('role'),
+                tabindex: node.getAttribute('tabindex'),
+                ariaSelected: node.getAttribute('aria-selected')
+            } : null;
+        })(),
+        optionCount: allByClass(body, 'ai-history-item').filter(function (n) {
+            return n.getAttribute('role') === 'option';
+        }).length,
+        // roving tabindex：整张清单只有一条能 Tab 进来（`"0"`），其余都是 `-1`
+        tabindexes: allByClass(body, 'ai-history-item').map(function (n) {
+            return n.getAttribute('tabindex');
+        }),
+        listRole: (byClass(body, 'ai-history-list') || {getAttribute: function () { return null; }})
+            .getAttribute('role'),
+        ariaBusy: detail ? detail.getAttribute('aria-busy') : null,
         footerHref: els[DRAWER_FOOTER_LINK].getAttribute('href'),
         state: api.state(),
         // 弹层里那个导出链接（由 JS 建，带固定 id）
         historyHref: (function () {
             var found = null;
-            (function walk(node) {
+            (function walkId(node) {
                 if (!node || found) return;
                 if (node.id === 'aiHistoryExportMdLink') { found = node.getAttribute('href'); }
-                (node.children || []).forEach(walk);
-            })(els[BODY_ID]);
+                (node.children || []).forEach(walkId);
+            })(body);
             return found;
         })(),
         fetchLog: fetchLog.slice()
@@ -179,9 +290,10 @@ function snap() {
 
 function reset(item) {
     seedEls();
+    uidSeq = 0;
     fetchLog = [];
     currentRunId = item.currentRunId === undefined ? null : item.currentRunId;
-    fetchTable = tableFor(item);
+    fetchTable = withRejects(tableFor(item), item);
     vm.runInContext(fs.readFileSync(__SCRIPT__, 'utf8'), sandbox);
     api = sandbox.AiReportHistory;
 }
@@ -216,7 +328,8 @@ function runAll() {
 }
 
 var pure = __PURE__.map(function (item) {
-    reset({});
+    reset({currentRunId: item.currentRunId});
+    var at = item.at === undefined ? null : item.at;
     return {
         name: item.name,
         url: api.historyUrlFor(item.kind, item.id),
@@ -225,7 +338,12 @@ var pure = __PURE__.map(function (item) {
         listNote: api.listNote(item.payload),
         mark: api.markText(item.row, item.currentRunId),
         tone: api.statusTone(item.status),
-        rowMeta: api.rowMeta(item.row || {})
+        rowMeta: api.rowMeta(item.row || {}),
+        current: api.isCurrentAt({run_id: item.runId}, item.currentRunId),
+        // 五个键各落哪一个下标（`-1` = 这个键不管）—— 首尾**不环绕**是这一格的判据。
+        nav: ['ArrowDown', 'ArrowUp', 'Home', 'End', 'Tab'].map(function (key) {
+            return api.nextIndex(key, at, item.count);
+        }).join(',')
     };
 });
 
@@ -251,6 +369,15 @@ def _rows() -> list:
             "status_label": "分析失败", "risk_label": "", "scope_label": "全量",
             "trigger_label": "定时", "focus_label": "", "summary": "失败：额度用完了",
             "anomaly_count": 0, "suppressed_count": 0, "exportable": False,
+        },
+        # 第三条：**降级**那一档（它不是成功也不是失败，报告正文是真的）。第三条也让
+        # 「方向键撞到首尾」这件事测得出来 —— 两条的话「停在最后一条」与「只有一个方向
+        # 可走」分辨不开。
+        {
+            "run_id": 40, "created_at_display": "2026-09-09 08:00:00", "status": "degraded",
+            "status_label": "降级完成", "risk_label": "中", "scope_label": "增量",
+            "trigger_label": "手动", "focus_label": "", "summary": "降级（上下文压缩）：这一次只有两条结论。",
+            "anomaly_count": 2, "suppressed_count": 1, "exportable": True,
         },
     ]
 
@@ -323,6 +450,25 @@ def run() -> dict:
             #    于是那句正确的话只活在常量表里，单测照样全绿。
             {"name": "正跑着且名单为空", "currentRunId": None, "rows": [], "in_progress": True,
              "ops": ["track:/ai-analysis/commit/7/history", "open"]},
+            # 8. 报告**还没回来**那一档：右栏要写「正在读这一份」，不许写成「里面没有正文」。
+            {"name": "报告还没回来", "currentRunId": 42,
+             "ops": ["track:/ai-analysis/commit/7/history", "open", "pending:41"]},
+            # 9. 某一份的报告**读不到**（网络抖一下）：那一条的详情说读不到，
+            #    但**列表必须原样还在**（原来这条路径会把整个弹层抹成一句话）。
+            {"name": "报告读不到", "currentRunId": 42, "rejectRuns": [41],
+             "ops": ["track:/ai-analysis/commit/7/history", "open", "select:41", "select:41"]},
+            # 10. 点整行（不是点某个按钮）就换选中。
+            {"name": "点整行就选中", "currentRunId": 42,
+             "ops": ["track:/ai-analysis/commit/7/history", "open", "clickItem:1"]},
+            # 11. 来回翻：列表**不重建**（左列逐条的身份不变）、看过的**不重取**。
+            {"name": "来回翻不重建列表", "currentRunId": 42,
+             "ops": ["track:/ai-analysis/commit/7/history", "open", "select:41",
+                     "select:42", "select:41"]},
+            # 12. 方向键：↓ 到底停住、↑ 到顶停住、Home/End 直达（三行才测得出来）。
+            {"name": "方向键换选中", "currentRunId": 42,
+             "ops": ["track:/ai-analysis/commit/7/history", "open",
+                     "key:ArrowDown", "key:ArrowDown", "key:ArrowDown",
+                     "key:ArrowUp", "key:Home", "key:End", "key:Tab"]},
         ],
         [
             {"name": "提交的历史地址", "kind": "commit", "id": 7, "runId": 42},
@@ -333,7 +479,7 @@ def run() -> dict:
              "payload": {"runs": [], "total": 0, "in_progress": True}, "runId": 1},
             {"name": "只有一次", "payload": {"runs": _rows()[:1], "total": 1}, "runId": 1},
             {"name": "全部列出", "payload": {"runs": _rows(), "total": 2}, "runId": 1},
-            {"name": "被截断", "payload": {"runs": _rows(), "total": 40, "truncated": True,
+            {"name": "被截断", "payload": {"runs": _rows()[:2], "total": 40, "truncated": True,
                                           "window_days": 90}, "runId": 1},
             {"name": "当前这一份", "runId": 1,
              "row": {"run_id": 1, "created_at_display": "2026-09-12 19:13:04"},
@@ -343,11 +489,21 @@ def run() -> dict:
              "currentRunId": 1},
             {"name": "成功", "status": "succeeded", "runId": 1},
             {"name": "失败", "status": "failed", "runId": 1},
+            {"name": "降级", "status": "degraded", "runId": 1},
             {"name": "进行中", "status": "running", "runId": 1},
             {"name": "一行的次要信息", "runId": 1,
              "row": {"scope_label": "全量", "trigger_label": "定时", "focus_label": "仅配表仓库",
                      "anomaly_count": 3}},
             {"name": "次要信息全空", "runId": 1, "row": {}},
+            # 「这一行是不是抽屉里正显示的那一份」（`is-current` 那半边的判据）
+            {"name": "就是抽屉里那份", "runId": 7, "currentRunId": 7},
+            {"name": "不是抽屉里那份", "runId": 7, "currentRunId": 9},
+            {"name": "没有当前那一次", "runId": 7},
+            # 方向键落点：没选中时（-1）、首、中、尾、空名单
+            {"name": "还没选中", "count": 3, "at": None},
+            {"name": "落在第一条", "count": 3, "at": 0},
+            {"name": "落在最后一条", "count": 3, "at": 2},
+            {"name": "名单是空的", "count": 0, "at": 0},
         ],
         _rows(),
     )
@@ -399,9 +555,105 @@ def test_the_status_colors_and_the_meta_line(run):
     pure = _pure(run)
     assert pure["成功"]["tone"] == "success"
     assert pure["失败"]["tone"] == "danger"
+    # 降级**单独一档**：它不是成功（流程没走完），也不是失败（那份报告是真的）。
+    # 与成功同色的话，「这一份是降级出来的」在列表里就看不出来。
+    assert pure["降级"]["tone"] == "warning"
     assert pure["进行中"]["tone"] == "secondary"
     assert pure["一行的次要信息"]["rowMeta"] == "全量 · 定时 · 仅配表仓库 · 异常 3 条"
     assert pure["次要信息全空"]["rowMeta"] == ""
+
+
+# --------------------------------------------------------------------------
+#  两栏（左列 + 右详情）：这是 2026-09-25 改版的核心
+# --------------------------------------------------------------------------
+def test_the_report_sits_next_to_the_list_not_under_it(run):
+    """用户实测的原话是「**没有跳到正文**」。
+
+    原来是「一张宽表 + 报告接在整张表下面」：20 行表格一千多像素高，报告落在折叠线
+    以下，点「看这一份」屏幕上纹丝不动（变化全在折叠线底下）。改版后**两栏各自滚动**，
+    报告永远在视野里。
+
+    **文档顺序分辨不出这两者**（改版前改版后，报告都在列表文字之后）—— 分开它们的是
+    「两栏是同一个网格的两个格子、各自滚」这一条 CSS。所以这里断到样式表上：
+    少一条 `overflow-y` / `max-height`，两栏就变成一栏，而那在 JS 的 dump 里完全看不出来。
+    """
+    last = _by_name(run)["默认选中当前这次"]["snaps"][-1]
+    assert "ai-history-panes" in last["body"]
+    assert "aiHistoryReportBody" in last["detail"], "报告没在右栏里"
+    assert "aiAnomalyPanel" in last["detail"]
+
+    css = (PROJECT_ROOT / "static" / "css" / "style.css").read_text(encoding="utf-8")
+    panes = _css_block(css, ".ai-history-panes {")
+    assert "grid-template-columns" in panes, "两栏不是网格：报告会退回列表下面"
+    assert panes.count("minmax(0, 1fr)") == 1 and "360px" in panes
+    for selector in (".ai-history-list-pane,", ".ai-history-detail-pane {"):
+        block = _css_block(css, selector)
+        assert "overflow-y: auto" in block, f"{selector} 不能自己滚"
+        # **要断到值上**：只写 `max-height` 三个字的话，`max-height: none` 也照样通过
+        # （变异验证当场验过这条守卫是假绿的）。
+        assert "max-height: calc(" in block, f"{selector} 没有封顶：报告会被推出视野"
+    # 改版前的那个「报告接在表下面」的分隔块必须已经不在（留着它会多一条横线与间距）
+    assert ".ai-history-report {" not in css
+
+
+def _css_block(css: str, selector: str) -> str:
+    start = css.index(selector)
+    return css[start:css.index("}", start)]
+
+
+def test_the_two_panes_are_siblings(run):
+    """两栏必须是**同一个父节点下**的兄弟。
+
+    分成两处渲染（比如列表在 body 里、报告挂到别处）看起来也「有那两栏」，
+    但窄屏的上下堆叠、`gap`、以及「两栏各自滚动」全都不会生效。
+    """
+    last = _by_name(run)["默认选中当前这次"]["snaps"][-1]
+    lines = last["body"].splitlines()
+    pane_lines = [i for i, line in enumerate(lines) if "ai-history-panes" in line]
+    assert pane_lines, "没有两栏的容器"
+    top = pane_lines[0]
+    # 容器下面紧跟的两个同级节点就是那两栏（dump 的缩进 = 树深）
+    indent = len(lines[top]) - len(lines[top].lstrip())
+    siblings = [
+        line for line in lines[top + 1:]
+        if (len(line) - len(line.lstrip())) == indent + 2 and line.strip().startswith("<div")
+    ]
+    assert len(siblings) >= 2, "两栏不是同级兄弟：\n" + "\n".join(lines[top:top + 8])
+    assert "ai-history-list-pane" in siblings[0]
+    assert "ai-history-detail-pane" in siblings[1]
+
+
+def test_switching_never_rebuilds_the_list(run):
+    """换选中只重画右栏。**整块重画会把左列的滚动位置打回顶部** ——
+    翻到第 15 条按一下方向键就跳回第 1 条，而这类毛病在 dump 出来的文本上
+    **一个字都看不出来**（重建出来的树长得一模一样），只有节点身份能分辨。
+    """
+    snaps = _by_name(run)["来回翻不重建列表"]["snaps"]
+    # ops = [track, open, select:41, select:42, select:41] → 每执行完一个 op 记一张
+    assert not snaps[0]["itemUids"], "track 之后不该有列表（构造没生效）"
+    opened, after_first, after_second, after_third = snaps[1], snaps[2], snaps[3], snaps[4]
+
+    assert len(opened["itemUids"]) == 3
+    assert after_first["itemUids"] == opened["itemUids"], "换选中把左列重建了"
+    assert after_second["itemUids"] == opened["itemUids"]
+    assert after_third["itemUids"] == opened["itemUids"]
+    assert after_third["listUid"] == opened["listUid"], "连列表容器都换了"
+    # 反过来也要成立：这一次里确实**换过**选中（不然上面几条是「什么都没发生」的假绿）
+    assert after_first["state"]["selectedRunId"] == 41
+    assert after_third["state"]["selectedRunId"] == 41
+    # 而右栏**确实**重画了（详情区换了内容）
+    assert after_first["detail"] != opened["detail"]
+
+
+def test_a_report_already_read_is_not_fetched_again(run):
+    """看过的报告不取第二遍。方向键逐条翻时，这一条省掉的是**每一次**请求。"""
+    last = _by_name(run)["来回翻不重建列表"]["snaps"][-1]
+    assert last["fetchLog"] == [
+        "/ai-analysis/commit/7/history",
+        "/ai-analysis/runs/42/report",
+        "/ai-analysis/runs/41/report",
+    ], last["fetchLog"]
+    assert sorted(last["state"]["cachedRuns"]) == [41, 42]
 
 
 # --------------------------------------------------------------------------
@@ -493,6 +745,134 @@ def test_without_a_target_url_it_says_so_and_fires_no_request(run):
 
 
 # --------------------------------------------------------------------------
+#  选中与「当前显示」是两件事（原来只靠两种颜色，说不出来）
+# --------------------------------------------------------------------------
+def test_the_two_marks_are_spelled_out_not_just_colored(run):
+    """「当前显示的那一份」原来只有一条 3px 色条 —— **颜色单独承载语义**。
+
+    「正在看的那一份」也只有底色。两件事都改成了**说得出来**的东西：前者多一个
+    写着「当前显示」的标签，后者多一个 `aria-selected`。它们可能落在同一行上
+    （默认打开时就是这样），所以两个标记必须能同时在场。
+    """
+    pure = _pure(run)
+    assert pure["就是抽屉里那份"]["current"] is True
+    assert pure["不是抽屉里那份"]["current"] is False
+    assert pure["没有当前那一次"]["current"] is False, (
+        "屏幕上没有结论时，不许把随便哪一条说成「当前显示」"
+    )
+
+    # 两个标记**同时在场**：默认打开时选中的就是抽屉里那份，两个 class 都要在
+    last = _by_name(run)["默认选中当前这次"]["snaps"][-1]
+    assert "ai-history-item is-current is-selected" in last["body"], last["body"]
+    assert "当前显示" in last["body"], "「当前」只剩颜色了"
+    # 清单是**单选**的：`role=listbox` + 每项 `role=option`，且只有一项说自己是选中的
+    assert last["listRole"] == "listbox"
+    assert last["optionCount"] == 3
+    assert last["selectedCount"] == 1
+    assert last["selectedAttrs"] == {
+        "role": "option", "tabindex": "0", "ariaSelected": "true",
+    }
+    assert last["state"]["rows"][0] == {"run_id": 42, "selected": True}
+    # roving tabindex：Tab 只进得来一次（选中那条），进来之后靠方向键走
+    assert last["tabindexes"] == ["0", "-1", "-1"]
+
+    # 换到历史那一条：`is-selected` 跟着走，`is-current` **留在原地**（两件事）
+    moved = _by_name(run)["翻到历史那一条"]["snaps"][-1]
+    assert "ai-history-item is-current" in moved["body"], "「当前显示」跟着选中跑了"
+    assert "ai-history-item is-selected" in moved["body"]
+    assert moved["selectedCount"] == 1, "同时有两条说自己被选中"
+    assert moved["selectedAttrs"]["ariaSelected"] == "true"
+    assert moved["tabindexes"] == ["-1", "0", "-1"], "roving tabindex 没跟着走"
+
+
+def test_clicking_anywhere_on_the_row_selects_it(run):
+    """整行可点 —— 原来只有右边那个「看这一份」按钮可点。
+
+    按钮已经去掉：整行都是目标，再摆一个按钮等于把「只有这里能点」写在脸上。
+    """
+    last = _by_name(run)["点整行就选中"]["snaps"][-1]
+    assert last["state"]["selectedRunId"] == 41, "点了第二行（run 41）却没换过去"
+    assert "这是 2026-09-10 09:00:00 的结论（历史）" in last["detail"]
+    assert "看这一份" not in last["body"], "那个按钮还在"
+
+
+# --------------------------------------------------------------------------
+#  键盘：焦点走到哪一条，看的就是哪一条
+# --------------------------------------------------------------------------
+def test_the_arrow_keys_move_the_selection(run):
+    """`↓` 到底停住、`↑` 到顶停住、`Home`/`End` 直达。
+
+    这一格是 `nextIndex` 的纯函数判据（`-1` = 这个键不管）。首尾**不环绕**：
+    翻历史是「找某一次」，绕回开头会让人以为自己翻过头了。
+    """
+    pure = _pure(run)
+    assert pure["还没选中"]["nav"] == "0,2,0,2,-1"
+    assert pure["落在第一条"]["nav"] == "1,0,0,2,-1"
+    assert pure["落在最后一条"]["nav"] == "2,1,0,2,-1", "到底了还往下走 = 绕回去了"
+    assert pure["名单是空的"]["nav"] == "-1,-1,-1,-1,-1"
+
+
+def test_the_arrow_keys_actually_walk_the_list_and_move_focus(run):
+    """**接线**：上面那条只证明算得对，这条证明屏幕上真的在动。
+
+    三行名单，从 run 42（当前，第一条）开始：`↓↓↓` 停在最后一条（40）、
+    `↑` 回到 41、`Home` 回 42、`End` 到 40、`Tab` 不拦（它得留给浏览器）。
+    """
+    snaps = _by_name(run)["方向键换选中"]["snaps"]
+    # ops = [track, open, ↓, ↓, ↓, ↑, Home, End, Tab] → 每执行完一个 op 记一张
+    assert snaps[1]["state"]["selectedRunId"] == 42, "打开之后没选中当前那一次"
+    #                                    ↓  ↓  ↓  ↑  Home End
+    assert [snap["state"]["selectedRunId"] for snap in snaps[2:8]] == [41, 40, 40, 41, 42, 40]
+
+    # 焦点**跟着选中走**：只改颜色不算 —— 按 Tab 进来的人会看不出焦点在哪一条
+    for snap in snaps[2:8]:
+        assert snap["focusedUid"] is not None, "方向键之后没有任何一条拿到焦点"
+        assert snap["focusedUid"] == snap["selectedUid"], (
+            "焦点落在的那一条不是刚选中的那一条：\n" + snap["body"]
+        )
+        assert snap["selectedUid"] in snap["itemUids"], "选中的节点已经不在列表里了"
+    # `Tab` 那一下什么都不许发生（它要留给浏览器去走下一个控件）
+    assert snaps[8]["state"]["selectedRunId"] == 40
+    assert snaps[8]["focusedUid"] == snaps[7]["focusedUid"], "Tab 被拦下来改了选中"
+
+
+# --------------------------------------------------------------------------
+#  右栏自己的加载态 / 读不到（两个都曾经把「还没回来」画成别的）
+# --------------------------------------------------------------------------
+def test_a_report_still_in_flight_says_it_is_reading(run):
+    """**原来是闪一句「这一次没有报告正文。」**
+
+    `select()` 先把 `selectedReport` 清成 null 再重画，于是「还没取回来」被画成了
+    「取回来了、里面没有正文」—— 用户每次换一条都会看到它闪一下。
+    """
+    last = _by_name(run)["报告还没回来"]["snaps"][-1]
+    assert "正在读取这一份的报告" in last["detail"], last["detail"]
+    assert "没有报告正文" not in last["detail"], "把「还没回来」画成了「里面没有」"
+    assert last["ariaBusy"] == "true", "在等的时候要有 aria-busy（读屏软件才知道）"
+    # 列表**不受影响**：左列照旧列着三条
+    assert "2026-09-12 19:13:04" in last["body"]
+    assert len(last["itemUids"]) == 3
+
+
+def test_a_report_that_cannot_be_read_keeps_the_list(run):
+    """读不到某一份的报告时：**只有右栏说读不到，左列原地不动**。
+
+    原来是 `renderNote()` 那一句（它写的是整个弹层），一次网络抖动就把用户正在翻的
+    历史**整张抹掉**，换成一行「读不到历次结论：连接失败」—— 而历次结论明明读到了。
+    """
+    last = _by_name(run)["报告读不到"]["snaps"][-1]
+    assert "读不到这一份的报告" in last["detail"]
+    assert "连接失败" in last["detail"]
+    # 左列三条一条都不许少
+    assert len(last["itemUids"]) == 3
+    assert "2026-09-12 19:13:04" in last["body"]
+    assert "2026-09-09 08:00:00" in last["body"]
+    assert "读不到历次结论" not in last["body"], "把「这一份读不到」说成了「历次结论读不到」"
+    # 重试：再点同一条要**重新发请求**（失败留在缓存里的话，用户永远看到同一个错误）
+    assert last["fetchLog"].count("/ai-analysis/runs/41/report") == 2, last["fetchLog"]
+
+
+# --------------------------------------------------------------------------
 #  模板那一侧：弹层 DOM 与按钮
 # --------------------------------------------------------------------------
 TEMPLATES = (
@@ -534,6 +914,31 @@ def test_the_history_button_is_never_disabled():
 def test_every_drawer_loads_the_history_module():
     for name in TEMPLATES:
         assert "js/ai_report_history.js" in _template(name), f"{name} 没有引历次结论那个模块"
+
+
+def test_the_history_module_is_loaded_with_a_cache_buster():
+    """脚本与样式**必须带 `?v=`**，否则用户看到的还是上一版。
+
+    这条不是形式主义：这次改版把**同一件事拆到了两个文件**里 —— 这个模块建出
+    `.ai-history-item` 那一套 DOM，`style.css` 才有得可样式。浏览器命中缓存的旧 JS
+    配上新的 CSS，屏幕上就是一堆没有任何排版的裸文字（比改版前更糟）。`base.html`
+    里给报告渲染器写 `?v=2` 时踩的就是这个坑（那里留了注释）。
+
+    **它拦不住「改了却没升版本号」**（那个只能靠人），拦的是「新加引用时忘了带」。
+    """
+    for name in TEMPLATES:
+        source = _template(name)
+        line = next(
+            line for line in source.splitlines()
+            if "js/ai_report_history.js" in line and "<script" in line
+        )
+        assert "?v=" in line, f"{name} 引历次结论模块时没有带 ?v=：{line.strip()}"
+    base = (PROJECT_ROOT / "templates" / "base.html").read_text(encoding="utf-8")
+    css_line = next(
+        line for line in base.splitlines()
+        if "css/style.css" in line and "<link" in line
+    )
+    assert "?v=" in css_line, f"style.css 没有带 ?v=：{css_line.strip()}"
 
 
 def test_the_merged_view_resets_the_export_link_when_the_target_changes():
