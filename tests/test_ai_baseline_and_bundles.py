@@ -204,6 +204,38 @@ def test_the_header_tells_the_model_not_to_re_report():
     assert "不要为它补写证据" in text
 
 
+def test_the_header_folds_the_code_values_back_into_chinese():
+    """摘要里的 `[critical]` / `[high]` 是码值，正文一律写中文（2026-09-25，用户实测）。
+
+    ## 为什么要写在**这里**
+
+    真机报告里「上次遗留（仍成立）」那一节长得和本轮确认**完全不同**：
+
+        - [high] 【模块】标题（文件 @提交）
+
+    逐字比对下来它就是 `_render_entry` 的产物减去指纹 —— 模型不是在「选格式」，是在**照抄
+    上面那条清单**。所以让正文写中文等级、写统一形态，最可靠的一处不是 references
+    （按需读取、常常没被读），而是这份**每轮都进提示词**的摘要：它自己怎么写，模型就怎么抄。
+
+    ## 但不能把摘要本身改成中文
+
+    等级要留在模型能写的闭集里（`_prompt_severity` 的 docstring：写成 `[中]` 会让模型跟着
+    往 `anomalies` 里写中文，那一条会被 `protocol` 按「severity 不在允许集合内」静默丢掉）。
+    所以这里只能**加一句说明**，不能改渲染出来的值。
+    """
+    text = build_baseline_digest(classify([_finding("a" * 8)]))
+
+    assert "- [high] " in text, "摘要自己仍用码值 —— 它是给模型看的闭集，不许折成中文"
+    assert "平台内部的码值" in text and "严重 / 高" in text, (
+        "没有说明列表里的码值要写成中文，模型会照抄 `[high]` 进正文。\n"
+        f"实际输出：\n{text}"
+    )
+    assert "旧结论与「本轮确认」用同一种写法" in text, (
+        "没有说明两个小节的形态要一致 —— 真机里它们长得像两份不同的清单。\n"
+        f"实际输出：\n{text}"
+    )
+
+
 def test_an_empty_baseline_states_that_this_is_the_first_run():
     text = build_baseline_digest([])
     assert "第一次分析" in text
