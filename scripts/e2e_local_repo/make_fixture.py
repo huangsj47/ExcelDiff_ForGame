@@ -459,6 +459,43 @@ end
 return BattleMgr
 """
 
+# 第八轮：与 `BATTLE_LUA_V5` 同一个文件、同一类小重构。用途只有一个：让这个文件再进一次
+# delta，复测模型的收口通道有没有真的被叫起来（第七轮那次没叫起来，见 `CLOSURE_RULE`）。
+BATTLE_LUA_V6 = """-- 战斗管理：伤害结算与队伍校验
+local BattleMgr = {}
+
+-- 队伍人数上限的兜底值：挂在模块上导出，客户端与编辑器按同一个数读
+BattleMgr.DEFAULT_TEAM_MEMBER_LIMIT = 5
+
+function BattleMgr.calc_damage(base, attack, defense)
+    local raw = base + attack - defense
+    if raw < 1 then
+        raw = 1
+    end
+    return raw
+end
+
+function BattleMgr.mana_cost(level, base_cost)
+    -- 等级上限 50，超过之后不再减免 —— 这是**有意**的，不是漏判
+    if level > 50 then
+        return base_cost
+    end
+    return base_cost * (1 - 0.02 * level)
+end
+
+-- 队伍是否已满：调用方拿它做前置判断，不必各写一遍 `#team.members >= limit`。
+function BattleMgr.team_is_full(team, limit)
+    local effective = limit or BattleMgr.DEFAULT_TEAM_MEMBER_LIMIT
+    return #team.members >= effective
+end
+
+function BattleMgr.can_join_team(team, player_id, limit)
+    return not BattleMgr.team_is_full(team, limit)
+end
+
+return BattleMgr
+"""
+
 
 def _reset_origin():
     """平台会去 fetch/checkout/pull 这个 url，所以它必须是**裸库**。
@@ -648,6 +685,26 @@ def round7():
                          capture_output=True, text=True).stdout)
 
 
+def round8():
+    """第八轮：**再改一次服务端 lua**（单文件、非关键路径），用来复测收口通道。
+
+    与 `round7` 同一手法、同一目的：那两条「服务端队伍人数上限」的结论在冻结版本上早就
+    修好了，而模型上一轮只在正文里说了「已修复」、结构化字段里什么都没交（见
+    `baseline.CLOSURE_RULE` 的 docstring）。这一轮让同一个文件重新进 delta（合并器判成
+    `needs_recheck`），再看一次它交不交 `baseline_updates`。
+
+    改的是一件正常的小重构：把「队伍是否已满」抽成一个函数，调用处不再各写一遍
+    `#team.members >= limit`。**不是修 bug、也不制造 bug。**
+    """
+    _battle_lua().write_text(BATTLE_LUA_V6, encoding="utf-8")
+    _commit("队伍是否已满抽成一个函数，调用处不再各写一遍判断",
+            "2026-09-25T11:30:00+08:00")
+    _git("push", "-q", "origin", "master")
+    print(subprocess.run(["git", "log", "--oneline", "-1"], cwd=str(SRC),
+                         capture_output=True, text=True).stdout)
+
+
 if __name__ == "__main__":
     {"build": build, "round2": round2, "round3": round3, "round4": round4,
-     "round5": round5, "round6": round6, "round7": round7}[sys.argv[1] if len(sys.argv) > 1 else "build"]()
+     "round5": round5, "round6": round6, "round7": round7,
+     "round8": round8}[sys.argv[1] if len(sys.argv) > 1 else "build"]()
