@@ -58,6 +58,7 @@ CASES = [
     {"name": "inline_code", "md": "见 `TrapCfgMod` 文件"},
     {"name": "quote", "md": "> 信息不足"},
     {"name": "paragraph_join", "md": "第一行\n第二行"},
+    {"name": "risk_lines", "md": "R1（critical）甲\nR2（high）乙\nR3（medium）丙"},
     {"name": "blank_lines_collapse", "md": "甲\n\n\n\n乙"},
     {"name": "fence", "md": "```\n- 这不是列表\n# 这不是标题\n```"},
     {"name": "unclosed_fence", "md": "```\ncode 没闭合"},
@@ -137,9 +138,32 @@ def test_blockquote(rendered):
     assert "<blockquote>信息不足</blockquote>" in rendered["quote"]
 
 
-def test_soft_wrapped_lines_join_into_one_paragraph(rendered):
+def test_a_line_break_in_the_source_stays_a_line_break(rendered):
+    """**换行不许被吃掉**（2026-09-25 产品决定，真机 run 70 实测）。
+
+    这份报告的作者（模型与平台）按「一行一条」写清单：一行一条风险、一行一条测试
+    建议。按标准 Markdown 的软换行规则把它们并用空格接成一段，读者拿到的是连成一片
+    的长文 —— 真机 run 70 的「上次遗留（仍成立）」**25 行 / 2195 字**被并成一段，
+    正是用户报的「很多报告内容没有换行，不方便阅读」。
+
+    段落仍然是**一个** `<p>`（换行不该变成分段），只是行与行之间有 `<br>`。
+    与「不许用 `white-space: pre-wrap`」不冲突：那条禁的是把标签之间的空白当正文渲染。
+    """
     html = rendered["paragraph_join"]
     assert html.count("<p>") == 1, f"软换行被拆成了多段：{html}"
+    assert "第一行<br>第二行" in html, f"行内换行被吃掉了：{html}"
+
+
+def test_a_checklist_written_one_item_per_line_keeps_its_lines(rendered):
+    """真实形态：清单每条一行（run 70 的风险清单就是 `R10…\\nR11…\\nR12…`）。
+
+    这条钉的是**用户实际读到的那一份**：并起来的时候，25 条风险会连成一段 2195 字的
+    长文，读者没法逐条看。
+    """
+    html = rendered["risk_lines"]
+    assert html.count("<br>") == 2, f"三条清单没保住三行：{html}"
+    for item in ("R1（critical）甲", "R2（high）乙", "R3（medium）丙"):
+        assert item in html, f"{item} 不见了：{html}"
 
 
 def test_blank_runs_do_not_produce_empty_paragraphs(rendered):
@@ -172,7 +196,7 @@ def test_a_realistic_report_gets_all_its_pieces(rendered):
 
 ALLOWED_TAGS = {
     "h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li",
-    "strong", "code", "blockquote", "pre",
+    "strong", "code", "blockquote", "pre", "br",
 }
 
 _TAG_RE = re.compile(r"<\s*/?\s*([a-zA-Z][a-zA-Z0-9]*)")
