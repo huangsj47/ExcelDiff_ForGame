@@ -267,6 +267,24 @@ LOGIC_V3 = LOGIC_V2.replace(
 )
 assert LOGIC_V3 != LOGIC_V2, "round6 的替换没命中 —— LOGIC_V2 又被改过了？"
 
+# 第九轮：把 20% 的下限提成模块常量（`LOGIC_V3` 里它是写在表达式里的字面量）。
+#
+# 一处正常的整理：这个数与 `DEFAULT_CRIT_RATE` 一样属于「调数值时只看一处」的那类常量，
+# 而 `LOGIC_V3` 把它留在表达式里，改的人得先在函数体里找到它。**不是修 bug、也不制造
+# bug** —— 这一轮要看的不是模型能不能发现新问题，而是它有没有把清单上的旧结论**逐条**
+# 交代清楚（`baseline_updates` 的枚举要求）。
+LOGIC_V4 = LOGIC_V3.replace(
+    "DEFAULT_CRIT_RATE = 0.15\n",
+    "DEFAULT_CRIT_RATE = 0.15\n"
+    "\n"
+    "# 蓝耗减免的下限：等级再高也至少扣原价的这个比例。\n"
+    "MANA_FLOOR_RATIO = 0.2\n",
+).replace(
+    "    return max(base_cost * (1 - 0.02 * level), base_cost * 0.2)",
+    "    return max(base_cost * (1 - 0.02 * level), base_cost * MANA_FLOOR_RATIO)",
+)
+assert LOGIC_V4.count("MANA_FLOOR_RATIO") == 2, "round9 的替换没命中 —— LOGIC_V3 又被改过了？"
+
 
 # ---------------------------------------------------------------------------
 #  Lua 代码（2026-09-25 加）
@@ -704,7 +722,27 @@ def round8():
                          capture_output=True, text=True).stdout)
 
 
+def round9():
+    """第九轮：**只改 `src/battle_logic.py`**（单文件、非关键路径），验逐条枚举。
+
+    与 `round7` / `round8` 同一手法、同一目的，只换一只脚：那几条「客户端蓝耗」的结论
+    在冻结版本上有的已经修好（`LOGIC_V3` 补上了曲线的连续性）、有的还挂着，而模型上两轮
+    只在正文里说「已修复」、结构化字段里一条都没交。`baseline_updates` 现在改成**逐条
+    枚举**（清单上有几条就要有几条状态），这一轮看它到底交不交、缺不缺。
+
+    改动本身是一处正常的整理：把 20% 的下限提成模块常量。**不是修 bug、也不制造 bug。**
+
+    为什么还是单文件：见 `BATTLE_LUA_V4` 上面的说明 —— delta/total = 1/4 = 0.25 < 0.30，
+    且路径里没有 `config/`。
+    """
+    (SRC / "src" / "battle_logic.py").write_text(LOGIC_V4, encoding="utf-8")
+    _commit("蓝耗下限提成模块常量，调数值只看一处", "2026-09-25T11:45:00+08:00")
+    _git("push", "-q", "origin", "master")
+    print(subprocess.run(["git", "log", "--oneline", "-1"], cwd=str(SRC),
+                         capture_output=True, text=True).stdout)
+
+
 if __name__ == "__main__":
     {"build": build, "round2": round2, "round3": round3, "round4": round4,
      "round5": round5, "round6": round6, "round7": round7,
-     "round8": round8}[sys.argv[1] if len(sys.argv) > 1 else "build"]()
+     "round8": round8, "round9": round9}[sys.argv[1] if len(sys.argv) > 1 else "build"]()
