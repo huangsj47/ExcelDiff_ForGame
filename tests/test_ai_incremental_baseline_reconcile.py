@@ -84,7 +84,7 @@ def test_incremental_result_carries_forward_and_marks_changed_history_for_rechec
         "suppressed": 1,
     }
     assert "历史结论延续（平台）" in merged["report_markdown"]
-    assert "不能因为模型没有重复输出就视为已修复" in merged["report_markdown"]
+    assert "不能因为模型没有逐条回应就视为已修复" in merged["report_markdown"]
     assert len([row for row in merged["final_findings"] if row.get("active")]) == 4
 
 
@@ -113,14 +113,24 @@ def test_the_section_is_a_count_not_a_list():
     section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
 
     assert "共 3 条" in section, "开头没有给出这一节的规模"
-    assert "2 条仍成立" in section and "1 条需要重新确认" in section, section
+    assert "2 条仍成立" in section and "1 条本轮无结论" in section, section
+    # **这一组不许叫「需要重新确认」**：那是提问期的说法（给模型看的那份基线用），
+    # 写进报告就变成平台替这几条下结论 —— 而它知道的只有「文件改了、本轮结论里没它」。
+    # 实测 run 73 撞过车：模型在正文里写了「已修复」，本节同时写着「需要重新确认」，
+    # 同一份报告对同一批条目给出两种说法。
+    assert "需要重新确认" not in section, (
+        "这一组的名字又回到「需要重新确认」了 —— 它读起来像平台的结论，会与正文撞车"
+    )
     # 一份只报数的节必须说清它不是全量清单，否则读者会以为「没列出来 = 没有了」；
     # 另一半是这一节存在的理由本身。
     assert "逐条清单以正文的「风险评估」为准" in section, (
         "没有说清它与正文那一节的分工 —— 两份并排时读者不知道信哪份"
     )
-    assert "不能因为模型没有重复输出就视为已修复" in section, (
+    assert "不能因为模型没有逐条回应就视为已修复" in section, (
         "「没提到 = 已修好」正是这一节要防的误读"
+    )
+    assert "只有结构化反证才能关闭" not in section, (
+        "平台没有任何结构化通道能让模型关闭一条旧结论 —— 这句话承诺了一个不存在的东西"
     )
     # **一条标题都不再列**（含「需要重新确认」那一类）：条目本身在异常面板与导出附录里
     # 都看得到，认得出的东西不在这里再抄一遍。
