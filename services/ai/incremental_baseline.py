@@ -253,14 +253,35 @@ def _report_section(
         f"{len(groups[state])} 条{label}" for state, label in labels if groups[state]
     )
     ignored = int((reconciliation or {}).get("declarations_ignored") or 0)
-    tail = ""
+    declared = int((reconciliation or {}).get("declared_fixed") or 0) + int(
+        (reconciliation or {}).get("declared_overturned") or 0
+    )
+    undetermined = len(groups[STATE_RECHECK]) + len(groups[STATE_CARRIED])
+    clauses: list[str] = []
     if ignored:
         # 一条声明「说了等于没说」是这条通道最坏的失效形态（模型以为关掉了，平台什么都没做），
         # 所以对不上的那些必须报出来，而且要指路：指纹抄错了就重抄一遍。
-        tail = (
+        clauses.append(
             f"另有 {ignored} 条收口声明**没有生效**（指纹对不上本次清单里的条目，"
             "或同一条又被重新报成了结论）。"
         )
+    if not declared and undetermined:
+        # **平台这一轮一条结构化收口都没收到**，而清单里还有没定论的条目 —— 把这件事说出来。
+        #
+        # 为什么非说不可（2026-09-25 真机，两次复现）：模型会在正文里写「某几条已修复」
+        # （run 76 甚至用上了这条通道自己的词：「声明已由本次提交 fc3f45b5d402 修复」），
+        # 而那句话平台**读不到**、也不认（`baseline_closures` 的模块 docstring 写着为什么
+        # 不能认）。读者于是看到两份说法：正文说修好了，本节说「仍成立 / 本轮无结论」——
+        # 而两份都没有错，缺的是**中间那一格事实**：平台收到了什么。
+        #
+        # 平台在这里**不判谁对**（它没有独立复核过那几条），只陈述自己收到了什么。这一句
+        # 会出现在多数报告里（多数轮次本来就没人声明收口）—— 那不是噪音，那是这条通道
+        # 当前的真实状态：正文里那句话与平台的账是**两件事**，读者必须知道。
+        clauses.append(
+            "本轮**没有收到任何结构化收口声明** —— 正文里若写着某几条「已修复」，"
+            "那只是模型的话（平台不复核、也读不到），在平台的账里它们仍在挂。"
+        )
+    tail = "".join(clauses)
     lines = [
         "## 历史结论延续（平台）",
         "",

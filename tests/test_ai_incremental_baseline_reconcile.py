@@ -384,6 +384,74 @@ def test_a_declaration_does_not_close_a_finding_the_same_round_still_reports():
     assert merged["retracted_findings"] == []
 
 
+def test_the_section_says_out_loud_when_no_close_out_arrived():
+    """清单里还有没定论的条目、而这一轮**一条结构化收口都没收到** —— 平台要把这件事说出来。
+
+    为什么非说不可（2026-09-25 真机，两次复现）：模型会在正文里写「某几条已修复」
+    （run 76 甚至用上了这条通道自己的词：「声明已由本次提交 fc3f45b5d402 修复」），
+    而那句话平台读不到、也不认。读者于是看到两份说法：正文说修好了，本节说「仍成立 /
+    本轮无结论」—— 两份都没错，缺的是中间那一格事实：**平台收到了什么**。
+
+    平台在这里不判谁对（它没有独立复核过那几条），只陈述自己收到了什么。
+    """
+    merged = reconcile_result(
+        {"report_markdown": "本轮", "anomalies": [], "final_findings": []},
+        [_old("aaaa1111bbbb2222", "code/stable.lua")],
+        changed_paths=set(),
+        previous_run_id=22,
+    )
+    section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
+
+    assert "没有收到任何结构化收口声明" in section, section
+    assert "在平台的账里它们仍在挂" in section
+
+
+def test_the_section_stops_saying_it_once_a_close_out_really_arrived():
+    """收口收到之后这句就不许再出现 —— 它陈述的是「平台收到了什么」，收到就不是那样了。
+
+    这一条同时防住「把这句话写成常驻口号」：它是**状态句**，不是免责声明。所以清单里
+    必须**同时**有一条已收口、另一条还没定论 —— 只放一条已收口的话，
+    「只要还有没定论的就说」这个改坏法也能让这条用例绿（判据落在「有没有声明」还是
+    「有没有没定论的条目」上，就分不出来了）。
+    """
+    declared = "aaaa1111bbbb2222"
+    merged = reconcile_result(
+        {
+            "report_markdown": "本轮",
+            "anomalies": [],
+            "final_findings": [],
+            "baseline_updates": [_closure(declared)],
+        },
+        [_old(declared, "code/stable.lua"), _old("cccc3333dddd4444", "code/other.lua")],
+        changed_paths=set(),
+        previous_run_id=22,
+    )
+    section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
+
+    assert merged["baseline_reconciliation"]["carried_forward"] == 1, "另一条没在清单里"
+    assert "没有收到任何结构化收口声明" not in section, section
+    assert "1 条本轮声明已修复" in section
+
+
+def test_the_section_stays_quiet_when_everything_was_reconfirmed():
+    """清单里的条目本轮**都有定论**时也不必说 —— 那句话是给「还没定论」的条目配的。"""
+    fingerprint = "aaaa1111bbbb2222"
+    merged = reconcile_result(
+        {
+            "report_markdown": "本轮",
+            "anomalies": [_current(fingerprint, "code/stable.lua")],
+            "final_findings": [{"fingerprint": fingerprint, "active": True}],
+        },
+        [_old(fingerprint, "code/stable.lua")],
+        changed_paths=set(),
+        previous_run_id=22,
+    )
+    section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
+
+    assert merged["baseline_reconciliation"]["reconfirmed"] == 1
+    assert "没有收到任何结构化收口声明" not in section, section
+
+
 def test_a_declared_fix_does_not_come_back_as_an_in_flight_item():
     """整条链走一遍：声明 → 合并 → **落库** → 下一轮的基线里没有它。
 
