@@ -11,13 +11,22 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from difflib import SequenceMatcher
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
+from services.ai.baseline_closures import (
+    DECLARED_FIXED,
+    BaselineClosure,
+    coerce_closures,
+)
 from services.ai.scope import normalize_path
 
 STATE_RECONFIRMED = "reconfirmed"
 STATE_CARRIED = "carried_forward"
 STATE_RECHECK = "needs_recheck"
+# 本轮由模型**声明**收口的两种（见 `baseline_closures`）。名字里带 `declared_` 是刻意的：
+# 平台没有独立复核过它，读到这个值的人第一眼就该知道这件事。
+STATE_DECLARED_FIXED = "declared_fixed"
+STATE_DECLARED_OVERTURNED = "declared_overturned"
 
 
 def _evidence(value) -> list[str]:
@@ -89,14 +98,25 @@ def _claims(raw: Any) -> list:
     return [dict(item) for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
 
 
-def _final_row(item: Mapping) -> dict:
+def _final_row(
+    item: Mapping,
+    *,
+    active: bool = True,
+    reason: str = "",
+) -> dict:
+    """一条旧结论在结论载荷里的行。
+
+    `active=False` 只用于**本轮被声明修好 / 推翻**的那几条（`_declared_row`）：它们照样
+    留在 `final_findings` 与 `retracted_findings` 里（面板、导出、审计都要看得到），
+    只是不再算作「仍然成立的问题」—— 下一轮基线正是按这个把它们放下的。
+    """
     return {
         "finding_id": "",
         "source": "baseline",
         "verdict": "",
         "verdict_label": "",
-        "active": True,
-        "reason": "",
+        "active": active,
+        "reason": reason,
         "evidence_refs": [],
         "unlocatable_refs": [],
         "evidence_capped": False,
@@ -123,7 +143,63 @@ def _final_row(item: Mapping) -> dict:
     }
 
 
-def _report_section(groups: Mapping[str, list[dict]], previous_run_id: int) -> str:
+def _declared_state(closure: BaselineClosure) -> str:
+    return (
+        STATE_DECLARED_FIXED
+        if closure.status == DECLARED_FIXED
+        else STATE_DECLARED_OVERTURNED
+    )
+
+
+def _split_declarations(
+    merged: Mapping, old_rows: Sequence[Mapping]
+) -> tuple[dict[str, BaselineClosure], list[BaselineClosure]]:
+    """模型的收口声明分成「对得上清单的」与「对不上的」。
+
+    对不上的那批**一条都不生效**，但会被如实记账并写进报告那一节 —— 模型以为自己关掉了
+    一条，而平台什么都没做，是这条通道最坏的失效形态（说了等于没说，双方都以为成了）。
+    """
+    closures, _problems = coerce_closures(merged.get("baseline_updates"))
+    known = {str(row.get("fingerprint") or "") for row in old_rows}
+    matched: dict[str, BaselineClosure] = {}
+    unmatched: list[BaselineClosure] = []
+    for item in closures:
+        if item.fingerprint in known and item.fingerprint not in matched:
+            matched[item.fingerprint] = item
+        else:
+            unmatched.append(item)
+    return matched, unmatched
+
+
+def _declared_row(
+    old: Mapping, closure: BaselineClosure, previous_run_id: int
+) -> tuple[dict, dict]:
+    """本轮被模型**声明**收口的一条旧结论：`(审计轨迹行, 结论载荷行)`。
+
+    两行都由上面两个现成的工厂造出来（`_historical_anomaly` / `_final_row`）——
+    **不许在这里手抄一份行形状**：手抄的那一份少一个键时，表现是「面板上少一段内容」
+    而不是异常，没人会去数（这一课在 `previous_anomaly_rows` 那里已经付过一次）。
+
+    `active=False` 是这条通道的全部作用：它把条目从「仍然成立的问题」里挪出去。**不是
+    删除** —— 它仍在 `retracted_findings` 与报告那一节里，并带着模型的理由原文。
+    """
+    state = (
+        STATE_DECLARED_FIXED
+        if closure.status == DECLARED_FIXED
+        else STATE_DECLARED_OVERTURNED
+    )
+    item = _historical_anomaly(old, state, previous_run_id)
+    item["declared_reason"] = closure.reason
+    item["declared_status"] = closure.status
+    return item, _final_row(item, active=False, reason=closure.reason)
+
+
+def _report_section(
+    groups: Mapping[str, list[dict]],
+    previous_run_id: int,
+    *,
+    reconciliation: Mapping | None = None,
+) -> str:
     """「历史结论延续（平台）」这一节 —— **2026-09-25 起它只是一行账**。
 
     ## 角色反转过一次（run 63 → 2026-09-25）
@@ -167,19 +243,32 @@ def _report_section(groups: Mapping[str, list[dict]], previous_run_id: int) -> s
         # 基线用），在这里读起来像平台下了结论，而它知道的只有「文件改了、本轮结论里没它」。
         # 与正文撞车的实测见模块 docstring。
         (STATE_RECHECK, "本轮无结论"),
+        # 这两组**必须带「声明」二字**：平台没有独立复核过，措辞里不许出现「已修复」这种
+        # 断言式说法（`baseline_closures` 的模块 docstring 写着这条通道的边界）。
+        (STATE_DECLARED_FIXED, "本轮声明已修复"),
+        (STATE_DECLARED_OVERTURNED, "本轮声明已被推翻"),
     )
     total = sum(len(groups[state]) for state, _ in labels)
     counts = "、".join(
         f"{len(groups[state])} 条{label}" for state, label in labels if groups[state]
     )
+    ignored = int((reconciliation or {}).get("declarations_ignored") or 0)
+    tail = ""
+    if ignored:
+        # 一条声明「说了等于没说」是这条通道最坏的失效形态（模型以为关掉了，平台什么都没做），
+        # 所以对不上的那些必须报出来，而且要指路：指纹抄错了就重抄一遍。
+        tail = (
+            f"另有 {ignored} 条收口声明**没有生效**（指纹对不上本次清单里的条目，"
+            "或同一条又被重新报成了结论）。"
+        )
     lines = [
         "## 历史结论延续（平台）",
         "",
         f"上一轮（Run {previous_run_id}）报过的问题，由平台按指纹与本轮结果确定性合并，"
-        f"共 {total} 条：{counts}。"
+        f"共 {total} 条：{counts}。{tail}"
         "**逐条清单以正文的「风险评估」为准**，本节只记数 —— 旧结论不能因为模型没有"
         "逐条回应就视为已修复：这几条本轮到底怎么样了，正文里逐条写着"
-        "（仍成立 / 已修复 / 已被推翻）。",
+        "（仍成立 / 已修复 / 已被推翻；「声明」那几组是模型给的收口，平台未独立复核）。",
     ]
     return "\n".join(lines).rstrip() + "\n"
 
@@ -208,7 +297,14 @@ def reconcile_result(
     changed_paths: Iterable[str],
     previous_run_id: int | None,
 ) -> dict:
-    """Return a cumulative incremental result without treating model silence as resolution."""
+    """Return a cumulative incremental result without treating model silence as resolution.
+
+    ## 模型的收口声明从 `result["baseline_updates"]` 读，不从参数传
+
+    它本来就是**本次运行交出来的东西**（`result_payload` 把它从模型的回答原样搬进载荷，
+    也是落库的那一份），从参数再走一遍只会多一个可能与载荷不一致的来源。缺键（老运行、
+    失败运行）＝这一轮没有任何声明，行为与这条通道存在之前**逐字相同**。
+    """
     old_rows = [row for row in previous if str(row.get("fingerprint") or "")]
     if not old_rows or previous_run_id is None:
         return result
@@ -216,6 +312,7 @@ def reconcile_result(
     merged = deepcopy(result)
     anomalies = list(merged.get("anomalies") or [])
     final_findings = list(merged.get("final_findings") or [])
+    retracted = list(merged.get("retracted_findings") or [])
     current = {str(item.get("fingerprint") or ""): item for item in anomalies}
     final_by_id = {
         str(item.get("fingerprint") or ""): item
@@ -223,9 +320,20 @@ def reconcile_result(
         if item.get("active") is not False
     }
     changed = {normalize_path(path) for path in changed_paths if str(path or "").strip()}
-    groups = {STATE_RECONFIRMED: [], STATE_CARRIED: [], STATE_RECHECK: []}
+    groups = {
+        STATE_RECONFIRMED: [],
+        STATE_CARRIED: [],
+        STATE_RECHECK: [],
+        STATE_DECLARED_FIXED: [],
+        STATE_DECLARED_OVERTURNED: [],
+    }
     suppressed = 0
     matched_current: set[str] = set()
+    # 声明只对**本次清单里真的有**的指纹生效。对不上清单的（模型的指纹写错、或对的是更早
+    # 那一轮的条目）一条都不生效，但**要记账**：否则模型以为自己关掉了一条，而平台当没
+    # 看见 —— 那正是这条通道要消灭的那种「说了等于没说」。
+    declared, unmatched = _split_declarations(merged, old_rows)
+    used: set[str] = set()
 
     for old in old_rows:
         fingerprint = str(old.get("fingerprint") or "")
@@ -258,6 +366,17 @@ def reconcile_result(
             matched_current.add(matched_fingerprint)
             groups[STATE_RECONFIRMED].append(item)
             continue
+        closure = declared.get(fingerprint)
+        if closure is not None:
+            # 声明生效：**不进 `anomalies`**（那是「仍然成立的问题」的列，落库、面板、
+            # 下一轮基线读的都是它），只进审计轨迹与结论载荷 —— 于是下一轮它不再被当成
+            # 在挂条目喂回去，而这一轮的读者仍然看得到「模型说它修好了、理由是什么」。
+            used.add(fingerprint)
+            item, row = _declared_row(old, closure, previous_run_id)
+            final_findings.append(row)
+            retracted.append(row)
+            groups[_declared_state(closure)].append(item)
+            continue
         if str(old.get("disposition") or "pending") == "ignored" and not file_changed:
             suppressed += 1
             continue
@@ -269,15 +388,22 @@ def reconcile_result(
 
     merged["anomalies"] = anomalies
     merged["final_findings"] = final_findings
+    # 收口声明一律留在审计轨迹里（`active=False` + 模型的理由原文）。面板与导出读的就是
+    # 这一列 —— 它**不是**删除，只是不再算作「仍然成立的问题」。
+    merged["retracted_findings"] = retracted
     merged["baseline_reconciliation"] = {
         "previous_run_id": previous_run_id,
         "previous_total": len(old_rows),
         "reconfirmed": len(groups[STATE_RECONFIRMED]),
         "carried_forward": len(groups[STATE_CARRIED]),
         "needs_recheck": len(groups[STATE_RECHECK]),
+        "declared_fixed": len(groups[STATE_DECLARED_FIXED]),
+        "declared_overturned": len(groups[STATE_DECLARED_OVERTURNED]),
+        # 对不上清单的 + 声明了却又把同一条重新报成结论的（后者以前者同样的方式记账）。
+        "declarations_ignored": len(unmatched) + len(set(declared) - used),
         "suppressed": suppressed,
     }
-    section = _report_section(groups, previous_run_id)
+    section = _report_section(groups, previous_run_id, reconciliation=merged["baseline_reconciliation"])
     report = str(merged.get("report_markdown") or "").rstrip()
     merged["report_markdown"] = (report + "\n\n" + section).lstrip() if report else section
     if any(str(item.get("severity") or "") == "critical" for item in anomalies):
@@ -286,6 +412,7 @@ def reconcile_result(
     reasons.append(
         f"累积基线：延续 {len(groups[STATE_CARRIED])} 条，"
         f"待复核 {len(groups[STATE_RECHECK])} 条，本轮重新确认 {len(groups[STATE_RECONFIRMED])} 条"
+        f"，声明收口 {len(groups[STATE_DECLARED_FIXED]) + len(groups[STATE_DECLARED_OVERTURNED])} 条"
     )
     merged["risk_reasons"] = reasons
     return merged

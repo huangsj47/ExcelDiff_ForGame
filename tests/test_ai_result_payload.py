@@ -20,6 +20,7 @@ from dataclasses import replace
 
 import pytest
 
+from services.ai.baseline_closures import DECLARED_FIXED, BaselineClosure
 from services.ai.engine import EngineOutcome
 from services.ai.protocol import AnalysisPayload, Anomaly, DimensionReview
 from services.ai.result_payload import failed_result, note_review_skipped, result_payload
@@ -117,6 +118,51 @@ def test_the_keys_the_ui_reads_are_all_present():
         "usage", "dropped", "subagents", "subagent_skipped", "context",
     ):
         assert key in payload, f"`{key}` 不在结果里了"
+
+
+# ==========================================================================
+# 模型对上一轮结论的收口声明
+# ==========================================================================
+
+
+def test_the_baseline_close_outs_reach_the_payload():
+    """**这条键的读者在下一轮**：`reconcile_result` 读的是 `result["baseline_updates"]`。
+
+    链路：`AnalysisPayload.baseline_closures` →（这一份）→ 落库的 `response_payload`
+    → 下一轮 `incremental_baseline.reconcile_result`。这里少一个键，这一轮声明过什么
+    下一轮就当没说过 —— 而报告正文里「已修复」那句话照样在（实测 run 73 → run 74 的
+    翻转就是这么来的：同一批条目在两轮报告里各说了一遍反话）。
+    """
+    outcome = _outcome()
+    outcome = replace(
+        outcome,
+        payload=replace(
+            outcome.payload,
+            baseline_closures=(
+                BaselineClosure(
+                    fingerprint="0123456789abcdef",
+                    status=DECLARED_FIXED,
+                    reason="兜底常量加回来了，服务端又校验了一次",
+                ),
+            ),
+        ),
+    )
+
+    payload = result_payload(outcome, {}, suppressed=frozenset())
+
+    assert payload["baseline_updates"] == [
+        {
+            "fingerprint": "0123456789abcdef",
+            "status": "fixed",
+            "reason": "兜底常量加回来了，服务端又校验了一次",
+        }
+    ], "收口声明没进这一份 —— 下一轮收不到它，那几条又会当在挂条目喂回去"
+
+
+def test_a_run_without_close_outs_says_so_with_an_empty_list():
+    """没声明收口是**常态**（绝大多数轮次没有旧结论要收）—— 两种形态都要有这个键。"""
+    assert result_payload(_outcome(), {}, suppressed=frozenset())["baseline_updates"] == []
+    assert failed_result({"commits": 1}, "本次分析未发起")["baseline_updates"] == []
 
 
 # ==========================================================================

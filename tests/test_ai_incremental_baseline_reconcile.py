@@ -7,8 +7,12 @@ from app import app as flask_app
 from app import create_tables, db
 from models import Project
 from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
-from services.ai.baseline_source import previous_anomaly_rows
+from services.ai.baseline_closures import DECLARED_FIXED, BaselineClosure
+from services.ai.baseline_source import baseline_findings, previous_anomaly_rows
+from services.ai.engine import STATUS_SUCCEEDED, EngineOutcome
 from services.ai.incremental_baseline import reconcile_result
+from services.ai.protocol import AnalysisPayload, DimensionReview
+from services.ai.result_payload import result_payload
 
 
 def _old(fingerprint, path, *, disposition="pending", severity="high"):
@@ -81,6 +85,10 @@ def test_incremental_result_carries_forward_and_marks_changed_history_for_rechec
         "reconfirmed": 1,
         "carried_forward": 1,
         "needs_recheck": 1,
+        # 这一轮没有任何收口声明 —— 三个新键都是 0，行为与这条通道存在之前逐字相同。
+        "declared_fixed": 0,
+        "declared_overturned": 0,
+        "declarations_ignored": 0,
         "suppressed": 1,
     }
     assert "历史结论延续（平台）" in merged["report_markdown"]
@@ -264,3 +272,207 @@ def test_a_carried_forward_row_keeps_its_claims():
         assert carried[without_claims.fingerprint]["claims"] == [], (
             "上一轮本来就没有断言的结论，这一轮凭空多出断言"
         )
+
+
+# ==========================================================================
+# 收口声明（`baseline_closures`）：模型说「这一条修好了」，平台收下这句话
+# ==========================================================================
+#
+# 为什么要这条通道：`reconcile_result` 的硬规则是「模型没有重复输出 ≠ 已修复」，
+# 而它**没有另一半** —— 平台收不到「已经修好了」这句话。实测 run 73 → run 74：
+# 上一轮的模型在正文里写了「已修复」，那是一段文字、没有任何结构；于是下一轮做
+# 基线时那条照样当在挂条目喂回去，报告把它写成「上次遗留，仍成立」。同一个事实
+# 在两轮报告里翻转了一次，读者无从判断哪次是对的。
+
+
+def _closure(fingerprint, *, status=DECLARED_FIXED, reason="兜底常量加回来了，服务端又校验了一次上限"):
+    return {"fingerprint": fingerprint, "status": status, "reason": reason}
+
+
+def test_a_declared_fix_leaves_the_ledger_but_stays_on_the_record():
+    """收下的定义是**从在挂清单里挪出去**，而不是删掉。
+
+    `anomalies` 是「仍然成立的问题」那一列（落库、面板、下一轮基线读的都是它），
+    所以声明生效的**唯一**动作就是在它里面不出现；与此同时条目要在审计轨迹里带着
+    模型的理由原文留着 —— 平台没有独立复核过，「谁说的、凭什么」必须看得到。
+    """
+    declared = "aaaa1111bbbb2222"
+    result = {
+        "report_markdown": "# Current report\n",
+        "anomalies": [],
+        "final_findings": [],
+        "baseline_updates": [_closure(declared)],
+    }
+    previous = [_old(declared, "code/team.lua"), _old("cccc3333dddd4444", "code/other.lua")]
+
+    merged = reconcile_result(result, previous, changed_paths=set(), previous_run_id=22)
+
+    assert [item["fingerprint"] for item in merged["anomalies"]] == ["cccc3333dddd4444"], (
+        "声明收口的那条还留在在挂清单里 —— 下一轮基线读的就是这一列，等于声明没生效"
+    )
+    assert merged["baseline_reconciliation"]["declared_fixed"] == 1
+    assert merged["baseline_reconciliation"]["carried_forward"] == 1
+    assert merged["baseline_reconciliation"]["declarations_ignored"] == 0
+
+    trail = {row["fingerprint"]: row for row in merged["retracted_findings"]}
+    row = trail[declared]
+    assert row["active"] is False
+    assert row["reason"] == _closure(declared)["reason"], "模型给的理由没有原样留下"
+    assert row["baseline_state"] == "declared_fixed"
+    # 同一个事实只写一遍：结论载荷里那一行与审计轨迹里的是同一行（面板与导出读它们）。
+    assert {r["fingerprint"]: r for r in merged["final_findings"]}[declared] == row
+
+    section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
+    assert "1 条本轮声明已修复" in section, section
+    # 措辞里必须有「声明」二字：平台没有独立复核过它，写成「已修复 N 条」就是把模型的
+    # 话当成平台的结论 —— 这条通道最危险的一种读法。
+    assert "条已修复" not in section, f"报告里出现了不带「声明」的「已修复」：{section!r}"
+
+
+def test_a_declaration_for_a_fingerprint_that_is_not_in_the_ledger_does_nothing():
+    """指纹对不上清单的声明**一条都不生效**，但必须记账、必须写进报告。
+
+    「说了等于没说」是这条通道最坏的失效形态：模型以为它关掉了一条，平台什么都没做，
+    下一轮那条又出现在清单里 —— 双方都以为对方处理了。所以对不上的那些要报出来，
+    还要指路（指纹抄错就重抄一遍）。
+    """
+    result = {
+        "report_markdown": "# Current report\n",
+        "anomalies": [],
+        "final_findings": [],
+        "baseline_updates": [_closure("9999999999999999")],
+    }
+    previous = [_old("aaaa1111bbbb2222", "code/changed.lua")]
+
+    merged = reconcile_result(
+        result, previous, changed_paths={"code/changed.lua"}, previous_run_id=22
+    )
+
+    assert [item["fingerprint"] for item in merged["anomalies"]] == ["aaaa1111bbbb2222"], (
+        "对不上的声明把一条在挂结论关掉了 —— 它凭什么关的是**这一条**？"
+    )
+    assert merged["anomalies"][0]["baseline_state"] == "needs_recheck"
+    assert merged["baseline_reconciliation"]["declarations_ignored"] == 1
+    assert merged["retracted_findings"] == []
+
+    section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
+    assert "1 条收口声明**没有生效**" in section, section
+
+
+def test_a_declaration_does_not_close_a_finding_the_same_round_still_reports():
+    """同一条既被声明收口、又被本轮重新报成结论时，**以重新报的为准**（保守方向）。
+
+    两种可能：模型自己前后矛盾（正文里说修好了、清单里又留着它），或它的指纹指的是
+    另一条。两种情况下「关掉」都是错的那一边，唯一不会误伤的判据是「本轮还在报 =
+    还在挂」。代价是这次声明没生效 —— 那一笔记在 `declarations_ignored` 里。
+    """
+    fingerprint = "aaaa1111bbbb2222"
+    result = {
+        "report_markdown": "# Current report\n",
+        "anomalies": [_current(fingerprint, "code/team.lua")],
+        "final_findings": [{"fingerprint": fingerprint, "active": True}],
+        "baseline_updates": [_closure(fingerprint)],
+    }
+
+    merged = reconcile_result(
+        result, [_old(fingerprint, "code/team.lua")], changed_paths=set(), previous_run_id=22
+    )
+
+    assert merged["anomalies"][0]["baseline_state"] == "reconfirmed"
+    assert merged["baseline_reconciliation"]["declared_fixed"] == 0
+    assert merged["baseline_reconciliation"]["declarations_ignored"] == 1
+    assert merged["retracted_findings"] == []
+
+
+def test_a_declared_fix_does_not_come_back_as_an_in_flight_item():
+    """整条链走一遍：声明 → 合并 → **落库** → 下一轮的基线里没有它。
+
+    只断言「合并结果里没有它」是不够的 —— 中间还有一步：结论落库时写的是哪一份。
+    `_persist_outcome` 逐条建 `AiAnalysisAnomaly` 行，读的是 `result["anomalies"]`
+    （`ai_analysis_service` 里的 `for item in result.get("anomalies") or []`），而
+    下一轮的基线读的就是这张表。合并与落库之间接错了来源（比如又去读 `outcome.anomalies`），
+    这条通道就是死的 —— 而「报告里写着声明已修复」照样是绿的。
+    """
+    # 落库那一步只在真入口上有，为了收集期不把整个服务模块拖进来，这里就近导入。
+    from services.ai_analysis_service import _persist_outcome
+
+    with flask_app.app_context():
+        create_tables()
+        previous, fingerprint = _seed_a_previous_run_with_one_finding()
+        run = AiAnalysisRun(
+            project_id=previous.project_id,
+            target_type=previous.target_type,
+            target_key=previous.target_key,
+            status="succeeded",
+            scope="incremental",
+            conclusion_structured=True,
+        )
+        db.session.add(run)
+        db.session.commit()
+
+        outcome = EngineOutcome(
+            status=STATUS_SUCCEEDED,
+            payload=AnalysisPayload(
+                status="final",
+                dimensions=(DimensionReview(id="config_id", hit=False, note="本批次没改配表"),),
+                baseline_closures=(
+                    BaselineClosure(
+                        fingerprint=fingerprint,
+                        status=DECLARED_FIXED,
+                        reason="兜底常量加回来了",
+                    ),
+                ),
+            ),
+            anomalies=(),
+            report_markdown="# 变更理解\n\n本轮没有新发现。\n",
+        )
+        result = reconcile_result(
+            result_payload(outcome, {}),
+            previous_anomaly_rows(previous.id),
+            changed_paths=set(),
+            previous_run_id=previous.id,
+        )
+        _persist_outcome(run, outcome, result)
+
+        assert AiAnalysisAnomaly.query.filter_by(run_id=run.id).count() == 0, (
+            "声明收口的条目还是被写进了异常表 —— 下一轮基线读的就是这张表"
+        )
+        assert [item.fingerprint for item in baseline_findings("weekly", run.target_key)] == [], (
+            "下一轮的基线里还有那条已声明修复的结论 —— 那条声明等于没说"
+        )
+        payload = json.loads(run.response_payload)
+        assert [row["fingerprint"] for row in payload["retracted_findings"]] == [fingerprint]
+        assert payload["retracted_findings"][0]["reason"] == "兜底常量加回来了"
+
+
+def _seed_a_previous_run_with_one_finding(path="code/qz_pub/team.lua"):
+    """落一条上一轮结论（带指纹与文件路径），返回 `(运行, 指纹)`。"""
+    project = Project(code=f"P{uuid.uuid4().hex[:8]}", name=f"收口{uuid.uuid4().hex[:6]}")
+    db.session.add(project)
+    db.session.flush()
+    run = AiAnalysisRun(
+        project_id=project.id,
+        target_type="weekly",
+        target_key=f"grp-{uuid.uuid4().hex[:8]}",
+        status="succeeded",
+        scope="incremental",
+        conclusion_structured=True,
+    )
+    db.session.add(run)
+    db.session.flush()
+    fingerprint = uuid.uuid4().hex[:16]
+    db.session.add(
+        AiAnalysisAnomaly(
+            run_id=run.id,
+            project_id=project.id,
+            fingerprint=fingerprint,
+            title="【战斗】队伍人数上限只在客户端判，服务端不校验",
+            severity="high",
+            category="code_logic",
+            file_path=path,
+            evidence=json.dumps(["diff: -if #team.members >= limit then"], ensure_ascii=False),
+            claims="[]",
+        )
+    )
+    db.session.commit()
+    return run, fingerprint

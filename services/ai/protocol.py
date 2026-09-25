@@ -46,6 +46,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
+from services.ai.baseline_closures import BaselineClosure, coerce_closures
 from services.ai.claims import (  # noqa: F401 —— Claim 在本模块重新导出（既有导入点按 protocol 走）
     CLAIM_KINDS,
     CLAIM_SOURCE_LAYERS,
@@ -54,6 +55,9 @@ from services.ai.claims import (  # noqa: F401 —— Claim 在本模块重新�
     _as_str,
     parse_claims,
 )
+# 中间轮的字段收窄搬到 `mid_round` 了（`protocol.py` 顶着 2000 行的 ERROR 闸门）。
+# `MID_ROUND_FIELDS` 一并回导：它是「中间轮认哪四个字段」的唯一出处，读代码的人会按名字找它。
+from services.ai.mid_round import MID_ROUND_FIELDS, mid_round_drops  # noqa: F401
 from services.ai.reference_search import MIN_QUERY_WEIGHT, normalize_query, query_weight
 from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_contract import (
@@ -68,23 +72,6 @@ STATUS_NEED_MORE_CONTEXT = "need_more_context"
 STATUS_FINAL = "final"
 STATUSES = (STATUS_NEED_MORE_CONTEXT, STATUS_FINAL)
 
-# 中间轮**只认这四个字段**。其余的一律解析后丢弃并逐条记账（见 `_mid_round_drops`）。
-#
-# 为什么中间轮要收窄：那一轮存在的意义只有一个 —— 把「我还需要什么」交回来并开始下一轮。
-# 而 `report_markdown` / `anomalies` / `dimensions` / `candidate_dispositions` 这四个
-# 字段**在中间轮没有任何读者**（引擎只在 `is_final` 那一支读它们）。模型顺手在中间轮
-# 写一整份报告时，平台原先**不拦不丢**：白花输出 token，还让那一轮的输出更容易撞上
-# 单次输出上限（撞上就是整轮作废）。现在丢弃并记账 —— 丢弃是**有账**的，不是静默消失。
-MID_ROUND_FIELDS = ("status", "reason", "reason_code", "requests")
-
-# 中间轮里**不该出现**的那四个字段，以及它们在文档里的别名。别名（`report`）只记一条账：
-# 记两条会让人以为模型交了两份报告。
-_MID_ROUND_EXTRA_FIELDS = (
-    ("report_markdown", ("report_markdown", "report")),
-    ("anomalies", ("anomalies",)),
-    ("dimensions", ("dimensions",)),
-    ("candidate_dispositions", ("candidate_dispositions",)),
-)
 
 # `reason` 的硬长度上限（字符）。
 #
@@ -324,6 +311,10 @@ class AnalysisPayload:
     anomalies: tuple[Anomaly, ...] = ()
     dimensions: tuple[DimensionReview, ...] = ()
     candidate_dispositions: tuple[CandidateDisposition, ...] = ()
+    # 模型对**上一轮结论**的收口声明（哪几条修好了 / 被推翻了）。语义与边界写在
+    # `baseline_closures` 的模块 docstring 里 —— 一句话：它只把「模型说过什么」如实
+    # 记下来，**平台不据此认定问题真的没了**。
+    baseline_closures: tuple[BaselineClosure, ...] = ()
     dropped: tuple[DroppedItem, ...] = field(default_factory=tuple)
 
     @property
@@ -638,48 +629,6 @@ def _clip_field(value: str, limit: int, kind: str, label: str) -> tuple[str, tup
     )
 
 
-def _mid_round_drops(raw: dict) -> tuple[DroppedItem, ...]:
-    """中间轮里那份**不该出现的报告**：逐个字段记账。
-
-    判据是「非空才算」：`"anomalies": []` 是模型的正当写法（这一轮没有发现），把它记成
-    「写了报告被丢弃」是假账 —— 而假账比没有账更糟，读的人会去找一份不存在的报告。
-    """
-    dropped: list[DroppedItem] = []
-    for name, keys in _MID_ROUND_EXTRA_FIELDS:
-        for key in keys:
-            value = raw.get(key)
-            if isinstance(value, str):
-                # 只有空白（`"report_markdown": "   "`）与空串是一回事：模型**没有**写报告。
-                # 不 strip 就把它记成「写了报告被丢弃」是假账 —— 而假账比没有账更糟，
-                # 读的人会去找一份不存在的报告。
-                value = value.strip()
-            if not value:
-                continue
-            if isinstance(value, (list, tuple, dict, str)):
-                # `detail` 里**带上字段名**：面板对 `dropped` 的前缀是「未执行：」（
-                # `static/js/ai_think_log.js`），只写「给了 3 条」那句话读不成句 ——
-                # 「未执行：给了 3 条」看不出是什么给了 3 条。
-                detail = f"{name} 给了 " + (
-                    f"{len(value)} 条"
-                    if isinstance(value, (list, tuple))
-                    else f"{len(value)} 字符"
-                )
-            else:
-                detail = _safe_repr(value)
-            dropped.append(
-                DroppedItem(
-                    "mid_round_field",
-                    len(dropped),
-                    f"中间轮（need_more_context）不接受 `{name}`，已丢弃"
-                    f"（这一轮只认 {'、'.join(MID_ROUND_FIELDS)}）",
-                    detail,
-                )
-            )
-            # 同一个字段的两个写法（`report_markdown` 与 `report`）只记一条 —— 记两条
-            # 会让人以为模型交了两份报告。
-            break
-    return tuple(dropped)
-
 
 def _select_payload_object(parsed: Iterable[Any]) -> dict:
     """从解析结果里挑出符合协议外壳的那个对象。
@@ -741,9 +690,10 @@ def parse_payload(
     anomalies: tuple[Anomaly, ...] = ()
     dimensions: tuple[DimensionReview, ...] = ()
     dispositions: tuple[CandidateDisposition, ...] = ()
+    closures: tuple[BaselineClosure, ...] = ()
     dropped_entries: tuple[DroppedItem, ...] = ()
     if status == STATUS_NEED_MORE_CONTEXT:
-        dropped_mid = _mid_round_drops(raw)
+        dropped_mid = mid_round_drops(raw)
     else:
         report_markdown = _as_str(raw.get("report_markdown")) or _as_str(raw.get("report"))
         anomalies, dropped_anomalies = _coerce_anomalies(
@@ -753,7 +703,17 @@ def parse_payload(
         dispositions, dropped_dispositions = _coerce_candidate_dispositions(
             raw.get("candidate_dispositions")
         )
-        dropped_entries = dropped_anomalies + dropped_dimensions + dropped_dispositions
+        closures, closure_problems = coerce_closures(raw.get("baseline_updates"))
+        dropped_closures = tuple(
+            DroppedItem("baseline_update", index, reason, detail)
+            for index, (detail, reason) in enumerate(closure_problems)
+        )
+        dropped_entries = (
+            dropped_anomalies
+            + dropped_dimensions
+            + dropped_dispositions
+            + dropped_closures
+        )
 
     if status == STATUS_FINAL:
         if not report_markdown:
@@ -774,6 +734,7 @@ def parse_payload(
         anomalies=anomalies,
         dimensions=dimensions,
         candidate_dispositions=dispositions,
+        baseline_closures=closures,
         dropped=dropped_entries + dropped_mid + dropped_reason + dropped_reason_code,
     )
 

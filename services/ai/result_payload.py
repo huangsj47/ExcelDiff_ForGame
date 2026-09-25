@@ -441,6 +441,14 @@ def result_payload(
         # 口径见 services/ai/usage.py。费用**不在这里算**（这一层拿不到价格表），
         # 由 `/ai-analysis/runs/<id>/usage` 在读取侧按当前价格表算。
         "usage": usage_from_outcome(outcome),
+        # 模型对上一轮结论的收口声明（哪几条修好了 / 被推翻了）。**必须落进这一份**：
+        # `incremental_baseline.reconcile_result` 读的就是它，而下一轮的「在挂条目」据此
+        # 少掉那几条 —— 不落库的话这一轮声明过什么，下一轮又当没说过（实测 run 73→74 的
+        # 翻转就是这么来的，见 `baseline_closures` 的模块 docstring）。
+        "baseline_updates": [
+            {"fingerprint": item.fingerprint, "status": item.status, "reason": item.reason}
+            for item in (outcome.payload.baseline_closures if outcome.payload else ())
+        ],
         "dropped": [
             {"kind": item.kind, "reason": item.reason, "detail": item.detail}
             for item in outcome.dropped
@@ -487,5 +495,7 @@ def failed_result(summary: dict, message: str) -> dict:
         "suppressed_count": 0,
         "rounds_used": 0,
         "requests_used": 0,
+        # 同上面那几条：形状一致（没发起分析当然没有任何收口声明）。
+        "baseline_updates": [],
         "dropped": [],
     }

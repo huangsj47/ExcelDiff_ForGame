@@ -925,7 +925,10 @@ def test_the_findings_row_splits_this_round_from_the_inherited_ones():
     # 上次遗留仍成立），少了就是正文没写全。原来这里写的是「正文只写本轮那几条」，
     # 那是旧口径（增量报告），也正是产品这次要改掉的那一条。
     assert "正文的「风险评估」应当覆盖全部在挂条目" in row, row
-    assert "另有 1 条已按复核裁决撤销" in row
+    assert "另有 1 条不在活动清单里" in row, row
+    # **不许写死「按复核裁决撤销」**：这一格里现在有两种东西 —— 复核轮的裁决（平台核过）
+    # 与模型本轮声明的收口（平台没核过）。合成一句会把没核过的那几条说成核过的。
+    assert "已按复核裁决撤销" not in row, row
 
 
 def test_without_the_findings_account_the_row_is_absent_not_zero():

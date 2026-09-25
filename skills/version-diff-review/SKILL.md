@@ -106,6 +106,7 @@ description: Use this skill whenever you review a game version's change set — 
     {"id": "config_id", "hit": true, "note": "命中的具体依据；未命中就写未命中及理由"}
   ],
   "candidate_dispositions": [{"candidate_id": "S1-1", "status": "adopted | rejected | deferred", "reason": "拒绝或延后时必填"}],
+  "baseline_updates": [{"fingerprint": "上面历史清单里那条末尾的 16 位十六进制", "status": "fixed | overturned", "reason": "凭什么说它修好了 / 被推翻了"}],
   "anomalies": [
     {
       "title": "【系统或模块】对象或条件下的可观察异常",
@@ -383,8 +384,7 @@ ID 的**具体编号规则、号段划分与命名方式以项目知识包为准
 ## 累积分析：这个版本之前已经报过什么
 
 同一个版本在一个周期里会被分析很多次（自动轮询、新提交触发、人工补跑）。**你产出的
-不是「本轮增量的第 N 份报告」，而是「这个版本截至目前的那一份」。** 这个区别决定了
-好几处具体做法。
+不是「本轮增量的第 N 份报告」，而是「这个版本截至目前的那一份」。** 这个区别决定了好几处具体做法。
 
 平台在第一轮会给你一份**已报过的问题清单**（第一次分析时会写明「暂无历史结论」）。
 拿到它之后：

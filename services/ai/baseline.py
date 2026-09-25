@@ -31,6 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Iterable, Mapping, Sequence, Tuple
 
+from services.ai.baseline_closures import DECLARED_STATUS_ENUM
 from services.ai.scope import normalize_path
 from services.ai.skill_contract import SEVERITIES
 
@@ -247,7 +248,14 @@ def _render_header(
         "标为「已忽略」的默认不要再提，除非你发现它正是因为这次改动而重新成立的。\n"
         "**每条末尾的 `#…` 是「问题指纹」（16 位十六进制）**，只用来让你逐条对照"
         "「这是不是上次那一条」—— 它**不是可以读取的证据地址**，不要拿它去发 "
-        "`evidence` 请求。要复核某条旧结论的原文，按它的 `文件路径` 与 `提交` 重新取证。"
+        "`evidence` 请求。要复核某条旧结论的原文，按它的 `文件路径` 与 `提交` 重新取证。\n"
+        "**已经修好（或已被推翻）的那几条，还要在最终 JSON 里交一份 `baseline_updates`**："
+        '`[{"fingerprint": "上面那条末尾的 16 位十六进制", '
+        f'"status": "{DECLARED_STATUS_ENUM}", "reason": "凭什么说它修好了 / 被推翻了"}}]`。'
+        "**这是唯一能让一条旧结论从「在挂条目」里出去的通道** —— 只在正文里写一句「已修复」，"
+        "下一轮它仍会被当作「仍然成立的问题」喂回来（实测因此让同一个事实在两轮报告里翻转"
+        "了一次）。平台**不复核**这份声明，措辞一律带「声明」二字，所以 `reason` 要写成一句"
+        "可以核对的话（在哪次提交、哪个文件的哪一处）。"
     )
 
 

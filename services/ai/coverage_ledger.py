@@ -710,7 +710,10 @@ def _findings_row(findings: Mapping[str, Any]) -> Optional[tuple[str, str]]:
         "（**正文的「风险评估」应当覆盖全部在挂条目**；明显少于这个数就是正文没写全）"
     )
     if retracted:
-        value += f"；另有 {retracted} 条已按复核裁决撤销"
+        # **不写死「按复核裁决撤销」**：这一格里现在有两种东西 —— 复核轮的裁决，以及
+        # 模型本轮声明的收口（`baseline_closures`）。前者平台核过、后者没有，合成一句话
+        # 会把没核过的那几条说成核过的。所以只陈述共同点（不在活动清单里）并指路。
+        value += f"；另有 {retracted} 条不在活动清单里（复核裁决撤销或本轮声明收口，见正文）"
     return ("结论（本轮 / 继承）", value)
 
 
