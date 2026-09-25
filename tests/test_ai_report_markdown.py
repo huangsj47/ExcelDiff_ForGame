@@ -59,6 +59,15 @@ CASES = [
     {"name": "quote", "md": "> 信息不足"},
     {"name": "paragraph_join", "md": "第一行\n第二行"},
     {"name": "risk_lines", "md": "R1（critical）甲\nR2（high）乙\nR3（medium）丙"},
+    # 平台拼的「复核标注（平台）」就是这种形状：一条结论后面跟着**缩进两格**的
+    # 「理由 / 依据 / 平台说明 / 复核方式」，它们属于上面那一条，不是同级条目。
+    {
+        "name": "list_continuation_line",
+        "md": "- **（正文 R1）甲**：原 `critical` → 撤销\n"
+              "  理由：反证成立：第 85 行读的是形参\n"
+              "  依据：a.lua:83-85\n"
+              "- **乙**：原 `high` → 降级\n",
+    },
     {"name": "blank_lines_collapse", "md": "甲\n\n\n\n乙"},
     {"name": "fence", "md": "```\n- 这不是列表\n# 这不是标题\n```"},
     {"name": "unclosed_fence", "md": "```\ncode 没闭合"},
@@ -69,6 +78,7 @@ CASES = [
     {"name": "xss_bold_wrapped", "md": "**<script>alert(1)</script>**"},
     {"name": "xss_in_heading", "md": "# <script>alert(1)</script>"},
     {"name": "xss_in_list", "md": "- <img src=x onerror=alert(1)>"},
+    {"name": "xss_in_list_continuation", "md": "- 甲\n  <img src=x onerror=alert(1)>"},
     {"name": "xss_in_code_span", "md": "`<script>alert(1)</script>`"},
     {"name": "xss_attribute_break", "md": '**" onmouseover="alert(1)**'},
     {"name": "xss_in_fence", "md": "```\n<script>alert(1)</script>\n```"},
@@ -164,6 +174,29 @@ def test_a_checklist_written_one_item_per_line_keeps_its_lines(rendered):
     assert html.count("<br>") == 2, f"三条清单没保住三行：{html}"
     for item in ("R1（critical）甲", "R2（high）乙", "R3（medium）丙"):
         assert item in html, f"{item} 不见了：{html}"
+
+
+def test_an_indented_line_after_a_list_item_belongs_to_that_item(rendered):
+    """**缩进续行属于上面那一条**（2026-09-25，平台拼的那几节的形状）。
+
+    平台自己拼的「复核标注（平台）」是这么写的：一条结论一行，后面跟几行**缩进两格**的
+    「理由 / 依据 / 平台说明 / 复核方式」。渲染器从前对每一行都先 `trim()`，缩进没了，
+    那几行于是变成**同级**条目 —— 读者看到的是一堆平行的 `-`，分不清哪几行属于同一条结论
+    （这正是「不方便阅读」的另一个来源）。
+
+    现在它们合成**同一个** `<li>`、行间用 `<br>`：一条结论是一个块。这与
+    `test_a_line_break_in_the_source_stays_a_line_break` 是同一条口径（作者写下的换行
+    要留住），只是对象是列表项而不是段落。
+    """
+    html = rendered["list_continuation_line"]
+    assert html.count("<li>") == 2, f"缩进续行被当成了同级条目：{html}"
+    assert html.count("<ul>") == 1, f"列表被拆开了：{html}"
+    assert (
+        "<li><strong>（正文 R1）甲</strong>：原 <code>critical</code> → 撤销"
+        "<br>理由：反证成立：第 85 行读的是形参"
+        "<br>依据：a.lua:83-85</li>"
+    ) in html, html
+    assert "<li><strong>乙</strong>：原 <code>high</code> → 降级</li>" in html, html
 
 
 def test_blank_runs_do_not_produce_empty_paragraphs(rendered):
