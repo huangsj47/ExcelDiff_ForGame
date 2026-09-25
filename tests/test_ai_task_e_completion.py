@@ -334,13 +334,12 @@ def test_the_report_rows_carry_the_assigned_and_inspected_layers():
         executed=[{"kind": "file_diff", "label": f"file_diff {LATEST[:12]} a.lua"}],
     )
 
-    rows = dict(ledger["rows"])
-    assert "3 / 3" in rows["覆盖（已分配）"]
-    assert "1 / 3" in rows["覆盖（已检查）"], "已检查那行必须与 inspection_coverage 同源"
+    # 2026-09-25：已分配 / 已检查合成一行 `覆盖（分层）`（两个数仍然来自各自的字段）。
+    layered = dict(ledger["rows"])["覆盖（分层）"]
+    assert "已分配 3 / 3" in layered, layered
+    assert "已检查 1 / 3" in layered, "分层那条必须与 inspection_coverage 同源"
     names = [name for name, _ in ledger["rows"]]
-    assert names.index("覆盖（版本清单）") < names.index("覆盖（已分配）")
-    assert names.index("覆盖（已分配）") < names.index("覆盖（已检查）")
-    assert names.index("覆盖（已检查）") < names.index("覆盖（取到证据）")
+    assert names[0] == "本次覆盖", f"一眼账要摆在最前面：{names}"
 
 
 def test_the_missing_evidence_gap_spells_out_the_assigned_and_inspected_counts():
@@ -388,8 +387,8 @@ def test_zero_compensation_or_dependency_is_not_the_same_as_unrecorded():
             "delta_files": [{"latest_commit_id": LATEST, "file_path": "a.lua"}],
         }
     )
-    assert "0 个" in zeroed["补偿输入"], zeroed["补偿输入"]
-    assert "0 个" in zeroed["依赖输入"], zeroed["依赖输入"]
+    assert "补偿项 0 个" in zeroed["额外输入"], zeroed["额外输入"]
+    assert "依赖核查项 0 个" in zeroed["额外输入"], zeroed["额外输入"]
 
     unrecorded = rows_of(
         {
@@ -399,8 +398,8 @@ def test_zero_compensation_or_dependency_is_not_the_same_as_unrecorded():
             "delta_files": [{"latest_commit_id": LATEST, "file_path": "a.lua"}],
         }
     )
-    assert unrecorded["补偿输入"] == "未记录", unrecorded["补偿输入"]
-    assert unrecorded["依赖输入"] == "未记录", unrecorded["依赖输入"]
+    assert "补偿项未记录" in unrecorded["额外输入"], unrecorded["额外输入"]
+    assert "依赖核查项未记录" in unrecorded["额外输入"], unrecorded["额外输入"]
 
 
 def test_a_compensation_or_dependency_file_without_evidence_becomes_a_gap():

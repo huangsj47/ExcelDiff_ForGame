@@ -104,8 +104,9 @@ def test_compensation_and_dependency_inputs_are_visible_in_scope_and_coverage_te
     assert ledger["counts"]["compensation_files"] == 2
     assert ledger["counts"]["dependency_files"] == 1
     rendered = "\n".join(f"{key}: {value}" for key, value in ledger["rows"])
-    assert "上轮未覆盖补偿" in rendered
-    assert "依赖核查" in rendered
+    # 2026-09-25：补偿项与依赖核查项合成一行「额外输入」，两个数一个都不少。
+    assert "补偿项 2 个" in rendered, rendered
+    assert "依赖核查项 1 个" in rendered, rendered
 
 
 def _fetched(kind: str, path: str, text: str) -> SimpleNamespace:
@@ -206,10 +207,11 @@ def test_the_stored_payload_carries_the_coverage_section():
     try:
         notice = seeded["payload"].get("coverage_notice") or ""
         assert "本次覆盖与缺口" in notice, f"落库的 payload 里没有覆盖段：{list(seeded['payload'])}"
-        assert "覆盖（版本清单）" in notice, notice
-        assert "覆盖（取到证据）" in notice, notice
-        # 数字来自账本，不是另算一份：这一批 2 个文件、取到 1 个、失败 1 次。
-        assert "1 / 2" in notice, notice
+        # 2026-09-25：`覆盖（版本清单）` 与 `覆盖（取到证据）` 并成 `本次覆盖` 一条漏斗，
+        # 分层那两个数在 `覆盖（分层）` 里。判据不变：**数都在**，而且都来自账本。
+        assert "本次覆盖" in notice, notice
+        assert "版本 4 个文件 → 输入 2 → 取证 1" in notice, notice
+        assert "已检查 1 / 2" in notice, notice
         assert "取数失败 1 次" in notice, notice
         # **失败的路径要在覆盖段里** —— 下面那条验收核心就是在最坏情况（路径出现在
         # 平台自己写的那段字里）下成立的。
@@ -285,7 +287,7 @@ def test_the_coverage_section_never_enters_the_report_text():
     try:
         report = seeded["payload"].get("report_markdown") or ""
         assert report == REPORT_BODY, "报告正文被改写了（覆盖段不该进正文）"
-        for marker in ("本次覆盖与缺口", "覆盖（取到证据）", FAILED_PATH, "平台补充"):
+        for marker in ("本次覆盖与缺口", "本次覆盖", FAILED_PATH, "平台补充"):
             assert marker not in report, f"覆盖段的内容混进了报告正文：{marker}"
         assert marker not in (seeded["response_text"] or "")
     finally:

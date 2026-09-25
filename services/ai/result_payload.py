@@ -38,7 +38,7 @@ def coverage_notice_text(coverage) -> str:
     审计要求（AI-P1-03）是「报告必须显示证据覆盖与缺口」，而**抽屉才是用户第一眼看到
     的地方**：导出那份 `.md` 早就有了（`routes/ai_analysis_routes.ai_run_report_md` 传了
     账本），可抽屉读的是落库的 `response_payload.report_markdown` —— 真机验证时那份里
-    「本次覆盖与缺口」「覆盖（版本清单）」「覆盖（取到证据）」这些关键词**一个都没有**。
+    「本次覆盖与缺口」那一整段的关键词（覆盖那几行、缺口那几条）**一个都没有**。
 
     写进 `report_markdown` 有两条具体的风险，所以这里刻意不那样做：
 

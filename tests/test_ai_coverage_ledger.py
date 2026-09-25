@@ -134,12 +134,11 @@ def test_two_dedup_conventions_give_two_different_numbers():
     assert evidence["by_pair"]["covered"] == 2
     assert evidence["by_path"]["covered"] == 3
     assert evidence["by_pair"]["ratio"] != evidence["by_path"]["ratio"]
-    # 两个数都写进了给报告的那几行，而且各自标了口径
-    rows = dict(ledger["rows"])
-    assert "2 / 3" in rows["覆盖（取到证据）"]
-    assert "按「(本批次最新提交, 文件)」去重" in rows["覆盖（取到证据）"]
-    assert "3 / 3" in rows["覆盖（同上·另一种去重）"]
-    assert "按「文件」去重" in rows["覆盖（同上·另一种去重）"]
+    # 两个数都写进了给报告的那一行，而且各自标了口径（2026-09-25：两个口径并进
+    # `本次覆盖` 那条漏斗的括号里；一样时不重复写，所以这里构造的是**不一样**的）
+    headline = _rows_of(ledger)["本次覆盖"]
+    assert "取证 2" in headline, headline
+    assert "按文件去重 3" in headline, headline
 
 
 def test_a_line_window_suffix_must_not_count_as_another_file():
@@ -233,9 +232,9 @@ def test_an_old_run_without_details_says_unknown_instead_of_zero():
     assert evidence["collected"] is False
     assert ledger["counts"]["evidence_files_by_pair"] is None
     assert evidence["by_pair"]["ratio"] is None
-    rows = dict(ledger["rows"])
-    assert "未知" in rows["覆盖（取到证据）"]
-    assert "0" not in rows["覆盖（取到证据）"].replace("不是 0", "")
+    headline = _rows_of(ledger)["本次覆盖"]
+    assert "未记录" in headline, headline
+    assert "取证 0" not in headline, headline
     # 缺口里要说明白：平台说不出「看过哪些文件」
     assert any("没有留下取数明细" in one for one in ledger["gaps"])
 
@@ -315,9 +314,11 @@ def test_a_single_commit_run_does_not_talk_about_a_version():
     )
 
     rows = dict(ledger["rows"])
-    assert rows["覆盖（本次提交）"] == "这条提交改了 1 个文件，都在本次输入里"
+    headline = rows["本次覆盖"]
+    assert headline.startswith("这条提交改了 1 个文件"), headline
+    assert "取证 1" in headline, headline
     assert "覆盖（列出的名字）" not in rows, "单提交模式没有第二份清单，别摆一行空的"
-    assert "1 / 1" in rows["覆盖（取到证据）"]
+    assert "覆盖（分层）" not in rows, "没有「版本清单」就谈不上分层覆盖"
     assert ledger["limited"] is False, "那一个文件取到了证据，这一轮没有缺口"
 
     # 取不到时同样是缺口（不是「没问题」）
@@ -425,9 +426,10 @@ def test_the_real_shape_of_a_finished_run():
     assert counts["evidence_files_by_path"] == 57
     assert counts["evidence_segments"] == 71
     assert counts["pending_files"] == 938
-    rows = dict(ledger["rows"])
-    assert "57 / 995（5.7%）" in rows["覆盖（取到证据）"]
-    assert "71 段证据" in rows["覆盖（同上·另一种去重）"]
+    headline = _rows_of(ledger)["本次覆盖"]
+    assert "输入 995" in headline and "取证 57（5.7%）" in headline, headline
+    # 71 段是「分段读」留下的：57 个文件、71 段证据 —— 段数不能因为收了行就丢
+    assert "71 段证据" in headline, headline
 
 
 # ---------------------------------------------------------------------------
@@ -465,8 +467,8 @@ def test_the_report_shows_the_ledger_and_never_says_full_means_everything_read()
     )
     text = _report(coverage=ledger)
 
-    assert "| 覆盖（取到证据） |" in text
-    assert "57 / 995" in text
+    assert "| 本次覆盖 |" in text
+    assert "取证 57（5.7%）" in text
     assert doc.COVERAGE_TITLE in text
     assert text.index(doc.COVERAGE_TITLE) < text.index("# 变更理解"), "缺口要在正文之前说"
     # 被读成「全读」的那一行没了：范围那一格现在带限定语
@@ -676,9 +678,13 @@ def test_the_docs_spell_out_both_dedup_conventions_and_where_the_numbers_show():
             tool_stats=_stats(),
         )["rows"]
     )
-    for name in ("覆盖（版本清单）", "覆盖（列出的名字）", "覆盖（取到证据）"):
+    # 2026-09-25：行的名字收成四个（见 `coverage_rows` 的说明），文档跟着换名 ——
+    # 判据不变：账本输出的每一行，文档里都要有一句解释。
+    for name in ("本次覆盖", "覆盖（分层）", "额外输入"):
         assert name in rows, f"账本没有输出「{name}」这一行"
         assert name in doc_text, f"说明文档没有解释「{name}」这一行是什么意思"
+    # 结论那一行要这一轮真的记了结论才有（没记就一个字都不说，另有用例钉着）。
+    assert "结论（本轮 / 继承）" in doc_text, "说明文档没有解释结论那一行"
 
 
 
@@ -711,8 +717,10 @@ def test_the_two_commit_counts_are_rendered_into_the_report():
     ledger = _commits_ledger(window_ids=window_ids, files=files)
     rows = dict(ledger["rows"])
 
-    assert "4" in rows["提交（本窗口）"], rows["提交（本窗口）"]
-    assert "2" in rows["提交（本次输入）"], rows["提交（本次输入）"]
+    # 两个提交数并进了 `本次覆盖` 的尾巴（2026-09-25）
+    headline = rows["本次覆盖"]
+    assert "本窗口 4 条提交" in headline, headline
+    assert "其中 2 条进了本次输入" in headline, headline
     assert ledger["counts"]["window_commits"] == len(set(window_ids))
     assert ledger["counts"]["input_commits"] == len({c for _, c in files})
 
@@ -728,10 +736,12 @@ def test_the_same_two_numbers_reach_both_readers_verbatim():
 
     notice = coverage_notice_text(ledger)
 
-    for name in ("提交（本窗口）", "提交（本次输入）"):
-        for value in (dict(ledger["rows"])[name],):
-            assert name in doc_text and value in doc_text, f"导出文档里缺「{name}」这一行"
-            assert name in notice and value in notice, f"抽屉那份里缺「{name}」这一行"
+    # 判据从「那两行在不在」换成**账本输出的每一行**都在两处逐字出现 ——
+    # 收了行之后这个性质更该钉住：抽屉与导出读的仍是同一份 `rows`。
+    assert ledger["rows"], "空账本证不了什么"
+    for name, value in ledger["rows"]:
+        assert name in doc_text and value in doc_text, f"导出文档里缺「{name}」这一行"
+        assert name in notice and value in notice, f"抽屉那份里缺「{name}」这一行"
 
 
 def test_a_payload_without_the_window_list_says_unknown_not_zero():
@@ -740,12 +750,12 @@ def test_a_payload_without_the_window_list_says_unknown_not_zero():
     写成 0 就是替用户断言「这个窗口一条提交都没有」—— 与 `cache_read_tokens` 那几个
     字段同一条口径（`None` ≠ `0`）。
     """
-    rows = dict(_commits_ledger(window_ids=None, files=[("a.lua", LATEST)])["rows"])
+    headline = dict(_commits_ledger(window_ids=None, files=[("a.lua", LATEST)])["rows"])["本次覆盖"]
 
-    assert rows["提交（本窗口）"] == ledger_mod.UNKNOWN
-    assert "0" not in rows["提交（本窗口）"]
+    assert "本窗口的提交数未记录" in headline, headline
+    assert "本窗口 0 条提交" not in headline, headline
     # 本次输入那个数是**算得出来的**（`delta_files` 就在 payload 里），所以它照常给出。
-    assert "1" in rows["提交（本次输入）"]
+    assert "其中 1 条进了本次输入" in headline, headline
 
 
 def test_a_single_commit_run_does_not_get_window_rows():
@@ -755,10 +765,12 @@ def test_a_single_commit_run_does_not_get_window_rows():
         "scope": "full",
         "commit": {"commit_id": LATEST, "path": "a.lua", "message": "m", "author": "x"},
     }
-    rows = dict(ledger_mod.build_ledger(request_payload=payload, executed=[], tool_stats={})["rows"])
+    headline = dict(
+        ledger_mod.build_ledger(request_payload=payload, executed=[], tool_stats={})["rows"]
+    )["本次覆盖"]
 
-    assert "提交（本窗口）" not in rows
-    assert "提交（本次输入）" not in rows
+    assert "本窗口" not in headline, headline
+    assert "本次输入" not in headline, headline
 
 
 def test_the_same_path_in_two_repositories_is_two_coverages():
@@ -857,10 +869,11 @@ def test_the_headline_row_carries_both_ratios():
         tool_stats=_stats(),
     )
     headline = _rows_of(ledger)["本次覆盖"]
-    assert "输入 3 / 窗口 1343" in headline, headline
-    assert "取证 1 / 输入 3" in headline, headline
+    # 2026-09-25：改成一条漏斗链（版本 → 输入 → 取证）。三个数与两个比值仍然挨着写，
+    # 只是不再各写成一个「A / B」—— 读者（与模型）不必自己拼。
+    assert "版本 1343 个文件 → 输入 3 → 取证 1" in headline, headline
     # 两个比值**都不是 100%**，而这一行不许把它们说成一个数
-    assert "别把它们读成一个" in headline
+    assert "都不是 100% 是常态" in headline, headline
 
 
 def test_the_headline_says_unknown_instead_of_zero_without_evidence():
@@ -871,7 +884,7 @@ def test_the_headline_says_unknown_instead_of_zero_without_evidence():
         tool_stats=_stats(),
     )
     headline = _rows_of(ledger)["本次覆盖"]
-    assert "取证未记录 / 输入 1" in headline, headline
+    assert "输入 1 → 取证未记录" in headline, headline
     assert "取证 0" not in headline
 
 
@@ -938,8 +951,7 @@ def test_both_rows_reach_the_drawer_text():
         },
     )
     text = coverage_notice_text(ledger)
-    assert "本次覆盖" in text and "输入 2 / 窗口 1343" in text, text
-    assert "取证 1 / 输入 2" in text, text
+    assert "本次覆盖" in text and "版本 1343 个文件 → 输入 2 → 取证 1" in text, text
     assert "本轮新增 1 条 + 基线继承 1 条" in text, text
     # 覆盖段仍然**只是** payload 里的一段文本：报告正文那份一个字都不动（另有用例钉着）。
     assert doc.coverage_table_rows(ledger), "导出那条路读的是同一份 rows"

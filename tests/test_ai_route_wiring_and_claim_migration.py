@@ -179,9 +179,9 @@ def test_the_exported_report_carries_the_coverage_ledger():
     assert response.status_code == 200
     body = response.get_data(as_text=True)
     # 元信息表里那一组覆盖行（措辞与数字都由账本给）
-    assert "| 覆盖（版本清单） |" in body, "账本没接上：报告里没有任何覆盖行"
-    assert "本版本改动过 10 个文件，其中 2 个进了本次输入" in body
-    assert "| 覆盖（取到证据） |" in body
+    assert "| 本次覆盖 |" in body, "账本没接上：报告里没有任何覆盖行"
+    assert "版本 10 个文件 → 输入 2 → 取证 1" in body
+    assert "| 覆盖（分层） |" in body, "分层覆盖那两个数也要摆出来"
     # 「覆盖与缺口」那一段（只在传了账本时才出现，标题本身也是判据）
     assert f"**{doc.COVERAGE_TITLE}**" in body, "缺口那一段没出现"
     assert "**没有取到证据**" in body, "有 1 个文件这次没看过，报告里却没说"
