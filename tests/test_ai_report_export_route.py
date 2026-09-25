@@ -32,6 +32,9 @@ from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
 from services.ai import report_document as doc
 from services.ai.skill_loader import SKILL_PROJECTS_ROOT_ENV, project_pack_slug
 from tests.test_ai_history_survives_restart import REPORT_TEXT, _setup_config
+# 「逐字」类断言的比较方式**只有一份**（`test_ai_report_document._no_hard_breaks` 的
+# docstring 写了为什么这几条要按去掉行尾空白之后比）。这里再写一份迟早会分叉。
+from tests.test_ai_report_document import _no_hard_breaks
 
 
 def _uid(prefix: str) -> str:
@@ -125,7 +128,9 @@ def test_a_weekly_report_downloads_as_a_markdown_attachment():
         assert "AI%E5%88%86%E6%9E%90%E6%8A%A5%E5%91%8A" in disposition  # 「AI分析报告」
 
         body = response.get_data(as_text=True)
-        assert REPORT_TEXT in body, "报告原文必须逐字出现在下载的文件里"
+        assert _no_hard_breaks(REPORT_TEXT) in _no_hard_breaks(body), (
+            "报告原文必须逐字出现在下载的文件里（只允许差行尾的硬换行两格）"
+        )
         assert "| 项目 |" in body and project.name in body
         assert "周版本" in body and cfg.name.split(" - ")[0] in body
 
@@ -268,8 +273,8 @@ def test_the_disposition_column_is_read_from_the_database_at_export_time():
             after = client.get(f"/ai-analysis/runs/{run.id}/report.md").get_data(as_text=True)
 
         assert "| 严重 | 很高 | 配置 ID | 已忽略 | 7007 悬空 | config/a.xlsx | 引用不到 |" in after
-        # 报告原文逐字不变 —— 变的是人工处置的进度，不是模型说过的话
-        assert REPORT_TEXT in after
+        # 报告原文一个字都没被这次导出改动 —— 变的是人工处置的进度，不是模型说过的话
+        assert _no_hard_breaks(REPORT_TEXT) in _no_hard_breaks(after)
 
 
 def test_the_focus_label_comes_from_the_stored_request_payload():
@@ -483,7 +488,7 @@ def test_an_unreadable_response_payload_still_exports_the_report_text():
 
         assert response.status_code == 200
         body = response.get_data(as_text=True)
-        assert REPORT_TEXT in body
+        assert _no_hard_breaks(REPORT_TEXT) in _no_hard_breaks(body)
         assert "| 风险等级 | - |" in body
         assert "是否降级" in body
 
@@ -732,7 +737,18 @@ def test_the_drawer_and_the_export_read_the_same_canonical_report():
     assert drawn["result"]["report_markdown"] == report_text, (
         "结论载荷里的正文与落库那一列不一致（同一份东西两个值）"
     )
-    assert report_text in body, "导出没有用同一份正文（读者该看到的那几节不见了）"
+    # 抽屉与导出的差异**必须只有行尾那两个空格**：抽屉那一份原样给渲染器（它的
+    # `flushPara` 自己产 `<br>`），导出那一份补的是 Markdown 的硬换行。两条读路径上的
+    # 文字仍然逐字相同 —— 这条断言就是「同一件事在两处说法不同」的守卫。
+    assert _no_hard_breaks(report_text) in _no_hard_breaks(body), (
+        "导出没有用同一份正文（读者该看到的那几节不见了）"
+    )
+    assert "### 已撤销 1 条（移出当前结论清单）  \n" not in body, (
+        "给标题行也补了硬换行（本来就自成一块，补了只是噪音）"
+    )
+    assert "理由：同一提交里生成文件已经删掉了。  \n" in body, (
+        "导出没给正文补硬换行 —— 外部 Markdown 阅读器会把整段并成一句"
+    )
 
 
 @pytest.mark.parametrize("path", ["drawer", "export", "history"])

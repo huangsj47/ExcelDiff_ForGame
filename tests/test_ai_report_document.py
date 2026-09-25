@@ -202,6 +202,19 @@ def test_the_weekly_label_without_a_window_is_just_the_name():
 REPORT = "# 变更理解\n\n把奖励发放从先扣后发改成先发后扣。\n\n## 测试建议\n\n- 跑一遍日常任务\n"
 
 
+def _no_hard_breaks(text: str) -> str:
+    """去掉导出的 Markdown 硬换行（行尾两格）之后再看这份文本。
+
+    导出会给正文每一行补行尾两格（`doc.keep_line_breaks`）—— 屏幕侧靠渲染器产 `<br>`，
+    而交给**外部**阅读器的 `.md` 只能靠 Markdown 自己的硬换行写法。于是「原文逐字出现
+    在文件里」这句话的字面形态不再成立。
+
+    **只放宽行尾空白这一点**：仍然要求逐字包含 —— 正文少半句、标题层级变了，照样红。
+    这是本模块里所有「逐字」断言的比较方式，不要在别处改成「大致包含」。
+    """
+    return "\n".join(line.rstrip() for line in str(text).split("\n"))
+
+
 def _build(**overrides):
     kwargs = dict(
         project_label="配表平台",
@@ -221,14 +234,17 @@ def _build(**overrides):
 
 
 def test_the_report_text_appears_verbatim():
-    """**逐字**：导出的是模型说过的话，平台一个字都不改。"""
+    """**逐字**：导出的是模型说过的话，平台一个字都不改（只补硬换行）。
+
+    比的是 `_no_hard_breaks` 之后的两份文本 —— 唯一允许的差异是行尾那两个空格，见那里。
+    """
     text = _build()
-    assert REPORT in text
+    assert _no_hard_breaks(REPORT) in _no_hard_breaks(text)
 
 
 def test_the_report_text_is_not_reformatted():
     body = _build(report_text="# 只有一级标题\n\n正文  with   spaces\n")
-    assert "# 只有一级标题\n\n正文  with   spaces" in body
+    assert "# 只有一级标题\n\n正文  with   spaces  " in body
 
 
 def test_the_document_is_meta_then_report_then_appendix():
@@ -475,9 +491,53 @@ def test_the_document_ends_with_exactly_one_newline():
 
 def test_the_report_body_keeps_its_own_trailing_boundary():
     """正文前后的空行由文档补齐（`---` 与正文之间必须隔一个空行，否则 markdown 里
-    分隔线会变成标题的下划线）。"""
+    分隔线会变成标题的下划线）。末尾那两个空格是硬换行（`keep_line_breaks`）。"""
     text = _build(report_text="第一行\n\n\n")
-    assert re.search(r"\n---\n\n第一行\n\n---\n", text)
+    assert re.search(r"\n---\n\n第一行 {2}\n\n---\n", text), text
+
+
+# ---------------------------------------------------------------------------
+#  导出件的硬换行（交给**外部**阅读器的那一份）
+# ---------------------------------------------------------------------------
+def test_the_export_keeps_the_authors_line_breaks():
+    """作者写下的换行要留住 —— 导出这份 `.md` 是给外部 Markdown 阅读器的。
+
+    屏幕侧由 `static/js/ai-report-markdown.js` 把段内换行转成 `<br>`，那条路 2026-09-25
+    已经修过（真机 run 70：「上次遗留（仍成立）」**25 行 / 2195 字并成一段**）。导出这条
+    路同样的病：`.md` 里的换行在标准 Markdown 里是**软换行**，阅读器照样并成一段。
+
+    补的是 Markdown 自己的写法（行尾两格 = hard break），不是别的东西 —— 空行是段落
+    分隔、标题自成一块，都不需要断（补了只是噪音）。
+    """
+    assert doc.keep_line_breaks("第一行\n第二行") == "第一行  \n第二行  "
+    assert doc.keep_line_breaks("甲\n\n# 标题\n乙") == "甲  \n\n# 标题\n乙  "
+    # 幂等：已经补过的再补一遍不变（同一个函数被调两次不该叠出四个空格）
+    once = doc.keep_line_breaks("甲\n乙")
+    assert doc.keep_line_breaks(once) == once
+
+
+def test_the_export_gives_indented_continuation_lines_a_hard_break():
+    """平台那几节把「理由 / 依据 / 平台说明 / 复核方式」写成**缩进续行**。
+
+    缩进在 Markdown 里不改语义（列表项的续行），但续行若没有硬换行，外部阅读器会把它们
+    并进列表项那一句里 —— 正是这次要修的那件事。
+    """
+    text = doc.keep_line_breaks("- **标题**：原 `high` → 撤销\n  理由：反证成立\n  依据：a.lua:83")
+    assert text == "- **标题**：原 `high` → 撤销  \n  理由：反证成立  \n  依据：a.lua:83  "
+
+
+def test_the_export_never_touches_code_fence_content():
+    """围栏里的内容是**代码**：往每行塞两个空格是改代码正文（读者复制出去会带上）。"""
+    source = "```\na = 1\nb = 2\n```\n外面"
+    assert doc.keep_line_breaks(source) == "```\na = 1\nb = 2\n```\n外面  "
+    # 未闭合的围栏同理：它后面每一行都还在代码块里，一行都不许动
+    assert doc.keep_line_breaks("```\na = 1") == "```\na = 1"
+
+
+def test_the_export_does_not_add_hard_breaks_to_an_empty_body():
+    """没有正文时写的是占位语，不是空行后面挂两个空格。"""
+    text = _build(report_text="")
+    assert "（这次运行没有报告正文。）" in text
 
 
 def test_demote_headings_shifts_levels_but_never_touches_code_fences():

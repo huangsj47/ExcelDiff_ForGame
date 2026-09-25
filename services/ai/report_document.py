@@ -513,6 +513,43 @@ def demote_headings(markdown: str) -> str:
     return "\n".join(out)
 
 
+def keep_line_breaks(text: str) -> str:
+    """把正文里**段落内部的换行**写成 Markdown 的硬换行（行尾两个空格）。
+
+    ## 为什么导出要管这件事
+
+    这份报告的作者（模型与平台）按「一行一条」写清单：一行一条风险、一行一条测试建议、
+    一行一条断言。而 Markdown 把段内换行当**软换行** —— 渲染时并成一段。真机 run 70
+    实测最重的一处是「上次遗留（仍成立）」：**25 行 / 2195 字并成一段**。
+
+    屏幕侧由 `static/js/ai-report-markdown.js` 解决（它产出 `<br>`），导出的是一份 `.md`、
+    交给**外部**阅读器渲染，所以这里补的是 Markdown 自己的写法（行尾两个空格 = hard
+    break）。两边说的是同一件事：**作者写下的换行要留住**，各自用各自格式里的正道。
+
+    ## 跳过哪些行
+
+    * **空行**：它们本身就是段落分隔，不需要断；
+    * **围栏代码块的内容**：往代码里塞行尾空格是改代码正文（读者复制出去会带上）；
+    * **标题行**：本身就是独立块，加不加都不影响显示，加了只是噪音。
+
+    其余每一行（含 `-` 列表项**及它们的缩进续行**）都补：列表项那两格空格不改变语义，
+    而续行若不加，外部渲染器会把它们并进列表项那一句里 —— 那正是这次要修的那件事。
+    """
+    out: list[str] = []
+    in_fence = False
+    for line in str(text or "").split("\n"):
+        stripped = line.strip()
+        if re.match(r"^\s*(```|~~~)", line):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence or not stripped or stripped.startswith("#"):
+            out.append(line)
+            continue
+        out.append(line.rstrip() + "  ")
+    return "\n".join(out)
+
+
 def is_unclassified(category: Any, labels: Mapping[str, str] | None = None) -> bool:
     """这个 category 是不是「不在本次生效的清单里」（含干脆没给 category）。
 
@@ -750,7 +787,11 @@ def build_report_markdown(
     lines.append("")
     lines.append("---")
     lines.append("")
-    body = str(report_text or "").rstrip("\n")
+    # **作者写下的换行要留住**：这一段里既有模型写的正文（按「一行一条」写清单），也有
+    # 平台拼的那几节（`## 复核标注（平台）` 的理由/依据/断言各占一行）。屏幕上由
+    # `static/js/ai-report-markdown.js` 转成 `<br>`，而这份是**交给外部阅读器**的 `.md`，
+    # 所以要补 Markdown 自己的硬换行写法。取舍与跳过规则见 `keep_line_breaks`。
+    body = keep_line_breaks(str(report_text or "").rstrip("\n"))
     lines.append(body if body else "（这次运行没有报告正文。）")
 
     lines.append("")
