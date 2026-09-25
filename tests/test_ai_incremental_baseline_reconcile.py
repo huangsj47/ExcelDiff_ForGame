@@ -88,12 +88,13 @@ def test_incremental_result_carries_forward_and_marks_changed_history_for_rechec
     assert len([row for row in merged["final_findings"] if row.get("active")]) == 4
 
 
-def test_the_section_is_usable_on_its_own():
-    """这一节要能单独读懂（2026-09-24，run 63 那三条投诉）。
+def test_the_section_is_a_count_not_a_list():
+    """这一节只报数（2026-09-25 产品决定，用户读 run 70 导出件后）。
 
-    实测那一轮它只印「标题 + 文件」，14 条读下来分不出先后，而正文里模型自己写的
-    「历史结论状态」是同一批标题的另一个说法 —— 两节并排，读者看不出哪一份算数。
-    所以：**总数与分组计数**写在开头、**分工与谁为准**明写、每一条补上**严重度**。
+    2026-09-24（run 63）它曾是**确定性清单**（「本节为准」），因为模型自己在正文里写的
+    「历史结论状态」与它并排、读者看不出信哪份。2026-09-25 起正文的「风险评估」承担了
+    「当前仍成立的全部问题」，于是这一节再当清单就是同一批标题的第二份 —— 正是 run 63
+    那个毛病换个方向再来一遍。它当时 **682 字 / 13 行**，其中 8 行是逐条清单。
     """
     result = {
         "report_markdown": "# Current report\n",
@@ -113,17 +114,19 @@ def test_the_section_is_usable_on_its_own():
 
     assert "共 3 条" in section, "开头没有给出这一节的规模"
     assert "2 条仍成立" in section and "1 条需要重新确认" in section, section
-    # 2026-09-25：这一节的角色反转了 —— 逐条清单归正文的「风险评估」（产品要求那一节
-    # 覆盖当前仍成立的全部问题），本节退回「账」，分工必须写明。
+    # 一份只报数的节必须说清它不是全量清单，否则读者会以为「没列出来 = 没有了」；
+    # 另一半是这一节存在的理由本身。
     assert "逐条清单以正文的「风险评估」为准" in section, (
         "没有说清它与正文那一节的分工 —— 两份并排时读者不知道信哪份"
     )
-    # 「要人工去看」的那一类仍然逐条：需要重新确认的那 1 条要认得出是它、也要有等级。
-    assert "### 需要重新确认 1 条" in section, section
-    assert "old-changed-missing" in section and "严重度 高" in section
-    # 其余（仍成立 / 本轮重新确认）只报数：它们会在正文的风险评估里逐条出现，
-    # 本节再列一遍就是同一批标题的第二份（run 63 那个毛病换了个方向）。
-    assert "old-untouched" not in section and "old-also-untouched" not in section, section
+    assert "不能因为模型没有重复输出就视为已修复" in section, (
+        "「没提到 = 已修好」正是这一节要防的误读"
+    )
+    # **一条标题都不再列**（含「需要重新确认」那一类）：条目本身在异常面板与导出附录里
+    # 都看得到，认得出的东西不在这里再抄一遍。
+    for title in ("old-untouched", "old-also-untouched", "old-changed-missing"):
+        assert title not in section, f"逐条清单又回来了：{title}"
+    assert "### " not in section, "这一节不该再有二级小节"
 
 
 def test_reconcile_is_a_noop_without_a_previous_baseline():

@@ -13,7 +13,6 @@ from copy import deepcopy
 from difflib import SequenceMatcher
 from typing import Any, Iterable, Mapping
 
-from services.ai.report_document import severity_label
 from services.ai.scope import normalize_path
 
 STATE_RECONFIRMED = "reconfirmed"
@@ -124,17 +123,49 @@ def _final_row(item: Mapping) -> dict:
     }
 
 
-def _line(item: Mapping) -> str:
-    """一条历史结论那一行：**标题 + 文件 + 严重度**（2026-09-24，run 63 补的等级）。
+def _report_section(groups: Mapping[str, list[dict]], previous_run_id: int) -> str:
+    """「历史结论延续（平台）」这一节 —— **2026-09-25 起它只是一行账**。
 
-    从前只有标题与文件，14 条读下来分不出先后 —— 而这一节要回答的正是「上一轮那些
-    问题里，哪些还压着」。等级是平台算好的中文名（`report_document.severity_label`，
-    与异常面板、导出同一份映射），不在这里另写一套。
+    ## 角色反转过一次（run 63 → 2026-09-25）
+
+    2026-09-24（run 63）这一节被做成**确定性清单**，理由是：模型自己在正文里写一节
+    「历史结论状态」、平台再列一遍同一批 15 条标题，读者看不出哪一份算数。那时的分工是
+    「本节为准」。
+
+    2026-09-25 产品要求**正文的「风险评估」承担当前仍成立的全部问题**（本轮新增 + 上次
+    遗留仍然成立的），于是这里再当一次清单就成了同一批标题的第二份 —— 正是 run 63 那个
+    毛病换个方向再来一遍。它退回「账」：**只报总数与分组计数**。用户读 run 70 的导出件时
+    的原话是「用户只需要关心完整报告，这些杂项可以简要说明即可」——这一节当时 682 字 / 13 行，
+    其中 8 行是逐条清单。
+
+    ## 留下来的两句（都不是计数）
+
+    * **「逐条清单以正文的『风险评估』为准，本节只记数」** —— 一份只报数的节必须说清它
+      不是全量清单，否则读者会以为「没列出来 = 没有了」；
+    * **「旧结论不能因为模型没有重复输出就视为已修复」** —— 这一节存在的理由本身。
+
+    「需要重新确认」那几条**不再逐条点名**（2026-09-25 产品决定）：它们是「相关文件又变了、
+    尚无充分反证」的那一类，条目本身在异常面板与导出附录里都能看到，本节再抄一遍标题
+    是第二份清单。要人工去看的那几条，正文的「风险评估」里也在。
     """
-    where = f"（`{item.get('file_path')}`）" if item.get("file_path") else ""
-    level = severity_label(item.get("severity"))
-    suffix = f" · 严重度 {level}" if level and level != "-" else ""
-    return f"- **{item.get('title') or '（无标题）'}**{where}{suffix}"
+    labels = (
+        (STATE_RECONFIRMED, "本轮重新确认"),
+        (STATE_CARRIED, "仍成立"),
+        (STATE_RECHECK, "需要重新确认"),
+    )
+    total = sum(len(groups[state]) for state, _ in labels)
+    counts = "、".join(
+        f"{len(groups[state])} 条{label}" for state, label in labels if groups[state]
+    )
+    lines = [
+        "## 历史结论延续（平台）",
+        "",
+        f"上一轮（Run {previous_run_id}）报过的问题，由平台按指纹与本轮结果确定性合并，"
+        f"共 {total} 条：{counts}。"
+        "**逐条清单以正文的「风险评估」为准**，本节只记数 —— 旧结论不能因为模型没有"
+        "重复输出就视为已修复，只有结构化反证才能关闭。",
+    ]
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _semantic_match(old: Mapping, current: Mapping) -> float:
@@ -152,52 +183,6 @@ def _semantic_match(old: Mapping, current: Mapping) -> float:
     if not old_title or not current_title:
         return 0.0
     return SequenceMatcher(None, old_title, current_title).ratio()
-
-
-def _report_section(groups: Mapping[str, list[dict]], previous_run_id: int) -> str:
-    """「历史结论延续（平台）」这一节 —— **2026-09-25 起它是「账」，不是清单**。
-
-    ## 角色反转过一次（run 63 → 本次）
-
-    2026-09-24（run 63）这一节被做成**确定性清单**，理由是：模型自己在正文里写一节
-    「历史结论状态」、平台再列一遍同一批 15 条标题，读者看不出哪一份算数。那时的分工是
-    「本节为准」。
-
-    现在产品要求**正文的「风险评估」承担当前仍成立的全部问题**（本轮新增 + 上次遗留仍然
-    成立的），于是这里再当一次清单就成了同一批标题的第二份 —— 正是 run 63 那个毛病换个
-    方向再来一遍。所以它退回「账」：**总数与分组计数 + 「需要重新确认」那几条逐条**
-    （那几条要人真的去看），其余（仍成立 / 本轮重新确认）只报数。
-    全量的结构化清单在报告末尾「异常清单（平台按门槛过滤后）」那张表里
-    （`report_document` 渲染 `anomalies`，那个集合按契约就是当前仍成立的全集），
-    不必靠这一节传。
-
-    「只有结构化反证才能关闭」这句仍然在：旧结论不能因为模型没重复输出就当已修复。
-    """
-    labels = (
-        (STATE_RECONFIRMED, "本轮重新确认"),
-        (STATE_CARRIED, "仍成立（相关文件本轮未变化，直接继承）"),
-        (STATE_RECHECK, "需要重新确认（相关文件已变化，尚无充分反证）"),
-    )
-    total = sum(len(groups[state]) for state, _ in labels)
-    counts = "、".join(
-        f"{len(groups[state])} 条{label.split('（')[0]}" for state, label in labels if groups[state]
-    )
-    lines = [
-        "## 历史结论延续（平台）",
-        "",
-        f"上一轮（Run {previous_run_id}）报过的问题，本节由平台按指纹与本轮结果确定性"
-        f"合并，共 {total} 条：{counts}。"
-        "旧结论不能因为模型没有重复输出就视为已修复；只有结构化反证才能关闭。",
-        "",
-        "**逐条清单以正文的「风险评估」为准**（那一节是当前仍成立的问题全集）。"
-        "本节只记数，并列出**需要重新确认**的那几条；全量的结构化清单在末尾的"
-        "「异常清单（平台按门槛过滤后）」里。",
-    ]
-    recheck = groups[STATE_RECHECK]
-    if recheck:
-        lines.extend(("", f"### 需要重新确认 {len(recheck)} 条", ""))
-        lines.extend(_line(item) for item in recheck)
-    return "\n".join(lines).rstrip() + "\n"
 
 
 def reconcile_result(
