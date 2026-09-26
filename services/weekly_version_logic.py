@@ -170,24 +170,24 @@ def _commit_sort_key_for_merge(commit):
     return commit_merge_sort_key(commit)
 
 
-def _get_app_func(name):
-    """延迟从 app 模块获取函数引用，避免循环导入。"""
-    import sys
-    app_mod = sys.modules.get('app')
-    if app_mod is None:
-        import app as app_mod
-    return getattr(app_mod, name)
-
 def _render_project_page_missing(project_id: int, page_label: str):
     return render_template("project_page_missing.html", project_id=project_id, page_label=page_label), 404
 
 def get_real_diff_data_for_merge(commit):
-    """代理: 委托给 app.get_real_diff_data_for_merge"""
-    return _get_app_func('get_real_diff_data_for_merge')(commit)
+    """代理: 委托给 `services.commit_diff_logic`（同名的那份是本体，`app` 只是把它转出来）。
+
+    `python app.py` 起服务时 app.py 在 `sys.modules` 里叫 **`__main__`**，旧写法只查
+    `app`、查不到就 `import app` —— 那一支会**把整份 app.py 再执行一遍**（真机日志里多出
+    完整一段启动输出）。这一跳没有必要：本体就在 `commit_diff_logic` 里。惰性 import
+    保留 —— 本模块由 app.py 导入，不在导入期拉重依赖。
+    """
+    from services.commit_diff_logic import get_real_diff_data_for_merge as _impl
+    return _impl(commit)
 
 def get_commit_pair_diff_internal(current_commit, previous_commit):
-    """代理: 委托给 app.get_commit_pair_diff_internal"""
-    return _get_app_func('get_commit_pair_diff_internal')(current_commit, previous_commit)
+    """代理: 委托给 `services.commit_diff_logic`（理由同上一个函数）。"""
+    from services.commit_diff_logic import get_commit_pair_diff_internal as _impl
+    return _impl(current_commit, previous_commit)
 
 # ---------------------------------------------------------------------------
 #  以下为从 app.py 拆分出来的周版本业务逻辑
