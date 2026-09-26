@@ -379,6 +379,9 @@ def test_the_age_limit_still_releases_a_wedged_processing_sync(busy_worker):
     """30 分钟上限那条既有设计不许丢：卡死的同步不能把分析永久挡住。
 
     它走的是 `processing` 那一支（真正在写却永远写不完），与判据收窄是两件事。
+    **2026-09-26 起这条上限只对「执行者失联」生效**：租约还在续的同步跑多久都继续拦
+    （真机大仓同步是小时级，见 `test_ai_weekly_sync_gate.py` 里那一对用例）。这份 fixture
+    的任务**没有租约** —— 正是「执行者不在了」的形状，所以这里判的仍是 30 分钟那条。
     """
     seeded = _seed(
         sync_status="processing", age_minutes=(SYNC_IN_FLIGHT_MAX_SECONDS // 60) + 5

@@ -1146,9 +1146,19 @@ def create_weekly_ai_analysis_task(
 # 意图在 BackgroundTask 里的类型。**不是**可执行任务：worker 不取它、不执行它。
 WAITING_INTENT_TASK_TYPE = "weekly_ai_waiting"
 
-# 意图最多等多久。判据与闸门那条上限（`SYNC_IN_FLIGHT_MAX_SECONDS`）同量级：同步超过
-# 30 分钟还没把这一轮跑完，就不再让用户在页面上干等，改回「可以手动再点一次」。
-WAITING_INTENT_TTL_SECONDS = 30 * 60
+# 意图最多等多久 —— 这是**兜底**，不是判据。
+#
+# 2026-09-26 改：判据改成「**闸门还能说出在等什么**」（`_intent_is_legitimately_waiting`
+# 里那条 `sync_gate.weekly_sync_in_flight`）。理由是真机实测：2054 个提交 / 583 个文件的
+# 仓库冷启动全量同步跑了十几分钟，而登记的上限是 30 分钟 —— 同步再大一点，用户看到的就是
+# 「登记作废了，你可以再点一次」，点完又是「已经登记」，而那次同步其实一直跑得好好的。
+# 大仓的同步是**小时级**的，拿 30 分钟墙钟去砍它，砍掉的正是最需要等的那一类。
+#
+# 所以这条常量的含义收窄成：闸门一直有话说的极端情况下（例如一条活着但永远写不完的同步），
+# 别让登记和它那条 job 无限挂下去。取 8 小时 = 比闸门给「活执行者」的上限
+# （`SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS`，6 小时）还宽 —— 免得出现「平台已经不等人了、
+# 闸门却还在拦」那种两头都动不了的窗口。
+WAITING_INTENT_TTL_SECONDS = 8 * 3600
 
 # 一条意图这一趟只可能落到这四种结局（**没有第五种**）。
 #
@@ -1502,8 +1512,9 @@ def _intent_is_legitimately_waiting(intent, *, now=None):
 
     **这是「意图不许永久 pending」的守卫。** 只剩两条正当理由：
 
-    1. **同步正在写这一批的缓存** —— 转交出去也是在闸门上再被挡一次。等多久有界：
-       `WAITING_INTENT_TTL_SECONDS`；
+    1. **同步正在写这一批的缓存** —— 转交出去也是在闸门上再被挡一次。等多久**由闸门说了算**
+       （2026-09-26 改）：它还能说出「在等哪一次同步」就继续等，大仓的同步本来就是小时级；
+       `WAITING_INTENT_TTL_SECONDS` 只剩兜底的作用，治「闸门永远不放手」那一种。
     2. **已经转交出去了，那条分析任务还排在队列里** —— 等多久同样有界，但界不在意图身上
        而在那条任务身上（它要么被执行、要么被租约/超时清理成终态），所以这里不重复计一个
        TTL：重复计会让「排队 40 分钟但确实快轮到了」的那次被别人当成「登记已作废」，
@@ -1524,6 +1535,8 @@ def _intent_is_legitimately_waiting(intent, *, now=None):
     if handed is not None:
         return f"已经转交给分析任务 #{handed.id}（{handed.status}），它还排在队列里或在跑"
     if _intent_age_seconds(intent, now=now) > WAITING_INTENT_TTL_SECONDS:
+        # **兜底**，不是判据（2026-09-26）。判据在下面一行 —— 同步还在跑就继续等，
+        # 大仓的同步按小时算是常态。这一条只治「闸门永远不放手」。
         return None
     config = worker._db.session.get(worker._WeeklyVersionConfig, config_id)
     if config is None:

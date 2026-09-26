@@ -419,27 +419,89 @@ class TestTheIntentIsRetiredWhenTheUserAlreadyRanIt:
 
 
 class TestAnIntentCannotWaitForever:
-    # 用**固定**的年龄（2 小时）当判据，而不是 `WAITING_INTENT_TTL_SECONDS + 60`：
+    # 用**固定**的年龄（10 小时）当判据，而不是 `WAITING_INTENT_TTL_SECONDS + 60`：
     # 拿被测常量自己算年龄的话，把常量调到 10**9 这条用例照样绿（它跟着一起变了）——
-    # 那正是「变异验证」要抓的东西。上限也一并钉住：等 2 小时就该放弃了。
-    STALE_INTENT_AGE_SECONDS = 2 * 3600
+    # 那正是「变异验证」要抓的东西。10 小时是照现在那条兜底写死的：兜底被调大之后
+    # 这几条会红，而红的理由恰好是它们要守的那件事（「等这么久还不放手」）。
+    STALE_INTENT_AGE_SECONDS = 10 * 3600
 
-    def test_the_intent_does_not_wait_for_more_than_two_hours(self):
+    def test_the_backstop_is_generous_but_finite(self):
+        """兜底要**足够宽**（大仓同步就是很久），但**必须有限**（2026-09-26 定）。
+
+        两个方向都是产品要求：
+
+        * 太小 → 大仓被扣在「正在等同步」上。真机实测：2054 个提交 / 583 个文件的仓库冷启动
+          全量同步（约 1 文件/秒）跑了十几分钟，再大一个数量级就是几小时；原来的 30 分钟会
+          在这里作废登记、页面改口说「可以再点一次」，而同步其实一直跑得好好的 ——
+          用户描述成「一直提示已经登记、分析不开始」。
+        * 没有上限 → 意图永远 pending、它服务的 job 永远停在非终态，而 `settle_without_run`
+          那条是**功能性**阻塞：`uq_ai_job_active_key` 是唯一索引，同一份输入从此再也建不出
+          job，用户点按钮只会附着到那条永远不动的 job 上。
+        """
         from services.task_worker_queue_service import WAITING_INTENT_TTL_SECONDS
 
-        assert WAITING_INTENT_TTL_SECONDS <= self.STALE_INTENT_AGE_SECONDS, (
-            f"等待意图的上限是 {WAITING_INTENT_TTL_SECONDS} 秒 —— 用户在页面上最多等这么久，"
-            "调大它等于把用户扣在一句「正在等同步」上"
+        assert WAITING_INTENT_TTL_SECONDS >= 4 * 3600, (
+            f"兜底只有 {WAITING_INTENT_TTL_SECONDS} 秒 —— 大仓的同步比这久，"
+            "等于把用户扣在一句「正在等同步」上"
+        )
+        assert WAITING_INTENT_TTL_SECONDS <= 24 * 3600, (
+            f"兜底是 {WAITING_INTENT_TTL_SECONDS} 秒 —— 上限等于没有，"
+            "那条 job 会永远停在非终态"
         )
 
-    def test_an_old_intent_stops_blocking_and_gets_swept(self):
+    def test_a_registration_waits_as_long_as_the_sync_keeps_writing(self):
+        """**大仓的长时间等待**：同步一直在写，登记就一直等 —— 等了一小时也不许作废。
+
+        这条是这次改动的本体（真机 2026-09-26）。判据从「登记自己多老了」换成
+        **「闸门还能不能说出在等什么」**：它说得出来，就说明同步确实还在往缓存里写，
+        只是大仓本来就慢。拿墙钟去砍，砍掉的正是最该等的那一类。
+        """
         from services.task_worker_queue_service import (
             effective_waiting_analysis_intent,
             register_waiting_analysis_intent,
             wake_waiting_analysis_intents,
         )
 
-        seeded = _seed()
+        seeded = _seed(with_sync_task=True, sync_status="processing")
+        one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        with flask_app.app_context():
+            sync = db.session.get(BackgroundTask, seeded["sync_task_id"])
+            sync.started_at = datetime.now(timezone.utc) - timedelta(minutes=50)
+            sync.created_at = one_hour_ago
+            # **租约还在** = 执行者还活着 —— 真机上一个正在写的同步就是这个形状
+            # （`stamp_task_lease` 在认领时起租，`renew_inflight_task_leases` 每 10 分钟续一次）。
+            sync.lease_expires_at = datetime.now(timezone.utc) + timedelta(minutes=50)
+            db.session.commit()
+
+            register_waiting_analysis_intent(seeded["config_id"], seeded["group_key"])
+            BackgroundTask.query.filter_by(
+                task_type="weekly_ai_waiting", file_path=seeded["group_key"], status="pending"
+            ).update({"created_at": one_hour_ago})
+            db.session.commit()
+
+            assert effective_waiting_analysis_intent(seeded["group_key"]) is not None, (
+                "等了一小时的登记不再生效 —— 用户再点一次就是同一次请求的第二次点击"
+            )
+            outcome = wake_waiting_analysis_intents()
+
+            # 计数是**全库**的（测试库会话级共用，别的用例会留下自己的意图），所以这里
+            # 只拿它当个 sanity check；真正的判据在下面两条 —— 都落在**本分组**上。
+            assert outcome["blocked"] >= 1, outcome
+            assert _analysis_tasks(seeded["group_key"]) == [], "同步还在写缓存，却把分析排了出去"
+            assert _pending_intents(seeded["group_key"]), "同步还在跑，登记却被收掉了"
+
+    def test_an_intent_past_the_backstop_stops_blocking_and_gets_swept(self):
+        """兜底到点：闸门还说着「在等」，也不再等（但那是兜底，不是判据）。
+
+        它与上一条是**一对**：上一条保证「同步还在写就一直等」，这一条保证「等不是无限的」。
+        """
+        from services.task_worker_queue_service import (
+            effective_waiting_analysis_intent,
+            register_waiting_analysis_intent,
+            wake_waiting_analysis_intents,
+        )
+
+        seeded = _seed(with_sync_task=True, sync_status="processing")
         stale = datetime.now(timezone.utc) - timedelta(seconds=self.STALE_INTENT_AGE_SECONDS)
         with flask_app.app_context():
             register_waiting_analysis_intent(seeded["config_id"], seeded["group_key"])
@@ -449,7 +511,7 @@ class TestAnIntentCannotWaitForever:
             db.session.commit()
 
             assert effective_waiting_analysis_intent(seeded["group_key"]) is None, (
-                "过期的意图还在挡着用户手动点"
+                "过了兜底的登记还在挡着用户手动点"
             )
             wake_waiting_analysis_intents()
             assert _pending_intents(seeded["group_key"]) == [], "过期的意图没有被收掉"

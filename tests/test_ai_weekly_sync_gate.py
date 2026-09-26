@@ -181,6 +181,48 @@ class TestTheGate:
         with flask_app.app_context():
             assert weekly_sync_stuck_note(seeded["config_ids"]) == ""
 
+    def test_a_long_running_sync_keeps_blocking_while_its_executor_is_alive(self):
+        """**大仓的长时间等待**：执行者还在，跑多久都继续拦（2026-09-26 改）。
+
+        真机实测：2054 个提交 / 583 个文件的仓库冷启动全量同步跑了十几分钟（约 1 文件/秒），
+        再大一个数量级就是几小时。原来一刀切「超过 30 分钟算卡死、放行」，砍掉的不是卡死的
+        任务，而是**正常但慢**的那一类 —— 而放行的代价是 AI 在一份写了一半的缓存上出结论，
+        正是本模块存在的理由。
+
+        判据换成「执行者还在不在」（平台侧租约）：租约还在续 = 进程活着、确实在往缓存里写。
+        """
+        seeded = _seed(status="processing", age_minutes=(SYNC_IN_FLIGHT_MAX_SECONDS // 60) + 60)
+        with flask_app.app_context():
+            sync = db.session.get(BackgroundTask, seeded["task_id"])
+            sync.started_at = datetime.now(timezone.utc) - timedelta(minutes=90)
+            sync.lease_expires_at = datetime.now(timezone.utc) + timedelta(minutes=50)
+            db.session.commit()
+
+            reason = weekly_sync_in_flight(seeded["config_ids"])
+
+        assert reason, "执行者还在写的同步跑了 90 分钟就被判成卡死，AI 会读半份缓存"
+        assert "90 分钟" in reason, reason
+        assert weekly_sync_stuck_note(seeded["config_ids"]) == "", "还在跑的任务不该报卡死"
+
+    def test_a_long_running_sync_whose_executor_died_is_released(self):
+        """执行者失联（租约过期）才是「卡死」—— 由那条 30 分钟上限放行，并留下醒目日志。
+
+        两条合起来才说明白这次改动：**放宽的是「还在写」，不是「卡死」**。
+        """
+        seeded = _seed(status="processing", age_minutes=(SYNC_IN_FLIGHT_MAX_SECONDS // 60) + 60)
+        with flask_app.app_context():
+            sync = db.session.get(BackgroundTask, seeded["task_id"])
+            sync.started_at = datetime.now(timezone.utc) - timedelta(minutes=90)
+            sync.lease_expires_at = datetime.now(timezone.utc) - timedelta(minutes=40)
+            db.session.commit()
+
+            assert weekly_sync_in_flight(seeded["config_ids"]) == "", "失联的同步把分析挡住了"
+            note = weekly_sync_stuck_note(seeded["config_ids"])
+
+        assert note and "不再拦" in note, note
+        assert "失联" in note, f"放行时说不清是执行者死了还是任务超时：{note}"
+        assert "不完整" in note, f"放行时没说清代价：{note}"
+
     def test_another_batch_sync_does_not_block_this_one(self):
         """只拦**本批次**的同步：别的项目/窗口在跑，不该影响这一组的分析。"""
         seeded = _seed(with_sync_task=False)

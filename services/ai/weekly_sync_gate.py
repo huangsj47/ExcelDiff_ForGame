@@ -27,10 +27,16 @@ pending 再跑一次（见 `ai_analysis_service.run_weekly_analysis_background` 
 
 * **只看 `weekly_sync`。** `auto_sync`（每 2 分钟、所有仓库）不改变变更清单的构成
   （清单来自周版本缓存行），而它长期在跑 —— 拿它当闸门会让分析几乎永远不触发。
-* **有上限。** 一个卡死的同步任务不能把分析永久挡住：超过 `SYNC_IN_FLIGHT_MAX_SECONDS`
-  就带着一条醒目日志放行。卡死本身有别的机制兜（`schedule_weekly_sync_tasks` 会把
-  超时的 pending 任务置 failed；重启时 `load_pending_tasks` 会把 processing 改回 pending），
-  这道上限是最后一道保底。
+* **有上限，但上界的判据是「执行者还在不在」**（2026-09-26 改）。一个卡死的同步任务不能
+  把分析永久挡住 —— 但「卡死」不等于「跑得久」。执行者还在（平台侧租约还在续）时，
+  这条同步确实在往缓存里写，跑多久都该继续等；执行者的租约过期了，才是它死了。
+  所以现在是两档：**执行者已失联**按 `SYNC_IN_FLIGHT_MAX_SECONDS`（30 分钟）放行；
+  **执行者还在**则按 `SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS`（6 小时）兜底。
+  放行时一律带一条醒目日志（`weekly_sync_stuck_note`）。改之前的样子是一刀切 30 分钟墙钟：
+  真机上 2054 个提交 / 583 个文件的仓库跑了十几分钟，再大一个数量级就会被**当成卡死放行**，
+  而那时缓存正写到一半 —— 静默缺文件，正是本模块存在的理由。
+  卡死本身还有别的机制兜（`schedule_weekly_sync_tasks` 会把超时的 pending 置 failed；
+  `reclaim_expired_task_leases` 会把租约过期的任务收回重投），这道上限是最后一道保底。
 * **`pending` 与 `processing` 一律算在跑**（2026-09-22；此前 2026-09-21 曾收窄过一次，
   见 `_in_flight_sync_task` 的 docstring —— 那次收窄的前提已被队列拆分推翻）。
   结论是不对称的：误拦的代价是分析晚几分钟（有上限兜底、同步**真的会跑完**），
@@ -48,11 +54,26 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
-# 同步任务在这个时长之内算「还在跑」，超过就认为是卡死了（放行并记一条醒目日志）。
+# **执行者已经失联**（平台侧租约过期或从来没有过租约）时，一条同步最多再挡多久。
 #
 # 取值依据：周版本同步要逐文件算合并 diff（大仓库上千个文件），分钟级是常态；
 # 而 AI 分析的触发周期是 1 分钟 —— 等一会儿没有代价，等一小时才是问题。
+#
+# **它不再是唯一的界**：执行者还活着时用下面那条（2026-09-26 改）。这一条现在的含义收窄成
+# 「一条没人管的僵尸任务最多再挡住多久」—— 租约过期已经说明执行者死了，不该再让它拦着。
 SYNC_IN_FLIGHT_MAX_SECONDS = 30 * 60
+
+# **执行者还活着**（平台侧租约还在续）时，一条 `processing` 的同步最多再挡多久。
+#
+# 与上面那条的区别不在数值，在**判据**：租约还在续说明进程还在、这条同步确实在往缓存里写，
+# 只是大仓的同步本来就要跑很久 —— 真机 2026-09-26 实测：2054 个提交、583 个文件、
+# 约 1 文件/秒 ≈ 十几分钟；再大一个数量级的仓库就是这个数的十倍。拿「30 分钟墙钟」去砍它，
+# 砍掉的不是卡死的任务，而是**正常但慢**的那一类，而放行的代价是 AI 在一份写了一半的缓存上
+# 出结论（正是本模块存在的理由）。
+#
+# 所以这里给的是一条**兜底**，不是「同步应该跑多久」：6 小时 = 实测量的一个数量级以上，
+# 它只治「进程活着但任务永远写不完」那一种。
+SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS = 6 * 3600
 
 
 def _as_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
@@ -69,10 +90,27 @@ def _as_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
-def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] = None):
-    """这个批次里**算在跑**的周版本同步任务，返回最该被说出口的那一条。
+def _executor_alive(row, *, now) -> bool:
+    """这条同步的**执行者**还在吗 —— 平台侧租约还没到期就是还在。
 
-    返回 `(task, 已跑秒数)`；没有就 `(None, 0)`。
+    租约是这一层唯一拿得到的「执行者还在不在」的判据（见
+    `task_worker_queue_service` 的「平台侧租约」那一节）：真的在跑的任务由
+    `renew_inflight_task_leases` 不断续租，所以**合法运行不会撞上租约到期**，
+    到期只剩一个含义 —— 执行者（进程）死了。
+
+    读不到那个时间戳（老数据 NULL、测试桩）时按**不在**处理：那种情况下原来的年龄判据
+    照样能收口；反过来按「在」会让一条没有租约的僵尸任务**永久**拦住分析。
+    """
+    deadline = _as_naive_utc(getattr(row, "lease_expires_at", None))
+    if deadline is None:
+        return False
+    return deadline > now
+
+
+def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] = None):
+    """这个批次里**算在跑**的周版本同步任务，返回 `(task, 已跑秒数, 是否仍在拦)`。
+
+    没有就 `(None, 0.0, False)`。
 
     ## 「算在跑」= `pending` 与 `processing` **一律算**（2026-09-22）
 
@@ -83,16 +121,25 @@ def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] =
     （`services/task_worker_service.py:984-987`）之后，分析**不再占住通用线程**，
     一条 `pending` 的同步**一定**会在分析期间被通用线程取走并开始写缓存。
 
-    ## 上限的判据是「还有没有一条在上限内」，不是「最老的那条超没超」
+    ## 上限的判据是「还有没有一条仍该拦」，不是「最老的那条超没超」
 
-    `SYNC_IN_FLIGHT_MAX_SECONDS` 的用途是「一条卡死的同步不能把分析永久挡住」，所以它
-    **逐条**作用：一批里同时有一条卡死 40 分钟的旧同步与一条刚开跑 2 分钟的新同步时，
-    后者仍可能在写缓存，必须继续拦。只有**全都在上限之外**时才返回最老的那条 ——
+    上界**逐条**作用：一批里同时有一条卡死 40 分钟的旧同步与一条刚开跑 2 分钟的新同步时，
+    后者仍可能在写缓存，必须继续拦。只有**全都不该拦**时才返回最老的那条 ——
     那是给 `weekly_sync_stuck_note` 指名用的。
+
+    一条任务该不该拦，看两件事（2026-09-26 起）：
+
+    * **执行者还在**（`_executor_alive`）→ 拦，跑多久都拦（界是
+      `SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS`）；
+    * 执行者不在了 → 按年龄判，界是 `SYNC_IN_FLIGHT_MAX_SECONDS`（30 分钟）。
+
+    第三个返回值就是「选中的这条还在拦吗」。它必须跟着**选中的那一条**走，不能各算各的：
+    `weekly_sync_in_flight` 与 `weekly_sync_stuck_note` 是两个互斥的回答，读同一份选择
+    才不会出现「一边说在拦、一边说已放行」。
     """
     ids = [str(int(item)) for item in config_ids if item is not None]
     if not ids:
-        return None, 0.0
+        return None, 0.0, False
 
     from models import BackgroundTask
 
@@ -112,9 +159,9 @@ def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] =
             .all()
         )
     except Exception:  # noqa: BLE001 —— 查不动只是少一道闸，不该把分析卡死
-        return None, 0.0
+        return None, 0.0, False
     if not rows:
-        return None, 0.0
+        return None, 0.0, False
 
     current = _as_naive_utc(now) or datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -130,11 +177,21 @@ def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] =
         return max((current - anchor).total_seconds(), 0.0) if anchor else 0.0
 
     aged = [(_age_of(row), row) for row in rows]
-    within = [item for item in aged if item[0] <= SYNC_IN_FLIGHT_MAX_SECONDS]
-    # 在上限内的取**最老**的那条：它最接近上限，报出来信息量最大。
-    # 全超上限时取最老的那条 = 真正卡死的那条（`stuck_note` 要指名它）。
-    age, worst = max(within or aged, key=lambda item: item[0])
-    return worst, age
+
+    def _blocks(age, row) -> bool:
+        if _executor_alive(row, now=current):
+            # 执行者还在：它确实在写缓存，只是这条同步本来就久 —— 大仓按小时算。
+            return age <= SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS
+        return age <= SYNC_IN_FLIGHT_MAX_SECONDS
+
+    blocking = [item for item in aged if _blocks(*item)]
+    # 仍在拦的里面取**最老**的那条：它最接近上限，报出来信息量最大。
+    # 全不该拦时取最老的那条 = 真正卡死的那条（`stuck_note` 要指名它）。
+    if not blocking:
+        age, worst = max(aged, key=lambda item: item[0])
+        return worst, age, False
+    age, worst = max(blocking, key=lambda item: item[0])
+    return worst, age, _blocks(age, worst)
 
 
 def weekly_sync_needed_config_ids(config_ids: Iterable[int]) -> list[int]:
@@ -221,6 +278,11 @@ def weekly_sync_in_flight(config_ids: Iterable[int], *, now: Optional[datetime] 
     2026-09-21 曾经把「执行侧忙」的 `pending` 放行，那条前提已被 `62b4746` 的队列/线程
     拆分推翻（分析不再占住通用线程）—— 改回去之前先读 `_in_flight_sync_task` 的 docstring。
 
+    **「多久算太久」有两档**（2026-09-26 起）：执行者还在（租约还在续）时按
+    `SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS`（6 小时）兜底 —— 大仓的同步本来就是小时级，
+    拿 30 分钟墙钟去砍会把**正常但慢**的那条当成卡死，放行后 AI 读的是半份缓存；
+    执行者失联时才按 `SYNC_IN_FLIGHT_MAX_SECONDS`（30 分钟）放行。
+
     调用方拿到原因后应当**跳过这一次分析并保留触发水位线**（不要推进
     `last_triggered_at`/`last_analyzed_at`），下一个周期自然会重试。
     """
@@ -233,10 +295,8 @@ def weekly_sync_in_flight(config_ids: Iterable[int], *, now: Optional[datetime] 
             f"周版本缓存落后于仓库同步（待刷新 config_id={','.join(map(str, needed))}）："
             "等最新提交写入周版本缓存后再分析"
         )
-    task, age = _in_flight_sync_task(config_ids, now=now)
-    if task is None:
-        return ""
-    if age > SYNC_IN_FLIGHT_MAX_SECONDS:
+    task, age, blocking = _in_flight_sync_task(config_ids, now=now)
+    if task is None or not blocking:
         return ""
     minutes = int(age // 60)
     return (
@@ -246,14 +306,23 @@ def weekly_sync_in_flight(config_ids: Iterable[int], *, now: Optional[datetime] 
 
 
 def weekly_sync_stuck_note(config_ids: Iterable[int], *, now: Optional[datetime] = None) -> str:
-    """卡死的同步任务（超过上限仍在跑）：给一句醒目日志用的话，没有就空串。"""
-    task, age = _in_flight_sync_task(config_ids, now=now)
-    if task is None or age <= SYNC_IN_FLIGHT_MAX_SECONDS:
+    """不再拦着分析、却**还没结束**的同步任务：给一句醒目日志用的话，没有就空串。
+
+    两种成因都报得出来（判据在 `_in_flight_sync_task`）：执行者失联（租约过期），
+    或者执行者还在但已经超过 `SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS` 的兜底上限。
+    放行时的代价是同一件事 —— 这一轮看到的变更清单可能不完整，所以这句话必须说清它。
+    """
+    task, age, blocking = _in_flight_sync_task(config_ids, now=now)
+    if task is None or blocking:
         return ""
+    current = _as_naive_utc(now) or datetime.now(timezone.utc).replace(tzinfo=None)
     minutes = int(age // 60)
+    if _executor_alive(task, now=current):
+        why = f"已跑 {minutes} 分钟，超过 {SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS // 3600} 小时兜底上限"
+    else:
+        why = f"已跑 {minutes} 分钟，执行者已失联（租约过期）"
     return (
-        f"⚠️ 周版本同步 task_id={task.id} 已跑 {minutes} 分钟仍未结束，"
-        f"超过 {SYNC_IN_FLIGHT_MAX_SECONDS // 60} 分钟上限，不再拦着 AI 分析"
+        f"⚠️ 周版本同步 task_id={task.id} {why}，不再拦着 AI 分析"
         "（这一轮看到的变更清单可能不完整）"
     )
 
