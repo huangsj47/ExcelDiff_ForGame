@@ -42,6 +42,7 @@ from services.ai.analysis_budget import budget_gate_reason, early_stop_guard
 # 运行侧与预估端点读的必须是**同一份**（`payload["plan"]`），不能再各推一次。
 from services.ai.analysis_plan import (
     attach_plan,
+    budget_keys_from_config,
     compose_skip_guards,
     make_single_run_guard,
     plan_of,
@@ -561,20 +562,10 @@ def attach_weekly_plan(payload: dict) -> object:
     )
     plan = attach_plan(
         payload,
-        effective_budget={
-            "user_chars": max(0, configured),
-            "single_run_token_limit": project_config.get("single_run_token_limit"),
-            # `single_run_token_limit` 是 2026-09-26 新加的列（在那之前「单次上限」在
-            # 界面上根本没有旋钮，用户以为自己在调的是 `prompt_char_budget` —— 那是**每轮
-            # 提示词的水位**）。留空 → `None` → 计划用平台初值（单代理 3M / 家族 8M，
-            # 见 `auto_sizing._assemble_plan`）。
-            #
-            # `output_tokens`（`max_output_tokens`）仍然不是项目配置里的列，所以它通常取不到
-            # 值 → 用引擎默认。下面这个**周期**上限（`budget_token_limit`，管理员可改）是
-            # 另一条路：它比单次那个数更紧时单次也不许超过它，只收紧、不放松。
-            "period_token_limit": project_config.get("budget_token_limit"),
-            "output_tokens": project_config.get("max_output_tokens"),
-        },
+        # 额度那一组键**只有一份**（`budget_keys_from_config`）：预估的兜底计划读的也是
+        # 它。手抄一份的代价是漏键 —— 而漏掉 `single_run_token_limit` 的表现正是
+        # 「确认框说 3M、实际按 2M 拦」（见那个函数的 docstring）。
+        effective_budget=budget_keys_from_config(project_config, user_chars=configured),
         dimensions=dimensions,
         # **手动关掉子代理 = 强制单代理**（指引 §3.B）。这条判据在计划里，不在配置读取侧：
         # 计划是唯一决定分工的地方，写在这里就不可能出现「界面关了、计划又开了」。

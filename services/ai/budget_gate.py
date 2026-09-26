@@ -3,7 +3,8 @@
 
 ## 它补的是哪一个缺口
 
-计划里那个「单次上限 1,500,000 token」原先**只在子代理路径的成员开跑前**判一次
+计划里那个「单次上限」（当时的平台常量，现在是 `auto_sizing.SINGLE_RUN_TOKEN_CAP_SMALL`）
+原先**只在子代理路径的成员开跑前**判一次
 （`analysis_plan.make_single_run_guard` → `run_family` 的 `should_skip`）。于是：
 
 * **单分析者路径完全没有闸** —— 页面写着「单次上限」，实际一个字的检查都没有；

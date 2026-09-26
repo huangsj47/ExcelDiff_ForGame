@@ -64,6 +64,7 @@ from services.ai.auto_sizing import (
     single_run_guard,
 )
 from services.ai.pricing import BudgetWeights
+from services.ai.skill_contract import DIMENSION_IDS
 from utils.logger import log_print
 
 #: 文件数不超过它时**逐个**量 diff 体量（`SMALL_BATCH_MAX_FILES + 1`：小批次判定的边界
@@ -261,18 +262,93 @@ def attach_plan(
         output_tokens=output_tokens,
         cost_limit=cost_limit,
     )
-    if budget_weights is not None:
-        plan.thresholds["budget_weights"] = budget_weights.to_dict()
-        # 估算公式那句话也要跟着说 —— 否则界面上写着「单次上限 3,000,000」而运行中被
-        # 折算过的数一撞就到顶，读的人只会觉得「上限没生效」。
-        plan.estimate["formula"] = (
-            str(plan.estimate.get("formula") or "")
-            + "；运行中按单价折算为等效 token 记账（缓存命中与输出两档，见"
-            " thresholds.budget_weights）"
-        )
+    attach_budget_weights(plan, budget_weights)
     payload["snapshot_facts"] = facts.to_dict()
     payload["plan"] = plan.to_dict()
     return plan
+
+
+def attach_budget_weights(plan: AnalysisPlan, weights: Any) -> None:
+    """把**记账倍率**挂到计划上（`thresholds.budget_weights` + 估算公式那句说明）。
+
+    运行侧（`ai_analysis_service`）与预估的兜底计划（`ai_usage_service`）都调它 ——
+    「这次运行按哪份单价折算」只能有一处答案。`weights` 为 `None`（没配价格表）时
+    一个字都不加，读回来就是全 1.0 的旧口径。
+    """
+    if weights is None:
+        return
+    plan.thresholds["budget_weights"] = weights.to_dict()
+    # 估算公式那句话也要跟着说 —— 否则界面上写着「单次上限 3,000,000」而运行中被
+    # 折算过的数一撞就到顶，读的人只会觉得「上限没生效」。
+    plan.estimate["formula"] = (
+        str(plan.estimate.get("formula") or "")
+        + "；运行中按单价折算为等效 token 记账（缓存命中与输出两档，见"
+        " thresholds.budget_weights）"
+    )
+
+
+def budget_keys_from_config(config: Mapping[str, Any], *, user_chars: int) -> dict:
+    """从项目配置里取出**额度那一组键**（`plan_analysis` 的 `effective_budget`）。
+
+    ## 为什么必须只有一份
+
+    运行侧与「预估兜底计划」各抄一遍时，**漏掉的那个键就是「确认框显示的上限 ≠ 实际
+    运行的上限」**。2026-09-26 的实例：兜底侧只抄了 `user_chars` + `period_token_limit`，
+    漏了那一笔新加的 `single_run_token_limit` —— 用户配了 2M，而 payload 构建失败时
+    确认框按平台初值 3M 显示，实际跑起来按 2M 拦。这正是 `attach_plan` 那一段
+    「计划只算一次、两个读者读同一份」要消灭的东西，只是换了个入口重现。
+
+    跨层的 dict 键清单只许有一份：抄一份就迟早会少一个键，而少键的表现是
+    「少了一段内容」而不是异常（见 `hand-copied-row-shapes-drop-keys`）。
+    """
+    return {
+        "user_chars": max(0, int(user_chars or 0)),
+        "single_run_token_limit": config.get("single_run_token_limit"),
+        "period_token_limit": config.get("budget_token_limit"),
+        "output_tokens": config.get("max_output_tokens"),
+    }
+
+
+#: 兜底计划在预估载荷里挂的那句说明（`ai_usage_service` 直接用它）。
+FALLBACK_PLAN_NOTE = (
+    "本次的输入账没有算出来，计划是按「只知文件数」现算的兜底版本 ——"
+    "每个文件的体量未知，所以按上限配的；实际分工与每片额度以运行记录里的计划为准。"
+)
+
+
+def fallback_weekly_plan(*, planned_files: Any, config: Mapping[str, Any], user_chars: int) -> AnalysisPlan:
+    """**只知文件数**时现算一份兜底计划（预估端点读不到 `payload["plan"]` 时用）。
+
+    它必须与运行侧那份计划**同一套口径**：同一个纯函数（`plan_analysis`）、
+    同一组额度键（`budget_keys_from_config`）、同一份记账倍率
+    （`attach_budget_weights`）。原先这一块抄在 `ai_usage_service` 里，手抄的键少一个
+    就是「确认框显示的上限 ≠ 实际运行的上限」—— 2026-09-26 漏掉的正是新加的
+    `single_run_token_limit`（用户配了 2M，确认框按平台初值 3M 显示，实际按 2M 拦）。
+    搬过来还有第二个理由：那个文件贴着 2000 行的 ERROR 闸门，新逻辑写进去只会把它顶穿。
+
+    **它不是运行那份计划**：事实更少（只知文件数），所以分工与每片额度只能按上限配 ——
+    兜底这件事本身由 `FALLBACK_PLAN_NOTE` 对用户说清（「以运行记录里的计划为准」）。
+    """
+    files = int(planned_files) if planned_files is not None else 0
+    return plan_analysis(
+        SnapshotFacts.from_mapping(
+            {
+                "file_count": max(0, files),
+                # **只知文件数**时也要能分成簇，否则「100 个文件」会被判成
+                # 「只有一个变更簇 → 单代理」。合成的条目只带路径与提交（**编码的是
+                # 「这是 N 个各自独立的文件」，不是任何真实内容**），体量留 0 ——
+                # 计划会把「体量未知」按上限配（`plan_analysis` 的 `unknown_volume`）。
+                "entries": [
+                    {"path": f"unknown/{index}.bin", "commit": f"unknown{index}"}
+                    for index in range(max(0, files))
+                ],
+            }
+        ),
+        budget_keys_from_config(config, user_chars=user_chars),
+        DIMENSION_IDS,
+        subagent_enabled=bool(config.get("subagent_enabled")),
+        verify=bool(config.get("subagent_verify")),
+    )
 
 
 def single_member_limits(limits: Any, plan: AnalysisPlan) -> Any:

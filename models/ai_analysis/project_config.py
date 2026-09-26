@@ -206,8 +206,9 @@ BUDGET_COST_LIMIT_MAX = 1_000_000_000
 # 而且不报错），所以 `test_resolved_never_returns_none_for_any_key` 逐键拦着。费用栏是例外：
 # 没有可靠价格表时，`None` 明确表示不按金额限制；token 栏则回落到 100M/月安全默认。
 # 单次分析预算也是例外：`None` 明确表示「用平台初值」（那个初值按模式取
-# `SINGLE_RUN_TOKEN_CAP_SMALL/LARGE`，还会按轮数抬底）—— 在这里回落成一个数字
-# 就等于把平台初值抄成第二份，改一处漏一处。
+# `SINGLE_RUN_TOKEN_CAP_SMALL/LARGE`）—— 在这里回落成一个数字就等于把平台初值
+# 抄成第二份，改一处漏一处。（2026-09-26 之前这里还写着「会按轮数抬底」：那道下界
+# 随默认值抬到 300 万一起删了，因为它再也进不去，见 `auto_sizing._assemble_plan`。）
 NULLABLE_RESOLVED_KEYS = ("budget_cost_limit", "single_run_token_limit")
 
 

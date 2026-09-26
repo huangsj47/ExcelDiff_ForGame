@@ -651,6 +651,116 @@ def test_a_blank_single_run_budget_falls_back_to_the_platform_default(monkeypatc
         assert payload["plan"]["thresholds"]["single_run_token_cap_source"] == "平台初值"
 
 
+# ==========================================================================
+# 五之二、额度那一组键只有一份：**预估兜底计划**与运行侧同源
+# ==========================================================================
+
+
+def test_the_budget_keys_have_exactly_one_home():
+    """`budget_keys_from_config` 是额度那一组键的唯一产地。
+
+    这条不是形式主义：2026-09-26 的实例就是**兜底侧手抄了两个键**，漏掉新加的
+    `single_run_token_limit` —— 用户配了 2M，而 payload 构建失败时确认框按平台初值
+    3M 显示，实际跑起来按 2M 拦。漏键的表现是「少了一段内容」而不是异常，所以只能
+    靠「只有一份 + 两侧都读它」来挡。
+    """
+    from services.ai.analysis_plan import budget_keys_from_config
+
+    keys = budget_keys_from_config(
+        {
+            "single_run_token_limit": 2_000_000,
+            "budget_token_limit": 9_000_000,
+            "max_output_tokens": 4_000,
+        },
+        user_chars=500_000,
+    )
+
+    assert set(keys) == {
+        "user_chars",
+        "single_run_token_limit",
+        "period_token_limit",
+        "output_tokens",
+    }, keys
+    assert keys["user_chars"] == 500_000
+    assert keys["single_run_token_limit"] == 2_000_000
+    # 负的/缺失的字符额度不许变成负数传下去（`plan_analysis` 对 0 与负数的处理不同）。
+    assert budget_keys_from_config({}, user_chars=-5)["user_chars"] == 0
+
+
+def test_the_fallback_estimate_plan_honours_the_configured_budget():
+    """**预估兜底计划**读的也是配置里那笔单次预算。
+
+    这条钉的是上面那条注释里写的失效场景本身：读不到 `payload["plan"]` 时现算的
+    兜底计划，必须与真正跑起来的那一次同源 —— 否则「确认框说 3M、实际按 2M 拦」
+    就又回来了一次（那正是这套「计划只算一次」机制存在的理由）。
+    """
+    from services.ai.analysis_plan import fallback_weekly_plan
+
+    plan = fallback_weekly_plan(
+        planned_files=120,
+        config={
+            "single_run_token_limit": 2_000_000,
+            "budget_token_limit": None,
+            "subagent_enabled": False,
+            "subagent_verify": False,
+        },
+        user_chars=580_000,
+    )
+
+    assert plan.total_token_budget == 2_000_000, plan.total_token_budget
+    assert plan.thresholds["single_run_token_cap_source"] == "用户配置"
+
+    # 反向：没配那一笔时回平台初值（不许把兜底写成 0 或某个抄来的数）。
+    # 反向：没配那一笔时回**平台初值那一档**（不许把兜底写成 0 或某个抄来的数）。
+    # 两档一起验 —— 初值是按模式取的，只测一档就分不出「读对了」与「写死了小计划 3M」。
+    bare = fallback_weekly_plan(
+        planned_files=120, config={"subagent_enabled": True}, user_chars=580_000
+    )
+    assert bare.total_token_budget == auto_sizing.SINGLE_RUN_TOKEN_CAP_LARGE
+    assert bare.thresholds["single_run_token_cap_source"] == "平台初值"
+    # 「只知文件数」也要能分簇 —— 合成的条目**编码的是「这是 N 个各自独立的文件」**，
+    # 所以 120 个文件不许被判成「只有一个变更簇 → 单代理」。`subagent_enabled=False`
+    # 时反过来必须是单代理（管理员关了就关了），上限也跟着换回小计划那一档。
+    assert bare.mode == MODE_FAMILY, bare.mode
+    solo = fallback_weekly_plan(
+        planned_files=120, config={"subagent_enabled": False}, user_chars=580_000
+    )
+    assert solo.mode == MODE_SINGLE
+    assert solo.total_token_budget == auto_sizing.SINGLE_RUN_TOKEN_CAP_SMALL
+
+
+def test_the_fallback_plan_carries_the_same_accounting_weights():
+    """兜底计划也要带**同一份记账倍率** —— 它是「这次按哪份单价折算」的另一半。
+
+    与运行侧同一处产地（`attach_budget_weights`）。没配价格表时一个键都不许加。
+    """
+    from services.ai.analysis_plan import fallback_weekly_plan
+    from services.ai.pricing import budget_weights_from_config
+    from tests.test_ai_budget_weights import TABLE_JSON
+
+    config = {
+        "api_model": "m-flash",
+        "model_price_table": TABLE_JSON,
+        "single_run_token_limit": 2_000_000,
+        "subagent_enabled": False,
+    }
+    plan = fallback_weekly_plan(planned_files=120, config=config, user_chars=580_000)
+    # `fallback_weekly_plan` 自己不带倍率（它只算计划）；带的那一步在调用方。
+    from services.ai.analysis_plan import attach_budget_weights
+
+    attach_budget_weights(plan, budget_weights_from_config(config))
+    assert plan.thresholds["budget_weights"]["hit"] == 0.1
+    assert "按单价折算" in plan.estimate["formula"]
+
+    # 反向：没有价格表 → 一个键都不加。
+    bare = fallback_weekly_plan(
+        planned_files=120, config={"subagent_enabled": False}, user_chars=580_000
+    )
+    attach_budget_weights(bare, budget_weights_from_config({}))
+    assert "budget_weights" not in bare.thresholds
+    assert "按单价折算" not in bare.estimate["formula"]
+
+
 @pytest.mark.parametrize(
     "files, chars_per_file, user_chars",
     [

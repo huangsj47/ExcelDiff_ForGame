@@ -163,6 +163,47 @@ def test_asking_for_more_context_again_is_not_a_conclusion():
     assert "没有按协议交回 JSON" in outcome.error_message
 
 
+def test_the_wrap_up_round_note_does_not_contradict_its_own_status():
+    """补发那一轮的备注要与**同一行的状态**对得上，三种结局分别说。
+
+    原先只有「拿到了结论 / 仍未拿到结论」两句，判据是 `wrap_error` 空不空 —— 于是
+    「模型没按协议给 JSON、但正文是一份像样的 markdown 报告」那一档（状态是
+    `unparsable`，正文照常交付）会被写成「拿到了结论」。读 trace 的人拿这一句去对
+    「为什么状态是 unparsable」，怎么对都对不上。
+
+    **正文那一档是真实存在的一条路**（与循环里那条 `markdown_fallback` 同一口径），
+    所以它必须有自己的一句话 —— 只测「final 那句还在」是测不出这个分叉的。
+    """
+    # 章节名要按 SKILL.md 的约定写：`looks_like_markdown_report` 数的是「`# 章节名`」
+    # 的命中数（至少两个），自造的小标题过不了那道闸。
+    markdown = (
+        "# 变更理解\n\n"
+        "改了道具表。\n\n"
+        "# 风险评估\n\n"
+        "- 表结构没变，风险低。\n"
+    )
+    client = CountingClient(_ask(), markdown, **EXPENSIVE)
+
+    outcome = _limited(client)
+
+    assert outcome.status == STATUS_DEGRADED, outcome.error_message
+    assert outcome.report_markdown.strip() == markdown.strip(), "正文没有被当成报告留下"
+    last = outcome.rounds[-1]
+    # 状态与备注必须自洽：正文那一档记 `unparsable`，而备注不许说「拿到了结论」。
+    assert last.status == "unparsable", last.status
+    assert "补发" in last.note
+    assert "正文" in last.note, last.note
+    assert "拿到了结论" not in last.note, last.note
+
+    # 反向两档：结构化 final 那句照旧；什么都没拿回来时说的是「仍未拿到结论」。
+    final_client = CountingClient(_ask(), _final(_anomaly()), **EXPENSIVE)
+    assert "拿到了结论" in _limited(final_client).rounds[-1].note
+    empty_client = CountingClient(_ask(), "嗯，我知道了。", **EXPENSIVE)
+    empty_outcome = _limited(empty_client)
+    assert empty_outcome.rounds[-1].status == "unparsable"
+    assert "仍未拿到结论" in empty_outcome.rounds[-1].note
+
+
 def test_a_transport_failure_on_the_wrap_up_keeps_the_rounds():
     """补发那一次撞上传输故障 → 按原来的失败收，但**已有的轮次一条都不丢**。
 

@@ -54,9 +54,11 @@ from services.ai import round_diagnostics, run_progress
 from services.ai.auto_sizing import (
     MODE_FAMILY,
     AnalysisPlan,
-    SnapshotFacts,
     derive_family_sizing,  # noqa: F401 —— 与运行侧同源（`test_ai_auto_sizing` 钉着）
-    plan_analysis,
+)
+from services.ai.analysis_plan import (
+    FALLBACK_PLAN_NOTE,
+    fallback_weekly_plan,
 )
 from services.ai.analysis_budget import (
     PERIOD_ALL_TIME,
@@ -83,7 +85,6 @@ from services.ai.job_service import UPGRADE_REASON_FIRST_RUN
 from services.ai.platform_budget import platform_budget_public
 from services.ai.pricing import amount_exact, amount_of, money
 from services.ai.project_config_source import build_weekly_group_key, get_project_analysis_config
-from services.ai.skill_contract import DIMENSION_IDS
 from services.ai.subagent import MIN_MEMBER_ROUNDS, MIN_MEMBER_TOOL_REQUESTS, verify_reserve_for
 from services.ai.trace_evidence import decode_evidence
 from services.ai.usage import (
@@ -1546,40 +1547,16 @@ def analysis_estimate(
     planning = AnalysisPlan.from_dict(facts.get("plan"))
     plan_note = ""
     if planning is None and target_type == "weekly":
-        fallback_files = int(
-            facts["planned_files"]
-            if facts.get("planned_files") is not None
-            else (effective_planned_files or 0)
-        )
-        planning = plan_analysis(
-            SnapshotFacts.from_mapping(
-                {
-                    "file_count": fallback_files,
-                    # **只知文件数**时也要能分成簇，否则「100 个文件」会被判成
-                    # 「只有一个变更簇 → 单代理」。合成的条目只带路径与提交（**编码的是
-                    # 「这是 N 个各自独立的文件」，不是任何真实内容**），体量留 0 ——
-                    # 计划会把「体量未知」按上限配（`plan_analysis` 的 `unknown_volume`）。
-                    "entries": [
-                        {"path": f"unknown/{index}.bin", "commit": f"unknown{index}"}
-                        for index in range(max(0, fallback_files))
-                    ],
-                }
+        planning = fallback_weekly_plan(
+            planned_files=(
+                facts["planned_files"]
+                if facts.get("planned_files") is not None
+                else effective_planned_files
             ),
-            # 与运行侧同一份额度口径（那边由 `attach_weekly_plan` 组装）：预算 + 周期上限。
-            # 兜底计划也要带上周期上限，否则「读不到计划」时摆出来的单次上限会比实际跑的大
-            # （周期上限收紧了它），又是「确认框与实际不一致」那类问题的另一种形态。
-            {
-                "user_chars": effective_chars,
-                "period_token_limit": config.get("budget_token_limit"),
-            },
-            DIMENSION_IDS,
-            subagent_enabled=bool(config.get("subagent_enabled")),
-            verify=bool(config.get("subagent_verify")),
+            config=config,
+            user_chars=effective_chars,
         )
-        plan_note = (
-            "本次的输入账没有算出来，计划是按「只知文件数」现算的兜底版本 ——"
-            "每个文件的体量未知，所以按上限配的；实际分工与每片额度以运行记录里的计划为准。"
-        )
+        plan_note = FALLBACK_PLAN_NOTE
     sizing = (
         planning.family
         if planning is not None

@@ -1026,7 +1026,7 @@ def run_analysis(
             round_start_spent = single_run_budget.spent_tokens
             if token_budget_low:
                 # 只留在日志里等于没说：事后要能回答「模型为什么这一轮突然收尾」。
-                round_notes.append("预算将尽：本轮已提示模型收尾（不再索取上下文）")
+                round_notes.append("预算将尽：本轮已提示模型收尾（再往后可能不再放行下一轮）")
         # 必读清单进度（P1b）：**每轮都重报一次**，因为它每轮都在变（模型正在读）。
         # 走 `budget_notes` 这条路是刻意的 —— 它是**每轮都发给模型**的（任务书只发一次），
         # 而这一段随成员/轮次变化，本来就只该出现在成员私有消息里（共享前缀逐字节相同
@@ -1814,10 +1814,18 @@ def run_analysis(
             _emit(RoundRecord(
                 len(rounds) + 1,
                 "final" if payload is not None else "unparsable",
+                # 三种结局分别说清：final / 只拿回 markdown 正文（那一轮记 `unparsable`，
+                # 正文仍当报告交出去）/ 什么都没有 —— 混成一句会让「拿到了结论」与上面
+                # 那个状态打架。
                 note=(
                     "额度用尽后补发了一次「现在出结论」，拿到了结论"
-                    if not wrap_error
-                    else f"额度用尽后补发了一次「现在出结论」，仍未拿到结论（{wrap_error}）"
+                    if payload is not None
+                    else (
+                        "额度用尽后补发了一次「现在出结论」，只拿回正文（没按协议给 JSON）"
+                        "，正文已按 markdown 报告留下"
+                        if markdown_fallback
+                        else f"额度用尽后补发了一次「现在出结论」，仍未拿到结论（{wrap_error}）"
+                    )
                 ),
                 **wrap_extra,
             ))
