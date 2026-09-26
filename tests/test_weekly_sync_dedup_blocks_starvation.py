@@ -366,6 +366,31 @@ def test_a_starved_sync_task_does_not_stop_syncing(app, monkeypatch):
         )
 
 
+def test_a_waiting_analysis_intent_does_not_stop_syncing(app, monkeypatch):
+    """**同族的第二个触发源**：等待意图等再久也不算「被饿死」。
+
+    `weekly_ai_waiting` 那条意图行**不是可执行任务**（`_enqueue_pending_row` 对它有专门
+    分支：worker 不取它、不执行它），它等的是某一次同步跑完，与队列积压毫无关系。而它
+    pending 的时长**就是**用户合法等待的时长 —— 判据是闸门「执行者还在不在」，大仓的同步
+    是小时级。让路判据按全表数「非同步任务等了多久」，于是每一次「同步在跑 + 用户点了一次
+    分析」都会变成一次**全局**让路：那几小时里，别的配置一条新同步都补不到 ——
+    与上一条是同一个病，只是触发源从同步自己换成了意图行。
+
+    这条是 2026-09-26 CI 变红后补的：留下的一条 60 分钟前的意图让本文件两条用例双双变红
+    （`weekly_ai_waiting#26`），而单跑本文件是绿的。
+    """
+    with app.app_context():
+        cfg = _seed_active_config()
+        _add_waiting('weekly_ai_waiting', minutes_ago=60)
+
+        created, logs = _run_scheduler(monkeypatch)
+
+        assert cfg.id in created, (
+            f"一条等待意图让调度器停止了补同步 —— 那几小时里别的配置都补不到新任务；"
+            f"实际建的：{created}；日志：{logs[-3:]}"
+        )
+
+
 def test_yielding_still_resets_a_stale_pending_sync(app, monkeypatch):
     """让路的只是「建新任务」这一步，**卡死 pending 的清理照做**。
 

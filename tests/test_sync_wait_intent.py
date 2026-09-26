@@ -44,20 +44,54 @@ from services.ai_analysis_service import build_weekly_group_key
 
 @pytest.fixture(autouse=True)
 def _cleanup_runs_created_here():
-    """本文件建出来的 run 必须自己收掉。
+    """本文件建出来的 run **和后台任务行**必须自己收掉。
 
     **测试库是会话级共用的**，而 `tests/test_weekly_ai_auto_trigger_gate.py` 里有一条
     **全局计数**断言（`fail_orphaned_analysis_runs() == 1`，它数的是全库）。本文件有几条
     用例会留下 `running` 的 run（`describe` 与「已有一条在跑」那两条），留着它们就会让
     那条用例在「一起跑」时红、单独跑时绿 —— 与本仓库既有的 `_cleanup_runs` 同一条纪律。
+
+    **任务行同样要收**（2026-09-26 CI 实测）：本文件按设计会留下**一直 pending 的意图行**
+    （「同步还在写就一直等」那条要的就是这个），而它的 `created_at` 是刻意调到一小时前的
+    —— 那样的行是**真数据**：同一条 worker 上后跑的
+    `tests/test_weekly_sync_dedup_blocks_starvation.py` 里，两条真实调度器用例看到
+    「有非同步任务等了 60 分钟」就让路，双双变红（CI 上正是这两条，日志里点名
+    `weekly_ai_waiting#26`），而单跑那个文件是绿的。那边判据是**全表**的，造出来的东西
+    就得自己收干净 —— 与 `tests/test_task_lease_and_source.py::_track` 同一条纪律。
+
+    **收法是「改状态」，不是「删行」**：SQLite 的 id 是 `max(id)+1`，删掉最新的那几行会
+    让 id **从头再排**，而本文件里有两条用例正是靠「意图 id 与 job id 数值撞车」来验守卫的
+    （`test_a_task_whose_reference_is_not_a_job_is_left_alone`）—— id 一变小就**真的**撞上，
+    那两条反过来红（实测踩过）。要挡的只是「它们还 pending、还像真的在等」。
     """
     with flask_app.app_context():
         create_tables()
         baseline = db.session.query(func.max(AiAnalysisRun.id)).scalar() or 0
+        task_baseline = db.session.query(func.max(BackgroundTask.id)).scalar() or 0
     yield
     with flask_app.app_context():
         AiAnalysisRun.query.filter(AiAnalysisRun.id > baseline).delete(synchronize_session=False)
+        # 基线之后的行全是**本文件造出来的**等待形状（意图行、转交出去的分析任务、
+        # 喂给用例的同步任务）：留着它们，别人的整表判据就会把它们当成真数据。
+        BackgroundTask.query.filter(
+            BackgroundTask.id > task_baseline,
+            BackgroundTask.status.in_(["pending", "processing"]),
+        ).update(
+            {"status": "failed", "error_message": "用例造出来的等待形状，收尾时作废"},
+            synchronize_session=False,
+        )
         db.session.commit()
+        # **自检**：收尾之后本文件不许再留下「还了结不了」的行。留下就是别人整表判据里的
+        # 真数据（CI 那次变红就是这个成因），而这一条也是上面那个 update 的见证 ——
+        # 把 update 去掉，这里立刻红。
+        leftover = BackgroundTask.query.filter(
+            BackgroundTask.id > task_baseline,
+            BackgroundTask.status.in_(["pending", "processing"]),
+        ).count()
+        assert leftover == 0, (
+            f"本文件留下了 {leftover} 条 pending/processing 的任务行 —— 同 worker 上后跑的"
+            "文件会把它们当成真实积压（CI 实测：一条 60 分钟前的意图让调度器用例让路变红）"
+        )
 
 
 def _uid(prefix: str) -> str:

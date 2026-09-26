@@ -36,6 +36,7 @@ from services.task_worker_agent_tasks import (
 )
 from services.task_worker_queue_service import (
     TASK_LEASE_SECONDS,
+    WAITING_INTENT_TASK_TYPE,  # 「等同步」的意图行不是可执行任务，见 _starvation_yield_note
     check_and_create_auto_sync_tasks,  # noqa: F401 —— 外部调用方与测试仍按 worker.check_and_create_auto_sync_tasks 取
     claim_task_row_for_execution,
     clear_task_lease,
@@ -1343,18 +1344,33 @@ def create_weekly_sync_task(config_id, auto_commit=True):
 # 「别让高优先级的来源无限补给」，判据放在唯一那个来源上最清楚。
 STARVED_TASK_WAIT_SECONDS = 900
 
+# **不算「等太久」的那两类**：让路判据只该看 worker **真会去取**的任务。
+#
+# * `weekly_sync` —— 让路要挡的正是它这个高频来源（见上面那段注释）；算进来就变成
+#   「因为有同步在排队，所以不再排同步」，队列一旦积压一条就永远不再补。
+# * `weekly_ai_waiting` —— **等待意图根本不可执行**：`_enqueue_pending_row` 对它有专门
+#   分支（worker 不取它、不执行它，`load_pending_tasks` 也不装载它），它等的是某一次
+#   同步跑完，与队列积压毫无关系。而它 pending 的时长**就是**用户合法等待的时长
+#   （判据是闸门「执行者还在不在」，大仓的同步是小时级 —— 见 `WAITING_INTENT_TTL_SECONDS`），
+#   于是把它算进来 = 只要有一个人在等同步，**全局**就让路：那几小时里别的配置一条新
+#   同步都补不到。这与「同步直接停摆」是同一个病，只是触发源从同步自己换成了意图行
+#   （2026-09-26 CI 实测：一条 60 分钟前的意图让本文件那两条用例双双变红）。
+_NOT_STARVABLE_TASK_TYPES = ('weekly_sync', WAITING_INTENT_TASK_TYPE)
+
 
 def _starvation_yield_note(now_utc_naive, *, limit=3):
     """本轮该让路吗；该就让返回那句日志，不该返回 ""（见上面常量的注释）。
 
-    **`weekly_sync` 必须排除**：它正是那个高频来源，算进来就变成「因为有同步在排队，
-    所以不再排同步」—— 队列一旦积压一条就永远不再补，同步直接停摆。
+    **只看可执行任务**（`_NOT_STARVABLE_TASK_TYPES`）：`weekly_sync` 是那个高频来源，
+    算进来就变成「因为有同步在排队，所以不再排同步」—— 队列一旦积压一条就永远不再补，
+    同步直接停摆；等待意图行 worker 根本不取，算进来会让每一次「大仓同步期间用户点了
+    一次分析」都变成一次几小时的全局让路。
     `created_at` 是 naive-UTC，与 `now_utc_naive` 同口径（混用会把年龄算错 8 小时）。
     """
     cutoff = now_utc_naive - timedelta(seconds=STARVED_TASK_WAIT_SECONDS)
     starved = _BackgroundTask.query.filter(
         _BackgroundTask.status == 'pending',
-        _BackgroundTask.task_type != 'weekly_sync',
+        _BackgroundTask.task_type.notin_(_NOT_STARVABLE_TASK_TYPES),
         _BackgroundTask.created_at <= cutoff,
     ).order_by(_BackgroundTask.created_at.asc()).limit(limit).all()
     if not starved:

@@ -484,9 +484,15 @@ class _TaskRowsQuery:
 class _FilterColumn:
     """模型列的占位：`_starvation_yield_note` 会读 `_BackgroundTask.status/task_type/created_at`。
 
-    桩不解释判据，所以 `==` / `in_()` / `<=` 一律为真 —— 判据本身由真库用例
+    桩不解释判据，所以 `==` / `in_()` / `notin_()` / `<=` 一律为真 —— 判据本身由真库用例
     （`tests/test_weekly_sync_dedup_blocks_starvation.py`）负责；这里只要求**列存在**，
     否则会在建查询条件时就抛 AttributeError，被调度器的 except 吞成「什么都不做」。
+
+    **`notin_` 是 2026-09-26 补的**：让路判据从 `!= 'weekly_sync'` 改成「不在
+    `_NOT_STARVABLE_TASK_TYPES` 里」时，这里少这一个方法 → AttributeError 被调度器的
+    except 吞掉 → 本文件的活跃版本用例**假红**（`created == []`，报出来的理由是
+    「活跃版本应当照旧创建同步任务」）。**判据换了写法，桩就得跟着长**：同族的形态在
+    仓库里有一整组用例（`KnowsTheNewDoor` 那一族）。
     """
 
     def __eq__(self, _other):
@@ -497,6 +503,10 @@ class _FilterColumn:
         return True
 
     def in_(self, _values):
+        return True
+
+    def notin_(self, _values):
+        # 让路判据的 `task_type.notin_(_NOT_STARVABLE_TASK_TYPES)`。
         return True
 
     def asc(self):
