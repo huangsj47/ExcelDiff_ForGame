@@ -1747,13 +1747,42 @@ def _handed_off_analysis_task(group_key):
         return None
 
 
+def _sync_gate_reason(config_id):
+    """这个批次现在为什么还不能开始分析 —— **原样**取自闸门那句，没有就返回空串。
+
+    判据**不在这里另写一份**：手工入口、后台入口、页面轮询用的是同一个
+    `weekly_sync_gate.weekly_sync_in_flight`，它本来就交回「task_id=…，已 N 分钟」。
+    这一层只负责把这句话搬到页面上，不重新描述一遍同步的状态。
+
+    为什么要搬：真机 2026-09-26，冷启动的全量同步（583 个文件、约 1 文件/秒）跑了十几
+    分钟，而这十几分钟里页面一直是同一句「已经登记」——**读起来与「卡死了」完全一样**，
+    用户唯一能做的就是反复刷新。等的那一件事本身要报得出来。
+
+    读不到就返回空串（这句话是附加信息，不该让整个轮询失败）。但只接 SQLAlchemy 的错
+    —— 宽 `except` 会把「忘了 import」也咽成「没有附加信息」，那种静默是这个仓库吃过
+    亏的地方（见 `silent-fallback-masks-missing-import`）。
+    """
+    if config_id is None:
+        return ""
+    try:
+        config = worker._db.session.get(worker._WeeklyVersionConfig, config_id)
+        if config is None:
+            return ""
+        return sync_gate.weekly_sync_in_flight(sync_gate.group_config_ids(config))
+    except worker.SQLAlchemyError as exc:
+        worker.log_print(f"⚠️ 读取「在等哪次同步」失败（轮询只报登记那一句）: {exc}", "AI")
+        return ""
+
+
 def describe_waiting_analysis(config_id, group_key):
     """页面轮询用：这次登记现在到哪一步了。**只读**，不建 run、不排队、不发请求。
 
     四种回答对应页面的四种动作：
 
     * `run_id` 有值 → **附着**到那次运行上（接着看它的进度与结论）；
-    * 只有 `waiting` 且登记还在 → 继续等（同步还没跑完）；
+    * 只有 `waiting` 且登记还在 → 继续等，**并说出在等哪一次同步、已经等了多久**
+      （见 `_sync_gate_reason`：没有这一句，等待期间页面上的字一字不变，与「卡死了」
+      读起来一样）；
     * 只有 `waiting` 且那次分析已**转交出去** → 继续等（它在队列里，还没轮到），
       这也是「排队中」而不是「没动静」——见下面的 `_handed_off_analysis_task`；
     * `waiting` 为假 → 别再等了（登记作废了、或者已经被别的分析覆盖），
@@ -1771,12 +1800,18 @@ def describe_waiting_analysis(config_id, group_key):
             }
     intent = effective_waiting_analysis_intent(group_key)
     if intent is not None:
+        reason = _sync_gate_reason(config_id)
         return {
             "waiting": True,
             "run_id": None,
             "message": (
                 f"这次分析已经登记（登记号 #{intent.id}）：版本同步一跑完就会自动开始，"
                 "不需要再点「重新分析」。当前等待过程不会产生消耗。"
+                + (
+                    f"正在等的是：{reason}。"
+                    if reason
+                    else "版本同步已经跑完，正在把它转交出去（下一次调度周期内开始）。"
+                )
             ),
         }
     handed = _handed_off_analysis_task(group_key)
@@ -1792,6 +1827,20 @@ def describe_waiting_analysis(config_id, group_key):
                 f"这次分析已经转交到后台任务 #{handed.id}（来源记为「手动」），"
                 "正在排队或执行 —— 它跑起来之后页面会接着显示进度与结论，"
                 "不需要再点「重新分析」。"
+            ),
+        }
+    reason = _sync_gate_reason(config_id)
+    if reason:
+        # 闸门还在拦，而这次登记已经了结（过期，或已被另一次分析覆盖）。
+        # 此时光说「可以再点一次」是**误导**：再点一次就是再登记一条、再等一遍，
+        # 而它为什么等、等到什么时候，这句里一个字都没有。
+        return {
+            "waiting": False,
+            "run_id": None,
+            "message": (
+                "这次登记已经结束（过期，或者已经被另一次分析覆盖），但现在还不能开始："
+                f"{reason}。要跑的话再点一次「重新分析」"
+                "（那会重新登记一次，接着等同步跑完）。"
             ),
         }
     return {

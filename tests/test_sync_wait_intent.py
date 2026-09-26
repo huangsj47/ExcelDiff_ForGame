@@ -634,6 +634,78 @@ class TestTheStatusForThePage:
         assert status["waiting"] is True, status
         assert status["run_id"] is None, status
 
+    def test_the_message_says_which_sync_it_is_waiting_for(self):
+        """登记期间那句「已经登记」必须带上**在等哪一次同步、等了多久**。
+
+        真机 2026-09-26：冷启动的全量同步（583 个文件、约 1 文件/秒）跑了十几分钟，
+        这十几分钟里页面上是**一字不变**的那句话 —— 与「卡死了」读起来完全一样，用户
+        唯一能做的就是反复刷新，而这正是他反馈的那件事。
+
+        这里钉的是「闸门那句有没有被搬上来」，不是它的措辞：`task_id` 这个数只有闸门
+        （`weekly_sync_in_flight`）产出，页面报得出它，就说明两处没有各写一份口径。
+        """
+        from services.task_worker_queue_service import (
+            describe_waiting_analysis,
+            register_waiting_analysis_intent,
+        )
+
+        seeded = _seed(with_sync_task=True, sync_status="processing")
+        with flask_app.app_context():
+            register_waiting_analysis_intent(seeded["config_id"], seeded["group_key"])
+            status = describe_waiting_analysis(seeded["config_id"], seeded["group_key"])
+
+        assert status["waiting"] is True, status
+        assert f"task_id={seeded['sync_task_id']}" in status["message"], status["message"]
+
+    def test_the_message_says_the_sync_is_done_when_nothing_blocks_it(self):
+        """闸门没话说的那一小段（同步刚写完、还没轮到下一次调度周期）也要答得上。
+
+        留空就等于又回到「一字不变」，而这一段读起来最像「没动静」—— 它恰恰是
+        「马上就好」。
+        """
+        from services.task_worker_queue_service import (
+            describe_waiting_analysis,
+            register_waiting_analysis_intent,
+        )
+
+        seeded = _seed(with_sync_task=True, sync_status="completed")
+        with flask_app.app_context():
+            register_waiting_analysis_intent(seeded["config_id"], seeded["group_key"])
+            status = describe_waiting_analysis(seeded["config_id"], seeded["group_key"])
+
+        assert status["waiting"] is True, status
+        assert "转交" in status["message"], status["message"]
+
+    def test_an_expired_intent_still_says_what_is_blocking(self):
+        """登记过期、同步还在跑：这时只说「可以再点一次」是**误导** —— 再点还是被拦。
+
+        真机上的死循环就是这么转的：同步跑过 30 分钟 → 登记过期 → 页面说「可以再点
+        一次」→ 用户点了 → 又登记一条 → 又是「已经登记」……所以这一格要说出拦的是什么，
+        并说明再点一次等于**重新登记、接着等**，而不是「马上能跑」。
+        """
+        from services.task_worker_queue_service import (
+            WAITING_INTENT_TTL_SECONDS,
+            describe_waiting_analysis,
+            register_waiting_analysis_intent,
+        )
+
+        seeded = _seed(with_sync_task=True, sync_status="processing")
+        # 过期判据就是 TTL 本身（`effective_waiting_analysis_intent` 用同一把尺子），
+        # 所以这里按它自己那个常量造陈旧度，不另写一个数。
+        stale = datetime.now(timezone.utc) - timedelta(
+            seconds=WAITING_INTENT_TTL_SECONDS + 60
+        )
+        with flask_app.app_context():
+            register_waiting_analysis_intent(seeded["config_id"], seeded["group_key"])
+            BackgroundTask.query.filter_by(
+                task_type="weekly_ai_waiting", file_path=seeded["group_key"], status="pending"
+            ).update({"created_at": stale})
+            db.session.commit()
+            status = describe_waiting_analysis(seeded["config_id"], seeded["group_key"])
+
+        assert status["waiting"] is False, status
+        assert f"task_id={seeded['sync_task_id']}" in status["message"], status["message"]
+
     def test_a_started_run_is_reported_with_its_run_id(self):
         """页面要能拿到**运行号**：拿到它才能附着上去看进度与结论。"""
         from services.task_worker_queue_service import (
