@@ -873,8 +873,9 @@ def gap_notes(ledger: Mapping[str, Any]) -> list[str]:
     refused = _count(counts.get("refused_by_budget"))
     if refused:
         notes.append(
-            f"**有 {refused} 次索取因为超出本次的上下文额度没有执行** —— 还有想看的没看成"
-            "（额度在项目管理页 →「AI 分析配置」的「上下文索取上限」里调）。"
+            f"**有 {refused} 次索取因为超出本次的额度没有执行** —— 还有想看的没看成"
+            "（每次能索取几次由平台按预算推导，改不了；真正能调的是项目管理页 →"
+            "「AI 分析配置」里的「单次分析预算」）。"
         )
     truncated_items = _count(counts.get("truncated_items"))
     if truncated_items:

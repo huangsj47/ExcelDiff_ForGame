@@ -279,9 +279,17 @@ def test_no_numeric_range_is_hardcoded_in_the_markup():
 
 
 def test_the_script_sets_the_range_from_the_schema():
+    """范围来自 schema，不写死在 HTML 里。
+
+    **2026-09-26 起多了一层单位换算**（三个预算框按 M 填，而 schema 里的上下限是原始
+    单位），所以断言跟着改到 `aiRuleBounds(...)` 上：它仍然是「从 schema 取范围」，
+    只是取完要换单位 —— 而那句换算也只有一处（`aiRuleBounds`），
+    `test_the_script_does_not_keep_its_own_copy_of_the_ranges` 继续守着它。
+    """
     script = _ai_script()
-    assert "input.min = rule.min;" in script
-    assert "input.max = rule.max;" in script
+    assert "const bounds = aiRuleBounds(rule, field);" in script
+    assert "input.min = bounds.min;" in script
+    assert "input.max = bounds.max;" in script
     assert "applyAiFieldSchema(data.field_schema);" in script
 
 

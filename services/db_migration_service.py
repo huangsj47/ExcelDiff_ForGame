@@ -380,6 +380,9 @@ def _migrate_ai_analysis_columns(db, log_print):
             "budget_period": "budget_period VARCHAR(20)",
             "budget_token_limit": "budget_token_limit BIGINT",
             "budget_cost_limit": "budget_cost_limit VARCHAR(40)",
+            # 单次分析预算（2026-09-26，token）。没有 DEFAULT 子句：老行是 NULL，
+            # 而 NULL 的语义正是「用平台初值」，不需要回填。
+            "single_run_token_limit": "single_run_token_limit BIGINT",
             # 子代理模式（2026-09，见 services/ai/subagent.py）。同样没有 DEFAULT：
             # 老行是 NULL，而 NULL 经 `resolved()` 读出来正是「关闭 + 3 个成员」——
             # 「关闭」是唯一安全的默认值（打开它会让模型调用次数变成 n+1 倍）。

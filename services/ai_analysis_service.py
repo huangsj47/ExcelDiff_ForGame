@@ -564,10 +564,14 @@ def attach_weekly_plan(payload: dict) -> object:
         effective_budget={
             "user_chars": max(0, configured),
             "single_run_token_limit": project_config.get("single_run_token_limit"),
-            # `output_tokens` / `single_run_token_limit` 目前都不是项目配置里的列（配置面
-            # 2026-09-23 收敛过一轮），所以它们通常取不到值 → 计划用平台初值。真正能改的
-            # 那个是下面这个**周期**上限（`budget_token_limit`，管理员可改）：它比单次初值
-            # 更紧时单次也不许超过它 —— 「用户可覆盖单次上限」的现成入口就是它。
+            # `single_run_token_limit` 是 2026-09-26 新加的列（在那之前「单次上限」在
+            # 界面上根本没有旋钮，用户以为自己在调的是 `prompt_char_budget` —— 那是**每轮
+            # 提示词的水位**）。留空 → `None` → 计划用平台初值（单代理 3M / 家族 8M，
+            # 见 `auto_sizing._assemble_plan`）。
+            #
+            # `output_tokens`（`max_output_tokens`）仍然不是项目配置里的列，所以它通常取不到
+            # 值 → 用引擎默认。下面这个**周期**上限（`budget_token_limit`，管理员可改）是
+            # 另一条路：它比单次那个数更紧时单次也不许超过它，只收紧、不放松。
             "period_token_limit": project_config.get("budget_token_limit"),
             "output_tokens": project_config.get("max_output_tokens"),
         },
@@ -1359,7 +1363,7 @@ def _run_engine_and_persist(
         else from_weekly_payload(payload, readable_references=readable, prefixes=prefixes)
     )
 
-    # 配置里那个「提示词字符预算」是**用户内容**的额度，不含平台内置提示词（见
+    # 配置里那个「每轮提示词字符水位」是**用户内容**的额度，不含平台内置提示词（见
     # `prompt.platform_prompt_chars` 的说明）。这里把内置那一段加回去，让引擎按
     # 「整份提示词」去组装与压缩；项目知识包、补充指令不在这个加法里 —— 它们在系统
     # 提示词里，仍然从用户的额度里扣。

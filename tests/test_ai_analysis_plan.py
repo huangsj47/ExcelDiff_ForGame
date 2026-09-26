@@ -598,6 +598,106 @@ def test_a_looser_period_limit_never_raises_the_single_run_cap():
     assert plan.thresholds["single_run_token_cap_source"] == "平台初值"
 
 
+def test_the_configured_single_run_budget_reaches_the_persisted_plan(monkeypatch):
+    """走真路径：配置页把「单次分析预算」填成 2M → **落库的那份计划**按 2M 算。
+
+    这一条与上面那条周期上限的分别在于**这个旋钮是 2026-09-26 才有的**：在那之前
+    「单次上限」是平台常量，界面上根本没有能改它的地方 —— 用户以为自己在调的
+    `prompt_char_budget` 其实是**每轮提示词的水位**（真机 run 3 就是按那个理解配的）。
+    所以这里要证的不只是「字段通了」，而是「填进这个框的那个数就是这一次的硬上限」。
+    """
+    from tests.test_ai_run_budget_warning import _prepare_weekly_run
+
+    with flask_app.app_context():
+        create_tables()
+        ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
+        ai_service.update_project_analysis_config(
+            project.id, {"single_run_token_limit": 2_000_000}
+        )
+        db.session.commit()
+
+        payload, _state, _skip = ai_service.build_weekly_payload(cfg.id)
+
+        assert payload["plan"]["total_token_budget"] == 2_000_000, (
+            "配置里的单次分析预算没有进计划 —— 界面上的那个框就成了一句空话"
+        )
+        assert payload["plan"]["thresholds"]["single_run_token_cap_source"] == "用户配置"
+
+
+def test_a_blank_single_run_budget_falls_back_to_the_platform_default(monkeypatch):
+    """反向的一半：**留空 = 用平台初值**，不是 0、也不是上一次填过的那个数。
+
+    `single_run_token_limit` 的 `None` 是有语义的（`NULLABLE_RESOLVED_KEYS`），而
+    「留空」在界面上是一条合法操作（清空即回到平台按规模算）。回落成 0 会把这一次
+    分析锁死，回落成上次的值会让用户以为清空没生效。
+    """
+    from tests.test_ai_run_budget_warning import _prepare_weekly_run
+
+    with flask_app.app_context():
+        create_tables()
+        ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
+        ai_service.update_project_analysis_config(
+            project.id, {"single_run_token_limit": 2_000_000}
+        )
+        db.session.commit()
+        ai_service.update_project_analysis_config(
+            project.id, {"single_run_token_limit": None}
+        )
+        db.session.commit()
+
+        payload, _state, _skip = ai_service.build_weekly_payload(cfg.id)
+
+        assert payload["plan"]["total_token_budget"] == auto_sizing.SINGLE_RUN_TOKEN_CAP_SMALL
+        assert payload["plan"]["thresholds"]["single_run_token_cap_source"] == "平台初值"
+
+
+@pytest.mark.parametrize(
+    "files, chars_per_file, user_chars",
+    [
+        (3, 500, 150_000),
+        (847, 5_000, 580_000),
+        (5_000, 20_000, 2_000_000),
+    ],
+)
+def test_the_platform_default_cap_covers_the_largest_plan_it_can_emit(
+    files, chars_per_file, user_chars
+):
+    """**平台初值这一档必须自己就够跑完它排得出来的轮数。**
+
+    2026-09-26 之前平台初值是 150 万，而单代理一档能排到 10 轮 —— 「跑满轮数的运行必然
+    以『没有结论』收场」，真机 run 3 就是这么死的。修法不是「跑的时候发现不够再抬底」
+    （那种分支在任何配置下都进不去，读的人却会以为有保护），而是**把这个常量本身按
+    「能排出来的最贵计划」定死**，再让**这条用例**看着它：
+
+    * 计划里的上限就是那枚常量（`==` 那一条）—— 证明没有人在背后悄悄改数；
+    * 而按计划自己的轮数把预留花完，**闸门仍然放行**（`blocked is False`）。
+
+    把 `SINGLE_RUN_TOKEN_CAP_SMALL` 调回 150 万，第二条就红 —— 那正是它要拦的回归。
+
+    三档输入分别代表：小批次（3 个文件）、真机那个周版本（847 个）、以及能把轮数与
+    清单取样同时顶到上界的那一档（5000 个文件 × 2 万字 diff、水位拉到 2M）。
+    """
+    plan = plan_analysis(
+        _large_version(files, chars_per_file=chars_per_file),
+        {"user_chars": user_chars},
+        DIMENSIONS,
+        subagent_enabled=False,
+    )
+
+    assert plan.mode == MODE_SINGLE, "这几档都要走单代理那一档（上限公式只对它生效）"
+    assert plan.total_token_budget == auto_sizing.SINGLE_RUN_TOKEN_CAP_SMALL
+    # 轮数从**计划自己的成员**上读，不再从 thresholds 抄一份（那一份已经删了）。
+    rounds = sum(item.max_rounds for item in plan.members)
+    assert rounds > 0
+
+    spent = rounds * plan.round_reserve_tokens
+    guard = single_run_guard(plan, spent_tokens=spent)
+    assert guard["blocked"] is False, (
+        f"跑完计划自己排的 {rounds} 轮之后闸门就不放行了（{guard['reason']}）—— "
+        "上限这一档比它能排出来的计划还小"
+    )
+
+
 def test_the_period_limit_reaches_the_persisted_plan_through_the_real_run(monkeypatch):
     """走真路径：配置里把周期上限调紧 → **落库的那份计划**跟着收紧（不是只改了纯函数）。"""
     from tests.test_ai_run_budget_warning import _prepare_weekly_run

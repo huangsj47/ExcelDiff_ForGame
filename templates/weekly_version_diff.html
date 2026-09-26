@@ -2296,6 +2296,17 @@ function weeklyAiFormatInt(value) {
     return Math.round(number).toLocaleString('en-US');
 }
 
+// 预算按 M 读：3,000,000 写成「3M」。配置页那三个输入框也按 M 读，但走的是另一对
+// 函数（`aiToMillions`/`aiFromMillions`，在 merged_project_view 里）。
+// **两者不能混用。** 这一个要的是「一屏里读得出哪个大」，所以截到 3 位小数 —— 那是显示
+// 该有的样子，却**不许**拿去回填配置输入框：配置那一侧要的是「显示什么就存回什么」，
+// 用截过位的数回填，用户没动过的 1,234,567 会变成 1,235,000。
+function weeklyAiFormatMillions(value) {
+    const number = Number(value);
+    if (!isFinite(number) || number <= 0) return '';
+    return (Math.round(number / 1000000 * 1000) / 1000) + 'M';
+}
+
 function weeklyAiFormatDuration(ms) {
     const number = Number(ms);
     if (!isFinite(number) || number <= 0) return '';
@@ -2348,7 +2359,7 @@ function weeklyAiMoneyText(value) {
 // 「决定要不要跑」要看的那几行，与「这份预估是怎么算出来的」那几行。
 //
 // 预估框原来把 `weeklyAiEstimateLines` 的**全部**十几行一次摆出来，其中一半是运行计划的
-// 内部账（提示词字符预算 / 模型窗口来源 / 平台内置提示词占用 / 单条上限 / 预留输出空间 /
+// 内部账（每轮提示词字符水位 / 模型窗口来源 / 平台内置提示词占用 / 单条上限 / 预留输出空间 /
 // 每片名义额…）。用户在这个框里要回答的只有一个问题：「这次要不要跑」—— 那些行不参与
 // 这个决定，却把框撑成了一屏半。现在只把 `PRIMARY` 里这几行摆在明面上，其余收进框内的
 // 「展开」里。
@@ -2439,10 +2450,22 @@ function weeklyAiEstimateLines(estimate) {
         // 所以被水位夹住时只能说「会被压到 N」；把未探测说成事实，用户会以为
         // 「我配的 2,000,000 真的生效了」。
         const tail = promptChars.clamped
-            ? ('会被模型窗口压到 ' + weeklyAiFormatInt(effective))
-            : (weeklyAiFormatInt(effective) + ' 当前预估生效');
-        lines.push(['提示词字符预算', weeklyAiFormatInt(promptChars.configured)
+            ? ('会被模型窗口压到 ' + weeklyAiFormatMillions(effective))
+            : (weeklyAiFormatMillions(effective) + ' 当前预估生效');
+        lines.push(['每轮提示词字符水位', weeklyAiFormatMillions(promptChars.configured)
             + ' 配置 / ' + tail]);
+    }
+    // 单次分析预算（2026-09-26）：**「这次能花多少」那个旋钮**，与上面那行
+    // 「每轮提示词字符水位」（一份提示词装多少字）是两个不同的问题 ——
+    // 名字混用的时候用户会去调错的那一个（实测就这么发生过）。
+    //
+    // 值取**计划里**的那一个（不是配置里的）：计划可能按周期上限把它收紧，
+    // 而用户要看的正是「这次实际按多少算」。来源也一并写出来 ——
+    // 「用户配置 / 平台初值 / 周期收紧」三档对应的处置完全不同。
+    const planThresholds = (estimate.plan && estimate.plan.thresholds) || {};
+    if (planThresholds.single_run_token_cap !== undefined) {
+        lines.push(['单次分析预算', weeklyAiFormatMillions(planThresholds.single_run_token_cap)
+            + '（' + (planThresholds.single_run_token_cap_source || '以运行记录为准') + '）']);
     }
     // 窗口来源：`600,000` 这个水位是怎么来的。**必须写** —— 「按默认窗口压的」与
     // 「端点声明了窗口」是两件事，不说清就会被读成「平台问到了端点」。

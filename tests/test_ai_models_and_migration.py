@@ -179,6 +179,9 @@ CONFIG_NEW_COLUMNS = (
     "max_anomalies_per_subagent",
     "project_knowledge",
     "model_price_table",
+    # 单次分析预算（2026-09-26）。老行 NULL → `resolved()` 读成 `None`，而 `None`
+    # 的语义正是「用平台按规模算的初值」，所以不需要回填。
+    "single_run_token_limit",
     # 预算闸门（2026-09）。老行在这三列上是 NULL，而 NULL 的语义就是「不限制」——
     # 这正是这个功能要的默认行为，所以没有回填这一步。
     "budget_period",
@@ -675,13 +678,21 @@ def test_resolved_never_returns_none_for_any_key():
         assert value is not None, f"{key} 读出来是 None"
 
 
-def test_the_nullable_resolved_keys_are_only_the_cost_limit():
+def test_the_nullable_resolved_keys_are_only_the_two_budgets():
     """**反向守卫**：例外清单只许装预算那两栏。
 
     没有这一条，将来有人加了一栏新配置、又不想补默认值，最省事的做法就是把它塞进
     这个清单 —— 上面那条用例照样全绿，而 `resolved()` 又开始返回 None 了。
+
+    ## 为什么是「两栏」而不是「只有费用那栏」（2026-09-26）
+
+    `single_run_token_limit`（单次分析预算）的 `None` 是**有语义的**：它表示「用平台初值」
+    —— 而那个初值按模式取（单代理 3M / 家族 8M，见 `auto_sizing._plan`）。
+    在这里回落成一个数字，就等于把平台初值抄成第二份，
+    改一处漏一处（这一族坑本文件里已经踩过：`auto_weekly_enabled` 的那份副本）。
+    所以它是**刻意**开的口子，清单里多它一个是有意的、不是漏补默认值。
     """
-    assert tuple(NULLABLE_RESOLVED_KEYS) == ("budget_cost_limit",)
+    assert tuple(NULLABLE_RESOLVED_KEYS) == ("budget_cost_limit", "single_run_token_limit")
 
 
 def test_resolved_uses_a_safe_token_budget_when_unset():

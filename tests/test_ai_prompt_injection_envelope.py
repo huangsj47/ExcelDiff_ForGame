@@ -184,7 +184,7 @@ class TestTheDeclaration:
 
     def test_the_declaration_is_platform_paid(self):
         """它是平台出的判据（与项目无关），所以它进的是**平台那几段**：
-        用户配的「提示词字符预算」不为它买单（那是给用户内容的额度）。"""
+        用户配的「每轮提示词字符水位」不为它买单（那是给用户内容的额度）。"""
         loaded = _loaded()
 
         assert _UNTRUSTED_DATA_NOTICE in build_system_prompt(loaded)

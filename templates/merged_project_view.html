@@ -1587,11 +1587,21 @@
                             <div class="form-text text-danger d-none" id="aiSubagentVerifyToggleError"></div>
                         </div>
                         <div class="col-12 col-lg-6 ai-config-field">
-                            <label class="form-label" for="aiPromptCharBudgetInput">提示词字符预算</label>
-                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiPromptCharBudgetInput"
+                            <!-- 名字 2026-09-26 改准：它过去叫「提示词字符预算」，而实测有用户按
+                                 「一次分析能花多少钱」去调它 —— 它管的是**每轮请求装多少字**（超了才压历史），
+                                 与「一次能花多少 token」是两件事（后者是下面那个「单次分析预算」）。 -->
+                            <label class="form-label" for="aiPromptCharBudgetInput">每轮提示词字符水位（M）</label>
+                            <input type="number" inputmode="decimal" step="any" class="form-control form-control-sm" id="aiPromptCharBudgetInput"
                                    aria-describedby="aiPromptCharBudgetInputHelp aiPromptCharBudgetInputError">
-                            <div class="form-text" id="aiPromptCharBudgetInputHelp">只算你自己要发的内容（变更清单、取回的上下文、项目知识包与补充指令）；平台内置提示词不占这个额度。超出时按「保留首尾」压缩，并在内容里标注省略了多少。</div>
+                            <div class="form-text" id="aiPromptCharBudgetInputHelp"><strong>按 M（百万字符）填</strong>，例如 0.56。只算你自己要发的内容（变更清单、取回的上下文、项目知识包与补充指令）；平台内置提示词不占这个额度。<strong>它是「一份提示词装多少字」的水位，不是「这次能花多少钱」</strong> —— 超了才会压缩历史。要调预算请改下面的「单次分析预算」。</div>
                             <div class="form-text text-danger d-none" id="aiPromptCharBudgetInputError"></div>
+                        </div>
+                        <div class="col-12 col-lg-6 ai-config-field">
+                            <label class="form-label" for="aiSingleRunBudgetInput">单次分析预算（M token）</label>
+                            <input type="number" inputmode="decimal" step="any" class="form-control form-control-sm" id="aiSingleRunBudgetInput"
+                                   aria-describedby="aiSingleRunBudgetInputHelp aiSingleRunBudgetInputError">
+                            <div class="form-text" id="aiSingleRunBudgetInputHelp"><strong>按 M（百万 token）填</strong>，例如 3。<strong>一次</strong>分析最多花多少 —— 用尽时平台会停止继续索取上下文，基于已有证据出结论（并尽量补一次收尾调用把结论交回来）。<strong>留空 = 平台按规模算</strong>（单代理 3M、大计划 8M）。填了价格表时这里是**按单价折算后的等效 token**：缓存命中与输出两档按各自单价折成未命中输入的等价量，所以「3M」不等于「3M 原始 token」。</div>
+                            <div class="form-text text-danger d-none" id="aiSingleRunBudgetInputError"></div>
                         </div>
                         <!-- token 留空恢复 100M/月安全默认；费用留空才是不按费用限制。 -->
                         <div class="col-12 col-lg-6 ai-config-field">
@@ -1608,12 +1618,12 @@
                             <div class="form-text text-danger d-none" id="aiBudgetPeriodSelectError"></div>
                         </div>
                         <div class="col-12 col-lg-6 ai-config-field">
-                            <label class="form-label" for="aiBudgetTokenInput">周期内 token 上限</label>
-                            <input type="number" inputmode="numeric" class="form-control form-control-sm" id="aiBudgetTokenInput"
+                            <label class="form-label" for="aiBudgetTokenInput">周期内 token 上限（M）</label>
+                            <input type="number" inputmode="decimal" step="any" class="form-control form-control-sm" id="aiBudgetTokenInput"
                                    aria-describedby="aiBudgetTokenInputHelp aiBudgetTokenInputError">
                             <div class="form-text" id="aiBudgetTokenInputHelp">
-                                <strong>留空 = 使用 100M/月安全默认。</strong>用超之后 AI 分析会被暂停（手动与定时都停），
-                                界面上会写明已用多少、上限多少。
+                                <strong>按 M（百万 token）填</strong>，例如 100。留空 = 使用 100M/月安全默认。用超之后 AI 分析会被暂停（手动与定时都停），
+                                界面上会写明已用多少、上限多少。<strong>它是整个周期的总量</strong>，与上面那栏「单次」是两个不同的问题。
                             </div>
                             <div class="form-text text-danger d-none" id="aiBudgetTokenInputError"></div>
                         </div>
@@ -2520,6 +2530,7 @@ const AI_FIELD_DOM = {
     // 落点就是它下面那个错误槽。
     subagent_verify: 'aiSubagentVerifyToggle',
     prompt_char_budget: 'aiPromptCharBudgetInput',
+    single_run_token_limit: 'aiSingleRunBudgetInput',
     min_severity: 'aiMinSeveritySelect',
     min_confidence: 'aiMinConfidenceSelect',
     prompt_template: 'aiPromptInput',
@@ -2557,6 +2568,41 @@ const AI_CHOICE_LABELS = {
 const AI_RANGE_KINDS = ['int', 'optional_int', 'optional_money'];
 // 可空预算字段：token 留空恢复安全默认，费用留空表示不按费用限制。
 const AI_OPTIONAL_KINDS = ['optional_int', 'optional_money'];
+
+// 三个预算框的单位是 **M（百万）**（2026-09-26 用户要求：0.6 / 100 / 3 这种读法）。
+// 落库仍然是**原始单位**（字符 / token）：换算只发生在**回填**与**收集**两处，
+// 常数只有这一份 —— 两个方向各写一个数，迟早会漂（而漂了不报错，只是存进去的数
+// 差了六个数量级）。
+const AI_MILLION = 1000000;
+const AI_MILLION_FIELDS = ['prompt_char_budget', 'budget_token_limit', 'single_run_token_limit'];
+
+// 原始单位 → M。**不许截位**：这里显示出来的数就是保存时要写回去的数，截到 3 位小数
+// 会把用户没动过的值改掉（1,234,567 显示成 1.235 → 存回去 1,235,000）。JS 的
+// Number→String 是「最短可往返」的十进制，所以直接除就够：0.56 打成 "0.56"，
+// 1.234567 打成 "1.234567"，`aiFromMillions` 都能原样折回来（见那条往返用例）。
+function aiToMillions(value) {
+    const number = Number(value);
+    if (!isFinite(number) || number <= 0) return '';
+    return String(number / AI_MILLION);
+}
+
+// M → 原始单位（整数）。空串原样返回：那是「留空」，不是 0。
+function aiFromMillions(raw) {
+    const number = Number(raw);
+    if (!isFinite(number) || number <= 0) return '';
+    return String(Math.round(number * AI_MILLION));
+}
+
+// 这一栏的上下限要不要按 M 显示/比较。**判据只有这一处** —— 界面上的 min/max
+// 属性、输入框旁的提示、本地校验三处都读它，免得其中一个还停在原始单位上
+// （浏览器会拿 3 去和 500000 比，直接判「小于最小值」）。
+function aiRuleBounds(rule, field) {
+    const inMillions = AI_MILLION_FIELDS.indexOf(field) >= 0;
+    const scale = (value) => (value === null || value === undefined
+        ? value
+        : (inMillions ? Number((value / AI_MILLION).toFixed(6)) : value));
+    return { min: scale(rule && rule.min), max: scale(rule && rule.max), note: inMillions ? 'M' : '' };
+}
 
 // 只读用户不该动的东西（radio 与开关不在 AI_FIELD_DOM 里，单独列）。
 // 开关注定不在 `AI_FIELD_DOM` 里（那张表是给字段级报错用的），所以它们**必须**在这里
@@ -2666,8 +2712,9 @@ function applyAiFieldSchema(schema) {
         if (!rule || AI_RANGE_KINDS.indexOf(rule.kind) < 0) return;
         const input = aiEl(AI_FIELD_DOM[field]);
         if (!input) return;
-        if (rule.min !== null && rule.min !== undefined) input.min = rule.min;
-        if (rule.max !== null && rule.max !== undefined) input.max = rule.max;
+        const bounds = aiRuleBounds(rule, field);
+        if (bounds.min !== null && bounds.min !== undefined) input.min = bounds.min;
+        if (bounds.max !== null && bounds.max !== undefined) input.max = bounds.max;
 
         const help = aiEl(`${AI_FIELD_DOM[field]}Help`);
         if (!help) return;
@@ -2678,14 +2725,19 @@ function applyAiFieldSchema(schema) {
             help.appendChild(hint);
         }
         // 可空预算字段要把各自的回落语义写清楚。
-        if (rule.max !== null && rule.max !== undefined) {
-            hint.textContent = AI_OPTIONAL_KINDS.indexOf(rule.kind) >= 0
+        if (bounds.max !== null && bounds.max !== undefined) {
+            // 单位后缀跟着 `aiRuleBounds` 走：三个预算框是 M，其余是原始单位。
+            const unit = bounds.note ? ' ' + bounds.note : '';
+            const tail = AI_OPTIONAL_KINDS.indexOf(rule.kind) >= 0
                 ? (field === 'budget_token_limit'
-                    ? `（上限 ${rule.max}，留空 = 100M/月安全默认）`
-                    : `（上限 ${rule.max}，留空 = 不限制）`)
-                : `（可填 ${rule.min}~${rule.max}）`;
-        } else if (rule.min !== null && rule.min !== undefined) {
-            hint.textContent = `（最小 ${rule.min}）`;
+                    ? `（上限 ${bounds.max}${unit}，留空 = 100M/月安全默认）`
+                    : (field === 'single_run_token_limit'
+                        ? `（上限 ${bounds.max}${unit}，留空 = 平台按规模算）`
+                        : `（上限 ${bounds.max}${unit}，留空 = 不限制）`))
+                : `（可填 ${bounds.min}~${bounds.max}${unit}）`;
+            hint.textContent = tail;
+        } else if (bounds.min !== null && bounds.min !== undefined) {
+            hint.textContent = `（最小 ${bounds.min}${bounds.note ? ' ' + bounds.note : ''}）`;
         } else {
             hint.textContent = '';
         }
@@ -2720,7 +2772,8 @@ function fillAiConfigForm(data) {
     setValue('aiModelInput', data.api_model);
     setValue('aiWeeklyIntervalInput', data.weekly_interval_minutes);
     // 收敛掉的七个数值栏不再回填（DOM 已删，见 AI_FIELD_DOM 的注释）。
-    setValue('aiPromptCharBudgetInput', data.prompt_char_budget);
+    // 三个预算框按 **M** 回填（落库是原始单位，见 `AI_MILLION_FIELDS`）。
+    setValue('aiPromptCharBudgetInput', aiToMillions(data.prompt_char_budget));
     setValue('aiMinSeveritySelect', data.min_severity);
     setValue('aiMinConfidenceSelect', data.min_confidence);
     setValue('aiPromptInput', data.prompt_template);
@@ -2739,7 +2792,10 @@ function fillAiConfigForm(data) {
         if (!el) return;
         el.value = (value === undefined || value === null) ? '' : String(value);
     }
-    setOptionalValue('aiBudgetTokenInput', data.budget_token_limit);
+    setOptionalValue('aiBudgetTokenInput', aiToMillions(data.budget_token_limit));
+    // 单次分析预算：`null` 是**有语义的**（= 用平台按规模算的那个初值），所以留空
+    // 就是留空，不许回填成平台初值 —— 那会把它变成用户显式配的数。
+    setOptionalValue('aiSingleRunBudgetInput', aiToMillions(data.single_run_token_limit));
     setOptionalValue('aiBudgetCostInput', data.budget_cost_limit);
     const autoToggle = aiEl('aiWeeklyAutoToggle');
     // 与下面两个开关**同一口径**：只有明确的 `true` 才勾上。这里原先是 `!== false`
@@ -2954,6 +3010,12 @@ function collectAiConfigPayload() {
         const num = Number(raw);
         payload[field] = Number.isFinite(num) ? num : raw;
     }
+    // M 单位的栏：读到的数乘回 100 万再提交。空串原样送（= 留空）。
+    function millionValue(id, field) {
+        const el = aiEl(id);
+        if (!el) return;
+        payload[field] = aiFromMillions(String(el.value || '').trim());
+    }
     function textValue(id, field) {
         const el = aiEl(id);
         if (el) payload[field] = String(el.value || '');
@@ -2964,10 +3026,11 @@ function collectAiConfigPayload() {
     numberValue('aiWeeklyIntervalInput', 'weekly_interval_minutes');
     // 收敛掉的七个数值栏不进提交体 —— 服务端对它们收到即报错（endpoint_service.RETIRED_FIELDS），
     // 哪怕值没变也提交上去，会把自己锁在配置页之外。
-    numberValue('aiPromptCharBudgetInput', 'prompt_char_budget');
+    millionValue('aiPromptCharBudgetInput', 'prompt_char_budget');
+    millionValue('aiSingleRunBudgetInput', 'single_run_token_limit');
     // 预算：空串原样提交；token 在读取侧回落到 100M/月，费用表示不按金额限制。
     // **不能把空串转成 0** —— 0 是「一个 token 都不许花」，会把分析整个锁死。
-    numberValue('aiBudgetTokenInput', 'budget_token_limit');
+    millionValue('aiBudgetTokenInput', 'budget_token_limit');
     numberValue('aiBudgetCostInput', 'budget_cost_limit');
     textValue('aiPromptInput', 'prompt_template');
     textValue('aiProjectKnowledgeInput', 'project_knowledge');
@@ -3034,24 +3097,30 @@ function aiFieldProblem(field) {
         return { field: field, label: label, message: '请填写数字' };
     }
     if (raw === '') {
-        // 两个预算栏都允许清空：token 恢复安全默认，费用取消金额限制。
+        // 预算栏都允许清空：周期 token 恢复 100M/月安全默认、单次预算回到平台按规模算、
+        // 费用取消金额限制。
         return null;
     }
     const num = Number(raw);
     if (!Number.isFinite(num)) {
         return { field: field, label: label, message: '请填写数字' };
     }
+    // **比之前先换单位**：三个预算框填的是 M，而规则里的上下限是原始单位
+    // （`aiRuleBounds` 一处换算）—— 直接比会把合法的 0.56 判成「小于 10000」。
+    const bounds = aiRuleBounds(rule, field);
+    const unit = bounds.note ? ' ' + bounds.note : '';
     const optional = AI_OPTIONAL_KINDS.indexOf(rule.kind) >= 0;
     if (optional && num <= 0) {
-        return { field: field, label: label, message: field === 'budget_token_limit'
-            ? '必须大于 0；留空恢复 100M/月安全默认'
-            : '必须大于 0；留空表示不限制' };
+        let tail = '必须大于 0；留空表示不限制';
+        if (field === 'budget_token_limit') tail = '必须大于 0；留空恢复 100M/月安全默认';
+        if (field === 'single_run_token_limit') tail = '必须大于 0；留空由平台按规模算';
+        return { field: field, label: label, message: tail };
     }
-    if (!optional && rule.min !== null && rule.min !== undefined && num < rule.min) {
-        return { field: field, label: label, message: `不能小于 ${rule.min}` };
+    if (!optional && bounds.min !== null && bounds.min !== undefined && num < bounds.min) {
+        return { field: field, label: label, message: `不能小于 ${bounds.min}${unit}` };
     }
-    if (rule.max !== null && rule.max !== undefined && num > rule.max) {
-        return { field: field, label: label, message: `不能大于 ${rule.max}` };
+    if (bounds.max !== null && bounds.max !== undefined && num > bounds.max) {
+        return { field: field, label: label, message: `不能大于 ${bounds.max}${unit}` };
     }
     return null;
 }
@@ -4925,6 +4994,18 @@ function weeklyAiFormatInt(value) {
     return Math.round(number).toLocaleString('en-US');
 }
 
+// 预估框里的**预算**按 M 读：3,000,000 写成「3M」而不是「3,000,000」—— 一屏里同时出现
+// 3000000 与 100000000 时，读的人得先数零才知道哪个大。配置页那三个输入框也按 M 读，
+// 但走的是另一对函数（`aiToMillions`/`aiFromMillions`，本文件里）。
+// **两者不能混用。** 这一个要的是「读得出哪个大」，所以截到 3 位小数 —— 那是显示该有的
+// 样子，却**不许**拿去回填配置输入框：配置那一侧要的是「显示什么就存回什么」，用截过位
+// 的数回填，用户没动过的 1,234,567 会变成 1,235,000。
+function weeklyAiFormatMillions(value) {
+    const number = Number(value);
+    if (!isFinite(number) || number <= 0) return '';
+    return (Math.round(number / 1000000 * 1000) / 1000) + 'M';
+}
+
 function weeklyAiFormatDuration(ms) {
     const number = Number(ms);
     if (!isFinite(number) || number <= 0) return '';
@@ -4977,7 +5058,7 @@ function weeklyAiMoneyText(value) {
 // 「决定要不要跑」要看的那几行，与「这份预估是怎么算出来的」那几行。
 //
 // 预估框原来把 `weeklyAiEstimateLines` 的**全部**十几行一次摆出来，其中一半是运行计划的
-// 内部账（提示词字符预算 / 模型窗口来源 / 平台内置提示词占用 / 单条上限 / 预留输出空间 /
+// 内部账（每轮提示词字符水位 / 模型窗口来源 / 平台内置提示词占用 / 单条上限 / 预留输出空间 /
 // 每片名义额…）。用户在这个框里要回答的只有一个问题：「这次要不要跑」—— 那些行不参与
 // 这个决定，却把框撑成了一屏半。现在只把 `PRIMARY` 里这几行摆在明面上，其余收进框内的
 // 「展开」里。
@@ -5068,10 +5149,22 @@ function weeklyAiEstimateLines(estimate) {
         // 所以被水位夹住时只能说「会被压到 N」；把未探测说成事实，用户会以为
         // 「我配的 2,000,000 真的生效了」。
         const tail = promptChars.clamped
-            ? ('会被模型窗口压到 ' + weeklyAiFormatInt(effective))
-            : (weeklyAiFormatInt(effective) + ' 当前预估生效');
-        lines.push(['提示词字符预算', weeklyAiFormatInt(promptChars.configured)
+            ? ('会被模型窗口压到 ' + weeklyAiFormatMillions(effective))
+            : (weeklyAiFormatMillions(effective) + ' 当前预估生效');
+        lines.push(['每轮提示词字符水位', weeklyAiFormatMillions(promptChars.configured)
             + ' 配置 / ' + tail]);
+    }
+    // 单次分析预算（2026-09-26）：**「这次能花多少」那个旋钮**，与上面那行
+    // 「每轮提示词字符水位」（一份提示词装多少字）是两个不同的问题 ——
+    // 名字混用的时候用户会去调错的那一个（实测就这么发生过）。
+    //
+    // 值取**计划里**的那一个（不是配置里的）：计划可能按周期上限把它收紧，
+    // 而用户要看的正是「这次实际按多少算」。来源也一并写出来 ——
+    // 「用户配置 / 平台初值 / 周期收紧」三档对应的处置完全不同。
+    const planThresholds = (estimate.plan && estimate.plan.thresholds) || {};
+    if (planThresholds.single_run_token_cap !== undefined) {
+        lines.push(['单次分析预算', weeklyAiFormatMillions(planThresholds.single_run_token_cap)
+            + '（' + (planThresholds.single_run_token_cap_source || '以运行记录为准') + '）']);
     }
     // 窗口来源：`600,000` 这个水位是怎么来的。**必须写** —— 「按默认窗口压的」与
     // 「端点声明了窗口」是两件事，不说清就会被读成「平台问到了端点」。

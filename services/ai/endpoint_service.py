@@ -55,6 +55,7 @@ from models.ai_analysis.project_config import (
     PROMPT_CACHE_FORMAT_CHOICES,
     PROMPT_CACHE_MODE_CHOICES,
     PROMPT_CHAR_BUDGET_RANGE,
+    SINGLE_RUN_TOKEN_LIMIT_RANGE,
     SEVERITY_CHOICES,
     WEEKLY_INTERVAL_RANGE,
 )
@@ -111,7 +112,15 @@ FIELD_RULES: Mapping[str, FieldRule] = {
     "weekly_interval_minutes": FieldRule(
         "分析间隔（分钟）", "int", *WEEKLY_INTERVAL_RANGE
     ),
-    "prompt_char_budget": FieldRule("提示词字符预算", "int", *PROMPT_CHAR_BUDGET_RANGE),
+    # **这一栏不是「一次分析能花多少钱」** —— 它是**每轮请求装多少字**的水位
+    # （超了才压历史）。2026-09-26 之前它顶着「预算」这个名字，实测就有用户
+    # 按「钱」去调它。真正的单次预算是下面那一栏。
+    "prompt_char_budget": FieldRule(
+        "每轮提示词字符水位", "int", *PROMPT_CHAR_BUDGET_RANGE
+    ),
+    "single_run_token_limit": FieldRule(
+        "单次分析预算（token）", "optional_int", *SINGLE_RUN_TOKEN_LIMIT_RANGE
+    ),
     # 提示词缓存标记。这两栏**不猜端点**：`cache_control` 不是 OpenAI 协议的一部分，
     # 一个私有域名既可能是 Anthropic 兼容层，也可能是完全不认这个字段的转发器，
     # 而猜错的代价是一次 400。所以默认是「不发标记」（auto + none），要发的部署者
@@ -206,6 +215,9 @@ FIELD_DEFAULTS: Mapping[str, Any] = {
     "budget_period": DEFAULT_BUDGET_PERIOD,
     "budget_token_limit": DEFAULT_BUDGET_TOKEN_LIMIT,
     "budget_cost_limit": DEFAULT_BUDGET_COST_LIMIT,
+    # 单次分析预算：平台初值不是一个固定数（按模式取：单代理 3M / 家族 8M，见
+    # `auto_sizing`），所以这里给 `None` = 「没配，用平台算出来的那个数」。
+    "single_run_token_limit": None,
 }
 
 

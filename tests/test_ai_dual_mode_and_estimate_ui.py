@@ -437,6 +437,15 @@ _SCENARIOS = [
                  "cost": {"computable": False, "reason": "还没有可参照的历史运行，估不出 token，也就估不出费用"},
                  "baseline": {"reusable": None, "note": "这次能不能复用基线还没有判定。"},
                  "last_actual": None, "basis": {"source": "none", "runs": 0}, "notes": []}},
+    # 计划里带着单次分析预算：那一行要显示**计划里的数**（不是配置里的），
+    # 并把来源一并写出来（用户配置 / 平台初值 / 周期上限收紧三档的处置完全不同）。
+    {"name": "estimate_lines_with_plan", "action": "estimateLines",
+     "payload": {**_ESTIMATE, "plan": {"thresholds": {
+         "single_run_token_cap": 3_000_000, "single_run_token_cap_source": "平台初值"}}}},
+    {"name": "estimate_lines_with_tightened_plan", "action": "estimateLines",
+     "payload": {**_ESTIMATE, "plan": {"thresholds": {
+         "single_run_token_cap": 1_000_000,
+         "single_run_token_cap_source": "周期上限（用户配置，收紧）"}}}},
     {"name": "estimate_note", "action": "estimateNote", "payload": _ESTIMATE},
     {"name": "upgrade_first_run", "action": "upgradeNotice",
      "job": {"requested_mode": "incremental", "effective_mode": "full", "upgrade_reason": "first_run"}},
@@ -469,6 +478,10 @@ def _probe_source(rel: str) -> str:
         _const_object_source(script, "WEEKLY_AI_UPGRADE_REASONS"),
         _function_source(script, "weeklyAiUpgradeNotice"),
         _function_source(script, "weeklyAiFormatInt"),
+        # 预算按 M 读的那个小函数（2026-09-26）：`weeklyAiEstimateLines` 现在调它，
+        # 所以抽取清单里必须有它 —— 少一个，这个探针就整个跑不起来
+        # （`ReferenceError`，而那看着像模板坏了）。
+        _function_source(script, "weeklyAiFormatMillions"),
         _function_source(script, "weeklyAiFormatDuration"),
         _function_source(script, "weeklyAiTokensText"),
         _function_source(script, "weeklyAiDurationText"),
@@ -729,15 +742,53 @@ def test_a_clamped_budget_is_written_as_a_clamp_not_as_a_fact(rel: str):
     事实。原先无论哪种情况都写「N 当前预估生效」，于是把「未探测」说成了事实 —— 而
     用户据此以为「我配的 2,000,000 真的生效了」。
     """
+    # 行名与数字 2026-09-26 跟着改：这一行是**每轮提示词的水位**（不是预算），
+    # 而且两个数都按 M 读（`weeklyAiFormatMillions`）—— 同一行里混两种单位最容易读错。
     clamped = dict((pair[0], pair[1]) for pair in _case(rel, "estimate_lines_full")["lines"])
-    assert "2,000,000" in clamped["提示词字符预算"], clamped
-    assert "会被模型窗口压到 580,000" in clamped["提示词字符预算"], clamped["提示词字符预算"]
-    assert "当前预估生效" not in clamped["提示词字符预算"], clamped["提示词字符预算"]
+    assert "2M" in clamped["每轮提示词字符水位"], clamped
+    assert "会被模型窗口压到 0.58M" in clamped["每轮提示词字符水位"], clamped["每轮提示词字符水位"]
+    assert "当前预估生效" not in clamped["每轮提示词字符水位"], clamped["每轮提示词字符水位"]
 
     plain = dict((pair[0], pair[1]) for pair in _case(rel, "estimate_lines_not_clamped")["lines"])
-    assert "560,000" in plain["提示词字符预算"], plain
-    assert "当前预估生效" in plain["提示词字符预算"], plain["提示词字符预算"]
-    assert "会被模型窗口压到" not in plain["提示词字符预算"], plain["提示词字符预算"]
+    assert "0.56M" in plain["每轮提示词字符水位"], plain
+    assert "当前预估生效" in plain["每轮提示词字符水位"], plain["每轮提示词字符水位"]
+    assert "会被模型窗口压到" not in plain["每轮提示词字符水位"], plain["每轮提示词字符水位"]
+
+
+@with_rels
+def test_the_estimate_shows_what_this_run_may_spend_not_what_the_config_says(rel: str):
+    """预估框里要有一行「**这一次**能花多少」——取计划里的数，并把来源写出来。
+
+    这一行是 2026-09-26 补的。在那之前预估框只有「每轮提示词字符水位」，而真机 run 3
+    的用户正是把它读成了「这次能花多少」（那是**每轮请求装多少字**），于是把水位调到
+    600,000 就以为预算够了 —— 实际卡住他的是平台常量那一档。
+
+    两件事必须同时成立：
+
+    * 显示的是**计划里**的数，不是配置里的 —— 计划可能被周期上限收紧，用户要看的正是
+      「这次实际按多少算」；这里用「计划 1M、来源=周期上限收紧」那条来钉；
+    * **计划没给就不显示**。缺了这半句，一个「永远打印配置值」的实现也能通过，
+      而它会和计划真实生效的数打架。
+    """
+    with_plan = dict(
+        (pair[0], pair[1]) for pair in _case(rel, "estimate_lines_with_plan")["lines"]
+    )
+    assert "单次分析预算" in with_plan, list(with_plan)
+    assert "3M" in with_plan["单次分析预算"], with_plan["单次分析预算"]
+    assert "平台初值" in with_plan["单次分析预算"], with_plan["单次分析预算"]
+
+    # 收紧那一条：数变了、来源也跟着变。
+    tightened = dict(
+        (pair[0], pair[1]) for pair in _case(rel, "estimate_lines_with_tightened_plan")["lines"]
+    )
+    assert "1M" in tightened["单次分析预算"], tightened["单次分析预算"]
+    assert "周期上限" in tightened["单次分析预算"], tightened["单次分析预算"]
+
+    # 反向：载荷里没有计划 → 这一行不出现（不许拿配置值顶上）。
+    without = dict(
+        (pair[0], pair[1]) for pair in _case(rel, "estimate_lines_full")["lines"]
+    )
+    assert "单次分析预算" not in without, without["单次分析预算"]
 
 
 # --- E8：本次动作的三个事实 + 升级原因 ----------------------------------------

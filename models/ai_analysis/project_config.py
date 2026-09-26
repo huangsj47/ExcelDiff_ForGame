@@ -150,7 +150,28 @@ SUBAGENT_COUNT_RANGE = (1, 6)
 # 再把最高严重度的几条交给一次独立的核对请求，要求它去找反证。同样**默认关** ——
 # 它是又一轮模型调用，而它带来的价值取决于读报告的人会不会去核那几条。
 DEFAULT_SUBAGENT_VERIFY = False
-PROMPT_CHAR_BUDGET_RANGE = (10_000, 2_000_000)
+#: **单次分析预算**（token）—— 一次分析最多花多少 token，留空 = 用平台初值。
+#:
+#: 它是 2026-09-26 才补上的旋钮：在那之前「单次上限」是平台常量
+#: （`auto_sizing.SINGLE_RUN_TOKEN_CAP_SMALL`），而界面上能调的那个数
+#: （`prompt_char_budget`）是**每轮请求的字符水位** —— 用户以为自己调的是钱，
+#: 实际调的是「一份提示词装多少字」。实测 run 3 就是在这个错位下失败的：
+#: 9 轮全在索取上下文、账上 1,306,756，第 10 轮被单次上限拦下，一份结论都没交。
+#:
+#: 下限 500,000：比它更小的预算跑不完一次像样的分析（一轮的保守预留就有几万，
+#: 加上收尾预留，10 万档连三轮都撑不到）—— 允许填一个注定失败的数不是自由度。
+#: 上限 50,000,000：比大计划的平台初值（8M）宽 6 倍，够把上限交回给用户，
+#: 又不至于一次点错就烧掉一个月的量。
+SINGLE_RUN_TOKEN_LIMIT_RANGE = (500_000, 50_000_000)
+#: **每轮提示词字符水位**的允许区间。2026-09-26 下限 10,000 → 150,000。
+#:
+#: 旧下限不是「小一点的自由」，是一个注定失败的档：一次分析的**平台固定开销**就有
+#: 12,000 字（`auto_sizing.PLATFORM_OVERHEAD_RESERVE_CHARS`），变更清单一档最多能到
+#: 9 万字，基线 6,000 字，再读回一条上下文又是 11,000 字
+#: （`ITEM_CHARS`）—— 这些**都不占**这个水位，它是留给用户内容的额度。于是 1 万档
+#: 的实际效果是「每一轮都触发压历史」，用户调了它却看不到任何变化，只会以为这个旋钮坏了。
+#: 15 万 ≈ 上面那几项之和再放宽一点：够装下一个中小版本的清单 + 三五条上下文。
+PROMPT_CHAR_BUDGET_RANGE = (150_000, 2_000_000)
 REQUEST_TIMEOUT_RANGE = (10, 3600)
 MAX_FILES_PER_RUN_RANGE = (1, 5_000)
 WEEKLY_INTERVAL_RANGE = (5, 10_080)
@@ -184,7 +205,10 @@ BUDGET_COST_LIMIT_MAX = 1_000_000_000
 # `None` 在别处是「忘了补默认值」的信号（`min_severity=None` 会让规则层什么都过滤不掉，
 # 而且不报错），所以 `test_resolved_never_returns_none_for_any_key` 逐键拦着。费用栏是例外：
 # 没有可靠价格表时，`None` 明确表示不按金额限制；token 栏则回落到 100M/月安全默认。
-NULLABLE_RESOLVED_KEYS = ("budget_cost_limit",)
+# 单次分析预算也是例外：`None` 明确表示「用平台初值」（那个初值按模式取
+# `SINGLE_RUN_TOKEN_CAP_SMALL/LARGE`，还会按轮数抬底）—— 在这里回落成一个数字
+# 就等于把平台初值抄成第二份，改一处漏一处。
+NULLABLE_RESOLVED_KEYS = ("budget_cost_limit", "single_run_token_limit")
 
 
 def _int_or(value, fallback: int) -> int:
@@ -329,6 +353,9 @@ class AiProjectAnalysisConfig(db.Model):
     # token 列可为 NULL，但读取时会落到月度安全默认值；费用 NULL 仍表示不按金额限制。
     budget_period = db.Column(db.String(20), default=DEFAULT_BUDGET_PERIOD)
     budget_token_limit = db.Column(db.BigInteger)
+    # 单次分析预算（token，2026-09-26）。NULL = 用平台初值（见 `resolved()`），
+    # 所以老行不需要回填 —— 与 `budget_*` 那两列同一条规矩。
+    single_run_token_limit = db.Column(db.BigInteger)
     budget_cost_limit = db.Column(db.String(40))
 
     updated_by = db.Column(db.String(100))
@@ -411,6 +438,9 @@ class AiProjectAnalysisConfig(db.Model):
             "budget_token_limit": (
                 _optional_int(self.budget_token_limit) or DEFAULT_BUDGET_TOKEN_LIMIT
             ),
+            # 单次分析预算：**留空就是 `None`**（= 用 `auto_sizing` 的平台初值），
+            # 不回落成一个数 —— 回落会把它变成第二份「平台默认」，两边迟早对不上。
+            "single_run_token_limit": _optional_int(self.single_run_token_limit),
             "budget_cost_limit": _optional_money(self.budget_cost_limit),
         }
 

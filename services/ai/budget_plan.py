@@ -190,7 +190,7 @@ def build_budget_plan(
         else None,
         "tool_limits": {key: max(0, int(value)) for key, value in limits.items()},
         "reserved_output": {"chars": max(0, int(reserved_output_chars))},
-        # 计划（工作包 B）：模式 / 分组 / 每成员额度 / 单次 token 上限 / 两个预留 /
+        # 计划（工作包 B）：模式 / 分组 / 每成员额度 / 单次分析预算 / 两个预留 /
         # 阈值与估算公式。**原样放进预算计划**，于是「这次是怎么分工的、为什么」在
         # 落库的载荷与预估端点的返回里都能读到，不需要再去别处推一遍。
         # 不给时是 `None`（老调用方逐字不变），不是一份编出来的空计划。

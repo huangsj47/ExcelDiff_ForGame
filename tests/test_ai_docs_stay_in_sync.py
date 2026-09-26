@@ -26,6 +26,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_SUBAGENT_VERIFY,
     DEFAULT_WEEKLY_INTERVAL_MINUTES,
     PROMPT_CHAR_BUDGET_RANGE,
+    SINGLE_RUN_TOKEN_LIMIT_RANGE,
     WEEKLY_INTERVAL_RANGE,
 )
 from services.ai.skill_contract import DIMENSION_IDS, REPORT_SECTIONS
@@ -95,7 +96,9 @@ def test_the_help_page_tells_qa_about_coupling_analysis():
 # 文档配置表里相应行已删，取而代之的是「平台自动推导」说明 —— 由下面那条测试钉住。
 _DOCUMENTED_DEFAULTS = {
     "分析间隔（分钟）": (DEFAULT_WEEKLY_INTERVAL_MINUTES, WEEKLY_INTERVAL_RANGE),
-    "提示词字符预算": (DEFAULT_PROMPT_CHAR_BUDGET, PROMPT_CHAR_BUDGET_RANGE),
+    # 2026-09-26 改的名：它管的是**每轮请求的水位**，不是「这次能花多少钱」——
+    # 旧名字让实测里的用户按「钱」去调它。行内容里也写明了界面按 M 填。
+    "每轮提示词字符水位": (DEFAULT_PROMPT_CHAR_BUDGET, PROMPT_CHAR_BUDGET_RANGE),
 }
 
 
@@ -105,6 +108,13 @@ _DOCUMENTED_DEFAULTS = {
 _DOCUMENTED_SWITCHES = {
     "子代理模式（仅周版本）": DEFAULT_SUBAGENT_ENABLED,
     "对账轮（找反证，仅周版本）": DEFAULT_SUBAGENT_VERIFY,
+}
+
+# **留空型**预算的配置项：默认值是 `None`（界面上那一格是空的），文档写「空（…）」+
+# 一句它回落成什么。范围那一列仍然要与常量同源 —— 这一栏是 2026-09-26 新加的，
+# 范围写错的后果是「用户按文档填 5000000 被服务端拒掉」。
+_DOCUMENTED_OPTIONAL_DEFAULTS = {
+    "单次分析预算（token）": ("空（平台按规模算）", SINGLE_RUN_TOKEN_LIMIT_RANGE),
 }
 
 
@@ -132,6 +142,12 @@ def test_the_documented_defaults_and_ranges_match_the_code():
     for label, (value, bounds) in _DOCUMENTED_DEFAULTS.items():
         low, high = bounds
         row = f"| {label} | {value} | {low}~{high} |"
+        assert row in doc, f"说明文档里的配置表与代码不一致，期望这一行：{row}"
+
+    # 留空型那一栏：默认值那一格是文案，范围那一格仍然要与常量同源。
+    for label, (empty_text, bounds) in _DOCUMENTED_OPTIONAL_DEFAULTS.items():
+        low, high = bounds
+        row = f"| {label} | {empty_text} | {low}~{high} |"
         assert row in doc, f"说明文档里的配置表与代码不一致，期望这一行：{row}"
 
 

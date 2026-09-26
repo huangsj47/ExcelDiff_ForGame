@@ -355,7 +355,10 @@ def test_every_gap_kind_shows_up():
     assert "变更清单长到列不下" in gaps
     assert "没有取到证据" in gaps and "还有 3 个" in gaps
     assert "取数失败 1 次" in gaps
-    assert "有 4 次索取因为超出本次的上下文额度没有执行" in gaps
+    # 文案 2026-09-26 改过：这里的额度**不是**「上下文索取上限」那个已被收敛的旋钮，
+    # 真正能调的是「单次分析预算」—— 旧那句话会把用户引到一个已经不存在的配置项上。
+    assert "有 4 次索取因为超出本次的额度没有执行" in gaps
+    assert "单次分析预算" in gaps
     assert "有 2 条取数在交给模型之前被截断" in gaps
 
 

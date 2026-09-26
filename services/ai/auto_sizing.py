@@ -144,10 +144,22 @@ SINGLE_AGENT_REQUESTS = 40
 # 「因为某个上限配错而跑成 1 亿」；大计划（500+ 文件、分工之后）取 800 万，同样是
 # runs 38~41 里最贵那一次（约 4.0M raw token）的两倍。**都是初值**。
 #
-# 「用户可改」的入口是项目配置里那个**周期** token 上限（`budget_token_limit`，管理员能改）：
-# 它比这两个初值更紧时单次也不许超过它（只收紧、不放松 —— 周期留空解析成 100M/月，
-# 要是拿它当单次上限就等于「一次可以花一亿」，正是这里要修的那件事）。
-SINGLE_RUN_TOKEN_CAP_SMALL = 1_500_000
+# **2026-09-26 抬到 300 万**：150 万那一版与轮数上限互相顶死 —— 实测一次 9 轮的单代理
+# 运行就花掉 1,306,756，再加上报告收尾预留 225,000 已经越线，「跑满轮数的运行必然以
+# 『没有结论』收场」。三条独立的改动一起解决了它（收尾兜底 / 按单价折算 / 这个默认值），
+# 这一条是最钝也最直接的那一条。
+#
+# **300 万是怎么定的**：按「单代理一档能排出来的最贵计划」反解 —— 轮数上界
+# `ROUNDS_PER_SHARD`（10）× 每轮保守预留上界 128,500 = 1,285,000，再除以
+# `1 − REPORT_RESERVE_RATIO` 得 1,511,765。300 万是它的近两倍（留了「实测单轮比预留
+# 贵」的余量：run 3 单轮实花 202,283，而它的预留约 140,000）。这条关系有测试钉住
+# （`tests/test_ai_analysis_plan.py::test_the_platform_default_cap_covers_the_largest_plan_it_can_emit`），
+# **调小它会让那条用例红** —— 因为它意味着「跑得完的计划会被闸门拦腰截断」。
+#
+# 「用户可改」的入口有两个：项目配置里的**单次分析预算**（`single_run_token_limit`，
+# 2026-09-26 起是一列）与那个**周期** token 上限（`budget_token_limit`，只收紧、
+# 不放松 —— 周期留空解析成 100M/月，拿它当单次上限就等于「一次可以花一亿」）。
+SINGLE_RUN_TOKEN_CAP_SMALL = 3_000_000
 SINGLE_RUN_TOKEN_CAP_LARGE = 8_000_000
 
 #: 预留给报告收尾的额度占单次上限的比例（下限见下）。收尾 = 汇总那一次调用 + 报告正文，
@@ -995,7 +1007,7 @@ def _round_reserve(requests_per_member: int, rounds_per_member: int, *, list_cha
     见 `budget.COMPACT_AT_RATIO` 与 `models/ai_analysis/project_config.py` 的推导），
     所以这里不做任何额外系数。
 
-    为什么不用「提示词字符预算」当预留：那是**上限**（580k），而实测调用只有 19k~40k
+    为什么不用「每轮提示词字符水位」当预留：那是**上限**（580k），而实测调用只有 19k~40k
     token 一轮（run 46：76,058 输入 / 4 轮）。按上限预留会把小计划的 150 万上限变成
     「只够两轮」，闸门天天误伤。这里按「这一轮**真的会**带多少」算，`DISCOVERY` 之外的
     次数就是它的依据。
@@ -1406,17 +1418,26 @@ def _assemble_plan(
     cap = int(user_cap_tokens or 0) or (
         SINGLE_RUN_TOKEN_CAP_SMALL if mode == MODE_SINGLE else SINGLE_RUN_TOKEN_CAP_LARGE
     )
+    cap_source = "用户配置" if user_cap_tokens else "平台初值"
+    round_reserve = _round_reserve(
+        nominal_requests, nominal_rounds, list_chars=list_chars, output_cap=output_cap
+    )
+    # **这里刻意没有「按轮数抬底」那道下界**（2026-09-26 删掉的一段）：它只在平台初值
+    # 是 150 万时才响得起来，抬到 300 万之后**在任何配置下都进不去**（算式在
+    # `SINGLE_RUN_TOKEN_CAP_SMALL` 的 docstring 里）。一个永远进不去的分支比没有它更糟
+    # —— 读的人会以为平台初值这一档有一道保护，而实际生效的只有那枚常量。保护改成了
+    # 可执行的一句：`test_the_platform_default_cap_covers_the_largest_plan_it_can_emit`
+    # 断言「常量 ≥ 能排出来的最贵计划」，把它调小就是红。
+    #
+    # 用户填的数与周期收紧**一个字都不改** —— 那是用户的决定，平台不该在背后把它抬
+    # 回去；填小了跑不完，是「配置」这件事本身要说的，不是平台偷偷补钱。
     # 周期上限只做**收紧**（见 `plan_analysis` 里 `period_cap_tokens` 的说明）：
     # 它比上面这个数更紧时才是这一次的硬上限，更松时什么也不做 —— 否则「周期留空 =
     # 100M/月」会被当成「单次可以花 100M」，那正是这个 P0 要修的东西。
-    cap_source = "用户配置" if user_cap_tokens else "平台初值"
     if period_cap_tokens and int(period_cap_tokens) < cap:
         cap = int(period_cap_tokens)
         cap_source = "周期上限（用户配置，收紧）"
     report_reserve = max(REPORT_RESERVE_FLOOR, int(cap * REPORT_RESERVE_RATIO))
-    round_reserve = _round_reserve(
-        nominal_requests, nominal_rounds, list_chars=list_chars, output_cap=output_cap
-    )
     return AnalysisPlan(
         plan_version=PLAN_VERSION,
         snapshot_fingerprint=facts.fingerprint or facts.digest(),
@@ -1497,8 +1518,8 @@ def _estimate_block(
         "chars_per_token": 1,
         "formula": (
             "上限口径：每成员索取 = min(预算上限, ceil(本簇 diff 字 ÷ 11,000) + 6)，"
-            "轮次 = ceil(索取 ÷ 5)；单次 token 上限 = "
-            f"{cap:,}（字符≈token，与平台水位 600,000 字 / 1M 窗口同一口径）"
+            "轮次 = ceil(索取 ÷ 5)；单次分析预算 = "
+            f"{cap:,} token（字符≈token，与平台水位 600,000 字 / 1M 窗口同一口径）"
         ),
         "members": len(members),
         "has_synthesis": synthesis is not None,
