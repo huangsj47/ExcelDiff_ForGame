@@ -713,7 +713,7 @@ def build_user_message(
         # 第 10 轮开头被闸门拦下，整次运行以「没有拿到可用的结论」收场。
         #
         # **必须排在最后**：上面两支是**硬事实**（这一轮根本没有下一轮 / 索取额度没了），
-        # 钱这条是**估算**（`SingleRunBudget.lookahead`）。硬事实成立时，这一支说的
+        # 钱这条是**估算**（`SingleRunBudget.next_round_affordable`）。硬事实成立时，这一支说的
         # 「别再要了」已经被覆盖；只有它俩都不成立时，钱才是真正拦住下一步的那一条。
         blocks.append(build_token_budget_final_hint())
 

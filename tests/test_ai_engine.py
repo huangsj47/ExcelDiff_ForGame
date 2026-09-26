@@ -826,6 +826,11 @@ def test_running_out_of_rounds_is_reported_rather_than_hidden():
 
     这时**不能**返回一个干净的「成功」：用户会以为模型看完了说没问题，而实际上它
     从头到尾都在要文件。
+
+    轮数是 **4** 而不是 3：轮次用尽之后还补了一次「现在出结论」（`services/ai/wrap_up.py`）——
+    那一次也是一次真实的模型调用，所以它**算一轮**（判据是「真的发了几次」，不是「循环
+    变量走到几」）。它没救回结论（这个假 client 对每一次调用都回同一句「我还想看」），
+    所以结局仍然是失败。
     """
     client = ScriptedClient(_requests({"type": "commit_detail", "commit": COMMIT}))
 
@@ -834,7 +839,8 @@ def test_running_out_of_rounds_is_reported_rather_than_hidden():
     assert outcome.status == STATUS_FAILED
     assert outcome.degradation == DEGRADE_ROUNDS
     assert "轮次用尽" in outcome.error_message
-    assert outcome.rounds_used == 3
+    assert outcome.rounds_used == 4
+    assert "已补发一次收尾调用" in outcome.error_message
 
 
 def test_exhausting_the_request_budget_marks_the_run_degraded():

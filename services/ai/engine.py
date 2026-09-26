@@ -78,18 +78,20 @@ from services.ai.round_observability import (
     CORRECTION_TRUNCATED_OUTPUT,
     CORRECTION_UNPARSABLE,
     replay_chars as _replay_chars,
+    round_usage_fields,
     truncation_reason as _truncation_reason,
-    visible_response_chars as _visible_response_chars,
     with_observability as _merge_observability,
 )
-from services.ai.llm_client import non_negative_int
 from services.ai.prompt import (
     build_system_prompt,
     build_user_message,
     change_block,
     render_context_items,
 )
-from services.ai.prompt_cache import CACHE_BREAKPOINT_KEY, mark_cache_breakpoint
+from services.ai.prompt_cache import (
+    mark_cache_breakpoint,
+    mark_current as _mark_current,  # noqa: F401
+)
 from services.ai.protocol import (
     TRUNCATED_OUTPUT_HINT,
     build_baseline_coverage_hint,
@@ -113,12 +115,21 @@ from services.ai.protocol import (
     sanitize_requests,
 )
 from services.ai.budget_gate import SingleRunBudget
+# 一次调用周边的三件小事（请求参数 / 截断判据 / 这一笔账怎么算）也从引擎里搬走了:
+# 它们与「一轮怎么编排」无关，而本文件贴着 2000 行的 ERROR 闸门。
+from services.ai.model_call import (
+    complete_kwargs,
+    output_limit_hit,
+    tokens_for_budget,
+    usage_of as _usage_of,  # noqa: F401
+)
 from services.ai.request_fingerprint import RoundDiagnostics
 # 引擎侧的中文措辞（trace 备注 + 收尾提示词）：纯文本拼装，不碰引擎状态，搬出去让本文件
 # 离 2000 行 ERROR 闸门远一点。**仍按原名回导**，于是下面几十个调用点一个字都不用改。
 #
 # `# noqa: F401` 必须写在**每一行别名上**：写在 `from ... import (` 那一行时 ruff 认为
 # 整块是未使用导入，`ruff --fix` 会把这些刻意保留的回导直接删掉（真发生过）。
+from services.ai.wrap_up import build_wrap_up_entry, should_request_final_answer
 from services.ai.round_notes import (  # noqa: F401
     batch_notes as _batch_notes,  # noqa: F401
     combine_notes as _combine_notes,  # noqa: F401
@@ -778,6 +789,24 @@ def run_analysis(
     cache_writes: list[int | None] = []
     cache_sources: list[str] = []
     context_chars = 0
+
+    def _note_usage(usage: dict[str, Any]) -> None:
+        """一次调用的用量进本次运行的总账（**唯一一处**）。
+
+        常规的某一轮与「一条结论都没交回来」时补发的那一次收尾调用都走它 ——
+        兜底那次要是不记账，平台自己报的数就是错的（见 `wrap_up`）。
+
+        逐次记下来、出口处由 `_totals()` 合成（与两个缓存字段同一条口径）。这里
+        **不能**写 `+= usage[...]`：读不到的那一次会被按 0 加进去，「上游没报」
+        就变成了「确实没花」。诊断账（推理 token 的来源、三类耗时、请求指纹）也在
+        这里扣一次，见 `RoundDiagnostics`。
+        """
+        prompt_reads.append(usage["prompt_tokens"])
+        completion_reads.append(usage["completion_tokens"])
+        cache_reads.append(usage["cache_read_tokens"])
+        cache_writes.append(usage["cache_write_tokens"])
+        cache_sources.append(usage["cache_source"])
+        diagnostics.note_usage(usage)
     started_at = time.monotonic()
     # 上下文压缩的记账（见 CompactionReport）。这里只累加，出口在 _usage_fields。
     compaction_events = 0
@@ -863,7 +892,11 @@ def run_analysis(
             on_round(
                 RoundProgress(
                     index=record.index,
-                    max_rounds=limits.max_rounds,
+                    # **报出来的上限不许小于这一轮的序号**：有两处会超出
+                    # `limits.max_rounds` —— 借来转格式的那一轮（`format_retry_granted`）
+                    # 与额度用尽后补发的那一次收尾（`wrap_up`）。照抄配置值的话，
+                    # 面板上会出现「第 9/8 轮」这种读不通的进度。
+                    max_rounds=max(limits.max_rounds, record.index),
                     status=record.status,
                     **_totals(),
                     # 整个列表一起看：**任一轮没上报就是 None**（口径见 _sum_optional）。
@@ -950,7 +983,10 @@ def run_analysis(
         # 各有一圈 `except Exception`，在那里抛异常会被它们咽掉、变成「传输失败」这种
         # 与钱无关的说法；而按轮判不需要用异常做控流。
         #
-        # 这一停**不是失败**，是「再花就超上限了」：下面的兜底会带着已有的轮次出结论。
+        # 这一停**不是失败**，是「再花就超上限了」：只要手上已经有取证（跑过轮次或取到过
+        # 内容），失败出口会补一次「现在出结论」把它兑现成一份报告（`services/ai/wrap_up.py`）。
+        # —— 这句话原先写的是「下面的兜底会带着已有的轮次出结论」，而当时**没有任何一处**
+        # 会真的去要那份结论：它只在模型自己已经写了报告时才成立（run 3 就是这么空的）。
         # 已经有了更具体的原因（例如上一轮刚写了 markdown 报告、正等它转成 JSON）时不覆盖
         # —— 与上面「轮次上限」那一段同一条规矩。
         if single_run_budget is not None and not single_run_budget.affordable():
@@ -976,7 +1012,7 @@ def run_analysis(
         # 「没有拿到可用的结论」收场。这里把**同一道闸门向前推一轮**：按「上一轮真的花了
         # 多少」估出这一轮结束后的账，付不起下一轮就在**这一轮**把话说给模型听。
         #
-        # 判据在 `SingleRunBudget.lookahead`（与 `affordable()` 同一条公式，算术在
+        # 判据在 `SingleRunBudget.next_round_affordable`（与 `affordable()` 同一条公式，算术在
         # `auto_sizing.single_run_lookahead`）；这里只负责把「上一轮花了多少」量出来 ——
         # 两次轮首的账相减，不去回读 `RoundRecord`（那会多出一条读法）。
         token_budget_low = False
@@ -1084,7 +1120,7 @@ def run_analysis(
         round_started = time.monotonic()
         try:
             result = diagnostics.model_call(
-                [*messages, entry], client.complete, _complete_kwargs(limits)
+                [*messages, entry], client.complete, complete_kwargs(limits)
             )
         except Exception as exc:  # noqa: BLE001 —— 网络/鉴权/超时都归为「这次没跑成」
             error_text = f"{type(exc).__name__}: {exc}"
@@ -1155,7 +1191,7 @@ def run_analysis(
                     shrunk_entry = _mark_current(shrunk_entry, movable_breakpoint)
                     try:
                         shrunk_result = diagnostics.model_call(
-                            [*base, shrunk_entry], client.complete, _complete_kwargs(limits)
+                            [*base, shrunk_entry], client.complete, complete_kwargs(limits)
                         )
                     except Exception as shrink_exc:  # noqa: BLE001
                         if looks_like_context_overflow(shrink_exc):
@@ -1247,7 +1283,7 @@ def run_analysis(
                 )
                 try:
                     result = diagnostics.model_call(
-                        [*messages, entry], client.complete, _complete_kwargs(limits)
+                        [*messages, entry], client.complete, complete_kwargs(limits)
                     )
                 except Exception as final_exc:  # noqa: BLE001
                     # 同上面那条：这一轮连着两次都没发出去，也要留痕（`transport_error`），
@@ -1277,14 +1313,7 @@ def run_analysis(
 
         usage = _usage_of(result)
         text = usage["text"]
-        # 逐轮记下来，出口处再由 `_totals()` 合成（与下面两个缓存字段同一条口径）。
-        # 这里**不能**写 `+= usage[...]`：读不到的那一轮会被按 0 加进去，
-        # 「上游没报」就变成了「确实没花」。
-        prompt_reads.append(usage["prompt_tokens"])
-        completion_reads.append(usage["completion_tokens"])
-        cache_reads.append(usage["cache_read_tokens"])
-        cache_writes.append(usage["cache_write_tokens"])
-        cache_sources.append(usage["cache_source"])
+        _note_usage(usage)
         # 真正进了提示词的字符数（不是工具取回的原始量，见 EngineOutcome.context_chars）。
         # 逐轮也算一份：总账说明「这次分析塞了多少进去」，而逐轮才说明**是哪一轮塞的**
         # —— 后几轮重发前几轮的全部上下文，钱正是花在那里。
@@ -1295,38 +1324,20 @@ def run_analysis(
         context_chars += round_context_chars
         # 本轮用量挂到每一个 RoundRecord 上（下面有 5 个构造点）。同样用 splat：逐处复制
         # 字段一定会漏，而漏掉的那一轮在 trace 里看着就像「这一轮没花钱」。
-        round_extra = {
-            "prompt_tokens": usage["prompt_tokens"],
-            "completion_tokens": usage["completion_tokens"],
-            "cache_read_tokens": usage["cache_read_tokens"],
-            "cache_write_tokens": usage["cache_write_tokens"],
-            "prompt_chars": len(user_message),
-            "context_chars": round_context_chars,
-            "duration_ms": int((time.monotonic() - round_started) * 1000),
-            # 模型这一轮的原文也挂在**每一个**构造点上（同一条 splat 的理由）：解析失败
-            # 的那几轮恰恰是最需要原文的（它到底返回了什么，才没被认成 JSON）。
-            "response_text": text,
-            "finish_reason": usage["finish_reason"],
-            # 「这一轮的输出撞上了单次输出上限」——**可观测**（E4）。两个信号取并集：
-            # 上游明说的 `finish_reason == "length"`，以及我们自己看出来的括号不配平。
-            # 落成 RoundRecord 上的一个 bool 而不是让读的人自己去比 `finish_reason`：
-            # 判据只有一个来源，才不会有人只判其中一半。
-            "output_budget_hit": _output_limit_hit(usage) or looks_like_truncated_json(text),
-            # P5：这一轮**可见**正文的长度（剥掉 think 块），以及上游若给的推理 token。
-            # 两个都在这里算/读一次，于是 5 个 RoundRecord 构造点自动带上（splat 的理由
-            # 同上）—— 逐处复制一定会漏，而漏掉的那一轮在账上看不出「输出都花在推理上」。
-            "visible_response_chars": _visible_response_chars(text),
-            # 从 `usage` 读（读法集中在 `_usage_of` 一处）：上游没报就是 `None`。
-            "reasoning_tokens": usage["reasoning_tokens"],
-        }
-        # 诊断值（推理 token 的来源、三类耗时、请求指纹）进的是**事件账本**，
-        # 不在这张账上（见 `RoundDiagnostics`）。调用点在 `usage` 之后。
-        diagnostics.note_usage(usage)
+        # 合成器在 `round_observability`（**兜底那一次收尾调用也走它** —— 它同样是
+        # 平台花掉的一笔，见 `wrap_up`）。
+        round_extra = round_usage_fields(
+            usage,
+            prompt_chars=len(user_message),
+            context_chars=round_context_chars,
+            duration_ms=int((time.monotonic() - round_started) * 1000),
+            text=text,
+        )
         if single_run_budget is not None:
             # 单次上限的账也在这里扣（**按次**；上面那道闸是**按轮**判的，因为一轮里可能
             # 有两次调用，第二次用的是压小后的提示词）。上游没报用量时的口径在
-            # `_tokens_for_budget`。
-            spent, estimated = _tokens_for_budget(
+            # `model_call.tokens_for_budget`。
+            spent, estimated = tokens_for_budget(
                 usage, len(user_message), estimate_chars(messages), text, limits
             )
             single_run_budget.note_usage(spent, estimated=estimated)
@@ -1346,7 +1357,7 @@ def run_analysis(
         # 别处。额度用完/没有下一轮时下面的解析照常进行（**一份能解析的结论不许被丢掉**：
         # 收下它并让 `output_budget_hit` 如实记着这件事，比丢掉它强得多）。
         if (
-            _output_limit_hit(usage)
+            output_limit_hit(usage)
             and limits.max_corrections > 0
             and round_index < limits.max_rounds
         ):
@@ -1731,22 +1742,102 @@ def run_analysis(
     # 曾经在这里又写了一遍，是一段永远走不到的死代码 —— 它让「降级路径」看起来有两条，
     # 读代码的人会以为少了一条覆盖。
     if payload is None and not markdown_fallback:
-        # 既没拿到 final，也没有可用的 markdown。给一句能对上号的原因。
+        # 既没拿到 final，也没有可用的 markdown。
         if degradation == DEGRADE_NONE:
             degradation = DEGRADE_ROUNDS
-        return EngineOutcome(
-            status=STATUS_FAILED,
-            rounds=tuple(rounds),
-            dropped=tuple(dropped),
-            requests_used=tools.requests_seen,
-            cache_hits=tools.cache_hits,
-            **_totals(),
-            degradation=degradation,
-            error_message=(
-                f"没有拿到可用的结论：{DEGRADATION_LABELS.get(degradation, degradation)}"
-            ),
-            **_usage_fields(),
-        )
+        # **认输之前补一次「现在出结论」**（2026-09-26 项目 1 run 3 的直接教训）。
+        #
+        # 三种额度用尽时循环在轮首就停了，而原先这里**直接**返回失败 —— 中间一次模型
+        # 调用都没有：模型手上那几轮取证全部作废，`report_reserve_tokens` 那笔报告预留
+        # 也从来没被花过。什么时候发、为什么带完整对话、为什么只发一次，全在
+        # `services/ai/wrap_up.py` 的模块 docstring 里。
+        wrap_error = ""
+        if should_request_final_answer(
+            degradation=degradation, rounds=rounds, seen_items=seen_items
+        ):
+            wrap_started = time.monotonic()
+            entry = _mark_current(build_wrap_up_entry(), movable_breakpoint)
+            wrap_extra: dict[str, Any] = {}
+            try:
+                result = diagnostics.model_call(
+                    [*messages, entry], client.complete, complete_kwargs(limits)
+                )
+            except Exception as exc:  # noqa: BLE001 —— 兜底那次没发成不改结论本身
+                wrap_error = f"{type(exc).__name__}: {exc}"
+            else:
+                usage = _usage_of(result)
+                text = usage["text"]
+                _note_usage(usage)
+                if single_run_budget is not None:
+                    # 这一笔照样按次扣账：不记的话平台自己报的数就是错的（见 wrap_up）。
+                    # 于是 `headroom` 可能微负 —— 分界写在 `budget_gate` 的 docstring 里：
+                    # **闸门管探索调用，交付那一次在它的定义域之外**。
+                    spent, estimated = tokens_for_budget(
+                        usage, len(entry["content"]), estimate_chars(messages), text, limits
+                    )
+                    single_run_budget.note_usage(spent, estimated=estimated)
+                # 那一次调用与它的回答也进对话：它是这次运行的**最后一条**消息，
+                # 事后要能在 trace 里读到它是怎么被要求的（正文见 `round_hints`）。
+                messages.append(entry)
+                messages.append({"role": "assistant", "content": text})
+                wrap_extra = round_usage_fields(
+                    usage,
+                    prompt_chars=len(entry["content"]),
+                    context_chars=0,  # 这一次没有带任何上下文条目
+                    duration_ms=int((time.monotonic() - wrap_started) * 1000),
+                    text=text,
+                )
+                try:
+                    wrap_payload = parse_payload(
+                        text,
+                        dimension_ids=dimension_ids,
+                        baseline_fingerprints=baseline_fingerprints,
+                    )
+                except ProtocolError:
+                    wrap_payload = None
+                # **只认 `final`**：模型若又回一句「我还想看 X」，那是它没听明白 ——
+                # 收下它等于把一份一条结论都没有的空壳当成报告交出去，比失败更糟
+                # （用户会看到一份很干净的报告，而里面没有任何结论）。
+                if wrap_payload is not None and wrap_payload.is_final:
+                    payload = wrap_payload
+                elif looks_like_markdown_report(text):
+                    # 正文也是交付：与循环里那条路同一条口径（留下正文，这一轮按
+                    # `unparsable` 记）。`degradation` 仍是闸门写的那一个 —— 不覆盖。
+                    markdown_fallback = text.strip()
+                else:
+                    wrap_error = "模型没有按协议交回 JSON"
+            # 轮序号按**已有的条数 + 1** 取，不许照抄循环变量：它在「借一轮做格式
+            # 转换」那条路上会走到 `max_rounds + 1`，照抄就会与上一条撞号 ——
+            # `ai_analysis_trace` 上有 `uq_ai_trace_run_round`（run_id + 轮序号）。
+            _emit(RoundRecord(
+                len(rounds) + 1,
+                "final" if payload is not None else "unparsable",
+                note=(
+                    "额度用尽后补发了一次「现在出结论」，拿到了结论"
+                    if not wrap_error
+                    else f"额度用尽后补发了一次「现在出结论」，仍未拿到结论（{wrap_error}）"
+                ),
+                **wrap_extra,
+            ))
+        if payload is None and not markdown_fallback:
+            # 兜底也试过了（或压根没资格发）→ 按原来的失败收，但说清兜底做了什么。
+            suffix = (
+                f"；已补发一次收尾调用，仍未拿到结论（{wrap_error}）" if wrap_error else ""
+            )
+            return EngineOutcome(
+                status=STATUS_FAILED,
+                rounds=tuple(rounds),
+                dropped=tuple(dropped),
+                requests_used=tools.requests_seen,
+                cache_hits=tools.cache_hits,
+                **_totals(),
+                degradation=degradation,
+                error_message=(
+                    f"没有拿到可用的结论：{DEGRADATION_LABELS.get(degradation, degradation)}"
+                    f"{suffix}"
+                ),
+                **_usage_fields(),
+            )
 
     if payload is None:
         return EngineOutcome(
@@ -1850,7 +1941,7 @@ class _RoundBrief:
     # （见 `prompt._first_round_hint`）。默认是平台出厂那一份 —— 与这段改动之前
     # 逐字相同（`run_analysis` 每次都会按 `loaded.dimensions` 传真的那份进来）。
     dimension_ids: tuple[str, ...] = DIMENSION_IDS
-    # 「钱只够这一轮了」——`SingleRunBudget.lookahead` 的估算结果（见 `round_hints
+    # 「钱只够这一轮了」——`SingleRunBudget.next_round_affordable` 的估算结果（见 `round_hints
     # .build_token_budget_final_hint`）。与 `budget_exhausted`（索取**次数**额度）是两条
     # 不同的额度：那一条是硬事实，这一条是估算，所以 `prompt.build_user_message` 里把它
     # 排在最后 —— 硬事实成立时它不说话。
@@ -1858,21 +1949,6 @@ class _RoundBrief:
     # 带默认值所以放在这一组（dataclass 的非默认字段必须排在前面）。
     token_budget_low: bool = False
 
-
-def _mark_current(
-    entry: dict[str, Any], previous: dict[str, Any] | None
-) -> dict[str, Any]:
-    """把「可挪动的缓存断点」挪到这一条消息上（见 `run_analysis` 里断点 ③ 的说明）。
-
-    返回的就是 `entry` 本身（原地打了标记），返回值是为了让调用处写成
-    `entry = _mark_current(entry, movable_breakpoint)` —— 少一层「忘了把新断点记下来」。
-    """
-    if previous is not None:
-        # 上一条可能已经不在 messages 里了（压历史把它丢掉了）：从一个不再发送的字典上
-        # 摘标记是空操作，不会出错，也不需要额外判断。
-        previous.pop(CACHE_BREAKPOINT_KEY, None)
-    mark_cache_breakpoint(entry)
-    return entry
 
 
 def _with_observability(record: RoundRecord) -> dict | None:
@@ -1884,87 +1960,6 @@ def _with_observability(record: RoundRecord) -> dict | None:
     return _merge_observability(record, _live_round_entry(record))
 
 
-def _usage_of(result: Any) -> dict[str, Any]:
-    """把一次模型调用的用量读出来（字段口径见 `llm_client.ChatResult`）。
-
-    集中一处是为了让「重试之后那一次调用」与正常路径用同一套读法 —— 分散在三处读
-    `getattr(result, ...)`，漏掉哪一处都是「这一轮看着没花钱」。
-    """
-    return {
-        "text": str(getattr(result, "text", "") or ""),
-        # 上游没报就是 `None`（不是 0）—— 口径与缓存那两个字段一致，见 `_sum_optional`。
-        "prompt_tokens": non_negative_int(getattr(result, "prompt_tokens", None)),
-        "completion_tokens": non_negative_int(getattr(result, "completion_tokens", None)),
-        "cache_read_tokens": getattr(result, "cache_read_tokens", None),
-        "cache_write_tokens": getattr(result, "cache_write_tokens", None),
-        "cache_source": str(getattr(result, "cache_source", "") or ""),
-        "finish_reason": str(getattr(result, "finish_reason", "") or ""),
-        # 输出里有多少是隐藏推理，以及这个数是从哪个字段读到的（见
-        # `llm_client._extract_reasoning_usage`）。**上游没报就是 `None`**，不是 0。
-        "reasoning_tokens": non_negative_int(getattr(result, "reasoning_tokens", None)),
-        "reasoning_source": str(getattr(result, "reasoning_source", "") or ""),
-    }
-
-
-def _tokens_for_budget(
-    usage: Mapping[str, Any],
-    user_message_chars: int,
-    history_chars: int,
-    text: str,
-    limits: EngineLimits,
-) -> tuple[int, bool]:
-    """这一次调用往单次上限的账上记多少，以及这个数**是不是估算出来的**。
-
-    上游两项都报了就是精确值。缺哪一项补哪一项的保守估算，并把整笔记成「估算」——
-    那两条纪律与 `auto_sizing.conservative_member_tokens` 逐字同源：
-
-    * **未知不许当 0** —— 那等于无限放行，单次上限永远判「还没超」；
-    * **也不许当真值** —— `estimated` 这个标记会被 `single_run_guard` 带进那句 `reason`
-      里（「其中含保守估算的部分」），报告的措辞跟着它走。
-
-    提示词那半按**这一轮实际发出去的那一份**估（历史 + 本轮 user 消息，与 `prompt_chars`
-    是同一处口径）；输出那半优先用配置的输出上限 —— 它是我们能承诺的最大值。
-    """
-    prompt = usage.get("prompt_tokens")
-    completion = usage.get("completion_tokens")
-    if prompt is not None and completion is not None:
-        return max(0, int(prompt)) + max(0, int(completion)), False
-    prompt_est = history_chars + user_message_chars if prompt is None else max(0, int(prompt))
-    if completion is None:
-        # 没配输出上限时退到这一轮实际写回来的正文长度 —— 那是**下界**（推理 token 不算在
-        # 里面），但比当 0 强；这一档本来就是「别把它当 0」。
-        completion_est = limits.max_output_tokens or estimate_chars(
-            [{"role": "assistant", "content": text}]
-        )
-    else:
-        completion_est = max(0, int(completion))
-    return conservative_tokens_for(prompt_est, completion_est), True
-
-
-def _complete_kwargs(limits: EngineLimits) -> dict[str, Any]:
-    """发给 `client.complete` 的那些可选参数。
-
-    **不配就不传**（`max_output_tokens is None` 时不出现 `max_tokens` 这个键）：端点默认
-    行为必须逐字节不变，而「传一个 None 进去」在有些客户端实现里会被写成 `"max_tokens":
-    null` 发出去 —— 那是一个与默认值不同、且没人验证过的请求。
-
-    集中一处是因为调用点有三个（正常轮、压小重发、收尾），而漏掉任何一处都表现为
-    「这个参数只在某些轮生效」——那种不一致查起来最费劲。
-    """
-    kwargs: dict[str, Any] = {"temperature": limits.temperature}
-    if limits.max_output_tokens is not None:
-        kwargs["max_tokens"] = limits.max_output_tokens
-    return kwargs
-
-
-def _output_limit_hit(usage: Mapping[str, Any]) -> bool:
-    """上游是否明说「这次输出被长度上限截断了」。
-
-    `finish_reason == "length"` 是上游给的**直接证据**，比我们自己按括号配平猜形状准 ——
-    断点恰好落在一个仍然合法的 JSON 上时（`requests` 数组已闭合、后面的字段整段没写），
-    `json.loads` 会成功、括号也配平，只有这句话能识破它。
-    """
-    return str(usage.get("finish_reason") or "").strip().lower() == "length"
 
 
 # 保留给调用方做「轮次摘要」用。

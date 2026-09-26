@@ -32,9 +32,10 @@ run 45/46 的性能归因里有一句**没被证过**的话：输出 token 涨�
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
-from services.ai.protocol import _THINK_BLOCK_RE
+from services.ai.model_call import output_limit_hit
+from services.ai.protocol import _THINK_BLOCK_RE, looks_like_truncated_json
 
 # 纠正原因的**短标签**。值进 `RoundRecord.correction_reason`；纠正的**成本**就是它占掉
 # 的那一轮 —— 于是「这次分析为什么多花了两轮」可以按原因统计，而不是读一段自由文本。
@@ -129,11 +130,53 @@ def with_observability(record: Any, entry: dict | None) -> dict | None:
     }
 
 
+
+def round_usage_fields(
+    usage: Mapping[str, Any],
+    *,
+    prompt_chars: int,
+    context_chars: int,
+    duration_ms: int,
+    text: str,
+) -> dict[str, Any]:
+    """一次调用挂到 `RoundRecord` 上的用量与观测字段（**唯一一处合成**）。
+
+    两个调用点：常规的某一轮，以及「一条结论都没交回来」时补发的那一次收尾调用
+    （`services/ai/wrap_up.py`）。合成一处不只是为了少写几行 —— 兜底那一次要是漏挂，
+    trace 里那一行看起来就是「这一轮没花钱」，而它恰恰是平台**破例**多花的一笔。
+
+    `response_text` 也在这里挂上：解析失败的那几轮最需要原文（它到底返回了什么，才没被
+    认成 JSON），而它按 `TRACE_RESPONSE_MAX_CHARS` 截断后落库（见读侧）。
+    """
+    return {
+        "prompt_tokens": usage["prompt_tokens"],
+        "completion_tokens": usage["completion_tokens"],
+        "cache_read_tokens": usage["cache_read_tokens"],
+        "cache_write_tokens": usage["cache_write_tokens"],
+        "prompt_chars": prompt_chars,
+        "context_chars": context_chars,
+        "duration_ms": duration_ms,
+        "response_text": text,
+        "finish_reason": usage["finish_reason"],
+        # 「这一次的输出撞上了单次输出上限」——**可观测**（E4）。两个信号取并集：
+        # 上游明说的 `finish_reason == "length"`，以及我们自己看出来的括号不配平。
+        # 落成 RoundRecord 上的一个 bool 而不是让读的人自己去比 `finish_reason`：
+        # 判据只有一个来源，才不会有人只判其中一半。
+        "output_budget_hit": output_limit_hit(usage) or looks_like_truncated_json(text),
+        # P5：**可见**正文的长度（剥掉 think 块），以及上游若给的推理 token ——
+        # 「输出变长了」与「想得更久了」该调的东西完全相反。
+        "visible_response_chars": visible_response_chars(text),
+        # 从 `usage` 读（读法集中在 `engine._usage_of` 一处）：上游没报就是 `None`。
+        "reasoning_tokens": usage["reasoning_tokens"],
+    }
+
+
 __all__ = [
     "CORRECTION_CHANNEL_MISMATCH",
     "CORRECTION_TRUNCATED_OUTPUT",
     "CORRECTION_UNPARSABLE",
     "replay_chars",
+    "round_usage_fields",
     "truncation_reason",
     "visible_response_chars",
     "with_observability",

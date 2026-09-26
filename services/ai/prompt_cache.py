@@ -228,3 +228,19 @@ def reset_cache_marker_rejections() -> None:
     """清空黑名单。给测试用 —— 它是进程级状态，用例之间必须互不影响。"""
     with _REJECTED_LOCK:
         _REJECTED.clear()
+
+
+def mark_current(
+    entry: dict[str, Any], previous: dict[str, Any] | None
+) -> dict[str, Any]:
+    """把「可挪动的缓存断点」挪到这一条消息上（见 `run_analysis` 里断点 ③ 的说明）。
+
+    返回的就是 `entry` 本身（原地打了标记），返回值是为了让调用处写成
+    `entry = _mark_current(entry, movable_breakpoint)` —— 少一层「忘了把新断点记下来」。
+    """
+    if previous is not None:
+        # 上一条可能已经不在 messages 里了（压历史把它丢掉了）：从一个不再发送的字典上
+        # 摘标记是空操作，不会出错，也不需要额外判断。
+        previous.pop(CACHE_BREAKPOINT_KEY, None)
+    mark_cache_breakpoint(entry)
+    return entry

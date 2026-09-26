@@ -1526,7 +1526,7 @@ def single_run_guard(
             "reason": (
                 f"单次分析上限 {cap:,} token：已花 {spent:,}{mark} + 本轮保守预留 "
                 f"{plan.round_reserve_tokens:,} + 报告收尾预留 {plan.report_reserve_tokens:,}"
-                f" 已超出 → 停止探索，未跑的成员进信息缺口（不再新增模型调用）"
+                f" 已超出 → 停止探索，未跑的成员进信息缺口"
             ),
             "spent": spent,
             "estimated": bool(spent_estimated),

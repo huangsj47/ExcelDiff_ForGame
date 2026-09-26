@@ -163,13 +163,21 @@ def test_the_channel_correction_is_bounded_by_the_round_limit():
 
 
 def test_the_channel_correction_never_exceeds_the_round_limit():
-    """轮次上限是**硬**上界：只给 2 轮时，通道纠正最多用掉这 2 轮，一次都不多。"""
+    """轮次上限是**硬**上界：只给 2 轮时，通道纠正最多用掉这 2 轮，一次都不多。
+
+    **探索**轮次的那条上界不变（2 轮用完就停，纠正额度再大也换不出第三轮）。这条用例
+    现在要多认一件事：额度用尽、手上又有取证时，失败出口会补**一次**「现在出结论」
+    （`services/ai/wrap_up.py`）—— 那一次走的是兜底，不是通道纠正借来的轮次。
+    判据因此分成两半，而不是把上界从 2 放宽到 3（那样这条守卫就废了）。
+    """
     client = ScriptedClient(_sample(S2_SAMPLE))
 
     outcome = _run(client, limits=EngineLimits(max_rounds=2, max_channel_corrections=5))
 
-    assert outcome.rounds_used <= 2
-    assert len(client.calls) <= 2
+    assert "补发" in outcome.rounds[-1].note, outcome.rounds[-1].note
+    exploration = outcome.rounds[:-1]
+    assert len(exploration) <= 2, [record.index for record in exploration]
+    assert len(client.calls) == len(outcome.rounds)
 
 
 # ==========================================================================

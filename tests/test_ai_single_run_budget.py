@@ -22,6 +22,7 @@ import dataclasses
 from services.ai.analysis_plan import make_single_run_guard
 from services.ai.auto_sizing import plan_analysis, single_run_guard
 from services.ai.budget_gate import SingleRunBudget
+from services.ai.round_hints import build_wrap_up_hint
 from services.ai.engine import (
     DEGRADATION_LABELS,
     DEGRADE_BUDGET,
@@ -88,6 +89,21 @@ def _budget(**overrides) -> SingleRunBudget:
     return SingleRunBudget(**fields)
 
 
+def _exploration_calls(client) -> list[list[dict]]:
+    """只看**探索**那几次调用（把兜底那次收尾调用排除掉）。
+
+    「本来一定会失败」的运行现在会再补一次「现在出结论」（`services/ai/wrap_up.py`，
+    产品决定）。下面几条用例量的是**闸门有没有把探索轮放出去**，所以两者必须分开数：
+    只数总次数的话，它们会在兜底上线那天变成一句假话 —— 实测就是这么红的
+    （`assert 1 == 2`，而多出来那一条的正文正是收尾指令）。
+
+    正文是唯一的凭据：那条消息的产地只有一处（`round_hints.build_wrap_up_hint`），
+    这里按**逐字相等**认，不按前缀或关键字猜。
+    """
+    hint = build_wrap_up_hint()
+    return [call for call in client.calls if call[-1].get("content") != hint]
+
+
 def _run(client, budget, **overrides):
     kwargs = {
         "client": client,
@@ -108,15 +124,19 @@ def _run(client, budget, **overrides):
 
 
 def test_the_round_it_cannot_afford_is_never_sent():
-    """第 1 轮花了 900，第 2 轮就该被拦下 —— **请求一个字节都不发出去**。
+    """第 1 轮花了 900，第 2 轮就该被拦下 —— **那一轮的请求一个字节都不发出去**。
 
     付得起第 2 轮的条件是 `900 + 300 <= 1000`，它不成立（差 200）。
+
+    数的是**探索调用**（`_exploration_calls`）：拦下之后这次运行一条结论都没有，于是
+    走了兜底那次收尾调用 —— 那是另一件事，它带的是收尾指令而不是第 2 轮那份索取。
     """
     client = CountingClient(_requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}), _final(), prompt_tokens=500, completion_tokens=400)
 
     outcome = _run(client, _budget())
 
-    assert len(client.calls) == 1, "付不起的那一轮还是发出去了"
+    assert len(_exploration_calls(client)) == 1, "付不起的那一轮还是发出去了"
+    assert len(client.calls) == 2, "没有结论时应当补一次收尾调用（见 wrap_up）"
     assert outcome.degradation == DEGRADE_BUDGET
     assert outcome.status != STATUS_SUCCEEDED
     # 停下来的理由要能给人看，而不是只留一个枚举名。
@@ -195,14 +215,14 @@ def test_an_unreported_usage_is_estimated_instead_of_treated_as_zero():
     """上游不报用量时**仍然要拦得住** —— 把「未知」当 0 等于无限放行。
 
     `prompt_tokens`/`completion_tokens` 都是 `None`：这一轮的钱只能靠估。
-    真按 0 记的话，第 2 轮会被放出去（`len(client.calls) == 2`），
+    真按 0 记的话，第 2 轮会被放出去（`_exploration_calls` 会数到 2），
     而「单次上限」就成了一句永远不会生效的话。
     """
     client = CountingClient(_requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}), _final())  # 两个用量字段都是 None
 
     outcome = _run(client, _budget())
 
-    assert len(client.calls) == 1, "没报用量就一路放行 —— 单次上限成了一句话"
+    assert len(_exploration_calls(client)) == 1, "没报用量就一路放行 —— 单次上限成了一句话"
     assert outcome.degradation == DEGRADE_BUDGET
 
 

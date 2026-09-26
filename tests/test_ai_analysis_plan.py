@@ -528,7 +528,11 @@ def test_the_single_run_guard_blocks_only_when_the_reserves_would_be_eaten():
     blocked = single_run_guard(plan, spent_tokens=cap - reserve + 1)
     assert blocked["blocked"] is True
     assert "收尾预留" in blocked["reason"]
-    assert "不再新增模型调用" in blocked["reason"]
+    # 这句话原先还写着「（不再新增模型调用）」，2026-09-26 之后它是一句假话：额度用尽、
+    # 而手上已经有取证时，平台会**再补一次**「现在出结论」（`services/ai/wrap_up.py`）。
+    # 这一档说的是**探索**停止 —— 判据跟着改，别把交付那一次也算进来。
+    assert "停止探索" in blocked["reason"]
+    assert "不再新增模型调用" not in blocked["reason"]
 
 
 def test_an_unreported_usage_is_estimated_and_marked_not_zero():

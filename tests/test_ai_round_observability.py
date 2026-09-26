@@ -24,10 +24,13 @@ from services.ai.engine import (
     RoundRecord,
     _replay_chars,
     _truncation_reason,
-    _visible_response_chars,
     _with_observability,
     run_analysis,
 )
+# `visible_response_chars` 从**产地**导入：这几个观测字段的实现都住在
+# `round_observability`，引擎那边原先只是回导（2026-09-26 那次搬家把它从引擎搬走了，
+# 于是这里跟着改成从产地取 —— 剩下那三个回导在引擎里还有别的消费者）。
+from services.ai.round_observability import visible_response_chars as _visible_response_chars
 from services.ai.rules import RuleThresholds
 from services.ai.request_fingerprint import DIVERGENCE_REASONS
 from services.ai.scope import AnalysisScope
