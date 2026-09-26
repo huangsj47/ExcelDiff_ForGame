@@ -63,6 +63,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional, Sequence
 
+from services.ai.pricing import BudgetWeights, equivalent_tokens
+
 # 分片数的**预算档目标**。2026-09-23（工作包 B）起它的角色变了：以前它是「本周开几片」
 # 的答案（于是 3 个文件也开 5 片），现在**只是 `derive_family_sizing` 给出的预算上限**
 # ——真正开几片由 `plan_analysis` 按快照事实（独立变更簇与证据体积）推导，并且
@@ -751,6 +753,19 @@ class AnalysisPlan:
     facts: dict
     family: Optional[FamilySizing] = None
     synthesis: Optional[PlanMember] = None
+
+    @property
+    def weights(self) -> "BudgetWeights | None":
+        """这次分析的**记账倍率**（`thresholds["budget_weights"]` 那一份）。
+
+        单次预算这一侧的唯一入口：`SingleRunBudget.from_plan` 与
+        `single_run_guard` 都从这里读，`subagent._tokens_of` 也读它 —— 三处各读一次
+        计划字段，不可能出现「引擎按折算、家族按原价」。
+
+        读不出来（没配价格表、老计划里没有这一项、数据坏了）→ `None` = 全 1.0，
+        也就是**旧口径**。降级方向是明确的：宁可少算折扣，不许编一个倍率。
+        """
+        return BudgetWeights.from_mapping(self.thresholds.get("budget_weights"))
 
     @property
     def is_single(self) -> bool:
@@ -1504,13 +1519,19 @@ def single_run_guard(
 ) -> dict[str, Any]:
     """单次硬上限的判定：`已花 + 本轮保守预留 + 收尾预留` 是否越过上限。
 
-    返回 `{blocked, reason, spent, estimated, headroom}`。**纯算术**，不查库、不看时钟：
+    返回 `{blocked, reason, spent, estimated, weighted, headroom}`。**纯算术**，不查库、
+    不看时钟：
 
     * `spent_tokens` 由调用方给（子代理路径上是「本次运行已消耗的下界」，见
       `subagent._tokens_of`：没上报的按 0 算 = 先不拦）；
     * `spent_estimated=True` 表示这个数里有**估算**成分（上游缺用量时按「请求字符 +
       配置的输出上限」补的），报告与界面必须把「估算」两个字说出来 ——
-      **未知不许当 0**（那等于无限放行），也不许当成精确值。
+      **未知不许当 0**（那等于无限放行），也不许当成精确值；
+    * `weighted=True` 表示这个数是**按单价折算过的等效 token**（缓存命中与输出两档按
+      配置的单价折算，见 `pricing.BudgetWeights`）。判据不是「调用方说了算」，而是
+      **这份计划自己带没带倍率**（`plan.weights`）：喂进来的每一个 `spent_tokens` 都由
+      同一份倍率算出来，所以「计划带倍率 ⇒ 这个数是折算过的」在两条路径上都成立。
+      **改了记账口径就必须显式写出来** —— 否则读的人会拿折算值与原价上限对不上而困惑。
 
     超过时返回非空 `reason`：调用方据此**停止探索**（跳过还没跑的分片），产出一份
     「已查 / 未查」分开的报告，而不是再发一次模型调用。
@@ -1520,6 +1541,9 @@ def single_run_guard(
     spent = max(0, int(spent_tokens))
     headroom = cap - spent - reserve
     mark = "（其中含保守估算的部分）" if spent_estimated else ""
+    weights = getattr(plan, "weights", None)
+    if weights is not None:
+        mark += "（按单价折算的等效 token）"
     if cap and headroom < 0:
         return {
             "blocked": True,
@@ -1530,6 +1554,7 @@ def single_run_guard(
             ),
             "spent": spent,
             "estimated": bool(spent_estimated),
+            "weighted": weights is not None,
             "headroom": headroom,
         }
     return {
@@ -1537,6 +1562,7 @@ def single_run_guard(
         "reason": "",
         "spent": spent,
         "estimated": bool(spent_estimated),
+        "weighted": weights is not None,
         "headroom": headroom,
     }
 
@@ -1582,17 +1608,31 @@ def single_run_lookahead(
     )
 
 
-def conservative_tokens_for(prompt_chars: int, output_tokens: int) -> int:
-    """上游没报用量时的**保守估算**：请求字符 + 配置的输出上限。
+def conservative_tokens_for(
+    prompt_chars: int, output_tokens: int, weights: "BudgetWeights | None" = None
+) -> int:
+    """上游没报用量时的**保守估算**：请求字符 × 未命中价 + 配置的输出上限 × 输出价。
 
     「字符 ≈ token」是平台自己的换算口径（与 `_round_reserve` 同一处注释）。返回的这个数
     必须被**标记为估算**（`single_run_guard` 的 `spent_estimated`），不能当成精确值、
     更不能把未知当 0（那等于无限放行）。
+
+    ## 提示词那一半**不许猜命中**
+
+    缺用量时我们连「这一轮有没有命中缓存」都不知道，只能按**全部未命中**算（权重 1.0）
+    —— 那是这一档的上界，方向偏保守。反过来说：这一档**故意**享受不到折算的折扣，
+    而它有折扣时才叫失真。
     """
-    return max(0, int(prompt_chars)) + max(0, int(output_tokens))
+    prompt = max(0, int(prompt_chars))
+    out = max(0, int(output_tokens))
+    if weights is None:
+        return prompt + out
+    return int(round(prompt * 1.0 + out * weights.output))
 
 
-def conservative_member_tokens(outcome: Any, *, output_cap: int) -> tuple[int, bool]:
+def conservative_member_tokens(
+    outcome: Any, *, output_cap: int, weights: "BudgetWeights | None" = None
+) -> tuple[int, bool]:
     """一个成员「至少花了多少」：**上游没报用量时的保守估算**（附「这是估算」标记）。
 
     上游报了就按它；没报时用「取回并放进提示词的上下文 + 每一轮的固定前缀 + 输出上限」
@@ -1601,20 +1641,32 @@ def conservative_member_tokens(outcome: Any, *, output_cap: int) -> tuple[int, b
     * **未知不许当 0** —— 那等于无限放行（单次上限永远判「还没超」）；
     * **也不许当真值** —— 返回的第二个值就是「这里含估算」，报告的措辞要跟着它走。
 
+    `weights` 是记账倍率（`pricing.BudgetWeights`）：**上游报了用量也要过它** ——
+    它喂的是家族那个 `should_skip`，而引擎自己有另一本账；两处对同一个 outcome
+    用两种算法，就会出现「成员被判跑得起、进去就被拦下」这种只体现在账目上的分叉。
+
     `None` 的成员（没跑）算 0 且不算估算：那是「压根没跑」，不是「跑了但不知道花了多少」。
     """
     if outcome is None:
         return 0, False
-    reported = max(0, _int(getattr(outcome, "prompt_tokens", None))) + max(
-        0, _int(getattr(outcome, "completion_tokens", None))
-    )
-    if getattr(outcome, "prompt_tokens", None) is not None or getattr(
-        outcome, "completion_tokens", None
-    ) is not None:
-        return reported, False
+    prompt = getattr(outcome, "prompt_tokens", None)
+    completion = getattr(outcome, "completion_tokens", None)
+    if prompt is not None or completion is not None:
+        # **上游报了用量时也要过同一份倍率。** 不折算的话，同一次运行里引擎按折算记账、
+        # 家族按原价记账 —— 那正是「引擎与家族判据同判」那条用例防不住的运行期分叉
+        # （它的判据落在两个函数上，落不到「两处对同一个数用了两种算法」上）。
+        return (
+            equivalent_tokens(
+                input_tokens=_int(prompt),
+                output_tokens=_int(completion),
+                cache_read=getattr(outcome, "cache_read_tokens", None),
+                weights=weights,
+            ),
+            False,
+        )
     rounds = len(getattr(outcome, "rounds", ()) or ())
     estimated = conservative_tokens_for(
-        _int(getattr(outcome, "context_chars", None)), output_cap
+        _int(getattr(outcome, "context_chars", None)), output_cap, weights
     )
     # 每一轮都要把「平台段 + 清单 + 历史基线」重发一次，而 `context_chars` 只算取回来的
     # 那部分内容 —— 不加这一项会低估。加了偏大也没关系：这一档本来就是**下界**估算，

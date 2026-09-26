@@ -418,6 +418,128 @@ def load_price_table(override_json: str | None) -> tuple[PriceTable | None, tupl
     return table, ()
 
 
+
+# ---------------------------------------------------------------------------
+# 记账倍率：把三档 token 折算成「未命中输入等价 token」
+# ---------------------------------------------------------------------------
+#
+# **这是单次预算那一侧的记账口径，不是费用口径。** 费用的唯一产地是 `estimate_cost`
+# （金额、单位是钱）；这里要的是同一个「贵不贵」在**预算闸门**上的表达：闸门比的是
+# token 数，而缓存命中的输入、输出这两档与未命中输入**不是一个价钱** —— 一律按 1.0
+# 计，等于让平台自己花大力气维护的 prompt cache（append-only 前缀、逐字节共享）反过来
+# **推高**账面（真机 run 3：账上 1,306,756，实际只花了 ¥1.19，命中率 84.6%）。
+#
+# 三条纪律：
+#
+# 1. **倍率只有一份产地**（本函数），且**必须**与费用那一侧同源：两边都从 `resolve_price`
+#    取得同一份单价，命中价缺失时都退到未命中价（偏保守）。
+# 2. **没有价格表就是全 1.0**（= 旧口径），并且要有话可说 —— `BudgetWeights.note` 就是
+#    那句能进报告的话。编不出来的倍率不许编。
+# 3. **周期配额（`budget_token_limit` / `analysis_budget`）刻意不折算**：那本账是用户
+#    按「一个月能花多少 token」配好的，把口径偷偷换成折算值等于**静默改义**他已经配好的
+#    100M/月。单次这一侧改了就必须**显式写出来**（`single_run_guard` 的 reason 里那句
+#    「按单价折算」）。
+
+
+@dataclass(frozen=True)
+class BudgetWeights:
+    """三档 token → 未命中输入等价 token 的倍率。未命中那一档恒为 1.0（它就是基准）。"""
+
+    hit: float = 1.0
+    output: float = 1.0
+    note: str = ""
+
+    @property
+    def is_flat(self) -> bool:
+        """三档一个价（或者没有价格表）—— 记出来的数与旧口径逐字相同。"""
+        return self.hit == 1.0 and self.output == 1.0
+
+    def to_dict(self) -> dict[str, Any]:
+        """进 `plan.thresholds`（它要能 JSON 序列化、能落库、能读回来）。"""
+        return {"hit": self.hit, "output": self.output, "note": self.note}
+
+    @classmethod
+    def from_mapping(cls, raw: Any) -> "BudgetWeights | None":
+        """从落库的那一份读回来。**坏数据回 `None`**（退回全 1.0 的旧口径）。
+
+        读侧容忍一切：计划是 JSON 落库再读回来的，字段缺、类型错、被谁手工改过都可能。
+        这不是「猜」—— 猜会变成一个没有出处的倍率，而 `None` 的语义是明确的
+        「没有可用倍率」，与「还没配价格表」是同一条路。
+        """
+        if not isinstance(raw, Mapping):
+            return None
+        try:
+            hit = float(raw.get("hit", 1.0))
+            output = float(raw.get("output", 1.0))
+        except (TypeError, ValueError):
+            return None
+        if not (hit >= 0 and output >= 0):
+            return None
+        return cls(hit=hit, output=output, note=str(raw.get("note") or ""))
+
+
+def budget_weights(model: str, table: "PriceTable | None") -> "BudgetWeights | None":
+    """按单价表算这个模型的记账倍率。**没有可用单价时返回 `None`**（= 全 1.0）。
+
+    倍率的基准是**未命中输入的单价**：命中那一档 = 命中价 ÷ 未命中价（「1/10 就按 1/10、
+    1/5 就按 1/5」—— 按实际配置算，不在代码里写死任何一个比例），输出那一档同理。
+
+    命中价没配时返回 1.0 而不是猜一个 —— 与 `estimate_cost` 同一条口径（那里也会加一句
+    「命中部分按未命中价计入，偏保守」）。
+    """
+    if table is None or not table.models:
+        return None
+    price, pattern = resolve_price(model, table)
+    if price is None:
+        return None
+    base = price.input_per_million
+    if base is None or base <= 0:
+        return None
+    hit_price = price.cache_read_per_million
+    return BudgetWeights(
+        hit=float(hit_price / base) if hit_price is not None else 1.0,
+        output=float(price.output_per_million / base),
+        note=(
+            f"按单价表折算（{pattern}：未命中 {money(base)}、"
+            f"命中 {money(hit_price) if hit_price is not None else '按未命中价'}、"
+            f"输出 {money(price.output_per_million)} 每百万 token）"
+        ),
+    )
+
+
+def budget_weights_from_config(config: Mapping[str, Any] | None) -> "BudgetWeights | None":
+    """项目分析配置 → 记账倍率。**调用方只该用这一个入口**（模型名与价格表各读一次）。"""
+    config = config if isinstance(config, Mapping) else {}
+    table, _errors = load_price_table(str(config.get("model_price_table") or ""))
+    return budget_weights(str(config.get("api_model") or ""), table)
+
+
+def equivalent_tokens(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read: int | None = None,
+    weights: "BudgetWeights | None" = None,
+) -> int:
+    """一次调用的用量 → **未命中输入等价 token**（单次预算账上记的那一个数）。
+
+    `input_tokens` 是**输入总数**（含命中缓存的部分）—— 与 `estimate_cost` 同一口径
+    （OpenAI / DeepSeek 的 `prompt_tokens` 都是这个意思）。
+
+    命中数大于输入总数（上游字段自相矛盾）时按**全部命中**算 —— 与 `estimate_cost` 逐字
+    同一条处理。「上游数据自相矛盾」这句提示由费用那一侧给出（`estimate_cost` 的 notes），
+    这里不重复报一遍：同一个事实只有一个产地。
+
+    `weights is None` 时三档都按 1.0 —— 也就是**旧口径**（未命中 + 输出之和）。
+    """
+    total_in = max(0, int(input_tokens or 0))
+    total_out = max(0, int(output_tokens or 0))
+    if weights is None:
+        return total_in + total_out
+    hit = 0 if cache_read is None else min(max(0, int(cache_read)), total_in)
+    return int(round((total_in - hit) + hit * weights.hit + total_out * weights.output))
+
+
 def resolve_price(model: str, table: PriceTable) -> tuple[ModelPrice | None, str]:
     """按模型名找单价，返回 `(单价, 命中的模式)`；找不到返回 `(None, "")`。
 

@@ -63,6 +63,7 @@ from services.ai.auto_sizing import (
     plan_analysis,
     single_run_guard,
 )
+from services.ai.pricing import BudgetWeights
 from utils.logger import log_print
 
 #: 文件数不超过它时**逐个**量 diff 体量（`SMALL_BATCH_MAX_FILES + 1`：小批次判定的边界
@@ -232,6 +233,7 @@ def attach_plan(
     output_tokens: Optional[int] = None,
     cost_limit: Optional[str] = None,
     fingerprint: str = "",
+    budget_weights: "BudgetWeights | None" = None,
 ) -> AnalysisPlan:
     """算出计划并挂到 payload 上（`payload["plan"]`），返回它。
 
@@ -242,6 +244,11 @@ def attach_plan(
     `fingerprint` 不给时用**内容指纹**（`SnapshotFacts.digest()`：文件、体量、路径、
     提交四样拼出来的 sha256）—— 它足够回答「预估那份计划与实际跑的是不是同一份输入」，
     而且是纯本地的（不查库、不看时钟）。
+
+    `budget_weights` 是**记账倍率**（`pricing.budget_weights_from_config(项目配置)`）：
+    挂到计划上（`thresholds.budget_weights`）之后，单次预算那一侧（引擎的账本、家族的
+    `should_skip`）都从这里读 —— 于是「这次运行按哪份单价折算」与「预估端点显示的是
+    哪一份计划」是同一处答案。没配价格表时传 `None`（= 全 1.0 的旧口径）。
     """
     facts = snapshot_facts_from_payload(payload, fingerprint=fingerprint)
     plan = plan_analysis(
@@ -254,6 +261,15 @@ def attach_plan(
         output_tokens=output_tokens,
         cost_limit=cost_limit,
     )
+    if budget_weights is not None:
+        plan.thresholds["budget_weights"] = budget_weights.to_dict()
+        # 估算公式那句话也要跟着说 —— 否则界面上写着「单次上限 3,000,000」而运行中被
+        # 折算过的数一撞就到顶，读的人只会觉得「上限没生效」。
+        plan.estimate["formula"] = (
+            str(plan.estimate.get("formula") or "")
+            + "；运行中按单价折算为等效 token 记账（缓存命中与输出两档，见"
+            " thresholds.budget_weights）"
+        )
     payload["snapshot_facts"] = facts.to_dict()
     payload["plan"] = plan.to_dict()
     return plan

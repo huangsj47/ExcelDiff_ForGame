@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 from services.ai.auto_sizing import conservative_tokens_for
 from services.ai.budget import estimate_chars
 from services.ai.llm_client import non_negative_int
+from services.ai.pricing import BudgetWeights, equivalent_tokens
 
 if TYPE_CHECKING:  # 只为标注：engine 在模块级导入本模块，这里不能反向导入。
     from services.ai.engine import EngineLimits
@@ -44,6 +45,7 @@ def tokens_for_budget(
     history_chars: int,
     text: str,
     limits: EngineLimits,
+    weights: "BudgetWeights | None" = None,
 ) -> tuple[int, bool]:
     """这一次调用往单次上限的账上记多少，以及这个数**是不是估算出来的**。
 
@@ -56,11 +58,25 @@ def tokens_for_budget(
 
     提示词那半按**这一轮实际发出去的那一份**估（历史 + 本轮 user 消息，与 `prompt_chars`
     是同一处口径）；输出那半优先用配置的输出上限 —— 它是我们能承诺的最大值。
+
+    ## `weights`：这一笔记的是**折算后的等效 token**
+
+    有价格表时，缓存命中的输入与输出按配置的单价折算成「未命中输入等价 token」
+    （`pricing.BudgetWeights`；没配就是三档各 1.0 = 旧口径）。**算术在 `pricing` 里**
+    （`equivalent_tokens`）—— 那一份与费用面板同源，两处不可能算出两种折扣。
     """
     prompt = usage.get("prompt_tokens")
     completion = usage.get("completion_tokens")
     if prompt is not None and completion is not None:
-        return max(0, int(prompt)) + max(0, int(completion)), False
+        return (
+            equivalent_tokens(
+                input_tokens=prompt,
+                output_tokens=completion,
+                cache_read=usage.get("cache_read_tokens"),
+                weights=weights,
+            ),
+            False,
+        )
     prompt_est = history_chars + user_message_chars if prompt is None else max(0, int(prompt))
     if completion is None:
         # 没配输出上限时退到这一轮实际写回来的正文长度 —— 那是**下界**（推理 token 不算在
@@ -70,7 +86,7 @@ def tokens_for_budget(
         )
     else:
         completion_est = max(0, int(completion))
-    return conservative_tokens_for(prompt_est, completion_est), True
+    return conservative_tokens_for(prompt_est, completion_est, weights), True
 
 
 def complete_kwargs(limits: EngineLimits) -> dict[str, Any]:

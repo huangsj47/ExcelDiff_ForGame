@@ -180,6 +180,7 @@ from services.ai.latest_result import (
 from services.ai.llm_client import LLMError
 from services.ai.manifest import build_manifest, shard_count_for_plan
 from services.ai.platform_provider import PlatformContextProvider
+from services.ai.pricing import budget_weights_from_config
 from services.ai.project_config_source import (  # noqa: F401 —— 调用点与测试仍在用
     _coerce_timeout,
     _get_project_api_key,
@@ -576,6 +577,9 @@ def attach_weekly_plan(payload: dict) -> object:
         subagent_enabled=bool(project_config.get("subagent_enabled")),
         verify=bool(project_config.get("subagent_verify")),
         cost_limit=project_config.get("budget_cost_limit"),
+        # 记账倍率：模型名 + 单价表 → 三档倍率（没配价格表时是 `None` = 旧口径）。
+        # 它与费用面板读的是**同一张表**，两处不可能算出两种折扣。
+        budget_weights=budget_weights_from_config(project_config),
     )
     plan.thresholds["user_chars_source"] = "项目配置的提示词预算（窗口未探测，运行时会再压）"
     plan.thresholds["dimensions_source"] = source

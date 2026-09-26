@@ -1335,10 +1335,11 @@ def run_analysis(
         )
         if single_run_budget is not None:
             # 单次上限的账也在这里扣（**按次**；上面那道闸是**按轮**判的，因为一轮里可能
-            # 有两次调用，第二次用的是压小后的提示词）。上游没报用量时的口径在
-            # `model_call.tokens_for_budget`。
+            # 有两次调用，第二次用的是压小后的提示词）。上游没报用量时的口径、以及
+            # 「按单价折算成等效 token」那件事都在 `model_call.tokens_for_budget`。
             spent, estimated = tokens_for_budget(
-                usage, len(user_message), estimate_chars(messages), text, limits
+                usage, len(user_message), estimate_chars(messages), text, limits,
+                weights=single_run_budget.weights,
             )
             single_run_budget.note_usage(spent, estimated=estimated)
         messages.append(entry)
@@ -1773,7 +1774,8 @@ def run_analysis(
                     # 于是 `headroom` 可能微负 —— 分界写在 `budget_gate` 的 docstring 里：
                     # **闸门管探索调用，交付那一次在它的定义域之外**。
                     spent, estimated = tokens_for_budget(
-                        usage, len(entry["content"]), estimate_chars(messages), text, limits
+                        usage, len(entry["content"]), estimate_chars(messages), text,
+                        limits, weights=single_run_budget.weights,
                     )
                     single_run_budget.note_usage(spent, estimated=estimated)
                 # 那一次调用与它的回答也进对话：它是这次运行的**最后一条**消息，

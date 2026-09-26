@@ -47,6 +47,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from services.ai.auto_sizing import single_run_guard, single_run_lookahead
+from services.ai.pricing import BudgetWeights
 
 __all__ = ["SingleRunBudget"]
 
@@ -67,16 +68,28 @@ class SingleRunBudget:
     spent_tokens: int = 0
     # 这个 spent 里有没有估算成分（上游缺用量时按保守值补的）。报告与界面要说出来。
     spent_estimated: bool = False
+    # **记账倍率**（`pricing.BudgetWeights`）：有它时进账的每一个数都是「按单价折算的
+    # 等效 token」。`None` = 没有价格表 = 三档各 1.0（旧口径）。
+    #
+    # 它跟着计划走（`from_plan` 从 `plan.weights` 取），于是「这本账里的数是不是折算过的」
+    # 只有一处答案：**有倍率就是** —— 每一次 `note_usage` 都由调用方按同一份倍率算出来
+    # （引擎走 `model_call.tokens_for_budget`，家族走 `subagent._tokens_of`）。
+    weights: "BudgetWeights | None" = None
 
     @classmethod
     def from_plan(cls, plan, *, spent_tokens: int = 0, spent_estimated: bool = False):
-        """按一份 `AnalysisPlan`（或任何有那三个字段的对象）建账。"""
+        """按一份 `AnalysisPlan`（或任何有那三个字段的对象）建账。
+
+        `spent_tokens` 是**折算后**的数（调用方按 `plan.weights` 算出来）；倍率也跟着
+        带上 —— 出了这个类没有第二处知道「这笔账是按哪份单价折的」。
+        """
         return cls(
             total_token_budget=int(getattr(plan, "total_token_budget", 0) or 0),
             round_reserve_tokens=int(getattr(plan, "round_reserve_tokens", 0) or 0),
             report_reserve_tokens=int(getattr(plan, "report_reserve_tokens", 0) or 0),
             spent_tokens=max(0, int(spent_tokens or 0)),
             spent_estimated=bool(spent_estimated),
+            weights=getattr(plan, "weights", None),
         )
 
     def note_usage(self, tokens: int | None, *, estimated: bool = False) -> None:
@@ -103,6 +116,11 @@ class SingleRunBudget:
     def affordable(self) -> bool:
         """还付得起下一轮吗。没有配上限时恒真。"""
         return not self.check()["blocked"]
+
+    @property
+    def weighted(self) -> bool:
+        """这本账里的数是不是**按单价折算**过的（报告措辞跟着它走）。"""
+        return self.weights is not None
 
     def next_round_affordable(self, last_round_tokens: int | None = None) -> bool:
         """**这一轮之后**还付得起下一轮吗（`False` = 本轮就该让模型收尾了）。

@@ -660,7 +660,12 @@ def run_family(
             # 扣账按实跑数：轮次按 len(rounds)（引擎的 +2 格式重问轮不双记），索取按
             # requests_used —— 名义额是「上限不是预扣」，只有真用掉的才滚不出去。
             quota.spend(step.outcome.requests_used, len(step.outcome.rounds))
-        spent_tokens += _tokens_of(step.outcome, output_cap=plan.limits.max_output_tokens or 0)
+        spent_tokens += _tokens_of(
+            step.outcome,
+            output_cap=plan.limits.max_output_tokens or 0,
+            # 倍率从**共享账本**上取（与引擎手里的是同一个对象上的同一份）。
+            weights=getattr(single_run_budget, "weights", None),
+        )
 
     # 汇总那一次：池内剩余全给它，但保下限、**可越池**（唯一产出最终报告的一步，不许
     # 被前面的分片饿死 —— 见 FamilyQuota.synthesis_caps）。
@@ -884,7 +889,9 @@ def run_family_with_seed(*, plan: FamilyPlan, limits: EngineLimits | None = None
     return run_family(plan=prepared, **engine_args).outcome
 
 
-def _tokens_of(outcome: EngineOutcome | None, *, output_cap: int) -> int:
+def _tokens_of(
+    outcome: EngineOutcome | None, *, output_cap: int, weights: Any = None
+) -> int:
     """一个成员烧掉多少 token，用于 `should_skip` 的**下界**。
 
     ## 上游没报用量时**按保守估算，不当 0**（工作包 B）
@@ -897,9 +904,13 @@ def _tokens_of(outcome: EngineOutcome | None, *, output_cap: int) -> int:
     **落库那一份走的是 `_sum_optional`**：读不到就是 `None`（「未上报」），仍然如实
     记成未上报 —— 闸门要的是「至少花了这么多」，账要的是「上游到底报没报」。两者
     读者不同，口径也应当不同（这条区别在本函数的返回值与 `run.tokens_input` 上各有一半）。
+
+    `weights` 是记账倍率（`pricing.BudgetWeights`，从**共享账本**上取）：引擎那边
+    用的是同一份。两处各算一套的话，同一次运行里会出现「成员被判跑得起、进去就被
+    拦下」—— 而它不报错，只表现为额度忽然不够用。
     """
     tokens, _estimated = conservative_member_tokens(
-        outcome, output_cap=max(0, int(output_cap or 0))
+        outcome, output_cap=max(0, int(output_cap or 0)), weights=weights
     )
     return tokens
 
