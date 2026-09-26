@@ -42,6 +42,7 @@ from __future__ import annotations
 # isort 要的字母序恰好与这个要求相反。
 
 import json
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -252,6 +253,17 @@ def _drive_the_job_task(cfg, group_key: str) -> None:
     )
 
 
+def _says_the_wait_costs_nothing(message: str) -> bool:
+    """这句话里有没有「等着的这段时间不花钱」这个**主张**。
+
+    判据落在主张上，不钉字面。同一件事在两个产地各写了一遍 —— 队列服务的日志里是
+    「本次没有发起分析，也没有产生任何消耗」，页面拿到的是「当前等待过程不会产生消耗」，
+    而**只改措辞**（2026-09-26 就是这么改的）不该让这条用例变红：要防的是
+    「不说」和「说反」，不是用哪个字说。
+    """
+    return re.search(r"(没有|不会|不产生|无需|不必)[^。；]{0,16}消耗", message) is not None
+
+
 def _cleanup_runs(seeded: dict) -> None:
     """把这一组用例建出来的行删掉。
 
@@ -339,7 +351,7 @@ def test_the_manual_entry_says_it_is_waiting_for_the_diff_sync(monkeypatch):
         message = notice.get("message") or ""
         assert "自动" in message, message
         # 「没有花钱」这句必须说 —— 用户第一件想知道的就是这个。
-        assert "没有" in message and "消耗" in message, message
+        assert _says_the_wait_costs_nothing(message), message
         assert calls == [], "被拦下了却发起了模型调用"
         _cleanup_runs(seeded)
 
