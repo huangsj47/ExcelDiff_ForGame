@@ -33,8 +33,36 @@ def _task_age_seconds(task, now_value):
     return (now_value - base_time).total_seconds()
 
 
-def is_stale_sync_task(task, now_value, *, pending_timeout_seconds=300, processing_timeout_seconds=1800):
+def _executor_is_alive(task, now_value):
+    """默认判据：真的去问租约（见 `services/task_liveness.py`）。
+
+    局部 import：本模块刻意不拉重依赖（同下面 `is_enqueued` 那条），而这一条要读库。
+    """
+    from services.task_liveness import executor_alive
+
+    return executor_alive(task, now=now_value)
+
+
+def is_stale_sync_task(task, now_value, *, pending_timeout_seconds=300,
+                       processing_timeout_seconds=1800, executor_alive=_executor_is_alive):
+    """这条同步该按「陈旧」处理吗 —— **执行者还在就不陈旧**（2026-09-26 补）。
+
+    ## 为什么先问租约
+
+    年龄判据分不出「慢」和「死」，而这两件事的正确动作相反。大仓的周版本同步本来就是
+    小时级（真机实测 2054 个提交 / 583 个文件跑了十几分钟），跑到第 30 分钟时这条判据
+    会把它置 `failed` —— 而它正是同步闸门在等的那一条（闸门因此失去拦住分析的那一行，
+    AI 可能在一份写了一半的缓存上出结论），也是调度器眼里「没有活跃同步」（于是再建一条
+    与它并发写同一份缓存）。租约分得出：合法运行由执行者不断续租，**永远不会撞上租约
+    到期**，到期只剩「执行者死了」一个含义。所以真正卡死的那条照样会在租约过期之后
+    按下面的年龄解锁页面。
+
+    `executor_alive` 可注入（与 `is_enqueued` 同一手法）：单元测试拿它当纯函数用，
+    生产走默认那条真判据。
+    """
     if task is None:
+        return False
+    if executor_alive(task, now_value):
         return False
     status_value = str(getattr(task, "status", "") or "").lower()
     age_seconds = _task_age_seconds(task, now_value)
@@ -50,15 +78,18 @@ def is_stale_sync_task(task, now_value, *, pending_timeout_seconds=300, processi
 def should_treat_sync_task_as_stale(task, now_value, *, is_enqueued=None, **timeouts):
     """这个同步任务该按「陈旧」处理吗（页面解锁 / 重建任务）。
 
+    **执行者还在的不算陈旧**（2026-09-26 补，见 `is_stale_sync_task`）：这条同时盖住
+    「本地 worker 正在写」与「派发给 Agent、那边正在写」两种形状。
+
     **还在内存队列里的 `pending` 不算陈旧**：队列只有一个 worker，前面排着每 2 分钟
     一轮的 `auto_sync`（所有仓库）与大仓库的周版本同步（800+ 文件、分钟级），所以一个
     刚建几分钟的 pending 排不到头是常态。原先只看年龄（300 秒），页面每轮询一次就把它
     置 failed、紧接着调度器又建一条新的 —— 实测一轮 30 分钟里重置 12 次、重建 12 次，
     队列剩余稳定在 31~33 不下降。
 
-    **只对 `pending` 生效**：`processing` 的任务 worker 正拿在手里、账本里也还挂着
-    （注销发生在处理完之后），拿账本挡会让真正卡死的那条永远不解锁页面 ——
-    已经开始跑的任务仍旧按「跑了多久」判定。
+    **账本那一条只对 `pending` 生效**：`processing` 的任务 worker 正拿在手里、账本里也
+    还挂着（注销发生在处理完之后），拿账本挡会让真正卡死的那条永远不解锁页面 ——
+    已经开始跑的任务按**租约**判定（上面那条），租约过期后才退回「跑了多久」。
 
     `is_enqueued` 由调用方传入（本模块不 import task_worker 那边的账本，避免反向依赖）。
     """

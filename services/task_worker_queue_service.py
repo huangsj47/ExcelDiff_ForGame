@@ -1787,6 +1787,33 @@ def _sync_gate_reason(config_id):
         return ""
 
 
+def _sync_gate_gave_up_on(config_id):
+    """闸门**不再拦、而那条同步还没跑完**吗 —— 是的话返回一句给人看的话，否则空串。
+
+    与 `_sync_gate_reason` 是互斥的两面（那条说「还在拦」，这条说「放行了」）。**只在
+    前者返回空串时才问它**：闸门放行有两种成因，只有一种是「真的跑完了」；另一种是
+    「判定它卡死、不再等它」。少了这一条，页面会在同步**没跑完**时断言「已经跑完」，
+    而下一拍就是 AI 在一份写了一半的缓存上出结论 —— 恰在本模块存在理由的那个场景上说反话。
+
+    成因那句由闸门产出（`weekly_sync_released_incomplete`），这里只负责拼进页面的话。
+    """
+    if config_id is None:
+        return ""
+    try:
+        config = worker._db.session.get(worker._WeeklyVersionConfig, config_id)
+        if config is None:
+            return ""
+        task_id, cause = sync_gate.weekly_sync_released_incomplete(
+            sync_gate.group_config_ids(config)
+        )
+    except worker.SQLAlchemyError as exc:
+        worker.log_print(f"⚠️ 读取「同步是不是被判定卡死了」失败: {exc}", "AI")
+        return ""
+    if not cause:
+        return ""
+    return f"同步任务 #{task_id} 还没跑完，但已经不再等它（{cause}）"
+
+
 def describe_waiting_analysis(config_id, group_key):
     """页面轮询用：这次登记现在到哪一步了。**只读**，不建 run、不排队、不发请求。
 
@@ -1814,6 +1841,7 @@ def describe_waiting_analysis(config_id, group_key):
     intent = effective_waiting_analysis_intent(group_key)
     if intent is not None:
         reason = _sync_gate_reason(config_id)
+        gave_up = "" if reason else _sync_gate_gave_up_on(config_id)
         return {
             "waiting": True,
             "run_id": None,
@@ -1823,7 +1851,12 @@ def describe_waiting_analysis(config_id, group_key):
                 + (
                     f"正在等的是：{reason}。"
                     if reason
-                    else "版本同步已经跑完，正在把它转交出去（下一次调度周期内开始）。"
+                    else (
+                        f"不用再等了：{gave_up}，这次分析马上开跑"
+                        "（这一轮的变更清单可能不完整）。"
+                        if gave_up
+                        else "版本同步已经跑完，正在把它转交出去（下一次调度周期内开始）。"
+                    )
                 )
             ),
         }

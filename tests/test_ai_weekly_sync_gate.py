@@ -31,6 +31,7 @@ from app import create_tables, db
 from models import BackgroundTask, Project, Repository
 from models.weekly_version import WeeklyVersionConfig
 from services.ai.weekly_sync_gate import (
+    SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS,
     SYNC_IN_FLIGHT_MAX_SECONDS,
     group_config_ids,
     weekly_sync_in_flight,
@@ -223,6 +224,38 @@ class TestTheGate:
         assert "失联" in note, f"放行时说不清是执行者死了还是任务超时：{note}"
         assert "不完整" in note, f"放行时没说清代价：{note}"
 
+    def test_a_sync_past_the_alive_cap_is_released_with_its_own_reason(self):
+        """**兜底也得有人钉**：执行者活着也不能无限拦 —— 超过 6 小时才放行。
+
+        「执行者还在就继续拦」如果没有上界，一条活着却永远写不完的同步会**永久**挡住这一组
+        的分析（连同它后面所有调度），而 `weekly_sync_stuck_note` 也永远不会说话。
+        这一条同时把**放行理由**钉住：是「超过兜底上限」，不是「执行者失联」—— 两者走的是
+        同一个 `return`，只有 note 那半句话能把它们分开（把两支对调，这条会红）。
+        """
+        # **夹具的年龄写死 7 小时**（不按被测常量算）：照常量算的话，把兜底调成 10**9
+        # 这条用例会跟着一起变、照样绿 —— 那正是「变异验证」要抓的假绿。
+        seeded = _seed(status="processing", age_minutes=1)
+        with flask_app.app_context():
+            assert SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS >= 4 * 3600, (
+                "兜底比大仓的同步还短 —— 正常但慢的那条会被当成卡死放行"
+            )
+            assert SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS < 7 * 3600, (
+                "夹具那 7 小时不再超过兜底了，这条用例失去了它的对象"
+            )
+            sync = db.session.get(BackgroundTask, seeded["task_id"])
+            sync.started_at = datetime.now(timezone.utc) - timedelta(hours=7)
+            sync.lease_expires_at = datetime.now(timezone.utc) + timedelta(minutes=50)
+            db.session.commit()
+
+            assert weekly_sync_in_flight(seeded["config_ids"]) == "", "超过兜底上限还在拦分析"
+            note = weekly_sync_stuck_note(seeded["config_ids"])
+
+        assert note and "不再拦" in note, note
+        assert str(SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS // 3600) in note, (
+            f"放行理由没说是「超过兜底上限」：{note}"
+        )
+        assert "失联" not in note, f"执行者还活着，却按「失联」放行：{note}"
+
     def test_another_batch_sync_does_not_block_this_one(self):
         """只拦**本批次**的同步：别的项目/窗口在跑，不该影响这一组的分析。"""
         seeded = _seed(with_sync_task=False)
@@ -283,13 +316,20 @@ class TestBothEntrypoints:
 
         seeded = _seed(status="processing", age_minutes=2)
         with flask_app.app_context():
+            # **判据记的是「这次调用有没有新增 run」，不是「这条 config 名下有没有 run」。**
+            # 测试库是会话级共用的，而好几个文件收尾时会删 `WeeklyVersionConfig` / `Project`
+            # 行却留下 `AiAnalysisRun`（删父留子）—— SQLite 的 id 是 `max(id)+1`，父行一删
+            # 就**复用**，于是这条新 config 拿到的 id 上可能挂着别的用例留下的 run。实测：
+            # 合跑时这条断言红、单跑绿（`target_id=32` 上有一条别人的 run）。
+            before = AiAnalysisRun.query.filter_by(target_id=seeded["primary_config_id"]).count()
             outcome = run_weekly_analysis_background(seeded["primary_config_id"])
 
             assert outcome.get("status") == "skipped", outcome
             assert outcome.get("reason") == "sync_in_flight", outcome
             assert "同步还在跑" in (outcome.get("message") or ""), outcome
             assert (
-                AiAnalysisRun.query.filter_by(target_id=seeded["primary_config_id"]).count() == 0
+                AiAnalysisRun.query.filter_by(target_id=seeded["primary_config_id"]).count()
+                == before
             ), "跳过了却还是留下了一条 run 记录"
 
     def test_the_background_entry_proceeds_when_the_sync_is_done(self):

@@ -1713,12 +1713,10 @@ let weeklyAiRunActive = false;
 
 // 「这次分析已经登记、等同步跑完自动开始」期间的轮询（见 startWeeklyAiWaitingPoll）。
 let weeklyAiWaitingTimer = null;
-let weeklyAiWaitingPolls = 0;
-// 15 秒一帧；120 帧 = 30 分钟 —— 与服务端那条意图上限
-// （`task_worker_queue_service.WAITING_INTENT_TTL_SECONDS`）同量级：等服务端先放弃，
-// 别让页面比服务端更早说「不等了」。
+// 15 秒一帧。**没有「最多轮询多少次」**：那个上限原先与服务端的意图上限同量级，
+// 而服务端那一条已经改成跟着同步的实际进展走（大仓按小时计），客户端再留一份必然漂移
+// —— 页面先放弃就等于替服务端说「不等了」。
 const WEEKLY_AI_WAITING_POLL_MS = 15000;
-const WEEKLY_AI_WAITING_MAX_POLLS = 120;
 
 function aiBudgetHost() {
     return document.getElementById('aiBudgetBanner');
@@ -1788,18 +1786,14 @@ async function fetchWeeklyAiWaitingState() {
 
 function startWeeklyAiWaitingPoll() {
     stopWeeklyAiWaitingPoll();
-    weeklyAiWaitingPolls = 0;
     weeklyAiWaitingTimer = setInterval(async function () {
-        weeklyAiWaitingPolls += 1;
         const btn = document.getElementById('weeklyAiStartBtn');
-        if (weeklyAiWaitingPolls > WEEKLY_AI_WAITING_MAX_POLLS) {
-            stopWeeklyAiWaitingPoll();
-            weeklyAiRunActive = false;
-            if (btn) btn.disabled = false;
-            setWeeklyAiStatusBadge('等待同步', 'warning');
-            setWeeklyAiMeta('等了太久还没等到同步结束：可以再点一次「重新分析」。');
-            return;
-        }
+        // **客户端不设墙钟。** 这里原先有一个 30 分钟的上限（120 帧 × 15 秒）：到点就停
+        // 轮询、把按钮放回可点、还说「可以再点一次」—— 而服务端那时可能正在正常等
+        // （大仓的同步是小时级，2026-09-26 实测 2054 个提交 / 583 个文件跑了十几分钟）。
+        // 用户照做就又点一次，服务端认出「已经登记过」，回的还是那句
+        // 「这次分析已经登记」—— 他上报的「一直提示、分析不开始」正是这个循环。
+        // **「还要不要等」只由服务端回答**（下面那个 `/waiting` 端点，它自己有兜底）。
         let data = null;
         try {
             const resp = await fetch(`/ai-analysis/weekly/${configId}/waiting`, { cache: 'no-store' });
@@ -2155,7 +2149,6 @@ let weeklyAiJobConfigId = null;
 let weeklyAiActionKey = null;
 // 「等同步 / 排队」期间按 job_id 轮询（SSE 被中间设备掐断时的第二条路）。
 let weeklyAiJobPollTimer = null;
-let weeklyAiJobPolls = 0;
 // 用户在 provenance 提示里选了「仍然只做增量」：这次结论与基线**不可比**，报告顶部要写明。
 // 它只活在页面内存里（服务端那一列见 `AiAnalysisJob.baseline_provenance_mismatch`，
 // 但今天没有任何生产代码写它 —— `create_or_attach_job` 也没有接这个意图）。
@@ -3132,19 +3125,12 @@ function stopWeeklyAiJobPoll() {
 function startWeeklyAiJobPoll(jobId) {
     stopWeeklyAiJobPoll();
     if (!jobId) return;
-    weeklyAiJobPolls = 0;
     const watchedConfigId = configId;
     weeklyAiJobPollTimer = setInterval(async function () {
-        weeklyAiJobPolls += 1;
         const btn = document.getElementById('weeklyAiStartBtn');
-        if (weeklyAiJobPolls > WEEKLY_AI_WAITING_MAX_POLLS) {
-            stopWeeklyAiJobPoll();
-            weeklyAiRunActive = false;
-            if (btn) btn.disabled = false;
-            setWeeklyAiStatusBadge('等待同步', 'warning');
-            setWeeklyAiMeta('等了太久还没等到同步结束：可以再点一次「重新分析」。');
-            return;
-        }
+        // 同 `startWeeklyAiWaitingPoll`：**客户端不设墙钟**。这条轮询的出路是 `job.terminal`
+        // （服务端给了终态）；一条永远不终态的 job 由服务端自己的兜底收拾，页面比它先
+        // 说「不等了」只会让用户白点一次 —— 那正是上面那个循环的另一半。
         const job = await fetchWeeklyAiJob(jobId);
         // 网络抖一下**不算**结束：下一帧再试（说成「没了」会让用户白点一次）。
         if (!job) return;

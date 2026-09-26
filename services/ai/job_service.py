@@ -1105,10 +1105,12 @@ def recover_stale_jobs(*, now=None, limit=200) -> dict:
       区别就在那条意图上 —— 误杀的后果是：同步一收尾那次分析照跑，而 job 已经是
       终态了（页面显示「已取消」而钱照花）。
 
-    `JOB_STALE_SECONDS` 刻意与等待意图的 TTL、同步闸门的上限同量级（见模型那一列
-    的注释）：**比同步闸门先放弃是不对的**（那会把「同步慢」说成「意图失效」）。
-    意图过了 TTL 会被 `wake_waiting_analysis_intents` 自己收成 `cancelled`，
-    那时这条 job 才真的没有任何未来 —— 也就是本函数接手的时候。
+    `JOB_STALE_SECONDS` **只是「还有没有证据」的兜底，不是「同步等多久」的口径**
+    （2026-09-26 订正）：判据 3 那两条否定证据才是决定性的，其中「活的等待意图」按
+    **意图是否 pending** 判（`_live_waiting_intent` 不看 TTL）—— 同步跑多久，意图就
+    pending 多久。所以一条正在等的 job 不会被这个 30 分钟判死，而意图被
+    `wake_waiting_analysis_intents` 收掉之后（过期/被覆盖/转交完成）它才真的没有未来 ——
+    也就是本函数接手的时候。
 
     ## 事务
 

@@ -54,6 +54,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
+from services.task_liveness import executor_alive
+
 # **执行者已经失联**（平台侧租约过期或从来没有过租约）时，一条同步最多再挡多久。
 #
 # 取值依据：周版本同步要逐文件算合并 diff（大仓库上千个文件），分钟级是常态；
@@ -90,23 +92,6 @@ def _as_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
-def _executor_alive(row, *, now) -> bool:
-    """这条同步的**执行者**还在吗 —— 平台侧租约还没到期就是还在。
-
-    租约是这一层唯一拿得到的「执行者还在不在」的判据（见
-    `task_worker_queue_service` 的「平台侧租约」那一节）：真的在跑的任务由
-    `renew_inflight_task_leases` 不断续租，所以**合法运行不会撞上租约到期**，
-    到期只剩一个含义 —— 执行者（进程）死了。
-
-    读不到那个时间戳（老数据 NULL、测试桩）时按**不在**处理：那种情况下原来的年龄判据
-    照样能收口；反过来按「在」会让一条没有租约的僵尸任务**永久**拦住分析。
-    """
-    deadline = _as_naive_utc(getattr(row, "lease_expires_at", None))
-    if deadline is None:
-        return False
-    return deadline > now
-
-
 def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] = None):
     """这个批次里**算在跑**的周版本同步任务，返回 `(task, 已跑秒数, 是否仍在拦)`。
 
@@ -129,7 +114,7 @@ def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] =
 
     一条任务该不该拦，看两件事（2026-09-26 起）：
 
-    * **执行者还在**（`_executor_alive`）→ 拦，跑多久都拦（界是
+    * **执行者还在**（`task_liveness.executor_alive`）→ 拦，跑多久都拦（界是
       `SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS`）；
     * 执行者不在了 → 按年龄判，界是 `SYNC_IN_FLIGHT_MAX_SECONDS`（30 分钟）。
 
@@ -179,7 +164,7 @@ def _in_flight_sync_task(config_ids: Iterable[int], *, now: Optional[datetime] =
     aged = [(_age_of(row), row) for row in rows]
 
     def _blocks(age, row) -> bool:
-        if _executor_alive(row, now=current):
+        if executor_alive(row, now=current):
             # 执行者还在：它确实在写缓存，只是这条同步本来就久 —— 大仓按小时算。
             return age <= SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS
         return age <= SYNC_IN_FLIGHT_MAX_SECONDS
@@ -305,24 +290,39 @@ def weekly_sync_in_flight(config_ids: Iterable[int], *, now: Optional[datetime] 
     )
 
 
-def weekly_sync_stuck_note(config_ids: Iterable[int], *, now: Optional[datetime] = None) -> str:
-    """不再拦着分析、却**还没结束**的同步任务：给一句醒目日志用的话，没有就空串。
+def weekly_sync_released_incomplete(config_ids: Iterable[int], *, now: Optional[datetime] = None):
+    """闸门**不再拦、而那条同步还没跑完**吗？返回 `(task_id, 不再等它的原因)`；没有就 `(None, "")`。
 
-    两种成因都报得出来（判据在 `_in_flight_sync_task`）：执行者失联（租约过期），
-    或者执行者还在但已经超过 `SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS` 的兜底上限。
-    放行时的代价是同一件事 —— 这一轮看到的变更清单可能不完整，所以这句话必须说清它。
+    与 `weekly_sync_in_flight` 是互斥的两面：那条说「还在拦」，这条说「放行了 —— 但放行的
+    理由是『判定它卡死』，**不是**『它跑完了』」。调用方（醒目日志、页面轮询）都要把这两件事
+    分开说：少了这一条，页面会在同步没跑完时断言「已经跑完」，而下一拍就是 AI 在一份写了
+    一半的缓存上出结论 —— 恰在本模块存在理由的那个场景上说反话。
+
+    成因只有 `weekly_sync_release_cause` 产出的那一句，别在调用方再拼一遍。
     """
     task, age, blocking = _in_flight_sync_task(config_ids, now=now)
     if task is None or blocking:
-        return ""
+        return None, ""
     current = _as_naive_utc(now) or datetime.now(timezone.utc).replace(tzinfo=None)
     minutes = int(age // 60)
-    if _executor_alive(task, now=current):
-        why = f"已跑 {minutes} 分钟，超过 {SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS // 3600} 小时兜底上限"
+    if executor_alive(task, now=current):
+        cause = f"已跑 {minutes} 分钟，超过 {SYNC_IN_FLIGHT_ALIVE_MAX_SECONDS // 3600} 小时兜底上限"
     else:
-        why = f"已跑 {minutes} 分钟，执行者已失联（租约过期）"
+        cause = f"已跑 {minutes} 分钟，执行者已失联（租约过期）"
+    return task.id, cause
+
+
+def weekly_sync_stuck_note(config_ids: Iterable[int], *, now: Optional[datetime] = None) -> str:
+    """不再拦着分析、却**还没结束**的同步任务：给一句醒目日志用的话，没有就空串。
+
+    放行时的代价是同一件事 —— 这一轮看到的变更清单可能不完整，所以这句话必须说清它。
+    成因那句来自 `weekly_sync_released_incomplete`（口径只有那一份）。
+    """
+    task_id, cause = weekly_sync_released_incomplete(config_ids, now=now)
+    if not cause:
+        return ""
     return (
-        f"⚠️ 周版本同步 task_id={task.id} {why}，不再拦着 AI 分析"
+        f"⚠️ 周版本同步 task_id={task_id} {cause}，不再拦着 AI 分析"
         "（这一轮看到的变更清单可能不完整）"
     )
 

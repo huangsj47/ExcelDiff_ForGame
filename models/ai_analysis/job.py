@@ -153,10 +153,13 @@ SOURCE_SCHEDULED = "scheduled"
 TRIGGER_SOURCES = (SOURCE_MANUAL, SOURCE_SCHEDULED)
 
 #: 一条 job 最长能在非终态上待多久（等待同步 + 排队 + 跑）。超过就由
-#: `services/ai/job_service.py` 的恢复扫描判死 —— 这是「意图不许永久 pending」的兜底。
-#: 30 分钟与 `weekly_sync_gate.SYNC_IN_FLIGHT_MAX_SECONDS` 同量级，
-#: 也与等待意图原来的 TTL（`task_worker_queue_service.WAITING_INTENT_TTL_SECONDS`）一致：
-#: 比同步闸门先放弃是不对的（那会把「同步慢」说成「意图失效」）。
+#: `services/ai/job_service.py` 的恢复扫描**再查两条否定证据**（没有活的等待意图、
+#: 没有活的分析任务引用它）之后才判死 —— 这是「意图不许永久 pending」的兜底。
+#:
+#: **不要再把它当成「与同步闸门/等待意图同量级」的常量**（2026-09-26）：那两条已经改成
+#: 跟着同步的实际进展走（大仓的同步是小时级），而这一条仍是 30 分钟墙钟。它不会因此误杀
+#: 一条正在等的 job：真正保护它的是那两条否定证据，其中「活的等待意图」按**意图是否
+#: pending**判（`_live_waiting_intent` 不看 TTL），意图一直 pending 就一直算活。
 JOB_STALE_SECONDS = 30 * 60
 
 

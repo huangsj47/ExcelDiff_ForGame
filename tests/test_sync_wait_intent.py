@@ -719,6 +719,36 @@ class TestTheStatusForThePage:
         assert status["waiting"] is True, status
         assert f"task_id={seeded['sync_task_id']}" in status["message"], status["message"]
 
+    def test_the_message_does_not_claim_the_sync_finished_when_it_was_given_up_on(self):
+        """闸门**放行了一条没跑完的同步**时，不许说「已经跑完」。
+
+        闸门沉默有两种成因：同步真跑完了，或者**判定它卡死、不再等它**。第二种情况下它
+        分明还没写完，而下一拍 AI 就要在这份写了一半的缓存上出结论 —— 恰在这个模块存在的
+        理由上说反话。所以那句话必须分开说。
+        """
+        from services.task_worker_queue_service import (
+            describe_waiting_analysis,
+            register_waiting_analysis_intent,
+        )
+
+        seeded = _seed(with_sync_task=True, sync_status="processing")
+        now = datetime.now(timezone.utc)
+        with flask_app.app_context():
+            sync = db.session.get(BackgroundTask, seeded["sync_task_id"])
+            sync.started_at = now - timedelta(minutes=40)
+            sync.created_at = now - timedelta(minutes=40)
+            sync.lease_expires_at = now - timedelta(minutes=20)  # 执行者失联
+            db.session.commit()
+            register_waiting_analysis_intent(seeded["config_id"], seeded["group_key"])
+
+            status = describe_waiting_analysis(seeded["config_id"], seeded["group_key"])
+
+        assert status["waiting"] is True, status
+        message = status["message"]
+        assert "已经跑完" not in message, f"同步没跑完，页面却说它跑完了：{message}"
+        assert "还没跑完" in message and "不再等" in message, message
+        assert "不完整" in message, f"放行时没说清代价：{message}"
+
     def test_the_message_says_the_sync_is_done_when_nothing_blocks_it(self):
         """闸门没话说的那一小段（同步刚写完、还没轮到下一次调度周期）也要答得上。
 
@@ -1059,6 +1089,28 @@ class TestThePageFollowsTheIntent:
                 f"{rel} 重新发起分析时没有停掉等待轮询"
             )
 
+    def test_no_client_side_wall_clock_reopens_the_button(self):
+        """两份模板里**都不许**再有「等太久就放行」那条出路（2026-09-26 拆掉的）。
+
+        它长这样：轮询计数到 120 帧（30 分钟）就停轮询、把按钮放回可点，并写一句
+        「等了太久还没等到同步结束：可以再点一次」。服务端那边 30 分钟只是一条兜底
+        （大仓的同步是小时级），所以这句话在两个方向上都错：说早了，而且把用户推去
+        **再点一次** —— 服务端认出「已经登记过」，回的还是「这次分析已经登记」。
+
+        静态判据在这里够用：那两句话就是那条出路本身，句子在就说明出路在。
+        等待轮询那一半另有**真跑**的判据（`test_it_keeps_waiting_no_matter_how_long_the_sync_takes`）；
+        这条同时盖住按 `job_id` 轮询的那一半（它没有 node 侧驱动）。
+        """
+        root = Path(__file__).resolve().parents[1]
+        for rel in WEEKLY_TEMPLATES:
+            source = (root / rel).read_text(encoding="utf-8")
+            assert "等了太久还没等到同步结束" not in source, (
+                f"{rel} 又出现「等太久就放行、让用户再点一次」那条出路"
+            )
+            assert "WEEKLY_AI_WAITING_MAX_POLLS" not in source, (
+                f"{rel} 又给客户端加了一个轮询次数上限 —— 那是一份会与服务端漂移的口径"
+            )
+
 
 # ==========================================================================
 #  九、轮询端点：页面靠它知道「那次分析开始了没有」
@@ -1169,11 +1221,9 @@ function runCase(kase) {
         configId: 7,
         weeklyAiCurrentConfigId: 7,
         weeklyAiWaitingTimer: null,
-        weeklyAiWaitingPolls: 0,
         weeklyAiRunActive: true,
         weeklyAiHasCached: false,
         WEEKLY_AI_WAITING_POLL_MS: 15000,
-        WEEKLY_AI_WAITING_MAX_POLLS: 3,
     };
     sandbox.window = sandbox;
     vm.createContext(sandbox);
@@ -1269,6 +1319,25 @@ class TestTheWaitingPollBehaviour:
         assert waiting["url"].endswith("/waiting"), waiting["url"]
         # 网络抖一下（success=false）不算登记结束：继续轮询，也不误报。
         assert results["blip"]["polling"] is True, "一次读失败就被当成「登记结束了」"
+
+    def test_it_keeps_waiting_no_matter_how_long_the_sync_takes(self):
+        """**客户端不设墙钟**：服务端说还在等，就一帧一帧等下去（2026-09-26 拆掉的）。
+
+        原先这里是「120 帧 × 15 秒 = 30 分钟」到点停轮询、把按钮放回可点，还说
+        「可以再点一次」—— 而服务端那边 30 分钟只是一条兜底（大仓的同步是小时级）。
+        用户照做又点一次，服务端认出「已经登记过」，回的还是那句「这次分析已经登记」：
+        他上报的「一直提示、分析不开始」正是这个循环。
+
+        帧数取 **200**（旧上限是 120）：真跑一遍，证明没有任何客户端上限还在。
+        """
+        results = _run_poll_in_node(
+            WEEKLY_TEMPLATES[0],
+            [{"name": "long", "ticks": 200, "run_still_active": True, "responses": []}],
+        )
+        long_wait = results["long"]
+
+        assert long_wait["polling"] is True, "等了 200 帧就不等了 —— 客户端又自己设了上限"
+        assert long_wait["disabled"] is True, "还在等却把按钮放回可点 —— 用户又会去点"
 
     def test_the_poll_attaches_when_the_analysis_starts(self):
         results = _run_poll_in_node(
